@@ -1,0 +1,95 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with
+code in this repository.
+
+## Project Overview
+
+TigerANN is a PostgreSQL index access method (IAM) for Approximate Nearest
+Neighbor (ANN) vector search, inspired by Google's ScaNN for AlloyDB and
+Microsoft's SPANN. It uses the vector format from
+[pgvector](https://github.com/pgvector/pgvector).
+
+### Architecture
+
+The index uses postings lists to partition the vector space into clusters
+based on centroids. A shallow tree structure enables fast searches across
+a subset of partitions to build the nearest neighbor result set.
+
+### Design Goals
+
+- Native PostgreSQL integration using the IAM API
+- High query performance with SIMD optimization (AVX512/NEON)
+- Use PostgreSQL's shared buffer cache and on-disk page system
+- Separate in-memory cache for centroid search (not relying on buffer cache,
+  which deals with raw pages)
+- Support for MVCC and streaming replication
+- Reasonable, stable, and tunable memory consumption
+
+### Performance Goals
+
+- Tiered storage: fast memory (CPU cache, RAM) for upper tree levels, SSD/cloud
+  for lower levels
+- Vector quantization for in-memory ANN with full-precision fallback (~1% of
+  cases)
+- Sequential disk layout for vectors close in search space
+- Bulk load operations should read sequential data without random disk seeks
+- High recall rates using state-of-the-art techniques
+- Fast index builds via linear scans, SIMD, and efficient clustering
+- Support high ingest rates without sacrificing query performance
+
+## References
+
+Research and inspiration:
+- [ScaNN reference implementation](https://github.com/google-research/google-research/tree/master/scann) (in-memory)
+- [SPANN paper](https://www.microsoft.com/en-us/research/wp-content/uploads/2021/11/SPANN_finalversion1.pdf)
+- [ScaNN for AlloyDB blog](https://cloud.google.com/blog/products/databases/understanding-the-scann-index-in-alloydb)
+- [ScaNN for AlloyDB whitepaper](https://services.google.com/fh/files/misc/scann_for_alloydb_whitepaper.pdf)
+- [turbopuffer ANN v3](https://turbopuffer.com/blog/ann-v3)
+- [SPFresh paper](https://dl.acm.org/doi/epdf/10.1145/3600006.3613166)
+
+Related PostgreSQL extensions:
+- [pgvector](https://github.com/pgvector/pgvector)
+- [pgvectorscale](https://github.com/timescale/pgvectorscale)
+- [pg_textsearch](https://github.com/timescale/pg_textsearch)
+
+## Implementation
+
+The extension is implemented in C (standard 23) using meson as the build
+system. It may later be integrated into `pgvectorscale` for distribution.
+
+### Development Approach
+
+- Iterative development with frequent functional releases
+- Well-tested changes using unit tests, PostgreSQL regression tests, and
+  isolation tests
+- TAP tests for multi-instance scenarios (e.g., streaming replication)
+
+### Testability
+
+To enable unit testing, the code uses an abstraction layer decoupled from
+PostgreSQL internals:
+
+- Memory allocation macros supporting both `palloc`/`pfree` and `malloc`/`free`
+- Abstraction for memory contexts (dummy contexts in standalone mode)
+- Minimal use of PostgreSQL internal data structures, with mocks where needed
+
+Note: Some components (buffer cache, IAM handlers) are too integrated with
+PostgreSQL for standalone unit testing.
+
+## Local Development
+
+### Related Project Checkouts
+
+- `../pgvector/`
+- `../pgvectorscale/`
+- `../pg_textsearch/`
+- `../google-research/scann/`
+
+### PostgreSQL Management
+
+Use pgmanager (`pgmr`) at `../pgmanager/` to manage PostgreSQL instances:
+
+- Source: `../pg/src/`
+- Builds: `../pg/usr/`
+- Runtime: `../pg/run/`
