@@ -144,10 +144,48 @@ provides:
 - Standard PostgreSQL page management and WAL logging
 
 **Cluster assignment**: During index build, each vector is assigned to its
-nearest centroid. Vectors near cluster boundaries (within some distance
-threshold of multiple centroids) are assigned to multiple posting lists to
-improve recall. This replication factor is tunable—higher replication improves
-recall but increases storage and scan cost.
+nearest centroid. However, single-cluster assignment causes a "boundary
+problem": if a query's true nearest neighbor lies just across a cluster
+boundary, it may be missed when only searching the query's nearest cluster.
+
+### Improving Recall: Multi-Cluster Assignment
+
+Two main approaches exist for assigning vectors to multiple clusters:
+
+**SPANN approach: Boundary-only replication (closure augmentation)**
+
+Only vectors near cluster boundaries are duplicated to neighboring clusters.
+Vectors close to their centroid remain in a single cluster.
+
+- Uses distance threshold to identify boundary vectors
+- Applies [RNG (Relative Neighborhood Graph) rule](https://arxiv.org/abs/2111.08566)
+  to select which clusters receive duplicates, reducing redundancy between
+  similar clusters
+- Limits replication factor (SPANN uses max 8 replicas)
+- Trade-off: Lower storage overhead, but requires tuning the boundary threshold
+
+**ScaNN/SOAR approach: Universal replication with orthogonal residuals**
+
+All vectors are assigned to multiple clusters, with secondary assignments
+chosen to provide independent "backup" coverage.
+
+- Primary assignment: nearest centroid (standard k-means)
+- Secondary assignments: chosen so residual errors are orthogonal to primary
+  residual ([SOAR algorithm](https://research.google/blog/soar-new-algorithms-for-even-faster-vector-search-with-scann/))
+- When query is parallel to primary residual (high error), it's orthogonal to
+  secondary residual (low error)—providing effective redundancy
+- Trade-off: Higher storage overhead, but more systematic recall improvement
+
+**TigerANN approach:**
+
+For initial implementation, use SPANN-style boundary-only replication:
+- Lower storage overhead (important for disk-based index)
+- Simpler to implement and tune
+- Replication factor controlled by reloption `max_replicas` (default: 1, meaning
+  no replication; set higher for better recall)
+
+Future versions may explore SOAR-style orthogonal secondary assignments for
+workloads where recall is critical.
 
 **Balancing**: Ideally, posting lists should be roughly equal in size for
 predictable query latency. The clustering algorithm aims for balanced clusters,
