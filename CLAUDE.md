@@ -44,6 +44,7 @@ Research and inspiration:
 
 - [ScaNN reference implementation](https://github.com/google-research/google-research/tree/master/scann) (in-memory)
 - [SPANN paper](https://www.microsoft.com/en-us/research/wp-content/uploads/2021/11/SPANN_finalversion1.pdf)
+- [SPTAG](https://github.com/microsoft/SPTAG) (ANN library used by SPANN for in-memory centroid index)
 - [ScaNN for AlloyDB blog](https://cloud.google.com/blog/products/databases/understanding-the-scann-index-in-alloydb)
 - [ScaNN for AlloyDB whitepaper](https://services.google.com/fh/files/misc/scann_for_alloydb_whitepaper.pdf)
 - [turbopuffer ANN v3](https://turbopuffer.com/blog/ann-v3)
