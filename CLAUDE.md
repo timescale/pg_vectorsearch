@@ -278,10 +278,11 @@ Before committing, verify all of the following:
 
 1. **Format code**: `meson compile -C builddir format`
 2. **Run all tests**: `meson test -C builddir`
-3. **Check lint**: `./scripts/ci/lint.sh`
-4. **Stage files explicitly**: `git add <specific-files>` (never `-a` or `-A`)
-5. **Review staged changes**: `git diff --staged`
-6. **Write a clear commit message** describing the change
+3. **Check coverage**: `./scripts/ci/coverage.sh` (minimum 90% line coverage)
+4. **Check lint**: `./scripts/ci/lint.sh`
+5. **Stage files explicitly**: `git add <specific-files>` (never `-a` or `-A`)
+6. **Review staged changes**: `git diff --staged`
+7. **Write a clear commit message** describing the change
 
 <!-- Links -->
 [pgvector]: https://github.com/pgvector/pgvector

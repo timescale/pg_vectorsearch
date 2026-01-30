@@ -198,3 +198,9 @@ TEST(vector_to_ref)
 
 	mkt_vector_free(v);
 }
+
+TEST(vector_copy_null)
+{
+	MktVector *v = mkt_vector_copy(NULL);
+	ASSERT_NULL(v, "copying NULL should return NULL");
+}
