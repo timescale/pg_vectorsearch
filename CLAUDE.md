@@ -175,6 +175,20 @@ alongside `<object>_create()` functions so that objects can be both stack and
 heap allocated. The corresponding `<object>_cleanup()` and `<object>_free()`
 functions are provided for cleaning up resources and freeing memory.
 
+### Use `const` when possible
+
+Use `const` when possible to indicate that objects can't be modified. In
+functions taking pointer arguments, declare the objects `const` when possible.
+Example:
+
+```C
+int 
+mkt_vector_dot_product(const MktVector *v1, const MktVector *v2)
+{
+  ...
+}
+```
+
 ## Important Notes
 
 ### Dependencies
