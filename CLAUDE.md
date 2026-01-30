@@ -26,11 +26,11 @@ a subset of partitions to build the nearest neighbor result set.
 - Support for MVCC and streaming replication
 - Reasonable, stable, and tunable memory consumption
 
-### Design Documentation
+### Documentation
 
-See `docs/architecture.md` for high-level architecture and `docs/implementation.md`
-for detailed implementation specifications including data structures, algorithms,
-and development phases.
+- `docs/architecture.md` - High-level architecture
+- `docs/implementation.md` - Detailed implementation specifications
+- `docs/development.md` - Build instructions, testing, CI scripts
 
 ### Performance Goals
 
@@ -76,6 +76,9 @@ system. It may later be integrated into `pgvectorscale` for distribution.
 - **Step-by-step with review**: Work in small increments and pause for review
   after each step. Don't implement multiple components at once unless explicitly
   asked to do larger work unattended.
+- **CI scripts**: Put larger CI workflow jobs in standalone bash scripts in
+  `scripts/ci/`. Scripts should be runnable locally for testing and debugging.
+  GitHub Actions workflows should call these scripts rather than inline commands.
 
 ### Testability
 
