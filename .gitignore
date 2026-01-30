@@ -1,0 +1,10 @@
+# Build directories
+builddir/
+builddir-*/
+debug/
+release/
+build/
+
+# Editor/IDE
+.cache/
+compile_commands.json
