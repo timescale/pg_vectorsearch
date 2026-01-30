@@ -161,3 +161,60 @@ consistency but falls back to any available version.
 # Format all source files
 meson compile -C builddir format
 ```
+
+## CI Scripts
+
+Standalone scripts in `scripts/ci/` can be run locally for testing and
+debugging. These are the same scripts used by GitHub Actions.
+
+### Available Scripts
+
+| Script | Description |
+|--------|-------------|
+| `build.sh` | Build and run tests |
+| `coverage.sh` | Build with coverage, generate report |
+| `sanitizers.sh` | Build and test with sanitizers |
+| `lint.sh` | Check formatting and run clang-tidy |
+
+### Usage
+
+```bash
+# Basic build and test
+./scripts/ci/build.sh
+
+# Build with coverage
+./scripts/ci/coverage.sh
+
+# Run with AddressSanitizer
+./scripts/ci/sanitizers.sh address
+
+# Run with UndefinedBehaviorSanitizer
+./scripts/ci/sanitizers.sh undefined
+
+# Run with both (default)
+./scripts/ci/sanitizers.sh address,undefined
+
+# Check formatting and run clang-tidy
+./scripts/ci/lint.sh
+```
+
+### Custom Build Directory
+
+All scripts accept an optional build directory argument:
+
+```bash
+./scripts/ci/build.sh my-builddir
+./scripts/ci/coverage.sh my-coverage-dir
+```
+
+## GitHub Actions
+
+The project uses GitHub Actions for CI with the following workflows:
+
+| Workflow | Trigger | Description |
+|----------|---------|-------------|
+| `build.yml` | Push, PR | Build and test |
+| `sanitizers.yml` | Push, PR | ASan and UBSan tests |
+| `coverage.yml` | Push, PR | Coverage report, upload to Codecov |
+| `lint.yml` | Push, PR | Format check and clang-tidy |
+| `codeql.yml` | Push, PR, Weekly | GitHub CodeQL static analysis |
