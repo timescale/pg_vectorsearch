@@ -5,7 +5,7 @@ code in this repository.
 
 ## Project Overview
 
-TigerANN is a PostgreSQL index access method (IAM) for Approximate Nearest
+Meerkat is a PostgreSQL index access method (IAM) for Approximate Nearest
 Neighbor (ANN) vector search, inspired by Google's ScaNN for AlloyDB and
 Microsoft's SPANN. It uses the vector format from
 [pgvector](https://github.com/pgvector/pgvector).
