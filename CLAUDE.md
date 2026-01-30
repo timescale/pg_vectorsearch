@@ -73,6 +73,9 @@ system. It may later be integrated into `pgvectorscale` for distribution.
 - Well-tested changes using unit tests, PostgreSQL regression tests, and
   isolation tests
 - TAP tests for multi-instance scenarios (e.g., streaming replication)
+- **Step-by-step with review**: Work in small increments and pause for review
+  after each step. Don't implement multiple components at once unless explicitly
+  asked to do larger work unattended.
 
 ### Testability
 
