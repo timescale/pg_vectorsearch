@@ -97,6 +97,13 @@ subset of the code.
 
 ## Local Development
 
+### Claude Code Environment
+
+Claude Code runs in a sandboxed environment with restricted `/tmp` access. Use
+`/tmp/claude/` for temporary files instead of `/tmp/` directly. Some tools
+(like `lcov`) have `/tmp` hardcoded - use `lcov --tempdir` to specify an
+alternative, or use `gcovr` for coverage instead.
+
 ### Related Project Checkouts
 
 - `../pgvector/`

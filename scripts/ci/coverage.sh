@@ -17,13 +17,18 @@ echo "==> Running tests"
 TERM=xterm-256color meson test -C "$BUILDDIR" --verbose
 
 echo "==> Generating coverage report"
-ninja -C "$BUILDDIR" coverage
+LOGDIR="$BUILDDIR/meson-logs"
+mkdir -p "$LOGDIR/coveragereport"
+
+# Use gcovr for coverage (works in sandboxed environments unlike lcov which
+# has /tmp hardcoded; use lcov --tempdir if lcov is preferred)
+gcovr --root . --object-directory "$BUILDDIR" \
+    --exclude 'builddir.*' --exclude 'test/.*' \
+    --txt "$LOGDIR/coverage.txt" \
+    --xml "$LOGDIR/coverage.xml" \
+    --html-details "$LOGDIR/coveragereport/index.html"
 
 echo "==> Coverage report generated"
-echo "    Text report: $BUILDDIR/meson-logs/coverage.txt"
-
-# Generate HTML if available
-if command -v gcovr &>/dev/null || command -v lcov &>/dev/null; then
-    ninja -C "$BUILDDIR" coverage-html 2>/dev/null || true
-    echo "    HTML report: $BUILDDIR/meson-logs/coveragereport/"
-fi
+echo "    Text report: $LOGDIR/coverage.txt"
+echo "    XML report:  $LOGDIR/coverage.xml"
+echo "    HTML report: $LOGDIR/coveragereport/index.html"
