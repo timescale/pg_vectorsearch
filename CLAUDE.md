@@ -7,8 +7,7 @@ code in this repository.
 
 Meerkat is a PostgreSQL index access method (IAM) for Approximate Nearest
 Neighbor (ANN) vector search, inspired by Google's ScaNN for AlloyDB and
-Microsoft's SPANN. It uses the vector format from
-[pgvector](https://github.com/pgvector/pgvector).
+Microsoft's SPANN. It uses the vector format from [pgvector].
 
 ### Architecture
 
@@ -48,19 +47,19 @@ a subset of partitions to build the nearest neighbor result set.
 
 Research and inspiration:
 
-- [ScaNN reference implementation](https://github.com/google-research/google-research/tree/master/scann) (in-memory)
-- [SPANN paper](https://www.microsoft.com/en-us/research/wp-content/uploads/2021/11/SPANN_finalversion1.pdf)
-- [SPTAG](https://github.com/microsoft/SPTAG) (ANN library used by SPANN for in-memory centroid index)
-- [ScaNN for AlloyDB blog](https://cloud.google.com/blog/products/databases/understanding-the-scann-index-in-alloydb)
-- [ScaNN for AlloyDB whitepaper](https://services.google.com/fh/files/misc/scann_for_alloydb_whitepaper.pdf)
-- [turbopuffer ANN v3](https://turbopuffer.com/blog/ann-v3)
-- [SPFresh paper](https://dl.acm.org/doi/epdf/10.1145/3600006.3613166)
+- [ScaNN reference implementation][scann-ref] (in-memory)
+- [SPANN paper]
+- [SPTAG] (ANN library used by SPANN for in-memory centroid index)
+- [ScaNN for AlloyDB blog][scann-alloydb-blog]
+- [ScaNN for AlloyDB whitepaper][scann-alloydb-paper]
+- [turbopuffer ANN v3][turbopuffer-ann]
+- [SPFresh paper]
 
 Related PostgreSQL extensions:
 
-- [pgvector](https://github.com/pgvector/pgvector)
-- [pgvectorscale](https://github.com/timescale/pgvectorscale)
-- [pg_textsearch](https://github.com/timescale/pg_textsearch)
+- [pgvector]
+- [pgvectorscale]
+- [pg_textsearch]
 
 ## Implementation
 
@@ -218,6 +217,22 @@ mkt_vector_dot_product(const MktVector *v1, const MktVector *v2)
 
 - Always run all test suites before committing changes
 
+### GitHub Workflows
+
+Use [zizmor] to check workflow files for
+security best practices:
+
+```bash
+zizmor --pedantic .github/workflows/
+```
+
+Workflow requirements:
+
+- Pin actions to commit hashes (not tags)
+- Add `persist-credentials: false` to checkouts
+- Add explicit `permissions` blocks
+- Add `concurrency` settings to cancel duplicate runs
+
 ### Code Style
 
 - Uses clang-format for consistent C formatting
@@ -263,7 +278,20 @@ Before committing, verify all of the following:
 
 1. **Format code**: `meson compile -C builddir format`
 2. **Run all tests**: `meson test -C builddir`
-3. **Check lint** (optional but recommended): `./scripts/ci/lint.sh`
+3. **Check lint**: `./scripts/ci/lint.sh`
 4. **Stage files explicitly**: `git add <specific-files>` (never `-a` or `-A`)
 5. **Review staged changes**: `git diff --staged`
 6. **Write a clear commit message** describing the change
+
+<!-- Links -->
+[pgvector]: https://github.com/pgvector/pgvector
+[pgvectorscale]: https://github.com/timescale/pgvectorscale
+[pg_textsearch]: https://github.com/timescale/pg_textsearch
+[scann-ref]: https://github.com/google-research/google-research/tree/master/scann
+[SPANN paper]: https://www.microsoft.com/en-us/research/wp-content/uploads/2021/11/SPANN_finalversion1.pdf
+[SPTAG]: https://github.com/microsoft/SPTAG
+[scann-alloydb-blog]: https://cloud.google.com/blog/products/databases/understanding-the-scann-index-in-alloydb
+[scann-alloydb-paper]: https://services.google.com/fh/files/misc/scann_for_alloydb_whitepaper.pdf
+[turbopuffer-ann]: https://turbopuffer.com/blog/ann-v3
+[SPFresh paper]: https://dl.acm.org/doi/epdf/10.1145/3600006.3613166
+[zizmor]: https://github.com/zizmorcore/zizmor
