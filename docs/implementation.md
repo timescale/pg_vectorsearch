@@ -1312,7 +1312,7 @@ void mkt_stream_build_destroy(MktStreamBuild *builder);
 **CLI Tool**: `mkt_build`
 
 ```
-$ mkt_build --input vectors.bin --dim 768 --nlist 1000 --output index.tiger
+$ mkt_build --input vectors.bin --dim 768 --nlist 1000 --output index.mkt
 Sampling: 10000 / 100000 vectors
 Clustering: 1000 clusters, 15 iterations
 Assigning: 100000 vectors
@@ -1590,7 +1590,7 @@ void mkt_search_rerank(
 **CLI Tool**: `mkt_search`
 
 ```
-$ mkt_search --index index.tiger --query query.bin --k 10 --nprobe 20
+$ mkt_search --index index.mkt --query query.bin --k 10 --nprobe 20
 Results (10 of 100000 vectors):
   1. tid=(42,15)  distance=0.0234
   2. tid=(108,3)  distance=0.0456
@@ -1604,7 +1604,7 @@ Search time: 2.3ms
 
 ### 6.1 Extension Setup
 
-**Files**: `src/tigerann.c`, `src/tigerann.h`
+**Files**: `src/meerkat.c`, `src/meerkat.h`
 
 ```c
 // Extension initialization
@@ -1623,7 +1623,7 @@ int mkt_default_rerank_k;
 
 ```c
 // Index handler function (registered with CREATE ACCESS METHOD)
-Datum tigerann_handler(PG_FUNCTION_ARGS);
+Datum mkt_handler(PG_FUNCTION_ARGS);
 
 // Required IAM callbacks
 static IndexBuildResult *mkt_ambuild(Relation heap, Relation index,
@@ -1990,7 +1990,7 @@ static IndexBulkDeleteResult *mkt_amvacuumcleanup(
 ## File Organization
 
 ```
-pg_tigerann/
+meerkat/
 ├── src/
 │   ├── mkt_types.h          # Type definitions
 │   ├── mkt_memory.h         # Memory abstraction
@@ -2019,16 +2019,16 @@ pg_tigerann/
 │   ├── build.c
 │   ├── search.h
 │   ├── search.c
-│   ├── tigerann.h             # PostgreSQL extension header
-│   ├── tigerann.c             # Extension entry point
-│   ├── tigerann_handler.c     # IAM callbacks
-│   ├── tigerann_build.c       # PG build integration
-│   ├── tigerann_scan.c        # PG scan integration
-│   ├── tigerann_shmem.c       # Shared memory cache
-│   └── tigerann_vacuum.c      # Vacuum support
+│   ├── meerkat.h              # PostgreSQL extension header
+│   ├── meerkat.c              # Extension entry point
+│   ├── mkt_handler.c          # IAM callbacks
+│   ├── mkt_build.c            # PG build integration
+│   ├── mkt_scan.c             # PG scan integration
+│   ├── mkt_shmem.c            # Shared memory cache
+│   └── mkt_vacuum.c           # Vacuum support
 ├── sql/
-│   ├── tigerann--1.0.sql      # Extension SQL
-│   └── tigerann.control       # Extension control file
+│   ├── meerkat--1.0.sql       # Extension SQL
+│   └── meerkat.control        # Extension control file
 ├── test/
 │   ├── unit/                  # Unit tests (standalone)
 │   ├── regress/               # PostgreSQL regression tests
