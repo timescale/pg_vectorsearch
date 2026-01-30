@@ -58,6 +58,52 @@ Meson provides several coverage targets:
 | `coverage-xml` | Generate XML report (Cobertura) |
 | `coverage-text` | Generate text summary |
 
+## Sanitizers
+
+Meson supports Clang/GCC sanitizers via the `b_sanitize` option.
+
+### AddressSanitizer (ASan)
+
+Detects memory errors: use-after-free, buffer overflow, double-free, memory
+leaks.
+
+```bash
+meson setup builddir-asan -Db_sanitize=address
+meson test -C builddir-asan
+```
+
+### UndefinedBehaviorSanitizer (UBSan)
+
+Detects undefined behavior: null pointer dereference, signed integer overflow,
+etc.
+
+```bash
+meson setup builddir-ubsan -Db_sanitize=undefined
+meson test -C builddir-ubsan
+```
+
+### Combined Sanitizers
+
+Multiple sanitizers can be combined:
+
+```bash
+meson setup builddir-san -Db_sanitize=address,undefined
+meson test -C builddir-san
+```
+
+### Available Sanitizers
+
+| Sanitizer | Option | Detects |
+|-----------|--------|---------|
+| AddressSanitizer | `address` | Use-after-free, buffer overflow, leaks |
+| LeakSanitizer | `leak` | Memory leaks (included in ASan) |
+| UndefinedBehaviorSanitizer | `undefined` | Undefined behavior |
+| ThreadSanitizer | `thread` | Data races |
+| MemorySanitizer | `memory` | Uninitialized reads (Clang only) |
+
+Note: ThreadSanitizer and MemorySanitizer cannot be combined with
+AddressSanitizer.
+
 ## Static Analysis
 
 ### clang-tidy
