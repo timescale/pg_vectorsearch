@@ -8,3 +8,9 @@ build/
 # Editor/IDE
 .cache/
 compile_commands.json
+
+# Coverage
+*.gcda
+*.gcno
+coverage.html
+coverage*.html

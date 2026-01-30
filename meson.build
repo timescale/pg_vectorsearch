@@ -67,3 +67,11 @@ if clang_format.found()
     ],
   )
 endif
+
+# Coverage (built-in meson support)
+# Usage:
+#   meson setup builddir-cov -Db_coverage=true
+#   meson test -C builddir-cov
+#   ninja -C builddir-cov coverage-html
+#
+# Meson auto-detects compiler (GCC/Clang) and coverage tools (gcovr, lcov, llvm-cov)
