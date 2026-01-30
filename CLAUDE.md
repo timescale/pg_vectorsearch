@@ -234,7 +234,7 @@ PostgreSQL include files.
 Note: keep the include list minimal. Remove unused includes. The LSP server can
 help identify unused includes.
 
-### Documentation
+### Documentation Maintenance
 
 Keep documentation up-to-date with code changes:
 
