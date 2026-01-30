@@ -1,11 +1,11 @@
-# TigerANN Architecture
+# Meerkat Architecture
 
-High-level architecture for TigerANN, a PostgreSQL index access method for
+High-level architecture for Meerkat, a PostgreSQL index access method for
 approximate nearest neighbor (ANN) vector search.
 
 ## Overview
 
-TigerANN uses an inverted index approach inspired by SPANN and ScaNN, where the
+Meerkat uses an inverted index approach inspired by SPANN and ScaNN, where the
 vector space is partitioned into clusters. Each cluster has a centroid and a
 posting list containing the vectors assigned to that cluster. Search proceeds
 in two phases: first find the closest centroids, then scan their posting lists.
@@ -80,7 +80,7 @@ clusters based on proximity.
 - If deleted, must find new representative
 - Used by SPANN for "more meaningful navigation" with graph indexes
 
-For TigerANN, the **medoid approach** is preferred: the centroid is chosen as
+For Meerkat, the **medoid approach** is preferred: the centroid is chosen as
 the actual vector closest to the cluster mean. The medoid is computed during
 index build.
 
@@ -176,7 +176,7 @@ chosen to provide independent "backup" coverage.
   secondary residual (low error)—providing effective redundancy
 - Trade-off: Higher storage overhead, but more systematic recall improvement
 
-**TigerANN approach:**
+**Meerkat approach:**
 
 For initial implementation, use SPANN-style boundary-only replication:
 - Lower storage overhead (important for disk-based index)
@@ -225,8 +225,8 @@ Index metadata is stored in multiple locations depending on its nature:
 - Over-allocation: `reserved_pages`
 
 **GUCs** (session/server-level, can override reloptions):
-- `tigerann.nprobe` - clusters to search per query
-- `tigerann.rerank_k` - candidates to re-rank with full precision
+- `meerkat.nprobe` - clusters to search per query
+- `meerkat.rerank_k` - candidates to re-rank with full precision
 
 **Catalog tables** (managed by PostgreSQL):
 - Structural info in pg_class, pg_index, pg_am, pg_opclass
@@ -387,7 +387,7 @@ Leaving 10% free allows inserts to append to existing pages before needing new
 ones.
 
 ```sql
-CREATE INDEX ON vectors USING tigerann (embedding)
+CREATE INDEX ON vectors USING meerkat (embedding)
   WITH (fillfactor = 70);  -- 30% room for growth per page
 ```
 
@@ -396,7 +396,7 @@ posting list during build. These pages are pre-linked but empty, allowing
 growth without allocation at EOF.
 
 ```sql
-CREATE INDEX ON vectors USING tigerann (embedding)
+CREATE INDEX ON vectors USING meerkat (embedding)
   WITH (reserved_pages = 2);  -- 2 empty pages per posting list
 ```
 
