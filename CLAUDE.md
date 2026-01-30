@@ -26,6 +26,12 @@ a subset of partitions to build the nearest neighbor result set.
 - Support for MVCC and streaming replication
 - Reasonable, stable, and tunable memory consumption
 
+### Design Documentation
+
+See `docs/architecture.md` for high-level architecture and `docs/implementation.md`
+for detailed implementation specifications including data structures, algorithms,
+and development phases.
+
 ### Performance Goals
 
 - Tiered storage: fast memory (CPU cache, RAM) for upper tree levels, SSD/cloud
@@ -116,7 +122,8 @@ For crashes:
 - On Linux, use `coredumpctl debug` to debug the latest crash
 - Always check the stacktrace first before adding debug statements
 
-The `pgm` tool can help with attaching to managed PostgreSQL instances on the system, if present.
+The `pgm` tool can help with attaching to managed PostgreSQL instances on the
+system, if present.
 
 ### Profiling
 
@@ -169,6 +176,10 @@ heap allocated. The corresponding `<object>_cleanup()` and `<object>_free()`
 functions are provided for cleaning up resources and freeing memory.
 
 ## Important Notes
+
+### Dependencies
+
+- `pgvector` extension for vector type and operators.
 
 ### Concurrency Safety
 
