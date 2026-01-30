@@ -1,0 +1,13 @@
+---
+# Clang-tidy configuration for Meerkat
+#
+# Disable checks that don't apply to portable C code or PostgreSQL extensions.
+
+Checks: >
+  -*,
+  clang-analyzer-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+
+# The insecureAPI.DeprecatedOrUnsafeBufferHandling check recommends memcpy_s
+# and memset_s which are C11 Annex K functions. These are optional and not
+# implemented by glibc, making them unsuitable for portable code.

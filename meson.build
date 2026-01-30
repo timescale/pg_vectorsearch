@@ -1,0 +1,69 @@
+project('meerkat', 'c',
+  version: '0.1.0',
+  default_options: [
+    'c_std=c2x',  # C23 (use c2x for older meson/gcc compatibility)
+    'warning_level=2',
+    'werror=true',
+    'b_ndebug=if-release',
+  ],
+)
+
+cc = meson.get_compiler('c')
+
+# Common flags
+add_project_arguments(
+  '-D_GNU_SOURCE',
+  '-DMKT_STANDALONE',
+  language: 'c',
+)
+
+# Math library
+m_dep = cc.find_library('m', required: true)
+
+# Source files for core library (standalone, no PostgreSQL)
+mkt_core_sources = files(
+  'src/mkt_memory.c',
+  'src/mkt_vector.c',
+)
+
+# Core library (static, for linking into tests and tools)
+mkt_core_lib = static_library('mkt_core',
+  mkt_core_sources,
+  include_directories: include_directories('src'),
+  dependencies: [m_dep],
+)
+
+mkt_core_dep = declare_dependency(
+  link_with: mkt_core_lib,
+  include_directories: include_directories('src'),
+  dependencies: [m_dep],
+)
+
+# Unit tests
+subdir('test/unit')
+
+# Header files
+mkt_core_headers = files(
+  'src/mkt_memory.h',
+  'src/mkt_types.h',
+  'src/mkt_vector.h',
+)
+
+# Format target
+clang_format = find_program('clang-format-18', 'clang-format', required: false)
+if clang_format.found()
+  run_target('format',
+    command: [
+      clang_format,
+      '-i',
+      mkt_core_sources,
+      mkt_core_headers,
+      files(
+        'test/unit/mkt_test.c',
+        'test/unit/mkt_test.h',
+        'test/unit/run_tests.c',
+        'test/unit/test_mkt_vector.c',
+      ),
+    ],
+  )
+endif
