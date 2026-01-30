@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly on Monday at 6am
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL Analysis
+    # Set repository variable CODE_SCANNING_ENABLED=true to enable
+    if: vars.CODE_SCANNING_ENABLED == 'true'
+    runs-on: ubuntu-latest
+
+    permissions:
+      security-events: write  # Required to upload CodeQL results
+      actions: read           # Required for workflow run graph
+      contents: read          # Required to checkout repository
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2b983b380ce715a6c836c917154509c332c19b3a # v3
+        with:
+          languages: c-cpp
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build gcc
+
+      - name: Build
+        run: |
+          meson setup builddir
+          meson compile -C builddir
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@2b983b380ce715a6c836c917154509c332c19b3a # v3

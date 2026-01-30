@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and Test (${{ matrix.os }} ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os: Linux
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            os: Linux
+            arch: arm64
+          - runner: macos-latest
+            os: macOS
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build gcc
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install meson ninja
+
+      - name: Build and test
+        run: ./scripts/ci/build.sh
