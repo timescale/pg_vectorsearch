@@ -5,10 +5,18 @@ name: CodeQL
 on:
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'meson.build'
   pull_request:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'meson.build'
   schedule:
-    - cron: '0 6 * * 1'  # Weekly on Monday at 6am
+    - cron: '0 6 * * 1'  # Weekly on Monday at 6am (always runs)
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

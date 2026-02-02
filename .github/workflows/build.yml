@@ -5,8 +5,22 @@ name: Build
 on:
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'test/**'
+      - 'meson.build'
+      - 'meson_options.txt'
+      - 'scripts/ci/build.sh'
   pull_request:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'test/**'
+      - 'meson.build'
+      - 'meson_options.txt'
+      - 'scripts/ci/build.sh'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
