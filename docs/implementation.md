@@ -4,6 +4,62 @@ Detailed implementation specification for Meerkat, organized for iterative
 development. Each section builds on previous work, with standalone components
 developed and tested before PostgreSQL integration.
 
+## Technical Overview
+
+Meerkat is a PostgreSQL index access method for approximate nearest neighbor
+(ANN) vector search. The implementation combines proven techniques from recent
+research with practical considerations for database integration.
+
+### Key Technical Decisions
+
+| Component | Choice | Rationale |
+|-----------|--------|-----------|
+| **Index structure** | ScaNN/SPANN-style partitioned index | Inverted file with posting lists enables disk-friendly access patterns and PostgreSQL buffer cache integration |
+| **Quantization** | RaBitQ (1-bit binary) | State-of-the-art 32× compression with theoretical error bounds; enables two-stage search with guaranteed recall |
+| **Recall improvement** | Boundary-only replication (SPANN) | Vectors near cluster boundaries are replicated to adjacent clusters; improves recall without excessive storage overhead |
+| **Dynamic updates** | LIRE-protocol style | Supports high insert rates without degrading query performance; periodic background reorganization |
+| **Multi-tenancy** | Composite key support | `(tenant_id, vector)` keys enable efficient per-tenant queries with shared index infrastructure |
+
+### Architecture Summary
+
+```
+Query Flow:
+  1. Quantize query, find top-k centroids (in-memory centroid index)
+  2. Scan posting lists for candidate clusters (disk/buffer cache)
+  3. RaBitQ two-stage filtering: 1-bit estimate → error bound check → rerank
+  4. Full-precision reranking of top candidates
+  5. Return k nearest neighbors
+
+Index Structure:
+  ┌─────────────────────────────────────────────────────────────┐
+  │ Centroid Index (in-memory)                                  │
+  │   - Quantized centroids for fast cluster selection          │
+  │   - Typically √n centroids for n vectors                    │
+  └─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │ Posting Lists (PostgreSQL pages)                            │
+  │   - One list per centroid/cluster                           │
+  │   - RaBitQ-encoded vectors + full vectors for reranking     │
+  │   - Boundary vectors replicated across adjacent clusters    │
+  └─────────────────────────────────────────────────────────────┘
+```
+
+### References
+
+The design draws from:
+
+- **ScaNN/SPANN**: Partitioned index structure, posting list organization
+- **RaBitQ**: Binary quantization with error bounds (SIGMOD 2024)
+- **LIRE**: Dynamic update protocol for IVF indexes
+- **SPFresh**: Fresh vector search with streaming updates
+
+See [architecture.md](architecture.md) for high-level design and CLAUDE.md for
+full reference list.
+
+---
+
 ## Guiding Principles
 
 ### Performance
@@ -75,6 +131,145 @@ developed and tested before PostgreSQL integration.
 
 Components are developed bottom-up. Foundation and Core Algorithms are
 standalone C libraries testable without PostgreSQL.
+
+---
+
+## Command-Line Interface
+
+Meerkat provides a single unified CLI binary (`mkt`) with subcommands for
+development, testing, and benchmarking. This replaces multiple standalone tools.
+
+### Usage
+
+```
+mkt <command> [options]
+
+Commands:
+  distance, d     Compute distance between vectors
+  quantize, q     Quantize vectors using RaBitQ
+  cluster,  c     Run clustering algorithms
+  build,    b     Build an index from vectors
+  search,   s     Search an index
+  bench           Run benchmarks (distance, quantize, cluster, search)
+  info            Show index metadata
+  version         Show version information
+
+Run 'mkt <command> --help' for command-specific options.
+```
+
+### Subcommand Examples
+
+**Distance computation:**
+
+```
+$ mkt distance --metric l2 --file vectors.fvecs --i 0 --j 1
+Distance(L2): 42.315
+
+$ mkt d -m ip -a "[1.0, 2.0, 3.0]" -b "[4.0, 5.0, 6.0]"
+Distance(IP): 32.000
+```
+
+**Quantization:**
+
+```
+$ mkt quantize --input vectors.fvecs --output quantized.rq --dim 768
+Quantized 100000 vectors (768-dim) using RaBitQ
+  Input:  292.97 MB (3072 bytes/vec)
+  Output:  11.04 MB (116 bytes/vec)
+  Ratio:  26.5x compression
+
+$ mkt q --decode quantized.rq --index 42
+Vector 42 (reconstructed): [0.123, -0.456, ...]
+```
+
+**Benchmarks:**
+
+```bash
+mkt bench distance --dim 768 --count 10000 --metric l2
+mkt bench quantize --dataset sift1m --k 10
+mkt bench cluster --dim 128 --nvecs 100000 --nlist 1000
+mkt bench search --index index.mkt --queries queries.fvecs --k 10
+```
+
+**Index operations:**
+
+```bash
+mkt build --input vectors.fvecs --dim 768 --nlist 1000 --output index.mkt
+mkt search --index index.mkt --query query.fvecs --k 10 --nprobe 20
+mkt info --index index.mkt
+```
+
+### Implementation
+
+**Files**: `tools/mkt_cli.c`, `tools/mkt_cmd_*.c`
+
+```c
+// tools/mkt_cli.c - Main entry point with subcommand dispatch
+
+typedef struct {
+    const char *name;
+    const char *alias;
+    const char *description;
+    int (*handler)(int argc, char **argv);
+} MktCommand;
+
+static const MktCommand commands[] = {
+    {"distance", "d", "Compute distance between vectors", cmd_distance},
+    {"quantize", "q", "Quantize vectors using RaBitQ",    cmd_quantize},
+    {"cluster",  "c", "Run clustering algorithms",        cmd_cluster},
+    {"build",    "b", "Build an index from vectors",      cmd_build},
+    {"search",   "s", "Search an index",                  cmd_search},
+    {"bench",    NULL, "Run benchmarks",                  cmd_bench},
+    {"info",     NULL, "Show index metadata",             cmd_info},
+    {"version",  NULL, "Show version information",        cmd_version},
+    {NULL, NULL, NULL, NULL}
+};
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        print_usage();
+        return 1;
+    }
+
+    const char *cmd_name = argv[1];
+    for (const MktCommand *cmd = commands; cmd->name; cmd++) {
+        if (strcmp(cmd_name, cmd->name) == 0 ||
+            (cmd->alias && strcmp(cmd_name, cmd->alias) == 0)) {
+            return cmd->handler(argc - 1, argv + 1);
+        }
+    }
+
+    fprintf(stderr, "Unknown command: %s\n", cmd_name);
+    return 1;
+}
+```
+
+Each subcommand is implemented in a separate file (`mkt_cmd_distance.c`,
+`mkt_cmd_quantize.c`, etc.) for maintainability. The `bench` subcommand has
+its own sub-subcommands for different benchmark types.
+
+### Meson Build
+
+```meson
+# tools/meson.build
+mkt_cli_sources = [
+  'mkt_cli.c',
+  'mkt_cmd_distance.c',
+  'mkt_cmd_quantize.c',
+  'mkt_cmd_cluster.c',
+  'mkt_cmd_build.c',
+  'mkt_cmd_search.c',
+  'mkt_cmd_bench.c',
+  'mkt_cmd_info.c',
+]
+
+mkt = executable(
+  'mkt',
+  mkt_cli_sources,
+  dependencies: [mkt_core_dep],
+  install: true,
+)
+```
 
 ---
 
@@ -549,50 +744,558 @@ typedef enum {
 
 ### 1.3 Memory Abstraction
 
-**File**: `src/mkt_memory.h`, `src/mkt_memory.c`
+**Files**:
+
+- `src/mkt_memory.h` - Common interface, includes mode-specific header
+- `src/mkt_memory_standalone.h` - Standalone type definitions and declarations
+- `src/mkt_memory_standalone.c` - Standalone arena implementation
+- `src/mkt_memory_pg.h` - PostgreSQL macros and inline wrappers (header-only)
 
 Abstraction layer allowing the same code to run with PostgreSQL's memory
-contexts or standard malloc/free.
+contexts or a standalone arena allocator. The arena allocator provides
+efficient bump-pointer allocation with bulk deallocation, matching the
+semantics of PostgreSQL memory contexts.
+
+**Build configuration**:
+
+- Standalone: define `MKT_STANDALONE`, compile `mkt_memory_standalone.c`
+- PostgreSQL: no define needed, header-only (no `.c` file to compile)
+
+#### Common Interface
 
 ```c
-// Memory context handle (opaque)
-typedef struct MktMemoryContext *MktMemCtx;
+/* mkt_memory.h - Memory abstraction interface */
 
-// Global context for current allocation scope
-extern MktMemCtx mkt_current_memctx;
+#ifndef MKT_MEMORY_H
+#define MKT_MEMORY_H
 
-// Allocation functions
-void *mkt_alloc(size_t size);
-void *mkt_alloc0(size_t size);  // Zero-initialized
-void *mkt_realloc(void *ptr, size_t size);
-void  mkt_free(void *ptr);
+#ifdef MKT_STANDALONE
+#include "mkt_memory_standalone.h"
+#else
+#include "mkt_memory_pg.h"
+#endif
 
-// Aligned allocation (for SIMD)
-void *mkt_alloc_aligned(size_t size, size_t alignment);
-void  mkt_free_aligned(void *ptr);
+/* Helper for cleanup attribute (works in both modes) */
+static inline void
+mkt_memctx_delete_ptr(MktMemCtx *ctx)
+{
+    if (*ctx)
+        mkt_memctx_delete(*ctx);
+}
 
-// Context management
-MktMemCtx mkt_memctx_create(MktMemCtx parent, const char *name);
-void        mkt_memctx_delete(MktMemCtx ctx);
-void        mkt_memctx_reset(MktMemCtx ctx);  // Free all allocations
-
-// Scoped context (RAII-style via cleanup attribute)
+/* Scoped context (RAII-style via cleanup attribute) */
+#ifdef MKT_STANDALONE
 #define MKT_MEMCTX_SCOPE(name) \
     MktMemCtx name __attribute__((cleanup(mkt_memctx_delete_ptr))) = \
         mkt_memctx_create(mkt_current_memctx, #name)
+#else
+#define MKT_MEMCTX_SCOPE(name) \
+    MktMemCtx name __attribute__((cleanup(mkt_memctx_delete_ptr))) = \
+        mkt_memctx_create(CurrentMemoryContext, #name)
+#endif
+
+#endif /* MKT_MEMORY_H */
 ```
 
-**Standalone implementation** (`mkt_memory_standalone.c`):
-- Uses standard `malloc`/`free`
-- Memory contexts track allocations in a linked list for bulk free
-- Aligned allocation via `aligned_alloc` or `posix_memalign`
+#### Standalone Header
 
-**PostgreSQL implementation** (`mkt_memory_pg.c`):
-- Maps to `palloc`/`pfree`
-- Memory contexts map to PostgreSQL MemoryContexts
-- Aligned allocation uses `MemoryContextAllocAligned` (PG16+) or manual alignment
+```c
+/* mkt_memory_standalone.h - Standalone arena allocator types and declarations */
 
-**Tests**: Unit tests verify allocation, context creation/deletion, bulk reset.
+#ifndef MKT_MEMORY_STANDALONE_H
+#define MKT_MEMORY_STANDALONE_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+/*
+ * Arena allocator for standalone builds.
+ *
+ * An arena allocates memory from large blocks using bump-pointer allocation.
+ * Individual allocations cannot be freed; memory is released all at once
+ * when the arena is reset or destroyed. This matches PostgreSQL memory
+ * context semantics and provides excellent cache locality.
+ */
+
+#define MKT_ARENA_BLOCK_SIZE (64 * 1024)  /* 64 KB default block size */
+#define MKT_ARENA_ALIGNMENT  16           /* Default alignment */
+
+/* Block header for arena memory blocks */
+typedef struct MktArenaBlock
+{
+    struct MktArenaBlock *next;   /* Next block in chain */
+    size_t                size;   /* Total size of this block */
+    size_t                used;   /* Bytes used in this block */
+    /* Data follows immediately after header, aligned */
+} MktArenaBlock;
+
+/* Arena memory context */
+typedef struct MktArena
+{
+    const char     *name;         /* Context name for debugging */
+    struct MktArena *parent;      /* Parent context (for hierarchy) */
+    struct MktArena *first_child; /* First child context */
+    struct MktArena *next_sibling;/* Next sibling in parent's child list */
+    MktArenaBlock  *current;      /* Current block for allocations */
+    MktArenaBlock  *blocks;       /* All blocks (for freeing) */
+    size_t          block_size;   /* Size for new blocks */
+    size_t          total_allocated; /* Stats: total bytes allocated */
+} MktArena;
+
+typedef MktArena *MktMemCtx;
+
+/* Current memory context (thread-local) */
+extern MktMemCtx mkt_current_memctx;
+
+/* Allocation functions */
+void *mkt_alloc(size_t size);
+void *mkt_alloc0(size_t size);
+void *mkt_realloc(void *ptr, size_t size);
+void  mkt_free(void *ptr);
+void *mkt_memctx_alloc(MktMemCtx ctx, size_t size);
+void *mkt_memctx_alloc0(MktMemCtx ctx, size_t size);
+void *mkt_alloc_aligned(size_t size, size_t alignment);
+void  mkt_free_aligned(void *ptr);
+
+/* Context management */
+MktMemCtx mkt_memctx_create(MktMemCtx parent, const char *name);
+void      mkt_memctx_delete(MktMemCtx ctx);
+void      mkt_memctx_reset(MktMemCtx ctx);
+MktMemCtx mkt_memctx_switch(MktMemCtx ctx);
+size_t    mkt_memctx_total_allocated(MktMemCtx ctx);
+
+#endif /* MKT_MEMORY_STANDALONE_H */
+```
+
+#### PostgreSQL Header
+
+```c
+/* mkt_memory_pg.h - PostgreSQL memory wrappers (header-only) */
+#ifndef MKT_MEMORY_PG_H
+#define MKT_MEMORY_PG_H
+
+#include "postgres.h"
+#include "utils/memutils.h"
+
+typedef MemoryContext MktMemCtx;
+
+/* Direct mappings to palloc family */
+#define mkt_alloc(size)              palloc(size)
+#define mkt_alloc0(size)             palloc0(size)
+#define mkt_realloc(ptr, size)       repalloc(ptr, size)
+#define mkt_free(ptr)                pfree(ptr)
+#define mkt_memctx_alloc(ctx, size)  MemoryContextAlloc(ctx, size)
+#define mkt_memctx_alloc0(ctx, size) MemoryContextAllocZero(ctx, size)
+#define mkt_alloc_aligned(sz, al)    palloc_aligned(sz, al, 0)
+#define mkt_free_aligned(ptr)        pfree(ptr)
+
+/* Context management */
+#define mkt_memctx_create(parent, name) \
+    AllocSetContextCreate((parent) ? (parent) : CurrentMemoryContext, \
+                          (name), ALLOCSET_DEFAULT_SIZES)
+#define mkt_memctx_delete(ctx)       MemoryContextDelete(ctx)
+#define mkt_memctx_reset(ctx)        MemoryContextReset(ctx)
+#define mkt_memctx_switch(ctx)       MemoryContextSwitchTo(ctx)
+#define mkt_memctx_total_allocated(ctx) ((size_t)0)
+
+#endif /* MKT_MEMORY_PG_H */
+```
+
+Note: `palloc_aligned()` requires PostgreSQL 16+. For older versions, add a
+compatibility wrapper.
+
+#### Standalone Implementation
+
+```c
+/* mkt_memory_standalone.c - Arena allocator implementation */
+
+#include "mkt_memory_standalone.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+
+/* Thread-local current context (or global if no thread support) */
+#ifdef _Thread_local
+_Thread_local MktMemCtx mkt_current_memctx = NULL;
+#else
+MktMemCtx mkt_current_memctx = NULL;
+#endif
+
+/* Align size up to alignment boundary */
+static inline size_t
+align_up(size_t size, size_t alignment)
+{
+    return (size + alignment - 1) & ~(alignment - 1);
+}
+
+/* Allocate a new block */
+static MktArenaBlock *
+arena_block_create(size_t min_size)
+{
+    size_t block_size = min_size > MKT_ARENA_BLOCK_SIZE
+                        ? min_size : MKT_ARENA_BLOCK_SIZE;
+    /* Include space for header, aligned */
+    size_t header_size = align_up(sizeof(MktArenaBlock), MKT_ARENA_ALIGNMENT);
+    size_t total_size = header_size + block_size;
+
+    MktArenaBlock *block = aligned_alloc(MKT_ARENA_ALIGNMENT, total_size);
+    if (!block)
+        return NULL;
+
+    block->next = NULL;
+    block->size = block_size;
+    block->used = 0;
+    return block;
+}
+
+/* Free a block */
+static void
+arena_block_free(MktArenaBlock *block)
+{
+    free(block);
+}
+
+/* Get data pointer for block */
+static inline void *
+arena_block_data(MktArenaBlock *block)
+{
+    size_t header_size = align_up(sizeof(MktArenaBlock), MKT_ARENA_ALIGNMENT);
+    return (char *)block + header_size;
+}
+
+/* Allocate from arena */
+static void *
+arena_alloc(MktArena *arena, size_t size, size_t alignment)
+{
+    if (size == 0)
+        return NULL;
+
+    size_t aligned_size = align_up(size, alignment);
+
+    /* Try current block first */
+    if (arena->current)
+    {
+        void *data = arena_block_data(arena->current);
+        size_t offset = align_up(arena->current->used, alignment);
+
+        if (offset + aligned_size <= arena->current->size)
+        {
+            void *ptr = (char *)data + offset;
+            arena->current->used = offset + aligned_size;
+            arena->total_allocated += aligned_size;
+            return ptr;
+        }
+    }
+
+    /* Need a new block */
+    MktArenaBlock *block = arena_block_create(aligned_size);
+    if (!block)
+        return NULL;
+
+    /* Link new block */
+    block->next = arena->blocks;
+    arena->blocks = block;
+    arena->current = block;
+
+    /* Allocate from new block */
+    void *data = arena_block_data(block);
+    block->used = aligned_size;
+    arena->total_allocated += aligned_size;
+    return data;
+}
+
+/* Create a new arena context */
+MktMemCtx
+mkt_memctx_create(MktMemCtx parent, const char *name)
+{
+    /* Allocate arena struct from parent or malloc */
+    MktArena *arena;
+    if (parent)
+        arena = arena_alloc(parent, sizeof(MktArena), MKT_ARENA_ALIGNMENT);
+    else
+        arena = aligned_alloc(MKT_ARENA_ALIGNMENT, sizeof(MktArena));
+
+    if (!arena)
+        return NULL;
+
+    memset(arena, 0, sizeof(MktArena));
+    arena->name = name;
+    arena->parent = parent;
+    arena->block_size = MKT_ARENA_BLOCK_SIZE;
+
+    /* Link into parent's child list */
+    if (parent)
+    {
+        arena->next_sibling = parent->first_child;
+        parent->first_child = arena;
+    }
+
+    return arena;
+}
+
+/* Delete arena and all children */
+void
+mkt_memctx_delete(MktMemCtx ctx)
+{
+    if (!ctx)
+        return;
+
+    MktArena *arena = ctx;
+
+    /* Recursively delete children first */
+    MktArena *child = arena->first_child;
+    while (child)
+    {
+        MktArena *next = child->next_sibling;
+        mkt_memctx_delete(child);
+        child = next;
+    }
+
+    /* Unlink from parent */
+    if (arena->parent)
+    {
+        MktArena **pp = &arena->parent->first_child;
+        while (*pp && *pp != arena)
+            pp = &(*pp)->next_sibling;
+        if (*pp)
+            *pp = arena->next_sibling;
+    }
+
+    /* Free all blocks */
+    MktArenaBlock *block = arena->blocks;
+    while (block)
+    {
+        MktArenaBlock *next = block->next;
+        arena_block_free(block);
+        block = next;
+    }
+
+    /* Free arena struct if it was top-level (no parent) */
+    if (!arena->parent)
+        free(arena);
+}
+
+/* Reset arena - free all allocations but keep arena */
+void
+mkt_memctx_reset(MktMemCtx ctx)
+{
+    if (!ctx)
+        return;
+
+    MktArena *arena = ctx;
+
+    /* Recursively delete children */
+    MktArena *child = arena->first_child;
+    while (child)
+    {
+        MktArena *next = child->next_sibling;
+        mkt_memctx_delete(child);
+        child = next;
+    }
+    arena->first_child = NULL;
+
+    /* Free all blocks except first (if any) */
+    if (arena->blocks)
+    {
+        MktArenaBlock *keep = arena->blocks;
+        MktArenaBlock *block = keep->next;
+        while (block)
+        {
+            MktArenaBlock *next = block->next;
+            arena_block_free(block);
+            block = next;
+        }
+        keep->next = NULL;
+        keep->used = 0;
+        arena->blocks = keep;
+        arena->current = keep;
+    }
+    else
+    {
+        arena->current = NULL;
+    }
+    arena->total_allocated = 0;
+}
+
+/* Allocate from current context */
+void *
+mkt_alloc(size_t size)
+{
+    assert(mkt_current_memctx != NULL);
+    return arena_alloc(mkt_current_memctx, size, MKT_ARENA_ALIGNMENT);
+}
+
+void *
+mkt_alloc0(size_t size)
+{
+    void *ptr = mkt_alloc(size);
+    if (ptr)
+        memset(ptr, 0, size);
+    return ptr;
+}
+
+void *
+mkt_memctx_alloc(MktMemCtx ctx, size_t size)
+{
+    return arena_alloc(ctx, size, MKT_ARENA_ALIGNMENT);
+}
+
+void *
+mkt_memctx_alloc0(MktMemCtx ctx, size_t size)
+{
+    void *ptr = mkt_memctx_alloc(ctx, size);
+    if (ptr)
+        memset(ptr, 0, size);
+    return ptr;
+}
+
+/*
+ * Realloc is limited in arena mode - we can't reclaim the old space.
+ * This just allocates new space and copies. Use sparingly.
+ */
+void *
+mkt_realloc(void *ptr, size_t size)
+{
+    if (!ptr)
+        return mkt_alloc(size);
+    if (size == 0)
+        return NULL;
+
+    /* We don't know the old size, so caller must handle copying */
+    /* This is a limitation of arena allocators */
+    return mkt_alloc(size);
+}
+
+/* Free is a no-op in arena mode */
+void
+mkt_free(void *ptr)
+{
+    (void)ptr;  /* Intentionally empty - memory freed on context reset/delete */
+}
+
+/* Aligned allocation */
+void *
+mkt_alloc_aligned(size_t size, size_t alignment)
+{
+    assert(mkt_current_memctx != NULL);
+    return arena_alloc(mkt_current_memctx, size, alignment);
+}
+
+void
+mkt_free_aligned(void *ptr)
+{
+    (void)ptr;  /* No-op in arena mode */
+}
+
+/* Switch context */
+MktMemCtx
+mkt_memctx_switch(MktMemCtx ctx)
+{
+    MktMemCtx old = mkt_current_memctx;
+    mkt_current_memctx = ctx;
+    return old;
+}
+
+/* Stats */
+size_t
+mkt_memctx_total_allocated(MktMemCtx ctx)
+{
+    return ctx ? ctx->total_allocated : 0;
+}
+```
+
+#### Function Mapping
+
+The following table shows how Meerkat memory functions map to PostgreSQL:
+
+| Meerkat Function       | PostgreSQL Equivalent                   |
+|------------------------|----------------------------------------|
+| `mkt_alloc()`          | `palloc()`                             |
+| `mkt_alloc0()`         | `palloc0()`                            |
+| `mkt_realloc()`        | `repalloc()`                           |
+| `mkt_free()`           | `pfree()`                              |
+| `mkt_memctx_alloc()`   | `MemoryContextAlloc()`                 |
+| `mkt_memctx_create()`  | `AllocSetContextCreate()`              |
+| `mkt_memctx_delete()`  | `MemoryContextDelete()`                |
+| `mkt_memctx_reset()`   | `MemoryContextReset()`                 |
+| `mkt_memctx_switch()`  | `MemoryContextSwitchTo()` (inline)     |
+
+For aligned allocation, PostgreSQL 16+ provides `palloc_aligned()`. On older
+versions, a manual alignment wrapper is used.
+
+#### Usage Example
+
+```c
+/* Example: using arena for temporary computation */
+void
+compute_distances(const MktVector *query, const MktVector *vectors, int n)
+{
+    /* Create scoped arena for temporary allocations */
+    MKT_MEMCTX_SCOPE(work_ctx);
+    MktMemCtx old = mkt_memctx_switch(work_ctx);
+
+    /* Allocate temporary buffer - freed automatically when scope exits */
+    float *distances = mkt_alloc(n * sizeof(float));
+
+    /* ... compute distances ... */
+
+    /* Restore previous context */
+    mkt_memctx_switch(old);
+    /* work_ctx automatically deleted via cleanup attribute */
+}
+
+/* Example: persistent arena for index build */
+MktMemCtx build_ctx = mkt_memctx_create(NULL, "IndexBuild");
+MktMemCtx old = mkt_memctx_switch(build_ctx);
+
+/* All allocations go to build_ctx */
+MktVector *centroids = mkt_alloc(k * sizeof(MktVector));
+
+/* Reset to reuse memory for next phase */
+mkt_memctx_reset(build_ctx);
+
+/* Clean up when done */
+mkt_memctx_switch(old);
+mkt_memctx_delete(build_ctx);
+```
+
+#### Design Notes
+
+**Why arena allocation?**
+
+1. **Matches PostgreSQL semantics**: PostgreSQL memory contexts use similar
+   bulk-deallocation semantics. Code that works with arenas works unchanged
+   with PostgreSQL.
+
+2. **Cache efficiency**: Arena allocations are contiguous, improving cache
+   locality for sequential access patterns common in vector operations.
+
+3. **Zero fragmentation**: No free-list management, no fragmentation. Memory
+   is compacted after reset.
+
+4. **Fast allocation**: Bump-pointer allocation is O(1) with minimal overhead
+   (just pointer arithmetic).
+
+5. **Simplified error handling**: No need to track and free individual
+   allocations on error paths.
+
+**Limitations**:
+
+- `mkt_free()` is a no-op; memory is only released via `mkt_memctx_reset()`
+  or `mkt_memctx_delete()`
+- `mkt_realloc()` cannot reclaim old space; avoid in hot paths
+- Not suitable for long-lived allocations with varying lifetimes
+
+**Tests**: Unit tests verify:
+
+- Basic allocation and alignment
+- Context hierarchy (parent/child relationships)
+- Reset releases memory but keeps arena
+- Delete frees all memory including children
+- Large allocations (> block size) work correctly
+- Stats tracking accuracy
 
 ### 1.4 Platform Abstraction
 
@@ -773,10 +1476,10 @@ void mkt_distance_init(void) {
 - Performance: Benchmark each implementation, verify SIMD speedup
 - Edge cases: Zero-length vectors, single element, non-aligned pointers
 
-**CLI Tool**: `mkt_distance_bench` - benchmark distance computations
+**CLI**: `mkt bench distance` - benchmark distance computations
 
 ```
-$ mkt_distance_bench --dim 768 --count 10000 --metric l2
+$ mkt bench distance --dim 768 --count 10000 --metric l2
 L2 distance (dim=768, count=10000):
   scalar:  45.2 ms (221k vec/s)
   avx2:    8.1 ms (1.23M vec/s)
@@ -785,37 +1488,59 @@ L2 distance (dim=768, count=10000):
 
 ### 2.2 Quantization
 
-**Files**: `src/mkt_quantize.h`, `src/mkt_quantize.c`, `src/mkt_rabitq.c`
+**Files**: `src/mkt_quantize.h`, `src/mkt_rabitq.c`
 
 Quantization compresses vectors for faster approximate distance computation.
-Meerkat supports multiple quantization methods:
+**Meerkat uses RaBitQ as its quantization method.** RaBitQ (Randomized Binary
+Quantization) compresses vectors to 1 bit per dimension (32x compression) while
+maintaining 95-99% recall through theoretical error bounds.
 
-| Method | Compression | Recall | Used By |
-|--------|-------------|--------|---------|
-| **RaBitQ** | 32x | 95-99% | turbopuffer, Elastic, LanceDB |
-| SQ8 (Scalar 8-bit) | 4x | 99%+ | Faiss, Qdrant, Milvus, OpenSearch |
-| SQ4 (Scalar 4-bit) | 8x | 95-98% | Faiss |
-| SBQ (Statistical Binary) | 32x | 95%+ | pgvectorscale |
-| PQ (Product Quantization) | 16-64x | 90-98% | Faiss, ScaNN, Pinecone |
-
-**Meerkat uses RaBitQ as the primary quantization method** for several reasons:
+**Why RaBitQ:**
 
 1. **Theoretical guarantees**: Error bound O(1/√D) that improves with dimension.
    PQ lacks such bounds and can fail on some datasets (e.g., 50%+ error on MSong).
-2. **High compression**: 32x (1 bit/dimension) vs SQ8's 4x.
-3. **Speed**: 3x faster than PQ at same accuracy due to bitwise operations.
-4. **Architecture fit**: Meerkat re-ranks with full precision vectors, so aggressive
-   initial compression is acceptable.
+2. **High compression**: 32x (1 bit/dimension) enables large in-memory indexes.
+3. **Speed**: Bitwise operations are faster than PQ codebook lookups at same
+   accuracy.
+4. **Architecture fit**: Meerkat re-ranks with full precision vectors, so
+   aggressive initial compression is acceptable.
+5. **Industry adoption**: Used by turbopuffer, Elasticsearch, LanceDB.
 
-SQ8 is available as a fallback for lower-dimensional vectors where RaBitQ's
-benefits are smaller.
+**Future (lower priority):** SQ8 (scalar 8-bit) may be added as a fallback for
+lower-dimensional vectors where RaBitQ's benefits are smaller, or for use cases
+requiring higher recall without reranking.
 
 #### References
+
+**Papers:**
 
 - [RaBitQ: Quantizing High-Dimensional Vectors with a Theoretical Error Bound
   for Approximate Nearest Neighbor Search](https://arxiv.org/abs/2405.12497)
   (SIGMOD 2024)
-- [RaBitQ Reference Implementation](https://github.com/gaoj0017/RaBitQ)
+
+**Reference implementations:**
+
+- [RaBitQ-Library](https://github.com/VectorDB-NTU/RaBitQ-Library) — Official
+  library from paper authors (C++). Local checkout: `../RaBitQ-Library/`
+- [RaBitQ](https://github.com/gaoj0017/RaBitQ) — Original research code
+
+**Production implementations to study:**
+
+| Project | Index + RaBitQ | Language | Local |
+|---------|----------------|----------|-------|
+| [Milvus](https://github.com/milvus-io/milvus) | IVF + RaBitQ | C++ | — |
+| [Faiss](https://github.com/facebookresearch/faiss) | IVF + RaBitQ | C++ | `../faiss/` |
+| [VSAG](https://github.com/antgroup/vsag) | HGraph + RaBitQ | C++ | — |
+| [VectorChord](https://github.com/tensorchord/VectorChord) | IVF + RaBitQ | Rust | — |
+| [CockroachDB](https://github.com/cockroachdb/cockroach) | C-SPANN + RaBitQ | Go | — |
+| [Elasticsearch](https://github.com/elastic/elasticsearch) | HNSW + RaBitQ | Java | — |
+| [Lucene](https://github.com/apache/lucene) | HNSW + RaBitQ | Java | — |
+
+Note: Elasticsearch/Lucene call their implementation "BBQ" (Better Binary
+Quantization).
+
+**Blog posts:**
+
 - [turbopuffer ANN v3](https://turbopuffer.com/blog/ann-v3)
 - [LanceDB RaBitQ Integration](https://lancedb.com/blog/feature-rabitq-quantization/)
 
@@ -886,14 +1611,29 @@ removes bias toward any particular vector direction.
  * PostgreSQL varlena-compatible type storing all components needed for
  * RaBitQ distance estimation. Bits are stored MSB-first for VarBit
  * compatibility in the bit array portion.
+ *
+ * Two storage approaches are possible:
+ *
+ * 1. Mathematical form (inner_oo, norm): Stores the raw mathematical
+ *    quantities from the RaBitQ paper. Distance computation derives
+ *    the estimate from these values.
+ *
+ * 2. Factor form (f_add, f_rescale, f_error): Precomputes factors so
+ *    distance estimation is just: est = f_add + f_rescale * inner_product.
+ *    This is what faiss and RaBitQ-Library use. Faster at query time but
+ *    stores derived values instead of primitives.
+ *
+ * The factor form also supports two-stage search via f_error bounds.
+ * See "Implementation Insights from Reference Code" section below.
  */
 typedef struct MktRaBitQVector
 {
     int32       vl_len_;        /* varlena header (do not touch directly!) */
     int16       dim;            /* number of dimensions (= number of bits) */
-    int16       unused;         /* reserved, always zero */
-    float       inner_oo;       /* ⟨ō, o⟩: quantized-original inner product */
-    float       norm;           /* ‖o - centroid‖: norm relative to centroid */
+    int16       flags;          /* reserved for future use (e.g., bit depth) */
+    float       f_add;          /* additive factor for distance formula */
+    float       f_rescale;      /* scaling factor for inner product term */
+    float       f_error;        /* error bound for two-stage filtering */
     uint8       bits[];         /* D/8 bytes, MSB-first bit ordering */
 } MktRaBitQVector;
 
@@ -902,8 +1642,9 @@ typedef struct MktRaBitQVector
                                     MKT_RABITQ_BITS_SIZE(dim))
 #define MKT_RABITQ_DIM(v)          ((v)->dim)
 #define MKT_RABITQ_BITS(v)         ((v)->bits)
-#define MKT_RABITQ_INNER_OO(v)     ((v)->inner_oo)
-#define MKT_RABITQ_NORM(v)         ((v)->norm)
+#define MKT_RABITQ_F_ADD(v)        ((v)->f_add)
+#define MKT_RABITQ_F_RESCALE(v)    ((v)->f_rescale)
+#define MKT_RABITQ_F_ERROR(v)      ((v)->f_error)
 
 // RaBitQ quantizer state (shared across all vectors in an index)
 typedef struct {
@@ -944,37 +1685,41 @@ Distance mkt_rabitq_distance_asymmetric(
 **Encoding implementation:**
 
 ```c
+// Error bound constant from RaBitQ-Library (empirically tuned)
+#define MKT_RABITQ_EPSILON 1.9f
+
 void
 mkt_rabitq_encode_into(const RaBitQParams *params, VectorRef input,
                        VectorRef centroid, MktRaBitQVector *output)
 {
     Dimension dim = params->dim;
-    float *normalized = mkt_alloc(dim * sizeof(float));
+    float *residual = mkt_alloc(dim * sizeof(float));
     float *transformed = mkt_alloc(dim * sizeof(float));
 
-    // Step 1: Compute o = (input - centroid) / ||input - centroid||
-    float norm_sq = 0.0f;
+    // Step 1: Compute residual = input - centroid
+    float residual_norm_sq = 0.0f;
     for (Dimension i = 0; i < dim; i++) {
-        float diff = input.data[i] - centroid.data[i];
-        normalized[i] = diff;
-        norm_sq += diff * diff;
+        residual[i] = input.data[i] - centroid.data[i];
+        residual_norm_sq += residual[i] * residual[i];
     }
-    float norm = sqrtf(norm_sq);
-    float inv_norm = (norm > 1e-10f) ? 1.0f / norm : 0.0f;
+    float residual_norm = sqrtf(residual_norm_sq);
+
+    // Step 2: Normalize residual for rotation
+    float inv_norm = (residual_norm > 1e-10f) ? 1.0f / residual_norm : 0.0f;
     for (Dimension i = 0; i < dim; i++) {
-        normalized[i] *= inv_norm;
+        residual[i] *= inv_norm;
     }
 
-    // Step 2: Apply inverse rotation: x = P^T * o (P is orthogonal)
+    // Step 3: Apply inverse rotation: x = P^T * normalized_residual
     for (Dimension i = 0; i < dim; i++) {
         float sum = 0.0f;
         for (Dimension j = 0; j < dim; j++) {
-            sum += params->P_inv[i * dim + j] * normalized[j];
+            sum += params->P_inv[i * dim + j] * residual[j];
         }
         transformed[i] = sum;
     }
 
-    // Step 3: Extract sign pattern ō = sign(x), MSB-first bit ordering
+    // Step 4: Extract sign pattern (binary code), MSB-first bit ordering
     uint32_t packed_bytes = MKT_RABITQ_BITS_SIZE(dim);
     memset(output->bits, 0, packed_bytes);
     for (Dimension i = 0; i < dim; i++) {
@@ -983,25 +1728,51 @@ mkt_rabitq_encode_into(const RaBitQParams *params, VectorRef input,
         }
     }
 
-    // Step 4: Compute ⟨ō, o⟩ where ō is the quantized (binary) vector
-    // ō[i] = +1/√D if bit set, -1/√D otherwise
-    float scale = 1.0f / sqrtf((float)dim);
-    float inner_oo = 0.0f;
+    // Step 5: Compute xu_cb = binary_code + cb, where cb = -0.5 for 1-bit
+    // Then compute inner products needed for factors
+    const float cb = -0.5f;
+    float ip_residual_xucb = 0.0f;  // <residual, xu_cb>
+    float ip_centroid_xucb = 0.0f;  // <centroid, xu_cb>
+
     for (Dimension i = 0; i < dim; i++) {
         int bit = (output->bits[i / 8] >> (7 - (i % 8))) & 1;
-        float o_bar_i = bit ? scale : -scale;
-        inner_oo += o_bar_i * normalized[i];
+        float xu_cb_i = (float)bit + cb;  // 0.5 if bit=1, -0.5 if bit=0
+        ip_residual_xucb += residual[i] * xu_cb_i;
+        ip_centroid_xucb += centroid.data[i] * xu_cb_i;
     }
 
-    // Step 5: Fill output structure
+    // Step 6: Compute factors for distance estimation (L2 metric)
+    // Formula: est_dist = f_add + g_add + f_rescale * (inner_product + k1xsumq)
+    float f_add, f_rescale, f_error;
+
+    if (fabsf(ip_residual_xucb) > 1e-10f) {
+        f_add = residual_norm_sq +
+                2.0f * residual_norm_sq * ip_centroid_xucb / ip_residual_xucb;
+        f_rescale = -2.0f * residual_norm_sq / ip_residual_xucb;
+
+        // Error bound for two-stage filtering
+        // f_error = 2 * ||residual|| * epsilon * sqrt((1 - cos²) / (dim - 1))
+        float cos_sq = (ip_residual_xucb * ip_residual_xucb) /
+                       (residual_norm_sq * (0.25f * dim));  // ||xu_cb||² = 0.25*dim
+        float error_term = (dim > 1) ? sqrtf((1.0f - cos_sq) / (dim - 1)) : 0.0f;
+        f_error = 2.0f * residual_norm * MKT_RABITQ_EPSILON * error_term;
+    } else {
+        // Degenerate case: zero residual or orthogonal
+        f_add = residual_norm_sq;
+        f_rescale = 0.0f;
+        f_error = 0.0f;
+    }
+
+    // Step 7: Fill output structure
     SET_VARSIZE(output, MKT_RABITQ_SIZE(dim));
     output->dim = dim;
-    output->unused = 0;
-    output->inner_oo = inner_oo;
-    output->norm = norm;
+    output->flags = 0;
+    output->f_add = f_add;
+    output->f_rescale = f_rescale;
+    output->f_error = f_error;
 
     mkt_free(transformed);
-    mkt_free(normalized);
+    mkt_free(residual);
 }
 ```
 
@@ -1026,56 +1797,96 @@ generate_orthogonal_matrix(float *P, Dimension dim, uint64_t seed)
 
 **Distance estimation:**
 
-The key formula estimates inner product ⟨o, q⟩ from quantized vectors. RaBitQ uses
-the stored `inner_oo` value to correct the estimation error:
+The factor-based approach precomputes values so distance estimation requires
+only a few arithmetic operations. Query factors are computed once and reused
+for all database vectors.
 
 ```c
-Distance
-mkt_rabitq_distance_asymmetric(const RaBitQParams *params, VectorRef query,
-                               const MktRaBitQVector *quantized)
+// Query preparation (done once per query)
+typedef struct {
+    float *transformed;  // P^T * (query - centroid)
+    float g_add;         // ||query - centroid||²
+    float g_error;       // Error term for filtering
+    float k1xsumq;       // sum(transformed) * (-0.5)
+} RaBitQQueryState;
+
+RaBitQQueryState *
+mkt_rabitq_prepare_query(const RaBitQParams *params, VectorRef query,
+                         VectorRef centroid)
 {
     Dimension dim = params->dim;
-    float *q_transformed = mkt_alloc(dim * sizeof(float));
+    RaBitQQueryState *state = mkt_alloc(sizeof(RaBitQQueryState));
+    state->transformed = mkt_alloc(dim * sizeof(float));
 
-    // Transform query: P^T * query
+    // Compute query - centroid
+    float g_add = 0.0f;
+    float sum_transformed = 0.0f;
+    for (Dimension i = 0; i < dim; i++) {
+        float diff = query.data[i] - centroid.data[i];
+        g_add += diff * diff;
+    }
+    state->g_add = g_add;
+
+    // Transform: P^T * (query - centroid)
     for (Dimension i = 0; i < dim; i++) {
         float sum = 0.0f;
         for (Dimension j = 0; j < dim; j++) {
-            sum += params->P_inv[i * dim + j] * query.data[j];
+            float diff = query.data[j] - centroid.data[j];
+            sum += params->P_inv[i * dim + j] * diff;
         }
-        q_transformed[i] = sum;
+        state->transformed[i] = sum;
+        sum_transformed += sum;
     }
 
-    // Compute inner product ⟨q_transformed, ō⟩ with binary code
-    // ō[i] = +1/√D if bit set, -1/√D otherwise
-    float scale = 1.0f / sqrtf((float)dim);
-    float inner_q_obar = 0.0f;
+    state->k1xsumq = sum_transformed * (-0.5f);  // cb = -0.5 for 1-bit
+    state->g_error = sqrtf(g_add);  // Simplified; full formula in reference code
+
+    return state;
+}
+
+// Fast distance estimation using precomputed factors
+Distance
+mkt_rabitq_distance_asymmetric(const RaBitQQueryState *query_state,
+                               const MktRaBitQVector *quantized)
+{
+    Dimension dim = quantized->dim;
+
+    // Compute inner product: <transformed_query, binary_code>
+    // binary_code values are 0 or 1, so this is sum of transformed[i] where bit=1
+    float inner_product = 0.0f;
     for (Dimension i = 0; i < dim; i++) {
-        int bit = (quantized->bits[i / 8] >> (7 - (i % 8))) & 1;  // MSB first
-        float obar_i = bit ? scale : -scale;
-        inner_q_obar += q_transformed[i] * obar_i;
+        int bit = (quantized->bits[i / 8] >> (7 - (i % 8))) & 1;
+        if (bit) {
+            inner_product += query_state->transformed[i];
+        }
     }
 
-    // RaBitQ distance formula (see paper Section 4):
-    // Estimated ⟨o, q⟩ ≈ ⟨ō, q⟩ / ⟨ō, o⟩  (when vectors are normalized)
-    // For unnormalized: ||o - q||² = ||o||² + ||q||² - 2⟨o,q⟩
-    //
-    // Here o is the normalized residual, so we scale by stored norm:
-    // actual_distance² = ||input - centroid||² + ||query - centroid||²
-    //                    - 2 * norm * ⟨o, q_normalized⟩
-    float inner_oo = quantized->inner_oo;
-    float norm_o = quantized->norm;
+    // Distance formula: est_dist = f_add + g_add + f_rescale * (ip + k1xsumq)
+    float est_dist = quantized->f_add + query_state->g_add +
+                     quantized->f_rescale * (inner_product + query_state->k1xsumq);
 
-    // Correct inner product estimate using stored ⟨ō, o⟩
-    float inner_oq_est = (inner_oo > 1e-10f)
-                       ? (inner_q_obar / inner_oo) * norm_o
-                       : 0.0f;
+    return fmaxf(0.0f, est_dist);  // Clamp to non-negative
+}
 
-    float norm_q = mkt_vector_norm_ref(query);
-    float dist_sq = norm_o * norm_o + norm_q * norm_q - 2.0f * inner_oq_est;
+// Distance with lower bound for two-stage filtering
+void
+mkt_rabitq_distance_with_bound(const RaBitQQueryState *query_state,
+                               const MktRaBitQVector *quantized,
+                               Distance *est_dist,
+                               Distance *lower_bound)
+{
+    *est_dist = mkt_rabitq_distance_asymmetric(query_state, quantized);
 
-    mkt_free(q_transformed);
-    return fmaxf(0.0f, dist_sq);  // Clamp to non-negative
+    // Lower bound = estimate - error adjustment
+    float error_adj = quantized->f_error * query_state->g_error;
+    *lower_bound = fmaxf(0.0f, *est_dist - error_adj);
+}
+
+void
+mkt_rabitq_free_query(RaBitQQueryState *state)
+{
+    mkt_free(state->transformed);
+    mkt_free(state);
 }
 ```
 
@@ -1309,17 +2120,204 @@ inner product dominates query time. Both benefit significantly from SIMD.
 
 **Storage requirements:**
 
-- `MktRaBitQVector`: 4 (vl_len) + 2 (dim) + 2 (unused) + 4 (inner_oo)
-  \+ 4 (norm) + D/8 (bits) = 16 + D/8 bytes per vector
-- For 768-dim: 16 + 96 = 112 bytes per vector
+- `MktRaBitQVector`: 4 (vl_len) + 2 (dim) + 2 (flags) + 4 (f_add) + 4 (f_rescale)
+  \+ 4 (f_error) + D/8 (bits) = 20 + D/8 bytes per vector
+- For 768-dim: 20 + 96 = 116 bytes per vector
 - Orthogonal matrix P: D² × 4 bytes (shared across all vectors in index)
 
 Binary codes are stored in VarBit-compatible format (MSB-first bit ordering)
 for interoperability with pgvector's `bit` type and distance functions.
 
-For 768-dim vectors: 100 bytes/vector vs 3072 bytes for float32 (30x compression).
+For 768-dim vectors: 116 bytes/vector vs 3072 bytes for float32 (~26× compression).
 
-#### Scalar Quantization (SQ8)
+#### Implementation Insights from Reference Code
+
+The following details are derived from analyzing the faiss (`../faiss/`) and
+RaBitQ-Library (`../RaBitQ-Library/`) implementations. The `MktRaBitQVector`
+struct and encoding/distance functions above already incorporate the factor-based
+approach (f_add, f_rescale, f_error) used by production implementations.
+
+**Two-stage search with error bounds:**
+
+RaBitQ's theoretical error bound enables two-stage search: use fast 1-bit
+estimates to filter candidates, then rerank survivors with full precision.
+
+```c
+// kConstEpsilon = 1.9 (from RaBitQ-Library, empirically tuned)
+#define MKT_RABITQ_ERROR_EPSILON 1.9f
+
+typedef struct {
+    float g_add;    // ||query - centroid||²
+    float g_error;  // Query-specific error term
+} RaBitQQueryFactors;
+
+// Two-stage search pseudocode:
+void mkt_rabitq_search_two_stage(
+    const RaBitQQueryFactors *query_factors,
+    const RaBitQFactors *vec_factors,
+    const uint8_t *binary_codes,
+    uint32_t n_vectors,
+    uint32_t k,
+    float *heap_distances,
+    uint32_t *heap_indices
+) {
+    float threshold = heap_distances[0];  // Current k-th best distance
+
+    for (uint32_t i = 0; i < n_vectors; i++) {
+        // Stage 1: Fast 1-bit estimate with lower bound
+        float est_dist = compute_1bit_distance(query_factors, &vec_factors[i],
+                                                binary_codes + i * code_bytes);
+
+        // Error adjustment for filtering
+        float error_adj = vec_factors[i].f_error * query_factors->g_error;
+        float lower_bound = est_dist - error_adj;
+
+        // Skip if lower bound can't beat current threshold
+        if (lower_bound >= threshold) {
+            continue;  // Filtered out
+        }
+
+        // Stage 2: Full precision reranking (expensive, but rare)
+        float true_dist = compute_full_precision_distance(...);
+        if (true_dist < threshold) {
+            heap_update(heap_distances, heap_indices, k, i, true_dist);
+            threshold = heap_distances[0];
+        }
+    }
+}
+```
+
+The skip rate depends on data distribution but typically filters 80-95% of
+candidates, significantly reducing full-precision distance computations.
+
+**Batch processing with FastScan:**
+
+Both faiss and RaBitQ-Library process vectors in batches of 32 using lookup
+tables (LUT) for SIMD-friendly accumulation:
+
+```c
+#define MKT_RABITQ_BATCH_SIZE 32
+
+// Data layout for batch processing (from RaBitQ-Library):
+// [Binary codes: padded_dim * 32 / 8 bytes]
+// [f_add values: 32 floats]
+// [f_rescale values: 32 floats]
+// [f_error values: 32 floats]
+
+typedef struct {
+    uint8_t *binary_codes;  // Packed codes for 32 vectors
+    float f_add[32];
+    float f_rescale[32];
+    float f_error[32];
+} RaBitQBatch;
+
+// FastScan uses 4-bit lookup tables:
+// - Each 4 dimensions map to one 16-entry LUT
+// - LUT[i] = sum of query values where bits match pattern i
+// - SIMD shuffles perform 16 parallel lookups per instruction
+```
+
+**Dimension padding requirements:**
+
+For efficient SIMD processing, dimensions must be padded:
+
+```c
+// Pad dimension to multiple of 64 for binary code alignment
+#define MKT_RABITQ_PAD_DIM(dim) (((dim) + 63) & ~63)
+
+// Example: 768-dim needs no padding (768 % 64 == 0)
+// Example: 384-dim needs no padding (384 % 64 == 0)
+// Example: 100-dim pads to 128 (100 -> 128)
+```
+
+**Query preprocessing:**
+
+Queries require preprocessing to compute factors used across all distance
+computations:
+
+```c
+typedef struct {
+    float *transformed;   // P^T * (query - centroid), dim floats
+    float *lut;          // Lookup table for FastScan, 16 * (dim/4) floats
+    float g_add;         // ||query - centroid||²
+    float g_error;       // Error term for filtering
+    float k1xsumq;       // sum(transformed) * (-0.5)
+    float sum_vl_lut;    // LUT offset sum
+    float delta;         // LUT quantization step
+} RaBitQQuery;
+
+RaBitQQuery *mkt_rabitq_prepare_query(
+    const RaBitQParams *params,
+    VectorRef query,
+    VectorRef centroid
+);
+
+void mkt_rabitq_free_query(RaBitQQuery *q);
+```
+
+**Multi-bit support (future consideration):**
+
+Faiss supports 1-9 bits per dimension. Higher bit counts improve accuracy at
+the cost of storage and speed:
+
+| Bits | Bytes/dim | Compression | Use case                    |
+|------|-----------|-------------|----------------------------|
+| 1    | 0.125     | 32×         | Initial filtering          |
+| 2    | 0.25      | 16×         | Better accuracy, still fast |
+| 4    | 0.5       | 8×          | High accuracy requirements |
+| 8    | 1.0       | 4×          | Near-lossless              |
+
+For multi-bit, extra bits are stored separately and combined with 1-bit codes
+during distance computation. The two-stage approach first evaluates 1-bit
+lower bounds, then refines with additional bits only for promising candidates.
+
+**Key constants from reference implementations:**
+
+```c
+// Error bound multiplier (RaBitQ-Library)
+#define MKT_RABITQ_EPSILON 1.9f
+
+// Tight start values for multi-bit optimization (RaBitQ-Library)
+// Used to accelerate finding optimal quantization scaling
+static const float kTightStart[] = {
+    0.0f,   // 1-bit (unused, sign-based)
+    0.15f,  // 2-bit
+    0.20f,  // 3-bit
+    0.52f,  // 4-bit
+    0.59f,  // 5-bit
+    0.71f,  // 6-bit
+    0.75f,  // 7-bit
+    0.77f,  // 8-bit
+    0.81f   // 9-bit
+};
+
+// Optimal query quantization radii (faiss)
+// For centered query quantization to accelerate distance computation
+static const float kQueryQuantRadii[] = {
+    0.79688f, 1.49375f, 2.05078f, 2.50938f,
+    2.91250f, 3.26406f, 3.59844f, 3.91016f
+};
+```
+
+**Popcount-based distance (alternative formulation):**
+
+For symmetric comparisons (both vectors quantized), Hamming distance via
+XOR + popcount is extremely fast:
+
+```c
+// Centered inner product using popcount (faiss):
+// int_dot = ((1 << qb) - 1) * dim - 2 * popcount(query XOR code)
+//
+// This exploits: sum of XOR bits = dim - 2 * (matching bits)
+// Much faster than float arithmetic when both sides are quantized.
+```
+
+#### Scalar Quantization (SQ8) — Future/Lower Priority
+
+> **Note**: SQ8 is not part of the initial implementation. RaBitQ is Meerkat's
+> quantization method. This section documents SQ8 for potential future use with
+> lower-dimensional vectors or use cases requiring higher recall without
+> reranking.
 
 Each dimension is linearly mapped from [min, max] to [0, 255].
 
@@ -1946,10 +2944,10 @@ void mkt_kmeans_compute_medoids(
 - Determinism: same seed produces same result
 - Performance: benchmark on various sizes
 
-**CLI Tool**: `mkt_cluster_bench`
+**CLI**: `mkt bench cluster`
 
 ```
-$ mkt_cluster_bench --dim 128 --nvecs 100000 --nlist 1000
+$ mkt bench cluster --dim 128 --nvecs 100000 --nlist 1000
 K-means clustering (dim=128, nvecs=100000, nlist=1000):
   Initialization: 1.2s
   Lloyd iterations: 8
@@ -1959,7 +2957,7 @@ K-means clustering (dim=128, nvecs=100000, nlist=1000):
 
 ### 2.5 Quantization Benchmark
 
-**Files**: `tools/mkt_quant_bench.c`, `src/bench/quant_bench.h`, `src/bench/quant_bench.c`
+**Files**: `tools/mkt_cmd_bench.c`, `src/bench/quant_bench.h`, `src/bench/quant_bench.c`
 
 A standalone benchmark tool compares quantization methods against full-precision
 vectors using standard ANN datasets. This validates correctness and measures
@@ -2195,12 +3193,12 @@ mkt_bench_run_all(const BenchDataset *ds, uint32_t k)
 }
 ```
 
-#### CLI Tool
+#### CLI
 
-**Tool**: `mkt_quant_bench`
+**Command**: `mkt bench quantize`
 
 ```
-$ mkt_quant_bench --dataset sift1m --k 10
+$ mkt bench quantize --dataset sift1m --k 10
 
 Quantization Benchmark: 1000000 vectors, 128 dims, 10000 queries, k=10
 
@@ -2212,7 +3210,7 @@ sq8          0.9912    1.0008       102.3       18.7     4.0x
 sbq          0.9756    1.0045       312.5       10.2    32.0x
 bq           0.8234    1.0312        45.1        5.3    32.0x
 
-$ mkt_quant_bench --dataset gist1m --k 100 --methods rabitq,sq8
+$ mkt bench quantize --dataset gist1m --k 100 --methods rabitq,sq8
 
 Quantization Benchmark: 1000000 vectors, 960 dims, 1000 queries, k=100
 
@@ -2226,9 +3224,9 @@ sq8           0.9801    1.0034       567.2      134.5     4.0x
 **Options:**
 
 ```
-mkt_quant_bench - Quantization method benchmark
+mkt bench quantize - Quantization method benchmark
 
-Usage: mkt_quant_bench [OPTIONS]
+Usage: mkt bench quantize [OPTIONS]
 
 Options:
   --dataset <name>     Dataset name (sift1m, gist1m, glove, deep1m, spacev)
@@ -2294,7 +3292,7 @@ Measure queries-per-second at various recall targets. Methods that achieve
 higher recall at the same QPS are superior:
 
 ```
-$ mkt_quant_bench --dataset sift1m --sweep-recall 0.90,0.95,0.99
+$ mkt bench quantize --dataset sift1m --sweep-recall 0.90,0.95,0.99
 
 Target    Method      Actual     QPS
 ------    ------      ------     ------
@@ -2435,7 +3433,7 @@ benchmark:
         tar xzf sift10k.tar.gz -C testdata/
     - name: Run benchmark
       run: |
-        ./builddir/tools/mkt_quant_bench \
+        ./builddir/mkt bench quantize \
           --base testdata/sift10k/base.fvecs \
           --query testdata/sift10k/query.fvecs \
           --gt testdata/sift10k/gt.ivecs \
@@ -2467,23 +3465,23 @@ typedef struct {
     uint8_t  flags;         // Entry flags
     // TID stored as 6 bytes: 4-byte block + 2-byte offset
     uint8_t  tid_bytes[6];
-    // Followed by: ScalarQ8 quantized[dim] (not in struct, variable length)
+    // Followed by: MktRaBitQVector (variable length based on dim)
 } PostingEntry;
 
 // Entry flags
 #define POSTING_FLAG_CENTROID  0x01  // This entry is the cluster centroid
 #define POSTING_FLAG_DELETED   0x02  // Soft-deleted, pending vacuum
 
-// Entry size calculation
+// Entry size calculation (RaBitQ: 16 bytes header + dim/8 bytes for bits)
 static inline size_t posting_entry_size(Dimension dim) {
-    return sizeof(PostingEntry) + dim * sizeof(ScalarQ8);
+    return sizeof(PostingEntry) + MKT_RABITQ_SIZE(dim);
 }
 
 // Access quantized data (const for reading, non-const for writing)
-static inline const ScalarQ8 *
+static inline const MktRaBitQVector *
 posting_entry_quantized(const PostingEntry *entry)
 {
-    return (const ScalarQ8 *)(entry + 1);
+    return (const MktRaBitQVector *)(entry + 1);
 }
 
 // TID encoding/decoding (6 bytes for block + offset)
@@ -2522,7 +3520,7 @@ void mkt_posting_list_add(
     MemPostingList *list,
     uint32_t block,
     uint16_t offset,
-    const ScalarQ8 *quantized,
+    const MktRaBitQVector *quantized,
     uint8_t flags
 );
 
@@ -2531,7 +3529,7 @@ void mkt_posting_list_set_centroid(
     MemPostingList *list,
     uint32_t block,
     uint16_t offset,
-    const ScalarQ8 *quantized
+    const MktRaBitQVector *quantized
 );
 
 // Sort by TID for locality (optional optimization)
@@ -2589,7 +3587,7 @@ bool mkt_page_add_entry(
     Dimension dim,
     uint32_t block,
     uint16_t offset,
-    const ScalarQ8 *quantized,
+    const MktRaBitQVector *quantized,
     uint8_t flags
 );
 
@@ -2613,14 +3611,14 @@ typedef struct {
     uint32_t nlist;           // Number of clusters
     uint64_t nvecs;           // Total vectors indexed
     uint32_t next_meta_blkno; // Next metapage (if directory overflows)
-    // SQ8 parameters follow
+    // RaBitQ parameters follow (orthogonal matrix seed, etc.)
     // Then: posting_list_heads[nlist] (uint32_t per cluster)
 } MktMetapage;
 
 #define MKT_MAGIC 0x54494752  // "TIGR"
 #define MKT_VERSION 1
 
-// Directory entries per metapage (after fixed header + SQ8 params)
+// Directory entries per metapage (after fixed header + RaBitQ params)
 size_t mkt_meta_directory_capacity(Dimension dim);
 
 // Initialize metapage
@@ -2629,7 +3627,7 @@ void mkt_meta_init(
     Dimension dim,
     DistanceMetric metric,
     uint32_t nlist,
-    const SQ8Params *sq8_params
+    const RaBitQParams *rabitq_params
 );
 
 // Get/set posting list head for cluster
@@ -2678,8 +3676,8 @@ typedef struct {
     // Clustering result
     KMeansResult   *kmeans;
 
-    // Quantization
-    SQ8Params      *sq8_params;
+    // Quantization (RaBitQ)
+    RaBitQParams   *rabitq_params;
 
     // Posting lists (in memory during build)
     MemPostingList **posting_lists;
@@ -2812,10 +3810,10 @@ void mkt_stream_build_destroy(MktStreamBuild *builder);
 - Empty clusters: verify handling of empty clusters
 - Page boundaries: verify entries split correctly across pages
 
-**CLI Tool**: `mkt_build`
+**CLI**: `mkt build`
 
 ```
-$ mkt_build --input vectors.bin --dim 768 --nlist 1000 --output index.mkt
+$ mkt build --input vectors.bin --dim 768 --nlist 1000 --output index.mkt
 Sampling: 10000 / 100000 vectors
 Clustering: 1000 clusters, 15 iterations
 Assigning: 100000 vectors
@@ -2847,18 +3845,18 @@ typedef struct {
 
 // Centroid cache (in-memory, optimized for SIMD search)
 typedef struct {
-    float   *centroids;   // Flat array: nlist * dim
-    ScalarQ8   *quantized;   // Quantized centroids (optional)
+    float      *centroids;       // Flat array: nlist * dim floats
+    MktRaBitQVector *quantized;  // RaBitQ quantized centroids
     uint32_t    nlist;
     Dimension   dim;
-    SQ8Params  *sq8_params;
+    RaBitQParams *rabitq_params;
 } CentroidCache;
 
 // Load centroids from pages (reads first page of each posting list)
 CentroidCache *mkt_centroid_cache_create(
     uint32_t nlist,
     Dimension dim,
-    const SQ8Params *sq8_params
+    const RaBitQParams *rabitq_params
 );
 
 void mkt_centroid_cache_set(
@@ -2896,7 +3894,7 @@ void mkt_search_posting_lists(
     const ClusterId *clusters,
     uint32_t nprobe,
     VectorRef query,
-    const SQ8Params *sq8_params,
+    const RaBitQParams *rabitq_params,
     DistanceMetric metric,
     const SearchParams *params,
     PageReadCallback read_page,
@@ -2969,7 +3967,7 @@ void mkt_search_posting_lists(
     const ClusterId *clusters,
     uint32_t nprobe,
     VectorRef query,
-    const SQ8Params *sq8_params,
+    const RaBitQParams *rabitq_params,
     DistanceMetric metric,
     const SearchParams *params,
     PageReadCallback read_page,
@@ -2977,16 +3975,10 @@ void mkt_search_posting_lists(
     void *callback_data,
     TopKHeap *results
 ) {
-    // Precompute lookup tables for asymmetric distance
-    SQ8LUT *luts = mkt_alloc(query.dim * sizeof(SQ8LUT));
-    for (Dimension d = 0; d < query.dim; d++) {
-        mkt_sq8_build_lut(
-            query.data[d],
-            sq8_params->mins[d],
-            sq8_params->scales[d],
-            luts[d].tables
-        );
-    }
+    // Precompute query-dependent values for RaBitQ asymmetric distance
+    float query_norm = mkt_vec_norm(query);
+    float *query_normalized = mkt_alloc(query.dim * sizeof(float));
+    mkt_vec_normalize(query, query_normalized);
 
     // Scan each cluster's posting list
     for (uint32_t p = 0; p < nprobe; p++) {
@@ -3008,10 +4000,10 @@ void mkt_search_posting_lists(
                 // Skip centroid in results (used for navigation only)
                 if (entry->flags & POSTING_FLAG_CENTROID) continue;
 
-                // Compute approximate distance using LUTs
-                const ScalarQ8 *quantized = posting_entry_quantized(entry);
-                Distance approx_dist = mkt_sq8_distance_lut(
-                    luts, quantized, query.dim
+                // Compute approximate distance using RaBitQ
+                const MktRaBitQVector *quantized = posting_entry_quantized(entry);
+                Distance approx_dist = mkt_rabitq_distance_asymmetric(
+                    rabitq_params, query, quantized
                 );
 
                 // Add to heap if promising
@@ -3032,7 +4024,7 @@ void mkt_search_posting_lists(
         }
     }
 
-    mkt_free(luts);
+    mkt_free(query_normalized);
 }
 ```
 
@@ -3090,10 +4082,10 @@ void mkt_search_rerank(
 - Performance: benchmark QPS at various nprobe values
 - Correctness: verify re-ranking improves result quality
 
-**CLI Tool**: `mkt_search`
+**CLI**: `mkt search`
 
 ```
-$ mkt_search --index index.mkt --query query.bin --k 10 --nprobe 20
+$ mkt search --index index.mkt --query query.bin --k 10 --nprobe 20
 Results (10 of 100000 vectors):
   1. tid=(42,15)  distance=0.0234
   2. tid=(108,3)  distance=0.0456
@@ -3347,7 +4339,7 @@ typedef struct {
     Dimension  dim;
     bool       initialized;
     // Followed by: centroids[nlist * dim]
-    // Followed by: sq8_params
+    // Followed by: rabitq_params
 } MktShmemHeader;
 
 // Get or create cache for an index
@@ -3358,7 +4350,7 @@ void mkt_shmem_invalidate_cache(Oid indexoid);
 void mkt_shmem_populate_cache(
     Oid indexoid,
     const KMeansResult *kmeans,
-    const SQ8Params *sq8_params
+    const RaBitQParams *rabitq_params
 );
 ```
 
@@ -3483,9 +4475,13 @@ static bool mkt_aminsert(
     ClusterId cluster;
     mkt_search_centroids(cache, VectorToRef(vec), DISTANCE_L2, 1, &cluster, NULL);
 
-    // Quantize vector
-    ScalarQ8 *quantized = palloc(vec->dim);
-    mkt_sq8_encode(cache->sq8_params, VectorToRef(vec), quantized);
+    // Get centroid for this cluster (needed for RaBitQ encoding)
+    VectorRef centroid = mkt_centroid_cache_get(cache, cluster);
+
+    // Quantize vector using RaBitQ
+    MktRaBitQVector *quantized = palloc(MKT_RABITQ_SIZE(vec->dim));
+    mkt_rabitq_encode_into(cache->rabitq_params, VectorToRef(vec),
+                           centroid, quantized);
 
     // Get posting list head from metapage
     Buffer meta_buf = ReadBuffer(index, 0);
@@ -3991,20 +4987,20 @@ typedef struct MktIndexStats
 4. Unit tests and benchmark CLI
 
 **Test artifacts**:
-- `mkt_distance_bench`: Distance computation benchmark
+- `mkt bench distance`: Distance computation benchmark
 - Unit test suite for distance functions
 
 ### Phase 2: Core Algorithms
 
 **Deliverables**:
-1. Scalar quantization (SQ8)
+1. RaBitQ quantization
 2. Top-K heap
 3. K-means clustering
 4. Unit tests and CLI tools
 
 **Test artifacts**:
-- `mkt_quantize_test`: Quantization accuracy tests
-- `mkt_cluster_bench`: Clustering benchmark
+- `mkt_rabitq_test`: RaBitQ encoding/distance accuracy tests
+- `mkt bench cluster`: Clustering benchmark
 - Unit test suite
 
 ### Phase 3: Data Structures
@@ -4027,7 +5023,7 @@ typedef struct MktIndexStats
 3. Write to file (standalone index format)
 
 **Test artifacts**:
-- `mkt_build`: Build index from vector file
+- `mkt build`: Build index from vector file
 - Build correctness tests
 
 ### Phase 5: Search (Standalone)
@@ -4039,7 +5035,7 @@ typedef struct MktIndexStats
 4. Full search pipeline
 
 **Test artifacts**:
-- `mkt_search`: Search standalone index
+- `mkt search`: Search standalone index
 - Recall benchmarks against brute force
 
 ### Phase 6: PostgreSQL Integration
@@ -4087,10 +5083,10 @@ typedef struct MktIndexStats
 meerkat/
 ├── src/
 │   ├── mkt_types.h          # Type definitions
-│   ├── mkt_memory.h         # Memory abstraction
-│   ├── mkt_memory.c
-│   ├── mkt_memory_standalone.c
-│   ├── mkt_memory_pg.c
+│   ├── mkt_memory.h              # Memory abstraction interface
+│   ├── mkt_memory_standalone.h   # Standalone types/declarations
+│   ├── mkt_memory_standalone.c   # Standalone arena implementation
+│   ├── mkt_memory_pg.h           # PostgreSQL wrappers (header-only)
 │   ├── mkt_platform.h       # Platform detection
 │   ├── mkt_platform.c
 │   ├── distance.h             # Distance interface
@@ -4128,10 +5124,14 @@ meerkat/
 │   ├── regress/               # PostgreSQL regression tests
 │   └── bench/                 # Benchmarks
 ├── tools/
-│   ├── mkt_distance_bench.c
-│   ├── mkt_cluster_bench.c
-│   ├── mkt_build.c
-│   └── mkt_search.c
+│   ├── mkt_cli.c              # Main CLI entry point
+│   ├── mkt_cmd_distance.c     # 'mkt distance' subcommand
+│   ├── mkt_cmd_quantize.c     # 'mkt quantize' subcommand
+│   ├── mkt_cmd_cluster.c      # 'mkt cluster' subcommand
+│   ├── mkt_cmd_build.c        # 'mkt build' subcommand
+│   ├── mkt_cmd_search.c       # 'mkt search' subcommand
+│   ├── mkt_cmd_bench.c        # 'mkt bench' subcommand
+│   └── mkt_cmd_info.c         # 'mkt info' subcommand
 ├── docs/
 │   ├── architecture.md
 │   └── implementation.md
