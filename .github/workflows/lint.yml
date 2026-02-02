@@ -28,7 +28,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build clang clang-format clang-tidy
+          sudo apt-get install -y meson ninja-build clang clang-format clang-tidy shellcheck
+          pip install pre-commit
+          npm install -g markdownlint-cli2
 
       - name: Run lint checks
         env:
