@@ -1309,8 +1309,8 @@ inner product dominates query time. Both benefit significantly from SIMD.
 
 **Storage requirements:**
 
-- `MktRaBitQVector`: 4 (vl_len) + 2 (dim) + 2 (unused) + 4 (inner_oo) + 4 (norm)
-  + D/8 (bits) = 16 + D/8 bytes per vector
+- `MktRaBitQVector`: 4 (vl_len) + 2 (dim) + 2 (unused) + 4 (inner_oo)
+  \+ 4 (norm) + D/8 (bits) = 16 + D/8 bytes per vector
 - For 768-dim: 16 + 96 = 112 bytes per vector
 - Orthogonal matrix P: D² × 4 bytes (shared across all vectors in index)
 
@@ -2373,7 +2373,7 @@ mkt_bench_ivf_nprobe(const BenchDataset *ds, const IVFConfig *config,
   a Theoretical Error Bound for Approximate Nearest Neighbor Search", SIGMOD 2024
 - Extended-RaBitQ: "Practical and Asymptotically Optimal Quantization of
   High-Dimensional Vectors in Euclidean Space", SIGMOD 2025
-- RaBitQ implementation: https://github.com/gaoj0017/RaBitQ
+- [RaBitQ implementation](https://github.com/gaoj0017/RaBitQ)
 
 #### Test Cases
 

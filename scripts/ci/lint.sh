@@ -15,12 +15,13 @@ fi
 echo "==> Checking code formatting"
 CLANG_FORMAT="${CLANG_FORMAT:-clang-format}"
 
-# Find all source files
-SOURCES=$(find src -name '*.c' -o -name '*.h' 2>/dev/null || true)
-SOURCES="$SOURCES $(find test -name '*.c' -o -name '*.h' 2>/dev/null || true)"
+# Find all source files (use arrays to handle filenames properly)
+mapfile -t SRC_FILES < <(find src -name '*.c' -o -name '*.h' 2>/dev/null)
+mapfile -t TEST_FILES < <(find test -name '*.c' -o -name '*.h' 2>/dev/null)
+SOURCES=("${SRC_FILES[@]}" "${TEST_FILES[@]}")
 
-if [ -n "$SOURCES" ]; then
-    FORMAT_DIFF=$($CLANG_FORMAT --dry-run -Werror $SOURCES 2>&1) || {
+if [ ${#SOURCES[@]} -gt 0 ]; then
+    FORMAT_DIFF=$("$CLANG_FORMAT" --dry-run -Werror "${SOURCES[@]}" 2>&1) || {
         echo "Format check failed. Run: meson compile -C $BUILDDIR format"
         echo "$FORMAT_DIFF"
         exit 1
@@ -32,9 +33,9 @@ fi
 
 echo "==> Running clang-tidy"
 if command -v clang-tidy &>/dev/null; then
-    TIDY_SOURCES=$(find src -name '*.c' 2>/dev/null || true)
-    if [ -n "$TIDY_SOURCES" ]; then
-        clang-tidy -p "$BUILDDIR" $TIDY_SOURCES
+    mapfile -t TIDY_SOURCES < <(find src -name '*.c' 2>/dev/null)
+    if [ ${#TIDY_SOURCES[@]} -gt 0 ]; then
+        clang-tidy -p "$BUILDDIR" "${TIDY_SOURCES[@]}"
         echo "    clang-tidy passed"
     else
         echo "    No source files to analyze"

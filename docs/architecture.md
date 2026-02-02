@@ -123,7 +123,8 @@ added.
 scan may become a bottleneck. Future versions could build a true in-memory ANN
 index over centroids using approaches like:
 - [pgvectorscale's streaming disk ANN](https://github.com/timescale/pgvectorscale)
-- [SPTAG library](https://github.com/microsoft/SPTAG) (used by SPANN for centroid navigation)
+- [SPTAG library](https://github.com/microsoft/SPTAG) (used by SPANN for
+  centroid navigation)
 
 ### 2. Posting Lists
 
@@ -207,7 +208,8 @@ PostgreSQL's inline storage threshold and are TOASTed automatically.
 This multi-step access is expensive. Therefore, the index should minimize heap
 access by:
 - Using quantized vectors in posting lists for approximate distance computation
-- Only accessing the heap for final re-ranking of top candidates (~1% of scanned vectors)
+- Only accessing the heap for final re-ranking of top candidates (~1% of
+  scanned vectors)
 - Tuning `rerank_k` to balance recall vs. heap access cost
 
 **Future exploration**: If full-precision vector access becomes a bottleneck,
