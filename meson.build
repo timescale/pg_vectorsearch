@@ -92,3 +92,28 @@ endif
 # Static analysis with scan-build (Clang Static Analyzer)
 # Usage: scan-build meson compile -C builddir
 # Or with report: scan-build -o reports meson compile -C builddir
+
+# Pre-commit hooks
+pre_commit = find_program('pre-commit', required: false)
+if pre_commit.found()
+  # Install hooks automatically during setup (may fail in sandbox, that's OK)
+  install_result = run_command(pre_commit, 'install', '--install-hooks',
+    check: false, capture: true)
+
+  if install_result.returncode() == 0
+    message('Pre-commit hooks installed successfully')
+  else
+    warning('Failed to install pre-commit hooks. Run: pre-commit install')
+  endif
+
+  # Manual targets
+  run_target('pre-commit',
+    command: [pre_commit, 'run', '--all-files'],
+  )
+
+  run_target('pre-commit-install',
+    command: [pre_commit, 'install', '--install-hooks'],
+  )
+else
+  warning('pre-commit not found. Install with: pip install pre-commit')
+endif
