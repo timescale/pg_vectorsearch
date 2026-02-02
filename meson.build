@@ -22,20 +22,23 @@ m_dep = cc.find_library('m', required: true)
 
 # Source files for core library (standalone, no PostgreSQL)
 mkt_core_sources = files(
-  'src/mkt_memory.c',
+  'src/core/memory_standalone.c',
   'src/mkt_vector.c',
 )
+
+# Include directories
+src_inc = include_directories('src')
 
 # Core library (static, for linking into tests and tools)
 mkt_core_lib = static_library('mkt_core',
   mkt_core_sources,
-  include_directories: include_directories('src'),
+  include_directories: src_inc,
   dependencies: [m_dep],
 )
 
 mkt_core_dep = declare_dependency(
   link_with: mkt_core_lib,
-  include_directories: include_directories('src'),
+  include_directories: src_inc,
   dependencies: [m_dep],
 )
 
@@ -44,7 +47,9 @@ subdir('test/unit')
 
 # Header files
 mkt_core_headers = files(
-  'src/mkt_memory.h',
+  'src/core/memory.h',
+  'src/core/memory_standalone.h',
+  'src/core/memory_pg.h',
   'src/mkt_types.h',
   'src/mkt_vector.h',
 )
@@ -62,6 +67,7 @@ if clang_format.found()
         'test/unit/mkt_test.c',
         'test/unit/mkt_test.h',
         'test/unit/run_tests.c',
+        'test/unit/test_mkt_memory.c',
         'test/unit/test_mkt_vector.c',
       ),
     ],

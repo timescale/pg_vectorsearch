@@ -5,7 +5,7 @@
 #include <math.h>
 #include <string.h>
 
-#include "mkt_memory.h"
+#include "core/memory.h"
 #include "mkt_vector.h"
 
 MktVector *
