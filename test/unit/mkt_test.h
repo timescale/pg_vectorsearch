@@ -56,16 +56,45 @@ int mkt_test_run_all(void);
 void mkt_test_fail(const char *file, int line, const char *msg);
 
 /* TEST_GROUP macro - sets the group for subsequent tests in this file */
-#define TEST_GROUP(group_name) static const char *_MKT_TEST_GROUP = #group_name
+#define TEST_GROUP(group_name)                             \
+	static const char *_MKT_TEST_GROUP		= #group_name; \
+	static void (*_mkt_test_setup)(void)	= NULL;        \
+	static void (*_mkt_test_teardown)(void) = NULL
+
+/*
+ * TEST_GROUP_FIXTURE - register setup/teardown functions for the test group
+ *
+ * Usage:
+ *   TEST_GROUP(MyTests);
+ *   TEST_GROUP_FIXTURE(my_setup, my_teardown);
+ *
+ *   TEST(my_test) {
+ *       // my_setup() called before, my_teardown() called after
+ *   }
+ */
+#define TEST_GROUP_FIXTURE(setup_fn, teardown_fn)                        \
+	__attribute__((constructor)) static void _mkt_register_fixture(void) \
+	{                                                                    \
+		_mkt_test_setup	   = setup_fn;                                   \
+		_mkt_test_teardown = teardown_fn;                                \
+	}
 
 /* TEST macro - defines and auto-registers a test */
 #define TEST(name)                                                 \
-	static void test_##name(MktTestResult *result);                \
+	static void test_##name##_impl(MktTestResult *result);         \
+	static void test_##name(MktTestResult *result)                 \
+	{                                                              \
+		if (_mkt_test_setup)                                       \
+			_mkt_test_setup();                                     \
+		test_##name##_impl(result);                                \
+		if (_mkt_test_teardown)                                    \
+			_mkt_test_teardown();                                  \
+	}                                                              \
 	__attribute__((constructor)) static void register_##name(void) \
 	{                                                              \
 		mkt_test_register(#name, _MKT_TEST_GROUP, test_##name);    \
 	}                                                              \
-	static void test_##name(MktTestResult *result)
+	static void test_##name##_impl(MktTestResult *result)
 
 /* Assertion macros */
 #define ASSERT_TRUE(cond, msg)                                            \

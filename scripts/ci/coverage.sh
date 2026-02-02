@@ -25,8 +25,15 @@ MIN_COVERAGE=90
 
 # Use gcovr for coverage (works in sandboxed environments unlike lcov which
 # has /tmp hardcoded; use lcov --tempdir if lcov is preferred)
+#
+# Exclusions:
+# - builddir.* : build artifacts
+# - test/.* : test code
+# - .*_pg\.h : PostgreSQL-specific headers (not compiled in standalone mode)
 gcovr --root . --object-directory "$BUILDDIR" \
-    --exclude 'builddir.*' --exclude 'test/.*' \
+    --exclude 'builddir.*' \
+    --exclude 'test/.*' \
+    --exclude '.*_pg\.h' \
     --txt "$LOGDIR/coverage.txt" \
     --xml "$LOGDIR/coverage.xml" \
     --html-details "$LOGDIR/coveragereport/index.html" \
