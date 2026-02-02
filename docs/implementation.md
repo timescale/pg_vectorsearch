@@ -19,6 +19,7 @@ research with practical considerations for database integration.
 | **Recall improvement** | Boundary-only replication (SPANN) | Vectors near cluster boundaries are replicated to adjacent clusters; improves recall without excessive storage overhead |
 | **Dynamic updates** | LIRE-protocol style | Supports high insert rates without degrading query performance; periodic background reorganization |
 | **Multi-tenancy** | Composite key support | `(tenant_id, vector)` keys enable efficient per-tenant queries with shared index infrastructure |
+| **Async I/O** | PostgreSQL 18 read stream API | Adaptive prefetching for posting list scans, heap reranking; supports `io_uring` for lowest latency |
 
 ### Architecture Summary
 
@@ -97,6 +98,9 @@ full reference list.
 
 3. **MVCC compliant**: Visibility checks use standard PostgreSQL snapshot
    mechanisms.
+
+4. **Async I/O ready**: Leverage PostgreSQL 18+ read stream API for efficient
+   prefetching. Support all `io_method` options including `io_uring`.
 
 4. **Planner integration**: Cost estimates enable the query planner to choose
    between index scan and sequential scan appropriately.
@@ -201,10 +205,10 @@ mkt info --index index.mkt
 
 ### Implementation
 
-**Files**: `tools/mkt_cli.c`, `tools/mkt_cmd_*.c`
+**Files**: `src/cli/main.c`, `src/cli/cmd_*.c`
 
 ```c
-// tools/mkt_cli.c - Main entry point with subcommand dispatch
+// src/cli/main.c - Entry point with subcommand dispatch
 
 typedef struct {
     const char *name;
@@ -251,23 +255,16 @@ its own sub-subcommands for different benchmark types.
 ### Meson Build
 
 ```meson
-# tools/meson.build
-mkt_cli_sources = [
-  'mkt_cli.c',
-  'mkt_cmd_distance.c',
-  'mkt_cmd_quantize.c',
-  'mkt_cmd_cluster.c',
-  'mkt_cmd_build.c',
-  'mkt_cmd_search.c',
-  'mkt_cmd_bench.c',
-  'mkt_cmd_info.c',
-]
-
-mkt = executable(
-  'mkt',
-  mkt_cli_sources,
-  dependencies: [mkt_core_dep],
-  install: true,
+# src/cli/meson.build
+cli_sources = files(
+  'main.c',
+  'cmd_distance.c',
+  'cmd_quantize.c',
+  'cmd_cluster.c',
+  'cmd_build.c',
+  'cmd_search.c',
+  'cmd_bench.c',
+  'cmd_info.c',
 )
 ```
 
@@ -526,7 +523,7 @@ Total: 6 passed, 0 failed
 
 ### 1.1 Standalone Vector Type
 
-**Files**: `src/mkt_vector.h`, `src/mkt_vector.c`
+**Files**: `src/core/vector.h`, `src/core/vector.c`
 
 The vector type is binary-compatible with pgvector's `vector` type in both
 standalone and PostgreSQL builds. The struct layout is identical; only the
@@ -699,7 +696,7 @@ The key design points:
 
 ### 1.2 Type Definitions
 
-**File**: `src/mkt_types.h`
+**File**: `src/core/types.h`
 
 ```c
 #include <stdint.h>
@@ -746,10 +743,10 @@ typedef enum {
 
 **Files**:
 
-- `src/mkt_memory.h` - Common interface, includes mode-specific header
-- `src/mkt_memory_standalone.h` - Standalone type definitions and declarations
-- `src/mkt_memory_standalone.c` - Standalone arena implementation
-- `src/mkt_memory_pg.h` - PostgreSQL macros and inline wrappers (header-only)
+- `src/core/memory.h` - Common interface, includes mode-specific header
+- `src/core/memory_standalone.h` - Standalone type definitions and declarations
+- `src/core/memory_standalone.c` - Standalone arena implementation
+- `src/core/memory_pg.h` - PostgreSQL macros and inline wrappers (header-only)
 
 Abstraction layer allowing the same code to run with PostgreSQL's memory
 contexts or a standalone arena allocator. The arena allocator provides
@@ -1299,7 +1296,7 @@ mkt_memctx_delete(build_ctx);
 
 ### 1.4 Platform Abstraction
 
-**File**: `src/mkt_platform.h`
+**File**: `src/core/platform.h`
 
 ```c
 // SIMD capability detection
@@ -1338,8 +1335,8 @@ SimdCapability mkt_detect_simd(void);
 
 ### 2.1 Distance Computation
 
-**Files**: `src/distance.h`, `src/distance.c`, `src/distance_avx512.c`,
-`src/distance_neon.c`
+**Files**: `src/algo/distance.h`, `src/algo/distance.c`, `src/algo/distance_avx512.c`,
+`src/algo/distance_avx2.c`, `src/algo/distance_neon.c`
 
 Distance computation is the most performance-critical operation. Multiple
 implementations selected at runtime based on CPU capabilities.
@@ -1488,7 +1485,7 @@ L2 distance (dim=768, count=10000):
 
 ### 2.2 Quantization
 
-**Files**: `src/mkt_quantize.h`, `src/mkt_rabitq.c`
+**Files**: `src/quant/rabitq.h`, `src/quant/rabitq.c`
 
 Quantization compresses vectors for faster approximate distance computation.
 **Meerkat uses RaBitQ as its quantization method.** RaBitQ (Randomized Binary
@@ -2543,7 +2540,7 @@ for (Dimension i = 0; i < dim; i++) {
 
 ### 2.3 Top-K Selection
 
-**Files**: `src/topk.h`, `src/topk.c`
+**Files**: `src/algo/topk.h`, `src/algo/topk.c`
 
 Efficiently find the K smallest distances from a large set.
 
@@ -2676,7 +2673,7 @@ void mkt_topk_insert_batch(
 
 ### 2.4 K-Means Clustering
 
-**Files**: `src/kmeans.h`, `src/kmeans.c`
+**Files**: `src/algo/kmeans.h`, `src/algo/kmeans.c`
 
 Clustering is used during index build to partition vectors into clusters.
 
@@ -2957,7 +2954,7 @@ K-means clustering (dim=128, nvecs=100000, nlist=1000):
 
 ### 2.5 Quantization Benchmark
 
-**Files**: `tools/mkt_cmd_bench.c`, `src/bench/quant_bench.h`, `src/bench/quant_bench.c`
+**Files**: `src/cli/cmd_bench.c`, `test/bench/quant_bench.h`, `test/bench/quant_bench.c`
 
 A standalone benchmark tool compares quantization methods against full-precision
 vectors using standard ANN datasets. This validates correctness and measures
@@ -3450,7 +3447,7 @@ benchmark:
 
 ### 3.1 Posting List Entry
 
-**Files**: `src/posting.h`, `src/posting.c`
+**Files**: `src/pg/index/posting.h`, `src/pg/index/posting.c`
 
 The posting list entry is the fundamental unit stored in the index.
 
@@ -3547,7 +3544,7 @@ const PostingEntry   *mkt_posting_list_next(PostingListIter *iter);
 
 ### 3.3 Page Layout
 
-**Files**: `src/page_layout.h`, `src/page_layout.c`
+**Files**: `src/pg/index/page.h`, `src/pg/index/page.c`
 
 Page layout for PostgreSQL integration, but designed to be testable standalone.
 
@@ -3647,7 +3644,7 @@ void mkt_meta_set_head(void *page, ClusterId cluster, uint32_t block);
 
 ### 4.1 Build Pipeline
 
-**Files**: `src/build.h`, `src/build.c`
+**Files**: `src/pg/build/build.h`, `src/pg/build/build.c`
 
 ```c
 // Build state machine
@@ -3827,7 +3824,7 @@ Done. Index size: 42.8 MB
 
 ### 5.1 Search Interface
 
-**Files**: `src/search.h`, `src/search.c`
+**Files**: `src/pg/search/search.h`, `src/pg/search/search.c`
 
 ```c
 // Search parameters
@@ -4099,7 +4096,7 @@ Search time: 2.3ms
 
 ### 6.1 Extension Setup
 
-**Files**: `src/meerkat.c`, `src/meerkat.h`
+**Files**: `src/pg/meerkat.c`, `src/pg/meerkat.h`
 
 ```c
 // Extension initialization
@@ -4116,7 +4113,7 @@ int mkt_default_rerank_k;
 
 ### 6.2 Vector Type and pgvector Compatibility
 
-**Files**: `src/mkt_vector.h`, `src/mkt_vector.c`
+**Files**: `src/core/vector.h`, `src/core/vector.c`
 
 Meerkat defines its own vector type (`mkt_vector`) that is binary-compatible with
 pgvector's `vector` type. This allows:
@@ -4445,6 +4442,422 @@ entry_is_visible(const PostingEntry *entry, Snapshot snapshot, Relation heap)
     return visible;
 }
 ```
+
+### 6.9 Async I/O Integration (PostgreSQL 18+)
+
+**Files**: `src/pg/search/stream.h`, `src/pg/search/stream.c`, `src/pg/build/stream.c`
+
+PostgreSQL 18 introduces a powerful async I/O subsystem with the read stream API.
+Meerkat leverages this for efficient prefetching during index scans, posting list
+traversal, and reranking operations.
+
+#### I/O Method Support
+
+PostgreSQL 18 supports multiple I/O backends via the `io_method` GUC:
+
+| Method     | Description                                    | Availability       |
+|------------|------------------------------------------------|--------------------|
+| `sync`     | Traditional synchronous I/O                    | All platforms      |
+| `worker`   | Dedicated I/O worker processes (default)       | All platforms      |
+| `io_uring` | Linux kernel async I/O via liburing            | Linux 5.1+ w/liburing |
+
+Meerkat works with all three methods. The `io_uring` method provides lowest latency
+for high-concurrency workloads. Configuration:
+
+```sql
+-- PostgreSQL 18+ settings
+SET io_method = 'io_uring';              -- Or 'worker' (default), 'sync'
+SET effective_io_concurrency = 200;       -- For user queries
+SET maintenance_io_concurrency = 10;      -- For index builds, VACUUM
+```
+
+#### Read Stream API Overview
+
+The read stream API provides adaptive prefetching with automatic I/O combining:
+
+```c
+#include <storage/read_stream.h>
+
+// Callback type - returns next block to read, InvalidBlockNumber when done
+typedef BlockNumber (*ReadStreamBlockNumberCB)(
+    ReadStream *stream,
+    void *callback_private_data,
+    void *per_buffer_data);
+
+// Create a read stream
+ReadStream *read_stream_begin_relation(
+    int flags,                          // READ_STREAM_* flags
+    BufferAccessStrategy strategy,      // Buffer ring strategy
+    Relation rel,
+    ForkNumber forknum,
+    ReadStreamBlockNumberCB callback,
+    void *callback_private_data,
+    size_t per_buffer_data_size);       // Per-buffer state passed to consumer
+
+// Get next buffer (blocks until available)
+Buffer read_stream_next_buffer(ReadStream *stream, void **per_buffer_data);
+
+// Reset for re-scanning
+void read_stream_reset(ReadStream *stream);
+
+// Cleanup
+void read_stream_end(ReadStream *stream);
+```
+
+**Read Stream Flags:**
+
+| Flag                        | Purpose                                      |
+|-----------------------------|----------------------------------------------|
+| `READ_STREAM_DEFAULT`       | General-purpose, random access patterns      |
+| `READ_STREAM_MAINTENANCE`   | Use `maintenance_io_concurrency` setting     |
+| `READ_STREAM_SEQUENTIAL`    | Disable explicit prefetch advice (kernel handles) |
+| `READ_STREAM_FULL`          | Scanning entire structure, skip ramp-up      |
+| `READ_STREAM_USE_BATCHING`  | Enable AIO batch mode (callback must be lock-free) |
+
+#### Use Case 1: Posting List Scan
+
+Scanning posting list pages benefits from prefetching since pages are linked:
+
+```c
+// Callback state for posting list traversal
+typedef struct PostingListStreamState
+{
+    BlockNumber     next_block;      // Next block to read
+    ClusterId       cluster_id;      // Which cluster we're scanning
+    int             pages_read;      // For statistics
+} PostingListStreamState;
+
+// Callback provides next posting list page
+static BlockNumber
+posting_list_stream_next(ReadStream *stream, void *callback_private,
+                        void *per_buffer_data)
+{
+    PostingListStreamState *state = callback_private;
+
+    if (state->next_block == InvalidBlockNumber)
+        return InvalidBlockNumber;
+
+    BlockNumber current = state->next_block;
+
+    // Look ahead: read the next-page pointer from cached page if available
+    // This allows the stream to prefetch the next page before we need it
+    // Note: actual next_block update happens in scan loop after reading page
+
+    state->pages_read++;
+    return current;
+}
+
+// Initialize stream for posting list scan
+ReadStream *
+mkt_posting_list_stream_begin(Relation index, ClusterId cluster,
+                              BufferAccessStrategy strategy)
+{
+    PostingListStreamState *state = palloc(sizeof(PostingListStreamState));
+
+    // Get head block from metapage (already cached in centroid cache)
+    state->next_block = mkt_meta_get_head(index, cluster);
+    state->cluster_id = cluster;
+    state->pages_read = 0;
+
+    return read_stream_begin_relation(
+        READ_STREAM_DEFAULT,            // Random access pattern
+        strategy,
+        index,
+        MAIN_FORKNUM,
+        posting_list_stream_next,
+        state,
+        0);                             // No per-buffer data needed
+}
+```
+
+#### Use Case 2: Multi-Cluster Scan (nprobe > 1)
+
+When scanning multiple clusters, interleave reads for better I/O utilization:
+
+```c
+typedef struct MultiClusterStreamState
+{
+    ClusterId      *clusters;         // Clusters to scan (sorted by distance)
+    int             nprobe;           // Number of clusters
+    int             current_cluster;  // Index into clusters array
+    BlockNumber    *heads;            // Head block for each cluster
+    BlockNumber    *current_blocks;   // Current block in each cluster
+} MultiClusterStreamState;
+
+static BlockNumber
+multi_cluster_stream_next(ReadStream *stream, void *callback_private,
+                         void *per_buffer_data)
+{
+    MultiClusterStreamState *state = callback_private;
+    ClusterId *cluster_out = per_buffer_data;  // Tell consumer which cluster
+
+    // Round-robin across clusters to interleave I/O
+    for (int attempts = 0; attempts < state->nprobe; attempts++)
+    {
+        int idx = state->current_cluster;
+        state->current_cluster = (idx + 1) % state->nprobe;
+
+        BlockNumber blk = state->current_blocks[idx];
+        if (blk != InvalidBlockNumber)
+        {
+            *cluster_out = state->clusters[idx];
+            return blk;
+        }
+    }
+
+    return InvalidBlockNumber;  // All clusters exhausted
+}
+
+// After reading each page, update current_blocks[cluster] from page header
+```
+
+#### Use Case 3: Heap Reranking (Bitmap Heap Scan Pattern)
+
+Reranking fetches full-precision vectors from heap pages for the top candidates
+from the quantized search phase. This follows PostgreSQL's **bitmap heap scan**
+pattern: collect TIDs, sort by block number, then scan pages sequentially.
+
+**Why block-sorted access matters:**
+
+- Random TID order → random I/O → ~100-200 IOPS on SSD
+- Block-sorted order → sequential I/O → 100K+ IOPS on SSD
+- Multiple TIDs per page are processed together (single page read)
+- Read stream prefetches upcoming blocks while processing current
+
+```
+Unsorted TIDs:        Block-sorted TIDs:
+  (5, 3)                (1, 7)
+  (1, 7)    ──sort──►   (1, 12)
+  (3, 2)                (3, 2)
+  (1, 12)               (5, 3)
+  (3, 8)                (3, 8)
+
+Pages read: 5,1,3,1,3   Pages read: 1,3,5  (3 pages vs 5 random accesses)
+```
+
+**Implementation:**
+
+```c
+// Rerank state: TIDs sorted by (block, offset) for sequential access
+typedef struct RerankStreamState
+{
+    ItemPointer     tids;             // TIDs sorted by block number
+    int             ntids;            // Total TIDs to fetch
+    int             current;          // Current position in tids array
+} RerankStreamState;
+
+// Per-buffer data passed to consumer: which TIDs are on this page
+typedef struct RerankPageInfo
+{
+    int             first_tid_idx;    // Index of first TID on this page
+    int             ntids_on_page;    // Count of TIDs to process on this page
+} RerankPageInfo;
+
+// Callback: return next unique block, skip duplicates
+static BlockNumber
+rerank_stream_next(ReadStream *stream, void *callback_private,
+                  void *per_buffer_data)
+{
+    RerankStreamState *state = callback_private;
+    RerankPageInfo *info = per_buffer_data;
+
+    if (state->current >= state->ntids)
+        return InvalidBlockNumber;
+
+    BlockNumber blk = ItemPointerGetBlockNumber(&state->tids[state->current]);
+
+    // Record which TIDs are on this page (they're contiguous after sorting)
+    info->first_tid_idx = state->current;
+    info->ntids_on_page = 1;
+
+    // Count consecutive TIDs on same block
+    while (state->current + info->ntids_on_page < state->ntids)
+    {
+        BlockNumber next_blk = ItemPointerGetBlockNumber(
+            &state->tids[state->current + info->ntids_on_page]);
+        if (next_blk != blk)
+            break;
+        info->ntids_on_page++;
+    }
+
+    state->current += info->ntids_on_page;
+    return blk;
+}
+
+// Compare function for qsort: order by (block, offset)
+static int
+tid_block_offset_cmp(const void *a, const void *b)
+{
+    const ItemPointer ta = (const ItemPointer) a;
+    const ItemPointer tb = (const ItemPointer) b;
+
+    BlockNumber ba = ItemPointerGetBlockNumber(ta);
+    BlockNumber bb = ItemPointerGetBlockNumber(tb);
+    if (ba != bb)
+        return (ba < bb) ? -1 : 1;
+
+    OffsetNumber oa = ItemPointerGetOffsetNumber(ta);
+    OffsetNumber ob = ItemPointerGetOffsetNumber(tb);
+    if (oa != ob)
+        return (oa < ob) ? -1 : 1;
+
+    return 0;
+}
+```
+
+**Stream initialization and usage:**
+
+```c
+// Prepare TIDs for sequential heap access
+static void
+mkt_rerank_sort_tids(ItemPointer tids, int ntids)
+{
+    qsort(tids, ntids, sizeof(ItemPointerData), tid_block_offset_cmp);
+}
+
+// Create read stream for reranking
+ReadStream *
+mkt_rerank_stream_begin(Relation heap, ItemPointer tids, int ntids,
+                       BufferAccessStrategy strategy)
+{
+    // Sort TIDs by block for sequential I/O
+    mkt_rerank_sort_tids(tids, ntids);
+
+    RerankStreamState *state = palloc(sizeof(RerankStreamState));
+    state->tids = tids;
+    state->ntids = ntids;
+    state->current = 0;
+
+    // READ_STREAM_DEFAULT: random access pattern (blocks aren't contiguous)
+    // READ_STREAM_USE_BATCHING: callback is lock-free (just array traversal)
+    return read_stream_begin_relation(
+        READ_STREAM_DEFAULT | READ_STREAM_USE_BATCHING,
+        strategy,
+        heap,
+        MAIN_FORKNUM,
+        rerank_stream_next,
+        state,
+        sizeof(RerankPageInfo));    // Per-buffer data for TID ranges
+}
+
+// Process reranking
+void
+mkt_rerank_execute(ReadStream *stream, RerankStreamState *state,
+                  Relation heap, TopKCollector *results)
+{
+    Buffer buf;
+    RerankPageInfo *info;
+
+    while ((buf = read_stream_next_buffer(stream, (void **) &info)) != InvalidBuffer)
+    {
+        Page page = BufferGetPage(buf);
+
+        // Process all TIDs on this page
+        for (int i = 0; i < info->ntids_on_page; i++)
+        {
+            int tid_idx = info->first_tid_idx + i;
+            ItemPointer tid = &state->tids[tid_idx];
+            OffsetNumber off = ItemPointerGetOffsetNumber(tid);
+
+            // Get tuple, extract vector, compute exact distance
+            ItemId itemid = PageGetItemId(page, off);
+            HeapTupleHeader htup = (HeapTupleHeader) PageGetItem(page, itemid);
+            // ... extract vector from tuple, compute distance, update results
+        }
+
+        ReleaseBuffer(buf);
+    }
+
+    read_stream_end(stream);
+}
+```
+
+#### Use Case 4: Index Build (Streaming Heap Scan)
+
+During index build, scan heap pages with prefetching:
+
+```c
+ReadStream *
+mkt_build_heap_stream(Relation heap, Snapshot snapshot,
+                     BufferAccessStrategy strategy)
+{
+    BlockRangeReadStreamPrivate *state = palloc(sizeof(*state));
+    state->current_blocknum = 0;
+    state->last_exclusive = RelationGetNumberOfBlocks(heap);
+
+    return read_stream_begin_relation(
+        READ_STREAM_MAINTENANCE |        // Use maintenance_io_concurrency
+        READ_STREAM_FULL |               // Scanning entire heap
+        READ_STREAM_SEQUENTIAL |         // Sequential access pattern
+        READ_STREAM_USE_BATCHING,        // Callback is lock-free
+        strategy,
+        heap,
+        MAIN_FORKNUM,
+        block_range_read_stream_cb,      // Built-in callback for ranges
+        state,
+        0);
+}
+```
+
+#### Batching Mode Restrictions
+
+When using `READ_STREAM_USE_BATCHING`, the callback must not:
+
+1. Block on I/O without calling `pgaio_submit_staged()` first
+2. Hold locks that might be held during I/O waits
+3. Start a nested batch
+
+Safe patterns for batching:
+- Simple arithmetic (block range iteration)
+- Lock-free data structure traversal
+- Reading from already-pinned buffers
+
+If the callback needs locks, omit `READ_STREAM_USE_BATCHING`:
+
+```c
+// Safe: no locks in callback
+read_stream_begin_relation(READ_STREAM_DEFAULT | READ_STREAM_USE_BATCHING, ...);
+
+// Callback takes locks - no batching
+read_stream_begin_relation(READ_STREAM_DEFAULT, ...);
+```
+
+#### Custom Async I/O Layer (Future)
+
+The PostgreSQL read stream API works well for page-oriented access but may be
+limiting for some Meerkat use cases:
+
+**Potential limitations:**
+- Callback model requires knowing next block before current completes
+- No direct support for non-page I/O (e.g., reading raw vector data from files)
+- Buffer pool integration assumes PostgreSQL page semantics
+- Limited control over I/O prioritization across multiple streams
+
+**Future consideration:** A Meerkat-specific async I/O layer for cases like:
+- Direct file I/O for external vector storage
+- Custom prefetch patterns for centroid search
+- Tiered storage with different I/O characteristics
+- Integration with user-space NVMe drivers
+
+If needed, this layer would:
+- Use `io_uring` directly on Linux (bypass PG's abstraction)
+- Fall back to `libaio` or worker threads on other platforms
+- Integrate with PG's buffer manager for hybrid access patterns
+
+```c
+// Hypothetical custom async I/O interface
+typedef struct MktAsyncIO MktAsyncIO;
+
+MktAsyncIO *mkt_aio_create(int max_concurrent);
+void        mkt_aio_submit_read(MktAsyncIO *aio, int fd, off_t offset,
+                                void *buf, size_t len, void *user_data);
+int         mkt_aio_poll(MktAsyncIO *aio, MktAIOCompletion *completions,
+                         int max_completions, int timeout_ms);
+void        mkt_aio_destroy(MktAsyncIO *aio);
+```
+
+This would live in `src/core/` (standalone) with platform-specific implementations,
+used alongside PG's read stream for buffer-managed pages.
 
 ---
 
@@ -5079,64 +5492,276 @@ typedef struct MktIndexStats
 
 ## File Organization
 
+Code is split into **standalone** modules (no PostgreSQL dependency) and
+**PostgreSQL-specific** code. This separation enables unit testing and
+benchmarking of core algorithms without PostgreSQL.
+
 ```
 meerkat/
 ├── src/
-│   ├── mkt_types.h          # Type definitions
-│   ├── mkt_memory.h              # Memory abstraction interface
-│   ├── mkt_memory_standalone.h   # Standalone types/declarations
-│   ├── mkt_memory_standalone.c   # Standalone arena implementation
-│   ├── mkt_memory_pg.h           # PostgreSQL wrappers (header-only)
-│   ├── mkt_platform.h       # Platform detection
-│   ├── mkt_platform.c
-│   ├── distance.h             # Distance interface
-│   ├── distance.c             # Dispatch + scalar
-│   ├── distance_avx512.c
-│   ├── distance_avx2.c
-│   ├── distance_neon.c
-│   ├── quantize.h
-│   ├── quantize.c
-│   ├── quantize_avx512.c
-│   ├── topk.h
-│   ├── topk.c
-│   ├── kmeans.h
-│   ├── kmeans.c
-│   ├── posting.h
-│   ├── posting.c
-│   ├── page_layout.h
-│   ├── page_layout.c
-│   ├── build.h
-│   ├── build.c
-│   ├── search.h
-│   ├── search.c
-│   ├── meerkat.h              # PostgreSQL extension header
-│   ├── meerkat.c              # Extension entry point
-│   ├── mkt_handler.c          # IAM callbacks
-│   ├── mkt_build.c            # PG build integration
-│   ├── mkt_scan.c             # PG scan integration
-│   ├── mkt_shmem.c            # Shared memory cache
-│   └── mkt_vacuum.c           # Vacuum support
+│   │
+│   │ # ════════════════════════════════════════════════════════════
+│   │ # STANDALONE (no PostgreSQL headers or libraries required)
+│   │ # ════════════════════════════════════════════════════════════
+│   │
+│   ├── core/                     # Foundation: types, memory, platform
+│   │   ├── types.h               # Dimension, Distance, VectorRef, etc.
+│   │   ├── memory.h              # Memory abstraction interface
+│   │   ├── memory_standalone.h   # Arena allocator declarations
+│   │   ├── memory_standalone.c   # Arena allocator implementation
+│   │   ├── platform.h            # SIMD detection, prefetch, alignment
+│   │   └── platform.c
+│   │
+│   ├── algo/                     # Core algorithms (SIMD-optimized)
+│   │   ├── distance.h            # Distance computation interface
+│   │   ├── distance.c            # Dispatch + scalar fallback
+│   │   ├── distance_avx512.c     # AVX-512 implementation
+│   │   ├── distance_avx2.c       # AVX2 implementation
+│   │   ├── distance_neon.c       # ARM NEON implementation
+│   │   ├── topk.h                # Top-K selection interface
+│   │   ├── topk.c                # Heap-based implementation
+│   │   ├── kmeans.h              # K-means clustering interface
+│   │   └── kmeans.c              # Lloyd's algorithm + k-means++
+│   │
+│   ├── quant/                    # Vector quantization
+│   │   ├── rabitq.h              # RaBitQ interface
+│   │   ├── rabitq.c              # RaBitQ encoding/distance
+│   │   ├── rabitq_avx512.c       # SIMD-optimized RaBitQ
+│   │   ├── rabitq_avx2.c
+│   │   └── rabitq_neon.c
+│   │
+│   ├── cli/                      # Command-line tool ('mkt' binary)
+│   │   ├── main.c                # Entry point, subcommand dispatch
+│   │   ├── cmd_distance.c        # mkt distance - test/benchmark
+│   │   ├── cmd_quantize.c        # mkt quantize - test RaBitQ
+│   │   ├── cmd_cluster.c         # mkt cluster - test k-means
+│   │   └── cmd_bench.c           # mkt bench - full algorithm benchmarks
+│   │
+│   │ # ════════════════════════════════════════════════════════════
+│   │ # POSTGRESQL (requires PostgreSQL headers and libraries)
+│   │ # ════════════════════════════════════════════════════════════
+│   │
+│   └── pg/                       # PostgreSQL extension
+│       ├── meerkat.h             # Extension public header
+│       ├── meerkat.c             # Extension entry point, GUCs
+│       ├── memory_pg.h           # palloc/pfree wrappers
+│       │
+│       ├── index/                # Index data structures (page-based)
+│       │   ├── posting.h         # Posting list entry format
+│       │   ├── posting.c
+│       │   ├── page.h            # Page layout (8KB PostgreSQL pages)
+│       │   ├── page.c
+│       │   ├── meta.h            # Metapage structure
+│       │   └── meta.c
+│       │
+│       ├── build/                # Index construction
+│       │   ├── build.h           # Build interface
+│       │   ├── build.c           # Build pipeline, state machine
+│       │   ├── sample.c          # Vector sampling for clustering
+│       │   └── write.c           # Page writing, WAL logging
+│       │
+│       ├── search/               # Search operations
+│       │   ├── search.h          # Search interface
+│       │   ├── search.c          # Search pipeline coordination
+│       │   ├── centroid.c        # Centroid search (from cache)
+│       │   ├── scan.c            # Posting list scanning
+│       │   └── rerank.c          # Full-precision reranking
+│       │
+│       ├── iam/                  # Index Access Method callbacks
+│       │   ├── handler.c         # amhandler registration
+│       │   ├── build.c           # ambuild, ambuildempty
+│       │   ├── insert.c          # aminsert
+│       │   ├── scan.c            # ambeginscan, amgettuple, amendscan
+│       │   └── vacuum.c          # ambulkdelete, amvacuumcleanup
+│       │
+│       └── shmem/                # Shared memory
+│           ├── cache.h           # Centroid cache interface
+│           └── cache.c           # Shared memory management
+│
 ├── sql/
-│   ├── meerkat--1.0.sql       # Extension SQL
-│   └── meerkat.control        # Extension control file
+│   ├── meerkat--1.0.sql          # Extension SQL definitions
+│   └── meerkat.control           # Extension control file
+│
 ├── test/
-│   ├── unit/                  # Unit tests (standalone)
-│   ├── regress/               # PostgreSQL regression tests
-│   └── bench/                 # Benchmarks
-├── tools/
-│   ├── mkt_cli.c              # Main CLI entry point
-│   ├── mkt_cmd_distance.c     # 'mkt distance' subcommand
-│   ├── mkt_cmd_quantize.c     # 'mkt quantize' subcommand
-│   ├── mkt_cmd_cluster.c      # 'mkt cluster' subcommand
-│   ├── mkt_cmd_build.c        # 'mkt build' subcommand
-│   ├── mkt_cmd_search.c       # 'mkt search' subcommand
-│   ├── mkt_cmd_bench.c        # 'mkt bench' subcommand
-│   └── mkt_cmd_info.c         # 'mkt info' subcommand
+│   ├── unit/                     # Unit tests (standalone, no PG)
+│   │   ├── test_distance.c
+│   │   ├── test_rabitq.c
+│   │   ├── test_topk.c
+│   │   ├── test_kmeans.c
+│   │   └── meson.build
+│   ├── regress/                  # PostgreSQL regression tests
+│   │   ├── sql/
+│   │   └── expected/
+│   └── bench/                    # Algorithm benchmarks
+│       ├── bench_distance.c
+│       ├── bench_rabitq.c
+│       └── datasets/             # Test datasets (gitignored)
+│
+├── scripts/
+│   └── ci/
+│       ├── build.sh
+│       ├── coverage.sh
+│       ├── lint.sh
+│       └── sanitizers.sh
+│
 ├── docs/
 │   ├── architecture.md
 │   └── implementation.md
+│
+├── .github/workflows/
 ├── meson.build
+├── meson_options.txt
 └── CLAUDE.md
+```
+
+### Module Dependencies
+
+```
+                        ┌───────────────────────────────────┐
+                        │              src/pg/              │
+                        │  (PostgreSQL extension, all of:   │
+                        │   index/, build/, search/, iam/,  │
+                        │            shmem/)                │
+                        └─────────────────┬─────────────────┘
+                                          │
+    ┌─────────────────────────────────────┼────────────────┐
+    │                                     │                │
+    ▼                                     ▼                ▼
+┌────────┐                         ┌───────────┐    ┌───────────┐
+│  cli/  │                         │   quant/  │    │   algo/   │
+│ (mkt)  │────────────────────────►│  rabitq   │───►│ distance  │
+└────────┘                         └───────────┘    │   topk    │
+                                                    │  kmeans   │
+                                                    └─────┬─────┘
+                                                          │
+                                                          ▼
+                                                    ┌───────────┐
+                                                    │   core/   │
+                                                    │   types   │
+                                                    │  memory   │
+                                                    │ platform  │
+                                                    └───────────┘
+```
+
+**Standalone modules** (no PostgreSQL):
+
+- **core/**: Foundation. No dependencies.
+- **algo/**: Algorithms. Depends on core/.
+- **quant/**: Quantization. Depends on core/, algo/.
+- **cli/**: Command-line tool. Depends on quant/, algo/, core/.
+
+**PostgreSQL modules** (require PG headers/libs):
+
+- **pg/**: Everything under src/pg/ requires PostgreSQL. Contains index
+  structures (page layout, posting lists), build pipeline, search operations,
+  IAM callbacks, and shared memory cache.
+
+### Include Conventions
+
+```c
+// From within src/algo/distance.c:
+#include "core/types.h"      // Relative to src/
+#include "core/platform.h"
+
+// From within src/pg/build/build.c:
+#include <postgres.h>        // PostgreSQL system headers first
+#include <access/reloptions.h>
+
+#include "core/types.h"      // Then local headers
+#include "algo/distance.h"
+#include "algo/kmeans.h"
+#include "quant/rabitq.h"
+#include "pg/index/posting.h"
+
+// From within src/pg/iam/handler.c:
+#include <postgres.h>
+#include <fmgr.h>
+
+#include "core/types.h"
+#include "pg/search/search.h"
+```
+
+### Meson Build Structure
+
+```meson
+# src/meson.build
+subdir('core')
+subdir('algo')
+subdir('quant')
+subdir('cli')
+
+# Core library (standalone, no PostgreSQL)
+mkt_core_lib = static_library(
+  'mkt_core',
+  core_sources + algo_sources + quant_sources,
+  include_directories: src_inc,
+)
+
+mkt_core_dep = declare_dependency(
+  link_with: mkt_core_lib,
+  include_directories: src_inc,
+)
+
+# CLI binary (standalone)
+mkt_exe = executable(
+  'mkt',
+  cli_sources,
+  dependencies: mkt_core_dep,
+  install: true,
+)
+
+# PostgreSQL extension (links against core)
+if pg_config.found()
+  subdir('pg')
+endif
+```
+
+The `pg/` subdirectory has its own structure for PostgreSQL-dependent code:
+
+```meson
+# src/pg/meson.build
+subdir('index')   # Page layouts, posting lists
+subdir('build')   # Index build pipeline
+subdir('search')  # Search operations
+subdir('iam')     # Index Access Method callbacks
+subdir('shmem')   # Shared memory cache
+
+pg_sources = (
+  pg_index_sources +
+  pg_build_sources +
+  pg_search_sources +
+  pg_iam_sources +
+  pg_shmem_sources
+)
+
+shared_module(
+  'meerkat',
+  pg_sources,
+  dependencies: [mkt_core_dep, pg_dep],
+  install: true,
+  install_dir: pg_pkglibdir,
+)
+```
+
+Each module subdirectory has its own `meson.build` that defines its sources:
+
+```meson
+# src/algo/meson.build (standalone)
+algo_sources = files(
+  'distance.c',
+  'distance_avx512.c',
+  'distance_avx2.c',
+  'distance_neon.c',
+  'topk.c',
+  'kmeans.c',
+)
+
+# src/pg/search/meson.build (PostgreSQL-dependent)
+pg_search_sources = files(
+  'search.c',
+  'recheck.c',
+  'scan.c',
+)
 ```
 
 ---
