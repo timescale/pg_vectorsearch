@@ -5,8 +5,22 @@ name: Coverage
 on:
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'test/**'
+      - 'meson.build'
+      - 'meson_options.txt'
+      - 'scripts/ci/coverage.sh'
   pull_request:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'test/**'
+      - 'meson.build'
+      - 'meson_options.txt'
+      - 'scripts/ci/coverage.sh'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
