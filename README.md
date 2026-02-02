@@ -7,8 +7,8 @@ search.
 
 Meerkat is a PostgreSQL extension that provides high-performance vector
 similarity search using an IVF (Inverted File) index structure with quantized
-vectors. It is inspired by [ScaNN][scann] and [SPANN][spann], and uses the vector type
-from [pgvector][pgvector].
+vectors. It is inspired by [ScaNN][scann] and [SPANN][spann], and uses the
+vector type from [pgvector][pgvector].
 
 ## Features
 

@@ -194,7 +194,7 @@ functions taking pointer arguments, declare the objects `const` when possible.
 Example:
 
 ```C
-int 
+int
 mkt_vector_dot_product(const MktVector *v1, const MktVector *v2)
 {
   ...
