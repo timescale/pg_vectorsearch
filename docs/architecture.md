@@ -5,10 +5,53 @@ approximate nearest neighbor (ANN) vector search.
 
 ## Overview
 
-Meerkat uses an inverted index approach inspired by SPANN and ScaNN, where the
-vector space is partitioned into clusters. Each cluster has a centroid and a
-posting list containing the vectors assigned to that cluster. Search proceeds
-in two phases: first find the closest centroids, then scan their posting lists.
+Meerkat is designed for **billion-scale vector search** within PostgreSQL,
+using an inverted index approach inspired by SPANN, ScaNN, and SPFresh. The
+vector space is partitioned into clusters via hierarchical clustering, enabling
+efficient search by narrowing the search space through multiple levels before
+scanning posting lists.
+
+Key design elements:
+- **Hierarchical clustering** to handle billion-scale datasets efficiently
+- **RaBitQ quantization** with theoretical error bounds for two-stage search
+- **Multi-tenant support** via composite keys or separate indexes
+- **Native PostgreSQL integration** using shared buffers and standard APIs
+
+### Hybrid Search with pg_textsearch
+
+Meerkat is designed as part of a unified search stack alongside
+[pg_textsearch](https://github.com/timescale/pg_textsearch), enabling hybrid
+search that combines semantic (vector) and keyword (BM25) retrieval.
+
+**Filtered semantic search** (keyword filter → vector ranking):
+
+```sql
+SELECT * FROM documents
+WHERE textsearch @@ plainto_tsquery('quarterly revenue')
+ORDER BY embedding <-> query_embedding
+LIMIT 10;
+```
+
+**Reciprocal Rank Fusion (RRF)** for combining independent rankings:
+
+```sql
+WITH semantic AS (
+    SELECT id, row_number() OVER (ORDER BY embedding <-> query_embedding) AS rank
+    FROM documents LIMIT 100
+),
+keyword AS (
+    SELECT id, row_number() OVER (ORDER BY ts_rank(textsearch, query) DESC) AS rank
+    FROM documents WHERE textsearch @@ query LIMIT 100
+)
+SELECT id, 1.0/(60+s.rank) + 1.0/(60+k.rank) AS rrf_score
+FROM semantic s JOIN keyword k USING (id)
+ORDER BY rrf_score DESC LIMIT 10;
+```
+
+Both extensions share design principles: PostgreSQL-native, billion-scale,
+multi-tenant, and optimized for modern hardware (SIMD, NVMe).
+
+### Search Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -17,17 +60,18 @@ in two phases: first find the closest centroids, then scan their posting lists.
                                │
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Centroid Search (in memory)                  │
-│         Find top-k centroids closest to query vector            │
-│                    Uses quantized centroids                     │
+│               Hierarchical Centroid Routing                     │
+│     Navigate tree of centroids to find candidate clusters       │
+│     Pages in shared buffers, frequently accessed = cached       │
 └─────────────────────────────────────────────────────────────────┘
                                │
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                  Posting List Scan (disk/buffer)                │
-│     Read posting lists for selected centroids from disk         │
-│       Compute distances using quantized vectors first           │
-│         Re-rank top candidates with full precision              │
+│     Read posting lists for selected clusters from disk          │
+│     Two-stage search with RaBitQ error bounds:                  │
+│       1. Fast 1-bit estimates filter 80-95% of candidates       │
+│       2. Re-rank remaining with full precision                  │
 └─────────────────────────────────────────────────────────────────┘
                                │
                                ▼
@@ -37,115 +81,132 @@ in two phases: first find the closest centroids, then scan their posting lists.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## Performance Targets
+
+| Metric | Target |
+|--------|--------|
+| Recall@10 | ≥95% (90-95% acceptable) |
+| Query latency (p99) | <100ms at 1B scale |
+| Index build | Hours, not days |
+| Insert latency (p99) | <10ms (foreground only) |
+| Update throughput | 1% daily churn without rebuild |
+
 ## Design Principles
 
-1. **Tiered memory hierarchy**: Centroids in fast memory (shared memory cache),
-   posting lists in PostgreSQL buffer cache, vectors on disk.
+1. **Billion-scale architecture**: Hierarchical clustering narrows the search
+   space efficiently, avoiding linear scans even at massive scale.
 
-2. **Quantization for speed**: Use scalar/binary quantization for fast
-   approximate distance computation, full precision for final re-ranking.
+2. **Tiered memory hierarchy**: Centroid pages in shared buffers (hot due to
+   frequent access), posting lists in buffer cache, full vectors on disk.
 
-3. **Sequential I/O**: Vectors close in embedding space stored sequentially
+3. **RaBitQ quantization with error bounds**: Theoretical guarantees enable
+   two-stage search—fast 1-bit filtering followed by selective re-ranking.
+
+4. **Sequential I/O**: Vectors close in embedding space stored sequentially
    on disk for efficient bulk reads.
 
-4. **SIMD everywhere**: All distance computations vectorized with AVX512/NEON.
+5. **SIMD everywhere**: All distance computations vectorized with AVX512/NEON.
 
-5. **PostgreSQL native**: Use buffer cache, WAL, MVCC, and standard IAM APIs.
+6. **PostgreSQL native**: Use shared buffers, WAL, MVCC, and standard IAM APIs.
+
+7. **Multi-tenant ready**: Support both index-per-tenant and composite key
+   `(tenant_id, vector)` approaches with tenant-segmented routing.
 
 ## Components
 
-### 1. Centroid Cache
+### 1. Hierarchical Centroid Structure
 
-Centroids are representative vectors that partition the vector space. Each
-centroid defines a cluster, and every indexed vector is assigned to one or more
-clusters based on proximity.
+To handle billion-scale datasets, Meerkat uses hierarchical clustering inspired
+by SPFresh (and similar to approaches in ScaNN and SPANN). Instead of a flat
+list of centroids requiring linear scan, centroids are organized in a tree
+structure that narrows the search space at each level.
 
-**Centroid representation - two approaches:**
+```
+                    Root Level (few hundred centroids)
+                           /    |    \
+                          /     |     \
+                Level 1 (thousands of centroids per subtree)
+                       /   |   \        /   |   \
+                      /    |    \      /    |    \
+            Level 2 (leaf clusters pointing to posting lists)
+```
 
-| Approach | Description | Used by |
-|----------|-------------|---------|
-| True centroid | Mean of all vectors in cluster (synthetic) | ScaNN |
-| Medoid | Actual vector closest to the mean | SPANN |
+**Hierarchical routing**: A query vector traverses the tree top-down, selecting
+the best branch(es) at each level. This reduces centroid comparisons from O(N)
+to O(log N) while maintaining high recall through multi-path exploration.
 
-*True centroid (mean):*
-- Mathematically optimal cluster center, minimizes within-cluster variance
-- Synthetic vector—may not exist in the dataset
-- Requires dedicated storage for centroid vectors
-- Standard k-means approach
+**Centroid representation**: Centroids are true centroids (mean of cluster
+vectors), computed during index build via hierarchical k-means. Synthetic
+centroids work well for navigation and don't require heap storage.
 
-*Medoid (closest actual vector):*
-- Real data point from the dataset
-- Can be stored as a TID pointing to the heap (no separate vector storage)
-- More robust to outliers
-- If deleted, must find new representative
-- Used by SPANN for "more meaningful navigation" with graph indexes
+### 2. Centroid Pages in Shared Buffers
 
-For Meerkat, the **medoid approach** is preferred: the centroid is chosen as
-the actual vector closest to the cluster mean. The medoid is computed during
-index build.
+Centroid data is stored in **dedicated centroid pages** within the index,
+separate from posting list pages. These pages live in PostgreSQL's standard
+shared buffer cache—there is no separate dedicated cache structure.
 
-**Centroid deletion handling**: If the centroid vector is deleted from the
-heap, the centroid entry remains in the posting list for navigation purposes.
-This means the centroid entry must store the actual vector data (or quantized
-version), not just a TID—otherwise the vector would be lost when the heap tuple
-is vacuumed. The centroid effectively becomes a "navigation-only" synthetic
-vector, similar to the true centroid approach. This is acceptable because
-centroids are used for cluster navigation, not returned as query results.
+**Why shared buffers work well for centroids**:
+- Centroid pages are accessed on every query (hot data)
+- Frequently accessed pages naturally stay in the buffer cache
+- Standard PostgreSQL infrastructure: locking, WAL, visibility
+- No custom shared memory allocation or startup coordination
 
-**On-disk storage**: Centroids are stored as the first entry in each posting
-list—no separate centroid pages. The metapage contains a directory of posting
-list head block numbers; the centroid for cluster i is the first vector on page
-`posting_list_head[i]`. This simplifies the storage layout and eliminates
-centroid growth issues.
+**Page layout**: Centroid pages store quantized centroid vectors in a format
+optimized for SIMD distance computation. Each page contains:
+- Array of quantized centroid vectors (contiguous, aligned)
+- Pointers to child nodes (for non-leaf levels) or posting lists (for leaves)
 
-**In-memory cache**: At startup, the index reads the first page of each posting
-list, extracts the centroid vector, and builds an optimized shared memory
-structure. This cache differs from the buffer cache in important ways:
+**Sizing**: For billion-scale indexes:
+- Root level: ~256-1024 centroids (fits in a few pages)
+- Intermediate levels: Branch factor of 32-256
+- Leaf level: Millions of clusters, each with a posting list
 
-| Aspect | Buffer Cache | Centroid Cache |
-|--------|--------------|----------------|
-| Format | Raw PostgreSQL pages | Optimized for SIMD search |
-| Access | Pin/unpin, shared locks | Direct memory access |
-| Eviction | LRU, can be evicted | Pinned for index lifetime |
-| Layout | Page headers, tuple format | Contiguous, aligned vectors |
+### 3. Multi-Tenant Centroid Routing
 
-The cache uses a flat array layout optimized for SIMD distance computation.
-For typical centroid counts (<100k), linear scan with SIMD is faster than
-tree-based structures due to cache efficiency and lack of branch mispredictions.
-For very large centroid sets, a hierarchical or graph-based approach may be
-added.
+For multi-tenant deployments using composite keys `(tenant_id, vector)`, the
+centroid hierarchy is **segmented by tenant**. Each tenant has its own subtree
+within the hierarchy:
 
-- **Size**: Typically sqrt(N) to N/100 centroids for N vectors
-- **Quantization**: Optional 4-bit or 8-bit scalar quantization reduces memory
-  footprint and improves cache utilization
+```
+             Root (tenant directory)
+            /     |     \      \
+       Tenant A  Tenant B  Tenant C  ...
+          |         |         |
+    (per-tenant hierarchical clusters)
+```
 
-**Future optimization**: For very large centroid counts (>100k), a flat SIMD
-scan may become a bottleneck. Future versions could build a true in-memory ANN
-index over centroids using approaches like:
-- [pgvectorscale's streaming disk ANN](https://github.com/timescale/pgvectorscale)
-- [SPTAG library](https://github.com/microsoft/SPTAG) (used by SPANN for
-  centroid navigation)
+This ensures:
+- Queries only traverse centroids for the specified tenant
+- No cross-tenant interference in search
+- Tenants can have different cluster counts based on data volume
+- Efficient tenant isolation without separate indexes
 
-### 2. Posting Lists
+See the Multi-Tenant Support section for deployment options.
 
-A posting list is the set of vectors assigned to a cluster (borrowing
-terminology from inverted indexes in text search). Each centroid points to its
-posting list, which contains:
+### 4. Posting Lists
+
+A posting list is the set of vectors assigned to a leaf cluster (borrowing
+terminology from inverted indexes in text search). Each leaf centroid points to
+its posting list, which contains:
 
 - **Vector TIDs**: Pointers to the full-precision vectors in the heap
-- **Quantized vectors**: Compressed vector representations for fast approximate
-  distance computation during search
+- **RaBitQ quantized vectors**: Binary quantized vectors with error factors for
+  two-stage search (see Quantization section)
 
-**Why buffer cache (not dedicated cache)?** Unlike centroids which are small
-and accessed on every query, posting lists are large (the bulk of index data)
-and only a subset is accessed per query (based on nprobe). The buffer cache
-provides:
+**Tenant segmentation**: For composite key indexes `(tenant_id, vector)`,
+posting lists are segmented by tenant. A leaf centroid's posting list only
+contains vectors from the tenant whose subtree it belongs to. This is natural
+since the hierarchical routing already separates tenants at the root level.
+
+**Why buffer cache?** Unlike centroid pages which are accessed on every query,
+posting lists are large (the bulk of index data) and only a subset is accessed
+per query (based on nprobe). The buffer cache provides:
 - Automatic caching of hot posting lists (frequently accessed clusters)
 - Memory sharing across backends
 - Standard PostgreSQL page management and WAL logging
 
 **Cluster assignment**: During index build, each vector is assigned to its
-nearest centroid. However, single-cluster assignment causes a "boundary
+nearest leaf centroid. However, single-cluster assignment causes a "boundary
 problem": if a query's true nearest neighbor lies just across a cluster
 boundary, it may be missed when only searching the query's nearest cluster.
 
@@ -193,7 +254,41 @@ predictable query latency. The clustering algorithm aims for balanced clusters,
 but natural data distribution may cause imbalance. Very large clusters can be
 split; very small clusters may be merged or eliminated.
 
-### 3. Vector Storage
+### 5. Vector Quantization (RaBitQ)
+
+Meerkat uses **RaBitQ** (Random Bit Quantization) for vector compression, which
+provides theoretical error bounds enabling efficient two-stage search.
+
+**Why RaBitQ?**
+- State-of-the-art binary quantization with provable error bounds
+- 32x compression (float32 → 1-bit per dimension)
+- Error bounds enable filtering without false negatives
+- Fast SIMD-friendly binary operations
+
+**Two-stage search with error bounds**:
+
+RaBitQ computes both an estimated distance and an error bound for each vector.
+The key insight is that the lower bound (estimate - error) is guaranteed to be
+≤ the true distance. This enables:
+
+1. **Stage 1 - Fast filtering**: Compute 1-bit distance estimates for all
+   vectors in selected posting lists. Use error bounds to identify candidates
+   that *could* be in the top-k (lower bound ≤ current k-th best).
+
+2. **Stage 2 - Precise re-ranking**: Only fetch full-precision vectors for
+   candidates that passed filtering (~1-5% of vectors). Compute exact distances
+   and return true top-k.
+
+**Error bound components**:
+- `f_error`: Per-vector factor computed at index time (stored with each vector)
+- `g_error`: Per-query factor computed at search time
+- Combined bound: `|true_dist - estimate| ≤ f_error × g_error`
+
+This approach filters 80-95% of candidates using fast binary operations while
+guaranteeing no false negatives—every vector in the true top-k will pass to
+stage 2.
+
+### 6. Vector Storage
 
 Full-precision vectors are stored in the heap of the indexed table—no separate
 vector storage. For typical embedding dimensions (768-1536), vectors exceed
@@ -205,26 +300,24 @@ PostgreSQL's inline storage threshold and are TOASTed automatically.
 3. Index scan on TOAST chunk_id index
 4. Read TOAST heap page(s) to retrieve chunks
 
-This multi-step access is expensive. Therefore, the index should minimize heap
-access by:
-- Using quantized vectors in posting lists for approximate distance computation
-- Only accessing the heap for final re-ranking of top candidates (~1% of
-  scanned vectors)
-- Tuning `rerank_k` to balance recall vs. heap access cost
+This multi-step access is expensive. The two-stage RaBitQ search minimizes heap
+access by only fetching full-precision vectors for the ~1-5% of candidates that
+pass error-bounded filtering.
 
 **Future exploration**: If full-precision vector access becomes a bottleneck,
 alternatives to TOAST storage could be explored (e.g., storing vectors in index
 pages, a dedicated vector heap, columnar storage, or a custom TOAST table
 access method optimized for vector retrieval).
 
-### 4. Metadata
+### 7. Metadata
 
 Index metadata is stored in multiple locations depending on its nature:
 
 **Reloptions** (pg_class.reloptions, specified at CREATE INDEX):
-- Build parameters: `nlist` (number of clusters), `fillfactor`
+- Build parameters: `nlist` (number of leaf clusters), `fillfactor`
 - Search defaults: `nprobe` (clusters to search), `rerank_k`
 - Over-allocation: `reserved_pages`
+- Multi-tenant: `tenant_column` (for composite key indexes)
 
 **GUCs** (session/server-level, can override reloptions):
 - `meerkat.nprobe` - clusters to search per query
@@ -234,150 +327,368 @@ Index metadata is stored in multiple locations depending on its nature:
 - Structural info in pg_class, pg_index, pg_am, pg_opclass
 
 **Metapage** (stored in index file, persists with the index):
-- Posting list directory (head block per cluster)
-- Quantization codebook (if using scalar quantization)
+- Hierarchical centroid tree structure (root page, level info)
+- Posting list directory (head block per leaf cluster)
+- RaBitQ normalization factors
 - Index version, dimension, distance metric
-- Statistics: cluster sizes, total vectors indexed
+- Statistics: cluster sizes, total vectors indexed, per-tenant stats
+
+## Multi-Tenant Support
+
+Meerkat supports multi-tenant deployments through two approaches:
+
+### Option 1: Index-per-Tenant
+
+Create separate tables and indexes for each tenant:
+
+```sql
+CREATE TABLE tenant_123_vectors (id bigint, embedding vector(768));
+CREATE INDEX ON tenant_123_vectors USING meerkat (embedding);
+```
+
+**Pros**:
+- Complete isolation (no cross-tenant data leakage possible)
+- Independent scaling, tuning, and maintenance per tenant
+- Can drop tenant data instantly
+
+**Cons**:
+- Connection/catalog overhead with many tenants
+- Cannot easily query across tenants
+- More complex application logic
+
+**Best for**: Strict isolation requirements, large tenants with distinct
+workloads, regulatory compliance scenarios.
+
+### Option 2: Composite Key Index
+
+Store all tenants in one table with a composite index key:
+
+```sql
+CREATE TABLE vectors (
+    tenant_id int,
+    id bigint,
+    embedding vector(768)
+);
+CREATE INDEX ON vectors USING meerkat ((tenant_id, embedding));
+```
+
+**How it works**:
+- The hierarchical centroid tree is segmented by `tenant_id` at the root level
+- Each tenant has its own subtree of centroids and posting lists
+- Queries specify `tenant_id` and route directly to that tenant's subtree
+- No cross-tenant centroid comparisons or posting list scans
+
+```sql
+-- Query automatically routes to tenant 42's subtree
+SELECT * FROM vectors
+WHERE tenant_id = 42
+ORDER BY embedding <-> '[...]'::vector
+LIMIT 10;
+```
+
+**Pros**:
+- Single table and index to manage
+- Efficient storage (shared infrastructure)
+- Simpler application logic
+- Can query across tenants if needed (with appropriate permissions)
+
+**Cons**:
+- Shared buffer cache (hot tenant may evict cold tenant's pages)
+- Maintenance operations affect all tenants
+- Tenant deletion requires DELETE + VACUUM
+
+**Best for**: Many small-to-medium tenants, shared infrastructure, simpler
+operations.
+
+### Tenant-Segmented Storage
+
+For composite key indexes, both centroid routing and posting lists are
+segmented by tenant:
+
+1. **Root-level tenant directory**: The root of the centroid tree contains a
+   tenant directory mapping `tenant_id` → subtree root page.
+
+2. **Per-tenant centroid hierarchy**: Each tenant has independent centroid
+   pages forming their own tree. Tenant data volume determines cluster count.
+
+3. **Per-tenant posting lists**: Leaf clusters only contain vectors from their
+   tenant. No mixing of tenant data in posting lists.
+
+This segmentation ensures queries only access pages for the target tenant,
+providing both performance isolation and predictable access patterns.
 
 ## Index Operations
 
 ### Build
 
 ```
-1. Sample vectors for clustering (e.g., 10% or fixed sample)
-2. Run k-means or hierarchical clustering to find centroids
-3. Assign each vector to nearest centroid(s)
-4. Build posting lists with quantized vectors
-5. Store centroids in metapage, posting lists in data pages
+1. For composite key index: group vectors by tenant_id
+2. For each tenant (or all vectors if single-tenant):
+   a. Sample vectors for clustering
+   b. Run hierarchical k-means to build centroid tree
+   c. Assign each vector to nearest leaf centroid(s)
+   d. Compute RaBitQ quantization and f_error factors
+3. Write centroid pages (hierarchical structure)
+4. Write posting list pages with quantized vectors
+5. Write metapage with tree root and directory
 ```
 
 **Optimizations**:
 - Hierarchical balanced clustering for uniform posting list sizes
 - Parallel clustering using multiple workers
 - Streaming build to limit memory usage
+- Per-tenant parallel builds for composite key indexes
 
 ### Search
 
 ```
-1. Load centroids into shared memory cache (if not cached)
-2. Compute distances from query to all centroids (SIMD)
-3. Select top-k centroids (k = nprobe parameter)
-4. Read posting lists for selected centroids
-5. Compute approximate distances using quantized vectors
-6. Re-rank top candidates with full-precision vectors
-7. Return top-k results
+1. For composite key: lookup tenant subtree root from tenant directory
+2. Navigate centroid tree top-down:
+   a. At each level, compute distances to child centroids
+   b. Select best branch(es) to explore (beam search)
+   c. Repeat until reaching leaf level
+3. For selected leaf clusters (nprobe clusters):
+   a. Read posting list pages
+   b. Compute RaBitQ estimates and error bounds
+   c. Filter candidates: keep if lower_bound ≤ k-th best
+4. Re-rank surviving candidates (~1-5%) with full precision
+5. Return top-k results
 ```
 
 **Parameters**:
-- `nprobe`: Number of posting lists to scan (recall/speed tradeoff)
-- `rerank_k`: Number of candidates to re-rank with full precision
+- `nprobe`: Number of leaf posting lists to scan (recall/speed tradeoff)
+- `beam_width`: Candidates to keep at each tree level (default: 1)
+- `rerank_k`: Number of candidates for full-precision re-ranking
 
-### Insert
+### Dynamic Updates (LIRE Protocol)
 
-Two strategies depending on insert rate:
+Meerkat adopts the **LIRE (Lightweight Incremental RE-balancing)** protocol
+from SPFresh for maintaining index quality under continuous updates without
+full rebuilds.
 
-**Low-rate inserts**: Assign to nearest centroid(s), append to posting list.
-The index degrades gracefully as cluster sizes become unbalanced.
+#### Foreground/Background Architecture
 
-**High-rate inserts**: Buffer inserts in a separate structure, periodically
-merge or trigger partial rebuild. Consider SPFresh-style approaches for
-maintaining quality under updates.
+| Stage | Operations | Characteristics |
+|-------|------------|-----------------|
+| **Foreground** | Insert, Delete (tombstone) | Fast, predictable latency |
+| **Background** | Split, Merge, Reassign, GC | Heavy lifting, off critical path |
 
-### Delete
+This separation keeps insert latency low while moving expensive rebalancing to
+background workers (PostgreSQL's parallel worker framework).
 
-Mark vectors as deleted in posting lists. Periodically compact to reclaim
-space. MVCC handled through standard PostgreSQL visibility checks.
+#### Insert
+
+```
+1. Find nearest leaf centroid(s) for the new vector
+2. Append vector + RaBitQ encoding to posting list tail
+3. Update in-memory metadata (version, count)
+4. If posting exceeds size threshold → queue split job
+```
+
+Inserts are append-only in the foreground. Only ~0.4% of insertions trigger
+rebalancing operations (based on SPFresh measurements).
+
+#### Delete
+
+```
+1. Set tombstone bit in posting list entry
+2. Vector immediately excluded from search results
+3. Physical removal deferred to background GC during rebalancing
+```
+
+Tombstones use PostgreSQL's standard MVCC visibility—deleted vectors are
+invisible to new transactions immediately.
+
+#### Split
+
+Triggered when a posting list exceeds the size threshold:
+
+```
+1. Garbage collect deleted vectors first
+2. If still oversized: apply balanced 2-means clustering
+3. Generate two new centroids, redistribute vectors
+4. Update centroid page (replace old entry with two new)
+5. Queue reassignment jobs for affected vectors
+```
+
+#### Merge
+
+Triggered when a posting list falls below minimum threshold:
+
+```
+1. Find nearest posting as merge candidate
+2. Append vectors from smaller posting to larger
+3. Remove redundant centroid from tree
+4. Queue reassignment jobs for merged vectors
+```
+
+#### Reassign
+
+Corrects **NPA (Nearest Partition Assignment) violations** after split/merge.
+A vector should be in the posting list of its nearest centroid.
+
+**After split**: Check if vectors in the split posting should move to the
+*other* new posting or to a neighboring posting.
+
+**After merge**: Check if vectors in neighbor postings should move to the
+newly merged posting (which may now be closer).
+
+**Key insight**: Only boundary vectors require reassignment. In a well-balanced
+index, ~79 vectors are reassigned out of ~5000 evaluated per rebalancing
+operation (SPFresh measurements).
+
+#### Version Tracking
+
+Each vector entry includes a version byte:
+- 7 bits: reassign version (incremented on each reassignment)
+- 1 bit: deletion flag
+
+During search, vectors with stale versions (lower than current metadata) are
+skipped. This enables lock-free reads—searches never block on updates.
+
+### Recall Measurement
+
+Meerkat supports measuring recall directly within PostgreSQL via an EXPLAIN
+option:
+
+```sql
+EXPLAIN (ANALYZE, RECALL)
+SELECT * FROM documents
+ORDER BY embedding <-> query_embedding
+LIMIT 10;
+```
+
+**How it works**:
+
+1. Execute the query using the ANN index (normal path)
+2. Execute an exact brute-force scan over the same data
+3. Compare result sets to compute recall = |ANN ∩ exact| / k
+
+**Output includes**:
+- Standard EXPLAIN ANALYZE output (timing, rows, etc.)
+- Recall percentage (e.g., "Recall: 95.0% (19/20 exact matches)")
+- Number of vectors scanned vs. total
+- Quantization filtering statistics (candidates before/after RaBitQ filtering)
+
+**Use cases**:
+- Tuning `nprobe` and `beam_width` for recall/speed tradeoff
+- Validating index quality after build or maintenance
+- Comparing different index configurations
+- Debugging unexpected search results
+
+**Performance note**: The exact scan can be expensive on large tables. For
+billion-scale tables, consider using `RECALL` with a `WHERE` clause to limit
+the scope, or sample-based recall estimation:
+
+```sql
+-- Recall on a subset (faster)
+EXPLAIN (ANALYZE, RECALL)
+SELECT * FROM documents
+WHERE tenant_id = 42
+ORDER BY embedding <-> query_embedding
+LIMIT 10;
+
+-- Sample-based recall (future)
+EXPLAIN (ANALYZE, RECALL, RECALL_SAMPLE 10000)
+SELECT * FROM documents
+ORDER BY embedding <-> query_embedding
+LIMIT 10;
+```
 
 ## Storage Layout
 
 ### Page Organization
 
-Pages are organized in two regions:
+Pages are organized in three regions:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ Blocks 0..M: Metapages (linked if >2k clusters)                 │
-│   - Index metadata, parameters, reloptions                      │
-│   - Posting list directory: head block for each cluster         │
+│ Block 0: Metapage                                               │
+│   - Index metadata, parameters, dimension, distance metric      │
+│   - Root centroid page pointer                                  │
+│   - Tenant directory (for composite key indexes)                │
 ├─────────────────────────────────────────────────────────────────┤
-│ Blocks M+1..N: Posting List Pages                               │
-│   [Cluster 0 pages][Cluster 1 pages]...[Cluster K pages]        │
-│    ↑ first entry = centroid                                     │
+│ Blocks 1..C: Centroid Pages (hierarchical tree)                 │
+│   - Level 0 (root): few hundred centroids                       │
+│   - Level 1..N-1: intermediate levels                           │
+│   - Level N (leaves): pointers to posting lists                 │
+├─────────────────────────────────────────────────────────────────┤
+│ Blocks C+1..P: Posting List Pages                               │
+│   - Quantized vectors with RaBitQ data (TID, bits, f_error)     │
+│   - Linked list structure within each cluster                   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Metapage (block 0+)**: Index metadata, parameters, reloptions, and posting
-list directory (`posting_list_head[cluster_id] → block number`).
+### Centroid Pages
 
-The directory stores one BlockNumber (4 bytes) per cluster. A single 8KB page
-holds ~2,000 entries. For larger cluster counts, the metapage overflows to
-additional pages using linked list structure (same as posting lists). At build
-time, metapages are written contiguously starting at block 0.
+Centroid pages store the hierarchical routing structure. Each page contains:
+- Array of quantized centroid vectors (SIMD-aligned)
+- Child pointers (page numbers for next level, or posting list heads for leaves)
+- Level indicator and parent pointer for navigation
 
-**Posting list pages**: Store vector entries (TIDs + quantized data). The first
-entry in each posting list is the cluster's centroid (medoid). At build time,
-pages for each cluster are written consecutively for sequential I/O.
+Centroid pages are stored in PostgreSQL's standard shared buffer cache. Because
+they are accessed on every query, they naturally remain cached (hot pages).
+There is no separate dedicated cache structure—just standard buffer management.
 
-There are no separate centroid pages. Centroids are embedded as the first entry
-of each posting list. At startup, the centroid cache is built by reading the
-first page of each posting list and extracting the first vector.
+**Multi-tenant layout**: For composite key indexes, the root level contains a
+tenant directory. Each tenant's subtree is stored contiguously:
 
-### Page Linking
+```
+[Meta][TenantDir][Tenant1-L0][Tenant1-L1...][Tenant2-L0][Tenant2-L1...]...
+```
 
-Posting list pages use a linked list structure. Each page header contains a
-`next_blkno` field pointing to the next page (or `InvalidBlockNumber` if last).
+### Posting List Pages
 
-Contiguity is determined at runtime by comparing block numbers:
+Posting list pages store vector entries with RaBitQ quantization:
+- TID: pointer to full-precision vector in heap
+- Quantized bits: 1-bit per dimension (d/8 bytes)
+- f_error: per-vector error factor for distance bounds
+
+Pages within a posting list are linked. Each page header contains `next_blkno`.
+
+### Initial State: Clustered
+
+At build time, pages are laid out for sequential I/O:
+
+```
+Build-time layout:
+
+[Meta][Centroid pages...][PL0-a][PL0-b][PL1-a][PL1-b][PL2-a]...
+
+Posting lists are contiguous per cluster.
+```
+
+Contiguity is checked at runtime:
 
 ```c
 bool is_contiguous = (next_blkno == current_blkno + 1);
 ```
 
-The scan code uses this to optimize I/O: contiguous pages can be read
-sequentially or prefetched; non-contiguous pages require a seek.
-
-### Initial State: Clustered
-
-At index build time, pages are laid out optimally (clustered):
-
-```
-Build-time layout (clustered):
-
-[Meta][PL0-a][PL0-b][PL0-c][PL1-a][PL1-b][PL2-a]...
-blk 0  blk 1  blk 2  blk 3  blk 4  blk 5  blk 6
-         ↑                    ↑            ↑
-      centroid 0          centroid 1    centroid 2
-      (first entry)
-
-       └──────┴──────┘       └──────┘
-       contiguous            contiguous
-```
-
-All `next_blkno` values point to `current + 1`. Scanning a posting list reads
-sequential disk blocks. Centroids are the first entry on the first page of each
-posting list.
+Contiguous pages can be prefetched; fragmented pages require seeks.
 
 ### Growth and Declustering
 
-As vectors are inserted, pages fill up and new pages are allocated at the end
-of the file, breaking physical contiguity:
+As vectors are inserted, posting list pages fill up and new pages are allocated
+at the end of the file, breaking physical contiguity:
 
 ```
 After inserts (declustered):
 
-Original:  [Meta][PL0-a][PL0-b][PL1-a][PL1-b]...
-           blk 0  blk 1  blk 2  blk 3  blk 4
-                           │
-                           │ next_blkno = 500 (jump!)
-                           ▼
-New pages at EOF:              [PL0-c][PL1-c]...
-                               blk 500  501
+Original:  [Meta][Centroids...][PL0-a][PL0-b][PL1-a][PL1-b]...
+                                        │
+                                        │ next_blkno = 500 (jump!)
+                                        ▼
+New pages at EOF:                           [PL0-c][PL1-c]...
+                                            blk 500  501
 ```
 
 The linked list structure remains intact, but links now span non-adjacent
 blocks (`next_blkno != current + 1`). This causes:
 - Random I/O when scanning fragmented posting lists
 - Gradual performance degradation proportional to fragmentation
+
+Centroid pages are rarely modified after build (only during cluster splits or
+rebalancing), so they remain contiguous.
 
 ### Over-Allocation for Growth
 
@@ -413,46 +724,48 @@ When fragmentation becomes significant:
 - **VACUUM (future)**: Could reorganize pages to restore locality without full
   rebuild
 
-### Cluster Splitting
+### Rebalancing Storage Layout
 
-When a cluster grows too large (exceeds a size threshold), it can be split into
-two sub-clusters without affecting other clusters:
+Split and merge operations (see LIRE Protocol above) affect storage layout:
 
-**Split procedure:**
-
-1. Identify oversized cluster C (e.g., posting list exceeds threshold)
-2. Scan C's posting list and compute two sub-centroids (k-means with k=2)
-3. Assign each vector to C1 or C2 based on nearest sub-centroid
-4. Rewrite existing pages in-place for C1 (centroid as first entry)
-5. Write new pages at EOF for C2 (centroid as first entry)
-6. Update metapage posting list directory (add C2's head block)
-7. Update centroid cache
+**Split storage flow:**
 
 ```
 Before: Cluster C spans pages P1, P2, P3, P4
 
-Split into C1 (~60%), C2 (~40%):
+After split into C1 (~60%), C2 (~40%):
 
 Pages P1, P2, P3: rewritten in-place for C1
-Pages at EOF:     new pages for C2
+New pages at EOF: new posting list for C2
 P4:               marked as free (reclaimed by vacuum)
+Centroid page:    C entry replaced with C1, C2
 ```
 
-**Benefits:**
-- Only one sub-cluster needs new page allocation
-- Approximately half the pages are reused in-place
-- Other clusters are unaffected (no global reorganization)
+**Merge storage flow:**
 
-**Edge cases:**
-- Single-page cluster: Must allocate at least one new page
-- Uneven split: Larger sub-cluster gets the in-place pages
+```
+Before: Small cluster C1 (pages P1) merges into neighbor C2 (pages P2, P3)
 
-**Triggering splits:**
-- Manual: Explicit maintenance command
-- Automatic (future): Background worker monitors cluster sizes
+After merge:
 
-For the initial implementation, cluster splitting is a manual maintenance
-operation. Automatic splitting can be added later.
+Pages P2, P3, + new page: combined posting list for C2
+P1:                       marked as free
+Centroid page:            C1 entry removed
+```
+
+**Cascade bounds** (from SPFresh measurements):
+- Only ~0.4% of insertions trigger rebalancing
+- Average cascade length: 3 operations
+- Maximum observed: 160 splits in a cascade
+- Convergence guaranteed (each split adds exactly one centroid)
+
+**Thresholds:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `split_threshold` | 2× target size | Trigger split when posting exceeds |
+| `merge_threshold` | 0.25× target size | Trigger merge when posting falls below |
+| `reassign_range` | 64 postings | Neighbor postings to check for reassignment |
 
 ### Future: Fork-Based Separation
 
@@ -480,17 +793,18 @@ Implement required callbacks:
 
 ### Buffer Cache Usage
 
-Posting list pages go through the standard buffer cache:
-- Benefits from PostgreSQL's LRU caching
-- Supports concurrent access with proper locking
-- WAL-logged for crash recovery
+Both centroid pages and posting list pages use the standard shared buffer cache:
 
-### Shared Memory Cache
+**Centroid pages**:
+- Accessed on every query (hot data)
+- Naturally stay cached due to frequent access
+- No separate dedicated cache structure needed
+- Standard PostgreSQL locking and WAL apply
 
-Separate cache for centroids (not in buffer cache):
-- Allocated at server startup via `shmem_request_hook`
-- Faster access than buffer cache (no page locking overhead)
-- Read-only after index build (no consistency concerns)
+**Posting list pages**:
+- Accessed based on query routing (subset per query)
+- LRU caching benefits frequently accessed clusters
+- Sequential prefetching for contiguous pages
 
 ### MVCC Support
 
@@ -504,34 +818,474 @@ Separate cache for centroids (not in buffer cache):
 
 | Component | Size Estimate | Location |
 |-----------|--------------|----------|
-| Centroids (quantized) | ~1MB per 10k centroids | Shared memory |
-| Posting list pages | Variable | Buffer cache |
-| Working memory | O(nprobe * avg_list_size) | Backend memory |
+| Centroid pages | ~1MB per 10k centroids | Shared buffers (hot) |
+| Posting list pages | Bulk of index | Shared buffers (LRU) |
+| Working memory | O(nprobe × avg_list_size) | Backend memory |
+| RaBitQ query state | O(dimension) | Backend memory |
 
 ### I/O Patterns
 
-- **Centroid search**: Memory-only, no I/O
+- **Centroid routing**: Typically cached (hot pages in shared buffers)
 - **Posting list read**: Sequential within list, random across lists
-- **Re-ranking**: Random access to heap (minimize with good quantization)
+- **Re-ranking**: Random access to heap (~1-5% of candidates)
 
 ### SIMD Requirements
 
 Critical paths requiring SIMD optimization:
 1. Distance computation (L2, inner product, cosine)
-2. Quantized distance computation
-3. Top-k selection
+2. RaBitQ binary distance and error bound computation
+3. Top-k selection during centroid routing
+
+## Billion-Scale Feasibility Study
+
+This section analyzes Meerkat's feasibility at 1 billion vectors, using SPFresh
+measurements as a baseline and calculating PostgreSQL-specific estimates.
+
+### SPFresh Reference Numbers (1B vectors, 96 dimensions)
+
+From the SPFresh paper (SPACEV1B dataset):
+
+| Metric | SPFresh Result |
+|--------|----------------|
+| Recall@10 | 90-97% (tunable) |
+| Query latency (p50) | 2-4ms |
+| Query latency (p99) | 8-12ms |
+| Update throughput | 1,000-5,000 vectors/sec |
+| Memory usage | 10GB (vs 1000GB for DiskANN) |
+| Index size | ~100GB |
+| Rebalancing overhead | 0.4% of inserts trigger split |
+
+Note: SPACEV1B uses 96-dimensional vectors. Modern embeddings (768-1536 dims)
+require proportionally more storage and compute.
+
+### Meerkat Estimates (1B vectors, 768 dimensions)
+
+**Base latency assumptions** (from [napkin-math]):
+
+| Operation | Latency | Throughput |
+|-----------|---------|------------|
+| Sequential memory (SIMD) | 0.5 ns | 20 GB/s |
+| Random memory (64 bytes) | 50 ns | 1 GB/s |
+| Sequential SSD read (8KB) | 1 μs | 4 GB/s |
+| Random SSD read (8KB) | 100 μs | 70 MB/s |
+| Same-zone network | 100 μs | 10 GB/s |
+
+**AWS storage options** (from [AWS i4i]/[AWS i3en] specs):
+
+| Storage | Random IOPS (4KB) | Seq throughput | Latency | Cost |
+|---------|-------------------|----------------|---------|------|
+| i4i.4xlarge NVMe | 400K read | ~3 GB/s | ~100 μs | ~$1/hr |
+| i4i.16xlarge NVMe | 1.6M read | ~7 GB/s | ~100 μs | ~$4/hr |
+| EBS gp3 (baseline) | 3K | 125 MB/s | ~200 μs | $0.08/GB |
+| EBS gp3 (max) | 16K | 1 GB/s | ~200 μs | +$0.005/IOPS |
+| EBS io2 Block Express | 256K | 4 GB/s | ~200 μs | $0.065/GB |
+
+**Platform assumptions:**
+- 1 billion vectors, 768 dimensions (OpenAI ada-002 scale)
+- **float16 (2 bytes)** per dimension for full-precision vectors
+- **Index on local NVMe** (i4i): 400K IOPS, ~3 GB/s, ~100 μs latency
+- **Heap on EBS gp3**: 16K IOPS provisioned, 1 GB/s, ~200 μs latency
+- 8KB PostgreSQL pages
+- 1 million leaf clusters (1,000 vectors per cluster average)
+- Boundary replication factor: 2× average
+
+[AWS i4i]: https://aws.amazon.com/ec2/instance-types/i4i/
+[AWS i3en]: https://aws.amazon.com/ec2/instance-types/i3en/
+
+**Vector element size comparison:**
+
+| Type | Bytes | 768d vector | 100d vector (SPACEV1B) |
+|------|-------|-------------|------------------------|
+| int8 | 1 | 768 B | 100 B (SPFresh) |
+| float16 | 2 | 1,536 B | 200 B |
+| float32 | 4 | 3,072 B | 400 B |
+
+We use **float16** as a practical middle ground: sufficient precision for most
+embedding models, avoids TOAST overhead for 768d, and halves storage vs float32.
+
+[napkin-math]: https://github.com/sirupsen/napkin-math
+
+#### Storage Requirements
+
+**Full-precision vectors (heap on EBS):**
+
+PostgreSQL TOASTs values exceeding ~2KB. With float16:
+
+| Dimensions | Vector size (float16) | TOAST? | Notes |
+|------------|----------------------|--------|-------|
+| 768 | 1,536 bytes | No | Inline in heap tuple |
+| 1024 | 2,048 bytes | Borderline | May be compressed inline |
+| 1536 | 3,072 bytes | Yes | Stored in TOAST table |
+| 3072 | 6,144 bytes | Yes | Stored in TOAST table |
+
+**Scenario A: Inline vectors (768d, float16) — recommended**
+
+| Component | Calculation | Size |
+|-----------|-------------|------|
+| Heap tuples | 1B × (1,536 + 24 header) bytes | 1.46 TB |
+| Page overhead | ~10% | 146 GB |
+| **Total heap** | | **~1.6 TB** |
+
+**Scenario B: TOASTed vectors (1536d float16 or 768d float32)**
+
+| Component | Calculation | Size |
+|-----------|-------------|------|
+| TOAST chunks | 1B × 3,072 bytes | 2.9 TB |
+| TOAST overhead | chunk headers + index | ~50 GB |
+| Main heap tuples | 1B × ~40 bytes (TOAST pointer) | 40 GB |
+| **Total heap + TOAST** | | **~3.0 TB** |
+
+**Scenario C: Vectors stored in index (no heap access)**
+
+| Component | Calculation | Size |
+|-----------|-------------|------|
+| Full vectors in index | 1B × 1,536 bytes × 2 (replication) | 2.9 TB |
+| RaBitQ + metadata | (as below) | 250 GB |
+| **Total index** | | **~3.2 TB** |
+
+Trade-off: 13× larger index but eliminates heap access entirely.
+
+**Index storage (NVMe) - quantized only:**
+
+| Component | Calculation | Size |
+|-----------|-------------|------|
+| RaBitQ bits | 768 bits / 8 = 96 bytes/vector | 96 GB |
+| TID | 6 bytes/entry | 6 GB |
+| f_error factor | 4 bytes/entry | 4 GB |
+| Version byte | 1 byte/entry | 1 GB |
+| **Per-entry total** | 107 bytes | 107 GB |
+| Boundary replication (2×) | 107 GB × 2 | 214 GB |
+| Centroids (quantized) | 1M × 96 bytes | 96 MB |
+| Centroid tree overhead | ~3 levels | 10 MB |
+| Page headers/fragmentation | ~15% | 32 GB |
+| **Total index** | | **~250 GB** |
+
+**Storage summary:**
+
+| Configuration | Vector size | Heap | Index | Total |
+|---------------|-------------|------|-------|-------|
+| Inline (768d, float16) | 1,536 B | 1.6 TB | 250 GB | **1.9 TB** |
+| TOASTed (1536d, float16) | 3,072 B | 3.0 TB | 250 GB | **3.3 TB** |
+| Vectors in index | 1,536 B | 0 | 3.2 TB | **3.2 TB** |
+| SPFresh (100d, int8) | 100 B | ~100 GB | ~100 GB | **~200 GB** |
+
+#### Query Performance Analysis
+
+All calculations use [napkin-math] reference latencies.
+
+**Centroid routing (hierarchical tree traversal):**
+
+| Level | Centroids | Data | Location | Latency |
+|-------|-----------|------|----------|---------|
+| Root | 256 | 24 KB | L3 cache (hot) | 256 × 50ns = **13 μs** |
+| Level 1 | 4,000 | 384 KB | Shared buffers | 4K × 50ns = **200 μs** |
+| Level 2 (leaves) | 1M | 96 MB | Shared buffers/NVMe | **0.1-1 ms** |
+| **Total routing** | | | | **0.3-1.2 ms** |
+
+Note: Hot paths stay in shared_buffers. Cold tenant routing may hit NVMe
+(100 μs per random 8KB page).
+
+**Posting list scan (nprobe=20) on i4i NVMe:**
+
+| Step | Calculation | Latency |
+|------|-------------|---------|
+| Vectors to scan | 20 clusters × 1,000 vectors | 20,000 vectors |
+| Index data to read | 20,000 × 107 bytes | 2.1 MB |
+| Pages to read | 2.1 MB / 8 KB | 268 pages |
+| RaBitQ compute (SIMD) | 20K × ~10 cycles / 3 GHz | **0.07 ms** |
+
+I/O latency depends critically on access pattern and async I/O:
+
+| Scenario | Access pattern | Calculation | Latency |
+|----------|----------------|-------------|---------|
+| Fresh index (contiguous) | Sequential read | 2.1 MB / 3 GB/s | **0.7 ms** |
+| Fragmented, serial I/O | Random QD=1 | 268 × 100 μs | **27 ms** |
+| Fragmented, async I/O | Random QD=268 | 268 / 400K + overhead | **1-2 ms** |
+
+*QD (queue depth) = I/O requests in flight simultaneously. NVMe achieves 400K
+IOPS only at QD≥32. Serial reads (QD=1) pay full 100μs latency per page.*
+
+**Key insight**: The 400K IOPS figure requires **queue depth saturation**. Serial
+random reads are 100 μs each. To achieve low latency on fragmented posting lists:
+
+1. **Prefetching**: PostgreSQL's `effective_io_concurrency` enables async prefetch
+2. **io_uring**: Submit all page reads in parallel, wait for completion
+3. **Keep lists contiguous**: Fresh builds are sequential; REINDEX restores this
+
+For fresh/defragmented indexes, posting scan is ~1ms. For fragmented indexes
+without async I/O, it degrades to ~27ms. Async I/O (io_uring) recovers to ~2ms.
+
+**Re-ranking (top candidates survive RaBitQ filtering):**
+
+| Step | Calculation | Latency |
+|------|-------------|---------|
+| Candidates after filter | 20,000 × 5% | 1,000 vectors |
+| Distance compute (SIMD) | 1K × 768 × 2B / 20 GB/s | **0.08 ms** |
+
+Heap access latency depends on storage configuration:
+
+**Scenario A: Inline vectors (768d, float16) — heap on EBS gp3**
+
+| Step | I/O ops | Calculation | Latency |
+|------|---------|-------------|---------|
+| Heap page reads | 1,000 | 1,000 / 16K IOPS | **62 ms** |
+| With prefetch batching | | 4× improvement | **15-20 ms** |
+
+**Scenario A': Inline vectors — heap on local NVMe (i4i)**
+
+| Step | I/O ops | Calculation | Latency |
+|------|---------|-------------|---------|
+| Heap page reads | 1,000 | 1,000 / 400K IOPS | **2.5 ms** |
+
+**Scenario B: TOASTed vectors (1536d) — heap on EBS gp3**
+
+| Step | I/O ops | Calculation | Latency |
+|------|---------|-------------|---------|
+| Heap + TOAST reads | 4,000 | 4,000 / 16K IOPS | **250 ms** |
+| With prefetch batching | | 4× improvement | **60-80 ms** |
+
+**Scenario C: Vectors stored in index (NVMe only)**
+
+| Step | I/O ops | Calculation | Latency |
+|------|---------|-------------|---------|
+| Already in posting list | 0 | 0 | **0 ms** |
+| (Larger posting scan) | +190 pages | +190 / 400K IOPS | **+0.5 ms** |
+
+**Query latency summary by configuration:**
+
+Assumes contiguous posting lists (fresh index) or async I/O for fragmented lists.
+
+| Configuration | Heap storage | Routing | Posting | Re-rank | **p50** | **p99** |
+|---------------|--------------|---------|---------|---------|---------|---------|
+| Inline (768d) | EBS gp3 16K | <1ms | 1-2ms | 15ms | **~17ms** | **~40ms** |
+| Inline (768d) | i4i NVMe | <1ms | 1-2ms | 2.5ms | **~5ms** | **~12ms** |
+| TOASTed (1536d) | EBS gp3 16K | <1ms | 1-2ms | 60ms | **~62ms** | **~110ms** |
+| Vectors in index | N/A | <1ms | 2-3ms | <1ms | **~4ms** | **~10ms** |
+| SPFresh (100d) | local NVMe | <1ms | 2ms | 2ms | **~4ms** | **~10ms** |
+
+**Fragmentation impact**: Without async I/O, fragmented posting lists degrade
+posting scan from ~1ms to ~27ms. Mitigation: use io_uring, maintain contiguity
+via REINDEX, or set `effective_io_concurrency` appropriately.
+
+**Key insights**:
+
+1. **Posting scan is I/O-bound**: RaBitQ binary distance with AVX-512 is ~0.1ms
+   for 20K vectors. NVMe read latency dominates, consistent with SPFresh.
+
+2. **Async I/O is critical**: Serial random reads are 100μs each. Without async
+   I/O (io_uring or prefetch), fragmented posting lists degrade to ~27ms.
+   PostgreSQL 16+ supports io_uring; earlier versions use `effective_io_concurrency`.
+
+3. **Heap access dominates total latency**: With EBS, re-ranking is 15-60ms.
+   With local NVMe (i4i), re-ranking drops to 2.5ms.
+
+4. **i4i NVMe matches SPFresh latency**: 5ms p50 vs SPFresh's 4ms despite
+   15× larger vectors. The architecture is equally efficient per-byte.
+
+5. **Vectors-in-index achieves 4ms p50** at ~2× storage cost. Consider for
+   latency-critical workloads.
+
+**Storage cost vs latency tradeoff:**
+
+| Configuration | Storage | p50 latency | Monthly cost (1B vectors) |
+|---------------|---------|-------------|---------------------------|
+| Inline + EBS gp3 | 1.9 TB | 17ms | ~$150 storage + $80 IOPS |
+| Inline + i4i NVMe | 1.9 TB | 5ms | ~$1,000 (i4i.4xlarge) |
+| Vectors in index | 3.2 TB | 4ms | ~$1,500 (larger i4i) |
+
+*Requires async I/O or contiguous posting lists. See fragmentation discussion above.*
+
+#### Index Build Performance
+
+Using [napkin-math] reference throughputs. Assumes 768d float16 vectors.
+
+**Phase 1: Sampling and clustering (leader only)**
+
+| Step | Calculation | Time |
+|------|-------------|------|
+| Sample 1% of vectors | 10M vectors × 1.5 KB = 15 GB | |
+| Sequential heap read | 15 GB / 1 GB/s (EBS) | 15 sec |
+| Load to memory | 15 GB / 20 GB/s (SIMD) | 0.75 sec |
+| Hierarchical k-means | 10M × 768d × 20 iterations | ~30 min |
+| **Phase 1 total** | | **~32 min** |
+
+Clustering runs on the leader process only (shared centroid state). Could be
+parallelized with parallel k-means, but 30 min is acceptable for 1B vectors.
+
+**Phase 2: Full scan, assignment, quantization (parallel workers)**
+
+PostgreSQL's parallel index build infrastructure partitions the heap scan across
+workers. Each worker independently:
+1. Scans assigned heap pages
+2. Finds nearest centroid for each vector
+3. Computes RaBitQ encoding
+4. Writes to worker-local buffer
+
+| Step | Serial | Parallelizable? |
+|------|--------|-----------------|
+| Heap scan | 27 min | Yes (I/O bandwidth limited) |
+| Centroid search | 25 min | Yes (CPU, scales linearly) |
+| RaBitQ encoding | 5 min | Yes (CPU, scales linearly) |
+| **Serial total** | **57 min** | |
+
+**Parallel scaling analysis:**
+
+| Workers | Heap scan | Centroid | RaBitQ | Merge | **Total** | Speedup |
+|---------|-----------|----------|--------|-------|-----------|---------|
+| 1 | 27 min | 25 min | 5 min | 0 | **57 min** | 1.0× |
+| 2 | 27 min | 12.5 min | 2.5 min | 1 min | **43 min** | 1.3× |
+| 4 | 27 min | 6.3 min | 1.3 min | 2 min | **37 min** | 1.5× |
+| 8 | 27 min | 3.1 min | 0.6 min | 3 min | **34 min** | 1.7× |
+| 16 | 27 min | 1.6 min | 0.3 min | 4 min | **33 min** | 1.7× |
+
+*Heap scan is I/O-bound at 1 GB/s (EBS). CPU work scales but I/O doesn't.*
+
+**With local NVMe (i4i: 3 GB/s read):**
+
+| Workers | Heap scan | Centroid | RaBitQ | Merge | **Total** | Speedup |
+|---------|-----------|----------|--------|-------|-----------|---------|
+| 1 | 9 min | 25 min | 5 min | 0 | **39 min** | 1.0× |
+| 4 | 9 min | 6.3 min | 1.3 min | 2 min | **19 min** | 2.1× |
+| 8 | 9 min | 3.1 min | 0.6 min | 3 min | **16 min** | 2.4× |
+| 16 | 9 min | 1.6 min | 0.3 min | 4 min | **15 min** | 2.6× |
+
+*Local NVMe removes I/O bottleneck; build becomes CPU-bound and scales better.*
+
+**Amdahl's Law analysis:**
+
+```
+Serial fraction (EBS):  ~50% (heap scan I/O)
+Serial fraction (NVMe): ~25% (heap scan I/O)
+
+Max speedup (EBS):  1 / 0.50 = 2×    → diminishing returns after 4 workers
+Max speedup (NVMe): 1 / 0.25 = 4×    → scales to 8-16 workers
+```
+
+**Phase 3: Merge and write (leader + I/O)**
+
+| Step | Calculation | Time |
+|------|-------------|------|
+| Merge worker buffers | Combine posting lists | 2-4 min |
+| Write posting lists | 250 GB / 4 GB/s (NVMe seq) | 63 sec |
+| Fsync overhead | ~10% | 6 sec |
+| Write centroid pages | 100 MB / 4 GB/s | <1 sec |
+| **Phase 3 total** | | **~3-5 min** |
+
+**Build time summary:**
+
+| Configuration | Phase 1 | Phase 2 | Phase 3 | **Total** |
+|---------------|---------|---------|---------|-----------|
+| EBS, 1 worker | 32 min | 57 min | 2 min | **91 min** |
+| EBS, 8 workers | 32 min | 34 min | 5 min | **71 min** |
+| i4i NVMe, 8 workers | 32 min | 16 min | 5 min | **53 min** |
+| i4i NVMe, 16 workers | 32 min | 15 min | 5 min | **52 min** |
+
+**PostgreSQL parallel build configuration:**
+
+```sql
+-- Enable parallel index build
+SET max_parallel_maintenance_workers = 8;  -- Workers for CREATE INDEX
+SET maintenance_work_mem = '8GB';          -- Memory per worker
+
+-- Create index with parallel workers
+CREATE INDEX CONCURRENTLY ON documents
+USING meerkat (embedding vector_cosine_ops)
+WITH (workers = 8);
+```
+
+**Recommendation:** Use 8 workers on i4i NVMe for ~50 min builds. Beyond 8
+workers, I/O becomes the bottleneck and additional CPU provides diminishing
+returns. For faster builds, the clustering phase (32 min) becomes dominant—
+consider pre-computed centroids or incremental builds for frequent rebuilds.
+
+#### Multi-Tenant Scaling
+
+For composite key indexes with N tenants:
+
+| Tenants | Vectors/tenant | Cluster overhead | Query isolation |
+|---------|----------------|------------------|-----------------|
+| 10 | 100M | Minimal | Full |
+| 100 | 10M | ~10% | Full |
+| 1,000 | 1M | ~15% | Full |
+| 10,000 | 100K | ~25% | Full |
+
+Per-tenant query cost is independent of total dataset size—a query for a
+tenant with 1M vectors has the same cost whether the total index has 1B or
+10B vectors.
+
+#### Comparison with SPFresh
+
+| Metric | SPFresh | Meerkat (EBS) | Meerkat (i4i) | Meerkat In-Index |
+|--------|---------|---------------|---------------|------------------|
+| Dimensions | 100 | 768 | 768 | 768 |
+| Element type | int8 | float16 | float16 | float16 |
+| Vector size | 100 B | 1,536 B | 1,536 B | 1,536 B |
+| Heap storage | NVMe | EBS gp3 | i4i NVMe | N/A |
+| Query p50 | 2-4ms | ~17ms | **~5ms** | **~4ms** |
+| Query p99 | 8-12ms | ~40ms | **~12ms** | **~10ms** |
+| Index size | ~100 GB | 250 GB | 250 GB | 3.2 TB |
+| Heap size | ~100 GB | 1.6 TB | 1.6 TB | 0 |
+| Total storage | ~200 GB | 1.9 TB | 1.9 TB | 3.2 TB |
+| Build time | N/A | ~1 hour | ~30 min | ~1 hour |
+| Memory | 10 GB | 32-64 GB | 32-64 GB | 64-128 GB |
+| Instance cost | N/A | ~$230/mo | ~$730/mo | ~$1,100/mo |
+
+**Analysis:**
+
+- **SPFresh baseline**: 100d int8 vectors are 15× smaller than 768d float16.
+  Both systems are I/O-bound on posting scan; RaBitQ compute is negligible.
+
+- **Meerkat on EBS**: Cost-effective at ~$230/month, but EBS IOPS limits
+  re-ranking latency to ~15ms. Good for throughput-oriented workloads.
+
+- **Meerkat on i4i NVMe**: Achieves **5ms p50**—matching SPFresh despite 15×
+  larger vectors. Proves the architecture scales efficiently with vector size.
+
+- **Vectors in index**: Best latency at **3ms p50** by eliminating heap access.
+  ~2× storage cost. Competitive with SPFresh at any vector size.
+
+**Recommendations by workload:**
+
+| Workload | Configuration | Instance | p50 | Cost/month |
+|----------|---------------|----------|-----|------------|
+| Cost-sensitive | Inline + EBS | r6i.4xlarge | 17ms | ~$500 |
+| Balanced | Inline + i4i | i4i.4xlarge | 5ms | ~$1,000 |
+| Latency-critical | In-index | i4i.8xlarge | 4ms | ~$2,000 |
+
+*Latencies assume async I/O (io_uring) or contiguous posting lists. Fragmented
+indexes without async I/O add ~25ms to posting scan.*
+| Latency-critical (<30ms p99) | Vectors in index | No heap access |
+| Cost-sensitive | Inline (768d, float16) | Smallest total storage |
 
 ## Future Extensions
 
-1. **Product quantization**: Better compression than scalar quantization
-2. **Graph-based refinement**: HNSW layer over centroids for faster search
+1. **Product quantization**: Even better compression for very high dimensions
+2. **Graph-based leaf refinement**: HNSW within large clusters
 3. **Tiered storage**: Extend to cloud storage for cold data
-4. **Learned quantization**: Data-adaptive quantization schemes
-5. **Filtered search**: Efficient pre-filtering with predicates
+4. **Filtered search**: Efficient pre-filtering with predicates
+5. **Cross-tenant queries**: Aggregate search across multiple tenants
 
 ## References
 
-- [SPANN paper](https://www.microsoft.com/en-us/research/wp-content/uploads/2021/11/SPANN_finalversion1.pdf)
-- [ScaNN for AlloyDB whitepaper](https://services.google.com/fh/files/misc/scann_for_alloydb_whitepaper.pdf)
-- [turbopuffer ANN v3](https://turbopuffer.com/blog/ann-v3)
-- [SPFresh paper](https://dl.acm.org/doi/epdf/10.1145/3600006.3613166)
+**Research papers:**
+
+- [SPANN paper][spann] - Disk-based IVF with boundary replication
+- [SPFresh paper][spfresh] - LIRE protocol for incremental updates
+- [ScaNN for AlloyDB whitepaper][scann-alloydb] - Hierarchical clustering
+- [RaBitQ paper][rabitq] - Binary quantization with error bounds
+
+**Implementation references:**
+
+- [turbopuffer ANN v3][turbopuffer] - Production IVF lessons
+- [napkin-math][napkin] - Systems performance reference numbers
+- [AWS i4i instances][aws-i4i] - Local NVMe storage specs
+- [AWS i3en instances][aws-i3en] - High-density NVMe storage
+
+[spann]: https://www.microsoft.com/en-us/research/wp-content/uploads/2021/11/SPANN_finalversion1.pdf
+[spfresh]: https://arxiv.org/pdf/2410.14452
+[scann-alloydb]: https://services.google.com/fh/files/misc/scann_for_alloydb_whitepaper.pdf
+[rabitq]: https://arxiv.org/abs/2405.12497
+[turbopuffer]: https://turbopuffer.com/blog/ann-v3
+[napkin]: https://github.com/sirupsen/napkin-math
+[aws-i4i]: https://aws.amazon.com/ec2/instance-types/i4i/
+[aws-i3en]: https://aws.amazon.com/ec2/instance-types/i3en/

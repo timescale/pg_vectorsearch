@@ -12,27 +12,28 @@ vector type from [pgvector][pgvector].
 
 ## Features
 
+- **Billion-scale vector search** with hierarchical clustering
 - **Native PostgreSQL integration** via the Index Access Method (IAM) API
 - **SIMD-optimized distance computation** (AVX2, AVX512, NEON)
-- **RaBitQ quantization** for memory-efficient vector storage with theoretical
-  error bounds
-- **Streaming search** with support for filtered queries
-- **Buffer cache integration** for posting lists with separate centroid cache
+- **RaBitQ quantization** with theoretical error bounds for two-stage search
+- **Dynamic updates** via LIRE protocol (split, merge, reassign)
+- **Multi-tenant support** with composite key indexes
+- **Buffer cache integration** for both centroid and posting list pages
 - **MVCC and replication support** through standard PostgreSQL mechanisms
 
 ## Architecture
 
-Meerkat partitions the vector space into clusters using k-means clustering.
-Each cluster has a centroid stored in a shared memory cache for fast nearest
-cluster lookup. Vectors are quantized and stored in posting lists within
-standard PostgreSQL pages.
+Meerkat uses a hierarchical centroid tree to partition vectors into clusters.
+Centroids are stored in dedicated pages within the PostgreSQL buffer cache.
+Vectors are RaBitQ-quantized and stored in posting lists with a SoA layout
+optimized for SIMD batch distance computation.
 
 ```
 Query Flow:
-1. Find nearest centroids (in-memory cache)
-2. Scan posting lists for candidate clusters (buffer cache)
-3. Compute distances using quantized vectors (SIMD)
-4. Rerank top candidates with full precision
+1. Traverse centroid tree to find nearest clusters (buffer cache)
+2. Scan posting lists for candidates (buffer cache, async I/O)
+3. RaBitQ two-stage filtering: estimate → error bound → rerank
+4. Full-precision reranking from heap
 5. Return k nearest neighbors
 ```
 
@@ -99,11 +100,12 @@ LIMIT 10;
 
 ### Research
 
-- [RaBitQ][rabitq] - Quantizing High-Dimensional Vectors with a Theoretical
-  Error Bound (SIGMOD 2024)
-- [SPANN][spann-paper] - Highly-efficient Billion-scale Approximate Nearest
-  Neighbor Search (NeurIPS 2021)
-- [ScaNN for AlloyDB][scann-alloydb] - Google whitepaper
+- [RaBitQ][rabitq] - Binary quantization with theoretical error bounds
+  (SIGMOD 2024)
+- [SPFresh][spfresh] - LIRE protocol for incremental updates (SOSP 2023)
+- [SPANN][spann-paper] - Billion-scale ANN with boundary replication
+  (NeurIPS 2021)
+- [ScaNN for AlloyDB][scann-alloydb] - Hierarchical clustering (Google)
 
 ### Related Projects
 
@@ -120,6 +122,7 @@ TBD
 [pgvector]: https://github.com/pgvector/pgvector
 [pgvectorscale]: https://github.com/timescale/pgvectorscale
 [rabitq]: https://github.com/gaoj0017/RaBitQ
+[spfresh]: https://dl.acm.org/doi/10.1145/3600006.3613166
 [spann-paper]: https://www.microsoft.com/en-us/research/wp-content/uploads/2021/11/SPANN_finalversion1.pdf
 [scann-alloydb]: https://services.google.com/fh/files/misc/scann_for_alloydb_whitepaper.pdf
 [arch-doc]: docs/architecture.md
