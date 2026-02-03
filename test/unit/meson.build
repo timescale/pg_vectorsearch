@@ -4,6 +4,7 @@ unit_test_sources = files(
   'mkt_test.c',
   'run_tests.c',
   'test_mkt_memory.c',
+  'test_mkt_platform.c',
   'test_mkt_vector.c',
 )
 

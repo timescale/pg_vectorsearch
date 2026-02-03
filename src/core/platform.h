@@ -1,0 +1,86 @@
+/*
+ * platform.h - Platform abstraction and SIMD capability detection
+ *
+ * Provides runtime CPU feature detection and compiler intrinsics wrappers
+ * for portable SIMD code.
+ */
+
+#ifndef MKT_PLATFORM_H
+#define MKT_PLATFORM_H
+
+#include <stdint.h>
+
+/*
+ * SIMD capability flags detected at runtime.
+ * Multiple flags may be set (e.g., AVX512F implies AVX2 implies SSE4.1).
+ */
+typedef enum
+{
+	SIMD_NONE	 = 0,
+	SIMD_SSE2	 = 1 << 0,
+	SIMD_SSE4_1	 = 1 << 1,
+	SIMD_AVX2	 = 1 << 2,
+	SIMD_AVX512F = 1 << 3,
+	SIMD_NEON	 = 1 << 4,
+} SimdCapability;
+
+/*
+ * Detect CPU SIMD capabilities at runtime.
+ *
+ * On x86/x64: Uses CPUID to detect SSE2, SSE4.1, AVX2, AVX512F.
+ * On ARM: Returns SIMD_NEON if compiled with NEON support.
+ *
+ * Result is cached after first call.
+ */
+SimdCapability mkt_detect_simd(void);
+
+/*
+ * Check if specific SIMD capability is available.
+ */
+static inline int
+mkt_has_simd(SimdCapability cap)
+{
+	return (mkt_detect_simd() & cap) != 0;
+}
+
+/* Cache line size (typical for modern CPUs) */
+#define MKT_CACHE_LINE 64
+
+/*
+ * Prefetch hints for memory access optimization.
+ *
+ * mkt_prefetch_read:  Prefetch for reading (non-temporal, keep in all caches)
+ * mkt_prefetch_write: Prefetch for writing (exclusive access)
+ */
+#define mkt_prefetch_read(addr)	 __builtin_prefetch((addr), 0, 3)
+#define mkt_prefetch_write(addr) __builtin_prefetch((addr), 1, 3)
+
+/*
+ * Branch prediction hints.
+ *
+ * Use sparingly - modern CPUs have good branch predictors.
+ * Most useful for error paths that are rarely taken.
+ */
+#define mkt_likely(x)	__builtin_expect(!!(x), 1)
+#define mkt_unlikely(x) __builtin_expect(!!(x), 0)
+
+/*
+ * Compiler memory barrier.
+ *
+ * Prevents compiler from reordering memory accesses across this point.
+ * Does NOT generate CPU fence instructions (use atomics for that).
+ */
+#define mkt_compiler_barrier() __asm__ __volatile__("" ::: "memory")
+
+/*
+ * Alignment helpers.
+ */
+#define MKT_ALIGN(x, a)		 (((x) + ((a) - 1)) & ~((a) - 1))
+#define MKT_IS_ALIGNED(x, a) (((uintptr_t)(x) & ((a) - 1)) == 0)
+
+/*
+ * SIMD vector alignment (64 bytes for AVX-512).
+ */
+#define MKT_SIMD_ALIGN 64
+
+#endif /* MKT_PLATFORM_H */
