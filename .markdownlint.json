@@ -3,6 +3,7 @@
   "MD003": {
     "style": "atx"
   },
+  "MD060": false,
   "MD004": {
     "style": "dash"
   },

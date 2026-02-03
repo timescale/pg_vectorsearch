@@ -25,24 +25,25 @@ research with practical considerations for database integration.
 
 ```
 Query Flow:
-  1. Quantize query, find top-k centroids (in-memory centroid index)
+  1. Traverse centroid tree to find top-k clusters (buffer cache)
   2. Scan posting lists for candidate clusters (disk/buffer cache)
   3. RaBitQ two-stage filtering: 1-bit estimate → error bound check → rerank
-  4. Full-precision reranking of top candidates
+  4. Full-precision reranking of top candidates (heap access)
   5. Return k nearest neighbors
 
 Index Structure:
   ┌─────────────────────────────────────────────────────────────┐
-  │ Centroid Index (in-memory)                                  │
+  │ Centroid Pages (dedicated pages in shared buffers)          │
+  │   - Hierarchical tree: root → intermediate → leaf levels    │
   │   - Quantized centroids for fast cluster selection          │
-  │   - Typically √n centroids for n vectors                    │
+  │   - Hot pages stay cached; no separate in-memory cache      │
   └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
   ┌─────────────────────────────────────────────────────────────┐
   │ Posting Lists (PostgreSQL pages)                            │
-  │   - One list per centroid/cluster                           │
-  │   - RaBitQ-encoded vectors + full vectors for reranking     │
+  │   - One list per leaf centroid/cluster                      │
+  │   - RaBitQ-encoded vectors (TID, bits, f_error)             │
   │   - Boundary vectors replicated across adjacent clusters    │
   └─────────────────────────────────────────────────────────────┘
 ```
@@ -113,7 +114,7 @@ full reference list.
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                        PostgreSQL Integration                           │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────────┐  │
-│  │ IAM Handler │  │ Page Layout │  │ Shmem Cache │  │ Cost Estimate │  │
+│  │ IAM Handler │  │ Page Layout │  │ Buffer Mgmt │  │ Cost Estimate │  │
 │  └─────────────┘  └─────────────┘  └─────────────┘  └───────────────┘  │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                          Index Operations                               │
@@ -1598,7 +1599,8 @@ removes bias toward any particular vector direction.
 **Per-vector storage**: RaBitQ requires more than just the binary code:
 
 - **D-bit binary code**: Sign pattern after rotation (D/8 bytes)
-- **⟨ō, o⟩**: Inner product between quantized and original normalized vector (4 bytes)
+- **⟨ō, o⟩**: Inner product between quantized and original normalized vector
+  (4 bytes)
 - **‖o - c‖**: Vector norm relative to cluster centroid (4 bytes)
 
 ```c
@@ -3449,51 +3451,44 @@ benchmark:
 
 **Files**: `src/pg/index/posting.h`, `src/pg/index/posting.c`
 
-The posting list entry is the fundamental unit stored in the index.
+Posting list pages use a Struct-of-Arrays (SoA) layout for SIMD efficiency,
+similar to centroid pages. Entry metadata and quantized vectors are stored in
+separate contiguous regions.
 
 ```c
-// Posting list entry (variable size based on quantization)
-// Layout: [flags: 1 byte][tid: 6 bytes][quantized: dim bytes]
-//
-// For centroid entries, TID may be InvalidItemPointer if the original
-// vector was deleted (centroid becomes navigation-only)
-
+// Posting entry metadata (separate from vector data for SoA layout)
+// Note: Centroids are stored in dedicated centroid pages, not in posting lists.
 typedef struct {
     uint8_t  flags;         // Entry flags
-    // TID stored as 6 bytes: 4-byte block + 2-byte offset
-    uint8_t  tid_bytes[6];
-    // Followed by: MktRaBitQVector (variable length based on dim)
-} PostingEntry;
+    uint8_t  tid_bytes[6];  // TID: 4-byte block + 2-byte offset
+    uint8_t  reserved;      // Alignment padding
+} PostingEntryMeta;
 
 // Entry flags
-#define POSTING_FLAG_CENTROID  0x01  // This entry is the cluster centroid
-#define POSTING_FLAG_DELETED   0x02  // Soft-deleted, pending vacuum
+#define POSTING_FLAG_DELETED   0x01  // Soft-deleted, pending vacuum
+#define POSTING_FLAG_BOUNDARY  0x02  // Replicated to adjacent cluster
 
-// Entry size calculation (RaBitQ: 16 bytes header + dim/8 bytes for bits)
-static inline size_t posting_entry_size(Dimension dim) {
-    return sizeof(PostingEntry) + MKT_RABITQ_SIZE(dim);
-}
-
-// Access quantized data (const for reading, non-const for writing)
-static inline const MktRaBitQVector *
-posting_entry_quantized(const PostingEntry *entry)
-{
-    return (const MktRaBitQVector *)(entry + 1);
-}
-
-// TID encoding/decoding (6 bytes for block + offset)
-static inline void posting_entry_set_tid(PostingEntry *entry,
-                                          uint32_t block, uint16_t offset) {
+// TID encoding/decoding
+static inline void posting_entry_set_tid(PostingEntryMeta *entry,
+                                          BlockNumber block,
+                                          OffsetNumber offset) {
     memcpy(entry->tid_bytes, &block, 4);
     memcpy(entry->tid_bytes + 4, &offset, 2);
 }
 
-static inline void posting_entry_get_tid(const PostingEntry *entry,
-                                          uint32_t *block, uint16_t *offset) {
+static inline void posting_entry_get_tid(const PostingEntryMeta *entry,
+                                          BlockNumber *block,
+                                          OffsetNumber *offset) {
     memcpy(block, entry->tid_bytes, 4);
     memcpy(offset, entry->tid_bytes + 4, 2);
 }
 ```
+
+**Why SoA layout for posting lists:**
+- Distance computation scans ALL vectors on page before checking TIDs
+- Contiguous vectors enable SIMD batch distance computation
+- Metadata accessed only for candidates passing distance threshold
+- Same benefits as centroid pages: sequential loads, prefetching, cache efficiency
 
 ### 3.2 In-Memory Posting List
 
@@ -3515,18 +3510,10 @@ void            mkt_posting_list_destroy(MemPostingList *list);
 // Add entry to list
 void mkt_posting_list_add(
     MemPostingList *list,
-    uint32_t block,
-    uint16_t offset,
+    BlockNumber block,
+    OffsetNumber offset,
     const MktRaBitQVector *quantized,
     uint8_t flags
-);
-
-// Set centroid (must be first entry)
-void mkt_posting_list_set_centroid(
-    MemPostingList *list,
-    uint32_t block,
-    uint16_t offset,
-    const MktRaBitQVector *quantized
 );
 
 // Sort by TID for locality (optional optimization)
@@ -3552,47 +3539,81 @@ Page layout for PostgreSQL integration, but designed to be testable standalone.
 // Page size (matches PostgreSQL default)
 #define MKT_PAGE_SIZE 8192
 
-// Page header (at start of each page)
+// Posting list page header (SoA with reverse growth)
+//
+// Layout enables both SIMD-friendly scans and efficient appends:
+//   - Metadata grows low→high (after header)
+//   - Vectors grow high→low (from page end)
+//   - Page full when they meet
+//
+// ┌─────────────────────────────────────────────────────────┐
+// │ Header                                                  │
+// ├─────────────────────────────────────────────────────────┤
+// │ Meta[0] Meta[1] Meta[2] ...        ──► (grows down)     │
+// │                                                         │
+// │                        ... Vec[2] Vec[1] Vec[0] ◄──     │
+// │                                        (grows up)       │
+// └─────────────────────────────────────────────────────────┘
+//
 typedef struct {
-    uint32_t next_blkno;      // Next page in posting list (or InvalidBlockNumber)
-    uint16_t entry_count;     // Number of entries on this page
-    uint16_t free_offset;     // Offset to first free byte
-    ClusterId cluster_id;     // Which cluster this page belongs to
-    uint8_t  flags;           // Page flags
-    uint8_t  reserved[3];     // Alignment padding
-} MktPageHeader;
+    BlockNumber  next_blkno;    // Next page in posting list
+    uint16_t     entry_count;   // Number of entries on this page
+    OffsetNumber meta_end;      // Offset past last metadata entry
+    OffsetNumber vec_start;     // Offset to first (lowest) vector
+    ClusterId    cluster_id;    // Which cluster this page belongs to
+    uint8_t      flags;         // Page flags
+    uint8_t      reserved;      // Alignment padding
+} MktPostingPageHeader;
 
-#define MKT_PAGE_FLAG_FIRST    0x01  // First page of posting list (has centroid)
-#define MKT_PAGE_FLAG_OVERFLOW 0x02  // Overflow page (added after initial build)
+#define MKT_PAGE_FLAG_FIRST    0x01  // First page of posting list
+#define MKT_PAGE_FLAG_OVERFLOW 0x02  // Overflow page (added after build)
 
 // Usable space per page
-#define MKT_PAGE_USABLE (MKT_PAGE_SIZE - sizeof(MktPageHeader))
+#define MKT_PAGE_USABLE (MKT_PAGE_SIZE - sizeof(MktPostingPageHeader))
 
-// Calculate entries per page
+// Calculate entries per page (metadata + vector per entry)
 static inline uint32_t mkt_entries_per_page(Dimension dim) {
-    return MKT_PAGE_USABLE / posting_entry_size(dim);
+    size_t entry_size = sizeof(PostingEntryMeta) + MKT_RABITQ_SIZE(dim);
+    return MKT_PAGE_USABLE / entry_size;
 }
 
-// Page operations (work on raw byte buffer)
+// Access macros for SoA regions
+#define MKT_PAGE_META(page) \
+    ((PostingEntryMeta *)((char *)(page) + sizeof(MktPostingPageHeader)))
+
+// Vectors are stored in reverse order from page end
+// vec_start points to lowest address; vectors are contiguous upward
+#define MKT_PAGE_VECTORS(page, hdr) \
+    ((MktRaBitQVector *)((char *)(page) + (hdr)->vec_start))
+
+// Check if page has room for another entry
+static inline bool mkt_page_has_room(const MktPostingPageHeader *hdr,
+                                      Dimension dim) {
+    size_t need = sizeof(PostingEntryMeta) + MKT_RABITQ_SIZE(dim);
+    return (hdr->vec_start - hdr->meta_end) >= need;
+}
+
+// Page operations
 void mkt_page_init(void *page, ClusterId cluster_id, uint8_t flags);
-void mkt_page_set_next(void *page, uint32_t next_blkno);
-uint32_t mkt_page_get_next(const void *page);
+void mkt_page_set_next(void *page, BlockNumber next_blkno);
+BlockNumber mkt_page_get_next(const void *page);
 
 // Add entry to page (returns false if page full)
+// Appends metadata at meta_end, prepends vector before vec_start
 bool mkt_page_add_entry(
     void *page,
     Dimension dim,
-    uint32_t block,
-    uint16_t offset,
+    BlockNumber block,
+    OffsetNumber offset,
     const MktRaBitQVector *quantized,
     uint8_t flags
 );
 
-// Get entry by index
-const PostingEntry *mkt_page_get_entry(const void *page, uint32_t index,
-                                       Dimension dim);
+// Access by index
+const PostingEntryMeta *mkt_page_get_meta(const void *page, uint16_t index);
+const MktRaBitQVector *mkt_page_get_vector(const void *page, uint16_t index,
+                                            Dimension dim);
 
-// Iterate entries on page
 uint16_t mkt_page_entry_count(const void *page);
 ```
 
@@ -3601,18 +3622,18 @@ uint16_t mkt_page_entry_count(const void *page);
 ```c
 // Metapage layout (block 0)
 typedef struct {
-    uint32_t magic;           // Magic number for validation
-    uint32_t version;         // Format version
-    Dimension dim;            // Vector dimension
-    DistanceMetric metric;    // Distance metric
-    uint32_t nlist;           // Number of clusters
-    uint64_t nvecs;           // Total vectors indexed
-    uint32_t next_meta_blkno; // Next metapage (if directory overflows)
+    uint32_t    magic;           // Magic number for validation
+    uint32_t    version;         // Format version
+    Dimension   dim;             // Vector dimension
+    DistanceMetric metric;       // Distance metric
+    uint32_t    nlist;           // Number of clusters
+    uint64_t    nvecs;           // Total vectors indexed
+    BlockNumber next_meta_blkno; // Next metapage (if directory overflows)
     // RaBitQ parameters follow (orthogonal matrix seed, etc.)
-    // Then: posting_list_heads[nlist] (uint32_t per cluster)
+    // Then: posting_list_heads[nlist] (BlockNumber per cluster)
 } MktMetapage;
 
-#define MKT_MAGIC 0x54494752  // "TIGR"
+#define MKT_MAGIC 0x4D4B4154  // "MKAT"
 #define MKT_VERSION 1
 
 // Directory entries per metapage (after fixed header + RaBitQ params)
@@ -3628,8 +3649,8 @@ void mkt_meta_init(
 );
 
 // Get/set posting list head for cluster
-uint32_t mkt_meta_get_head(const void *page, ClusterId cluster);
-void mkt_meta_set_head(void *page, ClusterId cluster, uint32_t block);
+BlockNumber mkt_meta_get_head(const void *page, ClusterId cluster);
+void mkt_meta_set_head(void *page, ClusterId cluster, BlockNumber block);
 ```
 
 **Tests**:
@@ -3728,7 +3749,7 @@ void mkt_build_assign(
 // Callback invoked for each page to write
 typedef void (*PageWriteCallback)(
     void *callback_data,
-    uint32_t block_number,
+    BlockNumber block_number,
     const void *page_data
 );
 
@@ -3840,33 +3861,35 @@ typedef struct {
     Distance    distance;
 } SearchResult;
 
-// Centroid cache (in-memory, optimized for SIMD search)
+// Centroid search state (backend-local, populated from centroid pages)
+// This is working memory for centroid search, not a shared cache.
+// The actual centroid pages live in shared buffers.
 typedef struct {
     float      *centroids;       // Flat array: nlist * dim floats
     MktRaBitQVector *quantized;  // RaBitQ quantized centroids
     uint32_t    nlist;
     Dimension   dim;
     RaBitQParams *rabitq_params;
-} CentroidCache;
+} CentroidSearchState;
 
-// Load centroids from pages (reads first page of each posting list)
-CentroidCache *mkt_centroid_cache_create(
+// Create centroid search state (reads from centroid pages in buffer cache)
+CentroidSearchState *mkt_centroid_search_state_create(
     uint32_t nlist,
     Dimension dim,
     const RaBitQParams *rabitq_params
 );
 
-void mkt_centroid_cache_set(
-    CentroidCache *cache,
+void mkt_centroid_search_state_set(
+    CentroidSearchState *state,
     ClusterId cluster,
     const float *centroid
 );
 
-void mkt_centroid_cache_destroy(CentroidCache *cache);
+void mkt_centroid_search_state_destroy(CentroidSearchState *state);
 
-// Search: find top-k clusters
+// Search: find top-k clusters by traversing centroid tree
 void mkt_search_centroids(
-    const CentroidCache *cache,
+    const CentroidSearchState *state,
     VectorRef query,
     DistanceMetric metric,
     uint32_t nprobe,
@@ -3878,12 +3901,12 @@ void mkt_search_centroids(
 // Callback for page reads (abstraction over buffer cache)
 typedef const void *(*PageReadCallback)(
     void *callback_data,
-    uint32_t block_number
+    BlockNumber block_number
 );
 
 typedef void (*PageReleaseCallback)(
     void *callback_data,
-    uint32_t block_number
+    BlockNumber block_number
 );
 
 // Scan posting lists and find candidates
@@ -3902,7 +3925,7 @@ void mkt_search_posting_lists(
 
 // Full search (centroids + posting lists)
 uint32_t mkt_search(
-    const CentroidCache *cache,
+    const CentroidSearchState *cache,
     VectorRef query,
     DistanceMetric metric,
     const SearchParams *params,
@@ -3918,7 +3941,7 @@ uint32_t mkt_search(
 
 ```c
 void mkt_search_centroids(
-    const CentroidCache *cache,
+    const CentroidSearchState *cache,
     VectorRef query,
     DistanceMetric metric,
     uint32_t nprobe,
@@ -3980,42 +4003,41 @@ void mkt_search_posting_lists(
     // Scan each cluster's posting list
     for (uint32_t p = 0; p < nprobe; p++) {
         ClusterId cluster = clusters[p];
-        uint32_t block = /* get from metapage */;
+        BlockNumber block = /* get from metapage */;
 
         while (block != InvalidBlockNumber) {
             const void *page = read_page(callback_data, block);
             uint16_t entry_count = mkt_page_entry_count(page);
 
+            // SoA access: get pointers to metadata and vector arrays
+            const MktPostingPageHeader *hdr = (MktPostingPageHeader *)page;
+            const PostingEntryMeta *meta = MKT_PAGE_META(page);
+            const MktRaBitQVector *vectors = MKT_PAGE_VECTORS(page, hdr);
+
+            // Phase 1: Compute distances for all vectors (SIMD-friendly)
+            // Vectors are contiguous (stored from page end), enabling batch computation
+            Distance *distances = mkt_alloc(entry_count * sizeof(Distance));
+            mkt_rabitq_distance_batch(rabitq_params, query, vectors,
+                                       entry_count, distances);
+
+            // Phase 2: Check metadata only for promising candidates
             for (uint16_t i = 0; i < entry_count; i++) {
-                const PostingEntry *entry = mkt_page_get_entry(
-                    page, i, query.dim
-                );
-
                 // Skip deleted entries
-                if (entry->flags & POSTING_FLAG_DELETED) continue;
-
-                // Skip centroid in results (used for navigation only)
-                if (entry->flags & POSTING_FLAG_CENTROID) continue;
-
-                // Compute approximate distance using RaBitQ
-                const MktRaBitQVector *quantized = posting_entry_quantized(entry);
-                Distance approx_dist = mkt_rabitq_distance_asymmetric(
-                    rabitq_params, query, quantized
-                );
+                if (meta[i].flags & POSTING_FLAG_DELETED) continue;
 
                 // Add to heap if promising
-                if (approx_dist < mkt_topk_threshold(results)) {
-                    uint32_t tid_block;
-                    uint16_t tid_offset;
-                    posting_entry_get_tid(entry, &tid_block, &tid_offset);
+                if (distances[i] < mkt_topk_threshold(results)) {
+                    BlockNumber tid_block;
+                    OffsetNumber tid_offset;
+                    posting_entry_get_tid(&meta[i], &tid_block, &tid_offset);
 
-                    // Encode TID as single uint64 for heap storage
                     uint64_t tid_encoded = ((uint64_t)tid_block << 16) | tid_offset;
-                    mkt_topk_insert(results, approx_dist, tid_encoded);
+                    mkt_topk_insert(results, distances[i], tid_encoded);
                 }
             }
 
-            uint32_t next = mkt_page_get_next(page);
+            mkt_free(distances);
+            BlockNumber next = mkt_page_get_next(page);
             release_page(callback_data, block);
             block = next;
         }
@@ -4102,13 +4124,9 @@ Search time: 2.3ms
 // Extension initialization
 void _PG_init(void);
 
-// Shared memory request hook
-static void mkt_shmem_request(void);
-static void mkt_shmem_startup(void);
-
 // GUC variables
-int mkt_default_nprobe;
-int mkt_default_rerank_k;
+int mkt_default_nprobe;      // Default clusters to search
+int mkt_default_rerank_k;    // Default candidates for full-precision reranking
 ```
 
 ### 6.2 Vector Type and pgvector Compatibility
@@ -4303,7 +4321,7 @@ typedef struct {
     Buffer   current_buffer;
 } BufferReadState;
 
-static const void *buffer_read_page(void *state, uint32_t block) {
+static const void *buffer_read_page(void *state, BlockNumber block) {
     BufferReadState *brs = (BufferReadState *)state;
 
     if (BufferIsValid(brs->current_buffer)) {
@@ -4316,7 +4334,7 @@ static const void *buffer_read_page(void *state, uint32_t block) {
     return BufferGetPage(brs->current_buffer);
 }
 
-static void buffer_release_page(void *state, uint32_t block) {
+static void buffer_release_page(void *state, BlockNumber block) {
     BufferReadState *brs = (BufferReadState *)state;
 
     if (BufferIsValid(brs->current_buffer)) {
@@ -4326,48 +4344,119 @@ static void buffer_release_page(void *state, uint32_t block) {
 }
 ```
 
-### 6.5 Shared Memory Centroid Cache
+### 6.5 Centroid Page Management
+
+Centroids are stored in dedicated pages within the index file, between the
+metapage and posting list pages. These pages are managed by PostgreSQL's
+standard shared buffer cache—no separate in-memory cache structure is needed.
+
+**Why no dedicated cache:**
+- Centroid pages are accessed on every query (hot data)
+- Hot pages naturally stay in shared buffers via LRU
+- Standard PostgreSQL locking and WAL apply automatically
+- Simplifies code and avoids cache coherency issues
+
+**Page layout:**
+```
+Block 0:        Metapage (index metadata, RaBitQ params)
+Blocks 1..C:    Centroid pages (hierarchical tree)
+Blocks C+1..:   Posting list pages
+```
+
+**Centroid page structure:**
+
+Centroid pages use the same SoA layout with bidirectional growth as posting
+pages. Metadata grows low→high, vectors grow high→low. This enables both
+SIMD-friendly scans and efficient appends during LIRE split/merge.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Header                                                  │
+├─────────────────────────────────────────────────────────┤
+│ Entry[0] Entry[1] Entry[2] ...        ──► (grows down)  │
+│                                                         │
+│                        ... Vec[2] Vec[1] Vec[0] ◄──     │
+│                                        (grows up)       │
+└─────────────────────────────────────────────────────────┘
+```
 
 ```c
-// Shared memory layout for centroid cache
+// Centroid page header (SoA with reverse growth)
 typedef struct {
-    LWLock     lock;           // For cache updates
-    uint32_t   nlist;
-    Dimension  dim;
-    bool       initialized;
-    // Followed by: centroids[nlist * dim]
-    // Followed by: rabitq_params
-} MktShmemHeader;
+    uint8_t      level;          // Tree level (0 = root)
+    uint8_t      flags;
+    uint16_t     entry_count;    // Centroids on this page
+    OffsetNumber meta_end;       // Offset past last metadata entry
+    OffsetNumber vec_start;      // Offset to first (lowest) vector
+    BlockNumber  parent_blkno;   // Parent centroid page
+    BlockNumber  next_blkno;     // Next page at same level (sibling)
+} MktCentroidPageHeader;
 
-// Get or create cache for an index
-CentroidCache *mkt_shmem_get_cache(Oid indexoid);
-void mkt_shmem_invalidate_cache(Oid indexoid);
+// Centroid entry metadata (separate from vector data)
+typedef struct {
+    BlockNumber child_blkno;    // Child page (next level) or posting list head
+    uint16_t    child_offset;   // Entry index within child page (for non-leaf)
+    uint16_t    reserved;
+} MktCentroidEntry;
 
-// Called during ambuild to populate cache
-void mkt_shmem_populate_cache(
-    Oid indexoid,
-    const KMeansResult *kmeans,
-    const RaBitQParams *rabitq_params
-);
+// Access macros
+#define MKT_CENTROID_ENTRIES(page) \
+    ((MktCentroidEntry *)((char *)(page) + sizeof(MktCentroidPageHeader)))
+
+#define MKT_CENTROID_VECTORS(page, hdr) \
+    ((uint8_t *)((char *)(page) + (hdr)->vec_start))
+
+// Check if page has room for another entry
+static inline bool mkt_centroid_page_has_room(const MktCentroidPageHeader *hdr,
+                                               Dimension dim) {
+    size_t need = sizeof(MktCentroidEntry) + SIMD_ALIGN(dim / 8);
+    return (hdr->vec_start - hdr->meta_end) >= need;
+}
 ```
+
+**Why SoA with bidirectional growth:**
+- SIMD distance computation loads vectors sequentially (no gather instructions)
+- Hardware prefetcher works efficiently with contiguous access
+- Supports appends during LIRE split/merge operations
+- Consistent pattern with posting list pages
+
+**Reading centroids:**
+```c
+// Read centroid page via standard buffer cache
+Buffer buf = ReadBuffer(index, centroid_blkno);
+LockBuffer(buf, BUFFER_LOCK_SHARE);
+Page page = BufferGetPage(buf);
+
+MktCentroidPageHeader *hdr = (MktCentroidPageHeader *)PageGetContents(page);
+// ... traverse centroids ...
+
+UnlockReleaseBuffer(buf);
+```
+
+Hot centroid pages stay cached in shared_buffers. For billion-scale indexes,
+the ~96MB centroid tree fits comfortably in a typical shared_buffers setting.
 
 ### 6.6 Scan State
 
 ```c
 // Scan state (stored in IndexScanDesc->opaque)
 typedef struct MktScanOpaque {
-    CentroidCache  *cache;
-    TopKHeap       *results;
-    SearchParams    params;
+    // Centroid search state (backend-local, populated from centroid pages)
+    CentroidSearchState *centroid_state;
+    RaBitQParams        *rabitq_params;
+
+    // Query parameters
     VectorRef       query;
+    SearchParams    params;
     bool            first_call;
 
-    // Buffer management
-    BufferReadState buffer_state;
-
-    // Current position in results
+    // Results
+    TopKHeap       *results;
     uint32_t        result_index;
     TopKEntry      *sorted_results;
+
+    // Buffer management for posting list scan
+    BufferReadState buffer_state;
 } MktScanOpaque;
 ```
 
@@ -4393,7 +4482,7 @@ static void mkt_amcostestimate(
     uint32_t nprobe = /* from GUC or reloption */;
     uint32_t k = /* from query */;
 
-    // Startup cost: centroid search (memory only)
+    // Startup cost: centroid tree traversal (typically cached in shared buffers)
     *indexStartupCost = nlist * cpu_operator_cost;
 
     // Per-tuple cost: posting list scan
@@ -4425,8 +4514,8 @@ static void mkt_amcostestimate(
 static bool
 entry_is_visible(const PostingEntry *entry, Snapshot snapshot, Relation heap)
 {
-    uint32_t block;
-    uint16_t offset;
+    BlockNumber block;
+    OffsetNumber offset;
     posting_entry_get_tid(entry, &block, &offset);
 
     ItemPointerData tid;
@@ -4470,6 +4559,26 @@ SET io_method = 'io_uring';              -- Or 'worker' (default), 'sync'
 SET effective_io_concurrency = 200;       -- For user queries
 SET maintenance_io_concurrency = 10;      -- For index builds, VACUUM
 ```
+
+#### Why Queue Depth Matters for NVMe
+
+NVMe drives achieve high IOPS (400K+) only when multiple I/O requests are in
+flight simultaneously. The number of concurrent requests is called **queue depth
+(QD)**:
+
+| Access Pattern | Queue Depth | Latency per 8KB | Throughput |
+|----------------|-------------|-----------------|------------|
+| Serial sync I/O | QD=1 | 100 μs | ~80 MB/s |
+| Async I/O | QD=32+ | 100 μs total | 3+ GB/s |
+
+For posting list scans reading 268 pages:
+
+- **Sync I/O (QD=1)**: 268 × 100 μs = **27 ms** — each read waits for completion
+- **Async I/O (QD=268)**: 268 / 400K IOPS = **0.7 ms** — all reads in parallel
+
+The read stream API and `io_uring` enable high queue depth by submitting many
+read requests in a single syscall, then processing completions as they arrive.
+This is why `effective_io_concurrency = 200` is recommended for Meerkat workloads.
 
 #### Read Stream API Overview
 
@@ -4859,11 +4968,57 @@ void        mkt_aio_destroy(MktAsyncIO *aio);
 This would live in `src/core/` (standalone) with platform-specific implementations,
 used alongside PG's read stream for buffer-managed pages.
 
+#### SPDK Consideration
+
+For maximum I/O performance, we may consider [SPDK (Storage Performance
+Development Kit)](https://spdk.io/) — a userspace NVMe driver that bypasses
+the kernel entirely. SPFresh uses SPDK to achieve their benchmark results.
+
+**SPDK advantages:**
+- Eliminates kernel overhead (syscalls, context switches, interrupts)
+- Polled-mode completion (no interrupt latency)
+- Direct NVMe queue access with minimal latency (~10-20 μs vs 100 μs)
+- Can sustain millions of IOPS from a single core
+
+**SPDK tradeoffs:**
+- Requires dedicated NVMe device (can't share with OS/PostgreSQL)
+- Must run as root or with special permissions
+- Application manages all memory (no page cache)
+- Significant complexity increase
+- Not integrated with PostgreSQL buffer manager
+
+**Potential use case:** If Meerkat stores posting lists or full-precision vectors
+in a separate file (outside PostgreSQL's heap), SPDK could provide a dedicated
+high-performance path:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     PostgreSQL Process                          │
+├─────────────────────────────────────────────────────────────────┤
+│  Centroid pages     │  Posting lists    │  Full vectors         │
+│  (buffer cache)     │  (buffer cache)   │  (SPDK direct I/O)    │
+│  io_uring           │  io_uring         │  userspace NVMe       │
+└─────────────────────┴───────────────────┴───────────────────────┘
+```
+
+This hybrid approach would use PostgreSQL's buffer cache for metadata and
+quantized data (which benefits from caching), while using SPDK for
+high-throughput sequential access to full-precision vectors during reranking.
+
+**Decision:** Start with PostgreSQL's native `io_uring` support. Consider SPDK
+only if profiling shows kernel I/O overhead is a significant bottleneck (>10%
+of query latency) and the operational complexity is acceptable.
+
 ---
 
 ## Part 7: Maintenance Operations
 
+Meerkat uses the LIRE protocol (from SPFresh) for dynamic updates. This enables
+high insert throughput without degrading query performance.
+
 ### 7.1 Insert
+
+**Basic insert flow:**
 
 ```c
 static bool mkt_aminsert(
@@ -4878,40 +5033,70 @@ static bool mkt_aminsert(
 ) {
     if (isnull[0]) return false;  // Can't index NULL vectors
 
-    // Get vector from datum
     Vector *vec = DatumGetVector(values[0]);
 
-    // Get centroid cache
-    CentroidCache *cache = mkt_shmem_get_cache(RelationGetRelid(index));
-
-    // Find nearest cluster
+    // 1. Find nearest centroid by traversing centroid pages
     ClusterId cluster;
-    mkt_search_centroids(cache, VectorToRef(vec), DISTANCE_L2, 1, &cluster, NULL);
+    VectorRef centroid;
+    mkt_find_nearest_centroid(index, VectorToRef(vec), &cluster, &centroid);
 
-    // Get centroid for this cluster (needed for RaBitQ encoding)
-    VectorRef centroid = mkt_centroid_cache_get(cache, cluster);
-
-    // Quantize vector using RaBitQ
+    // 2. Quantize vector using RaBitQ (relative to centroid)
     MktRaBitQVector *quantized = palloc(MKT_RABITQ_SIZE(vec->dim));
-    mkt_rabitq_encode_into(cache->rabitq_params, VectorToRef(vec),
-                           centroid, quantized);
+    RaBitQParams *params = mkt_get_rabitq_params(index);
+    mkt_rabitq_encode_into(params, VectorToRef(vec), centroid, quantized);
 
-    // Get posting list head from metapage
-    Buffer meta_buf = ReadBuffer(index, 0);
-    LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
-    MktMetapage *meta = (MktMetapage *)BufferGetPage(meta_buf);
-    BlockNumber head = mkt_meta_get_head(meta, cluster);
-    UnlockReleaseBuffer(meta_buf);
+    // 3. Insert into posting list (may trigger split)
+    BlockNumber head = mkt_meta_get_head(index, cluster);
+    InsertResult result = mkt_posting_insert(index, head, heap_tid, quantized);
 
-    // Find page with space (scan from head, or use FSM)
-    // ... insert entry ...
+    // 4. Handle LIRE operations if needed
+    if (result.needs_split) {
+        mkt_lire_split(index, cluster);
+    }
 
     pfree(quantized);
     return true;
 }
 ```
 
-### 7.2 Vacuum
+### 7.2 LIRE Protocol
+
+The LIRE protocol maintains index quality during updates:
+
+**Split**: When a posting list exceeds `2× target_size`:
+1. Compute new centroid for subset (~40% of vectors)
+2. Reassign vectors to original or new cluster
+3. Update centroid pages
+4. Create new posting list for split cluster
+
+**Merge**: When a posting list falls below `0.25× target_size`:
+1. Find nearest neighbor cluster
+2. Move all vectors to neighbor
+3. Remove centroid from centroid pages (update tree)
+4. Reclaim posting list pages
+
+**Reassign**: Periodically check if vectors should move to adjacent clusters:
+1. For each vector, check distance to current vs neighbor centroids
+2. If closer to neighbor, move vector
+3. Helps maintain quality as centroids drift
+
+**Thresholds** (configurable via reloptions):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `split_threshold` | 2× target | Trigger split when exceeded |
+| `merge_threshold` | 0.25× target | Trigger merge when below |
+| `reassign_fraction` | 0.1 | Fraction of vectors to check per vacuum |
+
+**Cascade bounds** (from SPFresh measurements):
+- Only ~0.4% of insertions trigger rebalancing
+- Average cascade: 3 operations
+- Maximum observed: 160 splits
+- Convergence guaranteed (finite operations per insert)
+
+### 7.3 Vacuum
+
+Vacuum performs deletion cleanup and LIRE maintenance:
 
 ```c
 static IndexBulkDeleteResult *mkt_ambulkdelete(
@@ -4920,13 +5105,8 @@ static IndexBulkDeleteResult *mkt_ambulkdelete(
     IndexBulkDeleteCallback callback,
     void *callback_state
 ) {
-    Relation index = info->index;
-
     // Scan all posting list pages
-    // For each entry, check if TID should be deleted
-    // Mark entry as deleted (soft delete)
-
-    // ... implementation ...
+    // Mark entries as deleted (soft delete) if callback returns true
 
     return stats;
 }
@@ -4935,15 +5115,22 @@ static IndexBulkDeleteResult *mkt_amvacuumcleanup(
     IndexVacuumInfo *info,
     IndexBulkDeleteResult *stats
 ) {
-    // Compact pages: remove soft-deleted entries
-    // Update FSM with free space
-    // Optionally merge underfull pages
-
-    // ... implementation ...
+    // 1. Compact pages: remove soft-deleted entries
+    // 2. Check for underfull posting lists → LIRE merge
+    // 3. Run reassignment on sample of vectors
+    // 4. Update FSM with free space
 
     return stats;
 }
 ```
+
+**Vacuum phases:**
+
+1. **Bulk delete**: Mark entries matching callback as deleted
+2. **Compact**: Remove deleted entries, reclaim page space
+3. **LIRE merge**: Merge underfull clusters into neighbors
+4. **Reassign**: Move misplaced vectors to correct clusters
+5. **Defragment**: Optionally reorganize posting lists for contiguity
 
 ---
 
@@ -5370,7 +5557,7 @@ Centroid search should return an iterator, not a fixed array:
 ```c
 /* Return clusters lazily, not all at once */
 MktClusterIterator *
-mkt_centroid_search_iterator(CentroidCache *cache, VectorRef query);
+mkt_centroid_search_iterator(CentroidSearchState *cache, VectorRef query);
 ```
 
 **4. Statistics collection**
@@ -5467,7 +5654,7 @@ typedef struct MktIndexStats
 ### Phase 7: Production Features
 
 **Deliverables**:
-1. Shared memory centroid cache
+1. LIRE protocol (split, merge, reassign)
 2. MVCC visibility checks
 3. Vacuum support
 4. WAL logging
@@ -5563,20 +5750,22 @@ meerkat/
 │       ├── search/               # Search operations
 │       │   ├── search.h          # Search interface
 │       │   ├── search.c          # Search pipeline coordination
-│       │   ├── centroid.c        # Centroid search (from cache)
+│       │   ├── centroid.c        # Centroid tree traversal
 │       │   ├── scan.c            # Posting list scanning
 │       │   └── rerank.c          # Full-precision reranking
 │       │
 │       ├── iam/                  # Index Access Method callbacks
 │       │   ├── handler.c         # amhandler registration
 │       │   ├── build.c           # ambuild, ambuildempty
-│       │   ├── insert.c          # aminsert
+│       │   ├── insert.c          # aminsert (with LIRE split)
 │       │   ├── scan.c            # ambeginscan, amgettuple, amendscan
-│       │   └── vacuum.c          # ambulkdelete, amvacuumcleanup
+│       │   └── vacuum.c          # ambulkdelete, amvacuumcleanup (with LIRE merge)
 │       │
-│       └── shmem/                # Shared memory
-│           ├── cache.h           # Centroid cache interface
-│           └── cache.c           # Shared memory management
+│       └── lire/                 # LIRE protocol for dynamic updates
+│           ├── lire.h            # LIRE interface
+│           ├── split.c           # Cluster splitting
+│           ├── merge.c           # Cluster merging
+│           └── reassign.c        # Vector reassignment
 │
 ├── sql/
 │   ├── meerkat--1.0.sql          # Extension SQL definitions
@@ -5621,7 +5810,7 @@ meerkat/
                         │              src/pg/              │
                         │  (PostgreSQL extension, all of:   │
                         │   index/, build/, search/, iam/,  │
-                        │            shmem/)                │
+                        │            lire/)                 │
                         └─────────────────┬─────────────────┘
                                           │
     ┌─────────────────────────────────────┼────────────────┐
@@ -5724,14 +5913,14 @@ subdir('index')   # Page layouts, posting lists
 subdir('build')   # Index build pipeline
 subdir('search')  # Search operations
 subdir('iam')     # Index Access Method callbacks
-subdir('shmem')   # Shared memory cache
+subdir('lire')    # LIRE protocol (split, merge, reassign)
 
 pg_sources = (
   pg_index_sources +
   pg_build_sources +
   pg_search_sources +
   pg_iam_sources +
-  pg_shmem_sources
+  pg_lire_sources
 )
 
 shared_module(
