@@ -1,24 +1,16 @@
 repos:
   # C code formatting
   - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: "v18.1.8"
+    rev: "v21.1.8"
     hooks:
       - id: clang-format
         types: [c]
-        files: ^src/.*\.(c|h)$
+        files: ^(src|test)/.*\.(c|h)$
         args: [--style=file]
 
   # Local hooks using system tools
   - repo: local
     hooks:
-      - id: meerkat-format-check
-        name: Meerkat C Format Check
-        entry: clang-format
-        language: system
-        files: ^src/.*\.(c|h)$
-        args: [--dry-run, --Werror]
-        pass_filenames: true
-
       - id: clang-tidy
         name: clang-tidy
         entry: clang-tidy

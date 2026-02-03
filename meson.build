@@ -54,23 +54,11 @@ mkt_core_headers = files(
   'src/mkt_vector.h',
 )
 
-# Format target
-clang_format = find_program('clang-format-18', 'clang-format', required: false)
-if clang_format.found()
+# Format target (uses pre-commit for consistency)
+pre_commit = find_program('pre-commit', required: false)
+if pre_commit.found()
   run_target('format',
-    command: [
-      clang_format,
-      '-i',
-      mkt_core_sources,
-      mkt_core_headers,
-      files(
-        'test/unit/mkt_test.c',
-        'test/unit/mkt_test.h',
-        'test/unit/run_tests.c',
-        'test/unit/test_mkt_memory.c',
-        'test/unit/test_mkt_vector.c',
-      ),
-    ],
+    command: [pre_commit, 'run', 'clang-format', '--all-files'],
   )
 endif
 
