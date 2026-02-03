@@ -23,6 +23,7 @@ m_dep = cc.find_library('m', required: true)
 # Source files for core library (standalone, no PostgreSQL)
 mkt_core_sources = files(
   'src/core/memory_standalone.c',
+  'src/core/platform.c',
   'src/mkt_vector.c',
 )
 
@@ -50,6 +51,7 @@ mkt_core_headers = files(
   'src/core/memory.h',
   'src/core/memory_standalone.h',
   'src/core/memory_pg.h',
+  'src/core/platform.h',
   'src/mkt_types.h',
   'src/mkt_vector.h',
 )
