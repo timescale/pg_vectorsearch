@@ -3,10 +3,10 @@
 unit_test_sources = files(
   'mkt_test.c',
   'run_tests.c',
-  'test_mkt_fixtures.c',
-  'test_mkt_memory.c',
-  'test_mkt_platform.c',
-  'test_mkt_vector.c',
+  'test_fixtures.c',
+  'test_memory.c',
+  'test_platform.c',
+  'test_vector.c',
 )
 
 test_runner = executable('run_tests',
