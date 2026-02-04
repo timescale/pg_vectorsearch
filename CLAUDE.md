@@ -271,16 +271,78 @@ Keep documentation up-to-date with code changes:
 - `docs/architecture.md`: Update when design or structure changes
 - `docs/implementation.md`: Update when implementation details change
 
+## Development Workflow
+
+Work follows a branch and pull request workflow:
+
+1. **Create a feature branch** with a descriptive name:
+   - **IMPORTANT**: Always ensure `main` is up-to-date before branching:
+     ```bash
+     git checkout main
+     git pull origin main
+     git checkout -b feature/branch-name
+     ```
+   - Branch naming patterns:
+     - Features: `feature/branch-name` (e.g., `feature/rabitq-quantization`)
+     - Bug fixes: `bugfix/description` (e.g., `bugfix/memory-leak-clustering`)
+     - Tests: `test/description` (e.g., `test/fixtures`)
+     - Refactoring: `refactor/description`
+
+2. **Work in iterations** on the branch:
+   - Make focused commits with clear messages
+   - Run pre-commit checks before each commit
+   - Keep changes logical and reviewable
+
+3. **Push to GitHub** when ready for review:
+   - **IMPORTANT**: Always rebase on `main` before pushing:
+     ```bash
+     git fetch origin
+     git rebase origin/main
+     git push -u origin branch-name
+     ```
+   - If you've already pushed and need to update:
+     ```bash
+     git fetch origin
+     git rebase origin/main
+     git push --force-with-lease origin branch-name
+     ```
+
+4. **Create a pull request** on GitHub:
+   - Write a clear description of the changes
+   - Reference any related issues
+   - Ensure CI checks pass
+
+5. **Address review feedback**:
+   - User reviews the PR
+   - Make requested changes in new commits
+   - Push updates to the same branch
+
+6. **After merge**:
+   - User merges the PR
+   - Pull the updated main branch:
+     ```bash
+     git checkout main
+     git pull origin main
+     ```
+   - Delete the local feature branch:
+     ```bash
+     git branch -d branch-name
+     ```
+   - Start the next feature/bugfix
+
 ### Committing Changes
 
 #### Pre-commit Checks
+
+**IMPORTANT**: All checks must pass before committing. The pre-commit hooks will
+enforce formatting, but coverage and linting must be verified manually.
 
 Before staging changes, verify:
 
 1. **Format code** - `meson compile -C builddir format`
 2. **Run tests** - `meson test -C builddir`
-3. **Check coverage** - `./scripts/ci/coverage.sh` (90% minimum)
-4. **Check lint** - `./scripts/ci/lint.sh`
+3. **Check coverage** - `./scripts/ci/coverage.sh` (90% minimum required)
+4. **Check lint** - `./scripts/ci/lint.sh` (must pass with no errors)
 
 ```bash
 # All checks in sequence
@@ -289,6 +351,9 @@ meson test -C builddir && \
 ./scripts/ci/coverage.sh && \
 ./scripts/ci/lint.sh
 ```
+
+**If coverage or linting fails, fix the issues before committing.** The CI will
+reject commits that don't meet these standards.
 
 The coverage script creates a separate build directory (`builddir-cov`) with
 `-Db_coverage=true` and generates HTML/XML reports. Reports are written to
@@ -310,14 +375,51 @@ pre-commit run --files src/*  # Run on specific files
 
 #### Commit Message Guidelines
 
-Write human-readable messages focusing on *what* and *why*, not itemized lists:
+This project follows [Conventional Commits](https://www.conventionalcommits.org/)
+for structured, machine-readable commit messages.
 
-- Summarize the main functionality or change
+**Format:**
+```
+<type>[optional scope]: <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+**Types:**
+- `feat:` - New feature
+- `fix:` - Bug fix
+- `docs:` - Documentation changes
+- `style:` - Code style/formatting (no functional change)
+- `refactor:` - Code refactoring
+- `perf:` - Performance improvement
+- `test:` - Adding or updating tests
+- `build:` - Build system or dependencies
+- `ci:` - CI configuration changes
+- `chore:` - Other changes (tooling, etc.)
+
+**Examples:**
+```
+feat(vector): add RaBitQ quantization support
+fix(memory): resolve leak in context cleanup
+docs: update branch workflow in CLAUDE.md
+test: add fixture system with three levels
+refactor(clustering): simplify centroid calculation
+```
+
+**Body Guidelines:**
+- Write human-readable messages focusing on *what* and *why*
 - Include key technical insights or trade-offs
 - Note caveats or follow-up work if relevant
 - Avoid: file lists, long bullet lists, "Co-Authored-By" lines
 
-See workspace `../CLAUDE.md` for detailed examples.
+**Enforcement:**
+Pre-commit hooks validate commit messages automatically. Messages must:
+- Start with a valid type
+- Use lowercase for type and description
+- Keep header under 72 characters
+- Have blank line before body (if present)
 
 <!-- Links -->
 [pgvector]: https://github.com/pgvector/pgvector
