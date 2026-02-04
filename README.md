@@ -1,5 +1,7 @@
 # Meerkat
 
+[![Coverage](https://img.shields.io/endpoint?url=https://timescale.github.io/meerkat/coverage-badge.json)](https://timescale.github.io/meerkat/coverage/)
+
 A PostgreSQL index access method for Approximate Nearest Neighbor (ANN) vector
 search.
 
