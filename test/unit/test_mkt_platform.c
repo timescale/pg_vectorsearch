@@ -163,12 +163,12 @@ TEST(print_detected_capabilities)
 	 */
 	SimdCapability caps = mkt_detect_simd();
 
-	printf("  Detected SIMD capabilities: 0x%x\n", caps);
-	printf("    SSE2:    %s\n", (caps & SIMD_SSE2) ? "yes" : "no");
-	printf("    SSE4.1:  %s\n", (caps & SIMD_SSE4_1) ? "yes" : "no");
-	printf("    AVX2:    %s\n", (caps & SIMD_AVX2) ? "yes" : "no");
-	printf("    AVX512F: %s\n", (caps & SIMD_AVX512F) ? "yes" : "no");
-	printf("    NEON:    %s\n", (caps & SIMD_NEON) ? "yes" : "no");
+	TEST_PRINT("Detected SIMD capabilities: 0x%x\n", caps);
+	TEST_PRINT("  SSE2:    %s\n", (caps & SIMD_SSE2) ? "yes" : "no");
+	TEST_PRINT("  SSE4.1:  %s\n", (caps & SIMD_SSE4_1) ? "yes" : "no");
+	TEST_PRINT("  AVX2:    %s\n", (caps & SIMD_AVX2) ? "yes" : "no");
+	TEST_PRINT("  AVX512F: %s\n", (caps & SIMD_AVX512F) ? "yes" : "no");
+	TEST_PRINT("  NEON:    %s\n", (caps & SIMD_NEON) ? "yes" : "no");
 
 	ASSERT_TRUE(1, "capability print");
 }
@@ -358,21 +358,23 @@ TEST(x86_detection_matches_procfs)
 	/* Skip if we couldn't read cpuinfo */
 	if (os_sse2 < 0)
 	{
-		printf("  (skipping: could not read /proc/cpuinfo)\n");
+		TEST_PRINT("(skipping: could not read /proc/cpuinfo)\n");
 		ASSERT_TRUE(1, "skipped");
 		return;
 	}
 
-	printf("  /proc/cpuinfo: sse2=%d sse4_1=%d avx2=%d avx512f=%d\n",
-		   os_sse2,
-		   os_sse4_1,
-		   os_avx2,
-		   os_avx512f);
-	printf("  mkt_detect:    sse2=%d sse4_1=%d avx2=%d avx512f=%d\n",
-		   !!(caps & SIMD_SSE2),
-		   !!(caps & SIMD_SSE4_1),
-		   !!(caps & SIMD_AVX2),
-		   !!(caps & SIMD_AVX512F));
+	TEST_PRINT(
+			"/proc/cpuinfo: sse2=%d sse4_1=%d avx2=%d avx512f=%d\n",
+			os_sse2,
+			os_sse4_1,
+			os_avx2,
+			os_avx512f);
+	TEST_PRINT(
+			"mkt_detect:    sse2=%d sse4_1=%d avx2=%d avx512f=%d\n",
+			!!(caps & SIMD_SSE2),
+			!!(caps & SIMD_SSE4_1),
+			!!(caps & SIMD_AVX2),
+			!!(caps & SIMD_AVX512F));
 
 	/*
 	 * Our detection should match OS for features we claim to have.
@@ -413,10 +415,11 @@ TEST(arm64_detection_matches_auxval)
 	SimdCapability caps	 = mkt_detect_simd();
 	unsigned long  hwcap = getauxval(AT_HWCAP);
 
-	printf("  getauxval(AT_HWCAP): 0x%lx, HWCAP_ASIMD=%d\n",
-		   hwcap,
-		   !!(hwcap & HWCAP_ASIMD));
-	printf("  mkt_detect: NEON=%d\n", !!(caps & SIMD_NEON));
+	TEST_PRINT(
+			"getauxval(AT_HWCAP): 0x%lx, HWCAP_ASIMD=%d\n",
+			hwcap,
+			!!(hwcap & HWCAP_ASIMD));
+	TEST_PRINT("mkt_detect: NEON=%d\n", !!(caps & SIMD_NEON));
 
 	if (hwcap & HWCAP_ASIMD)
 		ASSERT_TRUE(caps & SIMD_NEON, "ASIMD in hwcap but NEON not detected");
@@ -436,13 +439,13 @@ TEST(arm64_detection_matches_procfs)
 
 	if (os_asimd < 0)
 	{
-		printf("  (skipping: could not read /proc/cpuinfo)\n");
+		TEST_PRINT("(skipping: could not read /proc/cpuinfo)\n");
 		ASSERT_TRUE(1, "skipped");
 		return;
 	}
 
-	printf("  /proc/cpuinfo: asimd=%d\n", os_asimd);
-	printf("  mkt_detect:    NEON=%d\n", !!(caps & SIMD_NEON));
+	TEST_PRINT("/proc/cpuinfo: asimd=%d\n", os_asimd);
+	TEST_PRINT("mkt_detect:    NEON=%d\n", !!(caps & SIMD_NEON));
 
 	if (os_asimd)
 		ASSERT_TRUE(
@@ -485,15 +488,17 @@ TEST(x86_macos_detection_matches_sysctl)
 	int os_avx2	   = sysctl_has_feature("hw.optional.avx2_0");
 	int os_avx512f = sysctl_has_feature("hw.optional.avx512f");
 
-	printf("  sysctl:     sse4_1=%d avx2=%d avx512f=%d\n",
-		   os_sse4_1,
-		   os_avx2,
-		   os_avx512f);
-	printf("  mkt_detect: sse2=%d sse4_1=%d avx2=%d avx512f=%d\n",
-		   !!(caps & SIMD_SSE2),
-		   !!(caps & SIMD_SSE4_1),
-		   !!(caps & SIMD_AVX2),
-		   !!(caps & SIMD_AVX512F));
+	TEST_PRINT(
+			"sysctl:     sse4_1=%d avx2=%d avx512f=%d\n",
+			os_sse4_1,
+			os_avx2,
+			os_avx512f);
+	TEST_PRINT(
+			"mkt_detect: sse2=%d sse4_1=%d avx2=%d avx512f=%d\n",
+			!!(caps & SIMD_SSE2),
+			!!(caps & SIMD_SSE4_1),
+			!!(caps & SIMD_AVX2),
+			!!(caps & SIMD_AVX512F));
 
 	ASSERT_TRUE(caps & SIMD_SSE2, "x86_64 macOS must have SSE2");
 
@@ -523,8 +528,8 @@ TEST(arm64_macos_detection_matches_sysctl)
 	/* Also check via AdvSIMD which is the ARM64 name */
 	int os_advsimd = sysctl_has_feature("hw.optional.AdvSIMD");
 
-	printf("  sysctl:     neon=%d advsimd=%d\n", os_neon, os_advsimd);
-	printf("  mkt_detect: NEON=%d\n", !!(caps & SIMD_NEON));
+	TEST_PRINT("sysctl:     neon=%d advsimd=%d\n", os_neon, os_advsimd);
+	TEST_PRINT("mkt_detect: NEON=%d\n", !!(caps & SIMD_NEON));
 
 	/* Apple Silicon always has NEON */
 	ASSERT_TRUE(caps & SIMD_NEON, "ARM64 macOS must have NEON");
