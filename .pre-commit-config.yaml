@@ -49,3 +49,11 @@ repos:
     hooks:
       - id: markdownlint-cli2
         args: [--config, .markdownlint.json]
+
+  # Conventional Commits
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args: [--strict]
