@@ -239,9 +239,10 @@ mkt_test_run_all(
 		return 1;
 	}
 
-	/* TAP format: print plan */
+	/* TAP format: print version and plan */
 	if (tap_output)
 	{
+		printf("TAP version 13\n");
 		printf("1..%d\n", planned_tests);
 	}
 	else
@@ -360,8 +361,8 @@ mkt_test_run_all(
 					   tests_run,
 					   entry->group,
 					   entry->name);
-				printf("  # Failed at %s:%d\n", result.file, result.line);
-				printf("  # %s\n", result.failure_msg);
+				printf("# Failed at %s:%d\n", result.file, result.line);
+				printf("# %s\n", result.failure_msg);
 			}
 			else
 			{
