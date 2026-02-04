@@ -10,6 +10,9 @@
 static SimdCapability g_simd_caps	  = SIMD_NONE;
 static bool			  g_simd_detected = false;
 
+/* Override mask for testing/benchmarking (0xFFFFFFFF = no override) */
+static uint32_t g_simd_override = 0xFFFFFFFF;
+
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || \
 		defined(_M_IX86)
 
@@ -180,16 +183,38 @@ mkt_detect_simd(void)
 	if (g_simd_detected)
 		return g_simd_caps;
 
+	SimdCapability detected;
+
 #if defined(MKT_X86)
-	g_simd_caps = detect_simd_x86();
+	detected = detect_simd_x86();
 #elif defined(MKT_ARM64)
-	g_simd_caps = detect_simd_arm64();
+	detected = detect_simd_arm64();
 #elif defined(MKT_ARM32)
-	g_simd_caps = detect_simd_arm32();
+	detected = detect_simd_arm32();
 #else
-	g_simd_caps = SIMD_NONE;
+	detected = SIMD_NONE;
 #endif
+
+	/* Apply override mask if set */
+	if (g_simd_override != 0xFFFFFFFF)
+		g_simd_caps = detected & g_simd_override;
+	else
+		g_simd_caps = detected;
 
 	g_simd_detected = true;
 	return g_simd_caps;
+}
+
+void
+mkt_simd_set_override(uint32_t mask)
+{
+	g_simd_override = mask;
+	g_simd_detected = false; /* Force re-detection */
+}
+
+void
+mkt_simd_reset_cache(void)
+{
+	g_simd_detected = false;
+	g_simd_caps		= SIMD_NONE;
 }

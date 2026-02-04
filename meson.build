@@ -25,14 +25,51 @@ mkt_core_sources = files(
   'src/core/memory_standalone.c',
   'src/core/platform.c',
   'src/mkt_vector.c',
+  'src/algo/distance.c',
 )
 
 # Include directories
 src_inc = include_directories('src')
 
+# SIMD implementations as separate libraries with architecture-specific flags
+simd_libs = []
+
+if host_machine.cpu_family() in ['x86', 'x86_64']
+  # AVX2 library
+  mkt_avx2_lib = static_library('mkt_avx2',
+    'src/algo/distance_avx2.c',
+    c_args: ['-mavx2', '-mfma'],
+    include_directories: src_inc,
+  )
+  simd_libs += mkt_avx2_lib
+
+  # AVX-512 library
+  mkt_avx512_lib = static_library('mkt_avx512',
+    'src/algo/distance_avx512.c',
+    c_args: ['-mavx512f', '-mavx512dq'],
+    include_directories: src_inc,
+  )
+  simd_libs += mkt_avx512_lib
+
+elif host_machine.cpu_family() in ['aarch64', 'arm']
+  # NEON library
+  neon_args = []
+  if host_machine.cpu_family() == 'arm'
+    neon_args = ['-mfpu=neon']
+  endif
+
+  mkt_neon_lib = static_library('mkt_neon',
+    'src/algo/distance_neon.c',
+    c_args: neon_args,
+    include_directories: src_inc,
+  )
+  simd_libs += mkt_neon_lib
+endif
+
 # Core library (static, for linking into tests and tools)
 mkt_core_lib = static_library('mkt_core',
   mkt_core_sources,
+  link_with: simd_libs,
   include_directories: src_inc,
   dependencies: [m_dep],
 )
