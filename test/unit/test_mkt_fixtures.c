@@ -73,12 +73,12 @@ TEST(second_test)
 	ASSERT_EQ(1, group_setup_count, "group setup called once");
 	ASSERT_EQ(0, group_teardown_count, "group teardown not yet called");
 
-	/* Test setup called again (second time) */
-	ASSERT_EQ(2, test_setup_count, "test setup called twice");
+	/* Test setup called again (5th time - after first + 3 param tests) */
+	ASSERT_EQ(5, test_setup_count, "test setup called 5 times");
 	ASSERT_EQ(
-			1,
+			4,
 			test_teardown_count,
-			"test teardown called once (after first test)");
+			"test teardown called 4 times (after first + 3 param tests)");
 }
 
 /* Test with its own specific fixture in addition to group fixtures */
@@ -86,7 +86,7 @@ TEST_WITH_FIXTURE(special_test, special_setup, special_teardown)
 {
 	/* Group fixtures still run */
 	ASSERT_EQ(1, group_setup_count, "group setup called once");
-	ASSERT_EQ(3, test_setup_count, "test setup called three times");
+	ASSERT_EQ(6, test_setup_count, "test setup called 6 times");
 
 	/* Test-specific fixture also ran */
 	ASSERT_EQ(1, special_setup_count, "special setup called");
@@ -99,10 +99,36 @@ TEST(third_test)
 	ASSERT_EQ(1, group_setup_count, "group setup called once");
 	ASSERT_EQ(0, group_teardown_count, "group teardown not yet called");
 
-	/* Test setup called for fourth time (after special_test) */
-	ASSERT_EQ(4, test_setup_count, "test setup called four times");
-	ASSERT_EQ(
-			3,
-			test_teardown_count,
-			"test teardown called three times (after first, second, special)");
+	/* Test setup called for 7th time (after first + 3 param + second +
+	 * special) */
+	ASSERT_EQ(7, test_setup_count, "test setup called 7 times");
+	ASSERT_EQ(6, test_teardown_count, "test teardown called 6 times");
+}
+
+/*
+ * Parameterized test example - demonstrates TEST_PARAMETERIZED macro
+ *
+ * Each parameter string registers as a separate test, and fixtures run
+ * before/after each iteration. Note that parameterized tests affect the
+ * fixture call counts in other tests due to alphabetical ordering.
+ *
+ * These run alphabetically as: param_example_bar, param_example_baz,
+ * param_example_foo (NOT in iteration order 0,1,2).
+ */
+TEST_PARAMETERIZED(param_example, "foo", "bar", "baz")
+{
+	/* Both 'iteration' (0,1,2) and 'param' ("foo","bar","baz") available */
+	ASSERT_TRUE(param != NULL, "param should not be NULL");
+	ASSERT_TRUE(iteration >= 0 && iteration < 3, "iteration in range");
+
+	/* Verify fixtures ran (but don't check exact count since tests run
+	   alphabetically, not in iteration order) */
+	ASSERT_TRUE(
+			test_setup_count >= 2 && test_setup_count <= 4,
+			"test setup called for parameterized test");
+
+	TEST_PRINT(
+			"Parameterized test with param: %s (iteration=%d)\n",
+			param,
+			iteration);
 }

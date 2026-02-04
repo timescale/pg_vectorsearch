@@ -250,6 +250,111 @@ void mkt_test_printf(const char *fmt, ...)
 	}                                                              \
 	static void test_##name##_impl(MktTestResult *result)
 
+/*
+ * TEST_PARAMETERIZED - run a test multiple times with different parameters
+ *
+ * Each iteration is registered as a separate test with a descriptive name
+ * (e.g., "test_AVX2", "test_NEON") for better test reporting and filtering.
+ *
+ * Test receives two arguments:
+ *   - int iteration: index from 0 to count-1
+ *   - const char *param: the parameter string for this iteration
+ *
+ * Fixtures run before/after each iteration. Supports 2-10 parameters.
+ *
+ * Usage:
+ *   TEST_PARAMETERIZED(l2_correctness, "scalar", "AVX2", "AVX512") {
+ *       const uint32_t masks[] = {SIMD_NONE, SIMD_AVX2, SIMD_AVX512F};
+ *       reinit_distance_with_simd(masks[iteration]);
+ *       TEST_PRINT("Testing with: %s\n", param);
+ *       // ...
+ *   }
+ *
+ * This registers 3 separate tests: l2_correctness_scalar,
+ * l2_correctness_AVX2, l2_correctness_AVX512.
+ */
+
+/* Count variadic arguments (supports 1-10 args) */
+#define _COUNT_ARGS(...) \
+	_COUNT_ARGS_IMPL(__VA_ARGS__, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
+#define _COUNT_ARGS_IMPL(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, N, ...) N
+
+/* Concatenation helper for macro expansion */
+#define _CONCAT(a, b)	   _CONCAT_IMPL(a, b)
+#define _CONCAT_IMPL(a, b) a##b
+
+/* Helper macros to generate test wrappers for each iteration */
+#define _TEST_PARAM_WRAPPER(name, iter)                                       \
+	static void test_##name##_##iter(MktTestResult *result)                   \
+	{                                                                         \
+		if (_mkt_test_setup)                                                  \
+			_mkt_test_setup();                                                \
+		test_##name##_impl(result, iter, _##name##_param_names[iter]);        \
+		if (_mkt_test_teardown)                                               \
+			_mkt_test_teardown();                                             \
+	}                                                                         \
+	__attribute__((constructor)) static void register_##name##_##iter(void)   \
+	{                                                                         \
+		static char test_name[256]; /* STATIC - persists after constructor */ \
+		snprintf(                                                             \
+				test_name,                                                    \
+				sizeof(test_name),                                            \
+				"%s_%s",                                                      \
+				#name,                                                        \
+				_##name##_param_names[iter]);                                 \
+		mkt_test_register(test_name, _MKT_TEST_GROUP, test_##name##_##iter);  \
+	}
+
+/* Generate wrappers for supported iteration counts (2-10) */
+#define _TEST_PARAM_WRAPPERS_2(name) \
+	_TEST_PARAM_WRAPPER(name, 0)     \
+	_TEST_PARAM_WRAPPER(name, 1)
+
+#define _TEST_PARAM_WRAPPERS_3(name) \
+	_TEST_PARAM_WRAPPERS_2(name)     \
+	_TEST_PARAM_WRAPPER(name, 2)
+
+#define _TEST_PARAM_WRAPPERS_4(name) \
+	_TEST_PARAM_WRAPPERS_3(name)     \
+	_TEST_PARAM_WRAPPER(name, 3)
+
+#define _TEST_PARAM_WRAPPERS_5(name) \
+	_TEST_PARAM_WRAPPERS_4(name)     \
+	_TEST_PARAM_WRAPPER(name, 4)
+
+#define _TEST_PARAM_WRAPPERS_6(name) \
+	_TEST_PARAM_WRAPPERS_5(name)     \
+	_TEST_PARAM_WRAPPER(name, 5)
+
+#define _TEST_PARAM_WRAPPERS_7(name) \
+	_TEST_PARAM_WRAPPERS_6(name)     \
+	_TEST_PARAM_WRAPPER(name, 6)
+
+#define _TEST_PARAM_WRAPPERS_8(name) \
+	_TEST_PARAM_WRAPPERS_7(name)     \
+	_TEST_PARAM_WRAPPER(name, 7)
+
+#define _TEST_PARAM_WRAPPERS_9(name) \
+	_TEST_PARAM_WRAPPERS_8(name)     \
+	_TEST_PARAM_WRAPPER(name, 8)
+
+#define _TEST_PARAM_WRAPPERS_10(name) \
+	_TEST_PARAM_WRAPPERS_9(name)      \
+	_TEST_PARAM_WRAPPER(name, 9)
+
+/* Dispatcher macro to select the right wrapper generator based on count */
+#define _TEST_PARAM_DISPATCH(name, count) \
+	_CONCAT(_TEST_PARAM_WRAPPERS_, count)(name)
+
+/* Main TEST_PARAMETERIZED macro */
+#define TEST_PARAMETERIZED(name, ...)                                        \
+	static const char *_##name##_param_names[] = {__VA_ARGS__};              \
+	static void		   test_##name##_impl(                                   \
+			   MktTestResult *result, int iteration, const char *param); \
+	_TEST_PARAM_DISPATCH(name, _COUNT_ARGS(__VA_ARGS__))                     \
+	static void test_##name##_impl(                                          \
+			MktTestResult *result, int iteration, const char *param)
+
 /* Assertion macros */
 #define ASSERT_TRUE(cond, msg)                                            \
 	do                                                                    \
