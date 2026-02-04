@@ -2,34 +2,14 @@
  * test_mkt_vector.c - Vector type and operations tests
  */
 
-#include <math.h>
-
 #include "core/memory.h"
 #include "mkt_test.h"
 #include "mkt_vector.h"
 
 TEST_GROUP(Vector);
 
-/* Memory context for vector tests */
-static MktMemCtx vector_test_ctx = NULL;
-
-static void
-vector_test_setup(void)
-{
-	vector_test_ctx = mkt_memctx_create(NULL, "vector_test");
-	mkt_memctx_switch(vector_test_ctx);
-}
-
-static void
-vector_test_teardown(void)
-{
-	mkt_memctx_switch(NULL);
-	mkt_memctx_delete(vector_test_ctx);
-	vector_test_ctx = NULL;
-}
-
-/* Register setup/teardown for all tests in this group */
-TEST_GROUP_FIXTURE(vector_test_setup, vector_test_teardown);
+/* Create and switch to a memory context for each test */
+TEST_MEMCTX_FIXTURE();
 
 TEST(vector_create_and_dim)
 {

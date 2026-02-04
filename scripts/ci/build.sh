@@ -13,6 +13,6 @@ echo "==> Building"
 meson compile -C "$BUILDDIR"
 
 echo "==> Running tests"
-TERM=xterm-256color meson test -C "$BUILDDIR" --verbose
+meson test -C "$BUILDDIR"
 
 echo "==> Build and tests passed"

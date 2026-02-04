@@ -1,13 +1,42 @@
 /*
  * mkt_test.h - Simple C test framework with automatic test registration
  *
- * Usage:
+ * Basic Usage:
  *   TEST_GROUP(MyTests)
  *
  *   TEST(my_test_name) {
  *       ASSERT_EQ(5, 2 + 3, "addition works");
  *       ASSERT_TRUE(ptr != NULL, "pointer is not null");
  *   }
+ *
+ * Fixture Usage:
+ *   TEST_GROUP(DatabaseTests)
+ *
+ *   // Per-group fixtures (run once for the entire group)
+ *   static void group_setup(void) {
+ *       // Initialize database connection pool
+ *   }
+ *   static void group_teardown(void) {
+ *       // Close database connection pool
+ *   }
+ *   GROUP_FIXTURE(group_setup, group_teardown);
+ *
+ *   // Per-test fixtures (run before/after each test)
+ *   static void test_setup(void) {
+ *       // Begin transaction
+ *   }
+ *   static void test_teardown(void) {
+ *       // Rollback transaction
+ *   }
+ *   TEST_FIXTURE(test_setup, test_teardown);
+ *
+ *   TEST(insert_record) { ... }
+ *   TEST(delete_record) { ... }
+ *   // Execution order:
+ *   //   group_setup()
+ *   //   test_setup() -> insert_record() -> test_teardown()
+ *   //   test_setup() -> delete_record() -> test_teardown()
+ *   //   group_teardown()
  */
 
 #ifndef MKT_TEST_H
@@ -38,6 +67,9 @@ typedef struct
 /* Test function signature */
 typedef void (*MktTestFunc)(MktTestResult *result);
 
+/* Fixture function signature */
+typedef void (*MktFixtureFunc)(void);
+
 /* Test registry entry */
 typedef struct
 {
@@ -49,11 +81,27 @@ typedef struct
 /* Register a test (called automatically by TEST macro) */
 void mkt_test_register(const char *name, const char *group, MktTestFunc func);
 
+/* Register group fixtures (called automatically by GROUP_FIXTURE macro) */
+void mkt_test_register_group_fixture(
+		const char *group, MktFixtureFunc setup, MktFixtureFunc teardown);
+
 /* Run all registered tests, returns 0 on success, 1 on failure */
-int mkt_test_run_all(void);
+int mkt_test_run_all(
+		bool		 tap_output,
+		const char **test_filters,
+		int			 test_filter_count,
+		const char **group_filters,
+		int			 group_filter_count);
 
 /* Internal: mark current test as failed */
 void mkt_test_fail(const char *file, int line, const char *msg);
+
+/* Internal: check if running in TAP mode */
+bool mkt_test_is_tap_mode(void);
+
+/* Internal: printf wrapper for tests */
+void mkt_test_printf(const char *fmt, ...)
+		__attribute__((format(printf, 1, 2)));
 
 /* TEST_GROUP macro - sets the group for subsequent tests in this file */
 #define TEST_GROUP(group_name)                             \
@@ -62,22 +110,92 @@ void mkt_test_fail(const char *file, int line, const char *msg);
 	static void (*_mkt_test_teardown)(void) = NULL
 
 /*
- * TEST_GROUP_FIXTURE - register setup/teardown functions for the test group
+ * GROUP_FIXTURE - register per-group setup/teardown functions
+ *
+ * These run once when entering/leaving the test group (before first test,
+ * after last test).
  *
  * Usage:
  *   TEST_GROUP(MyTests);
- *   TEST_GROUP_FIXTURE(my_setup, my_teardown);
+ *   GROUP_FIXTURE(group_setup, group_teardown);
+ *
+ *   TEST(test1) { ... }
+ *   TEST(test2) { ... }
+ *   // group_setup() runs before test1
+ *   // group_teardown() runs after test2
+ */
+#define GROUP_FIXTURE(setup_fn, teardown_fn)                              \
+	__attribute__((constructor)) static void _mkt_register_group_fixture( \
+			void)                                                         \
+	{                                                                     \
+		mkt_test_register_group_fixture(                                  \
+				_MKT_TEST_GROUP, setup_fn, teardown_fn);                  \
+	}
+
+/*
+ * TEST_FIXTURE - register per-test setup/teardown functions
+ *
+ * These run before/after each individual test in the group.
+ *
+ * Usage:
+ *   TEST_GROUP(MyTests);
+ *   TEST_FIXTURE(my_setup, my_teardown);
  *
  *   TEST(my_test) {
  *       // my_setup() called before, my_teardown() called after
  *   }
  */
-#define TEST_GROUP_FIXTURE(setup_fn, teardown_fn)                        \
+#define TEST_FIXTURE(setup_fn, teardown_fn)                              \
 	__attribute__((constructor)) static void _mkt_register_fixture(void) \
 	{                                                                    \
 		_mkt_test_setup	   = setup_fn;                                   \
 		_mkt_test_teardown = teardown_fn;                                \
 	}
+
+/* Deprecated alias for TEST_FIXTURE (for backward compatibility) */
+#define TEST_GROUP_FIXTURE(setup_fn, teardown_fn) \
+	TEST_FIXTURE(setup_fn, teardown_fn)
+
+/*
+ * TEST_MEMCTX_FIXTURE - convenience macro for memory context per-test fixture
+ *
+ * Creates a memory context before each test and destroys it after. This is
+ * a common pattern for tests that need isolated memory allocation.
+ *
+ * Usage:
+ *   TEST_GROUP(MyTests);
+ *   TEST_MEMCTX_FIXTURE();
+ *
+ *   TEST(my_test) {
+ *       // Memory context active, allocations are isolated
+ *   }
+ */
+#define TEST_MEMCTX_FIXTURE()                                        \
+	static MktMemCtx _mkt_test_memctx = NULL;                        \
+	static void		 _mkt_memctx_setup(void)                         \
+	{                                                                \
+		_mkt_test_memctx = mkt_memctx_create(NULL, _MKT_TEST_GROUP); \
+		mkt_memctx_switch(_mkt_test_memctx);                         \
+	}                                                                \
+	static void _mkt_memctx_teardown(void)                           \
+	{                                                                \
+		mkt_memctx_switch(NULL);                                     \
+		mkt_memctx_delete(_mkt_test_memctx);                         \
+		_mkt_test_memctx = NULL;                                     \
+	}                                                                \
+	TEST_FIXTURE(_mkt_memctx_setup, _mkt_memctx_teardown)
+
+/*
+ * TEST_PRINT - printf for tests that respects TAP format
+ *
+ * Use this instead of printf() in tests to output diagnostic information.
+ * In TAP mode, output is prefixed with '# ' to mark it as a comment.
+ * In human-readable mode, output is indented to align with test output.
+ *
+ * Usage:
+ *   TEST_PRINT("Detected value: %d\n", value);
+ */
+#define TEST_PRINT(...) mkt_test_printf(__VA_ARGS__)
 
 /* TEST macro - defines and auto-registers a test */
 #define TEST(name)                                                 \
@@ -87,6 +205,42 @@ void mkt_test_fail(const char *file, int line, const char *msg);
 		if (_mkt_test_setup)                                       \
 			_mkt_test_setup();                                     \
 		test_##name##_impl(result);                                \
+		if (_mkt_test_teardown)                                    \
+			_mkt_test_teardown();                                  \
+	}                                                              \
+	__attribute__((constructor)) static void register_##name(void) \
+	{                                                              \
+		mkt_test_register(#name, _MKT_TEST_GROUP, test_##name);    \
+	}                                                              \
+	static void test_##name##_impl(MktTestResult *result)
+
+/*
+ * TEST_WITH_FIXTURE - define a test with its own specific setup/teardown
+ *
+ * The test's own fixture runs in addition to the group's TEST_FIXTURE
+ * (if one is registered).
+ *
+ * Execution order:
+ *   1. Group TEST_FIXTURE setup (if exists)
+ *   2. Test-specific setup
+ *   3. Test body
+ *   4. Test-specific teardown
+ *   5. Group TEST_FIXTURE teardown (if exists)
+ *
+ * Usage:
+ *   TEST_WITH_FIXTURE(my_special_test, my_setup, my_teardown) {
+ *       // Test body with custom setup/teardown
+ *   }
+ */
+#define TEST_WITH_FIXTURE(name, setup_fn, teardown_fn)             \
+	static void test_##name##_impl(MktTestResult *result);         \
+	static void test_##name(MktTestResult *result)                 \
+	{                                                              \
+		if (_mkt_test_setup)                                       \
+			_mkt_test_setup();                                     \
+		setup_fn();                                                \
+		test_##name##_impl(result);                                \
+		teardown_fn();                                             \
 		if (_mkt_test_teardown)                                    \
 			_mkt_test_teardown();                                  \
 	}                                                              \
