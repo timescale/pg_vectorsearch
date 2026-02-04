@@ -49,6 +49,14 @@ jobs:
           CC: clang
         run: ./scripts/ci/sanitizers.sh address
 
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
+        with:
+          name: test-logs-asan
+          path: builddir-asan/meson-logs/
+          retention-days: 7
+
   ubsan:
     name: UndefinedBehaviorSanitizer
     runs-on: ubuntu-latest
@@ -67,3 +75,11 @@ jobs:
         env:
           CC: clang
         run: ./scripts/ci/sanitizers.sh undefined
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
+        with:
+          name: test-logs-ubsan
+          path: builddir-ubsan/meson-logs/
+          retention-days: 7

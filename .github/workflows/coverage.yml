@@ -47,6 +47,16 @@ jobs:
       - name: Build with coverage
         run: ./scripts/ci/coverage.sh
 
+      - name: Upload test logs and coverage
+        if: always()
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
+        with:
+          name: coverage-report
+          path: |
+            builddir-cov/meson-logs/
+            builddir-cov/meson-logs/coveragereport/
+          retention-days: 7
+
       - name: Check Codecov token
         id: codecov-check
         env:
