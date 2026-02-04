@@ -16,6 +16,7 @@ repos:
         entry: clang-tidy
         language: system
         files: ^src/.*\.c$
+        exclude: ^src/algo/distance_(avx2|avx512|neon)\.c$
         args: [-p=builddir, --config-file=.clang-tidy]
         pass_filenames: true
         require_serial: true

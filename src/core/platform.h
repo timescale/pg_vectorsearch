@@ -43,6 +43,42 @@ mkt_has_simd(SimdCapability cap)
 	return (mkt_detect_simd() & cap) != 0;
 }
 
+/*
+ * Override SIMD capability detection (for testing and benchmarking).
+ *
+ * Forces all SIMD-using code to use a specific instruction set by masking
+ * detected CPU capabilities. This allows:
+ * - Testing all SIMD code paths, including fallbacks
+ * - Benchmarking different SIMD implementations
+ * - Debugging SIMD-specific issues
+ *
+ * Parameters:
+ *   mask: Bitwise OR of SimdCapability flags
+ *         - 0 or SIMD_NONE: Force scalar implementation
+ *         - SIMD_AVX2: Force AVX2 (on x86-64)
+ *         - SIMD_AVX512F: Force AVX-512 (on x86-64)
+ *         - SIMD_NEON: Force NEON (on ARM)
+ *         - 0xFFFFFFFF: Auto-detect (default, clears override)
+ *
+ * Note: Call this BEFORE any SIMD detection occurs. Calling after
+ * detection may require re-initialization of SIMD-using modules.
+ *
+ * Example usage:
+ *   // Test AVX2 code path even on AVX-512 CPU
+ *   mkt_simd_set_override(SIMD_AVX2);
+ *   // ... run tests or benchmarks ...
+ *   mkt_simd_set_override(0xFFFFFFFF);  // Reset to auto-detect
+ */
+void mkt_simd_set_override(uint32_t mask);
+
+/*
+ * Clear SIMD detection cache, forcing re-detection.
+ *
+ * Useful when testing different SIMD overrides. Call this after
+ * mkt_simd_set_override() to ensure the new mask takes effect.
+ */
+void mkt_simd_reset_cache(void);
+
 /* Cache line size (typical for modern CPUs) */
 #define MKT_CACHE_LINE 64
 

@@ -256,10 +256,11 @@ void mkt_test_printf(const char *fmt, ...)
  * Each iteration is registered as a separate test with a descriptive name
  * (e.g., "test_AVX2", "test_NEON") for better test reporting and filtering.
  *
- * Test receives two arguments:
+ * Test receives two arguments (both marked as __attribute__((unused))):
  *   - int iteration: index from 0 to count-1
  *   - const char *param: the parameter string for this iteration
  *
+ * Both parameters are marked unused, so you only need to use what you need.
  * Fixtures run before/after each iteration. Supports 2-10 parameters.
  *
  * Usage:
@@ -353,7 +354,9 @@ void mkt_test_printf(const char *fmt, ...)
 			   MktTestResult *result, int iteration, const char *param); \
 	_TEST_PARAM_DISPATCH(name, _COUNT_ARGS(__VA_ARGS__))                     \
 	static void test_##name##_impl(                                          \
-			MktTestResult *result, int iteration, const char *param)
+			MktTestResult			   *result,                              \
+			int __attribute__((unused)) iteration,                           \
+			const char __attribute__((unused)) * param)
 
 /* Assertion macros */
 #define ASSERT_TRUE(cond, msg)                                            \

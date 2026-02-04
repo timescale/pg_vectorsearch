@@ -1,18 +1,45 @@
 # Unit tests
 
+# Check for GSL (optional - for reference validation tests)
+gsl_dep = dependency('gsl', required: false)
+if gsl_dep.found()
+  message('GSL found: Reference validation tests will be enabled')
+else
+  message('GSL not found: Reference validation tests will be skipped')
+  message('  Install GSL to enable: sudo pacman -S gsl (Arch) or sudo apt install libgsl-dev (Debian/Ubuntu)')
+endif
+
+# Generate test config header
+test_config = configuration_data()
+test_config.set('HAVE_GSL', gsl_dep.found() ? 1 : 0)
+
+test_config_h = configure_file(
+  output: 'test_config.h',
+  configuration: test_config
+)
+
 unit_test_sources = files(
   'mkt_test.c',
   'run_tests.c',
+  'test_distance.c',
   'test_fixtures.c',
   'test_memory.c',
   'test_platform.c',
   'test_vector.c',
 )
 
+test_dependencies = [mkt_core_dep]
+if gsl_dep.found()
+  test_dependencies += gsl_dep
+endif
+
+# Create include directory for builddir (where test_config.h is generated)
+test_inc = include_directories('.')
+
 test_runner = executable('run_tests',
-  unit_test_sources,
-  dependencies: [mkt_core_dep],
-  include_directories: include_directories('.'),
+  [unit_test_sources, test_config_h],
+  dependencies: test_dependencies,
+  include_directories: test_inc,
   install: false,
 )
 
