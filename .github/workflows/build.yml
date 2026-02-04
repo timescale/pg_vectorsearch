@@ -65,3 +65,11 @@ jobs:
 
       - name: Build and test
         run: ./scripts/ci/build.sh
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
+        with:
+          name: test-logs-${{ matrix.os }}-${{ matrix.arch }}
+          path: builddir/meson-logs/
+          retention-days: 7
