@@ -34,6 +34,7 @@ MIN_COVERAGE=85
 # Exclusions:
 # - builddir.* : build artifacts
 # - test/.* : test code
+# - src/cli/.* : CLI tools (tested via integration, not unit tests)
 # - .*_pg\.h : PostgreSQL-specific headers (not compiled in standalone mode)
 # - Platform-specific SIMD files (can't be tested on other architectures)
 
@@ -46,6 +47,7 @@ MIN_COVERAGE=85
 GCOVR_EXCLUDES=(
     --exclude 'builddir.*'
     --exclude 'test/.*'
+    --exclude 'src/cli/.*'
     --exclude '.*_pg\.h'
 )
 

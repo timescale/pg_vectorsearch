@@ -131,6 +131,39 @@ mkt_core_dep = declare_dependency(
   dependencies: [m_dep],
 )
 
+# CLI tool
+mkt_cli_sources = files(
+  'src/cli/main.c',
+  'src/cli/bench_distance.c',
+  'src/cli/bench_quantize.c',
+  'src/cli/bench_cluster.c',
+  'src/cli/bench_search.c',
+  'src/cli/distance_pgvector.c',
+)
+
+mkt_exe = executable('mkt',
+  mkt_cli_sources,
+  dependencies: [mkt_core_dep],
+  include_directories: src_inc,
+  install: false,
+)
+
+# Create symlink in ./bin for easy local execution
+bin_dir = meson.project_source_root() / 'bin'
+mkt_symlink = custom_target('mkt-symlink',
+  output: 'mkt-link-stamp',
+  command: [
+    'sh', '-c',
+    'mkdir -p @0@ && ln -sf @1@ @2@ && touch @OUTPUT@'.format(
+      bin_dir,
+      meson.project_build_root() / 'mkt',
+      bin_dir / 'mkt'
+    )
+  ],
+  build_by_default: true,
+  depends: mkt_exe,
+)
+
 # Unit tests
 subdir('test/unit')
 

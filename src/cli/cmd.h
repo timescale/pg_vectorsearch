@@ -1,0 +1,61 @@
+/*
+ * cmd.h - Command context and shared CLI infrastructure
+ *
+ * Provides a structured context for CLI commands instead of raw argc/argv.
+ * Allows shared argument parsing in main and per-command specialization.
+ */
+
+#ifndef MKT_CLI_CMD_H
+#define MKT_CLI_CMD_H
+
+#include <stdbool.h>
+
+#include "core/memory.h"
+
+/*
+ * CmdContext - Shared context for all CLI commands
+ *
+ * Passed to command handlers instead of raw argc/argv. Allows:
+ * - Shared state (memory context, verbosity, etc.)
+ * - Command-specific arguments parsing
+ * - Extensible via inheritance (embed in larger structs)
+ */
+typedef struct CmdContext
+{
+	/* Command-line arguments (after command name) */
+	int	   argc;
+	char **argv;
+
+	/* Program name (for usage messages) */
+	const char *prog_name;
+
+	/* Memory context for command allocations */
+	MktMemCtx memctx;
+
+	/* Global flags (parsed by main before dispatch) */
+	bool verbose;
+	bool quiet;
+
+	/* Subcommand name (e.g., "distance" for "mkt bench distance") */
+	const char *subcmd_name;
+} CmdContext;
+
+/*
+ * Command handler signature
+ *
+ * All command handlers take a CmdContext* and return:
+ * - 0 on success
+ * - Non-zero error code on failure
+ */
+typedef int (*CmdHandler)(CmdContext *ctx);
+
+/*
+ * Helper macros for usage messages
+ */
+#define CMD_USAGE_HEADER(ctx, subcmd) \
+	printf("Usage: %s %s [OPTIONS]\n\n", (ctx)->prog_name, subcmd)
+
+#define CMD_USAGE_EXAMPLE(ctx, subcmd, args) \
+	printf("  %s %s %s\n", (ctx)->prog_name, subcmd, args)
+
+#endif /* MKT_CLI_CMD_H */

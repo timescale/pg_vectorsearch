@@ -71,6 +71,20 @@ meson test -C builddir
 meson install -C builddir
 ```
 
+## Benchmarking
+
+The `mkt` CLI tool includes benchmarks for distance computation:
+
+```bash
+# Run distance benchmark (default: dim=768, count=10000)
+./bin/mkt bench distance
+
+# Compare implementations
+./bin/mkt bench distance --dim 1536 --count 50000
+```
+
+See [docs/simd.md][simd-doc] for SIMD build options and implementation details.
+
 ## Usage
 
 ```sql
@@ -97,6 +111,7 @@ LIMIT 10;
 
 - [Architecture][arch-doc] - High-level design and data structures
 - [Implementation][impl-doc] - Detailed specifications and development phases
+- [SIMD][simd-doc] - SIMD build options and distance computation
 
 ## References
 
@@ -129,3 +144,4 @@ TBD
 [scann-alloydb]: https://services.google.com/fh/files/misc/scann_for_alloydb_whitepaper.pdf
 [arch-doc]: docs/architecture.md
 [impl-doc]: docs/implementation.md
+[simd-doc]: docs/simd.md
