@@ -7,9 +7,14 @@
  *
  * Features:
  * - Single-pair and batch distance operations
- * - Runtime SIMD detection (AVX-512, AVX2, NEON, or scalar fallback)
+ * - Runtime SIMD detection (AVX-512, AVX2, NEON, or compiler fallback)
  * - Zero-overhead function pointer dispatch after initialization
  * - Support for full-precision floating-point vectors
+ *
+ * Build modes (set via meson -Dsimd=):
+ * - full (default): Hand-optimized SIMD + compiler-vectorized baseline
+ * - compiler: Compiler-vectorized only (target_clones for ISA selection)
+ * - none: Truly scalar (no vectorization, for debugging/baseline)
  *
  * Usage:
  *   VectorRef a = {.data = vec1, .dim = 128};
@@ -134,7 +139,7 @@ int mkt_distance_batch_cosine(
 /*
  * Query current SIMD implementation name.
  *
- * Returns: String like "AVX-512", "AVX2", "NEON", or "scalar"
+ * Returns: String like "avx512", "avx2", "neon", "compiler", or "none"
  *
  * Useful for debugging and performance validation. The returned string
  * is valid for the lifetime of the program (static storage).
@@ -152,5 +157,128 @@ const char *mkt_distance_impl_name(void);
  *   mkt_distance_force_reinit();  // Will now use AVX2
  */
 void mkt_distance_force_reinit(void);
+
+/*
+ * Implementation-specific functions for benchmarking and testing.
+ *
+ * These bypass the dispatch mechanism and call specific implementations
+ * directly. Useful for accurate performance comparisons.
+ *
+ * Compiler-vectorized (always available):
+ * Uses target_clones for ISA selection on x86. Falls back to basic
+ * vectorization on other architectures.
+ */
+
+/* Compiler-vectorized single-pair functions */
+Distance mkt_distance_l2_compiler(VectorRef a, VectorRef b);
+Distance mkt_distance_ip_compiler(VectorRef a, VectorRef b);
+Distance mkt_distance_cosine_compiler(VectorRef a, VectorRef b);
+
+/* Compiler-vectorized batch functions */
+int mkt_distance_batch_l2_compiler(
+		VectorRef	 query,
+		const float *vectors,
+		uint32_t	 count,
+		Dimension	 dim,
+		Distance	*distances);
+int mkt_distance_batch_ip_compiler(
+		VectorRef	 query,
+		const float *vectors,
+		uint32_t	 count,
+		Dimension	 dim,
+		Distance	*distances);
+int mkt_distance_batch_cosine_compiler(
+		VectorRef	 query,
+		const float *vectors,
+		uint32_t	 count,
+		Dimension	 dim,
+		Distance	*distances);
+
+/*
+ * Hand-optimized SIMD implementations (simd=full mode only).
+ *
+ * These are only available when built with -Dsimd=full (the default).
+ * They provide the best performance on supported hardware.
+ */
+
+#ifdef MKT_SIMD_FULL
+
+#if defined(__x86_64__) || defined(_M_X64)
+/* AVX2 implementations */
+Distance mkt_distance_l2_avx2(VectorRef a, VectorRef b);
+Distance mkt_distance_ip_avx2(VectorRef a, VectorRef b);
+Distance mkt_distance_cosine_avx2(VectorRef a, VectorRef b);
+
+int mkt_distance_batch_l2_avx2(
+		VectorRef	 query,
+		const float *vectors,
+		uint32_t	 count,
+		Dimension	 dim,
+		Distance	*distances);
+int mkt_distance_batch_ip_avx2(
+		VectorRef	 query,
+		const float *vectors,
+		uint32_t	 count,
+		Dimension	 dim,
+		Distance	*distances);
+int mkt_distance_batch_cosine_avx2(
+		VectorRef	 query,
+		const float *vectors,
+		uint32_t	 count,
+		Dimension	 dim,
+		Distance	*distances);
+
+/* AVX-512 implementations */
+Distance mkt_distance_l2_avx512(VectorRef a, VectorRef b);
+Distance mkt_distance_ip_avx512(VectorRef a, VectorRef b);
+Distance mkt_distance_cosine_avx512(VectorRef a, VectorRef b);
+
+int mkt_distance_batch_l2_avx512(
+		VectorRef	 query,
+		const float *vectors,
+		uint32_t	 count,
+		Dimension	 dim,
+		Distance	*distances);
+int mkt_distance_batch_ip_avx512(
+		VectorRef	 query,
+		const float *vectors,
+		uint32_t	 count,
+		Dimension	 dim,
+		Distance	*distances);
+int mkt_distance_batch_cosine_avx512(
+		VectorRef	 query,
+		const float *vectors,
+		uint32_t	 count,
+		Dimension	 dim,
+		Distance	*distances);
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+/* NEON implementations */
+Distance mkt_distance_l2_neon(VectorRef a, VectorRef b);
+Distance mkt_distance_ip_neon(VectorRef a, VectorRef b);
+Distance mkt_distance_cosine_neon(VectorRef a, VectorRef b);
+
+int mkt_distance_batch_l2_neon(
+		VectorRef	 query,
+		const float *vectors,
+		uint32_t	 count,
+		Dimension	 dim,
+		Distance	*distances);
+int mkt_distance_batch_ip_neon(
+		VectorRef	 query,
+		const float *vectors,
+		uint32_t	 count,
+		Dimension	 dim,
+		Distance	*distances);
+int mkt_distance_batch_cosine_neon(
+		VectorRef	 query,
+		const float *vectors,
+		uint32_t	 count,
+		Dimension	 dim,
+		Distance	*distances);
+#endif
+
+#endif /* MKT_SIMD_FULL */
 
 #endif /* MKT_DISTANCE_H */

@@ -1,0 +1,19 @@
+# Meerkat build options
+
+option('simd',
+  type: 'combo',
+  choices: ['full', 'compiler', 'none'],
+  value: 'full',
+  description: '''SIMD implementation mode:
+  - full: target_clones baseline + hand-optimized intrinsics (best performance)
+  - compiler: target_clones only (compiler-generated vectorization)
+  - none: truly scalar (no vectorization, debugging/baseline)'''
+)
+
+option('native',
+  type: 'boolean',
+  value: false,
+  description: '''Use -march=native for local builds.
+  Enables all CPU-specific instructions for the build machine.
+  Produces non-portable binaries optimized for local benchmarking.'''
+)

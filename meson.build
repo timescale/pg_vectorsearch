@@ -10,12 +10,71 @@ project('meerkat', 'c',
 
 cc = meson.get_compiler('c')
 
+# Get build options
+simd_mode = get_option('simd')
+use_native = get_option('native')
+
 # Common flags
 add_project_arguments(
   '-D_GNU_SOURCE',
   '-DMKT_STANDALONE',
   language: 'c',
 )
+
+# Generate mkt_config.h with SIMD mode configuration
+# Use set() conditionally - undefined macros appear as /* #undef X */ comments
+# Source code uses #ifdef checks (standard autoconf-style pattern)
+config_data = configuration_data()
+if simd_mode == 'full'
+  config_data.set('MKT_SIMD_FULL', 1)
+endif
+if simd_mode == 'none'
+  config_data.set('MKT_SIMD_NONE', 1)
+endif
+config_data.set_quoted('MKT_SIMD_MODE', simd_mode)
+
+# Disable target_clones in coverage builds - each clone is a separate function
+# and only the one matching the CPU gets called, leaving others uncovered
+if get_option('b_coverage')
+  config_data.set('MKT_COVERAGE', 1)
+endif
+
+# Disable ifuncs in sanitizer builds - the ifunc resolver runs before the
+# sanitizer runtime is initialized, causing crashes on instrumented globals
+sanitize_opt = get_option('b_sanitize')
+if sanitize_opt != 'none'
+  config_data.set('MKT_SANITIZER', 1)
+endif
+
+mkt_config_h = configure_file(
+  input: 'src/mkt_config.h.in',
+  output: 'mkt_config.h',
+  configuration: config_data,
+)
+
+# Generate .clang-format-ignore to exclude build directory from formatting
+configure_file(
+  input: 'clang-format-ignore.in',
+  output: '.clang-format-ignore',
+  copy: true,
+)
+
+# Native build: -march=native for local optimization (non-portable)
+if use_native
+  add_project_arguments('-march=native', language: 'c')
+endif
+
+# Compiler vectorization flags (for simd=full and simd=compiler, NOT for simd=none)
+# These enable effective auto-vectorization with GCC/Clang for target_clones baseline
+if simd_mode != 'none'
+  add_project_arguments(
+    '-ftree-vectorize',        # Explicit auto-vectorization (GCC)
+    '-fassociative-math',      # Allow reassociation for better vectorization
+    '-fno-signed-zeros',       # IEEE 754 relaxation for performance
+    '-fno-trapping-math',      # No FP exceptions for performance
+    language: 'c',
+  )
+endif
 
 # Math library
 m_dep = cc.find_library('m', required: true)
@@ -29,53 +88,45 @@ mkt_core_sources = files(
 )
 
 # Include directories
-src_inc = include_directories('src')
+# Include build directory for generated mkt_config.h
+src_inc = include_directories('src', '.')
 
-# SIMD implementations as separate libraries with architecture-specific flags
+# SIMD source files and libraries
+# With file-level target attributes, SIMD files can be compiled as regular sources
+# Exception: 32-bit ARM needs -mfpu=neon flag, kept as separate library
+simd_sources = []
 simd_libs = []
 
-if host_machine.cpu_family() in ['x86', 'x86_64']
-  # AVX2 library
-  mkt_avx2_lib = static_library('mkt_avx2',
-    'src/algo/distance_avx2.c',
-    c_args: ['-mavx2', '-mfma'],
-    include_directories: src_inc,
-  )
-  simd_libs += mkt_avx2_lib
-
-  # AVX-512 library
-  mkt_avx512_lib = static_library('mkt_avx512',
-    'src/algo/distance_avx512.c',
-    c_args: ['-mavx512f', '-mavx512dq'],
-    include_directories: src_inc,
-  )
-  simd_libs += mkt_avx512_lib
-
-elif host_machine.cpu_family() in ['aarch64', 'arm']
-  # NEON library
-  neon_args = []
-  if host_machine.cpu_family() == 'arm'
-    neon_args = ['-mfpu=neon']
+if simd_mode == 'full'
+  # Hand-optimized SIMD implementations (simd=full only)
+  if host_machine.cpu_family() in ['x86', 'x86_64']
+    # AVX2 and AVX-512 use file-level target pragmas, compile as regular sources
+    simd_sources += files(
+      'src/algo/distance_avx2.c',
+      'src/algo/distance_avx512.c',
+    )
+  elif host_machine.cpu_family() == 'aarch64'
+    # AArch64: NEON is mandatory, no special flags needed
+    simd_sources += files('src/algo/distance_neon.c')
+  elif host_machine.cpu_family() == 'arm'
+    # 32-bit ARM: needs -mfpu=neon flag, keep as separate library
+    mkt_neon_lib = static_library('mkt_neon',
+      'src/algo/distance_neon.c',
+      c_args: ['-mfpu=neon'],
+      include_directories: src_inc,
+    )
+    simd_libs += mkt_neon_lib
   endif
-
-  mkt_neon_lib = static_library('mkt_neon',
-    'src/algo/distance_neon.c',
-    c_args: neon_args,
-    include_directories: src_inc,
-  )
-  simd_libs += mkt_neon_lib
 endif
 
-# Core library (static, for linking into tests and tools)
-mkt_core_lib = static_library('mkt_core',
-  mkt_core_sources,
-  link_with: simd_libs,
-  include_directories: src_inc,
-  dependencies: [m_dep],
-)
+# Combine all sources
+mkt_all_sources = mkt_core_sources + simd_sources
 
+# Core dependency: compile sources directly instead of static library
+# This avoids the 5-10% overhead from static library compilation
 mkt_core_dep = declare_dependency(
-  link_with: mkt_core_lib,
+  sources: mkt_all_sources,
+  link_with: simd_libs,
   include_directories: src_inc,
   dependencies: [m_dep],
 )

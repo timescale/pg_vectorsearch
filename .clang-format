@@ -53,7 +53,7 @@ BreakStringLiterals: true
 PointerAlignment: Right
 DerivePointerAlignment: false
 
-# Include handling (postgres.h first, then system, then local with blank lines)
+# Include handling (postgres.h first, then mkt_config.h, system, then local)
 SortIncludes: CaseSensitive
 IncludeBlocks: Regroup
 # Disable main file priority to treat all quoted includes equally
@@ -62,6 +62,9 @@ IncludeCategories:
   - Regex: '^<postgres\.h>'
     Priority: -3
     SortPriority: -3
+  - Regex: '^"mkt_config\.h"'
+    Priority: -2
+    SortPriority: -2
   - Regex: '^<.*\.h>'
     Priority: 1
     SortPriority: 1

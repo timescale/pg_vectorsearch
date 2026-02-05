@@ -313,9 +313,9 @@ static bool
 get_simd_mask_for_variant(
 		const char *variant, uint32_t *simd_mask, const char **expected_name)
 {
-	if (strcmp(variant, "scalar") == 0)
+	if (strcmp(variant, "compiler") == 0)
 	{
-		*expected_name = "scalar";
+		*expected_name = "compiler";
 		*simd_mask	   = SIMD_NONE;
 		return true; /* Always available */
 	}
@@ -325,7 +325,7 @@ get_simd_mask_for_variant(
 		if (!(caps & SIMD_AVX2))
 			return false; /* Not available */
 
-		*expected_name = "AVX2";
+		*expected_name = "avx2";
 		*simd_mask	   = SIMD_AVX2;
 		return true;
 	}
@@ -335,7 +335,7 @@ get_simd_mask_for_variant(
 		if (!(caps & SIMD_AVX512F))
 			return false; /* Not available */
 
-		*expected_name = "AVX-512";
+		*expected_name = "avx512";
 		*simd_mask	   = SIMD_AVX512F;
 		return true;
 	}
@@ -345,7 +345,7 @@ get_simd_mask_for_variant(
 		if (!(caps & SIMD_NEON))
 			return false; /* Not available */
 
-		*expected_name = "NEON";
+		*expected_name = "neon";
 		*simd_mask	   = SIMD_NEON;
 		return true;
 	}
@@ -369,7 +369,7 @@ get_simd_mask_for_variant(
 		return;                                                          \
 	}
 
-TEST_PARAMETERIZED(l2_simd_variant, "scalar", "avx2", "avx512", "neon")
+TEST_PARAMETERIZED(l2_simd_variant, "compiler", "avx2", "avx512", "neon")
 {
 	SKIP_IF_SIMD_VARIANT_NOT_AVAILABLE(param);
 
@@ -418,7 +418,7 @@ TEST_PARAMETERIZED(l2_simd_variant, "scalar", "avx2", "avx512", "neon")
 	reinit_distance_with_simd(0xFFFFFFFF);
 }
 
-TEST_PARAMETERIZED(ip_simd_variant, "scalar", "avx2", "avx512", "neon")
+TEST_PARAMETERIZED(ip_simd_variant, "compiler", "avx2", "avx512", "neon")
 {
 	SKIP_IF_SIMD_VARIANT_NOT_AVAILABLE(param);
 
@@ -461,7 +461,7 @@ TEST_PARAMETERIZED(ip_simd_variant, "scalar", "avx2", "avx512", "neon")
 	reinit_distance_with_simd(0xFFFFFFFF);
 }
 
-TEST_PARAMETERIZED(cosine_simd_variant, "scalar", "avx2", "avx512", "neon")
+TEST_PARAMETERIZED(cosine_simd_variant, "compiler", "avx2", "avx512", "neon")
 {
 	SKIP_IF_SIMD_VARIANT_NOT_AVAILABLE(param);
 
@@ -966,8 +966,9 @@ TEST(impl_name_is_valid)
 
 	/* Should be one of the known implementations */
 	int valid =
-			(strcmp(name, "AVX-512") == 0 || strcmp(name, "AVX2") == 0 ||
-			 strcmp(name, "NEON") == 0 || strcmp(name, "scalar") == 0);
+			(strcmp(name, "avx512") == 0 || strcmp(name, "avx2") == 0 ||
+			 strcmp(name, "neon") == 0 || strcmp(name, "compiler") == 0 ||
+			 strcmp(name, "none") == 0);
 
 	char msg[128];
 	snprintf(msg, sizeof(msg), "unknown implementation: %s", name);
@@ -981,13 +982,13 @@ TEST(impl_name_is_valid)
  * mechanism, ensuring all code paths are tested regardless of CPU.
  */
 
-TEST(force_scalar_implementation)
+TEST(force_compiler_implementation)
 {
-	/* Force scalar mode */
+	/* Force compiler mode */
 	reinit_distance_with_simd(SIMD_NONE);
 
 	const char *name = mkt_distance_impl_name();
-	ASSERT_STR_EQ("scalar", name, "should use scalar implementation");
+	ASSERT_STR_EQ("compiler", name, "should use compiler implementation");
 
 	/* Test basic functionality in scalar mode */
 	float	  a_data[] = {1.0f, 2.0f, 3.0f};
@@ -1041,7 +1042,7 @@ TEST(force_avx2_implementation)
 	reinit_distance_with_simd(SIMD_AVX2);
 
 	const char *name = mkt_distance_impl_name();
-	ASSERT_STR_EQ("AVX2", name, "should use AVX2 implementation");
+	ASSERT_STR_EQ("avx2", name, "should use AVX2 implementation");
 
 	/* Test all metrics with AVX2 - various dimensions to exercise all paths */
 	/* Dimension 8: exact AVX2 width */
@@ -1103,7 +1104,7 @@ TEST(force_avx512_implementation)
 	reinit_distance_with_simd(SIMD_AVX512F);
 
 	const char *name = mkt_distance_impl_name();
-	ASSERT_STR_EQ("AVX-512", name, "should use AVX-512 implementation");
+	ASSERT_STR_EQ("avx512", name, "should use AVX-512 implementation");
 
 	/* Test all metrics with AVX-512 */
 	float a_data[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};

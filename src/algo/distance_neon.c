@@ -5,6 +5,10 @@
  * Processes 4 floats per iteration (128 bits).
  *
  * Requires ARMv8.1+ for vaddvq_f32 (horizontal reduction).
+ *
+ * Note: No target pragmas needed here:
+ * - AArch64: NEON is mandatory, always available
+ * - ARMv7: Built as separate library with -mfpu=neon flag
  */
 
 #include <arm_neon.h>

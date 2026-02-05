@@ -18,10 +18,57 @@
 #ifndef MKT_SIMD_UTILS_H
 #define MKT_SIMD_UTILS_H
 
+/* Must be first - defines MKT_SIMD_NONE used by MKT_TARGET_CLONES */
+#include "mkt_config.h"
+
 #include <stdatomic.h>
 #include <stdint.h>
 
 #include "core/platform.h"
+
+/*
+ * Target Attribute Macros
+ *
+ * These macros specify the CPU features required for each SIMD implementation.
+ * Using macros makes it easy to change target features in one place.
+ */
+#if defined(__x86_64__) || defined(_M_X64)
+#define MKT_TARGET_AVX512 __attribute__((target("avx512f,avx512dq")))
+#define MKT_TARGET_AVX2	  __attribute__((target("avx2,fma")))
+#elif defined(__aarch64__) || defined(_M_ARM64)
+/* NEON is always available on AArch64, no attribute needed */
+#define MKT_TARGET_NEON
+#endif
+
+/*
+ * Target Clones Macro
+ *
+ * Generates multiple function versions for different ISAs. The dynamic linker
+ * selects the best version at load time. Only effective on x86 with GCC 6+ or
+ * Clang 13+.
+ *
+ * Note: target_clones doesn't work effectively on ARM (generates single
+ * clone).
+ */
+#ifndef __has_attribute
+#define __has_attribute(x) 0
+#endif
+
+/*
+ * Disable target_clones when:
+ * - simd=none (MKT_SIMD_NONE)
+ * - coverage build (MKT_COVERAGE) - each clone is separate, only one executes
+ * - compiler lacks target_clones support
+ * - non-x86 architecture (ARM target_clones generates single clone anyway)
+ */
+#if !defined(MKT_SIMD_NONE) && !defined(MKT_COVERAGE) && \
+		__has_attribute(target_clones) &&                \
+		(defined(__x86_64__) || defined(__i386__))
+#define MKT_TARGET_CLONES \
+	__attribute__((target_clones("default", "avx2", "avx512f")))
+#else
+#define MKT_TARGET_CLONES
+#endif
 
 /*
  * Horizontal Reduction Functions
@@ -39,7 +86,7 @@
  *
  * Uses _mm512_reduce_add_ps intrinsic (AVX-512F).
  */
-static inline float
+MKT_TARGET_AVX512 static inline float
 mkt_horizontal_sum_avx512(__m512 v)
 {
 	return _mm512_reduce_add_ps(v);
@@ -50,7 +97,7 @@ mkt_horizontal_sum_avx512(__m512 v)
  *
  * Used for Hamming distance (popcount results).
  */
-static inline uint64_t
+MKT_TARGET_AVX512 static inline uint64_t
 mkt_horizontal_sum_epi64_avx512(__m512i v)
 {
 	return _mm512_reduce_add_epi64(v);
@@ -62,7 +109,7 @@ mkt_horizontal_sum_epi64_avx512(__m512i v)
  * AVX2 lacks a reduce intrinsic, so we manually combine the two 128-bit
  * halves and use horizontal adds within each lane.
  */
-static inline float
+MKT_TARGET_AVX2 static inline float
 mkt_horizontal_sum_avx2(__m256 v)
 {
 	/* Extract high and low 128-bit halves */
@@ -83,7 +130,7 @@ mkt_horizontal_sum_avx2(__m256 v)
 /*
  * AVX2 horizontal sum for 64-bit integers (4 uint64_t -> 1 uint64_t)
  */
-static inline uint64_t
+MKT_TARGET_AVX2 static inline uint64_t
 mkt_horizontal_sum_epi64_avx2(__m256i v)
 {
 	__m128i lo	= _mm256_castsi256_si128(v);
