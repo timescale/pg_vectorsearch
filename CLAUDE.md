@@ -149,8 +149,36 @@ system, if present.
 Profile frequently to validate performance decisions and catch regressions.
 Maintain a performance log over time to track trends.
 
-- Use `perf` to profile
-- Create flame graphs
+**Prerequisites:**
+
+Profiling requires lowering `perf_event_paranoid` to allow non-root profiling:
+
+```bash
+# Temporary (until reboot)
+sudo sysctl -w kernel.perf_event_paranoid=1
+
+# Permanent (add to /etc/sysctl.conf)
+echo "kernel.perf_event_paranoid = 1" | sudo tee -a /etc/sysctl.conf
+```
+
+**Usage:**
+
+```bash
+# Profile any command
+./scripts/profile.sh ./bin/mkt bench distance --dim 768 --count 10000
+
+# Quick benchmark profiling
+./scripts/profile-bench.sh 768 10000 avx512
+
+# Profile cache misses
+./scripts/profile.sh --events cache-misses ./bin/mkt bench distance
+```
+
+Output: `profiles/flamegraph.svg` (open in browser)
+
+All profiling outputs are saved to the `profiles/` directory (gitignored).
+
+See `docs/development.md` for detailed profiling documentation.
 
 ### Benchmarking
 

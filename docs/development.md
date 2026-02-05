@@ -152,6 +152,108 @@ meson setup builddir-debug --buildtype=debug
 meson setup builddir-release --buildtype=release
 ```
 
+## Profiling
+
+### Quick Profiling with perf
+
+The `scripts/profile.sh` script automates profiling with `perf` and generates
+interactive flame graphs.
+
+#### Requirements
+
+- `perf` (linux-tools-common, linux-tools-generic)
+- FlameGraph (auto-downloaded to `/tmp/FlameGraph` if not found)
+
+Install perf:
+```bash
+sudo apt-get install linux-tools-common linux-tools-generic
+```
+
+#### Basic Usage
+
+```bash
+# Profile any command
+./scripts/profile.sh ./bin/mkt bench distance --dim 768 --count 10000
+
+# Convenience script for benchmarks
+./scripts/profile-bench.sh 768 10000 avx512
+
+# Profile with custom events
+./scripts/profile.sh --events cache-misses ./bin/mkt bench distance
+
+# Keep perf.data for manual analysis
+./scripts/profile.sh --keep-perf-data ./bin/mkt bench distance
+```
+
+#### Output
+
+The script generates files in the `profiles/` directory:
+- `profiles/flamegraph.svg` - Interactive flame graph (CPU time by function)
+- `profiles/flamegraph-icicle.svg` - Inverted flame graph (call chains from bottom)
+- `profiles/flamegraph.folded` - Collapsed stack traces (for manual analysis)
+- `profiles/perf.data` - Raw perf data (if `--keep-perf-data` used)
+
+Open in browser:
+```bash
+firefox profiles/flamegraph.svg
+```
+
+#### Profile Build
+
+The script automatically creates `builddir-profile` with:
+- Release optimizations (`-O3`)
+- Frame pointers (`-fno-omit-frame-pointer`)
+- Debug symbols (`-g`)
+
+This ensures accurate stack traces while maintaining realistic performance.
+
+#### Advanced Usage
+
+```bash
+# Profile cache misses instead of CPU cycles
+./scripts/profile.sh --events cache-misses --output cache-profile \
+  ./bin/mkt bench distance --dim 768 --count 100000
+
+# Profile branch mispredictions
+./scripts/profile.sh --events branch-misses --output branch-profile \
+  ./bin/mkt bench distance --dim 384 --count 50000
+
+# Profile at higher frequency (more samples, more overhead)
+./scripts/profile.sh --freq 4999 ./bin/mkt bench distance
+
+# Profile multiple events
+./scripts/profile.sh --events cycles,cache-misses ./bin/mkt bench distance
+```
+
+#### Interpreting Flame Graphs
+
+- **Width**: Total time spent in function (including children)
+- **Color**: Random (for visual distinction, not meaningful)
+- **Interactive**: Click to zoom, search for function names
+- **Icicle graph**: Shows call chains from root (main) at bottom
+
+Look for:
+- Wide bars = hot functions (optimization targets)
+- Tall stacks = deep call chains (potential inlining opportunities)
+- Unexpected functions = hidden overhead
+
+#### Manual Analysis
+
+For detailed analysis, use `perf report` directly:
+```bash
+# Generate profile with --keep-perf-data
+./scripts/profile.sh --keep-perf-data ./bin/mkt bench distance
+
+# Interactive report
+perf report
+
+# Text report
+perf report --stdio
+
+# Show annotated source code
+perf annotate mkt_distance_l2_avx512
+```
+
 ## Formatting
 
 Code is formatted with clang-format. The project prefers clang-format-18 for
