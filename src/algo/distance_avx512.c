@@ -4,7 +4,9 @@
  * Explicit SIMD implementations using AVX-512 intrinsics for x86-64 CPUs
  * with AVX-512F support. Processes 16 floats per iteration (512 bits).
  *
- * Compiled with -mavx512f -mavx512dq flags.
+ * Uses per-function target attributes instead of compiler flags to enable
+ * AVX-512 code generation. This allows the file to be compiled as part of
+ * the main build without requiring separate library compilation.
  */
 
 #include <immintrin.h>
@@ -20,7 +22,7 @@
  * Processes 16 floats per iteration using FMA (fused multiply-add).
  * Remaining elements handled with scalar tail loop.
  */
-Distance
+MKT_TARGET_AVX512 Distance
 mkt_distance_l2_avx512(VectorRef a, VectorRef b)
 {
 	if (mkt_unlikely(
@@ -60,7 +62,7 @@ mkt_distance_l2_avx512(VectorRef a, VectorRef b)
 /*
  * Negative inner product using AVX-512.
  */
-Distance
+MKT_TARGET_AVX512 Distance
 mkt_distance_ip_avx512(VectorRef a, VectorRef b)
 {
 	if (mkt_unlikely(
@@ -95,7 +97,7 @@ mkt_distance_ip_avx512(VectorRef a, VectorRef b)
  *
  * Computes three parallel reductions: dot product, norm_a, norm_b.
  */
-Distance
+MKT_TARGET_AVX512 Distance
 mkt_distance_cosine_avx512(VectorRef a, VectorRef b)
 {
 	if (mkt_unlikely(
@@ -143,9 +145,9 @@ mkt_distance_cosine_avx512(VectorRef a, VectorRef b)
 }
 
 /*
- * Batch L2 distance with prefetching.
+ * Batch L2 distance - simple single-accumulator loop.
  */
-int
+MKT_TARGET_AVX512 int
 mkt_distance_batch_l2_avx512(
 		VectorRef	 query,
 		const float *vectors,
@@ -158,30 +160,61 @@ mkt_distance_batch_l2_avx512(
 				distances == NULL))
 		return -1;
 
-	const float *q = query.data;
+	const float	  *q	 = query.data;
+	const uint32_t dim32 = dim; /* Use 32-bit for efficient loop codegen */
+
+	/* Precompute loop bounds */
+	const size_t unrolled_bytes = (dim32 / 32) *
+								  128; /* 32 floats = 128 bytes */
+	const uint32_t unrolled_elems = (dim32 / 32) * 32;
 
 	for (uint32_t v = 0; v < count; v++)
 	{
-		const float *vec = vectors + v * dim;
+		const float *vec = vectors + v * dim32;
 
-		/* Prefetch 2 vectors ahead */
-		if (v + MKT_PREFETCH_DISTANCE < count)
-			mkt_prefetch_read(vectors + (v + MKT_PREFETCH_DISTANCE) * dim);
+		__m512 sum0 = _mm512_setzero_ps();
+		__m512 sum1 = _mm512_setzero_ps();
 
-		__m512 sum_vec = _mm512_setzero_ps();
-
-		Dimension i = 0;
-		for (; i + 16 <= dim; i += 16)
+		/* 2x unrolled loop: 32 floats per iteration */
+		size_t offset = 0;
+		while (offset < unrolled_bytes)
 		{
-			__m512 vq	= _mm512_loadu_ps(q + i);
-			__m512 vv	= _mm512_loadu_ps(vec + i);
+			__m512 vq0 = _mm512_loadu_ps(
+					(const float *)((const char *)q + offset));
+			__m512 vv0 = _mm512_loadu_ps(
+					(const float *)((const char *)vec + offset));
+			__m512 diff0 = _mm512_sub_ps(vq0, vv0);
+			sum0		 = _mm512_fmadd_ps(diff0, diff0, sum0);
+
+			__m512 vq1 = _mm512_loadu_ps(
+					(const float *)((const char *)q + offset + 64));
+			__m512 vv1 = _mm512_loadu_ps(
+					(const float *)((const char *)vec + offset + 64));
+			__m512 diff1 = _mm512_sub_ps(vq1, vv1);
+			sum1		 = _mm512_fmadd_ps(diff1, diff1, sum1);
+
+			offset += 128;
+		}
+
+		/* Combine accumulators */
+		__m512 sum_vec = _mm512_add_ps(sum0, sum1);
+
+		/* Handle remaining 16-float chunk if dim not divisible by 32 */
+		if (unrolled_elems + 16 <= dim32)
+		{
+			__m512 vq = _mm512_loadu_ps(
+					(const float *)((const char *)q + offset));
+			__m512 vv = _mm512_loadu_ps(
+					(const float *)((const char *)vec + offset));
 			__m512 diff = _mm512_sub_ps(vq, vv);
 			sum_vec		= _mm512_fmadd_ps(diff, diff, sum_vec);
 		}
 
 		float sum = mkt_horizontal_sum_avx512(sum_vec);
 
-		for (; i < dim; i++)
+		/* Scalar tail */
+		uint32_t tail_start = (dim32 / 16) * 16;
+		for (uint32_t i = tail_start; i < dim32; i++)
 		{
 			float diff = q[i] - vec[i];
 			sum += diff * diff;
@@ -194,9 +227,9 @@ mkt_distance_batch_l2_avx512(
 }
 
 /*
- * Batch inner product with prefetching.
+ * Batch inner product - 2x unrolled loop.
  */
-int
+MKT_TARGET_AVX512 int
 mkt_distance_batch_ip_avx512(
 		VectorRef	 query,
 		const float *vectors,
@@ -209,28 +242,58 @@ mkt_distance_batch_ip_avx512(
 				distances == NULL))
 		return -1;
 
-	const float *q = query.data;
+	const float	  *q	 = query.data;
+	const uint32_t dim32 = dim; /* Use 32-bit for efficient loop codegen */
+
+	/* Precompute loop bounds */
+	const size_t unrolled_bytes = (dim32 / 32) *
+								  128; /* 32 floats = 128 bytes */
+	const uint32_t unrolled_elems = (dim32 / 32) * 32;
 
 	for (uint32_t v = 0; v < count; v++)
 	{
-		const float *vec = vectors + v * dim;
+		const float *vec = vectors + v * dim32;
 
-		if (v + MKT_PREFETCH_DISTANCE < count)
-			mkt_prefetch_read(vectors + (v + MKT_PREFETCH_DISTANCE) * dim);
+		__m512 dot0 = _mm512_setzero_ps();
+		__m512 dot1 = _mm512_setzero_ps();
 
-		__m512 dot_vec = _mm512_setzero_ps();
-
-		Dimension i = 0;
-		for (; i + 16 <= dim; i += 16)
+		/* 2x unrolled loop: 32 floats per iteration */
+		size_t offset = 0;
+		while (offset < unrolled_bytes)
 		{
-			__m512 vq = _mm512_loadu_ps(q + i);
-			__m512 vv = _mm512_loadu_ps(vec + i);
-			dot_vec	  = _mm512_fmadd_ps(vq, vv, dot_vec);
+			__m512 vq0 = _mm512_loadu_ps(
+					(const float *)((const char *)q + offset));
+			__m512 vv0 = _mm512_loadu_ps(
+					(const float *)((const char *)vec + offset));
+			dot0 = _mm512_fmadd_ps(vq0, vv0, dot0);
+
+			__m512 vq1 = _mm512_loadu_ps(
+					(const float *)((const char *)q + offset + 64));
+			__m512 vv1 = _mm512_loadu_ps(
+					(const float *)((const char *)vec + offset + 64));
+			dot1 = _mm512_fmadd_ps(vq1, vv1, dot1);
+
+			offset += 128;
+		}
+
+		/* Combine accumulators */
+		__m512 dot_vec = _mm512_add_ps(dot0, dot1);
+
+		/* Handle remaining 16-float chunk if dim not divisible by 32 */
+		if (unrolled_elems + 16 <= dim32)
+		{
+			__m512 vq = _mm512_loadu_ps(
+					(const float *)((const char *)q + offset));
+			__m512 vv = _mm512_loadu_ps(
+					(const float *)((const char *)vec + offset));
+			dot_vec = _mm512_fmadd_ps(vq, vv, dot_vec);
 		}
 
 		float dot = mkt_horizontal_sum_avx512(dot_vec);
 
-		for (; i < dim; i++)
+		/* Scalar tail */
+		uint32_t tail_start = (dim32 / 16) * 16;
+		for (uint32_t i = tail_start; i < dim32; i++)
 			dot += q[i] * vec[i];
 
 		distances[v] = -dot;
@@ -240,9 +303,9 @@ mkt_distance_batch_ip_avx512(
 }
 
 /*
- * Batch cosine distance with prefetching.
+ * Batch cosine distance with 4 accumulators.
  */
-int
+MKT_TARGET_AVX512 int
 mkt_distance_batch_cosine_avx512(
 		VectorRef	 query,
 		const float *vectors,
@@ -255,34 +318,75 @@ mkt_distance_batch_cosine_avx512(
 				distances == NULL))
 		return -1;
 
-	const float *q = query.data;
+	const float	  *q	 = query.data;
+	const uint32_t dim32 = dim; /* Use 32-bit for efficient loop codegen */
 
 	/* Pre-compute query norm (reused for all vectors) */
-	__m512	  norm_q_vec = _mm512_setzero_ps();
-	Dimension i			 = 0;
-	for (; i + 16 <= dim; i += 16)
+	__m512	 norm_q_vec = _mm512_setzero_ps();
+	uint32_t i			= 0;
+	for (; i + 16 <= dim32; i += 16)
 	{
 		__m512 vq  = _mm512_loadu_ps(q + i);
 		norm_q_vec = _mm512_fmadd_ps(vq, vq, norm_q_vec);
 	}
 	float norm_q = mkt_horizontal_sum_avx512(norm_q_vec);
-	for (; i < dim; i++)
+	for (; i < dim32; i++)
 		norm_q += q[i] * q[i];
 
 	float sqrt_norm_q = sqrtf(norm_q);
 
 	for (uint32_t v = 0; v < count; v++)
 	{
-		const float *vec = vectors + v * dim;
+		const float *vec = vectors + v * dim32;
 
 		if (v + MKT_PREFETCH_DISTANCE < count)
-			mkt_prefetch_read(vectors + (v + MKT_PREFETCH_DISTANCE) * dim);
+			mkt_prefetch_read(vectors + (v + MKT_PREFETCH_DISTANCE) * dim32);
 
-		__m512 dot_vec	  = _mm512_setzero_ps();
-		__m512 norm_v_vec = _mm512_setzero_ps();
+		/* Use 4 accumulators to hide FMA latency */
+		__m512 dot0	   = _mm512_setzero_ps();
+		__m512 dot1	   = _mm512_setzero_ps();
+		__m512 dot2	   = _mm512_setzero_ps();
+		__m512 dot3	   = _mm512_setzero_ps();
+		__m512 norm_v0 = _mm512_setzero_ps();
+		__m512 norm_v1 = _mm512_setzero_ps();
+		__m512 norm_v2 = _mm512_setzero_ps();
+		__m512 norm_v3 = _mm512_setzero_ps();
 
 		i = 0;
-		for (; i + 16 <= dim; i += 16)
+
+		/* Process 64 floats per iteration with 4 accumulators */
+		for (; i + 64 <= dim32; i += 64)
+		{
+			__m512 vq0 = _mm512_loadu_ps(q + i);
+			__m512 vv0 = _mm512_loadu_ps(vec + i);
+			dot0	   = _mm512_fmadd_ps(vq0, vv0, dot0);
+			norm_v0	   = _mm512_fmadd_ps(vv0, vv0, norm_v0);
+
+			__m512 vq1 = _mm512_loadu_ps(q + i + 16);
+			__m512 vv1 = _mm512_loadu_ps(vec + i + 16);
+			dot1	   = _mm512_fmadd_ps(vq1, vv1, dot1);
+			norm_v1	   = _mm512_fmadd_ps(vv1, vv1, norm_v1);
+
+			__m512 vq2 = _mm512_loadu_ps(q + i + 32);
+			__m512 vv2 = _mm512_loadu_ps(vec + i + 32);
+			dot2	   = _mm512_fmadd_ps(vq2, vv2, dot2);
+			norm_v2	   = _mm512_fmadd_ps(vv2, vv2, norm_v2);
+
+			__m512 vq3 = _mm512_loadu_ps(q + i + 48);
+			__m512 vv3 = _mm512_loadu_ps(vec + i + 48);
+			dot3	   = _mm512_fmadd_ps(vq3, vv3, dot3);
+			norm_v3	   = _mm512_fmadd_ps(vv3, vv3, norm_v3);
+		}
+
+		/* Combine accumulators */
+		__m512 dot_vec = _mm512_add_ps(
+				_mm512_add_ps(dot0, dot1), _mm512_add_ps(dot2, dot3));
+		__m512 norm_v_vec = _mm512_add_ps(
+				_mm512_add_ps(norm_v0, norm_v1),
+				_mm512_add_ps(norm_v2, norm_v3));
+
+		/* Handle remaining 16-float chunks */
+		for (; i + 16 <= dim32; i += 16)
 		{
 			__m512 vq  = _mm512_loadu_ps(q + i);
 			__m512 vv  = _mm512_loadu_ps(vec + i);
@@ -293,7 +397,8 @@ mkt_distance_batch_cosine_avx512(
 		float dot	 = mkt_horizontal_sum_avx512(dot_vec);
 		float norm_v = mkt_horizontal_sum_avx512(norm_v_vec);
 
-		for (; i < dim; i++)
+		/* Scalar tail */
+		for (; i < dim32; i++)
 		{
 			dot += q[i] * vec[i];
 			norm_v += vec[i] * vec[i];

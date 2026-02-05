@@ -4,6 +4,7 @@ builddir-*/
 debug/
 release/
 build/
+bin/
 
 # Editor/IDE
 .cache/
@@ -18,3 +19,8 @@ compile_commands.json
 *.gcno
 coverage.html
 coverage*.html
+
+# Profiling
+profiles/
+perf.data
+perf.data.old

@@ -4,7 +4,9 @@
  * Explicit SIMD implementations using AVX2 intrinsics for x86-64 CPUs.
  * Processes 8 floats per iteration (256 bits).
  *
- * Compiled with -mavx2 -mfma flags.
+ * Uses per-function target attributes instead of compiler flags to enable
+ * AVX2 code generation. This allows the file to be compiled as part of
+ * the main build without requiring separate library compilation.
  */
 
 #include <immintrin.h>
@@ -17,7 +19,7 @@
 /*
  * L2 squared distance using AVX2.
  */
-Distance
+MKT_TARGET_AVX2 Distance
 mkt_distance_l2_avx2(VectorRef a, VectorRef b)
 {
 	if (mkt_unlikely(
@@ -57,7 +59,7 @@ mkt_distance_l2_avx2(VectorRef a, VectorRef b)
 /*
  * Negative inner product using AVX2.
  */
-Distance
+MKT_TARGET_AVX2 Distance
 mkt_distance_ip_avx2(VectorRef a, VectorRef b)
 {
 	if (mkt_unlikely(
@@ -90,7 +92,7 @@ mkt_distance_ip_avx2(VectorRef a, VectorRef b)
 /*
  * Cosine distance using AVX2.
  */
-Distance
+MKT_TARGET_AVX2 Distance
 mkt_distance_cosine_avx2(VectorRef a, VectorRef b)
 {
 	if (mkt_unlikely(
@@ -139,7 +141,7 @@ mkt_distance_cosine_avx2(VectorRef a, VectorRef b)
 /*
  * Batch L2 distance with prefetching.
  */
-int
+MKT_TARGET_AVX2 int
 mkt_distance_batch_l2_avx2(
 		VectorRef	 query,
 		const float *vectors,
@@ -189,7 +191,7 @@ mkt_distance_batch_l2_avx2(
 /*
  * Batch inner product with prefetching.
  */
-int
+MKT_TARGET_AVX2 int
 mkt_distance_batch_ip_avx2(
 		VectorRef	 query,
 		const float *vectors,
@@ -235,7 +237,7 @@ mkt_distance_batch_ip_avx2(
 /*
  * Batch cosine distance with prefetching.
  */
-int
+MKT_TARGET_AVX2 int
 mkt_distance_batch_cosine_avx2(
 		VectorRef	 query,
 		const float *vectors,
