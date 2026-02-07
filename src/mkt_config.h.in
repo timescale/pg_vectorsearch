@@ -32,4 +32,16 @@
  */
 #mesondefine MKT_SANITIZER
 
+/*
+ * CBLAS support: enables optimized matrix multiplication via BLAS library.
+ * When available, batch encoding uses cblas_sgemm for ~4x speedup.
+ */
+#mesondefine MKT_HAVE_CBLAS
+
+/*
+ * FAISS support: enables benchmark comparison against FAISS RaBitQuantizer.
+ * Requires FAISS built with the C API patch from third-party/.
+ */
+#mesondefine MKT_HAVE_FAISS
+
 #endif /* MKT_CONFIG_H */

@@ -57,50 +57,45 @@ OS=$(uname -s)
 
 case "$ARCH" in
     x86_64|amd64|i686)
-        # On x86-64: exclude ARM NEON (cannot execute)
-        GCOVR_EXCLUDES+=(--exclude '.*distance_neon\.c')
+        # On x86: exclude ARM NEON (cannot execute)
+        GCOVR_EXCLUDES+=(--exclude '.*_neon\.c')
 
         # Check if CPU supports AVX2
         HAS_AVX2=0
         if [[ "$OS" == "Linux" ]]; then
-            # Linux: check /proc/cpuinfo
             if grep -q ' avx2 ' /proc/cpuinfo 2>/dev/null; then
                 HAS_AVX2=1
             fi
         elif [[ "$OS" == "Darwin" ]]; then
-            # macOS: check sysctl
             if sysctl -n machdep.cpu.features machdep.cpu.leaf7_features 2>/dev/null | grep -q AVX2; then
                 HAS_AVX2=1
             fi
         fi
 
         if [[ $HAS_AVX2 -eq 0 ]]; then
-            # No AVX2 support: exclude AVX2 code
-            GCOVR_EXCLUDES+=(--exclude '.*distance_avx2\.c')
+            GCOVR_EXCLUDES+=(--exclude '.*_avx2\.c')
         fi
 
-        # Check if CPU supports AVX-512 (needs avx512f flag)
+        # Check if CPU supports AVX-512
         HAS_AVX512=0
         if [[ "$OS" == "Linux" ]]; then
-            # Linux: check /proc/cpuinfo
             if grep -q ' avx512f ' /proc/cpuinfo 2>/dev/null; then
                 HAS_AVX512=1
             fi
         elif [[ "$OS" == "Darwin" ]]; then
-            # macOS: check sysctl (note: most Macs don't have AVX-512)
             if sysctl -n machdep.cpu.features 2>/dev/null | grep -q AVX512F; then
                 HAS_AVX512=1
             fi
         fi
 
         if [[ $HAS_AVX512 -eq 0 ]]; then
-            # No AVX-512 support: exclude AVX-512 code
-            GCOVR_EXCLUDES+=(--exclude '.*distance_avx512\.c')
+            GCOVR_EXCLUDES+=(--exclude '.*_avx512\.c')
         fi
         ;;
     aarch64|arm64|arm*)
         # On ARM: exclude x86 AVX implementations (cannot execute)
-        GCOVR_EXCLUDES+=(--exclude '.*distance_avx.*\.c')
+        GCOVR_EXCLUDES+=(--exclude '.*_avx2\.c')
+        GCOVR_EXCLUDES+=(--exclude '.*_avx512\.c')
         ;;
 esac
 

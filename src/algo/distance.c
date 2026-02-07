@@ -18,6 +18,7 @@
 
 #include "algo/distance.h"
 #include "algo/simd_utils.h"
+#include "algo/vecops.h"
 #include "core/platform.h"
 
 /*
@@ -117,19 +118,10 @@ int mkt_distance_batch_cosine_neon(
  * 3. Reference for comparing hand-optimized vs compiler-generated code
  */
 
-/* Static helper with target_clones (MKT_TARGET_CLONES defined in simd_utils.h)
+/*
+ * L2 and IP distance use vecops for the core computation.
+ * This reduces code duplication and ensures consistent SIMD optimization.
  */
-MKT_TARGET_CLONES static float
-compiler_l2_loop(int dim, const float *pa, const float *pb)
-{
-	float sum = 0.0f;
-	for (int i = 0; i < dim; i++)
-	{
-		float diff = pa[i] - pb[i];
-		sum += diff * diff;
-	}
-	return sum;
-}
 
 Distance
 mkt_distance_l2_compiler(VectorRef a, VectorRef b)
@@ -139,17 +131,7 @@ mkt_distance_l2_compiler(VectorRef a, VectorRef b)
 				b.data == NULL))
 		return -1.0f;
 
-	return compiler_l2_loop(a.dim, a.data, b.data);
-}
-
-/* Static helper with target_clones */
-MKT_TARGET_CLONES static float
-compiler_ip_loop(int dim, const float *pa, const float *pb)
-{
-	float sum = 0.0f;
-	for (int i = 0; i < dim; i++)
-		sum += pa[i] * pb[i];
-	return sum;
+	return mkt_l2_distance_squared(a.data, b.data, a.dim);
 }
 
 Distance
@@ -160,7 +142,7 @@ mkt_distance_ip_compiler(VectorRef a, VectorRef b)
 				b.data == NULL))
 		return -1.0f;
 
-	return -compiler_ip_loop(a.dim, a.data, b.data);
+	return -mkt_dot_product(a.data, b.data, a.dim);
 }
 
 /* Static helper with target_clones - returns similarity (not distance) */
@@ -226,7 +208,7 @@ mkt_distance_batch_l2_compiler(
 
 	for (uint32_t i = 0; i < count; i++)
 	{
-		distances[i] = compiler_l2_loop(dim, q, vectors + i * dim);
+		distances[i] = mkt_l2_distance_squared(q, vectors + i * dim, dim);
 	}
 
 	return 0;
@@ -249,7 +231,7 @@ mkt_distance_batch_ip_compiler(
 
 	for (uint32_t i = 0; i < count; i++)
 	{
-		distances[i] = -compiler_ip_loop(dim, q, vectors + i * dim);
+		distances[i] = -mkt_dot_product(q, vectors + i * dim, dim);
 	}
 
 	return 0;

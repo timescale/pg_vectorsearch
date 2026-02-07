@@ -71,6 +71,44 @@ meson test -C builddir
 meson install -C builddir
 ```
 
+### Build Options
+
+| Option | Values | Default | Description |
+|--------|--------|---------|-------------|
+| `simd` | `full`, `compiler`, `none` | `full` | SIMD implementation mode |
+| `native` | `true`, `false` | `false` | Use `-march=native` for local builds |
+| `blas` | `auto`, `enabled`, `disabled` | `auto` | CBLAS for matrix operations |
+
+### Optional: BLAS Library
+
+Installing a CPU-optimized BLAS library significantly improves RaBitQ encoding
+performance (~4x speedup for batch operations). The build system auto-detects
+CBLAS if available.
+
+**Recommended libraries by CPU:**
+
+| CPU | Library | Link |
+|-----|---------|------|
+| Intel | Intel oneMKL | [intel.com/oneapi/onemkl][mkl] |
+| AMD | AOCL-BLIS | [amd.com/aocl/blis][aocl] |
+| ARM | ARM Performance Libraries | [developer.arm.com][armpl] |
+| Any | OpenBLAS | [openblas.net][openblas] |
+
+**Quick install:**
+
+```bash
+# Arch Linux (AUR packages require yay or similar)
+pacman -S blas-openblas      # Generic (official repo)
+yay -S blas-mkl              # Intel (AUR)
+yay -S blas-aocl-gcc         # AMD (AUR)
+
+# Debian/Ubuntu
+apt install libopenblas-dev
+
+# Fedora
+dnf install openblas-devel
+```
+
 ## Benchmarking
 
 The `mkt` CLI tool includes benchmarks for distance computation:
@@ -134,6 +172,10 @@ LIMIT 10;
 TBD
 
 <!-- Links -->
+[mkl]: https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html
+[aocl]: https://www.amd.com/en/developer/aocl/blis.html
+[armpl]: https://developer.arm.com/Tools%20and%20Software/Arm%20Performance%20Libraries
+[openblas]: https://www.openblas.net/
 [scann]: https://github.com/google-research/google-research/tree/master/scann
 [spann]: https://www.microsoft.com/en-us/research/publication/spann-highly-efficient-billion-scale-approximate-nearest-neighbor-search/
 [pgvector]: https://github.com/pgvector/pgvector
