@@ -46,6 +46,150 @@ if sanitize_opt != 'none'
   config_data.set('MKT_SANITIZER', 1)
 endif
 
+# CBLAS library (optional, for optimized matrix operations)
+# Detected early so MKT_HAVE_CBLAS can be set in config header
+# Detection order: vendor-specific -> OpenBLAS -> generic CBLAS
+blas_opt = get_option('blas')
+cblas_dep = []
+have_cblas = false
+blas_name = ''
+
+if blas_opt != 'disabled'
+  # 1. Intel MKL (via pkg-config)
+  if not have_cblas
+    mkl_dep = dependency('mkl-dynamic-lp64-iomp', required: false)
+    if mkl_dep.found()
+      cblas_dep = mkl_dep
+      have_cblas = true
+      blas_name = 'Intel MKL'
+    endif
+  endif
+
+  # 2. macOS Accelerate framework
+  if not have_cblas and host_machine.system() == 'darwin'
+    accelerate_dep = dependency('Accelerate', required: false)
+    if accelerate_dep.found()
+      cblas_dep = accelerate_dep
+      have_cblas = true
+      blas_name = 'Apple Accelerate'
+      # Use new Accelerate API to avoid deprecation warnings (macOS 13.3+)
+      add_project_arguments('-DACCELERATE_NEW_LAPACK', language: 'c')
+    endif
+  endif
+
+  # 3. ARM Performance Libraries (via environment module or find_library)
+  if not have_cblas and host_machine.cpu_family() in ['aarch64', 'arm']
+    armpl_dir = run_command('sh', '-c', 'echo $ARMPL_DIR', check: false).stdout().strip()
+    if armpl_dir != ''
+      armpl_lib = cc.find_library('armpl_lp64',
+        dirs: [armpl_dir / 'lib'],
+        required: false
+      )
+      if armpl_lib.found() and cc.has_header('armpl.h', args: '-I' + armpl_dir / 'include_lp64')
+        cblas_dep = declare_dependency(
+          dependencies: armpl_lib,
+          compile_args: ['-I' + armpl_dir / 'include_lp64'],
+        )
+        have_cblas = true
+        blas_name = 'ARM Performance Libraries'
+      endif
+    endif
+    if not have_cblas
+      armpl_lib = cc.find_library('armpl_lp64', required: false)
+      if armpl_lib.found() and cc.has_header('cblas.h')
+        cblas_dep = armpl_lib
+        have_cblas = true
+        blas_name = 'ARM Performance Libraries'
+      endif
+    endif
+  endif
+
+  # 4. OpenBLAS (via pkg-config or libopenblas)
+  if not have_cblas
+    openblas_dep = dependency('openblas', required: false)
+    if openblas_dep.found()
+      cblas_dep = openblas_dep
+      have_cblas = true
+      blas_name = 'OpenBLAS'
+    endif
+  endif
+  if not have_cblas
+    openblas_lib = cc.find_library('openblas', required: false)
+    if openblas_lib.found() and cc.has_header('cblas.h')
+      cblas_dep = openblas_lib
+      have_cblas = true
+      blas_name = 'OpenBLAS'
+    endif
+  endif
+
+  # 5. Generic CBLAS (AMD AOCL, reference BLAS, or other implementations)
+  # These provide standard libblas.so/libcblas.so with cblas.h
+  if not have_cblas
+    cblas_lib = cc.find_library('cblas', required: false)
+    blas_lib = cc.find_library('blas', required: false)
+    if cblas_lib.found() and blas_lib.found() and cc.has_header('cblas.h')
+      cblas_dep = [cblas_lib, blas_lib]
+      have_cblas = true
+      blas_name = 'CBLAS'
+    elif blas_lib.found() and cc.has_header('cblas.h')
+      cblas_dep = blas_lib
+      have_cblas = true
+      blas_name = 'CBLAS'
+    endif
+  endif
+
+  # Summary message
+  if have_cblas
+    config_data.set('MKT_HAVE_CBLAS', 1)
+    message('BLAS: ' + blas_name + ' (optimized matrix operations enabled)')
+  elif blas_opt == 'enabled'
+    error('BLAS required but not found')
+  else
+    message('BLAS: not found (using built-in matrix operations)')
+    message('  For better RaBitQ encoding performance, install a BLAS library:')
+    if host_machine.cpu_family() in ['x86', 'x86_64']
+      message('    OpenBLAS: blas-openblas (Arch), libopenblas-dev (Debian/Ubuntu)')
+    elif host_machine.cpu_family() in ['aarch64', 'arm']
+      message('    OpenBLAS: libopenblas-dev (Debian/Ubuntu)')
+    else
+      message('    OpenBLAS is recommended')
+    endif
+  endif
+else
+  message('BLAS: disabled by configuration')
+endif
+
+# FAISS library (optional, for benchmark comparison)
+# Expects FAISS built in ../faiss with the C API patch from third-party/
+use_faiss = get_option('faiss')
+faiss_dep = []
+
+if use_faiss
+  faiss_root = meson.project_source_root() / '..' / 'faiss'
+  faiss_build = faiss_root / 'build'
+  faiss_lib_dir = faiss_build / 'faiss'
+  faiss_capi_dir = faiss_build / 'c_api'
+
+  omp_dep = dependency('openmp', required: false)
+
+  faiss_dep = declare_dependency(
+    compile_args: [
+      '-I' + faiss_root / 'c_api',
+      '-I' + faiss_root,
+    ],
+    link_args: [
+      '-L' + faiss_capi_dir,
+      '-L' + faiss_lib_dir,
+      '-lfaiss_c',
+      '-lfaiss',
+      '-lstdc++',
+    ],
+    dependencies: [omp_dep] + (have_cblas ? [cblas_dep] : []),
+  )
+  config_data.set('MKT_HAVE_FAISS', 1)
+  message('FAISS integration enabled (using ' + faiss_root + ')')
+endif
+
 mkt_config_h = configure_file(
   input: 'src/mkt_config.h.in',
   output: 'mkt_config.h',
@@ -85,6 +229,9 @@ mkt_core_sources = files(
   'src/core/platform.c',
   'src/mkt_vector.c',
   'src/algo/distance.c',
+  'src/algo/vecops.c',
+  'src/quant/rabitq.c',
+  'src/quant/matrix.c',
 )
 
 # Include directories
@@ -104,14 +251,19 @@ if simd_mode == 'full'
     simd_sources += files(
       'src/algo/distance_avx2.c',
       'src/algo/distance_avx512.c',
+      'src/quant/rabitq_avx2.c',
+      'src/quant/rabitq_avx512.c',
     )
   elif host_machine.cpu_family() == 'aarch64'
     # AArch64: NEON is mandatory, no special flags needed
-    simd_sources += files('src/algo/distance_neon.c')
+    simd_sources += files(
+      'src/algo/distance_neon.c',
+      'src/quant/rabitq_neon.c',
+    )
   elif host_machine.cpu_family() == 'arm'
     # 32-bit ARM: needs -mfpu=neon flag, keep as separate library
     mkt_neon_lib = static_library('mkt_neon',
-      'src/algo/distance_neon.c',
+      ['src/algo/distance_neon.c', 'src/quant/rabitq_neon.c'],
       c_args: ['-mfpu=neon'],
       include_directories: src_inc,
     )
@@ -128,7 +280,7 @@ mkt_core_dep = declare_dependency(
   sources: mkt_all_sources,
   link_with: simd_libs,
   include_directories: src_inc,
-  dependencies: [m_dep],
+  dependencies: [m_dep] + (have_cblas ? [cblas_dep] : []),
 )
 
 # CLI tool
@@ -143,7 +295,7 @@ mkt_cli_sources = files(
 
 mkt_exe = executable('mkt',
   mkt_cli_sources,
-  dependencies: [mkt_core_dep],
+  dependencies: [mkt_core_dep] + (use_faiss ? [faiss_dep] : []),
   include_directories: src_inc,
   install: false,
 )

@@ -17,3 +17,23 @@ option('native',
   Enables all CPU-specific instructions for the build machine.
   Produces non-portable binaries optimized for local benchmarking.'''
 )
+
+option('blas',
+  type: 'combo',
+  choices: ['auto', 'enabled', 'disabled'],
+  value: 'auto',
+  description: '''Use BLAS for matrix operations.
+  - auto: detect and use if available (default)
+  - enabled: require BLAS, fail if not found
+  - disabled: never use BLAS
+  Uses cblas_sgemm for matrix multiplication in RaBitQ encoding.
+  Install CBLAS library for better performance: OpenBLAS, AOCL-BLIS, Intel MKL.'''
+)
+
+option('faiss',
+  type: 'boolean',
+  value: false,
+  description: '''Enable FAISS RaBitQ comparison in benchmarks.
+  Requires FAISS built with the C API patch from third-party/faiss-rabitq-c-api.patch.
+  See third-party/README.md for build instructions.'''
+)

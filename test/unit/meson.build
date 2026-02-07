@@ -25,6 +25,8 @@ unit_test_sources = files(
   'test_fixtures.c',
   'test_memory.c',
   'test_platform.c',
+  'test_rabitq.c',
+  'test_vecops.c',
   'test_vector.c',
 )
 
