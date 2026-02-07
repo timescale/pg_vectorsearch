@@ -1,0 +1,434 @@
+diff --git a/c_api/CMakeLists.txt b/c_api/CMakeLists.txt
+index aa0eed4..5c5bf0e 100644
+--- a/c_api/CMakeLists.txt
++++ b/c_api/CMakeLists.txt
+@@ -25,6 +25,7 @@ set(FAISS_C_SRC
+   IndexBinaryIVF_c.cpp
+   IndexScalarQuantizer_c.cpp
+   MetaIndexes_c.cpp
++  RaBitQuantizer_c.cpp
+   clone_index_c.cpp
+   error_impl.cpp
+   index_factory_c.cpp
+diff --git a/c_api/RaBitQuantizer_c.h b/c_api/RaBitQuantizer_c.h
+new file mode 100644
+index 0000000..10d9596
+--- /dev/null
++++ b/c_api/RaBitQuantizer_c.h
+@@ -0,0 +1,226 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * This source code is licensed under the MIT license found in the
++ * LICENSE file in the root directory of this source tree.
++ */
++
++// -*- c -*-
++
++#ifndef FAISS_RABIT_QUANTIZER_C_H
++#define FAISS_RABIT_QUANTIZER_C_H
++
++#include <stddef.h>
++#include <stdint.h>
++#include "Index_c.h"
++#include "faiss_c.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/// Opaque type for RaBitQuantizer
++FAISS_DECLARE_CLASS(RaBitQuantizer)
++
++/// Opaque type for RaBitQDistanceComputer
++FAISS_DECLARE_CLASS(RaBitQDistanceComputer)
++
++/**
++ * Create a new RaBitQuantizer with default parameters.
++ *
++ * @param p_rq    output pointer to the new quantizer
++ * @return        0 on success, error code on failure
++ */
++int faiss_RaBitQuantizer_new(FaissRaBitQuantizer** p_rq);
++
++/**
++ * Create a new RaBitQuantizer with specified parameters.
++ *
++ * @param p_rq    output pointer to the new quantizer
++ * @param d       dimension of vectors
++ * @param metric  metric type (METRIC_L2 or METRIC_INNER_PRODUCT)
++ * @param nb_bits number of bits per dimension (1-9, default 1)
++ * @return        0 on success, error code on failure
++ */
++int faiss_RaBitQuantizer_new_with(
++        FaissRaBitQuantizer** p_rq,
++        size_t d,
++        FaissMetricType metric,
++        size_t nb_bits);
++
++/// Free a RaBitQuantizer
++FAISS_DECLARE_DESTRUCTOR(RaBitQuantizer)
++
++/// Get the dimension
++FAISS_DECLARE_GETTER(RaBitQuantizer, size_t, d)
++
++/// Get the code size in bytes
++FAISS_DECLARE_GETTER(RaBitQuantizer, size_t, code_size)
++
++/// Get the number of bits per dimension
++FAISS_DECLARE_GETTER(RaBitQuantizer, size_t, nb_bits)
++
++/// Get the metric type
++FAISS_DECLARE_GETTER(RaBitQuantizer, FaissMetricType, metric_type)
++
++/**
++ * Train the quantizer (currently a no-op for RaBitQ).
++ *
++ * @param rq  the quantizer
++ * @param n   number of training vectors
++ * @param x   training vectors, size n * d
++ * @return    0 on success, error code on failure
++ */
++int faiss_RaBitQuantizer_train(
++        FaissRaBitQuantizer* rq,
++        size_t n,
++        const float* x);
++
++/**
++ * Encode vectors to RaBitQ codes.
++ *
++ * @param rq     the quantizer
++ * @param x      input vectors, size n * d
++ * @param codes  output codes, size n * code_size (must be pre-allocated)
++ * @param n      number of vectors
++ * @return       0 on success, error code on failure
++ */
++int faiss_RaBitQuantizer_compute_codes(
++        const FaissRaBitQuantizer* rq,
++        const float* x,
++        uint8_t* codes,
++        size_t n);
++
++/**
++ * Encode vectors to RaBitQ codes with a custom centroid.
++ *
++ * @param rq          the quantizer
++ * @param x           input vectors, size n * d
++ * @param codes       output codes, size n * code_size (must be pre-allocated)
++ * @param n           number of vectors
++ * @param centroid    centroid to subtract (or NULL for zero centroid)
++ * @return            0 on success, error code on failure
++ */
++int faiss_RaBitQuantizer_compute_codes_with_centroid(
++        const FaissRaBitQuantizer* rq,
++        const float* x,
++        uint8_t* codes,
++        size_t n,
++        const float* centroid);
++
++/**
++ * Decode RaBitQ codes back to vectors.
++ *
++ * @param rq     the quantizer
++ * @param codes  input codes, size n * code_size
++ * @param x      output vectors, size n * d (must be pre-allocated)
++ * @param n      number of vectors
++ * @return       0 on success, error code on failure
++ */
++int faiss_RaBitQuantizer_decode(
++        const FaissRaBitQuantizer* rq,
++        const uint8_t* codes,
++        float* x,
++        size_t n);
++
++/**
++ * Decode RaBitQ codes back to vectors with a custom centroid.
++ *
++ * @param rq          the quantizer
++ * @param codes       input codes, size n * code_size
++ * @param x           output vectors, size n * d (must be pre-allocated)
++ * @param n           number of vectors
++ * @param centroid    centroid to add back (or NULL for zero centroid)
++ * @return            0 on success, error code on failure
++ */
++int faiss_RaBitQuantizer_decode_with_centroid(
++        const FaissRaBitQuantizer* rq,
++        const uint8_t* codes,
++        float* x,
++        size_t n,
++        const float* centroid);
++
++/**
++ * Get a distance computer for computing distances to encoded vectors.
++ *
++ * @param rq          the quantizer
++ * @param p_dc        output pointer to the distance computer
++ * @param qb          query quantization bits (0 = no quantization, 1-8 = SQ bits)
++ * @param centroid    centroid for distance computation (or NULL)
++ * @param centered    whether to use centered distance computation
++ * @return            0 on success, error code on failure
++ */
++int faiss_RaBitQuantizer_get_distance_computer(
++        const FaissRaBitQuantizer* rq,
++        FaissRaBitQDistanceComputer** p_dc,
++        uint8_t qb,
++        const float* centroid,
++        int centered);
++
++/// Free a RaBitQDistanceComputer
++FAISS_DECLARE_DESTRUCTOR(RaBitQDistanceComputer)
++
++/**
++ * Set the query vector for the distance computer.
++ *
++ * @param dc  the distance computer
++ * @param x   query vector, size d
++ * @return    0 on success, error code on failure
++ */
++int faiss_RaBitQDistanceComputer_set_query(
++        FaissRaBitQDistanceComputer* dc,
++        const float* x);
++
++/**
++ * Compute distance from the query to a single code.
++ *
++ * @param dc        the distance computer
++ * @param code      the encoded vector
++ * @param distance  output distance
++ * @return          0 on success, error code on failure
++ */
++int faiss_RaBitQDistanceComputer_distance_to_code(
++        FaissRaBitQDistanceComputer* dc,
++        const uint8_t* code,
++        float* distance);
++
++/**
++ * Compute 1-bit distance estimate (fast, for filtering).
++ *
++ * @param dc        the distance computer
++ * @param code      the encoded vector
++ * @param distance  output distance estimate
++ * @return          0 on success, error code on failure
++ */
++int faiss_RaBitQDistanceComputer_distance_to_code_1bit(
++        FaissRaBitQDistanceComputer* dc,
++        const uint8_t* code,
++        float* distance);
++
++/**
++ * Compute full multi-bit distance (accurate).
++ *
++ * @param dc        the distance computer
++ * @param code      the encoded vector
++ * @param distance  output distance
++ * @return          0 on success, error code on failure
++ */
++int faiss_RaBitQDistanceComputer_distance_to_code_full(
++        FaissRaBitQDistanceComputer* dc,
++        const uint8_t* code,
++        float* distance);
++
++/**
++ * Get the query error factor (g_error) for bound computation.
++ *
++ * @param dc  the distance computer
++ * @return    g_error value
++ */
++float faiss_RaBitQDistanceComputer_g_error(
++        const FaissRaBitQDistanceComputer* dc);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/c_api/RaBitQuantizer_c.cpp b/c_api/RaBitQuantizer_c.cpp
+new file mode 100644
+index 0000000..5b992a8
+--- /dev/null
++++ b/c_api/RaBitQuantizer_c.cpp
+@@ -0,0 +1,184 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * This source code is licensed under the MIT license found in the
++ * LICENSE file in the root directory of this source tree.
++ */
++
++// -*- c++ -*-
++
++#include "RaBitQuantizer_c.h"
++#include <faiss/impl/RaBitQuantizer.h>
++#include "macros_impl.h"
++
++using faiss::RaBitQuantizer;
++using faiss::RaBitQDistanceComputer;
++
++DEFINE_DESTRUCTOR(RaBitQuantizer)
++
++int faiss_RaBitQuantizer_new(FaissRaBitQuantizer** p_rq) {
++    try {
++        *p_rq = reinterpret_cast<FaissRaBitQuantizer*>(new RaBitQuantizer());
++        return 0;
++    }
++    CATCH_AND_HANDLE
++}
++
++int faiss_RaBitQuantizer_new_with(
++        FaissRaBitQuantizer** p_rq,
++        size_t d,
++        FaissMetricType metric,
++        size_t nb_bits) {
++    try {
++        RaBitQuantizer* rq = new RaBitQuantizer(
++                d, static_cast<faiss::MetricType>(metric), nb_bits);
++        *p_rq = reinterpret_cast<FaissRaBitQuantizer*>(rq);
++        return 0;
++    }
++    CATCH_AND_HANDLE
++}
++
++DEFINE_GETTER(RaBitQuantizer, size_t, d)
++DEFINE_GETTER(RaBitQuantizer, size_t, code_size)
++DEFINE_GETTER(RaBitQuantizer, size_t, nb_bits)
++
++FaissMetricType faiss_RaBitQuantizer_metric_type(
++        const FaissRaBitQuantizer* obj) {
++    return static_cast<FaissMetricType>(
++            reinterpret_cast<const RaBitQuantizer*>(obj)->metric_type);
++}
++
++int faiss_RaBitQuantizer_train(
++        FaissRaBitQuantizer* rq,
++        size_t n,
++        const float* x) {
++    try {
++        reinterpret_cast<RaBitQuantizer*>(rq)->train(n, x);
++        return 0;
++    }
++    CATCH_AND_HANDLE
++}
++
++int faiss_RaBitQuantizer_compute_codes(
++        const FaissRaBitQuantizer* rq,
++        const float* x,
++        uint8_t* codes,
++        size_t n) {
++    try {
++        reinterpret_cast<const RaBitQuantizer*>(rq)->compute_codes(x, codes, n);
++        return 0;
++    }
++    CATCH_AND_HANDLE
++}
++
++int faiss_RaBitQuantizer_compute_codes_with_centroid(
++        const FaissRaBitQuantizer* rq,
++        const float* x,
++        uint8_t* codes,
++        size_t n,
++        const float* centroid) {
++    try {
++        reinterpret_cast<const RaBitQuantizer*>(rq)->compute_codes_core(
++                x, codes, n, centroid);
++        return 0;
++    }
++    CATCH_AND_HANDLE
++}
++
++int faiss_RaBitQuantizer_decode(
++        const FaissRaBitQuantizer* rq,
++        const uint8_t* codes,
++        float* x,
++        size_t n) {
++    try {
++        reinterpret_cast<const RaBitQuantizer*>(rq)->decode(codes, x, n);
++        return 0;
++    }
++    CATCH_AND_HANDLE
++}
++
++int faiss_RaBitQuantizer_decode_with_centroid(
++        const FaissRaBitQuantizer* rq,
++        const uint8_t* codes,
++        float* x,
++        size_t n,
++        const float* centroid) {
++    try {
++        reinterpret_cast<const RaBitQuantizer*>(rq)->decode_core(
++                codes, x, n, centroid);
++        return 0;
++    }
++    CATCH_AND_HANDLE
++}
++
++int faiss_RaBitQuantizer_get_distance_computer(
++        const FaissRaBitQuantizer* rq,
++        FaissRaBitQDistanceComputer** p_dc,
++        uint8_t qb,
++        const float* centroid,
++        int centered) {
++    try {
++        auto* dc = reinterpret_cast<const RaBitQuantizer*>(rq)
++                           ->get_distance_computer(qb, centroid, centered != 0);
++        *p_dc = reinterpret_cast<FaissRaBitQDistanceComputer*>(
++                dynamic_cast<RaBitQDistanceComputer*>(dc));
++        return 0;
++    }
++    CATCH_AND_HANDLE
++}
++
++void faiss_RaBitQDistanceComputer_free(FaissRaBitQDistanceComputer* obj) {
++    delete reinterpret_cast<RaBitQDistanceComputer*>(obj);
++}
++
++int faiss_RaBitQDistanceComputer_set_query(
++        FaissRaBitQDistanceComputer* dc,
++        const float* x) {
++    try {
++        reinterpret_cast<RaBitQDistanceComputer*>(dc)->set_query(x);
++        return 0;
++    }
++    CATCH_AND_HANDLE
++}
++
++int faiss_RaBitQDistanceComputer_distance_to_code(
++        FaissRaBitQDistanceComputer* dc,
++        const uint8_t* code,
++        float* distance) {
++    try {
++        *distance =
++                reinterpret_cast<RaBitQDistanceComputer*>(dc)->distance_to_code(
++                        code);
++        return 0;
++    }
++    CATCH_AND_HANDLE
++}
++
++int faiss_RaBitQDistanceComputer_distance_to_code_1bit(
++        FaissRaBitQDistanceComputer* dc,
++        const uint8_t* code,
++        float* distance) {
++    try {
++        *distance = reinterpret_cast<RaBitQDistanceComputer*>(dc)
++                            ->distance_to_code_1bit(code);
++        return 0;
++    }
++    CATCH_AND_HANDLE
++}
++
++int faiss_RaBitQDistanceComputer_distance_to_code_full(
++        FaissRaBitQDistanceComputer* dc,
++        const uint8_t* code,
++        float* distance) {
++    try {
++        *distance = reinterpret_cast<RaBitQDistanceComputer*>(dc)
++                            ->distance_to_code_full(code);
++        return 0;
++    }
++    CATCH_AND_HANDLE
++}
++
++float faiss_RaBitQDistanceComputer_g_error(
++        const FaissRaBitQDistanceComputer* dc) {
++    return reinterpret_cast<const RaBitQDistanceComputer*>(dc)->g_error;
++}
