@@ -1605,79 +1605,121 @@ removes bias toward any particular vector direction.
 
 ```c
 /*
- * MktRaBitQVector: Quantized vector for RaBitQ
+ * RaBitQVector: PostgreSQL varlena-compatible quantized vector (future SQL type)
  *
- * PostgreSQL varlena-compatible type storing all components needed for
- * RaBitQ distance estimation. Bits are stored MSB-first for VarBit
- * compatibility in the bit array portion.
- *
- * Two storage approaches are possible:
- *
- * 1. Mathematical form (inner_oo, norm): Stores the raw mathematical
- *    quantities from the RaBitQ paper. Distance computation derives
- *    the estimate from these values.
- *
- * 2. Factor form (f_add, f_rescale, f_error): Precomputes factors so
- *    distance estimation is just: est = f_add + f_rescale * inner_product.
- *    This is what faiss and RaBitQ-Library use. Faster at query time but
- *    stores derived values instead of primitives.
- *
- * The factor form also supports two-stage search via f_error bounds.
- * See "Implementation Insights from Reference Code" section below.
+ * Reserved for the future PostgreSQL SQL type. Encoding functions produce
+ * RaBitQData (compact form) instead. The data portion (f_add, f_rescale,
+ * bits[]) is layout-compatible with RaBitQData for zero-copy access via
+ * MKT_RABITQ_DATA().
  */
-typedef struct MktRaBitQVector
+typedef struct RaBitQVector
 {
-    int32       vl_len_;        /* varlena header (do not touch directly!) */
-    int16       dim;            /* number of dimensions (= number of bits) */
-    int16       flags;          /* reserved for future use (e.g., bit depth) */
-    float       f_add;          /* additive factor for distance formula */
-    float       f_rescale;      /* scaling factor for inner product term */
-    float       f_error;        /* error bound for two-stage filtering */
-    uint8       bits[];         /* D/8 bytes, MSB-first bit ordering */
-} MktRaBitQVector;
+    int32_t vl_len_;   /* varlena header (for PG compatibility) */
+    int16_t dim;       /* dimensions = number of bits */
+    int16_t flags;     /* reserved for future use */
+    float   f_add;     /* additive factor for distance estimation */
+    float   f_rescale; /* scaling factor for distance estimation */
+    uint8_t bits[];    /* D/8 bytes, LSB-first bit packing */
+} RaBitQVector;
 
-#define MKT_RABITQ_BITS_SIZE(dim)  (((dim) + 7) / 8)
-#define MKT_RABITQ_SIZE(dim)       (offsetof(MktRaBitQVector, bits) + \
-                                    MKT_RABITQ_BITS_SIZE(dim))
-#define MKT_RABITQ_DIM(v)          ((v)->dim)
-#define MKT_RABITQ_BITS(v)         ((v)->bits)
-#define MKT_RABITQ_F_ADD(v)        ((v)->f_add)
-#define MKT_RABITQ_F_RESCALE(v)    ((v)->f_rescale)
-#define MKT_RABITQ_F_ERROR(v)      ((v)->f_error)
+/*
+ * RaBitQData: Compact quantized vector (primary encoding form)
+ *
+ * Stores f_add and f_rescale factors plus D/8 binary code bytes.
+ * f_error is derived at query time from f_add and f_rescale.
+ * This is the form produced by all encoding functions and consumed
+ * by distance functions.
+ *
+ * Total size: 8 bytes header + ceil(dim/8) bytes data
+ */
+typedef struct RaBitQData
+{
+    float   f_add;     /* ||v-c||² - additive distance factor */
+    float   f_rescale; /* dp_multiplier - scaling factor */
+    uint8_t bits[];    /* D/8 bytes, LSB-first bit packing */
+} RaBitQData;
+
+#define MKT_RABITQ_BYTES(dim)      (((dim) + 7) / 8)
+#define MKT_RABITQ_DATA_SIZE(dim)  (offsetof(RaBitQData, bits) + \
+                                    MKT_RABITQ_BYTES(dim))
+
+/* Access compact data portion of a presentation vector (zero-copy cast) */
+#define MKT_RABITQ_DATA(v)         ((RaBitQData *)&(v)->f_add)
+
+/*
+ * RaBitQBatch: Batch of encoded vectors in SoA layout
+ *
+ * Used for batch encoding where separate arrays for each field enable
+ * efficient scatter into posting page SoA regions.
+ */
+typedef struct RaBitQBatch
+{
+    uint16_t count;        /* number of encoded vectors */
+    uint16_t packed_bytes; /* ceil(dim/8) per vector */
+    float   *f_add;        /* [count] */
+    float   *f_rescale;    /* [count] */
+    uint8_t *bits;         /* [count * packed_bytes] */
+} RaBitQBatch;
 
 // RaBitQ quantizer state (shared across all vectors in an index)
 typedef struct {
     float    *P;            // Random orthogonal matrix (dim x dim), row-major
-    float    *P_inv;        // P inverse (P^T for orthogonal matrix)
     Dimension dim;
     uint32_t  packed_bytes; // ceil(dim / 8)
+    uint64_t  seed;         // Seed for reproducibility
 } RaBitQParams;
 
 // Initialize with random orthogonal matrix
 RaBitQParams *mkt_rabitq_create(Dimension dim, uint64_t seed);
+int           mkt_rabitq_init(RaBitQParams *params, Dimension dim,
+                              uint64_t seed);
 void          mkt_rabitq_destroy(RaBitQParams *params);
+void          mkt_rabitq_cleanup(RaBitQParams *params);
 
-// Encode vector to RaBitQ format (includes computing inner_oo and norm)
-MktRaBitQVector *mkt_rabitq_encode(
+// Encode vector to compact RaBitQ format
+RaBitQData *mkt_rabitq_encode(
     const RaBitQParams *params,
-    VectorRef input,          // Original vector
-    VectorRef centroid        // Cluster centroid for norm computation
+    VectorRef input,
+    VectorRef centroid
 );
 
 // Encode into pre-allocated buffer
-void mkt_rabitq_encode_into(
+int mkt_rabitq_encode_into(
     const RaBitQParams *params,
     VectorRef input,
     VectorRef centroid,
-    MktRaBitQVector *output   // Must be MKT_RABITQ_SIZE(dim) bytes
+    RaBitQData *output   // Must be MKT_RABITQ_DATA_SIZE(dim) bytes
 );
 
-// Asymmetric distance estimation (float query vs quantized DB vector)
-// Returns estimated squared L2 distance
-Distance mkt_rabitq_distance_asymmetric(
+// Batch encode to SoA output arrays
+int mkt_rabitq_encode_batch(
     const RaBitQParams *params,
-    VectorRef query,                  // Full precision query
-    const MktRaBitQVector *quantized  // Quantized DB vector
+    const float *vectors, VectorRef centroid,
+    float *f_add, float *f_rescale, uint8_t *bits,
+    uint16_t count
+);
+
+// Batch encode with heap-allocated RaBitQBatch output
+RaBitQBatch *mkt_rabitq_encode_batch_alloc(
+    const RaBitQParams *params,
+    const float *vectors, VectorRef centroid,
+    uint16_t count
+);
+
+// Compute estimated L2² distance from compact data
+Distance mkt_rabitq_distance(
+    const RaBitQQueryState *query_state,
+    const RaBitQData *data,
+    Dimension dim
+);
+
+// Compute estimated distance with derived error bound
+void mkt_rabitq_distance_with_bound(
+    const RaBitQQueryState *query_state,
+    const RaBitQData *data,
+    Dimension dim,
+    Distance *est_dist,
+    Distance *lower_bound
 );
 ```
 
@@ -1687,91 +1729,37 @@ Distance mkt_rabitq_distance_asymmetric(
 // Error bound constant from RaBitQ-Library (empirically tuned)
 #define MKT_RABITQ_EPSILON 1.9f
 
-void
+int
 mkt_rabitq_encode_into(const RaBitQParams *params, VectorRef input,
-                       VectorRef centroid, MktRaBitQVector *output)
+                       VectorRef centroid, RaBitQData *output)
 {
     Dimension dim = params->dim;
-    float *residual = mkt_alloc(dim * sizeof(float));
-    float *transformed = mkt_alloc(dim * sizeof(float));
+    float *trans = mkt_alloc(dim * sizeof(float));
 
-    // Step 1: Compute residual = input - centroid
-    float residual_norm_sq = 0.0f;
+    // Step 1: Compute residual = input - centroid, track norms
+    float l2_sqr = 0.0f, l1_norm = 0.0f;
     for (Dimension i = 0; i < dim; i++) {
-        residual[i] = input.data[i] - centroid.data[i];
-        residual_norm_sq += residual[i] * residual[i];
-    }
-    float residual_norm = sqrtf(residual_norm_sq);
-
-    // Step 2: Normalize residual for rotation
-    float inv_norm = (residual_norm > 1e-10f) ? 1.0f / residual_norm : 0.0f;
-    for (Dimension i = 0; i < dim; i++) {
-        residual[i] *= inv_norm;
+        float r = input.data[i] - centroid.data[i];
+        // ... matrix-vector multiply P^T * residual ...
+        trans[i] = sum;
+        l2_sqr += r * r;
     }
 
-    // Step 3: Apply inverse rotation: x = P^T * normalized_residual
-    for (Dimension i = 0; i < dim; i++) {
-        float sum = 0.0f;
-        for (Dimension j = 0; j < dim; j++) {
-            sum += params->P_inv[i * dim + j] * residual[j];
-        }
-        transformed[i] = sum;
-    }
+    // Step 2: Extract sign bits (LSB-first, FAISS-compatible)
+    rabitq_extract_signs(trans, output->bits, dim);
 
-    // Step 4: Extract sign pattern (binary code), MSB-first bit ordering
-    uint32_t packed_bytes = MKT_RABITQ_BITS_SIZE(dim);
-    memset(output->bits, 0, packed_bytes);
-    for (Dimension i = 0; i < dim; i++) {
-        if (transformed[i] > 0.0f) {
-            output->bits[i / 8] |= 1 << (7 - (i % 8));  // MSB first
-        }
-    }
+    // Step 3: Compute L1 norm of transformed vector
+    for (Dimension i = 0; i < dim; i++)
+        l1_norm += fabsf(trans[i]);
 
-    // Step 5: Compute xu_cb = binary_code + cb, where cb = -0.5 for 1-bit
-    // Then compute inner products needed for factors
-    const float cb = -0.5f;
-    float ip_residual_xucb = 0.0f;  // <residual, xu_cb>
-    float ip_centroid_xucb = 0.0f;  // <centroid, xu_cb>
+    // Step 4: Compute factors
+    float sqrt_d = sqrtf((float)dim);
+    output->f_add = l2_sqr;
+    output->f_rescale = l2_sqr * sqrt_d / l1_norm;
+    // f_error derived at query time: C_error * sqrt(f_rescale² - f_add)
 
-    for (Dimension i = 0; i < dim; i++) {
-        int bit = (output->bits[i / 8] >> (7 - (i % 8))) & 1;
-        float xu_cb_i = (float)bit + cb;  // 0.5 if bit=1, -0.5 if bit=0
-        ip_residual_xucb += residual[i] * xu_cb_i;
-        ip_centroid_xucb += centroid.data[i] * xu_cb_i;
-    }
-
-    // Step 6: Compute factors for distance estimation (L2 metric)
-    // Formula: est_dist = f_add + g_add + f_rescale * (inner_product + k1xsumq)
-    float f_add, f_rescale, f_error;
-
-    if (fabsf(ip_residual_xucb) > 1e-10f) {
-        f_add = residual_norm_sq +
-                2.0f * residual_norm_sq * ip_centroid_xucb / ip_residual_xucb;
-        f_rescale = -2.0f * residual_norm_sq / ip_residual_xucb;
-
-        // Error bound for two-stage filtering
-        // f_error = 2 * ||residual|| * epsilon * sqrt((1 - cos²) / (dim - 1))
-        float cos_sq = (ip_residual_xucb * ip_residual_xucb) /
-                       (residual_norm_sq * (0.25f * dim));  // ||xu_cb||² = 0.25*dim
-        float error_term = (dim > 1) ? sqrtf((1.0f - cos_sq) / (dim - 1)) : 0.0f;
-        f_error = 2.0f * residual_norm * MKT_RABITQ_EPSILON * error_term;
-    } else {
-        // Degenerate case: zero residual or orthogonal
-        f_add = residual_norm_sq;
-        f_rescale = 0.0f;
-        f_error = 0.0f;
-    }
-
-    // Step 7: Fill output structure
-    SET_VARSIZE(output, MKT_RABITQ_SIZE(dim));
-    output->dim = dim;
-    output->flags = 0;
-    output->f_add = f_add;
-    output->f_rescale = f_rescale;
-    output->f_error = f_error;
-
-    mkt_free(transformed);
-    mkt_free(residual);
+    mkt_free(trans);
+    return 0;
 }
 ```
 
@@ -1803,82 +1791,50 @@ for all database vectors.
 ```c
 // Query preparation (done once per query)
 typedef struct {
-    float *transformed;  // P^T * (query - centroid)
-    float g_add;         // ||query - centroid||²
-    float g_error;       // Error term for filtering
-    float k1xsumq;       // sum(transformed) * (-0.5)
+    float *transformed;      // P^T * (query - centroid)
+    float  g_add;            // ||query - centroid||²
+    float  g_error;          // sqrt(g_add) for error bound
+    float  sum_transformed;  // sum(transformed) for distance formula
+    float  inv_sqrt_d;       // 1 / sqrt(dim)
+    float  c_error;          // 2*ε/√(d-1), for deriving f_error
+    Dimension dim;
 } RaBitQQueryState;
 
 RaBitQQueryState *
 mkt_rabitq_prepare_query(const RaBitQParams *params, VectorRef query,
                          VectorRef centroid)
 {
-    Dimension dim = params->dim;
-    RaBitQQueryState *state = mkt_alloc(sizeof(RaBitQQueryState));
-    state->transformed = mkt_alloc(dim * sizeof(float));
-
-    // Compute query - centroid
-    float g_add = 0.0f;
-    float sum_transformed = 0.0f;
-    for (Dimension i = 0; i < dim; i++) {
-        float diff = query.data[i] - centroid.data[i];
-        g_add += diff * diff;
-    }
-    state->g_add = g_add;
-
-    // Transform: P^T * (query - centroid)
-    for (Dimension i = 0; i < dim; i++) {
-        float sum = 0.0f;
-        for (Dimension j = 0; j < dim; j++) {
-            float diff = query.data[j] - centroid.data[j];
-            sum += params->P_inv[i * dim + j] * diff;
-        }
-        state->transformed[i] = sum;
-        sum_transformed += sum;
-    }
-
-    state->k1xsumq = sum_transformed * (-0.5f);  // cb = -0.5 for 1-bit
-    state->g_error = sqrtf(g_add);  // Simplified; full formula in reference code
-
-    return state;
+    // ... transforms query through P^T, precomputes factors ...
 }
 
-// Fast distance estimation using precomputed factors
+// Estimated L2² distance from compact data (FAISS-style)
+//   est_dist = g_add + f_add - 2 * f_rescale * final_dot
+// where final_dot = (2 * binary_ip - sum_transformed) * inv_sqrt_d
 Distance
-mkt_rabitq_distance_asymmetric(const RaBitQQueryState *query_state,
-                               const MktRaBitQVector *quantized)
+mkt_rabitq_distance(const RaBitQQueryState *query_state,
+                    const RaBitQData *data, Dimension dim)
 {
-    Dimension dim = quantized->dim;
-
-    // Compute inner product: <transformed_query, binary_code>
-    // binary_code values are 0 or 1, so this is sum of transformed[i] where bit=1
-    float inner_product = 0.0f;
-    for (Dimension i = 0; i < dim; i++) {
-        int bit = (quantized->bits[i / 8] >> (7 - (i % 8))) & 1;
-        if (bit) {
-            inner_product += query_state->transformed[i];
-        }
-    }
-
-    // Distance formula: est_dist = f_add + g_add + f_rescale * (ip + k1xsumq)
-    float est_dist = quantized->f_add + query_state->g_add +
-                     quantized->f_rescale * (inner_product + query_state->k1xsumq);
-
-    return fmaxf(0.0f, est_dist);  // Clamp to non-negative
+    float binary_ip = simd_inner_product(query_state->transformed,
+                                         data->bits, dim);
+    float final_dot = (2.0f * binary_ip - query_state->sum_transformed)
+                      * query_state->inv_sqrt_d;
+    float est = query_state->g_add + data->f_add
+                - 2.0f * data->f_rescale * final_dot;
+    return fmaxf(0.0f, est);
 }
 
 // Distance with lower bound for two-stage filtering
+// f_error derived: c_error * sqrt(f_rescale² - f_add)
 void
 mkt_rabitq_distance_with_bound(const RaBitQQueryState *query_state,
-                               const MktRaBitQVector *quantized,
+                               const RaBitQData *data, Dimension dim,
                                Distance *est_dist,
                                Distance *lower_bound)
 {
-    *est_dist = mkt_rabitq_distance_asymmetric(query_state, quantized);
-
-    // Lower bound = estimate - error adjustment
-    float error_adj = quantized->f_error * query_state->g_error;
-    *lower_bound = fmaxf(0.0f, *est_dist - error_adj);
+    *est_dist = mkt_rabitq_distance(query_state, data, dim);
+    float f_error = query_state->c_error
+                    * sqrtf(data->f_rescale * data->f_rescale - data->f_add);
+    *lower_bound = fmaxf(0.0f, *est_dist - f_error * query_state->g_error);
 }
 
 void
@@ -2119,22 +2075,23 @@ inner product dominates query time. Both benefit significantly from SIMD.
 
 **Storage requirements:**
 
-- `MktRaBitQVector`: 4 (vl_len) + 2 (dim) + 2 (flags) + 4 (f_add) + 4 (f_rescale)
-  \+ 4 (f_error) + D/8 (bits) = 20 + D/8 bytes per vector
-- For 768-dim: 20 + 96 = 116 bytes per vector
+- `RaBitQData` (compact form): 4 (f_add) + 4 (f_rescale) + D/8 (bits)
+  = 8 + D/8 bytes per vector
+- For 768-dim: 8 + 96 = 104 bytes per vector
+- `RaBitQVector` (PG varlena, future): adds 8-byte header = 16 + D/8 bytes
 - Orthogonal matrix P: D² × 4 bytes (shared across all vectors in index)
 
-Binary codes are stored in VarBit-compatible format (MSB-first bit ordering)
-for interoperability with pgvector's `bit` type and distance functions.
+Binary codes use LSB-first bit packing (FAISS-compatible).
 
-For 768-dim vectors: 116 bytes/vector vs 3072 bytes for float32 (~26× compression).
+For 768-dim vectors: 104 bytes/vector vs 3072 bytes for float32 (~30× compression).
 
 #### Implementation Insights from Reference Code
 
 The following details are derived from analyzing the faiss (`../faiss/`) and
-RaBitQ-Library (`../RaBitQ-Library/`) implementations. The `MktRaBitQVector`
+RaBitQ-Library (`../RaBitQ-Library/`) implementations. The `RaBitQData`
 struct and encoding/distance functions above already incorporate the factor-based
-approach (f_add, f_rescale, f_error) used by production implementations.
+approach (f_add, f_rescale) used by production implementations. The f_error
+bound is derived at query time from f_add and f_rescale.
 
 **Two-stage search with error bounds:**
 
@@ -3512,7 +3469,7 @@ void mkt_posting_list_add(
     MemPostingList *list,
     BlockNumber block,
     OffsetNumber offset,
-    const MktRaBitQVector *quantized,
+    const RaBitQData *quantized,
     uint8_t flags
 );
 
@@ -3535,86 +3492,142 @@ const PostingEntry   *mkt_posting_list_next(PostingListIter *iter);
 
 Page layout for PostgreSQL integration, but designed to be testable standalone.
 
-```c
-// Page size (matches PostgreSQL default)
-#define MKT_PAGE_SIZE 8192
+Uses the standard PostgreSQL `PageHeaderData` at offset 0 and a special
+(opaque) area at the page end, following the same convention as B-tree, GIN,
+GiST, and pgvector. We don't use line pointers or the traditional tuple layout.
+Set `pd_lower = pd_upper = SizeOfPageHeaderData` (no free space from PG's
+perspective). `pd_special` points to the opaque area.
 
-// Posting list page header (SoA with reverse growth)
-//
-// Layout enables both SIMD-friendly scans and efficient appends:
-//   - Metadata grows low→high (after header)
-//   - Vectors grow high→low (from page end)
-//   - Page full when they meet
-//
-// ┌─────────────────────────────────────────────────────────┐
-// │ Header                                                  │
-// ├─────────────────────────────────────────────────────────┤
-// │ Meta[0] Meta[1] Meta[2] ...        ──► (grows down)     │
-// │                                                         │
-// │                        ... Vec[2] Vec[1] Vec[0] ◄──     │
-// │                                        (grows up)       │
-// └─────────────────────────────────────────────────────────┘
-//
+#### Compact on-disk form
+
+Posting list pages store vectors in the compact `RaBitQData` format
+(8 bytes + D/8 bits). This is the primary encoding form produced by all
+encoding functions. The `RaBitQVector` presentation type (for the future
+PG SQL type) adds a varlena header. f_error is derived at query time:
+
+```
+f_error = C_error * sqrt(f_rescale² - f_add)
+```
+
+where `C_error = 2 * ε / sqrt(dim - 1)` is a per-index constant precomputed
+in `RaBitQQueryState.c_error`.
+
+#### Opaque area
+
+```c
+// Posting page opaque data (special area, 16 bytes)
+// Follows PG conventions (B-tree: 16B, GiST: 16B, pgvector: 8B)
 typedef struct {
-    BlockNumber  next_blkno;    // Next page in posting list
-    uint16_t     entry_count;   // Number of entries on this page
-    OffsetNumber meta_end;      // Offset past last metadata entry
-    OffsetNumber vec_start;     // Offset to first (lowest) vector
-    ClusterId    cluster_id;    // Which cluster this page belongs to
-    uint8_t      flags;         // Page flags
-    uint8_t      reserved;      // Alignment padding
-} MktPostingPageHeader;
+    BlockNumber next_blkno;     // 4B - next page in posting list
+    uint32_t    cluster_id;     // 4B - which cluster this page belongs to
+    uint16_t    entry_count;    // 2B - number of entries on page
+    uint16_t    flags;          // 2B - page flags (FIRST, OVERFLOW)
+    uint16_t    page_id;        // 2B - magic for identification
+    uint16_t    reserved;       // 2B - future use
+} MktPostingPageOpaque;         // 16 bytes total
 
 #define MKT_PAGE_FLAG_FIRST    0x01  // First page of posting list
 #define MKT_PAGE_FLAG_OVERFLOW 0x02  // Overflow page (added after build)
+```
 
-// Usable space per page
-#define MKT_PAGE_USABLE (MKT_PAGE_SIZE - sizeof(MktPostingPageHeader))
+#### Pre-allocated SoA data layout
 
-// Calculate entries per page (metadata + vector per entry)
-static inline uint32_t mkt_entries_per_page(Dimension dim) {
-    size_t entry_size = sizeof(PostingEntryMeta) + MKT_RABITQ_SIZE(dim);
-    return MKT_PAGE_USABLE / entry_size;
+Since dim is fixed per index, `max_entries` per page is a constant computed
+at index creation time. Each SoA region is pre-sized for `max_entries` slots.
+Insert fills slot `entry_count` in each array — O(1), no shifting or
+boundary tracking needed.
+
+```
+┌────────────────────────────────────────────────────────┐
+│ PostgreSQL PageHeaderData                   (24 bytes) │
+├────────────────────────────────────────────────────────┤
+│ PostingEntryMeta[max]                    (max × 8)     │
+│   flags(1) + tid_bytes(6) + reserved(1)                │
+├────────────────────────────────────────────────────────┤
+│ float f_add[max]                         (max × 4)     │
+├────────────────────────────────────────────────────────┤
+│ float f_rescale[max]                     (max × 4)     │
+├────────────────────────────────────────────────────────┤
+│ uint8_t bits[max × D/8]                 (max × D/8)   │
+│   Contiguous binary codes for SIMD scanning            │
+├────────────────────────────────────────────────────────┤
+│ [padding - remainder after max entries]                │
+├────────────────────────────────────────────────────────┤
+│ MktPostingPageOpaque                       (16 bytes)  │
+└────────────────────────────────────────────────────────┘
+```
+
+**Why pre-allocated SoA** (instead of bidirectional growth):
+
+- All entries are fixed-size (dim constant per index), so max_entries is
+  known at index creation. No need for bidirectional growth (that solves the
+  variable-length tuple problem, which we don't have).
+- O(1) insert: write to slot `entry_count` in each array, increment count.
+- Contiguous arrays enable full SIMD vectorization of scalar distance math
+  (`f_add[N]`, `f_rescale[N]` loaded as contiguous `_mm512_loadu_ps`).
+- All offsets deterministic from dim alone — no meta_end/vec_start tracking.
+
+**Scan access pattern (two-stage search):**
+
+1. Read opaque → get `entry_count` (N)
+2. Binary inner product via POPCNT on `bits[]`
+3. Vectorized scalar phase on `f_add[N]`, `f_rescale[N]`: compute est_dist,
+   derive f_error, compute lower_bound, compare lower_bound < threshold
+4. Random access `meta[i]` only for ~5-10% surviving candidates to get TIDs
+
+#### Capacity and offset computation
+
+```c
+#define MKT_PAGE_DATA_START  SizeOfPageHeaderData  // 24
+
+// Usable space: page minus PG header minus opaque area
+#define MKT_PAGE_USABLE \
+    (BLCKSZ - SizeOfPageHeaderData - MAXALIGN(sizeof(MktPostingPageOpaque)))
+    // = 8192 - 24 - 16 = 8152 bytes
+
+// Per-entry: 8 (meta) + 4 (f_add) + 4 (f_rescale) + D/8 (bits)
+// = 16 + D/8 bytes
+static inline uint32_t mkt_max_entries(Dimension dim) {
+    return MKT_PAGE_USABLE / (16 + MKT_RABITQ_BYTES(dim));
 }
 
-// Access macros for SoA regions
+// Region base pointers (all deterministic from dim)
 #define MKT_PAGE_META(page) \
-    ((PostingEntryMeta *)((char *)(page) + sizeof(MktPostingPageHeader)))
+    ((PostingEntryMeta *)((char *)(page) + MKT_PAGE_DATA_START))
 
-// Vectors are stored in reverse order from page end
-// vec_start points to lowest address; vectors are contiguous upward
-#define MKT_PAGE_VECTORS(page, hdr) \
-    ((MktRaBitQVector *)((char *)(page) + (hdr)->vec_start))
+#define MKT_PAGE_F_ADD(page, max) \
+    ((float *)((char *)(page) + MKT_PAGE_DATA_START + (max) * 8))
 
-// Check if page has room for another entry
-static inline bool mkt_page_has_room(const MktPostingPageHeader *hdr,
-                                      Dimension dim) {
-    size_t need = sizeof(PostingEntryMeta) + MKT_RABITQ_SIZE(dim);
-    return (hdr->vec_start - hdr->meta_end) >= need;
-}
+#define MKT_PAGE_F_RESCALE(page, max) \
+    ((float *)((char *)(page) + MKT_PAGE_DATA_START + (max) * 8 \
+                                                    + (max) * 4))
 
-// Page operations
-void mkt_page_init(void *page, ClusterId cluster_id, uint8_t flags);
-void mkt_page_set_next(void *page, BlockNumber next_blkno);
-BlockNumber mkt_page_get_next(const void *page);
+#define MKT_PAGE_BITS(page, max) \
+    ((uint8_t *)((char *)(page) + MKT_PAGE_DATA_START + (max) * 16))
+```
+
+For 768d: 8152 / (16 + 96) = 8152 / 112 = **72 entries per page**
+
+#### Page operations
+
+```c
+// Initialize a posting page
+void mkt_page_init(Page page, ClusterId cluster_id, uint16_t flags,
+                   Dimension dim);
 
 // Add entry to page (returns false if page full)
-// Appends metadata at meta_end, prepends vector before vec_start
 bool mkt_page_add_entry(
-    void *page,
+    Page page,
     Dimension dim,
     BlockNumber block,
     OffsetNumber offset,
-    const MktRaBitQVector *quantized,
-    uint8_t flags
+    const RaBitQData *data,
+    uint8_t entry_flags
 );
 
 // Access by index
-const PostingEntryMeta *mkt_page_get_meta(const void *page, uint16_t index);
-const MktRaBitQVector *mkt_page_get_vector(const void *page, uint16_t index,
-                                            Dimension dim);
-
-uint16_t mkt_page_entry_count(const void *page);
+const PostingEntryMeta *mkt_page_get_meta(Page page, uint16_t index);
+uint16_t mkt_page_entry_count(Page page);
 ```
 
 ### 3.4 Metapage
@@ -3866,7 +3879,7 @@ typedef struct {
 // The actual centroid pages live in shared buffers.
 typedef struct {
     float      *centroids;       // Flat array: nlist * dim floats
-    MktRaBitQVector *quantized;  // RaBitQ quantized centroids
+    RaBitQData *quantized;       // RaBitQ quantized centroids
     uint32_t    nlist;
     Dimension   dim;
     RaBitQParams *rabitq_params;
@@ -4009,16 +4022,18 @@ void mkt_search_posting_lists(
             const void *page = read_page(callback_data, block);
             uint16_t entry_count = mkt_page_entry_count(page);
 
-            // SoA access: get pointers to metadata and vector arrays
-            const MktPostingPageHeader *hdr = (MktPostingPageHeader *)page;
+            // SoA access: get pointers to each array region
+            uint32_t max = mkt_max_entries(dim);
             const PostingEntryMeta *meta = MKT_PAGE_META(page);
-            const MktRaBitQVector *vectors = MKT_PAGE_VECTORS(page, hdr);
+            const float *f_add = MKT_PAGE_F_ADD(page, max);
+            const float *f_rescale = MKT_PAGE_F_RESCALE(page, max);
+            const uint8_t *bits = MKT_PAGE_BITS(page, max);
 
             // Phase 1: Compute distances for all vectors (SIMD-friendly)
-            // Vectors are contiguous (stored from page end), enabling batch computation
+            // Contiguous f_add/f_rescale/bits arrays enable batch computation
             Distance *distances = mkt_alloc(entry_count * sizeof(Distance));
-            mkt_rabitq_distance_batch(rabitq_params, query, vectors,
-                                       entry_count, distances);
+            mkt_rabitq_distance_batch(query_state, f_add, f_rescale, bits,
+                                       entry_count, dim, distances);
 
             // Phase 2: Check metadata only for promising candidates
             for (uint16_t i = 0; i < entry_count; i++) {
@@ -4571,10 +4586,10 @@ flight simultaneously. The number of concurrent requests is called **queue depth
 | Serial sync I/O | QD=1 | 100 μs | ~80 MB/s |
 | Async I/O | QD=32+ | 100 μs total | 3+ GB/s |
 
-For posting list scans reading 268 pages:
+For posting list scans reading 275 pages:
 
-- **Sync I/O (QD=1)**: 268 × 100 μs = **27 ms** — each read waits for completion
-- **Async I/O (QD=268)**: 268 / 400K IOPS = **0.7 ms** — all reads in parallel
+- **Sync I/O (QD=1)**: 275 × 100 μs = **28 ms** — each read waits for completion
+- **Async I/O (QD=275)**: 275 / 400K IOPS = **0.7 ms** — all reads in parallel
 
 The read stream API and `io_uring` enable high queue depth by submitting many
 read requests in a single syscall, then processing completions as they arrive.
@@ -5041,7 +5056,7 @@ static bool mkt_aminsert(
     mkt_find_nearest_centroid(index, VectorToRef(vec), &cluster, &centroid);
 
     // 2. Quantize vector using RaBitQ (relative to centroid)
-    MktRaBitQVector *quantized = palloc(MKT_RABITQ_SIZE(vec->dim));
+    RaBitQData *quantized = palloc(MKT_RABITQ_DATA_SIZE(vec->dim));
     RaBitQParams *params = mkt_get_rabitq_params(index);
     mkt_rabitq_encode_into(params, VectorToRef(vec), centroid, quantized);
 
