@@ -940,7 +940,7 @@ PostgreSQL TOASTs values exceeding ~2KB. With float16:
 | Component | Calculation | Size |
 |-----------|-------------|------|
 | Full vectors in index | 1B × 1,536 bytes × 2 (replication) | 2.9 TB |
-| RaBitQ + metadata | (as below) | 250 GB |
+| RaBitQ + metadata | (as below) | 260 GB |
 | **Total index** | | **~3.2 TB** |
 
 Trade-off: 13× larger index but eliminates heap access entirely.
@@ -950,22 +950,23 @@ Trade-off: 13× larger index but eliminates heap access entirely.
 | Component | Calculation | Size |
 |-----------|-------------|------|
 | RaBitQ bits | 768 bits / 8 = 96 bytes/vector | 96 GB |
+| f_add | 4 bytes/entry | 4 GB |
+| f_rescale | 4 bytes/entry | 4 GB |
 | TID | 6 bytes/entry | 6 GB |
-| f_error factor | 4 bytes/entry | 4 GB |
-| Version byte | 1 byte/entry | 1 GB |
-| **Per-entry total** | 107 bytes | 107 GB |
-| Boundary replication (2×) | 107 GB × 2 | 214 GB |
+| Flags + reserved | 2 bytes/entry | 2 GB |
+| **Per-entry total** | **112 bytes** | **112 GB** |
+| Boundary replication (2×) | 112 GB × 2 | 224 GB |
 | Centroids (quantized) | 1M × 96 bytes | 96 MB |
 | Centroid tree overhead | ~3 levels | 10 MB |
-| Page headers/fragmentation | ~15% | 32 GB |
-| **Total index** | | **~250 GB** |
+| Page headers/fragmentation | ~15% | 34 GB |
+| **Total index** | | **~260 GB** |
 
 **Storage summary:**
 
 | Configuration | Vector size | Heap | Index | Total |
 |---------------|-------------|------|-------|-------|
-| Inline (768d, float16) | 1,536 B | 1.6 TB | 250 GB | **1.9 TB** |
-| TOASTed (1536d, float16) | 3,072 B | 3.0 TB | 250 GB | **3.3 TB** |
+| Inline (768d, float16) | 1,536 B | 1.6 TB | 260 GB | **1.9 TB** |
+| TOASTed (1536d, float16) | 3,072 B | 3.0 TB | 260 GB | **3.3 TB** |
 | Vectors in index | 1,536 B | 0 | 3.2 TB | **3.2 TB** |
 | SPFresh (100d, int8) | 100 B | ~100 GB | ~100 GB | **~200 GB** |
 
@@ -990,17 +991,17 @@ Note: Hot paths stay in shared_buffers. Cold tenant routing may hit NVMe
 | Step | Calculation | Latency |
 |------|-------------|---------|
 | Vectors to scan | 20 clusters × 1,000 vectors | 20,000 vectors |
-| Index data to read | 20,000 × 107 bytes | 2.1 MB |
-| Pages to read | 2.1 MB / 8 KB | 268 pages |
+| Index data to read | 20,000 × 112 bytes | 2.2 MB |
+| Pages to read | 2.2 MB / 8 KB | 275 pages |
 | RaBitQ compute (SIMD) | 20K × ~10 cycles / 3 GHz | **0.07 ms** |
 
 I/O latency depends critically on access pattern and async I/O:
 
 | Scenario | Access pattern | Calculation | Latency |
 |----------|----------------|-------------|---------|
-| Fresh index (contiguous) | Sequential read | 2.1 MB / 3 GB/s | **0.7 ms** |
-| Fragmented, serial I/O | Random QD=1 | 268 × 100 μs | **27 ms** |
-| Fragmented, async I/O | Random QD=268 | 268 / 400K + overhead | **1-2 ms** |
+| Fresh index (contiguous) | Sequential read | 2.2 MB / 3 GB/s | **0.7 ms** |
+| Fragmented, serial I/O | Random QD=1 | 275 × 100 μs | **28 ms** |
+| Fragmented, async I/O | Random QD=275 | 275 / 400K + overhead | **1-2 ms** |
 
 *QD (queue depth) = I/O requests in flight simultaneously. NVMe achieves 400K
 IOPS only at QD≥32. Serial reads (QD=1) pay full 100μs latency per page.*
@@ -1166,7 +1167,7 @@ Max speedup (NVMe): 1 / 0.25 = 4×    → scales to 8-16 workers
 | Step | Calculation | Time |
 |------|-------------|------|
 | Merge worker buffers | Combine posting lists | 2-4 min |
-| Write posting lists | 250 GB / 4 GB/s (NVMe seq) | 63 sec |
+| Write posting lists | 260 GB / 4 GB/s (NVMe seq) | 65 sec |
 | Fsync overhead | ~10% | 6 sec |
 | Write centroid pages | 100 MB / 4 GB/s | <1 sec |
 | **Phase 3 total** | | **~3-5 min** |
@@ -1223,7 +1224,7 @@ tenant with 1M vectors has the same cost whether the total index has 1B or
 | Heap storage | NVMe | EBS gp3 | i4i NVMe | N/A |
 | Query p50 | 2-4ms | ~17ms | **~5ms** | **~4ms** |
 | Query p99 | 8-12ms | ~40ms | **~12ms** | **~10ms** |
-| Index size | ~100 GB | 250 GB | 250 GB | 3.2 TB |
+| Index size | ~100 GB | 260 GB | 260 GB | 3.2 TB |
 | Heap size | ~100 GB | 1.6 TB | 1.6 TB | 0 |
 | Total storage | ~200 GB | 1.9 TB | 1.9 TB | 3.2 TB |
 | Build time | N/A | ~1 hour | ~30 min | ~1 hour |
