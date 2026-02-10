@@ -65,7 +65,8 @@
 		__has_attribute(target_clones) &&                \
 		(defined(__x86_64__) || defined(__i386__))
 #define MKT_TARGET_CLONES \
-	__attribute__((target_clones("default", "avx2", "avx512f")))
+	__attribute__((       \
+			target_clones("default", "arch=x86-64-v3", "arch=x86-64-v4")))
 #else
 #define MKT_TARGET_CLONES
 #endif
