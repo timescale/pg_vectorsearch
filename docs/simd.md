@@ -113,10 +113,10 @@ over file-level pragmas for better IDE/clangd compatibility.
 Located in `src/algo/distance.c`, uses `target_clones` for multi-versioning:
 
 ```c
-#define COMPILER_TARGET_CLONES \
-    __attribute__((target_clones("default", "avx2", "avx512f")))
+#define MKT_TARGET_CLONES \
+    __attribute__((target_clones("default", "arch=x86-64-v3", "arch=x86-64-v4")))
 
-COMPILER_TARGET_CLONES static float
+MKT_TARGET_CLONES static float
 compiler_l2_loop(int dim, const float *pa, const float *pb)
 {
     float sum = 0.0f;
@@ -130,6 +130,19 @@ compiler_l2_loop(int dim, const float *pa, const float *pb)
 
 The compiler generates multiple function versions, and the dynamic linker
 selects the best one at load time.
+
+**Why `arch=x86-64-v3/v4` instead of `avx2/avx512f`:**
+
+The `arch=` specifiers bundle all features for a microarchitecture level:
+
+| Clone | Equivalent features |
+|-------|-------------------|
+| `arch=x86-64-v3` | AVX2, FMA, BMI1/2, F16C, ... |
+| `arch=x86-64-v4` | AVX-512F, AVX-512BW/DQ/VL, FMA, ... |
+| `avx512f` (old) | AVX-512F only — **no FMA implied** |
+
+Using `avx512f` alone generates separate `vmulps` + `vaddps` instead of fused
+`vfmadd231ps`, roughly halving throughput for dot-product loops.
 
 ## Compiler Support
 
@@ -146,6 +159,32 @@ Detection uses `__has_attribute(target_clones)`.
 
 Per-function `__attribute__((target(...)))` is supported by both GCC and Clang,
 providing consistent behavior across compilers without conditional compilation.
+
+### FP Contraction and FMA
+
+GCC's `-ffp-contract` flag controls whether the compiler may fuse `a * b + c`
+into a single FMA instruction (`vfmadd231ps`). The default depends on the
+language standard mode:
+
+| Flag | Default `-ffp-contract` | FMA generated? |
+|------|------------------------|----------------|
+| `-std=c23` / `-std=c2x` | `off` | No |
+| `-std=gnu23` / `-std=gnu2x` | `fast` | Yes |
+| (no `-std`) | `fast` | Yes |
+
+ISO C modes default to `off` because the C standard leaves FP contraction
+implementation-defined, and contraction changes rounding behavior (FMA rounds
+once instead of twice). This matters for strict numerical reproducibility but
+not for approximate algorithms like k-means clustering or ANN search.
+
+The project uses `-std=c2x` for C23 features, so we explicitly pass
+`-ffp-contract=fast` in `meson.build` to restore FMA generation. Without it,
+GCC generates separate multiply + add instructions, and for nested loops
+(like batch dot products), also fails to vectorize the reduction properly —
+producing horizontal scalar adds per vector chunk instead of accumulating in
+a wide register and reducing once.
+
+See: [GCC Optimize Options](https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html)
 
 ## ARM Considerations
 
@@ -210,7 +249,7 @@ pgvector's actual code. Interestingly, `compiler` is often faster than
 | Implementation | target_clones | Result |
 |----------------|---------------|--------|
 | pgvector | `"default", "fma"` | FMA only, may use 128-bit SSE |
-| compiler | `"default", "avx2", "avx512f"` | Full 256/512-bit vectorization |
+| compiler | `"default", "arch=x86-64-v3", "arch=x86-64-v4"` | Full 256/512-bit + FMA |
 
 **Why pgvector uses conservative settings:**
 
@@ -219,9 +258,10 @@ pgvector uses `target_clones("default", "fma")` which only enables FMA
 but doesn't imply full AVX2 vectorization. The compiler may still use 128-bit
 SSE registers.
 
-Our `compiler` implementation uses `target_clones("default", "avx2", "avx512f")`
-which tells the compiler to generate versions using 256-bit (AVX2) and 512-bit
-(AVX-512) registers, enabling much wider vectorization.
+Our `compiler` implementation uses
+`target_clones("default", "arch=x86-64-v3", "arch=x86-64-v4")` which generates
+versions using 256-bit (AVX2+FMA) and 512-bit (AVX-512+FMA) registers, enabling
+both wider vectorization and fused multiply-add.
 
 **Benchmark interpretation:**
 

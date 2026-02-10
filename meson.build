@@ -159,6 +159,7 @@ else
   message('BLAS: disabled by configuration')
 endif
 
+
 # FAISS library (optional, for benchmark comparison)
 # Expects FAISS built in ../faiss with the C API patch from third-party/
 use_faiss = get_option('faiss')
@@ -169,7 +170,6 @@ if use_faiss
   faiss_build = faiss_root / 'build'
   faiss_lib_dir = faiss_build / 'faiss'
   faiss_capi_dir = faiss_build / 'c_api'
-
   omp_dep = dependency('openmp', required: false)
 
   faiss_dep = declare_dependency(
@@ -216,6 +216,14 @@ if simd_mode != 'none'
     '-fassociative-math',      # Allow reassociation for better vectorization
     '-fno-signed-zeros',       # IEEE 754 relaxation for performance
     '-fno-trapping-math',      # No FP exceptions for performance
+    # GCC defaults to -ffp-contract=off in ISO C modes (-std=c23, -std=c2x)
+    # because the C standard leaves FP contraction implementation-defined.
+    # GNU modes (-std=gnu23) default to -ffp-contract=fast. Without this,
+    # GCC generates separate vmulps + vaddps instead of vfmadd231ps, which
+    # is ~3x slower for dot-product loops (no FMA, plus horizontal reduction
+    # per vector chunk instead of accumulate-and-reduce-once).
+    # See: https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html
+    '-ffp-contract=fast',
     language: 'c',
   )
 endif
@@ -229,6 +237,10 @@ mkt_core_sources = files(
   'src/core/platform.c',
   'src/mkt_vector.c',
   'src/algo/distance.c',
+  'src/algo/kmeans.c',
+  'src/algo/kmeans_elkan.c',
+  'src/algo/kmeans_hamerly.c',
+  'src/algo/kmeans_lloyd.c',
   'src/algo/vecops.c',
   'src/quant/rabitq.c',
   'src/quant/matrix.c',

@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "algo/kmeans.h"
 #include "cmd.h"
 #include "core/memory.h"
 
@@ -134,6 +135,21 @@ dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 int
 main(int argc, char **argv)
 {
+	/*
+	 * BLAS libraries use OpenMP/pthreads internally. In PostgreSQL,
+	 * multi-threaded BLAS is unsafe (backends fork). Warn if not
+	 * configured for single-threaded to keep benchmarks PG-representative.
+	 */
+	if (!mkt_cblas_is_single_threaded())
+	{
+		fprintf(stderr,
+				"Note: OMP_NUM_THREADS not set to 1. "
+				"BLAS may use multiple threads.\n"
+				"  For PG-representative benchmarks: "
+				"OMP_NUM_THREADS=1 %s ...\n\n",
+				argv[0]);
+	}
+
 	/* Initialize memory context for CLI */
 	MktMemCtx cli_memctx = mkt_memctx_create(NULL, "cli");
 	mkt_memctx_switch(cli_memctx);
