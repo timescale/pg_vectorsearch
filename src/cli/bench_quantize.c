@@ -17,6 +17,7 @@
 #include "cmd.h"
 #include "core/memory.h"
 #include "core/platform.h"
+#include "mkt_halfvec.h"
 #include "mkt_types.h"
 #include "quant/matrix.h"
 #include "quant/rabitq.h"
@@ -64,6 +65,7 @@ typedef struct
 	uint32_t	runs;
 	uint32_t	op_filter;
 	const char *impl_filter;
+	const char *type; /* "f32" or "f16" */
 	bool		help;
 } BenchConfig;
 
@@ -158,6 +160,19 @@ generate_random_vectors(float *data, uint32_t count, Dimension dim)
 		{
 			int val			  = rand() % 200 - 100;
 			data[i * dim + j] = (float)val / 100.0f;
+		}
+	}
+}
+
+static void
+generate_random_halfvecs(half *data, uint32_t count, Dimension dim)
+{
+	for (uint32_t i = 0; i < count; i++)
+	{
+		for (Dimension j = 0; j < dim; j++)
+		{
+			int val			  = rand() % 200 - 100;
+			data[i * dim + j] = mkt_float_to_half((float)val / 100.0f);
 		}
 	}
 }
@@ -275,13 +290,17 @@ benchmark_encode_single(
 static void
 benchmark_encode_batch(
 		RaBitQParams *params,
-		const float	 *vectors,
+		const void	 *vectors,
+		MktVecType	  vec_type,
 		const float	 *centroid,
 		uint32_t	  count,
 		Dimension	  dim,
 		uint32_t	  runs)
 {
-	printf("Batch encoding (dim=%u, count=%u):\n", dim, count);
+	printf("Batch encoding [%s] (dim=%u, count=%u):\n",
+		   mkt_vec_type_name(vec_type),
+		   dim,
+		   count);
 
 	VectorRef cent_ref = {.data = centroid, .dim = dim};
 
@@ -305,7 +324,14 @@ benchmark_encode_batch(
 	/* CPU warmup: throwaway passes to stabilize measurements */
 	for (uint32_t warmup = 0; warmup < runs; warmup++)
 		mkt_rabitq_encode_batch(
-				params, vectors, cent_ref, f_add, f_rescale, bits, count);
+				params,
+				vectors,
+				vec_type,
+				cent_ref,
+				f_add,
+				f_rescale,
+				bits,
+				count);
 
 	BenchStats stats;
 	bench_stats_init(&stats, runs);
@@ -315,7 +341,14 @@ benchmark_encode_batch(
 		uint64_t start = get_time_ns();
 
 		mkt_rabitq_encode_batch(
-				params, vectors, cent_ref, f_add, f_rescale, bits, count);
+				params,
+				vectors,
+				vec_type,
+				cent_ref,
+				f_add,
+				f_rescale,
+				bits,
+				count);
 
 		uint64_t end		 = get_time_ns();
 		double	 elapsed_ms	 = ns_to_ms(end - start);
@@ -941,6 +974,7 @@ print_usage(CmdContext *ctx)
 	printf("  --ops <list>       Comma-separated operations:\n");
 	printf("                     single, batch, distance, encode, all\n");
 	printf("                     (default: all)\n");
+	printf("  --type <str>       f32 or f16 (default: f32)\n");
 	printf("  --impls <list>     SIMD implementations for distance:\n");
 	printf("                     compiler, avx2, avx512, neon\n");
 	printf("                     (default: all supported)\n");
@@ -964,19 +998,24 @@ print_usage(CmdContext *ctx)
 static void
 benchmark_encode_comparison(
 		RaBitQParams *params,
-		const float	 *vectors,
+		const void	 *vectors,
+		MktVecType	  vec_type,
+		const float	 *f32_vectors,
 		const float	 *centroid,
 		uint32_t	  count,
 		Dimension	  dim,
 		uint32_t	  runs)
 {
-	printf("Encoding comparison (dim=%u, count=%u):\n", dim, count);
+	printf("Encoding comparison [%s] (dim=%u, count=%u):\n",
+		   mkt_vec_type_name(vec_type),
+		   dim,
+		   count);
 
 	VectorRef cent_ref	   = {.data = centroid, .dim = dim};
 	size_t	  data_size	   = MKT_RABITQ_DATA_SIZE(dim);
 	uint32_t  packed_bytes = MKT_RABITQ_BYTES(dim);
 
-	/* Allocate single-vector output buffer */
+	/* Allocate single-vector output buffer (always f32) */
 	uint8_t *single_outputs = mkt_alloc(count * data_size);
 	if (single_outputs == NULL)
 	{
@@ -1009,17 +1048,18 @@ benchmark_encode_comparison(
 	 */
 	for (uint32_t warmup = 0; warmup < runs; warmup++)
 	{
-		/* Throwaway single-vector pass */
+		/* Throwaway single-vector pass (always f32) */
 		for (uint32_t i = 0; i < count; i++)
 		{
-			VectorRef	vec_ref = {.data = vectors + i * dim, .dim = dim};
+			VectorRef	vec_ref = {.data = f32_vectors + i * dim, .dim = dim};
 			RaBitQData *out = (RaBitQData *)(single_outputs + i * data_size);
 			mkt_rabitq_encode_into(params, vec_ref, cent_ref, out);
 		}
-		/* Throwaway batch pass */
+		/* Throwaway batch pass (typed) */
 		mkt_rabitq_encode_batch(
 				params,
 				vectors,
+				vec_type,
 				cent_ref,
 				batch_f_add,
 				batch_f_rescale,
@@ -1027,7 +1067,7 @@ benchmark_encode_comparison(
 				count);
 	}
 
-	/* Benchmark single-vector encoding */
+	/* Benchmark single-vector encoding (always f32) */
 	BenchStats single_stats;
 	bench_stats_init(&single_stats, runs);
 
@@ -1036,7 +1076,7 @@ benchmark_encode_comparison(
 		uint64_t start = get_time_ns();
 		for (uint32_t i = 0; i < count; i++)
 		{
-			VectorRef	vec_ref = {.data = vectors + i * dim, .dim = dim};
+			VectorRef	vec_ref = {.data = f32_vectors + i * dim, .dim = dim};
 			RaBitQData *out = (RaBitQData *)(single_outputs + i * data_size);
 			mkt_rabitq_encode_into(params, vec_ref, cent_ref, out);
 		}
@@ -1047,7 +1087,7 @@ benchmark_encode_comparison(
 	}
 	bench_stats_compute(&single_stats);
 
-	/* Benchmark batch encoding with current implementation */
+	/* Benchmark batch encoding with current implementation (typed) */
 	BenchStats batch_stats;
 	bench_stats_init(&batch_stats, runs);
 
@@ -1057,6 +1097,7 @@ benchmark_encode_comparison(
 		mkt_rabitq_encode_batch(
 				params,
 				vectors,
+				vec_type,
 				cent_ref,
 				batch_f_add,
 				batch_f_rescale,
@@ -1081,6 +1122,7 @@ benchmark_encode_comparison(
 		mkt_rabitq_encode_batch(
 				params,
 				vectors,
+				vec_type,
 				cent_ref,
 				batch_f_add,
 				batch_f_rescale,
@@ -1101,7 +1143,7 @@ benchmark_encode_comparison(
 	double speedup = single_stats.avg > 0 ? batch_stats.avg / single_stats.avg
 										  : 0.0;
 
-	printf("  %-12s %8.1f ms  (%7.1fK vec/s) (±%.1f%%, n=%u)\n",
+	printf("  %-12s %8.1f ms  (%7.1fK vec/s) (±%.1f%%, n=%u) [f32]\n",
 		   "single",
 		   single_ms,
 		   single_stats.avg / 1000.0,
@@ -1149,6 +1191,7 @@ cmd_bench_quantize(CmdContext *ctx)
 			.runs		 = DEFAULT_RUNS,
 			.op_filter	 = OP_ALL,
 			.impl_filter = NULL,
+			.type		 = "f32",
 			.help		 = false,
 	};
 
@@ -1158,6 +1201,7 @@ cmd_bench_quantize(CmdContext *ctx)
 			 {"runs", required_argument, 0, 'r'},
 			 {"ops", required_argument, 0, 'o'},
 			 {"impls", required_argument, 0, 'i'},
+			 {"type", required_argument, 0, 't'},
 			 {"help", no_argument, 0, 'h'},
 			 {0, 0, 0, 0}};
 
@@ -1167,7 +1211,7 @@ cmd_bench_quantize(CmdContext *ctx)
 	while ((opt = getopt_long(
 					ctx->argc,
 					ctx->argv,
-					"d:c:r:o:i:h",
+					"d:c:r:o:i:t:h",
 					long_options,
 					NULL)) != -1)
 	{
@@ -1203,6 +1247,9 @@ cmd_bench_quantize(CmdContext *ctx)
 		case 'i':
 			config.impl_filter = optarg;
 			break;
+		case 't':
+			config.type = optarg;
+			break;
 		case 'h':
 			config.help = true;
 			break;
@@ -1221,14 +1268,37 @@ cmd_bench_quantize(CmdContext *ctx)
 	Dimension dim	= config.dim;
 	uint32_t  count = config.count;
 
+	/* Validate type */
+	bool use_f16 = strcmp(config.type, "f16") == 0;
+	if (!use_f16 && strcmp(config.type, "f32") != 0)
+	{
+		fprintf(stderr, "Error: --type must be f32 or f16\n");
+		return 1;
+	}
+
+	MktVecType vec_type;
+	if (use_f16)
+	{
+#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
+		vec_type = (mkt_detect_simd() & SIMD_AVX2) ? MKT_VEC_F16C
+												   : MKT_VEC_F16;
+#else
+		vec_type = MKT_VEC_F16;
+#endif
+	}
+	else
+		vec_type = MKT_VEC_F32;
+	size_t elem_size = mkt_vec_element_size(vec_type);
+
 	/* Memory calculation */
-	size_t vectors_size = (size_t)count * dim * sizeof(float);
+	size_t vectors_size = (size_t)count * dim * elem_size;
 	size_t encoded_size = (size_t)count * MKT_RABITQ_DATA_SIZE(dim);
 	size_t total_mb		= (vectors_size + encoded_size) / (1024 * 1024);
 
 	printf("RaBitQ Quantization Benchmark\n");
 	printf("  Dimension: %u\n", dim);
 	printf("  Vectors:   %u\n", count);
+	printf("  Type:      %s\n", mkt_vec_type_name(vec_type));
 	printf("  Memory:    ~%zu MB\n\n", total_mb);
 
 	/* Create RaBitQ parameters */
@@ -1242,19 +1312,45 @@ cmd_bench_quantize(CmdContext *ctx)
 	/* Generate test data */
 	srand(42);
 
-	float *vectors = mkt_alloc(vectors_size);
+	/* Generate typed vectors (native f16 or f32) */
+	void *vectors = mkt_alloc(vectors_size);
 	if (vectors == NULL)
 	{
 		fprintf(stderr, "Error: Failed to allocate vectors\n");
 		mkt_rabitq_destroy(params);
 		return 1;
 	}
-	generate_random_vectors(vectors, count, dim);
+	if (use_f16)
+		generate_random_halfvecs((half *)vectors, count, dim);
+	else
+		generate_random_vectors((float *)vectors, count, dim);
+
+	/* f32 copy for single-encode and distance paths (VectorRef is f32) */
+	float *f32_vectors = NULL;
+	if (use_f16)
+	{
+		f32_vectors = mkt_alloc((size_t)count * dim * sizeof(float));
+		if (f32_vectors == NULL)
+		{
+			fprintf(stderr, "Error: Failed to allocate f32 vectors\n");
+			mkt_free(vectors);
+			mkt_rabitq_destroy(params);
+			return 1;
+		}
+		mkt_half_to_float_array(
+				(const half *)vectors, f32_vectors, (uint32_t)count * dim);
+	}
+	else
+	{
+		f32_vectors = (float *)vectors;
+	}
 
 	float *centroid = mkt_alloc(dim * sizeof(float));
 	if (centroid == NULL)
 	{
 		fprintf(stderr, "Error: Failed to allocate centroid\n");
+		if (use_f16)
+			mkt_free(f32_vectors);
 		mkt_free(vectors);
 		mkt_rabitq_destroy(params);
 		return 1;
@@ -1266,6 +1362,8 @@ cmd_bench_quantize(CmdContext *ctx)
 	{
 		fprintf(stderr, "Error: Failed to allocate query\n");
 		mkt_free(centroid);
+		if (use_f16)
+			mkt_free(f32_vectors);
 		mkt_free(vectors);
 		mkt_rabitq_destroy(params);
 		return 1;
@@ -1280,10 +1378,17 @@ cmd_bench_quantize(CmdContext *ctx)
 	{
 		/* Run comparison benchmark showing both with speedup */
 		benchmark_encode_comparison(
-				params, vectors, centroid, count, dim, config.runs);
+				params,
+				vectors,
+				vec_type,
+				f32_vectors,
+				centroid,
+				count,
+				dim,
+				config.runs);
 #ifdef MKT_HAVE_FAISS
 		benchmark_faiss_encode(
-				params, vectors, centroid, count, dim, config.runs);
+				params, f32_vectors, centroid, count, dim, config.runs);
 #endif
 		printf("\n");
 	}
@@ -1292,23 +1397,29 @@ cmd_bench_quantize(CmdContext *ctx)
 		if (run_single)
 		{
 			benchmark_encode_single(
-					params, vectors, centroid, count, dim, config.runs);
+					params, f32_vectors, centroid, count, dim, config.runs);
 			printf("\n");
 		}
 
 		if (run_batch)
 		{
 			benchmark_encode_batch(
-					params, vectors, centroid, count, dim, config.runs);
+					params,
+					vectors,
+					vec_type,
+					centroid,
+					count,
+					dim,
+					config.runs);
 #ifdef MKT_HAVE_FAISS
 			benchmark_faiss_encode(
-					params, vectors, centroid, count, dim, config.runs);
+					params, f32_vectors, centroid, count, dim, config.runs);
 #endif
 			printf("\n");
 		}
 	}
 
-	/* For distance benchmark, we need pre-encoded vectors */
+	/* For distance benchmark, we need pre-encoded vectors (always f32) */
 	if (config.op_filter & OP_DISTANCE)
 	{
 		/* Encode all vectors */
@@ -1324,7 +1435,8 @@ cmd_bench_quantize(CmdContext *ctx)
 
 			for (uint32_t i = 0; i < count && ok; i++)
 			{
-				VectorRef vec_ref = {.data = vectors + i * dim, .dim = dim};
+				VectorRef vec_ref =
+						{.data = f32_vectors + i * dim, .dim = dim};
 				encoded[i] = mkt_rabitq_encode(params, vec_ref, cent_ref);
 				if (encoded[i] == NULL)
 				{
@@ -1346,9 +1458,9 @@ cmd_bench_quantize(CmdContext *ctx)
 						config.impl_filter);
 #ifdef MKT_HAVE_FAISS
 				benchmark_faiss_distance(
-						vectors, query, count, dim, config.runs);
+						f32_vectors, query, count, dim, config.runs);
 				compare_correctness(
-						params, vectors, query, centroid, count, dim);
+						params, f32_vectors, query, centroid, count, dim);
 #endif
 			}
 
@@ -1365,6 +1477,8 @@ cmd_bench_quantize(CmdContext *ctx)
 	/* Cleanup */
 	mkt_free(query);
 	mkt_free(centroid);
+	if (use_f16)
+		mkt_free(f32_vectors);
 	mkt_free(vectors);
 	mkt_rabitq_destroy(params);
 

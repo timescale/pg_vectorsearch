@@ -212,16 +212,21 @@ int mkt_rabitq_encode_into(
  * 3. Batched matrix-vector multiplication enables better SIMD utilization
  *
  * Memory layout:
- *   vectors:   count vectors, each dim floats, contiguous
+ *   vectors:   count vectors, each dim elements, contiguous
+ *   vec_type:  element type (MKT_VEC_F32, MKT_VEC_F16, MKT_VEC_F16C)
  *   f_add:     count floats (output)
  *   f_rescale: count floats (output)
  *   bits:      count * packed_bytes bytes (output)
+ *
+ * For non-f32 input, vectors are converted to float32 at entry.
+ * This is O(count × dim), negligible vs the O(count × dim²) rotation.
  *
  * Returns 0 on success, -1 on failure.
  */
 int mkt_rabitq_encode_batch(
 		const RaBitQParams *params,
-		const float		   *vectors,
+		const void		   *vectors,
+		MktVecType			vec_type,
 		VectorRef			centroid,
 		float			   *f_add,
 		float			   *f_rescale,
@@ -238,7 +243,8 @@ int mkt_rabitq_encode_batch(
  */
 RaBitQBatch *mkt_rabitq_encode_batch_alloc(
 		const RaBitQParams *params,
-		const float		   *vectors,
+		const void		   *vectors,
+		MktVecType			vec_type,
 		VectorRef			centroid,
 		uint16_t			count);
 

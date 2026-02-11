@@ -68,7 +68,12 @@ typedef struct KMeansOptions
 	 .algorithm		 = KMEANS_ALGO_AUTO}
 
 /*
- * Run k-means clustering.
+ * Run k-means clustering on typed vectors.
+ *
+ * vec_type selects how input vectors are accessed (float32, float16,
+ * or float16 with hand-written F16C SIMD). Centroids are always
+ * float32. For f16 input, distance computation uses mixed-type
+ * operations (half × float32) to avoid bulk conversion.
  *
  * For DISTANCE_COSINE: input vectors MUST be pre-normalized (unit
  * length). The function normalizes centroids after each update step
@@ -77,22 +82,40 @@ typedef struct KMeansOptions
  * Runs nredo independent attempts and returns the best (lowest cost).
  *
  * Parameters:
- *   vectors: [nvecs * dim] row-major input vectors
- *   nvecs:   number of input vectors
- *   dim:     vector dimension
- *   nlist:   number of clusters (K)
- *   metric:  distance metric (L2, IP, or cosine)
- *   options: configuration (NULL for defaults)
+ *   vectors:  [nvecs * dim] row-major input vectors
+ *   vec_type: element type (MKT_VEC_F32, MKT_VEC_F16, MKT_VEC_F16C)
+ *   nvecs:    number of input vectors
+ *   dim:      vector dimension
+ *   nlist:    number of clusters (K)
+ *   metric:   distance metric (L2, IP, or cosine)
+ *   options:  configuration (NULL for defaults)
  *
  * Returns allocated result on success, NULL on failure.
  */
 KMeansResult *mkt_kmeans(
-		const float			*vectors,
+		const void			*vectors,
+		MktVecType			 vec_type,
 		uint32_t			 nvecs,
 		Dimension			 dim,
 		uint32_t			 nlist,
 		DistanceMetric		 metric,
 		const KMeansOptions *options);
+
+/*
+ * Convenience wrapper for float32 vectors.
+ */
+static inline KMeansResult *
+mkt_kmeans_f32(
+		const float			*vectors,
+		uint32_t			 nvecs,
+		Dimension			 dim,
+		uint32_t			 nlist,
+		DistanceMetric		 metric,
+		const KMeansOptions *options)
+{
+	return mkt_kmeans(
+			vectors, MKT_VEC_F32, nvecs, dim, nlist, metric, options);
+}
 
 /*
  * Free a k-means result and all owned arrays.

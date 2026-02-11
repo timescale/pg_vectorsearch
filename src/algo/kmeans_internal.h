@@ -14,7 +14,8 @@
 #include <stdint.h>
 
 #include "algo/kmeans.h"
-#include "mkt_types.h"
+#include "mkt_halfvec.h"
+#include "mkt_vector.h"
 
 /* Block size for assignment step (matches FAISS) */
 #define KMEANS_BLOCK_SIZE 4096
@@ -45,14 +46,16 @@
 typedef struct KMeansState
 {
 	/* Input (not owned) */
-	const float	  *vectors;
+	const void	  *vectors;
+	MktVecType	   vec_type; /* element type (f32, f16, f16c) */
 	uint32_t	   nvecs;
 	uint32_t	   nlist;
 	Dimension	   dim;
 	DistanceMetric metric;
 
-	/* Working state (owned) */
+	/* Working state (owned) — always float32 */
 	float	  *centroids;	  /* [nlist * dim] */
+	float	  *vec_block;	  /* [BLOCK_SIZE * dim] BLAS convert buf */
 	ClusterId *assignments;	  /* [nvecs] */
 	uint32_t  *cluster_sizes; /* [nlist] */
 	float	  *norms_x;		  /* [nvecs] precomputed ||x||^2 (L2) */
@@ -61,5 +64,12 @@ typedef struct KMeansState
 	float	  *new_centroids; /* [nlist * dim] accumulator */
 	float	   total_cost;
 } KMeansState;
+
+/* Get pointer to vector i in the input array */
+__attribute__((always_inline)) static inline const void *
+km_get_vector(const KMeansState *st, uint32_t i, size_t elem_size)
+{
+	return (const char *)st->vectors + (size_t)i * st->dim * elem_size;
+}
 
 #endif /* MKT_KMEANS_INTERNAL_H */

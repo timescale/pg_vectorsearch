@@ -136,68 +136,69 @@ mkt_cblas_is_single_threaded(void)
 }
 
 /*
- * Precompute ||x||^2 for all input vectors (L2 only).
+ * Precompute ||x||^2 for all input vectors.
  */
-static void
-precompute_norms_x(KMeansState *st)
+__attribute__((always_inline)) static inline void
+precompute_norms_x_impl(KMeansState *st, const MktVectorTypeOps *ops)
 {
+	size_t esz = ops->element_size;
 	for (uint32_t i = 0; i < st->nvecs; i++)
-		st->norms_x[i] = mkt_l2_norm_squared(
-				st->vectors + (size_t)i * st->dim, st->dim);
+		st->norms_x[i] = ops->norm_sq(km_get_vector(st, i, esz), st->dim);
 }
 
 /*
- * Compute distance from a single vector to a single centroid.
+ * Compute distance from a typed vector to a float32 centroid.
  */
-static float
-vector_centroid_distance(
-		const float	  *vec,
-		const float	  *centroid,
-		Dimension	   dim,
-		DistanceMetric metric)
+__attribute__((always_inline)) static inline float
+vector_centroid_distance_impl(
+		DistanceMetric			metric,
+		const void			   *vec,
+		const float			   *centroid,
+		Dimension				dim,
+		const MktVectorTypeOps *ops)
 {
 	switch (metric)
 	{
 	case DISTANCE_L2:
-		return mkt_l2_distance_squared(vec, centroid, dim);
+		return ops->l2_squared(vec, centroid, dim);
 	case DISTANCE_INNER_PRODUCT:
-		return -mkt_dot_product(vec, centroid, dim);
+		return -ops->dot_product(vec, centroid, dim);
 	case DISTANCE_COSINE:
-		return 1.0f - mkt_dot_product(vec, centroid, dim);
+		return 1.0f - ops->dot_product(vec, centroid, dim);
 	}
 	return FLT_MAX;
 }
 
 /*
  * k-means++ initialization.
- *
- * 1. Pick first centroid uniformly at random.
- * 2. For each subsequent centroid, pick with probability proportional
- *    to squared distance to nearest existing centroid.
  */
-static void
-kmeans_init_plusplus(KMeansState *st, uint64_t seed)
+__attribute__((always_inline)) static inline void
+kmeans_init_plusplus_impl(
+		KMeansState *st, uint64_t seed, const MktVectorTypeOps *ops)
 {
 	Xoshiro256State rng;
 	xo_seed(&rng, seed);
 
-	uint32_t dim   = st->dim;
-	uint32_t nvecs = st->nvecs;
-	uint32_t nlist = st->nlist;
-	float	*dists = mkt_alloc(nvecs * sizeof(float));
+	Dimension dim	= st->dim;
+	uint32_t  nvecs = st->nvecs;
+	uint32_t  nlist = st->nlist;
+	size_t	  esz	= ops->element_size;
+	float	 *dists = mkt_alloc(nvecs * sizeof(float));
 
 	/* 1. First centroid: random vector */
 	uint32_t idx = (uint32_t)(xo_uniform(&rng) * nvecs);
 	if (idx >= nvecs)
 		idx = nvecs - 1;
-	memcpy(st->centroids,
-		   st->vectors + (size_t)idx * dim,
-		   dim * sizeof(float));
+	ops->to_float_one(km_get_vector(st, idx, esz), st->centroids, dim);
 
 	/* Initialize distances to first centroid */
 	for (uint32_t i = 0; i < nvecs; i++)
-		dists[i] = vector_centroid_distance(
-				st->vectors + (size_t)i * dim, st->centroids, dim, st->metric);
+		dists[i] = vector_centroid_distance_impl(
+				st->metric,
+				km_get_vector(st, i, esz),
+				st->centroids,
+				dim,
+				ops);
 
 	/* 2. Pick remaining centroids */
 	for (uint32_t k = 1; k < nlist; k++)
@@ -221,19 +222,21 @@ kmeans_init_plusplus(KMeansState *st, uint64_t seed)
 			}
 		}
 
-		/* Copy chosen vector as new centroid */
-		memcpy(st->centroids + (size_t)k * dim,
-			   st->vectors + (size_t)chosen * dim,
-			   dim * sizeof(float));
+		/* Copy chosen vector as new centroid (convert to f32) */
+		ops->to_float_one(
+				km_get_vector(st, chosen, esz),
+				st->centroids + (size_t)k * dim,
+				dim);
 
 		/* Update min distances */
 		for (uint32_t i = 0; i < nvecs; i++)
 		{
-			float d = vector_centroid_distance(
-					st->vectors + (size_t)i * dim,
+			float d = vector_centroid_distance_impl(
+					st->metric,
+					km_get_vector(st, i, esz),
 					st->centroids + (size_t)k * dim,
 					dim,
-					st->metric);
+					ops);
 			if (d < dists[i])
 				dists[i] = d;
 		}
@@ -243,15 +246,14 @@ kmeans_init_plusplus(KMeansState *st, uint64_t seed)
 }
 
 /*
- * Update step: recompute centroids as the mean of assigned vectors.
- *
- * For cosine: also normalizes centroids to unit length after averaging.
+ * Update step: recompute centroids as mean of assigned vectors.
  */
-static void
-kmeans_update_centroids(KMeansState *st)
+__attribute__((always_inline)) static inline void
+kmeans_update_centroids_impl(KMeansState *st, const MktVectorTypeOps *ops)
 {
-	uint32_t nlist = st->nlist;
-	uint32_t dim   = st->dim;
+	uint32_t  nlist = st->nlist;
+	Dimension dim	= st->dim;
+	size_t	  esz	= ops->element_size;
 
 	/* Zero accumulators */
 	memset(st->new_centroids, 0, (size_t)nlist * dim * sizeof(float));
@@ -262,10 +264,9 @@ kmeans_update_centroids(KMeansState *st)
 	{
 		ClusterId c = st->assignments[i];
 		st->cluster_sizes[c]++;
-		const float *vec  = st->vectors + (size_t)i * dim;
-		float		*cent = st->new_centroids + (size_t)c * dim;
-		for (uint32_t d = 0; d < dim; d++)
-			cent[d] += vec[d];
+		const void *vec	 = km_get_vector(st, i, esz);
+		float	   *cent = st->new_centroids + (size_t)c * dim;
+		ops->sum_to_float(vec, cent, dim);
 	}
 
 	/* Divide by cluster size */
@@ -380,7 +381,8 @@ kmeans_max_centroid_shift(const KMeansState *st)
  */
 static KMeansState *
 kmeans_state_create(
-		const float	  *vectors,
+		const void	  *vectors,
+		MktVecType	   vec_type,
 		uint32_t	   nvecs,
 		Dimension	   dim,
 		uint32_t	   nlist,
@@ -388,11 +390,12 @@ kmeans_state_create(
 {
 	KMeansState *st = mkt_alloc0(sizeof(KMeansState));
 
-	st->vectors = vectors;
-	st->nvecs	= nvecs;
-	st->nlist	= nlist;
-	st->dim		= dim;
-	st->metric	= metric;
+	st->vectors	 = vectors;
+	st->vec_type = vec_type;
+	st->nvecs	 = nvecs;
+	st->nlist	 = nlist;
+	st->dim		 = dim;
+	st->metric	 = metric;
 
 	st->centroids	  = mkt_alloc((size_t)nlist * dim * sizeof(float));
 	st->assignments	  = mkt_alloc(nvecs * sizeof(ClusterId));
@@ -404,11 +407,14 @@ kmeans_state_create(
 		block = nvecs;
 	st->dist_block = mkt_alloc((size_t)block * nlist * sizeof(float));
 
+	/* Allocate BLAS conversion buffer for non-f32 types */
+	if (mkt_vec_element_size(vec_type) != sizeof(float))
+		st->vec_block = mkt_alloc((size_t)block * dim * sizeof(float));
+
 	if (metric == DISTANCE_L2)
 	{
 		st->norms_x = mkt_alloc(nvecs * sizeof(float));
 		st->norms_c = mkt_alloc(nlist * sizeof(float));
-		precompute_norms_x(st);
 	}
 
 	return st;
@@ -420,6 +426,7 @@ kmeans_state_destroy(KMeansState *st)
 	if (st == NULL)
 		return;
 	mkt_free(st->centroids);
+	mkt_free(st->vec_block);
 	mkt_free(st->assignments);
 	mkt_free(st->cluster_sizes);
 	mkt_free(st->new_centroids);
@@ -538,21 +545,28 @@ static const KMeansAlgoOps elkan_ops = {
 /*
  * Run one complete k-means attempt (init + iterate to convergence).
  *
- * Unified loop for all algorithms. The ops vtable determines the
- * assignment step and optional bound maintenance.
+ * always_inline — the specialized wrappers below pass a static const
+ * MktVectorTypeOps from the header, so the compiler inlines through
+ * every vtable function pointer. MKT_TARGET_CLONES on the wrappers
+ * generates AVX2/AVX-512 variants of the entire inlined body.
  */
-static void
-kmeans_run_one(
-		KMeansState			*st,
-		const KMeansOptions *opts,
-		uint64_t			 seed,
-		const KMeansAlgoOps *ops)
+__attribute__((always_inline)) static inline void
+kmeans_run_one_impl(
+		KMeansState			   *st,
+		const KMeansOptions	   *opts,
+		uint64_t				seed,
+		const KMeansAlgoOps	   *algo,
+		const MktVectorTypeOps *ops)
 {
-	size_t cent_bytes = (size_t)st->nlist * st->dim * sizeof(float);
-	void  *algo_state = ops->create ? ops->create(st) : NULL;
-	float *old_cents  = ops->update_bounds ? mkt_alloc(cent_bytes) : NULL;
+	/* Precompute input vector norms for L2 */
+	if (st->metric == DISTANCE_L2)
+		precompute_norms_x_impl(st, ops);
 
-	kmeans_init_plusplus(st, seed);
+	size_t cent_bytes = (size_t)st->nlist * st->dim * sizeof(float);
+	void  *algo_state = algo->create ? algo->create(st) : NULL;
+	float *old_cents  = algo->update_bounds ? mkt_alloc(cent_bytes) : NULL;
+
+	kmeans_init_plusplus_impl(st, seed, ops);
 
 	for (uint32_t iter = 0; iter < opts->max_iterations; iter++)
 	{
@@ -563,12 +577,12 @@ kmeans_run_one(
 		if (old_cents)
 			memcpy(old_cents, st->centroids, cent_bytes);
 
-		ops->assign(st, algo_state);
-		kmeans_update_centroids(st);
+		algo->assign(st, algo_state);
+		kmeans_update_centroids_impl(st, ops);
 		kmeans_handle_empty_clusters(st);
 
-		if (ops->update_bounds)
-			ops->update_bounds(st, algo_state, old_cents);
+		if (algo->update_bounds)
+			algo->update_bounds(st, algo_state, old_cents);
 
 		float shift = kmeans_max_centroid_shift(st);
 
@@ -585,19 +599,77 @@ kmeans_run_one(
 
 		if (shift < opts->tolerance)
 		{
-			ops->assign(st, algo_state);
-			if (ops->destroy)
-				ops->destroy(algo_state);
+			algo->assign(st, algo_state);
+			if (algo->destroy)
+				algo->destroy(algo_state);
 			mkt_free(old_cents);
 			return;
 		}
 	}
 
 	/* Final assignment after max iterations */
-	ops->assign(st, algo_state);
-	if (ops->destroy)
-		ops->destroy(algo_state);
+	algo->assign(st, algo_state);
+	if (algo->destroy)
+		algo->destroy(algo_state);
 	mkt_free(old_cents);
+}
+
+/* Specialized wrappers — MKT_TARGET_CLONES generates SIMD variants */
+
+MKT_TARGET_CLONES static void
+kmeans_run_one_f32(
+		KMeansState			*st,
+		const KMeansOptions *opts,
+		uint64_t			 seed,
+		const KMeansAlgoOps *algo)
+{
+	kmeans_run_one_impl(st, opts, seed, algo, &mkt_f32_type_ops);
+}
+
+MKT_TARGET_CLONES static void
+kmeans_run_one_f16(
+		KMeansState			*st,
+		const KMeansOptions *opts,
+		uint64_t			 seed,
+		const KMeansAlgoOps *algo)
+{
+	kmeans_run_one_impl(st, opts, seed, algo, &mkt_f16_type_ops);
+}
+
+#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
+MKT_TARGET_F16C_AVX2 static void
+kmeans_run_one_f16c(
+		KMeansState			*st,
+		const KMeansOptions *opts,
+		uint64_t			 seed,
+		const KMeansAlgoOps *algo)
+{
+	kmeans_run_one_impl(st, opts, seed, algo, &mkt_f16c_type_ops);
+}
+#endif
+
+/* Single dispatch point — selects the inline vtable once */
+static void
+kmeans_run_one(
+		KMeansState			*st,
+		const KMeansOptions *opts,
+		uint64_t			 seed,
+		const KMeansAlgoOps *algo)
+{
+	switch (st->vec_type)
+	{
+	case MKT_VEC_F32:
+		kmeans_run_one_f32(st, opts, seed, algo);
+		break;
+#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
+	case MKT_VEC_F16C:
+		kmeans_run_one_f16c(st, opts, seed, algo);
+		break;
+#endif
+	default:
+		kmeans_run_one_f16(st, opts, seed, algo);
+		break;
+	}
 }
 
 /*
@@ -606,7 +678,8 @@ kmeans_run_one(
 
 KMeansResult *
 mkt_kmeans(
-		const float			*vectors,
+		const void			*vectors,
+		MktVecType			 vec_type,
 		uint32_t			 nvecs,
 		Dimension			 dim,
 		uint32_t			 nlist,
@@ -646,32 +719,32 @@ mkt_kmeans(
 		algo = KMEANS_ALGO_LLOYD;
 
 	/* Select algorithm vtable */
-	const KMeansAlgoOps *ops;
+	const KMeansAlgoOps *algo_ops;
 	switch (algo)
 	{
 	case KMEANS_ALGO_HAMERLY:
-		ops = &hamerly_ops;
+		algo_ops = &hamerly_ops;
 		break;
 	case KMEANS_ALGO_ELKAN:
-		ops = &elkan_ops;
+		algo_ops = &elkan_ops;
 		break;
 	case KMEANS_ALGO_CBLAS:
-		ops = &lloyd_cblas_ops;
+		algo_ops = &lloyd_cblas_ops;
 		break;
 	case KMEANS_ALGO_LLOYD:
 	default:
-		ops = &lloyd_ops;
+		algo_ops = &lloyd_ops;
 		break;
 	}
 
 	for (uint32_t redo = 0; redo < opts.nredo; redo++)
 	{
-		KMeansState *st =
-				kmeans_state_create(vectors, nvecs, dim, nlist, metric);
+		KMeansState *st = kmeans_state_create(
+				vectors, vec_type, nvecs, dim, nlist, metric);
 
 		uint64_t seed = opts.seed + redo;
 
-		kmeans_run_one(st, &opts, seed, ops);
+		kmeans_run_one(st, &opts, seed, algo_ops);
 
 		if (opts.verbose && opts.nredo > 1)
 		{

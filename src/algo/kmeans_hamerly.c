@@ -65,19 +65,6 @@ hamerly_destroy(HamerlyState *hs)
 }
 
 /*
- * Compute dot product between two vectors.
- * Structured for auto-vectorization (single tight loop).
- */
-MKT_TARGET_CLONES static inline float
-dot_product(const float *a, const float *b, uint32_t dim)
-{
-	float dot = 0.0f;
-	for (uint32_t d = 0; d < dim; d++)
-		dot += a[d] * b[d];
-	return dot;
-}
-
-/*
  * Compute L2 squared distance using dot product decomposition.
  * Requires precomputed norms: norm_a = ||a||^2, norm_b = ||b||^2.
  */
@@ -90,19 +77,19 @@ l2_from_dot(float norm_a, float norm_b, float dot)
 
 /*
  * Full assignment for one vector: find nearest and second-nearest.
- * Returns squared distances via out_dist1 and out_dist2.
  */
-MKT_TARGET_CLONES static void
-assign_full(
-		const float		  *vec,
-		float			   norm_x,
-		const KMeansState *st,
-		uint32_t		  *out_j1,
-		float			  *out_dist1,
-		float			  *out_dist2)
+__attribute__((always_inline)) static inline void
+assign_full_impl(
+		const void			   *vec,
+		float					norm_x,
+		const KMeansState	   *st,
+		uint32_t			   *out_j1,
+		float				   *out_dist1,
+		float				   *out_dist2,
+		const MktVectorTypeOps *ops)
 {
 	uint32_t	 nlist = st->nlist;
-	uint32_t	 dim   = st->dim;
+	Dimension	 dim   = st->dim;
 	const float *cents = st->centroids;
 
 	float	 d1 = FLT_MAX, d2 = FLT_MAX;
@@ -110,8 +97,8 @@ assign_full(
 
 	for (uint32_t j = 0; j < nlist; j++)
 	{
-		float dot = dot_product(vec, cents + (size_t)j * dim, dim);
-		float d	  = l2_from_dot(norm_x, st->norms_c[j], dot);
+		float dp = ops->dot_product(vec, cents + (size_t)j * dim, dim);
+		float d	 = l2_from_dot(norm_x, st->norms_c[j], dp);
 
 		if (d < d1)
 		{
@@ -141,14 +128,22 @@ precompute_norms_c(KMeansState *st)
 				st->centroids + (size_t)j * st->dim, st->dim);
 }
 
-void
-hamerly_assign(KMeansState *st, HamerlyState *hs)
+/*
+ * Main Hamerly assignment loop.
+ *
+ * always_inline — the specialized wrappers below pass a static const
+ * MktVectorTypeOps from the header, so the compiler inlines through
+ * every vtable function pointer. MKT_TARGET_CLONES on the wrappers
+ * generates AVX2/AVX-512 variants of the entire inlined body.
+ */
+__attribute__((always_inline)) static inline void
+hamerly_assign_impl(
+		KMeansState *st, HamerlyState *hs, const MktVectorTypeOps *ops)
 {
-	uint32_t nvecs = st->nvecs;
-	uint32_t dim   = st->dim;
-
-	st->total_cost = 0.0f;
-	precompute_norms_c(st);
+	uint32_t	 nvecs = st->nvecs;
+	Dimension	 dim   = st->dim;
+	size_t		 esz   = ops->element_size;
+	const float *cents = st->centroids;
 
 	if (!hs->bounds_valid)
 	{
@@ -158,12 +153,12 @@ hamerly_assign(KMeansState *st, HamerlyState *hs)
 		 */
 		for (uint32_t i = 0; i < nvecs; i++)
 		{
-			const float *v	= st->vectors + (size_t)i * dim;
-			float		 nx = st->norms_x[i];
+			const void *v  = km_get_vector(st, i, esz);
+			float		nx = st->norms_x[i];
 
 			uint32_t j1;
 			float	 d1, d2;
-			assign_full(v, nx, st, &j1, &d1, &d2);
+			assign_full_impl(v, nx, st, &j1, &d1, &d2, ops);
 
 			st->assignments[i] = j1;
 			st->total_cost += d1;
@@ -178,8 +173,6 @@ hamerly_assign(KMeansState *st, HamerlyState *hs)
 	/*
 	 * Subsequent calls: use bounds to skip vectors.
 	 */
-	const float *cents = st->centroids;
-
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
 		float ub = hs->upper_bound[i];
@@ -194,12 +187,12 @@ hamerly_assign(KMeansState *st, HamerlyState *hs)
 		}
 
 		/* Step 2: tighten upper bound with exact distance */
-		const float *v	   = st->vectors + (size_t)i * dim;
-		float		 nx	   = st->norms_x[i];
-		uint32_t	 prev  = st->assignments[i];
-		float		 dot_p = dot_product(v, cents + (size_t)prev * dim, dim);
-		float		 d_sq  = l2_from_dot(nx, st->norms_c[prev], dot_p);
-		ub				   = sqrtf(d_sq);
+		const void *v	 = km_get_vector(st, i, esz);
+		float		nx	 = st->norms_x[i];
+		uint32_t	prev = st->assignments[i];
+		float dot_p = ops->dot_product(v, cents + (size_t)prev * dim, dim);
+		float d_sq	= l2_from_dot(nx, st->norms_c[prev], dot_p);
+		ub			= sqrtf(d_sq);
 
 		hs->upper_bound[i] = ub;
 
@@ -213,12 +206,122 @@ hamerly_assign(KMeansState *st, HamerlyState *hs)
 		/* Step 3: full search required */
 		uint32_t j1;
 		float	 d1, d2;
-		assign_full(v, nx, st, &j1, &d1, &d2);
+		assign_full_impl(v, nx, st, &j1, &d1, &d2, ops);
 
 		st->assignments[i] = j1;
 		st->total_cost += d1;
 		hs->upper_bound[i] = sqrtf(d1);
 		hs->lower_bound[i] = sqrtf(d2);
+	}
+}
+
+/*
+ * Preconvert f16 variant: converts each f16 vector to f32 once before
+ * the centroid loop, then uses the f32 dot product kernel. Saves
+ * O(K*dim) f16→f32 conversions per vector (one conversion vs K).
+ * Vectors skipped by bounds check are never converted.
+ */
+__attribute__((always_inline)) static inline void
+hamerly_assign_preconvert_impl(KMeansState *st, HamerlyState *hs, size_t esz)
+{
+	uint32_t	 nvecs = st->nvecs;
+	Dimension	 dim   = st->dim;
+	const float *cents = st->centroids;
+	float		*buf   = st->vec_block;
+
+	const MktVectorTypeOps *f32ops = &mkt_f32_type_ops;
+
+	if (!hs->bounds_valid)
+	{
+		for (uint32_t i = 0; i < nvecs; i++)
+		{
+			const void *raw = km_get_vector(st, i, esz);
+			mkt_half_to_float_array((const half *)raw, buf, dim);
+			float nx = st->norms_x[i];
+
+			uint32_t j1;
+			float	 d1, d2;
+			assign_full_impl(buf, nx, st, &j1, &d1, &d2, f32ops);
+
+			st->assignments[i] = j1;
+			st->total_cost += d1;
+			hs->upper_bound[i] = sqrtf(d1);
+			hs->lower_bound[i] = sqrtf(d2);
+		}
+
+		hs->bounds_valid = true;
+		return;
+	}
+
+	for (uint32_t i = 0; i < nvecs; i++)
+	{
+		float ub = hs->upper_bound[i];
+		float lb = hs->lower_bound[i];
+
+		if (ub <= lb)
+		{
+			st->total_cost += ub * ub;
+			continue;
+		}
+
+		/* Convert once — only for vectors that need distance computation */
+		const void *raw = km_get_vector(st, i, esz);
+		mkt_half_to_float_array((const half *)raw, buf, dim);
+
+		float	 nx	  = st->norms_x[i];
+		uint32_t prev = st->assignments[i];
+		float	 dot_p =
+				f32ops->dot_product(buf, cents + (size_t)prev * dim, dim);
+		float d_sq = l2_from_dot(nx, st->norms_c[prev], dot_p);
+		ub		   = sqrtf(d_sq);
+
+		hs->upper_bound[i] = ub;
+
+		if (ub <= lb)
+		{
+			st->total_cost += d_sq;
+			continue;
+		}
+
+		uint32_t j1;
+		float	 d1, d2;
+		assign_full_impl(buf, nx, st, &j1, &d1, &d2, f32ops);
+
+		st->assignments[i] = j1;
+		st->total_cost += d1;
+		hs->upper_bound[i] = sqrtf(d1);
+		hs->lower_bound[i] = sqrtf(d2);
+	}
+}
+
+/* Specialized wrappers — MKT_TARGET_CLONES generates SIMD variants */
+MKT_TARGET_CLONES static void
+hamerly_assign_f32(KMeansState *st, HamerlyState *hs)
+{
+	hamerly_assign_impl(st, hs, &mkt_f32_type_ops);
+}
+
+MKT_TARGET_CLONES static void
+hamerly_assign_f16(KMeansState *st, HamerlyState *hs)
+{
+	hamerly_assign_preconvert_impl(st, hs, sizeof(half));
+}
+
+/* Public entry — dispatches once based on type */
+void
+hamerly_assign(KMeansState *st, HamerlyState *hs)
+{
+	st->total_cost = 0.0f;
+	precompute_norms_c(st);
+
+	switch (st->vec_type)
+	{
+	case MKT_VEC_F32:
+		hamerly_assign_f32(st, hs);
+		break;
+	default:
+		hamerly_assign_f16(st, hs);
+		break;
 	}
 }
 

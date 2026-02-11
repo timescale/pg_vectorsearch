@@ -33,8 +33,9 @@
  * Using macros makes it easy to change target features in one place.
  */
 #if defined(__x86_64__) || defined(_M_X64)
-#define MKT_TARGET_AVX512 __attribute__((target("avx512f,avx512dq")))
-#define MKT_TARGET_AVX2	  __attribute__((target("avx2,fma")))
+#define MKT_TARGET_AVX512	 __attribute__((target("avx512f,avx512dq")))
+#define MKT_TARGET_AVX2		 __attribute__((target("avx2,fma")))
+#define MKT_TARGET_F16C_AVX2 __attribute__((target("avx2,fma,f16c")))
 #elif defined(__aarch64__) || defined(_M_ARM64)
 /* NEON is always available on AArch64, no attribute needed */
 #define MKT_TARGET_NEON

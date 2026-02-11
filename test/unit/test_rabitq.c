@@ -18,6 +18,7 @@
 #include "core/memory.h"
 #include "core/platform.h"
 #include "mkt_test.h"
+#include "mkt_types.h"
 #include "quant/matrix.h"
 #include "quant/rabitq.h"
 #include "test_config.h"
@@ -384,6 +385,7 @@ TEST(encode_batch_matches_single)
 	int		 ret			 = mkt_rabitq_encode_batch(
 			 params,
 			 vectors,
+			 MKT_VEC_F32,
 			 cent_ref,
 			 batch_f_add,
 			 batch_f_rescale,
@@ -444,38 +446,45 @@ TEST(encode_batch_null_inputs)
 
 	/* Test null params */
 	int ret = mkt_rabitq_encode_batch(
-			NULL, vectors, cent_ref, f_add, f_rescale, bits, 4);
+			NULL, vectors, MKT_VEC_F32, cent_ref, f_add, f_rescale, bits, 4);
 	ASSERT_EQ(-1, ret, "null params should fail");
 
 	/* Test null vectors */
 	ret = mkt_rabitq_encode_batch(
-			params, NULL, cent_ref, f_add, f_rescale, bits, 4);
+			params, NULL, MKT_VEC_F32, cent_ref, f_add, f_rescale, bits, 4);
 	ASSERT_EQ(-1, ret, "null vectors should fail");
 
 	/* Test null centroid */
 	VectorRef null_cent = {.data = NULL, .dim = dim};
 	ret					= mkt_rabitq_encode_batch(
-			params, vectors, null_cent, f_add, f_rescale, bits, 4);
+			params,
+			vectors,
+			MKT_VEC_F32,
+			null_cent,
+			f_add,
+			f_rescale,
+			bits,
+			4);
 	ASSERT_EQ(-1, ret, "null centroid should fail");
 
 	/* Test null f_add */
 	ret = mkt_rabitq_encode_batch(
-			params, vectors, cent_ref, NULL, f_rescale, bits, 4);
+			params, vectors, MKT_VEC_F32, cent_ref, NULL, f_rescale, bits, 4);
 	ASSERT_EQ(-1, ret, "null f_add should fail");
 
 	/* Test null f_rescale */
 	ret = mkt_rabitq_encode_batch(
-			params, vectors, cent_ref, f_add, NULL, bits, 4);
+			params, vectors, MKT_VEC_F32, cent_ref, f_add, NULL, bits, 4);
 	ASSERT_EQ(-1, ret, "null f_rescale should fail");
 
 	/* Test null bits */
 	ret = mkt_rabitq_encode_batch(
-			params, vectors, cent_ref, f_add, f_rescale, NULL, 4);
+			params, vectors, MKT_VEC_F32, cent_ref, f_add, f_rescale, NULL, 4);
 	ASSERT_EQ(-1, ret, "null bits should fail");
 
 	/* Test zero count */
 	ret = mkt_rabitq_encode_batch(
-			params, vectors, cent_ref, f_add, f_rescale, bits, 0);
+			params, vectors, MKT_VEC_F32, cent_ref, f_add, f_rescale, bits, 0);
 	ASSERT_EQ(-1, ret, "zero count should fail");
 
 	mkt_free(bits);
@@ -1136,7 +1145,7 @@ TEST(encode_batch_dim_mismatch)
 	uint8_t *bits		  = mkt_alloc(2 * packed_bytes);
 
 	int ret = mkt_rabitq_encode_batch(
-			params, vectors, cent_ref, f_add, f_rescale, bits, 2);
+			params, vectors, MKT_VEC_F32, cent_ref, f_add, f_rescale, bits, 2);
 	ASSERT_EQ(-1, ret, "batch encode dim mismatch should fail");
 
 	mkt_free(bits);

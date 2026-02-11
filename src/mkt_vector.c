@@ -8,6 +8,13 @@
 #include "core/memory.h"
 #include "mkt_vector.h"
 
+/* (No extern vtable — inline vtable in mkt_vector.h, dispatch via MktVecType)
+ */
+
+/* ----------------------------------------------------------------
+ * MktVector lifecycle
+ * ---------------------------------------------------------------- */
+
 MktVector *
 mkt_vector_create(Dimension dim)
 {

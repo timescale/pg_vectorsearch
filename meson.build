@@ -190,6 +190,19 @@ if use_faiss
   message('FAISS integration enabled (using ' + faiss_root + ')')
 endif
 
+# F16C: hardware half-precision ↔ float conversion (available on all AVX2
+# CPUs, i.e. Haswell 2013+). Enables _cvtsh_ss / _cvtss_sh scalar intrinsics
+# globally so that inline half↔float conversion in mkt_halfvec.h compiles to
+# single vcvtsh2ss/vcvtss2sh instructions instead of software fallback.
+if simd_mode != 'none' and cc.compiles(
+  '#include <immintrin.h>\nfloat f(unsigned short h) { return _cvtsh_ss(h); }',
+  args: ['-mf16c'],
+  name: 'F16C half-precision conversion',
+)
+  add_project_arguments('-mf16c', language: 'c')
+  config_data.set('MKT_HAVE_F16C', 1)
+endif
+
 mkt_config_h = configure_file(
   input: 'src/mkt_config.h.in',
   output: 'mkt_config.h',
@@ -226,6 +239,7 @@ if simd_mode != 'none'
     '-ffp-contract=fast',
     language: 'c',
   )
+
 endif
 
 # Math library
@@ -235,6 +249,7 @@ m_dep = cc.find_library('m', required: true)
 mkt_core_sources = files(
   'src/core/memory_standalone.c',
   'src/core/platform.c',
+  'src/mkt_halfvec.c',
   'src/mkt_vector.c',
   'src/algo/distance.c',
   'src/algo/kmeans.c',
@@ -338,6 +353,7 @@ mkt_core_headers = files(
   'src/core/memory_standalone.h',
   'src/core/memory_pg.h',
   'src/core/platform.h',
+  'src/mkt_halfvec.h',
   'src/mkt_types.h',
   'src/mkt_vector.h',
 )
