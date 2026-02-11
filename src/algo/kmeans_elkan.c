@@ -76,9 +76,10 @@ elkan_destroy(ElkanState *es)
 }
 
 /*
- * Compute dot product between two vectors.
+ * Compute dot product between two float32 vectors.
+ * Used for centroid-centroid distances (always float32).
  */
-MKT_TARGET_CLONES static inline float
+MKT_TARGET_CLONES static float
 dot_product(const float *a, const float *b, uint32_t dim)
 {
 	float dot = 0.0f;
@@ -160,21 +161,23 @@ precompute_norms_c(KMeansState *st)
 }
 
 /*
- * Full initial assignment: compute all distances, set all bounds.
+ * Full initial assignment — always_inline, specialized by ops vtable.
  */
-MKT_TARGET_CLONES static void
-elkan_initial_assign(KMeansState *st, ElkanState *es)
+__attribute__((always_inline)) static inline void
+elkan_initial_assign_impl(
+		KMeansState *st, ElkanState *es, const MktVectorTypeOps *ops)
 {
 	uint32_t	 nvecs = st->nvecs;
 	uint32_t	 nlist = st->nlist;
-	uint32_t	 dim   = st->dim;
+	Dimension	 dim   = st->dim;
+	size_t		 esz   = ops->element_size;
 	const float *cents = st->centroids;
 
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
-		const float *v	= st->vectors + (size_t)i * dim;
-		float		 nx = st->norms_x[i];
-		float		*lb = es->lower + (size_t)i * nlist;
+		const void *v  = km_get_vector(st, i, esz);
+		float		nx = st->norms_x[i];
+		float	   *lb = es->lower + (size_t)i * nlist;
 
 		float	 best_d_sq = FLT_MAX;
 		float	 best_d	   = FLT_MAX;
@@ -182,8 +185,8 @@ elkan_initial_assign(KMeansState *st, ElkanState *es)
 
 		for (uint32_t j = 0; j < nlist; j++)
 		{
-			float dot  = dot_product(v, cents + (size_t)j * dim, dim);
-			float d_sq = l2_sq_from_dot(nx, st->norms_c[j], dot);
+			float dp   = ops->dot_product(v, cents + (size_t)j * dim, dim);
+			float d_sq = l2_sq_from_dot(nx, st->norms_c[j], dp);
 			float d	   = sqrtf(d_sq);
 			lb[j]	   = d;
 
@@ -201,20 +204,24 @@ elkan_initial_assign(KMeansState *st, ElkanState *es)
 	}
 }
 
-void
-elkan_assign(KMeansState *st, ElkanState *es)
+/*
+ * Main Elkan assignment loop — always_inline, specialized by ops vtable.
+ *
+ * Centroid-centroid distances use the separate dot_product() function
+ * (always float32 × float32). Only vector-centroid uses the typed ops.
+ */
+__attribute__((always_inline)) static inline void
+elkan_assign_impl(KMeansState *st, ElkanState *es, const MktVectorTypeOps *ops)
 {
 	uint32_t	 nvecs = st->nvecs;
 	uint32_t	 nlist = st->nlist;
-	uint32_t	 dim   = st->dim;
+	Dimension	 dim   = st->dim;
+	size_t		 esz   = ops->element_size;
 	const float *cents = st->centroids;
-
-	st->total_cost = 0.0f;
-	precompute_norms_c(st);
 
 	if (!es->bounds_valid)
 	{
-		elkan_initial_assign(st, es);
+		elkan_initial_assign_impl(st, es, ops);
 		compute_centroid_dists(es, st);
 		es->bounds_valid = true;
 		return;
@@ -236,10 +243,10 @@ elkan_assign(KMeansState *st, ElkanState *es)
 			continue;
 		}
 
-		const float *v		   = st->vectors + (size_t)i * dim;
-		float		 nx		   = st->norms_x[i];
-		float		 ub_sq	   = ub * ub;
-		bool		 recompute = true; /* need to recompute dist to assigned */
+		const void *v		  = km_get_vector(st, i, esz);
+		float		nx		  = st->norms_x[i];
+		float		ub_sq	  = ub * ub;
+		bool		recompute = true;
 
 		for (uint32_t k = 0; k < nlist; k++)
 		{
@@ -257,8 +264,9 @@ elkan_assign(KMeansState *st, ElkanState *es)
 			/* Step 3a: tighten upper bound if not yet done */
 			if (recompute)
 			{
-				float dot_a	 = dot_product(v, cents + (size_t)asgn * dim, dim);
-				float d_sq_a = l2_sq_from_dot(nx, st->norms_c[asgn], dot_a);
+				float dp_a =
+						ops->dot_product(v, cents + (size_t)asgn * dim, dim);
+				float d_sq_a = l2_sq_from_dot(nx, st->norms_c[asgn], dp_a);
 				float d_a	 = sqrtf(d_sq_a);
 				lb[asgn]	 = d_a;
 				ub			 = d_a;
@@ -274,8 +282,8 @@ elkan_assign(KMeansState *st, ElkanState *es)
 			}
 
 			/* Step 3b: compute actual distance to centroid k */
-			float dot_k	 = dot_product(v, cents + (size_t)k * dim, dim);
-			float d_sq_k = l2_sq_from_dot(nx, st->norms_c[k], dot_k);
+			float dp_k	 = ops->dot_product(v, cents + (size_t)k * dim, dim);
+			float d_sq_k = l2_sq_from_dot(nx, st->norms_c[k], dp_k);
 			float d_k	 = sqrtf(d_sq_k);
 			lb[k]		 = d_k;
 
@@ -291,6 +299,178 @@ elkan_assign(KMeansState *st, ElkanState *es)
 		}
 
 		st->total_cost += ub_sq;
+	}
+}
+
+/*
+ * Preconvert f16 variants: convert each f16 vector to f32 once before
+ * the centroid loop, then use the f32 dot product kernel. Saves
+ * O(K*dim) f16→f32 conversions per vector (one conversion vs K).
+ * Vectors pruned by bounds are never converted.
+ */
+__attribute__((always_inline)) static inline void
+elkan_initial_assign_preconvert_impl(
+		KMeansState *st, ElkanState *es, size_t esz)
+{
+	uint32_t	 nvecs = st->nvecs;
+	uint32_t	 nlist = st->nlist;
+	Dimension	 dim   = st->dim;
+	const float *cents = st->centroids;
+	float		*buf   = st->vec_block;
+
+	const MktVectorTypeOps *f32ops = &mkt_f32_type_ops;
+
+	for (uint32_t i = 0; i < nvecs; i++)
+	{
+		const void *raw = km_get_vector(st, i, esz);
+		mkt_half_to_float_array((const half *)raw, buf, dim);
+		float  nx = st->norms_x[i];
+		float *lb = es->lower + (size_t)i * nlist;
+
+		float	 best_d_sq = FLT_MAX;
+		float	 best_d	   = FLT_MAX;
+		uint32_t best_j	   = 0;
+
+		for (uint32_t j = 0; j < nlist; j++)
+		{
+			float dp = f32ops->dot_product(buf, cents + (size_t)j * dim, dim);
+			float d_sq = l2_sq_from_dot(nx, st->norms_c[j], dp);
+			float d	   = sqrtf(d_sq);
+			lb[j]	   = d;
+
+			if (d_sq < best_d_sq)
+			{
+				best_d_sq = d_sq;
+				best_d	  = d;
+				best_j	  = j;
+			}
+		}
+
+		st->assignments[i] = best_j;
+		es->upper[i]	   = best_d;
+		st->total_cost += best_d_sq;
+	}
+}
+
+__attribute__((always_inline)) static inline void
+elkan_assign_preconvert_impl(KMeansState *st, ElkanState *es, size_t esz)
+{
+	uint32_t	 nvecs = st->nvecs;
+	uint32_t	 nlist = st->nlist;
+	Dimension	 dim   = st->dim;
+	const float *cents = st->centroids;
+	float		*buf   = st->vec_block;
+
+	const MktVectorTypeOps *f32ops = &mkt_f32_type_ops;
+
+	if (!es->bounds_valid)
+	{
+		elkan_initial_assign_preconvert_impl(st, es, esz);
+		compute_centroid_dists(es, st);
+		es->bounds_valid = true;
+		return;
+	}
+
+	compute_centroid_dists(es, st);
+
+	for (uint32_t i = 0; i < nvecs; i++)
+	{
+		float	 ub	  = es->upper[i];
+		uint32_t asgn = st->assignments[i];
+		float	*lb	  = es->lower + (size_t)i * nlist;
+
+		if (ub <= es->s[asgn])
+		{
+			st->total_cost += ub * ub;
+			continue;
+		}
+
+		/* Convert once — only for vectors that pass the s-bound */
+		const void *raw = km_get_vector(st, i, esz);
+		mkt_half_to_float_array((const half *)raw, buf, dim);
+
+		float nx		= st->norms_x[i];
+		float ub_sq		= ub * ub;
+		bool  recompute = true;
+
+		for (uint32_t k = 0; k < nlist; k++)
+		{
+			if (k == asgn)
+				continue;
+
+			if (ub <= lb[k])
+				continue;
+
+			float *hcd_row = es->halfcdist + (size_t)asgn * nlist;
+			if (ub <= hcd_row[k])
+				continue;
+
+			if (recompute)
+			{
+				float dp_a = f32ops->dot_product(
+						buf, cents + (size_t)asgn * dim, dim);
+				float d_sq_a = l2_sq_from_dot(nx, st->norms_c[asgn], dp_a);
+				float d_a	 = sqrtf(d_sq_a);
+				lb[asgn]	 = d_a;
+				ub			 = d_a;
+				ub_sq		 = d_sq_a;
+				es->upper[i] = d_a;
+				recompute	 = false;
+
+				if (ub <= lb[k])
+					continue;
+				if (ub <= hcd_row[k])
+					continue;
+			}
+
+			float dp_k =
+					f32ops->dot_product(buf, cents + (size_t)k * dim, dim);
+			float d_sq_k = l2_sq_from_dot(nx, st->norms_c[k], dp_k);
+			float d_k	 = sqrtf(d_sq_k);
+			lb[k]		 = d_k;
+
+			if (d_sq_k < ub_sq)
+			{
+				asgn			   = k;
+				ub				   = d_k;
+				ub_sq			   = d_sq_k;
+				es->upper[i]	   = d_k;
+				st->assignments[i] = k;
+			}
+		}
+
+		st->total_cost += ub_sq;
+	}
+}
+
+/* Specialized wrappers — MKT_TARGET_CLONES generates SIMD variants */
+MKT_TARGET_CLONES static void
+elkan_assign_f32(KMeansState *st, ElkanState *es)
+{
+	elkan_assign_impl(st, es, &mkt_f32_type_ops);
+}
+
+MKT_TARGET_CLONES static void
+elkan_assign_f16(KMeansState *st, ElkanState *es)
+{
+	elkan_assign_preconvert_impl(st, es, sizeof(half));
+}
+
+/* Public entry — dispatches once based on type */
+void
+elkan_assign(KMeansState *st, ElkanState *es)
+{
+	st->total_cost = 0.0f;
+	precompute_norms_c(st);
+
+	switch (st->vec_type)
+	{
+	case MKT_VEC_F32:
+		elkan_assign_f32(st, es);
+		break;
+	default:
+		elkan_assign_f16(st, es);
+		break;
 	}
 }
 

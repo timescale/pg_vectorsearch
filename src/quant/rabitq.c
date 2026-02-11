@@ -22,6 +22,8 @@
 #include "algo/vecops.h"
 #include "core/memory.h"
 #include "core/platform.h"
+#include "mkt_halfvec.h"
+#include "mkt_vector.h"
 #include "quant/matrix.h"
 #include "quant/rabitq.h"
 
@@ -451,25 +453,36 @@ mkt_rabitq_encode_into(
 	return 0;
 }
 
-int
-mkt_rabitq_encode_batch(
-		const RaBitQParams *params,
-		const float		   *vectors,
-		VectorRef			centroid,
-		float			   *f_add,
-		float			   *f_rescale,
-		uint8_t			   *bits,
-		uint16_t			count)
+/*
+ * Batch encode implementation — always_inline so that the specialized
+ * wrappers below pass a static const MktVectorTypeOps from the header,
+ * enabling the compiler to inline through every vtable function pointer.
+ * MKT_TARGET_CLONES on the wrappers generates AVX2/AVX-512 variants.
+ *
+ * For f32 input, to_float_block returns the input pointer (zero-copy).
+ * For f16, it bulk-converts all vectors in one SIMD-dispatched call.
+ * Bulk conversion via to_float_block amortizes call overhead for f16
+ * (one SIMD-dispatched call vs N per-vector calls).
+ */
+__attribute__((always_inline)) static inline int
+rabitq_encode_batch_impl(
+		const RaBitQParams	   *params,
+		const void			   *vectors,
+		VectorRef				centroid,
+		float				   *f_add,
+		float				   *f_rescale,
+		uint8_t				   *bits,
+		uint16_t				count,
+		const MktVectorTypeOps *ops)
 {
-	if (params == NULL || vectors == NULL || centroid.data == NULL ||
-		f_add == NULL || f_rescale == NULL || bits == NULL || count == 0)
-		return -1;
-
-	if (centroid.dim != params->dim)
-		return -1;
-
 	Dimension dim		   = params->dim;
 	uint32_t  packed_bytes = params->packed_bytes;
+
+	/* Bulk-convert to f32 if needed. For f32, returns input pointer
+	 * (zero-copy). For f16, converts into conv_buf via SIMD. */
+	float *conv_buf =
+			mkt_alloc_aligned((size_t)count * dim * sizeof(float), 64);
+	const float *fvecs = ops->to_float_block(vectors, conv_buf, count, dim);
 
 	/* Allocate batch buffers */
 	float *residuals =
@@ -486,13 +499,14 @@ mkt_rabitq_encode_batch(
 			mkt_free_aligned(transformed);
 		if (cent_rotated)
 			mkt_free_aligned(cent_rotated);
+		mkt_free_aligned(conv_buf);
 		return -1;
 	}
 
 	/* Step 1: Compute all residuals = vectors[i] - centroid */
 	for (uint16_t i = 0; i < count; i++)
 	{
-		const float *vec = vectors + i * dim;
+		const float *vec = fvecs + i * dim;
 		float		*res = residuals + i * dim;
 		mkt_vector_sub(vec, centroid.data, res, dim);
 	}
@@ -556,8 +570,111 @@ mkt_rabitq_encode_batch(
 	mkt_free_aligned(residuals);
 	mkt_free_aligned(transformed);
 	mkt_free_aligned(cent_rotated);
+	mkt_free_aligned(conv_buf);
 
 	return 0;
+}
+
+/* Specialized wrappers — MKT_TARGET_CLONES generates SIMD variants */
+
+MKT_TARGET_CLONES static int
+rabitq_encode_batch_f32(
+		const RaBitQParams *params,
+		const void		   *vectors,
+		VectorRef			centroid,
+		float			   *f_add,
+		float			   *f_rescale,
+		uint8_t			   *bits,
+		uint16_t			count)
+{
+	return rabitq_encode_batch_impl(
+			params,
+			vectors,
+			centroid,
+			f_add,
+			f_rescale,
+			bits,
+			count,
+			&mkt_f32_type_ops);
+}
+
+MKT_TARGET_CLONES static int
+rabitq_encode_batch_f16(
+		const RaBitQParams *params,
+		const void		   *vectors,
+		VectorRef			centroid,
+		float			   *f_add,
+		float			   *f_rescale,
+		uint8_t			   *bits,
+		uint16_t			count)
+{
+	return rabitq_encode_batch_impl(
+			params,
+			vectors,
+			centroid,
+			f_add,
+			f_rescale,
+			bits,
+			count,
+			&mkt_f16_type_ops);
+}
+
+#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
+MKT_TARGET_F16C_AVX2 static int
+rabitq_encode_batch_f16c(
+		const RaBitQParams *params,
+		const void		   *vectors,
+		VectorRef			centroid,
+		float			   *f_add,
+		float			   *f_rescale,
+		uint8_t			   *bits,
+		uint16_t			count)
+{
+	return rabitq_encode_batch_impl(
+			params,
+			vectors,
+			centroid,
+			f_add,
+			f_rescale,
+			bits,
+			count,
+			&mkt_f16c_type_ops);
+}
+#endif
+
+int
+mkt_rabitq_encode_batch(
+		const RaBitQParams *params,
+		const void		   *vectors,
+		MktVecType			vec_type,
+		VectorRef			centroid,
+		float			   *f_add,
+		float			   *f_rescale,
+		uint8_t			   *bits,
+		uint16_t			count)
+{
+	if (params == NULL || vectors == NULL || centroid.data == NULL ||
+		f_add == NULL || f_rescale == NULL || bits == NULL || count == 0)
+		return -1;
+
+	if (centroid.dim != params->dim)
+		return -1;
+
+	/* Single dispatch point — selects the inline vtable once */
+	switch (vec_type)
+	{
+	case MKT_VEC_F32:
+		return rabitq_encode_batch_f32(
+				params, vectors, centroid, f_add, f_rescale, bits, count);
+#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
+	case MKT_VEC_F16C:
+		return rabitq_encode_batch_f16c(
+				params, vectors, centroid, f_add, f_rescale, bits, count);
+#endif
+	default:
+		return rabitq_encode_batch_f16(
+				params, vectors, centroid, f_add, f_rescale, bits, count);
+	}
 }
 
 /*
@@ -610,7 +727,8 @@ mkt_rabitq_batch_destroy(RaBitQBatch *batch)
 RaBitQBatch *
 mkt_rabitq_encode_batch_alloc(
 		const RaBitQParams *params,
-		const float		   *vectors,
+		const void		   *vectors,
+		MktVecType			vec_type,
 		VectorRef			centroid,
 		uint16_t			count)
 {
@@ -625,6 +743,7 @@ mkt_rabitq_encode_batch_alloc(
 	if (mkt_rabitq_encode_batch(
 				params,
 				vectors,
+				vec_type,
 				centroid,
 				batch->f_add,
 				batch->f_rescale,

@@ -34,6 +34,7 @@
 
 #include "algo/kmeans_lloyd.h"
 #include "algo/vecops.h"
+#include "mkt_halfvec.h"
 
 /*
  * Precompute ||c||² for all centroids (L2 only).
@@ -57,15 +58,22 @@ precompute_norms_c(KMeansState *st)
  * For cos: dist[i][j] = 1 - ⟨x_i, c_j⟩
  */
 #ifdef MKT_HAVE_CBLAS
-static void
-lloyd_assign_block_cblas(
-		KMeansState *st, uint32_t block_start, uint32_t block_count)
+__attribute__((always_inline)) static inline void
+lloyd_assign_block_cblas_impl(
+		KMeansState			   *st,
+		uint32_t				block_start,
+		uint32_t				block_count,
+		const MktVectorTypeOps *ops)
 {
 	uint32_t nlist = st->nlist;
 	uint32_t dim   = st->dim;
 	float	*dist  = st->dist_block;
 
-	const float *block_vecs = st->vectors + (size_t)block_start * dim;
+	/* Get float32 view of this block (zero-copy for f32, converts for f16) */
+	const void *raw = (const char *)st->vectors +
+					  (size_t)block_start * dim * ops->element_size;
+	const float *block_vecs =
+			ops->to_float_block(raw, st->vec_block, block_count, dim);
 
 	/* Compute dot products via sgemm */
 	float alpha = -2.0f;
@@ -130,6 +138,32 @@ lloyd_assign_block_cblas(
 		st->total_cost += min_dist;
 	}
 }
+
+static void
+lloyd_assign_block_cblas_f32(
+		KMeansState *st, uint32_t block_start, uint32_t block_count)
+{
+	lloyd_assign_block_cblas_impl(
+			st, block_start, block_count, &mkt_f32_type_ops);
+}
+
+static void
+lloyd_assign_block_cblas_f16(
+		KMeansState *st, uint32_t block_start, uint32_t block_count)
+{
+	lloyd_assign_block_cblas_impl(
+			st, block_start, block_count, &mkt_f16_type_ops);
+}
+
+#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
+static void
+lloyd_assign_block_cblas_f16c(
+		KMeansState *st, uint32_t block_start, uint32_t block_count)
+{
+	lloyd_assign_block_cblas_impl(
+			st, block_start, block_count, &mkt_f16c_type_ops);
+}
+#endif
 #endif /* MKT_HAVE_CBLAS */
 
 /*
@@ -167,24 +201,16 @@ lloyd_compute_dot_products(
 }
 
 /*
- * Assignment step: builtin fallback for one block.
- *
- * Uses batch dot-product + norm decomposition (same approach as CBLAS
- * path) to eliminate per-vector function pointer dispatch overhead.
+ * Convert dot products to distances and find argmin per row.
  */
 static void
-lloyd_assign_block_builtin(
-		KMeansState *st, uint32_t block_start, uint32_t block_count)
+lloyd_dots_to_assignments(
+		KMeansState *st,
+		float		*dist,
+		uint32_t	 block_start,
+		uint32_t	 block_count)
 {
 	uint32_t nlist = st->nlist;
-	uint32_t dim   = st->dim;
-	float	*dist  = st->dist_block;
-
-	const float *block_vecs = st->vectors + (size_t)block_start * dim;
-
-	/* Compute all dot products in one batch */
-	lloyd_compute_dot_products(
-			block_vecs, st->centroids, dist, block_count, nlist, dim);
 
 	/* Convert dot products to distances based on metric */
 	switch (st->metric)
@@ -243,6 +269,51 @@ lloyd_assign_block_builtin(
 	}
 }
 
+/*
+ * Assignment step: builtin fallback for one block.
+ *
+ * For f32 input: uses batch dot-product + norm decomposition.
+ * For f16 input: preconverts block to f32, then uses the same f32 kernel.
+ */
+static void
+lloyd_assign_block_builtin_f32(
+		KMeansState *st, uint32_t block_start, uint32_t block_count)
+{
+	uint32_t nlist = st->nlist;
+	uint32_t dim   = st->dim;
+	float	*dist  = st->dist_block;
+
+	const float *block_vecs = (const float *)st->vectors +
+							  (size_t)block_start * dim;
+	lloyd_compute_dot_products(
+			block_vecs, st->centroids, dist, block_count, nlist, dim);
+	lloyd_dots_to_assignments(st, dist, block_start, block_count);
+}
+
+static void
+lloyd_assign_block_builtin_f16(
+		KMeansState *st, uint32_t block_start, uint32_t block_count)
+{
+	uint32_t nlist = st->nlist;
+	uint32_t dim   = st->dim;
+
+	/* Preconvert f16 block to f32 — O(block*dim), saves O(block*K*dim) */
+	const half *src = (const half *)st->vectors + (size_t)block_start * dim;
+	mkt_half_to_float_array(src, st->vec_block, block_count * dim);
+
+	lloyd_compute_dot_products(
+			st->vec_block,
+			st->centroids,
+			st->dist_block,
+			block_count,
+			nlist,
+			dim);
+	lloyd_dots_to_assignments(st, st->dist_block, block_start, block_count);
+}
+
+/* Block assignment function pointer — selected once per lloyd_assign call */
+typedef void (*lloyd_block_fn)(KMeansState *, uint32_t, uint32_t);
+
 void
 lloyd_assign(KMeansState *st, bool use_cblas)
 {
@@ -252,20 +323,47 @@ lloyd_assign(KMeansState *st, bool use_cblas)
 	if (st->metric == DISTANCE_L2)
 		precompute_norms_c(st);
 
+	/* Single dispatch — select the right block function once */
+	lloyd_block_fn block_fn;
+
+#ifdef MKT_HAVE_CBLAS
+	if (use_cblas)
+	{
+		switch (st->vec_type)
+		{
+		case MKT_VEC_F32:
+			block_fn = lloyd_assign_block_cblas_f32;
+			break;
+#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
+		case MKT_VEC_F16C:
+			block_fn = lloyd_assign_block_cblas_f16c;
+			break;
+#endif
+		default:
+			block_fn = lloyd_assign_block_cblas_f16;
+			break;
+		}
+	}
+	else
+#endif
+	{
+		(void)use_cblas;
+		switch (st->vec_type)
+		{
+		case MKT_VEC_F32:
+			block_fn = lloyd_assign_block_builtin_f32;
+			break;
+		default:
+			block_fn = lloyd_assign_block_builtin_f16;
+			break;
+		}
+	}
+
 	for (uint32_t start = 0; start < st->nvecs; start += KMEANS_BLOCK_SIZE)
 	{
 		uint32_t count = st->nvecs - start;
 		if (count > KMEANS_BLOCK_SIZE)
 			count = KMEANS_BLOCK_SIZE;
-
-#ifdef MKT_HAVE_CBLAS
-		if (use_cblas)
-		{
-			lloyd_assign_block_cblas(st, start, count);
-			continue;
-		}
-#endif
-		(void)use_cblas; /* suppress unused warning when no CBLAS */
-		lloyd_assign_block_builtin(st, start, count);
+		block_fn(st, start, count);
 	}
 }

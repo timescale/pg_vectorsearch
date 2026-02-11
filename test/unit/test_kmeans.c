@@ -8,6 +8,7 @@
 #include "algo/kmeans.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
+#include "mkt_halfvec.h"
 #include "mkt_test.h"
 
 TEST_GROUP(KMeans);
@@ -108,7 +109,8 @@ TEST(basic_l2)
 	make_3_clusters(data, per_cluster, 42);
 
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	KMeansResult *res  = mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *res =
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "k-means should return a result");
 	ASSERT_EQ(3, res->nlist, "nlist should be 3");
@@ -149,7 +151,7 @@ TEST(basic_ip)
 
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	KMeansResult *res =
-			mkt_kmeans(data, nvecs, dim, 3, DISTANCE_INNER_PRODUCT, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_INNER_PRODUCT, &opts);
 
 	ASSERT_NOT_NULL(res, "k-means should return a result");
 	ASSERT_EQ(3, res->nlist, "nlist should be 3");
@@ -200,7 +202,7 @@ TEST(basic_cosine)
 
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	KMeansResult *res =
-			mkt_kmeans(data, nvecs, dim, 3, DISTANCE_COSINE, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_COSINE, &opts);
 
 	ASSERT_NOT_NULL(res, "k-means should return a result");
 
@@ -254,7 +256,8 @@ TEST(well_separated_clusters)
 	}
 
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	KMeansResult *res  = mkt_kmeans(data, nvecs, dim, 4, DISTANCE_L2, &opts);
+	KMeansResult *res =
+			mkt_kmeans_f32(data, nvecs, dim, 4, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "k-means should return a result");
 
@@ -279,8 +282,8 @@ TEST(deterministic_with_seed)
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	opts.seed		   = 99;
 
-	KMeansResult *r1 = mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts);
-	KMeansResult *r2 = mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r1 = mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r2 = mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(r1, "first run should succeed");
 	ASSERT_NOT_NULL(r2, "second run should succeed");
@@ -313,7 +316,7 @@ TEST(single_cluster)
 	/* Mean: (3, 4) */
 
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	KMeansResult *res  = mkt_kmeans(data, 3, 2, 1, DISTANCE_L2, &opts);
+	KMeansResult *res  = mkt_kmeans_f32(data, 3, 2, 1, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "should succeed");
 	ASSERT_EQ(1, res->nlist, "nlist=1");
@@ -333,7 +336,7 @@ TEST(nlist_equals_nvecs)
 	float data[] = {1.0f, 0.0f, 0.0f, 1.0f, -1.0f, 0.0f};
 
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	KMeansResult *res  = mkt_kmeans(data, 3, 2, 3, DISTANCE_L2, &opts);
+	KMeansResult *res  = mkt_kmeans_f32(data, 3, 2, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "should succeed");
 
@@ -384,7 +387,8 @@ TEST(empty_cluster_handling)
 	}
 
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	KMeansResult *res  = mkt_kmeans(data, nvecs, dim, 4, DISTANCE_L2, &opts);
+	KMeansResult *res =
+			mkt_kmeans_f32(data, nvecs, dim, 4, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "should handle empty clusters");
 
@@ -410,12 +414,14 @@ TEST(nredo_improves_cost)
 	KMeansOptions opts1 = MKT_KMEANS_OPTIONS_DEFAULT;
 	opts1.seed			= 42;
 	opts1.nredo			= 1;
-	KMeansResult *r1	= mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts1);
+	KMeansResult *r1 =
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts1);
 
 	KMeansOptions opts3 = MKT_KMEANS_OPTIONS_DEFAULT;
 	opts3.seed			= 42;
 	opts3.nredo			= 3;
-	KMeansResult *r3	= mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts3);
+	KMeansResult *r3 =
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts3);
 
 	ASSERT_NOT_NULL(r1, "nredo=1 should succeed");
 	ASSERT_NOT_NULL(r3, "nredo=3 should succeed");
@@ -449,12 +455,12 @@ TEST(cblas_builtin_match)
 	/* Force builtin */
 	mkt_kmeans_set_use_cblas(false);
 	KMeansResult *r_builtin =
-			mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	/* Force cblas (if available, otherwise same as builtin) */
 	mkt_kmeans_set_use_cblas(true);
 	KMeansResult *r_cblas =
-			mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	/* Restore */
 	mkt_kmeans_set_use_cblas(original);
@@ -490,23 +496,23 @@ TEST(null_inputs)
 	KMeansOptions opts	 = MKT_KMEANS_OPTIONS_DEFAULT;
 
 	ASSERT_NULL(
-			mkt_kmeans(NULL, 10, 2, 3, DISTANCE_L2, &opts),
+			mkt_kmeans_f32(NULL, 10, 2, 3, DISTANCE_L2, &opts),
 			"NULL vectors should return NULL");
 
 	ASSERT_NULL(
-			mkt_kmeans(data, 0, 2, 3, DISTANCE_L2, &opts),
+			mkt_kmeans_f32(data, 0, 2, 3, DISTANCE_L2, &opts),
 			"nvecs=0 should return NULL");
 
 	ASSERT_NULL(
-			mkt_kmeans(data, 1, 0, 3, DISTANCE_L2, &opts),
+			mkt_kmeans_f32(data, 1, 0, 3, DISTANCE_L2, &opts),
 			"dim=0 should return NULL");
 
 	ASSERT_NULL(
-			mkt_kmeans(data, 1, 2, 0, DISTANCE_L2, &opts),
+			mkt_kmeans_f32(data, 1, 2, 0, DISTANCE_L2, &opts),
 			"nlist=0 should return NULL");
 
 	/* NULL options should use defaults (not crash) */
-	KMeansResult *r = mkt_kmeans(data, 1, 2, 1, DISTANCE_L2, NULL);
+	KMeansResult *r = mkt_kmeans_f32(data, 1, 2, 1, DISTANCE_L2, NULL);
 	ASSERT_NOT_NULL(r, "NULL options should use defaults");
 	mkt_kmeans_result_destroy(r);
 }
@@ -543,7 +549,7 @@ TEST_PARAMETERIZED(dims, "4", "16", "64", "128")
 
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	KMeansResult *res =
-			mkt_kmeans(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "should succeed");
 	ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
@@ -572,7 +578,8 @@ TEST(max_iterations_respected)
 	opts.max_iterations = 1;
 	opts.tolerance		= 0.0f; /* never converge early */
 
-	KMeansResult *res = mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *res =
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "should succeed with 1 iteration");
 	/* Just verify it completed without crash */
@@ -616,7 +623,8 @@ TEST_PARAMETERIZED(algo_l2, "lloyd", "hamerly", "elkan")
 	opts.algorithm	   = algos[iteration];
 	opts.seed		   = 42;
 
-	KMeansResult *res = mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *res =
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "algorithm should return result");
 	ASSERT_EQ(3, res->nlist, "nlist should be 3");
@@ -670,7 +678,7 @@ TEST(algo_all_valid)
 		opts.algorithm	   = algos[a];
 
 		KMeansResult *res =
-				mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+				mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 		ASSERT_NOT_NULL(res, "algorithm should succeed");
 		ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
@@ -703,7 +711,7 @@ TEST(lloyd_ip)
 	opts.algorithm	   = KMEANS_ALGO_LLOYD;
 
 	KMeansResult *res =
-			mkt_kmeans(data, nvecs, dim, 3, DISTANCE_INNER_PRODUCT, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_INNER_PRODUCT, &opts);
 
 	ASSERT_NOT_NULL(res, "lloyd IP should succeed");
 
@@ -751,7 +759,7 @@ TEST(lloyd_cosine)
 	opts.algorithm	   = KMEANS_ALGO_LLOYD;
 
 	KMeansResult *res =
-			mkt_kmeans(data, nvecs, dim, 3, DISTANCE_COSINE, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_COSINE, &opts);
 
 	ASSERT_NOT_NULL(res, "lloyd cosine should succeed");
 
@@ -795,7 +803,7 @@ TEST_PARAMETERIZED(algo_non_l2_fallback, "hamerly_ip", "elkan_ip")
 
 	/* Should fall back to Lloyd for IP metric, not crash */
 	KMeansResult *res =
-			mkt_kmeans(data, nvecs, dim, 3, DISTANCE_INNER_PRODUCT, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_INNER_PRODUCT, &opts);
 
 	ASSERT_NOT_NULL(res, "fallback should succeed");
 
@@ -852,13 +860,13 @@ TEST(verbose_mode)
 
 	/* Test verbose for each algorithm */
 	opts.algorithm	 = KMEANS_ALGO_LLOYD;
-	KMeansResult *r1 = mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r1 = mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	opts.algorithm	 = KMEANS_ALGO_HAMERLY;
-	KMeansResult *r2 = mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r2 = mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	opts.algorithm	 = KMEANS_ALGO_ELKAN;
-	KMeansResult *r3 = mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r3 = mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	fclose(stderr);
 	stderr = saved;
@@ -906,7 +914,7 @@ TEST(hamerly_higher_dim)
 	opts.algorithm	   = KMEANS_ALGO_HAMERLY;
 
 	KMeansResult *res =
-			mkt_kmeans(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "hamerly higher dim should succeed");
 	ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
@@ -953,7 +961,7 @@ TEST(elkan_higher_dim)
 	opts.algorithm	   = KMEANS_ALGO_ELKAN;
 
 	KMeansResult *res =
-			mkt_kmeans(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "elkan higher dim should succeed");
 	ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
@@ -1010,8 +1018,10 @@ TEST_PARAMETERIZED(algo_nredo, "hamerly", "elkan")
 	opts3.seed			= 42;
 	opts3.nredo			= 3;
 
-	KMeansResult *r1 = mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts1);
-	KMeansResult *r3 = mkt_kmeans(data, nvecs, dim, 3, DISTANCE_L2, &opts3);
+	KMeansResult *r1 =
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts1);
+	KMeansResult *r3 =
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts3);
 
 	ASSERT_NOT_NULL(r1, "nredo=1 should succeed");
 	ASSERT_NOT_NULL(r3, "nredo=3 should succeed");
@@ -1059,7 +1069,7 @@ TEST(hamerly_many_clusters)
 	opts.algorithm	   = KMEANS_ALGO_HAMERLY;
 
 	KMeansResult *res =
-			mkt_kmeans(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "hamerly many clusters should succeed");
 
@@ -1123,7 +1133,7 @@ TEST_PARAMETERIZED(algo_overlapping, "hamerly", "elkan")
 	opts.max_iterations = 20;
 
 	KMeansResult *res =
-			mkt_kmeans(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "overlapping should succeed");
 	ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
@@ -1170,7 +1180,7 @@ TEST(elkan_many_clusters)
 	opts.algorithm	   = KMEANS_ALGO_ELKAN;
 
 	KMeansResult *res =
-			mkt_kmeans(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			mkt_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "elkan many clusters should succeed");
 
@@ -1186,5 +1196,170 @@ TEST(elkan_many_clusters)
 			"at least 90% correct for hypercube corners");
 
 	mkt_kmeans_result_destroy(res);
+	mkt_free(data);
+}
+
+/*
+ * Helper: convert f32 data to f16.
+ */
+static half *
+make_f16_data(const float *f32, uint32_t count, Dimension dim)
+{
+	size_t n   = (size_t)count * dim;
+	half  *f16 = mkt_alloc(n * sizeof(half));
+	mkt_float_to_half_array(f32, f16, (uint32_t)n);
+	return f16;
+}
+
+/*
+ * f16 k-means with all three algorithms on well-separated clusters.
+ *
+ * Exercises the preconvert paths in Lloyd, Hamerly, and Elkan.
+ */
+TEST_PARAMETERIZED(f16_algo_l2, "lloyd", "hamerly", "elkan")
+{
+	KMeansAlgorithm algos[] = {
+			KMEANS_ALGO_LLOYD,
+			KMEANS_ALGO_HAMERLY,
+			KMEANS_ALGO_ELKAN,
+	};
+
+	uint32_t  per_cluster = 50;
+	uint32_t  nvecs		  = per_cluster * 3;
+	Dimension dim		  = 2;
+	float	  data[300];
+
+	make_3_clusters(data, per_cluster, 42);
+	half *f16 = make_f16_data(data, nvecs, dim);
+
+	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	opts.algorithm	   = algos[iteration];
+	opts.seed		   = 42;
+
+	KMeansResult *res =
+			mkt_kmeans(f16, MKT_VEC_F16, nvecs, dim, 3, DISTANCE_L2, &opts);
+
+	ASSERT_NOT_NULL(res, "f16 algorithm should return result");
+	ASSERT_EQ(3, res->nlist, "nlist should be 3");
+	ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
+
+	uint32_t total_f16 = 0;
+	for (uint32_t j = 0; j < 3; j++)
+	{
+		ASSERT_TRUE(
+				res->cluster_sizes[j] > 0, "each cluster should have vectors");
+		total_f16 += res->cluster_sizes[j];
+	}
+	ASSERT_EQ(nvecs, total_f16, "total should equal nvecs");
+
+	uint32_t correct_f16 =
+			count_correct_assignments(res->assignments, per_cluster, 3);
+	ASSERT_TRUE(
+			correct_f16 >= nvecs * 9 / 10,
+			"at least 90% correct for separated clusters");
+
+	mkt_kmeans_result_destroy(res);
+	mkt_free(f16);
+}
+
+/*
+ * f16 vs f32 should produce similar assignments.
+ *
+ * With well-separated clusters and the same seed, both should
+ * converge to the same clustering.
+ */
+TEST(f16_matches_f32)
+{
+	uint32_t  per_cluster = 50;
+	uint32_t  nvecs		  = per_cluster * 3;
+	Dimension dim		  = 2;
+	float	  data[300];
+
+	make_3_clusters(data, per_cluster, 42);
+	half *f16 = make_f16_data(data, nvecs, dim);
+
+	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	opts.seed		   = 42;
+
+	KMeansResult *r32 =
+			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r16 =
+			mkt_kmeans(f16, MKT_VEC_F16, nvecs, dim, 3, DISTANCE_L2, &opts);
+
+	ASSERT_NOT_NULL(r32, "f32 should succeed");
+	ASSERT_NOT_NULL(r16, "f16 should succeed");
+
+	/* Same seed + well-separated: assignments should match */
+	for (uint32_t i = 0; i < nvecs; i++)
+	{
+		ASSERT_EQ(
+				r32->assignments[i],
+				r16->assignments[i],
+				"f16 and f32 assignments should match");
+	}
+
+	/* Costs should be close (f16 has quantization noise) */
+	ASSERT_FLOAT_EQ(
+			r32->total_cost,
+			r16->total_cost,
+			r32->total_cost * 0.01f,
+			"f16 cost should be within 1% of f32");
+
+	mkt_kmeans_result_destroy(r32);
+	mkt_kmeans_result_destroy(r16);
+	mkt_free(f16);
+}
+
+/*
+ * f16 Hamerly/Elkan with overlapping clusters.
+ *
+ * Exercises bound-violation paths in the preconvert impls where
+ * vectors near decision boundaries need full distance recomputation.
+ */
+TEST_PARAMETERIZED(f16_algo_overlapping, "hamerly", "elkan")
+{
+	KMeansAlgorithm algos[] = {
+			KMEANS_ALGO_HAMERLY,
+			KMEANS_ALGO_ELKAN,
+	};
+
+	uint32_t  nvecs = 200;
+	uint32_t  nlist = 5;
+	Dimension dim	= 8;
+	float	 *data	= mkt_alloc((size_t)nvecs * dim * sizeof(float));
+
+	uint32_t rng = 12345;
+	for (uint32_t i = 0; i < nvecs; i++)
+	{
+		uint32_t c = i % nlist;
+		for (uint32_t d = 0; d < dim; d++)
+		{
+			rng			 = rng * 1103515245 + 12345;
+			float noise	 = ((float)(rng % 10000) / 5000.0f - 1.0f) * 2.0f;
+			float center = (d == c) ? 3.0f : 0.0f;
+			data[(size_t)i * dim + d] = center + noise;
+		}
+	}
+
+	half *f16 = make_f16_data(data, nvecs, dim);
+
+	KMeansOptions opts	= MKT_KMEANS_OPTIONS_DEFAULT;
+	opts.algorithm		= algos[iteration];
+	opts.seed			= 42;
+	opts.max_iterations = 20;
+
+	KMeansResult *res = mkt_kmeans(
+			f16, MKT_VEC_F16, nvecs, dim, nlist, DISTANCE_L2, &opts);
+
+	ASSERT_NOT_NULL(res, "f16 overlapping should succeed");
+	ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
+
+	uint32_t total_f16 = 0;
+	for (uint32_t j = 0; j < nlist; j++)
+		total_f16 += res->cluster_sizes[j];
+	ASSERT_EQ(nvecs, total_f16, "all vectors assigned");
+
+	mkt_kmeans_result_destroy(res);
+	mkt_free(f16);
 	mkt_free(data);
 }

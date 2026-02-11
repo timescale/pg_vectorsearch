@@ -18,7 +18,9 @@
 #include "algo/vecops.h"
 #include "cmd.h"
 #include "core/memory.h"
+#include "core/platform.h"
 #include "kmeans_pgvector.h"
+#include "mkt_halfvec.h"
 #include "mkt_types.h"
 
 /* Default parameters */
@@ -47,6 +49,7 @@ typedef struct
 	DistanceMetric metric;
 	const char	  *impl;
 	const char	  *file;
+	const char	  *type; /* "f32" or "f16" */
 	bool		   help;
 	bool		   verify;
 } ClusterBenchConfig;
@@ -361,7 +364,10 @@ verify_against_ref(
  */
 static KMeansResult *
 run_bench(
-		const ClusterBenchConfig *cfg, const float *data, KMeansAlgorithm algo)
+		const ClusterBenchConfig *cfg,
+		const void				 *data,
+		MktVecType				  vec_type,
+		KMeansAlgorithm			  algo)
 {
 	const char	 *name	= mkt_kmeans_algo_name(algo);
 	KMeansOptions opts	= MKT_KMEANS_OPTIONS_DEFAULT;
@@ -372,7 +378,13 @@ run_bench(
 
 	uint64_t	  start = get_time_ns();
 	KMeansResult *res	= mkt_kmeans(
-			  data, cfg->nvecs, cfg->dim, cfg->nlist, cfg->metric, &opts);
+			  data,
+			  vec_type,
+			  cfg->nvecs,
+			  cfg->dim,
+			  cfg->nlist,
+			  cfg->metric,
+			  &opts);
 	uint64_t end = get_time_ns();
 
 	if (res == NULL)
@@ -483,6 +495,7 @@ print_usage(CmdContext *ctx)
 	printf("  --metric <str>     l2, ip, or cosine (default: l2)\n");
 	printf("  --file <path>      Load vectors from file or directory "
 		   "(DEFAULT int8 format)\n");
+	printf("  --type <str>       f32 or f16 (default: f32)\n");
 	printf("  --impl <str>       all, cblas, lloyd, hamerly, "
 		   "elkan, or pgvector (default: all)\n");
 	printf("  --verify           Compare all algos against lloyd "
@@ -511,6 +524,7 @@ cmd_bench_cluster(CmdContext *ctx)
 			.seed	= 42,
 			.metric = DISTANCE_L2,
 			.impl	= NULL,
+			.type	= "f32",
 			.help	= false,
 	};
 
@@ -524,6 +538,7 @@ cmd_bench_cluster(CmdContext *ctx)
 			{"metric", required_argument, 0, 'm'},
 			{"impl", required_argument, 0, 'p'},
 			{"file", required_argument, 0, 'f'},
+			{"type", required_argument, 0, 't'},
 			{"verify", no_argument, 0, 'v'},
 			{"help", no_argument, 0, 'h'},
 			{0, 0, 0, 0},
@@ -535,7 +550,7 @@ cmd_bench_cluster(CmdContext *ctx)
 	while ((opt = getopt_long(
 					ctx->argc,
 					ctx->argv,
-					"d:n:k:i:r:s:m:p:f:vh",
+					"d:n:k:i:r:s:m:p:f:t:vh",
 					long_options,
 					NULL)) != -1)
 	{
@@ -567,6 +582,9 @@ cmd_bench_cluster(CmdContext *ctx)
 			break;
 		case 'f':
 			cfg.file = optarg;
+			break;
+		case 't':
+			cfg.type = optarg;
 			break;
 		case 'v':
 			cfg.verify = true;
@@ -634,11 +652,40 @@ cmd_bench_cluster(CmdContext *ctx)
 	if (cfg.metric == DISTANCE_COSINE)
 		normalize_vectors(data, cfg.nvecs, cfg.dim);
 
-	uint64_t data_bytes = (uint64_t)cfg.nvecs * cfg.dim * sizeof(float);
-	double	 size_mb	= (double)data_bytes / (1024.0 * 1024.0);
-	printf("K-means clustering (%s, dim=%u, nvecs=%u, nlist=%u, "
+	/* Determine type and optionally convert to f16 */
+	bool use_f16 = cfg.type != NULL && strcmp(cfg.type, "f16") == 0;
+	if (cfg.type != NULL && strcmp(cfg.type, "f32") != 0 && !use_f16)
+	{
+		fprintf(stderr, "Error: --type must be f32 or f16\n");
+		mkt_free(data);
+		return 1;
+	}
+
+	MktVecType	vec_type   = MKT_VEC_F32;
+	const void *bench_data = data;
+	half	   *data_f16   = NULL;
+
+	if (use_f16)
+	{
+		size_t n_elems = (size_t)cfg.nvecs * cfg.dim;
+		data_f16	   = mkt_alloc(n_elems * sizeof(half));
+		mkt_float_to_half_array(data, data_f16, (uint32_t)n_elems);
+		bench_data = data_f16;
+#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
+		vec_type = (mkt_detect_simd() & SIMD_AVX2) ? MKT_VEC_F16C
+												   : MKT_VEC_F16;
+#else
+		vec_type = MKT_VEC_F16;
+#endif
+	}
+
+	size_t elem_size = mkt_vec_element_size(vec_type);
+	double size_mb	 = (double)cfg.nvecs * cfg.dim * elem_size /
+					 (1024.0 * 1024.0);
+	printf("K-means clustering (%s, %s, dim=%u, nvecs=%u, nlist=%u, "
 		   "%.1f MB):\n",
 		   metric_name(cfg.metric),
+		   mkt_vec_type_name(vec_type),
 		   cfg.dim,
 		   cfg.nvecs,
 		   cfg.nlist,
@@ -658,7 +705,8 @@ cmd_bench_cluster(CmdContext *ctx)
 
 	if (run_all || (cfg.impl != NULL && strcmp(cfg.impl, "cblas") == 0))
 	{
-		KMeansResult *r = run_bench(&cfg, data, KMEANS_ALGO_CBLAS);
+		KMeansResult *r =
+				run_bench(&cfg, bench_data, vec_type, KMEANS_ALGO_CBLAS);
 		if (cfg.verify && r != NULL)
 			results[nresults++] = (typeof(results[0])){r, "lloyd(cblas)"};
 		else
@@ -671,7 +719,7 @@ cmd_bench_cluster(CmdContext *ctx)
 	if (cfg.verify || run_all ||
 		(cfg.impl != NULL && strcmp(cfg.impl, "lloyd") == 0))
 	{
-		ref = run_bench(&cfg, data, KMEANS_ALGO_LLOYD);
+		ref = run_bench(&cfg, bench_data, vec_type, KMEANS_ALGO_LLOYD);
 		if (cfg.verify && ref != NULL)
 			ref_cost = recompute_exact_cost(
 					data, ref, cfg.nvecs, cfg.dim, cfg.metric);
@@ -684,7 +732,8 @@ cmd_bench_cluster(CmdContext *ctx)
 
 	if (run_all || (cfg.impl != NULL && strcmp(cfg.impl, "hamerly") == 0))
 	{
-		KMeansResult *r = run_bench(&cfg, data, KMEANS_ALGO_HAMERLY);
+		KMeansResult *r =
+				run_bench(&cfg, bench_data, vec_type, KMEANS_ALGO_HAMERLY);
 		if (cfg.verify && r != NULL)
 			results[nresults++] = (typeof(results[0])){r, "hamerly"};
 		else
@@ -693,7 +742,8 @@ cmd_bench_cluster(CmdContext *ctx)
 
 	if (run_all || (cfg.impl != NULL && strcmp(cfg.impl, "elkan") == 0))
 	{
-		KMeansResult *r = run_bench(&cfg, data, KMEANS_ALGO_ELKAN);
+		KMeansResult *r =
+				run_bench(&cfg, bench_data, vec_type, KMEANS_ALGO_ELKAN);
 		if (cfg.verify && r != NULL)
 			results[nresults++] = (typeof(results[0])){r, "elkan"};
 		else
@@ -732,6 +782,7 @@ cmd_bench_cluster(CmdContext *ctx)
 		mkt_kmeans_result_destroy(ref);
 	}
 
+	mkt_free(data_f16);
 	mkt_free(data);
 	return 0;
 }

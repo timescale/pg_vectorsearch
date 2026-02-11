@@ -33,6 +33,13 @@
 #mesondefine MKT_SANITIZER
 
 /*
+ * F16C support: hardware half-precision ↔ float conversion. When defined,
+ * mkt_half_to_float() compiles to a single vcvtsh2ss instruction instead of
+ * a software fallback, enabling efficient inline f16 conversion in hot loops.
+ */
+#mesondefine MKT_HAVE_F16C
+
+/*
  * CBLAS support: enables optimized matrix multiplication via BLAS library.
  * When available, batch encoding uses cblas_sgemm for ~4x speedup.
  */
