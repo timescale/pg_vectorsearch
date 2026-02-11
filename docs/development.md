@@ -320,3 +320,81 @@ The project uses GitHub Actions for CI with the following workflows:
 | `coverage.yml` | Push, PR | Coverage report, upload to Codecov |
 | `lint.yml` | Push, PR | Format check and clang-tidy |
 | `codeql.yml` | Push, PR, Weekly | GitHub CodeQL static analysis |
+
+## Design Patterns
+
+### Config-Based Polymorphism (Vtable Inlining)
+
+Meerkat uses `MktVectorTypeOps` vtables for type-generic algorithms (k-means,
+RaBitQ) that work over both float32 and float16 input. Naive vtable dispatch
+through function pointers prevents inlining and auto-vectorization in hot loops,
+causing 10-15% overhead on inner loops like dot product.
+
+We use a pattern inspired by [WebKit's libpas allocator][libpas-docs] to get
+zero-cost polymorphism in C. The key insight: **dispatch once at the outer
+level, then use direct inline functions in the hot loop**.
+
+Three dispatch modes, from fastest to most flexible:
+
+| Mode | How | Use When |
+|------|-----|----------|
+| **Inlined** | Convert input to known type, call inline function directly | Hot inner loops (distance, dot product) |
+| **Specialized** | Call through vtable once per batch/iteration | Warm paths (norm precompute, centroid update) |
+| **Virtual** | Call through vtable per element | Cold paths, or when conversion is too expensive |
+
+#### Example: k-means Assignment
+
+The assignment inner loop computes dot products between every vector and every
+centroid. This is the hottest code in k-means.
+
+**Bad** — virtual dispatch per dot product (prevents vectorization):
+
+```c
+for (uint32_t i = 0; i < nvecs; i++) {
+    const void *v = vec_at(st, i);
+    for (uint32_t j = 0; j < nlist; j++) {
+        /* Function pointer call — not inlineable */
+        float dp = st->ops->dot_product(v, centroid[j], dim);
+        ...
+    }
+}
+```
+
+**Good** — convert once, inline the hot loop:
+
+```c
+/* Warm path: one vtable call per vector to get float32 view */
+const float *vf = st->ops->to_float_block(block, buf, count, dim);
+
+for (uint32_t i = 0; i < count; i++) {
+    for (uint32_t j = 0; j < nlist; j++) {
+        /* Direct inline call — compiler auto-vectorizes */
+        float dp = dot_product_f32(vf + i * dim, centroid[j], dim);
+        ...
+    }
+}
+```
+
+For float32 input, `to_float_block` returns the source pointer directly
+(zero-copy). For float16 input, it converts into a scratch buffer. Either way,
+the inner loop operates on `float *` with a direct function call that the
+compiler can inline and auto-vectorize with `MKT_TARGET_CLONES`.
+
+#### Why This Works
+
+The C compiler applies two optimizations when an `always_inline` function
+receives a compile-time-known function pointer to another `always_inline`
+function:
+
+1. **Inline the callee** — the function pointer call becomes a direct call
+2. **Copy-propagate** — constant arguments flow into the inlined body
+
+This is equivalent to C++ template monomorphization but without code bloat for
+cold paths. The libpas documentation calls this "specialization akin to template
+monomorphization."
+
+In our case, we achieve the same effect more simply: by converting to a known
+type at the batch boundary, the inner loop doesn't need function pointers at
+all — it just operates on `float *` directly.
+
+[libpas-docs]: https://github.com/WebKit/WebKit/blob/main/Source/bmalloc/libpas/Documentation.md#libpas-style
