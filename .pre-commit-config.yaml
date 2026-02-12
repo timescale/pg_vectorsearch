@@ -49,7 +49,8 @@ repos:
     rev: "v2.40.0"
     hooks:
       - id: squawk
-        files: ^test/(.+/)?sql/.*\.sql$
+        files: ^(sql|test/(.+/)?(sql|compat))/.*\.sql$
+        exclude: ^(sql/meerkat--|test/pg/compat/)
 
   # Markdown linting
   - repo: https://github.com/DavidAnson/markdownlint-cli2
