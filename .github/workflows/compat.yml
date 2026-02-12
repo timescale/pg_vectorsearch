@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: Compatibility
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'sql/**'
+      - '*.control'
+      - 'meson.build'
+      - 'meson_options.txt'
+      - 'test/pg/compat/**'
+      - 'scripts/ci/pgvector-compat.sh'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'sql/**'
+      - '*.control'
+      - 'meson.build'
+      - 'meson_options.txt'
+      - 'test/pg/compat/**'
+      - 'scripts/ci/pgvector-compat.sh'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pgvector:
+    name: pgvector compatibility
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: pgvector/pgvector
+          ref: v0.8.1
+          path: pgvector
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build gcc libgsl-dev
+
+      - name: Install PostgreSQL 18
+        run: |
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-18 postgresql-server-dev-18
+          echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
+
+      - name: Run pgvector compatibility tests
+        env:
+          PGVECTOR_DIR: pgvector
+        run: ./scripts/ci/pgvector-compat.sh
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
+        with:
+          name: test-logs-compat
+          path: |
+            builddir/meson-logs/
+            builddir/postgres-compat.log
+          retention-days: 7
