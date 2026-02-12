@@ -77,4 +77,8 @@ size_t	  mkt_memctx_total_allocated(MktMemCtx ctx);
 void mkt_memctx_register_reset_callback(
 		MktMemCtx ctx, MktMemCtxCallback *cb, void (*func)(void *), void *arg);
 
+/* Varlena compatibility macros (standalone: direct size field) */
+#define MKT_SET_VARSIZE(ptr, size) ((ptr)->vl_len_ = (int32_t)(size))
+#define MKT_VARSIZE(ptr)		   ((ptr)->vl_len_)
+
 #endif /* MKT_MEMORY_STANDALONE_H */

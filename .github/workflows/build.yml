@@ -9,6 +9,8 @@ on:
       - 'src/**'
       - 'include/**'
       - 'test/**'
+      - 'sql/**'
+      - '*.control'
       - 'meson.build'
       - 'meson_options.txt'
       - 'scripts/ci/build.sh'
@@ -18,6 +20,8 @@ on:
       - 'src/**'
       - 'include/**'
       - 'test/**'
+      - 'sql/**'
+      - '*.control'
       - 'meson.build'
       - 'meson_options.txt'
       - 'scripts/ci/build.sh'
@@ -31,7 +35,7 @@ permissions:
 
 jobs:
   build:
-    name: Build and Test (${{ matrix.os }} ${{ matrix.arch }})
+    name: ${{ matrix.os }} ${{ matrix.arch }}${{ matrix.standalone && ' (standalone)' || '' }}
     runs-on: ${{ matrix.runner }}
 
     strategy:
@@ -41,6 +45,10 @@ jobs:
           - runner: ubuntu-latest
             os: Linux
             arch: x64
+          - runner: ubuntu-latest
+            os: Linux
+            arch: x64
+            standalone: true
           - runner: ubuntu-24.04-arm
             os: Linux
             arch: arm64
@@ -63,17 +71,43 @@ jobs:
         if: runner.os == 'Linux' && matrix.arch == 'x64'
         run: sudo apt-get install -y libopenblas-dev
 
+      - name: Install PostgreSQL 18 (Linux)
+        if: runner.os == 'Linux' && !matrix.standalone
+        run: |
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-18 postgresql-server-dev-18
+          echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
+
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: brew install meson ninja gsl
 
+      - name: Install PostgreSQL 18 (macOS)
+        if: runner.os == 'macOS' && !matrix.standalone
+        run: |
+          brew install postgresql@18
+          echo "$(brew --prefix postgresql@18)/bin" >> "$GITHUB_PATH"
+
       - name: Build and test
-        run: ./scripts/ci/build.sh
+        env:
+          MESON_ARGS: ${{ matrix.standalone && '-Dpostgresql=disabled' || '-Dpostgresql=enabled' }}
+        run: ./scripts/ci/build.sh builddir $MESON_ARGS
+
+      - name: Show regression diffs
+        if: failure()
+        run: |
+          for f in builddir/test/pg/regression.diffs; do
+            [ -f "$f" ] && echo "=== $f ===" && cat "$f"
+          done
 
       - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
         with:
-          name: test-logs-${{ matrix.os }}-${{ matrix.arch }}
+          name: test-logs-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.standalone && '-standalone' || '' }}
           path: builddir/meson-logs/
           retention-days: 7

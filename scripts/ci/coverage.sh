@@ -1,17 +1,50 @@
 #!/bin/bash
 # Build with coverage and generate report
 # Usage: ./scripts/ci/coverage.sh [builddir]
+#
+# Environment variables:
+#   PG_CONFIG  - path to pg_config (default: auto-detect)
+#   CC         - C compiler (default: auto-detect from pg_config)
 
 set -euo pipefail
 
 BUILDDIR="${1:-builddir-cov}"
 
+# Detect pg_config and compiler
+PG_CONFIG="${PG_CONFIG:-$(command -v pg_config 2>/dev/null || true)}"
+MESON_PG_ARGS=()
+
+if [[ -n "$PG_CONFIG" ]]; then
+    PG_CC=$("$PG_CONFIG" --cc 2>/dev/null || true)
+    if [[ -n "$PG_CC" ]]; then
+        CC="${CC:-$PG_CC}"
+        export CC
+        echo "==> PostgreSQL compiler: $CC (from $PG_CONFIG)"
+        MESON_PG_ARGS+=("-Dpostgresql=enabled" "-Dpg_config=$PG_CONFIG")
+    else
+        echo "==> Warning: pg_config found but --cc failed, building without PG"
+        MESON_PG_ARGS+=("-Dpostgresql=disabled")
+    fi
+else
+    echo "==> No pg_config found, building without PostgreSQL extension"
+    MESON_PG_ARGS+=("-Dpostgresql=disabled")
+fi
+
 echo "==> Setting up coverage build: $BUILDDIR"
-meson setup "$BUILDDIR" -Db_coverage=true --wipe 2>/dev/null || \
-    meson setup "$BUILDDIR" -Db_coverage=true
+meson setup "$BUILDDIR" -Db_coverage=true "${MESON_PG_ARGS[@]}" --wipe 2>/dev/null || \
+    meson setup "$BUILDDIR" -Db_coverage=true "${MESON_PG_ARGS[@]}"
 
 echo "==> Building"
 meson compile -C "$BUILDDIR"
+
+# Install extension so regression tests can find it via --temp-instance
+if [[ ${#MESON_PG_ARGS[@]} -gt 0 && "${MESON_PG_ARGS[0]}" != "-Dpostgresql=disabled" ]]; then
+    echo "==> Installing extension (required for regression tests)"
+    if ! meson install -C "$BUILDDIR" 2>/dev/null; then
+        echo "    Retrying with sudo (system PostgreSQL)"
+        sudo meson install -C "$BUILDDIR"
+    fi
+fi
 
 echo "==> Running tests"
 TERM=xterm-256color meson test -C "$BUILDDIR" --verbose
@@ -99,8 +132,16 @@ case "$ARCH" in
         ;;
 esac
 
+# Select the right gcov tool to match the compiler
+GCOV_TOOL=()
+CC_BASE=$(basename "${CC:-cc}")
+if [[ "$CC_BASE" == clang* ]]; then
+    GCOV_TOOL=(--gcov-executable "llvm-cov gcov")
+fi
+
 # Generate coverage reports
 gcovr --root . --object-directory "$BUILDDIR" \
+    "${GCOV_TOOL[@]}" \
     "${GCOVR_EXCLUDES[@]}" \
     --txt "$LOGDIR/coverage.txt" \
     --xml "$LOGDIR/coverage.xml" \

@@ -9,8 +9,11 @@ search.
 
 Meerkat is a PostgreSQL extension that provides high-performance vector
 similarity search using an IVF (Inverted File) index structure with quantized
-vectors. It is inspired by [ScaNN][scann] and [SPANN][spann], and uses the
-vector type from [pgvector][pgvector].
+vectors. It is inspired by [ScaNN][scann] and [SPANN][spann].
+
+Meerkat provides its own `vector` and `halfvec` types that are binary-compatible
+with [pgvector][pgvector]. If pgvector is installed, its types and operators can
+be used interchangeably with meerkat's.
 
 ## Features
 
@@ -51,9 +54,10 @@ detailed specifications.
 ## Requirements
 
 - PostgreSQL 18+
-- [pgvector][pgvector] extension
 - C23 compiler (GCC 13+ or Clang 16+)
 - Meson build system
+- Optional: [pgvector][pgvector] for compatibility with existing pgvector
+  workflows
 
 ## Building
 
@@ -75,9 +79,15 @@ meson install -C builddir
 
 | Option | Values | Default | Description |
 |--------|--------|---------|-------------|
+| `postgresql` | `auto`, `enabled`, `disabled` | `auto` | Build PostgreSQL extension |
+| `pg_config` | path | (auto-detect) | Path to `pg_config` |
 | `simd` | `full`, `compiler`, `none` | `full` | SIMD implementation mode |
 | `native` | `true`, `false` | `false` | Use `-march=native` for local builds |
 | `blas` | `auto`, `enabled`, `disabled` | `auto` | CBLAS for matrix operations |
+
+Use `-Dpostgresql=enabled` to require the extension build (fails if PostgreSQL
+is not found). Use `-Dpostgresql=disabled` to build only the standalone library
+and CLI tools.
 
 ### Optional: BLAS Library
 
@@ -126,22 +136,21 @@ See [docs/simd.md][simd-doc] for SIMD build options and implementation details.
 ## Usage
 
 ```sql
--- Enable extensions
-CREATE EXTENSION vector;
+-- Enable extension
 CREATE EXTENSION meerkat;
 
 -- Create table with vector column
 CREATE TABLE items (
     id serial PRIMARY KEY,
-    embedding vector(768)
+    embedding mkt.vector(768)
 );
 
 -- Create Meerkat index
-CREATE INDEX ON items USING meerkat (embedding vector_l2_ops);
+CREATE INDEX ON items USING meerkat (embedding mkt.vector_l2_ops);
 
 -- Query nearest neighbors
 SELECT * FROM items
-ORDER BY embedding <-> '[...]'::vector
+ORDER BY embedding <-> '[...]'::mkt.vector
 LIMIT 10;
 ```
 

@@ -30,6 +30,8 @@
 #ifndef MKT_DISTANCE_H
 #define MKT_DISTANCE_H
 
+#include "mkt_config.h"
+
 #include "mkt_types.h"
 
 /*

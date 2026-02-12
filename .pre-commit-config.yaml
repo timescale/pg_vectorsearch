@@ -16,7 +16,7 @@ repos:
         entry: clang-tidy
         language: system
         files: ^src/.*\.c$
-        exclude: ^src/algo/distance_(avx2|avx512|neon)\.c$
+        exclude: ^(src/algo/distance_(avx2|avx512|neon)\.c|src/pg/.*)$
         args: [-p=builddir, --config-file=.clang-tidy]
         pass_filenames: true
         require_serial: true
@@ -34,15 +34,22 @@ repos:
     rev: v4.5.0
     hooks:
       - id: trailing-whitespace
-        exclude: (\.patch$|test/expected/.*\.out$|test/sql/.*\.sql$)
+        exclude: (\.patch$|test/(.+/)?expected/.*\.out$|test/(.+/)?sql/.*\.sql$)
       - id: end-of-file-fixer
-        exclude: \.patch$
+        exclude: (\.patch$|test/(.+/)?expected/.*\.out$)
       - id: check-yaml
       - id: check-added-large-files
         args: ["--maxkb=500"]
       - id: check-merge-conflict
       - id: check-executables-have-shebangs
       - id: mixed-line-ending
+
+  # SQL linting (uses libpg_query — real PostgreSQL parser)
+  - repo: https://github.com/sbdchd/squawk
+    rev: "v2.40.0"
+    hooks:
+      - id: squawk
+        files: ^test/(.+/)?sql/.*\.sql$
 
   # Markdown linting
   - repo: https://github.com/DavidAnson/markdownlint-cli2

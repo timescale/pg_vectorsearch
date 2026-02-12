@@ -11,8 +11,16 @@ BUILDDIR="builddir-san-${SANITIZER//,/-}"
 echo "==> Setting up sanitizer build: $SANITIZER"
 echo "    Build directory: $BUILDDIR"
 
-meson setup "$BUILDDIR" -Db_sanitize="$SANITIZER" --wipe 2>/dev/null || \
-    meson setup "$BUILDDIR" -Db_sanitize="$SANITIZER"
+# Disable PostgreSQL extension: a sanitizer-instrumented shared library
+# cannot be loaded into a non-instrumented PostgreSQL backend without
+# runtime conflicts (ASan/UBSan expect to initialize before main()).
+meson setup "$BUILDDIR" \
+    -Db_sanitize="$SANITIZER" \
+    -Dpostgresql=disabled \
+    --wipe 2>/dev/null || \
+    meson setup "$BUILDDIR" \
+        -Db_sanitize="$SANITIZER" \
+        -Dpostgresql=disabled
 
 echo "==> Building"
 meson compile -C "$BUILDDIR"

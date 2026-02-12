@@ -11,6 +11,7 @@
 #include <postgres.h>
 
 #include <utils/memutils.h>
+#include <varatt.h>
 
 typedef MemoryContext		  MktMemCtx;
 typedef MemoryContextCallback MktMemCtxCallback;
@@ -46,5 +47,9 @@ typedef MemoryContextCallback MktMemCtxCallback;
 		(cb)->arg  = (arg_ptr);                                        \
 		MemoryContextRegisterResetCallback((ctx), (cb));               \
 	} while (0)
+
+/* Varlena macros (PG: SET_VARSIZE handles TOAST flag bits) */
+#define MKT_SET_VARSIZE(ptr, size) SET_VARSIZE(ptr, size)
+#define MKT_VARSIZE(ptr)		   VARSIZE(ptr)
 
 #endif /* MKT_MEMORY_PG_H */
