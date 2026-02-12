@@ -26,9 +26,9 @@ mkt_vector_create(Dimension dim)
 	if (v == NULL)
 		return NULL;
 
-	v->vl_len_ = (int32_t)size; /* Store size directly in standalone mode */
-	v->dim	   = (int16_t)dim;
-	v->unused  = 0;
+	MKT_SET_VARSIZE(v, size);
+	v->dim	  = (int16_t)dim;
+	v->unused = 0;
 
 	return v;
 }

@@ -122,8 +122,8 @@ mkt_halfvec_create(Dimension dim)
 	if (v == NULL)
 		return NULL;
 
-	v->vl_len_ = (int32_t)size;
-	v->dim	   = (int16_t)dim;
+	MKT_SET_VARSIZE(v, size);
+	v->dim = (int16_t)dim;
 	return v;
 }
 

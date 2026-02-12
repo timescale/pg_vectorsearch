@@ -1,0 +1,5 @@
+comment = 'Meerkat: ANN vector search for PostgreSQL'
+default_version = '0.1.0'
+module_pathname = '$libdir/meerkat'
+relocatable = false
+schema = 'mkt'

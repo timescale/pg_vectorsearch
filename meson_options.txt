@@ -37,3 +37,24 @@ option('faiss',
   Requires FAISS built with the C API patch from third-party/faiss-rabitq-c-api.patch.
   See third-party/README.md for build instructions.'''
 )
+
+option('postgresql',
+  type: 'feature',
+  value: 'auto',
+  description: '''Build meerkat PostgreSQL extension.
+  - auto: detect and build if PostgreSQL is available (default)
+  - enabled: require PostgreSQL, fail if not found
+  - disabled: never build the extension'''
+)
+
+option('pg_config',
+  type: 'string',
+  value: '',
+  description: 'Path to pg_config (auto-detected if not specified)'
+)
+
+option('pg_srcdir',
+  type: 'string',
+  value: '',
+  description: 'Path to PostgreSQL source directory (for internal headers)'
+)

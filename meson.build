@@ -14,10 +14,9 @@ cc = meson.get_compiler('c')
 simd_mode = get_option('simd')
 use_native = get_option('native')
 
-# Common flags
+# Common flags (MKT_STANDALONE added per-target, not globally)
 add_project_arguments(
   '-D_GNU_SOURCE',
-  '-DMKT_STANDALONE',
   language: 'c',
 )
 
@@ -305,6 +304,7 @@ mkt_all_sources = mkt_core_sources + simd_sources
 # This avoids the 5-10% overhead from static library compilation
 mkt_core_dep = declare_dependency(
   sources: mkt_all_sources,
+  compile_args: ['-DMKT_STANDALONE'],
   link_with: simd_libs,
   include_directories: src_inc,
   dependencies: [m_dep] + (have_cblas ? [cblas_dep] : []),
@@ -346,6 +346,161 @@ mkt_symlink = custom_target('mkt-symlink',
 
 # Unit tests
 subdir('test/unit')
+
+# ============================================================================
+# PostgreSQL extension
+# ============================================================================
+
+opt_postgresql = get_option('postgresql')
+pg_required = opt_postgresql.enabled()
+
+build_pg_extension = false
+
+if not opt_postgresql.disabled()
+  pg_config_path = get_option('pg_config')
+  if pg_config_path != ''
+    pg_config = find_program(pg_config_path, required: true)
+  else
+    pg_config = find_program('pg_config', required: pg_required)
+  endif
+
+  if pg_config.found()
+    build_pg_extension = true
+  elif not pg_required
+    warning('pg_config not found. PostgreSQL extension will not be built.')
+    warning('Install PostgreSQL or set -Dpg_config=/path/to/pg_config')
+  endif
+endif
+
+# Verify compiler family matches pg_config --cc
+# Run the PG compiler with --version to identify it (gcc vs clang),
+# rather than comparing binary names which vary across systems
+# (cc, gcc, gcc-13, x86_64-linux-gnu-gcc, etc.)
+if build_pg_extension
+  pg_cc = run_command(pg_config, '--cc', check: true).stdout().strip()
+  pg_cc_version = run_command('sh', '-c', pg_cc + ' --version 2>&1 || true',
+    check: true).stdout().to_lower()
+
+  if pg_cc_version.contains('clang')
+    pg_compiler_id = 'clang'
+  else
+    pg_compiler_id = 'gcc'
+  endif
+
+  if pg_compiler_id != cc.get_id()
+    if pg_required or pg_config_path != ''
+      error('Compiler mismatch: PostgreSQL was built with ' + pg_cc +
+            ' (' + pg_compiler_id + ') but meson is using ' + cc.get_id() + '.\n' +
+            'Reconfigure with: CC=' + pg_cc + ' meson setup builddir --reconfigure')
+    else
+      warning('Compiler mismatch: PostgreSQL was built with ' + pg_cc +
+              ' (' + pg_compiler_id + ') but meson is using ' + cc.get_id() +
+              '. Skipping extension.')
+      build_pg_extension = false
+    endif
+  endif
+endif
+
+if build_pg_extension
+  # Get PostgreSQL paths
+  pg_includedir_server = run_command(pg_config, '--includedir-server', check: true).stdout().strip()
+  pg_pkglibdir = run_command(pg_config, '--pkglibdir', check: true).stdout().strip()
+  pg_sharedir = run_command(pg_config, '--sharedir', check: true).stdout().strip()
+  pg_libdir = run_command(pg_config, '--libdir', check: true).stdout().strip()
+  pg_bindir = run_command(pg_config, '--bindir', check: true).stdout().strip()
+
+  # Parse CFLAGS and CPPFLAGS, skipping C90-era restriction.
+  # CPPFLAGS is needed for macOS Homebrew where gettext (libintl.h) is
+  # keg-only and the include path is only in --cppflags.
+  pg_cflags_raw = run_command(pg_config, '--cflags', check: true).stdout().strip().split()
+  pg_cppflags_raw = run_command(pg_config, '--cppflags', check: true).stdout().strip().split()
+  pg_cflags = []
+  foreach flag : pg_cflags_raw + pg_cppflags_raw
+    if flag == '-Wdeclaration-after-statement'
+      continue
+    endif
+    if cc.has_argument(flag) or flag.startswith('-I') or flag.startswith('-D')
+      pg_cflags += [flag]
+    endif
+  endforeach
+
+  # Check for PostgreSQL server development headers before compiling anything
+  if not cc.has_header('postgres.h', args: ['-I' + pg_includedir_server] + pg_cflags)
+    if pg_required
+      error('PostgreSQL server headers not found at: ' + pg_includedir_server +
+            '. Install postgresql-server-dev.')
+    endif
+    warning('PostgreSQL server headers not found at: ' + pg_includedir_server)
+    warning('Install postgresql-server-dev or set -Dpostgresql=disabled')
+    build_pg_extension = false
+  endif
+
+  # Require PostgreSQL 18+
+  if build_pg_extension
+    pg_version = run_command(pg_config, '--version', check: true).stdout().strip()
+    # pg_config --version returns e.g. "PostgreSQL 18.1" or "PostgreSQL 18devel"
+    pg_version_num = pg_version.split(' ')[1].split('.')[0].split('d')[0].split('r')[0].to_int()
+    if pg_version_num < 18
+      if pg_required or pg_config_path != ''
+        error('Meerkat requires PostgreSQL 18+, found: ' + pg_version)
+      else
+        warning('Meerkat requires PostgreSQL 18+, found: ' + pg_version + '. Skipping extension.')
+        build_pg_extension = false
+      endif
+    endif
+  endif
+endif
+
+if build_pg_extension
+  # Parse LDFLAGS, extracting rpath separately
+  pg_ldflags_raw = run_command(pg_config, '--ldflags', check: true).stdout().strip()
+  pg_ldflags = []
+  pg_rpath = []
+  foreach flag : pg_ldflags_raw.split()
+    if flag.startswith('-Wl,-rpath,')
+      rpath_val = flag.split(',')[2].strip('\'\"')
+      pg_rpath += [rpath_val]
+    elif flag != '-Wl,--enable-new-dtags'
+      pg_ldflags += [flag]
+    endif
+  endforeach
+
+  # Core sources compiled for PG (without MKT_STANDALONE, without
+  # memory_standalone.c)
+  mkt_pg_core_sources = files(
+    'src/core/platform.c',
+    'src/mkt_vector.c',
+    'src/mkt_halfvec.c',
+    'src/algo/distance.c',
+    'src/algo/vecops.c',
+  )
+
+  # SIMD sources for PG build (same as standalone)
+  mkt_pg_simd_sources = []
+  if simd_mode == 'full'
+    if host_machine.cpu_family() in ['x86', 'x86_64']
+      mkt_pg_simd_sources += files(
+        'src/algo/distance_avx2.c',
+        'src/algo/distance_avx512.c',
+      )
+    elif host_machine.cpu_family() == 'aarch64'
+      mkt_pg_simd_sources += files(
+        'src/algo/distance_neon.c',
+      )
+    endif
+  endif
+
+  mkt_pg_lib = static_library('mkt_pg',
+    mkt_pg_core_sources + mkt_pg_simd_sources,
+    c_args: ['-I' + pg_includedir_server] + pg_cflags,
+    include_directories: src_inc,
+    dependencies: [m_dep],
+    override_options: ['werror=false'],
+  )
+
+  subdir('src/pg')
+  subdir('test/pg')
+endif
 
 # Header files
 mkt_core_headers = files(

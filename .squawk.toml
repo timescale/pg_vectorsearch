@@ -1,0 +1,20 @@
+# Squawk configuration
+#
+# We use squawk primarily as a PostgreSQL SQL syntax checker (it uses
+# libpg_query, the real PG parser). Migration-safety rules are disabled
+# since our SQL files are extension DDL and regression tests, not
+# production migrations.
+
+excluded_rules = [
+    "ban-drop-column",
+    "ban-drop-not-null",
+    "ban-drop-table",
+    "prefer-bigint-over-int",
+    "prefer-bigint-over-smallint",
+    "prefer-identity",
+    "prefer-robust-stmts",
+    "prefer-text-field",
+    "require-concurrent-index-creation",
+    "require-concurrent-index-deletion",
+    "require-timeout-settings",
+]
