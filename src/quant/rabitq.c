@@ -28,37 +28,6 @@
 #include "quant/rabitq.h"
 
 /*
- * Forward declarations for hand-optimized SIMD implementations.
- * These are only available when MKT_SIMD_FULL is defined (simd=full mode).
- */
-
-#ifdef MKT_SIMD_FULL
-
-#if defined(__x86_64__) || defined(_M_X64)
-/* AVX-512 implementation */
-float mkt_rabitq_inner_product_avx512(
-		const float *transformed, const uint8_t *bits, Dimension dim);
-void mkt_rabitq_extract_signs_avx512(
-		const float *transformed, uint8_t *bits, Dimension dim);
-
-/* AVX2 implementation */
-float mkt_rabitq_inner_product_avx2(
-		const float *transformed, const uint8_t *bits, Dimension dim);
-void mkt_rabitq_extract_signs_avx2(
-		const float *transformed, uint8_t *bits, Dimension dim);
-#endif
-
-#if defined(__aarch64__) || defined(_M_ARM64)
-/* NEON implementation */
-float mkt_rabitq_inner_product_neon(
-		const float *transformed, const uint8_t *bits, Dimension dim);
-void mkt_rabitq_extract_signs_neon(
-		const float *transformed, uint8_t *bits, Dimension dim);
-#endif
-
-#endif /* MKT_SIMD_FULL */
-
-/*
  * Compiler-Vectorized Implementation
  *
  * Uses target_clones to generate multiple versions for different ISAs.

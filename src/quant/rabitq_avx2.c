@@ -22,6 +22,7 @@
 
 #include "algo/simd_utils.h"
 #include "mkt_types.h"
+#include "quant/rabitq.h"
 
 /*
  * Expand a byte to 8 float masks for AVX2.

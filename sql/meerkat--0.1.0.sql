@@ -443,6 +443,216 @@ CREATE OPERATOR CLASS halfvec_ops DEFAULT FOR TYPE halfvec USING btree
     FUNCTION 1 halfvec_cmp(halfvec, halfvec);
 
 -- =====================================================================
+-- rabitq type
+-- =====================================================================
+
+CREATE FUNCTION rabitq_in(cstring, oid, integer) RETURNS rabitq
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_in'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION rabitq_out(rabitq) RETURNS cstring
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_out'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION rabitq_typmod_in(cstring[]) RETURNS integer
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_typmod_in'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE rabitq (
+    INPUT     = rabitq_in,
+    OUTPUT    = rabitq_out,
+    TYPMOD_IN = rabitq_typmod_in,
+    INTERNALLENGTH = VARIABLE,
+    STORAGE   = external,
+    CATEGORY  = 'U',
+    DELIMITER = ','
+);
+
+-- =====================================================================
+-- rabitq accessor functions
+-- =====================================================================
+
+CREATE FUNCTION rabitq_dims(rabitq) RETURNS integer
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_dims'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION rabitq_f_add(rabitq) RETURNS float8
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_f_add'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION rabitq_f_rescale(rabitq) RETURNS float8
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_f_rescale'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- =====================================================================
+-- rabitq private functions (for operators and opclass)
+-- =====================================================================
+
+CREATE FUNCTION rabitq_cmp(rabitq, rabitq) RETURNS int4
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_cmp'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION rabitq_lt(rabitq, rabitq) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_lt'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION rabitq_le(rabitq, rabitq) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_le'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION rabitq_eq(rabitq, rabitq) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_eq'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION rabitq_ne(rabitq, rabitq) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_ne'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION rabitq_ge(rabitq, rabitq) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_ge'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION rabitq_gt(rabitq, rabitq) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_gt'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- =====================================================================
+-- rabitq cast functions
+-- =====================================================================
+
+CREATE FUNCTION rabitq(@extschema@.rabitq, integer, boolean) RETURNS rabitq
+    AS 'MODULE_PATHNAME', 'mkt_rabitq'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- =====================================================================
+-- rabitq casts
+-- =====================================================================
+
+CREATE CAST (@extschema@.rabitq AS @extschema@.rabitq)
+    WITH FUNCTION rabitq(@extschema@.rabitq, integer, boolean) AS IMPLICIT;
+
+-- =====================================================================
+-- rabitq comparison operators
+-- =====================================================================
+
+CREATE OPERATOR < (
+    LEFTARG = rabitq, RIGHTARG = rabitq,
+    FUNCTION = rabitq_lt,
+    COMMUTATOR = '>', NEGATOR = '>=',
+    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+
+CREATE OPERATOR <= (
+    LEFTARG = rabitq, RIGHTARG = rabitq,
+    FUNCTION = rabitq_le,
+    COMMUTATOR = '>=', NEGATOR = '>',
+    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+
+CREATE OPERATOR = (
+    LEFTARG = rabitq, RIGHTARG = rabitq,
+    FUNCTION = rabitq_eq,
+    COMMUTATOR = '=', NEGATOR = '<>',
+    RESTRICT = eqsel, JOIN = eqjoinsel,
+    HASHES, MERGES
+);
+
+CREATE OPERATOR <> (
+    LEFTARG = rabitq, RIGHTARG = rabitq,
+    FUNCTION = rabitq_ne,
+    COMMUTATOR = '<>', NEGATOR = '=',
+    RESTRICT = neqsel, JOIN = neqjoinsel
+);
+
+CREATE OPERATOR >= (
+    LEFTARG = rabitq, RIGHTARG = rabitq,
+    FUNCTION = rabitq_ge,
+    COMMUTATOR = '<=', NEGATOR = '<',
+    RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+CREATE OPERATOR > (
+    LEFTARG = rabitq, RIGHTARG = rabitq,
+    FUNCTION = rabitq_gt,
+    COMMUTATOR = '<', NEGATOR = '<=',
+    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+
+-- =====================================================================
+-- rabitq btree opclass
+-- =====================================================================
+
+CREATE OPERATOR FAMILY rabitq_ops USING btree;
+
+CREATE OPERATOR CLASS rabitq_ops DEFAULT FOR TYPE rabitq USING btree
+    FAMILY rabitq_ops AS
+    OPERATOR 1 <,
+    OPERATOR 2 <=,
+    OPERATOR 3 =,
+    OPERATOR 4 >=,
+    OPERATOR 5 >,
+    FUNCTION 1 rabitq_cmp(rabitq, rabitq);
+
+-- =====================================================================
+-- rabitq_params type
+-- =====================================================================
+
+CREATE FUNCTION rabitq_params_in(cstring, oid, integer)
+    RETURNS rabitq_params
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_params_in'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION rabitq_params_out(rabitq_params) RETURNS cstring
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_params_out'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE rabitq_params (
+    INPUT     = rabitq_params_in,
+    OUTPUT    = rabitq_params_out,
+    INTERNALLENGTH = VARIABLE,
+    STORAGE   = extended,
+    CATEGORY  = 'U'
+);
+
+-- =====================================================================
+-- rabitq_params functions
+-- =====================================================================
+
+CREATE FUNCTION rabitq_params_generate(dim integer, seed bigint)
+    RETURNS rabitq_params
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_params_generate_pg'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+COMMENT ON FUNCTION rabitq_params_generate(integer, bigint) IS
+'Generate RaBitQ quantization parameters (random orthogonal matrix) for a given dimension and seed.
+The same dim+seed always produces the same matrix. Store the result for reuse across encode calls.';
+
+CREATE FUNCTION rabitq_params_dim(rabitq_params) RETURNS integer
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_params_dim'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION rabitq_params_seed(rabitq_params) RETURNS bigint
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_params_seed'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- =====================================================================
+-- rabitq encoding function
+-- =====================================================================
+
+CREATE FUNCTION rabitq_encode(
+    input vector,
+    centroid vector,
+    params rabitq_params
+) RETURNS rabitq
+    AS 'MODULE_PATHNAME', 'mkt_rabitq_encode_pg'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+COMMENT ON FUNCTION rabitq_encode(vector, vector, rabitq_params) IS
+'Encode a vector to RaBitQ binary quantization relative to a centroid.
+Returns a rabitq value containing the quantized bits, f_add, and f_rescale.
+The params argument provides the orthogonal transform matrix (see rabitq_params_generate).';
+
+-- =====================================================================
 -- pgvector binary cast support
 -- =====================================================================
 --

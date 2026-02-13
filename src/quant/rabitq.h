@@ -333,4 +333,35 @@ const char *mkt_rabitq_impl_name(void);
  */
 void mkt_rabitq_force_reinit(void);
 
+/*
+ * Hand-optimized SIMD implementations (simd=full only)
+ *
+ * These are resolved via function pointers in mkt_rabitq_init_simd().
+ */
+#ifdef MKT_SIMD_FULL
+
+#if defined(__x86_64__) || defined(_M_X64)
+/* AVX-512 implementations */
+float mkt_rabitq_inner_product_avx512(
+		const float *transformed, const uint8_t *bits, Dimension dim);
+void mkt_rabitq_extract_signs_avx512(
+		const float *transformed, uint8_t *bits, Dimension dim);
+
+/* AVX2 implementations */
+float mkt_rabitq_inner_product_avx2(
+		const float *transformed, const uint8_t *bits, Dimension dim);
+void mkt_rabitq_extract_signs_avx2(
+		const float *transformed, uint8_t *bits, Dimension dim);
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+/* NEON implementations */
+float mkt_rabitq_inner_product_neon(
+		const float *transformed, const uint8_t *bits, Dimension dim);
+void mkt_rabitq_extract_signs_neon(
+		const float *transformed, uint8_t *bits, Dimension dim);
+#endif
+
+#endif /* MKT_SIMD_FULL */
+
 #endif /* MKT_RABITQ_H */

@@ -4,6 +4,8 @@ extension_sources = files(
   'mkt_pg.c',
   'mkt_pg_vector.c',
   'mkt_pg_halfvec.c',
+  'mkt_pg_rabitq.c',
+  'mkt_pg_rabitq_params.c',
 )
 
 pg_ext_cflags = [

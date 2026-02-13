@@ -16,6 +16,7 @@
 
 #include "algo/simd_utils.h"
 #include "mkt_types.h"
+#include "quant/rabitq.h"
 
 /*
  * AVX-512 binary inner product implementation.
