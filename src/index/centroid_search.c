@@ -138,11 +138,11 @@ mkt_centroid_beam_search(
 
 	while (blkno != InvalidBlockNumber)
 	{
-		Page page  = state->accessor->read(state->accessor->ctx, blkno);
+		Page page  = mkt_storage_read_page(state->storage, blkno);
 		cand_count = score_page(state, page, dim, cands, cand_count, cand_cap);
 		MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
 		BlockNumber			   next_blkno = opaque->next_blkno;
-		state->accessor->release(state->accessor->ctx, blkno);
+		mkt_storage_release_page(state->storage, blkno);
 		blkno = next_blkno;
 	}
 
@@ -168,12 +168,12 @@ mkt_centroid_beam_search(
 			BlockNumber cb = child_blkno;
 			while (cb != InvalidBlockNumber)
 			{
-				Page page  = state->accessor->read(state->accessor->ctx, cb);
+				Page page  = mkt_storage_read_page(state->storage, cb);
 				next_count = score_page(
 						state, page, dim, next, next_count, cand_cap);
 				MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
 				BlockNumber			   nb	  = opaque->next_blkno;
-				state->accessor->release(state->accessor->ctx, cb);
+				mkt_storage_release_page(state->storage, cb);
 				cb = nb;
 			}
 		}

@@ -3,7 +3,7 @@
  *
  * Implements page initialization and entry insertion for centroid pages.
  * The same code runs in standalone and PostgreSQL mode — only the I/O
- * layer (MktPageAccessor) differs.
+ * layer (MktStorage) differs.
  */
 
 #include "index/centroid_page.h"

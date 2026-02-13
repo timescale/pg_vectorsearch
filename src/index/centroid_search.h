@@ -2,8 +2,8 @@
  * centroid_search.h - Beam search over centroid tree
  *
  * Level-by-level descent with beam search, reading centroid pages
- * via MktPageAccessor. The same function works in standalone and
- * PG mode — only the accessor implementation differs.
+ * via MktStorage. The same function works in standalone and
+ * PG mode — only the storage implementation differs.
  *
  * Algorithm:
  *   1. Read root centroid page(s), score ALL centroids
@@ -20,6 +20,7 @@
 #include <stdint.h>
 
 #include "index/centroid_page.h"
+#include "index/storage.h"
 #include "mkt_types.h"
 #include "quant/rabitq.h"
 
@@ -38,8 +39,8 @@ typedef struct MktCentroidResult
  * ---------------------------------------------------------------- */
 typedef struct MktCentroidSearchState
 {
-	const RaBitQQueryState *qstate;	  /* query transformed vs global mean */
-	const MktPageAccessor  *accessor; /* page I/O */
+	const RaBitQQueryState *qstate;	 /* query transformed vs global mean */
+	const MktStorage	   *storage; /* page and vector I/O */
 	uint32_t				beam_width;
 	uint32_t				nprobe;
 	Dimension				dim;

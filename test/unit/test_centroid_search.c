@@ -21,18 +21,18 @@ TEST_GROUP(CentroidSearch);
 TEST_MEMCTX_FIXTURE();
 
 /* ----------------------------------------------------------------
- * Standalone page accessor (pages stored in a flat array)
+ * Test storage callbacks (pages stored in a flat array)
  * ---------------------------------------------------------------- */
 
 static Page
-standalone_page_read(void *ctx, BlockNumber blkno)
+test_read_page(void *ctx, BlockNumber blkno)
 {
 	char *pages = (char *)ctx;
 	return pages + (size_t)blkno * BLCKSZ;
 }
 
 static void
-standalone_page_release(void *ctx, BlockNumber blkno)
+test_release_page(void *ctx, BlockNumber blkno)
 {
 	(void)ctx;
 	(void)blkno;
@@ -239,17 +239,17 @@ TEST(beam_search_single_level)
 			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
 	ASSERT_NOT_NULL(qstate, "query state created");
 
-	/* Set up accessor */
-	MktPageAccessor accessor = {
-			.read	 = standalone_page_read,
-			.release = standalone_page_release,
-			.ctx	 = pages,
+	/* Set up storage */
+	MktStorage storage = {
+			.read_page	  = test_read_page,
+			.release_page = test_release_page,
+			.ctx		  = pages,
 	};
 
 	/* Search */
 	MktCentroidSearchState search_state = {
 			.qstate		= qstate,
-			.accessor	= &accessor,
+			.storage	= &storage,
 			.beam_width = 4,
 			.nprobe		= 4,
 			.dim		= dim,
@@ -429,16 +429,16 @@ TEST(beam_search_two_levels)
 			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
 	ASSERT_NOT_NULL(qstate, "query state created");
 
-	/* Set up accessor */
-	MktPageAccessor accessor = {
-			.read	 = standalone_page_read,
-			.release = standalone_page_release,
-			.ctx	 = pages,
+	/* Set up storage */
+	MktStorage storage = {
+			.read_page	  = test_read_page,
+			.release_page = test_release_page,
+			.ctx		  = pages,
 	};
 
 	MktCentroidSearchState search_state = {
 			.qstate		= qstate,
-			.accessor	= &accessor,
+			.storage	= &storage,
 			.beam_width = 2,
 			.nprobe		= 4,
 			.dim		= dim,
@@ -522,15 +522,15 @@ TEST(beam_search_null_state)
 
 TEST(beam_search_null_results)
 {
-	MktPageAccessor accessor = {
-			.read	 = standalone_page_read,
-			.release = standalone_page_release,
-			.ctx	 = NULL,
+	MktStorage storage = {
+			.read_page	  = test_read_page,
+			.release_page = test_release_page,
+			.ctx		  = NULL,
 	};
 	RaBitQQueryState	   dummy_qstate = {0};
 	MktCentroidSearchState state		= {
 				   .qstate	   = &dummy_qstate,
-				   .accessor   = &accessor,
+				   .storage	   = &storage,
 				   .beam_width = 4,
 				   .nprobe	   = 4,
 				   .dim		   = 64,
@@ -541,15 +541,15 @@ TEST(beam_search_null_results)
 
 TEST(beam_search_zero_levels)
 {
-	MktPageAccessor accessor = {
-			.read	 = standalone_page_read,
-			.release = standalone_page_release,
-			.ctx	 = NULL,
+	MktStorage storage = {
+			.read_page	  = test_read_page,
+			.release_page = test_release_page,
+			.ctx		  = NULL,
 	};
 	RaBitQQueryState	   dummy_qstate = {0};
 	MktCentroidSearchState state		= {
 				   .qstate	   = &dummy_qstate,
-				   .accessor   = &accessor,
+				   .storage	   = &storage,
 				   .beam_width = 4,
 				   .nprobe	   = 4,
 				   .dim		   = 64,
@@ -561,15 +561,15 @@ TEST(beam_search_zero_levels)
 
 TEST(beam_search_invalid_blkno)
 {
-	MktPageAccessor accessor = {
-			.read	 = standalone_page_read,
-			.release = standalone_page_release,
-			.ctx	 = NULL,
+	MktStorage storage = {
+			.read_page	  = test_read_page,
+			.release_page = test_release_page,
+			.ctx		  = NULL,
 	};
 	RaBitQQueryState	   dummy_qstate = {0};
 	MktCentroidSearchState state		= {
 				   .qstate	   = &dummy_qstate,
-				   .accessor   = &accessor,
+				   .storage	   = &storage,
 				   .beam_width = 4,
 				   .nprobe	   = 4,
 				   .dim		   = 64,

@@ -125,48 +125,6 @@ mkt_centroid_max_entries(Dimension dim)
 							   sizeof(MktCentroidPageOpaque)))
 
 /* ----------------------------------------------------------------
- * I/O abstraction callbacks
- *
- * Standalone: ctx = array of malloc'd 8KB buffers
- * PG mode:    ctx = Relation, wraps ReadBuffer/ReleaseBuffer
- * ---------------------------------------------------------------- */
-typedef struct MktPageAccessor
-{
-	Page (*read)(void *ctx, BlockNumber blkno);
-	void (*release)(void *ctx, BlockNumber blkno);
-
-	/* Write path: new page allocation + mark dirty */
-	Page (*new_page)(void *ctx, BlockNumber *blkno_out);
-	void (*mark_dirty)(void *ctx, BlockNumber blkno);
-
-	void *ctx;
-} MktPageAccessor;
-
-/* ----------------------------------------------------------------
- * Vector fetch abstraction
- *
- * Standalone: ctx = { float *vectors, Dimension dim }
- * PG mode:    ctx = Relation (heap), uses heap_fetch(tid)
- * ---------------------------------------------------------------- */
-typedef struct MktVectorAccessor
-{
-	VectorRef (*fetch)(void *ctx, ItemPointerData tid);
-	void *ctx;
-} MktVectorAccessor;
-
-/* ----------------------------------------------------------------
- * WAL abstraction (optional, NULL = no WAL)
- * ---------------------------------------------------------------- */
-typedef struct MktWALWriter
-{
-	void (*log_page_init)(
-			void *ctx, BlockNumber blkno, uint8_t level, Dimension dim);
-	void (*log_page_add)(
-			void *ctx, BlockNumber blkno, Page page, Dimension dim);
-	void *ctx;
-} MktWALWriter;
-
-/* ----------------------------------------------------------------
  * Page operations
  * ---------------------------------------------------------------- */
 
