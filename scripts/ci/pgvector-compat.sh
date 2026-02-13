@@ -92,17 +92,12 @@ for i in $(seq 1 30); do
     sleep 0.5
 done
 
-# Create test database and load extensions
-echo "==> Loading extensions"
-"$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d postgres <<'SQL'
-CREATE DATABASE compat_test;
-SQL
-"$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d compat_test <<'SQL'
-CREATE EXTENSION vector;
-CREATE EXTENSION meerkat;
-SQL
+# Create test database
+echo "==> Creating test database"
+"$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d postgres \
+    -c "CREATE DATABASE compat_test"
 
-# Run compatibility tests
+# Run compatibility and lifecycle tests (test script loads extensions)
 echo "==> Running pgvector compatibility tests"
 "$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d compat_test \
     -f test/pg/compat/pgvector.sql

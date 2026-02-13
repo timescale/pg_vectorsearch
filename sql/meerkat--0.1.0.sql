@@ -24,7 +24,7 @@ CREATE TYPE vector (
     OUTPUT    = vector_out,
     TYPMOD_IN = vector_typmod_in,
     INTERNALLENGTH = VARIABLE,
-    STORAGE   = extended,
+    STORAGE   = external,
     CATEGORY  = 'U',
     DELIMITER = ','
 );
@@ -238,7 +238,7 @@ CREATE TYPE halfvec (
     OUTPUT    = halfvec_out,
     TYPMOD_IN = halfvec_typmod_in,
     INTERNALLENGTH = VARIABLE,
-    STORAGE   = extended,
+    STORAGE   = external,
     CATEGORY  = 'U',
     DELIMITER = ','
 );
@@ -441,3 +441,102 @@ CREATE OPERATOR CLASS halfvec_ops DEFAULT FOR TYPE halfvec USING btree
     OPERATOR 4 >=,
     OPERATOR 5 >,
     FUNCTION 1 halfvec_cmp(halfvec, halfvec);
+
+-- =====================================================================
+-- pgvector binary cast support
+-- =====================================================================
+--
+-- When pgvector (the vector extension) is installed, meerkat creates
+-- zero-overhead binary casts between the two sets of types. The types
+-- have identical binary layouts (varlena header + int16 dim + int16
+-- unused + float[]), so WITHOUT FUNCTION casts produce RelabelType
+-- nodes with no conversion overhead.
+--
+-- Cast directions:
+--   pgvector -> meerkat: IMPLICIT (pgvector columns work transparently
+--     with meerkat operators and indexes)
+--   meerkat -> pgvector: ASSIGNMENT (avoids operator ambiguity when
+--     both extensions define <->, <#>, <=>)
+--
+-- The casts are standalone objects (not owned by either extension).
+-- PostgreSQL auto-drops them via type dependencies when the referenced
+-- types are dropped, so DROP EXTENSION on either side removes the
+-- casts without affecting the other extension.
+--
+-- Both install orderings are supported:
+--   pgvector first, meerkat later: DO block below creates casts
+--   meerkat first, pgvector later: event trigger creates casts
+
+-- Helper: create binary casts between meerkat and pgvector types.
+-- Uses exception handling for idempotency (CREATE CAST has no IF NOT
+-- EXISTS clause).
+CREATE FUNCTION mkt_create_pgvector_casts() RETURNS void
+    LANGUAGE plpgsql AS $$
+BEGIN
+    BEGIN
+        CREATE CAST (public.vector AS @extschema@.vector)
+            WITHOUT FUNCTION AS IMPLICIT;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        CREATE CAST (public.halfvec AS @extschema@.halfvec)
+            WITHOUT FUNCTION AS IMPLICIT;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        CREATE CAST (@extschema@.vector AS public.vector)
+            WITHOUT FUNCTION AS ASSIGNMENT;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        CREATE CAST (@extschema@.halfvec AS public.halfvec)
+            WITHOUT FUNCTION AS ASSIGNMENT;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+END;
+$$;
+
+-- Create casts now if pgvector is already installed.
+-- During CREATE EXTENSION, objects created in DO blocks are auto-owned
+-- by the extension. We immediately disassociate the casts so that
+-- DROP EXTENSION meerkat does not cascade to (or through) pgvector.
+-- The casts still get cleaned up via auto-dependencies on their
+-- referenced types.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_extension WHERE extname = 'vector'
+    ) THEN
+        PERFORM @extschema@.mkt_create_pgvector_casts();
+        EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
+            '(public.vector AS @extschema@.vector)';
+        EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
+            '(public.halfvec AS @extschema@.halfvec)';
+        EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
+            '(@extschema@.vector AS public.vector)';
+        EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
+            '(@extschema@.halfvec AS public.halfvec)';
+    END IF;
+END;
+$$;
+
+-- Event trigger: create casts when pgvector is installed after meerkat.
+CREATE FUNCTION mkt_on_extension_create()
+    RETURNS event_trigger LANGUAGE plpgsql AS $$
+DECLARE
+    obj record;
+BEGIN
+    FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands()
+               WHERE object_type = 'extension'
+    LOOP
+        IF obj.object_identity = 'vector' THEN
+            PERFORM @extschema@.mkt_create_pgvector_casts();
+        END IF;
+    END LOOP;
+END;
+$$;
+
+CREATE EVENT TRIGGER mkt_pgvector_cast_trigger
+    ON ddl_command_end
+    WHEN TAG IN ('CREATE EXTENSION')
+    EXECUTE FUNCTION mkt_on_extension_create();
