@@ -1,0 +1,264 @@
+-- RaBitQ type I/O, typmod, accessors, comparison, encoding
+-- Basic I/O round-trip
+SELECT '{10101010:1.5:2.3}'::rabitq;
+       rabitq       
+--------------------
+ {10101010:1.5:2.3}
+(1 row)
+
+SELECT '{0000:0:0}'::rabitq;
+   rabitq   
+------------
+ {0000:0:0}
+(1 row)
+
+SELECT '{1111:100.5:200.75}'::rabitq;
+       rabitq        
+---------------------
+ {1111:100.5:200.75}
+(1 row)
+
+SELECT '{1:1:1}'::rabitq;
+ rabitq  
+---------
+ {1:1:1}
+(1 row)
+
+-- Float precision round-trip (%.8g)
+SELECT '{10101010:1.2345679:9.8765431}'::rabitq;
+            rabitq             
+-------------------------------
+ {10101010:1.2345679:9.876543}
+(1 row)
+
+-- 16-bit (2 bytes)
+SELECT '{1010101010101010:1.5:2.3}'::rabitq;
+           rabitq           
+----------------------------
+ {1010101010101010:1.5:2.3}
+(1 row)
+
+-- Typmod
+SELECT '{10101010:1.5:2.3}'::rabitq(8);
+       rabitq       
+--------------------
+ {10101010:1.5:2.3}
+(1 row)
+
+-- Typmod mismatch
+SELECT '{10101010:1.5:2.3}'::rabitq(4); -- error
+ERROR:  expected 4 dimensions, not 8
+-- Empty bits
+SELECT '{:1:2}'::rabitq; -- error
+ERROR:  rabitq must have at least 1 dimension
+LINE 1: SELECT '{:1:2}'::rabitq;
+               ^
+-- No closing brace
+SELECT '{10101010:1.5:2.3'::rabitq; -- error
+ERROR:  rabitq must end with "}"
+LINE 1: SELECT '{10101010:1.5:2.3'::rabitq;
+               ^
+-- No opening brace
+SELECT '10101010:1.5:2.3}'::rabitq; -- error
+ERROR:  rabitq must start with "{"
+LINE 1: SELECT '10101010:1.5:2.3}'::rabitq;
+               ^
+-- Invalid bit character
+SELECT '{10201010:1.5:2.3}'::rabitq; -- error
+ERROR:  invalid bit character '2' in rabitq
+LINE 1: SELECT '{10201010:1.5:2.3}'::rabitq;
+               ^
+-- Missing f_add
+SELECT '{10101010}'::rabitq; -- error
+ERROR:  expected ":" after bits in rabitq
+LINE 1: SELECT '{10101010}'::rabitq;
+               ^
+-- Missing f_rescale
+SELECT '{10101010:1.5}'::rabitq; -- error
+ERROR:  expected ":" after f_add in rabitq
+LINE 1: SELECT '{10101010:1.5}'::rabitq;
+               ^
+-- Trailing content
+SELECT '{10101010:1.5:2.3}abc'::rabitq; -- error
+ERROR:  unexpected characters after "}" in rabitq
+LINE 1: SELECT '{10101010:1.5:2.3}abc'::rabitq;
+               ^
+-- NaN in f_add
+SELECT '{10101010:NaN:2.3}'::rabitq; -- error
+ERROR:  NaN value not allowed in vector
+LINE 1: SELECT '{10101010:NaN:2.3}'::rabitq;
+               ^
+-- Inf in f_rescale
+SELECT '{10101010:1.5:Inf}'::rabitq; -- error
+ERROR:  infinite value not allowed in vector
+LINE 1: SELECT '{10101010:1.5:Inf}'::rabitq;
+               ^
+-- Leading/trailing whitespace
+SELECT '  {10101010:1.5:2.3}  '::rabitq;
+       rabitq       
+--------------------
+ {10101010:1.5:2.3}
+(1 row)
+
+-- Accessor functions
+SELECT rabitq_dims('{10101010:1.5:2.3}'::rabitq);
+ rabitq_dims 
+-------------
+           8
+(1 row)
+
+SELECT rabitq_f_add('{10101010:1.5:2.3}'::rabitq);
+ rabitq_f_add 
+--------------
+          1.5
+(1 row)
+
+SELECT rabitq_f_rescale('{10101010:1.5:2.3}'::rabitq);
+ rabitq_f_rescale  
+-------------------
+ 2.299999952316284
+(1 row)
+
+-- 16-dim accessors
+SELECT rabitq_dims('{1010101010101010:1.5:2.3}'::rabitq);
+ rabitq_dims 
+-------------
+          16
+(1 row)
+
+-- Comparison operators (bits are the quantized identity)
+SELECT '{10101010:1.5:2.3}'::rabitq = '{10101010:1.5:2.3}'::rabitq;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT '{10101010:1.5:2.3}'::rabitq = '{10101010:9.9:9.9}'::rabitq;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT '{10101010:1.5:2.3}'::rabitq <> '{10101011:1.5:2.3}'::rabitq;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT '{00000000:1.5:2.3}'::rabitq < '{10000000:1.5:2.3}'::rabitq;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT '{10000000:1.5:2.3}'::rabitq > '{00000000:1.5:2.3}'::rabitq;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT '{10101010:1.5:2.3}'::rabitq <= '{10101010:1.5:2.3}'::rabitq;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT '{10101010:1.5:2.3}'::rabitq >= '{10101010:1.5:2.3}'::rabitq;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Different dimensions: shorter < longer
+SELECT '{1010:1.5:2.3}'::rabitq < '{10101010:1.5:2.3}'::rabitq;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Table storage and ORDER BY
+CREATE TABLE t_rq (id serial, q rabitq(8));
+INSERT INTO t_rq (q) VALUES
+    ('{10101010:1:1}'),
+    ('{01010101:2:2}'),
+    ('{11111111:3:3}'),
+    ('{00000000:4:4}');
+SELECT * FROM t_rq ORDER BY q;
+ id |       q        
+----+----------------
+  4 | {00000000:4:4}
+  1 | {10101010:1:1}
+  2 | {01010101:2:2}
+  3 | {11111111:3:3}
+(4 rows)
+
+SELECT * FROM t_rq ORDER BY q DESC;
+ id |       q        
+----+----------------
+  3 | {11111111:3:3}
+  2 | {01010101:2:2}
+  1 | {10101010:1:1}
+  4 | {00000000:4:4}
+(4 rows)
+
+DROP TABLE t_rq;
+-- rabitq_params generation and accessors
+SELECT rabitq_params_dim(rabitq_params_generate(8, 42));
+ rabitq_params_dim 
+-------------------
+                 8
+(1 row)
+
+SELECT rabitq_params_seed(rabitq_params_generate(8, 42));
+ rabitq_params_seed 
+--------------------
+                 42
+(1 row)
+
+-- rabitq_params text output
+SELECT rabitq_params_generate(8, 42);
+ rabitq_params_generate 
+------------------------
+ {8:42}
+(1 row)
+
+-- rabitq_params text input (not supported)
+SELECT '{8:42}'::rabitq_params; -- error
+ERROR:  cannot parse rabitq_params from text
+LINE 1: SELECT '{8:42}'::rabitq_params;
+               ^
+HINT:  Use rabitq_params_generate(dim, seed) instead.
+-- Encoding: deterministic with known seed
+-- Use zero centroid so residual = input
+-- Check components separately with rounding (FP results vary across platforms)
+SELECT rabitq_dims(q) AS dims,
+       round(rabitq_f_add(q)::numeric, 0) AS f_add,
+       round(rabitq_f_rescale(q)::numeric, 1) AS f_rescale
+FROM (SELECT rabitq_encode(
+    '[1,2,3,4,5,6,7,8]'::vector,
+    '[0,0,0,0,0,0,0,0]'::vector,
+    rabitq_params_generate(8, 42)
+) AS q) t;
+ dims | f_add | f_rescale 
+------+-------+-----------
+    8 |   204 |      17.4
+(1 row)
+
+-- Encoding dimension mismatch
+SELECT rabitq_encode(
+    '[1,2,3]'::vector,
+    '[0,0,0,0,0,0,0,0]'::vector,
+    rabitq_params_generate(8, 42)
+); -- error
+ERROR:  different vector dimensions 3 and 8
+-- Encoding: round-trip dims check
+SELECT rabitq_dims(rabitq_encode(
+    '[1,2,3,4,5,6,7,8]'::vector,
+    '[0,0,0,0,0,0,0,0]'::vector,
+    rabitq_params_generate(8, 42)
+));
+ rabitq_dims 
+-------------
+           8
+(1 row)
+

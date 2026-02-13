@@ -17,6 +17,7 @@ void
 _PG_init(void)
 {
 	mkt_distance_init();
+	mkt_rabitq_init_simd();
 }
 
 /* ----------------------------------------------------------------

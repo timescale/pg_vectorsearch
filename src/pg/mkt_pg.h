@@ -13,6 +13,7 @@
 
 #include "mkt_halfvec.h"
 #include "mkt_vector.h"
+#include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------
  * Datum conversion macros
@@ -25,6 +26,34 @@
 #define DatumGetMktHalfVector(x)   ((MktHalfVector *)PG_DETOAST_DATUM(x))
 #define PG_GETARG_MKT_HALFVEC_P(x) DatumGetMktHalfVector(PG_GETARG_DATUM(x))
 #define PG_RETURN_MKT_HALFVEC_P(x) PG_RETURN_POINTER(x)
+
+#define DatumGetRaBitQVector(x) ((RaBitQVector *)PG_DETOAST_DATUM(x))
+#define PG_GETARG_RABITQ_P(x)	DatumGetRaBitQVector(PG_GETARG_DATUM(x))
+#define PG_RETURN_RABITQ_P(x)	PG_RETURN_POINTER(x)
+
+/*
+ * RaBitQParamsPG - Orthogonal transform matrix (PostgreSQL varlena)
+ *
+ * Stores the random orthogonal matrix P and seed for reproducibility.
+ * Generated via rabitq_params_generate(dim, seed) and used with
+ * rabitq_encode() to quantize vectors.
+ *
+ * Total size: 16 bytes header + dim * dim * sizeof(float)
+ */
+typedef struct RaBitQParamsPG
+{
+	int32_t	 vl_len_;
+	int16_t	 dim;
+	int16_t	 unused;
+	uint64_t seed;
+	float	 P[];
+} RaBitQParamsPG;
+
+#define MKT_RABITQ_PARAMS_PG_SIZE(dim) \
+	(offsetof(RaBitQParamsPG, P) + (dim) * (dim) * sizeof(float))
+
+#define DatumGetRaBitQParamsPG(x)	 ((RaBitQParamsPG *)PG_DETOAST_DATUM(x))
+#define PG_GETARG_RABITQ_PARAMS_P(x) DatumGetRaBitQParamsPG(PG_GETARG_DATUM(x))
 
 /* ----------------------------------------------------------------
  * Allocation helpers
@@ -49,6 +78,17 @@ mkt_pg_halfvec_alloc(int dim)
 	SET_VARSIZE(v, size);
 	v->dim	  = (int16_t)dim;
 	v->unused = 0;
+	return v;
+}
+
+static inline RaBitQVector *
+mkt_pg_rabitq_alloc(int dim)
+{
+	int			  size = MKT_RABITQ_VECTOR_SIZE(dim);
+	RaBitQVector *v	   = (RaBitQVector *)palloc0(size);
+	SET_VARSIZE(v, size);
+	v->dim	 = (int16_t)dim;
+	v->flags = 0;
 	return v;
 }
 

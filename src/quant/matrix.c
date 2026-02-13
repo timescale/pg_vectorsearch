@@ -24,8 +24,8 @@
 
 #include "algo/simd_utils.h"
 #include "algo/vecops.h"
-#include "core/memory.h"
 #include "mkt_types.h"
+#include "quant/matrix.h"
 
 /*
  * Simple xoshiro256** PRNG for reproducible random generation.
