@@ -310,6 +310,25 @@ void mkt_rabitq_distance_with_bound(
 		Distance			   *lower_bound);
 
 /*
+ * Batch distance on SoA arrays (for centroid page scanning)
+ *
+ * Computes estimated L2 distances for 'count' vectors stored in
+ * contiguous SoA layout (as found on centroid pages). This avoids
+ * constructing RaBitQData structs per entry.
+ *
+ * The scalar arithmetic on contiguous f_add[]/f_rescale[] arrays
+ * auto-vectorizes with the compiler.
+ */
+void mkt_rabitq_distance_batch_soa(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances);
+
+/*
  * Internal SIMD dispatch (called automatically)
  */
 

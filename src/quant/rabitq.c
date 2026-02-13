@@ -849,6 +849,35 @@ mkt_rabitq_distance(
 }
 
 void
+mkt_rabitq_distance_batch_soa(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances)
+{
+	if (qstate == NULL || f_add == NULL || f_rescale == NULL || bits == NULL ||
+		distances == NULL || count == 0)
+		return;
+
+	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		float binary_ip = rabitq_inner_product(
+				qstate->transformed, bits + (size_t)i * packed_bytes, dim);
+
+		float final_dot = (2.0f * binary_ip - qstate->sum_transformed) *
+						  qstate->inv_sqrt_d;
+
+		distances[i] = f_add[i] + qstate->g_add -
+					   2.0f * f_rescale[i] * final_dot;
+	}
+}
+
+void
 mkt_rabitq_distance_with_bound(
 		const RaBitQQueryState *query_state,
 		const RaBitQData	   *data,
