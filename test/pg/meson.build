@@ -22,6 +22,7 @@ else
       'halfvec',
       'distance',
       'operators',
+      'rabitq',
     ]
 
     test('regress',

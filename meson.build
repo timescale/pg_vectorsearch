@@ -473,6 +473,8 @@ if build_pg_extension
     'src/mkt_halfvec.c',
     'src/algo/distance.c',
     'src/algo/vecops.c',
+    'src/quant/rabitq.c',
+    'src/quant/matrix.c',
   )
 
   # SIMD sources for PG build (same as standalone)
@@ -482,10 +484,13 @@ if build_pg_extension
       mkt_pg_simd_sources += files(
         'src/algo/distance_avx2.c',
         'src/algo/distance_avx512.c',
+        'src/quant/rabitq_avx2.c',
+        'src/quant/rabitq_avx512.c',
       )
     elif host_machine.cpu_family() == 'aarch64'
       mkt_pg_simd_sources += files(
         'src/algo/distance_neon.c',
+        'src/quant/rabitq_neon.c',
       )
     endif
   endif
@@ -494,7 +499,7 @@ if build_pg_extension
     mkt_pg_core_sources + mkt_pg_simd_sources,
     c_args: ['-I' + pg_includedir_server] + pg_cflags,
     include_directories: src_inc,
-    dependencies: [m_dep],
+    dependencies: [m_dep] + (have_cblas ? [cblas_dep] : []),
     override_options: ['werror=false'],
   )
 
