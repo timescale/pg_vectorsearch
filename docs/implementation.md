@@ -3858,140 +3858,105 @@ Done. Index size: 42.8 MB
 
 ### 5.1 Search Interface
 
-**Files**: `src/pg/search/search.h`, `src/pg/search/search.c`
+**Files**: `src/index/centroid_search.h`, `src/index/centroid_search.c`
+
+Search is split into two phases: centroid routing (beam search through the
+centroid tree) and posting list scan (RaBitQ distance on data vectors).
+
+The centroid search phase uses `MktPageAccessor` callbacks so the same code
+runs in both standalone and PostgreSQL mode. There is **no separate in-memory
+centroid cache** — search reads centroid pages directly via the accessor,
+which in PG mode wraps the standard shared buffer cache.
 
 ```c
-// Search parameters
+/* Search parameters (from reloptions / GUCs) */
 typedef struct {
-    uint32_t nprobe;      // Number of clusters to search
-    uint32_t k;           // Number of results
-    uint32_t rerank_k;    // Candidates to re-rank (0 = no reranking)
+    uint32_t nprobe;      /* leaf clusters to scan */
+    uint32_t k;           /* number of results */
+    uint32_t beam_width;  /* candidates kept per tree level */
+    uint32_t rerank_k;    /* candidates for full-precision re-rank */
 } SearchParams;
 
-// Search result
-typedef struct {
-    ItemPointer tid;
-    Distance    distance;
-} SearchResult;
-
-// Centroid search state (backend-local, populated from centroid pages)
-// This is working memory for centroid search, not a shared cache.
-// The actual centroid pages live in shared buffers.
-typedef struct {
-    float      *centroids;       // Flat array: nlist * dim floats
-    RaBitQData *quantized;       // RaBitQ quantized centroids
-    uint32_t    nlist;
-    Dimension   dim;
-    RaBitQParams *rabitq_params;
-} CentroidSearchState;
-
-// Create centroid search state (reads from centroid pages in buffer cache)
-CentroidSearchState *mkt_centroid_search_state_create(
-    uint32_t nlist,
-    Dimension dim,
-    const RaBitQParams *rabitq_params
-);
-
-void mkt_centroid_search_state_set(
-    CentroidSearchState *state,
-    ClusterId cluster,
-    const float *centroid
-);
-
-void mkt_centroid_search_state_destroy(CentroidSearchState *state);
-
-// Search: find top-k clusters by traversing centroid tree
-void mkt_search_centroids(
-    const CentroidSearchState *state,
-    VectorRef query,
-    DistanceMetric metric,
-    uint32_t nprobe,
-    ClusterId *clusters,      // Output: top nprobe cluster IDs
-    Distance *distances       // Output: distances to clusters (optional)
-);
-
-// Scan posting list pages
-// Callback for page reads (abstraction over buffer cache)
-typedef const void *(*PageReadCallback)(
-    void *callback_data,
-    BlockNumber block_number
-);
-
-typedef void (*PageReleaseCallback)(
-    void *callback_data,
-    BlockNumber block_number
-);
-
-// Scan posting lists and find candidates
-void mkt_search_posting_lists(
-    const ClusterId *clusters,
-    uint32_t nprobe,
-    VectorRef query,
-    const RaBitQParams *rabitq_params,
-    DistanceMetric metric,
-    const SearchParams *params,
-    PageReadCallback read_page,
-    PageReleaseCallback release_page,
-    void *callback_data,
-    TopKHeap *results
-);
-
-// Full search (centroids + posting lists)
-uint32_t mkt_search(
-    const CentroidSearchState *cache,
-    VectorRef query,
-    DistanceMetric metric,
-    const SearchParams *params,
-    const uint32_t *posting_list_heads,  // From metapage
-    PageReadCallback read_page,
-    PageReleaseCallback release_page,
-    void *callback_data,
-    SearchResult *results  // Output: up to k results
-);
+/* Centroid search: beam search through centroid tree */
+uint32_t mkt_centroid_beam_search(
+    const MktCentroidSearchState *state,
+    BlockNumber                   first_centroid_blkno,
+    uint8_t                       nlevels,
+    MktCentroidResult            *results);
 ```
+
+The `MktCentroidSearchState` bundles a pre-computed `RaBitQQueryState`
+(query transformed against the global mean), the page accessor, beam_width,
+nprobe, and dimension. Results contain `posting_head` block numbers and
+`medoid_tid` for each selected leaf cluster.
 
 ### 5.2 Centroid Search Implementation
 
+Centroid search uses level-by-level beam search via `MktPageAccessor`
+callbacks, reading centroid pages directly from the buffer cache (or from a
+flat array in standalone mode). All centroids are RaBitQ-encoded relative to
+the global data mean, so the query is transformed once and reused at every
+level.
+
+**Search state** (`src/index/centroid_search.h`):
+
 ```c
-void mkt_search_centroids(
-    const CentroidSearchState *cache,
-    VectorRef query,
-    DistanceMetric metric,
-    uint32_t nprobe,
-    ClusterId *clusters,
-    Distance *distances
-) {
-    TopKHeap *heap = mkt_topk_create(nprobe);
+typedef struct MktCentroidSearchState
+{
+    RaBitQQueryState      *qstate;    /* query transformed vs global mean */
+    const MktPageAccessor *accessor;  /* page I/O callbacks */
+    uint32_t               beam_width;
+    uint32_t               nprobe;
+    Dimension              dim;
+} MktCentroidSearchState;
 
-    // Batch distance computation with SIMD
-    Distance *all_distances = mkt_alloc(cache->nlist * sizeof(Distance));
-
-    mkt_distance_batch(
-        query,
-        cache->centroids,
-        cache->nlist,
-        cache->dim,
-        metric,
-        all_distances
-    );
-
-    // Find top nprobe
-    mkt_topk_insert_batch(heap, all_distances, cache->nlist, 0);
-
-    // Extract results
-    TopKEntry *entries = mkt_alloc(nprobe * sizeof(TopKEntry));
-    mkt_topk_extract_sorted(heap, entries);
-
-    for (uint32_t i = 0; i < nprobe; i++) {
-        clusters[i] = entries[i].id;
-        if (distances) distances[i] = entries[i].distance;
-    }
-
-    mkt_free(entries);
-    mkt_free(all_distances);
-    mkt_topk_destroy(heap);
-}
+typedef struct MktCentroidResult
+{
+    BlockNumber     posting_head; /* first posting list page */
+    ItemPointerData medoid_tid;   /* heap TID of medoid vector */
+    Distance        distance;     /* estimated distance to query */
+} MktCentroidResult;
 ```
+
+**Beam search** (`src/index/centroid_search.c`):
+
+```c
+uint32_t mkt_centroid_beam_search(
+    const MktCentroidSearchState *state,
+    BlockNumber                   first_centroid_blkno,
+    uint8_t                       nlevels,
+    MktCentroidResult            *results);
+```
+
+The algorithm:
+
+1. **Level 0**: Read root centroid page(s), score all centroids using
+   `mkt_rabitq_distance_batch_soa()` on the in-page SoA arrays. Keep top
+   `beam_width` candidates (or `nprobe` if single-level tree).
+
+2. **Intermediate levels**: For each winner, read its child centroid page(s)
+   via `child_blkno`, score all entries, select top `beam_width`.
+
+3. **Leaf level**: Same as intermediate but select top `nprobe`. Return
+   `posting_head` (child_blkno of leaf entries) and `medoid_tid` for each.
+
+**Batch SoA distance** (`src/quant/rabitq.c`):
+
+```c
+void mkt_rabitq_distance_batch_soa(
+    const RaBitQQueryState *qstate,
+    const float            *f_add,      /* [count] contiguous */
+    const float            *f_rescale,  /* [count] contiguous */
+    const uint8_t          *bits,       /* [count * packed_bytes] */
+    uint32_t                count,
+    Dimension               dim,
+    Distance               *distances); /* [count] output */
+```
+
+Operates directly on the contiguous SoA arrays within a centroid page. The
+inner loop calls the existing SIMD inner product kernel on each entry's bits,
+then applies the distance formula using the contiguous `f_add[]`/`f_rescale[]`
+arrays (which auto-vectorize).
 
 ### 5.3 Posting List Scan
 
@@ -4378,74 +4343,134 @@ Blocks 1..C:    Centroid pages (hierarchical tree)
 Blocks C+1..:   Posting list pages
 ```
 
-**Centroid page structure:**
+**Centroid page structure** (`src/index/centroid_page.h`):
 
-Centroid pages use the same SoA layout with bidirectional growth as posting
-pages. Metadata grows low→high, vectors grow high→low. This enables both
-SIMD-friendly scans and efficient appends during LIRE split/merge.
+Centroid pages use pre-allocated SoA (Structure of Arrays) layout. The
+dimension is fixed per index, so entry size and max capacity are constants.
+All regions are pre-allocated at page init time for the maximum number of
+entries that fit.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ Header                                                  │
-├─────────────────────────────────────────────────────────┤
-│ Entry[0] Entry[1] Entry[2] ...        ──► (grows down)  │
-│                                                         │
-│                        ... Vec[2] Vec[1] Vec[0] ◄──     │
-│                                        (grows up)       │
-└─────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│ PageHeaderData                              (24 bytes) │
+├────────────────────────────────────────────────────────┤
+│ MktCentroidEntryMeta[max]                (max × 16)    │
+│   child_blkno(4) + child_count(2) + flags(2)          │
+│   + medoid_tid(6) + reserved(2)                        │
+├────────────────────────────────────────────────────────┤
+│ float f_add[max]                          (max × 4)    │
+├────────────────────────────────────────────────────────┤
+│ float f_rescale[max]                      (max × 4)    │
+├────────────────────────────────────────────────────────┤
+│ uint8_t bits[max × D/8]                 (max × D/8)   │
+│   Contiguous binary codes for SIMD scanning            │
+├────────────────────────────────────────────────────────┤
+│ [padding]                                              │
+├────────────────────────────────────────────────────────┤
+│ MktCentroidPageOpaque                      (16 bytes)  │
+└────────────────────────────────────────────────────────┘
 ```
+
+Centroids are **medoids** — actual data vectors referenced by heap TID
+(`ItemPointerData`). This eliminates full-precision centroid storage in
+the index. All medoids are RaBitQ-encoded relative to the global data mean,
+sharing a single orthogonal matrix P.
 
 ```c
-// Centroid page header (SoA with reverse growth)
-typedef struct {
-    uint8_t      level;          // Tree level (0 = root)
-    uint8_t      flags;
-    uint16_t     entry_count;    // Centroids on this page
-    OffsetNumber meta_end;       // Offset past last metadata entry
-    OffsetNumber vec_start;      // Offset to first (lowest) vector
-    BlockNumber  parent_blkno;   // Parent centroid page
-    BlockNumber  next_blkno;     // Next page at same level (sibling)
-} MktCentroidPageHeader;
+/* Per-centroid metadata (16 bytes) */
+typedef struct MktCentroidEntryMeta
+{
+    BlockNumber      child_blkno;  /* child centroid page (internal)
+                                      or posting list head (leaf) */
+    uint16_t         child_count;  /* children at next level */
+    uint16_t         flags;        /* MKT_CENTROID_FLAG_LEAF etc. */
+    ItemPointerData  medoid_tid;   /* heap TID of medoid vector */
+    uint16_t         reserved;     /* alignment padding */
+} MktCentroidEntryMeta;            /* 16 bytes */
 
-// Centroid entry metadata (separate from vector data)
-typedef struct {
-    BlockNumber child_blkno;    // Child page (next level) or posting list head
-    uint16_t    child_offset;   // Entry index within child page (for non-leaf)
-    uint16_t    reserved;
-} MktCentroidEntry;
-
-// Access macros
-#define MKT_CENTROID_ENTRIES(page) \
-    ((MktCentroidEntry *)((char *)(page) + sizeof(MktCentroidPageHeader)))
-
-#define MKT_CENTROID_VECTORS(page, hdr) \
-    ((uint8_t *)((char *)(page) + (hdr)->vec_start))
-
-// Check if page has room for another entry
-static inline bool mkt_centroid_page_has_room(const MktCentroidPageHeader *hdr,
-                                               Dimension dim) {
-    size_t need = sizeof(MktCentroidEntry) + SIMD_ALIGN(dim / 8);
-    return (hdr->vec_start - hdr->meta_end) >= need;
-}
+/* Page special area (16 bytes, at page end per PG convention) */
+typedef struct MktCentroidPageOpaque
+{
+    BlockNumber next_blkno;        /* next page at same level */
+    uint16_t    entry_count;       /* centroids on this page */
+    uint8_t     level;             /* tree level (0 = root) */
+    uint8_t     flags;             /* page flags */
+    uint16_t    page_id;           /* MKT_CENTROID_PAGE_ID (0x4D43) */
+    uint16_t    first_global_idx;  /* global index of first entry */
+    uint32_t    reserved;
+} MktCentroidPageOpaque;           /* 16 bytes */
 ```
 
-**Why SoA with bidirectional growth:**
-- SIMD distance computation loads vectors sequentially (no gather instructions)
-- Hardware prefetcher works efficiently with contiguous access
-- Supports appends during LIRE split/merge operations
-- Consistent pattern with posting list pages
+**Capacity** (768d): Per entry = 16 (meta) + 4 (f_add) + 4 (f_rescale) +
+96 (bits) = 120 bytes. Usable = 8192 - 24 - 16 = 8152 bytes.
+Max entries = 8152 / 120 = **67 per page**.
 
-**Reading centroids:**
+**SoA access macros:**
+
 ```c
-// Read centroid page via standard buffer cache
-Buffer buf = ReadBuffer(index, centroid_blkno);
-LockBuffer(buf, BUFFER_LOCK_SHARE);
-Page page = BufferGetPage(buf);
+#define MKT_CENTROID_META(page) \
+    ((MktCentroidEntryMeta *) \
+     ((char *)(page) + SizeOfPageHeaderData))
 
-MktCentroidPageHeader *hdr = (MktCentroidPageHeader *)PageGetContents(page);
-// ... traverse centroids ...
+#define MKT_CENTROID_F_ADD(page, max) \
+    ((float *)((char *)(page) + SizeOfPageHeaderData \
+               + (max) * sizeof(MktCentroidEntryMeta)))
 
-UnlockReleaseBuffer(buf);
+#define MKT_CENTROID_F_RESCALE(page, max) \
+    ((float *)((char *)(page) + SizeOfPageHeaderData \
+               + (max) * sizeof(MktCentroidEntryMeta) \
+               + (max) * sizeof(float)))
+
+#define MKT_CENTROID_BITS(page, max) \
+    ((uint8_t *)((char *)(page) + SizeOfPageHeaderData \
+                 + (max) * sizeof(MktCentroidEntryMeta) \
+                 + (max) * 2 * sizeof(float)))
+
+#define MKT_CENTROID_OPAQUE(page) \
+    ((MktCentroidPageOpaque *) \
+     ((char *)(page) + BLCKSZ - sizeof(MktCentroidPageOpaque)))
+```
+
+**Page operations:**
+
+```c
+void mkt_centroid_page_init(Page page, uint8_t level,
+                            uint16_t first_global_idx);
+
+bool mkt_centroid_page_add(Page page, Dimension dim,
+                           BlockNumber child_blkno,
+                           uint16_t child_count, uint16_t flags,
+                           const ItemPointerData *medoid_tid,
+                           const RaBitQData *data);
+```
+
+**I/O abstraction** (`MktPageAccessor`):
+
+The same centroid page code runs in both standalone and PostgreSQL mode.
+Only the I/O layer differs, abstracted via callbacks:
+
+```c
+typedef struct MktPageAccessor
+{
+    Page (*read)(void *ctx, BlockNumber blkno);
+    void (*release)(void *ctx, BlockNumber blkno);
+    Page (*new_page)(void *ctx, BlockNumber *blkno_out);
+    void (*mark_dirty)(void *ctx, BlockNumber blkno);
+    void *ctx;
+} MktPageAccessor;
+```
+
+In standalone mode, `ctx` is an array of `malloc`'d 8KB buffers. In PG mode,
+`ctx` is a `Relation`, with `read` wrapping `ReadBuffer`/`BufferGetPage` and
+`release` wrapping `ReleaseBuffer`.
+
+**Reading centroids (PG mode):**
+```c
+// MktPageAccessor wraps standard buffer cache operations
+Page page = accessor->read(accessor->ctx, centroid_blkno);
+MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
+// ... batch distance on SoA arrays ...
+accessor->release(accessor->ctx, centroid_blkno);
 ```
 
 Hot centroid pages stay cached in shared_buffers. For billion-scale indexes,
@@ -5711,6 +5736,8 @@ meerkat/
 │   │   ├── memory.h              # Memory abstraction interface
 │   │   ├── memory_standalone.h   # Arena allocator declarations
 │   │   ├── memory_standalone.c   # Arena allocator implementation
+│   │   ├── pg_compat.h           # Standalone PG type shims (BlockNumber,
+│   │   │                         #   ItemPointerData, Page, BLCKSZ)
 │   │   ├── platform.h            # SIMD detection, prefetch, alignment
 │   │   └── platform.c
 │   │
@@ -5731,6 +5758,13 @@ meerkat/
 │   │   ├── rabitq_avx512.c       # SIMD-optimized RaBitQ
 │   │   ├── rabitq_avx2.c
 │   │   └── rabitq_neon.c
+│   │
+│   ├── index/                    # Index structures (standalone, no PG)
+│   │   ├── centroid_page.h       # Centroid page layout, SoA macros,
+│   │   │                         #   MktPageAccessor, MktVectorAccessor
+│   │   ├── centroid_page.c       # Page init, add entry
+│   │   ├── centroid_search.h     # Beam search API, search state
+│   │   └── centroid_search.c     # Level-by-level beam search
 │   │
 │   ├── cli/                      # Command-line tool ('mkt' binary)
 │   │   ├── main.c                # Entry point, subcommand dispatch
@@ -5792,6 +5826,8 @@ meerkat/
 │   │   ├── test_rabitq.c
 │   │   ├── test_topk.c
 │   │   ├── test_kmeans.c
+│   │   ├── test_centroid_page.c  # Centroid page layout tests
+│   │   ├── test_centroid_search.c # Beam search tests
 │   │   └── meson.build
 │   ├── regress/                  # PostgreSQL regression tests
 │   │   ├── sql/
@@ -5824,19 +5860,18 @@ meerkat/
                         ┌───────────────────────────────────┐
                         │              src/pg/              │
                         │  (PostgreSQL extension, all of:   │
-                        │   index/, build/, search/, iam/,  │
-                        │            lire/)                 │
+                        │   build/, search/, iam/, lire/)   │
                         └─────────────────┬─────────────────┘
                                           │
-    ┌─────────────────────────────────────┼────────────────┐
-    │                                     │                │
-    ▼                                     ▼                ▼
-┌────────┐                         ┌───────────┐    ┌───────────┐
-│  cli/  │                         │   quant/  │    │   algo/   │
-│ (mkt)  │────────────────────────►│  rabitq   │───►│ distance  │
-└────────┘                         └───────────┘    │   topk    │
-                                                    │  kmeans   │
-                                                    └─────┬─────┘
+    ┌──────────────────┬──────────────────┼────────────────┐
+    │                  │                  │                │
+    ▼                  ▼                  ▼                ▼
+┌────────┐      ┌───────────┐     ┌───────────┐    ┌───────────┐
+│  cli/  │      │  index/   │     │   quant/  │    │   algo/   │
+│ (mkt)  │─────►│ centroid  │────►│  rabitq   │───►│ distance  │
+└────────┘      │  page +   │     └───────────┘    │   topk    │
+                │  search   │                      │  kmeans   │
+                └───────────┘                      └─────┬─────┘
                                                           │
                                                           ▼
                                                     ┌───────────┐
