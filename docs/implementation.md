@@ -3863,10 +3863,10 @@ Done. Index size: 42.8 MB
 Search is split into two phases: centroid routing (beam search through the
 centroid tree) and posting list scan (RaBitQ distance on data vectors).
 
-The centroid search phase uses `MktPageAccessor` callbacks so the same code
+The centroid search phase uses `MktStorage` callbacks so the same code
 runs in both standalone and PostgreSQL mode. There is **no separate in-memory
-centroid cache** — search reads centroid pages directly via the accessor,
-which in PG mode wraps the standard shared buffer cache.
+centroid cache** — search reads centroid pages directly via the storage
+vtable, which in PG mode wraps the standard shared buffer cache.
 
 ```c
 /* Search parameters (from reloptions / GUCs) */
@@ -3886,13 +3886,13 @@ uint32_t mkt_centroid_beam_search(
 ```
 
 The `MktCentroidSearchState` bundles a pre-computed `RaBitQQueryState`
-(query transformed against the global mean), the page accessor, beam_width,
+(query transformed against the global mean), the storage vtable, beam_width,
 nprobe, and dimension. Results contain `posting_head` block numbers and
 `medoid_tid` for each selected leaf cluster.
 
 ### 5.2 Centroid Search Implementation
 
-Centroid search uses level-by-level beam search via `MktPageAccessor`
+Centroid search uses level-by-level beam search via `MktStorage`
 callbacks, reading centroid pages directly from the buffer cache (or from a
 flat array in standalone mode). All centroids are RaBitQ-encoded relative to
 the global data mean, so the query is transformed once and reused at every
@@ -3903,8 +3903,8 @@ level.
 ```c
 typedef struct MktCentroidSearchState
 {
-    RaBitQQueryState      *qstate;    /* query transformed vs global mean */
-    const MktPageAccessor *accessor;  /* page I/O callbacks */
+    RaBitQQueryState  *qstate;    /* query transformed vs global mean */
+    const MktStorage  *storage;  /* page and vector I/O */
     uint32_t               beam_width;
     uint32_t               nprobe;
     Dimension              dim;
@@ -4444,33 +4444,44 @@ bool mkt_centroid_page_add(Page page, Dimension dim,
                            const RaBitQData *data);
 ```
 
-**I/O abstraction** (`MktPageAccessor`):
+**I/O abstraction** (`MktStorage`):
 
-The same centroid page code runs in both standalone and PostgreSQL mode.
-Only the I/O layer differs, abstracted via callbacks:
+All page and vector I/O is abstracted behind a single `MktStorage` vtable
+(`src/index/storage.h`), shared across centroid pages, posting lists, and
+future index components. WAL logging and durability are internal to each
+implementation — the caller just sees read/release/write/commit:
 
 ```c
-typedef struct MktPageAccessor
+typedef struct MktStorage
 {
-    Page (*read)(void *ctx, BlockNumber blkno);
-    void (*release)(void *ctx, BlockNumber blkno);
+    /* Read path */
+    Page (*read_page)(void *ctx, BlockNumber blkno);
+    void (*release_page)(void *ctx, BlockNumber blkno);
+
+    /* Write path (durability/WAL is internal to implementation) */
+    Page (*write_page)(void *ctx, BlockNumber blkno);
     Page (*new_page)(void *ctx, BlockNumber *blkno_out);
-    void (*mark_dirty)(void *ctx, BlockNumber blkno);
+    void (*commit_page)(void *ctx, BlockNumber blkno);
+
+    /* Vector fetch */
+    VectorRef (*fetch_vec)(void *ctx, ItemPointerData tid);
+
     void *ctx;
-} MktPageAccessor;
+} MktStorage;
 ```
 
 In standalone mode, `ctx` is an array of `malloc`'d 8KB buffers. In PG mode,
-`ctx` is a `Relation`, with `read` wrapping `ReadBuffer`/`BufferGetPage` and
-`release` wrapping `ReleaseBuffer`.
+`ctx` is a `Relation`, with `read_page` wrapping `ReadBuffer` + `Lock(SHARE)`
+and `commit_page` wrapping `GenericXLogFinish` + `UnlockReleaseBuffer`.
 
-**Reading centroids (PG mode):**
+Static inline wrapper functions hide the vtable dispatch:
+
 ```c
-// MktPageAccessor wraps standard buffer cache operations
-Page page = accessor->read(accessor->ctx, centroid_blkno);
+// Clean API — no s->fn(s->ctx, ...) at call sites
+Page page = mkt_storage_read_page(storage, centroid_blkno);
 MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
 // ... batch distance on SoA arrays ...
-accessor->release(accessor->ctx, centroid_blkno);
+mkt_storage_release_page(storage, centroid_blkno);
 ```
 
 Hot centroid pages stay cached in shared_buffers. For billion-scale indexes,
@@ -5760,8 +5771,8 @@ meerkat/
 │   │   └── rabitq_neon.c
 │   │
 │   ├── index/                    # Index structures (standalone, no PG)
-│   │   ├── centroid_page.h       # Centroid page layout, SoA macros,
-│   │   │                         #   MktPageAccessor, MktVectorAccessor
+│   │   ├── storage.h             # MktStorage I/O vtable + wrappers
+│   │   ├── centroid_page.h       # Centroid page layout, SoA macros
 │   │   ├── centroid_page.c       # Page init, add entry
 │   │   ├── centroid_search.h     # Beam search API, search state
 │   │   └── centroid_search.c     # Level-by-level beam search
