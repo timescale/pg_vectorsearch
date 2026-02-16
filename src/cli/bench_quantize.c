@@ -304,7 +304,7 @@ benchmark_encode_batch(
 
 	VectorRef cent_ref = {.data = centroid, .dim = dim};
 
-	/* Allocate SoA output buffers */
+	/* Allocate batch output buffers */
 	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
 	float	*f_add		  = mkt_alloc(count * sizeof(float));
 	float	*f_rescale	  = mkt_alloc(count * sizeof(float));
@@ -1023,7 +1023,7 @@ benchmark_encode_comparison(
 		return;
 	}
 
-	/* Allocate SoA batch output buffers */
+	/* Allocate batch output buffers */
 	float	*batch_f_add	 = mkt_alloc(count * sizeof(float));
 	float	*batch_f_rescale = mkt_alloc(count * sizeof(float));
 	uint8_t *batch_bits		 = mkt_alloc((size_t)count * packed_bytes);

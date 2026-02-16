@@ -85,10 +85,10 @@ typedef struct RaBitQData
 #define MKT_RABITQ_DATA(v) ((RaBitQData *)&(v)->f_add)
 
 /*
- * RaBitQBatch - Batch of encoded vectors in SoA layout
+ * RaBitQBatch - Batch of encoded vectors in separate arrays
  *
  * Used for batch encoding where separate arrays for each field enable
- * efficient scatter into posting page SoA regions.
+ * efficient SIMD processing and bulk page insertion.
  */
 typedef struct RaBitQBatch
 {
@@ -149,14 +149,15 @@ typedef void (*RaBitQDistanceWithBoundFn)(
 
 typedef struct RaBitQQueryState
 {
-	float	 *transformed;	   /* P^T * (query - centroid) */
-	uint8_t	 *query_bits;	   /* sign(transformed), packed bits */
-	float	  g_add;		   /* ||query - centroid||² */
-	float	  g_error;		   /* sqrt(g_add) for error bound */
-	float	  g_scale;		   /* mean(|transformed|) for symmetric */
-	float	  sum_transformed; /* sum(transformed) for distance formula */
-	float	  inv_sqrt_d;	   /* 1 / sqrt(dim) */
-	float	  c_error;		   /* 2*ε/√(d-1), for deriving f_error */
+	float	 *transformed;		/* P^T * (query - centroid) */
+	uint8_t	 *query_bits;		/* sign(transformed), packed bits */
+	float	  g_add;			/* ||query - centroid||² */
+	float	  g_error;			/* sqrt(g_add) for error bound */
+	float	  g_scale;			/* mean(|transformed|) for symmetric */
+	float	  sum_transformed;	/* sum(transformed) for distance formula */
+	float	  inv_sqrt_d;		/* 1 / sqrt(dim) */
+	float	  c_error;			/* 2*ε/√(d-1), for deriving f_error */
+	float	  error_multiplier; /* 1.0 asymmetric, 3.0 symmetric */
 	Dimension dim;
 
 	/* Runtime dispatch (set by prepare_query_ex) */
@@ -230,7 +231,7 @@ int mkt_rabitq_encode_into(
 		RaBitQData		   *output);
 
 /*
- * Batch encode multiple vectors into SoA output arrays.
+ * Batch encode multiple vectors into separate output arrays.
  *
  * More efficient than calling mkt_rabitq_encode_into() repeatedly because:
  * 1. Matrix P is loaded into cache once and reused for all vectors
@@ -373,6 +374,25 @@ void mkt_rabitq_distance_with_bound(
 		Distance			   *lower_bound);
 
 /*
+ * Batch distance on separate arrays
+ *
+ * Computes estimated L2 distances for 'count' vectors whose fields
+ * are stored in separate contiguous arrays: f_add[], f_rescale[],
+ * and bits[]. Used by benchmarks and the multi-candidate kernel.
+ *
+ * The scalar arithmetic on contiguous f_add[]/f_rescale[] arrays
+ * auto-vectorizes with the compiler.
+ */
+void mkt_rabitq_distance_batch(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances);
+
+/*
  * Internal SIMD dispatch (called automatically)
  */
 
@@ -455,6 +475,91 @@ void mkt_rabitq_distance_batch_symmetric(
 		Distance			   *distances);
 
 /*
+ * Multi-candidate inner product (vertical SIMD)
+ *
+ * Computes inner products for multiple candidates in a single pass over
+ * transformed[]. Loads transformed[] once per dimension chunk and
+ * processes N candidates simultaneously.
+ *
+ * Candidate i's bits start at bits + i * stride.
+ */
+typedef void (*InnerProductMultiFn)(
+		const float	  *transformed,
+		const uint8_t *bits,
+		uint32_t	   stride,
+		Dimension	   dim,
+		uint32_t	   count,
+		float		  *results);
+
+void mkt_rabitq_inner_product_multi(
+		const float	  *transformed,
+		const uint8_t *bits,
+		uint32_t	   stride,
+		Dimension	   dim,
+		uint32_t	   count,
+		float		  *results);
+
+/*
+ * Batch distance using multi-candidate inner product
+ *
+ * Same interface as mkt_rabitq_distance_batch() but uses the
+ * vertical SIMD inner product to process multiple candidates per
+ * pass over transformed[].
+ */
+void mkt_rabitq_distance_batch_multi(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances);
+
+/*
+ * Batch distance with error bounds (multi-candidate inner product)
+ *
+ * Combines mkt_rabitq_inner_product_multi with per-entry error bound
+ * derivation. Bits are accessed via stride (not packed_bytes), allowing
+ * direct use on interleaved page data where stride = data_size.
+ *
+ * scratch: caller-provided buffer of at least count floats, reusable
+ * across calls to avoid per-call allocation.
+ */
+void mkt_rabitq_distance_batch_multi_with_bound(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				stride,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances,
+		Distance			   *lower_bounds,
+		float				   *scratch);
+
+/*
+ * Batch symmetric distance with error bounds
+ *
+ * Combines mkt_rabitq_hamming_distance_multi with per-entry error
+ * bound derivation. Like the asymmetric variant, bits are accessed
+ * via stride for direct use on interleaved page data.
+ *
+ * scratch: caller-provided buffer of at least count uint32_t's,
+ * reusable across calls to avoid per-call allocation.
+ */
+void mkt_rabitq_distance_batch_symmetric_with_bound(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				stride,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances,
+		Distance			   *lower_bounds,
+		uint32_t			   *scratch);
+
+/*
  * Get name of the active Hamming SIMD implementation.
  * Returns one of: "avx512-vpopcntdq", "avx2", "compiler"
  */
@@ -473,6 +578,13 @@ float mkt_rabitq_inner_product_avx512(
 		const float *transformed, const uint8_t *bits, Dimension dim);
 void mkt_rabitq_extract_signs_avx512(
 		const float *transformed, uint8_t *bits, Dimension dim);
+void mkt_rabitq_inner_product_multi_avx512(
+		const float	  *transformed,
+		const uint8_t *bits,
+		uint32_t	   stride,
+		Dimension	   dim,
+		uint32_t	   count,
+		float		  *results);
 
 /* AVX-512 VPOPCNTDQ Hamming implementations */
 uint32_t mkt_rabitq_hamming_avx512(
@@ -490,6 +602,13 @@ float mkt_rabitq_inner_product_avx2(
 		const float *transformed, const uint8_t *bits, Dimension dim);
 void mkt_rabitq_extract_signs_avx2(
 		const float *transformed, uint8_t *bits, Dimension dim);
+void mkt_rabitq_inner_product_multi_avx2(
+		const float	  *transformed,
+		const uint8_t *bits,
+		uint32_t	   stride,
+		Dimension	   dim,
+		uint32_t	   count,
+		float		  *results);
 
 /* AVX2 lookup-table Hamming implementations */
 uint32_t mkt_rabitq_hamming_avx2(
@@ -509,6 +628,13 @@ float mkt_rabitq_inner_product_neon(
 		const float *transformed, const uint8_t *bits, Dimension dim);
 void mkt_rabitq_extract_signs_neon(
 		const float *transformed, uint8_t *bits, Dimension dim);
+void mkt_rabitq_inner_product_multi_neon(
+		const float	  *transformed,
+		const uint8_t *bits,
+		uint32_t	   stride,
+		Dimension	   dim,
+		uint32_t	   count,
+		float		  *results);
 #endif
 
 #endif /* MKT_SIMD_FULL */
