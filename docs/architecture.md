@@ -135,9 +135,12 @@ structure that narrows the search space at each level.
 the best branch(es) at each level. This reduces centroid comparisons from O(N)
 to O(log N) while maintaining high recall through multi-path exploration.
 
-**Centroid representation**: Centroids are true centroids (mean of cluster
-vectors), computed during index build via hierarchical k-means. Synthetic
-centroids work well for navigation and don't require heap storage.
+**Centroid representation**: Centroids are **medoids** — actual data vectors
+from the dataset, referenced by heap TID (`ItemPointerData`). Each centroid
+entry stores the TID of the medoid vector rather than a full-precision copy.
+This eliminates dedicated centroid vector storage in the index. Medoids are
+selected during hierarchical k-means as the cluster member closest to the
+mean.
 
 ### 2. Centroid Pages in Shared Buffers
 
@@ -151,14 +154,22 @@ shared buffer cache—there is no separate dedicated cache structure.
 - Standard PostgreSQL infrastructure: locking, WAL, visibility
 - No custom shared memory allocation or startup coordination
 
-**Page layout**: Centroid pages store quantized centroid vectors in a format
-optimized for SIMD distance computation. Each page contains:
-- Array of quantized centroid vectors (contiguous, aligned)
-- Pointers to child nodes (for non-leaf levels) or posting lists (for leaves)
+**Page layout**: Centroid pages store RaBitQ-encoded medoid vectors in a
+bidirectional layout for SIMD-friendly distance computation. Each page
+contains:
+- Per-entry metadata (child pointer, medoid TID, flags) growing forward
+- Contiguous `RaBitQData` entries (f_add, f_rescale, bits) growing backward
+- Page opaque area with entry count, tree level, and sibling link
 
-**Sizing**: For billion-scale indexes:
-- Root level: ~256-1024 centroids (fits in a few pages)
-- Intermediate levels: Branch factor of 32-256
+All centroids at all levels are RaBitQ-encoded relative to the global data
+mean, sharing a single orthogonal matrix. The query is transformed once and
+reused at every tree level.
+
+**Sizing**: At 768 dimensions, each entry takes 120 bytes (16B metadata +
+4B f_add + 4B f_rescale + 96B bits), giving 67 entries per 8KB page. For
+billion-scale indexes:
+- Root level: ~256-1024 centroids (4-16 pages)
+- Intermediate levels: Branch factor of 32-64 (1 page per subtree)
 - Leaf level: Millions of clusters, each with a posting list
 
 ### 3. Multi-Tenant Centroid Routing
@@ -454,6 +465,13 @@ providing both performance isolation and predictable access patterns.
 4. Re-rank surviving candidates (~1-5%) with full precision
 5. Return top-k results
 ```
+
+**Beam search**: Centroid routing uses level-by-level beam search
+(`mkt_centroid_beam_search`) rather than best-first search. This maps well
+to PostgreSQL's page-based buffer cache: each level is processed as a batch,
+enabling SIMD distance computation on entries within each page.
+Upper-level pages stay hot in `shared_buffers` since they are accessed on
+every query.
 
 **Parameters**:
 - `nprobe`: Number of leaf posting lists to scan (recall/speed tradeoff)
