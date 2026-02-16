@@ -109,6 +109,93 @@ mkt_rabitq_extract_signs_avx512(
 	}
 }
 
+/*
+ * AVX-512 multi-candidate vertical inner product.
+ *
+ * Processes 4 candidates per dimension chunk. Each iteration:
+ * 1. Load 16 floats from transformed[] (1 zmm register)
+ * 2. For each of 4 candidates: load 2 bytes of bits, form mask,
+ *    masked-add into that candidate's accumulator
+ * 3. After all dimensions: horizontal sum each accumulator
+ *
+ * Tail candidates (count % 4) use the single-candidate kernel.
+ */
+MKT_TARGET_AVX512 void
+mkt_rabitq_inner_product_multi_avx512(
+		const float	  *transformed,
+		const uint8_t *bits,
+		uint32_t	   stride,
+		Dimension	   dim,
+		uint32_t	   count,
+		float		  *results)
+{
+	/* Process groups of 4 candidates */
+	uint32_t groups = count / 4;
+	uint32_t tail	= count % 4;
+
+	for (uint32_t g = 0; g < groups; g++)
+	{
+		uint32_t base = g * 4;
+
+		const uint8_t *b0 = bits + (size_t)base * stride;
+		const uint8_t *b1 = bits + (size_t)(base + 1) * stride;
+		const uint8_t *b2 = bits + (size_t)(base + 2) * stride;
+		const uint8_t *b3 = bits + (size_t)(base + 3) * stride;
+
+		__m512 sum0 = _mm512_setzero_ps();
+		__m512 sum1 = _mm512_setzero_ps();
+		__m512 sum2 = _mm512_setzero_ps();
+		__m512 sum3 = _mm512_setzero_ps();
+
+		/* Main loop: process 16 floats at a time */
+		Dimension i = 0;
+		for (; i + 16 <= dim; i += 16)
+		{
+			__m512 t = _mm512_loadu_ps(transformed + i);
+
+			uint32_t bi = i / 8;
+
+			__mmask16 k0 = (__mmask16)((uint16_t)b0[bi + 1] << 8 | b0[bi]);
+			__mmask16 k1 = (__mmask16)((uint16_t)b1[bi + 1] << 8 | b1[bi]);
+			__mmask16 k2 = (__mmask16)((uint16_t)b2[bi + 1] << 8 | b2[bi]);
+			__mmask16 k3 = (__mmask16)((uint16_t)b3[bi + 1] << 8 | b3[bi]);
+
+			sum0 = _mm512_mask_add_ps(sum0, k0, sum0, t);
+			sum1 = _mm512_mask_add_ps(sum1, k1, sum1, t);
+			sum2 = _mm512_mask_add_ps(sum2, k2, sum2, t);
+			sum3 = _mm512_mask_add_ps(sum3, k3, sum3, t);
+		}
+
+		results[base + 0] = mkt_horizontal_sum_avx512(sum0);
+		results[base + 1] = mkt_horizontal_sum_avx512(sum1);
+		results[base + 2] = mkt_horizontal_sum_avx512(sum2);
+		results[base + 3] = mkt_horizontal_sum_avx512(sum3);
+
+		/* Scalar tail for remaining dimensions */
+		for (; i < dim; i++)
+		{
+			int byte_idx = i / 8;
+			int bit_idx	 = i % 8;
+
+			if ((b0[byte_idx] >> bit_idx) & 1)
+				results[base + 0] += transformed[i];
+			if ((b1[byte_idx] >> bit_idx) & 1)
+				results[base + 1] += transformed[i];
+			if ((b2[byte_idx] >> bit_idx) & 1)
+				results[base + 2] += transformed[i];
+			if ((b3[byte_idx] >> bit_idx) & 1)
+				results[base + 3] += transformed[i];
+		}
+	}
+
+	/* Handle remaining candidates with single-candidate kernel */
+	for (uint32_t i = groups * 4; i < groups * 4 + tail; i++)
+	{
+		results[i] = mkt_rabitq_inner_product_avx512(
+				transformed, bits + (size_t)i * stride, dim);
+	}
+}
+
 #endif /* x86_64 */
 
 #endif /* MKT_SIMD_FULL */

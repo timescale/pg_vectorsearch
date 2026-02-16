@@ -78,14 +78,35 @@ rabitq_inner_product_compiler(
 }
 
 /*
+ * Compiler-vectorized multi-candidate inner product baseline.
+ *
+ * Simple loop calling the single-candidate function. This is the
+ * baseline that hand-optimized vertical SIMD kernels must beat.
+ */
+MKT_TARGET_CLONES static void
+rabitq_inner_product_multi_compiler(
+		const float	  *transformed,
+		const uint8_t *bits,
+		uint32_t	   stride,
+		Dimension	   dim,
+		uint32_t	   count,
+		float		  *results)
+{
+	for (uint32_t i = 0; i < count; i++)
+		results[i] = rabitq_inner_product_compiler(
+				transformed, bits + (size_t)i * stride, dim);
+}
+
+/*
  * Function pointer dispatch for inner product and sign extraction
  */
 typedef float (*InnerProductFn)(const float *, const uint8_t *, Dimension);
 typedef void (*ExtractSignsFn)(const float *, uint8_t *, Dimension);
-static InnerProductFn g_inner_product_fn   = NULL;
-static ExtractSignsFn g_extract_signs_fn   = NULL;
-static const char	 *g_impl_name		   = NULL;
-static _Atomic(bool)  g_rabitq_initialized = false;
+static InnerProductFn	   g_inner_product_fn		= NULL;
+static InnerProductMultiFn g_inner_product_multi_fn = NULL;
+static ExtractSignsFn	   g_extract_signs_fn		= NULL;
+static const char		  *g_impl_name				= NULL;
+static _Atomic(bool)	   g_rabitq_initialized		= false;
 
 /* Forward declaration for compiler-vectorized fallback */
 MKT_TARGET_CLONES static void rabitq_extract_signs_compiler(
@@ -94,10 +115,11 @@ MKT_TARGET_CLONES static void rabitq_extract_signs_compiler(
 void
 mkt_rabitq_force_reinit(void)
 {
-	g_rabitq_initialized = false;
-	g_inner_product_fn	 = NULL;
-	g_extract_signs_fn	 = NULL;
-	g_impl_name			 = NULL;
+	g_rabitq_initialized	 = false;
+	g_inner_product_fn		 = NULL;
+	g_inner_product_multi_fn = NULL;
+	g_extract_signs_fn		 = NULL;
+	g_impl_name				 = NULL;
 }
 
 int
@@ -112,46 +134,53 @@ mkt_rabitq_init_simd(void)
 #if defined(__x86_64__) || defined(_M_X64)
 	if (caps & SIMD_AVX512F)
 	{
-		g_inner_product_fn = mkt_rabitq_inner_product_avx512;
-		g_extract_signs_fn = mkt_rabitq_extract_signs_avx512;
-		g_impl_name		   = "avx512";
+		g_inner_product_fn		 = mkt_rabitq_inner_product_avx512;
+		g_inner_product_multi_fn = mkt_rabitq_inner_product_multi_avx512;
+		g_extract_signs_fn		 = mkt_rabitq_extract_signs_avx512;
+		g_impl_name				 = "avx512";
 	}
 	else if (caps & SIMD_AVX2)
 	{
-		g_inner_product_fn = mkt_rabitq_inner_product_avx2;
-		g_extract_signs_fn = mkt_rabitq_extract_signs_avx2;
-		g_impl_name		   = "avx2";
+		g_inner_product_fn		 = mkt_rabitq_inner_product_avx2;
+		g_inner_product_multi_fn = mkt_rabitq_inner_product_multi_avx2;
+		g_extract_signs_fn		 = mkt_rabitq_extract_signs_avx2;
+		g_impl_name				 = "avx2";
 	}
 	else
 	{
-		g_inner_product_fn = rabitq_inner_product_compiler;
-		g_extract_signs_fn = rabitq_extract_signs_compiler;
-		g_impl_name		   = "compiler";
+		g_inner_product_fn		 = rabitq_inner_product_compiler;
+		g_inner_product_multi_fn = rabitq_inner_product_multi_compiler;
+		g_extract_signs_fn		 = rabitq_extract_signs_compiler;
+		g_impl_name				 = "compiler";
 	}
 #elif defined(__aarch64__) || defined(_M_ARM64)
 	if (caps & SIMD_NEON)
 	{
-		g_inner_product_fn = mkt_rabitq_inner_product_neon;
-		g_extract_signs_fn = mkt_rabitq_extract_signs_neon;
-		g_impl_name		   = "neon";
+		g_inner_product_fn		 = mkt_rabitq_inner_product_neon;
+		g_inner_product_multi_fn = mkt_rabitq_inner_product_multi_neon;
+		g_extract_signs_fn		 = mkt_rabitq_extract_signs_neon;
+		g_impl_name				 = "neon";
 	}
 	else
 	{
-		g_inner_product_fn = rabitq_inner_product_compiler;
-		g_extract_signs_fn = rabitq_extract_signs_compiler;
-		g_impl_name		   = "compiler";
+		g_inner_product_fn		 = rabitq_inner_product_compiler;
+		g_inner_product_multi_fn = rabitq_inner_product_multi_compiler;
+		g_extract_signs_fn		 = rabitq_extract_signs_compiler;
+		g_impl_name				 = "compiler";
 	}
 #else
-	g_inner_product_fn = rabitq_inner_product_compiler;
-	g_extract_signs_fn = rabitq_extract_signs_compiler;
-	g_impl_name		   = "compiler";
+	g_inner_product_fn		 = rabitq_inner_product_compiler;
+	g_inner_product_multi_fn = rabitq_inner_product_multi_compiler;
+	g_extract_signs_fn		 = rabitq_extract_signs_compiler;
+	g_impl_name				 = "compiler";
 #endif
 
 #else
 	/* simd=compiler or simd=none mode */
-	g_inner_product_fn = rabitq_inner_product_compiler;
-	g_extract_signs_fn = rabitq_extract_signs_compiler;
-	g_impl_name		   = "compiler";
+	g_inner_product_fn		 = rabitq_inner_product_compiler;
+	g_inner_product_multi_fn = rabitq_inner_product_multi_compiler;
+	g_extract_signs_fn		 = rabitq_extract_signs_compiler;
+	g_impl_name				 = "compiler";
 #endif
 
 	g_rabitq_initialized = true;
@@ -846,6 +875,87 @@ mkt_rabitq_distance(
 					 2.0f * data->f_rescale * final_dot;
 
 	return est_dist;
+}
+
+void
+mkt_rabitq_distance_batch(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances)
+{
+	if (qstate == NULL || f_add == NULL || f_rescale == NULL || bits == NULL ||
+		distances == NULL || count == 0)
+		return;
+
+	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		float binary_ip = rabitq_inner_product(
+				qstate->transformed, bits + (size_t)i * packed_bytes, dim);
+
+		float final_dot = (2.0f * binary_ip - qstate->sum_transformed) *
+						  qstate->inv_sqrt_d;
+
+		distances[i] = f_add[i] + qstate->g_add -
+					   2.0f * f_rescale[i] * final_dot;
+	}
+}
+
+void
+mkt_rabitq_inner_product_multi(
+		const float	  *transformed,
+		const uint8_t *bits,
+		uint32_t	   stride,
+		Dimension	   dim,
+		uint32_t	   count,
+		float		  *results)
+{
+	if (mkt_unlikely(!g_rabitq_initialized))
+		mkt_rabitq_init_simd();
+	g_inner_product_multi_fn(transformed, bits, stride, dim, count, results);
+}
+
+void
+mkt_rabitq_distance_batch_multi(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances)
+{
+	if (qstate == NULL || f_add == NULL || f_rescale == NULL || bits == NULL ||
+		distances == NULL || count == 0)
+		return;
+
+	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+
+	/* Compute all inner products in a single multi-candidate pass */
+	float *ips = mkt_alloc_aligned(count * sizeof(float), 64);
+	if (ips == NULL)
+		return;
+
+	mkt_rabitq_inner_product_multi(
+			qstate->transformed, bits, packed_bytes, dim, count, ips);
+
+	/* Apply distance formula to all candidates */
+	float g_add		 = qstate->g_add;
+	float sum_t		 = qstate->sum_transformed;
+	float inv_sqrt_d = qstate->inv_sqrt_d;
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		float final_dot = (2.0f * ips[i] - sum_t) * inv_sqrt_d;
+		distances[i]	= f_add[i] + g_add - 2.0f * f_rescale[i] * final_dot;
+	}
+
+	mkt_free_aligned(ips);
 }
 
 void

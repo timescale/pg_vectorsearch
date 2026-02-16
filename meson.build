@@ -319,6 +319,7 @@ mkt_cli_sources = files(
   'src/cli/bench_quantize.c',
   'src/cli/bench_cluster.c',
   'src/cli/bench_search.c',
+  'src/cli/bench_page_score.c',
   'src/cli/distance_pgvector.c',
   'src/cli/kmeans_pgvector.c',
 )

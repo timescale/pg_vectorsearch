@@ -142,6 +142,91 @@ mkt_rabitq_extract_signs_avx2(
 	}
 }
 
+/*
+ * AVX2 multi-candidate vertical inner product.
+ *
+ * Processes 4 candidates per dimension chunk. Each iteration:
+ * 1. Load 8 floats from transformed[] (1 ymm register)
+ * 2. For each of 4 candidates: expand 1 byte to mask, masked-and-add
+ * 3. After all dimensions: horizontal sum each accumulator
+ *
+ * Tail candidates (count % 4) use the single-candidate kernel.
+ */
+MKT_TARGET_AVX2 void
+mkt_rabitq_inner_product_multi_avx2(
+		const float	  *transformed,
+		const uint8_t *bits,
+		uint32_t	   stride,
+		Dimension	   dim,
+		uint32_t	   count,
+		float		  *results)
+{
+	uint32_t groups = count / 4;
+	uint32_t tail	= count % 4;
+
+	for (uint32_t g = 0; g < groups; g++)
+	{
+		uint32_t base = g * 4;
+
+		const uint8_t *b0 = bits + (size_t)base * stride;
+		const uint8_t *b1 = bits + (size_t)(base + 1) * stride;
+		const uint8_t *b2 = bits + (size_t)(base + 2) * stride;
+		const uint8_t *b3 = bits + (size_t)(base + 3) * stride;
+
+		__m256 sum0 = _mm256_setzero_ps();
+		__m256 sum1 = _mm256_setzero_ps();
+		__m256 sum2 = _mm256_setzero_ps();
+		__m256 sum3 = _mm256_setzero_ps();
+
+		/* Main loop: process 8 floats (1 byte of bits) at a time */
+		Dimension i = 0;
+		for (; i + 8 <= dim; i += 8)
+		{
+			__m256 t = _mm256_loadu_ps(transformed + i);
+
+			uint32_t bi = i / 8;
+
+			__m256 mask0 = expand_byte_to_mask_avx2(b0[bi]);
+			__m256 mask1 = expand_byte_to_mask_avx2(b1[bi]);
+			__m256 mask2 = expand_byte_to_mask_avx2(b2[bi]);
+			__m256 mask3 = expand_byte_to_mask_avx2(b3[bi]);
+
+			sum0 = _mm256_add_ps(sum0, _mm256_and_ps(t, mask0));
+			sum1 = _mm256_add_ps(sum1, _mm256_and_ps(t, mask1));
+			sum2 = _mm256_add_ps(sum2, _mm256_and_ps(t, mask2));
+			sum3 = _mm256_add_ps(sum3, _mm256_and_ps(t, mask3));
+		}
+
+		results[base + 0] = mkt_horizontal_sum_avx2(sum0);
+		results[base + 1] = mkt_horizontal_sum_avx2(sum1);
+		results[base + 2] = mkt_horizontal_sum_avx2(sum2);
+		results[base + 3] = mkt_horizontal_sum_avx2(sum3);
+
+		/* Scalar tail for remaining dimensions */
+		for (; i < dim; i++)
+		{
+			int byte_idx = i / 8;
+			int bit_idx	 = i % 8;
+
+			if ((b0[byte_idx] >> bit_idx) & 1)
+				results[base + 0] += transformed[i];
+			if ((b1[byte_idx] >> bit_idx) & 1)
+				results[base + 1] += transformed[i];
+			if ((b2[byte_idx] >> bit_idx) & 1)
+				results[base + 2] += transformed[i];
+			if ((b3[byte_idx] >> bit_idx) & 1)
+				results[base + 3] += transformed[i];
+		}
+	}
+
+	/* Handle remaining candidates with single-candidate kernel */
+	for (uint32_t i = groups * 4; i < groups * 4 + tail; i++)
+	{
+		results[i] = mkt_rabitq_inner_product_avx2(
+				transformed, bits + (size_t)i * stride, dim);
+	}
+}
+
 #endif /* x86_64 */
 
 #endif /* MKT_SIMD_FULL */

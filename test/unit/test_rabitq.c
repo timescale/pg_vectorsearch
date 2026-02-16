@@ -377,7 +377,7 @@ TEST(encode_batch_matches_single)
 			v[j] = (float)((i * 17 + j * 13) % 100 - 50) / 10.0f;
 	}
 
-	/* Encode with batch function using SoA output */
+	/* Encode with batch function into separate arrays */
 	uint32_t packed_bytes	 = MKT_RABITQ_BYTES(dim);
 	float	*batch_f_add	 = mkt_alloc(count * sizeof(float));
 	float	*batch_f_rescale = mkt_alloc(count * sizeof(float));
@@ -1416,6 +1416,295 @@ TEST(data_distance_null_inputs)
 	mkt_rabitq_free_query(state);
 	mkt_free(encoded);
 	mkt_rabitq_destroy(params);
+}
+
+/*
+ * Batch distance tests
+ */
+
+TEST(batch_matches_single)
+{
+	Dimension dim	= 128;
+	const int count = 8;
+
+	RaBitQParams *params = mkt_rabitq_create(dim, 42);
+	ASSERT_NOT_NULL(params, "params created");
+
+	float	 *centroid = alloc_test_vector(dim, 0);
+	VectorRef cent_ref = {.data = centroid, .dim = dim};
+
+	/* Encode vectors into separate arrays */
+	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	float	*f_add		  = mkt_alloc(count * sizeof(float));
+	float	*f_rescale	  = mkt_alloc(count * sizeof(float));
+	uint8_t *bits		  = mkt_alloc((size_t)count * packed_bytes);
+
+	RaBitQData **encodings = mkt_alloc(count * sizeof(void *));
+
+	for (int i = 0; i < count; i++)
+	{
+		float	 *vec	  = alloc_test_vector(dim, i * 7);
+		VectorRef vec_ref = {.data = vec, .dim = dim};
+		encodings[i]	  = mkt_rabitq_encode(params, vec_ref, cent_ref);
+		ASSERT_NOT_NULL(encodings[i], "encoding succeeded");
+
+		f_add[i]	 = encodings[i]->f_add;
+		f_rescale[i] = encodings[i]->f_rescale;
+		memcpy(bits + (size_t)i * packed_bytes,
+			   encodings[i]->bits,
+			   packed_bytes);
+	}
+
+	float			 *query		= alloc_test_vector(dim, 100);
+	VectorRef		  query_ref = {.data = query, .dim = dim};
+	RaBitQQueryState *qstate =
+			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
+	ASSERT_NOT_NULL(qstate, "query state created");
+
+	/* Compute batch distances */
+	Distance *batch_dists = mkt_alloc(count * sizeof(Distance));
+	mkt_rabitq_distance_batch(
+			qstate, f_add, f_rescale, bits, count, dim, batch_dists);
+
+	/* Compare with single-entry distances */
+	for (int i = 0; i < count; i++)
+	{
+		Distance single_dist = mkt_rabitq_distance(qstate, encodings[i], dim);
+
+		char msg[128];
+		snprintf(
+				msg,
+				sizeof(msg),
+				"vec %d: batch=%.6f single=%.6f",
+				i,
+				batch_dists[i],
+				single_dist);
+		ASSERT_FLOAT_EQ(single_dist, batch_dists[i], 1e-6f, msg);
+	}
+
+	mkt_free(batch_dists);
+	mkt_rabitq_free_query(qstate);
+	for (int i = 0; i < count; i++)
+		mkt_free(encodings[i]);
+	mkt_free(encodings);
+	mkt_free(bits);
+	mkt_free(f_rescale);
+	mkt_free(f_add);
+	mkt_rabitq_destroy(params);
+}
+
+TEST(batch_null_inputs)
+{
+	Dimension	  dim	   = 64;
+	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
+	float		 *centroid = alloc_test_vector(dim, 0);
+	VectorRef	  cent_ref = {.data = centroid, .dim = dim};
+
+	float			 *query		= alloc_test_vector(dim, 1);
+	VectorRef		  query_ref = {.data = query, .dim = dim};
+	RaBitQQueryState *qstate =
+			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
+
+	float	 f_add[1]	  = {1.0f};
+	float	 f_rescale[1] = {1.0f};
+	uint8_t	 bits[16]	  = {0};
+	Distance dists[1];
+
+	/* Should not crash with null inputs */
+	mkt_rabitq_distance_batch(NULL, f_add, f_rescale, bits, 1, dim, dists);
+	mkt_rabitq_distance_batch(qstate, NULL, f_rescale, bits, 1, dim, dists);
+	mkt_rabitq_distance_batch(qstate, f_add, NULL, bits, 1, dim, dists);
+	mkt_rabitq_distance_batch(qstate, f_add, f_rescale, NULL, 1, dim, dists);
+	mkt_rabitq_distance_batch(qstate, f_add, f_rescale, bits, 0, dim, dists);
+	mkt_rabitq_distance_batch(qstate, f_add, f_rescale, bits, 1, dim, NULL);
+
+	ASSERT_TRUE(1, "null inputs should not crash");
+
+	mkt_rabitq_free_query(qstate);
+	mkt_rabitq_destroy(params);
+}
+
+/*
+ * Multi-candidate inner product tests
+ */
+
+TEST_PARAMETERIZED(multi_matches_single, "compiler", "avx2", "avx512", "neon")
+{
+	SKIP_IF_RABITQ_SIMD_NOT_AVAILABLE(param);
+
+	const Dimension dims[] = {64, 128, 768};
+
+	for (size_t d = 0; d < sizeof(dims) / sizeof(dims[0]); d++)
+	{
+		Dimension dim	= dims[d];
+		const int count = 16;
+
+		RaBitQParams *params   = mkt_rabitq_create(dim, 42);
+		float		 *centroid = alloc_test_vector(dim, 0);
+		VectorRef	  cent_ref = {.data = centroid, .dim = dim};
+
+		/* Generate and encode test vectors */
+		float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
+		for (int i = 0; i < count; i++)
+		{
+			float *v = vectors + i * dim;
+			for (Dimension j = 0; j < dim; j++)
+				v[j] = (float)((i * 17 + j * 13) % 100 - 50) / 10.0f;
+		}
+
+		uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+		float	*f_add		  = mkt_alloc(count * sizeof(float));
+		float	*f_rescale	  = mkt_alloc(count * sizeof(float));
+		uint8_t *bits		  = mkt_alloc((size_t)count * packed_bytes);
+		int		 ret		  = mkt_rabitq_encode_batch(
+				  params,
+				  vectors,
+				  MKT_VEC_F32,
+				  cent_ref,
+				  f_add,
+				  f_rescale,
+				  bits,
+				  count);
+		ASSERT_EQ(0, ret, "batch encode should succeed");
+
+		/* Generate query and prepare state */
+		float	 *query		= alloc_test_vector(dim, 100);
+		VectorRef query_ref = {.data = query, .dim = dim};
+
+		reinit_rabitq_with_simd(simd_mask);
+
+		RaBitQQueryState *qstate =
+				mkt_rabitq_prepare_query(params, query_ref, cent_ref);
+		ASSERT_NOT_NULL(qstate, "prepare_query should succeed");
+
+		/* Compute sequential distances */
+		Distance *seq_dists = mkt_alloc(count * sizeof(Distance));
+		mkt_rabitq_distance_batch(
+				qstate, f_add, f_rescale, bits, count, dim, seq_dists);
+
+		/* Compute multi distances */
+		Distance *multi_dists = mkt_alloc(count * sizeof(Distance));
+		mkt_rabitq_distance_batch_multi(
+				qstate, f_add, f_rescale, bits, count, dim, multi_dists);
+
+		/* Compare results */
+		for (int i = 0; i < count; i++)
+		{
+			char msg[128];
+			snprintf(
+					msg,
+					sizeof(msg),
+					"dim=%u %s vec %d: seq=%.6f multi=%.6f",
+					dim,
+					param,
+					i,
+					seq_dists[i],
+					multi_dists[i]);
+			float tolerance = fabsf(seq_dists[i]) * 1e-4f;
+			if (tolerance < 1e-3f)
+				tolerance = 1e-3f;
+			ASSERT_FLOAT_EQ(seq_dists[i], multi_dists[i], tolerance, msg);
+		}
+
+		mkt_free(multi_dists);
+		mkt_free(seq_dists);
+		mkt_rabitq_free_query(qstate);
+		mkt_free(bits);
+		mkt_free(f_rescale);
+		mkt_free(f_add);
+		mkt_free(vectors);
+		mkt_rabitq_destroy(params);
+	}
+
+	reinit_rabitq_with_simd(0xFFFFFFFF);
+}
+
+TEST_PARAMETERIZED(multi_tail_handling, "compiler", "avx2", "avx512", "neon")
+{
+	SKIP_IF_RABITQ_SIMD_NOT_AVAILABLE(param);
+
+	Dimension dim = 128;
+
+	/* Test counts that are not multiples of 4 (the SIMD group size) */
+	const int counts[] = {1, 2, 3, 5, 7};
+
+	for (size_t c = 0; c < sizeof(counts) / sizeof(counts[0]); c++)
+	{
+		int count = counts[c];
+
+		RaBitQParams *params   = mkt_rabitq_create(dim, 42);
+		float		 *centroid = alloc_test_vector(dim, 0);
+		VectorRef	  cent_ref = {.data = centroid, .dim = dim};
+
+		float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
+		for (int i = 0; i < count; i++)
+		{
+			float *v = vectors + i * dim;
+			for (Dimension j = 0; j < dim; j++)
+				v[j] = (float)((i * 17 + j * 13) % 100 - 50) / 10.0f;
+		}
+
+		uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+		float	*f_add		  = mkt_alloc(count * sizeof(float));
+		float	*f_rescale	  = mkt_alloc(count * sizeof(float));
+		uint8_t *bits		  = mkt_alloc((size_t)count * packed_bytes);
+		int		 ret		  = mkt_rabitq_encode_batch(
+				  params,
+				  vectors,
+				  MKT_VEC_F32,
+				  cent_ref,
+				  f_add,
+				  f_rescale,
+				  bits,
+				  count);
+		ASSERT_EQ(0, ret, "batch encode should succeed");
+
+		float	 *query		= alloc_test_vector(dim, 100);
+		VectorRef query_ref = {.data = query, .dim = dim};
+
+		reinit_rabitq_with_simd(simd_mask);
+
+		RaBitQQueryState *qstate =
+				mkt_rabitq_prepare_query(params, query_ref, cent_ref);
+		ASSERT_NOT_NULL(qstate, "prepare_query should succeed");
+
+		Distance *seq_dists	  = mkt_alloc(count * sizeof(Distance));
+		Distance *multi_dists = mkt_alloc(count * sizeof(Distance));
+
+		mkt_rabitq_distance_batch(
+				qstate, f_add, f_rescale, bits, count, dim, seq_dists);
+		mkt_rabitq_distance_batch_multi(
+				qstate, f_add, f_rescale, bits, count, dim, multi_dists);
+
+		for (int i = 0; i < count; i++)
+		{
+			char msg[128];
+			snprintf(
+					msg,
+					sizeof(msg),
+					"count=%d %s vec %d: seq=%.6f multi=%.6f",
+					count,
+					param,
+					i,
+					seq_dists[i],
+					multi_dists[i]);
+			float tolerance = fabsf(seq_dists[i]) * 1e-4f;
+			if (tolerance < 1e-3f)
+				tolerance = 1e-3f;
+			ASSERT_FLOAT_EQ(seq_dists[i], multi_dists[i], tolerance, msg);
+		}
+
+		mkt_free(multi_dists);
+		mkt_free(seq_dists);
+		mkt_rabitq_free_query(qstate);
+		mkt_free(bits);
+		mkt_free(f_rescale);
+		mkt_free(f_add);
+		mkt_free(vectors);
+		mkt_rabitq_destroy(params);
+	}
+
+	reinit_rabitq_with_simd(0xFFFFFFFF);
 }
 
 /*
