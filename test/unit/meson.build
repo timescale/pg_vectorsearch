@@ -21,6 +21,8 @@ test_config_h = configure_file(
 unit_test_sources = files(
   'mkt_test.c',
   'run_tests.c',
+  'test_centroid_page.c',
+  'test_centroid_search.c',
   'test_distance.c',
   'test_fixtures.c',
   'test_halfvec.c',
@@ -83,7 +85,7 @@ foreach group : test_groups
       args: ['--tap', '--group', group],
       protocol: 'tap',
       workdir: meson.project_source_root(),
-      timeout: 30,
+      timeout: 120,
       suite: 'unit',
     )
   endif
