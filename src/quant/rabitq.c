@@ -78,14 +78,35 @@ rabitq_inner_product_compiler(
 }
 
 /*
+ * Compiler-vectorized multi-candidate inner product baseline.
+ *
+ * Simple loop calling the single-candidate function. This is the
+ * baseline that hand-optimized vertical SIMD kernels must beat.
+ */
+MKT_TARGET_CLONES static void
+rabitq_inner_product_multi_compiler(
+		const float	  *transformed,
+		const uint8_t *bits,
+		uint32_t	   stride,
+		Dimension	   dim,
+		uint32_t	   count,
+		float		  *results)
+{
+	for (uint32_t i = 0; i < count; i++)
+		results[i] = rabitq_inner_product_compiler(
+				transformed, bits + (size_t)i * stride, dim);
+}
+
+/*
  * Function pointer dispatch for inner product and sign extraction
  */
 typedef float (*InnerProductFn)(const float *, const uint8_t *, Dimension);
 typedef void (*ExtractSignsFn)(const float *, uint8_t *, Dimension);
-static InnerProductFn g_inner_product_fn   = NULL;
-static ExtractSignsFn g_extract_signs_fn   = NULL;
-static const char	 *g_impl_name		   = NULL;
-static _Atomic(bool)  g_rabitq_initialized = false;
+static InnerProductFn	   g_inner_product_fn		= NULL;
+static InnerProductMultiFn g_inner_product_multi_fn = NULL;
+static ExtractSignsFn	   g_extract_signs_fn		= NULL;
+static const char		  *g_impl_name				= NULL;
+static _Atomic(bool)	   g_rabitq_initialized		= false;
 
 /* Hamming distance function pointer dispatch */
 typedef uint32_t (*HammingFn)(const uint8_t *, const uint8_t *, uint32_t);
@@ -118,13 +139,14 @@ MKT_TARGET_CLONES static void rabitq_hamming_multi_compiler(
 void
 mkt_rabitq_force_reinit(void)
 {
-	g_rabitq_initialized = false;
-	g_inner_product_fn	 = NULL;
-	g_extract_signs_fn	 = NULL;
-	g_impl_name			 = NULL;
-	g_hamming_fn		 = NULL;
-	g_hamming_multi_fn	 = NULL;
-	g_hamming_impl_name	 = NULL;
+	g_rabitq_initialized	 = false;
+	g_inner_product_fn		 = NULL;
+	g_inner_product_multi_fn = NULL;
+	g_extract_signs_fn		 = NULL;
+	g_impl_name				 = NULL;
+	g_hamming_fn			 = NULL;
+	g_hamming_multi_fn		 = NULL;
+	g_hamming_impl_name		 = NULL;
 }
 
 int
@@ -139,39 +161,45 @@ mkt_rabitq_init_simd(void)
 #if defined(__x86_64__) || defined(_M_X64)
 	if (caps & SIMD_AVX512F)
 	{
-		g_inner_product_fn = mkt_rabitq_inner_product_avx512;
-		g_extract_signs_fn = mkt_rabitq_extract_signs_avx512;
-		g_impl_name		   = "avx512";
+		g_inner_product_fn		 = mkt_rabitq_inner_product_avx512;
+		g_inner_product_multi_fn = mkt_rabitq_inner_product_multi_avx512;
+		g_extract_signs_fn		 = mkt_rabitq_extract_signs_avx512;
+		g_impl_name				 = "avx512";
 	}
 	else if (caps & SIMD_AVX2)
 	{
-		g_inner_product_fn = mkt_rabitq_inner_product_avx2;
-		g_extract_signs_fn = mkt_rabitq_extract_signs_avx2;
-		g_impl_name		   = "avx2";
+		g_inner_product_fn		 = mkt_rabitq_inner_product_avx2;
+		g_inner_product_multi_fn = mkt_rabitq_inner_product_multi_avx2;
+		g_extract_signs_fn		 = mkt_rabitq_extract_signs_avx2;
+		g_impl_name				 = "avx2";
 	}
 	else
 	{
-		g_inner_product_fn = rabitq_inner_product_compiler;
-		g_extract_signs_fn = rabitq_extract_signs_compiler;
-		g_impl_name		   = "compiler";
+		g_inner_product_fn		 = rabitq_inner_product_compiler;
+		g_inner_product_multi_fn = rabitq_inner_product_multi_compiler;
+		g_extract_signs_fn		 = rabitq_extract_signs_compiler;
+		g_impl_name				 = "compiler";
 	}
 #elif defined(__aarch64__) || defined(_M_ARM64)
 	if (caps & SIMD_NEON)
 	{
-		g_inner_product_fn = mkt_rabitq_inner_product_neon;
-		g_extract_signs_fn = mkt_rabitq_extract_signs_neon;
-		g_impl_name		   = "neon";
+		g_inner_product_fn		 = mkt_rabitq_inner_product_neon;
+		g_inner_product_multi_fn = mkt_rabitq_inner_product_multi_neon;
+		g_extract_signs_fn		 = mkt_rabitq_extract_signs_neon;
+		g_impl_name				 = "neon";
 	}
 	else
 	{
-		g_inner_product_fn = rabitq_inner_product_compiler;
-		g_extract_signs_fn = rabitq_extract_signs_compiler;
-		g_impl_name		   = "compiler";
+		g_inner_product_fn		 = rabitq_inner_product_compiler;
+		g_inner_product_multi_fn = rabitq_inner_product_multi_compiler;
+		g_extract_signs_fn		 = rabitq_extract_signs_compiler;
+		g_impl_name				 = "compiler";
 	}
 #else
-	g_inner_product_fn = rabitq_inner_product_compiler;
-	g_extract_signs_fn = rabitq_extract_signs_compiler;
-	g_impl_name		   = "compiler";
+	g_inner_product_fn		 = rabitq_inner_product_compiler;
+	g_inner_product_multi_fn = rabitq_inner_product_multi_compiler;
+	g_extract_signs_fn		 = rabitq_extract_signs_compiler;
+	g_impl_name				 = "compiler";
 #endif
 
 	/* Hamming dispatch (VPOPCNTDQ > AVX2 > compiler) */
@@ -206,12 +234,13 @@ mkt_rabitq_init_simd(void)
 
 #else
 	/* simd=compiler or simd=none mode */
-	g_inner_product_fn	= rabitq_inner_product_compiler;
-	g_extract_signs_fn	= rabitq_extract_signs_compiler;
-	g_impl_name			= "compiler";
-	g_hamming_fn		= rabitq_hamming_compiler;
-	g_hamming_multi_fn	= rabitq_hamming_multi_compiler;
-	g_hamming_impl_name = "compiler";
+	g_inner_product_fn		 = rabitq_inner_product_compiler;
+	g_inner_product_multi_fn = rabitq_inner_product_multi_compiler;
+	g_extract_signs_fn		 = rabitq_extract_signs_compiler;
+	g_impl_name				 = "compiler";
+	g_hamming_fn			 = rabitq_hamming_compiler;
+	g_hamming_multi_fn		 = rabitq_hamming_multi_compiler;
+	g_hamming_impl_name		 = "compiler";
 #endif
 
 	g_rabitq_initialized = true;
@@ -296,6 +325,34 @@ rabitq_extract_signs(const float *transformed, uint8_t *bits, Dimension dim)
 	if (mkt_unlikely(!g_rabitq_initialized))
 		mkt_rabitq_init_simd();
 	g_extract_signs_fn(transformed, bits, dim);
+}
+
+/*
+ * Error bound helpers
+ *
+ * Used by all with_bound distance functions (scalar and batch, asymmetric
+ * and symmetric). Centralizes the f_error derivation and lower_bound
+ * computation that were previously duplicated across 4 functions.
+ */
+
+static inline float
+rabitq_derive_f_error(
+		float f_add, float f_rescale, float c_error, Dimension dim)
+{
+	float f_rsq = f_rescale * f_rescale;
+	float ratio = f_rsq / f_add;
+	if (ratio <= 1.0f || dim <= 1)
+		return 2e-4f * sqrtf(f_add);
+	return c_error * sqrtf(f_rsq - f_add);
+}
+
+static inline Distance
+rabitq_lower_bound(
+		Distance est_dist, float f_error, float g_error, float multiplier)
+{
+	float err_margin = multiplier * f_error * g_error;
+	float fp_margin	 = 1e-5f * fabsf(est_dist);
+	return est_dist - err_margin - fp_margin;
 }
 
 /*
@@ -926,18 +983,20 @@ mkt_rabitq_prepare_query_ex(
 		l1_sum += fabsf(state->transformed[i]);
 	state->g_scale = l1_sum / (float)dim;
 
-	/* Set dispatch function pointers based on mode */
+	/* Set dispatch function pointers and error multiplier based on mode */
 	state->mode = mode;
 	if (mode == MKT_DISTANCE_MODE_SYMMETRIC)
 	{
 		state->distance_fn = mkt_rabitq_distance_symmetric;
 		state->distance_with_bound_fn =
 				mkt_rabitq_distance_symmetric_with_bound;
+		state->error_multiplier = 3.0f;
 	}
 	else
 	{
 		state->distance_fn			  = mkt_rabitq_distance;
 		state->distance_with_bound_fn = mkt_rabitq_distance_with_bound;
+		state->error_multiplier		  = 1.0f;
 	}
 
 	mkt_free_aligned(residual);
@@ -1009,15 +1068,218 @@ mkt_rabitq_distance(
 	return est_dist;
 }
 
+/*
+ * Shared distance formula for batch functions
+ *
+ * Applies: distances[i] = f_add[i] + g_add - 2 * f_rescale[i] * final_dots[i]
+ * with optional error bound derivation using qstate->error_multiplier.
+ *
+ * Callers convert mode-specific intermediates (IPs or Hamming distances)
+ * into uniform final_dots[] before calling this.  For symmetric mode,
+ * g_scale is folded into final_dots so the formula is identical.
+ *
+ * Marked always_inline so the compiler sees the full loop body in each
+ * caller, preserving auto-vectorization of the f_add[]/f_rescale[] math.
+ */
+__attribute__((always_inline)) static inline void
+rabitq_apply_distances(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const float			   *final_dots,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances,
+		Distance			   *lower_bounds)
+{
+	float g_add = qstate->g_add;
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		distances[i] = f_add[i] + g_add - 2.0f * f_rescale[i] * final_dots[i];
+
+		if (lower_bounds != NULL)
+		{
+			float f_error = rabitq_derive_f_error(
+					f_add[i], f_rescale[i], qstate->c_error, dim);
+			lower_bounds[i] = rabitq_lower_bound(
+					distances[i],
+					f_error,
+					qstate->g_error,
+					qstate->error_multiplier);
+		}
+	}
+}
+
 void
-mkt_rabitq_distance_with_bound(
-		const RaBitQQueryState *query_state,
+mkt_rabitq_distance_batch(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances)
+{
+	if (qstate == NULL || f_add == NULL || f_rescale == NULL || bits == NULL ||
+		distances == NULL || count == 0)
+		return;
+
+	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	float	 g_add		  = qstate->g_add;
+	float	 sum_t		  = qstate->sum_transformed;
+	float	 inv_sqrt_d	  = qstate->inv_sqrt_d;
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		float ip = rabitq_inner_product(
+				qstate->transformed, bits + (size_t)i * packed_bytes, dim);
+		float final_dot = (2.0f * ip - sum_t) * inv_sqrt_d;
+		distances[i]	= f_add[i] + g_add - 2.0f * f_rescale[i] * final_dot;
+	}
+}
+
+void
+mkt_rabitq_inner_product_multi(
+		const float	  *transformed,
+		const uint8_t *bits,
+		uint32_t	   stride,
+		Dimension	   dim,
+		uint32_t	   count,
+		float		  *results)
+{
+	if (mkt_unlikely(!g_rabitq_initialized))
+		mkt_rabitq_init_simd();
+	g_inner_product_multi_fn(transformed, bits, stride, dim, count, results);
+}
+
+void
+mkt_rabitq_distance_batch_multi(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances)
+{
+	float *scratch = mkt_alloc(count * sizeof(float));
+	mkt_rabitq_distance_batch_multi_with_bound(
+			qstate,
+			f_add,
+			f_rescale,
+			bits,
+			MKT_RABITQ_BYTES(dim),
+			count,
+			dim,
+			distances,
+			NULL,
+			scratch);
+	mkt_free(scratch);
+}
+
+void
+mkt_rabitq_distance_batch_multi_with_bound(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				stride,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances,
+		Distance			   *lower_bounds,
+		float				   *scratch)
+{
+	if (qstate == NULL || f_add == NULL || f_rescale == NULL || bits == NULL ||
+		distances == NULL || count == 0)
+		return;
+
+	/* Compute all inner products in a single multi-candidate pass */
+	mkt_rabitq_inner_product_multi(
+			qstate->transformed, bits, stride, dim, count, scratch);
+
+	/* Convert IPs to final_dots in-place */
+	float sum_t		 = qstate->sum_transformed;
+	float inv_sqrt_d = qstate->inv_sqrt_d;
+	for (uint32_t i = 0; i < count; i++)
+		scratch[i] = (2.0f * scratch[i] - sum_t) * inv_sqrt_d;
+
+	rabitq_apply_distances(
+			qstate,
+			f_add,
+			f_rescale,
+			scratch,
+			count,
+			dim,
+			distances,
+			lower_bounds);
+}
+
+void
+mkt_rabitq_distance_batch_symmetric_with_bound(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				stride,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances,
+		Distance			   *lower_bounds,
+		uint32_t			   *scratch)
+{
+	if (qstate == NULL || f_add == NULL || f_rescale == NULL || bits == NULL ||
+		distances == NULL || count == 0)
+		return;
+
+	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+
+	/* Compute all Hamming distances in a single multi-candidate pass */
+	mkt_rabitq_hamming_distance_multi(
+			qstate->query_bits, bits, stride, packed_bytes, count, scratch);
+
+	/* Apply symmetric distance formula (+ optional error bounds) */
+	float g_add		 = qstate->g_add;
+	float g_scale	 = qstate->g_scale;
+	float inv_sqrt_d = qstate->inv_sqrt_d;
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		float sym_dot	= (float)((int32_t)dim - 2 * (int32_t)scratch[i]);
+		float final_dot = sym_dot * inv_sqrt_d * g_scale;
+
+		distances[i] = f_add[i] + g_add - 2.0f * f_rescale[i] * final_dot;
+
+		if (lower_bounds != NULL)
+		{
+			float f_error = rabitq_derive_f_error(
+					f_add[i], f_rescale[i], qstate->c_error, dim);
+			lower_bounds[i] = rabitq_lower_bound(
+					distances[i],
+					f_error,
+					qstate->g_error,
+					qstate->error_multiplier);
+		}
+	}
+}
+
+/*
+ * Common scalar _with_bound implementation
+ *
+ * Uses qstate->distance_fn() (mode-dispatched) and
+ * qstate->error_multiplier to compute both estimated distance
+ * and lower bound. Both public _with_bound functions delegate here.
+ */
+static void
+rabitq_distance_with_bound_common(
+		const RaBitQQueryState *qstate,
 		const RaBitQData	   *data,
 		Dimension				dim,
 		Distance			   *est_dist,
 		Distance			   *lower_bound)
 {
-	if (query_state == NULL || data == NULL || est_dist == NULL ||
+	if (qstate == NULL || data == NULL || est_dist == NULL ||
 		lower_bound == NULL)
 	{
 		if (est_dist)
@@ -1027,33 +1289,24 @@ mkt_rabitq_distance_with_bound(
 		return;
 	}
 
-	/* Compute estimated distance */
-	*est_dist = mkt_rabitq_distance(query_state, data, dim);
+	*est_dist = qstate->distance_fn(qstate, data, dim);
 
-	/* Derive f_error from f_add and f_rescale.
-	 *
-	 * The ratio f_rescale²/f_add corresponds to (||v-c||² * d / ||v-c||_1²)
-	 * which equals (l2_sqr * xu_cb_norm_sq) / ip_resi_xucb² in encoding.
-	 * When ratio <= 1.0 (rounding), use a small safety margin.
-	 * Otherwise: f_error = c_error * sqrt(f_rescale² - f_add).
-	 */
-	float f_rsq = data->f_rescale * data->f_rescale;
-	float ratio = f_rsq / data->f_add;
-	float f_error;
+	float f_error = rabitq_derive_f_error(
+			data->f_add, data->f_rescale, qstate->c_error, dim);
+	*lower_bound = rabitq_lower_bound(
+			*est_dist, f_error, qstate->g_error, qstate->error_multiplier);
+}
 
-	if (ratio <= 1.0f || dim <= 1)
-		f_error = 2e-4f * sqrtf(data->f_add);
-	else
-		f_error = query_state->c_error * sqrtf(f_rsq - data->f_add);
-
-	/* Compute lower bound: est_dist - f_error * g_error
-	 *
-	 * Note: We add a small relative epsilon (1e-5 * est_dist) to handle
-	 * floating-point imprecision.
-	 */
-	float error_margin = f_error * query_state->g_error;
-	float fp_margin	   = 1e-5f * fabsf(*est_dist);
-	*lower_bound	   = *est_dist - error_margin - fp_margin;
+void
+mkt_rabitq_distance_with_bound(
+		const RaBitQQueryState *query_state,
+		const RaBitQData	   *data,
+		Dimension				dim,
+		Distance			   *est_dist,
+		Distance			   *lower_bound)
+{
+	rabitq_distance_with_bound_common(
+			query_state, data, dim, est_dist, lower_bound);
 }
 
 /*
@@ -1124,36 +1377,8 @@ mkt_rabitq_distance_symmetric_with_bound(
 		Distance			   *est_dist,
 		Distance			   *lower_bound)
 {
-	if (qstate == NULL || data == NULL || est_dist == NULL ||
-		lower_bound == NULL)
-	{
-		if (est_dist)
-			*est_dist = -1.0f;
-		if (lower_bound)
-			*lower_bound = -1.0f;
-		return;
-	}
-
-	*est_dist = mkt_rabitq_distance_symmetric(qstate, data, dim);
-
-	/* Symmetric error bound: wider than asymmetric because both
-	 * query and data are quantized. The data-side error (f_error)
-	 * and query-side approximation (g_scale vs true magnitudes)
-	 * compound. Empirically, ~3x the asymmetric margin gives a
-	 * safe lower bound while still pruning >50% of candidates.
-	 */
-	float f_rsq = data->f_rescale * data->f_rescale;
-	float ratio = f_rsq / data->f_add;
-	float f_error;
-
-	if (ratio <= 1.0f || dim <= 1)
-		f_error = 2e-4f * sqrtf(data->f_add);
-	else
-		f_error = qstate->c_error * sqrtf(f_rsq - data->f_add);
-
-	float error_margin = 3.0f * f_error * qstate->g_error;
-	float fp_margin	   = 1e-5f * fabsf(*est_dist);
-	*lower_bound	   = *est_dist - error_margin - fp_margin;
+	rabitq_distance_with_bound_common(
+			qstate, data, dim, est_dist, lower_bound);
 }
 
 void
@@ -1166,25 +1391,17 @@ mkt_rabitq_distance_batch_symmetric(
 		Dimension				dim,
 		Distance			   *distances)
 {
-	if (qstate == NULL || f_add == NULL || f_rescale == NULL || bits == NULL ||
-		distances == NULL)
-		return;
-
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
-	float	 inv_sqrt_d	  = qstate->inv_sqrt_d;
-	float	 g_add		  = qstate->g_add;
-	float	 g_scale	  = qstate->g_scale;
-
-	for (uint32_t i = 0; i < count; i++)
-	{
-		const uint8_t *data_bits = bits + (size_t)i * packed_bytes;
-		uint32_t	   hamming	 = mkt_rabitq_hamming_distance(
-				qstate->query_bits, data_bits, packed_bytes);
-
-		float sym_dot	= (float)((int32_t)dim - 2 * (int32_t)hamming);
-		float final_dot = sym_dot * inv_sqrt_d;
-
-		distances[i] = f_add[i] + g_add -
-					   2.0f * f_rescale[i] * g_scale * final_dot;
-	}
+	uint32_t *scratch = mkt_alloc(count * sizeof(uint32_t));
+	mkt_rabitq_distance_batch_symmetric_with_bound(
+			qstate,
+			f_add,
+			f_rescale,
+			bits,
+			MKT_RABITQ_BYTES(dim),
+			count,
+			dim,
+			distances,
+			NULL,
+			scratch);
+	mkt_free(scratch);
 }

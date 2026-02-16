@@ -20,6 +20,7 @@ int cmd_bench_quantize(CmdContext *ctx);
 int cmd_bench_cluster(CmdContext *ctx);
 int cmd_bench_search(CmdContext *ctx);
 int cmd_bench_rabitq_kernel(CmdContext *ctx);
+int cmd_bench_page_score(CmdContext *ctx);
 
 /* Subcommand structure */
 typedef struct
@@ -40,6 +41,7 @@ static const Command bench_commands[] = {
 		{"cluster", cmd_bench_cluster, "Benchmark clustering algorithms"},
 		{"search", cmd_bench_search, "Benchmark end-to-end search"},
 		{"rabitq-kernel", cmd_bench_rabitq_kernel, "Benchmark RaBitQ kernels"},
+		{"page-score", cmd_bench_page_score, "Benchmark page-level scoring"},
 		{NULL, NULL, NULL},
 };
 

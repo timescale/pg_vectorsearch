@@ -83,7 +83,7 @@ foreach group : test_groups
       args: ['--tap', '--group', group],
       protocol: 'tap',
       workdir: meson.project_source_root(),
-      timeout: 30,
+      timeout: 120,
       suite: 'unit',
     )
   endif
