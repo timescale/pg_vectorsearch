@@ -23,6 +23,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #ifdef MKT_HAVE_CBLAS
 #ifdef __APPLE__
@@ -69,11 +70,28 @@ lloyd_assign_block_cblas_impl(
 	uint32_t dim   = st->dim;
 	float	*dist  = st->dist_block;
 
-	/* Get float32 view of this block (zero-copy for f32, converts for f16) */
-	const void *raw = (const char *)st->vectors +
-					  (size_t)block_start * dim * ops->element_size;
-	const float *block_vecs =
-			ops->to_float_block(raw, st->vec_block, block_count, dim);
+	/* Get float32 view of this block */
+	const float *block_vecs;
+	if (st->indices != NULL)
+	{
+		/* Gather indexed vectors into vec_block */
+		size_t esz = ops->element_size;
+		for (uint32_t i = 0; i < block_count; i++)
+		{
+			uint32_t	idx = st->indices[block_start + i];
+			const void *src = (const char *)st->vectors +
+							  (size_t)idx * dim * esz;
+			ops->to_float_one(src, st->vec_block + (size_t)i * dim, dim);
+		}
+		block_vecs = st->vec_block;
+	}
+	else
+	{
+		/* Zero-copy for f32, converts for f16 */
+		const void *raw = (const char *)st->vectors +
+						  (size_t)block_start * dim * ops->element_size;
+		block_vecs = ops->to_float_block(raw, st->vec_block, block_count, dim);
+	}
 
 	/* Compute dot products via sgemm */
 	float alpha = -2.0f;
@@ -283,8 +301,24 @@ lloyd_assign_block_builtin_f32(
 	uint32_t dim   = st->dim;
 	float	*dist  = st->dist_block;
 
-	const float *block_vecs = (const float *)st->vectors +
-							  (size_t)block_start * dim;
+	const float *block_vecs;
+	if (st->indices != NULL)
+	{
+		/* Gather indexed vectors into contiguous block */
+		for (uint32_t i = 0; i < block_count; i++)
+		{
+			uint32_t idx = st->indices[block_start + i];
+			memcpy(st->vec_block + (size_t)i * dim,
+				   (const float *)st->vectors + (size_t)idx * dim,
+				   dim * sizeof(float));
+		}
+		block_vecs = st->vec_block;
+	}
+	else
+	{
+		block_vecs = (const float *)st->vectors + (size_t)block_start * dim;
+	}
+
 	lloyd_compute_dot_products(
 			block_vecs, st->centroids, dist, block_count, nlist, dim);
 	lloyd_dots_to_assignments(st, dist, block_start, block_count);
@@ -298,8 +332,21 @@ lloyd_assign_block_builtin_f16(
 	uint32_t dim   = st->dim;
 
 	/* Preconvert f16 block to f32 — O(block*dim), saves O(block*K*dim) */
-	const half *src = (const half *)st->vectors + (size_t)block_start * dim;
-	mkt_half_to_float_array(src, st->vec_block, block_count * dim);
+	if (st->indices != NULL)
+	{
+		for (uint32_t i = 0; i < block_count; i++)
+		{
+			uint32_t	idx = st->indices[block_start + i];
+			const half *src = (const half *)st->vectors + (size_t)idx * dim;
+			mkt_half_to_float_array(src, st->vec_block + (size_t)i * dim, dim);
+		}
+	}
+	else
+	{
+		const half *src = (const half *)st->vectors +
+						  (size_t)block_start * dim;
+		mkt_half_to_float_array(src, st->vec_block, block_count * dim);
+	}
 
 	lloyd_compute_dot_products(
 			st->vec_block,

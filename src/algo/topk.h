@@ -50,11 +50,19 @@ typedef struct MktTopKEntry
 
 /* ----------------------------------------------------------------
  * Top-K collection
+ *
+ * Standalone: binary max-heap array for threshold tracking.
+ * PG: pairing heap via opaque pointer (defined in src/pg/topk.c).
  * ---------------------------------------------------------------- */
 typedef struct MktTopK
 {
-	Distance	 *ub_heap;		 /* max-heap of K upper bounds */
-	uint32_t	  ub_count;		 /* entries in ub_heap (<= k) */
+#ifdef MKT_STANDALONE
+	Distance *ub_heap; /* binary max-heap of K upper bounds */
+#else
+	void *ub_heap;	/* pairingheap * (max-heap of upper bounds) */
+	void *ub_nodes; /* preallocated UBNode pool */
+#endif
+	uint32_t	  ub_count;		 /* entries in threshold heap (<= k) */
 	uint32_t	  k;			 /* target K */
 	MktTopKEntry *candidates;	 /* growable candidate buffer */
 	uint32_t	  cand_count;	 /* buffered candidates */
@@ -99,6 +107,7 @@ mkt_topk_insert(MktTopK *topk, Distance distance, Distance error, uint64_t id);
  * (distance + error) seen so far. Returns INFINITY if fewer
  * than K upper bounds have been recorded.
  */
+#ifdef MKT_STANDALONE
 static inline Distance
 mkt_topk_threshold(const MktTopK *topk)
 {
@@ -106,6 +115,9 @@ mkt_topk_threshold(const MktTopK *topk)
 		return INFINITY;
 	return topk->ub_heap[0];
 }
+#else
+Distance mkt_topk_threshold(const MktTopK *topk);
+#endif
 
 /*
  * Extract candidates sorted by distance ascending. Filters out

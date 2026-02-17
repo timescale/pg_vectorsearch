@@ -18,6 +18,13 @@
 #include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------
+ * Support function numbers
+ * ---------------------------------------------------------------- */
+
+#define MKTANN_DISTANCE_PROC 1 /* distance operator function */
+#define MKTANN_METRIC_PROC	 2 /* metric identifier function */
+
+/* ----------------------------------------------------------------
  * GUC variables
  * ---------------------------------------------------------------- */
 
@@ -70,8 +77,9 @@ typedef struct RaBitQParamsPG
 
 typedef struct MktannOptions
 {
-	int32 vl_len_;		 /* varlena header (required by reloptions) */
-	int	  distance_mode; /* MktDistanceMode */
+	int32 vl_len_;				/* varlena header (required by reloptions) */
+	int	  distance_mode;		/* MktDistanceMode */
+	bool  centroid_compression; /* use RaBitQ for centroid pages */
 } MktannOptions;
 
 /*
@@ -128,6 +136,12 @@ mkt_pg_rabitq_alloc(int dim)
 	v->flags = 0;
 	return v;
 }
+
+/* ----------------------------------------------------------------
+ * Type OID helpers (implemented in mkt_pg.c)
+ * ---------------------------------------------------------------- */
+
+Oid mkt_halfvec_type_oid(void);
 
 /* ----------------------------------------------------------------
  * Validation helpers (implemented in mkt_pg.c)

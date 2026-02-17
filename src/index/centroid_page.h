@@ -49,7 +49,10 @@
 #else
 #include <postgres.h>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <storage/bufpage.h>
+#pragma GCC diagnostic pop
 #include <storage/itemptr.h>
 #endif
 

@@ -259,6 +259,7 @@ mkt_core_sources = files(
   'src/quant/rabitq.c',
   'src/quant/matrix.c',
   'src/algo/topk_standalone.c',
+  'src/index/centroid_build.c',
   'src/index/centroid_page.c',
   'src/index/centroid_search.c',
 )
@@ -477,9 +478,14 @@ if build_pg_extension
     'src/mkt_vector.c',
     'src/mkt_halfvec.c',
     'src/algo/distance.c',
+    'src/algo/kmeans.c',
+    'src/algo/kmeans_elkan.c',
+    'src/algo/kmeans_hamerly.c',
+    'src/algo/kmeans_lloyd.c',
     'src/algo/vecops.c',
     'src/quant/rabitq.c',
     'src/quant/matrix.c',
+    'src/index/centroid_build.c',
     'src/index/centroid_page.c',
     'src/index/centroid_search.c',
   )
@@ -502,9 +508,11 @@ if build_pg_extension
     endif
   endif
 
+  mkt_pg_cflags = ['-I' + pg_includedir_server] + pg_cflags
+
   mkt_pg_lib = static_library('mkt_pg',
     mkt_pg_core_sources + mkt_pg_simd_sources,
-    c_args: ['-I' + pg_includedir_server] + pg_cflags,
+    c_args: mkt_pg_cflags,
     include_directories: src_inc,
     dependencies: [m_dep] + (have_cblas ? [cblas_dep] : []),
     override_options: ['werror=false'],

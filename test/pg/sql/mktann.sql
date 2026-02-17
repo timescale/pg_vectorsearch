@@ -3,26 +3,42 @@
 -- Create table with vector column
 CREATE TABLE embeddings (id serial, v vector(3));
 
--- Insert data before index
-INSERT INTO embeddings (v) VALUES
-    ('[1,0,0]'),
-    ('[0,1,0]'),
-    ('[0,0,1]');
+-- Insert deterministic data (grid of vectors)
+INSERT INTO embeddings (v)
+    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vector
+    FROM generate_series(0, 9) x,
+         generate_series(0, 9) y,
+         generate_series(0, 9) z;
 
--- Create index with default opclass (L2)
-CREATE INDEX idx_l2 ON embeddings USING mktann (v);
+-- Verify data inserted
+SELECT count(*) FROM embeddings;
 
--- Create index with inner product opclass
-CREATE INDEX idx_ip ON embeddings USING mktann (v vector_ip_ops);
+-- L2 with centroid_compression (RaBitQ centroids, supports scan)
+CREATE INDEX idx_l2c ON embeddings USING mktann (v)
+    WITH (centroid_compression = true);
 
--- Create index with cosine opclass
-CREATE INDEX idx_cos ON embeddings USING mktann (v vector_cosine_ops);
+-- Verify index was built (should have pages)
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_l2c';
+
+-- Verify index scan is used for ORDER BY <-> LIMIT
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
+    FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5;
+
+-- ORDER BY distance with LIMIT — should return results via index scan
+SELECT count(*) FROM (
+    SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
+    FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5
+) t;
+RESET enable_seqscan;
 
 -- Create index with distance_mode relopt
 CREATE INDEX idx_sym ON embeddings USING mktann (v)
-    WITH (distance_mode = 'symmetric');
+    WITH (distance_mode = 'symmetric', centroid_compression = true);
 CREATE INDEX idx_asym ON embeddings USING mktann (v)
-    WITH (distance_mode = 'asymmetric');
+    WITH (distance_mode = 'asymmetric', centroid_compression = true);
 
 -- GUC: check default, set, and reset
 SHOW mkt.distance_mode;
@@ -31,12 +47,38 @@ SHOW mkt.distance_mode;
 SET mkt.distance_mode = 'default';
 SHOW mkt.distance_mode;
 
+-- L2 default (uncompressed float centroids) — build should work
+CREATE INDEX idx_l2_float ON embeddings USING mktann (v);
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_l2_float';
+
+-- IP opclass (uncompressed float centroids) — build should work
+CREATE INDEX idx_ip ON embeddings USING mktann (v vector_ip_ops);
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_ip';
+
+-- Cosine opclass (uncompressed float centroids) — build should work
+CREATE INDEX idx_cos ON embeddings USING mktann (v vector_cosine_ops);
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_cos';
+
+-- Cosine with compression — build should work
+CREATE INDEX idx_cosc ON embeddings
+    USING mktann (v vector_cosine_ops)
+    WITH (centroid_compression = true);
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_cosc';
+
+-- Validation: compression + IP should ERROR
+CREATE INDEX idx_bad ON embeddings
+    USING mktann (v vector_ip_ops)
+    WITH (centroid_compression = true);
+
 -- Insert after index creation (should not crash)
 INSERT INTO embeddings (v) VALUES ('[1,1,1]');
 
--- ORDER BY distance with LIMIT (uses seqscan since shim returns nothing)
-SELECT id, v <-> '[1,0,0]' AS dist
-    FROM embeddings ORDER BY v <-> '[1,0,0]' LIMIT 3;
+-- VACUUM on the index (should not crash)
+VACUUM embeddings;
 
 -- Cleanup
 DROP TABLE embeddings;
