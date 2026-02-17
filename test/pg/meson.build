@@ -23,6 +23,7 @@ else
       'distance',
       'operators',
       'rabitq',
+      'mktann',
     ]
 
     test('regress',
