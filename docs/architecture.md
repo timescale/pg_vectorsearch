@@ -322,6 +322,7 @@ Index metadata is stored in multiple locations depending on its nature:
 **GUCs** (session/server-level, can override reloptions):
 - `meerkat.nprobe` - clusters to search per query
 - `meerkat.rerank_k` - candidates to re-rank with full precision
+- `mkt.distance_mode` - RaBitQ distance mode (`asymmetric` or `symmetric`)
 
 **Catalog tables** (managed by PostgreSQL):
 - Structural info in pg_class, pg_index, pg_am, pg_opclass

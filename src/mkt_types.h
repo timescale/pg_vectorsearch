@@ -54,6 +54,29 @@ typedef enum
 } DistanceMetric;
 
 /*
+ * MktDistanceMode - RaBitQ distance computation mode
+ *
+ * Controls whether search uses asymmetric (full-precision query × 1-bit data)
+ * or symmetric (1-bit query × 1-bit data) distance. Symmetric is ~4x faster
+ * but has higher estimation error.
+ */
+typedef enum
+{
+	MKT_DISTANCE_MODE_ASYMMETRIC = 0,
+	MKT_DISTANCE_MODE_SYMMETRIC	 = 1,
+} MktDistanceMode;
+
+static inline const char *
+mkt_distance_mode_name(MktDistanceMode mode)
+{
+	static const char *names[] = {
+			[MKT_DISTANCE_MODE_ASYMMETRIC] = "asymmetric",
+			[MKT_DISTANCE_MODE_SYMMETRIC]  = "symmetric",
+	};
+	return names[mode];
+}
+
+/*
  * MktVecType - Vector element type for dispatch
  *
  * Used by k-means and quantization to select the correct compile-time

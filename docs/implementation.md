@@ -4142,6 +4142,7 @@ void _PG_init(void);
 // GUC variables
 int mkt_default_nprobe;      // Default clusters to search
 int mkt_default_rerank_k;    // Default candidates for full-precision reranking
+int mkt_distance_mode;       // RaBitQ distance mode (asymmetric/symmetric)
 ```
 
 ### 6.2 Vector Type and pgvector Compatibility
