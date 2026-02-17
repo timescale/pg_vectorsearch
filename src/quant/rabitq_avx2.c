@@ -142,6 +142,111 @@ mkt_rabitq_extract_signs_avx2(
 	}
 }
 
+/*
+ * AVX2 popcount helper using nibble lookup table (Mula's method).
+ *
+ * Uses _mm256_shuffle_epi8 as a parallel 4-bit lookup table to count
+ * bits in each byte.
+ */
+MKT_TARGET_AVX2 static inline __m256i
+popcount_avx2(__m256i v)
+{
+	const __m256i lut = _mm256_setr_epi8(
+			0,
+			1,
+			1,
+			2,
+			1,
+			2,
+			2,
+			3,
+			1,
+			2,
+			2,
+			3,
+			2,
+			3,
+			3,
+			4,
+			0,
+			1,
+			1,
+			2,
+			1,
+			2,
+			2,
+			3,
+			1,
+			2,
+			2,
+			3,
+			2,
+			3,
+			3,
+			4);
+	const __m256i mask_lo = _mm256_set1_epi8(0x0F);
+
+	__m256i lo = _mm256_and_si256(v, mask_lo);
+	__m256i hi = _mm256_and_si256(_mm256_srli_epi16(v, 4), mask_lo);
+
+	return _mm256_add_epi8(
+			_mm256_shuffle_epi8(lut, lo), _mm256_shuffle_epi8(lut, hi));
+}
+
+/*
+ * AVX2 Hamming distance using lookup-table popcount.
+ *
+ * Processes 32 bytes per iteration. Uses _mm256_sad_epu8 to
+ * horizontally sum byte-level popcounts into 64-bit accumulators.
+ */
+MKT_TARGET_AVX2 uint32_t
+mkt_rabitq_hamming_avx2(
+		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes)
+{
+	__m256i total = _mm256_setzero_si256();
+
+	uint32_t i = 0;
+	for (; i + 32 <= packed_bytes; i += 32)
+	{
+		__m256i va = _mm256_loadu_si256((const __m256i *)(a + i));
+		__m256i vb = _mm256_loadu_si256((const __m256i *)(b + i));
+		__m256i x  = _mm256_xor_si256(va, vb);
+
+		__m256i pc = popcount_avx2(x);
+
+		/* Sum byte popcounts into 64-bit accumulators via SAD */
+		total = _mm256_add_epi64(
+				total, _mm256_sad_epu8(pc, _mm256_setzero_si256()));
+	}
+
+	uint64_t result = mkt_horizontal_sum_epi64_avx2(total);
+
+	/* Scalar tail */
+	for (; i < packed_bytes; i++)
+		result += (uint64_t)__builtin_popcount(a[i] ^ b[i]);
+
+	return (uint32_t)result;
+}
+
+/*
+ * Multi-candidate AVX2 Hamming distance.
+ */
+MKT_TARGET_AVX2 void
+mkt_rabitq_hamming_multi_avx2(
+		const uint8_t *query_bits,
+		const uint8_t *data_bits,
+		uint32_t	   stride,
+		uint32_t	   packed_bytes,
+		uint32_t	   count,
+		uint32_t	  *results)
+{
+	for (uint32_t c = 0; c < count; c++)
+	{
+		results[c] = mkt_rabitq_hamming_avx2(
+				query_bits, data_bits + c * stride, packed_bytes);
+	}
+}
+
 #endif /* x86_64 */
 
 #endif /* MKT_SIMD_FULL */

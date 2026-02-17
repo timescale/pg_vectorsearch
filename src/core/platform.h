@@ -16,12 +16,13 @@
  */
 typedef enum
 {
-	SIMD_NONE	 = 0,
-	SIMD_SSE2	 = 1 << 0,
-	SIMD_SSE4_1	 = 1 << 1,
-	SIMD_AVX2	 = 1 << 2,
-	SIMD_AVX512F = 1 << 3,
-	SIMD_NEON	 = 1 << 4,
+	SIMD_NONE			  = 0,
+	SIMD_SSE2			  = 1 << 0,
+	SIMD_SSE4_1			  = 1 << 1,
+	SIMD_AVX2			  = 1 << 2,
+	SIMD_AVX512F		  = 1 << 3,
+	SIMD_NEON			  = 1 << 4,
+	SIMD_AVX512_VPOPCNTDQ = 1 << 5,
 } SimdCapability;
 
 /*

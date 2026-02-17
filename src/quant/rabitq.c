@@ -87,9 +87,33 @@ static ExtractSignsFn g_extract_signs_fn   = NULL;
 static const char	 *g_impl_name		   = NULL;
 static _Atomic(bool)  g_rabitq_initialized = false;
 
+/* Hamming distance function pointer dispatch */
+typedef uint32_t (*HammingFn)(const uint8_t *, const uint8_t *, uint32_t);
+typedef void (*HammingMultiFn)(
+		const uint8_t *,
+		const uint8_t *,
+		uint32_t,
+		uint32_t,
+		uint32_t,
+		uint32_t *);
+static HammingFn	  g_hamming_fn		  = NULL;
+static HammingMultiFn g_hamming_multi_fn  = NULL;
+static const char	 *g_hamming_impl_name = NULL;
+
 /* Forward declaration for compiler-vectorized fallback */
 MKT_TARGET_CLONES static void rabitq_extract_signs_compiler(
 		const float *transformed, uint8_t *bits, Dimension dim);
+
+/* Forward declarations for compiler-vectorized hamming */
+MKT_TARGET_CLONES static uint32_t rabitq_hamming_compiler(
+		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes);
+MKT_TARGET_CLONES static void rabitq_hamming_multi_compiler(
+		const uint8_t *query_bits,
+		const uint8_t *data_bits,
+		uint32_t	   stride,
+		uint32_t	   packed_bytes,
+		uint32_t	   count,
+		uint32_t	  *results);
 
 void
 mkt_rabitq_force_reinit(void)
@@ -98,6 +122,9 @@ mkt_rabitq_force_reinit(void)
 	g_inner_product_fn	 = NULL;
 	g_extract_signs_fn	 = NULL;
 	g_impl_name			 = NULL;
+	g_hamming_fn		 = NULL;
+	g_hamming_multi_fn	 = NULL;
+	g_hamming_impl_name	 = NULL;
 }
 
 int
@@ -147,11 +174,44 @@ mkt_rabitq_init_simd(void)
 	g_impl_name		   = "compiler";
 #endif
 
+	/* Hamming dispatch (VPOPCNTDQ > AVX2 > compiler) */
+#if defined(__x86_64__) || defined(_M_X64)
+	if (caps & SIMD_AVX512_VPOPCNTDQ)
+	{
+		g_hamming_fn		= mkt_rabitq_hamming_avx512;
+		g_hamming_multi_fn	= mkt_rabitq_hamming_multi_avx512;
+		g_hamming_impl_name = "avx512-vpopcntdq";
+	}
+	else if (caps & SIMD_AVX2)
+	{
+		g_hamming_fn		= mkt_rabitq_hamming_avx2;
+		g_hamming_multi_fn	= mkt_rabitq_hamming_multi_avx2;
+		g_hamming_impl_name = "avx2";
+	}
+	else
+	{
+		g_hamming_fn		= rabitq_hamming_compiler;
+		g_hamming_multi_fn	= rabitq_hamming_multi_compiler;
+		g_hamming_impl_name = "compiler";
+	}
+#elif defined(__aarch64__) || defined(_M_ARM64)
+	g_hamming_fn		= rabitq_hamming_compiler;
+	g_hamming_multi_fn	= rabitq_hamming_multi_compiler;
+	g_hamming_impl_name = "compiler";
+#else
+	g_hamming_fn		= rabitq_hamming_compiler;
+	g_hamming_multi_fn	= rabitq_hamming_multi_compiler;
+	g_hamming_impl_name = "compiler";
+#endif
+
 #else
 	/* simd=compiler or simd=none mode */
-	g_inner_product_fn = rabitq_inner_product_compiler;
-	g_extract_signs_fn = rabitq_extract_signs_compiler;
-	g_impl_name		   = "compiler";
+	g_inner_product_fn	= rabitq_inner_product_compiler;
+	g_extract_signs_fn	= rabitq_extract_signs_compiler;
+	g_impl_name			= "compiler";
+	g_hamming_fn		= rabitq_hamming_compiler;
+	g_hamming_multi_fn	= rabitq_hamming_multi_compiler;
+	g_hamming_impl_name = "compiler";
 #endif
 
 	g_rabitq_initialized = true;
@@ -164,6 +224,14 @@ mkt_rabitq_impl_name(void)
 	if (mkt_unlikely(!g_rabitq_initialized))
 		mkt_rabitq_init_simd();
 	return g_impl_name;
+}
+
+const char *
+mkt_rabitq_hamming_impl_name(void)
+{
+	if (mkt_unlikely(!g_rabitq_initialized))
+		mkt_rabitq_init_simd();
+	return g_hamming_impl_name;
 }
 
 /*
@@ -228,6 +296,54 @@ rabitq_extract_signs(const float *transformed, uint8_t *bits, Dimension dim)
 	if (mkt_unlikely(!g_rabitq_initialized))
 		mkt_rabitq_init_simd();
 	g_extract_signs_fn(transformed, bits, dim);
+}
+
+/*
+ * Compiler-Vectorized Hamming Distance
+ *
+ * Computes XOR + popcount between two packed bit vectors.
+ * Uses target_clones to generate multiple versions for different ISAs.
+ */
+MKT_TARGET_CLONES static uint32_t
+rabitq_hamming_compiler(
+		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes)
+{
+	uint32_t count = 0;
+
+	/* Main loop: process 8 bytes (64 bits) at a time */
+	uint32_t i = 0;
+	for (; i + 8 <= packed_bytes; i += 8)
+	{
+		uint64_t va, vb;
+		memcpy(&va, a + i, 8);
+		memcpy(&vb, b + i, 8);
+		count += (uint32_t)__builtin_popcountll(va ^ vb);
+	}
+
+	/* Byte tail */
+	for (; i < packed_bytes; i++)
+		count += (uint32_t)__builtin_popcount(a[i] ^ b[i]);
+
+	return count;
+}
+
+/*
+ * Compiler-Vectorized Multi-Candidate Hamming Distance
+ */
+MKT_TARGET_CLONES static void
+rabitq_hamming_multi_compiler(
+		const uint8_t *query_bits,
+		const uint8_t *data_bits,
+		uint32_t	   stride,
+		uint32_t	   packed_bytes,
+		uint32_t	   count,
+		uint32_t	  *results)
+{
+	for (uint32_t c = 0; c < count; c++)
+	{
+		results[c] = rabitq_hamming_compiler(
+				query_bits, data_bits + c * stride, packed_bytes);
+	}
 }
 
 /*
@@ -789,6 +905,24 @@ mkt_rabitq_prepare_query(
 	else
 		state->c_error = 0.0f;
 
+	/* Compute symmetric search fields: query sign bits and g_scale */
+	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	state->query_bits	  = mkt_alloc_aligned(packed_bytes, 64);
+	if (state->query_bits == NULL)
+	{
+		mkt_free_aligned(state->transformed);
+		mkt_free_aligned(residual);
+		mkt_free(state);
+		return NULL;
+	}
+	rabitq_extract_signs(state->transformed, state->query_bits, dim);
+
+	/* g_scale = mean(|transformed|) = L1(transformed) / dim */
+	float l1_sum = 0.0f;
+	for (Dimension i = 0; i < dim; i++)
+		l1_sum += fabsf(state->transformed[i]);
+	state->g_scale = l1_sum / (float)dim;
+
 	mkt_free_aligned(residual);
 
 	return state;
@@ -802,6 +936,8 @@ mkt_rabitq_free_query(RaBitQQueryState *state)
 
 	if (state->transformed != NULL)
 		mkt_free_aligned(state->transformed);
+	if (state->query_bits != NULL)
+		mkt_free_aligned(state->query_bits);
 
 	mkt_free(state);
 }
@@ -893,4 +1029,137 @@ mkt_rabitq_distance_with_bound(
 	float error_margin = f_error * query_state->g_error;
 	float fp_margin	   = 1e-5f * fabsf(*est_dist);
 	*lower_bound	   = *est_dist - error_margin - fp_margin;
+}
+
+/*
+ * Hamming distance - public API
+ */
+
+uint32_t
+mkt_rabitq_hamming_distance(
+		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes)
+{
+	if (mkt_unlikely(!g_rabitq_initialized))
+		mkt_rabitq_init_simd();
+	return g_hamming_fn(a, b, packed_bytes);
+}
+
+void
+mkt_rabitq_hamming_distance_multi(
+		const uint8_t *query_bits,
+		const uint8_t *data_bits,
+		uint32_t	   stride,
+		uint32_t	   packed_bytes,
+		uint32_t	   count,
+		uint32_t	  *results)
+{
+	if (mkt_unlikely(!g_rabitq_initialized))
+		mkt_rabitq_init_simd();
+	g_hamming_multi_fn(
+			query_bits, data_bits, stride, packed_bytes, count, results);
+}
+
+/*
+ * Symmetric distance computation
+ *
+ * Both query and data are 1-bit quantized. Uses Hamming distance
+ * (XOR + popcount) instead of asymmetric inner product (mask + add).
+ * ~32x fewer inner loop iterations at the cost of additional query
+ * quantization error.
+ */
+
+Distance
+mkt_rabitq_distance_symmetric(
+		const RaBitQQueryState *qstate, const RaBitQData *data, Dimension dim)
+{
+	if (qstate == NULL || data == NULL)
+		return -1.0f;
+
+	if (qstate->dim != dim)
+		return -1.0f;
+
+	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	uint32_t hamming	  = mkt_rabitq_hamming_distance(
+			 qstate->query_bits, data->bits, packed_bytes);
+
+	/* sym_dot = dim - 2 * hamming (range: [-dim, dim]) */
+	float sym_dot	= (float)((int32_t)dim - 2 * (int32_t)hamming);
+	float final_dot = sym_dot * qstate->inv_sqrt_d;
+
+	/* est_dist = f_add + g_add - 2 * f_rescale * g_scale * final_dot */
+	return data->f_add + qstate->g_add -
+		   2.0f * data->f_rescale * qstate->g_scale * final_dot;
+}
+
+void
+mkt_rabitq_distance_symmetric_with_bound(
+		const RaBitQQueryState *qstate,
+		const RaBitQData	   *data,
+		Dimension				dim,
+		Distance			   *est_dist,
+		Distance			   *lower_bound)
+{
+	if (qstate == NULL || data == NULL || est_dist == NULL ||
+		lower_bound == NULL)
+	{
+		if (est_dist)
+			*est_dist = -1.0f;
+		if (lower_bound)
+			*lower_bound = -1.0f;
+		return;
+	}
+
+	*est_dist = mkt_rabitq_distance_symmetric(qstate, data, dim);
+
+	/* Symmetric error bound: wider than asymmetric because both
+	 * query and data are quantized. The data-side error (f_error)
+	 * and query-side approximation (g_scale vs true magnitudes)
+	 * compound. Empirically, ~3x the asymmetric margin gives a
+	 * safe lower bound while still pruning >50% of candidates.
+	 */
+	float f_rsq = data->f_rescale * data->f_rescale;
+	float ratio = f_rsq / data->f_add;
+	float f_error;
+
+	if (ratio <= 1.0f || dim <= 1)
+		f_error = 2e-4f * sqrtf(data->f_add);
+	else
+		f_error = qstate->c_error * sqrtf(f_rsq - data->f_add);
+
+	float error_margin = 3.0f * f_error * qstate->g_error;
+	float fp_margin	   = 1e-5f * fabsf(*est_dist);
+	*lower_bound	   = *est_dist - error_margin - fp_margin;
+}
+
+void
+mkt_rabitq_distance_batch_symmetric(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances)
+{
+	if (qstate == NULL || f_add == NULL || f_rescale == NULL || bits == NULL ||
+		distances == NULL)
+		return;
+
+	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	float	 inv_sqrt_d	  = qstate->inv_sqrt_d;
+	float	 g_add		  = qstate->g_add;
+	float	 g_scale	  = qstate->g_scale;
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const uint8_t *data_bits = bits + (size_t)i * packed_bytes;
+		uint32_t	   hamming	 = mkt_rabitq_hamming_distance(
+				qstate->query_bits, data_bits, packed_bytes);
+
+		float sym_dot	= (float)((int32_t)dim - 2 * (int32_t)hamming);
+		float final_dot = sym_dot * inv_sqrt_d;
+
+		distances[i] = f_add[i] + g_add -
+					   2.0f * f_rescale[i] * g_scale * final_dot;
+	}
 }
