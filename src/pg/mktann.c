@@ -1,9 +1,9 @@
 /*
- * mktann.c - meerkat ANN index access method (shim)
+ * mktann.c - meerkat ANN index access method handler
  *
- * Skeleton IAM that registers with PostgreSQL so CREATE INDEX ... USING
- * mktann works.  Every callback is either a no-op or returns an empty
- * result; the real implementation will replace these one at a time.
+ * Registers the mktann index access method with PostgreSQL. Build and
+ * scan callbacks delegate to mktann_build.c and mktann_scan.c; trivial
+ * stubs for unimplemented callbacks remain here.
  */
 
 #include <postgres.h>
@@ -18,31 +18,20 @@
 #include <utils/selfuncs.h>
 
 #include "mkt_pg.h"
+#include "mktann_build.h"
+#include "mktann_scan.h"
 
 PG_FUNCTION_INFO_V1(mktann_handler);
 
 /* ----------------------------------------------------------------
- * Build callbacks
+ * Trivial stubs (no separate file needed)
  * ---------------------------------------------------------------- */
-
-static IndexBuildResult *
-mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
-{
-	IndexBuildResult *result = palloc0(sizeof(IndexBuildResult));
-	result->heap_tuples		 = 0;
-	result->index_tuples	 = 0;
-	return result;
-}
 
 static void
 mktann_buildempty(Relation index)
 {
 	/* nothing to do */
 }
-
-/* ----------------------------------------------------------------
- * Insert / maintenance callbacks
- * ---------------------------------------------------------------- */
 
 static bool
 mktann_insert(
@@ -79,10 +68,6 @@ mktann_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 	return stats;
 }
 
-/* ----------------------------------------------------------------
- * Cost estimation
- * ---------------------------------------------------------------- */
-
 static void
 mktann_costestimate(
 		PlannerInfo *root,
@@ -116,10 +101,6 @@ mktann_costestimate(
 	*index_pages  = costs.numIndexPages;
 }
 
-/* ----------------------------------------------------------------
- * Options / validation
- * ---------------------------------------------------------------- */
-
 static bytea *
 mktann_options(Datum reloptions, bool validate)
 {
@@ -127,6 +108,9 @@ mktann_options(Datum reloptions, bool validate)
 			{"distance_mode",
 			 RELOPT_TYPE_ENUM,
 			 offsetof(MktannOptions, distance_mode)},
+			{"centroid_compression",
+			 RELOPT_TYPE_BOOL,
+			 offsetof(MktannOptions, centroid_compression)},
 	};
 	return (bytea *)build_reloptions(
 			reloptions,
@@ -144,47 +128,6 @@ mktann_validate(Oid opclassoid)
 }
 
 /* ----------------------------------------------------------------
- * Scan callbacks
- * ---------------------------------------------------------------- */
-
-static IndexScanDesc
-mktann_beginscan(Relation index, int nkeys, int norderbys)
-{
-	IndexScanDesc scan;
-	scan		 = RelationGetIndexScan(index, nkeys, norderbys);
-	scan->opaque = NULL;
-	return scan;
-}
-
-static void
-mktann_rescan(
-		IndexScanDesc scan,
-		ScanKey		  keys,
-		int			  nkeys,
-		ScanKey		  orderbys,
-		int			  norderbys)
-{
-	if (keys && scan->numberOfKeys > 0)
-		memcpy(scan->keyData, keys, scan->numberOfKeys * sizeof(ScanKeyData));
-	if (orderbys && scan->numberOfOrderBys > 0)
-		memcpy(scan->orderByData,
-			   orderbys,
-			   scan->numberOfOrderBys * sizeof(ScanKeyData));
-}
-
-static bool
-mktann_gettuple(IndexScanDesc scan, ScanDirection direction)
-{
-	return false;
-}
-
-static void
-mktann_endscan(IndexScanDesc scan)
-{
-	/* nothing to do */
-}
-
-/* ----------------------------------------------------------------
  * Handler
  * ---------------------------------------------------------------- */
 
@@ -195,7 +138,7 @@ mktann_handler(PG_FUNCTION_ARGS)
 
 	/* Properties */
 	amroutine->amstrategies			   = 0;
-	amroutine->amsupport			   = 1;
+	amroutine->amsupport			   = 2;
 	amroutine->amoptsprocnum		   = 0;
 	amroutine->amcanorder			   = false;
 	amroutine->amcanorderbyop		   = true;
@@ -219,28 +162,34 @@ mktann_handler(PG_FUNCTION_ARGS)
 	amroutine->amparallelvacuumoptions = VACUUM_OPTION_PARALLEL_BULKDEL;
 	amroutine->amkeytype			   = InvalidOid;
 
-	/* Required callbacks */
+	/* Build callbacks */
 	amroutine->ambuild			= mktann_build;
 	amroutine->ambuildempty		= mktann_buildempty;
-	amroutine->aminsert			= mktann_insert;
-	amroutine->aminsertcleanup	= NULL;
-	amroutine->ambulkdelete		= mktann_bulkdelete;
-	amroutine->amvacuumcleanup	= mktann_vacuumcleanup;
-	amroutine->amcanreturn		= NULL;
-	amroutine->amcostestimate	= mktann_costestimate;
-	amroutine->amgettreeheight	= NULL;
-	amroutine->amoptions		= mktann_options;
-	amroutine->amproperty		= NULL;
 	amroutine->ambuildphasename = NULL;
-	amroutine->amvalidate		= mktann_validate;
-	amroutine->amadjustmembers	= NULL;
-	amroutine->ambeginscan		= mktann_beginscan;
-	amroutine->amrescan			= mktann_rescan;
-	amroutine->amgettuple		= mktann_gettuple;
-	amroutine->amgetbitmap		= NULL;
-	amroutine->amendscan		= mktann_endscan;
-	amroutine->ammarkpos		= NULL;
-	amroutine->amrestrpos		= NULL;
+
+	/* Insert / maintenance */
+	amroutine->aminsert		   = mktann_insert;
+	amroutine->aminsertcleanup = NULL;
+	amroutine->ambulkdelete	   = mktann_bulkdelete;
+	amroutine->amvacuumcleanup = mktann_vacuumcleanup;
+
+	/* Cost estimation / validation */
+	amroutine->amcanreturn	   = NULL;
+	amroutine->amcostestimate  = mktann_costestimate;
+	amroutine->amgettreeheight = NULL;
+	amroutine->amoptions	   = mktann_options;
+	amroutine->amproperty	   = NULL;
+	amroutine->amvalidate	   = mktann_validate;
+	amroutine->amadjustmembers = NULL;
+
+	/* Scan callbacks */
+	amroutine->ambeginscan = mktann_beginscan;
+	amroutine->amrescan	   = mktann_rescan;
+	amroutine->amgettuple  = mktann_gettuple;
+	amroutine->amgetbitmap = NULL;
+	amroutine->amendscan   = mktann_endscan;
+	amroutine->ammarkpos   = NULL;
+	amroutine->amrestrpos  = NULL;
 
 	/* Parallel scan (not supported) */
 	amroutine->amestimateparallelscan = NULL;

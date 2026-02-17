@@ -33,6 +33,7 @@
 #include "algo/vecops.h"
 #include "cmd.h"
 #include "core/memory.h"
+#include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/centroid_search.h"
 #include "mkt_halfvec.h"
@@ -148,6 +149,7 @@ typedef struct TestStorage
 {
 	MktStorage base; /* must be first */
 	char	  *pages;
+	uint32_t   next_blkno;	/* for write path (new_page counter) */
 	float	  *medoid_vecs; /* [total_slots * dim] flat array */
 	uint32_t   max_entries; /* entries per page (for TID decode) */
 	Dimension  dim;
@@ -167,6 +169,28 @@ test_read_page(MktStorage *self, BlockNumber blkno)
 
 static void
 test_release_page(MktStorage *self, BlockNumber blkno)
+{
+	(void)self;
+	(void)blkno;
+}
+
+static Page
+test_new_page(MktStorage *self, BlockNumber *blkno_out)
+{
+	TestStorage *ts = (TestStorage *)self;
+	*blkno_out		= ts->next_blkno++;
+	return ts->pages + (size_t)*blkno_out * BLCKSZ;
+}
+
+static Page
+test_write_page(MktStorage *self, BlockNumber blkno)
+{
+	TestStorage *ts = (TestStorage *)self;
+	return ts->pages + (size_t)blkno * BLCKSZ;
+}
+
+static void
+test_commit_page(MktStorage *self, BlockNumber blkno)
 {
 	(void)self;
 	(void)blkno;
@@ -299,9 +323,9 @@ bench_rerank(
 static const MktStorageOps test_storage_ops = {
 		.read_page	  = test_read_page,
 		.release_page = test_release_page,
-		.write_page	  = NULL,
-		.new_page	  = NULL,
-		.commit_page  = NULL,
+		.write_page	  = test_write_page,
+		.new_page	  = test_new_page,
+		.commit_page  = test_commit_page,
 		.rerank		  = bench_rerank,
 };
 
@@ -499,63 +523,6 @@ find_medoid(
 	return best;
 }
 
-/*
- * add_centroid_entry - Encode and add a centroid entry to a page
- *
- * Format-aware: handles RaBitQ encoding, raw float, and
- * half-precision storage. For RaBitQ, encodes relative to
- * enc_centroid. For float/half, stores the vector directly.
- *
- * Returns true on success, false on encoding or page-full failure.
- */
-static bool
-add_centroid_entry(
-		Page				page,
-		uint8_t				fmt,
-		const RaBitQParams *params,
-		Dimension			dim,
-		const float		   *vec,
-		const float		   *enc_centroid,
-		BlockNumber			child_blkno,
-		uint16_t			child_count,
-		uint16_t			flags,
-		BlockNumber			page_blkno,
-		uint16_t			entry_idx)
-{
-	ItemPointerData tid;
-	ItemPointerSet(&tid, page_blkno, (OffsetNumber)(entry_idx + 1));
-
-	switch (fmt)
-	{
-	case MKT_CENTROID_FMT_RABITQ:
-	{
-		VectorRef	vec_ref	 = {.data = vec, .dim = dim};
-		VectorRef	cent_ref = {.data = enc_centroid, .dim = dim};
-		RaBitQData *enc		 = mkt_rabitq_encode(params, vec_ref, cent_ref);
-		if (enc == NULL)
-			return false;
-		bool added = mkt_centroid_page_add_entry(
-				page, dim, child_blkno, child_count, flags, &tid, enc);
-		mkt_free(enc);
-		return added;
-	}
-	case MKT_CENTROID_FMT_FLOAT:
-		return mkt_centroid_page_add_entry(
-				page, dim, child_blkno, child_count, flags, &tid, vec);
-	case MKT_CENTROID_FMT_HALF:
-	{
-		half *hvec = mkt_alloc(dim * sizeof(half));
-		mkt_float_to_half_array(vec, hvec, dim);
-		bool added = mkt_centroid_page_add_entry(
-				page, dim, child_blkno, child_count, flags, &tid, hvec);
-		mkt_free(hvec);
-		return added;
-	}
-	default:
-		return false;
-	}
-}
-
 /* ----------------------------------------------------------------
  * build_tree - Build centroid tree via hierarchical k-means
  *
@@ -641,6 +608,13 @@ build_tree(
 	/* Allocate page buffer */
 	char *pages = mkt_alloc((size_t)total_pages * BLCKSZ);
 	memset(pages, 0, (size_t)total_pages * BLCKSZ);
+
+	/* Build-time storage for mkt_centroid_write_pages */
+	TestStorage build_storage = {
+			.base.ops	= &test_storage_ops,
+			.pages		= pages,
+			.next_blkno = 0,
+	};
 
 	/* Allocate medoid vector storage for reranking */
 	float *medoid_vecs = mkt_alloc(
@@ -733,20 +707,6 @@ build_tree(
 			break;
 		}
 
-		/* Initialize all pages for this node and chain them */
-		for (uint32_t p = 0; p < pages_per_node; p++)
-		{
-			BlockNumber blkno = item.first_blkno + p;
-			Page		page  = pages + (size_t)blkno * BLCKSZ;
-			mkt_centroid_page_init_fmt(page, (uint8_t)item.level, fmt);
-			if (p > 0)
-			{
-				MktCentroidPageOpaque *prev = MKT_CENTROID_OPAQUE(
-						pages + (size_t)(blkno - 1) * BLCKSZ);
-				prev->next_blkno = blkno;
-			}
-		}
-
 		BlockNumber next_start =
 				level_start_blkno(item.level + 1, fan_out, pages_per_node);
 
@@ -767,10 +727,6 @@ build_tree(
 			uint32_t *saved_asgn = mkt_alloc(item.count * sizeof(uint32_t));
 			memcpy(saved_asgn, km->assignments, item.count * sizeof(uint32_t));
 
-			/*
-			 * Save a copy of indices (originals freed
-			 * with work item).
-			 */
 			uint32_t *saved_idx = mkt_alloc(item.count * sizeof(uint32_t));
 			memcpy(saved_idx, item.indices, item.count * sizeof(uint32_t));
 
@@ -782,58 +738,89 @@ build_tree(
 			};
 		}
 
+		/*
+		 * Pre-encode entries and build per-entry arrays for
+		 * mkt_centroid_write_pages.
+		 */
+		const void	   **node_data	   = mkt_alloc(k * sizeof(void *));
+		BlockNumber		*node_children = mkt_alloc(k * sizeof(BlockNumber));
+		ItemPointerData *node_tids	   = NULL;
+		if (fmt == MKT_CENTROID_FMT_RABITQ)
+			node_tids = mkt_alloc(k * sizeof(ItemPointerData));
+
+		uint16_t entry_flags	   = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
+		uint16_t entry_child_count = is_leaf ? 0 : (uint16_t)fan_out;
+
 		for (uint32_t c = 0; c < k; c++)
 		{
 			const float *centroid = km->centroids + (size_t)c * dim;
+			const float *medoid	  = find_medoid(
+					  item.vecs, km->assignments, item.count, c, centroid, dim);
 
-			const float *medoid = find_medoid(
-					item.vecs, km->assignments, item.count, c, centroid, dim);
-
-			BlockNumber child_blkno;
-			uint16_t	child_count;
-			uint16_t	flags;
-
+			/* Per-entry child block number */
 			if (is_leaf)
 			{
-				flags		= MKT_CENTROID_FLAG_LEAF;
-				child_count = 0;
-				child_blkno = 1000000 + item.idx_in_level * fan_out + c;
+				node_children[c] = POSTING_HEAD_BASE +
+								   item.idx_in_level * fan_out + c;
 
 				if (nsaved < leaf_centroids)
 				{
 					memcpy(seeds + (size_t)nsaved * dim,
 						   medoid,
 						   dim * sizeof(float));
-					seed_phs[nsaved] = child_blkno;
+					seed_phs[nsaved] = node_children[c];
 					nsaved++;
 				}
 			}
 			else
 			{
-				flags			   = 0;
-				child_count		   = fan_out;
 				uint32_t child_idx = item.idx_in_level * fan_out + c;
-				child_blkno		   = next_start + child_idx * pages_per_node;
+				node_children[c]   = next_start + child_idx * pages_per_node;
 			}
 
-			/* Distribute entries across overflow pages */
-			uint32_t	page_off	= c / max_entries;
-			uint16_t	entry_in_pg = (uint16_t)(c % max_entries);
-			BlockNumber entry_blkno = item.first_blkno + page_off;
-			Page		entry_page	= pages + (size_t)entry_blkno * BLCKSZ;
+			/* Encode data for write_pages */
+			switch (fmt)
+			{
+			case MKT_CENTROID_FMT_RABITQ:
+			{
+				VectorRef vec_ref  = {.data = medoid, .dim = dim};
+				VectorRef cent_ref = {.data = global_centroid_out, .dim = dim};
+				node_data[c] = mkt_rabitq_encode(params, vec_ref, cent_ref);
+				if (node_data[c] == NULL)
+				{
+					fprintf(stderr,
+							"Error: RaBitQ encode failed "
+							"at level %u entry %u\n",
+							item.level,
+							c);
+					ok = false;
+				}
+				break;
+			}
+			case MKT_CENTROID_FMT_FLOAT:
+				node_data[c] = medoid;
+				break;
+			case MKT_CENTROID_FMT_HALF:
+			{
+				half *hvec = mkt_alloc(dim * sizeof(half));
+				mkt_float_to_half_array(medoid, hvec, dim);
+				node_data[c] = hvec;
+				break;
+			}
+			}
 
-			bool added = add_centroid_entry(
-					entry_page,
-					fmt,
-					params,
-					dim,
-					medoid,
-					global_centroid_out,
-					child_blkno,
-					child_count,
-					flags,
-					entry_blkno,
-					entry_in_pg);
+			if (!ok)
+				break;
+
+			/* Compute TID for reranking lookup */
+			BlockNumber entry_blkno = item.first_blkno + c / max_entries;
+			uint16_t	entry_in_pg = (uint16_t)(c % max_entries);
+
+			if (node_tids != NULL)
+				ItemPointerSet(
+						&node_tids[c],
+						entry_blkno,
+						(OffsetNumber)(entry_in_pg + 1));
 
 			/* Save medoid for reranking */
 			uint32_t midx = entry_blkno * max_entries + entry_in_pg;
@@ -841,18 +828,7 @@ build_tree(
 				   medoid,
 				   dim * sizeof(float));
 
-			if (!added)
-			{
-				fprintf(stderr,
-						"Error: page add failed at level %u "
-						"page %u entry %u\n",
-						item.level,
-						entry_blkno,
-						c);
-				ok = false;
-				break;
-			}
-
+			/* Enqueue children (non-leaf) */
 			if (!is_leaf)
 			{
 				uint32_t sub_n = 0;
@@ -861,40 +837,70 @@ build_tree(
 					if (km->assignments[v] == c)
 						sub_n++;
 				}
-				if (sub_n == 0)
-					continue;
-
-				float *sub_vecs = mkt_alloc(
-						(size_t)sub_n * dim * sizeof(float));
-				uint32_t *sub_idx = mkt_alloc(sub_n * sizeof(uint32_t));
-
-				uint32_t idx = 0;
-				for (uint32_t v = 0; v < item.count; v++)
+				if (sub_n > 0)
 				{
-					if (km->assignments[v] == c)
+					float *sub_vecs = mkt_alloc(
+							(size_t)sub_n * dim * sizeof(float));
+					uint32_t *sub_idx = mkt_alloc(sub_n * sizeof(uint32_t));
+
+					uint32_t idx = 0;
+					for (uint32_t v = 0; v < item.count; v++)
 					{
-						memcpy(sub_vecs + (size_t)idx * dim,
-							   item.vecs + (size_t)v * dim,
-							   dim * sizeof(float));
-						sub_idx[idx] = item.indices[v];
-						idx++;
+						if (km->assignments[v] == c)
+						{
+							memcpy(sub_vecs + (size_t)idx * dim,
+								   item.vecs + (size_t)v * dim,
+								   dim * sizeof(float));
+							sub_idx[idx] = item.indices[v];
+							idx++;
+						}
 					}
+
+					uint32_t	child_il	= item.idx_in_level * fan_out + c;
+					BlockNumber child_first = next_start +
+											  child_il * pages_per_node;
+
+					queue[q_tail++] = (WorkItem){
+							.vecs		  = sub_vecs,
+							.indices	  = sub_idx,
+							.count		  = sub_n,
+							.first_blkno  = child_first,
+							.level		  = item.level + 1,
+							.idx_in_level = child_il,
+					};
 				}
-
-				uint32_t child_idx_in_level = item.idx_in_level * fan_out + c;
-				BlockNumber child_first		= next_start +
-										  child_idx_in_level * pages_per_node;
-
-				queue[q_tail++] = (WorkItem){
-						.vecs		  = sub_vecs,
-						.indices	  = sub_idx,
-						.count		  = sub_n,
-						.first_blkno  = child_first,
-						.level		  = item.level + 1,
-						.idx_in_level = child_idx_in_level,
-				};
 			}
 		}
+
+		/* Write pages using production code path */
+		if (ok)
+		{
+			build_storage.next_blkno = item.first_blkno;
+			mkt_centroid_write_pages(
+					&build_storage.base,
+					dim,
+					k,
+					fmt,
+					(uint8_t)item.level,
+					entry_flags,
+					entry_child_count,
+					node_data,
+					node_tids,
+					node_children);
+		}
+
+		/* Free encoded data */
+		for (uint32_t c = 0; c < k; c++)
+		{
+			if (fmt == MKT_CENTROID_FMT_RABITQ || fmt == MKT_CENTROID_FMT_HALF)
+			{
+				if (node_data[c] != NULL)
+					mkt_free((void *)node_data[c]);
+			}
+		}
+		mkt_free(node_data);
+		mkt_free(node_children);
+		mkt_free(node_tids);
 
 		mkt_kmeans_result_destroy(km);
 

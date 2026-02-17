@@ -1236,8 +1236,8 @@ TEST_PARAMETERIZED(f16_algo_l2, "lloyd", "hamerly", "elkan")
 	opts.algorithm	   = algos[iteration];
 	opts.seed		   = 42;
 
-	KMeansResult *res =
-			mkt_kmeans(f16, MKT_VEC_F16, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *res = mkt_kmeans(
+			f16, NULL, MKT_VEC_F16, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "f16 algorithm should return result");
 	ASSERT_EQ(3, res->nlist, "nlist should be 3");
@@ -1283,8 +1283,8 @@ TEST(f16_matches_f32)
 
 	KMeansResult *r32 =
 			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
-	KMeansResult *r16 =
-			mkt_kmeans(f16, MKT_VEC_F16, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r16 = mkt_kmeans(
+			f16, NULL, MKT_VEC_F16, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(r32, "f32 should succeed");
 	ASSERT_NOT_NULL(r16, "f16 should succeed");
@@ -1349,7 +1349,7 @@ TEST_PARAMETERIZED(f16_algo_overlapping, "hamerly", "elkan")
 	opts.max_iterations = 20;
 
 	KMeansResult *res = mkt_kmeans(
-			f16, MKT_VEC_F16, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			f16, NULL, MKT_VEC_F16, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "f16 overlapping should succeed");
 	ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
@@ -1362,4 +1362,102 @@ TEST_PARAMETERIZED(f16_algo_overlapping, "hamerly", "elkan")
 	mkt_kmeans_result_destroy(res);
 	mkt_free(f16);
 	mkt_free(data);
+}
+
+/*
+ * Indexed k-means: subset via index array should match gathered copy.
+ *
+ * Build a large array with 4 well-separated clusters, then select a
+ * subset of 3 clusters via an index array. Verify that indexed k-means
+ * produces the same assignments as k-means on a contiguous copy.
+ */
+TEST(indexed_kmeans)
+{
+	/* 4 clusters at (±50, ±50), 25 vectors each */
+	uint32_t  per_cluster = 25;
+	uint32_t  total_vecs  = per_cluster * 4;
+	Dimension dim		  = 2;
+	float	 *all_vecs = mkt_alloc((size_t)total_vecs * dim * sizeof(float));
+
+	float centers[][2] = {
+			{50.0f, 50.0f},
+			{-50.0f, 50.0f},
+			{50.0f, -50.0f},
+			{-50.0f, -50.0f},
+	};
+
+	uint32_t rng = 77;
+	for (uint32_t c = 0; c < 4; c++)
+	{
+		for (uint32_t i = 0; i < per_cluster; i++)
+		{
+			uint32_t idx = c * per_cluster + i;
+			rng			 = rng * 1103515245 + 12345;
+			float dx	 = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.1f;
+			rng			 = rng * 1103515245 + 12345;
+			float dy	 = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.1f;
+			all_vecs[idx * 2 + 0] = centers[c][0] + dx;
+			all_vecs[idx * 2 + 1] = centers[c][1] + dy;
+		}
+	}
+
+	/* Select clusters 0, 2, 3 (skip cluster 1) via indices */
+	uint32_t  sub_nvecs = per_cluster * 3;
+	uint32_t *indices	= mkt_alloc(sub_nvecs * sizeof(uint32_t));
+	float	 *gathered	= mkt_alloc((size_t)sub_nvecs * dim * sizeof(float));
+
+	uint32_t idx		= 0;
+	uint32_t selected[] = {0, 2, 3};
+	for (int s = 0; s < 3; s++)
+	{
+		uint32_t c = selected[s];
+		for (uint32_t i = 0; i < per_cluster; i++)
+		{
+			uint32_t orig = c * per_cluster + i;
+			indices[idx]  = orig;
+			memcpy(gathered + (size_t)idx * dim,
+				   all_vecs + (size_t)orig * dim,
+				   dim * sizeof(float));
+			idx++;
+		}
+	}
+
+	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	opts.seed		   = 42;
+
+	/* Run indexed k-means on full array with subset indices */
+	KMeansResult *r_idx = mkt_kmeans(
+			all_vecs,
+			indices,
+			MKT_VEC_F32,
+			sub_nvecs,
+			dim,
+			3,
+			DISTANCE_L2,
+			&opts);
+
+	/* Run standard k-means on gathered copy */
+	KMeansResult *r_std =
+			mkt_kmeans_f32(gathered, sub_nvecs, dim, 3, DISTANCE_L2, &opts);
+
+	ASSERT_NOT_NULL(r_idx, "indexed k-means should succeed");
+	ASSERT_NOT_NULL(r_std, "standard k-means should succeed");
+
+	/* Same seed + same data: assignments should match exactly */
+	for (uint32_t i = 0; i < sub_nvecs; i++)
+	{
+		ASSERT_EQ(
+				r_std->assignments[i],
+				r_idx->assignments[i],
+				"indexed and gathered should match");
+	}
+
+	ASSERT_FLOAT_EQ(
+			r_std->total_cost, r_idx->total_cost, 1e-3f, "costs should match");
+
+	mkt_kmeans_result_destroy(r_idx);
+	mkt_kmeans_result_destroy(r_std);
+	mkt_free(all_vecs);
+	mkt_free(indices);
+	mkt_free(gathered);
 }

@@ -82,9 +82,12 @@ typedef struct KMeansOptions
  * Runs nredo independent attempts and returns the best (lowest cost).
  *
  * Parameters:
- *   vectors:  [nvecs * dim] row-major input vectors
+ *   vectors:  [nvecs * dim] row-major input vectors (or full array
+ *             when indices is non-NULL)
+ *   indices:  optional index array [nvecs] mapping logical positions
+ *             to rows in vectors. NULL = contiguous [0..nvecs).
  *   vec_type: element type (MKT_VEC_F32, MKT_VEC_F16, MKT_VEC_F16C)
- *   nvecs:    number of input vectors
+ *   nvecs:    number of vectors (or indices) to cluster
  *   dim:      vector dimension
  *   nlist:    number of clusters (K)
  *   metric:   distance metric (L2, IP, or cosine)
@@ -94,6 +97,7 @@ typedef struct KMeansOptions
  */
 KMeansResult *mkt_kmeans(
 		const void			*vectors,
+		const uint32_t		*indices,
 		MktVecType			 vec_type,
 		uint32_t			 nvecs,
 		Dimension			 dim,
@@ -114,7 +118,7 @@ mkt_kmeans_f32(
 		const KMeansOptions *options)
 {
 	return mkt_kmeans(
-			vectors, MKT_VEC_F32, nvecs, dim, nlist, metric, options);
+			vectors, NULL, MKT_VEC_F32, nvecs, dim, nlist, metric, options);
 }
 
 /*

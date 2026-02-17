@@ -8,6 +8,7 @@
  * error-bound-aware pruning.
  */
 
+#include <math.h>
 #include <string.h>
 
 #include "algo/topk.h"
@@ -133,7 +134,26 @@ score_page(
 		{
 			const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, i);
 			const float *fvec = mkt_centroid_float_data(page, i, dim);
-			Distance dist = mkt_l2_distance_squared(state->query, fvec, dim);
+			Distance	 dist;
+
+			switch (state->metric)
+			{
+			case DISTANCE_INNER_PRODUCT:
+				dist = -mkt_dot_product(state->query, fvec, dim);
+				break;
+			case DISTANCE_COSINE:
+			{
+				float dot	 = mkt_dot_product(state->query, fvec, dim);
+				float norm_q = mkt_l2_norm_squared(state->query, dim);
+				float norm_v = mkt_l2_norm_squared(fvec, dim);
+				float denom	 = sqrtf(norm_q * norm_v);
+				dist		 = (denom > 0.0f) ? 1.0f - dot / denom : 1.0f;
+				break;
+			}
+			default: /* L2 */
+				dist = mkt_l2_distance_squared(state->query, fvec, dim);
+				break;
+			}
 
 			cands[cand_count].child_blkno = meta->child_blkno;
 			memset(&cands[cand_count].medoid_tid, 0, sizeof(ItemPointerData));
@@ -149,7 +169,26 @@ score_page(
 		{
 			const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, i);
 			const half *hvec = mkt_centroid_half_data(page, i, dim);
-			Distance	dist = mkt_f16_l2_squared(hvec, state->query, dim);
+			Distance	dist;
+
+			switch (state->metric)
+			{
+			case DISTANCE_INNER_PRODUCT:
+				dist = -mkt_f16_dot_product(hvec, state->query, dim);
+				break;
+			case DISTANCE_COSINE:
+			{
+				float dot	 = mkt_f16_dot_product(hvec, state->query, dim);
+				float norm_q = mkt_l2_norm_squared(state->query, dim);
+				float norm_v = mkt_f16_norm_sq(hvec, dim);
+				float denom	 = sqrtf(norm_q * norm_v);
+				dist		 = (denom > 0.0f) ? 1.0f - dot / denom : 1.0f;
+				break;
+			}
+			default: /* L2 */
+				dist = mkt_f16_l2_squared(hvec, state->query, dim);
+				break;
+			}
 
 			cands[cand_count].child_blkno = meta->child_blkno;
 			memset(&cands[cand_count].medoid_tid, 0, sizeof(ItemPointerData));

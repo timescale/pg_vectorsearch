@@ -7,6 +7,10 @@ extension_sources = files(
   'mkt_pg_rabitq.c',
   'mkt_pg_rabitq_params.c',
   'mktann.c',
+  'mktann_build.c',
+  'mktann_scan.c',
+  'mktann_storage.c',
+  'topk.c',
 )
 
 pg_ext_cflags = [
@@ -17,7 +21,7 @@ pg_ext_cflags = [
   '-Wno-pedantic',
 ]
 
-# Suppress clang-specific PG macro warnings
+# Suppress clang-specific PG header warnings
 if cc.get_id() == 'clang'
   pg_ext_cflags += [
     '-Wno-gnu-statement-expression-from-macro-expansion',
@@ -25,17 +29,19 @@ if cc.get_id() == 'clang'
   ]
 endif
 
-# Add PostgreSQL source tree headers for IDE navigation
+pg_ext_cflags += ['-I' + pg_includedir_server]
+pg_ext_cflags += pg_cflags
+
+# Add PostgreSQL source tree headers for IDE navigation.
+# Use -isystem so installed headers (above) take precedence and
+# warnings from the source tree are suppressed.
 pg_srcdir_path = get_option('pg_srcdir')
 if pg_srcdir_path != ''
   fs = import('fs')
   if fs.is_dir(pg_srcdir_path)
-    pg_ext_cflags += ['-I' + pg_srcdir_path / 'src/include']
+    pg_ext_cflags += ['-isystem', pg_srcdir_path / 'src/include']
   endif
 endif
-
-pg_ext_cflags += ['-I' + pg_includedir_server]
-pg_ext_cflags += pg_cflags
 
 # Build the extension as a shared library
 meerkat_ext_so = shared_library('meerkat',

@@ -379,6 +379,7 @@ run_bench(
 	uint64_t	  start = get_time_ns();
 	KMeansResult *res	= mkt_kmeans(
 			  data,
+			  NULL,
 			  vec_type,
 			  cfg->nvecs,
 			  cfg->dim,
