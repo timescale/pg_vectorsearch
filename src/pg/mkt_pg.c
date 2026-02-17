@@ -5,17 +5,42 @@
 #include <postgres.h>
 
 #include <fmgr.h>
+#include <utils/guc.h>
 
 #include "algo/distance.h"
 #include "mkt_pg.h"
 
 PG_MODULE_MAGIC;
 
+/* GUC variables */
+int mkt_distance_mode = MKT_DISTANCE_MODE_ASYMMETRIC;
+
+static const struct config_enum_entry mkt_distance_mode_options[] = {
+		{"asymmetric", MKT_DISTANCE_MODE_ASYMMETRIC, false},
+		{"symmetric", MKT_DISTANCE_MODE_SYMMETRIC, false},
+		{NULL, 0, false},
+};
+
 void _PG_init(void);
 
 void
 _PG_init(void)
 {
+	DefineCustomEnumVariable(
+			"mkt.distance_mode",
+			"RaBitQ distance computation mode.",
+			"asymmetric (accurate) or symmetric (4-12x faster)",
+			&mkt_distance_mode,
+			MKT_DISTANCE_MODE_ASYMMETRIC,
+			mkt_distance_mode_options,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	MarkGUCPrefixReserved("mkt");
+
 	mkt_distance_init();
 	mkt_rabitq_init_simd();
 }

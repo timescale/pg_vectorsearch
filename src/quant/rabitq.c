@@ -847,8 +847,11 @@ mkt_rabitq_encode_batch_alloc(
  */
 
 RaBitQQueryState *
-mkt_rabitq_prepare_query(
-		const RaBitQParams *params, VectorRef query, VectorRef centroid)
+mkt_rabitq_prepare_query_ex(
+		const RaBitQParams *params,
+		VectorRef			query,
+		VectorRef			centroid,
+		MktDistanceMode		mode)
 {
 	if (params == NULL || query.data == NULL || centroid.data == NULL)
 		return NULL;
@@ -923,9 +926,31 @@ mkt_rabitq_prepare_query(
 		l1_sum += fabsf(state->transformed[i]);
 	state->g_scale = l1_sum / (float)dim;
 
+	/* Set dispatch function pointers based on mode */
+	state->mode = mode;
+	if (mode == MKT_DISTANCE_MODE_SYMMETRIC)
+	{
+		state->distance_fn = mkt_rabitq_distance_symmetric;
+		state->distance_with_bound_fn =
+				mkt_rabitq_distance_symmetric_with_bound;
+	}
+	else
+	{
+		state->distance_fn			  = mkt_rabitq_distance;
+		state->distance_with_bound_fn = mkt_rabitq_distance_with_bound;
+	}
+
 	mkt_free_aligned(residual);
 
 	return state;
+}
+
+RaBitQQueryState *
+mkt_rabitq_prepare_query(
+		const RaBitQParams *params, VectorRef query, VectorRef centroid)
+{
+	return mkt_rabitq_prepare_query_ex(
+			params, query, centroid, MKT_DISTANCE_MODE_ASYMMETRIC);
 }
 
 void

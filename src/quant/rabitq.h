@@ -127,7 +127,26 @@ typedef struct RaBitQParams
  * where:
  *   final_dot = (2 * binary_ip - sum_transformed) * inv_sqrt_d
  *   binary_ip = sum of transformed[i] where bit[i] = 1
+ *
+ * The distance_fn and distance_with_bound_fn pointers are set at
+ * query preparation time based on the selected MktDistanceMode,
+ * enabling zero-branch dispatch in the hot loop.
  */
+
+/* Forward declaration for function pointer types */
+struct RaBitQQueryState;
+
+typedef Distance (*RaBitQDistanceFn)(
+		const struct RaBitQQueryState *qstate,
+		const RaBitQData			  *data,
+		Dimension					   dim);
+typedef void (*RaBitQDistanceWithBoundFn)(
+		const struct RaBitQQueryState *qstate,
+		const RaBitQData			  *data,
+		Dimension					   dim,
+		Distance					  *est_dist,
+		Distance					  *lower_bound);
+
 typedef struct RaBitQQueryState
 {
 	float	 *transformed;	   /* P^T * (query - centroid) */
@@ -139,6 +158,11 @@ typedef struct RaBitQQueryState
 	float	  inv_sqrt_d;	   /* 1 / sqrt(dim) */
 	float	  c_error;		   /* 2*ε/√(d-1), for deriving f_error */
 	Dimension dim;
+
+	/* Runtime dispatch (set by prepare_query_ex) */
+	MktDistanceMode			  mode;
+	RaBitQDistanceFn		  distance_fn;
+	RaBitQDistanceWithBoundFn distance_with_bound_fn;
 } RaBitQQueryState;
 
 /*
@@ -281,6 +305,43 @@ RaBitQQueryState *mkt_rabitq_prepare_query(
  * Free query state.
  */
 void mkt_rabitq_free_query(RaBitQQueryState *state);
+
+/*
+ * Prepare query state with explicit distance mode.
+ *
+ * Like mkt_rabitq_prepare_query() but additionally sets function pointers
+ * for the selected mode, enabling zero-branch dispatch via the inline
+ * helpers below.
+ *
+ * Returns NULL on failure.
+ */
+RaBitQQueryState *mkt_rabitq_prepare_query_ex(
+		const RaBitQParams *params,
+		VectorRef			query,
+		VectorRef			centroid,
+		MktDistanceMode		mode);
+
+/*
+ * Dispatch helpers - call through function pointers set at prepare time
+ */
+
+static inline Distance
+mkt_rabitq_distance_dispatch(
+		const RaBitQQueryState *qstate, const RaBitQData *data, Dimension dim)
+{
+	return qstate->distance_fn(qstate, data, dim);
+}
+
+static inline void
+mkt_rabitq_distance_dispatch_with_bound(
+		const RaBitQQueryState *qstate,
+		const RaBitQData	   *data,
+		Dimension				dim,
+		Distance			   *est_dist,
+		Distance			   *lower_bound)
+{
+	qstate->distance_with_bound_fn(qstate, data, dim, est_dist, lower_bound);
+}
 
 /*
  * Distance computation - estimate L2 distance from quantized codes

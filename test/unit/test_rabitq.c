@@ -1864,3 +1864,161 @@ TEST(symmetric_distance_null_inputs)
 	mkt_free(encoded);
 	mkt_rabitq_destroy(params);
 }
+
+/*
+ * Distance Mode Dispatch Tests
+ */
+
+TEST(distance_mode_name)
+{
+	ASSERT_STR_EQ(
+			"asymmetric",
+			mkt_distance_mode_name(MKT_DISTANCE_MODE_ASYMMETRIC),
+			"asymmetric name");
+	ASSERT_STR_EQ(
+			"symmetric",
+			mkt_distance_mode_name(MKT_DISTANCE_MODE_SYMMETRIC),
+			"symmetric name");
+}
+
+TEST(prepare_query_default_is_asymmetric)
+{
+	Dimension	  dim	   = 32;
+	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
+	float		 *query	   = alloc_test_vector(dim, 100);
+	float		 *centroid = alloc_test_vector(dim, 50);
+
+	VectorRef query_ref	   = {.data = query, .dim = dim};
+	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+
+	RaBitQQueryState *state =
+			mkt_rabitq_prepare_query(params, query_ref, centroid_ref);
+	ASSERT_NOT_NULL(state, "prepare_query should succeed");
+
+	ASSERT_EQ(
+			MKT_DISTANCE_MODE_ASYMMETRIC,
+			state->mode,
+			"default mode should be asymmetric");
+	ASSERT_NOT_NULL(
+			(void *)(uintptr_t)state->distance_fn,
+			"distance_fn should be set");
+	ASSERT_NOT_NULL(
+			(void *)(uintptr_t)state->distance_with_bound_fn,
+			"distance_with_bound_fn should be set");
+
+	mkt_rabitq_free_query(state);
+	mkt_rabitq_destroy(params);
+}
+
+TEST(prepare_query_ex_asymmetric)
+{
+	/* Dispatch through _ex with asymmetric should match direct call */
+	Dimension	  dim	   = 64;
+	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
+	float		 *input	   = alloc_test_vector(dim, 0);
+	float		 *query	   = alloc_test_vector(dim, 30);
+	float		 *centroid = alloc_test_vector(dim, 50);
+
+	VectorRef input_ref	   = {.data = input, .dim = dim};
+	VectorRef query_ref	   = {.data = query, .dim = dim};
+	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+
+	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
+
+	RaBitQQueryState *state = mkt_rabitq_prepare_query_ex(
+			params, query_ref, centroid_ref, MKT_DISTANCE_MODE_ASYMMETRIC);
+	ASSERT_NOT_NULL(state, "prepare_query_ex should succeed");
+
+	Distance direct	  = mkt_rabitq_distance(state, encoded, dim);
+	Distance dispatch = mkt_rabitq_distance_dispatch(state, encoded, dim);
+
+	ASSERT_FLOAT_EQ(
+			direct, dispatch, 1e-6f, "dispatch should match direct call");
+
+	mkt_rabitq_free_query(state);
+	mkt_free(encoded);
+	mkt_rabitq_destroy(params);
+}
+
+TEST(prepare_query_ex_symmetric)
+{
+	/* Dispatch through _ex with symmetric should match direct call */
+	Dimension	  dim	   = 64;
+	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
+	float		 *input	   = alloc_test_vector(dim, 0);
+	float		 *query	   = alloc_test_vector(dim, 30);
+	float		 *centroid = alloc_test_vector(dim, 50);
+
+	VectorRef input_ref	   = {.data = input, .dim = dim};
+	VectorRef query_ref	   = {.data = query, .dim = dim};
+	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+
+	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
+
+	RaBitQQueryState *state = mkt_rabitq_prepare_query_ex(
+			params, query_ref, centroid_ref, MKT_DISTANCE_MODE_SYMMETRIC);
+	ASSERT_NOT_NULL(state, "prepare_query_ex should succeed");
+
+	Distance direct	  = mkt_rabitq_distance_symmetric(state, encoded, dim);
+	Distance dispatch = mkt_rabitq_distance_dispatch(state, encoded, dim);
+
+	ASSERT_FLOAT_EQ(
+			direct, dispatch, 1e-6f, "dispatch should match direct call");
+
+	mkt_rabitq_free_query(state);
+	mkt_free(encoded);
+	mkt_rabitq_destroy(params);
+}
+
+TEST(dispatch_with_bound_both_modes)
+{
+	/* Both modes should produce valid bounds via dispatch */
+	Dimension	  dim	   = 64;
+	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
+	float		 *input	   = alloc_test_vector(dim, 0);
+	float		 *query	   = alloc_test_vector(dim, 30);
+	float		 *centroid = alloc_test_vector(dim, 0);
+
+	VectorRef input_ref	   = {.data = input, .dim = dim};
+	VectorRef query_ref	   = {.data = query, .dim = dim};
+	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+
+	RaBitQData *encoded	  = mkt_rabitq_encode(params, input_ref, centroid_ref);
+	Distance	true_dist = true_l2_distance(input_ref, query_ref);
+
+	/* Asymmetric dispatch */
+	RaBitQQueryState *asym = mkt_rabitq_prepare_query_ex(
+			params, query_ref, centroid_ref, MKT_DISTANCE_MODE_ASYMMETRIC);
+
+	Distance est_a, lb_a;
+	mkt_rabitq_distance_dispatch_with_bound(asym, encoded, dim, &est_a, &lb_a);
+
+	ASSERT_TRUE(isfinite(est_a), "asymmetric est should be finite");
+	ASSERT_TRUE(
+			lb_a <= true_dist + 1e-3f, "asymmetric lower bound should hold");
+
+	/* Symmetric dispatch */
+	RaBitQQueryState *sym = mkt_rabitq_prepare_query_ex(
+			params, query_ref, centroid_ref, MKT_DISTANCE_MODE_SYMMETRIC);
+
+	Distance est_s, lb_s;
+	mkt_rabitq_distance_dispatch_with_bound(sym, encoded, dim, &est_s, &lb_s);
+
+	ASSERT_TRUE(isfinite(est_s), "symmetric est should be finite");
+	ASSERT_TRUE(
+			lb_s <= true_dist + 1e-2f, "symmetric lower bound should hold");
+
+	TEST_PRINT(
+			"Asymmetric: est=%.4f lb=%.4f | "
+			"Symmetric: est=%.4f lb=%.4f | True: %.4f\n",
+			est_a,
+			lb_a,
+			est_s,
+			lb_s,
+			true_dist);
+
+	mkt_rabitq_free_query(asym);
+	mkt_rabitq_free_query(sym);
+	mkt_free(encoded);
+	mkt_rabitq_destroy(params);
+}
