@@ -139,7 +139,13 @@ detect_simd_x86(void)
 
 			/* AVX-512F: EBX bit 16 (requires OS support) */
 			if ((ebx & (1 << 16)) && os_supports_avx512())
+			{
 				caps |= SIMD_AVX512F;
+
+				/* VPOPCNTDQ: ECX bit 14 (Ice Lake 2019+) */
+				if (ecx & (1 << 14))
+					caps |= SIMD_AVX512_VPOPCNTDQ;
+			}
 		}
 	}
 

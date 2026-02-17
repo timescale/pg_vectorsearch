@@ -19,6 +19,7 @@ int cmd_bench_distance(CmdContext *ctx);
 int cmd_bench_quantize(CmdContext *ctx);
 int cmd_bench_cluster(CmdContext *ctx);
 int cmd_bench_search(CmdContext *ctx);
+int cmd_bench_rabitq_kernel(CmdContext *ctx);
 
 /* Subcommand structure */
 typedef struct
@@ -38,6 +39,7 @@ static const Command bench_commands[] = {
 		{"quantize", cmd_bench_quantize, "Benchmark quantization methods"},
 		{"cluster", cmd_bench_cluster, "Benchmark clustering algorithms"},
 		{"search", cmd_bench_search, "Benchmark end-to-end search"},
+		{"rabitq-kernel", cmd_bench_rabitq_kernel, "Benchmark RaBitQ kernels"},
 		{NULL, NULL, NULL},
 };
 

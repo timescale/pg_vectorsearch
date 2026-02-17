@@ -131,8 +131,10 @@ typedef struct RaBitQParams
 typedef struct RaBitQQueryState
 {
 	float	 *transformed;	   /* P^T * (query - centroid) */
+	uint8_t	 *query_bits;	   /* sign(transformed), packed bits */
 	float	  g_add;		   /* ||query - centroid||² */
 	float	  g_error;		   /* sqrt(g_add) for error bound */
+	float	  g_scale;		   /* mean(|transformed|) for symmetric */
 	float	  sum_transformed; /* sum(transformed) for distance formula */
 	float	  inv_sqrt_d;	   /* 1 / sqrt(dim) */
 	float	  c_error;		   /* 2*ε/√(d-1), for deriving f_error */
@@ -334,6 +336,70 @@ const char *mkt_rabitq_impl_name(void);
 void mkt_rabitq_force_reinit(void);
 
 /*
+ * Hamming distance - XOR + popcount between two bit vectors
+ */
+
+/*
+ * Compute Hamming distance between two packed bit vectors.
+ *
+ * Returns the number of bit positions where a and b differ.
+ */
+uint32_t mkt_rabitq_hamming_distance(
+		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes);
+
+/*
+ * Multi-candidate Hamming distance (vertical SIMD).
+ *
+ * Computes Hamming distances from query_bits to count data vectors.
+ * Candidate i's bits start at data_bits + i * stride.
+ */
+void mkt_rabitq_hamming_distance_multi(
+		const uint8_t *query_bits,
+		const uint8_t *data_bits,
+		uint32_t	   stride,
+		uint32_t	   packed_bytes,
+		uint32_t	   count,
+		uint32_t	  *results);
+
+/*
+ * Symmetric distance - both query and data are 1-bit quantized
+ *
+ * Uses Hamming distance (XOR + popcount) instead of asymmetric inner
+ * product (mask + add). ~32x fewer iterations of the inner loop,
+ * but with additional query quantization error.
+ *
+ * Formula:
+ *   sym_dot   = dim - 2 * hamming(query_bits, data_bits)
+ *   final_dot = sym_dot * inv_sqrt_d
+ *   est_dist  = f_add + g_add - 2 * f_rescale * g_scale * final_dot
+ */
+
+Distance mkt_rabitq_distance_symmetric(
+		const RaBitQQueryState *qstate, const RaBitQData *data, Dimension dim);
+
+void mkt_rabitq_distance_symmetric_with_bound(
+		const RaBitQQueryState *qstate,
+		const RaBitQData	   *data,
+		Dimension				dim,
+		Distance			   *est_dist,
+		Distance			   *lower_bound);
+
+void mkt_rabitq_distance_batch_symmetric(
+		const RaBitQQueryState *qstate,
+		const float			   *f_add,
+		const float			   *f_rescale,
+		const uint8_t		   *bits,
+		uint32_t				count,
+		Dimension				dim,
+		Distance			   *distances);
+
+/*
+ * Get name of the active Hamming SIMD implementation.
+ * Returns one of: "avx512-vpopcntdq", "avx2", "compiler"
+ */
+const char *mkt_rabitq_hamming_impl_name(void);
+
+/*
  * Hand-optimized SIMD implementations (simd=full only)
  *
  * These are resolved via function pointers in mkt_rabitq_init_simd().
@@ -347,11 +413,33 @@ float mkt_rabitq_inner_product_avx512(
 void mkt_rabitq_extract_signs_avx512(
 		const float *transformed, uint8_t *bits, Dimension dim);
 
+/* AVX-512 VPOPCNTDQ Hamming implementations */
+uint32_t mkt_rabitq_hamming_avx512(
+		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes);
+void mkt_rabitq_hamming_multi_avx512(
+		const uint8_t *query_bits,
+		const uint8_t *data_bits,
+		uint32_t	   stride,
+		uint32_t	   packed_bytes,
+		uint32_t	   count,
+		uint32_t	  *results);
+
 /* AVX2 implementations */
 float mkt_rabitq_inner_product_avx2(
 		const float *transformed, const uint8_t *bits, Dimension dim);
 void mkt_rabitq_extract_signs_avx2(
 		const float *transformed, uint8_t *bits, Dimension dim);
+
+/* AVX2 lookup-table Hamming implementations */
+uint32_t mkt_rabitq_hamming_avx2(
+		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes);
+void mkt_rabitq_hamming_multi_avx2(
+		const uint8_t *query_bits,
+		const uint8_t *data_bits,
+		uint32_t	   stride,
+		uint32_t	   packed_bytes,
+		uint32_t	   count,
+		uint32_t	  *results);
 #endif
 
 #if defined(__aarch64__) || defined(_M_ARM64)
