@@ -1,0 +1,25 @@
+-- mktann index access method
+-- Create table with vector column
+CREATE TABLE embeddings (id serial, v vector(3));
+-- Insert data before index
+INSERT INTO embeddings (v) VALUES
+    ('[1,0,0]'),
+    ('[0,1,0]'),
+    ('[0,0,1]');
+-- Create index with default opclass (L2)
+CREATE INDEX idx_l2 ON embeddings USING mktann (v);
+-- Create index with inner product opclass
+CREATE INDEX idx_ip ON embeddings USING mktann (v vector_ip_ops);
+-- Create index with cosine opclass
+CREATE INDEX idx_cos ON embeddings USING mktann (v vector_cosine_ops);
+-- Insert after index creation (should not crash)
+INSERT INTO embeddings (v) VALUES ('[1,1,1]');
+-- ORDER BY distance with LIMIT (uses seqscan since shim returns nothing)
+SELECT id, v <-> '[1,0,0]' AS dist
+    FROM embeddings ORDER BY v <-> '[1,0,0]' LIMIT 3;
+ id | dist 
+----+------
+(0 rows)
+
+-- Cleanup
+DROP TABLE embeddings;

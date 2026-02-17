@@ -653,6 +653,33 @@ Returns a rabitq value containing the quantized bits, f_add, and f_rescale.
 The params argument provides the orthogonal transform matrix (see rabitq_params_generate).';
 
 -- =====================================================================
+-- mktann index access method
+-- =====================================================================
+
+CREATE FUNCTION mktann_handler(internal) RETURNS index_am_handler
+    AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE ACCESS METHOD mktann TYPE INDEX HANDLER mktann_handler;
+
+COMMENT ON ACCESS METHOD mktann IS 'meerkat ANN index';
+
+-- Operator classes for vector type
+CREATE OPERATOR CLASS vector_l2_ops
+    DEFAULT FOR TYPE vector USING mktann AS
+    OPERATOR 1 <-> (vector, vector) FOR ORDER BY float_ops,
+    FUNCTION 1 vector_l2_squared_distance(vector, vector);
+
+CREATE OPERATOR CLASS vector_ip_ops
+    FOR TYPE vector USING mktann AS
+    OPERATOR 1 <#> (vector, vector) FOR ORDER BY float_ops,
+    FUNCTION 1 vector_negative_inner_product(vector, vector);
+
+CREATE OPERATOR CLASS vector_cosine_ops
+    FOR TYPE vector USING mktann AS
+    OPERATOR 1 <=> (vector, vector) FOR ORDER BY float_ops,
+    FUNCTION 1 cosine_distance(vector, vector);
+
+-- =====================================================================
 -- pgvector binary cast support
 -- =====================================================================
 --
