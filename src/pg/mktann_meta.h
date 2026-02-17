@@ -1,0 +1,61 @@
+/*
+ * mktann_meta.h - Metadata page layout for mktann index
+ *
+ * Block 0 of every mktann index stores an MktannMetaPage in the
+ * page special area. It records index parameters (dimension, tree
+ * depth, centroid format, distance metric, RaBitQ seed) and the
+ * global mean vector used for RaBitQ query preparation.
+ */
+
+#ifndef MKTANN_META_H
+#define MKTANN_META_H
+
+#include <postgres.h>
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#include <storage/bufpage.h>
+#pragma GCC diagnostic pop
+
+#include "mkt_types.h"
+
+#define MKT_META_MAGIC ((uint32_t)0x4D4B5401) /* "MKT\x01" */
+
+typedef struct MktannMetaPage
+{
+	uint32_t	magic;			 /* MKT_META_MAGIC */
+	Dimension	dim;			 /* vector dimension */
+	uint8_t		nlevels;		 /* centroid tree depth */
+	uint8_t		centroid_format; /* MktCentroidFormat */
+	BlockNumber first_centroid;	 /* root centroid page */
+	uint32_t	ntuples;		 /* total indexed tuples */
+	uint32_t	nlist;			 /* number of leaf centroids */
+	uint8_t		metric;			 /* DistanceMetric */
+	uint8_t		reserved[3];	 /* alignment */
+	uint64_t	rabitq_seed;	 /* seed for RaBitQ params */
+	/* Global mean vector stored inline after struct */
+} MktannMetaPage;
+
+/* Total special-area size including inline global mean */
+#define MKT_META_SIZE(dim)                                             \
+	(MAXALIGN(                                                         \
+			offsetof(MktannMetaPage, rabitq_seed) + sizeof(uint64_t) + \
+			(size_t)(dim) * sizeof(float)))
+
+/* Access the inline global mean vector after the struct */
+static inline float *
+mktann_meta_global_mean(MktannMetaPage *meta)
+{
+	return (float *)((char *)meta + offsetof(MktannMetaPage, rabitq_seed) +
+					 sizeof(uint64_t));
+}
+
+static inline const float *
+mktann_meta_global_mean_const(const MktannMetaPage *meta)
+{
+	return (const float *)((const char *)meta +
+						   offsetof(MktannMetaPage, rabitq_seed) +
+						   sizeof(uint64_t));
+}
+
+#endif /* MKTANN_META_H */

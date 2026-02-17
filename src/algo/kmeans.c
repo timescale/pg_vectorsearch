@@ -425,14 +425,22 @@ kmeans_state_destroy(KMeansState *st)
 {
 	if (st == NULL)
 		return;
-	mkt_free(st->centroids);
-	mkt_free(st->vec_block);
-	mkt_free(st->assignments);
-	mkt_free(st->cluster_sizes);
-	mkt_free(st->new_centroids);
-	mkt_free(st->dist_block);
-	mkt_free(st->norms_x);
-	mkt_free(st->norms_c);
+	if (st->centroids)
+		mkt_free(st->centroids);
+	if (st->vec_block)
+		mkt_free(st->vec_block);
+	if (st->assignments)
+		mkt_free(st->assignments);
+	if (st->cluster_sizes)
+		mkt_free(st->cluster_sizes);
+	if (st->new_centroids)
+		mkt_free(st->new_centroids);
+	if (st->dist_block)
+		mkt_free(st->dist_block);
+	if (st->norms_x)
+		mkt_free(st->norms_x);
+	if (st->norms_c)
+		mkt_free(st->norms_c);
 	mkt_free(st);
 }
 
@@ -602,7 +610,8 @@ kmeans_run_one_impl(
 			algo->assign(st, algo_state);
 			if (algo->destroy)
 				algo->destroy(algo_state);
-			mkt_free(old_cents);
+			if (old_cents)
+				mkt_free(old_cents);
 			return;
 		}
 	}
@@ -611,7 +620,8 @@ kmeans_run_one_impl(
 	algo->assign(st, algo_state);
 	if (algo->destroy)
 		algo->destroy(algo_state);
-	mkt_free(old_cents);
+	if (old_cents)
+		mkt_free(old_cents);
 }
 
 /* Specialized wrappers — MKT_TARGET_CLONES generates SIMD variants */

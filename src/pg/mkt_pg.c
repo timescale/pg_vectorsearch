@@ -5,6 +5,7 @@
 #include <postgres.h>
 
 #include <access/reloptions.h>
+#include <catalog/namespace.h>
 #include <fmgr.h>
 #include <utils/guc.h>
 
@@ -61,6 +62,12 @@ _PG_init(void)
 			MKT_DISTANCE_MODE_ASYMMETRIC,
 			"symmetric is faster but has larger estimation error",
 			NoLock);
+	add_bool_reloption(
+			mktann_relopt_kind,
+			"centroid_compression",
+			"Use RaBitQ compression for centroid pages",
+			false,
+			NoLock);
 
 	mkt_distance_init();
 	mkt_rabitq_init_simd();
@@ -115,4 +122,42 @@ mkt_pg_check_value_finite(float val)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("NaN value not allowed in vector")));
+}
+
+/* ----------------------------------------------------------------
+ * Type OID helpers
+ * ---------------------------------------------------------------- */
+
+Oid
+mkt_halfvec_type_oid(void)
+{
+	return TypenameGetTypid("halfvec");
+}
+
+/* ----------------------------------------------------------------
+ * Metric identifier support functions (FUNCTION 2 in opclasses)
+ * ---------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(mktann_metric_l2);
+
+Datum
+mktann_metric_l2(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(DISTANCE_L2);
+}
+
+PG_FUNCTION_INFO_V1(mktann_metric_ip);
+
+Datum
+mktann_metric_ip(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(DISTANCE_INNER_PRODUCT);
+}
+
+PG_FUNCTION_INFO_V1(mktann_metric_cosine);
+
+Datum
+mktann_metric_cosine(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(DISTANCE_COSINE);
 }

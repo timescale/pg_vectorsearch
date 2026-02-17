@@ -1,0 +1,74 @@
+/*
+ * centroid_build.c - Generic centroid page writer
+ *
+ * Writes centroid entries to linked pages via MktStorage. Format-
+ * agnostic: page format determines metadata and data sizes.
+ */
+
+#include <assert.h>
+
+#include "index/centroid_build.h"
+
+BlockNumber
+mkt_centroid_write_pages(
+		MktStorage			  *storage,
+		Dimension			   dim,
+		uint32_t			   nlist,
+		MktCentroidFormat	   fmt,
+		uint8_t				   level,
+		uint16_t			   flags,
+		uint16_t			   child_count,
+		const void			 **data,
+		const ItemPointerData *medoid_tids,
+		const BlockNumber	  *child_blknos)
+{
+	BlockNumber first_blkno = InvalidBlockNumber;
+	BlockNumber prev_blkno	= InvalidBlockNumber;
+	Page		cur_page	= NULL;
+	BlockNumber cur_blkno	= InvalidBlockNumber;
+
+	for (uint32_t i = 0; i < nlist; i++)
+	{
+		/* Allocate a new page if needed */
+		if (cur_page == NULL || !mkt_centroid_page_has_room(cur_page, dim))
+		{
+			/* Commit the previous page if any */
+			if (cur_page != NULL)
+				mkt_storage_commit_page(storage, cur_blkno);
+
+			/* Allocate new page */
+			cur_page = mkt_storage_new_page(storage, &cur_blkno);
+			mkt_centroid_page_init_fmt(cur_page, level, fmt);
+
+			if (first_blkno == InvalidBlockNumber)
+				first_blkno = cur_blkno;
+
+			/* Link previous page to this one */
+			if (prev_blkno != InvalidBlockNumber)
+			{
+				Page prev_page = mkt_storage_write_page(storage, prev_blkno);
+				MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(prev_page);
+				opaque->next_blkno			  = cur_blkno;
+				mkt_storage_commit_page(storage, prev_blkno);
+			}
+
+			prev_blkno = cur_blkno;
+		}
+
+		const ItemPointerData *tid = medoid_tids != NULL ? &medoid_tids[i]
+														 : NULL;
+		BlockNumber entry_child	   = child_blknos != NULL ? child_blknos[i]
+														  : InvalidBlockNumber;
+
+		bool added = mkt_centroid_page_add_entry(
+				cur_page, dim, entry_child, child_count, flags, tid, data[i]);
+		assert(added);
+		(void)added;
+	}
+
+	/* Commit last page */
+	if (cur_page != NULL)
+		mkt_storage_commit_page(storage, cur_blkno);
+
+	return first_blkno;
+}

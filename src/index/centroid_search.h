@@ -51,6 +51,7 @@ typedef struct MktCentroidSearchState
 	uint32_t				beam_width;
 	uint32_t				nprobe;
 	Dimension				dim;
+	DistanceMetric			metric; /* distance metric for routing */
 } MktCentroidSearchState;
 
 /* ----------------------------------------------------------------
