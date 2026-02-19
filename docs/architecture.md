@@ -62,6 +62,8 @@ multi-tenant, and optimized for modern hardware (SIMD, NVMe).
 ┌─────────────────────────────────────────────────────────────────┐
 │               Hierarchical Centroid Routing                     │
 │     Navigate tree of centroids to find candidate clusters       │
+│     Format-aware distance: RaBitQ approximate with error        │
+│     bounds, float32/float16 exact L2 — no reranking needed      │
 │     Pages in shared buffers, frequently accessed = cached       │
 └─────────────────────────────────────────────────────────────────┘
                                │
@@ -135,9 +137,12 @@ structure that narrows the search space at each level.
 the best branch(es) at each level. This reduces centroid comparisons from O(N)
 to O(log N) while maintaining high recall through multi-path exploration.
 
-**Centroid representation**: Centroids are true centroids (mean of cluster
-vectors), computed during index build via hierarchical k-means. Synthetic
-centroids work well for navigation and don't require heap storage.
+**Centroid representation**: Centroids are **medoids** — actual data vectors
+from the dataset, referenced by heap TID (`ItemPointerData`). Each centroid
+entry stores the TID of the medoid vector rather than a full-precision copy.
+This eliminates dedicated centroid vector storage in the index. Medoids are
+selected during hierarchical k-means as the cluster member closest to the
+mean.
 
 ### 2. Centroid Pages in Shared Buffers
 
@@ -151,14 +156,33 @@ shared buffer cache—there is no separate dedicated cache structure.
 - Standard PostgreSQL infrastructure: locking, WAL, visibility
 - No custom shared memory allocation or startup coordination
 
-**Page layout**: Centroid pages store quantized centroid vectors in a format
-optimized for SIMD distance computation. Each page contains:
-- Array of quantized centroid vectors (contiguous, aligned)
-- Pointers to child nodes (for non-leaf levels) or posting lists (for leaves)
+**Page layout**: Centroid pages use a bidirectional layout with per-entry
+metadata growing forward and vector data growing backward. Each page stores
+centroids in one of three data formats, selected at page initialization and
+recorded in the opaque flags:
 
-**Sizing**: For billion-scale indexes:
-- Root level: ~256-1024 centroids (fits in a few pages)
-- Intermediate levels: Branch factor of 32-256
+| Format | Data encoding | Metadata | Use case |
+|--------|---------------|----------|----------|
+| **RaBitQ** | Quantized bits + f_add/f_rescale | 16B (includes medoid TID) | Compact, approximate with error bounds |
+| **Float32** | Full-precision float vectors | 8B (no medoid TID) | Exact routing, highest accuracy |
+| **Float16** | Half-precision float vectors | 8B (no medoid TID) | Near-exact routing, good capacity |
+
+RaBitQ pages encode medoid vectors relative to the global data mean. The
+query is transformed once and reused at every tree level. Float and half
+pages store full-precision vectors and compute exact L2 distances—no
+reranking is needed at centroid routing time.
+
+**Sizing** (768 dimensions, 8KB pages):
+
+| Format | Entry size | Entries per page |
+|--------|-----------|-----------------|
+| RaBitQ | 120B (16B meta + 104B data) | 67 |
+| Float16 | 1544B (8B meta + 1536B data) | 5 |
+| Float32 | 3080B (8B meta + 3072B data) | 2 |
+
+For billion-scale indexes (RaBitQ format):
+- Root level: ~256-1024 centroids (4-16 pages)
+- Intermediate levels: Branch factor of 32-64 (1 page per subtree)
 - Leaf level: Millions of clusters, each with a posting list
 
 ### 3. Multi-Tenant Centroid Routing
@@ -316,13 +340,17 @@ Index metadata is stored in multiple locations depending on its nature:
 **Reloptions** (pg_class.reloptions, specified at CREATE INDEX):
 - Build parameters: `nlist` (number of leaf clusters), `fillfactor`
 - Search defaults: `nprobe` (clusters to search), `rerank_k`
+- Distance mode: `distance_mode` (`asymmetric` or `symmetric`, default:
+  `asymmetric`). Can be overridden per-session via `mkt.distance_mode` GUC
 - Over-allocation: `reserved_pages`
 - Multi-tenant: `tenant_column` (for composite key indexes)
 
 **GUCs** (session/server-level, can override reloptions):
 - `meerkat.nprobe` - clusters to search per query
 - `meerkat.rerank_k` - candidates to re-rank with full precision
-- `mkt.distance_mode` - RaBitQ distance mode (`asymmetric` or `symmetric`)
+- `mkt.distance_mode` - RaBitQ distance mode (`default`, `asymmetric`, or
+  `symmetric`). `default` uses the index's `distance_mode` relopt;
+  `asymmetric` or `symmetric` overrides the index setting for the session
 
 **Catalog tables** (managed by PostgreSQL):
 - Structural info in pg_class, pg_index, pg_am, pg_opclass
@@ -455,6 +483,13 @@ providing both performance isolation and predictable access patterns.
 4. Re-rank surviving candidates (~1-5%) with full precision
 5. Return top-k results
 ```
+
+**Beam search**: Centroid routing uses level-by-level beam search
+(`mkt_centroid_beam_search`) rather than best-first search. This maps well
+to PostgreSQL's page-based buffer cache: each level is processed as a batch,
+enabling SIMD distance computation on entries within each page.
+Upper-level pages stay hot in `shared_buffers` since they are accessed on
+every query.
 
 **Parameters**:
 - `nprobe`: Number of leaf posting lists to scan (recall/speed tradeoff)
@@ -623,9 +658,11 @@ Pages are organized in three regions:
 ### Centroid Pages
 
 Centroid pages store the hierarchical routing structure. Each page contains:
-- Array of quantized centroid vectors (SIMD-aligned)
-- Child pointers (page numbers for next level, or posting list heads for leaves)
-- Level indicator and parent pointer for navigation
+- Format-dependent vector encoding (RaBitQ quantized, float32 exact, or
+  float16 near-exact) — selected per page at initialization
+- Per-entry metadata with child pointers (page numbers for next level, or
+  posting list heads for leaves)
+- Level indicator and sibling link for navigation
 
 Centroid pages are stored in PostgreSQL's standard shared buffer cache. Because
 they are accessed on every query, they naturally remain cached (hot pages).

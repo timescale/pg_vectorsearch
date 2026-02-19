@@ -30,8 +30,8 @@ be used interchangeably with meerkat's.
 
 Meerkat uses a hierarchical centroid tree to partition vectors into clusters.
 Centroids are stored in dedicated pages within the PostgreSQL buffer cache.
-Vectors are RaBitQ-quantized and stored in posting lists with a SoA layout
-optimized for SIMD batch distance computation.
+Vectors are RaBitQ-quantized and stored in posting lists with a
+bidirectional page layout optimized for SIMD distance computation.
 
 ```
 Query Flow:
