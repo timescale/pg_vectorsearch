@@ -21,6 +21,8 @@ test_config_h = configure_file(
 unit_test_sources = files(
   'mkt_test.c',
   'run_tests.c',
+  'test_centroid_page.c',
+  'test_centroid_search.c',
   'test_distance.c',
   'test_fixtures.c',
   'test_halfvec.c',
@@ -28,6 +30,7 @@ unit_test_sources = files(
   'test_memory.c',
   'test_platform.c',
   'test_rabitq.c',
+  'test_topk.c',
   'test_vecops.c',
   'test_vector.c',
 )

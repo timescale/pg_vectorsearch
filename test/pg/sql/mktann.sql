@@ -18,6 +18,19 @@ CREATE INDEX idx_ip ON embeddings USING mktann (v vector_ip_ops);
 -- Create index with cosine opclass
 CREATE INDEX idx_cos ON embeddings USING mktann (v vector_cosine_ops);
 
+-- Create index with distance_mode relopt
+CREATE INDEX idx_sym ON embeddings USING mktann (v)
+    WITH (distance_mode = 'symmetric');
+CREATE INDEX idx_asym ON embeddings USING mktann (v)
+    WITH (distance_mode = 'asymmetric');
+
+-- GUC: check default, set, and reset
+SHOW mkt.distance_mode;
+SET mkt.distance_mode = 'symmetric';
+SHOW mkt.distance_mode;
+SET mkt.distance_mode = 'default';
+SHOW mkt.distance_mode;
+
 -- Insert after index creation (should not crash)
 INSERT INTO embeddings (v) VALUES ('[1,1,1]');
 

@@ -258,6 +258,9 @@ mkt_core_sources = files(
   'src/algo/vecops.c',
   'src/quant/rabitq.c',
   'src/quant/matrix.c',
+  'src/algo/topk_standalone.c',
+  'src/index/centroid_page.c',
+  'src/index/centroid_search.c',
 )
 
 # Include directories
@@ -477,6 +480,8 @@ if build_pg_extension
     'src/algo/vecops.c',
     'src/quant/rabitq.c',
     'src/quant/matrix.c',
+    'src/index/centroid_page.c',
+    'src/index/centroid_search.c',
   )
 
   # SIMD sources for PG build (same as standalone)

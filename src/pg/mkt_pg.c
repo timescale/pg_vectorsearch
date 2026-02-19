@@ -4,6 +4,7 @@
 
 #include <postgres.h>
 
+#include <access/reloptions.h>
 #include <fmgr.h>
 #include <utils/guc.h>
 
@@ -13,12 +14,22 @@
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-int mkt_distance_mode = MKT_DISTANCE_MODE_ASYMMETRIC;
+int mkt_distance_mode = MKT_DISTANCE_MODE_DEFAULT;
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
+		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
 		{"asymmetric", MKT_DISTANCE_MODE_ASYMMETRIC, false},
 		{"symmetric", MKT_DISTANCE_MODE_SYMMETRIC, false},
 		{NULL, 0, false},
+};
+
+/* Index reloptions */
+relopt_kind mktann_relopt_kind;
+
+static relopt_enum_elt_def distance_mode_relopt_members[] = {
+		{"asymmetric", MKT_DISTANCE_MODE_ASYMMETRIC},
+		{"symmetric", MKT_DISTANCE_MODE_SYMMETRIC},
+		{NULL, 0},
 };
 
 void _PG_init(void);
@@ -29,9 +40,9 @@ _PG_init(void)
 	DefineCustomEnumVariable(
 			"mkt.distance_mode",
 			"RaBitQ distance computation mode.",
-			"asymmetric (accurate) or symmetric (4-12x faster)",
+			"default (use index setting), asymmetric, or symmetric",
 			&mkt_distance_mode,
-			MKT_DISTANCE_MODE_ASYMMETRIC,
+			MKT_DISTANCE_MODE_DEFAULT,
 			mkt_distance_mode_options,
 			PGC_USERSET,
 			0,
@@ -40,6 +51,16 @@ _PG_init(void)
 			NULL);
 
 	MarkGUCPrefixReserved("mkt");
+
+	mktann_relopt_kind = add_reloption_kind();
+	add_enum_reloption(
+			mktann_relopt_kind,
+			"distance_mode",
+			"RaBitQ distance computation mode",
+			distance_mode_relopt_members,
+			MKT_DISTANCE_MODE_ASYMMETRIC,
+			"symmetric is faster but has larger estimation error",
+			NoLock);
 
 	mkt_distance_init();
 	mkt_rabitq_init_simd();

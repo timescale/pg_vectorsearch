@@ -9,12 +9,15 @@
 #include <postgres.h>
 
 #include <access/amapi.h>
+#include <access/reloptions.h>
 #include <access/relscan.h>
 #include <commands/vacuum.h>
 #include <fmgr.h>
 #include <storage/bufmgr.h>
 #include <utils/float.h>
 #include <utils/selfuncs.h>
+
+#include "mkt_pg.h"
 
 PG_FUNCTION_INFO_V1(mktann_handler);
 
@@ -120,7 +123,18 @@ mktann_costestimate(
 static bytea *
 mktann_options(Datum reloptions, bool validate)
 {
-	return NULL;
+	static const relopt_parse_elt tab[] = {
+			{"distance_mode",
+			 RELOPT_TYPE_ENUM,
+			 offsetof(MktannOptions, distance_mode)},
+	};
+	return (bytea *)build_reloptions(
+			reloptions,
+			validate,
+			mktann_relopt_kind,
+			sizeof(MktannOptions),
+			tab,
+			lengthof(tab));
 }
 
 static bool
