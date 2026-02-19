@@ -7,9 +7,11 @@
 
 #include <postgres.h>
 
+#include <access/reloptions.h>
 #include <fmgr.h>
 #include <utils/array.h>
 #include <utils/lsyscache.h>
+#include <utils/rel.h>
 
 #include "mkt_halfvec.h"
 #include "mkt_vector.h"
@@ -19,7 +21,8 @@
  * GUC variables
  * ---------------------------------------------------------------- */
 
-extern int mkt_distance_mode; /* MktDistanceMode */
+extern int		   mkt_distance_mode;  /* MktDistanceMode */
+extern relopt_kind mktann_relopt_kind; /* index reloption kind */
 
 /* ----------------------------------------------------------------
  * Datum conversion macros
@@ -60,6 +63,34 @@ typedef struct RaBitQParamsPG
 
 #define DatumGetRaBitQParamsPG(x)	 ((RaBitQParamsPG *)PG_DETOAST_DATUM(x))
 #define PG_GETARG_RABITQ_PARAMS_P(x) DatumGetRaBitQParamsPG(PG_GETARG_DATUM(x))
+
+/* ----------------------------------------------------------------
+ * Index reloptions
+ * ---------------------------------------------------------------- */
+
+typedef struct MktannOptions
+{
+	int32 vl_len_;		 /* varlena header (required by reloptions) */
+	int	  distance_mode; /* MktDistanceMode */
+} MktannOptions;
+
+/*
+ * MktannGetDistanceMode - Resolve effective distance mode for a scan.
+ *
+ * GUC overrides index relopt when explicitly set (not 'default').
+ */
+static inline MktDistanceMode
+MktannGetDistanceMode(Relation index)
+{
+	MktannOptions *opts = (MktannOptions *)index->rd_options;
+	/* GUC overrides index relopt when explicitly set */
+	if (mkt_distance_mode != MKT_DISTANCE_MODE_DEFAULT)
+		return (MktDistanceMode)mkt_distance_mode;
+	/* Use index relopt, or asymmetric if no options set */
+	if (opts != NULL)
+		return (MktDistanceMode)opts->distance_mode;
+	return MKT_DISTANCE_MODE_ASYMMETRIC;
+}
 
 /* ----------------------------------------------------------------
  * Allocation helpers

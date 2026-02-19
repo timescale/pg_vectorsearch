@@ -62,6 +62,7 @@ typedef enum
  */
 typedef enum
 {
+	MKT_DISTANCE_MODE_DEFAULT	 = -1, /* GUC sentinel: use index relopt */
 	MKT_DISTANCE_MODE_ASYMMETRIC = 0,
 	MKT_DISTANCE_MODE_SYMMETRIC	 = 1,
 } MktDistanceMode;
