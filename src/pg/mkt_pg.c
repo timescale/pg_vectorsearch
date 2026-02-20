@@ -62,6 +62,14 @@ _PG_init(void)
 			MKT_DISTANCE_MODE_ASYMMETRIC,
 			"symmetric is faster but has larger estimation error",
 			NoLock);
+	add_int_reloption(
+			mktann_relopt_kind,
+			"fan_out",
+			"Children per tree node (2-255)",
+			MKTANN_DEFAULT_FAN_OUT,
+			MKTANN_MIN_FAN_OUT,
+			MKTANN_MAX_FAN_OUT,
+			NoLock);
 	add_bool_reloption(
 			mktann_relopt_kind,
 			"centroid_compression",

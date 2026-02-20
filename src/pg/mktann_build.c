@@ -3,14 +3,15 @@
  *
  * Build phases:
  *   1. Determine dimension from index column typmod
- *   2. Resolve distance metric from opclass, centroid format from relopt
- *   3. Sample vectors for k-means (BlockSampler + reservoir)
- *   4. Run k-means clustering
- *   5. Compute global mean of centroids
+ *   2. Resolve distance metric, centroid format, fan_out from relopts
+ *   3. Sample vectors for clustering (BlockSampler + reservoir)
+ *   4. Run hierarchical k-means (mkt_hkmeans_f32)
+ *   5. Compute global mean from leaf centroids
  *   6. Full heap scan to assign vectors and find medoids
- *   7. Encode centroids (RaBitQ, float32, or float16)
- *   8. Write metadata page (block 0) and centroid pages
- *   9. WAL-log all pages
+ *   7. Pre-compute block numbers for BFS tree nodes
+ *   8. Encode + write centroid pages per BFS node
+ *   9. Write metadata page (block 0) with tree parameters
+ *  10. WAL-log all pages
  *
  * Memory layout:
  *   build_ctx  — all build-phase allocations; deleted in one shot
@@ -30,6 +31,7 @@
 #include <utils/sampling.h>
 
 #include "algo/distance.h"
+#include "algo/hkmeans.h"
 #include "algo/kmeans.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
@@ -233,6 +235,7 @@ write_meta_page(
 		MktStorage		 *storage,
 		Dimension		  dim,
 		uint8_t			  nlevels,
+		uint8_t			  fan_out,
 		BlockNumber		  first_centroid,
 		uint32_t		  ntuples,
 		uint32_t		  nlist,
@@ -258,6 +261,7 @@ write_meta_page(
 	meta->ntuples		  = ntuples;
 	meta->nlist			  = nlist;
 	meta->metric		  = (uint8_t)metric;
+	meta->fan_out		  = fan_out;
 	memset(meta->reserved, 0, sizeof(meta->reserved));
 	meta->rabitq_seed = rabitq_seed;
 
@@ -302,6 +306,51 @@ mktann_resolve_format(Relation index, DistanceMetric metric)
 }
 
 /* ----------------------------------------------------------------
+ * Helpers: resolve fan_out from reloptions
+ * ---------------------------------------------------------------- */
+
+static uint32_t
+mktann_get_fan_out(Relation index)
+{
+	MktannOptions *opts = (MktannOptions *)index->rd_options;
+	if (opts != NULL && opts->fan_out >= MKTANN_MIN_FAN_OUT)
+		return (uint32_t)opts->fan_out;
+	return MKTANN_DEFAULT_FAN_OUT;
+}
+
+/* ----------------------------------------------------------------
+ * Encode a single centroid entry for the given format
+ * ---------------------------------------------------------------- */
+
+static const void *
+encode_centroid(
+		MktCentroidFormat fmt,
+		const float		 *centroid,
+		Dimension		  dim,
+		RaBitQParams	 *params,
+		const float		 *global_mean)
+{
+	switch (fmt)
+	{
+	case MKT_CENTROID_FMT_RABITQ:
+	{
+		VectorRef cref = {.data = centroid, .dim = dim};
+		VectorRef mref = {.data = global_mean, .dim = dim};
+		return mkt_rabitq_encode(params, cref, mref);
+	}
+	case MKT_CENTROID_FMT_FLOAT:
+		return centroid;
+	case MKT_CENTROID_FMT_HALF:
+	{
+		half *hvec = palloc(dim * sizeof(half));
+		mkt_float_to_half_array(centroid, hvec, dim);
+		return hvec;
+	}
+	}
+	return NULL;
+}
+
+/* ----------------------------------------------------------------
  * Main build entry point
  * ---------------------------------------------------------------- */
 
@@ -330,9 +379,10 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				 errmsg("column cannot have more than %d dimensions",
 						MKT_VECTOR_MAX_DIM)));
 
-	/* 2. Resolve metric and centroid format */
+	/* 2. Resolve metric, centroid format, and fan_out */
 	DistanceMetric	  metric		  = mktann_get_metric(index);
 	MktCentroidFormat centroid_format = mktann_resolve_format(index, metric);
+	uint32_t		  fan_out		  = mktann_get_fan_out(index);
 
 	bs.dim		  = dim;
 	bs.metric	  = metric;
@@ -343,7 +393,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	bs.tmp_ctx	  = AllocSetContextCreate(
 			   build_ctx, "mktann build tuple", ALLOCSET_DEFAULT_SIZES);
 
-	/* 2. Compute nlist = sqrt(ntuples), at least 1 */
+	/* 3. Compute nlist = sqrt(ntuples), at least 1 */
 	double reltuples = RelationGetNumberOfBlocks(heap) *
 					   (BLCKSZ / (sizeof(float) * dim + 32));
 	uint32_t nlist = (uint32_t)sqrt((double)Max(reltuples, 1));
@@ -353,7 +403,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 		nlist = 10000;
 	bs.nlist = nlist;
 
-	/* 3. Sample vectors for k-means */
+	/* 4. Sample vectors for k-means */
 	bs.max_samples = Max(10000, (int)(nlist * 50));
 	bs.nsamples	   = 0;
 	bs.samples	   = palloc((size_t)bs.max_samples * dim * sizeof(float));
@@ -377,38 +427,53 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 		bs.nlist = nlist;
 	}
 
-	/* 4. Run k-means
+	/* 5. Run hierarchical k-means
 	 *
-	 * kmeans allocates via mkt_alloc (= palloc), so all its internal
-	 * state lands in build_ctx and gets freed with it. */
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	opts.seed		   = 42;
-	opts.nredo		   = 1;
-	opts.algorithm	   = KMEANS_ALGO_LLOYD;
+	 * hkmeans allocates via mkt_alloc (= palloc), so all its
+	 * internal state lands in build_ctx and gets freed with it. */
+	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	km_opts.seed		  = 42;
+	km_opts.nredo		  = 1;
+	km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
 
-	KMeansResult *km = mkt_kmeans_f32(
-			bs.samples, (uint32_t)bs.nsamples, dim, nlist, metric, &opts);
+	HKMeansResult *tree = mkt_hkmeans_f32(
+			bs.samples,
+			(uint32_t)bs.nsamples,
+			dim,
+			nlist,
+			fan_out,
+			metric,
+			&km_opts);
 
-	bs.centroids = km->centroids;
-	bs.nlist	 = km->nlist;
-	nlist		 = km->nlist;
+	if (tree == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("hierarchical k-means failed")));
+
+	nlist	 = tree->nleaves;
+	bs.nlist = nlist;
 
 	/* Samples no longer needed — reclaim memory */
 	pfree(bs.samples);
 	bs.samples = NULL;
 
-	/* 5. Compute global mean of centroids */
+	/* 6. Collect leaf centroids and compute global mean */
+	float *leaf_centroids = mkt_hkmeans_leaf_centroids(tree);
+
+	bs.centroids = leaf_centroids;
+
 	float *global_mean = palloc0(dim * sizeof(float));
 	for (uint32_t c = 0; c < nlist; c++)
 	{
-		const float *cent = bs.centroids + (size_t)c * dim;
+		const float *cent = leaf_centroids + (size_t)c * dim;
 		for (Dimension d = 0; d < dim; d++)
 			global_mean[d] += cent[d];
 	}
 	for (Dimension d = 0; d < dim; d++)
 		global_mean[d] /= (float)nlist;
 
-	/* 6. Full heap scan — assign vectors, find medoids */
+	/* 7. Full heap scan — assign vectors to leaf centroids,
+	 * find medoids */
 	if (centroid_format == MKT_CENTROID_FMT_RABITQ)
 	{
 		bs.medoid_tids	= palloc0(nlist * sizeof(ItemPointerData));
@@ -433,45 +498,31 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			(void *)&bs,
 			NULL);
 
-	/* 7. Encode centroids based on format */
-	uint64_t	 rabitq_seed = 42;
-	const void **encoded	 = palloc(nlist * sizeof(void *));
+	/* 8. Pre-compute block numbers for each BFS node.
+	 *
+	 * ReadBufferExtended(P_NEW) allocates blocks sequentially.
+	 * BFS order naturally matches. Block 0 is the meta page;
+	 * centroid pages start at block 1. */
+	uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, centroid_format);
 
-	switch (centroid_format)
+	uint32_t	*node_pages		  = palloc(tree->nnodes * sizeof(uint32_t));
+	BlockNumber *node_first_blkno = palloc(tree->nnodes * sizeof(BlockNumber));
+
+	BlockNumber next_blkno = 1; /* block 0 = meta */
+	for (uint32_t i = 0; i < tree->nnodes; i++)
 	{
-	case MKT_CENTROID_FMT_RABITQ:
-	{
-		RaBitQParams *params   = mkt_rabitq_create(dim, rabitq_seed);
-		VectorRef	  mean_ref = {.data = global_mean, .dim = dim};
-		for (uint32_t c = 0; c < nlist; c++)
-		{
-			VectorRef cref = {
-					.data = bs.centroids + (size_t)c * dim,
-					.dim  = dim,
-			};
-			encoded[c] = mkt_rabitq_encode(params, cref, mean_ref);
-		}
-		break;
-	}
-	case MKT_CENTROID_FMT_FLOAT:
-	{
-		for (uint32_t c = 0; c < nlist; c++)
-			encoded[c] = bs.centroids + (size_t)c * dim;
-		break;
-	}
-	case MKT_CENTROID_FMT_HALF:
-	{
-		for (uint32_t c = 0; c < nlist; c++)
-		{
-			half *hvec = palloc(dim * sizeof(half));
-			mkt_float_to_half_array(bs.centroids + (size_t)c * dim, hvec, dim);
-			encoded[c] = hvec;
-		}
-		break;
-	}
+		uint32_t n			= tree->nodes[i].nchildren;
+		node_pages[i]		= (n + max_ent - 1) / max_ent;
+		node_first_blkno[i] = next_blkno;
+		next_blkno += node_pages[i];
 	}
 
-	/* 8. Write index pages */
+	/* 9. Write index pages */
+	uint64_t	  rabitq_seed = 42;
+	RaBitQParams *rq_params	  = NULL;
+	if (centroid_format == MKT_CENTROID_FMT_RABITQ)
+		rq_params = mkt_rabitq_create(dim, rabitq_seed);
+
 	MktannStorage storage;
 	mktann_storage_init(&storage, index, NULL, metric);
 
@@ -479,8 +530,9 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	write_meta_page(
 			&storage.base,
 			dim,
-			1, /* nlevels=1 for flat */
-			1, /* first_centroid = block 1 (written next) */
+			(uint8_t)tree->nlevels,
+			(uint8_t)fan_out,
+			node_first_blkno[0],
 			(uint32_t)bs.indtuples,
 			nlist,
 			centroid_format,
@@ -488,35 +540,93 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			rabitq_seed,
 			global_mean);
 
-	/* Blocks 1+: centroid pages */
-	BlockNumber first_centroid = mkt_centroid_write_pages(
-			&storage.base,
-			dim,
-			nlist,
-			centroid_format,
-			0,
-			MKT_CENTROID_FLAG_LEAF,
-			0,
-			encoded,
-			bs.medoid_tids,
-			NULL);
+	/* Write centroid pages for each BFS node.
+	 *
+	 * Leaf-parent nodes (level == nlevels-1) write entries with
+	 * MKT_CENTROID_FLAG_LEAF. Internal nodes write entries with
+	 * child_blkno pointing to the child node's first page. */
+	uint32_t leaf_offset = 0; /* running offset into leaf arrays */
 
-	/* Update meta page if first_centroid != 1 (shouldn't happen
-	 * but be safe) */
-	if (first_centroid != 1)
+	for (uint32_t i = 0; i < tree->nnodes; i++)
 	{
-		Page			page = mkt_storage_write_page(&storage.base, 0);
-		MktannMetaPage *meta = (MktannMetaPage *)PageGetSpecialPointer(page);
-		meta->first_centroid = first_centroid;
-		mkt_storage_commit_page(&storage.base, 0);
+		HKMeansNode *node	 = &tree->nodes[i];
+		bool		 is_leaf = (node->level == tree->nlevels - 1);
+		uint32_t	 k		 = node->nchildren;
+
+		/* Build per-entry arrays */
+		const void	   **encoded	 = palloc(k * sizeof(void *));
+		BlockNumber		*child_blks	 = palloc(k * sizeof(BlockNumber));
+		ItemPointerData *medoid_tids = NULL;
+
+		uint16_t flags		 = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
+		uint16_t child_count = is_leaf ? 0 : (uint16_t)fan_out;
+
+		if (is_leaf && centroid_format == MKT_CENTROID_FMT_RABITQ)
+			medoid_tids = bs.medoid_tids + leaf_offset;
+
+		for (uint32_t c = 0; c < k; c++)
+		{
+			const float *cent = node->centroids + (size_t)c * dim;
+
+			if (is_leaf)
+			{
+				/* Leaf entries point to posting lists
+				 * (InvalidBlockNumber for now) */
+				child_blks[c] = InvalidBlockNumber;
+
+				/* Encode leaf centroid */
+				encoded[c] = encode_centroid(
+						centroid_format, cent, dim, rq_params, global_mean);
+			}
+			else
+			{
+				/* Internal: point to child's first page */
+				uint32_t child_idx = node->first_child + c;
+				child_blks[c]	   = node_first_blkno[child_idx];
+
+				/* Encode internal centroid */
+				encoded[c] = encode_centroid(
+						centroid_format, cent, dim, rq_params, global_mean);
+			}
+		}
+
+		mkt_centroid_write_pages(
+				&storage.base,
+				dim,
+				k,
+				centroid_format,
+				(uint8_t)node->level,
+				flags,
+				child_count,
+				encoded,
+				medoid_tids,
+				child_blks);
+
+		/* Free encoded data that was allocated */
+		if (centroid_format == MKT_CENTROID_FMT_RABITQ ||
+			centroid_format == MKT_CENTROID_FMT_HALF)
+		{
+			for (uint32_t c = 0; c < k; c++)
+				pfree((void *)encoded[c]);
+		}
+		pfree(encoded);
+		pfree(child_blks);
+
+		if (is_leaf)
+			leaf_offset += k;
 	}
 
-	/* 9. WAL-log all pages */
+	/* 10. WAL-log all pages */
 	log_newpage_range(
 			index, MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index), true);
 
-	/* 10. Cleanup — delete build context, return result in caller ctx */
+	/* 11. Cleanup — delete build context, return in caller ctx */
 	double indtuples = bs.indtuples;
+
+	pfree(leaf_centroids);
+	mkt_hkmeans_result_destroy(tree);
+	pfree(node_pages);
+	pfree(node_first_blkno);
 
 	MemoryContextSwitchTo(caller_ctx);
 	MemoryContextDelete(build_ctx);

@@ -51,8 +51,11 @@ mkt_centroid_page_add_entry(
 	if (fmt == MKT_CENTROID_FMT_RABITQ)
 	{
 		MktCentroidEntryMetaRaBitQ *rmeta = (MktCentroidEntryMetaRaBitQ *)meta;
-		rmeta->medoid_tid				  = *medoid_tid;
-		rmeta->reserved					  = 0;
+		if (medoid_tid != NULL)
+			rmeta->medoid_tid = *medoid_tid;
+		else
+			memset(&rmeta->medoid_tid, 0, sizeof(rmeta->medoid_tid));
+		rmeta->reserved = 0;
 	}
 
 	/* Write data (backward region) */
