@@ -439,7 +439,7 @@ kmeans_state_destroy(KMeansState *st)
 {
 	if (st == NULL)
 		return;
-	MktMemCtx ctx = st->memctx;
+	MktMemCtx ctx = (MktMemCtx)st->memctx;
 	mkt_memctx_delete(ctx); /* st is now invalid */
 }
 
@@ -759,7 +759,7 @@ mkt_kmeans(
 		uint64_t seed = opts.seed + redo;
 
 		/* Run in arena context so per-iteration temps land there */
-		MktMemCtx run_ctx = mkt_memctx_switch(st->memctx);
+		MktMemCtx run_ctx = mkt_memctx_switch((MktMemCtx)st->memctx);
 		kmeans_run_one(st, &opts, seed, algo_ops);
 		mkt_memctx_switch(run_ctx);
 

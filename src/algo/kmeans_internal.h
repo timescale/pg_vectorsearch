@@ -14,7 +14,6 @@
 #include <stdint.h>
 
 #include "algo/kmeans.h"
-#include "core/memory.h"
 #include "mkt_halfvec.h"
 #include "mkt_vector.h"
 
@@ -46,7 +45,7 @@
  */
 typedef struct KMeansState
 {
-	MktMemCtx memctx; /* Arena context — all state lives here */
+	void *memctx; /* Arena context (MktMemCtx) — used by kmeans.c */
 
 	/* Input (not owned) */
 	const void	   *vectors;
