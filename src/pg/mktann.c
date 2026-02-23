@@ -108,6 +108,7 @@ mktann_options(Datum reloptions, bool validate)
 			{"distance_mode",
 			 RELOPT_TYPE_ENUM,
 			 offsetof(MktannOptions, distance_mode)},
+			{"fan_out", RELOPT_TYPE_INT, offsetof(MktannOptions, fan_out)},
 			{"centroid_compression",
 			 RELOPT_TYPE_BOOL,
 			 offsetof(MktannOptions, centroid_compression)},

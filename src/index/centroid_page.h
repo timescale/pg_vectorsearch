@@ -281,6 +281,22 @@ mkt_centroid_page_init(Page page, uint8_t level)
 }
 
 /*
+ * Reserve space for a centroid entry. Writes metadata forward,
+ * reserves data space backward, returns a writable pointer to
+ * the data region. The caller writes entry data directly into
+ * the returned pointer (data_size bytes).
+ *
+ * Returns NULL if the page has no room.
+ */
+void *mkt_centroid_page_add_entry_begin(
+		Page				   page,
+		Dimension			   dim,
+		BlockNumber			   child_blkno,
+		uint16_t			   child_count,
+		uint16_t			   flags,
+		const ItemPointerData *medoid_tid);
+
+/*
  * Add a centroid entry to a page. Writes metadata forward and
  * vector data backward. The data format is read from the page's
  * opaque flags to determine data size.

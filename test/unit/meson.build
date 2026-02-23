@@ -26,6 +26,7 @@ unit_test_sources = files(
   'test_distance.c',
   'test_fixtures.c',
   'test_halfvec.c',
+  'test_hkmeans.c',
   'test_kmeans.c',
   'test_memory.c',
   'test_platform.c',

@@ -31,7 +31,8 @@ typedef struct MktannMetaPage
 	uint32_t	ntuples;		 /* total indexed tuples */
 	uint32_t	nlist;			 /* number of leaf centroids */
 	uint8_t		metric;			 /* DistanceMetric */
-	uint8_t		reserved[3];	 /* alignment */
+	uint8_t		fan_out;		 /* children per tree node */
+	uint8_t		reserved[2];	 /* alignment */
 	uint64_t	rabitq_seed;	 /* seed for RaBitQ params */
 	/* Global mean vector stored inline after struct */
 } MktannMetaPage;
