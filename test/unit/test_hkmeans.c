@@ -1,0 +1,347 @@
+/*
+ * test_hkmeans.c - Tests for hierarchical k-means tree builder
+ */
+
+#include <math.h>
+#include <string.h>
+
+#include "algo/hkmeans.h"
+#include "algo/vecops.h"
+#include "core/memory.h"
+#include "mkt_test.h"
+
+TEST_GROUP(HKMeans);
+TEST_MEMCTX_FIXTURE();
+
+/*
+ * Helper: generate clustered data with well-separated groups.
+ *
+ * Each cluster has a large value in dimension (c % dim) = 10.0,
+ * with small random noise. Returns [nclusters * per_cluster * dim].
+ */
+static float *
+make_clustered_data(
+		uint32_t nclusters, uint32_t per_cluster, Dimension dim, uint64_t seed)
+{
+	uint32_t nvecs = nclusters * per_cluster;
+	float	*data  = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+
+	uint32_t rng = (uint32_t)seed;
+	for (uint32_t c = 0; c < nclusters; c++)
+	{
+		for (uint32_t i = 0; i < per_cluster; i++)
+		{
+			uint32_t idx = c * per_cluster + i;
+			for (Dimension d = 0; d < dim; d++)
+			{
+				rng			 = rng * 1103515245 + 12345;
+				float noise	 = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.1f;
+				float center = (d == c % dim) ? 10.0f : 0.0f;
+				data[(size_t)idx * dim + d] = center + noise;
+			}
+		}
+	}
+
+	return data;
+}
+
+/*
+ * Flat tree: nlist <= fan_out gives nlevels=1.
+ */
+TEST(flat_single_level)
+{
+	uint32_t  nlist	  = 4;
+	uint32_t  fan_out = 8;
+	uint32_t  nvecs	  = 200;
+	Dimension dim	  = 16;
+	float	 *data	  = make_clustered_data(4, 50, dim, 42);
+
+	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+
+	HKMeansResult *tree = mkt_hkmeans_f32(
+			data, nvecs, dim, nlist, fan_out, DISTANCE_L2, &opts);
+
+	ASSERT_NOT_NULL(tree, "should return result");
+	ASSERT_EQ(1, tree->nlevels, "flat tree: 1 level");
+	ASSERT_EQ(1, tree->nnodes, "flat tree: 1 node");
+	ASSERT_EQ(nlist, tree->nleaves, "nleaves = nlist");
+	ASSERT_EQ(nlist, tree->nodes[0].nchildren, "root has nlist children");
+	ASSERT_EQ(0, tree->nodes[0].level, "root at level 0");
+	ASSERT_EQ(
+			HKMEANS_NO_CHILD, tree->nodes[0].first_child, "leaf: no children");
+
+	/* Leaf centroids should be valid */
+	ASSERT_NOT_NULL(tree->leaf_centroids, "leaf centroids allocated");
+
+	for (uint32_t i = 0; i < nlist * dim; i++)
+		ASSERT_TRUE(
+				isfinite(tree->leaf_centroids[i]),
+				"centroids should be finite");
+
+	mkt_hkmeans_result_destroy(tree);
+	mkt_free(data);
+}
+
+/*
+ * Two-level tree: nlist > fan_out.
+ */
+TEST(two_level_tree)
+{
+	uint32_t  fan_out = 4;
+	uint32_t  nlist	  = 16;
+	uint32_t  nvecs	  = 16 * 62;
+	Dimension dim	  = 16;
+	float	 *data	  = make_clustered_data(16, 62, dim, 42);
+
+	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+
+	HKMeansResult *tree = mkt_hkmeans_f32(
+			data, nvecs, dim, nlist, fan_out, DISTANCE_L2, &opts);
+
+	ASSERT_NOT_NULL(tree, "should return result");
+	ASSERT_EQ(2, tree->nlevels, "2-level tree");
+	ASSERT_TRUE(tree->nnodes > 1, "multiple nodes");
+
+	/* Root should be at level 0 */
+	ASSERT_EQ(0, tree->nodes[0].level, "root at level 0");
+	ASSERT_TRUE(
+			tree->nodes[0].nchildren <= fan_out, "root nchildren <= fan_out");
+	ASSERT_TRUE(tree->nodes[0].nchildren >= 2, "root has at least 2 children");
+
+	/* Root should have first_child set */
+	ASSERT_TRUE(
+			tree->nodes[0].first_child != HKMEANS_NO_CHILD,
+			"root has children");
+
+	/* All non-root nodes should be at level 1 (leaf) */
+	for (uint32_t i = 1; i < tree->nnodes; i++)
+	{
+		ASSERT_EQ(1, tree->nodes[i].level, "child at level 1");
+		ASSERT_EQ(
+				HKMEANS_NO_CHILD,
+				tree->nodes[i].first_child,
+				"leaf has no children");
+	}
+
+	/* Total leaf centroids should be reasonable */
+	ASSERT_TRUE(tree->nleaves > 0, "has leaf centroids");
+	ASSERT_TRUE(tree->nleaves <= fan_out * fan_out, "nleaves <= fan_out^2");
+
+	/* Leaf centroids should be valid */
+	ASSERT_NOT_NULL(tree->leaf_centroids, "leaf centroids allocated");
+	for (uint32_t i = 0; i < tree->nleaves * dim; i++)
+		ASSERT_TRUE(
+				isfinite(tree->leaf_centroids[i]), "leaf centroids finite");
+
+	mkt_hkmeans_result_destroy(tree);
+	mkt_free(data);
+}
+
+/*
+ * Three-level tree: nlist > fan_out^2.
+ */
+TEST(three_level_tree)
+{
+	uint32_t  fan_out = 4;
+	uint32_t  nlist	  = 64;
+	Dimension dim	  = 8;
+	uint32_t  nvecs	  = 8 * 80;
+	float	 *data	  = make_clustered_data(8, 80, dim, 42);
+
+	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+
+	HKMeansResult *tree = mkt_hkmeans_f32(
+			data, nvecs, dim, nlist, fan_out, DISTANCE_L2, &opts);
+
+	ASSERT_NOT_NULL(tree, "should return result");
+	ASSERT_EQ(3, tree->nlevels, "3-level tree");
+
+	/* Verify levels */
+	uint32_t level_counts[4] = {0};
+	for (uint32_t i = 0; i < tree->nnodes; i++)
+	{
+		ASSERT_TRUE(tree->nodes[i].level < 3, "level in range");
+		level_counts[tree->nodes[i].level]++;
+	}
+	ASSERT_EQ(1, level_counts[0], "1 root node");
+	ASSERT_TRUE(level_counts[1] > 0, "has level-1 nodes");
+	ASSERT_TRUE(level_counts[2] > 0, "has level-2 nodes");
+
+	/* first_child set for internal, not for leaves */
+	for (uint32_t i = 0; i < tree->nnodes; i++)
+	{
+		if (tree->nodes[i].level < 2)
+			ASSERT_TRUE(
+					tree->nodes[i].first_child != HKMEANS_NO_CHILD,
+					"internal nodes have children");
+		else
+			ASSERT_EQ(
+					HKMEANS_NO_CHILD,
+					tree->nodes[i].first_child,
+					"leaf nodes have no children");
+	}
+
+	ASSERT_TRUE(tree->nleaves > 0, "has leaf centroids");
+
+	mkt_hkmeans_result_destroy(tree);
+	mkt_free(data);
+}
+
+/*
+ * Structural invariants of a two-level tree.
+ */
+TEST(structural_invariants)
+{
+	uint32_t  fan_out = 4;
+	uint32_t  nlist	  = 16;
+	uint32_t  nvecs	  = 400;
+	Dimension dim	  = 8;
+	float	 *data	  = make_clustered_data(8, 50, dim, 42);
+
+	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+
+	HKMeansResult *tree = mkt_hkmeans_f32(
+			data, nvecs, dim, nlist, fan_out, DISTANCE_L2, &opts);
+
+	ASSERT_NOT_NULL(tree, "should return result");
+	ASSERT_EQ(2, tree->nlevels, "2-level tree");
+
+	/* All nodes have nchildren <= fan_out */
+	for (uint32_t i = 0; i < tree->nnodes; i++)
+		ASSERT_TRUE(
+				tree->nodes[i].nchildren <= fan_out, "nchildren <= fan_out");
+
+	/* Leaf centroid count matches nleaves */
+	uint32_t leaf_sum = 0;
+	for (uint32_t i = 0; i < tree->nnodes; i++)
+	{
+		if (tree->nodes[i].level == tree->nlevels - 1)
+			leaf_sum += tree->nodes[i].nchildren;
+	}
+	ASSERT_EQ(tree->nleaves, leaf_sum, "nleaves matches leaf sum");
+
+	/* Leaf centroids should be valid */
+	ASSERT_NOT_NULL(tree->leaf_centroids, "leaf centroids allocated");
+	for (uint32_t i = 0; i < tree->nleaves * dim; i++)
+		ASSERT_TRUE(
+				isfinite(tree->leaf_centroids[i]), "leaf centroids finite");
+
+	mkt_hkmeans_result_destroy(tree);
+	mkt_free(data);
+}
+
+/*
+ * NULL/invalid inputs return NULL.
+ */
+TEST(null_inputs)
+{
+	float		  data[] = {1.0f, 2.0f, 3.0f, 4.0f};
+	KMeansOptions opts	 = MKT_KMEANS_OPTIONS_DEFAULT;
+
+	ASSERT_NULL(
+			mkt_hkmeans_f32(NULL, 2, 2, 1, 4, DISTANCE_L2, &opts),
+			"NULL vectors");
+	ASSERT_NULL(
+			mkt_hkmeans_f32(data, 0, 2, 1, 4, DISTANCE_L2, &opts), "nvecs=0");
+	ASSERT_NULL(
+			mkt_hkmeans_f32(data, 2, 0, 1, 4, DISTANCE_L2, &opts), "dim=0");
+	ASSERT_NULL(
+			mkt_hkmeans_f32(data, 2, 2, 0, 4, DISTANCE_L2, &opts), "nlist=0");
+	ASSERT_NULL(
+			mkt_hkmeans_f32(data, 2, 2, 1, 1, DISTANCE_L2, &opts),
+			"fan_out=1");
+}
+
+/*
+ * Destroy NULL should not crash.
+ */
+TEST(destroy_null)
+{
+	mkt_hkmeans_result_destroy(NULL);
+	ASSERT_TRUE(true, "no crash");
+}
+
+/*
+ * Deterministic: same seed gives same result.
+ */
+TEST(deterministic)
+{
+	uint32_t  nvecs = 200;
+	Dimension dim	= 8;
+	float	 *data	= make_clustered_data(4, 50, dim, 42);
+
+	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	opts.seed		   = 42;
+
+	HKMeansResult *t1 =
+			mkt_hkmeans_f32(data, nvecs, dim, 4, 4, DISTANCE_L2, &opts);
+	HKMeansResult *t2 =
+			mkt_hkmeans_f32(data, nvecs, dim, 4, 4, DISTANCE_L2, &opts);
+
+	ASSERT_NOT_NULL(t1, "first run");
+	ASSERT_NOT_NULL(t2, "second run");
+	ASSERT_EQ(t1->nnodes, t2->nnodes, "same node count");
+	ASSERT_EQ(t1->nleaves, t2->nleaves, "same leaf count");
+
+	for (uint32_t i = 0; i < t1->nnodes; i++)
+	{
+		ASSERT_EQ(
+				t1->nodes[i].nchildren,
+				t2->nodes[i].nchildren,
+				"same nchildren");
+	}
+
+	mkt_hkmeans_result_destroy(t1);
+	mkt_hkmeans_result_destroy(t2);
+	mkt_free(data);
+}
+
+/*
+ * Few vectors (< fan_out): K gets clamped.
+ */
+TEST(few_vectors)
+{
+	float data[] = {
+			1.0f,
+			0.0f,
+			0.0f,
+			1.0f,
+			-1.0f,
+			0.0f,
+			0.0f,
+			-1.0f,
+	};
+
+	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+
+	HKMeansResult *tree =
+			mkt_hkmeans_f32(data, 4, 2, 2, 32, DISTANCE_L2, &opts);
+
+	ASSERT_NOT_NULL(tree, "should succeed with few vectors");
+	ASSERT_EQ(1, tree->nlevels, "flat when nlist <= fan_out");
+	ASSERT_EQ(2, tree->nleaves, "2 leaf centroids");
+
+	mkt_hkmeans_result_destroy(tree);
+}
+
+/*
+ * nlist == 1: single cluster, single level.
+ */
+TEST(single_cluster)
+{
+	float data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+
+	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+
+	HKMeansResult *tree =
+			mkt_hkmeans_f32(data, 3, 2, 1, 4, DISTANCE_L2, &opts);
+
+	ASSERT_NOT_NULL(tree, "should succeed");
+	ASSERT_EQ(1, tree->nlevels, "1 level");
+	ASSERT_EQ(1, tree->nleaves, "1 leaf centroid");
+
+	ASSERT_FLOAT_EQ(3.0f, tree->leaf_centroids[0], 1e-3f, "mean x");
+	ASSERT_FLOAT_EQ(4.0f, tree->leaf_centroids[1], 1e-3f, "mean y");
+
+	mkt_hkmeans_result_destroy(tree);
+}

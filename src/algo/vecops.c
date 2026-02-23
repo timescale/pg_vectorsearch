@@ -11,6 +11,7 @@
 #include <math.h>
 #include <stdatomic.h>
 #include <stddef.h>
+#include <string.h>
 
 #include "algo/simd_utils.h"
 #include "algo/vecops.h"
@@ -213,6 +214,16 @@ mkt_vector_scale(const float *v, float scalar, float *out, Dimension dim)
 	if (mkt_unlikely(!g_initialized))
 		mkt_vecops_init();
 	g_vector_scale_fn(v, scalar, out, dim);
+}
+
+void
+mkt_vector_mean(
+		const float *vectors, uint32_t nvecs, Dimension dim, float *out)
+{
+	memset(out, 0, dim * sizeof(float));
+	for (uint32_t i = 0; i < nvecs; i++)
+		mkt_vector_add(out, vectors + (size_t)i * dim, out, dim);
+	mkt_vector_scale(out, 1.0f / (float)nvecs, out, dim);
 }
 
 float

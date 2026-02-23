@@ -121,5 +121,52 @@ ERROR:  centroid_compression is not supported with vector_ip_ops
 INSERT INTO embeddings (v) VALUES ('[1,1,1]');
 -- VACUUM on the index (should not crash)
 VACUUM embeddings;
+-- Multi-level tree with fan_out (nlist=31, fan_out=4 → 3 levels)
+CREATE INDEX idx_ml ON embeddings USING mktann (v)
+    WITH (fan_out = 4, centroid_compression = true);
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_ml';
+ has_pages 
+-----------
+ t
+(1 row)
+
+-- Multi-level tree scan should return results
+SET enable_seqscan = off;
+SELECT count(*) FROM (
+    SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
+    FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5
+) t;
+ count 
+-------
+     5
+(1 row)
+
+RESET enable_seqscan;
+-- Multi-level tree with uncompressed float centroids
+CREATE INDEX idx_ml_float ON embeddings USING mktann (v)
+    WITH (fan_out = 4);
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_ml_float';
+ has_pages 
+-----------
+ t
+(1 row)
+
+-- fan_out = 2 (deepest tree)
+CREATE INDEX idx_fo2 ON embeddings USING mktann (v)
+    WITH (fan_out = 2, centroid_compression = true);
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_fo2';
+ has_pages 
+-----------
+ t
+(1 row)
+
+-- Validation: fan_out must be >= 2
+CREATE INDEX idx_bad_fo ON embeddings USING mktann (v)
+    WITH (fan_out = 1);
+ERROR:  value 1 out of bounds for option "fan_out"
+DETAIL:  Valid values are between "2" and "255".
 -- Cleanup
 DROP TABLE embeddings;

@@ -18,7 +18,7 @@ mkt_centroid_write_pages(
 		uint8_t				   level,
 		uint16_t			   flags,
 		uint16_t			   child_count,
-		const void			 **data,
+		CentroidEncoder		  *encoder,
 		const ItemPointerData *medoid_tids,
 		const BlockNumber	  *child_blknos)
 {
@@ -60,10 +60,10 @@ mkt_centroid_write_pages(
 		BlockNumber entry_child	   = child_blknos != NULL ? child_blknos[i]
 														  : InvalidBlockNumber;
 
-		bool added = mkt_centroid_page_add_entry(
-				cur_page, dim, entry_child, child_count, flags, tid, data[i]);
-		assert(added);
-		(void)added;
+		void *dest = mkt_centroid_page_add_entry_begin(
+				cur_page, dim, entry_child, child_count, flags, tid);
+		assert(dest != NULL);
+		encoder->ops->encode_into(encoder, i, dest);
 	}
 
 	/* Commit last page */

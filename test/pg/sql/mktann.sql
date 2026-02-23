@@ -80,5 +80,35 @@ INSERT INTO embeddings (v) VALUES ('[1,1,1]');
 -- VACUUM on the index (should not crash)
 VACUUM embeddings;
 
+-- Multi-level tree with fan_out (nlist=31, fan_out=4 → 3 levels)
+CREATE INDEX idx_ml ON embeddings USING mktann (v)
+    WITH (fan_out = 4, centroid_compression = true);
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_ml';
+
+-- Multi-level tree scan should return results
+SET enable_seqscan = off;
+SELECT count(*) FROM (
+    SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
+    FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5
+) t;
+RESET enable_seqscan;
+
+-- Multi-level tree with uncompressed float centroids
+CREATE INDEX idx_ml_float ON embeddings USING mktann (v)
+    WITH (fan_out = 4);
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_ml_float';
+
+-- fan_out = 2 (deepest tree)
+CREATE INDEX idx_fo2 ON embeddings USING mktann (v)
+    WITH (fan_out = 2, centroid_compression = true);
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_fo2';
+
+-- Validation: fan_out must be >= 2
+CREATE INDEX idx_bad_fo ON embeddings USING mktann (v)
+    WITH (fan_out = 1);
+
 -- Cleanup
 DROP TABLE embeddings;

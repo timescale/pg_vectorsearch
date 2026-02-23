@@ -60,6 +60,15 @@ void mkt_vector_add(const float *a, const float *b, float *out, Dimension dim);
 void mkt_vector_scale(const float *v, float scalar, float *out, Dimension dim);
 
 /*
+ * Vector mean: out[d] = mean of vectors[i][d] for all i
+ *
+ * Computes the element-wise mean of nvecs row-major vectors.
+ * Output must be preallocated with at least dim floats.
+ */
+void mkt_vector_mean(
+		const float *vectors, uint32_t nvecs, Dimension dim, float *out);
+
+/*
  * L2 distance squared: sum((a[i] - b[i])^2)
  *
  * Returns ||a - b||^2. Equivalent to mkt_l2_norm_squared of the difference,

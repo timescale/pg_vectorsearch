@@ -23,18 +23,17 @@ mkt_centroid_page_init_fmt(Page page, uint8_t level, MktCentroidFormat fmt)
 	opaque->page_id				  = MKT_CENTROID_PAGE_ID;
 }
 
-bool
-mkt_centroid_page_add_entry(
+void *
+mkt_centroid_page_add_entry_begin(
 		Page				   page,
 		Dimension			   dim,
 		BlockNumber			   child_blkno,
 		uint16_t			   child_count,
 		uint16_t			   flags,
-		const ItemPointerData *medoid_tid,
-		const void			  *data)
+		const ItemPointerData *medoid_tid)
 {
 	if (!mkt_centroid_page_has_room(page, dim))
-		return false;
+		return NULL;
 
 	PageHeader			   header	 = (PageHeader)page;
 	MktCentroidPageOpaque *opaque	 = MKT_CENTROID_OPAQUE(page);
@@ -58,12 +57,34 @@ mkt_centroid_page_add_entry(
 		rmeta->reserved = 0;
 	}
 
-	/* Write data (backward region) */
+	/* Reserve data space (backward region) */
 	uint32_t data_size = mkt_centroid_data_size(dim, fmt);
 	header->pd_upper -= data_size;
-	memcpy(page + header->pd_upper, data, data_size);
 
 	header->pd_lower += meta_size;
 	opaque->entry_count = index + 1;
+
+	return page + header->pd_upper;
+}
+
+bool
+mkt_centroid_page_add_entry(
+		Page				   page,
+		Dimension			   dim,
+		BlockNumber			   child_blkno,
+		uint16_t			   child_count,
+		uint16_t			   flags,
+		const ItemPointerData *medoid_tid,
+		const void			  *data)
+{
+	MktCentroidFormat fmt		= mkt_centroid_page_format(page);
+	uint32_t		  data_size = mkt_centroid_data_size(dim, fmt);
+
+	void *dest = mkt_centroid_page_add_entry_begin(
+			page, dim, child_blkno, child_count, flags, medoid_tid);
+	if (dest == NULL)
+		return false;
+
+	memcpy(dest, data, data_size);
 	return true;
 }

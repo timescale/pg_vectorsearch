@@ -28,6 +28,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "algo/hkmeans.h"
 #include "algo/kmeans.h"
 #include "algo/topk.h"
 #include "algo/vecops.h"
@@ -353,12 +354,11 @@ generate_random_vector(float *data, Dimension dim)
  * Clustered tree construction
  *
  * 1. Generate a random vector pool
- * 2. Run k-means (K = fan_out) to get level-0 centroids
- * 3. For each cluster, run k-means again for level-1, etc.
- * 4. Build centroid pages from real cluster structure
+ * 2. Run mkt_hkmeans_f32() to build hierarchical tree
+ * 3. Build centroid pages from the tree structure
  *
- * Block numbers assigned sequentially with overflow pages:
- * each tree node gets ceil(fan_out / max_entries) pages.
+ * Block numbers assigned sequentially per BFS node:
+ * each node gets ceil(nchildren / max_entries) pages.
  * ---------------------------------------------------------------- */
 
 /* Vectors per leaf centroid for k-means training */
@@ -373,15 +373,6 @@ power_u32(uint32_t base, uint32_t exp)
 	for (uint32_t i = 0; i < exp; i++)
 		result *= base;
 	return result;
-}
-
-static BlockNumber
-level_start_blkno(uint32_t level, uint32_t fan_out, uint32_t pages_per_node)
-{
-	BlockNumber start = 0;
-	for (uint32_t l = 0; l < level; l++)
-		start += power_u32(fan_out, l) * pages_per_node;
-	return start;
 }
 
 /*
@@ -484,28 +475,23 @@ generate_hierarchical_vectors(
 /*
  * find_medoid - Find the actual vector closest to a centroid
  *
- * Scans vectors assigned to cluster c and returns a pointer to
- * the one with minimum squared L2 distance to the centroid.
- * Falls back to the centroid itself if no vectors are assigned.
+ * Brute-force scan of all vectors, returning a pointer to the
+ * one with minimum squared L2 distance to the centroid. Falls
+ * back to the centroid itself if nvecs == 0.
  */
 static const float *
 find_medoid(
-		const float	   *vecs,
-		const uint32_t *assignments,
-		uint32_t		count,
-		uint32_t		c,
-		const float	   *centroid,
-		Dimension		dim)
+		const float *all_vecs,
+		uint32_t	 nvecs,
+		const float *centroid,
+		Dimension	 dim)
 {
 	const float *best	   = centroid;
 	float		 best_dist = FLT_MAX;
 
-	for (uint32_t v = 0; v < count; v++)
+	for (uint32_t v = 0; v < nvecs; v++)
 	{
-		if (assignments[v] != c)
-			continue;
-
-		const float *vec  = vecs + (size_t)v * dim;
+		const float *vec  = all_vecs + (size_t)v * dim;
 		float		 dist = 0.0f;
 		for (Dimension d = 0; d < dim; d++)
 		{
@@ -526,12 +512,10 @@ find_medoid(
 /* ----------------------------------------------------------------
  * build_tree - Build centroid tree via hierarchical k-means
  *
- * Generates nvecs random vectors, clusters them hierarchically,
- * and builds centroid pages in the specified format. All RaBitQ
- * entries are encoded relative to the global centroid.
- *
- * Supports overflow pages: when fan_out > max entries per page,
- * nodes chain multiple pages via next_blkno.
+ * Generates nvecs random vectors, clusters them hierarchically
+ * using mkt_hkmeans_f32(), and builds centroid pages in the
+ * specified format. All RaBitQ entries are encoded relative to
+ * the global centroid.
  *
  * Returns the allocated page buffer, or NULL on failure.
  * ---------------------------------------------------------------- */
@@ -557,27 +541,7 @@ build_tree(
 	uint32_t  fan_out = config->fan_out;
 	uint32_t  nlevels = config->nlevels;
 
-	uint32_t max_entries	= mkt_centroid_max_entries_fmt(dim, fmt);
-	uint32_t pages_per_node = (fan_out + max_entries - 1) / max_entries;
-	if (pages_per_node == 0)
-		pages_per_node = 1;
-
-	/* Count total pages and centroids */
-	uint32_t total_pages	 = 0;
-	uint32_t total_centroids = 0;
-	for (uint32_t l = 0; l < nlevels; l++)
-	{
-		uint32_t nodes = power_u32(fan_out, l);
-		total_pages += nodes * pages_per_node;
-		total_centroids += nodes * fan_out;
-	}
-
-	uint32_t leaf_centroids = power_u32(fan_out, nlevels);
-
-	/* Query seeds: leaf medoids + posting heads */
-	float *seeds = mkt_alloc((size_t)leaf_centroids * dim * sizeof(float));
-	BlockNumber *seed_phs = mkt_alloc(leaf_centroids * sizeof(BlockNumber));
-	uint32_t	 nsaved	  = 0;
+	uint32_t max_entries = mkt_centroid_max_entries_fmt(dim, fmt);
 
 	/*
 	 * Generate hierarchically-clustered vectors.
@@ -585,25 +549,62 @@ build_tree(
 	uint32_t nvecs	 = 0;
 	float	*vectors = generate_hierarchical_vectors(
 			  dim, fan_out, nlevels, VECS_PER_LEAF, &nvecs);
+
+	uint32_t nlist = power_u32(fan_out, nlevels);
+
 	if (verbose)
 		printf("  Generated %u vectors (%u leaf clusters x %u "
 			   "vecs)\n",
 			   nvecs,
-			   leaf_centroids,
+			   nlist,
 			   VECS_PER_LEAF);
 
 	/* Compute global centroid (mean of all vectors) */
-	memset(global_centroid_out, 0, dim * sizeof(float));
-	for (uint32_t i = 0; i < nvecs; i++)
-	{
-		const float *v = vectors + (size_t)i * dim;
-		for (Dimension d = 0; d < dim; d++)
-			global_centroid_out[d] += v[d];
-	}
-	for (Dimension d = 0; d < dim; d++)
-		global_centroid_out[d] /= (float)nvecs;
+	mkt_vector_mean(vectors, nvecs, dim, global_centroid_out);
 
+	/*
+	 * Run hierarchical k-means using the shared module.
+	 */
 	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
+
+	HKMeansResult *tree = mkt_hkmeans_f32(
+			vectors, nvecs, dim, nlist, fan_out, DISTANCE_L2, &km_opts);
+	if (tree == NULL)
+	{
+		fprintf(stderr, "Error: hierarchical k-means failed\n");
+		mkt_free(vectors);
+		return NULL;
+	}
+
+	if (verbose)
+		printf("  Tree: %u nodes, %u levels, %u leaves\n",
+			   tree->nnodes,
+			   tree->nlevels,
+			   tree->nleaves);
+
+	/*
+	 * Pre-compute block numbers for each BFS node.
+	 * Block numbers are assigned sequentially.
+	 */
+	BlockNumber *node_first_blkno = mkt_alloc(
+			tree->nnodes * sizeof(BlockNumber));
+	BlockNumber next_blkno	= 0;
+	uint32_t	total_pages = 0;
+
+	for (uint32_t i = 0; i < tree->nnodes; i++)
+	{
+		uint32_t n			  = tree->nodes[i].nchildren;
+		uint32_t pages_needed = (n + max_entries - 1) / max_entries;
+		if (pages_needed == 0)
+			pages_needed = 1;
+		node_first_blkno[i] = next_blkno;
+		next_blkno += pages_needed;
+		total_pages += pages_needed;
+	}
+
+	uint32_t total_centroids = 0;
+	for (uint32_t i = 0; i < tree->nnodes; i++)
+		total_centroids += tree->nodes[i].nchildren;
 
 	/* Allocate page buffer */
 	char *pages = mkt_alloc((size_t)total_pages * BLCKSZ);
@@ -624,196 +625,125 @@ build_tree(
 		   (size_t)total_pages * max_entries * dim * sizeof(float));
 
 	/*
-	 * Leaf index arrays: map each leaf cluster to global vector
-	 * indices. leaf_offsets is a prefix-sum array of length
-	 * leaf_centroids+1, and leaf_idx holds nvecs global indices.
-	 *
-	 * Built in two phases: count during tree build, fill after.
+	 * Leaf arrays: query seeds and leaf index mapping.
 	 */
+	uint32_t leaf_centroids = tree->nleaves;
+
+	float *seeds = mkt_alloc((size_t)leaf_centroids * dim * sizeof(float));
+	BlockNumber *seed_phs = mkt_alloc(leaf_centroids * sizeof(BlockNumber));
+	uint32_t	 nsaved	  = 0;
+
 	uint32_t *leaf_offsets = mkt_alloc(
 			(leaf_centroids + 1) * sizeof(uint32_t));
 	uint32_t *leaf_idx = mkt_alloc(nvecs * sizeof(uint32_t));
 	memset(leaf_offsets, 0, (leaf_centroids + 1) * sizeof(uint32_t));
 
-	/* Saved leaf work items for second pass (index filling) */
-	typedef struct LeafItem
+	/*
+	 * Build leaf_offsets/leaf_idx by brute-force nearest leaf
+	 * centroid assignment.
+	 */
+	const float *leaf_cents = tree->leaf_centroids;
+
+	for (uint32_t v = 0; v < nvecs; v++)
 	{
-		uint32_t *indices;	   /* global vector indices */
-		uint32_t *assignments; /* k-means cluster assignments */
-		uint32_t  count;
-		uint32_t  idx_in_level;
-	} LeafItem;
+		const float *vec	= vectors + (size_t)v * dim;
+		float		 best_d = FLT_MAX;
+		uint32_t	 best_c = 0;
+		for (uint32_t c = 0; c < leaf_centroids; c++)
+		{
+			float d = mkt_l2_distance_squared(
+					vec, leaf_cents + (size_t)c * dim, dim);
+			if (d < best_d)
+			{
+				best_d = d;
+				best_c = c;
+			}
+		}
+		leaf_offsets[best_c + 1]++;
+	}
 
-	uint32_t  leaf_item_cap	  = power_u32(fan_out, nlevels - 1);
-	LeafItem *leaf_items	  = mkt_alloc(leaf_item_cap * sizeof(LeafItem));
-	uint32_t  leaf_item_count = 0;
+	for (uint32_t i = 1; i <= leaf_centroids; i++)
+		leaf_offsets[i] += leaf_offsets[i - 1];
 
-	/* Work queue entry: a subset of vectors to cluster */
-	typedef struct WorkItem
+	uint32_t *pos = mkt_alloc(leaf_centroids * sizeof(uint32_t));
+	memcpy(pos, leaf_offsets, leaf_centroids * sizeof(uint32_t));
+
+	for (uint32_t v = 0; v < nvecs; v++)
 	{
-		float	   *vecs;	 /* [count * dim] (owned if level>0) */
-		uint32_t   *indices; /* global vector indices (owned if level>0) */
-		uint32_t	count;
-		BlockNumber first_blkno; /* first page of this node */
-		uint32_t	level;
-		uint32_t	idx_in_level;
-	} WorkItem;
+		const float *vec	= vectors + (size_t)v * dim;
+		float		 best_d = FLT_MAX;
+		uint32_t	 best_c = 0;
+		for (uint32_t c = 0; c < leaf_centroids; c++)
+		{
+			float d = mkt_l2_distance_squared(
+					vec, leaf_cents + (size_t)c * dim, dim);
+			if (d < best_d)
+			{
+				best_d = d;
+				best_c = c;
+			}
+		}
+		leaf_idx[pos[best_c]++] = v;
+	}
 
-	uint32_t  max_queue = total_pages;
-	WorkItem *queue		= mkt_alloc(max_queue * sizeof(WorkItem));
-	uint32_t  q_head = 0, q_tail = 0;
+	mkt_free(pos);
 
-	/* Root indices: [0, 1, ..., nvecs-1] */
-	uint32_t *root_indices = mkt_alloc(nvecs * sizeof(uint32_t));
-	for (uint32_t i = 0; i < nvecs; i++)
-		root_indices[i] = i;
+	/*
+	 * Write centroid pages for each BFS node.
+	 *
+	 * Two passes per node: (1) find medoids and collect metadata,
+	 * (2) create encoder pointing at medoid buffer, call write_pages.
+	 */
 
-	/* Seed: the full vector pool at level 0 */
-	queue[q_tail++] = (WorkItem){
-			.vecs		  = vectors,
-			.indices	  = root_indices,
-			.count		  = nvecs,
-			.first_blkno  = 0,
-			.level		  = 0,
-			.idx_in_level = 0,
-	};
+	/* Pre-allocate medoid buffer (reused per node) */
+	float *medoid_buf = mkt_alloc((size_t)fan_out * dim * sizeof(float));
 
 	bool ok = true;
 
-	while (q_head < q_tail && ok)
+	for (uint32_t i = 0; i < tree->nnodes && ok; i++)
 	{
-		WorkItem item = queue[q_head++];
-
-		bool is_leaf = (item.level == nlevels - 1);
-
-		uint32_t k = fan_out;
-		if (item.count < k)
-			k = item.count;
-
-		if (item.level == 0 && verbose)
-		{
-			printf("  Clustering %u vectors -> %u "
-				   "level-0 centroids\n",
-				   item.count,
-				   k);
-		}
-
-		KMeansResult *km = mkt_kmeans_f32(
-				item.vecs, item.count, dim, k, DISTANCE_L2, &km_opts);
-		if (km == NULL)
-		{
-			fprintf(stderr, "Error: k-means failed at level %u\n", item.level);
-			ok = false;
-			break;
-		}
-
-		BlockNumber next_start =
-				level_start_blkno(item.level + 1, fan_out, pages_per_node);
-
-		/*
-		 * At leaf level, count vectors per cluster and save
-		 * assignments for the fill pass after the main loop.
-		 */
-		if (is_leaf)
-		{
-			for (uint32_t v = 0; v < item.count; v++)
-			{
-				uint32_t c	= km->assignments[v];
-				uint32_t li = item.idx_in_level * fan_out + c;
-				leaf_offsets[li + 1]++;
-			}
-
-			/* Save for second pass */
-			uint32_t *saved_asgn = mkt_alloc(item.count * sizeof(uint32_t));
-			memcpy(saved_asgn, km->assignments, item.count * sizeof(uint32_t));
-
-			uint32_t *saved_idx = mkt_alloc(item.count * sizeof(uint32_t));
-			memcpy(saved_idx, item.indices, item.count * sizeof(uint32_t));
-
-			leaf_items[leaf_item_count++] = (LeafItem){
-					.indices	  = saved_idx,
-					.assignments  = saved_asgn,
-					.count		  = item.count,
-					.idx_in_level = item.idx_in_level,
-			};
-		}
-
-		/*
-		 * Pre-encode entries and build per-entry arrays for
-		 * mkt_centroid_write_pages.
-		 */
-		const void	   **node_data	   = mkt_alloc(k * sizeof(void *));
-		BlockNumber		*node_children = mkt_alloc(k * sizeof(BlockNumber));
-		ItemPointerData *node_tids	   = NULL;
-		if (fmt == MKT_CENTROID_FMT_RABITQ)
-			node_tids = mkt_alloc(k * sizeof(ItemPointerData));
+		HKMeansNode *node	 = &tree->nodes[i];
+		bool		 is_leaf = (node->level == tree->nlevels - 1);
+		uint32_t	 k		 = node->nchildren;
 
 		uint16_t entry_flags	   = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
 		uint16_t entry_child_count = is_leaf ? 0 : (uint16_t)fan_out;
 
+		/* Leaf nodes need per-entry child block numbers since
+		 * they use POSTING_HEAD_BASE offsets. Internal nodes
+		 * pass the precomputed node→block map directly. */
+		BlockNumber		*leaf_children = NULL;
+		ItemPointerData *node_tids	   = NULL;
+
+		if (is_leaf)
+			leaf_children = mkt_alloc(k * sizeof(BlockNumber));
+		if (fmt == MKT_CENTROID_FMT_RABITQ)
+			node_tids = mkt_alloc(k * sizeof(ItemPointerData));
+
+		/* Pass 1: find medoids, compute metadata */
 		for (uint32_t c = 0; c < k; c++)
 		{
-			const float *centroid = km->centroids + (size_t)c * dim;
-			const float *medoid	  = find_medoid(
-					  item.vecs, km->assignments, item.count, c, centroid, dim);
+			const float *centroid = node->centroids + (size_t)c * dim;
+			const float *medoid	  = find_medoid(vectors, nvecs, centroid, dim);
 
-			/* Per-entry child block number */
+			memcpy(medoid_buf + (size_t)c * dim, medoid, dim * sizeof(float));
+
 			if (is_leaf)
 			{
-				node_children[c] = POSTING_HEAD_BASE +
-								   item.idx_in_level * fan_out + c;
+				leaf_children[c] = POSTING_HEAD_BASE + node->first_leaf + c;
 
 				if (nsaved < leaf_centroids)
 				{
 					memcpy(seeds + (size_t)nsaved * dim,
 						   medoid,
 						   dim * sizeof(float));
-					seed_phs[nsaved] = node_children[c];
+					seed_phs[nsaved] = leaf_children[c];
 					nsaved++;
 				}
 			}
-			else
-			{
-				uint32_t child_idx = item.idx_in_level * fan_out + c;
-				node_children[c]   = next_start + child_idx * pages_per_node;
-			}
-
-			/* Encode data for write_pages */
-			switch (fmt)
-			{
-			case MKT_CENTROID_FMT_RABITQ:
-			{
-				VectorRef vec_ref  = {.data = medoid, .dim = dim};
-				VectorRef cent_ref = {.data = global_centroid_out, .dim = dim};
-				node_data[c] = mkt_rabitq_encode(params, vec_ref, cent_ref);
-				if (node_data[c] == NULL)
-				{
-					fprintf(stderr,
-							"Error: RaBitQ encode failed "
-							"at level %u entry %u\n",
-							item.level,
-							c);
-					ok = false;
-				}
-				break;
-			}
-			case MKT_CENTROID_FMT_FLOAT:
-				node_data[c] = medoid;
-				break;
-			case MKT_CENTROID_FMT_HALF:
-			{
-				half *hvec = mkt_alloc(dim * sizeof(half));
-				mkt_float_to_half_array(medoid, hvec, dim);
-				node_data[c] = hvec;
-				break;
-			}
-			}
-
-			if (!ok)
-				break;
 
 			/* Compute TID for reranking lookup */
-			BlockNumber entry_blkno = item.first_blkno + c / max_entries;
+			BlockNumber entry_blkno = node_first_blkno[i] + c / max_entries;
 			uint16_t	entry_in_pg = (uint16_t)(c % max_entries);
 
 			if (node_tids != NULL)
@@ -827,127 +757,37 @@ build_tree(
 			memcpy(medoid_vecs + (size_t)midx * dim,
 				   medoid,
 				   dim * sizeof(float));
-
-			/* Enqueue children (non-leaf) */
-			if (!is_leaf)
-			{
-				uint32_t sub_n = 0;
-				for (uint32_t v = 0; v < item.count; v++)
-				{
-					if (km->assignments[v] == c)
-						sub_n++;
-				}
-				if (sub_n > 0)
-				{
-					float *sub_vecs = mkt_alloc(
-							(size_t)sub_n * dim * sizeof(float));
-					uint32_t *sub_idx = mkt_alloc(sub_n * sizeof(uint32_t));
-
-					uint32_t idx = 0;
-					for (uint32_t v = 0; v < item.count; v++)
-					{
-						if (km->assignments[v] == c)
-						{
-							memcpy(sub_vecs + (size_t)idx * dim,
-								   item.vecs + (size_t)v * dim,
-								   dim * sizeof(float));
-							sub_idx[idx] = item.indices[v];
-							idx++;
-						}
-					}
-
-					uint32_t	child_il	= item.idx_in_level * fan_out + c;
-					BlockNumber child_first = next_start +
-											  child_il * pages_per_node;
-
-					queue[q_tail++] = (WorkItem){
-							.vecs		  = sub_vecs,
-							.indices	  = sub_idx,
-							.count		  = sub_n,
-							.first_blkno  = child_first,
-							.level		  = item.level + 1,
-							.idx_in_level = child_il,
-					};
-				}
-			}
 		}
 
-		/* Write pages using production code path */
-		if (ok)
-		{
-			build_storage.next_blkno = item.first_blkno;
-			mkt_centroid_write_pages(
-					&build_storage.base,
-					dim,
-					k,
-					fmt,
-					(uint8_t)item.level,
-					entry_flags,
-					entry_child_count,
-					node_data,
-					node_tids,
-					node_children);
-		}
+		/* Pass 2: create encoder, write pages */
+		CentroidEncoderState enc_state;
+		CentroidEncoder		*encoder = centroid_encoder_init(
+				&enc_state, fmt, medoid_buf, dim, params, global_centroid_out);
 
-		/* Free encoded data */
-		for (uint32_t c = 0; c < k; c++)
-		{
-			if (fmt == MKT_CENTROID_FMT_RABITQ || fmt == MKT_CENTROID_FMT_HALF)
-			{
-				if (node_data[c] != NULL)
-					mkt_free((void *)node_data[c]);
-			}
-		}
-		mkt_free(node_data);
-		mkt_free(node_children);
+		const BlockNumber *child_blks =
+				is_leaf ? leaf_children : &node_first_blkno[node->first_child];
+
+		build_storage.next_blkno = node_first_blkno[i];
+		mkt_centroid_write_pages(
+				&build_storage.base,
+				dim,
+				k,
+				fmt,
+				(uint8_t)node->level,
+				entry_flags,
+				entry_child_count,
+				encoder,
+				node_tids,
+				child_blks);
+
+		mkt_free(leaf_children);
 		mkt_free(node_tids);
-
-		mkt_kmeans_result_destroy(km);
-
-		if (item.level > 0)
-		{
-			mkt_free(item.vecs);
-			mkt_free(item.indices);
-		}
 	}
 
-	/* Free any unprocessed queue items */
-	for (uint32_t i = q_head; i < q_tail; i++)
-	{
-		if (queue[i].level > 0)
-		{
-			mkt_free(queue[i].vecs);
-			mkt_free(queue[i].indices);
-		}
-	}
-	mkt_free(queue);
-	mkt_free(root_indices);
+	mkt_free(medoid_buf);
 
-	/*
-	 * Build leaf_idx: convert histogram in leaf_offsets to a
-	 * prefix sum, then fill leaf_idx using saved leaf items.
-	 */
-	for (uint32_t i = 1; i <= leaf_centroids; i++)
-		leaf_offsets[i] += leaf_offsets[i - 1];
-
-	/* Write positions (copy of offsets, advanced during fill) */
-	uint32_t *pos = mkt_alloc(leaf_centroids * sizeof(uint32_t));
-	memcpy(pos, leaf_offsets, leaf_centroids * sizeof(uint32_t));
-
-	for (uint32_t li = 0; li < leaf_item_count; li++)
-	{
-		LeafItem *lf = &leaf_items[li];
-		for (uint32_t v = 0; v < lf->count; v++)
-		{
-			uint32_t c			  = lf->assignments[v];
-			uint32_t cidx		  = lf->idx_in_level * fan_out + c;
-			leaf_idx[pos[cidx]++] = lf->indices[v];
-		}
-		mkt_free(lf->indices);
-		mkt_free(lf->assignments);
-	}
-	mkt_free(pos);
-	mkt_free(leaf_items);
+	mkt_free(node_first_blkno);
+	mkt_hkmeans_result_destroy(tree);
 
 	if (!ok)
 	{
