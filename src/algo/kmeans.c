@@ -378,19 +378,29 @@ kmeans_max_centroid_shift(const KMeansState *st)
 
 /*
  * Allocate working state for one k-means run.
+ *
+ * Creates an arena context and allocates everything (including the
+ * struct itself) within it. kmeans_state_destroy() bulk-frees all
+ * memory by deleting the arena.
  */
 static KMeansState *
 kmeans_state_create(
-		const void	  *vectors,
-		MktVecType	   vec_type,
-		uint32_t	   nvecs,
-		Dimension	   dim,
-		uint32_t	   nlist,
-		DistanceMetric metric)
+		const void	   *vectors,
+		const uint32_t *indices,
+		MktVecType		vec_type,
+		uint32_t		nvecs,
+		Dimension		dim,
+		uint32_t		nlist,
+		DistanceMetric	metric)
 {
+	MktMemCtx ctx	  = mkt_memctx_create(NULL, "kmeans_state");
+	MktMemCtx old_ctx = mkt_memctx_switch(ctx);
+
 	KMeansState *st = mkt_alloc0(sizeof(KMeansState));
 
+	st->memctx	 = ctx;
 	st->vectors	 = vectors;
+	st->indices	 = indices;
 	st->vec_type = vec_type;
 	st->nvecs	 = nvecs;
 	st->nlist	 = nlist;
@@ -407,8 +417,11 @@ kmeans_state_create(
 		block = nvecs;
 	st->dist_block = mkt_alloc((size_t)block * nlist * sizeof(float));
 
-	/* Allocate BLAS conversion buffer for non-f32 types */
-	if (mkt_vec_element_size(vec_type) != sizeof(float))
+	/*
+	 * Allocate conversion buffer for non-f32 types, or for f32 with
+	 * indices (Lloyd gather needs a contiguous block).
+	 */
+	if (mkt_vec_element_size(vec_type) != sizeof(float) || indices != NULL)
 		st->vec_block = mkt_alloc((size_t)block * dim * sizeof(float));
 
 	if (metric == DISTANCE_L2)
@@ -417,6 +430,7 @@ kmeans_state_create(
 		st->norms_c = mkt_alloc(nlist * sizeof(float));
 	}
 
+	mkt_memctx_switch(old_ctx);
 	return st;
 }
 
@@ -425,23 +439,8 @@ kmeans_state_destroy(KMeansState *st)
 {
 	if (st == NULL)
 		return;
-	if (st->centroids)
-		mkt_free(st->centroids);
-	if (st->vec_block)
-		mkt_free(st->vec_block);
-	if (st->assignments)
-		mkt_free(st->assignments);
-	if (st->cluster_sizes)
-		mkt_free(st->cluster_sizes);
-	if (st->new_centroids)
-		mkt_free(st->new_centroids);
-	if (st->dist_block)
-		mkt_free(st->dist_block);
-	if (st->norms_x)
-		mkt_free(st->norms_x);
-	if (st->norms_c)
-		mkt_free(st->norms_c);
-	mkt_free(st);
+	MktMemCtx ctx = st->memctx;
+	mkt_memctx_delete(ctx); /* st is now invalid */
 }
 
 /*
@@ -689,6 +688,7 @@ kmeans_run_one(
 KMeansResult *
 mkt_kmeans(
 		const void			*vectors,
+		const uint32_t		*indices,
 		MktVecType			 vec_type,
 		uint32_t			 nvecs,
 		Dimension			 dim,
@@ -747,14 +747,21 @@ mkt_kmeans(
 		break;
 	}
 
+	size_t cent_sz	 = (size_t)nlist * dim * sizeof(float);
+	size_t assign_sz = nvecs * sizeof(ClusterId);
+	size_t clsize_sz = nlist * sizeof(uint32_t);
+
 	for (uint32_t redo = 0; redo < opts.nredo; redo++)
 	{
 		KMeansState *st = kmeans_state_create(
-				vectors, vec_type, nvecs, dim, nlist, metric);
+				vectors, indices, vec_type, nvecs, dim, nlist, metric);
 
 		uint64_t seed = opts.seed + redo;
 
+		/* Run in arena context so per-iteration temps land there */
+		MktMemCtx run_ctx = mkt_memctx_switch(st->memctx);
 		kmeans_run_one(st, &opts, seed, algo_ops);
+		mkt_memctx_switch(run_ctx);
 
 		if (opts.verbose && opts.nredo > 1)
 		{
@@ -768,7 +775,7 @@ mkt_kmeans(
 
 		if (st->total_cost < best_cost)
 		{
-			/* Save as best */
+			/* Save as best — copy out of arena into caller ctx */
 			if (best != NULL)
 				mkt_kmeans_result_destroy(best);
 
@@ -777,15 +784,14 @@ mkt_kmeans(
 			best->dim		 = dim;
 			best->total_cost = st->total_cost;
 
-			/* Transfer ownership of arrays */
-			best->centroids = st->centroids;
-			st->centroids	= NULL;
+			best->centroids = mkt_alloc(cent_sz);
+			memcpy(best->centroids, st->centroids, cent_sz);
 
-			best->assignments = st->assignments;
-			st->assignments	  = NULL;
+			best->assignments = mkt_alloc(assign_sz);
+			memcpy(best->assignments, st->assignments, assign_sz);
 
-			best->cluster_sizes = st->cluster_sizes;
-			st->cluster_sizes	= NULL;
+			best->cluster_sizes = mkt_alloc(clsize_sz);
+			memcpy(best->cluster_sizes, st->cluster_sizes, clsize_sz);
 
 			best_cost = st->total_cost;
 		}

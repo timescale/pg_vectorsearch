@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "algo/kmeans.h"
+#include "core/memory.h"
 #include "mkt_halfvec.h"
 #include "mkt_vector.h"
 
@@ -45,13 +46,16 @@
  */
 typedef struct KMeansState
 {
+	MktMemCtx memctx; /* Arena context — all state lives here */
+
 	/* Input (not owned) */
-	const void	  *vectors;
-	MktVecType	   vec_type; /* element type (f32, f16, f16c) */
-	uint32_t	   nvecs;
-	uint32_t	   nlist;
-	Dimension	   dim;
-	DistanceMetric metric;
+	const void	   *vectors;
+	const uint32_t *indices;  /* NULL = identity mapping [0..nvecs) */
+	MktVecType		vec_type; /* element type (f32, f16, f16c) */
+	uint32_t		nvecs;
+	uint32_t		nlist;
+	Dimension		dim;
+	DistanceMetric	metric;
 
 	/* Working state (owned) — always float32 */
 	float	  *centroids;	  /* [nlist * dim] */
@@ -69,7 +73,8 @@ typedef struct KMeansState
 __attribute__((always_inline)) static inline const void *
 km_get_vector(const KMeansState *st, uint32_t i, size_t elem_size)
 {
-	return (const char *)st->vectors + (size_t)i * st->dim * elem_size;
+	uint32_t idx = st->indices ? st->indices[i] : i;
+	return (const char *)st->vectors + (size_t)idx * st->dim * elem_size;
 }
 
 #endif /* MKT_KMEANS_INTERNAL_H */
