@@ -43,13 +43,19 @@ mkt_centroid_write_pages(
 			if (first_blkno == InvalidBlockNumber)
 				first_blkno = cur_blkno;
 
-			/* Link previous page to this one */
+			/* Link previous page to this one.  The storage layer
+			 * holds at most one buffer, so we commit the new page
+			 * first, reopen the previous page to set next_blkno,
+			 * then reopen the new page. */
 			if (prev_blkno != InvalidBlockNumber)
 			{
+				mkt_storage_commit_page(storage, cur_blkno);
+
 				Page prev_page = mkt_storage_write_page(storage, prev_blkno);
-				MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(prev_page);
-				opaque->next_blkno			  = cur_blkno;
+				MKT_CENTROID_OPAQUE(prev_page)->next_blkno = cur_blkno;
 				mkt_storage_commit_page(storage, prev_blkno);
+
+				cur_page = mkt_storage_write_page(storage, cur_blkno);
 			}
 
 			prev_blkno = cur_blkno;
