@@ -693,6 +693,23 @@ CREATE OPERATOR CLASS vector_cosine_ops
     FUNCTION 2 mktann_metric_cosine(internal);
 
 -- =====================================================================
+-- index inspection functions
+-- =====================================================================
+
+CREATE FUNCTION mkt_centroid_pages(regclass)
+    RETURNS TABLE (
+        blkno       integer,
+        entry       smallint,
+        level       smallint,
+        format      text,
+        child_blkno integer,
+        child_count smallint,
+        is_leaf     boolean
+    )
+    AS 'MODULE_PATHNAME', 'mkt_centroid_pages'
+    LANGUAGE C STRICT PARALLEL SAFE;
+
+-- =====================================================================
 -- pgvector binary cast support
 -- =====================================================================
 --

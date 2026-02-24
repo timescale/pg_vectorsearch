@@ -2,6 +2,7 @@
 
 extension_sources = files(
   'mkt_pg.c',
+  'mktann_inspect.c',
   'mkt_pg_vector.c',
   'mkt_pg_halfvec.c',
   'mkt_pg_rabitq.c',

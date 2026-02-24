@@ -1,0 +1,117 @@
+-- mkt_centroid_pages inspection function
+-- Create table with vector column
+CREATE TABLE embeddings (id serial, v vector(3));
+-- Insert deterministic data (grid of vectors)
+INSERT INTO embeddings (v)
+    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vector
+    FROM generate_series(0, 9) x,
+         generate_series(0, 9) y,
+         generate_series(0, 9) z;
+-- Single-level RaBitQ index — summary per level
+-- (Leaf count varies across platforms due to k-means convergence,
+-- so check structure and format without asserting exact counts.)
+CREATE INDEX idx_l2c ON embeddings USING mktann (v)
+    WITH (centroid_compression = true);
+SELECT level,
+       count(child_blkno) = count(*) AS all_have_children,
+       count(*) FILTER (WHERE is_leaf) = count(*) AS all_are_leaves,
+       count(*) > 0 AS has_entries,
+       min(format) AS format
+    FROM mkt_centroid_pages('idx_l2c'::regclass)
+    GROUP BY level ORDER BY level;
+ level | all_have_children | all_are_leaves | has_entries | format 
+-------+-------------------+----------------+-------------+--------
+     0 | t                 | f              | t           | rabitq
+     1 | f                 | t              | t           | rabitq
+(2 rows)
+
+-- Multi-level tree (fan_out = 4) — internal nodes show tree topology
+CREATE INDEX idx_ml ON embeddings USING mktann (v)
+    WITH (fan_out = 4, centroid_compression = true);
+SELECT * FROM mkt_centroid_pages('idx_ml'::regclass)
+    WHERE NOT is_leaf
+    ORDER BY blkno, entry;
+ blkno | entry | level | format | child_blkno | child_count | is_leaf 
+-------+-------+-------+--------+-------------+-------------+---------
+     1 |     0 |     0 | rabitq |           2 |           4 | f
+     1 |     1 |     0 | rabitq |           3 |           4 | f
+     1 |     2 |     0 | rabitq |           4 |           4 | f
+     1 |     3 |     0 | rabitq |           5 |           4 | f
+     2 |     0 |     1 | rabitq |           6 |           4 | f
+     2 |     1 |     1 | rabitq |           7 |           4 | f
+     2 |     2 |     1 | rabitq |           8 |           4 | f
+     2 |     3 |     1 | rabitq |           9 |           4 | f
+     3 |     0 |     1 | rabitq |          10 |           4 | f
+     3 |     1 |     1 | rabitq |          11 |           4 | f
+     3 |     2 |     1 | rabitq |          12 |           4 | f
+     3 |     3 |     1 | rabitq |          13 |           4 | f
+     4 |     0 |     1 | rabitq |          14 |           4 | f
+     4 |     1 |     1 | rabitq |          15 |           4 | f
+     4 |     2 |     1 | rabitq |          16 |           4 | f
+     4 |     3 |     1 | rabitq |          17 |           4 | f
+     5 |     0 |     1 | rabitq |          18 |           4 | f
+     5 |     1 |     1 | rabitq |          19 |           4 | f
+     5 |     2 |     1 | rabitq |          20 |           4 | f
+     5 |     3 |     1 | rabitq |          21 |           4 | f
+(20 rows)
+
+-- Leaf summary for multi-level tree
+SELECT level, count(*) AS leaf_entries
+    FROM mkt_centroid_pages('idx_ml'::regclass)
+    WHERE is_leaf
+    GROUP BY level
+    ORDER BY level;
+ level | leaf_entries 
+-------+--------------
+     2 |           64
+(1 row)
+
+-- Uncompressed float centroids — verify format string
+CREATE INDEX idx_float ON embeddings USING mktann (v);
+SELECT level,
+       count(child_blkno) = count(*) AS all_have_children,
+       count(*) FILTER (WHERE is_leaf) = count(*) AS all_are_leaves,
+       count(*) > 0 AS has_entries,
+       min(format) AS format
+    FROM mkt_centroid_pages('idx_float'::regclass)
+    GROUP BY level ORDER BY level;
+ level | all_have_children | all_are_leaves | has_entries | format 
+-------+-------------------+----------------+-------------+--------
+     0 | t                 | f              | t           | float
+     1 | f                 | t              | t           | float
+(2 rows)
+
+-- Higher-dim vectors to force page overflow (next_blkno chains).
+-- Float format with dim=256: max 7 entries/page, nlist=10 overflows.
+CREATE TABLE wide (id serial, v vector(256));
+INSERT INTO wide (v)
+    SELECT (
+        SELECT array_agg(sin(i + j * 0.1)::real)
+        FROM generate_series(0, 255) j
+    )::vector(256)
+    FROM generate_series(1, 100) i;
+CREATE INDEX idx_wide ON wide USING mktann (v);
+-- Entries from chained pages appear naturally in output
+SELECT * FROM mkt_centroid_pages('idx_wide'::regclass)
+    ORDER BY blkno, entry;
+ blkno | entry | level | format | child_blkno | child_count | is_leaf 
+-------+-------+-------+--------+-------------+-------------+---------
+     1 |     0 |     0 | float  |             |           0 | t
+     1 |     1 |     0 | float  |             |           0 | t
+     1 |     2 |     0 | float  |             |           0 | t
+     1 |     3 |     0 | float  |             |           0 | t
+     1 |     4 |     0 | float  |             |           0 | t
+     1 |     5 |     0 | float  |             |           0 | t
+     1 |     6 |     0 | float  |             |           0 | t
+     2 |     0 |     0 | float  |             |           0 | t
+     2 |     1 |     0 | float  |             |           0 | t
+     2 |     2 |     0 | float  |             |           0 | t
+(10 rows)
+
+-- Error case: not an mktann index
+CREATE INDEX idx_btree ON embeddings (id);
+SELECT * FROM mkt_centroid_pages('idx_btree'::regclass);
+ERROR:  "idx_btree" is not an mktann index
+-- Cleanup
+DROP TABLE embeddings;
+DROP TABLE wide;
