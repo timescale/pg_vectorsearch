@@ -189,6 +189,16 @@ if use_faiss
   message('FAISS integration enabled (using ' + faiss_root + ')')
 endif
 
+# HDF5 library (optional, for loading ann-benchmarks datasets)
+use_hdf5 = get_option('hdf5')
+hdf5_dep = []
+
+if use_hdf5
+  hdf5_dep = dependency('hdf5', language: 'c', required: true)
+  config_data.set('MKT_HAVE_HDF5', 1)
+  message('HDF5 integration enabled')
+endif
+
 # F16C: hardware half-precision ↔ float conversion (available on all AVX2
 # CPUs, i.e. Haswell 2013+). Enables _cvtsh_ss / _cvtss_sh scalar intrinsics
 # globally so that inline half↔float conversion in mkt_halfvec.h compiles to
@@ -328,9 +338,15 @@ mkt_cli_sources = files(
   'src/cli/kmeans_pgvector.c',
 )
 
+if use_faiss and use_hdf5
+  mkt_cli_sources += files('src/cli/verify_rabitq.c')
+endif
+
 mkt_exe = executable('mkt',
   mkt_cli_sources,
-  dependencies: [mkt_core_dep] + (use_faiss ? [faiss_dep] : []),
+  dependencies: [mkt_core_dep]
+    + (use_faiss ? [faiss_dep] : [])
+    + (use_hdf5 ? [hdf5_dep] : []),
   include_directories: src_inc,
   install: false,
 )

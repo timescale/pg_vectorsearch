@@ -51,4 +51,10 @@
  */
 #mesondefine MKT_HAVE_FAISS
 
+/*
+ * HDF5 support: enables loading ann-benchmarks datasets for verification.
+ * Used by mkt verify rabitq to load train/test/neighbors/distances datasets.
+ */
+#mesondefine MKT_HAVE_HDF5
+
 #endif /* MKT_CONFIG_H */
