@@ -78,6 +78,21 @@ HKMeansResult *mkt_hkmeans_f32(
 		const KMeansOptions *options);
 
 /*
+ * Assign a vector to a leaf centroid via greedy tree descent.
+ *
+ * Returns the leaf index (0..nleaves-1). Optionally writes the
+ * distance to the nearest leaf centroid into *out_dist.
+ *
+ * Cost: O(fan_out * nlevels) vs O(nleaves) for brute-force.
+ * For cosine metric, vec must be pre-normalized.
+ */
+uint32_t mkt_hkmeans_assign(
+		const HKMeansResult *tree,
+		const float			*vec,
+		DistanceMetric		 metric,
+		Distance			*out_dist);
+
+/*
  * Free a hierarchical k-means result and all owned data.
  */
 void mkt_hkmeans_result_destroy(HKMeansResult *result);

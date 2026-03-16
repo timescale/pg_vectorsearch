@@ -71,6 +71,15 @@ typedef struct MktCentroidSearchStats
  * estimated distance (ascending). Returns actual count written.
  *
  * results[] must have space for at least state->nprobe entries.
+ *
+ * centroid_vecs is an optional output buffer (may be NULL). When
+ * non-NULL, the function copies the leaf centroid vector for each
+ * result into centroid_vecs[i * dim .. (i+1) * dim - 1]. The
+ * buffer must hold at least nprobe * dim floats. Half-precision
+ * vectors are converted to float32. Used by the PG scan path to
+ * obtain centroid reference vectors for float/half centroid
+ * formats (RaBitQ uses medoid TIDs instead).
+ *
  * stats is optional (may be NULL). If provided, counters are
  * accumulated (not reset) so the caller can aggregate across
  * multiple calls.
@@ -80,6 +89,7 @@ uint32_t mkt_centroid_beam_search(
 		BlockNumber					  first_centroid_blkno,
 		uint8_t						  nlevels,
 		MktCentroidResult			 *results,
+		float						 *centroid_vecs,
 		MktCentroidSearchStats		 *stats);
 
 #endif /* MKT_CENTROID_SEARCH_H */

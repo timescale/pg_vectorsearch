@@ -14,9 +14,11 @@
 #include <utils/rel.h>
 
 #include "index/centroid_page.h"
+#include "index/posting_page.h"
 #include "mktann_meta.h"
 
 PG_FUNCTION_INFO_V1(mkt_centroid_pages);
+PG_FUNCTION_INFO_V1(mkt_posting_pages);
 
 /* Format name lookup (indexed by MktCentroidFormat) */
 static const char *centroid_format_names[] = {
@@ -165,6 +167,153 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 	}
 
 	pfree(worklist);
+	relation_close(index, AccessShareLock);
+
+	PG_RETURN_NULL();
+}
+
+/*
+ * mkt_posting_pages(regclass)
+ *
+ * Returns one row per posting page: cluster_id, page_seq (0-based
+ * position in chain), blkno, entry_count. Walks all posting chains
+ * found via leaf centroid entries.
+ */
+Datum
+mkt_posting_pages(PG_FUNCTION_ARGS)
+{
+	Oid			   indexoid = PG_GETARG_OID(0);
+	ReturnSetInfo *rsinfo	= (ReturnSetInfo *)fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	Relation index = relation_open(indexoid, AccessShareLock);
+
+	if (index->rd_rel->relkind != RELKIND_INDEX)
+	{
+		relation_close(index, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not an index",
+						RelationGetRelationName(index))));
+	}
+
+	/* Read metapage */
+	Buffer meta_buf = ReadBuffer(index, 0);
+	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
+	Page meta_page = BufferGetPage(meta_buf);
+
+	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+			meta_page);
+
+	if (meta->magic != MKT_META_MAGIC)
+	{
+		UnlockReleaseBuffer(meta_buf);
+		relation_close(index, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not an mktann index",
+						RelationGetRelationName(index))));
+	}
+
+	BlockNumber first_centroid = meta->first_centroid;
+	UnlockReleaseBuffer(meta_buf);
+
+	if (!BlockNumberIsValid(first_centroid))
+	{
+		relation_close(index, AccessShareLock);
+		PG_RETURN_NULL();
+	}
+
+	/*
+	 * BFS over centroid pages to find leaf entries (posting heads).
+	 * Then walk each posting chain.
+	 */
+	int			 wl_cap	 = 64;
+	int			 wl_len	 = 0;
+	int			 wl_head = 0;
+	BlockNumber *wl		 = palloc(wl_cap * sizeof(BlockNumber));
+
+	wl[wl_len++] = first_centroid;
+
+	uint32_t cluster_id = 0;
+
+	while (wl_head < wl_len)
+	{
+		BlockNumber cblkno = wl[wl_head++];
+
+		Buffer buf = ReadBuffer(index, cblkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		Page page = BufferGetPage(buf);
+
+		const MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
+		uint16_t					 nentries = opaque->entry_count;
+
+		for (uint16_t i = 0; i < nentries; i++)
+		{
+			const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
+			bool is_leaf = (entry->flags & MKT_CENTROID_FLAG_LEAF) != 0;
+
+			if (is_leaf && BlockNumberIsValid(entry->child_blkno))
+			{
+				/* Walk posting chain */
+				BlockNumber pblkno	 = entry->child_blkno;
+				int32		page_seq = 0;
+
+				while (BlockNumberIsValid(pblkno))
+				{
+					Buffer pbuf = ReadBuffer(index, pblkno);
+					LockBuffer(pbuf, BUFFER_LOCK_SHARE);
+					Page ppage = BufferGetPage(pbuf);
+
+					const MktPostingPageOpaque *pop = MKT_POSTING_OPAQUE(
+							ppage);
+
+					Datum values[4];
+					bool  nulls[4] = {0};
+
+					values[0] = Int32GetDatum((int32)cluster_id);
+					values[1] = Int32GetDatum(page_seq);
+					values[2] = Int32GetDatum((int32)pblkno);
+					values[3] = Int32GetDatum((int32)pop->entry_count);
+
+					tuplestore_putvalues(
+							rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+					pblkno = pop->next_blkno;
+					page_seq++;
+
+					UnlockReleaseBuffer(pbuf);
+				}
+
+				cluster_id++;
+			}
+			else if (!is_leaf && BlockNumberIsValid(entry->child_blkno))
+			{
+				if (wl_len >= wl_cap)
+				{
+					wl_cap *= 2;
+					wl = repalloc(wl, wl_cap * sizeof(BlockNumber));
+				}
+				wl[wl_len++] = entry->child_blkno;
+			}
+		}
+
+		/* Follow centroid page chain */
+		if (BlockNumberIsValid(opaque->next_blkno))
+		{
+			if (wl_len >= wl_cap)
+			{
+				wl_cap *= 2;
+				wl = repalloc(wl, wl_cap * sizeof(BlockNumber));
+			}
+			wl[wl_len++] = opaque->next_blkno;
+		}
+
+		UnlockReleaseBuffer(buf);
+	}
+
+	pfree(wl);
 	relation_close(index, AccessShareLock);
 
 	PG_RETURN_NULL();

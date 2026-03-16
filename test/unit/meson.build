@@ -11,7 +11,9 @@ endif
 
 # Generate test config header
 test_config = configuration_data()
-test_config.set('HAVE_GSL', gsl_dep.found() ? 1 : 0)
+if gsl_dep.found()
+  test_config.set('HAVE_GSL', 1)
+endif
 
 test_config_h = configure_file(
   output: 'test_config.h',
@@ -24,6 +26,9 @@ unit_test_sources = files(
   'test_centroid_page.c',
   'test_centroid_search.c',
   'test_distance.c',
+  'test_posting_page.c',
+  'test_posting_build.c',
+  'test_posting_scan.c',
   'test_fixtures.c',
   'test_halfvec.c',
   'test_hkmeans.c',
@@ -56,7 +61,7 @@ test('unit_tests', test_runner,
   args: ['--tap'],
   protocol: 'tap',
   workdir: meson.project_source_root(),
-  timeout: 60,
+  timeout: 120,
   suite: 'all',
 )
 

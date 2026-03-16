@@ -263,6 +263,9 @@ mkt_core_sources = files(
   'src/index/centroid_build.c',
   'src/index/centroid_page.c',
   'src/index/centroid_search.c',
+  'src/index/posting_build.c',
+  'src/index/posting_page.c',
+  'src/index/posting_scan.c',
 )
 
 # Include directories
@@ -490,6 +493,9 @@ if build_pg_extension
     'src/index/centroid_build.c',
     'src/index/centroid_page.c',
     'src/index/centroid_search.c',
+    'src/index/posting_build.c',
+    'src/index/posting_page.c',
+    'src/index/posting_scan.c',
   )
 
   # SIMD sources for PG build (same as standalone)

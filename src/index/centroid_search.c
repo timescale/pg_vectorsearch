@@ -25,7 +25,9 @@ typedef struct Candidate
 	BlockNumber		child_blkno; /* next level's page */
 	ItemPointerData medoid_tid;
 	Distance		distance;
-	Distance		error; /* symmetric error (0 for exact) */
+	Distance		error;		  /* symmetric error (0 for exact) */
+	BlockNumber		source_blkno; /* page this candidate came from */
+	uint16_t		source_entry; /* entry index on that page */
 } Candidate;
 
 /* ----------------------------------------------------------------
@@ -54,6 +56,7 @@ static uint32_t
 score_page(
 		const MktCentroidSearchState *state,
 		Page						  page,
+		BlockNumber					  page_blkno,
 		Dimension					  dim,
 		Candidate					 *cands,
 		uint32_t					  cand_count,
@@ -124,6 +127,8 @@ score_page(
 			cands[cand_count].distance	  = sp_scratch->distances[j];
 			cands[cand_count].error		  = sp_scratch->distances[j] -
 									  sp_scratch->lower_bounds[j];
+			cands[cand_count].source_blkno = page_blkno;
+			cands[cand_count].source_entry = page_idx;
 			cand_count++;
 		}
 		break;
@@ -157,8 +162,10 @@ score_page(
 
 			cands[cand_count].child_blkno = meta->child_blkno;
 			memset(&cands[cand_count].medoid_tid, 0, sizeof(ItemPointerData));
-			cands[cand_count].distance = dist;
-			cands[cand_count].error	   = 0.0f;
+			cands[cand_count].distance	   = dist;
+			cands[cand_count].error		   = 0.0f;
+			cands[cand_count].source_blkno = page_blkno;
+			cands[cand_count].source_entry = i;
 			cand_count++;
 		}
 		break;
@@ -192,8 +199,10 @@ score_page(
 
 			cands[cand_count].child_blkno = meta->child_blkno;
 			memset(&cands[cand_count].medoid_tid, 0, sizeof(ItemPointerData));
-			cands[cand_count].distance = dist;
-			cands[cand_count].error	   = 0.0f;
+			cands[cand_count].distance	   = dist;
+			cands[cand_count].error		   = 0.0f;
+			cands[cand_count].source_blkno = page_blkno;
+			cands[cand_count].source_entry = i;
 			cand_count++;
 		}
 		break;
@@ -321,11 +330,13 @@ rerank_candidates(
 	/* Rebuild candidate array from reranked results */
 	for (uint32_t i = 0; i < nresults; i++)
 	{
-		uint32_t idx				= scratch->out_indices[i];
-		scratch->tmp[i].child_blkno = cands[idx].child_blkno;
-		scratch->tmp[i].medoid_tid	= cands[idx].medoid_tid;
-		scratch->tmp[i].distance	= scratch->out_distances[i];
-		scratch->tmp[i].error		= 0.0f; /* now exact */
+		uint32_t idx				 = scratch->out_indices[i];
+		scratch->tmp[i].child_blkno	 = cands[idx].child_blkno;
+		scratch->tmp[i].medoid_tid	 = cands[idx].medoid_tid;
+		scratch->tmp[i].distance	 = scratch->out_distances[i];
+		scratch->tmp[i].error		 = 0.0f; /* now exact */
+		scratch->tmp[i].source_blkno = cands[idx].source_blkno;
+		scratch->tmp[i].source_entry = cands[idx].source_entry;
 	}
 	memcpy(cands, scratch->tmp, nresults * sizeof(Candidate));
 
@@ -338,6 +349,7 @@ mkt_centroid_beam_search(
 		BlockNumber					  first_centroid_blkno,
 		uint8_t						  nlevels,
 		MktCentroidResult			 *results,
+		float						 *centroid_vecs,
 		MktCentroidSearchStats		 *stats)
 {
 	if (state == NULL || results == NULL || nlevels == 0 ||
@@ -398,7 +410,14 @@ mkt_centroid_beam_search(
 	{
 		Page page = mkt_storage_read_page(state->storage, blkno);
 		raw_count = score_page(
-				state, page, dim, buf_a, raw_count, cand_cap, &sp_scratch);
+				state,
+				page,
+				blkno,
+				dim,
+				buf_a,
+				raw_count,
+				cand_cap,
+				&sp_scratch);
 		MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
 		BlockNumber			   next_blkno = opaque->next_blkno;
 		mkt_storage_release_page(state->storage, blkno);
@@ -440,6 +459,7 @@ mkt_centroid_beam_search(
 				next_count = score_page(
 						state,
 						page,
+						cb,
 						dim,
 						scratch,
 						next_count,
@@ -472,6 +492,35 @@ mkt_centroid_beam_search(
 		results[i].medoid_tid	= live[i].medoid_tid;
 		results[i].distance		= live[i].distance;
 		results[i].error		= live[i].error;
+	}
+
+	/* Extract centroid vectors for leaf winners (float/half only).
+	 * Re-read source pages and copy the centroid vectors into the
+	 * caller-provided buffer. For half format, convert to float32. */
+	if (centroid_vecs != NULL && result_count > 0)
+	{
+		for (uint32_t i = 0; i < result_count; i++)
+		{
+			float	   *dst	 = centroid_vecs + (size_t)i * dim;
+			BlockNumber sb	 = live[i].source_blkno;
+			uint16_t	se	 = live[i].source_entry;
+			Page		page = mkt_storage_read_page(state->storage, sb);
+
+			MktCentroidFormat fmt = mkt_centroid_page_format(page);
+			if (fmt == MKT_CENTROID_FMT_FLOAT)
+			{
+				const float *src = mkt_centroid_float_data(page, se, dim);
+				memcpy(dst, src, dim * sizeof(float));
+			}
+			else if (fmt == MKT_CENTROID_FMT_HALF)
+			{
+				const half *src = mkt_centroid_half_data(page, se, dim);
+				mkt_half_to_float_array(src, dst, dim);
+			}
+			/* RaBitQ: caller uses medoid_tid instead */
+
+			mkt_storage_release_page(state->storage, sb);
+		}
 	}
 
 	mkt_memctx_switch(old_ctx);

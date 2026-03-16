@@ -709,6 +709,16 @@ CREATE FUNCTION mkt_centroid_pages(regclass)
     AS 'MODULE_PATHNAME', 'mkt_centroid_pages'
     LANGUAGE C STRICT PARALLEL SAFE;
 
+CREATE FUNCTION mkt_posting_pages(regclass)
+    RETURNS TABLE (
+        cluster_id  integer,
+        page_seq    integer,
+        blkno       integer,
+        entry_count integer
+    )
+    AS 'MODULE_PATHNAME', 'mkt_posting_pages'
+    LANGUAGE C STRICT PARALLEL SAFE;
+
 -- =====================================================================
 -- pgvector binary cast support
 -- =====================================================================

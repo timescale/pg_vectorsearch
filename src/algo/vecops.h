@@ -69,6 +69,15 @@ void mkt_vector_mean(
 		const float *vectors, uint32_t nvecs, Dimension dim, float *out);
 
 /*
+ * Normalize vector to unit length: v[i] /= ||v||
+ *
+ * Divides each element by the L2 norm, making ||v|| = 1.
+ * Returns the original norm. Zero-vector guard: if norm < 1e-10f,
+ * the vector is left unchanged and 0 is returned.
+ */
+float mkt_normalize(float *v, Dimension dim);
+
+/*
  * L2 distance squared: sum((a[i] - b[i])^2)
  *
  * Returns ||a - b||^2. Equivalent to mkt_l2_norm_squared of the difference,

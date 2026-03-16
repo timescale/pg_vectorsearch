@@ -312,7 +312,7 @@ TEST(beam_search_two_levels)
 
 	MktCentroidResult results[4];
 	uint32_t		  nresults =
-			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL);
+			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL, NULL);
 
 	ASSERT_TRUE(nresults > 0, "should return at least one result");
 	ASSERT_TRUE(nresults <= 4, "should return at most nprobe results");
@@ -383,7 +383,7 @@ TEST(beam_search_two_levels)
 TEST(beam_search_null_state)
 {
 	MktCentroidResult results[1];
-	uint32_t		  n = mkt_centroid_beam_search(NULL, 0, 1, results, NULL);
+	uint32_t n = mkt_centroid_beam_search(NULL, 0, 1, results, NULL, NULL);
 	ASSERT_EQ(0, n, "null state should return 0");
 }
 
@@ -401,7 +401,7 @@ TEST(beam_search_null_results)
 				   .nprobe	   = 4,
 				   .dim		   = 64,
 	   };
-	uint32_t n = mkt_centroid_beam_search(&state, 0, 1, NULL, NULL);
+	uint32_t n = mkt_centroid_beam_search(&state, 0, 1, NULL, NULL, NULL);
 	ASSERT_EQ(0, n, "null results should return 0");
 }
 
@@ -420,7 +420,7 @@ TEST(beam_search_zero_levels)
 				   .dim		   = 64,
 	   };
 	MktCentroidResult results[1];
-	uint32_t n = mkt_centroid_beam_search(&state, 0, 0, results, NULL);
+	uint32_t n = mkt_centroid_beam_search(&state, 0, 0, results, NULL, NULL);
 	ASSERT_EQ(0, n, "zero levels should return 0");
 }
 
@@ -440,7 +440,7 @@ TEST(beam_search_invalid_blkno)
 	   };
 	MktCentroidResult results[1];
 	uint32_t		  n = mkt_centroid_beam_search(
-			 &state, InvalidBlockNumber, 1, results, NULL);
+			 &state, InvalidBlockNumber, 1, results, NULL, NULL);
 	ASSERT_EQ(0, n, "invalid blkno should return 0");
 }
 
@@ -522,7 +522,7 @@ TEST(beam_search_float_two_levels)
 
 	MktCentroidResult results[4];
 	uint32_t		  nresults =
-			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL);
+			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL, NULL);
 
 	ASSERT_TRUE(nresults > 0, "float: should return results");
 	ASSERT_TRUE(nresults <= 4, "float: at most nprobe results");
@@ -655,7 +655,7 @@ TEST(beam_search_half_two_levels)
 
 	MktCentroidResult results[4];
 	uint32_t		  nresults =
-			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL);
+			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL, NULL);
 
 	ASSERT_TRUE(nresults > 0, "half: should return results");
 	ASSERT_TRUE(nresults <= 4, "half: at most nprobe results");

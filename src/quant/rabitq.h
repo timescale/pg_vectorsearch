@@ -32,6 +32,12 @@
 #define MKT_RABITQ_EPSILON 1.9f
 
 /*
+ * Default seed for the random orthogonal rotation matrix.
+ * Deterministic: same (dim, seed) always produces the same matrix.
+ */
+#define MKT_RABITQ_DEFAULT_SEED 42
+
+/*
  * RaBitQVector - Quantized vector (PostgreSQL varlena-compatible)
  *
  * Stores D bits packed into ceil(D/8) bytes, plus two float factors

@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "algo/hkmeans.h"
+#include "algo/vecops.h"
 #include "core/memory.h"
 
 /* BFS work queue entry */
@@ -148,20 +149,19 @@ mkt_hkmeans_f32(
 		uint32_t	 node_idx = result->nnodes++;
 		HKMeansNode *node	  = &result->nodes[node_idx];
 
-		size_t cent_sz = (size_t)km->nlist * dim * sizeof(float);
-		if (is_leaf_parent)
-			node->centroids = mkt_alloc(cent_sz);
-		else
-			node->centroids = mkt_memctx_alloc(caller_ctx, cent_sz);
-		memcpy(node->centroids, km->centroids, cent_sz);
-		node->nchildren	  = km->nlist;
 		node->level		  = item.level;
 		node->first_child = HKMEANS_NO_CHILD;
 		node->first_leaf  = 0;
 
 		/* Count leaf centroids */
 		if (is_leaf_parent)
+		{
+			size_t cent_sz	= (size_t)km->nlist * dim * sizeof(float);
+			node->centroids = mkt_alloc(cent_sz);
+			memcpy(node->centroids, km->centroids, cent_sz);
+			node->nchildren = km->nlist;
 			result->nleaves += km->nlist;
+		}
 		else
 		/* Enqueue children for non-leaf nodes */
 		{
@@ -176,12 +176,36 @@ mkt_hkmeans_f32(
 			for (uint32_t v = 0; v < item.count; v++)
 				counts[km->assignments[v]]++;
 
-			bool first = true;
+			/*
+			 * Compact centroids to exclude empty clusters.
+			 * The centroid array must be 1:1 with child nodes,
+			 * since the build uses centroids[i] with
+			 * child_blkno[i] from node_first_blkno.
+			 */
+			uint32_t nactive = 0;
+			for (uint32_t c = 0; c < km->nlist; c++)
+			{
+				if (counts[c] > 0)
+					nactive++;
+			}
+
+			size_t cent_sz	= (size_t)nactive * dim * sizeof(float);
+			node->centroids = mkt_memctx_alloc(caller_ctx, cent_sz);
+			node->nchildren = nactive;
+
+			uint32_t compact_idx = 0;
+			bool	 first		 = true;
 			for (uint32_t c = 0; c < km->nlist; c++)
 			{
 				uint32_t sub_n = counts[c];
 				if (sub_n == 0)
 					continue;
+
+				/* Copy centroid for this non-empty cluster */
+				memcpy(node->centroids + (size_t)compact_idx * dim,
+					   km->centroids + (size_t)c * dim,
+					   dim * sizeof(float));
+				compact_idx++;
 
 				uint32_t *sub_indices = mkt_alloc(sub_n * sizeof(uint32_t));
 				uint32_t  idx		  = 0;
@@ -265,4 +289,73 @@ mkt_hkmeans_result_destroy(HKMeansResult *result)
 	mkt_free(result->leaf_centroids);
 	mkt_free(result->nodes);
 	mkt_free(result);
+}
+
+/* ----------------------------------------------------------------
+ * Tree traversal for centroid assignment
+ * ---------------------------------------------------------------- */
+
+static Distance
+hkmeans_dist(
+		const float *a, const float *b, Dimension dim, DistanceMetric metric)
+{
+	switch (metric)
+	{
+	case DISTANCE_INNER_PRODUCT:
+	case DISTANCE_COSINE:
+		return -mkt_dot_product(a, b, dim);
+	case DISTANCE_L2:
+	default:
+		return mkt_l2_distance_squared(a, b, dim);
+	}
+}
+
+/*
+ * Assign a vector to a leaf centroid via greedy tree descent.
+ *
+ * At each level, picks the nearest child centroid. Cost is
+ * O(fan_out * nlevels) instead of O(nleaves) for brute force.
+ *
+ * For cosine metric, the input vector must be pre-normalized.
+ */
+uint32_t
+mkt_hkmeans_assign(
+		const HKMeansResult *tree,
+		const float			*vec,
+		DistanceMetric		 metric,
+		Distance			*out_dist)
+{
+	Dimension dim  = tree->dim;
+	uint32_t  node = 0; /* start at root */
+
+	for (;;)
+	{
+		const HKMeansNode *n = &tree->nodes[node];
+
+		/* Find nearest child centroid */
+		uint32_t best	= 0;
+		Distance best_d = hkmeans_dist(vec, n->centroids, dim, metric);
+
+		for (uint32_t c = 1; c < n->nchildren; c++)
+		{
+			Distance d = hkmeans_dist(
+					vec, n->centroids + (size_t)c * dim, dim, metric);
+			if (d < best_d)
+			{
+				best_d = d;
+				best   = c;
+			}
+		}
+
+		/* Leaf-parent: return leaf index */
+		if (n->first_child == HKMEANS_NO_CHILD)
+		{
+			if (out_dist)
+				*out_dist = best_d;
+			return n->first_leaf + best;
+		}
+
+		/* Descend to child */
+		node = n->first_child + best;
+	}
 }

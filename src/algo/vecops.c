@@ -216,6 +216,16 @@ mkt_vector_scale(const float *v, float scalar, float *out, Dimension dim)
 	g_vector_scale_fn(v, scalar, out, dim);
 }
 
+float
+mkt_normalize(float *v, Dimension dim)
+{
+	float norm = mkt_l2_norm(v, dim);
+	if (norm < 1e-10f)
+		return 0.0f;
+	mkt_vector_scale(v, 1.0f / norm, v, dim);
+	return norm;
+}
+
 void
 mkt_vector_mean(
 		const float *vectors, uint32_t nvecs, Dimension dim, float *out)

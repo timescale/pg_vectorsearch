@@ -6,9 +6,9 @@ CREATE TABLE embeddings (id serial, v vector(3));
 -- Insert deterministic data (grid of vectors)
 INSERT INTO embeddings (v)
     SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vector
-    FROM generate_series(0, 9) x,
-         generate_series(0, 9) y,
-         generate_series(0, 9) z;
+    FROM generate_series(0, 4) x,
+         generate_series(0, 4) y,
+         generate_series(0, 4) z;
 
 -- Verify data inserted
 SELECT count(*) FROM embeddings;
@@ -24,14 +24,34 @@ SELECT relpages > 0 AS has_pages FROM pg_class
 -- Verify index scan is used for ORDER BY <-> LIMIT
 SET enable_seqscan = off;
 EXPLAIN (COSTS OFF)
-SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
-    FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5;
+SELECT id, v <-> '[0.3,0.3,0.3]' AS dist
+    FROM embeddings ORDER BY v <-> '[0.3,0.3,0.3]' LIMIT 5;
 
 -- ORDER BY distance with LIMIT — should return results via index scan
 SELECT count(*) FROM (
-    SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
-    FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5
+    SELECT id, v <-> '[0.3,0.3,0.3]' AS dist
+    FROM embeddings ORDER BY v <-> '[0.3,0.3,0.3]' LIMIT 5
 ) t;
+
+-- Verify results are ordered by distance (monotonically increasing)
+SELECT bool_and(dist <= next_dist) AS is_ordered FROM (
+    SELECT dist, lead(dist) OVER () AS next_dist FROM (
+        SELECT v <-> '[0.3,0.3,0.3]' AS dist
+        FROM embeddings ORDER BY v <-> '[0.3,0.3,0.3]' LIMIT 10
+    ) t
+) t2 WHERE next_dist IS NOT NULL;
+
+-- Recall check: top-1 nearest neighbor should be the exact nearest
+-- The exact NN of [0.3,0.3,0.3] is [0.3,0.3,0.3] (distance = 0)
+SELECT v <-> '[0.3,0.3,0.3]' < 0.01 AS top1_correct FROM (
+    SELECT v FROM embeddings ORDER BY v <-> '[0.3,0.3,0.3]' LIMIT 1
+) t;
+
+-- Verify more results can be returned
+SELECT count(*) > 0 AS has_results FROM (
+    SELECT id FROM embeddings ORDER BY v <-> '[0.1,0.1,0.1]' LIMIT 20
+) t;
+
 RESET enable_seqscan;
 
 -- Create index with distance_mode relopt
@@ -80,7 +100,14 @@ INSERT INTO embeddings (v) VALUES ('[1,1,1]');
 -- VACUUM on the index (should not crash)
 VACUUM embeddings;
 
--- Multi-level tree with fan_out (nlist=31, fan_out=4 → 3 levels)
+-- Drop uncompressed L2 indexes to force multi-level scan tests
+-- to use the compressed index (which supports posting list scan)
+DROP INDEX idx_l2c;
+DROP INDEX idx_l2_float;
+DROP INDEX idx_sym;
+DROP INDEX idx_asym;
+
+-- Multi-level tree with fan_out
 CREATE INDEX idx_ml ON embeddings USING mktann (v)
     WITH (fan_out = 4, centroid_compression = true);
 SELECT relpages > 0 AS has_pages FROM pg_class
@@ -89,9 +116,18 @@ SELECT relpages > 0 AS has_pages FROM pg_class
 -- Multi-level tree scan should return results
 SET enable_seqscan = off;
 SELECT count(*) FROM (
-    SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
-    FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5
+    SELECT id, v <-> '[0.3,0.3,0.3]' AS dist
+    FROM embeddings ORDER BY v <-> '[0.3,0.3,0.3]' LIMIT 5
 ) t;
+
+-- Multi-level tree: results should be ordered
+SELECT bool_and(dist <= next_dist) AS is_ordered FROM (
+    SELECT dist, lead(dist) OVER () AS next_dist FROM (
+        SELECT v <-> '[0.3,0.3,0.3]' AS dist
+        FROM embeddings ORDER BY v <-> '[0.3,0.3,0.3]' LIMIT 10
+    ) t
+) t2 WHERE next_dist IS NOT NULL;
+
 RESET enable_seqscan;
 
 -- Multi-level tree with uncompressed float centroids
@@ -112,3 +148,51 @@ CREATE INDEX idx_bad_fo ON embeddings USING mktann (v)
 
 -- Cleanup
 DROP TABLE embeddings;
+
+-- ================================================================
+-- Medium-scale posting list test (1000 vectors, dim=64)
+-- Exercises multi-page posting lists and centroid clustering
+-- ================================================================
+
+CREATE TABLE embeddings_med (id serial PRIMARY KEY, v vector(64));
+
+-- Insert 1000 deterministic vectors using sin-based formula
+INSERT INTO embeddings_med (v)
+SELECT ('[' || (
+    SELECT string_agg(
+        round(sin(i * 0.1 + d * 0.7)::numeric, 4)::text,
+        ',' ORDER BY d)
+    FROM generate_series(1, 64) d
+) || ']')::vector(64)
+FROM generate_series(1, 1000) i;
+
+SELECT count(*) FROM embeddings_med;
+
+-- Build index with compressed centroids
+CREATE INDEX idx_med ON embeddings_med USING mktann (v)
+    WITH (centroid_compression = true);
+
+-- Verify index was built
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_med';
+
+-- Verify scan returns correct count
+SET enable_seqscan = off;
+
+SELECT count(*) FROM (
+    SELECT id, v <-> (SELECT v FROM embeddings_med WHERE id = 1) AS dist
+    FROM embeddings_med
+    ORDER BY v <-> (SELECT v FROM embeddings_med WHERE id = 1)
+    LIMIT 10
+) t;
+
+-- Recall: query vector itself (id=1, distance=0) should appear in top-5
+SELECT bool_or(id = 1) AS found_self FROM (
+    SELECT id FROM embeddings_med
+    ORDER BY v <-> (SELECT v FROM embeddings_med WHERE id = 1)
+    LIMIT 5
+) t;
+
+RESET enable_seqscan;
+
+DROP TABLE embeddings_med;

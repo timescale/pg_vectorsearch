@@ -7,6 +7,7 @@
 #include <access/reloptions.h>
 #include <catalog/namespace.h>
 #include <fmgr.h>
+#include <optimizer/paths.h>
 #include <utils/guc.h>
 
 #include "algo/distance.h"
@@ -15,7 +16,12 @@
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-int mkt_distance_mode = MKT_DISTANCE_MODE_DEFAULT;
+int	  mkt_distance_mode = MKT_DISTANCE_MODE_DEFAULT;
+int	  mkt_nprobe		= 10;
+int64 mkt_query_limit	= -1;
+
+/* Hook chain */
+static set_rel_pathlist_hook_type prev_pathlist_hook = NULL;
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
@@ -33,6 +39,26 @@ static relopt_enum_elt_def distance_mode_relopt_members[] = {
 		{NULL, 0},
 };
 
+/* ----------------------------------------------------------------
+ * Planner hook: capture LIMIT for scan optimization
+ *
+ * root->limit_tuples is set by preprocess_limit() before
+ * set_rel_pathlist runs. We store it so the scan can derive
+ * a dynamic top-K budget from the query LIMIT.
+ * ---------------------------------------------------------------- */
+static void
+mkt_set_rel_pathlist(
+		PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTblEntry *rte)
+{
+	if (prev_pathlist_hook)
+		prev_pathlist_hook(root, rel, rti, rte);
+
+	if (root->limit_tuples > 0)
+		mkt_query_limit = (int64)root->limit_tuples;
+	else
+		mkt_query_limit = -1;
+}
+
 void _PG_init(void);
 
 void
@@ -45,6 +71,20 @@ _PG_init(void)
 			&mkt_distance_mode,
 			MKT_DISTANCE_MODE_DEFAULT,
 			mkt_distance_mode_options,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.nprobe",
+			"Number of clusters to probe during index scan.",
+			NULL,
+			&mkt_nprobe,
+			10,
+			1,
+			10000,
 			PGC_USERSET,
 			0,
 			NULL,
@@ -65,10 +105,18 @@ _PG_init(void)
 	add_int_reloption(
 			mktann_relopt_kind,
 			"fan_out",
-			"Children per tree node (2-255)",
+			"Children per tree node (2-65535)",
 			MKTANN_DEFAULT_FAN_OUT,
 			MKTANN_MIN_FAN_OUT,
 			MKTANN_MAX_FAN_OUT,
+			NoLock);
+	add_int_reloption(
+			mktann_relopt_kind,
+			"nlist",
+			"Number of clusters (0 = auto: sqrt(ntuples))",
+			MKTANN_DEFAULT_NLIST,
+			MKTANN_MIN_NLIST,
+			MKTANN_MAX_NLIST,
 			NoLock);
 	add_bool_reloption(
 			mktann_relopt_kind,
@@ -79,6 +127,9 @@ _PG_init(void)
 
 	mkt_distance_init();
 	mkt_rabitq_init_simd();
+
+	prev_pathlist_hook	  = set_rel_pathlist_hook;
+	set_rel_pathlist_hook = mkt_set_rel_pathlist;
 }
 
 /* ----------------------------------------------------------------

@@ -25,6 +25,7 @@ else
       'rabitq',
       'mktann',
       'inspect',
+      'pagelayout',
     ]
 
     test('regress',
@@ -38,7 +39,7 @@ else
         '--load-extension=meerkat',
       ] + test_names,
       depends: [meerkat_ext_so],
-      timeout: 300,
+      timeout: 120,
       is_parallel: false,
       protocol: 'tap',
     )

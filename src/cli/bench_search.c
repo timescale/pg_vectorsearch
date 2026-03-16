@@ -37,6 +37,8 @@
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/centroid_search.h"
+#include "index/posting_build.h"
+#include "index/posting_scan.h"
 #include "mkt_halfvec.h"
 #include "mkt_types.h"
 #include "quant/rabitq.h"
@@ -362,9 +364,15 @@ generate_random_vector(float *data, Dimension dim)
  * ---------------------------------------------------------------- */
 
 /* Vectors per leaf centroid for k-means training */
-#define VECS_PER_LEAF	  20
-#define POSTING_HEAD_BASE 1000000
-#define DEFAULT_TOPK	  10
+#define VECS_PER_LEAF 20
+#define DEFAULT_TOPK  10
+
+/* Encode TID as uint64 for top-K storage */
+static inline uint64_t
+encode_tid(BlockNumber block, OffsetNumber offset)
+{
+	return ((uint64_t)block << 16) | (uint64_t)offset;
+}
 
 static uint32_t
 power_u32(uint32_t base, uint32_t exp)
@@ -510,12 +518,12 @@ find_medoid(
 }
 
 /* ----------------------------------------------------------------
- * build_tree - Build centroid tree via hierarchical k-means
+ * build_tree - Build centroid tree + posting pages
  *
  * Generates nvecs random vectors, clusters them hierarchically
- * using mkt_hkmeans_f32(), and builds centroid pages in the
- * specified format. All RaBitQ entries are encoded relative to
- * the global centroid.
+ * using mkt_hkmeans_f32(), builds centroid pages in the specified
+ * format, then encodes each leaf cluster's vectors with IVF
+ * residual encoding and writes them into posting pages.
  *
  * Returns the allocated page buffer, or NULL on failure.
  * ---------------------------------------------------------------- */
@@ -525,6 +533,7 @@ build_tree(
 		const RaBitQParams *params,
 		uint8_t				fmt,
 		uint32_t		   *total_pages_out,
+		uint32_t		   *centroid_pages_out,
 		uint32_t		   *total_centroids_out,
 		float			   *global_centroid_out,
 		float			  **query_seeds_out,
@@ -532,8 +541,9 @@ build_tree(
 		uint32_t		   *nseeds_out,
 		float			  **medoid_vecs_out,
 		float			  **vectors_out,
-		uint32_t		  **leaf_idx_out,
-		uint32_t		  **leaf_offsets_out,
+		float			  **leaf_centroids_out,
+		BlockNumber		  **leaf_posting_heads_out,
+		uint32_t		   *nleaves_out,
 		uint32_t		   *nvecs_out,
 		bool				verbose)
 {
@@ -583,13 +593,12 @@ build_tree(
 			   tree->nleaves);
 
 	/*
-	 * Pre-compute block numbers for each BFS node.
-	 * Block numbers are assigned sequentially.
+	 * Pre-compute centroid page block numbers for each BFS node.
 	 */
 	BlockNumber *node_first_blkno = mkt_alloc(
 			tree->nnodes * sizeof(BlockNumber));
-	BlockNumber next_blkno	= 0;
-	uint32_t	total_pages = 0;
+	BlockNumber next_blkno		= 0;
+	uint32_t	centroid_npages = 0;
 
 	for (uint32_t i = 0; i < tree->nnodes; i++)
 	{
@@ -599,49 +608,28 @@ build_tree(
 			pages_needed = 1;
 		node_first_blkno[i] = next_blkno;
 		next_blkno += pages_needed;
-		total_pages += pages_needed;
+		centroid_npages += pages_needed;
 	}
 
 	uint32_t total_centroids = 0;
 	for (uint32_t i = 0; i < tree->nnodes; i++)
 		total_centroids += tree->nodes[i].nchildren;
 
-	/* Allocate page buffer */
-	char *pages = mkt_alloc((size_t)total_pages * BLCKSZ);
-	memset(pages, 0, (size_t)total_pages * BLCKSZ);
-
-	/* Build-time storage for mkt_centroid_write_pages */
-	TestStorage build_storage = {
-			.base.ops	= &test_storage_ops,
-			.pages		= pages,
-			.next_blkno = 0,
-	};
-
-	/* Allocate medoid vector storage for reranking */
-	float *medoid_vecs = mkt_alloc(
-			(size_t)total_pages * max_entries * dim * sizeof(float));
-	memset(medoid_vecs,
-		   0,
-		   (size_t)total_pages * max_entries * dim * sizeof(float));
-
 	/*
 	 * Leaf arrays: query seeds and leaf index mapping.
+	 * Build leaf_offsets/leaf_idx before page allocation so we
+	 * can pre-compute posting page counts.
 	 */
-	uint32_t leaf_centroids = tree->nleaves;
+	uint32_t nleaves = tree->nleaves;
 
-	float *seeds = mkt_alloc((size_t)leaf_centroids * dim * sizeof(float));
-	BlockNumber *seed_phs = mkt_alloc(leaf_centroids * sizeof(BlockNumber));
+	float		*seeds	  = mkt_alloc((size_t)nleaves * dim * sizeof(float));
+	BlockNumber *seed_phs = mkt_alloc(nleaves * sizeof(BlockNumber));
 	uint32_t	 nsaved	  = 0;
 
-	uint32_t *leaf_offsets = mkt_alloc(
-			(leaf_centroids + 1) * sizeof(uint32_t));
-	uint32_t *leaf_idx = mkt_alloc(nvecs * sizeof(uint32_t));
-	memset(leaf_offsets, 0, (leaf_centroids + 1) * sizeof(uint32_t));
+	uint32_t *leaf_offsets = mkt_alloc((nleaves + 1) * sizeof(uint32_t));
+	uint32_t *leaf_idx	   = mkt_alloc(nvecs * sizeof(uint32_t));
+	memset(leaf_offsets, 0, (nleaves + 1) * sizeof(uint32_t));
 
-	/*
-	 * Build leaf_offsets/leaf_idx by brute-force nearest leaf
-	 * centroid assignment.
-	 */
 	const float *leaf_cents = tree->leaf_centroids;
 
 	for (uint32_t v = 0; v < nvecs; v++)
@@ -649,7 +637,7 @@ build_tree(
 		const float *vec	= vectors + (size_t)v * dim;
 		float		 best_d = FLT_MAX;
 		uint32_t	 best_c = 0;
-		for (uint32_t c = 0; c < leaf_centroids; c++)
+		for (uint32_t c = 0; c < nleaves; c++)
 		{
 			float d = mkt_l2_distance_squared(
 					vec, leaf_cents + (size_t)c * dim, dim);
@@ -662,18 +650,18 @@ build_tree(
 		leaf_offsets[best_c + 1]++;
 	}
 
-	for (uint32_t i = 1; i <= leaf_centroids; i++)
+	for (uint32_t i = 1; i <= nleaves; i++)
 		leaf_offsets[i] += leaf_offsets[i - 1];
 
-	uint32_t *pos = mkt_alloc(leaf_centroids * sizeof(uint32_t));
-	memcpy(pos, leaf_offsets, leaf_centroids * sizeof(uint32_t));
+	uint32_t *pos = mkt_alloc(nleaves * sizeof(uint32_t));
+	memcpy(pos, leaf_offsets, nleaves * sizeof(uint32_t));
 
 	for (uint32_t v = 0; v < nvecs; v++)
 	{
 		const float *vec	= vectors + (size_t)v * dim;
 		float		 best_d = FLT_MAX;
 		uint32_t	 best_c = 0;
-		for (uint32_t c = 0; c < leaf_centroids; c++)
+		for (uint32_t c = 0; c < nleaves; c++)
 		{
 			float d = mkt_l2_distance_squared(
 					vec, leaf_cents + (size_t)c * dim, dim);
@@ -689,13 +677,59 @@ build_tree(
 	mkt_free(pos);
 
 	/*
+	 * Pre-compute posting page block numbers per leaf cluster.
+	 * Posting pages are allocated sequentially after centroid pages.
+	 */
+	uint32_t	 posting_max		= mkt_posting_max_entries(dim);
+	BlockNumber *leaf_posting_heads = mkt_alloc(nleaves * sizeof(BlockNumber));
+	uint32_t	 posting_npages		= 0;
+
+	for (uint32_t c = 0; c < nleaves; c++)
+	{
+		uint32_t count = leaf_offsets[c + 1] - leaf_offsets[c];
+		if (count == 0)
+		{
+			leaf_posting_heads[c] = InvalidBlockNumber;
+			continue;
+		}
+		uint32_t pages		  = (count + posting_max - 1) / posting_max;
+		leaf_posting_heads[c] = centroid_npages + posting_npages;
+		posting_npages += pages;
+	}
+
+	uint32_t total_pages = centroid_npages + posting_npages;
+
+	/* Save a copy of leaf centroids before tree is destroyed */
+	float *saved_leaf_cents = mkt_alloc((size_t)nleaves * dim * sizeof(float));
+	memcpy(saved_leaf_cents,
+		   tree->leaf_centroids,
+		   (size_t)nleaves * dim * sizeof(float));
+
+	/*
+	 * Allocate combined page buffer (centroid + posting pages).
+	 */
+	char *pages = mkt_alloc((size_t)total_pages * BLCKSZ);
+	memset(pages, 0, (size_t)total_pages * BLCKSZ);
+
+	TestStorage build_storage = {
+			.base.ops	= &test_storage_ops,
+			.pages		= pages,
+			.next_blkno = 0,
+	};
+
+	/* Allocate medoid vector storage for centroid reranking */
+	float *medoid_vecs = mkt_alloc(
+			(size_t)centroid_npages * max_entries * dim * sizeof(float));
+	memset(medoid_vecs,
+		   0,
+		   (size_t)centroid_npages * max_entries * dim * sizeof(float));
+
+	/*
 	 * Write centroid pages for each BFS node.
 	 *
 	 * Two passes per node: (1) find medoids and collect metadata,
 	 * (2) create encoder pointing at medoid buffer, call write_pages.
 	 */
-
-	/* Pre-allocate medoid buffer (reused per node) */
 	float *medoid_buf = mkt_alloc((size_t)fan_out * dim * sizeof(float));
 
 	bool ok = true;
@@ -709,9 +743,6 @@ build_tree(
 		uint16_t entry_flags	   = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
 		uint16_t entry_child_count = is_leaf ? 0 : (uint16_t)fan_out;
 
-		/* Leaf nodes need per-entry child block numbers since
-		 * they use POSTING_HEAD_BASE offsets. Internal nodes
-		 * pass the precomputed node→block map directly. */
 		BlockNumber		*leaf_children = NULL;
 		ItemPointerData *node_tids	   = NULL;
 
@@ -720,7 +751,6 @@ build_tree(
 		if (fmt == MKT_CENTROID_FMT_RABITQ)
 			node_tids = mkt_alloc(k * sizeof(ItemPointerData));
 
-		/* Pass 1: find medoids, compute metadata */
 		for (uint32_t c = 0; c < k; c++)
 		{
 			const float *centroid = node->centroids + (size_t)c * dim;
@@ -730,9 +760,9 @@ build_tree(
 
 			if (is_leaf)
 			{
-				leaf_children[c] = POSTING_HEAD_BASE + node->first_leaf + c;
+				leaf_children[c] = leaf_posting_heads[node->first_leaf + c];
 
-				if (nsaved < leaf_centroids)
+				if (nsaved < nleaves)
 				{
 					memcpy(seeds + (size_t)nsaved * dim,
 						   medoid,
@@ -742,7 +772,6 @@ build_tree(
 				}
 			}
 
-			/* Compute TID for reranking lookup */
 			BlockNumber entry_blkno = node_first_blkno[i] + c / max_entries;
 			uint16_t	entry_in_pg = (uint16_t)(c % max_entries);
 
@@ -752,14 +781,12 @@ build_tree(
 						entry_blkno,
 						(OffsetNumber)(entry_in_pg + 1));
 
-			/* Save medoid for reranking */
 			uint32_t midx = entry_blkno * max_entries + entry_in_pg;
 			memcpy(medoid_vecs + (size_t)midx * dim,
 				   medoid,
 				   dim * sizeof(float));
 		}
 
-		/* Pass 2: create encoder, write pages */
 		CentroidEncoderState enc_state;
 		CentroidEncoder		*encoder = centroid_encoder_init(
 				&enc_state, fmt, medoid_buf, dim, params, global_centroid_out);
@@ -785,7 +812,6 @@ build_tree(
 	}
 
 	mkt_free(medoid_buf);
-
 	mkt_free(node_first_blkno);
 	mkt_hkmeans_result_destroy(tree);
 
@@ -793,6 +819,8 @@ build_tree(
 	{
 		mkt_free(leaf_idx);
 		mkt_free(leaf_offsets);
+		mkt_free(leaf_posting_heads);
+		mkt_free(saved_leaf_cents);
 		mkt_free(medoid_vecs);
 		mkt_free(seed_phs);
 		mkt_free(seeds);
@@ -801,15 +829,62 @@ build_tree(
 		return NULL;
 	}
 
+	/*
+	 * Encode and write posting pages. Per leaf cluster: stream
+	 * vectors through MktPostingBuilder which encodes with IVF
+	 * residual and writes pages with O(1) memory per cluster.
+	 */
+	for (uint32_t c = 0; c < nleaves; c++)
+	{
+		uint32_t start = leaf_offsets[c];
+		uint32_t count = leaf_offsets[c + 1] - start;
+		if (count == 0)
+			continue;
+
+		MktPostingBuilder pb;
+		build_storage.next_blkno = leaf_posting_heads[c];
+		mkt_posting_builder_init(
+				&pb,
+				&build_storage.base,
+				params,
+				dim,
+				c,
+				saved_leaf_cents + (size_t)c * dim);
+
+		for (uint32_t i = 0; i < count; i++)
+		{
+			uint32_t  vi   = leaf_idx[start + i];
+			VectorRef vref = {
+					.data = vectors + (size_t)vi * dim,
+					.dim  = dim,
+			};
+			mkt_posting_builder_add(&pb, vref, (BlockNumber)vi, 1);
+		}
+
+		mkt_posting_builder_finish(&pb);
+		mkt_posting_builder_cleanup(&pb);
+	}
+
+	mkt_free(leaf_idx);
+	mkt_free(leaf_offsets);
+
+	if (verbose)
+		printf("  Pages: %u centroid + %u posting = %u total\n",
+			   centroid_npages,
+			   posting_npages,
+			   total_pages);
+
 	*total_pages_out		= total_pages;
+	*centroid_pages_out		= centroid_npages;
 	*total_centroids_out	= total_centroids;
 	*query_seeds_out		= seeds;
 	*seed_posting_heads_out = seed_phs;
 	*nseeds_out				= nsaved;
 	*medoid_vecs_out		= medoid_vecs;
 	*vectors_out			= vectors;
-	*leaf_idx_out			= leaf_idx;
-	*leaf_offsets_out		= leaf_offsets;
+	*leaf_centroids_out		= saved_leaf_cents;
+	*leaf_posting_heads_out = leaf_posting_heads;
+	*nleaves_out			= nleaves;
 	*nvecs_out				= nvecs;
 	return pages;
 }
@@ -876,12 +951,15 @@ static const BenchVariant variants[] = {
 
 typedef struct TreeState
 {
-	char	   *pages;
-	float	   *medoid_vecs;
-	TestStorage storage;
-	uint32_t	total_pages;
-	uint32_t	total_centroids;
-	uint32_t	max_entries;
+	char		*pages;
+	float		*medoid_vecs;
+	BlockNumber *leaf_posting_heads; /* posting head per leaf */
+	uint32_t	 nleaves;
+	TestStorage	 storage;
+	uint32_t	 total_pages;
+	uint32_t	 centroid_pages;
+	uint32_t	 total_centroids;
+	uint32_t	 max_entries;
 } TreeState;
 
 static int
@@ -1017,22 +1095,22 @@ cmd_bench_search(CmdContext *ctx)
 	BlockNumber *seed_posting_heads = NULL;
 	uint32_t	 nseeds				= 0;
 	float		*all_vectors		= NULL;
-	uint32_t	*leaf_idx			= NULL;
-	uint32_t	*leaf_offsets		= NULL;
+	float		*leaf_cents			= NULL;
 	uint32_t	 nvecs				= 0;
 	TreeState	 trees[NUM_FORMATS];
 	bool		 build_ok = true;
 
 	for (int f = 0; f < NUM_FORMATS; f++)
 	{
-		srand(42); /* same seed → identical clustering */
-		float		*seeds	  = NULL;
-		BlockNumber *seed_phs = NULL;
-		uint32_t	 ns		  = 0;
-		float		*vecs_tmp = NULL;
-		uint32_t	*lidx_tmp = NULL;
-		uint32_t	*loff_tmp = NULL;
-		uint32_t	 nv_tmp	  = 0;
+		srand(42); /* same seed -> identical clustering */
+		float		*seeds		= NULL;
+		BlockNumber *seed_phs	= NULL;
+		uint32_t	 ns			= 0;
+		float		*vecs_tmp	= NULL;
+		float		*lcents_tmp = NULL;
+		BlockNumber *lph_tmp	= NULL;
+		uint32_t	 nl_tmp		= 0;
+		uint32_t	 nv_tmp		= 0;
 
 		trees[f].max_entries =
 				mkt_centroid_max_entries_fmt(config.dim, fmts[f]);
@@ -1042,6 +1120,7 @@ cmd_bench_search(CmdContext *ctx)
 				params,
 				fmts[f],
 				&trees[f].total_pages,
+				&trees[f].centroid_pages,
 				&trees[f].total_centroids,
 				centroid,
 				&seeds,
@@ -1049,8 +1128,9 @@ cmd_bench_search(CmdContext *ctx)
 				&ns,
 				&trees[f].medoid_vecs,
 				&vecs_tmp,
-				&lidx_tmp,
-				&loff_tmp,
+				&lcents_tmp,
+				&lph_tmp,
+				&nl_tmp,
 				&nv_tmp,
 				f == 0); /* verbose only for first */
 
@@ -1060,10 +1140,13 @@ cmd_bench_search(CmdContext *ctx)
 			mkt_free(seed_phs);
 			mkt_free(seeds);
 			mkt_free(vecs_tmp);
-			mkt_free(lidx_tmp);
-			mkt_free(loff_tmp);
+			mkt_free(lcents_tmp);
+			mkt_free(lph_tmp);
 			break;
 		}
+
+		trees[f].leaf_posting_heads = lph_tmp;
+		trees[f].nleaves			= nl_tmp;
 
 		/*
 		 * Save seeds and leaf data from first build
@@ -1075,8 +1158,7 @@ cmd_bench_search(CmdContext *ctx)
 			seed_posting_heads = seed_phs;
 			nseeds			   = ns;
 			all_vectors		   = vecs_tmp;
-			leaf_idx		   = lidx_tmp;
-			leaf_offsets	   = loff_tmp;
+			leaf_cents		   = lcents_tmp;
 			nvecs			   = nv_tmp;
 		}
 		else
@@ -1084,8 +1166,7 @@ cmd_bench_search(CmdContext *ctx)
 			mkt_free(seed_phs);
 			mkt_free(seeds);
 			mkt_free(vecs_tmp);
-			mkt_free(lidx_tmp);
-			mkt_free(loff_tmp);
+			mkt_free(lcents_tmp);
 		}
 
 		trees[f].storage = (TestStorage){
@@ -1101,11 +1182,11 @@ cmd_bench_search(CmdContext *ctx)
 	{
 		for (int f = 0; f < NUM_FORMATS; f++)
 		{
+			mkt_free(trees[f].leaf_posting_heads);
 			mkt_free(trees[f].medoid_vecs);
 			mkt_free(trees[f].pages);
 		}
-		mkt_free(leaf_offsets);
-		mkt_free(leaf_idx);
+		mkt_free(leaf_cents);
 		mkt_free(all_vectors);
 		mkt_free(seed_posting_heads);
 		mkt_free(query_seeds);
@@ -1240,14 +1321,24 @@ cmd_bench_search(CmdContext *ctx)
 			/* Warmup */
 			for (int w = 0; w < WARMUP_RUNS; w++)
 				mkt_centroid_beam_search(
-						&state, 0, (uint8_t)config.nlevels, results, NULL);
+						&state,
+						0,
+						(uint8_t)config.nlevels,
+						results,
+						NULL,
+						NULL);
 
 			/* Timed runs */
 			for (uint32_t r = 0; r < config.runs; r++)
 			{
 				uint64_t start = get_time_ns();
 				mkt_centroid_beam_search(
-						&state, 0, (uint8_t)config.nlevels, results, NULL);
+						&state,
+						0,
+						(uint8_t)config.nlevels,
+						results,
+						NULL,
+						NULL);
 				uint64_t end = get_time_ns();
 				bench_stats_add(&var_stats[v], (double)(end - start) / 1000.0);
 			}
@@ -1258,43 +1349,100 @@ cmd_bench_search(CmdContext *ctx)
 					0,
 					(uint8_t)config.nlevels,
 					results,
+					NULL,
 					&var_stats_search[v]);
 
 			/*
-			 * End-to-end recall: scan vectors in selected
-			 * clusters, find top-K, compare to ground truth.
+			 * End-to-end recall: posting scan with two-stage
+			 * RaBitQ filtering + rerank, compare to ground truth.
 			 */
-			MktTopK scan;
-			mkt_topk_init(&scan, topk);
+			MktTopK tk;
+			mkt_topk_init(&tk, topk);
+			Distance topk_thresh = INFINITY;
+
+			MktPostingScan pscan;
+			mkt_posting_scan_init(
+					&pscan, &ts->storage.base, params, config.dim);
+			mkt_posting_scan_set_threshold(&pscan, &topk_thresh);
 
 			for (uint32_t j = 0; j < n_results; j++)
 			{
-				uint32_t li = results[j].posting_head - POSTING_HEAD_BASE;
-				for (uint32_t i = leaf_offsets[li]; i < leaf_offsets[li + 1];
-					 i++)
+				BlockNumber ph = results[j].posting_head;
+
+				/* Find leaf index for this posting head */
+				uint32_t li = 0;
+				for (uint32_t c = 0; c < ts->nleaves; c++)
 				{
-					uint32_t vi = leaf_idx[i];
-					float	 d2 = mkt_l2_distance_squared(
-							   qvec,
-							   all_vectors + (size_t)vi * config.dim,
-							   config.dim);
-					mkt_topk_insert(&scan, d2, 0.0f, vi);
+					if (ts->leaf_posting_heads[c] == ph)
+					{
+						li = c;
+						break;
+					}
 				}
+
+				VectorRef cref = {
+						.data = leaf_cents + (size_t)li * config.dim,
+						.dim  = config.dim,
+				};
+				mkt_posting_scan_begin_cluster(&pscan, query_ref, cref, ph);
+
+				MktPostingScanResult pr;
+				while (mkt_posting_scan_next(&pscan, &pr))
+				{
+					uint64_t id = encode_tid(
+							ItemPointerGetBlockNumber(&pr.tid),
+							ItemPointerGetOffsetNumber(&pr.tid));
+					mkt_topk_insert(&tk, pr.distance, pr.error, id);
+					topk_thresh = mkt_topk_threshold(&tk);
+				}
+				mkt_posting_scan_end_cluster(&pscan);
+			}
+			mkt_posting_scan_cleanup(&pscan);
+
+			/* Extract candidates for reranking */
+			uint32_t	  cand_max = tk.cand_count;
+			MktTopKEntry *cands	   = mkt_alloc(
+					   (cand_max > 0 ? cand_max : 1) * sizeof(MktTopKEntry));
+			uint32_t cand_count;
+			mkt_topk_extract_sorted(&tk, cands, &cand_count);
+
+			/*
+			 * Rerank: candidates are sorted by estimated
+			 * distance. Compute exact L2 for those with
+			 * error > 0, collect top-K by exact distance.
+			 */
+			MktTopK rerank_tk;
+			mkt_topk_init(&rerank_tk, topk);
+
+			for (uint32_t i = 0; i < cand_count; i++)
+			{
+				BlockNumber blk = (BlockNumber)(cands[i].id >> 16);
+				Distance	d;
+				if (cands[i].error > 0.0f)
+				{
+					const float *vec = all_vectors + (size_t)blk * config.dim;
+					d = mkt_l2_distance_squared(qvec, vec, config.dim);
+				}
+				else
+				{
+					d = cands[i].distance;
+				}
+				mkt_topk_insert(&rerank_tk, d, 0.0f, (uint64_t)blk);
 			}
 
-			MktTopKEntry *scan_entries = mkt_alloc(
-					scan.cand_count * sizeof(MktTopKEntry));
-			uint32_t scan_count;
-			mkt_topk_extract_sorted(&scan, scan_entries, &scan_count);
+			uint32_t	  rr_max = rerank_tk.cand_count;
+			MktTopKEntry *rr	 = mkt_alloc(
+					(rr_max > 0 ? rr_max : 1) * sizeof(MktTopKEntry));
+			uint32_t rr_count;
+			mkt_topk_extract_sorted(&rerank_tk, rr, &rr_count);
 
-			/* Count hits: scan results in ground truth set */
 			uint32_t hits = 0;
-			for (uint32_t i = 0; i < scan_count && i < topk; i++)
+			for (uint32_t i = 0; i < rr_count && i < topk; i++)
 			{
-				uint32_t sid = (uint32_t)scan_entries[i].id;
+				uint32_t vid = (uint32_t)rr[i].id;
 				for (uint32_t g = 0; g < topk; g++)
 				{
-					if (gt[q * topk + g] == sid)
+					if (gt[q * topk + g] == vid)
 					{
 						hits++;
 						break;
@@ -1303,8 +1451,10 @@ cmd_bench_search(CmdContext *ctx)
 			}
 			recall_sum[v] += (double)hits / topk;
 
-			mkt_free(scan_entries);
-			mkt_topk_cleanup(&scan);
+			mkt_free(rr);
+			mkt_topk_cleanup(&rerank_tk);
+			mkt_free(cands);
+			mkt_topk_cleanup(&tk);
 
 			if (qs)
 				mkt_rabitq_free_query(qs);
@@ -1370,8 +1520,7 @@ cmd_bench_search(CmdContext *ctx)
 	mkt_free(results);
 	mkt_free(gt);
 	mkt_free(queries);
-	mkt_free(leaf_offsets);
-	mkt_free(leaf_idx);
+	mkt_free(leaf_cents);
 	mkt_free(all_vectors);
 	mkt_free(seed_posting_heads);
 	mkt_free(query_seeds);
@@ -1380,6 +1529,7 @@ cmd_bench_search(CmdContext *ctx)
 	{
 		free(trees[f].storage.rerank_lb);
 		free(trees[f].storage.rerank_exact);
+		mkt_free(trees[f].leaf_posting_heads);
 		mkt_free(trees[f].medoid_vecs);
 		mkt_free(trees[f].pages);
 	}
