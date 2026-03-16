@@ -83,9 +83,10 @@ typedef struct RaBitQData
 	uint8_t bits[];	   /* D/8 bytes, LSB-first bit packing */
 } RaBitQData;
 
-/* Calculate size of compact quantized vector */
+/* Calculate size of compact quantized vector (4-byte aligned for
+ * safe struct access when stored in posting pages) */
 #define MKT_RABITQ_DATA_SIZE(dim) \
-	(offsetof(RaBitQData, bits) + MKT_RABITQ_BYTES(dim))
+	(((offsetof(RaBitQData, bits) + MKT_RABITQ_BYTES(dim)) + 3) & ~3u)
 
 /* Access compact data portion of a presentation vector (zero-copy cast) */
 #define MKT_RABITQ_DATA(v) ((RaBitQData *)&(v)->f_add)
