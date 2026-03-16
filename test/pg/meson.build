@@ -24,6 +24,7 @@ else
       'operators',
       'rabitq',
       'mktann',
+      'recall',
       'inspect',
       'pagelayout',
     ]

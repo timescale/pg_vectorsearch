@@ -1,0 +1,166 @@
+-- Recall tests using GloVe-100 sample data
+--
+-- Loads 1000 vectors from glove-100-angular, builds mktann indexes,
+-- and compares index scan results against precomputed ground truth.
+-- ================================================================
+-- Load data
+-- ================================================================
+CREATE TABLE glove (id serial PRIMARY KEY, v vector(100));
+CREATE TABLE glove_queries (id serial PRIMARY KEY, v vector(100));
+CREATE TABLE glove_truth_cosine (qid int, ids int[]);
+CREATE TABLE glove_truth_l2 (qid int, ids int[]);
+\copy glove (v) FROM PROGRAM 'gunzip -c ../test/pg/data/glove_vectors.csv.gz'
+\copy glove_queries (v) FROM '../test/pg/data/glove_queries.csv'
+\copy glove_truth_cosine FROM '../test/pg/data/glove_truth_cosine.csv'
+\copy glove_truth_l2 FROM '../test/pg/data/glove_truth_l2.csv'
+ANALYZE glove;
+ANALYZE glove_queries;
+SELECT count(*) AS vectors FROM glove;
+ vectors 
+---------
+    1000
+(1 row)
+
+SELECT count(*) AS queries FROM glove_queries;
+ queries 
+---------
+      10
+(1 row)
+
+-- ================================================================
+-- Cosine recall
+-- ================================================================
+CREATE INDEX idx_glove_cos ON glove
+    USING mktann (v vector_cosine_ops);
+-- Verify index scan is used for cosine ORDER BY
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT id FROM glove ORDER BY v <=> (SELECT v FROM glove_queries WHERE id = 1) LIMIT 10;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Limit
+   InitPlan 1
+     ->  Index Scan using glove_queries_pkey on glove_queries
+           Index Cond: (id = 1)
+   ->  Index Scan using idx_glove_cos on glove
+         Order By: (v <=> (InitPlan 1).col1)
+(6 rows)
+
+-- Compute index scan results
+CREATE TEMP TABLE idx_cos AS
+    SELECT q.id AS qid, array_agg(r.id) AS ids
+    FROM glove_queries q
+    CROSS JOIN LATERAL (
+        SELECT id FROM glove ORDER BY v <=> q.v LIMIT 10
+    ) r
+    GROUP BY q.id;
+RESET enable_seqscan;
+-- Compare ground truth vs index top-10 for each query
+SELECT gt.qid,
+       gt.ids AS truth,
+       i.ids AS index,
+       (SELECT count(*) FROM unnest(gt.ids) gid
+        WHERE gid = ANY(i.ids))::int AS hits
+FROM glove_truth_cosine gt
+JOIN idx_cos i ON gt.qid = i.qid
+ORDER BY gt.qid;
+ qid |                   truth                   |                   index                   | hits 
+-----+-------------------------------------------+-------------------------------------------+------
+   1 | {279,731,875,1,823,281,688,446,653,141}   | {279,731,875,823,688,446,653,141,856,955} |    8
+   2 | {62,516,621,386,474,321,738,481,280,266}  | {62,516,621,386,474,321,738,481,280,266}  |   10
+   3 | {153,531,554,803,575,626,841,596,204,441} | {153,531,554,803,575,841,596,204,441,703} |    9
+   4 | {788,30,519,434,149,304,103,344,280,603}  | {788,30,519,434,149,304,103,344,424,540}  |    8
+   5 | {434,99,508,40,477,149,660,344,995,590}   | {434,99,508,40,477,149,660,344,995,37}    |    9
+   6 | {795,637,604,383,941,660,212,836,411,369} | {795,637,604,383,941,660,212,836,411,369} |   10
+   7 | {872,119,875,169,673,741,974,981,449,945} | {872,119,875,169,673,974,981,945,278,397} |    8
+   8 | {396,578,246,930,125,357,515,585,576,280} | {396,246,930,125,357,515,585,280,166,987} |    8
+   9 | {456,78,29,896,171,798,576,957,320,589}   | {456,78,29,896,171,798,576,957,320,589}   |   10
+  10 | {129,958,849,528,360,115,322,796,954,13}  | {129,958,849,115,796,954,13,861,101,272}  |    7
+(10 rows)
+
+-- Results should be ordered by distance
+SET enable_seqscan = off;
+SELECT bool_and(dist <= next_dist) AS cosine_ordered FROM (
+    SELECT dist, lead(dist) OVER () AS next_dist FROM (
+        SELECT v <=> (SELECT v FROM glove WHERE id = 1) AS dist
+        FROM glove
+        ORDER BY v <=> (SELECT v FROM glove WHERE id = 1)
+        LIMIT 20
+    ) t
+) t2 WHERE next_dist IS NOT NULL;
+ cosine_ordered 
+----------------
+ t
+(1 row)
+
+RESET enable_seqscan;
+DROP INDEX idx_glove_cos;
+-- ================================================================
+-- L2 recall
+-- ================================================================
+CREATE INDEX idx_glove_l2 ON glove
+    USING mktann (v);
+-- Verify index scan is used for L2 ORDER BY
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT id FROM glove ORDER BY v <-> (SELECT v FROM glove_queries WHERE id = 1) LIMIT 10;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Limit
+   InitPlan 1
+     ->  Index Scan using glove_queries_pkey on glove_queries
+           Index Cond: (id = 1)
+   ->  Index Scan using idx_glove_l2 on glove
+         Order By: (v <-> (InitPlan 1).col1)
+(6 rows)
+
+-- Compute L2 index scan results
+CREATE TEMP TABLE idx_l2 AS
+    SELECT q.id AS qid, array_agg(r.id) AS ids
+    FROM glove_queries q
+    CROSS JOIN LATERAL (
+        SELECT id FROM glove ORDER BY v <-> q.v LIMIT 10
+    ) r
+    GROUP BY q.id;
+-- Compare L2 ground truth vs index top-10 for each query
+SELECT gt.qid,
+       gt.ids AS truth,
+       i.ids AS index,
+       (SELECT count(*) FROM unnest(gt.ids) gid
+        WHERE gid = ANY(i.ids))::int AS hits
+FROM glove_truth_l2 gt
+JOIN idx_l2 i ON gt.qid = i.qid
+ORDER BY gt.qid;
+ qid |                   truth                   |                   index                   | hits 
+-----+-------------------------------------------+-------------------------------------------+------
+   1 | {279,1,823,653,508,204,955,626,441,477}   | {279,1,823,653,508,204,955,626,441,477}   |   10
+   2 | {62,516,321,204,266,508,691,664,140,604}  | {62,516,321,204,266,508,691,664,140,233}  |    9
+   3 | {153,204,441,554,508,841,803,283,626,826} | {153,204,441,554,508,841,803,283,626,826} |   10
+   4 | {788,434,204,989,344,508,604,603,441,107} | {788,434,204,989,344,508,604,603,441,107} |   10
+   5 | {434,508,441,204,477,140,321,99,660,37}   | {434,508,441,204,477,140,321,99,660,37}   |   10
+   6 | {795,604,637,660,87,204,441,508,283,369}  | {795,604,637,660,87,204,441,508,283,369}  |   10
+   7 | {872,119,169,204,441,370,104,283,673,974} | {872,119,169,204,441,370,104,283,974,826} |    9
+   8 | {396,578,204,930,790,354,258,748,441,489} | {396,578,204,930,790,354,258,748,441,489} |   10
+   9 | {456,78,29,320,957,589,801,576,896,798}   | {456,78,29,320,957,589,801,576,896,798}   |   10
+  10 | {129,958,204,528,867,849,360,322,543,508} | {129,958,204,528,867,849,360,322,543,508} |   10
+(10 rows)
+
+-- Self-query should return itself as top-1
+SELECT id = 1 AS l2_found_self FROM (
+    SELECT id FROM glove
+    ORDER BY v <-> (SELECT v FROM glove WHERE id = 1)
+    LIMIT 1
+) t;
+ l2_found_self 
+---------------
+ t
+(1 row)
+
+RESET enable_seqscan;
+-- ================================================================
+-- Cleanup
+-- ================================================================
+DROP TABLE glove_truth_cosine;
+DROP TABLE glove_truth_l2;
+DROP TABLE glove_queries;
+DROP TABLE glove;

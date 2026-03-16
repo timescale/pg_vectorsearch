@@ -50,7 +50,7 @@ repos:
     hooks:
       - id: squawk
         files: ^(sql|test/(.+/)?(sql|compat))/.*\.sql$
-        exclude: ^(sql/meerkat--|test/pg/compat/)
+        exclude: ^(sql/meerkat--|test/pg/compat/|test/pg/sql/recall\.sql)
 
   # Markdown linting
   - repo: https://github.com/DavidAnson/markdownlint-cli2
