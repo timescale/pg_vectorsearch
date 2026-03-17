@@ -120,15 +120,6 @@ pg_commit_page(MktStorage *self, BlockNumber blkno)
  * distance is converted to L2²: exact_l2sq = 2 * cosine_distance.
  * ---------------------------------------------------------------- */
 
-/* Comparator for sorting candidate indices by TID order */
-static int
-cmp_tid_order(const void *a, const void *b, void *arg)
-{
-	ItemPointerData *tids = arg;
-	return ItemPointerCompare(
-			&tids[*(const uint32_t *)a], &tids[*(const uint32_t *)b]);
-}
-
 /*
  * pg_rerank - Rerank candidates with exact L2 distances.
  *
@@ -168,25 +159,19 @@ pg_rerank(
 	/* Determine which heap column the index covers */
 	AttrNumber vec_attnum = s->index->rd_index->indkey.values[0];
 
-	/* Build index array sorted by TID block number for
-	 * sequential I/O through the buffer cache */
-	uint32_t *order = palloc(count * sizeof(uint32_t));
-	for (uint32_t i = 0; i < count; i++)
-		order[i] = i;
-
-	qsort_arg(order, count, sizeof(uint32_t), cmp_tid_order, (void *)tids);
-
 	/* Top-K collector for exact distances */
 	MktTopK topk;
 	mkt_topk_init(&topk, keep);
 
-	/* Create a reusable slot for heap fetches */
-	TupleTableSlot *slot = table_slot_create(s->rel, NULL);
+	/* Use index_fetch API for buffer caching across same-page
+	 * fetches. ReleaseAndReadBuffer inside heapam avoids redundant
+	 * pin/lock cycles when consecutive TIDs share a page. */
+	IndexFetchTableData *fetch = table_index_fetch_begin(s->rel);
+	TupleTableSlot		*slot  = table_slot_create(s->rel, NULL);
 
-	/* Iterate in TID order, computing exact distances */
 	for (uint32_t i = 0; i < count; i++)
 	{
-		uint32_t idx = order[i];
+		uint32_t idx = i;
 
 		Distance d;
 		if (errors[idx] == 0.0f)
@@ -195,8 +180,10 @@ pg_rerank(
 		}
 		else
 		{
-			ItemPointerData tid = tids[idx];
-			if (table_tuple_fetch_row_version(s->rel, &tid, SnapshotAny, slot))
+			ItemPointerData tid		   = tids[idx];
+			bool			call_again = false;
+			if (table_index_fetch_tuple(
+						fetch, &tid, SnapshotAny, slot, &call_again, NULL))
 			{
 				bool  isnull;
 				Datum val = slot_getattr(slot, vec_attnum, &isnull);
@@ -230,6 +217,7 @@ pg_rerank(
 		mkt_topk_insert(&topk, d, 0.0f, (uint64_t)idx);
 	}
 
+	table_index_fetch_end(fetch);
 	ExecDropSingleTupleTableSlot(slot);
 
 	/* Extract sorted results */
@@ -245,7 +233,6 @@ pg_rerank(
 
 	pfree(entries);
 	mkt_topk_cleanup(&topk);
-	pfree(order);
 
 	return nresults;
 }
