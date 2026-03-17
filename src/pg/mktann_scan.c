@@ -427,21 +427,58 @@ mktann_gettuple(IndexScanDesc scan, ScanDirection direction)
 			pfree(centroid_vecs);
 		mkt_posting_scan_cleanup(&pscan);
 
-		/* 4. Extract results from top-K */
+		/* 4. Extract candidates from top-K */
 		MktTopKEntry *entries = palloc(topk.cand_count * sizeof(MktTopKEntry));
-		uint32_t	  nresults;
-		mkt_topk_extract_sorted(&topk, entries, &nresults);
+		uint32_t	  ncands;
+		mkt_topk_extract(&topk, entries, &ncands);
 
-		/* Convert to scan result format */
+		/* 5. Rerank: fetch exact distances from heap tuples.
+		 * Unpack candidates into parallel arrays for pg_rerank. */
+		ItemPointerData *cand_tids = palloc(ncands * sizeof(ItemPointerData));
+		Distance		*cand_dist = palloc(ncands * sizeof(Distance));
+		Distance		*cand_err  = palloc(ncands * sizeof(Distance));
+		for (uint32_t i = 0; i < ncands; i++)
+		{
+			cand_tids[i] = decode_tid(entries[i].id);
+			cand_dist[i] = entries[i].distance;
+			cand_err[i]	 = entries[i].error;
+		}
+
+		uint32_t *rr_indices   = palloc(topk_limit * sizeof(uint32_t));
+		Distance *rr_distances = palloc(topk_limit * sizeof(Distance));
+		uint32_t  nresults	   = mkt_storage_rerank(
+				 &storage.base,
+				 query_datum,
+				 ss->dim,
+				 cand_tids,
+				 cand_dist,
+				 cand_err,
+				 ncands,
+				 topk_limit,
+				 rr_indices,
+				 rr_distances);
+
+		/* Convert reranked results to scan format.
+		 * pg_rerank returns L2² distances. For cosine, convert
+		 * back to operator space: cosine_dist = l2sq / 2. */
 		ss->sorted_results = palloc(nresults * sizeof(MktannScanResult));
 		for (uint32_t i = 0; i < nresults; i++)
 		{
-			ss->sorted_results[i].tid	   = decode_tid(entries[i].id);
-			ss->sorted_results[i].distance = entries[i].distance;
-			ss->sorted_results[i].error	   = entries[i].error;
+			uint32_t idx				= rr_indices[i];
+			ss->sorted_results[i].tid	= cand_tids[idx];
+			ss->sorted_results[i].error = 0.0f;
+			if (ss->metric == DISTANCE_COSINE)
+				ss->sorted_results[i].distance = rr_distances[i] / 2.0f;
+			else
+				ss->sorted_results[i].distance = rr_distances[i];
 		}
 		ss->nresults = nresults;
 
+		pfree(rr_indices);
+		pfree(rr_distances);
+		pfree(cand_tids);
+		pfree(cand_dist);
+		pfree(cand_err);
 		pfree(entries);
 		mkt_topk_cleanup(&topk);
 		pfree(centroid_results);
@@ -458,17 +495,10 @@ mktann_gettuple(IndexScanDesc scan, ScanDirection direction)
 
 	scan->xs_heaptid = entry->tid;
 
-	/* All RaBitQ distances are approximate — always recheck so the
-	 * executor computes exact distances from heap tuples.
-	 *
-	 * Return 0.0 as the lower bound. The topk results are sorted by
-	 * approximate distance, but (distance - error) can be non-monotonic
-	 * across entries since error varies per vector. The executor
-	 * requires xs_orderbyvals to be non-decreasing, so a trivial
-	 * lower bound is the safe choice. The top-K limit bounds the
-	 * number of heap refetches. */
-	scan->xs_recheckorderby	 = true;
-	scan->xs_orderbyvals[0]	 = Float8GetDatum(-1.0);
+	/* Return exact distance from internal rerank. No executor
+	 * recheck needed — distances are already in operator space. */
+	scan->xs_recheckorderby	 = false;
+	scan->xs_orderbyvals[0]	 = Float8GetDatum((double)entry->distance);
 	scan->xs_orderbynulls[0] = false;
 
 	ss->curr++;

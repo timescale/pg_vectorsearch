@@ -172,9 +172,21 @@ mkt_topk_insert(MktTopK *topk, Distance distance, Distance error, uint64_t id)
  * Extract
  * ---------------------------------------------------------------- */
 
-void
-mkt_topk_extract_sorted(
-		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out)
+static int
+cmp_by_distance(const void *a, const void *b)
+{
+	const MktTopKEntry *ea = (const MktTopKEntry *)a;
+	const MktTopKEntry *eb = (const MktTopKEntry *)b;
+	if (ea->distance < eb->distance)
+		return -1;
+	if (ea->distance > eb->distance)
+		return 1;
+	return 0;
+}
+
+static void
+topk_extract(
+		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out, bool sorted)
 {
 	Distance threshold = mkt_topk_threshold(topk);
 
@@ -187,6 +199,22 @@ mkt_topk_extract_sorted(
 			results[out++] = topk->candidates[i];
 	}
 
+	if (sorted && out > 1)
+		qsort(results, out, sizeof(MktTopKEntry), cmp_by_distance);
+
 	*count_out = out;
 	mkt_topk_reset(topk);
+}
+
+void
+mkt_topk_extract(MktTopK *topk, MktTopKEntry *results, uint32_t *count_out)
+{
+	topk_extract(topk, results, count_out, false);
+}
+
+void
+mkt_topk_extract_sorted(
+		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out)
+{
+	topk_extract(topk, results, count_out, true);
 }

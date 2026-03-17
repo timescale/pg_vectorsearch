@@ -120,14 +120,19 @@ Distance mkt_topk_threshold(const MktTopK *topk);
 #endif
 
 /*
- * Extract candidates sorted by distance ascending. Filters out
- * stale entries whose lower bound now exceeds the final threshold.
+ * Extract candidates, filtering out stale entries whose lower bound
+ * now exceeds the final threshold. Output order is unspecified.
  *
  * results[] must have space for topk->cand_count entries (upper
  * bound; actual count returned via *count_out may be smaller).
  *
  * After extraction the collection is reset.
  */
+void
+mkt_topk_extract(MktTopK *topk, MktTopKEntry *results, uint32_t *count_out);
+
+/* Same as mkt_topk_extract, but results are sorted by distance
+ * ascending. */
 void mkt_topk_extract_sorted(
 		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out);
 
