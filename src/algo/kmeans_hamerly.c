@@ -78,7 +78,7 @@ l2_from_dot(float norm_a, float norm_b, float dot)
 /*
  * Full assignment for one vector: find nearest and second-nearest.
  */
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 assign_full_impl(
 		const void			   *vec,
 		float					norm_x,
@@ -136,7 +136,7 @@ precompute_norms_c(KMeansState *st)
  * every vtable function pointer. MKT_TARGET_CLONES on the wrappers
  * generates AVX2/AVX-512 variants of the entire inlined body.
  */
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 hamerly_assign_impl(
 		KMeansState *st, HamerlyState *hs, const MktVectorTypeOps *ops)
 {
@@ -221,7 +221,7 @@ hamerly_assign_impl(
  * O(K*dim) f16→f32 conversions per vector (one conversion vs K).
  * Vectors skipped by bounds check are never converted.
  */
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 hamerly_assign_preconvert_impl(KMeansState *st, HamerlyState *hs, size_t esz)
 {
 	uint32_t	 nvecs = st->nvecs;

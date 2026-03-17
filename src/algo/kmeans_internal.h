@@ -69,7 +69,7 @@ typedef struct KMeansState
 } KMeansState;
 
 /* Get pointer to vector i in the input array */
-__attribute__((always_inline)) static inline const void *
+MKT_ALWAYS_INLINE static inline const void *
 km_get_vector(const KMeansState *st, uint32_t i, size_t elem_size)
 {
 	uint32_t idx = st->indices ? st->indices[i] : i;

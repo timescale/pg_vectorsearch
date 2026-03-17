@@ -606,7 +606,7 @@ mkt_rabitq_encode_into(
  * Bulk conversion via to_float_block amortizes call overhead for f16
  * (one SIMD-dispatched call vs N per-vector calls).
  */
-__attribute__((always_inline)) static inline int
+MKT_ALWAYS_INLINE static inline int
 rabitq_encode_batch_impl(
 		const RaBitQParams	   *params,
 		const void			   *vectors,
@@ -1081,7 +1081,7 @@ mkt_rabitq_distance(
  * Marked always_inline so the compiler sees the full loop body in each
  * caller, preserving auto-vectorization of the f_add[]/f_rescale[] math.
  */
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 rabitq_apply_distances(
 		const RaBitQQueryState *qstate,
 		const float			   *f_add,
