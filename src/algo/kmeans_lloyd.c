@@ -59,7 +59,7 @@ precompute_norms_c(KMeansState *st)
  * For cos: dist[i][j] = 1 - ⟨x_i, c_j⟩
  */
 #ifdef MKT_HAVE_CBLAS
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 lloyd_assign_block_cblas_impl(
 		KMeansState			   *st,
 		uint32_t				block_start,

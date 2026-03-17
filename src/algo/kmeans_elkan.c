@@ -163,7 +163,7 @@ precompute_norms_c(KMeansState *st)
 /*
  * Full initial assignment — always_inline, specialized by ops vtable.
  */
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 elkan_initial_assign_impl(
 		KMeansState *st, ElkanState *es, const MktVectorTypeOps *ops)
 {
@@ -210,7 +210,7 @@ elkan_initial_assign_impl(
  * Centroid-centroid distances use the separate dot_product() function
  * (always float32 × float32). Only vector-centroid uses the typed ops.
  */
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 elkan_assign_impl(KMeansState *st, ElkanState *es, const MktVectorTypeOps *ops)
 {
 	uint32_t	 nvecs = st->nvecs;
@@ -308,7 +308,7 @@ elkan_assign_impl(KMeansState *st, ElkanState *es, const MktVectorTypeOps *ops)
  * O(K*dim) f16→f32 conversions per vector (one conversion vs K).
  * Vectors pruned by bounds are never converted.
  */
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 elkan_initial_assign_preconvert_impl(
 		KMeansState *st, ElkanState *es, size_t esz)
 {
@@ -352,7 +352,7 @@ elkan_initial_assign_preconvert_impl(
 	}
 }
 
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 elkan_assign_preconvert_impl(KMeansState *st, ElkanState *es, size_t esz)
 {
 	uint32_t	 nvecs = st->nvecs;

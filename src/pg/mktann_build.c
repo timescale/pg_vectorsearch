@@ -649,7 +649,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	}
 
 	/* Prepare build state for scan */
-	bs.tree	= tree;
+	bs.tree = tree;
 	if (p->centroid_format == MKT_CENTROID_FMT_RABITQ)
 	{
 		bs.medoid_tids	= palloc0(nlist * sizeof(ItemPointerData));
@@ -657,7 +657,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 		for (uint32_t c = 0; c < nlist; c++)
 			bs.medoid_dists[c] = INFINITY;
 	}
-	bs.builders = builders;
+	bs.builders	 = builders;
 	bs.norm_buf	 = (p->metric == DISTANCE_COSINE) ? palloc(dim * sizeof(float))
 												  : NULL;
 	bs.indtuples = 0;

@@ -9,6 +9,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * MKT_ALWAYS_INLINE - Request aggressive inlining.
+ *
+ * GCC rejects always_inline when the callee and caller have
+ * different target attributes (e.g., inlining a generic function
+ * into an AVX2/AVX512-specialized wrapper). Clang handles this
+ * correctly. Use this macro on static inline functions that should
+ * be inlined through vtable pointers in hot loops.
+ */
+#ifdef __clang__
+#define MKT_ALWAYS_INLINE __attribute__((always_inline))
+#else
+#define MKT_ALWAYS_INLINE
+#endif
+
 /* Quantized representations */
 typedef uint8_t ScalarQ8; /* 8-bit scalar quantized */
 typedef uint8_t BinaryQ;  /* Binary quantized byte (packed bits) */

@@ -138,7 +138,7 @@ mkt_cblas_is_single_threaded(void)
 /*
  * Precompute ||x||^2 for all input vectors.
  */
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 precompute_norms_x_impl(KMeansState *st, const MktVectorTypeOps *ops)
 {
 	size_t esz = ops->element_size;
@@ -149,7 +149,7 @@ precompute_norms_x_impl(KMeansState *st, const MktVectorTypeOps *ops)
 /*
  * Compute distance from a typed vector to a float32 centroid.
  */
-__attribute__((always_inline)) static inline float
+MKT_ALWAYS_INLINE static inline float
 vector_centroid_distance_impl(
 		DistanceMetric			metric,
 		const void			   *vec,
@@ -172,7 +172,7 @@ vector_centroid_distance_impl(
 /*
  * k-means++ initialization.
  */
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 kmeans_init_plusplus_impl(
 		KMeansState *st, uint64_t seed, const MktVectorTypeOps *ops)
 {
@@ -248,7 +248,7 @@ kmeans_init_plusplus_impl(
 /*
  * Update step: recompute centroids as mean of assigned vectors.
  */
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 kmeans_update_centroids_impl(KMeansState *st, const MktVectorTypeOps *ops)
 {
 	uint32_t  nlist = st->nlist;
@@ -557,7 +557,7 @@ static const KMeansAlgoOps elkan_ops = {
  * every vtable function pointer. MKT_TARGET_CLONES on the wrappers
  * generates AVX2/AVX-512 variants of the entire inlined body.
  */
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 kmeans_run_one_impl(
 		KMeansState			   *st,
 		const KMeansOptions	   *opts,

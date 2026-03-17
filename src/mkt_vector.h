@@ -35,14 +35,14 @@ typedef struct MktVector
 #define MKT_VECTOR_DATA(v)	 ((v)->x)
 
 /* Convert to VectorRef for internal operations */
-static inline VectorRef
+MKT_ALWAYS_INLINE static inline VectorRef
 MktVectorToRef(const MktVector *v)
 {
 	return (VectorRef){.data = v->x, .dim = (Dimension)v->dim};
 }
 
 /* Convert to VectorMut for mutable operations */
-static inline VectorMut
+MKT_ALWAYS_INLINE static inline VectorMut
 MktVectorToMut(MktVector *v)
 {
 	return (VectorMut){.data = v->x, .dim = (Dimension)v->dim};
@@ -66,13 +66,13 @@ void  mkt_vector_normalize(MktVector *v);
 /* ----------------------------------------------------------------
  * Inline vtable for compile-time specialization
  *
- * These always_inline functions + static const vtable enable the
+ * These static inline functions + static const vtable enable the
  * compiler to inline through vtable function pointers when the
  * pointer target is known at compile time. Used by k-means and
  * other hot loops that dispatch once at the entry point.
  * ---------------------------------------------------------------- */
 
-__attribute__((always_inline)) static inline float
+MKT_ALWAYS_INLINE static inline float
 mkt_f32_dot_product(const void *vec, const float *centroid, Dimension dim)
 {
 	const float *v	 = (const float *)vec;
@@ -82,7 +82,7 @@ mkt_f32_dot_product(const void *vec, const float *centroid, Dimension dim)
 	return sum;
 }
 
-__attribute__((always_inline)) static inline float
+MKT_ALWAYS_INLINE static inline float
 mkt_f32_l2_squared(const void *vec, const float *centroid, Dimension dim)
 {
 	const float *v	 = (const float *)vec;
@@ -95,7 +95,7 @@ mkt_f32_l2_squared(const void *vec, const float *centroid, Dimension dim)
 	return sum;
 }
 
-__attribute__((always_inline)) static inline float
+MKT_ALWAYS_INLINE static inline float
 mkt_f32_norm_sq(const void *vec, Dimension dim)
 {
 	const float *v	 = (const float *)vec;
@@ -105,7 +105,7 @@ mkt_f32_norm_sq(const void *vec, Dimension dim)
 	return sum;
 }
 
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 mkt_f32_sum_to_float(const void *vec, float *accum, Dimension dim)
 {
 	const float *v = (const float *)vec;
@@ -113,13 +113,13 @@ mkt_f32_sum_to_float(const void *vec, float *accum, Dimension dim)
 		accum[d] += v[d];
 }
 
-__attribute__((always_inline)) static inline void
+MKT_ALWAYS_INLINE static inline void
 mkt_f32_to_float_one(const void *src, float *dst, Dimension dim)
 {
 	memcpy(dst, src, (size_t)dim * sizeof(float));
 }
 
-__attribute__((always_inline)) static inline const float *
+MKT_ALWAYS_INLINE static inline const float *
 mkt_f32_to_float_block(
 		const void *src, float *dst, uint32_t count, Dimension dim)
 {
