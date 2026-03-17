@@ -427,7 +427,7 @@ mktann_gettuple(IndexScanDesc scan, ScanDirection direction)
 			pfree(centroid_vecs);
 		mkt_posting_scan_cleanup(&pscan);
 
-		/* 4. Extract sorted results from top-K */
+		/* 4. Extract results from top-K */
 		MktTopKEntry *entries = palloc(topk.cand_count * sizeof(MktTopKEntry));
 		uint32_t	  nresults;
 		mkt_topk_extract_sorted(&topk, entries, &nresults);

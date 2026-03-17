@@ -40,22 +40,6 @@ ub_max_cmp(const pairingheap_node *a, const pairingheap_node *b, void *arg)
 }
 
 /* ----------------------------------------------------------------
- * Comparator for qsort (ascending by distance)
- * ---------------------------------------------------------------- */
-
-static int
-cmp_by_distance(const void *a, const void *b)
-{
-	const MktTopKEntry *ea = (const MktTopKEntry *)a;
-	const MktTopKEntry *eb = (const MktTopKEntry *)b;
-	if (ea->distance < eb->distance)
-		return -1;
-	if (ea->distance > eb->distance)
-		return 1;
-	return 0;
-}
-
-/* ----------------------------------------------------------------
  * Init / cleanup / create / destroy
  * ---------------------------------------------------------------- */
 
@@ -185,7 +169,7 @@ mkt_topk_insert(MktTopK *topk, Distance distance, Distance error, uint64_t id)
 }
 
 /* ----------------------------------------------------------------
- * Extract sorted
+ * Extract
  * ---------------------------------------------------------------- */
 
 void
@@ -202,10 +186,6 @@ mkt_topk_extract_sorted(
 		if (lb <= threshold)
 			results[out++] = topk->candidates[i];
 	}
-
-	/* Sort by distance ascending */
-	if (out > 1)
-		qsort(results, out, sizeof(MktTopKEntry), cmp_by_distance);
 
 	*count_out = out;
 	mkt_topk_reset(topk);
