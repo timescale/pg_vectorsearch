@@ -51,12 +51,13 @@ test_runner = executable('run_tests',
   install: false,
 )
 
-# Run all tests as one suite
+# Run all tests as one suite (timeout must accommodate sanitizer builds
+# which run ~5-10x slower than normal)
 test('unit_tests', test_runner,
   args: ['--tap'],
   protocol: 'tap',
   workdir: meson.project_source_root(),
-  timeout: 60,
+  timeout: 300,
   suite: 'all',
 )
 
