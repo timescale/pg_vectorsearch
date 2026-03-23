@@ -7,7 +7,6 @@
  * - Bidirectional region non-overlap
  * - Page init/add round-trip
  * - ItemPointerData accessors
- * - Medoid TID round-trip
  */
 
 #include <string.h>
@@ -41,14 +40,6 @@ TEST(centroid_entry_meta_size)
 			"MktCentroidEntryMeta must be 8 bytes");
 }
 
-TEST(centroid_entry_meta_rabitq_size)
-{
-	ASSERT_EQ(
-			16,
-			sizeof(MktCentroidEntryMetaRaBitQ),
-			"MktCentroidEntryMetaRaBitQ must be 16 bytes");
-}
-
 TEST(centroid_page_opaque_size)
 {
 	ASSERT_EQ(
@@ -64,26 +55,26 @@ TEST(centroid_page_opaque_size)
 TEST(page_capacity_768d)
 {
 	uint32_t max = mkt_centroid_max_entries(768);
-	/* Per entry: 16 (meta) + 8 (f_add+f_rescale) + 96 (bits) = 120
+	/* Per entry: 8 (meta) + 104 (RaBitQData: 8 header + 96 bits) = 112
 	 * Usable: 8192 - 24 - 12 = 8156
-	 * 8156 / 120 = 67 */
-	ASSERT_EQ(67, max, "768d should fit 67 entries per page");
+	 * 8156 / 112 = 72 */
+	ASSERT_EQ(72, max, "768d should fit 72 entries per page");
 }
 
 TEST(page_capacity_128d)
 {
 	uint32_t max = mkt_centroid_max_entries(128);
-	/* Per entry: 16 + 8 + 16 = 40
-	 * 8156 / 40 = 203 */
-	ASSERT_EQ(203, max, "128d should fit 203 entries per page");
+	/* Per entry: 8 (meta) + 24 (RaBitQData: 8 header + 16 bits) = 32
+	 * 8156 / 32 = 254 */
+	ASSERT_EQ(254, max, "128d should fit 254 entries per page");
 }
 
 TEST(page_capacity_1536d)
 {
 	uint32_t max = mkt_centroid_max_entries(1536);
-	/* Per entry: 16 + 8 + 192 = 216
-	 * 8156 / 216 = 37 */
-	ASSERT_EQ(37, max, "1536d should fit 37 entries per page");
+	/* Per entry: 8 (meta) + 200 (RaBitQData: 8 header + 192 bits) = 208
+	 * 8156 / 208 = 39 */
+	ASSERT_EQ(39, max, "1536d should fit 39 entries per page");
 }
 
 /* ----------------------------------------------------------------
@@ -138,9 +129,9 @@ TEST(bidir_regions_no_overlap)
 	uint32_t  max		= mkt_centroid_max_entries(dim);
 	uint32_t  data_size = MKT_RABITQ_DATA_SIZE(dim);
 
-	/* Forward region: metadata (RaBitQ uses extended meta) */
+	/* Forward region: metadata */
 	size_t meta_start = SizeOfPageHeaderData;
-	size_t meta_end	  = meta_start + max * sizeof(MktCentroidEntryMetaRaBitQ);
+	size_t meta_end	  = meta_start + max * sizeof(MktCentroidEntryMeta);
 
 	/* Backward region: RaBitQData entries */
 	size_t opaque_start = BLCKSZ - sizeof(MktCentroidPageOpaque);
@@ -214,28 +205,18 @@ TEST(page_add_single_entry)
 	mkt_centroid_page_init(page, 0);
 
 	/* Add entry */
-	ItemPointerData tid;
-	ItemPointerSet(&tid, 5, 10);
-
 	bool added = mkt_centroid_page_add(
-			page, dim, 42, 8, MKT_CENTROID_FLAG_LEAF, &tid, encoded);
+			page, dim, 42, 8, MKT_CENTROID_FLAG_LEAF, encoded);
 	ASSERT_TRUE(added, "entry should be added");
 
 	/* Verify */
 	MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
 	ASSERT_EQ(1, opaque->entry_count, "entry_count should be 1");
 
-	const MktCentroidEntryMetaRaBitQ *rmeta =
-			mkt_centroid_meta_rabitq(page, 0);
-	ASSERT_EQ(42, rmeta->base.child_blkno, "child_blkno");
-	ASSERT_EQ(8, rmeta->base.child_count, "child_count");
-	ASSERT_EQ(MKT_CENTROID_FLAG_LEAF, rmeta->base.flags, "flags");
-	ASSERT_EQ(
-			5, ItemPointerGetBlockNumber(&rmeta->medoid_tid), "medoid block");
-	ASSERT_EQ(
-			10,
-			ItemPointerGetOffsetNumber(&rmeta->medoid_tid),
-			"medoid offset");
+	const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, 0);
+	ASSERT_EQ(42, meta->child_blkno, "child_blkno");
+	ASSERT_EQ(8, meta->child_count, "child_count");
+	ASSERT_EQ(MKT_CENTROID_FLAG_LEAF, meta->flags, "flags");
 
 	/* Verify RaBitQData round-trip via direct pointer */
 	const RaBitQData *data		   = mkt_centroid_data(page, 0, dim);
@@ -282,10 +263,7 @@ TEST(page_add_fill_to_capacity)
 	/* Fill page to capacity */
 	for (uint32_t i = 0; i < max; i++)
 	{
-		ItemPointerData tid;
-		ItemPointerSet(&tid, 0, (OffsetNumber)i);
-
-		bool added = mkt_centroid_page_add(page, dim, i, 1, 0, &tid, encoded);
+		bool added = mkt_centroid_page_add(page, dim, i, 1, 0, encoded);
 
 		char msg[64];
 		snprintf(msg, sizeof(msg), "entry %u should be added", i);
@@ -297,9 +275,7 @@ TEST(page_add_fill_to_capacity)
 	ASSERT_EQ(max, opaque->entry_count, "page should be full");
 
 	/* One more should fail */
-	ItemPointerData tid;
-	ItemPointerSet(&tid, 0, 0);
-	bool added = mkt_centroid_page_add(page, dim, 999, 1, 0, &tid, encoded);
+	bool added = mkt_centroid_page_add(page, dim, 999, 1, 0, encoded);
 	ASSERT_FALSE(added, "page should be full");
 
 	mkt_free(encoded);
@@ -333,11 +309,7 @@ TEST(page_has_room)
 
 	uint32_t max = mkt_centroid_max_entries(dim);
 	for (uint32_t i = 0; i < max; i++)
-	{
-		ItemPointerData tid;
-		ItemPointerSet(&tid, 0, (OffsetNumber)i);
-		mkt_centroid_page_add(page, dim, i, 1, 0, &tid, encoded);
-	}
+		mkt_centroid_page_add(page, dim, i, 1, 0, encoded);
 
 	ASSERT_FALSE(
 			mkt_centroid_page_has_room(page, dim),
@@ -381,38 +353,22 @@ TEST(page_multi_entry_round_trip)
 		encodings[e]	  = mkt_rabitq_encode(params, vec_ref, cent_ref);
 		ASSERT_NOT_NULL(encodings[e], "encoding succeeded");
 
-		ItemPointerData tid;
-		ItemPointerSet(&tid, (BlockNumber)e, (OffsetNumber)(e + 1));
-
 		bool added = mkt_centroid_page_add(
-				page, dim, 100 + e, e + 1, 0, &tid, encodings[e]);
+				page, dim, 100 + e, e + 1, 0, encodings[e]);
 		ASSERT_TRUE(added, "entry added");
 	}
 
 	/* Verify all entries */
 	for (int e = 0; e < count; e++)
 	{
-		const MktCentroidEntryMetaRaBitQ *rmeta =
-				mkt_centroid_meta_rabitq(page, e);
-		char msg[128];
+		const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, e);
+		char						msg[128];
 
 		snprintf(msg, sizeof(msg), "entry %d child_blkno", e);
-		ASSERT_EQ((BlockNumber)(100 + e), rmeta->base.child_blkno, msg);
+		ASSERT_EQ((BlockNumber)(100 + e), meta->child_blkno, msg);
 
 		snprintf(msg, sizeof(msg), "entry %d child_count", e);
-		ASSERT_EQ((uint16_t)(e + 1), rmeta->base.child_count, msg);
-
-		snprintf(msg, sizeof(msg), "entry %d medoid block", e);
-		ASSERT_EQ(
-				(BlockNumber)e,
-				ItemPointerGetBlockNumber(&rmeta->medoid_tid),
-				msg);
-
-		snprintf(msg, sizeof(msg), "entry %d medoid offset", e);
-		ASSERT_EQ(
-				(OffsetNumber)(e + 1),
-				ItemPointerGetOffsetNumber(&rmeta->medoid_tid),
-				msg);
+		ASSERT_EQ((uint16_t)(e + 1), meta->child_count, msg);
 
 		/* Verify RaBitQData via direct pointer */
 		const RaBitQData *data = mkt_centroid_data(page, e, dim);
@@ -523,7 +479,7 @@ TEST(page_float_add_round_trip)
 		vec[i] = (float)((i * 17 + 3) % 100 - 50) / 10.0f;
 
 	bool added = mkt_centroid_page_add_entry(
-			page, dim, 42, 8, MKT_CENTROID_FLAG_LEAF, NULL, vec);
+			page, dim, 42, 8, MKT_CENTROID_FLAG_LEAF, vec);
 	ASSERT_TRUE(added, "float entry should be added");
 
 	/* Verify metadata */
@@ -560,7 +516,7 @@ TEST(page_half_add_round_trip)
 	for (Dimension i = 0; i < dim; i++)
 		hvec[i] = mkt_float_to_half((float)((i * 17 + 3) % 100 - 50) / 10.0f);
 
-	bool added = mkt_centroid_page_add_entry(page, dim, 99, 4, 0, NULL, hvec);
+	bool added = mkt_centroid_page_add_entry(page, dim, 99, 4, 0, hvec);
 	ASSERT_TRUE(added, "half entry should be added");
 
 	/* Verify metadata */
@@ -594,8 +550,7 @@ TEST(page_float_fill_to_capacity)
 
 	for (uint32_t i = 0; i < max; i++)
 	{
-		bool added =
-				mkt_centroid_page_add_entry(page, dim, i, 1, 0, NULL, vec);
+		bool added = mkt_centroid_page_add_entry(page, dim, i, 1, 0, vec);
 
 		char msg[64];
 		snprintf(msg, sizeof(msg), "float entry %u added", i);
@@ -607,7 +562,7 @@ TEST(page_float_fill_to_capacity)
 	ASSERT_EQ(max, opaque->entry_count, "page should be full");
 
 	/* One more should fail */
-	bool added = mkt_centroid_page_add_entry(page, dim, 999, 1, 0, NULL, vec);
+	bool added = mkt_centroid_page_add_entry(page, dim, 999, 1, 0, vec);
 	ASSERT_FALSE(added, "full float page should reject");
 
 	ASSERT_FALSE(
@@ -636,7 +591,7 @@ TEST(page_half_multi_entry_round_trip)
 					(float)((i * 17 + e * 31) % 100 - 50) / 10.0f);
 
 		bool added = mkt_centroid_page_add_entry(
-				page, dim, 100 + e, e + 1, 0, NULL, vectors[e]);
+				page, dim, 100 + e, e + 1, 0, vectors[e]);
 		ASSERT_TRUE(added, "half entry added");
 	}
 
@@ -673,7 +628,7 @@ TEST(page_entry_data_generic_accessor)
 	for (Dimension i = 0; i < dim; i++)
 		fvec[i] = (float)i;
 
-	mkt_centroid_page_add_entry(page, dim, 0, 1, 0, NULL, fvec);
+	mkt_centroid_page_add_entry(page, dim, 0, 1, 0, fvec);
 
 	const void	*g1 = mkt_centroid_entry_data(page, 0, dim);
 	const float *t1 = mkt_centroid_float_data(page, 0, dim);
@@ -688,7 +643,7 @@ TEST(page_entry_data_generic_accessor)
 	for (Dimension i = 0; i < dim; i++)
 		hvec[i] = mkt_float_to_half((float)i);
 
-	mkt_centroid_page_add_entry(page, dim, 0, 1, 0, NULL, hvec);
+	mkt_centroid_page_add_entry(page, dim, 0, 1, 0, hvec);
 
 	const void *g2 = mkt_centroid_entry_data(page, 0, dim);
 	const half *t2 = mkt_centroid_half_data(page, 0, dim);

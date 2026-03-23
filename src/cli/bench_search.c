@@ -777,7 +777,6 @@ build_tree(
 				entry_flags,
 				entry_child_count,
 				encoder,
-				node_tids,
 				child_blks);
 
 		mkt_free(leaf_children);
@@ -1228,26 +1227,35 @@ cmd_bench_search(CmdContext *ctx)
 			}
 
 			MktCentroidSearchState state = {
-					.qstate		 = qs,
-					.query		 = qvec,
-					.query_datum = PointerGetDatum(qvec),
-					.storage	 = &ts->storage.base,
-					.beam_width	 = config.beam_width,
-					.nprobe		 = nprobe,
-					.dim		 = config.dim,
+					.qstate		= qs,
+					.query		= qvec,
+					.storage	= &ts->storage.base,
+					.beam_width = config.beam_width,
+					.nprobe		= nprobe,
+					.dim		= config.dim,
 			};
 
 			/* Warmup */
 			for (int w = 0; w < WARMUP_RUNS; w++)
 				mkt_centroid_beam_search(
-						&state, 0, (uint8_t)config.nlevels, results, NULL);
+						&state,
+						0,
+						(uint8_t)config.nlevels,
+						results,
+						NULL,
+						NULL);
 
 			/* Timed runs */
 			for (uint32_t r = 0; r < config.runs; r++)
 			{
 				uint64_t start = get_time_ns();
 				mkt_centroid_beam_search(
-						&state, 0, (uint8_t)config.nlevels, results, NULL);
+						&state,
+						0,
+						(uint8_t)config.nlevels,
+						results,
+						NULL,
+						NULL);
 				uint64_t end = get_time_ns();
 				bench_stats_add(&var_stats[v], (double)(end - start) / 1000.0);
 			}
@@ -1258,6 +1266,7 @@ cmd_bench_search(CmdContext *ctx)
 					0,
 					(uint8_t)config.nlevels,
 					results,
+					NULL,
 					&var_stats_search[v]);
 
 			/*
@@ -1338,30 +1347,14 @@ cmd_bench_search(CmdContext *ctx)
 	}
 
 	/* Print routing distance stats */
-	bool has_rerank = false;
+	printf("\n  Routing distance computations"
+		   " (avg per query):\n");
+	printf("  %-14s %8s\n", "Variant", "Scored");
 	for (int v = 0; v < NUM_VARIANTS; v++)
-		has_rerank |= (var_stats_search[v].reranked > 0);
-
-	if (has_rerank)
 	{
-		printf("\n  Routing distance computations"
-			   " (avg per query):\n");
-		printf("  %-14s %8s %8s %8s\n",
-			   "Variant",
-			   "Scored",
-			   "Rerank",
-			   "Total");
-		for (int v = 0; v < NUM_VARIANTS; v++)
-		{
-			MktCentroidSearchStats *ss		   = &var_stats_search[v];
-			double					avg_dist   = (double)ss->dist_calcs / nq;
-			double					avg_rerank = (double)ss->reranked / nq;
-			printf("  %-14s %8.1f %8.1f %8.1f\n",
-				   variants[v].name,
-				   avg_dist,
-				   avg_rerank,
-				   avg_dist + avg_rerank);
-		}
+		MktCentroidSearchStats *ss		 = &var_stats_search[v];
+		double					avg_dist = (double)ss->dist_calcs / nq;
+		printf("  %-14s %8.1f\n", variants[v].name, avg_dist);
 	}
 
 	/* Cleanup */

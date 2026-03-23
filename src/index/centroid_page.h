@@ -16,8 +16,7 @@
  *
  * Metadata grows from the top; vector data grows from the bottom.
  * The page is full when the two regions would overlap. Metadata
- * size is format-dependent: 16B for RaBitQ (includes medoid TID),
- * 8B for float/half (no reranking needed).
+ * is 8 bytes per entry (uniform across all formats).
  *
  * The data format is selected at page initialization and stored in the
  * low 2 bits of opaque->flags:
@@ -26,7 +25,7 @@
  *   FLOAT   — float32 vectors (dim * 4 bytes per entry)
  *   HALF    — float16 vectors (dim * 2 bytes per entry)
  *
- * RABITQ pages encode medoid vectors relative to a centroid, enabling
+ * RABITQ pages encode centroids relative to a global mean, enabling
  * fast approximate distance with error bounds. FLOAT/HALF pages store
  * full-precision vectors for exact routing at the cost of fewer
  * entries per page.
@@ -81,12 +80,9 @@ typedef enum MktCentroidFormat
 /* ----------------------------------------------------------------
  * Per-centroid metadata (grows forward from page header)
  *
- * Base struct (8 bytes) used by all formats. RaBitQ extends it
- * with medoid_tid for reranking. Float/half pages store exact
- * vectors and never need reranking, so they skip the TID.
- *
- * For internal nodes, child_blkno points to the child centroid page.
- * For leaf nodes, child_blkno points to the posting list head page.
+ * Uniform 8-byte struct used by all formats. For internal nodes,
+ * child_blkno points to the child centroid page. For leaf nodes,
+ * child_blkno points to the posting list head page.
  * ---------------------------------------------------------------- */
 typedef struct MktCentroidEntryMeta
 {
@@ -94,14 +90,6 @@ typedef struct MktCentroidEntryMeta
 	uint16_t	child_count; /* 2B - children at next level */
 	uint16_t	flags;		 /* 2B - MKT_CENTROID_FLAG_LEAF etc */
 } MktCentroidEntryMeta;
-
-/* Extended metadata for RaBitQ format (16 bytes) */
-typedef struct MktCentroidEntryMetaRaBitQ
-{
-	MktCentroidEntryMeta base;		 /* 8B - common fields */
-	ItemPointerData		 medoid_tid; /* 6B - heap TID for rerank */
-	uint16_t			 reserved;	 /* 2B - alignment */
-} MktCentroidEntryMetaRaBitQ;
 
 /* ----------------------------------------------------------------
  * Page special area (12 bytes, at page end per PG convention)
@@ -125,12 +113,11 @@ typedef struct MktCentroidPageOpaque
 	(BLCKSZ - SizeOfPageHeaderData - \
 	 (size_t)MAXALIGN(sizeof(MktCentroidPageOpaque)))
 
-/* Format-dependent metadata size per entry */
+/* Metadata size per entry (uniform across all formats) */
 static inline uint32_t
 mkt_centroid_meta_size(MktCentroidFormat fmt)
 {
-	if (fmt == MKT_CENTROID_FMT_RABITQ)
-		return sizeof(MktCentroidEntryMetaRaBitQ);
+	(void)fmt;
 	return sizeof(MktCentroidEntryMeta);
 }
 
@@ -216,13 +203,6 @@ mkt_centroid_meta(const Page page, uint32_t index)
 	return mkt_centroid_meta_mut(page, index);
 }
 
-/* Get pointer to the i-th RaBitQ metadata entry (read-only) */
-static inline const MktCentroidEntryMetaRaBitQ *
-mkt_centroid_meta_rabitq(const Page page, uint32_t index)
-{
-	return (const MktCentroidEntryMetaRaBitQ *)mkt_centroid_meta(page, index);
-}
-
 /*
  * Get pointer to the i-th data entry (backward region).
  *
@@ -289,12 +269,11 @@ mkt_centroid_page_init(Page page, uint8_t level)
  * Returns NULL if the page has no room.
  */
 void *mkt_centroid_page_add_entry_begin(
-		Page				   page,
-		Dimension			   dim,
-		BlockNumber			   child_blkno,
-		uint16_t			   child_count,
-		uint16_t			   flags,
-		const ItemPointerData *medoid_tid);
+		Page		page,
+		Dimension	dim,
+		BlockNumber child_blkno,
+		uint16_t	child_count,
+		uint16_t	flags);
 
 /*
  * Add a centroid entry to a page. Writes metadata forward and
@@ -307,27 +286,25 @@ void *mkt_centroid_page_add_entry_begin(
  *   HALF   → const half * (dim elements)
  */
 bool mkt_centroid_page_add_entry(
-		Page				   page,
-		Dimension			   dim,
-		BlockNumber			   child_blkno,
-		uint16_t			   child_count,
-		uint16_t			   flags,
-		const ItemPointerData *medoid_tid,
-		const void			  *data);
+		Page		page,
+		Dimension	dim,
+		BlockNumber child_blkno,
+		uint16_t	child_count,
+		uint16_t	flags,
+		const void *data);
 
 /* Backward-compatible add (RaBitQ-typed parameter) */
 static inline bool
 mkt_centroid_page_add(
-		Page				   page,
-		Dimension			   dim,
-		BlockNumber			   child_blkno,
-		uint16_t			   child_count,
-		uint16_t			   flags,
-		const ItemPointerData *medoid_tid,
-		const RaBitQData	  *data)
+		Page			  page,
+		Dimension		  dim,
+		BlockNumber		  child_blkno,
+		uint16_t		  child_count,
+		uint16_t		  flags,
+		const RaBitQData *data)
 {
 	return mkt_centroid_page_add_entry(
-			page, dim, child_blkno, child_count, flags, medoid_tid, data);
+			page, dim, child_blkno, child_count, flags, data);
 }
 
 /*

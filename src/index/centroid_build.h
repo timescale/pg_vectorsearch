@@ -175,22 +175,20 @@ centroid_encoder_init(
  *   flags        — per-entry flags (e.g. MKT_CENTROID_FLAG_LEAF)
  *   child_count  — uniform child count for all entries
  *   encoder      — vtable producing entry payloads on demand
- *   medoid_tids  — per-entry TIDs (NULL → no TID written)
  *   child_blknos — per-entry child block numbers
  *                   (NULL → InvalidBlockNumber for all entries)
  *
  * Returns the BlockNumber of the first centroid page.
  */
 BlockNumber mkt_centroid_write_pages(
-		MktStorage			  *storage,
-		Dimension			   dim,
-		uint32_t			   nlist,
-		MktCentroidFormat	   fmt,
-		uint8_t				   level,
-		uint16_t			   flags,
-		uint16_t			   child_count,
-		CentroidEncoder		  *encoder,
-		const ItemPointerData *medoid_tids,
-		const BlockNumber	  *child_blknos);
+		MktStorage		  *storage,
+		Dimension		   dim,
+		uint32_t		   nlist,
+		MktCentroidFormat  fmt,
+		uint8_t			   level,
+		uint16_t		   flags,
+		uint16_t		   child_count,
+		CentroidEncoder	  *encoder,
+		const BlockNumber *child_blknos);
 
 #endif /* MKT_CENTROID_BUILD_H */

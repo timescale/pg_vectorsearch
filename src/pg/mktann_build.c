@@ -7,7 +7,7 @@
  *   3. Sample vectors for clustering (BlockSampler + reservoir)
  *   4. Run hierarchical k-means (mkt_hkmeans_f32)
  *   5. Compute global mean from leaf centroids
- *   6. Full heap scan to assign vectors and find medoids
+ *   6. Full heap scan to assign vectors to leaf centroids
  *   7. Pre-compute block numbers for BFS tree nodes
  *   8. Encode + write centroid pages per BFS node
  *   9. Write metadata page (block 0) with tree parameters
@@ -57,9 +57,7 @@ typedef struct MktannBuildState
 	DistanceMetric metric;
 
 	/* Per-worker accumulators */
-	ItemPointerData *medoid_tids;  /* [nlist] best medoid per cluster */
-	float			*medoid_dists; /* [nlist] distance of best medoid */
-	double			 indtuples;	   /* count */
+	double indtuples; /* count */
 
 	/* Sampling */
 	float *samples;		/* [max_samples * dim] row-major */
@@ -170,7 +168,7 @@ sample_rows(MktannBuildState *bs)
 }
 
 /* ----------------------------------------------------------------
- * Full scan callback — assign vectors, find medoids
+ * Full scan callback — assign vectors to leaf centroids
  * ---------------------------------------------------------------- */
 
 static void
@@ -185,46 +183,15 @@ build_callback(
 	MktannBuildState *bs = (MktannBuildState *)state;
 
 	(void)index;
+	(void)tid;
+	(void)values;
 	(void)tuple_is_alive;
 
 	if (isnull[0])
 		return;
 
-	MemoryContext old_ctx = MemoryContextSwitchTo(bs->tmp_ctx);
-
-	MktVector *vec	= DatumGetMktVector(values[0]);
-	VectorRef  vref = MktVectorToRef(vec);
-	Dimension  dim	= bs->dim;
-
-	/* Find nearest centroid */
-	float	 min_dist = INFINITY;
-	uint32_t best_c	  = 0;
-
-	for (uint32_t c = 0; c < bs->nlist; c++)
-	{
-		VectorRef cref = {
-				.data = bs->centroids + (size_t)c * dim,
-				.dim  = dim,
-		};
-		float d = mkt_distance(vref, cref, bs->metric);
-		if (d < min_dist)
-		{
-			min_dist = d;
-			best_c	 = c;
-		}
-	}
-
-	/* Track medoid (closest vector to centroid) — only for RaBitQ */
-	if (bs->medoid_tids != NULL && min_dist < bs->medoid_dists[best_c])
-	{
-		bs->medoid_dists[best_c] = min_dist;
-		bs->medoid_tids[best_c]	 = *tid;
-	}
-
+	/* TODO: assign vector to nearest centroid for posting list build */
 	bs->indtuples++;
-
-	MemoryContextSwitchTo(old_ctx);
-	MemoryContextReset(bs->tmp_ctx);
 }
 
 /* ----------------------------------------------------------------
@@ -432,20 +399,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	float *global_mean = palloc(dim * sizeof(float));
 	mkt_vector_mean(tree->leaf_centroids, nlist, dim, global_mean);
 
-	/* 7. Full heap scan — assign vectors to leaf centroids,
-	 * find medoids */
-	if (centroid_format == MKT_CENTROID_FMT_RABITQ)
-	{
-		bs.medoid_tids	= palloc0(nlist * sizeof(ItemPointerData));
-		bs.medoid_dists = palloc(nlist * sizeof(float));
-		for (uint32_t c = 0; c < nlist; c++)
-			bs.medoid_dists[c] = INFINITY;
-	}
-	else
-	{
-		bs.medoid_tids	= NULL;
-		bs.medoid_dists = NULL;
-	}
+	/* 7. Full heap scan — assign vectors to leaf centroids */
 	bs.indtuples = 0;
 
 	double heap_tuples = table_index_build_scan(
@@ -514,10 +468,6 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 		uint16_t flags		 = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
 		uint16_t child_count = is_leaf ? 0 : (uint16_t)fan_out;
 
-		ItemPointerData *medoid_tids = NULL;
-		if (is_leaf && centroid_format == MKT_CENTROID_FMT_RABITQ)
-			medoid_tids = bs.medoid_tids + node->first_leaf;
-
 		CentroidEncoderState enc_state;
 		CentroidEncoder		*encoder = centroid_encoder_init(
 				&enc_state,
@@ -541,7 +491,6 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				flags,
 				child_count,
 				encoder,
-				medoid_tids,
 				child_blks);
 	}
 

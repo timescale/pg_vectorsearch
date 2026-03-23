@@ -22,10 +22,9 @@
  * ---------------------------------------------------------------- */
 typedef struct Candidate
 {
-	BlockNumber		child_blkno; /* next level's page */
-	ItemPointerData medoid_tid;
-	Distance		distance;
-	Distance		error; /* symmetric error (0 for exact) */
+	BlockNumber child_blkno; /* next level's page */
+	Distance	distance;
+	Distance	error; /* symmetric error (0 for exact) */
 } Candidate;
 
 /* ----------------------------------------------------------------
@@ -115,12 +114,11 @@ score_page(
 		/* Build candidates (result j → page entry count-1-j) */
 		for (uint16_t j = 0; j < count && cand_count < cand_cap; j++)
 		{
-			uint16_t						  page_idx = count - 1 - j;
-			const MktCentroidEntryMetaRaBitQ *rmeta =
-					mkt_centroid_meta_rabitq(page, page_idx);
+			uint16_t					page_idx = count - 1 - j;
+			const MktCentroidEntryMeta *meta =
+					mkt_centroid_meta(page, page_idx);
 
-			cands[cand_count].child_blkno = rmeta->base.child_blkno;
-			cands[cand_count].medoid_tid  = rmeta->medoid_tid;
+			cands[cand_count].child_blkno = meta->child_blkno;
 			cands[cand_count].distance	  = sp_scratch->distances[j];
 			cands[cand_count].error		  = sp_scratch->distances[j] -
 									  sp_scratch->lower_bounds[j];
@@ -156,9 +154,8 @@ score_page(
 			}
 
 			cands[cand_count].child_blkno = meta->child_blkno;
-			memset(&cands[cand_count].medoid_tid, 0, sizeof(ItemPointerData));
-			cands[cand_count].distance = dist;
-			cands[cand_count].error	   = 0.0f;
+			cands[cand_count].distance	  = dist;
+			cands[cand_count].error		  = 0.0f;
 			cand_count++;
 		}
 		break;
@@ -191,9 +188,8 @@ score_page(
 			}
 
 			cands[cand_count].child_blkno = meta->child_blkno;
-			memset(&cands[cand_count].medoid_tid, 0, sizeof(ItemPointerData));
-			cands[cand_count].distance = dist;
-			cands[cand_count].error	   = 0.0f;
+			cands[cand_count].distance	  = dist;
+			cands[cand_count].error		  = 0.0f;
 			cand_count++;
 		}
 		break;
@@ -243,101 +239,13 @@ select_topk_bounded(
 	return nresults;
 }
 
-/* ----------------------------------------------------------------
- * Rerank scratch — preallocated buffers for rerank_candidates
- * ---------------------------------------------------------------- */
-typedef struct RerankScratch
-{
-	ItemPointerData *tids;
-	Distance		*distances;
-	Distance		*errors;
-	uint32_t		*out_indices;
-	Distance		*out_distances;
-	Candidate		*tmp;
-} RerankScratch;
-
-static void
-rerank_scratch_init(RerankScratch *s, uint32_t cap)
-{
-	s->tids			 = mkt_alloc(cap * sizeof(ItemPointerData));
-	s->distances	 = mkt_alloc(cap * sizeof(Distance));
-	s->errors		 = mkt_alloc(cap * sizeof(Distance));
-	s->out_indices	 = mkt_alloc(cap * sizeof(uint32_t));
-	s->out_distances = mkt_alloc(cap * sizeof(Distance));
-	s->tmp			 = mkt_alloc(cap * sizeof(Candidate));
-}
-
-/*
- * Rerank candidates with exact distances via storage layer.
- * Replaces approximate distances with exact ones for candidates
- * that survive error-bound pruning. Skips if no rerank method
- * or all candidates are already exact (error == 0).
- *
- * Uses preallocated scratch buffers — no per-call allocations.
- */
-static uint32_t
-rerank_candidates(
-		const MktCentroidSearchState *state,
-		Candidate					 *cands,
-		uint32_t					  count,
-		uint32_t					  keep,
-		RerankScratch				 *scratch,
-		MktCentroidSearchStats		 *stats)
-{
-	if (count == 0 || state->storage->ops->rerank == NULL)
-		return count;
-
-	/* Check if any candidate has approximate distance */
-	bool has_approx = false;
-	for (uint32_t i = 0; i < count && !has_approx; i++)
-		has_approx = (cands[i].error > 0.0f);
-
-	if (!has_approx)
-		return count < keep ? count : keep;
-
-	if (stats)
-		stats->reranked += count;
-
-	/* Build parallel arrays from Candidate structs */
-	for (uint32_t i = 0; i < count; i++)
-	{
-		scratch->tids[i]	  = cands[i].medoid_tid;
-		scratch->distances[i] = cands[i].distance;
-		scratch->errors[i]	  = cands[i].error;
-	}
-
-	uint32_t nresults = mkt_storage_rerank(
-			state->storage,
-			state->query_datum,
-			state->dim,
-			scratch->tids,
-			scratch->distances,
-			scratch->errors,
-			count,
-			keep,
-			scratch->out_indices,
-			scratch->out_distances);
-
-	/* Rebuild candidate array from reranked results */
-	for (uint32_t i = 0; i < nresults; i++)
-	{
-		uint32_t idx				= scratch->out_indices[i];
-		scratch->tmp[i].child_blkno = cands[idx].child_blkno;
-		scratch->tmp[i].medoid_tid	= cands[idx].medoid_tid;
-		scratch->tmp[i].distance	= scratch->out_distances[i];
-		scratch->tmp[i].error		= 0.0f; /* now exact */
-	}
-	memcpy(cands, scratch->tmp, nresults * sizeof(Candidate));
-
-	return nresults;
-}
-
 uint32_t
 mkt_centroid_beam_search(
 		const MktCentroidSearchState *state,
 		BlockNumber					  first_centroid_blkno,
 		uint8_t						  nlevels,
 		MktCentroidResult			 *results,
+		float						 *centroid_vecs,
 		MktCentroidSearchStats		 *stats)
 {
 	if (state == NULL || results == NULL || nlevels == 0 ||
@@ -376,11 +284,8 @@ mkt_centroid_beam_search(
 	sp_scratch.multi_scratch	 = mkt_alloc(max_per_page * sizeof(float));
 	sp_scratch.symmetric_scratch = mkt_alloc(max_per_page * sizeof(uint32_t));
 
-	/* Preallocate rerank scratch buffers (zero allocations per level) */
-	RerankScratch rerank_scratch;
-	bool		  has_rerank = (state->storage->ops->rerank != NULL);
-	if (has_rerank)
-		rerank_scratch_init(&rerank_scratch, cand_cap);
+	/* centroid_vecs: will be used later for copying centroid vectors */
+	(void)centroid_vecs;
 
 	/*
 	 * buf_a accumulates raw candidates from score_page.
@@ -410,11 +315,6 @@ mkt_centroid_beam_search(
 	/* Select top-K from level 0 into buf_b */
 	uint32_t keep		= (nlevels == 1) ? nprobe : beam_width;
 	uint32_t cand_count = select_topk_bounded(buf_a, raw_count, keep, buf_b);
-
-	/* Rerank level 0 survivors with exact distances */
-	if (has_rerank)
-		cand_count = rerank_candidates(
-				state, buf_b, cand_count, keep, &rerank_scratch, stats);
 
 	/* buf_b is now the live set */
 	Candidate *live	   = buf_b;
@@ -457,11 +357,6 @@ mkt_centroid_beam_search(
 		/* Select into live (scratch → live via topk) */
 		keep	   = (level == nlevels - 1) ? nprobe : beam_width;
 		cand_count = select_topk_bounded(scratch, next_count, keep, live);
-
-		/* Rerank this level's survivors with exact distances */
-		if (has_rerank)
-			cand_count = rerank_candidates(
-					state, live, cand_count, keep, &rerank_scratch, stats);
 	}
 
 	/* Build results in caller-owned memory (cap at nprobe) */
@@ -469,7 +364,6 @@ mkt_centroid_beam_search(
 	for (uint32_t i = 0; i < result_count; i++)
 	{
 		results[i].posting_head = live[i].child_blkno;
-		results[i].medoid_tid	= live[i].medoid_tid;
 		results[i].distance		= live[i].distance;
 		results[i].error		= live[i].error;
 	}

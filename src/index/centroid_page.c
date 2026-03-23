@@ -25,12 +25,11 @@ mkt_centroid_page_init_fmt(Page page, uint8_t level, MktCentroidFormat fmt)
 
 void *
 mkt_centroid_page_add_entry_begin(
-		Page				   page,
-		Dimension			   dim,
-		BlockNumber			   child_blkno,
-		uint16_t			   child_count,
-		uint16_t			   flags,
-		const ItemPointerData *medoid_tid)
+		Page		page,
+		Dimension	dim,
+		BlockNumber child_blkno,
+		uint16_t	child_count,
+		uint16_t	flags)
 {
 	if (!mkt_centroid_page_has_room(page, dim))
 		return NULL;
@@ -47,16 +46,6 @@ mkt_centroid_page_add_entry_begin(
 	meta->child_count		   = child_count;
 	meta->flags				   = flags;
 
-	if (fmt == MKT_CENTROID_FMT_RABITQ)
-	{
-		MktCentroidEntryMetaRaBitQ *rmeta = (MktCentroidEntryMetaRaBitQ *)meta;
-		if (medoid_tid != NULL)
-			rmeta->medoid_tid = *medoid_tid;
-		else
-			memset(&rmeta->medoid_tid, 0, sizeof(rmeta->medoid_tid));
-		rmeta->reserved = 0;
-	}
-
 	/* Reserve data space (backward region) */
 	uint32_t data_size = mkt_centroid_data_size(dim, fmt);
 	header->pd_upper -= data_size;
@@ -69,19 +58,18 @@ mkt_centroid_page_add_entry_begin(
 
 bool
 mkt_centroid_page_add_entry(
-		Page				   page,
-		Dimension			   dim,
-		BlockNumber			   child_blkno,
-		uint16_t			   child_count,
-		uint16_t			   flags,
-		const ItemPointerData *medoid_tid,
-		const void			  *data)
+		Page		page,
+		Dimension	dim,
+		BlockNumber child_blkno,
+		uint16_t	child_count,
+		uint16_t	flags,
+		const void *data)
 {
 	MktCentroidFormat fmt		= mkt_centroid_page_format(page);
 	uint32_t		  data_size = mkt_centroid_data_size(dim, fmt);
 
 	void *dest = mkt_centroid_page_add_entry_begin(
-			page, dim, child_blkno, child_count, flags, medoid_tid);
+			page, dim, child_blkno, child_count, flags);
 	if (dest == NULL)
 		return false;
 
