@@ -42,7 +42,11 @@ SELECT count(*) FROM (
     SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
     FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5
 ) t;
-ERROR:  scan requires posting lists (not yet implemented)
+ count 
+-------
+     5
+(1 row)
+
 RESET enable_seqscan;
 -- Create index with distance_mode relopt
 CREATE INDEX idx_sym ON embeddings USING mktann (v)
@@ -133,7 +137,11 @@ SELECT count(*) FROM (
     SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
     FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5
 ) t;
-ERROR:  scan requires posting lists (not yet implemented)
+ count 
+-------
+     5
+(1 row)
+
 RESET enable_seqscan;
 -- Multi-level tree with uncompressed float centroids
 CREATE INDEX idx_ml_float ON embeddings USING mktann (v)
@@ -159,6 +167,6 @@ SELECT relpages > 0 AS has_pages FROM pg_class
 CREATE INDEX idx_bad_fo ON embeddings USING mktann (v)
     WITH (fan_out = 1);
 ERROR:  value 1 out of bounds for option "fan_out"
-DETAIL:  Valid values are between "2" and "255".
+DETAIL:  Valid values are between "2" and "65535".
 -- Cleanup
 DROP TABLE embeddings;

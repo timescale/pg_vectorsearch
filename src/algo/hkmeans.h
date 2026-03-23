@@ -82,4 +82,20 @@ HKMeansResult *mkt_hkmeans_f32(
  */
 void mkt_hkmeans_result_destroy(HKMeansResult *result);
 
+/*
+ * Assign a vector to its nearest leaf centroid via tree descent.
+ *
+ * At each tree level, finds the nearest centroid among the node's
+ * children, then descends to that child. Returns the leaf index
+ * (into result->leaf_centroids) and writes the distance to the
+ * nearest leaf centroid into *out_distance.
+ *
+ * Cost: O(fan_out * nlevels * dim) per call.
+ */
+uint32_t mkt_hkmeans_assign(
+		const HKMeansResult *tree,
+		const float			*vec,
+		DistanceMetric		 metric,
+		Distance			*out_distance);
+
 #endif /* MKT_HKMEANS_H */

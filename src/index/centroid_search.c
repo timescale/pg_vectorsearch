@@ -24,7 +24,9 @@ typedef struct Candidate
 {
 	BlockNumber child_blkno; /* next level's page */
 	Distance	distance;
-	Distance	error; /* symmetric error (0 for exact) */
+	Distance	error;		  /* symmetric error (0 for exact) */
+	BlockNumber source_blkno; /* page this candidate came from */
+	uint16_t	source_entry; /* entry index on source page */
 } Candidate;
 
 /* ----------------------------------------------------------------
@@ -53,6 +55,7 @@ static uint32_t
 score_page(
 		const MktCentroidSearchState *state,
 		Page						  page,
+		BlockNumber					  page_blkno,
 		Dimension					  dim,
 		Candidate					 *cands,
 		uint32_t					  cand_count,
@@ -122,6 +125,8 @@ score_page(
 			cands[cand_count].distance	  = sp_scratch->distances[j];
 			cands[cand_count].error		  = sp_scratch->distances[j] -
 									  sp_scratch->lower_bounds[j];
+			cands[cand_count].source_blkno = page_blkno;
+			cands[cand_count].source_entry = page_idx;
 			cand_count++;
 		}
 		break;
@@ -153,9 +158,11 @@ score_page(
 				break;
 			}
 
-			cands[cand_count].child_blkno = meta->child_blkno;
-			cands[cand_count].distance	  = dist;
-			cands[cand_count].error		  = 0.0f;
+			cands[cand_count].child_blkno  = meta->child_blkno;
+			cands[cand_count].distance	   = dist;
+			cands[cand_count].error		   = 0.0f;
+			cands[cand_count].source_blkno = page_blkno;
+			cands[cand_count].source_entry = i;
 			cand_count++;
 		}
 		break;
@@ -187,9 +194,11 @@ score_page(
 				break;
 			}
 
-			cands[cand_count].child_blkno = meta->child_blkno;
-			cands[cand_count].distance	  = dist;
-			cands[cand_count].error		  = 0.0f;
+			cands[cand_count].child_blkno  = meta->child_blkno;
+			cands[cand_count].distance	   = dist;
+			cands[cand_count].error		   = 0.0f;
+			cands[cand_count].source_blkno = page_blkno;
+			cands[cand_count].source_entry = i;
 			cand_count++;
 		}
 		break;
@@ -284,8 +293,7 @@ mkt_centroid_beam_search(
 	sp_scratch.multi_scratch	 = mkt_alloc(max_per_page * sizeof(float));
 	sp_scratch.symmetric_scratch = mkt_alloc(max_per_page * sizeof(uint32_t));
 
-	/* centroid_vecs: will be used later for copying centroid vectors */
-	(void)centroid_vecs;
+	/* centroid_vecs extraction happens after building results */
 
 	/*
 	 * buf_a accumulates raw candidates from score_page.
@@ -303,7 +311,14 @@ mkt_centroid_beam_search(
 	{
 		Page page = mkt_storage_read_page(state->storage, blkno);
 		raw_count = score_page(
-				state, page, dim, buf_a, raw_count, cand_cap, &sp_scratch);
+				state,
+				page,
+				blkno,
+				dim,
+				buf_a,
+				raw_count,
+				cand_cap,
+				&sp_scratch);
 		MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
 		BlockNumber			   next_blkno = opaque->next_blkno;
 		mkt_storage_release_page(state->storage, blkno);
@@ -340,6 +355,7 @@ mkt_centroid_beam_search(
 				next_count = score_page(
 						state,
 						page,
+						cb,
 						dim,
 						scratch,
 						next_count,
@@ -366,6 +382,61 @@ mkt_centroid_beam_search(
 		results[i].posting_head = live[i].child_blkno;
 		results[i].distance		= live[i].distance;
 		results[i].error		= live[i].error;
+	}
+
+	/* Extract centroid vectors for float/half formats.
+	 * Re-read the source pages (likely still cached) and copy
+	 * the centroid vector data into caller-owned centroid_vecs. */
+	if (centroid_vecs != NULL)
+	{
+		BlockNumber prev_blk  = InvalidBlockNumber;
+		Page		prev_page = NULL;
+
+		for (uint32_t i = 0; i < result_count; i++)
+		{
+			BlockNumber src_blk = live[i].source_blkno;
+			uint16_t	src_ent = live[i].source_entry;
+
+			/* Pin page (reuse if same as previous) */
+			if (src_blk != prev_blk)
+			{
+				if (prev_page != NULL)
+					mkt_storage_release_page(state->storage, prev_blk);
+				prev_page = mkt_storage_read_page(state->storage, src_blk);
+				prev_blk  = src_blk;
+			}
+
+			MktCentroidFormat fmt = mkt_centroid_page_format(prev_page);
+			float			 *dst = centroid_vecs + (size_t)i * dim;
+
+			switch (fmt)
+			{
+			case MKT_CENTROID_FMT_FLOAT:
+			{
+				const float *fvec =
+						mkt_centroid_float_data(prev_page, src_ent, dim);
+				memcpy(dst, fvec, dim * sizeof(float));
+				break;
+			}
+			case MKT_CENTROID_FMT_HALF:
+			{
+				const half *hvec =
+						mkt_centroid_half_data(prev_page, src_ent, dim);
+				for (Dimension d = 0; d < dim; d++)
+					dst[d] = mkt_half_to_float(hvec[d]);
+				break;
+			}
+			default:
+				/* RaBitQ centroids: can't extract float vector.
+				 * Zero-fill; caller should not use centroid_vecs
+				 * with RaBitQ centroid format. */
+				memset(dst, 0, dim * sizeof(float));
+				break;
+			}
+		}
+
+		if (prev_page != NULL)
+			mkt_storage_release_page(state->storage, prev_blk);
 	}
 
 	mkt_memctx_switch(old_ctx);

@@ -90,13 +90,55 @@ pg_commit_page(MktStorage *self, BlockNumber blkno)
 
 	(void)blkno;
 
-	/* WAL-log the page via GenericXLog */
-	GenericXLogState *state = GenericXLogStart(s->index);
-	GenericXLogRegisterBuffer(state, s->cur_buf, GENERIC_XLOG_FULL_IMAGE);
-	GenericXLogFinish(state);
+	if (s->build_mode)
+	{
+		/*
+		 * During index build, skip per-page WAL logging.
+		 * log_newpage_range() at the end of the build WAL-logs all
+		 * pages as full-page images. This matches the standard PG
+		 * index build pattern (btree, GiST, bloom, etc.).
+		 */
+		MarkBufferDirty(s->cur_buf);
+	}
+	else
+	{
+		/* Normal path: WAL-log via GenericXLog */
+		GenericXLogState *state = GenericXLogStart(s->index);
+		GenericXLogRegisterBuffer(state, s->cur_buf, GENERIC_XLOG_FULL_IMAGE);
+		GenericXLogFinish(state);
+	}
 
 	UnlockReleaseBuffer(s->cur_buf);
 	s->cur_buf = InvalidBuffer;
+}
+
+/* ----------------------------------------------------------------
+ * Bulk extend: pre-allocate contiguous pages for sequential layout
+ * ---------------------------------------------------------------- */
+
+static BlockNumber
+pg_extend(MktStorage *self, uint32_t npages)
+{
+	MktannStorage *s = PG_STORAGE(self);
+
+	Buffer	*buffers	 = palloc(npages * sizeof(Buffer));
+	uint32_t extended_by = 0;
+
+	BlockNumber start = ExtendBufferedRelBy(
+			BMR_REL(s->index),
+			MAIN_FORKNUM,
+			NULL,
+			EB_SKIP_EXTENSION_LOCK,
+			npages,
+			buffers,
+			&extended_by);
+
+	/* Release all pinned buffers — we just need the block range */
+	for (uint32_t i = 0; i < extended_by; i++)
+		ReleaseBuffer(buffers[i]);
+
+	pfree(buffers);
+	return start;
 }
 
 /* ----------------------------------------------------------------
@@ -236,6 +278,7 @@ static const MktStorageOps pg_storage_ops = {
 		.write_page	  = pg_write_page,
 		.new_page	  = pg_new_page,
 		.commit_page  = pg_commit_page,
+		.extend		  = pg_extend,
 		.rerank		  = pg_rerank,
 };
 
@@ -247,9 +290,10 @@ void
 mktann_storage_init(
 		MktannStorage *s, Relation index, Relation rel, DistanceMetric metric)
 {
-	s->base.ops = &pg_storage_ops;
-	s->index	= index;
-	s->rel		= rel;
-	s->cur_buf	= InvalidBuffer;
-	s->metric	= metric;
+	s->base.ops	  = &pg_storage_ops;
+	s->index	  = index;
+	s->rel		  = rel;
+	s->cur_buf	  = InvalidBuffer;
+	s->metric	  = metric;
+	s->build_mode = false;
 }

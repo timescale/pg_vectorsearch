@@ -28,7 +28,8 @@ SELECT level,
 CREATE INDEX idx_ml ON embeddings USING mktann (v)
     WITH (fan_out = 4, centroid_compression = true);
 
-SELECT * FROM mkt_centroid_pages('idx_ml'::regclass)
+SELECT entry, level, format, child_count, is_leaf
+    FROM mkt_centroid_pages('idx_ml'::regclass)
     WHERE NOT is_leaf
     ORDER BY blkno, entry;
 
@@ -64,7 +65,8 @@ INSERT INTO wide (v)
 CREATE INDEX idx_wide ON wide USING mktann (v);
 
 -- Entries from chained pages appear naturally in output
-SELECT * FROM mkt_centroid_pages('idx_wide'::regclass)
+SELECT entry, level, format, child_count, is_leaf
+    FROM mkt_centroid_pages('idx_wide'::regclass)
     ORDER BY blkno, entry;
 
 -- Error case: not an mktann index

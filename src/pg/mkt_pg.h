@@ -29,6 +29,8 @@
  * ---------------------------------------------------------------- */
 
 extern int		   mkt_distance_mode;  /* MktDistanceMode */
+extern int		   mkt_nprobe;		   /* search probes (GUC) */
+extern int64	   mkt_query_limit;	   /* LIMIT from planner (-1=none) */
 extern relopt_kind mktann_relopt_kind; /* index reloption kind */
 
 /* ----------------------------------------------------------------
@@ -79,13 +81,18 @@ typedef struct MktannOptions
 {
 	int32 vl_len_;				/* varlena header (required by reloptions) */
 	int	  distance_mode;		/* MktDistanceMode */
-	int	  fan_out;				/* children per tree node (2-255) */
+	int	  fan_out;				/* children per tree node (2-65535) */
+	int	  nlist;				/* number of clusters (0 = auto) */
 	bool  centroid_compression; /* use RaBitQ for centroid pages */
 } MktannOptions;
 
 #define MKTANN_DEFAULT_FAN_OUT 32
 #define MKTANN_MIN_FAN_OUT	   2
-#define MKTANN_MAX_FAN_OUT	   255
+#define MKTANN_MAX_FAN_OUT	   65535
+
+#define MKTANN_DEFAULT_NLIST 0 /* 0 = auto: sqrt(ntuples) */
+#define MKTANN_MIN_NLIST	 0
+#define MKTANN_MAX_NLIST	 1000000
 
 /*
  * MktannGetDistanceMode - Resolve effective distance mode for a scan.

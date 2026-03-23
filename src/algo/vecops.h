@@ -8,6 +8,8 @@
 #ifndef MKT_VECOPS_H
 #define MKT_VECOPS_H
 
+#include <math.h>
+
 #include "mkt_types.h"
 
 /*
@@ -67,6 +69,19 @@ void mkt_vector_scale(const float *v, float scalar, float *out, Dimension dim);
  */
 void mkt_vector_mean(
 		const float *vectors, uint32_t nvecs, Dimension dim, float *out);
+
+/*
+ * Normalize a vector to unit length in-place: v[i] /= ||v||
+ *
+ * If the vector has zero norm, it is left unchanged.
+ */
+static inline void
+mkt_normalize(float *v, Dimension dim)
+{
+	float norm = mkt_l2_norm(v, dim);
+	if (norm > 0.0f)
+		mkt_vector_scale(v, 1.0f / norm, v, dim);
+}
 
 /*
  * L2 distance squared: sum((a[i] - b[i])^2)
