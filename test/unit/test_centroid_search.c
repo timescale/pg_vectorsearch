@@ -7,7 +7,6 @@
  * - Edge cases (null inputs, zero levels, invalid block number)
  */
 
-#include <float.h>
 #include <string.h>
 
 #include "algo/vecops.h"
@@ -47,125 +46,13 @@ test_release_page(MktStorage *self, BlockNumber blkno)
 	(void)blkno;
 }
 
-/*
- * test_rerank - Rerank candidates using stored medoid vectors.
- *
- * Looks up each candidate's vector via TID offset, computes exact
- * L2 distance, then uses lower-bound ordering with threshold
- * pruning to return the best-keep results.
- */
-static uint32_t
-test_rerank(
-		MktStorage			  *self,
-		Datum				   query,
-		Dimension			   dim,
-		const ItemPointerData *tids,
-		const Distance		  *distances,
-		const Distance		  *errors,
-		uint32_t			   count,
-		uint32_t			   keep,
-		uint32_t			  *out_indices,
-		Distance			  *out_distances)
-{
-	TestStorage *ts		 = (TestStorage *)self;
-	const float *query_f = (const float *)DatumGetPointer(query);
-
-	if (ts->vecs == NULL || query_f == NULL || count == 0)
-		return 0;
-
-	/*
-	 * Build sortable array of (lower_bound, index) pairs.
-	 * Exact candidates (error==0) keep their distance as-is.
-	 */
-	typedef struct
-	{
-		Distance lower_bound;
-		uint32_t idx;
-	} LBEntry;
-
-	LBEntry *lb = mkt_alloc(count * sizeof(LBEntry));
-	for (uint32_t i = 0; i < count; i++)
-	{
-		lb[i].lower_bound = distances[i] - errors[i];
-		lb[i].idx		  = i;
-	}
-
-	/* Sort by lower_bound ascending */
-	for (uint32_t i = 1; i < count; i++)
-	{
-		LBEntry	 tmp = lb[i];
-		uint32_t j	 = i;
-		while (j > 0 && lb[j - 1].lower_bound > tmp.lower_bound)
-		{
-			lb[j] = lb[j - 1];
-			j--;
-		}
-		lb[j] = tmp;
-	}
-
-	/* Iterate in lower_bound order with threshold pruning */
-	Distance  threshold = FLT_MAX;
-	uint32_t  nresults	= 0;
-	Distance *exact		= mkt_alloc(count * sizeof(Distance));
-
-	for (uint32_t i = 0; i < count; i++)
-	{
-		uint32_t idx = lb[i].idx;
-
-		/* Prune: if lower_bound >= threshold and have k results */
-		if (nresults >= keep && lb[i].lower_bound >= threshold)
-			break;
-
-		Distance d;
-		if (errors[idx] == 0.0f)
-		{
-			d = distances[idx]; /* already exact */
-		}
-		else
-		{
-			OffsetNumber off = ItemPointerGetOffsetNumber(&tids[idx]);
-			const float *vec = ts->vecs[off];
-			if (vec == NULL)
-				continue;
-			d = mkt_l2_distance_squared(query_f, vec, dim);
-		}
-		exact[idx] = d;
-
-		/* Insert into result set maintaining sorted order */
-		uint32_t pos = nresults;
-		while (pos > 0 && exact[out_indices[pos - 1]] > d)
-		{
-			if (pos < keep)
-			{
-				out_indices[pos]   = out_indices[pos - 1];
-				out_distances[pos] = out_distances[pos - 1];
-			}
-			pos--;
-		}
-		if (pos < keep)
-		{
-			out_indices[pos]   = idx;
-			out_distances[pos] = d;
-			if (nresults < keep)
-				nresults++;
-
-			/* Update threshold to worst result */
-			threshold = out_distances[nresults - 1];
-		}
-	}
-
-	mkt_free(exact);
-	mkt_free(lb);
-	return nresults;
-}
-
 static const MktStorageOps test_storage_ops = {
 		.read_page	  = test_read_page,
 		.release_page = test_release_page,
 		.write_page	  = NULL,
 		.new_page	  = NULL,
 		.commit_page  = NULL,
-		.rerank		  = test_rerank,
+		.rerank		  = NULL,
 };
 
 /* ----------------------------------------------------------------
@@ -247,9 +134,6 @@ TEST(beam_search_two_levels)
 			RaBitQData *enc		= mkt_rabitq_encode(params, vec_ref, cent_ref);
 			ASSERT_NOT_NULL(enc, "leaf encoding succeeded");
 
-			ItemPointerData tid;
-			ItemPointerSet(&tid, 0, (OffsetNumber)vec_idx);
-
 			/* Leaf children point to posting lists (fake blknos) */
 			bool added = mkt_centroid_page_add(
 					leaf_page,
@@ -257,7 +141,6 @@ TEST(beam_search_two_levels)
 					200 + vec_idx,
 					0,
 					MKT_CENTROID_FLAG_LEAF,
-					&tid,
 					enc);
 			ASSERT_TRUE(added, "leaf entry added");
 			mkt_free(enc);
@@ -270,17 +153,8 @@ TEST(beam_search_two_levels)
 		RaBitQData *root_enc = mkt_rabitq_encode(params, root_ref, cent_ref);
 		ASSERT_NOT_NULL(root_enc, "root encoding succeeded");
 
-		ItemPointerData root_tid;
-		ItemPointerSet(&root_tid, 0, (OffsetNumber)(r * level1_count));
-
 		bool added = mkt_centroid_page_add(
-				root_page,
-				dim,
-				leaf_blkno,
-				level1_count,
-				0,
-				&root_tid,
-				root_enc);
+				root_page, dim, leaf_blkno, level1_count, 0, root_enc);
 		ASSERT_TRUE(added, "root entry added");
 		mkt_free(root_enc);
 	}
@@ -301,18 +175,17 @@ TEST(beam_search_two_levels)
 	};
 
 	MktCentroidSearchState search_state = {
-			.qstate		 = qstate,
-			.query		 = query,
-			.query_datum = PointerGetDatum(query),
-			.storage	 = &storage.base,
-			.beam_width	 = 2,
-			.nprobe		 = 4,
-			.dim		 = dim,
+			.qstate		= qstate,
+			.query		= query,
+			.storage	= &storage.base,
+			.beam_width = 2,
+			.nprobe		= 4,
+			.dim		= dim,
 	};
 
 	MktCentroidResult results[4];
 	uint32_t		  nresults =
-			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL);
+			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL, NULL);
 
 	ASSERT_TRUE(nresults > 0, "should return at least one result");
 	ASSERT_TRUE(nresults <= 4, "should return at most nprobe results");
@@ -383,7 +256,7 @@ TEST(beam_search_two_levels)
 TEST(beam_search_null_state)
 {
 	MktCentroidResult results[1];
-	uint32_t		  n = mkt_centroid_beam_search(NULL, 0, 1, results, NULL);
+	uint32_t n = mkt_centroid_beam_search(NULL, 0, 1, results, NULL, NULL);
 	ASSERT_EQ(0, n, "null state should return 0");
 }
 
@@ -401,7 +274,7 @@ TEST(beam_search_null_results)
 				   .nprobe	   = 4,
 				   .dim		   = 64,
 	   };
-	uint32_t n = mkt_centroid_beam_search(&state, 0, 1, NULL, NULL);
+	uint32_t n = mkt_centroid_beam_search(&state, 0, 1, NULL, NULL, NULL);
 	ASSERT_EQ(0, n, "null results should return 0");
 }
 
@@ -420,7 +293,7 @@ TEST(beam_search_zero_levels)
 				   .dim		   = 64,
 	   };
 	MktCentroidResult results[1];
-	uint32_t n = mkt_centroid_beam_search(&state, 0, 0, results, NULL);
+	uint32_t n = mkt_centroid_beam_search(&state, 0, 0, results, NULL, NULL);
 	ASSERT_EQ(0, n, "zero levels should return 0");
 }
 
@@ -440,7 +313,7 @@ TEST(beam_search_invalid_blkno)
 	   };
 	MktCentroidResult results[1];
 	uint32_t		  n = mkt_centroid_beam_search(
-			 &state, InvalidBlockNumber, 1, results, NULL);
+			 &state, InvalidBlockNumber, 1, results, NULL, NULL);
 	ASSERT_EQ(0, n, "invalid blkno should return 0");
 }
 
@@ -487,7 +360,6 @@ TEST(beam_search_float_two_levels)
 					200 + vec_idx,
 					0,
 					MKT_CENTROID_FLAG_LEAF,
-					NULL,
 					vec);
 			ASSERT_TRUE(added, "leaf float entry added");
 		}
@@ -496,7 +368,7 @@ TEST(beam_search_float_two_levels)
 		float *root_vec = all_leaf_vecs[r * level1_count];
 
 		bool added = mkt_centroid_page_add_entry(
-				root_page, dim, leaf_blkno, level1_count, 0, NULL, root_vec);
+				root_page, dim, leaf_blkno, level1_count, 0, root_vec);
 		ASSERT_TRUE(added, "root float entry added");
 	}
 
@@ -511,18 +383,17 @@ TEST(beam_search_float_two_levels)
 	};
 
 	MktCentroidSearchState search_state = {
-			.qstate		 = NULL, /* not needed for float pages */
-			.query		 = query,
-			.query_datum = PointerGetDatum(query),
-			.storage	 = &storage.base,
-			.beam_width	 = 2,
-			.nprobe		 = 4,
-			.dim		 = dim,
+			.qstate		= NULL, /* not needed for float pages */
+			.query		= query,
+			.storage	= &storage.base,
+			.beam_width = 2,
+			.nprobe		= 4,
+			.dim		= dim,
 	};
 
 	MktCentroidResult results[4];
 	uint32_t		  nresults =
-			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL);
+			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL, NULL);
 
 	ASSERT_TRUE(nresults > 0, "float: should return results");
 	ASSERT_TRUE(nresults <= 4, "float: at most nprobe results");
@@ -620,7 +491,6 @@ TEST(beam_search_half_two_levels)
 					200 + vec_idx,
 					0,
 					MKT_CENTROID_FLAG_LEAF,
-					NULL,
 					hvec);
 			ASSERT_TRUE(added, "leaf half entry added");
 		}
@@ -629,7 +499,7 @@ TEST(beam_search_half_two_levels)
 		half *root_hvec = all_leaf_half[r * level1_count];
 
 		bool added = mkt_centroid_page_add_entry(
-				root_page, dim, leaf_blkno, level1_count, 0, NULL, root_hvec);
+				root_page, dim, leaf_blkno, level1_count, 0, root_hvec);
 		ASSERT_TRUE(added, "root half entry added");
 	}
 
@@ -644,18 +514,17 @@ TEST(beam_search_half_two_levels)
 	};
 
 	MktCentroidSearchState search_state = {
-			.qstate		 = NULL,
-			.query		 = query,
-			.query_datum = PointerGetDatum(query),
-			.storage	 = &storage.base,
-			.beam_width	 = 2,
-			.nprobe		 = 4,
-			.dim		 = dim,
+			.qstate		= NULL,
+			.query		= query,
+			.storage	= &storage.base,
+			.beam_width = 2,
+			.nprobe		= 4,
+			.dim		= dim,
 	};
 
 	MktCentroidResult results[4];
 	uint32_t		  nresults =
-			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL);
+			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL, NULL);
 
 	ASSERT_TRUE(nresults > 0, "half: should return results");
 	ASSERT_TRUE(nresults <= 4, "half: at most nprobe results");

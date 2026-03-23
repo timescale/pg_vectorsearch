@@ -42,11 +42,7 @@ SELECT count(*) FROM (
     SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
     FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5
 ) t;
- count 
--------
-     5
-(1 row)
-
+ERROR:  scan requires posting lists (not yet implemented)
 RESET enable_seqscan;
 -- Create index with distance_mode relopt
 CREATE INDEX idx_sym ON embeddings USING mktann (v)
@@ -137,11 +133,7 @@ SELECT count(*) FROM (
     SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
     FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5
 ) t;
- count 
--------
-     5
-(1 row)
-
+ERROR:  scan requires posting lists (not yet implemented)
 RESET enable_seqscan;
 -- Multi-level tree with uncompressed float centroids
 CREATE INDEX idx_ml_float ON embeddings USING mktann (v)

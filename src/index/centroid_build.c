@@ -11,16 +11,15 @@
 
 BlockNumber
 mkt_centroid_write_pages(
-		MktStorage			  *storage,
-		Dimension			   dim,
-		uint32_t			   nlist,
-		MktCentroidFormat	   fmt,
-		uint8_t				   level,
-		uint16_t			   flags,
-		uint16_t			   child_count,
-		CentroidEncoder		  *encoder,
-		const ItemPointerData *medoid_tids,
-		const BlockNumber	  *child_blknos)
+		MktStorage		  *storage,
+		Dimension		   dim,
+		uint32_t		   nlist,
+		MktCentroidFormat  fmt,
+		uint8_t			   level,
+		uint16_t		   flags,
+		uint16_t		   child_count,
+		CentroidEncoder	  *encoder,
+		const BlockNumber *child_blknos)
 {
 	BlockNumber first_blkno = InvalidBlockNumber;
 	BlockNumber prev_blkno	= InvalidBlockNumber;
@@ -61,13 +60,11 @@ mkt_centroid_write_pages(
 			prev_blkno = cur_blkno;
 		}
 
-		const ItemPointerData *tid = medoid_tids != NULL ? &medoid_tids[i]
-														 : NULL;
-		BlockNumber entry_child	   = child_blknos != NULL ? child_blknos[i]
-														  : InvalidBlockNumber;
+		BlockNumber entry_child = child_blknos != NULL ? child_blknos[i]
+													   : InvalidBlockNumber;
 
 		void *dest = mkt_centroid_page_add_entry_begin(
-				cur_page, dim, entry_child, child_count, flags, tid);
+				cur_page, dim, entry_child, child_count, flags);
 		assert(dest != NULL);
 		encoder->ops->encode_into(encoder, i, dest);
 	}

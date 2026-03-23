@@ -15,7 +15,7 @@
  *   3. For each intermediate level, expand winners via child_blkno,
  *      score all children, keep top beam_width
  *   4. At leaf level, keep top nprobe candidates
- *   5. Return posting list heads + medoid TIDs for leaf winners
+ *   5. Return posting list heads + distances for leaf winners
  */
 
 #ifndef MKT_CENTROID_SEARCH_H
@@ -33,10 +33,9 @@
  * ---------------------------------------------------------------- */
 typedef struct MktCentroidResult
 {
-	BlockNumber		posting_head; /* head of posting list */
-	ItemPointerData medoid_tid;	  /* heap TID of medoid vector */
-	Distance		distance;	  /* estimated distance to query */
-	Distance		error;		  /* symmetric error margin */
+	BlockNumber posting_head; /* head of posting list */
+	Distance	distance;	  /* estimated distance to query */
+	Distance	error;		  /* symmetric error margin */
 } MktCentroidResult;
 
 /* ----------------------------------------------------------------
@@ -44,10 +43,9 @@ typedef struct MktCentroidResult
  * ---------------------------------------------------------------- */
 typedef struct MktCentroidSearchState
 {
-	const RaBitQQueryState *qstate;		 /* query for RaBitQ pages */
-	const float			   *query;		 /* raw query for float/half pages */
-	Datum					query_datum; /* opaque query for reranking */
-	MktStorage			   *storage;	 /* page and vector I/O */
+	const RaBitQQueryState *qstate;	 /* query for RaBitQ pages */
+	const float			   *query;	 /* raw query for float/half pages */
+	MktStorage			   *storage; /* page and vector I/O */
 	uint32_t				beam_width;
 	uint32_t				nprobe;
 	Dimension				dim;
@@ -60,7 +58,6 @@ typedef struct MktCentroidSearchState
 typedef struct MktCentroidSearchStats
 {
 	uint64_t dist_calcs; /* approximate distance computations */
-	uint64_t reranked;	 /* exact distance recomputations */
 } MktCentroidSearchStats;
 
 /* ----------------------------------------------------------------
@@ -75,11 +72,21 @@ typedef struct MktCentroidSearchStats
  * accumulated (not reset) so the caller can aggregate across
  * multiple calls.
  * ---------------------------------------------------------------- */
+/*
+ * centroid_vecs is an optional output buffer (may be NULL). When
+ * non-NULL, the function copies the leaf centroid vector for each
+ * result into centroid_vecs[i * dim .. (i+1) * dim - 1]. The
+ * buffer must hold at least nprobe * dim floats. Half-precision
+ * vectors are converted to float32. Used by the PG scan path to
+ * obtain centroid reference vectors for float/half centroid
+ * formats.
+ */
 uint32_t mkt_centroid_beam_search(
 		const MktCentroidSearchState *state,
 		BlockNumber					  first_centroid_blkno,
 		uint8_t						  nlevels,
 		MktCentroidResult			 *results,
+		float						 *centroid_vecs,
 		MktCentroidSearchStats		 *stats);
 
 #endif /* MKT_CENTROID_SEARCH_H */

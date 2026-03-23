@@ -1,9 +1,9 @@
 /*
  * mktann_scan.c - Index scan for mktann
  *
- * Beam search over centroid pages, returning medoid TIDs as results.
- * RaBitQ distances are approximate; xs_recheckorderby = true tells
- * the executor to recompute exact distances from heap tuples.
+ * Beam search over centroid pages to find nearest leaf centroids.
+ * Currently only performs centroid routing; returning heap tuples
+ * requires posting lists (not yet implemented).
  *
  * Memory layout:
  *   scan_ctx    — scan lifetime (params, global_mean, results, ss)
@@ -170,15 +170,12 @@ mktann_gettuple(IndexScanDesc scan, ScanDirection direction)
 		if (scan->numberOfOrderBys == 0)
 			return false;
 
-		/* Uncompressed centroids don't store medoid TIDs —
-		 * regular scans need posting lists (not yet implemented) */
-		if (ss->centroid_format != MKT_CENTROID_FMT_RABITQ)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("uncompressed centroid format requires "
-							"posting lists (not yet implemented)"),
-					 errhint("Use centroid_compression = true, or "
-							 "wait for posting list support.")));
+		/* Centroid routing doesn't store heap TIDs — scans need
+		 * posting lists (not yet implemented) */
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("scan requires posting lists "
+						"(not yet implemented)")));
 
 		/* Extract query vector from orderby */
 		Datum	   query_datum = scan->orderByData[0].sk_argument;
@@ -217,18 +214,22 @@ mktann_gettuple(IndexScanDesc scan, ScanDirection direction)
 
 		/* Run beam search */
 		MktCentroidSearchState search = {
-				.qstate		 = qstate,
-				.query		 = qref.data,
-				.query_datum = query_datum,
-				.storage	 = &storage.base,
-				.beam_width	 = ss->nprobe,
-				.nprobe		 = ss->nprobe,
-				.dim		 = ss->dim,
-				.metric		 = ss->metric,
+				.qstate		= qstate,
+				.query		= qref.data,
+				.storage	= &storage.base,
+				.beam_width = ss->nprobe,
+				.nprobe		= ss->nprobe,
+				.dim		= ss->dim,
+				.metric		= ss->metric,
 		};
 
 		ss->nresults = mkt_centroid_beam_search(
-				&search, ss->first_centroid, ss->nlevels, ss->results, NULL);
+				&search,
+				ss->first_centroid,
+				ss->nlevels,
+				ss->results,
+				NULL,
+				NULL);
 
 		MemoryContextSwitchTo(old_ctx);
 		ss->curr = 0;
@@ -238,7 +239,7 @@ mktann_gettuple(IndexScanDesc scan, ScanDirection direction)
 	if (ss->curr >= ss->nresults)
 		return false;
 
-	scan->xs_heaptid		= ss->results[ss->curr].medoid_tid;
+	/* TODO: return TID from posting list scan */
 	scan->xs_recheckorderby = true;
 
 	/* Provide estimated distance for executor reorder */
