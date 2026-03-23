@@ -30,6 +30,8 @@ unit_test_sources = files(
   'test_kmeans.c',
   'test_memory.c',
   'test_platform.c',
+  'test_posting_page.c',
+  'test_posting_scan.c',
   'test_rabitq.c',
   'test_topk.c',
   'test_vecops.c',
