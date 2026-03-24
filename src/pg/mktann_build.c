@@ -335,9 +335,9 @@ static uint32_t
 mktann_get_fan_out(Relation index)
 {
 	MktannOptions *opts = (MktannOptions *)index->rd_options;
-	if (opts != NULL && opts->fan_out >= MKTANN_MIN_FAN_OUT)
+	if (opts != NULL && opts->fan_out >= MKT_MIN_FAN_OUT)
 		return (uint32_t)opts->fan_out;
-	return MKTANN_DEFAULT_FAN_OUT;
+	return MKT_DEFAULT_FAN_OUT;
 }
 
 /* ----------------------------------------------------------------
@@ -384,7 +384,7 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 
 	/* Derive fan_out from nlist so hkmeans produces ~nlist leaves.
 	 * Only override when fan_out is at its default. */
-	if (p->fan_out == MKTANN_DEFAULT_FAN_OUT && p->nlist > p->fan_out)
+	if (p->fan_out == MKT_DEFAULT_FAN_OUT && p->nlist > p->fan_out)
 	{
 		uint32_t f = (uint32_t)ceil(sqrt((double)p->nlist));
 		if (f > 256)
@@ -408,7 +408,9 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	uint32_t  nlist = bs->params.nlist;
 
 	/* Sample vectors (capped to fit in MaxAllocSize) */
-	bs->max_samples = Max(10000, (int)(nlist * 256));
+	bs->max_samples =
+			Max(MKT_KMEANS_MIN_SAMPLES,
+				(int)(nlist * MKT_KMEANS_SAMPLES_PER_CLUSTER));
 	{
 		size_t max_by_mem = MaxAllocSize / (dim * sizeof(float));
 		if ((size_t)bs->max_samples > max_by_mem)
@@ -438,8 +440,6 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 
 	/* Run hierarchical k-means */
 	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	km_opts.seed		  = 42;
-	km_opts.nredo		  = 1;
 	km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
 
 	HKMeansResult *tree = mkt_hkmeans_f32(
@@ -566,7 +566,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 	/* 3. Single-pass streaming build: assign via tree descent,
 	 * stream into posting builders — all in one heap scan. */
-	uint64_t	  rabitq_seed = 42;
+	uint64_t	  rabitq_seed = MKT_RABITQ_DEFAULT_SEED;
 	RaBitQParams *rq_params	  = mkt_rabitq_create(dim, rabitq_seed);
 
 	MktannStorage storage;

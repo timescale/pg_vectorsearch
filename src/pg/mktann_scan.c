@@ -37,9 +37,6 @@
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
 
-/* Fallback top-K when the planner cannot determine LIMIT. */
-#define MKT_DEFAULT_TOPK 100
-
 /* ----------------------------------------------------------------
  * Process-local cache for RaBitQParams
  *

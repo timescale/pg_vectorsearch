@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "mkt_params.h"
 #include "mkt_types.h"
 
 /*
@@ -59,12 +60,12 @@ typedef struct KMeansOptions
 	KMeansAlgorithm algorithm;		/* assignment algorithm, default: auto */
 } KMeansOptions;
 
-#define MKT_KMEANS_OPTIONS_DEFAULT \
-	{.max_iterations = 20,         \
-	 .tolerance		 = 1e-4f,      \
-	 .seed			 = 42,         \
-	 .nredo			 = 1,          \
-	 .verbose		 = false,      \
+#define MKT_KMEANS_OPTIONS_DEFAULT                   \
+	{.max_iterations = MKT_KMEANS_DEFAULT_MAX_ITER,  \
+	 .tolerance		 = MKT_KMEANS_DEFAULT_TOLERANCE, \
+	 .seed			 = MKT_KMEANS_DEFAULT_SEED,      \
+	 .nredo			 = MKT_KMEANS_DEFAULT_NREDO,     \
+	 .verbose		 = false,                        \
 	 .algorithm		 = KMEANS_ALGO_AUTO}
 
 /*

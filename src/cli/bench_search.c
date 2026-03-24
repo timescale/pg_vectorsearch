@@ -38,15 +38,16 @@
 #include "index/centroid_page.h"
 #include "index/centroid_search.h"
 #include "mkt_halfvec.h"
+#include "mkt_params.h"
 #include "mkt_types.h"
 #include "quant/rabitq.h"
 
-/* Default parameters */
+/* Default parameters (bench-specific; index params from mkt_params.h) */
 #define DEFAULT_DIM		   768
 #define DEFAULT_NLEVELS	   2
-#define DEFAULT_FAN_OUT	   32
+#define DEFAULT_FAN_OUT	   MKT_DEFAULT_FAN_OUT
 #define DEFAULT_BEAM_WIDTH 4
-#define DEFAULT_NPROBE	   10
+#define DEFAULT_NPROBE	   MKT_DEFAULT_NPROBE
 #define DEFAULT_QUERIES	   100
 #define DEFAULT_RUNS	   10
 #define WARMUP_RUNS		   3

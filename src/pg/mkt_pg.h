@@ -14,6 +14,7 @@
 #include <utils/rel.h>
 
 #include "mkt_halfvec.h"
+#include "mkt_params.h"
 #include "mkt_vector.h"
 #include "quant/rabitq.h"
 
@@ -86,13 +87,7 @@ typedef struct MktannOptions
 	bool  centroid_compression; /* use RaBitQ for centroid pages */
 } MktannOptions;
 
-#define MKTANN_DEFAULT_FAN_OUT 32
-#define MKTANN_MIN_FAN_OUT	   2
-#define MKTANN_MAX_FAN_OUT	   65535
-
-#define MKTANN_DEFAULT_NLIST 0 /* 0 = auto: sqrt(ntuples) */
-#define MKTANN_MIN_NLIST	 0
-#define MKTANN_MAX_NLIST	 1000000
+/* Parameter limits defined in mkt_params.h */
 
 /*
  * MktannGetDistanceMode - Resolve effective distance mode for a scan.
