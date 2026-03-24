@@ -312,7 +312,16 @@ mkt_centroid_beam_search(
 	if (stats)
 		stats->dist_calcs += raw_count;
 
-	/* Select top-K from level 0 into buf_b */
+	/* Enforce beam_width >= nprobe */
+	if (beam_width < nprobe)
+		beam_width = nprobe;
+
+	/* Select top-K from level 0 into buf_b.
+	 *
+	 * Error-bound-aware selection via MktTopK: keeps the beam_width
+	 * candidates with smallest upper bounds, plus any additional
+	 * candidates whose lower bound overlaps the threshold. For
+	 * exact formats (error=0) this returns exactly beam_width. */
 	uint32_t keep		= (nlevels == 1) ? nprobe : beam_width;
 	uint32_t cand_count = select_topk_bounded(buf_a, raw_count, keep, buf_b);
 

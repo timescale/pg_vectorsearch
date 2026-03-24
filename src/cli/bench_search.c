@@ -28,6 +28,10 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef MKT_HAVE_HDF5
+#include <hdf5.h>
+#endif
+
 #include "algo/hkmeans.h"
 #include "algo/kmeans.h"
 #include "algo/topk.h"
@@ -58,14 +62,17 @@
 
 typedef struct
 {
-	Dimension dim;
-	uint32_t  nlevels;
-	uint32_t  fan_out;
-	uint32_t  beam_width;
-	uint32_t  nprobe;
-	uint32_t  queries;
-	uint32_t  runs;
-	bool	  help;
+	Dimension	dim;
+	uint32_t	nlevels;
+	uint32_t	fan_out;
+	uint32_t	beam_width;
+	uint32_t	nprobe;
+	uint32_t	queries;
+	uint32_t	runs;
+	uint32_t	nlist;		/* 0 = auto (HDF5 mode only) */
+	const char *hdf5_path;	/* NULL = synthetic mode */
+	const char *metric_str; /* NULL = auto-detect from HDF5 */
+	bool		help;
 } BenchConfig;
 
 /* ----------------------------------------------------------------
@@ -472,13 +479,110 @@ generate_hierarchical_vectors(
 	return vectors;
 }
 
+#ifdef MKT_HAVE_HDF5
+static float *
+load_hdf5_float(
+		const char *path, const char *dataset, hsize_t *rows, hsize_t *cols)
+{
+	hid_t file = H5Fopen(path, H5F_ACC_RDONLY, H5P_DEFAULT);
+	if (file < 0)
+	{
+		fprintf(stderr, "Error: cannot open HDF5 file '%s'\n", path);
+		return NULL;
+	}
+
+	hid_t dset = H5Dopen2(file, dataset, H5P_DEFAULT);
+	if (dset < 0)
+	{
+		fprintf(stderr,
+				"Error: dataset '%s' not found in '%s'\n",
+				dataset,
+				path);
+		H5Fclose(file);
+		return NULL;
+	}
+
+	hid_t	space = H5Dget_space(dset);
+	hsize_t dims[2];
+	H5Sget_simple_extent_dims(space, dims, NULL);
+	*rows = dims[0];
+	*cols = dims[1];
+
+	float *data = malloc(*rows * *cols * sizeof(float));
+	if (data == NULL)
+	{
+		H5Sclose(space);
+		H5Dclose(dset);
+		H5Fclose(file);
+		return NULL;
+	}
+
+	H5Dread(dset, H5T_NATIVE_FLOAT, H5S_ALL, H5S_ALL, H5P_DEFAULT, data);
+	H5Sclose(space);
+	H5Dclose(dset);
+	H5Fclose(file);
+	return data;
+}
+
+static int64_t *
+load_hdf5_int64(
+		const char *path, const char *dataset, hsize_t *rows, hsize_t *cols)
+{
+	hid_t file = H5Fopen(path, H5F_ACC_RDONLY, H5P_DEFAULT);
+	if (file < 0)
+		return NULL;
+
+	hid_t dset = H5Dopen2(file, dataset, H5P_DEFAULT);
+	if (dset < 0)
+	{
+		H5Fclose(file);
+		return NULL;
+	}
+
+	hid_t	space = H5Dget_space(dset);
+	hsize_t dims[2];
+	H5Sget_simple_extent_dims(space, dims, NULL);
+	*rows = dims[0];
+	*cols = dims[1];
+
+	int64_t *data = malloc(*rows * *cols * sizeof(int64_t));
+	if (data == NULL)
+	{
+		H5Sclose(space);
+		H5Dclose(dset);
+		H5Fclose(file);
+		return NULL;
+	}
+
+	H5Dread(dset, H5T_NATIVE_INT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, data);
+	H5Sclose(space);
+	H5Dclose(dset);
+	H5Fclose(file);
+	return data;
+}
+
+static void
+normalize_vectors(float *data, uint32_t nvecs, Dimension dim)
+{
+	for (uint32_t i = 0; i < nvecs; i++)
+	{
+		float *v	= data + (size_t)i * dim;
+		float  norm = mkt_l2_norm(v, dim);
+		if (norm > 0.0f)
+			mkt_vector_scale(v, 1.0f / norm, v, dim);
+	}
+}
+#endif /* MKT_HAVE_HDF5 */
+
 /* ----------------------------------------------------------------
  * build_tree - Build centroid tree via hierarchical k-means
  *
- * Generates nvecs random vectors, clusters them hierarchically
- * using mkt_hkmeans_f32(), and builds centroid pages in the
- * specified format. All RaBitQ entries are encoded relative to
- * the global centroid.
+ * Clusters vectors (synthetic or external) hierarchically and
+ * builds centroid pages in the specified format. All RaBitQ
+ * entries are encoded relative to the global centroid.
+ *
+ * When ext_vectors is NULL, generates random vectors internally.
+ * When ext_vectors is provided, uses them directly (caller owns).
  *
  * Returns the allocated page buffer, or NULL on failure.
  * ---------------------------------------------------------------- */
@@ -487,6 +591,9 @@ build_tree(
 		const BenchConfig  *config,
 		const RaBitQParams *params,
 		uint8_t				fmt,
+		const float		   *ext_vectors,
+		uint32_t			ext_nvecs,
+		DistanceMetric		metric,
 		uint32_t		   *total_pages_out,
 		uint32_t		   *total_centroids_out,
 		float			   *global_centroid_out,
@@ -501,25 +608,74 @@ build_tree(
 {
 	Dimension dim	  = config->dim;
 	uint32_t  fan_out = config->fan_out;
-	uint32_t  nlevels = config->nlevels;
 
 	uint32_t max_entries = mkt_centroid_max_entries_fmt(dim, fmt);
 
 	/*
-	 * Generate hierarchically-clustered vectors.
+	 * Get vectors: external dataset or synthetic generation.
 	 */
-	uint32_t nvecs	 = 0;
-	float	*vectors = generate_hierarchical_vectors(
-			  dim, fan_out, nlevels, VECS_PER_LEAF, &nvecs);
+	uint32_t nvecs;
+	float	*vectors;
+	uint32_t nlist;
 
-	uint32_t nlist = power_u32(fan_out, nlevels);
+	if (ext_vectors != NULL)
+	{
+		nvecs = ext_nvecs;
 
-	if (verbose)
-		printf("  Generated %u vectors (%u leaf clusters x %u "
-			   "vecs)\n",
-			   nvecs,
-			   nlist,
-			   VECS_PER_LEAF);
+		nlist = config->nlist;
+		if (nlist == 0)
+		{
+			nlist = (uint32_t)sqrt((double)nvecs);
+			if (nlist < 1)
+				nlist = 1;
+			if (nlist > 10000)
+				nlist = 10000;
+		}
+
+		/* Sample for clustering (stride sampling).
+		 * Use all vectors when nlist is explicitly set and larger
+		 * datasets need full coverage. */
+		uint32_t max_samples = nvecs < 256000 ? nvecs : 256000;
+		vectors = mkt_alloc((size_t)max_samples * dim * sizeof(float));
+		if (max_samples == nvecs)
+		{
+			memcpy(vectors, ext_vectors, (size_t)nvecs * dim * sizeof(float));
+		}
+		else
+		{
+			uint32_t stride = nvecs / max_samples;
+			for (uint32_t i = 0; i < max_samples; i++)
+				memcpy(vectors + (size_t)i * dim,
+					   ext_vectors + (size_t)(i * stride) * dim,
+					   dim * sizeof(float));
+		}
+		/* k-means runs on the sample; nvecs is reset to sample
+		 * count for clustering only. The full dataset is used
+		 * for vector assignment later via ext_vectors. */
+		nvecs = max_samples;
+
+		if (verbose)
+			printf("  Loaded %u vectors (sample=%u), nlist=%u\n",
+				   ext_nvecs,
+				   max_samples,
+				   nlist);
+	}
+	else
+	{
+		uint32_t nlevels = config->nlevels;
+		nvecs			 = 0;
+		vectors			 = generate_hierarchical_vectors(
+				 dim, fan_out, nlevels, VECS_PER_LEAF, &nvecs);
+
+		nlist = power_u32(fan_out, nlevels);
+
+		if (verbose)
+			printf("  Generated %u vectors (%u leaf clusters x %u "
+				   "vecs)\n",
+				   nvecs,
+				   nlist,
+				   VECS_PER_LEAF);
+	}
 
 	/* Compute global centroid (mean of all vectors) */
 	mkt_vector_mean(vectors, nvecs, dim, global_centroid_out);
@@ -530,7 +686,7 @@ build_tree(
 	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
 
 	HKMeansResult *tree = mkt_hkmeans_f32(
-			vectors, nvecs, dim, nlist, fan_out, DISTANCE_L2, &km_opts);
+			vectors, nvecs, dim, nlist, fan_out, metric, &km_opts);
 	if (tree == NULL)
 	{
 		fprintf(stderr, "Error: hierarchical k-means failed\n");
@@ -604,33 +760,24 @@ build_tree(
 		   tree->leaf_centroids,
 		   (size_t)leaf_centroids * dim * sizeof(float));
 
+	/* Assign all vectors (not just the clustering sample) to
+	 * leaf centroids via tree descent. For external datasets,
+	 * use the full original vectors; for synthetic, vectors
+	 * already contains all of them. */
+	const float *assign_vecs = ext_vectors != NULL ? ext_vectors : vectors;
+	uint32_t	 assign_n	 = ext_vectors != NULL ? ext_nvecs : nvecs;
+
 	uint32_t *leaf_offsets = mkt_alloc(
 			(leaf_centroids + 1) * sizeof(uint32_t));
-	uint32_t *leaf_idx = mkt_alloc(nvecs * sizeof(uint32_t));
+	uint32_t *leaf_idx = mkt_alloc(assign_n * sizeof(uint32_t));
 	memset(leaf_offsets, 0, (leaf_centroids + 1) * sizeof(uint32_t));
 
-	/*
-	 * Build leaf_offsets/leaf_idx by brute-force nearest leaf
-	 * centroid assignment.
-	 */
-	const float *leaf_cents = tree->leaf_centroids;
-
-	for (uint32_t v = 0; v < nvecs; v++)
+	uint32_t *assignments = mkt_alloc(assign_n * sizeof(uint32_t));
+	for (uint32_t v = 0; v < assign_n; v++)
 	{
-		const float *vec	= vectors + (size_t)v * dim;
-		float		 best_d = FLT_MAX;
-		uint32_t	 best_c = 0;
-		for (uint32_t c = 0; c < leaf_centroids; c++)
-		{
-			float d = mkt_l2_distance_squared(
-					vec, leaf_cents + (size_t)c * dim, dim);
-			if (d < best_d)
-			{
-				best_d = d;
-				best_c = c;
-			}
-		}
-		leaf_offsets[best_c + 1]++;
+		assignments[v] = mkt_hkmeans_assign(
+				tree, assign_vecs + (size_t)v * dim, metric, NULL);
+		leaf_offsets[assignments[v] + 1]++;
 	}
 
 	for (uint32_t i = 1; i <= leaf_centroids; i++)
@@ -639,25 +786,11 @@ build_tree(
 	uint32_t *pos = mkt_alloc(leaf_centroids * sizeof(uint32_t));
 	memcpy(pos, leaf_offsets, leaf_centroids * sizeof(uint32_t));
 
-	for (uint32_t v = 0; v < nvecs; v++)
-	{
-		const float *vec	= vectors + (size_t)v * dim;
-		float		 best_d = FLT_MAX;
-		uint32_t	 best_c = 0;
-		for (uint32_t c = 0; c < leaf_centroids; c++)
-		{
-			float d = mkt_l2_distance_squared(
-					vec, leaf_cents + (size_t)c * dim, dim);
-			if (d < best_d)
-			{
-				best_d = d;
-				best_c = c;
-			}
-		}
-		leaf_idx[pos[best_c]++] = v;
-	}
+	for (uint32_t v = 0; v < assign_n; v++)
+		leaf_idx[pos[assignments[v]]++] = v;
 
 	mkt_free(pos);
+	mkt_free(assignments);
 
 	/* Build leaf index array as posting_heads so beam search
 	 * results carry the leaf cluster index in posting_head. */
@@ -686,10 +819,23 @@ build_tree(
 	*query_seeds_out	 = seeds;
 	*nseeds_out			 = leaf_centroids;
 	*rerank_vecs_out	 = rerank_vecs;
-	*vectors_out		 = vectors;
 	*leaf_idx_out		 = leaf_idx;
 	*leaf_offsets_out	 = leaf_offsets;
-	*nvecs_out			 = nvecs;
+
+	/* For external datasets, the caller owns the full vectors;
+	 * free the clustering sample and return NULL. For synthetic
+	 * data, vectors is the full dataset. */
+	if (ext_vectors != NULL)
+	{
+		mkt_free(vectors);
+		*vectors_out = NULL;
+		*nvecs_out	 = ext_nvecs;
+	}
+	else
+	{
+		*vectors_out = vectors;
+		*nvecs_out	 = nvecs;
+	}
 	return pages;
 }
 
@@ -725,6 +871,13 @@ print_usage(CmdContext *ctx)
 	printf("  --runs <int>       Runs per query "
 		   "(default: %d)\n",
 		   DEFAULT_RUNS);
+#ifdef MKT_HAVE_HDF5
+	printf("  --hdf5 <path>      Load vectors from HDF5 file\n");
+	printf("  --nlist <int>      Number of clusters "
+		   "(0=auto, HDF5 only)\n");
+	printf("  --metric <str>     Distance metric override "
+		   "(angular, euclidean)\n");
+#endif
 	printf("  --help             Show this help message\n");
 	printf("\n");
 	printf("Examples:\n");
@@ -805,6 +958,9 @@ cmd_bench_search(CmdContext *ctx)
 			{"nprobe", required_argument, 0, 'p'},
 			{"queries", required_argument, 0, 'q'},
 			{"runs", required_argument, 0, 'r'},
+			{"nlist", required_argument, 0, 'n'},
+			{"hdf5", required_argument, 0, 'H'},
+			{"metric", required_argument, 0, 'm'},
 			{"help", no_argument, 0, 'h'},
 			{0, 0, 0, 0},
 	};
@@ -815,7 +971,7 @@ cmd_bench_search(CmdContext *ctx)
 	while ((opt = getopt_long(
 					ctx->argc,
 					ctx->argv,
-					"d:l:f:b:p:q:r:h",
+					"d:l:f:b:p:q:r:n:H:m:h",
 					long_options,
 					NULL)) != -1)
 	{
@@ -842,6 +998,15 @@ cmd_bench_search(CmdContext *ctx)
 		case 'r':
 			config.runs = (uint32_t)atoi(optarg);
 			break;
+		case 'n':
+			config.nlist = (uint32_t)atoi(optarg);
+			break;
+		case 'H':
+			config.hdf5_path = optarg;
+			break;
+		case 'm':
+			config.metric_str = optarg;
+			break;
 		case 'h':
 			config.help = true;
 			break;
@@ -857,18 +1022,179 @@ cmd_bench_search(CmdContext *ctx)
 		return 0;
 	}
 
-	if (config.dim == 0 || config.nlevels == 0 || config.fan_out == 0 ||
-		config.queries == 0 || config.runs == 0)
+	/* Load HDF5 data if requested */
+	float		  *hdf5_train	  = NULL;
+	float		  *hdf5_test	  = NULL;
+	int64_t		  *hdf5_neighbors = NULL;
+	uint32_t	   hdf5_nvecs	  = 0;
+	uint32_t	   hdf5_gt_k	  = 0;
+	DistanceMetric metric		  = DISTANCE_L2;
+
+#ifndef MKT_HAVE_HDF5
+	if (config.hdf5_path != NULL)
 	{
-		fprintf(stderr, "Error: all numeric parameters must be > 0\n");
+		fprintf(stderr,
+				"Error: --hdf5 requires HDF5 support. "
+				"Install libhdf5-dev and reconfigure.\n");
 		return 1;
 	}
+#else
+	if (config.hdf5_path != NULL)
+	{
+		hsize_t n_train, dim_h, n_test, dim_test;
+		hdf5_train =
+				load_hdf5_float(config.hdf5_path, "train", &n_train, &dim_h);
+		hdf5_test =
+				load_hdf5_float(config.hdf5_path, "test", &n_test, &dim_test);
 
-	printf("Search benchmark (dim=%u, nlevels=%u, "
-		   "fan_out=%u):\n",
-		   config.dim,
-		   config.nlevels,
-		   config.fan_out);
+		if (hdf5_train == NULL || hdf5_test == NULL)
+		{
+			fprintf(stderr, "Error: failed to load HDF5 datasets\n");
+			free(hdf5_train);
+			free(hdf5_test);
+			return 1;
+		}
+
+		config.dim = (Dimension)dim_h;
+		hdf5_nvecs = (uint32_t)n_train;
+
+		/* Load ground truth neighbors (optional, suppress HDF5
+		 * errors since the dataset may not exist) */
+		hsize_t n_gt, k_gt;
+		H5Eset_auto(H5E_DEFAULT, NULL, NULL);
+		hdf5_neighbors =
+				load_hdf5_int64(config.hdf5_path, "neighbors", &n_gt, &k_gt);
+		H5Eset_auto(H5E_DEFAULT, (H5E_auto_t)H5Eprint, stderr);
+		if (hdf5_neighbors != NULL)
+			hdf5_gt_k = (uint32_t)k_gt;
+
+		/* Detect metric from HDF5 "distance" attribute */
+		const char *hdf5_metric = NULL;
+		{
+			H5Eset_auto(H5E_DEFAULT, NULL, NULL);
+			hid_t file =
+					H5Fopen(config.hdf5_path, H5F_ACC_RDONLY, H5P_DEFAULT);
+			if (file >= 0 && H5Aexists(file, "distance"))
+			{
+				hid_t attr	= H5Aopen(file, "distance", H5P_DEFAULT);
+				hid_t atype = H5Aget_type(attr);
+
+				if (H5Tis_variable_str(atype))
+				{
+					/* Variable-length string */
+					char *vstr	  = NULL;
+					hid_t memtype = H5Tcopy(H5T_C_S1);
+					H5Tset_size(memtype, H5T_VARIABLE);
+					H5Aread(attr, memtype, &vstr);
+					if (vstr != NULL)
+						hdf5_metric = strdup(vstr);
+					H5free_memory(vstr);
+					H5Tclose(memtype);
+				}
+				else
+				{
+					/* Fixed-length string */
+					size_t sz	   = H5Tget_size(atype);
+					char  *buf	   = malloc(sz + 1);
+					hid_t  memtype = H5Tcopy(H5T_C_S1);
+					H5Tset_size(memtype, sz + 1);
+					H5Aread(attr, memtype, buf);
+					buf[sz]		= '\0';
+					hdf5_metric = buf;
+					H5Tclose(memtype);
+				}
+
+				H5Tclose(atype);
+				H5Aclose(attr);
+			}
+			if (file >= 0)
+				H5Fclose(file);
+			H5Eset_auto(H5E_DEFAULT, (H5E_auto_t)H5Eprint, stderr);
+		}
+
+		/* Resolve metric: CLI override > HDF5 attribute > filename */
+		const char *detected = hdf5_metric;
+		if (detected == NULL)
+		{
+			/* Fall back to filename heuristic */
+			if (strstr(config.hdf5_path, "angular") != NULL ||
+				strstr(config.hdf5_path, "cosine") != NULL)
+				detected = "angular";
+		}
+
+		if (config.metric_str != NULL)
+		{
+			if (detected != NULL && strcmp(config.metric_str, detected) != 0)
+			{
+				fprintf(stderr,
+						"Warning: --metric '%s' overrides "
+						"dataset metric '%s'\n",
+						config.metric_str,
+						detected);
+			}
+			detected = config.metric_str;
+		}
+
+		if (detected != NULL && (strcmp(detected, "angular") == 0 ||
+								 strcmp(detected, "cosine") == 0))
+		{
+			metric = DISTANCE_COSINE;
+			normalize_vectors(hdf5_train, hdf5_nvecs, config.dim);
+			normalize_vectors(hdf5_test, (uint32_t)n_test, config.dim);
+		}
+
+		free((void *)hdf5_metric);
+
+		/* Auto-derive tree shape from dataset */
+		if (config.nlist == 0)
+		{
+			config.nlist = (uint32_t)sqrt((double)hdf5_nvecs);
+			if (config.nlist < 1)
+				config.nlist = 1;
+			if (config.nlist > 10000)
+				config.nlist = 10000;
+		}
+		config.fan_out = mkt_auto_fan_out(0, config.nlist, 0);
+		/* nlevels from fan_out and nlist */
+		config.nlevels = 1;
+		{
+			uint32_t leaves = config.fan_out;
+			while (leaves < config.nlist)
+			{
+				leaves *= config.fan_out;
+				config.nlevels++;
+			}
+		}
+
+		if (config.queries > (uint32_t)n_test)
+			config.queries = (uint32_t)n_test;
+
+		printf("Search benchmark (HDF5: %s):\n", config.hdf5_path);
+		printf("  Vectors: %u x %u (%s)\n",
+			   hdf5_nvecs,
+			   config.dim,
+			   metric == DISTANCE_COSINE ? "cosine" : "L2");
+	}
+	else
+#endif /* MKT_HAVE_HDF5 */
+	{
+		if (config.dim == 0 || config.nlevels == 0 || config.fan_out == 0)
+		{
+			fprintf(stderr, "Error: dim, nlevels, fan_out must be > 0\n");
+			return 1;
+		}
+		printf("Search benchmark (dim=%u, nlevels=%u, "
+			   "fan_out=%u):\n",
+			   config.dim,
+			   config.nlevels,
+			   config.fan_out);
+	}
+
+	if (config.queries == 0 || config.runs == 0)
+	{
+		fprintf(stderr, "Error: queries and runs must be > 0\n");
+		return 1;
+	}
 
 	/* Create RaBitQ params (needed for RaBitQ format) */
 	srand(42);
@@ -918,6 +1244,9 @@ cmd_bench_search(CmdContext *ctx)
 				&config,
 				params,
 				fmts[f],
+				hdf5_train,
+				hdf5_nvecs,
+				metric,
 				&trees[f].total_pages,
 				&trees[f].total_centroids,
 				centroid,
@@ -948,7 +1277,7 @@ cmd_bench_search(CmdContext *ctx)
 		{
 			query_seeds	 = seeds;
 			nseeds		 = ns;
-			all_vectors	 = vecs_tmp;
+			all_vectors	 = vecs_tmp != NULL ? vecs_tmp : hdf5_train;
 			leaf_idx	 = lidx_tmp;
 			leaf_offsets = loff_tmp;
 			nvecs		 = nv_tmp;
@@ -979,10 +1308,13 @@ cmd_bench_search(CmdContext *ctx)
 		}
 		mkt_free(leaf_offsets);
 		mkt_free(leaf_idx);
-		mkt_free(all_vectors);
+		if (all_vectors != hdf5_train)
+			mkt_free(all_vectors);
 		mkt_free(query_seeds);
 		mkt_free(centroid);
 		mkt_rabitq_destroy(params);
+		free(hdf5_train);
+		free(hdf5_test);
 		return 1;
 	}
 
@@ -1001,66 +1333,90 @@ cmd_bench_search(CmdContext *ctx)
 		   config.nprobe);
 
 	/* Pre-generate all queries (same across variants) */
-	srand(12345);
 	uint32_t nq		 = config.queries;
 	uint32_t nprobe	 = config.nprobe;
 	float	*queries = mkt_alloc((size_t)nq * config.dim * sizeof(float));
 
-	for (uint32_t q = 0; q < nq; q++)
+	if (hdf5_test != NULL)
 	{
-		float *qvec = queries + (size_t)q * config.dim;
-		if (nseeds > 0)
+		/* Use HDF5 test vectors as queries */
+		memcpy(queries, hdf5_test, (size_t)nq * config.dim * sizeof(float));
+	}
+	else
+	{
+		srand(12345);
+		for (uint32_t q = 0; q < nq; q++)
 		{
-			Dimension	 subdim	  = config.dim < 32 ? config.dim : 32;
-			uint32_t	 seed_idx = (uint32_t)rand() % nseeds;
-			const float *seed = query_seeds + (size_t)seed_idx * config.dim;
-			for (Dimension d = 0; d < config.dim; d++)
-				qvec[d] = seed[d] + 0.05f * rand_normal();
-			for (Dimension d = 0; d < subdim; d++)
-				qvec[d] += 1.5f * rand_normal();
-		}
-		else
-		{
-			generate_random_vector(qvec, config.dim);
+			float *qvec = queries + (size_t)q * config.dim;
+			if (nseeds > 0)
+			{
+				Dimension	 subdim	  = config.dim < 32 ? config.dim : 32;
+				uint32_t	 seed_idx = (uint32_t)rand() % nseeds;
+				const float *seed	  = query_seeds +
+									(size_t)seed_idx * config.dim;
+				for (Dimension d = 0; d < config.dim; d++)
+					qvec[d] = seed[d] + 0.05f * rand_normal();
+				for (Dimension d = 0; d < subdim; d++)
+					qvec[d] += 1.5f * rand_normal();
+			}
+			else
+			{
+				generate_random_vector(qvec, config.dim);
+			}
 		}
 	}
 
 	/*
-	 * Ground truth: brute-force top-K nearest neighbors over
-	 * all vectors. gt[q * topk + i] = global vector index of
-	 * the i-th nearest neighbor for query q.
+	 * Ground truth: top-K nearest neighbors per query.
+	 * Use HDF5 neighbors dataset when available, otherwise
+	 * compute by brute-force over all vectors.
 	 */
 	uint32_t  topk = DEFAULT_TOPK;
 	uint32_t *gt   = mkt_alloc((size_t)nq * topk * sizeof(uint32_t));
 
-	for (uint32_t q = 0; q < nq; q++)
+	if (hdf5_neighbors != NULL)
 	{
-		const float *qvec = queries + (size_t)q * config.dim;
-
-		MktTopK tk;
-		mkt_topk_init(&tk, topk);
-
-		for (uint32_t v = 0; v < nvecs; v++)
+		for (uint32_t q = 0; q < nq; q++)
 		{
-			float d2 = mkt_l2_distance_squared(
-					qvec, all_vectors + (size_t)v * config.dim, config.dim);
-			mkt_topk_insert(&tk, d2, 0.0f, v);
+			uint32_t gt_k = topk < hdf5_gt_k ? topk : hdf5_gt_k;
+			for (uint32_t i = 0; i < gt_k; i++)
+				gt[q * topk + i] = (uint32_t)hdf5_neighbors[q * hdf5_gt_k + i];
+			for (uint32_t i = gt_k; i < topk; i++)
+				gt[q * topk + i] = UINT32_MAX;
 		}
+	}
+	else
+	{
+		for (uint32_t q = 0; q < nq; q++)
+		{
+			const float *qvec = queries + (size_t)q * config.dim;
 
-		MktTopKEntry *entries = mkt_alloc(
-				tk.cand_count * sizeof(MktTopKEntry));
-		uint32_t count;
-		mkt_topk_extract_sorted(&tk, entries, &count);
+			MktTopK tk;
+			mkt_topk_init(&tk, topk);
 
-		uint32_t gt_k = count < topk ? count : topk;
-		for (uint32_t i = 0; i < gt_k; i++)
-			gt[q * topk + i] = (uint32_t)entries[i].id;
-		/* Pad remaining slots (if count < topk) */
-		for (uint32_t i = gt_k; i < topk; i++)
-			gt[q * topk + i] = UINT32_MAX;
+			for (uint32_t v = 0; v < nvecs; v++)
+			{
+				float d2 = mkt_l2_distance_squared(
+						qvec,
+						all_vectors + (size_t)v * config.dim,
+						config.dim);
+				mkt_topk_insert(&tk, d2, 0.0f, v);
+			}
 
-		mkt_free(entries);
-		mkt_topk_cleanup(&tk);
+			MktTopKEntry *entries = mkt_alloc(
+					tk.cand_count * sizeof(MktTopKEntry));
+			uint32_t count;
+			mkt_topk_extract_sorted(&tk, entries, &count);
+
+			uint32_t gt_k = count < topk ? count : topk;
+			for (uint32_t i = 0; i < gt_k; i++)
+				gt[q * topk + i] = (uint32_t)entries[i].id;
+			for (uint32_t i = gt_k; i < topk; i++)
+				gt[q * topk + i] = UINT32_MAX;
+
+			mkt_free(entries);
+			mkt_topk_cleanup(&tk);
+		}
 	}
 
 	/*
@@ -1255,29 +1611,32 @@ cmd_bench_search(CmdContext *ctx)
 	char recall_hdr[32];
 	snprintf(recall_hdr, sizeof(recall_hdr), "R@%u", topk);
 
-	printf("  %-14s %9s %9s %9s %9s %9s %9s\n",
+	printf("  %-14s %9s %9s %9s %9s %9s %9s %9s\n",
 		   "Variant",
 		   "Avg (us)",
 		   "Min (us)",
 		   "Max (us)",
 		   "Stddev",
 		   recall_hdr,
-		   "Route R");
+		   "Route R",
+		   "QPS");
 
 	for (int v = 0; v < NUM_VARIANTS; v++)
 	{
 		bench_stats_compute(&var_stats[v]);
 		double recall_pct = nq > 0 ? 100.0 * recall_sum[v] / nq : 0.0;
 		double route_pct  = nq > 0 ? 100.0 * routing_recall_sum[v] / nq : 0.0;
+		double qps = var_stats[v].avg > 0 ? 1e6 / var_stats[v].avg : 0.0;
 
-		printf("  %-14s %9.2f %9.2f %9.2f %9.2f %8.1f%% %8.1f%%\n",
+		printf("  %-14s %9.2f %9.2f %9.2f %9.2f %8.1f%% %8.1f%% %9.0f\n",
 			   variants[v].name,
 			   var_stats[v].avg,
 			   var_stats[v].min,
 			   var_stats[v].max,
 			   var_stats[v].stddev,
 			   recall_pct,
-			   route_pct);
+			   route_pct,
+			   qps);
 	}
 
 	/* Print routing distance stats */
@@ -1300,7 +1659,8 @@ cmd_bench_search(CmdContext *ctx)
 	mkt_free(queries);
 	mkt_free(leaf_offsets);
 	mkt_free(leaf_idx);
-	mkt_free(all_vectors);
+	if (all_vectors != hdf5_train)
+		mkt_free(all_vectors);
 	mkt_free(query_seeds);
 
 	for (int f = 0; f < NUM_FORMATS; f++)
@@ -1313,6 +1673,9 @@ cmd_bench_search(CmdContext *ctx)
 
 	mkt_free(centroid);
 	mkt_rabitq_destroy(params);
+	free(hdf5_train);
+	free(hdf5_test);
+	free(hdf5_neighbors);
 
 	return 0;
 }

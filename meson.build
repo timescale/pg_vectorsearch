@@ -190,13 +190,16 @@ if use_faiss
 endif
 
 # HDF5 library (optional, for loading ann-benchmarks datasets)
-use_hdf5 = get_option('hdf5')
-hdf5_dep = []
+hdf5_opt = get_option('hdf5')
+hdf5_dep = dependency('hdf5', language: 'c', required: hdf5_opt)
+use_hdf5 = hdf5_dep.found()
 
 if use_hdf5
-  hdf5_dep = dependency('hdf5', language: 'c', required: true)
   config_data.set('MKT_HAVE_HDF5', 1)
   message('HDF5 integration enabled')
+else
+  message('HDF5 not found: bench search --hdf5 and verify rabitq disabled')
+  hdf5_dep = []
 endif
 
 # F16C: hardware half-precision ↔ float conversion (available on all AVX2
