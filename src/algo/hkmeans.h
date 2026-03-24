@@ -78,6 +78,20 @@ HKMeansResult *mkt_hkmeans_f32(
 		const KMeansOptions *options);
 
 /*
+ * Route a vector to its nearest leaf centroid by descending the
+ * hierarchical k-means tree. Returns the leaf index (0..nleaves-1)
+ * used to assign the vector to a posting list during index build.
+ *
+ * Optionally writes the distance to the nearest leaf centroid
+ * into *out_distance (may be NULL).
+ */
+uint32_t mkt_hkmeans_assign(
+		const HKMeansResult *tree,
+		const float			*vec,
+		DistanceMetric		 metric,
+		Distance			*out_distance);
+
+/*
  * Free a hierarchical k-means result and all owned data.
  */
 void mkt_hkmeans_result_destroy(HKMeansResult *result);

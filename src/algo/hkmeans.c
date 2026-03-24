@@ -10,6 +10,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "algo/distance.h"
 #include "algo/hkmeans.h"
 #include "core/memory.h"
 
@@ -246,6 +247,53 @@ mkt_hkmeans_f32(
 	}
 
 	return result;
+}
+
+uint32_t
+mkt_hkmeans_assign(
+		const HKMeansResult *tree,
+		const float			*vec,
+		DistanceMetric		 metric,
+		Distance			*out_distance)
+{
+	Dimension dim	   = tree->dim;
+	uint32_t  node_idx = 0; /* start at root (BFS index 0) */
+
+	for (uint32_t level = 0; level < tree->nlevels; level++)
+	{
+		const HKMeansNode *node		 = &tree->nodes[node_idx];
+		Distance		   best_dist = INFINITY;
+		uint32_t		   best_c	 = 0;
+
+		for (uint32_t c = 0; c < node->nchildren; c++)
+		{
+			const float *centroid = node->centroids + (size_t)c * dim;
+			VectorRef	 qref	  = {.data = vec, .dim = dim};
+			VectorRef	 cref	  = {.data = centroid, .dim = dim};
+			Distance	 d		  = mkt_distance(qref, cref, metric);
+			if (d < best_dist)
+			{
+				best_dist = d;
+				best_c	  = c;
+			}
+		}
+
+		bool is_leaf = (level == tree->nlevels - 1);
+		if (is_leaf)
+		{
+			if (out_distance != NULL)
+				*out_distance = best_dist;
+			return node->first_leaf + best_c;
+		}
+
+		/* Descend to child node */
+		node_idx = node->first_child + best_c;
+	}
+
+	/* Should not reach here */
+	if (out_distance != NULL)
+		*out_distance = INFINITY;
+	return 0;
 }
 
 void
