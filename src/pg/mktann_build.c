@@ -36,6 +36,7 @@
 #include "algo/vecops.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
+#include "index/index_build.h"
 #include "mkt_halfvec.h"
 #include "mkt_pg.h"
 #include "mkt_vector.h"
@@ -419,17 +420,10 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	 * centroid pages start at block 1. */
 	uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, centroid_format);
 
-	uint32_t	*node_pages		  = palloc(tree->nnodes * sizeof(uint32_t));
 	BlockNumber *node_first_blkno = palloc(tree->nnodes * sizeof(BlockNumber));
 
-	BlockNumber next_blkno = 1; /* block 0 = meta */
-	for (uint32_t i = 0; i < tree->nnodes; i++)
-	{
-		uint32_t n			= tree->nodes[i].nchildren;
-		node_pages[i]		= (n + max_ent - 1) / max_ent;
-		node_first_blkno[i] = next_blkno;
-		next_blkno += node_pages[i];
-	}
+	mkt_compute_centroid_layout(
+			tree, max_ent, 1 /* block 0 = meta */, node_first_blkno);
 
 	/* 9. Write index pages */
 	uint64_t	  rabitq_seed = 42;
@@ -454,45 +448,17 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			rabitq_seed,
 			global_mean);
 
-	/* Write centroid pages for each BFS node.
-	 *
-	 * Leaf-parent nodes (level == nlevels-1) write entries with
-	 * MKT_CENTROID_FLAG_LEAF. Internal nodes write entries with
-	 * child_blkno pointing to the child node's first page. */
-	for (uint32_t i = 0; i < tree->nnodes; i++)
-	{
-		HKMeansNode *node	 = &tree->nodes[i];
-		bool		 is_leaf = (node->level == tree->nlevels - 1);
-		uint32_t	 k		 = node->nchildren;
-
-		uint16_t flags		 = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
-		uint16_t child_count = is_leaf ? 0 : (uint16_t)fan_out;
-
-		CentroidEncoderState enc_state;
-		CentroidEncoder		*encoder = centroid_encoder_init(
-				&enc_state,
-				centroid_format,
-				node->centroids,
-				dim,
-				rq_params,
-				global_mean);
-
-		/* Leaves pass NULL (no child blocks); internal nodes
-		 * point into the precomputed node→block map. */
-		const BlockNumber *child_blks =
-				is_leaf ? NULL : &node_first_blkno[node->first_child];
-
-		mkt_centroid_write_pages(
-				&storage.base,
-				dim,
-				k,
-				centroid_format,
-				(uint8_t)node->level,
-				flags,
-				child_count,
-				encoder,
-				child_blks);
-	}
+	/* Write centroid pages for all BFS nodes */
+	mkt_write_centroid_tree(
+			&storage.base,
+			tree,
+			dim,
+			fan_out,
+			centroid_format,
+			rq_params,
+			global_mean,
+			NULL, /* no posting heads on main yet */
+			node_first_blkno);
 
 	/* 10. WAL-log all pages */
 	log_newpage_range(
@@ -502,7 +468,6 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	double indtuples = bs.indtuples;
 
 	mkt_hkmeans_result_destroy(tree);
-	pfree(node_pages);
 	pfree(node_first_blkno);
 
 	MemoryContextSwitchTo(caller_ctx);

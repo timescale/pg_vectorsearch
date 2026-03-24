@@ -1,0 +1,95 @@
+/*
+ * index_build.c - Shared index build utilities
+ *
+ * Generic helpers for building meerkat indexes, usable from both
+ * the PostgreSQL IAM build and the standalone CLI.
+ */
+
+#include <math.h>
+
+#include "core/memory.h"
+#include "index/index_build.h"
+
+BlockNumber
+mkt_compute_centroid_layout(
+		const HKMeansResult *tree,
+		uint32_t			 max_entries,
+		BlockNumber			 first_blkno,
+		BlockNumber			*node_first_blkno)
+{
+	BlockNumber next = first_blkno;
+
+	for (uint32_t i = 0; i < tree->nnodes; i++)
+	{
+		uint32_t n		= tree->nodes[i].nchildren;
+		uint32_t npages = (n + max_entries - 1) / max_entries;
+		if (npages == 0)
+			npages = 1;
+		node_first_blkno[i] = next;
+		next += npages;
+	}
+
+	return next;
+}
+
+void
+mkt_write_centroid_tree(
+		MktStorage			*storage,
+		const HKMeansResult *tree,
+		Dimension			 dim,
+		uint32_t			 fan_out,
+		MktCentroidFormat	 centroid_format,
+		const RaBitQParams	*rq_params,
+		const float			*global_mean,
+		const BlockNumber	*posting_heads,
+		const BlockNumber	*node_first_blkno)
+{
+	for (uint32_t i = 0; i < tree->nnodes; i++)
+	{
+		HKMeansNode *node	 = &tree->nodes[i];
+		bool		 is_leaf = (node->level == tree->nlevels - 1);
+
+		uint16_t flags		 = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
+		uint16_t child_count = is_leaf ? 0 : (uint16_t)fan_out;
+
+		CentroidEncoderState enc_state;
+		CentroidEncoder		*encoder = centroid_encoder_init(
+				&enc_state,
+				centroid_format,
+				node->centroids,
+				dim,
+				rq_params,
+				global_mean);
+
+		const BlockNumber *child_blks;
+		if (is_leaf && posting_heads != NULL)
+			child_blks = &posting_heads[node->first_leaf];
+		else if (!is_leaf)
+			child_blks = &node_first_blkno[node->first_child];
+		else
+			child_blks = NULL;
+
+		mkt_centroid_write_pages(
+				storage,
+				dim,
+				node->nchildren,
+				centroid_format,
+				(uint8_t)node->level,
+				flags,
+				child_count,
+				encoder,
+				child_blks);
+	}
+}
+
+uint32_t
+mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out)
+{
+	if (fan_out != default_fan_out || nlist <= fan_out)
+		return (nlist <= fan_out) ? nlist : fan_out;
+
+	uint32_t f = (uint32_t)ceil(sqrt((double)nlist));
+	if (f > 256)
+		f = (uint32_t)ceil(cbrt((double)nlist));
+	return f;
+}
