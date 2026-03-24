@@ -39,10 +39,10 @@ option('faiss',
 )
 
 option('hdf5',
-  type: 'boolean',
-  value: false,
-  description: '''Enable HDF5 dataset loading for verification commands.
-  Required for mkt verify rabitq (ann-benchmarks HDF5 datasets).
+  type: 'feature',
+  value: 'auto',
+  description: '''Enable HDF5 dataset loading for benchmarks and verification.
+  Auto-detected when libhdf5 is installed.
   Install: libhdf5-dev (Debian/Ubuntu), hdf5 (Arch).'''
 )
 

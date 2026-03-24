@@ -43,11 +43,11 @@ typedef struct MktCentroidResult
  * ---------------------------------------------------------------- */
 typedef struct MktCentroidSearchState
 {
-	const RaBitQQueryState *qstate;	 /* query for RaBitQ pages */
-	const float			   *query;	 /* raw query for float/half pages */
-	MktStorage			   *storage; /* page and vector I/O */
-	uint32_t				beam_width;
-	uint32_t				nprobe;
+	const RaBitQQueryState *qstate;		/* query for RaBitQ pages */
+	const float			   *query;		/* raw query for float/half pages */
+	MktStorage			   *storage;	/* page and vector I/O */
+	uint32_t				beam_width; /* candidates per level (>= nprobe) */
+	uint32_t				nprobe;		/* target leaf count */
 	Dimension				dim;
 	DistanceMetric			metric; /* distance metric for routing */
 } MktCentroidSearchState;
@@ -64,10 +64,15 @@ typedef struct MktCentroidSearchStats
  * Beam search API
  *
  * Searches the centroid tree starting from first_centroid_blkno.
- * Returns up to nprobe leaf centroids in results[], sorted by
- * estimated distance (ascending). Returns actual count written.
+ * Returns leaf centroids in results[], sorted by estimated
+ * distance (ascending). Returns actual count written.
  *
- * results[] must have space for at least state->nprobe entries.
+ * Returns up to nprobe leaf centroids. Error-bound-aware
+ * selection at intermediate levels may keep more candidates
+ * than beam_width to avoid pruning uncertain results, but the
+ * final output is capped at nprobe.
+ *
+ * results[] must have space for at least nprobe entries.
  * stats is optional (may be NULL). If provided, counters are
  * accumulated (not reset) so the caller can aggregate across
  * multiple calls.
@@ -76,10 +81,10 @@ typedef struct MktCentroidSearchStats
  * centroid_vecs is an optional output buffer (may be NULL). When
  * non-NULL, the function copies the leaf centroid vector for each
  * result into centroid_vecs[i * dim .. (i+1) * dim - 1]. The
- * buffer must hold at least nprobe * dim floats. Half-precision
- * vectors are converted to float32. Used by the PG scan path to
- * obtain centroid reference vectors for float/half centroid
- * formats.
+ * buffer must hold at least nprobe * dim floats. Half-
+ * precision vectors are converted to float32. Used by the PG scan
+ * path to obtain centroid reference vectors for float/half
+ * centroid formats.
  */
 uint32_t mkt_centroid_beam_search(
 		const MktCentroidSearchState *state,
