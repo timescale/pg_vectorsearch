@@ -1043,19 +1043,18 @@ mkt_rabitq_init_query_state(
 	else
 		state->c_error = 0.0f;
 
-	/* Sign bits */
-	rabitq_extract_signs(state->transformed, state->query_bits, dim);
-
-	/* g_scale for symmetric mode */
-	float l1_sum = 0.0f;
-	for (Dimension i = 0; i < dim; i++)
-		l1_sum += fabsf(state->transformed[i]);
-	state->g_scale = l1_sum / (float)dim;
-
 	/* Dispatch pointers */
 	state->mode = mode;
 	if (mode == MKT_DISTANCE_MODE_SYMMETRIC)
 	{
+		/* Symmetric mode needs sign bits and L1 norm */
+		rabitq_extract_signs(state->transformed, state->query_bits, dim);
+
+		float l1_sum = 0.0f;
+		for (Dimension i = 0; i < dim; i++)
+			l1_sum += fabsf(state->transformed[i]);
+		state->g_scale = l1_sum / (float)dim;
+
 		state->distance_fn = mkt_rabitq_distance_symmetric;
 		state->distance_with_bound_fn =
 				mkt_rabitq_distance_symmetric_with_bound;
