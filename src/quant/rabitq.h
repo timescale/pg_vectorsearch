@@ -352,7 +352,13 @@ void mkt_rabitq_rotate(
  *
  * state->transformed and state->query_bits must be pre-allocated by
  * the caller (dim floats and packed_bytes bytes respectively).
+ *
+ * Call mkt_rabitq_init_query_constants() once at context creation to
+ * set dim-dependent constants (inv_sqrt_d, c_error) that don't change
+ * per cluster.
  */
+void mkt_rabitq_init_query_constants(RaBitQQueryState *state, Dimension dim);
+
 void mkt_rabitq_init_query_state(
 		RaBitQQueryState *state,
 		const float		 *pt_query,

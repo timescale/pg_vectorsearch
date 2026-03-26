@@ -128,6 +128,10 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 	ctx->cluster_qs.transformed = ctx->cluster_transformed;
 	ctx->cluster_qs.query_bits	= ctx->cluster_query_bits;
 
+	/* Set dim-dependent constants once (avoid recomputing per cluster) */
+	mkt_rabitq_init_query_constants(&ctx->beam_qs, dim);
+	mkt_rabitq_init_query_constants(&ctx->cluster_qs, dim);
+
 	/* Child arena for transient per-query allocations */
 	ctx->arena = mkt_memctx_create(memctx, "query_arena");
 
