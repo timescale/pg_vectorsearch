@@ -213,19 +213,12 @@ int
 main(int argc, char **argv)
 {
 	/*
-	 * BLAS libraries use OpenMP/pthreads internally. In PostgreSQL,
-	 * multi-threaded BLAS is unsafe (backends fork). Warn if not
-	 * configured for single-threaded to keep benchmarks PG-representative.
+	 * Force single-threaded BLAS. In PostgreSQL, multi-threaded BLAS
+	 * is unsafe (backends fork). Set OMP_NUM_THREADS=1 unless the
+	 * user explicitly set it to something else.
 	 */
-	if (!mkt_cblas_is_single_threaded())
-	{
-		fprintf(stderr,
-				"Note: OMP_NUM_THREADS not set to 1. "
-				"BLAS may use multiple threads.\n"
-				"  For PG-representative benchmarks: "
-				"OMP_NUM_THREADS=1 %s ...\n\n",
-				argv[0]);
-	}
+	setenv("OMP_NUM_THREADS", "1", 0);
+	setenv("OPENBLAS_NUM_THREADS", "1", 0);
 
 	/* Initialize memory context for CLI */
 	MktMemCtx cli_memctx = mkt_memctx_create(NULL, "cli");
