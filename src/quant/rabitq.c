@@ -1020,6 +1020,17 @@ mkt_rabitq_rotate(
 }
 
 void
+mkt_rabitq_init_query_constants(RaBitQQueryState *state, Dimension dim)
+{
+	state->dim		  = dim;
+	state->inv_sqrt_d = 1.0f / sqrtf((float)dim);
+	if (dim > 1)
+		state->c_error = 2.0f * MKT_RABITQ_EPSILON / sqrtf((float)(dim - 1));
+	else
+		state->c_error = 0.0f;
+}
+
+void
 mkt_rabitq_init_query_state(
 		RaBitQQueryState *state,
 		const float		 *pt_query,
@@ -1027,21 +1038,15 @@ mkt_rabitq_init_query_state(
 		Dimension		  dim,
 		MktDistanceMode	  mode)
 {
-	state->dim = dim;
-
 	/* transformed = pt_query - pt_centroid (O(dim) vector subtraction) */
 	mkt_vector_sub(pt_query, pt_centroid, state->transformed, dim);
 
-	/* Compute scalar fields from transformed */
+	/* Compute per-centroid scalar fields from transformed.
+	 * inv_sqrt_d and c_error are dim-dependent constants set once
+	 * via mkt_rabitq_init_query_constants(). */
 	state->g_add		   = mkt_l2_norm_squared(state->transformed, dim);
 	state->g_error		   = sqrtf(state->g_add);
 	state->sum_transformed = mkt_vector_sum(state->transformed, dim);
-	state->inv_sqrt_d	   = 1.0f / sqrtf((float)dim);
-
-	if (dim > 1)
-		state->c_error = 2.0f * MKT_RABITQ_EPSILON / sqrtf((float)(dim - 1));
-	else
-		state->c_error = 0.0f;
 
 	/* Dispatch pointers */
 	state->mode = mode;
