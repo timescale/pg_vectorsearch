@@ -280,6 +280,7 @@ mkt_core_sources = files(
   'src/standalone/vector_source.c',
   'src/standalone/index.c',
   'src/standalone/query.c',
+  'src/standalone/api.c',
 )
 
 # Include directories
@@ -345,6 +346,10 @@ mkt_cli_sources = files(
   'src/cli/kmeans_pgvector.c',
 )
 
+if use_hdf5
+  mkt_cli_sources += files('src/standalone/hdf5_source.c')
+endif
+
 if use_faiss and use_hdf5
   mkt_cli_sources += files('src/cli/verify_rabitq.c')
 endif
@@ -357,6 +362,18 @@ mkt_exe = executable('mkt',
   include_directories: src_inc,
   install: false,
 )
+
+# Shared library for Python bindings (ann-benchmarks, etc.)
+# Skip in sanitizer builds — the shared library can't link the
+# sanitizer runtime (only executables get it automatically).
+if sanitize_opt == 'none'
+  mkt_bindings_lib = shared_library('mkt',
+    files('src/standalone/api.c'),
+    dependencies: [mkt_core_dep],
+    include_directories: src_inc,
+    install: false,
+  )
+endif
 
 # Create symlink in ./bin for easy local execution
 bin_dir = meson.project_source_root() / 'bin'
