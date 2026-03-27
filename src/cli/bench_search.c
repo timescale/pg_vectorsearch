@@ -37,7 +37,7 @@
 #define DEFAULT_K		10
 #define DEFAULT_QUERIES 100
 #define DEFAULT_RUNS	5
-#define DEFAULT_WARMUP	3
+#define DEFAULT_WARMUP	100
 
 /* ----------------------------------------------------------------
  * Configuration
@@ -182,6 +182,8 @@ print_usage(CmdContext *ctx)
 		   DEFAULT_RUNS);
 	printf("  --fmt <str>        rabitq, float32, float16\n");
 	printf("  --mode <str>       asymmetric, symmetric\n");
+	printf("  --warmup <int>     Warmup queries (default: %d)\n",
+		   DEFAULT_WARMUP);
 	printf("  --nredo <int>      K-means restarts\n");
 	printf("  --km-iter <int>    K-means iterations\n");
 #ifdef MKT_HAVE_HDF5
@@ -219,6 +221,7 @@ cmd_bench_search(CmdContext *ctx)
 			{"runs", required_argument, 0, 'r'},
 			{"fmt", required_argument, 0, 'F'},
 			{"mode", required_argument, 0, 'M'},
+			{"warmup", required_argument, 0, 'W'},
 			{"nredo", required_argument, 0, 'R'},
 			{"km-iter", required_argument, 0, 'I'},
 			{"hdf5", required_argument, 0, 'H'},
@@ -264,6 +267,9 @@ cmd_bench_search(CmdContext *ctx)
 			break;
 		case 'M':
 			config.distance_mode = optarg;
+			break;
+		case 'W':
+			config.warmup = (uint32_t)atoi(optarg);
 			break;
 		case 'R':
 			config.nredo = (uint32_t)atoi(optarg);
@@ -439,6 +445,9 @@ cmd_bench_search(CmdContext *ctx)
 	/* --------------------------------------------------------
 	 * Run queries via bindings API
 	 * -------------------------------------------------------- */
+
+	if (config.queries > 0 && config.queries < nqueries)
+		nqueries = config.queries;
 
 	uint32_t *result_ids = malloc(config.k * sizeof(uint32_t));
 	double	  recall_sum = 0.0;
