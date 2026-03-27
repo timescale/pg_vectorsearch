@@ -256,6 +256,9 @@ mkt_query_exec(
 					&ctx->cluster_qs, ctx->pt_query, pt_cent, dim, mode);
 
 			/* Batch distance computation */
+			/* Compute batch estimated distances. Pass NULL for
+			 * lower_bounds — we use pre-stored f_error in the
+			 * prune loop below instead of deriving it here. */
 			mkt_rabitq_distance_batch_multi_with_bound(
 					&ctx->cluster_qs,
 					pl->f_add,
@@ -265,7 +268,7 @@ mkt_query_exec(
 					pl->count,
 					dim,
 					ctx->scan_distances,
-					ctx->scan_lower_bounds,
+					NULL,
 					ctx->scan_scratch);
 
 			/* Two-stage: prune via lower bound, rerank
