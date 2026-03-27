@@ -295,6 +295,19 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	/* RaBitQ params */
 	idx->rq_params = mkt_rabitq_create(dim, 42);
 
+	/* Precompute P^T * centroids for zero-alloc query path.
+	 * This turns per-cluster O(dim²) matrix multiply into O(dim)
+	 * vector subtraction at query time. */
+	idx->pt_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
+	for (uint32_t c = 0; c < nlist; c++)
+		mkt_rabitq_rotate(
+				idx->rq_params,
+				idx->leaf_centroids + (size_t)c * dim,
+				idx->pt_centroids + (size_t)c * dim);
+
+	idx->pt_global_mean = mkt_alloc(dim * sizeof(float));
+	mkt_rabitq_rotate(idx->rq_params, idx->global_mean, idx->pt_global_mean);
+
 	/* Build centroid pages */
 	uint32_t est_pages	  = nlist + 100;
 	idx->centroid_storage = (ArrayPageStorage){
