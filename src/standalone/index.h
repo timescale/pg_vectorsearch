@@ -85,6 +85,8 @@ typedef struct MktIndex
 	/* Posting lists */
 	MktPostingList *lists;			/* [nlist] */
 	float		   *leaf_centroids; /* [nlist * dim] for per-cluster qstate */
+	float		   *pt_centroids;	/* [nlist * dim] P^T * leaf_centroids */
+	float		   *pt_global_mean; /* [dim] P^T * global_mean */
 	uint32_t		nlist;
 	uint32_t		nvecs; /* total vectors across all lists */
 

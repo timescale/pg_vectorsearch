@@ -324,6 +324,43 @@ RaBitQQueryState *mkt_rabitq_prepare_query_ex(
 		MktDistanceMode		mode);
 
 /*
+ * Pre-rotation API — eliminates per-cluster matrix multiply
+ *
+ * Instead of calling mkt_rabitq_prepare_query_ex() per cluster
+ * (which does O(dim²) matrix multiply each time), precompute:
+ *   - P^T * centroid at index build time (once per cluster)
+ *   - P^T * query at query time (once per query)
+ * Then per cluster: transformed = pt_query - pt_centroid (O(dim))
+ *
+ * This is valid because P^T is linear:
+ *   P^T * (query - centroid) = P^T * query - P^T * centroid
+ */
+
+/*
+ * Rotate a vector through P^T into pre-allocated output buffer.
+ * Output must have space for dim floats, 64-byte aligned preferred.
+ */
+void mkt_rabitq_rotate(
+		const RaBitQParams *params, const float *input, float *output);
+
+/*
+ * Initialize a pre-allocated query state from already-rotated vectors.
+ *
+ * Computes transformed = pt_query - pt_centroid (vector subtraction),
+ * then derives all scalar fields (g_add, g_error, query_bits, etc.).
+ * No matrix multiply — O(dim) instead of O(dim²).
+ *
+ * state->transformed and state->query_bits must be pre-allocated by
+ * the caller (dim floats and packed_bytes bytes respectively).
+ */
+void mkt_rabitq_init_query_state(
+		RaBitQQueryState *state,
+		const float		 *pt_query,
+		const float		 *pt_centroid,
+		Dimension		  dim,
+		MktDistanceMode	  mode);
+
+/*
  * Dispatch helpers - call through function pointers set at prepare time
  */
 

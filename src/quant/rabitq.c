@@ -1013,6 +1013,63 @@ mkt_rabitq_prepare_query(
 }
 
 void
+mkt_rabitq_rotate(
+		const RaBitQParams *params, const float *input, float *output)
+{
+	mkt_matrix_transpose_vector_mul(params->P, input, output, params->dim);
+}
+
+void
+mkt_rabitq_init_query_state(
+		RaBitQQueryState *state,
+		const float		 *pt_query,
+		const float		 *pt_centroid,
+		Dimension		  dim,
+		MktDistanceMode	  mode)
+{
+	state->dim = dim;
+
+	/* transformed = pt_query - pt_centroid (O(dim) vector subtraction) */
+	mkt_vector_sub(pt_query, pt_centroid, state->transformed, dim);
+
+	/* Compute scalar fields from transformed */
+	state->g_add		   = mkt_l2_norm_squared(state->transformed, dim);
+	state->g_error		   = sqrtf(state->g_add);
+	state->sum_transformed = mkt_vector_sum(state->transformed, dim);
+	state->inv_sqrt_d	   = 1.0f / sqrtf((float)dim);
+
+	if (dim > 1)
+		state->c_error = 2.0f * MKT_RABITQ_EPSILON / sqrtf((float)(dim - 1));
+	else
+		state->c_error = 0.0f;
+
+	/* Sign bits */
+	rabitq_extract_signs(state->transformed, state->query_bits, dim);
+
+	/* g_scale for symmetric mode */
+	float l1_sum = 0.0f;
+	for (Dimension i = 0; i < dim; i++)
+		l1_sum += fabsf(state->transformed[i]);
+	state->g_scale = l1_sum / (float)dim;
+
+	/* Dispatch pointers */
+	state->mode = mode;
+	if (mode == MKT_DISTANCE_MODE_SYMMETRIC)
+	{
+		state->distance_fn = mkt_rabitq_distance_symmetric;
+		state->distance_with_bound_fn =
+				mkt_rabitq_distance_symmetric_with_bound;
+		state->error_multiplier = 3.0f;
+	}
+	else
+	{
+		state->distance_fn			  = mkt_rabitq_distance;
+		state->distance_with_bound_fn = mkt_rabitq_distance_with_bound;
+		state->error_multiplier		  = 1.0f;
+	}
+}
+
+void
 mkt_rabitq_free_query(RaBitQQueryState *state)
 {
 	if (state == NULL)

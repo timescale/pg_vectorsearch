@@ -4,6 +4,11 @@
  * All buffers are pre-allocated in MktQueryCtx. The query hot path
  * uses only pre-allocated memory and arena reset (no malloc/free).
  *
+ * Key optimization: P^T * centroid is precomputed at index build time.
+ * At query time, P^T * query is computed once, then per-cluster state
+ * is derived via O(dim) vector subtraction instead of O(dim²) matrix
+ * multiply.
+ *
  * Memory layout:
  *   memctx (long-lived) — owns all query context buffers
  *     └── arena (child) — transient per-query allocations, reset each query
@@ -39,13 +44,21 @@ struct MktQueryCtx
 	float	 *scan_scratch;		 /* [max_per_cluster] float scratch */
 	uint32_t  max_per_cluster;
 
+	/* Pre-allocated RaBitQ query state (avoids per-cluster alloc) */
+	float			*pt_query;			  /* [dim] P^T * query */
+	RaBitQQueryState beam_qs;			  /* for beam search */
+	RaBitQQueryState cluster_qs;		  /* for cluster scan (reused) */
+	float			*beam_transformed;	  /* [dim] scratch */
+	float			*cluster_transformed; /* [dim] scratch */
+	uint8_t			*beam_query_bits;	  /* [packed_bytes] */
+	uint8_t			*cluster_query_bits;  /* [packed_bytes] */
+
 	/* Long-lived memory context for all query context buffers.
 	 * Deleting this frees everything at once (no individual frees). */
 	MktMemCtx memctx;
 
 	/* Child arena for transient per-query allocations (beam search
-	 * internals, rabitq query state). Reset per query — no
-	 * create/delete overhead. */
+	 * internals). Reset per query — no create/delete overhead. */
 	MktMemCtx arena;
 
 	/* Limits */
@@ -74,8 +87,11 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 	ctx->max_nprobe	 = max_nprobe;
 	ctx->memctx		 = memctx;
 
+	Dimension dim		   = idx->dim;
+	uint32_t  packed_bytes = MKT_RABITQ_BYTES(dim);
+
 	/* Query normalization buffer */
-	ctx->query_buf = mkt_alloc(idx->dim * sizeof(float));
+	ctx->query_buf = mkt_alloc(dim * sizeof(float));
 
 	/* Beam search results */
 	ctx->beam_results = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
@@ -98,6 +114,19 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 	ctx->scan_distances	   = mkt_alloc(max_cluster * sizeof(Distance));
 	ctx->scan_lower_bounds = mkt_alloc(max_cluster * sizeof(Distance));
 	ctx->scan_scratch	   = mkt_alloc(max_cluster * sizeof(float));
+
+	/* Pre-allocated RaBitQ buffers */
+	ctx->pt_query			 = mkt_alloc_aligned(dim * sizeof(float), 64);
+	ctx->beam_transformed	 = mkt_alloc_aligned(dim * sizeof(float), 64);
+	ctx->cluster_transformed = mkt_alloc_aligned(dim * sizeof(float), 64);
+	ctx->beam_query_bits	 = mkt_alloc_aligned(packed_bytes, 64);
+	ctx->cluster_query_bits	 = mkt_alloc_aligned(packed_bytes, 64);
+
+	/* Wire up the pre-allocated buffers to the query states */
+	ctx->beam_qs.transformed	= ctx->beam_transformed;
+	ctx->beam_qs.query_bits		= ctx->beam_query_bits;
+	ctx->cluster_qs.transformed = ctx->cluster_transformed;
+	ctx->cluster_qs.query_bits	= ctx->cluster_query_bits;
 
 	/* Child arena for transient per-query allocations */
 	ctx->arena = mkt_memctx_create(memctx, "query_arena");
@@ -159,13 +188,17 @@ mkt_query_exec(
 		qvec = ctx->query_buf;
 	}
 
-	/* Prepare RaBitQ query state (uses arena — freed on reset) */
+	/* Compute P^T * query once (O(dim²) — but only once per query) */
 	RaBitQQueryState *qs = NULL;
 	if (idx->centroid_fmt == MKT_CENTROID_FMT_RABITQ)
 	{
-		VectorRef qref = {.data = qvec, .dim = dim};
-		VectorRef cref = {.data = idx->global_mean, .dim = dim};
-		qs = mkt_rabitq_prepare_query_ex(idx->rq_params, qref, cref, mode);
+		mkt_rabitq_rotate(idx->rq_params, qvec, ctx->pt_query);
+
+		/* Initialize beam search query state from pre-rotated vectors.
+		 * This is O(dim) subtraction instead of O(dim²) matrix multiply. */
+		mkt_rabitq_init_query_state(
+				&ctx->beam_qs, ctx->pt_query, idx->pt_global_mean, dim, mode);
+		qs = &ctx->beam_qs;
 	}
 
 	/* Beam search (uses arena for internal scratch) */
@@ -211,23 +244,16 @@ mkt_query_exec(
 		{
 			/* RaBitQ quantized scan with error bounds.
 			 *
-			 * Prepare per-cluster query state, then batch
-			 * distance + lower bound computation. Only vectors
-			 * whose lower bound passes the top-K threshold get
-			 * reranked with exact distance. */
-			const float *cent = idx->leaf_centroids + (size_t)li * dim;
-			VectorRef	 qref = {.data = qvec, .dim = dim};
-			VectorRef	 cref = {.data = cent, .dim = dim};
+			 * Initialize per-cluster query state from pre-rotated
+			 * vectors. O(dim) subtraction, no matrix multiply. */
+			const float *pt_cent = idx->pt_centroids + (size_t)li * dim;
 
-			/* Per-cluster qstate (arena-allocated) */
-			MktMemCtx		  prev		 = mkt_memctx_switch(ctx->arena);
-			RaBitQQueryState *cluster_qs = mkt_rabitq_prepare_query_ex(
-					idx->rq_params, qref, cref, mode);
-			mkt_memctx_switch(prev);
+			mkt_rabitq_init_query_state(
+					&ctx->cluster_qs, ctx->pt_query, pt_cent, dim, mode);
 
 			/* Batch distance computation */
 			mkt_rabitq_distance_batch_multi_with_bound(
-					cluster_qs,
+					&ctx->cluster_qs,
 					pl->f_add,
 					pl->f_rescale,
 					pl->bits,
@@ -241,7 +267,7 @@ mkt_query_exec(
 			/* Two-stage: prune via lower bound, rerank
 			 * survivors with exact L2 distance. */
 			Distance threshold = mkt_topk_threshold(&ctx->topk);
-			float	 g_error   = cluster_qs->g_error;
+			float	 g_error   = ctx->cluster_qs.g_error;
 
 			for (uint32_t vi = 0; vi < pl->count; vi++)
 			{
@@ -257,8 +283,6 @@ mkt_query_exec(
 				mkt_topk_insert(&ctx->topk, d, 0.0f, pl->ids[vi]);
 				threshold = mkt_topk_threshold(&ctx->topk);
 			}
-
-			/* cluster_qs freed on arena reset */
 		}
 		else
 		{
