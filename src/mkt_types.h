@@ -9,6 +9,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * Flexible array member marker. PostgreSQL's c.h defines this; for
+ * standalone builds we provide an empty fallback so shared headers
+ * can use the same syntax in both contexts.
+ */
+#ifndef FLEXIBLE_ARRAY_MEMBER
+#define FLEXIBLE_ARRAY_MEMBER /* empty, C99+ */
+#endif
+
 /* Quantized representations */
 typedef uint8_t ScalarQ8; /* 8-bit scalar quantized */
 typedef uint8_t BinaryQ;  /* Binary quantized byte (packed bits) */

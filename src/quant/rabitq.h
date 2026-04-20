@@ -110,11 +110,16 @@ typedef struct RaBitQBatch
  */
 typedef struct RaBitQParams
 {
-	float	 *P;   /* Random orthogonal matrix (dim x dim), row-major */
-	Dimension dim; /* Vector dimension */
-	uint32_t  packed_bytes; /* ceil(dim / 8) */
-	uint64_t  seed;			/* Seed for reproducibility */
+	Dimension dim;						/* Vector dimension */
+	uint32_t  packed_bytes;				/* ceil(dim / 8) */
+	uint64_t  seed;						/* Seed for reproducibility */
+	float	  P[FLEXIBLE_ARRAY_MEMBER]; /* Random orthogonal matrix
+										 * (dim x dim), row-major */
 } RaBitQParams;
+
+/* Total byte size for a RaBitQParams with dim x dim matrix */
+#define MKT_RABITQ_PARAMS_SIZE(dim) \
+	(offsetof(RaBitQParams, P) + (size_t)(dim) * (dim) * sizeof(float))
 
 /*
  * RaBitQQueryState - Query state (amortizes work across vectors)
@@ -183,10 +188,18 @@ typedef struct RaBitQQueryState
 RaBitQParams *mkt_rabitq_create(Dimension dim, uint64_t seed);
 
 /*
+ * Create RaBitQ parameters from an existing rotation matrix.
+ * Copies the matrix into the new allocation.
+ */
+RaBitQParams *
+mkt_rabitq_create_from_matrix(Dimension dim, uint64_t seed, const float *P);
+
+/*
  * Initialize RaBitQ parameters in pre-allocated memory.
  *
- * Same as mkt_rabitq_create but uses caller-provided struct.
- * The P matrix is still heap-allocated internally.
+ * Same as mkt_rabitq_create but uses caller-provided buffer.
+ * Buffer must be at least MKT_RABITQ_PARAMS_SIZE(dim) bytes.
+ * Generates the rotation matrix P in-place.
  *
  * Returns 0 on success, -1 on failure.
  */
@@ -198,8 +211,8 @@ int mkt_rabitq_init(RaBitQParams *params, Dimension dim, uint64_t seed);
 void mkt_rabitq_destroy(RaBitQParams *params);
 
 /*
- * Free internal resources without freeing the struct itself.
- * Use when struct is stack-allocated.
+ * Cleanup internal resources (no-op since P is now inline).
+ * Kept for API compatibility with stack-allocated usage.
  */
 void mkt_rabitq_cleanup(RaBitQParams *params);
 
