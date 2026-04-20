@@ -57,6 +57,12 @@ typedef struct MktStorageOps
 	void (*commit_page)(MktStorage *self, BlockNumber blkno);
 
 	/*
+	 * Bulk extend: pre-allocate npages contiguous pages.
+	 * Returns the first block number. NULL = not supported.
+	 */
+	BlockNumber (*extend)(MktStorage *self, uint32_t npages);
+
+	/*
 	 * Rerank candidates with exact distances.
 	 *
 	 * Fetches full-precision vectors and computes exact L2 for
@@ -131,6 +137,14 @@ static inline void
 mkt_storage_commit_page(MktStorage *s, BlockNumber blkno)
 {
 	s->ops->commit_page(s, blkno);
+}
+
+static inline BlockNumber
+mkt_storage_extend(MktStorage *s, uint32_t npages)
+{
+	if (s->ops->extend != NULL)
+		return s->ops->extend(s, npages);
+	return InvalidBlockNumber;
 }
 
 static inline uint32_t
