@@ -52,9 +52,9 @@ parse_centroid_fmt(const char *s)
 static MktPostingFormat
 parse_posting_fmt(const char *s)
 {
-	if (s != NULL && strcmp(s, "pages") == 0)
-		return MKT_POSTING_FMT_PAGES;
-	return MKT_POSTING_FMT_FLAT; /* default: flat (lowest overhead) */
+	if (s != NULL && strcmp(s, "flat") == 0)
+		return MKT_POSTING_FMT_FLAT;
+	return MKT_POSTING_FMT_PAGES; /* default: pages (matches PG on-disk) */
 }
 
 static MktDistanceMode
