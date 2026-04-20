@@ -11,7 +11,6 @@ extension_sources = files(
   'mktann_build.c',
   'mktann_scan.c',
   'mktann_storage.c',
-  'topk.c',
 )
 
 pg_ext_cflags = [
