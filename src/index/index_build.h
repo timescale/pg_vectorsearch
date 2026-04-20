@@ -46,6 +46,10 @@ BlockNumber mkt_compute_centroid_layout(
  * posting_heads may be NULL (centroid-only build without posting
  * lists).
  */
+/*
+ * pt_centroids: optional P^T * centroid array [nlist * dim] for leaf
+ * entries, stored alongside routing data. NULL to skip.
+ */
 void mkt_write_centroid_tree(
 		MktStorage			*storage,
 		const HKMeansResult *tree,
@@ -55,7 +59,8 @@ void mkt_write_centroid_tree(
 		const RaBitQParams	*rq_params,
 		const float			*global_mean,
 		const BlockNumber	*posting_heads,
-		const BlockNumber	*node_first_blkno);
+		const BlockNumber	*node_first_blkno,
+		const float			*pt_centroids);
 
 /*
  * Auto-tune fan_out from nlist.

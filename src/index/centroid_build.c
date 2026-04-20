@@ -19,17 +19,21 @@ mkt_centroid_write_pages(
 		uint16_t		   flags,
 		uint16_t		   child_count,
 		CentroidEncoder	  *encoder,
-		const BlockNumber *child_blknos)
+		const BlockNumber *child_blknos,
+		const float		  *pt_centroids)
 {
 	BlockNumber first_blkno = InvalidBlockNumber;
 	BlockNumber prev_blkno	= InvalidBlockNumber;
 	Page		cur_page	= NULL;
 	BlockNumber cur_blkno	= InvalidBlockNumber;
 
+	(void)pt_centroids; /* pt_centroids stored on posting pages, not here */
+
 	for (uint32_t i = 0; i < nlist; i++)
 	{
 		/* Allocate a new page if needed */
-		if (cur_page == NULL || !mkt_centroid_page_has_room(cur_page, dim))
+		if (cur_page == NULL ||
+			!mkt_centroid_page_has_room(cur_page, dim, false))
 		{
 			/* Commit the previous page if any */
 			if (cur_page != NULL)

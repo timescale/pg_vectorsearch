@@ -458,7 +458,8 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			rq_params,
 			global_mean,
 			NULL, /* no posting heads on main yet */
-			node_first_blkno);
+			node_first_blkno,
+			NULL /* pt_centroids: stored on posting pages */);
 
 	/* 10. WAL-log all pages */
 	log_newpage_range(

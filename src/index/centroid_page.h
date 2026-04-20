@@ -69,6 +69,8 @@
  * Centroid data format (stored in low 2 bits of opaque->flags)
  * ---------------------------------------------------------------- */
 #define MKT_CENTROID_FMT_MASK ((uint8_t)0x03)
+#define MKT_CENTROID_OPAQUE_LEAF \
+	((uint8_t)0x04) /* page contains leaf entries */
 
 typedef enum MktCentroidFormat
 {
@@ -121,7 +123,7 @@ mkt_centroid_meta_size(MktCentroidFormat fmt)
 	return sizeof(MktCentroidEntryMeta);
 }
 
-/* Per-entry data size for a given format */
+/* Per-entry data size for routing (centroid vector or RaBitQ) */
 static inline uint32_t
 mkt_centroid_data_size(Dimension dim, MktCentroidFormat fmt)
 {
@@ -136,11 +138,25 @@ mkt_centroid_data_size(Dimension dim, MktCentroidFormat fmt)
 	}
 }
 
+/* Per-entry data size for leaf pages (routing + P^T * centroid) */
+static inline uint32_t
+mkt_centroid_leaf_data_size(Dimension dim, MktCentroidFormat fmt)
+{
+	return mkt_centroid_data_size(dim, fmt) + dim * sizeof(float);
+}
+
 /* Bytes consumed per entry (metadata + data) for a given format */
 static inline uint32_t
 mkt_centroid_entry_bytes_fmt(Dimension dim, MktCentroidFormat fmt)
 {
 	return mkt_centroid_meta_size(fmt) + mkt_centroid_data_size(dim, fmt);
+}
+
+/* Bytes consumed per leaf entry (metadata + routing + pt_centroid) */
+static inline uint32_t
+mkt_centroid_leaf_entry_bytes_fmt(Dimension dim, MktCentroidFormat fmt)
+{
+	return mkt_centroid_meta_size(fmt) + mkt_centroid_leaf_data_size(dim, fmt);
 }
 
 /* Maximum entries per page for a given format */
@@ -149,6 +165,14 @@ mkt_centroid_max_entries_fmt(Dimension dim, MktCentroidFormat fmt)
 {
 	return (uint32_t)(MKT_CENTROID_PAGE_USABLE /
 					  mkt_centroid_entry_bytes_fmt(dim, fmt));
+}
+
+/* Maximum entries per leaf page (includes pt_centroid per entry) */
+static inline uint32_t
+mkt_centroid_max_leaf_entries_fmt(Dimension dim, MktCentroidFormat fmt)
+{
+	return (uint32_t)(MKT_CENTROID_PAGE_USABLE /
+					  mkt_centroid_leaf_entry_bytes_fmt(dim, fmt));
 }
 
 /* Backward-compatible wrappers (default to RaBitQ format) */
@@ -214,6 +238,13 @@ mkt_centroid_meta(const Page page, uint32_t index)
  *   opaque_start - 2*data_size = data[1]
  *   ...
  */
+/*
+ * Data accessor for the backward-growing data region.
+ *
+ * For leaf pages, each entry stores [routing_data | pt_centroid]
+ * so the total data_size per entry is larger. For internal pages,
+ * only routing_data is stored.
+ */
 static inline const void *
 mkt_centroid_entry_data(const Page page, uint32_t index, Dimension dim)
 {
@@ -223,7 +254,7 @@ mkt_centroid_entry_data(const Page page, uint32_t index, Dimension dim)
 						  (size_t)(index + 1) * data_size);
 }
 
-/* Typed accessors for each format */
+/* Typed accessors for routing data (at start of data region) */
 static inline const RaBitQData *
 mkt_centroid_data(const Page page, uint32_t index, Dimension dim)
 {
@@ -312,12 +343,13 @@ mkt_centroid_page_add(
  * Reads data format from the page to determine entry size.
  */
 static inline bool
-mkt_centroid_page_has_room(Page page, Dimension dim)
+mkt_centroid_page_has_room(Page page, Dimension dim, bool is_leaf)
 {
 	PageHeader		  header   = (PageHeader)page;
 	MktCentroidFormat fmt	   = mkt_centroid_page_format(page);
 	size_t			  need_fwd = mkt_centroid_meta_size(fmt);
-	size_t			  need_bwd = mkt_centroid_data_size(dim, fmt);
+	size_t need_bwd = is_leaf ? mkt_centroid_leaf_data_size(dim, fmt)
+							  : mkt_centroid_data_size(dim, fmt);
 
 	return header->pd_lower + need_fwd + need_bwd <= header->pd_upper;
 }
