@@ -49,6 +49,7 @@ uint32_t mkt_query_exec(
 		uint32_t		k,
 		uint32_t		nprobe,
 		MktDistanceMode mode,
+		bool			rerank,
 		uint32_t	   *result_ids);
 
 #endif /* MKT_STANDALONE_QUERY_H */

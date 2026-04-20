@@ -58,7 +58,10 @@ typedef struct
 	const char *hdf5_path;
 	const char *metric;
 	const char *centroid_fmt;
+	const char *posting_fmt;
+	const char *posting_layout;
 	const char *distance_mode;
+	bool		no_rerank;
 	bool		help;
 } BenchConfig;
 
@@ -180,12 +183,17 @@ print_usage(CmdContext *ctx)
 		   DEFAULT_QUERIES);
 	printf("  --runs <int>       Runs per query (default: %d)\n",
 		   DEFAULT_RUNS);
-	printf("  --fmt <str>        rabitq, float32, float16\n");
+	printf("  --centroid-fmt <s> float32, float16, rabitq "
+		   "(default: float32)\n");
+	printf("  --posting-fmt <s>  native, rabitq, int8 "
+		   "(default: rabitq)\n");
+	printf("  --posting-layout   flat, pages (default: flat)\n");
 	printf("  --mode <str>       asymmetric, symmetric\n");
 	printf("  --warmup <int>     Warmup queries (default: %d)\n",
 		   DEFAULT_WARMUP);
 	printf("  --nredo <int>      K-means restarts\n");
 	printf("  --km-iter <int>    K-means iterations\n");
+	printf("  --no-rerank        Skip reranking (return approximate)\n");
 #ifdef MKT_HAVE_HDF5
 	printf("  --hdf5 <path>      HDF5 dataset\n");
 	printf("  --metric <str>     angular, euclidean\n");
@@ -201,15 +209,17 @@ int
 cmd_bench_search(CmdContext *ctx)
 {
 	BenchConfig config = {
-			.dim		   = DEFAULT_DIM,
-			.nprobe		   = DEFAULT_NPROBE,
-			.k			   = DEFAULT_K,
-			.queries	   = DEFAULT_QUERIES,
-			.runs		   = DEFAULT_RUNS,
-			.warmup		   = DEFAULT_WARMUP,
-			.metric		   = "euclidean",
-			.centroid_fmt  = "rabitq",
-			.distance_mode = "asymmetric",
+			.dim			= DEFAULT_DIM,
+			.nprobe			= DEFAULT_NPROBE,
+			.k				= DEFAULT_K,
+			.queries		= DEFAULT_QUERIES,
+			.runs			= DEFAULT_RUNS,
+			.warmup			= DEFAULT_WARMUP,
+			.metric			= "euclidean",
+			.centroid_fmt	= "float32",
+			.posting_fmt	= "rabitq",
+			.posting_layout = "flat",
+			.distance_mode	= "asymmetric",
 	};
 
 	static struct option long_options[] = {
@@ -219,13 +229,17 @@ cmd_bench_search(CmdContext *ctx)
 			{"nprobe", required_argument, 0, 'p'},
 			{"queries", required_argument, 0, 'q'},
 			{"runs", required_argument, 0, 'r'},
-			{"fmt", required_argument, 0, 'F'},
+			{"centroid-fmt", required_argument, 0, 'F'},
+			{"fmt", required_argument, 0, 'F'}, /* backward compat */
 			{"mode", required_argument, 0, 'M'},
 			{"warmup", required_argument, 0, 'W'},
 			{"nredo", required_argument, 0, 'R'},
 			{"km-iter", required_argument, 0, 'I'},
 			{"hdf5", required_argument, 0, 'H'},
 			{"metric", required_argument, 0, 'm'},
+			{"posting-fmt", required_argument, 0, 'T'},
+			{"posting-layout", required_argument, 0, 'P'},
+			{"no-rerank", no_argument, 0, 'N'},
 			{"help", no_argument, 0, 'h'},
 			{0, 0, 0, 0},
 	};
@@ -268,6 +282,12 @@ cmd_bench_search(CmdContext *ctx)
 		case 'M':
 			config.distance_mode = optarg;
 			break;
+		case 'T':
+			config.posting_fmt = optarg;
+			break;
+		case 'P':
+			config.posting_layout = optarg;
+			break;
 		case 'W':
 			config.warmup = (uint32_t)atoi(optarg);
 			break;
@@ -282,6 +302,9 @@ cmd_bench_search(CmdContext *ctx)
 			break;
 		case 'm':
 			config.metric = optarg;
+			break;
+		case 'N':
+			config.no_rerank = true;
 			break;
 		case 'h':
 			config.help = true;
@@ -359,9 +382,12 @@ cmd_bench_search(CmdContext *ctx)
 			   config.metric);
 
 		/* Build index by streaming from HDF5 */
-		printf("Building index (nlist=%u, fmt=%s)...\n",
+		printf("Building index (nlist=%u, centroid=%s, "
+			   "posting=%s, layout=%s)...\n",
 			   config.nlist,
-			   config.centroid_fmt);
+			   config.centroid_fmt,
+			   config.posting_fmt,
+			   config.posting_layout);
 
 		uint64_t t0 = get_time_ns();
 		handle		= mkt_handle_create(
@@ -370,6 +396,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.fan_out,
 				 config.metric,
 				 config.centroid_fmt,
+				 config.posting_layout,
 				 config.nredo,
 				 config.km_iter,
 				 &info);
@@ -401,9 +428,12 @@ cmd_bench_search(CmdContext *ctx)
 		query_vecs		  = generate_random_vectors(nqueries, config.dim);
 		printf("Synthetic: %u x %u (L2)\n", nvecs, config.dim);
 
-		printf("Building index (nlist=%u, fmt=%s)...\n",
+		printf("Building index (nlist=%u, centroid=%s, "
+			   "posting=%s, layout=%s)...\n",
 			   config.nlist,
-			   config.centroid_fmt);
+			   config.centroid_fmt,
+			   config.posting_fmt,
+			   config.posting_layout);
 
 		uint64_t t0 = get_time_ns();
 		handle		= mkt_handle_create_from_array(
@@ -414,6 +444,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.fan_out,
 				 config.metric,
 				 config.centroid_fmt,
+				 config.posting_layout,
 				 config.nredo,
 				 config.km_iter,
 				 &info);
@@ -456,12 +487,14 @@ cmd_bench_search(CmdContext *ctx)
 	double	  lat_max	 = 0.0;
 
 	printf("Querying: %u queries x %u runs, k=%u, nprobe=%u, "
-		   "fmt=%s, mode=%s\n",
+		   "centroid=%s, posting=%s, layout=%s, mode=%s\n",
 		   nqueries,
 		   config.runs,
 		   config.k,
 		   config.nprobe,
 		   config.centroid_fmt,
+		   config.posting_fmt,
+		   config.posting_layout,
 		   config.distance_mode);
 
 	/* Warmup */
@@ -474,6 +507,7 @@ cmd_bench_search(CmdContext *ctx)
 				config.k,
 				config.nprobe,
 				config.distance_mode,
+				!config.no_rerank,
 				result_ids);
 	}
 
@@ -492,6 +526,7 @@ cmd_bench_search(CmdContext *ctx)
 					  config.k,
 					  config.nprobe,
 					  config.distance_mode,
+					  !config.no_rerank,
 					  result_ids);
 			uint64_t t_end = get_time_ns();
 
@@ -534,8 +569,11 @@ cmd_bench_search(CmdContext *ctx)
 	double recall  = nqueries > 0 ? recall_sum / nqueries : 0.0;
 
 	printf("\nResults:\n");
-	printf("  fmt=%-8s mode=%-12s nprobe=%u k=%u\n",
+	printf("  centroid=%-8s posting=%-8s layout=%-6s mode=%-12s "
+		   "nprobe=%u k=%u\n",
 		   config.centroid_fmt,
+		   config.posting_fmt,
+		   config.posting_layout,
 		   config.distance_mode,
 		   config.nprobe,
 		   config.k);

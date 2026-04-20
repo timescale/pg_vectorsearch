@@ -49,6 +49,14 @@ parse_centroid_fmt(const char *s)
 	return MKT_CENTROID_FMT_RABITQ;
 }
 
+static MktPostingFormat
+parse_posting_fmt(const char *s)
+{
+	if (s != NULL && strcmp(s, "pages") == 0)
+		return MKT_POSTING_FMT_PAGES;
+	return MKT_POSTING_FMT_FLAT; /* default: flat (lowest overhead) */
+}
+
 static MktDistanceMode
 parse_distance_mode(const char *s)
 {
@@ -68,6 +76,7 @@ mkt_handle_create(
 		uint32_t		 fan_out,
 		const char		*metric,
 		const char		*centroid_fmt,
+		const char		*posting_fmt,
 		uint32_t		 km_nredo,
 		uint32_t		 km_max_iter,
 		MktBuildInfo	*info)
@@ -89,7 +98,8 @@ mkt_handle_create(
 			.metric		   = parse_metric(metric),
 			.km_nredo	   = km_nredo,
 			.km_max_iter   = km_max_iter,
-			.encode_rabitq = (fmt == MKT_CENTROID_FMT_RABITQ),
+			.encode_rabitq = true,
+			.posting_fmt   = parse_posting_fmt(posting_fmt),
 	};
 
 	MktIndex *idx = mkt_index_build(src, &config);
@@ -110,7 +120,7 @@ mkt_handle_create(
 		info->min_cluster = UINT32_MAX;
 		for (uint32_t c = 0; c < idx->nlist; c++)
 		{
-			uint32_t sz = idx->lists[c].count;
+			uint32_t sz = idx->clusters[c].count;
 			if (sz > info->max_cluster)
 				info->max_cluster = sz;
 			if (sz < info->min_cluster)
@@ -147,6 +157,7 @@ mkt_handle_create_from_array(
 		uint32_t	  fan_out,
 		const char	 *metric,
 		const char	 *centroid_fmt,
+		const char	 *posting_fmt,
 		uint32_t	  km_nredo,
 		uint32_t	  km_max_iter,
 		MktBuildInfo *info)
@@ -159,6 +170,7 @@ mkt_handle_create_from_array(
 			fan_out,
 			metric,
 			centroid_fmt,
+			posting_fmt,
 			km_nredo,
 			km_max_iter,
 			info);
@@ -171,6 +183,7 @@ mkt_handle_query(
 		uint32_t	 k,
 		uint32_t	 nprobe,
 		const char	*distance_mode,
+		bool		 rerank,
 		uint32_t	*result_ids)
 {
 	if (handle == NULL)
@@ -178,7 +191,8 @@ mkt_handle_query(
 
 	MktDistanceMode mode = parse_distance_mode(distance_mode);
 
-	return mkt_query_exec(handle->qctx, query, k, nprobe, mode, result_ids);
+	return mkt_query_exec(
+			handle->qctx, query, k, nprobe, mode, rerank, result_ids);
 }
 
 void
