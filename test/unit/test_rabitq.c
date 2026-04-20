@@ -1043,12 +1043,11 @@ TEST(cleanup_null)
 	ASSERT_TRUE(1, "cleanup null should not crash");
 }
 
-TEST(cleanup_null_matrix)
+TEST(cleanup_null_params)
 {
-	/* Cleanup with NULL P should be safe */
-	RaBitQParams params = {.P = NULL, .dim = 16, .packed_bytes = 2, .seed = 0};
-	mkt_rabitq_cleanup(&params);
-	ASSERT_TRUE(1, "cleanup with null P should not crash");
+	/* Cleanup with NULL should be safe */
+	mkt_rabitq_cleanup(NULL);
+	ASSERT_TRUE(1, "cleanup with null should not crash");
 }
 
 TEST(free_query_null)
@@ -1066,9 +1065,12 @@ TEST(init_null_params)
 
 TEST(init_zero_dim)
 {
-	RaBitQParams params;
-	int			 ret = mkt_rabitq_init(&params, 0, 42);
+	/* Need buffer for flexible array, but dim=0 should fail before
+	 * accessing P, so a minimal alloc suffices. */
+	RaBitQParams *params = mkt_alloc(sizeof(RaBitQParams));
+	int			  ret	 = mkt_rabitq_init(params, 0, 42);
 	ASSERT_EQ(-1, ret, "init with zero dim should fail");
+	mkt_free(params);
 }
 
 /*

@@ -410,7 +410,8 @@ rabitq_hamming_multi_compiler(
 RaBitQParams *
 mkt_rabitq_create(Dimension dim, uint64_t seed)
 {
-	RaBitQParams *params = mkt_alloc(sizeof(RaBitQParams));
+	size_t		  size	 = MKT_RABITQ_PARAMS_SIZE(dim);
+	RaBitQParams *params = mkt_alloc(size);
 	if (params == NULL)
 		return NULL;
 
@@ -419,6 +420,22 @@ mkt_rabitq_create(Dimension dim, uint64_t seed)
 		mkt_free(params);
 		return NULL;
 	}
+
+	return params;
+}
+
+RaBitQParams *
+mkt_rabitq_create_from_matrix(Dimension dim, uint64_t seed, const float *P)
+{
+	size_t		  size	 = MKT_RABITQ_PARAMS_SIZE(dim);
+	RaBitQParams *params = mkt_alloc(size);
+	if (params == NULL)
+		return NULL;
+
+	params->dim			 = dim;
+	params->seed		 = seed;
+	params->packed_bytes = MKT_RABITQ_BYTES(dim);
+	memcpy(params->P, P, (size_t)dim * dim * sizeof(float));
 
 	return params;
 }
@@ -433,18 +450,9 @@ mkt_rabitq_init(RaBitQParams *params, Dimension dim, uint64_t seed)
 	params->seed		 = seed;
 	params->packed_bytes = MKT_RABITQ_BYTES(dim);
 
-	/* Allocate orthogonal matrix */
-	params->P = mkt_alloc_aligned((size_t)dim * dim * sizeof(float), 64);
-	if (params->P == NULL)
-		return -1;
-
-	/* Generate random orthogonal matrix */
+	/* Generate random orthogonal matrix into inline P[] */
 	if (mkt_random_orthogonal_matrix(params->P, dim, seed) != 0)
-	{
-		mkt_free_aligned(params->P);
-		params->P = NULL;
 		return -1;
-	}
 
 	return 0;
 }
@@ -452,14 +460,8 @@ mkt_rabitq_init(RaBitQParams *params, Dimension dim, uint64_t seed)
 void
 mkt_rabitq_cleanup(RaBitQParams *params)
 {
-	if (params == NULL)
-		return;
-
-	if (params->P != NULL)
-	{
-		mkt_free_aligned(params->P);
-		params->P = NULL;
-	}
+	(void)params;
+	/* P is now inline — nothing to free */
 }
 
 void
@@ -468,7 +470,6 @@ mkt_rabitq_destroy(RaBitQParams *params)
 	if (params == NULL)
 		return;
 
-	mkt_rabitq_cleanup(params);
 	mkt_free(params);
 }
 

@@ -322,13 +322,9 @@ mkt_rabitq_encode_pg(PG_FUNCTION_ARGS)
 
 	int dim = input->dim;
 
-	/* Build temporary RaBitQParams pointing into the varlena */
-	RaBitQParams rparams = {
-			.P			  = params->P,
-			.dim		  = (Dimension)dim,
-			.packed_bytes = MKT_RABITQ_BYTES(dim),
-			.seed		  = params->seed,
-	};
+	/* Build RaBitQParams from the PG varlena's pre-computed matrix */
+	RaBitQParams *rparams =
+			mkt_rabitq_create_from_matrix(dim, params->seed, params->P);
 
 	RaBitQVector *result = mkt_pg_rabitq_alloc(dim);
 
@@ -336,7 +332,7 @@ mkt_rabitq_encode_pg(PG_FUNCTION_ARGS)
 	VectorRef	centroid_ref = MktVectorToRef(centroid);
 	RaBitQData *data		 = MKT_RABITQ_DATA(result);
 
-	int ret = mkt_rabitq_encode_into(&rparams, input_ref, centroid_ref, data);
+	int ret = mkt_rabitq_encode_into(rparams, input_ref, centroid_ref, data);
 	if (ret != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
