@@ -187,7 +187,7 @@ print_usage(CmdContext *ctx)
 		   "(default: float32)\n");
 	printf("  --posting-fmt <s>  native, rabitq, int8 "
 		   "(default: rabitq)\n");
-	printf("  --posting-layout   flat, pages (default: flat)\n");
+	printf("  --posting-layout   pages, flat (default: pages)\n");
 	printf("  --mode <str>       asymmetric, symmetric\n");
 	printf("  --warmup <int>     Warmup queries (default: %d)\n",
 		   DEFAULT_WARMUP);
@@ -218,7 +218,7 @@ cmd_bench_search(CmdContext *ctx)
 			.metric			= "euclidean",
 			.centroid_fmt	= "float32",
 			.posting_fmt	= "rabitq",
-			.posting_layout = "flat",
+			.posting_layout = "pages",
 			.distance_mode	= "asymmetric",
 	};
 
