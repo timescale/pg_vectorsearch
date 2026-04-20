@@ -1,42 +1,63 @@
 /*
- * topk.c - Top-K collection for PostgreSQL builds
+ * topk.c - Top-K collection
  *
- * Uses PG's pairing heap for the threshold max-heap and palloc
- * for memory. Same API as the standalone implementation in
- * algo/topk_standalone.c but uses PG infrastructure.
+ * Threshold heap: max-heap of K Distance values (upper bounds).
+ * Candidate buffer: growable array of all entries that passed
+ * the threshold check.
+ *
+ * Used by both standalone and PG builds.
  */
 
-#include <postgres.h>
-
-#include <lib/pairingheap.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "algo/topk.h"
+#include "core/memory.h"
 
 #define MKT_TOPK_INITIAL_CAP_MIN 32
 
 /* ----------------------------------------------------------------
- * Threshold heap node — embeds pairingheap_node
+ * Threshold heap (max-heap of Distance values)
  * ---------------------------------------------------------------- */
 
-typedef struct UBNode
+static void
+ub_sift_up(Distance *heap, uint32_t i)
 {
-	pairingheap_node ph_node;
-	Distance		 ub;
-} UBNode;
+	while (i > 0)
+	{
+		uint32_t parent = (i - 1) / 2;
+		if (heap[i] <= heap[parent])
+			break;
+		Distance tmp = heap[i];
+		heap[i]		 = heap[parent];
+		heap[parent] = tmp;
+		i			 = parent;
+	}
+}
 
-/* Max-heap comparator: largest upper bound at root */
-static int
-ub_max_cmp(const pairingheap_node *a, const pairingheap_node *b, void *arg)
+static void
+ub_sift_down(Distance *heap, uint32_t count)
 {
-	Distance da = pairingheap_const_container(UBNode, ph_node, a)->ub;
-	Distance db = pairingheap_const_container(UBNode, ph_node, b)->ub;
+	uint32_t i = 0;
+	for (;;)
+	{
+		uint32_t left	 = 2 * i + 1;
+		uint32_t right	 = 2 * i + 2;
+		uint32_t largest = i;
 
-	(void)arg;
-	if (da > db)
-		return 1;
-	if (da < db)
-		return -1;
-	return 0;
+		if (left < count && heap[left] > heap[largest])
+			largest = left;
+		if (right < count && heap[right] > heap[largest])
+			largest = right;
+
+		if (largest == i)
+			break;
+
+		Distance tmp  = heap[i];
+		heap[i]		  = heap[largest];
+		heap[largest] = tmp;
+		i			  = largest;
+	}
 }
 
 /* ----------------------------------------------------------------
@@ -63,14 +84,13 @@ void
 mkt_topk_init(MktTopK *topk, uint32_t k)
 {
 	topk->k		   = k;
-	topk->ub_heap  = pairingheap_allocate(ub_max_cmp, NULL);
-	topk->ub_nodes = palloc(k * sizeof(UBNode));
+	topk->ub_heap  = mkt_alloc(k * sizeof(Distance));
 	topk->ub_count = 0;
 
 	uint32_t cap = k * 2;
 	if (cap < MKT_TOPK_INITIAL_CAP_MIN)
 		cap = MKT_TOPK_INITIAL_CAP_MIN;
-	topk->candidates	= palloc(cap * sizeof(MktTopKEntry));
+	topk->candidates	= mkt_alloc(cap * sizeof(MktTopKEntry));
 	topk->cand_count	= 0;
 	topk->cand_capacity = cap;
 }
@@ -80,21 +100,16 @@ mkt_topk_cleanup(MktTopK *topk)
 {
 	if (topk == NULL)
 		return;
-	if (topk->ub_heap)
-		pairingheap_free(topk->ub_heap);
-	if (topk->ub_nodes)
-		pfree(topk->ub_nodes);
-	if (topk->candidates)
-		pfree(topk->candidates);
+	mkt_free(topk->ub_heap);
+	mkt_free(topk->candidates);
 	topk->ub_heap	 = NULL;
-	topk->ub_nodes	 = NULL;
 	topk->candidates = NULL;
 }
 
 MktTopK *
 mkt_topk_create(uint32_t k)
 {
-	MktTopK *topk = palloc(sizeof(MktTopK));
+	MktTopK *topk = mkt_alloc(sizeof(MktTopK));
 	mkt_topk_init(topk, k);
 	return topk;
 }
@@ -105,29 +120,14 @@ mkt_topk_destroy(MktTopK *topk)
 	if (topk == NULL)
 		return;
 	mkt_topk_cleanup(topk);
-	pfree(topk);
+	mkt_free(topk);
 }
 
 void
 mkt_topk_reset(MktTopK *topk)
 {
-	pairingheap_reset((pairingheap *)topk->ub_heap);
 	topk->ub_count	 = 0;
 	topk->cand_count = 0;
-}
-
-/* ----------------------------------------------------------------
- * Threshold
- * ---------------------------------------------------------------- */
-
-Distance
-mkt_topk_threshold(const MktTopK *topk)
-{
-	if (topk->ub_count < topk->k)
-		return INFINITY;
-
-	pairingheap_node *max = pairingheap_first((pairingheap *)topk->ub_heap);
-	return pairingheap_container(UBNode, ph_node, max)->ub;
 }
 
 /* ----------------------------------------------------------------
@@ -145,34 +145,26 @@ mkt_topk_insert(MktTopK *topk, Distance distance, Distance error, uint64_t id)
 		return;
 
 	/* Update threshold heap */
-	pairingheap *ph	   = topk->ub_heap;
-	UBNode		*nodes = topk->ub_nodes;
-
 	if (topk->ub_count < topk->k)
 	{
-		UBNode *node = &nodes[topk->ub_count];
-		node->ub	 = ub;
-		pairingheap_add(ph, &node->ph_node);
+		topk->ub_heap[topk->ub_count] = ub;
 		topk->ub_count++;
+		ub_sift_up(topk->ub_heap, topk->ub_count - 1);
 	}
-	else
+	else if (ub < topk->ub_heap[0])
 	{
-		pairingheap_node *max_node = pairingheap_first(ph);
-		UBNode *max = pairingheap_container(UBNode, ph_node, max_node);
-		if (ub < max->ub)
-		{
-			pairingheap_remove_first(ph);
-			max->ub = ub;
-			pairingheap_add(ph, &max->ph_node);
-		}
+		topk->ub_heap[0] = ub;
+		ub_sift_down(topk->ub_heap, topk->ub_count);
 	}
 
 	/* Grow candidate buffer if needed */
 	if (topk->cand_count == topk->cand_capacity)
 	{
-		uint32_t new_cap = topk->cand_capacity * 2;
-		topk->candidates =
-				repalloc(topk->candidates, new_cap * sizeof(MktTopKEntry));
+		uint32_t	  new_cap = topk->cand_capacity * 2;
+		MktTopKEntry *old	  = topk->candidates;
+		topk->candidates	  = mkt_alloc(new_cap * sizeof(MktTopKEntry));
+		memcpy(topk->candidates, old, topk->cand_count * sizeof(MktTopKEntry));
+		mkt_free(old);
 		topk->cand_capacity = new_cap;
 	}
 
