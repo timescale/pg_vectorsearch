@@ -23,25 +23,14 @@
 #include "standalone/vector_source.h"
 
 /* ----------------------------------------------------------------
- * Per-cluster posting list (standalone, contiguous arrays)
- *
- * RaBitQ fields are parallel SoA arrays for cache-friendly
- * quantized scanning. The vectors array is only touched during
- * reranking of survivors (~1% of scanned vectors).
+ * Per-cluster vector ID list (for brute-force scan fallback)
  * ---------------------------------------------------------------- */
-typedef struct MktPostingList
+typedef struct MktClusterList
 {
 	uint32_t  count;	/* vectors in this cluster */
 	uint32_t  capacity; /* allocated slots */
 	uint32_t *ids;		/* [count] original vector IDs */
-	float	 *vectors;	/* [count * dim] full-precision */
-
-	/* RaBitQ parallel arrays (NULL if not enabled) */
-	float	*f_add;		/* [count] */
-	float	*f_rescale; /* [count] */
-	float	*f_error;	/* [count] */
-	uint8_t *bits;		/* [count * packed_bytes] */
-} MktPostingList;
+} MktClusterList;
 
 /* ----------------------------------------------------------------
  * Array-backed page storage for centroid pages
@@ -55,6 +44,15 @@ typedef struct ArrayPageStorage
 } ArrayPageStorage;
 
 /* ----------------------------------------------------------------
+ * Posting format
+ * ---------------------------------------------------------------- */
+typedef enum MktPostingFormat
+{
+	MKT_POSTING_FMT_FLAT  = 0, /* one contiguous buffer per cluster */
+	MKT_POSTING_FMT_PAGES = 1, /* chain of BLCKSZ pages in storage */
+} MktPostingFormat;
+
+/* ----------------------------------------------------------------
  * Index configuration
  * ---------------------------------------------------------------- */
 typedef struct MktIndexConfig
@@ -66,6 +64,7 @@ typedef struct MktIndexConfig
 	uint32_t		  km_nredo;		 /* k-means restarts (0 = default) */
 	uint32_t		  km_max_iter;	 /* k-means iterations (0 = default) */
 	bool			  encode_rabitq; /* encode posting lists with RaBitQ */
+	MktPostingFormat  posting_fmt;	 /* flat or pages */
 } MktIndexConfig;
 
 /* ----------------------------------------------------------------
@@ -82,13 +81,25 @@ typedef struct MktIndex
 	float			 *global_mean;
 	MktCentroidFormat centroid_fmt;
 
-	/* Posting lists */
-	MktPostingList *lists;			/* [nlist] */
-	float		   *leaf_centroids; /* [nlist * dim] for per-cluster qstate */
-	float		   *pt_centroids;	/* [nlist * dim] P^T * leaf_centroids */
-	float		   *pt_global_mean; /* [dim] P^T * global_mean */
-	uint32_t		nlist;
-	uint32_t		nvecs; /* total vectors across all lists */
+	/* Full-precision vectors for reranking (indexed by vector_id) */
+	float *all_vectors; /* [nvecs * dim] */
+
+	/* Posting data for RaBitQ scan (flat or paged) */
+	MktPostingFormat posting_fmt;
+	ArrayPageStorage posting_storage;  /* paged mode: BLCKSZ pages */
+	BlockNumber		*posting_heads;	   /* paged mode: [nlist] head blocks */
+	char		   **flat_pages;	   /* flat mode: [nlist] buffers */
+	uint32_t		 max_cluster_size; /* largest cluster entry count */
+	bool			 has_posting_data;
+
+	/* Per-cluster ID lists for brute-force fallback */
+	MktClusterList *clusters; /* [nlist] */
+
+	float	*leaf_centroids; /* [nlist * dim] for per-cluster qstate */
+	float	*pt_centroids;	 /* [nlist * dim] P^T * leaf_centroids */
+	float	*pt_global_mean; /* [dim] P^T * global_mean */
+	uint32_t nlist;
+	uint32_t nvecs; /* total vectors across all lists */
 
 	Dimension	   dim;
 	DistanceMetric metric;

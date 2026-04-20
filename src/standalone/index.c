@@ -3,6 +3,10 @@
  *
  * Builds centroid tree and per-cluster posting lists from a flat
  * vector array. Used by bindings and CLI benchmark.
+ *
+ * When RaBitQ encoding is enabled, posting data is written to pages
+ * via MktPostingBuilder. The full-precision vectors are stored in a
+ * flat array for reranking.
  */
 
 #include <math.h>
@@ -17,6 +21,7 @@
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
+#include "index/posting_build.h"
 #include "standalone/index.h"
 
 /* Arena-safe grow: alloc new, copy old, old freed on context delete */
@@ -87,79 +92,46 @@ static const MktStorageOps array_page_storage_ops = {
 };
 
 /* ----------------------------------------------------------------
- * Posting list helpers
+ * Cluster list helpers (per-cluster vector ID lists)
  * ---------------------------------------------------------------- */
 
 static void
-posting_list_init(
-		MktPostingList *pl, uint32_t initial_cap, Dimension dim, bool rabitq)
+cluster_list_init(MktClusterList *cl, uint32_t initial_cap)
 {
-	pl->count	 = 0;
-	pl->capacity = initial_cap;
-	pl->ids		 = mkt_alloc(initial_cap * sizeof(uint32_t));
-	pl->vectors	 = mkt_alloc((size_t)initial_cap * dim * sizeof(float));
-
-	if (rabitq)
-	{
-		uint32_t packed = MKT_RABITQ_BYTES(dim);
-		pl->f_add		= mkt_alloc(initial_cap * sizeof(float));
-		pl->f_rescale	= mkt_alloc(initial_cap * sizeof(float));
-		pl->f_error		= mkt_alloc(initial_cap * sizeof(float));
-		pl->bits		= mkt_alloc((size_t)initial_cap * packed);
-	}
-	else
-	{
-		pl->f_add	  = NULL;
-		pl->f_rescale = NULL;
-		pl->f_error	  = NULL;
-		pl->bits	  = NULL;
-	}
+	cl->count	 = 0;
+	cl->capacity = initial_cap;
+	cl->ids		 = mkt_alloc(initial_cap * sizeof(uint32_t));
 }
 
 static void
-posting_list_append(
-		MktPostingList *pl, uint32_t id, const float *vec, Dimension dim)
+cluster_list_append(MktClusterList *cl, uint32_t id)
 {
-	if (pl->count == pl->capacity)
+	if (cl->count == cl->capacity)
 	{
-		uint32_t old_cap = pl->capacity;
+		uint32_t old_cap = cl->capacity;
 		uint32_t new_cap = old_cap * 2;
-
-		pl->ids = arena_grow(
-				pl->ids,
-				old_cap * sizeof(uint32_t),
-				new_cap * sizeof(uint32_t));
-		pl->vectors = arena_grow(
-				pl->vectors,
-				(size_t)old_cap * dim * sizeof(float),
-				(size_t)new_cap * dim * sizeof(float));
-
-		if (pl->f_add != NULL)
-		{
-			uint32_t packed = MKT_RABITQ_BYTES(dim);
-			pl->f_add		= arena_grow(
-					  pl->f_add,
-					  old_cap * sizeof(float),
-					  new_cap * sizeof(float));
-			pl->f_rescale = arena_grow(
-					pl->f_rescale,
-					old_cap * sizeof(float),
-					new_cap * sizeof(float));
-			pl->f_error = arena_grow(
-					pl->f_error,
-					old_cap * sizeof(float),
-					new_cap * sizeof(float));
-			pl->bits = arena_grow(
-					pl->bits,
-					(size_t)old_cap * packed,
-					(size_t)new_cap * packed);
-		}
-		pl->capacity = new_cap;
+		cl->ids			 = arena_grow(
+				 cl->ids,
+				 old_cap * sizeof(uint32_t),
+				 new_cap * sizeof(uint32_t));
+		cl->capacity = new_cap;
 	}
+	cl->ids[cl->count++] = id;
+}
 
-	pl->ids[pl->count] = id;
-	memcpy(pl->vectors + (size_t)pl->count * dim, vec, dim * sizeof(float));
-	pl->count++;
+/* ----------------------------------------------------------------
+ * ArrayPageStorage initialization helper
+ * ---------------------------------------------------------------- */
+
+static ArrayPageStorage
+make_array_page_storage(uint32_t est_pages)
+{
+	return (ArrayPageStorage){
+			.base		= {.ops = &array_page_storage_ops},
+			.pages		= mkt_alloc0((size_t)est_pages * BLCKSZ),
+			.next_blkno = 0,
+			.page_cap	= est_pages,
+	};
 }
 
 /* ----------------------------------------------------------------
@@ -309,13 +281,8 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	mkt_rabitq_rotate(idx->rq_params, idx->global_mean, idx->pt_global_mean);
 
 	/* Build centroid pages */
-	uint32_t est_pages	  = nlist + 100;
-	idx->centroid_storage = (ArrayPageStorage){
-			.base		= {.ops = &array_page_storage_ops},
-			.pages		= mkt_alloc0((size_t)est_pages * BLCKSZ),
-			.next_blkno = 0,
-			.page_cap	= est_pages,
-	};
+	uint32_t est_centroid_pages = nlist + 100;
+	idx->centroid_storage		= make_array_page_storage(est_centroid_pages);
 
 	uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, idx->centroid_fmt);
 
@@ -327,35 +294,22 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	mkt_compute_centroid_layout(
 			tree, max_ent, idx->first_centroid, node_first_blkno);
 
-	BlockNumber *leaf_heads = mkt_alloc(nlist * sizeof(BlockNumber));
-	for (uint32_t i = 0; i < nlist; i++)
-		leaf_heads[i] = (BlockNumber)i;
-
-	mkt_write_centroid_tree(
-			&idx->centroid_storage.base,
-			tree,
-			dim,
-			fan_out,
-			idx->centroid_fmt,
-			idx->centroid_fmt == MKT_CENTROID_FMT_RABITQ ? idx->rq_params
-														 : NULL,
-			idx->global_mean,
-			leaf_heads,
-			node_first_blkno,
-			NULL /* pt_centroids: stored on posting pages */);
-
-	/* Switch back to index context for posting lists */
+	/* Switch back to index context for posting data.
+	 * Posting lists are built before centroid pages so that
+	 * centroid leaf entries store actual posting block numbers. */
 	mkt_memctx_switch(idx_ctx);
 
-	/* Initialize posting lists */
+	/* Allocate flat vectors array for reranking */
+	idx->all_vectors = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+
+	/* Initialize per-cluster ID lists */
 	uint32_t est_per_cluster = nvecs / nlist + 1;
-	idx->lists				 = mkt_alloc0(nlist * sizeof(MktPostingList));
+	idx->clusters			 = mkt_alloc0(nlist * sizeof(MktClusterList));
 	for (uint32_t c = 0; c < nlist; c++)
-		posting_list_init(
-				&idx->lists[c], est_per_cluster, dim, config->encode_rabitq);
+		cluster_list_init(&idx->clusters[c], est_per_cluster);
 
 	/* Assign vectors to clusters.
-	 * Stay in idx_ctx so posting list growth allocations are
+	 * Stay in idx_ctx so cluster list growth allocations are
 	 * long-lived. Only norm_buf is temporary (freed with build_ctx). */
 	float *norm_buf = NULL;
 	if (idx->metric == DISTANCE_COSINE)
@@ -374,65 +328,142 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 		uint32_t	 id;
 		while (src->next(src, 1, &vec, &id))
 		{
+			const float *store_vec = vec;
+
 			/* Normalize for cosine */
 			if (idx->metric == DISTANCE_COSINE)
 			{
 				memcpy(norm_buf, vec, dim * sizeof(float));
 				normalize_vector(norm_buf, dim);
-				vec = norm_buf;
+				store_vec = norm_buf;
 			}
 
-			uint32_t c = mkt_hkmeans_assign(tree, vec, idx->metric, NULL);
-			posting_list_append(&idx->lists[c], id, vec, dim);
+			uint32_t c =
+					mkt_hkmeans_assign(tree, store_vec, idx->metric, NULL);
+
+			/* Store full-precision vector for reranking */
+			memcpy(idx->all_vectors + (size_t)id * dim,
+				   store_vec,
+				   dim * sizeof(float));
+
+			cluster_list_append(&idx->clusters[c], id);
 			idx->nvecs++;
 		}
 	}
 
-	/* Encode RaBitQ for posting lists if requested.
-	 * Use build_ctx for temporary RaBitQData allocations. */
-	mkt_memctx_switch(build_ctx);
+	/* Compute max cluster size (needed for flat mode scan buffers) */
+	idx->max_cluster_size = 0;
+	for (uint32_t c = 0; c < nlist; c++)
+		if (idx->clusters[c].count > idx->max_cluster_size)
+			idx->max_cluster_size = idx->clusters[c].count;
 
-	/* Encode RaBitQ for posting lists if requested */
+	/* Build posting data if RaBitQ encoding is requested */
 	if (config->encode_rabitq)
 	{
-		for (uint32_t c = 0; c < nlist; c++)
+		idx->posting_fmt = config->posting_fmt;
+
+		if (config->posting_fmt == MKT_POSTING_FMT_PAGES)
 		{
-			MktPostingList *pl		 = &idx->lists[c];
-			VectorRef		cent_ref = {
-						  .data = tree->leaf_centroids + (size_t)c * dim,
-						  .dim	= dim,
-			  };
+			/* Paged mode: BLCKSZ pages in ArrayPageStorage */
+			uint32_t ent_per_page = mkt_posting_max_entries(dim);
+			uint32_t est_pages	  = (nvecs / ent_per_page) + nlist + 100;
+			idx->posting_storage  = make_array_page_storage(est_pages);
+			idx->posting_heads	  = mkt_alloc(nlist * sizeof(BlockNumber));
 
-			for (uint32_t i = 0; i < pl->count; i++)
+			for (uint32_t c = 0; c < nlist; c++)
 			{
-				VectorRef vref = {
-						.data = pl->vectors + (size_t)i * dim,
-						.dim  = dim,
-				};
-				/* Encode into temp RaBitQData, extract SoA fields */
-				uint32_t	data_sz = MKT_RABITQ_DATA_SIZE(dim);
-				RaBitQData *tmp		= mkt_alloc(data_sz);
-				mkt_rabitq_encode_into(idx->rq_params, vref, cent_ref, tmp);
-				pl->f_add[i]	 = tmp->f_add;
-				pl->f_rescale[i] = tmp->f_rescale;
+				MktClusterList *cl	 = &idx->clusters[c];
+				const float	   *cent = tree->leaf_centroids + (size_t)c * dim;
 
-				/* Derive f_error: C_error * sqrt(f_rescale² - f_add) */
-				float f_rsq = tmp->f_rescale * tmp->f_rescale;
-				if (f_rsq > tmp->f_add && dim > 1)
+				const float *pt_cent = idx->pt_centroids + (size_t)c * dim;
+
+				MktPostingBuilder builder;
+				mkt_posting_builder_init(
+						&builder,
+						&idx->posting_storage.base,
+						idx->rq_params,
+						dim,
+						c,
+						cent,
+						pt_cent);
+
+				for (uint32_t i = 0; i < cl->count; i++)
 				{
-					float c_err = 2.0f * MKT_RABITQ_EPSILON /
-								  sqrtf((float)(dim - 1));
-					pl->f_error[i] = c_err * sqrtf(f_rsq - tmp->f_add);
-				}
-				else
-				{
-					pl->f_error[i] = 2e-4f * sqrtf(tmp->f_add);
+					uint32_t		vid = cl->ids[i];
+					const float	   *vec = idx->all_vectors + (size_t)vid * dim;
+					ItemPointerData tid;
+					mkt_posting_set_vector_id(&tid, vid);
+					mkt_posting_builder_add(&builder, tid, vec);
 				}
 
-				uint32_t packed = MKT_RABITQ_BYTES(dim);
-				memcpy(pl->bits + (size_t)i * packed, tmp->bits, packed);
+				idx->posting_heads[c] = mkt_posting_builder_finish(&builder);
+				mkt_posting_builder_cleanup(&builder);
 			}
 		}
+		else
+		{
+			/* Flat mode: one buffer per cluster */
+			idx->flat_pages = mkt_alloc(nlist * sizeof(char *));
+
+			for (uint32_t c = 0; c < nlist; c++)
+			{
+				MktClusterList *cl	 = &idx->clusters[c];
+				const float	   *cent = tree->leaf_centroids + (size_t)c * dim;
+
+				MktFlatPostingBuilder builder;
+				mkt_flat_posting_builder_init(
+						&builder, idx->rq_params, dim, c, cent, cl->count);
+
+				for (uint32_t i = 0; i < cl->count; i++)
+				{
+					uint32_t		vid = cl->ids[i];
+					const float	   *vec = idx->all_vectors + (size_t)vid * dim;
+					ItemPointerData tid;
+					mkt_posting_set_vector_id(&tid, vid);
+					mkt_flat_posting_builder_add(&builder, tid, vec);
+				}
+
+				idx->flat_pages[c] = mkt_flat_posting_builder_finish(&builder);
+				mkt_flat_posting_builder_cleanup(&builder);
+			}
+		}
+
+		idx->has_posting_data = true;
+	}
+
+	/* Write centroid pages — after posting lists so leaf entries
+	 * store actual posting block numbers (not just cluster indices). */
+	{
+		/* For paged mode, store actual posting block numbers so the
+		 * shared scan can use posting_head directly. For flat mode,
+		 * store cluster indices (the inline loop maps them). */
+		BlockNumber *leaf_heads;
+		if (idx->has_posting_data &&
+			config->posting_fmt == MKT_POSTING_FMT_PAGES)
+		{
+			leaf_heads = idx->posting_heads;
+		}
+		else
+		{
+			leaf_heads = mkt_alloc(nlist * sizeof(BlockNumber));
+			for (uint32_t i = 0; i < nlist; i++)
+				leaf_heads[i] = (BlockNumber)i;
+		}
+
+		mkt_memctx_switch(build_ctx);
+		mkt_write_centroid_tree(
+				&idx->centroid_storage.base,
+				tree,
+				dim,
+				fan_out,
+				idx->centroid_fmt,
+				idx->centroid_fmt == MKT_CENTROID_FMT_RABITQ ? idx->rq_params
+															 : NULL,
+				idx->global_mean,
+				leaf_heads,
+				node_first_blkno,
+				NULL); /* pt_centroids on posting pages, not here */
+		mkt_memctx_switch(idx_ctx);
 	}
 
 	mkt_hkmeans_result_destroy(tree);

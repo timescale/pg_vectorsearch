@@ -47,6 +47,7 @@ MktHandle *mkt_handle_create(
 		uint32_t		 fan_out,
 		const char		*metric,
 		const char		*centroid_fmt,
+		const char		*posting_fmt,
 		uint32_t		 km_nredo,
 		uint32_t		 km_max_iter,
 		MktBuildInfo	*info);
@@ -64,6 +65,7 @@ MktHandle *mkt_handle_create_from_array(
 		uint32_t	  fan_out,
 		const char	 *metric,
 		const char	 *centroid_fmt,
+		const char	 *posting_fmt,
 		uint32_t	  km_nredo,
 		uint32_t	  km_max_iter,
 		MktBuildInfo *info);
@@ -81,6 +83,7 @@ uint32_t mkt_handle_query(
 		uint32_t	 k,
 		uint32_t	 nprobe,
 		const char	*distance_mode,
+		bool		 rerank,
 		uint32_t	*result_ids);
 
 /*

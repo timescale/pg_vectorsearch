@@ -204,7 +204,13 @@ TEST(query_exec_returns_results)
 	/* Query with the first vector — scan all clusters */
 	uint32_t result_ids[5];
 	uint32_t count = mkt_query_exec(
-			qctx, vecs, k, nprobe, MKT_DISTANCE_MODE_ASYMMETRIC, result_ids);
+			qctx,
+			vecs,
+			k,
+			nprobe,
+			MKT_DISTANCE_MODE_ASYMMETRIC,
+			true,
+			result_ids);
 
 	ASSERT_TRUE(count > 0, "should return results");
 	ASSERT_TRUE(count <= k, "should not exceed k");
@@ -242,7 +248,13 @@ TEST(query_exec_recall)
 
 		uint32_t result_ids[10];
 		uint32_t count = mkt_query_exec(
-				qctx, query, k, 10, MKT_DISTANCE_MODE_ASYMMETRIC, result_ids);
+				qctx,
+				query,
+				k,
+				10,
+				MKT_DISTANCE_MODE_ASYMMETRIC,
+				true,
+				result_ids);
 
 		/* Compute ground truth */
 		uint32_t gt_ids[10];
@@ -269,7 +281,13 @@ TEST(query_exec_null_fails)
 	float	 query[32] = {0};
 	ASSERT_EQ(
 			mkt_query_exec(
-					NULL, query, 10, 5, MKT_DISTANCE_MODE_ASYMMETRIC, ids),
+					NULL,
+					query,
+					10,
+					5,
+					MKT_DISTANCE_MODE_ASYMMETRIC,
+					true,
+					ids),
 			0,
 			"null ctx should return 0");
 }
@@ -291,7 +309,7 @@ TEST(query_exec_brute_force_path)
 
 	uint32_t result_ids[5];
 	uint32_t count = mkt_query_exec(
-			qctx, vecs, k, 5, MKT_DISTANCE_MODE_ASYMMETRIC, result_ids);
+			qctx, vecs, k, 5, MKT_DISTANCE_MODE_ASYMMETRIC, true, result_ids);
 
 	ASSERT_EQ(count, k, "should return k results");
 	for (uint32_t i = 0; i < count; i++)
@@ -311,7 +329,7 @@ TEST(bindings_create_destroy)
 
 	MktBuildInfo info;
 	MktHandle	*handle = mkt_handle_create_from_array(
-			  vecs, 500, 16, 5, 0, "euclidean", "rabitq", 0, 0, &info);
+			  vecs, 500, 16, 5, 0, "euclidean", "rabitq", NULL, 0, 0, &info);
 
 	ASSERT_NOT_NULL(handle, "create should succeed");
 	ASSERT_TRUE(info.nlist > 0, "should have clusters");
@@ -328,12 +346,12 @@ TEST(bindings_query)
 	float	*vecs = make_vectors(nvecs, dim, 42);
 
 	MktHandle *handle = mkt_handle_create_from_array(
-			vecs, nvecs, dim, 10, 0, "euclidean", "rabitq", 0, 0, NULL);
+			vecs, nvecs, dim, 10, 0, "euclidean", "rabitq", NULL, 0, 0, NULL);
 	ASSERT_NOT_NULL(handle, "create should succeed");
 
 	uint32_t result_ids[10];
-	uint32_t count =
-			mkt_handle_query(handle, vecs, 10, 5, "asymmetric", result_ids);
+	uint32_t count = mkt_handle_query(
+			handle, vecs, 10, 5, "asymmetric", true, result_ids);
 
 	ASSERT_EQ(count, 10, "should return 10 results");
 	ASSERT_TRUE(result_ids[0] < nvecs, "result ID in range");
@@ -347,12 +365,12 @@ TEST(bindings_angular_metric)
 	float	*vecs = make_vectors(nvecs, dim, 77);
 
 	MktHandle *handle = mkt_handle_create_from_array(
-			vecs, nvecs, dim, 5, 0, "angular", "rabitq", 0, 0, NULL);
+			vecs, nvecs, dim, 5, 0, "angular", "rabitq", NULL, 0, 0, NULL);
 	ASSERT_NOT_NULL(handle, "angular create should succeed");
 
 	uint32_t result_ids[5];
-	uint32_t count =
-			mkt_handle_query(handle, vecs, 5, 5, "asymmetric", result_ids);
+	uint32_t count = mkt_handle_query(
+			handle, vecs, 5, 5, "asymmetric", true, result_ids);
 
 	ASSERT_TRUE(count > 0, "should return results");
 
@@ -371,7 +389,7 @@ TEST(bindings_null_query)
 	uint32_t ids[10];
 	float	 query[32] = {0};
 	ASSERT_EQ(
-			mkt_handle_query(NULL, query, 10, 5, "asymmetric", ids),
+			mkt_handle_query(NULL, query, 10, 5, "asymmetric", true, ids),
 			0,
 			"null handle should return 0");
 }
@@ -382,11 +400,11 @@ TEST(bindings_symmetric_mode)
 	float	*vecs = make_vectors(nvecs, dim, 42);
 
 	MktHandle *handle = mkt_handle_create_from_array(
-			vecs, nvecs, dim, 5, 0, "euclidean", "rabitq", 0, 0, NULL);
+			vecs, nvecs, dim, 5, 0, "euclidean", "rabitq", NULL, 0, 0, NULL);
 
 	uint32_t result_ids[5];
-	uint32_t count =
-			mkt_handle_query(handle, vecs, 5, 5, "symmetric", result_ids);
+	uint32_t count = mkt_handle_query(
+			handle, vecs, 5, 5, "symmetric", true, result_ids);
 
 	ASSERT_TRUE(count > 0, "symmetric query should return results");
 
@@ -399,7 +417,7 @@ TEST(bindings_kmeans_params)
 
 	MktBuildInfo info;
 	MktHandle	*handle = mkt_handle_create_from_array(
-			  vecs, 500, 16, 5, 0, "euclidean", "rabitq", 2, 20, &info);
+			  vecs, 500, 16, 5, 0, "euclidean", "rabitq", NULL, 2, 20, &info);
 
 	ASSERT_NOT_NULL(handle, "create with kmeans params should succeed");
 	ASSERT_TRUE(info.nlist > 0, "should have clusters");
