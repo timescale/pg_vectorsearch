@@ -290,7 +290,7 @@ TEST(page_has_room)
 	mkt_centroid_page_init(page, 0);
 
 	ASSERT_TRUE(
-			mkt_centroid_page_has_room(page, dim),
+			mkt_centroid_page_has_room(page, dim, false),
 			"empty page should have room");
 
 	/* Fill it */
@@ -312,7 +312,7 @@ TEST(page_has_room)
 		mkt_centroid_page_add(page, dim, i, 1, 0, encoded);
 
 	ASSERT_FALSE(
-			mkt_centroid_page_has_room(page, dim),
+			mkt_centroid_page_has_room(page, dim, false),
 			"full page should not have room");
 
 	mkt_free(encoded);
@@ -566,7 +566,7 @@ TEST(page_float_fill_to_capacity)
 	ASSERT_FALSE(added, "full float page should reject");
 
 	ASSERT_FALSE(
-			mkt_centroid_page_has_room(page, dim),
+			mkt_centroid_page_has_room(page, dim, false),
 			"full float page has_room should be false");
 
 	mkt_free(vec);

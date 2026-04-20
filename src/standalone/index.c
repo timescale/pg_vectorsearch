@@ -341,7 +341,8 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 														 : NULL,
 			idx->global_mean,
 			leaf_heads,
-			node_first_blkno);
+			node_first_blkno,
+			NULL /* pt_centroids: stored on posting pages */);
 
 	/* Switch back to index context for posting lists */
 	mkt_memctx_switch(idx_ctx);

@@ -58,6 +58,7 @@ typedef struct MktCentroidSearchState
 typedef struct MktCentroidSearchStats
 {
 	uint64_t dist_calcs; /* approximate distance computations */
+	uint32_t pages_read; /* centroid pages read */
 } MktCentroidSearchStats;
 
 /* ----------------------------------------------------------------

@@ -22,9 +22,10 @@
  * ---------------------------------------------------------------- */
 typedef struct Candidate
 {
-	BlockNumber child_blkno; /* next level's page */
-	Distance	distance;
-	Distance	error; /* symmetric error (0 for exact) */
+	BlockNumber		child_blkno; /* next level's page (or posting head) */
+	ItemPointerData origin;		 /* (page, entry) this came from */
+	Distance		distance;
+	Distance		error; /* symmetric error (0 for exact) */
 } Candidate;
 
 /* ----------------------------------------------------------------
@@ -53,6 +54,7 @@ static uint32_t
 score_page(
 		const MktCentroidSearchState *state,
 		Page						  page,
+		BlockNumber					  page_blkno,
 		Dimension					  dim,
 		Candidate					 *cands,
 		uint32_t					  cand_count,
@@ -119,8 +121,9 @@ score_page(
 					mkt_centroid_meta(page, page_idx);
 
 			cands[cand_count].child_blkno = meta->child_blkno;
-			cands[cand_count].distance	  = sp_scratch->distances[j];
-			cands[cand_count].error		  = sp_scratch->distances[j] -
+			ItemPointerSet(&cands[cand_count].origin, page_blkno, page_idx);
+			cands[cand_count].distance = sp_scratch->distances[j];
+			cands[cand_count].error	   = sp_scratch->distances[j] -
 									  sp_scratch->lower_bounds[j];
 			cand_count++;
 		}
@@ -154,8 +157,9 @@ score_page(
 			}
 
 			cands[cand_count].child_blkno = meta->child_blkno;
-			cands[cand_count].distance	  = dist;
-			cands[cand_count].error		  = 0.0f;
+			ItemPointerSet(&cands[cand_count].origin, page_blkno, i);
+			cands[cand_count].distance = dist;
+			cands[cand_count].error	   = 0.0f;
 			cand_count++;
 		}
 		break;
@@ -188,8 +192,9 @@ score_page(
 			}
 
 			cands[cand_count].child_blkno = meta->child_blkno;
-			cands[cand_count].distance	  = dist;
-			cands[cand_count].error		  = 0.0f;
+			ItemPointerSet(&cands[cand_count].origin, page_blkno, i);
+			cands[cand_count].distance = dist;
+			cands[cand_count].error	   = 0.0f;
 			cand_count++;
 		}
 		break;
@@ -293,6 +298,8 @@ mkt_centroid_beam_search(
 	 * After selection, buf_b becomes the live set for expansion.
 	 */
 
+	uint32_t centroid_pages_read = 0;
+
 	/* Level 0: read root centroid page(s), score ALL centroids */
 	uint32_t	raw_count = 0;
 	BlockNumber blkno	  = first_centroid_blkno;
@@ -302,8 +309,16 @@ mkt_centroid_beam_search(
 	while (blkno != InvalidBlockNumber)
 	{
 		Page page = mkt_storage_read_page(state->storage, blkno);
+		centroid_pages_read++;
 		raw_count = score_page(
-				state, page, dim, buf_a, raw_count, cand_cap, &sp_scratch);
+				state,
+				page,
+				blkno,
+				dim,
+				buf_a,
+				raw_count,
+				cand_cap,
+				&sp_scratch);
 		MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
 		BlockNumber			   next_blkno = opaque->next_blkno;
 		mkt_storage_release_page(state->storage, blkno);
@@ -345,10 +360,12 @@ mkt_centroid_beam_search(
 			BlockNumber cb = child_blkno;
 			while (cb != InvalidBlockNumber)
 			{
-				Page page  = mkt_storage_read_page(state->storage, cb);
+				Page page = mkt_storage_read_page(state->storage, cb);
+				centroid_pages_read++;
 				next_count = score_page(
 						state,
 						page,
+						cb,
 						dim,
 						scratch,
 						next_count,
@@ -376,6 +393,68 @@ mkt_centroid_beam_search(
 		results[i].distance		= live[i].distance;
 		results[i].error		= live[i].error;
 	}
+
+	/* Extract centroid vectors for winning clusters.
+	 * Only meaningful for FLOAT/HALF centroid pages — RaBitQ is a
+	 * lossy binary encoding, so the full-precision centroid cannot
+	 * be recovered. RaBitQ callers must obtain pt_centroid from its
+	 * dedicated location (e.g., the first posting page). Skip the
+	 * loop entirely rather than re-reading pages for nothing. */
+	if (centroid_vecs != NULL && result_count > 0 && state->qstate == NULL)
+	{
+		BlockNumber prev_blk  = InvalidBlockNumber;
+		Page		prev_page = NULL;
+
+		for (uint32_t i = 0; i < result_count; i++)
+		{
+			BlockNumber	 blk = ItemPointerGetBlockNumber(&live[i].origin);
+			OffsetNumber idx = ItemPointerGetOffsetNumber(&live[i].origin);
+
+			Page page;
+			if (blk == prev_blk)
+			{
+				page = prev_page;
+			}
+			else
+			{
+				if (prev_page != NULL)
+					mkt_storage_release_page(state->storage, prev_blk);
+				page = mkt_storage_read_page(state->storage, blk);
+				centroid_pages_read++;
+				prev_blk  = blk;
+				prev_page = page;
+			}
+
+			float			 *dst = centroid_vecs + (size_t)i * dim;
+			MktCentroidFormat fmt = mkt_centroid_page_format(page);
+
+			switch (fmt)
+			{
+			case MKT_CENTROID_FMT_FLOAT:
+			{
+				const float *src = mkt_centroid_float_data(page, idx, dim);
+				memcpy(dst, src, dim * sizeof(float));
+				break;
+			}
+			case MKT_CENTROID_FMT_HALF:
+			{
+				const half *src = mkt_centroid_half_data(page, idx, dim);
+				for (Dimension d = 0; d < dim; d++)
+					dst[d] = mkt_half_to_float(src[d]);
+				break;
+			}
+			case MKT_CENTROID_FMT_RABITQ:
+				/* Unreachable — guarded at loop entry. */
+				break;
+			}
+		}
+
+		if (prev_page != NULL)
+			mkt_storage_release_page(state->storage, prev_blk);
+	}
+
+	if (stats)
+		stats->pages_read = centroid_pages_read;
 
 	mkt_memctx_switch(old_ctx);
 	mkt_memctx_delete(beam_ctx);

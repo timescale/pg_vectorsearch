@@ -42,7 +42,8 @@ mkt_write_centroid_tree(
 		const RaBitQParams	*rq_params,
 		const float			*global_mean,
 		const BlockNumber	*posting_heads,
-		const BlockNumber	*node_first_blkno)
+		const BlockNumber	*node_first_blkno,
+		const float			*pt_centroids)
 {
 	for (uint32_t i = 0; i < tree->nnodes; i++)
 	{
@@ -69,6 +70,12 @@ mkt_write_centroid_tree(
 		else
 			child_blks = NULL;
 
+		/* Pass pt_centroids for leaf nodes only */
+		const float *leaf_pt = (is_leaf && pt_centroids != NULL)
+									 ? pt_centroids +
+											   (size_t)node->first_leaf * dim
+									 : NULL;
+
 		mkt_centroid_write_pages(
 				storage,
 				dim,
@@ -78,7 +85,8 @@ mkt_write_centroid_tree(
 				flags,
 				child_count,
 				encoder,
-				child_blks);
+				child_blks,
+				leaf_pt);
 	}
 }
 

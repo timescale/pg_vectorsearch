@@ -180,6 +180,11 @@ centroid_encoder_init(
  *
  * Returns the BlockNumber of the first centroid page.
  */
+/*
+ * pt_centroids: optional P^T * centroid array [nlist * dim] for leaf
+ * entries. When non-NULL, each leaf entry stores pt_centroid alongside
+ * routing data. Pass NULL for internal nodes.
+ */
 BlockNumber mkt_centroid_write_pages(
 		MktStorage		  *storage,
 		Dimension		   dim,
@@ -189,6 +194,7 @@ BlockNumber mkt_centroid_write_pages(
 		uint16_t		   flags,
 		uint16_t		   child_count,
 		CentroidEncoder	  *encoder,
-		const BlockNumber *child_blknos);
+		const BlockNumber *child_blknos,
+		const float		  *pt_centroids);
 
 #endif /* MKT_CENTROID_BUILD_H */

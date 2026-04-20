@@ -31,7 +31,7 @@ mkt_centroid_page_add_entry_begin(
 		uint16_t	child_count,
 		uint16_t	flags)
 {
-	if (!mkt_centroid_page_has_room(page, dim))
+	if (!mkt_centroid_page_has_room(page, dim, false))
 		return NULL;
 
 	PageHeader			   header	 = (PageHeader)page;
