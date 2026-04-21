@@ -20,10 +20,13 @@ mkt_centroid_write_pages(
 		uint16_t		   child_count,
 		CentroidEncoder	  *encoder,
 		const BlockNumber *child_blknos,
-		const float		  *pt_centroids)
+		const float		  *pt_centroids,
+		BlockNumber		   start_blkno)
 {
-	BlockNumber first_blkno = InvalidBlockNumber;
+	bool		reserved	= (start_blkno != InvalidBlockNumber);
+	BlockNumber first_blkno = reserved ? start_blkno : InvalidBlockNumber;
 	BlockNumber prev_blkno	= InvalidBlockNumber;
+	BlockNumber next_blkno	= start_blkno;
 	Page		cur_page	= NULL;
 	BlockNumber cur_blkno	= InvalidBlockNumber;
 
@@ -39,8 +42,15 @@ mkt_centroid_write_pages(
 			if (cur_page != NULL)
 				mkt_storage_commit_page(storage, cur_blkno);
 
-			/* Allocate new page */
-			cur_page = mkt_storage_new_page(storage, &cur_blkno);
+			if (reserved)
+			{
+				cur_blkno = next_blkno++;
+				cur_page  = mkt_storage_write_page(storage, cur_blkno);
+			}
+			else
+			{
+				cur_page = mkt_storage_new_page(storage, &cur_blkno);
+			}
 			mkt_centroid_page_init_fmt(cur_page, level, fmt);
 
 			if (first_blkno == InvalidBlockNumber)

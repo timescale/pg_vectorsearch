@@ -25,15 +25,17 @@
 
 void
 mkt_query_state_init(
-		MktQueryState	   *qs,
-		const MktIndexBase *index,
-		uint32_t			max_k,
-		uint32_t			max_nprobe)
+		MktQueryState *qs,
+		MktIndexBase  *index,
+		uint32_t	   max_k,
+		uint32_t	   max_nprobe)
 {
 	memset(qs, 0, sizeof(*qs));
 	qs->index	   = index;
 	qs->max_k	   = max_k;
 	qs->max_nprobe = max_nprobe;
+
+	mkt_index_ensure_rabitq(index);
 
 	Dimension dim		   = index->dim;
 	uint32_t  packed_bytes = MKT_RABITQ_BYTES(dim);
@@ -114,8 +116,6 @@ search_centroids(
 {
 	const MktIndexBase *idx = qs->index;
 	Dimension			dim = idx->dim;
-
-	mkt_rabitq_rotate(idx->params, qvec, qs->pt_query);
 
 	RaBitQQueryState *rqs = NULL;
 	if (idx->centroid_format == MKT_CENTROID_FMT_RABITQ)
@@ -236,6 +236,8 @@ mkt_query_execute(
 	qs->topk.k = k;
 
 	const float *qvec = prepare_query(qs, query);
+
+	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
 
 	MktCentroidSearchStats beam_stats = {0};
 	uint32_t			   ncentroids =

@@ -166,24 +166,11 @@ centroid_encoder_init(
 /*
  * Write centroid entries to linked pages.
  *
- * Creates one or more centroid pages via storage->new_page, filling
- * each to capacity before allocating the next. Pages are linked
- * via next_blkno in the opaque area.
- *
- * Parameters:
- *   level        — tree level for page init (0 = root)
- *   flags        — per-entry flags (e.g. MKT_CENTROID_FLAG_LEAF)
- *   child_count  — uniform child count for all entries
- *   encoder      — vtable producing entry payloads on demand
- *   child_blknos — per-entry child block numbers
- *                   (NULL → InvalidBlockNumber for all entries)
+ * Fills pages to capacity, linking via next_blkno. When start_blkno
+ * is InvalidBlockNumber, appends via new_page. Otherwise writes to
+ * pre-reserved blocks starting at start_blkno via write_page.
  *
  * Returns the BlockNumber of the first centroid page.
- */
-/*
- * pt_centroids: optional P^T * centroid array [nlist * dim] for leaf
- * entries. When non-NULL, each leaf entry stores pt_centroid alongside
- * routing data. Pass NULL for internal nodes.
  */
 BlockNumber mkt_centroid_write_pages(
 		MktStorage		  *storage,
@@ -195,6 +182,7 @@ BlockNumber mkt_centroid_write_pages(
 		uint16_t		   child_count,
 		CentroidEncoder	  *encoder,
 		const BlockNumber *child_blknos,
-		const float		  *pt_centroids);
+		const float		  *pt_centroids,
+		BlockNumber		   start_blkno);
 
 #endif /* MKT_CENTROID_BUILD_H */

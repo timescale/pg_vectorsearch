@@ -41,9 +41,9 @@ typedef struct MktQueryStats
 
 typedef struct MktQueryState
 {
-	const MktIndexBase *index;
-	uint32_t			max_k;
-	uint32_t			max_nprobe;
+	MktIndexBase *index;
+	uint32_t	  max_k;
+	uint32_t	  max_nprobe;
 
 	/* Pre-allocated query buffers */
 	float	*query_buf;
@@ -70,10 +70,10 @@ typedef struct MktQueryState
  * ---------------------------------------------------------------- */
 
 void mkt_query_state_init(
-		MktQueryState	   *qs,
-		const MktIndexBase *index,
-		uint32_t			max_k,
-		uint32_t			max_nprobe);
+		MktQueryState *qs,
+		MktIndexBase  *index,
+		uint32_t	   max_k,
+		uint32_t	   max_nprobe);
 
 void mkt_query_state_cleanup(MktQueryState *qs);
 

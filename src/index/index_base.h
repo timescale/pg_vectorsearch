@@ -19,6 +19,7 @@ typedef struct MktIndexBase
 	/* RaBitQ (must outlive the search context) */
 	RaBitQParams *params;
 	float		 *pt_global_mean;
+	uint64_t	  rabitq_seed;
 
 	/* PG: both point to the same MktannStorage (one index relation).
 	 * Standalone: separate ArrayPageStorage for centroids vs postings. */
@@ -35,5 +36,18 @@ typedef struct MktIndexBase
 	DistanceMetric	  metric;
 	MktCentroidFormat centroid_format;
 } MktIndexBase;
+
+static inline RaBitQParams *
+mkt_index_ensure_rabitq(MktIndexBase *idx)
+{
+	if (idx->params == NULL)
+	{
+		idx->params = mkt_rabitq_create(idx->dim, idx->rabitq_seed);
+		if (idx->pt_global_mean != NULL)
+			mkt_rabitq_rotate(
+					idx->params, idx->pt_global_mean, idx->pt_global_mean);
+	}
+	return idx->params;
+}
 
 #endif /* MKT_INDEX_BASE_H */

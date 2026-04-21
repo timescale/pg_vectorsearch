@@ -103,18 +103,12 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	ss->index_base.nlevels		   = meta->nlevels;
 	ss->index_base.first_centroid  = meta->first_centroid;
 
-	/* RaBitQ params */
-	if (ss->index_base.centroid_format == MKT_CENTROID_FMT_RABITQ)
-	{
-		ss->index_base.params = mkt_rabitq_create(dim, meta->rabitq_seed);
-		ss->index_base.pt_global_mean = palloc(dim * sizeof(float));
-		const float *src_mean		  = mktann_meta_global_mean_const(meta);
-		memcpy(ss->index_base.pt_global_mean, src_mean, dim * sizeof(float));
-		mkt_rabitq_rotate(
-				ss->index_base.params,
-				ss->index_base.pt_global_mean,
-				ss->index_base.pt_global_mean);
-	}
+	/* Store for lazy RaBitQ init in shared query code */
+	ss->index_base.rabitq_seed	  = meta->rabitq_seed;
+	ss->index_base.pt_global_mean = palloc(dim * sizeof(float));
+	memcpy(ss->index_base.pt_global_mean,
+		   mktann_meta_global_mean_const(meta),
+		   dim * sizeof(float));
 
 	UnlockReleaseBuffer(meta_buf);
 
