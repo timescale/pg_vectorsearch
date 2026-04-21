@@ -38,6 +38,7 @@ pg_read_page(MktStorage *self, BlockNumber blkno)
 	Buffer buf = ReadBuffer(s->index, blkno);
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
 	s->cur_buf = buf;
+	s->read_count++;
 
 	return BufferGetPage(buf);
 }
@@ -90,13 +91,49 @@ pg_commit_page(MktStorage *self, BlockNumber blkno)
 
 	(void)blkno;
 
-	/* WAL-log the page via GenericXLog */
-	GenericXLogState *state = GenericXLogStart(s->index);
-	GenericXLogRegisterBuffer(state, s->cur_buf, GENERIC_XLOG_FULL_IMAGE);
-	GenericXLogFinish(state);
+	if (s->build_mode)
+	{
+		/* During index build, skip per-page WAL logging.
+		 * log_newpage_range() at the end covers all pages. */
+		MarkBufferDirty(s->cur_buf);
+	}
+	else
+	{
+		GenericXLogState *state = GenericXLogStart(s->index);
+		GenericXLogRegisterBuffer(state, s->cur_buf, GENERIC_XLOG_FULL_IMAGE);
+		GenericXLogFinish(state);
+	}
 
 	UnlockReleaseBuffer(s->cur_buf);
 	s->cur_buf = InvalidBuffer;
+}
+
+/* ----------------------------------------------------------------
+ * Bulk extend: pre-allocate contiguous pages
+ * ---------------------------------------------------------------- */
+
+static BlockNumber
+pg_extend(MktStorage *self, uint32_t npages)
+{
+	MktannStorage *s = PG_STORAGE(self);
+
+	Buffer	*buffers	 = palloc(npages * sizeof(Buffer));
+	uint32_t extended_by = 0;
+
+	BlockNumber start = ExtendBufferedRelBy(
+			BMR_REL(s->index),
+			MAIN_FORKNUM,
+			NULL,
+			EB_SKIP_EXTENSION_LOCK,
+			npages,
+			buffers,
+			&extended_by);
+
+	for (uint32_t i = 0; i < extended_by; i++)
+		ReleaseBuffer(buffers[i]);
+
+	pfree(buffers);
+	return start;
 }
 
 /* ----------------------------------------------------------------
@@ -236,6 +273,7 @@ static const MktStorageOps pg_storage_ops = {
 		.write_page	  = pg_write_page,
 		.new_page	  = pg_new_page,
 		.commit_page  = pg_commit_page,
+		.extend		  = pg_extend,
 		.rerank		  = pg_rerank,
 };
 
@@ -247,9 +285,11 @@ void
 mktann_storage_init(
 		MktannStorage *s, Relation index, Relation rel, DistanceMetric metric)
 {
-	s->base.ops = &pg_storage_ops;
-	s->index	= index;
-	s->rel		= rel;
-	s->cur_buf	= InvalidBuffer;
-	s->metric	= metric;
+	s->base.ops	  = &pg_storage_ops;
+	s->index	  = index;
+	s->rel		  = rel;
+	s->build_mode = false;
+	s->cur_buf	  = InvalidBuffer;
+	s->metric	  = metric;
+	s->read_count = 0;
 }
