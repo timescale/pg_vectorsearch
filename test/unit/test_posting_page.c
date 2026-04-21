@@ -245,24 +245,12 @@ TEST(page_add_single_entry)
 	ASSERT_TRUE(ok, "add should succeed");
 	ASSERT_EQ(1, mkt_posting_page_count(page), "count should be 1");
 
-	/* Verify round-trip */
-	ASSERT_EQ(
-			42,
-			mkt_posting_get_vector_id(&mkt_posting_metas(page)[0].tid),
-			"tid round-trip");
-	uint32_t max = mkt_posting_max_entries(dim);
-	ASSERT_FLOAT_EQ(
-			1.0f, mkt_posting_f_add(page, max)[0], 1e-6f, "f_add round-trip");
-	ASSERT_FLOAT_EQ(
-			2.0f,
-			mkt_posting_f_rescale(page, max)[0],
-			1e-6f,
-			"f_rescale round-trip");
-	ASSERT_FLOAT_EQ(
-			0.5f,
-			mkt_posting_f_error(page, max)[0],
-			1e-6f,
-			"f_error round-trip");
+	/* Verify round-trip via the AoS entry accessor */
+	MktPostingEntryHeader *e0 = mkt_posting_entry(page, 0, dim);
+	ASSERT_EQ(42, mkt_posting_get_vector_id(&e0->meta.tid), "tid round-trip");
+	ASSERT_FLOAT_EQ(1.0f, e0->f_add, 1e-6f, "f_add round-trip");
+	ASSERT_FLOAT_EQ(2.0f, e0->f_rescale, 1e-6f, "f_rescale round-trip");
+	ASSERT_FLOAT_EQ(0.5f, e0->f_error, 1e-6f, "f_error round-trip");
 	ASSERT_EQ(
 			0xAB,
 			mkt_posting_entry_bits(
@@ -334,11 +322,11 @@ TEST(builder_single_page)
 	ASSERT_EQ(5, mkt_posting_page_count(page), "should have 5 entries");
 
 	/* Verify vector IDs — first page content starts after pt_centroid */
-	char					  *content = mkt_posting_content_first(page, dim);
-	const MktPostingEntryMeta *metas   = mkt_posting_metas_at(content);
+	char *content = mkt_posting_content_first(page, dim);
 	for (uint32_t i = 0; i < 5; i++)
 	{
-		uint32_t vid = mkt_posting_get_vector_id(&metas[i].tid);
+		MktPostingEntryHeader *e   = mkt_posting_entry_at(content, i, dim);
+		uint32_t			   vid = mkt_posting_get_vector_id(&e->meta.tid);
 		ASSERT_EQ(i, vid, "vector_id round-trip through builder");
 	}
 
