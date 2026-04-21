@@ -42,28 +42,21 @@ mkt_posting_page_add(
 		return false;
 
 	MktPostingPageOpaque *opaque  = mkt_posting_opaque(page);
-	uint32_t			  max	  = opaque->max_entries;
 	uint32_t			  i		  = opaque->entry_count;
 	char				 *content = (opaque->flags & MKT_POSTING_PAGE_FIRST)
 										  ? mkt_posting_content_first(page, dim)
 										  : mkt_posting_content(page);
 
-	/* Write metadata */
-	MktPostingEntryMeta *meta = &mkt_posting_metas_at(content)[i];
-	meta->tid				  = tid;
-	meta->flags				  = entry_flags;
-	meta->reserved			  = 0;
-
-	/* Write scalar arrays */
-	mkt_posting_f_add_at(content, max)[i]	  = f_add;
-	mkt_posting_f_rescale_at(content, max)[i] = f_rescale;
-	mkt_posting_f_error_at(content, max)[i]	  = f_error;
-
-	/* Write bits */
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
-	memcpy(mkt_posting_entry_bits_at(content, max, dim, i),
-		   bits,
-		   packed_bytes);
+	/* Write the entry header (meta + factors) + bits in one contiguous
+	 * block at content + i * entry_size. */
+	MktPostingEntryHeader *hdr = mkt_posting_entry_at(content, i, dim);
+	hdr->meta.tid			   = tid;
+	hdr->meta.flags			   = entry_flags;
+	hdr->meta.reserved		   = 0;
+	hdr->f_add				   = f_add;
+	hdr->f_rescale			   = f_rescale;
+	hdr->f_error			   = f_error;
+	memcpy(hdr->bits, bits, MKT_RABITQ_BYTES(dim));
 
 	opaque->entry_count = i + 1;
 	return true;
@@ -94,31 +87,22 @@ mkt_posting_flat_add(
 		const uint8_t  *bits,
 		uint8_t			entry_flags)
 {
-	MktFlatPostingHeader *hdr = mkt_flat_posting_header(buf);
-	if (hdr->entry_count >= hdr->max_entries)
+	MktFlatPostingHeader *flat_hdr = mkt_flat_posting_header(buf);
+	if (flat_hdr->entry_count >= flat_hdr->max_entries)
 		return false;
 
-	uint32_t max	 = hdr->max_entries;
-	uint32_t i		 = hdr->entry_count;
+	uint32_t i		 = flat_hdr->entry_count;
 	char	*content = mkt_flat_posting_content(buf);
 
-	/* Write metadata */
-	MktPostingEntryMeta *meta = &mkt_posting_metas_at(content)[i];
-	meta->tid				  = tid;
-	meta->flags				  = entry_flags;
-	meta->reserved			  = 0;
+	MktPostingEntryHeader *hdr = mkt_posting_entry_at(content, i, dim);
+	hdr->meta.tid			   = tid;
+	hdr->meta.flags			   = entry_flags;
+	hdr->meta.reserved		   = 0;
+	hdr->f_add				   = f_add;
+	hdr->f_rescale			   = f_rescale;
+	hdr->f_error			   = f_error;
+	memcpy(hdr->bits, bits, MKT_RABITQ_BYTES(dim));
 
-	/* Write scalar arrays */
-	mkt_posting_f_add_at(content, max)[i]	  = f_add;
-	mkt_posting_f_rescale_at(content, max)[i] = f_rescale;
-	mkt_posting_f_error_at(content, max)[i]	  = f_error;
-
-	/* Write bits */
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
-	memcpy(mkt_posting_entry_bits_at(content, max, dim, i),
-		   bits,
-		   packed_bytes);
-
-	hdr->entry_count = i + 1;
+	flat_hdr->entry_count = i + 1;
 	return true;
 }

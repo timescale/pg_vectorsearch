@@ -1,28 +1,36 @@
 /*
  * posting_page.h - Posting list page format
  *
- * Stores per-cluster posting data using an all-forward SoA layout.
- * Two storage modes share the same layout and scan code:
+ * Stores per-cluster posting data using an AoS layout: each entry
+ * is a fixed-size block packing meta + factors + bits together.
  *
  *   Paged mode (BLCKSZ pages):
  *     PageHeader (PG-compatible, 24B)
- *     SoA data (pre-sized to max_entries)
+ *     (pt_centroid — on first page only)
+ *     entry[0], entry[1], ...
  *     MktPostingPageOpaque (16B at page end)
  *
  *   Flat mode (one buffer per cluster):
  *     MktFlatPostingHeader (16B)
- *     SoA data (exactly sized to entry count)
+ *     entry[0], entry[1], ...
  *
- * SoA data layout (identical for both modes):
- *     MktPostingEntryMeta[max]   8B each  (TID + flags)
- *     float f_add[max]           4B each
- *     float f_rescale[max]       4B each
- *     float f_error[max]         4B each
- *     uint8_t bits[max * packed_bytes]    (contiguous 1-bit codes)
+ * Per-entry block (size = MKT_POSTING_ENTRY_SIZE(dim) bytes):
+ *     MktPostingEntryHeader  20B  (tid + flags + f_add/rescale/error)
+ *     uint8_t bits[packed_bytes]  (dim-dependent, 96B at dim=768)
  *
- * Access helpers take a content pointer and max_entries, making
- * them agnostic to the page header format. The scan iterator
- * stores these per-page and works identically for both modes.
+ * Why AoS: when the SIMD kernel strides through entries at
+ * stride=MKT_POSTING_ENTRY_SIZE(dim), consecutive pages' bit
+ * regions are separated by only ~72 bytes of page-boundary overhead
+ * (opaque + next PageHeader) instead of the ~1472 bytes that an
+ * SoA layout interleaves (metas + f_add + f_rescale + f_error of
+ * the next page before its bits). A small per-page perturbation is
+ * much easier for the HW prefetcher to absorb than a multi-KB
+ * discontinuity — see the BLCKSZ experiment that confirmed the gap
+ * lives at those region transitions.
+ *
+ * Side benefit: reading bits at stride=entry_size also pulls each
+ * entry's f_add/f_rescale/f_error/meta into L1 for free, so phase 3
+ * (distance conversion + prune) finds them hot.
  */
 
 #ifndef MKT_POSTING_PAGE_H
@@ -69,6 +77,26 @@ typedef struct MktPostingEntryMeta
 } MktPostingEntryMeta; /* 8B */
 
 /*
+ * Per-entry header in the AoS layout: meta + the three RaBitQ
+ * scalar factors, followed by a flexible array of quantized bits
+ * (MKT_RABITQ_BYTES(dim) bytes at runtime).
+ *
+ * sizeof(MktPostingEntryHeader) is 20B — the FAM doesn't contribute
+ * to the struct's static size, so MKT_POSTING_ENTRY_HEADER_SIZE
+ * stays a clean compile-time constant. The bits array extends past
+ * the struct in memory; callers compute per-entry offsets via
+ * MKT_POSTING_ENTRY_SIZE(dim) and access bits as `hdr->bits`.
+ */
+typedef struct MktPostingEntryHeader
+{
+	MktPostingEntryMeta meta;	   /* 8B */
+	float				f_add;	   /* 4B */
+	float				f_rescale; /* 4B */
+	float				f_error;   /* 4B */
+	uint8_t				bits[FLEXIBLE_ARRAY_MEMBER];
+} MktPostingEntryHeader; /* 20B + dim-dependent bits */
+
+/*
  * Paged-mode opaque (at end of every BLCKSZ posting page).
  */
 typedef struct MktPostingPageOpaque
@@ -97,16 +125,29 @@ typedef struct MktFlatPostingHeader
  * Size calculations
  * ---------------------------------------------------------------- */
 
-/* Bytes per entry in forward region: meta + 3 floats */
-#define MKT_POSTING_FWD_PER_ENTRY \
-	(sizeof(MktPostingEntryMeta) + 3 * sizeof(float)) /* 20B */
+/* Bytes in the per-entry header (meta + 3 floats) */
+#define MKT_POSTING_ENTRY_HEADER_SIZE sizeof(MktPostingEntryHeader) /* 20B */
+
+/* Byte offset of bits[] within one entry. Equal to the header size
+ * because bits[] is the FAM right after the header. */
+#define MKT_POSTING_ENTRY_BITS_OFFSET offsetof(MktPostingEntryHeader, bits)
 
 /* Bytes per entry in bits region */
 #define MKT_POSTING_BITS_PER_ENTRY(dim) MKT_RABITQ_BYTES(dim)
 
-/* Total bytes per entry */
-#define MKT_POSTING_ENTRY_SIZE(dim) \
-	(MKT_POSTING_FWD_PER_ENTRY + MKT_POSTING_BITS_PER_ENTRY(dim))
+/* Entry stride must be a multiple of MktPostingEntryHeader's alignment
+ * (4 bytes — the float fields) so entry i's float members land on
+ * properly aligned addresses regardless of `i`. For dim values where
+ * MKT_RABITQ_BYTES(dim) isn't already a multiple of 4 (i.e., dim not
+ * a multiple of 32, such as dim=16 or dim=100), we pad up. */
+#define MKT_POSTING_ENTRY_ALIGN 4u
+
+/* Total bytes per entry: header + bits, padded up to entry alignment
+ * (= 116 at dim=768; 24 at dim=16). */
+#define MKT_POSTING_ENTRY_SIZE(dim)                                       \
+	(((MKT_POSTING_ENTRY_HEADER_SIZE + MKT_POSTING_BITS_PER_ENTRY(dim)) + \
+	  MKT_POSTING_ENTRY_ALIGN - 1u) &                                     \
+	 ~(MKT_POSTING_ENTRY_ALIGN - 1u))
 
 /* Usable space on a BLCKSZ page (between content start and opaque) */
 static inline uint32_t
@@ -171,57 +212,40 @@ mkt_posting_page_has_room(Page page)
 }
 
 /* ----------------------------------------------------------------
- * Content-based SoA access — header-agnostic
+ * Content-based AoS access — header-agnostic
  *
- * These helpers take a content pointer (start of SoA data) and
- * max_entries. They work identically for both paged and flat modes.
- *
- * Layout within content area:
- *   offset 0:                      meta[max]
- *   offset max * sizeof(meta):     f_add[max]
- *   offset + max * sizeof(float):  f_rescale[max]
- *   offset + max * sizeof(float):  f_error[max]
- *   offset + max * sizeof(float):  bits[max * packed_bytes]
+ * Entries are laid out contiguously: entry i starts at
+ *   content + i * MKT_POSTING_ENTRY_SIZE(dim)
+ * and consists of an MktPostingEntryHeader followed by
+ * MKT_RABITQ_BYTES(dim) bytes of bits. The SIMD kernel strides
+ * through bits[] at stride = MKT_POSTING_ENTRY_SIZE(dim), starting
+ * from mkt_posting_first_bits(content).
  * ---------------------------------------------------------------- */
 
-static inline MktPostingEntryMeta *
-mkt_posting_metas_at(char *content)
+/* Header for entry i (access fields via the struct: hdr->meta,
+ * hdr->f_add, hdr->f_rescale, hdr->f_error). */
+static inline MktPostingEntryHeader *
+mkt_posting_entry_at(char *content, uint32_t i, Dimension dim)
 {
-	return (MktPostingEntryMeta *)content;
+	return (MktPostingEntryHeader *)(content +
+									 (size_t)i * MKT_POSTING_ENTRY_SIZE(dim));
 }
 
-static inline float *
-mkt_posting_f_add_at(char *content, uint32_t max_entries)
-{
-	return (float *)(content +
-					 (size_t)max_entries * sizeof(MktPostingEntryMeta));
-}
-
-static inline float *
-mkt_posting_f_rescale_at(char *content, uint32_t max_entries)
-{
-	return mkt_posting_f_add_at(content, max_entries) + max_entries;
-}
-
-static inline float *
-mkt_posting_f_error_at(char *content, uint32_t max_entries)
-{
-	return mkt_posting_f_rescale_at(content, max_entries) + max_entries;
-}
-
-static inline uint8_t *
-mkt_posting_bits_at(char *content, uint32_t max_entries)
-{
-	return (uint8_t *)(mkt_posting_f_error_at(content, max_entries) +
-					   max_entries);
-}
-
+/* Bits pointer for entry i (immediately follows entry i's header). */
 static inline uint8_t *
 mkt_posting_entry_bits_at(
-		char *content, uint32_t max_entries, Dimension dim, uint32_t index)
+		char *content, uint32_t max_entries, Dimension dim, uint32_t i)
 {
-	return mkt_posting_bits_at(content, max_entries) +
-		   (size_t)index * MKT_RABITQ_BYTES(dim);
+	(void)max_entries;
+	return mkt_posting_entry_at(content, i, dim)->bits;
+}
+
+/* Pointer to entry 0's bits — the base the SIMD kernel uses, with
+ * stride = MKT_POSTING_ENTRY_SIZE(dim). */
+static inline uint8_t *
+mkt_posting_first_bits(char *content)
+{
+	return ((MktPostingEntryHeader *)content)->bits;
 }
 
 /* ----------------------------------------------------------------
@@ -259,42 +283,21 @@ mkt_posting_content_first(Page page, Dimension dim)
 	return PageGetContents(page) + mkt_posting_pt_centroid_size(dim);
 }
 
-static inline MktPostingEntryMeta *
-mkt_posting_metas(Page page)
+/* Paged-mode convenience wrappers — these assume non-first pages
+ * (content starts right after PageHeader). For first pages with
+ * pt_centroid, go through mkt_posting_content_first. */
+static inline MktPostingEntryHeader *
+mkt_posting_entry(Page page, uint32_t i, Dimension dim)
 {
-	return mkt_posting_metas_at(PageGetContents(page));
-}
-
-static inline float *
-mkt_posting_f_add(Page page, uint32_t max_entries)
-{
-	return mkt_posting_f_add_at(PageGetContents(page), max_entries);
-}
-
-static inline float *
-mkt_posting_f_rescale(Page page, uint32_t max_entries)
-{
-	return mkt_posting_f_rescale_at(PageGetContents(page), max_entries);
-}
-
-static inline float *
-mkt_posting_f_error(Page page, uint32_t max_entries)
-{
-	return mkt_posting_f_error_at(PageGetContents(page), max_entries);
-}
-
-static inline uint8_t *
-mkt_posting_bits(Page page, uint32_t max_entries)
-{
-	return mkt_posting_bits_at(PageGetContents(page), max_entries);
+	return mkt_posting_entry_at(PageGetContents(page), i, dim);
 }
 
 static inline uint8_t *
 mkt_posting_entry_bits(
-		Page page, uint32_t max_entries, Dimension dim, uint32_t index)
+		Page page, uint32_t max_entries, Dimension dim, uint32_t i)
 {
 	return mkt_posting_entry_bits_at(
-			PageGetContents(page), max_entries, dim, index);
+			PageGetContents(page), max_entries, dim, i);
 }
 
 /* ----------------------------------------------------------------

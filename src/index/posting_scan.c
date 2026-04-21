@@ -188,8 +188,8 @@ advance_page(MktPostingScan *scan)
 void
 mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 {
-	Dimension dim	 = scan->dim;
-	uint32_t  packed = scan->packed_bytes;
+	Dimension dim		 = scan->dim;
+	uint32_t  entry_size = MKT_POSTING_ENTRY_SIZE(dim);
 
 	float g_add		 = scan->qstate->g_add;
 	float sum_t		 = scan->qstate->sum_transformed;
@@ -211,41 +211,49 @@ mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 		}
 
 		char	*content = scan->cur_content;
-		uint32_t max_ent = scan->cur_max_entries;
 		uint32_t count	 = scan->cur_count;
 
-		/* --- Score: batch IP + distance conversion --- */
-		const float	  *f_add	 = mkt_posting_f_add_at(content, max_ent);
-		const float	  *f_rescale = mkt_posting_f_rescale_at(content, max_ent);
-		const uint8_t *bits		 = mkt_posting_bits_at(content, max_ent);
+		/* --- Score: batch IP over all entries on this page ---
+		 *
+		 * AoS layout: entry i's bits live at content + i * entry_size
+		 * + MKT_POSTING_ENTRY_BITS_OFFSET. The SIMD kernel just needs
+		 * the first entry's bits pointer and a stride of entry_size. */
+		const uint8_t *bits_base = mkt_posting_first_bits(content);
 
 		uint32_t padded = (count + 3) & ~3u;
 		mkt_rabitq_inner_product_multi(
-				scan->qstate->transformed, bits, packed, dim, padded, scratch);
+				scan->qstate->transformed,
+				bits_base,
+				entry_size,
+				dim,
+				padded,
+				scratch);
 
+		/* Convert raw IPs to distances, reading f_add/f_rescale per
+		 * entry via the strided AoS accessor. */
 		for (uint32_t i = 0; i < count; i++)
 		{
+			MktPostingEntryHeader *e = mkt_posting_entry_at(content, i, dim);
 			float final_dot = (2.0f * scratch[i] - sum_t) * inv_sqrt_d;
-			distances[i] = f_add[i] + g_add - 2.0f * f_rescale[i] * final_dot;
+			distances[i] = e->f_add + g_add - 2.0f * e->f_rescale * final_dot;
 		}
 
 		/* --- Prune + insert approximate distances --- */
-		const float *f_error = mkt_posting_f_error_at(content, max_ent);
-		const MktPostingEntryMeta *metas	 = mkt_posting_metas_at(content);
-		Distance				   threshold = mkt_topk_threshold(topk);
+		Distance threshold = mkt_topk_threshold(topk);
 
 		for (uint32_t i = 0; i < count; i++)
 		{
+			MktPostingEntryHeader *e = mkt_posting_entry_at(content, i, dim);
 			scan->entries_scanned++;
 
-			if (metas[i].flags & MKT_POSTING_FLAG_DELETED)
+			if (e->meta.flags & MKT_POSTING_FLAG_DELETED)
 			{
 				scan->entries_pruned++;
 				continue;
 			}
 
 			Distance est = distances[i];
-			Distance err = f_error[i] * g_error;
+			Distance err = e->f_error * g_error;
 			Distance lb	 = est - err;
 
 			if (lb >= threshold)
@@ -254,7 +262,7 @@ mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 				continue;
 			}
 
-			uint64_t id = mkt_posting_encode_tid(&metas[i].tid);
+			uint64_t id = mkt_posting_encode_tid(&e->meta.tid);
 			mkt_topk_insert(topk, est, err, id);
 			threshold = mkt_topk_threshold(topk);
 		}
