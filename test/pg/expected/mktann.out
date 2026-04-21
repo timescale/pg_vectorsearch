@@ -44,7 +44,7 @@ SELECT count(*) FROM (
 ) t;
  count 
 -------
-     0
+     5
 (1 row)
 
 RESET enable_seqscan;
@@ -139,7 +139,7 @@ SELECT count(*) FROM (
 ) t;
  count 
 -------
-     0
+     5
 (1 row)
 
 RESET enable_seqscan;

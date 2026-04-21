@@ -86,7 +86,8 @@ mkt_write_centroid_tree(
 				child_count,
 				encoder,
 				child_blks,
-				leaf_pt);
+				leaf_pt,
+				node_first_blkno[i]);
 	}
 }
 

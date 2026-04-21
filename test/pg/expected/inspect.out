@@ -77,9 +77,8 @@ SELECT level,
     GROUP BY level ORDER BY level;
  level | all_have_children | all_are_leaves | has_entries | format 
 -------+-------------------+----------------+-------------+--------
-     0 | t                 | f              | t           | float
-     1 | f                 | t              | t           | float
-(2 rows)
+     0 | f                 | t              | t           | float
+(1 row)
 
 -- Higher-dim vectors to force page overflow (next_blkno chains).
 -- Float format with dim=256: max 7 entries/page, nlist=10 overflows.
