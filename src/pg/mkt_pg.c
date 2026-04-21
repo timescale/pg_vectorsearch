@@ -15,7 +15,10 @@
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-int mkt_distance_mode = MKT_DISTANCE_MODE_DEFAULT;
+int	 mkt_distance_mode = MKT_DISTANCE_MODE_DEFAULT;
+int	 mkt_nprobe		   = 10;
+int	 mkt_query_limit   = 0;
+bool mkt_rerank		   = true;
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
@@ -45,6 +48,46 @@ _PG_init(void)
 			&mkt_distance_mode,
 			MKT_DISTANCE_MODE_DEFAULT,
 			mkt_distance_mode_options,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.nprobe",
+			"Number of clusters to probe per query.",
+			NULL,
+			&mkt_nprobe,
+			10,
+			1,
+			10000,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.query_limit",
+			"Maximum number of results per query (0 = auto).",
+			NULL,
+			&mkt_query_limit,
+			0,
+			0,
+			100000,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomBoolVariable(
+			"mkt.rerank",
+			"Enable reranking with exact distances.",
+			NULL,
+			&mkt_rerank,
+			true,
 			PGC_USERSET,
 			0,
 			NULL,

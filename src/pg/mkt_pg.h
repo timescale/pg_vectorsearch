@@ -29,6 +29,9 @@
  * ---------------------------------------------------------------- */
 
 extern int		   mkt_distance_mode;  /* MktDistanceMode */
+extern int		   mkt_nprobe;		   /* clusters to probe per query */
+extern int		   mkt_query_limit;	   /* max results per query (0=auto) */
+extern bool		   mkt_rerank;		   /* enable reranking (default: true) */
 extern relopt_kind mktann_relopt_kind; /* index reloption kind */
 
 /* ----------------------------------------------------------------
