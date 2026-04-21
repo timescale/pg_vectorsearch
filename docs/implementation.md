@@ -3404,236 +3404,305 @@ benchmark:
 
 ## Part 3: Posting List Data Structures
 
-### 3.1 Posting List Entry
+### 3.1 Page Layout
 
-**Files**: `src/pg/index/posting.h`, `src/pg/index/posting.c`
+**Files**: `src/index/posting_page.h`, `src/index/posting_page.c`
 
-Posting list pages use a bidirectional AoS (Array-of-Structures) layout,
-similar to centroid pages. Entry metadata grows forward from the page header;
-RaBitQData entries grow backward from the opaque area. This stores each
-quantized vector as a contiguous `RaBitQData` struct — no decomposition into
-separate arrays.
+Posting list pages use a forward-growing AoS (Array-of-Structures) layout:
+each entry is a fixed-size block containing its metadata, RaBitQ factors, and
+quantized bits contiguously. The SIMD scan kernel strides through entries at
+`entry_size` (116 bytes at dim=768), which lets consecutive pages' bit regions
+sit only tens of bytes apart in memory — the HW prefetcher absorbs the
+per-page perturbation cleanly.
+
+Two storage modes share the same entry format and the same scan code:
+
+- **Paged mode** — a chain of BLCKSZ pages with a PG-compatible `PageHeaderData`
+  at the start and an opaque footer at the end, matching PG buffer-cache
+  conventions (B-tree, GIN, GiST, pgvector).
+- **Flat mode** — a single contiguous buffer per cluster with a minimal
+  header, exactly sized to the cluster's entry count. Used as a reference
+  point and for bindings where no PG framing is needed.
+
+```
+┌─────────────────────────────────────────────────────────┐    Paged mode
+│ PostgreSQL PageHeaderData                    (24 bytes) │
+├─────────────────────────────────────────────────────────┤
+│ (first page only) pt_centroid[dim]                      │    MAXALIGN(4*dim)
+├─────────────────────────────────────────────────────────┤
+│ entry[0]   MktPostingEntryHeader + bits  ┐              │
+│ entry[1]                                 │              │
+│   ...                                    ├─ AoS entries │
+│ entry[max-1]                             ┘              │
+├─────────────────────────────────────────────────────────┤
+│ MktPostingPageOpaque                         (16 bytes) │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐    Flat mode
+│ MktFlatPostingHeader                         (16 bytes) │
+├─────────────────────────────────────────────────────────┤
+│ entry[0] ... entry[count-1]                             │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### Per-entry block
+
+Each entry is a 116-byte (at dim=768) contiguous block:
 
 ```c
-// Posting entry metadata (grows forward from page header)
-// Note: Centroids are stored in dedicated centroid pages, not in posting lists.
-typedef struct {
-    uint8_t  flags;         // Entry flags
-    uint8_t  tid_bytes[6];  // TID: 4-byte block + 2-byte offset
-    uint8_t  reserved;      // Alignment padding
-} PostingEntryMeta;
+typedef struct MktPostingEntryMeta
+{
+    ItemPointerData tid;      // 6B — heap TID (PG) or packed vector_id (standalone)
+    uint8_t         flags;    // entry flags (DELETED, BOUNDARY)
+    uint8_t         reserved;
+} MktPostingEntryMeta;        // 8B total
 
-// Entry flags
-#define POSTING_FLAG_DELETED   0x01  // Soft-deleted, pending vacuum
-#define POSTING_FLAG_BOUNDARY  0x02  // Replicated to adjacent cluster
+typedef struct MktPostingEntryHeader
+{
+    MktPostingEntryMeta meta;       // 8B
+    float               f_add;      // 4B — per-entry RaBitQ additive factor
+    float               f_rescale;  // 4B — scaling factor
+    float               f_error;    // 4B — error-bound factor (pre-stored)
+} MktPostingEntryHeader;            // 20B total
 
-// TID encoding/decoding
-static inline void posting_entry_set_tid(PostingEntryMeta *entry,
-                                          BlockNumber block,
-                                          OffsetNumber offset) {
-    memcpy(entry->tid_bytes, &block, 4);
-    memcpy(entry->tid_bytes + 4, &offset, 2);
-}
+// Followed in memory by: uint8_t bits[MKT_RABITQ_BYTES(dim)]
 
-static inline void posting_entry_get_tid(const PostingEntryMeta *entry,
-                                          BlockNumber *block,
-                                          OffsetNumber *offset) {
-    memcpy(block, entry->tid_bytes, 4);
-    memcpy(offset, entry->tid_bytes + 4, 2);
-}
+// Flags
+#define MKT_POSTING_FLAG_DELETED   0x01  // Soft-deleted, pending vacuum
+#define MKT_POSTING_FLAG_BOUNDARY  0x02  // Replicated to adjacent cluster
 ```
 
-**Why bidirectional AoS layout for posting lists:**
-- `RaBitQData` stored as-is — no decomposition into separate f_add/f_rescale/bits
-  arrays on write, no recomposition on read
-- Adding an entry is two memcpy's (meta + data) instead of four scatter writes
-- Reading an entry returns a direct `RaBitQData` pointer — zero-copy access
-- Metadata accessed only for candidates passing distance threshold
-- Benchmarking confirmed AoS matches separate-array performance for the
-  vertical SIMD inner product kernel (stride difference is negligible in
-  L1 cache)
-
-### 3.2 In-Memory Posting List
-
-For building and manipulation before writing to pages:
+Per-entry size:
 
 ```c
-// In-memory posting list (growable)
-typedef struct {
-    PostingEntry **entries;  // Array of entry pointers
-    uint32_t       count;
-    uint32_t       capacity;
-    Dimension      dim;
-    ClusterId      cluster_id;
-} MemPostingList;
-
-MemPostingList *mkt_posting_list_create(ClusterId cluster_id, Dimension dim);
-void            mkt_posting_list_destroy(MemPostingList *list);
-
-// Add entry to list
-void mkt_posting_list_add(
-    MemPostingList *list,
-    BlockNumber block,
-    OffsetNumber offset,
-    const RaBitQData *quantized,
-    uint8_t flags
-);
-
-// Sort by TID for locality (optional optimization)
-void mkt_posting_list_sort_by_tid(MemPostingList *list);
-
-// Iteration (read-only traversal)
-typedef struct {
-    const MemPostingList *list;
-    uint32_t              index;
-} PostingListIter;
-
-PostingListIter       mkt_posting_list_iter(const MemPostingList *list);
-const PostingEntry   *mkt_posting_list_next(PostingListIter *iter);
+#define MKT_POSTING_ENTRY_SIZE(dim) \
+    (sizeof(MktPostingEntryHeader) + MKT_RABITQ_BYTES(dim))
 ```
 
-### 3.3 Page Layout
+At dim=768: `20 + 96 = 116` bytes per entry.
 
-**Files**: `src/pg/index/page.h`, `src/pg/index/page.c`
+`f_error` is stored per entry (not derived at query time) so the scan's
+pruning step doesn't need a per-entry `sqrtf`. It is computed once per entry
+at build time from the entry's factors.
 
-Page layout for PostgreSQL integration, but designed to be testable standalone.
-
-Uses the standard PostgreSQL `PageHeaderData` at offset 0 and a special
-(opaque) area at the page end, following the same convention as B-tree, GIN,
-GiST, and pgvector. We don't use line pointers or the traditional tuple layout.
-Set `pd_lower = pd_upper = SizeOfPageHeaderData` (no free space from PG's
-perspective). `pd_special` points to the opaque area.
-
-#### Compact on-disk form
-
-Posting list pages store vectors in the compact `RaBitQData` format
-(8 bytes + D/8 bits). This is the primary encoding form produced by all
-encoding functions. The `RaBitQVector` presentation type (for the future
-PG SQL type) adds a varlena header. f_error is derived at query time:
-
-```
-f_error = C_error * sqrt(f_rescale² - f_add)
-```
-
-where `C_error = 2 * ε / sqrt(dim - 1)` is a per-index constant precomputed
-in `RaBitQQueryState.c_error`.
-
-#### Opaque area
+#### Opaque (paged mode)
 
 ```c
-// Posting page opaque data (special area, 16 bytes)
-// Follows PG conventions (B-tree: 16B, GiST: 16B, pgvector: 8B)
-typedef struct {
-    BlockNumber next_blkno;     // 4B - next page in posting list
-    uint32_t    cluster_id;     // 4B - which cluster this page belongs to
-    uint16_t    entry_count;    // 2B - number of entries on page
-    uint16_t    flags;          // 2B - page flags (FIRST, OVERFLOW)
-    uint16_t    page_id;        // 2B - magic for identification
-    uint16_t    reserved;       // 2B - future use
-} MktPostingPageOpaque;         // 16 bytes total
+typedef struct MktPostingPageOpaque
+{
+    BlockNumber next_blkno;     // 4B — next page in chain, or InvalidBlockNumber
+    uint32_t    cluster_id;     // 4B
+    uint16_t    entry_count;    // 2B — live entries on this page
+    uint16_t    flags;          // 2B — FIRST, OVERFLOW, FASTSCAN (reserved)
+    uint16_t    page_id;        // 2B — MKT_POSTING_PAGE_ID ("MP")
+    uint16_t    max_entries;    // 2B — capacity at this page's dim
+} MktPostingPageOpaque;         // 16B total
 
-#define MKT_PAGE_FLAG_FIRST    0x01  // First page of posting list
-#define MKT_PAGE_FLAG_OVERFLOW 0x02  // Overflow page (added after build)
+#define MKT_POSTING_PAGE_FIRST     0x0001  // First page of posting list
+#define MKT_POSTING_PAGE_OVERFLOW  0x0002  // Overflow page
+#define MKT_POSTING_PAGE_FASTSCAN  0x0004  // Reserved for future fastscan layout
 ```
 
-#### Bidirectional AoS data layout
+#### pt_centroid on first pages
 
-Posting list pages use bidirectional growth, inspired by PostgreSQL's standard
-page layout. Entry metadata grows forward from the page header; `RaBitQData`
-entries grow backward from the opaque area. The page is full when the two
-regions would overlap.
+The first page of each posting list's chain carries `pt_centroid` — the
+rotated centroid `P^T · centroid_of_this_cluster` — right after the
+PageHeader. The scan reads it when entering a new cluster and uses it to
+initialize the per-cluster RaBitQ query state via an `O(dim)` residual
+subtraction instead of an `O(dim²)` matrix multiply. Overflow pages do not
+carry pt_centroid.
 
-```
-┌────────────────────────────────────────────────────────┐
-│ PostgreSQL PageHeaderData                   (24 bytes) │
-├────────────────────────────────────────────────────────┤
-│ PostingEntryMeta[0]                          (8 bytes) │
-│ PostingEntryMeta[1]                   ← grows forward  │
-│       ...                                              │
-├ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┤
-│       free space                                       │
-├ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┤
-│       ...                                              │
-│ RaBitQData[1]                        ← grows backward  │
-│ RaBitQData[0]                     (8 + D/8 bytes each) │
-├────────────────────────────────────────────────────────┤
-│ MktPostingPageOpaque                       (16 bytes)  │
-└────────────────────────────────────────────────────────┘
-```
-
-**Why bidirectional AoS:**
-
-- `RaBitQData` stored as-is — adding an entry is two memcpy's (meta + data)
-  instead of four separate array writes. Reading returns a direct pointer.
-- O(1) insert: write metadata at slot `entry_count`, write RaBitQData at
-  the corresponding backward slot, increment count.
-- Benchmarking confirmed AoS matches separate-array performance for SIMD
-  distance computation — the vertical SIMD kernel works with any stride.
-- All entries are fixed-size (dim constant per index), so capacity is
-  deterministic: `usable_bytes / (meta_size + rabitq_data_size)`.
-
-**Scan access pattern (two-stage search):**
-
-1. Read opaque → get `entry_count` (N)
-2. For each entry: get `RaBitQData` pointer, compute SIMD inner product
-3. Apply distance formula using per-entry `f_add`/`f_rescale`
-4. Random access `meta[i]` only for ~5-10% surviving candidates to get TIDs
-
-#### Capacity and access helpers
+#### Flat mode header
 
 ```c
-// Usable space: page minus PG header minus opaque area
-#define MKT_POSTING_PAGE_USABLE \
-    (BLCKSZ - SizeOfPageHeaderData - sizeof(MktPostingPageOpaque))
-
-// Bytes per entry: metadata + RaBitQData
-static inline uint32_t mkt_posting_entry_bytes(Dimension dim) {
-    return sizeof(PostingEntryMeta) + MKT_RABITQ_DATA_SIZE(dim);
-}
-
-static inline uint32_t mkt_posting_max_entries(Dimension dim) {
-    return MKT_POSTING_PAGE_USABLE / mkt_posting_entry_bytes(dim);
-}
-
-// Metadata array (forward region)
-#define MKT_POSTING_META(page) \
-    ((PostingEntryMeta *)((char *)(page) + SizeOfPageHeaderData))
-
-// i-th RaBitQData entry (backward region, same pattern as centroid pages)
-static inline RaBitQData *
-mkt_posting_data(Page page, uint32_t index, Dimension dim) {
-    uint32_t data_size    = MKT_RABITQ_DATA_SIZE(dim);
-    size_t   opaque_start = BLCKSZ - sizeof(MktPostingPageOpaque);
-    return (RaBitQData *)((char *)page + opaque_start
-                          - (size_t)(index + 1) * data_size);
-}
+typedef struct MktFlatPostingHeader
+{
+    uint32_t max_entries;     // == capacity (buffer is exactly sized)
+    uint32_t entry_count;
+    uint32_t cluster_id;
+    uint32_t _pad;
+} MktFlatPostingHeader;       // 16B total
 ```
 
-For 768d: 8152 / (16 + 96) = 8152 / 112 = **72 entries per page**
+Flat mode doesn't need `pd_lsn`, `pd_checksum`, `next_blkno`, or any of PG's
+page plumbing — there's no buffer cache, no chain, no WAL. It exists as a
+zero-framing reference point.
 
-#### Page operations
+### 3.2 Why AoS
+
+The SIMD scan kernel (`mkt_rabitq_inner_product_multi_avx512`) reads bits at
+some stride and does 4-wide masked accumulation across dim per group. The
+stride is programmable. With AoS we pass `stride = MKT_POSTING_ENTRY_SIZE(dim)`
+and `bits_base = mkt_posting_first_bits(content)` — no new kernel code
+required.
+
+Two effects combine:
+
+1. **Small per-page prefetcher perturbation.** Consecutive pages in the same
+   posting list sit adjacent in physical memory. The AoS entries on page N
+   end near offset `BLCKSZ - opaque_size`; the AoS entries on page N+1 start
+   near `BLCKSZ + PageHeader_size`. That leaves only a few dozen bytes of
+   non-bits data between the last bits of one page and the first bits of the
+   next. The HW stream prefetcher can absorb this.
+
+   An SoA layout, by contrast, interleaves `metas` + `f_add` + `f_rescale` +
+   `f_error` at the front of each page before `bits`, so consecutive pages'
+   bits regions sit ~1.5 KB apart. The prefetcher loses its lock at every
+   page boundary and has to re-acquire. Paged scans paid this cost at every
+   transition.
+
+2. **Free metadata colocation.** Striding at `entry_size` pulls each entry's
+   20 B header into L1 alongside its 96 B of bits (they share cache lines).
+   The distance-conversion and prune step finds `f_add`, `f_rescale`,
+   `f_error`, and the TID already warm, so the per-entry scalar math in
+   phase 3 runs without cold reads.
+
+### 3.3 Capacity and access helpers
 
 ```c
-// Initialize a posting page
-void mkt_page_init(Page page, ClusterId cluster_id, uint16_t flags,
-                   Dimension dim);
+// Usable space between content start and opaque footer
+static inline uint32_t
+mkt_posting_page_usable(void)
+{
+    return BLCKSZ - (uint32_t)MAXALIGN(SizeOfPageHeaderData)
+                  - sizeof(MktPostingPageOpaque);
+}
 
-// Add entry to page (returns false if page full)
-bool mkt_page_add_entry(
-    Page page,
-    Dimension dim,
-    BlockNumber block,
-    OffsetNumber offset,
-    const RaBitQData *data,
-    uint8_t entry_flags
-);
+// Max entries on an overflow page
+static inline uint32_t
+mkt_posting_max_entries(Dimension dim)
+{
+    return mkt_posting_page_usable() / MKT_POSTING_ENTRY_SIZE(dim);
+}
 
-// Access by index
-const PostingEntryMeta *mkt_page_get_meta(Page page, uint16_t index);
-uint16_t mkt_page_entry_count(Page page);
+// Max entries on a first page (reduced by pt_centroid reservation)
+static inline uint32_t
+mkt_posting_max_entries_first(Dimension dim)
+{
+    return (mkt_posting_page_usable() - MAXALIGN(dim * sizeof(float)))
+           / MKT_POSTING_ENTRY_SIZE(dim);
+}
+
+// Entry i's header (meta + factors)
+static inline MktPostingEntryHeader *
+mkt_posting_entry_at(char *content, uint32_t i, Dimension dim);
+
+// Entry i's bits (immediately follows entry i's header)
+static inline uint8_t *
+mkt_posting_entry_bits_at(char *content, uint32_t max_entries,
+                          Dimension dim, uint32_t i);
+
+// Pointer to entry 0's bits — the base the SIMD kernel strides from
+static inline uint8_t *
+mkt_posting_first_bits(char *content);
 ```
 
-### 3.4 Metapage
+At **dim = 768, BLCKSZ = 8192**:
+
+- overflow page: `8152 / 116 = 70` entries
+- first page:   `(8152 - 3072) / 116 = 43` entries (reserves 3072 bytes for pt_centroid)
+
+### 3.4 Page operations
+
+```c
+// Paged mode
+void mkt_posting_page_init(Page page, uint32_t cluster_id,
+                           Dimension dim, uint16_t flags);
+bool mkt_posting_page_add(Page page, Dimension dim,
+                          ItemPointerData tid,
+                          float f_add, float f_rescale, float f_error,
+                          const uint8_t *bits,
+                          uint8_t entry_flags);
+
+// Flat mode
+void mkt_posting_flat_init(char *buf, uint32_t max_entries,
+                           uint32_t cluster_id);
+bool mkt_posting_flat_add(char *buf, Dimension dim,
+                          ItemPointerData tid,
+                          float f_add, float f_rescale, float f_error,
+                          const uint8_t *bits,
+                          uint8_t entry_flags);
+```
+
+Entry writes go through these for both modes; the writers place the
+`MktPostingEntryHeader` and `bits` contiguously at `content + i*entry_size`.
+
+### 3.5 Why not SoA?
+
+An earlier iteration laid out each page as per-array SoA regions:
+
+```
+┌────────────────────────────────────────┐
+│ PageHeader                             │
+├────────────────────────────────────────┤
+│ MktPostingEntryMeta[max]      (8B × N) │
+│ f_add[max]                    (4B × N) │
+│ f_rescale[max]                (4B × N) │
+│ f_error[max]                  (4B × N) │
+│ bits[max * packed_bytes]               │
+├────────────────────────────────────────┤
+│ Opaque                                 │
+└────────────────────────────────────────┘
+```
+
+Within a single page the SIMD kernel sees a clean sequential stride over
+`bits` and runs at full speed. But *across* pages, the bits regions of
+consecutive pages sit roughly 1.5 KB apart in memory: page N's `bits` ends
+near the opaque footer, and page N+1's `bits` starts only after its
+PageHeader, the four metadata arrays of N+1, and the opaque of N. For a
+cohere-1M workload with ~15 pages per posting list, the scan kernel paid
+~14 such ~1.5 KB gaps per cluster.
+
+The cost didn't show up as L1 misses or TLB misses — both metrics looked
+fine. It showed up as backend-bound stalls inside the SIMD kernel: the
+HW stream prefetcher loses its stride lock at each page boundary and
+takes a few cache lines of re-learning before it's prefetching ahead
+again. Multiplied across pages, this was the bulk of a ~28% paged-vs-flat
+QPS gap we could otherwise not explain.
+
+Three experiments confirmed the story before AoS landed:
+
+- **Span-fix kernel** (one `_multi` invocation per posting list, per-
+  candidate bits pointers): flat, no improvement. Disproved "function-call
+  overhead per page" as the cause.
+- **Cache-line alignment** (round `bits[]` to a 64 B boundary inside the
+  page): no improvement. Disproved "cache-line straddling" as the cause.
+- **BLCKSZ experiment** (bump standalone BLCKSZ from 8192 to 65535 so a
+  posting list fits in ~2 pages): +33% on paged mode, essentially closing
+  the gap. Confirmed "bits region transitions" as the cause.
+
+AoS closes the same gap without changing BLCKSZ: consecutive pages'
+entry regions sit only ~72 bytes apart (opaque + next PageHeader), a
+perturbation small enough for the prefetcher to absorb. Scan code is
+unchanged — it just strides at `entry_size` instead of `packed_bytes`.
+
+### 3.6 Building a posting list
+
+**Files**: `src/index/posting_build.h`, `src/index/posting_build.c`
+
+The `MktPostingBuilder` streams entries into the chosen page format. Build
+flow for each cluster:
+
+```c
+MktPostingBuilder builder;
+mkt_posting_builder_init(&builder, storage, rq_params, dim,
+                         cluster_id, centroid, pt_centroid);
+for each vector in cluster:
+    mkt_posting_builder_add(&builder, tid, vector);  // RaBitQ-encoded internally
+BlockNumber head = mkt_posting_builder_finish(&builder);
+mkt_posting_builder_cleanup(&builder);
+```
+
+The builder encodes each input vector with RaBitQ (producing `f_add`,
+`f_rescale`, `f_error`, and bits), then appends a page entry. It manages the
+BLCKSZ-page chain internally: opens a new page when the current one fills,
+links pages via `next_blkno`, and writes `pt_centroid` to the first page's
+header area.
+
+Flat mode has an analogous `MktFlatPostingBuilder` that writes into a
+caller-provided pre-sized buffer.
+
+### 3.7 Metapage
 
 ```c
 // Metapage layout (block 0)
@@ -3713,8 +3782,9 @@ typedef struct {
     // Quantization (RaBitQ)
     RaBitQParams   *rabitq_params;
 
-    // Posting lists (in memory during build)
-    MemPostingList **posting_lists;
+    // One posting-list builder per cluster — streams RaBitQ-encoded
+    // entries into paged or flat posting storage as vectors arrive.
+    MktPostingBuilder *builders;
 
     // Statistics
     uint64_t        total_vectors;
@@ -4018,36 +4088,41 @@ void mkt_search_posting_lists(
 
         while (block != InvalidBlockNumber) {
             const void *page = read_page(callback_data, block);
-            uint16_t entry_count = mkt_page_entry_count(page);
+            MktPostingPageOpaque *opaque = mkt_posting_opaque(page);
+            uint16_t entry_count = opaque->entry_count;
+            char *content = (opaque->flags & MKT_POSTING_PAGE_FIRST)
+                          ? mkt_posting_content_first(page, dim)
+                          : mkt_posting_content(page);
 
-            // Bidirectional AoS access: meta forward, data backward
-            const PostingEntryMeta *meta = MKT_POSTING_META(page);
-
-            // Phase 1: Compute distances for all vectors
+            // Phase 1: batch IP for all entries on the page. Kernel
+            // strides at entry_size through the AoS entries.
             Distance *distances = mkt_alloc(entry_count * sizeof(Distance));
+            mkt_rabitq_inner_product_multi(
+                    query_state->transformed,
+                    mkt_posting_first_bits(content),
+                    MKT_POSTING_ENTRY_SIZE(dim),
+                    dim,
+                    entry_count,
+                    distances);
+
+            // Phase 2: convert to distances, prune, insert survivors.
+            // Each entry's header carries meta + f_add/f_rescale/f_error;
+            // it's already hot in L1 from the strided bits read.
             for (uint16_t i = 0; i < entry_count; i++) {
-                RaBitQData *data = mkt_posting_data(page, i, dim);
-                distances[i] = mkt_rabitq_distance(query_state, data, dim);
-            }
+                MktPostingEntryHeader *e = mkt_posting_entry_at(content, i, dim);
+                if (e->meta.flags & MKT_POSTING_FLAG_DELETED) continue;
 
-            // Phase 2: Check metadata only for promising candidates
-            for (uint16_t i = 0; i < entry_count; i++) {
-                // Skip deleted entries
-                if (meta[i].flags & POSTING_FLAG_DELETED) continue;
+                Distance est = e->f_add /* + query-side constants and
+                                           f_rescale * distances[i] */;
 
-                // Add to heap if promising
-                if (distances[i] < mkt_topk_threshold(results)) {
-                    BlockNumber tid_block;
-                    OffsetNumber tid_offset;
-                    posting_entry_get_tid(&meta[i], &tid_block, &tid_offset);
-
-                    uint64_t tid_encoded = ((uint64_t)tid_block << 16) | tid_offset;
-                    mkt_topk_insert(results, distances[i], tid_encoded);
+                if (est < mkt_topk_threshold(results)) {
+                    uint64_t tid_encoded = mkt_posting_encode_tid(&e->meta.tid);
+                    mkt_topk_insert(results, est, tid_encoded);
                 }
             }
 
             mkt_free(distances);
-            BlockNumber next = mkt_page_get_next(page);
+            BlockNumber next = opaque->next_blkno;
             release_page(callback_data, block);
             block = next;
         }
