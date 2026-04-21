@@ -25,7 +25,9 @@ typedef struct MktannStorage
 	Relation	   index;
 	Relation	   rel; /* table relation for rerank (NULL during build) */
 	Buffer		   cur_buf;
-	DistanceMetric metric; /* distance metric for reranking */
+	DistanceMetric metric;	   /* distance metric for reranking */
+	bool		   build_mode; /* skip per-page WAL during build */
+	uint32_t	   read_count; /* debug: total page reads */
 } MktannStorage;
 
 /*
