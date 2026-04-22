@@ -1,13 +1,12 @@
 /*
  * mktann_scan.c - Index scan for mktann
  *
- * Beam search over centroid pages to find nearest leaf centroids.
- * Currently only performs centroid routing; returning heap tuples
- * requires posting lists (not yet implemented).
+ * Uses MktQueryState (shared with standalone) for the search hot
+ * path. PG-specific concerns: scan iterator protocol, memory
+ * contexts, query vector extraction.
  *
  * Memory layout:
- *   scan_ctx    — scan lifetime (params, global_mean, results, ss)
- *     search_ctx — per-search temporaries; reset on rescan
+ *   scan_ctx  — scan lifetime (index base, query state, storage)
  */
 
 #include <postgres.h>
@@ -16,7 +15,9 @@
 #include <utils/memutils.h>
 #include <utils/rel.h>
 
-#include "index/centroid_search.h"
+#include "algo/vecops.h"
+#include "index/posting_page.h"
+#include "index/query_scan.h"
 #include "mkt_pg.h"
 #include "mkt_vector.h"
 #include "mktann_meta.h"
@@ -26,6 +27,17 @@
 
 /* Default nprobe — will become a GUC later */
 #define MKT_DEFAULT_NPROBE 10
+#define MKT_DEFAULT_K	   10
+
+/* ----------------------------------------------------------------
+ * Scan result entry
+ * ---------------------------------------------------------------- */
+
+typedef struct MktannScanResult
+{
+	ItemPointerData tid;
+	Distance		distance;
+} MktannScanResult;
 
 /* ----------------------------------------------------------------
  * Scan state
@@ -33,20 +45,22 @@
 
 typedef struct MktannScanState
 {
-	MktCentroidResult *results;		/* beam search output */
-	uint32_t		   nresults;	/* count returned */
-	uint32_t		   curr;		/* next to return */
-	bool			   first;		/* first gettuple call? */
-	RaBitQParams	  *params;		/* for query prep (NULL if !RaBitQ) */
-	float			  *global_mean; /* NULL if not RaBitQ */
-	Dimension		   dim;
-	uint8_t			   nlevels;
-	BlockNumber		   first_centroid;
-	uint32_t		   nprobe;
-	DistanceMetric	   metric;			/* distance metric from opclass */
-	MktCentroidFormat  centroid_format; /* centroid page format */
-	MemoryContext	   scan_ctx;		/* scan lifetime */
-	MemoryContext	   search_ctx;		/* per-search temps */
+	/* Common index descriptor (first for cast compatibility) */
+	MktIndexBase index_base;
+
+	/* Result iterator */
+	MktannScanResult *results;
+	uint32_t		  nresults;
+	uint32_t		  curr;
+	bool			  first;
+
+	/* Shared query state (pre-allocated, zero-alloc hot path) */
+	MktQueryState qstate;
+
+	/* PG storage (index page I/O) */
+	MktannStorage storage;
+
+	MemoryContext scan_ctx;
 } MktannScanState;
 
 /* ----------------------------------------------------------------
@@ -64,13 +78,7 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 
 	MktannScanState *ss = palloc0(sizeof(MktannScanState));
 	ss->scan_ctx		= scan_ctx;
-	ss->search_ctx		= AllocSetContextCreate(
-			 scan_ctx, "mktann search", ALLOCSET_DEFAULT_SIZES);
-	ss->first	 = true;
-	ss->curr	 = 0;
-	ss->nresults = 0;
-	ss->results	 = NULL;
-	ss->nprobe	 = MKT_DEFAULT_NPROBE;
+	ss->first			= true;
 
 	/* Read metadata page */
 	Buffer meta_buf = ReadBuffer(index, 0);
@@ -81,33 +89,48 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 			meta_page);
 	Assert(meta->magic == MKT_META_MAGIC);
 
-	ss->dim				= meta->dim;
-	ss->nlevels			= meta->nlevels;
-	ss->first_centroid	= meta->first_centroid;
-	ss->metric			= (DistanceMetric)meta->metric;
-	ss->centroid_format = (MktCentroidFormat)meta->centroid_format;
+	Dimension dim	 = meta->dim;
+	uint32_t  nprobe = MKT_DEFAULT_NPROBE;
+	uint32_t  k		 = MKT_DEFAULT_K;
 
-	/* Cap nprobe to nlist */
-	if (ss->nprobe > meta->nlist)
-		ss->nprobe = meta->nlist;
+	if (nprobe > meta->nlist)
+		nprobe = meta->nlist;
 
-	/* RaBitQ params only needed for compressed centroids */
-	if (ss->centroid_format == MKT_CENTROID_FMT_RABITQ)
+	/* Populate MktIndexBase from meta page */
+	ss->index_base.dim			   = dim;
+	ss->index_base.metric		   = (DistanceMetric)meta->metric;
+	ss->index_base.centroid_format = (MktCentroidFormat)meta->centroid_format;
+	ss->index_base.nlevels		   = meta->nlevels;
+	ss->index_base.first_centroid  = meta->first_centroid;
+
+	/* RaBitQ params */
+	if (ss->index_base.centroid_format == MKT_CENTROID_FMT_RABITQ)
 	{
-		const float *src_mean = mktann_meta_global_mean_const(meta);
-		ss->global_mean		  = palloc(meta->dim * sizeof(float));
-		memcpy(ss->global_mean, src_mean, meta->dim * sizeof(float));
-		ss->params = mkt_rabitq_create(meta->dim, meta->rabitq_seed);
-	}
-	else
-	{
-		ss->global_mean = NULL;
-		ss->params		= NULL;
+		ss->index_base.params = mkt_rabitq_create(dim, meta->rabitq_seed);
+		ss->index_base.pt_global_mean = palloc(dim * sizeof(float));
+		const float *src_mean		  = mktann_meta_global_mean_const(meta);
+		memcpy(ss->index_base.pt_global_mean, src_mean, dim * sizeof(float));
+		mkt_rabitq_rotate(
+				ss->index_base.params,
+				ss->index_base.pt_global_mean,
+				ss->index_base.pt_global_mean);
 	}
 
 	UnlockReleaseBuffer(meta_buf);
 
-	/* Allocate order-by value/null arrays (AM is responsible) */
+	/* Initialize PG storage */
+	mktann_storage_init(&ss->storage, index, NULL, ss->index_base.metric);
+	ss->index_base.centroid_storage = &ss->storage.base;
+	ss->index_base.posting_storage	= &ss->storage.base;
+	ss->index_base.page_base		= NULL;
+
+	/* Initialize shared query state */
+	mkt_query_state_init(&ss->qstate, &ss->index_base, k, nprobe);
+
+	/* Pre-allocate result buffer */
+	ss->results = palloc(k * sizeof(MktannScanResult));
+
+	/* Order-by arrays */
 	if (norderbys > 0)
 	{
 		scan->xs_orderbyvals  = palloc0(norderbys * sizeof(Datum));
@@ -143,12 +166,52 @@ mktann_rescan(
 
 	ss->first	 = true;
 	ss->curr	 = 0;
-	ss->results	 = NULL;
 	ss->nresults = 0;
+}
 
-	/* Reset search context — frees previous results and any
-	 * leftover temporaries from beam search in one shot */
-	MemoryContextReset(ss->search_ctx);
+/* ----------------------------------------------------------------
+ * Search execution (called on first gettuple)
+ * ---------------------------------------------------------------- */
+
+static void
+execute_search(IndexScanDesc scan)
+{
+	MktannScanState *ss = (MktannScanState *)scan->opaque;
+
+	/* Extract query vector */
+	Datum	   query_datum = scan->orderByData[0].sk_argument;
+	MktVector *query_vec   = DatumGetMktVector(query_datum);
+	VectorRef  qref		   = MktVectorToRef(query_vec);
+
+	if (qref.dim != ss->index_base.dim)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("query dimension %u does not match "
+						"index dimension %u",
+						qref.dim,
+						ss->index_base.dim)));
+
+	uint32_t k = ss->qstate.max_k;
+
+	/* Execute shared search */
+	uint32_t ncands = mkt_query_execute(
+			&ss->qstate,
+			qref.data,
+			k,
+			ss->qstate.max_nprobe,
+			(MktDistanceMode)mkt_distance_mode,
+			NULL);
+
+	/* Copy results */
+	uint32_t nresults = ncands < k ? ncands : k;
+	for (uint32_t i = 0; i < nresults; i++)
+	{
+		ss->results[i].tid = mkt_posting_decode_tid(
+				ss->qstate.candidates[i].id);
+		ss->results[i].distance = ss->qstate.candidates[i].distance;
+	}
+	ss->nresults = nresults;
+	ss->curr	 = 0;
 }
 
 /* ----------------------------------------------------------------
@@ -166,85 +229,21 @@ mktann_gettuple(IndexScanDesc scan, ScanDirection direction)
 	{
 		ss->first = false;
 
-		/* No ORDER BY → no results */
 		if (scan->numberOfOrderBys == 0)
 			return false;
 
-		/* Centroid routing doesn't store heap TIDs — scans need
-		 * posting lists (not yet implemented) */
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("scan requires posting lists "
-						"(not yet implemented)")));
-
-		/* Extract query vector from orderby */
-		Datum	   query_datum = scan->orderByData[0].sk_argument;
-		MktVector *query_vec   = DatumGetMktVector(query_datum);
-		VectorRef  qref		   = MktVectorToRef(query_vec);
-
-		if (qref.dim != ss->dim)
-			ereport(ERROR,
-					(errcode(ERRCODE_DATA_EXCEPTION),
-					 errmsg("query dimension %u does not match "
-							"index dimension %u",
-							qref.dim,
-							ss->dim)));
-
-		/* Switch to search context for temporaries.
-		 * beam search and query state allocate via mkt_alloc
-		 * (= palloc), so they land here and get freed on
-		 * rescan/endscan via context reset/delete. */
-		MemoryContext old_ctx = MemoryContextSwitchTo(ss->search_ctx);
-
-		/* Prepare RaBitQ query state */
-		VectorRef		  mean_ref = {.data = ss->global_mean, .dim = ss->dim};
-		RaBitQQueryState *qstate   = mkt_rabitq_prepare_query_ex(
-				  ss->params,
-				  qref,
-				  mean_ref,
-				  (MktDistanceMode)mkt_distance_mode);
-
-		/* Set up storage with heap relation for reranking */
-		MktannStorage storage;
-		mktann_storage_init(
-				&storage, scan->indexRelation, scan->heapRelation, ss->metric);
-
-		/* Allocate results */
-		ss->results = palloc(ss->nprobe * sizeof(MktCentroidResult));
-
-		/* Run beam search */
-		MktCentroidSearchState search = {
-				.qstate		= qstate,
-				.query		= qref.data,
-				.storage	= &storage.base,
-				.beam_width = ss->nprobe,
-				.nprobe		= ss->nprobe,
-				.dim		= ss->dim,
-				.metric		= ss->metric,
-		};
-
-		ss->nresults = mkt_centroid_beam_search(
-				&search,
-				ss->first_centroid,
-				ss->nlevels,
-				ss->results,
-				NULL,
-				NULL);
-
-		MemoryContextSwitchTo(old_ctx);
-		ss->curr = 0;
+		execute_search(scan);
 	}
 
-	/* Return next result */
 	if (ss->curr >= ss->nresults)
 		return false;
 
-	/* TODO: return TID from posting list scan */
-	scan->xs_recheckorderby = true;
+	MktannScanResult *entry = &ss->results[ss->curr];
 
-	/* Provide estimated distance for executor reorder */
-	scan->xs_orderbyvals[0] = Float8GetDatum(
-			(double)ss->results[ss->curr].distance);
+	scan->xs_heaptid = entry->tid;
+
+	scan->xs_recheckorderby	 = false;
+	scan->xs_orderbyvals[0]	 = Float8GetDatum((double)entry->distance);
 	scan->xs_orderbynulls[0] = false;
 
 	ss->curr++;
@@ -262,9 +261,7 @@ mktann_endscan(IndexScanDesc scan)
 
 	if (ss != NULL)
 	{
-		/* scan_ctx owns everything: ss, params, global_mean,
-		 * search_ctx (and its children: results, query state,
-		 * beam search buffers). One delete frees all. */
+		mkt_query_state_cleanup(&ss->qstate);
 		MemoryContextDelete(ss->scan_ctx);
 		scan->opaque = NULL;
 	}
