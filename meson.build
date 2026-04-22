@@ -281,6 +281,7 @@ mkt_core_sources = files(
   'src/index/posting_build.c',
   'src/index/posting_scan.c',
   'src/index/query_scan.c',
+  'src/index/search_ctx.c',
   'src/standalone/vector_source.c',
   'src/standalone/index.c',
   'src/standalone/query.c',
@@ -540,6 +541,7 @@ if build_pg_extension
     'src/index/posting_build.c',
     'src/index/posting_scan.c',
     'src/index/query_scan.c',
+    'src/index/search_ctx.c',
   )
 
   # SIMD sources for PG build (same as standalone)
