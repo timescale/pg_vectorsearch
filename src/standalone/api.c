@@ -114,7 +114,7 @@ mkt_handle_create(
 	if (info != NULL)
 	{
 		info->nlist		  = idx->nlist;
-		info->nlevels	  = idx->nlevels;
+		info->nlevels	  = idx->base.nlevels;
 		info->nvecs		  = idx->nvecs;
 		info->max_cluster = 0;
 		info->min_cluster = UINT32_MAX;

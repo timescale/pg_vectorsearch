@@ -1,0 +1,39 @@
+/*
+ * index_base.h - Common index descriptor for search
+ *
+ * MktIndexBase contains the fields needed by the shared search
+ * path. Standalone embeds it in MktIndex; PG populates it from
+ * the meta page and amcache.
+ */
+
+#ifndef MKT_INDEX_BASE_H
+#define MKT_INDEX_BASE_H
+
+#include "index/centroid_page.h"
+#include "index/storage.h"
+#include "mkt_types.h"
+#include "quant/rabitq.h"
+
+typedef struct MktIndexBase
+{
+	/* RaBitQ (must outlive the search context) */
+	RaBitQParams *params;
+	float		 *pt_global_mean;
+
+	/* PG: both point to the same MktannStorage (one index relation).
+	 * Standalone: separate ArrayPageStorage for centroids vs postings. */
+	MktStorage *centroid_storage;
+	MktStorage *posting_storage;
+
+	/* Non-NULL for inline page access (standalone postings) */
+	char *page_base;
+
+	/* Index metadata */
+	Dimension		  dim;
+	uint8_t			  nlevels;
+	BlockNumber		  first_centroid;
+	DistanceMetric	  metric;
+	MktCentroidFormat centroid_format;
+} MktIndexBase;
+
+#endif /* MKT_INDEX_BASE_H */

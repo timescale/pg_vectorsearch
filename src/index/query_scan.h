@@ -1,11 +1,18 @@
 /*
- * query_scan.h - Shared posting list scan for query execution
+ * query_scan.h - Shared query execution for ANN search
  *
- * Scans posting lists for selected clusters, inserting approximate
- * distances into a MktTopK. Used by both standalone and PG query
- * paths — the only backend differences are how pt_centroids and
- * posting heads are obtained, and how reranking is done (caller's
- * responsibility).
+ * MktQueryState owns all pre-allocated buffers for query execution.
+ * Shared between standalone and PG. The per-query execute path
+ * does zero allocations (except rare topk candidate buffer growth).
+ *
+ * Usage:
+ *   MktQueryState qs;
+ *   mkt_query_state_init(&qs, &index_base, max_k, max_nprobe);
+ *
+ *   uint32_t n = mkt_query_execute(&qs, query, k, nprobe, mode, &stats);
+ *   // Results in qs.candidates[0..n)
+ *
+ *   mkt_query_state_cleanup(&qs);
  */
 
 #ifndef MKT_QUERY_SCAN_H
@@ -13,46 +20,79 @@
 
 #include "algo/topk.h"
 #include "index/centroid_search.h"
+#include "index/index_base.h"
 #include "index/posting_scan.h"
-#include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------
- * Scan parameters — populated by the caller, passed to the
- * shared scan function. All pointers must remain valid for the
- * duration of the scan.
+ * Query statistics
  * ---------------------------------------------------------------- */
 
-typedef struct MktQueryScanParams
+typedef struct MktQueryStats
 {
-	/* Pre-initialized, reused across clusters */
-	MktPostingScan	 *posting_scan;
-	RaBitQQueryState *cluster_qs; /* reused per cluster */
+	uint32_t centroid_pages_read;
+	uint32_t posting_pages_read;
+	uint32_t posting_entries_scanned;
+	uint32_t clusters_scanned;
+} MktQueryStats;
 
-	/* Query vectors */
-	const float *pt_query; /* P^T * query, precomputed once */
+/* ----------------------------------------------------------------
+ * Query state — pre-allocated, reused across queries
+ * ---------------------------------------------------------------- */
 
-	Dimension		dim;
-	MktDistanceMode mode;
+typedef struct MktQueryState
+{
+	const MktIndexBase *index;
+	uint32_t			max_k;
+	uint32_t			max_nprobe;
 
-	/* Output stats (accumulated across clusters) */
-	uint32_t total_posting_pages;
-	uint32_t total_posting_entries;
-} MktQueryScanParams;
+	/* Pre-allocated query buffers */
+	float	*query_buf;
+	float	*pt_query;
+	float	*beam_transformed;
+	float	*cluster_transformed;
+	uint8_t *beam_query_bits;
+	uint8_t *cluster_query_bits;
+
+	RaBitQQueryState beam_qs;
+	RaBitQQueryState cluster_qs;
+
+	/* Pre-allocated search state (reset per query) */
+	MktCentroidResult *beam_results;
+	MktTopK			   topk;
+	MktPostingScan	   pscan;
+	MktTopKEntry	  *candidates;
+	uint32_t		   cand_cap;
+	uint32_t		   ncandidates;
+} MktQueryState;
+
+/* ----------------------------------------------------------------
+ * API
+ * ---------------------------------------------------------------- */
+
+void mkt_query_state_init(
+		MktQueryState	   *qs,
+		const MktIndexBase *index,
+		uint32_t			max_k,
+		uint32_t			max_nprobe);
+
+void mkt_query_state_cleanup(MktQueryState *qs);
 
 /*
- * Scan posting lists for selected clusters.
+ * Execute one ANN search query.
  *
- * For each beam result with a valid posting_head, initializes the
- * per-cluster RaBitQ query state from pt_centroids, then runs
- * mkt_posting_scan_cluster to score + prune into topk.
+ * Normalizes the query (cosine), runs beam search over centroids,
+ * scans posting lists, and collects approximate candidates.
  *
- * The posting_head in each beam result is used directly as the
- * BlockNumber for mkt_posting_scan_begin_cluster.
+ * Returns: number of candidates.
+ * Results are in qs->candidates[0..return_count), sorted by
+ * distance ascending. The caller owns reranking (if any).
  */
-void mkt_query_scan_clusters(
-		MktQueryScanParams		*params,
-		const MktCentroidResult *beam_results,
-		uint32_t				 n_results,
-		MktTopK					*topk);
+uint32_t mkt_query_execute(
+		MktQueryState  *qs,
+		const float	   *query,
+		uint32_t		k,
+		uint32_t		nprobe,
+		MktDistanceMode mode,
+		MktQueryStats  *stats);
 
 #endif /* MKT_QUERY_SCAN_H */

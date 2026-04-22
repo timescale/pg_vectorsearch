@@ -97,10 +97,10 @@ TEST(index_build_basic)
 
 	MktIndex *idx = build_from_array(vecs, 1000, 32, &config);
 	ASSERT_NOT_NULL(idx, "build should succeed");
-	ASSERT_EQ(idx->dim, 32, "dim should match");
+	ASSERT_EQ(idx->base.dim, 32, "dim should match");
 	ASSERT_EQ(idx->nvecs, 1000, "nvecs should match");
 	ASSERT_TRUE(idx->nlist > 0, "should have clusters");
-	ASSERT_TRUE(idx->nlevels > 0, "should have levels");
+	ASSERT_TRUE(idx->base.nlevels > 0, "should have levels");
 
 	mkt_index_destroy(idx);
 }
@@ -118,7 +118,7 @@ TEST(index_build_cosine)
 
 	MktIndex *idx = build_from_array(vecs, 500, 16, &config);
 	ASSERT_NOT_NULL(idx, "cosine build should succeed");
-	ASSERT_EQ(idx->metric, DISTANCE_COSINE, "metric should be cosine");
+	ASSERT_EQ(idx->base.metric, DISTANCE_COSINE, "metric should be cosine");
 
 	mkt_index_destroy(idx);
 }
