@@ -4,10 +4,8 @@
  * All buffers are pre-allocated in MktQueryCtx. The query hot path
  * uses only pre-allocated memory and arena reset (no malloc/free).
  *
- * Key optimization: P^T * centroid is precomputed at index build time.
- * At query time, P^T * query is computed once, then per-cluster state
- * is derived via O(dim) vector subtraction instead of O(dim²) matrix
- * multiply.
+ * For paged posting lists, delegates to MktQueryState (shared with
+ * PG). Flat posting lists and brute-force remain standalone-only.
  *
  * Memory layout:
  *   memctx (long-lived) — owns all query context buffers
@@ -35,26 +33,28 @@ struct MktQueryCtx
 {
 	MktIndex *idx;
 
-	/* Pre-allocated buffers (owned by memctx) */
-	float			  *query_buf;	 /* [dim] for normalization */
-	MktCentroidResult *beam_results; /* [max_nprobe] */
-	MktTopK			   topk;		 /* approximate candidates */
-	MktTopK			   rerank_topk;	 /* exact reranked results */
-	MktTopKEntry	  *extract_buf;	 /* [extract_cap] for extraction */
-	uint32_t		   extract_cap;
+	/* Shared search context (paged mode) */
+	MktQueryState search;
+	bool		  has_query_state;
 
-	/* Posting scan */
-	MktPostingScan posting_scan;
-	float		  *pt_cents_buf; /* [max_nprobe * dim] for shared scan */
+	/* Reranking (standalone-specific) */
+	MktTopK		  rerank_topk;
+	MktTopKEntry *rerank_buf;
+	uint32_t	  rerank_cap;
 
-	/* Pre-allocated RaBitQ query state (avoids per-cluster alloc) */
-	float			*pt_query;			  /* [dim] P^T * query */
-	RaBitQQueryState beam_qs;			  /* for beam search */
-	RaBitQQueryState cluster_qs;		  /* for cluster scan (reused) */
-	float			*beam_transformed;	  /* [dim] scratch */
-	float			*cluster_transformed; /* [dim] scratch */
-	uint8_t			*beam_query_bits;	  /* [packed_bytes] */
-	uint8_t			*cluster_query_bits;  /* [packed_bytes] */
+	/* Flat/brute-force fallback buffers */
+	float			  *query_buf;
+	MktCentroidResult *beam_results;
+	MktTopK			   topk;
+	MktPostingScan	   posting_scan;
+	float			  *pt_query;
+	float			  *pt_cents_buf;
+	RaBitQQueryState   beam_qs;
+	RaBitQQueryState   cluster_qs;
+	float			  *beam_transformed;
+	float			  *cluster_transformed;
+	uint8_t			  *beam_query_bits;
+	uint8_t			  *cluster_query_bits;
 
 	/* Long-lived memory context for all query context buffers.
 	 * Deleting this frees everything at once (no individual frees). */
@@ -79,8 +79,6 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 	if (idx == NULL || max_k == 0 || max_nprobe == 0)
 		return NULL;
 
-	/* All allocations go into this long-lived context.
-	 * Destroying it frees everything at once. */
 	MktMemCtx memctx  = mkt_memctx_create(NULL, "query_ctx");
 	MktMemCtx old_ctx = mkt_memctx_switch(memctx);
 
@@ -90,70 +88,70 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 	ctx->max_nprobe	 = max_nprobe;
 	ctx->memctx		 = memctx;
 
-	Dimension dim		   = idx->dim;
-	uint32_t  packed_bytes = MKT_RABITQ_BYTES(dim);
+	Dimension dim = idx->base.dim;
 
-	/* Query normalization buffer */
-	ctx->query_buf = mkt_alloc(dim * sizeof(float));
-
-	/* Beam search results */
-	ctx->beam_results = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
-
-	/* Top-K: approximate candidates + exact reranked results */
-	mkt_topk_init(&ctx->topk, max_k);
-	mkt_topk_init(&ctx->rerank_topk, max_k);
-
-	/* Extraction buffer — sized for typical case */
-	ctx->extract_cap = max_k * 16;
-	ctx->extract_buf = mkt_alloc(ctx->extract_cap * sizeof(MktTopKEntry));
-
-	/* Initialize posting scan iterator if index has posting data */
-	if (idx->has_posting_data)
+	/* Paged mode: use shared MktQueryState */
+	if (idx->has_posting_data && idx->base.params != NULL &&
+		idx->posting_fmt == MKT_POSTING_FMT_PAGES)
 	{
-		MktStorage *storage		 = (idx->posting_fmt == MKT_POSTING_FMT_PAGES)
-										 ? &idx->posting_storage.base
-										 : NULL;
-		char	   *page_base	 = (idx->posting_fmt == MKT_POSTING_FMT_PAGES)
-										 ? idx->posting_storage.pages
-										 : NULL;
-		uint32_t	max_per_page = (idx->posting_fmt == MKT_POSTING_FMT_PAGES)
-										 ? mkt_posting_max_entries(dim)
-										 : idx->max_cluster_size;
+		mkt_query_state_init(&ctx->search, &idx->base, max_k, max_nprobe);
+		ctx->has_query_state = true;
+	}
+	else
+	{
+		/* Flat/brute-force: allocate standalone buffers */
+		uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
 
-		mkt_posting_scan_init(
-				&ctx->posting_scan,
-				storage,
-				page_base,
-				idx->rq_params,
-				dim,
-				max_per_page);
+		ctx->query_buf	  = mkt_alloc(dim * sizeof(float));
+		ctx->beam_results = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
+		mkt_topk_init(&ctx->topk, max_k);
+
+		if (idx->has_posting_data)
+		{
+			MktStorage *storage	  = (idx->posting_fmt == MKT_POSTING_FMT_PAGES)
+										  ? &idx->posting_storage.base
+										  : NULL;
+			char	   *page_base = (idx->posting_fmt == MKT_POSTING_FMT_PAGES)
+										  ? idx->posting_storage.pages
+										  : NULL;
+			uint32_t max_per_page = (idx->posting_fmt == MKT_POSTING_FMT_PAGES)
+										  ? mkt_posting_max_entries(dim)
+										  : idx->max_cluster_size;
+
+			mkt_posting_scan_init(
+					&ctx->posting_scan,
+					storage,
+					page_base,
+					idx->base.params,
+					dim,
+					max_per_page);
+		}
+
+		ctx->pt_cents_buf		 = mkt_alloc(max_nprobe * dim * sizeof(float));
+		ctx->pt_query			 = mkt_alloc_aligned(dim * sizeof(float), 64);
+		ctx->beam_transformed	 = mkt_alloc_aligned(dim * sizeof(float), 64);
+		ctx->cluster_transformed = mkt_alloc_aligned(dim * sizeof(float), 64);
+		ctx->beam_query_bits	 = mkt_alloc_aligned(packed_bytes, 64);
+		ctx->cluster_query_bits	 = mkt_alloc_aligned(packed_bytes, 64);
+
+		ctx->beam_qs.transformed	= ctx->beam_transformed;
+		ctx->beam_qs.query_bits		= ctx->beam_query_bits;
+		ctx->cluster_qs.transformed = ctx->cluster_transformed;
+		ctx->cluster_qs.query_bits	= ctx->cluster_query_bits;
+
+		mkt_rabitq_init_query_constants(&ctx->beam_qs, dim);
+		mkt_rabitq_init_query_constants(&ctx->cluster_qs, dim);
 	}
 
-	/* Buffer for gathering pt_centroids per query (shared scan) */
-	ctx->pt_cents_buf = mkt_alloc(max_nprobe * dim * sizeof(float));
-
-	/* Pre-allocated RaBitQ buffers */
-	ctx->pt_query			 = mkt_alloc_aligned(dim * sizeof(float), 64);
-	ctx->beam_transformed	 = mkt_alloc_aligned(dim * sizeof(float), 64);
-	ctx->cluster_transformed = mkt_alloc_aligned(dim * sizeof(float), 64);
-	ctx->beam_query_bits	 = mkt_alloc_aligned(packed_bytes, 64);
-	ctx->cluster_query_bits	 = mkt_alloc_aligned(packed_bytes, 64);
-
-	/* Wire up the pre-allocated buffers to the query states */
-	ctx->beam_qs.transformed	= ctx->beam_transformed;
-	ctx->beam_qs.query_bits		= ctx->beam_query_bits;
-	ctx->cluster_qs.transformed = ctx->cluster_transformed;
-	ctx->cluster_qs.query_bits	= ctx->cluster_query_bits;
-
-	/* Set dim-dependent constants once (avoid recomputing per cluster) */
-	mkt_rabitq_init_query_constants(&ctx->beam_qs, dim);
-	mkt_rabitq_init_query_constants(&ctx->cluster_qs, dim);
+	/* Reranking buffers (used for both paged and flat) */
+	mkt_topk_init(&ctx->rerank_topk, max_k);
+	ctx->rerank_cap = max_k * 16;
+	ctx->rerank_buf = mkt_alloc(ctx->rerank_cap * sizeof(MktTopKEntry));
 
 	/* Child arena for transient per-query allocations */
 	ctx->arena = mkt_memctx_create(memctx, "query_arena");
 
 	mkt_memctx_switch(old_ctx);
-
 	return ctx;
 }
 
@@ -163,12 +161,15 @@ mkt_query_ctx_destroy(MktQueryCtx *ctx)
 	if (ctx == NULL)
 		return;
 
-	/* Clean up posting scan buffers */
-	if (ctx->idx->has_posting_data)
-		mkt_posting_scan_cleanup(&ctx->posting_scan);
+	if (ctx->has_query_state)
+		mkt_query_state_cleanup(&ctx->search);
+	else
+	{
+		if (ctx->idx->has_posting_data)
+			mkt_posting_scan_cleanup(&ctx->posting_scan);
+		mkt_topk_cleanup(&ctx->topk);
+	}
 
-	/* TopK has its own heap that may have been grown outside memctx */
-	mkt_topk_cleanup(&ctx->topk);
 	mkt_topk_cleanup(&ctx->rerank_topk);
 
 	/* Deleting memctx frees ctx itself, all buffers, and the arena */
@@ -176,11 +177,11 @@ mkt_query_ctx_destroy(MktQueryCtx *ctx)
 }
 
 /* ----------------------------------------------------------------
- * Query execution — zero malloc on hot path
+ * Paged query (via shared MktQueryState)
  * ---------------------------------------------------------------- */
 
-uint32_t
-mkt_query_exec(
+static uint32_t
+exec_paged(
 		MktQueryCtx	   *ctx,
 		const float	   *query,
 		uint32_t		k,
@@ -189,24 +190,92 @@ mkt_query_exec(
 		bool			rerank,
 		uint32_t	   *result_ids)
 {
-	if (ctx == NULL || query == NULL || result_ids == NULL || k == 0)
-		return 0;
-
 	MktIndex *idx = ctx->idx;
-	Dimension dim = idx->dim;
+	Dimension dim = idx->base.dim;
+
+	uint32_t ncands =
+			mkt_query_execute(&ctx->search, query, k, nprobe, mode, NULL);
+
+	MktTopKEntry *candidates = ctx->search.candidates;
+
+	uint32_t count;
+	if (rerank)
+	{
+		mkt_topk_reset(&ctx->rerank_topk);
+		ctx->rerank_topk.k = k;
+
+		/* Use normalized query for cosine, raw for L2 */
+		const float *qvec = (idx->base.metric == DISTANCE_COSINE)
+								  ? ctx->search.query_buf
+								  : query;
+
+		for (uint32_t i = 0; i < ncands; i++)
+		{
+			uint32_t	 vid = mkt_posting_decode_vector_id(candidates[i].id);
+			const float *vec = idx->all_vectors + (size_t)vid * dim;
+			Distance	 d	 = mkt_l2_distance_squared(qvec, vec, dim);
+			mkt_topk_insert(&ctx->rerank_topk, d, 0.0f, candidates[i].id);
+		}
+
+		if (ctx->rerank_topk.cand_count <= ctx->rerank_cap)
+		{
+			mkt_topk_extract_sorted(
+					&ctx->rerank_topk, ctx->rerank_buf, &count);
+		}
+		else
+		{
+			MktTopKEntry *tmp = mkt_alloc(
+					ctx->rerank_topk.cand_count * sizeof(MktTopKEntry));
+			mkt_topk_extract_sorted(&ctx->rerank_topk, tmp, &count);
+			if (count > ctx->rerank_cap)
+				count = ctx->rerank_cap;
+			memcpy(ctx->rerank_buf, tmp, count * sizeof(MktTopKEntry));
+			mkt_free(tmp);
+		}
+	}
+	else
+	{
+		count = ncands;
+		if (count > ctx->rerank_cap)
+			count = ctx->rerank_cap;
+		memcpy(ctx->rerank_buf, candidates, count * sizeof(MktTopKEntry));
+	}
+
+	uint32_t out = count < k ? count : k;
+	for (uint32_t i = 0; i < out; i++)
+		result_ids[i] = mkt_posting_decode_vector_id(ctx->rerank_buf[i].id);
+
+	return out;
+}
+
+/* ----------------------------------------------------------------
+ * Flat/brute-force query (standalone-only fallback)
+ * ---------------------------------------------------------------- */
+
+static uint32_t
+exec_fallback(
+		MktQueryCtx	   *ctx,
+		const float	   *query,
+		uint32_t		k,
+		uint32_t		nprobe,
+		MktDistanceMode mode,
+		bool			rerank,
+		uint32_t	   *result_ids)
+{
+	MktIndex *idx = ctx->idx;
+	Dimension dim = idx->base.dim;
 
 	if (k > ctx->max_k)
 		k = ctx->max_k;
 	if (nprobe > ctx->max_nprobe)
 		nprobe = ctx->max_nprobe;
 
-	/* Reset arena for transient allocations */
 	MktMemCtx old_ctx = mkt_memctx_switch(ctx->arena);
 	mkt_memctx_reset(ctx->arena);
 
-	/* Normalize query (into pre-allocated buffer) */
+	/* Normalize query */
 	const float *qvec = query;
-	if (idx->metric == DISTANCE_COSINE)
+	if (idx->base.metric == DISTANCE_COSINE)
 	{
 		memcpy(ctx->query_buf, query, dim * sizeof(float));
 		float norm = mkt_l2_norm(ctx->query_buf, dim);
@@ -215,28 +284,25 @@ mkt_query_exec(
 		qvec = ctx->query_buf;
 	}
 
-	/* Compute P^T * query once (O(dim²) — but only once per query).
-	 * Needed when posting lists use RaBitQ encoding, and also for
-	 * RaBitQ centroid routing. */
+	/* Rotate query */
 	RaBitQQueryState *qs = NULL;
-	if (idx->rq_params != NULL)
+	if (idx->base.params != NULL)
 	{
-		mkt_rabitq_rotate(idx->rq_params, qvec, ctx->pt_query);
+		mkt_rabitq_rotate(idx->base.params, qvec, ctx->pt_query);
 
-		/* Beam search query state — only for RaBitQ centroids */
-		if (idx->centroid_fmt == MKT_CENTROID_FMT_RABITQ)
+		if (idx->base.centroid_format == MKT_CENTROID_FMT_RABITQ)
 		{
 			mkt_rabitq_init_query_state(
 					&ctx->beam_qs,
 					ctx->pt_query,
-					idx->pt_global_mean,
+					idx->base.pt_global_mean,
 					dim,
 					mode);
 			qs = &ctx->beam_qs;
 		}
 	}
 
-	/* Beam search (uses arena for internal scratch) */
+	/* Beam search */
 	MktCentroidSearchState state = {
 			.qstate		= qs,
 			.query		= qvec,
@@ -244,75 +310,27 @@ mkt_query_exec(
 			.beam_width = nprobe,
 			.nprobe		= nprobe,
 			.dim		= dim,
-			.metric		= idx->metric,
+			.metric		= idx->base.metric,
 	};
 
 	MktCentroidSearchStats beam_stats = {0};
 	uint32_t			   n_results  = mkt_centroid_beam_search(
 			   &state,
-			   idx->first_centroid,
-			   idx->nlevels,
+			   idx->base.first_centroid,
+			   idx->base.nlevels,
 			   ctx->beam_results,
 			   NULL,
 			   &beam_stats);
 
-	/* Gather pt_centroids for winning clusters from pre-computed
-	 * array. Beam results' posting_head maps to cluster index
-	 * (paged: actual block number, flat: cluster index). */
-	for (uint32_t j = 0; j < n_results; j++)
-	{
-		uint32_t li = (uint32_t)ctx->beam_results[j].posting_head;
-		if (li < idx->nlist)
-			memcpy(ctx->pt_cents_buf + (size_t)j * dim,
-				   idx->pt_centroids + (size_t)li * dim,
-				   dim * sizeof(float));
-	}
-
-	/* Switch away from arena so topk growth allocations
-	 * (if any) use the default allocator, not the arena
-	 * that gets reset per query. */
 	mkt_memctx_switch(old_ctx);
 
-	/* Reset top-K (pre-allocated, no alloc) */
+	/* Reset top-K */
 	mkt_topk_reset(&ctx->topk);
 	ctx->topk.k = k;
 
-	/* Scan posting lists */
-	if (idx->has_posting_data && idx->rq_params != NULL &&
-		idx->posting_fmt == MKT_POSTING_FMT_PAGES)
+	/* Flat mode or brute-force */
+	if (idx->has_posting_data && idx->base.params != NULL)
 	{
-		/* Paged mode: shared scan reads pt_centroid from pages */
-		MktQueryScanParams scan_params = {
-				.posting_scan		   = &ctx->posting_scan,
-				.cluster_qs			   = &ctx->cluster_qs,
-				.pt_query			   = ctx->pt_query,
-				.dim				   = dim,
-				.mode				   = mode,
-				.total_posting_pages   = 0,
-				.total_posting_entries = 0,
-		};
-
-		mkt_query_scan_clusters(
-				&scan_params, ctx->beam_results, n_results, &ctx->topk);
-
-		/* Print page stats on first query */
-		static bool stats_printed = false;
-		if (!stats_printed)
-		{
-			fprintf(stderr,
-					"[query stats] centroid_pages=%u "
-					"posting_pages=%u posting_entries=%u "
-					"nprobe=%u\n",
-					beam_stats.pages_read,
-					scan_params.total_posting_pages,
-					scan_params.total_posting_entries,
-					nprobe);
-			stats_printed = true;
-		}
-	}
-	else if (idx->has_posting_data && idx->rq_params != NULL)
-	{
-		/* Flat mode: pt_centroid from idx->pt_centroids */
 		for (uint32_t j = 0; j < n_results; j++)
 		{
 			uint32_t li = (uint32_t)ctx->beam_results[j].posting_head;
@@ -325,14 +343,12 @@ mkt_query_exec(
 
 			mkt_posting_scan_begin_flat(
 					&ctx->posting_scan, &ctx->cluster_qs, idx->flat_pages[li]);
-
 			mkt_posting_scan_cluster(&ctx->posting_scan, &ctx->topk);
 			mkt_posting_scan_end_cluster(&ctx->posting_scan);
 		}
 	}
 	else
 	{
-		/* No posting data: brute-force L2 per cluster */
 		for (uint32_t j = 0; j < n_results; j++)
 		{
 			uint32_t li = (uint32_t)ctx->beam_results[j].posting_head;
@@ -350,14 +366,14 @@ mkt_query_exec(
 		}
 	}
 
-	/* Phase 2: Rerank candidates with exact L2 (optional) */
+	/* Extract results */
 	uint32_t count;
 	if (rerank)
 	{
-		uint32_t	  n_cands;
 		MktTopKEntry *cand_entries;
-		if (ctx->topk.cand_count <= ctx->extract_cap)
-			cand_entries = ctx->extract_buf;
+		uint32_t	  n_cands;
+		if (ctx->topk.cand_count <= ctx->rerank_cap)
+			cand_entries = ctx->rerank_buf;
 		else
 			cand_entries = mkt_alloc(
 					ctx->topk.cand_count * sizeof(MktTopKEntry));
@@ -374,33 +390,55 @@ mkt_query_exec(
 			mkt_topk_insert(&ctx->rerank_topk, d, 0.0f, cand_entries[i].id);
 		}
 
-		if (cand_entries != ctx->extract_buf)
+		if (cand_entries != ctx->rerank_buf)
 			mkt_free(cand_entries);
 
-		mkt_topk_extract_sorted(&ctx->rerank_topk, ctx->extract_buf, &count);
+		mkt_topk_extract_sorted(&ctx->rerank_topk, ctx->rerank_buf, &count);
 	}
 	else
 	{
-		/* No rerank: return approximate results directly */
-		if (ctx->topk.cand_count <= ctx->extract_cap)
+		if (ctx->topk.cand_count <= ctx->rerank_cap)
 		{
-			mkt_topk_extract_sorted(&ctx->topk, ctx->extract_buf, &count);
+			mkt_topk_extract_sorted(&ctx->topk, ctx->rerank_buf, &count);
 		}
 		else
 		{
 			MktTopKEntry *tmp = mkt_alloc(
 					ctx->topk.cand_count * sizeof(MktTopKEntry));
 			mkt_topk_extract_sorted(&ctx->topk, tmp, &count);
-			if (count > ctx->extract_cap)
-				count = ctx->extract_cap;
-			memcpy(ctx->extract_buf, tmp, count * sizeof(MktTopKEntry));
+			if (count > ctx->rerank_cap)
+				count = ctx->rerank_cap;
+			memcpy(ctx->rerank_buf, tmp, count * sizeof(MktTopKEntry));
 			mkt_free(tmp);
 		}
 	}
 
 	uint32_t out = count < k ? count : k;
 	for (uint32_t i = 0; i < out; i++)
-		result_ids[i] = mkt_posting_decode_vector_id(ctx->extract_buf[i].id);
+		result_ids[i] = mkt_posting_decode_vector_id(ctx->rerank_buf[i].id);
 
 	return out;
+}
+
+/* ----------------------------------------------------------------
+ * Query execution — dispatch to paged or fallback
+ * ---------------------------------------------------------------- */
+
+uint32_t
+mkt_query_exec(
+		MktQueryCtx	   *ctx,
+		const float	   *query,
+		uint32_t		k,
+		uint32_t		nprobe,
+		MktDistanceMode mode,
+		bool			rerank,
+		uint32_t	   *result_ids)
+{
+	if (ctx == NULL || query == NULL || result_ids == NULL || k == 0)
+		return 0;
+
+	if (ctx->has_query_state)
+		return exec_paged(ctx, query, k, nprobe, mode, rerank, result_ids);
+	else
+		return exec_fallback(ctx, query, k, nprobe, mode, rerank, result_ids);
 }

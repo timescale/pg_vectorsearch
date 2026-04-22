@@ -17,6 +17,7 @@
 
 #include "core/memory.h"
 #include "index/centroid_page.h"
+#include "index/index_base.h"
 #include "index/storage.h"
 #include "mkt_types.h"
 #include "quant/rabitq.h"
@@ -72,21 +73,22 @@ typedef struct MktIndexConfig
  * ---------------------------------------------------------------- */
 typedef struct MktIndex
 {
-	/* Centroid tree */
-	ArrayPageStorage  centroid_storage;
-	BlockNumber		  first_centroid;
-	uint8_t			  nlevels;
-	uint32_t		  fan_out;
-	RaBitQParams	 *rq_params;
-	float			 *global_mean;
-	MktCentroidFormat centroid_fmt;
+	/* Common index descriptor (passed to MktSearchCtx) */
+	MktIndexBase base;
+
+	/* Concrete storage (base.centroid_storage/posting_storage
+	 * point into these) */
+	ArrayPageStorage centroid_storage;
+	ArrayPageStorage posting_storage;
+
+	uint32_t fan_out;
+	float	*global_mean;
 
 	/* Full-precision vectors for reranking (indexed by vector_id) */
 	float *all_vectors; /* [nvecs * dim] */
 
 	/* Posting data for RaBitQ scan (flat or paged) */
 	MktPostingFormat posting_fmt;
-	ArrayPageStorage posting_storage;  /* paged mode: BLCKSZ pages */
 	BlockNumber		*posting_heads;	   /* paged mode: [nlist] head blocks */
 	char		   **flat_pages;	   /* flat mode: [nlist] buffers */
 	uint32_t		 max_cluster_size; /* largest cluster entry count */
@@ -97,12 +99,8 @@ typedef struct MktIndex
 
 	float	*leaf_centroids; /* [nlist * dim] for per-cluster qstate */
 	float	*pt_centroids;	 /* [nlist * dim] P^T * leaf_centroids */
-	float	*pt_global_mean; /* [dim] P^T * global_mean */
 	uint32_t nlist;
 	uint32_t nvecs; /* total vectors across all lists */
-
-	Dimension	   dim;
-	DistanceMetric metric;
 
 	/* Memory context owning all index allocations.
 	 * Deleting this frees everything at once. */

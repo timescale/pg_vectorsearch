@@ -174,11 +174,11 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	MktMemCtx build_ctx = mkt_memctx_create(idx_ctx, "index_build");
 	MktMemCtx old_ctx	= mkt_memctx_switch(idx_ctx);
 
-	MktIndex *idx	  = mkt_alloc0(sizeof(MktIndex));
-	idx->memctx		  = idx_ctx;
-	idx->dim		  = dim;
-	idx->metric		  = config->metric;
-	idx->centroid_fmt = config->centroid_fmt;
+	MktIndex *idx			  = mkt_alloc0(sizeof(MktIndex));
+	idx->memctx				  = idx_ctx;
+	idx->base.dim			  = dim;
+	idx->base.metric		  = config->metric;
+	idx->base.centroid_format = config->centroid_fmt;
 
 	/* Resolve nlist */
 	uint32_t nlist = config->nlist;
@@ -218,7 +218,7 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	}
 
 	/* Normalize samples for cosine */
-	if (idx->metric == DISTANCE_COSINE)
+	if (idx->base.metric == DISTANCE_COSINE)
 		normalize_all(samples, max_samples, dim);
 
 	/* Run hierarchical k-means */
@@ -229,7 +229,13 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 		km_opts.max_iterations = config->km_max_iter;
 
 	HKMeansResult *tree = mkt_hkmeans_f32(
-			samples, max_samples, dim, nlist, fan_out, idx->metric, &km_opts);
+			samples,
+			max_samples,
+			dim,
+			nlist,
+			fan_out,
+			idx->base.metric,
+			&km_opts);
 
 	/* Switch back to index context for long-lived allocations */
 	mkt_memctx_switch(idx_ctx);
@@ -241,12 +247,12 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 		return NULL;
 	}
 
-	nlist		 = tree->nleaves;
-	idx->nlist	 = nlist;
-	idx->nlevels = (uint8_t)tree->nlevels;
+	nlist			  = tree->nleaves;
+	idx->nlist		  = nlist;
+	idx->base.nlevels = (uint8_t)tree->nlevels;
 
 	/* Normalize leaf centroids for cosine */
-	if (idx->metric == DISTANCE_COSINE)
+	if (idx->base.metric == DISTANCE_COSINE)
 	{
 		for (uint32_t c = 0; c < nlist; c++)
 			normalize_vector(tree->leaf_centroids + (size_t)c * dim, dim);
@@ -255,7 +261,7 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	/* Global mean */
 	idx->global_mean = mkt_alloc(dim * sizeof(float));
 	mkt_vector_mean(tree->leaf_centroids, nlist, dim, idx->global_mean);
-	if (idx->metric == DISTANCE_COSINE)
+	if (idx->base.metric == DISTANCE_COSINE)
 		normalize_vector(idx->global_mean, dim);
 
 	/* Save leaf centroids for per-cluster query preparation */
@@ -265,7 +271,7 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 		   (size_t)nlist * dim * sizeof(float));
 
 	/* RaBitQ params */
-	idx->rq_params = mkt_rabitq_create(dim, 42);
+	idx->base.params = mkt_rabitq_create(dim, 42);
 
 	/* Precompute P^T * centroids for zero-alloc query path.
 	 * This turns per-cluster O(dim²) matrix multiply into O(dim)
@@ -273,26 +279,28 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	idx->pt_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
 	for (uint32_t c = 0; c < nlist; c++)
 		mkt_rabitq_rotate(
-				idx->rq_params,
+				idx->base.params,
 				idx->leaf_centroids + (size_t)c * dim,
 				idx->pt_centroids + (size_t)c * dim);
 
-	idx->pt_global_mean = mkt_alloc(dim * sizeof(float));
-	mkt_rabitq_rotate(idx->rq_params, idx->global_mean, idx->pt_global_mean);
+	idx->base.pt_global_mean = mkt_alloc(dim * sizeof(float));
+	mkt_rabitq_rotate(
+			idx->base.params, idx->global_mean, idx->base.pt_global_mean);
 
 	/* Build centroid pages */
 	uint32_t est_centroid_pages = nlist + 100;
 	idx->centroid_storage		= make_array_page_storage(est_centroid_pages);
 
-	uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, idx->centroid_fmt);
+	uint32_t max_ent =
+			mkt_centroid_max_entries_fmt(dim, idx->base.centroid_format);
 
 	/* Temporary arrays for centroid page layout (build context) */
 	mkt_memctx_switch(build_ctx);
 	BlockNumber *node_first_blkno = mkt_alloc(
 			tree->nnodes * sizeof(BlockNumber));
-	idx->first_centroid = 0;
+	idx->base.first_centroid = 0;
 	mkt_compute_centroid_layout(
-			tree, max_ent, idx->first_centroid, node_first_blkno);
+			tree, max_ent, idx->base.first_centroid, node_first_blkno);
 
 	/* Switch back to index context for posting data.
 	 * Posting lists are built before centroid pages so that
@@ -312,7 +320,7 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	 * Stay in idx_ctx so cluster list growth allocations are
 	 * long-lived. Only norm_buf is temporary (freed with build_ctx). */
 	float *norm_buf = NULL;
-	if (idx->metric == DISTANCE_COSINE)
+	if (idx->base.metric == DISTANCE_COSINE)
 	{
 		mkt_memctx_switch(build_ctx);
 		norm_buf = mkt_alloc(dim * sizeof(float));
@@ -331,15 +339,15 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 			const float *store_vec = vec;
 
 			/* Normalize for cosine */
-			if (idx->metric == DISTANCE_COSINE)
+			if (idx->base.metric == DISTANCE_COSINE)
 			{
 				memcpy(norm_buf, vec, dim * sizeof(float));
 				normalize_vector(norm_buf, dim);
 				store_vec = norm_buf;
 			}
 
-			uint32_t c =
-					mkt_hkmeans_assign(tree, store_vec, idx->metric, NULL);
+			uint32_t c = mkt_hkmeans_assign(
+					tree, store_vec, idx->base.metric, NULL);
 
 			/* Store full-precision vector for reranking */
 			memcpy(idx->all_vectors + (size_t)id * dim,
@@ -381,7 +389,7 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 				mkt_posting_builder_init(
 						&builder,
 						&idx->posting_storage.base,
-						idx->rq_params,
+						idx->base.params,
 						dim,
 						c,
 						cent,
@@ -412,7 +420,7 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 
 				MktFlatPostingBuilder builder;
 				mkt_flat_posting_builder_init(
-						&builder, idx->rq_params, dim, c, cent, cl->count);
+						&builder, idx->base.params, dim, c, cent, cl->count);
 
 				for (uint32_t i = 0; i < cl->count; i++)
 				{
@@ -456,9 +464,10 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 				tree,
 				dim,
 				fan_out,
-				idx->centroid_fmt,
-				idx->centroid_fmt == MKT_CENTROID_FMT_RABITQ ? idx->rq_params
-															 : NULL,
+				idx->base.centroid_format,
+				idx->base.centroid_format == MKT_CENTROID_FMT_RABITQ
+						? idx->base.params
+						: NULL,
 				idx->global_mean,
 				leaf_heads,
 				node_first_blkno,
@@ -470,6 +479,11 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 
 	mkt_memctx_switch(old_ctx);
 	mkt_memctx_delete(build_ctx);
+
+	/* Wire storage pointers in base (concrete storage owned above) */
+	idx->base.centroid_storage = &idx->centroid_storage.base;
+	idx->base.posting_storage  = &idx->posting_storage.base;
+	idx->base.page_base		   = idx->posting_storage.pages;
 
 	return idx;
 }
