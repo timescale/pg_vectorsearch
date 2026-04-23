@@ -45,6 +45,9 @@ typedef struct ArrayPageStorage
 	const float	  *all_vectors; /* for reranking (NULL if not set) */
 	uint32_t	   nvecs;
 	DistanceMetric metric;
+	MktTopK		   rerank_topk;	   /* pre-allocated, reset per query */
+	MktTopKEntry  *rerank_entries; /* pre-allocated extraction buffer */
+	uint32_t	   rerank_cap;	   /* entries buffer capacity */
 } ArrayPageStorage;
 
 /* ----------------------------------------------------------------

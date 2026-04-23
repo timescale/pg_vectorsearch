@@ -101,8 +101,8 @@ aps_rerank(
 	if (s->all_vectors == NULL || count == 0)
 		return 0;
 
-	MktTopK topk;
-	mkt_topk_init(&topk, keep);
+	mkt_topk_reset(&s->rerank_topk);
+	s->rerank_topk.k = keep;
 
 	for (uint32_t i = 0; i < count; i++)
 	{
@@ -125,21 +125,20 @@ aps_rerank(
 			}
 		}
 
-		mkt_topk_insert(&topk, d, 0.0f, (uint64_t)i);
+		mkt_topk_insert(&s->rerank_topk, d, 0.0f, (uint64_t)i);
 	}
 
-	MktTopKEntry *entries = mkt_alloc(topk.cand_count * sizeof(MktTopKEntry));
-	uint32_t	  nresults;
-	mkt_topk_extract_sorted(&topk, entries, &nresults);
+	uint32_t nresults;
+	mkt_topk_extract_sorted(&s->rerank_topk, s->rerank_entries, &nresults);
+	if (nresults > s->rerank_cap)
+		nresults = s->rerank_cap;
 
 	for (uint32_t i = 0; i < nresults; i++)
 	{
-		out_indices[i]	 = (uint32_t)entries[i].id;
-		out_distances[i] = entries[i].distance;
+		out_indices[i]	 = (uint32_t)s->rerank_entries[i].id;
+		out_distances[i] = s->rerank_entries[i].distance;
 	}
 
-	mkt_free(entries);
-	mkt_topk_cleanup(&topk);
 	return nresults;
 }
 
@@ -550,6 +549,13 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	idx->posting_storage.all_vectors = idx->all_vectors;
 	idx->posting_storage.nvecs		 = idx->nvecs;
 	idx->posting_storage.metric		 = idx->base.metric;
+
+	/* Pre-allocate rerank buffers */
+	uint32_t rerank_cap = 256;
+	mkt_topk_init(&idx->posting_storage.rerank_topk, rerank_cap);
+	idx->posting_storage.rerank_entries = mkt_alloc(
+			rerank_cap * sizeof(MktTopKEntry));
+	idx->posting_storage.rerank_cap = rerank_cap;
 
 	return idx;
 }
