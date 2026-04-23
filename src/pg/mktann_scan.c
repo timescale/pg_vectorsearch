@@ -20,6 +20,7 @@
 #include "index/query_scan.h"
 #include "mkt_pg.h"
 #include "mkt_vector.h"
+#include "mktann_cache.h"
 #include "mktann_meta.h"
 #include "mktann_scan.h"
 #include "mktann_storage.h"
@@ -100,14 +101,14 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	ss->index_base.nlevels		   = meta->nlevels;
 	ss->index_base.first_centroid  = meta->first_centroid;
 
-	/* Store for lazy RaBitQ init in shared query code */
-	ss->index_base.rabitq_seed	  = meta->rabitq_seed;
-	ss->index_base.pt_global_mean = palloc(dim * sizeof(float));
-	memcpy(ss->index_base.pt_global_mean,
-		   mktann_meta_global_mean_const(meta),
-		   dim * sizeof(float));
+	ss->index_base.rabitq_seed = meta->rabitq_seed;
 
 	UnlockReleaseBuffer(meta_buf);
+
+	/* Cached RaBitQ params + rotated global mean */
+	MktannIndexCache cache		  = mktann_cache_get(index);
+	ss->index_base.params		  = cache.params;
+	ss->index_base.pt_global_mean = (float *)cache.pt_global_mean;
 
 	/* Initialize PG storage */
 	mktann_storage_init(&ss->storage, index, NULL, ss->index_base.metric);

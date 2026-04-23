@@ -9,6 +9,7 @@ extension_sources = files(
   'mkt_pg_rabitq_params.c',
   'mktann.c',
   'mktann_build.c',
+  'mktann_cache.c',
   'mktann_scan.c',
   'mktann_storage.c',
 )
