@@ -12,6 +12,7 @@
 
 #include "algo/topk.h"
 #include "algo/vecops.h"
+#include "core/log.h"
 #include "core/memory.h"
 #include "index/centroid_search.h"
 #include "index/posting_page.h"
@@ -66,6 +67,10 @@ mkt_query_state_init(
 	/* Candidate extraction buffer */
 	qs->cand_cap   = max_k * 16;
 	qs->candidates = mkt_alloc(qs->cand_cap * sizeof(MktTopKEntry));
+
+	/* Result ordering */
+	qs->result_order = mkt_alloc(qs->cand_cap * sizeof(uint32_t));
+	qs->result_dists = mkt_alloc(qs->cand_cap * sizeof(Distance));
 
 	/* Posting scan iterator */
 	uint32_t max_entries = mkt_posting_max_entries(dim);
@@ -225,6 +230,7 @@ mkt_query_execute(
 		uint32_t		k,
 		uint32_t		nprobe,
 		MktDistanceMode mode,
+		bool			rerank,
 		MktQueryStats  *stats)
 {
 	if (k > qs->max_k)
@@ -247,11 +253,49 @@ mkt_query_execute(
 
 	uint32_t ncands = extract_candidates(qs);
 
+	/* Rerank with exact distances if enabled and storage supports it */
+	MktStorage *ps = qs->index->posting_storage;
+	if (rerank && ncands > 0 && ps != NULL && ps->ops->rerank != NULL)
+	{
+		qs->nresults = mkt_storage_rerank(
+				ps,
+				qvec,
+				qs->index->dim,
+				qs->candidates,
+				ncands,
+				k,
+				qs->result_order,
+				qs->result_dists);
+	}
+	else
+	{
+		qs->nresults = ncands < k ? ncands : k;
+		for (uint32_t i = 0; i < qs->nresults; i++)
+		{
+			qs->result_order[i] = i;
+			qs->result_dists[i] = qs->candidates[i].distance;
+		}
+	}
+
+#ifndef NDEBUG
+	for (uint32_t i = 0; i < qs->nresults; i++)
+	{
+		uint64_t id_i = qs->candidates[qs->result_order[i]].id;
+		for (uint32_t j = i + 1; j < qs->nresults; j++)
+			if (id_i == qs->candidates[qs->result_order[j]].id)
+				mkt_warn(
+						"meerkat: duplicate result at positions "
+						"%u and %u",
+						i,
+						j);
+	}
+#endif
+
 	if (stats != NULL)
 	{
 		stats->centroid_pages_read = beam_stats.pages_read;
 		stats->clusters_scanned	   = ncentroids;
 	}
 
-	return ncands;
+	return qs->nresults;
 }
