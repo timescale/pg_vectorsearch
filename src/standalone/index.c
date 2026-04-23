@@ -116,10 +116,8 @@ aps_rerank(
 			uint32_t vid = mkt_posting_decode_vector_id(candidates[i].id);
 			if (vid < s->nvecs)
 			{
-				const float *vec  = s->all_vectors + (size_t)vid * dim;
-				VectorRef	 qref = {.data = query, .dim = dim};
-				VectorRef	 vref = {.data = vec, .dim = dim};
-				d				  = mkt_distance(qref, vref, s->metric);
+				const float *vec = s->all_vectors + (size_t)vid * dim;
+				d				 = mkt_l2_distance_squared(query, vec, dim);
 			}
 			else
 			{
