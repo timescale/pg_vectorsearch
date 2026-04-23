@@ -38,10 +38,13 @@ typedef struct MktClusterList
  * ---------------------------------------------------------------- */
 typedef struct ArrayPageStorage
 {
-	MktStorage base; /* must be first */
-	char	  *pages;
-	uint32_t   next_blkno;
-	uint32_t   page_cap;
+	MktStorage	   base; /* must be first */
+	char		  *pages;
+	uint32_t	   next_blkno;
+	uint32_t	   page_cap;
+	const float	  *all_vectors; /* for reranking (NULL if not set) */
+	uint32_t	   nvecs;
+	DistanceMetric metric;
 } ArrayPageStorage;
 
 /* ----------------------------------------------------------------

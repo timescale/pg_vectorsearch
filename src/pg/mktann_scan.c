@@ -89,12 +89,9 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 			meta_page);
 	Assert(meta->magic == MKT_META_MAGIC);
 
-	Dimension dim	 = meta->dim;
-	uint32_t  nprobe = MKT_DEFAULT_NPROBE;
-	uint32_t  k		 = MKT_DEFAULT_K;
-
-	if (nprobe > meta->nlist)
-		nprobe = meta->nlist;
+	Dimension dim		 = meta->dim;
+	uint32_t  max_k		 = MKT_DEFAULT_K;
+	uint32_t  max_nprobe = meta->nlist;
 
 	/* Populate MktIndexBase from meta page */
 	ss->index_base.dim			   = dim;
@@ -119,10 +116,10 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	ss->index_base.page_base		= NULL;
 
 	/* Initialize shared query state */
-	mkt_query_state_init(&ss->qstate, &ss->index_base, k, nprobe);
+	mkt_query_state_init(&ss->qstate, &ss->index_base, max_k, max_nprobe);
 
 	/* Pre-allocate result buffer */
-	ss->results = palloc(k * sizeof(MktannScanResult));
+	ss->results = palloc(max_k * sizeof(MktannScanResult));
 
 	/* Order-by arrays */
 	if (norderbys > 0)
@@ -172,6 +169,10 @@ execute_search(IndexScanDesc scan)
 {
 	MktannScanState *ss = (MktannScanState *)scan->opaque;
 
+	/* Lazily set heap relation for reranking */
+	if (scan->heapRelation != NULL && ss->storage.rel == NULL)
+		ss->storage.rel = scan->heapRelation;
+
 	/* Extract query vector */
 	Datum	   query_datum = scan->orderByData[0].sk_argument;
 	MktVector *query_vec   = DatumGetMktVector(query_datum);
@@ -185,24 +186,28 @@ execute_search(IndexScanDesc scan)
 						qref.dim,
 						ss->index_base.dim)));
 
-	uint32_t k = ss->qstate.max_k;
-
 	/* Execute shared search */
-	uint32_t ncands = mkt_query_execute(
+	uint32_t k		= mkt_query_limit > 0 ? (uint32_t)mkt_query_limit
+										  : ss->qstate.max_k;
+	uint32_t nprobe = (uint32_t)mkt_nprobe;
+
+	mkt_query_execute(
 			&ss->qstate,
 			qref.data,
 			k,
-			ss->qstate.max_nprobe,
+			nprobe,
 			(MktDistanceMode)mkt_distance_mode,
+			mkt_rerank,
 			NULL);
 
-	/* Copy results */
-	uint32_t nresults = ncands < k ? ncands : k;
+	/* Copy results from result ordering */
+	uint32_t nresults = ss->qstate.nresults;
 	for (uint32_t i = 0; i < nresults; i++)
 	{
+		uint32_t ci		   = ss->qstate.result_order[i];
 		ss->results[i].tid = mkt_posting_decode_tid(
-				ss->qstate.candidates[i].id);
-		ss->results[i].distance = ss->qstate.candidates[i].distance;
+				ss->qstate.candidates[ci].id);
+		ss->results[i].distance = ss->qstate.result_dists[i];
 	}
 	ss->nresults = nresults;
 	ss->curr	 = 0;

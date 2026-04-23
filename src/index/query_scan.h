@@ -63,6 +63,11 @@ typedef struct MktQueryState
 	MktTopKEntry	  *candidates;
 	uint32_t		   cand_cap;
 	uint32_t		   ncandidates;
+
+	/* Result ordering (indices into candidates + final distances) */
+	uint32_t *result_order;
+	Distance *result_dists;
+	uint32_t  nresults;
 } MktQueryState;
 
 /* ----------------------------------------------------------------
@@ -93,6 +98,7 @@ uint32_t mkt_query_execute(
 		uint32_t		k,
 		uint32_t		nprobe,
 		MktDistanceMode mode,
+		bool			rerank,
 		MktQueryStats  *stats);
 
 #endif /* MKT_QUERY_SCAN_H */

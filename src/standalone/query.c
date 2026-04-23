@@ -190,62 +190,17 @@ exec_paged(
 		bool			rerank,
 		uint32_t	   *result_ids)
 {
-	MktIndex *idx = ctx->idx;
-	Dimension dim = idx->base.dim;
+	mkt_query_execute(&ctx->search, query, k, nprobe, mode, rerank, NULL);
 
-	uint32_t ncands =
-			mkt_query_execute(&ctx->search, query, k, nprobe, mode, NULL);
-
-	MktTopKEntry *candidates = ctx->search.candidates;
-
-	uint32_t count;
-	if (rerank)
+	uint32_t nresults = ctx->search.nresults;
+	for (uint32_t i = 0; i < nresults; i++)
 	{
-		mkt_topk_reset(&ctx->rerank_topk);
-		ctx->rerank_topk.k = k;
-
-		/* Use normalized query for cosine, raw for L2 */
-		const float *qvec = (idx->base.metric == DISTANCE_COSINE)
-								  ? ctx->search.query_buf
-								  : query;
-
-		for (uint32_t i = 0; i < ncands; i++)
-		{
-			uint32_t	 vid = mkt_posting_decode_vector_id(candidates[i].id);
-			const float *vec = idx->all_vectors + (size_t)vid * dim;
-			Distance	 d	 = mkt_l2_distance_squared(qvec, vec, dim);
-			mkt_topk_insert(&ctx->rerank_topk, d, 0.0f, candidates[i].id);
-		}
-
-		if (ctx->rerank_topk.cand_count <= ctx->rerank_cap)
-		{
-			mkt_topk_extract_sorted(
-					&ctx->rerank_topk, ctx->rerank_buf, &count);
-		}
-		else
-		{
-			MktTopKEntry *tmp = mkt_alloc(
-					ctx->rerank_topk.cand_count * sizeof(MktTopKEntry));
-			mkt_topk_extract_sorted(&ctx->rerank_topk, tmp, &count);
-			if (count > ctx->rerank_cap)
-				count = ctx->rerank_cap;
-			memcpy(ctx->rerank_buf, tmp, count * sizeof(MktTopKEntry));
-			mkt_free(tmp);
-		}
-	}
-	else
-	{
-		count = ncands;
-		if (count > ctx->rerank_cap)
-			count = ctx->rerank_cap;
-		memcpy(ctx->rerank_buf, candidates, count * sizeof(MktTopKEntry));
+		uint32_t ci	  = ctx->search.result_order[i];
+		result_ids[i] = mkt_posting_decode_vector_id(
+				ctx->search.candidates[ci].id);
 	}
 
-	uint32_t out = count < k ? count : k;
-	for (uint32_t i = 0; i < out; i++)
-		result_ids[i] = mkt_posting_decode_vector_id(ctx->rerank_buf[i].id);
-
-	return out;
+	return nresults;
 }
 
 /* ----------------------------------------------------------------

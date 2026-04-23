@@ -20,6 +20,7 @@
 #include "algo/distance.h"
 #include "algo/topk.h"
 #include "algo/vecops.h"
+#include "index/posting_page.h"
 #include "mkt_pg.h"
 #include "mktann_storage.h"
 
@@ -140,13 +141,16 @@ pg_extend(MktStorage *self, uint32_t npages)
  * Rerank: fetch vectors from heap, compute exact L2
  * ---------------------------------------------------------------- */
 
-/* Comparator for sorting candidate indices by TID order */
+/* Comparator for sorting candidate indices by TID block order */
 static int
 cmp_tid_order(const void *a, const void *b, void *arg)
 {
-	ItemPointerData *tids = arg;
-	return ItemPointerCompare(
-			&tids[*(const uint32_t *)a], &tids[*(const uint32_t *)b]);
+	const MktTopKEntry *cands = arg;
+	ItemPointerData		tid_a = mkt_posting_decode_tid(
+			cands[*(const uint32_t *)a].id);
+	ItemPointerData tid_b = mkt_posting_decode_tid(
+			cands[*(const uint32_t *)b].id);
+	return ItemPointerCompare(&tid_a, &tid_b);
 }
 
 /*
@@ -167,55 +171,46 @@ cmp_tid_order(const void *a, const void *b, void *arg)
  */
 static uint32_t
 pg_rerank(
-		MktStorage			  *self,
-		Datum				   query,
-		Dimension			   dim,
-		const ItemPointerData *tids,
-		const Distance		  *distances,
-		const Distance		  *errors,
-		uint32_t			   count,
-		uint32_t			   keep,
-		uint32_t			  *out_indices,
-		Distance			  *out_distances)
+		MktStorage		   *self,
+		const float		   *query,
+		Dimension			dim,
+		const MktTopKEntry *candidates,
+		uint32_t			count,
+		uint32_t			keep,
+		uint32_t		   *out_indices,
+		Distance		   *out_distances)
 {
-	MktannStorage *s	   = PG_STORAGE(self);
-	MktVector	  *qvec	   = DatumGetMktVector(query);
-	const float	  *query_f = qvec->x;
+	MktannStorage *s = PG_STORAGE(self);
 
 	if (s->rel == NULL || count == 0)
 		return 0;
 
-	/* Determine which heap column the index covers */
 	AttrNumber vec_attnum = s->index->rd_index->indkey.values[0];
 
-	/* Build index array sorted by TID block number for
-	 * sequential I/O through the buffer cache */
+	/* Sort by TID block order for sequential I/O */
 	uint32_t *order = palloc(count * sizeof(uint32_t));
 	for (uint32_t i = 0; i < count; i++)
 		order[i] = i;
+	qsort_arg(
+			order, count, sizeof(uint32_t), cmp_tid_order, (void *)candidates);
 
-	qsort_arg(order, count, sizeof(uint32_t), cmp_tid_order, (void *)tids);
-
-	/* Top-K collector for exact distances */
 	MktTopK topk;
 	mkt_topk_init(&topk, keep);
 
-	/* Create a reusable slot for heap fetches */
 	TupleTableSlot *slot = table_slot_create(s->rel, NULL);
 
-	/* Iterate in TID order, computing exact distances */
 	for (uint32_t i = 0; i < count; i++)
 	{
 		uint32_t idx = order[i];
 
 		Distance d;
-		if (errors[idx] == 0.0f)
+		if (candidates[idx].error == 0.0f)
 		{
-			d = distances[idx];
+			d = candidates[idx].distance;
 		}
 		else
 		{
-			ItemPointerData tid = tids[idx];
+			ItemPointerData tid = mkt_posting_decode_tid(candidates[idx].id);
 			if (table_tuple_fetch_row_version(s->rel, &tid, SnapshotAny, slot))
 			{
 				bool  isnull;
@@ -223,20 +218,19 @@ pg_rerank(
 				if (!isnull)
 				{
 					MktVector *vec	= DatumGetMktVector(val);
-					VectorRef  qref = {.data = query_f, .dim = dim};
+					VectorRef  qref = {.data = query, .dim = dim};
 					VectorRef  vref = {.data = vec->x, .dim = dim};
 					d				= mkt_distance(qref, vref, s->metric);
 				}
 				else
 				{
-					d = distances[idx];
+					d = candidates[idx].distance;
 				}
 				ExecClearTuple(slot);
 			}
 			else
 			{
-				/* Tuple gone (VACUUMed) — fall back to approx */
-				d = distances[idx];
+				d = candidates[idx].distance;
 			}
 		}
 
@@ -245,7 +239,6 @@ pg_rerank(
 
 	ExecDropSingleTupleTableSlot(slot);
 
-	/* Extract sorted results */
 	MktTopKEntry *entries = palloc(topk.cand_count * sizeof(MktTopKEntry));
 	uint32_t	  nresults;
 	mkt_topk_extract_sorted(&topk, entries, &nresults);

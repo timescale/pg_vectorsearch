@@ -16,12 +16,14 @@
 #include "algo/distance.h"
 #include "algo/hkmeans.h"
 #include "algo/kmeans.h"
+#include "algo/topk.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
 #include "index/posting_build.h"
+#include "index/posting_page.h"
 #include "standalone/index.h"
 
 /* Arena-safe grow: alloc new, copy old, old freed on context delete */
@@ -83,12 +85,73 @@ aps_commit_page(MktStorage *self, BlockNumber blkno)
 	(void)blkno;
 }
 
+static uint32_t
+aps_rerank(
+		MktStorage		   *self,
+		const float		   *query,
+		Dimension			dim,
+		const MktTopKEntry *candidates,
+		uint32_t			count,
+		uint32_t			keep,
+		uint32_t		   *out_indices,
+		Distance		   *out_distances)
+{
+	ArrayPageStorage *s = (ArrayPageStorage *)self;
+
+	if (s->all_vectors == NULL || count == 0)
+		return 0;
+
+	MktTopK topk;
+	mkt_topk_init(&topk, keep);
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		Distance d;
+		if (candidates[i].error == 0.0f)
+		{
+			d = candidates[i].distance;
+		}
+		else
+		{
+			uint32_t vid = mkt_posting_decode_vector_id(candidates[i].id);
+			if (vid < s->nvecs)
+			{
+				const float *vec  = s->all_vectors + (size_t)vid * dim;
+				VectorRef	 qref = {.data = query, .dim = dim};
+				VectorRef	 vref = {.data = vec, .dim = dim};
+				d				  = mkt_distance(qref, vref, s->metric);
+			}
+			else
+			{
+				d = candidates[i].distance;
+			}
+		}
+
+		mkt_topk_insert(&topk, d, 0.0f, (uint64_t)i);
+	}
+
+	MktTopKEntry *entries = mkt_alloc(topk.cand_count * sizeof(MktTopKEntry));
+	uint32_t	  nresults;
+	mkt_topk_extract_sorted(&topk, entries, &nresults);
+
+	for (uint32_t i = 0; i < nresults; i++)
+	{
+		out_indices[i]	 = (uint32_t)entries[i].id;
+		out_distances[i] = entries[i].distance;
+	}
+
+	mkt_free(entries);
+	mkt_topk_cleanup(&topk);
+	return nresults;
+}
+
 static const MktStorageOps array_page_storage_ops = {
 		.read_page	  = aps_read_page,
 		.release_page = aps_release_page,
 		.write_page	  = aps_write_page,
 		.new_page	  = aps_new_page,
 		.commit_page  = aps_commit_page,
+		.rerank		  = aps_rerank,
 };
 
 /* ----------------------------------------------------------------
@@ -484,6 +547,11 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	idx->base.centroid_storage = &idx->centroid_storage.base;
 	idx->base.posting_storage  = &idx->posting_storage.base;
 	idx->base.page_base		   = idx->posting_storage.pages;
+
+	/* Wire rerank data on posting storage */
+	idx->posting_storage.all_vectors = idx->all_vectors;
+	idx->posting_storage.nvecs		 = idx->nvecs;
+	idx->posting_storage.metric		 = idx->base.metric;
 
 	return idx;
 }

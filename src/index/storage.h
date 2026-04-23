@@ -29,6 +29,7 @@
 #ifndef MKT_STORAGE_H
 #define MKT_STORAGE_H
 
+#include "algo/topk.h"
 #include "mkt_types.h"
 
 #ifdef MKT_STANDALONE
@@ -74,30 +75,26 @@ typedef struct MktStorageOps
 	 * knows the vector type and handles extraction + dispatch.
 	 *
 	 * Input:
-	 *   query           — opaque query vector (Datum)
-	 *   dim             — vector dimension
-	 *   tids[count]     — candidate TIDs
-	 *   distances[count] — approximate distances
-	 *   errors[count]   — error bounds (0 = already exact)
+	 *   query              — query vector (float array)
+	 *   dim                — vector dimension
+	 *   candidates[count]  — approximate results (id encodes TID)
 	 *
 	 * Output:
-	 *   out_indices[keep]   — indices into input arrays
+	 *   out_indices[keep]   — indices into candidates
 	 *   out_distances[keep] — exact distances
 	 *
 	 * Returns: result count (<= keep), sorted by distance asc.
 	 * NULL pointer means reranking is not supported.
 	 */
 	uint32_t (*rerank)(
-			MktStorage			  *self,
-			Datum				   query,
-			Dimension			   dim,
-			const ItemPointerData *tids,
-			const Distance		  *distances,
-			const Distance		  *errors,
-			uint32_t			   count,
-			uint32_t			   keep,
-			uint32_t			  *out_indices,
-			Distance			  *out_distances);
+			MktStorage		   *self,
+			const float		   *query,
+			Dimension			dim,
+			const MktTopKEntry *candidates,
+			uint32_t			count,
+			uint32_t			keep,
+			uint32_t		   *out_indices,
+			Distance		   *out_distances);
 } MktStorageOps;
 
 struct MktStorage
@@ -149,24 +146,20 @@ mkt_storage_extend(MktStorage *s, uint32_t npages)
 
 static inline uint32_t
 mkt_storage_rerank(
-		MktStorage			  *s,
-		Datum				   query,
-		Dimension			   dim,
-		const ItemPointerData *tids,
-		const Distance		  *distances,
-		const Distance		  *errors,
-		uint32_t			   count,
-		uint32_t			   keep,
-		uint32_t			  *out_indices,
-		Distance			  *out_distances)
+		MktStorage		   *s,
+		const float		   *query,
+		Dimension			dim,
+		const MktTopKEntry *candidates,
+		uint32_t			count,
+		uint32_t			keep,
+		uint32_t		   *out_indices,
+		Distance		   *out_distances)
 {
 	return s->ops->rerank(
 			s,
 			query,
 			dim,
-			tids,
-			distances,
-			errors,
+			candidates,
 			count,
 			keep,
 			out_indices,
