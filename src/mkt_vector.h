@@ -119,7 +119,7 @@ mkt_f32_to_float_one(const void *src, float *dst, Dimension dim)
 	memcpy(dst, src, (size_t)dim * sizeof(float));
 }
 
-__attribute__((always_inline)) static inline const float *
+static inline const float *
 mkt_f32_to_float_block(
 		const void *src, float *dst, uint32_t count, Dimension dim)
 {
