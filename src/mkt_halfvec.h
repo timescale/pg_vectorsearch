@@ -58,7 +58,7 @@ typedef uint16_t half;
  * Scalar conversion (inline, 3-tier)
  * ---------------------------------------------------------------- */
 
-static inline float
+MKT_VTABLE_INLINE float
 mkt_half_to_float(half h)
 {
 #if defined(MKT_FLT16_SUPPORT)
@@ -256,7 +256,7 @@ MktHalfVectorToRef(const MktHalfVector *hv, float *buffer)
  * other hot loops that dispatch once at the entry point.
  * ---------------------------------------------------------------- */
 
-__attribute__((always_inline)) static inline float
+MKT_VTABLE_INLINE float
 mkt_f16_dot_product(const void *vec, const float *centroid, Dimension dim)
 {
 	const half *v	= (const half *)vec;
@@ -266,7 +266,7 @@ mkt_f16_dot_product(const void *vec, const float *centroid, Dimension dim)
 	return sum;
 }
 
-__attribute__((always_inline)) static inline float
+MKT_VTABLE_INLINE float
 mkt_f16_l2_squared(const void *vec, const float *centroid, Dimension dim)
 {
 	const half *v	= (const half *)vec;
@@ -279,7 +279,7 @@ mkt_f16_l2_squared(const void *vec, const float *centroid, Dimension dim)
 	return sum;
 }
 
-__attribute__((always_inline)) static inline float
+MKT_VTABLE_INLINE float
 mkt_f16_norm_sq(const void *vec, Dimension dim)
 {
 	const half *v	= (const half *)vec;
@@ -292,7 +292,7 @@ mkt_f16_norm_sq(const void *vec, Dimension dim)
 	return sum;
 }
 
-__attribute__((always_inline)) static inline void
+MKT_VTABLE_INLINE void
 mkt_f16_sum_to_float(const void *vec, float *accum, Dimension dim)
 {
 	const half *v = (const half *)vec;
@@ -300,13 +300,13 @@ mkt_f16_sum_to_float(const void *vec, float *accum, Dimension dim)
 		accum[d] += mkt_half_to_float(v[d]);
 }
 
-__attribute__((always_inline)) static inline void
+MKT_VTABLE_INLINE void
 mkt_f16_to_float_one(const void *src, float *dst, Dimension dim)
 {
 	mkt_half_to_float_array((const half *)src, dst, dim);
 }
 
-static inline const float *
+MKT_VTABLE_INLINE const float *
 mkt_f16_to_float_block(
 		const void *src, float *dst, uint32_t count, Dimension dim)
 {
@@ -339,7 +339,7 @@ static const MktVectorTypeOps mkt_f16_type_ops = {
 
 #include "algo/simd_utils.h"
 
-MKT_TARGET_F16C_AVX2 __attribute__((always_inline)) static inline float
+MKT_TARGET_F16C_AVX2 MKT_VTABLE_INLINE float
 mkt_f16c_dot_product(const void *vec, const float *centroid, Dimension dim)
 {
 	const half *v	 = (const half *)vec;
@@ -362,7 +362,7 @@ mkt_f16c_dot_product(const void *vec, const float *centroid, Dimension dim)
 	return sum;
 }
 
-MKT_TARGET_F16C_AVX2 __attribute__((always_inline)) static inline float
+MKT_TARGET_F16C_AVX2 MKT_VTABLE_INLINE float
 mkt_f16c_l2_squared(const void *vec, const float *centroid, Dimension dim)
 {
 	const half *v	 = (const half *)vec;
@@ -389,7 +389,7 @@ mkt_f16c_l2_squared(const void *vec, const float *centroid, Dimension dim)
 	return sum;
 }
 
-MKT_TARGET_F16C_AVX2 __attribute__((always_inline)) static inline float
+MKT_TARGET_F16C_AVX2 MKT_VTABLE_INLINE float
 mkt_f16c_norm_sq(const void *vec, Dimension dim)
 {
 	const half *v	 = (const half *)vec;
@@ -414,7 +414,7 @@ mkt_f16c_norm_sq(const void *vec, Dimension dim)
 	return sum;
 }
 
-MKT_TARGET_F16C_AVX2 __attribute__((always_inline)) static inline void
+MKT_TARGET_F16C_AVX2 MKT_VTABLE_INLINE void
 mkt_f16c_sum_to_float(const void *vec, float *accum, Dimension dim)
 {
 	const half *v = (const half *)vec;
