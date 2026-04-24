@@ -18,6 +18,19 @@
 #define FLEXIBLE_ARRAY_MEMBER /* empty, C99+ */
 #endif
 
+/*
+ * MKT_VTABLE_INLINE — hint for vtable functions.
+ *
+ * Clang inlines always_inline functions through static-const vtable
+ * pointers even across target_clones boundaries. GCC errors on
+ * target mismatch, so we omit the attribute there.
+ */
+#ifdef __clang__
+#define MKT_VTABLE_INLINE __attribute__((always_inline)) static inline
+#else
+#define MKT_VTABLE_INLINE static inline
+#endif
+
 /* Quantized representations */
 typedef uint8_t ScalarQ8; /* 8-bit scalar quantized */
 typedef uint8_t BinaryQ;  /* Binary quantized byte (packed bits) */
