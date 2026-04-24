@@ -216,7 +216,11 @@ score_page(
  * ---------------------------------------------------------------- */
 static uint32_t
 select_topk_bounded(
-		Candidate *cands, uint32_t count, uint32_t k, Candidate *out)
+		Candidate *cands,
+		uint32_t   count,
+		uint32_t   k,
+		Candidate *out,
+		uint32_t   out_cap)
 {
 	if (count == 0)
 		return 0;
@@ -230,6 +234,9 @@ select_topk_bounded(
 	MktTopKEntry *entries = mkt_alloc(topk.cand_count * sizeof(MktTopKEntry));
 	uint32_t	  nresults;
 	mkt_topk_extract_sorted(&topk, entries, &nresults);
+
+	if (nresults > out_cap)
+		nresults = out_cap;
 
 	for (uint32_t i = 0; i < nresults; i++)
 	{
@@ -337,8 +344,9 @@ mkt_centroid_beam_search(
 	 * candidates with smallest upper bounds, plus any additional
 	 * candidates whose lower bound overlaps the threshold. For
 	 * exact formats (error=0) this returns exactly beam_width. */
-	uint32_t keep		= (nlevels == 1) ? nprobe : beam_width;
-	uint32_t cand_count = select_topk_bounded(buf_a, raw_count, keep, buf_b);
+	uint32_t keep = (nlevels == 1) ? nprobe : beam_width;
+	uint32_t cand_count =
+			select_topk_bounded(buf_a, raw_count, keep, buf_b, cand_cap);
 
 	/* buf_b is now the live set */
 	Candidate *live	   = buf_b;
@@ -381,8 +389,9 @@ mkt_centroid_beam_search(
 			stats->dist_calcs += next_count;
 
 		/* Select into live (scratch → live via topk) */
-		keep	   = (level == nlevels - 1) ? nprobe : beam_width;
-		cand_count = select_topk_bounded(scratch, next_count, keep, live);
+		keep = (level == nlevels - 1) ? nprobe : beam_width;
+		cand_count =
+				select_topk_bounded(scratch, next_count, keep, live, cand_cap);
 	}
 
 	/* Build results in caller-owned memory (cap at nprobe) */
