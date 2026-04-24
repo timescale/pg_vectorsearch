@@ -356,17 +356,27 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 	p->centroid_format = mktann_resolve_format(index, p->metric);
 	p->fan_out		   = mktann_get_fan_out(index);
 
-	/* Use pg_class.reltuples when available (set by ANALYZE).
-	 * The block-based estimate is wrong for TOASTed vectors. */
-	double reltuples = (heap->rd_rel->reltuples > 0)
-							 ? heap->rd_rel->reltuples
-							 : RelationGetNumberOfBlocks(heap) *
-									   (BLCKSZ / (sizeof(float) * dim + 32));
-	p->nlist		 = (uint32_t)sqrt((double)Max(reltuples, 1));
-	if (p->nlist < 1)
-		p->nlist = 1;
-	if (p->nlist > 10000)
-		p->nlist = 10000;
+	/* nlist: use relopt if set, otherwise auto from sqrt(reltuples) */
+	MktannOptions *opts		 = (MktannOptions *)index->rd_options;
+	uint32_t	   nlist_opt = (opts != NULL) ? (uint32_t)opts->nlist : 0;
+
+	if (nlist_opt > 0)
+	{
+		p->nlist = nlist_opt;
+	}
+	else
+	{
+		double reltuples = (heap->rd_rel->reltuples > 0)
+								 ? heap->rd_rel->reltuples
+								 : RelationGetNumberOfBlocks(heap) *
+										   (BLCKSZ /
+											(sizeof(float) * dim + 32));
+		p->nlist		 = (uint32_t)sqrt((double)Max(reltuples, 1));
+		if (p->nlist < 1)
+			p->nlist = 1;
+		if (p->nlist > 10000)
+			p->nlist = 10000;
+	}
 
 	p->fan_out =
 			mkt_auto_fan_out(p->fan_out, p->nlist, MKTANN_DEFAULT_FAN_OUT);
