@@ -165,7 +165,7 @@ TEST(cosine_zero_vectors)
 	ASSERT_FLOAT_EQ(1.0f, d, 1e-6f, "zero vector has max distance");
 }
 
-#ifdef HAVE_GSL
+#if HAVE_GSL
 /*
  * GSL Reference Tests
  *
