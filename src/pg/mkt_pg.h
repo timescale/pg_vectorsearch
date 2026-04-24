@@ -83,12 +83,17 @@ typedef struct MktannOptions
 	int32 vl_len_;				/* varlena header (required by reloptions) */
 	int	  distance_mode;		/* MktDistanceMode */
 	int	  fan_out;				/* children per tree node (2-255) */
+	int	  nlist;				/* number of clusters (0 = auto) */
 	bool  centroid_compression; /* use RaBitQ for centroid pages */
 } MktannOptions;
 
 #define MKTANN_DEFAULT_FAN_OUT 32
 #define MKTANN_MIN_FAN_OUT	   2
 #define MKTANN_MAX_FAN_OUT	   255
+
+#define MKTANN_DEFAULT_NLIST 0
+#define MKTANN_MIN_NLIST	 0
+#define MKTANN_MAX_NLIST	 100000
 
 /*
  * MktannGetDistanceMode - Resolve effective distance mode for a scan.

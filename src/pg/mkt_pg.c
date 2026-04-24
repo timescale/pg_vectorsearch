@@ -113,6 +113,14 @@ _PG_init(void)
 			MKTANN_MIN_FAN_OUT,
 			MKTANN_MAX_FAN_OUT,
 			NoLock);
+	add_int_reloption(
+			mktann_relopt_kind,
+			"nlist",
+			"Number of IVF clusters (0 = auto from sqrt(rows))",
+			MKTANN_DEFAULT_NLIST,
+			MKTANN_MIN_NLIST,
+			MKTANN_MAX_NLIST,
+			NoLock);
 	add_bool_reloption(
 			mktann_relopt_kind,
 			"centroid_compression",
