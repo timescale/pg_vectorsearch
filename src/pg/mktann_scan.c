@@ -92,7 +92,7 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 
 	Dimension dim		 = meta->dim;
 	uint32_t  max_k		 = MKT_DEFAULT_K;
-	uint32_t  max_nprobe = meta->nlist;
+	uint32_t  max_nprobe = meta->nlist < 512 ? meta->nlist : 512;
 
 	/* Populate MktIndexBase from meta page */
 	ss->index_base.dim			   = dim;
