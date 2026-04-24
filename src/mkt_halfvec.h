@@ -306,7 +306,7 @@ mkt_f16_to_float_one(const void *src, float *dst, Dimension dim)
 	mkt_half_to_float_array((const half *)src, dst, dim);
 }
 
-__attribute__((always_inline)) static inline const float *
+static inline const float *
 mkt_f16_to_float_block(
 		const void *src, float *dst, uint32_t count, Dimension dim)
 {
