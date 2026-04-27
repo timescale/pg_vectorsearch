@@ -566,6 +566,8 @@ mkt_index_destroy(MktIndex *idx)
 	if (idx == NULL)
 		return;
 
+	mkt_topk_cleanup(&idx->posting_storage.rerank_topk);
+
 	/* Deleting the memory context frees idx and all owned data. */
 	mkt_memctx_delete(idx->memctx);
 }

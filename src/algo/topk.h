@@ -36,6 +36,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "core/memory.h"
 #include "mkt_types.h"
 
 /* ----------------------------------------------------------------
@@ -62,6 +63,7 @@ typedef struct MktTopK
 	MktTopKEntry *candidates;	 /* growable candidate buffer */
 	uint32_t	  cand_count;	 /* buffered candidates */
 	uint32_t	  cand_capacity; /* allocated capacity */
+	MktMemCtx	  memctx;		 /* owning context for all allocations */
 } MktTopK;
 
 /* ----------------------------------------------------------------
@@ -69,7 +71,9 @@ typedef struct MktTopK
  * ---------------------------------------------------------------- */
 
 /*
- * Initialize a top-K collection. Allocates internal buffers.
+ * Initialize a top-K collection. Creates a child memory context
+ * under the current context for internal buffers. Caller must be
+ * in a context with the desired lifetime.
  * Use mkt_topk_cleanup() to free.
  */
 void mkt_topk_init(MktTopK *topk, uint32_t k);
