@@ -14,6 +14,7 @@
 
 #include <string.h>
 
+#include "core/log.h"
 #include "core/memory.h"
 #include "index/posting_scan.h"
 
@@ -167,6 +168,20 @@ advance_page(MktPostingScan *scan)
 		scan->cur_page = mkt_storage_read_page(scan->storage, scan->cur_blkno);
 
 	MktPostingPageOpaque *opaque = mkt_posting_opaque(scan->cur_page);
+
+	/* Validate page identity — catch corrupted chain pointers early */
+	if (opaque->page_id != MKT_POSTING_PAGE_ID)
+	{
+		mkt_warn(
+				"meerkat: posting scan hit non-posting page "
+				"(blkno=%u, page_id=0x%04X)",
+				scan->cur_blkno,
+				opaque->page_id);
+		scan->cur_page	  = NULL;
+		scan->cur_content = NULL;
+		return false;
+	}
+
 	scan->cur_content =
 			(opaque->flags & MKT_POSTING_PAGE_FIRST)
 					? mkt_posting_content_first(scan->cur_page, scan->dim)
