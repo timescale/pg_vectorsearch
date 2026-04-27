@@ -190,7 +190,9 @@ exec_paged(
 		bool			rerank,
 		uint32_t	   *result_ids)
 {
+	MktMemCtx old = mkt_memctx_switch(ctx->memctx);
 	mkt_query_execute(&ctx->search, query, k, nprobe, mode, rerank, NULL);
+	mkt_memctx_switch(old);
 
 	uint32_t nresults = ctx->search.nresults;
 	for (uint32_t i = 0; i < nresults; i++)
@@ -325,47 +327,39 @@ exec_fallback(
 	uint32_t count;
 	if (rerank)
 	{
-		MktTopKEntry *cand_entries;
-		uint32_t	  n_cands;
-		if (ctx->topk.cand_count <= ctx->rerank_cap)
-			cand_entries = ctx->rerank_buf;
-		else
-			cand_entries = mkt_alloc(
-					ctx->topk.cand_count * sizeof(MktTopKEntry));
-		mkt_topk_extract_sorted(&ctx->topk, cand_entries, &n_cands);
+		if (ctx->topk.cand_count > ctx->rerank_cap)
+		{
+			ctx->rerank_cap = ctx->topk.cand_count;
+			ctx->rerank_buf = mkt_realloc(
+					ctx->rerank_buf, ctx->rerank_cap * sizeof(MktTopKEntry));
+		}
+
+		uint32_t n_cands;
+		mkt_topk_extract_sorted(&ctx->topk, ctx->rerank_buf, &n_cands);
 
 		mkt_topk_reset(&ctx->rerank_topk);
 		ctx->rerank_topk.k = k;
 
 		for (uint32_t i = 0; i < n_cands; i++)
 		{
-			uint32_t vid = mkt_posting_decode_vector_id(cand_entries[i].id);
+			uint32_t vid = mkt_posting_decode_vector_id(ctx->rerank_buf[i].id);
 			const float *vec = idx->all_vectors + (size_t)vid * dim;
 			Distance	 d	 = mkt_l2_distance_squared(qvec, vec, dim);
-			mkt_topk_insert(&ctx->rerank_topk, d, 0.0f, cand_entries[i].id);
+			mkt_topk_insert(&ctx->rerank_topk, d, 0.0f, ctx->rerank_buf[i].id);
 		}
-
-		if (cand_entries != ctx->rerank_buf)
-			mkt_free(cand_entries);
 
 		mkt_topk_extract_sorted(&ctx->rerank_topk, ctx->rerank_buf, &count);
 	}
 	else
 	{
-		if (ctx->topk.cand_count <= ctx->rerank_cap)
+		if (ctx->topk.cand_count > ctx->rerank_cap)
 		{
-			mkt_topk_extract_sorted(&ctx->topk, ctx->rerank_buf, &count);
+			ctx->rerank_cap = ctx->topk.cand_count;
+			ctx->rerank_buf = mkt_realloc(
+					ctx->rerank_buf, ctx->rerank_cap * sizeof(MktTopKEntry));
 		}
-		else
-		{
-			MktTopKEntry *tmp = mkt_alloc(
-					ctx->topk.cand_count * sizeof(MktTopKEntry));
-			mkt_topk_extract_sorted(&ctx->topk, tmp, &count);
-			if (count > ctx->rerank_cap)
-				count = ctx->rerank_cap;
-			memcpy(ctx->rerank_buf, tmp, count * sizeof(MktTopKEntry));
-			mkt_free(tmp);
-		}
+
+		mkt_topk_extract_sorted(&ctx->topk, ctx->rerank_buf, &count);
 	}
 
 	uint32_t out = count < k ? count : k;

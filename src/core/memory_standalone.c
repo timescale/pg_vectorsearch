@@ -29,7 +29,8 @@ arena_block_create(size_t min_size)
 														: MKT_ARENA_BLOCK_SIZE;
 	/* Include space for header, aligned */
 	size_t header_size = align_up(sizeof(MktArenaBlock), MKT_ARENA_ALIGNMENT);
-	size_t total_size  = header_size + block_size;
+	size_t total_size =
+			align_up(header_size + block_size, MKT_ARENA_ALIGNMENT);
 
 	MktArenaBlock *block = aligned_alloc(MKT_ARENA_ALIGNMENT, total_size);
 	if (!block)
