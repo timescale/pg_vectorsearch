@@ -110,5 +110,38 @@ SELECT relpages > 0 AS has_pages FROM pg_class
 CREATE INDEX idx_bad_fo ON embeddings USING mktann (v)
     WITH (fan_out = 1);
 
+-- EXPLAIN ANALYZE: verify mktann stats are present with sensible values
+SET enable_seqscan = off;
+CREATE FUNCTION test_explain_stats() RETURNS TABLE (
+    has_clusters bool,
+    has_centroid_pages bool,
+    has_posting_pages bool,
+    has_entries bool,
+    has_rerank_cands bool,
+    has_results bool,
+    has_storage_reads bool
+) LANGUAGE plpgsql AS $$
+DECLARE
+    explain_json json;
+    stats json;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, FORMAT JSON)
+        SELECT id, v <-> ''[0.5,0.5,0.5]'' AS dist
+        FROM embeddings ORDER BY v <-> ''[0.5,0.5,0.5]'' LIMIT 5'
+    INTO explain_json;
+    stats := explain_json->0->'Plan'->'Plans'->0->'Mktann';
+    RETURN QUERY SELECT
+        (stats->>'Posting Lists Scanned')::int > 0,
+        (stats->>'Centroid Pages Read')::int > 0,
+        (stats->>'Posting Pages Read')::int > 0,
+        (stats->>'Posting Entries Scanned')::int > 0,
+        (stats->>'Rerank Candidates')::int >= 0,
+        (stats->>'Rerank Results')::int > 0,
+        (stats->>'Storage Reads')::int > 0;
+END $$;
+SELECT * FROM test_explain_stats();
+DROP FUNCTION test_explain_stats();
+RESET enable_seqscan;
+
 -- Cleanup
 DROP TABLE embeddings;

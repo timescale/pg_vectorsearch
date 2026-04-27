@@ -12,6 +12,7 @@
 #include <postgres.h>
 
 #include <access/relscan.h>
+#include <portability/instr_time.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
 
@@ -61,8 +62,18 @@ typedef struct MktannScanState
 	/* PG storage (index page I/O) */
 	MktannStorage storage;
 
+	/* EXPLAIN ANALYZE stats (accumulated across rescans) */
+	MktannScanStats stats;
+
 	MemoryContext scan_ctx;
 } MktannScanState;
+
+const MktannScanStats *
+mktann_scan_get_stats(IndexScanDesc scan)
+{
+	MktannScanState *ss = (MktannScanState *)scan->opaque;
+	return ss ? &ss->stats : NULL;
+}
 
 /* ----------------------------------------------------------------
  * beginscan
@@ -192,6 +203,9 @@ execute_search(IndexScanDesc scan)
 										  : ss->qstate.max_k;
 	uint32_t nprobe = (uint32_t)mkt_nprobe;
 
+	MktQueryStats qstats   = {0};
+	ss->storage.read_count = 0;
+
 	mkt_query_execute(
 			&ss->qstate,
 			qref.data,
@@ -199,7 +213,15 @@ execute_search(IndexScanDesc scan)
 			nprobe,
 			(MktDistanceMode)mkt_distance_mode,
 			mkt_rerank,
-			NULL);
+			&qstats);
+
+	ss->stats.clusters_scanned		  = qstats.clusters_scanned;
+	ss->stats.centroid_pages_read	  = qstats.centroid_pages_read;
+	ss->stats.posting_pages_read	  = qstats.posting_pages_read;
+	ss->stats.posting_entries_scanned = qstats.posting_entries_scanned;
+	ss->stats.rerank_candidates		  = ss->qstate.ncandidates;
+	ss->stats.rerank_results		  = ss->qstate.nresults;
+	ss->stats.storage_reads			  = ss->storage.read_count;
 
 	/* Copy results from result ordering */
 	uint32_t nresults = ss->qstate.nresults;

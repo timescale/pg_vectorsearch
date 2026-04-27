@@ -12,6 +12,37 @@
 
 #include <access/amapi.h>
 #include <access/relscan.h>
+#include <portability/instr_time.h>
+
+/* ----------------------------------------------------------------
+ * Scan statistics (populated by execute_search)
+ * ---------------------------------------------------------------- */
+
+typedef struct MktannScanStats
+{
+	/* Phase timing */
+	instr_time centroid_search;
+	instr_time posting_scan;
+	instr_time rerank;
+
+	/* Centroid beam search */
+	uint32_t clusters_scanned;
+	uint32_t centroid_pages_read;
+
+	/* Posting scan */
+	uint32_t posting_pages_read;
+	uint32_t posting_entries_scanned;
+
+	/* Rerank */
+	uint32_t rerank_candidates;
+	uint32_t rerank_heap_fetches;
+	uint32_t rerank_results;
+
+	/* Total storage reads */
+	uint32_t storage_reads;
+} MktannScanStats;
+
+const MktannScanStats *mktann_scan_get_stats(IndexScanDesc scan);
 
 /*
  * Begin an index scan. Matches ambeginscan_function signature.
