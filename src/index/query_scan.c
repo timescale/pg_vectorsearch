@@ -202,23 +202,19 @@ scan_clusters(
 static uint32_t
 extract_candidates(MktQueryState *qs)
 {
+	if (qs->topk.cand_count > qs->cand_cap)
+	{
+		qs->cand_cap   = qs->topk.cand_count;
+		qs->candidates = mkt_realloc(
+				qs->candidates, qs->cand_cap * sizeof(MktTopKEntry));
+		qs->result_order =
+				mkt_realloc(qs->result_order, qs->cand_cap * sizeof(uint32_t));
+		qs->result_dists =
+				mkt_realloc(qs->result_dists, qs->cand_cap * sizeof(Distance));
+	}
+
 	uint32_t ncands;
-
-	if (qs->topk.cand_count <= qs->cand_cap)
-	{
-		mkt_topk_extract_sorted(&qs->topk, qs->candidates, &ncands);
-	}
-	else
-	{
-		MktTopKEntry *tmp = mkt_alloc(
-				qs->topk.cand_count * sizeof(MktTopKEntry));
-		mkt_topk_extract_sorted(&qs->topk, tmp, &ncands);
-		uint32_t copy = ncands < qs->cand_cap ? ncands : qs->cand_cap;
-		memcpy(qs->candidates, tmp, copy * sizeof(MktTopKEntry));
-		ncands = copy;
-		mkt_free(tmp);
-	}
-
+	mkt_topk_extract_sorted(&qs->topk, qs->candidates, &ncands);
 	qs->ncandidates = ncands;
 	return ncands;
 }

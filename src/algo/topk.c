@@ -141,8 +141,20 @@ mkt_topk_destroy(MktTopK *topk)
 void
 mkt_topk_reset(MktTopK *topk)
 {
-	topk->ub_count	 = 0;
-	topk->cand_count = 0;
+	/* Reset the arena to reclaim grown buffers, then re-allocate
+	 * the initial ub_heap and candidates from the fresh arena. */
+	mkt_memctx_reset(topk->memctx);
+
+	topk->ub_heap = mkt_memctx_alloc(topk->memctx, topk->k * sizeof(Distance));
+	topk->ub_count = 0;
+
+	uint32_t cap = topk->k * 2;
+	if (cap < MKT_TOPK_INITIAL_CAP_MIN)
+		cap = MKT_TOPK_INITIAL_CAP_MIN;
+	topk->candidates =
+			mkt_memctx_alloc(topk->memctx, cap * sizeof(MktTopKEntry));
+	topk->cand_count	= 0;
+	topk->cand_capacity = cap;
 }
 
 /* ----------------------------------------------------------------
@@ -217,5 +229,4 @@ mkt_topk_extract_sorted(
 		qsort(results, out, sizeof(MktTopKEntry), cmp_by_distance);
 
 	*count_out = out;
-	mkt_topk_reset(topk);
 }

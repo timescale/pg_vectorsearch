@@ -170,9 +170,10 @@ TEST(topk_extract_resets)
 	MktTopKEntry results[32];
 	uint32_t	 count;
 	mkt_topk_extract_sorted(&topk, results, &count);
-
 	ASSERT_EQ(2, count, "should extract 2");
-	ASSERT_EQ(0, topk.cand_count, "cand_count should be 0 after extract");
+
+	mkt_topk_reset(&topk);
+	ASSERT_EQ(0, topk.cand_count, "cand_count should be 0 after reset");
 	mkt_topk_cleanup(&topk);
 }
 

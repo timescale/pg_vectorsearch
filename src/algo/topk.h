@@ -121,7 +121,8 @@ mkt_topk_threshold(const MktTopK *topk)
  * results[] must have space for topk->cand_count entries (upper
  * bound; actual count returned via *count_out may be smaller).
  *
- * After extraction the collection is reset.
+ * Does not reset the collection — call mkt_topk_reset() or
+ * mkt_topk_cleanup() when done with the results.
  */
 void mkt_topk_extract_sorted(
 		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out);
