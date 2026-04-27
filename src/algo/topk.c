@@ -83,14 +83,16 @@ cmp_by_distance(const void *a, const void *b)
 void
 mkt_topk_init(MktTopK *topk, uint32_t k)
 {
+	topk->memctx   = mkt_memctx_create(NULL, "topk");
 	topk->k		   = k;
-	topk->ub_heap  = mkt_alloc(k * sizeof(Distance));
+	topk->ub_heap  = mkt_memctx_alloc(topk->memctx, k * sizeof(Distance));
 	topk->ub_count = 0;
 
 	uint32_t cap = k * 2;
 	if (cap < MKT_TOPK_INITIAL_CAP_MIN)
 		cap = MKT_TOPK_INITIAL_CAP_MIN;
-	topk->candidates	= mkt_alloc(cap * sizeof(MktTopKEntry));
+	topk->candidates =
+			mkt_memctx_alloc(topk->memctx, cap * sizeof(MktTopKEntry));
 	topk->cand_count	= 0;
 	topk->cand_capacity = cap;
 }
@@ -100,8 +102,11 @@ mkt_topk_cleanup(MktTopK *topk)
 {
 	if (topk == NULL)
 		return;
-	mkt_free(topk->ub_heap);
-	mkt_free(topk->candidates);
+	if (topk->memctx != NULL)
+	{
+		mkt_memctx_delete(topk->memctx);
+		topk->memctx = NULL;
+	}
 	topk->ub_heap	 = NULL;
 	topk->candidates = NULL;
 }
@@ -109,8 +114,19 @@ mkt_topk_cleanup(MktTopK *topk)
 MktTopK *
 mkt_topk_create(uint32_t k)
 {
-	MktTopK *topk = mkt_alloc(sizeof(MktTopK));
-	mkt_topk_init(topk, k);
+	MktMemCtx ctx  = mkt_memctx_create(NULL, "topk");
+	MktTopK	 *topk = mkt_memctx_alloc(ctx, sizeof(MktTopK));
+	topk->memctx   = ctx;
+	topk->k		   = k;
+	topk->ub_heap  = mkt_memctx_alloc(ctx, k * sizeof(Distance));
+	topk->ub_count = 0;
+
+	uint32_t cap = k * 2;
+	if (cap < MKT_TOPK_INITIAL_CAP_MIN)
+		cap = MKT_TOPK_INITIAL_CAP_MIN;
+	topk->candidates	= mkt_memctx_alloc(ctx, cap * sizeof(MktTopKEntry));
+	topk->cand_count	= 0;
+	topk->cand_capacity = cap;
 	return topk;
 }
 
@@ -119,8 +135,7 @@ mkt_topk_destroy(MktTopK *topk)
 {
 	if (topk == NULL)
 		return;
-	mkt_topk_cleanup(topk);
-	mkt_free(topk);
+	mkt_memctx_delete(topk->memctx);
 }
 
 void
@@ -157,14 +172,16 @@ mkt_topk_insert(MktTopK *topk, Distance distance, Distance error, uint64_t id)
 		ub_sift_down(topk->ub_heap, topk->ub_count);
 	}
 
-	/* Grow candidate buffer if needed */
+	/* Grow candidate buffer if needed (old buffer freed with memctx) */
 	if (topk->cand_count == topk->cand_capacity)
 	{
 		uint32_t	  new_cap = topk->cand_capacity * 2;
-		MktTopKEntry *old	  = topk->candidates;
-		topk->candidates	  = mkt_alloc(new_cap * sizeof(MktTopKEntry));
-		memcpy(topk->candidates, old, topk->cand_count * sizeof(MktTopKEntry));
-		mkt_free(old);
+		MktTopKEntry *new_buf =
+				mkt_memctx_alloc(topk->memctx, new_cap * sizeof(MktTopKEntry));
+		memcpy(new_buf,
+			   topk->candidates,
+			   topk->cand_count * sizeof(MktTopKEntry));
+		topk->candidates	= new_buf;
 		topk->cand_capacity = new_cap;
 	}
 
