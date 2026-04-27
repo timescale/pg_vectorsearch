@@ -118,19 +118,32 @@ pg_extend(MktStorage *self, uint32_t npages)
 {
 	MktannStorage *s = PG_STORAGE(self);
 
-	Buffer	*buffers	 = palloc(npages * sizeof(Buffer));
-	uint32_t extended_by = 0;
+	Buffer	   *buffers	  = palloc(npages * sizeof(Buffer));
+	BlockNumber start	  = InvalidBlockNumber;
+	uint32_t	remaining = npages;
+	uint32_t	offset	  = 0;
 
-	BlockNumber start = ExtendBufferedRelBy(
-			BMR_REL(s->index),
-			MAIN_FORKNUM,
-			NULL,
-			EB_SKIP_EXTENSION_LOCK,
-			npages,
-			buffers,
-			&extended_by);
+	while (remaining > 0)
+	{
+		uint32_t extended_by = 0;
 
-	for (uint32_t i = 0; i < extended_by; i++)
+		BlockNumber batch_start = ExtendBufferedRelBy(
+				BMR_REL(s->index),
+				MAIN_FORKNUM,
+				NULL,
+				EB_SKIP_EXTENSION_LOCK,
+				remaining,
+				buffers + offset,
+				&extended_by);
+
+		if (start == InvalidBlockNumber)
+			start = batch_start;
+
+		offset += extended_by;
+		remaining -= extended_by;
+	}
+
+	for (uint32_t i = 0; i < npages; i++)
 		ReleaseBuffer(buffers[i]);
 
 	pfree(buffers);
