@@ -11,6 +11,7 @@
 
 #include "algo/distance.h"
 #include "mkt_pg.h"
+#include "mktann_explain.h"
 
 PG_MODULE_MAGIC;
 
@@ -130,6 +131,7 @@ _PG_init(void)
 
 	mkt_distance_init();
 	mkt_rabitq_init_simd();
+	mktann_explain_init();
 }
 
 /* ----------------------------------------------------------------

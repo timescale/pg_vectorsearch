@@ -10,6 +10,7 @@ extension_sources = files(
   'mktann.c',
   'mktann_build.c',
   'mktann_cache.c',
+  'mktann_explain.c',
   'mktann_scan.c',
   'mktann_storage.c',
 )
