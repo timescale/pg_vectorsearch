@@ -560,11 +560,15 @@ if build_pg_extension
     endif
   endif
 
-  mkt_pg_cflags = ['-I' + pg_includedir_server] + pg_cflags
+  # The shared hot-path library only needs PG headers for type
+  # compatibility (Page, BlockNumber, etc.), NOT PG's restrictive
+  # compiler flags (-O2, -fno-omit-frame-pointer, -fwrapv).
+  # Those flags degrade SIMD kernel performance by ~20%.
+  mkt_pg_core_cflags = ['-I' + pg_includedir_server]
 
   mkt_pg_lib = static_library('mkt_pg',
     mkt_pg_core_sources + mkt_pg_simd_sources,
-    c_args: mkt_pg_cflags,
+    c_args: mkt_pg_core_cflags,
     include_directories: src_inc,
     dependencies: [m_dep] + (have_cblas ? [cblas_dep] : []),
     override_options: ['werror=false'],

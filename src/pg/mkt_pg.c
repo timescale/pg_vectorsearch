@@ -132,6 +132,11 @@ _PG_init(void)
 	mkt_distance_init();
 	mkt_rabitq_init_simd();
 	mktann_explain_init();
+
+	ereport(LOG,
+			errmsg("meerkat: SIMD impl=%s, hamming=%s",
+				   mkt_rabitq_impl_name(),
+				   mkt_rabitq_hamming_impl_name()));
 }
 
 /* ----------------------------------------------------------------
