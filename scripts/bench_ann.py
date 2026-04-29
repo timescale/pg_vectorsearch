@@ -114,14 +114,27 @@ def build_index(conn, table: str, index_type: str, nlist: int | None, **kwargs):
             cur.execute(f"DROP INDEX IF EXISTS {idx}")
     conn.commit()
 
+    fan_out = kwargs.get("fan_out")
+    kmeans_nredo = kwargs.get("kmeans_nredo")
+    centroid_compression = kwargs.get("centroid_compression", False)
+
     with conn.cursor() as cur:
         cur.execute("SET maintenance_work_mem = '2GB'")
 
         if index_type == "mktann":
             idx_name = f"idx_{table}_mkt"
-            with_clause = ""
+            with_parts = []
             if nlist is not None:
-                with_clause = f" WITH (nlist = {nlist})"
+                with_parts.append(f"nlist = {nlist}")
+            if fan_out is not None:
+                with_parts.append(f"fan_out = {fan_out}")
+            if kmeans_nredo is not None:
+                with_parts.append(f"kmeans_nredo = {kmeans_nredo}")
+            if centroid_compression:
+                with_parts.append("centroid_compression = true")
+            with_clause = ""
+            if with_parts:
+                with_clause = f" WITH ({', '.join(with_parts)})"
             sql = (
                 f"CREATE INDEX {idx_name} ON {table} "
                 f"USING mktann (v mkt.vector_cosine_ops)"
@@ -163,6 +176,12 @@ def build_index(conn, table: str, index_type: str, nlist: int | None, **kwargs):
         print(f"\nBuilding {index_type} index ({idx_name})...")
         if nlist is not None:
             print(f"  nlist/lists = {nlist}")
+        if fan_out is not None:
+            print(f"  fan_out = {fan_out}")
+        if kmeans_nredo is not None:
+            print(f"  kmeans_nredo = {kmeans_nredo}")
+        if centroid_compression:
+            print("  centroid_compression = true")
 
         t0 = time.monotonic()
         cur.execute(sql)
@@ -531,6 +550,30 @@ def main():
         help="Number of lists/clusters (default: auto)",
     )
     parser.add_argument(
+        "--nlist-sweep",
+        type=str,
+        default=None,
+        help="Comma-separated nlist values; rebuilds index for each, "
+        "then runs --nprobe-sweep (e.g., '100,1000,10000')",
+    )
+    parser.add_argument(
+        "--fan-out",
+        type=int,
+        default=None,
+        help="mktann tree branching factor (default: auto from nlist)",
+    )
+    parser.add_argument(
+        "--kmeans-nredo",
+        type=int,
+        default=None,
+        help="K-means restarts for cluster quality (default: 1)",
+    )
+    parser.add_argument(
+        "--centroid-compression",
+        action="store_true",
+        help="Use RaBitQ compression for centroid pages",
+    )
+    parser.add_argument(
         "--topk",
         type=int,
         default=None,
@@ -617,7 +660,7 @@ def main():
             count = cur.fetchone()[0]
         print(f"Table {table}: {count:,} rows")
 
-    if not args.skip_index:
+    if not args.skip_index and not args.nlist_sweep:
         build_index(
             conn,
             table,
@@ -625,14 +668,44 @@ def main():
             args.nlist,
             m=args.m,
             ef_construction=args.ef_construction,
+            fan_out=args.fan_out,
+            kmeans_nredo=args.kmeans_nredo,
+            centroid_compression=args.centroid_compression,
         )
 
     rerank = None
     if args.rerank is not None:
         rerank = args.rerank == "on"
 
+    nprobe_values = None
     if args.nprobe_sweep:
         nprobe_values = [int(x) for x in args.nprobe_sweep.split(",")]
+
+    if args.nlist_sweep:
+        if not nprobe_values:
+            nprobe_values = [args.nprobe]
+        for nlist in [int(x) for x in args.nlist_sweep.split(",")]:
+            build_index(
+                conn, table, args.index_type, nlist,
+                m=args.m, ef_construction=args.ef_construction,
+                fan_out=args.fan_out,
+                kmeans_nredo=args.kmeans_nredo,
+                centroid_compression=args.centroid_compression,
+            )
+            max_nprobe = max(nprobe_values)
+            run_recall(
+                conn, hdf5_path, table, args.index_type, args.k,
+                args.num_queries, max_nprobe, ef_search=args.ef_search,
+                topk=args.topk, rerank=rerank, warmup=args.warmup,
+                warmup_only=True,
+            )
+            for nprobe in nprobe_values:
+                run_recall(
+                    conn, hdf5_path, table, args.index_type, args.k,
+                    args.num_queries, nprobe, ef_search=args.ef_search,
+                    topk=args.topk, rerank=rerank, warmup=0,
+                )
+    elif nprobe_values:
         max_nprobe = max(nprobe_values)
         run_recall(
             conn, hdf5_path, table, args.index_type, args.k,
