@@ -84,6 +84,7 @@ typedef struct MktannOptions
 	int	  distance_mode;		/* MktDistanceMode */
 	int	  fan_out;				/* children per tree node (2-255) */
 	int	  nlist;				/* number of clusters (0 = auto) */
+	int	  kmeans_nredo;			/* k-means restarts (1 = no restart) */
 	bool  centroid_compression; /* use RaBitQ for centroid pages */
 } MktannOptions;
 

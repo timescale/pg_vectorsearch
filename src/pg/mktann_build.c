@@ -66,6 +66,7 @@ typedef struct MktannBuildParams
 	MktCentroidFormat centroid_format;
 	uint32_t		  nlist;
 	uint32_t		  fan_out;
+	uint32_t		  kmeans_nredo;
 } MktannBuildParams;
 
 typedef struct MktannBuildState
@@ -380,6 +381,10 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 
 	p->fan_out =
 			mkt_auto_fan_out(p->fan_out, p->nlist, MKTANN_DEFAULT_FAN_OUT);
+
+	p->kmeans_nredo = (opts != NULL && opts->kmeans_nredo > 0)
+							? (uint32_t)opts->kmeans_nredo
+							: 1;
 }
 
 /* ----------------------------------------------------------------
@@ -420,6 +425,7 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 
 	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
+	km_opts.nredo		  = bs->params.kmeans_nredo;
 
 	HKMeansResult *tree = mkt_hkmeans_f32(
 			bs->samples,
