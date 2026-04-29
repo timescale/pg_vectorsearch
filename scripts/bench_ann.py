@@ -231,11 +231,29 @@ def run_recall(
     topk: int | None = None,
     rerank: bool | None = None,
     warmup: int = 20,
+    warmup_only: bool = False,
 ):
     """Run queries and measure recall against ground truth."""
     with h5py.File(hdf5_path, "r") as f:
         test = f["test"][:].astype(np.float32)
         neighbors = f["neighbors"][:]  # 0-indexed ground truth
+
+    sql = query_sql(table, index_type, k)
+
+    with conn.cursor() as cur:
+        set_search_params(cur, index_type, nprobe, ef_search, topk, rerank)
+        cur.execute("SET enable_seqscan = off")
+        cur.execute("SET max_parallel_workers_per_gather = 0")
+
+        if warmup > 0:
+            n_warmup = min(warmup, len(test))
+            print(f"\nWarming up ({n_warmup} queries at nprobe={nprobe})...")
+            for qi in range(n_warmup):
+                cur.execute(sql, (test[qi],), prepare=True, binary=True)
+                cur.fetchall()
+            if warmup_only:
+                print("Warm.")
+                return
 
     n_test = min(num_queries, len(test))
     if index_type == "hnsw":
@@ -249,16 +267,10 @@ def run_recall(
             f"index_type={index_type}"
         )
 
-    sql = query_sql(table, index_type, k)
-
     with conn.cursor() as cur:
         set_search_params(cur, index_type, nprobe, ef_search, topk, rerank)
         cur.execute("SET enable_seqscan = off")
         cur.execute("SET max_parallel_workers_per_gather = 0")
-
-        for qi in range(min(warmup, n_test)):
-            cur.execute(sql, (test[qi],), prepare=True, binary=True)
-            cur.fetchall()
 
         recall_sum = 0.0
         latency_sum = 0.0
@@ -507,6 +519,12 @@ def main():
         "--nprobe", type=int, default=10, help="Probes for index scan (default: 10)"
     )
     parser.add_argument(
+        "--nprobe-sweep",
+        type=str,
+        default=None,
+        help="Comma-separated nprobe values to sweep in one session (e.g., '5,10,20,40,80')",
+    )
+    parser.add_argument(
         "--nlist",
         type=int,
         default=None,
@@ -613,7 +631,22 @@ def main():
     if args.rerank is not None:
         rerank = args.rerank == "on"
 
-    if args.profile:
+    if args.nprobe_sweep:
+        nprobe_values = [int(x) for x in args.nprobe_sweep.split(",")]
+        max_nprobe = max(nprobe_values)
+        run_recall(
+            conn, hdf5_path, table, args.index_type, args.k,
+            args.num_queries, max_nprobe, ef_search=args.ef_search,
+            topk=args.topk, rerank=rerank, warmup=args.warmup,
+            warmup_only=True,
+        )
+        for nprobe in nprobe_values:
+            run_recall(
+                conn, hdf5_path, table, args.index_type, args.k,
+                args.num_queries, nprobe, ef_search=args.ef_search,
+                topk=args.topk, rerank=rerank, warmup=0,
+            )
+    elif args.profile:
         run_profile(
             conn,
             hdf5_path,
