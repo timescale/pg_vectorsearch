@@ -122,6 +122,14 @@ _PG_init(void)
 			MKTANN_MIN_NLIST,
 			MKTANN_MAX_NLIST,
 			NoLock);
+	add_int_reloption(
+			mktann_relopt_kind,
+			"kmeans_nredo",
+			"K-means restarts for cluster quality (1 = no restart)",
+			1,
+			1,
+			20,
+			NoLock);
 	add_bool_reloption(
 			mktann_relopt_kind,
 			"centroid_compression",
