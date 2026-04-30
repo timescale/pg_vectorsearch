@@ -3,6 +3,10 @@
  *
  * Provides set-returning functions to inspect the internal structure
  * of mktann indexes via SQL, useful for debugging and visualization.
+ *
+ * Functions:
+ *   mkt.centroid_pages(regclass) -- centroid tree structure
+ *   mkt.posting_pages(regclass)  -- posting list page chains
  */
 
 #include <postgres.h>
@@ -14,9 +18,11 @@
 #include <utils/rel.h>
 
 #include "index/centroid_page.h"
+#include "index/posting_page.h"
 #include "mktann_meta.h"
 
 PG_FUNCTION_INFO_V1(mkt_centroid_pages);
+PG_FUNCTION_INFO_V1(mkt_posting_pages);
 
 /* Format name lookup (indexed by MktCentroidFormat) */
 static const char *centroid_format_names[] = {
@@ -165,6 +171,174 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 	}
 
 	pfree(worklist);
+	relation_close(index, AccessShareLock);
+
+	PG_RETURN_NULL();
+}
+
+/* ----------------------------------------------------------------
+ * mkt.posting_pages(regclass)
+ *
+ * Returns one row per posting page: blkno, cluster_id, is_first,
+ * entry_count, max_entries, next_blkno, chain_pos.
+ *
+ * Walks all posting chains by finding leaf centroids (which store
+ * posting_head block numbers) and following next_blkno links.
+ * ---------------------------------------------------------------- */
+Datum
+mkt_posting_pages(PG_FUNCTION_ARGS)
+{
+	Oid			   indexoid = PG_GETARG_OID(0);
+	ReturnSetInfo *rsinfo	= (ReturnSetInfo *)fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	Relation index = relation_open(indexoid, AccessShareLock);
+
+	if (index->rd_rel->relkind != RELKIND_INDEX)
+	{
+		relation_close(index, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not an index",
+						RelationGetRelationName(index))));
+	}
+
+	Buffer meta_buf = ReadBuffer(index, 0);
+	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
+	Page meta_page = BufferGetPage(meta_buf);
+
+	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+			meta_page);
+
+	if (meta->magic != MKT_META_MAGIC)
+	{
+		UnlockReleaseBuffer(meta_buf);
+		relation_close(index, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not an mktann index",
+						RelationGetRelationName(index))));
+	}
+
+	BlockNumber first_centroid = meta->first_centroid;
+	UnlockReleaseBuffer(meta_buf);
+
+	if (!BlockNumberIsValid(first_centroid))
+	{
+		relation_close(index, AccessShareLock);
+		PG_RETURN_NULL();
+	}
+
+	/* BFS over centroid tree to collect posting heads from leaves */
+	int			 wl_cap	 = 64;
+	int			 wl_len	 = 0;
+	int			 wl_head = 0;
+	BlockNumber *wl		 = palloc(wl_cap * sizeof(BlockNumber));
+
+	int			 heads_cap = 64;
+	int			 heads_len = 0;
+	BlockNumber *heads	   = palloc(heads_cap * sizeof(BlockNumber));
+
+	wl[wl_len++] = first_centroid;
+
+	while (wl_head < wl_len)
+	{
+		BlockNumber blkno = wl[wl_head++];
+
+		Buffer buf = ReadBuffer(index, blkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		Page page = BufferGetPage(buf);
+
+		const MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
+		uint16_t					 nentries = opaque->entry_count;
+
+		if (BlockNumberIsValid(opaque->next_blkno))
+		{
+			if (wl_len >= wl_cap)
+			{
+				wl_cap *= 2;
+				wl = repalloc(wl, wl_cap * sizeof(BlockNumber));
+			}
+			wl[wl_len++] = opaque->next_blkno;
+		}
+
+		for (uint16_t i = 0; i < nentries; i++)
+		{
+			const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
+
+			if (entry->flags & MKT_CENTROID_FLAG_LEAF)
+			{
+				if (BlockNumberIsValid(entry->child_blkno))
+				{
+					if (heads_len >= heads_cap)
+					{
+						heads_cap *= 2;
+						heads = repalloc(
+								heads, heads_cap * sizeof(BlockNumber));
+					}
+					heads[heads_len++] = entry->child_blkno;
+				}
+			}
+			else if (BlockNumberIsValid(entry->child_blkno))
+			{
+				if (wl_len >= wl_cap)
+				{
+					wl_cap *= 2;
+					wl = repalloc(wl, wl_cap * sizeof(BlockNumber));
+				}
+				wl[wl_len++] = entry->child_blkno;
+			}
+		}
+
+		UnlockReleaseBuffer(buf);
+	}
+
+	pfree(wl);
+
+	/* Walk each posting chain */
+	for (int c = 0; c < heads_len; c++)
+	{
+		BlockNumber blkno	  = heads[c];
+		int			chain_pos = 0;
+
+		while (BlockNumberIsValid(blkno))
+		{
+			Buffer buf = ReadBuffer(index, blkno);
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+			Page page = BufferGetPage(buf);
+
+			const MktPostingPageOpaque *op = mkt_posting_opaque(page);
+			bool is_first = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+
+			Datum values[7];
+			bool  nulls[7] = {0};
+
+			values[0] = Int32GetDatum((int32)blkno);
+			values[1] = Int32GetDatum((int32)op->cluster_id);
+			values[2] = BoolGetDatum(is_first);
+			values[3] = Int32GetDatum((int32)op->entry_count);
+			values[4] = Int32GetDatum((int32)op->max_entries);
+
+			if (BlockNumberIsValid(op->next_blkno))
+				values[5] = Int32GetDatum((int32)op->next_blkno);
+			else
+				nulls[5] = true;
+
+			values[6] = Int32GetDatum(chain_pos);
+
+			tuplestore_putvalues(
+					rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+			BlockNumber next = op->next_blkno;
+			UnlockReleaseBuffer(buf);
+
+			blkno = next;
+			chain_pos++;
+		}
+	}
+
+	pfree(heads);
 	relation_close(index, AccessShareLock);
 
 	PG_RETURN_NULL();
