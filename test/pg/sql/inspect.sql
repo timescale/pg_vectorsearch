@@ -67,9 +67,44 @@ CREATE INDEX idx_wide ON wide USING mktann (v);
 SELECT * FROM mkt_centroid_pages('idx_wide'::regclass)
     ORDER BY blkno, entry;
 
+-- =====================================================================
+-- mkt.posting_pages inspection function
+-- =====================================================================
+
+-- Posting pages summary for single-level index
+-- (Use idx_l2c which has embeddings with 1000 rows, ~32 clusters)
+SELECT count(*) > 0 AS has_pages,
+       count(DISTINCT cluster_id) > 0 AS has_clusters,
+       bool_and(entry_count > 0) AS all_have_entries,
+       bool_and(max_entries > 0) AS all_have_capacity,
+       bool_and(chain_pos >= 0) AS valid_chain_pos,
+       count(*) FILTER (WHERE is_first) > 0 AS has_first_pages
+    FROM mkt.posting_pages('idx_l2c'::regclass);
+
+-- First page of each cluster has chain_pos=0
+SELECT bool_and(chain_pos = 0) AS first_at_pos_zero
+    FROM mkt.posting_pages('idx_l2c'::regclass)
+    WHERE is_first;
+
+-- Total entries across all posting pages should equal table row count
+SELECT sum(entry_count) AS total_entries
+    FROM mkt.posting_pages('idx_l2c'::regclass);
+
+-- Multi-level tree posting pages
+SELECT count(*) > 0 AS has_pages,
+       count(DISTINCT cluster_id) AS nclusters
+    FROM mkt.posting_pages('idx_ml'::regclass);
+
+-- Posting chains: verify next_blkno links are consistent
+-- (non-first pages should have chain_pos > 0)
+SELECT bool_and(chain_pos > 0) AS continuation_pages_ok
+    FROM mkt.posting_pages('idx_l2c'::regclass)
+    WHERE NOT is_first;
+
 -- Error case: not an mktann index
-CREATE INDEX idx_btree ON embeddings (id);
+CREATE INDEX IF NOT EXISTS idx_btree ON embeddings (id);
 SELECT * FROM mkt_centroid_pages('idx_btree'::regclass);
+SELECT * FROM mkt.posting_pages('idx_btree'::regclass);
 
 -- Cleanup
 DROP TABLE embeddings;
