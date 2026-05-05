@@ -340,6 +340,7 @@ TEST(bindings_create_destroy)
 			  0,
 			  0,
 			  0.0,
+			  0.0,
 			  &info);
 
 	ASSERT_NOT_NULL(handle, "create should succeed");
@@ -367,6 +368,7 @@ TEST(bindings_query)
 			NULL,
 			0,
 			0,
+			0.0,
 			0.0,
 			NULL);
 	ASSERT_NOT_NULL(handle, "create should succeed");
@@ -397,6 +399,7 @@ TEST(bindings_angular_metric)
 			NULL,
 			0,
 			0,
+			0.0,
 			0.0,
 			NULL);
 	ASSERT_NOT_NULL(handle, "angular create should succeed");
@@ -444,6 +447,7 @@ TEST(bindings_symmetric_mode)
 			0,
 			0,
 			0.0,
+			0.0,
 			NULL);
 
 	uint32_t result_ids[5];
@@ -471,6 +475,7 @@ TEST(bindings_kmeans_params)
 			  NULL,
 			  2,
 			  20,
+			  0.0,
 			  0.0,
 			  &info);
 

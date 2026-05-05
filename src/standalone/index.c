@@ -414,8 +414,9 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 				store_vec = norm_buf;
 			}
 
+			Distance primary_dist;
 			uint32_t c = mkt_hkmeans_assign(
-					tree, store_vec, idx->base.metric, NULL);
+					tree, store_vec, idx->base.metric, &primary_dist);
 
 			/* Store full-precision vector for reranking */
 			memcpy(idx->all_vectors + (size_t)id * dim,
@@ -425,37 +426,65 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 			cluster_list_append(&idx->clusters[c], id);
 			idx->nvecs++;
 
-			/* SOAR replication */
-			if (config->soar_lambda > 0.0)
+			/* Vector replication (see mktann_build.c for mode docs) */
+			bool has_soar	  = config->soar_lambda > 0.0;
+			bool has_boundary = config->boundary_epsilon > 0.0;
+
+			if (has_soar || has_boundary)
 			{
-				const float *cent = tree->leaf_centroids + (size_t)c * dim;
+				const float *leaves	 = tree->leaf_centroids;
+				uint32_t	 nleaves = tree->nleaves;
 
-				/* Compute normalized residual */
-				float norm = 0.0f;
-				for (Dimension d = 0; d < dim; d++)
+				uint32_t boundary_c2 = c;
+				if (has_boundary)
+					boundary_c2 = mkt_find_secondary_cluster(
+							store_vec,
+							leaves,
+							nleaves,
+							dim,
+							idx->base.metric,
+							c,
+							primary_dist,
+							config->boundary_epsilon);
+
+				bool should_replicate = has_boundary ? (boundary_c2 != c)
+													 : true;
+
+				if (should_replicate)
 				{
-					soar_residual[d] = store_vec[d] - cent[d];
-					norm += soar_residual[d] * soar_residual[d];
-				}
-				norm = sqrtf(norm);
-				if (norm > 0.0f)
-				{
-					float inv = 1.0f / norm;
-					for (Dimension d = 0; d < dim; d++)
-						soar_residual[d] *= inv;
-				}
+					uint32_t c2;
+					if (has_soar)
+					{
+						const float *cent = leaves + (size_t)c * dim;
+						float		 norm = 0.0f;
+						for (Dimension d = 0; d < dim; d++)
+						{
+							soar_residual[d] = store_vec[d] - cent[d];
+							norm += soar_residual[d] * soar_residual[d];
+						}
+						if (norm > 1e-7f)
+						{
+							float inv = 1.0f / sqrtf(norm);
+							for (Dimension d = 0; d < dim; d++)
+								soar_residual[d] *= inv;
+						}
+						c2 = mkt_find_soar_secondary(
+								store_vec,
+								leaves,
+								nleaves,
+								dim,
+								c,
+								soar_residual,
+								config->soar_lambda);
+					}
+					else
+					{
+						c2 = boundary_c2;
+					}
 
-				uint32_t c2 = mkt_find_soar_secondary(
-						store_vec,
-						tree->leaf_centroids,
-						tree->nleaves,
-						dim,
-						c,
-						soar_residual,
-						config->soar_lambda);
-
-				if (c2 != c)
-					cluster_list_append(&idx->clusters[c2], id);
+					if (c2 != c)
+						cluster_list_append(&idx->clusters[c2], id);
+				}
 			}
 		}
 	}
@@ -540,7 +569,8 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 		idx->has_posting_data = true;
 	}
 
-	idx->has_replication = config->soar_lambda > 0.0;
+	idx->has_replication = config->soar_lambda > 0.0 ||
+						   config->boundary_epsilon > 0.0;
 
 	/* Write centroid pages — after posting lists so leaf entries
 	 * store actual posting block numbers (not just cluster indices). */

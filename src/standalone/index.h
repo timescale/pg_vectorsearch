@@ -68,11 +68,12 @@ typedef struct MktIndexConfig
 	uint32_t		  fan_out;		/* 0 = auto from nlist */
 	MktCentroidFormat centroid_fmt; /* rabitq, float, half */
 	DistanceMetric	  metric;
-	uint32_t		  km_nredo;		 /* k-means restarts (0 = default) */
-	uint32_t		  km_max_iter;	 /* k-means iterations (0 = default) */
-	double			  soar_lambda;	 /* SOAR replication (0 = off) */
-	bool			  encode_rabitq; /* encode posting lists with RaBitQ */
-	MktPostingFormat  posting_fmt;	 /* flat or pages */
+	uint32_t		  km_nredo;			/* k-means restarts (0 = default) */
+	uint32_t		  km_max_iter;		/* k-means iterations (0 = default) */
+	double			  soar_lambda;		/* SOAR replication (0 = off) */
+	double			  boundary_epsilon; /* boundary gate threshold (0 = off) */
+	bool			  encode_rabitq;	/* encode posting lists with RaBitQ */
+	MktPostingFormat  posting_fmt;		/* flat or pages */
 } MktIndexConfig;
 
 /* ----------------------------------------------------------------

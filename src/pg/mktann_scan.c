@@ -131,8 +131,9 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	mkt_query_state_init(&ss->qstate, &ss->index_base, max_k, max_nprobe);
 
 	/* Enable TID dedup if index uses vector replication */
-	MktannOptions *opts			   = (MktannOptions *)index->rd_options;
-	bool		   has_replication = opts != NULL && opts->soar_lambda > 0.0;
+	MktannOptions *opts	 = (MktannOptions *)index->rd_options;
+	bool has_replication = opts != NULL && (opts->soar_lambda > 0.0 ||
+											opts->boundary_epsilon > 0.0);
 	if (has_replication)
 	{
 		uint32_t avg_per_cluster = meta->ntuples / Max(meta->nlist, 1);

@@ -138,6 +138,14 @@ _PG_init(void)
 			0.0,
 			100.0,
 			NoLock);
+	add_real_reloption(
+			mktann_relopt_kind,
+			"boundary_epsilon",
+			"Boundary replication gap threshold (0 = off)",
+			0.0,
+			0.0,
+			100.0,
+			NoLock);
 	add_bool_reloption(
 			mktann_relopt_kind,
 			"centroid_compression",

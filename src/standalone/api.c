@@ -80,6 +80,7 @@ mkt_handle_create(
 		uint32_t		 km_nredo,
 		uint32_t		 km_max_iter,
 		double			 soar_lambda,
+		double			 boundary_epsilon,
 		MktBuildInfo	*info)
 {
 	/* Create context as child of the current context if one exists,
@@ -93,15 +94,16 @@ mkt_handle_create(
 	MktCentroidFormat fmt = parse_centroid_fmt(centroid_fmt);
 
 	MktIndexConfig config = {
-			.nlist		   = nlist,
-			.fan_out	   = fan_out,
-			.centroid_fmt  = fmt,
-			.metric		   = parse_metric(metric),
-			.km_nredo	   = km_nredo,
-			.km_max_iter   = km_max_iter,
-			.soar_lambda   = soar_lambda,
-			.encode_rabitq = true,
-			.posting_fmt   = parse_posting_fmt(posting_fmt),
+			.nlist			  = nlist,
+			.fan_out		  = fan_out,
+			.centroid_fmt	  = fmt,
+			.metric			  = parse_metric(metric),
+			.km_nredo		  = km_nredo,
+			.km_max_iter	  = km_max_iter,
+			.soar_lambda	  = soar_lambda,
+			.boundary_epsilon = boundary_epsilon,
+			.encode_rabitq	  = true,
+			.posting_fmt	  = parse_posting_fmt(posting_fmt),
 	};
 
 	MktIndex *idx = mkt_index_build(src, &config);
@@ -163,6 +165,7 @@ mkt_handle_create_from_array(
 		uint32_t	  km_nredo,
 		uint32_t	  km_max_iter,
 		double		  soar_lambda,
+		double		  boundary_epsilon,
 		MktBuildInfo *info)
 {
 	MktArraySource array_src;
@@ -177,6 +180,7 @@ mkt_handle_create_from_array(
 			km_nredo,
 			km_max_iter,
 			soar_lambda,
+			boundary_epsilon,
 			info);
 }
 

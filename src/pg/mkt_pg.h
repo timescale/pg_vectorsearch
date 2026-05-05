@@ -86,6 +86,7 @@ typedef struct MktannOptions
 	int	   nlist;				 /* number of clusters (0 = auto) */
 	int	   kmeans_nredo;		 /* k-means restarts (1 = no restart) */
 	double soar_lambda;			 /* SOAR replication lambda (0=off) */
+	double boundary_epsilon;	 /* boundary replication threshold (0=off) */
 	bool   centroid_compression; /* use RaBitQ for centroid pages */
 } MktannOptions;
 
