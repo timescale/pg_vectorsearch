@@ -329,7 +329,18 @@ TEST(bindings_create_destroy)
 
 	MktBuildInfo info;
 	MktHandle	*handle = mkt_handle_create_from_array(
-			  vecs, 500, 16, 5, 0, "euclidean", "rabitq", NULL, 0, 0, &info);
+			  vecs,
+			  500,
+			  16,
+			  5,
+			  0,
+			  "euclidean",
+			  "rabitq",
+			  NULL,
+			  0,
+			  0,
+			  0.0,
+			  &info);
 
 	ASSERT_NOT_NULL(handle, "create should succeed");
 	ASSERT_TRUE(info.nlist > 0, "should have clusters");
@@ -346,7 +357,18 @@ TEST(bindings_query)
 	float	*vecs = make_vectors(nvecs, dim, 42);
 
 	MktHandle *handle = mkt_handle_create_from_array(
-			vecs, nvecs, dim, 10, 0, "euclidean", "rabitq", NULL, 0, 0, NULL);
+			vecs,
+			nvecs,
+			dim,
+			10,
+			0,
+			"euclidean",
+			"rabitq",
+			NULL,
+			0,
+			0,
+			0.0,
+			NULL);
 	ASSERT_NOT_NULL(handle, "create should succeed");
 
 	uint32_t result_ids[10];
@@ -365,7 +387,18 @@ TEST(bindings_angular_metric)
 	float	*vecs = make_vectors(nvecs, dim, 77);
 
 	MktHandle *handle = mkt_handle_create_from_array(
-			vecs, nvecs, dim, 5, 0, "angular", "rabitq", NULL, 0, 0, NULL);
+			vecs,
+			nvecs,
+			dim,
+			5,
+			0,
+			"angular",
+			"rabitq",
+			NULL,
+			0,
+			0,
+			0.0,
+			NULL);
 	ASSERT_NOT_NULL(handle, "angular create should succeed");
 
 	uint32_t result_ids[5];
@@ -400,7 +433,18 @@ TEST(bindings_symmetric_mode)
 	float	*vecs = make_vectors(nvecs, dim, 42);
 
 	MktHandle *handle = mkt_handle_create_from_array(
-			vecs, nvecs, dim, 5, 0, "euclidean", "rabitq", NULL, 0, 0, NULL);
+			vecs,
+			nvecs,
+			dim,
+			5,
+			0,
+			"euclidean",
+			"rabitq",
+			NULL,
+			0,
+			0,
+			0.0,
+			NULL);
 
 	uint32_t result_ids[5];
 	uint32_t count = mkt_handle_query(
@@ -417,7 +461,18 @@ TEST(bindings_kmeans_params)
 
 	MktBuildInfo info;
 	MktHandle	*handle = mkt_handle_create_from_array(
-			  vecs, 500, 16, 5, 0, "euclidean", "rabitq", NULL, 2, 20, &info);
+			  vecs,
+			  500,
+			  16,
+			  5,
+			  0,
+			  "euclidean",
+			  "rabitq",
+			  NULL,
+			  2,
+			  20,
+			  0.0,
+			  &info);
 
 	ASSERT_NOT_NULL(handle, "create with kmeans params should succeed");
 	ASSERT_TRUE(info.nlist > 0, "should have clusters");

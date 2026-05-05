@@ -70,6 +70,7 @@ typedef struct MktIndexConfig
 	DistanceMetric	  metric;
 	uint32_t		  km_nredo;		 /* k-means restarts (0 = default) */
 	uint32_t		  km_max_iter;	 /* k-means iterations (0 = default) */
+	double			  soar_lambda;	 /* SOAR replication (0 = off) */
 	bool			  encode_rabitq; /* encode posting lists with RaBitQ */
 	MktPostingFormat  posting_fmt;	 /* flat or pages */
 } MktIndexConfig;
@@ -99,6 +100,7 @@ typedef struct MktIndex
 	char		   **flat_pages;	   /* flat mode: [nlist] buffers */
 	uint32_t		 max_cluster_size; /* largest cluster entry count */
 	bool			 has_posting_data;
+	bool			 has_replication;
 
 	/* Per-cluster ID lists for brute-force fallback */
 	MktClusterList *clusters; /* [nlist] */

@@ -55,6 +55,7 @@ typedef struct
 	uint32_t	warmup;
 	uint32_t	nredo;
 	uint32_t	km_iter;
+	double		soar_lambda;
 	const char *hdf5_path;
 	const char *metric;
 	const char *centroid_fmt;
@@ -193,6 +194,8 @@ print_usage(CmdContext *ctx)
 		   DEFAULT_WARMUP);
 	printf("  --nredo <int>      K-means restarts\n");
 	printf("  --km-iter <int>    K-means iterations\n");
+	printf("  --soar-lambda <float>  SOAR replication lambda "
+		   "(0=off)\n");
 	printf("  --no-rerank        Skip reranking (return approximate)\n");
 #ifdef MKT_HAVE_HDF5
 	printf("  --hdf5 <path>      HDF5 dataset\n");
@@ -240,6 +243,7 @@ cmd_bench_search(CmdContext *ctx)
 			{"posting-fmt", required_argument, 0, 'T'},
 			{"posting-layout", required_argument, 0, 'P'},
 			{"no-rerank", no_argument, 0, 'N'},
+			{"soar-lambda", required_argument, 0, 'S'},
 			{"help", no_argument, 0, 'h'},
 			{0, 0, 0, 0},
 	};
@@ -305,6 +309,9 @@ cmd_bench_search(CmdContext *ctx)
 			break;
 		case 'N':
 			config.no_rerank = true;
+			break;
+		case 'S':
+			config.soar_lambda = atof(optarg);
 			break;
 		case 'h':
 			config.help = true;
@@ -399,6 +406,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.posting_layout,
 				 config.nredo,
 				 config.km_iter,
+				 config.soar_lambda,
 				 &info);
 		double build_ms = (double)(get_time_ns() - t0) / 1e6;
 
@@ -447,6 +455,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.posting_layout,
 				 config.nredo,
 				 config.km_iter,
+				 config.soar_lambda,
 				 &info);
 		double build_ms = (double)(get_time_ns() - t0) / 1e6;
 		free(train_vecs);

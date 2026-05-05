@@ -79,6 +79,7 @@ mkt_handle_create(
 		const char		*posting_fmt,
 		uint32_t		 km_nredo,
 		uint32_t		 km_max_iter,
+		double			 soar_lambda,
 		MktBuildInfo	*info)
 {
 	/* Create context as child of the current context if one exists,
@@ -98,6 +99,7 @@ mkt_handle_create(
 			.metric		   = parse_metric(metric),
 			.km_nredo	   = km_nredo,
 			.km_max_iter   = km_max_iter,
+			.soar_lambda   = soar_lambda,
 			.encode_rabitq = true,
 			.posting_fmt   = parse_posting_fmt(posting_fmt),
 	};
@@ -160,6 +162,7 @@ mkt_handle_create_from_array(
 		const char	 *posting_fmt,
 		uint32_t	  km_nredo,
 		uint32_t	  km_max_iter,
+		double		  soar_lambda,
 		MktBuildInfo *info)
 {
 	MktArraySource array_src;
@@ -173,6 +176,7 @@ mkt_handle_create_from_array(
 			posting_fmt,
 			km_nredo,
 			km_max_iter,
+			soar_lambda,
 			info);
 }
 

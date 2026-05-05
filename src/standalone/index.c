@@ -378,12 +378,20 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 
 	/* Assign vectors to clusters.
 	 * Stay in idx_ctx so cluster list growth allocations are
-	 * long-lived. Only norm_buf is temporary (freed with build_ctx). */
-	float *norm_buf = NULL;
+	 * long-lived. Only norm_buf/soar_residual are temporary
+	 * (freed with build_ctx). */
+	float *norm_buf		 = NULL;
+	float *soar_residual = NULL;
 	if (idx->base.metric == DISTANCE_COSINE)
 	{
 		mkt_memctx_switch(build_ctx);
 		norm_buf = mkt_alloc(dim * sizeof(float));
+		mkt_memctx_switch(idx_ctx);
+	}
+	if (config->soar_lambda > 0.0)
+	{
+		mkt_memctx_switch(build_ctx);
+		soar_residual = mkt_alloc(dim * sizeof(float));
 		mkt_memctx_switch(idx_ctx);
 	}
 
@@ -416,6 +424,39 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 
 			cluster_list_append(&idx->clusters[c], id);
 			idx->nvecs++;
+
+			/* SOAR replication */
+			if (config->soar_lambda > 0.0)
+			{
+				const float *cent = tree->leaf_centroids + (size_t)c * dim;
+
+				/* Compute normalized residual */
+				float norm = 0.0f;
+				for (Dimension d = 0; d < dim; d++)
+				{
+					soar_residual[d] = store_vec[d] - cent[d];
+					norm += soar_residual[d] * soar_residual[d];
+				}
+				norm = sqrtf(norm);
+				if (norm > 0.0f)
+				{
+					float inv = 1.0f / norm;
+					for (Dimension d = 0; d < dim; d++)
+						soar_residual[d] *= inv;
+				}
+
+				uint32_t c2 = mkt_find_soar_secondary(
+						store_vec,
+						tree->leaf_centroids,
+						tree->nleaves,
+						dim,
+						c,
+						soar_residual,
+						config->soar_lambda);
+
+				if (c2 != c)
+					cluster_list_append(&idx->clusters[c2], id);
+			}
 		}
 	}
 
@@ -498,6 +539,8 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 
 		idx->has_posting_data = true;
 	}
+
+	idx->has_replication = config->soar_lambda > 0.0;
 
 	/* Write centroid pages — after posting lists so leaf entries
 	 * store actual posting block numbers (not just cluster indices). */
