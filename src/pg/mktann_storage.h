@@ -42,4 +42,10 @@ typedef struct MktannStorage
 void mktann_storage_init(
 		MktannStorage *s, Relation index, Relation rel, DistanceMetric metric);
 
+/*
+ * Lazily set the heap relation after init. Updates the vtable to
+ * use the read_stream-optimized rerank path when applicable.
+ */
+void mktann_storage_set_rel(MktannStorage *s, Relation rel);
+
 #endif /* MKTANN_STORAGE_H */
