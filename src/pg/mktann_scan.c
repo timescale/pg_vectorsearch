@@ -198,9 +198,10 @@ execute_search(IndexScanDesc scan)
 {
 	MktannScanState *ss = (MktannScanState *)scan->opaque;
 
-	/* Lazily set heap relation for reranking */
+	/* Lazily set heap relation for reranking (rel is NULL at
+	 * beginscan time; heapRelation becomes available later) */
 	if (scan->heapRelation != NULL && ss->storage.rel == NULL)
-		ss->storage.rel = scan->heapRelation;
+		mktann_storage_set_rel(&ss->storage, scan->heapRelation);
 
 	/* Extract query vector */
 	Datum	   query_datum = scan->orderByData[0].sk_argument;
