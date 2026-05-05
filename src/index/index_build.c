@@ -102,3 +102,43 @@ mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out)
 		f = (uint32_t)ceil(cbrt((double)nlist));
 	return f;
 }
+
+uint32_t
+mkt_find_soar_secondary(
+		const float *vec,
+		const float *leaf_centroids,
+		uint32_t	 nleaves,
+		Dimension	 dim,
+		uint32_t	 primary_cluster,
+		const float *normalized_residual,
+		double		 lambda)
+{
+	Distance best_oa = INFINITY;
+	uint32_t best_c	 = primary_cluster;
+
+	for (uint32_t i = 0; i < nleaves; i++)
+	{
+		if (i == primary_cluster)
+			continue;
+
+		const float *cent	 = leaf_centroids + (size_t)i * dim;
+		double		 sq_dist = 0.0;
+		double		 dot	 = 0.0;
+
+		for (Dimension d = 0; d < dim; d++)
+		{
+			double diff = (double)vec[d] - (double)cent[d];
+			sq_dist += diff * diff;
+			dot += diff * (double)normalized_residual[d];
+		}
+
+		Distance oa = (Distance)(sq_dist + lambda * dot * dot);
+		if (oa < best_oa)
+		{
+			best_oa = oa;
+			best_c	= i;
+		}
+	}
+
+	return best_c;
+}

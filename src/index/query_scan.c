@@ -163,6 +163,22 @@ scan_clusters(
 
 	qs->pscan.storage = idx->posting_storage;
 
+	/* Enable TID dedup if caller set up a hash set.
+	 * Bump generation instead of memset — O(1) reset. */
+	if (qs->dedup_set != NULL && n_results > 1)
+	{
+		qs->dedup_gen++;
+		qs->pscan.seen_tids		= qs->dedup_set;
+		qs->pscan.seen_gens		= qs->dedup_gens;
+		qs->pscan.seen_tids_cap = qs->dedup_cap;
+		qs->pscan.seen_gen		= qs->dedup_gen;
+	}
+	else
+	{
+		qs->pscan.seen_tids		= NULL;
+		qs->pscan.seen_tids_cap = 0;
+	}
+
 	uint32_t total_pages   = 0;
 	uint32_t total_entries = 0;
 

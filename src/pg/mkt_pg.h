@@ -80,12 +80,13 @@ typedef struct RaBitQParamsPG
 
 typedef struct MktannOptions
 {
-	int32 vl_len_;				/* varlena header (required by reloptions) */
-	int	  distance_mode;		/* MktDistanceMode */
-	int	  fan_out;				/* children per tree node (2-255) */
-	int	  nlist;				/* number of clusters (0 = auto) */
-	int	  kmeans_nredo;			/* k-means restarts (1 = no restart) */
-	bool  centroid_compression; /* use RaBitQ for centroid pages */
+	int32  vl_len_;				 /* varlena header (required by reloptions) */
+	int	   distance_mode;		 /* MktDistanceMode */
+	int	   fan_out;				 /* children per tree node (2-255) */
+	int	   nlist;				 /* number of clusters (0 = auto) */
+	int	   kmeans_nredo;		 /* k-means restarts (1 = no restart) */
+	double soar_lambda;			 /* SOAR replication lambda (0=off) */
+	bool   centroid_compression; /* use RaBitQ for centroid pages */
 } MktannOptions;
 
 #define MKTANN_DEFAULT_FAN_OUT 32

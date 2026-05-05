@@ -130,6 +130,22 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	/* Initialize shared query state */
 	mkt_query_state_init(&ss->qstate, &ss->index_base, max_k, max_nprobe);
 
+	/* Enable TID dedup if index uses vector replication */
+	MktannOptions *opts			   = (MktannOptions *)index->rd_options;
+	bool		   has_replication = opts != NULL && opts->soar_lambda > 0.0;
+	if (has_replication)
+	{
+		uint32_t avg_per_cluster = meta->ntuples / Max(meta->nlist, 1);
+		uint32_t est_entries	 = max_nprobe * avg_per_cluster * 2;
+		uint32_t cap			 = 1024;
+		while (cap < est_entries * 2)
+			cap *= 2;
+		ss->qstate.dedup_set  = palloc(cap * sizeof(uint64_t));
+		ss->qstate.dedup_gens = palloc0(cap * sizeof(uint32_t));
+		ss->qstate.dedup_cap  = cap;
+		ss->qstate.dedup_gen  = 0;
+	}
+
 	/* Pre-allocate result buffer */
 	ss->results = palloc(max_k * sizeof(MktannScanResult));
 

@@ -74,4 +74,25 @@ void mkt_write_centroid_tree(
 uint32_t
 mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out);
 
+/*
+ * Find secondary cluster via SOAR (Spilling with Orthogonality-
+ * Amplified Residuals).
+ *
+ * Computes the orthogonality-amplified distance for each candidate
+ * centroid:
+ *   OA(vec, c) = ||vec - c||^2 + lambda * dot(vec - c, r)^2
+ * where r is the normalized residual from the primary centroid.
+ *
+ * Returns the centroid minimizing OA distance (excluding primary).
+ * When lambda=0, this degenerates to standard 2nd-nearest.
+ */
+uint32_t mkt_find_soar_secondary(
+		const float *vec,
+		const float *leaf_centroids,
+		uint32_t	 nleaves,
+		Dimension	 dim,
+		uint32_t	 primary_cluster,
+		const float *normalized_residual,
+		double		 lambda);
+
 #endif /* MKT_INDEX_BUILD_H */

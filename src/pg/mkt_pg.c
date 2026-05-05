@@ -130,6 +130,14 @@ _PG_init(void)
 			1,
 			20,
 			NoLock);
+	add_real_reloption(
+			mktann_relopt_kind,
+			"soar_lambda",
+			"SOAR replication lambda (0 = off)",
+			0.0,
+			0.0,
+			100.0,
+			NoLock);
 	add_bool_reloption(
 			mktann_relopt_kind,
 			"centroid_compression",

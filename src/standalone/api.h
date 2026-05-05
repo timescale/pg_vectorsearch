@@ -50,6 +50,7 @@ MktHandle *mkt_handle_create(
 		const char		*posting_fmt,
 		uint32_t		 km_nredo,
 		uint32_t		 km_max_iter,
+		double			 soar_lambda,
 		MktBuildInfo	*info);
 
 /*
@@ -68,6 +69,7 @@ MktHandle *mkt_handle_create_from_array(
 		const char	 *posting_fmt,
 		uint32_t	  km_nredo,
 		uint32_t	  km_max_iter,
+		double		  soar_lambda,
 		MktBuildInfo *info);
 
 /*
