@@ -435,6 +435,12 @@ static MktFastscanBuildLutFn	   g_fastscan_build_lut_hacc_fn	 = NULL;
 static atomic_bool				   g_fastscan_initialized		 = false;
 
 void
+mkt_fastscan_reset_simd(void)
+{
+	atomic_store(&g_fastscan_initialized, false);
+}
+
+void
 mkt_fastscan_init_simd(void)
 {
 	if (atomic_load(&g_fastscan_initialized))

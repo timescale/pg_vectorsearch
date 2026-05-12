@@ -23,6 +23,7 @@ int cmd_bench_cluster(CmdContext *ctx);
 int cmd_bench_search(CmdContext *ctx);
 int cmd_bench_rabitq_kernel(CmdContext *ctx);
 int cmd_bench_page_score(CmdContext *ctx);
+int cmd_bench_fastscan_kernel(CmdContext *ctx);
 
 #if defined(MKT_HAVE_FAISS) && defined(MKT_HAVE_HDF5)
 int cmd_verify_rabitq(CmdContext *ctx);
@@ -48,6 +49,9 @@ static const Command bench_commands[] = {
 		{"search", cmd_bench_search, "Benchmark end-to-end search"},
 		{"rabitq-kernel", cmd_bench_rabitq_kernel, "Benchmark RaBitQ kernels"},
 		{"page-score", cmd_bench_page_score, "Benchmark page-level scoring"},
+		{"fastscan-kernel",
+		 cmd_bench_fastscan_kernel,
+		 "Benchmark fastscan VPSHUFB kernels"},
 		{NULL, NULL, NULL},
 };
 

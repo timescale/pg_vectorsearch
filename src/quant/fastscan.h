@@ -168,6 +168,7 @@ void mkt_fastscan_distance_batch(
 		uint16_t					  *accum_buf);
 
 void		mkt_fastscan_init_simd(void);
+void		mkt_fastscan_reset_simd(void);
 const char *mkt_fastscan_impl_name(void);
 
 /* SIMD implementations */
