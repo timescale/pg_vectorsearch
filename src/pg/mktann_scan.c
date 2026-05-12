@@ -114,6 +114,9 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 
 	ss->index_base.rabitq_seed = meta->rabitq_seed;
 
+	bool has_fastscan		= meta->flags & MKT_META_FLAG_FASTSCAN;
+	ss->index_base.fastscan = has_fastscan ? mkt_fastscan_bits : 0;
+
 	UnlockReleaseBuffer(meta_buf);
 
 	/* Cached RaBitQ params + rotated global mean */
@@ -129,6 +132,9 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 
 	/* Initialize shared query state */
 	mkt_query_state_init(&ss->qstate, &ss->index_base, max_k, max_nprobe);
+
+	if (has_fastscan)
+		mkt_posting_scan_enable_fastscan(&ss->qstate.pscan, mkt_fastscan_bits);
 
 	/* Enable TID dedup if index uses vector replication */
 	MktannOptions *opts	 = (MktannOptions *)index->rd_options;

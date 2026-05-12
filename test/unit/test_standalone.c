@@ -8,8 +8,15 @@
 #include <math.h>
 #include <string.h>
 
+#include "algo/distance.h"
 #include "core/memory.h"
+#include "index/posting_build.h"
+#include "index/posting_convert.h"
+#include "index/posting_page.h"
+#include "index/posting_scan.h"
 #include "mkt_test.h"
+#include "quant/fastscan.h"
+#include "quant/rabitq.h"
 #include "standalone/api.h"
 #include "standalone/index.h"
 #include "standalone/query.h"
@@ -383,6 +390,70 @@ TEST(bindings_query)
 	ASSERT_TRUE(result_ids[0] < nvecs, "result ID in range");
 
 	mkt_handle_destroy(handle);
+}
+
+TEST(posting_convert_aos_to_fastscan)
+{
+	uint32_t dim   = 32;
+	uint32_t nvecs = 200;
+
+	mkt_distance_init();
+	mkt_rabitq_init_simd();
+	mkt_fastscan_init_simd();
+
+	/* Build an AoS index (fastscan=false) */
+	float *cvecs = make_vectors(nvecs, dim, 42);
+
+	MktArraySource array_src;
+	mkt_array_source_init(&array_src, cvecs, nvecs, dim);
+
+	MktIndexConfig cfg = {
+			.nlist		   = 5,
+			.metric		   = DISTANCE_L2,
+			.encode_rabitq = true,
+			.posting_fmt   = MKT_POSTING_FMT_PAGES,
+			.fastscan	   = 0,
+	};
+
+	MktIndex *idx = mkt_index_build(&array_src.base, &cfg);
+	ASSERT_NOT_NULL(idx, "AoS index built");
+	ASSERT_TRUE(
+			idx->posting_heads[0] != InvalidBlockNumber,
+			"cluster 0 has pages");
+
+	/* Count AoS entries for cluster 0 */
+	uint32_t	aos_count = 0;
+	BlockNumber blkno	  = idx->posting_heads[0];
+	while (blkno != InvalidBlockNumber)
+	{
+		Page page = idx->posting_storage.pages + (size_t)blkno * BLCKSZ;
+		MktPostingPageOpaque *op = mkt_posting_opaque(page);
+		aos_count += op->entry_count;
+		blkno = op->next_blkno;
+	}
+	ASSERT_TRUE(aos_count > 0, "cluster 0 has entries");
+
+	/* Convert cluster 0 to fastscan */
+	BlockNumber fs_head = mkt_posting_convert_to_fastscan(
+			&idx->posting_storage.base, idx->posting_heads[0], dim);
+	ASSERT_TRUE(fs_head != InvalidBlockNumber, "fastscan chain created");
+
+	/* Count fastscan entries */
+	uint32_t fs_count = 0;
+	blkno			  = fs_head;
+	while (blkno != InvalidBlockNumber)
+	{
+		Page page = idx->posting_storage.pages + (size_t)blkno * BLCKSZ;
+		MktPostingPageOpaque *op = mkt_posting_opaque(page);
+		ASSERT_TRUE(
+				op->flags & MKT_POSTING_PAGE_FASTSCAN,
+				"converted page has fastscan flag");
+		fs_count += op->entry_count;
+		blkno = op->next_blkno;
+	}
+	ASSERT_EQ(fs_count, aos_count, "fastscan has same entry count as AoS");
+
+	mkt_index_destroy(idx);
 }
 
 TEST(bindings_query_fastscan)
