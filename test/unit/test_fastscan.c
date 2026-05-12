@@ -49,6 +49,14 @@ get_fastscan_simd_mask(const char *variant, uint32_t *simd_mask)
 		*simd_mask = SIMD_AVX512F;
 		return true;
 	}
+#elif defined(__aarch64__) || defined(_M_ARM64)
+	if (strcmp(variant, "neon") == 0)
+	{
+		if (!(mkt_detect_simd() & SIMD_NEON))
+			return false;
+		*simd_mask = SIMD_NEON;
+		return true;
+	}
 #endif
 	(void)variant;
 	*simd_mask = 0xFFFFFFFF;
@@ -557,7 +565,8 @@ TEST(lut_dim_not_multiple_of_4)
  * Parameterized SIMD tests: run accumulate + LUT at each level
  * ---------------------------------------------------------------- */
 
-TEST_PARAMETERIZED(simd_accumulate_equivalence, "scalar", "avx2", "avx512")
+TEST_PARAMETERIZED(
+		simd_accumulate_equivalence, "scalar", "avx2", "avx512", "neon")
 {
 	SKIP_IF_FASTSCAN_SIMD_NOT_AVAILABLE(param);
 
@@ -606,7 +615,7 @@ TEST_PARAMETERIZED(simd_accumulate_equivalence, "scalar", "avx2", "avx512")
 }
 
 TEST_PARAMETERIZED(
-		simd_accumulate_hacc_equivalence, "scalar", "avx2", "avx512")
+		simd_accumulate_hacc_equivalence, "scalar", "avx2", "avx512", "neon")
 {
 	SKIP_IF_FASTSCAN_SIMD_NOT_AVAILABLE(param);
 

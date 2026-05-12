@@ -213,6 +213,20 @@ void mkt_fastscan_build_lut_hacc_avx512(
 		float		*delta_out,
 		float		*bias_out);
 
+#elif defined(__aarch64__) || defined(_M_ARM64)
+
+void mkt_fastscan_accumulate_neon(
+		const uint8_t *codes,
+		const uint8_t *lut,
+		uint16_t	  *accum,
+		Dimension	   dim);
+
+void mkt_fastscan_accumulate_hacc_neon(
+		const uint8_t *codes,
+		const uint8_t *lut,
+		int32_t		  *accum,
+		Dimension	   dim);
+
 #endif
 #endif
 

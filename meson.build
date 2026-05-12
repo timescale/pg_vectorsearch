@@ -316,11 +316,16 @@ if simd_mode == 'full'
     simd_sources += files(
       'src/algo/distance_neon.c',
       'src/quant/rabitq_neon.c',
+      'src/quant/fastscan_neon.c',
     )
   elif host_machine.cpu_family() == 'arm'
     # 32-bit ARM: needs -mfpu=neon flag, keep as separate library
     mkt_neon_lib = static_library('mkt_neon',
-      ['src/algo/distance_neon.c', 'src/quant/rabitq_neon.c'],
+      [
+        'src/algo/distance_neon.c',
+        'src/quant/rabitq_neon.c',
+        'src/quant/fastscan_neon.c',
+      ],
       c_args: ['-mfpu=neon'],
       include_directories: src_inc,
     )
@@ -565,6 +570,7 @@ if build_pg_extension
       mkt_pg_simd_sources += files(
         'src/algo/distance_neon.c',
         'src/quant/rabitq_neon.c',
+        'src/quant/fastscan_neon.c',
       )
     endif
   endif
