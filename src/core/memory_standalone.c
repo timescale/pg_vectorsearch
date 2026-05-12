@@ -57,6 +57,13 @@ arena_block_data(MktArenaBlock *block)
 	return (char *)block + header_size;
 }
 
+/*
+ * Each allocation is prefixed with a size_t header storing the
+ * requested size. This lets mkt_realloc copy min(old, new) bytes
+ * without reading past the old allocation.
+ */
+#define ALLOC_HDR_SIZE align_up(sizeof(size_t), MKT_ARENA_ALIGNMENT)
+
 /* Allocate from arena with specified alignment */
 static void *
 arena_alloc(MktArena *arena, size_t size, size_t alignment)
@@ -65,21 +72,25 @@ arena_alloc(MktArena *arena, size_t size, size_t alignment)
 		return NULL;
 
 	size_t aligned_size = align_up(size, alignment);
+	size_t need			= ALLOC_HDR_SIZE + aligned_size;
 
 	/* Try current block first */
 	if (arena->current)
 	{
-		void	 *data		   = arena_block_data(arena->current);
-		uintptr_t base		   = (uintptr_t)data + arena->current->used;
-		uintptr_t aligned_base = align_up(base, alignment);
-		size_t	  padding	   = aligned_base - (uintptr_t)data;
+		void	 *data = arena_block_data(arena->current);
+		uintptr_t base = (uintptr_t)data + arena->current->used;
 
-		if (padding + aligned_size <= arena->current->size)
+		/* Align the user pointer; header sits just before it */
+		uintptr_t user_ptr = align_up(base + ALLOC_HDR_SIZE, alignment);
+		uintptr_t hdr_ptr  = user_ptr - ALLOC_HDR_SIZE;
+		size_t	  end	   = (hdr_ptr - (uintptr_t)data) + need;
+
+		if (end <= arena->current->size)
 		{
-			void *ptr			 = (void *)aligned_base;
-			arena->current->used = padding + aligned_size;
-			arena->total_allocated += aligned_size;
-			return ptr;
+			*(size_t *)hdr_ptr	 = size;
+			arena->current->used = end;
+			arena->total_allocated += need;
+			return (void *)user_ptr;
 		}
 	}
 
@@ -90,8 +101,7 @@ arena_alloc(MktArena *arena, size_t size, size_t alignment)
 	size_t		   extra_for_alignment = alignment > MKT_ARENA_ALIGNMENT
 											   ? alignment - MKT_ARENA_ALIGNMENT
 											   : 0;
-	MktArenaBlock *block			   = arena_block_create(
-			  aligned_size + extra_for_alignment);
+	MktArenaBlock *block = arena_block_create(need + extra_for_alignment);
 	if (!block)
 		return NULL;
 
@@ -100,15 +110,17 @@ arena_alloc(MktArena *arena, size_t size, size_t alignment)
 	arena->blocks  = block;
 	arena->current = block;
 
-	/* Allocate from new block with proper alignment */
-	void	 *data		   = arena_block_data(block);
-	uintptr_t base		   = (uintptr_t)data;
-	uintptr_t aligned_base = align_up(base, alignment);
-	size_t	  padding	   = aligned_base - base;
+	/* Allocate from new block — align the user pointer */
+	void	 *data	   = arena_block_data(block);
+	uintptr_t base	   = (uintptr_t)data;
+	uintptr_t user_ptr = align_up(base + ALLOC_HDR_SIZE, alignment);
+	uintptr_t hdr_ptr  = user_ptr - ALLOC_HDR_SIZE;
+	size_t	  end	   = (hdr_ptr - base) + need;
 
-	block->used = padding + aligned_size;
-	arena->total_allocated += aligned_size;
-	return (void *)aligned_base;
+	*(size_t *)hdr_ptr = size;
+	block->used		   = end;
+	arena->total_allocated += need;
+	return (void *)user_ptr;
 }
 
 /* Create a new arena context */
@@ -277,14 +289,6 @@ mkt_memctx_alloc0(MktMemCtx ctx, size_t size)
 	return ptr;
 }
 
-/*
- * Realloc is limited in arena mode - we can't reclaim the old space.
- * This just allocates new space and copies. Use sparingly.
- *
- * Note: We don't know the old size, so the caller must handle copying
- * if they need to preserve data. This matches the limitation of arena
- * allocators.
- */
 void *
 mkt_realloc(void *ptr, size_t size)
 {
@@ -293,12 +297,9 @@ mkt_realloc(void *ptr, size_t size)
 	if (size == 0)
 		return NULL;
 
-	/* Arena allocator cannot resize in-place, so allocate new and
-	 * copy. We don't track the old allocation size, so copy up to
-	 * the new size (old block may be larger — safe because arena
-	 * memory stays valid until context delete). */
-	void *new_ptr = mkt_alloc(size);
-	memcpy(new_ptr, ptr, size);
+	size_t old_size = *(size_t *)((char *)ptr - ALLOC_HDR_SIZE);
+	void  *new_ptr	= mkt_alloc(size);
+	memcpy(new_ptr, ptr, old_size < size ? old_size : size);
 	return new_ptr;
 }
 

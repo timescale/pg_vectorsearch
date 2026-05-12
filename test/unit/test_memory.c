@@ -268,10 +268,23 @@ TEST(realloc_normal)
 {
 	void *ptr = mkt_alloc(64);
 	ASSERT_NOT_NULL(ptr, "initial allocation should succeed");
+	memset(ptr, 0xAB, 64);
 
-	/* realloc allocates new space (doesn't preserve data in arena mode) */
 	void *new_ptr = mkt_realloc(ptr, 128);
 	ASSERT_NOT_NULL(new_ptr, "realloc should succeed");
+
+	/* Verify old data is preserved */
+	uint8_t *bytes	   = new_ptr;
+	bool	 preserved = true;
+	for (int i = 0; i < 64; i++)
+	{
+		if (bytes[i] != 0xAB)
+		{
+			preserved = false;
+			break;
+		}
+	}
+	ASSERT_TRUE(preserved, "realloc should preserve old data");
 }
 
 TEST(alloc_zero_size)
