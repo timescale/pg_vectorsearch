@@ -281,6 +281,7 @@ mkt_core_sources = files(
   'src/index/posting_page.c',
   'src/index/posting_build.c',
   'src/index/posting_scan.c',
+  'src/index/posting_convert.c',
   'src/index/query_scan.c',
   'src/standalone/vector_source.c',
   'src/standalone/index.c',
@@ -544,6 +545,7 @@ if build_pg_extension
     'src/index/posting_page.c',
     'src/index/posting_build.c',
     'src/index/posting_scan.c',
+    'src/index/posting_convert.c',
     'src/index/query_scan.c',
   )
 

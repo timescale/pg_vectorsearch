@@ -200,7 +200,10 @@ scan_clusters(
 		mkt_rabitq_init_query_state(
 				&qs->cluster_qs, qs->pt_query, pt_cent, dim, mode);
 
-		mkt_posting_scan_cluster(&qs->pscan, topk);
+		if (idx->fastscan && qs->pscan.fs_lut != NULL)
+			mkt_posting_scan_cluster_fastscan(&qs->pscan, topk);
+		else
+			mkt_posting_scan_cluster(&qs->pscan, topk);
 		total_pages += qs->pscan.pages_read;
 		total_entries += qs->pscan.entries_scanned;
 		mkt_posting_scan_end_cluster(&qs->pscan);

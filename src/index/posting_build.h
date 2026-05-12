@@ -2,18 +2,15 @@
  * posting_build.h - Streaming posting list builder
  *
  * Builds posting list page chains from a stream of vectors.
- * Each vector is RaBitQ-encoded and written to an in-memory page
- * buffer. Full pages are flushed to storage and linked into a
- * chain. O(1) memory per cluster regardless of cluster size.
- *
- * Follows the centroid_build.h pattern: a shared builder in
- * src/index/ that works with MktStorage, usable from both the
- * standalone benchmarker and the PG extension.
+ * Supports two page formats (AoS and fastscan) via a page-ops
+ * callback, and two entry modes: raw vectors (RaBitQ-encoded
+ * internally) and pre-encoded data.
  *
  * Usage:
  *   MktPostingBuilder builder;
  *   mkt_posting_builder_init(&builder, storage, params, dim,
- *                            cluster_id, centroid);
+ *                            cluster_id, centroid, pt_centroid);
+ *   // or: mkt_posting_builder_init_fastscan(...) for fastscan
  *   for each vector in cluster:
  *       mkt_posting_builder_add(&builder, tid, vector);
  *   BlockNumber head = mkt_posting_builder_finish(&builder);
@@ -28,38 +25,84 @@
 #include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------
- * Builder state — O(1) memory per cluster via in-memory page buffer
+ * Page format ops — the only part that differs between formats
+ *
+ * write_entry: add one encoded entry to the in-memory page.
+ *     Returns false if the page is full and needs flushing first.
+ * reinit_page: re-initialize the page buffer after a flush.
+ * finalize: called before the last flush (e.g., write partial
+ *     fastscan group).
+ * cleanup: free format-specific scratch buffers.
+ * ---------------------------------------------------------------- */
+
+struct MktPostingBuilder;
+
+typedef struct MktPostingPageOps
+{
+	bool (*write_entry)(
+			struct MktPostingBuilder *b,
+			ItemPointerData			  tid,
+			float					  f_add,
+			float					  f_rescale,
+			float					  f_error,
+			const uint8_t			 *bits);
+	void (*reinit_page)(struct MktPostingBuilder *b);
+	void (*finalize)(struct MktPostingBuilder *b);
+	void (*cleanup)(struct MktPostingBuilder *b);
+} MktPostingPageOps;
+
+/* Fastscan group staging buffer */
+typedef struct FsGroupStage
+{
+	ItemPointerData tids[MKT_FASTSCAN_GROUP];
+	float			f_add[MKT_FASTSCAN_GROUP];
+	float			f_rescale[MKT_FASTSCAN_GROUP];
+	float			f_error[MKT_FASTSCAN_GROUP];
+	uint32_t		count;
+} FsGroupStage;
+
+/* ----------------------------------------------------------------
+ * Unified builder state
  * ---------------------------------------------------------------- */
 
 typedef struct MktPostingBuilder
 {
+	/* Common fields */
 	MktStorage		   *storage;
 	const RaBitQParams *params;
 	Dimension			dim;
 	uint32_t			cluster_id;
-	const float		   *centroid; /* [dim] for IVF encoding */
-	const float *pt_centroid; /* [dim] P^T * centroid, written to first page */
+	const float		   *centroid;
 
-	BlockNumber head_blkno; /* first page in chain */
-	BlockNumber prev_blkno; /* previous page (for linking) */
-	bool		is_first;	/* next page gets FIRST flag */
+	BlockNumber head_blkno;
+	BlockNumber prev_blkno;
+	bool		is_first;
 
-	char mem_page[BLCKSZ]
-			__attribute__((aligned(8))); /* in-memory page buffer */
-	bool page_dirty;					 /* has entries since last flush */
+	char mem_page[BLCKSZ] __attribute__((aligned(8)));
+	bool page_dirty;
 
-	/* Reserved contiguous block range (set via _set_reserve) */
-	BlockNumber reserve_start; /* first reserved block */
-	uint32_t	reserve_count; /* total reserved blocks */
-	uint32_t	reserve_used;  /* blocks consumed so far */
+	BlockNumber reserve_start;
+	uint32_t	reserve_count;
+	uint32_t	reserve_used;
 
-	/* RaBitQ encode scratch buffer (~dim/8 + 12 bytes) */
 	RaBitQData *enc_buf;
+
+	/* Page format dispatch */
+	const MktPostingPageOps *page_ops;
+
+	/* Format-specific state (only fastscan uses this) */
+	struct
+	{
+		FsGroupStage grp;
+		uint32_t	 groups_on_page;
+		uint32_t	 max_groups;
+		uint8_t		*bits_buf;
+		uint8_t		*codes_buf;
+	} fs;
 } MktPostingBuilder;
 
 /*
- * Initialize builder state. Allocates a small RaBitQ encode buffer.
- * centroid is borrowed (not copied) — must remain valid until finish.
+ * Initialize for AoS page format. Encodes vectors with RaBitQ.
  */
 void mkt_posting_builder_init(
 		MktPostingBuilder  *builder,
@@ -71,45 +114,46 @@ void mkt_posting_builder_init(
 		const float		   *pt_centroid);
 
 /*
- * Set a reserved contiguous block range for this builder.
- * Pages are flushed to reserved blocks first for sequential layout;
- * overflow falls back to new_page. Optional — without this, all
- * flushes go through new_page.
+ * Initialize for fastscan page format. When params and centroid
+ * are non-NULL, use _add() to encode raw vectors. When both are
+ * NULL, use _add_encoded() for pre-encoded data (AoS conversion).
  */
+void mkt_posting_builder_init_fastscan(
+		MktPostingBuilder  *builder,
+		MktStorage		   *storage,
+		const RaBitQParams *params,
+		Dimension			dim,
+		uint32_t			cluster_id,
+		const float		   *centroid,
+		const float		   *pt_centroid);
+
 void mkt_posting_builder_set_reserve(
 		MktPostingBuilder *builder, BlockNumber start, uint32_t count);
 
 /*
- * Add a vector to the posting list. Encodes with RaBitQ relative
- * to the cluster centroid. The TID identifies the source tuple —
- * in PG this is a real heap TID; in standalone, pack a vector_id
- * via mkt_posting_set_vector_id().
+ * Add a raw vector. Encodes with RaBitQ relative to centroid.
  */
 void mkt_posting_builder_add(
 		MktPostingBuilder *builder, ItemPointerData tid, const float *vector);
 
 /*
- * Flush the last page and return the head block number.
- * Returns InvalidBlockNumber if no vectors were added.
+ * Add a pre-encoded entry. No RaBitQ encoding — data is already
+ * quantized. Works with both AoS and fastscan formats.
  */
+void mkt_posting_builder_add_encoded(
+		MktPostingBuilder *builder,
+		ItemPointerData	   tid,
+		float			   f_add,
+		float			   f_rescale,
+		float			   f_error,
+		const uint8_t	  *bits);
+
 BlockNumber mkt_posting_builder_finish(MktPostingBuilder *builder);
 
-/*
- * Free internal scratch buffers.
- */
 void mkt_posting_builder_cleanup(MktPostingBuilder *builder);
 
 /* ----------------------------------------------------------------
  * Flat builder — one buffer per cluster (standalone benchmark)
- *
- * Usage:
- *   MktFlatPostingBuilder builder;
- *   mkt_flat_posting_builder_init(&builder, params, dim,
- *                                 cluster_id, centroid, count);
- *   for each vector in cluster:
- *       mkt_flat_posting_builder_add(&builder, tid, vector);
- *   char *page = mkt_flat_posting_builder_finish(&builder);
- *   mkt_flat_posting_builder_cleanup(&builder);
  * ---------------------------------------------------------------- */
 
 typedef struct MktFlatPostingBuilder
@@ -119,10 +163,10 @@ typedef struct MktFlatPostingBuilder
 	uint32_t			cluster_id;
 	const float		   *centroid;
 
-	char	*buf; /* flat page buffer */
+	char	*buf;
 	uint32_t max_entries;
 
-	RaBitQData *enc_buf; /* reusable encode scratch */
+	RaBitQData *enc_buf;
 } MktFlatPostingBuilder;
 
 void mkt_flat_posting_builder_init(
@@ -138,10 +182,6 @@ void mkt_flat_posting_builder_add(
 		ItemPointerData		   tid,
 		const float			  *vector);
 
-/*
- * Return the flat page buffer. Owned by the memory context
- * that was current during init.
- */
 char *mkt_flat_posting_builder_finish(MktFlatPostingBuilder *builder);
 
 void mkt_flat_posting_builder_cleanup(MktFlatPostingBuilder *builder);

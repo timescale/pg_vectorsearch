@@ -341,6 +341,7 @@ TEST(bindings_create_destroy)
 			  0,
 			  0.0,
 			  0.0,
+			  false,
 			  &info);
 
 	ASSERT_NOT_NULL(handle, "create should succeed");
@@ -370,8 +371,41 @@ TEST(bindings_query)
 			0,
 			0.0,
 			0.0,
+			false,
 			NULL);
 	ASSERT_NOT_NULL(handle, "create should succeed");
+
+	uint32_t result_ids[10];
+	uint32_t count = mkt_handle_query(
+			handle, vecs, 10, 5, "asymmetric", true, result_ids);
+
+	ASSERT_EQ(count, 10, "should return 10 results");
+	ASSERT_TRUE(result_ids[0] < nvecs, "result ID in range");
+
+	mkt_handle_destroy(handle);
+}
+
+TEST(bindings_query_fastscan)
+{
+	uint32_t dim = 32, nvecs = 1000;
+	float	*vecs = make_vectors(nvecs, dim, 42);
+
+	MktHandle *handle = mkt_handle_create_from_array(
+			vecs,
+			nvecs,
+			dim,
+			10,
+			0,
+			"euclidean",
+			"rabitq",
+			NULL,
+			0,
+			0,
+			0.0,
+			0.0,
+			16,
+			NULL);
+	ASSERT_NOT_NULL(handle, "fastscan create should succeed");
 
 	uint32_t result_ids[10];
 	uint32_t count = mkt_handle_query(
@@ -401,6 +435,7 @@ TEST(bindings_angular_metric)
 			0,
 			0.0,
 			0.0,
+			false,
 			NULL);
 	ASSERT_NOT_NULL(handle, "angular create should succeed");
 
@@ -448,6 +483,7 @@ TEST(bindings_symmetric_mode)
 			0,
 			0.0,
 			0.0,
+			false,
 			NULL);
 
 	uint32_t result_ids[5];
@@ -477,6 +513,7 @@ TEST(bindings_kmeans_params)
 			  20,
 			  0.0,
 			  0.0,
+			  false,
 			  &info);
 
 	ASSERT_NOT_NULL(handle, "create with kmeans params should succeed");
