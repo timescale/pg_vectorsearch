@@ -57,13 +57,6 @@ arena_block_data(MktArenaBlock *block)
 	return (char *)block + header_size;
 }
 
-/*
- * Each allocation is prefixed with a size_t header storing the
- * requested size. This lets mkt_realloc copy min(old, new) bytes
- * without reading past the old allocation.
- */
-#define ALLOC_HDR_SIZE align_up(sizeof(size_t), MKT_ARENA_ALIGNMENT)
-
 /* Allocate from arena with specified alignment */
 static void *
 arena_alloc(MktArena *arena, size_t size, size_t alignment)
@@ -72,25 +65,21 @@ arena_alloc(MktArena *arena, size_t size, size_t alignment)
 		return NULL;
 
 	size_t aligned_size = align_up(size, alignment);
-	size_t need			= ALLOC_HDR_SIZE + aligned_size;
 
 	/* Try current block first */
 	if (arena->current)
 	{
-		void	 *data = arena_block_data(arena->current);
-		uintptr_t base = (uintptr_t)data + arena->current->used;
+		void	 *data		   = arena_block_data(arena->current);
+		uintptr_t base		   = (uintptr_t)data + arena->current->used;
+		uintptr_t aligned_base = align_up(base, alignment);
+		size_t	  padding	   = aligned_base - (uintptr_t)data;
 
-		/* Align the user pointer; header sits just before it */
-		uintptr_t user_ptr = align_up(base + ALLOC_HDR_SIZE, alignment);
-		uintptr_t hdr_ptr  = user_ptr - ALLOC_HDR_SIZE;
-		size_t	  end	   = (hdr_ptr - (uintptr_t)data) + need;
-
-		if (end <= arena->current->size)
+		if (padding + aligned_size <= arena->current->size)
 		{
-			*(size_t *)hdr_ptr	 = size;
-			arena->current->used = end;
-			arena->total_allocated += need;
-			return (void *)user_ptr;
+			void *ptr			 = (void *)aligned_base;
+			arena->current->used = padding + aligned_size;
+			arena->total_allocated += aligned_size;
+			return ptr;
 		}
 	}
 
@@ -101,7 +90,8 @@ arena_alloc(MktArena *arena, size_t size, size_t alignment)
 	size_t		   extra_for_alignment = alignment > MKT_ARENA_ALIGNMENT
 											   ? alignment - MKT_ARENA_ALIGNMENT
 											   : 0;
-	MktArenaBlock *block = arena_block_create(need + extra_for_alignment);
+	MktArenaBlock *block			   = arena_block_create(
+			  aligned_size + extra_for_alignment);
 	if (!block)
 		return NULL;
 
@@ -110,17 +100,15 @@ arena_alloc(MktArena *arena, size_t size, size_t alignment)
 	arena->blocks  = block;
 	arena->current = block;
 
-	/* Allocate from new block — align the user pointer */
-	void	 *data	   = arena_block_data(block);
-	uintptr_t base	   = (uintptr_t)data;
-	uintptr_t user_ptr = align_up(base + ALLOC_HDR_SIZE, alignment);
-	uintptr_t hdr_ptr  = user_ptr - ALLOC_HDR_SIZE;
-	size_t	  end	   = (hdr_ptr - base) + need;
+	/* Allocate from new block with proper alignment */
+	void	 *data		   = arena_block_data(block);
+	uintptr_t base		   = (uintptr_t)data;
+	uintptr_t aligned_base = align_up(base, alignment);
+	size_t	  padding	   = aligned_base - base;
 
-	*(size_t *)hdr_ptr = size;
-	block->used		   = end;
-	arena->total_allocated += need;
-	return (void *)user_ptr;
+	block->used = padding + aligned_size;
+	arena->total_allocated += aligned_size;
+	return (void *)aligned_base;
 }
 
 /* Create a new arena context */
@@ -290,16 +278,42 @@ mkt_memctx_alloc0(MktMemCtx ctx, size_t size)
 }
 
 void *
-mkt_realloc(void *ptr, size_t size)
+mkt_realloc(void *ptr, size_t old_size, size_t new_size)
 {
 	if (!ptr)
-		return mkt_alloc(size);
-	if (size == 0)
+		return mkt_alloc(new_size);
+	if (new_size == 0)
 		return NULL;
+	if (new_size <= old_size)
+		return ptr;
 
-	size_t old_size = *(size_t *)((char *)ptr - ALLOC_HDR_SIZE);
-	void  *new_ptr	= mkt_alloc(size);
-	memcpy(new_ptr, ptr, old_size < size ? old_size : size);
+	assert(mkt_current_memctx != NULL);
+	MktArena *arena = mkt_current_memctx;
+
+	size_t aligned_old = align_up(old_size, MKT_ARENA_ALIGNMENT);
+	size_t aligned_new = align_up(new_size, MKT_ARENA_ALIGNMENT);
+
+	/* If ptr is the last allocation in the current block, extend
+	 * in place — no copy needed. */
+	if (arena->current)
+	{
+		void	*data = arena_block_data(arena->current);
+		uint8_t *end  = (uint8_t *)data + arena->current->used;
+
+		if ((uint8_t *)ptr + aligned_old == end)
+		{
+			size_t extra = aligned_new - aligned_old;
+			if (arena->current->used + extra <= arena->current->size)
+			{
+				arena->current->used += extra;
+				arena->total_allocated += extra;
+				return ptr;
+			}
+		}
+	}
+
+	void *new_ptr = mkt_alloc(new_size);
+	memcpy(new_ptr, ptr, old_size);
 	return new_ptr;
 }
 

@@ -223,13 +223,20 @@ extract_candidates(MktQueryState *qs)
 {
 	if (qs->topk.cand_count > qs->cand_cap)
 	{
-		qs->cand_cap   = qs->topk.cand_count;
-		qs->candidates = mkt_realloc(
-				qs->candidates, qs->cand_cap * sizeof(MktTopKEntry));
-		qs->result_order =
-				mkt_realloc(qs->result_order, qs->cand_cap * sizeof(uint32_t));
-		qs->result_dists =
-				mkt_realloc(qs->result_dists, qs->cand_cap * sizeof(Distance));
+		uint32_t old_cap = qs->cand_cap;
+		qs->cand_cap	 = qs->topk.cand_count;
+		qs->candidates	 = mkt_realloc(
+				  qs->candidates,
+				  old_cap * sizeof(MktTopKEntry),
+				  qs->cand_cap * sizeof(MktTopKEntry));
+		qs->result_order = mkt_realloc(
+				qs->result_order,
+				old_cap * sizeof(uint32_t),
+				qs->cand_cap * sizeof(uint32_t));
+		qs->result_dists = mkt_realloc(
+				qs->result_dists,
+				old_cap * sizeof(Distance),
+				qs->cand_cap * sizeof(Distance));
 	}
 
 	uint32_t ncands;

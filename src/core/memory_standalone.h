@@ -57,7 +57,7 @@ extern _Thread_local MktMemCtx mkt_current_memctx;
 /* Allocation functions */
 void *mkt_alloc(size_t size);
 void *mkt_alloc0(size_t size);
-void *mkt_realloc(void *ptr, size_t size);
+void *mkt_realloc(void *ptr, size_t old_size, size_t new_size);
 void  mkt_free(void *ptr);
 void *mkt_memctx_alloc(MktMemCtx ctx, size_t size);
 void *mkt_memctx_alloc0(MktMemCtx ctx, size_t size);

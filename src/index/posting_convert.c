@@ -71,11 +71,17 @@ mkt_posting_convert_to_fastscan(
 		{
 			if (total_entries >= entries_cap)
 			{
+				size_t old_staged_sz = entries_cap * sizeof(StagedEntry);
+				size_t old_bits_sz	 = entries_cap * (size_t)packed_bytes;
 				entries_cap *= 2;
-				staged =
-						mkt_realloc(staged, entries_cap * sizeof(StagedEntry));
+				staged = mkt_realloc(
+						staged,
+						old_staged_sz,
+						entries_cap * sizeof(StagedEntry));
 				all_bits = mkt_realloc(
-						all_bits, entries_cap * (size_t)packed_bytes);
+						all_bits,
+						old_bits_sz,
+						entries_cap * (size_t)packed_bytes);
 			}
 			MktPostingEntryHeader *e  = mkt_posting_entry_at(content, i, dim);
 			staged[total_entries].tid = e->meta.tid;

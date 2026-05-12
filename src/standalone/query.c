@@ -351,9 +351,12 @@ exec_fallback(
 	{
 		if (ctx->topk.cand_count > ctx->rerank_cap)
 		{
+			size_t old_sz	= ctx->rerank_cap * sizeof(MktTopKEntry);
 			ctx->rerank_cap = ctx->topk.cand_count;
 			ctx->rerank_buf = mkt_realloc(
-					ctx->rerank_buf, ctx->rerank_cap * sizeof(MktTopKEntry));
+					ctx->rerank_buf,
+					old_sz,
+					ctx->rerank_cap * sizeof(MktTopKEntry));
 		}
 
 		uint32_t n_cands;
@@ -376,9 +379,12 @@ exec_fallback(
 	{
 		if (ctx->topk.cand_count > ctx->rerank_cap)
 		{
+			size_t old_sz	= ctx->rerank_cap * sizeof(MktTopKEntry);
 			ctx->rerank_cap = ctx->topk.cand_count;
 			ctx->rerank_buf = mkt_realloc(
-					ctx->rerank_buf, ctx->rerank_cap * sizeof(MktTopKEntry));
+					ctx->rerank_buf,
+					old_sz,
+					ctx->rerank_cap * sizeof(MktTopKEntry));
 		}
 
 		mkt_topk_extract_sorted(&ctx->topk, ctx->rerank_buf, &count);

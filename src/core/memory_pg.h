@@ -17,9 +17,10 @@ typedef MemoryContext		  MktMemCtx;
 typedef MemoryContextCallback MktMemCtxCallback;
 
 /* Direct mappings to palloc family */
-#define mkt_alloc(size)				 palloc(size)
-#define mkt_alloc0(size)			 palloc0(size)
-#define mkt_realloc(ptr, size)		 repalloc(ptr, size)
+#define mkt_alloc(size)	 palloc(size)
+#define mkt_alloc0(size) palloc0(size)
+#define mkt_realloc(ptr, old_size, new_size) \
+	((void)(old_size), repalloc(ptr, new_size))
 #define mkt_free(ptr)				 pfree(ptr)
 #define mkt_memctx_alloc(ctx, size)	 MemoryContextAlloc(ctx, size)
 #define mkt_memctx_alloc0(ctx, size) MemoryContextAllocZero(ctx, size)

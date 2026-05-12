@@ -249,9 +249,8 @@ TEST(scoped_context)
 
 TEST(realloc_null_ptr)
 {
-	/* realloc with NULL ptr should act like alloc */
-	void *ptr = mkt_realloc(NULL, 64);
-	ASSERT_NOT_NULL(ptr, "realloc(NULL, size) should allocate");
+	void *ptr = mkt_realloc(NULL, 0, 64);
+	ASSERT_NOT_NULL(ptr, "realloc(NULL, 0, size) should allocate");
 }
 
 TEST(realloc_zero_size)
@@ -259,9 +258,8 @@ TEST(realloc_zero_size)
 	void *ptr = mkt_alloc(64);
 	ASSERT_NOT_NULL(ptr, "initial allocation should succeed");
 
-	/* realloc with size 0 returns NULL */
-	void *new_ptr = mkt_realloc(ptr, 0);
-	ASSERT_NULL(new_ptr, "realloc(ptr, 0) should return NULL");
+	void *new_ptr = mkt_realloc(ptr, 64, 0);
+	ASSERT_NULL(new_ptr, "realloc(ptr, old, 0) should return NULL");
 }
 
 TEST(realloc_normal)
@@ -270,21 +268,26 @@ TEST(realloc_normal)
 	ASSERT_NOT_NULL(ptr, "initial allocation should succeed");
 	memset(ptr, 0xAB, 64);
 
-	void *new_ptr = mkt_realloc(ptr, 128);
+	void *new_ptr = mkt_realloc(ptr, 64, 128);
 	ASSERT_NOT_NULL(new_ptr, "realloc should succeed");
 
-	/* Verify old data is preserved */
-	uint8_t *bytes	   = new_ptr;
-	bool	 preserved = true;
+	uint8_t *bytes = new_ptr;
 	for (int i = 0; i < 64; i++)
-	{
-		if (bytes[i] != 0xAB)
-		{
-			preserved = false;
-			break;
-		}
-	}
-	ASSERT_TRUE(preserved, "realloc should preserve old data");
+		ASSERT_EQ(0xAB, bytes[i], "old data preserved");
+}
+
+TEST(realloc_in_place)
+{
+	void *ptr = mkt_alloc(64);
+	ASSERT_NOT_NULL(ptr, "initial allocation should succeed");
+	memset(ptr, 0xCD, 64);
+
+	void *new_ptr = mkt_realloc(ptr, 64, 128);
+	ASSERT_EQ(ptr, new_ptr, "tail realloc should extend in place");
+
+	uint8_t *bytes = new_ptr;
+	for (int i = 0; i < 64; i++)
+		ASSERT_EQ(0xCD, bytes[i], "old data preserved in place");
 }
 
 TEST(alloc_zero_size)
