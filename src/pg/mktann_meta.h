@@ -21,6 +21,9 @@
 
 #define MKT_META_MAGIC ((uint32_t)0x4D4B5401) /* "MKT\x01" */
 
+/* Metadata flags */
+#define MKT_META_FLAG_FASTSCAN 0x01
+
 typedef struct MktannMetaPage
 {
 	uint32_t	magic;			 /* MKT_META_MAGIC */
@@ -32,8 +35,9 @@ typedef struct MktannMetaPage
 	uint32_t	nlist;			 /* number of leaf centroids */
 	uint8_t		metric;			 /* DistanceMetric */
 	uint8_t		fan_out;		 /* children per tree node */
-	uint8_t		reserved[2];	 /* alignment */
-	uint64_t	rabitq_seed;	 /* seed for RaBitQ params */
+	uint8_t		flags;			 /* MKT_META_FLAG_* */
+	uint8_t		reserved;
+	uint64_t	rabitq_seed; /* seed for RaBitQ params */
 	/* Global mean vector stored inline after struct */
 } MktannMetaPage;
 

@@ -69,6 +69,7 @@ typedef struct MktannBuildParams
 	uint32_t		  kmeans_nredo;
 	double			  soar_lambda;
 	double			  boundary_epsilon;
+	bool			  fastscan;
 } MktannBuildParams;
 
 typedef struct MktannBuildState
@@ -376,8 +377,9 @@ write_meta_page(
 	meta->nlist			  = nlist;
 	meta->metric		  = (uint8_t)metric;
 	meta->fan_out		  = (uint8_t)fan_out;
-	memset(meta->reserved, 0, sizeof(meta->reserved));
-	meta->rabitq_seed = rabitq_seed;
+	meta->flags			  = 0;
+	meta->reserved		  = 0;
+	meta->rabitq_seed	  = rabitq_seed;
 
 	memcpy(mktann_meta_global_mean(meta), global_mean, dim * sizeof(float));
 
@@ -477,6 +479,7 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 
 	p->soar_lambda		= (opts != NULL) ? opts->soar_lambda : 0.0;
 	p->boundary_epsilon = (opts != NULL) ? opts->boundary_epsilon : 0.0;
+	p->fastscan			= (opts != NULL) ? opts->fastscan : false;
 }
 
 /* ----------------------------------------------------------------
@@ -647,14 +650,24 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	MktPostingBuilder *builders = palloc(nlist * sizeof(MktPostingBuilder));
 	for (uint32_t c = 0; c < nlist; c++)
 	{
-		mkt_posting_builder_init(
-				&builders[c],
-				&storage.base,
-				rq_params,
-				dim,
-				c,
-				ref_vecs + (size_t)c * dim,
-				pt_centroids + (size_t)c * dim);
+		if (p->fastscan)
+			mkt_posting_builder_init_fastscan(
+					&builders[c],
+					&storage.base,
+					rq_params,
+					dim,
+					c,
+					ref_vecs + (size_t)c * dim,
+					pt_centroids + (size_t)c * dim);
+		else
+			mkt_posting_builder_init(
+					&builders[c],
+					&storage.base,
+					rq_params,
+					dim,
+					c,
+					ref_vecs + (size_t)c * dim,
+					pt_centroids + (size_t)c * dim);
 
 		BlockNumber start = mkt_storage_extend(&storage.base, reserve_each);
 		if (start != InvalidBlockNumber)
@@ -715,11 +728,13 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			node_first_blkno,
 			NULL); /* pt_centroids on posting pages, not here */
 
-	/* Update metadata with final tuple count */
+	/* Update metadata with final tuple count and flags */
 	{
 		Page			page = mkt_storage_write_page(&storage.base, 0);
 		MktannMetaPage *meta = (MktannMetaPage *)PageGetSpecialPointer(page);
 		meta->ntuples		 = (uint32_t)indtuples;
+		if (p->fastscan)
+			meta->flags |= MKT_META_FLAG_FASTSCAN;
 		mkt_storage_commit_page(&storage.base, 0);
 	}
 

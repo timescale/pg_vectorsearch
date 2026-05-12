@@ -31,6 +31,7 @@
 extern int		   mkt_distance_mode;  /* MktDistanceMode */
 extern int		   mkt_nprobe;		   /* clusters to probe per query */
 extern int		   mkt_query_limit;	   /* max results per query (0=auto) */
+extern int		   mkt_fastscan_bits;  /* fastscan LUT bits (8 or 16) */
 extern bool		   mkt_rerank;		   /* enable reranking (default: true) */
 extern relopt_kind mktann_relopt_kind; /* index reloption kind */
 
@@ -88,6 +89,7 @@ typedef struct MktannOptions
 	double soar_lambda;			 /* SOAR replication lambda (0=off) */
 	double boundary_epsilon;	 /* boundary replication threshold (0=off) */
 	bool   centroid_compression; /* use RaBitQ for centroid pages */
+	bool   fastscan;			 /* use VPSHUFB fastscan posting format */
 } MktannOptions;
 
 #define MKTANN_DEFAULT_FAN_OUT 32

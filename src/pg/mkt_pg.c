@@ -19,12 +19,19 @@ PG_MODULE_MAGIC;
 int	 mkt_distance_mode = MKT_DISTANCE_MODE_DEFAULT;
 int	 mkt_nprobe		   = 10;
 int	 mkt_query_limit   = 0;
+int	 mkt_fastscan_bits = 16;
 bool mkt_rerank		   = true;
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
 		{"asymmetric", MKT_DISTANCE_MODE_ASYMMETRIC, false},
 		{"symmetric", MKT_DISTANCE_MODE_SYMMETRIC, false},
+		{NULL, 0, false},
+};
+
+static const struct config_enum_entry mkt_fastscan_bits_options[] = {
+		{"8", 8, false},
+		{"16", 16, false},
 		{NULL, 0, false},
 };
 
@@ -77,6 +84,19 @@ _PG_init(void)
 			0,
 			0,
 			100000,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomEnumVariable(
+			"mkt.fastscan_bits",
+			"Fastscan LUT quantization bits.",
+			"8 is faster, 16 is more accurate",
+			&mkt_fastscan_bits,
+			16,
+			mkt_fastscan_bits_options,
 			PGC_USERSET,
 			0,
 			NULL,
@@ -150,6 +170,12 @@ _PG_init(void)
 			mktann_relopt_kind,
 			"centroid_compression",
 			"Use RaBitQ compression for centroid pages",
+			false,
+			NoLock);
+	add_bool_reloption(
+			mktann_relopt_kind,
+			"fastscan",
+			"Use VPSHUFB fastscan posting page format",
 			false,
 			NoLock);
 
