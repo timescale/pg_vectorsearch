@@ -23,6 +23,7 @@ unit_test_sources = files(
   'run_tests.c',
   'test_centroid_page.c',
   'test_centroid_search.c',
+  'test_fastscan.c',
   'test_posting_page.c',
   'test_distance.c',
   'test_fixtures.c',

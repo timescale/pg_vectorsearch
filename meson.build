@@ -270,6 +270,7 @@ mkt_core_sources = files(
   'src/algo/kmeans_lloyd.c',
   'src/algo/vecops.c',
   'src/quant/rabitq.c',
+  'src/quant/fastscan.c',
   'src/quant/matrix.c',
   'src/algo/topk.c',
   'src/algo/hkmeans.c',
@@ -306,6 +307,8 @@ if simd_mode == 'full'
       'src/algo/distance_avx512.c',
       'src/quant/rabitq_avx2.c',
       'src/quant/rabitq_avx512.c',
+      'src/quant/fastscan_avx2.c',
+      'src/quant/fastscan_avx512.c',
     )
   elif host_machine.cpu_family() == 'aarch64'
     # AArch64: NEON is mandatory, no special flags needed
@@ -529,6 +532,7 @@ if build_pg_extension
     'src/algo/kmeans_lloyd.c',
     'src/algo/vecops.c',
     'src/quant/rabitq.c',
+    'src/quant/fastscan.c',
     'src/quant/matrix.c',
     'src/algo/hkmeans.c',
     'src/index/centroid_build.c',
@@ -551,6 +555,8 @@ if build_pg_extension
         'src/algo/distance_avx512.c',
         'src/quant/rabitq_avx2.c',
         'src/quant/rabitq_avx512.c',
+        'src/quant/fastscan_avx2.c',
+        'src/quant/fastscan_avx512.c',
       )
     elif host_machine.cpu_family() == 'aarch64'
       mkt_pg_simd_sources += files(
