@@ -467,6 +467,17 @@ mkt_fastscan_init_simd(void)
 		atomic_store(&g_fastscan_initialized, true);
 		return;
 	}
+#elif defined(__aarch64__) || defined(_M_ARM64)
+	SimdCapability caps = mkt_detect_simd();
+	if (caps & SIMD_NEON)
+	{
+		g_fastscan_accumulate_fn	  = mkt_fastscan_accumulate_neon;
+		g_fastscan_accumulate_hacc_fn = mkt_fastscan_accumulate_hacc_neon;
+		g_fastscan_build_lut_fn		  = fastscan_build_lut_scalar;
+		g_fastscan_build_lut_hacc_fn  = fastscan_build_lut_hacc_scalar;
+		atomic_store(&g_fastscan_initialized, true);
+		return;
+	}
 #endif
 #endif
 
@@ -540,6 +551,9 @@ mkt_fastscan_impl_name(void)
 		return "avx512";
 	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_avx2)
 		return "avx2";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_neon)
+		return "neon";
 #endif
 #endif
 

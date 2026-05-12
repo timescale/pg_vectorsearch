@@ -462,7 +462,6 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 	SimdCapability caps = mkt_detect_simd();
 
 #ifdef MKT_SIMD_FULL
-#if defined(__x86_64__) || defined(_M_X64)
 	/* Benchmark each available SIMD level (widest first) */
 	typedef struct
 	{
@@ -471,11 +470,22 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 		bool		run_distance;
 	} SimdLevel;
 
+#if defined(__x86_64__) || defined(_M_X64)
 	SimdLevel levels[] = {
 			{SIMD_AVX512F, "avx512", true},
 			{SIMD_AVX2, "avx2", false},
 			{0, "scalar", false},
 	};
+#elif defined(__aarch64__) || defined(_M_ARM64)
+	SimdLevel levels[] = {
+			{SIMD_NEON, "neon", true},
+			{0, "scalar", false},
+	};
+#else
+	SimdLevel levels[] = {
+			{0, "scalar", true},
+	};
+#endif
 	uint32_t nlevels = sizeof(levels) / sizeof(levels[0]);
 
 	for (uint32_t l = 0; l < nlevels; l++)
@@ -500,14 +510,6 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 	mkt_simd_set_override(0xFFFFFFFF);
 	mkt_fastscan_reset_simd();
 	mkt_fastscan_init_simd();
-#else
-	(void)caps;
-	mkt_fastscan_init_simd();
-	benchmark_lut_build(&config);
-	benchmark_accumulate(&config);
-	benchmark_distance_throughput(&config);
-	printf("\n");
-#endif
 #else
 	(void)caps;
 	mkt_fastscan_init_simd();
