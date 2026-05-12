@@ -74,6 +74,7 @@ typedef struct MktIndexConfig
 	double			  boundary_epsilon; /* boundary gate threshold (0 = off) */
 	bool			  encode_rabitq;	/* encode posting lists with RaBitQ */
 	MktPostingFormat  posting_fmt;		/* flat or pages */
+	int				  fastscan;			/* 0=off, 8=uint8 LUT, 16=uint16 LUT */
 } MktIndexConfig;
 
 /* ----------------------------------------------------------------

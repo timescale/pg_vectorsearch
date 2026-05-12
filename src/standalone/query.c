@@ -97,6 +97,10 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 		mkt_query_state_init(&ctx->search, &idx->base, max_k, max_nprobe);
 		ctx->has_query_state = true;
 
+		if (idx->base.fastscan)
+			mkt_posting_scan_enable_fastscan(
+					&ctx->search.pscan, idx->base.fastscan);
+
 		if (idx->has_replication)
 		{
 			/* Size for max load at ~50%. Generation counter
@@ -139,6 +143,10 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 					idx->base.params,
 					dim,
 					max_per_page);
+
+			if (idx->base.fastscan)
+				mkt_posting_scan_enable_fastscan(
+						&ctx->posting_scan, idx->base.fastscan);
 		}
 
 		ctx->pt_cents_buf		 = mkt_alloc(max_nprobe * dim * sizeof(float));

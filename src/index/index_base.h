@@ -35,6 +35,7 @@ typedef struct MktIndexBase
 	BlockNumber		  first_centroid;
 	DistanceMetric	  metric;
 	MktCentroidFormat centroid_format;
+	int				  fastscan; /* 0=off, 8=uint8, 16=uint16 hacc */
 } MktIndexBase;
 
 static inline RaBitQParams *

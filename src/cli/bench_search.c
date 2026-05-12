@@ -65,6 +65,7 @@ typedef struct
 	const char *posting_layout;
 	const char *distance_mode;
 	bool		no_rerank;
+	int			fastscan; /* 0=off, 8=uint8 LUT, 16=uint16 LUT (hacc) */
 	bool		wait_profile;
 	bool		help;
 } BenchConfig;
@@ -202,6 +203,8 @@ print_usage(CmdContext *ctx)
 	printf("  --soar-lambda <float>  SOAR replication lambda "
 		   "(0=off)\n");
 	printf("  --no-rerank        Skip reranking (return approximate)\n");
+	printf("  --fastscan <8|16>  Use VPSHUFB fastscan (8=fast, "
+		   "16=accurate)\n");
 	printf("  --wait-profile     Pause before queries (print PID for perf "
 		   "attach)\n");
 #ifdef MKT_HAVE_HDF5
@@ -250,6 +253,7 @@ cmd_bench_search(CmdContext *ctx)
 			{"posting-fmt", required_argument, 0, 'T'},
 			{"posting-layout", required_argument, 0, 'P'},
 			{"no-rerank", no_argument, 0, 'N'},
+			{"fastscan", required_argument, 0, 'X'},
 			{"wait-profile", no_argument, 0, 'Z'},
 			{"boundary-epsilon", required_argument, 0, 'B'},
 			{"soar-lambda", required_argument, 0, 'S'},
@@ -318,6 +322,11 @@ cmd_bench_search(CmdContext *ctx)
 			break;
 		case 'N':
 			config.no_rerank = true;
+			break;
+		case 'X':
+			config.fastscan = atoi(optarg);
+			if (config.fastscan != 8 && config.fastscan != 16)
+				config.fastscan = 16;
 			break;
 		case 'Z':
 			config.wait_profile = true;
@@ -423,6 +432,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.km_iter,
 				 config.soar_lambda,
 				 config.boundary_epsilon,
+				 config.fastscan,
 				 &info);
 		double build_ms = (double)(get_time_ns() - t0) / 1e6;
 
@@ -473,6 +483,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.km_iter,
 				 config.soar_lambda,
 				 config.boundary_epsilon,
+				 config.fastscan,
 				 &info);
 		double build_ms = (double)(get_time_ns() - t0) / 1e6;
 		free(train_vecs);
@@ -525,6 +536,8 @@ cmd_bench_search(CmdContext *ctx)
 
 	if (config.wait_profile)
 	{
+		/* Write PID to a signal file so a profiler can attach,
+		 * then wait for the file to be removed as the trigger. */
 		const char *tmpdir = getenv("TMPDIR");
 		char		sig_path[256];
 		snprintf(
@@ -622,11 +635,12 @@ cmd_bench_search(CmdContext *ctx)
 
 	printf("\nResults:\n");
 	printf("  centroid=%-8s posting=%-8s layout=%-6s mode=%-12s "
-		   "nprobe=%u k=%u\n",
+		   "fastscan=%-5s nprobe=%u k=%u\n",
 		   config.centroid_fmt,
 		   config.posting_fmt,
 		   config.posting_layout,
 		   config.distance_mode,
+		   config.fastscan ? (config.fastscan == 8 ? "8bit" : "16bit") : "off",
 		   config.nprobe,
 		   config.k);
 	if (gt_neighbors != NULL)

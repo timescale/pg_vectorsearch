@@ -413,4 +413,106 @@ bool mkt_posting_flat_add(
 		const uint8_t  *bits,
 		uint8_t			entry_flags);
 
+/* ----------------------------------------------------------------
+ * Fastscan page format
+ *
+ * SoA layout organized into 32-vector group sections.
+ * Each group section:
+ *   ItemPointerData tids[32]         192B
+ *   float f_add[32]                  128B
+ *   float f_rescale[32]              128B
+ *   float f_error[32]                128B
+ *   uint8_t codes[nsq_pairs × 32]   variable (3072B at dim=768)
+ *
+ * Pages are identified by MKT_POSTING_PAGE_FASTSCAN in opaque flags.
+ * ---------------------------------------------------------------- */
+
+#include "quant/fastscan.h"
+
+/* Bytes per 32-vector group section (metadata + packed codes) */
+static inline uint32_t
+mkt_fastscan_group_section_bytes(Dimension dim)
+{
+	return (uint32_t)(MKT_FASTSCAN_GROUP * sizeof(ItemPointerData) +
+					  MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
+					  MKT_FASTSCAN_GROUP_BYTES(dim));
+}
+
+/* Max entries on a fastscan overflow page */
+static inline uint32_t
+mkt_fastscan_max_entries(Dimension dim)
+{
+	uint32_t section = mkt_fastscan_group_section_bytes(dim);
+	uint32_t usable	 = mkt_posting_page_usable();
+	uint32_t ngroups = usable / section;
+	return ngroups * MKT_FASTSCAN_GROUP;
+}
+
+/* Max entries on a fastscan first page (with pt_centroid) */
+static inline uint32_t
+mkt_fastscan_max_entries_first(Dimension dim)
+{
+	uint32_t section = mkt_fastscan_group_section_bytes(dim);
+	uint32_t usable	 = mkt_posting_page_usable() -
+					  mkt_posting_pt_centroid_size(dim);
+	uint32_t ngroups = usable / section;
+	return ngroups * MKT_FASTSCAN_GROUP;
+}
+
+/* Max groups on a page */
+static inline uint32_t
+mkt_fastscan_max_groups(Dimension dim, bool is_first)
+{
+	uint32_t section = mkt_fastscan_group_section_bytes(dim);
+	uint32_t usable	 = mkt_posting_page_usable();
+	if (is_first)
+		usable -= mkt_posting_pt_centroid_size(dim);
+	return usable / section;
+}
+
+/* ----------------------------------------------------------------
+ * Fastscan group accessors
+ *
+ * All take content pointer (past PageHeader, past pt_centroid on
+ * first pages) and group index g.
+ * ---------------------------------------------------------------- */
+
+static inline char *
+mkt_fastscan_group_base(char *content, uint32_t g, Dimension dim)
+{
+	return content + (size_t)g * mkt_fastscan_group_section_bytes(dim);
+}
+
+static inline ItemPointerData *
+mkt_fastscan_group_tids(char *content, uint32_t g, Dimension dim)
+{
+	return (ItemPointerData *)mkt_fastscan_group_base(content, g, dim);
+}
+
+static inline float *
+mkt_fastscan_group_f_add(char *content, uint32_t g, Dimension dim)
+{
+	return (float *)(mkt_fastscan_group_base(content, g, dim) +
+					 MKT_FASTSCAN_GROUP * sizeof(ItemPointerData));
+}
+
+static inline float *
+mkt_fastscan_group_f_rescale(char *content, uint32_t g, Dimension dim)
+{
+	return mkt_fastscan_group_f_add(content, g, dim) + MKT_FASTSCAN_GROUP;
+}
+
+static inline float *
+mkt_fastscan_group_f_error(char *content, uint32_t g, Dimension dim)
+{
+	return mkt_fastscan_group_f_rescale(content, g, dim) + MKT_FASTSCAN_GROUP;
+}
+
+static inline uint8_t *
+mkt_fastscan_group_codes(char *content, uint32_t g, Dimension dim)
+{
+	return (uint8_t *)(mkt_fastscan_group_f_error(content, g, dim) +
+					   MKT_FASTSCAN_GROUP);
+}
+
 #endif /* MKT_POSTING_PAGE_H */

@@ -81,6 +81,7 @@ mkt_handle_create(
 		uint32_t		 km_max_iter,
 		double			 soar_lambda,
 		double			 boundary_epsilon,
+		int				 fastscan,
 		MktBuildInfo	*info)
 {
 	/* Create context as child of the current context if one exists,
@@ -102,6 +103,7 @@ mkt_handle_create(
 			.km_max_iter	  = km_max_iter,
 			.soar_lambda	  = soar_lambda,
 			.boundary_epsilon = boundary_epsilon,
+			.fastscan		  = fastscan,
 			.encode_rabitq	  = true,
 			.posting_fmt	  = parse_posting_fmt(posting_fmt),
 	};
@@ -166,6 +168,7 @@ mkt_handle_create_from_array(
 		uint32_t	  km_max_iter,
 		double		  soar_lambda,
 		double		  boundary_epsilon,
+		int			  fastscan,
 		MktBuildInfo *info)
 {
 	MktArraySource array_src;
@@ -181,6 +184,7 @@ mkt_handle_create_from_array(
 			km_max_iter,
 			soar_lambda,
 			boundary_epsilon,
+			fastscan,
 			info);
 }
 

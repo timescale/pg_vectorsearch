@@ -60,6 +60,14 @@ typedef struct MktPostingScan
 	Distance *page_distances; /* [max_entries_per_page] */
 	float	 *page_scratch;	  /* [max_entries_per_page] for IP scratch */
 
+	/* Fastscan scratch buffers (NULL if fastscan not enabled) */
+	uint8_t *fs_lut;	   /* query LUT */
+	int32_t *fs_accum;	   /* [32] accumulators */
+	float	 fs_lut_scale; /* LUT dequantization scale */
+	float	 fs_lut_bias;  /* LUT dequantization bias */
+	bool	 fs_lut_valid; /* LUT built for current cluster */
+	int		 fs_lut_bits;  /* 8 or 16 */
+
 	/* TID dedup for replicated vectors (NULL = no dedup).
 	 * Open-addressing hash with generation counter — no memset
 	 * needed per query, just bump seen_gen. */
@@ -131,6 +139,21 @@ const float *mkt_posting_scan_pt_centroid(const MktPostingScan *scan);
  * found, providing dynamic pruning within the cluster.
  */
 void mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk);
+
+/*
+ * Enable fastscan scratch buffers. Call after init if the index
+ * may contain fastscan-format pages.
+ * lut_bits: 8 for uint8 LUT, 16 for uint16 high-accuracy LUT.
+ */
+void mkt_posting_scan_enable_fastscan(MktPostingScan *scan, int lut_bits);
+
+/*
+ * Score and prune a cluster using fastscan kernel.
+ *
+ * Handles mixed chains: fastscan-format pages use the VPSHUFB
+ * kernel, AoS pages fall back to the standard 1-bit kernel.
+ */
+void mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk);
 
 /*
  * Free scratch buffers.

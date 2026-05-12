@@ -23,6 +23,7 @@
 #include "index/centroid_page.h"
 #include "index/index_build.h"
 #include "index/posting_build.h"
+#include "index/posting_convert.h"
 #include "index/posting_page.h"
 #include "standalone/index.h"
 
@@ -512,18 +513,27 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 			{
 				MktClusterList *cl	 = &idx->clusters[c];
 				const float	   *cent = tree->leaf_centroids + (size_t)c * dim;
+				const float	   *pt_cent = idx->pt_centroids + (size_t)c * dim;
 
-				const float *pt_cent = idx->pt_centroids + (size_t)c * dim;
-
-				MktPostingBuilder builder;
-				mkt_posting_builder_init(
-						&builder,
-						&idx->posting_storage.base,
-						idx->base.params,
-						dim,
-						c,
-						cent,
-						pt_cent);
+				MktPostingBuilder b;
+				if (config->fastscan)
+					mkt_posting_builder_init_fastscan(
+							&b,
+							&idx->posting_storage.base,
+							idx->base.params,
+							dim,
+							c,
+							cent,
+							pt_cent);
+				else
+					mkt_posting_builder_init(
+							&b,
+							&idx->posting_storage.base,
+							idx->base.params,
+							dim,
+							c,
+							cent,
+							pt_cent);
 
 				for (uint32_t i = 0; i < cl->count; i++)
 				{
@@ -531,12 +541,15 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 					const float	   *vec = idx->all_vectors + (size_t)vid * dim;
 					ItemPointerData tid;
 					mkt_posting_set_vector_id(&tid, vid);
-					mkt_posting_builder_add(&builder, tid, vec);
+					mkt_posting_builder_add(&b, tid, vec);
 				}
 
-				idx->posting_heads[c] = mkt_posting_builder_finish(&builder);
-				mkt_posting_builder_cleanup(&builder);
+				idx->posting_heads[c] = mkt_posting_builder_finish(&b);
+				mkt_posting_builder_cleanup(&b);
 			}
+
+			if (config->fastscan)
+				idx->base.fastscan = config->fastscan;
 		}
 		else
 		{
