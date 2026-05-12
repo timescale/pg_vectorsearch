@@ -1,16 +1,20 @@
 /*
- * mkt_pg_inspect.c - Index inspection functions
+ * mkt_pg_inspect.c - Index inspection and maintenance functions
  *
  * Provides set-returning functions to inspect the internal structure
- * of mktann indexes via SQL, useful for debugging and visualization.
+ * of mktann indexes via SQL, and utility functions for index
+ * maintenance.
  *
  * Functions:
  *   mkt.centroid_pages(regclass) -- centroid tree structure
  *   mkt.posting_pages(regclass)  -- posting list page chains
+ *   mkt.convert_posting_to_fastscan(regclass, int4) -- convert one
+ *       cluster's posting chain from AoS to fastscan format
  */
 
 #include <postgres.h>
 
+#include <access/generic_xlog.h>
 #include <access/relation.h>
 #include <funcapi.h>
 #include <storage/bufmgr.h>
@@ -18,11 +22,106 @@
 #include <utils/rel.h>
 
 #include "index/centroid_page.h"
+#include "index/posting_convert.h"
 #include "index/posting_page.h"
 #include "mktann_meta.h"
+#include "mktann_storage.h"
 
 PG_FUNCTION_INFO_V1(mkt_centroid_pages);
 PG_FUNCTION_INFO_V1(mkt_posting_pages);
+PG_FUNCTION_INFO_V1(mkt_convert_posting_to_fastscan);
+
+/* ----------------------------------------------------------------
+ * Shared helpers
+ * ---------------------------------------------------------------- */
+
+/* One leaf centroid entry with its location in the centroid tree */
+typedef struct LeafEntry
+{
+	BlockNumber posting_head;
+	BlockNumber centroid_page;
+	uint16_t	entry_idx;
+} LeafEntry;
+
+/*
+ * BFS the centroid tree and collect all leaf entries. Returns
+ * the count and fills *out (palloc'd array). Caller must pfree.
+ */
+static int
+collect_leaf_entries(
+		Relation index, BlockNumber first_centroid, LeafEntry **out)
+{
+	int			 wl_cap	 = 64;
+	int			 wl_len	 = 0;
+	int			 wl_head = 0;
+	BlockNumber *wl		 = palloc(wl_cap * sizeof(BlockNumber));
+
+	int		   leaves_cap = 64;
+	int		   leaves_len = 0;
+	LeafEntry *leaves	  = palloc(leaves_cap * sizeof(LeafEntry));
+
+	wl[wl_len++] = first_centroid;
+
+	while (wl_head < wl_len)
+	{
+		BlockNumber blkno = wl[wl_head++];
+
+		Buffer buf = ReadBuffer(index, blkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		Page page = BufferGetPage(buf);
+
+		const MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
+		uint16_t					 nentries = opaque->entry_count;
+
+		if (BlockNumberIsValid(opaque->next_blkno))
+		{
+			if (wl_len >= wl_cap)
+			{
+				wl_cap *= 2;
+				wl = repalloc(wl, wl_cap * sizeof(BlockNumber));
+			}
+			wl[wl_len++] = opaque->next_blkno;
+		}
+
+		for (uint16_t i = 0; i < nentries; i++)
+		{
+			const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
+
+			if (entry->flags & MKT_CENTROID_FLAG_LEAF)
+			{
+				if (BlockNumberIsValid(entry->child_blkno))
+				{
+					if (leaves_len >= leaves_cap)
+					{
+						leaves_cap *= 2;
+						leaves = repalloc(
+								leaves, leaves_cap * sizeof(LeafEntry));
+					}
+					leaves[leaves_len++] = (LeafEntry){
+							.posting_head  = entry->child_blkno,
+							.centroid_page = blkno,
+							.entry_idx	   = i,
+					};
+				}
+			}
+			else if (BlockNumberIsValid(entry->child_blkno))
+			{
+				if (wl_len >= wl_cap)
+				{
+					wl_cap *= 2;
+					wl = repalloc(wl, wl_cap * sizeof(BlockNumber));
+				}
+				wl[wl_len++] = entry->child_blkno;
+			}
+		}
+
+		UnlockReleaseBuffer(buf);
+	}
+
+	pfree(wl);
+	*out = leaves;
+	return leaves_len;
+}
 
 /* Format name lookup (indexed by MktCentroidFormat) */
 static const char *centroid_format_names[] = {
@@ -230,76 +329,13 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	}
 
-	/* BFS over centroid tree to collect posting heads from leaves */
-	int			 wl_cap	 = 64;
-	int			 wl_len	 = 0;
-	int			 wl_head = 0;
-	BlockNumber *wl		 = palloc(wl_cap * sizeof(BlockNumber));
-
-	int			 heads_cap = 64;
-	int			 heads_len = 0;
-	BlockNumber *heads	   = palloc(heads_cap * sizeof(BlockNumber));
-
-	wl[wl_len++] = first_centroid;
-
-	while (wl_head < wl_len)
-	{
-		BlockNumber blkno = wl[wl_head++];
-
-		Buffer buf = ReadBuffer(index, blkno);
-		LockBuffer(buf, BUFFER_LOCK_SHARE);
-		Page page = BufferGetPage(buf);
-
-		const MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
-		uint16_t					 nentries = opaque->entry_count;
-
-		if (BlockNumberIsValid(opaque->next_blkno))
-		{
-			if (wl_len >= wl_cap)
-			{
-				wl_cap *= 2;
-				wl = repalloc(wl, wl_cap * sizeof(BlockNumber));
-			}
-			wl[wl_len++] = opaque->next_blkno;
-		}
-
-		for (uint16_t i = 0; i < nentries; i++)
-		{
-			const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
-
-			if (entry->flags & MKT_CENTROID_FLAG_LEAF)
-			{
-				if (BlockNumberIsValid(entry->child_blkno))
-				{
-					if (heads_len >= heads_cap)
-					{
-						heads_cap *= 2;
-						heads = repalloc(
-								heads, heads_cap * sizeof(BlockNumber));
-					}
-					heads[heads_len++] = entry->child_blkno;
-				}
-			}
-			else if (BlockNumberIsValid(entry->child_blkno))
-			{
-				if (wl_len >= wl_cap)
-				{
-					wl_cap *= 2;
-					wl = repalloc(wl, wl_cap * sizeof(BlockNumber));
-				}
-				wl[wl_len++] = entry->child_blkno;
-			}
-		}
-
-		UnlockReleaseBuffer(buf);
-	}
-
-	pfree(wl);
+	LeafEntry *leaves;
+	int		   nleaves = collect_leaf_entries(index, first_centroid, &leaves);
 
 	/* Walk each posting chain */
-	for (int c = 0; c < heads_len; c++)
+	for (int c = 0; c < nleaves; c++)
 	{
-		BlockNumber blkno	  = heads[c];
+		BlockNumber blkno	  = leaves[c].posting_head;
 		int			chain_pos = 0;
 
 		while (BlockNumberIsValid(blkno))
@@ -309,10 +345,11 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 			Page page = BufferGetPage(buf);
 
 			const MktPostingPageOpaque *op = mkt_posting_opaque(page);
-			bool is_first = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+			bool is_first	 = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+			bool is_fastscan = (op->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
 
-			Datum values[7];
-			bool  nulls[7] = {0};
+			Datum values[8];
+			bool  nulls[8] = {0};
 
 			values[0] = Int32GetDatum((int32)blkno);
 			values[1] = Int32GetDatum((int32)op->cluster_id);
@@ -326,6 +363,7 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 				nulls[5] = true;
 
 			values[6] = Int32GetDatum(chain_pos);
+			values[7] = CStringGetTextDatum(is_fastscan ? "fastscan" : "aos");
 
 			tuplestore_putvalues(
 					rsinfo->setResult, rsinfo->setDesc, values, nulls);
@@ -338,8 +376,158 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 		}
 	}
 
-	pfree(heads);
+	pfree(leaves);
 	relation_close(index, AccessShareLock);
 
 	PG_RETURN_NULL();
+}
+
+/* ----------------------------------------------------------------
+ * Centroid tree helpers for posting head updates
+ * ---------------------------------------------------------------- */
+
+/*
+ * Update a centroid leaf entry's posting head pointer via WAL.
+ */
+static void
+update_centroid_posting_head(
+		Relation	index,
+		BlockNumber centroid_page,
+		uint16_t	entry_idx,
+		BlockNumber new_head)
+{
+	GenericXLogState *state = GenericXLogStart(index);
+	Buffer			  buf	= ReadBuffer(index, centroid_page);
+	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+	Page page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
+
+	MktCentroidEntryMeta *entry = (MktCentroidEntryMeta *)
+			mkt_centroid_meta(page, entry_idx);
+	entry->child_blkno = new_head;
+
+	GenericXLogFinish(state);
+	UnlockReleaseBuffer(buf);
+}
+
+/*
+ * Set MKT_META_FLAG_FASTSCAN on the metadata page if not already set.
+ */
+static void
+ensure_meta_fastscan_flag(Relation index)
+{
+	Buffer buf = ReadBuffer(index, 0);
+	LockBuffer(buf, BUFFER_LOCK_SHARE);
+	Page			page = BufferGetPage(buf);
+	MktannMetaPage *mp	 = (MktannMetaPage *)PageGetSpecialPointer(page);
+	bool			needs_update = !(mp->flags & MKT_META_FLAG_FASTSCAN);
+	UnlockReleaseBuffer(buf);
+
+	if (needs_update)
+	{
+		GenericXLogState *state = GenericXLogStart(index);
+		buf						= ReadBuffer(index, 0);
+		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+		page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
+		mp	 = (MktannMetaPage *)PageGetSpecialPointer(page);
+		mp->flags |= MKT_META_FLAG_FASTSCAN;
+		GenericXLogFinish(state);
+		UnlockReleaseBuffer(buf);
+	}
+}
+
+/* ----------------------------------------------------------------
+ * mkt.convert_posting_to_fastscan(regclass, int4)
+ *
+ * Converts one cluster's posting chain from AoS to fastscan.
+ * Updates the centroid leaf entry and sets the metadata flag.
+ * Returns the new posting head block number.
+ * ---------------------------------------------------------------- */
+Datum
+mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
+{
+	Oid		 indexoid	= PG_GETARG_OID(0);
+	int32	 cluster_id = PG_GETARG_INT32(1);
+	Relation index		= relation_open(indexoid, RowExclusiveLock);
+
+	if (index->rd_rel->relkind != RELKIND_INDEX)
+	{
+		relation_close(index, RowExclusiveLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not an index",
+						RelationGetRelationName(index))));
+	}
+
+	/* Read metadata */
+	Buffer meta_buf = ReadBuffer(index, 0);
+	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
+	Page meta_page = BufferGetPage(meta_buf);
+
+	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+			meta_page);
+
+	if (meta->magic != MKT_META_MAGIC)
+	{
+		UnlockReleaseBuffer(meta_buf);
+		relation_close(index, RowExclusiveLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not an mktann index",
+						RelationGetRelationName(index))));
+	}
+
+	BlockNumber first_centroid = meta->first_centroid;
+	Dimension	dim			   = meta->dim;
+	UnlockReleaseBuffer(meta_buf);
+
+	/* Find the leaf entry for this cluster */
+	LeafEntry *leaves;
+	int		   nleaves = collect_leaf_entries(index, first_centroid, &leaves);
+
+	if (cluster_id < 0 || cluster_id >= nleaves)
+	{
+		pfree(leaves);
+		relation_close(index, RowExclusiveLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("cluster %d not found or has no posting list",
+						cluster_id)));
+	}
+
+	LeafEntry  *leaf		  = &leaves[cluster_id];
+	BlockNumber old_head	  = leaf->posting_head;
+	BlockNumber centroid_page = leaf->centroid_page;
+	uint16_t	entry_idx	  = leaf->entry_idx;
+	pfree(leaves);
+
+	/* Skip if already fastscan */
+	{
+		Buffer buf = ReadBuffer(index, old_head);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		Page				  page = BufferGetPage(buf);
+		MktPostingPageOpaque *op   = mkt_posting_opaque(page);
+		bool already_fastscan = (op->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
+		UnlockReleaseBuffer(buf);
+
+		if (already_fastscan)
+		{
+			relation_close(index, RowExclusiveLock);
+			PG_RETURN_INT32((int32)old_head);
+		}
+	}
+
+	/* Convert the posting chain */
+	MktannStorage storage;
+	mktann_storage_init(&storage, index, NULL, DISTANCE_L2);
+	storage.build_mode = true;
+
+	BlockNumber new_head =
+			mkt_posting_convert_to_fastscan(&storage.base, old_head, dim);
+
+	update_centroid_posting_head(index, centroid_page, entry_idx, new_head);
+	ensure_meta_fastscan_flag(index);
+
+	relation_close(index, RowExclusiveLock);
+
+	PG_RETURN_INT32((int32)new_head);
 }
