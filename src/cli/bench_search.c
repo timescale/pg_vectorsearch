@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #ifdef MKT_HAVE_HDF5
 #include <hdf5.h>
@@ -64,6 +65,7 @@ typedef struct
 	const char *posting_layout;
 	const char *distance_mode;
 	bool		no_rerank;
+	bool		wait_profile;
 	bool		help;
 } BenchConfig;
 
@@ -200,6 +202,8 @@ print_usage(CmdContext *ctx)
 	printf("  --soar-lambda <float>  SOAR replication lambda "
 		   "(0=off)\n");
 	printf("  --no-rerank        Skip reranking (return approximate)\n");
+	printf("  --wait-profile     Pause before queries (print PID for perf "
+		   "attach)\n");
 #ifdef MKT_HAVE_HDF5
 	printf("  --hdf5 <path>      HDF5 dataset\n");
 	printf("  --metric <str>     angular, euclidean\n");
@@ -246,6 +250,7 @@ cmd_bench_search(CmdContext *ctx)
 			{"posting-fmt", required_argument, 0, 'T'},
 			{"posting-layout", required_argument, 0, 'P'},
 			{"no-rerank", no_argument, 0, 'N'},
+			{"wait-profile", no_argument, 0, 'Z'},
 			{"boundary-epsilon", required_argument, 0, 'B'},
 			{"soar-lambda", required_argument, 0, 'S'},
 			{"help", no_argument, 0, 'h'},
@@ -313,6 +318,9 @@ cmd_bench_search(CmdContext *ctx)
 			break;
 		case 'N':
 			config.no_rerank = true;
+			break;
+		case 'Z':
+			config.wait_profile = true;
 			break;
 		case 'S':
 			config.soar_lambda = atof(optarg);
@@ -514,6 +522,32 @@ cmd_bench_search(CmdContext *ctx)
 		   config.posting_fmt,
 		   config.posting_layout,
 		   config.distance_mode);
+
+	if (config.wait_profile)
+	{
+		const char *tmpdir = getenv("TMPDIR");
+		char		sig_path[256];
+		snprintf(
+				sig_path,
+				sizeof(sig_path),
+				"%s/mkt-bench-ready",
+				tmpdir ? tmpdir : "/tmp");
+		const char *sig_file = sig_path;
+		FILE	   *f		 = fopen(sig_file, "w");
+		if (f)
+		{
+			fprintf(f, "%d\n", (int)getpid());
+			fclose(f);
+		}
+		printf("PID %d ready. Waiting for %s to be removed...\n",
+			   (int)getpid(),
+			   sig_file);
+		fflush(stdout);
+		while (access(sig_file, F_OK) == 0)
+			usleep(10000); /* 10ms poll */
+		printf("Starting queries.\n");
+		fflush(stdout);
+	}
 
 	/* Warmup */
 	for (uint32_t w = 0; w < config.warmup; w++)
