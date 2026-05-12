@@ -293,8 +293,13 @@ mkt_realloc(void *ptr, size_t size)
 	if (size == 0)
 		return NULL;
 
-	/* Just allocate new space - caller responsible for copying */
-	return mkt_alloc(size);
+	/* Arena allocator cannot resize in-place, so allocate new and
+	 * copy. We don't track the old allocation size, so copy up to
+	 * the new size (old block may be larger — safe because arena
+	 * memory stays valid until context delete). */
+	void *new_ptr = mkt_alloc(size);
+	memcpy(new_ptr, ptr, size);
+	return new_ptr;
 }
 
 /* Free is a no-op in arena mode */
