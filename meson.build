@@ -349,6 +349,7 @@ mkt_cli_sources = files(
   'src/cli/bench_search.c',
   'src/cli/bench_rabitq_kernel.c',
   'src/cli/bench_page_score.c',
+  'src/cli/bench_fastscan_kernel.c',
   'src/cli/distance_pgvector.c',
   'src/cli/kmeans_pgvector.c',
 )
