@@ -717,10 +717,22 @@ CREATE FUNCTION mkt.posting_pages(regclass)
         entry_count integer,
         max_entries integer,
         next_blkno  integer,
-        chain_pos   integer
+        chain_pos   integer,
+        format      text
     )
     AS 'MODULE_PATHNAME', 'mkt_posting_pages'
     LANGUAGE C STRICT PARALLEL SAFE;
+
+-- Convert one cluster's posting chain from AoS to fastscan format.
+-- Updates centroid entries and metadata flag atomically.
+-- Returns the new posting head block number.
+CREATE FUNCTION mkt.convert_posting_to_fastscan(
+        index_oid regclass,
+        cluster_id integer
+    )
+    RETURNS integer
+    AS 'MODULE_PATHNAME', 'mkt_convert_posting_to_fastscan'
+    LANGUAGE C STRICT;
 
 -- =====================================================================
 -- pgvector binary cast support

@@ -106,6 +106,57 @@ CREATE INDEX IF NOT EXISTS idx_btree ON embeddings (id);
 SELECT * FROM mkt_centroid_pages('idx_btree'::regclass);
 SELECT * FROM mkt.posting_pages('idx_btree'::regclass);
 
+-- =====================================================================
+-- mkt.convert_posting_to_fastscan
+-- =====================================================================
+
+-- Convert cluster 0 from AoS to fastscan
+SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 0) IS NOT NULL
+    AS converted;
+
+-- Verify the converted cluster has fastscan format
+SELECT format AS cluster0_format
+    FROM mkt.posting_pages('idx_l2c'::regclass)
+    WHERE cluster_id = 0 AND is_first;
+
+-- Non-converted clusters still show 'aos'
+SELECT bool_and(format = 'aos') AS others_aos
+    FROM mkt.posting_pages('idx_l2c'::regclass)
+    WHERE cluster_id != 0 AND is_first;
+
+-- Converting again should be a no-op (returns same head)
+SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 0) IS NOT NULL
+    AS idempotent;
+
+-- Query still works after partial conversion (mixed AoS + fastscan)
+SET enable_seqscan = off;
+SELECT count(*) FROM (
+    SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
+    FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5
+) t;
+RESET enable_seqscan;
+
+-- Convert all remaining clusters
+SELECT count(*) AS converted_count FROM (
+    SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, cluster_id)
+    FROM mkt.posting_pages('idx_l2c'::regclass)
+    WHERE is_first AND cluster_id != 0
+) t;
+
+-- Query still works after full conversion
+SET enable_seqscan = off;
+SELECT count(*) FROM (
+    SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
+    FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5
+) t;
+RESET enable_seqscan;
+
+-- Error: non-existent cluster_id
+SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 99999);
+
+-- Error: not an mktann index
+SELECT mkt.convert_posting_to_fastscan('idx_btree'::regclass, 0);
+
 -- Cleanup
 DROP TABLE embeddings;
 DROP TABLE wide;
