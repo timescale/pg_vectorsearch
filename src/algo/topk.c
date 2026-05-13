@@ -21,7 +21,7 @@
  * ---------------------------------------------------------------- */
 
 static void
-ub_sift_up(Distance *heap, uint32_t i)
+ub_sift_up(Distance *heap, uint64_t *ids, uint32_t i)
 {
 	while (i > 0)
 	{
@@ -31,12 +31,15 @@ ub_sift_up(Distance *heap, uint32_t i)
 		Distance tmp = heap[i];
 		heap[i]		 = heap[parent];
 		heap[parent] = tmp;
+		uint64_t tid = ids[i];
+		ids[i]		 = ids[parent];
+		ids[parent]	 = tid;
 		i			 = parent;
 	}
 }
 
 static void
-ub_sift_down(Distance *heap, uint32_t count)
+ub_sift_down(Distance *heap, uint64_t *ids, uint32_t count)
 {
 	uint32_t i = 0;
 	for (;;)
@@ -56,6 +59,36 @@ ub_sift_down(Distance *heap, uint32_t count)
 		Distance tmp  = heap[i];
 		heap[i]		  = heap[largest];
 		heap[largest] = tmp;
+		uint64_t tid  = ids[i];
+		ids[i]		  = ids[largest];
+		ids[largest]  = tid;
+		i			  = largest;
+	}
+}
+
+static void
+ub_sift_down_from(Distance *heap, uint64_t *ids, uint32_t count, uint32_t i)
+{
+	for (;;)
+	{
+		uint32_t left	 = 2 * i + 1;
+		uint32_t right	 = 2 * i + 2;
+		uint32_t largest = i;
+
+		if (left < count && heap[left] > heap[largest])
+			largest = left;
+		if (right < count && heap[right] > heap[largest])
+			largest = right;
+
+		if (largest == i)
+			break;
+
+		Distance tmp  = heap[i];
+		heap[i]		  = heap[largest];
+		heap[largest] = tmp;
+		uint64_t tid  = ids[i];
+		ids[i]		  = ids[largest];
+		ids[largest]  = tid;
 		i			  = largest;
 	}
 }
@@ -86,6 +119,7 @@ mkt_topk_init(MktTopK *topk, uint32_t k)
 	topk->memctx   = mkt_memctx_create(NULL, "topk");
 	topk->k		   = k;
 	topk->ub_heap  = mkt_memctx_alloc(topk->memctx, k * sizeof(Distance));
+	topk->ub_ids   = mkt_memctx_alloc(topk->memctx, k * sizeof(uint64_t));
 	topk->ub_count = 0;
 
 	uint32_t cap = k * 2;
@@ -108,6 +142,7 @@ mkt_topk_cleanup(MktTopK *topk)
 		topk->memctx = NULL;
 	}
 	topk->ub_heap	 = NULL;
+	topk->ub_ids	 = NULL;
 	topk->candidates = NULL;
 }
 
@@ -119,6 +154,7 @@ mkt_topk_create(uint32_t k)
 	topk->memctx   = ctx;
 	topk->k		   = k;
 	topk->ub_heap  = mkt_memctx_alloc(ctx, k * sizeof(Distance));
+	topk->ub_ids   = mkt_memctx_alloc(ctx, k * sizeof(uint64_t));
 	topk->ub_count = 0;
 
 	uint32_t cap = k * 2;
@@ -146,6 +182,7 @@ mkt_topk_reset(MktTopK *topk)
 	mkt_memctx_reset(topk->memctx);
 
 	topk->ub_heap = mkt_memctx_alloc(topk->memctx, topk->k * sizeof(Distance));
+	topk->ub_ids  = mkt_memctx_alloc(topk->memctx, topk->k * sizeof(uint64_t));
 	topk->ub_count = 0;
 
 	uint32_t cap = topk->k * 2;
@@ -171,19 +208,40 @@ mkt_topk_insert(MktTopK *topk, Distance distance, Distance error, uint64_t id)
 	if (lb >= mkt_topk_threshold(topk))
 		return;
 
+	/* Dedup: check if this ID is already in the heap. If so,
+	 * only keep the entry with the better (smaller) upper bound.
+	 * This prevents duplicates (e.g. SOAR replicas) from occupying
+	 * multiple heap slots and inflating the threshold. */
+	for (uint32_t i = 0; i < topk->ub_count; i++)
+	{
+		if (topk->ub_ids[i] == id)
+		{
+			if (ub < topk->ub_heap[i])
+			{
+				topk->ub_heap[i] = ub;
+				ub_sift_down_from(
+						topk->ub_heap, topk->ub_ids, topk->ub_count, i);
+			}
+			goto append;
+		}
+	}
+
 	/* Update threshold heap */
 	if (topk->ub_count < topk->k)
 	{
 		topk->ub_heap[topk->ub_count] = ub;
+		topk->ub_ids[topk->ub_count]  = id;
 		topk->ub_count++;
-		ub_sift_up(topk->ub_heap, topk->ub_count - 1);
+		ub_sift_up(topk->ub_heap, topk->ub_ids, topk->ub_count - 1);
 	}
 	else if (ub < topk->ub_heap[0])
 	{
 		topk->ub_heap[0] = ub;
-		ub_sift_down(topk->ub_heap, topk->ub_count);
+		topk->ub_ids[0]	 = id;
+		ub_sift_down(topk->ub_heap, topk->ub_ids, topk->ub_count);
 	}
 
+append:
 	/* Grow candidate buffer if needed (old buffer freed with memctx) */
 	if (topk->cand_count == topk->cand_capacity)
 	{
@@ -227,6 +285,27 @@ mkt_topk_extract_sorted(
 	/* Sort by distance ascending */
 	if (out > 1)
 		qsort(results, out, sizeof(MktTopKEntry), cmp_by_distance);
+
+	/* Deduplicate: keep the first (best distance) for each ID. */
+	if (out > 1)
+	{
+		uint32_t w = 1;
+		for (uint32_t r = 1; r < out; r++)
+		{
+			bool dup = false;
+			for (uint32_t j = 0; j < w; j++)
+			{
+				if (results[r].id == results[j].id)
+				{
+					dup = true;
+					break;
+				}
+			}
+			if (!dup)
+				results[w++] = results[r];
+		}
+		out = w;
+	}
 
 	*count_out = out;
 }
