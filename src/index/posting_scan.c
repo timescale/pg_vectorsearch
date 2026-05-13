@@ -312,38 +312,6 @@ mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 			}
 
 			uint64_t id = mkt_posting_encode_tid(&e->meta.tid);
-
-			/* Skip duplicates from replicated vectors */
-			if (scan->seen_tids != NULL)
-			{
-				uint32_t mask = scan->seen_tids_cap - 1;
-				uint32_t gen  = scan->seen_gen;
-				uint32_t slot = (uint32_t)(id * 0x9E3779B97F4A7C15ULL >> 32) &
-								mask;
-				bool dup = false;
-				for (;;)
-				{
-					if (scan->seen_gens[slot] == gen &&
-						scan->seen_tids[slot] == id)
-					{
-						dup = true;
-						break;
-					}
-					if (scan->seen_gens[slot] != gen)
-					{
-						scan->seen_tids[slot] = id;
-						scan->seen_gens[slot] = gen;
-						break;
-					}
-					slot = (slot + 1) & mask;
-				}
-				if (dup)
-				{
-					scan->entries_pruned++;
-					continue;
-				}
-			}
-
 			mkt_topk_insert(topk, est, err, id);
 			threshold = mkt_topk_threshold(topk);
 		}
@@ -487,37 +455,6 @@ fastscan_prune_group_avx512(
 			surv &= surv - 1;
 
 			uint64_t id = mkt_posting_encode_tid(&tids[v]);
-
-			if (scan->seen_tids != NULL)
-			{
-				uint32_t mask = scan->seen_tids_cap - 1;
-				uint32_t gen  = scan->seen_gen;
-				uint32_t slot = (uint32_t)(id * 0x9E3779B97F4A7C15ULL >> 32) &
-								mask;
-				bool dup = false;
-				for (;;)
-				{
-					if (scan->seen_gens[slot] == gen &&
-						scan->seen_tids[slot] == id)
-					{
-						dup = true;
-						break;
-					}
-					if (scan->seen_gens[slot] != gen)
-					{
-						scan->seen_tids[slot] = id;
-						scan->seen_gens[slot] = gen;
-						break;
-					}
-					slot = (slot + 1) & mask;
-				}
-				if (dup)
-				{
-					scan->entries_pruned++;
-					continue;
-				}
-			}
-
 			mkt_topk_insert(topk, est_buf[v], err_buf[v], id);
 			threshold = mkt_topk_threshold(topk);
 		}
@@ -671,38 +608,6 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 				}
 
 				uint64_t id = mkt_posting_encode_tid(&tids[v]);
-
-				if (scan->seen_tids != NULL)
-				{
-					uint32_t mask = scan->seen_tids_cap - 1;
-					uint32_t gen  = scan->seen_gen;
-					uint32_t slot = (uint32_t)(id * 0x9E3779B97F4A7C15ULL >>
-											   32) &
-									mask;
-					bool dup = false;
-					for (;;)
-					{
-						if (scan->seen_gens[slot] == gen &&
-							scan->seen_tids[slot] == id)
-						{
-							dup = true;
-							break;
-						}
-						if (scan->seen_gens[slot] != gen)
-						{
-							scan->seen_tids[slot] = id;
-							scan->seen_gens[slot] = gen;
-							break;
-						}
-						slot = (slot + 1) & mask;
-					}
-					if (dup)
-					{
-						scan->entries_pruned++;
-						continue;
-					}
-				}
-
 				mkt_topk_insert(topk, est, err, id);
 				threshold = mkt_topk_threshold(topk);
 			}

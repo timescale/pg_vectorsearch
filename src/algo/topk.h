@@ -58,6 +58,7 @@ typedef struct MktTopKEntry
 typedef struct MktTopK
 {
 	Distance	 *ub_heap;		 /* binary max-heap of K upper bounds */
+	uint64_t	 *ub_ids;		 /* parallel array: ID for each heap entry */
 	uint32_t	  ub_count;		 /* entries in threshold heap (<= k) */
 	uint32_t	  k;			 /* target K */
 	MktTopKEntry *candidates;	 /* growable candidate buffer */
