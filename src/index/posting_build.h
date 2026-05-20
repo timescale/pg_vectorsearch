@@ -1,28 +1,59 @@
 /*
- * posting_build.h - Streaming posting list builder
+ * posting_build.h - Posting list construction
  *
- * Builds posting list page chains from a stream of vectors.
- * Supports two page formats (AoS and fastscan) via a page-ops
- * callback, and two entry modes: raw vectors (RaBitQ-encoded
- * internally) and pre-encoded data.
- *
- * Usage:
- *   MktPostingBuilder builder;
- *   mkt_posting_builder_init(&builder, storage, params, dim,
- *                            cluster_id, centroid, pt_centroid);
- *   // or: mkt_posting_builder_init_fastscan(...) for fastscan
- *   for each vector in cluster:
- *       mkt_posting_builder_add(&builder, tid, vector);
- *   BlockNumber head = mkt_posting_builder_finish(&builder);
- *   mkt_posting_builder_cleanup(&builder);
+ * Vector-to-cluster assignment (tree descent, SOAR, boundary
+ * replication) and streaming page builder. Used by both standalone
+ * and PostgreSQL builds. No PostgreSQL dependencies.
  */
 
 #ifndef MKT_POSTING_BUILD_H
 #define MKT_POSTING_BUILD_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "algo/hkmeans.h"
+#include "core/atomics.h"
 #include "index/posting_page.h"
 #include "index/storage.h"
+#include "mkt_types.h"
 #include "quant/rabitq.h"
+
+/* ----------------------------------------------------------------
+ * Vector-to-cluster assignment
+ * ---------------------------------------------------------------- */
+
+#define MKT_INVALID_CLUSTER UINT32_MAX
+
+typedef struct MktBuildParams
+{
+	Dimension	   dim;
+	DistanceMetric metric;
+	double		   soar_lambda;
+	double		   boundary_epsilon;
+} MktBuildParams;
+
+typedef struct MktBuildAssignment
+{
+	uint32_t	 primary;
+	uint32_t	 secondary;
+	const float *enc_vector;
+} MktBuildAssignment;
+
+typedef struct MktBuildWorkerBufs
+{
+	float *norm_buf;	 /* [dim] for cosine normalization */
+	float *residual_buf; /* [dim] for SOAR residual computation */
+} MktBuildWorkerBufs;
+
+MktBuildWorkerBufs mkt_build_worker_bufs_create(Dimension dim);
+void			   mkt_build_worker_bufs_free(MktBuildWorkerBufs *bufs);
+
+MktBuildAssignment mkt_build_assign_vector(
+		const HKMeansResult	 *tree,
+		const float			 *vec,
+		const MktBuildParams *params,
+		MktBuildWorkerBufs	 *bufs);
 
 /* ----------------------------------------------------------------
  * Page format ops — the only part that differs between formats
@@ -81,11 +112,14 @@ typedef struct MktPostingBuilder
 	char mem_page[BLCKSZ] __attribute__((aligned(8)));
 	bool page_dirty;
 
-	BlockNumber reserve_start;
-	uint32_t	reserve_count;
-	uint32_t	reserve_used;
+	BlockNumber		   reserve_start;
+	uint32_t		   reserve_count;
+	uint32_t		   reserve_used;
+	mkt_atomic_uint32 *shared_reserve_next;
+	BlockNumber		   fixed_first_blkno;
 
-	RaBitQData *enc_buf;
+	RaBitQData	 *enc_buf;
+	RaBitQScratch enc_scratch;
 
 	/* Page format dispatch */
 	const MktPostingPageOps *page_ops;
@@ -127,8 +161,47 @@ void mkt_posting_builder_init_fastscan(
 		const float		   *centroid,
 		const float		   *pt_centroid);
 
+/*
+ * Initialize continuation builder (no pt_centroid on first page).
+ * Used by parallel workers that are not responsible for the first
+ * page of a cluster's posting list.
+ */
+void mkt_posting_builder_init_continuation(
+		MktPostingBuilder  *builder,
+		MktStorage		   *storage,
+		const RaBitQParams *params,
+		Dimension			dim,
+		uint32_t			cluster_id,
+		const float		   *centroid);
+
+void mkt_posting_builder_init_continuation_fastscan(
+		MktPostingBuilder  *builder,
+		MktStorage		   *storage,
+		const RaBitQParams *params,
+		Dimension			dim,
+		uint32_t			cluster_id,
+		const float		   *centroid);
+
 void mkt_posting_builder_set_reserve(
 		MktPostingBuilder *builder, BlockNumber start, uint32_t count);
+
+/*
+ * Shared reserve: multiple builders (from different threads) for the
+ * same cluster claim page slots atomically from a shared counter.
+ * Falls back to storage->new_page() if the reserved range is exhausted.
+ */
+void mkt_posting_builder_set_shared_reserve(
+		MktPostingBuilder *builder,
+		BlockNumber		   start,
+		uint32_t		   count,
+		mkt_atomic_uint32 *next);
+
+/*
+ * Pin the first page to a specific block number. The first flush
+ * writes to this block; subsequent pages use the reserve or new_page.
+ */
+void mkt_posting_builder_set_first_blkno(
+		MktPostingBuilder *builder, BlockNumber blkno);
 
 /*
  * Add a raw vector. Encodes with RaBitQ relative to centroid.
@@ -150,7 +223,27 @@ void mkt_posting_builder_add_encoded(
 
 BlockNumber mkt_posting_builder_finish(MktPostingBuilder *builder);
 
+/*
+ * Finalize entries but don't flush the last page. The partial page
+ * data remains in builder->mem_page for merging by the caller.
+ * Returns the head of the flushed chain (InvalidBlockNumber if no
+ * pages were flushed).
+ */
+BlockNumber mkt_posting_builder_finish_partial(MktPostingBuilder *builder);
+
 void mkt_posting_builder_cleanup(MktPostingBuilder *builder);
+
+static inline BlockNumber
+mkt_posting_builder_head(const MktPostingBuilder *b)
+{
+	return b->head_blkno;
+}
+
+static inline BlockNumber
+mkt_posting_builder_tail(const MktPostingBuilder *b)
+{
+	return b->prev_blkno;
+}
 
 /* ----------------------------------------------------------------
  * Flat builder — one buffer per cluster (standalone benchmark)

@@ -10,8 +10,13 @@
  */
 
 #include <math.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "algo/distance.h"
 #include "algo/hkmeans.h"
@@ -19,14 +24,23 @@
 #include "algo/topk.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
-#include "index/build_parallel.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
 #include "index/posting_build.h"
+#include "index/posting_build_parallel.h"
 #include "index/posting_convert.h"
 #include "index/posting_page.h"
 #include "standalone/index.h"
+#include "standalone/thread_pool.h"
+
+static uint64_t
+now_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
 
 /* Arena-safe grow: alloc new, copy old, old freed on context delete */
 static void *
@@ -67,16 +81,20 @@ static Page
 aps_new_page(MktStorage *self, BlockNumber *blkno_out)
 {
 	ArrayPageStorage *s = (ArrayPageStorage *)self;
+	pthread_mutex_lock(&s->alloc_mutex);
 	if (s->next_blkno >= s->page_cap)
 	{
-		uint32_t new_cap = s->page_cap * 2;
-		s->pages		 = arena_grow(
-				s->pages,
-				(size_t)s->page_cap * BLCKSZ,
-				(size_t)new_cap * BLCKSZ);
+		MktMemCtx prev	  = mkt_memctx_switch(s->memctx);
+		uint32_t  new_cap = s->page_cap * 2;
+		s->pages		  = arena_grow(
+				 s->pages,
+				 (size_t)s->page_cap * BLCKSZ,
+				 (size_t)new_cap * BLCKSZ);
 		s->page_cap = new_cap;
+		mkt_memctx_switch(prev);
 	}
 	*blkno_out = s->next_blkno++;
+	pthread_mutex_unlock(&s->alloc_mutex);
 	return s->pages + (size_t)*blkno_out * BLCKSZ;
 }
 
@@ -186,14 +204,17 @@ cluster_list_append(MktClusterList *cl, uint32_t id)
  * ---------------------------------------------------------------- */
 
 static ArrayPageStorage
-make_array_page_storage(uint32_t est_pages)
+make_array_page_storage(uint32_t est_pages, MktMemCtx memctx)
 {
-	return (ArrayPageStorage){
+	ArrayPageStorage s = {
 			.base		= {.ops = &array_page_storage_ops},
 			.pages		= mkt_alloc0((size_t)est_pages * BLCKSZ),
 			.next_blkno = 0,
 			.page_cap	= est_pages,
+			.memctx		= memctx,
 	};
+	pthread_mutex_init(&s.alloc_mutex, NULL);
+	return s;
 }
 
 /* ----------------------------------------------------------------
@@ -216,11 +237,136 @@ normalize_all(float *data, uint32_t nvecs, Dimension dim)
 }
 
 /* ----------------------------------------------------------------
+ * Parallel centroid rotation callback
+ * ---------------------------------------------------------------- */
+
+typedef struct RotateCtx
+{
+	const RaBitQParams *params;
+	const float		   *leaf_centroids;
+	float			   *pt_centroids;
+	Dimension			dim;
+} RotateCtx;
+
+static void
+par_rotate_fn(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
+{
+	(void)thread_id;
+	RotateCtx *ctx = (RotateCtx *)arg;
+	Dimension  dim = ctx->dim;
+
+	for (uint32_t c = start; c < end; c++)
+		mkt_rabitq_rotate(
+				ctx->params,
+				ctx->leaf_centroids + (size_t)c * dim,
+				ctx->pt_centroids + (size_t)c * dim);
+}
+
+/* ----------------------------------------------------------------
+ * Parallel posting build callback
+ *
+ * Each thread creates its own memory context for transient
+ * allocations. The MktPostingWorkerState is pre-initialized
+ * by the caller and lives in the main context.
+ * ---------------------------------------------------------------- */
+
+typedef struct ParPostingCtx
+{
+	MktPostingWorkerState *workers;
+	const float			  *all_vectors;
+	const HKMeansResult	  *tree;
+	MktBuildParams		   bp;
+} ParPostingCtx;
+
+static void
+par_posting_fn(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
+{
+	ParPostingCtx		  *ctx = (ParPostingCtx *)arg;
+	MktPostingWorkerState *ws  = &ctx->workers[thread_id];
+	Dimension			   dim = ws->dim;
+
+	MktMemCtx thread_ctx = mkt_memctx_create(NULL, "par_posting");
+	MktMemCtx old_ctx	 = mkt_memctx_switch(thread_ctx);
+
+	MktBuildWorkerBufs bufs	   = mkt_build_worker_bufs_create(dim);
+	MktMemCtx		   tmp_ctx = mkt_memctx_create(thread_ctx, "par_tmp");
+
+	for (uint32_t i = start; i < end; i++)
+	{
+		mkt_memctx_switch(tmp_ctx);
+		const float		  *vec = ctx->all_vectors + (size_t)i * dim;
+		MktBuildAssignment asgn =
+				mkt_build_assign_vector(ctx->tree, vec, &ctx->bp, &bufs);
+		mkt_memctx_switch(thread_ctx);
+		mkt_posting_worker_add(
+				ws, i, asgn.enc_vector, asgn.primary, asgn.secondary);
+		mkt_memctx_reset(tmp_ctx);
+	}
+
+	mkt_posting_worker_finish(ws);
+	mkt_build_worker_bufs_free(&bufs);
+
+	mkt_memctx_switch(old_ctx);
+	mkt_memctx_delete(thread_ctx);
+}
+
+static uint32_t
+sa_detect_nthreads(void)
+{
+	long n = sysconf(_SC_NPROCESSORS_ONLN);
+	if (n < 1)
+		n = 1;
+	if (n > 64)
+		n = 64;
+	return (uint32_t)n;
+}
+
+/* ----------------------------------------------------------------
+ * Assign vectors to cluster lists (serial, inline)
+ *
+ * Used only by flat mode and no-rabitq brute-force path which need
+ * per-cluster vector ID lists. The pages mode parallel path does
+ * assignment inline in each posting worker instead.
+ * ---------------------------------------------------------------- */
+
+static void
+assign_to_cluster_lists(
+		MktIndex			 *idx,
+		const HKMeansResult	 *tree,
+		const MktBuildParams *bp,
+		Dimension			  dim,
+		uint32_t			  nlist)
+{
+	MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
+
+	for (uint32_t i = 0; i < idx->nvecs; i++)
+	{
+		const float		  *vec = idx->all_vectors + (size_t)i * dim;
+		MktBuildAssignment asgn =
+				mkt_build_assign_vector(tree, vec, bp, &bufs);
+
+		cluster_list_append(&idx->clusters[asgn.primary], i);
+		if (asgn.secondary != MKT_INVALID_CLUSTER)
+			cluster_list_append(&idx->clusters[asgn.secondary], i);
+	}
+
+	mkt_build_worker_bufs_free(&bufs);
+
+	idx->max_cluster_size = 0;
+	for (uint32_t c = 0; c < nlist; c++)
+		if (idx->clusters[c].count > idx->max_cluster_size)
+			idx->max_cluster_size = idx->clusters[c].count;
+}
+
+/* ----------------------------------------------------------------
  * Build
  * ---------------------------------------------------------------- */
 
 MktIndex *
-mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
+mkt_index_build(
+		MktVectorSource		 *src,
+		const MktIndexConfig *config,
+		MktBuildStats		 *stats)
 {
 	if (src == NULL || src->nvecs == 0 || src->dim == 0 || config == NULL)
 		return NULL;
@@ -259,8 +405,8 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 		fan_out = mkt_auto_fan_out(0, nlist, 0);
 	idx->fan_out = fan_out;
 
-	/* Pass 1: sample vectors for clustering (build context).
-	 * Use strided reads for uniform coverage across the dataset. */
+	/* --- Phase: sample --- */
+	uint64_t t_phase = now_ns();
 	mkt_memctx_switch(build_ctx);
 	uint32_t max_samples = nvecs < 256000 ? nvecs : 256000;
 	uint32_t stride		 = nvecs / max_samples;
@@ -283,7 +429,9 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	if (idx->base.metric == DISTANCE_COSINE)
 		normalize_all(samples, max_samples, dim);
 
-	/* Run hierarchical k-means */
+	/* --- Phase: kmeans --- */
+	double ms_sample	  = (double)(now_ns() - t_phase) / 1e6;
+	t_phase				  = now_ns();
 	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	if (config->km_nredo > 0)
 		km_opts.nredo = config->km_nredo;
@@ -299,7 +447,10 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 			idx->base.metric,
 			&km_opts);
 
-	/* Switch back to index context for long-lived allocations */
+	/* --- Phase: setup --- */
+	double ms_kmeans = (double)(now_ns() - t_phase) / 1e6;
+	t_phase			 = now_ns();
+
 	mkt_memctx_switch(idx_ctx);
 
 	if (tree == NULL)
@@ -335,15 +486,26 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	/* RaBitQ params */
 	idx->base.params = mkt_rabitq_create(dim, 42);
 
-	/* Precompute P^T * centroids for zero-alloc query path.
-	 * This turns per-cluster O(dim²) matrix multiply into O(dim)
-	 * vector subtraction at query time. */
-	idx->pt_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
-	for (uint32_t c = 0; c < nlist; c++)
-		mkt_rabitq_rotate(
-				idx->base.params,
-				idx->leaf_centroids + (size_t)c * dim,
-				idx->pt_centroids + (size_t)c * dim);
+	/* Create thread pool for parallel build phases.
+	 * nworkers = background workers (matches PG convention).
+	 * parallel_for adds the leader = nworkers + 1 total. */
+	uint32_t nworkers = config->nworkers;
+	if (nworkers == 0)
+	{
+		uint32_t ncpu = sa_detect_nthreads();
+		nworkers	  = ncpu > 1 ? ncpu - 1 : 0;
+	}
+	MktThreadPool *pool = mkt_thread_pool_create(nworkers);
+
+	/* Precompute P^T * centroids for zero-alloc query path. */
+	idx->pt_centroids	 = mkt_alloc((size_t)nlist * dim * sizeof(float));
+	RotateCtx rotate_ctx = {
+			.params			= idx->base.params,
+			.leaf_centroids = idx->leaf_centroids,
+			.pt_centroids	= idx->pt_centroids,
+			.dim			= dim,
+	};
+	mkt_thread_pool_parallel_for(pool, nlist, par_rotate_fn, &rotate_ctx);
 
 	idx->base.pt_global_mean = mkt_alloc(dim * sizeof(float));
 	mkt_rabitq_rotate(
@@ -351,7 +513,8 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 
 	/* Build centroid pages */
 	uint32_t est_centroid_pages = nlist + 100;
-	idx->centroid_storage		= make_array_page_storage(est_centroid_pages);
+	idx->centroid_storage =
+			make_array_page_storage(est_centroid_pages, idx_ctx);
 
 	uint32_t max_ent =
 			mkt_centroid_max_entries_fmt(dim, idx->base.centroid_format);
@@ -378,108 +541,168 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	for (uint32_t c = 0; c < nlist; c++)
 		cluster_list_init(&idx->clusters[c], est_per_cluster);
 
-	/* Pass 2: stream all vectors, route to clusters.
-	 * Uses shared mkt_build_assign_vector() for tree descent +
-	 * normalization + SOAR logic. */
-	mkt_memctx_switch(build_ctx);
-	MktBuildWorkerBufs worker_bufs = mkt_build_worker_bufs_create(dim);
-	mkt_memctx_switch(idx_ctx);
-
-	const MktBuildParams bp = {
-			.dim			  = dim,
-			.metric			  = config->metric,
-			.soar_lambda	  = config->soar_lambda,
-			.boundary_epsilon = config->boundary_epsilon,
-	};
+	double				 ms_setup = (double)(now_ns() - t_phase) / 1e6;
+	const MktBuildParams bp		  = {
+				  .dim				= dim,
+				  .metric			= config->metric,
+				  .soar_lambda		= config->soar_lambda,
+				  .boundary_epsilon = config->boundary_epsilon,
+	  };
 
 	src->reset(src);
-	idx->nvecs = 0;
 
+	if (src->read_all != NULL && src->read_all(src, idx->all_vectors))
 	{
+		idx->nvecs = nvecs;
+	}
+	else
+	{
+		idx->nvecs = 0;
 		const float *vec;
 		uint32_t	 id;
 		while (src->next(src, 1, &vec, &id))
 		{
-			MktBuildAssignment asgn =
-					mkt_build_assign_vector(tree, vec, &bp, &worker_bufs);
-
-			/* Store full-precision vector for reranking */
 			memcpy(idx->all_vectors + (size_t)id * dim,
-				   asgn.enc_vector,
+				   vec,
 				   dim * sizeof(float));
-
-			cluster_list_append(&idx->clusters[asgn.primary], id);
 			idx->nvecs++;
-
-			if (asgn.secondary != MKT_INVALID_CLUSTER)
-				cluster_list_append(&idx->clusters[asgn.secondary], id);
 		}
 	}
 
-	/* Compute max cluster size (needed for flat mode scan buffers) */
-	idx->max_cluster_size = 0;
-	for (uint32_t c = 0; c < nlist; c++)
-		if (idx->clusters[c].count > idx->max_cluster_size)
-			idx->max_cluster_size = idx->clusters[c].count;
+	/* Normalize all vectors for cosine before parallel assignment */
+	if (config->metric == DISTANCE_COSINE)
+		normalize_all(idx->all_vectors, idx->nvecs, dim);
 
-	/* Build posting data if RaBitQ encoding is requested */
+	/* --- Phase: posting --- */
+	t_phase = now_ns();
+
+	uint32_t nt = nworkers + 1; /* workers + leader */
+
+	double	 ms_parallel = 0, ms_merge = 0;
+	uint32_t stat_nworkers = nworkers, stat_pages = 0;
+	uint32_t stat_merge_in = 0, stat_merge_out = 0;
 	if (config->encode_rabitq)
 	{
 		idx->posting_fmt = config->posting_fmt;
 
 		if (config->posting_fmt == MKT_POSTING_FMT_PAGES)
 		{
-			/* Paged mode: BLCKSZ pages in ArrayPageStorage */
-			uint32_t ent_per_page = mkt_posting_max_entries(dim);
-			uint32_t est_pages	  = (nvecs / ent_per_page) + nlist + 100;
-			idx->posting_storage  = make_array_page_storage(est_pages);
-			idx->posting_heads	  = mkt_alloc(nlist * sizeof(BlockNumber));
+			uint32_t est_per_cluster = (idx->nvecs + nlist - 1) / nlist;
+			if (config->soar_lambda > 0.0 || config->boundary_epsilon > 0.0)
+				est_per_cluster = (uint32_t)(est_per_cluster * 1.3) + 1;
 
+			mkt_memctx_switch(build_ctx);
+			uint32_t *cluster_counts = mkt_alloc(nlist * sizeof(uint32_t));
 			for (uint32_t c = 0; c < nlist; c++)
+				cluster_counts[c] = est_per_cluster;
+
+			MktPostingReserve reserve;
+			mkt_posting_reserve_init(&reserve, cluster_counts, nlist, nt, dim);
+			mkt_memctx_switch(idx_ctx);
+
+			uint32_t est_extra	 = reserve.total / 10 + 100;
+			idx->posting_storage = make_array_page_storage(
+					reserve.total + est_extra, idx_ctx);
+			idx->posting_storage.next_blkno = reserve.total;
+			idx->posting_heads = mkt_alloc(nlist * sizeof(BlockNumber));
+
+			/* Shared partial page buffer — must be malloc'd
+			 * since workers write from their own contexts. */
+			char *partials = config->fastscan
+								   ? NULL
+								   : calloc((size_t)nt * nlist, BLCKSZ);
+
+			mkt_memctx_switch(build_ctx);
+			MktPostingWorkerState *workers = mkt_alloc(
+					nt * sizeof(MktPostingWorkerState));
+			BlockNumber **all_heads	 = mkt_alloc(nt * sizeof(BlockNumber *));
+			BlockNumber **all_tails	 = mkt_alloc(nt * sizeof(BlockNumber *));
+			bool		**all_active = mkt_alloc(nt * sizeof(bool *));
+			mkt_memctx_switch(idx_ctx);
+
+			for (uint32_t t = 0; t < nt; t++)
 			{
-				MktClusterList *cl	 = &idx->clusters[c];
-				const float	   *cent = tree->leaf_centroids + (size_t)c * dim;
-				const float	   *pt_cent = idx->pt_centroids + (size_t)c * dim;
-
-				MktPostingBuilder b;
-				if (config->fastscan)
-					mkt_posting_builder_init_fastscan(
-							&b,
-							&idx->posting_storage.base,
-							idx->base.params,
-							dim,
-							c,
-							cent,
-							pt_cent);
-				else
-					mkt_posting_builder_init(
-							&b,
-							&idx->posting_storage.base,
-							idx->base.params,
-							dim,
-							c,
-							cent,
-							pt_cent);
-
-				for (uint32_t i = 0; i < cl->count; i++)
-				{
-					uint32_t		vid = cl->ids[i];
-					const float	   *vec = idx->all_vectors + (size_t)vid * dim;
-					ItemPointerData tid;
-					mkt_posting_set_vector_id(&tid, vid);
-					mkt_posting_builder_add(&b, tid, vec);
-				}
-
-				idx->posting_heads[c] = mkt_posting_builder_finish(&b);
-				mkt_posting_builder_cleanup(&b);
+				char *t_partials = partials ? partials + (size_t)t * nlist *
+																 BLCKSZ
+											: NULL;
+				mkt_posting_worker_init(
+						&workers[t],
+						t,
+						nlist,
+						dim,
+						config->fastscan != 0,
+						&idx->posting_storage.base,
+						idx->base.params,
+						idx->leaf_centroids,
+						idx->pt_centroids,
+						&reserve,
+						t_partials);
 			}
+
+			ParPostingCtx posting_ctx = {
+					.workers	 = workers,
+					.all_vectors = idx->all_vectors,
+					.tree		 = tree,
+					.bp			 = bp,
+			};
+
+			uint64_t t_posting = now_ns();
+			mkt_thread_pool_parallel_for(
+					pool, idx->nvecs, par_posting_fn, &posting_ctx);
+			uint64_t t_parallel = now_ns() - t_posting;
+
+			/* Gather per-thread outputs */
+			for (uint32_t t = 0; t < nt; t++)
+			{
+				all_heads[t]  = workers[t].heads;
+				all_tails[t]  = workers[t].tails;
+				all_active[t] = workers[t].active;
+			}
+
+			/* Merge partials + sort chains */
+			uint64_t			  t_merge_start = now_ns();
+			MktPostingBuildResult build_result;
+			mkt_posting_finalize(
+					partials,
+					all_heads,
+					all_tails,
+					all_active,
+					nt,
+					&idx->posting_storage.base,
+					&reserve,
+					idx->leaf_centroids,
+					idx->pt_centroids,
+					dim,
+					config->fastscan != 0,
+					&build_result);
+
+			uint64_t t_merge = now_ns() - t_merge_start;
+
+			memcpy(idx->posting_heads,
+				   build_result.heads,
+				   nlist * sizeof(BlockNumber));
+			mkt_free(build_result.heads);
+
+			ms_parallel	   = (double)t_parallel / 1e6;
+			ms_merge	   = (double)t_merge / 1e6;
+			stat_pages	   = build_result.total_pages;
+			stat_merge_in  = build_result.merge_input;
+			stat_merge_out = build_result.merge_output;
+
+			for (uint32_t t = 0; t < nt; t++)
+				mkt_posting_worker_cleanup(&workers[t]);
+			free(partials);
+
+			mkt_posting_reserve_free(&reserve);
 
 			if (config->fastscan)
 				idx->base.fastscan = config->fastscan;
 		}
 		else
 		{
-			/* Flat mode: one buffer per cluster */
+			/* Flat mode needs per-cluster vector lists */
+			assign_to_cluster_lists(idx, tree, &bp, dim, nlist);
+
 			idx->flat_pages = mkt_alloc(nlist * sizeof(char *));
 
 			for (uint32_t c = 0; c < nlist; c++)
@@ -507,12 +730,18 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 
 		idx->has_posting_data = true;
 	}
+	else
+	{
+		/* No RaBitQ — still need cluster lists for brute-force */
+		assign_to_cluster_lists(idx, tree, &bp, dim, nlist);
+	}
 
 	idx->has_replication = config->soar_lambda > 0.0 ||
 						   config->boundary_epsilon > 0.0;
 
-	/* Write centroid pages — after posting lists so leaf entries
-	 * store actual posting block numbers (not just cluster indices). */
+	/* --- Phase: centroid pages --- */
+	double ms_posting = (double)(now_ns() - t_phase) / 1e6;
+	t_phase			  = now_ns();
 	{
 		/* For paged mode, store actual posting block numbers so the
 		 * shared scan can use posting_head directly. For flat mode,
@@ -547,10 +776,31 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 		mkt_memctx_switch(idx_ctx);
 	}
 
+	double ms_centroid = (double)(now_ns() - t_phase) / 1e6;
+
+	mkt_thread_pool_destroy(pool);
 	mkt_hkmeans_result_destroy(tree);
 
 	mkt_memctx_switch(old_ctx);
 	mkt_memctx_delete(build_ctx);
+
+	/* Fill build stats */
+	if (stats != NULL)
+	{
+		stats->ms_sample   = ms_sample;
+		stats->ms_kmeans   = ms_kmeans;
+		stats->ms_setup	   = ms_setup;
+		stats->ms_posting  = ms_posting;
+		stats->ms_parallel = ms_parallel;
+		stats->ms_merge	   = ms_merge;
+		stats->ms_centroid = ms_centroid;
+		stats->ms_total	   = ms_sample + ms_kmeans + ms_setup + ms_posting +
+						  ms_centroid;
+		stats->nworkers		= stat_nworkers;
+		stats->total_pages	= stat_pages;
+		stats->merge_input	= stat_merge_in;
+		stats->merge_output = stat_merge_out;
+	}
 
 	/* Wire storage pointers in base (concrete storage owned above) */
 	idx->base.centroid_storage = &idx->centroid_storage.base;

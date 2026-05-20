@@ -42,7 +42,6 @@
 #include "algo/hkmeans.h"
 #include "algo/kmeans.h"
 #include "algo/vecops.h"
-#include "index/build_parallel.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"

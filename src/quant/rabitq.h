@@ -122,6 +122,22 @@ typedef struct RaBitQParams
 	(offsetof(RaBitQParams, P) + (size_t)(dim) * (dim) * sizeof(float))
 
 /*
+ * RaBitQScratch - Pre-allocated scratch buffers for encoding
+ *
+ * Avoids per-vector allocation in mkt_rabitq_encode_into. Create once
+ * per builder/thread, reuse across all encode calls.
+ */
+typedef struct RaBitQScratch
+{
+	float *residual;	/* [dim], 64-byte aligned */
+	float *transformed; /* [dim], 64-byte aligned */
+	float *xu_cb;		/* [dim], 64-byte aligned */
+} RaBitQScratch;
+
+void mkt_rabitq_scratch_init(RaBitQScratch *scratch, Dimension dim);
+void mkt_rabitq_scratch_cleanup(RaBitQScratch *scratch);
+
+/*
  * RaBitQQueryState - Query state (amortizes work across vectors)
  *
  * Precomputes query-specific values that are reused when comparing against
@@ -243,6 +259,16 @@ int mkt_rabitq_encode_into(
 		VectorRef			input,
 		VectorRef			centroid,
 		RaBitQData		   *output);
+
+/*
+ * Encode with pre-allocated scratch buffers (zero per-call allocation).
+ */
+int mkt_rabitq_encode_into_ex(
+		const RaBitQParams *params,
+		VectorRef			input,
+		VectorRef			centroid,
+		RaBitQData		   *output,
+		RaBitQScratch	   *scratch);
 
 /*
  * Batch encode multiple vectors into separate output arrays.

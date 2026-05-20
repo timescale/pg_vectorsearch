@@ -82,6 +82,7 @@ mkt_handle_create(
 		double			 soar_lambda,
 		double			 boundary_epsilon,
 		int				 fastscan,
+		uint32_t		 nworkers,
 		MktBuildInfo	*info)
 {
 	/* Create context as child of the current context if one exists,
@@ -104,11 +105,13 @@ mkt_handle_create(
 			.soar_lambda	  = soar_lambda,
 			.boundary_epsilon = boundary_epsilon,
 			.fastscan		  = fastscan,
+			.nworkers		  = nworkers,
 			.encode_rabitq	  = true,
 			.posting_fmt	  = parse_posting_fmt(posting_fmt),
 	};
 
-	MktIndex *idx = mkt_index_build(src, &config);
+	MktBuildStats build_stats;
+	MktIndex	 *idx = mkt_index_build(src, &config, &build_stats);
 	if (idx == NULL)
 	{
 		mkt_memctx_switch(old_ctx);
@@ -119,6 +122,7 @@ mkt_handle_create(
 	/* Fill build stats if requested */
 	if (info != NULL)
 	{
+		info->stats		  = build_stats;
 		info->nlist		  = idx->nlist;
 		info->nlevels	  = idx->base.nlevels;
 		info->nvecs		  = idx->nvecs;
@@ -131,6 +135,13 @@ mkt_handle_create(
 				info->max_cluster = sz;
 			if (sz < info->min_cluster)
 				info->min_cluster = sz;
+		}
+		/* Pages mode skips cluster list construction —
+		 * fall back to estimates */
+		if (info->max_cluster == 0)
+		{
+			info->max_cluster = (idx->nvecs + idx->nlist - 1) / idx->nlist;
+			info->min_cluster = idx->nvecs / idx->nlist;
 		}
 	}
 
@@ -169,6 +180,7 @@ mkt_handle_create_from_array(
 		double		  soar_lambda,
 		double		  boundary_epsilon,
 		int			  fastscan,
+		uint32_t	  nworkers,
 		MktBuildInfo *info)
 {
 	MktArraySource array_src;
@@ -185,6 +197,7 @@ mkt_handle_create_from_array(
 			soar_lambda,
 			boundary_epsilon,
 			fastscan,
+			nworkers,
 			info);
 }
 

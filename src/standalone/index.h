@@ -13,11 +13,13 @@
 #ifndef MKT_STANDALONE_INDEX_H
 #define MKT_STANDALONE_INDEX_H
 
+#include <pthread.h>
 #include <stdint.h>
 
 #include "core/memory.h"
 #include "index/centroid_page.h"
 #include "index/index_base.h"
+#include "index/index_build.h"
 #include "index/storage.h"
 #include "mkt_types.h"
 #include "quant/rabitq.h"
@@ -38,16 +40,18 @@ typedef struct MktClusterList
  * ---------------------------------------------------------------- */
 typedef struct ArrayPageStorage
 {
-	MktStorage	   base; /* must be first */
-	char		  *pages;
-	uint32_t	   next_blkno;
-	uint32_t	   page_cap;
-	const float	  *all_vectors; /* for reranking (NULL if not set) */
-	uint32_t	   nvecs;
-	DistanceMetric metric;
-	MktTopK		   rerank_topk;	   /* pre-allocated, reset per query */
-	MktTopKEntry  *rerank_entries; /* pre-allocated extraction buffer */
-	uint32_t	   rerank_cap;	   /* entries buffer capacity */
+	MktStorage		base; /* must be first */
+	char		   *pages;
+	uint32_t		next_blkno;
+	uint32_t		page_cap;
+	MktMemCtx		memctx;		 /* owning context for page growth */
+	pthread_mutex_t alloc_mutex; /* protects next_blkno + page growth */
+	const float	   *all_vectors; /* for reranking (NULL if not set) */
+	uint32_t		nvecs;
+	DistanceMetric	metric;
+	MktTopK			rerank_topk;	/* pre-allocated, reset per query */
+	MktTopKEntry   *rerank_entries; /* pre-allocated extraction buffer */
+	uint32_t		rerank_cap;		/* entries buffer capacity */
 } ArrayPageStorage;
 
 /* ----------------------------------------------------------------
@@ -75,6 +79,7 @@ typedef struct MktIndexConfig
 	bool			  encode_rabitq;	/* encode posting lists with RaBitQ */
 	MktPostingFormat  posting_fmt;		/* flat or pages */
 	int				  fastscan;			/* 0=off, 8=uint8 LUT, 16=uint16 LUT */
+	uint32_t		  nworkers;			/* 0 = auto, 1 = serial */
 } MktIndexConfig;
 
 /* ----------------------------------------------------------------
@@ -134,7 +139,10 @@ typedef struct MktIndex
  *
  * Returns NULL on failure.
  */
-MktIndex *mkt_index_build(MktVectorSource *src, const MktIndexConfig *config);
+MktIndex *mkt_index_build(
+		MktVectorSource		 *src,
+		const MktIndexConfig *config,
+		MktBuildStats		 *stats);
 
 /*
  * Free the index and all owned memory.

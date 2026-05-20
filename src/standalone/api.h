@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 
+#include "index/index_build.h"
 #include "standalone/vector_source.h"
 
 /* Opaque index handle (wraps MktIndex + MktQueryCtx) */
@@ -18,11 +19,12 @@ typedef struct MktHandle MktHandle;
 /* Index build statistics */
 typedef struct MktBuildInfo
 {
-	uint32_t nlist;		  /* actual number of clusters */
-	uint32_t nlevels;	  /* tree depth */
-	uint32_t nvecs;		  /* total vectors in index */
-	uint32_t max_cluster; /* largest cluster size */
-	uint32_t min_cluster; /* smallest cluster size */
+	uint32_t	  nlist;	   /* actual number of clusters */
+	uint32_t	  nlevels;	   /* tree depth */
+	uint32_t	  nvecs;	   /* total vectors in index */
+	uint32_t	  max_cluster; /* largest cluster size */
+	uint32_t	  min_cluster; /* smallest cluster size */
+	MktBuildStats stats;	   /* phase timings + posting stats */
 } MktBuildInfo;
 
 /*
@@ -53,6 +55,7 @@ MktHandle *mkt_handle_create(
 		double			 soar_lambda,
 		double			 boundary_epsilon,
 		int				 fastscan,
+		uint32_t		 nworkers,
 		MktBuildInfo	*info);
 
 /*
@@ -74,6 +77,7 @@ MktHandle *mkt_handle_create_from_array(
 		double		  soar_lambda,
 		double		  boundary_epsilon,
 		int			  fastscan,
+		uint32_t	  nworkers,
 		MktBuildInfo *info);
 
 /*
