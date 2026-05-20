@@ -19,6 +19,7 @@
 #include "algo/topk.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
+#include "index/build_parallel.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
@@ -377,26 +378,20 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	for (uint32_t c = 0; c < nlist; c++)
 		cluster_list_init(&idx->clusters[c], est_per_cluster);
 
-	/* Assign vectors to clusters.
-	 * Stay in idx_ctx so cluster list growth allocations are
-	 * long-lived. Only norm_buf/soar_residual are temporary
-	 * (freed with build_ctx). */
-	float *norm_buf		 = NULL;
-	float *soar_residual = NULL;
-	if (idx->base.metric == DISTANCE_COSINE)
-	{
-		mkt_memctx_switch(build_ctx);
-		norm_buf = mkt_alloc(dim * sizeof(float));
-		mkt_memctx_switch(idx_ctx);
-	}
-	if (config->soar_lambda > 0.0)
-	{
-		mkt_memctx_switch(build_ctx);
-		soar_residual = mkt_alloc(dim * sizeof(float));
-		mkt_memctx_switch(idx_ctx);
-	}
+	/* Pass 2: stream all vectors, route to clusters.
+	 * Uses shared mkt_build_assign_vector() for tree descent +
+	 * normalization + SOAR logic. */
+	mkt_memctx_switch(build_ctx);
+	MktBuildWorkerBufs worker_bufs = mkt_build_worker_bufs_create(dim);
+	mkt_memctx_switch(idx_ctx);
 
-	/* Pass 2: stream all vectors, route to clusters */
+	const MktBuildParams bp = {
+			.dim			  = dim,
+			.metric			  = config->metric,
+			.soar_lambda	  = config->soar_lambda,
+			.boundary_epsilon = config->boundary_epsilon,
+	};
+
 	src->reset(src);
 	idx->nvecs = 0;
 
@@ -405,88 +400,19 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 		uint32_t	 id;
 		while (src->next(src, 1, &vec, &id))
 		{
-			const float *store_vec = vec;
-
-			/* Normalize for cosine */
-			if (idx->base.metric == DISTANCE_COSINE)
-			{
-				memcpy(norm_buf, vec, dim * sizeof(float));
-				normalize_vector(norm_buf, dim);
-				store_vec = norm_buf;
-			}
-
-			Distance primary_dist;
-			uint32_t c = mkt_hkmeans_assign(
-					tree, store_vec, idx->base.metric, &primary_dist);
+			MktBuildAssignment asgn =
+					mkt_build_assign_vector(tree, vec, &bp, &worker_bufs);
 
 			/* Store full-precision vector for reranking */
 			memcpy(idx->all_vectors + (size_t)id * dim,
-				   store_vec,
+				   asgn.enc_vector,
 				   dim * sizeof(float));
 
-			cluster_list_append(&idx->clusters[c], id);
+			cluster_list_append(&idx->clusters[asgn.primary], id);
 			idx->nvecs++;
 
-			/* Vector replication (see mktann_build.c for mode docs) */
-			bool has_soar	  = config->soar_lambda > 0.0;
-			bool has_boundary = config->boundary_epsilon > 0.0;
-
-			if (has_soar || has_boundary)
-			{
-				const float *leaves	 = tree->leaf_centroids;
-				uint32_t	 nleaves = tree->nleaves;
-
-				uint32_t boundary_c2 = c;
-				if (has_boundary)
-					boundary_c2 = mkt_find_secondary_cluster(
-							store_vec,
-							leaves,
-							nleaves,
-							dim,
-							idx->base.metric,
-							c,
-							primary_dist,
-							config->boundary_epsilon);
-
-				bool should_replicate = has_boundary ? (boundary_c2 != c)
-													 : true;
-
-				if (should_replicate)
-				{
-					uint32_t c2;
-					if (has_soar)
-					{
-						const float *cent = leaves + (size_t)c * dim;
-						float		 norm = 0.0f;
-						for (Dimension d = 0; d < dim; d++)
-						{
-							soar_residual[d] = store_vec[d] - cent[d];
-							norm += soar_residual[d] * soar_residual[d];
-						}
-						if (norm > 1e-7f)
-						{
-							float inv = 1.0f / sqrtf(norm);
-							for (Dimension d = 0; d < dim; d++)
-								soar_residual[d] *= inv;
-						}
-						c2 = mkt_find_soar_secondary(
-								store_vec,
-								leaves,
-								nleaves,
-								dim,
-								c,
-								soar_residual,
-								config->soar_lambda);
-					}
-					else
-					{
-						c2 = boundary_c2;
-					}
-
-					if (c2 != c)
-						cluster_list_append(&idx->clusters[c2], id);
-				}
-			}
+			if (asgn.secondary != MKT_INVALID_CLUSTER)
+				cluster_list_append(&idx->clusters[asgn.secondary], id);
 		}
 	}
 
