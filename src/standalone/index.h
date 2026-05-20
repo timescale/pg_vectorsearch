@@ -13,6 +13,7 @@
 #ifndef MKT_STANDALONE_INDEX_H
 #define MKT_STANDALONE_INDEX_H
 
+#include <pthread.h>
 #include <stdint.h>
 
 #include "core/memory.h"
@@ -38,16 +39,17 @@ typedef struct MktClusterList
  * ---------------------------------------------------------------- */
 typedef struct ArrayPageStorage
 {
-	MktStorage	   base; /* must be first */
-	char		  *pages;
-	uint32_t	   next_blkno;
-	uint32_t	   page_cap;
-	const float	  *all_vectors; /* for reranking (NULL if not set) */
-	uint32_t	   nvecs;
-	DistanceMetric metric;
-	MktTopK		   rerank_topk;	   /* pre-allocated, reset per query */
-	MktTopKEntry  *rerank_entries; /* pre-allocated extraction buffer */
-	uint32_t	   rerank_cap;	   /* entries buffer capacity */
+	MktStorage		base; /* must be first */
+	char		   *pages;
+	uint32_t		next_blkno;
+	uint32_t		page_cap;
+	pthread_mutex_t alloc_mutex; /* protects next_blkno + page growth */
+	const float	   *all_vectors; /* for reranking (NULL if not set) */
+	uint32_t		nvecs;
+	DistanceMetric	metric;
+	MktTopK			rerank_topk;	/* pre-allocated, reset per query */
+	MktTopKEntry   *rerank_entries; /* pre-allocated extraction buffer */
+	uint32_t		rerank_cap;		/* entries buffer capacity */
 } ArrayPageStorage;
 
 /* ----------------------------------------------------------------

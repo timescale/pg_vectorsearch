@@ -10,8 +10,10 @@
  */
 
 #include <math.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "algo/distance.h"
 #include "algo/hkmeans.h"
@@ -67,6 +69,7 @@ static Page
 aps_new_page(MktStorage *self, BlockNumber *blkno_out)
 {
 	ArrayPageStorage *s = (ArrayPageStorage *)self;
+	pthread_mutex_lock(&s->alloc_mutex);
 	if (s->next_blkno >= s->page_cap)
 	{
 		uint32_t new_cap = s->page_cap * 2;
@@ -77,6 +80,7 @@ aps_new_page(MktStorage *self, BlockNumber *blkno_out)
 		s->page_cap = new_cap;
 	}
 	*blkno_out = s->next_blkno++;
+	pthread_mutex_unlock(&s->alloc_mutex);
 	return s->pages + (size_t)*blkno_out * BLCKSZ;
 }
 
@@ -188,12 +192,14 @@ cluster_list_append(MktClusterList *cl, uint32_t id)
 static ArrayPageStorage
 make_array_page_storage(uint32_t est_pages)
 {
-	return (ArrayPageStorage){
+	ArrayPageStorage s = {
 			.base		= {.ops = &array_page_storage_ops},
 			.pages		= mkt_alloc0((size_t)est_pages * BLCKSZ),
 			.next_blkno = 0,
 			.page_cap	= est_pages,
 	};
+	pthread_mutex_init(&s.alloc_mutex, NULL);
+	return s;
 }
 
 /* ----------------------------------------------------------------
@@ -213,6 +219,83 @@ normalize_all(float *data, uint32_t nvecs, Dimension dim)
 {
 	for (uint32_t i = 0; i < nvecs; i++)
 		normalize_vector(data + (size_t)i * dim, dim);
+}
+
+/* ----------------------------------------------------------------
+ * Parallel posting build helpers
+ * ---------------------------------------------------------------- */
+
+typedef struct PostingWorkerArg
+{
+	uint32_t			  c_start;
+	uint32_t			  c_end;
+	MktIndex			 *idx;
+	const HKMeansResult	 *tree;
+	const MktIndexConfig *config;
+	Dimension			  dim;
+} PostingWorkerArg;
+
+static void *
+posting_worker_fn(void *arg)
+{
+	PostingWorkerArg *w = (PostingWorkerArg *)arg;
+
+	/* Each thread needs its own memory context for mkt_alloc */
+	MktMemCtx thread_ctx = mkt_memctx_create(NULL, "posting_worker");
+	mkt_memctx_switch(thread_ctx);
+
+	for (uint32_t c = w->c_start; c < w->c_end; c++)
+	{
+		MktClusterList *cl		= &w->idx->clusters[c];
+		const float	   *cent	= w->tree->leaf_centroids + (size_t)c * w->dim;
+		const float	   *pt_cent = w->idx->pt_centroids + (size_t)c * w->dim;
+
+		MktPostingBuilder b;
+		if (w->config->fastscan)
+			mkt_posting_builder_init_fastscan(
+					&b,
+					&w->idx->posting_storage.base,
+					w->idx->base.params,
+					w->dim,
+					c,
+					cent,
+					pt_cent);
+		else
+			mkt_posting_builder_init(
+					&b,
+					&w->idx->posting_storage.base,
+					w->idx->base.params,
+					w->dim,
+					c,
+					cent,
+					pt_cent);
+
+		for (uint32_t i = 0; i < cl->count; i++)
+		{
+			uint32_t		vid = cl->ids[i];
+			const float	   *vec = w->idx->all_vectors + (size_t)vid * w->dim;
+			ItemPointerData tid;
+			mkt_posting_set_vector_id(&tid, vid);
+			mkt_posting_builder_add(&b, tid, vec);
+		}
+
+		w->idx->posting_heads[c] = mkt_posting_builder_finish(&b);
+		mkt_posting_builder_cleanup(&b);
+	}
+
+	mkt_memctx_delete(thread_ctx);
+	return NULL;
+}
+
+static uint32_t
+sa_detect_nthreads(void)
+{
+	long n = sysconf(_SC_NPROCESSORS_ONLN);
+	if (n < 1)
+		n = 1;
+	if (n > 64)
+		n = 64;
+	return (uint32_t)n;
 }
 
 /* ----------------------------------------------------------------
@@ -441,43 +524,42 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 			idx->posting_storage  = make_array_page_storage(est_pages);
 			idx->posting_heads	  = mkt_alloc(nlist * sizeof(BlockNumber));
 
-			for (uint32_t c = 0; c < nlist; c++)
+			/* Parallel posting build: each thread processes a range
+			 * of clusters. Page allocation is mutex-protected. */
 			{
-				MktClusterList *cl	 = &idx->clusters[c];
-				const float	   *cent = tree->leaf_centroids + (size_t)c * dim;
-				const float	   *pt_cent = idx->pt_centroids + (size_t)c * dim;
+				uint32_t nt = sa_detect_nthreads();
+				if (nt > nlist)
+					nt = nlist;
 
-				MktPostingBuilder b;
-				if (config->fastscan)
-					mkt_posting_builder_init_fastscan(
-							&b,
-							&idx->posting_storage.base,
-							idx->base.params,
-							dim,
-							c,
-							cent,
-							pt_cent);
-				else
-					mkt_posting_builder_init(
-							&b,
-							&idx->posting_storage.base,
-							idx->base.params,
-							dim,
-							c,
-							cent,
-							pt_cent);
+				pthread_t		 *threads = malloc(nt * sizeof(pthread_t));
+				PostingWorkerArg *pargs	  = malloc(
+						  nt * sizeof(PostingWorkerArg));
 
-				for (uint32_t i = 0; i < cl->count; i++)
+				uint32_t per = nlist / nt;
+				uint32_t rem = nlist % nt;
+				uint32_t off = 0;
+
+				for (uint32_t t = 0; t < nt; t++)
 				{
-					uint32_t		vid = cl->ids[i];
-					const float	   *vec = idx->all_vectors + (size_t)vid * dim;
-					ItemPointerData tid;
-					mkt_posting_set_vector_id(&tid, vid);
-					mkt_posting_builder_add(&b, tid, vec);
+					uint32_t chunk = per + (t < rem ? 1 : 0);
+					pargs[t]	   = (PostingWorkerArg){
+								  .c_start = off,
+								  .c_end   = off + chunk,
+								  .idx	   = idx,
+								  .tree	   = tree,
+								  .config  = config,
+								  .dim	   = dim,
+					  };
+					pthread_create(
+							&threads[t], NULL, posting_worker_fn, &pargs[t]);
+					off += chunk;
 				}
 
-				idx->posting_heads[c] = mkt_posting_builder_finish(&b);
-				mkt_posting_builder_cleanup(&b);
+				for (uint32_t t = 0; t < nt; t++)
+					pthread_join(threads[t], NULL);
+
+				free(threads);
+				free(pargs);
 			}
 
 			if (config->fastscan)
