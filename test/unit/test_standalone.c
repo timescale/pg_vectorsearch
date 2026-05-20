@@ -49,7 +49,7 @@ build_from_array(
 {
 	MktArraySource src;
 	mkt_array_source_init(&src, vecs, nvecs, dim);
-	return mkt_index_build(&src.base, config);
+	return mkt_index_build(&src.base, config, NULL);
 }
 
 /* Brute-force nearest neighbor for ground truth */
@@ -134,19 +134,23 @@ TEST(index_build_null_fails)
 {
 	MktIndexConfig config = {.nlist = 10, .metric = DISTANCE_L2};
 
-	ASSERT_NULL(mkt_index_build(NULL, &config), "null src should fail");
+	ASSERT_NULL(mkt_index_build(NULL, &config, NULL), "null src should fail");
 
 	float		   dummy = 1.0f;
 	MktArraySource src;
 
 	mkt_array_source_init(&src, &dummy, 0, 32);
-	ASSERT_NULL(mkt_index_build(&src.base, &config), "zero nvecs should fail");
+	ASSERT_NULL(
+			mkt_index_build(&src.base, &config, NULL),
+			"zero nvecs should fail");
 
 	mkt_array_source_init(&src, &dummy, 100, 0);
-	ASSERT_NULL(mkt_index_build(&src.base, &config), "zero dim should fail");
+	ASSERT_NULL(
+			mkt_index_build(&src.base, &config, NULL), "zero dim should fail");
 
 	mkt_array_source_init(&src, &dummy, 100, 32);
-	ASSERT_NULL(mkt_index_build(&src.base, NULL), "null config should fail");
+	ASSERT_NULL(
+			mkt_index_build(&src.base, NULL, NULL), "null config should fail");
 }
 
 TEST(index_build_float32_centroids)
@@ -349,6 +353,7 @@ TEST(bindings_create_destroy)
 			  0.0,
 			  0.0,
 			  false,
+			  0,
 			  &info);
 
 	ASSERT_NOT_NULL(handle, "create should succeed");
@@ -379,6 +384,7 @@ TEST(bindings_query)
 			0.0,
 			0.0,
 			false,
+			0,
 			NULL);
 	ASSERT_NOT_NULL(handle, "create should succeed");
 
@@ -415,7 +421,7 @@ TEST(posting_convert_aos_to_fastscan)
 			.fastscan	   = 0,
 	};
 
-	MktIndex *idx = mkt_index_build(&array_src.base, &cfg);
+	MktIndex *idx = mkt_index_build(&array_src.base, &cfg, NULL);
 	ASSERT_NOT_NULL(idx, "AoS index built");
 	ASSERT_TRUE(
 			idx->posting_heads[0] != InvalidBlockNumber,
@@ -475,6 +481,7 @@ TEST(bindings_query_fastscan)
 			0.0,
 			0.0,
 			16,
+			0,
 			NULL);
 	ASSERT_NOT_NULL(handle, "fastscan create should succeed");
 
@@ -507,6 +514,7 @@ TEST(bindings_angular_metric)
 			0.0,
 			0.0,
 			false,
+			0,
 			NULL);
 	ASSERT_NOT_NULL(handle, "angular create should succeed");
 
@@ -555,6 +563,7 @@ TEST(bindings_symmetric_mode)
 			0.0,
 			0.0,
 			false,
+			0,
 			NULL);
 
 	uint32_t result_ids[5];
@@ -585,6 +594,7 @@ TEST(bindings_kmeans_params)
 			  0.0,
 			  0.0,
 			  false,
+			  0,
 			  &info);
 
 	ASSERT_NOT_NULL(handle, "create with kmeans params should succeed");

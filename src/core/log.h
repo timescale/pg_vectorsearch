@@ -11,12 +11,14 @@
 
 #include <stdio.h>
 
+#define mkt_log(...)  fprintf(stderr, __VA_ARGS__)
 #define mkt_warn(...) fprintf(stderr, __VA_ARGS__)
 
 #else /* PostgreSQL */
 
 #include <postgres.h>
 
+#define mkt_log(...)  elog(LOG, __VA_ARGS__)
 #define mkt_warn(...) elog(WARNING, __VA_ARGS__)
 
 #endif

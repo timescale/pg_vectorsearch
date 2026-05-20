@@ -1,18 +1,151 @@
 /*
- * posting_build.c - Streaming posting list builder
+ * posting_build.c - Posting list construction
  *
- * Encodes and writes posting entries one at a time with O(1) memory.
- * The page format (AoS or fastscan) is selected at init time via
- * page_ops callbacks. Everything else — encode, flush, chain link,
- * reserve — is shared.
+ * Vector-to-cluster assignment (tree descent, SOAR, boundary
+ * replication) and streaming page builder. The page format (AoS or
+ * fastscan) is selected at init time via page_ops callbacks.
  */
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "core/memory.h"
+#include "index/index_build.h"
 #include "index/posting_build.h"
 #include "quant/fastscan.h"
+
+/* ================================================================
+ * Vector-to-cluster assignment
+ * ================================================================ */
+
+static void
+normalize_vec(float *out, const float *in, Dimension dim)
+{
+	float norm = 0.0f;
+	for (Dimension d = 0; d < dim; d++)
+		norm += in[d] * in[d];
+
+	if (norm > 0.0f)
+	{
+		float inv = 1.0f / sqrtf(norm);
+		for (Dimension d = 0; d < dim; d++)
+			out[d] = in[d] * inv;
+	}
+	else
+	{
+		memcpy(out, in, dim * sizeof(float));
+	}
+}
+
+MktBuildWorkerBufs
+mkt_build_worker_bufs_create(Dimension dim)
+{
+	return (MktBuildWorkerBufs){
+			.norm_buf	  = malloc(dim * sizeof(float)),
+			.residual_buf = malloc(dim * sizeof(float)),
+	};
+}
+
+void
+mkt_build_worker_bufs_free(MktBuildWorkerBufs *bufs)
+{
+	free(bufs->norm_buf);
+	free(bufs->residual_buf);
+	bufs->norm_buf	   = NULL;
+	bufs->residual_buf = NULL;
+}
+
+MktBuildAssignment
+mkt_build_assign_vector(
+		const HKMeansResult	 *tree,
+		const float			 *vec,
+		const MktBuildParams *params,
+		MktBuildWorkerBufs	 *bufs)
+{
+	const Dimension dim = params->dim;
+
+	Distance min_dist;
+	uint32_t best_c = mkt_hkmeans_assign(tree, vec, params->metric, &min_dist);
+
+	const float *enc_vec = vec;
+	if (params->metric == DISTANCE_COSINE)
+	{
+		normalize_vec(bufs->norm_buf, vec, dim);
+		enc_vec = bufs->norm_buf;
+	}
+
+	uint32_t secondary = MKT_INVALID_CLUSTER;
+
+	bool has_soar	  = params->soar_lambda > 0.0;
+	bool has_boundary = params->boundary_epsilon > 0.0;
+
+	if (has_soar || has_boundary)
+	{
+		const float *leaves	 = tree->leaf_centroids;
+		uint32_t	 nleaves = tree->nleaves;
+
+		uint32_t boundary_c2 = best_c;
+		if (has_boundary)
+			boundary_c2 = mkt_find_secondary_cluster(
+					enc_vec,
+					leaves,
+					nleaves,
+					dim,
+					params->metric,
+					best_c,
+					min_dist,
+					params->boundary_epsilon);
+
+		bool should_replicate = has_boundary ? (boundary_c2 != best_c) : true;
+
+		if (should_replicate)
+		{
+			if (has_soar)
+			{
+				const float *cent = leaves + (size_t)best_c * dim;
+				float		*r	  = bufs->residual_buf;
+				float		 norm = 0.0f;
+				for (Dimension d = 0; d < dim; d++)
+				{
+					r[d] = enc_vec[d] - cent[d];
+					norm += r[d] * r[d];
+				}
+				if (norm > 1e-7f)
+				{
+					float inv = 1.0f / sqrtf(norm);
+					for (Dimension d = 0; d < dim; d++)
+						r[d] *= inv;
+				}
+				secondary = mkt_find_soar_secondary(
+						enc_vec,
+						leaves,
+						nleaves,
+						dim,
+						best_c,
+						r,
+						params->soar_lambda);
+			}
+			else
+			{
+				secondary = boundary_c2;
+			}
+
+			if (secondary == best_c)
+				secondary = MKT_INVALID_CLUSTER;
+		}
+	}
+
+	return (MktBuildAssignment){
+			.primary	= best_c,
+			.secondary	= secondary,
+			.enc_vector = enc_vec,
+	};
+}
+
+/* ================================================================
+ * Streaming page builder
+ * ================================================================ */
 
 /* ----------------------------------------------------------------
  * Shared helpers
@@ -42,7 +175,26 @@ flush_page(MktPostingBuilder *builder)
 
 	BlockNumber blkno;
 	Page		spage;
-	if (builder->reserve_used < builder->reserve_count)
+	if (builder->is_first && builder->fixed_first_blkno != InvalidBlockNumber)
+	{
+		blkno = builder->fixed_first_blkno;
+		spage = mkt_storage_write_page(builder->storage, blkno);
+	}
+	else if (builder->shared_reserve_next != NULL)
+	{
+		uint32_t slot =
+				mkt_atomic_fetch_add_u32(builder->shared_reserve_next, 1);
+		if (slot < builder->reserve_count)
+		{
+			blkno = builder->reserve_start + slot;
+			spage = mkt_storage_write_page(builder->storage, blkno);
+		}
+		else
+		{
+			spage = mkt_storage_new_page(builder->storage, &blkno);
+		}
+	}
+	else if (builder->reserve_used < builder->reserve_count)
 	{
 		blkno = builder->reserve_start + builder->reserve_used;
 		builder->reserve_used++;
@@ -76,8 +228,8 @@ flush_page(MktPostingBuilder *builder)
 }
 
 /*
- * Common init for both formats. Sets up shared fields and the
- * first page with pt_centroid.
+ * Common init for both formats. When pt_centroid is NULL, initializes
+ * a continuation page (no pt_centroid header, overflow flags).
  */
 static void
 builder_init_common(
@@ -102,15 +254,20 @@ builder_init_common(
 	builder->is_first	= true;
 	builder->page_ops	= ops;
 
-	builder->reserve_start = InvalidBlockNumber;
+	builder->reserve_start		 = InvalidBlockNumber;
+	builder->shared_reserve_next = NULL;
+	builder->fixed_first_blkno	 = InvalidBlockNumber;
 
 	mkt_posting_page_init(
 			builder->mem_page, cluster_id, dim, first_page_flags);
-	memcpy(mkt_posting_pt_centroid_mut(builder->mem_page),
-		   pt_centroid,
-		   dim * sizeof(float));
+	if (pt_centroid != NULL)
+		memcpy(mkt_posting_pt_centroid_mut(builder->mem_page),
+			   pt_centroid,
+			   dim * sizeof(float));
 
 	builder->enc_buf = params ? mkt_alloc(MKT_RABITQ_DATA_SIZE(dim)) : NULL;
+	if (params)
+		mkt_rabitq_scratch_init(&builder->enc_scratch, dim);
 }
 
 /* ----------------------------------------------------------------
@@ -345,6 +502,54 @@ mkt_posting_builder_init_fastscan(
 	builder->fs.max_groups = mkt_fastscan_max_groups(dim, true);
 }
 
+void
+mkt_posting_builder_init_continuation(
+		MktPostingBuilder  *builder,
+		MktStorage		   *storage,
+		const RaBitQParams *params,
+		Dimension			dim,
+		uint32_t			cluster_id,
+		const float		   *centroid)
+{
+	builder_init_common(
+			builder,
+			storage,
+			params,
+			dim,
+			cluster_id,
+			centroid,
+			NULL,
+			&aos_page_ops,
+			MKT_POSTING_PAGE_OVERFLOW);
+}
+
+void
+mkt_posting_builder_init_continuation_fastscan(
+		MktPostingBuilder  *builder,
+		MktStorage		   *storage,
+		const RaBitQParams *params,
+		Dimension			dim,
+		uint32_t			cluster_id,
+		const float		   *centroid)
+{
+	builder_init_common(
+			builder,
+			storage,
+			params,
+			dim,
+			cluster_id,
+			centroid,
+			NULL,
+			&fs_page_ops,
+			MKT_POSTING_PAGE_OVERFLOW | MKT_POSTING_PAGE_FASTSCAN);
+
+	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	builder->fs.bits_buf  = mkt_alloc(
+			 (size_t)MKT_FASTSCAN_GROUP * packed_bytes);
+	builder->fs.codes_buf  = mkt_alloc(MKT_FASTSCAN_GROUP_BYTES(dim));
+	builder->fs.max_groups = mkt_fastscan_max_groups(dim, false);
+}
+
 /* ----------------------------------------------------------------
  * Public API — add / finish / cleanup / reserve
  * ---------------------------------------------------------------- */
@@ -356,6 +561,25 @@ mkt_posting_builder_set_reserve(
 	builder->reserve_start = start;
 	builder->reserve_count = count;
 	builder->reserve_used  = 0;
+}
+
+void
+mkt_posting_builder_set_shared_reserve(
+		MktPostingBuilder *builder,
+		BlockNumber		   start,
+		uint32_t		   count,
+		mkt_atomic_uint32 *next)
+{
+	builder->reserve_start		 = start;
+	builder->reserve_count		 = count;
+	builder->shared_reserve_next = next;
+}
+
+void
+mkt_posting_builder_set_first_blkno(
+		MktPostingBuilder *builder, BlockNumber blkno)
+{
+	builder->fixed_first_blkno = blkno;
 }
 
 void
@@ -383,7 +607,12 @@ mkt_posting_builder_add(
 {
 	VectorRef vref = {.data = vector, .dim = builder->dim};
 	VectorRef cref = {.data = builder->centroid, .dim = builder->dim};
-	mkt_rabitq_encode_into(builder->params, vref, cref, builder->enc_buf);
+	mkt_rabitq_encode_into_ex(
+			builder->params,
+			vref,
+			cref,
+			builder->enc_buf,
+			&builder->enc_scratch);
 
 	float f_error = derive_f_error(
 			builder->enc_buf->f_add,
@@ -407,12 +636,20 @@ mkt_posting_builder_finish(MktPostingBuilder *builder)
 	return builder->head_blkno;
 }
 
+BlockNumber
+mkt_posting_builder_finish_partial(MktPostingBuilder *builder)
+{
+	builder->page_ops->finalize(builder);
+	return builder->head_blkno;
+}
+
 void
 mkt_posting_builder_cleanup(MktPostingBuilder *builder)
 {
 	builder->page_ops->cleanup(builder);
 	if (builder->enc_buf != NULL)
 	{
+		mkt_rabitq_scratch_cleanup(&builder->enc_scratch);
 		mkt_free(builder->enc_buf);
 		builder->enc_buf = NULL;
 	}

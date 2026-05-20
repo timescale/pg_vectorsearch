@@ -9,6 +9,7 @@
 
 #include "algo/distance.h"
 #include "algo/vecops.h"
+#include "core/log.h"
 #include "core/memory.h"
 #include "index/index_build.h"
 
@@ -182,4 +183,27 @@ mkt_find_soar_secondary(
 	}
 
 	return best_c;
+}
+
+void
+mkt_build_stats_print(const MktBuildStats *s)
+{
+	mkt_log("build: sample %.1fms, kmeans %.1fms, setup %.1fms, "
+			"posting %.1fms "
+			"(parallel %.1fms + merge %.1fms, "
+			"%u workers + leader, %u pages, "
+			"%u partial pages merged into %u), "
+			"centroid %.1fms, total %.1fms\n",
+			s->ms_sample,
+			s->ms_kmeans,
+			s->ms_setup,
+			s->ms_posting,
+			s->ms_parallel,
+			s->ms_merge,
+			s->nworkers,
+			s->total_pages,
+			s->merge_input,
+			s->merge_output,
+			s->ms_centroid,
+			s->ms_total);
 }

@@ -501,6 +501,73 @@ mkt_rabitq_encode(
 	return output;
 }
 
+void
+mkt_rabitq_scratch_init(RaBitQScratch *scratch, Dimension dim)
+{
+	scratch->residual	 = mkt_alloc_aligned(dim * sizeof(float), 64);
+	scratch->transformed = mkt_alloc_aligned(dim * sizeof(float), 64);
+	scratch->xu_cb		 = mkt_alloc_aligned(dim * sizeof(float), 64);
+}
+
+void
+mkt_rabitq_scratch_cleanup(RaBitQScratch *scratch)
+{
+	mkt_free_aligned(scratch->residual);
+	mkt_free_aligned(scratch->transformed);
+	mkt_free_aligned(scratch->xu_cb);
+	scratch->residual	 = NULL;
+	scratch->transformed = NULL;
+	scratch->xu_cb		 = NULL;
+}
+
+int
+mkt_rabitq_encode_into_ex(
+		const RaBitQParams *params,
+		VectorRef			input,
+		VectorRef			centroid,
+		RaBitQData		   *output,
+		RaBitQScratch	   *scratch)
+{
+	if (params == NULL || input.data == NULL || centroid.data == NULL ||
+		output == NULL || scratch == NULL)
+		return -1;
+
+	if (input.dim != params->dim || centroid.dim != params->dim)
+		return -1;
+
+	Dimension dim = params->dim;
+
+	float *residual	   = scratch->residual;
+	float *transformed = scratch->transformed;
+	float *xu_cb	   = scratch->xu_cb;
+
+	mkt_vector_sub(input.data, centroid.data, residual, dim);
+	mkt_matrix_transpose_vector_mul(params->P, residual, transformed, dim);
+	rabitq_extract_signs(transformed, output->bits, dim);
+
+	float cb = -0.5f;
+	for (Dimension i = 0; i < dim; i++)
+	{
+		int byte_idx = i / 8;
+		int bit_idx	 = i % 8;
+		int bit		 = (output->bits[byte_idx] >> bit_idx) & 1;
+		xu_cb[i]	 = (float)bit + cb;
+	}
+
+	float l2_sqr	   = mkt_l2_norm_squared(transformed, dim);
+	float ip_resi_xucb = mkt_dot_product(transformed, xu_cb, dim);
+
+	if (fabsf(ip_resi_xucb) < 1e-10f)
+		ip_resi_xucb = 1e-10f;
+
+	float sqrt_d	  = sqrtf((float)dim);
+	float l1_norm	  = 2.0f * fabsf(ip_resi_xucb);
+	output->f_add	  = l2_sqr;
+	output->f_rescale = l2_sqr * sqrt_d / l1_norm;
+
+	return 0;
+}
+
 int
 mkt_rabitq_encode_into(
 		const RaBitQParams *params,

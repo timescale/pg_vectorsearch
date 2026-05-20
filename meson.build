@@ -278,7 +278,7 @@ mkt_core_sources = files(
   'src/index/centroid_build.c',
   'src/index/centroid_page.c',
   'src/index/centroid_search.c',
-  'src/index/build_parallel.c',
+  'src/index/posting_build_parallel.c',
   'src/index/index_build.c',
   'src/index/posting_page.c',
   'src/index/posting_build.c',
@@ -338,6 +338,8 @@ endif
 # Combine all sources
 mkt_all_sources = mkt_core_sources + simd_sources
 
+thread_dep = dependency('threads')
+
 # Core dependency: compile sources directly instead of static library
 # This avoids the 5-10% overhead from static library compilation
 mkt_core_dep = declare_dependency(
@@ -345,7 +347,7 @@ mkt_core_dep = declare_dependency(
   compile_args: ['-DMKT_STANDALONE'],
   link_with: simd_libs,
   include_directories: src_inc,
-  dependencies: [m_dep] + (have_cblas ? [cblas_dep] : []),
+  dependencies: [m_dep, thread_dep] + (have_cblas ? [cblas_dep] : []),
 )
 
 # CLI tool
@@ -547,7 +549,7 @@ if build_pg_extension
     'src/index/centroid_build.c',
     'src/index/centroid_page.c',
     'src/index/centroid_search.c',
-    'src/index/build_parallel.c',
+    'src/index/posting_build_parallel.c',
     'src/index/index_build.c',
     'src/algo/topk.c',
     'src/index/posting_page.c',

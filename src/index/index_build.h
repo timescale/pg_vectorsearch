@@ -18,6 +18,35 @@
 #include "mkt_types.h"
 #include "quant/rabitq.h"
 
+/* ----------------------------------------------------------------
+ * Build statistics — shared between standalone and PG builds
+ * ---------------------------------------------------------------- */
+
+typedef struct MktBuildStats
+{
+	/* Phase timings (milliseconds) */
+	double ms_total;	/* total build time */
+	double ms_sample;	/* sampling vectors for clustering */
+	double ms_kmeans;	/* hierarchical k-means clustering */
+	double ms_setup;	/* RaBitQ params, centroid rotation, etc */
+	double ms_posting;	/* posting build total (parallel + merge) */
+	double ms_parallel; /* parallel encode+write phase */
+	double ms_merge;	/* serial partial page merge */
+	double ms_centroid; /* writing centroid pages */
+
+	/* Posting merge stats */
+	uint32_t nworkers;
+	uint32_t total_pages;
+	uint32_t merge_input;
+	uint32_t merge_output;
+} MktBuildStats;
+
+void mkt_build_stats_print(const MktBuildStats *s);
+
+/* ----------------------------------------------------------------
+ * Centroid layout + write
+ * ---------------------------------------------------------------- */
+
 /*
  * Compute the block layout for centroid pages in a BFS tree.
  *
