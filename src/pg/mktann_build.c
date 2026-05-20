@@ -42,6 +42,7 @@
 #include "algo/hkmeans.h"
 #include "algo/kmeans.h"
 #include "algo/vecops.h"
+#include "index/build_parallel.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
@@ -83,9 +84,10 @@ typedef struct MktannBuildState
 	double soar_dupes; /* replicated SOAR vectors */
 
 	/* Posting list builders (initialized before scan) */
-	MktPostingBuilder *builders;	  /* [nlist] */
-	float			  *norm_buf;	  /* [dim] reusable for cosine normalize */
-	float			  *soar_residual; /* [dim] scratch for SOAR residual */
+	MktPostingBuilder *builders; /* [nlist] */
+
+	/* Per-worker scratch buffers for parallel-ready assignment */
+	MktBuildWorkerBufs worker_bufs;
 
 	/* Sampling */
 	float *samples;		/* [max_samples * dim] row-major */
@@ -229,113 +231,28 @@ build_callback(
 
 	MemoryContext old_ctx = MemoryContextSwitchTo(bs->tmp_ctx);
 
-	const MktannBuildParams *p = &bs->params;
-
 	MktVector *vec	= DatumGetMktVector(values[0]);
 	VectorRef  vref = MktVectorToRef(vec);
-	Dimension  dim	= p->dim;
 
-	/* Find nearest centroid via tree descent */
-	Distance min_dist;
-	uint32_t best_c =
-			mkt_hkmeans_assign(bs->tree, vref.data, p->metric, &min_dist);
+	const MktBuildParams bp = {
+			.dim			  = bs->params.dim,
+			.metric			  = bs->params.metric,
+			.soar_lambda	  = bs->params.soar_lambda,
+			.boundary_epsilon = bs->params.boundary_epsilon,
+	};
 
-	/* Normalize for cosine so RaBitQ encodes in L2-equivalent space */
-	if (p->metric == DISTANCE_COSINE)
-	{
-		memcpy(bs->norm_buf, vref.data, dim * sizeof(float));
-		normalize_in_place(bs->norm_buf, dim);
-		vref = (VectorRef){.data = bs->norm_buf, .dim = dim};
-	}
+	MktBuildAssignment asgn = mkt_build_assign_vector(
+			bs->tree, vref.data, &bp, &bs->worker_bufs);
 
-	/* Stream directly into the cluster's posting builder */
-	mkt_posting_builder_add(&bs->builders[best_c], *tid, vref.data);
-
+	mkt_posting_builder_add(
+			&bs->builders[asgn.primary], *tid, asgn.enc_vector);
 	bs->indtuples++;
 
-	/*
-	 * Vector replication for improved recall.
-	 *
-	 * Three modes controlled by boundary_epsilon and soar_lambda:
-	 *
-	 * 1. boundary_epsilon only: replicate vectors near Voronoi
-	 *    boundaries (gap ratio <= epsilon) to their 2nd-nearest
-	 *    centroid. Selective (~30% of vectors), simple placement.
-	 *
-	 * 2. soar_lambda only: replicate ALL vectors to a secondary
-	 *    cluster chosen by orthogonality-amplified distance. Smart
-	 *    placement but ~2x storage.
-	 *
-	 * 3. Both set (combined): use boundary epsilon to decide WHETHER
-	 *    to replicate (selective), use SOAR OA distance to decide
-	 *    WHERE (smart placement). Best of both: ~30% storage with
-	 *    geometrically optimal secondary assignment.
-	 */
-	bool has_soar	  = bs->params.soar_lambda > 0.0;
-	bool has_boundary = bs->params.boundary_epsilon > 0.0;
-
-	if (has_soar || has_boundary)
+	if (asgn.secondary != MKT_INVALID_CLUSTER)
 	{
-		const float *leaves	 = bs->tree->leaf_centroids;
-		uint32_t	 nleaves = bs->tree->nleaves;
-
-		/* Boundary gate: check if vector is near Voronoi boundary.
-		 * When boundary_epsilon is 0, all vectors pass (SOAR-only). */
-		uint32_t boundary_c2 = best_c;
-		if (has_boundary)
-			boundary_c2 = mkt_find_secondary_cluster(
-					vref.data,
-					leaves,
-					nleaves,
-					dim,
-					p->metric,
-					best_c,
-					min_dist,
-					bs->params.boundary_epsilon);
-
-		bool should_replicate = has_boundary ? (boundary_c2 != best_c) : true;
-
-		if (should_replicate)
-		{
-			uint32_t c2;
-			if (has_soar)
-			{
-				/* SOAR placement: pick secondary by OA distance */
-				const float *cent = leaves + (size_t)best_c * dim;
-				float		*r	  = bs->soar_residual;
-				float		 norm = 0.0f;
-				for (Dimension d = 0; d < dim; d++)
-				{
-					r[d] = vref.data[d] - cent[d];
-					norm += r[d] * r[d];
-				}
-				if (norm > 1e-7f)
-				{
-					float inv = 1.0f / sqrtf(norm);
-					for (Dimension d = 0; d < dim; d++)
-						r[d] *= inv;
-				}
-				c2 = mkt_find_soar_secondary(
-						vref.data,
-						leaves,
-						nleaves,
-						dim,
-						best_c,
-						r,
-						bs->params.soar_lambda);
-			}
-			else
-			{
-				/* Plain 2nd-nearest (already found by gate) */
-				c2 = boundary_c2;
-			}
-
-			if (c2 != best_c)
-			{
-				mkt_posting_builder_add(&bs->builders[c2], *tid, vref.data);
-				bs->soar_dupes++;
-			}
-		}
+		mkt_posting_builder_add(
+				&bs->builders[asgn.secondary], *tid, asgn.enc_vector);
+		bs->soar_dupes++;
 	}
 
 	MemoryContextSwitchTo(old_ctx);
@@ -675,14 +592,11 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	}
 
 	/* Prepare build state for scan */
-	bs.tree		= tree;
-	bs.builders = builders;
-	bs.norm_buf = (p->metric == DISTANCE_COSINE) ? palloc(dim * sizeof(float))
-												 : NULL;
-	bs.soar_residual = (p->soar_lambda > 0.0) ? palloc(dim * sizeof(float))
-											  : NULL;
-	bs.indtuples	 = 0;
-	bs.soar_dupes	 = 0;
+	bs.tree		   = tree;
+	bs.builders	   = builders;
+	bs.worker_bufs = mkt_build_worker_bufs_create(dim);
+	bs.indtuples   = 0;
+	bs.soar_dupes  = 0;
 
 	/* 4. Single heap scan */
 	double heap_tuples = table_index_build_scan(
