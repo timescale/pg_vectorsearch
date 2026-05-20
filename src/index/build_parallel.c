@@ -6,10 +6,11 @@
  */
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "algo/hkmeans.h"
-#include "core/memory.h"
 #include "index/build_parallel.h"
 #include "index/index_build.h"
 #include "mkt_types.h"
@@ -36,17 +37,19 @@ normalize_vec(float *out, const float *in, Dimension dim)
 MktBuildWorkerBufs
 mkt_build_worker_bufs_create(Dimension dim)
 {
+	/* Use malloc (not mkt_alloc) because worker threads may not
+	 * have a memory context in standalone mode. */
 	return (MktBuildWorkerBufs){
-			.norm_buf	  = mkt_alloc(dim * sizeof(float)),
-			.residual_buf = mkt_alloc(dim * sizeof(float)),
+			.norm_buf	  = malloc(dim * sizeof(float)),
+			.residual_buf = malloc(dim * sizeof(float)),
 	};
 }
 
 void
 mkt_build_worker_bufs_free(MktBuildWorkerBufs *bufs)
 {
-	mkt_free(bufs->norm_buf);
-	mkt_free(bufs->residual_buf);
+	free(bufs->norm_buf);
+	free(bufs->residual_buf);
 	bufs->norm_buf	   = NULL;
 	bufs->residual_buf = NULL;
 }
@@ -142,4 +145,134 @@ mkt_build_assign_vector(
 			.secondary	= secondary,
 			.enc_vector = enc_vec,
 	};
+}
+
+/* ----------------------------------------------------------------
+ * Batch parallel assignment via pthreads
+ * ---------------------------------------------------------------- */
+
+#include <pthread.h>
+
+typedef struct BatchWorkerArg
+{
+	const float			 *vectors;
+	uint32_t			  start;
+	uint32_t			  end;
+	Dimension			  dim;
+	const HKMeansResult	 *tree;
+	const MktBuildParams *params;
+	uint32_t			 *out_primary;
+	uint32_t			 *out_secondary;
+} BatchWorkerArg;
+
+static void *
+batch_worker_fn(void *arg)
+{
+	BatchWorkerArg	  *w	= (BatchWorkerArg *)arg;
+	MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(w->dim);
+
+	for (uint32_t i = w->start; i < w->end; i++)
+	{
+		const float		  *vec = w->vectors + (size_t)i * w->dim;
+		MktBuildAssignment asgn =
+				mkt_build_assign_vector(w->tree, vec, w->params, &bufs);
+
+		w->out_primary[i]	= asgn.primary;
+		w->out_secondary[i] = asgn.secondary;
+	}
+
+	mkt_build_worker_bufs_free(&bufs);
+	return NULL;
+}
+
+static uint32_t
+detect_nthreads(void)
+{
+	long n = sysconf(_SC_NPROCESSORS_ONLN);
+	if (n < 1)
+		n = 1;
+	if (n > 64)
+		n = 64;
+	return (uint32_t)n;
+}
+
+MktBatchAssignment
+mkt_batch_assignment_create(uint32_t count)
+{
+	return (MktBatchAssignment){
+			.primary   = malloc(count * sizeof(uint32_t)),
+			.secondary = malloc(count * sizeof(uint32_t)),
+			.count	   = count,
+	};
+}
+
+void
+mkt_batch_assignment_free(MktBatchAssignment *ba)
+{
+	free(ba->primary);
+	free(ba->secondary);
+	ba->primary	  = NULL;
+	ba->secondary = NULL;
+	ba->count	  = 0;
+}
+
+void
+mkt_build_assign_batch_parallel(
+		const float			 *vectors,
+		uint32_t			  count,
+		Dimension			  dim,
+		const HKMeansResult	 *tree,
+		const MktBuildParams *params,
+		uint32_t			  nthreads,
+		MktBatchAssignment	 *out)
+{
+	if (nthreads == 0)
+		nthreads = detect_nthreads();
+	if (nthreads > count)
+		nthreads = count;
+	if (nthreads <= 1)
+	{
+		/* Single-threaded fallback */
+		MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
+		for (uint32_t i = 0; i < count; i++)
+		{
+			const float		  *vec = vectors + (size_t)i * dim;
+			MktBuildAssignment asgn =
+					mkt_build_assign_vector(tree, vec, params, &bufs);
+			out->primary[i]	  = asgn.primary;
+			out->secondary[i] = asgn.secondary;
+		}
+		mkt_build_worker_bufs_free(&bufs);
+		return;
+	}
+
+	pthread_t	   *threads = malloc(nthreads * sizeof(pthread_t));
+	BatchWorkerArg *args	= malloc(nthreads * sizeof(BatchWorkerArg));
+
+	uint32_t per_thread = count / nthreads;
+	uint32_t remainder	= count % nthreads;
+
+	uint32_t offset = 0;
+	for (uint32_t t = 0; t < nthreads; t++)
+	{
+		uint32_t chunk = per_thread + (t < remainder ? 1 : 0);
+		args[t]		   = (BatchWorkerArg){
+					   .vectors		  = vectors,
+					   .start		  = offset,
+					   .end			  = offset + chunk,
+					   .dim			  = dim,
+					   .tree		  = tree,
+					   .params		  = params,
+					   .out_primary	  = out->primary,
+					   .out_secondary = out->secondary,
+		   };
+		pthread_create(&threads[t], NULL, batch_worker_fn, &args[t]);
+		offset += chunk;
+	}
+
+	for (uint32_t t = 0; t < nthreads; t++)
+		pthread_join(threads[t], NULL);
+
+	free(threads);
+	free(args);
 }

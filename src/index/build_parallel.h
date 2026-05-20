@@ -92,4 +92,43 @@ MktBuildAssignment mkt_build_assign_vector(
 		const MktBuildParams *params,
 		MktBuildWorkerBufs	 *bufs);
 
+/*
+ * Per-vector assignment result stored in flat arrays for batch
+ * processing. Used by the threaded build path.
+ */
+typedef struct MktBatchAssignment
+{
+	uint32_t *primary;	 /* [count] primary cluster IDs */
+	uint32_t *secondary; /* [count] secondary cluster IDs (MKT_INVALID_CLUSTER
+							if none) */
+	uint32_t count;
+} MktBatchAssignment;
+
+MktBatchAssignment mkt_batch_assignment_create(uint32_t count);
+void			   mkt_batch_assignment_free(MktBatchAssignment *ba);
+
+/*
+ * Assign a batch of vectors to clusters in parallel using pthreads.
+ *
+ * vectors:    [count * dim] contiguous float array
+ * count:      number of vectors
+ * tree:       hierarchical k-means result (read-only, shared)
+ * params:     build parameters (read-only, shared)
+ * nthreads:   number of threads (0 = auto-detect)
+ * out:        pre-allocated batch assignment (primary + secondary arrays)
+ *
+ * Each thread processes a contiguous range of vectors independently.
+ * The enc_vector from MktBuildAssignment is NOT stored — the caller
+ * should normalize separately if needed, since the normalized vector
+ * lives in a per-thread buffer that's freed after the batch.
+ */
+void mkt_build_assign_batch_parallel(
+		const float			 *vectors,
+		uint32_t			  count,
+		Dimension			  dim,
+		const HKMeansResult	 *tree,
+		const MktBuildParams *params,
+		uint32_t			  nthreads,
+		MktBatchAssignment	 *out);
+
 #endif /* MKT_BUILD_PARALLEL_H */

@@ -378,13 +378,9 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	for (uint32_t c = 0; c < nlist; c++)
 		cluster_list_init(&idx->clusters[c], est_per_cluster);
 
-	/* Pass 2: stream all vectors, route to clusters.
-	 * Uses shared mkt_build_assign_vector() for tree descent +
-	 * normalization + SOAR logic. */
-	mkt_memctx_switch(build_ctx);
-	MktBuildWorkerBufs worker_bufs = mkt_build_worker_bufs_create(dim);
-	mkt_memctx_switch(idx_ctx);
-
+	/* Pass 2: assign all vectors to clusters in parallel.
+	 * Read all vectors into the rerank array, normalize if cosine,
+	 * then run threaded batch assignment. */
 	const MktBuildParams bp = {
 			.dim			  = dim,
 			.metric			  = config->metric,
@@ -400,20 +396,30 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 		uint32_t	 id;
 		while (src->next(src, 1, &vec, &id))
 		{
-			MktBuildAssignment asgn =
-					mkt_build_assign_vector(tree, vec, &bp, &worker_bufs);
-
-			/* Store full-precision vector for reranking */
 			memcpy(idx->all_vectors + (size_t)id * dim,
-				   asgn.enc_vector,
+				   vec,
 				   dim * sizeof(float));
-
-			cluster_list_append(&idx->clusters[asgn.primary], id);
 			idx->nvecs++;
-
-			if (asgn.secondary != MKT_INVALID_CLUSTER)
-				cluster_list_append(&idx->clusters[asgn.secondary], id);
 		}
+	}
+
+	/* Normalize all vectors for cosine before parallel assignment */
+	if (config->metric == DISTANCE_COSINE)
+		normalize_all(idx->all_vectors, idx->nvecs, dim);
+
+	/* Parallel batch assignment (0 = auto-detect thread count) */
+	MktBatchAssignment batch = mkt_batch_assignment_create(idx->nvecs);
+
+	mkt_build_assign_batch_parallel(
+			idx->all_vectors, idx->nvecs, dim, tree, &bp, 0, &batch);
+
+	/* Distribute assignments to cluster lists (sequential) */
+	for (uint32_t i = 0; i < idx->nvecs; i++)
+	{
+		cluster_list_append(&idx->clusters[batch.primary[i]], i);
+
+		if (batch.secondary[i] != MKT_INVALID_CLUSTER)
+			cluster_list_append(&idx->clusters[batch.secondary[i]], i);
 	}
 
 	/* Compute max cluster size (needed for flat mode scan buffers) */
