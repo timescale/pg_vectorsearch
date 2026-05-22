@@ -206,6 +206,8 @@ print_usage(CmdContext *ctx)
 	printf("  --no-rerank        Skip reranking (return approximate)\n");
 	printf("  --fastscan <8|16>  Use VPSHUFB fastscan (8=fast, "
 		   "16=accurate)\n");
+	printf("  --workers <int>    Build parallelism "
+		   "(0=auto, 1=serial)\n");
 	printf("  --wait-profile     Pause before queries (print PID for perf "
 		   "attach)\n");
 #ifdef MKT_HAVE_HDF5

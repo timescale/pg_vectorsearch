@@ -42,7 +42,25 @@ flush_page(MktPostingBuilder *builder)
 
 	BlockNumber blkno;
 	Page		spage;
-	if (builder->reserve_used < builder->reserve_count)
+	if (builder->is_first && builder->fixed_first_blkno != InvalidBlockNumber)
+	{
+		blkno = builder->fixed_first_blkno;
+		spage = mkt_storage_write_page(builder->storage, blkno);
+	}
+	else if (builder->shared_reserve_next != NULL)
+	{
+		uint32_t slot = atomic_fetch_add(builder->shared_reserve_next, 1);
+		if (slot < builder->reserve_count)
+		{
+			blkno = builder->reserve_start + slot;
+			spage = mkt_storage_write_page(builder->storage, blkno);
+		}
+		else
+		{
+			spage = mkt_storage_new_page(builder->storage, &blkno);
+		}
+	}
+	else if (builder->reserve_used < builder->reserve_count)
 	{
 		blkno = builder->reserve_start + builder->reserve_used;
 		builder->reserve_used++;
@@ -76,8 +94,8 @@ flush_page(MktPostingBuilder *builder)
 }
 
 /*
- * Common init for both formats. Sets up shared fields and the
- * first page with pt_centroid.
+ * Common init for both formats. When pt_centroid is NULL, initializes
+ * a continuation page (no pt_centroid header, overflow flags).
  */
 static void
 builder_init_common(
@@ -102,13 +120,16 @@ builder_init_common(
 	builder->is_first	= true;
 	builder->page_ops	= ops;
 
-	builder->reserve_start = InvalidBlockNumber;
+	builder->reserve_start		 = InvalidBlockNumber;
+	builder->shared_reserve_next = NULL;
+	builder->fixed_first_blkno	 = InvalidBlockNumber;
 
 	mkt_posting_page_init(
 			builder->mem_page, cluster_id, dim, first_page_flags);
-	memcpy(mkt_posting_pt_centroid_mut(builder->mem_page),
-		   pt_centroid,
-		   dim * sizeof(float));
+	if (pt_centroid != NULL)
+		memcpy(mkt_posting_pt_centroid_mut(builder->mem_page),
+			   pt_centroid,
+			   dim * sizeof(float));
 
 	builder->enc_buf = params ? mkt_alloc(MKT_RABITQ_DATA_SIZE(dim)) : NULL;
 }
@@ -345,6 +366,54 @@ mkt_posting_builder_init_fastscan(
 	builder->fs.max_groups = mkt_fastscan_max_groups(dim, true);
 }
 
+void
+mkt_posting_builder_init_continuation(
+		MktPostingBuilder  *builder,
+		MktStorage		   *storage,
+		const RaBitQParams *params,
+		Dimension			dim,
+		uint32_t			cluster_id,
+		const float		   *centroid)
+{
+	builder_init_common(
+			builder,
+			storage,
+			params,
+			dim,
+			cluster_id,
+			centroid,
+			NULL,
+			&aos_page_ops,
+			MKT_POSTING_PAGE_OVERFLOW);
+}
+
+void
+mkt_posting_builder_init_continuation_fastscan(
+		MktPostingBuilder  *builder,
+		MktStorage		   *storage,
+		const RaBitQParams *params,
+		Dimension			dim,
+		uint32_t			cluster_id,
+		const float		   *centroid)
+{
+	builder_init_common(
+			builder,
+			storage,
+			params,
+			dim,
+			cluster_id,
+			centroid,
+			NULL,
+			&fs_page_ops,
+			MKT_POSTING_PAGE_OVERFLOW | MKT_POSTING_PAGE_FASTSCAN);
+
+	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	builder->fs.bits_buf  = mkt_alloc(
+			 (size_t)MKT_FASTSCAN_GROUP * packed_bytes);
+	builder->fs.codes_buf  = mkt_alloc(MKT_FASTSCAN_GROUP_BYTES(dim));
+	builder->fs.max_groups = mkt_fastscan_max_groups(dim, false);
+}
+
 /* ----------------------------------------------------------------
  * Public API — add / finish / cleanup / reserve
  * ---------------------------------------------------------------- */
@@ -356,6 +425,25 @@ mkt_posting_builder_set_reserve(
 	builder->reserve_start = start;
 	builder->reserve_count = count;
 	builder->reserve_used  = 0;
+}
+
+void
+mkt_posting_builder_set_shared_reserve(
+		MktPostingBuilder *builder,
+		BlockNumber		   start,
+		uint32_t		   count,
+		_Atomic(uint32_t) *next)
+{
+	builder->reserve_start		 = start;
+	builder->reserve_count		 = count;
+	builder->shared_reserve_next = next;
+}
+
+void
+mkt_posting_builder_set_first_blkno(
+		MktPostingBuilder *builder, BlockNumber blkno)
+{
+	builder->fixed_first_blkno = blkno;
 }
 
 void
@@ -404,6 +492,13 @@ mkt_posting_builder_finish(MktPostingBuilder *builder)
 {
 	builder->page_ops->finalize(builder);
 	flush_page(builder);
+	return builder->head_blkno;
+}
+
+BlockNumber
+mkt_posting_builder_finish_partial(MktPostingBuilder *builder)
+{
+	builder->page_ops->finalize(builder);
 	return builder->head_blkno;
 }
 
