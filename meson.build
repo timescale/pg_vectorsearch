@@ -278,6 +278,7 @@ mkt_core_sources = files(
   'src/index/centroid_page.c',
   'src/index/centroid_search.c',
   'src/index/build_parallel.c',
+  'src/index/build_posting.c',
   'src/index/index_build.c',
   'src/index/posting_page.c',
   'src/index/posting_build.c',

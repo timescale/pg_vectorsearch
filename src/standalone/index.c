@@ -25,6 +25,7 @@
 #include "algo/vecops.h"
 #include "core/memory.h"
 #include "index/build_parallel.h"
+#include "index/build_posting.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
@@ -235,40 +236,21 @@ normalize_all(float *data, uint32_t nvecs, Dimension dim)
 }
 
 /* ----------------------------------------------------------------
- * Parallel posting build — each thread processes a vector slice
+ * Parallel posting build — pthread worker wrapper
  *
- * Mirrors the PG model: each worker independently scans its portion
- * of the heap, assigns vectors to clusters, encodes, and writes
- * posting pages. Workers share pre-allocated page ranges per cluster
- * via atomic counters. After all workers finish, page chains are
- * linked together.
+ * Thin wrapper around the shared MktPostingWorkerState API.
+ * Manages thread-local memory context and vector iteration.
  * ---------------------------------------------------------------- */
 
 typedef struct ParPostingWorkerArg
 {
-	uint32_t			  thread_id;
-	uint32_t			  vec_start;
-	uint32_t			  vec_end;
-	MktIndex			 *idx;
-	const HKMeansResult	 *tree;
-	const MktIndexConfig *config;
-	const MktBuildParams *bp;
-	Dimension			  dim;
-	uint32_t			  nlist;
-
-	/* Pre-computed assignments (NULL to re-assign) */
+	MktPostingWorkerState	  ws;
+	uint32_t				  vec_start;
+	uint32_t				  vec_end;
+	const float				 *all_vectors;
 	const MktBatchAssignment *batch;
-
-	/* Per-cluster shared page reservations */
-	BlockNumber		  *reserve_starts;
-	uint32_t		  *reserve_counts;
-	_Atomic(uint32_t) *reserve_nexts;
-
-	/* Output: per-cluster head/tail from this thread */
-	BlockNumber		  *out_heads;
-	BlockNumber		  *out_tails;
-	MktPostingBuilder *out_builders;
-	bool			  *out_active;
+	const HKMeansResult		 *tree;
+	const MktBuildParams	 *bp;
 } ParPostingWorkerArg;
 
 static void *
@@ -279,26 +261,14 @@ par_posting_worker_fn(void *arg)
 	MktMemCtx thread_ctx = mkt_memctx_create(NULL, "par_posting");
 	mkt_memctx_switch(thread_ctx);
 
-	uint32_t  nlist = w->nlist;
-	Dimension dim	= w->dim;
-
-	MktPostingBuilder *builders = malloc(
-			(size_t)nlist * sizeof(MktPostingBuilder));
-	bool *active = calloc(nlist, sizeof(bool));
-
+	Dimension		   dim	= w->ws.dim;
 	MktBuildWorkerBufs bufs = {0};
 	if (w->batch == NULL)
 		bufs = mkt_build_worker_bufs_create(dim);
 
-	for (BlockNumber c = 0; c < nlist; c++)
-	{
-		w->out_heads[c] = InvalidBlockNumber;
-		w->out_tails[c] = InvalidBlockNumber;
-	}
-
 	for (uint32_t i = w->vec_start; i < w->vec_end; i++)
 	{
-		const float *vec = w->idx->all_vectors + (size_t)i * dim;
+		const float *vec = w->all_vectors + (size_t)i * dim;
 		uint32_t	 primary, secondary;
 
 		if (w->batch != NULL)
@@ -314,103 +284,14 @@ par_posting_worker_fn(void *arg)
 			secondary = asgn.secondary;
 		}
 
-		/* Add to primary cluster */
-		uint32_t clusters[2] = {primary, secondary};
-		uint32_t nclusters	 = (secondary != MKT_INVALID_CLUSTER) ? 2 : 1;
-
-		for (uint32_t ci = 0; ci < nclusters; ci++)
-		{
-			uint32_t c = clusters[ci];
-			if (!active[c])
-			{
-				const float *cent = w->tree->leaf_centroids + (size_t)c * dim;
-
-				if (w->thread_id == 0)
-				{
-					const float *pt_cent = w->idx->pt_centroids +
-										   (size_t)c * dim;
-					if (w->config->fastscan)
-						mkt_posting_builder_init_fastscan(
-								&builders[c],
-								&w->idx->posting_storage.base,
-								w->idx->base.params,
-								dim,
-								c,
-								cent,
-								pt_cent);
-					else
-						mkt_posting_builder_init(
-								&builders[c],
-								&w->idx->posting_storage.base,
-								w->idx->base.params,
-								dim,
-								c,
-								cent,
-								pt_cent);
-				}
-				else
-				{
-					if (w->config->fastscan)
-						mkt_posting_builder_init_continuation_fastscan(
-								&builders[c],
-								&w->idx->posting_storage.base,
-								w->idx->base.params,
-								dim,
-								c,
-								cent);
-					else
-						mkt_posting_builder_init_continuation(
-								&builders[c],
-								&w->idx->posting_storage.base,
-								w->idx->base.params,
-								dim,
-								c,
-								cent);
-				}
-
-				if (w->reserve_starts != NULL)
-				{
-					mkt_posting_builder_set_shared_reserve(
-							&builders[c],
-							w->reserve_starts[c],
-							w->reserve_counts[c],
-							&w->reserve_nexts[c]);
-					if (w->thread_id == 0)
-						mkt_posting_builder_set_first_blkno(
-								&builders[c], w->reserve_starts[c]);
-				}
-
-				active[c] = true;
-			}
-
-			ItemPointerData tid;
-			mkt_posting_set_vector_id(&tid, i);
-			mkt_posting_builder_add(&builders[c], tid, vec);
-		}
+		mkt_posting_worker_add(&w->ws, i, vec, primary, secondary);
 	}
 
-	/* Finalize builders: flush full pages, hold back partials
-	 * for merge (AoS only; fastscan flushes everything). */
-	for (uint32_t c = 0; c < nlist; c++)
-	{
-		if (!active[c])
-			continue;
-		if (w->config->fastscan)
-			mkt_posting_builder_finish(&builders[c]);
-		else
-			mkt_posting_builder_finish_partial(&builders[c]);
-		w->out_heads[c] = mkt_posting_builder_head(&builders[c]);
-		w->out_tails[c] = mkt_posting_builder_tail(&builders[c]);
-		mkt_posting_builder_cleanup(&builders[c]);
-	}
+	mkt_posting_worker_finish(&w->ws);
 
 	if (w->batch == NULL)
 		mkt_build_worker_bufs_free(&bufs);
 
-	/* Keep builders/active alive — main thread reads mem_page
-	 * for partial page merge. mem_page is inline, survives cleanup. */
-	w->out_builders = builders;
-	w->out_active	= active;
 	mkt_memctx_delete(thread_ctx);
 	return NULL;
 }
@@ -649,66 +530,42 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 
 		if (config->posting_fmt == MKT_POSTING_FMT_PAGES)
 		{
-			/* Estimate per-cluster page counts from known sizes.
-			 * Reserve contiguous block ranges so all pages for a
-			 * cluster are adjacent in the page array. */
-			uint32_t ent_first	  = mkt_posting_max_entries_first(dim);
-			uint32_t ent_overflow = mkt_posting_max_entries(dim);
-
-			BlockNumber *reserve_starts = malloc(nlist * sizeof(BlockNumber));
-			uint32_t	*reserve_counts = malloc(nlist * sizeof(uint32_t));
-			_Atomic(uint32_t) *reserve_nexts =
-					calloc(nlist, sizeof(_Atomic(uint32_t)));
-
-			BlockNumber total_reserved = 0;
+			/* Compute page reservations from cluster sizes */
+			uint32_t *cluster_counts = malloc(nlist * sizeof(uint32_t));
 			for (uint32_t c = 0; c < nlist; c++)
-			{
-				uint32_t cnt	= idx->clusters[c].count;
-				uint32_t npages = 1; /* first page (with pt_centroid) */
-				if (cnt > ent_first)
-					npages += (cnt - ent_first + ent_overflow - 1) /
-							  ent_overflow;
-				/* Each thread may produce a partial page per cluster,
-				 * so add (nworkers - 1) extra pages. */
-				npages += nworkers - 1;
-				reserve_starts[c] = total_reserved;
-				reserve_counts[c] = npages;
-				total_reserved += npages;
-			}
+				cluster_counts[c] = idx->clusters[c].count;
 
-			uint32_t est_extra	 = total_reserved / 10 + 100;
+			MktPostingReserve reserve;
+			mkt_posting_reserve_init(
+					&reserve, cluster_counts, nlist, nworkers, dim);
+			free(cluster_counts);
+
+			uint32_t est_extra	 = reserve.total / 10 + 100;
 			idx->posting_storage = make_array_page_storage(
-					total_reserved + est_extra);
-			idx->posting_storage.next_blkno = total_reserved;
+					reserve.total + est_extra);
+			idx->posting_storage.next_blkno = reserve.total;
 			idx->posting_heads = mkt_alloc(nlist * sizeof(BlockNumber));
 
-			/* Slot 0 of each cluster is reserved for thread 0's
-			 * first page (which carries pt_centroid). Shared
-			 * atomic counters start at 1 so other threads skip
-			 * slot 0. */
-			for (uint32_t c = 0; c < nlist; c++)
-				atomic_store(&reserve_nexts[c], 1);
-
-			/* Parallel posting build: each thread processes its
-			 * 1/N slice of vectors, like an independent PG worker. */
+			/* Parallel posting build */
 			uint64_t t_posting = now_ns();
 			{
 				uint32_t nt = nworkers;
 				if (nt > nlist)
 					nt = nlist;
 
+				/* Shared partial page buffer (thread-local in
+				 * standalone, DSM in PG). */
+				char *partials = config->fastscan
+									   ? NULL
+									   : calloc((size_t)nt * nlist, BLCKSZ);
+
 				pthread_t			*threads = malloc(nt * sizeof(pthread_t));
 				ParPostingWorkerArg *pargs	 = malloc(
 						  nt * sizeof(ParPostingWorkerArg));
 
-				/* Per-thread output arrays */
-				BlockNumber **all_heads = malloc(nt * sizeof(BlockNumber *));
-				BlockNumber **all_tails = malloc(nt * sizeof(BlockNumber *));
-				for (uint32_t t = 0; t < nt; t++)
-				{
-					all_heads[t] = malloc(nlist * sizeof(BlockNumber));
-					all_tails[t] = malloc(nlist * sizeof(BlockNumber));
-				}
+				BlockNumber **all_heads	 = malloc(nt * sizeof(BlockNumber *));
+				BlockNumber **all_tails	 = malloc(nt * sizeof(BlockNumber *));
+				bool		**all_active = malloc(nt * sizeof(bool *));
 
 				uint32_t per_thread = idx->nvecs / nt;
 				uint32_t remainder	= idx->nvecs % nt;
@@ -717,23 +574,32 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 				for (uint32_t t = 0; t < nt; t++)
 				{
 					uint32_t chunk = per_thread + (t < remainder ? 1 : 0);
-					pargs[t]	   = (ParPostingWorkerArg){
-								  .thread_id	  = t,
-								  .vec_start	  = voff,
-								  .vec_end		  = voff + chunk,
-								  .idx			  = idx,
-								  .tree			  = tree,
-								  .config		  = config,
-								  .bp			  = &bp,
-								  .dim			  = dim,
-								  .nlist		  = nlist,
-								  .batch		  = &batch,
-								  .reserve_starts = reserve_starts,
-								  .reserve_counts = reserve_counts,
-								  .reserve_nexts  = reserve_nexts,
-								  .out_heads	  = all_heads[t],
-								  .out_tails	  = all_tails[t],
-					  };
+
+					char *t_partials = partials
+											 ? partials + (size_t)t * nlist *
+																  BLCKSZ
+											 : NULL;
+
+					mkt_posting_worker_init(
+							&pargs[t].ws,
+							t,
+							nlist,
+							dim,
+							config->fastscan != 0,
+							&idx->posting_storage.base,
+							idx->base.params,
+							idx->leaf_centroids,
+							idx->pt_centroids,
+							&reserve,
+							t_partials);
+
+					pargs[t].vec_start	 = voff;
+					pargs[t].vec_end	 = voff + chunk;
+					pargs[t].all_vectors = idx->all_vectors;
+					pargs[t].batch		 = &batch;
+					pargs[t].tree		 = tree;
+					pargs[t].bp			 = &bp;
+
 					pthread_create(
 							&threads[t],
 							NULL,
@@ -747,236 +613,54 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 
 				double ms_posting = (double)(now_ns() - t_posting) / 1e6;
 
-				/* Merge partial pages (AoS only): each thread held
-				 * back its last in-memory page per cluster. Feed all
-				 * partial entries into a continuation builder that
-				 * emits full pages, leaving at most one partial. */
-				uint32_t pages_saved = 0;
-				for (uint32_t c = 0; c < nlist && !config->fastscan; c++)
+				/* Gather per-thread outputs */
+				for (uint32_t t = 0; t < nt; t++)
 				{
-					uint32_t total_entries = 0;
-					uint32_t npartials	   = 0;
-					for (uint32_t t = 0; t < nt; t++)
-					{
-						if (!pargs[t].out_active[c])
-							continue;
-						uint32_t ecnt = mkt_posting_page_count(
-								pargs[t].out_builders[c].mem_page);
-						if (ecnt > 0)
-						{
-							total_entries += ecnt;
-							npartials++;
-						}
-					}
-
-					if (total_entries == 0)
-						continue;
-
-					const float *cent = tree->leaf_centroids + (size_t)c * dim;
-
-					MktPostingBuilder mb;
-					mkt_posting_builder_init_continuation(
-							&mb,
-							&idx->posting_storage.base,
-							NULL,
-							dim,
-							c,
-							cent);
-					mkt_posting_builder_set_shared_reserve(
-							&mb,
-							reserve_starts[c],
-							reserve_counts[c],
-							&reserve_nexts[c]);
-
-					for (uint32_t t = 0; t < nt; t++)
-					{
-						if (!pargs[t].out_active[c])
-							continue;
-						MktPostingBuilder	 *b	 = &pargs[t].out_builders[c];
-						Page				  pg = b->mem_page;
-						MktPostingPageOpaque *op = mkt_posting_opaque(pg);
-						if (op->entry_count == 0)
-							continue;
-
-						bool is_fp = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
-						char *ct   = is_fp ? mkt_posting_content_first(pg, dim)
-										   : mkt_posting_content(pg);
-
-						for (uint32_t e = 0; e < op->entry_count; e++)
-						{
-							MktPostingEntryHeader *hdr =
-									mkt_posting_entry_at(ct, e, dim);
-							mkt_posting_builder_add_encoded(
-									&mb,
-									hdr->meta.tid,
-									hdr->f_add,
-									hdr->f_rescale,
-									hdr->f_error,
-									hdr->bits);
-						}
-					}
-
-					mkt_posting_builder_finish(&mb);
-					BlockNumber mhead = mkt_posting_builder_head(&mb);
-					BlockNumber mtail = mkt_posting_builder_tail(&mb);
-					mkt_posting_builder_cleanup(&mb);
-
-					/* Link merge output after the last thread's
-					 * flushed chain. Find the last thread that
-					 * flushed pages for this cluster. */
-					BlockNumber prev_tail = InvalidBlockNumber;
-					for (uint32_t t = nt; t > 0; t--)
-					{
-						if (all_tails[t - 1][c] != InvalidBlockNumber)
-						{
-							prev_tail = all_tails[t - 1][c];
-							break;
-						}
-					}
-
-					if (prev_tail != InvalidBlockNumber)
-					{
-						Page prev = idx->posting_storage.pages +
-									(size_t)prev_tail * BLCKSZ;
-						mkt_posting_opaque(prev)->next_blkno = mhead;
-					}
-					else
-					{
-						/* No thread flushed any full pages for this
-						 * cluster. The merge output IS the chain.
-						 * Thread 0's first page is at slot 0
-						 * (head already set), but it was never
-						 * flushed. The merge wrote a continuation
-						 * page. We need a first page. */
-						if (all_heads[0][c] == InvalidBlockNumber)
-						{
-							BlockNumber blkno = reserve_starts[c];
-							Page		page  = idx->posting_storage.pages +
-										(size_t)blkno * BLCKSZ;
-							uint16_t flags = MKT_POSTING_PAGE_FIRST;
-							if (config->fastscan)
-								flags |= MKT_POSTING_PAGE_FASTSCAN;
-							mkt_posting_page_init(page, c, dim, flags);
-							memcpy(mkt_posting_pt_centroid_mut(page),
-								   idx->pt_centroids + (size_t)c * dim,
-								   dim * sizeof(float));
-							mkt_posting_opaque(page)->next_blkno = mhead;
-							all_heads[0][c]						 = blkno;
-						}
-						else
-						{
-							Page fp = idx->posting_storage.pages +
-									  (size_t)all_heads[0][c] * BLCKSZ;
-							mkt_posting_opaque(fp)->next_blkno = mhead;
-						}
-					}
-
-					pages_saved += npartials > 0 ? npartials - 1 : 0;
-					(void)mtail;
+					all_heads[t]  = pargs[t].ws.heads;
+					all_tails[t]  = pargs[t].ws.tails;
+					all_active[t] = pargs[t].ws.active;
 				}
 
-				/* Collect all pages per cluster, sort by block
-				 * number, and relink for sequential I/O. */
-				uint32_t total_pages = 0;
-				{
-					uint32_t max_pages = 0;
-					for (uint32_t c = 0; c < nlist; c++)
-						if (reserve_counts[c] > max_pages)
-							max_pages = reserve_counts[c];
-					max_pages += nt + 64;
-					BlockNumber *chain = malloc(
-							max_pages * sizeof(BlockNumber));
+				/* Merge partials + sort chains */
+				MktPostingBuildResult build_result;
+				mkt_posting_finalize(
+						partials,
+						all_heads,
+						all_tails,
+						all_active,
+						nt,
+						&idx->posting_storage.base,
+						&reserve,
+						idx->leaf_centroids,
+						idx->pt_centroids,
+						dim,
+						config->fastscan != 0,
+						&build_result);
 
-					for (uint32_t c = 0; c < nlist; c++)
-					{
-						uint32_t nchain = 0;
-
-						if (all_heads[0][c] == InvalidBlockNumber)
-						{
-							BlockNumber blkno = reserve_starts[c];
-							Page		page  = idx->posting_storage.pages +
-										(size_t)blkno * BLCKSZ;
-							uint16_t flags = MKT_POSTING_PAGE_FIRST;
-							if (config->fastscan)
-								flags |= MKT_POSTING_PAGE_FASTSCAN;
-							mkt_posting_page_init(page, c, dim, flags);
-							memcpy(mkt_posting_pt_centroid_mut(page),
-								   idx->pt_centroids + (size_t)c * dim,
-								   dim * sizeof(float));
-							mkt_posting_opaque(page)->next_blkno =
-									InvalidBlockNumber;
-							chain[nchain++] = blkno;
-						}
-
-						for (uint32_t t = 0; t < nt; t++)
-						{
-							BlockNumber blk = all_heads[t][c];
-							while (blk != InvalidBlockNumber)
-							{
-								chain[nchain++] = blk;
-								Page pg			= idx->posting_storage.pages +
-										  (size_t)blk * BLCKSZ;
-								blk = mkt_posting_opaque(pg)->next_blkno;
-							}
-						}
-
-						for (uint32_t i = 1; i < nchain; i++)
-							for (uint32_t j = i;
-								 j > 0 && chain[j] < chain[j - 1];
-								 j--)
-							{
-								BlockNumber tmp = chain[j];
-								chain[j]		= chain[j - 1];
-								chain[j - 1]	= tmp;
-							}
-
-						for (uint32_t i = 0; i + 1 < nchain; i++)
-						{
-							Page pg = idx->posting_storage.pages +
-									  (size_t)chain[i] * BLCKSZ;
-							mkt_posting_opaque(pg)->next_blkno = chain[i + 1];
-						}
-						if (nchain > 0)
-						{
-							Page last = idx->posting_storage.pages +
-										(size_t)chain[nchain - 1] * BLCKSZ;
-							mkt_posting_opaque(last)->next_blkno =
-									InvalidBlockNumber;
-						}
-
-						idx->posting_heads[c] = nchain > 0
-													  ? chain[0]
-													  : InvalidBlockNumber;
-						total_pages += nchain;
-					}
-
-					free(chain);
-				}
+				memcpy(idx->posting_heads,
+					   build_result.heads,
+					   nlist * sizeof(BlockNumber));
+				free(build_result.heads);
 
 				fprintf(stderr,
 						"  Posting build: %.1fms "
 						"(%u threads, %u pages, %u partial merged)\n",
 						ms_posting,
 						nt,
-						total_pages,
-						pages_saved);
+						build_result.total_pages,
+						build_result.pages_merged);
 
 				for (uint32_t t = 0; t < nt; t++)
-				{
-					free(pargs[t].out_builders);
-					free(pargs[t].out_active);
-					free(all_heads[t]);
-					free(all_tails[t]);
-				}
+					mkt_posting_worker_cleanup(&pargs[t].ws);
 				free(all_heads);
 				free(all_tails);
+				free(all_active);
+				free(partials);
 				free(threads);
 				free(pargs);
 			}
 
-			free(reserve_starts);
-			free(reserve_counts);
-			free(reserve_nexts);
+			mkt_posting_reserve_free(&reserve);
 
 			if (config->fastscan)
 				idx->base.fastscan = config->fastscan;
