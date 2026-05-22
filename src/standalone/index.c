@@ -814,6 +814,115 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 									InvalidBlockNumber;
 						}
 
+						/* Merge trailing partial pages: walk the chain
+						 * backwards, collect entries from non-full
+						 * pages, and repack them into fewer pages. */
+						if (nchain > 1 && !config->fastscan)
+						{
+							uint32_t ent_max = mkt_posting_max_entries(dim);
+							uint32_t tail_entries = 0;
+							uint32_t merge_from	  = nchain;
+
+							for (uint32_t i = nchain; i > 1; i--)
+							{
+								Page pg = idx->posting_storage.pages +
+										  (size_t)chain[i - 1] * BLCKSZ;
+								MktPostingPageOpaque *op = mkt_posting_opaque(
+										pg);
+								if (op->entry_count == ent_max)
+									break;
+								tail_entries += op->entry_count;
+								merge_from = i - 1;
+							}
+
+							uint32_t merged_pages = (tail_entries + ent_max -
+													 1) /
+													ent_max;
+							uint32_t orig_pages = nchain - merge_from;
+
+							if (merged_pages < orig_pages && tail_entries > 0)
+							{
+								MktPostingBuilder mb;
+								const float		 *cent = tree->leaf_centroids +
+													(size_t)c * dim;
+								mkt_posting_builder_init_continuation(
+										&mb,
+										&idx->posting_storage.base,
+										NULL,
+										dim,
+										c,
+										cent);
+								mkt_posting_builder_set_shared_reserve(
+										&mb,
+										reserve_starts[c],
+										reserve_counts[c],
+										&reserve_nexts[c]);
+
+								for (uint32_t i = merge_from; i < nchain; i++)
+								{
+									Page pg = idx->posting_storage.pages +
+											  (size_t)chain[i] * BLCKSZ;
+									MktPostingPageOpaque *op =
+											mkt_posting_opaque(pg);
+									bool  is_fp = (op->flags &
+												   MKT_POSTING_PAGE_FIRST) != 0;
+									char *ct =
+											is_fp ? mkt_posting_content_first(
+															pg, dim)
+												  : mkt_posting_content(pg);
+									for (uint32_t e = 0; e < op->entry_count;
+										 e++)
+									{
+										MktPostingEntryHeader *hdr =
+												mkt_posting_entry_at(
+														ct, e, dim);
+										mkt_posting_builder_add_encoded(
+												&mb,
+												hdr->meta.tid,
+												hdr->f_add,
+												hdr->f_rescale,
+												hdr->f_error,
+												hdr->bits);
+									}
+								}
+
+								mkt_posting_builder_finish(&mb);
+								BlockNumber mh = mkt_posting_builder_head(&mb);
+								BlockNumber mt = mkt_posting_builder_tail(&mb);
+								mkt_posting_builder_cleanup(&mb);
+
+								/* Truncate chain: replace merged tail
+								 * pages with the merge output. */
+								nchain = merge_from;
+
+								/* Walk merge chain, append blocks */
+								BlockNumber blk = mh;
+								while (blk != InvalidBlockNumber)
+								{
+									chain[nchain++] = blk;
+									Page pg = idx->posting_storage.pages +
+											  (size_t)blk * BLCKSZ;
+									blk = mkt_posting_opaque(pg)->next_blkno;
+								}
+
+								/* Relink the junction */
+								if (merge_from > 0)
+								{
+									Page prev = idx->posting_storage.pages +
+												(size_t)chain[merge_from - 1] *
+														BLCKSZ;
+									mkt_posting_opaque(prev)->next_blkno =
+											chain[merge_from];
+								}
+								Page last = idx->posting_storage.pages +
+											(size_t)chain[nchain - 1] * BLCKSZ;
+								mkt_posting_opaque(last)->next_blkno =
+										InvalidBlockNumber;
+
+								(void)mt;
+							}
+						}
+
 						idx->posting_heads[c] = nchain > 0
 													  ? chain[0]
 													  : InvalidBlockNumber;
@@ -831,7 +940,9 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 					BlockNumber total_slots = 0;
 					for (uint32_t c = 0; c < nlist; c++)
 						total_slots += reserve_counts[c];
-					empty_pages = total_slots - used_slots;
+					empty_pages = total_slots > used_slots
+										? total_slots - used_slots
+										: 0;
 
 					free(chain);
 				}
