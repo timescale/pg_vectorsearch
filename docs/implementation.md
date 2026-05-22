@@ -3925,6 +3925,127 @@ Writing: 5234 pages
 Done. Index size: 42.8 MB
 ```
 
+### 4.3 Build Optimizations (Roadmap)
+
+See `docs/parallel-build-design.md` for the parallel insertion design
+(interleaved page claiming, shared assignment code). Additional
+optimizations for billion-scale builds are documented below.
+
+#### 4.3.1 Hierarchical K-Means
+
+Standard Lloyd's k-means with `c` clusters has complexity O(n·c·d·i)
+where n=samples, c=clusters, d=dimensions, i=iterations. For large
+nlist values (e.g., 160K for 1B vectors), the c factor dominates.
+
+**Hierarchical approach**: partition the sample into sqrt(c) groups using
+a coarse clustering pass, then run independent k-means within each
+group. This reduces complexity from O(n·c·d·i) to O(n·sqrt(c)·d·i) —
+roughly 400× faster for c=160,000.
+
+Steps:
+1. Run coarse k-means with sqrt(c) centroids on all samples
+2. Assign each sample to its nearest coarse centroid
+3. Allocate fine clusters proportionally per coarse partition
+   (e.g., Modified Webster/Sainte-Laguë method for balanced allocation)
+4. Run independent k-means within each partition (parallelizable)
+5. Concatenate the resulting centroids
+
+The coarse pass needs only ~10 iterations since its job is rough
+partitioning, not precision.
+
+#### 4.3.2 Dimensionality Reduction During Clustering
+
+K-means only needs distances between vectors, not the vectors at full
+precision. Reducing dimensionality before clustering cuts both memory
+and computation proportionally.
+
+**Approach**: apply a random orthogonal rotation (the same matrix used
+by RaBitQ encoding) then truncate to `k` dimensions (e.g., 768 → 100).
+This is a form of random projection that preserves distance structure.
+
+Steps:
+1. Generate or reuse the RaBitQ rotation matrix P
+2. Rotate all sampled vectors: x' = P·x
+3. Truncate to first k dimensions
+4. Run k-means in reduced space
+5. Recompute centroids in full dimensionality by re-scanning and
+   accumulating vectors into their assigned clusters
+
+For 768d → 100d, this reduces clustering memory ~7.7× and computation
+proportionally. The rotation matrix is already available from the RaBitQ
+encoding pipeline.
+
+#### 4.3.3 Parallel Insertion with Multi-List Posting
+
+The current parallel build uses a mutex on the page allocator. For high
+worker counts (16+), this becomes a bottleneck. The solution is to
+eliminate contention by giving each worker its own list chain per
+cluster.
+
+**Multi-list structure**: instead of one posting list per cluster,
+maintain `P` separate list chains (where P = number of parallel
+workers). Each worker appends exclusively to its own chain. At read
+time, all chains for a cluster are scanned sequentially.
+
+```
+Cluster C with 4 workers:
+  Chain 0: [page] → [page] → [page]  (worker 0 writes here)
+  Chain 1: [page] → [page]           (worker 1 writes here)
+  Chain 2: [page] → [page] → [page]  (worker 2 writes here)
+  Chain 3: [page]                     (worker 3 writes here)
+```
+
+Benefits:
+- Zero contention during the insertion phase (no mutexes)
+- Each worker does sequential page writes to its own chains
+- Read path scans all chains — minor overhead since chains are
+  page-aligned and benefit from prefetching
+
+The chain heads are stored in the cluster's metadata page. Skip
+pointers in each page's opaque data enable O(1) jump to the end of
+a chain for appending.
+
+#### 4.3.4 Bulk Page Allocation
+
+Instead of allocating one page at a time via the storage extend API,
+request pages in batches (e.g., 16 at once). This allows the OS to
+use `fallocate` for contiguous allocation instead of per-page `pwrite`.
+
+For PostgreSQL, this maps to `ExtendBufferedRelBy` with a multi-page
+request. Note: `LimitAdditionalPins` may silently reduce the request
+size — the caller must loop until all requested pages are allocated.
+
+#### 4.3.5 External Centroid Import
+
+For very large datasets, k-means clustering can be the bottleneck even
+with the optimizations above. Allow users to pre-compute centroids
+using external tools (e.g., faiss, scikit-learn) and import them.
+
+```sql
+-- User pre-computes centroids and loads into a table
+CREATE TABLE my_centroids (
+    id       int,
+    parent   int,
+    centroid vector(768)
+);
+COPY my_centroids FROM 'centroids.csv' WITH (FORMAT csv);
+
+-- Build index using external centroids
+CREATE INDEX ON my_table USING mktann (v vector_cosine_ops)
+    WITH (external_centroids = 'my_centroids');
+```
+
+The build pipeline skips the sampling and clustering phases entirely,
+reading the centroid tree directly from the specified table. The tree
+structure is reconstructed from (id, parent) relationships.
+
+This enables:
+- GPU-accelerated k-means via faiss
+- Custom clustering strategies (e.g., balanced k-means)
+- Reproducible builds with fixed centroids
+- Faster iteration when tuning index parameters (cluster once, rebuild
+  posting lists multiple times)
+
 ---
 
 ## Part 5: Search
