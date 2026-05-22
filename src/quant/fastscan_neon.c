@@ -52,15 +52,63 @@ mkt_fastscan_accumulate_neon(
 
 	const uint8x16_t lo_mask = vdupq_n_u8(0x0F);
 
-	/* Two banks of accumulators (a, b) to break the add-chain across
-	 * unrolled iterations. Combined at the end. code_length is always
-	 * a multiple of 32: each column (8 dims) contributes 2 sq blocks. */
+	/* Four accumulator banks (a, b, c, d) to break the add dependency
+	 * chain across unrolled iterations. The 2x deeper unroll processes
+	 * 64 bytes (4 sq blocks) per iteration, which gives the OoO core
+	 * more independent work to hide the 4-cycle TBL throughput bottleneck
+	 * on Neoverse-class cores (TBL is throughput-1 on the V01 pipe).
+	 *
+	 * code_length is always a multiple of 32: each column (8 dims)
+	 * contributes 2 sq blocks. We use a 64B unroll plus a 32B tail. */
 	uint16x8_t accu0a = vdupq_n_u16(0), accu0b = vdupq_n_u16(0);
+	uint16x8_t accu0c = vdupq_n_u16(0), accu0d = vdupq_n_u16(0);
 	uint16x8_t accu1a = vdupq_n_u16(0), accu1b = vdupq_n_u16(0);
+	uint16x8_t accu1c = vdupq_n_u16(0), accu1d = vdupq_n_u16(0);
 	uint16x8_t accu2a = vdupq_n_u16(0), accu2b = vdupq_n_u16(0);
+	uint16x8_t accu2c = vdupq_n_u16(0), accu2d = vdupq_n_u16(0);
 	uint16x8_t accu3a = vdupq_n_u16(0), accu3b = vdupq_n_u16(0);
+	uint16x8_t accu3c = vdupq_n_u16(0), accu3d = vdupq_n_u16(0);
 
-	for (uint32_t i = 0; i < code_length; i += 32)
+	uint32_t i = 0;
+
+	/* Main loop: 64B per iteration (4 sq blocks).
+	 * Use vld1q_u8_x4 (LD1 multi-reg) to coalesce the 4 loads into
+	 * one instruction each for codes and lut. */
+	for (; i + 64 <= code_length; i += 64)
+	{
+		uint8x16x4_t c = vld1q_u8_x4(codes + i);
+		uint8x16x4_t t = vld1q_u8_x4(lut + i);
+
+		uint8x16_t lo0 = vandq_u8(c.val[0], lo_mask);
+		uint8x16_t hi0 = vshrq_n_u8(c.val[0], 4);
+		uint8x16_t lo1 = vandq_u8(c.val[1], lo_mask);
+		uint8x16_t hi1 = vshrq_n_u8(c.val[1], 4);
+		uint8x16_t lo2 = vandq_u8(c.val[2], lo_mask);
+		uint8x16_t hi2 = vshrq_n_u8(c.val[2], 4);
+		uint8x16_t lo3 = vandq_u8(c.val[3], lo_mask);
+		uint8x16_t hi3 = vshrq_n_u8(c.val[3], 4);
+
+		uint8x16_t rlo0 = vqtbl1q_u8(t.val[0], lo0);
+		uint8x16_t rhi0 = vqtbl1q_u8(t.val[0], hi0);
+		uint8x16_t rlo1 = vqtbl1q_u8(t.val[1], lo1);
+		uint8x16_t rhi1 = vqtbl1q_u8(t.val[1], hi1);
+		uint8x16_t rlo2 = vqtbl1q_u8(t.val[2], lo2);
+		uint8x16_t rhi2 = vqtbl1q_u8(t.val[2], hi2);
+		uint8x16_t rlo3 = vqtbl1q_u8(t.val[3], lo3);
+		uint8x16_t rhi3 = vqtbl1q_u8(t.val[3], hi3);
+
+		ACCUM_RES(rlo0, accu0a, accu1a);
+		ACCUM_RES(rhi0, accu2a, accu3a);
+		ACCUM_RES(rlo1, accu0b, accu1b);
+		ACCUM_RES(rhi1, accu2b, accu3b);
+		ACCUM_RES(rlo2, accu0c, accu1c);
+		ACCUM_RES(rhi2, accu2c, accu3c);
+		ACCUM_RES(rlo3, accu0d, accu1d);
+		ACCUM_RES(rhi3, accu2d, accu3d);
+	}
+
+	/* Tail: remaining 32B block (when code_length isn't a multiple of 64) */
+	if (i < code_length)
 	{
 		uint8x16_t c0 = vld1q_u8(codes + i);
 		uint8x16_t c1 = vld1q_u8(codes + i + 16);
@@ -83,10 +131,15 @@ mkt_fastscan_accumulate_neon(
 		ACCUM_RES(rhi1, accu2b, accu3b);
 	}
 
-	uint16x8_t accu0 = vaddq_u16(accu0a, accu0b);
-	uint16x8_t accu1 = vaddq_u16(accu1a, accu1b);
-	uint16x8_t accu2 = vaddq_u16(accu2a, accu2b);
-	uint16x8_t accu3 = vaddq_u16(accu3a, accu3b);
+	/* Combine all four banks. */
+	uint16x8_t accu0 = vaddq_u16(vaddq_u16(accu0a, accu0b),
+								 vaddq_u16(accu0c, accu0d));
+	uint16x8_t accu1 = vaddq_u16(vaddq_u16(accu1a, accu1b),
+								 vaddq_u16(accu1c, accu1d));
+	uint16x8_t accu2 = vaddq_u16(vaddq_u16(accu2a, accu2b),
+								 vaddq_u16(accu2c, accu2d));
+	uint16x8_t accu3 = vaddq_u16(vaddq_u16(accu3a, accu3b),
+								 vaddq_u16(accu3c, accu3d));
 
 	/* Remove upper byte contamination from even-byte accumulators */
 	accu0 = vsubq_u16(accu0, vshlq_n_u16(accu1, 8));
