@@ -227,6 +227,20 @@ void mkt_fastscan_accumulate_hacc_neon(
 		int32_t		  *accum,
 		Dimension	   dim);
 
+void mkt_fastscan_build_lut_neon(
+		const float *transformed,
+		Dimension	 dim,
+		uint8_t		*lut_out,
+		float		*delta_out,
+		float		*bias_out);
+
+void mkt_fastscan_build_lut_hacc_neon(
+		const float *transformed,
+		Dimension	 dim,
+		uint8_t		*lut_out,
+		float		*delta_out,
+		float		*bias_out);
+
 #endif
 #endif
 

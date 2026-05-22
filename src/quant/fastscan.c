@@ -473,8 +473,8 @@ mkt_fastscan_init_simd(void)
 	{
 		g_fastscan_accumulate_fn	  = mkt_fastscan_accumulate_neon;
 		g_fastscan_accumulate_hacc_fn = mkt_fastscan_accumulate_hacc_neon;
-		g_fastscan_build_lut_fn		  = fastscan_build_lut_scalar;
-		g_fastscan_build_lut_hacc_fn  = fastscan_build_lut_hacc_scalar;
+		g_fastscan_build_lut_fn		  = mkt_fastscan_build_lut_neon;
+		g_fastscan_build_lut_hacc_fn  = mkt_fastscan_build_lut_hacc_neon;
 		atomic_store(&g_fastscan_initialized, true);
 		return;
 	}
