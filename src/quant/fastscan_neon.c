@@ -27,6 +27,7 @@
 
 #include <arm_neon.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "quant/fastscan.h"
 
@@ -289,6 +290,266 @@ mkt_fastscan_accumulate_hacc_neon(
 }
 
 #undef HACC_ACCUM
+
+/* ----------------------------------------------------------------
+ * NEON LUT construction (uint8 and uint16 variants)
+ *
+ * Vectorizes:
+ *   1. Global min/max scan via parallel positive/negative sums.
+ *   2. Per-sq table build: 16 entries computed as four float32x4
+ *      vectors (fk + {0, s0, s1, s0+s1}), clamped, narrowed to
+ *      uint8 / uint16 with saturation.
+ *
+ * The scalar fallback in fastscan.c builds entries via incremental
+ * scalar additions and clamps per element. The NEON version replaces
+ * this with vectorized adds + clamp + narrow, eliminating most of
+ * the per-entry scalar overhead.
+ *
+ * NOTE: the per-sq path is fundamentally a 4-entry pattern repeated
+ * 4 times (one per fk base). The pattern (fk, fk+s0, fk+s1, fk+p01)
+ * is the same shape for all 4 base values, so a single delta vector
+ * is reused across all 4 sub-vectors.
+ * ---------------------------------------------------------------- */
+
+void
+mkt_fastscan_build_lut_neon(
+		const float *transformed,
+		Dimension	 dim,
+		uint8_t		*lut_out,
+		float		*delta_out,
+		float		*bias_out)
+{
+	uint32_t nsq	   = MKT_FASTSCAN_NSQ(dim);
+	uint32_t nsq_pairs = MKT_FASTSCAN_NSQ_PAIRS(dim);
+
+	/* Parallel min/max: split positive and negative contributions.
+	 * vmaxq/vminq with zero accumulate the right halves directly.
+	 * Use 4 accumulators to break the dep chain. */
+	float32x4_t zero	 = vdupq_n_f32(0.0f);
+	float32x4_t pos_sum	 = vdupq_n_f32(0.0f);
+	float32x4_t neg_sum	 = vdupq_n_f32(0.0f);
+	float32x4_t pos_sum2 = vdupq_n_f32(0.0f);
+	float32x4_t neg_sum2 = vdupq_n_f32(0.0f);
+
+	Dimension d = 0;
+	for (; d + 8 <= dim; d += 8)
+	{
+		float32x4_t v0 = vld1q_f32(transformed + d);
+		float32x4_t v1 = vld1q_f32(transformed + d + 4);
+		pos_sum	 = vaddq_f32(pos_sum, vmaxq_f32(v0, zero));
+		neg_sum	 = vaddq_f32(neg_sum, vminq_f32(v0, zero));
+		pos_sum2 = vaddq_f32(pos_sum2, vmaxq_f32(v1, zero));
+		neg_sum2 = vaddq_f32(neg_sum2, vminq_f32(v1, zero));
+	}
+	for (; d + 4 <= dim; d += 4)
+	{
+		float32x4_t v = vld1q_f32(transformed + d);
+		pos_sum		  = vaddq_f32(pos_sum, vmaxq_f32(v, zero));
+		neg_sum		  = vaddq_f32(neg_sum, vminq_f32(v, zero));
+	}
+	pos_sum			 = vaddq_f32(pos_sum, pos_sum2);
+	neg_sum			 = vaddq_f32(neg_sum, neg_sum2);
+	float global_max = vaddvq_f32(pos_sum);
+	float global_min = vaddvq_f32(neg_sum);
+	for (; d < dim; d++)
+	{
+		if (transformed[d] > 0)
+			global_max += transformed[d];
+		else
+			global_min += transformed[d];
+	}
+
+	float range = global_max - global_min;
+	if (range < MKT_FASTSCAN_MIN_RANGE)
+		range = MKT_FASTSCAN_MIN_RANGE;
+
+	float delta		= range / (float)UINT8_MAX;
+	float inv_delta = 1.0f / delta;
+	*delta_out		= delta;
+	*bias_out		= global_min * (float)nsq;
+
+	/* +0.5f for round-half-up via truncation (matches scalar) */
+	float bias_scaled = -global_min * inv_delta + 0.5f;
+
+	memset(lut_out, 0, nsq_pairs * 2 * 16);
+
+	const float *q = transformed;
+	for (uint32_t sq = 0; sq < nsq; sq++)
+	{
+		uint8_t *out = lut_out + sq * 16;
+
+		Dimension base = sq * 4;
+		float	  s0   = (base + 0 < dim) ? q[0] * inv_delta : 0.0f;
+		float	  s1   = (base + 1 < dim) ? q[1] * inv_delta : 0.0f;
+		float	  s2   = (base + 2 < dim) ? q[2] * inv_delta : 0.0f;
+		float	  s3   = (base + 3 < dim) ? q[3] * inv_delta : 0.0f;
+
+		float p01 = s0 + s1;
+		float p23 = s2 + s3;
+
+		float f0  = bias_scaled;
+		float f4  = f0 + s2;
+		float f8  = f0 + s3;
+		float f12 = f0 + p23;
+
+		/* Build 16 entries as four float32x4 vectors. Each vector is
+		 * fk + (0, s0, s1, p01). The delta is shared across all 4. */
+		float32x4_t fb_lo = vsetq_lane_f32(s0, vdupq_n_f32(0.0f), 1);
+		fb_lo			  = vsetq_lane_f32(s1, fb_lo, 2);
+		fb_lo			  = vsetq_lane_f32(p01, fb_lo, 3);
+
+		float32x4_t e0 = vaddq_f32(vdupq_n_f32(f0), fb_lo);
+		float32x4_t e1 = vaddq_f32(vdupq_n_f32(f4), fb_lo);
+		float32x4_t e2 = vaddq_f32(vdupq_n_f32(f8), fb_lo);
+		float32x4_t e3 = vaddq_f32(vdupq_n_f32(f12), fb_lo);
+
+		/* Convert to int32 with truncation toward zero (matches the
+		 * scalar (int)val cast). Negative values get clamped to 0
+		 * later via uqxtn (unsigned saturating narrow). */
+		int32x4_t i0 = vcvtq_s32_f32(e0);
+		int32x4_t i1 = vcvtq_s32_f32(e1);
+		int32x4_t i2 = vcvtq_s32_f32(e2);
+		int32x4_t i3 = vcvtq_s32_f32(e3);
+
+		/* int32 -> uint8 with unsigned saturation: two-stage narrow
+		 * (sqxtun s32->u16, qxtn u16->u8). Saturates [<0, >255] to
+		 * [0, 255], matching the scalar Q() macro. */
+		uint16x4_t u0_lo = vqmovun_s32(i0);
+		uint16x4_t u0_hi = vqmovun_s32(i1);
+		uint16x8_t u0	 = vcombine_u16(u0_lo, u0_hi);
+		uint8x8_t  b0	 = vqmovn_u16(u0);
+
+		uint16x4_t u1_lo = vqmovun_s32(i2);
+		uint16x4_t u1_hi = vqmovun_s32(i3);
+		uint16x8_t u1	 = vcombine_u16(u1_lo, u1_hi);
+		uint8x8_t  b1	 = vqmovn_u16(u1);
+
+		vst1q_u8(out, vcombine_u8(b0, b1));
+
+		q += 4;
+	}
+}
+
+void
+mkt_fastscan_build_lut_hacc_neon(
+		const float *transformed,
+		Dimension	 dim,
+		uint8_t		*lut_out,
+		float		*delta_out,
+		float		*bias_out)
+{
+	uint32_t nsq = MKT_FASTSCAN_NSQ(dim);
+
+	/* Parallel min/max — same structure as uint8 variant. */
+	float32x4_t zero	 = vdupq_n_f32(0.0f);
+	float32x4_t pos_sum	 = vdupq_n_f32(0.0f);
+	float32x4_t neg_sum	 = vdupq_n_f32(0.0f);
+	float32x4_t pos_sum2 = vdupq_n_f32(0.0f);
+	float32x4_t neg_sum2 = vdupq_n_f32(0.0f);
+
+	Dimension d = 0;
+	for (; d + 8 <= dim; d += 8)
+	{
+		float32x4_t v0 = vld1q_f32(transformed + d);
+		float32x4_t v1 = vld1q_f32(transformed + d + 4);
+		pos_sum	 = vaddq_f32(pos_sum, vmaxq_f32(v0, zero));
+		neg_sum	 = vaddq_f32(neg_sum, vminq_f32(v0, zero));
+		pos_sum2 = vaddq_f32(pos_sum2, vmaxq_f32(v1, zero));
+		neg_sum2 = vaddq_f32(neg_sum2, vminq_f32(v1, zero));
+	}
+	for (; d + 4 <= dim; d += 4)
+	{
+		float32x4_t v = vld1q_f32(transformed + d);
+		pos_sum		  = vaddq_f32(pos_sum, vmaxq_f32(v, zero));
+		neg_sum		  = vaddq_f32(neg_sum, vminq_f32(v, zero));
+	}
+	pos_sum			 = vaddq_f32(pos_sum, pos_sum2);
+	neg_sum			 = vaddq_f32(neg_sum, neg_sum2);
+	float global_max = vaddvq_f32(pos_sum);
+	float global_min = vaddvq_f32(neg_sum);
+	for (; d < dim; d++)
+	{
+		if (transformed[d] > 0)
+			global_max += transformed[d];
+		else
+			global_min += transformed[d];
+	}
+
+	float range = global_max - global_min;
+	if (range < MKT_FASTSCAN_MIN_RANGE)
+		range = MKT_FASTSCAN_MIN_RANGE;
+
+	float delta		= range / (float)UINT16_MAX;
+	float inv_delta = 1.0f / delta;
+	*delta_out		= delta;
+	*bias_out		= global_min * (float)nsq;
+
+	float bias_scaled = -global_min * inv_delta + 0.5f;
+
+	uint32_t lut_bytes = MKT_FASTSCAN_LUT_HACC_BYTES(dim);
+	memset(lut_out, 0, lut_bytes);
+
+	const float *q = transformed;
+
+	for (uint32_t sq = 0; sq < nsq; sq++)
+	{
+		Dimension base = sq * 4;
+		float	  s0   = (base + 0 < dim) ? q[0] * inv_delta : 0.0f;
+		float	  s1   = (base + 1 < dim) ? q[1] * inv_delta : 0.0f;
+		float	  s2   = (base + 2 < dim) ? q[2] * inv_delta : 0.0f;
+		float	  s3   = (base + 3 < dim) ? q[3] * inv_delta : 0.0f;
+
+		float p01 = s0 + s1;
+		float p23 = s2 + s3;
+		float f0  = bias_scaled;
+		float f4  = f0 + s2;
+		float f8  = f0 + s3;
+		float f12 = f0 + p23;
+
+		float32x4_t fb = vsetq_lane_f32(s0, vdupq_n_f32(0.0f), 1);
+		fb			   = vsetq_lane_f32(s1, fb, 2);
+		fb			   = vsetq_lane_f32(p01, fb, 3);
+
+		float32x4_t e0 = vaddq_f32(vdupq_n_f32(f0), fb);
+		float32x4_t e1 = vaddq_f32(vdupq_n_f32(f4), fb);
+		float32x4_t e2 = vaddq_f32(vdupq_n_f32(f8), fb);
+		float32x4_t e3 = vaddq_f32(vdupq_n_f32(f12), fb);
+
+		int32x4_t i0 = vcvtq_s32_f32(e0);
+		int32x4_t i1 = vcvtq_s32_f32(e1);
+		int32x4_t i2 = vcvtq_s32_f32(e2);
+		int32x4_t i3 = vcvtq_s32_f32(e3);
+
+		/* int32 -> uint16 with unsigned saturation */
+		uint16x4_t u0 = vqmovun_s32(i0);
+		uint16x4_t u1 = vqmovun_s32(i1);
+		uint16x4_t u2 = vqmovun_s32(i2);
+		uint16x4_t u3 = vqmovun_s32(i3);
+
+		uint16x8_t v_lo = vcombine_u16(u0, u1);
+		uint16x8_t v_hi = vcombine_u16(u2, u3);
+
+		/* Split each uint16 into lo and hi bytes.
+		 * Use vmovn for low byte (truncate) and vshrn for high byte. */
+		uint8x8_t lo_a = vmovn_u16(v_lo);
+		uint8x8_t lo_b = vmovn_u16(v_hi);
+		uint8x8_t hi_a = vshrn_n_u16(v_lo, 8);
+		uint8x8_t hi_b = vshrn_n_u16(v_hi, 8);
+
+		uint8x16_t lo_bytes = vcombine_u8(lo_a, lo_b);
+		uint8x16_t hi_bytes = vcombine_u8(hi_a, hi_b);
+
+		uint32_t group4		  = sq / 4;
+		uint32_t pos_in_group = sq % 4;
+		uint8_t *lo_dst		  = lut_out + group4 * 128 + pos_in_group * 16;
+		uint8_t *hi_dst		  = lo_dst + 64;
+
+		vst1q_u8(lo_dst, lo_bytes);
+		vst1q_u8(hi_dst, hi_bytes);
+
+		q += 4;
+	}
+}
 
 #endif /* aarch64 */
 
