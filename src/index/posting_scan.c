@@ -18,6 +18,7 @@
 
 #include "core/log.h"
 #include "core/memory.h"
+#include "core/platform.h"
 #include "index/posting_scan.h"
 #include "quant/fastscan.h"
 
@@ -26,6 +27,8 @@
 #include <immintrin.h>
 
 #include "algo/simd_utils.h"
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
 #endif
 #endif
 
@@ -466,6 +469,107 @@ fastscan_prune_group_avx512(
 #endif
 #endif
 
+#ifdef MKT_SIMD_FULL
+#if defined(__aarch64__) || defined(_M_ARM64)
+
+/*
+ * NEON vectorized distance + prune for one 32-vector group.
+ *
+ * Per 4-vector chunk:
+ *   1. Convert 4 int32 accumulators to float
+ *   2. binary_ip = acc * scale + bias
+ *   3. final_dot = (2*ip - sum_t) * inv_sqrt_d
+ *   4. est = f_add + g_add - 2 * f_rescale * final_dot
+ *   5. err = f_error * g_error
+ *   6. lb = est - err
+ *   7. survivor mask = lb < threshold (extract to 4-bit per chunk)
+ *
+ * NEON has no native packed compare-mask, so we narrow the
+ * 32-bit compare result into a single 4-bit nibble per chunk via
+ * shrn / addv.
+ */
+static void
+fastscan_prune_group_neon(
+		MktPostingScan	*scan,
+		MktTopK			*topk,
+		ItemPointerData *tids,
+		const float		*f_add,
+		const float		*f_rescale,
+		const float		*f_error,
+		float			 lut_scale,
+		float			 lut_bias,
+		float			 sum_t,
+		float			 inv_sqrt_d,
+		float			 g_add,
+		float			 g_error,
+		Distance		*threshold_p)
+{
+	Distance threshold = *threshold_p;
+	float	 est_buf[MKT_FASTSCAN_GROUP];
+	float	 err_buf[MKT_FASTSCAN_GROUP];
+
+	float32x4_t scale_v	   = vdupq_n_f32(lut_scale);
+	float32x4_t bias_v	   = vdupq_n_f32(lut_bias);
+	float32x4_t two_v	   = vdupq_n_f32(2.0f);
+	float32x4_t sum_t_v	   = vdupq_n_f32(sum_t);
+	float32x4_t inv_sqrt_v = vdupq_n_f32(inv_sqrt_d);
+	float32x4_t gadd_v	   = vdupq_n_f32(g_add);
+	float32x4_t gerr_v	   = vdupq_n_f32(g_error);
+
+	uint32_t surv_bits = 0; /* 32-bit mask of survivors */
+
+	for (uint32_t off = 0; off < MKT_FASTSCAN_GROUP; off += 4)
+	{
+		int32x4_t	acc32 = vld1q_s32(scan->fs_accum + off);
+		float32x4_t acc_f = vcvtq_f32_s32(acc32);
+
+		float32x4_t ip	  = vmlaq_f32(bias_v, acc_f, scale_v);
+		float32x4_t two_ip = vmulq_f32(two_v, ip);
+		float32x4_t final_dot =
+				vmulq_f32(vsubq_f32(two_ip, sum_t_v), inv_sqrt_v);
+
+		float32x4_t fa	 = vld1q_f32(f_add + off);
+		float32x4_t fr	 = vld1q_f32(f_rescale + off);
+		float32x4_t est	 = vaddq_f32(fa, gadd_v);
+		est = vmlsq_f32(est, vmulq_f32(two_v, fr), final_dot);
+
+		float32x4_t fe	= vld1q_f32(f_error + off);
+		float32x4_t err = vmulq_f32(fe, gerr_v);
+		float32x4_t lb	= vsubq_f32(est, err);
+
+		vst1q_f32(est_buf + off, est);
+		vst1q_f32(err_buf + off, err);
+
+		float32x4_t thr_v = vdupq_n_f32(threshold);
+		uint32x4_t	cmp	  = vcltq_f32(lb, thr_v);
+
+		/* Extract 4-bit survivor mask: each lane is 0xFFFFFFFF or 0.
+		 * AND with weighted lane mask then horizontal reduce. */
+		const uint32x4_t weights = {1, 2, 4, 8};
+		uint32x4_t		 bits	 = vandq_u32(cmp, weights);
+		uint32_t		 chunk_bits = vaddvq_u32(bits);
+		surv_bits |= chunk_bits << off;
+	}
+
+	uint32_t surv_count = (uint32_t)__builtin_popcount(surv_bits);
+	scan->entries_pruned += MKT_FASTSCAN_GROUP - surv_count;
+
+	while (surv_bits != 0)
+	{
+		uint32_t v = (uint32_t)__builtin_ctz(surv_bits);
+		surv_bits &= surv_bits - 1;
+
+		uint64_t id = mkt_posting_encode_tid(&tids[v]);
+		mkt_topk_insert(topk, est_buf[v], err_buf[v], id);
+		threshold = mkt_topk_threshold(topk);
+	}
+
+	*threshold_p = threshold;
+}
+
+#endif
+#endif
+
 /* ----------------------------------------------------------------
  * Fastscan variant: VPSHUFB kernel for fastscan-format pages
  *
@@ -572,6 +676,25 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 			mkt_has_simd(SIMD_AVX512F))
 		{
 			fastscan_prune_group_avx512(
+					scan,
+					topk,
+					tids,
+					f_add,
+					f_rescale,
+					f_error,
+					lut_scale,
+					lut_bias,
+					sum_t,
+					inv_sqrt_d,
+					g_add,
+					g_error,
+					&threshold);
+		}
+		else
+#elif defined(__aarch64__) || defined(_M_ARM64)
+		if (mkt_likely(g_count == MKT_FASTSCAN_GROUP))
+		{
+			fastscan_prune_group_neon(
 					scan,
 					topk,
 					tids,
