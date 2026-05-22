@@ -43,6 +43,7 @@ typedef struct ArrayPageStorage
 	char		   *pages;
 	uint32_t		next_blkno;
 	uint32_t		page_cap;
+	MktMemCtx		memctx;		 /* owning context for page growth */
 	pthread_mutex_t alloc_mutex; /* protects next_blkno + page growth */
 	const float	   *all_vectors; /* for reranking (NULL if not set) */
 	uint32_t		nvecs;

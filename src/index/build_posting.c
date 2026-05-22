@@ -27,9 +27,9 @@ mkt_posting_reserve_init(
 	uint32_t ent_first	  = mkt_posting_max_entries_first(dim);
 	uint32_t ent_overflow = mkt_posting_max_entries(dim);
 
-	res->starts = malloc(nlist * sizeof(BlockNumber));
-	res->counts = malloc(nlist * sizeof(uint32_t));
-	res->nexts	= calloc(nlist, sizeof(_Atomic(uint32_t)));
+	res->starts = mkt_alloc(nlist * sizeof(BlockNumber));
+	res->counts = mkt_alloc(nlist * sizeof(uint32_t));
+	res->nexts	= mkt_alloc0(nlist * sizeof(_Atomic(uint32_t)));
 	res->nlist	= nlist;
 
 	BlockNumber total = 0;
@@ -53,9 +53,9 @@ mkt_posting_reserve_init(
 void
 mkt_posting_reserve_free(MktPostingReserve *res)
 {
-	free(res->starts);
-	free(res->counts);
-	free(res->nexts);
+	mkt_free(res->starts);
+	mkt_free(res->counts);
+	mkt_free(res->nexts);
 	res->starts = NULL;
 	res->counts = NULL;
 	res->nexts	= NULL;
@@ -90,10 +90,10 @@ mkt_posting_worker_init(
 	ws->reserve		   = reserve;
 	ws->partials	   = partials;
 
-	ws->builders = malloc((size_t)nlist * sizeof(MktPostingBuilder));
-	ws->active	 = calloc(nlist, sizeof(bool));
-	ws->heads	 = malloc(nlist * sizeof(BlockNumber));
-	ws->tails	 = malloc(nlist * sizeof(BlockNumber));
+	ws->builders = mkt_alloc((size_t)nlist * sizeof(MktPostingBuilder));
+	ws->active	 = mkt_alloc0(nlist * sizeof(bool));
+	ws->heads	 = mkt_alloc(nlist * sizeof(BlockNumber));
+	ws->tails	 = mkt_alloc(nlist * sizeof(BlockNumber));
 
 	for (uint32_t c = 0; c < nlist; c++)
 	{
@@ -214,10 +214,10 @@ mkt_posting_worker_finish(MktPostingWorkerState *ws)
 void
 mkt_posting_worker_cleanup(MktPostingWorkerState *ws)
 {
-	free(ws->builders);
-	free(ws->active);
-	free(ws->heads);
-	free(ws->tails);
+	mkt_free(ws->builders);
+	mkt_free(ws->active);
+	mkt_free(ws->heads);
+	mkt_free(ws->tails);
 	ws->builders = NULL;
 	ws->active	 = NULL;
 	ws->heads	 = NULL;
@@ -253,7 +253,7 @@ mkt_posting_finalize(
 {
 	uint32_t nlist = reserve->nlist;
 
-	result->heads		 = malloc(nlist * sizeof(BlockNumber));
+	result->heads		 = mkt_alloc(nlist * sizeof(BlockNumber));
 	result->total_pages	 = 0;
 	result->pages_merged = 0;
 
@@ -262,7 +262,7 @@ mkt_posting_finalize(
 		if (reserve->counts[c] > max_chain)
 			max_chain = reserve->counts[c];
 	max_chain += nworkers + 64;
-	BlockNumber *chain = malloc(max_chain * sizeof(BlockNumber));
+	BlockNumber *chain = mkt_alloc(max_chain * sizeof(BlockNumber));
 
 	for (uint32_t c = 0; c < nlist; c++)
 	{
@@ -428,5 +428,5 @@ mkt_posting_finalize(
 		result->total_pages += nchain;
 	}
 
-	free(chain);
+	mkt_free(chain);
 }

@@ -84,14 +84,14 @@ aps_new_page(MktStorage *self, BlockNumber *blkno_out)
 	pthread_mutex_lock(&s->alloc_mutex);
 	if (s->next_blkno >= s->page_cap)
 	{
-		uint32_t new_cap  = s->page_cap * 2;
-		size_t	 new_size = (size_t)new_cap * BLCKSZ;
-		char	*new_buf  = realloc(s->pages, new_size);
-		memset(new_buf + (size_t)s->page_cap * BLCKSZ,
-			   0,
-			   ((size_t)new_cap - s->page_cap) * BLCKSZ);
-		s->pages	= new_buf;
+		MktMemCtx prev	  = mkt_memctx_switch(s->memctx);
+		uint32_t  new_cap = s->page_cap * 2;
+		s->pages		  = arena_grow(
+				 s->pages,
+				 (size_t)s->page_cap * BLCKSZ,
+				 (size_t)new_cap * BLCKSZ);
 		s->page_cap = new_cap;
+		mkt_memctx_switch(prev);
 	}
 	*blkno_out = s->next_blkno++;
 	pthread_mutex_unlock(&s->alloc_mutex);
@@ -204,13 +204,14 @@ cluster_list_append(MktClusterList *cl, uint32_t id)
  * ---------------------------------------------------------------- */
 
 static ArrayPageStorage
-make_array_page_storage(uint32_t est_pages)
+make_array_page_storage(uint32_t est_pages, MktMemCtx memctx)
 {
 	ArrayPageStorage s = {
 			.base		= {.ops = &array_page_storage_ops},
-			.pages		= calloc(est_pages, BLCKSZ),
+			.pages		= mkt_alloc0((size_t)est_pages * BLCKSZ),
 			.next_blkno = 0,
 			.page_cap	= est_pages,
+			.memctx		= memctx,
 	};
 	pthread_mutex_init(&s.alloc_mutex, NULL);
 	return s;
@@ -443,7 +444,8 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 
 	/* Build centroid pages */
 	uint32_t est_centroid_pages = nlist + 100;
-	idx->centroid_storage		= make_array_page_storage(est_centroid_pages);
+	idx->centroid_storage =
+			make_array_page_storage(est_centroid_pages, idx_ctx);
 
 	uint32_t max_ent =
 			mkt_centroid_max_entries_fmt(dim, idx->base.centroid_format);
@@ -531,18 +533,19 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 		if (config->posting_fmt == MKT_POSTING_FMT_PAGES)
 		{
 			/* Compute page reservations from cluster sizes */
-			uint32_t *cluster_counts = malloc(nlist * sizeof(uint32_t));
+			mkt_memctx_switch(build_ctx);
+			uint32_t *cluster_counts = mkt_alloc(nlist * sizeof(uint32_t));
 			for (uint32_t c = 0; c < nlist; c++)
 				cluster_counts[c] = idx->clusters[c].count;
 
 			MktPostingReserve reserve;
 			mkt_posting_reserve_init(
 					&reserve, cluster_counts, nlist, nworkers, dim);
-			free(cluster_counts);
+			mkt_memctx_switch(idx_ctx);
 
 			uint32_t est_extra	 = reserve.total / 10 + 100;
 			idx->posting_storage = make_array_page_storage(
-					reserve.total + est_extra);
+					reserve.total + est_extra, idx_ctx);
 			idx->posting_storage.next_blkno = reserve.total;
 			idx->posting_heads = mkt_alloc(nlist * sizeof(BlockNumber));
 
@@ -553,19 +556,22 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 				if (nt > nlist)
 					nt = nlist;
 
-				/* Shared partial page buffer (thread-local in
-				 * standalone, DSM in PG). */
+				/* Shared partial page buffer — must be malloc'd
+				 * since workers write from their own contexts. */
 				char *partials = config->fastscan
 									   ? NULL
 									   : calloc((size_t)nt * nlist, BLCKSZ);
 
-				pthread_t			*threads = malloc(nt * sizeof(pthread_t));
-				ParPostingWorkerArg *pargs	 = malloc(
-						  nt * sizeof(ParPostingWorkerArg));
-
-				BlockNumber **all_heads	 = malloc(nt * sizeof(BlockNumber *));
-				BlockNumber **all_tails	 = malloc(nt * sizeof(BlockNumber *));
-				bool		**all_active = malloc(nt * sizeof(bool *));
+				mkt_memctx_switch(build_ctx);
+				pthread_t *threads		   = mkt_alloc(nt * sizeof(pthread_t));
+				ParPostingWorkerArg *pargs = mkt_alloc(
+						nt * sizeof(ParPostingWorkerArg));
+				BlockNumber **all_heads = mkt_alloc(
+						nt * sizeof(BlockNumber *));
+				BlockNumber **all_tails = mkt_alloc(
+						nt * sizeof(BlockNumber *));
+				bool **all_active = mkt_alloc(nt * sizeof(bool *));
+				mkt_memctx_switch(idx_ctx);
 
 				uint32_t per_thread = idx->nvecs / nt;
 				uint32_t remainder	= idx->nvecs % nt;
@@ -640,7 +646,7 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 				memcpy(idx->posting_heads,
 					   build_result.heads,
 					   nlist * sizeof(BlockNumber));
-				free(build_result.heads);
+				mkt_free(build_result.heads);
 
 				fprintf(stderr,
 						"  Posting build: %.1fms "
@@ -652,12 +658,7 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 
 				for (uint32_t t = 0; t < nt; t++)
 					mkt_posting_worker_cleanup(&pargs[t].ws);
-				free(all_heads);
-				free(all_tails);
-				free(all_active);
 				free(partials);
-				free(threads);
-				free(pargs);
 			}
 
 			mkt_posting_reserve_free(&reserve);
@@ -767,9 +768,6 @@ mkt_index_destroy(MktIndex *idx)
 		return;
 
 	mkt_topk_cleanup(&idx->posting_storage.rerank_topk);
-
-	free(idx->posting_storage.pages);
-	free(idx->centroid_storage.pages);
 
 	/* Deleting the memory context frees idx and all owned data. */
 	mkt_memctx_delete(idx->memctx);
