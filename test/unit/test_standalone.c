@@ -349,6 +349,7 @@ TEST(bindings_create_destroy)
 			  0.0,
 			  0.0,
 			  false,
+			  0,
 			  &info);
 
 	ASSERT_NOT_NULL(handle, "create should succeed");
@@ -379,6 +380,7 @@ TEST(bindings_query)
 			0.0,
 			0.0,
 			false,
+			0,
 			NULL);
 	ASSERT_NOT_NULL(handle, "create should succeed");
 
@@ -475,6 +477,7 @@ TEST(bindings_query_fastscan)
 			0.0,
 			0.0,
 			16,
+			0,
 			NULL);
 	ASSERT_NOT_NULL(handle, "fastscan create should succeed");
 
@@ -507,6 +510,7 @@ TEST(bindings_angular_metric)
 			0.0,
 			0.0,
 			false,
+			0,
 			NULL);
 	ASSERT_NOT_NULL(handle, "angular create should succeed");
 
@@ -555,6 +559,7 @@ TEST(bindings_symmetric_mode)
 			0.0,
 			0.0,
 			false,
+			0,
 			NULL);
 
 	uint32_t result_ids[5];
@@ -585,6 +590,7 @@ TEST(bindings_kmeans_params)
 			  0.0,
 			  0.0,
 			  false,
+			  0,
 			  &info);
 
 	ASSERT_NOT_NULL(handle, "create with kmeans params should succeed");

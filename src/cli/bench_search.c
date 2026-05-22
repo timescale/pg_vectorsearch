@@ -66,6 +66,7 @@ typedef struct
 	const char *distance_mode;
 	bool		no_rerank;
 	int			fastscan; /* 0=off, 8=uint8 LUT, 16=uint16 LUT (hacc) */
+	uint32_t	nworkers; /* 0=auto, 1=serial */
 	bool		wait_profile;
 	bool		help;
 } BenchConfig;
@@ -257,6 +258,7 @@ cmd_bench_search(CmdContext *ctx)
 			{"wait-profile", no_argument, 0, 'Z'},
 			{"boundary-epsilon", required_argument, 0, 'B'},
 			{"soar-lambda", required_argument, 0, 'S'},
+			{"workers", required_argument, 0, 'w'},
 			{"help", no_argument, 0, 'h'},
 			{0, 0, 0, 0},
 	};
@@ -337,6 +339,9 @@ cmd_bench_search(CmdContext *ctx)
 		case 'B':
 			config.boundary_epsilon = atof(optarg);
 			break;
+		case 'w':
+			config.nworkers = (uint32_t)atoi(optarg);
+			break;
 		case 'h':
 			config.help = true;
 			break;
@@ -414,11 +419,12 @@ cmd_bench_search(CmdContext *ctx)
 
 		/* Build index by streaming from HDF5 */
 		printf("Building index (nlist=%u, centroid=%s, "
-			   "posting=%s, layout=%s)...\n",
+			   "posting=%s, layout=%s, workers=%u)...\n",
 			   config.nlist,
 			   config.centroid_fmt,
 			   config.posting_fmt,
-			   config.posting_layout);
+			   config.posting_layout,
+			   config.nworkers);
 
 		uint64_t t0 = get_time_ns();
 		handle		= mkt_handle_create(
@@ -433,6 +439,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.soar_lambda,
 				 config.boundary_epsilon,
 				 config.fastscan,
+				 config.nworkers,
 				 &info);
 		double build_ms = (double)(get_time_ns() - t0) / 1e6;
 
@@ -484,6 +491,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.soar_lambda,
 				 config.boundary_epsilon,
 				 config.fastscan,
+				 config.nworkers,
 				 &info);
 		double build_ms = (double)(get_time_ns() - t0) / 1e6;
 		free(train_vecs);

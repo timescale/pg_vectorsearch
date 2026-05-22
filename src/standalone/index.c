@@ -490,11 +490,14 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 	if (config->metric == DISTANCE_COSINE)
 		normalize_all(idx->all_vectors, idx->nvecs, dim);
 
-	/* Parallel batch assignment (0 = auto-detect thread count) */
+	uint32_t nworkers = config->nworkers;
+	if (nworkers == 0)
+		nworkers = sa_detect_nthreads();
+
 	MktBatchAssignment batch = mkt_batch_assignment_create(idx->nvecs);
 
 	mkt_build_assign_batch_parallel(
-			idx->all_vectors, idx->nvecs, dim, tree, &bp, 0, &batch);
+			idx->all_vectors, idx->nvecs, dim, tree, &bp, nworkers, &batch);
 
 	/* Distribute assignments to cluster lists (sequential) */
 	for (uint32_t i = 0; i < idx->nvecs; i++)
@@ -527,7 +530,7 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 			/* Parallel posting build: each thread processes a range
 			 * of clusters. Page allocation is mutex-protected. */
 			{
-				uint32_t nt = sa_detect_nthreads();
+				uint32_t nt = nworkers;
 				if (nt > nlist)
 					nt = nlist;
 

@@ -53,6 +53,7 @@ MktHandle *mkt_handle_create(
 		double			 soar_lambda,
 		double			 boundary_epsilon,
 		int				 fastscan,
+		uint32_t		 nworkers,
 		MktBuildInfo	*info);
 
 /*
@@ -74,6 +75,7 @@ MktHandle *mkt_handle_create_from_array(
 		double		  soar_lambda,
 		double		  boundary_epsilon,
 		int			  fastscan,
+		uint32_t	  nworkers,
 		MktBuildInfo *info);
 
 /*

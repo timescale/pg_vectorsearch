@@ -82,6 +82,7 @@ mkt_handle_create(
 		double			 soar_lambda,
 		double			 boundary_epsilon,
 		int				 fastscan,
+		uint32_t		 nworkers,
 		MktBuildInfo	*info)
 {
 	/* Create context as child of the current context if one exists,
@@ -104,6 +105,7 @@ mkt_handle_create(
 			.soar_lambda	  = soar_lambda,
 			.boundary_epsilon = boundary_epsilon,
 			.fastscan		  = fastscan,
+			.nworkers		  = nworkers,
 			.encode_rabitq	  = true,
 			.posting_fmt	  = parse_posting_fmt(posting_fmt),
 	};
@@ -169,6 +171,7 @@ mkt_handle_create_from_array(
 		double		  soar_lambda,
 		double		  boundary_epsilon,
 		int			  fastscan,
+		uint32_t	  nworkers,
 		MktBuildInfo *info)
 {
 	MktArraySource array_src;
@@ -185,6 +188,7 @@ mkt_handle_create_from_array(
 			soar_lambda,
 			boundary_epsilon,
 			fastscan,
+			nworkers,
 			info);
 }
 
