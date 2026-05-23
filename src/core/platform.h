@@ -23,6 +23,9 @@ typedef enum
 	SIMD_AVX512F		  = 1 << 3,
 	SIMD_NEON			  = 1 << 4,
 	SIMD_AVX512_VPOPCNTDQ = 1 << 5,
+	SIMD_SVE			  = 1 << 6,
+	SIMD_SVE2			  = 1 << 7,
+	SIMD_SVE2_I8MM		  = 1 << 8,
 } SimdCapability;
 
 /*

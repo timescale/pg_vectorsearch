@@ -156,11 +156,41 @@ detect_simd_x86(void)
 
 #define MKT_ARM64 1
 
+#if defined(__linux__)
+#include <sys/auxv.h>
+
+/* HWCAP bits (kernel headers may be old; define locally to be safe).
+ * See linux/arch/arm64/include/uapi/asm/hwcap.h */
+#ifndef HWCAP_SVE
+#define HWCAP_SVE (1UL << 22)
+#endif
+#ifndef HWCAP2_SVE2
+#define HWCAP2_SVE2 (1UL << 1)
+#endif
+#ifndef HWCAP2_SVEI8MM
+#define HWCAP2_SVEI8MM (1UL << 9)
+#endif
+#endif
+
 static SimdCapability
 detect_simd_arm64(void)
 {
 	/* NEON is mandatory on AArch64 */
-	return SIMD_NEON;
+	SimdCapability caps = SIMD_NEON;
+
+#if defined(__linux__)
+	unsigned long hwcap	 = getauxval(AT_HWCAP);
+	unsigned long hwcap2 = getauxval(AT_HWCAP2);
+
+	if (hwcap & HWCAP_SVE)
+		caps |= SIMD_SVE;
+	if (hwcap2 & HWCAP2_SVE2)
+		caps |= SIMD_SVE2;
+	if (hwcap2 & HWCAP2_SVEI8MM)
+		caps |= SIMD_SVE2_I8MM;
+#endif
+
+	return caps;
 }
 
 #elif defined(__arm__) || defined(_M_ARM)

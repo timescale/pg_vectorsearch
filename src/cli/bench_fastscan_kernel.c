@@ -478,6 +478,7 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 	};
 #elif defined(__aarch64__) || defined(_M_ARM64)
 	SimdLevel levels[] = {
+			{SIMD_SVE2, "sve2", true},
 			{SIMD_NEON, "neon", true},
 			{0, "scalar", false},
 	};

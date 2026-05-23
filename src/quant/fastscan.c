@@ -469,6 +469,19 @@ mkt_fastscan_init_simd(void)
 	}
 #elif defined(__aarch64__) || defined(_M_ARM64)
 	SimdCapability caps = mkt_detect_simd();
+#ifdef MKT_HAVE_SVE2
+	if (caps & SIMD_SVE2)
+	{
+		/* SVE2 accumulate kernels; reuse NEON build_lut (LUT layout is
+		 * identical and the build kernel is not on the inner hot path). */
+		g_fastscan_accumulate_fn	  = mkt_fastscan_accumulate_sve2;
+		g_fastscan_accumulate_hacc_fn = mkt_fastscan_accumulate_hacc_sve2;
+		g_fastscan_build_lut_fn		  = mkt_fastscan_build_lut_neon;
+		g_fastscan_build_lut_hacc_fn  = mkt_fastscan_build_lut_hacc_neon;
+		atomic_store(&g_fastscan_initialized, true);
+		return;
+	}
+#endif
 	if (caps & SIMD_NEON)
 	{
 		g_fastscan_accumulate_fn	  = mkt_fastscan_accumulate_neon;
@@ -552,6 +565,10 @@ mkt_fastscan_impl_name(void)
 	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_avx2)
 		return "avx2";
 #elif defined(__aarch64__) || defined(_M_ARM64)
+#ifdef MKT_HAVE_SVE2
+	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_sve2)
+		return "sve2";
+#endif
 	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_neon)
 		return "neon";
 #endif
