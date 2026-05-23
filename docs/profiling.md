@@ -149,6 +149,32 @@ configured `results_dir`. After a change, **rename or delete**
 re-running, or rekall will silently report cached numbers and your
 "after" looks the same as your "before".
 
+### Don't profile or measure while another workload is running
+
+Running two `rekall run` / `mkt bench` invocations simultaneously, or
+benchmarking while an index build is in progress, contaminates both
+sets of numbers. Symptoms:
+
+- QPS suddenly drops 10–30% versus an earlier run on the same code.
+- Latency p99 spikes wildly.
+- `hash_search` or kernel-scheduling functions inflate disproportionately
+  in the perf profile (they were waiting for the contending workload).
+
+Common foot-guns:
+
+- Kicking off an index build, then running a search profile on a
+  different index in the same PG instance "to save time." The build is
+  pinning all the parallel-maintenance workers and starving the
+  search backend.
+- Leaving a flame-graph collector running across a measurement window.
+- `cargo build`-ing the rekall binary in another shell while the
+  current shell is benching.
+
+Sequence everything: build → settle → bench → next bench. If a build
+is unavoidable mid-session, drop a marker in the result so you remember:
+this row was measured under contention, don't compare against quiet
+runs.
+
 ### Index build dominates if you profile the full `rekall run`
 
 Build phase on cohere-1M is ~75 s, search phase per-nprobe is ~5–20 s.
