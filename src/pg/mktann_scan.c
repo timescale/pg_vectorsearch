@@ -27,6 +27,57 @@
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
 
+/* ---------------------------------------------------------------- *
+ * Per-backend dedup scratch buffers.
+ *
+ * The dedup set / generation buffer is large (~2 MB at default cap
+ * for cohere-1m). Originally palloc0'd per beginscan, which dominated
+ * the per-query profile at ~6% (memset). The generation counter
+ * makes a "zero buffer" semantically unnecessary: a stale
+ * `gens[i] != current_gen` means "not seen", regardless of value.
+ *
+ * We allocate the pair once per backend in CacheMemoryContext, grow
+ * on demand, and use a process-wide monotonic generation so each new
+ * scan/query sees a fresh logical set without touching memory.
+ * ---------------------------------------------------------------- */
+static uint64_t *cached_dedup_set;
+static uint32_t *cached_dedup_gens;
+static uint32_t	 cached_dedup_cap;
+static uint32_t	 cached_dedup_gen_next = 1;
+
+static void
+dedup_buffers_get(uint32_t cap, uint64_t **set_out, uint32_t **gens_out)
+{
+	if (cap > cached_dedup_cap)
+	{
+		MemoryContext old = MemoryContextSwitchTo(CacheMemoryContext);
+		if (cached_dedup_set != NULL)
+			pfree(cached_dedup_set);
+		if (cached_dedup_gens != NULL)
+			pfree(cached_dedup_gens);
+		cached_dedup_set  = palloc(cap * sizeof(uint64_t));
+		cached_dedup_gens = palloc0(cap * sizeof(uint32_t));
+		cached_dedup_cap  = cap;
+		MemoryContextSwitchTo(old);
+	}
+	*set_out  = cached_dedup_set;
+	*gens_out = cached_dedup_gens;
+}
+
+static uint32_t
+dedup_gen_next(void)
+{
+	/* Wrap with care: after 2^32 - 1 queries we'd collide with stale
+	 * entries. If we ever approach that, rezero and reset. */
+	if (cached_dedup_gen_next == 0)
+	{
+		if (cached_dedup_gens != NULL)
+			memset(cached_dedup_gens, 0, cached_dedup_cap * sizeof(uint32_t));
+		cached_dedup_gen_next = 1;
+	}
+	return cached_dedup_gen_next++;
+}
+
 /* Default nprobe — will become a GUC later */
 #define MKT_DEFAULT_NPROBE 10
 #define MKT_DEFAULT_K	   10
@@ -148,10 +199,18 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 		uint32_t cap			 = 1024;
 		while (cap < est_entries * 2)
 			cap *= 2;
-		ss->qstate.dedup_set  = palloc(cap * sizeof(uint64_t));
-		ss->qstate.dedup_gens = palloc0(cap * sizeof(uint32_t));
+
+		/* dedup_set and dedup_gens are large (~2 MB combined at default
+		 * cap for cohere-1m) and were previously palloc0'd per
+		 * beginscan, costing ~6% of query time in memset on the per-
+		 * query profile. The generation counter is specifically
+		 * designed so a stale `gens[i] != current_gen` reads as "not
+		 * seen" without needing a zero buffer. We allocate once in
+		 * CacheMemoryContext, grow on demand, and let `dedup_gen`
+		 * (process-monotonic) invalidate across scans. */
+		dedup_buffers_get(cap, &ss->qstate.dedup_set, &ss->qstate.dedup_gens);
 		ss->qstate.dedup_cap  = cap;
-		ss->qstate.dedup_gen  = 0;
+		ss->qstate.dedup_gen  = dedup_gen_next();
 	}
 
 	/* Pre-allocate result buffer. The error-bound rerank can return more than
