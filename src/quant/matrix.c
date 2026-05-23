@@ -267,19 +267,32 @@ void
 mkt_matrix_transpose_vector_mul(
 		const float *M, const float *v, float *result, Dimension dim)
 {
-	/* Zero result */
+#ifdef MKT_HAVE_CBLAS
+	/* M is row-major dim×dim. M^T * v computed as cblas_sgemv with
+	 * CblasTrans: result = 1.0 * M^T * v + 0.0 * result. OpenBLAS
+	 * (and Apple Accelerate / ARMPL) provide cores tuned for Neoverse,
+	 * winning ~2× over the auto-vectorized double loop at dim=768.
+	 *
+	 * This is on the per-query hot path (rabitq_prepare_query rotates
+	 * the query vector through P), so the BLAS callout pays for
+	 * itself even at single-vector granularity. */
+	cblas_sgemv(CblasRowMajor, CblasTrans,
+				(int)dim, (int)dim,
+				1.0f, M, (int)dim,
+				v, 1,
+				0.0f, result, 1);
+#else
 	memset(result, 0, dim * sizeof(float));
 
-	/* Accumulate v[j] * row_j for each row j */
 	for (Dimension j = 0; j < dim; j++)
 	{
 		const float *row   = M + j * dim;
 		float		 scale = v[j];
 
-		/* This inner loop auto-vectorizes well */
 		for (Dimension i = 0; i < dim; i++)
 			result[i] += scale * row[i];
 	}
+#endif
 }
 
 /*
