@@ -33,6 +33,51 @@
 #endif
 
 /* ----------------------------------------------------------------
+ * Per-query seen-TID hash (open addressing + generation counter)
+ *
+ * Used to dedup vectors replicated across clusters (SOAR or
+ * boundary-epsilon replication). The hash is sized at scan setup
+ * so we have power-of-two capacity; a single-step linear probe
+ * keeps the inner loop branch-light and the slots stay near the
+ * initial bucket because the load factor is < 0.5 by construction.
+ *
+ * Returns true if the tid is already in the set (skip this
+ * survivor); false otherwise and inserts it.
+ * ---------------------------------------------------------------- */
+
+static inline bool
+seen_tid_check_and_insert(MktPostingScan *scan, uint64_t tid)
+{
+	if (scan->seen_tids == NULL)
+		return false;
+
+	/* splitmix64-style mixer for good distribution from sparse TIDs. */
+	uint64_t h = tid * 0x9E3779B97F4A7C15ULL;
+	h ^= h >> 33;
+	h *= 0xff51afd7ed558ccdULL;
+	h ^= h >> 33;
+
+	uint32_t mask  = scan->seen_tids_cap - 1;
+	uint32_t slot  = (uint32_t)h & mask;
+	uint32_t gen   = scan->seen_gen;
+	uint64_t *tids = scan->seen_tids;
+	uint32_t *gens = scan->seen_gens;
+
+	for (;;)
+	{
+		if (gens[slot] != gen)
+		{
+			tids[slot] = tid;
+			gens[slot] = gen;
+			return false;
+		}
+		if (tids[slot] == tid)
+			return true;
+		slot = (slot + 1) & mask;
+	}
+}
+
+/* ----------------------------------------------------------------
  * Init / cleanup
  * ---------------------------------------------------------------- */
 
@@ -319,6 +364,8 @@ mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 			}
 
 			uint64_t id = mkt_posting_encode_tid(&e->meta.tid);
+			if (seen_tid_check_and_insert(scan, id))
+				continue;
 			mkt_topk_insert(topk, est, err, id);
 			threshold = mkt_topk_threshold(topk);
 		}
@@ -462,6 +509,8 @@ fastscan_prune_group_avx512(
 			surv &= surv - 1;
 
 			uint64_t id = mkt_posting_encode_tid(&tids[v]);
+			if (seen_tid_check_and_insert(scan, id))
+				continue;
 			mkt_topk_insert(topk, est_buf[v], err_buf[v], id);
 			threshold = mkt_topk_threshold(topk);
 		}
@@ -564,6 +613,8 @@ fastscan_prune_group_neon(
 		surv_bits &= surv_bits - 1;
 
 		uint64_t id = mkt_posting_encode_tid(&tids[v]);
+		if (seen_tid_check_and_insert(scan, id))
+			continue;
 		mkt_topk_insert(topk, est_buf[v], err_buf[v], id);
 		threshold = mkt_topk_threshold(topk);
 	}
@@ -735,6 +786,8 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 				}
 
 				uint64_t id = mkt_posting_encode_tid(&tids[v]);
+				if (seen_tid_check_and_insert(scan, id))
+					continue;
 				mkt_topk_insert(topk, est, err, id);
 				threshold = mkt_topk_threshold(topk);
 			}
