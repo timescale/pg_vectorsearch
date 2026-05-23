@@ -261,6 +261,22 @@ void mkt_fastscan_build_lut_hacc_neon(
 		float		*delta_out,
 		float		*bias_out);
 
+/* SVE2 implementations. The functions themselves carry
+ * __attribute__((target("+sve2"))) so the TU compiles without
+ * project-wide SVE2 flags; runtime dispatch picks them only when
+ * HWCAP2_SVE2 is set. */
+void mkt_fastscan_accumulate_sve2(
+		const uint8_t *codes,
+		const uint8_t *lut,
+		uint16_t	  *accum,
+		Dimension	   dim);
+
+void mkt_fastscan_accumulate_hacc_sve2(
+		const uint8_t *codes,
+		const uint8_t *lut,
+		int32_t		  *accum,
+		Dimension	   dim);
+
 #endif
 #endif
 

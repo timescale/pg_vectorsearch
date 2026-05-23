@@ -248,6 +248,23 @@ if simd_mode != 'none' and cc.compiles(
   config_data.set('MKT_HAVE_F16C', 1)
 endif
 
+# Detect SVE2 support in the toolchain (independent of -march/-mcpu).
+# Per-function target attributes let SVE2 kernels compile even when the
+# project-wide flags don't enable SVE2; runtime dispatch via HWCAP2_SVE2
+# picks them only when the CPU actually supports the instructions.
+have_sve2 = false
+if simd_mode == 'full' and host_machine.cpu_family() == 'aarch64'
+  have_sve2 = cc.compiles(
+    '#include <arm_sve.h>\n' +
+    '__attribute__((target("+sve2"))) ' +
+    'static svuint8_t f(svuint8_t a, svuint8_t b){return svtbl_u8(a,b);}',
+    name: 'aarch64 SVE2 target attribute',
+  )
+  if have_sve2
+    config_data.set('MKT_HAVE_SVE2', 1)
+  endif
+endif
+
 mkt_config_h = configure_file(
   input: 'src/mkt_config.h.in',
   output: 'mkt_config.h',
@@ -367,12 +384,17 @@ if simd_mode == 'full'
       'src/quant/fastscan_avx512.c',
     )
   elif host_machine.cpu_family() == 'aarch64'
-    # AArch64: NEON is mandatory, no special flags needed
+    # AArch64: NEON is mandatory, no special flags needed.
     simd_sources += files(
       'src/algo/distance_neon.c',
       'src/quant/rabitq_neon.c',
       'src/quant/fastscan_neon.c',
     )
+    if have_sve2
+      simd_sources += files(
+        'src/quant/fastscan_sve2.c',
+      )
+    endif
   elif host_machine.cpu_family() == 'arm'
     # 32-bit ARM: needs -mfpu=neon flag, keep as separate library
     mkt_neon_lib = static_library('mkt_neon',
@@ -630,6 +652,11 @@ if build_pg_extension
         'src/quant/rabitq_neon.c',
         'src/quant/fastscan_neon.c',
       )
+      if have_sve2
+        mkt_pg_simd_sources += files(
+          'src/quant/fastscan_sve2.c',
+        )
+      endif
     endif
   endif
 

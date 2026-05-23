@@ -41,6 +41,12 @@
 #elif defined(__aarch64__) || defined(_M_ARM64)
 /* NEON is always available on AArch64, no attribute needed */
 #define MKT_TARGET_NEON
+/* SVE/SVE2 require explicit target attribute so the source file can use
+ * SVE intrinsics (and define __ARM_FEATURE_SVE2 inside the attribute scope)
+ * regardless of the project-wide -march/-mcpu flags. The functions are
+ * dispatched at runtime via mkt_detect_simd(). */
+#define MKT_TARGET_SVE	__attribute__((target("+sve")))
+#define MKT_TARGET_SVE2 __attribute__((target("+sve2")))
 #endif
 
 /*
