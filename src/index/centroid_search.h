@@ -39,6 +39,32 @@ typedef struct MktCentroidResult
 } MktCentroidResult;
 
 /* ----------------------------------------------------------------
+ * Per-scan scratch buffers
+ *
+ * Bundles the candidate-buffer pair and the score-page scratch that
+ * mkt_centroid_beam_search would otherwise palloc on every call. The
+ * caller (MktQueryState / MktQueryCtx) allocates this once at scan
+ * setup and passes it in through MktCentroidSearchState.
+ *
+ * Sizing:
+ *   buf_a, buf_b: cand_cap entries each. Caller picks cand_cap so it
+ *     fits the worst-case max_per_page * max_beam_width.
+ *   f_add..symmetric_scratch: max_per_page entries each (the largest
+ *     centroid page entry count for this dim).
+ * ---------------------------------------------------------------- */
+struct MktCentroidScratch;
+typedef struct MktCentroidScratch MktCentroidScratch;
+
+/*
+ * Allocate scratch sized for searches up to max_beam_width / nprobe
+ * candidates per level. Returns NULL on failure. cleanup releases
+ * the underlying buffers.
+ */
+MktCentroidScratch *mkt_centroid_scratch_create(Dimension dim,
+												uint32_t  max_beam_width);
+void				mkt_centroid_scratch_free(MktCentroidScratch *scratch);
+
+/* ----------------------------------------------------------------
  * Search state
  * ---------------------------------------------------------------- */
 typedef struct MktCentroidSearchState
@@ -50,6 +76,9 @@ typedef struct MktCentroidSearchState
 	uint32_t				nprobe;		/* target leaf count */
 	Dimension				dim;
 	DistanceMetric			metric; /* distance metric for routing */
+	/* Pre-allocated scratch. Must be non-NULL and sized for at least
+	 * this state's beam_width / nprobe. */
+	MktCentroidScratch	   *scratch;
 } MktCentroidSearchState;
 
 /* ----------------------------------------------------------------
