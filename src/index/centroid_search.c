@@ -55,16 +55,25 @@ typedef struct ScorePageScratch
  * ---------------------------------------------------------------- */
 struct MktCentroidScratch
 {
-	uint32_t   cand_cap;	 /* size of buf_a / buf_b */
-	uint32_t   max_per_page; /* size of the f_add..symmetric_scratch arrays */
-	Candidate *buf_a;
-	Candidate *buf_b;
-	float	  *f_add;
-	float	  *f_rescale;
-	Distance  *distances;
-	Distance  *lower_bounds;
-	float	  *multi_scratch;
-	uint32_t  *symmetric_scratch;
+	uint32_t	  cand_cap;		/* size of buf_a / buf_b */
+	uint32_t	  max_per_page; /* size of the f_add..symmetric_scratch arrays */
+	Candidate	 *buf_a;
+	Candidate	 *buf_b;
+	float		 *f_add;
+	float		 *f_rescale;
+	Distance	 *distances;
+	Distance	 *lower_bounds;
+	float		 *multi_scratch;
+	uint32_t	 *symmetric_scratch;
+	/* Reusable top-K + extraction buffer for select_topk_bounded.
+	 * Avoids creating a fresh memctx + ub_heap + ub_ids + candidates
+	 * + entries-buf on every beam-search level (was 2 sets of 4 allocs
+	 * + 2 memctx creates per query). The MktTopK is initialised once
+	 * at scratch_create with the worst-case k; select_topk_bounded
+	 * calls mkt_topk_reset_to_k() to adjust between levels. */
+	MktTopK		  level_topk;
+	MktTopKEntry *entries_buf;
+	uint32_t	  entries_cap;
 };
 
 MktCentroidScratch *
@@ -89,6 +98,16 @@ mkt_centroid_scratch_create(Dimension dim, uint32_t max_beam_width)
 	s->lower_bounds		= mkt_alloc(max_per_page * sizeof(Distance));
 	s->multi_scratch	= mkt_alloc(max_per_page * sizeof(float));
 	s->symmetric_scratch = mkt_alloc(max_per_page * sizeof(uint32_t));
+
+	/* Reusable top-K and extract buffer (resized to actual k per
+	 * select_topk_bounded call). Initial k=max_beam_width is just
+	 * a starting size — the reset path repalloc's within the
+	 * topk's memctx for different k. */
+	mkt_topk_init(&s->level_topk, max_beam_width);
+	s->entries_cap = max_beam_width * 4;
+	if (s->entries_cap < 64)
+		s->entries_cap = 64;
+	s->entries_buf = mkt_alloc(s->entries_cap * sizeof(MktTopKEntry));
 	return s;
 }
 
@@ -97,6 +116,8 @@ mkt_centroid_scratch_free(MktCentroidScratch *s)
 {
 	if (s == NULL)
 		return;
+	mkt_topk_cleanup(&s->level_topk);
+	mkt_free(s->entries_buf);
 	mkt_free(s->buf_a);
 	mkt_free(s->buf_b);
 	mkt_free(s->f_add);
@@ -292,38 +313,53 @@ score_page(
  * ---------------------------------------------------------------- */
 static uint32_t
 select_topk_bounded(
-		Candidate *cands,
-		uint32_t   count,
-		uint32_t   k,
-		Candidate *out,
-		uint32_t   out_cap)
+		MktCentroidScratch *scratch,
+		Candidate		   *cands,
+		uint32_t			count,
+		uint32_t			k,
+		Candidate		   *out,
+		uint32_t			out_cap)
 {
 	if (count == 0)
 		return 0;
 
-	MktTopK topk;
-	mkt_topk_init(&topk, k);
+	/* Reuse the per-scan topk and extract buffer instead of allocating
+	 * new ones every level. mkt_topk_reset_to_k re-allocates the
+	 * heap/candidates within the topk's existing memctx (cheap). */
+	MktTopK *topk = &scratch->level_topk;
+	mkt_topk_reset_to_k(topk, k);
 
+	/* Centroid candidates have unique ids (the buf index), so we can
+	 * skip the O(k) per-insert dedup scan. */
 	for (uint32_t i = 0; i < count; i++)
-		mkt_topk_insert(&topk, cands[i].distance, cands[i].error, i);
+		mkt_topk_insert_unique(topk, cands[i].distance, cands[i].error, i);
 
-	MktTopKEntry *entries = mkt_alloc(topk.cand_count * sizeof(MktTopKEntry));
-	uint32_t	  nresults;
-	mkt_topk_extract_sorted(&topk, entries, &nresults);
+	/* entries_buf must hold topk->cand_count survivors; grow if needed. */
+	if (topk->cand_count > scratch->entries_cap)
+	{
+		uint32_t new_cap = scratch->entries_cap * 2;
+		while (new_cap < topk->cand_count)
+			new_cap *= 2;
+		mkt_free(scratch->entries_buf);
+		scratch->entries_buf =
+				mkt_alloc(new_cap * sizeof(MktTopKEntry));
+		scratch->entries_cap = new_cap;
+	}
+
+	uint32_t nresults;
+	mkt_topk_extract_sorted(topk, scratch->entries_buf, &nresults);
 
 	if (nresults > out_cap)
 		nresults = out_cap;
 
 	for (uint32_t i = 0; i < nresults; i++)
 	{
-		uint32_t idx	= (uint32_t)entries[i].id;
+		uint32_t idx	= (uint32_t)scratch->entries_buf[i].id;
 		out[i]			= cands[idx];
-		out[i].distance = entries[i].distance;
-		out[i].error	= entries[i].error;
+		out[i].distance = scratch->entries_buf[i].distance;
+		out[i].error	= scratch->entries_buf[i].error;
 	}
 
-	mkt_free(entries);
-	mkt_topk_cleanup(&topk);
 	return nresults;
 }
 
@@ -425,7 +461,7 @@ mkt_centroid_beam_search(
 	 * exact formats (error=0) this returns exactly beam_width. */
 	uint32_t keep = (nlevels == 1) ? nprobe : beam_width;
 	uint32_t cand_count =
-			select_topk_bounded(buf_a, raw_count, keep, buf_b, cand_cap);
+			select_topk_bounded(scratch, buf_a, raw_count, keep, buf_b, cand_cap);
 
 	/* buf_b is now the live set */
 	Candidate *live	   = buf_b;
@@ -468,7 +504,7 @@ mkt_centroid_beam_search(
 		/* Select winners into live; expand_buf is the raw input. */
 		keep = (level == nlevels - 1) ? nprobe : beam_width;
 		cand_count =
-				select_topk_bounded(expand_buf, next_count, keep, live, cand_cap);
+				select_topk_bounded(scratch, expand_buf, next_count, keep, live, cand_cap);
 	}
 
 	/* Build results in caller-owned memory (cap at nprobe) */
