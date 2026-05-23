@@ -182,11 +182,16 @@ mkt_rabitq_inner_product_neon(
 /*
  * NEON multi-candidate vertical inner product.
  *
- * Processes 4 candidates per dimension chunk using nibble lookup.
- * Each iteration loads 4 floats from transformed[], then for each
- * of 4 candidates: expand nibble to mask, masked-and-add.
+ * Processes 8 candidates per group: each iteration loads 4 floats
+ * from transformed[] once and reuses them across all 8 candidates.
+ * For each candidate: expand nibble to mask via LUT, masked-and-add
+ * into that candidate's accumulator. The 8-wide grouping amortizes
+ * the transformed-load over twice as many candidates as the prior
+ * 4-wide kernel, and gives the OoO scheduler more independent work
+ * to overlap with the LUT loads (which dominate the inner loop).
  *
- * Tail candidates (count % 4) use the single-candidate kernel.
+ * Tail candidates (count % 8) fall back to the single-candidate
+ * kernel.
  */
 void
 mkt_rabitq_inner_product_multi_neon(
@@ -197,111 +202,106 @@ mkt_rabitq_inner_product_multi_neon(
 		uint32_t	   count,
 		float		  *results)
 {
-	uint32_t groups = count / 4;
-	uint32_t tail	= count % 4;
+	uint32_t groups = count / 8;
+	uint32_t tail	= count % 8;
 
 	for (uint32_t g = 0; g < groups; g++)
 	{
-		uint32_t base = g * 4;
+		uint32_t base = g * 8;
 
 		const uint8_t *b0 = bits + (size_t)base * stride;
 		const uint8_t *b1 = bits + (size_t)(base + 1) * stride;
 		const uint8_t *b2 = bits + (size_t)(base + 2) * stride;
 		const uint8_t *b3 = bits + (size_t)(base + 3) * stride;
+		const uint8_t *b4 = bits + (size_t)(base + 4) * stride;
+		const uint8_t *b5 = bits + (size_t)(base + 5) * stride;
+		const uint8_t *b6 = bits + (size_t)(base + 6) * stride;
+		const uint8_t *b7 = bits + (size_t)(base + 7) * stride;
 
 		float32x4_t sum0 = vdupq_n_f32(0.0f);
 		float32x4_t sum1 = vdupq_n_f32(0.0f);
 		float32x4_t sum2 = vdupq_n_f32(0.0f);
 		float32x4_t sum3 = vdupq_n_f32(0.0f);
+		float32x4_t sum4 = vdupq_n_f32(0.0f);
+		float32x4_t sum5 = vdupq_n_f32(0.0f);
+		float32x4_t sum6 = vdupq_n_f32(0.0f);
+		float32x4_t sum7 = vdupq_n_f32(0.0f);
 
-		/* Main loop: process 8 floats (1 byte = 2 nibbles) */
+		/* Main loop: process 8 floats (1 byte = 2 nibbles) per iter,
+		 * across all 8 candidates. */
 		Dimension i = 0;
 		for (; i + 8 <= dim; i += 8)
 		{
 			uint32_t bi = i / 8;
 
-			/* Low nibble (floats i+0..i+3) */
+			/* Low nibble: t0 floats × 8 cand masks */
 			float32x4_t t0 = vld1q_f32(transformed + i);
+			uint32x4_t  t0u = vreinterpretq_u32_f32(t0);
 
-			uint32x4_t m0 = expand_nibble_to_mask_neon(b0[bi] & 0x0F);
-			uint32x4_t m1 = expand_nibble_to_mask_neon(b1[bi] & 0x0F);
-			uint32x4_t m2 = expand_nibble_to_mask_neon(b2[bi] & 0x0F);
-			uint32x4_t m3 = expand_nibble_to_mask_neon(b3[bi] & 0x0F);
+			sum0 = vaddq_f32(sum0, vreinterpretq_f32_u32(vandq_u32(
+					t0u, expand_nibble_to_mask_neon(b0[bi] & 0x0F))));
+			sum1 = vaddq_f32(sum1, vreinterpretq_f32_u32(vandq_u32(
+					t0u, expand_nibble_to_mask_neon(b1[bi] & 0x0F))));
+			sum2 = vaddq_f32(sum2, vreinterpretq_f32_u32(vandq_u32(
+					t0u, expand_nibble_to_mask_neon(b2[bi] & 0x0F))));
+			sum3 = vaddq_f32(sum3, vreinterpretq_f32_u32(vandq_u32(
+					t0u, expand_nibble_to_mask_neon(b3[bi] & 0x0F))));
+			sum4 = vaddq_f32(sum4, vreinterpretq_f32_u32(vandq_u32(
+					t0u, expand_nibble_to_mask_neon(b4[bi] & 0x0F))));
+			sum5 = vaddq_f32(sum5, vreinterpretq_f32_u32(vandq_u32(
+					t0u, expand_nibble_to_mask_neon(b5[bi] & 0x0F))));
+			sum6 = vaddq_f32(sum6, vreinterpretq_f32_u32(vandq_u32(
+					t0u, expand_nibble_to_mask_neon(b6[bi] & 0x0F))));
+			sum7 = vaddq_f32(sum7, vreinterpretq_f32_u32(vandq_u32(
+					t0u, expand_nibble_to_mask_neon(b7[bi] & 0x0F))));
 
-			sum0 = vaddq_f32(
-					sum0,
-					vreinterpretq_f32_u32(
-							vandq_u32(vreinterpretq_u32_f32(t0), m0)));
-			sum1 = vaddq_f32(
-					sum1,
-					vreinterpretq_f32_u32(
-							vandq_u32(vreinterpretq_u32_f32(t0), m1)));
-			sum2 = vaddq_f32(
-					sum2,
-					vreinterpretq_f32_u32(
-							vandq_u32(vreinterpretq_u32_f32(t0), m2)));
-			sum3 = vaddq_f32(
-					sum3,
-					vreinterpretq_f32_u32(
-							vandq_u32(vreinterpretq_u32_f32(t0), m3)));
-
-			/* High nibble (floats i+4..i+7) */
+			/* High nibble: t1 floats × 8 cand masks */
 			float32x4_t t1 = vld1q_f32(transformed + i + 4);
+			uint32x4_t  t1u = vreinterpretq_u32_f32(t1);
 
-			m0 = expand_nibble_to_mask_neon((b0[bi] >> 4) & 0x0F);
-			m1 = expand_nibble_to_mask_neon((b1[bi] >> 4) & 0x0F);
-			m2 = expand_nibble_to_mask_neon((b2[bi] >> 4) & 0x0F);
-			m3 = expand_nibble_to_mask_neon((b3[bi] >> 4) & 0x0F);
-
-			sum0 = vaddq_f32(
-					sum0,
-					vreinterpretq_f32_u32(
-							vandq_u32(vreinterpretq_u32_f32(t1), m0)));
-			sum1 = vaddq_f32(
-					sum1,
-					vreinterpretq_f32_u32(
-							vandq_u32(vreinterpretq_u32_f32(t1), m1)));
-			sum2 = vaddq_f32(
-					sum2,
-					vreinterpretq_f32_u32(
-							vandq_u32(vreinterpretq_u32_f32(t1), m2)));
-			sum3 = vaddq_f32(
-					sum3,
-					vreinterpretq_f32_u32(
-							vandq_u32(vreinterpretq_u32_f32(t1), m3)));
+			sum0 = vaddq_f32(sum0, vreinterpretq_f32_u32(vandq_u32(
+					t1u, expand_nibble_to_mask_neon((b0[bi] >> 4) & 0x0F))));
+			sum1 = vaddq_f32(sum1, vreinterpretq_f32_u32(vandq_u32(
+					t1u, expand_nibble_to_mask_neon((b1[bi] >> 4) & 0x0F))));
+			sum2 = vaddq_f32(sum2, vreinterpretq_f32_u32(vandq_u32(
+					t1u, expand_nibble_to_mask_neon((b2[bi] >> 4) & 0x0F))));
+			sum3 = vaddq_f32(sum3, vreinterpretq_f32_u32(vandq_u32(
+					t1u, expand_nibble_to_mask_neon((b3[bi] >> 4) & 0x0F))));
+			sum4 = vaddq_f32(sum4, vreinterpretq_f32_u32(vandq_u32(
+					t1u, expand_nibble_to_mask_neon((b4[bi] >> 4) & 0x0F))));
+			sum5 = vaddq_f32(sum5, vreinterpretq_f32_u32(vandq_u32(
+					t1u, expand_nibble_to_mask_neon((b5[bi] >> 4) & 0x0F))));
+			sum6 = vaddq_f32(sum6, vreinterpretq_f32_u32(vandq_u32(
+					t1u, expand_nibble_to_mask_neon((b6[bi] >> 4) & 0x0F))));
+			sum7 = vaddq_f32(sum7, vreinterpretq_f32_u32(vandq_u32(
+					t1u, expand_nibble_to_mask_neon((b7[bi] >> 4) & 0x0F))));
 		}
 
-		/* Process remaining 4 floats if any */
+		/* Process remaining 4 floats if any (only the relevant nibble) */
 		if (i + 4 <= dim)
 		{
-			uint8_t by0 = b0[i / 8], by1 = b1[i / 8];
-			uint8_t by2 = b2[i / 8], by3 = b3[i / 8];
+			uint32_t bi	   = i / 8;
+			uint8_t  shift = (i % 8 == 0) ? 0 : 4;
 
-			uint8_t shift = (i % 8 == 0) ? 0 : 4;
+			float32x4_t t  = vld1q_f32(transformed + i);
+			uint32x4_t  tu = vreinterpretq_u32_f32(t);
 
-			float32x4_t t = vld1q_f32(transformed + i);
-
-			uint32x4_t m0 = expand_nibble_to_mask_neon((by0 >> shift) & 0x0F);
-			uint32x4_t m1 = expand_nibble_to_mask_neon((by1 >> shift) & 0x0F);
-			uint32x4_t m2 = expand_nibble_to_mask_neon((by2 >> shift) & 0x0F);
-			uint32x4_t m3 = expand_nibble_to_mask_neon((by3 >> shift) & 0x0F);
-
-			sum0 = vaddq_f32(
-					sum0,
-					vreinterpretq_f32_u32(
-							vandq_u32(vreinterpretq_u32_f32(t), m0)));
-			sum1 = vaddq_f32(
-					sum1,
-					vreinterpretq_f32_u32(
-							vandq_u32(vreinterpretq_u32_f32(t), m1)));
-			sum2 = vaddq_f32(
-					sum2,
-					vreinterpretq_f32_u32(
-							vandq_u32(vreinterpretq_u32_f32(t), m2)));
-			sum3 = vaddq_f32(
-					sum3,
-					vreinterpretq_f32_u32(
-							vandq_u32(vreinterpretq_u32_f32(t), m3)));
+			sum0 = vaddq_f32(sum0, vreinterpretq_f32_u32(vandq_u32(
+					tu, expand_nibble_to_mask_neon((b0[bi] >> shift) & 0x0F))));
+			sum1 = vaddq_f32(sum1, vreinterpretq_f32_u32(vandq_u32(
+					tu, expand_nibble_to_mask_neon((b1[bi] >> shift) & 0x0F))));
+			sum2 = vaddq_f32(sum2, vreinterpretq_f32_u32(vandq_u32(
+					tu, expand_nibble_to_mask_neon((b2[bi] >> shift) & 0x0F))));
+			sum3 = vaddq_f32(sum3, vreinterpretq_f32_u32(vandq_u32(
+					tu, expand_nibble_to_mask_neon((b3[bi] >> shift) & 0x0F))));
+			sum4 = vaddq_f32(sum4, vreinterpretq_f32_u32(vandq_u32(
+					tu, expand_nibble_to_mask_neon((b4[bi] >> shift) & 0x0F))));
+			sum5 = vaddq_f32(sum5, vreinterpretq_f32_u32(vandq_u32(
+					tu, expand_nibble_to_mask_neon((b5[bi] >> shift) & 0x0F))));
+			sum6 = vaddq_f32(sum6, vreinterpretq_f32_u32(vandq_u32(
+					tu, expand_nibble_to_mask_neon((b6[bi] >> shift) & 0x0F))));
+			sum7 = vaddq_f32(sum7, vreinterpretq_f32_u32(vandq_u32(
+					tu, expand_nibble_to_mask_neon((b7[bi] >> shift) & 0x0F))));
 			i += 4;
 		}
 
@@ -309,26 +309,31 @@ mkt_rabitq_inner_product_multi_neon(
 		results[base + 1] = mkt_horizontal_sum_neon(sum1);
 		results[base + 2] = mkt_horizontal_sum_neon(sum2);
 		results[base + 3] = mkt_horizontal_sum_neon(sum3);
+		results[base + 4] = mkt_horizontal_sum_neon(sum4);
+		results[base + 5] = mkt_horizontal_sum_neon(sum5);
+		results[base + 6] = mkt_horizontal_sum_neon(sum6);
+		results[base + 7] = mkt_horizontal_sum_neon(sum7);
 
 		/* Scalar tail for remaining dimensions */
 		for (; i < dim; i++)
 		{
 			int byte_idx = i / 8;
 			int bit_idx	 = i % 8;
+			float v		 = transformed[i];
 
-			if ((b0[byte_idx] >> bit_idx) & 1)
-				results[base + 0] += transformed[i];
-			if ((b1[byte_idx] >> bit_idx) & 1)
-				results[base + 1] += transformed[i];
-			if ((b2[byte_idx] >> bit_idx) & 1)
-				results[base + 2] += transformed[i];
-			if ((b3[byte_idx] >> bit_idx) & 1)
-				results[base + 3] += transformed[i];
+			if ((b0[byte_idx] >> bit_idx) & 1) results[base + 0] += v;
+			if ((b1[byte_idx] >> bit_idx) & 1) results[base + 1] += v;
+			if ((b2[byte_idx] >> bit_idx) & 1) results[base + 2] += v;
+			if ((b3[byte_idx] >> bit_idx) & 1) results[base + 3] += v;
+			if ((b4[byte_idx] >> bit_idx) & 1) results[base + 4] += v;
+			if ((b5[byte_idx] >> bit_idx) & 1) results[base + 5] += v;
+			if ((b6[byte_idx] >> bit_idx) & 1) results[base + 6] += v;
+			if ((b7[byte_idx] >> bit_idx) & 1) results[base + 7] += v;
 		}
 	}
 
 	/* Handle remaining candidates with single-candidate kernel */
-	for (uint32_t i = groups * 4; i < groups * 4 + tail; i++)
+	for (uint32_t i = groups * 8; i < groups * 8 + tail; i++)
 	{
 		results[i] = mkt_rabitq_inner_product_neon(
 				transformed, bits + (size_t)i * stride, dim);
