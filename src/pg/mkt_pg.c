@@ -10,8 +10,17 @@
 #include <utils/guc.h>
 
 #include "algo/distance.h"
+#include "mkt_config.h"
 #include "mkt_pg.h"
 #include "mktann_explain.h"
+
+#ifdef MKT_HAVE_CBLAS
+/* OpenBLAS / Apple Accelerate / ARMPL expose a thread-count setter.
+ * Forward-declare to avoid pulling cblas.h into the PG translation unit
+ * (header conflicts on some BLAS distributions). All three implementations
+ * accept this prototype. */
+extern void openblas_set_num_threads(int);
+#endif
 
 PG_MODULE_MAGIC;
 
@@ -49,6 +58,20 @@ void _PG_init(void);
 void
 _PG_init(void)
 {
+#ifdef MKT_HAVE_CBLAS
+	/* PostgreSQL backends are forked from the postmaster, and OpenBLAS's
+	 * lazy-initialized thread pool interacts badly with fork(): the
+	 * worker threads in the parent are gone after fork, so the backend
+	 * recreates them on first sgemv. For our query rotation (768×768
+	 * sgemv), the threading sync overhead vastly exceeds the math —
+	 * profiling showed >35% of query time in sched_yield waiting on
+	 * spawned BLAS workers. One-thread BLAS removes all that. The
+	 * setter is a weak link (only called if libopenblas is linked); on
+	 * Accelerate/ARMPL it's a no-op or absent and we silently use
+	 * whatever the BLAS default is. */
+	openblas_set_num_threads(1);
+#endif
+
 	DefineCustomEnumVariable(
 			"mkt.distance_mode",
 			"RaBitQ distance computation mode.",
