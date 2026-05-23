@@ -131,6 +131,13 @@ score_page(
 	}
 	case MKT_CENTROID_FMT_FLOAT:
 	{
+		/* Hoist query norm out of the inner loop: it depends only on
+		 * the query, not the centroid, but was previously recomputed
+		 * for every entry (one full norm² per centroid scored). */
+		float norm_q = (state->metric == DISTANCE_COSINE)
+							   ? mkt_l2_norm_squared(state->query, dim)
+							   : 0.0f;
+
 		for (uint16_t i = 0; i < count && cand_count < cand_cap; i++)
 		{
 			const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, i);
@@ -145,7 +152,6 @@ score_page(
 			case DISTANCE_COSINE:
 			{
 				float dot	 = mkt_dot_product(state->query, fvec, dim);
-				float norm_q = mkt_l2_norm_squared(state->query, dim);
 				float norm_v = mkt_l2_norm_squared(fvec, dim);
 				float denom	 = sqrtf(norm_q * norm_v);
 				dist		 = (denom > 0.0f) ? 1.0f - dot / denom : 1.0f;
@@ -166,6 +172,10 @@ score_page(
 	}
 	case MKT_CENTROID_FMT_HALF:
 	{
+		float norm_q = (state->metric == DISTANCE_COSINE)
+							   ? mkt_l2_norm_squared(state->query, dim)
+							   : 0.0f;
+
 		for (uint16_t i = 0; i < count && cand_count < cand_cap; i++)
 		{
 			const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, i);
@@ -180,7 +190,6 @@ score_page(
 			case DISTANCE_COSINE:
 			{
 				float dot	 = mkt_f16_dot_product(hvec, state->query, dim);
-				float norm_q = mkt_l2_norm_squared(state->query, dim);
 				float norm_v = mkt_f16_norm_sq(hvec, dim);
 				float denom	 = sqrtf(norm_q * norm_v);
 				dist		 = (denom > 0.0f) ? 1.0f - dot / denom : 1.0f;
