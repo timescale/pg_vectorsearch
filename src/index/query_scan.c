@@ -58,8 +58,14 @@ mkt_query_state_init(
 	mkt_rabitq_init_query_constants(&qs->beam_qs, dim);
 	mkt_rabitq_init_query_constants(&qs->cluster_qs, dim);
 
-	/* Beam search results */
-	qs->beam_results = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
+	/* Beam search results + per-scan scratch.
+	 * Pre-allocating the scratch here means mkt_centroid_beam_search
+	 * skips 8 mkt_alloc calls and 2 memory-context creations on
+	 * every query (the largest remaining source of per-query
+	 * allocator traffic after the dedup-gens fix). Sized to the
+	 * worst case beam_width == max_nprobe. */
+	qs->beam_results	 = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
+	qs->centroid_scratch = mkt_centroid_scratch_create(dim, max_nprobe);
 
 	/* Top-K */
 	mkt_topk_init(&qs->topk, max_k);
@@ -91,6 +97,8 @@ mkt_query_state_cleanup(MktQueryState *qs)
 
 	mkt_posting_scan_cleanup(&qs->pscan);
 	mkt_topk_cleanup(&qs->topk);
+	mkt_centroid_scratch_free(qs->centroid_scratch);
+	qs->centroid_scratch = NULL;
 }
 
 /* ----------------------------------------------------------------
@@ -138,6 +146,7 @@ search_centroids(
 			.nprobe		= nprobe,
 			.dim		= dim,
 			.metric		= idx->metric,
+			.scratch	= qs->centroid_scratch,
 	};
 
 	return mkt_centroid_beam_search(
