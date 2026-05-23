@@ -43,18 +43,19 @@ struct MktQueryCtx
 	uint32_t	  rerank_cap;
 
 	/* Flat/brute-force fallback buffers */
-	float			  *query_buf;
-	MktCentroidResult *beam_results;
-	MktTopK			   topk;
-	MktPostingScan	   posting_scan;
-	float			  *pt_query;
-	float			  *pt_cents_buf;
-	RaBitQQueryState   beam_qs;
-	RaBitQQueryState   cluster_qs;
-	float			  *beam_transformed;
-	float			  *cluster_transformed;
-	uint8_t			  *beam_query_bits;
-	uint8_t			  *cluster_query_bits;
+	float			   *query_buf;
+	MktCentroidResult  *beam_results;
+	MktCentroidScratch *centroid_scratch;
+	MktTopK				topk;
+	MktPostingScan		posting_scan;
+	float			   *pt_query;
+	float			   *pt_cents_buf;
+	RaBitQQueryState	beam_qs;
+	RaBitQQueryState	cluster_qs;
+	float			   *beam_transformed;
+	float			   *cluster_transformed;
+	uint8_t			   *beam_query_bits;
+	uint8_t			   *cluster_query_bits;
 
 	/* Long-lived memory context for all query context buffers.
 	 * Deleting this frees everything at once (no individual frees). */
@@ -120,8 +121,9 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 		/* Flat/brute-force: allocate standalone buffers */
 		uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
 
-		ctx->query_buf	  = mkt_alloc(dim * sizeof(float));
-		ctx->beam_results = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
+		ctx->query_buf		  = mkt_alloc(dim * sizeof(float));
+		ctx->beam_results	  = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
+		ctx->centroid_scratch = mkt_centroid_scratch_create(dim, max_nprobe);
 		mkt_topk_init(&ctx->topk, max_k);
 
 		if (idx->has_posting_data)
@@ -190,6 +192,8 @@ mkt_query_ctx_destroy(MktQueryCtx *ctx)
 		if (ctx->idx->has_posting_data)
 			mkt_posting_scan_cleanup(&ctx->posting_scan);
 		mkt_topk_cleanup(&ctx->topk);
+		mkt_centroid_scratch_free(ctx->centroid_scratch);
+		ctx->centroid_scratch = NULL;
 	}
 
 	mkt_topk_cleanup(&ctx->rerank_topk);
@@ -290,6 +294,7 @@ exec_fallback(
 			.nprobe		= nprobe,
 			.dim		= dim,
 			.metric		= idx->base.metric,
+			.scratch	= ctx->centroid_scratch,
 	};
 
 	MktCentroidSearchStats beam_stats = {0};

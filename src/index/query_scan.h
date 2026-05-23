@@ -57,12 +57,13 @@ typedef struct MktQueryState
 	RaBitQQueryState cluster_qs;
 
 	/* Pre-allocated search state (reset per query) */
-	MktCentroidResult *beam_results;
-	MktTopK			   topk;
-	MktPostingScan	   pscan;
-	MktTopKEntry	  *candidates;
-	uint32_t		   cand_cap;
-	uint32_t		   ncandidates;
+	MktCentroidResult  *beam_results;
+	MktCentroidScratch *centroid_scratch;
+	MktTopK				topk;
+	MktPostingScan		pscan;
+	MktTopKEntry	   *candidates;
+	uint32_t			cand_cap;
+	uint32_t			ncandidates;
 
 	/* TID dedup hash for replicated vectors (NULL = disabled).
 	 * Uses generation counter — no memset per query. */

@@ -30,6 +30,11 @@ typedef struct Candidate
 
 /* ----------------------------------------------------------------
  * Score-page scratch — preallocated buffers for batch RaBitQ scoring
+ *
+ * Public storage for these lives in MktCentroidScratch (below); this
+ * struct is a thin alias used inside score_page() so the existing
+ * signature is unchanged. The fields are pointers into the larger
+ * MktCentroidScratch allocation.
  * ---------------------------------------------------------------- */
 typedef struct ScorePageScratch
 {
@@ -40,6 +45,68 @@ typedef struct ScorePageScratch
 	float	 *multi_scratch;	 /* scratch for batch_multi_with_bound */
 	uint32_t *symmetric_scratch; /* scratch for batch_symmetric_with_bound */
 } ScorePageScratch;
+
+/* ----------------------------------------------------------------
+ * Per-scan scratch (public allocation; see centroid_search.h)
+ *
+ * Holds the candidate-buffer pair and score-page scratch that beam
+ * search previously palloc'd per call. Allocated once at scan setup
+ * and reused across all queries on the scan.
+ * ---------------------------------------------------------------- */
+struct MktCentroidScratch
+{
+	uint32_t   cand_cap;	 /* size of buf_a / buf_b */
+	uint32_t   max_per_page; /* size of the f_add..symmetric_scratch arrays */
+	Candidate *buf_a;
+	Candidate *buf_b;
+	float	  *f_add;
+	float	  *f_rescale;
+	Distance  *distances;
+	Distance  *lower_bounds;
+	float	  *multi_scratch;
+	uint32_t  *symmetric_scratch;
+};
+
+MktCentroidScratch *
+mkt_centroid_scratch_create(Dimension dim, uint32_t max_beam_width)
+{
+	uint32_t max_per_page = mkt_centroid_max_entries(dim);
+	uint32_t cand_cap	  = max_beam_width * max_per_page;
+	if (cand_cap < max_per_page * 4)
+		cand_cap = max_per_page * 4;
+
+	MktCentroidScratch *s = mkt_alloc(sizeof(MktCentroidScratch));
+	if (s == NULL)
+		return NULL;
+
+	s->cand_cap			= cand_cap;
+	s->max_per_page		= max_per_page;
+	s->buf_a			= mkt_alloc(cand_cap * sizeof(Candidate));
+	s->buf_b			= mkt_alloc(cand_cap * sizeof(Candidate));
+	s->f_add			= mkt_alloc(max_per_page * sizeof(float));
+	s->f_rescale		= mkt_alloc(max_per_page * sizeof(float));
+	s->distances		= mkt_alloc(max_per_page * sizeof(Distance));
+	s->lower_bounds		= mkt_alloc(max_per_page * sizeof(Distance));
+	s->multi_scratch	= mkt_alloc(max_per_page * sizeof(float));
+	s->symmetric_scratch = mkt_alloc(max_per_page * sizeof(uint32_t));
+	return s;
+}
+
+void
+mkt_centroid_scratch_free(MktCentroidScratch *s)
+{
+	if (s == NULL)
+		return;
+	mkt_free(s->buf_a);
+	mkt_free(s->buf_b);
+	mkt_free(s->f_add);
+	mkt_free(s->f_rescale);
+	mkt_free(s->distances);
+	mkt_free(s->lower_bounds);
+	mkt_free(s->multi_scratch);
+	mkt_free(s->symmetric_scratch);
+	mkt_free(s);
+}
 
 /*
  * Score all centroids on a single page, appending to candidates.
@@ -277,33 +344,38 @@ mkt_centroid_beam_search(
 	uint32_t  beam_width = state->beam_width;
 	uint32_t  nprobe	 = state->nprobe;
 
-	/*
-	 * Two-level memory context hierarchy for bounded memory usage.
-	 */
-	MktMemCtx beam_ctx	= mkt_memctx_create(NULL, "beam_search");
-	MktMemCtx level_ctx = mkt_memctx_create(beam_ctx, "beam_level");
-	MktMemCtx old_ctx	= mkt_memctx_switch(beam_ctx);
+	/* Caller-owned scratch: pre-allocated buffers for candidate
+	 * arrays and per-page batch scoring. Avoids 8 palloc + 2 memctx
+	 * creations per query — a meaningful chunk of the allocator
+	 * traffic on the hot path.
+	 *
+	 * If state->scratch is NULL we fall back to a one-shot
+	 * allocation. The fallback exists for tests and ad-hoc callers;
+	 * production query paths (MktQueryState / MktQueryCtx)
+	 * pre-allocate and pass it in. */
+	MktCentroidScratch *scratch		   = state->scratch;
+	MktCentroidScratch *owned_scratch = NULL;
+	if (scratch == NULL)
+	{
+		owned_scratch = mkt_centroid_scratch_create(dim, beam_width);
+		if (owned_scratch == NULL)
+			return 0;
+		scratch = owned_scratch;
+	}
+	uint32_t   cand_cap = scratch->cand_cap;
+	Candidate *buf_a	= scratch->buf_a;
+	Candidate *buf_b	= scratch->buf_b;
 
-	/*
-	 * Fixed-size candidate buffers. Use RaBitQ max (largest possible
-	 * entry count) for safe upper bound regardless of page format.
-	 */
-	uint32_t max_per_page = mkt_centroid_max_entries(dim);
-	uint32_t cand_cap	  = beam_width * max_per_page;
-	if (cand_cap < max_per_page * 4)
-		cand_cap = max_per_page * 4;
-
-	Candidate *buf_a = mkt_alloc(cand_cap * sizeof(Candidate));
-	Candidate *buf_b = mkt_alloc(cand_cap * sizeof(Candidate));
-
-	/* Preallocate score-page scratch for batch RaBitQ scoring */
-	ScorePageScratch sp_scratch;
-	sp_scratch.f_add			 = mkt_alloc(max_per_page * sizeof(float));
-	sp_scratch.f_rescale		 = mkt_alloc(max_per_page * sizeof(float));
-	sp_scratch.distances		 = mkt_alloc(max_per_page * sizeof(Distance));
-	sp_scratch.lower_bounds		 = mkt_alloc(max_per_page * sizeof(Distance));
-	sp_scratch.multi_scratch	 = mkt_alloc(max_per_page * sizeof(float));
-	sp_scratch.symmetric_scratch = mkt_alloc(max_per_page * sizeof(uint32_t));
+	/* ScorePageScratch is just pointer-aliased onto the larger
+	 * MktCentroidScratch allocation. */
+	ScorePageScratch sp_scratch = {
+			.f_add			   = scratch->f_add,
+			.f_rescale		   = scratch->f_rescale,
+			.distances		   = scratch->distances,
+			.lower_bounds	   = scratch->lower_bounds,
+			.multi_scratch	   = scratch->multi_scratch,
+			.symmetric_scratch = scratch->symmetric_scratch,
+	};
 
 	/* centroid_vecs: will be used later for copying centroid vectors */
 	(void)centroid_vecs;
@@ -319,8 +391,6 @@ mkt_centroid_beam_search(
 	/* Level 0: read root centroid page(s), score ALL centroids */
 	uint32_t	raw_count = 0;
 	BlockNumber blkno	  = first_centroid_blkno;
-
-	mkt_memctx_switch(level_ctx);
 
 	while (blkno != InvalidBlockNumber)
 	{
@@ -359,13 +429,11 @@ mkt_centroid_beam_search(
 
 	/* buf_b is now the live set */
 	Candidate *live	   = buf_b;
-	Candidate *scratch = buf_a;
+	Candidate *expand_buf = buf_a;
 
 	/* Intermediate levels: expand winners via child_blkno */
 	for (uint8_t level = 1; level < nlevels; level++)
 	{
-		mkt_memctx_reset(level_ctx);
-
 		uint32_t next_count = 0;
 
 		for (uint32_t i = 0; i < cand_count; i++)
@@ -384,7 +452,7 @@ mkt_centroid_beam_search(
 						page,
 						cb,
 						dim,
-						scratch,
+						expand_buf,
 						next_count,
 						cand_cap,
 						&sp_scratch);
@@ -397,10 +465,10 @@ mkt_centroid_beam_search(
 		if (stats)
 			stats->dist_calcs += next_count;
 
-		/* Select into live (scratch → live via topk) */
+		/* Select winners into live; expand_buf is the raw input. */
 		keep = (level == nlevels - 1) ? nprobe : beam_width;
 		cand_count =
-				select_topk_bounded(scratch, next_count, keep, live, cand_cap);
+				select_topk_bounded(expand_buf, next_count, keep, live, cand_cap);
 	}
 
 	/* Build results in caller-owned memory (cap at nprobe) */
@@ -474,8 +542,8 @@ mkt_centroid_beam_search(
 	if (stats)
 		stats->pages_read = centroid_pages_read;
 
-	mkt_memctx_switch(old_ctx);
-	mkt_memctx_delete(beam_ctx);
+	if (owned_scratch != NULL)
+		mkt_centroid_scratch_free(owned_scratch);
 
 	return result_count;
 }
