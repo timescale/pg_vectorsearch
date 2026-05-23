@@ -31,16 +31,132 @@
 /* Downcast from base to concrete type */
 #define PG_STORAGE(self) ((MktannStorage *)(self))
 
+/* ================================================================ *
+ * Buffer hint cache  —  skip BufTable on warm-cache page reads
+ *
+ * Purpose
+ * -------
+ * A `ReadBuffer(rel, blkno)` does two expensive things even when the
+ * page is already in shared_buffers:
+ *
+ *   1. BufTableLookup() — a hash_search_with_hash_value on the global
+ *      buffer mapping table, gated by an LWLock on the partition.
+ *   2. PinBuffer() — atomic refcount bump on the buffer descriptor.
+ *
+ * For our workload (cohere-1m, 4.2 GB data, 25 GB shared_buffers) the
+ * pages we touch are always cache-resident. Step 1 is the only real
+ * cost — and was ~11% of per-query time in the rekall profile.
+ *
+ * PG16+ exposes ReadRecentBuffer():
+ *
+ *   bool ReadRecentBuffer(RelFileLocator, ForkNumber, BlockNumber,
+ *                         Buffer recent_buffer)
+ *
+ * It takes a hint — `recent_buffer` is the integer buffer-pool slot
+ * (1..NBuffers) returned by a previous ReadBuffer — and *atomically*
+ * pins the slot, reads its tag, and verifies it still holds the
+ * requested (rel, fork, blkno). No BufTable involvement on success.
+ * On a tag mismatch (slot was evicted and reused) it returns false
+ * and we fall back to the regular ReadBuffer.
+ *
+ * This cache stores those hints. A hit ⇒ one fewer BufTable lookup
+ * per page read. For a hot working set (centroid root + the few
+ * posting heads probed by recent queries), hit rate is essentially
+ * 100% after warmup.
+ *
+ * Design
+ * ------
+ * - **Per-backend static, not rd_amcache.** rd_amcache gets freed on
+ *   any relcache invalidation (DDL, vacuum, sinval, ...). The hint
+ *   cache survives invalidation: a stale entry simply fails the tag
+ *   check and we repopulate. Survival matters most for backends in
+ *   mixed read/write workloads where invalidations are frequent.
+ *
+ * - **Direct-mapped, 8192 slots, 64 KiB total.** Keyed by blkno
+ *   (with a bit-rotation hash to avoid aliasing on contiguous
+ *   posting chains). On collision the older entry is overwritten;
+ *   correctness is unchanged because the tag check catches it.
+ *
+ * - **Discriminated by RelFileNumber.** A single backend may have
+ *   multiple meerkat indexes open. The `rel` field prevents an
+ *   index-A blkno cache entry from being mistakenly handed to
+ *   ReadRecentBuffer when index-B requests the same blkno; the tag
+ *   check would catch it anyway, but the early-out avoids the cost.
+ *
+ * - **No pin held by the cache.** Entries are pure advisory hints —
+ *   the buffer manager is free to evict any slot we've cached. PG's
+ *   own refcount + tag is the source of truth; we just provide a
+ *   shortcut to "where to look first".
+ *
+ * Worst case (every lookup misses): one extra branch + tag-check
+ * compare on top of a regular ReadBuffer. Best case (steady state):
+ * one BufTable hash_search saved per page read.
+ * ================================================================ */
+#define MKT_BUF_HINT_SIZE 8192
+
+typedef struct BufHintEntry
+{
+	RelFileNumber rel;	 /* index identity; 0 = empty slot */
+	BlockNumber	  blkno; /* page identity within that index */
+	Buffer		  buf;	 /* hint: shared-buffer slot (1..NBuffers) */
+} BufHintEntry;
+
+static BufHintEntry buf_hint[MKT_BUF_HINT_SIZE];
+
+/* Map blkno → slot. Posting chain pages tend to be contiguous on
+ * disk, which would alias adjacent slots in a plain `blkno % SIZE`
+ * scheme. Mixing low bits into upper positions spreads chains across
+ * the table. */
+static inline uint32_t
+buf_hint_slot(BlockNumber blkno)
+{
+	uint32_t h = (uint32_t) blkno;
+	h		   = (h >> 13) ^ (h << 7) ^ h;
+	return h & (MKT_BUF_HINT_SIZE - 1);
+}
+
 /* ----------------------------------------------------------------
  * Read path
  * ---------------------------------------------------------------- */
 
+/*
+ * Read a page through the shared-buffer cache, using the hint cache
+ * above to skip the BufTable hash lookup when possible.
+ *
+ * Always returns a pinned + share-locked page; callers must call
+ * pg_release_page() to unlock and unpin.
+ */
 static Page
 pg_read_page(MktStorage *self, BlockNumber blkno)
 {
 	MktannStorage *s = PG_STORAGE(self);
 
-	Buffer buf = ReadBuffer(s->index, blkno);
+	/* Look up our hint for this (rel, blkno). On a match we attempt
+	 * ReadRecentBuffer, which atomically validates the hint and pins
+	 * the buffer in one shot — no BufTable involvement on success. */
+	RelFileNumber rel	= s->index->rd_locator.relNumber;
+	uint32_t	  slot	= buf_hint_slot(blkno);
+	BufHintEntry *entry = &buf_hint[slot];
+
+	Buffer buf = InvalidBuffer;
+	if (entry->rel == rel && entry->blkno == blkno &&
+		entry->buf != InvalidBuffer)
+	{
+		if (ReadRecentBuffer(s->index->rd_locator, MAIN_FORKNUM, blkno,
+							 entry->buf))
+			buf = entry->buf;
+		/* On false: hint was stale (slot evicted/reused). Fall
+		 * through to ReadBuffer and refresh the entry below. */
+	}
+
+	if (buf == InvalidBuffer)
+	{
+		buf			 = ReadBuffer(s->index, blkno);
+		entry->rel	 = rel;
+		entry->blkno = blkno;
+		entry->buf	 = buf;
+	}
+
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
 	s->cur_buf = buf;
 	s->read_count++;
