@@ -33,13 +33,18 @@
 
 /* Accumulate one VQTBL1 result into even/odd byte accumulators.
  * a_even += res (as u16, low byte of each lane = byte[2i])
- * a_odd  += res >> 8 (as u16, low byte = byte[2i+1]) */
-#define ACCUM_RES(res, a_even, a_odd)                             \
-	do                                                            \
-	{                                                             \
-		uint16x8_t r16_ = vreinterpretq_u16_u8(res);              \
-		a_even			= vaddq_u16(a_even, r16_);                \
-		a_odd			= vaddq_u16(a_odd, vshrq_n_u16(r16_, 8)); \
+ * a_odd  += res >> 8 (as u16, low byte = byte[2i+1])
+ *
+ * USRA (vsraq_n_u16) folds shift-right+add into one instruction, halving
+ * dispatch in the odd-byte accumulate path. On Neoverse-V2 USRA is
+ * throughput-2 (same as separate SHR+ADD pair) but saves a uop and a
+ * dependency, freeing slots in the 8-wide decoder. */
+#define ACCUM_RES(res, a_even, a_odd)                  \
+	do                                                 \
+	{                                                  \
+		uint16x8_t r16_ = vreinterpretq_u16_u8(res);   \
+		a_even			= vaddq_u16(a_even, r16_);     \
+		a_odd			= vsraq_n_u16(a_odd, r16_, 8); \
 	} while (0)
 
 void
@@ -165,12 +170,12 @@ mkt_fastscan_accumulate_neon(
  *   bytes 64..127: 4 x 16-byte hi-byte tables
  * ---------------------------------------------------------------- */
 
-#define HACC_ACCUM(res, a_even, a_odd)                            \
-	do                                                            \
-	{                                                             \
-		uint16x8_t r16_ = vreinterpretq_u16_u8(res);              \
-		a_even			= vaddq_u16(a_even, r16_);                \
-		a_odd			= vaddq_u16(a_odd, vshrq_n_u16(r16_, 8)); \
+#define HACC_ACCUM(res, a_even, a_odd)                 \
+	do                                                 \
+	{                                                  \
+		uint16x8_t r16_ = vreinterpretq_u16_u8(res);   \
+		a_even			= vaddq_u16(a_even, r16_);     \
+		a_odd			= vsraq_n_u16(a_odd, r16_, 8); \
 	} while (0)
 
 void
