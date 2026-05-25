@@ -41,6 +41,13 @@ struct MktVectorSource
 	/* Reset to the beginning for another pass. */
 	void (*reset)(MktVectorSource *src);
 
+	/*
+	 * Bulk-read all vectors into a contiguous buffer.
+	 * dest must hold nvecs * dim floats.
+	 * Optional — NULL means not supported (use next() loop).
+	 */
+	bool (*read_all)(MktVectorSource *src, float *dest);
+
 	uint32_t nvecs; /* total number of vectors */
 	uint32_t dim;	/* vector dimension */
 };
