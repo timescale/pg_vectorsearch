@@ -51,6 +51,22 @@ hdf5_source_reset(MktVectorSource *src)
 	hs->pos			  = 0;
 }
 
+static bool
+hdf5_source_read_all(MktVectorSource *src, float *dest)
+{
+	MktHdf5Source *hs	   = (MktHdf5Source *)src;
+	hsize_t		   dims[2] = {src->nvecs, src->dim};
+	hid_t		   mspace  = H5Screate_simple(2, dims, NULL);
+	if (mspace < 0)
+		return false;
+
+	H5Sselect_all(hs->fspace);
+	herr_t err = H5Dread(
+			hs->dset, H5T_NATIVE_FLOAT, mspace, hs->fspace, H5P_DEFAULT, dest);
+	H5Sclose(mspace);
+	return err >= 0;
+}
+
 int
 mkt_hdf5_source_open(MktHdf5Source *src, const char *path, const char *dataset)
 {
@@ -70,11 +86,12 @@ mkt_hdf5_source_open(MktHdf5Source *src, const char *path, const char *dataset)
 	hsize_t dims[2];
 	H5Sget_simple_extent_dims(src->fspace, dims, NULL);
 
-	src->base.nvecs = (uint32_t)dims[0];
-	src->base.dim	= (uint32_t)dims[1];
-	src->base.next	= hdf5_source_next;
-	src->base.reset = hdf5_source_reset;
-	src->pos		= 0;
+	src->base.nvecs	   = (uint32_t)dims[0];
+	src->base.dim	   = (uint32_t)dims[1];
+	src->base.next	   = hdf5_source_next;
+	src->base.reset	   = hdf5_source_reset;
+	src->base.read_all = hdf5_source_read_all;
+	src->pos		   = 0;
 
 	/* Create memory dataspace for one row */
 	hsize_t mdims[1] = {dims[1]};

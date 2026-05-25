@@ -33,10 +33,11 @@ void
 mkt_array_source_init(
 		MktArraySource *src, const float *data, uint32_t nvecs, uint32_t dim)
 {
-	src->base.next	= array_source_next;
-	src->base.reset = array_source_reset;
-	src->base.nvecs = nvecs;
-	src->base.dim	= dim;
-	src->data		= data;
-	src->pos		= 0;
+	src->base.next	   = array_source_next;
+	src->base.reset	   = array_source_reset;
+	src->base.read_all = NULL;
+	src->base.nvecs	   = nvecs;
+	src->base.dim	   = dim;
+	src->data		   = data;
+	src->pos		   = 0;
 }
