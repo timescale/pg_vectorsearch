@@ -44,7 +44,7 @@ typedef struct ScorePageScratch
 	Distance *lower_bounds;
 	float	 *multi_scratch;	 /* scratch for batch_multi_with_bound */
 	uint32_t *symmetric_scratch; /* scratch for batch_symmetric_with_bound */
-	uint8_t	 *fs_lut;			 /* LUT buffer for FASTSCAN format */
+	struct MktCentroidScratch *cs; /* back-ptr for FASTSCAN LUT cache */
 } ScorePageScratch;
 
 /* ----------------------------------------------------------------
@@ -75,12 +75,16 @@ struct MktCentroidScratch
 	MktTopK		  level_topk;
 	MktTopKEntry *entries_buf;
 	uint32_t	  entries_cap;
-	/* Fastscan LUT used by the FASTSCAN centroid format. Sized at
-	 * scratch_create for the worst-case (hacc) LUT bytes; the LUT
-	 * is rebuilt once per centroid page scored (amortised across
-	 * its 32-entry groups). */
+	/* Fastscan LUT used by the FASTSCAN centroid format. The LUT only
+	 * depends on the query (qstate->transformed), which is constant
+	 * for the entire centroid descent — so we build it once per query
+	 * and reuse for every FASTSCAN page. fs_lut_valid is cleared at
+	 * the start of every beam-search call. */
 	uint8_t		 *fs_lut;
 	uint32_t	  fs_lut_bytes;
+	float		  fs_lut_delta;
+	float		  fs_lut_bias;
+	bool		  fs_lut_valid;
 };
 
 MktCentroidScratch *
@@ -297,22 +301,31 @@ score_page(
 		 * scored. Amortising the LUT build across all 32 entries in
 		 * a group is the whole reason this is faster than the
 		 * per-vector kernel. */
-		float lut_delta, lut_bias;
-		mkt_fastscan_build_lut_hacc(state->qstate->transformed, dim,
-									 sp_scratch->fs_lut, &lut_delta,
-									 &lut_bias);
+		/* Build the LUT once per query — qstate->transformed is
+		 * constant across the whole centroid descent, so we cache
+		 * the LUT bytes + lut_delta + lut_bias in MktCentroidScratch
+		 * and reuse them on every subsequent FASTSCAN page. */
+		MktCentroidScratch *cs = sp_scratch->cs;
+		if (!cs->fs_lut_valid)
+		{
+			mkt_fastscan_build_lut_hacc(state->qstate->transformed, dim,
+										 cs->fs_lut, &cs->fs_lut_delta,
+										 &cs->fs_lut_bias);
+			cs->fs_lut_valid = true;
+		}
+		float lut_delta = cs->fs_lut_delta;
+		float lut_bias	= cs->fs_lut_bias;
 
-		float g_add		 = state->qstate->g_add;
-		float sum_t		 = state->qstate->sum_transformed;
-		float inv_sqrt_d = state->qstate->inv_sqrt_d;
-		float g_error	 = state->qstate->g_error;
+		float g_add		   = state->qstate->g_add;
+		float sum_t		   = state->qstate->sum_transformed;
+		float inv_sqrt_d   = state->qstate->inv_sqrt_d;
+		float g_error	   = state->qstate->g_error;
+		float err_mult	   = state->qstate->error_multiplier;
 
 		char	*content	  = (char *) PageGetContents(page);
-		uint32_t group_bytes  = mkt_centroid_fastscan_group_bytes(dim);
 		uint32_t entry_count  = count;
 		uint32_t ngroups	  = (entry_count + MKT_FASTSCAN_GROUP - 1) /
 								MKT_FASTSCAN_GROUP;
-		(void) group_bytes;
 
 		int32_t accum[MKT_FASTSCAN_GROUP];
 
@@ -335,8 +348,7 @@ score_page(
 			const uint8_t *codes =
 					mkt_centroid_fastscan_group_codes(content, g, dim);
 
-			mkt_fastscan_accumulate_hacc(codes, sp_scratch->fs_lut, accum,
-										 dim);
+			mkt_fastscan_accumulate_hacc(codes, cs->fs_lut, accum, dim);
 
 			for (uint32_t v = 0; v < g_count && cand_count < cand_cap; v++)
 			{
@@ -349,7 +361,11 @@ score_page(
 
 				Distance est = f_add_arr[v] + g_add -
 							   2.0f * f_rescale_arr[v] * final_dot;
-				Distance err = f_error_arr[v] * g_error;
+				/* Matches rabitq_lower_bound(): err_margin =
+				 * multiplier * f_error * g_error, plus a small
+				 * floating-point margin proportional to |est|. */
+				Distance err = err_mult * f_error_arr[v] * g_error +
+							   1e-5f * fabsf(est);
 
 				uint32_t page_idx = g_start + v;
 				cands[cand_count].child_blkno = child[v];
@@ -506,6 +522,11 @@ mkt_centroid_beam_search(
 	Candidate *buf_a	= scratch->buf_a;
 	Candidate *buf_b	= scratch->buf_b;
 
+	/* Invalidate the per-query fastscan LUT cache. Built lazily on
+	 * first FASTSCAN page encountered, then reused for all subsequent
+	 * pages in this query. */
+	scratch->fs_lut_valid = false;
+
 	/* ScorePageScratch is just pointer-aliased onto the larger
 	 * MktCentroidScratch allocation. */
 	ScorePageScratch sp_scratch = {
@@ -515,7 +536,7 @@ mkt_centroid_beam_search(
 			.lower_bounds	   = scratch->lower_bounds,
 			.multi_scratch	   = scratch->multi_scratch,
 			.symmetric_scratch = scratch->symmetric_scratch,
-			.fs_lut			   = scratch->fs_lut,
+			.cs				   = scratch,
 	};
 
 	/* centroid_vecs: will be used later for copying centroid vectors */

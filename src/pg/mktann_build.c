@@ -310,6 +310,7 @@ mktann_resolve_format(Relation index, DistanceMetric metric)
 	MktannOptions *opts = (MktannOptions *)index->rd_options;
 	int			   cc	= (opts != NULL) ? opts->centroid_compression
 										 : MKT_CENTROID_COMPRESSION_AUTO;
+	bool cfastscan = (opts != NULL) ? opts->centroid_fastscan : false;
 
 	/*
 	 * RaBitQ centroids estimate L2 distance, which routes correctly for
@@ -334,6 +335,21 @@ mktann_resolve_format(Relation index, DistanceMetric metric)
 	default: /* AUTO */
 		compressed = (metric != DISTANCE_INNER_PRODUCT);
 		break;
+	}
+
+	if (cfastscan)
+	{
+		if (!compressed)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("centroid_fastscan requires "
+							"centroid_compression=true")));
+		if (metric == DISTANCE_INNER_PRODUCT)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("centroid_fastscan is not supported "
+							"with vector_ip_ops")));
+		return MKT_CENTROID_FMT_FASTSCAN;
 	}
 
 	if (compressed)
