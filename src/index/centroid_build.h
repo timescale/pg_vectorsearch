@@ -159,6 +159,12 @@ centroid_encoder_init(
 				.global_mean = global_mean,
 		};
 		return &state->r.base;
+	case MKT_CENTROID_FMT_FASTSCAN:
+		/* fastscan uses a group-packed page layout that doesn't fit
+		 * this per-vector encoder model. The build path emits these
+		 * pages directly (see mkt_centroid_write_fastscan_pages —
+		 * future work) or they're produced by an in-place conversion. */
+		return NULL;
 	}
 	return NULL;
 }
