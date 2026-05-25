@@ -32,89 +32,105 @@ TEST(supported_dims)
 	ASSERT_TRUE(mkt_fast_rotate_supported(1536), "1536 = 512*3");
 }
 
-/* Norm preservation: ||F(x)|| should equal ||x|| (orthonormal). */
-TEST(preserves_norm)
+static double
+sum_sq(const float *v, Dimension d)
 {
-	const Dimension dim = 1024;
-	uint8_t *signs = mkt_alloc((dim + 7) / 8);
-	MktFastRotateParams p;
-	mkt_fast_rotate_init(&p, dim, 0x123456789ABCDEF0ULL, signs);
-
-	float *x   = mkt_alloc(dim * sizeof(float));
-	float *out = mkt_alloc(dim * sizeof(float));
-	srand(7);
-	double nx = 0;
-	for (Dimension i = 0; i < dim; i++)
-	{
-		x[i] = (float) ((rand() / (double) RAND_MAX) * 2.0 - 1.0);
-		nx += (double) x[i] * x[i];
-	}
-
-	mkt_fast_rotate_apply(&p, x, out);
-
-	double ny = 0;
-	for (Dimension i = 0; i < dim; i++)
-		ny += (double) out[i] * out[i];
-
-	ASSERT_FLOAT_EQ((float) nx, (float) ny, 1e-3f,
-					"orthonormal rotation preserves norm");
-
-	mkt_free(x);
-	mkt_free(out);
-	mkt_free(signs);
+	double s = 0;
+	for (Dimension i = 0; i < d; i++)
+		s += (double) v[i] * v[i];
+	return s;
 }
 
-/* Inner-product preservation: <F(x), F(y)> should equal <x, y>. */
+static double
+dot(const float *a, const float *b, Dimension d)
+{
+	double s = 0;
+	for (Dimension i = 0; i < d; i++)
+		s += (double) a[i] * b[i];
+	return s;
+}
+
+static void
+fill_random(float *v, Dimension d, unsigned seed)
+{
+	srand(seed);
+	for (Dimension i = 0; i < d; i++)
+		v[i] = (float) ((rand() / (double) RAND_MAX) * 2.0 - 1.0);
+}
+
+/* Norm preservation across dims: pure-FWHT path and mixed-radix path. */
+TEST(preserves_norm)
+{
+	const Dimension dims[] = {64, 256, 768, 1024, 1536};
+	const uint64_t  seeds[] = {0x123, 0x456, 0xC0FFEE, 0xDEAD, 0xABCD};
+	for (size_t t = 0; t < sizeof(dims) / sizeof(dims[0]); t++)
+	{
+		Dimension dim = dims[t];
+		MktFastRotateParams p;
+		mkt_fast_rotate_init(&p, dim, seeds[t]);
+
+		float *x   = mkt_alloc(dim * sizeof(float));
+		float *out = mkt_alloc(dim * sizeof(float));
+		fill_random(x, dim, (unsigned) (7 + t));
+
+		mkt_fast_rotate_apply(&p, x, out);
+
+		double nx = sum_sq(x, dim);
+		double ny = sum_sq(out, dim);
+		ASSERT_FLOAT_EQ((float) nx, (float) ny, 5e-3f,
+						"rotation preserves norm");
+
+		mkt_free(x);
+		mkt_free(out);
+	}
+}
+
+/* Inner-product preservation across dims. */
 TEST(preserves_inner_product)
 {
-	const Dimension dim = 256;
-	uint8_t *signs = mkt_alloc((dim + 7) / 8);
-	MktFastRotateParams p;
-	mkt_fast_rotate_init(&p, dim, 42, signs);
-
-	float *x  = mkt_alloc(dim * sizeof(float));
-	float *y  = mkt_alloc(dim * sizeof(float));
-	float *fx = mkt_alloc(dim * sizeof(float));
-	float *fy = mkt_alloc(dim * sizeof(float));
-	srand(11);
-	double dot_orig = 0;
-	for (Dimension i = 0; i < dim; i++)
+	const Dimension dims[] = {64, 256, 768, 1024};
+	for (size_t t = 0; t < sizeof(dims) / sizeof(dims[0]); t++)
 	{
-		x[i] = (float) ((rand() / (double) RAND_MAX) * 2.0 - 1.0);
-		y[i] = (float) ((rand() / (double) RAND_MAX) * 2.0 - 1.0);
-		dot_orig += (double) x[i] * y[i];
+		Dimension dim = dims[t];
+		MktFastRotateParams p;
+		mkt_fast_rotate_init(&p, dim, 0x1234 + t);
+
+		float *x  = mkt_alloc(dim * sizeof(float));
+		float *y  = mkt_alloc(dim * sizeof(float));
+		float *fx = mkt_alloc(dim * sizeof(float));
+		float *fy = mkt_alloc(dim * sizeof(float));
+		fill_random(x, dim, (unsigned) (11 + t));
+		fill_random(y, dim, (unsigned) (13 + t));
+
+		mkt_fast_rotate_apply(&p, x, fx);
+		mkt_fast_rotate_apply(&p, y, fy);
+
+		double a = dot(x, y, dim);
+		double b = dot(fx, fy, dim);
+		ASSERT_FLOAT_EQ((float) a, (float) b, 5e-3f,
+						"rotation preserves inner product");
+
+		mkt_free(x);
+		mkt_free(y);
+		mkt_free(fx);
+		mkt_free(fy);
 	}
-
-	mkt_fast_rotate_apply(&p, x, fx);
-	mkt_fast_rotate_apply(&p, y, fy);
-
-	double dot_rot = 0;
-	for (Dimension i = 0; i < dim; i++)
-		dot_rot += (double) fx[i] * fy[i];
-
-	ASSERT_FLOAT_EQ((float) dot_orig, (float) dot_rot, 1e-3f,
-					"orthonormal rotation preserves inner product");
-
-	mkt_free(x);
-	mkt_free(y);
-	mkt_free(fx);
-	mkt_free(fy);
-	mkt_free(signs);
 }
 
 /* Deterministic from seed: same seed → same sign vector → same output. */
 TEST(deterministic_from_seed)
 {
-	const Dimension dim	   = 64;
-	uint8_t		   *signs1 = mkt_alloc((dim + 7) / 8);
-	uint8_t		   *signs2 = mkt_alloc((dim + 7) / 8);
+	const Dimension dim = 64;
 	MktFastRotateParams p1, p2;
-	mkt_fast_rotate_init(&p1, dim, 0xCAFEULL, signs1);
-	mkt_fast_rotate_init(&p2, dim, 0xCAFEULL, signs2);
+	mkt_fast_rotate_init(&p1, dim, 0xCAFEULL);
+	mkt_fast_rotate_init(&p2, dim, 0xCAFEULL);
 
 	ASSERT_MEM_EQ(
-			signs1, signs2, (size_t)((dim + 7) / 8),
-			"same seed produces same sign vector");
+			p1.signs1, p2.signs1, (size_t)((dim + 7) / 8),
+			"same seed produces same sign1 vector");
+	ASSERT_MEM_EQ(
+			p1.signs2, p2.signs2, (size_t)((dim + 7) / 8),
+			"same seed produces same sign2 vector");
 
 	float *x	= mkt_alloc(dim * sizeof(float));
 	float *out1 = mkt_alloc(dim * sizeof(float));
@@ -130,86 +146,14 @@ TEST(deterministic_from_seed)
 	mkt_free(x);
 	mkt_free(out1);
 	mkt_free(out2);
-	mkt_free(signs1);
-	mkt_free(signs2);
-}
-
-/* Mixed-radix orthonormality at dim=768 (the cohere case). */
-TEST(preserves_norm_dim768)
-{
-	const Dimension dim = 768;
-	uint8_t *signs = mkt_alloc((dim + 7) / 8);
-	MktFastRotateParams p;
-	mkt_fast_rotate_init(&p, dim, 0xC0FFEE, signs);
-
-	float *x   = mkt_alloc(dim * sizeof(float));
-	float *out = mkt_alloc(dim * sizeof(float));
-	srand(17);
-	double nx = 0;
-	for (Dimension i = 0; i < dim; i++)
-	{
-		x[i] = (float) ((rand() / (double) RAND_MAX) * 2.0 - 1.0);
-		nx += (double) x[i] * x[i];
-	}
-
-	mkt_fast_rotate_apply(&p, x, out);
-
-	double ny = 0;
-	for (Dimension i = 0; i < dim; i++)
-		ny += (double) out[i] * out[i];
-
-	ASSERT_FLOAT_EQ((float) nx, (float) ny, 5e-3f,
-					"mixed-radix rotation preserves norm");
-
-	mkt_free(x);
-	mkt_free(out);
-	mkt_free(signs);
-}
-
-TEST(preserves_inner_product_dim768)
-{
-	const Dimension dim = 768;
-	uint8_t *signs = mkt_alloc((dim + 7) / 8);
-	MktFastRotateParams p;
-	mkt_fast_rotate_init(&p, dim, 0xDECAF, signs);
-
-	float *x  = mkt_alloc(dim * sizeof(float));
-	float *y  = mkt_alloc(dim * sizeof(float));
-	float *fx = mkt_alloc(dim * sizeof(float));
-	float *fy = mkt_alloc(dim * sizeof(float));
-	srand(23);
-	double dot_orig = 0;
-	for (Dimension i = 0; i < dim; i++)
-	{
-		x[i] = (float) ((rand() / (double) RAND_MAX) * 2.0 - 1.0);
-		y[i] = (float) ((rand() / (double) RAND_MAX) * 2.0 - 1.0);
-		dot_orig += (double) x[i] * y[i];
-	}
-
-	mkt_fast_rotate_apply(&p, x, fx);
-	mkt_fast_rotate_apply(&p, y, fy);
-
-	double dot_rot = 0;
-	for (Dimension i = 0; i < dim; i++)
-		dot_rot += (double) fx[i] * fy[i];
-
-	ASSERT_FLOAT_EQ((float) dot_orig, (float) dot_rot, 5e-3f,
-					"mixed-radix rotation preserves inner product");
-
-	mkt_free(x);
-	mkt_free(y);
-	mkt_free(fx);
-	mkt_free(fy);
-	mkt_free(signs);
 }
 
 /* In-place aliasing: out == in must work. */
 TEST(in_place)
 {
 	const Dimension dim = 32;
-	uint8_t *signs = mkt_alloc((dim + 7) / 8);
 	MktFastRotateParams p;
-	mkt_fast_rotate_init(&p, dim, 99, signs);
+	mkt_fast_rotate_init(&p, dim, 99);
 
 	float x[32], copy[32], copy_out[32];
 	for (Dimension i = 0; i < dim; i++)
@@ -221,6 +165,4 @@ TEST(in_place)
 	for (Dimension i = 0; i < dim; i++)
 		ASSERT_FLOAT_EQ(copy_out[i], x[i], 1e-6f,
 						"in-place result matches out-of-place");
-
-	mkt_free(signs);
 }

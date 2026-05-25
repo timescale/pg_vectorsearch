@@ -449,10 +449,22 @@ mkt_rabitq_init(RaBitQParams *params, Dimension dim, uint64_t seed)
 	params->dim			 = dim;
 	params->seed		 = seed;
 	params->packed_bytes = MKT_RABITQ_BYTES(dim);
+	memset(params->_pad, 0, sizeof(params->_pad));
 
-	/* Generate random orthogonal matrix into inline P[] */
-	if (mkt_random_orthogonal_matrix(params->P, dim, seed) != 0)
-		return -1;
+	/* Prefer the O(d log d) randomized Hadamard whenever the dim is
+	 * factorable as N·K (N power-of-two ≥ 4, K small). Fall back to a
+	 * dense random orthogonal P otherwise. */
+	if (mkt_fast_rotate_supported(dim))
+	{
+		params->rotation_kind = RABITQ_ROT_HADAMARD;
+		mkt_fast_rotate_init(&params->fast, dim, seed);
+	}
+	else
+	{
+		params->rotation_kind = RABITQ_ROT_DENSE;
+		if (mkt_random_orthogonal_matrix(params->P, dim, seed) != 0)
+			return -1;
+	}
 
 	return 0;
 }
@@ -543,7 +555,7 @@ mkt_rabitq_encode_into(
 	 * P^T to the residual is equivalent to rotating both vectors then
 	 * subtracting.
 	 */
-	mkt_matrix_transpose_vector_mul(params->P, residual, transformed, dim);
+	mkt_rabitq_rotate(params, residual, transformed);
 
 	/* Step 3: Extract sign bits (LSB-first packing, FAISS-compatible) */
 	rabitq_extract_signs(transformed, output->bits, dim);
@@ -658,12 +670,10 @@ rabitq_encode_batch_impl(
 	 * This is the key optimization: matrix P stays in cache while
 	 * processing all vectors.
 	 */
-	mkt_matrix_transpose_vector_mul_batch(
-			params->P, residuals, transformed, count, dim);
+	mkt_rabitq_rotate_batch(params, residuals, transformed, count);
 
 	/* Step 3: Rotate centroid once (shared across all vectors) */
-	mkt_matrix_transpose_vector_mul(
-			params->P, centroid.data, cent_rotated, dim);
+	mkt_rabitq_rotate(params, centroid.data, cent_rotated);
 
 	/* Step 4: Process each transformed vector to extract bits and factors */
 	for (uint16_t i = 0; i < count; i++)
@@ -944,8 +954,7 @@ mkt_rabitq_prepare_query_ex(
 	mkt_vector_sub(query.data, centroid.data, residual, dim);
 
 	/* Transform through P^T */
-	mkt_matrix_transpose_vector_mul(
-			params->P, residual, state->transformed, dim);
+	mkt_rabitq_rotate(params, residual, state->transformed);
 
 	/* Compute g_add = ||query - centroid||^2 */
 	state->g_add = mkt_l2_norm_squared(state->transformed, dim);
@@ -1017,7 +1026,34 @@ void
 mkt_rabitq_rotate(
 		const RaBitQParams *params, const float *input, float *output)
 {
-	mkt_matrix_transpose_vector_mul(params->P, input, output, params->dim);
+	if (params->rotation_kind == RABITQ_ROT_HADAMARD)
+		mkt_fast_rotate_apply(&params->fast, input, output);
+	else
+		mkt_matrix_transpose_vector_mul(
+				params->P, input, output, params->dim);
+}
+
+void
+mkt_rabitq_rotate_batch(
+		const RaBitQParams *params,
+		const float		   *inputs,
+		float			   *outputs,
+		uint32_t			count)
+{
+	if (params->rotation_kind == RABITQ_ROT_HADAMARD)
+	{
+		Dimension dim = params->dim;
+		for (uint32_t i = 0; i < count; i++)
+			mkt_fast_rotate_apply(
+					&params->fast,
+					inputs + (size_t) i * dim,
+					outputs + (size_t) i * dim);
+	}
+	else
+	{
+		mkt_matrix_transpose_vector_mul_batch(
+				params->P, inputs, outputs, count, params->dim);
+	}
 }
 
 void
