@@ -25,24 +25,37 @@
 
 #include "mkt_types.h"
 
-/* Random sign vector for the diagonal D in F = (1/sqrt(N)) * H * D.
- * One bit per dimension, packed LSB-first into bytes. */
+/* Mixed-radix support: factor dim = N * K with N a power-of-two.
+ * MIXING_DIM_MAX caps K so we can keep the K×K mixing matrix on the
+ * stack as fixed-size. cohere-1M lives at dim=768 = 256*3; vectors at
+ * dim = 384 = 128*3, 1536 = 512*3, etc. also work. */
+#define MKT_FAST_ROTATE_K_MAX 8
+
 typedef struct MktFastRotateParams
 {
-	Dimension dim;		/* must be a power of 2 */
-	uint64_t  seed;		/* used to regenerate signs deterministically */
-	uint8_t	 *signs;	/* dim bits, packed; sign[i] = (signs[i>>3] >> (i&7)) & 1 */
+	Dimension dim;		/* total vector dimension */
+	Dimension fwht_n;	/* power-of-two FWHT length (= dim when K==1) */
+	uint32_t  k;		/* outer "mixing" radix; K==1 means pure FWHT */
+	uint64_t  seed;		/* regenerates signs+mixer deterministically */
+	uint8_t	 *signs;	/* dim bits, packed; sign[i] = (signs[i>>3] >> (i&7))&1 */
+	/* Random K×K orthonormal matrix applied across the K sub-blocks
+	 * after the per-block FWHT. Generated from seed; identity slot
+	 * unused when K==1. Stored row-major as K*K floats. */
+	float	  mixer[MKT_FAST_ROTATE_K_MAX * MKT_FAST_ROTATE_K_MAX];
 } MktFastRotateParams;
 
-/* True if fast rotation is supported at the given dimension. */
+/* True if fast rotation is supported at the given dimension.
+ * Requires dim = N * K with N a power-of-two and K ≤ K_MAX. */
 bool mkt_fast_rotate_supported(Dimension dim);
 
-/* Initialise sign vector from seed. `signs_buf` must hold at least
- * (dim + 7) / 8 bytes. */
+/* Initialise sign vector + mixer from seed. `signs_buf` must hold at
+ * least (dim + 7) / 8 bytes. */
 void mkt_fast_rotate_init(
 		MktFastRotateParams *p, Dimension dim, uint64_t seed, uint8_t *signs_buf);
 
-/* Apply F = (1/sqrt(N)) * H * D to `in`, writing into `out`.
+/* Apply F = (1/sqrt(dim)) * M * H * D to `in`, writing into `out`.
+ * H is the block-diagonal FWHT on K blocks of length N; M is the K×K
+ * mixer applied across the blocks; D is the diagonal sign flip.
  * `out` may alias `in`. Both buffers must be `dim` floats. */
 void mkt_fast_rotate_apply(
 		const MktFastRotateParams *p, const float *in, float *out);
