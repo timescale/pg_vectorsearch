@@ -403,6 +403,22 @@ mktann_resolve_format(Relation index, DistanceMetric metric)
 {
 	MktannOptions *opts = (MktannOptions *)index->rd_options;
 	bool compressed		= (opts != NULL) ? opts->centroid_compression : false;
+	bool cfastscan		= (opts != NULL) ? opts->centroid_fastscan : false;
+
+	if (cfastscan)
+	{
+		if (!compressed)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("centroid_fastscan requires "
+							"centroid_compression=true")));
+		if (metric == DISTANCE_INNER_PRODUCT)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("centroid_fastscan is not supported "
+							"with vector_ip_ops")));
+		return MKT_CENTROID_FMT_FASTSCAN;
+	}
 
 	if (compressed)
 	{

@@ -201,6 +201,13 @@ _PG_init(void)
 			"Use VPSHUFB fastscan posting page format",
 			false,
 			NoLock);
+	add_bool_reloption(
+			mktann_relopt_kind,
+			"centroid_fastscan",
+			"Emit FASTSCAN-format centroid pages "
+			"(requires centroid_compression=true)",
+			false,
+			NoLock);
 
 	mkt_distance_init();
 	mkt_rabitq_init_simd();

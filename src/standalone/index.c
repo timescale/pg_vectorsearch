@@ -605,15 +605,16 @@ mkt_index_build(MktVectorSource *src, const MktIndexConfig *config)
 		}
 
 		mkt_memctx_switch(build_ctx);
+		bool needs_rq_params =
+				(idx->base.centroid_format == MKT_CENTROID_FMT_RABITQ ||
+				 idx->base.centroid_format == MKT_CENTROID_FMT_FASTSCAN);
 		mkt_write_centroid_tree(
 				&idx->centroid_storage.base,
 				tree,
 				dim,
 				fan_out,
 				idx->base.centroid_format,
-				idx->base.centroid_format == MKT_CENTROID_FMT_RABITQ
-						? idx->base.params
-						: NULL,
+				needs_rq_params ? idx->base.params : NULL,
 				idx->global_mean,
 				leaf_heads,
 				node_first_blkno,

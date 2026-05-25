@@ -46,6 +46,8 @@ parse_centroid_fmt(const char *s)
 		return MKT_CENTROID_FMT_FLOAT;
 	if (strcmp(s, "float16") == 0)
 		return MKT_CENTROID_FMT_HALF;
+	if (strcmp(s, "fastscan") == 0)
+		return MKT_CENTROID_FMT_FASTSCAN;
 	return MKT_CENTROID_FMT_RABITQ;
 }
 
