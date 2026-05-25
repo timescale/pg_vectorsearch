@@ -105,6 +105,7 @@ typedef struct MktannOptions
 	double boundary_epsilon;	 /* boundary replication threshold (0=off) */
 	int	   centroid_compression; /* MktCentroidCompression */
 	bool   fastscan;			 /* use VPSHUFB fastscan posting format */
+	bool   centroid_fastscan;	 /* emit FASTSCAN-format centroid pages */
 } MktannOptions;
 
 #define MKTANN_DEFAULT_FAN_OUT 32

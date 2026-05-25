@@ -123,6 +123,9 @@ mktann_options(Datum reloptions, bool validate)
 			 RELOPT_TYPE_ENUM,
 			 offsetof(MktannOptions, centroid_compression)},
 			{"fastscan", RELOPT_TYPE_BOOL, offsetof(MktannOptions, fastscan)},
+			{"centroid_fastscan",
+			 RELOPT_TYPE_BOOL,
+			 offsetof(MktannOptions, centroid_fastscan)},
 	};
 	return (bytea *)build_reloptions(
 			reloptions,
