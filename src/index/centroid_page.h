@@ -40,6 +40,7 @@
 #include "core/memory.h"
 #include "mkt_halfvec.h"
 #include "mkt_types.h"
+#include "quant/fastscan.h"
 #include "quant/rabitq.h"
 
 /* Include PG compat for standalone, real PG headers for extension */
@@ -74,9 +75,32 @@
 
 typedef enum MktCentroidFormat
 {
-	MKT_CENTROID_FMT_RABITQ = 0,
-	MKT_CENTROID_FMT_FLOAT	= 1,
-	MKT_CENTROID_FMT_HALF	= 2,
+	MKT_CENTROID_FMT_RABITQ	  = 0,
+	MKT_CENTROID_FMT_FLOAT	  = 1,
+	MKT_CENTROID_FMT_HALF	  = 2,
+	/*
+	 * FASTSCAN: same RaBitQ codes as the RABITQ format, but rearranged
+	 * into 32-vector groups with kPerm0 interleaving so the centroid
+	 * scoring path can use mkt_fastscan_accumulate instead of the
+	 * per-vector mkt_rabitq_inner_product_multi kernel.
+	 *
+	 * Group section layout (per 32 entries):
+	 *   BlockNumber child_blkno[32]      128 B
+	 *   float       f_add[32]            128 B
+	 *   float       f_rescale[32]        128 B
+	 *   float       f_error[32]          128 B
+	 *   uint8_t     codes[nsq_pairs*32]  variable
+	 *
+	 * Per-entry MktCentroidEntryMeta (4 B child_blkno + 4 B
+	 * child_count/flags) is replaced by the array-of-fields layout
+	 * above; child_count and per-entry flags are dropped because the
+	 * page-level MKT_CENTROID_OPAQUE_LEAF bit already tells the scan
+	 * whether children are posting heads vs. nested centroid pages,
+	 * and child_count is only used at build time. Final group may be
+	 * partial; unused slots have child_blkno = InvalidBlockNumber and
+	 * zero-padded codes.
+	 */
+	MKT_CENTROID_FMT_FASTSCAN = 3,
 } MktCentroidFormat;
 
 /* ----------------------------------------------------------------
@@ -133,6 +157,13 @@ mkt_centroid_data_size(Dimension dim, MktCentroidFormat fmt)
 		return dim * sizeof(float);
 	case MKT_CENTROID_FMT_HALF:
 		return dim * sizeof(half);
+	case MKT_CENTROID_FMT_FASTSCAN:
+		/* Average per-entry overhead inside a fastscan group. Used
+		 * only by the legacy "data_size × N" capacity check; the
+		 * real layout is group-based — see mkt_centroid_fastscan_*. */
+		return (uint32_t) (MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
+						   MKT_FASTSCAN_GROUP_BYTES(dim)) /
+			   MKT_FASTSCAN_GROUP;
 	default:
 		return MKT_RABITQ_DATA_SIZE(dim);
 	}
@@ -163,8 +194,101 @@ mkt_centroid_leaf_entry_bytes_fmt(Dimension dim, MktCentroidFormat fmt)
 static inline uint32_t
 mkt_centroid_max_entries_fmt(Dimension dim, MktCentroidFormat fmt)
 {
+	if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+	{
+		/* fastscan stores entries in 32-vector groups; max_entries is
+		 * ngroups * 32. See mkt_centroid_fastscan_group_bytes. */
+		uint32_t group_bytes = (uint32_t) (MKT_FASTSCAN_GROUP *
+											   sizeof(BlockNumber) +
+										   MKT_FASTSCAN_GROUP * 3 *
+											   sizeof(float) +
+										   MKT_FASTSCAN_GROUP_BYTES(dim));
+		uint32_t ngroups = (uint32_t) MKT_CENTROID_PAGE_USABLE / group_bytes;
+		return ngroups * MKT_FASTSCAN_GROUP;
+	}
 	return (uint32_t)(MKT_CENTROID_PAGE_USABLE /
 					  mkt_centroid_entry_bytes_fmt(dim, fmt));
+}
+
+/* ----------------------------------------------------------------
+ * Fastscan centroid page layout
+ *
+ * No PostgreSQL-style meta-grows-forward / data-grows-backward — the
+ * whole page contents area is a sequence of fixed-size group sections
+ * laid out forward from PageGetContents(). The number of valid
+ * entries (which may be < ngroups * 32 for the last group) lives in
+ * opaque->entry_count as for the other formats; ngroups is
+ * ceil(entry_count / 32).
+ *
+ * Per-group section, in this order so that group index g maps to a
+ * single contiguous span computable via g * group_bytes:
+ *
+ *   BlockNumber child_blkno[32]
+ *   float       f_add[32]
+ *   float       f_rescale[32]
+ *   float       f_error[32]
+ *   uint8_t     codes[nsq_pairs * 32]
+ *
+ * Centroid pages do NOT need leaf-mode pt_centroid (that lives on
+ * the first posting page; see mkt_posting_pt_centroid). The leaf bit
+ * in opaque flags determines whether child_blkno[*] points to
+ * posting heads or nested centroid pages.
+ * ---------------------------------------------------------------- */
+
+static inline uint32_t
+mkt_centroid_fastscan_group_bytes(Dimension dim)
+{
+	return (uint32_t) (MKT_FASTSCAN_GROUP * sizeof(BlockNumber) +
+					   MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
+					   MKT_FASTSCAN_GROUP_BYTES(dim));
+}
+
+static inline uint32_t
+mkt_centroid_fastscan_max_groups(Dimension dim)
+{
+	return (uint32_t) MKT_CENTROID_PAGE_USABLE /
+		   mkt_centroid_fastscan_group_bytes(dim);
+}
+
+/* Group accessors: each takes the page contents pointer + group index. */
+static inline char *
+mkt_centroid_fastscan_group_base(char *content, uint32_t g, Dimension dim)
+{
+	return content + (size_t) g * mkt_centroid_fastscan_group_bytes(dim);
+}
+
+static inline BlockNumber *
+mkt_centroid_fastscan_group_child(char *content, uint32_t g, Dimension dim)
+{
+	return (BlockNumber *) mkt_centroid_fastscan_group_base(content, g, dim);
+}
+
+static inline float *
+mkt_centroid_fastscan_group_f_add(char *content, uint32_t g, Dimension dim)
+{
+	return (float *) (mkt_centroid_fastscan_group_base(content, g, dim) +
+					  MKT_FASTSCAN_GROUP * sizeof(BlockNumber));
+}
+
+static inline float *
+mkt_centroid_fastscan_group_f_rescale(char *content, uint32_t g, Dimension dim)
+{
+	return mkt_centroid_fastscan_group_f_add(content, g, dim) +
+		   MKT_FASTSCAN_GROUP;
+}
+
+static inline float *
+mkt_centroid_fastscan_group_f_error(char *content, uint32_t g, Dimension dim)
+{
+	return mkt_centroid_fastscan_group_f_rescale(content, g, dim) +
+		   MKT_FASTSCAN_GROUP;
+}
+
+static inline uint8_t *
+mkt_centroid_fastscan_group_codes(char *content, uint32_t g, Dimension dim)
+{
+	return (uint8_t *) (mkt_centroid_fastscan_group_f_error(content, g, dim) +
+						MKT_FASTSCAN_GROUP);
 }
 
 /* Maximum entries per leaf page (includes pt_centroid per entry) */
