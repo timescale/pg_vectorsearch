@@ -115,11 +115,10 @@ init_mixer(float *m, uint32_t k, uint64_t *prng_state)
 
 void
 mkt_fast_rotate_init(
-		MktFastRotateParams *p, Dimension dim, uint64_t seed, uint8_t *signs_buf)
+		MktFastRotateParams *p, Dimension dim, uint64_t seed)
 {
 	p->dim	 = dim;
 	p->seed	 = seed;
-	p->signs = signs_buf;
 
 	/* Factor dim = fwht_n * k with fwht_n the power-of-two part. */
 	uint32_t odd = dim;
@@ -128,15 +127,21 @@ mkt_fast_rotate_init(
 	p->fwht_n = dim / odd;
 	p->k	  = odd;
 
-	uint32_t nbytes = (uint32_t)((dim + 7) / 8);
-	memset(p->signs, 0, nbytes);
+	memset(p->signs1, 0, sizeof(p->signs1));
+	memset(p->signs2, 0, sizeof(p->signs2));
 
 	uint64_t s = seed ? seed : 0xDEADBEEFCAFEBABEULL;
 	for (Dimension i = 0; i < dim; i++)
 	{
 		uint64_t r = splitmix64(&s);
 		if (r & 1)
-			p->signs[i >> 3] |= (uint8_t)(1u << (i & 7));
+			p->signs1[i >> 3] |= (uint8_t)(1u << (i & 7));
+	}
+	for (Dimension i = 0; i < dim; i++)
+	{
+		uint64_t r = splitmix64(&s);
+		if (r & 1)
+			p->signs2[i >> 3] |= (uint8_t)(1u << (i & 7));
 	}
 
 	memset(p->mixer, 0, sizeof(p->mixer));
@@ -199,12 +204,12 @@ mkt_fast_rotate_apply(
 	 * unit-norm regardless of K. */
 	float	  invsq	 = 1.0f / sqrtf((float) n);
 
-	/* Sign flip + scale. Folding the 1/sqrt(N) scale into this pass
-	 * means the butterflies and mixer can run on plain sums without
-	 * a final scaling sweep. */
+	/* Pre-FWHT sign flip (D1) + scale. Folding the 1/sqrt(N) scale
+	 * into this pass means the butterflies and mixer can run on plain
+	 * sums without a final scaling sweep. */
 	for (Dimension i = 0; i < dim; i++)
 	{
-		float sign = ((p->signs[i >> 3] >> (i & 7)) & 1u) ? -1.0f : 1.0f;
+		float sign = ((p->signs1[i >> 3] >> (i & 7)) & 1u) ? -1.0f : 1.0f;
 		out[i]	   = in[i] * sign * invsq;
 	}
 
@@ -218,5 +223,16 @@ mkt_fast_rotate_apply(
 	{
 		for (Dimension col = 0; col < n; col++)
 			apply_mixer_column(out, p->mixer, k, n, col);
+	}
+
+	/* Post-FWHT sign flip (D2). This second round of randomisation
+	 * tightens the concentration of the transform: with one round,
+	 * worst-case Lipschitz can break RaBitQ's strict lower bound at
+	 * small dim; two rounds match the FJLT analysis (Ailon-Chazelle)
+	 * and restore the bound. Cost is one extra O(d) pass. */
+	for (Dimension i = 0; i < dim; i++)
+	{
+		float sign = ((p->signs2[i >> 3] >> (i & 7)) & 1u) ? -1.0f : 1.0f;
+		out[i]	  *= sign;
 	}
 }

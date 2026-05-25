@@ -100,21 +100,48 @@ typedef struct RaBitQBatch
 	uint8_t *bits;		   /* [count * packed_bytes] */
 } RaBitQBatch;
 
+/* Choice of random orthonormal rotation. Either:
+ *   DENSE: a randomly-sampled dim×dim orthonormal matrix applied with
+ *     a dim² sgemv. Universal but expensive at large dim.
+ *   HADAMARD: a randomized Hadamard transform (with mixed-radix support
+ *     for non-power-of-two dims). O(d log d). Used when
+ *     mkt_fast_rotate_supported(dim).
+ *
+ * Per-query rotation cost at dim=768 (cohere): DENSE ≈ 80 µs vs
+ * HADAMARD ≈ 5 µs measured against cblas_sgemv on Graviton 4.
+ */
+typedef enum RaBitQRotationKind
+{
+	RABITQ_ROT_DENSE	 = 0,
+	RABITQ_ROT_HADAMARD	 = 1,
+} RaBitQRotationKind;
+
+#include "quant/fast_rotate.h"
+
 /*
  * RaBitQParams - Quantizer parameters (shared per index)
  *
- * Contains the random orthogonal matrix and derived values. Generated
- * once during index creation and shared across all vectors in the index.
- * The matrix P ensures isotropic distribution of residuals, which is
- * essential for RaBitQ's error bounds.
+ * Contains the random orthogonal rotation and derived values. Generated
+ * once during index creation and shared across all vectors in the
+ * index. The rotation ensures isotropic distribution of residuals,
+ * which is essential for RaBitQ's error bounds.
  */
 typedef struct RaBitQParams
 {
-	Dimension dim;						/* Vector dimension */
-	uint32_t  packed_bytes;				/* ceil(dim / 8) */
-	uint64_t  seed;						/* Seed for reproducibility */
-	float	  P[FLEXIBLE_ARRAY_MEMBER]; /* Random orthogonal matrix
-										 * (dim x dim), row-major */
+	Dimension			dim;		   /* Vector dimension */
+	uint32_t			packed_bytes;  /* ceil(dim / 8) */
+	uint64_t			seed;		   /* Seed for reproducibility */
+	uint8_t				rotation_kind; /* RaBitQRotationKind */
+	uint8_t				_pad[7];	   /* keep `fast` aligned */
+	MktFastRotateParams fast;		   /* used when rotation_kind == HADAMARD */
+	float				P[FLEXIBLE_ARRAY_MEMBER]; /* Dense matrix
+												   * (dim x dim, row-major).
+												   * Used when
+												   * rotation_kind == DENSE;
+												   * unused otherwise but
+												   * still allocated so the
+												   * struct keeps a single
+												   * sizing macro. */
 } RaBitQParams;
 
 /* Total byte size for a RaBitQParams with dim x dim matrix */
@@ -381,6 +408,15 @@ RaBitQQueryState *mkt_rabitq_prepare_query_ex(
  */
 void mkt_rabitq_rotate(
 		const RaBitQParams *params, const float *input, float *output);
+
+/* Same as mkt_rabitq_rotate but for `count` consecutive vectors stored
+ * contiguously (each `dim` floats). Used by the index-build bulk path
+ * to amortise loading the rotation parameters across many inputs. */
+void mkt_rabitq_rotate_batch(
+		const RaBitQParams *params,
+		const float		   *inputs,
+		float			   *outputs,
+		uint32_t			count);
 
 /*
  * Initialize a pre-allocated query state from already-rotated vectors.
