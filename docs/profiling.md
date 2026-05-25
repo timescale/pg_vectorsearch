@@ -141,13 +141,49 @@ Without the `backend_type='client backend'` filter you'll happily
 attach perf to an autovacuum worker and waste a 20 s recording on
 `heap_vacuum_rel` and `pg_checksum_page`.
 
-### Clear cached rekall results between runs
+### Don't share a results_dir across runs — partition per experiment
 
 rekall skips sweep points that already have a result file in the
-configured `results_dir`. After a change, **rename or delete**
-`results/cohere-1m/` (or whatever the dataset config points at) before
-re-running, or rekall will silently report cached numbers and your
-"after" looks the same as your "before".
+configured `results_dir`. The temptation is to `rm -rf` the dir
+before each run to force re-benching. **Don't.** A later sweep that
+only covers a subset of indexes will quietly leave you with no JSON
+for the ones you didn't include — and any later plot or comparison
+loses those configs entirely. (This happened during the SVE2-sgemv
+investigation: the n2000-soar and n4000-norepl JSONs from the
+original full sweep got wiped because the V2-BLAS rerun only
+covered n4000-soar and n2000-soar.)
+
+The right pattern is one `results_dir` per experiment, set in a
+small per-run dataset config:
+
+```toml
+# /tmp/claude/ds-myrun.toml
+[dataset]
+name = "cohere-1m"
+uri  = "s3://..."
+metric = "angular"
+dimension = 768
+
+[load]
+table = "cohere_1m"
+
+[search]
+k = 10
+runs = 3
+warmup = 500
+num_queries = 10000
+
+[output]
+format = ["table", "json"]
+results_dir = "/tmp/claude/results_myrun"   # unique per experiment
+```
+
+Then `rekall run --datasets /tmp/claude/ds-myrun.toml --indexes ...`
+writes JSONs in a directory nobody else touches. Old runs stay on
+disk and you can plot any combination at any time.
+
+If you genuinely want rekall to redo a sweep point that already has
+a result, rename or move the prior JSON aside — never delete it.
 
 ### Don't profile or measure while another workload is running
 
