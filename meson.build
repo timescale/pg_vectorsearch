@@ -289,6 +289,7 @@ mkt_core_sources = files(
   'src/quant/rabitq.c',
   'src/quant/fastscan.c',
   'src/quant/matrix.c',
+  'src/quant/fast_rotate.c',
   'src/algo/topk.c',
   'src/algo/hkmeans.c',
   'src/index/centroid_build.c',

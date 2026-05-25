@@ -26,6 +26,7 @@ unit_test_sources = files(
   'test_fastscan.c',
   'test_posting_page.c',
   'test_distance.c',
+  'test_fast_rotate.c',
   'test_fixtures.c',
   'test_halfvec.c',
   'test_hkmeans.c',
