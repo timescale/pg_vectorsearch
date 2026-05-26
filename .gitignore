@@ -9,7 +9,22 @@ bin/
 # Editor/IDE
 .cache/
 .claude/
+.idea
+.vscode
+.mcp.json
+.nvimlog
 compile_commands.json
+
+# Sandbox dotfiles (Claude Code environment)
+.bash_profile
+.bashrc
+.zprofile
+.zshrc
+.profile
+.gitconfig
+.ripgreprc
+.dockerignore
+.gitmodules
 
 # Environment
 .env
@@ -17,6 +32,7 @@ compile_commands.json
 # Coverage
 *.gcda
 *.gcno
+*.gcov
 coverage.html
 coverage*.html
 
@@ -24,3 +40,8 @@ coverage*.html
 profiles/
 perf.data
 perf.data.old
+*-flamegraph.svg
+
+# Regression test output
+regression.diffs
+regression.out
