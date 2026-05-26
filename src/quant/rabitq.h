@@ -100,53 +100,33 @@ typedef struct RaBitQBatch
 	uint8_t *bits;		   /* [count * packed_bytes] */
 } RaBitQBatch;
 
-/* Choice of random orthonormal rotation. Either:
- *   DENSE: a randomly-sampled dim×dim orthonormal matrix applied with
- *     a dim² sgemv. Universal but expensive at large dim.
- *   HADAMARD: a randomized Hadamard transform (with mixed-radix support
- *     for non-power-of-two dims). O(d log d). Used when
- *     mkt_fast_rotate_supported(dim).
- *
- * Per-query rotation cost at dim=768 (cohere): DENSE ≈ 80 µs vs
- * HADAMARD ≈ 5 µs measured against cblas_sgemv on Graviton 4.
- */
-typedef enum RaBitQRotationKind
-{
-	RABITQ_ROT_DENSE	 = 0,
-	RABITQ_ROT_HADAMARD	 = 1,
-} RaBitQRotationKind;
-
 #include "quant/fast_rotate.h"
 
 /*
  * RaBitQParams - Quantizer parameters (shared per index)
  *
- * Contains the random orthogonal rotation and derived values. Generated
- * once during index creation and shared across all vectors in the
- * index. The rotation ensures isotropic distribution of residuals,
- * which is essential for RaBitQ's error bounds.
+ * Holds the randomized Hadamard rotation used to spread residuals
+ * isotropically before RaBitQ's 1-bit sign extraction. Generated once
+ * at index build time from (dim, seed); the rotation is regenerated
+ * deterministically from the seed at query time, so the params struct
+ * is small and trivially serialisable.
+ *
+ * Only dims supported by mkt_fast_rotate_supported() are accepted —
+ * that covers every common embedding dim (multiples of 4 with no
+ * large odd factor, i.e. 64, 128, …, 768, 1024, 1536, 2048).
  */
 typedef struct RaBitQParams
 {
-	Dimension			dim;		   /* Vector dimension */
-	uint32_t			packed_bytes;  /* ceil(dim / 8) */
-	uint64_t			seed;		   /* Seed for reproducibility */
-	uint8_t				rotation_kind; /* RaBitQRotationKind */
-	uint8_t				_pad[7];	   /* keep `fast` aligned */
-	MktFastRotateParams fast;		   /* used when rotation_kind == HADAMARD */
-	float				P[FLEXIBLE_ARRAY_MEMBER]; /* Dense matrix
-												   * (dim x dim, row-major).
-												   * Used when
-												   * rotation_kind == DENSE;
-												   * unused otherwise but
-												   * still allocated so the
-												   * struct keeps a single
-												   * sizing macro. */
+	Dimension			dim;		  /* Vector dimension */
+	uint32_t			packed_bytes; /* ceil(dim / 8) */
+	uint64_t			seed;		  /* Seed for reproducibility */
+	MktFastRotateParams fast;		  /* Hadamard rotation (signs + mixer) */
 } RaBitQParams;
 
-/* Total byte size for a RaBitQParams with dim x dim matrix */
-#define MKT_RABITQ_PARAMS_SIZE(dim) \
-	(offsetof(RaBitQParams, P) + (size_t)(dim) * (dim) * sizeof(float))
+/* Total byte size for a RaBitQParams. The Hadamard rotation has
+ * constant overhead — dim doesn't affect the size — but we keep the
+ * macro signature for callers that don't know that yet. */
+#define MKT_RABITQ_PARAMS_SIZE(dim) ((void)(dim), sizeof(RaBitQParams))
 
 /*
  * RaBitQScratch - Pre-allocated scratch buffers for encoding
@@ -222,27 +202,19 @@ typedef struct RaBitQQueryState
 /*
  * Create new RaBitQ parameters with heap allocation.
  *
- * Generates a random orthogonal matrix of size dim x dim using the given
- * seed. The matrix is created via QR decomposition of a random Gaussian
- * matrix.
+ * Sets up a randomized Hadamard rotation deterministically from
+ * (dim, seed). Fails if dim is unsupported by
+ * mkt_fast_rotate_supported().
  *
- * Returns NULL on allocation failure.
+ * Returns NULL on allocation or dim-validity failure.
  */
 RaBitQParams *mkt_rabitq_create(Dimension dim, uint64_t seed);
 
 /*
- * Create RaBitQ parameters from an existing rotation matrix.
- * Copies the matrix into the new allocation.
- */
-RaBitQParams *
-mkt_rabitq_create_from_matrix(Dimension dim, uint64_t seed, const float *P);
-
-/*
  * Initialize RaBitQ parameters in pre-allocated memory.
  *
- * Same as mkt_rabitq_create but uses caller-provided buffer.
- * Buffer must be at least MKT_RABITQ_PARAMS_SIZE(dim) bytes.
- * Generates the rotation matrix P in-place.
+ * Same as mkt_rabitq_create but uses caller-provided buffer of size
+ * MKT_RABITQ_PARAMS_SIZE(dim).
  *
  * Returns 0 on success, -1 on failure.
  */

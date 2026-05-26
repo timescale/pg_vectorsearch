@@ -19,7 +19,6 @@
 #include "core/platform.h"
 #include "mkt_halfvec.h"
 #include "mkt_types.h"
-#include "quant/matrix.h"
 #include "quant/rabitq.h"
 
 #ifdef MKT_HAVE_FAISS
@@ -557,8 +556,7 @@ benchmark_faiss_encode(
 			for (Dimension j = 0; j < dim; j++)
 				residual[j] = vectors[i * dim + j] - centroid[j];
 		}
-		mkt_matrix_transpose_vector_mul_batch(
-				params->P, transformed, transformed, count, dim);
+		mkt_rabitq_rotate_batch(params, transformed, transformed, count);
 		faiss_RaBitQuantizer_compute_codes(
 				faiss_rq, transformed, codes, count);
 	}
@@ -570,15 +568,14 @@ benchmark_faiss_encode(
 	{
 		uint64_t start = get_time_ns();
 
-		/* Transform: residual then P^T multiply (same as Meerkat) */
+		/* Transform: residual then rotation (same as Meerkat) */
 		for (uint32_t i = 0; i < count; i++)
 		{
 			float *residual = transformed + i * dim;
 			for (Dimension j = 0; j < dim; j++)
 				residual[j] = vectors[i * dim + j] - centroid[j];
 		}
-		mkt_matrix_transpose_vector_mul_batch(
-				params->P, transformed, transformed, count, dim);
+		mkt_rabitq_rotate_batch(params, transformed, transformed, count);
 		faiss_RaBitQuantizer_compute_codes(
 				faiss_rq, transformed, codes, count);
 
@@ -799,16 +796,14 @@ compare_correctness(
 		return;
 	}
 
-	/* Transform all vectors: rotated = P^T * (v - centroid) */
+	/* Transform all vectors: rotated = R(v - centroid) */
 	for (uint32_t i = 0; i < count; i++)
 	{
-		/* Subtract centroid first */
 		float *v_centered = mkt_alloc(dim * sizeof(float));
 		for (Dimension j = 0; j < dim; j++)
 			v_centered[j] = vectors[i * dim + j] - centroid[j];
 
-		mkt_matrix_transpose_vector_mul(
-				params->P, v_centered, transformed + i * dim, dim);
+		mkt_rabitq_rotate(params, v_centered, transformed + i * dim);
 		mkt_free(v_centered);
 	}
 
@@ -816,8 +811,7 @@ compare_correctness(
 	float *q_centered = mkt_alloc(dim * sizeof(float));
 	for (Dimension j = 0; j < dim; j++)
 		q_centered[j] = query[j] - centroid[j];
-	mkt_matrix_transpose_vector_mul(
-			params->P, q_centered, query_transformed, dim);
+	mkt_rabitq_rotate(params, q_centered, query_transformed);
 	mkt_free(q_centered);
 
 	/* Create FAISS quantizer */
@@ -1110,33 +1104,6 @@ benchmark_encode_comparison(
 	}
 	bench_stats_compute(&batch_stats);
 
-#ifdef MKT_HAVE_CBLAS
-	/* Benchmark batch encoding with builtin (non-CBLAS) for comparison */
-	BenchStats builtin_stats;
-	bench_stats_init(&builtin_stats, runs);
-
-	mkt_matrix_set_use_cblas(false); /* Switch to builtin */
-	for (uint32_t run = 0; run < runs; run++)
-	{
-		uint64_t start = get_time_ns();
-		mkt_rabitq_encode_batch(
-				params,
-				vectors,
-				vec_type,
-				cent_ref,
-				batch_f_add,
-				batch_f_rescale,
-				batch_bits,
-				count);
-		uint64_t end		 = get_time_ns();
-		double	 elapsed_ms	 = ns_to_ms(end - start);
-		double	 vec_per_sec = (double)count / (elapsed_ms / 1000.0);
-		bench_stats_add(&builtin_stats, vec_per_sec);
-	}
-	bench_stats_compute(&builtin_stats);
-	mkt_matrix_set_use_cblas(true); /* Restore CBLAS */
-#endif
-
 	/* Print results with comparison */
 	double single_ms = (double)count / (single_stats.avg / 1000.0);
 	double batch_ms	 = (double)count / (batch_stats.avg / 1000.0);
@@ -1150,24 +1117,12 @@ benchmark_encode_comparison(
 		   (single_stats.stddev / single_stats.avg) * 100.0,
 		   runs);
 
-	printf("  %-12s %8.1f ms  (%7.1fK vec/s) (±%.1f%%, n=%u) [%s]\n",
+	printf("  %-12s %8.1f ms  (%7.1fK vec/s) (±%.1f%%, n=%u)\n",
 		   "batch",
 		   batch_ms,
 		   batch_stats.avg / 1000.0,
 		   (batch_stats.stddev / batch_stats.avg) * 100.0,
-		   runs,
-		   mkt_matrix_impl_name());
-
-#ifdef MKT_HAVE_CBLAS
-	double builtin_ms = (double)count / (builtin_stats.avg / 1000.0);
-	printf("  %-12s %8.1f ms  (%7.1fK vec/s) (±%.1f%%, n=%u) [builtin]\n",
-		   "batch",
-		   builtin_ms,
-		   builtin_stats.avg / 1000.0,
-		   (builtin_stats.stddev / builtin_stats.avg) * 100.0,
 		   runs);
-	bench_stats_free(&builtin_stats);
-#endif
 
 	printf("  %-12s %.2fx faster\n", "speedup", speedup);
 

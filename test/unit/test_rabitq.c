@@ -19,15 +19,10 @@
 #include "core/platform.h"
 #include "mkt_test.h"
 #include "mkt_types.h"
-#include "quant/matrix.h"
 #include "quant/rabitq.h"
 #include "test_config.h"
 
 TEST_GROUP(RaBitQ);
-
-/* Forward declaration for matrix orthogonality test */
-int
-mkt_matrix_is_orthogonal(const float *matrix, Dimension dim, float tolerance);
 
 /*
  * Helper to re-initialize RaBitQ SIMD dispatch with specific override.
@@ -187,105 +182,8 @@ TEST(rotation_different_seeds)
 	mkt_rabitq_destroy(p2);
 }
 
-TEST(matrix_cblas_vs_builtin)
-{
-	/*
-	 * Compare CBLAS and builtin matrix multiplication results.
-	 * This test verifies that both implementations produce equivalent
-	 * results within floating-point tolerance.
-	 */
-	bool had_cblas = mkt_matrix_get_use_cblas();
-
-	/* Skip test if CBLAS is not available */
-	if (!had_cblas)
-	{
-		TEST_PRINT("CBLAS not available, skipping comparison test\n");
-		return;
-	}
-
-	const Dimension dim	  = 64;
-	const int		count = 16;
-
-	/* Create random orthogonal matrix */
-	float *matrix = mkt_alloc((size_t)dim * dim * sizeof(float));
-	mkt_random_orthogonal_matrix(matrix, dim, 12345);
-
-	/* Create test vectors */
-	float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
-	for (int i = 0; i < count; i++)
-	{
-		for (Dimension j = 0; j < dim; j++)
-			vectors[i * dim + j] = (float)((i * 17 + j * 13) % 100 - 50) /
-								   10.0f;
-	}
-
-	/* Compute with CBLAS */
-	float *results_cblas = mkt_alloc((size_t)count * dim * sizeof(float));
-	mkt_matrix_set_use_cblas(true);
-	ASSERT_STR_EQ("cblas", mkt_matrix_impl_name(), "should use cblas");
-	mkt_matrix_transpose_vector_mul_batch(
-			matrix, vectors, results_cblas, count, dim);
-
-	/* Compute with builtin */
-	float *results_builtin = mkt_alloc((size_t)count * dim * sizeof(float));
-	mkt_matrix_set_use_cblas(false);
-	ASSERT_STR_EQ("builtin", mkt_matrix_impl_name(), "should use builtin");
-	mkt_matrix_transpose_vector_mul_batch(
-			matrix, vectors, results_builtin, count, dim);
-
-	/* Restore original setting */
-	mkt_matrix_set_use_cblas(had_cblas);
-
-	/* Compare results - allow tolerance for floating point differences */
-	float max_diff		= 0.0f;
-	int	  max_diff_vec	= 0;
-	int	  max_diff_elem = 0;
-
-	for (int i = 0; i < count; i++)
-	{
-		for (Dimension j = 0; j < dim; j++)
-		{
-			float cblas_val	  = results_cblas[i * dim + j];
-			float builtin_val = results_builtin[i * dim + j];
-			float diff		  = fabsf(cblas_val - builtin_val);
-
-			if (diff > max_diff)
-			{
-				max_diff	  = diff;
-				max_diff_vec  = i;
-				max_diff_elem = j;
-			}
-		}
-	}
-
-	TEST_PRINT(
-			"Max diff: %.6e at vec %d elem %d (cblas=%.6f builtin=%.6f)\n",
-			max_diff,
-			max_diff_vec,
-			max_diff_elem,
-			results_cblas[max_diff_vec * dim + max_diff_elem],
-			results_builtin[max_diff_vec * dim + max_diff_elem]);
-
-	/*
-	 * CBLAS uses optimized SIMD with different operation ordering, which
-	 * can cause small differences. Allow 1e-4 relative tolerance with
-	 * 1e-5 minimum absolute tolerance.
-	 */
-	float tolerance = 1e-4f;
-	char  msg[128];
-	snprintf(
-			msg,
-			sizeof(msg),
-			"max diff %.6e exceeds tolerance %.6e",
-			max_diff,
-			tolerance);
-	ASSERT_TRUE(max_diff < tolerance, msg);
-
-	mkt_free(results_builtin);
-	mkt_free(results_cblas);
-	mkt_free(vectors);
-	mkt_free(matrix);
-}
+/* matrix_cblas_vs_builtin removed: with the dense sgemv path gone,
+ * there is no cblas-vs-builtin code path to compare. */
 
 /*
  * Encoding Tests
@@ -1006,10 +904,11 @@ TEST(small_dimension)
 	mkt_rabitq_destroy(params);
 }
 
-TEST(odd_dimension)
+TEST(non_byte_aligned_dimension)
 {
-	/* Test dimension not divisible by 8 */
-	Dimension dim = 17;
+	/* Dimension not divisible by 8 (but factorable for Hadamard).
+	 * dim=20 = 4 * 5 → fwht_n=4, k=5, supported. */
+	Dimension dim = 20;
 
 	RaBitQParams *params = mkt_rabitq_create(dim, 42);
 	ASSERT_NOT_NULL(params, "params should be created");
@@ -1026,7 +925,7 @@ TEST(odd_dimension)
 	ASSERT_NOT_NULL(encoded, "encoding should succeed");
 
 	/* Check packed bytes calculation */
-	ASSERT_EQ(3, MKT_RABITQ_BYTES(17), "17 bits needs 3 bytes");
+	ASSERT_EQ(3, MKT_RABITQ_BYTES(20), "20 bits needs 3 bytes");
 
 	RaBitQQueryState *state =
 			mkt_rabitq_prepare_query(params, query_ref, centroid_ref);
@@ -1038,7 +937,6 @@ TEST(odd_dimension)
 	mkt_rabitq_distance_with_bound(
 			state, encoded, dim, &dummy_est, &lower_bound);
 
-	/* Verify lower bound guarantee */
 	Distance true_dist = true_l2_distance(input_ref, query_ref);
 	ASSERT_TRUE(
 			lower_bound <= true_dist + 1e-3f,
@@ -1047,6 +945,14 @@ TEST(odd_dimension)
 	mkt_rabitq_free_query(state);
 	mkt_free(encoded);
 	mkt_rabitq_destroy(params);
+}
+
+TEST(unsupported_dimension_fails)
+{
+	/* dim=17 is prime — Hadamard can't factor it; mkt_rabitq_create
+	 * must fail rather than silently returning broken params. */
+	ASSERT_NULL(mkt_rabitq_create(17, 42),
+				"prime dim should be rejected");
 }
 
 /*

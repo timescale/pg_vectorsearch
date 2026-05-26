@@ -13,7 +13,7 @@
 #include <utils/builtins.h>
 
 #include "mkt_pg.h"
-#include "quant/matrix.h"
+#include "quant/fast_rotate.h"
 
 /* ----------------------------------------------------------------
  * Type I/O
@@ -61,20 +61,19 @@ mkt_rabitq_params_generate_pg(PG_FUNCTION_ARGS)
 
 	mkt_pg_check_dim_valid(dim);
 
-	int				size   = MKT_RABITQ_PARAMS_PG_SIZE(dim);
-	RaBitQParamsPG *result = (RaBitQParamsPG *)palloc0(size);
-	SET_VARSIZE(result, size);
-	result->dim	   = (int16_t)dim;
-	result->unused = 0;
-	result->seed   = (uint64_t)seed;
-
-	int ret = mkt_random_orthogonal_matrix(
-			result->P, (Dimension)dim, (uint64_t)seed);
-	if (ret != 0)
+	if (!mkt_fast_rotate_supported((Dimension) dim))
 		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to generate orthogonal matrix"
-						" for rabitq_params")));
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unsupported dim %d for RaBitQ rotation", dim),
+				 errhint("dim must factor as N·K with N a power of two "
+						 "≥ 4 and K ≤ 8")));
+
+	int				size   = MKT_RABITQ_PARAMS_PG_SIZE(dim);
+	RaBitQParamsPG *result = (RaBitQParamsPG *) palloc0(size);
+	SET_VARSIZE(result, size);
+	result->dim	   = (int16_t) dim;
+	result->unused = 0;
+	result->seed   = (uint64_t) seed;
 
 	PG_RETURN_POINTER(result);
 }

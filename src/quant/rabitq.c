@@ -24,7 +24,6 @@
 #include "core/platform.h"
 #include "mkt_halfvec.h"
 #include "mkt_vector.h"
-#include "quant/matrix.h"
 #include "quant/rabitq.h"
 
 /*
@@ -424,47 +423,18 @@ mkt_rabitq_create(Dimension dim, uint64_t seed)
 	return params;
 }
 
-RaBitQParams *
-mkt_rabitq_create_from_matrix(Dimension dim, uint64_t seed, const float *P)
-{
-	size_t		  size	 = MKT_RABITQ_PARAMS_SIZE(dim);
-	RaBitQParams *params = mkt_alloc(size);
-	if (params == NULL)
-		return NULL;
-
-	params->dim			 = dim;
-	params->seed		 = seed;
-	params->packed_bytes = MKT_RABITQ_BYTES(dim);
-	memcpy(params->P, P, (size_t)dim * dim * sizeof(float));
-
-	return params;
-}
-
 int
 mkt_rabitq_init(RaBitQParams *params, Dimension dim, uint64_t seed)
 {
 	if (params == NULL || dim == 0)
 		return -1;
+	if (!mkt_fast_rotate_supported(dim))
+		return -1;
 
 	params->dim			 = dim;
 	params->seed		 = seed;
 	params->packed_bytes = MKT_RABITQ_BYTES(dim);
-	memset(params->_pad, 0, sizeof(params->_pad));
-
-	/* Prefer the O(d log d) randomized Hadamard whenever the dim is
-	 * factorable as N·K (N power-of-two ≥ 4, K small). Fall back to a
-	 * dense random orthogonal P otherwise. */
-	if (mkt_fast_rotate_supported(dim))
-	{
-		params->rotation_kind = RABITQ_ROT_HADAMARD;
-		mkt_fast_rotate_init(&params->fast, dim, seed);
-	}
-	else
-	{
-		params->rotation_kind = RABITQ_ROT_DENSE;
-		if (mkt_random_orthogonal_matrix(params->P, dim, seed) != 0)
-			return -1;
-	}
+	mkt_fast_rotate_init(&params->fast, dim, seed);
 
 	return 0;
 }
@@ -554,7 +524,7 @@ mkt_rabitq_encode_into_ex(
 	float *xu_cb	   = scratch->xu_cb;
 
 	mkt_vector_sub(input.data, centroid.data, residual, dim);
-	mkt_matrix_transpose_vector_mul(params->P, residual, transformed, dim);
+	mkt_rabitq_rotate(params, residual, transformed);
 	rabitq_extract_signs(transformed, output->bits, dim);
 
 	float cb = -0.5f;
@@ -1093,11 +1063,7 @@ void
 mkt_rabitq_rotate(
 		const RaBitQParams *params, const float *input, float *output)
 {
-	if (params->rotation_kind == RABITQ_ROT_HADAMARD)
-		mkt_fast_rotate_apply(&params->fast, input, output);
-	else
-		mkt_matrix_transpose_vector_mul(
-				params->P, input, output, params->dim);
+	mkt_fast_rotate_apply(&params->fast, input, output);
 }
 
 void
@@ -1107,20 +1073,12 @@ mkt_rabitq_rotate_batch(
 		float			   *outputs,
 		uint32_t			count)
 {
-	if (params->rotation_kind == RABITQ_ROT_HADAMARD)
-	{
-		Dimension dim = params->dim;
-		for (uint32_t i = 0; i < count; i++)
-			mkt_fast_rotate_apply(
-					&params->fast,
-					inputs + (size_t) i * dim,
-					outputs + (size_t) i * dim);
-	}
-	else
-	{
-		mkt_matrix_transpose_vector_mul_batch(
-				params->P, inputs, outputs, count, params->dim);
-	}
+	Dimension dim = params->dim;
+	for (uint32_t i = 0; i < count; i++)
+		mkt_fast_rotate_apply(
+				&params->fast,
+				inputs + (size_t) i * dim,
+				outputs + (size_t) i * dim);
 }
 
 void

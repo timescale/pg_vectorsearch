@@ -31,7 +31,6 @@
 #include "mkt_pg.h"
 #include "mkt_vector.h"
 #include "mktann_build.h"
-#include "quant/matrix.h"
 
 /*
  * PG-specific shared build state: the neutral MktBuildShared plus the relation
