@@ -40,8 +40,12 @@
 #mesondefine MKT_HAVE_F16C
 
 /*
- * CBLAS support: enables optimized matrix multiplication via BLAS library.
- * When available, batch encoding uses cblas_sgemm for ~4x speedup.
+ * CBLAS support: enables an optimised k-means assignment path at index
+ * build time. The Lloyd inner loop reformulates pairwise ‖x - c‖² for a
+ * block of inputs × centroids as one cblas_sgemm call (plus per-row
+ * norms), which is several × faster than the per-vector fallback. The
+ * per-query rotation does NOT use BLAS — it goes through the O(d log d)
+ * randomised Hadamard transform instead, so BLAS is build-time only.
  *
  * MKT_BLAS_OPENBLAS / MKT_BLAS_BLIS are set when meson detects that
  * vendor specifically. The runtime thread-pinning code in
