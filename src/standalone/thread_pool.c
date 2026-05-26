@@ -1,5 +1,10 @@
 /*
- * thread_pool.c - Reusable thread pool for parallel build phases
+ * thread_pool.c - Reusable thread pool with barrier-based iteration
+ *
+ * All parallelism funnels through iterate: workers wake from a
+ * condvar, enter a barrier-synchronized loop (work → barrier →
+ * leader reduce → barrier → repeat), then return to idle.
+ * parallel_for is iterate with one iteration and no reduce.
  */
 
 #include <stdlib.h>
@@ -19,18 +24,19 @@ struct MktThreadPool
 	MktWorker *workers;
 	uint32_t   nthreads;
 
-	/* Current round's work */
-	MktParallelForFn fn;
+	/* Current iterate parameters (set by leader before waking) */
+	MktParallelForFn work_fn;
 	void			*arg;
+	uint32_t		 max_iterations;
+	volatile bool	 keep_going;
 
-	/* Synchronization: workers wait on work_cv for a new round,
-	 * main thread waits on done_cv for all workers to finish. */
+	/* Inter-iteration barrier (nthreads + 1 participants) */
+	pthread_barrier_t barrier;
+
+	/* Idle synchronization */
 	pthread_mutex_t mutex;
-	pthread_cond_t	work_cv;
-	pthread_cond_t	done_cv;
+	pthread_cond_t	wake_cv;
 	uint32_t		generation;
-	uint32_t		workers_done;
-	uint32_t		dispatched; /* workers woken this round */
 	int				shutdown;
 };
 
@@ -54,7 +60,7 @@ pool_worker_fn(void *raw)
 	{
 		pthread_mutex_lock(&pool->mutex);
 		while (pool->generation == my_gen && !pool->shutdown)
-			pthread_cond_wait(&pool->work_cv, &pool->mutex);
+			pthread_cond_wait(&pool->wake_cv, &pool->mutex);
 
 		if (pool->shutdown)
 		{
@@ -62,21 +68,27 @@ pool_worker_fn(void *raw)
 			break;
 		}
 
-		my_gen				   = pool->generation;
-		uint32_t		 start = pool->workers[id].start;
-		uint32_t		 end   = pool->workers[id].end;
-		MktParallelForFn fn	   = pool->fn;
-		void			*arg   = pool->arg;
+		my_gen = pool->generation;
 		pthread_mutex_unlock(&pool->mutex);
 
-		if (start < end)
-			fn(id, start, end, arg);
+		/* Iterate loop with barrier synchronization */
+		for (uint32_t iter = 0; iter < pool->max_iterations; iter++)
+		{
+			if (pool->workers[id].start < pool->workers[id].end)
+				pool->work_fn(
+						id,
+						pool->workers[id].start,
+						pool->workers[id].end,
+						pool->arg);
 
-		pthread_mutex_lock(&pool->mutex);
-		pool->workers_done++;
-		if (pool->workers_done == pool->dispatched)
-			pthread_cond_signal(&pool->done_cv);
-		pthread_mutex_unlock(&pool->mutex);
+			pthread_barrier_wait(&pool->barrier);
+
+			/* Leader does reduce between these two barriers */
+			pthread_barrier_wait(&pool->barrier);
+
+			if (!pool->keep_going)
+				break;
+		}
 	}
 
 	return NULL;
@@ -90,8 +102,10 @@ mkt_thread_pool_create(uint32_t nthreads)
 	pool->workers		= calloc(nthreads, sizeof(MktWorker));
 
 	pthread_mutex_init(&pool->mutex, NULL);
-	pthread_cond_init(&pool->work_cv, NULL);
-	pthread_cond_init(&pool->done_cv, NULL);
+	pthread_cond_init(&pool->wake_cv, NULL);
+
+	if (nthreads > 0)
+		pthread_barrier_init(&pool->barrier, NULL, nthreads + 1);
 
 	for (uint32_t i = 0; i < nthreads; i++)
 	{
@@ -105,79 +119,32 @@ mkt_thread_pool_create(uint32_t nthreads)
 	return pool;
 }
 
-static void
-partition(MktWorker *workers, uint32_t nworkers, uint32_t total)
-{
-	uint32_t per	   = total / nworkers;
-	uint32_t remainder = total % nworkers;
-	uint32_t off	   = 0;
-
-	for (uint32_t i = 0; i < nworkers; i++)
-	{
-		uint32_t chunk	 = per + (i < remainder ? 1 : 0);
-		workers[i].start = off;
-		workers[i].end	 = off + chunk;
-		off += chunk;
-	}
-}
-
-static void
-wake_workers(
-		MktThreadPool *pool, uint32_t nworkers, MktParallelForFn fn, void *arg)
-{
-	pthread_mutex_lock(&pool->mutex);
-	pool->fn		   = fn;
-	pool->arg		   = arg;
-	pool->workers_done = 0;
-	pool->dispatched   = nworkers;
-	pool->generation++;
-	pthread_cond_broadcast(&pool->work_cv);
-	pthread_mutex_unlock(&pool->mutex);
-}
-
 void
-mkt_thread_pool_dispatch(
-		MktThreadPool *pool, uint32_t total, MktParallelForFn fn, void *arg)
+mkt_thread_pool_iterate(
+		MktThreadPool	*pool,
+		uint32_t		 total,
+		MktParallelForFn work_fn,
+		MktReduceFn		 reduce_fn,
+		void			*arg,
+		uint32_t		 max_iterations)
 {
-	if (pool->nthreads == 0 || total == 0)
-	{
-		pool->dispatched = 0;
-		return;
-	}
-
-	partition(pool->workers, pool->nthreads, total);
-	wake_workers(pool, pool->nthreads, fn, arg);
-}
-
-void
-mkt_thread_pool_wait(MktThreadPool *pool)
-{
-	if (pool->nthreads == 0)
-		return;
-
-	pthread_mutex_lock(&pool->mutex);
-	while (pool->workers_done < pool->dispatched)
-		pthread_cond_wait(&pool->done_cv, &pool->mutex);
-	pthread_mutex_unlock(&pool->mutex);
-}
-
-void
-mkt_thread_pool_parallel_for(
-		MktThreadPool *pool, uint32_t total, MktParallelForFn fn, void *arg)
-{
-	if (total == 0)
+	if (total == 0 || max_iterations == 0)
 		return;
 
 	uint32_t nt = pool->nthreads;
 
 	if (nt == 0)
 	{
-		fn(0, 0, total, arg);
+		for (uint32_t iter = 0; iter < max_iterations; iter++)
+		{
+			work_fn(0, 0, total, arg);
+			if (!reduce_fn || !reduce_fn(arg, iter))
+				break;
+		}
 		return;
 	}
 
-	/* Partition across N+1: workers get chunks 0..N-1,
-	 * caller gets chunk N (the last one). */
+	/* Partition across N+1 (workers + leader) */
 	uint32_t all	   = nt + 1;
 	uint32_t per	   = total / all;
 	uint32_t remainder = total % all;
@@ -191,16 +158,46 @@ mkt_thread_pool_parallel_for(
 		off += chunk;
 	}
 
-	uint32_t caller_start = off;
-	uint32_t caller_end	  = total;
+	uint32_t leader_start = off;
+	uint32_t leader_end	  = total;
+	uint32_t leader_id	  = nt;
 
-	wake_workers(pool, nt, fn, arg);
+	pool->work_fn		 = work_fn;
+	pool->arg			 = arg;
+	pool->max_iterations = max_iterations;
+	pool->keep_going	 = true;
 
-	/* Caller runs the last chunk */
-	if (caller_start < caller_end)
-		fn(nt, caller_start, caller_end, arg);
+	/* Wake workers */
+	pthread_mutex_lock(&pool->mutex);
+	pool->generation++;
+	pthread_cond_broadcast(&pool->wake_cv);
+	pthread_mutex_unlock(&pool->mutex);
 
-	mkt_thread_pool_wait(pool);
+	/* Leader participates in iterate loop */
+	for (uint32_t iter = 0; iter < max_iterations; iter++)
+	{
+		if (leader_start < leader_end)
+			work_fn(leader_id, leader_start, leader_end, arg);
+
+		/* Wait for all workers to finish this iteration */
+		pthread_barrier_wait(&pool->barrier);
+
+		/* Leader does reduction */
+		pool->keep_going = reduce_fn ? reduce_fn(arg, iter) : false;
+
+		/* Release workers for next iteration (or exit) */
+		pthread_barrier_wait(&pool->barrier);
+
+		if (!pool->keep_going)
+			break;
+	}
+}
+
+void
+mkt_thread_pool_parallel_for(
+		MktThreadPool *pool, uint32_t total, MktParallelForFn fn, void *arg)
+{
+	mkt_thread_pool_iterate(pool, total, fn, NULL, arg, 1);
 }
 
 uint32_t
@@ -217,15 +214,16 @@ mkt_thread_pool_destroy(MktThreadPool *pool)
 
 	pthread_mutex_lock(&pool->mutex);
 	pool->shutdown = 1;
-	pthread_cond_broadcast(&pool->work_cv);
+	pthread_cond_broadcast(&pool->wake_cv);
 	pthread_mutex_unlock(&pool->mutex);
 
 	for (uint32_t i = 0; i < pool->nthreads; i++)
 		pthread_join(pool->workers[i].thread, NULL);
 
+	if (pool->nthreads > 0)
+		pthread_barrier_destroy(&pool->barrier);
 	pthread_mutex_destroy(&pool->mutex);
-	pthread_cond_destroy(&pool->work_cv);
-	pthread_cond_destroy(&pool->done_cv);
+	pthread_cond_destroy(&pool->wake_cv);
 	free(pool->workers);
 	free(pool);
 }

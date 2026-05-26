@@ -1,9 +1,13 @@
 /*
  * thread_pool.h - Reusable thread pool for parallel build phases
  *
- * Creates N background worker threads that persist across multiple
- * dispatch/wait cycles, eliminating per-phase thread creation
- * overhead. Workers block on a condition variable between rounds.
+ * Creates N background worker threads that persist for the pool's
+ * lifetime. All parallelism uses barrier-based iteration: workers
+ * synchronize via pthread_barrier between iterations, with the
+ * leader calling a reduce function to merge results and check
+ * convergence.
+ *
+ * parallel_for is a convenience wrapper for single-iteration use.
  *
  * Standalone only (pthreads). PG parallel builds use PG's own
  * parallel worker infrastructure.
@@ -15,48 +19,112 @@
 #include <pthread.h>
 #include <stdint.h>
 
+/* macOS lacks pthread_barrier_t (optional POSIX extension). */
+#ifdef __APPLE__
+
+#define PTHREAD_BARRIER_SERIAL_THREAD (-1)
+
+typedef struct
+{
+	pthread_mutex_t mutex;
+	pthread_cond_t	cv;
+	uint32_t		count;
+	uint32_t		waiting;
+	uint32_t		generation;
+} pthread_barrier_t;
+
+typedef void pthread_barrierattr_t;
+
+static inline int
+pthread_barrier_init(
+		pthread_barrier_t			*b,
+		const pthread_barrierattr_t *attr,
+		unsigned					 count)
+{
+	(void)attr;
+	pthread_mutex_init(&b->mutex, NULL);
+	pthread_cond_init(&b->cv, NULL);
+	b->count	  = count;
+	b->waiting	  = 0;
+	b->generation = 0;
+	return 0;
+}
+
+static inline int
+pthread_barrier_wait(pthread_barrier_t *b)
+{
+	pthread_mutex_lock(&b->mutex);
+	uint32_t gen = b->generation;
+	b->waiting++;
+
+	if (b->waiting == b->count)
+	{
+		b->waiting = 0;
+		b->generation++;
+		pthread_cond_broadcast(&b->cv);
+		pthread_mutex_unlock(&b->mutex);
+		return PTHREAD_BARRIER_SERIAL_THREAD;
+	}
+
+	while (gen == b->generation)
+		pthread_cond_wait(&b->cv, &b->mutex);
+	pthread_mutex_unlock(&b->mutex);
+	return 0;
+}
+
+static inline int
+pthread_barrier_destroy(pthread_barrier_t *b)
+{
+	pthread_mutex_destroy(&b->mutex);
+	pthread_cond_destroy(&b->cv);
+	return 0;
+}
+
+#endif /* __APPLE__ */
+
 typedef void (*MktParallelForFn)(
 		uint32_t thread_id, uint32_t start, uint32_t end, void *arg);
+
+typedef bool (*MktReduceFn)(void *arg, uint32_t iteration);
 
 typedef struct MktThreadPool MktThreadPool;
 
 /*
  * Create a pool with nthreads background worker threads.
- * Thread IDs are 0..nthreads-1.
+ * Thread IDs are 0..nthreads-1; the leader gets ID nthreads.
  */
 MktThreadPool *mkt_thread_pool_create(uint32_t nthreads);
 
 /*
- * Dispatch work to the pool's background threads (non-blocking).
+ * Iterative parallel-for with barrier synchronization.
  *
- * Divides [0, total) into nthreads contiguous chunks and wakes
- * all workers. Returns immediately — the caller is free to do
- * other work while the pool executes.
+ * Each iteration: all threads (N workers + leader) execute work_fn
+ * on their chunk, then synchronize at a barrier. The leader calls
+ * reduce_fn to merge results; if it returns true, the next iteration
+ * starts, otherwise the loop ends.
  *
- * The same arg pointer is passed to every worker. Use it to pass
- * shared read-only state or an array of per-thread contexts
- * indexed by thread_id. Thread IDs are stable across rounds:
- * thread i always gets the i-th chunk.
+ * Workers stay alive across iterations — synchronization is a
+ * lightweight barrier, not dispatch/wake per round.
  *
- * Must call mkt_thread_pool_wait() before the next dispatch.
+ * If reduce_fn is NULL, runs a single iteration regardless of
+ * max_iterations (used by parallel_for).
+ *
+ * The leader (calling thread) participates as thread nthreads.
+ * With nthreads=0, runs single-threaded.
+ *
+ * Maps to PG's Barrier (BarrierArriveAndWait) for PG builds.
  */
-void mkt_thread_pool_dispatch(
-		MktThreadPool *pool, uint32_t total, MktParallelForFn fn, void *arg);
+void mkt_thread_pool_iterate(
+		MktThreadPool	*pool,
+		uint32_t		 total,
+		MktParallelForFn work_fn,
+		MktReduceFn		 reduce_fn,
+		void			*arg,
+		uint32_t		 max_iterations);
 
 /*
- * Block until all dispatched workers finish.
- */
-void mkt_thread_pool_wait(MktThreadPool *pool);
-
-/*
- * Convenience: dispatch + caller participates + wait.
- *
- * Splits [0, total) across nthreads + 1 chunks: the N pool workers
- * each get a chunk, and the calling thread runs one chunk itself.
- * Blocks until all work is complete. This gives N+1 way parallelism.
- *
- * With nthreads=0 (no pool workers), runs fn(0, 0, total, arg)
- * directly on the calling thread.
+ * Single-iteration parallel-for. Equivalent to iterate with
+ * reduce_fn=NULL and max_iterations=1.
  */
 void mkt_thread_pool_parallel_for(
 		MktThreadPool *pool, uint32_t total, MktParallelForFn fn, void *arg);

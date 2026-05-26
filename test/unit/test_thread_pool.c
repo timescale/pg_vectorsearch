@@ -242,143 +242,98 @@ TEST(parallel_for_large)
 }
 
 /* ----------------------------------------------------------------
- * dispatch + wait
+ * iterate tests
  * ---------------------------------------------------------------- */
 
-TEST(dispatch_wait_basic)
+typedef struct
+{
+	_Atomic(uint64_t) total;
+	uint32_t		  target_iters;
+} IterSumArg;
+
+static void
+iter_sum_fn(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
+{
+	(void)thread_id;
+	IterSumArg *ia	  = (IterSumArg *)arg;
+	uint64_t	local = 0;
+	for (uint32_t i = start; i < end; i++)
+		local += i;
+	atomic_fetch_add(&ia->total, local);
+}
+
+static bool
+iter_reduce_fn(void *arg, uint32_t iteration)
+{
+	IterSumArg *ia = (IterSumArg *)arg;
+	return iteration + 1 < ia->target_iters;
+}
+
+TEST(iterate_basic)
 {
 	MktThreadPool *pool = mkt_thread_pool_create(4);
 
-	_Atomic(uint64_t) total = 0;
-	mkt_thread_pool_dispatch(pool, 10000, sum_fn, &total);
-	mkt_thread_pool_wait(pool);
+	IterSumArg ia = {.total = 0, .target_iters = 5};
+	mkt_thread_pool_iterate(pool, 1000, iter_sum_fn, iter_reduce_fn, &ia, 100);
 
-	uint64_t expected = 0;
-	for (uint32_t i = 0; i < 10000; i++)
-		expected += i;
-	ASSERT_EQ(expected, atomic_load(&total), "dispatch+wait sum");
-
-	mkt_thread_pool_destroy(pool);
-}
-
-TEST(dispatch_wait_coverage)
-{
-	MktThreadPool *pool = mkt_thread_pool_create(8);
-
-	uint32_t	n	   = 1000;
-	uint32_t   *counts = calloc(n, sizeof(uint32_t));
-	CoverageArg ca	   = {.counts = counts, .nslots = n};
-
-	mkt_thread_pool_dispatch(pool, n, coverage_fn, &ca);
-	mkt_thread_pool_wait(pool);
-
-	for (uint32_t i = 0; i < n; i++)
-		ASSERT_EQ(1, counts[i], "each element visited exactly once");
-
-	free(counts);
-	mkt_thread_pool_destroy(pool);
-}
-
-TEST(dispatch_zero_workers)
-{
-	MktThreadPool	 *pool	= mkt_thread_pool_create(0);
-	_Atomic(uint64_t) total = 0;
-	mkt_thread_pool_dispatch(pool, 100, sum_fn, &total);
-	mkt_thread_pool_wait(pool);
-	ASSERT_EQ(0, atomic_load(&total), "dispatch with 0 workers is a no-op");
-	mkt_thread_pool_destroy(pool);
-}
-
-TEST(dispatch_zero_total)
-{
-	MktThreadPool	 *pool	= mkt_thread_pool_create(4);
-	_Atomic(uint64_t) total = 0;
-	mkt_thread_pool_dispatch(pool, 0, sum_fn, &total);
-	mkt_thread_pool_wait(pool);
-	ASSERT_EQ(0, atomic_load(&total), "zero total is a no-op");
-	mkt_thread_pool_destroy(pool);
-}
-
-TEST(dispatch_one_worker)
-{
-	MktThreadPool *pool = mkt_thread_pool_create(1);
-
-	_Atomic(uint64_t) total = 0;
-	mkt_thread_pool_dispatch(pool, 100, sum_fn, &total);
-	/* Caller is free here — work runs on background thread */
-	mkt_thread_pool_wait(pool);
-
-	uint64_t expected = 0;
-	for (uint32_t i = 0; i < 100; i++)
-		expected += i;
-	ASSERT_EQ(expected, atomic_load(&total), "single worker dispatch");
-
-	mkt_thread_pool_destroy(pool);
-}
-
-TEST(dispatch_multiple_rounds)
-{
-	MktThreadPool *pool = mkt_thread_pool_create(4);
-
-	for (int round = 0; round < 10; round++)
-	{
-		_Atomic(uint64_t) total = 0;
-		mkt_thread_pool_dispatch(pool, 1000, sum_fn, &total);
-		mkt_thread_pool_wait(pool);
-
-		uint64_t expected = 0;
-		for (uint32_t i = 0; i < 1000; i++)
-			expected += i;
-		ASSERT_EQ(expected, atomic_load(&total), "round correctness");
-	}
-
-	mkt_thread_pool_destroy(pool);
-}
-
-TEST(dispatch_thread_ids)
-{
-	MktThreadPool *pool = mkt_thread_pool_create(8);
-
-	ThreadIdArg ta = {0};
-	mkt_thread_pool_dispatch(pool, 1000, thread_id_fn, &ta);
-	mkt_thread_pool_wait(pool);
-
-	/* 8 workers only, caller does not participate */
-	ASSERT_EQ(8, atomic_load(&ta.call_count), "8 workers called");
-	ASSERT_TRUE(
-			atomic_load(&ta.max_thread_id) < 8,
-			"dispatch thread IDs should be in [0, nthreads)");
-
-	mkt_thread_pool_destroy(pool);
-}
-
-TEST(dispatch_caller_does_work)
-{
-	MktThreadPool *pool = mkt_thread_pool_create(4);
-
-	_Atomic(uint64_t) pool_total = 0;
-	mkt_thread_pool_dispatch(pool, 1000, sum_fn, &pool_total);
-
-	/* Caller does independent work while pool runs */
-	uint64_t caller_sum = 0;
-	for (uint32_t i = 1000; i < 2000; i++)
-		caller_sum += i;
-
-	mkt_thread_pool_wait(pool);
-
-	uint64_t pool_expected = 0;
+	uint64_t one_iter = 0;
 	for (uint32_t i = 0; i < 1000; i++)
-		pool_expected += i;
+		one_iter += i;
+	ASSERT_EQ(one_iter * 5, atomic_load(&ia.total), "5 iterations sum");
 
-	ASSERT_EQ(
-			pool_expected,
-			atomic_load(&pool_total),
-			"pool computed correctly");
+	mkt_thread_pool_destroy(pool);
+}
 
-	uint64_t caller_expected = 0;
-	for (uint32_t i = 1000; i < 2000; i++)
-		caller_expected += i;
-	ASSERT_EQ(caller_expected, caller_sum, "caller computed correctly");
+TEST(iterate_single_thread)
+{
+	MktThreadPool *pool = mkt_thread_pool_create(0);
 
+	IterSumArg ia = {.total = 0, .target_iters = 3};
+	mkt_thread_pool_iterate(pool, 100, iter_sum_fn, iter_reduce_fn, &ia, 100);
+
+	uint64_t one_iter = 0;
+	for (uint32_t i = 0; i < 100; i++)
+		one_iter += i;
+	ASSERT_EQ(one_iter * 3, atomic_load(&ia.total), "3 iterations serial");
+
+	mkt_thread_pool_destroy(pool);
+}
+
+TEST(iterate_early_stop)
+{
+	MktThreadPool *pool = mkt_thread_pool_create(4);
+
+	IterSumArg ia = {.total = 0, .target_iters = 2};
+	mkt_thread_pool_iterate(pool, 1000, iter_sum_fn, iter_reduce_fn, &ia, 100);
+
+	uint64_t one_iter = 0;
+	for (uint32_t i = 0; i < 1000; i++)
+		one_iter += i;
+	ASSERT_EQ(one_iter * 2, atomic_load(&ia.total), "early stop at 2");
+
+	mkt_thread_pool_destroy(pool);
+}
+
+TEST(iterate_max_iterations)
+{
+	MktThreadPool *pool = mkt_thread_pool_create(4);
+
+	IterSumArg ia = {.total = 0, .target_iters = 999};
+	mkt_thread_pool_iterate(pool, 100, iter_sum_fn, iter_reduce_fn, &ia, 5);
+
+	uint64_t one_iter = 0;
+	for (uint32_t i = 0; i < 100; i++)
+		one_iter += i;
+	ASSERT_EQ(one_iter * 5, atomic_load(&ia.total), "capped at max 5");
+
+	mkt_thread_pool_destroy(pool);
+}
+
+TEST(iterate_zero_total)
+{
+	MktThreadPool *pool = mkt_thread_pool_create(4);
+	IterSumArg	   ia	= {.total = 0, .target_iters = 5};
+	mkt_thread_pool_iterate(pool, 0, iter_sum_fn, iter_reduce_fn, &ia, 10);
+	ASSERT_EQ(0, atomic_load(&ia.total), "zero total no-op");
 	mkt_thread_pool_destroy(pool);
 }
