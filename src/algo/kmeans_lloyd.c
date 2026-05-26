@@ -21,13 +21,15 @@
 
 #include "mkt_config.h"
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
 #ifdef MKT_HAVE_CBLAS
+/* See matrix.c for the rationale on the Apple branch. */
 #ifdef __APPLE__
-#include <Accelerate/Accelerate.h>
+#include <vecLib/cblas_new.h>
 #else
 #include <cblas.h>
 #endif
@@ -35,6 +37,8 @@
 
 #include "algo/kmeans_lloyd.h"
 #include "algo/vecops.h"
+#include "core/log.h"
+#include "core/memory.h"
 #include "mkt_halfvec.h"
 
 /*
@@ -361,56 +365,443 @@ lloyd_assign_block_builtin_f16(
 /* Block assignment function pointer — selected once per lloyd_assign call */
 typedef void (*lloyd_block_fn)(KMeansState *, uint32_t, uint32_t);
 
-void
-lloyd_assign(KMeansState *st, bool use_cblas)
+static lloyd_block_fn
+lloyd_select_block_fn(KMeansState *st, bool use_cblas)
 {
-	st->total_cost = 0.0f;
-
-	/* Precompute centroid norms for L2 */
-	if (st->metric == DISTANCE_L2)
-		precompute_norms_c(st);
-
-	/* Single dispatch — select the right block function once */
-	lloyd_block_fn block_fn;
-
 #ifdef MKT_HAVE_CBLAS
 	if (use_cblas)
 	{
 		switch (st->vec_type)
 		{
 		case MKT_VEC_F32:
-			block_fn = lloyd_assign_block_cblas_f32;
-			break;
+			return lloyd_assign_block_cblas_f32;
 #if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
 		case MKT_VEC_F16C:
-			block_fn = lloyd_assign_block_cblas_f16c;
-			break;
+			return lloyd_assign_block_cblas_f16c;
 #endif
 		default:
-			block_fn = lloyd_assign_block_cblas_f16;
-			break;
+			return lloyd_assign_block_cblas_f16;
 		}
 	}
-	else
 #endif
+	(void)use_cblas;
+	switch (st->vec_type)
 	{
-		(void)use_cblas;
-		switch (st->vec_type)
+	case MKT_VEC_F32:
+		return lloyd_assign_block_builtin_f32;
+	default:
+		return lloyd_assign_block_builtin_f16;
+	}
+}
+
+/*
+ * Adaptive block size for the parallel builtin path.
+ *
+ * The distance buffer is [block × nlist] floats per thread. With
+ * fixed block=4096, large nlist blows past L3 (e.g., 4096×8000×4
+ * = 128MB per thread). Cap the buffer at ~2MB so the distance
+ * matrix, vector block, and centroid tile all fit in L3.
+ */
+static uint32_t
+lloyd_parallel_block_size(uint32_t nlist, uint32_t nvecs)
+{
+	uint32_t block	= KMEANS_BLOCK_SIZE;
+	uint32_t buf_sz = block * nlist * (uint32_t)sizeof(float);
+	if (buf_sz > 8 * 1024 * 1024)
+	{
+		block = 8 * 1024 * 1024 / (nlist * (uint32_t)sizeof(float));
+		if (block < 64)
+			block = 64;
+	}
+	if (block > nvecs)
+		block = nvecs;
+	return block;
+}
+
+static void
+lloyd_assign_range(
+		KMeansState	  *st,
+		lloyd_block_fn block_fn,
+		float		  *dist_buf,
+		uint32_t	   block_size,
+		uint32_t	   range_start,
+		uint32_t	   range_end,
+		float		  *cost_out)
+{
+	float *saved_dist = st->dist_block;
+	st->dist_block	  = dist_buf;
+
+	float cost = 0.0f;
+	for (uint32_t start = range_start; start < range_end; start += block_size)
+	{
+		uint32_t count = range_end - start;
+		if (count > block_size)
+			count = block_size;
+		st->total_cost = 0.0f;
+		block_fn(st, start, count);
+		cost += st->total_cost;
+	}
+	*cost_out	   = cost;
+	st->dist_block = saved_dist;
+}
+
+typedef struct
+{
+	KMeansState	  *st;
+	lloyd_block_fn block_fn;
+	float		  *dist_bufs; /* [nthreads * block * nlist] */
+	float		  *costs;	  /* [nthreads] */
+	float		  *vec_bufs;  /* [nthreads * block * dim] or NULL */
+	uint32_t	   block;
+} LloydParCtx;
+
+static void
+lloyd_par_worker(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
+{
+	LloydParCtx *ctx   = (LloydParCtx *)arg;
+	uint32_t	 nlist = ctx->st->nlist;
+	uint32_t	 dim   = ctx->st->dim;
+	uint32_t	 block = ctx->block;
+
+	KMeansState local = *ctx->st;
+	local.dist_block  = ctx->dist_bufs + (size_t)thread_id * block * nlist;
+	if (ctx->vec_bufs)
+		local.vec_block = ctx->vec_bufs + (size_t)thread_id * block * dim;
+
+	lloyd_assign_range(
+			&local,
+			ctx->block_fn,
+			local.dist_block,
+			ctx->block,
+			start,
+			end,
+			&ctx->costs[thread_id]);
+}
+
+void
+lloyd_assign(KMeansState *st, bool use_cblas)
+{
+	st->total_cost = 0.0f;
+
+	if (st->metric == DISTANCE_L2)
+		precompute_norms_c(st);
+
+	uint32_t min_vecs_per_thread = 256;
+	bool	 use_parallel = st->parallel_for != NULL && st->nthreads > 1 &&
+						st->nvecs >= st->nthreads * min_vecs_per_thread;
+
+	lloyd_block_fn block_fn = lloyd_select_block_fn(st, use_cblas);
+
+	if (!use_parallel)
+	{
+		lloyd_assign_range(
+				st,
+				block_fn,
+				st->dist_block,
+				KMEANS_BLOCK_SIZE,
+				0,
+				st->nvecs,
+				&st->total_cost);
+		return;
+	}
+
+	uint32_t nt	   = st->nthreads;
+	uint32_t nlist = st->nlist;
+	uint32_t dim   = st->dim;
+	uint32_t block = lloyd_parallel_block_size(nlist, st->nvecs);
+
+	float *dist_bufs = mkt_alloc((size_t)nt * block * nlist * sizeof(float));
+	float *costs	 = mkt_alloc0(nt * sizeof(float));
+	float *vec_bufs	 = NULL;
+
+	if (st->vec_block != NULL)
+		vec_bufs = mkt_alloc((size_t)nt * block * dim * sizeof(float));
+
+	LloydParCtx ctx = {
+			.st		   = st,
+			.block_fn  = block_fn,
+			.dist_bufs = dist_bufs,
+			.costs	   = costs,
+			.vec_bufs  = vec_bufs,
+			.block	   = block,
+	};
+
+	st->parallel_for(st->parallel_ctx, st->nvecs, lloyd_par_worker, &ctx);
+
+	st->total_cost = 0.0f;
+	for (uint32_t t = 0; t < nt; t++)
+		st->total_cost += costs[t];
+
+	mkt_free(dist_bufs);
+	mkt_free(costs);
+	mkt_free(vec_bufs);
+}
+
+/* ----------------------------------------------------------------
+ * Fused iterative assign + update via iterate callback
+ * ---------------------------------------------------------------- */
+
+typedef struct
+{
+	KMeansState	  *st;
+	lloyd_block_fn block_fn;
+	uint32_t	   nthreads;
+	uint32_t	   block;
+
+	/* Per-thread buffers */
+	float	 *dist_bufs;	 /* [nthreads * block * nlist] */
+	float	 *vec_bufs;		 /* [nthreads * block * dim] or NULL */
+	float	 *centroid_sums; /* [nthreads * nlist * dim] */
+	uint32_t *centroid_cnts; /* [nthreads * nlist] */
+	float	 *costs;		 /* [nthreads] */
+
+	/* Convergence */
+	float	*old_centroids; /* [nlist * dim] saved before iteration */
+	float	 tolerance;
+	bool	 verbose;
+	uint32_t completed_iters;
+} LloydIterCtx;
+
+/*
+ * Work function: assign vectors [start, end) to nearest centroids,
+ * then accumulate per-thread centroid sums for the update step.
+ *
+ * Each thread gets its own dist/vec buffers and centroid accumulators
+ * so there is no shared mutable state during the parallel phase.
+ */
+static void
+lloyd_iter_work(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
+{
+	LloydIterCtx *ctx	= (LloydIterCtx *)arg;
+	KMeansState	 *st	= ctx->st;
+	uint32_t	  nlist = st->nlist;
+	uint32_t	  dim	= st->dim;
+	uint32_t	  block = ctx->block;
+
+	/* 1. Set up thread-local KMeansState with private buffers */
+	KMeansState local = *st;
+	local.dist_block  = ctx->dist_bufs + (size_t)thread_id * block * nlist;
+	if (ctx->vec_bufs)
+		local.vec_block = ctx->vec_bufs + (size_t)thread_id * block * dim;
+
+	/* 2. Assign: compute distances and find nearest centroid */
+	lloyd_assign_range(
+			&local,
+			ctx->block_fn,
+			local.dist_block,
+			block,
+			start,
+			end,
+			&ctx->costs[thread_id]);
+
+	/* 3. Accumulate: add each vector to its assigned centroid's sum */
+	float	 *my_sums = ctx->centroid_sums + (size_t)thread_id * nlist * dim;
+	uint32_t *my_cnts = ctx->centroid_cnts + (size_t)thread_id * nlist;
+
+	for (uint32_t i = start; i < end; i++)
+	{
+		ClusterId	 c	 = st->assignments[i];
+		uint32_t	 idx = st->indices ? st->indices[i] : i;
+		const float *vec = (const float *)st->vectors + (size_t)idx * dim;
+		float		*sum = my_sums + (size_t)c * dim;
+		for (uint32_t d = 0; d < dim; d++)
+			sum[d] += vec[d];
+		my_cnts[c]++;
+	}
+}
+
+/*
+ * Reduce function: merge per-thread results, update centroids,
+ * and check convergence. Runs on the leader thread between
+ * barrier-synchronized iterations.
+ *
+ * Returns true to continue iterating, false to stop.
+ */
+static bool
+lloyd_iter_reduce(void *arg, uint32_t iteration)
+{
+	LloydIterCtx *ctx	= (LloydIterCtx *)arg;
+	KMeansState	 *st	= ctx->st;
+	uint32_t	  nlist = st->nlist;
+	uint32_t	  dim	= st->dim;
+	uint32_t	  nt	= ctx->nthreads;
+
+	/* 1. Sum per-thread costs into total */
+	st->total_cost = 0.0f;
+	for (uint32_t t = 0; t < nt; t++)
+		st->total_cost += ctx->costs[t];
+
+	/* 2. Merge per-thread centroid accumulators into new_centroids */
+	memset(st->new_centroids, 0, (size_t)nlist * dim * sizeof(float));
+	memset(st->cluster_sizes, 0, nlist * sizeof(uint32_t));
+
+	for (uint32_t t = 0; t < nt; t++)
+	{
+		float	 *sums = ctx->centroid_sums + (size_t)t * nlist * dim;
+		uint32_t *cnts = ctx->centroid_cnts + (size_t)t * nlist;
+
+		for (uint32_t c = 0; c < nlist; c++)
 		{
-		case MKT_VEC_F32:
-			block_fn = lloyd_assign_block_builtin_f32;
-			break;
-		default:
-			block_fn = lloyd_assign_block_builtin_f16;
-			break;
+			st->cluster_sizes[c] += cnts[c];
+			float *dst = st->new_centroids + (size_t)c * dim;
+			float *src = sums + (size_t)c * dim;
+			for (uint32_t d = 0; d < dim; d++)
+				dst[d] += src[d];
 		}
 	}
 
-	for (uint32_t start = 0; start < st->nvecs; start += KMEANS_BLOCK_SIZE)
+	/* 3. Compute new centroids as mean of assigned vectors */
+	for (uint32_t c = 0; c < nlist; c++)
 	{
-		uint32_t count = st->nvecs - start;
-		if (count > KMEANS_BLOCK_SIZE)
-			count = KMEANS_BLOCK_SIZE;
-		block_fn(st, start, count);
+		if (st->cluster_sizes[c] == 0)
+			continue;
+		float  inv	= 1.0f / (float)st->cluster_sizes[c];
+		float *cent = st->new_centroids + (size_t)c * dim;
+		for (uint32_t d = 0; d < dim; d++)
+			cent[d] *= inv;
 	}
+
+	/* 4. Re-normalize centroids for cosine metric */
+	if (st->metric == DISTANCE_COSINE)
+	{
+		for (uint32_t c = 0; c < nlist; c++)
+		{
+			if (st->cluster_sizes[c] == 0)
+				continue;
+			float *cent = st->new_centroids + (size_t)c * dim;
+			float  norm = mkt_l2_norm(cent, dim);
+			if (norm > 1e-10f)
+				mkt_vector_scale(cent, 1.0f / norm, cent, dim);
+		}
+	}
+
+	/* 5. Swap old and new centroids */
+	float *tmp		  = st->centroids;
+	st->centroids	  = st->new_centroids;
+	st->new_centroids = tmp;
+
+	/* 6. Check convergence: max centroid movement (squared) */
+	float shift_sq = kmeans_max_centroid_shift_between(
+			st->centroids, ctx->old_centroids, nlist, dim);
+
+	if (ctx->verbose)
+		mkt_log("  iter %u: cost=%.4f, max_shift=%.6f\n",
+				iteration,
+				st->total_cost,
+				sqrtf(shift_sq));
+
+	ctx->completed_iters = iteration + 1;
+
+	float tol_sq = ctx->tolerance * ctx->tolerance;
+	if (shift_sq < tol_sq)
+		return false;
+
+	/* 7. Prepare for next iteration: save centroids, reset accumulators */
+	memcpy(ctx->old_centroids,
+		   st->centroids,
+		   (size_t)nlist * dim * sizeof(float));
+	memset(ctx->centroid_sums, 0, (size_t)nt * nlist * dim * sizeof(float));
+	memset(ctx->centroid_cnts, 0, (size_t)nt * nlist * sizeof(uint32_t));
+	memset(ctx->costs, 0, nt * sizeof(float));
+
+	/* 8. Precompute centroid norms for next iteration's distance calc */
+	if (st->metric == DISTANCE_L2)
+		precompute_norms_c(st);
+
+	return true;
+}
+
+uint32_t
+lloyd_iterate(KMeansState *st, bool use_cblas, const KMeansOptions *opts)
+{
+	(void)use_cblas;
+
+	uint32_t nt	   = st->nthreads;
+	uint32_t nlist = st->nlist;
+	uint32_t dim   = st->dim;
+	uint32_t block = lloyd_parallel_block_size(nlist, st->nvecs);
+
+	lloyd_block_fn block_fn = lloyd_select_block_fn(st, use_cblas);
+
+	/* Precompute norms before first iteration */
+	if (st->metric == DISTANCE_L2)
+		precompute_norms_c(st);
+
+	MKT_MEMCTX_SCOPE(iter_ctx);
+	MktMemCtx old_ctx = mkt_memctx_switch(iter_ctx);
+
+	float *dist_bufs = mkt_alloc((size_t)nt * block * nlist * sizeof(float));
+	float *vec_bufs	 = NULL;
+	if (st->vec_block != NULL)
+		vec_bufs = mkt_alloc((size_t)nt * block * dim * sizeof(float));
+
+	float *centroid_sums = mkt_alloc0(
+			(size_t)nt * nlist * dim * sizeof(float));
+	uint32_t *centroid_cnts = mkt_alloc0(
+			(size_t)nt * nlist * sizeof(uint32_t));
+	float *costs		 = mkt_alloc0(nt * sizeof(float));
+	float *old_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
+
+	mkt_memctx_switch(old_ctx);
+
+	memcpy(old_centroids, st->centroids, (size_t)nlist * dim * sizeof(float));
+
+	LloydIterCtx ctx = {
+			.st				 = st,
+			.block_fn		 = block_fn,
+			.nthreads		 = nt,
+			.block			 = block,
+			.dist_bufs		 = dist_bufs,
+			.vec_bufs		 = vec_bufs,
+			.centroid_sums	 = centroid_sums,
+			.centroid_cnts	 = centroid_cnts,
+			.costs			 = costs,
+			.old_centroids	 = old_centroids,
+			.tolerance		 = opts->tolerance,
+			.verbose		 = opts->verbose,
+			.completed_iters = 0,
+	};
+
+	if (st->iterate)
+	{
+		st->iterate(
+				st->parallel_ctx,
+				st->nvecs,
+				lloyd_iter_work,
+				lloyd_iter_reduce,
+				&ctx,
+				opts->max_iterations);
+	}
+	else
+	{
+		for (uint32_t iter = 0; iter < opts->max_iterations; iter++)
+		{
+			lloyd_iter_work(0, 0, st->nvecs, &ctx);
+			if (!lloyd_iter_reduce(&ctx, iter))
+				break;
+		}
+	}
+
+	/* Final assignment (reduce already did the last centroid update) */
+	memset(costs, 0, nt * sizeof(float));
+
+	LloydParCtx par_ctx = {
+			.st		   = st,
+			.block_fn  = block_fn,
+			.dist_bufs = dist_bufs,
+			.costs	   = costs,
+			.vec_bufs  = vec_bufs,
+			.block	   = block,
+	};
+
+	if (st->parallel_for)
+		st->parallel_for(
+				st->parallel_ctx, st->nvecs, lloyd_par_worker, &par_ctx);
+	else
+		lloyd_par_worker(0, 0, st->nvecs, &par_ctx);
+	st->total_cost = 0.0f;
+	for (uint32_t t = 0; t < nt; t++)
+		st->total_cost += costs[t];
+
+	return ctx.completed_iters;
 }

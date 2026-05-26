@@ -31,4 +31,16 @@
  */
 void lloyd_assign(KMeansState *st, bool use_cblas);
 
+/*
+ * Fused iterative assign + update using the iterate callback.
+ *
+ * Each iteration: parallel assignment + per-thread centroid
+ * accumulation, then serial merge + convergence check.
+ * Workers stay alive across iterations via barrier.
+ *
+ * Returns the number of iterations completed.
+ */
+uint32_t
+lloyd_iterate(KMeansState *st, bool use_cblas, const KMeansOptions *opts);
+
 #endif /* MKT_KMEANS_LLOYD_H */

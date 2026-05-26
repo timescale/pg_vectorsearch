@@ -140,6 +140,20 @@ if blas_opt != 'disabled'
   # Summary message
   if have_cblas
     config_data.set('MKT_HAVE_CBLAS', 1)
+    # Vendor-specific define so the runtime thread-pinning code in
+    # mkt_cblas_pin_single_thread() only references symbols that the
+    # detected BLAS actually exports. Referencing an undefined extern
+    # in that function (e.g. openblas_set_num_threads when linked
+    # against Accelerate) breaks the link on macOS — Mach-O's weak
+    # references don't survive LTO. Currently only OpenBLAS is
+    # singled out; other vendors fall through to a no-op (threading
+    # must be set via env vars like VECLIB_MAXIMUM_THREADS / MKL_NUM_THREADS).
+    if blas_name == 'OpenBLAS'
+      config_data.set('MKT_BLAS_OPENBLAS', 1)
+    endif
+    if cc.has_function('bli_thread_set_num_threads', dependencies: cblas_dep)
+      config_data.set('MKT_BLAS_BLIS', 1)
+    endif
     message('BLAS: ' + blas_name + ' (optimized matrix operations enabled)')
   elif blas_opt == 'enabled'
     error('BLAS required but not found')

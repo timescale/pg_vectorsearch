@@ -223,6 +223,8 @@ main(int argc, char **argv)
 	 */
 	setenv("OMP_NUM_THREADS", "1", 0);
 	setenv("OPENBLAS_NUM_THREADS", "1", 0);
+	setenv("BLIS_NUM_THREADS", "1", 0);
+	mkt_cblas_pin_single_thread();
 
 	/* Initialize memory context for CLI */
 	MktMemCtx cli_memctx = mkt_memctx_create(NULL, "cli");

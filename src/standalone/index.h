@@ -79,7 +79,7 @@ typedef struct MktIndexConfig
 	bool			  encode_rabitq;	/* encode posting lists with RaBitQ */
 	MktPostingFormat  posting_fmt;		/* flat or pages */
 	int				  fastscan;			/* 0=off, 8=uint8 LUT, 16=uint16 LUT */
-	uint32_t		  nworkers;			/* 0 = auto, 1 = serial */
+	int32_t			  nworkers;			/* -1 = auto, 0 = serial */
 } MktIndexConfig;
 
 /* ----------------------------------------------------------------

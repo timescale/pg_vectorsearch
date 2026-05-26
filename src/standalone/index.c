@@ -237,6 +237,37 @@ normalize_all(float *data, uint32_t nvecs, Dimension dim)
 }
 
 /* ----------------------------------------------------------------
+ * K-means parallel dispatch bridge
+ *
+ * Adapts the thread pool's parallel_for to the k-means callback
+ * signature. K-means doesn't know about MktThreadPool.
+ * ---------------------------------------------------------------- */
+
+static void
+km_parallel_for(void *ctx, uint32_t total, KMeansWorkFn work_fn, void *arg)
+{
+	mkt_thread_pool_parallel_for((MktThreadPool *)ctx, total, work_fn, arg);
+}
+
+static void
+km_iterate(
+		void		  *ctx,
+		uint32_t	   total,
+		KMeansWorkFn   work_fn,
+		KMeansReduceFn reduce_fn,
+		void		  *arg,
+		uint32_t	   max_iterations)
+{
+	mkt_thread_pool_iterate(
+			(MktThreadPool *)ctx,
+			total,
+			work_fn,
+			(MktReduceFn)reduce_fn,
+			arg,
+			max_iterations);
+}
+
+/* ----------------------------------------------------------------
  * Parallel centroid rotation callback
  * ---------------------------------------------------------------- */
 
@@ -376,6 +407,19 @@ mkt_index_build(
 
 	mkt_distance_init();
 
+	/* Create thread pool early — used by k-means and posting build */
+	uint32_t nworkers;
+	if (config->nworkers < 0)
+	{
+		uint32_t ncpu = sa_detect_nthreads();
+		nworkers	  = ncpu > 1 ? ncpu - 1 : 0;
+	}
+	else
+	{
+		nworkers = (uint32_t)config->nworkers;
+	}
+	MktThreadPool *pool = mkt_thread_pool_create(nworkers);
+
 	/* Long-lived context for index data. Build-phase temporaries
 	 * go into a child context that gets deleted after build. */
 	MktMemCtx idx_ctx	= mkt_memctx_create(NULL, "index");
@@ -437,6 +481,10 @@ mkt_index_build(
 		km_opts.nredo = config->km_nredo;
 	if (config->km_max_iter > 0)
 		km_opts.max_iterations = config->km_max_iter;
+	km_opts.parallel_for = km_parallel_for;
+	km_opts.iterate		 = km_iterate;
+	km_opts.parallel_ctx = pool;
+	km_opts.nthreads	 = nworkers + 1;
 
 	HKMeansResult *tree = mkt_hkmeans_f32(
 			samples,
@@ -485,17 +533,6 @@ mkt_index_build(
 
 	/* RaBitQ params */
 	idx->base.params = mkt_rabitq_create(dim, 42);
-
-	/* Create thread pool for parallel build phases.
-	 * nworkers = background workers (matches PG convention).
-	 * parallel_for adds the leader = nworkers + 1 total. */
-	uint32_t nworkers = config->nworkers;
-	if (nworkers == 0)
-	{
-		uint32_t ncpu = sa_detect_nthreads();
-		nworkers	  = ncpu > 1 ? ncpu - 1 : 0;
-	}
-	MktThreadPool *pool = mkt_thread_pool_create(nworkers);
 
 	/* Precompute P^T * centroids for zero-alloc query path. */
 	idx->pt_centroids	 = mkt_alloc((size_t)nlist * dim * sizeof(float));
