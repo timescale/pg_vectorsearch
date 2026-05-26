@@ -1592,9 +1592,13 @@ removes bias toward any particular vector direction.
 
 **Algorithm overview:**
 
-1. **Setup**: Generate a random orthogonal matrix P (Johnson-Lindenstrauss style)
-2. **Encode**: For vector **o**, compute P⁻¹**o** and store sign pattern as D bits
-3. **Distance**: Use ratio estimator with theoretical error bound O(1/√D)
+1. **Setup**: Generate a random orthonormal rotation R deterministically from
+   `(dim, seed)`. We use a *randomized Hadamard transform* (FJLT — see
+   "Hadamard rotation" below), not a dense random matrix, so R is O(d log d)
+   to apply and the per-index parameter storage is constant-size.
+2. **Encode**: For vector **o**, compute R(**o** − **c**) and store sign
+   pattern as D bits.
+3. **Distance**: Use ratio estimator with theoretical error bound O(1/√D).
 
 **Per-vector storage**: RaBitQ requires more than just the binary code:
 
@@ -1661,15 +1665,17 @@ typedef struct RaBitQBatch
     uint8_t *bits;         /* [count * packed_bytes] */
 } RaBitQBatch;
 
-// RaBitQ quantizer state (shared across all vectors in an index)
+// RaBitQ quantizer state (shared across all vectors in an index).
+// Holds the randomized Hadamard rotation; storage does not scale with dim.
 typedef struct {
-    float    *P;            // Random orthogonal matrix (dim x dim), row-major
-    Dimension dim;
-    uint32_t  packed_bytes; // ceil(dim / 8)
-    uint64_t  seed;         // Seed for reproducibility
+    Dimension           dim;          // vector dimension
+    uint32_t            packed_bytes; // ceil(dim / 8)
+    uint64_t            seed;         // seed for reproducibility
+    MktFastRotateParams fast;         // Hadamard rotation (signs + K×K mixer)
 } RaBitQParams;
 
-// Initialize with random orthogonal matrix
+// Initialize from (dim, seed). Returns NULL if dim isn't supported by the
+// Hadamard factorization (see mkt_fast_rotate_supported).
 RaBitQParams *mkt_rabitq_create(Dimension dim, uint64_t seed);
 int           mkt_rabitq_init(RaBitQParams *params, Dimension dim,
                               uint64_t seed);
@@ -1763,24 +1769,63 @@ mkt_rabitq_encode_into(const RaBitQParams *params, VectorRef input,
 }
 ```
 
-**Random orthogonal matrix generation:**
+**Hadamard rotation:**
 
-```c
-// Generate random orthogonal matrix via QR decomposition of random Gaussian
-static void
-generate_orthogonal_matrix(float *P, Dimension dim, uint64_t seed)
-{
-    // Fill with random Gaussian values
-    uint64_t rng = seed;
-    for (Dimension i = 0; i < dim * dim; i++) {
-        P[i] = random_gaussian(&rng);
-    }
+The rotation `R` that turns vectors into RaBitQ-friendly form is a
+*randomized Hadamard transform* (RHT), not a dense random orthogonal
+matrix. Two reasons:
 
-    // QR decomposition (Gram-Schmidt or Householder)
-    // Result: P is orthogonal (P * P^T = I)
-    qr_decomposition_inplace(P, dim);
-}
-```
+1. **O(d log d) per application** instead of O(d²). At dim=768, one
+   per-query rotation through a dense BLAS sgemv took ≈ 22 µs against
+   ARM Performance Libraries (matched OpenBLAS on AVX-512); the
+   Hadamard transform takes ≈ 5 µs scalar/auto-vectorized — a 4-5×
+   speedup that lifts QPS by ~19% at recall 0.94 on cohere-1M.
+2. **Tiny serialized state.** The rotation is described by two random
+   sign vectors (D1, D2) and a small K×K orthonormal mixer matrix
+   (where dim = N·K and K is the small odd cofactor). For dim=768 =
+   256·3 the rotation params are ≈ 200 bytes, vs ≈ 2.25 MB for a
+   dense `float P[768×768]`. The same seed regenerates them
+   deterministically, so we persist (dim, seed) and rebuild on load.
+
+The applied transform is `R = D2 · M_K · (I_K ⊗ H_N) · D1 · (1/√N)`:
+
+- `D1`: per-input sign flip, pre-FWHT
+- `I_K ⊗ H_N`: block-diagonal Walsh-Hadamard transform on K blocks
+  of length N (each block is power-of-two)
+- `M_K`: K×K orthonormal mixer applied across the K blocks at each
+  position
+- `D2`: post-FWHT sign flip — the second round of randomisation that
+  matches the FJLT analysis (Ailon-Chazelle) and tightens the
+  concentration of the transform enough to satisfy RaBitQ's
+  probabilistic lower-bound at small dim.
+
+The kernel lives in `src/quant/fast_rotate.{c,h}` and is exposed via
+`mkt_rabitq_rotate` / `mkt_rabitq_rotate_batch` for callers — they
+dispatch automatically; nobody touches the rotation directly.
+
+**Supported dimensions:** `mkt_fast_rotate_supported(dim)` requires
+`dim = N · K` with `N` a power of two ≥ 4 and `K ≤
+MKT_FAST_ROTATE_K_MAX` (currently 8). That covers every common
+embedding dim — 64, 128, 256, 384, 512, 768, 1024, 1536, 2048 — but
+not awkward primes. `mkt_rabitq_create` returns NULL for unsupported
+dims rather than silently falling back to anything else.
+
+**Future SIMD optimisation:** `mkt_fast_rotate_apply` is currently
+plain portable C, relying on the compiler's auto-vectoriser. With
+`-O3` and a modern compiler, GCC/clang vectorise the FWHT butterflies
+to NEON (16-byte) on aarch64 and to AVX-2/AVX-512 (32/64-byte) on
+x86, which is fast enough that the kernel only takes ≈ 5 µs at
+dim=768. If profiling later shows the rotation pass as a bottleneck
+(or if a compiler version misses the vectorisation), the codebase has
+room for explicit hand-tuned variants alongside the FASTSCAN
+kernels — add `fast_rotate_neon.c`, `fast_rotate_sve2.c`,
+`fast_rotate_avx512.c` files with target-attribute kernels and wire
+them into the same `mkt_simd_has(...)` runtime dispatch already used
+by `mkt_fastscan_accumulate_hacc_*`. Expected upper bound on AVX-512
+is roughly 16-wide butterflies → ~1-2 µs per rotation, i.e. another
+3-4 µs of headroom per query. Not pursued yet because the
+auto-vectorised baseline already shipped a +19% QPS gain at
+mid-recall.
 
 **Distance estimation:**
 
