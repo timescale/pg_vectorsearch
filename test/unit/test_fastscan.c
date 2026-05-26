@@ -57,6 +57,22 @@ get_fastscan_simd_mask(const char *variant, uint32_t *simd_mask)
 		*simd_mask = SIMD_NEON;
 		return true;
 	}
+	if (strcmp(variant, "sve") == 0)
+	{
+		if (!(mkt_detect_simd() & SIMD_SVE))
+			return false;
+		/* Force NEON+SVE only so the dispatch falls through SVE2
+		 * (even on CPUs that also expose SVE2) into the SVE path. */
+		*simd_mask = SIMD_NEON | SIMD_SVE;
+		return true;
+	}
+	if (strcmp(variant, "sve2") == 0)
+	{
+		if (!(mkt_detect_simd() & SIMD_SVE2))
+			return false;
+		*simd_mask = SIMD_NEON | SIMD_SVE | SIMD_SVE2;
+		return true;
+	}
 #endif
 	(void)variant;
 	*simd_mask = 0xFFFFFFFF;
@@ -566,7 +582,13 @@ TEST(lut_dim_not_multiple_of_4)
  * ---------------------------------------------------------------- */
 
 TEST_PARAMETERIZED(
-		simd_accumulate_equivalence, "scalar", "avx2", "avx512", "neon")
+		simd_accumulate_equivalence,
+		"scalar",
+		"avx2",
+		"avx512",
+		"neon",
+		"sve",
+		"sve2")
 {
 	SKIP_IF_FASTSCAN_SIMD_NOT_AVAILABLE(param);
 
@@ -615,7 +637,13 @@ TEST_PARAMETERIZED(
 }
 
 TEST_PARAMETERIZED(
-		simd_accumulate_hacc_equivalence, "scalar", "avx2", "avx512", "neon")
+		simd_accumulate_hacc_equivalence,
+		"scalar",
+		"avx2",
+		"avx512",
+		"neon",
+		"sve",
+		"sve2")
 {
 	SKIP_IF_FASTSCAN_SIMD_NOT_AVAILABLE(param);
 

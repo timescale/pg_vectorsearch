@@ -482,6 +482,20 @@ mkt_fastscan_init_simd(void)
 		return;
 	}
 #endif
+#ifdef MKT_HAVE_SVE
+	if (caps & SIMD_SVE)
+	{
+		/* SVE (non-SVE2) accumulate kernels for cores like Graviton 3
+		 * that expose SVE but not SVE2. Same algorithm as the SVE2
+		 * path with the USRA fuse decomposed into add+shift. */
+		g_fastscan_accumulate_fn	  = mkt_fastscan_accumulate_sve;
+		g_fastscan_accumulate_hacc_fn = mkt_fastscan_accumulate_hacc_sve;
+		g_fastscan_build_lut_fn		  = mkt_fastscan_build_lut_neon;
+		g_fastscan_build_lut_hacc_fn  = mkt_fastscan_build_lut_hacc_neon;
+		atomic_store(&g_fastscan_initialized, true);
+		return;
+	}
+#endif
 	if (caps & SIMD_NEON)
 	{
 		g_fastscan_accumulate_fn	  = mkt_fastscan_accumulate_neon;

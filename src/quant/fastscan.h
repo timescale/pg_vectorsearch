@@ -257,6 +257,24 @@ void mkt_fastscan_accumulate_hacc_sve2(
 		int32_t		  *accum,
 		Dimension	   dim);
 
+/* SVE (non-2) implementations. Same algorithm as the SVE2 variants
+ * but with `svsra` (USRA-equivalent, SVE2-only) decomposed into the
+ * SVE-base svadd + svlsr pair. Used on cores that expose SVE but not
+ * SVE2 — Graviton 3 / Neoverse-V1 most notably. Runtime dispatch
+ * prefers SVE2 when available; this kernel runs only when
+ * HWCAP_SVE & !HWCAP2_SVE2. */
+void mkt_fastscan_accumulate_sve(
+		const uint8_t *codes,
+		const uint8_t *lut,
+		uint16_t	  *accum,
+		Dimension	   dim);
+
+void mkt_fastscan_accumulate_hacc_sve(
+		const uint8_t *codes,
+		const uint8_t *lut,
+		int32_t		  *accum,
+		Dimension	   dim);
+
 #endif
 #endif
 
