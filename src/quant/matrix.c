@@ -15,8 +15,20 @@
 #include <string.h>
 
 #ifdef MKT_HAVE_CBLAS
+/*
+ * macOS: cblas lives inside Accelerate's vecLib sub-framework. We
+ * include it directly rather than via the `Accelerate/Accelerate.h`
+ * umbrella because the umbrella pulls in MacTypes.h, which
+ * `typedef long Size` clashes with PostgreSQL's `typedef size_t
+ * Size` in the PG-extension build.
+ *
+ * The legacy `vecLib/cblas.h` deprecates every prototype past macOS
+ * 13.3; under -DACCELERATE_NEW_LAPACK (set in meson.build for the
+ * Apple branch) we use `vecLib/cblas_new.h` instead, which aliases
+ * the same call sites to the non-deprecated LP64 symbols.
+ */
 #ifdef __APPLE__
-#include <Accelerate/Accelerate.h>
+#include <vecLib/cblas_new.h>
 #else
 #include <cblas.h>
 #endif

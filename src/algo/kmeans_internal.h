@@ -66,6 +66,12 @@ typedef struct KMeansState
 	float	  *dist_block;	  /* [KMEANS_BLOCK_SIZE * nlist] work buf */
 	float	  *new_centroids; /* [nlist * dim] accumulator */
 	float	   total_cost;
+
+	/* Parallel dispatch (NULL = serial) */
+	KMeansParallelFn parallel_for;
+	KMeansIterateFn	 iterate;
+	void			*parallel_ctx;
+	uint32_t		 nthreads;
 } KMeansState;
 
 /* Get pointer to vector i in the input array */
@@ -75,5 +81,12 @@ km_get_vector(const KMeansState *st, uint32_t i, size_t elem_size)
 	uint32_t idx = st->indices ? st->indices[i] : i;
 	return (const char *)st->vectors + (size_t)idx * st->dim * elem_size;
 }
+
+/*
+ * Max centroid movement between two centroid arrays.
+ * Returns the maximum squared L2 shift.
+ */
+float kmeans_max_centroid_shift_between(
+		const float *a, const float *b, uint32_t nlist, Dimension dim);
 
 #endif /* MKT_KMEANS_INTERNAL_H */

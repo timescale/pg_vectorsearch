@@ -19,7 +19,6 @@
 #include <float.h>
 #include <math.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,6 +27,7 @@
 #include "algo/kmeans_internal.h"
 #include "algo/kmeans_lloyd.h"
 #include "algo/vecops.h"
+#include "core/log.h"
 #include "core/memory.h"
 
 /*
@@ -133,6 +133,37 @@ mkt_cblas_is_single_threaded(void)
 {
 	const char *v = getenv("OMP_NUM_THREADS");
 	return v != NULL && v[0] == '1' && v[1] == '\0';
+}
+
+/*
+ * Pin BLAS to single-threaded operation via the vendor's runtime API.
+ *
+ * Only symbols for the BLAS vendor detected at configure time are
+ * referenced. Declaring all vendors' externs and relying on weak
+ * symbols doesn't survive macOS's linker (Mach-O has no portable
+ * "undefined weak reference resolves to NULL" that holds up under
+ * LTO).
+ *
+ * Supported vendors: OpenBLAS (openblas_set_num_threads),
+ * BLIS/AOCL (bli_thread_set_num_threads). Others (Accelerate,
+ * MKL, ARM PL) must be pinned via env vars.
+ */
+#ifdef MKT_BLAS_OPENBLAS
+extern void openblas_set_num_threads(int);
+#endif
+#ifdef MKT_BLAS_BLIS
+extern void bli_thread_set_num_threads(long);
+#endif
+
+void
+mkt_cblas_pin_single_thread(void)
+{
+#ifdef MKT_BLAS_OPENBLAS
+	openblas_set_num_threads(1);
+#endif
+#ifdef MKT_BLAS_BLIS
+	bli_thread_set_num_threads(1);
+#endif
 }
 
 /*
@@ -354,21 +385,19 @@ kmeans_handle_empty_clusters(KMeansState *st)
 }
 
 /*
- * Check convergence: max centroid shift.
- *
- * Returns the maximum squared L2 distance any centroid moved.
+ * Max centroid movement between two centroid arrays.
+ * Returns the maximum squared L2 shift.
  */
-static float
-kmeans_max_centroid_shift(const KMeansState *st)
+float
+kmeans_max_centroid_shift_between(
+		const float *a, const float *b, uint32_t nlist, Dimension dim)
 {
 	float max_shift = 0.0f;
 
-	for (uint32_t j = 0; j < st->nlist; j++)
+	for (uint32_t j = 0; j < nlist; j++)
 	{
 		float shift = mkt_l2_distance_squared(
-				st->centroids + (size_t)j * st->dim,
-				st->new_centroids + (size_t)j * st->dim,
-				st->dim);
+				a + (size_t)j * dim, b + (size_t)j * dim, dim);
 		if (shift > max_shift)
 			max_shift = shift;
 	}
@@ -575,6 +604,25 @@ kmeans_run_one_impl(
 
 	kmeans_init_plusplus_impl(st, seed, ops);
 
+	/* Use fused iterate path for Lloyd with f32 vectors.
+	 * Works with or without a thread pool — serial fallback
+	 * calls work+reduce in a plain loop.
+	 * Hamerly/Elkan use the generic loop below (needs bounds). */
+	bool use_iterate = st->vec_type == MKT_VEC_F32 &&
+					   algo->update_bounds == NULL;
+
+	if (use_iterate)
+	{
+		bool use_cblas = (algo == &lloyd_cblas_ops);
+		lloyd_iterate(st, use_cblas, opts);
+		kmeans_handle_empty_clusters(st);
+		if (algo->destroy)
+			algo->destroy(algo_state);
+		if (old_cents)
+			mkt_free(old_cents);
+		return;
+	}
+
 	for (uint32_t iter = 0; iter < opts->max_iterations; iter++)
 	{
 		/* Save old centroids for convergence check */
@@ -591,20 +639,19 @@ kmeans_run_one_impl(
 		if (algo->update_bounds)
 			algo->update_bounds(st, algo_state, old_cents);
 
-		float shift = kmeans_max_centroid_shift(st);
+		float shift_sq = kmeans_max_centroid_shift_between(
+				st->centroids, st->new_centroids, st->nlist, st->dim);
 
 		if (opts->verbose)
-		{
-			fprintf(stderr,
-					"  iter %u: cost=%.4f, max_shift=%.6f\n",
+			mkt_log("  iter %u: cost=%.4f, max_shift=%.6f\n",
 					iter,
 					st->total_cost,
-					shift);
-		}
+					sqrtf(shift_sq));
 
 		st->total_cost = 0.0f;
 
-		if (shift < opts->tolerance)
+		float tol_sq = opts->tolerance * opts->tolerance;
+		if (shift_sq < tol_sq)
 		{
 			algo->assign(st, algo_state);
 			if (algo->destroy)
@@ -756,6 +803,11 @@ mkt_kmeans(
 		KMeansState *st = kmeans_state_create(
 				vectors, indices, vec_type, nvecs, dim, nlist, metric);
 
+		st->parallel_for = opts.parallel_for;
+		st->iterate		 = opts.iterate;
+		st->parallel_ctx = opts.parallel_ctx;
+		st->nthreads	 = opts.nthreads > 0 ? opts.nthreads : 1;
+
 		uint64_t seed = opts.seed + redo;
 
 		/* Run in arena context so per-iteration temps land there */
@@ -764,14 +816,11 @@ mkt_kmeans(
 		mkt_memctx_switch(run_ctx);
 
 		if (opts.verbose && opts.nredo > 1)
-		{
-			fprintf(stderr,
-					"redo %u/%u: cost=%.4f%s\n",
+			mkt_log("redo %u/%u: cost=%.4f%s\n",
 					redo + 1,
 					opts.nredo,
 					st->total_cost,
 					st->total_cost < best_cost ? " (best)" : "");
-		}
 
 		if (st->total_cost < best_cost)
 		{

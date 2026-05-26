@@ -66,7 +66,7 @@ typedef struct
 	const char *distance_mode;
 	bool		no_rerank;
 	int			fastscan; /* 0=off, 8=uint8 LUT, 16=uint16 LUT (hacc) */
-	uint32_t	nworkers; /* 0=auto, 1=serial */
+	int32_t		nworkers; /* -1=auto, 0=serial */
 	bool		wait_profile;
 	bool		help;
 } BenchConfig;
@@ -207,7 +207,7 @@ print_usage(CmdContext *ctx)
 	printf("  --fastscan <8|16>  Use VPSHUFB fastscan (8=fast, "
 		   "16=accurate)\n");
 	printf("  --workers <int>    Build parallelism "
-		   "(0=auto, 1=serial)\n");
+		   "(-1=auto, 0=serial)\n");
 	printf("  --wait-profile     Pause before queries (print PID for perf "
 		   "attach)\n");
 #ifdef MKT_HAVE_HDF5
@@ -236,6 +236,7 @@ cmd_bench_search(CmdContext *ctx)
 			.posting_fmt	= "rabitq",
 			.posting_layout = "pages",
 			.distance_mode	= "asymmetric",
+			.nworkers		= -1,
 	};
 
 	static struct option long_options[] = {
@@ -342,7 +343,7 @@ cmd_bench_search(CmdContext *ctx)
 			config.boundary_epsilon = atof(optarg);
 			break;
 		case 'w':
-			config.nworkers = (uint32_t)atoi(optarg);
+			config.nworkers = (int32_t)atoi(optarg);
 			break;
 		case 'h':
 			config.help = true;
@@ -421,7 +422,7 @@ cmd_bench_search(CmdContext *ctx)
 
 		/* Build index by streaming from HDF5 */
 		printf("Building index (nlist=%u, centroid=%s, "
-			   "posting=%s, layout=%s, workers=%u)...\n",
+			   "posting=%s, layout=%s, workers=%d)...\n",
 			   config.nlist,
 			   config.centroid_fmt,
 			   config.posting_fmt,

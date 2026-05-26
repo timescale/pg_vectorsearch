@@ -42,8 +42,16 @@
 /*
  * CBLAS support: enables optimized matrix multiplication via BLAS library.
  * When available, batch encoding uses cblas_sgemm for ~4x speedup.
+ *
+ * MKT_BLAS_OPENBLAS is set when meson detected OpenBLAS specifically.
+ * The runtime thread-pinning code in mkt_cblas_pin_single_thread()
+ * uses it to decide whether to call openblas_set_num_threads().
+ * Referencing that symbol unconditionally breaks linking on macOS
+ * with Accelerate (Mach-O has no portable "undefined weak reference
+ * resolves to NULL" that survives LTO).
  */
 #mesondefine MKT_HAVE_CBLAS
+#mesondefine MKT_BLAS_OPENBLAS
 
 /*
  * FAISS support: enables benchmark comparison against FAISS RaBitQuantizer.
