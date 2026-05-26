@@ -31,9 +31,11 @@
 #include <access/tableam.h>
 #include <access/xloginsert.h>
 #include <catalog/index.h>
+#include <commands/progress.h>
 #include <common/pg_prng.h>
 #include <math.h>
 #include <miscadmin.h>
+#include <utils/backend_progress.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
 #include <utils/sampling.h>
@@ -247,6 +249,10 @@ build_callback(
 			&bs->builders[asgn.primary], *tid, asgn.enc_vector);
 	bs->indtuples++;
 
+	if (((uint64_t)bs->indtuples % 10000) == 0)
+		pgstat_progress_update_param(
+				PROGRESS_CREATEIDX_TUPLES_DONE, (int64)bs->indtuples);
+
 	if (asgn.secondary != MKT_INVALID_CLUSTER)
 	{
 		mkt_posting_builder_add(
@@ -434,6 +440,11 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	if ((uint32_t)bs->nsamples < nlist)
 		nlist = (uint32_t)bs->nsamples;
 
+	pgstat_progress_update_param(
+			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_KMEANS);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
+
 	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
 	km_opts.nredo		  = bs->params.kmeans_nredo;
@@ -489,6 +500,8 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	resolve_build_params(heap, index, &bs.params);
 
 	/* 2. Sample and cluster vectors */
+	pgstat_progress_update_param(
+			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SAMPLE);
 	float		  *global_mean;
 	HKMeansResult *tree = run_clustering(&bs, &global_mean);
 
@@ -505,6 +518,11 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	bs.params.nlist				   = nlist;
 
 	/* 3. Single-pass streaming build */
+	pgstat_progress_update_param(
+			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SETUP);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
+
 	uint64_t	  rabitq_seed = 42;
 	RaBitQParams *rq_params	  = mkt_rabitq_create(dim, rabitq_seed);
 
@@ -598,6 +616,12 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	bs.soar_dupes  = 0;
 
 	/* 4. Single heap scan */
+	pgstat_progress_update_param(
+			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SCAN);
+	pgstat_progress_update_param(
+			PROGRESS_CREATEIDX_TUPLES_TOTAL, (int64)est_rows);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
+
 	double heap_tuples = table_index_build_scan(
 			heap,
 			index,
@@ -620,6 +644,10 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			 bs.params.soar_lambda);
 
 	/* 5. Finish posting builders */
+	pgstat_progress_update_param(
+			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_POSTING);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
 	BlockNumber *posting_heads = palloc(nlist * sizeof(BlockNumber));
 	for (uint32_t c = 0; c < nlist; c++)
 	{
@@ -629,6 +657,10 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	pfree(builders);
 
 	/* 6. Write centroid pages into reserved blocks */
+	pgstat_progress_update_param(
+			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_CENTROID);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
 	mkt_write_centroid_tree(
 			&storage.base,
 			tree,
@@ -652,6 +684,10 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	}
 
 	/* 7. WAL-log all pages */
+	pgstat_progress_update_param(
+			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_WAL);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
 	log_newpage_range(
 			index, MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index), true);
 
@@ -668,4 +704,30 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	result->heap_tuples		 = heap_tuples;
 	result->index_tuples	 = indtuples;
 	return result;
+}
+
+char *
+mktann_buildphasename(int64 phasenum)
+{
+	switch (phasenum)
+	{
+	case PROGRESS_CREATEIDX_SUBPHASE_INITIALIZE:
+		return "initializing";
+	case PROGRESS_MKTANN_PHASE_SAMPLE:
+		return "sampling vectors";
+	case PROGRESS_MKTANN_PHASE_KMEANS:
+		return "clustering (k-means)";
+	case PROGRESS_MKTANN_PHASE_SETUP:
+		return "preparing RaBitQ encoding";
+	case PROGRESS_MKTANN_PHASE_SCAN:
+		return "scanning table";
+	case PROGRESS_MKTANN_PHASE_POSTING:
+		return "finalizing posting lists";
+	case PROGRESS_MKTANN_PHASE_CENTROID:
+		return "writing centroid pages";
+	case PROGRESS_MKTANN_PHASE_WAL:
+		return "WAL logging";
+	default:
+		return NULL;
+	}
 }

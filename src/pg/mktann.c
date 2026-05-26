@@ -177,7 +177,7 @@ mktann_handler(PG_FUNCTION_ARGS)
 	/* Build callbacks */
 	amroutine->ambuild			= mktann_build;
 	amroutine->ambuildempty		= mktann_buildempty;
-	amroutine->ambuildphasename = NULL;
+	amroutine->ambuildphasename = mktann_buildphasename;
 
 	/* Insert / maintenance */
 	amroutine->aminsert		   = mktann_insert;

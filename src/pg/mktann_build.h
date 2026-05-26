@@ -13,18 +13,19 @@
 #include <access/amapi.h>
 #include <utils/rel.h>
 
-/*
- * Build the mktann index. Matches ambuild_function signature.
- *
- * Phases:
- *   1. Determine dimension from index column typmod
- *   2. Sample vectors via BlockSampler + reservoir sampling
- *   3. Run k-means on samples
- *   4. Full heap scan to assign vectors and find medoids
- *   5. RaBitQ-encode centroids relative to global mean
- *   6. Write metadata page (block 0) and centroid pages
- */
+/* Custom build subphases for pg_stat_progress_create_index.
+ * Values start at 2 (1 = PROGRESS_CREATEIDX_SUBPHASE_INITIALIZE). */
+#define PROGRESS_MKTANN_PHASE_SAMPLE   2
+#define PROGRESS_MKTANN_PHASE_KMEANS   3
+#define PROGRESS_MKTANN_PHASE_SETUP	   4
+#define PROGRESS_MKTANN_PHASE_SCAN	   5
+#define PROGRESS_MKTANN_PHASE_POSTING  6
+#define PROGRESS_MKTANN_PHASE_CENTROID 7
+#define PROGRESS_MKTANN_PHASE_WAL	   8
+
 IndexBuildResult *
 mktann_build(Relation heap, Relation index, struct IndexInfo *index_info);
+
+char *mktann_buildphasename(int64 phasenum);
 
 #endif /* MKTANN_BUILD_H */
