@@ -12,7 +12,6 @@
 #include <utils/array.h>
 
 #include "mkt_pg.h"
-#include "quant/matrix.h"
 
 /* ----------------------------------------------------------------
  * Type I/O
@@ -322,9 +321,14 @@ mkt_rabitq_encode_pg(PG_FUNCTION_ARGS)
 
 	int dim = input->dim;
 
-	/* Build RaBitQParams from the PG varlena's pre-computed matrix */
-	RaBitQParams *rparams =
-			mkt_rabitq_create_from_matrix(dim, params->seed, params->P);
+	/* RaBitQParams are regenerated deterministically from (dim, seed)
+	 * — the rotation is a randomized Hadamard, not a dense matrix, so
+	 * the params->P field is no longer used. */
+	RaBitQParams *rparams = mkt_rabitq_create(dim, params->seed);
+	if (rparams == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("unsupported dim %d for RaBitQ", dim)));
 
 	RaBitQVector *result = mkt_pg_rabitq_alloc(dim);
 

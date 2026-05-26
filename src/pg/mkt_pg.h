@@ -52,13 +52,11 @@ extern relopt_kind mktann_relopt_kind; /* index reloption kind */
 #define PG_RETURN_RABITQ_P(x)	PG_RETURN_POINTER(x)
 
 /*
- * RaBitQParamsPG - Orthogonal transform matrix (PostgreSQL varlena)
+ * RaBitQParamsPG - RaBitQ rotation params (PostgreSQL varlena)
  *
- * Stores the random orthogonal matrix P and seed for reproducibility.
- * Generated via rabitq_params_generate(dim, seed) and used with
- * rabitq_encode() to quantize vectors.
- *
- * Total size: 16 bytes header + dim * dim * sizeof(float)
+ * Just dim + seed: the rotation is a randomized Hadamard, regenerated
+ * deterministically from the seed at use time, so there's nothing
+ * else to persist. Generated via rabitq_params_generate(dim, seed).
  */
 typedef struct RaBitQParamsPG
 {
@@ -66,11 +64,9 @@ typedef struct RaBitQParamsPG
 	int16_t	 dim;
 	int16_t	 unused;
 	uint64_t seed;
-	float	 P[];
 } RaBitQParamsPG;
 
-#define MKT_RABITQ_PARAMS_PG_SIZE(dim) \
-	(offsetof(RaBitQParamsPG, P) + (dim) * (dim) * sizeof(float))
+#define MKT_RABITQ_PARAMS_PG_SIZE(dim) ((void)(dim), sizeof(RaBitQParamsPG))
 
 #define DatumGetRaBitQParamsPG(x)	 ((RaBitQParamsPG *)PG_DETOAST_DATUM(x))
 #define PG_GETARG_RABITQ_PARAMS_P(x) DatumGetRaBitQParamsPG(PG_GETARG_DATUM(x))
