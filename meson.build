@@ -248,16 +248,27 @@ if simd_mode != 'none' and cc.compiles(
   config_data.set('MKT_HAVE_F16C', 1)
 endif
 
-# Detect SVE2 support in the toolchain (independent of -march/-mcpu).
-# Per-function target attributes let SVE2 kernels compile even when the
-# project-wide flags don't enable SVE2; runtime dispatch via HWCAP2_SVE2
-# picks them only when the CPU actually supports the instructions.
+# Detect SVE / SVE2 toolchain support (independent of -march/-mcpu).
+# Per-function target attributes let the SVE/SVE2 kernels compile even
+# when the project-wide flags don't enable them; runtime dispatch via
+# HWCAP_SVE / HWCAP2_SVE2 picks them only on capable CPUs.
+have_sve = false
 have_sve2 = false
 if simd_mode == 'full' and host_machine.cpu_family() == 'aarch64'
+  have_sve = cc.compiles(
+    '#include <arm_sve.h>\n' +
+    '__attribute__((target("+sve"))) ' +
+    'static svuint8_t f(svuint8_t a, svuint8_t b){return svtbl_u8(a,b);}',
+    name: 'aarch64 SVE target attribute',
+  )
+  if have_sve
+    config_data.set('MKT_HAVE_SVE', 1)
+  endif
+
   have_sve2 = cc.compiles(
     '#include <arm_sve.h>\n' +
     '__attribute__((target("+sve2"))) ' +
-    'static svuint8_t f(svuint8_t a, svuint8_t b){return svtbl_u8(a,b);}',
+    'static svuint16_t f(svuint16_t a, svuint16_t b){return svsra_n_u16(a,b,8);}',
     name: 'aarch64 SVE2 target attribute',
   )
   if have_sve2
@@ -390,6 +401,11 @@ if simd_mode == 'full'
       'src/quant/rabitq_neon.c',
       'src/quant/fastscan_neon.c',
     )
+    if have_sve
+      simd_sources += files(
+        'src/quant/fastscan_sve.c',
+      )
+    endif
     if have_sve2
       simd_sources += files(
         'src/quant/fastscan_sve2.c',
@@ -652,6 +668,11 @@ if build_pg_extension
         'src/quant/rabitq_neon.c',
         'src/quant/fastscan_neon.c',
       )
+      if have_sve
+        mkt_pg_simd_sources += files(
+          'src/quant/fastscan_sve.c',
+        )
+      endif
       if have_sve2
         mkt_pg_simd_sources += files(
           'src/quant/fastscan_sve2.c',

@@ -72,11 +72,15 @@
 #mesondefine MKT_HAVE_HDF5
 
 /*
- * AArch64 SVE2 support: enables SVE2 fastscan accumulate kernels.
- * The kernels carry per-function target attributes so they compile even
- * when -march/-mcpu don't include SVE2; runtime dispatch via HWCAP2_SVE2
- * picks them only when the CPU actually supports the instructions.
+ * AArch64 SVE / SVE2 support: enables SVE-base / SVE2 fastscan
+ * accumulate kernels. The kernels carry per-function target attributes
+ * so they compile even when -march/-mcpu don't include SVE; runtime
+ * dispatch via HWCAP_SVE / HWCAP2_SVE2 picks them based on what the
+ * CPU actually advertises. SVE2 (Graviton 4, Grace, M4) is preferred
+ * when available; SVE-only cores (Graviton 3 / Neoverse-V1) fall back
+ * to the SVE-base kernel.
  */
+#mesondefine MKT_HAVE_SVE
 #mesondefine MKT_HAVE_SVE2
 
 #endif /* MKT_CONFIG_H */
