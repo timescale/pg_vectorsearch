@@ -45,9 +45,12 @@ if pg_srcdir_path != ''
   endif
 endif
 
-# Build the extension as a shared library
+# Build the extension as a shared library. The vcs_tag-generated
+# git_commit.h is listed as a source so ninja produces it before
+# compiling any TU that #includes it.
 meerkat_ext_so = shared_library('meerkat',
   extension_sources,
+  git_commit_h,
   c_args: pg_ext_cflags,
   link_args: pg_ldflags,
   link_with: mkt_pg_lib,

@@ -221,6 +221,17 @@ mkt_config_h = configure_file(
   configuration: config_data,
 )
 
+# Embed the git commit hash at build time. vcs_tag re-runs when HEAD
+# moves, so a plain `ninja` picks up a fresh commit without a full
+# reconfigure. Falls back to "unknown" outside of a git checkout.
+git_commit_h = vcs_tag(
+  input: 'src/git_commit.h.in',
+  output: 'git_commit.h',
+  fallback: 'unknown',
+  command: ['git', 'rev-parse', 'HEAD'],
+  replace_string: '@VCS_TAG@',
+)
+
 # Generate .clang-format-ignore to exclude build directory from formatting
 configure_file(
   input: 'clang-format-ignore.in',

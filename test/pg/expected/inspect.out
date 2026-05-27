@@ -247,3 +247,40 @@ ERROR:  "idx_btree" is not an mktann index
 -- Cleanup
 DROP TABLE embeddings;
 DROP TABLE wide;
+-- ---------------------------------------------------------------------
+-- mkt.git_commit() — exposes the git commit the extension was built
+-- from. Verify the contract without printing the actual hash so the
+-- expected output stays deterministic across builds.
+-- ---------------------------------------------------------------------
+-- Format: 40-char lowercase hex (git's full SHA-1) or the "unknown"
+-- fallback used when vcs_tag had no git checkout available.
+SELECT mkt.git_commit() ~ '^([0-9a-f]{40}|unknown)$' AS valid_format;
+ valid_format 
+--------------
+ t
+(1 row)
+
+-- Callers (e.g. rekall) use this as a string, so the return type
+-- must be text.
+SELECT pg_typeof(mkt.git_commit())::text = 'text' AS returns_text;
+ returns_text 
+--------------
+ t
+(1 row)
+
+-- The function must be IMMUTABLE STRICT PARALLEL SAFE — the commit
+-- doesn't change within a single backend's lifetime, the input is
+-- void so STRICT is trivially satisfied, and there's no per-backend
+-- state that would break parallel workers.
+SELECT
+    p.provolatile      = 'i' AS immutable,
+    p.proisstrict            AS strict,
+    p.proparallel      = 's' AS parallel_safe
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'mkt' AND p.proname = 'git_commit';
+ immutable | strict | parallel_safe 
+-----------+--------+---------------
+ t         | t      | t
+(1 row)
+

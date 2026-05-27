@@ -7,9 +7,11 @@
 #include <access/reloptions.h>
 #include <catalog/namespace.h>
 #include <fmgr.h>
+#include <utils/builtins.h>
 #include <utils/guc.h>
 
 #include "algo/distance.h"
+#include "git_commit.h"
 #include "mkt_pg.h"
 #include "mktann_explain.h"
 
@@ -233,6 +235,24 @@ mkt_pg_check_value_finite(float val)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("NaN value not allowed in vector")));
+}
+
+/* ----------------------------------------------------------------
+ * Build identity
+ * ---------------------------------------------------------------- */
+
+/*
+ * Return the git commit the extension was built from. The string is
+ * baked into the binary via vcs_tag at build time (see meson.build).
+ * Rekall and other tooling use this to identify a build for
+ * benchmark reports.
+ */
+PG_FUNCTION_INFO_V1(mkt_git_commit);
+
+Datum
+mkt_git_commit(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_TEXT_P(cstring_to_text(MKT_GIT_COMMIT));
 }
 
 /* ----------------------------------------------------------------
