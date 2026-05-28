@@ -7,7 +7,6 @@
  */
 
 #include <math.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "core/memory.h"
@@ -42,16 +41,16 @@ MktBuildWorkerBufs
 mkt_build_worker_bufs_create(Dimension dim)
 {
 	return (MktBuildWorkerBufs){
-			.norm_buf	  = malloc(dim * sizeof(float)),
-			.residual_buf = malloc(dim * sizeof(float)),
+			.norm_buf	  = mkt_alloc(dim * sizeof(float)),
+			.residual_buf = mkt_alloc(dim * sizeof(float)),
 	};
 }
 
 void
 mkt_build_worker_bufs_free(MktBuildWorkerBufs *bufs)
 {
-	free(bufs->norm_buf);
-	free(bufs->residual_buf);
+	mkt_free(bufs->norm_buf);
+	mkt_free(bufs->residual_buf);
 	bufs->norm_buf	   = NULL;
 	bufs->residual_buf = NULL;
 }
