@@ -641,7 +641,6 @@ do_parallel_build(
 	shared->boundary_epsilon = bs->params.boundary_epsilon;
 	shared->fastscan		 = bs->params.fastscan;
 	shared->rabitq_seed		 = rabitq_seed;
-	shared->nlevels			 = tree->nlevels;
 	shared->nparticipants	 = nparticipants;
 	SpinLockInit(&shared->mutex);
 	ConditionVariableInit(&shared->workersdonecv);

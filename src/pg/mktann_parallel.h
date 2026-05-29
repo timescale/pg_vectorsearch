@@ -1,13 +1,14 @@
 /*
  * mktann_parallel.h - PG parallel index build for mktann
  *
- * DSM shared memory structures and worker entry point for parallel
- * index builds using PostgreSQL's parallel worker infrastructure.
- *
- * The leader process runs sampling + k-means, then sets up DSM with
- * the centroid tree, page reservations, and coordination state.
- * Workers cooperatively scan the heap, assign vectors to clusters
- * via tree descent, and stream posting pages to the buffer cache.
+ * Two-phase parallel build:
+ *   Phase 1 (sampling + k-means): workers cooperatively scan the
+ *     heap, collect samples, pick initial centroids, then iterate
+ *     k-means assignment + accumulation via PG Barrier. The leader
+ *     merges per-worker sums between iterations.
+ *   Phase 2 (posting): workers cooperatively scan the heap again,
+ *     assign vectors to clusters via tree descent, and stream
+ *     posting pages to the buffer cache.
  * The leader merges partial pages and writes centroid pages.
  */
 
@@ -17,6 +18,7 @@
 #include <postgres.h>
 
 #include <port/atomics.h>
+#include <storage/barrier.h>
 #include <storage/block.h>
 #include <storage/condition_variable.h>
 #include <storage/shm_toc.h>
@@ -36,6 +38,10 @@
 #define MKTANN_KEY_WAL_USAGE	 UINT64CONST(0xB000000000000006)
 #define MKTANN_KEY_BUFFER_USAGE	 UINT64CONST(0xB000000000000007)
 #define MKTANN_KEY_QUERY_TEXT	 UINT64CONST(0xB000000000000008)
+#define MKTANN_KEY_BARRIER		 UINT64CONST(0xB000000000000009)
+#define MKTANN_KEY_SAMPLES		 UINT64CONST(0xB00000000000000A)
+#define MKTANN_KEY_CENTROIDS	 UINT64CONST(0xB00000000000000B)
+#define MKTANN_KEY_KM_WORKERS	 UINT64CONST(0xB00000000000000C)
 
 /* ----------------------------------------------------------------
  * MktBuildShared — primary shared state in DSM
@@ -59,8 +65,12 @@ typedef struct MktBuildShared
 	double		   boundary_epsilon;
 	bool		   fastscan;
 	uint64_t	   rabitq_seed;
-	uint32_t	   nlevels;
 	int			   nparticipants;
+
+	/* K-means sampling config */
+	uint32_t max_samples_per_worker;
+	uint32_t km_max_iterations;
+	float	 km_tolerance;
 
 	/* Mutable — spinlock-protected */
 	slock_t			  mutex;
@@ -69,11 +79,120 @@ typedef struct MktBuildShared
 	double			  reltuples;
 	double			  indtuples;
 	double			  soar_dupes;
+
+	/* K-means convergence — set by leader between barriers */
+	bool km_converged;
 } MktBuildShared;
 
 #define ParallelTableScanFromMktShared(shared)  \
 	((ParallelTableScanDesc)((char *)(shared) + \
 							 BUFFERALIGN(sizeof(MktBuildShared))))
+
+/* ----------------------------------------------------------------
+ * K-means sampling: per-worker sample slots in DSM
+ *
+ * Layout: [sample_counts[nparticipants]] then
+ *         [samples[worker_id][max_per_worker * dim]] packed.
+ * ---------------------------------------------------------------- */
+
+typedef struct MktDsmSamples
+{
+	uint32_t  nparticipants;
+	uint32_t  max_per_worker;
+	Dimension dim;
+} MktDsmSamples;
+
+static inline uint32_t *
+mktann_sample_counts(MktDsmSamples *s)
+{
+	return (uint32_t *)((char *)s + MAXALIGN(sizeof(MktDsmSamples)));
+}
+
+static inline float *
+mktann_worker_samples(MktDsmSamples *s, int worker_id)
+{
+	char *base = (char *)mktann_sample_counts(s) +
+				 s->nparticipants * sizeof(uint32_t);
+	return (float *)(base + (size_t)worker_id * s->max_per_worker * s->dim *
+									sizeof(float));
+}
+
+static inline Size
+mktann_samples_size(int nparticipants, uint32_t max_per_worker, Dimension dim)
+{
+	Size sz = MAXALIGN(sizeof(MktDsmSamples));
+	sz += (Size)nparticipants * sizeof(uint32_t);
+	sz += (Size)nparticipants * max_per_worker * dim * sizeof(float);
+	return sz;
+}
+
+/* ----------------------------------------------------------------
+ * K-means shared centroids in DSM
+ *
+ * centroids[nlist * dim] + norms_c[nlist]
+ * Written by leader between barriers, read by workers during
+ * assignment.
+ * ---------------------------------------------------------------- */
+
+static inline Size
+mktann_centroids_size(uint32_t nlist, Dimension dim)
+{
+	return (Size)nlist * dim * sizeof(float) + (Size)nlist * sizeof(float);
+}
+
+static inline float *
+mktann_centroids(char *base)
+{
+	return (float *)base;
+}
+
+static inline float *
+mktann_norms_c(char *base, uint32_t nlist, Dimension dim)
+{
+	return (float *)(base + (size_t)nlist * dim * sizeof(float));
+}
+
+/* ----------------------------------------------------------------
+ * K-means per-worker accumulators in DSM
+ *
+ * Per worker: centroid_sums[nlist * dim] + centroid_cnts[nlist]
+ *             + cost (1 float)
+ * ---------------------------------------------------------------- */
+
+static inline Size
+mktann_km_worker_size(uint32_t nlist, Dimension dim)
+{
+	return (Size)nlist * dim * sizeof(float) + (Size)nlist * sizeof(uint32_t) +
+		   sizeof(float);
+}
+
+static inline Size
+mktann_km_workers_size(int nparticipants, uint32_t nlist, Dimension dim)
+{
+	return (Size)nparticipants * mktann_km_worker_size(nlist, dim);
+}
+
+static inline float *
+mktann_km_worker_sums(char *base, uint32_t nlist, Dimension dim, int worker_id)
+{
+	return (float *)(base +
+					 (size_t)worker_id * mktann_km_worker_size(nlist, dim));
+}
+
+static inline uint32_t *
+mktann_km_worker_cnts(char *base, uint32_t nlist, Dimension dim, int worker_id)
+{
+	char *slot = base + (size_t)worker_id * mktann_km_worker_size(nlist, dim);
+	return (uint32_t *)(slot + (size_t)nlist * dim * sizeof(float));
+}
+
+static inline float *
+mktann_km_worker_cost(char *base, uint32_t nlist, Dimension dim, int worker_id)
+{
+	char *slot = base + (size_t)worker_id * mktann_km_worker_size(nlist, dim);
+	return (float *)(slot + (size_t)nlist * dim * sizeof(float) +
+					 (size_t)nlist * sizeof(uint32_t));
+}
 
 /* ----------------------------------------------------------------
  * MktDsmReserve — page reservation with atomics in DSM
@@ -120,7 +239,7 @@ mktann_dsm_reserve_size(uint32_t nlist)
 }
 
 /* ----------------------------------------------------------------
- * Per-worker output in DSM
+ * Per-worker posting output in DSM
  *
  * Flat arrays: heads[nlist] + tails[nlist] + active[nlist]
  * per worker, packed contiguously.
