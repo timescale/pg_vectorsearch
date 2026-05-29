@@ -59,7 +59,7 @@ TEST(flat_single_level)
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
 
 	HKMeansResult *tree = mkt_hkmeans_f32(
-			data, nvecs, dim, nlist, fan_out, DISTANCE_L2, &opts);
+			data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(tree, "should return result");
 	ASSERT_EQ(1, tree->nlevels, "flat tree: 1 level");
@@ -98,7 +98,7 @@ TEST(two_level_tree)
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
 
 	HKMeansResult *tree = mkt_hkmeans_f32(
-			data, nvecs, dim, nlist, fan_out, DISTANCE_L2, &opts);
+			data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(tree, "should return result");
 	ASSERT_EQ(2, tree->nlevels, "2-level tree");
@@ -155,7 +155,7 @@ TEST(three_level_tree)
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
 
 	HKMeansResult *tree = mkt_hkmeans_f32(
-			data, nvecs, dim, nlist, fan_out, DISTANCE_L2, &opts);
+			data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(tree, "should return result");
 	ASSERT_EQ(3, tree->nlevels, "3-level tree");
@@ -205,7 +205,7 @@ TEST(structural_invariants)
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
 
 	HKMeansResult *tree = mkt_hkmeans_f32(
-			data, nvecs, dim, nlist, fan_out, DISTANCE_L2, &opts);
+			data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(tree, "should return result");
 	ASSERT_EQ(2, tree->nlevels, "2-level tree");
@@ -244,16 +244,19 @@ TEST(null_inputs)
 	KMeansOptions opts	 = MKT_KMEANS_OPTIONS_DEFAULT;
 
 	ASSERT_NULL(
-			mkt_hkmeans_f32(NULL, 2, 2, 1, 4, DISTANCE_L2, &opts),
+			mkt_hkmeans_f32(NULL, 2, NULL, 2, 1, 4, DISTANCE_L2, &opts),
 			"NULL vectors");
 	ASSERT_NULL(
-			mkt_hkmeans_f32(data, 0, 2, 1, 4, DISTANCE_L2, &opts), "nvecs=0");
+			mkt_hkmeans_f32(data, 0, NULL, 2, 1, 4, DISTANCE_L2, &opts),
+			"nvecs=0");
 	ASSERT_NULL(
-			mkt_hkmeans_f32(data, 2, 0, 1, 4, DISTANCE_L2, &opts), "dim=0");
+			mkt_hkmeans_f32(data, 2, NULL, 0, 1, 4, DISTANCE_L2, &opts),
+			"dim=0");
 	ASSERT_NULL(
-			mkt_hkmeans_f32(data, 2, 2, 0, 4, DISTANCE_L2, &opts), "nlist=0");
+			mkt_hkmeans_f32(data, 2, NULL, 2, 0, 4, DISTANCE_L2, &opts),
+			"nlist=0");
 	ASSERT_NULL(
-			mkt_hkmeans_f32(data, 2, 2, 1, 1, DISTANCE_L2, &opts),
+			mkt_hkmeans_f32(data, 2, NULL, 2, 1, 1, DISTANCE_L2, &opts),
 			"fan_out=1");
 }
 
@@ -279,9 +282,9 @@ TEST(deterministic)
 	opts.seed		   = 42;
 
 	HKMeansResult *t1 =
-			mkt_hkmeans_f32(data, nvecs, dim, 4, 4, DISTANCE_L2, &opts);
+			mkt_hkmeans_f32(data, nvecs, NULL, dim, 4, 4, DISTANCE_L2, &opts);
 	HKMeansResult *t2 =
-			mkt_hkmeans_f32(data, nvecs, dim, 4, 4, DISTANCE_L2, &opts);
+			mkt_hkmeans_f32(data, nvecs, NULL, dim, 4, 4, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(t1, "first run");
 	ASSERT_NOT_NULL(t2, "second run");
@@ -320,7 +323,7 @@ TEST(few_vectors)
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
 
 	HKMeansResult *tree =
-			mkt_hkmeans_f32(data, 4, 2, 2, 32, DISTANCE_L2, &opts);
+			mkt_hkmeans_f32(data, 4, NULL, 2, 2, 32, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(tree, "should succeed with few vectors");
 	ASSERT_EQ(1, tree->nlevels, "flat when nlist <= fan_out");
@@ -339,7 +342,7 @@ TEST(single_cluster)
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
 
 	HKMeansResult *tree =
-			mkt_hkmeans_f32(data, 3, 2, 1, 4, DISTANCE_L2, &opts);
+			mkt_hkmeans_f32(data, 3, NULL, 2, 1, 4, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(tree, "should succeed");
 	ASSERT_EQ(1, tree->nlevels, "1 level");

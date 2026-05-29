@@ -73,6 +73,7 @@ HKMeansResult *
 mkt_hkmeans_f32(
 		const float			*vectors,
 		uint32_t			 nvecs,
+		const uint32_t		*indices,
 		Dimension			 dim,
 		uint32_t			 nlist,
 		uint32_t			 fan_out,
@@ -95,12 +96,21 @@ mkt_hkmeans_f32(
 	uint32_t nnodes	 = 0;
 	uint32_t nleaves = 0;
 
+	/* If caller provided indices, copy them as the root's
+	 * vec_indices so mkt_kmeans uses indirect access. */
+	uint32_t *root_indices = NULL;
+	if (indices != NULL)
+	{
+		root_indices = mkt_alloc(nvecs * sizeof(uint32_t));
+		memcpy(root_indices, indices, nvecs * sizeof(uint32_t));
+	}
+
 	/* BFS work queue */
 	HKWorkItem *queue  = mkt_alloc(max_nodes * sizeof(HKWorkItem));
 	uint32_t	q_tail = 0;
 
 	queue[q_tail++] = (HKWorkItem){
-			.vec_indices  = NULL,
+			.vec_indices  = root_indices,
 			.count		  = nvecs,
 			.level		  = 0,
 			.idx_in_level = 0,

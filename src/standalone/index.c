@@ -268,6 +268,32 @@ km_iterate(
 }
 
 /* ----------------------------------------------------------------
+ * Parallel sample copy callback
+ * ---------------------------------------------------------------- */
+
+typedef struct SampleCopyCtx
+{
+	const float *src;
+	float		*dst;
+	Dimension	 dim;
+	uint32_t	 stride;
+} SampleCopyCtx;
+
+static void
+par_sample_copy_fn(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
+{
+	(void)thread_id;
+	SampleCopyCtx *ctx = (SampleCopyCtx *)arg;
+	Dimension	   dim = ctx->dim;
+	size_t		   esz = dim * sizeof(float);
+
+	for (uint32_t i = start; i < end; i++)
+		memcpy(ctx->dst + (size_t)i * dim,
+			   ctx->src + (size_t)(i * ctx->stride) * dim,
+			   esz);
+}
+
+/* ----------------------------------------------------------------
  * Parallel centroid rotation callback
  * ---------------------------------------------------------------- */
 
@@ -449,33 +475,64 @@ mkt_index_build(
 		fan_out = mkt_auto_fan_out(0, nlist, 0);
 	idx->fan_out = fan_out;
 
-	/* --- Phase: sample --- */
+	/* --- Phase: load vectors --- */
 	uint64_t t_phase = now_ns();
-	mkt_memctx_switch(build_ctx);
-	uint32_t max_samples = nvecs < 256000 ? nvecs : 256000;
-	uint32_t stride		 = nvecs / max_samples;
-	if (stride < 1)
-		stride = 1;
-	float *samples = mkt_alloc((size_t)max_samples * dim * sizeof(float));
 
+	idx->all_vectors = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+
+	if (src->read_all != NULL && src->read_all(src, idx->all_vectors))
 	{
+		idx->nvecs = nvecs;
+	}
+	else
+	{
+		idx->nvecs = 0;
 		const float *vec;
-		uint32_t	 id, n = 0;
-		while (n < max_samples && src->next(src, stride, &vec, &id))
+		uint32_t	 id;
+		while (src->next(src, 1, &vec, &id))
 		{
-			memcpy(samples + (size_t)n * dim, vec, dim * sizeof(float));
-			n++;
+			memcpy(idx->all_vectors + (size_t)id * dim,
+				   vec,
+				   dim * sizeof(float));
+			idx->nvecs++;
 		}
-		max_samples = n;
 	}
 
-	/* Normalize samples for cosine */
 	if (idx->base.metric == DISTANCE_COSINE)
-		normalize_all(samples, max_samples, dim);
+		normalize_all(idx->all_vectors, idx->nvecs, dim);
+
+	double ms_sample = (double)(now_ns() - t_phase) / 1e6;
 
 	/* --- Phase: kmeans --- */
-	double ms_sample	  = (double)(now_ns() - t_phase) / 1e6;
-	t_phase				  = now_ns();
+	t_phase = now_ns();
+	mkt_memctx_switch(build_ctx);
+
+	/* Subsample by stride into a contiguous buffer for
+	 * cache-friendly k-means iteration. */
+	uint32_t max_samples = idx->nvecs < 256000 ? idx->nvecs : 256000;
+	uint32_t stride		 = idx->nvecs / max_samples;
+	if (stride < 1)
+		stride = 1;
+	uint32_t km_nvecs = (stride > 1) ? max_samples : idx->nvecs;
+
+	float *km_vectors;
+	if (stride > 1)
+	{
+		km_vectors = mkt_alloc((size_t)km_nvecs * dim * sizeof(float));
+		SampleCopyCtx sc_ctx = {
+				.src	= idx->all_vectors,
+				.dst	= km_vectors,
+				.dim	= dim,
+				.stride = stride,
+		};
+		mkt_thread_pool_parallel_for(
+				pool, km_nvecs, par_sample_copy_fn, &sc_ctx);
+	}
+	else
+	{
+		km_vectors = idx->all_vectors;
+	}
+
 	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	if (config->km_nredo > 0)
 		km_opts.nredo = config->km_nredo;
@@ -487,8 +544,9 @@ mkt_index_build(
 	km_opts.nthreads	 = nworkers + 1;
 
 	HKMeansResult *tree = mkt_hkmeans_f32(
-			samples,
-			max_samples,
+			km_vectors,
+			km_nvecs,
+			NULL,
 			dim,
 			nlist,
 			fan_out,
@@ -569,9 +627,6 @@ mkt_index_build(
 	 * centroid leaf entries store actual posting block numbers. */
 	mkt_memctx_switch(idx_ctx);
 
-	/* Allocate flat vectors array for reranking */
-	idx->all_vectors = mkt_alloc((size_t)nvecs * dim * sizeof(float));
-
 	/* Initialize per-cluster ID lists */
 	uint32_t est_per_cluster = nvecs / nlist + 1;
 	idx->clusters			 = mkt_alloc0(nlist * sizeof(MktClusterList));
@@ -585,30 +640,6 @@ mkt_index_build(
 				  .soar_lambda		= config->soar_lambda,
 				  .boundary_epsilon = config->boundary_epsilon,
 	  };
-
-	src->reset(src);
-
-	if (src->read_all != NULL && src->read_all(src, idx->all_vectors))
-	{
-		idx->nvecs = nvecs;
-	}
-	else
-	{
-		idx->nvecs = 0;
-		const float *vec;
-		uint32_t	 id;
-		while (src->next(src, 1, &vec, &id))
-		{
-			memcpy(idx->all_vectors + (size_t)id * dim,
-				   vec,
-				   dim * sizeof(float));
-			idx->nvecs++;
-		}
-	}
-
-	/* Normalize all vectors for cosine before parallel assignment */
-	if (config->metric == DISTANCE_COSINE)
-		normalize_all(idx->all_vectors, idx->nvecs, dim);
 
 	/* --- Phase: posting --- */
 	t_phase = now_ns();

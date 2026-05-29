@@ -94,12 +94,17 @@ hk_node_centroids(const HKMeansResult *r, const HKMeansNode *node)
 /*
  * Build a hierarchical k-means tree.
  *
+ * indices: optional index array for indirect access (NULL = identity).
+ *          When non-NULL, vector i is at vectors[indices[i] * dim].
+ *          This allows subsampling without copying.
+ *
  * Returns a single contiguous allocation on success, NULL on failure.
  * Caller must free with mkt_free().
  */
 HKMeansResult *mkt_hkmeans_f32(
 		const float			*vectors,
 		uint32_t			 nvecs,
+		const uint32_t		*indices,
 		Dimension			 dim,
 		uint32_t			 nlist,
 		uint32_t			 fan_out,

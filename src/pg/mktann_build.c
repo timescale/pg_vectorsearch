@@ -458,6 +458,7 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	HKMeansResult *tree = mkt_hkmeans_f32(
 			bs->samples,
 			(uint32_t)bs->nsamples,
+			NULL,
 			dim,
 			nlist,
 			bs->params.fan_out,
