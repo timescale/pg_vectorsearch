@@ -269,7 +269,6 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	int		  worker_id = ParallelWorkerNumber + 1;
 	Dimension dim		= shared->dim;
-	uint32_t  nlist		= shared->nlist;
 
 	InstrStartParallelQuery();
 
@@ -280,9 +279,10 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	char  *centroids_base = shm_toc_lookup(toc, MKTANN_KEY_CENTROIDS, false);
 	float *cents		  = mktann_centroids(centroids_base);
 
-	/* Each worker picks K/N initial centroids */
-	uint32_t cents_per = nlist / shared->nparticipants;
-	uint32_t cents_rem = nlist % shared->nparticipants;
+	/* Each worker picks km_k/N initial centroids */
+	uint32_t km_k	   = shared->km_k;
+	uint32_t cents_per = km_k / shared->nparticipants;
+	uint32_t cents_rem = km_k % shared->nparticipants;
 	uint32_t cent_start, cent_end;
 	if ((uint32_t)worker_id < cents_rem)
 	{
@@ -341,20 +341,19 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* Barrier: all workers done sampling + centroid init */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-	/* ---- Phase 2: K-means iterate ---- */
+	/* ---- Phase 2: K-means iterate (root level, k=km_k) ---- */
 
-	char *km_workers_base = shm_toc_lookup(toc, MKTANN_KEY_KM_WORKERS, false);
+	char  *km_workers_base = shm_toc_lookup(toc, MKTANN_KEY_KM_WORKERS, false);
+	float *my_samples	   = mktann_worker_samples(dsm_samples, worker_id);
+	uint32_t my_nsamples   = mktann_sample_counts(dsm_samples)[worker_id];
 
-	float	*my_samples	 = mktann_worker_samples(dsm_samples, worker_id);
-	uint32_t my_nsamples = mktann_sample_counts(dsm_samples)[worker_id];
-
-	float *norms_c = mktann_norms_c(centroids_base, nlist, dim);
+	float *norms_c = mktann_norms_c(centroids_base, km_k, dim);
 	float *my_sums =
-			mktann_km_worker_sums(km_workers_base, nlist, dim, worker_id);
+			mktann_km_worker_sums(km_workers_base, km_k, dim, worker_id);
 	uint32_t *my_cnts =
-			mktann_km_worker_cnts(km_workers_base, nlist, dim, worker_id);
+			mktann_km_worker_cnts(km_workers_base, km_k, dim, worker_id);
 	float *my_cost =
-			mktann_km_worker_cost(km_workers_base, nlist, dim, worker_id);
+			mktann_km_worker_cost(km_workers_base, km_k, dim, worker_id);
 
 	for (uint32_t iter = 0; iter < shared->km_max_iterations; iter++)
 	{
@@ -364,7 +363,7 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 				my_nsamples,
 				cents,
 				norms_c,
-				nlist,
+				km_k,
 				dim,
 				shared->metric,
 				my_sums,
@@ -386,8 +385,7 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	/* ---- Phase 3: Posting scan ---- */
 
-	/* Re-read nlist — leader updated it after k-means */
-	nlist = shared->nlist;
+	(void)shared->nlist; /* nlist re-read by entry callback */
 
 	HKMeansResult *tree = shm_toc_lookup(toc, MKTANN_KEY_TREE, false);
 	MktDsmEntries *dsm_entries =

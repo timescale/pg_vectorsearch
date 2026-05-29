@@ -72,10 +72,11 @@ typedef struct MktBuildShared
 	uint64_t	   rabitq_seed;
 	int			   nparticipants;
 
-	/* K-means sampling config */
+	/* K-means config */
 	uint32_t max_samples_per_worker;
 	uint32_t km_max_iterations;
 	float	 km_tolerance;
+	uint32_t km_k; /* root k-means k (= fan_out) */
 
 	/* Mutable — spinlock-protected */
 	slock_t			  mutex;
