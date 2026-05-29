@@ -151,8 +151,8 @@ mkt_build_assign_vector(
  * Shared helpers
  * ---------------------------------------------------------------- */
 
-static float
-derive_f_error(float f_add, float f_rescale, Dimension dim)
+float
+mkt_posting_derive_f_error(float f_add, float f_rescale, Dimension dim)
 {
 	float f_rsq = f_rescale * f_rescale;
 	if (f_rsq > f_add && dim > 1)
@@ -162,6 +162,8 @@ derive_f_error(float f_add, float f_rescale, Dimension dim)
 	}
 	return 2e-4f * sqrtf(f_add);
 }
+
+#define derive_f_error mkt_posting_derive_f_error
 
 /*
  * Save page to the deferred batch output. Grows the pages

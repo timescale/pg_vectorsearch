@@ -21,10 +21,14 @@
 #include <storage/barrier.h>
 #include <storage/block.h>
 #include <storage/condition_variable.h>
+#include <storage/itemptr.h>
 #include <storage/shm_toc.h>
 #include <storage/spin.h>
 
+#include "algo/hkmeans.h"
+#include "index/posting_build.h"
 #include "mkt_types.h"
+#include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------
  * DSM table-of-contents keys
@@ -42,6 +46,7 @@
 #define MKTANN_KEY_SAMPLES		 UINT64CONST(0xB00000000000000A)
 #define MKTANN_KEY_CENTROIDS	 UINT64CONST(0xB00000000000000B)
 #define MKTANN_KEY_KM_WORKERS	 UINT64CONST(0xB00000000000000C)
+#define MKTANN_KEY_ENTRIES		 UINT64CONST(0xB00000000000000D)
 
 /* ----------------------------------------------------------------
  * MktBuildShared — primary shared state in DSM
@@ -296,6 +301,64 @@ mktann_worker_partials(char *base, uint32_t nlist, int worker_id)
 }
 
 /* ----------------------------------------------------------------
+ * Per-worker encoded entry buffer in DSM
+ *
+ * Workers encode vectors with RaBitQ and write compact entries
+ * here. Leader reads all entries after workers finish and feeds
+ * them to serial posting builders. This avoids workers writing
+ * to the index relation's buffer pool.
+ *
+ * Entry layout: cluster_id(4) + tid(6) + pad(2) + f_add(4)
+ *               + f_rescale(4) + f_error(4) + bits[rabitq_bytes]
+ * ---------------------------------------------------------------- */
+
+typedef struct MktDsmEntryHeader
+{
+	uint32_t		cluster_id;
+	ItemPointerData tid; /* 6 bytes */
+	uint16_t		_pad;
+	float			f_add;
+	float			f_rescale;
+	float			f_error;
+	/* uint8_t bits[MKT_RABITQ_BYTES(dim)] follows */
+} MktDsmEntryHeader;
+
+#define MKT_DSM_ENTRY_SIZE(dim) \
+	MAXALIGN(sizeof(MktDsmEntryHeader) + MKT_RABITQ_BYTES(dim))
+
+typedef struct MktDsmEntries
+{
+	int		  nparticipants;
+	uint32_t  max_per_worker;
+	uint32_t  entry_size;
+	Dimension dim;
+} MktDsmEntries;
+
+static inline pg_atomic_uint32 *
+mktann_entry_counts(MktDsmEntries *e)
+{
+	return (pg_atomic_uint32 *)((char *)e + MAXALIGN(sizeof(MktDsmEntries)));
+}
+
+static inline char *
+mktann_worker_entries(MktDsmEntries *e, int worker_id)
+{
+	char *base = (char *)mktann_entry_counts(e) +
+				 e->nparticipants * sizeof(pg_atomic_uint32);
+	return base + (size_t)worker_id * e->max_per_worker * e->entry_size;
+}
+
+static inline Size
+mktann_entries_size(int nparticipants, uint32_t max_per_worker, Dimension dim)
+{
+	Size entry_sz = MKT_DSM_ENTRY_SIZE(dim);
+	Size sz		  = MAXALIGN(sizeof(MktDsmEntries));
+	sz += (Size)nparticipants * sizeof(pg_atomic_uint32);
+	sz += (Size)nparticipants * max_per_worker * entry_sz;
+	return sz;
+}
+
+/* ----------------------------------------------------------------
  * Shared callbacks — used by both leader and workers
  * ---------------------------------------------------------------- */
 
@@ -333,6 +396,46 @@ extern void mktann_km_assign_and_accumulate(
 		float		  *out_sums,
 		uint32_t	  *out_cnts,
 		float		  *out_cost);
+
+/* ----------------------------------------------------------------
+ * Phase 3: Entry build callback — shared by leader and workers
+ *
+ * Encodes vectors with RaBitQ and writes compact entries to a
+ * DSM buffer. Leader reads all entries after workers finish and
+ * feeds them to serial posting builders.
+ * ---------------------------------------------------------------- */
+
+typedef struct EntryBuildCbState
+{
+	const HKMeansResult *tree;
+	MktBuildParams		 bp;
+	MktBuildWorkerBufs	 bufs;
+
+	/* DSM entry output */
+	char			 *entry_buf;
+	pg_atomic_uint32 *count;
+	uint32_t		  max_entries;
+	uint32_t		  entry_size;
+
+	/* RaBitQ encoding scratch */
+	const RaBitQParams *params;
+	const float		   *leaf_centroids;
+	Dimension			dim;
+	RaBitQData		   *enc_buf;
+	RaBitQScratch		enc_scratch;
+
+	double		  indtuples;
+	double		  soar_dupes;
+	MemoryContext tmp_ctx;
+} EntryBuildCbState;
+
+extern void entry_build_callback(
+		Relation	index,
+		ItemPointer tid,
+		Datum	   *values,
+		bool	   *isnull,
+		bool		tuple_is_alive,
+		void	   *state);
 
 /* ----------------------------------------------------------------
  * Worker entry point — registered with CreateParallelContext

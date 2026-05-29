@@ -53,7 +53,6 @@
 #include "index/centroid_page.h"
 #include "index/index_build.h"
 #include "index/posting_build.h"
-#include "index/posting_build_parallel.h"
 #include "index/posting_page.h"
 #include "mkt_halfvec.h"
 #include "mkt_pg.h"
@@ -509,55 +508,6 @@ estimate_posting_pages(Relation heap, Dimension dim, uint32_t nlist)
  * on false.
  * ---------------------------------------------------------------- */
 
-typedef struct LeaderBuildState
-{
-	MktannBuildState	  *bs;
-	MktPostingWorkerState *ws;
-	MktBuildParams		   bp;
-	MemoryContext		   worker_ctx;
-	double				   indtuples;
-	double				   soar_dupes;
-} LeaderBuildState;
-
-static void
-leader_build_callback(
-		Relation	index,
-		ItemPointer tid,
-		Datum	   *values,
-		bool	   *isnull,
-		bool		tuple_is_alive,
-		void	   *state)
-{
-	LeaderBuildState *ls = (LeaderBuildState *)state;
-
-	(void)index;
-	(void)tuple_is_alive;
-
-	if (isnull[0])
-		return;
-
-	MemoryContext old_ctx = MemoryContextSwitchTo(ls->bs->tmp_ctx);
-
-	MktVector *vec	= DatumGetMktVector(values[0]);
-	VectorRef  vref = MktVectorToRef(vec);
-
-	MktBuildAssignment asgn = mkt_build_assign_vector(
-			ls->bs->tree, vref.data, &ls->bp, &ls->bs->worker_bufs);
-
-	MemoryContextSwitchTo(ls->worker_ctx);
-
-	mkt_posting_worker_add_heap(
-			ls->ws, *tid, asgn.enc_vector, asgn.primary, asgn.secondary);
-
-	MemoryContextSwitchTo(old_ctx);
-
-	ls->indtuples++;
-	if (asgn.secondary != MKT_INVALID_CLUSTER)
-		ls->soar_dupes++;
-
-	MemoryContextReset(ls->bs->tmp_ctx);
-}
-
 static bool
 do_parallel_build(
 		Relation		  heap,
@@ -612,13 +562,22 @@ do_parallel_build(
 					   (Size)nlist * 2 * sizeof(HKMeansNode) +
 					   (Size)nlist * dim * sizeof(float) * 2;
 	shm_toc_estimate_chunk(&pcxt->estimator, max_tree_sz);
-	/* Posting phase */
-	shm_toc_estimate_chunk(&pcxt->estimator, mktann_dsm_reserve_size(nlist));
+	/* Entry-based posting phase: workers encode entries in DSM,
+	 * leader reads and builds posting pages serially. */
+	double est_heap_tuples =
+			Max(RelationGetNumberOfBlocks(heap) *
+						(BLCKSZ / (double)(dim * sizeof(float) + 32)),
+				10000);
+	double	 soar_factor = (bs->params.soar_lambda > 0.0 ||
+							bs->params.boundary_epsilon > 0.0)
+								 ? 1.5
+								 : 1.0;
+	uint32_t max_entries_per_worker =
+			(uint32_t)((est_heap_tuples * soar_factor) / nparticipants) + 1000;
+
 	shm_toc_estimate_chunk(
-			&pcxt->estimator, mktann_worker_output_size(nlist, nparticipants));
-	if (!bs->params.fastscan)
-		shm_toc_estimate_chunk(
-				&pcxt->estimator, mktann_partials_size(nlist, nparticipants));
+			&pcxt->estimator,
+			mktann_entries_size(nparticipants, max_entries_per_worker, dim));
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mul_size(sizeof(WalUsage), pcxt->nworkers));
 	shm_toc_estimate_chunk(
@@ -631,9 +590,7 @@ do_parallel_build(
 		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
 	}
 
-	int nkeys = 12;
-	if (!bs->params.fastscan)
-		nkeys++;
+	int nkeys = 11;
 	if (debug_query_string)
 		nkeys++;
 	shm_toc_estimate_keys(&pcxt->estimator, nkeys);
@@ -708,27 +665,18 @@ do_parallel_build(
 	memset(dsm_tree, 0, max_tree_sz);
 	shm_toc_insert(pcxt->toc, MKTANN_KEY_TREE, dsm_tree);
 
-	/* Posting phase DSM — allocated now but populated after k-means */
-	uint32_t	   alloc_nlist = nlist; /* save allocation-time nlist */
-	Size		   res_sz	   = mktann_dsm_reserve_size(alloc_nlist);
-	MktDsmReserve *dsm_reserve = shm_toc_allocate(pcxt->toc, res_sz);
-	memset(dsm_reserve, 0, res_sz);
-	dsm_reserve->nlist = alloc_nlist;
-	shm_toc_insert(pcxt->toc, MKTANN_KEY_RESERVE, dsm_reserve);
-
-	Size  out_sz		= mktann_worker_output_size(nlist, nparticipants);
-	char *worker_output = shm_toc_allocate(pcxt->toc, out_sz);
-	memset(worker_output, 0, out_sz);
-	shm_toc_insert(pcxt->toc, MKTANN_KEY_WORKER_OUTPUT, worker_output);
-
-	char *partials = NULL;
-	if (!bs->params.fastscan)
-	{
-		Size part_sz = mktann_partials_size(nlist, nparticipants);
-		partials	 = shm_toc_allocate(pcxt->toc, part_sz);
-		memset(partials, 0, part_sz);
-		shm_toc_insert(pcxt->toc, MKTANN_KEY_PARTIALS, partials);
-	}
+	/* Entry-based posting phase DSM */
+	Size entries_sz =
+			mktann_entries_size(nparticipants, max_entries_per_worker, dim);
+	MktDsmEntries *dsm_entries = shm_toc_allocate(pcxt->toc, entries_sz);
+	memset(dsm_entries, 0, entries_sz);
+	dsm_entries->nparticipants	= nparticipants;
+	dsm_entries->max_per_worker = max_entries_per_worker;
+	dsm_entries->entry_size		= MKT_DSM_ENTRY_SIZE(dim);
+	dsm_entries->dim			= dim;
+	for (int t = 0; t < nparticipants; t++)
+		pg_atomic_init_u32(&mktann_entry_counts(dsm_entries)[t], 0);
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_ENTRIES, dsm_entries);
 
 	WalUsage *walusage = shm_toc_allocate(
 			pcxt->toc, mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -970,94 +918,40 @@ do_parallel_build(
 	uint32_t n_centroid_pages = first_posting - first_centroid;
 	mkt_storage_extend(&storage->base, n_centroid_pages);
 
-	uint32_t	 pages_per_cluster = estimate_posting_pages(heap, dim, nlist);
-	BlockNumber *starts			   = mktann_dsm_reserve_starts(dsm_reserve);
-	uint32_t	*counts			   = mktann_dsm_reserve_counts(dsm_reserve);
-	pg_atomic_uint32 *nexts		   = mktann_dsm_reserve_nexts(dsm_reserve);
-
-	BlockNumber total_reserve = 0;
-	for (uint32_t c = 0; c < nlist; c++)
-		total_reserve += pages_per_cluster;
-
-	BlockNumber actual_start =
-			mkt_storage_extend(&storage->base, total_reserve);
-
-	{
-		BlockNumber pos = 0;
-		for (uint32_t c = 0; c < nlist; c++)
-		{
-			starts[c] = actual_start + pos;
-			counts[c] = pages_per_cluster;
-			pos += pages_per_cluster;
-		}
-	}
-	dsm_reserve->total_reserved = total_reserve;
-	dsm_reserve->first_posting	= actual_start;
-
-	for (uint32_t c = 0; c < nlist; c++)
-		pg_atomic_init_u32(&nexts[c], 1);
-
-	/* Re-init parallel scan for posting phase */
+	/* Re-init parallel scan for posting (entry) phase */
 	table_parallelscan_reinitialize(
 			heap, ParallelTableScanFromMktShared(shared));
 
-	/* Barrier: tree + reserve ready, workers can start posting */
+	/* Barrier: tree ready, workers can start entry scan */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-	/* ---- Phase 3: Leader does posting scan ---- */
+	/* ---- Phase 3: Leader does entry scan ---- */
 	{
-		MktPostingReserve local_reserve = {
-				.starts = starts,
-				.counts = counts,
-				.nexts	= (mkt_atomic_uint32 *)nexts,
-				.nlist	= nlist,
-				.total	= total_reserve,
+		MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
+
+		EntryBuildCbState cbs = {
+				.tree			= (HKMeansResult *)dsm_tree,
+				.bp				= {.dim				 = dim,
+								   .metric			 = bs->params.metric,
+								   .soar_lambda		 = bs->params.soar_lambda,
+								   .boundary_epsilon = bs->params.boundary_epsilon},
+				.bufs			= bufs,
+				.entry_buf		= mktann_worker_entries(dsm_entries, 0),
+				.count			= &mktann_entry_counts(dsm_entries)[0],
+				.max_entries	= max_entries_per_worker,
+				.entry_size		= dsm_entries->entry_size,
+				.params			= rq_params,
+				.leaf_centroids = ref_vecs,
+				.dim			= dim,
+				.enc_buf		= palloc(MKT_RABITQ_DATA_SIZE(dim)),
+				.indtuples		= 0,
+				.soar_dupes		= 0,
+				.tmp_ctx		= AllocSetContextCreate(
+						   CurrentMemoryContext,
+						   "mktann leader entry",
+						   ALLOCSET_DEFAULT_SIZES),
 		};
-
-		char *my_partials = (partials != NULL)
-								  ? mktann_worker_partials(partials, nlist, 0)
-								  : NULL;
-
-		MemoryContext worker_ctx = AllocSetContextCreate(
-				CurrentMemoryContext,
-				"mktann leader worker",
-				ALLOCSET_DEFAULT_SIZES);
-		MemoryContext prev = MemoryContextSwitchTo(worker_ctx);
-
-		MktPostingWorkerState ws;
-		mkt_posting_worker_init(
-				&ws,
-				0,
-				nlist,
-				dim,
-				bs->params.fastscan,
-				&storage->base,
-				rq_params,
-				ref_vecs,
-				pt_centroids,
-				&local_reserve,
-				my_partials);
-
-		MemoryContextSwitchTo(prev);
-
-		MktBuildParams bp = {
-				.dim			  = dim,
-				.metric			  = bs->params.metric,
-				.soar_lambda	  = bs->params.soar_lambda,
-				.boundary_epsilon = bs->params.boundary_epsilon,
-		};
-
-		bs->tree		= (HKMeansResult *)dsm_tree;
-		bs->worker_bufs = mkt_build_worker_bufs_create(dim);
-
-		LeaderBuildState leader_state = {
-				.bs			= bs,
-				.ws			= &ws,
-				.bp			= bp,
-				.worker_ctx = worker_ctx,
-				.indtuples	= 0,
-				.soar_dupes = 0,
-		};
+		mkt_rabitq_scratch_init(&cbs.enc_scratch, dim);
 
 		TableScanDesc scan2 = table_beginscan_parallel(
 				heap, ParallelTableScanFromMktShared(shared));
@@ -1068,27 +962,19 @@ do_parallel_build(
 				index_info,
 				true,
 				true,
-				leader_build_callback,
-				&leader_state,
+				entry_build_callback,
+				&cbs,
 				scan2);
 
-		mkt_posting_worker_finish(&ws);
-
-		BlockNumber *lh = mktann_worker_heads(worker_output, nlist, 0);
-		BlockNumber *lt = mktann_worker_tails(worker_output, nlist, 0);
-		bool		*la = mktann_worker_active(worker_output, nlist, 0);
-		memcpy(lh, ws.heads, nlist * sizeof(BlockNumber));
-		memcpy(lt, ws.tails, nlist * sizeof(BlockNumber));
-		memcpy(la, ws.active, nlist * sizeof(bool));
+		mkt_rabitq_scratch_cleanup(&cbs.enc_scratch);
+		mkt_build_worker_bufs_free(&bufs);
 
 		SpinLockAcquire(&shared->mutex);
 		shared->nparticipantsdone++;
 		shared->reltuples += leader_reltuples;
-		shared->indtuples += leader_state.indtuples;
-		shared->soar_dupes += leader_state.soar_dupes;
+		shared->indtuples += cbs.indtuples;
+		shared->soar_dupes += cbs.soar_dupes;
 		SpinLockRelease(&shared->mutex);
-
-		MemoryContextDelete(worker_ctx);
 	}
 
 	WaitForParallelWorkersToFinish(pcxt);
@@ -1101,57 +987,74 @@ do_parallel_build(
 	*out_soar_dupes	 = shared->soar_dupes;
 	*out_tree		 = tree;
 
-	/* Merge partial pages and link chains */
-	BlockNumber **all_heads	 = palloc(nparticipants * sizeof(BlockNumber *));
-	BlockNumber **all_tails	 = palloc(nparticipants * sizeof(BlockNumber *));
-	bool		**all_active = palloc(nparticipants * sizeof(bool *));
+	/* Build posting pages from entries — serial merge */
+	uint32_t entry_size		 = dsm_entries->entry_size;
+	uint32_t est_pages_per_c = estimate_posting_pages(heap, dim, nlist);
 
-	for (int t = 0; t < nparticipants; t++)
+	MktPostingBuilder *builders = palloc0(nlist * sizeof(MktPostingBuilder));
+	for (uint32_t c = 0; c < nlist; c++)
 	{
-		all_heads[t]  = mktann_worker_heads(worker_output, nlist, t);
-		all_tails[t]  = mktann_worker_tails(worker_output, nlist, t);
-		all_active[t] = mktann_worker_active(worker_output, nlist, t);
+		if (bs->params.fastscan)
+			mkt_posting_builder_init_fastscan(
+					&builders[c],
+					&storage->base,
+					NULL,
+					dim,
+					c,
+					ref_vecs + (size_t)c * dim,
+					pt_centroids + (size_t)c * dim);
+		else
+			mkt_posting_builder_init(
+					&builders[c],
+					&storage->base,
+					NULL,
+					dim,
+					c,
+					ref_vecs + (size_t)c * dim,
+					pt_centroids + (size_t)c * dim);
+
+		BlockNumber start =
+				mkt_storage_extend(&storage->base, est_pages_per_c);
+		mkt_posting_builder_set_reserve(&builders[c], start, est_pages_per_c);
 	}
 
-	MktPostingReserve merge_reserve = {
-			.starts = starts,
-			.counts = counts,
-			.nexts	= (mkt_atomic_uint32 *)nexts,
-			.nlist	= nlist,
-			.total	= total_reserve,
-	};
+	/* Read entries from all workers and feed to builders */
+	for (int w = 0; w < nparticipants; w++)
+	{
+		uint32_t count = pg_atomic_read_u32(
+				&mktann_entry_counts(dsm_entries)[w]);
+		char *buf = mktann_worker_entries(dsm_entries, w);
 
-	MktPostingBuildResult build_result;
-	mkt_posting_finalize(
-			partials,
-			all_heads,
-			all_tails,
-			all_active,
-			nparticipants,
-			&storage->base,
-			&merge_reserve,
-			ref_vecs,
-			pt_centroids,
-			dim,
-			bs->params.fastscan,
-			&build_result);
+		for (uint32_t i = 0; i < count; i++)
+		{
+			char			  *slot = buf + (size_t)i * entry_size;
+			MktDsmEntryHeader *hdr	= (MktDsmEntryHeader *)slot;
+			uint8_t *bits = (uint8_t *)(slot + sizeof(MktDsmEntryHeader));
 
-	memcpy(posting_heads, build_result.heads, nlist * sizeof(BlockNumber));
-	pfree(build_result.heads);
-	pfree(all_heads);
-	pfree(all_tails);
-	pfree(all_active);
+			mkt_posting_builder_add_encoded(
+					&builders[hdr->cluster_id],
+					hdr->tid,
+					hdr->f_add,
+					hdr->f_rescale,
+					hdr->f_error,
+					bits);
+		}
+	}
+
+	/* Finish builders */
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		posting_heads[c] = mkt_posting_builder_finish(&builders[c]);
+		mkt_posting_builder_cleanup(&builders[c]);
+	}
+	pfree(builders);
 	pfree(pt_centroids);
 
 	elog(LOG,
-		 "mktann: parallel build with %d workers, "
-		 "%u posting pages, %u merge input, %u merge output, "
-		 "reserved %u, relation %u blocks",
+		 "mktann: parallel entry build with %d workers, "
+		 "%u clusters, relation %u blocks",
 		 pcxt->nworkers_launched,
-		 build_result.total_pages,
-		 build_result.merge_input,
-		 build_result.merge_output,
-		 total_reserve,
+		 nlist,
 		 RelationGetNumberOfBlocks(index));
 
 	DestroyParallelContext(pcxt);

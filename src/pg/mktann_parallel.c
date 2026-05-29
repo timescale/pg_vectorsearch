@@ -27,11 +27,9 @@
 #include "algo/hkmeans.h"
 #include "algo/vecops.h"
 #include "index/posting_build.h"
-#include "index/posting_build_parallel.h"
 #include "mkt_pg.h"
 #include "mkt_vector.h"
 #include "mktann_parallel.h"
-#include "mktann_storage.h"
 #include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------
@@ -40,23 +38,6 @@
  * Collects vectors into a per-worker sample slot and picks
  * initial centroids from the first vectors seen.
  * ---------------------------------------------------------------- */
-
-typedef struct SampleCbState
-{
-	float		  *samples;
-	float		  *centroids;
-	uint32_t	   count;
-	uint32_t	   max_samples;
-	uint32_t	   stride;
-	uint32_t	   stride_counter;
-	Dimension	   dim;
-	DistanceMetric metric;
-
-	/* Centroid init: this worker picks centroids [cent_start, cent_end) */
-	uint32_t cent_start;
-	uint32_t cent_end;
-	uint32_t cents_picked;
-} SampleCbState;
 
 void
 mktann_sample_callback(
@@ -187,23 +168,49 @@ mktann_km_assign_and_accumulate(
 }
 
 /* ----------------------------------------------------------------
- * Phase 3: Posting build callback
+ * Phase 3: Entry build callback
+ *
+ * Workers encode vectors and write compact entries to a DSM
+ * buffer. The leader reads entries after all workers finish and
+ * feeds them to serial posting builders. This avoids workers
+ * writing to the index relation's buffer pool.
  * ---------------------------------------------------------------- */
 
-typedef struct PostingCbState
-{
-	const HKMeansResult	  *tree;
-	MktBuildParams		   bp;
-	MktBuildWorkerBufs	   bufs;
-	MktPostingWorkerState *ws;
-	double				   indtuples;
-	double				   soar_dupes;
-	MemoryContext		   tmp_ctx;
-	MemoryContext		   worker_ctx;
-} PostingCbState;
-
 static void
-posting_build_callback(
+write_dsm_entry(
+		EntryBuildCbState *cbs,
+		uint32_t		   cluster_id,
+		ItemPointerData	   tid,
+		const float		  *vec)
+{
+	VectorRef evref = {.data = vec, .dim = cbs->dim};
+	VectorRef cref =
+			{.data = cbs->leaf_centroids + (size_t)cluster_id * cbs->dim,
+			 .dim  = cbs->dim};
+	mkt_rabitq_encode_into_ex(
+			cbs->params, evref, cref, cbs->enc_buf, &cbs->enc_scratch);
+
+	float f_error = mkt_posting_derive_f_error(
+			cbs->enc_buf->f_add, cbs->enc_buf->f_rescale, cbs->dim);
+
+	uint32_t idx = pg_atomic_fetch_add_u32(cbs->count, 1);
+	if (idx >= cbs->max_entries)
+		return;
+
+	char			  *slot = cbs->entry_buf + (size_t)idx * cbs->entry_size;
+	MktDsmEntryHeader *hdr	= (MktDsmEntryHeader *)slot;
+	hdr->cluster_id			= cluster_id;
+	hdr->tid				= tid;
+	hdr->f_add				= cbs->enc_buf->f_add;
+	hdr->f_rescale			= cbs->enc_buf->f_rescale;
+	hdr->f_error			= f_error;
+	memcpy(slot + sizeof(MktDsmEntryHeader),
+		   cbs->enc_buf->bits,
+		   MKT_RABITQ_BYTES(cbs->dim));
+}
+
+void
+entry_build_callback(
 		Relation	index,
 		ItemPointer tid,
 		Datum	   *values,
@@ -211,7 +218,7 @@ posting_build_callback(
 		bool		tuple_is_alive,
 		void	   *state)
 {
-	PostingCbState *cbs = (PostingCbState *)state;
+	EntryBuildCbState *cbs = (EntryBuildCbState *)state;
 
 	(void)index;
 	(void)tuple_is_alive;
@@ -227,10 +234,9 @@ posting_build_callback(
 	MktBuildAssignment asgn = mkt_build_assign_vector(
 			cbs->tree, vref.data, &cbs->bp, &cbs->bufs);
 
-	MemoryContextSwitchTo(cbs->worker_ctx);
-
-	mkt_posting_worker_add_heap(
-			cbs->ws, *tid, asgn.enc_vector, asgn.primary, asgn.secondary);
+	write_dsm_entry(cbs, asgn.primary, *tid, asgn.enc_vector);
+	if (asgn.secondary != MKT_INVALID_CLUSTER)
+		write_dsm_entry(cbs, asgn.secondary, *tid, asgn.enc_vector);
 
 	MemoryContextSwitchTo(old_ctx);
 
@@ -239,20 +245,6 @@ posting_build_callback(
 		cbs->soar_dupes++;
 
 	MemoryContextReset(cbs->tmp_ctx);
-}
-
-/* ----------------------------------------------------------------
- * DSM reserve → local MktPostingReserve adapter
- * ---------------------------------------------------------------- */
-
-static void
-dsm_reserve_to_local(MktDsmReserve *dsm, MktPostingReserve *local)
-{
-	local->starts = mktann_dsm_reserve_starts(dsm);
-	local->counts = mktann_dsm_reserve_counts(dsm);
-	local->nexts  = (mkt_atomic_uint32 *)mktann_dsm_reserve_nexts(dsm);
-	local->nlist  = dsm->nlist;
-	local->total  = dsm->total_reserved;
 }
 
 /* ----------------------------------------------------------------
@@ -398,74 +390,38 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	nlist = shared->nlist;
 
 	HKMeansResult *tree = shm_toc_lookup(toc, MKTANN_KEY_TREE, false);
-	MktDsmReserve *dsm_reserve =
-			shm_toc_lookup(toc, MKTANN_KEY_RESERVE, false);
-	char *worker_output_base =
-			shm_toc_lookup(toc, MKTANN_KEY_WORKER_OUTPUT, false);
-	char *partials_base = shm_toc_lookup(toc, MKTANN_KEY_PARTIALS, true);
+	MktDsmEntries *dsm_entries =
+			shm_toc_lookup(toc, MKTANN_KEY_ENTRIES, false);
 
 	RaBitQParams *rq_params = mkt_rabitq_create(dim, shared->rabitq_seed);
 
-	MktannStorage storage;
-	mktann_storage_init(&storage, indexRel, NULL, shared->metric);
-	storage.build_mode = true;
-
-	MktPostingReserve reserve;
-	dsm_reserve_to_local(dsm_reserve, &reserve);
-
-	char *my_partials =
-			(partials_base != NULL)
-					? mktann_worker_partials(partials_base, nlist, worker_id)
-					: NULL;
-
 	const float *leaf_cents = hk_leaf_centroids(tree);
 
-	float *pt_centroids = palloc((size_t)nlist * dim * sizeof(float));
-	for (uint32_t c = 0; c < nlist; c++)
-		mkt_rabitq_rotate(
-				rq_params,
-				leaf_cents + (size_t)c * dim,
-				pt_centroids + (size_t)c * dim);
-
-	MemoryContext worker_ctx = AllocSetContextCreate(
-			CurrentMemoryContext,
-			"mktann worker posting",
-			ALLOCSET_DEFAULT_SIZES);
-	MemoryContext prev = MemoryContextSwitchTo(worker_ctx);
-
-	MktPostingWorkerState ws;
-	mkt_posting_worker_init(
-			&ws,
-			worker_id,
-			nlist,
-			dim,
-			shared->fastscan,
-			&storage.base,
-			rq_params,
-			leaf_cents,
-			pt_centroids,
-			&reserve,
-			my_partials);
-
 	MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
-	MemoryContextSwitchTo(prev);
 
-	PostingCbState cbs = {
-			.tree		= tree,
-			.bp			= {.dim				 = dim,
-						   .metric			 = shared->metric,
-						   .soar_lambda		 = shared->soar_lambda,
-						   .boundary_epsilon = shared->boundary_epsilon},
-			.bufs		= bufs,
-			.ws			= &ws,
-			.indtuples	= 0,
-			.soar_dupes = 0,
-			.tmp_ctx	= AllocSetContextCreate(
+	EntryBuildCbState cbs = {
+			.tree			= tree,
+			.bp				= {.dim				 = dim,
+							   .metric			 = shared->metric,
+							   .soar_lambda		 = shared->soar_lambda,
+							   .boundary_epsilon = shared->boundary_epsilon},
+			.bufs			= bufs,
+			.entry_buf		= mktann_worker_entries(dsm_entries, worker_id),
+			.count			= &mktann_entry_counts(dsm_entries)[worker_id],
+			.max_entries	= dsm_entries->max_per_worker,
+			.entry_size		= dsm_entries->entry_size,
+			.params			= rq_params,
+			.leaf_centroids = leaf_cents,
+			.dim			= dim,
+			.enc_buf		= palloc(MKT_RABITQ_DATA_SIZE(dim)),
+			.indtuples		= 0,
+			.soar_dupes		= 0,
+			.tmp_ctx		= AllocSetContextCreate(
 					   CurrentMemoryContext,
 					   "mktann parallel tuple",
 					   ALLOCSET_DEFAULT_SIZES),
-			.worker_ctx = worker_ctx,
 	};
+	mkt_rabitq_scratch_init(&cbs.enc_scratch, dim);
 
 	/* Second parallel scan for posting build */
 	TableScanDesc scan2 = table_beginscan_parallel(
@@ -477,20 +433,11 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			indexInfo,
 			true,
 			false,
-			posting_build_callback,
+			entry_build_callback,
 			&cbs,
 			scan2);
 
-	mkt_posting_worker_finish(&ws);
-
-	BlockNumber *wh =
-			mktann_worker_heads(worker_output_base, nlist, worker_id);
-	BlockNumber *wt =
-			mktann_worker_tails(worker_output_base, nlist, worker_id);
-	bool *wa = mktann_worker_active(worker_output_base, nlist, worker_id);
-	memcpy(wh, ws.heads, nlist * sizeof(BlockNumber));
-	memcpy(wt, ws.tails, nlist * sizeof(BlockNumber));
-	memcpy(wa, ws.active, nlist * sizeof(bool));
+	mkt_rabitq_scratch_cleanup(&cbs.enc_scratch);
 
 	SpinLockAcquire(&shared->mutex);
 	shared->nparticipantsdone++;
@@ -506,8 +453,7 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			&bufferusage[ParallelWorkerNumber],
 			&walusage[ParallelWorkerNumber]);
 
-	MemoryContextDelete(worker_ctx);
-	pfree(pt_centroids);
+	mkt_build_worker_bufs_free(&bufs);
 
 	index_close(indexRel, AccessExclusiveLock);
 	table_close(heapRel, ShareLock);
