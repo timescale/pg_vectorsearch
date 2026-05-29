@@ -121,4 +121,24 @@ uint32_t mkt_hkmeans_assign(
 		DistanceMetric		 metric,
 		Distance			*out_distance);
 
+/*
+ * Build a 2-level HKMeansResult from pre-computed centroids.
+ *
+ * Used by parallel build where root and child k-means are run
+ * separately. Packs root centroids + per-child centroids into
+ * the same contiguous format as mkt_hkmeans_f32().
+ *
+ * child_centroids[c] points to child_k[c] * dim floats.
+ * Total leaves = sum(child_k[c]).
+ *
+ * Returns a single contiguous allocation. Caller frees with
+ * mkt_free().
+ */
+HKMeansResult *mkt_hkmeans_build_two_level(
+		const float	   *root_centroids,
+		uint32_t		fan_out,
+		const float	  **child_centroids,
+		const uint32_t *child_k,
+		Dimension		dim);
+
 #endif /* MKT_HKMEANS_H */

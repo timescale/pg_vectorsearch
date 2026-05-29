@@ -302,6 +302,83 @@ mkt_hkmeans_f32(
 	return result;
 }
 
+HKMeansResult *
+mkt_hkmeans_build_two_level(
+		const float	   *root_centroids,
+		uint32_t		fan_out,
+		const float	  **child_centroids,
+		const uint32_t *child_k,
+		Dimension		dim)
+{
+	if (root_centroids == NULL || fan_out == 0 || dim == 0)
+		return NULL;
+
+	uint32_t nleaves = 0;
+	for (uint32_t c = 0; c < fan_out; c++)
+		nleaves += child_k[c];
+
+	/* Tree has 1 root + fan_out child nodes = 1 + fan_out total */
+	uint32_t nnodes	 = 1 + fan_out;
+	uint32_t nlevels = 2;
+
+	size_t hdr_sz	 = sizeof(HKMeansResult);
+	size_t nodes_sz	 = (size_t)nnodes * sizeof(HKMeansNode);
+	size_t leaf_sz	 = (size_t)nleaves * dim * sizeof(float);
+	size_t intern_sz = (size_t)fan_out * dim * sizeof(float);
+	size_t total	 = hdr_sz + nodes_sz + leaf_sz + intern_sz;
+
+	HKMeansResult *result = mkt_alloc(total);
+	memset(result, 0, total);
+
+	result->nodes_offset = (uint32_t)hdr_sz;
+	result->leaf_offset	 = (uint32_t)(hdr_sz + nodes_sz);
+	result->total_size	 = (uint32_t)total;
+	result->nnodes		 = nnodes;
+	result->nlevels		 = nlevels;
+	result->nleaves		 = nleaves;
+	result->fan_out		 = fan_out;
+	result->dim			 = dim;
+
+	HKMeansNode *nodes		= hk_nodes(result);
+	float		*leaf_cents = hk_leaf_centroids(result);
+	char		*intern_dst = (char *)result + hdr_sz + nodes_sz + leaf_sz;
+
+	/* Root node: internal centroids, fan_out children */
+	nodes[0].nchildren		 = fan_out;
+	nodes[0].level			 = 0;
+	nodes[0].first_child	 = 1;
+	nodes[0].first_leaf		 = 0;
+	nodes[0].centroid_offset = (uint32_t)((size_t)(intern_dst -
+												   (char *)result));
+	memcpy(intern_dst, root_centroids, (size_t)fan_out * dim * sizeof(float));
+
+	/* Child nodes: each is a leaf-parent */
+	uint32_t leaf_off = 0;
+	for (uint32_t c = 0; c < fan_out; c++)
+	{
+		uint32_t nidx = 1 + c;
+
+		nodes[nidx].nchildren		= child_k[c];
+		nodes[nidx].level			= 1;
+		nodes[nidx].first_child		= HKMEANS_NO_CHILD;
+		nodes[nidx].first_leaf		= leaf_off;
+		nodes[nidx].centroid_offset = result->leaf_offset +
+									  (uint32_t)((size_t)leaf_off * dim *
+												 sizeof(float));
+
+		if (child_centroids[c] != NULL && child_k[c] > 0)
+		{
+			memcpy(leaf_cents + (size_t)leaf_off * dim,
+				   child_centroids[c],
+				   (size_t)child_k[c] * dim * sizeof(float));
+		}
+
+		leaf_off += child_k[c];
+	}
+
+	return result;
+}
+
 uint32_t
 mkt_hkmeans_assign(
 		const HKMeansResult *tree,

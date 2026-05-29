@@ -558,6 +558,10 @@ do_parallel_build(
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
 			mktann_km_workers_size(nparticipants, km_k, dim));
+	/* Root assignments: per-worker uint32_t[max_per_worker] */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator,
+			mktann_root_assign_size(nparticipants, max_per_worker));
 	/* Tree blob (placeholder — allocated later by leader, but
 	 * we need the max possible size. Use a generous estimate.) */
 	Size max_tree_sz = sizeof(HKMeansResult) +
@@ -592,7 +596,7 @@ do_parallel_build(
 		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
 	}
 
-	int nkeys = 11;
+	int nkeys = 12;
 	if (debug_query_string)
 		nkeys++;
 	shm_toc_estimate_keys(&pcxt->estimator, nkeys);
@@ -661,6 +665,14 @@ do_parallel_build(
 	char *km_workers_base = shm_toc_allocate(pcxt->toc, km_sz);
 	memset(km_workers_base, 0, km_sz);
 	shm_toc_insert(pcxt->toc, MKTANN_KEY_KM_WORKERS, km_workers_base);
+
+	/* Root assignment slots */
+	Size ra_sz = mktann_root_assign_size(nparticipants, max_per_worker);
+	MktDsmRootAssign *dsm_ra = shm_toc_allocate(pcxt->toc, ra_sz);
+	memset(dsm_ra, 0, ra_sz);
+	dsm_ra->nparticipants  = nparticipants;
+	dsm_ra->max_per_worker = max_per_worker;
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_ROOT_ASSIGN, dsm_ra);
 
 	/* Tree blob — allocated now, populated after k-means */
 	void *dsm_tree = shm_toc_allocate(pcxt->toc, max_tree_sz);
@@ -862,37 +874,365 @@ do_parallel_build(
 			 km_k);
 	}
 
-	/* Concatenate all workers' samples */
-	uint32_t total_nsamples = 0;
-	for (int t = 0; t < nparticipants; t++)
-		total_nsamples += mktann_sample_counts(dsm_samples)[t];
-
-	float *all_samples = palloc((size_t)total_nsamples * dim * sizeof(float));
-	uint32_t off	   = 0;
-	for (int t = 0; t < nparticipants; t++)
+	/*
+	 * Compute nlevels to decide parallel vs serial child k-means.
+	 * For nlevels == 1, root k-means is the only level. For
+	 * nlevels == 2, we do parallel child k-means. For nlevels > 2,
+	 * fall back to serial hkmeans.
+	 */
+	uint32_t nlevels = 1;
 	{
-		uint32_t n = mktann_sample_counts(dsm_samples)[t];
-		memcpy(all_samples + (size_t)off * dim,
-			   mktann_worker_samples(dsm_samples, t),
-			   (size_t)n * dim * sizeof(float));
-		off += n;
+		uint32_t n = nlist;
+		while (n > fan_out)
+		{
+			n = (n + fan_out - 1) / fan_out;
+			nlevels++;
+		}
 	}
 
-	KMeansOptions km_opts	  = MKT_KMEANS_OPTIONS_DEFAULT;
-	km_opts.max_iterations	  = shared->km_max_iterations;
-	km_opts.initial_centroids = cents;
+	HKMeansResult *tree = NULL;
 
-	HKMeansResult *tree = mkt_hkmeans_f32(
-			all_samples,
-			total_nsamples,
-			NULL,
-			dim,
-			nlist,
-			fan_out,
-			shared->metric,
-			&km_opts);
+	instr_time t_child_start;
+	INSTR_TIME_SET_CURRENT(t_child_start);
 
-	pfree(all_samples);
+	if (nlevels == 2)
+	{
+		/*
+		 * Phase 2b: Root assignment — leader + workers
+		 *
+		 * Each participant assigns its samples to root centroids.
+		 */
+		uint32_t *leader_ra = mktann_root_assignments(dsm_ra, 0);
+		uint32_t  leader_ns = mktann_sample_counts(dsm_samples)[0];
+
+		for (uint32_t i = 0; i < leader_ns; i++)
+		{
+			const float *vec	= leader_samples + (size_t)i * dim;
+			float		 best_d = __FLT_MAX__;
+			uint32_t	 best_c = 0;
+
+			for (uint32_t c = 0; c < km_k; c++)
+			{
+				const float *cent = cents + (size_t)c * dim;
+				float		 d;
+
+				switch (shared->metric)
+				{
+				case DISTANCE_L2:
+				{
+					float nx = mkt_l2_norm_squared(vec, dim);
+					float dt = mkt_dot_product(vec, cent, dim);
+					d		 = nx + norms_c[c] - 2.0f * dt;
+					if (d < 0.0f)
+						d = 0.0f;
+					break;
+				}
+				case DISTANCE_INNER_PRODUCT:
+					d = -mkt_dot_product(vec, cent, dim);
+					break;
+				case DISTANCE_COSINE:
+					d = 1.0f - mkt_dot_product(vec, cent, dim);
+					break;
+				}
+
+				if (d < best_d)
+				{
+					best_d = d;
+					best_c = c;
+				}
+			}
+
+			leader_ra[i] = best_c;
+		}
+
+		/* Barrier: all done with root assignment */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		/*
+		 * Phase 2c: Parallel child k-means
+		 *
+		 * For each child c, run k-means on samples assigned to c.
+		 * The leader picks initial centroids, writes them to the
+		 * DSM centroid buffer, then all participants iterate.
+		 */
+
+		/* Concatenate all workers' samples + assignments for
+		 * leader to pick initial child centroids from */
+		uint32_t total_nsamples = 0;
+		for (int t = 0; t < nparticipants; t++)
+			total_nsamples += mktann_sample_counts(dsm_samples)[t];
+
+		float *all_samples = palloc(
+				(size_t)total_nsamples * dim * sizeof(float));
+		uint32_t *all_root_asgn = palloc(total_nsamples * sizeof(uint32_t));
+		uint32_t  soff			= 0;
+		for (int t = 0; t < nparticipants; t++)
+		{
+			uint32_t n = mktann_sample_counts(dsm_samples)[t];
+			memcpy(all_samples + (size_t)soff * dim,
+				   mktann_worker_samples(dsm_samples, t),
+				   (size_t)n * dim * sizeof(float));
+			memcpy(all_root_asgn + soff,
+				   mktann_root_assignments(dsm_ra, t),
+				   n * sizeof(uint32_t));
+			soff += n;
+		}
+
+		/* Save root centroids — cents buffer will be reused */
+		float *root_cents = palloc((size_t)km_k * dim * sizeof(float));
+		memcpy(root_cents, cents, (size_t)km_k * dim * sizeof(float));
+
+		/* Per-child result storage */
+		float	**child_centroids = palloc(km_k * sizeof(float *));
+		uint32_t *child_ks		  = palloc(km_k * sizeof(uint32_t));
+
+		for (uint32_t child = 0; child < km_k; child++)
+		{
+			/* Count samples for this child */
+			uint32_t child_count = 0;
+			for (uint32_t i = 0; i < total_nsamples; i++)
+			{
+				if (all_root_asgn[i] == child)
+					child_count++;
+			}
+
+			uint32_t child_k = fan_out < child_count ? fan_out : child_count;
+			if (child_k < 1)
+				child_k = 1;
+
+			shared->child_km_k = child_k;
+			child_ks[child]	   = child_k;
+
+			if (child_k <= 1)
+			{
+				/* Trivial: single centroid = root centroid */
+				child_centroids[child] = palloc(dim * sizeof(float));
+				memcpy(child_centroids[child],
+					   root_cents + (size_t)child * dim,
+					   dim * sizeof(float));
+
+				shared->km_converged = true;
+
+				/* Barrier: init done */
+				BarrierArriveAndWait(
+						barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+				continue;
+			}
+
+			/* Pick initial centroids: first child_k samples
+			 * assigned to this child */
+			uint32_t picked = 0;
+			for (uint32_t i = 0; i < total_nsamples && picked < child_k; i++)
+			{
+				if (all_root_asgn[i] != child)
+					continue;
+				memcpy(cents + (size_t)picked * dim,
+					   all_samples + (size_t)i * dim,
+					   dim * sizeof(float));
+				picked++;
+			}
+
+			/* Compute norms for child centroids */
+			float *child_norms = mktann_norms_c(centroids_base, child_k, dim);
+			if (shared->metric == DISTANCE_L2)
+				for (uint32_t j = 0; j < child_k; j++)
+					child_norms[j] =
+							mkt_l2_norm_squared(cents + (size_t)j * dim, dim);
+
+			shared->km_converged = false;
+
+			/* Clear accumulators */
+			Size child_km_sz =
+					mktann_km_workers_size(nparticipants, child_k, dim);
+			memset(km_workers_base, 0, child_km_sz);
+
+			float *child_old_cents = palloc(
+					(size_t)child_k * dim * sizeof(float));
+
+			/* Barrier: child centroids written, workers start */
+			BarrierArriveAndWait(
+					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+			/* Iterate child k-means */
+			for (uint32_t iter = 0; iter < shared->km_max_iterations; iter++)
+			{
+				/* Leader's assignment + accumulation */
+				float *l_sums = mktann_km_worker_sums(
+						km_workers_base, child_k, dim, 0);
+				uint32_t *l_cnts = mktann_km_worker_cnts(
+						km_workers_base, child_k, dim, 0);
+				float *l_cost = mktann_km_worker_cost(
+						km_workers_base, child_k, dim, 0);
+
+				mktann_km_assign_and_accumulate_filtered(
+						leader_samples,
+						leader_ns,
+						leader_ra,
+						child,
+						cents,
+						child_norms,
+						child_k,
+						dim,
+						shared->metric,
+						l_sums,
+						l_cnts,
+						l_cost);
+
+				/* Barrier: all workers done */
+				BarrierArriveAndWait(
+						barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+				/* Leader reduce */
+				memcpy(child_old_cents,
+					   cents,
+					   (size_t)child_k * dim * sizeof(float));
+
+				const float **csums = palloc(nparticipants * sizeof(float *));
+				const uint32_t **ccnts = palloc(
+						nparticipants * sizeof(uint32_t *));
+				float *ccosts = palloc(nparticipants * sizeof(float));
+
+				for (int t = 0; t < nparticipants; t++)
+				{
+					csums[t] = mktann_km_worker_sums(
+							km_workers_base, child_k, dim, t);
+					ccnts[t] = mktann_km_worker_cnts(
+							km_workers_base, child_k, dim, t);
+					ccosts[t] = *mktann_km_worker_cost(
+							km_workers_base, child_k, dim, t);
+				}
+
+				float total_cost;
+				float shift_sq = kmeans_merge_centroids(
+						cents,
+						child_norms,
+						child_old_cents,
+						csums,
+						ccnts,
+						ccosts,
+						nparticipants,
+						child_k,
+						dim,
+						shared->metric,
+						&total_cost);
+
+				float tol_sq = shared->km_tolerance * shared->km_tolerance;
+				shared->km_converged = (shift_sq < tol_sq);
+
+				/* Clear accumulators for next iter */
+				memset(km_workers_base, 0, child_km_sz);
+
+				/* Barrier: workers read updated centroids */
+				BarrierArriveAndWait(
+						barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+				pfree(csums);
+				pfree(ccnts);
+				pfree(ccosts);
+
+				if (shared->km_converged)
+					break;
+			}
+
+			pfree(child_old_cents);
+
+			/* Save converged child centroids */
+			child_centroids[child] = palloc(
+					(size_t)child_k * dim * sizeof(float));
+			memcpy(child_centroids[child],
+				   cents,
+				   (size_t)child_k * dim * sizeof(float));
+		}
+
+		/* Build 2-level tree from root + child centroids */
+		tree = mkt_hkmeans_build_two_level(
+				root_cents,
+				km_k,
+				(const float **)child_centroids,
+				child_ks,
+				dim);
+
+		/* Cleanup */
+		for (uint32_t c = 0; c < km_k; c++)
+			pfree(child_centroids[c]);
+		pfree(child_centroids);
+		pfree(child_ks);
+		pfree(root_cents);
+		pfree(all_samples);
+		pfree(all_root_asgn);
+
+		nlist = tree->nleaves;
+	}
+	else
+	{
+		/* nlevels != 2: fall back to serial hkmeans */
+		uint32_t total_nsamples = 0;
+		for (int t = 0; t < nparticipants; t++)
+			total_nsamples += mktann_sample_counts(dsm_samples)[t];
+
+		float *all_samples = palloc(
+				(size_t)total_nsamples * dim * sizeof(float));
+		uint32_t soff = 0;
+		for (int t = 0; t < nparticipants; t++)
+		{
+			uint32_t n = mktann_sample_counts(dsm_samples)[t];
+			memcpy(all_samples + (size_t)soff * dim,
+				   mktann_worker_samples(dsm_samples, t),
+				   (size_t)n * dim * sizeof(float));
+			soff += n;
+		}
+
+		KMeansOptions km_opts	  = MKT_KMEANS_OPTIONS_DEFAULT;
+		km_opts.max_iterations	  = shared->km_max_iterations;
+		km_opts.initial_centroids = cents;
+
+		tree = mkt_hkmeans_f32(
+				all_samples,
+				total_nsamples,
+				NULL,
+				dim,
+				nlist,
+				fan_out,
+				shared->metric,
+				&km_opts);
+
+		pfree(all_samples);
+
+		/* Still need barriers for root assign + child k-means
+		 * that workers are waiting on */
+		{
+			uint32_t *leader_ra = mktann_root_assignments(dsm_ra, 0);
+			uint32_t  ln		= mktann_sample_counts(dsm_samples)[0];
+			for (uint32_t i = 0; i < ln; i++)
+				leader_ra[i] = 0;
+
+			BarrierArriveAndWait(
+					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+		}
+
+		for (uint32_t child = 0; child < km_k; child++)
+		{
+			shared->child_km_k	 = 1;
+			shared->km_converged = true;
+			BarrierArriveAndWait(
+					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+		}
+
+		nlist = tree ? tree->nleaves : 0;
+	}
+
+	{
+		instr_time t_child_elapsed;
+		INSTR_TIME_SET_CURRENT(t_child_elapsed);
+		INSTR_TIME_SUBTRACT(t_child_elapsed, t_child_start);
+		elog(LOG,
+			 "mktann: child kmeans %.1fms (nlevels=%u, "
+			 "%u children, %u leaves)",
+			 INSTR_TIME_GET_MILLISEC(t_child_elapsed),
+			 nlevels,
+			 km_k,
+			 tree ? tree->nleaves : 0);
+	}
 
 	if (tree == NULL)
 	{
@@ -902,8 +1242,7 @@ do_parallel_build(
 		return false;
 	}
 
-	/* Update nlist from actual tree leaves */
-	nlist		  = tree->nleaves;
+	/* Update nlist in shared state */
 	shared->nlist = nlist;
 
 	/* Copy tree into pre-allocated DSM slot */

@@ -168,6 +168,82 @@ mktann_km_assign_and_accumulate(
 }
 
 /* ----------------------------------------------------------------
+ * Phase 2b: Filtered k-means assignment for child k-means
+ *
+ * Same as mktann_km_assign_and_accumulate but skips samples
+ * whose root assignment doesn't match target_child.
+ * ---------------------------------------------------------------- */
+
+void
+mktann_km_assign_and_accumulate_filtered(
+		const float	   *samples,
+		uint32_t		nsamples,
+		const uint32_t *root_assignments,
+		uint32_t		target_child,
+		const float	   *centroids,
+		const float	   *norms_c,
+		uint32_t		nlist,
+		Dimension		dim,
+		DistanceMetric	metric,
+		float		   *out_sums,
+		uint32_t	   *out_cnts,
+		float		   *out_cost)
+{
+	memset(out_sums, 0, (size_t)nlist * dim * sizeof(float));
+	memset(out_cnts, 0, nlist * sizeof(uint32_t));
+	float cost = 0.0f;
+
+	for (uint32_t i = 0; i < nsamples; i++)
+	{
+		if (root_assignments[i] != target_child)
+			continue;
+
+		const float *vec	= samples + (size_t)i * dim;
+		float		 best_d = __FLT_MAX__;
+		uint32_t	 best_c = 0;
+
+		for (uint32_t c = 0; c < nlist; c++)
+		{
+			const float *cent = centroids + (size_t)c * dim;
+			float		 d;
+
+			switch (metric)
+			{
+			case DISTANCE_L2:
+			{
+				float norm_x = mkt_l2_norm_squared(vec, dim);
+				float dot	 = mkt_dot_product(vec, cent, dim);
+				d			 = norm_x + norms_c[c] - 2.0f * dot;
+				if (d < 0.0f)
+					d = 0.0f;
+				break;
+			}
+			case DISTANCE_INNER_PRODUCT:
+				d = -mkt_dot_product(vec, cent, dim);
+				break;
+			case DISTANCE_COSINE:
+				d = 1.0f - mkt_dot_product(vec, cent, dim);
+				break;
+			}
+
+			if (d < best_d)
+			{
+				best_d = d;
+				best_c = c;
+			}
+		}
+
+		cost += best_d;
+		out_cnts[best_c]++;
+		float *sum = out_sums + (size_t)best_c * dim;
+		for (uint32_t d = 0; d < dim; d++)
+			sum[d] += vec[d];
+	}
+
+	*out_cost = cost;
+}
+
+/* ----------------------------------------------------------------
  * Phase 3: Entry build callback
  *
  * Workers encode vectors and write compact entries to a DSM
@@ -378,6 +454,110 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 		if (shared->km_converged)
 			break;
+	}
+
+	/* ---- Phase 2b: Root assignment ---- */
+
+	MktDsmRootAssign *dsm_ra =
+			shm_toc_lookup(toc, MKTANN_KEY_ROOT_ASSIGN, false);
+	uint32_t *my_root_asgn = mktann_root_assignments(dsm_ra, worker_id);
+
+	for (uint32_t i = 0; i < my_nsamples; i++)
+	{
+		const float *vec	= my_samples + (size_t)i * dim;
+		float		 best_d = __FLT_MAX__;
+		uint32_t	 best_c = 0;
+
+		for (uint32_t c = 0; c < km_k; c++)
+		{
+			const float *cent = cents + (size_t)c * dim;
+			float		 d;
+
+			switch (shared->metric)
+			{
+			case DISTANCE_L2:
+			{
+				float norm_x = mkt_l2_norm_squared(vec, dim);
+				float dot	 = mkt_dot_product(vec, cent, dim);
+				d			 = norm_x + norms_c[c] - 2.0f * dot;
+				if (d < 0.0f)
+					d = 0.0f;
+				break;
+			}
+			case DISTANCE_INNER_PRODUCT:
+				d = -mkt_dot_product(vec, cent, dim);
+				break;
+			case DISTANCE_COSINE:
+				d = 1.0f - mkt_dot_product(vec, cent, dim);
+				break;
+			}
+
+			if (d < best_d)
+			{
+				best_d = d;
+				best_c = c;
+			}
+		}
+
+		my_root_asgn[i] = best_c;
+	}
+
+	/* Barrier: all done with root assignment */
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+	/* ---- Phase 2c: Child k-means ---- */
+
+	for (uint32_t child = 0; child < km_k; child++)
+	{
+		/* Barrier: leader wrote child centroids */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		uint32_t child_k = shared->child_km_k;
+
+		if (child_k <= 1)
+			continue; /* nothing to iterate */
+
+		/*
+		 * Reuse the km_workers accumulator buffer. The leader
+		 * sizes it for km_k (= fan_out), and child_k <= fan_out,
+		 * so the per-worker slot is large enough.
+		 */
+		float *child_sums = mktann_km_worker_sums(
+				km_workers_base, child_k, dim, worker_id);
+		uint32_t *child_cnts = mktann_km_worker_cnts(
+				km_workers_base, child_k, dim, worker_id);
+		float *child_cost = mktann_km_worker_cost(
+				km_workers_base, child_k, dim, worker_id);
+
+		float *child_norms_c = mktann_norms_c(centroids_base, child_k, dim);
+
+		for (uint32_t iter = 0; iter < shared->km_max_iterations; iter++)
+		{
+			mktann_km_assign_and_accumulate_filtered(
+					my_samples,
+					my_nsamples,
+					my_root_asgn,
+					child,
+					cents,
+					child_norms_c,
+					child_k,
+					dim,
+					shared->metric,
+					child_sums,
+					child_cnts,
+					child_cost);
+
+			/* Barrier: all done — leader reduces */
+			BarrierArriveAndWait(
+					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+			/* Barrier: leader updated centroids */
+			BarrierArriveAndWait(
+					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+			if (shared->km_converged)
+				break;
+		}
 	}
 
 	/* Barrier: leader built tree, set up posting reserve */

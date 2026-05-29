@@ -47,6 +47,7 @@
 #define MKTANN_KEY_CENTROIDS	 UINT64CONST(0xB00000000000000B)
 #define MKTANN_KEY_KM_WORKERS	 UINT64CONST(0xB00000000000000C)
 #define MKTANN_KEY_ENTRIES		 UINT64CONST(0xB00000000000000D)
+#define MKTANN_KEY_ROOT_ASSIGN	 UINT64CONST(0xB00000000000000E)
 
 /* ----------------------------------------------------------------
  * MktBuildShared — primary shared state in DSM
@@ -88,6 +89,10 @@ typedef struct MktBuildShared
 
 	/* K-means convergence — set by leader between barriers */
 	bool km_converged;
+
+	/* Child k-means — set by leader between barriers */
+	uint32_t current_child;
+	uint32_t child_km_k; /* k for current child k-means */
 } MktBuildShared;
 
 #define ParallelTableScanFromMktShared(shared)  \
@@ -129,6 +134,35 @@ mktann_samples_size(int nparticipants, uint32_t max_per_worker, Dimension dim)
 	Size sz = MAXALIGN(sizeof(MktDsmSamples));
 	sz += (Size)nparticipants * sizeof(uint32_t);
 	sz += (Size)nparticipants * max_per_worker * dim * sizeof(float);
+	return sz;
+}
+
+/* ----------------------------------------------------------------
+ * Root assignments: per-worker uint32_t[max_per_worker] in DSM
+ *
+ * After root k-means converges, each worker stores its root
+ * assignments here. Used to filter samples during child k-means.
+ * ---------------------------------------------------------------- */
+
+typedef struct MktDsmRootAssign
+{
+	uint32_t nparticipants;
+	uint32_t max_per_worker;
+} MktDsmRootAssign;
+
+static inline uint32_t *
+mktann_root_assignments(MktDsmRootAssign *ra, int worker_id)
+{
+	char *base = (char *)ra + MAXALIGN(sizeof(MktDsmRootAssign));
+	return (uint32_t *)(base + (size_t)worker_id * ra->max_per_worker *
+									   sizeof(uint32_t));
+}
+
+static inline Size
+mktann_root_assign_size(int nparticipants, uint32_t max_per_worker)
+{
+	Size sz = MAXALIGN(sizeof(MktDsmRootAssign));
+	sz += (Size)nparticipants * max_per_worker * sizeof(uint32_t);
 	return sz;
 }
 
@@ -397,6 +431,24 @@ extern void mktann_km_assign_and_accumulate(
 		float		  *out_sums,
 		uint32_t	  *out_cnts,
 		float		  *out_cost);
+
+/*
+ * Filtered variant: only processes samples where
+ * root_assignments[i] == target_child.
+ */
+extern void mktann_km_assign_and_accumulate_filtered(
+		const float	   *samples,
+		uint32_t		nsamples,
+		const uint32_t *root_assignments,
+		uint32_t		target_child,
+		const float	   *centroids,
+		const float	   *norms_c,
+		uint32_t		nlist,
+		Dimension		dim,
+		DistanceMetric	metric,
+		float		   *out_sums,
+		uint32_t	   *out_cnts,
+		float		   *out_cost);
 
 /* ----------------------------------------------------------------
  * Phase 3: Entry build callback — shared by leader and workers
