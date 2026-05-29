@@ -89,4 +89,36 @@ km_get_vector(const KMeansState *st, uint32_t i, size_t elem_size)
 float kmeans_max_centroid_shift_between(
 		const float *a, const float *b, uint32_t nlist, Dimension dim);
 
+/*
+ * Merge per-worker centroid accumulators and update centroids.
+ *
+ * This is the reduce step of parallel k-means (BSP pattern).
+ * Called by the leader between barrier-synchronized iterations.
+ *
+ * Inputs:
+ *   worker_sums:  [nworkers][nlist * dim] per-worker centroid sums
+ *   worker_cnts:  [nworkers][nlist] per-worker cluster counts
+ *   worker_costs: [nworkers] per-worker total costs
+ *   nworkers:     number of workers
+ *   old_cents:    [nlist * dim] centroids from before this iteration
+ *
+ * Outputs:
+ *   centroids:    [nlist * dim] updated centroid positions (in-place)
+ *   norms_c:      [nlist] updated centroid norms (for L2, may be NULL)
+ *
+ * Returns the maximum squared centroid shift (for convergence check).
+ */
+float kmeans_merge_centroids(
+		float				  *centroids,
+		float				  *norms_c,
+		const float			  *old_cents,
+		const float *const	  *worker_sums,
+		const uint32_t *const *worker_cnts,
+		const float			  *worker_costs,
+		uint32_t			   nworkers,
+		uint32_t			   nlist,
+		Dimension			   dim,
+		DistanceMetric		   metric,
+		float				  *out_total_cost);
+
 #endif /* MKT_KMEANS_INTERNAL_H */
