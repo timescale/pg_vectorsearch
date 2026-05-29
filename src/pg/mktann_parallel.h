@@ -296,6 +296,45 @@ mktann_worker_partials(char *base, uint32_t nlist, int worker_id)
 }
 
 /* ----------------------------------------------------------------
+ * Shared callbacks — used by both leader and workers
+ * ---------------------------------------------------------------- */
+
+typedef struct SampleCbState
+{
+	float		  *samples;
+	float		  *centroids;
+	uint32_t	   count;
+	uint32_t	   max_samples;
+	uint32_t	   stride;
+	uint32_t	   stride_counter;
+	Dimension	   dim;
+	DistanceMetric metric;
+	uint32_t	   cent_start;
+	uint32_t	   cent_end;
+	uint32_t	   cents_picked;
+} SampleCbState;
+
+extern void mktann_sample_callback(
+		Relation	index,
+		ItemPointer tid,
+		Datum	   *values,
+		bool	   *isnull,
+		bool		tuple_is_alive,
+		void	   *state);
+
+extern void mktann_km_assign_and_accumulate(
+		const float	  *samples,
+		uint32_t	   nsamples,
+		const float	  *centroids,
+		const float	  *norms_c,
+		uint32_t	   nlist,
+		Dimension	   dim,
+		DistanceMetric metric,
+		float		  *out_sums,
+		uint32_t	  *out_cnts,
+		float		  *out_cost);
+
+/* ----------------------------------------------------------------
  * Worker entry point — registered with CreateParallelContext
  * ---------------------------------------------------------------- */
 

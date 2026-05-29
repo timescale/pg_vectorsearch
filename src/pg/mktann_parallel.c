@@ -58,8 +58,8 @@ typedef struct SampleCbState
 	uint32_t cents_picked;
 } SampleCbState;
 
-static void
-sample_callback(
+void
+mktann_sample_callback(
 		Relation	index,
 		ItemPointer tid,
 		Datum	   *values,
@@ -122,8 +122,8 @@ sample_callback(
  * centroids and accumulates per-worker centroid sums.
  * ---------------------------------------------------------------- */
 
-static void
-km_assign_and_accumulate(
+void
+mktann_km_assign_and_accumulate(
 		const float	  *samples,
 		uint32_t	   nsamples,
 		const float	  *centroids,
@@ -338,7 +338,7 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			indexInfo,
 			true,
 			false,
-			sample_callback,
+			mktann_sample_callback,
 			&sc,
 			scan);
 
@@ -367,7 +367,7 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	for (uint32_t iter = 0; iter < shared->km_max_iterations; iter++)
 	{
 		/* Assignment + accumulation on this worker's samples */
-		km_assign_and_accumulate(
+		mktann_km_assign_and_accumulate(
 				my_samples,
 				my_nsamples,
 				cents,
@@ -393,6 +393,9 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 	/* ---- Phase 3: Posting scan ---- */
+
+	/* Re-read nlist — leader updated it after k-means */
+	nlist = shared->nlist;
 
 	HKMeansResult *tree = shm_toc_lookup(toc, MKTANN_KEY_TREE, false);
 	MktDsmReserve *dsm_reserve =

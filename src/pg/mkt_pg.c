@@ -11,6 +11,7 @@
 #include <utils/guc.h>
 
 #include "algo/distance.h"
+#include "algo/kmeans.h"
 #include "git_commit.h"
 #include "mkt_pg.h"
 #include "mktann_explain.h"
@@ -118,6 +119,8 @@ _PG_init(void)
 			NULL);
 
 	MarkGUCPrefixReserved("mkt");
+
+	mkt_cblas_pin_single_thread();
 
 	mktann_relopt_kind = add_reloption_kind();
 	add_enum_reloption(

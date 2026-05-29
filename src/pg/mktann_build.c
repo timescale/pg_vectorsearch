@@ -47,6 +47,7 @@
 #include "algo/distance.h"
 #include "algo/hkmeans.h"
 #include "algo/kmeans.h"
+#include "algo/kmeans_internal.h"
 #include "algo/vecops.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
@@ -565,11 +566,8 @@ do_parallel_build(
 		struct IndexInfo *index_info,
 		MktannBuildState *bs,
 		MktannStorage	 *storage,
-		HKMeansResult	 *tree,
-		RaBitQParams	 *rq_params,
-		const float		 *ref_vecs,
-		const float		 *pt_centroids,
 		BlockNumber		  first_posting,
+		HKMeansResult	**out_tree,
 		BlockNumber		 *posting_heads,
 		double			 *out_heap_tuples,
 		double			 *out_indtuples,
@@ -581,19 +579,42 @@ do_parallel_build(
 	int		  nparticipants = nworkers + 1;
 	uint64_t  rabitq_seed	= 42;
 
+	/* Compute sample budget per worker */
+	uint32_t total_samples	= Max(10000, (int)(nlist * 256));
+	uint32_t max_per_worker = (total_samples + nparticipants - 1) /
+							  nparticipants;
+
 	EnterParallelMode();
 
 	ParallelContext *pcxt = CreateParallelContext(
 			"meerkat", "mktann_parallel_build_main", nworkers);
 
-	/* Estimate DSM size */
+	/* Estimate DSM size for ALL phases */
 	Snapshot snapshot	= SnapshotAny;
 	Size	 est_shared = add_size(
 			BUFFERALIGN(sizeof(MktBuildShared)),
 			table_parallelscan_estimate(heap, snapshot));
 
 	shm_toc_estimate_chunk(&pcxt->estimator, est_shared);
-	shm_toc_estimate_chunk(&pcxt->estimator, tree->total_size);
+	shm_toc_estimate_chunk(&pcxt->estimator, sizeof(Barrier));
+	/* Sampling */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator,
+			mktann_samples_size(nparticipants, max_per_worker, dim));
+	/* K-means shared centroids + norms */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator, mktann_centroids_size(nlist, dim));
+	/* K-means per-worker accumulators */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator,
+			mktann_km_workers_size(nparticipants, nlist, dim));
+	/* Tree blob (placeholder — allocated later by leader, but
+	 * we need the max possible size. Use a generous estimate.) */
+	Size max_tree_sz = sizeof(HKMeansResult) +
+					   (Size)nlist * 2 * sizeof(HKMeansNode) +
+					   (Size)nlist * dim * sizeof(float) * 2;
+	shm_toc_estimate_chunk(&pcxt->estimator, max_tree_sz);
+	/* Posting phase */
 	shm_toc_estimate_chunk(&pcxt->estimator, mktann_dsm_reserve_size(nlist));
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mktann_worker_output_size(nlist, nparticipants));
@@ -612,7 +633,7 @@ do_parallel_build(
 		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
 	}
 
-	int nkeys = 7;
+	int nkeys = 12;
 	if (!bs->params.fastscan)
 		nkeys++;
 	if (debug_query_string)
@@ -628,20 +649,24 @@ do_parallel_build(
 		return false;
 	}
 
-	/* Populate shared state */
-	MktBuildShared *shared	 = shm_toc_allocate(pcxt->toc, est_shared);
-	shared->heaprelid		 = RelationGetRelid(heap);
-	shared->indexrelid		 = RelationGetRelid(index);
-	shared->queryid			 = pgstat_get_my_query_id();
-	shared->dim				 = dim;
-	shared->metric			 = bs->params.metric;
-	shared->nlist			 = nlist;
-	shared->fan_out			 = bs->params.fan_out;
-	shared->soar_lambda		 = bs->params.soar_lambda;
-	shared->boundary_epsilon = bs->params.boundary_epsilon;
-	shared->fastscan		 = bs->params.fastscan;
-	shared->rabitq_seed		 = rabitq_seed;
-	shared->nparticipants	 = nparticipants;
+	/* ---- Populate shared state ---- */
+	MktBuildShared *shared		   = shm_toc_allocate(pcxt->toc, est_shared);
+	shared->heaprelid			   = RelationGetRelid(heap);
+	shared->indexrelid			   = RelationGetRelid(index);
+	shared->queryid				   = pgstat_get_my_query_id();
+	shared->dim					   = dim;
+	shared->metric				   = bs->params.metric;
+	shared->nlist				   = nlist;
+	shared->fan_out				   = bs->params.fan_out;
+	shared->soar_lambda			   = bs->params.soar_lambda;
+	shared->boundary_epsilon	   = bs->params.boundary_epsilon;
+	shared->fastscan			   = bs->params.fastscan;
+	shared->rabitq_seed			   = rabitq_seed;
+	shared->nparticipants		   = nparticipants;
+	shared->max_samples_per_worker = max_per_worker;
+	shared->km_max_iterations	   = 20;
+	shared->km_tolerance		   = 1e-4f;
+	shared->km_converged		   = false;
 	SpinLockInit(&shared->mutex);
 	ConditionVariableInit(&shared->workersdonecv);
 	shared->nparticipantsdone = 0;
@@ -652,46 +677,52 @@ do_parallel_build(
 			heap, ParallelTableScanFromMktShared(shared), snapshot);
 	shm_toc_insert(pcxt->toc, MKTANN_KEY_SHARED, shared);
 
-	/* Copy tree blob into DSM */
-	void *dsm_tree = shm_toc_allocate(pcxt->toc, tree->total_size);
-	memcpy(dsm_tree, tree, tree->total_size);
+	/* Barrier for phase synchronization */
+	Barrier *barrier = shm_toc_allocate(pcxt->toc, sizeof(Barrier));
+	BarrierInit(barrier, nparticipants);
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_BARRIER, barrier);
+
+	/* Sample slots */
+	Size samp_sz = mktann_samples_size(nparticipants, max_per_worker, dim);
+	MktDsmSamples *dsm_samples = shm_toc_allocate(pcxt->toc, samp_sz);
+	memset(dsm_samples, 0, samp_sz);
+	dsm_samples->nparticipants	= nparticipants;
+	dsm_samples->max_per_worker = max_per_worker;
+	dsm_samples->dim			= dim;
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_SAMPLES, dsm_samples);
+
+	/* Shared centroids + norms */
+	Size  cent_sz		 = mktann_centroids_size(nlist, dim);
+	char *centroids_base = shm_toc_allocate(pcxt->toc, cent_sz);
+	memset(centroids_base, 0, cent_sz);
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_CENTROIDS, centroids_base);
+	float *cents   = mktann_centroids(centroids_base);
+	float *norms_c = mktann_norms_c(centroids_base, nlist, dim);
+
+	/* Per-worker k-means accumulators */
+	Size  km_sz			  = mktann_km_workers_size(nparticipants, nlist, dim);
+	char *km_workers_base = shm_toc_allocate(pcxt->toc, km_sz);
+	memset(km_workers_base, 0, km_sz);
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_KM_WORKERS, km_workers_base);
+
+	/* Tree blob — allocated now, populated after k-means */
+	void *dsm_tree = shm_toc_allocate(pcxt->toc, max_tree_sz);
+	memset(dsm_tree, 0, max_tree_sz);
 	shm_toc_insert(pcxt->toc, MKTANN_KEY_TREE, dsm_tree);
 
-	/* Set up page reservation in DSM */
-	Size		   res_sz	   = mktann_dsm_reserve_size(nlist);
+	/* Posting phase DSM — allocated now but populated after k-means */
+	uint32_t	   alloc_nlist = nlist; /* save allocation-time nlist */
+	Size		   res_sz	   = mktann_dsm_reserve_size(alloc_nlist);
 	MktDsmReserve *dsm_reserve = shm_toc_allocate(pcxt->toc, res_sz);
 	memset(dsm_reserve, 0, res_sz);
-	dsm_reserve->nlist		   = nlist;
-	dsm_reserve->first_posting = first_posting;
-
-	uint32_t	 pages_per_cluster = estimate_posting_pages(heap, dim, nlist);
-	BlockNumber *starts			   = mktann_dsm_reserve_starts(dsm_reserve);
-	uint32_t	*counts			   = mktann_dsm_reserve_counts(dsm_reserve);
-
-	BlockNumber total_reserve = 0;
-	for (uint32_t c = 0; c < nlist; c++)
-	{
-		starts[c] = first_posting + total_reserve;
-		counts[c] = pages_per_cluster;
-		total_reserve += pages_per_cluster;
-	}
-	dsm_reserve->total_reserved = total_reserve;
-
-	pg_atomic_uint32 *nexts = mktann_dsm_reserve_nexts(dsm_reserve);
-	for (uint32_t c = 0; c < nlist; c++)
-		pg_atomic_init_u32(&nexts[c], 1);
-
+	dsm_reserve->nlist = alloc_nlist;
 	shm_toc_insert(pcxt->toc, MKTANN_KEY_RESERVE, dsm_reserve);
 
-	mkt_storage_extend(&storage->base, total_reserve);
-
-	/* Worker output area */
 	Size  out_sz		= mktann_worker_output_size(nlist, nparticipants);
 	char *worker_output = shm_toc_allocate(pcxt->toc, out_sz);
 	memset(worker_output, 0, out_sz);
 	shm_toc_insert(pcxt->toc, MKTANN_KEY_WORKER_OUTPUT, worker_output);
 
-	/* Partials buffer (only for AoS, not fastscan) */
 	char *partials = NULL;
 	if (!bs->params.fastscan)
 	{
@@ -701,7 +732,6 @@ do_parallel_build(
 		shm_toc_insert(pcxt->toc, MKTANN_KEY_PARTIALS, partials);
 	}
 
-	/* WAL/buffer usage */
 	WalUsage *walusage = shm_toc_allocate(
 			pcxt->toc, mul_size(sizeof(WalUsage), pcxt->nworkers));
 	memset(walusage, 0, mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -719,7 +749,7 @@ do_parallel_build(
 		shm_toc_insert(pcxt->toc, MKTANN_KEY_QUERY_TEXT, sq);
 	}
 
-	/* Launch workers */
+	/* ---- Launch workers ---- */
 	LaunchParallelWorkers(pcxt);
 
 	if (pcxt->nworkers_launched == 0)
@@ -730,7 +760,258 @@ do_parallel_build(
 		return false;
 	}
 
-	/* Leader participates as worker_id = 0 */
+	/* ==== Leader participates in all phases as worker_id=0 ==== */
+
+	/* ---- Phase 1: Leader samples ---- */
+	{
+		uint32_t cents_per = nlist / nparticipants;
+		uint32_t cents_rem = nlist % nparticipants;
+		uint32_t cent_end  = (0 < cents_rem) ? (cents_per + 1) : cents_per;
+
+		double est_rows = RelationGetNumberOfBlocks(heap) *
+						  (BLCKSZ / (double)(dim * sizeof(float) + 32));
+		uint32_t stride = 1;
+		if (est_rows / nparticipants > max_per_worker)
+			stride = (uint32_t)(est_rows / nparticipants / max_per_worker);
+		if (stride < 1)
+			stride = 1;
+
+		SampleCbState sc = {
+				.samples		= mktann_worker_samples(dsm_samples, 0),
+				.centroids		= cents,
+				.count			= 0,
+				.max_samples	= max_per_worker,
+				.stride			= stride,
+				.stride_counter = 0,
+				.dim			= dim,
+				.metric			= shared->metric,
+				.cent_start		= 0,
+				.cent_end		= cent_end,
+				.cents_picked	= 0,
+		};
+
+		TableScanDesc scan = table_beginscan_parallel(
+				heap, ParallelTableScanFromMktShared(shared));
+
+		table_index_build_scan(
+				heap,
+				index,
+				index_info,
+				true,
+				true,
+				mktann_sample_callback,
+				&sc,
+				scan);
+
+		mktann_sample_counts(dsm_samples)[0] = sc.count;
+	}
+
+	/* Barrier: all participants done sampling */
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+	/* ---- Phase 2: Leader runs k-means reduce loop ---- */
+
+	/* Precompute centroid norms for L2 */
+	if (shared->metric == DISTANCE_L2)
+		for (uint32_t j = 0; j < nlist; j++)
+			norms_c[j] = mkt_l2_norm_squared(cents + (size_t)j * dim, dim);
+
+	/* Leader also does assignment on its samples */
+	float	 *my_sums = mktann_km_worker_sums(km_workers_base, nlist, dim, 0);
+	uint32_t *my_cnts = mktann_km_worker_cnts(km_workers_base, nlist, dim, 0);
+	float	 *my_cost = mktann_km_worker_cost(km_workers_base, nlist, dim, 0);
+
+	float	*leader_samples	 = mktann_worker_samples(dsm_samples, 0);
+	uint32_t leader_nsamples = mktann_sample_counts(dsm_samples)[0];
+
+	float *old_cents = palloc((size_t)nlist * dim * sizeof(float));
+
+	for (uint32_t iter = 0; iter < shared->km_max_iterations; iter++)
+	{
+		memcpy(old_cents, cents, (size_t)nlist * dim * sizeof(float));
+
+		/* Leader assignment + accumulation */
+		mktann_km_assign_and_accumulate(
+				leader_samples,
+				leader_nsamples,
+				cents,
+				norms_c,
+				nlist,
+				dim,
+				shared->metric,
+				my_sums,
+				my_cnts,
+				my_cost);
+
+		/* Barrier: all workers done with assignment */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		/* Leader reduce: merge per-worker sums → new centroids */
+		const float	   **all_sums = palloc(nparticipants * sizeof(float *));
+		const uint32_t **all_cnts = palloc(nparticipants * sizeof(uint32_t *));
+		float			*all_costs = palloc(nparticipants * sizeof(float));
+
+		for (int t = 0; t < nparticipants; t++)
+		{
+			all_sums[t] =
+					mktann_km_worker_sums(km_workers_base, nlist, dim, t);
+			all_cnts[t] =
+					mktann_km_worker_cnts(km_workers_base, nlist, dim, t);
+			all_costs[t] =
+					*mktann_km_worker_cost(km_workers_base, nlist, dim, t);
+		}
+
+		float total_cost;
+		float shift_sq = kmeans_merge_centroids(
+				cents,
+				norms_c,
+				old_cents,
+				all_sums,
+				all_cnts,
+				all_costs,
+				nparticipants,
+				nlist,
+				dim,
+				shared->metric,
+				&total_cost);
+
+		float tol_sq		 = shared->km_tolerance * shared->km_tolerance;
+		shared->km_converged = (shift_sq < tol_sq);
+
+		/* Reset per-worker accumulators for next iteration */
+		memset(km_workers_base, 0, km_sz);
+
+		/* Barrier: workers can read updated centroids */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		if (shared->km_converged)
+			break;
+	}
+
+	/* ---- Leader: build hkmeans tree from samples + centroids ---- */
+
+	/* Concatenate all workers' samples */
+	uint32_t total_nsamples = 0;
+	for (int t = 0; t < nparticipants; t++)
+		total_nsamples += mktann_sample_counts(dsm_samples)[t];
+
+	float *all_samples = palloc((size_t)total_nsamples * dim * sizeof(float));
+	uint32_t off	   = 0;
+	for (int t = 0; t < nparticipants; t++)
+	{
+		uint32_t n = mktann_sample_counts(dsm_samples)[t];
+		memcpy(all_samples + (size_t)off * dim,
+			   mktann_worker_samples(dsm_samples, t),
+			   (size_t)n * dim * sizeof(float));
+		off += n;
+	}
+
+	KMeansOptions km_opts  = MKT_KMEANS_OPTIONS_DEFAULT;
+	km_opts.max_iterations = shared->km_max_iterations;
+
+	HKMeansResult *tree = mkt_hkmeans_f32(
+			all_samples,
+			total_nsamples,
+			NULL,
+			dim,
+			nlist,
+			bs->params.fan_out,
+			shared->metric,
+			&km_opts);
+
+	pfree(all_samples);
+	pfree(old_cents);
+
+	if (tree == NULL)
+	{
+		WaitForParallelWorkersToFinish(pcxt);
+		DestroyParallelContext(pcxt);
+		ExitParallelMode();
+		return false;
+	}
+
+	/* Update nlist from actual tree leaves */
+	nlist		  = tree->nleaves;
+	shared->nlist = nlist;
+
+	/* Copy tree into pre-allocated DSM slot */
+	if (tree->total_size > max_tree_sz)
+		elog(ERROR,
+			 "mktann: tree too large for DSM (%u > %zu)",
+			 tree->total_size,
+			 max_tree_sz);
+	elog(LOG,
+		 "mktann: tree size=%u, dsm slot=%zu, nleaves=%u, nnodes=%u",
+		 tree->total_size,
+		 max_tree_sz,
+		 tree->nleaves,
+		 tree->nnodes);
+	memcpy(dsm_tree, tree, tree->total_size);
+
+	/* Verify tree is usable from DSM */
+	{
+		HKMeansResult *t2 = (HKMeansResult *)dsm_tree;
+		Assert(t2->nleaves == tree->nleaves);
+		Assert(t2->dim == tree->dim);
+		float *lc = hk_leaf_centroids(t2);
+		Assert(isfinite(lc[0]));
+	}
+
+	/* Normalize leaf centroids for cosine */
+	float *ref_vecs = hk_leaf_centroids(tree);
+	if (shared->metric == DISTANCE_COSINE)
+		for (uint32_t c = 0; c < nlist; c++)
+			normalize_in_place(ref_vecs + (size_t)c * dim, dim);
+
+	/* Compute P^T * centroids */
+	RaBitQParams *rq_params	   = mkt_rabitq_create(dim, rabitq_seed);
+	float		 *pt_centroids = palloc((size_t)nlist * dim * sizeof(float));
+	for (uint32_t c = 0; c < nlist; c++)
+		mkt_rabitq_rotate(
+				rq_params,
+				ref_vecs + (size_t)c * dim,
+				pt_centroids + (size_t)c * dim);
+
+	/* Set up posting page reservation.
+	 * Keep dsm_reserve->nlist at the allocated size — the accessor
+	 * functions compute array offsets from it. shared->nlist has
+	 * the actual count from k-means. */
+
+	uint32_t	 pages_per_cluster = estimate_posting_pages(heap, dim, nlist);
+	BlockNumber *starts			   = mktann_dsm_reserve_starts(dsm_reserve);
+	uint32_t	*counts			   = mktann_dsm_reserve_counts(dsm_reserve);
+	pg_atomic_uint32 *nexts		   = mktann_dsm_reserve_nexts(dsm_reserve);
+
+	BlockNumber total_reserve = 0;
+	for (uint32_t c = 0; c < nlist; c++)
+		total_reserve += pages_per_cluster;
+
+	BlockNumber actual_start =
+			mkt_storage_extend(&storage->base, total_reserve);
+
+	{
+		BlockNumber pos = 0;
+		for (uint32_t c = 0; c < nlist; c++)
+		{
+			starts[c] = actual_start + pos;
+			counts[c] = pages_per_cluster;
+			pos += pages_per_cluster;
+		}
+	}
+	dsm_reserve->total_reserved = total_reserve;
+	dsm_reserve->first_posting	= actual_start;
+
+	for (uint32_t c = 0; c < nlist; c++)
+		pg_atomic_init_u32(&nexts[c], 1);
+
+	/* Re-init parallel scan for posting phase */
+	table_parallelscan_reinitialize(
+			heap, ParallelTableScanFromMktShared(shared));
+
+	/* Barrier: tree + reserve ready, workers can start posting */
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+	/* ---- Phase 3: Leader does posting scan ---- */
 	{
 		MktPostingReserve local_reserve = {
 				.starts = starts,
@@ -773,6 +1054,9 @@ do_parallel_build(
 				.boundary_epsilon = bs->params.boundary_epsilon,
 		};
 
+		bs->tree		= (HKMeansResult *)dsm_tree;
+		bs->worker_bufs = mkt_build_worker_bufs_create(dim);
+
 		LeaderBuildState leader_state = {
 				.bs			= bs,
 				.ws			= &ws,
@@ -782,7 +1066,7 @@ do_parallel_build(
 				.soar_dupes = 0,
 		};
 
-		TableScanDesc scan = table_beginscan_parallel(
+		TableScanDesc scan2 = table_beginscan_parallel(
 				heap, ParallelTableScanFromMktShared(shared));
 
 		double leader_reltuples = table_index_build_scan(
@@ -793,7 +1077,7 @@ do_parallel_build(
 				true,
 				leader_build_callback,
 				&leader_state,
-				scan);
+				scan2);
 
 		mkt_posting_worker_finish(&ws);
 
@@ -822,6 +1106,7 @@ do_parallel_build(
 	*out_heap_tuples = shared->reltuples;
 	*out_indtuples	 = shared->indtuples;
 	*out_soar_dupes	 = shared->soar_dupes;
+	*out_tree		 = tree;
 
 	/* Merge partial pages and link chains */
 	BlockNumber **all_heads	 = palloc(nparticipants * sizeof(BlockNumber *));
@@ -863,6 +1148,7 @@ do_parallel_build(
 	pfree(all_heads);
 	pfree(all_tails);
 	pfree(all_active);
+	pfree(pt_centroids);
 
 	elog(LOG,
 		 "mktann: parallel build with %d workers, "
@@ -904,114 +1190,155 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 	resolve_build_params(heap, index, &bs.params);
 
-	/* 2. Sample and cluster vectors */
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SAMPLE);
-	float		  *global_mean;
-	HKMeansResult *tree = run_clustering(&bs, &global_mean);
-
-	if (tree == NULL)
-	{
-		MemoryContextSwitchTo(caller_ctx);
-		MemoryContextDelete(build_ctx);
-		return palloc0(sizeof(IndexBuildResult));
-	}
-
-	const MktannBuildParams *p	   = &bs.params;
-	Dimension				 dim   = p->dim;
-	uint32_t				 nlist = tree->nleaves;
-	bs.params.nlist				   = nlist;
-
-	/* 3. Single-pass streaming build */
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SETUP);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
-
-	uint64_t	  rabitq_seed = 42;
-	RaBitQParams *rq_params	  = mkt_rabitq_create(dim, rabitq_seed);
+	const MktannBuildParams *p			 = &bs.params;
+	Dimension				 dim		 = p->dim;
+	uint64_t				 rabitq_seed = 42;
 
 	MktannStorage storage;
 	mktann_storage_init(&storage, index, NULL, p->metric);
 	storage.build_mode = true;
 
-	/* Normalize leaf centroids for cosine */
-	float *ref_vecs = hk_leaf_centroids(tree);
-	if (p->metric == DISTANCE_COSINE)
-	{
-		for (uint32_t c = 0; c < nlist; c++)
-			normalize_in_place(ref_vecs + (size_t)c * dim, dim);
-	}
+	HKMeansResult *tree			 = NULL;
+	double		   heap_tuples	 = 0;
+	double		   indtuples	 = 0;
+	double		   soar_dupes	 = 0;
+	BlockNumber	  *posting_heads = NULL;
+	float		  *global_mean	 = NULL;
 
-	/* Compute P^T * centroids for posting scan query state */
-	float *pt_centroids = palloc((size_t)nlist * dim * sizeof(float));
-	for (uint32_t c = 0; c < nlist; c++)
-		mkt_rabitq_rotate(
-				rq_params,
-				ref_vecs + (size_t)c * dim,
-				pt_centroids + (size_t)c * dim);
-
-	/* Compute centroid page layout starting at block 1 */
-	uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, p->centroid_format);
-	BlockNumber *node_first_blkno = palloc(tree->nnodes * sizeof(BlockNumber));
-	BlockNumber	 first_centroid	  = 1;
-	BlockNumber	 first_posting	  = mkt_compute_centroid_layout(
-			tree, max_ent, first_centroid, node_first_blkno);
-
-	/* Write metadata page (block 0) with known centroid layout */
-	write_meta_page(
-			&storage.base,
-			dim,
-			(uint8_t)tree->nlevels,
-			(uint8_t)p->fan_out,
-			first_centroid,
-			0, /* ntuples placeholder */
-			nlist,
-			p->centroid_format,
-			p->metric,
-			rabitq_seed,
-			global_mean);
-
-	/* Reserve centroid blocks so posting pages start after them */
-	uint32_t n_centroid_pages = first_posting - first_centroid;
-	mkt_storage_extend(&storage.base, n_centroid_pages);
-
-	double		 heap_tuples   = 0;
-	double		 indtuples	   = 0;
-	double		 soar_dupes	   = 0;
-	BlockNumber *posting_heads = palloc(nlist * sizeof(BlockNumber));
-
-	/* 4. Heap scan — parallel or serial */
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SCAN);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
-
+	/* Try parallel build first (sampling + k-means + posting) */
 	bool did_parallel = false;
 	if (index_info->ii_ParallelWorkers > 0)
 	{
-		bs.tree		   = tree;
-		bs.worker_bufs = mkt_build_worker_bufs_create(dim);
-		did_parallel   = do_parallel_build(
-				  heap,
-				  index,
-				  index_info,
-				  &bs,
-				  &storage,
-				  tree,
-				  rq_params,
-				  ref_vecs,
-				  pt_centroids,
-				  first_posting,
-				  posting_heads,
-				  &heap_tuples,
-				  &indtuples,
-				  &soar_dupes);
+		/* Compute nlist estimate. hkmeans with fan_out can produce
+		 * up to fan_out^nlevels leaves, so use that as the upper
+		 * bound for DSM sizing. */
+		uint32_t est_nlist = (uint32_t)sqrt(
+				RelationGetNumberOfBlocks(heap) *
+				(BLCKSZ / (double)(dim * sizeof(float) + 32)));
+		if (est_nlist < 1)
+			est_nlist = 1;
+		if (p->nlist > 0)
+			est_nlist = p->nlist;
+
+		uint32_t fan_out = p->fan_out > 0 ? p->fan_out
+										  : mkt_auto_fan_out(0, est_nlist, 0);
+		uint32_t nlevels = 1;
+		{
+			uint32_t n = est_nlist;
+			while (n > fan_out)
+			{
+				n = (n + fan_out - 1) / fan_out;
+				nlevels++;
+			}
+		}
+		uint32_t max_nlist = 1;
+		for (uint32_t l = 0; l < nlevels; l++)
+			max_nlist *= fan_out;
+		if (max_nlist < est_nlist)
+			max_nlist = est_nlist;
+
+		bs.params.nlist = max_nlist;
+
+		uint32_t est_max_ent =
+				mkt_centroid_max_entries_fmt(dim, p->centroid_format);
+		BlockNumber first_centroid = 1;
+		/* Over-allocate centroid space: max nodes in hkmeans tree
+		 * is bounded by 2*nlist, each node's centroids fit in
+		 * ceil(fan_out / max_entries_per_page) pages. */
+		uint32_t max_nodes			= est_nlist * 2;
+		uint32_t est_centroid_pages = (max_nodes + est_max_ent - 1) /
+											  est_max_ent +
+									  1;
+		BlockNumber first_posting = first_centroid + est_centroid_pages;
+		mkt_storage_extend(&storage.base, est_centroid_pages);
+
+		posting_heads = palloc(est_nlist * sizeof(BlockNumber));
+
+		did_parallel = do_parallel_build(
+				heap,
+				index,
+				index_info,
+				&bs,
+				&storage,
+				first_posting,
+				&tree,
+				posting_heads,
+				&heap_tuples,
+				&indtuples,
+				&soar_dupes);
+
+		if (did_parallel && tree != NULL)
+		{
+			uint32_t nlist	= tree->nleaves;
+			bs.params.nlist = nlist;
+
+			global_mean = palloc(dim * sizeof(float));
+			mkt_vector_mean(hk_leaf_centroids(tree), nlist, dim, global_mean);
+			if (p->metric == DISTANCE_COSINE)
+				normalize_in_place(global_mean, dim);
+		}
 	}
 
 	if (!did_parallel)
 	{
-		/* Serial fallback: one builder per cluster */
+		/* Serial fallback: sample, cluster, build */
+		pgstat_progress_update_param(
+				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SAMPLE);
+		tree = run_clustering(&bs, &global_mean);
+
+		if (tree == NULL)
+		{
+			MemoryContextSwitchTo(caller_ctx);
+			MemoryContextDelete(build_ctx);
+			return palloc0(sizeof(IndexBuildResult));
+		}
+
+		uint32_t nlist	= tree->nleaves;
+		bs.params.nlist = nlist;
+
+		pgstat_progress_update_param(
+				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SETUP);
+
+		RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
+
+		float *ref_vecs = hk_leaf_centroids(tree);
+		if (p->metric == DISTANCE_COSINE)
+			for (uint32_t c = 0; c < nlist; c++)
+				normalize_in_place(ref_vecs + (size_t)c * dim, dim);
+
+		float *pt_centroids = palloc((size_t)nlist * dim * sizeof(float));
+		for (uint32_t c = 0; c < nlist; c++)
+			mkt_rabitq_rotate(
+					rq_params,
+					ref_vecs + (size_t)c * dim,
+					pt_centroids + (size_t)c * dim);
+
+		uint32_t max_ent =
+				mkt_centroid_max_entries_fmt(dim, p->centroid_format);
+		BlockNumber *node_first_blkno = palloc(
+				tree->nnodes * sizeof(BlockNumber));
+		BlockNumber first_centroid = 1;
+		BlockNumber first_posting  = mkt_compute_centroid_layout(
+				 tree, max_ent, first_centroid, node_first_blkno);
+
+		write_meta_page(
+				&storage.base,
+				dim,
+				(uint8_t)tree->nlevels,
+				(uint8_t)p->fan_out,
+				first_centroid,
+				0,
+				nlist,
+				p->centroid_format,
+				p->metric,
+				rabitq_seed,
+				global_mean);
+
+		uint32_t n_centroid_pages = first_posting - first_centroid;
+		mkt_storage_extend(&storage.base, n_centroid_pages);
+
+		posting_heads = palloc(nlist * sizeof(BlockNumber));
+
 		uint32_t reserve_each = estimate_posting_pages(heap, dim, nlist);
 
 		MktPostingBuilder *builders = palloc(
@@ -1083,46 +1410,76 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			 indtuples,
 			 bs.params.soar_lambda);
 
-	/* 6. Write centroid pages into reserved blocks */
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_CENTROID);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
-	mkt_write_centroid_tree(
-			&storage.base,
-			tree,
-			dim,
-			p->fan_out,
-			p->centroid_format,
-			rq_params,
-			global_mean,
-			posting_heads,
-			node_first_blkno,
-			NULL); /* pt_centroids on posting pages, not here */
-
-	/* Update metadata with final tuple count and flags */
+	/* Write centroid pages + metadata + WAL */
 	{
+		uint32_t nlist = tree->nleaves;
+
+		RaBitQParams *rq = mkt_rabitq_create(dim, rabitq_seed);
+
+		uint32_t max_ent =
+				mkt_centroid_max_entries_fmt(dim, p->centroid_format);
+		BlockNumber *nfb = palloc(tree->nnodes * sizeof(BlockNumber));
+		BlockNumber	 fc	 = 1;
+		BlockNumber	 fp	 = mkt_compute_centroid_layout(tree, max_ent, fc, nfb);
+		(void)fp;
+
+		if (global_mean == NULL)
+		{
+			global_mean = palloc(dim * sizeof(float));
+			mkt_vector_mean(hk_leaf_centroids(tree), nlist, dim, global_mean);
+			if (p->metric == DISTANCE_COSINE)
+				normalize_in_place(global_mean, dim);
+		}
+
+		write_meta_page(
+				&storage.base,
+				dim,
+				(uint8_t)tree->nlevels,
+				(uint8_t)p->fan_out,
+				fc,
+				0,
+				nlist,
+				p->centroid_format,
+				p->metric,
+				rabitq_seed,
+				global_mean);
+
+		pgstat_progress_update_param(
+				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_CENTROID);
+		mkt_write_centroid_tree(
+				&storage.base,
+				tree,
+				dim,
+				p->fan_out,
+				p->centroid_format,
+				rq,
+				global_mean,
+				posting_heads,
+				nfb,
+				NULL);
+
 		Page			page = mkt_storage_write_page(&storage.base, 0);
 		MktannMetaPage *meta = (MktannMetaPage *)PageGetSpecialPointer(page);
 		meta->ntuples		 = (uint32_t)indtuples;
 		if (p->fastscan)
 			meta->flags |= MKT_META_FLAG_FASTSCAN;
 		mkt_storage_commit_page(&storage.base, 0);
-	}
 
-	/* 7. WAL-log all pages */
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_WAL);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
-	log_newpage_range(
-			index, MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index), true);
+		pgstat_progress_update_param(
+				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_WAL);
+		log_newpage_range(
+				index,
+				MAIN_FORKNUM,
+				0,
+				RelationGetNumberOfBlocks(index),
+				true);
+
+		pfree(nfb);
+	}
 
 	/* Cleanup */
 	mkt_free(tree);
-	pfree(node_first_blkno);
 	pfree(posting_heads);
-	pfree(pt_centroids);
 
 	MemoryContextSwitchTo(caller_ctx);
 	MemoryContextDelete(build_ctx);
