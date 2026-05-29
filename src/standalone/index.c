@@ -105,6 +105,34 @@ aps_commit_page(MktStorage *self, BlockNumber blkno)
 	(void)blkno;
 }
 
+static BlockNumber
+aps_extend(MktStorage *self, uint32_t npages)
+{
+	ArrayPageStorage *s = (ArrayPageStorage *)self;
+	pthread_mutex_lock(&s->alloc_mutex);
+
+	BlockNumber start  = s->next_blkno;
+	uint32_t	needed = start + npages;
+
+	while (needed > s->page_cap)
+	{
+		MktMemCtx prev	  = mkt_memctx_switch(s->memctx);
+		uint32_t  new_cap = s->page_cap * 2;
+		if (new_cap < needed)
+			new_cap = needed;
+		s->pages = arena_grow(
+				s->pages,
+				(size_t)s->page_cap * BLCKSZ,
+				(size_t)new_cap * BLCKSZ);
+		s->page_cap = new_cap;
+		mkt_memctx_switch(prev);
+	}
+
+	s->next_blkno = needed;
+	pthread_mutex_unlock(&s->alloc_mutex);
+	return start;
+}
+
 static uint32_t
 aps_rerank(
 		MktStorage		   *self,
@@ -168,6 +196,7 @@ static const MktStorageOps array_page_storage_ops = {
 		.write_page	  = aps_write_page,
 		.new_page	  = aps_new_page,
 		.commit_page  = aps_commit_page,
+		.extend		  = aps_extend,
 		.rerank		  = aps_rerank,
 };
 
@@ -655,25 +684,6 @@ mkt_index_build(
 
 		if (config->posting_fmt == MKT_POSTING_FMT_PAGES)
 		{
-			uint32_t est_per_cluster = (idx->nvecs + nlist - 1) / nlist;
-			if (config->soar_lambda > 0.0 || config->boundary_epsilon > 0.0)
-				est_per_cluster = (uint32_t)(est_per_cluster * 1.3) + 1;
-
-			mkt_memctx_switch(build_ctx);
-			uint32_t *cluster_counts = mkt_alloc(nlist * sizeof(uint32_t));
-			for (uint32_t c = 0; c < nlist; c++)
-				cluster_counts[c] = est_per_cluster;
-
-			MktPostingReserve reserve;
-			mkt_posting_reserve_init(&reserve, cluster_counts, nlist, nt, dim);
-			mkt_memctx_switch(idx_ctx);
-
-			uint32_t est_extra	 = reserve.total / 10 + 100;
-			idx->posting_storage = make_array_page_storage(
-					reserve.total + est_extra, idx_ctx);
-			idx->posting_storage.next_blkno = reserve.total;
-			idx->posting_heads = mkt_alloc(nlist * sizeof(BlockNumber));
-
 			/* Shared partial page buffer — must be malloc'd
 			 * since workers write from their own contexts. */
 			char *partials = config->fastscan
@@ -683,11 +693,14 @@ mkt_index_build(
 			mkt_memctx_switch(build_ctx);
 			MktPostingWorkerState *workers = mkt_alloc(
 					nt * sizeof(MktPostingWorkerState));
-			BlockNumber **all_heads	 = mkt_alloc(nt * sizeof(BlockNumber *));
-			BlockNumber **all_tails	 = mkt_alloc(nt * sizeof(BlockNumber *));
-			bool		**all_active = mkt_alloc(nt * sizeof(bool *));
+			MktPostingBatch **all_batches = mkt_alloc(
+					nt * sizeof(MktPostingBatch *));
+			bool **all_active = mkt_alloc(nt * sizeof(bool *));
 			mkt_memctx_switch(idx_ctx);
 
+			/* Deferred mode: workers produce batch pages
+			 * in memory (storage == NULL), leader
+			 * materializes them to storage afterward. */
 			for (uint32_t t = 0; t < nt; t++)
 			{
 				char *t_partials = partials ? partials + (size_t)t * nlist *
@@ -699,11 +712,11 @@ mkt_index_build(
 						nlist,
 						dim,
 						config->fastscan != 0,
-						&idx->posting_storage.base,
+						NULL,
 						idx->base.params,
 						idx->leaf_centroids,
 						idx->pt_centroids,
-						&reserve,
+						NULL,
 						t_partials);
 			}
 
@@ -722,22 +735,23 @@ mkt_index_build(
 			/* Gather per-thread outputs */
 			for (uint32_t t = 0; t < nt; t++)
 			{
-				all_heads[t]  = workers[t].heads;
-				all_tails[t]  = workers[t].tails;
-				all_active[t] = workers[t].active;
+				all_batches[t] = workers[t].batches;
+				all_active[t]  = workers[t].active;
 			}
 
-			/* Merge partials + sort chains */
+			/* Create posting storage and materialize */
+			idx->posting_storage = make_array_page_storage(1024, idx_ctx);
+			idx->posting_heads	 = mkt_alloc(nlist * sizeof(BlockNumber));
+
 			uint64_t			  t_merge_start = now_ns();
 			MktPostingBuildResult build_result;
-			mkt_posting_finalize(
+			mkt_posting_materialize(
+					all_batches,
 					partials,
-					all_heads,
-					all_tails,
 					all_active,
 					nt,
+					nlist,
 					&idx->posting_storage.base,
-					&reserve,
 					idx->leaf_centroids,
 					idx->pt_centroids,
 					dim,
@@ -760,8 +774,6 @@ mkt_index_build(
 			for (uint32_t t = 0; t < nt; t++)
 				mkt_posting_worker_cleanup(&workers[t]);
 			free(partials);
-
-			mkt_posting_reserve_free(&reserve);
 
 			if (config->fastscan)
 				idx->base.fastscan = config->fastscan;

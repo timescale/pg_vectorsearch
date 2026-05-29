@@ -102,6 +102,9 @@ mkt_posting_worker_init(
 	ws->active	 = mkt_alloc0(nlist * sizeof(bool));
 	ws->heads	 = mkt_alloc(nlist * sizeof(BlockNumber));
 	ws->tails	 = mkt_alloc(nlist * sizeof(BlockNumber));
+	ws->batches	 = (storage == NULL)
+						 ? mkt_alloc0(nlist * sizeof(MktPostingBatch))
+						 : NULL;
 
 	for (uint32_t c = 0; c < nlist; c++)
 	{
@@ -212,7 +215,8 @@ mkt_posting_worker_add_heap(
 void
 mkt_posting_worker_finish(MktPostingWorkerState *ws)
 {
-	bool hold = !ws->fastscan && ws->partials != NULL;
+	bool deferred = (ws->storage == NULL);
+	bool hold	  = !ws->fastscan && ws->partials != NULL;
 
 	for (uint32_t c = 0; c < ws->nlist; c++)
 	{
@@ -224,8 +228,15 @@ mkt_posting_worker_finish(MktPostingWorkerState *ws)
 		else
 			mkt_posting_builder_finish(&ws->builders[c]);
 
-		ws->heads[c] = mkt_posting_builder_head(&ws->builders[c]);
-		ws->tails[c] = mkt_posting_builder_tail(&ws->builders[c]);
+		if (deferred)
+		{
+			mkt_posting_builder_take_batch(&ws->builders[c], &ws->batches[c]);
+		}
+		else
+		{
+			ws->heads[c] = mkt_posting_builder_head(&ws->builders[c]);
+			ws->tails[c] = mkt_posting_builder_tail(&ws->builders[c]);
+		}
 
 		if (hold)
 			memcpy(ws->partials + (size_t)c * BLCKSZ,
@@ -239,6 +250,13 @@ mkt_posting_worker_finish(MktPostingWorkerState *ws)
 void
 mkt_posting_worker_cleanup(MktPostingWorkerState *ws)
 {
+	if (ws->batches != NULL)
+	{
+		for (uint32_t c = 0; c < ws->nlist; c++)
+			free(ws->batches[c].pages);
+		mkt_free(ws->batches);
+		ws->batches = NULL;
+	}
 	mkt_free(ws->builders);
 	mkt_free(ws->active);
 	mkt_free(ws->heads);
@@ -481,4 +499,258 @@ mkt_posting_finalize(
 	}
 
 	mkt_free(chain);
+}
+
+/* ----------------------------------------------------------------
+ * Materialize deferred batch output into storage
+ *
+ * All workers ran in deferred mode (storage == NULL), so their
+ * output is complete BLCKSZ page buffers without block numbers
+ * or chain links. This function:
+ *
+ *   1. Merges partial pages (AoS) into additional batch pages
+ *   2. Extends storage for the exact page count needed
+ *   3. Writes all pages sequentially, assigning contiguous
+ *      block numbers and chain links as they go
+ *
+ * No sorting or relinking needed — pages are written in order.
+ * ---------------------------------------------------------------- */
+
+/*
+ * Write a page from a batch to storage at the given block,
+ * setting the chain link to next_blkno.
+ */
+static void
+write_batch_page(
+		MktStorage *storage,
+		BlockNumber blkno,
+		const char *src_page,
+		BlockNumber next_blkno)
+{
+	Page spage = mkt_storage_write_page(storage, blkno);
+	memcpy(spage, src_page, BLCKSZ);
+	mkt_posting_opaque(spage)->next_blkno = next_blkno;
+	mkt_storage_commit_page(storage, blkno);
+}
+
+void
+mkt_posting_materialize(
+		MktPostingBatch		 **worker_batches,
+		char				  *partials,
+		bool				 **worker_active,
+		uint32_t			   nworkers,
+		uint32_t			   nlist,
+		MktStorage			  *storage,
+		const float			  *leaf_centroids,
+		const float			  *pt_centroids,
+		Dimension			   dim,
+		bool				   fastscan,
+		MktPostingBuildResult *result)
+{
+	/* --- Phase 1: Merge partial pages into batch pages --- */
+	MktPostingBatch *merged = mkt_alloc0(nlist * sizeof(MktPostingBatch));
+
+	result->merge_input	 = 0;
+	result->merge_output = 0;
+
+	if (!fastscan && partials != NULL)
+	{
+		for (uint32_t c = 0; c < nlist; c++)
+		{
+			uint32_t npartials = 0;
+			for (uint32_t w = 0; w < nworkers; w++)
+			{
+				if (!worker_active[w][c])
+					continue;
+				Page pg = partials + ((size_t)w * nlist + c) * BLCKSZ;
+				if (mkt_posting_page_count(pg) > 0)
+					npartials++;
+			}
+			if (npartials == 0)
+				continue;
+
+			const float *cent	 = leaf_centroids + (size_t)c * dim;
+			const float *pt_cent = pt_centroids + (size_t)c * dim;
+
+			/* First-page format when worker 0 has no batch output */
+			bool			  need_first = (worker_batches[0][c].count == 0);
+			MktPostingBuilder mb;
+			if (need_first)
+				mkt_posting_builder_init(
+						&mb, NULL, NULL, dim, c, cent, pt_cent);
+			else
+				mkt_posting_builder_init_continuation(
+						&mb, NULL, NULL, dim, c, cent);
+
+			for (uint32_t w = 0; w < nworkers; w++)
+			{
+				if (!worker_active[w][c])
+					continue;
+				Page pg = partials + ((size_t)w * nlist + c) * BLCKSZ;
+				MktPostingPageOpaque *op = mkt_posting_opaque(pg);
+				if (op->entry_count == 0)
+					continue;
+
+				bool  is_fp = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+				char *ct	= is_fp ? mkt_posting_content_first(pg, dim)
+									: mkt_posting_content(pg);
+
+				for (uint32_t e = 0; e < op->entry_count; e++)
+				{
+					MktPostingEntryHeader *hdr =
+							mkt_posting_entry_at(ct, e, dim);
+					mkt_posting_builder_add_encoded(
+							&mb,
+							hdr->meta.tid,
+							hdr->f_add,
+							hdr->f_rescale,
+							hdr->f_error,
+							hdr->bits);
+				}
+			}
+
+			mkt_posting_builder_finish(&mb);
+			mkt_posting_builder_take_batch(&mb, &merged[c]);
+			mkt_posting_builder_cleanup(&mb);
+
+			result->merge_input += npartials;
+			result->merge_output += merged[c].count;
+		}
+	}
+
+	/* --- Phase 2: Compute exact page counts --- */
+	uint32_t *cluster_pages = mkt_alloc(nlist * sizeof(uint32_t));
+	/* Whether merged pages supply the first page for each cluster */
+	bool	*merged_first = mkt_alloc0(nlist * sizeof(bool));
+	uint32_t total_pages  = 0;
+
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		uint32_t count = 0;
+		for (uint32_t w = 0; w < nworkers; w++)
+		{
+			if (worker_active[w][c])
+				count += worker_batches[w][c].count;
+		}
+
+		bool w0_has_pages = (worker_batches[0][c].count > 0);
+		merged_first[c]	  = !w0_has_pages && merged[c].count > 0;
+
+		count += merged[c].count;
+		if (count == 0)
+			count = 1; /* empty first page */
+		cluster_pages[c] = count;
+		total_pages += count;
+	}
+
+	/* --- Phase 3: Extend storage --- */
+	BlockNumber base_block = mkt_storage_extend(storage, total_pages);
+
+	/* --- Phase 4: Write pages --- */
+	result->heads		= mkt_alloc(nlist * sizeof(BlockNumber));
+	result->total_pages = total_pages;
+
+	BlockNumber cur_block = base_block;
+
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		uint32_t	ct		= cluster_pages[c];
+		BlockNumber cl_base = cur_block;
+		uint32_t	written = 0;
+
+		bool w0_has		   = (worker_batches[0][c].count > 0);
+		bool has_any_batch = w0_has || merged[c].count > 0;
+		for (uint32_t w = 1; !has_any_batch && w < nworkers; w++)
+		{
+			if (worker_active[w][c] && worker_batches[w][c].count > 0)
+				has_any_batch = true;
+		}
+
+		if (!has_any_batch)
+		{
+			/* Empty cluster: create first page with pt_centroid */
+			BlockNumber blkno = cur_block++;
+			Page		page  = mkt_storage_write_page(storage, blkno);
+			uint16_t	flags = MKT_POSTING_PAGE_FIRST;
+			if (fastscan)
+				flags |= MKT_POSTING_PAGE_FASTSCAN;
+			mkt_posting_page_init(page, c, dim, flags);
+			memcpy(mkt_posting_pt_centroid_mut(page),
+				   pt_centroids + (size_t)c * dim,
+				   dim * sizeof(float));
+			mkt_posting_opaque(page)->next_blkno = InvalidBlockNumber;
+			mkt_storage_commit_page(storage, blkno);
+			result->heads[c] = blkno;
+			continue;
+		}
+
+		/*
+		 * Write order:
+		 *   If worker 0 has batch pages: w0 pages, w1..wN, merged
+		 *   If merged supplies first page: merged, w0..wN
+		 *   Otherwise: w1..wN (rare: w0 has no output, no partials)
+		 */
+		if (merged_first[c])
+		{
+			/* Merged pages first (first one is first-page format) */
+			for (uint32_t p = 0; p < merged[c].count; p++)
+			{
+				BlockNumber next = (written + 1 < ct) ? cur_block + 1
+													  : InvalidBlockNumber;
+				write_batch_page(
+						storage,
+						cur_block,
+						merged[c].pages + (size_t)p * BLCKSZ,
+						next);
+				cur_block++;
+				written++;
+			}
+		}
+
+		/* Worker batch pages */
+		for (uint32_t w = 0; w < nworkers; w++)
+		{
+			if (!worker_active[w][c])
+				continue;
+			MktPostingBatch *batch = &worker_batches[w][c];
+			for (uint32_t p = 0; p < batch->count; p++)
+			{
+				BlockNumber next = (written + 1 < ct) ? cur_block + 1
+													  : InvalidBlockNumber;
+				write_batch_page(
+						storage,
+						cur_block,
+						batch->pages + (size_t)p * BLCKSZ,
+						next);
+				cur_block++;
+				written++;
+			}
+		}
+
+		/* Merged pages last (when not first) */
+		if (!merged_first[c])
+		{
+			for (uint32_t p = 0; p < merged[c].count; p++)
+			{
+				BlockNumber next = (written + 1 < ct) ? cur_block + 1
+													  : InvalidBlockNumber;
+				write_batch_page(
+						storage,
+						cur_block,
+						merged[c].pages + (size_t)p * BLCKSZ,
+						next);
+				cur_block++;
+				written++;
+			}
+		}
+
+		result->heads[c] = cl_base;
+	}
+
+	/* --- Cleanup --- */
+	for (uint32_t c = 0; c < nlist; c++)
+		free(merged[c].pages);
+	mkt_free(merged);
+	mkt_free(cluster_pages);
+	mkt_free(merged_first);
 }

@@ -93,6 +93,22 @@ typedef struct FsGroupStage
 } FsGroupStage;
 
 /* ----------------------------------------------------------------
+ * Deferred batch output
+ *
+ * When a builder runs in deferred mode (storage == NULL), complete
+ * pages accumulate here instead of being written to storage.
+ * Each page is a full BLCKSZ buffer with content laid out but
+ * without assigned block numbers or chain links.
+ * ---------------------------------------------------------------- */
+
+typedef struct MktPostingBatch
+{
+	char	*pages;
+	uint32_t count;
+	uint32_t capacity;
+} MktPostingBatch;
+
+/* ----------------------------------------------------------------
  * Unified builder state
  * ---------------------------------------------------------------- */
 
@@ -123,6 +139,9 @@ typedef struct MktPostingBuilder
 
 	/* Page format dispatch */
 	const MktPostingPageOps *page_ops;
+
+	/* Deferred batch output (when storage == NULL) */
+	MktPostingBatch batch;
 
 	/* Format-specific state (only fastscan uses this) */
 	struct
@@ -244,6 +263,14 @@ mkt_posting_builder_tail(const MktPostingBuilder *b)
 {
 	return b->prev_blkno;
 }
+
+/*
+ * Transfer batch ownership from builder to output struct.
+ * After this call, the builder's batch is empty (zeroed) and
+ * the caller owns the pages buffer.
+ */
+void mkt_posting_builder_take_batch(
+		MktPostingBuilder *builder, MktPostingBatch *out);
 
 /* ----------------------------------------------------------------
  * Flat builder — one buffer per cluster (standalone benchmark)

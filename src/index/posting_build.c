@@ -7,6 +7,7 @@
  */
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "core/memory.h"
@@ -163,14 +164,50 @@ derive_f_error(float f_add, float f_rescale, Dimension dim)
 }
 
 /*
- * Flush the in-memory page to storage and link it into the chain.
- * Prefers reserved contiguous blocks for sequential layout.
+ * Save page to the deferred batch output. Grows the pages
+ * array dynamically. Uses raw realloc (not mkt_realloc) so
+ * batch pages survive memory context destruction — workers
+ * run in temporary contexts but batches must outlive them.
+ */
+static void
+batch_save_page(MktPostingBuilder *builder)
+{
+	MktPostingBatch *b = &builder->batch;
+	if (b->count >= b->capacity)
+	{
+		uint32_t new_cap = b->capacity * 2;
+		if (new_cap < 8)
+			new_cap = 8;
+		b->pages	= realloc(b->pages, (size_t)new_cap * BLCKSZ);
+		b->capacity = new_cap;
+	}
+	memcpy(b->pages + (size_t)b->count * BLCKSZ, builder->mem_page, BLCKSZ);
+	b->count++;
+}
+
+/*
+ * Flush the in-memory page.
+ *
+ * Deferred mode (storage == NULL): saves the page to the batch
+ * output array. No block numbers, no chain linking.
+ *
+ * Direct mode (storage != NULL): writes to storage and links
+ * into the chain. Prefers reserved contiguous blocks.
  */
 static void
 flush_page(MktPostingBuilder *builder)
 {
 	if (!builder->page_dirty)
 		return;
+
+	if (builder->storage == NULL)
+	{
+		batch_save_page(builder);
+		builder->is_first = false;
+		builder->page_ops->reinit_page(builder);
+		builder->page_dirty = false;
+		return;
+	}
 
 	BlockNumber blkno;
 	Page		spage;
@@ -643,6 +680,14 @@ mkt_posting_builder_finish_partial(MktPostingBuilder *builder)
 }
 
 void
+mkt_posting_builder_take_batch(
+		MktPostingBuilder *builder, MktPostingBatch *out)
+{
+	*out		   = builder->batch;
+	builder->batch = (MktPostingBatch){0};
+}
+
+void
 mkt_posting_builder_cleanup(MktPostingBuilder *builder)
 {
 	builder->page_ops->cleanup(builder);
@@ -651,6 +696,11 @@ mkt_posting_builder_cleanup(MktPostingBuilder *builder)
 		mkt_rabitq_scratch_cleanup(&builder->enc_scratch);
 		mkt_free(builder->enc_buf);
 		builder->enc_buf = NULL;
+	}
+	if (builder->batch.pages != NULL)
+	{
+		free(builder->batch.pages);
+		builder->batch = (MktPostingBatch){0};
 	}
 }
 
