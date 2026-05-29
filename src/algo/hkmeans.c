@@ -119,6 +119,11 @@ mkt_hkmeans_f32(
 	bool	  ok	 = true;
 	uint32_t *counts = mkt_alloc(fan_out * sizeof(uint32_t));
 
+	/* Mutable copy: initial_centroids applies only to root */
+	KMeansOptions local_opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	if (options != NULL)
+		local_opts = *options;
+
 	for (uint32_t qi = 0; qi < q_tail && ok; qi++)
 	{
 		HKWorkItem item			  = queue[qi];
@@ -138,7 +143,10 @@ mkt_hkmeans_f32(
 				dim,
 				k,
 				metric,
-				options);
+				&local_opts);
+
+		/* Initial centroids only for root node */
+		local_opts.initial_centroids = NULL;
 
 		if (km == NULL)
 		{

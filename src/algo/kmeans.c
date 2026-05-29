@@ -683,7 +683,16 @@ kmeans_run_one_impl(
 	void  *algo_state = algo->create ? algo->create(st) : NULL;
 	float *old_cents  = algo->update_bounds ? mkt_alloc(cent_bytes) : NULL;
 
-	kmeans_init_plusplus_impl(st, seed, ops);
+	if (opts->initial_centroids != NULL)
+	{
+		memcpy(st->centroids,
+			   opts->initial_centroids,
+			   (size_t)st->nlist * st->dim * sizeof(float));
+	}
+	else
+	{
+		kmeans_init_plusplus_impl(st, seed, ops);
+	}
 
 	/* Use fused iterate path for Lloyd with f32 vectors.
 	 * Works with or without a thread pool — serial fallback
