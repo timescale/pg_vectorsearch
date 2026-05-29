@@ -28,6 +28,7 @@
 #include "algo/kmeans_internal.h"
 #include "algo/vecops.h"
 #include "index/posting_build.h"
+#include "index/posting_build_parallel.h"
 #include "mkt_pg.h"
 #include "mkt_vector.h"
 #include "mktann_parallel.h"
@@ -170,49 +171,16 @@ mktann_km_assign_and_accumulate_filtered(
 }
 
 /* ----------------------------------------------------------------
- * Phase 3: Entry build callback
+ * Phase 3: Posting build callback
  *
- * Workers encode vectors and write compact entries to a DSM
- * buffer. The leader reads entries after all workers finish and
- * feeds them to serial posting builders. This avoids workers
- * writing to the index relation's buffer pool.
+ * Uses MktPostingWorkerState in deferred batch mode (storage=NULL).
+ * Assigns vectors to clusters via tree descent, encodes with
+ * RaBitQ, and adds to per-cluster posting builders. Batch pages
+ * accumulate in process memory and are copied to DSM after scan.
  * ---------------------------------------------------------------- */
 
-static void
-write_dsm_entry(
-		EntryBuildCbState *cbs,
-		uint32_t		   cluster_id,
-		ItemPointerData	   tid,
-		const float		  *vec)
-{
-	VectorRef evref = {.data = vec, .dim = cbs->dim};
-	VectorRef cref =
-			{.data = cbs->leaf_centroids + (size_t)cluster_id * cbs->dim,
-			 .dim  = cbs->dim};
-	mkt_rabitq_encode_into_ex(
-			cbs->params, evref, cref, cbs->enc_buf, &cbs->enc_scratch);
-
-	float f_error = mkt_posting_derive_f_error(
-			cbs->enc_buf->f_add, cbs->enc_buf->f_rescale, cbs->dim);
-
-	uint32_t idx = pg_atomic_fetch_add_u32(cbs->count, 1);
-	if (idx >= cbs->max_entries)
-		return;
-
-	char			  *slot = cbs->entry_buf + (size_t)idx * cbs->entry_size;
-	MktDsmEntryHeader *hdr	= (MktDsmEntryHeader *)slot;
-	hdr->cluster_id			= cluster_id;
-	hdr->tid				= tid;
-	hdr->f_add				= cbs->enc_buf->f_add;
-	hdr->f_rescale			= cbs->enc_buf->f_rescale;
-	hdr->f_error			= f_error;
-	memcpy(slot + sizeof(MktDsmEntryHeader),
-		   cbs->enc_buf->bits,
-		   MKT_RABITQ_BYTES(cbs->dim));
-}
-
 void
-entry_build_callback(
+posting_build_callback(
 		Relation	index,
 		ItemPointer tid,
 		Datum	   *values,
@@ -220,7 +188,7 @@ entry_build_callback(
 		bool		tuple_is_alive,
 		void	   *state)
 {
-	EntryBuildCbState *cbs = (EntryBuildCbState *)state;
+	PostingCbState *cbs = (PostingCbState *)state;
 
 	(void)index;
 	(void)tuple_is_alive;
@@ -236,9 +204,10 @@ entry_build_callback(
 	MktBuildAssignment asgn = mkt_build_assign_vector(
 			cbs->tree, vref.data, &cbs->bp, &cbs->bufs);
 
-	write_dsm_entry(cbs, asgn.primary, *tid, asgn.enc_vector);
-	if (asgn.secondary != MKT_INVALID_CLUSTER)
-		write_dsm_entry(cbs, asgn.secondary, *tid, asgn.enc_vector);
+	MemoryContextSwitchTo(cbs->worker_ctx);
+
+	mkt_posting_worker_add_heap(
+			cbs->ws, *tid, asgn.enc_vector, asgn.primary, asgn.secondary);
 
 	MemoryContextSwitchTo(old_ctx);
 
@@ -489,43 +458,71 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* Barrier: leader built tree, set up posting reserve */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-	/* ---- Phase 3: Posting scan ---- */
-
-	(void)shared->nlist; /* nlist re-read by entry callback */
+	/* ---- Phase 3: Posting scan (deferred batch) ---- */
 
 	HKMeansResult *tree = shm_toc_lookup(toc, MKTANN_KEY_TREE, false);
-	MktDsmEntries *dsm_entries =
-			shm_toc_lookup(toc, MKTANN_KEY_ENTRIES, false);
+	MktDsmBatches *dsm_batches =
+			shm_toc_lookup(toc, MKTANN_KEY_BATCHES, false);
+	char *worker_output = shm_toc_lookup(toc, MKTANN_KEY_WORKER_OUTPUT, false);
+	char *dsm_partials	= shm_toc_lookup(toc, MKTANN_KEY_PARTIALS, true);
+
+	uint32_t nlist = shared->nlist;
 
 	RaBitQParams *rq_params = mkt_rabitq_create(dim, shared->rabitq_seed);
 
-	const float *leaf_cents = hk_leaf_centroids(tree);
+	const float *leaf_cents	  = hk_leaf_centroids(tree);
+	float		*pt_centroids = palloc((size_t)nlist * dim * sizeof(float));
+	for (uint32_t c = 0; c < nlist; c++)
+		mkt_rabitq_rotate(
+				rq_params,
+				leaf_cents + (size_t)c * dim,
+				pt_centroids + (size_t)c * dim);
+
+	char *my_partials =
+			(dsm_partials != NULL)
+					? mktann_worker_partials(dsm_partials, nlist, worker_id)
+					: NULL;
+
+	MemoryContext worker_ctx = AllocSetContextCreate(
+			CurrentMemoryContext,
+			"mktann worker posting",
+			ALLOCSET_DEFAULT_SIZES);
+	MemoryContext prev = MemoryContextSwitchTo(worker_ctx);
+
+	MktPostingWorkerState ws;
+	mkt_posting_worker_init(
+			&ws,
+			(uint32_t)worker_id,
+			nlist,
+			dim,
+			shared->fastscan,
+			NULL,
+			rq_params,
+			leaf_cents,
+			pt_centroids,
+			NULL,
+			my_partials);
 
 	MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
 
-	EntryBuildCbState cbs = {
-			.tree			= tree,
-			.bp				= {.dim				 = dim,
-							   .metric			 = shared->metric,
-							   .soar_lambda		 = shared->soar_lambda,
-							   .boundary_epsilon = shared->boundary_epsilon},
-			.bufs			= bufs,
-			.entry_buf		= mktann_worker_entries(dsm_entries, worker_id),
-			.count			= &mktann_entry_counts(dsm_entries)[worker_id],
-			.max_entries	= dsm_entries->max_per_worker,
-			.entry_size		= dsm_entries->entry_size,
-			.params			= rq_params,
-			.leaf_centroids = leaf_cents,
-			.dim			= dim,
-			.enc_buf		= palloc(MKT_RABITQ_DATA_SIZE(dim)),
-			.indtuples		= 0,
-			.soar_dupes		= 0,
-			.tmp_ctx		= AllocSetContextCreate(
+	MemoryContextSwitchTo(prev);
+
+	PostingCbState cbs = {
+			.tree		= tree,
+			.bp			= {.dim				 = dim,
+						   .metric			 = shared->metric,
+						   .soar_lambda		 = shared->soar_lambda,
+						   .boundary_epsilon = shared->boundary_epsilon},
+			.bufs		= bufs,
+			.ws			= &ws,
+			.indtuples	= 0,
+			.soar_dupes = 0,
+			.tmp_ctx	= AllocSetContextCreate(
 					   CurrentMemoryContext,
 					   "mktann parallel tuple",
 					   ALLOCSET_DEFAULT_SIZES),
+			.worker_ctx = worker_ctx,
 	};
-	mkt_rabitq_scratch_init(&cbs.enc_scratch, dim);
 
 	/* Second parallel scan for posting build */
 	TableScanDesc scan2 = table_beginscan_parallel(
@@ -537,11 +534,34 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			indexInfo,
 			true,
 			false,
-			entry_build_callback,
+			posting_build_callback,
 			&cbs,
 			scan2);
 
-	mkt_rabitq_scratch_cleanup(&cbs.enc_scratch);
+	mkt_posting_worker_finish(&ws);
+
+	/* Copy batch pages to DSM */
+	uint32_t *my_counts = mktann_batch_counts(dsm_batches, worker_id);
+	char	 *my_pages	= mktann_batch_pages(dsm_batches, worker_id);
+	uint32_t  offset	= 0;
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		if (!ws.active[c] || ws.batches[c].count == 0)
+		{
+			my_counts[c] = 0;
+			continue;
+		}
+		uint32_t cnt = ws.batches[c].count;
+		memcpy(my_pages + (size_t)offset * BLCKSZ,
+			   ws.batches[c].pages,
+			   (size_t)cnt * BLCKSZ);
+		my_counts[c] = cnt;
+		offset += cnt;
+	}
+
+	/* Copy active flags to worker_output */
+	bool *wa = mktann_worker_active(worker_output, nlist, worker_id);
+	memcpy(wa, ws.active, nlist * sizeof(bool));
 
 	SpinLockAcquire(&shared->mutex);
 	shared->nparticipantsdone++;
@@ -550,14 +570,16 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	SpinLockRelease(&shared->mutex);
 	ConditionVariableSignal(&shared->workersdonecv);
 
+	mkt_posting_worker_cleanup(&ws);
+	mkt_build_worker_bufs_free(&bufs);
+	pfree(pt_centroids);
+
 	BufferUsage *bufferusage =
 			shm_toc_lookup(toc, MKTANN_KEY_BUFFER_USAGE, false);
 	WalUsage *walusage = shm_toc_lookup(toc, MKTANN_KEY_WAL_USAGE, false);
 	InstrEndParallelQuery(
 			&bufferusage[ParallelWorkerNumber],
 			&walusage[ParallelWorkerNumber]);
-
-	mkt_build_worker_bufs_free(&bufs);
 
 	index_close(indexRel, AccessExclusiveLock);
 	table_close(heapRel, ShareLock);
