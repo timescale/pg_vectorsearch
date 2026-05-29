@@ -21,8 +21,6 @@
  * its page. Contiguous layout also gives sequential I/O during
  * query scans.
  *
- * Extra headroom (nworkers - 1 pages per cluster) accounts for
- * each worker potentially holding one partial page at the end.
  * ---------------------------------------------------------------- */
 
 void
@@ -33,6 +31,8 @@ mkt_posting_reserve_init(
 		uint32_t		   nworkers,
 		Dimension		   dim)
 {
+	(void)nworkers;
+
 	uint32_t ent_first	  = mkt_posting_max_entries_first(dim);
 	uint32_t ent_overflow = mkt_posting_max_entries(dim);
 
@@ -48,7 +48,6 @@ mkt_posting_reserve_init(
 		uint32_t npages = 1;
 		if (cnt > ent_first)
 			npages += (cnt - ent_first + ent_overflow - 1) / ent_overflow;
-		npages += nworkers - 1;
 		res->starts[c] = total;
 		res->counts[c] = npages;
 		total += npages;
@@ -329,16 +328,27 @@ mkt_posting_finalize(
 
 			if (npartials > 0)
 			{
-				const float *cent = leaf_centroids + (size_t)c * dim;
+				const float *cent	 = leaf_centroids + (size_t)c * dim;
+				const float *pt_cent = pt_centroids + (size_t)c * dim;
 
+				/* Use full init (with pt_centroid) when no worker
+				 * flushed a first page, continuation otherwise. */
 				MktPostingBuilder mb;
-				mkt_posting_builder_init_continuation(
-						&mb, storage, NULL, dim, c, cent);
+				bool need_first = (worker_heads[0][c] == InvalidBlockNumber);
+				if (need_first)
+					mkt_posting_builder_init(
+							&mb, storage, NULL, dim, c, cent, pt_cent);
+				else
+					mkt_posting_builder_init_continuation(
+							&mb, storage, NULL, dim, c, cent);
 				mkt_posting_builder_set_shared_reserve(
 						&mb,
 						reserve->starts[c],
 						reserve->counts[c],
 						&reserve->nexts[c]);
+				if (need_first)
+					mkt_posting_builder_set_first_blkno(
+							&mb, reserve->starts[c]);
 
 				for (uint32_t t = 0; t < nworkers; t++)
 				{
@@ -395,28 +405,15 @@ mkt_posting_finalize(
 					}
 				}
 
-				if (prev_tail != InvalidBlockNumber)
+				if (need_first)
+				{
+					worker_heads[0][c] = merge_head;
+				}
+				else if (prev_tail != InvalidBlockNumber)
 				{
 					Page prev = mkt_storage_write_page(storage, prev_tail);
 					mkt_posting_opaque(prev)->next_blkno = merge_head;
 					mkt_storage_commit_page(storage, prev_tail);
-				}
-				else if (worker_heads[0][c] == InvalidBlockNumber)
-				{
-					/* No flushed pages at all — create synthetic
-					 * first page at slot 0 */
-					BlockNumber blkno = reserve->starts[c];
-					Page		page  = mkt_storage_write_page(storage, blkno);
-					uint16_t	flags = MKT_POSTING_PAGE_FIRST;
-					if (fastscan)
-						flags |= MKT_POSTING_PAGE_FASTSCAN;
-					mkt_posting_page_init(page, c, dim, flags);
-					memcpy(mkt_posting_pt_centroid_mut(page),
-						   pt_centroids + (size_t)c * dim,
-						   dim * sizeof(float));
-					mkt_posting_opaque(page)->next_blkno = merge_head;
-					mkt_storage_commit_page(storage, blkno);
-					worker_heads[0][c] = blkno;
 				}
 				else
 				{
