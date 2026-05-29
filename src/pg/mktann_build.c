@@ -926,45 +926,16 @@ do_parallel_build(
 		uint32_t *leader_ra = mktann_root_assignments(dsm_ra, 0);
 		uint32_t  leader_ns = mktann_sample_counts(dsm_samples)[0];
 
-		for (uint32_t i = 0; i < leader_ns; i++)
-		{
-			const float *vec	= leader_samples + (size_t)i * dim;
-			float		 best_d = __FLT_MAX__;
-			uint32_t	 best_c = 0;
-
-			for (uint32_t c = 0; c < km_k; c++)
-			{
-				const float *cent = cents + (size_t)c * dim;
-				float		 d;
-
-				switch (shared->metric)
-				{
-				case DISTANCE_L2:
-				{
-					float nx = mkt_l2_norm_squared(vec, dim);
-					float dt = mkt_dot_product(vec, cent, dim);
-					d		 = nx + norms_c[c] - 2.0f * dt;
-					if (d < 0.0f)
-						d = 0.0f;
-					break;
-				}
-				case DISTANCE_INNER_PRODUCT:
-					d = -mkt_dot_product(vec, cent, dim);
-					break;
-				case DISTANCE_COSINE:
-					d = 1.0f - mkt_dot_product(vec, cent, dim);
-					break;
-				}
-
-				if (d < best_d)
-				{
-					best_d = d;
-					best_c = c;
-				}
-			}
-
-			leader_ra[i] = best_c;
-		}
+		kmeans_assign(
+				leader_samples,
+				0,
+				leader_ns,
+				cents,
+				norms_c,
+				km_k,
+				dim,
+				shared->metric,
+				leader_ra);
 
 		/* Barrier: all done with root assignment */
 		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);

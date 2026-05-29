@@ -150,4 +150,26 @@ void kmeans_assign_accumulate(
 		uint32_t	   *out_cnts,
 		float		   *out_cost);
 
+/*
+ * Assignment-only kernel for a range of vectors.
+ *
+ * For each vector in [start, end): find nearest centroid and
+ * write the centroid index to out_assignments[i]. Unlike
+ * kmeans_assign_accumulate, this does not accumulate sums
+ * or counts — it only outputs assignments.
+ *
+ * Used for root assignment in hierarchical k-means (both
+ * standalone and PG paths).
+ */
+void kmeans_assign(
+		const float	  *vectors,
+		uint32_t	   start,
+		uint32_t	   end,
+		const float	  *centroids,
+		const float	  *norms_c,
+		uint32_t	   k,
+		Dimension	   dim,
+		DistanceMetric metric,
+		uint32_t	  *out_assignments);
+
 #endif /* MKT_KMEANS_INTERNAL_H */

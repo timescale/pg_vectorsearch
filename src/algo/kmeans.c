@@ -475,6 +475,59 @@ kmeans_assign_accumulate(
 	*out_cost += cost;
 }
 
+MKT_TARGET_CLONES void
+kmeans_assign(
+		const float	  *vectors,
+		uint32_t	   start,
+		uint32_t	   end,
+		const float	  *centroids,
+		const float	  *norms_c,
+		uint32_t	   k,
+		Dimension	   dim,
+		DistanceMetric metric,
+		uint32_t	  *out_assignments)
+{
+	for (uint32_t i = start; i < end; i++)
+	{
+		const float *vec	= vectors + (size_t)i * dim;
+		float		 best_d = __FLT_MAX__;
+		uint32_t	 best_c = 0;
+
+		for (uint32_t c = 0; c < k; c++)
+		{
+			const float *cent = centroids + (size_t)c * dim;
+			float		 d;
+
+			switch (metric)
+			{
+			case DISTANCE_L2:
+			{
+				float nx  = mkt_l2_norm_squared(vec, dim);
+				float dot = mkt_dot_product(vec, cent, dim);
+				d		  = nx + norms_c[c] - 2.0f * dot;
+				if (d < 0.0f)
+					d = 0.0f;
+				break;
+			}
+			case DISTANCE_INNER_PRODUCT:
+				d = -mkt_dot_product(vec, cent, dim);
+				break;
+			case DISTANCE_COSINE:
+				d = 1.0f - mkt_dot_product(vec, cent, dim);
+				break;
+			}
+
+			if (d < best_d)
+			{
+				best_d = d;
+				best_c = c;
+			}
+		}
+
+		out_assignments[i] = best_c;
+	}
+}
+
 float
 kmeans_merge_centroids(
 		float				  *centroids,
