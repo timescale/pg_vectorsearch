@@ -405,6 +405,76 @@ kmeans_max_centroid_shift_between(
 	return max_shift;
 }
 
+MKT_TARGET_CLONES void
+kmeans_assign_accumulate(
+		const float	   *vectors,
+		const uint32_t *indices,
+		uint32_t		start,
+		uint32_t		end,
+		const float	   *centroids,
+		const float	   *norms_c,
+		uint32_t		k,
+		Dimension		dim,
+		DistanceMetric	metric,
+		const uint32_t *filter,
+		uint32_t		filter_val,
+		float		   *out_sums,
+		uint32_t	   *out_cnts,
+		float		   *out_cost)
+{
+	float cost = 0.0f;
+
+	for (uint32_t i = start; i < end; i++)
+	{
+		if (filter != NULL && filter[i] != filter_val)
+			continue;
+
+		uint32_t	 idx	= indices ? indices[i] : i;
+		const float *vec	= vectors + (size_t)idx * dim;
+		float		 best_d = __FLT_MAX__;
+		uint32_t	 best_c = 0;
+
+		for (uint32_t c = 0; c < k; c++)
+		{
+			const float *cent = centroids + (size_t)c * dim;
+			float		 d;
+
+			switch (metric)
+			{
+			case DISTANCE_L2:
+			{
+				float nx  = mkt_l2_norm_squared(vec, dim);
+				float dot = mkt_dot_product(vec, cent, dim);
+				d		  = nx + norms_c[c] - 2.0f * dot;
+				if (d < 0.0f)
+					d = 0.0f;
+				break;
+			}
+			case DISTANCE_INNER_PRODUCT:
+				d = -mkt_dot_product(vec, cent, dim);
+				break;
+			case DISTANCE_COSINE:
+				d = 1.0f - mkt_dot_product(vec, cent, dim);
+				break;
+			}
+
+			if (d < best_d)
+			{
+				best_d = d;
+				best_c = c;
+			}
+		}
+
+		cost += best_d;
+		out_cnts[best_c]++;
+		float *sum = out_sums + (size_t)best_c * dim;
+		for (uint32_t d = 0; d < dim; d++)
+			sum[d] += vec[d];
+	}
+
+	*out_cost += cost;
+}
+
 float
 kmeans_merge_centroids(
 		float				  *centroids,

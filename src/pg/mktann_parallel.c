@@ -25,6 +25,7 @@
 #include <utils/rel.h>
 
 #include "algo/hkmeans.h"
+#include "algo/kmeans_internal.h"
 #include "algo/vecops.h"
 #include "index/posting_build.h"
 #include "mkt_pg.h"
@@ -97,10 +98,7 @@ mktann_sample_callback(
 }
 
 /* ----------------------------------------------------------------
- * Phase 2: K-means assignment on per-worker samples
- *
- * Each worker computes distances from its samples to all
- * centroids and accumulates per-worker centroid sums.
+ * Phase 2: K-means assignment — thin wrappers around shared kernel
  * ---------------------------------------------------------------- */
 
 void
@@ -118,61 +116,23 @@ mktann_km_assign_and_accumulate(
 {
 	memset(out_sums, 0, (size_t)nlist * dim * sizeof(float));
 	memset(out_cnts, 0, nlist * sizeof(uint32_t));
-	float cost = 0.0f;
-
-	for (uint32_t i = 0; i < nsamples; i++)
-	{
-		const float *vec	= samples + (size_t)i * dim;
-		float		 best_d = __FLT_MAX__;
-		uint32_t	 best_c = 0;
-
-		for (uint32_t c = 0; c < nlist; c++)
-		{
-			const float *cent = centroids + (size_t)c * dim;
-			float		 d;
-
-			switch (metric)
-			{
-			case DISTANCE_L2:
-			{
-				float norm_x = mkt_l2_norm_squared(vec, dim);
-				float dot	 = mkt_dot_product(vec, cent, dim);
-				d			 = norm_x + norms_c[c] - 2.0f * dot;
-				if (d < 0.0f)
-					d = 0.0f;
-				break;
-			}
-			case DISTANCE_INNER_PRODUCT:
-				d = -mkt_dot_product(vec, cent, dim);
-				break;
-			case DISTANCE_COSINE:
-				d = 1.0f - mkt_dot_product(vec, cent, dim);
-				break;
-			}
-
-			if (d < best_d)
-			{
-				best_d = d;
-				best_c = c;
-			}
-		}
-
-		cost += best_d;
-		out_cnts[best_c]++;
-		float *sum = out_sums + (size_t)best_c * dim;
-		for (uint32_t d = 0; d < dim; d++)
-			sum[d] += vec[d];
-	}
-
-	*out_cost = cost;
+	*out_cost = 0.0f;
+	kmeans_assign_accumulate(
+			samples,
+			NULL,
+			0,
+			nsamples,
+			centroids,
+			norms_c,
+			nlist,
+			dim,
+			metric,
+			NULL,
+			0,
+			out_sums,
+			out_cnts,
+			out_cost);
 }
-
-/* ----------------------------------------------------------------
- * Phase 2b: Filtered k-means assignment for child k-means
- *
- * Same as mktann_km_assign_and_accumulate but skips samples
- * whose root assignment doesn't match target_child.
- * ---------------------------------------------------------------- */
 
 void
 mktann_km_assign_and_accumulate_filtered(
@@ -191,56 +151,22 @@ mktann_km_assign_and_accumulate_filtered(
 {
 	memset(out_sums, 0, (size_t)nlist * dim * sizeof(float));
 	memset(out_cnts, 0, nlist * sizeof(uint32_t));
-	float cost = 0.0f;
-
-	for (uint32_t i = 0; i < nsamples; i++)
-	{
-		if (root_assignments[i] != target_child)
-			continue;
-
-		const float *vec	= samples + (size_t)i * dim;
-		float		 best_d = __FLT_MAX__;
-		uint32_t	 best_c = 0;
-
-		for (uint32_t c = 0; c < nlist; c++)
-		{
-			const float *cent = centroids + (size_t)c * dim;
-			float		 d;
-
-			switch (metric)
-			{
-			case DISTANCE_L2:
-			{
-				float norm_x = mkt_l2_norm_squared(vec, dim);
-				float dot	 = mkt_dot_product(vec, cent, dim);
-				d			 = norm_x + norms_c[c] - 2.0f * dot;
-				if (d < 0.0f)
-					d = 0.0f;
-				break;
-			}
-			case DISTANCE_INNER_PRODUCT:
-				d = -mkt_dot_product(vec, cent, dim);
-				break;
-			case DISTANCE_COSINE:
-				d = 1.0f - mkt_dot_product(vec, cent, dim);
-				break;
-			}
-
-			if (d < best_d)
-			{
-				best_d = d;
-				best_c = c;
-			}
-		}
-
-		cost += best_d;
-		out_cnts[best_c]++;
-		float *sum = out_sums + (size_t)best_c * dim;
-		for (uint32_t d = 0; d < dim; d++)
-			sum[d] += vec[d];
-	}
-
-	*out_cost = cost;
+	*out_cost = 0.0f;
+	kmeans_assign_accumulate(
+			samples,
+			NULL,
+			0,
+			nsamples,
+			centroids,
+			norms_c,
+			nlist,
+			dim,
+			metric,
+			root_assignments,
+			target_child,
+			out_sums,
+			out_cnts,
+			out_cost);
 }
 
 /* ----------------------------------------------------------------

@@ -121,4 +121,33 @@ float kmeans_merge_centroids(
 		DistanceMetric		   metric,
 		float				  *out_total_cost);
 
+/*
+ * Scalar assign+accumulate kernel for a range of vectors.
+ *
+ * For each vector in [start, end): find nearest centroid, add
+ * to per-worker sums/counts. Supports optional root-assignment
+ * filtering for hierarchical child k-means — when filter is
+ * non-NULL, only vectors where filter[i] == filter_val are
+ * processed.
+ *
+ * Used by both standalone (via Lloyd iterate) and PG parallel
+ * workers (via Barrier iterate). The CBLAS path in Lloyd uses
+ * its own batched sgemm kernel instead.
+ */
+void kmeans_assign_accumulate(
+		const float	   *vectors,
+		const uint32_t *indices,
+		uint32_t		start,
+		uint32_t		end,
+		const float	   *centroids,
+		const float	   *norms_c,
+		uint32_t		k,
+		Dimension		dim,
+		DistanceMetric	metric,
+		const uint32_t *filter,
+		uint32_t		filter_val,
+		float		   *out_sums,
+		uint32_t	   *out_cnts,
+		float		   *out_cost);
+
 #endif /* MKT_KMEANS_INTERNAL_H */
