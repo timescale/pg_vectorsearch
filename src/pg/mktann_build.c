@@ -467,7 +467,7 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	bs->samples = NULL;
 
 	float *global_mean = palloc(dim * sizeof(float));
-	mkt_vector_mean(tree->leaf_centroids, tree->nleaves, dim, global_mean);
+	mkt_vector_mean(hk_leaf_centroids(tree), tree->nleaves, dim, global_mean);
 
 	if (bs->params.metric == DISTANCE_COSINE)
 		normalize_in_place(global_mean, dim);
@@ -531,7 +531,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	storage.build_mode = true;
 
 	/* Normalize leaf centroids for cosine */
-	float *ref_vecs = tree->leaf_centroids;
+	float *ref_vecs = hk_leaf_centroids(tree);
 	if (p->metric == DISTANCE_COSINE)
 	{
 		for (uint32_t c = 0; c < nlist; c++)
@@ -692,7 +692,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			index, MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index), true);
 
 	/* Cleanup */
-	mkt_hkmeans_result_destroy(tree);
+	mkt_free(tree);
 	pfree(node_first_blkno);
 	pfree(posting_heads);
 	pfree(pt_centroids);

@@ -93,10 +93,22 @@ void mkt_posting_worker_init(
 
 /*
  * Add a vector to its cluster's posting list builder.
+ * Standalone path: vec_id is converted to an ItemPointerData.
  */
 void mkt_posting_worker_add(
 		MktPostingWorkerState *ws,
 		uint32_t			   vec_id,
+		const float			  *vec,
+		uint32_t			   primary,
+		uint32_t			   secondary);
+
+/*
+ * Add a heap tuple to its cluster's posting list builder.
+ * PG path: TID comes directly from the heap scan.
+ */
+void mkt_posting_worker_add_heap(
+		MktPostingWorkerState *ws,
+		ItemPointerData		   tid,
 		const float			  *vec,
 		uint32_t			   primary,
 		uint32_t			   secondary);

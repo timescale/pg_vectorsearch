@@ -111,6 +111,81 @@ mkt_posting_worker_init(
 	}
 }
 
+static void
+ensure_builder(MktPostingWorkerState *ws, uint32_t c)
+{
+	if (ws->active[c])
+		return;
+
+	uint32_t	 dim  = ws->dim;
+	const float *cent = ws->leaf_centroids + (size_t)c * dim;
+
+	if (ws->thread_id == 0)
+	{
+		const float *pt_cent = ws->pt_centroids + (size_t)c * dim;
+		if (ws->fastscan)
+			mkt_posting_builder_init_fastscan(
+					&ws->builders[c],
+					ws->storage,
+					ws->params,
+					dim,
+					c,
+					cent,
+					pt_cent);
+		else
+			mkt_posting_builder_init(
+					&ws->builders[c],
+					ws->storage,
+					ws->params,
+					dim,
+					c,
+					cent,
+					pt_cent);
+	}
+	else
+	{
+		if (ws->fastscan)
+			mkt_posting_builder_init_continuation_fastscan(
+					&ws->builders[c], ws->storage, ws->params, dim, c, cent);
+		else
+			mkt_posting_builder_init_continuation(
+					&ws->builders[c], ws->storage, ws->params, dim, c, cent);
+	}
+
+	if (ws->reserve != NULL)
+	{
+		mkt_posting_builder_set_shared_reserve(
+				&ws->builders[c],
+				ws->reserve->starts[c],
+				ws->reserve->counts[c],
+				&ws->reserve->nexts[c]);
+		if (ws->thread_id == 0)
+			mkt_posting_builder_set_first_blkno(
+					&ws->builders[c], ws->reserve->starts[c]);
+	}
+
+	ws->active[c] = true;
+}
+
+static void
+worker_add_to_clusters(
+		MktPostingWorkerState *ws,
+		ItemPointerData		   tid,
+		const float			  *vec,
+		uint32_t			   primary,
+		uint32_t			   secondary)
+{
+	uint32_t clusters[2] = {primary, secondary};
+	uint32_t nclusters	 = (secondary != MKT_INVALID_CLUSTER) ? 2 : 1;
+
+	for (uint32_t ci = 0; ci < nclusters; ci++)
+	{
+		uint32_t c = clusters[ci];
+		ensure_builder(ws, c);
+		mkt_posting_builder_add(&ws->builders[c], tid, vec);
+	}
+}
+
 void
 mkt_posting_worker_add(
 		MktPostingWorkerState *ws,
@@ -119,78 +194,20 @@ mkt_posting_worker_add(
 		uint32_t			   primary,
 		uint32_t			   secondary)
 {
-	uint32_t dim		 = ws->dim;
-	uint32_t clusters[2] = {primary, secondary};
-	uint32_t nclusters	 = (secondary != MKT_INVALID_CLUSTER) ? 2 : 1;
+	ItemPointerData tid;
+	mkt_posting_set_vector_id(&tid, vec_id);
+	worker_add_to_clusters(ws, tid, vec, primary, secondary);
+}
 
-	for (uint32_t ci = 0; ci < nclusters; ci++)
-	{
-		uint32_t c = clusters[ci];
-		if (!ws->active[c])
-		{
-			const float *cent = ws->leaf_centroids + (size_t)c * dim;
-
-			if (ws->thread_id == 0)
-			{
-				const float *pt_cent = ws->pt_centroids + (size_t)c * dim;
-				if (ws->fastscan)
-					mkt_posting_builder_init_fastscan(
-							&ws->builders[c],
-							ws->storage,
-							ws->params,
-							dim,
-							c,
-							cent,
-							pt_cent);
-				else
-					mkt_posting_builder_init(
-							&ws->builders[c],
-							ws->storage,
-							ws->params,
-							dim,
-							c,
-							cent,
-							pt_cent);
-			}
-			else
-			{
-				if (ws->fastscan)
-					mkt_posting_builder_init_continuation_fastscan(
-							&ws->builders[c],
-							ws->storage,
-							ws->params,
-							dim,
-							c,
-							cent);
-				else
-					mkt_posting_builder_init_continuation(
-							&ws->builders[c],
-							ws->storage,
-							ws->params,
-							dim,
-							c,
-							cent);
-			}
-
-			if (ws->reserve != NULL)
-			{
-				mkt_posting_builder_set_shared_reserve(
-						&ws->builders[c],
-						ws->reserve->starts[c],
-						ws->reserve->counts[c],
-						&ws->reserve->nexts[c]);
-				if (ws->thread_id == 0)
-					mkt_posting_builder_set_first_blkno(
-							&ws->builders[c], ws->reserve->starts[c]);
-			}
-
-			ws->active[c] = true;
-		}
-
-		ItemPointerData tid;
-		mkt_posting_set_vector_id(&tid, vec_id);
-		mkt_posting_builder_add(&ws->builders[c], tid, vec);
-	}
+void
+mkt_posting_worker_add_heap(
+		MktPostingWorkerState *ws,
+		ItemPointerData		   tid,
+		const float			  *vec,
+		uint32_t			   primary,
+		uint32_t			   secondary)
+{
+	worker_add_to_clusters(ws, tid, vec, primary, secondary);
 }
 
 void
