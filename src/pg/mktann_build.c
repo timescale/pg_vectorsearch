@@ -289,10 +289,9 @@ write_meta_page(
 		uint64_t		  rabitq_seed,
 		const float		 *global_mean)
 {
-	BlockNumber blkno;
-	Page		page = mkt_storage_new_page(storage, &blkno);
-
-	Assert(blkno == 0);
+	/* Block 0 must already exist (extended or new_page'd by caller).
+	 * Use write_page to write in-place. */
+	Page page = mkt_storage_write_page(storage, 0);
 
 	PageInit(page, BLCKSZ, MKT_META_SIZE(dim));
 
@@ -312,7 +311,7 @@ write_meta_page(
 
 	memcpy(mktann_meta_global_mean(meta), global_mean, dim * sizeof(float));
 
-	mkt_storage_commit_page(storage, blkno);
+	mkt_storage_commit_page(storage, 0);
 }
 
 /* ----------------------------------------------------------------
@@ -490,7 +489,7 @@ estimate_posting_pages(Relation heap, Dimension dim, uint32_t nlist)
 {
 	double est_rows = RelationGetNumberOfBlocks(heap) *
 					  (BLCKSZ / (double)(dim * sizeof(float) + 32));
-	uint32_t est_per_cluster = (uint32_t)ceil(est_rows / nlist);
+	uint32_t est_per_cluster = (uint32_t)ceil(est_rows / nlist * 1.2);
 	uint32_t per_first		 = mkt_posting_max_entries_first(dim);
 	uint32_t per_page		 = mkt_posting_max_entries(dim);
 	uint32_t npages			 = 1;
@@ -566,7 +565,6 @@ do_parallel_build(
 		struct IndexInfo *index_info,
 		MktannBuildState *bs,
 		MktannStorage	 *storage,
-		BlockNumber		  first_posting,
 		HKMeansResult	**out_tree,
 		BlockNumber		 *posting_heads,
 		double			 *out_heap_tuples,
@@ -940,22 +938,7 @@ do_parallel_build(
 			 "mktann: tree too large for DSM (%u > %zu)",
 			 tree->total_size,
 			 max_tree_sz);
-	elog(LOG,
-		 "mktann: tree size=%u, dsm slot=%zu, nleaves=%u, nnodes=%u",
-		 tree->total_size,
-		 max_tree_sz,
-		 tree->nleaves,
-		 tree->nnodes);
 	memcpy(dsm_tree, tree, tree->total_size);
-
-	/* Verify tree is usable from DSM */
-	{
-		HKMeansResult *t2 = (HKMeansResult *)dsm_tree;
-		Assert(t2->nleaves == tree->nleaves);
-		Assert(t2->dim == tree->dim);
-		float *lc = hk_leaf_centroids(t2);
-		Assert(isfinite(lc[0]));
-	}
 
 	/* Normalize leaf centroids for cosine */
 	float *ref_vecs = hk_leaf_centroids(tree);
@@ -972,10 +955,20 @@ do_parallel_build(
 				ref_vecs + (size_t)c * dim,
 				pt_centroids + (size_t)c * dim);
 
-	/* Set up posting page reservation.
-	 * Keep dsm_reserve->nlist at the allocated size — the accessor
-	 * functions compute array offsets from it. shared->nlist has
-	 * the actual count from k-means. */
+	/* Block 0 = metadata page. Extend 1 page so block 0 exists. */
+	mkt_storage_extend(&storage->base, 1);
+
+	/* Compute exact centroid page layout from the real tree,
+	 * then extend for centroid + posting pages. Same layout
+	 * logic as the serial path. */
+	uint32_t cent_max_ent =
+			mkt_centroid_max_entries_fmt(dim, bs->params.centroid_format);
+	BlockNumber *node_first_blkno = palloc(tree->nnodes * sizeof(BlockNumber));
+	BlockNumber	 first_centroid	  = 1;
+	BlockNumber	 first_posting	  = mkt_compute_centroid_layout(
+			tree, cent_max_ent, first_centroid, node_first_blkno);
+	uint32_t n_centroid_pages = first_posting - first_centroid;
+	mkt_storage_extend(&storage->base, n_centroid_pages);
 
 	uint32_t	 pages_per_cluster = estimate_posting_pages(heap, dim, nlist);
 	BlockNumber *starts			   = mktann_dsm_reserve_starts(dsm_reserve);
@@ -1239,20 +1232,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 		bs.params.nlist = max_nlist;
 
-		uint32_t est_max_ent =
-				mkt_centroid_max_entries_fmt(dim, p->centroid_format);
-		BlockNumber first_centroid = 1;
-		/* Over-allocate centroid space: max nodes in hkmeans tree
-		 * is bounded by 2*nlist, each node's centroids fit in
-		 * ceil(fan_out / max_entries_per_page) pages. */
-		uint32_t max_nodes			= est_nlist * 2;
-		uint32_t est_centroid_pages = (max_nodes + est_max_ent - 1) /
-											  est_max_ent +
-									  1;
-		BlockNumber first_posting = first_centroid + est_centroid_pages;
-		mkt_storage_extend(&storage.base, est_centroid_pages);
-
-		posting_heads = palloc(est_nlist * sizeof(BlockNumber));
+		posting_heads = palloc(max_nlist * sizeof(BlockNumber));
 
 		did_parallel = do_parallel_build(
 				heap,
@@ -1260,7 +1240,6 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				index_info,
 				&bs,
 				&storage,
-				first_posting,
 				&tree,
 				posting_heads,
 				&heap_tuples,
@@ -1320,6 +1299,9 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 		BlockNumber first_centroid = 1;
 		BlockNumber first_posting  = mkt_compute_centroid_layout(
 				 tree, max_ent, first_centroid, node_first_blkno);
+
+		/* Block 0 = metadata page */
+		mkt_storage_extend(&storage.base, 1);
 
 		write_meta_page(
 				&storage.base,
