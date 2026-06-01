@@ -26,6 +26,7 @@ typedef enum
 	SIMD_SVE			  = 1 << 6,
 	SIMD_SVE2			  = 1 << 7,
 	SIMD_SVE2_I8MM		  = 1 << 8,
+	SIMD_SME2			  = 1 << 9,
 } SimdCapability;
 
 /*

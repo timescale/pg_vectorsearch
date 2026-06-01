@@ -295,6 +295,25 @@ void mkt_fastscan_accumulate_hacc_sve(
 		int32_t		  *accum,
 		Dimension	   dim);
 
+/* SME2 streaming-mode implementations. Functions are
+ * __arm_locally_streaming so callers stay in normal mode; the body
+ * runs in SME streaming context where the streaming-compatible
+ * subset of SVE2 (incl. svtbl_u8 and svsra_n_u16) is available.
+ * Used on cores that expose SME2 but not architectural SVE2 —
+ * Apple M-series from M4 onward, Neoverse V3/N3. Runtime dispatch
+ * prefers SME2 over SVE2 when both are advertised. */
+void mkt_fastscan_accumulate_sme2(
+		const uint8_t *codes,
+		const uint8_t *lut,
+		uint16_t	  *accum,
+		Dimension	   dim);
+
+void mkt_fastscan_accumulate_hacc_sme2(
+		const uint8_t *codes,
+		const uint8_t *lut,
+		int32_t		  *accum,
+		Dimension	   dim);
+
 #endif
 #endif
 

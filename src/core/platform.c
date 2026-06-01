@@ -170,6 +170,11 @@ detect_simd_x86(void)
 #ifndef HWCAP2_SVEI8MM
 #define HWCAP2_SVEI8MM (1UL << 9)
 #endif
+#ifndef HWCAP2_SME2
+#define HWCAP2_SME2 (1UL << 37)
+#endif
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
 #endif
 
 static SimdCapability
@@ -188,6 +193,20 @@ detect_simd_arm64(void)
 		caps |= SIMD_SVE2;
 	if (hwcap2 & HWCAP2_SVEI8MM)
 		caps |= SIMD_SVE2_I8MM;
+	if (hwcap2 & HWCAP2_SME2)
+		caps |= SIMD_SME2;
+#elif defined(__APPLE__)
+	/* macOS exposes Arm architecture extensions via sysctl rather than
+	 * HWCAP. The keys are documented in `man 1 sysctl` under "Apple
+	 * Silicon" and in <sys/sysctl.h>. We only probe for SME2 here;
+	 * Apple Silicon does not advertise architectural SVE/SVE2 to
+	 * userspace, so those caps stay clear on darwin. */
+	int	   sme2	   = 0;
+	size_t sme2_sz = sizeof(sme2);
+	if (sysctlbyname("hw.optional.arm.FEAT_SME2", &sme2, &sme2_sz, NULL, 0) ==
+				0 &&
+		sme2)
+		caps |= SIMD_SME2;
 #endif
 
 	return caps;

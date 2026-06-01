@@ -254,6 +254,7 @@ endif
 # HWCAP_SVE / HWCAP2_SVE2 picks them only on capable CPUs.
 have_sve = false
 have_sve2 = false
+have_sme2 = false
 if simd_mode == 'full' and host_machine.cpu_family() == 'aarch64'
   # Test the actual pragma the SVE source files use, not just the
   # __attribute__ form. clang on aarch64-darwin accepts the attribute
@@ -282,6 +283,23 @@ if simd_mode == 'full' and host_machine.cpu_family() == 'aarch64'
   )
   if have_sve2
     config_data.set('MKT_HAVE_SVE2', 1)
+  endif
+
+  # SME2: requires the toolchain to accept `#pragma GCC target("+sme2")`,
+  # the <arm_sme.h> header, the __arm_locally_streaming function
+  # specifier, and the streaming-compatible svtbl/svsra intrinsics.
+  # Apple clang currently rejects the pragma — same situation as SVE2.
+  have_sme2 = cc.compiles(
+    '#pragma GCC target("+sme2")\n' +
+    '#include <arm_sme.h>\n' +
+    '__arm_locally_streaming static void f(svuint8_t a, svuint8_t b,\n' +
+    '                                       svuint16_t c){\n' +
+    '  (void)svtbl_u8(a,b); (void)svsra_n_u16(c,c,8); }',
+    args: ['-Werror=unknown-pragmas'],
+    name: 'aarch64 SME2 streaming target + intrinsics',
+  )
+  if have_sme2
+    config_data.set('MKT_HAVE_SME2', 1)
   endif
 endif
 
@@ -418,6 +436,11 @@ if simd_mode == 'full'
     if have_sve2
       simd_sources += files(
         'src/quant/fastscan_sve2.c',
+      )
+    endif
+    if have_sme2
+      simd_sources += files(
+        'src/quant/fastscan_sme2.c',
       )
     endif
   elif host_machine.cpu_family() == 'arm'
@@ -685,6 +708,11 @@ if build_pg_extension
       if have_sve2
         mkt_pg_simd_sources += files(
           'src/quant/fastscan_sve2.c',
+        )
+      endif
+      if have_sme2
+        mkt_pg_simd_sources += files(
+          'src/quant/fastscan_sme2.c',
         )
       endif
     endif

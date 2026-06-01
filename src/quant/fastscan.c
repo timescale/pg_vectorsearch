@@ -515,6 +515,20 @@ mkt_fastscan_init_simd(void)
 	}
 #elif defined(__aarch64__) || defined(_M_ARM64)
 	SimdCapability caps = mkt_detect_simd();
+#ifdef MKT_HAVE_SME2
+	if (caps & SIMD_SME2)
+	{
+		/* SME2 streaming-mode kernels. Preferred over SVE2 when both
+		 * are advertised, and the only ARM accelerated path on cores
+		 * that expose SME2 without architectural SVE2 (Apple M4+). */
+		g_fastscan_accumulate_fn	  = mkt_fastscan_accumulate_sme2;
+		g_fastscan_accumulate_hacc_fn = mkt_fastscan_accumulate_hacc_sme2;
+		g_fastscan_build_lut_fn		  = mkt_fastscan_build_lut_neon;
+		g_fastscan_build_lut_hacc_fn  = mkt_fastscan_build_lut_hacc_neon;
+		atomic_store(&g_fastscan_initialized, true);
+		return;
+	}
+#endif
 #ifdef MKT_HAVE_SVE2
 	if (caps & SIMD_SVE2)
 	{
@@ -625,9 +639,17 @@ mkt_fastscan_impl_name(void)
 	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_avx2)
 		return "avx2";
 #elif defined(__aarch64__) || defined(_M_ARM64)
+#ifdef MKT_HAVE_SME2
+	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_sme2)
+		return "sme2";
+#endif
 #ifdef MKT_HAVE_SVE2
 	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_sve2)
 		return "sve2";
+#endif
+#ifdef MKT_HAVE_SVE
+	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_sve)
+		return "sve";
 #endif
 	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_neon)
 		return "neon";
