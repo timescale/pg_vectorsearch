@@ -50,6 +50,10 @@ typedef struct MktBuildAssignment
 #define MKT_SECONDARY_TOPK		 8
 #define MKT_SECONDARY_BEAM_WIDTH 16
 
+/* Vectors per batch for the GEMM secondary path (amortizes centroid
+ * reads across the batch). */
+#define MKT_SECONDARY_BATCH 256
+
 typedef struct MktBuildWorkerBufs
 {
 	float	 *norm_buf;		/* [dim] for cosine normalization */
@@ -66,6 +70,72 @@ MktBuildAssignment mkt_build_assign_vector(
 		const float			 *vec,
 		const MktBuildParams *params,
 		MktBuildWorkerBufs	 *bufs);
+
+/*
+ * Primary cluster via tree descent, plus the encoded vector written into
+ * enc_out[dim] (normalized for cosine, copied otherwise). Used by the
+ * batched secondary path, which needs the encoded vectors contiguous.
+ * Returns the primary cluster; *out_dist receives its distance.
+ */
+uint32_t mkt_build_assign_primary(
+		const HKMeansResult	 *tree,
+		const float			 *vec,
+		const MktBuildParams *params,
+		float				 *enc_out,
+		Distance			 *out_dist);
+
+/* ----------------------------------------------------------------
+ * Batched secondary (boundary + SOAR) assignment
+ *
+ * Primary assignment stays per-vector (tree descent); the secondary
+ * search is the memory-bandwidth-bound part because every vector scans
+ * all leaf centroids. Batching B vectors lets the centroid block be read
+ * once and reused across the batch via two sgemm calls (V·Cᵀ for the
+ * boundary/L2 distances, R·Cᵀ for SOAR), turning a memory-bound scan
+ * into a compute-bound GEMM. Requires CBLAS; callers fall back to the
+ * per-vector path when mkt_secondary_batch_available() is false.
+ * ---------------------------------------------------------------- */
+
+typedef struct MktSecondaryBatch
+{
+	uint32_t	 max_batch;
+	uint32_t	 nleaves;
+	Dimension	 dim;
+	const float *leaf_centroids; /* [nleaves * dim], not owned */
+	float		*cent_norms;	 /* [nleaves] ||c||^2 */
+	float		*vc;			 /* [max_batch * nleaves] <v, c> */
+	float		*rc;			 /* [max_batch * nleaves] <r_hat, c> */
+	float		*residuals;		 /* [max_batch * dim] normalized residuals */
+	float		*vec_norms;		 /* [max_batch] ||v||^2 */
+	float		*qrv;			 /* [max_batch] r_hat . v */
+} MktSecondaryBatch;
+
+/* True when CBLAS is available (the batched path needs sgemm). */
+bool mkt_secondary_batch_available(void);
+
+void mkt_secondary_batch_init(
+		MktSecondaryBatch *s,
+		const float		  *leaf_centroids,
+		uint32_t		   nleaves,
+		Dimension		   dim,
+		uint32_t		   max_batch);
+
+void mkt_secondary_batch_free(MktSecondaryBatch *s);
+
+/*
+ * Assign the secondary (replication) cluster for a batch of n <=
+ * max_batch encoded vectors. primary[]/primary_dist[] come from the
+ * per-vector tree descent. Writes out_secondary[n], using
+ * MKT_INVALID_CLUSTER where no replication applies.
+ */
+void mkt_secondary_batch_assign(
+		MktSecondaryBatch	 *s,
+		const float			 *vecs,
+		uint32_t			  n,
+		const uint32_t		 *primary,
+		const float			 *primary_dist,
+		const MktBuildParams *params,
+		uint32_t			 *out_secondary);
 
 /* ----------------------------------------------------------------
  * Page format ops — the only part that differs between formats

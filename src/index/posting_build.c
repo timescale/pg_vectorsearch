@@ -6,10 +6,22 @@
  * fastscan) is selected at init time via page_ops callbacks.
  */
 
+#include "mkt_config.h"
+
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef MKT_HAVE_CBLAS
+/* See matrix.c for the rationale on the Apple branch. */
+#ifdef __APPLE__
+#include <vecLib/cblas_new.h>
+#else
+#include <cblas.h>
+#endif
+#endif
+
+#include "algo/vecops.h"
 #include "core/memory.h"
 #include "index/index_build.h"
 #include "index/posting_build.h"
@@ -160,6 +172,250 @@ mkt_build_assign_vector(
 			.secondary	= secondary,
 			.enc_vector = enc_vec,
 	};
+}
+
+uint32_t
+mkt_build_assign_primary(
+		const HKMeansResult	 *tree,
+		const float			 *vec,
+		const MktBuildParams *params,
+		float				 *enc_out,
+		Distance			 *out_dist)
+{
+	uint32_t best_c = mkt_hkmeans_assign(tree, vec, params->metric, out_dist);
+
+	if (params->metric == DISTANCE_COSINE)
+		normalize_vec(enc_out, vec, params->dim);
+	else
+		memcpy(enc_out, vec, (size_t)params->dim * sizeof(float));
+
+	return best_c;
+}
+
+/* ----------------------------------------------------------------
+ * Batched secondary assignment (CBLAS sgemm)
+ * ---------------------------------------------------------------- */
+
+bool
+mkt_secondary_batch_available(void)
+{
+#ifdef MKT_HAVE_CBLAS
+	return true;
+#else
+	return false;
+#endif
+}
+
+void
+mkt_secondary_batch_init(
+		MktSecondaryBatch *s,
+		const float		  *leaf_centroids,
+		uint32_t		   nleaves,
+		Dimension		   dim,
+		uint32_t		   max_batch)
+{
+	s->max_batch	  = max_batch;
+	s->nleaves		  = nleaves;
+	s->dim			  = dim;
+	s->leaf_centroids = leaf_centroids;
+	s->cent_norms	  = mkt_alloc(nleaves * sizeof(float));
+	s->vc			  = mkt_alloc((size_t)max_batch * nleaves * sizeof(float));
+	s->rc			  = mkt_alloc((size_t)max_batch * nleaves * sizeof(float));
+	s->residuals	  = mkt_alloc((size_t)max_batch * dim * sizeof(float));
+	s->vec_norms	  = mkt_alloc(max_batch * sizeof(float));
+	s->qrv			  = mkt_alloc(max_batch * sizeof(float));
+
+	for (uint32_t j = 0; j < nleaves; j++)
+		s->cent_norms[j] =
+				mkt_l2_norm_squared(leaf_centroids + (size_t)j * dim, dim);
+}
+
+void
+mkt_secondary_batch_free(MktSecondaryBatch *s)
+{
+	mkt_free(s->cent_norms);
+	mkt_free(s->vc);
+	mkt_free(s->rc);
+	mkt_free(s->residuals);
+	mkt_free(s->vec_norms);
+	mkt_free(s->qrv);
+	*s = (MktSecondaryBatch){0};
+}
+
+#ifdef MKT_HAVE_CBLAS
+/*
+ * One sgemm produces <v_i, c_j> for the whole batch; both the boundary
+ * distance (metric-specific) and SOAR's ||v-c||^2 derive from it plus
+ * the precomputed norms, so the centroid block is read once per batch.
+ */
+static void
+secondary_batch_gemm(
+		MktSecondaryBatch *s, const float *vecs, uint32_t n, float *out)
+{
+	cblas_sgemm(
+			CblasRowMajor,
+			CblasNoTrans,
+			CblasTrans,
+			(int)n,
+			(int)s->nleaves,
+			(int)s->dim,
+			1.0f,
+			vecs,
+			(int)s->dim,
+			s->leaf_centroids,
+			(int)s->dim,
+			0.0f,
+			out,
+			(int)s->nleaves);
+}
+#endif
+
+void
+mkt_secondary_batch_assign(
+		MktSecondaryBatch	 *s,
+		const float			 *vecs,
+		uint32_t			  n,
+		const uint32_t		 *primary,
+		const float			 *primary_dist,
+		const MktBuildParams *params,
+		uint32_t			 *out_secondary)
+{
+#ifndef MKT_HAVE_CBLAS
+	(void)s;
+	(void)vecs;
+	(void)primary_dist;
+	(void)params;
+	for (uint32_t i = 0; i < n; i++)
+		out_secondary[i] = primary[i];
+	return;
+#else
+	const uint32_t	nleaves		 = s->nleaves;
+	const Dimension dim			 = s->dim;
+	const bool		has_soar	 = params->soar_lambda > 0.0;
+	const bool		has_boundary = params->boundary_epsilon > 0.0;
+	const float		lambda		 = (float)params->soar_lambda;
+
+	for (uint32_t i = 0; i < n; i++)
+		s->vec_norms[i] = mkt_l2_norm_squared(vecs + (size_t)i * dim, dim);
+
+	/* vc[i*nleaves + j] = <v_i, c_j> */
+	secondary_batch_gemm(s, vecs, n, s->vc);
+
+	for (uint32_t i = 0; i < n; i++)
+	{
+		uint32_t	 p	   = primary[i];
+		const float *vcrow = s->vc + (size_t)i * nleaves;
+		float		 nx	   = s->vec_norms[i];
+
+		/*
+		 * Boundary: nearest leaf != primary in the build metric.
+		 *   L2:  nx + ||c||^2 - 2<v,c>
+		 *   cos: 1 - <v,c>     (v and leaf centroids are normalized)
+		 *   ip:  -<v,c>
+		 */
+		float	 best2 = INFINITY;
+		uint32_t c2	   = p;
+		for (uint32_t j = 0; j < nleaves; j++)
+		{
+			if (j == p)
+				continue;
+			float d;
+			if (params->metric == DISTANCE_L2)
+				d = nx + s->cent_norms[j] - 2.0f * vcrow[j];
+			else if (params->metric == DISTANCE_COSINE)
+				d = 1.0f - vcrow[j];
+			else
+				d = -vcrow[j];
+			if (d < best2)
+			{
+				best2 = d;
+				c2	  = j;
+			}
+		}
+
+		bool should_replicate;
+		if (has_boundary)
+		{
+			double pd		 = (double)primary_dist[i];
+			double gap		 = (double)best2 - pd;
+			double gap_ratio = (pd != 0.0) ? gap / fabs(pd) : INFINITY;
+			should_replicate = (c2 != p) &&
+							   (gap_ratio <= params->boundary_epsilon);
+		}
+		else
+		{
+			should_replicate = true;
+		}
+
+		if (!should_replicate)
+		{
+			out_secondary[i] = MKT_INVALID_CLUSTER;
+			continue;
+		}
+
+		if (!has_soar)
+		{
+			out_secondary[i] = (c2 != p) ? c2 : MKT_INVALID_CLUSTER;
+			continue;
+		}
+
+		/* SOAR: normalized residual from the primary centroid. */
+		const float *v	  = vecs + (size_t)i * dim;
+		const float *cent = s->leaf_centroids + (size_t)p * dim;
+		float		*r	  = s->residuals + (size_t)i * dim;
+		float		 norm = 0.0f;
+		for (Dimension d = 0; d < dim; d++)
+		{
+			r[d] = v[d] - cent[d];
+			norm += r[d] * r[d];
+		}
+		if (norm > 1e-7f)
+		{
+			float inv = 1.0f / sqrtf(norm);
+			for (Dimension d = 0; d < dim; d++)
+				r[d] *= inv;
+		}
+		s->qrv[i] = mkt_dot_product(r, v, dim);
+		/* Mark for the SOAR pass below. */
+		out_secondary[i] = p; /* provisional; resolved after rc gemm */
+	}
+
+	if (!has_soar)
+		return;
+
+	/* rc[i*nleaves + j] = <r_hat_i, c_j>. Residuals for non-replicated
+	 * rows are stale but their rows are never read below. */
+	secondary_batch_gemm(s, s->residuals, n, s->rc);
+
+	for (uint32_t i = 0; i < n; i++)
+	{
+		if (out_secondary[i] == MKT_INVALID_CLUSTER)
+			continue;
+
+		uint32_t	 p	   = primary[i];
+		const float *vcrow = s->vc + (size_t)i * nleaves;
+		const float *rcrow = s->rc + (size_t)i * nleaves;
+		float		 nx	   = s->vec_norms[i];
+		float		 qrv   = s->qrv[i];
+
+		float	 best_oa = INFINITY;
+		uint32_t best_c	 = p;
+		for (uint32_t j = 0; j < nleaves; j++)
+		{
+			if (j == p)
+				continue;
+			float l2  = nx + s->cent_norms[j] - 2.0f * vcrow[j];
+			float gap = qrv - rcrow[j];
+			float oa  = l2 + lambda * gap * gap;
+			if (oa < best_oa)
+			{
+				best_oa = oa;
+				best_c	= j;
+			}
+		}
+		out_secondary[i] = (best_c != p) ? best_c : MKT_INVALID_CLUSTER;
+	}
+#endif
 }
 
 /* ================================================================

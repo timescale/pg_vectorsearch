@@ -33,6 +33,7 @@ unit_test_sources = files(
   'test_memory.c',
   'test_platform.c',
   'test_rabitq.c',
+  'test_secondary_batch.c',
   'test_standalone.c',
   'test_thread_pool.c',
   'test_topk.c',

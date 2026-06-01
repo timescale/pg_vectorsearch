@@ -509,16 +509,72 @@ par_posting_fn(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
 	MktBuildWorkerBufs bufs	   = mkt_build_worker_bufs_create(dim);
 	MktMemCtx		   tmp_ctx = mkt_memctx_create(thread_ctx, "par_tmp");
 
-	for (uint32_t i = start; i < end; i++)
+	/*
+	 * When replication is on, the secondary search dominates and is
+	 * memory-bandwidth bound per vector. Batch B vectors so the centroid
+	 * block is read once per batch (sgemm). Primary stays per-vector tree
+	 * descent. Falls back to the per-vector path without CBLAS.
+	 */
+	bool replicate = (ctx->bp.soar_lambda > 0.0) ||
+					 (ctx->bp.boundary_epsilon > 0.0);
+
+	if (replicate && mkt_secondary_batch_available())
 	{
-		mkt_memctx_switch(tmp_ctx);
-		const float		  *vec = ctx->all_vectors + (size_t)i * dim;
-		MktBuildAssignment asgn =
-				mkt_build_assign_vector(ctx->tree, vec, &ctx->bp, &bufs);
-		mkt_memctx_switch(thread_ctx);
-		mkt_posting_worker_add(
-				ws, i, asgn.enc_vector, asgn.primary, asgn.secondary);
-		mkt_memctx_reset(tmp_ctx);
+		uint32_t  B			= MKT_SECONDARY_BATCH;
+		float	 *enc_batch = mkt_alloc((size_t)B * dim * sizeof(float));
+		uint32_t *primary	= mkt_alloc(B * sizeof(uint32_t));
+		float	 *pdist		= mkt_alloc(B * sizeof(float));
+		uint32_t *secondary = mkt_alloc(B * sizeof(uint32_t));
+
+		MktSecondaryBatch sb;
+		mkt_secondary_batch_init(
+				&sb, hk_leaf_centroids(ctx->tree), ctx->tree->nleaves, dim, B);
+
+		for (uint32_t bstart = start; bstart < end; bstart += B)
+		{
+			uint32_t bn = (end - bstart < B) ? (end - bstart) : B;
+
+			for (uint32_t k = 0; k < bn; k++)
+			{
+				const float *vec = ctx->all_vectors +
+								   (size_t)(bstart + k) * dim;
+				Distance d;
+				primary[k] = mkt_build_assign_primary(
+						ctx->tree,
+						vec,
+						&ctx->bp,
+						enc_batch + (size_t)k * dim,
+						&d);
+				pdist[k] = (float)d;
+			}
+
+			mkt_secondary_batch_assign(
+					&sb, enc_batch, bn, primary, pdist, &ctx->bp, secondary);
+
+			for (uint32_t k = 0; k < bn; k++)
+				mkt_posting_worker_add(
+						ws,
+						bstart + k,
+						enc_batch + (size_t)k * dim,
+						primary[k],
+						secondary[k]);
+		}
+
+		mkt_secondary_batch_free(&sb);
+	}
+	else
+	{
+		for (uint32_t i = start; i < end; i++)
+		{
+			mkt_memctx_switch(tmp_ctx);
+			const float		  *vec = ctx->all_vectors + (size_t)i * dim;
+			MktBuildAssignment asgn =
+					mkt_build_assign_vector(ctx->tree, vec, &ctx->bp, &bufs);
+			mkt_memctx_switch(thread_ctx);
+			mkt_posting_worker_add(
+					ws, i, asgn.enc_vector, asgn.primary, asgn.secondary);
+			mkt_memctx_reset(tmp_ctx);
+		}
 	}
 
 	mkt_posting_worker_finish(ws);
