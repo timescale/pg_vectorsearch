@@ -44,6 +44,8 @@ mkt_build_worker_bufs_create(Dimension dim)
 	return (MktBuildWorkerBufs){
 			.norm_buf	  = mkt_alloc(dim * sizeof(float)),
 			.residual_buf = mkt_alloc(dim * sizeof(float)),
+			.cand_leaves  = mkt_alloc(MKT_SECONDARY_TOPK * sizeof(uint32_t)),
+			.cand_dists	  = mkt_alloc(MKT_SECONDARY_TOPK * sizeof(Distance)),
 	};
 }
 
@@ -52,8 +54,12 @@ mkt_build_worker_bufs_free(MktBuildWorkerBufs *bufs)
 {
 	mkt_free(bufs->norm_buf);
 	mkt_free(bufs->residual_buf);
+	mkt_free(bufs->cand_leaves);
+	mkt_free(bufs->cand_dists);
 	bufs->norm_buf	   = NULL;
 	bufs->residual_buf = NULL;
+	bufs->cand_leaves  = NULL;
+	bufs->cand_dists   = NULL;
 }
 
 MktBuildAssignment
@@ -87,15 +93,28 @@ mkt_build_assign_vector(
 
 		uint32_t boundary_c2 = best_c;
 		if (has_boundary)
-			boundary_c2 = mkt_find_secondary_cluster(
+		{
+			/* Beam-descend for the nearest leaves; the 2nd-nearest is
+			 * the boundary candidate. Far cheaper than scanning all
+			 * leaves, and exact when the true 2nd-nearest is within the
+			 * explored subtrees (which it is for boundary vectors). */
+			uint32_t ncand = mkt_hkmeans_assign_topk(
+					tree,
 					enc_vec,
-					leaves,
-					nleaves,
-					dim,
 					params->metric,
+					MKT_SECONDARY_TOPK,
+					MKT_SECONDARY_BEAM_WIDTH,
+					bufs->cand_leaves,
+					bufs->cand_dists);
+
+			boundary_c2 = mkt_find_secondary_cluster(
+					bufs->cand_leaves,
+					bufs->cand_dists,
+					ncand,
 					best_c,
 					min_dist,
 					params->boundary_epsilon);
+		}
 
 		bool should_replicate = has_boundary ? (boundary_c2 != best_c) : true;
 

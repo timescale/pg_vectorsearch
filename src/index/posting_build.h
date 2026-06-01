@@ -40,10 +40,22 @@ typedef struct MktBuildAssignment
 	const float *enc_vector;
 } MktBuildAssignment;
 
+/*
+ * Beam search parameters for the boundary (border-neighbor) secondary
+ * search. The boundary cluster is the 2nd-nearest centroid by plain
+ * distance, so a tree beam-descent finds it far cheaper than scanning
+ * all leaves. SOAR's orthogonality-amplified search stays exact (its
+ * optimum need not be among the nearest-by-distance leaves).
+ */
+#define MKT_SECONDARY_TOPK		 8
+#define MKT_SECONDARY_BEAM_WIDTH 16
+
 typedef struct MktBuildWorkerBufs
 {
-	float *norm_buf;	 /* [dim] for cosine normalization */
-	float *residual_buf; /* [dim] for SOAR residual computation */
+	float	 *norm_buf;		/* [dim] for cosine normalization */
+	float	 *residual_buf; /* [dim] for SOAR residual computation */
+	uint32_t *cand_leaves;	/* [MKT_SECONDARY_TOPK] beam candidates */
+	Distance *cand_dists;	/* [MKT_SECONDARY_TOPK] candidate distances */
 } MktBuildWorkerBufs;
 
 MktBuildWorkerBufs mkt_build_worker_bufs_create(Dimension dim);

@@ -108,39 +108,30 @@ mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out)
 
 uint32_t
 mkt_find_secondary_cluster(
-		const float	  *vec,
-		const float	  *leaf_centroids,
-		uint32_t	   nleaves,
-		Dimension	   dim,
-		DistanceMetric metric,
-		uint32_t	   primary_cluster,
-		Distance	   primary_dist,
-		double		   epsilon)
+		const uint32_t *cand_leaves,
+		const Distance *cand_dists,
+		uint32_t		ncand,
+		uint32_t		primary_cluster,
+		Distance		primary_dist,
+		double			epsilon)
 {
-	VectorRef qref	= {.data = vec, .dim = dim};
-	Distance  best2 = INFINITY;
-	uint32_t  c2	= primary_cluster;
-
-	for (uint32_t i = 0; i < nleaves; i++)
+	/* Candidates are sorted by ascending distance, so the first one
+	 * that is not the primary is the 2nd-nearest centroid. */
+	for (uint32_t i = 0; i < ncand; i++)
 	{
-		if (i == primary_cluster)
+		if (cand_leaves[i] == primary_cluster)
 			continue;
-		VectorRef cref =
-				{.data = leaf_centroids + (size_t)i * dim, .dim = dim};
-		Distance d = mkt_distance(qref, cref, metric);
-		if (d < best2)
-		{
-			best2 = d;
-			c2	  = i;
-		}
+
+		Distance best2	   = cand_dists[i];
+		double	 gap	   = (double)best2 - (double)primary_dist;
+		double	 gap_ratio = (primary_dist != 0.0)
+								   ? gap / fabs((double)primary_dist)
+								   : INFINITY;
+
+		if (gap_ratio <= epsilon)
+			return cand_leaves[i];
+		break;
 	}
-
-	double gap		 = (double)best2 - (double)primary_dist;
-	double gap_ratio = (primary_dist != 0.0) ? gap / fabs((double)primary_dist)
-											 : INFINITY;
-
-	if (c2 != primary_cluster && gap_ratio <= epsilon)
-		return c2;
 
 	return primary_cluster;
 }
