@@ -235,73 +235,153 @@ mkt_rabitq_inner_product_multi_neon(
 			uint32_t bi = i / 8;
 
 			/* Low nibble: t0 floats × 8 cand masks */
-			float32x4_t t0 = vld1q_f32(transformed + i);
-			uint32x4_t  t0u = vreinterpretq_u32_f32(t0);
+			float32x4_t t0	= vld1q_f32(transformed + i);
+			uint32x4_t	t0u = vreinterpretq_u32_f32(t0);
 
-			sum0 = vaddq_f32(sum0, vreinterpretq_f32_u32(vandq_u32(
-					t0u, expand_nibble_to_mask_neon(b0[bi] & 0x0F))));
-			sum1 = vaddq_f32(sum1, vreinterpretq_f32_u32(vandq_u32(
-					t0u, expand_nibble_to_mask_neon(b1[bi] & 0x0F))));
-			sum2 = vaddq_f32(sum2, vreinterpretq_f32_u32(vandq_u32(
-					t0u, expand_nibble_to_mask_neon(b2[bi] & 0x0F))));
-			sum3 = vaddq_f32(sum3, vreinterpretq_f32_u32(vandq_u32(
-					t0u, expand_nibble_to_mask_neon(b3[bi] & 0x0F))));
-			sum4 = vaddq_f32(sum4, vreinterpretq_f32_u32(vandq_u32(
-					t0u, expand_nibble_to_mask_neon(b4[bi] & 0x0F))));
-			sum5 = vaddq_f32(sum5, vreinterpretq_f32_u32(vandq_u32(
-					t0u, expand_nibble_to_mask_neon(b5[bi] & 0x0F))));
-			sum6 = vaddq_f32(sum6, vreinterpretq_f32_u32(vandq_u32(
-					t0u, expand_nibble_to_mask_neon(b6[bi] & 0x0F))));
-			sum7 = vaddq_f32(sum7, vreinterpretq_f32_u32(vandq_u32(
-					t0u, expand_nibble_to_mask_neon(b7[bi] & 0x0F))));
+			sum0 = vaddq_f32(
+					sum0,
+					vreinterpretq_f32_u32(vandq_u32(
+							t0u, expand_nibble_to_mask_neon(b0[bi] & 0x0F))));
+			sum1 = vaddq_f32(
+					sum1,
+					vreinterpretq_f32_u32(vandq_u32(
+							t0u, expand_nibble_to_mask_neon(b1[bi] & 0x0F))));
+			sum2 = vaddq_f32(
+					sum2,
+					vreinterpretq_f32_u32(vandq_u32(
+							t0u, expand_nibble_to_mask_neon(b2[bi] & 0x0F))));
+			sum3 = vaddq_f32(
+					sum3,
+					vreinterpretq_f32_u32(vandq_u32(
+							t0u, expand_nibble_to_mask_neon(b3[bi] & 0x0F))));
+			sum4 = vaddq_f32(
+					sum4,
+					vreinterpretq_f32_u32(vandq_u32(
+							t0u, expand_nibble_to_mask_neon(b4[bi] & 0x0F))));
+			sum5 = vaddq_f32(
+					sum5,
+					vreinterpretq_f32_u32(vandq_u32(
+							t0u, expand_nibble_to_mask_neon(b5[bi] & 0x0F))));
+			sum6 = vaddq_f32(
+					sum6,
+					vreinterpretq_f32_u32(vandq_u32(
+							t0u, expand_nibble_to_mask_neon(b6[bi] & 0x0F))));
+			sum7 = vaddq_f32(
+					sum7,
+					vreinterpretq_f32_u32(vandq_u32(
+							t0u, expand_nibble_to_mask_neon(b7[bi] & 0x0F))));
 
 			/* High nibble: t1 floats × 8 cand masks */
-			float32x4_t t1 = vld1q_f32(transformed + i + 4);
-			uint32x4_t  t1u = vreinterpretq_u32_f32(t1);
+			float32x4_t t1	= vld1q_f32(transformed + i + 4);
+			uint32x4_t	t1u = vreinterpretq_u32_f32(t1);
 
-			sum0 = vaddq_f32(sum0, vreinterpretq_f32_u32(vandq_u32(
-					t1u, expand_nibble_to_mask_neon((b0[bi] >> 4) & 0x0F))));
-			sum1 = vaddq_f32(sum1, vreinterpretq_f32_u32(vandq_u32(
-					t1u, expand_nibble_to_mask_neon((b1[bi] >> 4) & 0x0F))));
-			sum2 = vaddq_f32(sum2, vreinterpretq_f32_u32(vandq_u32(
-					t1u, expand_nibble_to_mask_neon((b2[bi] >> 4) & 0x0F))));
-			sum3 = vaddq_f32(sum3, vreinterpretq_f32_u32(vandq_u32(
-					t1u, expand_nibble_to_mask_neon((b3[bi] >> 4) & 0x0F))));
-			sum4 = vaddq_f32(sum4, vreinterpretq_f32_u32(vandq_u32(
-					t1u, expand_nibble_to_mask_neon((b4[bi] >> 4) & 0x0F))));
-			sum5 = vaddq_f32(sum5, vreinterpretq_f32_u32(vandq_u32(
-					t1u, expand_nibble_to_mask_neon((b5[bi] >> 4) & 0x0F))));
-			sum6 = vaddq_f32(sum6, vreinterpretq_f32_u32(vandq_u32(
-					t1u, expand_nibble_to_mask_neon((b6[bi] >> 4) & 0x0F))));
-			sum7 = vaddq_f32(sum7, vreinterpretq_f32_u32(vandq_u32(
-					t1u, expand_nibble_to_mask_neon((b7[bi] >> 4) & 0x0F))));
+			sum0 = vaddq_f32(
+					sum0,
+					vreinterpretq_f32_u32(vandq_u32(
+							t1u,
+							expand_nibble_to_mask_neon(
+									(b0[bi] >> 4) & 0x0F))));
+			sum1 = vaddq_f32(
+					sum1,
+					vreinterpretq_f32_u32(vandq_u32(
+							t1u,
+							expand_nibble_to_mask_neon(
+									(b1[bi] >> 4) & 0x0F))));
+			sum2 = vaddq_f32(
+					sum2,
+					vreinterpretq_f32_u32(vandq_u32(
+							t1u,
+							expand_nibble_to_mask_neon(
+									(b2[bi] >> 4) & 0x0F))));
+			sum3 = vaddq_f32(
+					sum3,
+					vreinterpretq_f32_u32(vandq_u32(
+							t1u,
+							expand_nibble_to_mask_neon(
+									(b3[bi] >> 4) & 0x0F))));
+			sum4 = vaddq_f32(
+					sum4,
+					vreinterpretq_f32_u32(vandq_u32(
+							t1u,
+							expand_nibble_to_mask_neon(
+									(b4[bi] >> 4) & 0x0F))));
+			sum5 = vaddq_f32(
+					sum5,
+					vreinterpretq_f32_u32(vandq_u32(
+							t1u,
+							expand_nibble_to_mask_neon(
+									(b5[bi] >> 4) & 0x0F))));
+			sum6 = vaddq_f32(
+					sum6,
+					vreinterpretq_f32_u32(vandq_u32(
+							t1u,
+							expand_nibble_to_mask_neon(
+									(b6[bi] >> 4) & 0x0F))));
+			sum7 = vaddq_f32(
+					sum7,
+					vreinterpretq_f32_u32(vandq_u32(
+							t1u,
+							expand_nibble_to_mask_neon(
+									(b7[bi] >> 4) & 0x0F))));
 		}
 
 		/* Process remaining 4 floats if any (only the relevant nibble) */
 		if (i + 4 <= dim)
 		{
 			uint32_t bi	   = i / 8;
-			uint8_t  shift = (i % 8 == 0) ? 0 : 4;
+			uint8_t	 shift = (i % 8 == 0) ? 0 : 4;
 
 			float32x4_t t  = vld1q_f32(transformed + i);
-			uint32x4_t  tu = vreinterpretq_u32_f32(t);
+			uint32x4_t	tu = vreinterpretq_u32_f32(t);
 
-			sum0 = vaddq_f32(sum0, vreinterpretq_f32_u32(vandq_u32(
-					tu, expand_nibble_to_mask_neon((b0[bi] >> shift) & 0x0F))));
-			sum1 = vaddq_f32(sum1, vreinterpretq_f32_u32(vandq_u32(
-					tu, expand_nibble_to_mask_neon((b1[bi] >> shift) & 0x0F))));
-			sum2 = vaddq_f32(sum2, vreinterpretq_f32_u32(vandq_u32(
-					tu, expand_nibble_to_mask_neon((b2[bi] >> shift) & 0x0F))));
-			sum3 = vaddq_f32(sum3, vreinterpretq_f32_u32(vandq_u32(
-					tu, expand_nibble_to_mask_neon((b3[bi] >> shift) & 0x0F))));
-			sum4 = vaddq_f32(sum4, vreinterpretq_f32_u32(vandq_u32(
-					tu, expand_nibble_to_mask_neon((b4[bi] >> shift) & 0x0F))));
-			sum5 = vaddq_f32(sum5, vreinterpretq_f32_u32(vandq_u32(
-					tu, expand_nibble_to_mask_neon((b5[bi] >> shift) & 0x0F))));
-			sum6 = vaddq_f32(sum6, vreinterpretq_f32_u32(vandq_u32(
-					tu, expand_nibble_to_mask_neon((b6[bi] >> shift) & 0x0F))));
-			sum7 = vaddq_f32(sum7, vreinterpretq_f32_u32(vandq_u32(
-					tu, expand_nibble_to_mask_neon((b7[bi] >> shift) & 0x0F))));
+			sum0 = vaddq_f32(
+					sum0,
+					vreinterpretq_f32_u32(vandq_u32(
+							tu,
+							expand_nibble_to_mask_neon(
+									(b0[bi] >> shift) & 0x0F))));
+			sum1 = vaddq_f32(
+					sum1,
+					vreinterpretq_f32_u32(vandq_u32(
+							tu,
+							expand_nibble_to_mask_neon(
+									(b1[bi] >> shift) & 0x0F))));
+			sum2 = vaddq_f32(
+					sum2,
+					vreinterpretq_f32_u32(vandq_u32(
+							tu,
+							expand_nibble_to_mask_neon(
+									(b2[bi] >> shift) & 0x0F))));
+			sum3 = vaddq_f32(
+					sum3,
+					vreinterpretq_f32_u32(vandq_u32(
+							tu,
+							expand_nibble_to_mask_neon(
+									(b3[bi] >> shift) & 0x0F))));
+			sum4 = vaddq_f32(
+					sum4,
+					vreinterpretq_f32_u32(vandq_u32(
+							tu,
+							expand_nibble_to_mask_neon(
+									(b4[bi] >> shift) & 0x0F))));
+			sum5 = vaddq_f32(
+					sum5,
+					vreinterpretq_f32_u32(vandq_u32(
+							tu,
+							expand_nibble_to_mask_neon(
+									(b5[bi] >> shift) & 0x0F))));
+			sum6 = vaddq_f32(
+					sum6,
+					vreinterpretq_f32_u32(vandq_u32(
+							tu,
+							expand_nibble_to_mask_neon(
+									(b6[bi] >> shift) & 0x0F))));
+			sum7 = vaddq_f32(
+					sum7,
+					vreinterpretq_f32_u32(vandq_u32(
+							tu,
+							expand_nibble_to_mask_neon(
+									(b7[bi] >> shift) & 0x0F))));
 			i += 4;
 		}
 
@@ -317,18 +397,26 @@ mkt_rabitq_inner_product_multi_neon(
 		/* Scalar tail for remaining dimensions */
 		for (; i < dim; i++)
 		{
-			int byte_idx = i / 8;
-			int bit_idx	 = i % 8;
-			float v		 = transformed[i];
+			int	  byte_idx = i / 8;
+			int	  bit_idx  = i % 8;
+			float v		   = transformed[i];
 
-			if ((b0[byte_idx] >> bit_idx) & 1) results[base + 0] += v;
-			if ((b1[byte_idx] >> bit_idx) & 1) results[base + 1] += v;
-			if ((b2[byte_idx] >> bit_idx) & 1) results[base + 2] += v;
-			if ((b3[byte_idx] >> bit_idx) & 1) results[base + 3] += v;
-			if ((b4[byte_idx] >> bit_idx) & 1) results[base + 4] += v;
-			if ((b5[byte_idx] >> bit_idx) & 1) results[base + 5] += v;
-			if ((b6[byte_idx] >> bit_idx) & 1) results[base + 6] += v;
-			if ((b7[byte_idx] >> bit_idx) & 1) results[base + 7] += v;
+			if ((b0[byte_idx] >> bit_idx) & 1)
+				results[base + 0] += v;
+			if ((b1[byte_idx] >> bit_idx) & 1)
+				results[base + 1] += v;
+			if ((b2[byte_idx] >> bit_idx) & 1)
+				results[base + 2] += v;
+			if ((b3[byte_idx] >> bit_idx) & 1)
+				results[base + 3] += v;
+			if ((b4[byte_idx] >> bit_idx) & 1)
+				results[base + 4] += v;
+			if ((b5[byte_idx] >> bit_idx) & 1)
+				results[base + 5] += v;
+			if ((b6[byte_idx] >> bit_idx) & 1)
+				results[base + 6] += v;
+			if ((b7[byte_idx] >> bit_idx) & 1)
+				results[base + 7] += v;
 		}
 	}
 

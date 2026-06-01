@@ -93,7 +93,7 @@ sq_norm(const float *v, Dimension d)
 {
 	double s = 0;
 	for (Dimension i = 0; i < d; i++)
-		s += (double) v[i] * v[i];
+		s += (double)v[i] * v[i];
 	return s;
 }
 
@@ -101,7 +101,7 @@ static void
 fill_rotation_input(float *v, Dimension dim, int seed_offset)
 {
 	for (Dimension i = 0; i < dim; i++)
-		v[i] = (float) (((i * 131 + seed_offset) % 211) - 105) * 0.1f;
+		v[i] = (float)(((i * 131 + seed_offset) % 211) - 105) * 0.1f;
 }
 
 TEST(rotation_preserves_norm_small)
@@ -113,7 +113,9 @@ TEST(rotation_preserves_norm_small)
 	fill_rotation_input(x, 8, 1);
 	mkt_rabitq_rotate(params, x, y);
 	ASSERT_FLOAT_EQ(
-			(float) sq_norm(x, 8), (float) sq_norm(y, 8), 1e-3f,
+			(float)sq_norm(x, 8),
+			(float)sq_norm(y, 8),
+			1e-3f,
 			"rotation preserves ||x||²");
 
 	mkt_rabitq_destroy(params);
@@ -128,7 +130,9 @@ TEST(rotation_preserves_norm_medium)
 	fill_rotation_input(x, 64, 2);
 	mkt_rabitq_rotate(params, x, y);
 	ASSERT_FLOAT_EQ(
-			(float) sq_norm(x, 64), (float) sq_norm(y, 64), 1e-2f,
+			(float)sq_norm(x, 64),
+			(float)sq_norm(y, 64),
+			1e-2f,
 			"rotation preserves ||x||²");
 
 	mkt_rabitq_destroy(params);
@@ -148,8 +152,7 @@ TEST(rotation_reproducibility)
 	mkt_rabitq_rotate(p1, x, y1);
 	mkt_rabitq_rotate(p2, x, y2);
 	ASSERT_MEM_EQ(
-			y1, y2, sizeof(y1),
-			"same seed produces identical rotated output");
+			y1, y2, sizeof(y1), "same seed produces identical rotated output");
 
 	mkt_rabitq_destroy(p1);
 	mkt_rabitq_destroy(p2);
@@ -175,8 +178,7 @@ TEST(rotation_different_seeds)
 			break;
 		}
 
-	ASSERT_TRUE(
-			different, "different seeds produce different rotations");
+	ASSERT_TRUE(different, "different seeds produce different rotations");
 
 	mkt_rabitq_destroy(p1);
 	mkt_rabitq_destroy(p2);
@@ -951,8 +953,7 @@ TEST(unsupported_dimension_fails)
 {
 	/* dim=17 is prime — Hadamard can't factor it; mkt_rabitq_create
 	 * must fail rather than silently returning broken params. */
-	ASSERT_NULL(mkt_rabitq_create(17, 42),
-				"prime dim should be rejected");
+	ASSERT_NULL(mkt_rabitq_create(17, 42), "prime dim should be rejected");
 }
 
 /*
@@ -1302,7 +1303,7 @@ TEST(data_lower_bound_multi_dim)
 		 * therefore allow ≤ 1 violation; tighter check (==0) is too
 		 * strict for the randomized-Hadamard rotation, which has
 		 * slightly higher tail variance than fully-random orthonormal. */
-		int max_allowed = 1;
+		int	 max_allowed = 1;
 		char msg[128];
 		snprintf(
 				msg,

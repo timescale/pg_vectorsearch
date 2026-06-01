@@ -60,9 +60,9 @@ typedef struct MktCentroidScratch MktCentroidScratch;
  * candidates per level. Returns NULL on failure. cleanup releases
  * the underlying buffers.
  */
-MktCentroidScratch *mkt_centroid_scratch_create(Dimension dim,
-												uint32_t  max_beam_width);
-void				mkt_centroid_scratch_free(MktCentroidScratch *scratch);
+MktCentroidScratch		*
+mkt_centroid_scratch_create(Dimension dim, uint32_t max_beam_width);
+void mkt_centroid_scratch_free(MktCentroidScratch *scratch);
 
 /* ----------------------------------------------------------------
  * Search state
@@ -78,7 +78,7 @@ typedef struct MktCentroidSearchState
 	DistanceMetric			metric; /* distance metric for routing */
 	/* Pre-allocated scratch. Must be non-NULL and sized for at least
 	 * this state's beam_width / nprobe. */
-	MktCentroidScratch	   *scratch;
+	MktCentroidScratch *scratch;
 } MktCentroidSearchState;
 
 /* ----------------------------------------------------------------

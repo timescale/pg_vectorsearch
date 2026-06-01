@@ -121,7 +121,7 @@ mkt_centroid_derive_f_error(float f_add, float f_rescale, Dimension dim)
 	float f_rsq = f_rescale * f_rescale;
 	if (f_rsq > f_add && dim > 1)
 	{
-		float c_err = 2.0f * MKT_RABITQ_EPSILON / sqrtf((float) (dim - 1));
+		float c_err = 2.0f * MKT_RABITQ_EPSILON / sqrtf((float)(dim - 1));
 		return c_err * sqrtf(f_rsq - f_add);
 	}
 	return 2e-4f * sqrtf(f_add);
@@ -131,7 +131,22 @@ mkt_centroid_derive_f_error(float f_add, float f_rescale, Dimension dim)
  * the static array in fastscan.c — it's tiny enough to duplicate
  * rather than expose. */
 static const int kPerm0_centroid[16] = {
-		0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15,
+		0,
+		8,
+		1,
+		9,
+		2,
+		10,
+		3,
+		11,
+		4,
+		12,
+		5,
+		13,
+		6,
+		14,
+		7,
+		15,
 };
 
 /* Pack one group of up to 32 1-bit codes into the kPerm0 layout
@@ -140,10 +155,11 @@ static const int kPerm0_centroid[16] = {
  * packed_bytes = ceil(dim/8) bytes); `n_valid` is how many of
  * those slots are real (the rest are zero-padded). */
 static void
-pack_one_group(const uint8_t *bits_1bit,
-			   uint32_t		  n_valid,
-			   Dimension	  dim,
-			   uint8_t		 *codes_out)
+pack_one_group(
+		const uint8_t *bits_1bit,
+		uint32_t	   n_valid,
+		Dimension	   dim,
+		uint8_t		  *codes_out)
 {
 	uint32_t packed_bytes = (dim + 7) / 8;
 
@@ -153,9 +169,8 @@ pack_one_group(const uint8_t *bits_1bit,
 	{
 		uint8_t raw[MKT_FASTSCAN_GROUP];
 		for (uint32_t v = 0; v < MKT_FASTSCAN_GROUP; v++)
-			raw[v] = (v < n_valid)
-							 ? bits_1bit[(size_t) v * packed_bytes + col]
-							 : 0;
+			raw[v] = (v < n_valid) ? bits_1bit[(size_t)v * packed_bytes + col]
+								   : 0;
 
 		uint8_t upper[MKT_FASTSCAN_GROUP];
 		uint8_t lower[MKT_FASTSCAN_GROUP];
@@ -165,7 +180,7 @@ pack_one_group(const uint8_t *bits_1bit,
 			lower[v] = raw[v] & 0x0F;
 		}
 
-		uint8_t *out = codes_out + (size_t) col * MKT_FASTSCAN_GROUP;
+		uint8_t *out = codes_out + (size_t)col * MKT_FASTSCAN_GROUP;
 		for (uint32_t j = 0; j < 16; j++)
 		{
 			out[j] = lower[kPerm0_centroid[j]] |
@@ -189,9 +204,9 @@ mkt_centroid_write_fastscan_pages(
 		const BlockNumber  *child_blknos,
 		BlockNumber			start_blkno)
 {
-	(void) flags; /* per-entry flags not stored in FASTSCAN format */
+	(void)flags; /* per-entry flags not stored in FASTSCAN format */
 
-	uint32_t packed_bytes	= (dim + 7) / 8;
+	uint32_t packed_bytes	 = (dim + 7) / 8;
 	uint32_t groups_per_page = mkt_centroid_fastscan_max_groups(dim);
 	if (groups_per_page == 0)
 		groups_per_page = 1; /* defensive — bigger dims may need split */
@@ -200,9 +215,8 @@ mkt_centroid_write_fastscan_pages(
 
 	/* Scratch for one group's RaBitQ data (32 entries). */
 	size_t	 rdata_size = MKT_RABITQ_DATA_SIZE(dim);
-	uint8_t *rdata_buf	= mkt_alloc((size_t) MKT_FASTSCAN_GROUP * rdata_size);
-	uint8_t *bits_buf =
-			mkt_alloc((size_t) MKT_FASTSCAN_GROUP * packed_bytes);
+	uint8_t *rdata_buf	= mkt_alloc((size_t)MKT_FASTSCAN_GROUP * rdata_size);
+	uint8_t *bits_buf	= mkt_alloc((size_t)MKT_FASTSCAN_GROUP * packed_bytes);
 
 	VectorRef mref = {.data = global_mean, .dim = dim};
 
@@ -245,8 +259,8 @@ mkt_centroid_write_fastscan_pages(
 				cur_page = mkt_storage_write_page(storage, cur_blkno);
 			}
 
-			prev_blkno	 = cur_blkno;
-			cur_ngroups	 = 0;
+			prev_blkno	= cur_blkno;
+			cur_ngroups = 0;
 		}
 
 		/* Encode this group's 32 entries (or fewer for the last). */
@@ -260,46 +274,43 @@ mkt_centroid_write_fastscan_pages(
 		for (uint32_t v = 0; v < g_count; v++)
 		{
 			VectorRef vref = {
-					.data = vectors + (size_t) (g_start + v) * dim,
+					.data = vectors + (size_t)(g_start + v) * dim,
 					.dim  = dim,
 			};
-			RaBitQData *d = (RaBitQData *) (rdata_buf + (size_t) v * rdata_size);
+			RaBitQData *d = (RaBitQData *)(rdata_buf + (size_t)v * rdata_size);
 			mkt_rabitq_encode_into(params, vref, mref, d);
-			memcpy(bits_buf + (size_t) v * packed_bytes,
-				   d->bits,
-				   packed_bytes);
+			memcpy(bits_buf + (size_t)v * packed_bytes, d->bits, packed_bytes);
 		}
 
 		/* Write per-entry scalars + child_blkno arrays into the
 		 * group section, then pack codes. */
 		uint32_t cur_group_idx = cur_ngroups;
-		char	*content	   = (char *) PageGetContents(cur_page);
+		char	*content	   = (char *)PageGetContents(cur_page);
 
-		BlockNumber *child = mkt_centroid_fastscan_group_child(
-				content, cur_group_idx, dim);
-		float *f_add_arr = mkt_centroid_fastscan_group_f_add(
-				content, cur_group_idx, dim);
+		BlockNumber *child =
+				mkt_centroid_fastscan_group_child(content, cur_group_idx, dim);
+		float *f_add_arr =
+				mkt_centroid_fastscan_group_f_add(content, cur_group_idx, dim);
 		float *f_rescale_arr = mkt_centroid_fastscan_group_f_rescale(
 				content, cur_group_idx, dim);
 		float *f_error_arr = mkt_centroid_fastscan_group_f_error(
 				content, cur_group_idx, dim);
-		uint8_t *codes = mkt_centroid_fastscan_group_codes(
-				content, cur_group_idx, dim);
+		uint8_t *codes =
+				mkt_centroid_fastscan_group_codes(content, cur_group_idx, dim);
 
 		for (uint32_t v = 0; v < MKT_FASTSCAN_GROUP; v++)
 		{
 			if (v < g_count)
 			{
-				const RaBitQData *d = (const RaBitQData *) (rdata_buf +
-															(size_t) v *
-																	rdata_size);
-				child[v]	 = child_blknos != NULL
-									 ? child_blknos[g_start + v]
-									 : InvalidBlockNumber;
-				f_add_arr[v]	 = d->f_add;
+				const RaBitQData *d = (const RaBitQData *)(rdata_buf +
+														   (size_t)v *
+																   rdata_size);
+				child[v]	 = child_blknos != NULL ? child_blknos[g_start + v]
+													: InvalidBlockNumber;
+				f_add_arr[v] = d->f_add;
 				f_rescale_arr[v] = d->f_rescale;
 				f_error_arr[v]	 = mkt_centroid_derive_f_error(
-						 d->f_add, d->f_rescale, dim);
+						  d->f_add, d->f_rescale, dim);
 			}
 			else
 			{
@@ -313,13 +324,13 @@ mkt_centroid_write_fastscan_pages(
 		pack_one_group(bits_buf, g_count, dim, codes);
 
 		MktCentroidPageOpaque *op = MKT_CENTROID_OPAQUE(cur_page);
-		op->entry_count += (uint16_t) g_count;
+		op->entry_count += (uint16_t)g_count;
 		cur_ngroups++;
 
 		/* Bump pd_lower so PostgreSQL's hole-compression preserves
 		 * our writes. FASTSCAN doesn't use the backward data region
 		 * — everything lives in the forward content area. */
-		PageHeader header = (PageHeader) cur_page;
+		PageHeader header = (PageHeader)cur_page;
 		header->pd_lower += mkt_centroid_fastscan_group_bytes(dim);
 	}
 

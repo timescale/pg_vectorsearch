@@ -121,8 +121,8 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 		/* Flat/brute-force: allocate standalone buffers */
 		uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
 
-		ctx->query_buf		  = mkt_alloc(dim * sizeof(float));
-		ctx->beam_results	  = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
+		ctx->query_buf	  = mkt_alloc(dim * sizeof(float));
+		ctx->beam_results = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
 		ctx->centroid_scratch = mkt_centroid_scratch_create(dim, max_nprobe);
 		mkt_topk_init(&ctx->topk, max_k);
 

@@ -178,7 +178,7 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 	}
 
 	BlockNumber first_centroid = meta->first_centroid;
-	Dimension	dim			   = (Dimension) meta->dim;
+	Dimension	dim			   = (Dimension)meta->dim;
 	uint8_t		nlevels		   = meta->nlevels;
 
 	UnlockReleaseBuffer(meta_buf);
@@ -223,26 +223,25 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 
 		if (fmt == MKT_CENTROID_FMT_FASTSCAN)
 		{
-			char *content = (char *) PageGetContents(page);
+			char *content = (char *)PageGetContents(page);
 
 			for (uint16_t i = 0; i < nentries; i++)
 			{
-				uint32_t	 g	   = i / MKT_FASTSCAN_GROUP;
-				uint32_t	 slot  = i % MKT_FASTSCAN_GROUP;
-				BlockNumber *child = mkt_centroid_fastscan_group_child(
-						content, g, dim);
+				uint32_t	 g	  = i / MKT_FASTSCAN_GROUP;
+				uint32_t	 slot = i % MKT_FASTSCAN_GROUP;
+				BlockNumber *child =
+						mkt_centroid_fastscan_group_child(content, g, dim);
 
 				Datum values[7];
 				bool  nulls[7] = {0};
 
-				values[0] = Int32GetDatum((int32) blkno);
-				values[1] = Int16GetDatum((int16) i);
-				values[2] = Int16GetDatum((int16) opaque->level);
-				values[3] = CStringGetTextDatum(
-						centroid_format_names[fmt]);
+				values[0] = Int32GetDatum((int32)blkno);
+				values[1] = Int16GetDatum((int16)i);
+				values[2] = Int16GetDatum((int16)opaque->level);
+				values[3] = CStringGetTextDatum(centroid_format_names[fmt]);
 
 				if (BlockNumberIsValid(child[slot]))
-					values[4] = Int32GetDatum((int32) child[slot]);
+					values[4] = Int32GetDatum((int32)child[slot]);
 				else
 					nulls[4] = true;
 
@@ -262,9 +261,8 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 					if (worklist_len >= worklist_cap)
 					{
 						worklist_cap *= 2;
-						worklist	 = repalloc(
-								 worklist,
-								 worklist_cap * sizeof(BlockNumber));
+						worklist = repalloc(
+								worklist, worklist_cap * sizeof(BlockNumber));
 					}
 					worklist[worklist_len++] = child[slot];
 				}
@@ -280,17 +278,17 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 				Datum values[7];
 				bool  nulls[7] = {0};
 
-				values[0] = Int32GetDatum((int32) blkno);
-				values[1] = Int16GetDatum((int16) i);
-				values[2] = Int16GetDatum((int16) opaque->level);
+				values[0] = Int32GetDatum((int32)blkno);
+				values[1] = Int16GetDatum((int16)i);
+				values[2] = Int16GetDatum((int16)opaque->level);
 				values[3] = CStringGetTextDatum(centroid_format_names[fmt]);
 
 				if (!is_leaf && BlockNumberIsValid(entry->child_blkno))
-					values[4] = Int32GetDatum((int32) entry->child_blkno);
+					values[4] = Int32GetDatum((int32)entry->child_blkno);
 				else
 					nulls[4] = true;
 
-				values[5] = Int16GetDatum((int16) entry->child_count);
+				values[5] = Int16GetDatum((int16)entry->child_count);
 				values[6] = BoolGetDatum(is_leaf);
 
 				tuplestore_putvalues(
@@ -301,9 +299,8 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 					if (worklist_len >= worklist_cap)
 					{
 						worklist_cap *= 2;
-						worklist	 = repalloc(
-								 worklist,
-								 worklist_cap * sizeof(BlockNumber));
+						worklist = repalloc(
+								worklist, worklist_cap * sizeof(BlockNumber));
 					}
 					worklist[worklist_len++] = entry->child_blkno;
 				}

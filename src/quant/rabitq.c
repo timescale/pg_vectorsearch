@@ -1077,8 +1077,8 @@ mkt_rabitq_rotate_batch(
 	for (uint32_t i = 0; i < count; i++)
 		mkt_fast_rotate_apply(
 				&params->fast,
-				inputs + (size_t) i * dim,
-				outputs + (size_t) i * dim);
+				inputs + (size_t)i * dim,
+				outputs + (size_t)i * dim);
 }
 
 void

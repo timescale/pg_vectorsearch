@@ -37,7 +37,7 @@
  * still issue this as two ops on V1 (no USRA path), but the cost is a
  * single extra cycle in a deeply-pipelined inner loop, which is
  * negligible compared to the table-lookup throughput. */
-#define SVE_SRA_U16(pg, acc, x, n)                                 \
+#define SVE_SRA_U16(pg, acc, x, n) \
 	svadd_u16_x((pg), (acc), svlsr_n_u16_x((pg), (x), (n)))
 
 __attribute__((target("+sve"))) void
@@ -141,18 +141,22 @@ mkt_fastscan_accumulate_sve(
 		accu3b = SVE_SRA_U16(pg, accu3b, rhi1, 8);
 	}
 
-	svuint16_t accu0 =
-			svadd_u16_x(pg, svadd_u16_x(pg, accu0a, accu0b),
-						svadd_u16_x(pg, accu0c, accu0d));
-	svuint16_t accu1 =
-			svadd_u16_x(pg, svadd_u16_x(pg, accu1a, accu1b),
-						svadd_u16_x(pg, accu1c, accu1d));
-	svuint16_t accu2 =
-			svadd_u16_x(pg, svadd_u16_x(pg, accu2a, accu2b),
-						svadd_u16_x(pg, accu2c, accu2d));
-	svuint16_t accu3 =
-			svadd_u16_x(pg, svadd_u16_x(pg, accu3a, accu3b),
-						svadd_u16_x(pg, accu3c, accu3d));
+	svuint16_t accu0 = svadd_u16_x(
+			pg,
+			svadd_u16_x(pg, accu0a, accu0b),
+			svadd_u16_x(pg, accu0c, accu0d));
+	svuint16_t accu1 = svadd_u16_x(
+			pg,
+			svadd_u16_x(pg, accu1a, accu1b),
+			svadd_u16_x(pg, accu1c, accu1d));
+	svuint16_t accu2 = svadd_u16_x(
+			pg,
+			svadd_u16_x(pg, accu2a, accu2b),
+			svadd_u16_x(pg, accu2c, accu2d));
+	svuint16_t accu3 = svadd_u16_x(
+			pg,
+			svadd_u16_x(pg, accu3a, accu3b),
+			svadd_u16_x(pg, accu3c, accu3d));
 
 	accu0 = svsub_u16_x(pg, accu0, svlsl_n_u16_x(pg, accu1, 8));
 	accu2 = svsub_u16_x(pg, accu2, svlsl_n_u16_x(pg, accu3, 8));
@@ -288,19 +292,19 @@ mkt_fastscan_accumulate_hacc_sve(
 
 	svbool_t pg32 = svptrue_b32();
 
-#define WIDEN_AND_STORE(lo_acc, hi_acc, off)                              \
-	do                                                                    \
-	{                                                                     \
-		svuint32_t lo_lo = svunpklo_u32(lo_acc);                          \
-		svuint32_t lo_hi = svunpkhi_u32(lo_acc);                          \
-		svuint32_t hi_lo = svunpklo_u32(hi_acc);                          \
-		svuint32_t hi_hi = svunpkhi_u32(hi_acc);                          \
-		svint32_t  r_lo	 = svreinterpret_s32_u32(                         \
-				 svadd_u32_x(pg32, lo_lo, svlsl_n_u32_x(pg32, hi_lo, 8))); \
-		svint32_t r_hi = svreinterpret_s32_u32(                           \
-				svadd_u32_x(pg32, lo_hi, svlsl_n_u32_x(pg32, hi_hi, 8))); \
-		svst1_s32(pg32, accum + (off), r_lo);                             \
-		svst1_s32(pg32, accum + (off) + 4, r_hi);                         \
+#define WIDEN_AND_STORE(lo_acc, hi_acc, off)                                \
+	do                                                                      \
+	{                                                                       \
+		svuint32_t lo_lo = svunpklo_u32(lo_acc);                            \
+		svuint32_t lo_hi = svunpkhi_u32(lo_acc);                            \
+		svuint32_t hi_lo = svunpklo_u32(hi_acc);                            \
+		svuint32_t hi_hi = svunpkhi_u32(hi_acc);                            \
+		svint32_t  r_lo	 = svreinterpret_s32_u32(                           \
+				  svadd_u32_x(pg32, lo_lo, svlsl_n_u32_x(pg32, hi_lo, 8))); \
+		svint32_t r_hi = svreinterpret_s32_u32(                             \
+				svadd_u32_x(pg32, lo_hi, svlsl_n_u32_x(pg32, hi_hi, 8)));   \
+		svst1_s32(pg32, accum + (off), r_lo);                               \
+		svst1_s32(pg32, accum + (off) + 4, r_hi);                           \
 	} while (0)
 
 	WIDEN_AND_STORE(lo0acc, hi0acc, 0);

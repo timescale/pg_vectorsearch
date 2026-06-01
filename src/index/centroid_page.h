@@ -75,9 +75,9 @@
 
 typedef enum MktCentroidFormat
 {
-	MKT_CENTROID_FMT_RABITQ	  = 0,
-	MKT_CENTROID_FMT_FLOAT	  = 1,
-	MKT_CENTROID_FMT_HALF	  = 2,
+	MKT_CENTROID_FMT_RABITQ = 0,
+	MKT_CENTROID_FMT_FLOAT	= 1,
+	MKT_CENTROID_FMT_HALF	= 2,
 	/*
 	 * FASTSCAN: same RaBitQ codes as the RABITQ format, but rearranged
 	 * into 32-vector groups with kPerm0 interleaving so the centroid
@@ -161,8 +161,8 @@ mkt_centroid_data_size(Dimension dim, MktCentroidFormat fmt)
 		/* Average per-entry overhead inside a fastscan group. Used
 		 * only by the legacy "data_size × N" capacity check; the
 		 * real layout is group-based — see mkt_centroid_fastscan_*. */
-		return (uint32_t) (MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
-						   MKT_FASTSCAN_GROUP_BYTES(dim)) /
+		return (uint32_t)(MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
+						  MKT_FASTSCAN_GROUP_BYTES(dim)) /
 			   MKT_FASTSCAN_GROUP;
 	default:
 		return MKT_RABITQ_DATA_SIZE(dim);
@@ -198,12 +198,11 @@ mkt_centroid_max_entries_fmt(Dimension dim, MktCentroidFormat fmt)
 	{
 		/* fastscan stores entries in 32-vector groups; max_entries is
 		 * ngroups * 32. See mkt_centroid_fastscan_group_bytes. */
-		uint32_t group_bytes = (uint32_t) (MKT_FASTSCAN_GROUP *
-											   sizeof(BlockNumber) +
-										   MKT_FASTSCAN_GROUP * 3 *
-											   sizeof(float) +
-										   MKT_FASTSCAN_GROUP_BYTES(dim));
-		uint32_t ngroups = (uint32_t) MKT_CENTROID_PAGE_USABLE / group_bytes;
+		uint32_t group_bytes =
+				(uint32_t)(MKT_FASTSCAN_GROUP * sizeof(BlockNumber) +
+						   MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
+						   MKT_FASTSCAN_GROUP_BYTES(dim));
+		uint32_t ngroups = (uint32_t)MKT_CENTROID_PAGE_USABLE / group_bytes;
 		return ngroups * MKT_FASTSCAN_GROUP;
 	}
 	return (uint32_t)(MKT_CENTROID_PAGE_USABLE /
@@ -238,15 +237,15 @@ mkt_centroid_max_entries_fmt(Dimension dim, MktCentroidFormat fmt)
 static inline uint32_t
 mkt_centroid_fastscan_group_bytes(Dimension dim)
 {
-	return (uint32_t) (MKT_FASTSCAN_GROUP * sizeof(BlockNumber) +
-					   MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
-					   MKT_FASTSCAN_GROUP_BYTES(dim));
+	return (uint32_t)(MKT_FASTSCAN_GROUP * sizeof(BlockNumber) +
+					  MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
+					  MKT_FASTSCAN_GROUP_BYTES(dim));
 }
 
 static inline uint32_t
 mkt_centroid_fastscan_max_groups(Dimension dim)
 {
-	return (uint32_t) MKT_CENTROID_PAGE_USABLE /
+	return (uint32_t)MKT_CENTROID_PAGE_USABLE /
 		   mkt_centroid_fastscan_group_bytes(dim);
 }
 
@@ -254,20 +253,20 @@ mkt_centroid_fastscan_max_groups(Dimension dim)
 static inline char *
 mkt_centroid_fastscan_group_base(char *content, uint32_t g, Dimension dim)
 {
-	return content + (size_t) g * mkt_centroid_fastscan_group_bytes(dim);
+	return content + (size_t)g * mkt_centroid_fastscan_group_bytes(dim);
 }
 
 static inline BlockNumber *
 mkt_centroid_fastscan_group_child(char *content, uint32_t g, Dimension dim)
 {
-	return (BlockNumber *) mkt_centroid_fastscan_group_base(content, g, dim);
+	return (BlockNumber *)mkt_centroid_fastscan_group_base(content, g, dim);
 }
 
 static inline float *
 mkt_centroid_fastscan_group_f_add(char *content, uint32_t g, Dimension dim)
 {
-	return (float *) (mkt_centroid_fastscan_group_base(content, g, dim) +
-					  MKT_FASTSCAN_GROUP * sizeof(BlockNumber));
+	return (float *)(mkt_centroid_fastscan_group_base(content, g, dim) +
+					 MKT_FASTSCAN_GROUP * sizeof(BlockNumber));
 }
 
 static inline float *
@@ -287,8 +286,8 @@ mkt_centroid_fastscan_group_f_error(char *content, uint32_t g, Dimension dim)
 static inline uint8_t *
 mkt_centroid_fastscan_group_codes(char *content, uint32_t g, Dimension dim)
 {
-	return (uint8_t *) (mkt_centroid_fastscan_group_f_error(content, g, dim) +
-						MKT_FASTSCAN_GROUP);
+	return (uint8_t *)(mkt_centroid_fastscan_group_f_error(content, g, dim) +
+					   MKT_FASTSCAN_GROUP);
 }
 
 /* Maximum entries per leaf page (includes pt_centroid per entry) */

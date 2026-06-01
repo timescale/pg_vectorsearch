@@ -110,7 +110,7 @@ static BufHintEntry buf_hint[MKT_BUF_HINT_SIZE];
 static inline uint32_t
 buf_hint_slot(BlockNumber blkno)
 {
-	uint32_t h = (uint32_t) blkno;
+	uint32_t h = (uint32_t)blkno;
 	h		   = (h >> 13) ^ (h << 7) ^ h;
 	return h & (MKT_BUF_HINT_SIZE - 1);
 }
@@ -142,8 +142,8 @@ pg_read_page(MktStorage *self, BlockNumber blkno)
 	if (entry->rel == rel && entry->blkno == blkno &&
 		entry->buf != InvalidBuffer)
 	{
-		if (ReadRecentBuffer(s->index->rd_locator, MAIN_FORKNUM, blkno,
-							 entry->buf))
+		if (ReadRecentBuffer(
+					s->index->rd_locator, MAIN_FORKNUM, blkno, entry->buf))
 			buf = entry->buf;
 		/* On false: hint was stale (slot evicted/reused). Fall
 		 * through to ReadBuffer and refresh the entry below. */

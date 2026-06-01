@@ -4,6 +4,8 @@
 
 #include <postgres.h>
 
+#include "mkt_config.h"
+
 #include <access/reloptions.h>
 #include <catalog/namespace.h>
 #include <fmgr.h>

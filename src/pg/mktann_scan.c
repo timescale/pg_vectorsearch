@@ -209,8 +209,8 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 		 * CacheMemoryContext, grow on demand, and let `dedup_gen`
 		 * (process-monotonic) invalidate across scans. */
 		dedup_buffers_get(cap, &ss->qstate.dedup_set, &ss->qstate.dedup_gens);
-		ss->qstate.dedup_cap  = cap;
-		ss->qstate.dedup_gen  = dedup_gen_next();
+		ss->qstate.dedup_cap = cap;
+		ss->qstate.dedup_gen = dedup_gen_next();
 	}
 
 	/* Pre-allocate result buffer. The error-bound rerank can return more than

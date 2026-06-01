@@ -61,7 +61,7 @@ mkt_rabitq_params_generate_pg(PG_FUNCTION_ARGS)
 
 	mkt_pg_check_dim_valid(dim);
 
-	if (!mkt_fast_rotate_supported((Dimension) dim))
+	if (!mkt_fast_rotate_supported((Dimension)dim))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unsupported dim %d for RaBitQ rotation", dim),
@@ -69,11 +69,11 @@ mkt_rabitq_params_generate_pg(PG_FUNCTION_ARGS)
 						 "≥ 4 and K ≤ 8")));
 
 	int				size   = MKT_RABITQ_PARAMS_PG_SIZE(dim);
-	RaBitQParamsPG *result = (RaBitQParamsPG *) palloc0(size);
+	RaBitQParamsPG *result = (RaBitQParamsPG *)palloc0(size);
 	SET_VARSIZE(result, size);
-	result->dim	   = (int16_t) dim;
+	result->dim	   = (int16_t)dim;
 	result->unused = 0;
-	result->seed   = (uint64_t) seed;
+	result->seed   = (uint64_t)seed;
 
 	PG_RETURN_POINTER(result);
 }

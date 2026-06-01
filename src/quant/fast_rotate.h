@@ -33,27 +33,27 @@
 
 /* Max dim with inline signs storage. 8192 covers every embedding
  * dim we care about (cohere-768, openai-1536, etc.) at 1 KB. */
-#define MKT_FAST_ROTATE_MAX_DIM	   8192
-#define MKT_FAST_ROTATE_MAX_SIGNS  ((MKT_FAST_ROTATE_MAX_DIM + 7) / 8)
+#define MKT_FAST_ROTATE_MAX_DIM	  8192
+#define MKT_FAST_ROTATE_MAX_SIGNS ((MKT_FAST_ROTATE_MAX_DIM + 7) / 8)
 
 typedef struct MktFastRotateParams
 {
-	Dimension dim;		/* total vector dimension */
-	Dimension fwht_n;	/* power-of-two FWHT length (= dim when K==1) */
-	uint32_t  k;		/* outer "mixing" radix; K==1 means pure FWHT */
-	uint64_t  seed;		/* regenerates signs+mixer deterministically */
+	Dimension dim;	  /* total vector dimension */
+	Dimension fwht_n; /* power-of-two FWHT length (= dim when K==1) */
+	uint32_t  k;	  /* outer "mixing" radix; K==1 means pure FWHT */
+	uint64_t  seed;	  /* regenerates signs+mixer deterministically */
 	/* Pre-FWHT sign-flip vector (D1) and post-FWHT sign-flip vector
 	 * (D2) — two independent rounds of randomisation. A single round
 	 * (D1 only) is isotropic in expectation but its concentration is
 	 * weaker than a dense Haar-random orthonormal, enough to break
 	 * the strict RaBitQ lower-bound at small dim. Two rounds match
 	 * the FJLT recipe and recover the worst-case bound. */
-	uint8_t	  signs1[MKT_FAST_ROTATE_MAX_SIGNS];
-	uint8_t	  signs2[MKT_FAST_ROTATE_MAX_SIGNS];
+	uint8_t signs1[MKT_FAST_ROTATE_MAX_SIGNS];
+	uint8_t signs2[MKT_FAST_ROTATE_MAX_SIGNS];
 	/* Random K×K orthonormal matrix applied across the K sub-blocks
 	 * after the per-block FWHT. Generated from seed; identity slot
 	 * unused when K==1. Stored row-major as K*K floats. */
-	float	  mixer[MKT_FAST_ROTATE_K_MAX * MKT_FAST_ROTATE_K_MAX];
+	float mixer[MKT_FAST_ROTATE_K_MAX * MKT_FAST_ROTATE_K_MAX];
 } MktFastRotateParams;
 
 /* True if fast rotation is supported at the given dimension.
@@ -61,8 +61,8 @@ typedef struct MktFastRotateParams
 bool mkt_fast_rotate_supported(Dimension dim);
 
 /* Initialise sign vector + mixer from seed. */
-void mkt_fast_rotate_init(
-		MktFastRotateParams *p, Dimension dim, uint64_t seed);
+void
+mkt_fast_rotate_init(MktFastRotateParams *p, Dimension dim, uint64_t seed);
 
 /* Apply F = (1/sqrt(dim)) * M * H * D to `in`, writing into `out`.
  * H is the block-diagonal FWHT on K blocks of length N; M is the K×K

@@ -75,7 +75,7 @@ init_mixer(float *m, uint32_t k, uint64_t *prng_state)
 			/* Standard normal via Box-Muller would be cleaner but the
 			 * mixer just needs to be a non-degenerate basis to
 			 * orthogonalise — uniform in [-1, 1] is fine. */
-			v[i][j] = (float) ((double) r / (double) UINT64_MAX) * 2.0f - 1.0f;
+			v[i][j] = (float)((double)r / (double)UINT64_MAX) * 2.0f - 1.0f;
 		}
 
 	/* Modified Gram-Schmidt */
@@ -114,11 +114,10 @@ init_mixer(float *m, uint32_t k, uint64_t *prng_state)
 }
 
 void
-mkt_fast_rotate_init(
-		MktFastRotateParams *p, Dimension dim, uint64_t seed)
+mkt_fast_rotate_init(MktFastRotateParams *p, Dimension dim, uint64_t seed)
 {
-	p->dim	 = dim;
-	p->seed	 = seed;
+	p->dim	= dim;
+	p->seed = seed;
 
 	/* Factor dim = fwht_n * k with fwht_n the power-of-two part. */
 	uint32_t odd = dim;
@@ -161,10 +160,10 @@ fwht_inplace(float *a, Dimension n)
 		{
 			for (Dimension j = i; j < i + h; j++)
 			{
-				float x	   = a[j];
-				float y	   = a[j + h];
-				a[j]	   = x + y;
-				a[j + h]   = x - y;
+				float x	 = a[j];
+				float y	 = a[j + h];
+				a[j]	 = x + y;
+				a[j + h] = x - y;
 			}
 		}
 	}
@@ -173,8 +172,8 @@ fwht_inplace(float *a, Dimension n)
 /* Apply the K×K mixer matrix M to the K-vector formed by taking
  * `col` from each of K rows. Mixer rows = K, columns = K. */
 static inline void
-apply_mixer_column(float *out, const float *m, uint32_t k, Dimension n,
-				   Dimension col)
+apply_mixer_column(
+		float *out, const float *m, uint32_t k, Dimension n, Dimension col)
 {
 	float tmp[MKT_FAST_ROTATE_K_MAX];
 	for (uint32_t i = 0; i < k; i++)
@@ -195,14 +194,14 @@ void
 mkt_fast_rotate_apply(
 		const MktFastRotateParams *p, const float *in, float *out)
 {
-	Dimension dim	 = p->dim;
-	Dimension n		 = p->fwht_n;
-	uint32_t  k		 = p->k;
+	Dimension dim = p->dim;
+	Dimension n	  = p->fwht_n;
+	uint32_t  k	  = p->k;
 	/* Unscaled FWHT on a length-N block has Parseval factor N
 	 * (||y||² = N · ||x||²). The K×K mixer is unit-norm. So pre-scale
 	 * by 1/sqrt(N), NOT 1/sqrt(dim) — that gets the overall map to
 	 * unit-norm regardless of K. */
-	float	  invsq	 = 1.0f / sqrtf((float) n);
+	float invsq = 1.0f / sqrtf((float)n);
 
 	/* Pre-FWHT sign flip (D1) + scale. Folding the 1/sqrt(N) scale
 	 * into this pass means the butterflies and mixer can run on plain
@@ -216,7 +215,7 @@ mkt_fast_rotate_apply(
 	/* FWHT on each of K sub-blocks of length N. When K==1 this is
 	 * just the classic randomised Hadamard rotation. */
 	for (uint32_t b = 0; b < k; b++)
-		fwht_inplace(out + (size_t) b * n, n);
+		fwht_inplace(out + (size_t)b * n, n);
 
 	/* K×K mixer across the blocks. Skip when K==1: mixer is identity. */
 	if (k > 1)
@@ -233,6 +232,6 @@ mkt_fast_rotate_apply(
 	for (Dimension i = 0; i < dim; i++)
 	{
 		float sign = ((p->signs2[i >> 3] >> (i & 7)) & 1u) ? -1.0f : 1.0f;
-		out[i]	  *= sign;
+		out[i] *= sign;
 	}
 }

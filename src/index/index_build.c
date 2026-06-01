@@ -65,13 +65,13 @@ mkt_write_centroid_tree(
 
 		if (centroid_format == MKT_CENTROID_FMT_FASTSCAN)
 		{
-			(void) child_count;
-			(void) pt_centroids; /* pt_centroids live on posting pages */
+			(void)child_count;
+			(void)pt_centroids; /* pt_centroids live on posting pages */
 			mkt_centroid_write_fastscan_pages(
 					storage,
 					dim,
 					node->nchildren,
-					(uint8_t) node->level,
+					(uint8_t)node->level,
 					flags,
 					rq_params,
 					node->centroids,

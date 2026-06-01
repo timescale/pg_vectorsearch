@@ -57,9 +57,9 @@ seen_tid_check_and_insert(MktPostingScan *scan, uint64_t tid)
 	h *= 0xff51afd7ed558ccdULL;
 	h ^= h >> 33;
 
-	uint32_t mask  = scan->seen_tids_cap - 1;
-	uint32_t slot  = (uint32_t)h & mask;
-	uint32_t gen   = scan->seen_gen;
+	uint32_t  mask = scan->seen_tids_cap - 1;
+	uint32_t  slot = (uint32_t)h & mask;
+	uint32_t  gen  = scan->seen_gen;
 	uint64_t *tids = scan->seen_tids;
 	uint32_t *gens = scan->seen_gens;
 
@@ -576,15 +576,15 @@ fastscan_prune_group_neon(
 		int32x4_t	acc32 = vld1q_s32(scan->fs_accum + off);
 		float32x4_t acc_f = vcvtq_f32_s32(acc32);
 
-		float32x4_t ip	  = vmlaq_f32(bias_v, acc_f, scale_v);
+		float32x4_t ip	   = vmlaq_f32(bias_v, acc_f, scale_v);
 		float32x4_t two_ip = vmulq_f32(two_v, ip);
 		float32x4_t final_dot =
 				vmulq_f32(vsubq_f32(two_ip, sum_t_v), inv_sqrt_v);
 
-		float32x4_t fa	 = vld1q_f32(f_add + off);
-		float32x4_t fr	 = vld1q_f32(f_rescale + off);
-		float32x4_t est	 = vaddq_f32(fa, gadd_v);
-		est = vmlsq_f32(est, vmulq_f32(two_v, fr), final_dot);
+		float32x4_t fa	= vld1q_f32(f_add + off);
+		float32x4_t fr	= vld1q_f32(f_rescale + off);
+		float32x4_t est = vaddq_f32(fa, gadd_v);
+		est				= vmlsq_f32(est, vmulq_f32(two_v, fr), final_dot);
 
 		float32x4_t fe	= vld1q_f32(f_error + off);
 		float32x4_t err = vmulq_f32(fe, gerr_v);
@@ -598,8 +598,8 @@ fastscan_prune_group_neon(
 
 		/* Extract 4-bit survivor mask: each lane is 0xFFFFFFFF or 0.
 		 * AND with weighted lane mask then horizontal reduce. */
-		const uint32x4_t weights = {1, 2, 4, 8};
-		uint32x4_t		 bits	 = vandq_u32(cmp, weights);
+		const uint32x4_t weights	= {1, 2, 4, 8};
+		uint32x4_t		 bits		= vandq_u32(cmp, weights);
 		uint32_t		 chunk_bits = vaddvq_u32(bits);
 		surv_bits |= chunk_bits << off;
 	}

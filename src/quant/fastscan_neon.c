@@ -138,14 +138,14 @@ mkt_fastscan_accumulate_neon(
 	}
 
 	/* Combine all four banks. */
-	uint16x8_t accu0 = vaddq_u16(vaddq_u16(accu0a, accu0b),
-								 vaddq_u16(accu0c, accu0d));
-	uint16x8_t accu1 = vaddq_u16(vaddq_u16(accu1a, accu1b),
-								 vaddq_u16(accu1c, accu1d));
-	uint16x8_t accu2 = vaddq_u16(vaddq_u16(accu2a, accu2b),
-								 vaddq_u16(accu2c, accu2d));
-	uint16x8_t accu3 = vaddq_u16(vaddq_u16(accu3a, accu3b),
-								 vaddq_u16(accu3c, accu3d));
+	uint16x8_t accu0 =
+			vaddq_u16(vaddq_u16(accu0a, accu0b), vaddq_u16(accu0c, accu0d));
+	uint16x8_t accu1 =
+			vaddq_u16(vaddq_u16(accu1a, accu1b), vaddq_u16(accu1c, accu1d));
+	uint16x8_t accu2 =
+			vaddq_u16(vaddq_u16(accu2a, accu2b), vaddq_u16(accu2c, accu2d));
+	uint16x8_t accu3 =
+			vaddq_u16(vaddq_u16(accu3a, accu3b), vaddq_u16(accu3c, accu3d));
 
 	/* Remove upper byte contamination from even-byte accumulators */
 	accu0 = vsubq_u16(accu0, vshlq_n_u16(accu1, 8));
@@ -341,10 +341,10 @@ mkt_fastscan_build_lut_neon(
 	{
 		float32x4_t v0 = vld1q_f32(transformed + d);
 		float32x4_t v1 = vld1q_f32(transformed + d + 4);
-		pos_sum	 = vaddq_f32(pos_sum, vmaxq_f32(v0, zero));
-		neg_sum	 = vaddq_f32(neg_sum, vminq_f32(v0, zero));
-		pos_sum2 = vaddq_f32(pos_sum2, vmaxq_f32(v1, zero));
-		neg_sum2 = vaddq_f32(neg_sum2, vminq_f32(v1, zero));
+		pos_sum		   = vaddq_f32(pos_sum, vmaxq_f32(v0, zero));
+		neg_sum		   = vaddq_f32(neg_sum, vminq_f32(v0, zero));
+		pos_sum2	   = vaddq_f32(pos_sum2, vmaxq_f32(v1, zero));
+		neg_sum2	   = vaddq_f32(neg_sum2, vminq_f32(v1, zero));
 	}
 	for (; d + 4 <= dim; d += 4)
 	{
@@ -457,10 +457,10 @@ mkt_fastscan_build_lut_hacc_neon(
 	{
 		float32x4_t v0 = vld1q_f32(transformed + d);
 		float32x4_t v1 = vld1q_f32(transformed + d + 4);
-		pos_sum	 = vaddq_f32(pos_sum, vmaxq_f32(v0, zero));
-		neg_sum	 = vaddq_f32(neg_sum, vminq_f32(v0, zero));
-		pos_sum2 = vaddq_f32(pos_sum2, vmaxq_f32(v1, zero));
-		neg_sum2 = vaddq_f32(neg_sum2, vminq_f32(v1, zero));
+		pos_sum		   = vaddq_f32(pos_sum, vmaxq_f32(v0, zero));
+		neg_sum		   = vaddq_f32(neg_sum, vminq_f32(v0, zero));
+		pos_sum2	   = vaddq_f32(pos_sum2, vmaxq_f32(v1, zero));
+		neg_sum2	   = vaddq_f32(neg_sum2, vminq_f32(v1, zero));
 	}
 	for (; d + 4 <= dim; d += 4)
 	{
