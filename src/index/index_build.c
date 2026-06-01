@@ -7,7 +7,6 @@
 
 #include <math.h>
 
-#include "algo/distance.h"
 #include "algo/vecops.h"
 #include "core/log.h"
 #include "core/memory.h"
@@ -146,7 +145,21 @@ mkt_find_soar_secondary(
 		const float *normalized_residual,
 		double		 lambda)
 {
-	Distance best_oa = INFINITY;
+	/*
+	 * Orthogonality-amplified distance, decomposed so both terms use the
+	 * SIMD vecops kernels:
+	 *
+	 *   oa(c) = ||v - c||^2 + lambda * (r_hat . (v - c))^2
+	 *         = ||v - c||^2 + lambda * (r_hat.v - r_hat.c)^2
+	 *
+	 * r_hat.v is constant across centroids, so only ||v - c||^2 and
+	 * r_hat.c are per-centroid. Since lambda * (...)^2 >= 0, ||v - c||^2
+	 * is a lower bound on oa: when it already exceeds the running best we
+	 * skip the dot product (exact pruning — no recall impact).
+	 */
+	float	 qrv	 = mkt_dot_product(normalized_residual, vec, dim);
+	float	 lam	 = (float)lambda;
+	float	 best_oa = INFINITY;
 	uint32_t best_c	 = primary_cluster;
 
 	for (uint32_t i = 0; i < nleaves; i++)
@@ -154,18 +167,15 @@ mkt_find_soar_secondary(
 		if (i == primary_cluster)
 			continue;
 
-		const float *cent	 = leaf_centroids + (size_t)i * dim;
-		double		 sq_dist = 0.0;
-		double		 dot	 = 0.0;
+		const float *cent = leaf_centroids + (size_t)i * dim;
 
-		for (Dimension d = 0; d < dim; d++)
-		{
-			double diff = (double)vec[d] - (double)cent[d];
-			sq_dist += diff * diff;
-			dot += diff * (double)normalized_residual[d];
-		}
+		float l2 = mkt_l2_distance_squared(vec, cent, dim);
+		if (l2 >= best_oa)
+			continue; /* oa >= l2 >= best_oa: cannot improve */
 
-		Distance oa = (Distance)(sq_dist + lambda * dot * dot);
+		float rc  = mkt_dot_product(normalized_residual, cent, dim);
+		float gap = qrv - rc;
+		float oa  = l2 + lam * gap * gap;
 		if (oa < best_oa)
 		{
 			best_oa = oa;
