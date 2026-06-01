@@ -57,8 +57,11 @@ typedef struct MktBuildAssignment
 /* Centroids per tile. The secondary GEMM streams centroids in tiles so
  * the working set is B*TILE (not B*nleaves), keeping brute-force viable
  * at any nlist — the fallback to tree descent is then a performance
- * choice, not a memory limit. */
-#define MKT_SECONDARY_TILE 2048
+ * choice, not a memory limit. A small tile also keeps the per-worker
+ * B*TILE matrix hot in cache (the workers share L3), which measured
+ * faster than one large GEMM; ~512 is past the plateau without losing
+ * sgemm efficiency. */
+#define MKT_SECONDARY_TILE 512
 
 typedef struct MktBuildWorkerBufs
 {
