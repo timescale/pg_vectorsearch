@@ -79,6 +79,21 @@ typedef struct RaBitQParamsPG
  * Index reloptions
  * ---------------------------------------------------------------- */
 
+/*
+ * MktCentroidCompression - tri-state control for RaBitQ centroid pages.
+ *
+ * AUTO compresses where RaBitQ routing is correct (L2, cosine) and falls
+ * back to float for inner product, whose ordering cannot be recovered from
+ * RaBitQ's L2 distance estimate. ON forces compression and errors at build
+ * time for inner product. OFF disables compression.
+ */
+typedef enum
+{
+	MKT_CENTROID_COMPRESSION_AUTO = 0,
+	MKT_CENTROID_COMPRESSION_ON	  = 1,
+	MKT_CENTROID_COMPRESSION_OFF  = 2,
+} MktCentroidCompression;
+
 typedef struct MktannOptions
 {
 	int32  vl_len_;				 /* varlena header (required by reloptions) */
@@ -88,7 +103,7 @@ typedef struct MktannOptions
 	int	   kmeans_nredo;		 /* k-means restarts (1 = no restart) */
 	double soar_lambda;			 /* SOAR replication lambda (0=off) */
 	double boundary_epsilon;	 /* boundary replication threshold (0=off) */
-	bool   centroid_compression; /* use RaBitQ for centroid pages */
+	int	   centroid_compression; /* MktCentroidCompression */
 	bool   fastscan;			 /* use VPSHUFB fastscan posting format */
 } MktannOptions;
 

@@ -47,18 +47,20 @@ SHOW mkt.distance_mode;
 SET mkt.distance_mode = 'default';
 SHOW mkt.distance_mode;
 
--- L2 default (uncompressed float centroids) — build should work
-CREATE INDEX idx_l2_float ON embeddings USING mktann (v);
+-- L2 with uncompressed float centroids — build should work
+CREATE INDEX idx_l2_float ON embeddings USING mktann (v)
+    WITH (centroid_compression = off);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_l2_float';
 
--- IP opclass (uncompressed float centroids) — build should work
+-- IP opclass (centroid_compression=auto falls back to float) — build works
 CREATE INDEX idx_ip ON embeddings USING mktann (v vector_ip_ops);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_ip';
 
--- Cosine opclass (uncompressed float centroids) — build should work
-CREATE INDEX idx_cos ON embeddings USING mktann (v vector_cosine_ops);
+-- Cosine opclass with uncompressed float centroids — build should work
+CREATE INDEX idx_cos ON embeddings USING mktann (v vector_cosine_ops)
+    WITH (centroid_compression = off);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_cos';
 
@@ -96,7 +98,7 @@ RESET enable_seqscan;
 
 -- Multi-level tree with uncompressed float centroids
 CREATE INDEX idx_ml_float ON embeddings USING mktann (v)
-    WITH (fan_out = 4);
+    WITH (fan_out = 4, centroid_compression = off);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_ml_float';
 

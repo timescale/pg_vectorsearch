@@ -324,17 +324,36 @@ static MktCentroidFormat
 mktann_resolve_format(Relation index, DistanceMetric metric)
 {
 	MktannOptions *opts = (MktannOptions *)index->rd_options;
-	bool compressed		= (opts != NULL) ? opts->centroid_compression : false;
+	int			   cc	= (opts != NULL) ? opts->centroid_compression
+										 : MKT_CENTROID_COMPRESSION_AUTO;
 
-	if (compressed)
+	/*
+	 * RaBitQ centroids estimate L2 distance, which routes correctly for
+	 * L2 and (normalized) cosine but not inner product. ON forces it and
+	 * errors for inner product; AUTO compresses everything except inner
+	 * product; OFF disables it.
+	 */
+	bool compressed;
+	switch (cc)
 	{
+	case MKT_CENTROID_COMPRESSION_ON:
 		if (metric == DISTANCE_INNER_PRODUCT)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("centroid_compression is not supported "
+					 errmsg("centroid_compression=on is not supported "
 							"with vector_ip_ops")));
-		return MKT_CENTROID_FMT_RABITQ;
+		compressed = true;
+		break;
+	case MKT_CENTROID_COMPRESSION_OFF:
+		compressed = false;
+		break;
+	default: /* AUTO */
+		compressed = (metric != DISTANCE_INNER_PRODUCT);
+		break;
 	}
+
+	if (compressed)
+		return MKT_CENTROID_FMT_RABITQ;
 
 	Oid col_type = TupleDescAttr(index->rd_att, 0)->atttypid;
 	if (col_type == mkt_halfvec_type_oid())

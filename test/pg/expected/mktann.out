@@ -74,8 +74,9 @@ SHOW mkt.distance_mode;
  default
 (1 row)
 
--- L2 default (uncompressed float centroids) — build should work
-CREATE INDEX idx_l2_float ON embeddings USING mktann (v);
+-- L2 with uncompressed float centroids — build should work
+CREATE INDEX idx_l2_float ON embeddings USING mktann (v)
+    WITH (centroid_compression = off);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_l2_float';
  has_pages 
@@ -83,7 +84,7 @@ SELECT relpages > 0 AS has_pages FROM pg_class
  t
 (1 row)
 
--- IP opclass (uncompressed float centroids) — build should work
+-- IP opclass (centroid_compression=auto falls back to float) — build works
 CREATE INDEX idx_ip ON embeddings USING mktann (v vector_ip_ops);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_ip';
@@ -92,8 +93,9 @@ SELECT relpages > 0 AS has_pages FROM pg_class
  t
 (1 row)
 
--- Cosine opclass (uncompressed float centroids) — build should work
-CREATE INDEX idx_cos ON embeddings USING mktann (v vector_cosine_ops);
+-- Cosine opclass with uncompressed float centroids — build should work
+CREATE INDEX idx_cos ON embeddings USING mktann (v vector_cosine_ops)
+    WITH (centroid_compression = off);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_cos';
  has_pages 
@@ -116,7 +118,7 @@ SELECT relpages > 0 AS has_pages FROM pg_class
 CREATE INDEX idx_bad ON embeddings
     USING mktann (v vector_ip_ops)
     WITH (centroid_compression = true);
-ERROR:  centroid_compression is not supported with vector_ip_ops
+ERROR:  centroid_compression=on is not supported with vector_ip_ops
 -- Insert after index creation (should not crash)
 INSERT INTO embeddings (v) VALUES ('[1,1,1]');
 -- VACUUM on the index (should not crash)
@@ -145,7 +147,7 @@ SELECT count(*) FROM (
 RESET enable_seqscan;
 -- Multi-level tree with uncompressed float centroids
 CREATE INDEX idx_ml_float ON embeddings USING mktann (v)
-    WITH (fan_out = 4);
+    WITH (fan_out = 4, centroid_compression = off);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_ml_float';
  has_pages 

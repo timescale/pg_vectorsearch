@@ -120,7 +120,7 @@ mktann_options(Datum reloptions, bool validate)
 			 RELOPT_TYPE_REAL,
 			 offsetof(MktannOptions, boundary_epsilon)},
 			{"centroid_compression",
-			 RELOPT_TYPE_BOOL,
+			 RELOPT_TYPE_ENUM,
 			 offsetof(MktannOptions, centroid_compression)},
 			{"fastscan", RELOPT_TYPE_BOOL, offsetof(MktannOptions, fastscan)},
 	};

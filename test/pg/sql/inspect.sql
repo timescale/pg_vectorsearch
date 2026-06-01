@@ -40,7 +40,8 @@ SELECT level, count(*) AS leaf_entries
     ORDER BY level;
 
 -- Uncompressed float centroids — verify format string
-CREATE INDEX idx_float ON embeddings USING mktann (v);
+CREATE INDEX idx_float ON embeddings USING mktann (v)
+    WITH (centroid_compression = off);
 
 SELECT level,
        count(child_blkno) = count(*) AS all_have_children,
@@ -50,8 +51,24 @@ SELECT level,
     FROM mkt_centroid_pages('idx_float'::regclass)
     GROUP BY level ORDER BY level;
 
+-- centroid_compression tri-state on L2 (default opclass): the default and
+-- 'auto' compress, 'on' compresses, 'off' is float (idx_float above).
+CREATE INDEX idx_cc_default ON embeddings USING mktann (v);
+CREATE INDEX idx_cc_auto ON embeddings USING mktann (v)
+    WITH (centroid_compression = auto);
+CREATE INDEX idx_cc_on ON embeddings USING mktann (v)
+    WITH (centroid_compression = on);
+SELECT
+    (SELECT min(format) FROM mkt_centroid_pages('idx_cc_default'::regclass))
+        AS default_fmt,
+    (SELECT min(format) FROM mkt_centroid_pages('idx_cc_auto'::regclass))
+        AS auto_fmt,
+    (SELECT min(format) FROM mkt_centroid_pages('idx_cc_on'::regclass))
+        AS on_fmt;
+
 -- Higher-dim vectors to force page overflow (next_blkno chains).
 -- Float format with dim=256: max 7 entries/page, nlist=10 overflows.
+-- Pin float (off) so the page-chain layout this test asserts is stable.
 CREATE TABLE wide (id serial, v vector(256));
 
 INSERT INTO wide (v)
@@ -61,7 +78,8 @@ INSERT INTO wide (v)
     )::vector(256)
     FROM generate_series(1, 100) i;
 
-CREATE INDEX idx_wide ON wide USING mktann (v);
+CREATE INDEX idx_wide ON wide USING mktann (v)
+    WITH (centroid_compression = off);
 
 -- Entries from chained pages appear naturally in output
 SELECT * FROM mkt_centroid_pages('idx_wide'::regclass)
