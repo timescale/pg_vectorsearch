@@ -46,6 +46,16 @@ static relopt_enum_elt_def distance_mode_relopt_members[] = {
 		{NULL, 0},
 };
 
+/* "true"/"false" are accepted aliases for "on"/"off". */
+static relopt_enum_elt_def centroid_compression_relopt_members[] = {
+		{"auto", MKT_CENTROID_COMPRESSION_AUTO},
+		{"on", MKT_CENTROID_COMPRESSION_ON},
+		{"true", MKT_CENTROID_COMPRESSION_ON},
+		{"off", MKT_CENTROID_COMPRESSION_OFF},
+		{"false", MKT_CENTROID_COMPRESSION_OFF},
+		{NULL, 0},
+};
+
 void _PG_init(void);
 
 void
@@ -168,11 +178,13 @@ _PG_init(void)
 			0.0,
 			100.0,
 			NoLock);
-	add_bool_reloption(
+	add_enum_reloption(
 			mktann_relopt_kind,
 			"centroid_compression",
-			"Use RaBitQ compression for centroid pages",
-			false,
+			"RaBitQ compression for centroid pages",
+			centroid_compression_relopt_members,
+			MKT_CENTROID_COMPRESSION_AUTO,
+			"auto compresses for L2/cosine and skips inner product",
 			NoLock);
 	add_bool_reloption(
 			mktann_relopt_kind,
