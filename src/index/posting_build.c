@@ -214,16 +214,21 @@ mkt_secondary_batch_init(
 		Dimension		   dim,
 		uint32_t		   max_batch)
 {
+	uint32_t tile	  = MKT_SECONDARY_TILE;
 	s->max_batch	  = max_batch;
 	s->nleaves		  = nleaves;
 	s->dim			  = dim;
 	s->leaf_centroids = leaf_centroids;
 	s->cent_norms	  = mkt_alloc(nleaves * sizeof(float));
-	s->vc			  = mkt_alloc((size_t)max_batch * nleaves * sizeof(float));
-	s->rc			  = mkt_alloc((size_t)max_batch * nleaves * sizeof(float));
+	s->vc			  = mkt_alloc((size_t)max_batch * tile * sizeof(float));
+	s->rc			  = mkt_alloc((size_t)max_batch * tile * sizeof(float));
 	s->residuals	  = mkt_alloc((size_t)max_batch * dim * sizeof(float));
 	s->vec_norms	  = mkt_alloc(max_batch * sizeof(float));
 	s->qrv			  = mkt_alloc(max_batch * sizeof(float));
+	s->best2		  = mkt_alloc(max_batch * sizeof(float));
+	s->c2			  = mkt_alloc(max_batch * sizeof(uint32_t));
+	s->best_oa		  = mkt_alloc(max_batch * sizeof(float));
+	s->best_oa_c	  = mkt_alloc(max_batch * sizeof(uint32_t));
 
 	for (uint32_t j = 0; j < nleaves; j++)
 		s->cent_norms[j] =
@@ -239,6 +244,10 @@ mkt_secondary_batch_free(MktSecondaryBatch *s)
 	mkt_free(s->residuals);
 	mkt_free(s->vec_norms);
 	mkt_free(s->qrv);
+	mkt_free(s->best2);
+	mkt_free(s->c2);
+	mkt_free(s->best_oa);
+	mkt_free(s->best_oa_c);
 	*s = (MktSecondaryBatch){0};
 }
 
@@ -250,23 +259,28 @@ mkt_secondary_batch_free(MktSecondaryBatch *s)
  */
 static void
 secondary_batch_gemm(
-		MktSecondaryBatch *s, const float *vecs, uint32_t n, float *out)
+		MktSecondaryBatch *s,
+		const float		  *vecs,
+		uint32_t		   n,
+		const float		  *cent_base,
+		uint32_t		   ncent,
+		float			  *out)
 {
 	cblas_sgemm(
 			CblasRowMajor,
 			CblasNoTrans,
 			CblasTrans,
 			(int)n,
-			(int)s->nleaves,
+			(int)ncent,
 			(int)s->dim,
 			1.0f,
 			vecs,
 			(int)s->dim,
-			s->leaf_centroids,
+			cent_base,
 			(int)s->dim,
 			0.0f,
 			out,
-			(int)s->nleaves);
+			(int)ncent);
 }
 #endif
 
@@ -296,50 +310,112 @@ mkt_secondary_batch_assign(
 	const float		lambda		 = (float)params->soar_lambda;
 
 	for (uint32_t i = 0; i < n; i++)
+	{
 		s->vec_norms[i] = mkt_l2_norm_squared(vecs + (size_t)i * dim, dim);
+		s->best2[i]		= INFINITY;
+		s->c2[i]		= primary[i];
+		s->best_oa[i]	= INFINITY;
+		s->best_oa_c[i] = primary[i];
+	}
 
-	/* vc[i*nleaves + j] = <v_i, c_j> */
-	secondary_batch_gemm(s, vecs, n, s->vc);
+	/* SOAR residual (normalized, from the primary centroid) for every
+	 * row; <r_hat, v> is constant across centroids. */
+	if (has_soar)
+	{
+		for (uint32_t i = 0; i < n; i++)
+		{
+			const float *v	  = vecs + (size_t)i * dim;
+			const float *cent = s->leaf_centroids + (size_t)primary[i] * dim;
+			float		*r	  = s->residuals + (size_t)i * dim;
+			float		 norm = 0.0f;
+			for (Dimension d = 0; d < dim; d++)
+			{
+				r[d] = v[d] - cent[d];
+				norm += r[d] * r[d];
+			}
+			if (norm > 1e-7f)
+			{
+				float inv = 1.0f / sqrtf(norm);
+				for (Dimension d = 0; d < dim; d++)
+					r[d] *= inv;
+			}
+			s->qrv[i] = mkt_dot_product(r, v, dim);
+		}
+	}
+
+	/*
+	 * Stream centroids in tiles so the distance matrix is B*TILE, not
+	 * B*nleaves. Each tile folds into the per-query running reductions:
+	 * boundary distance (metric-specific) and SOAR oa = ||v-c||^2 +
+	 * lambda*(<r_hat,v> - <r_hat,c>)^2.
+	 */
+	for (uint32_t j0 = 0; j0 < nleaves; j0 += MKT_SECONDARY_TILE)
+	{
+		uint32_t	 tile = nleaves - j0 < MKT_SECONDARY_TILE ? nleaves - j0
+															  : MKT_SECONDARY_TILE;
+		const float *cent_base = s->leaf_centroids + (size_t)j0 * dim;
+
+		secondary_batch_gemm(s, vecs, n, cent_base, tile, s->vc);
+		if (has_soar)
+			secondary_batch_gemm(s, s->residuals, n, cent_base, tile, s->rc);
+
+		for (uint32_t i = 0; i < n; i++)
+		{
+			uint32_t	 p	   = primary[i];
+			const float *vcrow = s->vc + (size_t)i * tile;
+			const float *rcrow = has_soar ? s->rc + (size_t)i * tile : NULL;
+			float		 nx	   = s->vec_norms[i];
+			float		 qrv   = has_soar ? s->qrv[i] : 0.0f;
+
+			for (uint32_t jj = 0; jj < tile; jj++)
+			{
+				uint32_t j = j0 + jj;
+				if (j == p)
+					continue;
+				float vcv = vcrow[jj];
+
+				if (has_boundary)
+				{
+					float d;
+					if (params->metric == DISTANCE_L2)
+						d = nx + s->cent_norms[j] - 2.0f * vcv;
+					else if (params->metric == DISTANCE_COSINE)
+						d = 1.0f - vcv;
+					else
+						d = -vcv;
+					if (d < s->best2[i])
+					{
+						s->best2[i] = d;
+						s->c2[i]	= j;
+					}
+				}
+
+				if (has_soar)
+				{
+					float l2  = nx + s->cent_norms[j] - 2.0f * vcv;
+					float gap = qrv - rcrow[jj];
+					float oa  = l2 + lambda * gap * gap;
+					if (oa < s->best_oa[i])
+					{
+						s->best_oa[i]	= oa;
+						s->best_oa_c[i] = j;
+					}
+				}
+			}
+		}
+	}
 
 	for (uint32_t i = 0; i < n; i++)
 	{
-		uint32_t	 p	   = primary[i];
-		const float *vcrow = s->vc + (size_t)i * nleaves;
-		float		 nx	   = s->vec_norms[i];
-
-		/*
-		 * Boundary: nearest leaf != primary in the build metric.
-		 *   L2:  nx + ||c||^2 - 2<v,c>
-		 *   cos: 1 - <v,c>     (v and leaf centroids are normalized)
-		 *   ip:  -<v,c>
-		 */
-		float	 best2 = INFINITY;
-		uint32_t c2	   = p;
-		for (uint32_t j = 0; j < nleaves; j++)
-		{
-			if (j == p)
-				continue;
-			float d;
-			if (params->metric == DISTANCE_L2)
-				d = nx + s->cent_norms[j] - 2.0f * vcrow[j];
-			else if (params->metric == DISTANCE_COSINE)
-				d = 1.0f - vcrow[j];
-			else
-				d = -vcrow[j];
-			if (d < best2)
-			{
-				best2 = d;
-				c2	  = j;
-			}
-		}
+		uint32_t p = primary[i];
 
 		bool should_replicate;
 		if (has_boundary)
 		{
 			double pd		 = (double)primary_dist[i];
-			double gap		 = (double)best2 - pd;
+			double gap		 = (double)s->best2[i] - pd;
 			double gap_ratio = (pd != 0.0) ? gap / fabs(pd) : INFINITY;
-			should_replicate = (c2 != p) &&
+			should_replicate = (s->c2[i] != p) &&
 							   (gap_ratio <= params->boundary_epsilon);
 		}
 		else
@@ -348,72 +424,13 @@ mkt_secondary_batch_assign(
 		}
 
 		if (!should_replicate)
-		{
 			out_secondary[i] = MKT_INVALID_CLUSTER;
-			continue;
-		}
-
-		if (!has_soar)
-		{
-			out_secondary[i] = (c2 != p) ? c2 : MKT_INVALID_CLUSTER;
-			continue;
-		}
-
-		/* SOAR: normalized residual from the primary centroid. */
-		const float *v	  = vecs + (size_t)i * dim;
-		const float *cent = s->leaf_centroids + (size_t)p * dim;
-		float		*r	  = s->residuals + (size_t)i * dim;
-		float		 norm = 0.0f;
-		for (Dimension d = 0; d < dim; d++)
-		{
-			r[d] = v[d] - cent[d];
-			norm += r[d] * r[d];
-		}
-		if (norm > 1e-7f)
-		{
-			float inv = 1.0f / sqrtf(norm);
-			for (Dimension d = 0; d < dim; d++)
-				r[d] *= inv;
-		}
-		s->qrv[i] = mkt_dot_product(r, v, dim);
-		/* Mark for the SOAR pass below. */
-		out_secondary[i] = p; /* provisional; resolved after rc gemm */
-	}
-
-	if (!has_soar)
-		return;
-
-	/* rc[i*nleaves + j] = <r_hat_i, c_j>. Residuals for non-replicated
-	 * rows are stale but their rows are never read below. */
-	secondary_batch_gemm(s, s->residuals, n, s->rc);
-
-	for (uint32_t i = 0; i < n; i++)
-	{
-		if (out_secondary[i] == MKT_INVALID_CLUSTER)
-			continue;
-
-		uint32_t	 p	   = primary[i];
-		const float *vcrow = s->vc + (size_t)i * nleaves;
-		const float *rcrow = s->rc + (size_t)i * nleaves;
-		float		 nx	   = s->vec_norms[i];
-		float		 qrv   = s->qrv[i];
-
-		float	 best_oa = INFINITY;
-		uint32_t best_c	 = p;
-		for (uint32_t j = 0; j < nleaves; j++)
-		{
-			if (j == p)
-				continue;
-			float l2  = nx + s->cent_norms[j] - 2.0f * vcrow[j];
-			float gap = qrv - rcrow[j];
-			float oa  = l2 + lambda * gap * gap;
-			if (oa < best_oa)
-			{
-				best_oa = oa;
-				best_c	= j;
-			}
-		}
-		out_secondary[i] = (best_c != p) ? best_c : MKT_INVALID_CLUSTER;
+		else if (has_soar)
+			out_secondary[i] = (s->best_oa_c[i] != p) ? s->best_oa_c[i]
+													  : MKT_INVALID_CLUSTER;
+		else
+			out_secondary[i] = (s->c2[i] != p) ? s->c2[i]
+											   : MKT_INVALID_CLUSTER;
 	}
 #endif
 }

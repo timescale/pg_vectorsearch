@@ -231,3 +231,94 @@ TEST(soar_and_boundary_matches_reference)
 	};
 	run_compare(result, &bp, 29);
 }
+
+/*
+ * Multi-tile: build a tree with more leaves than MKT_SECONDARY_TILE so
+ * the kernel streams several centroid tiles, and confirm the tiled
+ * running reduction still matches the brute-force reference.
+ */
+TEST(multi_tile_matches_reference)
+{
+	Dimension dim	  = 8;
+	uint32_t  fan_out = 64;
+	uint32_t  nchild  = 64;
+	/* 64 * 64 = 4096 leaves > MKT_SECONDARY_TILE (2048) → 2+ tiles. */
+	uint32_t nleaves = fan_out * nchild;
+
+	uint32_t rng = 12345;
+#define NEXTF() \
+	(rng = rng * 1103515245 + 12345, ((float)(rng % 2000) / 1000.0f - 1.0f))
+
+	float *root = mkt_alloc((size_t)fan_out * dim * sizeof(float));
+	for (uint32_t i = 0; i < fan_out * dim; i++)
+		root[i] = NEXTF();
+
+	const float **children = mkt_alloc(fan_out * sizeof(float *));
+	uint32_t	 *child_k  = mkt_alloc(fan_out * sizeof(uint32_t));
+	for (uint32_t c = 0; c < fan_out; c++)
+	{
+		float *cc = mkt_alloc((size_t)nchild * dim * sizeof(float));
+		for (uint32_t i = 0; i < nchild * dim; i++)
+			cc[i] = NEXTF();
+		children[c] = cc;
+		child_k[c]	= nchild;
+	}
+
+	HKMeansResult *tree =
+			mkt_hkmeans_build_two_level(root, fan_out, children, child_k, dim);
+	ASSERT_NOT_NULL(tree, "two-level tree built");
+	ASSERT_EQ(nleaves, tree->nleaves, "4096 leaves");
+	ASSERT_TRUE(tree->nleaves > MKT_SECONDARY_TILE, "spans multiple tiles");
+
+	const float *leaves		= hk_leaf_centroids(tree);
+	float		*cent_norms = mkt_alloc(nleaves * sizeof(float));
+	for (uint32_t j = 0; j < nleaves; j++)
+		cent_norms[j] = mkt_l2_norm_squared(leaves + (size_t)j * dim, dim);
+
+	MktBuildParams bp = {
+			.dim			  = dim,
+			.metric			  = DISTANCE_L2,
+			.soar_lambda	  = 1.0,
+			.boundary_epsilon = 10.0,
+	};
+
+	uint32_t nq	   = 200;
+	float	*qvecs = mkt_alloc((size_t)nq * dim * sizeof(float));
+	for (uint32_t i = 0; i < nq * dim; i++)
+		qvecs[i] = NEXTF();
+#undef NEXTF
+
+	uint32_t *primary = mkt_alloc(nq * sizeof(uint32_t));
+	float	 *pdist	  = mkt_alloc(nq * sizeof(float));
+	uint32_t *ref	  = mkt_alloc(nq * sizeof(uint32_t));
+	for (uint32_t i = 0; i < nq; i++)
+	{
+		Distance d;
+		primary[i] = mkt_hkmeans_assign(
+				tree, qvecs + (size_t)i * dim, DISTANCE_L2, &d);
+		pdist[i] = (float)d;
+		ref[i]	 = ref_secondary(
+				  leaves,
+				  cent_norms,
+				  nleaves,
+				  dim,
+				  qvecs + (size_t)i * dim,
+				  primary[i],
+				  pdist[i],
+				  &bp);
+	}
+
+	MktSecondaryBatch sb;
+	mkt_secondary_batch_init(&sb, leaves, nleaves, dim, nq);
+	uint32_t *got = mkt_alloc(nq * sizeof(uint32_t));
+	mkt_secondary_batch_assign(&sb, qvecs, nq, primary, pdist, &bp, got);
+	mkt_secondary_batch_free(&sb);
+
+	uint32_t mismatches = 0;
+	for (uint32_t i = 0; i < nq; i++)
+		if (got[i] != ref[i])
+			mismatches++;
+	ASSERT_EQ(0, mismatches, "tiled batched matches reference across tiles");
+
+	mkt_free(tree);
+}

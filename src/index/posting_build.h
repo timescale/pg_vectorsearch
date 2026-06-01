@@ -54,6 +54,12 @@ typedef struct MktBuildAssignment
  * reads across the batch). */
 #define MKT_SECONDARY_BATCH 256
 
+/* Centroids per tile. The secondary GEMM streams centroids in tiles so
+ * the working set is B*TILE (not B*nleaves), keeping brute-force viable
+ * at any nlist — the fallback to tree descent is then a performance
+ * choice, not a memory limit. */
+#define MKT_SECONDARY_TILE 2048
+
 typedef struct MktBuildWorkerBufs
 {
 	float	 *norm_buf;		/* [dim] for cosine normalization */
@@ -103,11 +109,16 @@ typedef struct MktSecondaryBatch
 	Dimension	 dim;
 	const float *leaf_centroids; /* [nleaves * dim], not owned */
 	float		*cent_norms;	 /* [nleaves] ||c||^2 */
-	float		*vc;			 /* [max_batch * nleaves] <v, c> */
-	float		*rc;			 /* [max_batch * nleaves] <r_hat, c> */
+	float		*vc;			 /* [max_batch * TILE] <v, c> per tile */
+	float		*rc;			 /* [max_batch * TILE] <r_hat, c> per tile */
 	float		*residuals;		 /* [max_batch * dim] normalized residuals */
 	float		*vec_norms;		 /* [max_batch] ||v||^2 */
 	float		*qrv;			 /* [max_batch] r_hat . v */
+	/* Per-query running reductions across centroid tiles. */
+	float	 *best2;	 /* [max_batch] best boundary distance (!= primary) */
+	uint32_t *c2;		 /* [max_batch] arg of best2 */
+	float	 *best_oa;	 /* [max_batch] best SOAR oa distance */
+	uint32_t *best_oa_c; /* [max_batch] arg of best_oa */
 } MktSecondaryBatch;
 
 /* True when CBLAS is available (the batched path needs sgemm). */
