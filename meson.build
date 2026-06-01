@@ -255,21 +255,30 @@ endif
 have_sve = false
 have_sve2 = false
 if simd_mode == 'full' and host_machine.cpu_family() == 'aarch64'
+  # Test the actual pragma the SVE source files use, not just the
+  # __attribute__ form. clang on aarch64-darwin accepts the attribute
+  # but rejects `#pragma GCC target`, which would fail at compile time
+  # with -Werror=unknown-pragmas. Apple Silicon has no SVE anyway, so
+  # excluding these sources there is the correct outcome.
   have_sve = cc.compiles(
+    '#pragma GCC target("+sve")\n' +
     '#include <arm_sve.h>\n' +
     '__attribute__((target("+sve"))) ' +
     'static svuint8_t f(svuint8_t a, svuint8_t b){return svtbl_u8(a,b);}',
-    name: 'aarch64 SVE target attribute',
+    args: ['-Werror=unknown-pragmas'],
+    name: 'aarch64 SVE target pragma + attribute',
   )
   if have_sve
     config_data.set('MKT_HAVE_SVE', 1)
   endif
 
   have_sve2 = cc.compiles(
+    '#pragma GCC target("+sve2")\n' +
     '#include <arm_sve.h>\n' +
     '__attribute__((target("+sve2"))) ' +
     'static svuint16_t f(svuint16_t a, svuint16_t b){return svsra_n_u16(a,b,8);}',
-    name: 'aarch64 SVE2 target attribute',
+    args: ['-Werror=unknown-pragmas'],
+    name: 'aarch64 SVE2 target pragma + attribute',
   )
   if have_sve2
     config_data.set('MKT_HAVE_SVE2', 1)
