@@ -458,7 +458,26 @@ typedef struct PostingCbState
 	double				   soar_dupes;
 	MemoryContext		   tmp_ctx;
 	MemoryContext		   worker_ctx;
+
+	/* Batched secondary assignment: when replication is on and CBLAS is
+	 * available, tuples are buffered and the secondary search runs as a
+	 * GEMM over the batch (centroids read once per batch). */
+	bool			  use_batch;
+	MktSecondaryBatch sb;
+	float			 *enc_batch;	   /* [B * dim] */
+	ItemPointerData	 *batch_tids;	   /* [B] */
+	uint32_t		 *batch_primary;   /* [B] */
+	float			 *batch_pdist;	   /* [B] */
+	uint32_t		 *batch_secondary; /* [B] */
+	uint32_t		  batch_count;
 } PostingCbState;
+
+/* Initialize/flush/clean the batch buffers; no-op when batching is off
+ * (e.g. no replication or no CBLAS). Call init in the worker context
+ * before the scan, flush + cleanup after it. */
+void posting_cb_batch_init(PostingCbState *cbs);
+void posting_cb_batch_flush(PostingCbState *cbs);
+void posting_cb_batch_cleanup(PostingCbState *cbs);
 
 extern void posting_build_callback(
 		Relation	index,

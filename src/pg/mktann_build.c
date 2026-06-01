@@ -1346,6 +1346,10 @@ do_parallel_build(
 				.worker_ctx = worker_ctx,
 		};
 
+		MemoryContext batch_ctx = MemoryContextSwitchTo(worker_ctx);
+		posting_cb_batch_init(&cbs);
+		MemoryContextSwitchTo(batch_ctx);
+
 		TableScanDesc scan2 = table_beginscan_parallel(
 				heap, ParallelTableScanFromMktShared(shared));
 
@@ -1358,6 +1362,9 @@ do_parallel_build(
 				posting_build_callback,
 				&cbs,
 				scan2);
+
+		posting_cb_batch_flush(&cbs);
+		posting_cb_batch_cleanup(&cbs);
 
 		mkt_posting_worker_finish(&ws);
 
