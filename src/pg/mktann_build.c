@@ -954,8 +954,11 @@ do_parallel_build(
 		for (int t = 0; t < nparticipants; t++)
 			total_nsamples += mktann_sample_counts(dsm_samples)[t];
 
-		float *all_samples = palloc(
-				(size_t)total_nsamples * dim * sizeof(float));
+		/* nlist * 256 samples * dim can exceed the 1GB palloc limit for
+		 * large nlist / high dim (e.g. nlist=2000, dim=768 ~ 1.5GB), so
+		 * allow a huge allocation. Freed after child k-means. */
+		float *all_samples = palloc_extended(
+				(size_t)total_nsamples * dim * sizeof(float), MCXT_ALLOC_HUGE);
 		uint32_t *all_root_asgn = palloc(total_nsamples * sizeof(uint32_t));
 		uint32_t  soff			= 0;
 		for (int t = 0; t < nparticipants; t++)
@@ -1162,8 +1165,9 @@ do_parallel_build(
 		for (int t = 0; t < nparticipants; t++)
 			total_nsamples += mktann_sample_counts(dsm_samples)[t];
 
-		float *all_samples = palloc(
-				(size_t)total_nsamples * dim * sizeof(float));
+		/* May exceed the 1GB palloc limit for large nlist / high dim. */
+		float *all_samples = palloc_extended(
+				(size_t)total_nsamples * dim * sizeof(float), MCXT_ALLOC_HUGE);
 		uint32_t soff = 0;
 		for (int t = 0; t < nparticipants; t++)
 		{
