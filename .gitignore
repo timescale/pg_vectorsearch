@@ -45,3 +45,6 @@ perf.data.old
 # Regression test output
 regression.diffs
 regression.out
+
+# Agent files
+CLAUDE.local.md

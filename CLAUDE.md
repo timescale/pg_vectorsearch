@@ -1,7 +1,8 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with
-code in this repository.
+code in this repository. If available, local instructions can be found in
+CLAUDE.local.md.
 
 ## Project Overview
 
@@ -31,6 +32,7 @@ a subset of partitions to build the nearest neighbor result set.
 - `docs/implementation.md` - Detailed implementation specifications
 - `docs/development.md` - Build instructions, testing, CI scripts
 
+
 ### Performance Goals
 
 - Tiered storage: fast memory (CPU cache, RAM) for upper tree levels, SSD/cloud
@@ -42,6 +44,43 @@ a subset of partitions to build the nearest neighbor result set.
 - High recall rates using state-of-the-art techniques
 - Fast index builds via linear scans, SIMD, and efficient clustering
 - Support high ingest rates without sacrificing query performance
+
+### Two versions of Meerkat: standalone and PostgreSQL
+
+The main purpose of this project is to build an index for PostgreSQL providing
+first-class vector search performance. Performance is measured by QPS at a
+certain recall.
+
+However, Meerkat can build both as a standalone (in-memory) vector search
+engine and as a PostgreSQL extension providing an Index Access Method (IAM).
+
+#### The role of Meerkat standalone
+
+The role of the standalone version is to be able to easily test and benchmark
+parts of Meerkat while isolating it from adverse effects of bottlenecks in
+PostgreSQL that we cannot affect. For example, with the standalone CLI, it is
+possible to build micro benchmarks for certain SIMD kernels that encode RabitQ
+vectors. These same kernels then run in PostgreSQL.
+
+#### Keep standalone and PostgreSQL versions close
+
+It is critically important that the core Meerkat logic and architecture stay
+close between the standalone version and the PostgreSQL extension. Minimizing
+code duplication and version-specific paths of core logic is a critical goal of
+the project. If the versions start to diverge in code and their approach,
+standalone benchmarks and tests will no longer be representative for the
+PostgreSQL version, which defeats the purpose of having a standalone version.
+
+Examples of things that can differ between Meerkat and standalone:
+
+- Vector storage: standalone stores vectors in memory. There's a point to this:
+it provides an upper-bound on performance which allows identifying and
+isolating other bottlenecks. For example, if we see good performance of the
+search path in standalone, but poor performance in PostgreSQL, we know there's
+nothing wrong with the shared code of the scan path.
+- Threads vs processes for parallel mode: Standalone uses threads while
+PostgreSQL uses worker processes and shared memory. Apart from these
+differences, parallel processing code should be as similar as possible.
 
 ## References
 
@@ -117,19 +156,6 @@ alternative, or use `gcovr` for coverage instead.
 - `../RaBitQ-Library/` — Official RaBitQ implementation from paper authors
 - `../google-research/scann/` — Google ScaNN (in-memory ANN)
 
-### PostgreSQL Management
-
-If available, use pgmanager (`pgm`) at `../pgmanager/` to manage PostgreSQL:
-
-- Source: `../pg/src/`
-- Builds: `../pg/usr/`
-- Runtime: `../pg/run/`
-
-The extension builds against PostgreSQL source managed by `pgm`.
-
-If `pgm` is not available, build against the system PostgreSQL installation
-(meson detects this automatically).
-
 ### Debugging
 
 To debug a running PostgreSQL instance attach a debugger. Important: attach to the
@@ -182,9 +208,29 @@ See `docs/development.md` for detailed profiling documentation.
 
 ### Benchmarking
 
-Use automated benchmarks to track performance against targets. The SPANN paper
-provides datasets and queries suitable for ANN benchmarking. Consider building
-a benchmark runner for repeatable, automated testing.
+#### Testing and benchmarking the PostgreSQL build
+
+The PostgreSQL build of Meerkat should be benhmarked against a local PostgreSQL
+instance.
+
+Prefer "real" datasets over generated data.
+
+#### Critical benchmark instructions
+
+- Core algorithms can be benchmarked using the Meerkat client tool's search
+command (`mkt bench search`) as long as that exercises a path that is shared
+between standalone and Meerkat.
+- Always benchmark and profile a release build with all optimizations turned on.
+Benchmarking a debug build will _not_ give the correct understanding of the
+current performance.
+- When running (Claude) in a sandbox, it is not possible for Claude to see the
+real running status of PostgreSQL, so it is best to ask the user to restart
+PostgreSQL.
+- After building and installing a new .so binary of the Meerkat extension, it
+is not necessary to restart PostgreSQL since a new session will load the new
+.so (i.e., creating a new session/backend is enough). Only changes to the SQL
+code and/or metadata in the extension requires recreating the extension in
+PostgreSQL.
 
 ### Coding Patterns
 
@@ -267,6 +313,10 @@ Workflow requirements:
 - Add `persist-credentials: false` to checkouts
 - Add explicit `permissions` blocks
 - Add `concurrency` settings to cancel duplicate runs
+- When testing optimizations or new experimental features, do not roll the
+changes back if the changes didn't show the performance or promise hoped for.
+Instead, save the code to an aptly-named branch and ask the user how proceed.
+Do not automatically discard the changes!
 
 ### Code Style
 
