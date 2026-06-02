@@ -1342,7 +1342,8 @@ do_parallel_build(
 				ref_vecs,
 				pt_centroids,
 				NULL,
-				my_partials);
+				my_partials,
+				worker_ctx);
 
 		MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
 

@@ -568,7 +568,8 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			leaf_cents,
 			pt_centroids,
 			NULL,
-			my_partials);
+			my_partials,
+			worker_ctx);
 
 	MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
 
