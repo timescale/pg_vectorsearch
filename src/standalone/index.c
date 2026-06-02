@@ -236,9 +236,16 @@ cluster_list_append(MktClusterList *cl, uint32_t id)
 static ArrayPageStorage
 make_array_page_storage(uint32_t est_pages, MktMemCtx memctx)
 {
+	/*
+	 * No zero-fill: every page is fully overwritten on its first write
+	 * (flush copies the whole BLCKSZ buffer), and reserved/spill pages
+	 * that no worker writes are never linked into a chain, so they are
+	 * never read. Zeroing the whole pre-reserved array (hundreds of MB
+	 * for large builds) would be pure overhead.
+	 */
 	ArrayPageStorage s = {
 			.base		= {.ops = &array_page_storage_ops},
-			.pages		= mkt_alloc0((size_t)est_pages * BLCKSZ),
+			.pages		= mkt_alloc((size_t)est_pages * BLCKSZ),
 			.next_blkno = 0,
 			.page_cap	= est_pages,
 			.memctx		= memctx,
@@ -426,6 +433,41 @@ par_root_assign_fn(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
 			ctx->dim,
 			ctx->metric,
 			ctx->assignments);
+}
+
+/* ----------------------------------------------------------------
+ * Parallel per-cluster size estimate
+ *
+ * Assigns sample vectors to leaf clusters (full tree descent) and
+ * tallies per-thread counts; the caller reduces them and extrapolates
+ * to the full vector set to size each posting list's reserved range.
+ * ---------------------------------------------------------------- */
+
+typedef struct EstimateCtx
+{
+	const float			*samples;
+	const HKMeansResult *tree;
+	Dimension			 dim;
+	DistanceMetric		 metric;
+	uint32_t			 nlist;
+	uint32_t			*counts; /* [nthreads * nlist], per-thread */
+} EstimateCtx;
+
+static void
+par_estimate_fn(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
+{
+	EstimateCtx *ctx = arg;
+	uint32_t	*my	 = ctx->counts + (size_t)thread_id * ctx->nlist;
+	for (uint32_t i = start; i < end; i++)
+	{
+		Distance d;
+		uint32_t leaf = mkt_hkmeans_assign(
+				ctx->tree,
+				ctx->samples + (size_t)i * ctx->dim,
+				ctx->metric,
+				&d);
+		my[leaf]++;
+	}
 }
 
 /* ----------------------------------------------------------------
@@ -1057,8 +1099,60 @@ mkt_index_build(
 
 		if (config->posting_fmt == MKT_POSTING_FMT_PAGES)
 		{
-			/* Shared partial page buffer — must be malloc'd
-			 * since workers write from their own contexts. */
+			/*
+			 * Per-cluster page estimate: assign the k-means sample set to
+			 * leaves and extrapolate to the full vector count. This tracks
+			 * cluster skew (unlike a flat nvecs/nlist average) so each
+			 * posting list gets a contiguous reserved range close to its
+			 * true size. Over-estimate slightly (headroom) so most lists
+			 * fit without spilling; replication needs more room.
+			 */
+			mkt_memctx_switch(build_ctx);
+			uint32_t *cluster_counts = mkt_alloc0(nlist * sizeof(uint32_t));
+			uint32_t *est_counts	 = mkt_alloc0(
+					(size_t)nt * nlist * sizeof(uint32_t));
+			EstimateCtx est_ctx = {
+					.samples = km_vectors,
+					.tree	 = tree,
+					.dim	 = dim,
+					.metric	 = idx->base.metric,
+					.nlist	 = nlist,
+					.counts	 = est_counts,
+			};
+			mkt_thread_pool_parallel_for(
+					pool, km_nvecs, par_estimate_fn, &est_ctx);
+			for (uint32_t t = 0; t < nt; t++)
+				for (uint32_t c = 0; c < nlist; c++)
+					cluster_counts[c] += est_counts[(size_t)t * nlist + c];
+
+			double scale	 = (double)idx->nvecs / (double)km_nvecs;
+			bool   replicate = config->soar_lambda > 0.0 ||
+							 config->boundary_epsilon > 0.0;
+			double headroom = replicate ? 1.3 : 1.05;
+			for (uint32_t c = 0; c < nlist; c++)
+				cluster_counts[c] = (uint32_t)((double)cluster_counts[c] *
+											   scale * headroom) +
+									1;
+
+			MktPostingReserve reserve;
+			mkt_posting_reserve_init(&reserve, cluster_counts, nlist, nt, dim);
+			mkt_memctx_switch(idx_ctx);
+
+			/*
+			 * Storage = reserved region + spill headroom. Workers stream
+			 * full pages directly into their reserved blocks; clusters that
+			 * under-estimated spill into the (non-contiguous) region after
+			 * reserve.total, which only mildly degrades scan locality.
+			 */
+			uint32_t est_extra	 = reserve.total / 10 + 100;
+			idx->posting_storage = make_array_page_storage(
+					reserve.total + est_extra, idx_ctx);
+			idx->posting_storage.next_blkno = reserve.total;
+			idx->posting_heads = mkt_alloc(nlist * sizeof(BlockNumber));
+
+			/* Shared partial-page buffer (one partial per worker per
+			 * cluster) — malloc'd since workers write from their own
+			 * thread contexts. */
 			char *partials = config->fastscan
 								   ? NULL
 								   : calloc((size_t)nt * nlist, BLCKSZ);
@@ -1066,25 +1160,18 @@ mkt_index_build(
 			mkt_memctx_switch(build_ctx);
 			MktPostingWorkerState *workers = mkt_alloc(
 					nt * sizeof(MktPostingWorkerState));
-			MktPostingBatch **all_batches = mkt_alloc(
-					nt * sizeof(MktPostingBatch *));
-			bool **all_active = mkt_alloc(nt * sizeof(bool *));
-			/* Each worker needs its own context for its deferred batch
-			 * pages: arena allocation is not thread-safe within a single
-			 * context, so concurrent workers must not share one. They are
-			 * parented under a single context so one delete frees them all
-			 * after the merge, and they outlive the worker threads. */
-			MktMemCtx batch_parent =
-					mkt_memctx_create(build_ctx, "par_posting_batches");
-			MktMemCtx *batch_ctxs = mkt_alloc(nt * sizeof(MktMemCtx));
-			for (uint32_t t = 0; t < nt; t++)
-				batch_ctxs[t] =
-						mkt_memctx_create(batch_parent, "par_posting_batch");
+			BlockNumber **all_heads	 = mkt_alloc(nt * sizeof(BlockNumber *));
+			BlockNumber **all_tails	 = mkt_alloc(nt * sizeof(BlockNumber *));
+			bool		**all_active = mkt_alloc(nt * sizeof(bool *));
 			mkt_memctx_switch(idx_ctx);
 
-			/* Deferred mode: workers produce batch pages
-			 * in memory (storage == NULL), leader
-			 * materializes them to storage afterward. */
+			/*
+			 * Direct mode: each worker streams full pages straight to its
+			 * claimed reserved blocks (storage != NULL + shared reserve),
+			 * holding only one working page per cluster plus a trailing
+			 * partial. Bounded memory (~nlist pages/worker), not the whole
+			 * index. The leader merges the trailing partials in finalize.
+			 */
 			for (uint32_t t = 0; t < nt; t++)
 			{
 				char *t_partials = partials ? partials + (size_t)t * nlist *
@@ -1096,13 +1183,13 @@ mkt_index_build(
 						nlist,
 						dim,
 						config->fastscan != 0,
-						NULL,
+						&idx->posting_storage.base,
 						idx->base.params,
 						idx->leaf_centroids,
 						idx->pt_centroids,
-						NULL,
+						&reserve,
 						t_partials,
-						batch_ctxs[t]);
+						NULL /* batch_ctx unused in direct mode */);
 			}
 
 			ParPostingCtx posting_ctx = {
@@ -1117,26 +1204,25 @@ mkt_index_build(
 					pool, idx->nvecs, par_posting_fn, &posting_ctx);
 			uint64_t t_parallel = now_ns() - t_posting;
 
-			/* Gather per-thread outputs */
+			/* Gather per-thread chain endpoints */
 			for (uint32_t t = 0; t < nt; t++)
 			{
-				all_batches[t] = workers[t].batches;
-				all_active[t]  = workers[t].active;
+				all_heads[t]  = workers[t].heads;
+				all_tails[t]  = workers[t].tails;
+				all_active[t] = workers[t].active;
 			}
 
-			/* Create posting storage and materialize */
-			idx->posting_storage = make_array_page_storage(1024, idx_ctx);
-			idx->posting_heads	 = mkt_alloc(nlist * sizeof(BlockNumber));
-
+			/* Merge trailing partials + link/sort chains */
 			uint64_t			  t_merge_start = now_ns();
 			MktPostingBuildResult build_result;
-			mkt_posting_materialize(
-					all_batches,
+			mkt_posting_finalize(
 					partials,
+					all_heads,
+					all_tails,
 					all_active,
 					nt,
-					nlist,
 					&idx->posting_storage.base,
+					&reserve,
 					idx->leaf_centroids,
 					idx->pt_centroids,
 					dim,
@@ -1158,7 +1244,6 @@ mkt_index_build(
 
 			for (uint32_t t = 0; t < nt; t++)
 				mkt_posting_worker_cleanup(&workers[t]);
-			mkt_memctx_delete(batch_parent); /* frees all worker batches */
 			free(partials);
 
 			if (config->fastscan)

@@ -141,7 +141,7 @@ void mkt_posting_worker_finish(MktPostingWorkerState *ws);
 
 /*
  * Free internal arrays (builders, active). Must be called after
- * mkt_posting_materialize() since the merge reads from partials.
+ * mkt_posting_finalize() since the merge reads from partials.
  */
 void mkt_posting_worker_cleanup(MktPostingWorkerState *ws);
 
@@ -156,6 +156,35 @@ typedef struct MktPostingBuildResult
 	uint32_t	 merge_input;  /* partial pages that went into merge */
 	uint32_t	 merge_output; /* pages produced by merge */
 } MktPostingBuildResult;
+
+/*
+ * Merge partial pages and link all page chains.
+ *
+ * partials: [nworkers * nlist * BLCKSZ] shared buffer with
+ *           partial page data from all workers
+ * worker_heads/tails: [nworkers][nlist] flushed chain endpoints
+ * worker_active: [nworkers][nlist] which clusters each worker touched
+ *
+ * For each cluster:
+ *   1. Merge partial pages into optimally packed pages
+ *   2. Link all flushed chains + merge output
+ *   3. Sort chain by block number for sequential I/O
+ *
+ * result: output — caller must free result->heads
+ */
+void mkt_posting_finalize(
+		char				  *partials,
+		BlockNumber			 **worker_heads,
+		BlockNumber			 **worker_tails,
+		bool				 **worker_active,
+		uint32_t			   nworkers,
+		MktStorage			  *storage,
+		MktPostingReserve	  *reserve,
+		const float			  *leaf_centroids,
+		const float			  *pt_centroids,
+		Dimension			   dim,
+		bool				   fastscan,
+		MktPostingBuildResult *result);
 
 /*
  * Materialize deferred batch output into storage.
