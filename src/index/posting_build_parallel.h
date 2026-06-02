@@ -54,7 +54,7 @@ void mkt_posting_reserve_free(MktPostingReserve *res);
 
 typedef struct MktPostingWorkerState
 {
-	uint32_t  thread_id;
+	uint32_t  worker_id; /* 0 = leader; threads (standalone) or procs (PG) */
 	uint32_t  nlist;
 	Dimension dim;
 	bool	  fastscan;
@@ -70,8 +70,12 @@ typedef struct MktPostingWorkerState
 	BlockNumber		  *heads;	 /* [nlist] flushed chain heads */
 	BlockNumber		  *tails;	 /* [nlist] flushed chain tails */
 
+	/* Deferred batch output: per-cluster batch of complete pages.
+	 * Populated by worker_finish when storage == NULL. */
+	MktPostingBatch *batches; /* [nlist] */
+
 	/* Shared partial page buffer: after finish, each worker's
-	 * partial page for cluster c is at partials[thread_id * nlist + c].
+	 * partial page for cluster c is at partials[worker_id * nlist + c].
 	 * The buffer is provided by the caller (thread-local memory in
 	 * standalone, DSM in PG). NULL entries = no partial for that
 	 * cluster. The page data is BLCKSZ bytes per slot. */
@@ -80,7 +84,7 @@ typedef struct MktPostingWorkerState
 
 void mkt_posting_worker_init(
 		MktPostingWorkerState *ws,
-		uint32_t			   thread_id,
+		uint32_t			   worker_id,
 		uint32_t			   nlist,
 		Dimension			   dim,
 		bool				   fastscan,
@@ -93,10 +97,22 @@ void mkt_posting_worker_init(
 
 /*
  * Add a vector to its cluster's posting list builder.
+ * Standalone path: vec_id is converted to an ItemPointerData.
  */
 void mkt_posting_worker_add(
 		MktPostingWorkerState *ws,
 		uint32_t			   vec_id,
+		const float			  *vec,
+		uint32_t			   primary,
+		uint32_t			   secondary);
+
+/*
+ * Add a heap tuple to its cluster's posting list builder.
+ * PG path: TID comes directly from the heap scan.
+ */
+void mkt_posting_worker_add_heap(
+		MktPostingWorkerState *ws,
+		ItemPointerData		   tid,
 		const float			  *vec,
 		uint32_t			   primary,
 		uint32_t			   secondary);
@@ -149,6 +165,36 @@ void mkt_posting_finalize(
 		uint32_t			   nworkers,
 		MktStorage			  *storage,
 		MktPostingReserve	  *reserve,
+		const float			  *leaf_centroids,
+		const float			  *pt_centroids,
+		Dimension			   dim,
+		bool				   fastscan,
+		MktPostingBuildResult *result);
+
+/*
+ * Materialize deferred batch output into storage.
+ *
+ * Workers produce pages in deferred mode (storage == NULL),
+ * accumulating complete pages in MktPostingBatch arrays. This
+ * function takes all worker output, reserves contiguous blocks,
+ * writes pages to storage, and links chains.
+ *
+ * For AoS: partial pages (in the partials buffer) are merged
+ * across workers into optimally packed pages before writing.
+ *
+ * worker_batches: [nworkers] arrays of MktPostingBatch[nlist]
+ * partials: [nworkers * nlist * BLCKSZ] or NULL (fastscan)
+ * worker_active: [nworkers][nlist]
+ *
+ * result: output — caller must free result->heads
+ */
+void mkt_posting_materialize(
+		MktPostingBatch		 **worker_batches,
+		char				  *partials,
+		bool				 **worker_active,
+		uint32_t			   nworkers,
+		uint32_t			   nlist,
+		MktStorage			  *storage,
 		const float			  *leaf_centroids,
 		const float			  *pt_centroids,
 		Dimension			   dim,

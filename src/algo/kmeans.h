@@ -80,6 +80,7 @@ typedef struct KMeansOptions
 	KMeansIterateFn	 iterate;		 /* NULL = use parallel_for per iter */
 	void			*parallel_ctx;	 /* opaque context for callbacks */
 	uint32_t		 nthreads;		 /* total threads (for buffer sizing) */
+	const float		*initial_centroids; /* skip init, use these */
 } KMeansOptions;
 
 #define MKT_KMEANS_OPTIONS_DEFAULT \
