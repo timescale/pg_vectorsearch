@@ -18,12 +18,18 @@
 /* BFS work queue entry */
 typedef struct HKWorkItem
 {
-	uint32_t *vec_indices;
+	uint32_t *vec_indices; /* original vector indices; NULL = identity */
 	uint32_t  count;
 	uint32_t  level;
 	uint32_t  idx_in_level;
 } HKWorkItem;
 
+/*
+ * Compute the number of tree levels needed.
+ *
+ * nlevels = max(1, ceil(log(nlist) / log(fan_out)))
+ * When nlist <= fan_out, nlevels = 1 (flat).
+ */
 static uint32_t
 compute_nlevels(uint32_t nlist, uint32_t fan_out)
 {
@@ -35,6 +41,9 @@ compute_nlevels(uint32_t nlist, uint32_t fan_out)
 	return n < 1 ? 1 : n;
 }
 
+/*
+ * power_u32 - Compute base^exp for small unsigned integers.
+ */
 static uint32_t
 power_u32(uint32_t base, uint32_t exp)
 {
@@ -44,6 +53,9 @@ power_u32(uint32_t base, uint32_t exp)
 	return result;
 }
 
+/*
+ * Upper bound on total nodes: sum of fan_out^l for l = 0..nlevels-1.
+ */
 static uint32_t
 max_total_nodes(uint32_t fan_out, uint32_t nlevels)
 {
@@ -129,12 +141,19 @@ mkt_hkmeans_f32(
 		HKWorkItem item			  = queue[qi];
 		bool	   is_leaf_parent = (item.level == nlevels - 1);
 
+		/*
+		 * Determine K for this node.
+		 *
+		 * Single-level (flat): K = nlist (clamped to vector count)
+		 * Multi-level root/internal: K = fan_out (clamped)
+		 */
 		uint32_t k;
 		if (nlevels == 1)
 			k = nlist < item.count ? nlist : item.count;
 		else
 			k = fan_out < item.count ? fan_out : item.count;
 
+		/* Use indexed k-means — no vector copy needed */
 		KMeansResult *km = mkt_kmeans(
 				vectors,
 				item.vec_indices,
@@ -171,6 +190,13 @@ mkt_hkmeans_f32(
 			nleaves += km->nlist;
 		else
 		{
+			/*
+			 * Count vectors per cluster from assignments.
+			 *
+			 * We cannot use km->cluster_sizes because k-means
+			 * does a final reassignment after the last update
+			 * step, so cluster_sizes may be stale.
+			 */
 			memset(counts, 0, km->nlist * sizeof(uint32_t));
 			for (uint32_t v = 0; v < item.count; v++)
 				counts[km->assignments[v]]++;
@@ -229,7 +255,13 @@ mkt_hkmeans_f32(
 		leaf_off += tmp_nodes[i].nchildren;
 	}
 
-	/* Pack everything into a single contiguous allocation */
+	/*
+	 * Pack the whole tree into one contiguous allocation, laid out as
+	 * [header][nodes][leaf centroids][internal centroids] and addressed
+	 * by byte offsets rather than pointers. This is what lets a built
+	 * tree be memcpy'd into shared memory and used by another process
+	 * (the PG parallel build) with no pointer fix-up or deserialization.
+	 */
 	size_t hdr_sz	 = sizeof(HKMeansResult);
 	size_t nodes_sz	 = (size_t)nnodes * sizeof(HKMeansNode);
 	size_t leaf_sz	 = (size_t)nleaves * dim * sizeof(float);

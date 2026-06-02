@@ -37,7 +37,9 @@ typedef struct MktPostingReserve
  * Compute page reservations from cluster sizes.
  *
  * cluster_counts: [nlist] vectors per cluster
- * nworkers: headroom for partial pages (adds nworkers-1 per cluster)
+ * nworkers: currently unused — the deferred-batch path reserves exact
+ *           block counts at materialize, so no per-worker partial-page
+ *           headroom is added here.
  */
 void mkt_posting_reserve_init(
 		MktPostingReserve *res,

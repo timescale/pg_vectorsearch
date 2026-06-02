@@ -114,6 +114,9 @@ HKMeansResult *mkt_hkmeans_f32(
 /*
  * Route a vector to its nearest leaf centroid by descending the tree.
  * Returns the leaf index (0..nleaves-1).
+ *
+ * Optionally writes the distance to the nearest leaf centroid into
+ * *out_distance (may be NULL).
  */
 uint32_t mkt_hkmeans_assign(
 		const HKMeansResult *tree,
