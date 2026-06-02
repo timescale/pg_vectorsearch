@@ -74,6 +74,18 @@ typedef struct MktPostingWorkerState
 	 * Populated by worker_finish when storage == NULL. */
 	MktPostingBatch *batches; /* [nlist] */
 
+	/* Memory context this worker accumulates its deferred batch pages in.
+	 * Each worker owns its own context and writes only into it; the
+	 * driver transfers the finished pages to the leader. In PostgreSQL a
+	 * worker is a separate process: it passes its process-local context,
+	 * copies the pages into shared memory after the scan, and may then
+	 * release the context (the leader materializes from shared memory). In
+	 * standalone a worker is a thread sharing the leader's address space,
+	 * so the leader reads the pages in place and the context must live
+	 * until mkt_posting_materialize() completes. NULL in direct mode
+	 * (storage != NULL). */
+	MktMemCtx batch_ctx;
+
 	/* Shared partial page buffer: after finish, each worker's
 	 * partial page for cluster c is at partials[worker_id * nlist + c].
 	 * The buffer is provided by the caller (thread-local memory in
@@ -93,7 +105,8 @@ void mkt_posting_worker_init(
 		const float			  *leaf_centroids,
 		const float			  *pt_centroids,
 		MktPostingReserve	  *reserve,
-		char				  *partials);
+		char				  *partials,
+		MktMemCtx			   batch_ctx);
 
 /*
  * Add a vector to its cluster's posting list builder.

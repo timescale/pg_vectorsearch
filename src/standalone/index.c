@@ -1013,6 +1013,17 @@ mkt_index_build(
 			MktPostingBatch **all_batches = mkt_alloc(
 					nt * sizeof(MktPostingBatch *));
 			bool **all_active = mkt_alloc(nt * sizeof(bool *));
+			/* Each worker needs its own context for its deferred batch
+			 * pages: arena allocation is not thread-safe within a single
+			 * context, so concurrent workers must not share one. They are
+			 * parented under a single context so one delete frees them all
+			 * after the merge, and they outlive the worker threads. */
+			MktMemCtx batch_parent =
+					mkt_memctx_create(build_ctx, "par_posting_batches");
+			MktMemCtx *batch_ctxs = mkt_alloc(nt * sizeof(MktMemCtx));
+			for (uint32_t t = 0; t < nt; t++)
+				batch_ctxs[t] =
+						mkt_memctx_create(batch_parent, "par_posting_batch");
 			mkt_memctx_switch(idx_ctx);
 
 			/* Deferred mode: workers produce batch pages
@@ -1034,7 +1045,8 @@ mkt_index_build(
 						idx->leaf_centroids,
 						idx->pt_centroids,
 						NULL,
-						t_partials);
+						t_partials,
+						batch_ctxs[t]);
 			}
 
 			ParPostingCtx posting_ctx = {
@@ -1090,6 +1102,7 @@ mkt_index_build(
 
 			for (uint32_t t = 0; t < nt; t++)
 				mkt_posting_worker_cleanup(&workers[t]);
+			mkt_memctx_delete(batch_parent); /* frees all worker batches */
 			free(partials);
 
 			if (config->fastscan)

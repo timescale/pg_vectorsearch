@@ -7,7 +7,6 @@
  */
 
 #include <math.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "core/memory.h"
@@ -166,10 +165,13 @@ mkt_posting_derive_f_error(float f_add, float f_rescale, Dimension dim)
 #define derive_f_error mkt_posting_derive_f_error
 
 /*
- * Save page to the deferred batch output. Grows the pages
- * array dynamically. Uses raw realloc (not mkt_realloc) so
- * batch pages survive memory context destruction — workers
- * run in temporary contexts but batches must outlive them.
+ * Save page to the deferred batch output. Grows the pages array
+ * dynamically in the builder's output context (batch_ctx) so the batch
+ * survives the builder and any transient per-worker scratch context.
+ * The current context is switched only around the (re)allocation;
+ * since batch_ctx is allocated into by a single builder it is safe to
+ * grow concurrently with other builders' batches. Falls back to the
+ * current context when no output context is set.
  */
 static void
 batch_save_page(MktPostingBuilder *builder)
@@ -180,8 +182,13 @@ batch_save_page(MktPostingBuilder *builder)
 		uint32_t new_cap = b->capacity * 2;
 		if (new_cap < 8)
 			new_cap = 8;
-		b->pages	= realloc(b->pages, (size_t)new_cap * BLCKSZ);
-		b->capacity = new_cap;
+		MktMemCtx old = (builder->batch_ctx != NULL)
+							  ? mkt_memctx_switch(builder->batch_ctx)
+							  : NULL;
+		b->pages	  = mkt_realloc(b->pages, (size_t)new_cap * BLCKSZ);
+		b->capacity	  = new_cap;
+		if (builder->batch_ctx != NULL)
+			mkt_memctx_switch(old);
 	}
 	memcpy(b->pages + (size_t)b->count * BLCKSZ, builder->mem_page, BLCKSZ);
 	b->count++;
@@ -690,6 +697,12 @@ mkt_posting_builder_take_batch(
 }
 
 void
+mkt_posting_builder_set_batch_ctx(MktPostingBuilder *builder, MktMemCtx ctx)
+{
+	builder->batch_ctx = ctx;
+}
+
+void
 mkt_posting_builder_cleanup(MktPostingBuilder *builder)
 {
 	builder->page_ops->cleanup(builder);
@@ -699,11 +712,12 @@ mkt_posting_builder_cleanup(MktPostingBuilder *builder)
 		mkt_free(builder->enc_buf);
 		builder->enc_buf = NULL;
 	}
-	if (builder->batch.pages != NULL)
-	{
-		free(builder->batch.pages);
-		builder->batch = (MktPostingBatch){0};
-	}
+	/*
+	 * Batch pages live in builder->batch_ctx (or the current context) and
+	 * are released when that context is reset or deleted — nothing to free
+	 * here. Any untaken batch is simply abandoned to its context.
+	 */
+	builder->batch = (MktPostingBatch){0};
 }
 
 /* ----------------------------------------------------------------

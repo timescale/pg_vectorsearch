@@ -85,7 +85,8 @@ mkt_posting_worker_init(
 		const float			  *leaf_centroids,
 		const float			  *pt_centroids,
 		MktPostingReserve	  *reserve,
-		char				  *partials)
+		char				  *partials,
+		MktMemCtx			   batch_ctx)
 {
 	ws->worker_id	   = worker_id;
 	ws->nlist		   = nlist;
@@ -97,6 +98,7 @@ mkt_posting_worker_init(
 	ws->pt_centroids   = pt_centroids;
 	ws->reserve		   = reserve;
 	ws->partials	   = partials;
+	ws->batch_ctx	   = batch_ctx;
 
 	ws->builders = mkt_alloc((size_t)nlist * sizeof(MktPostingBuilder));
 	ws->active	 = mkt_alloc0(nlist * sizeof(bool));
@@ -176,6 +178,11 @@ ensure_builder(MktPostingWorkerState *ws, uint32_t c)
 			mkt_posting_builder_set_first_blkno(
 					&ws->builders[c], ws->reserve->starts[c]);
 	}
+
+	/* Deferred mode: complete pages accumulate in this worker's batch
+	 * context so they outlive the (transient) context the scan runs in. */
+	if (ws->storage == NULL)
+		mkt_posting_builder_set_batch_ctx(&ws->builders[c], ws->batch_ctx);
 
 	ws->active[c] = true;
 }
@@ -263,8 +270,8 @@ mkt_posting_worker_cleanup(MktPostingWorkerState *ws)
 {
 	if (ws->batches != NULL)
 	{
-		for (uint32_t c = 0; c < ws->nlist; c++)
-			free(ws->batches[c].pages);
+		/* Batch pages live in ws->batch_ctx and are released when the
+		 * caller deletes that context — only the array is freed here. */
 		mkt_free(ws->batches);
 		ws->batches = NULL;
 	}
@@ -561,6 +568,11 @@ mkt_posting_materialize(
 	/* --- Phase 1: Merge partial pages into batch pages --- */
 	MktPostingBatch *merged = mkt_alloc0(nlist * sizeof(MktPostingBatch));
 
+	/* Merged pages are transient: written to storage in phase 3 and then
+	 * discarded. Accumulate them in a scratch context that is freed in one
+	 * shot at the end, rather than freeing each cluster's pages by hand. */
+	MktMemCtx merge_ctx = mkt_memctx_create(NULL, "posting_merge");
+
 	result->merge_input	 = 0;
 	result->merge_output = 0;
 
@@ -592,6 +604,7 @@ mkt_posting_materialize(
 			else
 				mkt_posting_builder_init_continuation(
 						&mb, NULL, NULL, dim, c, cent);
+			mkt_posting_builder_set_batch_ctx(&mb, merge_ctx);
 
 			for (uint32_t w = 0; w < nworkers; w++)
 			{
@@ -759,8 +772,7 @@ mkt_posting_materialize(
 	}
 
 	/* --- Cleanup --- */
-	for (uint32_t c = 0; c < nlist; c++)
-		free(merged[c].pages);
+	mkt_memctx_delete(merge_ctx); /* frees all merged[c].pages at once */
 	mkt_free(merged);
 	mkt_free(cluster_pages);
 	mkt_free(merged_first);

@@ -14,6 +14,7 @@
 
 #include "algo/hkmeans.h"
 #include "core/atomics.h"
+#include "core/memory.h"
 #include "index/posting_page.h"
 #include "index/storage.h"
 #include "mkt_types.h"
@@ -142,6 +143,15 @@ typedef struct MktPostingBuilder
 
 	/* Deferred batch output (when storage == NULL) */
 	MktPostingBatch batch;
+
+	/*
+	 * Output context for deferred batch pages. Pages are (re)allocated
+	 * here rather than in the current context, so the batch outlives the
+	 * builder and any transient per-worker scratch context. Set via
+	 * mkt_posting_builder_set_batch_ctx(); when NULL the current context
+	 * is used (single-threaded callers).
+	 */
+	MktMemCtx batch_ctx;
 
 	/* Format-specific state (only fastscan uses this) */
 	struct
@@ -276,6 +286,18 @@ mkt_posting_builder_tail(const MktPostingBuilder *b)
  */
 void mkt_posting_builder_take_batch(
 		MktPostingBuilder *builder, MktPostingBatch *out);
+
+/*
+ * Set the output context for deferred batch pages (storage == NULL).
+ * Pages accumulated by the builder are allocated here so they survive
+ * the builder and any transient per-worker scratch context. The
+ * context must outlive whoever consumes the pages taken via
+ * take_batch. Callers running multiple builders concurrently must give
+ * each builder its own context (arena allocation is not thread-safe
+ * within a single context).
+ */
+void
+mkt_posting_builder_set_batch_ctx(MktPostingBuilder *builder, MktMemCtx ctx);
 
 /* ----------------------------------------------------------------
  * Flat builder — one buffer per cluster (standalone benchmark)
