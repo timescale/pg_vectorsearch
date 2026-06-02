@@ -314,6 +314,27 @@ posting_build_callback(
 	MemoryContextReset(cbs->tmp_ctx);
 }
 
+/*
+ * Page sink: stream one completed full page to the leader over this
+ * worker's shm_mq. The page carries its own cluster id and first/
+ * continuation flag in its header, so only the BLCKSZ page is sent.
+ * The send blocks when the ring is full (backpressure) — that is what
+ * bounds worker memory to ~one working page per cluster.
+ */
+static void
+mktann_posting_page_sink(void *ctx, uint32_t cluster_id, const char *page)
+{
+	shm_mq_handle *mqh = (shm_mq_handle *)ctx;
+	shm_mq_result  res;
+
+	(void)cluster_id; /* carried in the page header */
+	res = shm_mq_send(mqh, BLCKSZ, page, false, true);
+	if (res != SHM_MQ_SUCCESS)
+		elog(ERROR,
+			 "mktann: posting page queue send failed (result %d)",
+			 (int)res);
+}
+
 /* ----------------------------------------------------------------
  * Worker entry point — multi-phase build
  * ---------------------------------------------------------------- */
@@ -321,8 +342,6 @@ posting_build_callback(
 void
 mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 {
-	(void)seg;
-
 	MktBuildShared *shared	= shm_toc_lookup(toc, MKTANN_KEY_SHARED, false);
 	Barrier		   *barrier = shm_toc_lookup(toc, MKTANN_KEY_BARRIER, false);
 
@@ -528,12 +547,17 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* ---- Phase 3: Posting scan (deferred batch) ---- */
 
 	HKMeansResult *tree = shm_toc_lookup(toc, MKTANN_KEY_TREE, false);
-	MktDsmBatches *dsm_batches =
-			shm_toc_lookup(toc, MKTANN_KEY_BATCHES, false);
 	char *worker_output = shm_toc_lookup(toc, MKTANN_KEY_WORKER_OUTPUT, false);
 	char *dsm_partials	= shm_toc_lookup(toc, MKTANN_KEY_PARTIALS, true);
+	char *queues_base = shm_toc_lookup(toc, MKTANN_KEY_POSTING_QUEUES, false);
 
 	uint32_t nlist = shared->nlist;
+
+	/* Attach this worker's posting-page queue as the sender; full pages
+	 * are streamed to the leader over it as they fill. */
+	shm_mq *mq = (shm_mq *)mktann_posting_queue(queues_base, worker_id);
+	shm_mq_set_sender(mq, MyProc);
+	shm_mq_handle *qhandle = shm_mq_attach(mq, seg, NULL);
 
 	RaBitQParams *rq_params = mkt_rabitq_create(dim, shared->rabitq_seed);
 
@@ -570,6 +594,11 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			NULL,
 			my_partials,
 			worker_ctx);
+
+	/* Stream each completed full page to the leader over the queue
+	 * instead of accumulating it; only the trailing partial per cluster
+	 * is retained (copied to the partials DSM buffer by worker_finish). */
+	mkt_posting_worker_set_page_sink(&ws, mktann_posting_page_sink, qhandle);
 
 	MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
 
@@ -615,24 +644,13 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	mkt_posting_worker_finish(&ws);
 
-	/* Copy batch pages to DSM */
-	uint32_t *my_counts = mktann_batch_counts(dsm_batches, worker_id);
-	char	 *my_pages	= mktann_batch_pages(dsm_batches, worker_id);
-	uint32_t  offset	= 0;
-	for (uint32_t c = 0; c < nlist; c++)
-	{
-		if (!ws.active[c] || ws.batches[c].count == 0)
-		{
-			my_counts[c] = 0;
-			continue;
-		}
-		uint32_t cnt = ws.batches[c].count;
-		memcpy(my_pages + (size_t)offset * BLCKSZ,
-			   ws.batches[c].pages,
-			   (size_t)cnt * BLCKSZ);
-		my_counts[c] = cnt;
-		offset += cnt;
-	}
+	/*
+	 * All full pages have been streamed to the leader; detach the queue
+	 * to signal this worker is done (the leader drains until every queue
+	 * detaches). The trailing partial page per cluster was copied to the
+	 * partials DSM buffer by worker_finish for the leader to merge.
+	 */
+	shm_mq_detach(qhandle);
 
 	/* Copy active flags to worker_output */
 	bool *wa = mktann_worker_active(worker_output, nlist, worker_id);

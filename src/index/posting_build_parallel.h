@@ -94,6 +94,14 @@ typedef struct MktPostingWorkerState
 	 * standalone, DSM in PG). NULL entries = no partial for that
 	 * cluster. The page data is BLCKSZ bytes per slot. */
 	char *partials; /* [nlist * BLCKSZ], caller-owned */
+
+	/* Optional full-page sink (deferred mode). When set, each builder
+	 * streams its completed pages to this callback instead of
+	 * accumulating them — the PG parallel build uses it to stream pages
+	 * to the leader over shm_mq. Applied to every builder in
+	 * ensure_builder. NULL = accumulate in batches (standalone). */
+	void (*page_sink)(void *ctx, uint32_t cluster_id, const char *page);
+	void *sink_ctx;
 } MktPostingWorkerState;
 
 void mkt_posting_worker_init(
@@ -109,6 +117,15 @@ void mkt_posting_worker_init(
 		MktPostingReserve	  *reserve,
 		char				  *partials,
 		MktMemCtx			   batch_ctx);
+
+/*
+ * Set a full-page sink applied to every builder this worker creates
+ * (deferred mode). Call after worker_init, before adding vectors.
+ */
+void mkt_posting_worker_set_page_sink(
+		MktPostingWorkerState *ws,
+		void (*sink)(void *ctx, uint32_t cluster_id, const char *page),
+		void *sink_ctx);
 
 /*
  * Add a vector to its cluster's posting list builder.

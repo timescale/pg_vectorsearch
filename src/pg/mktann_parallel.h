@@ -22,6 +22,7 @@
 #include <storage/block.h>
 #include <storage/condition_variable.h>
 #include <storage/itemptr.h>
+#include <storage/shm_mq.h>
 #include <storage/shm_toc.h>
 #include <storage/spin.h>
 
@@ -35,20 +36,21 @@
  * DSM table-of-contents keys
  * ---------------------------------------------------------------- */
 
-#define MKTANN_KEY_SHARED		 UINT64CONST(0xB000000000000001)
-#define MKTANN_KEY_TREE			 UINT64CONST(0xB000000000000002)
-#define MKTANN_KEY_RESERVE		 UINT64CONST(0xB000000000000003)
-#define MKTANN_KEY_WORKER_OUTPUT UINT64CONST(0xB000000000000004)
-#define MKTANN_KEY_PARTIALS		 UINT64CONST(0xB000000000000005)
-#define MKTANN_KEY_WAL_USAGE	 UINT64CONST(0xB000000000000006)
-#define MKTANN_KEY_BUFFER_USAGE	 UINT64CONST(0xB000000000000007)
-#define MKTANN_KEY_QUERY_TEXT	 UINT64CONST(0xB000000000000008)
-#define MKTANN_KEY_BARRIER		 UINT64CONST(0xB000000000000009)
-#define MKTANN_KEY_SAMPLES		 UINT64CONST(0xB00000000000000A)
-#define MKTANN_KEY_CENTROIDS	 UINT64CONST(0xB00000000000000B)
-#define MKTANN_KEY_KM_WORKERS	 UINT64CONST(0xB00000000000000C)
-#define MKTANN_KEY_BATCHES		 UINT64CONST(0xB00000000000000D)
-#define MKTANN_KEY_ROOT_ASSIGN	 UINT64CONST(0xB00000000000000E)
+#define MKTANN_KEY_SHARED		  UINT64CONST(0xB000000000000001)
+#define MKTANN_KEY_TREE			  UINT64CONST(0xB000000000000002)
+#define MKTANN_KEY_RESERVE		  UINT64CONST(0xB000000000000003)
+#define MKTANN_KEY_WORKER_OUTPUT  UINT64CONST(0xB000000000000004)
+#define MKTANN_KEY_PARTIALS		  UINT64CONST(0xB000000000000005)
+#define MKTANN_KEY_WAL_USAGE	  UINT64CONST(0xB000000000000006)
+#define MKTANN_KEY_BUFFER_USAGE	  UINT64CONST(0xB000000000000007)
+#define MKTANN_KEY_QUERY_TEXT	  UINT64CONST(0xB000000000000008)
+#define MKTANN_KEY_BARRIER		  UINT64CONST(0xB000000000000009)
+#define MKTANN_KEY_SAMPLES		  UINT64CONST(0xB00000000000000A)
+#define MKTANN_KEY_CENTROIDS	  UINT64CONST(0xB00000000000000B)
+#define MKTANN_KEY_KM_WORKERS	  UINT64CONST(0xB00000000000000C)
+#define MKTANN_KEY_BATCHES		  UINT64CONST(0xB00000000000000D)
+#define MKTANN_KEY_ROOT_ASSIGN	  UINT64CONST(0xB00000000000000E)
+#define MKTANN_KEY_POSTING_QUEUES UINT64CONST(0xB00000000000000F)
 
 /* ----------------------------------------------------------------
  * MktBuildShared — primary shared state in DSM
@@ -334,6 +336,42 @@ static inline char *
 mktann_worker_partials(char *base, uint32_t nlist, int worker_id)
 {
 	return base + (Size)worker_id * nlist * BLCKSZ;
+}
+
+/* ----------------------------------------------------------------
+ * Per-worker shm_mq posting-page queues
+ *
+ * Each worker streams its completed full pages to the leader over a
+ * single-reader/single-writer shm_mq (worker = sender, leader =
+ * receiver). One message = one BLCKSZ page; the leader reads the
+ * cluster id and first/continuation flag from the page header to place
+ * it in that list's reserved block range. The ring doubles as the flush
+ * buffer: when it fills, the worker's send blocks (backpressure), which
+ * is what keeps worker memory bounded to ~one working page per cluster.
+ * A worker detaches its queue when done; the leader drains until all
+ * queues are detached.
+ * ---------------------------------------------------------------- */
+
+#define MKTANN_POSTING_QUEUE_PAGES 8
+
+static inline Size
+mktann_posting_queue_bytes(void)
+{
+	/* Ring large enough for several full-page messages, plus slack for
+	 * shm_mq's internal header. */
+	return (Size)MKTANN_POSTING_QUEUE_PAGES * (BLCKSZ + 64) + 1024;
+}
+
+static inline Size
+mktann_posting_queues_size(int nparticipants)
+{
+	return (Size)nparticipants * MAXALIGN(mktann_posting_queue_bytes());
+}
+
+static inline char *
+mktann_posting_queue(char *base, int worker_id)
+{
+	return base + (Size)worker_id * MAXALIGN(mktann_posting_queue_bytes());
 }
 
 /* ----------------------------------------------------------------

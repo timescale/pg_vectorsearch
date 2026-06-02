@@ -99,6 +99,8 @@ mkt_posting_worker_init(
 	ws->reserve		   = reserve;
 	ws->partials	   = partials;
 	ws->batch_ctx	   = batch_ctx;
+	ws->page_sink	   = NULL;
+	ws->sink_ctx	   = NULL;
 
 	ws->builders = mkt_alloc((size_t)nlist * sizeof(MktPostingBuilder));
 	ws->active	 = mkt_alloc0(nlist * sizeof(bool));
@@ -179,12 +181,30 @@ ensure_builder(MktPostingWorkerState *ws, uint32_t c)
 					&ws->builders[c], ws->reserve->starts[c]);
 	}
 
-	/* Deferred mode: complete pages accumulate in this worker's batch
-	 * context so they outlive the (transient) context the scan runs in. */
+	/* Deferred mode: either stream completed pages to the sink (PG
+	 * parallel: shm_mq to the leader) or accumulate them in this worker's
+	 * batch context (standalone), in which case the batch must outlive
+	 * the transient context the scan runs in. */
 	if (ws->storage == NULL)
-		mkt_posting_builder_set_batch_ctx(&ws->builders[c], ws->batch_ctx);
+	{
+		if (ws->page_sink != NULL)
+			mkt_posting_builder_set_page_sink(
+					&ws->builders[c], ws->page_sink, ws->sink_ctx);
+		else
+			mkt_posting_builder_set_batch_ctx(&ws->builders[c], ws->batch_ctx);
+	}
 
 	ws->active[c] = true;
+}
+
+void
+mkt_posting_worker_set_page_sink(
+		MktPostingWorkerState *ws,
+		void (*sink)(void *ctx, uint32_t cluster_id, const char *page),
+		void *sink_ctx)
+{
+	ws->page_sink = sink;
+	ws->sink_ctx  = sink_ctx;
 }
 
 static void
