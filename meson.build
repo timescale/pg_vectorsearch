@@ -151,8 +151,27 @@ if blas_opt != 'disabled'
     if blas_name == 'OpenBLAS'
       config_data.set('MKT_BLAS_OPENBLAS', 1)
     endif
+    # BLIS threading control (bli_thread_set_num_threads) lives in
+    # libblis / libblis-mt, which the generic CBLAS path may not link
+    # directly (the cblas/blas wrappers don't export it). Probe for it
+    # explicitly and link it so the runtime pin is compiled in — without
+    # this, parallel-build worker processes each spin up a full BLIS
+    # thread pool and oversubscribe the machine.
+    if not cc.has_function('bli_thread_set_num_threads', dependencies: cblas_dep)
+      blis_thread_lib = cc.find_library('blis-mt', required: false)
+      if not blis_thread_lib.found()
+        blis_thread_lib = cc.find_library('blis', required: false)
+      endif
+      if blis_thread_lib.found() and cc.has_function(
+          'bli_thread_set_num_threads', dependencies: blis_thread_lib)
+        cblas_dep = [cblas_dep, blis_thread_lib]
+      endif
+    endif
     if cc.has_function('bli_thread_set_num_threads', dependencies: cblas_dep)
       config_data.set('MKT_BLAS_BLIS', 1)
+      if blas_name == 'CBLAS'
+        blas_name = 'BLIS'
+      endif
     endif
     message('BLAS: ' + blas_name + ' (optimized matrix operations enabled)')
   elif blas_opt == 'enabled'

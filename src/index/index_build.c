@@ -7,7 +7,6 @@
 
 #include <math.h>
 
-#include "algo/distance.h"
 #include "algo/vecops.h"
 #include "core/log.h"
 #include "core/memory.h"
@@ -108,39 +107,30 @@ mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out)
 
 uint32_t
 mkt_find_secondary_cluster(
-		const float	  *vec,
-		const float	  *leaf_centroids,
-		uint32_t	   nleaves,
-		Dimension	   dim,
-		DistanceMetric metric,
-		uint32_t	   primary_cluster,
-		Distance	   primary_dist,
-		double		   epsilon)
+		const uint32_t *cand_leaves,
+		const Distance *cand_dists,
+		uint32_t		ncand,
+		uint32_t		primary_cluster,
+		Distance		primary_dist,
+		double			epsilon)
 {
-	VectorRef qref	= {.data = vec, .dim = dim};
-	Distance  best2 = INFINITY;
-	uint32_t  c2	= primary_cluster;
-
-	for (uint32_t i = 0; i < nleaves; i++)
+	/* Candidates are sorted by ascending distance, so the first one
+	 * that is not the primary is the 2nd-nearest centroid. */
+	for (uint32_t i = 0; i < ncand; i++)
 	{
-		if (i == primary_cluster)
+		if (cand_leaves[i] == primary_cluster)
 			continue;
-		VectorRef cref =
-				{.data = leaf_centroids + (size_t)i * dim, .dim = dim};
-		Distance d = mkt_distance(qref, cref, metric);
-		if (d < best2)
-		{
-			best2 = d;
-			c2	  = i;
-		}
+
+		Distance best2	   = cand_dists[i];
+		double	 gap	   = (double)best2 - (double)primary_dist;
+		double	 gap_ratio = (primary_dist != 0.0)
+								   ? gap / fabs((double)primary_dist)
+								   : INFINITY;
+
+		if (gap_ratio <= epsilon)
+			return cand_leaves[i];
+		break;
 	}
-
-	double gap		 = (double)best2 - (double)primary_dist;
-	double gap_ratio = (primary_dist != 0.0) ? gap / fabs((double)primary_dist)
-											 : INFINITY;
-
-	if (c2 != primary_cluster && gap_ratio <= epsilon)
-		return c2;
 
 	return primary_cluster;
 }
@@ -155,7 +145,21 @@ mkt_find_soar_secondary(
 		const float *normalized_residual,
 		double		 lambda)
 {
-	Distance best_oa = INFINITY;
+	/*
+	 * Orthogonality-amplified distance, decomposed so both terms use the
+	 * SIMD vecops kernels:
+	 *
+	 *   oa(c) = ||v - c||^2 + lambda * (r_hat . (v - c))^2
+	 *         = ||v - c||^2 + lambda * (r_hat.v - r_hat.c)^2
+	 *
+	 * r_hat.v is constant across centroids, so only ||v - c||^2 and
+	 * r_hat.c are per-centroid. Since lambda * (...)^2 >= 0, ||v - c||^2
+	 * is a lower bound on oa: when it already exceeds the running best we
+	 * skip the dot product (exact pruning — no recall impact).
+	 */
+	float	 qrv	 = mkt_dot_product(normalized_residual, vec, dim);
+	float	 lam	 = (float)lambda;
+	float	 best_oa = INFINITY;
 	uint32_t best_c	 = primary_cluster;
 
 	for (uint32_t i = 0; i < nleaves; i++)
@@ -163,18 +167,15 @@ mkt_find_soar_secondary(
 		if (i == primary_cluster)
 			continue;
 
-		const float *cent	 = leaf_centroids + (size_t)i * dim;
-		double		 sq_dist = 0.0;
-		double		 dot	 = 0.0;
+		const float *cent = leaf_centroids + (size_t)i * dim;
 
-		for (Dimension d = 0; d < dim; d++)
-		{
-			double diff = (double)vec[d] - (double)cent[d];
-			sq_dist += diff * diff;
-			dot += diff * (double)normalized_residual[d];
-		}
+		float l2 = mkt_l2_distance_squared(vec, cent, dim);
+		if (l2 >= best_oa)
+			continue; /* oa >= l2 >= best_oa: cannot improve */
 
-		Distance oa = (Distance)(sq_dist + lambda * dot * dot);
+		float rc  = mkt_dot_product(normalized_residual, cent, dim);
+		float gap = qrv - rc;
+		float oa  = l2 + lam * gap * gap;
 		if (oa < best_oa)
 		{
 			best_oa = oa;

@@ -353,3 +353,133 @@ TEST(single_cluster)
 
 	mkt_free(tree);
 }
+
+/* Brute-force nearest leaf (squared L2) for comparison. */
+static uint32_t
+bruteforce_nearest(
+		const float *leaves,
+		uint32_t	 nleaves,
+		const float *vec,
+		Dimension	 dim,
+		double		*out_dist)
+{
+	uint32_t best  = 0;
+	double	 bestd = INFINITY;
+	for (uint32_t l = 0; l < nleaves; l++)
+	{
+		double d = 0.0;
+		for (Dimension dd = 0; dd < dim; dd++)
+		{
+			double diff = (double)vec[dd] -
+						  (double)leaves[(size_t)l * dim + dd];
+			d += diff * diff;
+		}
+		if (d < bestd)
+		{
+			bestd = d;
+			best  = l;
+		}
+	}
+	*out_dist = bestd;
+	return best;
+}
+
+/*
+ * A wide beam (>= fan_out) explores every subtree, so the nearest leaf
+ * it returns must equal the brute-force nearest, and distances must be
+ * ascending.
+ */
+TEST(assign_topk_wide_beam_is_exact)
+{
+	uint32_t  fan_out = 4;
+	uint32_t  nlist	  = 16;
+	Dimension dim	  = 16;
+	uint32_t  nvecs	  = 16 * 62;
+	float	 *data	  = make_clustered_data(16, 62, dim, 7);
+
+	KMeansOptions  opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	HKMeansResult *tree = mkt_hkmeans_f32(
+			data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
+	ASSERT_NOT_NULL(tree, "tree built");
+	ASSERT_EQ(2, tree->nlevels, "2-level tree");
+
+	const float *leaves	 = hk_leaf_centroids(tree);
+	uint32_t	 nleaves = tree->nleaves;
+
+	for (uint32_t q = 0; q < nvecs; q += 37)
+	{
+		const float *vec = data + (size_t)q * dim;
+
+		double	 bf_dist;
+		uint32_t bf_best =
+				bruteforce_nearest(leaves, nleaves, vec, dim, &bf_dist);
+
+		uint32_t out_leaves[8];
+		Distance out_dists[8];
+		uint32_t n = mkt_hkmeans_assign_topk(
+				tree,
+				vec,
+				DISTANCE_L2,
+				4,
+				MKT_HK_MAX_TOPK,
+				out_leaves,
+				out_dists);
+
+		ASSERT_TRUE(n >= 1, "returns at least one leaf");
+		ASSERT_TRUE(n <= 4, "returns at most k leaves");
+		ASSERT_EQ(bf_best, out_leaves[0], "wide beam nearest == brute force");
+		for (uint32_t i = 1; i < n; i++)
+			ASSERT_TRUE(
+					out_dists[i] >= out_dists[i - 1], "distances ascending");
+		/* Returned leaf indices must be distinct. */
+		for (uint32_t i = 0; i < n; i++)
+			for (uint32_t j = i + 1; j < n; j++)
+				ASSERT_TRUE(out_leaves[i] != out_leaves[j], "leaves distinct");
+	}
+
+	mkt_free(tree);
+	mkt_free(data);
+}
+
+/*
+ * beam_width = 1 follows the single greedy path, so its nearest leaf
+ * must match mkt_hkmeans_assign().
+ */
+TEST(assign_topk_beam1_equals_greedy)
+{
+	uint32_t  fan_out = 4;
+	uint32_t  nlist	  = 16;
+	Dimension dim	  = 16;
+	uint32_t  nvecs	  = 16 * 62;
+	float	 *data	  = make_clustered_data(16, 62, dim, 11);
+
+	KMeansOptions  opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	HKMeansResult *tree = mkt_hkmeans_f32(
+			data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
+	ASSERT_NOT_NULL(tree, "tree built");
+
+	for (uint32_t q = 0; q < nvecs; q += 53)
+	{
+		const float *vec = data + (size_t)q * dim;
+
+		Distance greedy_dist;
+		uint32_t greedy =
+				mkt_hkmeans_assign(tree, vec, DISTANCE_L2, &greedy_dist);
+
+		uint32_t out_leaves[4];
+		Distance out_dists[4];
+		uint32_t n = mkt_hkmeans_assign_topk(
+				tree, vec, DISTANCE_L2, 2, 1, out_leaves, out_dists);
+
+		ASSERT_TRUE(n >= 1, "returns at least one leaf");
+		ASSERT_EQ(greedy, out_leaves[0], "beam-1 nearest == greedy assign");
+		ASSERT_FLOAT_EQ(
+				(float)greedy_dist,
+				(float)out_dists[0],
+				1e-3f,
+				"beam-1 distance == greedy distance");
+	}
+
+	mkt_free(tree);
+	mkt_free(data);
+}

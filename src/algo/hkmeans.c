@@ -457,3 +457,133 @@ mkt_hkmeans_assign(
 		*out_distance = INFINITY;
 	return 0;
 }
+
+/*
+ * Insert (id, d) into an unsorted bounded set of the `cap` smallest
+ * entries. Keeps at most `cap` items; evicts the current max when full.
+ */
+static inline void
+topk_insert(
+		uint32_t *ids,
+		Distance *dists,
+		uint32_t *n,
+		uint32_t  cap,
+		uint32_t  id,
+		Distance  d)
+{
+	if (*n < cap)
+	{
+		ids[*n]	  = id;
+		dists[*n] = d;
+		(*n)++;
+		return;
+	}
+
+	/* Full: replace the worst entry if this one is better. */
+	uint32_t worst_i = 0;
+	Distance worst_d = dists[0];
+	for (uint32_t i = 1; i < cap; i++)
+		if (dists[i] > worst_d)
+		{
+			worst_d = dists[i];
+			worst_i = i;
+		}
+	if (d < worst_d)
+	{
+		ids[worst_i]   = id;
+		dists[worst_i] = d;
+	}
+}
+
+/* Insertion sort by ascending distance (n is small, <= MKT_HK_MAX_TOPK). */
+static inline void
+topk_sort(uint32_t *ids, Distance *dists, uint32_t n)
+{
+	for (uint32_t i = 1; i < n; i++)
+	{
+		Distance d	= dists[i];
+		uint32_t id = ids[i];
+		uint32_t j	= i;
+		while (j > 0 && dists[j - 1] > d)
+		{
+			dists[j] = dists[j - 1];
+			ids[j]	 = ids[j - 1];
+			j--;
+		}
+		dists[j] = d;
+		ids[j]	 = id;
+	}
+}
+
+uint32_t
+mkt_hkmeans_assign_topk(
+		const HKMeansResult *tree,
+		const float			*vec,
+		DistanceMetric		 metric,
+		uint32_t			 k,
+		uint32_t			 beam_width,
+		uint32_t			*out_leaves,
+		Distance			*out_dists)
+{
+	if (k == 0)
+		return 0;
+	if (k > MKT_HK_MAX_TOPK)
+		k = MKT_HK_MAX_TOPK;
+	if (beam_width < 1)
+		beam_width = 1;
+	if (beam_width > MKT_HK_MAX_TOPK)
+		beam_width = MKT_HK_MAX_TOPK;
+
+	const Dimension	   dim	 = tree->dim;
+	const HKMeansNode *nodes = hk_nodes(tree);
+
+	/* Current beam: indices into nodes[] for the next level to expand. */
+	uint32_t beam[MKT_HK_MAX_TOPK];
+	uint32_t beam_n = 1;
+	beam[0]			= 0; /* root */
+
+	for (uint32_t level = 0; level < tree->nlevels; level++)
+	{
+		bool	 is_leaf = (level == tree->nlevels - 1);
+		uint32_t cap	 = is_leaf ? k : beam_width;
+
+		/* Bounded best-`cap` collection of this level's candidates. For
+		 * internal levels these are child node indices; at the leaf
+		 * level they are global leaf indices. */
+		uint32_t best_id[MKT_HK_MAX_TOPK];
+		Distance best_d[MKT_HK_MAX_TOPK];
+		uint32_t best_n = 0;
+
+		for (uint32_t b = 0; b < beam_n; b++)
+		{
+			const HKMeansNode *node	 = &nodes[beam[b]];
+			const float		  *cents = hk_node_centroids(tree, node);
+			for (uint32_t c = 0; c < node->nchildren; c++)
+			{
+				VectorRef qref = {.data = vec, .dim = dim};
+				VectorRef cref = {.data = cents + (size_t)c * dim, .dim = dim};
+				Distance  d	   = mkt_distance(qref, cref, metric);
+				uint32_t  id   = is_leaf ? node->first_leaf + c
+										 : node->first_child + c;
+				topk_insert(best_id, best_d, &best_n, cap, id, d);
+			}
+		}
+
+		if (is_leaf)
+		{
+			topk_sort(best_id, best_d, best_n);
+			for (uint32_t i = 0; i < best_n; i++)
+			{
+				out_leaves[i] = best_id[i];
+				if (out_dists != NULL)
+					out_dists[i] = best_d[i];
+			}
+			return best_n;
+		}
+
+		memcpy(beam, best_id, best_n * sizeof(uint32_t));
+		beam_n = best_n;
+	}
+
+	return 0;
+}

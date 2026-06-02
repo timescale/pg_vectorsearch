@@ -124,6 +124,32 @@ uint32_t mkt_hkmeans_assign(
 		DistanceMetric		 metric,
 		Distance			*out_distance);
 
+/* Upper bound on k / beam_width for mkt_hkmeans_assign_topk (keeps the
+ * beam scratch on the stack). */
+#define MKT_HK_MAX_TOPK 64
+
+/*
+ * Beam-search the tree for the k nearest leaf centroids.
+ *
+ * Maintains a beam of the best `beam_width` nodes per level, then keeps
+ * the k nearest leaves at the leaf level. Approximate for k/beam_width
+ * smaller than the tree fan-out, but far cheaper than scanning all
+ * leaves — used for secondary (boundary) cluster assignment during
+ * build. k and beam_width are clamped to MKT_HK_MAX_TOPK.
+ *
+ * out_leaves[k] receives leaf indices sorted by ascending distance;
+ * out_dists[k] (optional) the matching distances. Returns the number of
+ * leaves written (<= k).
+ */
+uint32_t mkt_hkmeans_assign_topk(
+		const HKMeansResult *tree,
+		const float			*vec,
+		DistanceMetric		 metric,
+		uint32_t			 k,
+		uint32_t			 beam_width,
+		uint32_t			*out_leaves,
+		Distance			*out_dists);
+
 /*
  * Build a 2-level HKMeansResult from pre-computed centroids.
  *

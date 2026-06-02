@@ -180,6 +180,79 @@ mktann_km_assign_and_accumulate_filtered(
  * ---------------------------------------------------------------- */
 
 void
+posting_cb_batch_init(PostingCbState *cbs)
+{
+	cbs->batch_count = 0;
+	cbs->use_batch	 = (cbs->bp.soar_lambda > 0.0 ||
+						cbs->bp.boundary_epsilon > 0.0) &&
+					 mkt_secondary_batch_available();
+	if (!cbs->use_batch)
+		return;
+
+	uint32_t  B	  = MKT_SECONDARY_BATCH;
+	Dimension dim = cbs->bp.dim;
+
+	cbs->enc_batch		 = palloc((size_t)B * dim * sizeof(float));
+	cbs->batch_tids		 = palloc(B * sizeof(ItemPointerData));
+	cbs->batch_primary	 = palloc(B * sizeof(uint32_t));
+	cbs->batch_pdist	 = palloc(B * sizeof(float));
+	cbs->batch_secondary = palloc(B * sizeof(uint32_t));
+	mkt_secondary_batch_init(
+			&cbs->sb,
+			hk_leaf_centroids(cbs->tree),
+			cbs->tree->nleaves,
+			dim,
+			B);
+}
+
+void
+posting_cb_batch_flush(PostingCbState *cbs)
+{
+	if (!cbs->use_batch || cbs->batch_count == 0)
+		return;
+
+	Dimension	  dim	  = cbs->bp.dim;
+	MemoryContext old_ctx = MemoryContextSwitchTo(cbs->worker_ctx);
+
+	mkt_secondary_batch_assign(
+			&cbs->sb,
+			cbs->enc_batch,
+			cbs->batch_count,
+			cbs->batch_primary,
+			cbs->batch_pdist,
+			&cbs->bp,
+			cbs->batch_secondary);
+
+	for (uint32_t k = 0; k < cbs->batch_count; k++)
+	{
+		mkt_posting_worker_add_heap(
+				cbs->ws,
+				cbs->batch_tids[k],
+				cbs->enc_batch + (size_t)k * dim,
+				cbs->batch_primary[k],
+				cbs->batch_secondary[k]);
+		if (cbs->batch_secondary[k] != MKT_INVALID_CLUSTER)
+			cbs->soar_dupes++;
+	}
+
+	cbs->batch_count = 0;
+	MemoryContextSwitchTo(old_ctx);
+}
+
+void
+posting_cb_batch_cleanup(PostingCbState *cbs)
+{
+	if (!cbs->use_batch)
+		return;
+	mkt_secondary_batch_free(&cbs->sb);
+	pfree(cbs->enc_batch);
+	pfree(cbs->batch_tids);
+	pfree(cbs->batch_primary);
+	pfree(cbs->batch_pdist);
+	pfree(cbs->batch_secondary);
+}
+
+void
 posting_build_callback(
 		Relation	index,
 		ItemPointer tid,
@@ -196,10 +269,33 @@ posting_build_callback(
 	if (isnull[0])
 		return;
 
-	MemoryContext old_ctx = MemoryContextSwitchTo(cbs->tmp_ctx);
-
 	MktVector *vec	= DatumGetMktVector(values[0]);
 	VectorRef  vref = MktVectorToRef(vec);
+
+	if (cbs->use_batch)
+	{
+		/* Buffer the tuple; the secondary search runs per batch. Primary
+		 * assignment (tree descent) writes the encoded vector into the
+		 * batch buffer. No per-tuple allocation, so no tmp context. */
+		uint32_t k = cbs->batch_count;
+		Distance d;
+		cbs->batch_primary[k] = mkt_build_assign_primary(
+				cbs->tree,
+				vref.data,
+				&cbs->bp,
+				cbs->enc_batch + (size_t)k * cbs->bp.dim,
+				&d);
+		cbs->batch_pdist[k] = (float)d;
+		cbs->batch_tids[k]	= *tid;
+		cbs->batch_count++;
+		cbs->indtuples++;
+
+		if (cbs->batch_count == MKT_SECONDARY_BATCH)
+			posting_cb_batch_flush(cbs);
+		return;
+	}
+
+	MemoryContext old_ctx = MemoryContextSwitchTo(cbs->tmp_ctx);
 
 	MktBuildAssignment asgn = mkt_build_assign_vector(
 			cbs->tree, vref.data, &cbs->bp, &cbs->bufs);
@@ -495,6 +591,10 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			.worker_ctx = worker_ctx,
 	};
 
+	MemoryContext batch_ctx = MemoryContextSwitchTo(worker_ctx);
+	posting_cb_batch_init(&cbs);
+	MemoryContextSwitchTo(batch_ctx);
+
 	/* Second parallel scan for posting build */
 	TableScanDesc scan2 = table_beginscan_parallel(
 			heapRel, ParallelTableScanFromMktShared(shared));
@@ -508,6 +608,9 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			posting_build_callback,
 			&cbs,
 			scan2);
+
+	posting_cb_batch_flush(&cbs);
+	posting_cb_batch_cleanup(&cbs);
 
 	mkt_posting_worker_finish(&ws);
 
