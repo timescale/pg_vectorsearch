@@ -588,16 +588,10 @@ do_parallel_build(
 					   (Size)nlist * 2 * sizeof(HKMeansNode) +
 					   (Size)nlist * dim * sizeof(float) * 2;
 	shm_toc_estimate_chunk(&pcxt->estimator, max_tree_sz);
-	/* Deferred batch posting phase: workers build deferred
-	 * batch pages, copy to DSM, leader materializes. */
-	uint32_t est_pages_per_c	  = estimate_posting_pages(heap, dim, nlist);
-	uint32_t est_total_pages	  = est_pages_per_c * nlist;
-	uint32_t max_pages_per_worker = (est_total_pages / nparticipants) * 2 +
-									100;
-
+	/* Bounded streaming posting phase: per-worker shm_mq queues carry full
+	 * pages from the workers to the leader, which writes them. */
 	shm_toc_estimate_chunk(
-			&pcxt->estimator,
-			mktann_batches_size(nparticipants, max_pages_per_worker, nlist));
+			&pcxt->estimator, mktann_posting_queues_size(nparticipants));
 	/* Worker output (active flags) */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mktann_worker_output_size(nlist, nparticipants));
@@ -618,8 +612,8 @@ do_parallel_build(
 		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
 	}
 
-	/* nkeys: shared, barrier, samples, centroids, km_workers,
-	 * root_assign, tree, batches, worker_output, wal, buffer
+	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
+	 * tree, posting_queues, worker_output, wal, buffer
 	 * + optionally partials + query_text */
 	int nkeys = 11;
 	if (!bs->params.fastscan)
@@ -706,15 +700,21 @@ do_parallel_build(
 	memset(dsm_tree, 0, max_tree_sz);
 	shm_toc_insert(pcxt->toc, MKTANN_KEY_TREE, dsm_tree);
 
-	/* Deferred batch posting phase DSM */
-	Size batches_sz =
-			mktann_batches_size(nparticipants, max_pages_per_worker, nlist);
-	MktDsmBatches *dsm_batches = shm_toc_allocate(pcxt->toc, batches_sz);
-	memset(dsm_batches, 0, batches_sz);
-	dsm_batches->nparticipants		  = nparticipants;
-	dsm_batches->max_pages_per_worker = max_pages_per_worker;
-	dsm_batches->nlist				  = nlist;
-	shm_toc_insert(pcxt->toc, MKTANN_KEY_BATCHES, dsm_batches);
+	/* Per-worker shm_mq posting-page queues. The leader is the receiver of
+	 * every queue; the launched workers attach as senders in phase 3 and
+	 * stream their full pages. Create and register the receiver here,
+	 * before launch. */
+	Size  queues_sz	  = mktann_posting_queues_size(nparticipants);
+	char *queues_base = shm_toc_allocate(pcxt->toc, queues_sz);
+	memset(queues_base, 0, queues_sz);
+	for (int i = 0; i < nparticipants; i++)
+	{
+		shm_mq *mq = shm_mq_create(
+				mktann_posting_queue(queues_base, i),
+				mktann_posting_queue_bytes());
+		shm_mq_set_receiver(mq, MyProc);
+	}
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_POSTING_QUEUES, queues_base);
 
 	/* Worker output (active flags) */
 	Size  out_sz		= mktann_worker_output_size(nlist, nparticipants);
@@ -1257,9 +1257,8 @@ do_parallel_build(
 		return false;
 	}
 
-	/* Update nlist in shared state and batch DSM */
-	shared->nlist	   = nlist;
-	dsm_batches->nlist = nlist;
+	/* Update nlist in shared state (workers read it for phase 3). */
+	shared->nlist = nlist;
 
 	/* Copy tree into pre-allocated DSM slot */
 	if (tree->total_size > max_tree_sz)
@@ -1317,111 +1316,143 @@ do_parallel_build(
 	instr_time t_scan_start;
 	INSTR_TIME_SET_CURRENT(t_scan_start);
 
-	/* ---- Phase 3: Leader does posting scan ---- */
+	/*
+	 * ---- Phase 3: leader pre-reserves layout, then drains worker queues ----
+	 *
+	 * Bounded streaming build: the launched workers (worker_id 1..N) scan,
+	 * assign + RaBitQ-encode, and stream completed full pages over their
+	 * shm_mq; the leader does NOT scan here. It estimates each list's size,
+	 * reserves a contiguous block range per list, pre-extends the relation,
+	 * then drains every queue — placing each page in its list's range and
+	 * writing it — until all queues detach. Heads + trailing partials are
+	 * stitched in by the finalize below.
+	 *
+	 * NOTE (draft, untested): fastscan posting is not handled here yet; the
+	 * AoS (non-fastscan) path is implemented. Validate via rekall.
+	 */
+	HKMeansResult *tree_r = (HKMeansResult *)dsm_tree;
+
+	/* Per-cluster page estimate from the sample assignment, extrapolated
+	 * to the full table (handles skew; slight over-estimate for headroom). */
+	uint32_t *cluster_counts = palloc0((size_t)nlist * sizeof(uint32_t));
+	uint32_t  n_est_samples	 = 0;
+	for (int w = 0; w < nparticipants; w++)
 	{
-		char *my_partials =
-				(dsm_partials != NULL)
-						? mktann_worker_partials(dsm_partials, nlist, 0)
-						: NULL;
-
-		MemoryContext worker_ctx = AllocSetContextCreate(
-				CurrentMemoryContext,
-				"mktann leader posting",
-				ALLOCSET_DEFAULT_SIZES);
-		MemoryContext prev_ctx = MemoryContextSwitchTo(worker_ctx);
-
-		MktPostingWorkerState ws;
-		mkt_posting_worker_init(
-				&ws,
-				0,
-				nlist,
-				dim,
-				bs->params.fastscan,
-				NULL,
-				rq_params,
-				ref_vecs,
-				pt_centroids,
-				NULL,
-				my_partials,
-				worker_ctx);
-
-		MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
-
-		MemoryContextSwitchTo(prev_ctx);
-
-		PostingCbState cbs = {
-				.tree		= (HKMeansResult *)dsm_tree,
-				.bp			= {.dim				 = dim,
-							   .metric			 = bs->params.metric,
-							   .soar_lambda		 = bs->params.soar_lambda,
-							   .boundary_epsilon = bs->params.boundary_epsilon},
-				.bufs		= bufs,
-				.ws			= &ws,
-				.indtuples	= 0,
-				.soar_dupes = 0,
-				.tmp_ctx	= AllocSetContextCreate(
-						   CurrentMemoryContext,
-						   "mktann leader tuple",
-						   ALLOCSET_DEFAULT_SIZES),
-				.worker_ctx = worker_ctx,
-		};
-
-		MemoryContext batch_ctx = MemoryContextSwitchTo(worker_ctx);
-		posting_cb_batch_init(&cbs);
-		MemoryContextSwitchTo(batch_ctx);
-
-		TableScanDesc scan2 = table_beginscan_parallel(
-				heap, ParallelTableScanFromMktShared(shared));
-
-		double leader_reltuples = table_index_build_scan(
-				heap,
-				index,
-				index_info,
-				true,
-				true,
-				posting_build_callback,
-				&cbs,
-				scan2);
-
-		posting_cb_batch_flush(&cbs);
-		posting_cb_batch_cleanup(&cbs);
-
-		mkt_posting_worker_finish(&ws);
-
-		/* Copy leader batch pages to DSM */
-		uint32_t *my_counts = mktann_batch_counts(dsm_batches, 0);
-		char	 *my_pages	= mktann_batch_pages(dsm_batches, 0);
-		uint32_t  offset	= 0;
-		for (uint32_t c = 0; c < nlist; c++)
+		float	*sw = mktann_worker_samples(dsm_samples, w);
+		uint32_t nw = mktann_sample_counts(dsm_samples)[w];
+		n_est_samples += nw;
+		for (uint32_t i = 0; i < nw; i++)
 		{
-			if (!ws.active[c] || ws.batches[c].count == 0)
-			{
-				my_counts[c] = 0;
-				continue;
-			}
-			uint32_t cnt = ws.batches[c].count;
-			memcpy(my_pages + (size_t)offset * BLCKSZ,
-				   ws.batches[c].pages,
-				   (size_t)cnt * BLCKSZ);
-			my_counts[c] = cnt;
-			offset += cnt;
+			Distance d;
+			cluster_counts[mkt_hkmeans_assign(
+					tree_r, sw + (size_t)i * dim, bs->params.metric, &d)]++;
 		}
-
-		/* Copy active to worker_output */
-		bool *la = mktann_worker_active(worker_output, nlist, 0);
-		memcpy(la, ws.active, nlist * sizeof(bool));
-
-		SpinLockAcquire(&shared->mutex);
-		shared->nparticipantsdone++;
-		shared->reltuples += leader_reltuples;
-		shared->indtuples += cbs.indtuples;
-		shared->soar_dupes += cbs.soar_dupes;
-		SpinLockRelease(&shared->mutex);
-
-		mkt_posting_worker_cleanup(&ws);
-		mkt_build_worker_bufs_free(&bufs);
-		MemoryContextDelete(worker_ctx);
 	}
+	{
+		double est_rows = RelationGetNumberOfBlocks(heap) *
+						  (BLCKSZ / (double)(dim * sizeof(float) + 32));
+		double scale	 = n_est_samples > 0 ? est_rows / n_est_samples : 1.0;
+		bool   replicate = bs->params.soar_lambda > 0.0 ||
+						 bs->params.boundary_epsilon > 0.0;
+		double headroom = replicate ? 1.3 : 1.05;
+		for (uint32_t c = 0; c < nlist; c++)
+			cluster_counts[c] = (uint32_t)((double)cluster_counts[c] * scale *
+										   headroom) +
+								1;
+	}
+
+	/* Leader-local reserve (0-based ranges; first_posting added on write).
+	 * first_posting is the centroid-layout posting start computed above. */
+	MktPostingReserve reserve;
+	mkt_posting_reserve_init(
+			&reserve, cluster_counts, nlist, nparticipants, dim);
+	pfree(cluster_counts);
+
+	uint32_t	spill_extra = reserve.total / 10 + 100;
+	BlockNumber spill_next	= first_posting + reserve.total;
+
+	/* Pre-extend the relation up to first_posting + reserved + spill, in
+	 * bounded chunks (ExtendBufferedRelBy caps additional pins per call, so
+	 * a single big extend is silently truncated — loop). */
+	{
+		BlockNumber cur	   = RelationGetNumberOfBlocks(index);
+		BlockNumber target = first_posting + reserve.total + spill_extra;
+		uint32_t	remain = target > cur ? (uint32_t)(target - cur) : 0;
+		while (remain > 0)
+		{
+			uint32_t chunk = remain > 2048 ? 2048 : remain;
+			mkt_storage_extend(&storage->base, chunk);
+			remain -= chunk;
+		}
+	}
+
+	/* Attach as receiver to each launched worker's queue. */
+	int				nq = pcxt->nworkers_launched;
+	shm_mq_handle **rh = palloc0(
+			(size_t)nparticipants * sizeof(shm_mq_handle *));
+	for (int wi = 0; wi < nq; wi++)
+	{
+		shm_mq *mq = (shm_mq *)mktann_posting_queue(queues_base, wi + 1);
+		rh[wi + 1] = shm_mq_attach(mq, pcxt->seg, NULL);
+	}
+
+	/*
+	 * Drain: place continuation pages at offsets 1.. within each list's
+	 * range (offset 0 is reserved for the head, written in finalize); spill
+	 * past the range into the spill region. cl_used[c] counts placed
+	 * continuations.
+	 */
+	uint32_t *cl_used = palloc0((size_t)nlist * sizeof(uint32_t));
+	bool	 *qdone	  = palloc0((size_t)(nq > 0 ? nq : 1) * sizeof(bool));
+	int		  ndone	  = 0;
+	while (ndone < nq)
+	{
+		bool progressed = false;
+		for (int wi = 0; wi < nq; wi++)
+		{
+			Size		  len;
+			void		 *data;
+			shm_mq_result res;
+
+			if (qdone[wi])
+				continue;
+			res = shm_mq_receive(rh[wi + 1], &len, &data, true);
+			if (res == SHM_MQ_SUCCESS)
+			{
+				Page		src = (Page)data;
+				uint32_t	c	= mkt_posting_opaque(src)->cluster_id;
+				uint32_t	off = ++cl_used[c]; /* 1.. ; 0 = head */
+				BlockNumber blk = (off < reserve.counts[c])
+										? first_posting + reserve.starts[c] +
+												  off
+										: spill_next++;
+				Page		dst = mkt_storage_write_page(&storage->base, blk);
+				memcpy(dst, src, BLCKSZ);
+				mkt_storage_commit_page(&storage->base, blk);
+				progressed = true;
+			}
+			else if (res == SHM_MQ_DETACHED)
+			{
+				qdone[wi] = true;
+				ndone++;
+				progressed = true;
+			}
+		}
+		if (!progressed)
+		{
+			WaitLatch(
+					MyLatch,
+					WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
+					-1L,
+					WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+			ResetLatch(MyLatch);
+			CHECK_FOR_INTERRUPTS();
+		}
+	}
+	for (int wi = 0; wi < nq; wi++)
+		shm_mq_detach(rh[wi + 1]);
+	pfree(rh);
+	pfree(qdone);
 
 	WaitForParallelWorkersToFinish(pcxt);
 
@@ -1440,49 +1471,107 @@ do_parallel_build(
 	instr_time t_merge_start;
 	INSTR_TIME_SET_CURRENT(t_merge_start);
 
-	/* Reconstruct MktPostingBatch from DSM and materialize */
-	MktPostingBatch **all_batches = palloc(
-			nparticipants * sizeof(MktPostingBatch *));
-	bool **all_active = palloc(nparticipants * sizeof(bool *));
-
-	for (int t = 0; t < nparticipants; t++)
+	/*
+	 * Finalize each list: write its head page (the list's reserved offset
+	 * 0) with centroid metadata, merge the trailing partials from all
+	 * workers into the head (overflowing past the continuations / into
+	 * spill), then stitch the chain head -> continuations -> overflow.
+	 */
+	for (uint32_t c = 0; c < nlist; c++)
 	{
-		uint32_t *counts	 = mktann_batch_counts(dsm_batches, t);
-		char	 *pages_base = mktann_batch_pages(dsm_batches, t);
+		BlockNumber head_blk = first_posting + reserve.starts[c];
 
-		MktPostingBatch *batches = palloc0(nlist * sizeof(MktPostingBatch));
-		uint32_t		 off	 = 0;
-		for (uint32_t c = 0; c < nlist; c++)
+		/* Overflow from the head builder is claimed after the
+		 * continuations (offsets 1..cl_used are already written). */
+		mkt_atomic_init_u32(&reserve.nexts[c], cl_used[c] + 1);
+
+		MktPostingBuilder hb;
+		if (bs->params.fastscan)
+			mkt_posting_builder_init_fastscan(
+					&hb,
+					&storage->base,
+					rq_params,
+					dim,
+					c,
+					ref_vecs + (size_t)c * dim,
+					pt_centroids + (size_t)c * dim);
+		else
+			mkt_posting_builder_init(
+					&hb,
+					&storage->base,
+					rq_params,
+					dim,
+					c,
+					ref_vecs + (size_t)c * dim,
+					pt_centroids + (size_t)c * dim);
+		mkt_posting_builder_set_shared_reserve(
+				&hb,
+				first_posting + reserve.starts[c],
+				reserve.counts[c],
+				&reserve.nexts[c]);
+		mkt_posting_builder_set_first_blkno(&hb, head_blk);
+
+		/* Merge trailing partials (AoS) from every worker into the head. */
+		if (!bs->params.fastscan && dsm_partials != NULL)
 		{
-			batches[c].pages = pages_base + (size_t)off * BLCKSZ;
-			batches[c].count = counts[c];
-			off += counts[c];
+			for (int w = 0; w < nparticipants; w++)
+			{
+				Page pg = mktann_worker_partials(dsm_partials, nlist, w) +
+						  (size_t)c * BLCKSZ;
+				MktPostingPageOpaque *op = mkt_posting_opaque(pg);
+				if (op->entry_count == 0)
+					continue;
+				bool  is_fp = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+				char *ct	= is_fp ? mkt_posting_content_first(pg, dim)
+									: mkt_posting_content(pg);
+				for (uint32_t e = 0; e < op->entry_count; e++)
+				{
+					MktPostingEntryHeader *hdr =
+							mkt_posting_entry_at(ct, e, dim);
+					mkt_posting_builder_add_encoded(
+							&hb,
+							hdr->meta.tid,
+							hdr->f_add,
+							hdr->f_rescale,
+							hdr->f_error,
+							hdr->bits);
+				}
+			}
 		}
-		all_batches[t] = batches;
-		all_active[t]  = mktann_worker_active(worker_output, nlist, t);
+
+		mkt_posting_builder_finish(&hb);
+		mkt_posting_builder_cleanup(&hb);
+
+		/* Stitch the contiguous continuation run between the head and the
+		 * head builder's overflow chain (ov1 = head's current next link). */
+		if (cl_used[c] > 0)
+		{
+			Page		hp	= mkt_storage_write_page(&storage->base, head_blk);
+			BlockNumber ov1 = mkt_posting_opaque(hp)->next_blkno;
+			mkt_posting_opaque(hp)->next_blkno = first_posting +
+												 reserve.starts[c] + 1;
+			mkt_storage_commit_page(&storage->base, head_blk);
+
+			for (uint32_t off = 1; off < cl_used[c]; off++)
+			{
+				BlockNumber b = first_posting + reserve.starts[c] + off;
+				Page		p = mkt_storage_write_page(&storage->base, b);
+				mkt_posting_opaque(p)->next_blkno = b + 1;
+				mkt_storage_commit_page(&storage->base, b);
+			}
+			BlockNumber lastc = first_posting + reserve.starts[c] + cl_used[c];
+			Page		lp	  = mkt_storage_write_page(&storage->base, lastc);
+			mkt_posting_opaque(lp)->next_blkno = ov1;
+			mkt_storage_commit_page(&storage->base, lastc);
+		}
+
+		posting_heads[c] = head_blk;
 	}
 
-	MktPostingBuildResult build_result;
-	mkt_posting_materialize(
-			all_batches,
-			dsm_partials,
-			all_active,
-			(uint32_t)nparticipants,
-			nlist,
-			&storage->base,
-			ref_vecs,
-			pt_centroids,
-			dim,
-			bs->params.fastscan,
-			&build_result);
+	uint32_t total_pages = RelationGetNumberOfBlocks(index) - first_posting;
 
-	memcpy(posting_heads, build_result.heads, nlist * sizeof(BlockNumber));
-	mkt_free(build_result.heads);
-
-	for (int t = 0; t < nparticipants; t++)
-		pfree(all_batches[t]);
-	pfree(all_batches);
-	pfree(all_active);
+	mkt_posting_reserve_free(&reserve);
+	pfree(cl_used);
 	pfree(pt_centroids);
 
 	instr_time t_merge_end;
@@ -1490,12 +1579,12 @@ do_parallel_build(
 	INSTR_TIME_SUBTRACT(t_merge_end, t_merge_start);
 
 	elog(LOG,
-		 "mktann: parallel batch build with %d workers, "
+		 "mktann: parallel streaming build with %d workers, "
 		 "%u clusters, %u pages, "
-		 "scan %.1fms, materialize %.1fms",
+		 "scan+drain %.1fms, finalize %.1fms",
 		 pcxt->nworkers_launched,
 		 nlist,
-		 build_result.total_pages,
+		 total_pages,
 		 INSTR_TIME_GET_MILLISEC(t_scan_end),
 		 INSTR_TIME_GET_MILLISEC(t_merge_end));
 
