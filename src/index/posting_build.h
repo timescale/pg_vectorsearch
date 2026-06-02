@@ -249,6 +249,17 @@ typedef struct MktPostingBuilder
 	 */
 	MktMemCtx batch_ctx;
 
+	/*
+	 * Optional full-page sink for deferred mode. When set, a completed
+	 * page is handed to this callback instead of being accumulated in
+	 * `batch` — used by the PG parallel build to stream full pages to the
+	 * leader (over shm_mq) so worker memory stays bounded to one working
+	 * page per cluster. The page's cluster id and flags (first vs
+	 * continuation) are carried in the page itself.
+	 */
+	void (*page_sink)(void *ctx, uint32_t cluster_id, const char *page);
+	void *sink_ctx;
+
 	/* Format-specific state (only fastscan uses this) */
 	struct
 	{
@@ -394,6 +405,18 @@ void mkt_posting_builder_take_batch(
  */
 void
 mkt_posting_builder_set_batch_ctx(MktPostingBuilder *builder, MktMemCtx ctx);
+
+/*
+ * Set a full-page sink for deferred mode (storage == NULL). When set,
+ * completed pages are streamed to `sink(ctx, cluster_id, page)` instead
+ * of accumulated in the batch — the PG parallel build uses this to send
+ * full pages to the leader over shm_mq. NULL (default) keeps batch
+ * accumulation.
+ */
+void mkt_posting_builder_set_page_sink(
+		MktPostingBuilder *builder,
+		void (*sink)(void *ctx, uint32_t cluster_id, const char *page),
+		void *sink_ctx);
 
 /* ----------------------------------------------------------------
  * Flat builder — one buffer per cluster (standalone benchmark)

@@ -546,7 +546,17 @@ flush_page(MktPostingBuilder *builder)
 
 	if (builder->storage == NULL)
 	{
-		batch_save_page(builder);
+		/*
+		 * Deferred mode. With a page sink set (PG parallel build), stream
+		 * the full page to the sink — the leader writes it — for bounded
+		 * memory. Otherwise accumulate it in the batch (standalone tests /
+		 * AoS conversion).
+		 */
+		if (builder->page_sink != NULL)
+			builder->page_sink(
+					builder->sink_ctx, builder->cluster_id, builder->mem_page);
+		else
+			batch_save_page(builder);
 		builder->is_first = false;
 		builder->page_ops->reinit_page(builder);
 		builder->page_dirty = false;
@@ -1035,6 +1045,16 @@ void
 mkt_posting_builder_set_batch_ctx(MktPostingBuilder *builder, MktMemCtx ctx)
 {
 	builder->batch_ctx = ctx;
+}
+
+void
+mkt_posting_builder_set_page_sink(
+		MktPostingBuilder *builder,
+		void (*sink)(void *ctx, uint32_t cluster_id, const char *page),
+		void *sink_ctx)
+{
+	builder->page_sink = sink;
+	builder->sink_ctx  = sink_ctx;
 }
 
 void
