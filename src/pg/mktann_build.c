@@ -60,8 +60,8 @@
 #include "mkt_vector.h"
 #include "mktann_build.h"
 #include "mktann_meta.h"
-#include "mktann_parallel.h"
 #include "mktann_storage.h"
+#include "parallel_build.h"
 #include "quant/fastscan.h"
 #include "quant/rabitq.h"
 

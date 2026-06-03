@@ -1,5 +1,5 @@
 /*
- * mktann_parallel.c - PG parallel worker for mktann index build
+ * parallel_build_worker.c - PG parallel index build, worker side
  *
  * Multi-phase parallel build:
  *   Phase 1 (sampling): cooperative heap scan, each worker collects
@@ -32,7 +32,7 @@
 #include "index/posting_build_parallel.h"
 #include "mkt_pg.h"
 #include "mkt_vector.h"
-#include "mktann_parallel.h"
+#include "parallel_build.h"
 #include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------

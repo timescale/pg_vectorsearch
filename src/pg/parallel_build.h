@@ -1,5 +1,5 @@
 /*
- * mktann_parallel.h - PG parallel index build for mktann
+ * parallel_build.h - PG parallel index build (worker + leader shared decls)
  *
  * Two-phase parallel build:
  *   Phase 1 (sampling + k-means): workers cooperatively scan the
@@ -12,8 +12,8 @@
  * The leader merges partial pages and writes centroid pages.
  */
 
-#ifndef MKTANN_PARALLEL_H
-#define MKTANN_PARALLEL_H
+#ifndef MKT_PARALLEL_BUILD_H
+#define MKT_PARALLEL_BUILD_H
 
 #include <postgres.h>
 
@@ -527,4 +527,4 @@ extern void posting_build_callback(
 
 extern void mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc);
 
-#endif /* MKTANN_PARALLEL_H */
+#endif /* MKT_PARALLEL_BUILD_H */
