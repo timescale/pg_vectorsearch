@@ -851,6 +851,12 @@ do_parallel_build(
 	 * being sample-starved. Slots for workers that never launched hold count 0
 	 * and are skipped naturally. The k-means iterations below stay parallel;
 	 * this seed pick is a few-microsecond copy of km_k vectors.
+	 *
+	 * Note: the slot contents and their order come from the work-stealing heap
+	 * scan, so these seeds (and thus the resulting tree) vary run to run — the
+	 * parallel build is not bit-reproducible. See
+	 * docs/parallel-build-design.md
+	 * ("Determinism").
 	 */
 	float *norms_c = mktann_norms_c(centroids_base, km_k, dim);
 	{

@@ -263,13 +263,45 @@ new `src/index/build_parallel.h`
 - With 8 cores: ~6-7x speedup on bottleneck → ~4-5x total
 - 4-hour build → ~50-60 min
 
+## Determinism
+
+The parallel build is **not** bit-reproducible, and a parallel-built index
+does not match a serial-built one cluster-for-cluster. This is expected — see
+the sources below — and is not a correctness problem: recall is statistically
+equivalent, just not identical.
+
+What stays deterministic (given the tree):
+- Tree descent — a vector's cluster assignment is fixed once the tree exists.
+- RaBitQ encoding — deterministic given the seed.
+
+What varies — all rooted in the **work-stealing heap scan**, where which worker
+reads which blocks depends on runtime timing:
+- **k-means seeding.** Sampling collects per-worker sample slots via the
+  work-stealing scan, so the slot contents (and their concatenation order, from
+  which the leader picks the initial centroids) differ run to run. Different
+  seeds → k-means converges to a different local optimum → a different tree.
+- **Floating-point reduction.** Each k-means iteration sums per-worker partial
+  centroid sums; float addition is non-associative, so a different
+  vectors-to-workers partition yields slightly different centroids, compounding
+  over iterations.
+
+A serial build (`max_parallel_maintenance_workers = 0`) is fully deterministic:
+fixed scan order → fixed samples → fixed seeds → identical tree and recall on
+every rebuild. So run-to-run recall variance appears only with workers > 0.
+
+Making parallel builds deterministic would require seeding k-means from a
+canonically-ordered sample set (removing the slot-order dependence) and
+accumulating the reduction in a fixed order. Not done — the variance is small
+and unbiased, and the work-stealing scan is kept for load balancing.
+
 ## Verification
 
-1. **Correctness**: Compare index built with 1 thread vs N threads:
-   - Same cluster assignments (tree descent is deterministic)
-   - Same RaBitQ encodings (encoding is deterministic given same seed)
-   - Same recall at same nprobe (primary correctness test)
-   - Posting list contents equivalent (order may differ within a page)
+1. **Correctness**: Compare index built with 1 worker vs N workers:
+   - Tree descent and RaBitQ encoding are deterministic *given the tree*, but
+     the tree itself differs (see Determinism above), so do not expect
+     identical cluster assignments or page contents.
+   - **Equivalent** recall/QPS at the same nprobe is the primary correctness
+     test (within the small run-to-run variance), not bit-identical results.
 
 2. **Performance**: Benchmark build time on 10M dataset:
    - 1 thread baseline
