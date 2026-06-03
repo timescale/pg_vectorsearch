@@ -48,6 +48,48 @@
 #include "parallel_build.h"
 #include "quant/fastscan.h"
 
+/*
+ * Launch the worker participants and wait until they have all attached to the
+ * barrier (so the dynamic party reaches launched+1 before the leader advances
+ * the first phase). Returns false — after tearing the context down — if no
+ * workers started, so the caller falls back to a serial build. This is a
+ * coarse back-end seam: a standalone build provides a same-named function that
+ * spawns threads and joins them at the barrier instead.
+ */
+static bool
+mkt_pbuild_launch(ParallelContext *pcxt, Barrier *barrier)
+{
+	LaunchParallelWorkers(pcxt);
+
+	if (pcxt->nworkers_launched == 0)
+	{
+		WaitForParallelWorkersToFinish(pcxt);
+		DestroyParallelContext(pcxt);
+		ExitParallelMode();
+		return false;
+	}
+
+	/*
+	 * Workers attach to the barrier dynamically, so the party (1 leader + N
+	 * launched) is not final until they all have; if the leader arrived first
+	 * it could advance the phase alone and strand late workers.
+	 * WaitForParallelWorkersToAttach surfaces a startup failure as an error
+	 * rather than a hang; then poll until the live participant count is whole.
+	 */
+	WaitForParallelWorkersToAttach(pcxt);
+	while (BarrierParticipants(barrier) < pcxt->nworkers_launched + 1)
+	{
+		CHECK_FOR_INTERRUPTS();
+		(void)WaitLatch(
+				MyLatch,
+				WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+				1L,
+				WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+		ResetLatch(MyLatch);
+	}
+	return true;
+}
+
 bool
 do_parallel_build(
 		Relation				 heap,
@@ -275,37 +317,9 @@ do_parallel_build(
 	instr_time t_launch_start;
 	INSTR_TIME_SET_CURRENT(t_launch_start);
 
-	/* ---- Launch workers ---- */
-	LaunchParallelWorkers(pcxt);
-
-	if (pcxt->nworkers_launched == 0)
-	{
-		WaitForParallelWorkersToFinish(pcxt);
-		DestroyParallelContext(pcxt);
-		ExitParallelMode();
+	/* ---- Launch workers + wait until they've all attached ---- */
+	if (!mkt_pbuild_launch(pcxt, barrier))
 		return false;
-	}
-
-	/*
-	 * Wait until every launched worker has attached to the barrier before the
-	 * leader arrives at the first phase. Workers attach dynamically, so the
-	 * party (1 leader + N launched) is not final until they all have. If the
-	 * leader arrived first it could advance the phase alone and leave late
-	 * workers stranded a phase behind. WaitForParallelWorkersToAttach surfaces
-	 * any startup failure as an error (rather than a hang), after which we
-	 * poll the barrier participant count until it reaches the live total.
-	 */
-	WaitForParallelWorkersToAttach(pcxt);
-	while (BarrierParticipants(barrier) < pcxt->nworkers_launched + 1)
-	{
-		CHECK_FOR_INTERRUPTS();
-		(void)WaitLatch(
-				MyLatch,
-				WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-				1L,
-				WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-		ResetLatch(MyLatch);
-	}
 
 	/* ==== Leader participates in all phases as worker_id=0 ==== */
 
