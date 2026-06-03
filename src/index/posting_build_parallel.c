@@ -262,7 +262,10 @@ void
 mkt_posting_worker_finish(MktPostingWorkerState *ws)
 {
 	bool deferred = (ws->storage == NULL);
-	bool hold	  = !ws->fastscan && ws->partials != NULL;
+	/* Hold the trailing partial page (both formats) when a partials buffer is
+	 * provided so the driver can fold it into the head, packing it optimally
+	 * instead of leaving an under-full page per worker. */
+	bool hold = ws->partials != NULL;
 
 	for (uint32_t c = 0; c < ws->nlist; c++)
 	{

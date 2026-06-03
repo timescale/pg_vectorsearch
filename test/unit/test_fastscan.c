@@ -321,6 +321,30 @@ TEST(pack_codes_roundtrip)
 	}
 }
 
+TEST(unpack_codes_roundtrip)
+{
+	/* pack -> unpack must reproduce the original 1-bit codes exactly,
+	 * including a partial trailing group (count not a multiple of 32). */
+	uint32_t dim		  = 96; /* packed_bytes = 12 */
+	uint32_t count		  = 40; /* 2 groups; 2nd holds 8 vectors */
+	uint32_t packed_bytes = (dim + 7) / 8;
+
+	uint8_t bits[40 * 12];
+	fill_random_bits(bits, count * packed_bytes, 123);
+
+	uint8_t *codes = mkt_alloc(mkt_fastscan_codes_size(count, dim));
+	mkt_fastscan_pack_codes(bits, count, dim, codes);
+
+	uint8_t *out = mkt_alloc(count * packed_bytes);
+	mkt_fastscan_unpack_codes(codes, count, dim, out);
+
+	for (uint32_t i = 0; i < count * packed_bytes; i++)
+		ASSERT_EQ(out[i], bits[i], "unpacked byte matches original");
+
+	mkt_free(codes);
+	mkt_free(out);
+}
+
 TEST(pack_codes_padding)
 {
 	/* Verify tail group is zero-padded for vectors >= count.

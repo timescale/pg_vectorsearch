@@ -84,6 +84,16 @@ uint32_t mkt_fastscan_pack_codes(
 		uint8_t		  *codes_out);
 
 /*
+ * Inverse of mkt_fastscan_pack_codes: reconstruct per-vector 1-bit codes
+ * from the packed fastscan layout. bits_out[count * packed_bytes].
+ */
+void mkt_fastscan_unpack_codes(
+		const uint8_t *codes,
+		uint32_t	   count,
+		Dimension	   dim,
+		uint8_t		  *bits_out);
+
+/*
  * Required output buffer size for packed fastscan codes.
  */
 static inline uint32_t

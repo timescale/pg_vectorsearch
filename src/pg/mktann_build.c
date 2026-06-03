@@ -62,6 +62,7 @@
 #include "mktann_meta.h"
 #include "mktann_parallel.h"
 #include "mktann_storage.h"
+#include "quant/fastscan.h"
 #include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------
@@ -595,10 +596,10 @@ do_parallel_build(
 	/* Worker output (active flags) */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mktann_worker_output_size(nlist, nparticipants));
-	/* Partials (AoS only) */
-	if (!bs->params.fastscan)
-		shm_toc_estimate_chunk(
-				&pcxt->estimator, mktann_partials_size(nlist, nparticipants));
+	/* Per-worker trailing partial pages (both formats): the leader folds
+	 * them into each list's head during finalize. */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator, mktann_partials_size(nlist, nparticipants));
 
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -613,11 +614,9 @@ do_parallel_build(
 	}
 
 	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
-	 * tree, posting_queues, worker_output, wal, buffer
-	 * + optionally partials + query_text */
-	int nkeys = 11;
-	if (!bs->params.fastscan)
-		nkeys++; /* partials */
+	 * tree, posting_queues, worker_output, wal, buffer, partials
+	 * + optionally query_text */
+	int nkeys = 12;
 	if (debug_query_string)
 		nkeys++;
 	shm_toc_estimate_keys(&pcxt->estimator, nkeys);
@@ -729,15 +728,13 @@ do_parallel_build(
 	memset(worker_output, 0, out_sz);
 	shm_toc_insert(pcxt->toc, MKTANN_KEY_WORKER_OUTPUT, worker_output);
 
-	/* Partials (AoS only) */
-	char *dsm_partials = NULL;
-	if (!bs->params.fastscan)
-	{
-		Size part_sz = mktann_partials_size(nlist, nparticipants);
-		dsm_partials = shm_toc_allocate(pcxt->toc, part_sz);
-		memset(dsm_partials, 0, part_sz);
-		shm_toc_insert(pcxt->toc, MKTANN_KEY_PARTIALS, dsm_partials);
-	}
+	/* Per-worker trailing partial pages (both AoS and fastscan). Each worker
+	 * holds at most one partial page per cluster here; the leader folds them
+	 * into the list's head during finalize. */
+	Size  part_sz	   = mktann_partials_size(nlist, nparticipants);
+	char *dsm_partials = shm_toc_allocate(pcxt->toc, part_sz);
+	memset(dsm_partials, 0, part_sz);
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_PARTIALS, dsm_partials);
 
 	WalUsage *walusage = shm_toc_allocate(
 			pcxt->toc, mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -1394,9 +1391,10 @@ do_parallel_build(
 	 * then drains every queue — placing each page in its list's range and
 	 * linking it into the cluster's chain — until all queues detach. The
 	 * finalize below writes each list's head (with centroid metadata) and
-	 * splices the chain. Both AoS and fastscan are handled: AoS merges the
-	 * workers' trailing partials into the head, while fastscan keeps an empty
-	 * head and the workers' streamed pages carry all entries.
+	 * splices the chain. For both AoS and fastscan, each worker holds its
+	 * trailing partial page per cluster and the finalize folds those into the
+	 * head, so the head is populated and there is no per-worker under-full
+	 * page left in the chain.
 	 */
 	HKMeansResult *tree_r = (HKMeansResult *)dsm_tree;
 
@@ -1572,11 +1570,15 @@ do_parallel_build(
 	INSTR_TIME_SET_CURRENT(t_merge_start);
 
 	/*
-	 * Finalize each list: write its head page (the list's reserved offset
-	 * 0) with centroid metadata, merge the trailing partials from all
-	 * workers into the head (overflowing past the continuations / into
-	 * spill), then stitch the chain head -> continuations -> overflow.
+	 * Finalize each list: write its head page (the list's reserved offset 0)
+	 * with centroid metadata, fold every worker's trailing partial page into
+	 * the head (re-packed optimally, overflowing past the continuations / into
+	 * spill), then splice the chain head -> continuations -> overflow.
 	 */
+	uint32_t packed_bytes = (dim + 7) / 8;
+	uint8_t *unpack_buf	  = bs->params.fastscan
+								  ? palloc(MKT_FASTSCAN_GROUP * packed_bytes)
+								  : NULL;
 	for (uint32_t c = 0; c < nlist; c++)
 	{
 		BlockNumber head_blk = first_posting + reserve.starts[c];
@@ -1611,20 +1613,55 @@ do_parallel_build(
 				&reserve.nexts[c]);
 		mkt_posting_builder_set_first_blkno(&hb, head_blk);
 
-		/* Merge trailing partials (AoS) from every worker into the head. */
-		if (!bs->params.fastscan && dsm_partials != NULL)
+		/*
+		 * Fold every worker's trailing partial page for this cluster into the
+		 * head builder, which re-packs it optimally. Worker pages are always
+		 * continuations (only the leader makes heads), so content lives at the
+		 * continuation offset. For fastscan we unpack each group's codes back
+		 * to per-vector 1-bit form so add_encoded can re-pack them.
+		 */
+		for (int w = 0; w < nparticipants; w++)
 		{
-			for (int w = 0; w < nparticipants; w++)
+			Page pg = mktann_worker_partials(dsm_partials, nlist, w) +
+					  (size_t)c * BLCKSZ;
+			MktPostingPageOpaque *op = mkt_posting_opaque(pg);
+			if (op->entry_count == 0)
+				continue;
+			char	*ct	 = mkt_posting_content(pg);
+			uint32_t cnt = op->entry_count;
+
+			if (bs->params.fastscan)
 			{
-				Page pg = mktann_worker_partials(dsm_partials, nlist, w) +
-						  (size_t)c * BLCKSZ;
-				MktPostingPageOpaque *op = mkt_posting_opaque(pg);
-				if (op->entry_count == 0)
-					continue;
-				bool  is_fp = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
-				char *ct	= is_fp ? mkt_posting_content_first(pg, dim)
-									: mkt_posting_content(pg);
-				for (uint32_t e = 0; e < op->entry_count; e++)
+				uint32_t ngroups = (cnt + MKT_FASTSCAN_GROUP - 1) /
+								   MKT_FASTSCAN_GROUP;
+				for (uint32_t g = 0; g < ngroups; g++)
+				{
+					uint32_t g_count = cnt - g * MKT_FASTSCAN_GROUP;
+					if (g_count > MKT_FASTSCAN_GROUP)
+						g_count = MKT_FASTSCAN_GROUP;
+					mkt_fastscan_unpack_codes(
+							mkt_fastscan_group_codes(ct, g, dim),
+							g_count,
+							dim,
+							unpack_buf);
+					ItemPointerData *tids =
+							mkt_fastscan_group_tids(ct, g, dim);
+					float *fa = mkt_fastscan_group_f_add(ct, g, dim);
+					float *fr = mkt_fastscan_group_f_rescale(ct, g, dim);
+					float *fe = mkt_fastscan_group_f_error(ct, g, dim);
+					for (uint32_t v = 0; v < g_count; v++)
+						mkt_posting_builder_add_encoded(
+								&hb,
+								tids[v],
+								fa[v],
+								fr[v],
+								fe[v],
+								unpack_buf + (size_t)v * packed_bytes);
+				}
+			}
+			else
+			{
+				for (uint32_t e = 0; e < cnt; e++)
 				{
 					MktPostingEntryHeader *hdr =
 							mkt_posting_entry_at(ct, e, dim);
@@ -1668,6 +1705,8 @@ do_parallel_build(
 	pfree(cl_used);
 	pfree(cont_first);
 	pfree(cont_last);
+	if (unpack_buf != NULL)
+		pfree(unpack_buf);
 	pfree(pt_centroids);
 
 	instr_time t_merge_end;
