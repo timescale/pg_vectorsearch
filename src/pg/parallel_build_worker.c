@@ -327,12 +327,31 @@ mktann_posting_page_sink(void *ctx, uint32_t cluster_id, const char *page)
 			 (int)res);
 }
 
-/* ----------------------------------------------------------------
- * Worker entry point — multi-phase build
- * ---------------------------------------------------------------- */
+/*
+ * Worker-side runtime handles for one participant: the shared state, the phase
+ * barrier, the opened relations, and this worker's id/dim. Filled by
+ * mkt_pbuild_worker_attach, mirroring the leader's MktPBuildLeader. (A coarse
+ * back-end seam: the standalone build populates the same struct from its
+ * thread-start arguments instead of from the DSM table of contents.)
+ */
+typedef struct MktPBuildWorker
+{
+	MktBuildShared *shared;
+	Barrier		   *barrier;
+	Relation		heapRel;
+	Relation		indexRel;
+	int				worker_id;
+	Dimension		dim;
+} MktPBuildWorker;
 
-void
-mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
+/*
+ * Join the parallel build: look up the shared state, open the heap and index,
+ * start per-worker instrumentation, and attach to the phase barrier. Coarse PG
+ * block — the standalone back-end provides a same-named function that takes
+ * the shared state and vector data directly and joins a thread barrier.
+ */
+static void
+mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
 {
 	MktBuildShared *shared	= shm_toc_lookup(toc, MKTANN_KEY_SHARED, false);
 	Barrier		   *barrier = shm_toc_lookup(toc, MKTANN_KEY_BARRIER, false);
@@ -342,11 +361,12 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	pgstat_report_activity(STATE_RUNNING, debug_query_string);
 	pgstat_report_query_id(shared->queryid, false);
 
-	Relation heapRel  = table_open(shared->heaprelid, ShareLock);
-	Relation indexRel = index_open(shared->indexrelid, AccessExclusiveLock);
-
-	int		  worker_id = ParallelWorkerNumber + 1;
-	Dimension dim		= shared->dim;
+	w->shared	 = shared;
+	w->barrier	 = barrier;
+	w->heapRel	 = table_open(shared->heaprelid, ShareLock);
+	w->indexRel	 = index_open(shared->indexrelid, AccessExclusiveLock);
+	w->worker_id = ParallelWorkerNumber + 1;
+	w->dim		 = shared->dim;
 
 	InstrStartParallelQuery();
 
@@ -357,6 +377,43 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * participants in lockstep regardless of how many workers were launched.
 	 */
 	BarrierAttach(barrier);
+}
+
+/*
+ * Leave the parallel build: report this worker's buffer/WAL usage back to the
+ * leader and close the relations. Coarse PG block; the standalone back-end's
+ * same-named function joins the thread and is otherwise a no-op.
+ */
+static void
+mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
+{
+	BufferUsage *bufferusage =
+			shm_toc_lookup(toc, MKTANN_KEY_BUFFER_USAGE, false);
+	WalUsage *walusage = shm_toc_lookup(toc, MKTANN_KEY_WAL_USAGE, false);
+	InstrEndParallelQuery(
+			&bufferusage[ParallelWorkerNumber],
+			&walusage[ParallelWorkerNumber]);
+
+	index_close(w->indexRel, AccessExclusiveLock);
+	table_close(w->heapRel, ShareLock);
+}
+
+/* ----------------------------------------------------------------
+ * Worker entry point — multi-phase build
+ * ---------------------------------------------------------------- */
+
+void
+mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
+{
+	MktPBuildWorker w;
+	mkt_pbuild_worker_attach(toc, &w);
+
+	MktBuildShared *shared	  = w.shared;
+	Barrier		   *barrier	  = w.barrier;
+	Relation		heapRel	  = w.heapRel;
+	Relation		indexRel  = w.indexRel;
+	int				worker_id = w.worker_id;
+	Dimension		dim		  = w.dim;
 
 	/* ---- Phase 1: Sampling ---- */
 
@@ -671,13 +728,5 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	mkt_build_worker_bufs_free(&bufs);
 	pfree(pt_centroids);
 
-	BufferUsage *bufferusage =
-			shm_toc_lookup(toc, MKTANN_KEY_BUFFER_USAGE, false);
-	WalUsage *walusage = shm_toc_lookup(toc, MKTANN_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(
-			&bufferusage[ParallelWorkerNumber],
-			&walusage[ParallelWorkerNumber]);
-
-	index_close(indexRel, AccessExclusiveLock);
-	table_close(heapRel, ShareLock);
+	mkt_pbuild_worker_detach(toc, &w);
 }
