@@ -954,15 +954,6 @@ mkt_posting_builder_init_continuation_fastscan(
  * ---------------------------------------------------------------- */
 
 void
-mkt_posting_builder_set_reserve(
-		MktPostingBuilder *builder, BlockNumber start, uint32_t count)
-{
-	builder->reserve_start = start;
-	builder->reserve_count = count;
-	builder->reserve_used  = 0;
-}
-
-void
 mkt_posting_builder_set_shared_reserve(
 		MktPostingBuilder *builder,
 		BlockNumber		   start,

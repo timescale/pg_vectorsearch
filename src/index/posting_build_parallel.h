@@ -47,7 +47,8 @@ void mkt_posting_reserve_init(
 		uint32_t		   nlist,
 		uint32_t		   nworkers,
 		Dimension		   dim,
-		bool			   fastscan);
+		bool			   fastscan,
+		bool			   replicate);
 
 void mkt_posting_reserve_free(MktPostingReserve *res);
 

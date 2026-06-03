@@ -318,13 +318,11 @@ void mkt_posting_builder_init_continuation_fastscan(
 		uint32_t			cluster_id,
 		const float		   *centroid);
 
-void mkt_posting_builder_set_reserve(
-		MktPostingBuilder *builder, BlockNumber start, uint32_t count);
-
 /*
  * Shared reserve: multiple builders (from different threads) for the
  * same cluster claim page slots atomically from a shared counter.
  * Falls back to storage->new_page() if the reserved range is exhausted.
+ * Used by every build path (serial, parallel, standalone).
  */
 void mkt_posting_builder_set_shared_reserve(
 		MktPostingBuilder *builder,

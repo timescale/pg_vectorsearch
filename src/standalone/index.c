@@ -1128,11 +1128,11 @@ mkt_index_build(
 			double scale	 = (double)idx->nvecs / (double)km_nvecs;
 			bool   replicate = config->soar_lambda > 0.0 ||
 							 config->boundary_epsilon > 0.0;
-			double headroom = replicate ? 1.3 : 1.05;
+			/* Raw per-cluster estimate; the reserve estimator applies the
+			 * format + replication headroom. */
 			for (uint32_t c = 0; c < nlist; c++)
 				cluster_counts[c] = (uint32_t)((double)cluster_counts[c] *
-											   scale * headroom) +
-									1;
+											   scale);
 
 			MktPostingReserve reserve;
 			mkt_posting_reserve_init(
@@ -1141,7 +1141,8 @@ mkt_index_build(
 					nlist,
 					nt,
 					dim,
-					config->fastscan != 0);
+					config->fastscan != 0,
+					replicate);
 			mkt_memctx_switch(idx_ctx);
 
 			/*

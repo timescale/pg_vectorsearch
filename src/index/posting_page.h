@@ -470,6 +470,44 @@ mkt_fastscan_max_groups(Dimension dim, bool is_first)
 	return usable / section;
 }
 
+/*
+ * Estimate the pages a single posting list needs to hold ~base_vectors
+ * primary vectors. Shared by every build path (serial, parallel-PG,
+ * standalone) so they reserve space consistently.
+ *
+ * Accounts for:
+ *  - page layout: fastscan packs in groups of 32, giving a different
+ *    per-page capacity than AoS for the same dim.
+ *  - replication: SOAR / boundary place a fraction of vectors into a second
+ *    list, so when replication is enabled the count is scaled up to cover the
+ *    replicas; otherwise a small slack absorbs estimate error.
+ *
+ * Under-estimating is safe — all build paths fall back to appended/spilled
+ * pages — so this only needs to be close; a good estimate keeps lists
+ * contiguous and minimizes reserved-but-unused pages.
+ */
+static inline uint32_t
+mkt_posting_estimate_pages(
+		uint32_t base_vectors, Dimension dim, bool fastscan, bool replicate)
+{
+	/* Replication (SOAR + boundary) puts extra copies in some lists; a modest
+	 * headroom covers the common case while under-estimates fall back to
+	 * appended/spilled pages. Without replication, a small slack absorbs
+	 * sampling-estimate error. */
+	double	 headroom = replicate ? 1.3 : 1.1;
+	uint32_t nvectors = (uint32_t)((double)base_vectors * headroom) + 1;
+
+	uint32_t ent_first	  = fastscan ? mkt_fastscan_max_entries_first(dim)
+									 : mkt_posting_max_entries_first(dim);
+	uint32_t ent_overflow = fastscan ? mkt_fastscan_max_entries(dim)
+									 : mkt_posting_max_entries(dim);
+
+	uint32_t npages = 1;
+	if (nvectors > ent_first)
+		npages += (nvectors - ent_first + ent_overflow - 1) / ent_overflow;
+	return npages;
+}
+
 /* ----------------------------------------------------------------
  * Fastscan group accessors
  *

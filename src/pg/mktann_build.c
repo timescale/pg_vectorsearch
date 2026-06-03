@@ -503,21 +503,6 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	return tree;
 }
 
-/* Estimate posting pages per cluster from heap size */
-static uint32_t
-estimate_posting_pages(Relation heap, Dimension dim, uint32_t nlist)
-{
-	double est_rows = RelationGetNumberOfBlocks(heap) *
-					  (BLCKSZ / (double)(dim * sizeof(float) + 32));
-	uint32_t est_per_cluster = (uint32_t)ceil(est_rows / nlist * 1.2);
-	uint32_t per_first		 = mkt_posting_max_entries_first(dim);
-	uint32_t per_page		 = mkt_posting_max_entries(dim);
-	uint32_t npages			 = 1;
-	if (est_per_cluster > per_first)
-		npages += (est_per_cluster - per_first + per_page - 1) / per_page;
-	return npages;
-}
-
 /* ----------------------------------------------------------------
  * Parallel build — leader side
  *
@@ -1420,17 +1405,16 @@ do_parallel_build(
 					tree_r, sw + (size_t)i * dim, bs->params.metric, &d)]++;
 		}
 	}
+	/* Extrapolate per-cluster sample counts to the full table; the reserve
+	 * estimator applies the format + replication headroom. */
+	bool replicate = bs->params.soar_lambda > 0.0 ||
+					 bs->params.boundary_epsilon > 0.0;
 	{
 		double est_rows = RelationGetNumberOfBlocks(heap) *
 						  (BLCKSZ / (double)(dim * sizeof(float) + 32));
-		double scale	 = n_est_samples > 0 ? est_rows / n_est_samples : 1.0;
-		bool   replicate = bs->params.soar_lambda > 0.0 ||
-						 bs->params.boundary_epsilon > 0.0;
-		double headroom = replicate ? 1.3 : 1.05;
+		double scale = n_est_samples > 0 ? est_rows / n_est_samples : 1.0;
 		for (uint32_t c = 0; c < nlist; c++)
-			cluster_counts[c] = (uint32_t)((double)cluster_counts[c] * scale *
-										   headroom) +
-								1;
+			cluster_counts[c] = (uint32_t)((double)cluster_counts[c] * scale);
 	}
 
 	/* Leader-local reserve (0-based ranges; first_posting added on write).
@@ -1442,7 +1426,8 @@ do_parallel_build(
 			nlist,
 			nparticipants,
 			dim,
-			bs->params.fastscan);
+			bs->params.fastscan,
+			replicate);
 	pfree(cluster_counts);
 
 	uint32_t	spill_extra = reserve.total / 10 + 100;
@@ -1896,7 +1881,26 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 		posting_heads = palloc(nlist * sizeof(BlockNumber));
 
-		uint32_t reserve_each = estimate_posting_pages(heap, dim, nlist);
+		/*
+		 * Reserve a contiguous page range per cluster via the shared
+		 * reserve_init (same as the parallel and standalone paths). Serial has
+		 * no per-cluster sample assignment, so it feeds a uniform estimate:
+		 * the heap-size cardinality guess split evenly. reserve_init applies
+		 * the format + replication headroom and the page math.
+		 */
+		bool   replicate = p->soar_lambda > 0.0 || p->boundary_epsilon > 0.0;
+		double est_rows	 = RelationGetNumberOfBlocks(heap) *
+						  (BLCKSZ / (double)(dim * sizeof(float) + 32));
+		uint32_t  base	 = (uint32_t)ceil(est_rows / nlist);
+		uint32_t *counts = palloc(nlist * sizeof(uint32_t));
+		for (uint32_t c = 0; c < nlist; c++)
+			counts[c] = base;
+
+		MktPostingReserve reserve;
+		mkt_posting_reserve_init(
+				&reserve, counts, nlist, 1, dim, p->fastscan, replicate);
+		pfree(counts);
+		mkt_storage_extend(&storage.base, reserve.total);
 
 		MktPostingBuilder *builders = palloc(
 				nlist * sizeof(MktPostingBuilder));
@@ -1921,11 +1925,13 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 						ref_vecs + (size_t)c * dim,
 						pt_centroids + (size_t)c * dim);
 
-			BlockNumber start =
-					mkt_storage_extend(&storage.base, reserve_each);
-			if (start != InvalidBlockNumber)
-				mkt_posting_builder_set_reserve(
-						&builders[c], start, reserve_each);
+			mkt_posting_builder_set_shared_reserve(
+					&builders[c],
+					first_posting + reserve.starts[c],
+					reserve.counts[c],
+					&reserve.nexts[c]);
+			mkt_posting_builder_set_first_blkno(
+					&builders[c], first_posting + reserve.starts[c]);
 		}
 
 		bs.tree		   = tree;
@@ -1963,6 +1969,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			mkt_posting_builder_cleanup(&builders[c]);
 		}
 		pfree(builders);
+		mkt_posting_reserve_free(&reserve);
 
 		elog(LOG,
 			 "mktann: serial build scan %.1fms, "
