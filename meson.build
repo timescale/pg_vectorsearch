@@ -307,6 +307,7 @@ mkt_core_sources = files(
   'src/core/platform.c',
   'src/core/barrier_standalone.c',
   'src/core/shm_toc_standalone.c',
+  'src/core/parallel_scan_standalone.c',
   'src/standalone/thread_pool.c',
   'src/mkt_halfvec.c',
   'src/mkt_vector.c',

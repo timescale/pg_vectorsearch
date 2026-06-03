@@ -23,6 +23,7 @@ unit_test_sources = files(
   'run_tests.c',
   'test_barrier.c',
   'test_shm_toc.c',
+  'test_parallel_scan.c',
   'test_centroid_page.c',
   'test_centroid_search.c',
   'test_fastscan.c',
