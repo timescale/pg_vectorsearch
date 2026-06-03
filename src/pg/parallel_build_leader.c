@@ -49,6 +49,18 @@
 #include "quant/fastscan.h"
 
 /*
+ * Tear the parallel context down and leave parallel mode. Coarse back-end
+ * seam: the standalone build provides a same-named function that joins its
+ * worker threads and frees the shared arena instead.
+ */
+static void
+mkt_pbuild_teardown(ParallelContext *pcxt)
+{
+	DestroyParallelContext(pcxt);
+	ExitParallelMode();
+}
+
+/*
  * Launch the worker participants and wait until they have all attached to the
  * barrier (so the dynamic party reaches launched+1 before the leader advances
  * the first phase). Returns false — after tearing the context down — if no
@@ -64,8 +76,7 @@ mkt_pbuild_launch(ParallelContext *pcxt, Barrier *barrier)
 	if (pcxt->nworkers_launched == 0)
 	{
 		WaitForParallelWorkersToFinish(pcxt);
-		DestroyParallelContext(pcxt);
-		ExitParallelMode();
+		mkt_pbuild_teardown(pcxt);
 		return false;
 	}
 
@@ -220,8 +231,7 @@ mkt_pbuild_setup_shared(
 
 	if (pcxt->seg == NULL)
 	{
-		DestroyParallelContext(pcxt);
-		ExitParallelMode();
+		mkt_pbuild_teardown(pcxt);
 		return false;
 	}
 
@@ -952,8 +962,7 @@ do_parallel_build(
 	if (tree == NULL)
 	{
 		WaitForParallelWorkersToFinish(pcxt);
-		DestroyParallelContext(pcxt);
-		ExitParallelMode();
+		mkt_pbuild_teardown(pcxt);
 		return false;
 	}
 
@@ -1361,8 +1370,7 @@ do_parallel_build(
 		 INSTR_TIME_GET_MILLISEC(t_scan_end),
 		 INSTR_TIME_GET_MILLISEC(t_merge_end));
 
-	DestroyParallelContext(pcxt);
-	ExitParallelMode();
+	mkt_pbuild_teardown(pcxt);
 
 	return true;
 }
