@@ -118,14 +118,6 @@ typedef struct MktannBuildState
  * Helpers
  * ---------------------------------------------------------------- */
 
-static void
-normalize_in_place(float *v, Dimension dim)
-{
-	float norm = mkt_l2_norm(v, dim);
-	if (norm > 0.0f)
-		mkt_vector_scale(v, 1.0f / norm, v, dim);
-}
-
 /* ----------------------------------------------------------------
  * Sampling
  * ---------------------------------------------------------------- */
@@ -457,7 +449,7 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	if (bs->params.metric == DISTANCE_COSINE)
 	{
 		for (int i = 0; i < bs->nsamples; i++)
-			normalize_in_place(bs->samples + (size_t)i * dim, dim);
+			mkt_l2_normalize(bs->samples + (size_t)i * dim, dim);
 	}
 
 	if (bs->nsamples == 0)
@@ -497,7 +489,7 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	mkt_vector_mean(hk_leaf_centroids(tree), tree->nleaves, dim, global_mean);
 
 	if (bs->params.metric == DISTANCE_COSINE)
-		normalize_in_place(global_mean, dim);
+		mkt_l2_normalize(global_mean, dim);
 
 	*out_global_mean = global_mean;
 	return tree;
@@ -1325,7 +1317,7 @@ do_parallel_build(
 	float *ref_vecs = hk_leaf_centroids(tree);
 	if (shared->metric == DISTANCE_COSINE)
 		for (uint32_t c = 0; c < nlist; c++)
-			normalize_in_place(ref_vecs + (size_t)c * dim, dim);
+			mkt_l2_normalize(ref_vecs + (size_t)c * dim, dim);
 
 	/* Compute P^T * centroids */
 	RaBitQParams *rq_params	   = mkt_rabitq_create(dim, rabitq_seed);
@@ -1814,7 +1806,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			global_mean = palloc(dim * sizeof(float));
 			mkt_vector_mean(hk_leaf_centroids(tree), nlist, dim, global_mean);
 			if (p->metric == DISTANCE_COSINE)
-				normalize_in_place(global_mean, dim);
+				mkt_l2_normalize(global_mean, dim);
 		}
 	}
 
@@ -1843,7 +1835,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 		float *ref_vecs = hk_leaf_centroids(tree);
 		if (p->metric == DISTANCE_COSINE)
 			for (uint32_t c = 0; c < nlist; c++)
-				normalize_in_place(ref_vecs + (size_t)c * dim, dim);
+				mkt_l2_normalize(ref_vecs + (size_t)c * dim, dim);
 
 		float *pt_centroids = palloc((size_t)nlist * dim * sizeof(float));
 		for (uint32_t c = 0; c < nlist; c++)
@@ -2006,7 +1998,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			global_mean = palloc(dim * sizeof(float));
 			mkt_vector_mean(hk_leaf_centroids(tree), nlist, dim, global_mean);
 			if (p->metric == DISTANCE_COSINE)
-				normalize_in_place(global_mean, dim);
+				mkt_l2_normalize(global_mean, dim);
 		}
 
 		write_meta_page(

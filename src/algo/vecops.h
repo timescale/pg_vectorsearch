@@ -60,6 +60,18 @@ void mkt_vector_add(const float *a, const float *b, float *out, Dimension dim);
 void mkt_vector_scale(const float *v, float scalar, float *out, Dimension dim);
 
 /*
+ * Normalize a raw float vector to unit L2 length, in place. No-op for a
+ * zero vector. (mkt_vector_normalize in mkt_vector.h is the MktVector form.)
+ */
+static inline void
+mkt_l2_normalize(float *v, Dimension dim)
+{
+	float norm = mkt_l2_norm(v, dim);
+	if (norm > 0.0f)
+		mkt_vector_scale(v, 1.0f / norm, v, dim);
+}
+
+/*
  * Vector mean: out[d] = mean of vectors[i][d] for all i
  *
  * Computes the element-wise mean of nvecs row-major vectors.
