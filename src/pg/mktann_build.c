@@ -1430,23 +1430,12 @@ do_parallel_build(
 			replicate);
 	pfree(cluster_counts);
 
-	uint32_t	spill_extra = reserve.total / 10 + 100;
-	BlockNumber spill_next	= first_posting + reserve.total;
-
-	/* Pre-extend the relation up to first_posting + reserved + spill, in
-	 * bounded chunks (ExtendBufferedRelBy caps additional pins per call, so
-	 * a single big extend is silently truncated — loop). */
-	{
-		BlockNumber cur	   = RelationGetNumberOfBlocks(index);
-		BlockNumber target = first_posting + reserve.total + spill_extra;
-		uint32_t	remain = target > cur ? (uint32_t)(target - cur) : 0;
-		while (remain > 0)
-		{
-			uint32_t chunk = remain > 2048 ? 2048 : remain;
-			mkt_storage_extend(&storage->base, chunk);
-			remain -= chunk;
-		}
-	}
+	/* Pre-extend the relation to cover the reserved ranges. mkt_storage_extend
+	 * handles any backend-specific batching internally (the PG storage chunks
+	 * around the ExtendBufferedRelBy pin limit). A cluster that outgrows its
+	 * (over-)reservation overflows via on-demand new_page during the drain, so
+	 * there is no separate spill region to pre-extend. */
+	mkt_storage_extend(&storage->base, reserve.total);
 
 	/* Attach as receiver to each launched worker's queue. */
 	int				nq = pcxt->nworkers_launched;
@@ -1460,12 +1449,12 @@ do_parallel_build(
 
 	/*
 	 * Drain: place each continuation page at the next offset within its
-	 * list's reserved range (offset 0 is the head, written in finalize),
-	 * spilling past the range into the spill region when a list outgrows its
-	 * reservation. cl_used[c] counts placed continuations and drives the
+	 * list's reserved range (offset 0 is the head, written in finalize); a
+	 * list that outgrows its (over-)reservation extends the relation on demand
+	 * via new_page. cl_used[c] counts placed continuations and drives the
 	 * placement; cont_first/cont_last record the actual block numbers so the
 	 * chain is linked from real placements rather than assuming the
-	 * continuations are contiguous (they aren't, once any page spills).
+	 * continuations are contiguous (they aren't, once a list overflows).
 	 */
 	uint32_t	*cl_used	= palloc0((size_t)nlist * sizeof(uint32_t));
 	BlockNumber *cont_first = palloc((size_t)nlist * sizeof(BlockNumber));
@@ -1494,11 +1483,22 @@ do_parallel_build(
 				Page		src = (Page)data;
 				uint32_t	c	= mkt_posting_opaque(src)->cluster_id;
 				uint32_t	off = ++cl_used[c]; /* 1.. ; 0 = head */
-				BlockNumber blk = (off < reserve.counts[c])
-										? first_posting + reserve.starts[c] +
-												  off
-										: spill_next++;
-				Page		dst = mkt_storage_write_page(&storage->base, blk);
+				BlockNumber blk;
+				Page		dst;
+				if (off < reserve.counts[c])
+				{
+					/* Within the cluster's reserved (over-estimated) range. */
+					blk = first_posting + reserve.starts[c] + off;
+					dst = mkt_storage_write_page(&storage->base, blk);
+				}
+				else
+				{
+					/* Cluster outgrew its reservation: extend on demand. The
+					 * page lands at the end of the relation (non-sequential
+					 * for this list, but rare) and is linked in by block
+					 * number below. */
+					dst = mkt_storage_new_page(&storage->base, &blk);
+				}
 				memcpy(dst, src, BLCKSZ);
 				mkt_storage_commit_page(&storage->base, blk);
 
