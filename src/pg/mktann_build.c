@@ -660,9 +660,16 @@ do_parallel_build(
 			heap, ParallelTableScanFromMktShared(shared), snapshot);
 	shm_toc_insert(pcxt->toc, MKTANN_KEY_SHARED, shared);
 
-	/* Barrier for phase synchronization */
+	/*
+	 * Barrier for phase synchronization. Init with party 1 (the leader,
+	 * the only statically-known participant). Each launched worker attaches
+	 * dynamically (BarrierAttach) on startup, so the party always tracks the
+	 * number of participants that actually showed up — PostgreSQL may launch
+	 * fewer workers than planned, and a fixed planned-count party would
+	 * deadlock waiting on workers that never started.
+	 */
 	Barrier *barrier = shm_toc_allocate(pcxt->toc, sizeof(Barrier));
-	BarrierInit(barrier, nparticipants);
+	BarrierInit(barrier, 1);
 	shm_toc_insert(pcxt->toc, MKTANN_KEY_BARRIER, barrier);
 
 	/* Sample slots */
@@ -763,14 +770,31 @@ do_parallel_build(
 		return false;
 	}
 
+	/*
+	 * Wait until every launched worker has attached to the barrier before the
+	 * leader arrives at the first phase. Workers attach dynamically, so the
+	 * party (1 leader + N launched) is not final until they all have. If the
+	 * leader arrived first it could advance the phase alone and leave late
+	 * workers stranded a phase behind. WaitForParallelWorkersToAttach surfaces
+	 * any startup failure as an error (rather than a hang), after which we
+	 * poll the barrier participant count until it reaches the live total.
+	 */
+	WaitForParallelWorkersToAttach(pcxt);
+	while (BarrierParticipants(barrier) < pcxt->nworkers_launched + 1)
+	{
+		CHECK_FOR_INTERRUPTS();
+		(void)WaitLatch(
+				MyLatch,
+				WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+				1L,
+				WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+		ResetLatch(MyLatch);
+	}
+
 	/* ==== Leader participates in all phases as worker_id=0 ==== */
 
 	/* ---- Phase 1: Leader samples ---- */
 	{
-		uint32_t cents_per = km_k / nparticipants;
-		uint32_t cents_rem = km_k % nparticipants;
-		uint32_t cent_end  = (0 < cents_rem) ? (cents_per + 1) : cents_per;
-
 		double est_rows = RelationGetNumberOfBlocks(heap) *
 						  (BLCKSZ / (double)(dim * sizeof(float) + 32));
 		uint32_t stride = 1;
@@ -781,16 +805,12 @@ do_parallel_build(
 
 		SampleCbState sc = {
 				.samples		= mktann_worker_samples(dsm_samples, 0),
-				.centroids		= cents,
 				.count			= 0,
 				.max_samples	= max_per_worker,
 				.stride			= stride,
 				.stride_counter = 0,
 				.dim			= dim,
 				.metric			= shared->metric,
-				.cent_start		= 0,
-				.cent_end		= cent_end,
-				.cents_picked	= 0,
 		};
 
 		TableScanDesc scan = table_beginscan_parallel(
@@ -824,10 +844,55 @@ do_parallel_build(
 
 	/* ---- Phase 2: Parallel root k-means (k=km_k) ---- */
 
+	/*
+	 * Leader-only init: seed all km_k initial centroids from the pooled
+	 * samples, spread evenly across the concatenation of every participant's
+	 * slot. Centralizing the pick (rather than slicing it by worker index)
+	 * makes initialization independent of how many workers launched — a
+	 * partial launch can no longer leave centroid slots unseeded — and draws
+	 * from every participant's samples, so it's robust to any one of them
+	 * being sample-starved. Slots for workers that never launched hold count 0
+	 * and are skipped naturally. The k-means iterations below stay parallel;
+	 * this seed pick is a few-microsecond copy of km_k vectors.
+	 */
 	float *norms_c = mktann_norms_c(centroids_base, km_k, dim);
-	if (shared->metric == DISTANCE_L2)
-		for (uint32_t j = 0; j < km_k; j++)
-			norms_c[j] = mkt_l2_norm_squared(cents + (size_t)j * dim, dim);
+	{
+		uint32_t total_ns = 0;
+		for (int t = 0; t < nparticipants; t++)
+			total_ns += mktann_sample_counts(dsm_samples)[t];
+
+		uint32_t step = (total_ns >= km_k) ? total_ns / km_k : 1;
+		for (uint32_t i = 0; i < km_k; i++)
+		{
+			uint32_t gidx = (total_ns > 0) ? (i * step) % total_ns : 0;
+
+			/* Map the global sample index to its participant slot. */
+			int		 t	  = 0;
+			uint32_t base = 0;
+			while (t < nparticipants &&
+				   base + mktann_sample_counts(dsm_samples)[t] <= gidx)
+			{
+				base += mktann_sample_counts(dsm_samples)[t];
+				t++;
+			}
+			if (t < nparticipants)
+				memcpy(cents + (size_t)i * dim,
+					   mktann_worker_samples(dsm_samples, t) +
+							   (size_t)(gidx - base) * dim,
+					   dim * sizeof(float));
+		}
+
+		if (shared->metric == DISTANCE_L2)
+			for (uint32_t j = 0; j < km_k; j++)
+				norms_c[j] = mkt_l2_norm_squared(cents + (size_t)j * dim, dim);
+	}
+
+	/*
+	 * Barrier: initial centroids + norms are ready. Pairs with the workers'
+	 * post-sampling barrier and releases them into the iteration loop without
+	 * racing the seed pick above.
+	 */
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 	float	 *my_sums = mktann_km_worker_sums(km_workers_base, km_k, dim, 0);
 	uint32_t *my_cnts = mktann_km_worker_cnts(km_workers_base, km_k, dim, 0);
@@ -1310,8 +1375,11 @@ do_parallel_build(
 	table_parallelscan_reinitialize(
 			heap, ParallelTableScanFromMktShared(shared));
 
-	/* Barrier: tree ready, workers can start posting scan */
+	/* Barrier: tree ready, workers can start posting scan. This is the last
+	 * barrier; phase 3 (drain) uses the shm_mq queues, not the barrier, so the
+	 * leader detaches once released. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+	BarrierDetach(barrier);
 
 	instr_time t_scan_start;
 	INSTR_TIME_SET_CURRENT(t_scan_start);

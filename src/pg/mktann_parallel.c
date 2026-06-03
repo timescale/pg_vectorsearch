@@ -3,9 +3,10 @@
  *
  * Multi-phase parallel build:
  *   Phase 1 (sampling): cooperative heap scan, each worker collects
- *     samples and picks initial centroids.
- *   Phase 2 (k-means): iterative assignment + accumulation on
- *     per-worker samples, barrier-synchronized with leader reduce.
+ *     samples into its own slot.
+ *   Phase 2 (k-means): leader seeds the initial centroids, then
+ *     iterative assignment + accumulation on per-worker samples,
+ *     barrier-synchronized with leader reduce.
  *   Phase 3 (posting): cooperative heap scan, tree descent +
  *     RaBitQ encode + streaming to posting pages.
  */
@@ -37,8 +38,9 @@
 /* ----------------------------------------------------------------
  * Phase 1: Sampling callback
  *
- * Collects vectors into a per-worker sample slot and picks
- * initial centroids from the first vectors seen.
+ * Collects vectors into a per-worker sample slot (stride-subsampled,
+ * normalized for cosine). Initial centroids are seeded later by the
+ * leader from the pooled samples.
  * ---------------------------------------------------------------- */
 
 void
@@ -83,16 +85,6 @@ mktann_sample_callback(
 		float norm = mkt_l2_norm(dest, dim);
 		if (norm > 0.0f)
 			mkt_vector_scale(dest, 1.0f / norm, dest, dim);
-	}
-
-	/* Pick initial centroids from first vectors */
-	uint32_t cent_idx = sc->cent_start + sc->cents_picked;
-	if (cent_idx < sc->cent_end)
-	{
-		memcpy(sc->centroids + (size_t)cent_idx * dim,
-			   dest,
-			   dim * sizeof(float));
-		sc->cents_picked++;
 	}
 
 	sc->count++;
@@ -358,6 +350,14 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	InstrStartParallelQuery();
 
+	/*
+	 * Attach to the phase barrier. The leader initializes the barrier with
+	 * itself as the sole party and waits for every launched worker to attach
+	 * before advancing, so attaching here (before the first phase) keeps all
+	 * participants in lockstep regardless of how many workers were launched.
+	 */
+	BarrierAttach(barrier);
+
 	/* ---- Phase 1: Sampling ---- */
 
 	MktDsmSamples *dsm_samples =
@@ -365,22 +365,7 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	char  *centroids_base = shm_toc_lookup(toc, MKTANN_KEY_CENTROIDS, false);
 	float *cents		  = mktann_centroids(centroids_base);
 
-	/* Each worker picks km_k/N initial centroids */
-	uint32_t km_k	   = shared->km_k;
-	uint32_t cents_per = km_k / shared->nparticipants;
-	uint32_t cents_rem = km_k % shared->nparticipants;
-	uint32_t cent_start, cent_end;
-	if ((uint32_t)worker_id < cents_rem)
-	{
-		cent_start = (uint32_t)worker_id * (cents_per + 1);
-		cent_end   = cent_start + cents_per + 1;
-	}
-	else
-	{
-		cent_start = cents_rem * (cents_per + 1) +
-					 ((uint32_t)worker_id - cents_rem) * cents_per;
-		cent_end = cent_start + cents_per;
-	}
+	uint32_t km_k = shared->km_k;
 
 	/* Compute stride: sample ~max_per_worker from our heap chunk */
 	double est_rows_total = RelationGetNumberOfBlocks(heapRel) *
@@ -394,16 +379,12 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	SampleCbState sc = {
 			.samples		= mktann_worker_samples(dsm_samples, worker_id),
-			.centroids		= cents,
 			.count			= 0,
 			.max_samples	= shared->max_samples_per_worker,
 			.stride			= stride,
 			.stride_counter = 0,
 			.dim			= dim,
 			.metric			= shared->metric,
-			.cent_start		= cent_start,
-			.cent_end		= cent_end,
-			.cents_picked	= 0,
 	};
 
 	IndexInfo	 *indexInfo = BuildIndexInfo(indexRel);
@@ -424,11 +405,31 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* Fix: write to this worker's slot */
 	mktann_sample_counts(dsm_samples)[worker_id] = sc.count;
 
-	/* Barrier: all workers done sampling + centroid init */
+	/* Barrier: all participants done sampling */
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+	/*
+	 * Barrier: leader has seeded the initial centroids (and their norms) from
+	 * the pooled samples. Workers don't touch the centroid buffer until here,
+	 * so this also guards the read below against the leader's concurrent
+	 * write.
+	 */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 	/* ---- Phase 2: K-means iterate (root level, k=km_k) ---- */
 
+	/*
+	 * Each participant keeps and processes the samples it gathered itself in
+	 * the work-stealing scan above; we deliberately do NOT redistribute them
+	 * to equalize per-worker counts. The scan hands out blocks at each
+	 * participant's own rate, so a worker's sample count ends up roughly
+	 * proportional to its throughput — making the per-iteration k-means cost
+	 * (n_samples / throughput) about equal across workers, i.e. self-balanced.
+	 * Forcing equal counts would instead hand a slow worker an equal load and
+	 * make it the barrier bottleneck. The dominant build phase (posting) is
+	 * itself work-stealing, so k-means balance is second-order; revisit only
+	 * if it ever proves to be a real bottleneck.
+	 */
 	char  *km_workers_base = shm_toc_lookup(toc, MKTANN_KEY_KM_WORKERS, false);
 	float *my_samples	   = mktann_worker_samples(dsm_samples, worker_id);
 	uint32_t my_nsamples   = mktann_sample_counts(dsm_samples)[worker_id];
@@ -541,8 +542,11 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 		}
 	}
 
-	/* Barrier: leader built tree, set up posting reserve */
+	/* Barrier: leader built tree, set up posting reserve. This is the worker's
+	 * last barrier — phase 3 streams pages over the shm_mq, so detach once
+	 * released so the leader's drain isn't gated on a stale party count. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+	BarrierDetach(barrier);
 
 	/* ---- Phase 3: Posting scan (deferred batch) ---- */
 

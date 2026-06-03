@@ -428,16 +428,12 @@ mktann_batches_size(
 typedef struct SampleCbState
 {
 	float		  *samples;
-	float		  *centroids;
 	uint32_t	   count;
 	uint32_t	   max_samples;
 	uint32_t	   stride;
 	uint32_t	   stride_counter;
 	Dimension	   dim;
 	DistanceMetric metric;
-	uint32_t	   cent_start;
-	uint32_t	   cent_end;
-	uint32_t	   cents_picked;
 } SampleCbState;
 
 extern void mktann_sample_callback(
