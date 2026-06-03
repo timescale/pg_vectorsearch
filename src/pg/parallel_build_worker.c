@@ -44,22 +44,11 @@
  * ---------------------------------------------------------------- */
 
 void
-mktann_sample_callback(
-		Relation	index,
-		ItemPointer tid,
-		Datum	   *values,
-		bool	   *isnull,
-		bool		tuple_is_alive,
-		void	   *state)
+mktann_sample_cb(void *state, ItemPointerData tid, const float *vec)
 {
 	SampleCbState *sc = (SampleCbState *)state;
 
-	(void)index;
 	(void)tid;
-	(void)tuple_is_alive;
-
-	if (isnull[0])
-		return;
 
 	/* Stride-based subsampling */
 	if (sc->stride_counter > 0)
@@ -72,12 +61,10 @@ mktann_sample_callback(
 	if (sc->count >= sc->max_samples)
 		return;
 
-	MktVector *vec	= DatumGetMktVector(values[0]);
-	float	  *src	= MKT_VECTOR_DATA(vec);
-	Dimension  dim	= sc->dim;
-	float	  *dest = sc->samples + (size_t)sc->count * dim;
+	Dimension dim  = sc->dim;
+	float	 *dest = sc->samples + (size_t)sc->count * dim;
 
-	memcpy(dest, src, dim * sizeof(float));
+	memcpy(dest, vec, dim * sizeof(float));
 
 	/* Normalize for cosine */
 	if (sc->metric == DISTANCE_COSINE)
@@ -88,6 +75,27 @@ mktann_sample_callback(
 	}
 
 	sc->count++;
+}
+
+/* PG scan adapter: unwrap the tuple and hand the vector to mktann_sample_cb.
+ */
+void
+mktann_sample_callback(
+		Relation	index,
+		ItemPointer tid,
+		Datum	   *values,
+		bool	   *isnull,
+		bool		tuple_is_alive,
+		void	   *state)
+{
+	(void)index;
+	(void)tuple_is_alive;
+
+	if (isnull[0])
+		return;
+
+	mktann_sample_cb(
+			state, *tid, MKT_VECTOR_DATA(DatumGetMktVector(values[0])));
 }
 
 /* ----------------------------------------------------------------
@@ -245,24 +253,9 @@ posting_cb_batch_cleanup(PostingCbState *cbs)
 }
 
 void
-posting_build_callback(
-		Relation	index,
-		ItemPointer tid,
-		Datum	   *values,
-		bool	   *isnull,
-		bool		tuple_is_alive,
-		void	   *state)
+posting_cb(void *state, ItemPointerData tid, const float *vec)
 {
 	PostingCbState *cbs = (PostingCbState *)state;
-
-	(void)index;
-	(void)tuple_is_alive;
-
-	if (isnull[0])
-		return;
-
-	MktVector *vec	= DatumGetMktVector(values[0]);
-	VectorRef  vref = MktVectorToRef(vec);
 
 	if (cbs->use_batch)
 	{
@@ -273,12 +266,12 @@ posting_build_callback(
 		Distance d;
 		cbs->batch_primary[k] = mkt_build_assign_primary(
 				cbs->tree,
-				vref.data,
+				vec,
 				&cbs->bp,
 				cbs->enc_batch + (size_t)k * cbs->bp.dim,
 				&d);
 		cbs->batch_pdist[k] = (float)d;
-		cbs->batch_tids[k]	= *tid;
+		cbs->batch_tids[k]	= tid;
 		cbs->batch_count++;
 		cbs->indtuples++;
 
@@ -289,13 +282,13 @@ posting_build_callback(
 
 	MemoryContext old_ctx = MemoryContextSwitchTo(cbs->tmp_ctx);
 
-	MktBuildAssignment asgn = mkt_build_assign_vector(
-			cbs->tree, vref.data, &cbs->bp, &cbs->bufs);
+	MktBuildAssignment asgn =
+			mkt_build_assign_vector(cbs->tree, vec, &cbs->bp, &cbs->bufs);
 
 	MemoryContextSwitchTo(cbs->worker_ctx);
 
 	mkt_posting_worker_add_heap(
-			cbs->ws, *tid, asgn.enc_vector, asgn.primary, asgn.secondary);
+			cbs->ws, tid, asgn.enc_vector, asgn.primary, asgn.secondary);
 
 	MemoryContextSwitchTo(old_ctx);
 
@@ -304,6 +297,25 @@ posting_build_callback(
 		cbs->soar_dupes++;
 
 	MemoryContextReset(cbs->tmp_ctx);
+}
+
+/* PG scan adapter: unwrap the tuple and hand the vector to posting_cb. */
+void
+posting_build_callback(
+		Relation	index,
+		ItemPointer tid,
+		Datum	   *values,
+		bool	   *isnull,
+		bool		tuple_is_alive,
+		void	   *state)
+{
+	(void)index;
+	(void)tuple_is_alive;
+
+	if (isnull[0])
+		return;
+
+	posting_cb(state, *tid, MKT_VECTOR_DATA(DatumGetMktVector(values[0])));
 }
 
 /*

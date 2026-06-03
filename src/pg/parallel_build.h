@@ -436,6 +436,15 @@ typedef struct SampleCbState
 	DistanceMetric metric;
 } SampleCbState;
 
+/*
+ * Shared sampling logic, called per live tuple with a raw vector pointer (no
+ * Datum) so the same code serves both back-ends; the standalone scan calls it
+ * directly. mktann_sample_callback is the PG scan adapter that unwraps the
+ * tuple and forwards here.
+ */
+extern void
+mktann_sample_cb(void *state, ItemPointerData tid, const float *vec);
+
 extern void mktann_sample_callback(
 		Relation	index,
 		ItemPointer tid,
@@ -512,6 +521,13 @@ typedef struct PostingCbState
 void posting_cb_batch_init(PostingCbState *cbs);
 void posting_cb_batch_flush(PostingCbState *cbs);
 void posting_cb_batch_cleanup(PostingCbState *cbs);
+
+/*
+ * Shared posting logic, called per live tuple with a raw vector pointer; the
+ * standalone scan calls it directly. posting_build_callback is the PG scan
+ * adapter that unwraps the tuple and forwards here.
+ */
+extern void posting_cb(void *state, ItemPointerData tid, const float *vec);
 
 extern void posting_build_callback(
 		Relation	index,
