@@ -90,20 +90,54 @@ mkt_pbuild_launch(ParallelContext *pcxt, Barrier *barrier)
 	return true;
 }
 
-bool
-do_parallel_build(
+/*
+ * Leader-side runtime state for the parallel build: the parallel context, the
+ * shared DSM regions, and the derived sizes. Produced by
+ * mkt_pbuild_setup_shared and consumed by the rest of the driver. (A coarse
+ * back-end seam: the standalone build will later populate the same struct from
+ * a heap arena instead of DSM.)
+ */
+typedef struct MktPBuildLeader
+{
+	ParallelContext	 *pcxt;
+	MktBuildShared	 *shared;
+	Barrier			 *barrier;
+	MktDsmSamples	 *dsm_samples;
+	char			 *centroids_base;
+	float			 *cents;
+	char			 *km_workers_base;
+	MktDsmRootAssign *dsm_ra;
+	void			 *dsm_tree;
+	char			 *queues_base;
+	char			 *dsm_partials;
+	WalUsage		 *walusage;
+	BufferUsage		 *bufferusage;
+	int				  nparticipants;
+	uint32_t		  km_k;
+	uint32_t		  max_per_worker;
+	Dimension		  dim;
+	uint32_t		  nlist;
+	uint64_t		  rabitq_seed;
+	uint32_t		  fan_out;
+	Size			  max_tree_sz;
+} MktPBuildLeader;
+
+/*
+ * Allocate and populate the parallel build's shared state: the DSM segment and
+ * its regions (shared header, barrier, sample/centroid/assignment slots, the
+ * tree blob, the per-worker page queues, usage counters). Does not launch
+ * workers; the caller does. Coarse PG block — the standalone back-end provides
+ * a same-named function over a heap arena. Returns false (after tearing the
+ * parallel context down) if the DSM segment could not be created.
+ */
+static bool
+mkt_pbuild_setup_shared(
+		MktPBuildLeader			*lead,
 		Relation				 heap,
 		Relation				 index,
-		struct IndexInfo		*index_info,
 		const MktannBuildParams *params,
-		MktannStorage			*storage,
-		HKMeansResult		   **out_tree,
-		BlockNumber				*posting_heads,
-		double					*out_heap_tuples,
-		double					*out_indtuples,
-		double					*out_soar_dupes)
+		int						 nworkers)
 {
-	int		  nworkers		= index_info->ii_ParallelWorkers;
 	Dimension dim			= params->dim;
 	uint32_t  nlist			= params->nlist;
 	int		  nparticipants = nworkers + 1;
@@ -314,13 +348,78 @@ do_parallel_build(
 		shm_toc_insert(pcxt->toc, MKTANN_KEY_QUERY_TEXT, sq);
 	}
 
+	lead->pcxt			  = pcxt;
+	lead->shared		  = shared;
+	lead->barrier		  = barrier;
+	lead->dsm_samples	  = dsm_samples;
+	lead->centroids_base  = centroids_base;
+	lead->cents			  = cents;
+	lead->km_workers_base = km_workers_base;
+	lead->dsm_ra		  = dsm_ra;
+	lead->dsm_tree		  = dsm_tree;
+	lead->queues_base	  = queues_base;
+	lead->dsm_partials	  = dsm_partials;
+	lead->walusage		  = walusage;
+	lead->bufferusage	  = bufferusage;
+	lead->nparticipants	  = nparticipants;
+	lead->km_k			  = km_k;
+	lead->max_per_worker  = max_per_worker;
+	lead->dim			  = dim;
+	lead->nlist			  = nlist;
+	lead->rabitq_seed	  = rabitq_seed;
+	lead->fan_out		  = fan_out;
+	lead->max_tree_sz	  = max_tree_sz;
+	return true;
+}
+
+bool
+do_parallel_build(
+		Relation				 heap,
+		Relation				 index,
+		struct IndexInfo		*index_info,
+		const MktannBuildParams *params,
+		MktannStorage			*storage,
+		HKMeansResult		   **out_tree,
+		BlockNumber				*posting_heads,
+		double					*out_heap_tuples,
+		double					*out_indtuples,
+		double					*out_soar_dupes)
+{
+	int nworkers = index_info->ii_ParallelWorkers;
+
+	MktPBuildLeader lead;
+	if (!mkt_pbuild_setup_shared(&lead, heap, index, params, nworkers))
+		return false;
+
+	ParallelContext	 *pcxt			  = lead.pcxt;
+	MktBuildShared	 *shared		  = lead.shared;
+	Barrier			 *barrier		  = lead.barrier;
+	MktDsmSamples	 *dsm_samples	  = lead.dsm_samples;
+	char			 *centroids_base  = lead.centroids_base;
+	float			 *cents			  = lead.cents;
+	char			 *km_workers_base = lead.km_workers_base;
+	MktDsmRootAssign *dsm_ra		  = lead.dsm_ra;
+	void			 *dsm_tree		  = lead.dsm_tree;
+	char			 *queues_base	  = lead.queues_base;
+	char			 *dsm_partials	  = lead.dsm_partials;
+	WalUsage		 *walusage		  = lead.walusage;
+	BufferUsage		 *bufferusage	  = lead.bufferusage;
+	int				  nparticipants	  = lead.nparticipants;
+	uint32_t		  km_k			  = lead.km_k;
+	uint32_t		  max_per_worker  = lead.max_per_worker;
+	Dimension		  dim			  = lead.dim;
+	uint32_t		  nlist			  = lead.nlist;
+	uint64_t		  rabitq_seed	  = lead.rabitq_seed;
+	uint32_t		  fan_out		  = lead.fan_out;
+	Size			  max_tree_sz	  = lead.max_tree_sz;
+	Size			  km_sz = mktann_km_workers_size(nparticipants, km_k, dim);
+
 	instr_time t_launch_start;
 	INSTR_TIME_SET_CURRENT(t_launch_start);
 
 	/* ---- Launch workers + wait until they've all attached ---- */
 	if (!mkt_pbuild_launch(pcxt, barrier))
 		return false;
-
 	/* ==== Leader participates in all phases as worker_id=0 ==== */
 
 	/* ---- Phase 1: Leader samples ---- */
