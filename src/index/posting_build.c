@@ -541,7 +541,16 @@ batch_save_page(MktPostingBuilder *builder)
 static void
 flush_page(MktPostingBuilder *builder)
 {
-	if (!builder->page_dirty)
+	/*
+	 * The first page of a chain (the posting-list head) must always be
+	 * materialized, even with no entries: it carries the cluster's centroid
+	 * metadata and pt_centroid, anchors the chain, and is where a scan begins.
+	 * An empty head arises in the parallel bounded build, where the leader
+	 * synthesizes the head while the workers stream the continuations (for
+	 * fastscan nothing is merged into the head, so it stays empty). Later
+	 * pages are still skipped when they hold no new entries.
+	 */
+	if (!builder->page_dirty && !builder->is_first)
 		return;
 
 	if (builder->storage == NULL)

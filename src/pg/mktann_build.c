@@ -1392,11 +1392,11 @@ do_parallel_build(
 	 * shm_mq; the leader does NOT scan here. It estimates each list's size,
 	 * reserves a contiguous block range per list, pre-extends the relation,
 	 * then drains every queue — placing each page in its list's range and
-	 * writing it — until all queues detach. Heads + trailing partials are
-	 * stitched in by the finalize below.
-	 *
-	 * NOTE (draft, untested): fastscan posting is not handled here yet; the
-	 * AoS (non-fastscan) path is implemented. Validate via rekall.
+	 * linking it into the cluster's chain — until all queues detach. The
+	 * finalize below writes each list's head (with centroid metadata) and
+	 * splices the chain. Both AoS and fastscan are handled: AoS merges the
+	 * workers' trailing partials into the head, while fastscan keeps an empty
+	 * head and the workers' streamed pages carry all entries.
 	 */
 	HKMeansResult *tree_r = (HKMeansResult *)dsm_tree;
 
@@ -1433,7 +1433,12 @@ do_parallel_build(
 	 * first_posting is the centroid-layout posting start computed above. */
 	MktPostingReserve reserve;
 	mkt_posting_reserve_init(
-			&reserve, cluster_counts, nlist, nparticipants, dim);
+			&reserve,
+			cluster_counts,
+			nlist,
+			nparticipants,
+			dim,
+			bs->params.fastscan);
 	pfree(cluster_counts);
 
 	uint32_t	spill_extra = reserve.total / 10 + 100;
@@ -1465,14 +1470,24 @@ do_parallel_build(
 	}
 
 	/*
-	 * Drain: place continuation pages at offsets 1.. within each list's
-	 * range (offset 0 is reserved for the head, written in finalize); spill
-	 * past the range into the spill region. cl_used[c] counts placed
-	 * continuations.
+	 * Drain: place each continuation page at the next offset within its
+	 * list's reserved range (offset 0 is the head, written in finalize),
+	 * spilling past the range into the spill region when a list outgrows its
+	 * reservation. cl_used[c] counts placed continuations and drives the
+	 * placement; cont_first/cont_last record the actual block numbers so the
+	 * chain is linked from real placements rather than assuming the
+	 * continuations are contiguous (they aren't, once any page spills).
 	 */
-	uint32_t *cl_used = palloc0((size_t)nlist * sizeof(uint32_t));
-	bool	 *qdone	  = palloc0((size_t)(nq > 0 ? nq : 1) * sizeof(bool));
-	int		  ndone	  = 0;
+	uint32_t	*cl_used	= palloc0((size_t)nlist * sizeof(uint32_t));
+	BlockNumber *cont_first = palloc((size_t)nlist * sizeof(BlockNumber));
+	BlockNumber *cont_last	= palloc((size_t)nlist * sizeof(BlockNumber));
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		cont_first[c] = InvalidBlockNumber;
+		cont_last[c]  = InvalidBlockNumber;
+	}
+	bool *qdone = palloc0((size_t)(nq > 0 ? nq : 1) * sizeof(bool));
+	int	  ndone = 0;
 	while (ndone < nq)
 	{
 		bool progressed = false;
@@ -1497,7 +1512,24 @@ do_parallel_build(
 				Page		dst = mkt_storage_write_page(&storage->base, blk);
 				memcpy(dst, src, BLCKSZ);
 				mkt_storage_commit_page(&storage->base, blk);
-				progressed = true;
+
+				/* Link into this cluster's continuation chain using actual
+				 * block numbers. The previous page's next_blkno is fixed up
+				 * once its successor's block is known; the final page's link
+				 * is set in finalize. */
+				if (cont_last[c] == InvalidBlockNumber)
+				{
+					cont_first[c] = blk;
+				}
+				else
+				{
+					Page prev = mkt_storage_write_page(
+							&storage->base, cont_last[c]);
+					mkt_posting_opaque(prev)->next_blkno = blk;
+					mkt_storage_commit_page(&storage->base, cont_last[c]);
+				}
+				cont_last[c] = blk;
+				progressed	 = true;
 			}
 			else if (res == SHM_MQ_DETACHED)
 			{
@@ -1610,27 +1642,21 @@ do_parallel_build(
 		mkt_posting_builder_finish(&hb);
 		mkt_posting_builder_cleanup(&hb);
 
-		/* Stitch the contiguous continuation run between the head and the
-		 * head builder's overflow chain (ov1 = head's current next link). */
-		if (cl_used[c] > 0)
+		/* Splice the worker continuation chain (already linked internally
+		 * during the drain, in real block order) between the head and the head
+		 * builder's own overflow chain: head -> cont_first .. cont_last ->
+		 * ov1, where ov1 is whatever the head builder linked to (its overflow,
+		 * or InvalidBlockNumber when the head didn't overflow). */
+		if (cont_first[c] != InvalidBlockNumber)
 		{
 			Page		hp	= mkt_storage_write_page(&storage->base, head_blk);
 			BlockNumber ov1 = mkt_posting_opaque(hp)->next_blkno;
-			mkt_posting_opaque(hp)->next_blkno = first_posting +
-												 reserve.starts[c] + 1;
+			mkt_posting_opaque(hp)->next_blkno = cont_first[c];
 			mkt_storage_commit_page(&storage->base, head_blk);
 
-			for (uint32_t off = 1; off < cl_used[c]; off++)
-			{
-				BlockNumber b = first_posting + reserve.starts[c] + off;
-				Page		p = mkt_storage_write_page(&storage->base, b);
-				mkt_posting_opaque(p)->next_blkno = b + 1;
-				mkt_storage_commit_page(&storage->base, b);
-			}
-			BlockNumber lastc = first_posting + reserve.starts[c] + cl_used[c];
-			Page		lp	  = mkt_storage_write_page(&storage->base, lastc);
+			Page lp = mkt_storage_write_page(&storage->base, cont_last[c]);
 			mkt_posting_opaque(lp)->next_blkno = ov1;
-			mkt_storage_commit_page(&storage->base, lastc);
+			mkt_storage_commit_page(&storage->base, cont_last[c]);
 		}
 
 		posting_heads[c] = head_blk;
@@ -1640,6 +1666,8 @@ do_parallel_build(
 
 	mkt_posting_reserve_free(&reserve);
 	pfree(cl_used);
+	pfree(cont_first);
+	pfree(cont_last);
 	pfree(pt_centroids);
 
 	instr_time t_merge_end;

@@ -1135,7 +1135,13 @@ mkt_index_build(
 									1;
 
 			MktPostingReserve reserve;
-			mkt_posting_reserve_init(&reserve, cluster_counts, nlist, nt, dim);
+			mkt_posting_reserve_init(
+					&reserve,
+					cluster_counts,
+					nlist,
+					nt,
+					dim,
+					config->fastscan != 0);
 			mkt_memctx_switch(idx_ctx);
 
 			/*

@@ -46,7 +46,8 @@ void mkt_posting_reserve_init(
 		const uint32_t	  *cluster_counts,
 		uint32_t		   nlist,
 		uint32_t		   nworkers,
-		Dimension		   dim);
+		Dimension		   dim,
+		bool			   fastscan);
 
 void mkt_posting_reserve_free(MktPostingReserve *res);
 

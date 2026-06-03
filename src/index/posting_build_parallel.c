@@ -29,12 +29,20 @@ mkt_posting_reserve_init(
 		const uint32_t	  *cluster_counts,
 		uint32_t		   nlist,
 		uint32_t		   nworkers,
-		Dimension		   dim)
+		Dimension		   dim,
+		bool			   fastscan)
 {
 	(void)nworkers;
 
-	uint32_t ent_first	  = mkt_posting_max_entries_first(dim);
-	uint32_t ent_overflow = mkt_posting_max_entries(dim);
+	/* Per-page entry capacity differs by format: fastscan packs in groups
+	 * of MKT_FASTSCAN_GROUP, so its effective capacity is a multiple of 32
+	 * and smaller than AoS for the same dim. Sizing the reservation with the
+	 * wrong format under-counts pages, which would force pages to spill out
+	 * of the contiguous range. */
+	uint32_t ent_first	  = fastscan ? mkt_fastscan_max_entries_first(dim)
+									 : mkt_posting_max_entries_first(dim);
+	uint32_t ent_overflow = fastscan ? mkt_fastscan_max_entries(dim)
+									 : mkt_posting_max_entries(dim);
 
 	res->starts = mkt_alloc(nlist * sizeof(BlockNumber));
 	res->counts = mkt_alloc(nlist * sizeof(uint32_t));
