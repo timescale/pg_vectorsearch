@@ -305,6 +305,7 @@ m_dep = cc.find_library('m', required: true)
 mkt_core_sources = files(
   'src/core/memory_standalone.c',
   'src/core/platform.c',
+  'src/core/barrier_standalone.c',
   'src/standalone/thread_pool.c',
   'src/mkt_halfvec.c',
   'src/mkt_vector.c',
