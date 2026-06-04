@@ -25,6 +25,7 @@
 #include "algo/hkmeans.h"
 #include "algo/kmeans_internal.h"
 #include "algo/vecops.h"
+#include "core/log.h"
 #include "core/memory.h"
 #include "index/parallel_build.h"
 #include "index/posting_build.h"
@@ -167,11 +168,11 @@ posting_cb_batch_init(PostingCbState *cbs)
 	uint32_t  B	  = MKT_SECONDARY_BATCH;
 	Dimension dim = cbs->bp.dim;
 
-	cbs->enc_batch		 = palloc((size_t)B * dim * sizeof(float));
-	cbs->batch_tids		 = palloc(B * sizeof(ItemPointerData));
-	cbs->batch_primary	 = palloc(B * sizeof(uint32_t));
-	cbs->batch_pdist	 = palloc(B * sizeof(float));
-	cbs->batch_secondary = palloc(B * sizeof(uint32_t));
+	cbs->enc_batch		 = mkt_alloc((size_t)B * dim * sizeof(float));
+	cbs->batch_tids		 = mkt_alloc(B * sizeof(ItemPointerData));
+	cbs->batch_primary	 = mkt_alloc(B * sizeof(uint32_t));
+	cbs->batch_pdist	 = mkt_alloc(B * sizeof(float));
+	cbs->batch_secondary = mkt_alloc(B * sizeof(uint32_t));
 	mkt_secondary_batch_init(
 			&cbs->sb,
 			hk_leaf_centroids(cbs->tree),
@@ -220,11 +221,11 @@ posting_cb_batch_cleanup(PostingCbState *cbs)
 	if (!cbs->use_batch)
 		return;
 	mkt_secondary_batch_free(&cbs->sb);
-	pfree(cbs->enc_batch);
-	pfree(cbs->batch_tids);
-	pfree(cbs->batch_primary);
-	pfree(cbs->batch_pdist);
-	pfree(cbs->batch_secondary);
+	mkt_free(cbs->enc_batch);
+	mkt_free(cbs->batch_tids);
+	mkt_free(cbs->batch_primary);
+	mkt_free(cbs->batch_pdist);
+	mkt_free(cbs->batch_secondary);
 }
 
 void
@@ -290,9 +291,9 @@ mktann_posting_page_sink(void *ctx, uint32_t cluster_id, const char *page)
 	(void)cluster_id; /* carried in the page header */
 	res = shm_mq_send(mqh, BLCKSZ, page, false, true);
 	if (res != SHM_MQ_SUCCESS)
-		elog(ERROR,
-			 "mktann: posting page queue send failed (result %d)",
-			 (int)res);
+		mkt_error(
+				"mktann: posting page queue send failed (result %d)",
+				(int)res);
 }
 
 /* ----------------------------------------------------------------
@@ -519,7 +520,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	RaBitQParams *rq_params = mkt_rabitq_create(dim, shared->rabitq_seed);
 
 	const float *leaf_cents	  = hk_leaf_centroids(tree);
-	float		*pt_centroids = palloc((size_t)nlist * dim * sizeof(float));
+	float		*pt_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
 	for (uint32_t c = 0; c < nlist; c++)
 		mkt_rabitq_rotate(
 				rq_params,
@@ -608,7 +609,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	mkt_posting_worker_cleanup(&ws);
 	mkt_build_worker_bufs_free(&bufs);
-	pfree(pt_centroids);
+	mkt_free(pt_centroids);
 
 	mkt_pbuild_worker_detach(toc, &w);
 }
