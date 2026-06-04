@@ -609,10 +609,7 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	bool *wa = mktann_worker_active(worker_output, nlist, worker_id);
 	memcpy(wa, ws.active, nlist * sizeof(bool));
 
-	SpinLockAcquire(&shared->mutex);
-	shared->indtuples += cbs.indtuples;
-	shared->soar_dupes += cbs.soar_dupes;
-	SpinLockRelease(&shared->mutex);
+	mkt_pbuild_worker_add_counts(shared, cbs.indtuples, cbs.soar_dupes);
 
 	mkt_posting_worker_cleanup(&ws);
 	mkt_build_worker_bufs_free(&bufs);

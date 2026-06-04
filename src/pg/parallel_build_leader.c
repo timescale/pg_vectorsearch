@@ -678,9 +678,8 @@ do_parallel_build(
 		 INSTR_TIME_GET_MILLISEC(t_km_end),
 		 nlist);
 
-	/* Re-init parallel scan for posting phase */
-	table_parallelscan_reinitialize(
-			heap, ParallelTableScanFromMktShared(shared));
+	/* Re-init the scan for the posting phase (back-end seam). */
+	mkt_pbuild_rescan(heap, shared);
 
 	/* Barrier: tree ready, workers can start posting scan. This is the last
 	 * barrier; phase 3 (drain) uses the shm_mq queues, not the barrier, so the

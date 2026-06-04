@@ -20,6 +20,7 @@
 #include <pgstat.h>
 #include <storage/latch.h>
 #include <storage/proc.h>
+#include <storage/spin.h>
 #include <tcop/tcopprot.h>
 #include <utils/rel.h>
 #include <utils/snapmgr.h>
@@ -30,6 +31,26 @@
 #include "mkt_vector.h"
 #include "mktann_build.h"
 #include "parallel_build.h"
+
+/*
+ * PG-specific shared build state: the neutral MktBuildShared plus the relation
+ * identity, query id, and the spinlock guarding its counters. A
+ * ParallelTableScanDesc is appended after it in the DSM segment. The base is
+ * the first member, so the MktBuildShared * the workers look up out of the toc
+ * is recovered here as a MktBuildSharedPg *.
+ */
+typedef struct MktBuildSharedPg
+{
+	MktBuildShared base;
+	Oid			   heaprelid;
+	Oid			   indexrelid;
+	int64		   queryid;
+	slock_t		   mutex;
+} MktBuildSharedPg;
+
+#define ParallelTableScanFromMktShared(shared)  \
+	((ParallelTableScanDesc)((char *)(shared) + \
+							 BUFFERALIGN(sizeof(MktBuildSharedPg))))
 
 /*
  * Bridges PostgreSQL's heap-tuple callback to the back-end-neutral scan
@@ -105,18 +126,19 @@ mkt_build_scan(
 void
 mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
 {
-	MktBuildShared *shared	= shm_toc_lookup(toc, MKTANN_KEY_SHARED, false);
-	Barrier		   *barrier = shm_toc_lookup(toc, MKTANN_KEY_BARRIER, false);
+	MktBuildShared	 *shared  = shm_toc_lookup(toc, MKTANN_KEY_SHARED, false);
+	MktBuildSharedPg *pg	  = (MktBuildSharedPg *)shared;
+	Barrier			 *barrier = shm_toc_lookup(toc, MKTANN_KEY_BARRIER, false);
 
 	char *sharedquery  = shm_toc_lookup(toc, MKTANN_KEY_QUERY_TEXT, true);
 	debug_query_string = sharedquery;
 	pgstat_report_activity(STATE_RUNNING, debug_query_string);
-	pgstat_report_query_id(shared->queryid, false);
+	pgstat_report_query_id(pg->queryid, false);
 
 	w->shared	 = shared;
 	w->barrier	 = barrier;
-	w->heapRel	 = table_open(shared->heaprelid, ShareLock);
-	w->indexRel	 = index_open(shared->indexrelid, AccessExclusiveLock);
+	w->heapRel	 = table_open(pg->heaprelid, ShareLock);
+	w->indexRel	 = index_open(pg->indexrelid, AccessExclusiveLock);
 	w->worker_id = ParallelWorkerNumber + 1;
 	w->dim		 = shared->dim;
 
@@ -240,7 +262,7 @@ mkt_pbuild_setup_shared(
 	/* Estimate DSM size for ALL phases */
 	Snapshot snapshot	= SnapshotAny;
 	Size	 est_shared = add_size(
-			BUFFERALIGN(sizeof(MktBuildShared)),
+			BUFFERALIGN(sizeof(MktBuildSharedPg)),
 			table_parallelscan_estimate(heap, snapshot));
 
 	shm_toc_estimate_chunk(&pcxt->estimator, est_shared);
@@ -306,10 +328,11 @@ mkt_pbuild_setup_shared(
 	}
 
 	/* ---- Populate shared state ---- */
-	MktBuildShared *shared		   = shm_toc_allocate(pcxt->toc, est_shared);
-	shared->heaprelid			   = RelationGetRelid(heap);
-	shared->indexrelid			   = RelationGetRelid(index);
-	shared->queryid				   = pgstat_get_my_query_id();
+	MktBuildSharedPg *pg		   = shm_toc_allocate(pcxt->toc, est_shared);
+	MktBuildShared	 *shared	   = &pg->base;
+	pg->heaprelid				   = RelationGetRelid(heap);
+	pg->indexrelid				   = RelationGetRelid(index);
+	pg->queryid					   = pgstat_get_my_query_id();
 	shared->dim					   = dim;
 	shared->metric				   = params->metric;
 	shared->nlist				   = nlist;
@@ -324,7 +347,7 @@ mkt_pbuild_setup_shared(
 	shared->km_tolerance		   = 1e-4f;
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
-	SpinLockInit(&shared->mutex);
+	SpinLockInit(&pg->mutex);
 	shared->reltuples  = 0.0;
 	shared->indtuples  = 0.0;
 	shared->soar_dupes = 0.0;
@@ -448,4 +471,33 @@ mkt_pbuild_setup_shared(
 	lead->fan_out		  = fan_out;
 	lead->max_tree_sz	  = max_tree_sz;
 	return true;
+}
+
+/*
+ * Accumulate one worker's tuple counts into the shared state under the lock.
+ * Back-end seam: only the spinlock is PG-specific (it lives in the derived
+ * struct); the standalone version locks a pthread mutex around the same adds.
+ */
+void
+mkt_pbuild_worker_add_counts(
+		MktBuildShared *shared, double indtuples, double soar_dupes)
+{
+	MktBuildSharedPg *pg = (MktBuildSharedPg *)shared;
+
+	SpinLockAcquire(&pg->mutex);
+	shared->indtuples += indtuples;
+	shared->soar_dupes += soar_dupes;
+	SpinLockRelease(&pg->mutex);
+}
+
+/*
+ * Re-initialize the parallel scan for the posting pass; the sampling pass
+ * consumed the first one. Back-end seam: the standalone version resets its
+ * work-stealing cursor.
+ */
+void
+mkt_pbuild_rescan(Relation heap, MktBuildShared *shared)
+{
+	table_parallelscan_reinitialize(
+			heap, ParallelTableScanFromMktShared(shared));
 }

@@ -22,7 +22,6 @@
 #include <storage/itemptr.h>
 #include <storage/shm_mq.h>
 #include <storage/shm_toc.h>
-#include <storage/spin.h>
 #include <utils/rel.h>
 
 #include "algo/hkmeans.h"
@@ -56,19 +55,19 @@ struct IndexInfo;
 #define MKTANN_KEY_POSTING_QUEUES UINT64CONST(0xB00000000000000F)
 
 /* ----------------------------------------------------------------
- * MktBuildShared — primary shared state in DSM
+ * MktBuildShared — back-end-neutral shared build state
  *
- * Immutable fields are set by the leader before workers launch.
- * Mutable counters are protected by the spinlock.
- * ParallelTableScanDescData follows at BUFFERALIGN offset.
+ * Immutable config set by the leader before the workers start, plus counters
+ * the workers update concurrently during the posting scan under a lock the
+ * back-end owns (mkt_pbuild_worker_add_counts). Each back-end embeds this as
+ * the first member of its own struct carrying the back-end-specific state —
+ * for PG, the relation OIDs, query id, the spinlock, and a trailing
+ * ParallelTableScanDesc (see MktBuildSharedPg in parallel_backend.c).
  * ---------------------------------------------------------------- */
 
 typedef struct MktBuildShared
 {
-	/* Immutable — set by leader */
-	Oid			   heaprelid;
-	Oid			   indexrelid;
-	int64		   queryid;
+	/* Immutable — set by the leader before launch */
 	Dimension	   dim;
 	DistanceMetric metric;
 	uint32_t	   nlist;
@@ -85,11 +84,10 @@ typedef struct MktBuildShared
 	float	 km_tolerance;
 	uint32_t km_k; /* root k-means k (= fan_out) */
 
-	/* Mutable — spinlock-protected */
-	slock_t mutex;
-	double	reltuples;
-	double	indtuples;
-	double	soar_dupes;
+	/* Counters — updated concurrently under the back-end's lock */
+	double reltuples;
+	double indtuples;
+	double soar_dupes;
 
 	/* K-means convergence — set by leader between barriers */
 	bool km_converged;
@@ -98,10 +96,6 @@ typedef struct MktBuildShared
 	uint32_t current_child;
 	uint32_t child_km_k; /* k for current child k-means */
 } MktBuildShared;
-
-#define ParallelTableScanFromMktShared(shared)  \
-	((ParallelTableScanDesc)((char *)(shared) + \
-							 BUFFERALIGN(sizeof(MktBuildShared))))
 
 /* ----------------------------------------------------------------
  * K-means sampling: per-worker sample slots in DSM
@@ -457,6 +451,13 @@ typedef struct MktPBuildWorker
 extern void mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w);
 extern void mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w);
 
+/*
+ * Accumulate one worker's tuple counts into the shared state under the
+ * back-end's lock (the lock lives in the back-end's derived shared struct).
+ */
+extern void mkt_pbuild_worker_add_counts(
+		MktBuildShared *shared, double indtuples, double soar_dupes);
+
 /* ----------------------------------------------------------------
  * Leader launch/teardown seam — back-end-specific (parallel_backend.c for PG)
  *
@@ -517,5 +518,12 @@ extern bool mkt_pbuild_setup_shared(
 		Relation						index,
 		const struct MktannBuildParams *params,
 		int								nworkers);
+
+/*
+ * Re-initialize the scan for the posting pass (the sampling pass consumed the
+ * first). Back-end seam: resets the PG parallel-scan descriptor or, in
+ * standalone, the work-stealing cursor.
+ */
+extern void mkt_pbuild_rescan(Relation heap, MktBuildShared *shared);
 
 #endif /* MKT_PARALLEL_BUILD_H */
