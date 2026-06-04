@@ -50,22 +50,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info);
 
 char *mktann_buildphasename(int64 phasenum);
 
-/*
- * Parallel build (leader side, parallel_build_leader.c). Runs sampling +
- * k-means + the bounded streaming posting build, returning the tree and
- * per-list posting heads. Returns false if parallelism could not start, so
- * the caller falls back to a serial build.
- */
-bool do_parallel_build(
-		Relation			  heap,
-		Relation			  index,
-		struct IndexInfo	 *index_info,
-		const MktBuildConfig *config,
-		MktStorage			 *storage,
-		HKMeansResult		**out_tree,
-		BlockNumber			 *posting_heads,
-		double				 *out_heap_tuples,
-		double				 *out_indtuples,
-		double				 *out_soar_dupes);
+/* do_parallel_build (the shared parallel build entry) is declared in
+ * index/parallel_build.h, included above. */
 
 #endif /* MKTANN_BUILD_H */

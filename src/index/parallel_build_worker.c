@@ -11,6 +11,9 @@
  *     RaBitQ encode + streaming to posting pages.
  */
 
+#ifdef MKT_STANDALONE
+#include "core/pg_compat.h"
+#else
 #include <postgres.h>
 
 #include <access/parallel.h>
@@ -21,12 +24,14 @@
 #include <storage/shm_toc.h>
 #include <utils/rel.h>
 #include <utils/wait_event.h>
+#endif
 
 #include "algo/hkmeans.h"
 #include "algo/kmeans_internal.h"
 #include "algo/vecops.h"
 #include "core/log.h"
 #include "core/memory.h"
+#include "core/mkt_parallel_ctx.h" /* ParallelWorkerNumber */
 #include "index/parallel_build.h"
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"

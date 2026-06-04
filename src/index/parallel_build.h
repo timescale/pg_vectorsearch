@@ -34,6 +34,7 @@
 #include "index/centroid_page.h" /* MktCentroidFormat */
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"
+#include "index/storage.h" /* MktStorage */
 #include "mkt_types.h"
 #include "quant/rabitq.h"
 
@@ -556,5 +557,27 @@ extern bool mkt_pbuild_setup_shared(
  * standalone, the work-stealing cursor.
  */
 extern void mkt_pbuild_rescan(Relation heap, MktBuildShared *shared);
+
+/* ----------------------------------------------------------------
+ * Parallel build entry — shared driver (parallel_build_leader.c)
+ *
+ * Runs sampling + k-means + the bounded streaming posting build over the heap
+ * (its vectors) into storage, returning the centroid tree and per-list posting
+ * heads. Returns false if parallelism could not start, so the caller falls
+ * back to a serial build. The PG caller fills config from its resolved build
+ * params; the standalone caller fills it from its index config.
+ * ---------------------------------------------------------------- */
+
+extern bool do_parallel_build(
+		Relation			  heap,
+		Relation			  index,
+		struct IndexInfo	 *index_info,
+		const MktBuildConfig *config,
+		MktStorage			 *storage,
+		HKMeansResult		**out_tree,
+		BlockNumber			 *posting_heads,
+		double				 *out_heap_tuples,
+		double				 *out_indtuples,
+		double				 *out_soar_dupes);
 
 #endif /* MKT_PARALLEL_BUILD_H */

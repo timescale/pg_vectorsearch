@@ -10,6 +10,9 @@
  * if parallelism could not start, so the caller falls back to a serial build.
  */
 
+#ifdef MKT_STANDALONE
+#include "core/pg_compat.h"
+#else
 #include <postgres.h>
 
 #include <access/parallel.h>
@@ -19,7 +22,6 @@
 #include <catalog/index.h>
 #include <commands/progress.h>
 #include <common/pg_prng.h>
-#include <math.h>
 #include <miscadmin.h>
 #include <pgstat.h>
 #include <tcop/tcopprot.h>
@@ -27,6 +29,9 @@
 #include <utils/memutils.h>
 #include <utils/rel.h>
 #include <utils/sampling.h>
+#endif
+
+#include <math.h>
 
 #include "algo/distance.h"
 #include "algo/hkmeans.h"
@@ -36,6 +41,7 @@
 #include "core/log.h"
 #include "core/memory.h"
 #include "core/mkt_instr_time.h"
+#include "core/mkt_parallel_ctx.h" /* ParallelContext + lifecycle */
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
@@ -44,12 +50,15 @@
 #include "index/posting_build_parallel.h"
 #include "index/posting_page.h"
 #include "mkt_halfvec.h"
-#include "mkt_pg.h"
 #include "mkt_vector.h"
+#include "quant/fastscan.h"
+
+#ifndef MKT_STANDALONE
+#include "mkt_pg.h"
 #include "mktann_build.h"
 #include "mktann_meta.h"
 #include "mktann_storage.h"
-#include "quant/fastscan.h"
+#endif
 
 bool
 do_parallel_build(
