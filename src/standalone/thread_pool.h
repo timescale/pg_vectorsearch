@@ -133,4 +133,18 @@ uint32_t mkt_thread_pool_nthreads(const MktThreadPool *pool);
 
 void mkt_thread_pool_destroy(MktThreadPool *pool);
 
+/*
+ * SPMD dispatch: run fn(participant_id, arg) once on every participant — the
+ * leader (id 0) and each worker (ids 1..nthreads) — concurrently, returning
+ * when all have finished. Unlike parallel_for there is no chunking and no
+ * per-iteration barrier: each participant runs the whole function and is
+ * expected to self-synchronize internally (e.g. an SPMD index-build worker
+ * coordinating its phases through a dynamic Barrier). With nthreads=0 it runs
+ * fn(0, arg) on the calling thread. This is how the standalone back-end drives
+ * the shared parallel build on the persistent pool, mirroring PG launching
+ * parallel workers on the same registered entry.
+ */
+typedef void (*MktSpmdFn)(uint32_t participant_id, void *arg);
+void mkt_thread_pool_run_spmd(MktThreadPool *pool, MktSpmdFn fn, void *arg);
+
 #endif /* MKT_THREAD_POOL_H */

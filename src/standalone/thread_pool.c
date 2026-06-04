@@ -30,6 +30,14 @@ struct MktThreadPool
 	uint32_t		 max_iterations;
 	volatile bool	 keep_going;
 
+	/*
+	 * SPMD dispatch: when spmd_fn is non-NULL, woken workers run it once (as
+	 * participants 1..nthreads) instead of the chunked iterate loop, then
+	 * rendezvous at the barrier. The leader runs it as participant 0. Set
+	 * before each wake; iterate clears it so workers take the chunked path.
+	 */
+	MktSpmdFn spmd_fn;
+
 	/* Inter-iteration barrier (nthreads + 1 participants) */
 	pthread_barrier_t barrier;
 
@@ -70,6 +78,18 @@ pool_worker_fn(void *raw)
 
 		my_gen = pool->generation;
 		pthread_mutex_unlock(&pool->mutex);
+
+		/*
+		 * SPMD dispatch: run the whole function once as participant id+1
+		 * (the leader is participant 0), then rendezvous. The function
+		 * self-synchronizes internally; the pool only bookends the run.
+		 */
+		if (pool->spmd_fn != NULL)
+		{
+			pool->spmd_fn(id + 1, pool->arg);
+			pthread_barrier_wait(&pool->barrier);
+			continue;
+		}
 
 		/* Iterate loop with barrier synchronization */
 		for (uint32_t iter = 0; iter < pool->max_iterations; iter++)
@@ -166,6 +186,7 @@ mkt_thread_pool_iterate(
 	pool->arg			 = arg;
 	pool->max_iterations = max_iterations;
 	pool->keep_going	 = true;
+	pool->spmd_fn		 = NULL;
 
 	/* Wake workers */
 	pthread_mutex_lock(&pool->mutex);
@@ -198,6 +219,32 @@ mkt_thread_pool_parallel_for(
 		MktThreadPool *pool, uint32_t total, MktParallelForFn fn, void *arg)
 {
 	mkt_thread_pool_iterate(pool, total, fn, NULL, arg, 1);
+}
+
+void
+mkt_thread_pool_run_spmd(MktThreadPool *pool, MktSpmdFn fn, void *arg)
+{
+	if (pool->nthreads == 0)
+	{
+		/* Serial: the calling thread is the sole participant. */
+		fn(0, arg);
+		return;
+	}
+
+	pool->spmd_fn = fn;
+	pool->arg	  = arg;
+
+	/* Wake workers — they run fn as participants 1..nthreads. */
+	pthread_mutex_lock(&pool->mutex);
+	pool->generation++;
+	pthread_cond_broadcast(&pool->wake_cv);
+	pthread_mutex_unlock(&pool->mutex);
+
+	/* The leader runs fn as participant 0, then rendezvous with workers. */
+	fn(0, arg);
+	pthread_barrier_wait(&pool->barrier);
+
+	pool->spmd_fn = NULL;
 }
 
 uint32_t

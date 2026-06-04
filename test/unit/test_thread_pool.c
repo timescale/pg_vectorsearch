@@ -337,3 +337,109 @@ TEST(iterate_zero_total)
 	ASSERT_EQ(0, atomic_load(&ia.total), "zero total no-op");
 	mkt_thread_pool_destroy(pool);
 }
+
+/* ----------------------------------------------------------------
+ * SPMD dispatch tests
+ * ---------------------------------------------------------------- */
+
+typedef struct
+{
+	_Atomic(uint32_t) call_count;
+	_Atomic(uint32_t) id_seen[64]; /* id_seen[i] = times participant i ran */
+} SpmdArg;
+
+static void
+spmd_fn(uint32_t participant_id, void *arg)
+{
+	SpmdArg *sa = (SpmdArg *)arg;
+	atomic_fetch_add(&sa->call_count, 1);
+	if (participant_id < 64)
+		atomic_fetch_add(&sa->id_seen[participant_id], 1);
+}
+
+TEST(spmd_multi)
+{
+	MktThreadPool *pool = mkt_thread_pool_create(7);
+
+	SpmdArg sa = {0};
+	mkt_thread_pool_run_spmd(pool, spmd_fn, &sa);
+
+	/* 7 workers + 1 leader = 8 participants, ids 0..7, once each. */
+	ASSERT_EQ(8, atomic_load(&sa.call_count), "N+1 participants ran");
+	for (uint32_t i = 0; i < 8; i++)
+		ASSERT_EQ(
+				1,
+				atomic_load(&sa.id_seen[i]),
+				"participant ran exactly once");
+	for (uint32_t i = 8; i < 64; i++)
+		ASSERT_EQ(
+				0, atomic_load(&sa.id_seen[i]), "no out-of-range participant");
+
+	mkt_thread_pool_destroy(pool);
+}
+
+TEST(spmd_zero_workers)
+{
+	MktThreadPool *pool = mkt_thread_pool_create(0);
+
+	SpmdArg sa = {0};
+	mkt_thread_pool_run_spmd(pool, spmd_fn, &sa);
+
+	/* Serial: only the calling thread runs, as participant 0. */
+	ASSERT_EQ(1, atomic_load(&sa.call_count), "sole participant ran");
+	ASSERT_EQ(1, atomic_load(&sa.id_seen[0]), "participant 0 ran");
+
+	mkt_thread_pool_destroy(pool);
+}
+
+TEST(spmd_one_worker)
+{
+	MktThreadPool *pool = mkt_thread_pool_create(1);
+
+	SpmdArg sa = {0};
+	mkt_thread_pool_run_spmd(pool, spmd_fn, &sa);
+
+	ASSERT_EQ(2, atomic_load(&sa.call_count), "leader + 1 worker ran");
+	ASSERT_EQ(1, atomic_load(&sa.id_seen[0]), "leader ran");
+	ASSERT_EQ(1, atomic_load(&sa.id_seen[1]), "worker ran");
+
+	mkt_thread_pool_destroy(pool);
+}
+
+TEST(spmd_multiple_rounds)
+{
+	MktThreadPool *pool = mkt_thread_pool_create(4);
+
+	for (int round = 0; round < 10; round++)
+	{
+		SpmdArg sa = {0};
+		mkt_thread_pool_run_spmd(pool, spmd_fn, &sa);
+		ASSERT_EQ(5, atomic_load(&sa.call_count), "5 participants each round");
+	}
+
+	mkt_thread_pool_destroy(pool);
+}
+
+/* The pool must switch cleanly between SPMD and chunked dispatch. */
+TEST(spmd_interleaved_with_parallel_for)
+{
+	MktThreadPool *pool = mkt_thread_pool_create(4);
+
+	SpmdArg sa = {0};
+	mkt_thread_pool_run_spmd(pool, spmd_fn, &sa);
+	ASSERT_EQ(5, atomic_load(&sa.call_count), "spmd round ran");
+
+	_Atomic(uint64_t) total = 0;
+	mkt_thread_pool_parallel_for(pool, 1000, sum_fn, &total);
+	uint64_t expected = 0;
+	for (uint32_t i = 0; i < 1000; i++)
+		expected += i;
+	ASSERT_EQ(expected, atomic_load(&total), "parallel_for after spmd");
+
+	SpmdArg sa2 = {0};
+	mkt_thread_pool_run_spmd(pool, spmd_fn, &sa2);
+	ASSERT_EQ(
+			5, atomic_load(&sa2.call_count), "spmd round after parallel_for");
+
+	mkt_thread_pool_destroy(pool);
+}
