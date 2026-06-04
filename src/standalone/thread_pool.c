@@ -222,6 +222,35 @@ mkt_thread_pool_parallel_for(
 }
 
 void
+mkt_thread_pool_launch(MktThreadPool *pool, MktSpmdFn fn, void *arg)
+{
+	if (pool->nthreads == 0)
+		return; /* no workers to wake */
+
+	pool->spmd_fn = fn;
+	pool->arg	  = arg;
+
+	/* Wake workers — they run fn as participants 1..nthreads, then wait at
+	 * the barrier for the leader's join. The leader returns now. */
+	pthread_mutex_lock(&pool->mutex);
+	pool->generation++;
+	pthread_cond_broadcast(&pool->wake_cv);
+	pthread_mutex_unlock(&pool->mutex);
+}
+
+void
+mkt_thread_pool_join(MktThreadPool *pool)
+{
+	if (pool->nthreads == 0)
+		return;
+
+	/* Rendezvous with the workers, which are waiting at the barrier after
+	 * finishing their run. */
+	pthread_barrier_wait(&pool->barrier);
+	pool->spmd_fn = NULL;
+}
+
+void
 mkt_thread_pool_run_spmd(MktThreadPool *pool, MktSpmdFn fn, void *arg)
 {
 	if (pool->nthreads == 0)
@@ -231,20 +260,9 @@ mkt_thread_pool_run_spmd(MktThreadPool *pool, MktSpmdFn fn, void *arg)
 		return;
 	}
 
-	pool->spmd_fn = fn;
-	pool->arg	  = arg;
-
-	/* Wake workers — they run fn as participants 1..nthreads. */
-	pthread_mutex_lock(&pool->mutex);
-	pool->generation++;
-	pthread_cond_broadcast(&pool->wake_cv);
-	pthread_mutex_unlock(&pool->mutex);
-
-	/* The leader runs fn as participant 0, then rendezvous with workers. */
-	fn(0, arg);
-	pthread_barrier_wait(&pool->barrier);
-
-	pool->spmd_fn = NULL;
+	mkt_thread_pool_launch(pool, fn, arg);
+	fn(0, arg); /* leader runs as participant 0 */
+	mkt_thread_pool_join(pool);
 }
 
 uint32_t

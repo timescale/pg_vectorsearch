@@ -420,6 +420,48 @@ TEST(spmd_multiple_rounds)
 	mkt_thread_pool_destroy(pool);
 }
 
+/*
+ * Async launch/join: the leader does its own work concurrently with the
+ * workers (as the index build does — workers stream, leader drains), then
+ * rendezvous at join. The leader is NOT a participant of fn here.
+ */
+TEST(spmd_launch_join_async)
+{
+	MktThreadPool *pool = mkt_thread_pool_create(4);
+
+	SpmdArg sa = {0};
+	mkt_thread_pool_launch(pool, spmd_fn, &sa);
+
+	/* Leader runs its own code while the 4 workers run fn concurrently. */
+	uint64_t leader_work = 0;
+	for (uint32_t i = 0; i < 1000; i++)
+		leader_work += i;
+
+	mkt_thread_pool_join(pool);
+
+	/* Only the 4 workers ran fn (participants 1..4); the leader did not. */
+	ASSERT_EQ(4, atomic_load(&sa.call_count), "only workers ran fn");
+	ASSERT_EQ(0, atomic_load(&sa.id_seen[0]), "leader did not run fn");
+	for (uint32_t i = 1; i <= 4; i++)
+		ASSERT_EQ(1, atomic_load(&sa.id_seen[i]), "each worker ran once");
+	ASSERT_EQ(499500, leader_work, "leader did its own work");
+
+	mkt_thread_pool_destroy(pool);
+}
+
+TEST(spmd_launch_join_zero_workers)
+{
+	MktThreadPool *pool = mkt_thread_pool_create(0);
+
+	/* With no workers, launch/join are no-ops; the leader does everything. */
+	SpmdArg sa = {0};
+	mkt_thread_pool_launch(pool, spmd_fn, &sa);
+	mkt_thread_pool_join(pool);
+	ASSERT_EQ(0, atomic_load(&sa.call_count), "no workers, fn never ran");
+
+	mkt_thread_pool_destroy(pool);
+}
+
 /* The pool must switch cleanly between SPMD and chunked dispatch. */
 TEST(spmd_interleaved_with_parallel_for)
 {

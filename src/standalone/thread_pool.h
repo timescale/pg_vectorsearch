@@ -134,17 +134,30 @@ uint32_t mkt_thread_pool_nthreads(const MktThreadPool *pool);
 void mkt_thread_pool_destroy(MktThreadPool *pool);
 
 /*
- * SPMD dispatch: run fn(participant_id, arg) once on every participant — the
- * leader (id 0) and each worker (ids 1..nthreads) — concurrently, returning
- * when all have finished. Unlike parallel_for there is no chunking and no
- * per-iteration barrier: each participant runs the whole function and is
- * expected to self-synchronize internally (e.g. an SPMD index-build worker
- * coordinating its phases through a dynamic Barrier). With nthreads=0 it runs
- * fn(0, arg) on the calling thread. This is how the standalone back-end drives
- * the shared parallel build on the persistent pool, mirroring PG launching
- * parallel workers on the same registered entry.
+ * SPMD dispatch over the persistent pool.
+ *
+ * fn runs once per worker as fn(participant_id, arg) with participant_id in
+ * 1..nthreads (the leader is participant 0). Unlike parallel_for there is no
+ * chunking and no per-iteration barrier: each worker runs the whole function
+ * and is expected to self-synchronize internally (e.g. an SPMD index-build
+ * worker coordinating its phases through a dynamic Barrier). This is how the
+ * standalone back-end drives the shared parallel build on the pool, mirroring
+ * how PostgreSQL launches parallel workers on a single registered entry.
+ *
+ * launch/join are the asynchronous pair the index build needs: launch wakes
+ * the workers and returns immediately, so the leader can run its own code
+ * (participate in k-means, drain the workers' streamed output) concurrently;
+ * join then rendezvous with the workers once the leader is done. Between them
+ * the leader must NOT touch the pool. With nthreads=0 they are no-ops (there
+ * are no workers; the caller does all the work itself).
+ *
+ * run_spmd is the synchronous convenience: launch, run fn as participant 0 on
+ * the calling thread, then join — i.e. every participant runs fn. With
+ * nthreads=0 it runs fn(0, arg) inline.
  */
 typedef void (*MktSpmdFn)(uint32_t participant_id, void *arg);
+void mkt_thread_pool_launch(MktThreadPool *pool, MktSpmdFn fn, void *arg);
+void mkt_thread_pool_join(MktThreadPool *pool);
 void mkt_thread_pool_run_spmd(MktThreadPool *pool, MktSpmdFn fn, void *arg);
 
 #endif /* MKT_THREAD_POOL_H */
