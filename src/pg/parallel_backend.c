@@ -11,8 +11,12 @@
 
 #include <postgres.h>
 
+#include <access/parallel.h>
+#include <access/table.h>
 #include <access/tableam.h>
 #include <catalog/index.h>
+#include <pgstat.h>
+#include <tcop/tcopprot.h>
 #include <utils/rel.h>
 
 #include "mkt_pg.h"
@@ -82,4 +86,58 @@ mkt_build_scan(
 			mkt_pg_scan_adapter,
 			&actx,
 			scan);
+}
+
+/*
+ * Join the parallel build: look up the shared state, open the heap and index,
+ * start per-worker instrumentation, and attach to the phase barrier. The
+ * standalone back-end provides a same-named function that takes the shared
+ * state and vectors directly and joins a thread barrier.
+ */
+void
+mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
+{
+	MktBuildShared *shared	= shm_toc_lookup(toc, MKTANN_KEY_SHARED, false);
+	Barrier		   *barrier = shm_toc_lookup(toc, MKTANN_KEY_BARRIER, false);
+
+	char *sharedquery  = shm_toc_lookup(toc, MKTANN_KEY_QUERY_TEXT, true);
+	debug_query_string = sharedquery;
+	pgstat_report_activity(STATE_RUNNING, debug_query_string);
+	pgstat_report_query_id(shared->queryid, false);
+
+	w->shared	 = shared;
+	w->barrier	 = barrier;
+	w->heapRel	 = table_open(shared->heaprelid, ShareLock);
+	w->indexRel	 = index_open(shared->indexrelid, AccessExclusiveLock);
+	w->worker_id = ParallelWorkerNumber + 1;
+	w->dim		 = shared->dim;
+
+	InstrStartParallelQuery();
+
+	/*
+	 * Attach to the phase barrier. The leader initializes the barrier with
+	 * itself as the sole party and waits for every launched worker to attach
+	 * before advancing, so attaching here (before the first phase) keeps all
+	 * participants in lockstep regardless of how many workers were launched.
+	 */
+	BarrierAttach(barrier);
+}
+
+/*
+ * Leave the parallel build: report this worker's buffer/WAL usage back to the
+ * leader and close the relations. The standalone back-end's same-named
+ * function joins the thread and is otherwise a no-op.
+ */
+void
+mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
+{
+	BufferUsage *bufferusage =
+			shm_toc_lookup(toc, MKTANN_KEY_BUFFER_USAGE, false);
+	WalUsage *walusage = shm_toc_lookup(toc, MKTANN_KEY_WAL_USAGE, false);
+	InstrEndParallelQuery(
+			&bufferusage[ParallelWorkerNumber],
+			&walusage[ParallelWorkerNumber]);
+
+	index_close(w->indexRel, AccessExclusiveLock);
+	table_close(w->heapRel, ShareLock);
 }

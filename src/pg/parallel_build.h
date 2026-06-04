@@ -550,4 +550,27 @@ extern void mkt_build_scan(
 
 extern void mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc);
 
+/* ----------------------------------------------------------------
+ * Worker lifecycle seam — back-end-specific (parallel_backend.c for PG)
+ *
+ * Runtime handles for one participant. mkt_pbuild_worker_attach fills it when
+ * the worker joins the build; mkt_pbuild_worker_detach tears it down. The PG
+ * version opens the heap/index relations and reports instrumentation; the
+ * standalone version takes the shared state and vectors directly and joins a
+ * thread barrier.
+ * ---------------------------------------------------------------- */
+
+typedef struct MktPBuildWorker
+{
+	MktBuildShared *shared;
+	Barrier		   *barrier;
+	Relation		heapRel;
+	Relation		indexRel;
+	int				worker_id;
+	Dimension		dim;
+} MktPBuildWorker;
+
+extern void mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w);
+extern void mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w);
+
 #endif /* MKT_PARALLEL_BUILD_H */

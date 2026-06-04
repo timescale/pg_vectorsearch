@@ -14,16 +14,14 @@
 #include <postgres.h>
 
 #include <access/parallel.h>
-#include <access/table.h>
 #include <catalog/index.h>
 #include <miscadmin.h>
-#include <pgstat.h>
 #include <storage/barrier.h>
 #include <storage/bufmgr.h>
 #include <storage/shm_toc.h>
-#include <tcop/tcopprot.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
+#include <utils/wait_event.h>
 
 #include "algo/hkmeans.h"
 #include "algo/kmeans_internal.h"
@@ -295,77 +293,6 @@ mktann_posting_page_sink(void *ctx, uint32_t cluster_id, const char *page)
 		elog(ERROR,
 			 "mktann: posting page queue send failed (result %d)",
 			 (int)res);
-}
-
-/*
- * Worker-side runtime handles for one participant: the shared state, the phase
- * barrier, the opened relations, and this worker's id/dim. Filled by
- * mkt_pbuild_worker_attach, mirroring the leader's MktPBuildLeader. (A coarse
- * back-end seam: the standalone build populates the same struct from its
- * thread-start arguments instead of from the DSM table of contents.)
- */
-typedef struct MktPBuildWorker
-{
-	MktBuildShared *shared;
-	Barrier		   *barrier;
-	Relation		heapRel;
-	Relation		indexRel;
-	int				worker_id;
-	Dimension		dim;
-} MktPBuildWorker;
-
-/*
- * Join the parallel build: look up the shared state, open the heap and index,
- * start per-worker instrumentation, and attach to the phase barrier. Coarse PG
- * block — the standalone back-end provides a same-named function that takes
- * the shared state and vector data directly and joins a thread barrier.
- */
-static void
-mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
-{
-	MktBuildShared *shared	= shm_toc_lookup(toc, MKTANN_KEY_SHARED, false);
-	Barrier		   *barrier = shm_toc_lookup(toc, MKTANN_KEY_BARRIER, false);
-
-	char *sharedquery  = shm_toc_lookup(toc, MKTANN_KEY_QUERY_TEXT, true);
-	debug_query_string = sharedquery;
-	pgstat_report_activity(STATE_RUNNING, debug_query_string);
-	pgstat_report_query_id(shared->queryid, false);
-
-	w->shared	 = shared;
-	w->barrier	 = barrier;
-	w->heapRel	 = table_open(shared->heaprelid, ShareLock);
-	w->indexRel	 = index_open(shared->indexrelid, AccessExclusiveLock);
-	w->worker_id = ParallelWorkerNumber + 1;
-	w->dim		 = shared->dim;
-
-	InstrStartParallelQuery();
-
-	/*
-	 * Attach to the phase barrier. The leader initializes the barrier with
-	 * itself as the sole party and waits for every launched worker to attach
-	 * before advancing, so attaching here (before the first phase) keeps all
-	 * participants in lockstep regardless of how many workers were launched.
-	 */
-	BarrierAttach(barrier);
-}
-
-/*
- * Leave the parallel build: report this worker's buffer/WAL usage back to the
- * leader and close the relations. Coarse PG block; the standalone back-end's
- * same-named function joins the thread and is otherwise a no-op.
- */
-static void
-mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
-{
-	BufferUsage *bufferusage =
-			shm_toc_lookup(toc, MKTANN_KEY_BUFFER_USAGE, false);
-	WalUsage *walusage = shm_toc_lookup(toc, MKTANN_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(
-			&bufferusage[ParallelWorkerNumber],
-			&walusage[ParallelWorkerNumber]);
-
-	index_close(w->indexRel, AccessExclusiveLock);
-	table_close(w->heapRel, ShareLock);
 }
 
 /* ----------------------------------------------------------------
