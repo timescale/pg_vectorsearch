@@ -40,7 +40,7 @@
  * ---------------------------------------------------------------- */
 
 void
-mktann_sample_cb(void *state, ItemPointerData tid, const float *vec)
+mkt_sample_cb(void *state, ItemPointerData tid, const float *vec)
 {
 	SampleCbState *sc = (SampleCbState *)state;
 
@@ -78,7 +78,7 @@ mktann_sample_cb(void *state, ItemPointerData tid, const float *vec)
  * ---------------------------------------------------------------- */
 
 void
-mktann_km_assign_and_accumulate(
+mkt_km_assign_and_accumulate(
 		const float	  *samples,
 		uint32_t	   nsamples,
 		const float	  *centroids,
@@ -111,7 +111,7 @@ mktann_km_assign_and_accumulate(
 }
 
 void
-mktann_km_assign_and_accumulate_filtered(
+mkt_km_assign_and_accumulate_filtered(
 		const float	   *samples,
 		uint32_t		nsamples,
 		const uint32_t *root_assignments,
@@ -300,7 +300,7 @@ mktann_posting_page_sink(void *ctx, uint32_t cluster_id, const char *page)
  * ---------------------------------------------------------------- */
 
 void
-mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
+mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 {
 	MktPBuildWorker w;
 	mkt_pbuild_worker_attach(toc, &w);
@@ -314,10 +314,9 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	/* ---- Phase 1: Sampling ---- */
 
-	MktDsmSamples *dsm_samples =
-			shm_toc_lookup(toc, MKTANN_KEY_SAMPLES, false);
-	char  *centroids_base = shm_toc_lookup(toc, MKTANN_KEY_CENTROIDS, false);
-	float *cents		  = mktann_centroids(centroids_base);
+	MktDsmSamples *dsm_samples = shm_toc_lookup(toc, MKT_KEY_SAMPLES, false);
+	char  *centroids_base	   = shm_toc_lookup(toc, MKT_KEY_CENTROIDS, false);
+	float *cents			   = mkt_centroids(centroids_base);
 
 	uint32_t km_k = shared->km_k;
 
@@ -332,7 +331,7 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 		stride = 1;
 
 	SampleCbState sc = {
-			.samples		= mktann_worker_samples(dsm_samples, worker_id),
+			.samples		= mkt_worker_samples(dsm_samples, worker_id),
 			.count			= 0,
 			.max_samples	= shared->max_samples_per_worker,
 			.stride			= stride,
@@ -350,12 +349,12 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			shared,
 			true,
 			false,
-			mktann_sample_cb,
+			mkt_sample_cb,
 			&sc);
 
-	*mktann_sample_counts(dsm_samples) = sc.count;
+	*mkt_sample_counts(dsm_samples) = sc.count;
 	/* Fix: write to this worker's slot */
-	mktann_sample_counts(dsm_samples)[worker_id] = sc.count;
+	mkt_sample_counts(dsm_samples)[worker_id] = sc.count;
 
 	/* Barrier: all participants done sampling */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
@@ -382,22 +381,20 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * itself work-stealing, so k-means balance is second-order; revisit only
 	 * if it ever proves to be a real bottleneck.
 	 */
-	char  *km_workers_base = shm_toc_lookup(toc, MKTANN_KEY_KM_WORKERS, false);
-	float *my_samples	   = mktann_worker_samples(dsm_samples, worker_id);
-	uint32_t my_nsamples   = mktann_sample_counts(dsm_samples)[worker_id];
+	char	*km_workers_base = shm_toc_lookup(toc, MKT_KEY_KM_WORKERS, false);
+	float	*my_samples		 = mkt_worker_samples(dsm_samples, worker_id);
+	uint32_t my_nsamples	 = mkt_sample_counts(dsm_samples)[worker_id];
 
-	float *norms_c = mktann_norms_c(centroids_base, km_k, dim);
-	float *my_sums =
-			mktann_km_worker_sums(km_workers_base, km_k, dim, worker_id);
+	float *norms_c = mkt_norms_c(centroids_base, km_k, dim);
+	float *my_sums = mkt_km_worker_sums(km_workers_base, km_k, dim, worker_id);
 	uint32_t *my_cnts =
-			mktann_km_worker_cnts(km_workers_base, km_k, dim, worker_id);
-	float *my_cost =
-			mktann_km_worker_cost(km_workers_base, km_k, dim, worker_id);
+			mkt_km_worker_cnts(km_workers_base, km_k, dim, worker_id);
+	float *my_cost = mkt_km_worker_cost(km_workers_base, km_k, dim, worker_id);
 
 	for (uint32_t iter = 0; iter < shared->km_max_iterations; iter++)
 	{
 		/* Assignment + accumulation on this worker's samples */
-		mktann_km_assign_and_accumulate(
+		mkt_km_assign_and_accumulate(
 				my_samples,
 				my_nsamples,
 				cents,
@@ -421,9 +418,8 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	/* ---- Phase 2b: Root assignment ---- */
 
-	MktDsmRootAssign *dsm_ra =
-			shm_toc_lookup(toc, MKTANN_KEY_ROOT_ASSIGN, false);
-	uint32_t *my_root_asgn = mktann_root_assignments(dsm_ra, worker_id);
+	MktDsmRootAssign *dsm_ra = shm_toc_lookup(toc, MKT_KEY_ROOT_ASSIGN, false);
+	uint32_t		 *my_root_asgn = mkt_root_assignments(dsm_ra, worker_id);
 
 	kmeans_assign(
 			my_samples,
@@ -456,18 +452,18 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 		 * sizes it for km_k (= fan_out), and child_k <= fan_out,
 		 * so the per-worker slot is large enough.
 		 */
-		float *child_sums = mktann_km_worker_sums(
-				km_workers_base, child_k, dim, worker_id);
-		uint32_t *child_cnts = mktann_km_worker_cnts(
-				km_workers_base, child_k, dim, worker_id);
-		float *child_cost = mktann_km_worker_cost(
-				km_workers_base, child_k, dim, worker_id);
+		float *child_sums =
+				mkt_km_worker_sums(km_workers_base, child_k, dim, worker_id);
+		uint32_t *child_cnts =
+				mkt_km_worker_cnts(km_workers_base, child_k, dim, worker_id);
+		float *child_cost =
+				mkt_km_worker_cost(km_workers_base, child_k, dim, worker_id);
 
-		float *child_norms_c = mktann_norms_c(centroids_base, child_k, dim);
+		float *child_norms_c = mkt_norms_c(centroids_base, child_k, dim);
 
 		for (uint32_t iter = 0; iter < shared->km_max_iterations; iter++)
 		{
-			mktann_km_assign_and_accumulate_filtered(
+			mkt_km_assign_and_accumulate_filtered(
 					my_samples,
 					my_nsamples,
 					my_root_asgn,
@@ -502,16 +498,16 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	/* ---- Phase 3: Posting scan (deferred batch) ---- */
 
-	HKMeansResult *tree = shm_toc_lookup(toc, MKTANN_KEY_TREE, false);
-	char *worker_output = shm_toc_lookup(toc, MKTANN_KEY_WORKER_OUTPUT, false);
-	char *dsm_partials	= shm_toc_lookup(toc, MKTANN_KEY_PARTIALS, true);
-	char *queues_base = shm_toc_lookup(toc, MKTANN_KEY_POSTING_QUEUES, false);
+	HKMeansResult *tree = shm_toc_lookup(toc, MKT_KEY_TREE, false);
+	char *worker_output = shm_toc_lookup(toc, MKT_KEY_WORKER_OUTPUT, false);
+	char *dsm_partials	= shm_toc_lookup(toc, MKT_KEY_PARTIALS, true);
+	char *queues_base	= shm_toc_lookup(toc, MKT_KEY_POSTING_QUEUES, false);
 
 	uint32_t nlist = shared->nlist;
 
 	/* Attach this worker's posting-page queue as the sender; full pages
 	 * are streamed to the leader over it as they fill. */
-	shm_mq *mq = (shm_mq *)mktann_posting_queue(queues_base, worker_id);
+	shm_mq *mq = (shm_mq *)mkt_posting_queue(queues_base, worker_id);
 	shm_mq_set_sender(mq, MyProc);
 	shm_mq_handle *qhandle = shm_mq_attach(mq, seg, NULL);
 
@@ -527,7 +523,7 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	char *my_partials =
 			(dsm_partials != NULL)
-					? mktann_worker_partials(dsm_partials, nlist, worker_id)
+					? mkt_worker_partials(dsm_partials, nlist, worker_id)
 					: NULL;
 
 	MktMemCtx worker_ctx = mkt_memctx_create(NULL, "mktann worker posting");
@@ -600,7 +596,7 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	shm_mq_detach(qhandle);
 
 	/* Copy active flags to worker_output */
-	bool *wa = mktann_worker_active(worker_output, nlist, worker_id);
+	bool *wa = mkt_worker_active(worker_output, nlist, worker_id);
 	memcpy(wa, ws.active, nlist * sizeof(bool));
 
 	mkt_pbuild_worker_add_counts(shared, cbs.indtuples, cbs.soar_dupes);
