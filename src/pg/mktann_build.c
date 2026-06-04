@@ -557,11 +557,22 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 		posting_heads = palloc(max_nlist * sizeof(BlockNumber));
 
+		MktBuildConfig cfg = {
+				.dim			  = bs.params.dim,
+				.metric			  = bs.params.metric,
+				.centroid_format  = bs.params.centroid_format,
+				.nlist			  = bs.params.nlist,
+				.fan_out		  = bs.params.fan_out,
+				.soar_lambda	  = bs.params.soar_lambda,
+				.boundary_epsilon = bs.params.boundary_epsilon,
+				.fastscan		  = bs.params.fastscan,
+		};
+
 		did_parallel = do_parallel_build(
 				heap,
 				index,
 				index_info,
-				&bs.params,
+				&cfg,
 				&storage.base,
 				&tree,
 				posting_heads,

@@ -53,21 +53,21 @@
 
 bool
 do_parallel_build(
-		Relation				 heap,
-		Relation				 index,
-		struct IndexInfo		*index_info,
-		const MktannBuildParams *params,
-		MktStorage				*storage,
-		HKMeansResult		   **out_tree,
-		BlockNumber				*posting_heads,
-		double					*out_heap_tuples,
-		double					*out_indtuples,
-		double					*out_soar_dupes)
+		Relation			  heap,
+		Relation			  index,
+		struct IndexInfo	 *index_info,
+		const MktBuildConfig *config,
+		MktStorage			 *storage,
+		HKMeansResult		**out_tree,
+		BlockNumber			 *posting_heads,
+		double				 *out_heap_tuples,
+		double				 *out_indtuples,
+		double				 *out_soar_dupes)
 {
 	int nworkers = index_info->ii_ParallelWorkers;
 
 	MktPBuildLeader lead;
-	if (!mkt_pbuild_setup_shared(&lead, heap, index, params, nworkers))
+	if (!mkt_pbuild_setup_shared(&lead, heap, index, config, nworkers))
 		return false;
 
 	ParallelContext	 *pcxt			  = lead.pcxt;

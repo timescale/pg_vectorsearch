@@ -482,10 +482,30 @@ extern void mkt_pbuild_worker_add_counts(
 struct ParallelContext;
 struct WalUsage;
 struct BufferUsage;
-struct MktannBuildParams;
 
 extern void mkt_pbuild_teardown(struct ParallelContext *pcxt);
 extern bool mkt_pbuild_launch(struct ParallelContext *pcxt, Barrier *barrier);
+
+/* ----------------------------------------------------------------
+ * Build configuration — back-end-neutral input to the setup seam
+ *
+ * The fields the setup seam needs to size and populate the shared state. The
+ * PG path fills this from its opclass-resolved MktannBuildParams; the
+ * standalone path fills it from its own config. Keeping it neutral lets one
+ * setup-seam signature serve both back-ends.
+ * ---------------------------------------------------------------- */
+
+typedef struct MktBuildConfig
+{
+	Dimension		  dim;
+	DistanceMetric	  metric;
+	MktCentroidFormat centroid_format;
+	uint32_t		  nlist;
+	uint32_t		  fan_out;
+	double			  soar_lambda;
+	double			  boundary_epsilon;
+	bool			  fastscan;
+} MktBuildConfig;
 
 /* ----------------------------------------------------------------
  * Leader setup seam — back-end-specific (parallel_backend.c for PG)
@@ -524,11 +544,11 @@ typedef struct MktPBuildLeader
 } MktPBuildLeader;
 
 extern bool mkt_pbuild_setup_shared(
-		MktPBuildLeader				   *lead,
-		Relation						heap,
-		Relation						index,
-		const struct MktannBuildParams *params,
-		int								nworkers);
+		MktPBuildLeader		 *lead,
+		Relation			  heap,
+		Relation			  index,
+		const MktBuildConfig *config,
+		int					  nworkers);
 
 /*
  * Re-initialize the scan for the posting pass (the sampling pass consumed the

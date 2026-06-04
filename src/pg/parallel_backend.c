@@ -235,17 +235,17 @@ mkt_pbuild_launch(ParallelContext *pcxt, Barrier *barrier)
  */
 bool
 mkt_pbuild_setup_shared(
-		MktPBuildLeader			*lead,
-		Relation				 heap,
-		Relation				 index,
-		const MktannBuildParams *params,
-		int						 nworkers)
+		MktPBuildLeader		 *lead,
+		Relation			  heap,
+		Relation			  index,
+		const MktBuildConfig *config,
+		int					  nworkers)
 {
-	Dimension dim			= params->dim;
-	uint32_t  nlist			= params->nlist;
+	Dimension dim			= config->dim;
+	uint32_t  nlist			= config->nlist;
 	int		  nparticipants = nworkers + 1;
 	uint64_t  rabitq_seed	= 42;
-	uint32_t  fan_out		= params->fan_out > 0 ? params->fan_out
+	uint32_t  fan_out		= config->fan_out > 0 ? config->fan_out
 												  : mkt_auto_fan_out(0, nlist, 0);
 	uint32_t  km_k			= fan_out < nlist ? fan_out : nlist;
 
@@ -336,13 +336,13 @@ mkt_pbuild_setup_shared(
 	pg->indexrelid				   = RelationGetRelid(index);
 	pg->queryid					   = pgstat_get_my_query_id();
 	shared->dim					   = dim;
-	shared->metric				   = params->metric;
+	shared->metric				   = config->metric;
 	shared->nlist				   = nlist;
-	shared->fan_out				   = params->fan_out;
-	shared->soar_lambda			   = params->soar_lambda;
-	shared->boundary_epsilon	   = params->boundary_epsilon;
-	shared->fastscan			   = params->fastscan;
-	shared->centroid_format		   = params->centroid_format;
+	shared->fan_out				   = config->fan_out;
+	shared->soar_lambda			   = config->soar_lambda;
+	shared->boundary_epsilon	   = config->boundary_epsilon;
+	shared->fastscan			   = config->fastscan;
+	shared->centroid_format		   = config->centroid_format;
 	shared->rabitq_seed			   = rabitq_seed;
 	shared->nparticipants		   = nparticipants;
 	shared->max_samples_per_worker = max_per_worker;

@@ -16,6 +16,7 @@
 
 #include "algo/hkmeans.h"
 #include "index/index_base.h"
+#include "index/parallel_build.h" /* MktBuildConfig */
 #include "mkt_types.h"
 #include "mktann_storage.h"
 
@@ -56,15 +57,15 @@ char *mktann_buildphasename(int64 phasenum);
  * the caller falls back to a serial build.
  */
 bool do_parallel_build(
-		Relation				 heap,
-		Relation				 index,
-		struct IndexInfo		*index_info,
-		const MktannBuildParams *params,
-		MktStorage				*storage,
-		HKMeansResult		   **out_tree,
-		BlockNumber				*posting_heads,
-		double					*out_heap_tuples,
-		double					*out_indtuples,
-		double					*out_soar_dupes);
+		Relation			  heap,
+		Relation			  index,
+		struct IndexInfo	 *index_info,
+		const MktBuildConfig *config,
+		MktStorage			 *storage,
+		HKMeansResult		**out_tree,
+		BlockNumber			 *posting_heads,
+		double				 *out_heap_tuples,
+		double				 *out_indtuples,
+		double				 *out_soar_dupes);
 
 #endif /* MKTANN_BUILD_H */
