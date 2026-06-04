@@ -15,18 +15,22 @@
 #ifndef MKT_PARALLEL_BUILD_H
 #define MKT_PARALLEL_BUILD_H
 
+#ifdef MKT_STANDALONE
+#include "core/pg_compat.h" /* Size, BlockNumber, ItemPointerData, Relation */
+#else
 #include <postgres.h>
 
-#include <storage/barrier.h>
 #include <storage/block.h>
 #include <storage/itemptr.h>
-#include <storage/shm_mq.h>
-#include <storage/shm_toc.h>
 #include <utils/rel.h>
+#endif
 
 #include "algo/hkmeans.h"
 #include "core/memory.h"
+#include "core/mkt_barrier.h" /* Barrier (PG's, or the pthread shim) */
 #include "core/mkt_build_scan.h"
+#include "core/mkt_shm_mq.h"  /* shm_mq (PG's, or the thread-queue shim) */
+#include "core/mkt_shm_toc.h" /* shm_toc (PG's, or the heap-arena shim) */
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"
 #include "mkt_types.h"

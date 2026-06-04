@@ -36,6 +36,7 @@
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
+#include "index/parallel_build.h"
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"
 #include "index/posting_page.h"
@@ -45,7 +46,6 @@
 #include "mktann_build.h"
 #include "mktann_meta.h"
 #include "mktann_storage.h"
-#include "parallel_build.h"
 #include "quant/fastscan.h"
 
 bool

@@ -27,10 +27,10 @@
 #include <utils/wait_event.h>
 
 #include "index/index_build.h"
+#include "index/parallel_build.h"
 #include "mkt_pg.h"
 #include "mkt_vector.h"
 #include "mktann_build.h"
-#include "parallel_build.h"
 
 /*
  * PG-specific shared build state: the neutral MktBuildShared plus the relation

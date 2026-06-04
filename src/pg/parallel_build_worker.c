@@ -26,9 +26,9 @@
 #include "algo/kmeans_internal.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
+#include "index/parallel_build.h"
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"
-#include "parallel_build.h"
 #include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------

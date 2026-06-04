@@ -163,5 +163,16 @@ ItemPointerSetInvalid(ItemPointerData *tip)
 	tip->ip_posid		= InvalidOffsetNumber;
 }
 
+/*
+ * Types/macros the shared parallel build (parallel_build.h) expects from
+ * PostgreSQL's postgres.h / utils/rel.h. Relation is opaque here — the
+ * standalone build never dereferences it (it passes its vectors directly).
+ */
+typedef size_t				 Size;
+typedef struct RelationData *Relation;
+
+#define BUFFERALIGN(len) MAXALIGN(len)
+#define UINT64CONST(x)	 (x##ULL)
+
 #endif /* MKT_STANDALONE */
 #endif /* MKT_PG_COMPAT_H */
