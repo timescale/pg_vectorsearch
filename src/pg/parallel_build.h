@@ -45,7 +45,6 @@ struct IndexInfo;
 
 #define MKTANN_KEY_SHARED		  UINT64CONST(0xB000000000000001)
 #define MKTANN_KEY_TREE			  UINT64CONST(0xB000000000000002)
-#define MKTANN_KEY_RESERVE		  UINT64CONST(0xB000000000000003)
 #define MKTANN_KEY_WORKER_OUTPUT  UINT64CONST(0xB000000000000004)
 #define MKTANN_KEY_PARTIALS		  UINT64CONST(0xB000000000000005)
 #define MKTANN_KEY_WAL_USAGE	  UINT64CONST(0xB000000000000006)
@@ -55,7 +54,6 @@ struct IndexInfo;
 #define MKTANN_KEY_SAMPLES		  UINT64CONST(0xB00000000000000A)
 #define MKTANN_KEY_CENTROIDS	  UINT64CONST(0xB00000000000000B)
 #define MKTANN_KEY_KM_WORKERS	  UINT64CONST(0xB00000000000000C)
-#define MKTANN_KEY_BATCHES		  UINT64CONST(0xB00000000000000D)
 #define MKTANN_KEY_ROOT_ASSIGN	  UINT64CONST(0xB00000000000000E)
 #define MKTANN_KEY_POSTING_QUEUES UINT64CONST(0xB00000000000000F)
 
@@ -245,85 +243,22 @@ mktann_km_worker_cost(char *base, uint32_t nlist, Dimension dim, int worker_id)
 }
 
 /* ----------------------------------------------------------------
- * MktDsmReserve — page reservation with atomics in DSM
- *
- * Layout: header, then starts[nlist], counts[nlist], nexts[nlist]
- * all inline.
- * ---------------------------------------------------------------- */
-
-typedef struct MktDsmReserve
-{
-	uint32_t	nlist;
-	BlockNumber first_posting;
-	BlockNumber total_reserved;
-} MktDsmReserve;
-
-static inline BlockNumber *
-mktann_dsm_reserve_starts(MktDsmReserve *r)
-{
-	return (BlockNumber *)((char *)r + MAXALIGN(sizeof(MktDsmReserve)));
-}
-
-static inline uint32_t *
-mktann_dsm_reserve_counts(MktDsmReserve *r)
-{
-	return (uint32_t *)((char *)mktann_dsm_reserve_starts(r) +
-						r->nlist * sizeof(BlockNumber));
-}
-
-static inline pg_atomic_uint32 *
-mktann_dsm_reserve_nexts(MktDsmReserve *r)
-{
-	return (pg_atomic_uint32 *)((char *)mktann_dsm_reserve_counts(r) +
-								r->nlist * sizeof(uint32_t));
-}
-
-static inline Size
-mktann_dsm_reserve_size(uint32_t nlist)
-{
-	Size sz = MAXALIGN(sizeof(MktDsmReserve));
-	sz += (Size)nlist * sizeof(BlockNumber);
-	sz += (Size)nlist * sizeof(uint32_t);
-	sz += (Size)nlist * sizeof(pg_atomic_uint32);
-	return sz;
-}
-
-/* ----------------------------------------------------------------
  * Per-worker posting output in DSM
  *
- * Flat arrays: heads[nlist] + tails[nlist] + active[nlist]
- * per worker, packed contiguously.
+ * active[nlist] per worker, packed contiguously: a flag per cluster marking
+ * which lists this worker wrote into.
  * ---------------------------------------------------------------- */
 
 static inline Size
 mktann_worker_output_size(uint32_t nlist, int nparticipants)
 {
-	Size per_worker = (Size)nlist * (2 * sizeof(BlockNumber) + sizeof(bool));
-	return per_worker * nparticipants;
-}
-
-static inline BlockNumber *
-mktann_worker_heads(char *base, uint32_t nlist, int worker_id)
-{
-	Size  per_worker = (Size)nlist * (2 * sizeof(BlockNumber) + sizeof(bool));
-	char *slot		 = base + per_worker * worker_id;
-	return (BlockNumber *)slot;
-}
-
-static inline BlockNumber *
-mktann_worker_tails(char *base, uint32_t nlist, int worker_id)
-{
-	Size  per_worker = (Size)nlist * (2 * sizeof(BlockNumber) + sizeof(bool));
-	char *slot		 = base + per_worker * worker_id;
-	return (BlockNumber *)(slot + (Size)nlist * sizeof(BlockNumber));
+	return (Size)nparticipants * nlist * sizeof(bool);
 }
 
 static inline bool *
 mktann_worker_active(char *base, uint32_t nlist, int worker_id)
 {
-	Size  per_worker = (Size)nlist * (2 * sizeof(BlockNumber) + sizeof(bool));
-	char *slot		 = base + per_worker * worker_id;
-	return (bool *)(slot + (Size)nlist * 2 * sizeof(BlockNumber));
+	return (bool *)(base + (Size)worker_id * nlist * sizeof(bool));
 }
 
 /* ----------------------------------------------------------------
@@ -379,53 +314,6 @@ static inline char *
 mktann_posting_queue(char *base, int worker_id)
 {
 	return base + (Size)worker_id * MAXALIGN(mktann_posting_queue_bytes());
-}
-
-/* ----------------------------------------------------------------
- * Per-worker deferred batch pages in DSM
- *
- * Workers use MktPostingWorkerState with storage=NULL (deferred
- * batch mode). After the heap scan, workers copy their batch
- * pages to per-worker DSM slots. Leader reconstructs
- * MktPostingBatch arrays from DSM and calls
- * mkt_posting_materialize() — identical to standalone.
- *
- * Layout: MktDsmBatches header, then per-worker batch counts
- * [nparticipants][nlist], then per-worker batch pages
- * [nparticipants][max_pages_per_worker * BLCKSZ].
- * ---------------------------------------------------------------- */
-
-typedef struct MktDsmBatches
-{
-	int		 nparticipants;
-	uint32_t max_pages_per_worker;
-	uint32_t nlist;
-} MktDsmBatches;
-
-static inline uint32_t *
-mktann_batch_counts(MktDsmBatches *b, int worker_id)
-{
-	char *base = (char *)b + MAXALIGN(sizeof(MktDsmBatches));
-	return (uint32_t *)(base +
-						(size_t)worker_id * b->nlist * sizeof(uint32_t));
-}
-
-static inline char *
-mktann_batch_pages(MktDsmBatches *b, int worker_id)
-{
-	char *base = (char *)b + MAXALIGN(sizeof(MktDsmBatches));
-	base += (size_t)b->nparticipants * b->nlist * sizeof(uint32_t);
-	return base + (size_t)worker_id * b->max_pages_per_worker * BLCKSZ;
-}
-
-static inline Size
-mktann_batches_size(
-		int nparticipants, uint32_t max_pages_per_worker, uint32_t nlist)
-{
-	Size sz = MAXALIGN(sizeof(MktDsmBatches));
-	sz += (Size)nparticipants * nlist * sizeof(uint32_t);
-	sz += (Size)nparticipants * max_pages_per_worker * BLCKSZ;
-	return sz;
 }
 
 /* ----------------------------------------------------------------
