@@ -25,6 +25,7 @@
 #include <utils/rel.h>
 
 #include "algo/hkmeans.h"
+#include "core/memory.h"
 #include "core/mkt_build_scan.h"
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"
@@ -376,8 +377,8 @@ typedef struct PostingCbState
 	MktPostingWorkerState *ws;
 	double				   indtuples;
 	double				   soar_dupes;
-	MemoryContext		   tmp_ctx;
-	MemoryContext		   worker_ctx;
+	MktMemCtx			   tmp_ctx;
+	MktMemCtx			   worker_ctx;
 
 	/* Batched secondary assignment: when replication is on and CBLAS is
 	 * available, tuples are buffered and the secondary search runs as a

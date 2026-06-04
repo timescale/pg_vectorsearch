@@ -19,13 +19,13 @@
 #include <storage/barrier.h>
 #include <storage/bufmgr.h>
 #include <storage/shm_toc.h>
-#include <utils/memutils.h>
 #include <utils/rel.h>
 #include <utils/wait_event.h>
 
 #include "algo/hkmeans.h"
 #include "algo/kmeans_internal.h"
 #include "algo/vecops.h"
+#include "core/memory.h"
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"
 #include "parallel_build.h"
@@ -186,8 +186,8 @@ posting_cb_batch_flush(PostingCbState *cbs)
 	if (!cbs->use_batch || cbs->batch_count == 0)
 		return;
 
-	Dimension	  dim	  = cbs->bp.dim;
-	MemoryContext old_ctx = MemoryContextSwitchTo(cbs->worker_ctx);
+	Dimension dim	  = cbs->bp.dim;
+	MktMemCtx old_ctx = mkt_memctx_switch(cbs->worker_ctx);
 
 	mkt_secondary_batch_assign(
 			&cbs->sb,
@@ -211,7 +211,7 @@ posting_cb_batch_flush(PostingCbState *cbs)
 	}
 
 	cbs->batch_count = 0;
-	MemoryContextSwitchTo(old_ctx);
+	mkt_memctx_switch(old_ctx);
 }
 
 void
@@ -255,23 +255,23 @@ posting_cb(void *state, ItemPointerData tid, const float *vec)
 		return;
 	}
 
-	MemoryContext old_ctx = MemoryContextSwitchTo(cbs->tmp_ctx);
+	MktMemCtx old_ctx = mkt_memctx_switch(cbs->tmp_ctx);
 
 	MktBuildAssignment asgn =
 			mkt_build_assign_vector(cbs->tree, vec, &cbs->bp, &cbs->bufs);
 
-	MemoryContextSwitchTo(cbs->worker_ctx);
+	mkt_memctx_switch(cbs->worker_ctx);
 
 	mkt_posting_worker_add_heap(
 			cbs->ws, tid, asgn.enc_vector, asgn.primary, asgn.secondary);
 
-	MemoryContextSwitchTo(old_ctx);
+	mkt_memctx_switch(old_ctx);
 
 	cbs->indtuples++;
 	if (asgn.secondary != MKT_INVALID_CLUSTER)
 		cbs->soar_dupes++;
 
-	MemoryContextReset(cbs->tmp_ctx);
+	mkt_memctx_reset(cbs->tmp_ctx);
 }
 
 /*
@@ -530,11 +530,8 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 					? mktann_worker_partials(dsm_partials, nlist, worker_id)
 					: NULL;
 
-	MemoryContext worker_ctx = AllocSetContextCreate(
-			CurrentMemoryContext,
-			"mktann worker posting",
-			ALLOCSET_DEFAULT_SIZES);
-	MemoryContext prev = MemoryContextSwitchTo(worker_ctx);
+	MktMemCtx worker_ctx = mkt_memctx_create(NULL, "mktann worker posting");
+	MktMemCtx prev		 = mkt_memctx_switch(worker_ctx);
 
 	MktPostingWorkerState ws;
 	mkt_posting_worker_init(
@@ -558,7 +555,7 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
 
-	MemoryContextSwitchTo(prev);
+	mkt_memctx_switch(prev);
 
 	PostingCbState cbs = {
 			.tree		= tree,
@@ -570,16 +567,13 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			.ws			= &ws,
 			.indtuples	= 0,
 			.soar_dupes = 0,
-			.tmp_ctx	= AllocSetContextCreate(
-					   CurrentMemoryContext,
-					   "mktann parallel tuple",
-					   ALLOCSET_DEFAULT_SIZES),
+			.tmp_ctx	= mkt_memctx_create(NULL, "mktann parallel tuple"),
 			.worker_ctx = worker_ctx,
 	};
 
-	MemoryContext batch_ctx = MemoryContextSwitchTo(worker_ctx);
+	MktMemCtx batch_ctx = mkt_memctx_switch(worker_ctx);
 	posting_cb_batch_init(&cbs);
-	MemoryContextSwitchTo(batch_ctx);
+	mkt_memctx_switch(batch_ctx);
 
 	/* Second parallel scan for posting build */
 	mkt_build_scan(
