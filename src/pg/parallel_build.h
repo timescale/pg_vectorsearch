@@ -25,12 +25,19 @@
 #include <storage/shm_mq.h>
 #include <storage/shm_toc.h>
 #include <storage/spin.h>
+#include <utils/rel.h>
 
 #include "algo/hkmeans.h"
+#include "core/mkt_build_scan.h"
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"
 #include "mkt_types.h"
 #include "quant/rabitq.h"
+
+/* Forward decl so mkt_build_scan's prototype can reference it without pulling
+ * in the executor headers; callers that pass one already have the full type.
+ */
+struct IndexInfo;
 
 /* ----------------------------------------------------------------
  * DSM table-of-contents keys
@@ -438,20 +445,12 @@ typedef struct SampleCbState
 
 /*
  * Shared sampling logic, called per live tuple with a raw vector pointer (no
- * Datum) so the same code serves both back-ends; the standalone scan calls it
- * directly. mktann_sample_callback is the PG scan adapter that unwraps the
- * tuple and forwards here.
+ * Datum) so the same code serves both back-ends. mkt_build_scan feeds it: the
+ * PG scan unwraps each heap tuple's Datum, the standalone scan passes its
+ * in-memory vectors directly.
  */
 extern void
 mktann_sample_cb(void *state, ItemPointerData tid, const float *vec);
-
-extern void mktann_sample_callback(
-		Relation	index,
-		ItemPointer tid,
-		Datum	   *values,
-		bool	   *isnull,
-		bool		tuple_is_alive,
-		void	   *state);
 
 extern void mktann_km_assign_and_accumulate(
 		const float	  *samples,
@@ -523,19 +522,27 @@ void posting_cb_batch_flush(PostingCbState *cbs);
 void posting_cb_batch_cleanup(PostingCbState *cbs);
 
 /*
- * Shared posting logic, called per live tuple with a raw vector pointer; the
- * standalone scan calls it directly. posting_build_callback is the PG scan
- * adapter that unwraps the tuple and forwards here.
+ * Shared posting logic, called per live tuple with a raw vector pointer; fed
+ * by mkt_build_scan in both back-ends.
  */
 extern void posting_cb(void *state, ItemPointerData tid, const float *vec);
 
-extern void posting_build_callback(
-		Relation	index,
-		ItemPointer tid,
-		Datum	   *values,
-		bool	   *isnull,
-		bool		tuple_is_alive,
-		void	   *state);
+/*
+ * Scan every vector cooperatively, invoking cb per live tuple. Back-end seam:
+ * the PG implementation (parallel_backend_pg.c) drives a parallel heap scan
+ * and unwraps each tuple; the standalone implementation iterates its in-memory
+ * vector array. allow_sync/anyvisible are PG table_index_build_scan flags,
+ * ignored in standalone.
+ */
+extern void mkt_build_scan(
+		Relation		  heap,
+		Relation		  index,
+		struct IndexInfo *indexInfo,
+		MktBuildShared	 *shared,
+		bool			  allow_sync,
+		bool			  anyvisible,
+		MktBuildScanCb	  cb,
+		void			 *state);
 
 /* ----------------------------------------------------------------
  * Worker entry point — registered with CreateParallelContext

@@ -15,11 +15,11 @@
 
 #include <access/parallel.h>
 #include <access/table.h>
-#include <access/tableam.h>
 #include <catalog/index.h>
 #include <miscadmin.h>
 #include <pgstat.h>
 #include <storage/barrier.h>
+#include <storage/bufmgr.h>
 #include <storage/shm_toc.h>
 #include <tcop/tcopprot.h>
 #include <utils/memutils.h>
@@ -30,8 +30,6 @@
 #include "algo/vecops.h"
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"
-#include "mkt_pg.h"
-#include "mkt_vector.h"
 #include "parallel_build.h"
 #include "quant/rabitq.h"
 
@@ -75,27 +73,6 @@ mktann_sample_cb(void *state, ItemPointerData tid, const float *vec)
 	}
 
 	sc->count++;
-}
-
-/* PG scan adapter: unwrap the tuple and hand the vector to mktann_sample_cb.
- */
-void
-mktann_sample_callback(
-		Relation	index,
-		ItemPointer tid,
-		Datum	   *values,
-		bool	   *isnull,
-		bool		tuple_is_alive,
-		void	   *state)
-{
-	(void)index;
-	(void)tuple_is_alive;
-
-	if (isnull[0])
-		return;
-
-	mktann_sample_cb(
-			state, *tid, MKT_VECTOR_DATA(DatumGetMktVector(values[0])));
 }
 
 /* ----------------------------------------------------------------
@@ -299,25 +276,6 @@ posting_cb(void *state, ItemPointerData tid, const float *vec)
 	MemoryContextReset(cbs->tmp_ctx);
 }
 
-/* PG scan adapter: unwrap the tuple and hand the vector to posting_cb. */
-void
-posting_build_callback(
-		Relation	index,
-		ItemPointer tid,
-		Datum	   *values,
-		bool	   *isnull,
-		bool		tuple_is_alive,
-		void	   *state)
-{
-	(void)index;
-	(void)tuple_is_alive;
-
-	if (isnull[0])
-		return;
-
-	posting_cb(state, *tid, MKT_VECTOR_DATA(DatumGetMktVector(values[0])));
-}
-
 /*
  * Page sink: stream one completed full page to the leader over this
  * worker's shm_mq. The page carries its own cluster id and first/
@@ -456,19 +414,17 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			.metric			= shared->metric,
 	};
 
-	IndexInfo	 *indexInfo = BuildIndexInfo(indexRel);
-	TableScanDesc scan		= table_beginscan_parallel(
-			 heapRel, ParallelTableScanFromMktShared(shared));
+	IndexInfo *indexInfo = BuildIndexInfo(indexRel);
 
-	table_index_build_scan(
+	mkt_build_scan(
 			heapRel,
 			indexRel,
 			indexInfo,
+			shared,
 			true,
 			false,
-			mktann_sample_callback,
-			&sc,
-			scan);
+			mktann_sample_cb,
+			&sc);
 
 	*mktann_sample_counts(dsm_samples) = sc.count;
 	/* Fix: write to this worker's slot */
@@ -699,18 +655,15 @@ mktann_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	MemoryContextSwitchTo(batch_ctx);
 
 	/* Second parallel scan for posting build */
-	TableScanDesc scan2 = table_beginscan_parallel(
-			heapRel, ParallelTableScanFromMktShared(shared));
-
-	table_index_build_scan(
+	mkt_build_scan(
 			heapRel,
 			indexRel,
 			indexInfo,
+			shared,
 			true,
 			false,
-			posting_build_callback,
-			&cbs,
-			scan2);
+			posting_cb,
+			&cbs);
 
 	posting_cb_batch_flush(&cbs);
 	posting_cb_batch_cleanup(&cbs);

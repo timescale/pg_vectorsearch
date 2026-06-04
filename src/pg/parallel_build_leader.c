@@ -452,18 +452,15 @@ do_parallel_build(
 				.metric			= shared->metric,
 		};
 
-		TableScanDesc scan = table_beginscan_parallel(
-				heap, ParallelTableScanFromMktShared(shared));
-
-		table_index_build_scan(
+		mkt_build_scan(
 				heap,
 				index,
 				index_info,
+				shared,
 				true,
 				true,
-				mktann_sample_callback,
-				&sc,
-				scan);
+				mktann_sample_cb,
+				&sc);
 
 		mktann_sample_counts(dsm_samples)[0] = sc.count;
 	}
