@@ -5,8 +5,10 @@
  * them, and tears it down. In a PostgreSQL build this is PostgreSQL's
  * ParallelContext (access/parallel.h), backed by background workers and a DSM
  * segment. In a standalone (thread-based) build we provide the same lifecycle
- * over pthreads: InitializeParallelDSM lays a shm_toc over a heap arena, and
- * LaunchParallelWorkers spawns threads running the registered worker entry.
+ * over a persistent thread pool: InitializeParallelDSM lays a shm_toc over a
+ * heap arena, and LaunchParallelWorkers dispatches the registered worker entry
+ * onto the pool's worker threads (asynchronously, so the leader can drain),
+ * mirroring how PostgreSQL launches background workers on a registered entry.
  *
  * Workers are resolved by name the way PostgreSQL resolves a background-worker
  * entry point: the worker module registers its function with
@@ -23,12 +25,12 @@
 
 #ifdef MKT_STANDALONE
 
-#include <pthread.h>
 #include <stddef.h>
 
 #include "core/mkt_latch.h"
 #include "core/mkt_shm_mq.h" /* dsm_segment */
 #include "core/mkt_shm_toc.h"
+#include "standalone/thread_pool.h"
 
 /*
  * The parallel worker index of the running thread: -1 in the leader, 0..N-1 in
@@ -48,10 +50,11 @@ typedef struct ParallelContext
 	shm_toc_estimator estimator;
 
 	/* standalone internals */
-	const char *function_name;
-	void	   *arena;
-	size_t		arena_size;
-	pthread_t  *threads;
+	const char		   *function_name;
+	MktParallelWorkerFn worker_fn; /* resolved at launch */
+	void			   *arena;
+	size_t				arena_size;
+	MktThreadPool	   *pool; /* persistent worker threads */
 	Latch *worker_latches; /* stable [nworkers]; bound as each thread's MyLatch
 							*/
 	Latch leader_latch;	   /* stable; the leader's MyLatch */

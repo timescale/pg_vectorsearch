@@ -78,6 +78,7 @@ CreateParallelContext(const char *library, const char *function, int nworkers)
 	pcxt->nworkers			= nworkers;
 	pcxt->nworkers_launched = 0;
 	pcxt->function_name		= function;
+	pcxt->pool				= mkt_thread_pool_create((uint32_t)nworkers);
 	shm_toc_initialize_estimator(&pcxt->estimator);
 
 	/*
@@ -111,65 +112,49 @@ InitializeParallelDSM(ParallelContext *pcxt)
 	pcxt->seg = (dsm_segment *)pcxt;
 }
 
-/* Trampoline: bind this thread's worker number + latch, then run the entry. */
-typedef struct
+/*
+ * Pool trampoline: runs on a pool worker thread as participant 1..nworkers.
+ * Binds this thread's worker number (ParallelWorkerNumber = participant - 1)
+ * and its stable latch, then runs the registered entry. The pool runs this
+ * once per worker per launch; afterwards the worker waits at the pool barrier
+ * for the leader's join (WaitForParallelWorkersToFinish).
+ */
+static void
+mkt_pool_worker_trampoline(uint32_t participant_id, void *arg)
 {
-	MktParallelWorkerFn fn;
-	int					worker_number;
-	Latch			   *latch;
-	dsm_segment		   *seg;
-	shm_toc			   *toc;
-} MktWorkerThreadArg;
+	ParallelContext *pcxt		   = (ParallelContext *)arg;
+	int				 worker_number = (int)participant_id - 1;
 
-static void *
-mkt_worker_trampoline(void *arg)
-{
-	MktWorkerThreadArg *w = (MktWorkerThreadArg *)arg;
-
-	ParallelWorkerNumber = w->worker_number;
-	mkt_latch_attach_self(w->latch);
-	w->fn(w->seg, w->toc);
-	free(w);
-	return NULL;
+	ParallelWorkerNumber = worker_number;
+	mkt_latch_attach_self(&pcxt->worker_latches[worker_number]);
+	pcxt->worker_fn(pcxt->seg, pcxt->toc);
 }
 
 void
 LaunchParallelWorkers(ParallelContext *pcxt)
 {
-	MktParallelWorkerFn fn = mkt_worker_lookup(pcxt->function_name);
-
 	if (pcxt->nworkers == 0)
 	{
 		pcxt->nworkers_launched = 0;
 		return;
 	}
 
+	pcxt->worker_fn		 = mkt_worker_lookup(pcxt->function_name);
 	pcxt->worker_latches = calloc(pcxt->nworkers, sizeof(Latch));
-	pcxt->threads		 = calloc(pcxt->nworkers, sizeof(pthread_t));
-	if (pcxt->worker_latches == NULL || pcxt->threads == NULL)
+	if (pcxt->worker_latches == NULL)
 	{
 		fprintf(stderr, "LaunchParallelWorkers: out of memory\n");
 		abort();
 	}
-
 	for (int i = 0; i < pcxt->nworkers; i++)
-	{
-		MktWorkerThreadArg *w = malloc(sizeof(MktWorkerThreadArg));
-
 		InitLatch(&pcxt->worker_latches[i]);
-		w->fn			 = fn;
-		w->worker_number = i;
-		w->latch		 = &pcxt->worker_latches[i];
-		w->seg			 = pcxt->seg;
-		w->toc			 = pcxt->toc;
 
-		if (pthread_create(
-					&pcxt->threads[i], NULL, mkt_worker_trampoline, w) != 0)
-		{
-			fprintf(stderr, "LaunchParallelWorkers: pthread_create failed\n");
-			abort();
-		}
-	}
+	/*
+	 * Dispatch the entry onto the pool's worker threads and return: the leader
+	 * then participates in k-means and drains the workers' streamed pages
+	 * concurrently, joining them in WaitForParallelWorkersToFinish.
+	 */
+	mkt_thread_pool_launch(pcxt->pool, mkt_pool_worker_trampoline, pcxt);
 	pcxt->nworkers_launched = pcxt->nworkers;
 }
 
@@ -177,9 +162,9 @@ void
 WaitForParallelWorkersToAttach(ParallelContext *pcxt)
 {
 	/*
-	 * No-op: the threads are already created and will attach to the phase
-	 * barrier. The leader's launch path polls BarrierParticipants until the
-	 * party is whole, which is the real attach wait.
+	 * No-op: the pool threads are already running the entry and will attach to
+	 * the phase barrier. The leader's launch path polls BarrierParticipants
+	 * until the party is whole, which is the real attach wait.
 	 */
 	(void)pcxt;
 }
@@ -187,15 +172,14 @@ WaitForParallelWorkersToAttach(ParallelContext *pcxt)
 void
 WaitForParallelWorkersToFinish(ParallelContext *pcxt)
 {
-	for (int i = 0; i < pcxt->nworkers_launched; i++)
-		pthread_join(pcxt->threads[i], NULL);
+	mkt_thread_pool_join(pcxt->pool);
 }
 
 void
 DestroyParallelContext(ParallelContext *pcxt)
 {
 	/* Workers have been joined by now, so their latches are safe to free. */
-	free(pcxt->threads);
+	mkt_thread_pool_destroy(pcxt->pool);
 	free(pcxt->worker_latches);
 	free(pcxt->arena);
 	mkt_shm_toc_free(pcxt->toc);
