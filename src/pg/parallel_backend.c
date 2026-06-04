@@ -1,5 +1,5 @@
 /*
- * parallel_backend_pg.c - PostgreSQL implementations of the build's back-end
+ * parallel_backend.c - PostgreSQL implementations of the build's back-end
  * seams.
  *
  * The build driver is shared between the PG extension and the standalone
