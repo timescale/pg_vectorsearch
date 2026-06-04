@@ -584,8 +584,54 @@ extern void mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w);
  * ---------------------------------------------------------------- */
 
 struct ParallelContext;
+struct WalUsage;
+struct BufferUsage;
+struct MktannBuildParams;
 
 extern void mkt_pbuild_teardown(struct ParallelContext *pcxt);
 extern bool mkt_pbuild_launch(struct ParallelContext *pcxt, Barrier *barrier);
+
+/* ----------------------------------------------------------------
+ * Leader setup seam — back-end-specific (parallel_backend.c for PG)
+ *
+ * Leader-side runtime state: the parallel context, the shared regions, and the
+ * derived sizes. mkt_pbuild_setup_shared allocates and populates them (a DSM
+ * segment + regions in PG, a heap arena in standalone) and fills this struct;
+ * the rest of the driver consumes it. Returns false (after teardown) if the
+ * back-end could not start. The WalUsage/BufferUsage fields are PG
+ * instrumentation, unused in standalone.
+ * ---------------------------------------------------------------- */
+
+typedef struct MktPBuildLeader
+{
+	struct ParallelContext *pcxt;
+	MktBuildShared		   *shared;
+	Barrier				   *barrier;
+	MktDsmSamples		   *dsm_samples;
+	char				   *centroids_base;
+	float				   *cents;
+	char				   *km_workers_base;
+	MktDsmRootAssign	   *dsm_ra;
+	void				   *dsm_tree;
+	char				   *queues_base;
+	char				   *dsm_partials;
+	struct WalUsage		   *walusage;
+	struct BufferUsage	   *bufferusage;
+	int						nparticipants;
+	uint32_t				km_k;
+	uint32_t				max_per_worker;
+	Dimension				dim;
+	uint32_t				nlist;
+	uint64_t				rabitq_seed;
+	uint32_t				fan_out;
+	Size					max_tree_sz;
+} MktPBuildLeader;
+
+extern bool mkt_pbuild_setup_shared(
+		MktPBuildLeader				   *lead,
+		Relation						heap,
+		Relation						index,
+		const struct MktannBuildParams *params,
+		int								nworkers);
 
 #endif /* MKT_PARALLEL_BUILD_H */

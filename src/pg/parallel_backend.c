@@ -19,12 +19,16 @@
 #include <miscadmin.h>
 #include <pgstat.h>
 #include <storage/latch.h>
+#include <storage/proc.h>
 #include <tcop/tcopprot.h>
 #include <utils/rel.h>
+#include <utils/snapmgr.h>
 #include <utils/wait_event.h>
 
+#include "index/index_build.h"
 #include "mkt_pg.h"
 #include "mkt_vector.h"
+#include "mktann_build.h"
 #include "parallel_build.h"
 
 /*
@@ -196,5 +200,254 @@ mkt_pbuild_launch(ParallelContext *pcxt, Barrier *barrier)
 				WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 		ResetLatch(MyLatch);
 	}
+	return true;
+}
+
+/*
+ * Allocate and populate the parallel build's shared state: the DSM segment and
+ * its regions (shared header, barrier, sample/centroid/assignment slots, the
+ * tree blob, the per-worker page queues, usage counters). Does not launch
+ * workers; the caller does. Coarse PG block — the standalone back-end provides
+ * a same-named function over a heap arena. Returns false (after tearing the
+ * parallel context down) if the DSM segment could not be created.
+ */
+bool
+mkt_pbuild_setup_shared(
+		MktPBuildLeader			*lead,
+		Relation				 heap,
+		Relation				 index,
+		const MktannBuildParams *params,
+		int						 nworkers)
+{
+	Dimension dim			= params->dim;
+	uint32_t  nlist			= params->nlist;
+	int		  nparticipants = nworkers + 1;
+	uint64_t  rabitq_seed	= 42;
+	uint32_t  fan_out		= params->fan_out > 0 ? params->fan_out
+												  : mkt_auto_fan_out(0, nlist, 0);
+	uint32_t  km_k			= fan_out < nlist ? fan_out : nlist;
+
+	/* Compute sample budget per worker */
+	uint32_t total_samples	= Max(10000, (int)(nlist * 256));
+	uint32_t max_per_worker = (total_samples + nparticipants - 1) /
+							  nparticipants;
+
+	EnterParallelMode();
+
+	ParallelContext *pcxt = CreateParallelContext(
+			"meerkat", "mktann_parallel_build_main", nworkers);
+
+	/* Estimate DSM size for ALL phases */
+	Snapshot snapshot	= SnapshotAny;
+	Size	 est_shared = add_size(
+			BUFFERALIGN(sizeof(MktBuildShared)),
+			table_parallelscan_estimate(heap, snapshot));
+
+	shm_toc_estimate_chunk(&pcxt->estimator, est_shared);
+	shm_toc_estimate_chunk(&pcxt->estimator, sizeof(Barrier));
+	/* Sampling */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator,
+			mktann_samples_size(nparticipants, max_per_worker, dim));
+	/* K-means shared centroids + norms (root level, k=km_k) */
+	shm_toc_estimate_chunk(&pcxt->estimator, mktann_centroids_size(km_k, dim));
+	/* K-means per-worker accumulators */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator,
+			mktann_km_workers_size(nparticipants, km_k, dim));
+	/* Root assignments: per-worker uint32_t[max_per_worker] */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator,
+			mktann_root_assign_size(nparticipants, max_per_worker));
+	/* Tree blob (placeholder — allocated later by leader, but
+	 * we need the max possible size. Use a generous estimate.) */
+	Size max_tree_sz = sizeof(HKMeansResult) +
+					   (Size)nlist * 2 * sizeof(HKMeansNode) +
+					   (Size)nlist * dim * sizeof(float) * 2;
+	shm_toc_estimate_chunk(&pcxt->estimator, max_tree_sz);
+	/* Bounded streaming posting phase: per-worker shm_mq queues carry full
+	 * pages from the workers to the leader, which writes them. */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator, mktann_posting_queues_size(nparticipants));
+	/* Worker output (active flags) */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator, mktann_worker_output_size(nlist, nparticipants));
+	/* Per-worker trailing partial pages (both formats): the leader folds
+	 * them into each list's head during finalize. */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator, mktann_partials_size(nlist, nparticipants));
+
+	shm_toc_estimate_chunk(
+			&pcxt->estimator, mul_size(sizeof(WalUsage), pcxt->nworkers));
+	shm_toc_estimate_chunk(
+			&pcxt->estimator, mul_size(sizeof(BufferUsage), pcxt->nworkers));
+
+	int querylen = 0;
+	if (debug_query_string)
+	{
+		querylen = strlen(debug_query_string);
+		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
+	}
+
+	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
+	 * tree, posting_queues, worker_output, wal, buffer, partials
+	 * + optionally query_text */
+	int nkeys = 12;
+	if (debug_query_string)
+		nkeys++;
+	shm_toc_estimate_keys(&pcxt->estimator, nkeys);
+
+	InitializeParallelDSM(pcxt);
+
+	if (pcxt->seg == NULL)
+	{
+		mkt_pbuild_teardown(pcxt);
+		return false;
+	}
+
+	/* ---- Populate shared state ---- */
+	MktBuildShared *shared		   = shm_toc_allocate(pcxt->toc, est_shared);
+	shared->heaprelid			   = RelationGetRelid(heap);
+	shared->indexrelid			   = RelationGetRelid(index);
+	shared->queryid				   = pgstat_get_my_query_id();
+	shared->dim					   = dim;
+	shared->metric				   = params->metric;
+	shared->nlist				   = nlist;
+	shared->fan_out				   = params->fan_out;
+	shared->soar_lambda			   = params->soar_lambda;
+	shared->boundary_epsilon	   = params->boundary_epsilon;
+	shared->fastscan			   = params->fastscan;
+	shared->rabitq_seed			   = rabitq_seed;
+	shared->nparticipants		   = nparticipants;
+	shared->max_samples_per_worker = max_per_worker;
+	shared->km_max_iterations	   = 20;
+	shared->km_tolerance		   = 1e-4f;
+	shared->km_k				   = km_k;
+	shared->km_converged		   = false;
+	SpinLockInit(&shared->mutex);
+	ConditionVariableInit(&shared->workersdonecv);
+	shared->nparticipantsdone = 0;
+	shared->reltuples		  = 0.0;
+	shared->indtuples		  = 0.0;
+	shared->soar_dupes		  = 0.0;
+	table_parallelscan_initialize(
+			heap, ParallelTableScanFromMktShared(shared), snapshot);
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_SHARED, shared);
+
+	/*
+	 * Barrier for phase synchronization. Init with party 1 (the leader,
+	 * the only statically-known participant). Each launched worker attaches
+	 * dynamically (BarrierAttach) on startup, so the party always tracks the
+	 * number of participants that actually showed up — PostgreSQL may launch
+	 * fewer workers than planned, and a fixed planned-count party would
+	 * deadlock waiting on workers that never started.
+	 */
+	Barrier *barrier = shm_toc_allocate(pcxt->toc, sizeof(Barrier));
+	BarrierInit(barrier, 1);
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_BARRIER, barrier);
+
+	/* Sample slots */
+	Size samp_sz = mktann_samples_size(nparticipants, max_per_worker, dim);
+	MktDsmSamples *dsm_samples = shm_toc_allocate(pcxt->toc, samp_sz);
+	memset(dsm_samples, 0, samp_sz);
+	dsm_samples->nparticipants	= nparticipants;
+	dsm_samples->max_per_worker = max_per_worker;
+	dsm_samples->dim			= dim;
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_SAMPLES, dsm_samples);
+
+	/* Shared centroids + norms (root k-means, k=km_k) */
+	Size  cent_sz		 = mktann_centroids_size(km_k, dim);
+	char *centroids_base = shm_toc_allocate(pcxt->toc, cent_sz);
+	memset(centroids_base, 0, cent_sz);
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_CENTROIDS, centroids_base);
+	float *cents = mktann_centroids(centroids_base);
+
+	/* Per-worker k-means accumulators */
+	Size  km_sz			  = mktann_km_workers_size(nparticipants, km_k, dim);
+	char *km_workers_base = shm_toc_allocate(pcxt->toc, km_sz);
+	memset(km_workers_base, 0, km_sz);
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_KM_WORKERS, km_workers_base);
+
+	/* Root assignment slots */
+	Size ra_sz = mktann_root_assign_size(nparticipants, max_per_worker);
+	MktDsmRootAssign *dsm_ra = shm_toc_allocate(pcxt->toc, ra_sz);
+	memset(dsm_ra, 0, ra_sz);
+	dsm_ra->nparticipants  = nparticipants;
+	dsm_ra->max_per_worker = max_per_worker;
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_ROOT_ASSIGN, dsm_ra);
+
+	/* Tree blob — allocated now, populated after k-means */
+	void *dsm_tree = shm_toc_allocate(pcxt->toc, max_tree_sz);
+	memset(dsm_tree, 0, max_tree_sz);
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_TREE, dsm_tree);
+
+	/* Per-worker shm_mq posting-page queues. The leader is the receiver of
+	 * every queue; the launched workers attach as senders in phase 3 and
+	 * stream their full pages. Create and register the receiver here,
+	 * before launch. */
+	Size  queues_sz	  = mktann_posting_queues_size(nparticipants);
+	char *queues_base = shm_toc_allocate(pcxt->toc, queues_sz);
+	memset(queues_base, 0, queues_sz);
+	for (int i = 0; i < nparticipants; i++)
+	{
+		shm_mq *mq = shm_mq_create(
+				mktann_posting_queue(queues_base, i),
+				mktann_posting_queue_bytes());
+		shm_mq_set_receiver(mq, MyProc);
+	}
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_POSTING_QUEUES, queues_base);
+
+	/* Worker output (active flags) */
+	Size  out_sz		= mktann_worker_output_size(nlist, nparticipants);
+	char *worker_output = shm_toc_allocate(pcxt->toc, out_sz);
+	memset(worker_output, 0, out_sz);
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_WORKER_OUTPUT, worker_output);
+
+	/* Per-worker trailing partial pages (both AoS and fastscan). Each worker
+	 * holds at most one partial page per cluster here; the leader folds them
+	 * into the list's head during finalize. */
+	Size  part_sz	   = mktann_partials_size(nlist, nparticipants);
+	char *dsm_partials = shm_toc_allocate(pcxt->toc, part_sz);
+	memset(dsm_partials, 0, part_sz);
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_PARTIALS, dsm_partials);
+
+	WalUsage *walusage = shm_toc_allocate(
+			pcxt->toc, mul_size(sizeof(WalUsage), pcxt->nworkers));
+	memset(walusage, 0, mul_size(sizeof(WalUsage), pcxt->nworkers));
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_WAL_USAGE, walusage);
+
+	BufferUsage *bufferusage = shm_toc_allocate(
+			pcxt->toc, mul_size(sizeof(BufferUsage), pcxt->nworkers));
+	memset(bufferusage, 0, mul_size(sizeof(BufferUsage), pcxt->nworkers));
+	shm_toc_insert(pcxt->toc, MKTANN_KEY_BUFFER_USAGE, bufferusage);
+
+	if (debug_query_string)
+	{
+		char *sq = shm_toc_allocate(pcxt->toc, querylen + 1);
+		memcpy(sq, debug_query_string, querylen + 1);
+		shm_toc_insert(pcxt->toc, MKTANN_KEY_QUERY_TEXT, sq);
+	}
+
+	lead->pcxt			  = pcxt;
+	lead->shared		  = shared;
+	lead->barrier		  = barrier;
+	lead->dsm_samples	  = dsm_samples;
+	lead->centroids_base  = centroids_base;
+	lead->cents			  = cents;
+	lead->km_workers_base = km_workers_base;
+	lead->dsm_ra		  = dsm_ra;
+	lead->dsm_tree		  = dsm_tree;
+	lead->queues_base	  = queues_base;
+	lead->dsm_partials	  = dsm_partials;
+	lead->walusage		  = walusage;
+	lead->bufferusage	  = bufferusage;
+	lead->nparticipants	  = nparticipants;
+	lead->km_k			  = km_k;
+	lead->max_per_worker  = max_per_worker;
+	lead->dim			  = dim;
+	lead->nlist			  = nlist;
+	lead->rabitq_seed	  = rabitq_seed;
+	lead->fan_out		  = fan_out;
+	lead->max_tree_sz	  = max_tree_sz;
 	return true;
 }
