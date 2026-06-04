@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/memory.h"
 #include "core/mkt_parallel_ctx.h"
 
 #define MKT_PARALLEL_TOC_MAGIC		 UINT64_C(0x4d4b54504152) /* "MKTPAR" */
@@ -127,7 +128,18 @@ mkt_pool_worker_trampoline(uint32_t participant_id, void *arg)
 
 	ParallelWorkerNumber = worker_number;
 	mkt_latch_attach_self(&pcxt->worker_latches[worker_number]);
+
+	/*
+	 * Each worker thread needs its own current memory context — the analog of
+	 * a PG worker process's CurrentMemoryContext — for the entry's allocations
+	 * (the worker's per-phase contexts are created under it). Freed when the
+	 * worker returns.
+	 */
+	MktMemCtx wctx = mkt_memctx_create(NULL, "mkt parallel worker");
+	MktMemCtx prev = mkt_memctx_switch(wctx);
 	pcxt->worker_fn(pcxt->seg, pcxt->toc);
+	mkt_memctx_switch(prev);
+	mkt_memctx_delete(wctx);
 }
 
 void

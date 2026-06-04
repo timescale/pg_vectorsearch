@@ -28,6 +28,7 @@
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
+#include "index/parallel_build.h"
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"
 #include "index/posting_convert.h"
@@ -762,203 +763,198 @@ mkt_index_build(
 
 	double ms_sample = (double)(now_ns() - t_phase) / 1e6;
 
-	/* --- Phase: kmeans --- */
-	t_phase = now_ns();
-	mkt_memctx_switch(build_ctx);
+	/*
+	 * Paged RaBitQ builds with at least one worker run the shared parallel
+	 * build driver (sampling + k-means + bounded streaming posting) — the same
+	 * code path the PostgreSQL extension uses. Flat and serial builds keep the
+	 * in-memory path below.
+	 */
+	bool use_driver = config->encode_rabitq &&
+					  config->posting_fmt == MKT_POSTING_FMT_PAGES &&
+					  nworkers >= 1;
 
-	/* Subsample by stride into a contiguous buffer for
-	 * cache-friendly k-means iteration. */
-	uint32_t max_samples = idx->nvecs < 256000 ? idx->nvecs : 256000;
-	uint32_t stride		 = idx->nvecs / max_samples;
-	if (stride < 1)
-		stride = 1;
-	uint32_t km_nvecs = (stride > 1) ? max_samples : idx->nvecs;
+	HKMeansResult *tree		  = NULL;
+	float		  *km_vectors = NULL;
+	uint32_t	   km_nvecs	  = 0;
+	double		   ms_kmeans  = 0;
 
-	float *km_vectors;
-	if (stride > 1)
+	if (use_driver)
 	{
-		km_vectors = mkt_alloc((size_t)km_nvecs * dim * sizeof(float));
-		SampleCopyCtx sc_ctx = {
-				.src	= idx->all_vectors,
-				.dst	= km_vectors,
-				.dim	= dim,
-				.stride = stride,
-		};
-		mkt_thread_pool_parallel_for(
-				pool, km_nvecs, par_sample_copy_fn, &sc_ctx);
-	}
-	else
-	{
-		km_vectors = idx->all_vectors;
-	}
+		t_phase = now_ns();
 
-	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	if (config->km_nredo > 0)
-		km_opts.nredo = config->km_nredo;
-	if (config->km_max_iter > 0)
-		km_opts.max_iterations = config->km_max_iter;
-	km_opts.parallel_for = km_parallel_for;
-	km_opts.iterate		 = km_iterate;
-	km_opts.parallel_ctx = pool;
-	km_opts.nthreads	 = nworkers + 1;
-
-	/* Compute tree depth to decide explicit vs fallback path */
-	uint32_t nlevels = 1;
-	{
-		uint32_t n = nlist;
-		while (n > fan_out)
+		/* Upper bound on leaves (fan_out^nlevels, matching the tree the driver
+		 * builds), so posting_heads has a slot per leaf. */
+		uint32_t max_nlist = 1;
 		{
-			n = (n + fan_out - 1) / fan_out;
-			nlevels++;
+			uint32_t lv = 1, n = nlist;
+			while (n > fan_out)
+			{
+				n = (n + fan_out - 1) / fan_out;
+				lv++;
+			}
+			for (uint32_t i = 0; i < lv; i++)
+				max_nlist *= fan_out;
+			if (max_nlist < nlist)
+				max_nlist = nlist;
 		}
+
+		/*
+		 * Long-lived posting storage for the driver's streamed pages. The
+		 * driver reserves a centroid region at the front (left unwritten here
+		 * — the centroid pages go to centroid_storage below) and writes
+		 * posting pages after it, returning absolute head block numbers.
+		 */
+		uint32_t est_pages	 = idx->nvecs / 4 + max_nlist + 256;
+		idx->posting_storage = make_array_page_storage(est_pages, idx_ctx);
+		idx->posting_heads	 = mkt_alloc(max_nlist * sizeof(BlockNumber));
+
+		RelationData heap_rel = {
+				.vectors = idx->all_vectors,
+				.nvecs	 = idx->nvecs,
+				.dim	 = dim,
+		};
+		RelationData index_rel = {
+				.page_count = &idx->posting_storage.next_blkno,
+		};
+		IndexInfo	   index_info = {.ii_ParallelWorkers = (int)nworkers};
+		MktBuildConfig cfg		  = {
+					   .dim				= dim,
+					   .metric			= config->metric,
+					   .centroid_format = idx->base.centroid_format,
+				   /* The tree expands to up to fan_out^nlevels leaves; size the
+					* shared regions for that bound (matches the PG caller). */
+					   .nlist			 = max_nlist,
+					   .fan_out			 = fan_out,
+					   .soar_lambda		 = config->soar_lambda,
+					   .boundary_epsilon = config->boundary_epsilon,
+					   .fastscan		 = config->fastscan != 0,
+		   };
+
+		double heap_tuples = 0, indtuples = 0, soar_dupes = 0;
+
+		/* Build temporaries (samples, accumulators, the tree) live in
+		 * build_ctx and are freed after the build; page growth uses the
+		 * storage's own (idx_ctx) context, so the index pages outlive it. */
+		mkt_memctx_switch(build_ctx);
+		bool ok = do_parallel_build(
+				&heap_rel,
+				&index_rel,
+				&index_info,
+				&cfg,
+				&idx->posting_storage.base,
+				&tree,
+				idx->posting_heads,
+				&heap_tuples,
+				&indtuples,
+				&soar_dupes);
+		mkt_memctx_switch(idx_ctx);
+
+		if (!ok)
+			use_driver = false; /* fall through to the in-memory path */
+
+		ms_kmeans = (double)(now_ns() - t_phase) / 1e6;
 	}
 
-	uint32_t	   km_k		= fan_out < nlist ? fan_out : nlist;
-	HKMeansResult *tree		= NULL;
-	uint32_t	   nthreads = nworkers + 1;
-
-	if (nlevels == 2)
+	if (!use_driver)
 	{
-		/*
-		 * Explicit root + child k-means using the shared
-		 * kernels (kmeans_assign_accumulate + merge). This
-		 * matches PG's parallel build path.
-		 */
+		/* --- Phase: kmeans --- */
+		t_phase = now_ns();
+		mkt_memctx_switch(build_ctx);
 
-		/* --- Root k-means --- */
-		float *centroids = mkt_alloc((size_t)km_k * dim * sizeof(float));
-		float *norms_c	 = mkt_alloc(km_k * sizeof(float));
+		/* Subsample by stride into a contiguous buffer for
+		 * cache-friendly k-means iteration. */
+		uint32_t max_samples = idx->nvecs < 256000 ? idx->nvecs : 256000;
+		uint32_t stride		 = idx->nvecs / max_samples;
+		if (stride < 1)
+			stride = 1;
+		km_nvecs = (stride > 1) ? max_samples : idx->nvecs;
 
-		/* Initial centroids: first km_k samples */
-		uint32_t init_k = km_k < km_nvecs ? km_k : km_nvecs;
-		memcpy(centroids, km_vectors, (size_t)init_k * dim * sizeof(float));
-
-		if (idx->base.metric == DISTANCE_L2)
-			for (uint32_t c = 0; c < init_k; c++)
-				norms_c[c] =
-						mkt_l2_norm_squared(centroids + (size_t)c * dim, dim);
-
-		float *old_cents = mkt_alloc((size_t)km_k * dim * sizeof(float));
-		float *sums		 = mkt_alloc0(
-				 (size_t)nthreads * km_k * dim * sizeof(float));
-		uint32_t *cnts = mkt_alloc0(
-				(size_t)nthreads * km_k * sizeof(uint32_t));
-		float *costs = mkt_alloc0(nthreads * sizeof(float));
-
-		KmIterCtx root_ctx = {
-				.samples	= km_vectors,
-				.centroids	= centroids,
-				.norms_c	= norms_c,
-				.k			= km_k,
-				.dim		= dim,
-				.metric		= idx->base.metric,
-				.nthreads	= nthreads,
-				.tolerance	= km_opts.tolerance,
-				.sums		= sums,
-				.cnts		= cnts,
-				.costs		= costs,
-				.old_cents	= old_cents,
-				.filter		= NULL,
-				.filter_val = 0,
-		};
-
-		mkt_thread_pool_iterate(
-				pool,
-				km_nvecs,
-				km_iter_work,
-				(MktReduceFn)km_iter_reduce,
-				&root_ctx,
-				km_opts.max_iterations);
-
-		/* --- Root assignment --- */
-		uint32_t *root_asgn = mkt_alloc(km_nvecs * sizeof(uint32_t));
-
-		RootAssignCtx ra_ctx = {
-				.samples	 = km_vectors,
-				.centroids	 = centroids,
-				.norms_c	 = norms_c,
-				.k			 = km_k,
-				.dim		 = dim,
-				.metric		 = idx->base.metric,
-				.assignments = root_asgn,
-		};
-		mkt_thread_pool_parallel_for(
-				pool, km_nvecs, par_root_assign_fn, &ra_ctx);
-
-		/* Save root centroids before reusing buffers */
-		float *root_cents = mkt_alloc((size_t)km_k * dim * sizeof(float));
-		memcpy(root_cents, centroids, (size_t)km_k * dim * sizeof(float));
-
-		/* --- Child k-means --- */
-		float	**child_centroids = mkt_alloc(km_k * sizeof(float *));
-		uint32_t *child_ks		  = mkt_alloc(km_k * sizeof(uint32_t));
-
-		for (uint32_t child = 0; child < km_k; child++)
+		if (stride > 1)
 		{
-			/* Count samples for this child */
-			uint32_t child_count = 0;
-			for (uint32_t i = 0; i < km_nvecs; i++)
-				if (root_asgn[i] == child)
-					child_count++;
+			km_vectors = mkt_alloc((size_t)km_nvecs * dim * sizeof(float));
+			SampleCopyCtx sc_ctx = {
+					.src	= idx->all_vectors,
+					.dst	= km_vectors,
+					.dim	= dim,
+					.stride = stride,
+			};
+			mkt_thread_pool_parallel_for(
+					pool, km_nvecs, par_sample_copy_fn, &sc_ctx);
+		}
+		else
+		{
+			km_vectors = idx->all_vectors;
+		}
 
-			uint32_t child_k = fan_out < child_count ? fan_out : child_count;
-			if (child_k < 1)
-				child_k = 1;
-			child_ks[child] = child_k;
+		KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
+		if (config->km_nredo > 0)
+			km_opts.nredo = config->km_nredo;
+		if (config->km_max_iter > 0)
+			km_opts.max_iterations = config->km_max_iter;
+		km_opts.parallel_for = km_parallel_for;
+		km_opts.iterate		 = km_iterate;
+		km_opts.parallel_ctx = pool;
+		km_opts.nthreads	 = nworkers + 1;
 
-			if (child_k <= 1)
+		/* Compute tree depth to decide explicit vs fallback path */
+		uint32_t nlevels = 1;
+		{
+			uint32_t n = nlist;
+			while (n > fan_out)
 			{
-				child_centroids[child] = mkt_alloc(dim * sizeof(float));
-				memcpy(child_centroids[child],
-					   root_cents + (size_t)child * dim,
-					   dim * sizeof(float));
-				continue;
+				n = (n + fan_out - 1) / fan_out;
+				nlevels++;
 			}
+		}
 
-			/* Pick initial child centroids: first child_k
-			 * samples assigned to this child */
-			float *child_cents = mkt_alloc(
-					(size_t)child_k * dim * sizeof(float));
-			uint32_t picked = 0;
-			for (uint32_t i = 0; i < km_nvecs && picked < child_k; i++)
-			{
-				if (root_asgn[i] != child)
-					continue;
-				memcpy(child_cents + (size_t)picked * dim,
-					   km_vectors + (size_t)i * dim,
-					   dim * sizeof(float));
-				picked++;
-			}
+		uint32_t km_k	  = fan_out < nlist ? fan_out : nlist;
+		uint32_t nthreads = nworkers + 1;
 
-			float *child_norms = mkt_alloc(child_k * sizeof(float));
+		if (nlevels == 2)
+		{
+			/*
+			 * Explicit root + child k-means using the shared
+			 * kernels (kmeans_assign_accumulate + merge). This
+			 * matches PG's parallel build path.
+			 */
+
+			/* --- Root k-means --- */
+			float *centroids = mkt_alloc((size_t)km_k * dim * sizeof(float));
+			float *norms_c	 = mkt_alloc(km_k * sizeof(float));
+
+			/* Initial centroids: first km_k samples */
+			uint32_t init_k = km_k < km_nvecs ? km_k : km_nvecs;
+			memcpy(centroids,
+				   km_vectors,
+				   (size_t)init_k * dim * sizeof(float));
+
 			if (idx->base.metric == DISTANCE_L2)
-				for (uint32_t c = 0; c < child_k; c++)
-					child_norms[c] = mkt_l2_norm_squared(
-							child_cents + (size_t)c * dim, dim);
+				for (uint32_t c = 0; c < init_k; c++)
+					norms_c[c] = mkt_l2_norm_squared(
+							centroids + (size_t)c * dim, dim);
 
-			/* Reuse accumulator buffers (child_k <= km_k) */
-			float *ch_old  = mkt_alloc((size_t)child_k * dim * sizeof(float));
-			float *ch_sums = mkt_alloc0(
-					(size_t)nthreads * child_k * dim * sizeof(float));
-			uint32_t *ch_cnts = mkt_alloc0(
-					(size_t)nthreads * child_k * sizeof(uint32_t));
-			float *ch_costs = mkt_alloc0(nthreads * sizeof(float));
+			float *old_cents = mkt_alloc((size_t)km_k * dim * sizeof(float));
+			float *sums		 = mkt_alloc0(
+					 (size_t)nthreads * km_k * dim * sizeof(float));
+			uint32_t *cnts = mkt_alloc0(
+					(size_t)nthreads * km_k * sizeof(uint32_t));
+			float *costs = mkt_alloc0(nthreads * sizeof(float));
 
-			KmIterCtx child_ctx = {
+			KmIterCtx root_ctx = {
 					.samples	= km_vectors,
-					.centroids	= child_cents,
-					.norms_c	= child_norms,
-					.k			= child_k,
+					.centroids	= centroids,
+					.norms_c	= norms_c,
+					.k			= km_k,
 					.dim		= dim,
 					.metric		= idx->base.metric,
 					.nthreads	= nthreads,
 					.tolerance	= km_opts.tolerance,
-					.sums		= ch_sums,
-					.cnts		= ch_cnts,
-					.costs		= ch_costs,
-					.old_cents	= ch_old,
-					.filter		= root_asgn,
-					.filter_val = child,
+					.sums		= sums,
+					.cnts		= cnts,
+					.costs		= costs,
+					.old_cents	= old_cents,
+					.filter		= NULL,
+					.filter_val = 0,
 			};
 
 			mkt_thread_pool_iterate(
@@ -966,40 +962,143 @@ mkt_index_build(
 					km_nvecs,
 					km_iter_work,
 					(MktReduceFn)km_iter_reduce,
-					&child_ctx,
+					&root_ctx,
 					km_opts.max_iterations);
 
-			child_centroids[child] = mkt_alloc(
-					(size_t)child_k * dim * sizeof(float));
-			memcpy(child_centroids[child],
-				   child_cents,
-				   (size_t)child_k * dim * sizeof(float));
+			/* --- Root assignment --- */
+			uint32_t *root_asgn = mkt_alloc(km_nvecs * sizeof(uint32_t));
+
+			RootAssignCtx ra_ctx = {
+					.samples	 = km_vectors,
+					.centroids	 = centroids,
+					.norms_c	 = norms_c,
+					.k			 = km_k,
+					.dim		 = dim,
+					.metric		 = idx->base.metric,
+					.assignments = root_asgn,
+			};
+			mkt_thread_pool_parallel_for(
+					pool, km_nvecs, par_root_assign_fn, &ra_ctx);
+
+			/* Save root centroids before reusing buffers */
+			float *root_cents = mkt_alloc((size_t)km_k * dim * sizeof(float));
+			memcpy(root_cents, centroids, (size_t)km_k * dim * sizeof(float));
+
+			/* --- Child k-means --- */
+			float	**child_centroids = mkt_alloc(km_k * sizeof(float *));
+			uint32_t *child_ks		  = mkt_alloc(km_k * sizeof(uint32_t));
+
+			for (uint32_t child = 0; child < km_k; child++)
+			{
+				/* Count samples for this child */
+				uint32_t child_count = 0;
+				for (uint32_t i = 0; i < km_nvecs; i++)
+					if (root_asgn[i] == child)
+						child_count++;
+
+				uint32_t child_k = fan_out < child_count ? fan_out
+														 : child_count;
+				if (child_k < 1)
+					child_k = 1;
+				child_ks[child] = child_k;
+
+				if (child_k <= 1)
+				{
+					child_centroids[child] = mkt_alloc(dim * sizeof(float));
+					memcpy(child_centroids[child],
+						   root_cents + (size_t)child * dim,
+						   dim * sizeof(float));
+					continue;
+				}
+
+				/* Pick initial child centroids: first child_k
+				 * samples assigned to this child */
+				float *child_cents = mkt_alloc(
+						(size_t)child_k * dim * sizeof(float));
+				uint32_t picked = 0;
+				for (uint32_t i = 0; i < km_nvecs && picked < child_k; i++)
+				{
+					if (root_asgn[i] != child)
+						continue;
+					memcpy(child_cents + (size_t)picked * dim,
+						   km_vectors + (size_t)i * dim,
+						   dim * sizeof(float));
+					picked++;
+				}
+
+				float *child_norms = mkt_alloc(child_k * sizeof(float));
+				if (idx->base.metric == DISTANCE_L2)
+					for (uint32_t c = 0; c < child_k; c++)
+						child_norms[c] = mkt_l2_norm_squared(
+								child_cents + (size_t)c * dim, dim);
+
+				/* Reuse accumulator buffers (child_k <= km_k) */
+				float *ch_old = mkt_alloc(
+						(size_t)child_k * dim * sizeof(float));
+				float *ch_sums = mkt_alloc0(
+						(size_t)nthreads * child_k * dim * sizeof(float));
+				uint32_t *ch_cnts = mkt_alloc0(
+						(size_t)nthreads * child_k * sizeof(uint32_t));
+				float *ch_costs = mkt_alloc0(nthreads * sizeof(float));
+
+				KmIterCtx child_ctx = {
+						.samples	= km_vectors,
+						.centroids	= child_cents,
+						.norms_c	= child_norms,
+						.k			= child_k,
+						.dim		= dim,
+						.metric		= idx->base.metric,
+						.nthreads	= nthreads,
+						.tolerance	= km_opts.tolerance,
+						.sums		= ch_sums,
+						.cnts		= ch_cnts,
+						.costs		= ch_costs,
+						.old_cents	= ch_old,
+						.filter		= root_asgn,
+						.filter_val = child,
+				};
+
+				mkt_thread_pool_iterate(
+						pool,
+						km_nvecs,
+						km_iter_work,
+						(MktReduceFn)km_iter_reduce,
+						&child_ctx,
+						km_opts.max_iterations);
+
+				child_centroids[child] = mkt_alloc(
+						(size_t)child_k * dim * sizeof(float));
+				memcpy(child_centroids[child],
+					   child_cents,
+					   (size_t)child_k * dim * sizeof(float));
+			}
+
+			tree = mkt_hkmeans_build_two_level(
+					root_cents,
+					km_k,
+					(const float **)child_centroids,
+					child_ks,
+					dim);
+		}
+		else
+		{
+			/* nlevels != 2: fall back to mkt_hkmeans_f32 */
+			tree = mkt_hkmeans_f32(
+					km_vectors,
+					km_nvecs,
+					NULL,
+					dim,
+					nlist,
+					fan_out,
+					idx->base.metric,
+					&km_opts);
 		}
 
-		tree = mkt_hkmeans_build_two_level(
-				root_cents,
-				km_k,
-				(const float **)child_centroids,
-				child_ks,
-				dim);
-	}
-	else
-	{
-		/* nlevels != 2: fall back to mkt_hkmeans_f32 */
-		tree = mkt_hkmeans_f32(
-				km_vectors,
-				km_nvecs,
-				NULL,
-				dim,
-				nlist,
-				fan_out,
-				idx->base.metric,
-				&km_opts);
-	}
+		ms_kmeans = (double)(now_ns() - t_phase) / 1e6;
+	} /* end !use_driver: in-memory sampling + k-means */
 
 	/* --- Phase: setup --- */
-	double ms_kmeans = (double)(now_ns() - t_phase) / 1e6;
-	t_phase			 = now_ns();
+	t_phase = now_ns();
 
 	mkt_memctx_switch(idx_ctx);
 
@@ -1097,7 +1196,12 @@ mkt_index_build(
 	{
 		idx->posting_fmt = config->posting_fmt;
 
-		if (config->posting_fmt == MKT_POSTING_FMT_PAGES)
+		if (use_driver)
+		{
+			/* do_parallel_build already streamed the posting pages into
+			 * posting_storage and filled posting_heads. */
+		}
+		else if (config->posting_fmt == MKT_POSTING_FMT_PAGES)
 		{
 			/*
 			 * Per-cluster page estimate: assign the k-means sample set to

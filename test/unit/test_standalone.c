@@ -286,6 +286,62 @@ TEST(query_exec_recall)
 	mkt_index_destroy(idx);
 }
 
+/*
+ * Paged + parallel build runs the shared do_parallel_build driver (the same
+ * code path as the PG extension). Build, query, and check recall to confirm
+ * the driver produces a correct, queryable index in the standalone back-end.
+ */
+TEST(query_exec_recall_pages_parallel)
+{
+	uint32_t dim = 32, nvecs = 2000, k = 10;
+	float	*vecs = make_vectors(nvecs, dim, 42);
+
+	MktIndexConfig config = {
+			.nlist		   = 20,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = MKT_POSTING_FMT_PAGES,
+			.nworkers	   = 4, /* force the parallel driver */
+	};
+
+	MktIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "paged parallel build should succeed");
+
+	MktQueryCtx *qctx = mkt_query_ctx_create(idx, k, 20);
+
+	uint32_t total_hits = 0;
+	uint32_t nqueries	= 10;
+	for (uint32_t q = 0; q < nqueries; q++)
+	{
+		const float *query = vecs + (size_t)(q * 100) * dim;
+
+		uint32_t result_ids[10];
+		uint32_t count = mkt_query_exec(
+				qctx,
+				query,
+				k,
+				20,
+				MKT_DISTANCE_MODE_ASYMMETRIC,
+				true,
+				result_ids);
+
+		uint32_t gt_ids[10];
+		brute_force_knn(vecs, nvecs, dim, query, k, gt_ids);
+
+		for (uint32_t i = 0; i < count; i++)
+			for (uint32_t g = 0; g < k; g++)
+				if (result_ids[i] == gt_ids[g])
+					total_hits++;
+	}
+
+	double recall = (double)total_hits / (nqueries * k);
+	ASSERT_TRUE(recall > 0.2, "paged parallel recall should be > 0.2");
+
+	mkt_query_ctx_destroy(qctx);
+	mkt_index_destroy(idx);
+}
+
 TEST(query_exec_null_fails)
 {
 	uint32_t ids[10];
