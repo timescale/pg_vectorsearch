@@ -29,8 +29,9 @@
 #include "core/memory.h"
 #include "core/mkt_barrier.h" /* Barrier (PG's, or the pthread shim) */
 #include "core/mkt_build_scan.h"
-#include "core/mkt_shm_mq.h"  /* shm_mq (PG's, or the thread-queue shim) */
-#include "core/mkt_shm_toc.h" /* shm_toc (PG's, or the heap-arena shim) */
+#include "core/mkt_shm_mq.h"	 /* shm_mq (PG's, or the thread-queue shim) */
+#include "core/mkt_shm_toc.h"	 /* shm_toc (PG's, or the heap-arena shim) */
+#include "index/centroid_page.h" /* MktCentroidFormat */
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"
 #include "mkt_types.h"
@@ -75,15 +76,16 @@ struct IndexInfo;
 typedef struct MktBuildShared
 {
 	/* Immutable — set by the leader before launch */
-	Dimension	   dim;
-	DistanceMetric metric;
-	uint32_t	   nlist;
-	uint32_t	   fan_out;
-	double		   soar_lambda;
-	double		   boundary_epsilon;
-	bool		   fastscan;
-	uint64_t	   rabitq_seed;
-	int			   nparticipants;
+	Dimension		  dim;
+	DistanceMetric	  metric;
+	uint32_t		  nlist;
+	uint32_t		  fan_out;
+	double			  soar_lambda;
+	double			  boundary_epsilon;
+	bool			  fastscan;
+	MktCentroidFormat centroid_format;
+	uint64_t		  rabitq_seed;
+	int				  nparticipants;
 
 	/* K-means config */
 	uint32_t max_samples_per_worker;

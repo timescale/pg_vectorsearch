@@ -60,7 +60,7 @@ bool do_parallel_build(
 		Relation				 index,
 		struct IndexInfo		*index_info,
 		const MktannBuildParams *params,
-		MktannStorage			*storage,
+		MktStorage				*storage,
 		HKMeansResult		   **out_tree,
 		BlockNumber				*posting_heads,
 		double					*out_heap_tuples,

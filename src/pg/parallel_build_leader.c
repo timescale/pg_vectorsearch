@@ -57,7 +57,7 @@ do_parallel_build(
 		Relation				 index,
 		struct IndexInfo		*index_info,
 		const MktannBuildParams *params,
-		MktannStorage			*storage,
+		MktStorage				*storage,
 		HKMeansResult		   **out_tree,
 		BlockNumber				*posting_heads,
 		double					*out_heap_tuples,
@@ -660,20 +660,20 @@ do_parallel_build(
 				pt_centroids + (size_t)c * dim);
 
 	/* Block 0 = metadata page. Extend 1 page so block 0 exists. */
-	mkt_storage_extend(&storage->base, 1);
+	mkt_storage_extend(storage, 1);
 
 	/* Compute exact centroid page layout from the real tree,
 	 * then extend for centroid + posting pages. Same layout
 	 * logic as the serial path. */
 	uint32_t cent_max_ent =
-			mkt_centroid_max_entries_fmt(dim, params->centroid_format);
+			mkt_centroid_max_entries_fmt(dim, shared->centroid_format);
 	BlockNumber *node_first_blkno = mkt_alloc(
 			tree->nnodes * sizeof(BlockNumber));
 	BlockNumber first_centroid = 1;
 	BlockNumber first_posting  = mkt_compute_centroid_layout(
 			 tree, cent_max_ent, first_centroid, node_first_blkno);
 	uint32_t n_centroid_pages = first_posting - first_centroid;
-	mkt_storage_extend(&storage->base, n_centroid_pages);
+	mkt_storage_extend(storage, n_centroid_pages);
 
 	instr_time t_km_end;
 	INSTR_TIME_SET_CURRENT(t_km_end);
@@ -724,13 +724,13 @@ do_parallel_build(
 		{
 			Distance d;
 			cluster_counts[mkt_hkmeans_assign(
-					tree_r, sw + (size_t)i * dim, params->metric, &d)]++;
+					tree_r, sw + (size_t)i * dim, shared->metric, &d)]++;
 		}
 	}
 	/* Extrapolate per-cluster sample counts to the full table; the reserve
 	 * estimator applies the format + replication headroom. */
-	bool replicate = params->soar_lambda > 0.0 ||
-					 params->boundary_epsilon > 0.0;
+	bool replicate = shared->soar_lambda > 0.0 ||
+					 shared->boundary_epsilon > 0.0;
 	{
 		double est_rows = RelationGetNumberOfBlocks(heap) *
 						  (BLCKSZ / (double)(dim * sizeof(float) + 32));
@@ -748,7 +748,7 @@ do_parallel_build(
 			nlist,
 			nparticipants,
 			dim,
-			params->fastscan,
+			shared->fastscan,
 			replicate);
 	mkt_free(cluster_counts);
 
@@ -757,7 +757,7 @@ do_parallel_build(
 	 * around the ExtendBufferedRelBy pin limit). A cluster that outgrows its
 	 * (over-)reservation overflows via on-demand new_page during the drain, so
 	 * there is no separate spill region to pre-extend. */
-	mkt_storage_extend(&storage->base, reserve.total);
+	mkt_storage_extend(storage, reserve.total);
 
 	/* Attach as receiver to each launched worker's queue. */
 	int				nq = pcxt->nworkers_launched;
@@ -811,7 +811,7 @@ do_parallel_build(
 				{
 					/* Within the cluster's reserved (over-estimated) range. */
 					blk = first_posting + reserve.starts[c] + off;
-					dst = mkt_storage_write_page(&storage->base, blk);
+					dst = mkt_storage_write_page(storage, blk);
 				}
 				else
 				{
@@ -819,10 +819,10 @@ do_parallel_build(
 					 * page lands at the end of the relation (non-sequential
 					 * for this list, but rare) and is linked in by block
 					 * number below. */
-					dst = mkt_storage_new_page(&storage->base, &blk);
+					dst = mkt_storage_new_page(storage, &blk);
 				}
 				memcpy(dst, src, BLCKSZ);
-				mkt_storage_commit_page(&storage->base, blk);
+				mkt_storage_commit_page(storage, blk);
 
 				/* Link into this cluster's continuation chain using actual
 				 * block numbers. The previous page's next_blkno is fixed up
@@ -834,10 +834,9 @@ do_parallel_build(
 				}
 				else
 				{
-					Page prev = mkt_storage_write_page(
-							&storage->base, cont_last[c]);
+					Page prev = mkt_storage_write_page(storage, cont_last[c]);
 					mkt_posting_opaque(prev)->next_blkno = blk;
-					mkt_storage_commit_page(&storage->base, cont_last[c]);
+					mkt_storage_commit_page(storage, cont_last[c]);
 				}
 				cont_last[c] = blk;
 				progressed	 = true;
@@ -889,7 +888,7 @@ do_parallel_build(
 	 * spill), then splice the chain head -> continuations -> overflow.
 	 */
 	uint32_t packed_bytes = (dim + 7) / 8;
-	uint8_t *unpack_buf	  = params->fastscan
+	uint8_t *unpack_buf	  = shared->fastscan
 								  ? mkt_alloc(MKT_FASTSCAN_GROUP * packed_bytes)
 								  : NULL;
 	for (uint32_t c = 0; c < nlist; c++)
@@ -901,10 +900,10 @@ do_parallel_build(
 		mkt_atomic_init_u32(&reserve.nexts[c], cl_used[c] + 1);
 
 		MktPostingBuilder hb;
-		if (params->fastscan)
+		if (shared->fastscan)
 			mkt_posting_builder_init_fastscan(
 					&hb,
-					&storage->base,
+					storage,
 					rq_params,
 					dim,
 					c,
@@ -913,7 +912,7 @@ do_parallel_build(
 		else
 			mkt_posting_builder_init(
 					&hb,
-					&storage->base,
+					storage,
 					rq_params,
 					dim,
 					c,
@@ -943,7 +942,7 @@ do_parallel_build(
 			char	*ct	 = mkt_posting_content(pg);
 			uint32_t cnt = op->entry_count;
 
-			if (params->fastscan)
+			if (shared->fastscan)
 			{
 				uint32_t ngroups = (cnt + MKT_FASTSCAN_GROUP - 1) /
 								   MKT_FASTSCAN_GROUP;
@@ -999,14 +998,14 @@ do_parallel_build(
 		 * or InvalidBlockNumber when the head didn't overflow). */
 		if (cont_first[c] != InvalidBlockNumber)
 		{
-			Page		hp	= mkt_storage_write_page(&storage->base, head_blk);
+			Page		hp	= mkt_storage_write_page(storage, head_blk);
 			BlockNumber ov1 = mkt_posting_opaque(hp)->next_blkno;
 			mkt_posting_opaque(hp)->next_blkno = cont_first[c];
-			mkt_storage_commit_page(&storage->base, head_blk);
+			mkt_storage_commit_page(storage, head_blk);
 
-			Page lp = mkt_storage_write_page(&storage->base, cont_last[c]);
+			Page lp = mkt_storage_write_page(storage, cont_last[c]);
 			mkt_posting_opaque(lp)->next_blkno = ov1;
-			mkt_storage_commit_page(&storage->base, cont_last[c]);
+			mkt_storage_commit_page(storage, cont_last[c]);
 		}
 
 		posting_heads[c] = head_blk;

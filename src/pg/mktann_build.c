@@ -562,7 +562,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				index,
 				index_info,
 				&bs.params,
-				&storage,
+				&storage.base,
 				&tree,
 				posting_heads,
 				&heap_tuples,

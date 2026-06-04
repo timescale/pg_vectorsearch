@@ -342,6 +342,7 @@ mkt_pbuild_setup_shared(
 	shared->soar_lambda			   = params->soar_lambda;
 	shared->boundary_epsilon	   = params->boundary_epsilon;
 	shared->fastscan			   = params->fastscan;
+	shared->centroid_format		   = params->centroid_format;
 	shared->rabitq_seed			   = rabitq_seed;
 	shared->nparticipants		   = nparticipants;
 	shared->max_samples_per_worker = max_per_worker;
