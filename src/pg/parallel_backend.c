@@ -325,11 +325,9 @@ mkt_pbuild_setup_shared(
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
 	SpinLockInit(&shared->mutex);
-	ConditionVariableInit(&shared->workersdonecv);
-	shared->nparticipantsdone = 0;
-	shared->reltuples		  = 0.0;
-	shared->indtuples		  = 0.0;
-	shared->soar_dupes		  = 0.0;
+	shared->reltuples  = 0.0;
+	shared->indtuples  = 0.0;
+	shared->soar_dupes = 0.0;
 	table_parallelscan_initialize(
 			heap, ParallelTableScanFromMktShared(shared), snapshot);
 	shm_toc_insert(pcxt->toc, MKTANN_KEY_SHARED, shared);

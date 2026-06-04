@@ -17,10 +17,8 @@
 
 #include <postgres.h>
 
-#include <port/atomics.h>
 #include <storage/barrier.h>
 #include <storage/block.h>
-#include <storage/condition_variable.h>
 #include <storage/itemptr.h>
 #include <storage/shm_mq.h>
 #include <storage/shm_toc.h>
@@ -88,12 +86,10 @@ typedef struct MktBuildShared
 	uint32_t km_k; /* root k-means k (= fan_out) */
 
 	/* Mutable — spinlock-protected */
-	slock_t			  mutex;
-	ConditionVariable workersdonecv;
-	int				  nparticipantsdone;
-	double			  reltuples;
-	double			  indtuples;
-	double			  soar_dupes;
+	slock_t mutex;
+	double	reltuples;
+	double	indtuples;
+	double	soar_dupes;
 
 	/* K-means convergence — set by leader between barriers */
 	bool km_converged;
