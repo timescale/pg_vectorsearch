@@ -174,5 +174,8 @@ typedef struct RelationData *Relation;
 #define BUFFERALIGN(len) MAXALIGN(len)
 #define UINT64CONST(x)	 (x##ULL)
 
+/* PG checks for query cancellation in long loops; nothing to do standalone. */
+#define CHECK_FOR_INTERRUPTS() ((void)0)
+
 #endif /* MKT_STANDALONE */
 #endif /* MKT_PG_COMPAT_H */

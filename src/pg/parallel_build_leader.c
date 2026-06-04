@@ -35,6 +35,7 @@
 #include "algo/vecops.h"
 #include "core/log.h"
 #include "core/memory.h"
+#include "core/mkt_instr_time.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
