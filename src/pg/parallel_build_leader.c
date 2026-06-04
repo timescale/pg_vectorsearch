@@ -49,59 +49,6 @@
 #include "quant/fastscan.h"
 
 /*
- * Tear the parallel context down and leave parallel mode. Coarse back-end
- * seam: the standalone build provides a same-named function that joins its
- * worker threads and frees the shared arena instead.
- */
-static void
-mkt_pbuild_teardown(ParallelContext *pcxt)
-{
-	DestroyParallelContext(pcxt);
-	ExitParallelMode();
-}
-
-/*
- * Launch the worker participants and wait until they have all attached to the
- * barrier (so the dynamic party reaches launched+1 before the leader advances
- * the first phase). Returns false — after tearing the context down — if no
- * workers started, so the caller falls back to a serial build. This is a
- * coarse back-end seam: a standalone build provides a same-named function that
- * spawns threads and joins them at the barrier instead.
- */
-static bool
-mkt_pbuild_launch(ParallelContext *pcxt, Barrier *barrier)
-{
-	LaunchParallelWorkers(pcxt);
-
-	if (pcxt->nworkers_launched == 0)
-	{
-		WaitForParallelWorkersToFinish(pcxt);
-		mkt_pbuild_teardown(pcxt);
-		return false;
-	}
-
-	/*
-	 * Workers attach to the barrier dynamically, so the party (1 leader + N
-	 * launched) is not final until they all have; if the leader arrived first
-	 * it could advance the phase alone and strand late workers.
-	 * WaitForParallelWorkersToAttach surfaces a startup failure as an error
-	 * rather than a hang; then poll until the live participant count is whole.
-	 */
-	WaitForParallelWorkersToAttach(pcxt);
-	while (BarrierParticipants(barrier) < pcxt->nworkers_launched + 1)
-	{
-		CHECK_FOR_INTERRUPTS();
-		(void)WaitLatch(
-				MyLatch,
-				WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-				1L,
-				WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-		ResetLatch(MyLatch);
-	}
-	return true;
-}
-
-/*
  * Leader-side runtime state for the parallel build: the parallel context, the
  * shared DSM regions, and the derived sizes. Produced by
  * mkt_pbuild_setup_shared and consumed by the rest of the driver. (A coarse

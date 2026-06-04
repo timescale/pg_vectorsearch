@@ -573,4 +573,19 @@ typedef struct MktPBuildWorker
 extern void mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w);
 extern void mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w);
 
+/* ----------------------------------------------------------------
+ * Leader launch/teardown seam — back-end-specific (parallel_backend.c for PG)
+ *
+ * mkt_pbuild_launch starts the workers and blocks until the whole party has
+ * attached to the phase barrier (returning false, after teardown, if none
+ * started). mkt_pbuild_teardown frees the parallel context. The standalone
+ * versions spawn/join threads and free the shared arena. (struct
+ * ParallelContext is PostgreSQL's; standalone provides its own definition.)
+ * ---------------------------------------------------------------- */
+
+struct ParallelContext;
+
+extern void mkt_pbuild_teardown(struct ParallelContext *pcxt);
+extern bool mkt_pbuild_launch(struct ParallelContext *pcxt, Barrier *barrier);
+
 #endif /* MKT_PARALLEL_BUILD_H */

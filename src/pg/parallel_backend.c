@@ -5,8 +5,9 @@
  * The build driver is shared between the PG extension and the standalone
  * engine; the parts that genuinely differ by back-end are expressed as
  * same-named seam functions, with the PG versions here and the thread-based
- * versions under src/standalone. This file currently holds the heap-scan seam;
- * the DSM/launch/teardown seams join it as the driver moves to shared code.
+ * versions under src/standalone. It currently holds the heap-scan, worker
+ * attach/detach, and launch/teardown seams; the DSM setup seam joins them as
+ * the driver moves to shared code.
  */
 
 #include <postgres.h>
@@ -15,9 +16,12 @@
 #include <access/table.h>
 #include <access/tableam.h>
 #include <catalog/index.h>
+#include <miscadmin.h>
 #include <pgstat.h>
+#include <storage/latch.h>
 #include <tcop/tcopprot.h>
 #include <utils/rel.h>
+#include <utils/wait_event.h>
 
 #include "mkt_pg.h"
 #include "mkt_vector.h"
@@ -140,4 +144,57 @@ mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
 
 	index_close(w->indexRel, AccessExclusiveLock);
 	table_close(w->heapRel, ShareLock);
+}
+
+/*
+ * Tear the parallel context down and leave parallel mode. The standalone
+ * back-end provides a same-named function that joins its worker threads and
+ * frees the shared arena instead.
+ */
+void
+mkt_pbuild_teardown(ParallelContext *pcxt)
+{
+	DestroyParallelContext(pcxt);
+	ExitParallelMode();
+}
+
+/*
+ * Launch the worker participants and wait until they have all attached to the
+ * barrier (so the dynamic party reaches launched+1 before the leader advances
+ * the first phase). Returns false — after tearing the context down — if no
+ * workers started, so the caller falls back to a serial build. The standalone
+ * back-end provides a same-named function that spawns threads and joins them
+ * at the barrier instead.
+ */
+bool
+mkt_pbuild_launch(ParallelContext *pcxt, Barrier *barrier)
+{
+	LaunchParallelWorkers(pcxt);
+
+	if (pcxt->nworkers_launched == 0)
+	{
+		WaitForParallelWorkersToFinish(pcxt);
+		mkt_pbuild_teardown(pcxt);
+		return false;
+	}
+
+	/*
+	 * Workers attach to the barrier dynamically, so the party (1 leader + N
+	 * launched) is not final until they all have; if the leader arrived first
+	 * it could advance the phase alone and strand late workers.
+	 * WaitForParallelWorkersToAttach surfaces a startup failure as an error
+	 * rather than a hang; then poll until the live participant count is whole.
+	 */
+	WaitForParallelWorkersToAttach(pcxt);
+	while (BarrierParticipants(barrier) < pcxt->nworkers_launched + 1)
+	{
+		CHECK_FOR_INTERRUPTS();
+		(void)WaitLatch(
+				MyLatch,
+				WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+				1L,
+				WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+		ResetLatch(MyLatch);
+	}
+	return true;
 }
