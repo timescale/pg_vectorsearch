@@ -324,6 +324,25 @@ mkt_free_aligned(void *ptr)
 	(void)ptr; /* No-op in arena mode */
 }
 
+/*
+ * Huge transient buffers bypass the arena: they are large and explicitly freed
+ * mid-build, which the bump-pointer arena cannot do. Back them with the system
+ * allocator instead (matching palloc_extended/pfree on the PG side).
+ */
+void *
+mkt_alloc_huge(size_t size)
+{
+	void *p = malloc(size);
+	assert(p != NULL);
+	return p;
+}
+
+void
+mkt_free_huge(void *ptr)
+{
+	free(ptr);
+}
+
 /* Switch context, return old context */
 MktMemCtx
 mkt_memctx_switch(MktMemCtx ctx)

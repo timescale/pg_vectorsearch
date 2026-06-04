@@ -353,8 +353,8 @@ do_parallel_build(
 		/* nlist * 256 samples * dim can exceed the 1GB palloc limit for
 		 * large nlist / high dim (e.g. nlist=2000, dim=768 ~ 1.5GB), so
 		 * allow a huge allocation. Freed after child k-means. */
-		float *all_samples = palloc_extended(
-				(size_t)total_nsamples * dim * sizeof(float), MCXT_ALLOC_HUGE);
+		float *all_samples = mkt_alloc_huge(
+				(size_t)total_nsamples * dim * sizeof(float));
 		uint32_t *all_root_asgn = mkt_alloc(total_nsamples * sizeof(uint32_t));
 		uint32_t  soff			= 0;
 		for (int t = 0; t < nparticipants; t++)
@@ -550,7 +550,7 @@ do_parallel_build(
 		mkt_free(child_centroids);
 		mkt_free(child_ks);
 		mkt_free(root_cents);
-		mkt_free(all_samples);
+		mkt_free_huge(all_samples);
 		mkt_free(all_root_asgn);
 
 		nlist = tree->nleaves;
@@ -563,8 +563,8 @@ do_parallel_build(
 			total_nsamples += mkt_dsm_sample_counts(dsm_samples)[t];
 
 		/* May exceed the 1GB palloc limit for large nlist / high dim. */
-		float *all_samples = palloc_extended(
-				(size_t)total_nsamples * dim * sizeof(float), MCXT_ALLOC_HUGE);
+		float *all_samples = mkt_alloc_huge(
+				(size_t)total_nsamples * dim * sizeof(float));
 		uint32_t soff = 0;
 		for (int t = 0; t < nparticipants; t++)
 		{
@@ -589,7 +589,7 @@ do_parallel_build(
 				shared->metric,
 				&km_opts);
 
-		mkt_free(all_samples);
+		mkt_free_huge(all_samples);
 
 		/* Still need barriers for root assign + child k-means
 		 * that workers are waiting on */

@@ -26,6 +26,15 @@ typedef MemoryContextCallback MktMemCtxCallback;
 #define mkt_alloc_aligned(sz, al)	 palloc_aligned(sz, al, 0)
 #define mkt_free_aligned(ptr)		 pfree(ptr)
 
+/*
+ * Allocation that may exceed the 1GB palloc limit (MCXT_ALLOC_HUGE). For large
+ * transient buffers (e.g. the pooled k-means sample matrix); pair with
+ * mkt_free_huge. Standalone backs this with malloc/free rather than the arena,
+ * since these buffers are huge and explicitly freed mid-build.
+ */
+#define mkt_alloc_huge(size) palloc_extended((size), MCXT_ALLOC_HUGE)
+#define mkt_free_huge(ptr)	 pfree(ptr)
+
 /* Context management */
 #define mkt_memctx_create(parent, name)                 \
 	AllocSetContextCreate(                              \

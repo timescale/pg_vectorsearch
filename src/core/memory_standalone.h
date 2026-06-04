@@ -64,6 +64,11 @@ void *mkt_memctx_alloc0(MktMemCtx ctx, size_t size);
 void *mkt_alloc_aligned(size_t size, size_t alignment);
 void  mkt_free_aligned(void *ptr);
 
+/* Huge transient buffers — backed by malloc/free, not the arena (see the PG
+ * counterpart in memory_pg.h). Pair mkt_alloc_huge with mkt_free_huge. */
+void *mkt_alloc_huge(size_t size);
+void  mkt_free_huge(void *ptr);
+
 /* Context management */
 MktMemCtx mkt_memctx_create(MktMemCtx parent, const char *name);
 void	  mkt_memctx_delete(MktMemCtx ctx);
