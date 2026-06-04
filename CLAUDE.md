@@ -341,6 +341,31 @@ PostgreSQL include files.
 Note: keep the include list minimal. Remove unused includes. The LSP server can
 help identify unused includes.
 
+#### Code comments
+
+Provide informational comments in the code at a medium level of detail.
+
+- Do not _only_ comment on what code does, but also explain _why_
+- Keep it high-level and architectural for human understanding.
+- Deeply technical comments can sometimes be warranted for critical pieces of
+code.
+- For bigger architectural components, consider adding information in a
+separate architecture or implementation document.
+
+#### Critical coding standards
+
+- Strive to minimize code duplication across standalone and PostgreSQL builds.
+- If standalone and PG pulls in different directions due to architectural
+differences or constraints imposed by PostgreSQL, PostgreSQL should win.
+- Make judicious use of (child) Memory contexts where it makes sense (builders,
+scratch memory, batch functionality, etc.). Memory can be bulk freed instead of
+having individual mkt_free/pfree:s. It also protects against leaks and
+transient allocations in sub-functions called by, e.g., a builder.
+- Never do unrelated code changes, and don't change/remove comments not related
+to the feature/refactor being worked on.
+- Feel free to highlight inaccuracies in comments or code, and potential
+refactor targets.
+
 ### Documentation Maintenance
 
 Keep documentation up-to-date with code changes:
