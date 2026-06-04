@@ -88,7 +88,7 @@ do_parallel_build(
 	uint64_t		  rabitq_seed	  = lead.rabitq_seed;
 	uint32_t		  fan_out		  = lead.fan_out;
 	Size			  max_tree_sz	  = lead.max_tree_sz;
-	Size			  km_sz = mkt_km_workers_size(nparticipants, km_k, dim);
+	Size km_sz = mkt_dsm_km_workers_size(nparticipants, km_k, dim);
 
 	instr_time t_launch_start;
 	INSTR_TIME_SET_CURRENT(t_launch_start);
@@ -109,7 +109,7 @@ do_parallel_build(
 			stride = 1;
 
 		SampleCbState sc = {
-				.samples		= mkt_worker_samples(dsm_samples, 0),
+				.samples		= mkt_dsm_worker_samples(dsm_samples, 0),
 				.count			= 0,
 				.max_samples	= max_per_worker,
 				.stride			= stride,
@@ -128,7 +128,7 @@ do_parallel_build(
 				mkt_sample_cb,
 				&sc);
 
-		mkt_sample_counts(dsm_samples)[0] = sc.count;
+		mkt_dsm_sample_counts(dsm_samples)[0] = sc.count;
 	}
 
 	instr_time t_sample_end;
@@ -163,11 +163,11 @@ do_parallel_build(
 	 * docs/parallel-build-design.md
 	 * ("Determinism").
 	 */
-	float *norms_c = mkt_norms_c(centroids_base, km_k, dim);
+	float *norms_c = mkt_dsm_norms_c(centroids_base, km_k, dim);
 	{
 		uint32_t total_ns = 0;
 		for (int t = 0; t < nparticipants; t++)
-			total_ns += mkt_sample_counts(dsm_samples)[t];
+			total_ns += mkt_dsm_sample_counts(dsm_samples)[t];
 
 		uint32_t step = (total_ns >= km_k) ? total_ns / km_k : 1;
 		for (uint32_t i = 0; i < km_k; i++)
@@ -178,14 +178,14 @@ do_parallel_build(
 			int		 t	  = 0;
 			uint32_t base = 0;
 			while (t < nparticipants &&
-				   base + mkt_sample_counts(dsm_samples)[t] <= gidx)
+				   base + mkt_dsm_sample_counts(dsm_samples)[t] <= gidx)
 			{
-				base += mkt_sample_counts(dsm_samples)[t];
+				base += mkt_dsm_sample_counts(dsm_samples)[t];
 				t++;
 			}
 			if (t < nparticipants)
 				memcpy(cents + (size_t)i * dim,
-					   mkt_worker_samples(dsm_samples, t) +
+					   mkt_dsm_worker_samples(dsm_samples, t) +
 							   (size_t)(gidx - base) * dim,
 					   dim * sizeof(float));
 		}
@@ -202,12 +202,12 @@ do_parallel_build(
 	 */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-	float	 *my_sums = mkt_km_worker_sums(km_workers_base, km_k, dim, 0);
-	uint32_t *my_cnts = mkt_km_worker_cnts(km_workers_base, km_k, dim, 0);
-	float	 *my_cost = mkt_km_worker_cost(km_workers_base, km_k, dim, 0);
+	float	 *my_sums = mkt_dsm_km_worker_sums(km_workers_base, km_k, dim, 0);
+	uint32_t *my_cnts = mkt_dsm_km_worker_cnts(km_workers_base, km_k, dim, 0);
+	float	 *my_cost = mkt_dsm_km_worker_cost(km_workers_base, km_k, dim, 0);
 
-	float	*leader_samples	 = mkt_worker_samples(dsm_samples, 0);
-	uint32_t leader_nsamples = mkt_sample_counts(dsm_samples)[0];
+	float	*leader_samples	 = mkt_dsm_worker_samples(dsm_samples, 0);
+	uint32_t leader_nsamples = mkt_dsm_sample_counts(dsm_samples)[0];
 	float	*old_cents		 = palloc((size_t)km_k * dim * sizeof(float));
 
 	uint32_t km_iters = 0;
@@ -238,9 +238,12 @@ do_parallel_build(
 
 		for (int t = 0; t < nparticipants; t++)
 		{
-			all_sums[t]	 = mkt_km_worker_sums(km_workers_base, km_k, dim, t);
-			all_cnts[t]	 = mkt_km_worker_cnts(km_workers_base, km_k, dim, t);
-			all_costs[t] = *mkt_km_worker_cost(km_workers_base, km_k, dim, t);
+			all_sums[t] =
+					mkt_dsm_km_worker_sums(km_workers_base, km_k, dim, t);
+			all_cnts[t] =
+					mkt_dsm_km_worker_cnts(km_workers_base, km_k, dim, t);
+			all_costs[t] =
+					*mkt_dsm_km_worker_cost(km_workers_base, km_k, dim, t);
 		}
 
 		float total_cost;
@@ -314,8 +317,8 @@ do_parallel_build(
 		 *
 		 * Each participant assigns its samples to root centroids.
 		 */
-		uint32_t *leader_ra = mkt_root_assignments(dsm_ra, 0);
-		uint32_t  leader_ns = mkt_sample_counts(dsm_samples)[0];
+		uint32_t *leader_ra = mkt_dsm_root_assignments(dsm_ra, 0);
+		uint32_t  leader_ns = mkt_dsm_sample_counts(dsm_samples)[0];
 
 		kmeans_assign(
 				leader_samples,
@@ -343,7 +346,7 @@ do_parallel_build(
 		 * leader to pick initial child centroids from */
 		uint32_t total_nsamples = 0;
 		for (int t = 0; t < nparticipants; t++)
-			total_nsamples += mkt_sample_counts(dsm_samples)[t];
+			total_nsamples += mkt_dsm_sample_counts(dsm_samples)[t];
 
 		/* nlist * 256 samples * dim can exceed the 1GB palloc limit for
 		 * large nlist / high dim (e.g. nlist=2000, dim=768 ~ 1.5GB), so
@@ -354,12 +357,12 @@ do_parallel_build(
 		uint32_t  soff			= 0;
 		for (int t = 0; t < nparticipants; t++)
 		{
-			uint32_t n = mkt_sample_counts(dsm_samples)[t];
+			uint32_t n = mkt_dsm_sample_counts(dsm_samples)[t];
 			memcpy(all_samples + (size_t)soff * dim,
-				   mkt_worker_samples(dsm_samples, t),
+				   mkt_dsm_worker_samples(dsm_samples, t),
 				   (size_t)n * dim * sizeof(float));
 			memcpy(all_root_asgn + soff,
-				   mkt_root_assignments(dsm_ra, t),
+				   mkt_dsm_root_assignments(dsm_ra, t),
 				   n * sizeof(uint32_t));
 			soff += n;
 		}
@@ -419,7 +422,7 @@ do_parallel_build(
 			}
 
 			/* Compute norms for child centroids */
-			float *child_norms = mkt_norms_c(centroids_base, child_k, dim);
+			float *child_norms = mkt_dsm_norms_c(centroids_base, child_k, dim);
 			if (shared->metric == DISTANCE_L2)
 				for (uint32_t j = 0; j < child_k; j++)
 					child_norms[j] =
@@ -429,7 +432,7 @@ do_parallel_build(
 
 			/* Clear accumulators */
 			Size child_km_sz =
-					mkt_km_workers_size(nparticipants, child_k, dim);
+					mkt_dsm_km_workers_size(nparticipants, child_k, dim);
 			memset(km_workers_base, 0, child_km_sz);
 
 			float *child_old_cents = palloc(
@@ -443,12 +446,12 @@ do_parallel_build(
 			for (uint32_t iter = 0; iter < shared->km_max_iterations; iter++)
 			{
 				/* Leader's assignment + accumulation */
-				float *l_sums =
-						mkt_km_worker_sums(km_workers_base, child_k, dim, 0);
-				uint32_t *l_cnts =
-						mkt_km_worker_cnts(km_workers_base, child_k, dim, 0);
-				float *l_cost =
-						mkt_km_worker_cost(km_workers_base, child_k, dim, 0);
+				float *l_sums = mkt_dsm_km_worker_sums(
+						km_workers_base, child_k, dim, 0);
+				uint32_t *l_cnts = mkt_dsm_km_worker_cnts(
+						km_workers_base, child_k, dim, 0);
+				float *l_cost = mkt_dsm_km_worker_cost(
+						km_workers_base, child_k, dim, 0);
 
 				mkt_km_assign_and_accumulate_filtered(
 						leader_samples,
@@ -480,11 +483,11 @@ do_parallel_build(
 
 				for (int t = 0; t < nparticipants; t++)
 				{
-					csums[t] = mkt_km_worker_sums(
+					csums[t] = mkt_dsm_km_worker_sums(
 							km_workers_base, child_k, dim, t);
-					ccnts[t] = mkt_km_worker_cnts(
+					ccnts[t] = mkt_dsm_km_worker_cnts(
 							km_workers_base, child_k, dim, t);
-					ccosts[t] = *mkt_km_worker_cost(
+					ccosts[t] = *mkt_dsm_km_worker_cost(
 							km_workers_base, child_k, dim, t);
 				}
 
@@ -554,7 +557,7 @@ do_parallel_build(
 		/* nlevels != 2: fall back to serial hkmeans */
 		uint32_t total_nsamples = 0;
 		for (int t = 0; t < nparticipants; t++)
-			total_nsamples += mkt_sample_counts(dsm_samples)[t];
+			total_nsamples += mkt_dsm_sample_counts(dsm_samples)[t];
 
 		/* May exceed the 1GB palloc limit for large nlist / high dim. */
 		float *all_samples = palloc_extended(
@@ -562,9 +565,9 @@ do_parallel_build(
 		uint32_t soff = 0;
 		for (int t = 0; t < nparticipants; t++)
 		{
-			uint32_t n = mkt_sample_counts(dsm_samples)[t];
+			uint32_t n = mkt_dsm_sample_counts(dsm_samples)[t];
 			memcpy(all_samples + (size_t)soff * dim,
-				   mkt_worker_samples(dsm_samples, t),
+				   mkt_dsm_worker_samples(dsm_samples, t),
 				   (size_t)n * dim * sizeof(float));
 			soff += n;
 		}
@@ -588,8 +591,8 @@ do_parallel_build(
 		/* Still need barriers for root assign + child k-means
 		 * that workers are waiting on */
 		{
-			uint32_t *leader_ra = mkt_root_assignments(dsm_ra, 0);
-			uint32_t  ln		= mkt_sample_counts(dsm_samples)[0];
+			uint32_t *leader_ra = mkt_dsm_root_assignments(dsm_ra, 0);
+			uint32_t  ln		= mkt_dsm_sample_counts(dsm_samples)[0];
 			for (uint32_t i = 0; i < ln; i++)
 				leader_ra[i] = 0;
 
@@ -712,8 +715,8 @@ do_parallel_build(
 	uint32_t  n_est_samples	 = 0;
 	for (int w = 0; w < nparticipants; w++)
 	{
-		float	*sw = mkt_worker_samples(dsm_samples, w);
-		uint32_t nw = mkt_sample_counts(dsm_samples)[w];
+		float	*sw = mkt_dsm_worker_samples(dsm_samples, w);
+		uint32_t nw = mkt_dsm_sample_counts(dsm_samples)[w];
 		n_est_samples += nw;
 		for (uint32_t i = 0; i < nw; i++)
 		{
@@ -760,7 +763,7 @@ do_parallel_build(
 			(size_t)nparticipants * sizeof(shm_mq_handle *));
 	for (int wi = 0; wi < nq; wi++)
 	{
-		shm_mq *mq = (shm_mq *)mkt_posting_queue(queues_base, wi + 1);
+		shm_mq *mq = (shm_mq *)mkt_dsm_posting_queue(queues_base, wi + 1);
 		rh[wi + 1] = shm_mq_attach(mq, pcxt->seg, NULL);
 	}
 
@@ -930,7 +933,7 @@ do_parallel_build(
 		 */
 		for (int w = 0; w < nparticipants; w++)
 		{
-			Page pg = mkt_worker_partials(dsm_partials, nlist, w) +
+			Page pg = mkt_dsm_worker_partials(dsm_partials, nlist, w) +
 					  (size_t)c * BLCKSZ;
 			MktPostingPageOpaque *op = mkt_posting_opaque(pg);
 			if (op->entry_count == 0)

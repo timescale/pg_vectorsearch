@@ -47,19 +47,19 @@ struct IndexInfo;
  * their keys live here with the rest for one contiguous numbering.
  * ---------------------------------------------------------------- */
 
-#define MKT_KEY_SHARED		   UINT64CONST(0xB000000000000001)
-#define MKT_KEY_TREE		   UINT64CONST(0xB000000000000002)
-#define MKT_KEY_WORKER_OUTPUT  UINT64CONST(0xB000000000000004)
-#define MKT_KEY_PARTIALS	   UINT64CONST(0xB000000000000005)
-#define MKT_KEY_WAL_USAGE	   UINT64CONST(0xB000000000000006)
-#define MKT_KEY_BUFFER_USAGE   UINT64CONST(0xB000000000000007)
-#define MKT_KEY_QUERY_TEXT	   UINT64CONST(0xB000000000000008)
-#define MKT_KEY_BARRIER		   UINT64CONST(0xB000000000000009)
-#define MKT_KEY_SAMPLES		   UINT64CONST(0xB00000000000000A)
-#define MKT_KEY_CENTROIDS	   UINT64CONST(0xB00000000000000B)
-#define MKT_KEY_KM_WORKERS	   UINT64CONST(0xB00000000000000C)
-#define MKT_KEY_ROOT_ASSIGN	   UINT64CONST(0xB00000000000000E)
-#define MKT_KEY_POSTING_QUEUES UINT64CONST(0xB00000000000000F)
+#define MKT_DSM_KEY_SHARED		   UINT64CONST(0xB000000000000001)
+#define MKT_DSM_KEY_TREE		   UINT64CONST(0xB000000000000002)
+#define MKT_DSM_KEY_WORKER_OUTPUT  UINT64CONST(0xB000000000000004)
+#define MKT_DSM_KEY_PARTIALS	   UINT64CONST(0xB000000000000005)
+#define MKT_DSM_KEY_WAL_USAGE	   UINT64CONST(0xB000000000000006)
+#define MKT_DSM_KEY_BUFFER_USAGE   UINT64CONST(0xB000000000000007)
+#define MKT_DSM_KEY_QUERY_TEXT	   UINT64CONST(0xB000000000000008)
+#define MKT_DSM_KEY_BARRIER		   UINT64CONST(0xB000000000000009)
+#define MKT_DSM_KEY_SAMPLES		   UINT64CONST(0xB00000000000000A)
+#define MKT_DSM_KEY_CENTROIDS	   UINT64CONST(0xB00000000000000B)
+#define MKT_DSM_KEY_KM_WORKERS	   UINT64CONST(0xB00000000000000C)
+#define MKT_DSM_KEY_ROOT_ASSIGN	   UINT64CONST(0xB00000000000000E)
+#define MKT_DSM_KEY_POSTING_QUEUES UINT64CONST(0xB00000000000000F)
 
 /* ----------------------------------------------------------------
  * MktBuildShared — back-end-neutral shared build state
@@ -119,22 +119,22 @@ typedef struct MktDsmSamples
 } MktDsmSamples;
 
 static inline uint32_t *
-mkt_sample_counts(MktDsmSamples *s)
+mkt_dsm_sample_counts(MktDsmSamples *s)
 {
 	return (uint32_t *)((char *)s + MAXALIGN(sizeof(MktDsmSamples)));
 }
 
 static inline float *
-mkt_worker_samples(MktDsmSamples *s, int worker_id)
+mkt_dsm_worker_samples(MktDsmSamples *s, int worker_id)
 {
-	char *base = (char *)mkt_sample_counts(s) +
+	char *base = (char *)mkt_dsm_sample_counts(s) +
 				 s->nparticipants * sizeof(uint32_t);
 	return (float *)(base + (size_t)worker_id * s->max_per_worker * s->dim *
 									sizeof(float));
 }
 
 static inline Size
-mkt_samples_size(int nparticipants, uint32_t max_per_worker, Dimension dim)
+mkt_dsm_samples_size(int nparticipants, uint32_t max_per_worker, Dimension dim)
 {
 	Size sz = MAXALIGN(sizeof(MktDsmSamples));
 	sz += (Size)nparticipants * sizeof(uint32_t);
@@ -156,7 +156,7 @@ typedef struct MktDsmRootAssign
 } MktDsmRootAssign;
 
 static inline uint32_t *
-mkt_root_assignments(MktDsmRootAssign *ra, int worker_id)
+mkt_dsm_root_assignments(MktDsmRootAssign *ra, int worker_id)
 {
 	char *base = (char *)ra + MAXALIGN(sizeof(MktDsmRootAssign));
 	return (uint32_t *)(base + (size_t)worker_id * ra->max_per_worker *
@@ -164,7 +164,7 @@ mkt_root_assignments(MktDsmRootAssign *ra, int worker_id)
 }
 
 static inline Size
-mkt_root_assign_size(int nparticipants, uint32_t max_per_worker)
+mkt_dsm_root_assign_size(int nparticipants, uint32_t max_per_worker)
 {
 	Size sz = MAXALIGN(sizeof(MktDsmRootAssign));
 	sz += (Size)nparticipants * max_per_worker * sizeof(uint32_t);
@@ -180,19 +180,19 @@ mkt_root_assign_size(int nparticipants, uint32_t max_per_worker)
  * ---------------------------------------------------------------- */
 
 static inline Size
-mkt_centroids_size(uint32_t nlist, Dimension dim)
+mkt_dsm_centroids_size(uint32_t nlist, Dimension dim)
 {
 	return (Size)nlist * dim * sizeof(float) + (Size)nlist * sizeof(float);
 }
 
 static inline float *
-mkt_centroids(char *base)
+mkt_dsm_centroids(char *base)
 {
 	return (float *)base;
 }
 
 static inline float *
-mkt_norms_c(char *base, uint32_t nlist, Dimension dim)
+mkt_dsm_norms_c(char *base, uint32_t nlist, Dimension dim)
 {
 	return (float *)(base + (size_t)nlist * dim * sizeof(float));
 }
@@ -205,36 +205,39 @@ mkt_norms_c(char *base, uint32_t nlist, Dimension dim)
  * ---------------------------------------------------------------- */
 
 static inline Size
-mkt_km_worker_size(uint32_t nlist, Dimension dim)
+mkt_dsm_km_worker_size(uint32_t nlist, Dimension dim)
 {
 	return (Size)nlist * dim * sizeof(float) + (Size)nlist * sizeof(uint32_t) +
 		   sizeof(float);
 }
 
 static inline Size
-mkt_km_workers_size(int nparticipants, uint32_t nlist, Dimension dim)
+mkt_dsm_km_workers_size(int nparticipants, uint32_t nlist, Dimension dim)
 {
-	return (Size)nparticipants * mkt_km_worker_size(nlist, dim);
+	return (Size)nparticipants * mkt_dsm_km_worker_size(nlist, dim);
 }
 
 static inline float *
-mkt_km_worker_sums(char *base, uint32_t nlist, Dimension dim, int worker_id)
+mkt_dsm_km_worker_sums(
+		char *base, uint32_t nlist, Dimension dim, int worker_id)
 {
 	return (float *)(base +
-					 (size_t)worker_id * mkt_km_worker_size(nlist, dim));
+					 (size_t)worker_id * mkt_dsm_km_worker_size(nlist, dim));
 }
 
 static inline uint32_t *
-mkt_km_worker_cnts(char *base, uint32_t nlist, Dimension dim, int worker_id)
+mkt_dsm_km_worker_cnts(
+		char *base, uint32_t nlist, Dimension dim, int worker_id)
 {
-	char *slot = base + (size_t)worker_id * mkt_km_worker_size(nlist, dim);
+	char *slot = base + (size_t)worker_id * mkt_dsm_km_worker_size(nlist, dim);
 	return (uint32_t *)(slot + (size_t)nlist * dim * sizeof(float));
 }
 
 static inline float *
-mkt_km_worker_cost(char *base, uint32_t nlist, Dimension dim, int worker_id)
+mkt_dsm_km_worker_cost(
+		char *base, uint32_t nlist, Dimension dim, int worker_id)
 {
-	char *slot = base + (size_t)worker_id * mkt_km_worker_size(nlist, dim);
+	char *slot = base + (size_t)worker_id * mkt_dsm_km_worker_size(nlist, dim);
 	return (float *)(slot + (size_t)nlist * dim * sizeof(float) +
 					 (size_t)nlist * sizeof(uint32_t));
 }
@@ -247,13 +250,13 @@ mkt_km_worker_cost(char *base, uint32_t nlist, Dimension dim, int worker_id)
  * ---------------------------------------------------------------- */
 
 static inline Size
-mkt_worker_output_size(uint32_t nlist, int nparticipants)
+mkt_dsm_worker_output_size(uint32_t nlist, int nparticipants)
 {
 	return (Size)nparticipants * nlist * sizeof(bool);
 }
 
 static inline bool *
-mkt_worker_active(char *base, uint32_t nlist, int worker_id)
+mkt_dsm_worker_active(char *base, uint32_t nlist, int worker_id)
 {
 	return (bool *)(base + (Size)worker_id * nlist * sizeof(bool));
 }
@@ -266,13 +269,13 @@ mkt_worker_active(char *base, uint32_t nlist, int worker_id)
  * ---------------------------------------------------------------- */
 
 static inline Size
-mkt_partials_size(uint32_t nlist, int nparticipants)
+mkt_dsm_partials_size(uint32_t nlist, int nparticipants)
 {
 	return (Size)nparticipants * nlist * BLCKSZ;
 }
 
 static inline char *
-mkt_worker_partials(char *base, uint32_t nlist, int worker_id)
+mkt_dsm_worker_partials(char *base, uint32_t nlist, int worker_id)
 {
 	return base + (Size)worker_id * nlist * BLCKSZ;
 }
@@ -291,26 +294,26 @@ mkt_worker_partials(char *base, uint32_t nlist, int worker_id)
  * queues are detached.
  * ---------------------------------------------------------------- */
 
-#define MKT_POSTING_QUEUE_PAGES 8
+#define MKT_DSM_POSTING_QUEUE_PAGES 8
 
 static inline Size
-mkt_posting_queue_bytes(void)
+mkt_dsm_posting_queue_bytes(void)
 {
 	/* Ring large enough for several full-page messages, plus slack for
 	 * shm_mq's internal header. */
-	return (Size)MKT_POSTING_QUEUE_PAGES * (BLCKSZ + 64) + 1024;
+	return (Size)MKT_DSM_POSTING_QUEUE_PAGES * (BLCKSZ + 64) + 1024;
 }
 
 static inline Size
-mkt_posting_queues_size(int nparticipants)
+mkt_dsm_posting_queues_size(int nparticipants)
 {
-	return (Size)nparticipants * MAXALIGN(mkt_posting_queue_bytes());
+	return (Size)nparticipants * MAXALIGN(mkt_dsm_posting_queue_bytes());
 }
 
 static inline char *
-mkt_posting_queue(char *base, int worker_id)
+mkt_dsm_posting_queue(char *base, int worker_id)
 {
-	return base + (Size)worker_id * MAXALIGN(mkt_posting_queue_bytes());
+	return base + (Size)worker_id * MAXALIGN(mkt_dsm_posting_queue_bytes());
 }
 
 /* ----------------------------------------------------------------
