@@ -531,7 +531,7 @@ extern void posting_cb(void *state, ItemPointerData tid, const float *vec);
  * Scan every vector cooperatively, invoking cb per live tuple. Back-end seam:
  * the PG implementation (parallel_backend_pg.c) drives a parallel heap scan
  * and unwraps each tuple; the standalone implementation iterates its in-memory
- * vector array. allow_sync/anyvisible are PG table_index_build_scan flags,
+ * vector array. allow_sync/progress are PG table_index_build_scan flags,
  * ignored in standalone.
  */
 extern void mkt_build_scan(
@@ -540,7 +540,7 @@ extern void mkt_build_scan(
 		struct IndexInfo *indexInfo,
 		MktBuildShared	 *shared,
 		bool			  allow_sync,
-		bool			  anyvisible,
+		bool			  progress,
 		MktBuildScanCb	  cb,
 		void			 *state);
 

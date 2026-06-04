@@ -53,8 +53,10 @@ mkt_pg_scan_adapter(
 /*
  * Scan every vector via the shared parallel table scan, invoking cb per live
  * tuple. The standalone back-end provides a same-named function that iterates
- * its in-memory vector array (work-stealing) instead. allow_sync/anyvisible
- * are PostgreSQL table_index_build_scan flags, ignored in standalone.
+ * its in-memory vector array (work-stealing) instead. allow_sync/progress
+ * are PostgreSQL table_index_build_scan flags, ignored in standalone; progress
+ * gates pg_stat_progress_create_index reporting, so only the leader sets it
+ * (otherwise every participant would inflate the tuples-scanned counter).
  */
 void
 mkt_build_scan(
@@ -63,7 +65,7 @@ mkt_build_scan(
 		struct IndexInfo *indexInfo,
 		MktBuildShared	 *shared,
 		bool			  allow_sync,
-		bool			  anyvisible,
+		bool			  progress,
 		MktBuildScanCb	  cb,
 		void			 *state)
 {
@@ -76,7 +78,7 @@ mkt_build_scan(
 			index,
 			indexInfo,
 			allow_sync,
-			anyvisible,
+			progress,
 			mkt_pg_scan_adapter,
 			&actx,
 			scan);
