@@ -770,8 +770,7 @@ mkt_index_build(
 	 * in-memory path below.
 	 */
 	bool use_driver = config->encode_rabitq &&
-					  config->posting_fmt == MKT_POSTING_FMT_PAGES &&
-					  nworkers >= 1;
+					  config->posting_fmt == MKT_POSTING_FMT_PAGES;
 
 	HKMeansResult *tree		  = NULL;
 	float		  *km_vectors = NULL;
@@ -781,6 +780,10 @@ mkt_index_build(
 	if (use_driver)
 	{
 		t_phase = now_ns();
+
+		/* The driver produces fastscan-packed pages when requested; the query
+		 * path must know to read them as fastscan (not AoS). */
+		idx->base.fastscan = config->fastscan != 0;
 
 		/* Upper bound on leaves (fan_out^nlevels, matching the tree the driver
 		 * builds), so posting_heads has a slot per leaf. */
@@ -816,19 +819,23 @@ mkt_index_build(
 		RelationData index_rel = {
 				.page_count = &idx->posting_storage.next_blkno,
 		};
-		IndexInfo	   index_info = {.ii_ParallelWorkers = (int)nworkers};
-		MktBuildConfig cfg		  = {
-					   .dim				= dim,
-					   .metric			= config->metric,
-					   .centroid_format = idx->base.centroid_format,
-				   /* The tree expands to up to fan_out^nlevels leaves; size the
-					* shared regions for that bound (matches the PG caller). */
-					   .nlist			 = max_nlist,
-					   .fan_out			 = fan_out,
-					   .soar_lambda		 = config->soar_lambda,
-					   .boundary_epsilon = config->boundary_epsilon,
-					   .fastscan		 = config->fastscan != 0,
-		   };
+		/* The driver streams worker→leader, so it needs at least one worker;
+		 * a serial (nworkers==0) PAGES build runs through the driver with one.
+		 */
+		IndexInfo index_info = {
+				.ii_ParallelWorkers = (int)(nworkers > 0 ? nworkers : 1)};
+		MktBuildConfig cfg = {
+				.dim			 = dim,
+				.metric			 = config->metric,
+				.centroid_format = idx->base.centroid_format,
+				/* The tree expands to up to fan_out^nlevels leaves; size the
+				 * shared regions for that bound (matches the PG caller). */
+				.nlist			  = max_nlist,
+				.fan_out		  = fan_out,
+				.soar_lambda	  = config->soar_lambda,
+				.boundary_epsilon = config->boundary_epsilon,
+				.fastscan		  = config->fastscan != 0,
+		};
 
 		double heap_tuples = 0, indtuples = 0, soar_dupes = 0;
 
@@ -849,8 +856,11 @@ mkt_index_build(
 				&soar_dupes);
 		mkt_memctx_switch(idx_ctx);
 
+		/* The driver always launches at least one worker, so it does not fail
+		 * here; on the off chance it does, the tree==NULL guard below returns.
+		 */
 		if (!ok)
-			use_driver = false; /* fall through to the in-memory path */
+			tree = NULL;
 
 		ms_kmeans = (double)(now_ns() - t_phase) / 1e6;
 	}
