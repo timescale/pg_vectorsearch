@@ -62,6 +62,7 @@ struct IndexInfo;
 #define MKT_DSM_KEY_KM_WORKERS	   UINT64CONST(0xB00000000000000C)
 #define MKT_DSM_KEY_ROOT_ASSIGN	   UINT64CONST(0xB00000000000000E)
 #define MKT_DSM_KEY_POSTING_QUEUES UINT64CONST(0xB00000000000000F)
+#define MKT_DSM_KEY_RABITQ_MATRIX  UINT64CONST(0xB000000000000010)
 
 /* ----------------------------------------------------------------
  * MktBuildShared — back-end-neutral shared build state
@@ -186,6 +187,15 @@ static inline Size
 mkt_dsm_centroids_size(uint32_t nlist, Dimension dim)
 {
 	return (Size)nlist * dim * sizeof(float) + (Size)nlist * sizeof(float);
+}
+
+/* RaBitQ rotation matrix P (dim*dim floats). The leader generates it once and
+ * shares it so workers build their RaBitQParams via create_from_matrix instead
+ * of each regenerating the identical orthogonal matrix from the same seed. */
+static inline Size
+mkt_dsm_rabitq_matrix_size(Dimension dim)
+{
+	return (Size)dim * dim * sizeof(float);
 }
 
 static inline float *
@@ -532,6 +542,7 @@ typedef struct MktPBuildLeader
 	void				   *dsm_tree;
 	char				   *queues_base;
 	char				   *dsm_partials;
+	float				   *rabitq_matrix; /* shared P (dim*dim) */
 	struct WalUsage		   *walusage;
 	struct BufferUsage	   *bufferusage;
 	int						nparticipants;

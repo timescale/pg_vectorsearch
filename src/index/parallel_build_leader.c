@@ -98,6 +98,7 @@ do_parallel_build(
 	Dimension		  dim			  = lead.dim;
 	uint32_t		  nlist			  = lead.nlist;
 	uint64_t		  rabitq_seed	  = lead.rabitq_seed;
+	float			 *rabitq_matrix	  = lead.rabitq_matrix;
 	uint32_t		  fan_out		  = lead.fan_out;
 	Size			  max_tree_sz	  = lead.max_tree_sz;
 	Size km_sz = mkt_dsm_km_workers_size(nparticipants, km_k, dim);
@@ -660,8 +661,9 @@ do_parallel_build(
 			mkt_l2_normalize(ref_vecs + (size_t)c * dim, dim);
 
 	/* Compute P^T * centroids */
-	RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
-	float *pt_centroids		= mkt_alloc((size_t)nlist * dim * sizeof(float));
+	RaBitQParams *rq_params =
+			mkt_rabitq_create_from_matrix(dim, rabitq_seed, rabitq_matrix);
+	float *pt_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
 	for (uint32_t c = 0; c < nlist; c++)
 		mkt_rabitq_rotate(
 				rq_params,

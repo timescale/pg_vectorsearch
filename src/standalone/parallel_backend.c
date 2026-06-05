@@ -23,6 +23,7 @@
 #include "core/parallel_ctx.h"
 #include "index/index_build.h" /* mkt_auto_fan_out */
 #include "index/parallel_build.h"
+#include "quant/matrix.h" /* mkt_random_orthogonal_matrix */
 
 /*
  * Standalone shared build state: the neutral MktBuildShared plus a mutex
@@ -204,6 +205,7 @@ mkt_pbuild_setup_shared(
 			mkt_dsm_samples_size(nparticipants, max_per_worker, dim));
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_dsm_centroids_size(km_k, dim));
+	shm_toc_estimate_chunk(&pcxt->estimator, mkt_dsm_rabitq_matrix_size(dim));
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
 			mkt_dsm_km_workers_size(nparticipants, km_k, dim));
@@ -220,9 +222,10 @@ mkt_pbuild_setup_shared(
 			&pcxt->estimator, mkt_dsm_partials_size(nlist, nparticipants));
 	shm_toc_estimate_chunk(&pcxt->estimator, usage_sz);
 	shm_toc_estimate_chunk(&pcxt->estimator, bufuse_sz);
-	/* Keyed regions: shared, barrier, samples, centroids, km_workers,
-	 * root_assign, tree, posting_queues, worker_output, partials. */
-	shm_toc_estimate_keys(&pcxt->estimator, 10);
+	/* Keyed regions: shared, barrier, samples, centroids, rabitq_matrix,
+	 * km_workers, root_assign, tree, posting_queues, worker_output, partials.
+	 */
+	shm_toc_estimate_keys(&pcxt->estimator, 11);
 
 	InitializeParallelDSM(pcxt);
 
@@ -271,6 +274,14 @@ mkt_pbuild_setup_shared(
 	memset(centroids_base, 0, cent_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CENTROIDS, centroids_base);
 	float *cents = mkt_dsm_centroids(centroids_base);
+
+	/* RaBitQ rotation matrix: generated once here, shared by all workers (they
+	 * build their RaBitQParams via create_from_matrix instead of regenerating
+	 * the identical orthogonal matrix from the seed). */
+	float *rabitq_matrix =
+			shm_toc_allocate(pcxt->toc, mkt_dsm_rabitq_matrix_size(dim));
+	mkt_random_orthogonal_matrix(rabitq_matrix, dim, rabitq_seed);
+	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_RABITQ_MATRIX, rabitq_matrix);
 
 	Size  km_sz			  = mkt_dsm_km_workers_size(nparticipants, km_k, dim);
 	char *km_workers_base = shm_toc_allocate(pcxt->toc, km_sz);
@@ -323,6 +334,7 @@ mkt_pbuild_setup_shared(
 	lead->dsm_samples	  = dsm_samples;
 	lead->centroids_base  = centroids_base;
 	lead->cents			  = cents;
+	lead->rabitq_matrix	  = rabitq_matrix;
 	lead->km_workers_base = km_workers_base;
 	lead->dsm_ra		  = dsm_ra;
 	lead->dsm_tree		  = dsm_tree;

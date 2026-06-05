@@ -31,6 +31,7 @@
 #include "mkt_pg.h"
 #include "mkt_vector.h"
 #include "mktann_build.h"
+#include "quant/matrix.h"
 
 /*
  * PG-specific shared build state: the neutral MktBuildShared plus the relation
@@ -274,6 +275,8 @@ mkt_pbuild_setup_shared(
 	/* K-means shared centroids + norms (root level, k=km_k) */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_dsm_centroids_size(km_k, dim));
+	/* RaBitQ rotation matrix — generated once, shared by all participants. */
+	shm_toc_estimate_chunk(&pcxt->estimator, mkt_dsm_rabitq_matrix_size(dim));
 	/* K-means per-worker accumulators */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
@@ -313,10 +316,10 @@ mkt_pbuild_setup_shared(
 		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
 	}
 
-	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
-	 * tree, posting_queues, worker_output, wal, buffer, partials
+	/* nkeys: shared, barrier, samples, centroids, rabitq_matrix, km_workers,
+	 * root_assign, tree, posting_queues, worker_output, wal, buffer, partials
 	 * + optionally query_text */
-	int nkeys = 12;
+	int nkeys = 13;
 	if (debug_query_string)
 		nkeys++;
 	shm_toc_estimate_keys(&pcxt->estimator, nkeys);
@@ -385,6 +388,14 @@ mkt_pbuild_setup_shared(
 	memset(centroids_base, 0, cent_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CENTROIDS, centroids_base);
 	float *cents = mkt_dsm_centroids(centroids_base);
+
+	/* RaBitQ rotation matrix: generate the orthogonal matrix once here so the
+	 * participants build their RaBitQParams from it (create_from_matrix)
+	 * rather than each regenerating the identical matrix from the seed. */
+	float *rabitq_matrix =
+			shm_toc_allocate(pcxt->toc, mkt_dsm_rabitq_matrix_size(dim));
+	mkt_random_orthogonal_matrix(rabitq_matrix, dim, rabitq_seed);
+	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_RABITQ_MATRIX, rabitq_matrix);
 
 	/* Per-worker k-means accumulators */
 	Size  km_sz			  = mkt_dsm_km_workers_size(nparticipants, km_k, dim);
@@ -458,6 +469,7 @@ mkt_pbuild_setup_shared(
 	lead->dsm_samples	  = dsm_samples;
 	lead->centroids_base  = centroids_base;
 	lead->cents			  = cents;
+	lead->rabitq_matrix	  = rabitq_matrix;
 	lead->km_workers_base = km_workers_base;
 	lead->dsm_ra		  = dsm_ra;
 	lead->dsm_tree		  = dsm_tree;

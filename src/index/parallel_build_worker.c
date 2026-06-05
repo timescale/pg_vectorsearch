@@ -522,7 +522,12 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	shm_mq_set_sender(mq, MyProc);
 	shm_mq_handle *qhandle = shm_mq_attach(mq, seg, NULL);
 
-	RaBitQParams *rq_params = mkt_rabitq_create(dim, shared->rabitq_seed);
+	/* Build the RaBitQ params from the leader's shared rotation matrix rather
+	 * than regenerating the identical orthogonal matrix per worker. */
+	const float *rabitq_matrix =
+			shm_toc_lookup(toc, MKT_DSM_KEY_RABITQ_MATRIX, false);
+	RaBitQParams *rq_params = mkt_rabitq_create_from_matrix(
+			dim, shared->rabitq_seed, rabitq_matrix);
 
 	const float *leaf_cents	  = hk_leaf_centroids(tree);
 	float		*pt_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
