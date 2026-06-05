@@ -500,40 +500,10 @@ mkt_posting_derive_f_error(float f_add, float f_rescale, Dimension dim)
 #define derive_f_error mkt_posting_derive_f_error
 
 /*
- * Save page to the deferred batch output. Grows the pages array
- * dynamically in the builder's output context (batch_ctx) so the batch
- * survives the builder and any transient per-worker scratch context.
- * The current context is switched only around the (re)allocation;
- * since batch_ctx is allocated into by a single builder it is safe to
- * grow concurrently with other builders' batches. Falls back to the
- * current context when no output context is set.
- */
-static void
-batch_save_page(MktPostingBuilder *builder)
-{
-	MktPostingBatch *b = &builder->batch;
-	if (b->count >= b->capacity)
-	{
-		uint32_t new_cap = b->capacity * 2;
-		if (new_cap < 8)
-			new_cap = 8;
-		MktMemCtx old = (builder->batch_ctx != NULL)
-							  ? mkt_memctx_switch(builder->batch_ctx)
-							  : NULL;
-		b->pages	  = mkt_realloc(b->pages, (size_t)new_cap * BLCKSZ);
-		b->capacity	  = new_cap;
-		if (builder->batch_ctx != NULL)
-			mkt_memctx_switch(old);
-	}
-	memcpy(b->pages + (size_t)b->count * BLCKSZ, builder->mem_page, BLCKSZ);
-	b->count++;
-}
-
-/*
  * Flush the in-memory page.
  *
- * Deferred mode (storage == NULL): saves the page to the batch
- * output array. No block numbers, no chain linking.
+ * Deferred mode (storage == NULL): streams the full page to the page sink
+ * (the leader writes it). No block numbers, no chain linking.
  *
  * Direct mode (storage != NULL): writes to storage and links
  * into the chain. Prefers reserved contiguous blocks.
@@ -556,16 +526,11 @@ flush_page(MktPostingBuilder *builder)
 	if (builder->storage == NULL)
 	{
 		/*
-		 * Deferred mode. With a page sink set (PG parallel build), stream
-		 * the full page to the sink — the leader writes it — for bounded
-		 * memory. Otherwise accumulate it in the batch (standalone tests /
-		 * AoS conversion).
+		 * Deferred mode: stream the full page to the sink — the leader writes
+		 * it — for bounded memory.
 		 */
-		if (builder->page_sink != NULL)
-			builder->page_sink(
-					builder->sink_ctx, builder->cluster_id, builder->mem_page);
-		else
-			batch_save_page(builder);
+		builder->page_sink(
+				builder->sink_ctx, builder->cluster_id, builder->mem_page);
 		builder->is_first = false;
 		builder->page_ops->reinit_page(builder);
 		builder->page_dirty = false;
@@ -1034,20 +999,6 @@ mkt_posting_builder_finish_partial(MktPostingBuilder *builder)
 }
 
 void
-mkt_posting_builder_take_batch(
-		MktPostingBuilder *builder, MktPostingBatch *out)
-{
-	*out		   = builder->batch;
-	builder->batch = (MktPostingBatch){0};
-}
-
-void
-mkt_posting_builder_set_batch_ctx(MktPostingBuilder *builder, MktMemCtx ctx)
-{
-	builder->batch_ctx = ctx;
-}
-
-void
 mkt_posting_builder_set_page_sink(
 		MktPostingBuilder *builder,
 		void (*sink)(void *ctx, uint32_t cluster_id, const char *page),
@@ -1067,12 +1018,6 @@ mkt_posting_builder_cleanup(MktPostingBuilder *builder)
 		mkt_free(builder->enc_buf);
 		builder->enc_buf = NULL;
 	}
-	/*
-	 * Batch pages live in builder->batch_ctx (or the current context) and
-	 * are released when that context is reset or deleted — nothing to free
-	 * here. Any untaken batch is simply abandoned to its context.
-	 */
-	builder->batch = (MktPostingBatch){0};
 }
 
 /* ----------------------------------------------------------------

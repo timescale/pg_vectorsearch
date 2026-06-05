@@ -1299,8 +1299,7 @@ mkt_index_build(
 						idx->leaf_centroids,
 						idx->pt_centroids,
 						&reserve,
-						t_partials,
-						NULL /* batch_ctx unused in direct mode */);
+						t_partials);
 			}
 
 			ParPostingCtx posting_ctx = {

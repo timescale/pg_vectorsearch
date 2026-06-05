@@ -190,22 +190,6 @@ typedef struct FsGroupStage
 } FsGroupStage;
 
 /* ----------------------------------------------------------------
- * Deferred batch output
- *
- * When a builder runs in deferred mode (storage == NULL), complete
- * pages accumulate here instead of being written to storage.
- * Each page is a full BLCKSZ buffer with content laid out but
- * without assigned block numbers or chain links.
- * ---------------------------------------------------------------- */
-
-typedef struct MktPostingBatch
-{
-	char	*pages;
-	uint32_t count;
-	uint32_t capacity;
-} MktPostingBatch;
-
-/* ----------------------------------------------------------------
  * Unified builder state
  * ---------------------------------------------------------------- */
 
@@ -237,25 +221,12 @@ typedef struct MktPostingBuilder
 	/* Page format dispatch */
 	const MktPostingPageOps *page_ops;
 
-	/* Deferred batch output (when storage == NULL) */
-	MktPostingBatch batch;
-
 	/*
-	 * Output context for deferred batch pages. Pages are (re)allocated
-	 * here rather than in the current context, so the batch outlives the
-	 * builder and any transient per-worker scratch context. Set via
-	 * mkt_posting_builder_set_batch_ctx(); when NULL the current context
-	 * is used (single-threaded callers).
-	 */
-	MktMemCtx batch_ctx;
-
-	/*
-	 * Optional full-page sink for deferred mode. When set, a completed
-	 * page is handed to this callback instead of being accumulated in
-	 * `batch` — used by the PG parallel build to stream full pages to the
-	 * leader (over shm_mq) so worker memory stays bounded to one working
-	 * page per cluster. The page's cluster id and flags (first vs
-	 * continuation) are carried in the page itself.
+	 * Full-page sink for deferred mode (storage == NULL). A completed page is
+	 * handed to this callback — the parallel build streams full pages to the
+	 * leader (over shm_mq) so worker memory stays bounded to one working page
+	 * per cluster. The page's cluster id and flags (first vs continuation) are
+	 * carried in the page itself.
 	 */
 	void (*page_sink)(void *ctx, uint32_t cluster_id, const char *page);
 	void *sink_ctx;
@@ -383,26 +354,6 @@ mkt_posting_builder_tail(const MktPostingBuilder *b)
 {
 	return b->prev_blkno;
 }
-
-/*
- * Transfer batch ownership from builder to output struct.
- * After this call, the builder's batch is empty (zeroed) and
- * the caller owns the pages buffer.
- */
-void mkt_posting_builder_take_batch(
-		MktPostingBuilder *builder, MktPostingBatch *out);
-
-/*
- * Set the output context for deferred batch pages (storage == NULL).
- * Pages accumulated by the builder are allocated here so they survive
- * the builder and any transient per-worker scratch context. The
- * context must outlive whoever consumes the pages taken via
- * take_batch. Callers running multiple builders concurrently must give
- * each builder its own context (arena allocation is not thread-safe
- * within a single context).
- */
-void
-mkt_posting_builder_set_batch_ctx(MktPostingBuilder *builder, MktMemCtx ctx);
 
 /*
  * Set a full-page sink for deferred mode (storage == NULL). When set,

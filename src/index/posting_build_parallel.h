@@ -74,22 +74,6 @@ typedef struct MktPostingWorkerState
 	BlockNumber		  *heads;	 /* [nlist] flushed chain heads */
 	BlockNumber		  *tails;	 /* [nlist] flushed chain tails */
 
-	/* Deferred batch output: per-cluster batch of complete pages.
-	 * Populated by worker_finish when storage == NULL. */
-	MktPostingBatch *batches; /* [nlist] */
-
-	/* Memory context this worker accumulates its deferred batch pages in.
-	 * Each worker owns its own context and writes only into it; the
-	 * driver transfers the finished pages to the leader. In PostgreSQL a
-	 * worker is a separate process: it passes its process-local context,
-	 * copies the pages into shared memory after the scan, and may then
-	 * release the context (the leader materializes from shared memory). In
-	 * standalone a worker is a thread sharing the leader's address space,
-	 * so the leader reads the pages in place and the context must live
-	 * until mkt_posting_materialize() completes. NULL in direct mode
-	 * (storage != NULL). */
-	MktMemCtx batch_ctx;
-
 	/* Shared partial page buffer: after finish, each worker's
 	 * partial page for cluster c is at partials[worker_id * nlist + c].
 	 * The buffer is provided by the caller (thread-local memory in
@@ -97,11 +81,10 @@ typedef struct MktPostingWorkerState
 	 * cluster. The page data is BLCKSZ bytes per slot. */
 	char *partials; /* [nlist * BLCKSZ], caller-owned */
 
-	/* Optional full-page sink (deferred mode). When set, each builder
-	 * streams its completed pages to this callback instead of
-	 * accumulating them — the PG parallel build uses it to stream pages
-	 * to the leader over shm_mq. Applied to every builder in
-	 * ensure_builder. NULL = accumulate in batches (standalone). */
+	/* Full-page sink for deferred mode (storage == NULL): each builder
+	 * streams its completed pages to this callback, which writes/forwards
+	 * them — the parallel build uses it to stream pages to the leader over
+	 * shm_mq. Applied to every builder in ensure_builder. */
 	void (*page_sink)(void *ctx, uint32_t cluster_id, const char *page);
 	void *sink_ctx;
 } MktPostingWorkerState;
@@ -117,8 +100,7 @@ void mkt_posting_worker_init(
 		const float			  *leaf_centroids,
 		const float			  *pt_centroids,
 		MktPostingReserve	  *reserve,
-		char				  *partials,
-		MktMemCtx			   batch_ctx);
+		char				  *partials);
 
 /*
  * Set a full-page sink applied to every builder this worker creates
@@ -199,36 +181,6 @@ void mkt_posting_finalize(
 		uint32_t			   nworkers,
 		MktStorage			  *storage,
 		MktPostingReserve	  *reserve,
-		const float			  *leaf_centroids,
-		const float			  *pt_centroids,
-		Dimension			   dim,
-		bool				   fastscan,
-		MktPostingBuildResult *result);
-
-/*
- * Materialize deferred batch output into storage.
- *
- * Workers produce pages in deferred mode (storage == NULL),
- * accumulating complete pages in MktPostingBatch arrays. This
- * function takes all worker output, reserves contiguous blocks,
- * writes pages to storage, and links chains.
- *
- * For AoS: partial pages (in the partials buffer) are merged
- * across workers into optimally packed pages before writing.
- *
- * worker_batches: [nworkers] arrays of MktPostingBatch[nlist]
- * partials: [nworkers * nlist * BLCKSZ] or NULL (fastscan)
- * worker_active: [nworkers][nlist]
- *
- * result: output — caller must free result->heads
- */
-void mkt_posting_materialize(
-		MktPostingBatch		 **worker_batches,
-		char				  *partials,
-		bool				 **worker_active,
-		uint32_t			   nworkers,
-		uint32_t			   nlist,
-		MktStorage			  *storage,
 		const float			  *leaf_centroids,
 		const float			  *pt_centroids,
 		Dimension			   dim,

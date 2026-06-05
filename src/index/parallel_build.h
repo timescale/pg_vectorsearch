@@ -375,9 +375,9 @@ extern void mkt_km_assign_and_accumulate_filtered(
 /* ----------------------------------------------------------------
  * Phase 3: Posting build callback — shared by leader and workers
  *
- * Uses MktPostingWorkerState in deferred batch mode (storage=NULL).
- * After the heap scan, batch pages are copied to DSM. Leader
- * reconstructs batches and calls mkt_posting_materialize().
+ * Uses MktPostingWorkerState in deferred mode (storage=NULL): each worker
+ * streams its completed pages to the leader over its shm_mq queue and the
+ * leader places them, holding only a trailing partial page per cluster.
  * ---------------------------------------------------------------- */
 
 typedef struct PostingCbState

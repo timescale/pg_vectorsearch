@@ -552,8 +552,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			leaf_cents,
 			pt_centroids,
 			NULL,
-			my_partials,
-			worker_ctx);
+			my_partials);
 
 	/* Stream each completed full page to the leader over the queue
 	 * instead of accumulating it; only the trailing partial per cluster
