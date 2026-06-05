@@ -14,6 +14,7 @@
 #include "index/posting_convert.h"
 #include "index/posting_page.h"
 #include "index/posting_scan.h"
+#include "index/storage.h"
 #include "mkt_test.h"
 #include "quant/fastscan.h"
 #include "quant/rabitq.h"
@@ -281,6 +282,62 @@ TEST(query_exec_recall)
 	double recall = (double)total_hits / (nqueries * k);
 	/* With nprobe=10 on 20 clusters, recall should be reasonable */
 	ASSERT_TRUE(recall > 0.2, "recall should be > 0.2");
+
+	mkt_query_ctx_destroy(qctx);
+	mkt_index_destroy(idx);
+}
+
+/*
+ * Paged + parallel build runs the shared do_parallel_build driver (the same
+ * code path as the PG extension). Build, query, and check recall to confirm
+ * the driver produces a correct, queryable index in the standalone back-end.
+ */
+TEST(query_exec_recall_pages_parallel)
+{
+	uint32_t dim = 32, nvecs = 2000, k = 10;
+	float	*vecs = make_vectors(nvecs, dim, 42);
+
+	MktIndexConfig config = {
+			.nlist		   = 20,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = MKT_POSTING_FMT_PAGES,
+			.nworkers	   = 4, /* force the parallel driver */
+	};
+
+	MktIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "paged parallel build should succeed");
+
+	MktQueryCtx *qctx = mkt_query_ctx_create(idx, k, 20);
+
+	uint32_t total_hits = 0;
+	uint32_t nqueries	= 10;
+	for (uint32_t q = 0; q < nqueries; q++)
+	{
+		const float *query = vecs + (size_t)(q * 100) * dim;
+
+		uint32_t result_ids[10];
+		uint32_t count = mkt_query_exec(
+				qctx,
+				query,
+				k,
+				20,
+				MKT_DISTANCE_MODE_ASYMMETRIC,
+				true,
+				result_ids);
+
+		uint32_t gt_ids[10];
+		brute_force_knn(vecs, nvecs, dim, query, k, gt_ids);
+
+		for (uint32_t i = 0; i < count; i++)
+			for (uint32_t g = 0; g < k; g++)
+				if (result_ids[i] == gt_ids[g])
+					total_hits++;
+	}
+
+	double recall = (double)total_hits / (nqueries * k);
+	ASSERT_TRUE(recall > 0.2, "paged parallel recall should be > 0.2");
 
 	mkt_query_ctx_destroy(qctx);
 	mkt_index_destroy(idx);
@@ -601,4 +658,67 @@ TEST(bindings_kmeans_params)
 	ASSERT_TRUE(info.nlist > 0, "should have clusters");
 
 	mkt_handle_destroy(handle);
+}
+
+/* ----------------------------------------------------------------
+ * Regression: parallel fastscan build must not drop trailing partials
+ * ---------------------------------------------------------------- */
+
+/* Sum the entries actually written across all posting-list pages. */
+static uint32_t
+count_posting_entries(MktIndex *idx)
+{
+	MktStorage *st	  = idx->base.posting_storage;
+	uint32_t	total = 0;
+
+	for (uint32_t c = 0; c < idx->nlist; c++)
+	{
+		BlockNumber blk = idx->posting_heads[c];
+		while (blk != InvalidBlockNumber)
+		{
+			Page		pg	 = mkt_storage_read_page(st, blk);
+			BlockNumber next = mkt_posting_opaque(pg)->next_blkno;
+			total += mkt_posting_page_count(pg);
+			mkt_storage_release_page(st, blk);
+			blk = next;
+		}
+	}
+	return total;
+}
+
+/*
+ * Regression guard for the parallel fastscan build. Each worker streams its
+ * full pages to the leader and holds only its trailing (under-full) page per
+ * cluster; the leader folds those held partials into each list head during
+ * finalize, unpacking fastscan groups to re-pack them. With no SOAR/boundary
+ * replication every input vector is written to the posting pages exactly
+ * once — walk the pages and require all of them to survive (a dropped
+ * trailing partial would show up as written < nvecs).
+ */
+TEST(parallel_fastscan_no_lost_partials)
+{
+	uint32_t dim = 32, nvecs = 10000;
+	float	*vecs = make_vectors(nvecs, dim, 7);
+
+	MktIndexConfig config = {
+			.nlist		   = 8,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = MKT_POSTING_FMT_PAGES,
+			.fastscan	   = 8,
+			.nworkers	   = 4, /* force the shared parallel driver */
+	};
+
+	MktIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "parallel fastscan build should succeed");
+
+	uint32_t written = count_posting_entries(idx);
+	ASSERT_EQ(
+			nvecs,
+			written,
+			"every vector must be written to the posting pages (no dropped "
+			"trailing partials)");
+
+	mkt_index_destroy(idx);
 }

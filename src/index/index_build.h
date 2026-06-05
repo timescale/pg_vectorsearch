@@ -104,21 +104,22 @@ uint32_t
 mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out);
 
 /*
- * Find secondary cluster by plain distance (2nd-nearest centroid).
+ * Find secondary cluster by plain distance (2nd-nearest centroid),
+ * given a distance-sorted candidate list (e.g. from a tree beam
+ * descent). The nearest candidate that is not primary_cluster is the
+ * 2nd-nearest centroid.
  *
- * Returns the secondary cluster index, or primary_cluster if
- * the gap ratio exceeds epsilon (no replication needed).
+ * Returns the secondary cluster index, or primary_cluster if the gap
+ * ratio exceeds epsilon (no replication needed).
  * gap_ratio = (dist_2nd - dist_primary) / |dist_primary|
  */
 uint32_t mkt_find_secondary_cluster(
-		const float	  *vec,
-		const float	  *leaf_centroids,
-		uint32_t	   nleaves,
-		Dimension	   dim,
-		DistanceMetric metric,
-		uint32_t	   primary_cluster,
-		Distance	   primary_dist,
-		double		   epsilon);
+		const uint32_t *cand_leaves,
+		const Distance *cand_dists,
+		uint32_t		ncand,
+		uint32_t		primary_cluster,
+		Distance		primary_dist,
+		double			epsilon);
 
 /*
  * Find secondary cluster via SOAR (Spilling with Orthogonality-

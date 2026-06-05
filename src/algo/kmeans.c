@@ -405,6 +405,210 @@ kmeans_max_centroid_shift_between(
 	return max_shift;
 }
 
+MKT_TARGET_CLONES void
+kmeans_assign_accumulate(
+		const float	   *vectors,
+		const uint32_t *indices,
+		uint32_t		start,
+		uint32_t		end,
+		const float	   *centroids,
+		const float	   *norms_c,
+		uint32_t		k,
+		Dimension		dim,
+		DistanceMetric	metric,
+		const uint32_t *filter,
+		uint32_t		filter_val,
+		float		   *out_sums,
+		uint32_t	   *out_cnts,
+		float		   *out_cost)
+{
+	float cost = 0.0f;
+
+	for (uint32_t i = start; i < end; i++)
+	{
+		if (filter != NULL && filter[i] != filter_val)
+			continue;
+
+		uint32_t	 idx	= indices ? indices[i] : i;
+		const float *vec	= vectors + (size_t)idx * dim;
+		float		 best_d = __FLT_MAX__;
+		uint32_t	 best_c = 0;
+
+		for (uint32_t c = 0; c < k; c++)
+		{
+			const float *cent = centroids + (size_t)c * dim;
+			float		 d;
+
+			switch (metric)
+			{
+			case DISTANCE_L2:
+			{
+				float nx  = mkt_l2_norm_squared(vec, dim);
+				float dot = mkt_dot_product(vec, cent, dim);
+				d		  = nx + norms_c[c] - 2.0f * dot;
+				if (d < 0.0f)
+					d = 0.0f;
+				break;
+			}
+			case DISTANCE_INNER_PRODUCT:
+				d = -mkt_dot_product(vec, cent, dim);
+				break;
+			case DISTANCE_COSINE:
+				d = 1.0f - mkt_dot_product(vec, cent, dim);
+				break;
+			}
+
+			if (d < best_d)
+			{
+				best_d = d;
+				best_c = c;
+			}
+		}
+
+		cost += best_d;
+		out_cnts[best_c]++;
+		float *sum = out_sums + (size_t)best_c * dim;
+		for (uint32_t d = 0; d < dim; d++)
+			sum[d] += vec[d];
+	}
+
+	*out_cost += cost;
+}
+
+MKT_TARGET_CLONES void
+kmeans_assign(
+		const float	  *vectors,
+		uint32_t	   start,
+		uint32_t	   end,
+		const float	  *centroids,
+		const float	  *norms_c,
+		uint32_t	   k,
+		Dimension	   dim,
+		DistanceMetric metric,
+		uint32_t	  *out_assignments)
+{
+	for (uint32_t i = start; i < end; i++)
+	{
+		const float *vec	= vectors + (size_t)i * dim;
+		float		 best_d = __FLT_MAX__;
+		uint32_t	 best_c = 0;
+
+		for (uint32_t c = 0; c < k; c++)
+		{
+			const float *cent = centroids + (size_t)c * dim;
+			float		 d;
+
+			switch (metric)
+			{
+			case DISTANCE_L2:
+			{
+				float nx  = mkt_l2_norm_squared(vec, dim);
+				float dot = mkt_dot_product(vec, cent, dim);
+				d		  = nx + norms_c[c] - 2.0f * dot;
+				if (d < 0.0f)
+					d = 0.0f;
+				break;
+			}
+			case DISTANCE_INNER_PRODUCT:
+				d = -mkt_dot_product(vec, cent, dim);
+				break;
+			case DISTANCE_COSINE:
+				d = 1.0f - mkt_dot_product(vec, cent, dim);
+				break;
+			}
+
+			if (d < best_d)
+			{
+				best_d = d;
+				best_c = c;
+			}
+		}
+
+		out_assignments[i] = best_c;
+	}
+}
+
+float
+kmeans_merge_centroids(
+		float				  *centroids,
+		float				  *norms_c,
+		const float			  *old_cents,
+		const float *const	  *worker_sums,
+		const uint32_t *const *worker_cnts,
+		const float			  *worker_costs,
+		uint32_t			   nworkers,
+		uint32_t			   nlist,
+		Dimension			   dim,
+		DistanceMetric		   metric,
+		float				  *out_total_cost)
+{
+	/* Sum costs */
+	float total_cost = 0.0f;
+	for (uint32_t t = 0; t < nworkers; t++)
+		total_cost += worker_costs[t];
+	*out_total_cost = total_cost;
+
+	/* Merge per-worker accumulators */
+	float *new_cents = centroids;
+	memset(new_cents, 0, (size_t)nlist * dim * sizeof(float));
+
+	uint32_t *sizes = (uint32_t *)alloca(nlist * sizeof(uint32_t));
+	memset(sizes, 0, nlist * sizeof(uint32_t));
+
+	for (uint32_t t = 0; t < nworkers; t++)
+	{
+		const float	   *sums = worker_sums[t];
+		const uint32_t *cnts = worker_cnts[t];
+
+		for (uint32_t c = 0; c < nlist; c++)
+		{
+			sizes[c] += cnts[c];
+			float		*dst = new_cents + (size_t)c * dim;
+			const float *src = sums + (size_t)c * dim;
+			for (uint32_t d = 0; d < dim; d++)
+				dst[d] += src[d];
+		}
+	}
+
+	/* Divide by cluster size to get mean */
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		if (sizes[c] == 0)
+			continue;
+		float  inv	= 1.0f / (float)sizes[c];
+		float *cent = new_cents + (size_t)c * dim;
+		for (uint32_t d = 0; d < dim; d++)
+			cent[d] *= inv;
+	}
+
+	/* Normalize for cosine metric */
+	if (metric == DISTANCE_COSINE)
+	{
+		for (uint32_t c = 0; c < nlist; c++)
+		{
+			if (sizes[c] == 0)
+				continue;
+			float *cent = new_cents + (size_t)c * dim;
+			float  norm = mkt_l2_norm(cent, dim);
+			if (norm > 1e-10f)
+				mkt_vector_scale(cent, 1.0f / norm, cent, dim);
+		}
+	}
+
+	/* Convergence: max centroid shift (squared) */
+	float shift_sq = kmeans_max_centroid_shift_between(
+			centroids, old_cents, nlist, dim);
+
+	/* Precompute centroid norms for next iteration */
+	if (norms_c != NULL && metric == DISTANCE_L2)
+	{
+		for (uint32_t j = 0; j < nlist; j++)
+			norms_c[j] = mkt_l2_norm_squared(centroids + (size_t)j * dim, dim);
+	}
+
+	return shift_sq;
+}
+
 /*
  * Allocate working state for one k-means run.
  *
@@ -602,7 +806,16 @@ kmeans_run_one_impl(
 	void  *algo_state = algo->create ? algo->create(st) : NULL;
 	float *old_cents  = algo->update_bounds ? mkt_alloc(cent_bytes) : NULL;
 
-	kmeans_init_plusplus_impl(st, seed, ops);
+	if (opts->initial_centroids != NULL)
+	{
+		memcpy(st->centroids,
+			   opts->initial_centroids,
+			   (size_t)st->nlist * st->dim * sizeof(float));
+	}
+	else
+	{
+		kmeans_init_plusplus_impl(st, seed, ops);
+	}
 
 	/* Use fused iterate path for Lloyd with f32 vectors.
 	 * Works with or without a thread pool — serial fallback
@@ -802,11 +1015,6 @@ mkt_kmeans(
 	{
 		KMeansState *st = kmeans_state_create(
 				vectors, indices, vec_type, nvecs, dim, nlist, metric);
-
-		st->parallel_for = opts.parallel_for;
-		st->iterate		 = opts.iterate;
-		st->parallel_ctx = opts.parallel_ctx;
-		st->nthreads	 = opts.nthreads > 0 ? opts.nthreads : 1;
 
 		uint64_t seed = opts.seed + redo;
 

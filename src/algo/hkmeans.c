@@ -85,6 +85,7 @@ HKMeansResult *
 mkt_hkmeans_f32(
 		const float			*vectors,
 		uint32_t			 nvecs,
+		const uint32_t		*indices,
 		Dimension			 dim,
 		uint32_t			 nlist,
 		uint32_t			 fan_out,
@@ -107,13 +108,21 @@ mkt_hkmeans_f32(
 	uint32_t nnodes	 = 0;
 	uint32_t nleaves = 0;
 
-	/* BFS work queue. The root clusters all vectors via identity
-	 * mapping (vec_indices == NULL); children get explicit subsets. */
+	/* If caller provided indices, copy them as the root's
+	 * vec_indices so mkt_kmeans uses indirect access. */
+	uint32_t *root_indices = NULL;
+	if (indices != NULL)
+	{
+		root_indices = mkt_alloc(nvecs * sizeof(uint32_t));
+		memcpy(root_indices, indices, nvecs * sizeof(uint32_t));
+	}
+
+	/* BFS work queue */
 	HKWorkItem *queue  = mkt_alloc(max_nodes * sizeof(HKWorkItem));
 	uint32_t	q_tail = 0;
 
 	queue[q_tail++] = (HKWorkItem){
-			.vec_indices  = NULL,
+			.vec_indices  = root_indices,
 			.count		  = nvecs,
 			.level		  = 0,
 			.idx_in_level = 0,
@@ -122,7 +131,7 @@ mkt_hkmeans_f32(
 	bool	  ok	 = true;
 	uint32_t *counts = mkt_alloc(fan_out * sizeof(uint32_t));
 
-	/* Local copy so a NULL caller still gets sane defaults. */
+	/* Mutable copy: initial_centroids applies only to root */
 	KMeansOptions local_opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	if (options != NULL)
 		local_opts = *options;
@@ -154,6 +163,9 @@ mkt_hkmeans_f32(
 				k,
 				metric,
 				&local_opts);
+
+		/* Initial centroids only for root node */
+		local_opts.initial_centroids = NULL;
 
 		if (km == NULL)
 		{
@@ -322,6 +334,222 @@ mkt_hkmeans_f32(
 	return result;
 }
 
+size_t
+mkt_hkmeans_max_blob_size(uint32_t nlist, uint32_t fan_out, Dimension dim)
+{
+	if (fan_out < 2)
+		fan_out = 2;
+
+	uint32_t nlevels = compute_nlevels(nlist, fan_out);
+	uint32_t nnodes	 = max_total_nodes(fan_out, nlevels);
+	/* Leaves are bounded by fan_out^nlevels (every leaf-parent full). */
+	uint32_t nleaves = power_u32(fan_out, nlevels);
+	/* Internal centroids: every non-leaf node holds up to fan_out of them. */
+	uint32_t intern_nodes = nlevels >= 2
+								  ? max_total_nodes(fan_out, nlevels - 1)
+								  : 0;
+
+	return sizeof(HKMeansResult) + (size_t)nnodes * sizeof(HKMeansNode) +
+		   (size_t)nleaves * dim * sizeof(float) +
+		   (size_t)intern_nodes * fan_out * dim * sizeof(float);
+}
+
+HKMeansResult *
+mkt_hkmeans_build_flat(
+		const float *centroids,
+		uint32_t	 nleaves,
+		uint32_t	 fan_out,
+		Dimension	 dim)
+{
+	if (centroids == NULL || nleaves == 0 || dim == 0)
+		return NULL;
+
+	size_t hdr_sz	= sizeof(HKMeansResult);
+	size_t nodes_sz = sizeof(HKMeansNode); /* single leaf-parent root */
+	size_t leaf_sz	= (size_t)nleaves * dim * sizeof(float);
+	size_t total	= hdr_sz + nodes_sz + leaf_sz;
+
+	HKMeansResult *result = mkt_alloc(total);
+	memset(result, 0, total);
+
+	result->nodes_offset = (uint32_t)hdr_sz;
+	result->leaf_offset	 = (uint32_t)(hdr_sz + nodes_sz);
+	result->total_size	 = (uint32_t)total;
+	result->nnodes		 = 1;
+	result->nlevels		 = 1;
+	result->nleaves		 = nleaves;
+	result->fan_out		 = fan_out;
+	result->dim			 = dim;
+
+	HKMeansNode *root	  = hk_nodes(result);
+	root->level			  = 0;
+	root->nchildren		  = nleaves;
+	root->first_child	  = HKMEANS_NO_CHILD; /* leaf-parent */
+	root->first_leaf	  = 0;
+	root->centroid_offset = result->leaf_offset;
+	memcpy(hk_leaf_centroids(result), centroids, leaf_sz);
+
+	return result;
+}
+
+HKMeansResult *
+mkt_hkmeans_graft(
+		const float				   *root_centroids,
+		uint32_t					fan_out,
+		const HKMeansResult *const *subtrees,
+		Dimension					dim)
+{
+	if (root_centroids == NULL || fan_out == 0 || dim == 0)
+		return NULL;
+
+	/* Subtree depth (uniform across non-NULL subtrees). */
+	uint32_t sub_levels = 0;
+	for (uint32_t c = 0; c < fan_out; c++)
+		if (subtrees[c] != NULL)
+		{
+			sub_levels = subtrees[c]->nlevels;
+			break;
+		}
+	if (sub_levels == 0)
+		return NULL;
+
+	uint32_t nlevels = sub_levels + 1;
+
+	/* Totals: root + all subtree nodes; leaves and internal centroids carried
+	 * over from the subtrees (a node keeps its leaf/internal role, just one
+	 * level deeper), plus the root's fan_out internal centroids. */
+	uint32_t nnodes		= 1;
+	uint32_t nleaves	= 0;
+	size_t	 sub_intern = 0;
+	for (uint32_t c = 0; c < fan_out; c++)
+	{
+		const HKMeansResult *s = subtrees[c];
+		if (s == NULL)
+			continue;
+		nnodes += s->nnodes;
+		nleaves += s->nleaves;
+		sub_intern += (size_t)s->total_size - sizeof(HKMeansResult) -
+					  (size_t)s->nnodes * sizeof(HKMeansNode) -
+					  (size_t)s->nleaves * dim * sizeof(float);
+	}
+
+	size_t hdr_sz	 = sizeof(HKMeansResult);
+	size_t nodes_sz	 = (size_t)nnodes * sizeof(HKMeansNode);
+	size_t leaf_sz	 = (size_t)nleaves * dim * sizeof(float);
+	size_t intern_sz = (size_t)fan_out * dim * sizeof(float) + sub_intern;
+	size_t total	 = hdr_sz + nodes_sz + leaf_sz + intern_sz;
+
+	HKMeansResult *result = mkt_alloc(total);
+	memset(result, 0, total);
+
+	result->nodes_offset = (uint32_t)hdr_sz;
+	result->leaf_offset	 = (uint32_t)(hdr_sz + nodes_sz);
+	result->total_size	 = (uint32_t)total;
+	result->nnodes		 = nnodes;
+	result->nlevels		 = nlevels;
+	result->nleaves		 = nleaves;
+	result->fan_out		 = fan_out;
+	result->dim			 = dim;
+
+	HKMeansNode *nodes		= hk_nodes(result);
+	float		*leaf_cents = hk_leaf_centroids(result);
+	char		*intern_dst = (char *)result + hdr_sz + nodes_sz + leaf_sz;
+
+	/*
+	 * Assign final node indices in global BFS order: index 0 is the root, then
+	 * for each subtree level (0..sub_levels-1) every subtree's nodes at that
+	 * level, in subtree order. This keeps each node's children contiguous (the
+	 * descent relies on first_child + child_index) — the root's fan_out
+	 * children land at indices 1..fan_out, and within a subtree the per-level
+	 * order is preserved so a node's children stay adjacent.
+	 */
+	uint32_t **gmap = mkt_alloc(fan_out * sizeof(uint32_t *));
+	for (uint32_t c = 0; c < fan_out; c++)
+		gmap[c] = subtrees[c]
+						? mkt_alloc(subtrees[c]->nnodes * sizeof(uint32_t))
+						: NULL;
+
+	uint32_t next = 1;
+	for (uint32_t sl = 0; sl < sub_levels; sl++)
+		for (uint32_t c = 0; c < fan_out; c++)
+		{
+			const HKMeansResult *s = subtrees[c];
+			if (s == NULL)
+				continue;
+			const HKMeansNode *sn = hk_nodes(s);
+			for (uint32_t j = 0; j < s->nnodes; j++)
+				if (sn[j].level == sl)
+					gmap[c][j] = next++;
+		}
+
+	/* Root node: fan_out children at indices 1..fan_out. */
+	nodes[0].level			 = 0;
+	nodes[0].nchildren		 = fan_out;
+	nodes[0].first_child	 = 1;
+	nodes[0].first_leaf		 = 0;
+	nodes[0].centroid_offset = (uint32_t)((size_t)(intern_dst -
+												   (char *)result));
+	memcpy(intern_dst, root_centroids, (size_t)fan_out * dim * sizeof(float));
+	intern_dst += (size_t)fan_out * dim * sizeof(float);
+
+	/* Fill subtree nodes in the same BFS order; accumulate the global leaf
+	 * offset as leaf-parents are encountered (all at the deepest level). */
+	uint32_t leaf_off = 0;
+	for (uint32_t sl = 0; sl < sub_levels; sl++)
+		for (uint32_t c = 0; c < fan_out; c++)
+		{
+			const HKMeansResult *s = subtrees[c];
+			if (s == NULL)
+				continue;
+			const HKMeansNode *sn = hk_nodes(s);
+			for (uint32_t j = 0; j < s->nnodes; j++)
+			{
+				if (sn[j].level != sl)
+					continue;
+
+				HKMeansNode		  *fn		 = &nodes[gmap[c][j]];
+				const HKMeansNode *src_node	 = &sn[j];
+				const float		  *src_cents = hk_node_centroids(s, src_node);
+				bool leaf_parent			 = (sn[j].level == sub_levels - 1);
+
+				fn->level		= sl + 1;
+				fn->nchildren	= src_node->nchildren;
+				fn->first_child = src_node->first_child == HKMEANS_NO_CHILD
+										? HKMEANS_NO_CHILD
+										: gmap[c][src_node->first_child];
+
+				if (leaf_parent)
+				{
+					fn->first_leaf		= leaf_off;
+					fn->centroid_offset = result->leaf_offset +
+										  (uint32_t)((size_t)leaf_off * dim *
+													 sizeof(float));
+					memcpy(leaf_cents + (size_t)leaf_off * dim,
+						   src_cents,
+						   (size_t)src_node->nchildren * dim * sizeof(float));
+					leaf_off += src_node->nchildren;
+				}
+				else
+				{
+					fn->first_leaf		= 0;
+					fn->centroid_offset = (uint32_t)((size_t)(intern_dst -
+															  (char *)result));
+					memcpy(intern_dst,
+						   src_cents,
+						   (size_t)src_node->nchildren * dim * sizeof(float));
+					intern_dst += (size_t)src_node->nchildren * dim *
+								  sizeof(float);
+				}
+			}
+		}
+
+	for (uint32_t c = 0; c < fan_out; c++)
+		mkt_free(gmap[c]);
+	mkt_free(gmap);
+
+	return result;
+}
+
 uint32_t
 mkt_hkmeans_assign(
 		const HKMeansResult *tree,
@@ -369,10 +597,132 @@ mkt_hkmeans_assign(
 	return 0;
 }
 
-void
-mkt_hkmeans_result_destroy(HKMeansResult *result)
+/*
+ * Insert (id, d) into an unsorted bounded set of the `cap` smallest
+ * entries. Keeps at most `cap` items; evicts the current max when full.
+ */
+static inline void
+topk_insert(
+		uint32_t *ids,
+		Distance *dists,
+		uint32_t *n,
+		uint32_t  cap,
+		uint32_t  id,
+		Distance  d)
 {
-	/* The whole tree is one contiguous allocation. */
-	if (result != NULL)
-		mkt_free(result);
+	if (*n < cap)
+	{
+		ids[*n]	  = id;
+		dists[*n] = d;
+		(*n)++;
+		return;
+	}
+
+	/* Full: replace the worst entry if this one is better. */
+	uint32_t worst_i = 0;
+	Distance worst_d = dists[0];
+	for (uint32_t i = 1; i < cap; i++)
+		if (dists[i] > worst_d)
+		{
+			worst_d = dists[i];
+			worst_i = i;
+		}
+	if (d < worst_d)
+	{
+		ids[worst_i]   = id;
+		dists[worst_i] = d;
+	}
+}
+
+/* Insertion sort by ascending distance (n is small, <= MKT_HK_MAX_TOPK). */
+static inline void
+topk_sort(uint32_t *ids, Distance *dists, uint32_t n)
+{
+	for (uint32_t i = 1; i < n; i++)
+	{
+		Distance d	= dists[i];
+		uint32_t id = ids[i];
+		uint32_t j	= i;
+		while (j > 0 && dists[j - 1] > d)
+		{
+			dists[j] = dists[j - 1];
+			ids[j]	 = ids[j - 1];
+			j--;
+		}
+		dists[j] = d;
+		ids[j]	 = id;
+	}
+}
+
+uint32_t
+mkt_hkmeans_assign_topk(
+		const HKMeansResult *tree,
+		const float			*vec,
+		DistanceMetric		 metric,
+		uint32_t			 k,
+		uint32_t			 beam_width,
+		uint32_t			*out_leaves,
+		Distance			*out_dists)
+{
+	if (k == 0)
+		return 0;
+	if (k > MKT_HK_MAX_TOPK)
+		k = MKT_HK_MAX_TOPK;
+	if (beam_width < 1)
+		beam_width = 1;
+	if (beam_width > MKT_HK_MAX_TOPK)
+		beam_width = MKT_HK_MAX_TOPK;
+
+	const Dimension	   dim	 = tree->dim;
+	const HKMeansNode *nodes = hk_nodes(tree);
+
+	/* Current beam: indices into nodes[] for the next level to expand. */
+	uint32_t beam[MKT_HK_MAX_TOPK];
+	uint32_t beam_n = 1;
+	beam[0]			= 0; /* root */
+
+	for (uint32_t level = 0; level < tree->nlevels; level++)
+	{
+		bool	 is_leaf = (level == tree->nlevels - 1);
+		uint32_t cap	 = is_leaf ? k : beam_width;
+
+		/* Bounded best-`cap` collection of this level's candidates. For
+		 * internal levels these are child node indices; at the leaf
+		 * level they are global leaf indices. */
+		uint32_t best_id[MKT_HK_MAX_TOPK];
+		Distance best_d[MKT_HK_MAX_TOPK];
+		uint32_t best_n = 0;
+
+		for (uint32_t b = 0; b < beam_n; b++)
+		{
+			const HKMeansNode *node	 = &nodes[beam[b]];
+			const float		  *cents = hk_node_centroids(tree, node);
+			for (uint32_t c = 0; c < node->nchildren; c++)
+			{
+				VectorRef qref = {.data = vec, .dim = dim};
+				VectorRef cref = {.data = cents + (size_t)c * dim, .dim = dim};
+				Distance  d	   = mkt_distance(qref, cref, metric);
+				uint32_t  id   = is_leaf ? node->first_leaf + c
+										 : node->first_child + c;
+				topk_insert(best_id, best_d, &best_n, cap, id, d);
+			}
+		}
+
+		if (is_leaf)
+		{
+			topk_sort(best_id, best_d, best_n);
+			for (uint32_t i = 0; i < best_n; i++)
+			{
+				out_leaves[i] = best_id[i];
+				if (out_dists != NULL)
+					out_dists[i] = best_d[i];
+			}
+			return best_n;
+		}
+
+		memcpy(beam, best_id, best_n * sizeof(uint32_t));
+		beam_n = best_n;
+	}
+
+	return 0;
 }

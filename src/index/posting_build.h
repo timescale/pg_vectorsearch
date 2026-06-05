@@ -14,6 +14,7 @@
 
 #include "algo/hkmeans.h"
 #include "core/atomics.h"
+#include "core/memory.h"
 #include "index/posting_page.h"
 #include "index/storage.h"
 #include "mkt_types.h"
@@ -40,10 +41,35 @@ typedef struct MktBuildAssignment
 	const float *enc_vector;
 } MktBuildAssignment;
 
+/*
+ * Beam search parameters for the boundary (border-neighbor) secondary
+ * search. The boundary cluster is the 2nd-nearest centroid by plain
+ * distance, so a tree beam-descent finds it far cheaper than scanning
+ * all leaves. SOAR's orthogonality-amplified search stays exact (its
+ * optimum need not be among the nearest-by-distance leaves).
+ */
+#define MKT_SECONDARY_TOPK		 8
+#define MKT_SECONDARY_BEAM_WIDTH 16
+
+/* Vectors per batch for the GEMM secondary path (amortizes centroid
+ * reads across the batch). */
+#define MKT_SECONDARY_BATCH 256
+
+/* Centroids per tile. The secondary GEMM streams centroids in tiles so
+ * the working set is B*TILE (not B*nleaves), keeping brute-force viable
+ * at any nlist — the fallback to tree descent is then a performance
+ * choice, not a memory limit. A small tile also keeps the per-worker
+ * B*TILE matrix hot in cache (the workers share L3), which measured
+ * faster than one large GEMM; ~512 is past the plateau without losing
+ * sgemm efficiency. */
+#define MKT_SECONDARY_TILE 512
+
 typedef struct MktBuildWorkerBufs
 {
-	float *norm_buf;	 /* [dim] for cosine normalization */
-	float *residual_buf; /* [dim] for SOAR residual computation */
+	float	 *norm_buf;		/* [dim] for cosine normalization */
+	float	 *residual_buf; /* [dim] for SOAR residual computation */
+	uint32_t *cand_leaves;	/* [MKT_SECONDARY_TOPK] beam candidates */
+	Distance *cand_dists;	/* [MKT_SECONDARY_TOPK] candidate distances */
 } MktBuildWorkerBufs;
 
 MktBuildWorkerBufs mkt_build_worker_bufs_create(Dimension dim);
@@ -54,6 +80,77 @@ MktBuildAssignment mkt_build_assign_vector(
 		const float			 *vec,
 		const MktBuildParams *params,
 		MktBuildWorkerBufs	 *bufs);
+
+/*
+ * Primary cluster via tree descent, plus the encoded vector written into
+ * enc_out[dim] (normalized for cosine, copied otherwise). Used by the
+ * batched secondary path, which needs the encoded vectors contiguous.
+ * Returns the primary cluster; *out_dist receives its distance.
+ */
+uint32_t mkt_build_assign_primary(
+		const HKMeansResult	 *tree,
+		const float			 *vec,
+		const MktBuildParams *params,
+		float				 *enc_out,
+		Distance			 *out_dist);
+
+/* ----------------------------------------------------------------
+ * Batched secondary (boundary + SOAR) assignment
+ *
+ * Primary assignment stays per-vector (tree descent); the secondary
+ * search is the memory-bandwidth-bound part because every vector scans
+ * all leaf centroids. Batching B vectors lets the centroid block be read
+ * once and reused across the batch via two sgemm calls (V·Cᵀ for the
+ * boundary/L2 distances, R·Cᵀ for SOAR), turning a memory-bound scan
+ * into a compute-bound GEMM. Requires CBLAS; callers fall back to the
+ * per-vector path when mkt_secondary_batch_available() is false.
+ * ---------------------------------------------------------------- */
+
+typedef struct MktSecondaryBatch
+{
+	uint32_t	 max_batch;
+	uint32_t	 nleaves;
+	Dimension	 dim;
+	const float *leaf_centroids; /* [nleaves * dim], not owned */
+	float		*cent_norms;	 /* [nleaves] ||c||^2 */
+	float		*vc;			 /* [max_batch * TILE] <v, c> per tile */
+	float		*rc;			 /* [max_batch * TILE] <r_hat, c> per tile */
+	float		*residuals;		 /* [max_batch * dim] normalized residuals */
+	float		*vec_norms;		 /* [max_batch] ||v||^2 */
+	float		*qrv;			 /* [max_batch] r_hat . v */
+	/* Per-query running reductions across centroid tiles. */
+	float	 *best2;	 /* [max_batch] best boundary distance (!= primary) */
+	uint32_t *c2;		 /* [max_batch] arg of best2 */
+	float	 *best_oa;	 /* [max_batch] best SOAR oa distance */
+	uint32_t *best_oa_c; /* [max_batch] arg of best_oa */
+} MktSecondaryBatch;
+
+/* True when CBLAS is available (the batched path needs sgemm). */
+bool mkt_secondary_batch_available(void);
+
+void mkt_secondary_batch_init(
+		MktSecondaryBatch *s,
+		const float		  *leaf_centroids,
+		uint32_t		   nleaves,
+		Dimension		   dim,
+		uint32_t		   max_batch);
+
+void mkt_secondary_batch_free(MktSecondaryBatch *s);
+
+/*
+ * Assign the secondary (replication) cluster for a batch of n <=
+ * max_batch encoded vectors. primary[]/primary_dist[] come from the
+ * per-vector tree descent. Writes out_secondary[n], using
+ * MKT_INVALID_CLUSTER where no replication applies.
+ */
+void mkt_secondary_batch_assign(
+		MktSecondaryBatch	 *s,
+		const float			 *vecs,
+		uint32_t			  n,
+		const uint32_t		 *primary,
+		const float			 *primary_dist,
+		const MktBuildParams *params,
+		uint32_t			 *out_secondary);
 
 /* ----------------------------------------------------------------
  * Page format ops — the only part that differs between formats
@@ -124,6 +221,16 @@ typedef struct MktPostingBuilder
 	/* Page format dispatch */
 	const MktPostingPageOps *page_ops;
 
+	/*
+	 * Full-page sink for deferred mode (storage == NULL). A completed page is
+	 * handed to this callback — the parallel build streams full pages to the
+	 * leader (over shm_mq) so worker memory stays bounded to one working page
+	 * per cluster. The page's cluster id and flags (first vs continuation) are
+	 * carried in the page itself.
+	 */
+	void (*page_sink)(void *ctx, uint32_t cluster_id, const char *page);
+	void *sink_ctx;
+
 	/* Format-specific state (only fastscan uses this) */
 	struct
 	{
@@ -182,13 +289,11 @@ void mkt_posting_builder_init_continuation_fastscan(
 		uint32_t			cluster_id,
 		const float		   *centroid);
 
-void mkt_posting_builder_set_reserve(
-		MktPostingBuilder *builder, BlockNumber start, uint32_t count);
-
 /*
  * Shared reserve: multiple builders (from different threads) for the
  * same cluster claim page slots atomically from a shared counter.
  * Falls back to storage->new_page() if the reserved range is exhausted.
+ * Used by every build path (serial, parallel, standalone).
  */
 void mkt_posting_builder_set_shared_reserve(
 		MktPostingBuilder *builder,
@@ -202,6 +307,11 @@ void mkt_posting_builder_set_shared_reserve(
  */
 void mkt_posting_builder_set_first_blkno(
 		MktPostingBuilder *builder, BlockNumber blkno);
+
+/*
+ * Derive RaBitQ error bound from encoding factors.
+ */
+float mkt_posting_derive_f_error(float f_add, float f_rescale, Dimension dim);
 
 /*
  * Add a raw vector. Encodes with RaBitQ relative to centroid.
@@ -233,17 +343,17 @@ BlockNumber mkt_posting_builder_finish_partial(MktPostingBuilder *builder);
 
 void mkt_posting_builder_cleanup(MktPostingBuilder *builder);
 
-static inline BlockNumber
-mkt_posting_builder_head(const MktPostingBuilder *b)
-{
-	return b->head_blkno;
-}
-
-static inline BlockNumber
-mkt_posting_builder_tail(const MktPostingBuilder *b)
-{
-	return b->prev_blkno;
-}
+/*
+ * Set a full-page sink for deferred mode (storage == NULL). When set,
+ * completed pages are streamed to `sink(ctx, cluster_id, page)` instead
+ * of accumulated in the batch — the PG parallel build uses this to send
+ * full pages to the leader over shm_mq. NULL (default) keeps batch
+ * accumulation.
+ */
+void mkt_posting_builder_set_page_sink(
+		MktPostingBuilder *builder,
+		void (*sink)(void *ctx, uint32_t cluster_id, const char *page),
+		void *sink_ctx);
 
 /* ----------------------------------------------------------------
  * Flat builder — one buffer per cluster (standalone benchmark)

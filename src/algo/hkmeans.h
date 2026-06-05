@@ -94,12 +94,17 @@ hk_node_centroids(const HKMeansResult *r, const HKMeansNode *node)
 /*
  * Build a hierarchical k-means tree.
  *
+ * indices: optional index array for indirect access (NULL = identity).
+ *          When non-NULL, vector i is at vectors[indices[i] * dim].
+ *          This allows subsampling without copying.
+ *
  * Returns a single contiguous allocation on success, NULL on failure.
- * Caller must free with mkt_hkmeans_result_destroy().
+ * Caller must free with mkt_free().
  */
 HKMeansResult *mkt_hkmeans_f32(
 		const float			*vectors,
 		uint32_t			 nvecs,
+		const uint32_t		*indices,
 		Dimension			 dim,
 		uint32_t			 nlist,
 		uint32_t			 fan_out,
@@ -119,10 +124,76 @@ uint32_t mkt_hkmeans_assign(
 		DistanceMetric		 metric,
 		Distance			*out_distance);
 
+/* Upper bound on k / beam_width for mkt_hkmeans_assign_topk (keeps the
+ * beam scratch on the stack). */
+#define MKT_HK_MAX_TOPK 64
+
 /*
- * Free a tree built by mkt_hkmeans_f32(). The tree is a single contiguous
- * allocation, so this is just a free of the base pointer.
+ * Beam-search the tree for the k nearest leaf centroids.
+ *
+ * Maintains a beam of the best `beam_width` nodes per level, then keeps
+ * the k nearest leaves at the leaf level. Approximate for k/beam_width
+ * smaller than the tree fan-out, but far cheaper than scanning all
+ * leaves — used for secondary (boundary) cluster assignment during
+ * build. k and beam_width are clamped to MKT_HK_MAX_TOPK.
+ *
+ * out_leaves[k] receives leaf indices sorted by ascending distance;
+ * out_dists[k] (optional) the matching distances. Returns the number of
+ * leaves written (<= k).
  */
-void mkt_hkmeans_result_destroy(HKMeansResult *result);
+uint32_t mkt_hkmeans_assign_topk(
+		const HKMeansResult *tree,
+		const float			*vec,
+		DistanceMetric		 metric,
+		uint32_t			 k,
+		uint32_t			 beam_width,
+		uint32_t			*out_leaves,
+		Distance			*out_dists);
+
+/*
+ * Graft per-child subtrees under a fresh root into one BFS-ordered tree.
+ *
+ * The parallel build splits the samples into fan_out groups with one root
+ * k-means, then builds each group's subtree independently (and in parallel).
+ * This assembles the final tree: a new level-0 root holding root_centroids
+ * (fan_out children), with subtrees[c] grafted beneath child c — every
+ * subtree node shifted down one level, re-indexed into global BFS order, and
+ * its centroids/leaves copied into the packed result. All non-NULL subtrees
+ * must share the same depth (they do when built with the same target nlist),
+ * so the grafted tree has uniform leaf depth = subtree depth + 1.
+ *
+ * For depth-1 subtrees (a single flat split) this reduces to the two-level
+ * tree; deeper subtrees yield 3+ level trees. Returns a single contiguous
+ * allocation; caller frees with mkt_free().
+ */
+HKMeansResult *mkt_hkmeans_graft(
+		const float				   *root_centroids,
+		uint32_t					fan_out,
+		const HKMeansResult *const *subtrees,
+		Dimension					dim);
+
+/*
+ * Upper bound (bytes) on the contiguous size of a tree built for `nlist`
+ * leaves with `fan_out`. Used to size the fixed per-subtree DSM slots the
+ * parallel build's participants write their subtrees into.
+ */
+size_t
+mkt_hkmeans_max_blob_size(uint32_t nlist, uint32_t fan_out, Dimension dim);
+
+/*
+ * Build a one-level (flat) tree directly from pre-computed leaf centroids.
+ *
+ * For a flat clustering (nleaves <= fan_out) the root k-means already produced
+ * every leaf centroid, so the parallel build can assemble the tree straight
+ * from them rather than re-gathering the samples and re-clustering. Produces
+ * the same shape mkt_hkmeans_f32 does for a single-level build: one
+ * leaf-parent root with nleaves children. Returns a contiguous allocation;
+ * caller frees with mkt_free().
+ */
+HKMeansResult *mkt_hkmeans_build_flat(
+		const float *centroids,
+		uint32_t	 nleaves,
+		uint32_t	 fan_out,
+		Dimension	 dim);
 
 #endif /* MKT_HKMEANS_H */
