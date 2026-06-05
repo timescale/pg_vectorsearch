@@ -81,7 +81,7 @@ mkt_build_assign_vector(
 
 	if (has_soar || has_boundary)
 	{
-		const float *leaves	 = tree->leaf_centroids;
+		const float *leaves	 = hk_leaf_centroids(tree);
 		uint32_t	 nleaves = tree->nleaves;
 
 		uint32_t boundary_c2 = best_c;

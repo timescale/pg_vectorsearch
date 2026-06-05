@@ -24,7 +24,7 @@ mkt_compute_centroid_layout(
 
 	for (uint32_t i = 0; i < tree->nnodes; i++)
 	{
-		uint32_t n		= tree->nodes[i].nchildren;
+		uint32_t n		= hk_nodes(tree)[i].nchildren;
 		uint32_t npages = (n + max_entries - 1) / max_entries;
 		if (npages == 0)
 			npages = 1;
@@ -50,7 +50,7 @@ mkt_write_centroid_tree(
 {
 	for (uint32_t i = 0; i < tree->nnodes; i++)
 	{
-		HKMeansNode *node	 = &tree->nodes[i];
+		HKMeansNode *node	 = &hk_nodes(tree)[i];
 		bool		 is_leaf = (node->level == tree->nlevels - 1);
 
 		uint16_t flags		 = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
@@ -60,7 +60,7 @@ mkt_write_centroid_tree(
 		CentroidEncoder		*encoder = centroid_encoder_init(
 				&enc_state,
 				centroid_format,
-				node->centroids,
+				hk_node_centroids(tree, node),
 				dim,
 				rq_params,
 				global_mean);
