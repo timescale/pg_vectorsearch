@@ -265,7 +265,14 @@ mkt_pbuild_setup_shared(
 
 	Size samp_sz = mkt_dsm_samples_size(nparticipants, max_per_worker, dim);
 	MktDsmSamples *dsm_samples = shm_toc_allocate(pcxt->toc, samp_sz);
-	memset(dsm_samples, 0, samp_sz);
+	/* Only the header + per-participant counts are read before being written;
+	 * the sample data (often multiple GB) is filled by the sampling pass and
+	 * read back bounded by those counts, so zeroing it would just burn memory
+	 * bandwidth on a region that is about to be overwritten. */
+	memset(dsm_samples,
+		   0,
+		   MAXALIGN(sizeof(MktDsmSamples)) +
+				   (size_t)nparticipants * sizeof(uint32_t));
 	dsm_samples->nparticipants	= nparticipants;
 	dsm_samples->max_per_worker = max_per_worker;
 	dsm_samples->dim			= dim;
