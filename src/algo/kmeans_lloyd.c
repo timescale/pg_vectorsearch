@@ -486,55 +486,16 @@ lloyd_assign(KMeansState *st, bool use_cblas)
 	if (st->metric == DISTANCE_L2)
 		precompute_norms_c(st);
 
-	uint32_t min_vecs_per_thread = 256;
-	bool	 use_parallel = st->parallel_for != NULL && st->nthreads > 1 &&
-						st->nvecs >= st->nthreads * min_vecs_per_thread;
-
 	lloyd_block_fn block_fn = lloyd_select_block_fn(st, use_cblas);
 
-	if (!use_parallel)
-	{
-		lloyd_assign_range(
-				st,
-				block_fn,
-				st->dist_block,
-				KMEANS_BLOCK_SIZE,
-				0,
-				st->nvecs,
-				&st->total_cost);
-		return;
-	}
-
-	uint32_t nt	   = st->nthreads;
-	uint32_t nlist = st->nlist;
-	uint32_t dim   = st->dim;
-	uint32_t block = lloyd_parallel_block_size(nlist, st->nvecs);
-
-	float *dist_bufs = mkt_alloc((size_t)nt * block * nlist * sizeof(float));
-	float *costs	 = mkt_alloc0(nt * sizeof(float));
-	float *vec_bufs	 = NULL;
-
-	if (st->vec_block != NULL)
-		vec_bufs = mkt_alloc((size_t)nt * block * dim * sizeof(float));
-
-	LloydParCtx ctx = {
-			.st		   = st,
-			.block_fn  = block_fn,
-			.dist_bufs = dist_bufs,
-			.costs	   = costs,
-			.vec_bufs  = vec_bufs,
-			.block	   = block,
-	};
-
-	st->parallel_for(st->parallel_ctx, st->nvecs, lloyd_par_worker, &ctx);
-
-	st->total_cost = 0.0f;
-	for (uint32_t t = 0; t < nt; t++)
-		st->total_cost += costs[t];
-
-	mkt_free(dist_bufs);
-	mkt_free(costs);
-	mkt_free(vec_bufs);
+	lloyd_assign_range(
+			st,
+			block_fn,
+			st->dist_block,
+			KMEANS_BLOCK_SIZE,
+			0,
+			st->nvecs,
+			&st->total_cost);
 }
 
 /* ----------------------------------------------------------------
@@ -716,7 +677,7 @@ lloyd_iterate(KMeansState *st, bool use_cblas, const KMeansOptions *opts)
 {
 	(void)use_cblas;
 
-	uint32_t nt	   = st->nthreads;
+	uint32_t nt	   = 1; /* serial: the driver owns parallelism, not k-means */
 	uint32_t nlist = st->nlist;
 	uint32_t dim   = st->dim;
 	uint32_t block = lloyd_parallel_block_size(nlist, st->nvecs);
@@ -762,24 +723,11 @@ lloyd_iterate(KMeansState *st, bool use_cblas, const KMeansOptions *opts)
 			.completed_iters = 0,
 	};
 
-	if (st->iterate)
+	for (uint32_t iter = 0; iter < opts->max_iterations; iter++)
 	{
-		st->iterate(
-				st->parallel_ctx,
-				st->nvecs,
-				lloyd_iter_work,
-				lloyd_iter_reduce,
-				&ctx,
-				opts->max_iterations);
-	}
-	else
-	{
-		for (uint32_t iter = 0; iter < opts->max_iterations; iter++)
-		{
-			lloyd_iter_work(0, 0, st->nvecs, &ctx);
-			if (!lloyd_iter_reduce(&ctx, iter))
-				break;
-		}
+		lloyd_iter_work(0, 0, st->nvecs, &ctx);
+		if (!lloyd_iter_reduce(&ctx, iter))
+			break;
 	}
 
 	/* Final assignment (reduce already did the last centroid update) */
@@ -794,11 +742,7 @@ lloyd_iterate(KMeansState *st, bool use_cblas, const KMeansOptions *opts)
 			.block	   = block,
 	};
 
-	if (st->parallel_for)
-		st->parallel_for(
-				st->parallel_ctx, st->nvecs, lloyd_par_worker, &par_ctx);
-	else
-		lloyd_par_worker(0, 0, st->nvecs, &par_ctx);
+	lloyd_par_worker(0, 0, st->nvecs, &par_ctx);
 	st->total_cost = 0.0f;
 	for (uint32_t t = 0; t < nt; t++)
 		st->total_cost += costs[t];

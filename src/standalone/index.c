@@ -237,37 +237,6 @@ normalize_all(float *data, uint32_t nvecs, Dimension dim)
 }
 
 /* ----------------------------------------------------------------
- * K-means parallel dispatch bridge
- *
- * Adapts the thread pool's parallel_for to the k-means callback
- * signature. K-means doesn't know about MktThreadPool.
- * ---------------------------------------------------------------- */
-
-static void
-km_parallel_for(void *ctx, uint32_t total, KMeansWorkFn work_fn, void *arg)
-{
-	mkt_thread_pool_parallel_for((MktThreadPool *)ctx, total, work_fn, arg);
-}
-
-static void
-km_iterate(
-		void		  *ctx,
-		uint32_t	   total,
-		KMeansWorkFn   work_fn,
-		KMeansReduceFn reduce_fn,
-		void		  *arg,
-		uint32_t	   max_iterations)
-{
-	mkt_thread_pool_iterate(
-			(MktThreadPool *)ctx,
-			total,
-			work_fn,
-			(MktReduceFn)reduce_fn,
-			arg,
-			max_iterations);
-}
-
-/* ----------------------------------------------------------------
  * Parallel centroid rotation callback
  * ---------------------------------------------------------------- */
 
@@ -481,10 +450,6 @@ mkt_index_build(
 		km_opts.nredo = config->km_nredo;
 	if (config->km_max_iter > 0)
 		km_opts.max_iterations = config->km_max_iter;
-	km_opts.parallel_for = km_parallel_for;
-	km_opts.iterate		 = km_iterate;
-	km_opts.parallel_ctx = pool;
-	km_opts.nthreads	 = nworkers + 1;
 
 	HKMeansResult *tree = mkt_hkmeans_f32(
 			samples,
