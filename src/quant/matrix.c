@@ -36,6 +36,7 @@
 
 #include "algo/simd_utils.h"
 #include "algo/vecops.h"
+#include "core/memory.h"
 #include "mkt_types.h"
 #include "quant/matrix.h"
 
@@ -151,50 +152,60 @@ fill_gaussian_matrix(float *matrix, Dimension dim, uint64_t seed)
 }
 
 /*
- * QR decomposition using modified Gram-Schmidt.
+ * QR decomposition using modified Gram-Schmidt over the COLUMNS of A.
  *
  * Input: A (dim x dim matrix, row-major)
- * Output: Q (orthogonal matrix, row-major)
+ * Output: Q (orthogonal matrix, row-major) — A overwritten in place.
  *
- * The input matrix A is overwritten with Q.
+ * The columns of a row-major matrix are strided by dim, so the naive
+ * column-walking form touches a fresh cache line per element — at dim=768 it
+ * is almost entirely cache-miss-bound. We instead transpose into a scratch
+ * buffer (columns become contiguous rows), run the identical Gram-Schmidt
+ * arithmetic there, and transpose back. The arithmetic and its summation order
+ * are byte for byte the same as the column form, so the resulting orthogonal
+ * matrix is bit-identical — only the memory access pattern changes — while
+ * running far faster. (The dot/norm reductions stay scalar to preserve that
+ * bit-identity; the speedup is from locality, not vectorization.)
  */
 static void
 gram_schmidt_qr(float *A, Dimension dim)
 {
-	/* Process columns */
+	/* At[j][i] = A[i][j]: column j of A becomes contiguous row j of At. */
+	float *At = mkt_alloc((size_t)dim * dim * sizeof(float));
+	for (Dimension i = 0; i < dim; i++)
+		for (Dimension j = 0; j < dim; j++)
+			At[(size_t)j * dim + i] = A[(size_t)i * dim + j];
+
 	for (Dimension j = 0; j < dim; j++)
 	{
-		/* Get pointer to column j (stored as row j in transposed view) */
-		/* For row-major, column j elements are at A[0*dim+j], A[1*dim+j], ...
-		 */
+		float *col_j = At + (size_t)j * dim;
 
-		/* Compute norm of column j */
 		float norm = 0.0f;
 		for (Dimension i = 0; i < dim; i++)
-			norm += A[i * dim + j] * A[i * dim + j];
+			norm += col_j[i] * col_j[i];
 		norm = sqrtf(norm);
-
-		/* Handle near-zero columns (shouldn't happen with Gaussian init) */
 		if (norm < 1e-10f)
 			norm = 1.0f;
 
-		/* Normalize column j */
 		for (Dimension i = 0; i < dim; i++)
-			A[i * dim + j] /= norm;
+			col_j[i] /= norm;
 
-		/* Orthogonalize remaining columns against column j */
 		for (Dimension k = j + 1; k < dim; k++)
 		{
-			/* Compute dot product of columns j and k */
-			float dot = 0.0f;
+			float *col_k = At + (size_t)k * dim;
+			float  dot	 = 0.0f;
 			for (Dimension i = 0; i < dim; i++)
-				dot += A[i * dim + j] * A[i * dim + k];
-
-			/* Subtract projection: col_k = col_k - dot * col_j */
+				dot += col_j[i] * col_k[i];
 			for (Dimension i = 0; i < dim; i++)
-				A[i * dim + k] -= dot * A[i * dim + j];
+				col_k[i] -= dot * col_j[i];
 		}
 	}
+
+	for (Dimension i = 0; i < dim; i++)
+		for (Dimension j = 0; j < dim; j++)
+			A[(size_t)i * dim + j] = At[(size_t)j * dim + i];
+
+	mkt_free(At);
 }
 
 /*
