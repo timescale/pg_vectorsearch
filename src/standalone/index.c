@@ -34,7 +34,6 @@
 #include "index/posting_convert.h"
 #include "index/posting_page.h"
 #include "standalone/index.h"
-#include "standalone/thread_pool.h"
 
 static uint64_t
 now_ns(void)
@@ -274,220 +273,6 @@ normalize_all(float *data, uint32_t nvecs, Dimension dim)
 		normalize_vector(data + (size_t)i * dim, dim);
 }
 
-/* ----------------------------------------------------------------
- * K-means parallel dispatch bridge
- *
- * Adapts the thread pool's parallel_for to the k-means callback
- * signature. K-means doesn't know about MktThreadPool.
- * ---------------------------------------------------------------- */
-
-static void
-km_parallel_for(void *ctx, uint32_t total, KMeansWorkFn work_fn, void *arg)
-{
-	mkt_thread_pool_parallel_for((MktThreadPool *)ctx, total, work_fn, arg);
-}
-
-static void
-km_iterate(
-		void		  *ctx,
-		uint32_t	   total,
-		KMeansWorkFn   work_fn,
-		KMeansReduceFn reduce_fn,
-		void		  *arg,
-		uint32_t	   max_iterations)
-{
-	mkt_thread_pool_iterate(
-			(MktThreadPool *)ctx,
-			total,
-			work_fn,
-			(MktReduceFn)reduce_fn,
-			arg,
-			max_iterations);
-}
-
-/* ----------------------------------------------------------------
- * K-means iterate context for root/child k-means
- *
- * Uses kmeans_assign_accumulate (shared kernel) for the work step
- * and kmeans_merge_centroids for the reduce step, matching PG's
- * parallel k-means path.
- * ---------------------------------------------------------------- */
-
-typedef struct KmIterCtx
-{
-	const float	  *samples;	  /* all samples (flat array) */
-	float		  *centroids; /* current centroids [k * dim] */
-	float		  *norms_c;	  /* centroid norms [k] */
-	uint32_t	   k;
-	Dimension	   dim;
-	DistanceMetric metric;
-	uint32_t	   nthreads;
-	float		   tolerance;
-
-	/* Per-thread accumulators */
-	float	 *sums;		 /* [nthreads * k * dim] */
-	uint32_t *cnts;		 /* [nthreads * k] */
-	float	 *costs;	 /* [nthreads] */
-	float	 *old_cents; /* [k * dim] for convergence */
-
-	/* Optional filter for child k-means */
-	const uint32_t *filter;		/* root assignments, NULL for root */
-	uint32_t		filter_val; /* child index */
-} KmIterCtx;
-
-static void
-km_iter_work(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
-{
-	KmIterCtx *ctx	   = arg;
-	float	  *my_sums = ctx->sums + (size_t)thread_id * ctx->k * ctx->dim;
-	uint32_t  *my_cnts = ctx->cnts + (size_t)thread_id * ctx->k;
-	float	  *my_cost = &ctx->costs[thread_id];
-
-	memset(my_sums, 0, (size_t)ctx->k * ctx->dim * sizeof(float));
-	memset(my_cnts, 0, ctx->k * sizeof(uint32_t));
-	*my_cost = 0.0f;
-
-	kmeans_assign_accumulate(
-			ctx->samples,
-			NULL,
-			start,
-			end,
-			ctx->centroids,
-			ctx->norms_c,
-			ctx->k,
-			ctx->dim,
-			ctx->metric,
-			ctx->filter,
-			ctx->filter_val,
-			my_sums,
-			my_cnts,
-			my_cost);
-}
-
-static bool
-km_iter_reduce(void *arg, uint32_t iteration)
-{
-	(void)iteration;
-	KmIterCtx *ctx = arg;
-	uint32_t   nt  = ctx->nthreads;
-	uint32_t   k   = ctx->k;
-	Dimension  dim = ctx->dim;
-
-	memcpy(ctx->old_cents, ctx->centroids, (size_t)k * dim * sizeof(float));
-
-	/* Build pointer arrays for merge (stack-allocated) */
-	const float	   **all_sums = (const float **)alloca(nt * sizeof(float *));
-	const uint32_t **all_cnts = (const uint32_t **)alloca(
-			nt * sizeof(uint32_t *));
-
-	for (uint32_t t = 0; t < nt; t++)
-	{
-		all_sums[t] = ctx->sums + (size_t)t * k * dim;
-		all_cnts[t] = ctx->cnts + (size_t)t * k;
-	}
-
-	float total_cost;
-	float shift_sq = kmeans_merge_centroids(
-			ctx->centroids,
-			ctx->norms_c,
-			ctx->old_cents,
-			all_sums,
-			all_cnts,
-			ctx->costs,
-			nt,
-			k,
-			dim,
-			ctx->metric,
-			&total_cost);
-
-	float tol_sq = ctx->tolerance * ctx->tolerance;
-	return shift_sq >= tol_sq; /* true = continue */
-}
-
-/* ----------------------------------------------------------------
- * Parallel root assignment callback
- * ---------------------------------------------------------------- */
-
-typedef struct RootAssignCtx
-{
-	const float	  *samples;
-	const float	  *centroids;
-	const float	  *norms_c;
-	uint32_t	   k;
-	Dimension	   dim;
-	DistanceMetric metric;
-	uint32_t	  *assignments;
-} RootAssignCtx;
-
-static void
-par_root_assign_fn(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
-{
-	(void)thread_id;
-	RootAssignCtx *ctx = arg;
-	kmeans_assign(
-			ctx->samples,
-			start,
-			end,
-			ctx->centroids,
-			ctx->norms_c,
-			ctx->k,
-			ctx->dim,
-			ctx->metric,
-			ctx->assignments);
-}
-
-/* ----------------------------------------------------------------
- * Parallel sample copy callback
- * ---------------------------------------------------------------- */
-
-typedef struct SampleCopyCtx
-{
-	const float *src;
-	float		*dst;
-	Dimension	 dim;
-	uint32_t	 stride;
-} SampleCopyCtx;
-
-static void
-par_sample_copy_fn(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
-{
-	(void)thread_id;
-	SampleCopyCtx *ctx = (SampleCopyCtx *)arg;
-	Dimension	   dim = ctx->dim;
-	size_t		   esz = dim * sizeof(float);
-
-	for (uint32_t i = start; i < end; i++)
-		memcpy(ctx->dst + (size_t)i * dim,
-			   ctx->src + (size_t)(i * ctx->stride) * dim,
-			   esz);
-}
-
-/* ----------------------------------------------------------------
- * Parallel centroid rotation callback
- * ---------------------------------------------------------------- */
-
-typedef struct RotateCtx
-{
-	const RaBitQParams *params;
-	const float		   *leaf_centroids;
-	float			   *pt_centroids;
-	Dimension			dim;
-} RotateCtx;
-
-static void
-par_rotate_fn(uint32_t thread_id, uint32_t start, uint32_t end, void *arg)
-{
-	(void)thread_id;
-	RotateCtx *ctx = (RotateCtx *)arg;
-	Dimension  dim = ctx->dim;
-
-	for (uint32_t c = start; c < end; c++)
-		mkt_rabitq_rotate(
-				ctx->params,
-				ctx->leaf_centroids + (size_t)c * dim,
-				ctx->pt_centroids + (size_t)c * dim);
-}
-
 static uint32_t
 sa_detect_nthreads(void)
 {
@@ -554,7 +339,7 @@ mkt_index_build(
 
 	mkt_distance_init();
 
-	/* Create thread pool early — used by k-means and posting build */
+	/* Resolve the worker count for the parallel driver (paged builds). */
 	uint32_t nworkers;
 	if (config->nworkers < 0)
 	{
@@ -565,7 +350,6 @@ mkt_index_build(
 	{
 		nworkers = (uint32_t)config->nworkers;
 	}
-	MktThreadPool *pool = mkt_thread_pool_create(nworkers);
 
 	/* Long-lived context for index data. Build-phase temporaries
 	 * go into a child context that gets deleted after build. */
@@ -728,12 +512,13 @@ mkt_index_build(
 
 	if (!use_driver)
 	{
-		/* --- Phase: kmeans --- */
+		/* --- Phase: kmeans (serial; FLAT/no-RaBitQ do not need parallel)
+		 * --- */
 		t_phase = now_ns();
 		mkt_memctx_switch(build_ctx);
 
-		/* Subsample by stride into a contiguous buffer for
-		 * cache-friendly k-means iteration. */
+		/* Subsample by stride into a contiguous buffer for cache-friendly
+		 * k-means iteration. */
 		uint32_t max_samples = idx->nvecs < 256000 ? idx->nvecs : 256000;
 		uint32_t stride		 = idx->nvecs / max_samples;
 		if (stride < 1)
@@ -743,14 +528,10 @@ mkt_index_build(
 		if (stride > 1)
 		{
 			km_vectors = mkt_alloc((size_t)km_nvecs * dim * sizeof(float));
-			SampleCopyCtx sc_ctx = {
-					.src	= idx->all_vectors,
-					.dst	= km_vectors,
-					.dim	= dim,
-					.stride = stride,
-			};
-			mkt_thread_pool_parallel_for(
-					pool, km_nvecs, par_sample_copy_fn, &sc_ctx);
+			for (uint32_t i = 0; i < km_nvecs; i++)
+				memcpy(km_vectors + (size_t)i * dim,
+					   idx->all_vectors + (size_t)i * stride * dim,
+					   dim * sizeof(float));
 		}
 		else
 		{
@@ -762,211 +543,19 @@ mkt_index_build(
 			km_opts.nredo = config->km_nredo;
 		if (config->km_max_iter > 0)
 			km_opts.max_iterations = config->km_max_iter;
-		km_opts.parallel_for = km_parallel_for;
-		km_opts.iterate		 = km_iterate;
-		km_opts.parallel_ctx = pool;
-		km_opts.nthreads	 = nworkers + 1;
 
-		/* Compute tree depth to decide explicit vs fallback path */
-		uint32_t nlevels = 1;
-		{
-			uint32_t n = nlist;
-			while (n > fan_out)
-			{
-				n = (n + fan_out - 1) / fan_out;
-				nlevels++;
-			}
-		}
-
-		uint32_t km_k	  = fan_out < nlist ? fan_out : nlist;
-		uint32_t nthreads = nworkers + 1;
-
-		if (nlevels == 2)
-		{
-			/*
-			 * Explicit root + child k-means using the shared
-			 * kernels (kmeans_assign_accumulate + merge). This
-			 * matches PG's parallel build path.
-			 */
-
-			/* --- Root k-means --- */
-			float *centroids = mkt_alloc((size_t)km_k * dim * sizeof(float));
-			float *norms_c	 = mkt_alloc(km_k * sizeof(float));
-
-			/* Initial centroids: first km_k samples */
-			uint32_t init_k = km_k < km_nvecs ? km_k : km_nvecs;
-			memcpy(centroids,
-				   km_vectors,
-				   (size_t)init_k * dim * sizeof(float));
-
-			if (idx->base.metric == DISTANCE_L2)
-				for (uint32_t c = 0; c < init_k; c++)
-					norms_c[c] = mkt_l2_norm_squared(
-							centroids + (size_t)c * dim, dim);
-
-			float *old_cents = mkt_alloc((size_t)km_k * dim * sizeof(float));
-			float *sums		 = mkt_alloc0(
-					 (size_t)nthreads * km_k * dim * sizeof(float));
-			uint32_t *cnts = mkt_alloc0(
-					(size_t)nthreads * km_k * sizeof(uint32_t));
-			float *costs = mkt_alloc0(nthreads * sizeof(float));
-
-			KmIterCtx root_ctx = {
-					.samples	= km_vectors,
-					.centroids	= centroids,
-					.norms_c	= norms_c,
-					.k			= km_k,
-					.dim		= dim,
-					.metric		= idx->base.metric,
-					.nthreads	= nthreads,
-					.tolerance	= km_opts.tolerance,
-					.sums		= sums,
-					.cnts		= cnts,
-					.costs		= costs,
-					.old_cents	= old_cents,
-					.filter		= NULL,
-					.filter_val = 0,
-			};
-
-			mkt_thread_pool_iterate(
-					pool,
-					km_nvecs,
-					km_iter_work,
-					(MktReduceFn)km_iter_reduce,
-					&root_ctx,
-					km_opts.max_iterations);
-
-			/* --- Root assignment --- */
-			uint32_t *root_asgn = mkt_alloc(km_nvecs * sizeof(uint32_t));
-
-			RootAssignCtx ra_ctx = {
-					.samples	 = km_vectors,
-					.centroids	 = centroids,
-					.norms_c	 = norms_c,
-					.k			 = km_k,
-					.dim		 = dim,
-					.metric		 = idx->base.metric,
-					.assignments = root_asgn,
-			};
-			mkt_thread_pool_parallel_for(
-					pool, km_nvecs, par_root_assign_fn, &ra_ctx);
-
-			/* Save root centroids before reusing buffers */
-			float *root_cents = mkt_alloc((size_t)km_k * dim * sizeof(float));
-			memcpy(root_cents, centroids, (size_t)km_k * dim * sizeof(float));
-
-			/* --- Child k-means --- */
-			float	**child_centroids = mkt_alloc(km_k * sizeof(float *));
-			uint32_t *child_ks		  = mkt_alloc(km_k * sizeof(uint32_t));
-
-			for (uint32_t child = 0; child < km_k; child++)
-			{
-				/* Count samples for this child */
-				uint32_t child_count = 0;
-				for (uint32_t i = 0; i < km_nvecs; i++)
-					if (root_asgn[i] == child)
-						child_count++;
-
-				uint32_t child_k = fan_out < child_count ? fan_out
-														 : child_count;
-				if (child_k < 1)
-					child_k = 1;
-				child_ks[child] = child_k;
-
-				if (child_k <= 1)
-				{
-					child_centroids[child] = mkt_alloc(dim * sizeof(float));
-					memcpy(child_centroids[child],
-						   root_cents + (size_t)child * dim,
-						   dim * sizeof(float));
-					continue;
-				}
-
-				/* Pick initial child centroids: first child_k
-				 * samples assigned to this child */
-				float *child_cents = mkt_alloc(
-						(size_t)child_k * dim * sizeof(float));
-				uint32_t picked = 0;
-				for (uint32_t i = 0; i < km_nvecs && picked < child_k; i++)
-				{
-					if (root_asgn[i] != child)
-						continue;
-					memcpy(child_cents + (size_t)picked * dim,
-						   km_vectors + (size_t)i * dim,
-						   dim * sizeof(float));
-					picked++;
-				}
-
-				float *child_norms = mkt_alloc(child_k * sizeof(float));
-				if (idx->base.metric == DISTANCE_L2)
-					for (uint32_t c = 0; c < child_k; c++)
-						child_norms[c] = mkt_l2_norm_squared(
-								child_cents + (size_t)c * dim, dim);
-
-				/* Reuse accumulator buffers (child_k <= km_k) */
-				float *ch_old = mkt_alloc(
-						(size_t)child_k * dim * sizeof(float));
-				float *ch_sums = mkt_alloc0(
-						(size_t)nthreads * child_k * dim * sizeof(float));
-				uint32_t *ch_cnts = mkt_alloc0(
-						(size_t)nthreads * child_k * sizeof(uint32_t));
-				float *ch_costs = mkt_alloc0(nthreads * sizeof(float));
-
-				KmIterCtx child_ctx = {
-						.samples	= km_vectors,
-						.centroids	= child_cents,
-						.norms_c	= child_norms,
-						.k			= child_k,
-						.dim		= dim,
-						.metric		= idx->base.metric,
-						.nthreads	= nthreads,
-						.tolerance	= km_opts.tolerance,
-						.sums		= ch_sums,
-						.cnts		= ch_cnts,
-						.costs		= ch_costs,
-						.old_cents	= ch_old,
-						.filter		= root_asgn,
-						.filter_val = child,
-				};
-
-				mkt_thread_pool_iterate(
-						pool,
-						km_nvecs,
-						km_iter_work,
-						(MktReduceFn)km_iter_reduce,
-						&child_ctx,
-						km_opts.max_iterations);
-
-				child_centroids[child] = mkt_alloc(
-						(size_t)child_k * dim * sizeof(float));
-				memcpy(child_centroids[child],
-					   child_cents,
-					   (size_t)child_k * dim * sizeof(float));
-			}
-
-			tree = mkt_hkmeans_build_two_level(
-					root_cents,
-					km_k,
-					(const float **)child_centroids,
-					child_ks,
-					dim);
-		}
-		else
-		{
-			/* nlevels != 2: fall back to mkt_hkmeans_f32 */
-			tree = mkt_hkmeans_f32(
-					km_vectors,
-					km_nvecs,
-					NULL,
-					dim,
-					nlist,
-					fan_out,
-					idx->base.metric,
-					&km_opts);
-		}
+		tree = mkt_hkmeans_f32(
+				km_vectors,
+				km_nvecs,
+				NULL,
+				dim,
+				nlist,
+				fan_out,
+				idx->base.metric,
+				&km_opts);
 
 		ms_kmeans = (double)(now_ns() - t_phase) / 1e6;
-	} /* end !use_driver: in-memory sampling + k-means */
+	} /* end serial in-memory k-means */
 
 	/* --- Phase: setup --- */
 	t_phase = now_ns();
@@ -1007,14 +596,12 @@ mkt_index_build(
 	idx->base.params = mkt_rabitq_create(dim, 42);
 
 	/* Precompute P^T * centroids for zero-alloc query path. */
-	idx->pt_centroids	 = mkt_alloc((size_t)nlist * dim * sizeof(float));
-	RotateCtx rotate_ctx = {
-			.params			= idx->base.params,
-			.leaf_centroids = idx->leaf_centroids,
-			.pt_centroids	= idx->pt_centroids,
-			.dim			= dim,
-	};
-	mkt_thread_pool_parallel_for(pool, nlist, par_rotate_fn, &rotate_ctx);
+	idx->pt_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
+	for (uint32_t c = 0; c < nlist; c++)
+		mkt_rabitq_rotate(
+				idx->base.params,
+				idx->leaf_centroids + (size_t)c * dim,
+				idx->pt_centroids + (size_t)c * dim);
 
 	idx->base.pt_global_mean = mkt_alloc(dim * sizeof(float));
 	mkt_rabitq_rotate(
@@ -1150,7 +737,6 @@ mkt_index_build(
 
 	double ms_centroid = (double)(now_ns() - t_phase) / 1e6;
 
-	mkt_thread_pool_destroy(pool);
 	mkt_free(tree);
 
 	mkt_memctx_switch(old_ctx);
