@@ -47,40 +47,17 @@ typedef enum KMeansAlgorithm
 } KMeansAlgorithm;
 
 /*
- * Parallel dispatch callback for k-means.
- *
- * work_fn(thread_id, start, end, arg) is called once per thread
- * for a partition of [0, total). NULL = serial execution.
- */
-typedef void (*KMeansWorkFn)(
-		uint32_t thread_id, uint32_t start, uint32_t end, void *arg);
-typedef void (*KMeansParallelFn)(
-		void *ctx, uint32_t total, KMeansWorkFn work_fn, void *arg);
-typedef bool (*KMeansReduceFn)(void *arg, uint32_t iteration);
-typedef void (*KMeansIterateFn)(
-		void		  *ctx,
-		uint32_t	   total,
-		KMeansWorkFn   work_fn,
-		KMeansReduceFn reduce_fn,
-		void		  *arg,
-		uint32_t	   max_iterations);
-
-/*
  * KMeansOptions - Configuration for k-means
  */
 typedef struct KMeansOptions
 {
-	uint32_t		 max_iterations; /* default: 20 */
-	float			 tolerance;		 /* convergence threshold, default: 1e-4 */
-	uint64_t		 seed;			 /* random seed, default: 42 */
-	uint32_t		 nredo;			 /* number of restarts, default: 1 */
-	bool			 verbose;		 /* print per-iteration stats */
-	KMeansAlgorithm	 algorithm;		 /* assignment algorithm, default: auto */
-	KMeansParallelFn parallel_for;	 /* NULL = serial */
-	KMeansIterateFn	 iterate;		 /* NULL = use parallel_for per iter */
-	void			*parallel_ctx;	 /* opaque context for callbacks */
-	uint32_t		 nthreads;		 /* total threads (for buffer sizing) */
-	const float		*initial_centroids; /* skip init, use these */
+	uint32_t		max_iterations; /* default: 20 */
+	float			tolerance;		/* convergence threshold, default: 1e-4 */
+	uint64_t		seed;			/* random seed, default: 42 */
+	uint32_t		nredo;			/* number of restarts, default: 1 */
+	bool			verbose;		/* print per-iteration stats */
+	KMeansAlgorithm algorithm;		/* assignment algorithm, default: auto */
+	const float	   *initial_centroids; /* skip init, use these */
 } KMeansOptions;
 
 #define MKT_KMEANS_OPTIONS_DEFAULT \

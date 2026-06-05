@@ -66,12 +66,6 @@ typedef struct KMeansState
 	float	  *dist_block;	  /* [KMEANS_BLOCK_SIZE * nlist] work buf */
 	float	  *new_centroids; /* [nlist * dim] accumulator */
 	float	   total_cost;
-
-	/* Parallel dispatch (NULL = serial) */
-	KMeansParallelFn parallel_for;
-	KMeansIterateFn	 iterate;
-	void			*parallel_ctx;
-	uint32_t		 nthreads;
 } KMeansState;
 
 /* Get pointer to vector i in the input array */

@@ -1016,11 +1016,6 @@ mkt_kmeans(
 		KMeansState *st = kmeans_state_create(
 				vectors, indices, vec_type, nvecs, dim, nlist, metric);
 
-		st->parallel_for = opts.parallel_for;
-		st->iterate		 = opts.iterate;
-		st->parallel_ctx = opts.parallel_ctx;
-		st->nthreads	 = opts.nthreads > 0 ? opts.nthreads : 1;
-
 		uint64_t seed = opts.seed + redo;
 
 		/* Run in arena context so per-iteration temps land there */
