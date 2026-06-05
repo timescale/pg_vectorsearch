@@ -273,6 +273,52 @@ For initial implementation, use SPANN-style boundary-only replication:
 Future versions may explore SOAR-style orthogonal secondary assignments for
 workloads where recall is critical.
 
+#### Assignment methods: tree descent vs. brute-force
+
+Independent of *which* clusters a vector is replicated to, there is the
+question of *how* the assignment is computed. Meerkat deliberately uses two
+different methods for the two kinds of assignment, because they are different
+problems:
+
+**Primary assignment → tree descent.** The primary (home) cluster is the
+nearest centroid, found by a greedy descent of the k-means tree
+(`O(fan_out · nlevels)` distance evaluations along one root-to-leaf path).
+This is chosen for two reasons:
+
+1. *Cost.* For the primary we only need the (approximate) nearest centroid,
+   and a greedy descent finds it in roughly `log(nlist)` work instead of
+   scanning all leaves.
+2. *Consistency with the query path.* Queries route to clusters by descending
+   the same tree. Assigning vectors the same way makes a vector and a nearby
+   query land in the same cluster. Assigning by *exact* nearest instead would
+   create a build/query routing mismatch — a vector could sit in its
+   exact-nearest leaf that a nearby query's greedy descent never reaches —
+   which measurably lowers recall. Benchmarks confirm exact (brute-force)
+   primary assignment is both slower and slightly lower recall than tree
+   descent, and the speed gap widens with `nlist`.
+
+**Secondary assignment (boundary + SOAR) → batched brute-force SIMD.** The
+replica search is inherently a full-scan problem: boundary replication needs
+the *2nd-nearest* centroid, and SOAR needs the centroid minimizing an
+orthogonality-amplified distance whose optimum need *not* be among the
+nearest-by-distance leaves — so a tree cannot prune to it, and the search must
+run over the flat centroid set. The implementation batches B vectors and
+computes their distances to all centroids with a single `sgemm`, streamed in
+cache-sized centroid tiles, so the centroid block is read once per batch and
+the kernel is compute-bound. This was measured faster than a per-vector tree
+beam at every `nlist` tested (1k–64k), with the gap *widening* at scale: the
+beam's per-vector, random-access scan degrades as centroids spill from cache,
+while the tiled GEMM streams sequentially. For the boundary case, recall is
+identical to the beam (primary stays tree descent in both, and the beam finds
+the same close 2nd-nearest), so brute-force is strictly better here — faster
+with no recall cost. A hierarchy would only help in a fundamentally different
+regime (billion-scale tiered storage, where the centroid set itself exceeds
+memory).
+
+When no BLAS library is available, a fallback per-vector path is used instead:
+boundary via a wider tree beam search, SOAR via a per-vector SIMD full scan.
+Correct but slower; only used when the GEMM kernel is unavailable.
+
 **Balancing**: Ideally, posting lists should be roughly equal in size for
 predictable query latency. The clustering algorithm aims for balanced clusters,
 but natural data distribution may cause imbalance. Very large clusters can be

@@ -46,7 +46,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build clang libgsl-dev
+          sudo apt-get install -y meson ninja-build clang libgsl-dev \
+            libopenblas-dev
 
       - name: Test with ASan
         env:
@@ -73,7 +74,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build clang libgsl-dev
+          sudo apt-get install -y meson ninja-build clang libgsl-dev \
+            libopenblas-dev
 
       - name: Test with UBSan
         env:

@@ -163,5 +163,84 @@ ItemPointerSetInvalid(ItemPointerData *tip)
 	tip->ip_posid		= InvalidOffsetNumber;
 }
 
+/*
+ * Types/macros the shared parallel build (parallel_build.h) expects from
+ * PostgreSQL's postgres.h / utils/rel.h.
+ */
+typedef size_t Size;
+
+#define BUFFERALIGN(len) MAXALIGN(len)
+#define UINT64CONST(x)	 (x##ULL)
+
+/* PG checks for query cancellation in long loops; nothing to do standalone. */
+#define CHECK_FOR_INTERRUPTS() ((void)0)
+
+/* The wait-event class is PG instrumentation; the barrier/latch shims ignore
+ * the argument, so any value will do. */
+#define WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN 0
+
+/*
+ * Standalone Relation: the parallel build's "heap" carries the in-memory
+ * vector array it scans; its "index" carries a live page count so the few
+ * RelationGetNumberOfBlocks() call sites resolve. The shared driver never
+ * dereferences a Relation directly — the standalone back-end opens these out
+ * of its shared state — so only RelationGetNumberOfBlocks needs the fields.
+ */
+typedef struct RelationData
+{
+	const float	   *vectors;	/* heap: vectors[nvecs * dim] */
+	uint32_t		nvecs;		/* heap: vector count */
+	uint32_t		dim;		/* heap: dimension */
+	const uint32_t *page_count; /* index: live page count (NULL for a heap) */
+} RelationData;
+
+typedef struct RelationData *Relation;
+
+static inline BlockNumber
+RelationGetNumberOfBlocks(Relation rel)
+{
+	if (rel->page_count != NULL)
+		return (BlockNumber)*rel->page_count;
+
+	/*
+	 * Heap: report a block count from which the build's row estimate
+	 * (blocks * BLCKSZ / bytes-per-tuple) recovers the true vector count.
+	 */
+	uint64_t bytes_per_tuple = (uint64_t)rel->dim * sizeof(float) + 32;
+	return (BlockNumber)(((uint64_t)rel->nvecs * bytes_per_tuple + BLCKSZ -
+						  1) /
+						 BLCKSZ);
+}
+
+/*
+ * The shared build asks for an IndexInfo only to read ii_ParallelWorkers (the
+ * leader) and to hand back to mkt_build_scan (ignored in standalone). A small
+ * struct covers both; BuildIndexInfo is unused by the standalone scan.
+ */
+typedef struct IndexInfo
+{
+	int ii_ParallelWorkers;
+} IndexInfo;
+
+static inline IndexInfo *
+BuildIndexInfo(Relation rel)
+{
+	(void)rel;
+	return NULL;
+}
+
+/* PG per-worker instrumentation — no-ops in standalone (single process). */
+typedef struct WalUsage
+{
+	int unused;
+} WalUsage;
+
+typedef struct BufferUsage
+{
+	int unused;
+} BufferUsage;
+
+#define InstrAccumParallelQuery(buf, wal) ((void)(buf), (void)(wal))
+
 #endif /* MKT_STANDALONE */
 #endif /* MKT_PG_COMPAT_H */

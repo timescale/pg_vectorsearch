@@ -28,6 +28,7 @@
 
 #include <postgres.h>
 
+#include <access/table.h>
 #include <access/tableam.h>
 #include <access/xloginsert.h>
 #include <catalog/index.h>
@@ -35,6 +36,7 @@
 #include <common/pg_prng.h>
 #include <math.h>
 #include <miscadmin.h>
+#include <pgstat.h>
 #include <utils/backend_progress.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
@@ -47,7 +49,9 @@
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
+#include "index/parallel_build.h"
 #include "index/posting_build.h"
+#include "index/posting_build_parallel.h"
 #include "index/posting_page.h"
 #include "mkt_halfvec.h"
 #include "mkt_pg.h"
@@ -58,21 +62,9 @@
 #include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------
- * Build state
+ * Build state (MktannBuildParams is in mktann_build.h, shared with the
+ * parallel leader)
  * ---------------------------------------------------------------- */
-
-typedef struct MktannBuildParams
-{
-	Dimension		  dim;
-	DistanceMetric	  metric;
-	MktCentroidFormat centroid_format;
-	uint32_t		  nlist;
-	uint32_t		  fan_out;
-	uint32_t		  kmeans_nredo;
-	double			  soar_lambda;
-	double			  boundary_epsilon;
-	bool			  fastscan;
-} MktannBuildParams;
 
 typedef struct MktannBuildState
 {
@@ -109,14 +101,6 @@ typedef struct MktannBuildState
 /* ----------------------------------------------------------------
  * Helpers
  * ---------------------------------------------------------------- */
-
-static void
-normalize_in_place(float *v, Dimension dim)
-{
-	float norm = mkt_l2_norm(v, dim);
-	if (norm > 0.0f)
-		mkt_vector_scale(v, 1.0f / norm, v, dim);
-}
 
 /* ----------------------------------------------------------------
  * Sampling
@@ -282,10 +266,9 @@ write_meta_page(
 		uint64_t		  rabitq_seed,
 		const float		 *global_mean)
 {
-	BlockNumber blkno;
-	Page		page = mkt_storage_new_page(storage, &blkno);
-
-	Assert(blkno == 0);
+	/* Block 0 must already exist (extended or new_page'd by caller).
+	 * Use write_page to write in-place. */
+	Page page = mkt_storage_write_page(storage, 0);
 
 	PageInit(page, BLCKSZ, MKT_META_SIZE(dim));
 
@@ -305,7 +288,7 @@ write_meta_page(
 
 	memcpy(mktann_meta_global_mean(meta), global_mean, dim * sizeof(float));
 
-	mkt_storage_commit_page(storage, blkno);
+	mkt_storage_commit_page(storage, 0);
 }
 
 /* ----------------------------------------------------------------
@@ -450,7 +433,7 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	if (bs->params.metric == DISTANCE_COSINE)
 	{
 		for (int i = 0; i < bs->nsamples; i++)
-			normalize_in_place(bs->samples + (size_t)i * dim, dim);
+			mkt_l2_normalize(bs->samples + (size_t)i * dim, dim);
 	}
 
 	if (bs->nsamples == 0)
@@ -471,6 +454,7 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	HKMeansResult *tree = mkt_hkmeans_f32(
 			bs->samples,
 			(uint32_t)bs->nsamples,
+			NULL,
 			dim,
 			nlist,
 			bs->params.fan_out,
@@ -489,7 +473,7 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	mkt_vector_mean(hk_leaf_centroids(tree), tree->nleaves, dim, global_mean);
 
 	if (bs->params.metric == DISTANCE_COSINE)
-		normalize_in_place(global_mean, dim);
+		mkt_l2_normalize(global_mean, dim);
 
 	*out_global_mean = global_mean;
 	return tree;
@@ -518,203 +502,261 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 	resolve_build_params(heap, index, &bs.params);
 
-	/* 2. Sample and cluster vectors */
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SAMPLE);
-	float		  *global_mean;
-	HKMeansResult *tree = run_clustering(&bs, &global_mean);
-
-	if (tree == NULL)
-	{
-		MemoryContextSwitchTo(caller_ctx);
-		MemoryContextDelete(build_ctx);
-		return palloc0(sizeof(IndexBuildResult));
-	}
-
-	const MktannBuildParams *p	   = &bs.params;
-	Dimension				 dim   = p->dim;
-	uint32_t				 nlist = tree->nleaves;
-	bs.params.nlist				   = nlist;
-
-	/* 3. Single-pass streaming build */
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SETUP);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
-
-	uint64_t	  rabitq_seed = 42;
-	RaBitQParams *rq_params	  = mkt_rabitq_create(dim, rabitq_seed);
+	const MktannBuildParams *p			 = &bs.params;
+	Dimension				 dim		 = p->dim;
+	uint64_t				 rabitq_seed = 42;
 
 	MktannStorage storage;
 	mktann_storage_init(&storage, index, NULL, p->metric);
 	storage.build_mode = true;
 
-	/* Normalize leaf centroids for cosine */
-	float *ref_vecs = hk_leaf_centroids(tree);
-	if (p->metric == DISTANCE_COSINE)
+	HKMeansResult *tree			 = NULL;
+	double		   heap_tuples	 = 0;
+	double		   indtuples	 = 0;
+	double		   soar_dupes	 = 0;
+	BlockNumber	  *posting_heads = NULL;
+	float		  *global_mean	 = NULL;
+
 	{
+		/* Sample, cluster, then build the posting lists serially. The PG
+		 * parallel build path is added in a follow-up change. */
+		pgstat_progress_update_param(
+				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SAMPLE);
+		tree = run_clustering(&bs, &global_mean);
+
+		if (tree == NULL)
+		{
+			MemoryContextSwitchTo(caller_ctx);
+			MemoryContextDelete(build_ctx);
+			return palloc0(sizeof(IndexBuildResult));
+		}
+
+		uint32_t nlist	= tree->nleaves;
+		bs.params.nlist = nlist;
+
+		pgstat_progress_update_param(
+				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SETUP);
+
+		RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
+
+		float *ref_vecs = hk_leaf_centroids(tree);
+		if (p->metric == DISTANCE_COSINE)
+			for (uint32_t c = 0; c < nlist; c++)
+				mkt_l2_normalize(ref_vecs + (size_t)c * dim, dim);
+
+		float *pt_centroids = palloc((size_t)nlist * dim * sizeof(float));
 		for (uint32_t c = 0; c < nlist; c++)
-			normalize_in_place(ref_vecs + (size_t)c * dim, dim);
-	}
-
-	/* Compute P^T * centroids for posting scan query state */
-	float *pt_centroids = palloc((size_t)nlist * dim * sizeof(float));
-	for (uint32_t c = 0; c < nlist; c++)
-		mkt_rabitq_rotate(
-				rq_params,
-				ref_vecs + (size_t)c * dim,
-				pt_centroids + (size_t)c * dim);
-
-	/* Compute centroid page layout starting at block 1 */
-	uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, p->centroid_format);
-	BlockNumber *node_first_blkno = palloc(tree->nnodes * sizeof(BlockNumber));
-	BlockNumber	 first_centroid	  = 1;
-	BlockNumber	 first_posting	  = mkt_compute_centroid_layout(
-			tree, max_ent, first_centroid, node_first_blkno);
-
-	/* Write metadata page (block 0) with known centroid layout */
-	write_meta_page(
-			&storage.base,
-			dim,
-			(uint8_t)tree->nlevels,
-			(uint8_t)p->fan_out,
-			first_centroid,
-			0, /* ntuples placeholder */
-			nlist,
-			p->centroid_format,
-			p->metric,
-			rabitq_seed,
-			global_mean);
-
-	/* Reserve centroid blocks so posting pages start after them */
-	uint32_t n_centroid_pages = first_posting - first_centroid;
-	mkt_storage_extend(&storage.base, n_centroid_pages);
-
-	/* Initialize posting builders with contiguous page reservations */
-	uint32_t per_page = mkt_posting_max_entries(dim);
-	double	 est_rows = RelationGetNumberOfBlocks(heap) *
-					  (BLCKSZ / (double)(dim * sizeof(float) + 32));
-	uint32_t est_per_cluster = (uint32_t)ceil(est_rows / nlist);
-	uint32_t reserve_each	 = (uint32_t)ceil(
-			   (double)est_per_cluster / per_page * 1.2);
-	if (reserve_each < 1)
-		reserve_each = 1;
-
-	MktPostingBuilder *builders = palloc(nlist * sizeof(MktPostingBuilder));
-	for (uint32_t c = 0; c < nlist; c++)
-	{
-		if (p->fastscan)
-			mkt_posting_builder_init_fastscan(
-					&builders[c],
-					&storage.base,
+			mkt_rabitq_rotate(
 					rq_params,
-					dim,
-					c,
-					ref_vecs + (size_t)c * dim,
-					pt_centroids + (size_t)c * dim);
-		else
-			mkt_posting_builder_init(
-					&builders[c],
-					&storage.base,
-					rq_params,
-					dim,
-					c,
 					ref_vecs + (size_t)c * dim,
 					pt_centroids + (size_t)c * dim);
 
-		BlockNumber start = mkt_storage_extend(&storage.base, reserve_each);
-		if (start != InvalidBlockNumber)
-			mkt_posting_builder_set_reserve(&builders[c], start, reserve_each);
+		uint32_t max_ent =
+				mkt_centroid_max_entries_fmt(dim, p->centroid_format);
+		BlockNumber *node_first_blkno = palloc(
+				tree->nnodes * sizeof(BlockNumber));
+		BlockNumber first_centroid = 1;
+		BlockNumber first_posting  = mkt_compute_centroid_layout(
+				 tree, max_ent, first_centroid, node_first_blkno);
+
+		/* Block 0 = metadata page */
+		mkt_storage_extend(&storage.base, 1);
+
+		write_meta_page(
+				&storage.base,
+				dim,
+				(uint8_t)tree->nlevels,
+				(uint8_t)p->fan_out,
+				first_centroid,
+				0,
+				nlist,
+				p->centroid_format,
+				p->metric,
+				rabitq_seed,
+				global_mean);
+
+		uint32_t n_centroid_pages = first_posting - first_centroid;
+		mkt_storage_extend(&storage.base, n_centroid_pages);
+
+		posting_heads = palloc(nlist * sizeof(BlockNumber));
+
+		/*
+		 * Reserve a contiguous page range per cluster via the shared
+		 * reserve_init (same as the parallel and standalone paths). Serial has
+		 * no per-cluster sample assignment, so it feeds a uniform estimate:
+		 * the heap-size cardinality guess split evenly. reserve_init applies
+		 * the format + replication headroom and the page math.
+		 */
+		bool   replicate = p->soar_lambda > 0.0 || p->boundary_epsilon > 0.0;
+		double est_rows	 = RelationGetNumberOfBlocks(heap) *
+						  (BLCKSZ / (double)(dim * sizeof(float) + 32));
+		uint32_t  base	 = (uint32_t)ceil(est_rows / nlist);
+		uint32_t *counts = palloc(nlist * sizeof(uint32_t));
+		for (uint32_t c = 0; c < nlist; c++)
+			counts[c] = base;
+
+		MktPostingReserve reserve;
+		mkt_posting_reserve_init(
+				&reserve, counts, nlist, 1, dim, p->fastscan, replicate);
+		pfree(counts);
+		mkt_storage_extend(&storage.base, reserve.total);
+
+		MktPostingBuilder *builders = palloc(
+				nlist * sizeof(MktPostingBuilder));
+		for (uint32_t c = 0; c < nlist; c++)
+		{
+			if (p->fastscan)
+				mkt_posting_builder_init_fastscan(
+						&builders[c],
+						&storage.base,
+						rq_params,
+						dim,
+						c,
+						ref_vecs + (size_t)c * dim,
+						pt_centroids + (size_t)c * dim);
+			else
+				mkt_posting_builder_init(
+						&builders[c],
+						&storage.base,
+						rq_params,
+						dim,
+						c,
+						ref_vecs + (size_t)c * dim,
+						pt_centroids + (size_t)c * dim);
+
+			mkt_posting_builder_set_shared_reserve(
+					&builders[c],
+					first_posting + reserve.starts[c],
+					reserve.counts[c],
+					&reserve.nexts[c]);
+			mkt_posting_builder_set_first_blkno(
+					&builders[c], first_posting + reserve.starts[c]);
+		}
+
+		bs.tree		   = tree;
+		bs.builders	   = builders;
+		bs.worker_bufs = mkt_build_worker_bufs_create(dim);
+		bs.indtuples   = 0;
+		bs.soar_dupes  = 0;
+
+		instr_time t_serial_start;
+		INSTR_TIME_SET_CURRENT(t_serial_start);
+
+		heap_tuples = table_index_build_scan(
+				heap,
+				index,
+				index_info,
+				true,
+				true,
+				build_callback,
+				(void *)&bs,
+				NULL);
+
+		instr_time t_serial_scan;
+		INSTR_TIME_SET_CURRENT(t_serial_scan);
+		INSTR_TIME_SUBTRACT(t_serial_scan, t_serial_start);
+
+		indtuples  = bs.indtuples;
+		soar_dupes = bs.soar_dupes;
+
+		/* Finish posting builders */
+		pgstat_progress_update_param(
+				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_POSTING);
+		for (uint32_t c = 0; c < nlist; c++)
+		{
+			posting_heads[c] = mkt_posting_builder_finish(&builders[c]);
+			mkt_posting_builder_cleanup(&builders[c]);
+		}
+		pfree(builders);
+		mkt_posting_reserve_free(&reserve);
+
+		elog(LOG,
+			 "mktann: serial build scan %.1fms, "
+			 "%.0f tuples, %u clusters",
+			 INSTR_TIME_GET_MILLISEC(t_serial_scan),
+			 indtuples,
+			 tree->nleaves);
 	}
 
-	/* Prepare build state for scan */
-	bs.tree		   = tree;
-	bs.builders	   = builders;
-	bs.worker_bufs = mkt_build_worker_bufs_create(dim);
-	bs.indtuples   = 0;
-	bs.soar_dupes  = 0;
-
-	/* 4. Single heap scan */
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SCAN);
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_TUPLES_TOTAL, (int64)est_rows);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
-
-	double heap_tuples = table_index_build_scan(
-			heap,
-			index,
-			index_info,
-			true,
-			true,
-			build_callback,
-			(void *)&bs,
-			NULL);
-
-	double indtuples = bs.indtuples;
-
-	if (bs.soar_dupes > 0)
+	if (soar_dupes > 0)
 		elog(LOG,
 			 "mktann: replicated %.0f vectors "
 			 "(%.1f%% of %.0f, lambda=%.4g)",
-			 bs.soar_dupes,
-			 100.0 * bs.soar_dupes / indtuples,
+			 soar_dupes,
+			 100.0 * soar_dupes / indtuples,
 			 indtuples,
 			 bs.params.soar_lambda);
 
-	/* 5. Finish posting builders */
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_POSTING);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
-	BlockNumber *posting_heads = palloc(nlist * sizeof(BlockNumber));
-	for (uint32_t c = 0; c < nlist; c++)
+	/* Write centroid pages + metadata + WAL */
 	{
-		posting_heads[c] = mkt_posting_builder_finish(&builders[c]);
-		mkt_posting_builder_cleanup(&builders[c]);
-	}
-	pfree(builders);
+		uint32_t nlist = tree->nleaves;
 
-	/* 6. Write centroid pages into reserved blocks */
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_CENTROID);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
-	mkt_write_centroid_tree(
-			&storage.base,
-			tree,
-			dim,
-			p->fan_out,
-			p->centroid_format,
-			rq_params,
-			global_mean,
-			posting_heads,
-			node_first_blkno,
-			NULL); /* pt_centroids on posting pages, not here */
+		RaBitQParams *rq = mkt_rabitq_create(dim, rabitq_seed);
 
-	/* Update metadata with final tuple count and flags */
-	{
+		uint32_t max_ent =
+				mkt_centroid_max_entries_fmt(dim, p->centroid_format);
+		BlockNumber *nfb = palloc(tree->nnodes * sizeof(BlockNumber));
+		BlockNumber	 fc	 = 1;
+		BlockNumber	 fp	 = mkt_compute_centroid_layout(tree, max_ent, fc, nfb);
+		(void)fp;
+
+		if (global_mean == NULL)
+		{
+			global_mean = palloc(dim * sizeof(float));
+			mkt_vector_mean(hk_leaf_centroids(tree), nlist, dim, global_mean);
+			if (p->metric == DISTANCE_COSINE)
+				mkt_l2_normalize(global_mean, dim);
+		}
+
+		write_meta_page(
+				&storage.base,
+				dim,
+				(uint8_t)tree->nlevels,
+				(uint8_t)p->fan_out,
+				fc,
+				0,
+				nlist,
+				p->centroid_format,
+				p->metric,
+				rabitq_seed,
+				global_mean);
+
+		pgstat_progress_update_param(
+				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_CENTROID);
+		mkt_write_centroid_tree(
+				&storage.base,
+				tree,
+				dim,
+				p->fan_out,
+				p->centroid_format,
+				rq,
+				global_mean,
+				posting_heads,
+				nfb,
+				NULL);
+
 		Page			page = mkt_storage_write_page(&storage.base, 0);
 		MktannMetaPage *meta = (MktannMetaPage *)PageGetSpecialPointer(page);
 		meta->ntuples		 = (uint32_t)indtuples;
 		if (p->fastscan)
 			meta->flags |= MKT_META_FLAG_FASTSCAN;
 		mkt_storage_commit_page(&storage.base, 0);
+
+		pgstat_progress_update_param(
+				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_WAL);
+		log_newpage_range(
+				index,
+				MAIN_FORKNUM,
+				0,
+				RelationGetNumberOfBlocks(index),
+				true);
+
+		pfree(nfb);
 	}
 
-	/* 7. WAL-log all pages */
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_WAL);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
-	log_newpage_range(
-			index, MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index), true);
-
 	/* Cleanup */
-	mkt_hkmeans_result_destroy(tree);
-	pfree(node_first_blkno);
+	mkt_free(tree);
 	pfree(posting_heads);
-	pfree(pt_centroids);
 
 	MemoryContextSwitchTo(caller_ctx);
 	MemoryContextDelete(build_ctx);

@@ -6,9 +6,21 @@
  * fastscan) is selected at init time via page_ops callbacks.
  */
 
+#include "mkt_config.h"
+
 #include <math.h>
 #include <string.h>
 
+#ifdef MKT_HAVE_CBLAS
+/* See matrix.c for the rationale on the Apple branch. */
+#ifdef __APPLE__
+#include <vecLib/cblas_new.h>
+#else
+#include <cblas.h>
+#endif
+#endif
+
+#include "algo/vecops.h"
 #include "core/memory.h"
 #include "index/index_build.h"
 #include "index/posting_build.h"
@@ -16,6 +28,49 @@
 
 /* ================================================================
  * Vector-to-cluster assignment
+ *
+ * Building a posting list assigns each vector to a PRIMARY cluster and,
+ * when replication is enabled, to a SECONDARY (replica) cluster. These
+ * two use deliberately different methods, because they are different
+ * problems:
+ *
+ *   PRIMARY  -> tree descent (mkt_hkmeans_assign).
+ *     The nearest centroid via a greedy descent of the k-means tree:
+ *     O(fan_out * nlevels) distance evaluations, a single root-to-leaf
+ *     path. Two reasons it is the right tool here:
+ *       1. It is far cheaper than scanning every leaf. For primary we
+ *          only need the (approximate) nearest, and a greedy descent
+ *          finds it in ~log(nlist) work.
+ *       2. It MATCHES the query path. Queries route to clusters by
+ *          descending the same tree, so assigning vectors the same way
+ *          makes a vector and a nearby query land in the same cluster.
+ *          Assigning by exact-nearest instead would create a
+ *          build/query routing mismatch — some vectors would sit in
+ *          their exact-nearest leaf that a nearby query's greedy descent
+ *          never reaches — which measurably lowers recall. (Measured:
+ *          exact brute-force primary was both slower and slightly lower
+ *          recall than tree descent.)
+ *
+ *   SECONDARY (SOAR + boundary) -> batched brute-force SIMD (sgemm).
+ *     The replica search is inherently a full-scan problem: boundary
+ *     needs the 2nd-nearest centroid, and SOAR needs the centroid
+ *     minimizing an orthogonality-amplified distance whose optimum need
+ *     NOT be among the nearest-by-distance leaves, so a tree cannot
+ *     prune to it — this replica search must run over the flat centroid
+ *     set, not a hierarchy. The batched kernel (mkt_secondary_batch_*)
+ *     computes <v,c> for a batch of vectors against all centroids via
+ *     sgemm, streamed in cache-sized tiles, so the centroid block is
+ *     read once per batch and the kernel is compute-bound. Measured
+ *     faster than a per-vector tree beam at every nlist tested (the
+ *     beam's per-vector, random-access scan degrades as centroids spill
+ *     from cache, while the tiled GEMM streams) and with identical
+ *     boundary recall, so there is no benefit to a hierarchy here in the
+ *     practical range.
+ *
+ *   FALLBACK (no CBLAS) -> per-vector path in mkt_build_assign_vector:
+ *     boundary via a wider tree beam (mkt_hkmeans_assign_topk), SOAR via
+ *     a per-vector SIMD full scan (mkt_find_soar_secondary). Correct but
+ *     slower; only used when no BLAS is available for the GEMM.
  * ================================================================ */
 
 static void
@@ -43,6 +98,8 @@ mkt_build_worker_bufs_create(Dimension dim)
 	return (MktBuildWorkerBufs){
 			.norm_buf	  = mkt_alloc(dim * sizeof(float)),
 			.residual_buf = mkt_alloc(dim * sizeof(float)),
+			.cand_leaves  = mkt_alloc(MKT_SECONDARY_TOPK * sizeof(uint32_t)),
+			.cand_dists	  = mkt_alloc(MKT_SECONDARY_TOPK * sizeof(Distance)),
 	};
 }
 
@@ -51,8 +108,12 @@ mkt_build_worker_bufs_free(MktBuildWorkerBufs *bufs)
 {
 	mkt_free(bufs->norm_buf);
 	mkt_free(bufs->residual_buf);
+	mkt_free(bufs->cand_leaves);
+	mkt_free(bufs->cand_dists);
 	bufs->norm_buf	   = NULL;
 	bufs->residual_buf = NULL;
+	bufs->cand_leaves  = NULL;
+	bufs->cand_dists   = NULL;
 }
 
 MktBuildAssignment
@@ -86,15 +147,28 @@ mkt_build_assign_vector(
 
 		uint32_t boundary_c2 = best_c;
 		if (has_boundary)
-			boundary_c2 = mkt_find_secondary_cluster(
+		{
+			/* Beam-descend for the nearest leaves; the 2nd-nearest is
+			 * the boundary candidate. Far cheaper than scanning all
+			 * leaves, and exact when the true 2nd-nearest is within the
+			 * explored subtrees (which it is for boundary vectors). */
+			uint32_t ncand = mkt_hkmeans_assign_topk(
+					tree,
 					enc_vec,
-					leaves,
-					nleaves,
-					dim,
 					params->metric,
+					MKT_SECONDARY_TOPK,
+					MKT_SECONDARY_BEAM_WIDTH,
+					bufs->cand_leaves,
+					bufs->cand_dists);
+
+			boundary_c2 = mkt_find_secondary_cluster(
+					bufs->cand_leaves,
+					bufs->cand_dists,
+					ncand,
 					best_c,
 					min_dist,
 					params->boundary_epsilon);
+		}
 
 		bool should_replicate = has_boundary ? (boundary_c2 != best_c) : true;
 
@@ -142,6 +216,266 @@ mkt_build_assign_vector(
 	};
 }
 
+uint32_t
+mkt_build_assign_primary(
+		const HKMeansResult	 *tree,
+		const float			 *vec,
+		const MktBuildParams *params,
+		float				 *enc_out,
+		Distance			 *out_dist)
+{
+	uint32_t best_c = mkt_hkmeans_assign(tree, vec, params->metric, out_dist);
+
+	if (params->metric == DISTANCE_COSINE)
+		normalize_vec(enc_out, vec, params->dim);
+	else
+		memcpy(enc_out, vec, (size_t)params->dim * sizeof(float));
+
+	return best_c;
+}
+
+/* ----------------------------------------------------------------
+ * Batched secondary assignment (CBLAS sgemm)
+ * ---------------------------------------------------------------- */
+
+bool
+mkt_secondary_batch_available(void)
+{
+#ifdef MKT_HAVE_CBLAS
+	return true;
+#else
+	return false;
+#endif
+}
+
+void
+mkt_secondary_batch_init(
+		MktSecondaryBatch *s,
+		const float		  *leaf_centroids,
+		uint32_t		   nleaves,
+		Dimension		   dim,
+		uint32_t		   max_batch)
+{
+	uint32_t tile	  = MKT_SECONDARY_TILE;
+	s->max_batch	  = max_batch;
+	s->nleaves		  = nleaves;
+	s->dim			  = dim;
+	s->leaf_centroids = leaf_centroids;
+	s->cent_norms	  = mkt_alloc(nleaves * sizeof(float));
+	s->vc			  = mkt_alloc((size_t)max_batch * tile * sizeof(float));
+	s->rc			  = mkt_alloc((size_t)max_batch * tile * sizeof(float));
+	s->residuals	  = mkt_alloc((size_t)max_batch * dim * sizeof(float));
+	s->vec_norms	  = mkt_alloc(max_batch * sizeof(float));
+	s->qrv			  = mkt_alloc(max_batch * sizeof(float));
+	s->best2		  = mkt_alloc(max_batch * sizeof(float));
+	s->c2			  = mkt_alloc(max_batch * sizeof(uint32_t));
+	s->best_oa		  = mkt_alloc(max_batch * sizeof(float));
+	s->best_oa_c	  = mkt_alloc(max_batch * sizeof(uint32_t));
+
+	for (uint32_t j = 0; j < nleaves; j++)
+		s->cent_norms[j] =
+				mkt_l2_norm_squared(leaf_centroids + (size_t)j * dim, dim);
+}
+
+void
+mkt_secondary_batch_free(MktSecondaryBatch *s)
+{
+	mkt_free(s->cent_norms);
+	mkt_free(s->vc);
+	mkt_free(s->rc);
+	mkt_free(s->residuals);
+	mkt_free(s->vec_norms);
+	mkt_free(s->qrv);
+	mkt_free(s->best2);
+	mkt_free(s->c2);
+	mkt_free(s->best_oa);
+	mkt_free(s->best_oa_c);
+	*s = (MktSecondaryBatch){0};
+}
+
+/*
+ * Fill out[i*ncent + j] = <row_i, cent_j> for the whole batch. Both the
+ * boundary distance (metric-specific) and SOAR's ||v-c||^2 derive from this
+ * matrix plus the precomputed norms, so the centroid block is read once per
+ * batch. With CBLAS this is a single sgemm (V·Cᵀ); without it, a direct
+ * dot-product loop — un-accelerated but identical results, so the batched
+ * path stays correct on builds with no BLAS (MKT_HAVE_CBLAS undefined).
+ */
+static void
+secondary_batch_dots(
+		MktSecondaryBatch *s,
+		const float		  *vecs,
+		uint32_t		   n,
+		const float		  *cent_base,
+		uint32_t		   ncent,
+		float			  *out)
+{
+#ifdef MKT_HAVE_CBLAS
+	cblas_sgemm(
+			CblasRowMajor,
+			CblasNoTrans,
+			CblasTrans,
+			(int)n,
+			(int)ncent,
+			(int)s->dim,
+			1.0f,
+			vecs,
+			(int)s->dim,
+			cent_base,
+			(int)s->dim,
+			0.0f,
+			out,
+			(int)ncent);
+#else
+	const Dimension dim = s->dim;
+	for (uint32_t i = 0; i < n; i++)
+		for (uint32_t j = 0; j < ncent; j++)
+			out[(size_t)i * ncent + j] = mkt_dot_product(
+					vecs + (size_t)i * dim, cent_base + (size_t)j * dim, dim);
+#endif
+}
+
+void
+mkt_secondary_batch_assign(
+		MktSecondaryBatch	 *s,
+		const float			 *vecs,
+		uint32_t			  n,
+		const uint32_t		 *primary,
+		const float			 *primary_dist,
+		const MktBuildParams *params,
+		uint32_t			 *out_secondary)
+{
+	const uint32_t	nleaves		 = s->nleaves;
+	const Dimension dim			 = s->dim;
+	const bool		has_soar	 = params->soar_lambda > 0.0;
+	const bool		has_boundary = params->boundary_epsilon > 0.0;
+	const float		lambda		 = (float)params->soar_lambda;
+
+	for (uint32_t i = 0; i < n; i++)
+	{
+		s->vec_norms[i] = mkt_l2_norm_squared(vecs + (size_t)i * dim, dim);
+		s->best2[i]		= INFINITY;
+		s->c2[i]		= primary[i];
+		s->best_oa[i]	= INFINITY;
+		s->best_oa_c[i] = primary[i];
+	}
+
+	/* SOAR residual (normalized, from the primary centroid) for every
+	 * row; <r_hat, v> is constant across centroids. */
+	if (has_soar)
+	{
+		for (uint32_t i = 0; i < n; i++)
+		{
+			const float *v	  = vecs + (size_t)i * dim;
+			const float *cent = s->leaf_centroids + (size_t)primary[i] * dim;
+			float		*r	  = s->residuals + (size_t)i * dim;
+			float		 norm = 0.0f;
+			for (Dimension d = 0; d < dim; d++)
+			{
+				r[d] = v[d] - cent[d];
+				norm += r[d] * r[d];
+			}
+			if (norm > 1e-7f)
+			{
+				float inv = 1.0f / sqrtf(norm);
+				for (Dimension d = 0; d < dim; d++)
+					r[d] *= inv;
+			}
+			s->qrv[i] = mkt_dot_product(r, v, dim);
+		}
+	}
+
+	/*
+	 * Stream centroids in tiles so the distance matrix is B*TILE, not
+	 * B*nleaves. Each tile folds into the per-query running reductions:
+	 * boundary distance (metric-specific) and SOAR oa = ||v-c||^2 +
+	 * lambda*(<r_hat,v> - <r_hat,c>)^2.
+	 */
+	for (uint32_t j0 = 0; j0 < nleaves; j0 += MKT_SECONDARY_TILE)
+	{
+		uint32_t	 tile = nleaves - j0 < MKT_SECONDARY_TILE ? nleaves - j0
+															  : MKT_SECONDARY_TILE;
+		const float *cent_base = s->leaf_centroids + (size_t)j0 * dim;
+
+		secondary_batch_dots(s, vecs, n, cent_base, tile, s->vc);
+		if (has_soar)
+			secondary_batch_dots(s, s->residuals, n, cent_base, tile, s->rc);
+
+		for (uint32_t i = 0; i < n; i++)
+		{
+			uint32_t	 p	   = primary[i];
+			const float *vcrow = s->vc + (size_t)i * tile;
+			const float *rcrow = has_soar ? s->rc + (size_t)i * tile : NULL;
+			float		 nx	   = s->vec_norms[i];
+			float		 qrv   = has_soar ? s->qrv[i] : 0.0f;
+
+			for (uint32_t jj = 0; jj < tile; jj++)
+			{
+				uint32_t j = j0 + jj;
+				if (j == p)
+					continue;
+				float vcv = vcrow[jj];
+
+				if (has_boundary)
+				{
+					float d;
+					if (params->metric == DISTANCE_L2)
+						d = nx + s->cent_norms[j] - 2.0f * vcv;
+					else if (params->metric == DISTANCE_COSINE)
+						d = 1.0f - vcv;
+					else
+						d = -vcv;
+					if (d < s->best2[i])
+					{
+						s->best2[i] = d;
+						s->c2[i]	= j;
+					}
+				}
+
+				if (has_soar)
+				{
+					float l2  = nx + s->cent_norms[j] - 2.0f * vcv;
+					float gap = qrv - rcrow[jj];
+					float oa  = l2 + lambda * gap * gap;
+					if (oa < s->best_oa[i])
+					{
+						s->best_oa[i]	= oa;
+						s->best_oa_c[i] = j;
+					}
+				}
+			}
+		}
+	}
+
+	for (uint32_t i = 0; i < n; i++)
+	{
+		uint32_t p = primary[i];
+
+		bool should_replicate;
+		if (has_boundary)
+		{
+			double pd		 = (double)primary_dist[i];
+			double gap		 = (double)s->best2[i] - pd;
+			double gap_ratio = (pd != 0.0) ? gap / fabs(pd) : INFINITY;
+			should_replicate = (s->c2[i] != p) &&
+							   (gap_ratio <= params->boundary_epsilon);
+		}
+		else
+		{
+			should_replicate = true;
+		}
+
+		if (!should_replicate)
+			out_secondary[i] = MKT_INVALID_CLUSTER;
+		else if (has_soar)
+			out_secondary[i] = (s->best_oa_c[i] != p) ? s->best_oa_c[i]
+													  : MKT_INVALID_CLUSTER;
+		else
+			out_secondary[i] = (s->c2[i] != p) ? s->c2[i]
+											   : MKT_INVALID_CLUSTER;
+	}
+}
+
 /* ================================================================
  * Streaming page builder
  * ================================================================ */
@@ -150,8 +484,8 @@ mkt_build_assign_vector(
  * Shared helpers
  * ---------------------------------------------------------------- */
 
-static float
-derive_f_error(float f_add, float f_rescale, Dimension dim)
+float
+mkt_posting_derive_f_error(float f_add, float f_rescale, Dimension dim)
 {
 	float f_rsq = f_rescale * f_rescale;
 	if (f_rsq > f_add && dim > 1)
@@ -162,15 +496,45 @@ derive_f_error(float f_add, float f_rescale, Dimension dim)
 	return 2e-4f * sqrtf(f_add);
 }
 
+#define derive_f_error mkt_posting_derive_f_error
+
 /*
- * Flush the in-memory page to storage and link it into the chain.
- * Prefers reserved contiguous blocks for sequential layout.
+ * Flush the in-memory page.
+ *
+ * Deferred mode (storage == NULL): streams the full page to the page sink
+ * (the leader writes it). No block numbers, no chain linking.
+ *
+ * Direct mode (storage != NULL): writes to storage and links
+ * into the chain. Prefers reserved contiguous blocks.
  */
 static void
 flush_page(MktPostingBuilder *builder)
 {
-	if (!builder->page_dirty)
+	/*
+	 * The first page of a chain (the posting-list head) must always be
+	 * materialized, even with no entries: it carries the cluster's centroid
+	 * metadata and pt_centroid, anchors the chain, and is where a scan begins.
+	 * An empty head arises in the parallel bounded build, where the leader
+	 * synthesizes the head while the workers stream the continuations (for
+	 * fastscan nothing is merged into the head, so it stays empty). Later
+	 * pages are still skipped when they hold no new entries.
+	 */
+	if (!builder->page_dirty && !builder->is_first)
 		return;
+
+	if (builder->storage == NULL)
+	{
+		/*
+		 * Deferred mode: stream the full page to the sink — the leader writes
+		 * it — for bounded memory.
+		 */
+		builder->page_sink(
+				builder->sink_ctx, builder->cluster_id, builder->mem_page);
+		builder->is_first = false;
+		builder->page_ops->reinit_page(builder);
+		builder->page_dirty = false;
+		return;
+	}
 
 	BlockNumber blkno;
 	Page		spage;
@@ -554,15 +918,6 @@ mkt_posting_builder_init_continuation_fastscan(
  * ---------------------------------------------------------------- */
 
 void
-mkt_posting_builder_set_reserve(
-		MktPostingBuilder *builder, BlockNumber start, uint32_t count)
-{
-	builder->reserve_start = start;
-	builder->reserve_count = count;
-	builder->reserve_used  = 0;
-}
-
-void
 mkt_posting_builder_set_shared_reserve(
 		MktPostingBuilder *builder,
 		BlockNumber		   start,
@@ -640,6 +995,16 @@ mkt_posting_builder_finish_partial(MktPostingBuilder *builder)
 {
 	builder->page_ops->finalize(builder);
 	return builder->head_blkno;
+}
+
+void
+mkt_posting_builder_set_page_sink(
+		MktPostingBuilder *builder,
+		void (*sink)(void *ctx, uint32_t cluster_id, const char *page),
+		void *sink_ctx)
+{
+	builder->page_sink = sink;
+	builder->sink_ctx  = sink_ctx;
 }
 
 void

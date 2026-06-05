@@ -37,14 +37,18 @@ typedef struct MktPostingReserve
  * Compute page reservations from cluster sizes.
  *
  * cluster_counts: [nlist] vectors per cluster
- * nworkers: headroom for partial pages (adds nworkers-1 per cluster)
+ * nworkers: currently unused — the deferred-batch path reserves exact
+ *           block counts at materialize, so no per-worker partial-page
+ *           headroom is added here.
  */
 void mkt_posting_reserve_init(
 		MktPostingReserve *res,
 		const uint32_t	  *cluster_counts,
 		uint32_t		   nlist,
 		uint32_t		   nworkers,
-		Dimension		   dim);
+		Dimension		   dim,
+		bool			   fastscan,
+		bool			   replicate);
 
 void mkt_posting_reserve_free(MktPostingReserve *res);
 
@@ -54,7 +58,7 @@ void mkt_posting_reserve_free(MktPostingReserve *res);
 
 typedef struct MktPostingWorkerState
 {
-	uint32_t  thread_id;
+	uint32_t  worker_id; /* 0 = leader; threads (standalone) or procs (PG) */
 	uint32_t  nlist;
 	Dimension dim;
 	bool	  fastscan;
@@ -67,20 +71,25 @@ typedef struct MktPostingWorkerState
 
 	MktPostingBuilder *builders; /* [nlist] lazily initialized */
 	bool			  *active;	 /* [nlist] */
-	BlockNumber		  *heads;	 /* [nlist] flushed chain heads */
-	BlockNumber		  *tails;	 /* [nlist] flushed chain tails */
 
 	/* Shared partial page buffer: after finish, each worker's
-	 * partial page for cluster c is at partials[thread_id * nlist + c].
+	 * partial page for cluster c is at partials[worker_id * nlist + c].
 	 * The buffer is provided by the caller (thread-local memory in
 	 * standalone, DSM in PG). NULL entries = no partial for that
 	 * cluster. The page data is BLCKSZ bytes per slot. */
 	char *partials; /* [nlist * BLCKSZ], caller-owned */
+
+	/* Full-page sink for deferred mode (storage == NULL): each builder
+	 * streams its completed pages to this callback, which writes/forwards
+	 * them — the parallel build uses it to stream pages to the leader over
+	 * shm_mq. Applied to every builder in ensure_builder. */
+	void (*page_sink)(void *ctx, uint32_t cluster_id, const char *page);
+	void *sink_ctx;
 } MktPostingWorkerState;
 
 void mkt_posting_worker_init(
 		MktPostingWorkerState *ws,
-		uint32_t			   thread_id,
+		uint32_t			   worker_id,
 		uint32_t			   nlist,
 		Dimension			   dim,
 		bool				   fastscan,
@@ -92,67 +101,36 @@ void mkt_posting_worker_init(
 		char				  *partials);
 
 /*
- * Add a vector to its cluster's posting list builder.
+ * Set a full-page sink applied to every builder this worker creates
+ * (deferred mode). Call after worker_init, before adding vectors.
  */
-void mkt_posting_worker_add(
+void mkt_posting_worker_set_page_sink(
 		MktPostingWorkerState *ws,
-		uint32_t			   vec_id,
+		void (*sink)(void *ctx, uint32_t cluster_id, const char *page),
+		void *sink_ctx);
+
+/*
+ * Add a heap tuple to its cluster's posting list builder.
+ * PG path: TID comes directly from the heap scan.
+ */
+void mkt_posting_worker_add_heap(
+		MktPostingWorkerState *ws,
+		ItemPointerData		   tid,
 		const float			  *vec,
 		uint32_t			   primary,
 		uint32_t			   secondary);
 
 /*
- * Finalize all active builders. Full pages have already been flushed
- * to storage. Partial pages are copied to the partials buffer.
- * heads[] and tails[] contain the flushed chain endpoints.
+ * Finalize all active builders. Full pages have already been streamed
+ * to the leader; the trailing partial page per cluster is copied to the
+ * partials buffer for the leader to fold into the list head.
  */
 void mkt_posting_worker_finish(MktPostingWorkerState *ws);
 
 /*
- * Free internal arrays (builders, active). Must be called after
- * mkt_posting_finalize() since the merge reads from partials.
+ * Free internal arrays (builders, active). Call after the leader has
+ * consumed this worker's partials.
  */
 void mkt_posting_worker_cleanup(MktPostingWorkerState *ws);
-
-/* ----------------------------------------------------------------
- * Post-build: merge partial pages + chain linking
- * ---------------------------------------------------------------- */
-
-typedef struct MktPostingBuildResult
-{
-	BlockNumber *heads;		   /* [nlist] posting list head blocks */
-	uint32_t	 total_pages;  /* final page count */
-	uint32_t	 merge_input;  /* partial pages that went into merge */
-	uint32_t	 merge_output; /* pages produced by merge */
-} MktPostingBuildResult;
-
-/*
- * Merge partial pages and link all page chains.
- *
- * partials: [nworkers * nlist * BLCKSZ] shared buffer with
- *           partial page data from all workers
- * worker_heads/tails: [nworkers][nlist] flushed chain endpoints
- * worker_active: [nworkers][nlist] which clusters each worker touched
- *
- * For each cluster:
- *   1. Merge partial pages into optimally packed pages
- *   2. Link all flushed chains + merge output
- *   3. Sort chain by block number for sequential I/O
- *
- * result: output — caller must free result->heads
- */
-void mkt_posting_finalize(
-		char				  *partials,
-		BlockNumber			 **worker_heads,
-		BlockNumber			 **worker_tails,
-		bool				 **worker_active,
-		uint32_t			   nworkers,
-		MktStorage			  *storage,
-		MktPostingReserve	  *reserve,
-		const float			  *leaf_centroids,
-		const float			  *pt_centroids,
-		Dimension			   dim,
-		bool				   fastscan,
-		MktPostingBuildResult *result);
 
 #endif /* MKT_POSTING_BUILD_PARALLEL_H */

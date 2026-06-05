@@ -375,6 +375,52 @@ mkt_fastscan_pack_codes(
 	return ngroups;
 }
 
+/*
+ * Inverse of mkt_fastscan_pack_codes: reconstruct the per-vector 1-bit
+ * RaBitQ codes from the packed fastscan layout. Used when merging a
+ * fastscan posting page back into a builder (the parallel build folds
+ * workers' trailing partial pages into the head). bits_out must hold
+ * count * packed_bytes bytes.
+ */
+void
+mkt_fastscan_unpack_codes(
+		const uint8_t *codes, uint32_t count, Dimension dim, uint8_t *bits_out)
+{
+	uint32_t packed_bytes = (dim + 7) / 8;
+	uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) / MKT_FASTSCAN_GROUP;
+
+	for (uint32_t g = 0; g < ngroups; g++)
+	{
+		uint32_t g_start = g * MKT_FASTSCAN_GROUP;
+
+		for (uint32_t col = 0; col < packed_bytes; col++)
+		{
+			const uint8_t *in = codes +
+								(size_t)g * MKT_FASTSCAN_GROUP_BYTES(dim) +
+								(size_t)col * MKT_FASTSCAN_GROUP;
+
+			/* Undo the kPerm0 nibble interleaving (inverse of the pack). */
+			uint8_t lower[MKT_FASTSCAN_GROUP];
+			uint8_t upper[MKT_FASTSCAN_GROUP];
+			for (uint32_t j = 0; j < 16; j++)
+			{
+				lower[kPerm0[j]]	  = in[j] & 0x0F;
+				lower[kPerm0[j] + 16] = in[j] >> 4;
+				upper[kPerm0[j]]	  = in[j + 16] & 0x0F;
+				upper[kPerm0[j] + 16] = in[j + 16] >> 4;
+			}
+
+			for (uint32_t v = 0; v < MKT_FASTSCAN_GROUP; v++)
+			{
+				uint32_t vi = g_start + v;
+				if (vi < count)
+					bits_out[(size_t)vi * packed_bytes + col] =
+							(uint8_t)((upper[v] << 4) | lower[v]);
+			}
+		}
+	}
+}
+
 /* ----------------------------------------------------------------
  * Scalar accumulate kernel (reference implementation)
  *
