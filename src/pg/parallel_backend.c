@@ -277,6 +277,9 @@ mkt_pbuild_setup_shared(
 			&pcxt->estimator, mkt_dsm_centroids_size(km_k, dim));
 	/* RaBitQ rotation matrix — generated once, shared by all participants. */
 	shm_toc_estimate_chunk(&pcxt->estimator, mkt_dsm_rabitq_matrix_size(dim));
+	/* Child k-means output (work-partitioned phase 2c) */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator, mkt_dsm_child_cents_size(km_k, fan_out, dim));
 	/* K-means per-worker accumulators */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
@@ -316,10 +319,10 @@ mkt_pbuild_setup_shared(
 		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
 	}
 
-	/* nkeys: shared, barrier, samples, centroids, rabitq_matrix, km_workers,
-	 * root_assign, tree, posting_queues, worker_output, wal, buffer, partials
-	 * + optionally query_text */
-	int nkeys = 13;
+	/* nkeys: shared, barrier, samples, centroids, rabitq_matrix,
+	 * child_centroids, km_workers, root_assign, tree, posting_queues,
+	 * worker_output, wal, buffer, partials + optionally query_text */
+	int nkeys = 14;
 	if (debug_query_string)
 		nkeys++;
 	shm_toc_estimate_keys(&pcxt->estimator, nkeys);
@@ -341,7 +344,7 @@ mkt_pbuild_setup_shared(
 	shared->dim					   = dim;
 	shared->metric				   = config->metric;
 	shared->nlist				   = nlist;
-	shared->fan_out				   = config->fan_out;
+	shared->fan_out				   = fan_out; /* resolved (auto if config 0) */
 	shared->soar_lambda			   = config->soar_lambda;
 	shared->boundary_epsilon	   = config->boundary_epsilon;
 	shared->fastscan			   = config->fastscan;
@@ -396,6 +399,12 @@ mkt_pbuild_setup_shared(
 			shm_toc_allocate(pcxt->toc, mkt_dsm_rabitq_matrix_size(dim));
 	mkt_random_orthogonal_matrix(rabitq_matrix, dim, rabitq_seed);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_RABITQ_MATRIX, rabitq_matrix);
+
+	/* Child k-means output region (written by all participants in phase 2c,
+	 * read by the leader to assemble the tree). */
+	char *child_cents_base = shm_toc_allocate(
+			pcxt->toc, mkt_dsm_child_cents_size(km_k, fan_out, dim));
+	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CHILD_CENTROIDS, child_cents_base);
 
 	/* Per-worker k-means accumulators */
 	Size  km_sz			  = mkt_dsm_km_workers_size(nparticipants, km_k, dim);
@@ -463,28 +472,29 @@ mkt_pbuild_setup_shared(
 		shm_toc_insert(pcxt->toc, MKT_DSM_KEY_QUERY_TEXT, sq);
 	}
 
-	lead->pcxt			  = pcxt;
-	lead->shared		  = shared;
-	lead->barrier		  = barrier;
-	lead->dsm_samples	  = dsm_samples;
-	lead->centroids_base  = centroids_base;
-	lead->cents			  = cents;
-	lead->rabitq_matrix	  = rabitq_matrix;
-	lead->km_workers_base = km_workers_base;
-	lead->dsm_ra		  = dsm_ra;
-	lead->dsm_tree		  = dsm_tree;
-	lead->queues_base	  = queues_base;
-	lead->dsm_partials	  = dsm_partials;
-	lead->walusage		  = walusage;
-	lead->bufferusage	  = bufferusage;
-	lead->nparticipants	  = nparticipants;
-	lead->km_k			  = km_k;
-	lead->max_per_worker  = max_per_worker;
-	lead->dim			  = dim;
-	lead->nlist			  = nlist;
-	lead->rabitq_seed	  = rabitq_seed;
-	lead->fan_out		  = fan_out;
-	lead->max_tree_sz	  = max_tree_sz;
+	lead->pcxt			   = pcxt;
+	lead->shared		   = shared;
+	lead->barrier		   = barrier;
+	lead->dsm_samples	   = dsm_samples;
+	lead->centroids_base   = centroids_base;
+	lead->cents			   = cents;
+	lead->rabitq_matrix	   = rabitq_matrix;
+	lead->child_cents_base = child_cents_base;
+	lead->km_workers_base  = km_workers_base;
+	lead->dsm_ra		   = dsm_ra;
+	lead->dsm_tree		   = dsm_tree;
+	lead->queues_base	   = queues_base;
+	lead->dsm_partials	   = dsm_partials;
+	lead->walusage		   = walusage;
+	lead->bufferusage	   = bufferusage;
+	lead->nparticipants	   = nparticipants;
+	lead->km_k			   = km_k;
+	lead->max_per_worker   = max_per_worker;
+	lead->dim			   = dim;
+	lead->nlist			   = nlist;
+	lead->rabitq_seed	   = rabitq_seed;
+	lead->fan_out		   = fan_out;
+	lead->max_tree_sz	   = max_tree_sz;
 	return true;
 }
 

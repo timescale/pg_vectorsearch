@@ -49,20 +49,21 @@ struct IndexInfo;
  * their keys live here with the rest for one contiguous numbering.
  * ---------------------------------------------------------------- */
 
-#define MKT_DSM_KEY_SHARED		   UINT64CONST(0xB000000000000001)
-#define MKT_DSM_KEY_TREE		   UINT64CONST(0xB000000000000002)
-#define MKT_DSM_KEY_WORKER_OUTPUT  UINT64CONST(0xB000000000000004)
-#define MKT_DSM_KEY_PARTIALS	   UINT64CONST(0xB000000000000005)
-#define MKT_DSM_KEY_WAL_USAGE	   UINT64CONST(0xB000000000000006)
-#define MKT_DSM_KEY_BUFFER_USAGE   UINT64CONST(0xB000000000000007)
-#define MKT_DSM_KEY_QUERY_TEXT	   UINT64CONST(0xB000000000000008)
-#define MKT_DSM_KEY_BARRIER		   UINT64CONST(0xB000000000000009)
-#define MKT_DSM_KEY_SAMPLES		   UINT64CONST(0xB00000000000000A)
-#define MKT_DSM_KEY_CENTROIDS	   UINT64CONST(0xB00000000000000B)
-#define MKT_DSM_KEY_KM_WORKERS	   UINT64CONST(0xB00000000000000C)
-#define MKT_DSM_KEY_ROOT_ASSIGN	   UINT64CONST(0xB00000000000000E)
-#define MKT_DSM_KEY_POSTING_QUEUES UINT64CONST(0xB00000000000000F)
-#define MKT_DSM_KEY_RABITQ_MATRIX  UINT64CONST(0xB000000000000010)
+#define MKT_DSM_KEY_SHARED			UINT64CONST(0xB000000000000001)
+#define MKT_DSM_KEY_TREE			UINT64CONST(0xB000000000000002)
+#define MKT_DSM_KEY_WORKER_OUTPUT	UINT64CONST(0xB000000000000004)
+#define MKT_DSM_KEY_PARTIALS		UINT64CONST(0xB000000000000005)
+#define MKT_DSM_KEY_WAL_USAGE		UINT64CONST(0xB000000000000006)
+#define MKT_DSM_KEY_BUFFER_USAGE	UINT64CONST(0xB000000000000007)
+#define MKT_DSM_KEY_QUERY_TEXT		UINT64CONST(0xB000000000000008)
+#define MKT_DSM_KEY_BARRIER			UINT64CONST(0xB000000000000009)
+#define MKT_DSM_KEY_SAMPLES			UINT64CONST(0xB00000000000000A)
+#define MKT_DSM_KEY_CENTROIDS		UINT64CONST(0xB00000000000000B)
+#define MKT_DSM_KEY_KM_WORKERS		UINT64CONST(0xB00000000000000C)
+#define MKT_DSM_KEY_ROOT_ASSIGN		UINT64CONST(0xB00000000000000E)
+#define MKT_DSM_KEY_POSTING_QUEUES	UINT64CONST(0xB00000000000000F)
+#define MKT_DSM_KEY_RABITQ_MATRIX	UINT64CONST(0xB000000000000010)
+#define MKT_DSM_KEY_CHILD_CENTROIDS UINT64CONST(0xB000000000000011)
 
 /* ----------------------------------------------------------------
  * MktBuildShared — back-end-neutral shared build state
@@ -102,10 +103,6 @@ typedef struct MktBuildShared
 
 	/* K-means convergence — set by leader between barriers */
 	bool km_converged;
-
-	/* Child k-means — set by leader between barriers */
-	uint32_t current_child;
-	uint32_t child_km_k; /* k for current child k-means */
 } MktBuildShared;
 
 /* ----------------------------------------------------------------
@@ -202,6 +199,55 @@ static inline float *
 mkt_dsm_centroids(char *base)
 {
 	return (float *)base;
+}
+
+/* ----------------------------------------------------------------
+ * Child k-means output in DSM
+ *
+ * The 45 child k-means runs are partitioned across participants (each owns
+ * children where child % nparticipants == participant_id) and run to
+ * completion independently, with no per-iteration barrier. Each participant
+ * writes its children's centroids here; the leader reads them all (after a
+ * single barrier) to assemble the two-level tree. Layout: centroids
+ * [km_k * fan_out * dim] (child c at offset c*fan_out*dim, child_ks[c]
+ * centroids used) followed by child_ks[km_k].
+ * ---------------------------------------------------------------- */
+
+static inline Size
+mkt_dsm_child_cents_size(uint32_t km_k, uint32_t fan_out, Dimension dim)
+{
+	return (Size)km_k * fan_out * dim * sizeof(float) +
+		   (Size)km_k * sizeof(uint32_t);
+}
+
+static inline float *
+mkt_dsm_child_cents(char *base)
+{
+	return (float *)base;
+}
+
+static inline uint32_t *
+mkt_dsm_child_ks(char *base, uint32_t km_k, uint32_t fan_out, Dimension dim)
+{
+	return (uint32_t *)(base + (size_t)km_k * fan_out * dim * sizeof(float));
+}
+
+/*
+ * Number of hierarchy levels for nlist leaves with the given fan_out. Both the
+ * leader and the workers compute this identically to agree on whether the
+ * (parallel, two-level) child k-means runs or the serial fallback is used.
+ */
+static inline uint32_t
+mkt_compute_nlevels(uint32_t nlist, uint32_t fan_out)
+{
+	uint32_t nlevels = 1;
+	uint32_t n		 = nlist;
+	while (n > fan_out)
+	{
+		n = (n + fan_out - 1) / fan_out;
+		nlevels++;
+	}
+	return nlevels;
 }
 
 static inline float *
@@ -382,6 +428,33 @@ extern void mkt_km_assign_and_accumulate_filtered(
 		uint32_t	   *out_cnts,
 		float		   *out_cost);
 
+/*
+ * Phase 2c: work-partitioned child k-means (shared by leader and workers).
+ *
+ * Each participant runs the complete k-means for the children it owns
+ * (child where child % nparticipants == participant_id), reading the pooled
+ * samples and their root assignments out of DSM and writing the resulting
+ * centroids + per-child k into the child-centroids region. There is NO
+ * cross-participant synchronization inside this call: the children are
+ * independent, so the only barrier is the single one the caller issues after
+ * it returns. root_cents (km_k * dim) supplies the centroid for any child that
+ * collapses to a single leaf.
+ */
+extern void mkt_child_kmeans_partitioned(
+		int				  participant_id,
+		int				  nparticipants,
+		MktDsmSamples	 *dsm_samples,
+		MktDsmRootAssign *dsm_ra,
+		const float		 *root_cents,
+		uint32_t		  km_k,
+		uint32_t		  fan_out,
+		Dimension		  dim,
+		DistanceMetric	  metric,
+		uint32_t		  km_max_iterations,
+		float			  km_tolerance,
+		float			 *out_child_cents,
+		uint32_t		 *out_child_ks);
+
 /* ----------------------------------------------------------------
  * Phase 3: Posting build callback — shared by leader and workers
  *
@@ -542,7 +615,8 @@ typedef struct MktPBuildLeader
 	void				   *dsm_tree;
 	char				   *queues_base;
 	char				   *dsm_partials;
-	float				   *rabitq_matrix; /* shared P (dim*dim) */
+	float				   *rabitq_matrix;	  /* shared P (dim*dim) */
+	char				   *child_cents_base; /* child k-means output region */
 	struct WalUsage		   *walusage;
 	struct BufferUsage	   *bufferusage;
 	int						nparticipants;

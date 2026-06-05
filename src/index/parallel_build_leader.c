@@ -347,221 +347,46 @@ do_parallel_build(
 		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 		/*
-		 * Phase 2c: Parallel child k-means
+		 * Phase 2c: child k-means, work-partitioned across participants.
 		 *
-		 * For each child c, run k-means on samples assigned to c.
-		 * The leader picks initial centroids, writes them to the
-		 * DSM centroid buffer, then all participants iterate.
+		 * Each participant (the leader is id 0) runs the children it owns to
+		 * completion against the pooled samples in DSM — no per-iteration
+		 * barrier. cents still holds the converged root centroids (nothing
+		 * overwrites it now), serving both as the collapsed-child fallback and
+		 * as the tree's root level.
 		 */
+		char	 *child_base  = lead.child_cents_base;
+		float	 *child_cents = mkt_dsm_child_cents(child_base);
+		uint32_t *child_ks = mkt_dsm_child_ks(child_base, km_k, fan_out, dim);
 
-		/* Concatenate all workers' samples + assignments for
-		 * leader to pick initial child centroids from */
-		uint32_t total_nsamples = 0;
-		for (int t = 0; t < nparticipants; t++)
-			total_nsamples += mkt_dsm_sample_counts(dsm_samples)[t];
-
-		/* nlist * 256 samples * dim can exceed the 1GB palloc limit for
-		 * large nlist / high dim (e.g. nlist=2000, dim=768 ~ 1.5GB), so
-		 * allow a huge allocation. Freed after child k-means. */
-		float *all_samples = mkt_alloc_huge(
-				(size_t)total_nsamples * dim * sizeof(float));
-		uint32_t *all_root_asgn = mkt_alloc(total_nsamples * sizeof(uint32_t));
-		uint32_t  soff			= 0;
-		for (int t = 0; t < nparticipants; t++)
-		{
-			uint32_t n = mkt_dsm_sample_counts(dsm_samples)[t];
-			memcpy(all_samples + (size_t)soff * dim,
-				   mkt_dsm_worker_samples(dsm_samples, t),
-				   (size_t)n * dim * sizeof(float));
-			memcpy(all_root_asgn + soff,
-				   mkt_dsm_root_assignments(dsm_ra, t),
-				   n * sizeof(uint32_t));
-			soff += n;
-		}
-
-		/* Save root centroids — cents buffer will be reused */
-		float *root_cents = mkt_alloc((size_t)km_k * dim * sizeof(float));
-		memcpy(root_cents, cents, (size_t)km_k * dim * sizeof(float));
-
-		/* Per-child result storage */
-		float	**child_centroids = mkt_alloc(km_k * sizeof(float *));
-		uint32_t *child_ks		  = mkt_alloc(km_k * sizeof(uint32_t));
-
-		for (uint32_t child = 0; child < km_k; child++)
-		{
-			/* Count samples for this child */
-			uint32_t child_count = 0;
-			for (uint32_t i = 0; i < total_nsamples; i++)
-			{
-				if (all_root_asgn[i] == child)
-					child_count++;
-			}
-
-			uint32_t child_k = fan_out < child_count ? fan_out : child_count;
-			if (child_k < 1)
-				child_k = 1;
-
-			shared->child_km_k = child_k;
-			child_ks[child]	   = child_k;
-
-			if (child_k <= 1)
-			{
-				/* Trivial: single centroid = root centroid */
-				child_centroids[child] = mkt_alloc(dim * sizeof(float));
-				memcpy(child_centroids[child],
-					   root_cents + (size_t)child * dim,
-					   dim * sizeof(float));
-
-				shared->km_converged = true;
-
-				/* Barrier: init done */
-				BarrierArriveAndWait(
-						barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-				continue;
-			}
-
-			/* Pick initial centroids: first child_k samples
-			 * assigned to this child */
-			uint32_t picked = 0;
-			for (uint32_t i = 0; i < total_nsamples && picked < child_k; i++)
-			{
-				if (all_root_asgn[i] != child)
-					continue;
-				memcpy(cents + (size_t)picked * dim,
-					   all_samples + (size_t)i * dim,
-					   dim * sizeof(float));
-				picked++;
-			}
-
-			/* Compute norms for child centroids */
-			float *child_norms = mkt_dsm_norms_c(centroids_base, child_k, dim);
-			if (shared->metric == DISTANCE_L2)
-				for (uint32_t j = 0; j < child_k; j++)
-					child_norms[j] =
-							mkt_l2_norm_squared(cents + (size_t)j * dim, dim);
-
-			shared->km_converged = false;
-
-			/* Clear accumulators */
-			Size child_km_sz =
-					mkt_dsm_km_workers_size(nparticipants, child_k, dim);
-			memset(km_workers_base, 0, child_km_sz);
-
-			float *child_old_cents = mkt_alloc(
-					(size_t)child_k * dim * sizeof(float));
-
-			/* Barrier: child centroids written, workers start */
-			BarrierArriveAndWait(
-					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-
-			/* Iterate child k-means */
-			for (uint32_t iter = 0; iter < shared->km_max_iterations; iter++)
-			{
-				/* Leader's assignment + accumulation */
-				float *l_sums = mkt_dsm_km_worker_sums(
-						km_workers_base, child_k, dim, 0);
-				uint32_t *l_cnts = mkt_dsm_km_worker_cnts(
-						km_workers_base, child_k, dim, 0);
-				float *l_cost = mkt_dsm_km_worker_cost(
-						km_workers_base, child_k, dim, 0);
-
-				mkt_km_assign_and_accumulate_filtered(
-						leader_samples,
-						leader_ns,
-						leader_ra,
-						child,
-						cents,
-						child_norms,
-						child_k,
-						dim,
-						shared->metric,
-						l_sums,
-						l_cnts,
-						l_cost);
-
-				/* Barrier: all workers done */
-				BarrierArriveAndWait(
-						barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-
-				/* Leader reduce */
-				memcpy(child_old_cents,
-					   cents,
-					   (size_t)child_k * dim * sizeof(float));
-
-				const float **csums = mkt_alloc(
-						nparticipants * sizeof(float *));
-				const uint32_t **ccnts = mkt_alloc(
-						nparticipants * sizeof(uint32_t *));
-				float *ccosts = mkt_alloc(nparticipants * sizeof(float));
-
-				for (int t = 0; t < nparticipants; t++)
-				{
-					csums[t] = mkt_dsm_km_worker_sums(
-							km_workers_base, child_k, dim, t);
-					ccnts[t] = mkt_dsm_km_worker_cnts(
-							km_workers_base, child_k, dim, t);
-					ccosts[t] = *mkt_dsm_km_worker_cost(
-							km_workers_base, child_k, dim, t);
-				}
-
-				float total_cost;
-				float shift_sq = kmeans_merge_centroids(
-						cents,
-						child_norms,
-						child_old_cents,
-						csums,
-						ccnts,
-						ccosts,
-						nparticipants,
-						child_k,
-						dim,
-						shared->metric,
-						&total_cost);
-
-				float tol_sq = shared->km_tolerance * shared->km_tolerance;
-				shared->km_converged = (shift_sq < tol_sq);
-
-				/* Clear accumulators for next iter */
-				memset(km_workers_base, 0, child_km_sz);
-
-				/* Barrier: workers read updated centroids */
-				BarrierArriveAndWait(
-						barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-
-				mkt_free(csums);
-				mkt_free(ccnts);
-				mkt_free(ccosts);
-
-				if (shared->km_converged)
-					break;
-			}
-
-			mkt_free(child_old_cents);
-
-			/* Save converged child centroids */
-			child_centroids[child] = mkt_alloc(
-					(size_t)child_k * dim * sizeof(float));
-			memcpy(child_centroids[child],
-				   cents,
-				   (size_t)child_k * dim * sizeof(float));
-		}
-
-		/* Build 2-level tree from root + child centroids */
-		tree = mkt_hkmeans_build_two_level(
-				root_cents,
+		mkt_child_kmeans_partitioned(
+				0,
+				nparticipants,
+				dsm_samples,
+				dsm_ra,
+				cents,
 				km_k,
-				(const float **)child_centroids,
-				child_ks,
-				dim);
+				fan_out,
+				dim,
+				shared->metric,
+				shared->km_max_iterations,
+				shared->km_tolerance,
+				child_cents,
+				child_ks);
 
-		/* Cleanup */
+		/* Barrier: all participants done child k-means; child centroids in
+		 * DSM are now complete and safe to read. */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		/* Assemble the two-level tree from the per-child centroids. */
+		const float **child_cptrs = mkt_alloc(km_k * sizeof(float *));
 		for (uint32_t c = 0; c < km_k; c++)
-			mkt_free(child_centroids[c]);
-		mkt_free(child_centroids);
-		mkt_free(child_ks);
-		mkt_free(root_cents);
-		mkt_free_huge(all_samples);
-		mkt_free(all_root_asgn);
+			child_cptrs[c] = child_cents + (size_t)c * fan_out * dim;
+
+		tree = mkt_hkmeans_build_two_level(
+				cents, km_k, child_cptrs, child_ks, dim);
+
+		mkt_free(child_cptrs);
 
 		nlist = tree->nleaves;
 	}
@@ -601,25 +426,22 @@ do_parallel_build(
 
 		mkt_free_huge(all_samples);
 
-		/* Still need barriers for root assign + child k-means
-		 * that workers are waiting on */
+		/* The workers still run the root-assign + child-k-means barriers (they
+		 * compute nlevels themselves and skip the partitioned k-means here,
+		 * but arrive at both barriers). Match them. */
 		{
 			uint32_t *leader_ra = mkt_dsm_root_assignments(dsm_ra, 0);
 			uint32_t  ln		= mkt_dsm_sample_counts(dsm_samples)[0];
 			for (uint32_t i = 0; i < ln; i++)
 				leader_ra[i] = 0;
 
+			/* Barrier: root assignment done. */
 			BarrierArriveAndWait(
 					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 		}
 
-		for (uint32_t child = 0; child < km_k; child++)
-		{
-			shared->child_km_k	 = 1;
-			shared->km_converged = true;
-			BarrierArriveAndWait(
-					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-		}
+		/* Barrier: child k-means done (no-op in this path). */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 		nlist = tree ? tree->nleaves : 0;
 	}
