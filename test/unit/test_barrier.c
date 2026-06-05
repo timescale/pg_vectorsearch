@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <unistd.h>
 
-#include "core/mkt_barrier.h"
+#include "core/barrier.h"
 #include "mkt_test.h"
 
 TEST_GROUP(Barrier);

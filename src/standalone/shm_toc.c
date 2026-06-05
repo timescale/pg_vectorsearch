@@ -11,7 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "core/mkt_shm_toc.h"
+#include "core/shm_toc.h"
 
 struct shm_toc
 {

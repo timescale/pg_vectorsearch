@@ -11,8 +11,8 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#include "core/mkt_barrier.h"
-#include "core/mkt_parallel_ctx.h"
+#include "core/barrier.h"
+#include "core/parallel_ctx.h"
 #include "mkt_test.h"
 
 TEST_GROUP(ParallelCtx);

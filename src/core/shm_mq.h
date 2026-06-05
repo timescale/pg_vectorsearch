@@ -24,7 +24,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "core/mkt_latch.h"
+#include "core/latch.h"
 
 /* Opaque DSM segment; unused in standalone (threads share the heap). */
 typedef struct dsm_segment dsm_segment;

@@ -11,7 +11,7 @@
 #include <errno.h>
 #include <time.h>
 
-#include "core/mkt_latch.h"
+#include "core/latch.h"
 
 __thread Latch *MyLatch = NULL;
 

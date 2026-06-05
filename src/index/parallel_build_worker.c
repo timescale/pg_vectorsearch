@@ -31,7 +31,7 @@
 #include "algo/vecops.h"
 #include "core/log.h"
 #include "core/memory.h"
-#include "core/mkt_parallel_ctx.h" /* ParallelWorkerNumber */
+#include "core/parallel_ctx.h" /* ParallelWorkerNumber */
 #include "index/parallel_build.h"
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"

@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#include "core/mkt_shm_toc.h"
+#include "core/shm_toc.h"
 #include "mkt_test.h"
 
 TEST_GROUP(ShmToc);

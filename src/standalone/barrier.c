@@ -8,7 +8,7 @@
 
 #ifdef MKT_STANDALONE
 
-#include "core/mkt_barrier.h"
+#include "core/barrier.h"
 
 void
 BarrierInit(Barrier *barrier, int participants)

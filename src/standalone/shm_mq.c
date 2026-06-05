@@ -18,7 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "core/mkt_shm_mq.h"
+#include "core/shm_mq.h"
 
 struct shm_mq
 {

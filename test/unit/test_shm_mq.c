@@ -13,7 +13,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include "core/mkt_shm_mq.h"
+#include "core/shm_mq.h"
 #include "mkt_test.h"
 
 TEST_GROUP(ShmMq);

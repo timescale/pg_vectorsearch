@@ -27,9 +27,9 @@
 
 #include <stddef.h>
 
-#include "core/mkt_latch.h"
-#include "core/mkt_shm_mq.h" /* dsm_segment */
-#include "core/mkt_shm_toc.h"
+#include "core/latch.h"
+#include "core/shm_mq.h" /* dsm_segment */
+#include "core/shm_toc.h"
 #include "standalone/thread_pool.h"
 
 /*

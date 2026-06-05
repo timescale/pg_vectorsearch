@@ -26,11 +26,11 @@
 #endif
 
 #include "algo/hkmeans.h"
+#include "core/barrier.h" /* Barrier (PG's, or the pthread shim) */
+#include "core/build_scan.h"
 #include "core/memory.h"
-#include "core/mkt_barrier.h" /* Barrier (PG's, or the pthread shim) */
-#include "core/mkt_build_scan.h"
-#include "core/mkt_shm_mq.h"	 /* shm_mq (PG's, or the thread-queue shim) */
-#include "core/mkt_shm_toc.h"	 /* shm_toc (PG's, or the heap-arena shim) */
+#include "core/shm_mq.h"		 /* shm_mq (PG's, or the thread-queue shim) */
+#include "core/shm_toc.h"		 /* shm_toc (PG's, or the heap-arena shim) */
 #include "index/centroid_page.h" /* MktCentroidFormat */
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"

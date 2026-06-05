@@ -8,7 +8,7 @@
 
 #ifdef MKT_STANDALONE
 
-#include "core/mkt_build_scan.h"
+#include "core/build_scan.h"
 
 void
 mkt_parallel_scan_init(

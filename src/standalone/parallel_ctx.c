@@ -13,7 +13,7 @@
 
 #include "core/log.h"
 #include "core/memory.h"
-#include "core/mkt_parallel_ctx.h"
+#include "core/parallel_ctx.h"
 
 #define MKT_PARALLEL_TOC_MAGIC		 UINT64_C(0x4d4b54504152) /* "MKTPAR" */
 #define MKT_PARALLEL_MAX_WORKERS_REG 8

@@ -20,7 +20,7 @@
 
 #include "algo/hkmeans.h"
 #include "core/memory.h"
-#include "core/mkt_parallel_ctx.h"
+#include "core/parallel_ctx.h"
 #include "index/index_build.h" /* mkt_auto_fan_out */
 #include "index/parallel_build.h"
 

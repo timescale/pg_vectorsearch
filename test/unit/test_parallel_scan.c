@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include "core/mkt_build_scan.h"
+#include "core/build_scan.h"
 #include "mkt_test.h"
 
 TEST_GROUP(ParallelScan);

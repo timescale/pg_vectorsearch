@@ -11,7 +11,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#include "core/mkt_latch.h"
+#include "core/latch.h"
 #include "mkt_test.h"
 
 TEST_GROUP(Latch);

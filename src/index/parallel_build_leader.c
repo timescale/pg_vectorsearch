@@ -38,10 +38,10 @@
 #include "algo/kmeans.h"
 #include "algo/kmeans_internal.h"
 #include "algo/vecops.h"
+#include "core/instr_time.h"
 #include "core/log.h"
 #include "core/memory.h"
-#include "core/mkt_instr_time.h"
-#include "core/mkt_parallel_ctx.h" /* ParallelContext + lifecycle */
+#include "core/parallel_ctx.h" /* ParallelContext + lifecycle */
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
