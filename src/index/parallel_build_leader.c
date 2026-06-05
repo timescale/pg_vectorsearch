@@ -11,9 +11,9 @@
  */
 
 #ifdef MKT_STANDALONE
-#include "core/pg_compat.h"
 #include "standalone/instr_time.h"
 #include "standalone/parallel_ctx.h" /* ParallelContext + lifecycle */
+#include "standalone/pg_compat.h"
 #else
 #include <postgres.h>
 

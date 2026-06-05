@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "memory_standalone.h"
+#include "standalone/memory_sa.h"
 
 /* Thread-local current context */
 _Thread_local MktMemCtx mkt_current_memctx = NULL;

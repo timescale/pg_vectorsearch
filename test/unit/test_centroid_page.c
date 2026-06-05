@@ -12,10 +12,10 @@
 #include <string.h>
 
 #include "core/memory.h"
-#include "core/pg_compat.h"
 #include "index/centroid_page.h"
 #include "mkt_test.h"
 #include "quant/rabitq.h"
+#include "standalone/pg_compat.h"
 
 TEST_GROUP(CentroidPage);
 TEST_MEMCTX_FIXTURE();

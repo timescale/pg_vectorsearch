@@ -33,7 +33,7 @@
 #include "mkt_types.h"
 
 #ifdef MKT_STANDALONE
-#include "core/pg_compat.h"
+#include "standalone/pg_compat.h"
 #else
 #include <postgres.h>
 
