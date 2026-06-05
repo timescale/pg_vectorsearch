@@ -12,8 +12,8 @@
  */
 
 #ifdef MKT_STANDALONE
-#include "core/pg_compat.h"
 #include "standalone/parallel_ctx.h" /* ParallelWorkerNumber */
+#include "standalone/pg_compat.h"
 #else
 #include <postgres.h>
 

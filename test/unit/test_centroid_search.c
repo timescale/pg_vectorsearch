@@ -11,11 +11,11 @@
 
 #include "algo/vecops.h"
 #include "core/memory.h"
-#include "core/pg_compat.h"
 #include "index/centroid_search.h"
 #include "mkt_halfvec.h"
 #include "mkt_test.h"
 #include "quant/rabitq.h"
+#include "standalone/pg_compat.h"
 
 TEST_GROUP(CentroidSearch);
 TEST_MEMCTX_FIXTURE();

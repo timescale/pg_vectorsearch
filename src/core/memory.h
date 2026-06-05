@@ -13,9 +13,9 @@
 #define MKT_MEMORY_H
 
 #ifdef MKT_STANDALONE
-#include "memory_standalone.h"
+#include "standalone/memory_sa.h"
 #else
-#include "memory_pg.h"
+#include "pg/memory_pg.h"
 #endif
 
 /* Helper for cleanup attribute (works in both modes) */

@@ -22,8 +22,8 @@
  * branch of their own.
  */
 #ifdef MKT_STANDALONE
-#include "core/pg_compat.h" /* Size, BlockNumber, ItemPointerData, Relation */
 #include "standalone/barrier.h"
+#include "standalone/pg_compat.h" /* Size, BlockNumber, ItemPointerData, Relation */
 #include "standalone/shm_mq.h"
 #include "standalone/shm_toc.h"
 #else
