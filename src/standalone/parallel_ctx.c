@@ -8,10 +8,10 @@
 
 #ifdef MKT_STANDALONE
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/log.h"
 #include "core/memory.h"
 #include "core/mkt_parallel_ctx.h"
 
@@ -34,8 +34,7 @@ mkt_parallel_register_worker(const char *name, MktParallelWorkerFn fn)
 {
 	if (mkt_worker_registry_count == MKT_PARALLEL_MAX_WORKERS_REG)
 	{
-		fprintf(stderr, "mkt_parallel_register_worker: registry full\n");
-		abort();
+		mkt_error("mkt_parallel_register_worker: registry full");
 	}
 	mkt_worker_registry[mkt_worker_registry_count].name = name;
 	mkt_worker_registry[mkt_worker_registry_count].fn	= fn;
@@ -49,8 +48,7 @@ mkt_worker_lookup(const char *name)
 		if (strcmp(mkt_worker_registry[i].name, name) == 0)
 			return mkt_worker_registry[i].fn;
 
-	fprintf(stderr, "mkt_worker_lookup: '%s' not registered\n", name);
-	abort();
+	mkt_error("mkt_worker_lookup: '%s' not registered", name);
 }
 
 void
@@ -72,8 +70,7 @@ CreateParallelContext(const char *library, const char *function, int nworkers)
 
 	if (pcxt == NULL)
 	{
-		fprintf(stderr, "CreateParallelContext: out of memory\n");
-		abort();
+		mkt_error("CreateParallelContext: out of memory");
 	}
 
 	pcxt->nworkers			= nworkers;
@@ -99,8 +96,7 @@ InitializeParallelDSM(ParallelContext *pcxt)
 	pcxt->arena		 = malloc(pcxt->arena_size);
 	if (pcxt->arena == NULL)
 	{
-		fprintf(stderr, "InitializeParallelDSM: out of memory\n");
-		abort();
+		mkt_error("InitializeParallelDSM: out of memory");
 	}
 	pcxt->toc = shm_toc_create(
 			MKT_PARALLEL_TOC_MAGIC, pcxt->arena, pcxt->arena_size);
@@ -155,8 +151,7 @@ LaunchParallelWorkers(ParallelContext *pcxt)
 	pcxt->worker_latches = calloc(pcxt->nworkers, sizeof(Latch));
 	if (pcxt->worker_latches == NULL)
 	{
-		fprintf(stderr, "LaunchParallelWorkers: out of memory\n");
-		abort();
+		mkt_error("LaunchParallelWorkers: out of memory");
 	}
 	for (int i = 0; i < pcxt->nworkers; i++)
 		InitLatch(&pcxt->worker_latches[i]);
