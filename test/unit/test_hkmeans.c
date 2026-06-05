@@ -65,17 +65,19 @@ TEST(flat_single_level)
 	ASSERT_EQ(1, tree->nlevels, "flat tree: 1 level");
 	ASSERT_EQ(1, tree->nnodes, "flat tree: 1 node");
 	ASSERT_EQ(nlist, tree->nleaves, "nleaves = nlist");
-	ASSERT_EQ(nlist, tree->nodes[0].nchildren, "root has nlist children");
-	ASSERT_EQ(0, tree->nodes[0].level, "root at level 0");
+	ASSERT_EQ(nlist, hk_nodes(tree)[0].nchildren, "root has nlist children");
+	ASSERT_EQ(0, hk_nodes(tree)[0].level, "root at level 0");
 	ASSERT_EQ(
-			HKMEANS_NO_CHILD, tree->nodes[0].first_child, "leaf: no children");
+			HKMEANS_NO_CHILD,
+			hk_nodes(tree)[0].first_child,
+			"leaf: no children");
 
 	/* Leaf centroids should be valid */
-	ASSERT_NOT_NULL(tree->leaf_centroids, "leaf centroids allocated");
+	ASSERT_NOT_NULL(hk_leaf_centroids(tree), "leaf centroids allocated");
 
 	for (uint32_t i = 0; i < nlist * dim; i++)
 		ASSERT_TRUE(
-				isfinite(tree->leaf_centroids[i]),
+				isfinite(hk_leaf_centroids(tree)[i]),
 				"centroids should be finite");
 
 	mkt_hkmeans_result_destroy(tree);
@@ -103,23 +105,25 @@ TEST(two_level_tree)
 	ASSERT_TRUE(tree->nnodes > 1, "multiple nodes");
 
 	/* Root should be at level 0 */
-	ASSERT_EQ(0, tree->nodes[0].level, "root at level 0");
+	ASSERT_EQ(0, hk_nodes(tree)[0].level, "root at level 0");
 	ASSERT_TRUE(
-			tree->nodes[0].nchildren <= fan_out, "root nchildren <= fan_out");
-	ASSERT_TRUE(tree->nodes[0].nchildren >= 2, "root has at least 2 children");
+			hk_nodes(tree)[0].nchildren <= fan_out,
+			"root nchildren <= fan_out");
+	ASSERT_TRUE(
+			hk_nodes(tree)[0].nchildren >= 2, "root has at least 2 children");
 
 	/* Root should have first_child set */
 	ASSERT_TRUE(
-			tree->nodes[0].first_child != HKMEANS_NO_CHILD,
+			hk_nodes(tree)[0].first_child != HKMEANS_NO_CHILD,
 			"root has children");
 
 	/* All non-root nodes should be at level 1 (leaf) */
 	for (uint32_t i = 1; i < tree->nnodes; i++)
 	{
-		ASSERT_EQ(1, tree->nodes[i].level, "child at level 1");
+		ASSERT_EQ(1, hk_nodes(tree)[i].level, "child at level 1");
 		ASSERT_EQ(
 				HKMEANS_NO_CHILD,
-				tree->nodes[i].first_child,
+				hk_nodes(tree)[i].first_child,
 				"leaf has no children");
 	}
 
@@ -128,10 +132,10 @@ TEST(two_level_tree)
 	ASSERT_TRUE(tree->nleaves <= fan_out * fan_out, "nleaves <= fan_out^2");
 
 	/* Leaf centroids should be valid */
-	ASSERT_NOT_NULL(tree->leaf_centroids, "leaf centroids allocated");
+	ASSERT_NOT_NULL(hk_leaf_centroids(tree), "leaf centroids allocated");
 	for (uint32_t i = 0; i < tree->nleaves * dim; i++)
 		ASSERT_TRUE(
-				isfinite(tree->leaf_centroids[i]), "leaf centroids finite");
+				isfinite(hk_leaf_centroids(tree)[i]), "leaf centroids finite");
 
 	mkt_hkmeans_result_destroy(tree);
 	mkt_free(data);
@@ -160,8 +164,8 @@ TEST(three_level_tree)
 	uint32_t level_counts[4] = {0};
 	for (uint32_t i = 0; i < tree->nnodes; i++)
 	{
-		ASSERT_TRUE(tree->nodes[i].level < 3, "level in range");
-		level_counts[tree->nodes[i].level]++;
+		ASSERT_TRUE(hk_nodes(tree)[i].level < 3, "level in range");
+		level_counts[hk_nodes(tree)[i].level]++;
 	}
 	ASSERT_EQ(1, level_counts[0], "1 root node");
 	ASSERT_TRUE(level_counts[1] > 0, "has level-1 nodes");
@@ -170,14 +174,14 @@ TEST(three_level_tree)
 	/* first_child set for internal, not for leaves */
 	for (uint32_t i = 0; i < tree->nnodes; i++)
 	{
-		if (tree->nodes[i].level < 2)
+		if (hk_nodes(tree)[i].level < 2)
 			ASSERT_TRUE(
-					tree->nodes[i].first_child != HKMEANS_NO_CHILD,
+					hk_nodes(tree)[i].first_child != HKMEANS_NO_CHILD,
 					"internal nodes have children");
 		else
 			ASSERT_EQ(
 					HKMEANS_NO_CHILD,
-					tree->nodes[i].first_child,
+					hk_nodes(tree)[i].first_child,
 					"leaf nodes have no children");
 	}
 
@@ -209,22 +213,23 @@ TEST(structural_invariants)
 	/* All nodes have nchildren <= fan_out */
 	for (uint32_t i = 0; i < tree->nnodes; i++)
 		ASSERT_TRUE(
-				tree->nodes[i].nchildren <= fan_out, "nchildren <= fan_out");
+				hk_nodes(tree)[i].nchildren <= fan_out,
+				"nchildren <= fan_out");
 
 	/* Leaf centroid count matches nleaves */
 	uint32_t leaf_sum = 0;
 	for (uint32_t i = 0; i < tree->nnodes; i++)
 	{
-		if (tree->nodes[i].level == tree->nlevels - 1)
-			leaf_sum += tree->nodes[i].nchildren;
+		if (hk_nodes(tree)[i].level == tree->nlevels - 1)
+			leaf_sum += hk_nodes(tree)[i].nchildren;
 	}
 	ASSERT_EQ(tree->nleaves, leaf_sum, "nleaves matches leaf sum");
 
 	/* Leaf centroids should be valid */
-	ASSERT_NOT_NULL(tree->leaf_centroids, "leaf centroids allocated");
+	ASSERT_NOT_NULL(hk_leaf_centroids(tree), "leaf centroids allocated");
 	for (uint32_t i = 0; i < tree->nleaves * dim; i++)
 		ASSERT_TRUE(
-				isfinite(tree->leaf_centroids[i]), "leaf centroids finite");
+				isfinite(hk_leaf_centroids(tree)[i]), "leaf centroids finite");
 
 	mkt_hkmeans_result_destroy(tree);
 	mkt_free(data);
@@ -286,8 +291,8 @@ TEST(deterministic)
 	for (uint32_t i = 0; i < t1->nnodes; i++)
 	{
 		ASSERT_EQ(
-				t1->nodes[i].nchildren,
-				t2->nodes[i].nchildren,
+				hk_nodes(t1)[i].nchildren,
+				hk_nodes(t2)[i].nchildren,
 				"same nchildren");
 	}
 
@@ -340,8 +345,8 @@ TEST(single_cluster)
 	ASSERT_EQ(1, tree->nlevels, "1 level");
 	ASSERT_EQ(1, tree->nleaves, "1 leaf centroid");
 
-	ASSERT_FLOAT_EQ(3.0f, tree->leaf_centroids[0], 1e-3f, "mean x");
-	ASSERT_FLOAT_EQ(4.0f, tree->leaf_centroids[1], 1e-3f, "mean y");
+	ASSERT_FLOAT_EQ(3.0f, hk_leaf_centroids(tree)[0], 1e-3f, "mean x");
+	ASSERT_FLOAT_EQ(4.0f, hk_leaf_centroids(tree)[1], 1e-3f, "mean y");
 
 	mkt_hkmeans_result_destroy(tree);
 }

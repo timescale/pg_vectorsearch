@@ -516,19 +516,19 @@ mkt_index_build(
 	if (idx->base.metric == DISTANCE_COSINE)
 	{
 		for (uint32_t c = 0; c < nlist; c++)
-			normalize_vector(tree->leaf_centroids + (size_t)c * dim, dim);
+			normalize_vector(hk_leaf_centroids(tree) + (size_t)c * dim, dim);
 	}
 
 	/* Global mean */
 	idx->global_mean = mkt_alloc(dim * sizeof(float));
-	mkt_vector_mean(tree->leaf_centroids, nlist, dim, idx->global_mean);
+	mkt_vector_mean(hk_leaf_centroids(tree), nlist, dim, idx->global_mean);
 	if (idx->base.metric == DISTANCE_COSINE)
 		normalize_vector(idx->global_mean, dim);
 
 	/* Save leaf centroids for per-cluster query preparation */
 	idx->leaf_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
 	memcpy(idx->leaf_centroids,
-		   tree->leaf_centroids,
+		   hk_leaf_centroids(tree),
 		   (size_t)nlist * dim * sizeof(float));
 
 	/* RaBitQ params */
@@ -744,8 +744,8 @@ mkt_index_build(
 
 			for (uint32_t c = 0; c < nlist; c++)
 			{
-				MktClusterList *cl	 = &idx->clusters[c];
-				const float	   *cent = tree->leaf_centroids + (size_t)c * dim;
+				MktClusterList *cl = &idx->clusters[c];
+				const float *cent  = hk_leaf_centroids(tree) + (size_t)c * dim;
 
 				MktFlatPostingBuilder builder;
 				mkt_flat_posting_builder_init(
