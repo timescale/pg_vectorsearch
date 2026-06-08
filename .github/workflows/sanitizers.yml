@@ -59,7 +59,7 @@ jobs:
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
         with:
           name: test-logs-asan
-          path: builddir-asan/meson-logs/
+          path: builddir-san-address/meson-logs/
           retention-days: 7
 
   ubsan:
@@ -87,5 +87,5 @@ jobs:
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
         with:
           name: test-logs-ubsan
-          path: builddir-ubsan/meson-logs/
+          path: builddir-san-undefined/meson-logs/
           retention-days: 7
