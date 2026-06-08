@@ -476,6 +476,194 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 }
 
 /* ----------------------------------------------------------------
+ * Serial build
+ * ---------------------------------------------------------------- */
+
+/*
+ * Serial build fallback, mirroring do_parallel_build's role for the
+ * non-parallel path: sample + cluster, reserve the posting page layout, then
+ * scan the heap once through build_callback to fill the posting builders.
+ *
+ * out_posting_heads is allocated here (sized to the resolved tree->nleaves).
+ * Returns false with *out_tree == NULL when the heap has no tuples.
+ */
+static bool
+do_serial_build(
+		MktannBuildState *bs,
+		MktStorage		 *storage,
+		uint64_t		  rabitq_seed,
+		HKMeansResult	**out_tree,
+		float			**out_global_mean,
+		BlockNumber		**out_posting_heads,
+		double			 *out_heap_tuples,
+		double			 *out_indtuples,
+		double			 *out_soar_dupes)
+{
+	const MktannBuildParams *p	 = &bs->params;
+	Dimension				 dim = p->dim;
+
+	pgstat_progress_update_param(
+			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SAMPLE);
+
+	float		  *global_mean = NULL;
+	HKMeansResult *tree		   = run_clustering(bs, &global_mean);
+
+	if (tree == NULL)
+	{
+		*out_tree = NULL;
+		return false;
+	}
+
+	uint32_t nlist	 = tree->nleaves;
+	bs->params.nlist = nlist;
+
+	pgstat_progress_update_param(
+			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SETUP);
+
+	RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
+
+	float *ref_vecs = hk_leaf_centroids(tree);
+	if (p->metric == DISTANCE_COSINE)
+		for (uint32_t c = 0; c < nlist; c++)
+			mkt_l2_normalize(ref_vecs + (size_t)c * dim, dim);
+
+	float *pt_centroids = palloc((size_t)nlist * dim * sizeof(float));
+	for (uint32_t c = 0; c < nlist; c++)
+		mkt_rabitq_rotate(
+				rq_params,
+				ref_vecs + (size_t)c * dim,
+				pt_centroids + (size_t)c * dim);
+
+	uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, p->centroid_format);
+	BlockNumber *node_first_blkno = palloc(tree->nnodes * sizeof(BlockNumber));
+	BlockNumber	 first_centroid	  = 1;
+	BlockNumber	 first_posting	  = mkt_compute_centroid_layout(
+			tree, max_ent, first_centroid, node_first_blkno);
+
+	/* Block 0 = metadata page */
+	mkt_storage_extend(storage, 1);
+
+	write_meta_page(
+			storage,
+			dim,
+			(uint8_t)tree->nlevels,
+			(uint8_t)p->fan_out,
+			first_centroid,
+			0,
+			nlist,
+			p->centroid_format,
+			p->metric,
+			rabitq_seed,
+			global_mean);
+
+	uint32_t n_centroid_pages = first_posting - first_centroid;
+	mkt_storage_extend(storage, n_centroid_pages);
+
+	BlockNumber *posting_heads = palloc(nlist * sizeof(BlockNumber));
+
+	/*
+	 * Reserve a contiguous page range per cluster via the shared
+	 * reserve_init (same as the parallel and standalone paths). Serial has
+	 * no per-cluster sample assignment, so it feeds a uniform estimate:
+	 * the heap-size cardinality guess split evenly. reserve_init applies
+	 * the format + replication headroom and the page math.
+	 */
+	bool   replicate = p->soar_lambda > 0.0 || p->boundary_epsilon > 0.0;
+	double est_rows	 = RelationGetNumberOfBlocks(bs->heap) *
+					  (BLCKSZ / (double)(dim * sizeof(float) + 32));
+	uint32_t  base	 = (uint32_t)ceil(est_rows / nlist);
+	uint32_t *counts = palloc(nlist * sizeof(uint32_t));
+	for (uint32_t c = 0; c < nlist; c++)
+		counts[c] = base;
+
+	MktPostingReserve reserve;
+	mkt_posting_reserve_init(
+			&reserve, counts, nlist, 1, dim, p->fastscan, replicate);
+	pfree(counts);
+	mkt_storage_extend(storage, reserve.total);
+
+	MktPostingBuilder *builders = palloc(nlist * sizeof(MktPostingBuilder));
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		if (p->fastscan)
+			mkt_posting_builder_init_fastscan(
+					&builders[c],
+					storage,
+					rq_params,
+					dim,
+					c,
+					ref_vecs + (size_t)c * dim,
+					pt_centroids + (size_t)c * dim);
+		else
+			mkt_posting_builder_init(
+					&builders[c],
+					storage,
+					rq_params,
+					dim,
+					c,
+					ref_vecs + (size_t)c * dim,
+					pt_centroids + (size_t)c * dim);
+
+		mkt_posting_builder_set_shared_reserve(
+				&builders[c],
+				first_posting + reserve.starts[c],
+				reserve.counts[c],
+				&reserve.nexts[c]);
+		mkt_posting_builder_set_first_blkno(
+				&builders[c], first_posting + reserve.starts[c]);
+	}
+
+	bs->tree		= tree;
+	bs->builders	= builders;
+	bs->worker_bufs = mkt_build_worker_bufs_create(dim);
+	bs->indtuples	= 0;
+	bs->soar_dupes	= 0;
+
+	instr_time t_serial_start;
+	INSTR_TIME_SET_CURRENT(t_serial_start);
+
+	double heap_tuples = table_index_build_scan(
+			bs->heap,
+			bs->index,
+			bs->index_info,
+			true,
+			true,
+			build_callback,
+			(void *)bs,
+			NULL);
+
+	instr_time t_serial_scan;
+	INSTR_TIME_SET_CURRENT(t_serial_scan);
+	INSTR_TIME_SUBTRACT(t_serial_scan, t_serial_start);
+
+	/* Finish posting builders */
+	pgstat_progress_update_param(
+			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_POSTING);
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		posting_heads[c] = mkt_posting_builder_finish(&builders[c]);
+		mkt_posting_builder_cleanup(&builders[c]);
+	}
+	pfree(builders);
+	mkt_posting_reserve_free(&reserve);
+
+	elog(LOG,
+		 "mktann: serial build scan %.1fms, "
+		 "%.0f tuples, %u clusters",
+		 INSTR_TIME_GET_MILLISEC(t_serial_scan),
+		 bs->indtuples,
+		 tree->nleaves);
+
+	*out_tree		   = tree;
+	*out_global_mean   = global_mean;
+	*out_posting_heads = posting_heads;
+	*out_heap_tuples   = heap_tuples;
+	*out_indtuples	   = bs->indtuples;
+	*out_soar_dupes	   = bs->soar_dupes;
+	return true;
+}
+
+/* ----------------------------------------------------------------
  * Main build entry point
  * ---------------------------------------------------------------- */
 
@@ -577,162 +765,22 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	if (!did_parallel)
 	{
 		/* Serial fallback: sample, cluster, build */
-		pgstat_progress_update_param(
-				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SAMPLE);
-		tree = run_clustering(&bs, &global_mean);
-
-		if (tree == NULL)
+		if (!do_serial_build(
+					&bs,
+					&storage.base,
+					rabitq_seed,
+					&tree,
+					&global_mean,
+					&posting_heads,
+					&heap_tuples,
+					&indtuples,
+					&soar_dupes))
 		{
+			/* No tuples in the heap */
 			MemoryContextSwitchTo(caller_ctx);
 			MemoryContextDelete(build_ctx);
 			return palloc0(sizeof(IndexBuildResult));
 		}
-
-		uint32_t nlist	= tree->nleaves;
-		bs.params.nlist = nlist;
-
-		pgstat_progress_update_param(
-				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SETUP);
-
-		RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
-
-		float *ref_vecs = hk_leaf_centroids(tree);
-		if (p->metric == DISTANCE_COSINE)
-			for (uint32_t c = 0; c < nlist; c++)
-				mkt_l2_normalize(ref_vecs + (size_t)c * dim, dim);
-
-		float *pt_centroids = palloc((size_t)nlist * dim * sizeof(float));
-		for (uint32_t c = 0; c < nlist; c++)
-			mkt_rabitq_rotate(
-					rq_params,
-					ref_vecs + (size_t)c * dim,
-					pt_centroids + (size_t)c * dim);
-
-		uint32_t max_ent =
-				mkt_centroid_max_entries_fmt(dim, p->centroid_format);
-		BlockNumber *node_first_blkno = palloc(
-				tree->nnodes * sizeof(BlockNumber));
-		BlockNumber first_centroid = 1;
-		BlockNumber first_posting  = mkt_compute_centroid_layout(
-				 tree, max_ent, first_centroid, node_first_blkno);
-
-		/* Block 0 = metadata page */
-		mkt_storage_extend(&storage.base, 1);
-
-		write_meta_page(
-				&storage.base,
-				dim,
-				(uint8_t)tree->nlevels,
-				(uint8_t)p->fan_out,
-				first_centroid,
-				0,
-				nlist,
-				p->centroid_format,
-				p->metric,
-				rabitq_seed,
-				global_mean);
-
-		uint32_t n_centroid_pages = first_posting - first_centroid;
-		mkt_storage_extend(&storage.base, n_centroid_pages);
-
-		posting_heads = palloc(nlist * sizeof(BlockNumber));
-
-		/*
-		 * Reserve a contiguous page range per cluster via the shared
-		 * reserve_init (same as the parallel and standalone paths). Serial has
-		 * no per-cluster sample assignment, so it feeds a uniform estimate:
-		 * the heap-size cardinality guess split evenly. reserve_init applies
-		 * the format + replication headroom and the page math.
-		 */
-		bool   replicate = p->soar_lambda > 0.0 || p->boundary_epsilon > 0.0;
-		double est_rows	 = RelationGetNumberOfBlocks(heap) *
-						  (BLCKSZ / (double)(dim * sizeof(float) + 32));
-		uint32_t  base	 = (uint32_t)ceil(est_rows / nlist);
-		uint32_t *counts = palloc(nlist * sizeof(uint32_t));
-		for (uint32_t c = 0; c < nlist; c++)
-			counts[c] = base;
-
-		MktPostingReserve reserve;
-		mkt_posting_reserve_init(
-				&reserve, counts, nlist, 1, dim, p->fastscan, replicate);
-		pfree(counts);
-		mkt_storage_extend(&storage.base, reserve.total);
-
-		MktPostingBuilder *builders = palloc(
-				nlist * sizeof(MktPostingBuilder));
-		for (uint32_t c = 0; c < nlist; c++)
-		{
-			if (p->fastscan)
-				mkt_posting_builder_init_fastscan(
-						&builders[c],
-						&storage.base,
-						rq_params,
-						dim,
-						c,
-						ref_vecs + (size_t)c * dim,
-						pt_centroids + (size_t)c * dim);
-			else
-				mkt_posting_builder_init(
-						&builders[c],
-						&storage.base,
-						rq_params,
-						dim,
-						c,
-						ref_vecs + (size_t)c * dim,
-						pt_centroids + (size_t)c * dim);
-
-			mkt_posting_builder_set_shared_reserve(
-					&builders[c],
-					first_posting + reserve.starts[c],
-					reserve.counts[c],
-					&reserve.nexts[c]);
-			mkt_posting_builder_set_first_blkno(
-					&builders[c], first_posting + reserve.starts[c]);
-		}
-
-		bs.tree		   = tree;
-		bs.builders	   = builders;
-		bs.worker_bufs = mkt_build_worker_bufs_create(dim);
-		bs.indtuples   = 0;
-		bs.soar_dupes  = 0;
-
-		instr_time t_serial_start;
-		INSTR_TIME_SET_CURRENT(t_serial_start);
-
-		heap_tuples = table_index_build_scan(
-				heap,
-				index,
-				index_info,
-				true,
-				true,
-				build_callback,
-				(void *)&bs,
-				NULL);
-
-		instr_time t_serial_scan;
-		INSTR_TIME_SET_CURRENT(t_serial_scan);
-		INSTR_TIME_SUBTRACT(t_serial_scan, t_serial_start);
-
-		indtuples  = bs.indtuples;
-		soar_dupes = bs.soar_dupes;
-
-		/* Finish posting builders */
-		pgstat_progress_update_param(
-				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_POSTING);
-		for (uint32_t c = 0; c < nlist; c++)
-		{
-			posting_heads[c] = mkt_posting_builder_finish(&builders[c]);
-			mkt_posting_builder_cleanup(&builders[c]);
-		}
-		pfree(builders);
-		mkt_posting_reserve_free(&reserve);
-
-		elog(LOG,
-			 "mktann: serial build scan %.1fms, "
-			 "%.0f tuples, %u clusters",
-			 INSTR_TIME_GET_MILLISEC(t_serial_scan),
-			 indtuples,
-			 tree->nleaves);
 	}
 
 	if (soar_dupes > 0)
