@@ -264,8 +264,10 @@ mkt_pbuild_setup_shared(
 	shared->soar_dupes			   = 0.0;
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SHARED, shared);
 
+	/* Dynamic barrier (0 parties): the leader and every worker attach as they
+	 * start, matching the PG back-end (see do_parallel_build). */
 	Barrier *barrier = shm_toc_allocate(pcxt->toc, sizeof(Barrier));
-	BarrierInit(barrier, 1);
+	BarrierInit(barrier, 0);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_BARRIER, barrier);
 
 	Size samp_sz = mkt_dsm_samples_size(nparticipants, max_per_worker, dim);

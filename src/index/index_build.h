@@ -104,6 +104,15 @@ uint32_t
 mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out);
 
 /*
+ * Auto-tune nlist from a (possibly estimated) vector count: sqrt(count),
+ * clamped to [1, 10000]. Used by every build path when nlist is not set
+ * explicitly. The count source differs by back-end (reltuples / heap-block
+ * estimate in PostgreSQL, the in-memory vector count standalone), but the
+ * resolution is the same.
+ */
+uint32_t mkt_auto_nlist(double count);
+
+/*
  * Find secondary cluster by plain distance (2nd-nearest centroid),
  * given a distance-sorted candidate list (e.g. from a tree beam
  * descent). The nearest candidate that is not primary_cluster is the

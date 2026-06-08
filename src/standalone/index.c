@@ -366,13 +366,7 @@ mkt_index_build(
 	/* Resolve nlist */
 	uint32_t nlist = config->nlist;
 	if (nlist == 0)
-	{
-		nlist = (uint32_t)sqrt((double)nvecs);
-		if (nlist < 1)
-			nlist = 1;
-		if (nlist > 10000)
-			nlist = 10000;
-	}
+		nlist = mkt_auto_nlist((double)nvecs);
 
 	/* Resolve fan_out */
 	uint32_t fan_out = config->fan_out;
@@ -432,19 +426,7 @@ mkt_index_build(
 
 		/* Upper bound on leaves (fan_out^nlevels, matching the tree the driver
 		 * builds), so posting_heads has a slot per leaf. */
-		uint32_t max_nlist = 1;
-		{
-			uint32_t lv = 1, n = nlist;
-			while (n > fan_out)
-			{
-				n = (n + fan_out - 1) / fan_out;
-				lv++;
-			}
-			for (uint32_t i = 0; i < lv; i++)
-				max_nlist *= fan_out;
-			if (max_nlist < nlist)
-				max_nlist = nlist;
-		}
+		uint32_t max_nlist = mkt_max_nlist(nlist, fan_out);
 
 		/*
 		 * Long-lived posting storage for the driver's streamed pages. The

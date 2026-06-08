@@ -104,6 +104,14 @@ do_parallel_build(
 	instr_time t_launch_start;
 	INSTR_TIME_SET_CURRENT(t_launch_start);
 
+	/*
+	 * The leader participates in every phase, so it joins the dynamic barrier
+	 * as a party (workers attach the same way as they start). Attaching before
+	 * launching workers guarantees the leader is counted before any worker can
+	 * arrive, so the barrier never advances a phase without it.
+	 */
+	BarrierAttach(barrier);
+
 	/* ---- Launch workers + wait until they've all attached ---- */
 	if (!mkt_pbuild_launch(pcxt, barrier))
 		return false;
@@ -542,6 +550,13 @@ do_parallel_build(
 		{
 			Page pg = mkt_dsm_worker_partials(dsm_partials, nlist, w) +
 					  (size_t)c * BLCKSZ;
+			/* A worker only writes a partial for clusters it actually touched
+			 * (see mkt_posting_worker_finish); the slot for an untouched
+			 * (worker, cluster) pair is still zero from the partials buffer's
+			 * memset. Skip it before reading the page opaque, whose special
+			 * pointer would be invalid on an uninitialized page. */
+			if (PageIsNew(pg))
+				continue;
 			MktPostingPageOpaque *op = mkt_posting_opaque(pg);
 			if (op->entry_count == 0)
 				continue;
