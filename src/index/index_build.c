@@ -106,6 +106,18 @@ mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out)
 }
 
 uint32_t
+mkt_auto_nlist(double count)
+{
+	double	 c	   = count > 1.0 ? count : 1.0;
+	uint32_t nlist = (uint32_t)sqrt(c);
+	if (nlist < 1)
+		nlist = 1;
+	if (nlist > 10000)
+		nlist = 10000;
+	return nlist;
+}
+
+uint32_t
 mkt_find_secondary_cluster(
 		const uint32_t *cand_leaves,
 		const Distance *cand_dists,

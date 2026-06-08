@@ -256,6 +256,22 @@ mkt_compute_nlevels(uint32_t nlist, uint32_t fan_out)
 	return nlevels;
 }
 
+/*
+ * Worst-case leaf count for a tree targeting `nlist` leaves at this fan_out:
+ * fan_out^nlevels (clamped to >= nlist). The exact leaf count isn't known
+ * until k-means runs, so the parallel build uses this to size its DSM regions
+ * up front, then narrows to the real tree->nleaves afterward.
+ */
+static inline uint32_t
+mkt_max_nlist(uint32_t nlist, uint32_t fan_out)
+{
+	uint32_t nlevels   = mkt_compute_nlevels(nlist, fan_out);
+	uint32_t max_nlist = 1;
+	for (uint32_t l = 0; l < nlevels; l++)
+		max_nlist *= fan_out;
+	return max_nlist < nlist ? nlist : max_nlist;
+}
+
 static inline float *
 mkt_dsm_norms_c(char *base, uint32_t nlist, Dimension dim)
 {

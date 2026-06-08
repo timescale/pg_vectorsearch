@@ -387,11 +387,7 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 								 : RelationGetNumberOfBlocks(heap) *
 										   (BLCKSZ /
 											(sizeof(float) * dim + 32));
-		p->nlist		 = (uint32_t)sqrt((double)Max(reltuples, 1));
-		if (p->nlist < 1)
-			p->nlist = 1;
-		if (p->nlist > 10000)
-			p->nlist = 10000;
+		p->nlist		 = mkt_auto_nlist(reltuples);
 	}
 
 	p->fan_out =
@@ -517,9 +513,70 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	BlockNumber	  *posting_heads = NULL;
 	float		  *global_mean	 = NULL;
 
+	/* Try parallel build first (sampling + k-means + posting) */
+	bool did_parallel = false;
+	if (index_info->ii_ParallelWorkers > 0)
 	{
-		/* Sample, cluster, then build the posting lists serially. The PG
-		 * parallel build path is added in a follow-up change. */
+		/*
+		 * Estimate the leaf count up front.
+		 *
+		 * A parallel build allocates its shared-memory (DSM) regions before
+		 * the workers run, and DSM segments cannot be resized once created.
+		 * Several of those regions are sized per leaf (centroids, posting
+		 * heads, per-cluster assignment state), so the leader has to commit to
+		 * a leaf count at allocation time — but the real count (tree->nleaves)
+		 * is only known after k-means clusters the sample, which happens
+		 * inside the workers. hkmeans targets `nlist` leaves at this fan_out
+		 * but can produce up to fan_out^nlevels of them, so we size every
+		 * per-leaf region for that worst-case upper bound here, then narrow to
+		 * the actual tree->nleaves once the tree comes back below.
+		 *
+		 * nlist and fan_out are already resolved (resolve_build_params).
+		 */
+		uint32_t max_nlist = mkt_max_nlist(p->nlist, p->fan_out);
+
+		bs.params.nlist = max_nlist;
+
+		posting_heads = palloc(max_nlist * sizeof(BlockNumber));
+
+		MktBuildConfig cfg = {
+				.dim			  = bs.params.dim,
+				.metric			  = bs.params.metric,
+				.centroid_format  = bs.params.centroid_format,
+				.nlist			  = bs.params.nlist,
+				.fan_out		  = bs.params.fan_out,
+				.soar_lambda	  = bs.params.soar_lambda,
+				.boundary_epsilon = bs.params.boundary_epsilon,
+				.fastscan		  = bs.params.fastscan,
+		};
+
+		did_parallel = do_parallel_build(
+				heap,
+				index,
+				index_info,
+				&cfg,
+				&storage.base,
+				&tree,
+				posting_heads,
+				&heap_tuples,
+				&indtuples,
+				&soar_dupes);
+
+		if (did_parallel && tree != NULL)
+		{
+			uint32_t nlist	= tree->nleaves;
+			bs.params.nlist = nlist;
+
+			global_mean = palloc(dim * sizeof(float));
+			mkt_vector_mean(hk_leaf_centroids(tree), nlist, dim, global_mean);
+			if (p->metric == DISTANCE_COSINE)
+				mkt_l2_normalize(global_mean, dim);
+		}
+	}
+
+	if (!did_parallel)
+	{
+		/* Serial fallback: sample, cluster, build */
 		pgstat_progress_update_param(
 				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SAMPLE);
 		tree = run_clustering(&bs, &global_mean);

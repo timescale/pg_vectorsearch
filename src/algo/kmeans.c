@@ -441,7 +441,7 @@ kmeans_assign_accumulate(
 
 			switch (metric)
 			{
-			case DISTANCE_L2:
+			default: /* L2 */
 			{
 				float nx  = mkt_l2_norm_squared(vec, dim);
 				float dot = mkt_dot_product(vec, cent, dim);
@@ -500,7 +500,7 @@ kmeans_assign(
 
 			switch (metric)
 			{
-			case DISTANCE_L2:
+			default: /* L2 */
 			{
 				float nx  = mkt_l2_norm_squared(vec, dim);
 				float dot = mkt_dot_product(vec, cent, dim);
