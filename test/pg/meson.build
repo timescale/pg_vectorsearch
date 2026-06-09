@@ -26,6 +26,7 @@ else
       'mktann',
       'rerank',
       'inspect',
+      'parallel',
     ]
 
     test('regress',
