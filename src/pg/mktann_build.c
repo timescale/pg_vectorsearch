@@ -38,6 +38,7 @@
 #include <miscadmin.h>
 #include <pgstat.h>
 #include <utils/backend_progress.h>
+#include <utils/injection_point.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
 #include <utils/sampling.h>
@@ -619,6 +620,13 @@ do_serial_build(
 	bs->indtuples	= 0;
 	bs->soar_dupes	= 0;
 
+	pgstat_progress_update_param(
+			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SCAN);
+	/* Test hook: lets an isolation test observe an in-progress serial build
+	 * (e.g. the progress view's phase). No-op unless PG was built with
+	 * injection points and a test has attached an action. */
+	INJECTION_POINT("mktann-build-load", NULL);
+
 	instr_time t_serial_start;
 	INSTR_TIME_SET_CURRENT(t_serial_start);
 
@@ -737,6 +745,14 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				.boundary_epsilon = bs.params.boundary_epsilon,
 				.fastscan		  = bs.params.fastscan,
 		};
+
+		pgstat_progress_update_param(
+				PROGRESS_CREATEIDX_SUBPHASE,
+				PROGRESS_MKTANN_PHASE_SCAN_PARALLEL);
+		/* Test hook: lets an isolation test observe an in-progress parallel
+		 * build (e.g. the progress view's phase). No-op unless PG was built
+		 * with injection points and a test has attached an action. */
+		INJECTION_POINT("mktann-build-load", NULL);
 
 		did_parallel = do_parallel_build(
 				heap,
@@ -887,6 +903,8 @@ mktann_buildphasename(int64 phasenum)
 		return "preparing RaBitQ encoding";
 	case PROGRESS_MKTANN_PHASE_SCAN:
 		return "scanning table";
+	case PROGRESS_MKTANN_PHASE_SCAN_PARALLEL:
+		return "scanning table (parallel)";
 	case PROGRESS_MKTANN_PHASE_POSTING:
 		return "finalizing posting lists";
 	case PROGRESS_MKTANN_PHASE_CENTROID:
