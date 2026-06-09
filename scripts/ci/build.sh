@@ -13,6 +13,10 @@
 
 set -euo pipefail
 
+# Allow a crashing test process to leave a core dump (CI analyzes them via the
+# coredumps action). Harmless locally; cores go to the cwd.
+ulimit -c unlimited 2>/dev/null || true
+
 BUILDDIR="${1:-builddir}"
 shift || true
 MESON_ARGS=("$@")

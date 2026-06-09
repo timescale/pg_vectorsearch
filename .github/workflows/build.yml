@@ -14,6 +14,8 @@ on:
       - 'meson.build'
       - 'meson_options.txt'
       - 'scripts/ci/build.sh'
+      - 'scripts/ci/build-pg-debug.sh'
+      - '.github/actions/setup-pg-debug/**'
   pull_request:
     branches: [main]
     paths:
@@ -25,6 +27,8 @@ on:
       - 'meson.build'
       - 'meson_options.txt'
       - 'scripts/ci/build.sh'
+      - 'scripts/ci/build-pg-debug.sh'
+      - '.github/actions/setup-pg-debug/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -35,26 +39,38 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.os }} ${{ matrix.arch }}${{ matrix.standalone && ' (standalone)' || '' }}
+    name: ${{ matrix.os }} ${{ matrix.arch }} ${{ matrix.standalone && 'standalone' || matrix.pg }}
     runs-on: ${{ matrix.runner }}
 
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Standard jobs: source-built debug PostgreSQL with assertions,
+          # randomized allocations, and injection points (the isolation tests
+          # run only here). The build is cached by the setup-pg-debug action.
           - runner: ubuntu-latest
             os: Linux
             arch: x64
+            pg: debug
+          - runner: ubuntu-24.04-arm
+            os: Linux
+            arch: arm64
+            pg: debug
+          # Standalone (no PostgreSQL).
           - runner: ubuntu-latest
             os: Linux
             arch: x64
             standalone: true
-          - runner: ubuntu-24.04-arm
+          # Compatibility: stock release packages (no asserts/injection).
+          - runner: ubuntu-latest
             os: Linux
-            arch: arm64
+            arch: x64
+            pg: packaged
           - runner: macos-latest
             os: macOS
             arch: arm64
+            pg: packaged
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -65,14 +81,22 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build gcc libgsl-dev
+          sudo apt-get install -y \
+            meson ninja-build gcc gdb make bison flex libgsl-dev
 
       - name: Install OpenBLAS (Linux x64 only)
         if: runner.os == 'Linux' && matrix.arch == 'x64'
         run: sudo apt-get install -y libopenblas-dev
 
-      - name: Install PostgreSQL 18 (Linux)
-        if: runner.os == 'Linux' && !matrix.standalone
+      - name: Setup debug PostgreSQL
+        id: pg
+        if: matrix.pg == 'debug'
+        uses: ./.github/actions/setup-pg-debug
+        with:
+          pg-version: '18.4'
+
+      - name: Install PostgreSQL 18 (Linux, packaged)
+        if: matrix.pg == 'packaged' && runner.os == 'Linux'
         run: |
           sudo apt-get install -y curl ca-certificates
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -86,28 +110,49 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install meson ninja gsl
 
-      - name: Install PostgreSQL 18 (macOS)
-        if: runner.os == 'macOS' && !matrix.standalone
+      - name: Install PostgreSQL 18 (macOS, packaged)
+        if: matrix.pg == 'packaged' && runner.os == 'macOS'
         run: |
           brew install postgresql@18
           echo "$(brew --prefix postgresql@18)/bin" >> "$GITHUB_PATH"
 
+      - name: Core dumps
+        uses: ./.github/actions/coredumps
+
       - name: Build and test
         env:
-          MESON_ARGS: ${{ matrix.standalone && '-Dpostgresql=disabled' || '-Dpostgresql=enabled' }}
-        run: ./scripts/ci/build.sh builddir $MESON_ARGS
+          PG_CONFIG: ${{ steps.pg.outputs.pg-config }}
+          STANDALONE: ${{ matrix.standalone }}
+        run: |
+          if [ -n "$STANDALONE" ]; then
+            args="-Dpostgresql=disabled"
+          else
+            args="-Dpostgresql=enabled"
+            [ -n "$PG_CONFIG" ] && args="$args -Dpg_config=$PG_CONFIG"
+          fi
+          ./scripts/ci/build.sh builddir $args
 
-      - name: Show regression diffs
+      - name: Show regression diffs and server logs
         if: failure()
         run: |
           for f in builddir/test/pg/regression.diffs; do
             [ -f "$f" ] && echo "=== $f ===" && cat "$f"
+          done
+          # Temp-instance server logs carry the crash signal and, on an
+          # assert build, the "TRAP: failed Assert(...) File:Line".
+          for d in builddir/testdb builddir/isolation_testdb; do
+            for f in "$d"/log/*; do
+              [ -f "$f" ] && echo "=== $f ===" && cat "$f"
+            done
           done
 
       - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
         with:
-          name: test-logs-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.standalone && '-standalone' || '' }}
-          path: builddir/meson-logs/
+          name: test-logs-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.standalone && 'standalone' || matrix.pg }}
+          path: |
+            builddir/meson-logs/
+            builddir/testdb/log/
+            builddir/isolation_testdb/log/
           retention-days: 7
