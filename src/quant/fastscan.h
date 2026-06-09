@@ -134,9 +134,19 @@ void mkt_fastscan_accumulate(
  * Total LUT size: 2 × nsq × 16 bytes.
  * ---------------------------------------------------------------- */
 
-/* LUT bytes for high-accuracy mode (2× the uint8 version) */
+/*
+ * LUT bytes for high-accuracy (16-bit) mode.
+ *
+ * Entries are split into lo/hi bytes laid out in 128-byte blocks, one block
+ * per group of 4 subquantizers: [4×16 lo][4×16 hi]. The build and accumulate
+ * kernels address it as lut + (sq/4)*128 + (sq%4)*16 with the hi half at +64,
+ * so the buffer must cover ceil(nsq/4) whole 128-byte blocks. Sizing it from
+ * NSQ_PAIRS (ceil(nsq/2)*64) under-allocates by a block whenever nsq mod 4 is
+ * 1 or 2 (e.g. dim ≤ 4 → nsq = 1), letting the hi-half store run 64 bytes past
+ * the end and corrupt the following allocation.
+ */
 #define MKT_FASTSCAN_LUT_HACC_BYTES(dim) \
-	((uint32_t)MKT_FASTSCAN_NSQ_PAIRS(dim) * 2 * 16 * 2)
+	((uint32_t)(((MKT_FASTSCAN_NSQ(dim) + 3) / 4) * 128))
 
 /*
  * Build a uint16-precision LUT, split into lo/hi byte tables.
