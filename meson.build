@@ -633,7 +633,14 @@ if build_pg_extension
     endif
   endif
 
-  mkt_pg_cflags = ['-I' + pg_includedir_server] + pg_cflags
+  # Disable the manual IFUNC distance dispatch in the PostgreSQL build.
+  # PostgreSQL dlopens extensions with RTLD_NOW, so IFUNC resolvers run during
+  # ELF relocation; resolve_distance_*() calls mkt_detect_simd() in another TU
+  # through a GOT entry that is not yet relocated, crashing the backend on
+  # CREATE EXTENSION (glibc-relocation-order dependent). The function-pointer
+  # fallback dispatches lazily on first call instead, with equivalent cost.
+  mkt_pg_cflags = ['-I' + pg_includedir_server, '-DMKT_DISABLE_IFUNC'] \
+    + pg_cflags
 
   mkt_pg_lib = static_library('mkt_pg',
     mkt_pg_core_sources + mkt_pg_simd_sources,
