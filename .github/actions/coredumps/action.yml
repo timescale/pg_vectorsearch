@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-action.json
+---
+name: Core dumps
+description: >-
+  Enable core dumps (main step) and print a gdb backtrace for any crash at job
+  end (post step), so a backend/test crash is diagnosable from the job log
+  without re-running. One `uses:` per job; Linux only. Run tests with
+  `ulimit -c unlimited` (the shared CI scripts do) so cores are written.
+
+runs:
+  using: node20
+  main: main.js
+  post: post.js

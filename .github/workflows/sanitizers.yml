@@ -49,6 +49,9 @@ jobs:
           sudo apt-get install -y meson ninja-build clang libgsl-dev \
             libopenblas-dev
 
+      - name: Core dumps
+        uses: ./.github/actions/coredumps
+
       - name: Test with ASan
         env:
           CC: clang
@@ -76,6 +79,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y meson ninja-build clang libgsl-dev \
             libopenblas-dev
+
+      - name: Core dumps
+        uses: ./.github/actions/coredumps
 
       - name: Test with UBSan
         env:

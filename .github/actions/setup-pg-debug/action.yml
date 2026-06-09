@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-action.json
+---
+name: Setup debug PostgreSQL
+description: >-
+  Build (cached) and install a debug PostgreSQL with assertions, randomized
+  allocations, and injection points, plus the injection_points test extension,
+  then add it to PATH. Shared by CI jobs that need an assert/injection build.
+
+inputs:
+  pg-version:
+    description: PostgreSQL version to build.
+    required: false
+    default: '18.4'
+  prefix:
+    description: Install prefix for the built PostgreSQL.
+    required: false
+    default: ${{ github.workspace }}/pg-debug
+
+outputs:
+  pg-config:
+    description: Path to the built pg_config.
+    value: ${{ inputs.prefix }}/bin/pg_config
+
+runs:
+  using: composite
+  steps:
+    # The build only changes when the version or the build script changes, so
+    # key the cache on both. Built once, then restored across every workflow
+    # that uses this action.
+    - name: Cache debug PostgreSQL
+      id: cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: ${{ inputs.prefix }}
+        key: >-
+          pg-debug-${{ runner.os }}-${{ runner.arch }}-${{ inputs.pg-version }}-${{ hashFiles('scripts/ci/build-pg-debug.sh') }}
+
+    - name: Build debug PostgreSQL
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        PG_VERSION: ${{ inputs.pg-version }}
+        PG_PREFIX: ${{ inputs.prefix }}
+      run: scripts/ci/build-pg-debug.sh "$PG_VERSION" "$PG_PREFIX"
+
+    - name: Add PostgreSQL to PATH
+      shell: bash
+      env:
+        PG_PREFIX: ${{ inputs.prefix }}
+      # PG_PREFIX is a trusted, workflow-defined install path, not external input.
+      run: echo "$PG_PREFIX/bin" >> "$GITHUB_PATH" # zizmor: ignore[github-env]
