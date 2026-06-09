@@ -52,6 +52,7 @@ typedef struct MktannScanState
 
 	/* Result iterator */
 	MktannScanResult *results;
+	uint32_t		  results_cap;
 	uint32_t		  nresults;
 	uint32_t		  curr;
 	bool			  first;
@@ -153,8 +154,10 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 		ss->qstate.dedup_gen  = 0;
 	}
 
-	/* Pre-allocate result buffer */
-	ss->results = palloc(max_k * sizeof(MktannScanResult));
+	/* Pre-allocate result buffer. The error-bound rerank can return more than
+	 * max_k results, so this is a starting size; rescan grows it as needed. */
+	ss->results		= palloc(max_k * sizeof(MktannScanResult));
+	ss->results_cap = max_k;
 
 	/* Order-by arrays */
 	if (norderbys > 0)
@@ -247,8 +250,16 @@ execute_search(IndexScanDesc scan)
 	ss->stats.rerank_results		  = ss->qstate.nresults;
 	ss->stats.storage_reads			  = ss->storage.read_count;
 
-	/* Copy results from result ordering */
+	/* Copy results from result ordering. The error-bound rerank can return
+	 * more than the beginscan max_k (the rerank set is inflated beyond k to
+	 * guarantee correctness), so grow the result buffer to fit. */
 	uint32_t nresults = ss->qstate.nresults;
+	if (nresults > ss->results_cap)
+	{
+		ss->results =
+				repalloc(ss->results, nresults * sizeof(MktannScanResult));
+		ss->results_cap = nresults;
+	}
 	for (uint32_t i = 0; i < nresults; i++)
 	{
 		uint32_t ci		   = ss->qstate.result_order[i];
