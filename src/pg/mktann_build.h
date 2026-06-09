@@ -37,13 +37,14 @@ typedef struct MktannBuildParams
 
 /* Custom build subphases for pg_stat_progress_create_index.
  * Values start at 2 (1 = PROGRESS_CREATEIDX_SUBPHASE_INITIALIZE). */
-#define PROGRESS_MKTANN_PHASE_SAMPLE   2
-#define PROGRESS_MKTANN_PHASE_KMEANS   3
-#define PROGRESS_MKTANN_PHASE_SETUP	   4
-#define PROGRESS_MKTANN_PHASE_SCAN	   5
-#define PROGRESS_MKTANN_PHASE_POSTING  6
-#define PROGRESS_MKTANN_PHASE_CENTROID 7
-#define PROGRESS_MKTANN_PHASE_WAL	   8
+#define PROGRESS_MKTANN_PHASE_SAMPLE		2
+#define PROGRESS_MKTANN_PHASE_KMEANS		3
+#define PROGRESS_MKTANN_PHASE_SETUP			4
+#define PROGRESS_MKTANN_PHASE_SCAN			5
+#define PROGRESS_MKTANN_PHASE_POSTING		6
+#define PROGRESS_MKTANN_PHASE_CENTROID		7
+#define PROGRESS_MKTANN_PHASE_WAL			8
+#define PROGRESS_MKTANN_PHASE_SCAN_PARALLEL 9
 
 IndexBuildResult *
 mktann_build(Relation heap, Relation index, struct IndexInfo *index_info);
