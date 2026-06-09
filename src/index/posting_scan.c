@@ -211,6 +211,10 @@ advance_page(MktPostingScan *scan)
 				"(blkno=%u, page_id=0x%04X)",
 				scan->cur_blkno,
 				opaque->page_id);
+		/* Release the pin taken above before bailing (storage-backed only;
+		 * in page_base mode the page is a borrowed pointer, not a pin). */
+		if (scan->storage != NULL && scan->page_base == NULL)
+			mkt_storage_release_page(scan->storage, scan->cur_blkno);
 		scan->cur_page	  = NULL;
 		scan->cur_content = NULL;
 		return false;
