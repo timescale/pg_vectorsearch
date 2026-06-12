@@ -74,7 +74,7 @@ mkt_write_centroid_tree(
 					(uint8_t)node->level,
 					flags,
 					rq_params,
-					node->centroids,
+					hk_node_centroids(tree, node),
 					global_mean,
 					child_blks,
 					node_first_blkno[i]);
