@@ -175,47 +175,49 @@ mkt_subtree_build_partitioned(
 		uint32_t cc	  = child_count[child];
 		char	*slot = mkt_dsm_child_subtree(subtrees_base, child, slot_size);
 
-		float	*buf;
-		uint32_t scount;
+		HKMeansResult *sub = NULL;
+		opts.initial_centroids =
+				NULL; /* default seeding, as the serial path */
 		if (cc == 0)
 		{
 			/* Empty root cluster (k-means reseeding makes this effectively
 			 * impossible at nlevels >= 2). Seed the subtree with the root
 			 * centroid as a single sample so it still has the same depth as
 			 * its siblings and the graft stays uniform. */
-			buf = mkt_alloc((size_t)dim * sizeof(float));
-			memcpy(buf,
+			float *seed = mkt_alloc((size_t)dim * sizeof(float));
+			memcpy(seed,
 				   root_cents + (size_t)child * dim,
 				   (size_t)dim * sizeof(float));
-			scount = 1;
+			sub = mkt_hkmeans_f32(
+					seed, 1, NULL, dim, nlist_c, fan_out, metric, &opts);
+			mkt_free(seed);
 		}
 		else
 		{
-			buf		   = mkt_alloc((size_t)cc * dim * sizeof(float));
-			uint32_t g = 0;
+			/* Index this child's samples in place instead of copying them
+			 * into a contiguous [cc * dim] buffer: cc is ~total_samples /
+			 * fan_out, which exceeds MaxAllocSize at high nlist. The
+			 * per-participant DSM sample blocks form one flat array, so a
+			 * sample's global slot is t * max_per_worker + i; hkmeans
+			 * clusters via indirect access (cc uint32 indices, not cc
+			 * full vectors). */
+			const float *vbase = mkt_dsm_worker_samples(dsm_samples, 0);
+			uint32_t	 mpw   = dsm_samples->max_per_worker;
+			uint32_t	*idx   = mkt_alloc((size_t)cc * sizeof(uint32_t));
+			uint32_t	 g	   = 0;
 			for (int t = 0; t < nparticipants; t++)
 			{
 				const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
-				const float	   *sp = mkt_dsm_worker_samples(dsm_samples, t);
 				uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
 				for (uint32_t i = 0; i < n; i++)
 					if (ra[i] == child)
-					{
-						memcpy(buf + (size_t)g * dim,
-							   sp + (size_t)i * dim,
-							   (size_t)dim * sizeof(float));
-						g++;
-					}
+						idx[g++] = (uint32_t)t * mpw + i;
 			}
-			scount = cc;
+			sub = mkt_hkmeans_f32(
+					vbase, cc, idx, dim, nlist_c, fan_out, metric, &opts);
+			mkt_free(idx);
 		}
 
-		/* Seed the subtree root from the first gathered samples (the
-		 * pre-subtree child phase used this init); applies to the subtree's
-		 * top level. */
-		opts.initial_centroids = buf;
-		HKMeansResult *sub	   = mkt_hkmeans_f32(
-				buf, scount, NULL, dim, nlist_c, fan_out, metric, &opts);
 		if (sub != NULL)
 		{
 			if ((uint64_t)sub->total_size > slot_size)
@@ -227,7 +229,6 @@ mkt_subtree_build_partitioned(
 			memcpy(slot, sub, sub->total_size);
 			mkt_free(sub);
 		}
-		mkt_free(buf);
 	}
 
 	mkt_free(child_count);
@@ -258,10 +259,10 @@ mkt_pbuild_exec_sampling(
 
 	/* Stride to subsample ~max_samples_per_worker from this participant's
 	 * share of the heap. */
-	double est_rows = RelationGetNumberOfBlocks(heap) *
-					  (BLCKSZ / (double)(dim * sizeof(float) + 32));
-	double	 est_per = est_rows / shared->nparticipants;
-	uint32_t stride	 = 1;
+	double	 est_rows = RelationGetNumberOfBlocks(heap) *
+						(BLCKSZ / (double)(dim * sizeof(float) + 32));
+	double	 est_per  = est_rows / shared->nparticipants;
+	uint32_t stride	  = 1;
 	if (est_per > shared->max_samples_per_worker)
 		stride = (uint32_t)(est_per / shared->max_samples_per_worker);
 	if (stride < 1)
@@ -488,7 +489,7 @@ posting_cb_batch_init(PostingCbState *cbs)
 	cbs->batch_count = 0;
 	cbs->use_batch	 = (cbs->bp.soar_lambda > 0.0 ||
 						cbs->bp.boundary_epsilon > 0.0) &&
-					 mkt_secondary_batch_available();
+					   mkt_secondary_batch_available();
 	if (!cbs->use_batch)
 		return;
 
