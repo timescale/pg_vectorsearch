@@ -26,7 +26,7 @@ int	 mkt_query_limit   = 0;
 int	 mkt_fastscan_bits = 16;
 bool mkt_rerank		   = true;
 int	 mkt_rerank_pool   = 0;
-bool mkt_profile	   = false;
+static bool mkt_profile = false;
 
 static void
 mkt_profile_assign_hook(bool newval, void *extra)
