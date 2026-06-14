@@ -48,4 +48,22 @@ void mktann_storage_init(
  */
 void mktann_storage_set_rel(MktannStorage *s, Relation rel);
 
+/*
+ * Per-backend read-through cache for centroid pages.
+ *
+ * The centroid beam search re-reads nearly the entire centroid region
+ * on every query (~hundreds of pages), and each read is a buffer-manager
+ * pin (BufTableLookup) that is slow under large shared_buffers. Centroid
+ * pages are immutable after build, so we cache their contents in backend
+ * memory (keyed by block number) and serve subsequent reads with a direct
+ * pointer — no pin, no content lock, no hash probe of the global buffer
+ * table.
+ *
+ * Returns a MktStorage whose read path is the cache. `backing` supplies
+ * the underlying buffer-cache storage used to populate cache misses; it
+ * must remain valid for the duration of any scan that triggers a miss.
+ * The cache resets automatically when the index relation changes.
+ */
+MktStorage *mktann_centroid_cache_get(Relation index, MktannStorage *backing);
+
 #endif /* MKTANN_STORAGE_H */
