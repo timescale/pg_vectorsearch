@@ -429,6 +429,98 @@ pg_rerank_readstream(
 }
 
 /* ----------------------------------------------------------------
+ * Centroid page cache (per-backend, read-through)
+ *
+ * Centroid pages are immutable after build and re-read on every query.
+ * Caching their contents in backend-local memory turns each centroid
+ * page access from a buffer-manager pin (BufTableLookup over a 128 GB
+ * pool) into a direct array-indexed pointer load.
+ * ---------------------------------------------------------------- */
+
+typedef struct CentroidCache
+{
+	MktStorage	   base;	/* must be first */
+	MktannStorage *backing; /* underlying buffer storage for misses */
+	char		 **pages;	/* blkno -> 8 KB page copy (NULL = uncached) */
+	uint32_t	   cap;		/* length of pages[] */
+	Oid			   relid;	/* index this cache belongs to */
+	bool		   active;	/* has been bound to a relation */
+} CentroidCache;
+
+static CentroidCache cc_state;
+
+static Page
+cc_read_page(MktStorage *self, BlockNumber blkno)
+{
+	CentroidCache *c = (CentroidCache *)self;
+
+	if (blkno >= c->cap)
+	{
+		uint32_t newcap = blkno + 64;
+		MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
+		c->pages = c->pages == NULL
+				? palloc0(newcap * sizeof(char *))
+				: repalloc(c->pages, newcap * sizeof(char *));
+		MemoryContextSwitchTo(old);
+		for (uint32_t i = c->cap; i < newcap; i++)
+			c->pages[i] = NULL;
+		c->cap = newcap;
+	}
+
+	if (c->pages[blkno] == NULL)
+	{
+		/* Miss: read once through the buffer cache, copy, release. */
+		MktStorage *b = &c->backing->base;
+		Page		src = b->ops->read_page(b, blkno);
+		char	   *buf = MemoryContextAlloc(TopMemoryContext, BLCKSZ);
+		memcpy(buf, src, BLCKSZ);
+		b->ops->release_page(b, blkno);
+		c->pages[blkno] = buf;
+	}
+
+	return (Page)c->pages[blkno];
+}
+
+static void
+cc_release_page(MktStorage *self, BlockNumber blkno)
+{
+	(void)self;
+	(void)blkno;
+	/* Cached pages stay resident; nothing to release. */
+}
+
+static const MktStorageOps cc_ops = {
+		.read_page	  = cc_read_page,
+		.release_page = cc_release_page,
+};
+
+MktStorage *
+mktann_centroid_cache_get(Relation index, MktannStorage *backing)
+{
+	Oid relid = RelationGetRelid(index);
+
+	if (!cc_state.active || cc_state.relid != relid)
+	{
+		/* Drop a stale cache (different index / REINDEX). */
+		if (cc_state.pages != NULL)
+		{
+			for (uint32_t i = 0; i < cc_state.cap; i++)
+				if (cc_state.pages[i] != NULL)
+					pfree(cc_state.pages[i]);
+			pfree(cc_state.pages);
+		}
+		cc_state.pages	 = NULL;
+		cc_state.cap	 = 0;
+		cc_state.relid	 = relid;
+		cc_state.active	 = true;
+		cc_state.base.ops = &cc_ops;
+	}
+
+	cc_state.backing = backing;
+	return &cc_state.base;
+}
+
+/* ----------------------------------------------------------------
  * Static vtables
  * ---------------------------------------------------------------- */
 

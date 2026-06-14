@@ -217,7 +217,7 @@ exec_paged(
 		uint32_t	   *result_ids)
 {
 	MktMemCtx old = mkt_memctx_switch(ctx->memctx);
-	mkt_query_execute(&ctx->search, query, k, nprobe, mode, rerank, NULL);
+	mkt_query_execute(&ctx->search, query, k, nprobe, mode, rerank, 0, NULL);
 	mkt_memctx_switch(old);
 
 	uint32_t nresults = ctx->search.nresults;

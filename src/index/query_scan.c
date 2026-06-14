@@ -9,6 +9,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 #include "algo/topk.h"
 #include "algo/vecops.h"
@@ -104,6 +105,26 @@ mkt_query_state_cleanup(MktQueryState *qs)
 /* ----------------------------------------------------------------
  * Per-query execution
  * ---------------------------------------------------------------- */
+
+/* Per-phase timing is opt-in (mkt.profile). Off by default so the hot
+ * query path makes zero clock_gettime calls. */
+static bool g_mkt_profile = false;
+
+void
+mkt_query_set_profile(bool enabled)
+{
+	g_mkt_profile = enabled;
+}
+
+static inline uint64_t
+mkt_now_ns(void)
+{
+	if (!g_mkt_profile)
+		return 0;
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 
 static const float *
 prepare_query(MktQueryState *qs, const float *query)
@@ -256,6 +277,7 @@ mkt_query_execute(
 		uint32_t		nprobe,
 		MktDistanceMode mode,
 		bool			rerank,
+		uint32_t		rerank_pool,
 		MktQueryStats  *stats)
 {
 	if (k > qs->max_k)
@@ -270,13 +292,26 @@ mkt_query_execute(
 
 	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
 
+	uint64_t			   t0		  = mkt_now_ns();
 	MktCentroidSearchStats beam_stats = {0};
 	uint32_t			   ncentroids =
 			search_centroids(qs, qvec, nprobe, mode, &beam_stats);
 
+	uint64_t t1 = mkt_now_ns();
 	scan_clusters(qs, qs->beam_results, ncentroids, mode, &qs->topk, stats);
 
+	uint64_t t2		= mkt_now_ns();
 	uint32_t ncands = extract_candidates(qs);
+
+	/* Bound the rerank pool. Candidates are sorted by quantized distance
+	 * ascending (extract_candidates), so the first rerank_pool entries are
+	 * the most promising by the approximate score. Reranking only those
+	 * caps the number of full-precision heap fetches — the dominant cost
+	 * of the rerank stage — at a small recall cost. rerank_pool == 0 keeps
+	 * the legacy behavior of reranking every prune survivor. The pool is
+	 * never shrunk below k, so the exact top-k is always achievable. */
+	if (rerank_pool > 0 && ncands > rerank_pool)
+		ncands = rerank_pool < k ? k : rerank_pool;
 
 	/* Rerank with exact distances if enabled and storage supports it */
 	MktStorage *ps = qs->index->posting_storage;
@@ -316,10 +351,16 @@ mkt_query_execute(
 	}
 #endif
 
+	uint64_t t3 = mkt_now_ns();
+
 	if (stats != NULL)
 	{
 		stats->centroid_pages_read = beam_stats.pages_read;
 		stats->clusters_scanned	   = ncentroids;
+		stats->rerank_candidates   = ncands;
+		stats->centroid_ns		   = t1 - t0;
+		stats->posting_ns		   = t2 - t1;
+		stats->rerank_ns		   = t3 - t2;
 	}
 
 	return qs->nresults;

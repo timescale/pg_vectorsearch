@@ -12,6 +12,7 @@
 
 #include "algo/distance.h"
 #include "algo/kmeans.h"
+#include "index/query_scan.h"
 #include "git_commit.h"
 #include "mkt_pg.h"
 #include "mktann_explain.h"
@@ -24,6 +25,14 @@ int	 mkt_nprobe		   = 10;
 int	 mkt_query_limit   = 0;
 int	 mkt_fastscan_bits = 16;
 bool mkt_rerank		   = true;
+int	 mkt_rerank_pool   = 0;
+bool mkt_profile	   = false;
+
+static void
+mkt_profile_assign_hook(bool newval, void *extra)
+{
+	mkt_query_set_profile(newval);
+}
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
@@ -126,6 +135,34 @@ _PG_init(void)
 			0,
 			NULL,
 			NULL,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.rerank_pool",
+			"Max candidates to rerank with exact distances (0 = unbounded).",
+			"Caps full-precision heap fetches. Candidates are reranked in "
+			"order of ascending quantized distance, so the pool keeps the "
+			"most promising survivors. Never shrinks below k.",
+			&mkt_rerank_pool,
+			0,
+			0,
+			1000000,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomBoolVariable(
+			"mkt.profile",
+			"Record per-phase query timing (centroid/posting/rerank).",
+			"Adds clock_gettime calls to the scan path; off by default.",
+			&mkt_profile,
+			false,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_profile_assign_hook,
 			NULL);
 
 	MarkGUCPrefixReserved("mkt");
