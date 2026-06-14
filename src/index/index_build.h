@@ -151,4 +151,22 @@ uint32_t mkt_find_soar_secondary(
 		const float *normalized_residual,
 		double		 lambda);
 
+/*
+ * SOAR secondary restricted to a candidate leaf set (e.g. the nearest
+ * leaves from a tree beam descent) instead of all leaves. Same OA
+ * objective as mkt_find_soar_secondary; the only difference is the search
+ * domain. Makes the per-vector cost O(ncand) rather than O(nleaves), so
+ * build time is independent of nlist / tree depth. cand_leaves are leaf
+ * indices into leaf_centroids.
+ */
+uint32_t mkt_find_soar_secondary_cand(
+		const float	   *vec,
+		const float	   *leaf_centroids,
+		const uint32_t *cand_leaves,
+		uint32_t		ncand,
+		Dimension		dim,
+		uint32_t		primary_cluster,
+		const float	   *normalized_residual,
+		double			lambda);
+
 #endif /* MKT_INDEX_BUILD_H */

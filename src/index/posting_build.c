@@ -98,8 +98,8 @@ mkt_build_worker_bufs_create(Dimension dim)
 	return (MktBuildWorkerBufs){
 			.norm_buf	  = mkt_alloc(dim * sizeof(float)),
 			.residual_buf = mkt_alloc(dim * sizeof(float)),
-			.cand_leaves  = mkt_alloc(MKT_SECONDARY_TOPK * sizeof(uint32_t)),
-			.cand_dists	  = mkt_alloc(MKT_SECONDARY_TOPK * sizeof(Distance)),
+			.cand_leaves  = mkt_alloc(MKT_BUILD_CAND_MAX * sizeof(uint32_t)),
+			.cand_dists	  = mkt_alloc(MKT_BUILD_CAND_MAX * sizeof(Distance)),
 	};
 }
 
@@ -142,25 +142,28 @@ mkt_build_assign_vector(
 
 	if (has_soar || has_boundary)
 	{
-		const float *leaves	 = hk_leaf_centroids(tree);
-		uint32_t	 nleaves = tree->nleaves;
+		const float *leaves = hk_leaf_centroids(tree);
+
+		/* One beam descent serves both secondary searches. The boundary
+		 * candidate is simply the 2nd-nearest leaf, but SOAR's optimum
+		 * need not be the nearest, so size the beam to the more demanding
+		 * consumer when SOAR is on. This keeps the per-vector cost
+		 * O(ncand) — independent of nlist and tree depth — instead of the
+		 * former all-leaves scan that dominated build time. */
+		uint32_t k	  = has_soar ? MKT_SOAR_CAND_K : MKT_SECONDARY_TOPK;
+		uint32_t beam = has_soar ? MKT_SOAR_BEAM_WIDTH
+								 : MKT_SECONDARY_BEAM_WIDTH;
+		uint32_t ncand = mkt_hkmeans_assign_topk(
+				tree,
+				enc_vec,
+				params->metric,
+				k,
+				beam,
+				bufs->cand_leaves,
+				bufs->cand_dists);
 
 		uint32_t boundary_c2 = best_c;
 		if (has_boundary)
-		{
-			/* Beam-descend for the nearest leaves; the 2nd-nearest is
-			 * the boundary candidate. Far cheaper than scanning all
-			 * leaves, and exact when the true 2nd-nearest is within the
-			 * explored subtrees (which it is for boundary vectors). */
-			uint32_t ncand = mkt_hkmeans_assign_topk(
-					tree,
-					enc_vec,
-					params->metric,
-					MKT_SECONDARY_TOPK,
-					MKT_SECONDARY_BEAM_WIDTH,
-					bufs->cand_leaves,
-					bufs->cand_dists);
-
 			boundary_c2 = mkt_find_secondary_cluster(
 					bufs->cand_leaves,
 					bufs->cand_dists,
@@ -168,7 +171,6 @@ mkt_build_assign_vector(
 					best_c,
 					min_dist,
 					params->boundary_epsilon);
-		}
 
 		bool should_replicate = has_boundary ? (boundary_c2 != best_c) : true;
 
@@ -190,10 +192,11 @@ mkt_build_assign_vector(
 					for (Dimension d = 0; d < dim; d++)
 						r[d] *= inv;
 				}
-				secondary = mkt_find_soar_secondary(
+				secondary = mkt_find_soar_secondary_cand(
 						enc_vec,
 						leaves,
-						nleaves,
+						bufs->cand_leaves,
+						ncand,
 						dim,
 						best_c,
 						r,

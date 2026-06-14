@@ -495,9 +495,11 @@ void
 posting_cb_batch_init(PostingCbState *cbs)
 {
 	cbs->batch_count = 0;
-	cbs->use_batch	 = (cbs->bp.soar_lambda > 0.0 ||
-						cbs->bp.boundary_epsilon > 0.0) &&
-					   mkt_secondary_batch_available();
+	/* The secondary search is now tree-candidate-based (mkt_build_assign_
+	 * vector), which is O(candidates) per vector — independent of nlist and
+	 * tree depth. That removes the reason for the GEMM batch path (which
+	 * scanned all leaves), so route every tuple through the per-tuple path. */
+	cbs->use_batch = false;
 	if (!cbs->use_batch)
 		return;
 

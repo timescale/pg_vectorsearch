@@ -216,6 +216,50 @@ mkt_find_soar_secondary(
 	return best_c;
 }
 
+uint32_t
+mkt_find_soar_secondary_cand(
+		const float	   *vec,
+		const float	   *leaf_centroids,
+		const uint32_t *cand_leaves,
+		uint32_t		ncand,
+		Dimension		dim,
+		uint32_t		primary_cluster,
+		const float	   *normalized_residual,
+		double			lambda)
+{
+	/* Same OA objective as mkt_find_soar_secondary, but iterating a
+	 * candidate leaf list rather than all leaves. The l2 >= best_oa prune
+	 * still applies (lambda * gap^2 >= 0). */
+	float	 qrv	 = mkt_dot_product(normalized_residual, vec, dim);
+	float	 lam	 = (float)lambda;
+	float	 best_oa = INFINITY;
+	uint32_t best_c	 = primary_cluster;
+
+	for (uint32_t k = 0; k < ncand; k++)
+	{
+		uint32_t i = cand_leaves[k];
+		if (i == primary_cluster)
+			continue;
+
+		const float *cent = leaf_centroids + (size_t)i * dim;
+
+		float l2 = mkt_l2_distance_squared(vec, cent, dim);
+		if (l2 >= best_oa)
+			continue;
+
+		float rc  = mkt_dot_product(normalized_residual, cent, dim);
+		float gap = qrv - rc;
+		float oa  = l2 + lam * gap * gap;
+		if (oa < best_oa)
+		{
+			best_oa = oa;
+			best_c	= i;
+		}
+	}
+
+	return best_c;
+}
+
 void
 mkt_build_stats_print(const MktBuildStats *s)
 {

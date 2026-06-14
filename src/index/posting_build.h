@@ -51,6 +51,22 @@ typedef struct MktBuildAssignment
 #define MKT_SECONDARY_TOPK		 8
 #define MKT_SECONDARY_BEAM_WIDTH 16
 
+/*
+ * Candidate set for the SOAR secondary search. SOAR's optimum need not be
+ * the nearest-by-distance leaf, so the exact search scans all leaves —
+ * O(nlist) per vector, which dominates build time and grows with deeper
+ * trees. Restricting the search to the K nearest leaves (a tree beam
+ * descent) makes the build independent of nlist while keeping the SOAR
+ * optimum in the candidate set in practice (the orthogonality term is
+ * added to ||v-c||^2, so the optimum is almost always among the nearest
+ * few dozen). 64 is the tree beam cap (MKT_HK_MAX_TOPK).
+ */
+#define MKT_SOAR_CAND_K		64
+#define MKT_SOAR_BEAM_WIDTH 64
+
+/* Candidate buffers must hold the larger of the two searches. */
+#define MKT_BUILD_CAND_MAX MKT_SOAR_CAND_K
+
 /* Vectors per batch for the GEMM secondary path (amortizes centroid
  * reads across the batch). */
 #define MKT_SECONDARY_BATCH 256
@@ -68,8 +84,8 @@ typedef struct MktBuildWorkerBufs
 {
 	float	 *norm_buf;		/* [dim] for cosine normalization */
 	float	 *residual_buf; /* [dim] for SOAR residual computation */
-	uint32_t *cand_leaves;	/* [MKT_SECONDARY_TOPK] beam candidates */
-	Distance *cand_dists;	/* [MKT_SECONDARY_TOPK] candidate distances */
+	uint32_t *cand_leaves;	/* [MKT_BUILD_CAND_MAX] beam candidates */
+	Distance *cand_dists;	/* [MKT_BUILD_CAND_MAX] candidate distances */
 } MktBuildWorkerBufs;
 
 MktBuildWorkerBufs mkt_build_worker_bufs_create(Dimension dim);
