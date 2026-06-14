@@ -20,10 +20,10 @@
 
 typedef struct MktannScanStats
 {
-	/* Phase timing */
-	instr_time centroid_search;
-	instr_time posting_scan;
-	instr_time rerank;
+	/* Phase timing (nanoseconds, from CLOCK_MONOTONIC) */
+	uint64_t centroid_search_ns;
+	uint64_t posting_scan_ns;
+	uint64_t rerank_ns;
 
 	/* Centroid beam search */
 	uint32_t clusters_scanned;

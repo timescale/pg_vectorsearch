@@ -9,6 +9,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 #include "algo/topk.h"
 #include "algo/vecops.h"
@@ -104,6 +105,26 @@ mkt_query_state_cleanup(MktQueryState *qs)
 /* ----------------------------------------------------------------
  * Per-query execution
  * ---------------------------------------------------------------- */
+
+/* Per-phase timing is opt-in (mkt.profile). Off by default so the hot
+ * query path makes zero clock_gettime calls. */
+static bool g_mkt_profile = false;
+
+void
+mkt_query_set_profile(bool enabled)
+{
+	g_mkt_profile = enabled;
+}
+
+static inline uint64_t
+mkt_now_ns(void)
+{
+	if (!g_mkt_profile)
+		return 0;
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 
 static const float *
 prepare_query(MktQueryState *qs, const float *query)
@@ -290,15 +311,19 @@ mkt_query_execute(
 	mkt_topk_reset(&qs->topk);
 	qs->topk.k = k;
 
+	uint64_t			   t0		  = mkt_now_ns();
 	MktCentroidSearchStats beam_stats = {0};
 	uint32_t			   ncentroids =
 			mkt_query_route(qs, query, nprobe, mode, &beam_stats);
 
-	/* qvec (prepared/normalized) is reused by the rerank below. */
+	/* mkt_query_route() prepared and rotated the query; reuse the
+	 * normalized vector for the exact rerank below. */
 	const float *qvec = prepare_query(qs, query);
 
+	uint64_t t1 = mkt_now_ns();
 	scan_clusters(qs, qs->beam_results, ncentroids, mode, &qs->topk, stats);
 
+	uint64_t t2		= mkt_now_ns();
 	uint32_t ncands = extract_candidates(qs);
 
 	/* Rerank with exact distances if enabled and storage supports it */
@@ -339,10 +364,16 @@ mkt_query_execute(
 	}
 #endif
 
+	uint64_t t3 = mkt_now_ns();
+
 	if (stats != NULL)
 	{
 		stats->centroid_pages_read = beam_stats.pages_read;
 		stats->clusters_scanned	   = ncentroids;
+		stats->rerank_candidates   = ncands;
+		stats->centroid_ns		   = t1 - t0;
+		stats->posting_ns		   = t2 - t1;
+		stats->rerank_ns		   = t3 - t2;
 	}
 
 	return qs->nresults;

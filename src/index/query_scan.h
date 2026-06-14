@@ -33,6 +33,10 @@ typedef struct MktQueryStats
 	uint32_t posting_pages_read;
 	uint32_t posting_entries_scanned;
 	uint32_t clusters_scanned;
+	uint32_t rerank_candidates; /* candidates actually reranked (post-cap) */
+	uint64_t centroid_ns;		/* time in centroid beam search */
+	uint64_t posting_ns;		/* time in posting-list scan */
+	uint64_t rerank_ns;			/* time in exact rerank (heap fetches) */
 } MktQueryStats;
 
 /* ----------------------------------------------------------------
@@ -100,6 +104,10 @@ void mkt_query_state_cleanup(MktQueryState *qs);
  * Results are in qs->candidates[0..return_count), sorted by
  * distance ascending. The caller owns reranking (if any).
  */
+/* Enable/disable per-phase timing (centroid/posting/rerank ns in stats).
+ * Off by default; the hot path skips clock_gettime entirely when off. */
+void mkt_query_set_profile(bool enabled);
+
 uint32_t mkt_query_execute(
 		MktQueryState  *qs,
 		const float	   *query,

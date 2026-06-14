@@ -13,6 +13,7 @@
 #include "algo/distance.h"
 #include "algo/kmeans.h"
 #include "git_commit.h"
+#include "index/query_scan.h"
 #include "mkt_pg.h"
 #include "mktann_explain.h"
 
@@ -24,8 +25,15 @@ int	   mkt_nprobe				= 10;
 int	   mkt_query_limit			= 0;
 int	   mkt_fastscan_bits		= 16;
 bool   mkt_rerank				= true;
+bool   mkt_profile				= false;
 double mkt_centroid_error_scale = 0.0;
 double mkt_centroid_beam_scale	= 0.25;
+
+static void
+mkt_profile_assign_hook(bool newval, void *extra)
+{
+	mkt_query_set_profile(newval);
+}
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
@@ -180,6 +188,18 @@ _PG_init(void)
 			0,
 			NULL,
 			NULL,
+			NULL);
+
+	DefineCustomBoolVariable(
+			"mkt.profile",
+			"Record per-phase query timing (centroid/posting/rerank).",
+			"Adds clock_gettime calls to the scan path; off by default.",
+			&mkt_profile,
+			false,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_profile_assign_hook,
 			NULL);
 
 	MarkGUCPrefixReserved("mkt");

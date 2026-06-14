@@ -75,6 +75,21 @@ mktann_explain_hook(
 	ExplainPropertyInteger("Rerank Results", NULL, stats->rerank_results, es);
 	ExplainPropertyInteger("Storage Reads", NULL, stats->storage_reads, es);
 
+	ExplainPropertyFloat(
+			"Centroid Search Time",
+			"us",
+			(double)stats->centroid_search_ns / 1000.0,
+			1,
+			es);
+	ExplainPropertyFloat(
+			"Posting Scan Time",
+			"us",
+			(double)stats->posting_scan_ns / 1000.0,
+			1,
+			es);
+	ExplainPropertyFloat(
+			"Rerank Time", "us", (double)stats->rerank_ns / 1000.0, 1, es);
+
 	ExplainCloseGroup("Mktann", "Mktann", true, es);
 }
 

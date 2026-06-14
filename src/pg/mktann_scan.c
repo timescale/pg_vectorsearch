@@ -103,9 +103,14 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 
 	/* Initialize PG storage */
 	mktann_storage_init(&ss->storage, index, NULL, ss->index_base.metric);
-	ss->index_base.centroid_storage = &ss->storage.base;
-	ss->index_base.posting_storage	= &ss->storage.base;
-	ss->index_base.page_base		= NULL;
+	/* Centroid pages are immutable and re-read every query; serve them
+	 * from a per-backend read-through cache to avoid buffer-manager pins
+	 * (a large fraction of per-query page accesses). Posting pages stay
+	 * on the buffer cache. */
+	ss->index_base.centroid_storage =
+			mktann_centroid_cache_get(index, &ss->storage);
+	ss->index_base.posting_storage = &ss->storage.base;
+	ss->index_base.page_base	   = NULL;
 
 	/* Initialize shared query state */
 	mkt_query_state_init(&ss->qstate, &ss->index_base, max_k, max_nprobe);
@@ -119,8 +124,16 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 											opts->boundary_epsilon > 0.0);
 	if (has_replication)
 	{
+		/* Size the dedup set to the nprobe actually requested for this
+		 * scan (the GUC is set before the query runs), not the worst-case
+		 * max_nprobe. The buffer is zeroed once per scan via palloc0, so
+		 * oversizing it to max_nprobe (4096) burned a large per-query memset
+		 * — tens of MB at low nlist — regardless of the real nprobe. */
+		uint32_t req_nprobe = mkt_nprobe > 0 ? (uint32_t)mkt_nprobe : 1;
+		if (req_nprobe > max_nprobe)
+			req_nprobe = max_nprobe;
 		uint32_t avg_per_cluster = info.ntuples / Max(info.nlist, 1);
-		uint32_t est_entries	 = max_nprobe * avg_per_cluster * 2;
+		uint32_t est_entries	 = req_nprobe * avg_per_cluster * 2;
 		uint32_t cap			 = 1024;
 		while (cap < est_entries * 2)
 			cap *= 2;
@@ -222,9 +235,12 @@ execute_search(IndexScanDesc scan)
 	ss->stats.centroid_pages_read	  = qstats.centroid_pages_read;
 	ss->stats.posting_pages_read	  = qstats.posting_pages_read;
 	ss->stats.posting_entries_scanned = qstats.posting_entries_scanned;
-	ss->stats.rerank_candidates		  = ss->qstate.ncandidates;
+	ss->stats.rerank_candidates		  = qstats.rerank_candidates;
 	ss->stats.rerank_results		  = ss->qstate.nresults;
 	ss->stats.storage_reads			  = ss->storage.read_count;
+	ss->stats.centroid_search_ns	  = qstats.centroid_ns;
+	ss->stats.posting_scan_ns		  = qstats.posting_ns;
+	ss->stats.rerank_ns				  = qstats.rerank_ns;
 
 	/* Copy results from result ordering. The error-bound rerank can return
 	 * more than the beginscan max_k (the rerank set is inflated beyond k to
