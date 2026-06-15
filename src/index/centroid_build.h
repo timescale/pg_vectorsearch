@@ -159,6 +159,12 @@ centroid_encoder_init(
 				.global_mean = global_mean,
 		};
 		return &state->r.base;
+	case MKT_CENTROID_FMT_FASTSCAN:
+		/* fastscan uses a group-packed page layout that doesn't fit
+		 * this per-vector encoder model. The build path emits these
+		 * pages directly (see mkt_centroid_write_fastscan_pages —
+		 * future work) or they're produced by an in-place conversion. */
+		return NULL;
 	}
 	return NULL;
 }
@@ -184,5 +190,30 @@ BlockNumber mkt_centroid_write_pages(
 		const BlockNumber *child_blknos,
 		const float		  *pt_centroids,
 		BlockNumber		   start_blkno);
+
+/*
+ * Write centroid entries as FASTSCAN-format pages.
+ *
+ * Same inputs as mkt_centroid_write_pages but emits 32-vector groups
+ * with kPerm0-packed RaBitQ codes instead of per-entry RaBitQData,
+ * so the scan path uses mkt_fastscan_accumulate_hacc rather than
+ * mkt_rabitq_inner_product_multi at score time.
+ *
+ * Requires `params` and `global_mean` (the RaBitQ encoding inputs);
+ * the float `vectors` array provides the centroids to encode. Each
+ * entry's f_error is computed from f_add / f_rescale at emit time
+ * so the score path doesn't need to recompute it.
+ */
+BlockNumber mkt_centroid_write_fastscan_pages(
+		MktStorage		   *storage,
+		Dimension			dim,
+		uint32_t			nlist,
+		uint8_t				level,
+		uint16_t			flags,
+		const RaBitQParams *params,
+		const float		   *vectors,
+		const float		   *global_mean,
+		const BlockNumber  *child_blknos,
+		BlockNumber			start_blkno);
 
 #endif /* MKT_CENTROID_BUILD_H */

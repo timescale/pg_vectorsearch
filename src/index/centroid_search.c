@@ -56,6 +56,16 @@ struct MktCentroidScratch
 	MktTopK		  level_topk;
 	MktTopKEntry *entries_buf;
 	uint32_t	  entries_cap;
+	/* Fastscan LUT used by the FASTSCAN centroid format. The LUT only
+	 * depends on the query (qstate->transformed), which is constant
+	 * for the entire centroid descent — so we build it once per query
+	 * and reuse for every FASTSCAN page. fs_lut_valid is cleared at
+	 * the start of every beam-search call. */
+	uint8_t *fs_lut;
+	uint32_t fs_lut_bytes;
+	float	 fs_lut_delta;
+	float	 fs_lut_bias;
+	bool	 fs_lut_valid;
 };
 
 MktCentroidScratch *
@@ -90,6 +100,13 @@ mkt_centroid_scratch_create(Dimension dim, uint32_t max_beam_width)
 	if (s->entries_cap < 64)
 		s->entries_cap = 64;
 	s->entries_buf = mkt_alloc(s->entries_cap * sizeof(MktTopKEntry));
+
+	/* Fastscan LUT (worst-case hacc size for this dim). Allocated
+	 * once and reused for every centroid page scored in the
+	 * FASTSCAN format. The LUT depends on the query so it's rebuilt
+	 * per page; the buffer is reusable. */
+	s->fs_lut_bytes = MKT_FASTSCAN_LUT_HACC_BYTES(dim);
+	s->fs_lut		= mkt_alloc(s->fs_lut_bytes);
 	return s;
 }
 
@@ -108,6 +125,7 @@ mkt_centroid_scratch_free(MktCentroidScratch *s)
 	mkt_free(s->lower_bounds);
 	mkt_free(s->multi_scratch);
 	mkt_free(s->symmetric_scratch);
+	mkt_free(s->fs_lut);
 	mkt_free(s);
 }
 
@@ -236,6 +254,107 @@ score_page(
 			cands[cand_count].distance = dist;
 			cands[cand_count].error	   = 0.0f;
 			cand_count++;
+		}
+		break;
+	}
+	case MKT_CENTROID_FMT_FASTSCAN:
+	{
+		/* Fastscan centroid pages: same RaBitQ codes as the RABITQ
+		 * format but rearranged into 32-vector groups so we can
+		 * score them with mkt_fastscan_accumulate (~150 M vec/s on
+		 * Graviton 4) instead of the per-vector kernel used by the
+		 * RABITQ branch above.
+		 *
+		 * Layout per group section:
+		 *   BlockNumber child_blkno[32]
+		 *   float       f_add[32]
+		 *   float       f_rescale[32]
+		 *   float       f_error[32]
+		 *   uint8_t     codes[nsq_pairs*32]
+		 *
+		 * The LUT depends on the query (and via qstate->transformed,
+		 * implicitly on the cluster's centroid for posting scans;
+		 * for centroid descent the relevant query state is the
+		 * pre-cluster qstate->transformed which is just P^T*query
+		 * minus the global_mean rotation already absorbed by
+		 * pt_global_mean). It is rebuilt once per centroid page
+		 * scored. Amortising the LUT build across all 32 entries in
+		 * a group is the whole reason this is faster than the
+		 * per-vector kernel. */
+		/* Build the LUT once per query — qstate->transformed is
+		 * constant across the whole centroid descent, so we cache
+		 * the LUT bytes + lut_delta + lut_bias in MktCentroidScratch
+		 * and reuse them on every subsequent FASTSCAN page. */
+		if (!cs->fs_lut_valid)
+		{
+			mkt_fastscan_build_lut_hacc(
+					state->qstate->transformed,
+					dim,
+					cs->fs_lut,
+					&cs->fs_lut_delta,
+					&cs->fs_lut_bias);
+			cs->fs_lut_valid = true;
+		}
+		float lut_delta = cs->fs_lut_delta;
+		float lut_bias	= cs->fs_lut_bias;
+
+		float g_add		 = state->qstate->g_add;
+		float sum_t		 = state->qstate->sum_transformed;
+		float inv_sqrt_d = state->qstate->inv_sqrt_d;
+		float g_error	 = state->qstate->g_error;
+		float err_mult	 = state->qstate->error_multiplier;
+
+		char	*content	 = (char *)PageGetContents(page);
+		uint32_t entry_count = count;
+		uint32_t ngroups	 = (entry_count + MKT_FASTSCAN_GROUP - 1) /
+						   MKT_FASTSCAN_GROUP;
+
+		int32_t accum[MKT_FASTSCAN_GROUP];
+
+		for (uint32_t g = 0; g < ngroups; g++)
+		{
+			uint32_t g_start = g * MKT_FASTSCAN_GROUP;
+			uint32_t g_count = entry_count - g_start;
+			if (g_count > MKT_FASTSCAN_GROUP)
+				g_count = MKT_FASTSCAN_GROUP;
+
+			const BlockNumber *child = (const BlockNumber *)
+					mkt_centroid_fastscan_group_child(content, g, dim);
+			const float *f_add_arr =
+					mkt_centroid_fastscan_group_f_add(content, g, dim);
+			const float *f_rescale_arr =
+					mkt_centroid_fastscan_group_f_rescale(content, g, dim);
+			const float *f_error_arr =
+					mkt_centroid_fastscan_group_f_error(content, g, dim);
+			const uint8_t *codes =
+					mkt_centroid_fastscan_group_codes(content, g, dim);
+
+			mkt_fastscan_accumulate_hacc(codes, cs->fs_lut, accum, dim);
+
+			for (uint32_t v = 0; v < g_count && cand_count < cand_cap; v++)
+			{
+				/* De-quantise the LUT accumulator the same way the
+				 * posting fastscan path does (see prune_group_neon
+				 * in posting_scan.c). */
+				float binary_ip = (float)accum[v] * lut_delta + lut_bias;
+				float final_dot = (2.0f * binary_ip - sum_t) * inv_sqrt_d;
+
+				Distance est = f_add_arr[v] + g_add -
+							   2.0f * f_rescale_arr[v] * final_dot;
+				/* Matches rabitq_lower_bound(): err_margin =
+				 * multiplier * f_error * g_error, plus a small
+				 * floating-point margin proportional to |est|. */
+				Distance err = err_mult * f_error_arr[v] * g_error +
+							   1e-5f * fabsf(est);
+
+				uint32_t page_idx			  = g_start + v;
+				cands[cand_count].child_blkno = child[v];
+				ItemPointerSet(
+						&cands[cand_count].origin, page_blkno, page_idx);
+				cands[cand_count].distance = est;
+				cands[cand_count].error	   = err;
+				cand_count++;
+			}
 		}
 		break;
 	}
@@ -381,6 +500,11 @@ mkt_centroid_beam_search(
 	uint32_t   cand_cap = scratch->cand_cap;
 	Candidate *buf_a	= scratch->buf_a;
 	Candidate *buf_b	= scratch->buf_b;
+
+	/* Invalidate the per-query fastscan LUT cache. Built lazily on
+	 * first FASTSCAN page encountered, then reused for all subsequent
+	 * pages in this query. */
+	scratch->fs_lut_valid = false;
 
 	/* centroid_vecs: will be used later for copying centroid vectors */
 	(void)centroid_vecs;
@@ -528,7 +652,10 @@ mkt_centroid_beam_search(
 				break;
 			}
 			case MKT_CENTROID_FMT_RABITQ:
-				/* Unreachable — guarded at loop entry. */
+			case MKT_CENTROID_FMT_FASTSCAN:
+				/* Unreachable — both are lossy binary encodings and
+				 * the outer guard skips this branch when the page
+				 * format isn't FLOAT/HALF. */
 				break;
 			}
 		}
