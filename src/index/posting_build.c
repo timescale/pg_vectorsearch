@@ -484,20 +484,6 @@ mkt_secondary_batch_assign(
  * Shared helpers
  * ---------------------------------------------------------------- */
 
-float
-mkt_posting_derive_f_error(float f_add, float f_rescale, Dimension dim)
-{
-	float f_rsq = f_rescale * f_rescale;
-	if (f_rsq > f_add && dim > 1)
-	{
-		float c_err = 2.0f * MKT_RABITQ_EPSILON / sqrtf((float)(dim - 1));
-		return c_err * sqrtf(f_rsq - f_add);
-	}
-	return 2e-4f * sqrtf(f_add);
-}
-
-#define derive_f_error mkt_posting_derive_f_error
-
 /*
  * Flush the in-memory page.
  *
@@ -968,7 +954,7 @@ mkt_posting_builder_add(
 			builder->enc_buf,
 			&builder->enc_scratch);
 
-	float f_error = derive_f_error(
+	float f_error = mkt_rabitq_derive_f_error(
 			builder->enc_buf->f_add,
 			builder->enc_buf->f_rescale,
 			builder->dim);
@@ -1058,7 +1044,7 @@ mkt_flat_posting_builder_add(
 	VectorRef cref = {.data = builder->centroid, .dim = dim};
 	mkt_rabitq_encode_into(builder->params, vref, cref, builder->enc_buf);
 
-	float f_error = derive_f_error(
+	float f_error = mkt_rabitq_derive_f_error(
 			builder->enc_buf->f_add, builder->enc_buf->f_rescale, dim);
 
 	mkt_posting_flat_add(

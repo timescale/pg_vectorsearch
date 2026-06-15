@@ -201,6 +201,13 @@ typedef struct RaBitQQueryState
  *
  * Returns NULL on allocation failure.
  */
+/*
+ * Derive the per-vector error factor f_error from the encoded f_add /
+ * f_rescale (see the RaBitQData comment for the formula). Shared by the
+ * posting and centroid build paths so the formula lives in one place.
+ */
+float mkt_rabitq_derive_f_error(float f_add, float f_rescale, Dimension dim);
+
 RaBitQParams *mkt_rabitq_create(Dimension dim, uint64_t seed);
 
 /*

@@ -311,7 +311,6 @@ void mkt_posting_builder_set_first_blkno(
 /*
  * Derive RaBitQ error bound from encoding factors.
  */
-float mkt_posting_derive_f_error(float f_add, float f_rescale, Dimension dim);
 
 /*
  * Add a raw vector. Encodes with RaBitQ relative to centroid.
