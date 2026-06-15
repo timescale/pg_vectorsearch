@@ -194,6 +194,7 @@ do_parallel_build(
 				dim,
 				shared->metric,
 				shared->km_max_iterations,
+				shared->km_nredo,
 				subtrees_base,
 				shared->subtree_slot_size);
 

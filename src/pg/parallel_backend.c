@@ -357,6 +357,7 @@ mkt_pbuild_setup_shared(
 	shared->nparticipants		   = nparticipants;
 	shared->max_samples_per_worker = max_per_worker;
 	shared->km_max_iterations	   = 20;
+	shared->km_nredo = config->kmeans_nredo > 0 ? config->kmeans_nredo : 1;
 	shared->km_tolerance		   = 1e-4f;
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;

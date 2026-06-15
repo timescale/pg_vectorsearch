@@ -140,6 +140,7 @@ mkt_subtree_build_partitioned(
 		Dimension		  dim,
 		DistanceMetric	  metric,
 		uint32_t		  km_max_iterations,
+		uint32_t		  km_nredo,
 		char			 *subtrees_base,
 		uint64_t		  slot_size)
 {
@@ -160,6 +161,10 @@ mkt_subtree_build_partitioned(
 
 	KMeansOptions opts	= MKT_KMEANS_OPTIONS_DEFAULT;
 	opts.max_iterations = km_max_iterations;
+	/* Restarts: each leaf subtree's k-means runs km_nredo independent
+	 * attempts (different seeds) and keeps the lowest-cost one — escapes
+	 * bad local minima for tighter clusters / better routing. */
+	opts.nredo = km_nredo > 0 ? km_nredo : 1;
 	/*
 	 * Per-child problems are small (~nsamples/fan_out points, k=fan_out) and
 	 * run on every participant at once. The Lloyd dot-product kernel beats the
@@ -694,6 +699,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 				dim,
 				shared->metric,
 				shared->km_max_iterations,
+				shared->km_nredo,
 				subtrees_base,
 				shared->subtree_slot_size);
 	}

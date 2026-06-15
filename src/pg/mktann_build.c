@@ -765,6 +765,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				.soar_lambda	  = bs.params.soar_lambda,
 				.boundary_epsilon = bs.params.boundary_epsilon,
 				.fastscan		  = bs.params.fastscan,
+				.kmeans_nredo	  = bs.params.kmeans_nredo,
 		};
 
 		pgstat_progress_update_param(

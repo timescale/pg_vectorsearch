@@ -110,6 +110,7 @@ typedef struct MktBuildShared
 	/* K-means config */
 	uint32_t max_samples_per_worker;
 	uint32_t km_max_iterations;
+	uint32_t km_nredo; /* k-means restarts for subtree leaves (>=1) */
 	float	 km_tolerance;
 	uint32_t km_k; /* root k-means k (= fan_out) */
 
@@ -460,6 +461,7 @@ extern void mkt_subtree_build_partitioned(
 		Dimension		  dim,
 		DistanceMetric	  metric,
 		uint32_t		  km_max_iterations,
+		uint32_t		  km_nredo,
 		char			 *subtrees_base,
 		uint64_t		  slot_size);
 
@@ -630,6 +632,7 @@ typedef struct MktBuildConfig
 	double			  soar_lambda;
 	double			  boundary_epsilon;
 	bool			  fastscan;
+	uint32_t		  kmeans_nredo; /* k-means restarts (>=1) */
 } MktBuildConfig;
 
 /* ----------------------------------------------------------------
