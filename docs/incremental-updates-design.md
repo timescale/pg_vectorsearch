@@ -206,9 +206,23 @@ Keep the fast path fast and bound the write buffer.
   or shared-memory structure — PostgreSQL's `shared_buffers` is the in-memory
   cache for them, and `GenericXLog` provides durability + crash recovery for
   free.
-- Background (or vacuum-time) compaction repacks accumulated write-tier entries
-  into FASTSCAN-packed **segment** pages and garbage-collects tombstones,
-  triggered by a size/age threshold.
+- Compaction repacks accumulated write-tier entries into FASTSCAN-packed
+  **segment** pages and garbage-collects tombstones. It must be **online and
+  crash-safe**: build the new segment fully, flip the posting-chain pointer in
+  one WAL-logged step, then free the old pages — never expose a half-converted
+  chain. **No dedicated background worker is needed at this phase**; three
+  complementary triggers (mirroring GIN's pending list) drive it:
+  - **Vacuum hooks** (`ambulkdelete` / `amvacuumcleanup`) — the steady-state +
+    GC path, auto-scheduled by autovacuum on table churn. Idiomatic: GIN flushes
+    its pending list into the main index during vacuum, and these hooks can read
+    AoS write-tier pages and write FASTSCAN segments directly.
+  - **Inline overflow** — when a cluster's write buffer crosses a size
+    threshold, the inserting backend (or next scan) repacks it then and there.
+    Vacuum fires on table *dead-tuple* thresholds, the wrong signal for an
+    insert-grown buffer, so this keeps insert-heavy workloads from accumulating
+    unpacked data between vacuums (GIN's inline pending-list flush).
+  - **Manual procedure** — a user-callable `mkt_compact(index)` to force
+    compaction on demand (GIN's `gin_clean_pending_list()`).
 - Search merges base + segments + write tier; fewer packed segments keep scan
   fast.
 - Still fixed centroids (drift), but no unbounded write-tier growth.
@@ -236,8 +250,12 @@ Stable recall under heavy mutation **without** rebuild.
   `< min` (reassign to neighbors, remove centroid).
 - **Bounded local reassign** to maintain NPA — re-check only affected +
   neighboring postings.
-- **Background job queue** decoupled from foreground inserts; crash-consistent,
-  idempotent jobs.
+- **Async execution** — a **dedicated background worker** (a PG dynamic
+  bgworker consuming a shared job queue) runs the size-triggered **split**:
+  vacuum's dead-tuple trigger is the wrong signal for an insert-grown posting,
+  and split is too heavy for foreground `aminsert`. **Merge and tombstone-GC can
+  stay on the vacuum hooks** (delete-driven shrink fits the dead-tuple model).
+  Jobs are crash-consistent and idempotent.
 - Hard parts: mutable hierarchical centroid tree (split a leaf, possible parent
   cascade), in-memory cache coherence across backends, RaBitQ re-encode, SOAR
   re-replication, WAL.
