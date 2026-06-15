@@ -95,6 +95,28 @@ void mkt_topk_destroy(MktTopK *topk);
 void mkt_topk_reset(MktTopK *topk);
 
 /*
+ * Reset to empty state AND change k. Reuses the existing memory
+ * context (preserves the per-topk arena) but re-allocates ub_heap /
+ * ub_ids / candidates within it. Cheap compared to a full init +
+ * cleanup pair, because the memctx itself isn't created or destroyed.
+ *
+ * Use this when the same MktTopK is reused across calls that may
+ * want different k values (e.g. beam-search keeps beam_width
+ * candidates at intermediate levels, nprobe at the last).
+ */
+void mkt_topk_reset_to_k(MktTopK *topk, uint32_t k);
+
+/*
+ * Same as mkt_topk_insert but skips the O(k) per-insert dedup scan.
+ * Use ONLY when the caller guarantees all ids are unique. The cluster
+ * scan (where SOAR / boundary replicas can collide) must keep using
+ * mkt_topk_insert; centroid beam search and similar code that
+ * inserts each candidate exactly once should use this fast path.
+ */
+void mkt_topk_insert_unique(
+		MktTopK *topk, Distance distance, Distance error, uint64_t id);
+
+/*
  * Insert a candidate. Pruned if lower_bound >= threshold.
  * Otherwise updates the threshold heap and appends to the
  * candidate buffer.
