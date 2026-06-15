@@ -12,6 +12,7 @@
 
 #include "algo/distance.h"
 #include "algo/kmeans.h"
+#include "index/posting_scan.h"
 #include "index/query_scan.h"
 #include "git_commit.h"
 #include "mkt_pg.h"
@@ -27,11 +28,18 @@ int	 mkt_fastscan_bits = 16;
 bool mkt_rerank		   = true;
 int	 mkt_rerank_pool   = 0;
 static bool mkt_profile = false;
+static bool mkt_scan_readahead = true;
 
 static void
 mkt_profile_assign_hook(bool newval, void *extra)
 {
 	mkt_query_set_profile(newval);
+}
+
+static void
+mkt_scan_readahead_assign_hook(bool newval, void *extra)
+{
+	mkt_posting_set_readahead(newval);
 }
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
@@ -163,6 +171,18 @@ _PG_init(void)
 			0,
 			NULL,
 			mkt_profile_assign_hook,
+			NULL);
+
+	DefineCustomBoolVariable(
+			"mkt.scan_readahead",
+			"Prefetch next posting page's codes during the current scan.",
+			"Hides code-load latency in the fastscan posting scan.",
+			&mkt_scan_readahead,
+			true,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_scan_readahead_assign_hook,
 			NULL);
 
 	MarkGUCPrefixReserved("mkt");
