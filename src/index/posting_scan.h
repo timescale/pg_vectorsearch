@@ -155,8 +155,8 @@ void mkt_posting_scan_enable_fastscan(MktPostingScan *scan, int lut_bits);
  */
 void mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk);
 
-/* Toggle next-page read-ahead prefetch in the fastscan posting scan. */
-void mkt_posting_set_readahead(bool enabled);
+/* Set read-ahead prefetch depth (pages prefetched ahead; 0 = off). */
+void mkt_posting_set_readahead_depth(int depth);
 
 /*
  * Free scratch buffers.

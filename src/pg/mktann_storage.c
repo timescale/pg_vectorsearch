@@ -58,7 +58,7 @@ pg_release_page(MktStorage *self, BlockNumber blkno)
 	s->cur_buf = InvalidBuffer;
 }
 
-/* Pin a page into the read-ahead slot (held alongside cur_buf). */
+/* Pin a page into the read-ahead ring tail (held alongside cur_buf). */
 static Page
 pg_read_ahead(MktStorage *self, BlockNumber blkno)
 {
@@ -66,13 +66,14 @@ pg_read_ahead(MktStorage *self, BlockNumber blkno)
 
 	Buffer buf = ReadBuffer(s->index, blkno);
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
-	s->ra_buf = buf;
+	s->ra_ring[s->ra_tail % MKT_RA_RING] = buf;
+	s->ra_tail++;
 	s->read_count++;
 
 	return BufferGetPage(buf);
 }
 
-/* Release the current page and make the read-ahead page current. */
+/* Release the current page and promote the oldest ring page to current. */
 static void
 pg_promote_ahead(MktStorage *self, BlockNumber old_blkno)
 {
@@ -81,19 +82,24 @@ pg_promote_ahead(MktStorage *self, BlockNumber old_blkno)
 	(void)old_blkno;
 	if (BufferIsValid(s->cur_buf))
 		UnlockReleaseBuffer(s->cur_buf);
-	s->cur_buf = s->ra_buf;
-	s->ra_buf  = InvalidBuffer;
+	s->cur_buf = s->ra_ring[s->ra_head % MKT_RA_RING];
+	s->ra_head++;
 }
 
-/* Drop the read-ahead pin without promoting it. */
+/* Drop all outstanding read-ahead pins (cleanup / abort). */
 static void
 pg_release_ahead(MktStorage *self)
 {
 	MktannStorage *s = PG_STORAGE(self);
 
-	if (BufferIsValid(s->ra_buf))
-		UnlockReleaseBuffer(s->ra_buf);
-	s->ra_buf = InvalidBuffer;
+	while (s->ra_head < s->ra_tail)
+	{
+		Buffer buf = s->ra_ring[s->ra_head % MKT_RA_RING];
+		if (BufferIsValid(buf))
+			UnlockReleaseBuffer(buf);
+		s->ra_head++;
+	}
+	s->ra_head = s->ra_tail = 0;
 }
 
 /* ----------------------------------------------------------------
@@ -604,7 +610,8 @@ mktann_storage_init(
 	s->rel		  = rel;
 	s->build_mode = false;
 	s->cur_buf	  = InvalidBuffer;
-	s->ra_buf	  = InvalidBuffer;
+	s->ra_head	  = 0;
+	s->ra_tail	  = 0;
 	s->metric	  = metric;
 	s->read_count = 0;
 }

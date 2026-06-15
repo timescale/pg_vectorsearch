@@ -25,7 +25,12 @@ typedef struct MktannStorage
 	Relation	   index;
 	Relation	   rel; /* table relation for rerank (NULL during build) */
 	Buffer		   cur_buf;
-	Buffer		   ra_buf; /* read-ahead pin held alongside cur_buf */
+	/* Read-ahead pin ring (FIFO): pages pinned ahead of cur_buf so their
+	 * codes can be prefetched while earlier pages are scanned. */
+#define MKT_RA_RING 16
+	Buffer	 ra_ring[MKT_RA_RING];
+	uint32_t ra_head; /* next to promote/release */
+	uint32_t ra_tail; /* next free slot (count = tail - head) */
 	DistanceMetric metric;	   /* distance metric for reranking */
 	bool		   build_mode; /* skip per-page WAL during build */
 	uint32_t	   read_count; /* debug: total page reads */

@@ -620,22 +620,27 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 }
 
 /*
- * Prefetch the packed-code regions of a fastscan page into cache. The
- * fastscan kernel is bound by the code load (vmovdqu64), and posting
- * pages hold only ~2 groups, so the hardware prefetcher cannot establish
- * a stream before each page ends — the first group of every page loads
- * cold. Issuing these prefetches against the *next* page while the
- * current page is still being scanned hides that latency.
+ * Read-ahead prefetch depth (mkt.scan_readahead_depth): how many posting
+ * pages ahead of the current scan position to pin and prefetch. 0 = off.
+ * Posting pages hold ~2 fastscan groups, so the HW prefetcher can't stream
+ * and each page's first group loads cold (the kernel is load-bound on the
+ * code vmovdqu64). Prefetching D pages ahead gives each page's codes ~D
+ * pages of kernel time to arrive. Must be < the storage ring size.
  */
-/* Read-ahead prefetch toggle (mkt.scan_readahead); on by default. */
-static bool g_scan_readahead = true;
+#define MKT_SCAN_RA_MAX 16
+static int g_scan_readahead_depth = 1;
 
 void
-mkt_posting_set_readahead(bool enabled)
+mkt_posting_set_readahead_depth(int depth)
 {
-	g_scan_readahead = enabled;
+	if (depth < 0)
+		depth = 0;
+	if (depth > MKT_SCAN_RA_MAX - 1)
+		depth = MKT_SCAN_RA_MAX - 1;
+	g_scan_readahead_depth = depth;
 }
 
+/* Prefetch the packed-code regions of a fastscan page into cache. */
 static inline void
 prefetch_fastscan_codes(Page page, Dimension dim)
 {
@@ -660,7 +665,15 @@ prefetch_fastscan_codes(Page page, Dimension dim)
 void
 mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk)
 {
-	/* Process pages until chain is exhausted */
+	uint32_t depth	= (uint32_t)g_scan_readahead_depth;
+	bool	 use_ra = depth > 0;
+
+	/* FIFO of pages pinned ahead of the current page (parallel to the
+	 * storage pin ring). count = qt - qh, capped at depth. */
+	Page		ra_page[MKT_SCAN_RA_MAX];
+	BlockNumber ra_blk[MKT_SCAN_RA_MAX];
+	uint32_t	qh = 0, qt = 0;
+
 	for (;;)
 	{
 		if (scan->cur_page == NULL)
@@ -672,21 +685,35 @@ mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk)
 		MktPostingPageOpaque *opaque = mkt_posting_opaque(scan->cur_page);
 		bool is_fs = (opaque->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
 
-		/* Read-ahead: pin the next page and prefetch its codes so they are
-		 * warm by the time we promote and scan it. Fastscan chains only. */
-		Page		ra_page = NULL;
-		BlockNumber ra_blk	= InvalidBlockNumber;
-		if (is_fs && g_scan_readahead)
+		/* Fill the read-ahead queue to `depth`, chaining from the last
+		 * queued page (or the current page if the queue is empty), and
+		 * prefetch each page's codes as it is pinned. */
+		if (is_fs && use_ra)
 		{
-			ra_blk = opaque->next_blkno;
-			if (ra_blk != InvalidBlockNumber)
+			while ((qt - qh) < depth)
 			{
+				BlockNumber nb;
+				if (qt == qh)
+					nb = opaque->next_blkno;
+				else
+					nb = mkt_posting_opaque(
+								 ra_page[(qt - 1) % MKT_SCAN_RA_MAX])
+								 ->next_blkno;
+				if (nb == InvalidBlockNumber)
+					break;
+
+				Page p = NULL;
 				if (scan->page_base != NULL)
-					ra_page = scan->page_base + (size_t)ra_blk * BLCKSZ;
+					p = scan->page_base + (size_t)nb * BLCKSZ;
 				else if (scan->storage != NULL)
-					ra_page = mkt_storage_read_ahead(scan->storage, ra_blk);
-				if (ra_page != NULL)
-					prefetch_fastscan_codes(ra_page, scan->dim);
+					p = mkt_storage_read_ahead(scan->storage, nb);
+				if (p == NULL)
+					break;
+
+				prefetch_fastscan_codes(p, scan->dim);
+				ra_page[qt % MKT_SCAN_RA_MAX] = p;
+				ra_blk[qt % MKT_SCAN_RA_MAX]  = nb;
+				qt++;
 			}
 		}
 
@@ -698,9 +725,9 @@ mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk)
 		/* If AoS fallback consumed the entire chain, we're done */
 		if (scan->cur_page == NULL && scan->cur_blkno == InvalidBlockNumber)
 		{
-			if (ra_page != NULL && scan->page_base == NULL &&
-				scan->storage != NULL)
+			if (qt > qh && scan->page_base == NULL && scan->storage != NULL)
 				mkt_storage_release_ahead(scan->storage);
+			qh = qt = 0;
 			break;
 		}
 
@@ -710,32 +737,41 @@ mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk)
 			BlockNumber prev_blkno = scan->cur_blkno;
 			scan->cur_blkno		   = opaque->next_blkno;
 
-			if (ra_page != NULL)
+			if (qt > qh)
 			{
-				/* Promote the prefetched read-ahead page to current
-				 * (releases the old current page in storage mode). */
+				/* Promote the oldest queued page to current (releases the
+				 * old current page in storage mode). */
 				if (scan->page_base == NULL && scan->storage != NULL)
 					mkt_storage_promote_ahead(scan->storage, prev_blkno);
 
-				MktPostingPageOpaque *nop = mkt_posting_opaque(ra_page);
+				Page		np	 = ra_page[qh % MKT_SCAN_RA_MAX];
+				BlockNumber nblk = ra_blk[qh % MKT_SCAN_RA_MAX];
+				qh++;
+
+				MktPostingPageOpaque *nop = mkt_posting_opaque(np);
 				if (nop->page_id != MKT_POSTING_PAGE_ID)
 				{
 					mkt_warn(
 							"meerkat: read-ahead hit non-posting page "
 							"(blkno=%u)",
-							ra_blk);
+							nblk);
 					if (scan->page_base == NULL && scan->storage != NULL)
-						mkt_storage_release_page(scan->storage, ra_blk);
+					{
+						mkt_storage_release_page(scan->storage, nblk);
+						if (qt > qh)
+							mkt_storage_release_ahead(scan->storage);
+					}
 					scan->cur_page	  = NULL;
 					scan->cur_content = NULL;
 					break;
 				}
 
-				scan->cur_page = ra_page;
+				scan->cur_page = np;
+				scan->cur_blkno = nblk;
 				scan->cur_content =
 						(nop->flags & MKT_POSTING_PAGE_FIRST)
-								? mkt_posting_content_first(ra_page, scan->dim)
-								: mkt_posting_content(ra_page);
+								? mkt_posting_content_first(np, scan->dim)
+								: mkt_posting_content(np);
 				scan->cur_max_entries = nop->max_entries;
 				scan->cur_count		  = nop->entry_count;
 				scan->pages_read++;

@@ -28,7 +28,7 @@ int	 mkt_fastscan_bits = 16;
 bool mkt_rerank		   = true;
 int	 mkt_rerank_pool   = 0;
 static bool mkt_profile = false;
-static bool mkt_scan_readahead = true;
+static int	mkt_scan_readahead_depth = 1;
 
 static void
 mkt_profile_assign_hook(bool newval, void *extra)
@@ -37,9 +37,9 @@ mkt_profile_assign_hook(bool newval, void *extra)
 }
 
 static void
-mkt_scan_readahead_assign_hook(bool newval, void *extra)
+mkt_scan_readahead_assign_hook(int newval, void *extra)
 {
-	mkt_posting_set_readahead(newval);
+	mkt_posting_set_readahead_depth(newval);
 }
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
@@ -173,12 +173,14 @@ _PG_init(void)
 			mkt_profile_assign_hook,
 			NULL);
 
-	DefineCustomBoolVariable(
-			"mkt.scan_readahead",
-			"Prefetch next posting page's codes during the current scan.",
-			"Hides code-load latency in the fastscan posting scan.",
-			&mkt_scan_readahead,
-			true,
+	DefineCustomIntVariable(
+			"mkt.scan_readahead_depth",
+			"Posting pages to prefetch ahead during the fastscan scan.",
+			"0 disables read-ahead; higher hides more code-load latency.",
+			&mkt_scan_readahead_depth,
+			1,
+			0,
+			15,
 			PGC_USERSET,
 			0,
 			NULL,
