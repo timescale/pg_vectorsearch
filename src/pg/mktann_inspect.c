@@ -125,9 +125,10 @@ collect_leaf_entries(
 
 /* Format name lookup (indexed by MktCentroidFormat) */
 static const char *centroid_format_names[] = {
-		[MKT_CENTROID_FMT_RABITQ] = "rabitq",
-		[MKT_CENTROID_FMT_FLOAT]  = "float",
-		[MKT_CENTROID_FMT_HALF]	  = "half",
+		[MKT_CENTROID_FMT_RABITQ]	= "rabitq",
+		[MKT_CENTROID_FMT_FLOAT]	= "float",
+		[MKT_CENTROID_FMT_HALF]		= "half",
+		[MKT_CENTROID_FMT_FASTSCAN] = "fastscan",
 };
 
 /*
@@ -177,6 +178,8 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 	}
 
 	BlockNumber first_centroid = meta->first_centroid;
+	Dimension	dim			   = (Dimension)meta->dim;
+	uint8_t		nlevels		   = meta->nlevels;
 
 	UnlockReleaseBuffer(meta_buf);
 
@@ -208,32 +211,100 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 		const MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
 		MktCentroidFormat			 fmt = (MktCentroidFormat)(opaque->flags &
 													   MKT_CENTROID_FMT_MASK);
+		/* FASTSCAN doesn't have per-entry flags, so determine leaf
+		 * status from tree depth: bottom level holds posting heads. */
+		bool is_leaf_page = (opaque->level == nlevels - 1);
 
-		/* Emit one row per entry */
+		/* Emit one row per entry. FASTSCAN pages have a different
+		 * layout (group section instead of per-entry meta + data),
+		 * so child_blkno lives in the group array and per-entry
+		 * flags don't exist — the leaf bit is page-level. */
 		uint16_t nentries = opaque->entry_count;
-		for (uint16_t i = 0; i < nentries; i++)
+
+		if (fmt == MKT_CENTROID_FMT_FASTSCAN)
 		{
-			const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
-			bool is_leaf = (entry->flags & MKT_CENTROID_FLAG_LEAF) != 0;
+			char *content = (char *)PageGetContents(page);
 
-			Datum values[7];
-			bool  nulls[7] = {0};
+			for (uint16_t i = 0; i < nentries; i++)
+			{
+				uint32_t	 g	  = i / MKT_FASTSCAN_GROUP;
+				uint32_t	 slot = i % MKT_FASTSCAN_GROUP;
+				BlockNumber *child =
+						mkt_centroid_fastscan_group_child(content, g, dim);
 
-			values[0] = Int32GetDatum((int32)blkno);
-			values[1] = Int16GetDatum((int16)i);
-			values[2] = Int16GetDatum((int16)opaque->level);
-			values[3] = CStringGetTextDatum(centroid_format_names[fmt]);
+				Datum values[7];
+				bool  nulls[7] = {0};
 
-			if (!is_leaf && BlockNumberIsValid(entry->child_blkno))
-				values[4] = Int32GetDatum((int32)entry->child_blkno);
-			else
-				nulls[4] = true;
+				values[0] = Int32GetDatum((int32)blkno);
+				values[1] = Int16GetDatum((int16)i);
+				values[2] = Int16GetDatum((int16)opaque->level);
+				values[3] = CStringGetTextDatum(centroid_format_names[fmt]);
 
-			values[5] = Int16GetDatum((int16)entry->child_count);
-			values[6] = BoolGetDatum(is_leaf);
+				if (BlockNumberIsValid(child[slot]))
+					values[4] = Int32GetDatum((int32)child[slot]);
+				else
+					nulls[4] = true;
 
-			tuplestore_putvalues(
-					rsinfo->setResult, rsinfo->setDesc, values, nulls);
+				/* child_count is not stored per-entry in FASTSCAN — the
+				 * page-level leaf flag tells us whether children are
+				 * posting heads (child_count = 0) or another centroid
+				 * page. Leave as 0 / NULL. */
+				nulls[5]  = true;
+				values[6] = BoolGetDatum(is_leaf_page);
+
+				tuplestore_putvalues(
+						rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+				/* Enqueue children if this isn't a leaf page */
+				if (!is_leaf_page && BlockNumberIsValid(child[slot]))
+				{
+					if (worklist_len >= worklist_cap)
+					{
+						worklist_cap *= 2;
+						worklist = repalloc(
+								worklist, worklist_cap * sizeof(BlockNumber));
+					}
+					worklist[worklist_len++] = child[slot];
+				}
+			}
+		}
+		else
+		{
+			for (uint16_t i = 0; i < nentries; i++)
+			{
+				const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
+				bool is_leaf = (entry->flags & MKT_CENTROID_FLAG_LEAF) != 0;
+
+				Datum values[7];
+				bool  nulls[7] = {0};
+
+				values[0] = Int32GetDatum((int32)blkno);
+				values[1] = Int16GetDatum((int16)i);
+				values[2] = Int16GetDatum((int16)opaque->level);
+				values[3] = CStringGetTextDatum(centroid_format_names[fmt]);
+
+				if (!is_leaf && BlockNumberIsValid(entry->child_blkno))
+					values[4] = Int32GetDatum((int32)entry->child_blkno);
+				else
+					nulls[4] = true;
+
+				values[5] = Int16GetDatum((int16)entry->child_count);
+				values[6] = BoolGetDatum(is_leaf);
+
+				tuplestore_putvalues(
+						rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+				if (!is_leaf && BlockNumberIsValid(entry->child_blkno))
+				{
+					if (worklist_len >= worklist_cap)
+					{
+						worklist_cap *= 2;
+						worklist = repalloc(
+								worklist, worklist_cap * sizeof(BlockNumber));
+					}
+					worklist[worklist_len++] = entry->child_blkno;
+				}
+			}
 		}
 
 		/* Enqueue sibling (next_blkno chain) */
@@ -246,24 +317,6 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 						repalloc(worklist, worklist_cap * sizeof(BlockNumber));
 			}
 			worklist[worklist_len++] = opaque->next_blkno;
-		}
-
-		/* Enqueue children from entry metadata */
-		for (uint16_t i = 0; i < nentries; i++)
-		{
-			const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
-
-			if (!(entry->flags & MKT_CENTROID_FLAG_LEAF) &&
-				BlockNumberIsValid(entry->child_blkno))
-			{
-				if (worklist_len >= worklist_cap)
-				{
-					worklist_cap *= 2;
-					worklist = repalloc(
-							worklist, worklist_cap * sizeof(BlockNumber));
-				}
-				worklist[worklist_len++] = entry->child_blkno;
-			}
 		}
 
 		UnlockReleaseBuffer(buf);

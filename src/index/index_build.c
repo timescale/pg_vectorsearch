@@ -55,6 +55,32 @@ mkt_write_centroid_tree(
 		uint16_t flags		 = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
 		uint16_t child_count = is_leaf ? 0 : (uint16_t)fan_out;
 
+		const BlockNumber *child_blks;
+		if (is_leaf && posting_heads != NULL)
+			child_blks = &posting_heads[node->first_leaf];
+		else if (!is_leaf)
+			child_blks = &node_first_blkno[node->first_child];
+		else
+			child_blks = NULL;
+
+		if (centroid_format == MKT_CENTROID_FMT_FASTSCAN)
+		{
+			(void)child_count;
+			(void)pt_centroids; /* pt_centroids live on posting pages */
+			mkt_centroid_write_fastscan_pages(
+					storage,
+					dim,
+					node->nchildren,
+					(uint8_t)node->level,
+					flags,
+					rq_params,
+					hk_node_centroids(tree, node),
+					global_mean,
+					child_blks,
+					node_first_blkno[i]);
+			continue;
+		}
+
 		CentroidEncoderState enc_state;
 		CentroidEncoder		*encoder = centroid_encoder_init(
 				&enc_state,
@@ -63,14 +89,6 @@ mkt_write_centroid_tree(
 				dim,
 				rq_params,
 				global_mean);
-
-		const BlockNumber *child_blks;
-		if (is_leaf && posting_heads != NULL)
-			child_blks = &posting_heads[node->first_leaf];
-		else if (!is_leaf)
-			child_blks = &node_first_blkno[node->first_child];
-		else
-			child_blks = NULL;
 
 		/* Pass pt_centroids for leaf nodes only */
 		const float *leaf_pt = (is_leaf && pt_centroids != NULL)

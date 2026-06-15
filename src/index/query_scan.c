@@ -131,7 +131,8 @@ search_centroids(
 	Dimension			dim = idx->dim;
 
 	RaBitQQueryState *rqs = NULL;
-	if (idx->centroid_format == MKT_CENTROID_FMT_RABITQ)
+	if (idx->centroid_format == MKT_CENTROID_FMT_RABITQ ||
+		idx->centroid_format == MKT_CENTROID_FMT_FASTSCAN)
 	{
 		mkt_rabitq_init_query_state(
 				&qs->beam_qs, qs->pt_query, idx->pt_global_mean, dim, mode);
