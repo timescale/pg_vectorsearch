@@ -194,6 +194,59 @@ mkt_topk_reset(MktTopK *topk)
 	topk->cand_capacity = cap;
 }
 
+void
+mkt_topk_reset_to_k(MktTopK *topk, uint32_t k)
+{
+	topk->k = k;
+	mkt_topk_reset(topk);
+}
+
+void
+mkt_topk_insert_unique(
+		MktTopK *topk, Distance distance, Distance error, uint64_t id)
+{
+	Distance lb = distance - error;
+	Distance ub = distance + error;
+
+	/* Prune: lower bound exceeds threshold */
+	if (lb >= mkt_topk_threshold(topk))
+		return;
+
+	/* No dedup scan: caller guarantees ids are unique. */
+	if (topk->ub_count < topk->k)
+	{
+		topk->ub_heap[topk->ub_count] = ub;
+		topk->ub_ids[topk->ub_count]  = id;
+		topk->ub_count++;
+		ub_sift_up(topk->ub_heap, topk->ub_ids, topk->ub_count - 1);
+	}
+	else if (ub < topk->ub_heap[0])
+	{
+		topk->ub_heap[0] = ub;
+		topk->ub_ids[0]	 = id;
+		ub_sift_down(topk->ub_heap, topk->ub_ids, topk->ub_count);
+	}
+
+	/* Grow candidate buffer if needed (old buffer freed with memctx) */
+	if (topk->cand_count == topk->cand_capacity)
+	{
+		uint32_t	  new_cap = topk->cand_capacity * 2;
+		MktTopKEntry *new_buf =
+				mkt_memctx_alloc(topk->memctx, new_cap * sizeof(MktTopKEntry));
+		memcpy(new_buf,
+			   topk->candidates,
+			   topk->cand_count * sizeof(MktTopKEntry));
+		topk->candidates	= new_buf;
+		topk->cand_capacity = new_cap;
+	}
+
+	topk->candidates[topk->cand_count++] = (MktTopKEntry){
+			.distance = distance,
+			.error	  = error,
+			.id		  = id,
+	};
+}
+
 /* ----------------------------------------------------------------
  * Insert
  * ---------------------------------------------------------------- */

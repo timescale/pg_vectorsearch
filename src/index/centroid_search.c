@@ -29,24 +29,94 @@ typedef struct Candidate
 } Candidate;
 
 /* ----------------------------------------------------------------
- * Score-page scratch — preallocated buffers for batch RaBitQ scoring
+ * Per-scan scratch (public allocation; see centroid_search.h)
+ *
+ * Holds the candidate-buffer pair and score-page scratch that beam
+ * search previously palloc'd per call. Allocated once at scan setup
+ * and reused across all queries on the scan.
  * ---------------------------------------------------------------- */
-typedef struct ScorePageScratch
+struct MktCentroidScratch
 {
-	float	 *f_add;
-	float	 *f_rescale;
-	Distance *distances;
-	Distance *lower_bounds;
-	float	 *multi_scratch;	 /* scratch for batch_multi_with_bound */
-	uint32_t *symmetric_scratch; /* scratch for batch_symmetric_with_bound */
-} ScorePageScratch;
+	uint32_t   cand_cap;	 /* size of buf_a / buf_b */
+	uint32_t   max_per_page; /* size of the f_add..symmetric_scratch arrays */
+	Candidate *buf_a;
+	Candidate *buf_b;
+	float	  *f_add;
+	float	  *f_rescale;
+	Distance  *distances;
+	Distance  *lower_bounds;
+	float	  *multi_scratch;
+	uint32_t  *symmetric_scratch;
+	/* Reusable top-K + extraction buffer for select_topk_bounded.
+	 * Avoids creating a fresh memctx + ub_heap + ub_ids + candidates
+	 * + entries-buf on every beam-search level (was 2 sets of 4 allocs
+	 * + 2 memctx creates per query). The MktTopK is initialised once
+	 * at scratch_create with the worst-case k; select_topk_bounded
+	 * calls mkt_topk_reset_to_k() to adjust between levels. */
+	MktTopK		  level_topk;
+	MktTopKEntry *entries_buf;
+	uint32_t	  entries_cap;
+};
+
+MktCentroidScratch *
+mkt_centroid_scratch_create(Dimension dim, uint32_t max_beam_width)
+{
+	uint32_t max_per_page = mkt_centroid_max_entries(dim);
+	uint32_t cand_cap	  = max_beam_width * max_per_page;
+	if (cand_cap < max_per_page * 4)
+		cand_cap = max_per_page * 4;
+
+	MktCentroidScratch *s = mkt_alloc(sizeof(MktCentroidScratch));
+	if (s == NULL)
+		return NULL;
+
+	s->cand_cap			 = cand_cap;
+	s->max_per_page		 = max_per_page;
+	s->buf_a			 = mkt_alloc(cand_cap * sizeof(Candidate));
+	s->buf_b			 = mkt_alloc(cand_cap * sizeof(Candidate));
+	s->f_add			 = mkt_alloc(max_per_page * sizeof(float));
+	s->f_rescale		 = mkt_alloc(max_per_page * sizeof(float));
+	s->distances		 = mkt_alloc(max_per_page * sizeof(Distance));
+	s->lower_bounds		 = mkt_alloc(max_per_page * sizeof(Distance));
+	s->multi_scratch	 = mkt_alloc(max_per_page * sizeof(float));
+	s->symmetric_scratch = mkt_alloc(max_per_page * sizeof(uint32_t));
+
+	/* Reusable top-K and extract buffer (resized to actual k per
+	 * select_topk_bounded call). Initial k=max_beam_width is just
+	 * a starting size — the reset path repalloc's within the
+	 * topk's memctx for different k. */
+	mkt_topk_init(&s->level_topk, max_beam_width);
+	s->entries_cap = max_beam_width * 4;
+	if (s->entries_cap < 64)
+		s->entries_cap = 64;
+	s->entries_buf = mkt_alloc(s->entries_cap * sizeof(MktTopKEntry));
+	return s;
+}
+
+void
+mkt_centroid_scratch_free(MktCentroidScratch *s)
+{
+	if (s == NULL)
+		return;
+	mkt_topk_cleanup(&s->level_topk);
+	mkt_free(s->entries_buf);
+	mkt_free(s->buf_a);
+	mkt_free(s->buf_b);
+	mkt_free(s->f_add);
+	mkt_free(s->f_rescale);
+	mkt_free(s->distances);
+	mkt_free(s->lower_bounds);
+	mkt_free(s->multi_scratch);
+	mkt_free(s->symmetric_scratch);
+	mkt_free(s);
+}
 
 /*
  * Score all centroids on a single page, appending to candidates.
  * Returns the new candidate count.
  *
  * Dispatches based on page data format:
- *   RABITQ → batch multi-candidate scoring via sp_scratch
+ *   RABITQ → batch multi-candidate scoring via cs
  *   FLOAT  → mkt_l2_distance_squared (exact, error=0)
  *   HALF   → mkt_f16_l2_squared (exact, error=0)
  */
@@ -59,7 +129,7 @@ score_page(
 		Candidate					 *cands,
 		uint32_t					  cand_count,
 		uint32_t					  cand_cap,
-		ScorePageScratch			 *sp_scratch)
+		MktCentroidScratch			 *cs)
 {
 	MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
 	uint16_t			   count  = opaque->entry_count;
@@ -78,9 +148,9 @@ score_page(
 		 * (page data grows backward: entry 0 at highest address) */
 		for (uint16_t i = 0; i < count; i++)
 		{
-			const RaBitQData *d	 = mkt_centroid_data(page, count - 1 - i, dim);
-			sp_scratch->f_add[i] = d->f_add;
-			sp_scratch->f_rescale[i] = d->f_rescale;
+			const RaBitQData *d = mkt_centroid_data(page, count - 1 - i, dim);
+			cs->f_add[i]		= d->f_add;
+			cs->f_rescale[i]	= d->f_rescale;
 		}
 
 		/* bits_base = last entry's bits (lowest address) */
@@ -91,27 +161,27 @@ score_page(
 		if (state->qstate->mode == MKT_DISTANCE_MODE_SYMMETRIC)
 			mkt_rabitq_distance_batch_symmetric_with_bound(
 					state->qstate,
-					sp_scratch->f_add,
-					sp_scratch->f_rescale,
+					cs->f_add,
+					cs->f_rescale,
 					bits_base,
 					data_size,
 					count,
 					dim,
-					sp_scratch->distances,
-					sp_scratch->lower_bounds,
-					sp_scratch->symmetric_scratch);
+					cs->distances,
+					cs->lower_bounds,
+					cs->symmetric_scratch);
 		else
 			mkt_rabitq_distance_batch_multi_with_bound(
 					state->qstate,
-					sp_scratch->f_add,
-					sp_scratch->f_rescale,
+					cs->f_add,
+					cs->f_rescale,
 					bits_base,
 					data_size,
 					count,
 					dim,
-					sp_scratch->distances,
-					sp_scratch->lower_bounds,
-					sp_scratch->multi_scratch);
+					cs->distances,
+					cs->lower_bounds,
+					cs->multi_scratch);
 
 		/* Build candidates (result j → page entry count-1-j) */
 		for (uint16_t j = 0; j < count && cand_count < cand_cap; j++)
@@ -122,15 +192,21 @@ score_page(
 
 			cands[cand_count].child_blkno = meta->child_blkno;
 			ItemPointerSet(&cands[cand_count].origin, page_blkno, page_idx);
-			cands[cand_count].distance = sp_scratch->distances[j];
-			cands[cand_count].error	   = sp_scratch->distances[j] -
-									  sp_scratch->lower_bounds[j];
+			cands[cand_count].distance = cs->distances[j];
+			cands[cand_count].error = cs->distances[j] - cs->lower_bounds[j];
 			cand_count++;
 		}
 		break;
 	}
 	case MKT_CENTROID_FMT_FLOAT:
 	{
+		/* Hoist query norm out of the inner loop: it depends only on
+		 * the query, not the centroid, but was previously recomputed
+		 * for every entry (one full norm² per centroid scored). */
+		float norm_q = (state->metric == DISTANCE_COSINE)
+							 ? mkt_l2_norm_squared(state->query, dim)
+							 : 0.0f;
+
 		for (uint16_t i = 0; i < count && cand_count < cand_cap; i++)
 		{
 			const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, i);
@@ -145,7 +221,6 @@ score_page(
 			case DISTANCE_COSINE:
 			{
 				float dot	 = mkt_dot_product(state->query, fvec, dim);
-				float norm_q = mkt_l2_norm_squared(state->query, dim);
 				float norm_v = mkt_l2_norm_squared(fvec, dim);
 				float denom	 = sqrtf(norm_q * norm_v);
 				dist		 = (denom > 0.0f) ? 1.0f - dot / denom : 1.0f;
@@ -166,6 +241,10 @@ score_page(
 	}
 	case MKT_CENTROID_FMT_HALF:
 	{
+		float norm_q = (state->metric == DISTANCE_COSINE)
+							 ? mkt_l2_norm_squared(state->query, dim)
+							 : 0.0f;
+
 		for (uint16_t i = 0; i < count && cand_count < cand_cap; i++)
 		{
 			const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, i);
@@ -180,7 +259,6 @@ score_page(
 			case DISTANCE_COSINE:
 			{
 				float dot	 = mkt_f16_dot_product(hvec, state->query, dim);
-				float norm_q = mkt_l2_norm_squared(state->query, dim);
 				float norm_v = mkt_f16_norm_sq(hvec, dim);
 				float denom	 = sqrtf(norm_q * norm_v);
 				dist		 = (denom > 0.0f) ? 1.0f - dot / denom : 1.0f;
@@ -216,38 +294,52 @@ score_page(
  * ---------------------------------------------------------------- */
 static uint32_t
 select_topk_bounded(
-		Candidate *cands,
-		uint32_t   count,
-		uint32_t   k,
-		Candidate *out,
-		uint32_t   out_cap)
+		MktCentroidScratch *scratch,
+		Candidate		   *cands,
+		uint32_t			count,
+		uint32_t			k,
+		Candidate		   *out,
+		uint32_t			out_cap)
 {
 	if (count == 0)
 		return 0;
 
-	MktTopK topk;
-	mkt_topk_init(&topk, k);
+	/* Reuse the per-scan topk and extract buffer instead of allocating
+	 * new ones every level. mkt_topk_reset_to_k re-allocates the
+	 * heap/candidates within the topk's existing memctx (cheap). */
+	MktTopK *topk = &scratch->level_topk;
+	mkt_topk_reset_to_k(topk, k);
 
+	/* Centroid candidates have unique ids (the buf index), so we can
+	 * skip the O(k) per-insert dedup scan. */
 	for (uint32_t i = 0; i < count; i++)
-		mkt_topk_insert(&topk, cands[i].distance, cands[i].error, i);
+		mkt_topk_insert_unique(topk, cands[i].distance, cands[i].error, i);
 
-	MktTopKEntry *entries = mkt_alloc(topk.cand_count * sizeof(MktTopKEntry));
-	uint32_t	  nresults;
-	mkt_topk_extract_sorted(&topk, entries, &nresults);
+	/* entries_buf must hold topk->cand_count survivors; grow if needed. */
+	if (topk->cand_count > scratch->entries_cap)
+	{
+		uint32_t new_cap = scratch->entries_cap * 2;
+		while (new_cap < topk->cand_count)
+			new_cap *= 2;
+		mkt_free(scratch->entries_buf);
+		scratch->entries_buf = mkt_alloc(new_cap * sizeof(MktTopKEntry));
+		scratch->entries_cap = new_cap;
+	}
+
+	uint32_t nresults;
+	mkt_topk_extract_sorted(topk, scratch->entries_buf, &nresults);
 
 	if (nresults > out_cap)
 		nresults = out_cap;
 
 	for (uint32_t i = 0; i < nresults; i++)
 	{
-		uint32_t idx	= (uint32_t)entries[i].id;
+		uint32_t idx	= (uint32_t)scratch->entries_buf[i].id;
 		out[i]			= cands[idx];
-		out[i].distance = entries[i].distance;
-		out[i].error	= entries[i].error;
+		out[i].distance = scratch->entries_buf[i].distance;
+		out[i].error	= scratch->entries_buf[i].error;
 	}
 
-	mkt_free(entries);
-	mkt_topk_cleanup(&topk);
 	return nresults;
 }
 
@@ -268,33 +360,27 @@ mkt_centroid_beam_search(
 	uint32_t  beam_width = state->beam_width;
 	uint32_t  nprobe	 = state->nprobe;
 
-	/*
-	 * Two-level memory context hierarchy for bounded memory usage.
-	 */
-	MktMemCtx beam_ctx	= mkt_memctx_create(NULL, "beam_search");
-	MktMemCtx level_ctx = mkt_memctx_create(beam_ctx, "beam_level");
-	MktMemCtx old_ctx	= mkt_memctx_switch(beam_ctx);
-
-	/*
-	 * Fixed-size candidate buffers. Use RaBitQ max (largest possible
-	 * entry count) for safe upper bound regardless of page format.
-	 */
-	uint32_t max_per_page = mkt_centroid_max_entries(dim);
-	uint32_t cand_cap	  = beam_width * max_per_page;
-	if (cand_cap < max_per_page * 4)
-		cand_cap = max_per_page * 4;
-
-	Candidate *buf_a = mkt_alloc(cand_cap * sizeof(Candidate));
-	Candidate *buf_b = mkt_alloc(cand_cap * sizeof(Candidate));
-
-	/* Preallocate score-page scratch for batch RaBitQ scoring */
-	ScorePageScratch sp_scratch;
-	sp_scratch.f_add			 = mkt_alloc(max_per_page * sizeof(float));
-	sp_scratch.f_rescale		 = mkt_alloc(max_per_page * sizeof(float));
-	sp_scratch.distances		 = mkt_alloc(max_per_page * sizeof(Distance));
-	sp_scratch.lower_bounds		 = mkt_alloc(max_per_page * sizeof(Distance));
-	sp_scratch.multi_scratch	 = mkt_alloc(max_per_page * sizeof(float));
-	sp_scratch.symmetric_scratch = mkt_alloc(max_per_page * sizeof(uint32_t));
+	/* Caller-owned scratch: pre-allocated buffers for candidate
+	 * arrays and per-page batch scoring. Avoids 8 palloc + 2 memctx
+	 * creations per query — a meaningful chunk of the allocator
+	 * traffic on the hot path.
+	 *
+	 * If state->scratch is NULL we fall back to a one-shot
+	 * allocation. The fallback exists for tests and ad-hoc callers;
+	 * production query paths (MktQueryState / MktQueryCtx)
+	 * pre-allocate and pass it in. */
+	MktCentroidScratch *scratch		  = state->scratch;
+	MktCentroidScratch *owned_scratch = NULL;
+	if (scratch == NULL)
+	{
+		owned_scratch = mkt_centroid_scratch_create(dim, beam_width);
+		if (owned_scratch == NULL)
+			return 0;
+		scratch = owned_scratch;
+	}
+	uint32_t   cand_cap = scratch->cand_cap;
+	Candidate *buf_a	= scratch->buf_a;
+	Candidate *buf_b	= scratch->buf_b;
 
 	/* centroid_vecs: will be used later for copying centroid vectors */
 	(void)centroid_vecs;
@@ -311,21 +397,12 @@ mkt_centroid_beam_search(
 	uint32_t	raw_count = 0;
 	BlockNumber blkno	  = first_centroid_blkno;
 
-	mkt_memctx_switch(level_ctx);
-
 	while (blkno != InvalidBlockNumber)
 	{
 		Page page = mkt_storage_read_page(state->storage, blkno);
 		centroid_pages_read++;
 		raw_count = score_page(
-				state,
-				page,
-				blkno,
-				dim,
-				buf_a,
-				raw_count,
-				cand_cap,
-				&sp_scratch);
+				state, page, blkno, dim, buf_a, raw_count, cand_cap, scratch);
 		MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
 		BlockNumber			   next_blkno = opaque->next_blkno;
 		mkt_storage_release_page(state->storage, blkno);
@@ -344,19 +421,17 @@ mkt_centroid_beam_search(
 	 * candidates with smallest upper bounds, plus any additional
 	 * candidates whose lower bound overlaps the threshold. For
 	 * exact formats (error=0) this returns exactly beam_width. */
-	uint32_t keep = (nlevels == 1) ? nprobe : beam_width;
-	uint32_t cand_count =
-			select_topk_bounded(buf_a, raw_count, keep, buf_b, cand_cap);
+	uint32_t keep		= (nlevels == 1) ? nprobe : beam_width;
+	uint32_t cand_count = select_topk_bounded(
+			scratch, buf_a, raw_count, keep, buf_b, cand_cap);
 
 	/* buf_b is now the live set */
-	Candidate *live	   = buf_b;
-	Candidate *scratch = buf_a;
+	Candidate *live		  = buf_b;
+	Candidate *expand_buf = buf_a;
 
 	/* Intermediate levels: expand winners via child_blkno */
 	for (uint8_t level = 1; level < nlevels; level++)
 	{
-		mkt_memctx_reset(level_ctx);
-
 		uint32_t next_count = 0;
 
 		for (uint32_t i = 0; i < cand_count; i++)
@@ -375,10 +450,10 @@ mkt_centroid_beam_search(
 						page,
 						cb,
 						dim,
-						scratch,
+						expand_buf,
 						next_count,
 						cand_cap,
-						&sp_scratch);
+						scratch);
 				MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
 				BlockNumber			   nb	  = opaque->next_blkno;
 				mkt_storage_release_page(state->storage, cb);
@@ -388,10 +463,10 @@ mkt_centroid_beam_search(
 		if (stats)
 			stats->dist_calcs += next_count;
 
-		/* Select into live (scratch → live via topk) */
-		keep = (level == nlevels - 1) ? nprobe : beam_width;
-		cand_count =
-				select_topk_bounded(scratch, next_count, keep, live, cand_cap);
+		/* Select winners into live; expand_buf is the raw input. */
+		keep	   = (level == nlevels - 1) ? nprobe : beam_width;
+		cand_count = select_topk_bounded(
+				scratch, expand_buf, next_count, keep, live, cand_cap);
 	}
 
 	/* Build results in caller-owned memory (cap at nprobe) */
@@ -465,8 +540,8 @@ mkt_centroid_beam_search(
 	if (stats)
 		stats->pages_read = centroid_pages_read;
 
-	mkt_memctx_switch(old_ctx);
-	mkt_memctx_delete(beam_ctx);
+	if (owned_scratch != NULL)
+		mkt_centroid_scratch_free(owned_scratch);
 
 	return result_count;
 }
