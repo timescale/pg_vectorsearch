@@ -346,6 +346,15 @@ rabitq_derive_f_error(
 	return c_error * sqrtf(f_rsq - f_add);
 }
 
+float
+mkt_rabitq_derive_f_error(float f_add, float f_rescale, Dimension dim)
+{
+	float c_error = (dim > 1)
+						  ? 2.0f * MKT_RABITQ_EPSILON / sqrtf((float)(dim - 1))
+						  : 0.0f;
+	return rabitq_derive_f_error(f_add, f_rescale, c_error, dim);
+}
+
 static inline Distance
 rabitq_lower_bound(
 		Distance est_dist, float f_error, float g_error, float multiplier)
