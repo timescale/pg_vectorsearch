@@ -243,6 +243,51 @@ Stable recall under heavy mutation **without** rebuild.
   re-replication, WAL.
 - Outcome: recall stays stable; periodic `REINDEX` no longer required.
 
+### Phase dependencies: are 0/1 stepping stones to LIRE?
+
+Mostly stepping stones, not detours. LIRE reuses the bulk of Phase 0/1 and adds
+one genuinely new piece.
+
+**Carried forward to LIRE (built once, in Phase 0/1):**
+
+- Mutable posting storage + the `aminsert` route → encode → append path; LIRE
+  still appends new vectors to their nearest postings.
+- Delete / tombstone / GC (`kill_prior_tuple`, `ambulkdelete`).
+- Multi-tier scan + over-fetch + dead-tuple filtering.
+- The background-job + compaction machinery — a split is "recluster a cluster's
+  vectors into two new postings" and a compaction is "rewrite a cluster's
+  postings into packed segments": the same rewrite-postings primitive.
+- The background-rewrite-vs-foreground-scan concurrency model and
+  crash-consistent incremental WAL writes — the hardest concurrency hazard
+  (compaction vs scan, half-written segments) is solved here, *before* centroids
+  also start moving.
+
+**Net-new in Phase 2 (LIRE's hard ~20-30%):**
+
+- A mutable centroid tree (add/remove leaf centroids on split/merge, keep the
+  multi-level tree + in-memory cache coherent, handle parent cascade) and the
+  bounded-reassign / NPA logic that rides on it (plus RaBitQ re-encode). Phases
+  0/1 deliberately assume fixed centroids and do not advance this — it is where
+  the real risk lives.
+
+**Is there a shortcut straight to LIRE?** No. LIRE requires essentially all of
+Phase 0 and most of Phase 1's machinery regardless, so jumping ahead does not
+skip building them — it only skips *shipping* them as milestones. The only
+throwaway is the fixed-centroid + `REINDEX` accuracy posture, which is
+documentation, not code. Shipping 0/1 first delivers immediate value (parity
+with ivfflat/vchordrq, closing the build-only gap) and de-risks the concurrency
+foundation before the centroid-mutability work.
+
+**Build Phase 0/1 "LIRE-aware"** so they are stepping stones, not side quests:
+
+1. Track posting sizes from Phase 0 (LIRE's split/merge triggers).
+2. Make compaction a generalizable "rewrite a cluster's vectors into N
+   postings" primitive (plain compaction = N=1 repack; split = N=2 with new
+   centroids).
+3. Settle the background-rebalance-vs-scan concurrency model once, in Phase 1.
+4. Keep route / encode / append / rewrite as shared `src/index/` primitives so
+   the standalone build can test them.
+
 ## 7. Key decisions and open questions
 
 - **Write-buffer location/format**: per-cluster on-disk AoS overflow chain
