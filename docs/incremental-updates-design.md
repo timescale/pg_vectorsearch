@@ -221,7 +221,7 @@ Keep the fast path fast and bound the write buffer.
     Vacuum fires on table *dead-tuple* thresholds, the wrong signal for an
     insert-grown buffer, so this keeps insert-heavy workloads from accumulating
     unpacked data between vacuums (GIN's inline pending-list flush).
-  - **Manual procedure** — a user-callable `mkt_compact(index)` to force
+  - **Manual procedure** — a user-callable `mkt.compact(index)` to force
     compaction on demand (GIN's `gin_clean_pending_list()`).
 - Search merges base + segments + write tier; fewer packed segments keep scan
   fast.
