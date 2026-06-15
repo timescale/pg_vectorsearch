@@ -243,6 +243,53 @@ Stable recall under heavy mutation **without** rebuild.
   re-replication, WAL.
 - Outcome: recall stays stable; periodic `REINDEX` no longer required.
 
+### Deletes: tombstone lifecycle and the over-fetch problem
+
+Deletes are first-class and load-bearing: since updates reduce to insert +
+delete (§3), the delete path serves both explicit `DELETE`s and the
+old-version cleanup of every vector-column `UPDATE`.
+
+**Correctness vs optimization.** PostgreSQL's MVCC is the correctness backstop —
+the index may return a dead/invisible TID and the executor's visibility recheck
+against the heap filters it. So index-level deletion is an *optimization*
+(skip known-dead entries to avoid wasting top-k slots and heap fetches), not a
+correctness requirement. The index must never physically remove an entry just
+because a `DELETE` ran; removal is safe only once VACUUM finds the tuple dead to
+all snapshots.
+
+**Tombstone lifecycle (three stages):**
+
+1. **Lazy mark** (`kill_prior_tuple` / LP_DEAD-style): when a scan returns a TID
+   the executor finds dead-to-everyone, it sets `scan->kill_prior_tuple`; the AM
+   marks that entry (`MKT_POSTING_FLAG_DELETED` for AoS, a per-group deletion
+   bit for FASTSCAN) so later scans skip it. No vacuum needed; near-free.
+2. **Bulk mark** (`ambulkdelete`): VACUUM calls it with a "is this TID dead?"
+   callback; the AM tombstones all matching entries across base + segments +
+   write tier.
+3. **Physical reclaim**: tombstoned entries are dropped only when the
+   page/segment is rewritten — during Phase 1 compaction or Phase 2 split/merge.
+
+**Tombstoning inside immutable FASTSCAN groups.** A FASTSCAN posting packs 32
+vectors per SIMD group, so an entry can't be removed in place. Mark deletes in a
+**per-group (or per-segment) deletion bitmap** (one bit per entry), consulted at
+scan time to mask dead lanes; physical removal happens at compaction. The AoS
+write tier can use the entry flag directly (the currently-unused
+`MKT_POSTING_FLAG_DELETED` is the starting point).
+
+**The over-fetch problem (ANN-specific).** Tombstoned + MVCC-invisible entries
+shrink the effective result set, so a top-k scan that stops at k candidates can
+return fewer than k live rows. The scan must **over-fetch** — a larger candidate
+pool and/or higher nprobe — so that after masking dead/invisible entries at
+least k live results remain; the over-fetch factor should scale with the
+observed dead-entry ratio.
+
+**GC cadence and recall.** Accumulated tombstones inflate scan work (more
+candidates scanned per live result) and degrade effective QPS, so reclamation
+cadence matters: lazy marking keeps scans correct, but VACUUM + compaction must
+run often enough to bound the dead ratio. In Phase 2, heavy deletes also shrink
+postings below the min size and trigger LIRE **merge**, reclaiming space and
+keeping the partitioning balanced.
+
 ### Phase dependencies: are 0/1 stepping stones to LIRE?
 
 Mostly stepping stones, not detours. LIRE reuses the bulk of Phase 0/1 and adds
