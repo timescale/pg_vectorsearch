@@ -276,12 +276,31 @@ scan time to mask dead lanes; physical removal happens at compaction. The AoS
 write tier can use the entry flag directly (the currently-unused
 `MKT_POSTING_FLAG_DELETED` is the starting point).
 
-**The over-fetch problem (ANN-specific).** Tombstoned + MVCC-invisible entries
-shrink the effective result set, so a top-k scan that stops at k candidates can
-return fewer than k live rows. The scan must **over-fetch** — a larger candidate
-pool and/or higher nprobe — so that after masking dead/invisible entries at
-least k live results remain; the over-fetch factor should scale with the
-observed dead-entry ratio.
+**Returning k live results.** IVF scans the *full* posting lists of the nprobe
+nearest centroids, so the candidate pool is normally far larger than k; dead and
+MVCC-invisible entries are filtered during top-k selection at no extra scan
+cost, and k live results still come back unless a large fraction of the scanned
+lists is dead. A pre-sized "over-fetch factor" is the wrong tool.
+
+- **Phase 0 stance (simplest):** scan, filter, return top-k live. Accept that an
+  extreme local dead ratio can transiently return fewer/worse results, and rely
+  on GC — compaction (Phase 1), LIRE merge (Phase 2), or a rebuild — to keep the
+  dead ratio low and the degradation self-healing. This is approximate search,
+  so a slightly-short top-k between GC passes is acceptable (and matches how
+  ivfflat behaves with stale data). The trade-off is a *silent* quality dip, not
+  slower-but-correct, so document it; GC cadence (autovacuum + compaction) is the
+  lever that bounds it. The pathological case is a burst of deletes on a hot
+  cluster between vacuums, which self-heals.
+- **Optional refinement:** for workloads that can't tolerate the transient dip, a
+  **resumable scan** with a live-result counter that **expands nprobe** (descends
+  to the next-nearest centroids) when the current lists are exhausted before k
+  live results — strictly better than pgvector ivfflat/hnsw, which don't
+  auto-expand. (Meerkat's current scan materializes a fixed top-k up front in
+  `execute_search`; this refinement makes it resumable/expandable.)
+
+Either way, index-level tombstones are an *optimization* — skip known-dead
+entries before the exact-distance rerank and heap fetch — not a correctness
+mechanism; MVCC's visibility recheck is the backstop.
 
 **GC cadence and recall.** Accumulated tombstones inflate scan work (more
 candidates scanned per live result) and degrade effective QPS, so reclamation
