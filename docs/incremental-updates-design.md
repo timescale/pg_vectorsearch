@@ -197,17 +197,35 @@ ivfflat/vchordrq plus correct delete behavior.
 
 This alone moves Meerkat from "build-only" to "mutable with rebuild."
 
-### Phase 1 — Compaction: memtable → FASTSCAN segments (LSM-ish)
+### Phase 1 — Compaction: write-buffer pages → FASTSCAN segments (LSM-ish)
 
 Keep the fast path fast and bound the write buffer.
 
-- Treat the per-cluster AoS write buffer as a **memtable**. Background (or
-  vacuum-time) compaction repacks accumulated entries into FASTSCAN-packed
-  **segment** pages and garbage-collects tombstones.
-- This mirrors `pg_textsearch`'s memtable/segment design — reuse the
-  segment/merge machinery and lessons.
-- Search merges base segments + memtable; fewer packed segments keep scan fast.
-- Still fixed centroids (drift), but no unbounded buffer growth.
+- The per-cluster AoS write buffer (Phase 0) is the mutable "write tier." It is
+  **on-disk overflow pages in the index relation**, *not* a separate in-memory
+  or shared-memory structure — PostgreSQL's `shared_buffers` is the in-memory
+  cache for them, and `GenericXLog` provides durability + crash recovery for
+  free.
+- Background (or vacuum-time) compaction repacks accumulated write-tier entries
+  into FASTSCAN-packed **segment** pages and garbage-collects tombstones,
+  triggered by a size/age threshold.
+- Search merges base + segments + write tier; fewer packed segments keep scan
+  fast.
+- Still fixed centroids (drift), but no unbounded write-tier growth.
+
+The write-tier + immutable-segment + background-compaction structure is just
+standard **LSM / Lucene-segment tiering** — nothing novel. The one real choice
+is the write tier's substrate:
+
+- **On-disk write-buffer pages (recommended)**: durability, MVCC, and
+  cross-backend visibility come for free from the buffer manager + WAL; no
+  shared-memory sizing or memtable crash-recovery to build.
+- **Shared-memory (DSA) memtable**: faster in-memory appends, but you must
+  build a WAL/crash-recovery story for the in-memory entries plus shared-memory
+  sizing.
+
+Start with on-disk pages; a DSA memtable is a later optimization only if insert
+throughput demands it.
 
 ### Phase 2 — LIRE: incremental rebalancing (the SPFresh target)
 
