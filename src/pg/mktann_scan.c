@@ -22,7 +22,6 @@
 #include "mkt_pg.h"
 #include "mkt_vector.h"
 #include "mktann_cache.h"
-#include "mktann_meta.h"
 #include "mktann_scan.h"
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
@@ -93,37 +92,14 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	ss->scan_ctx		= scan_ctx;
 	ss->first			= true;
 
-	/* Read metadata page */
-	Buffer meta_buf = ReadBuffer(index, 0);
-	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
-	Page meta_page = BufferGetPage(meta_buf);
+	/* Immutable index parameters from the per-backend cache (metapage read at
+	 * most once per backend). */
+	mktann_index_base_init(index, &ss->index_base);
+	MktannScanInfo info = mktann_cache_scan_info(index);
 
-	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
-			meta_page);
-	Assert(meta->magic == MKT_META_MAGIC);
-
-	Dimension dim		 = meta->dim;
-	uint32_t  max_k		 = MKT_DEFAULT_K;
-	uint32_t  max_nprobe = meta->nlist < 512 ? meta->nlist : 512;
-
-	/* Populate MktIndexBase from meta page */
-	ss->index_base.dim			   = dim;
-	ss->index_base.metric		   = (DistanceMetric)meta->metric;
-	ss->index_base.centroid_format = (MktCentroidFormat)meta->centroid_format;
-	ss->index_base.nlevels		   = meta->nlevels;
-	ss->index_base.first_centroid  = meta->first_centroid;
-
-	ss->index_base.rabitq_seed = meta->rabitq_seed;
-
-	bool has_fastscan		= meta->flags & MKT_META_FLAG_FASTSCAN;
-	ss->index_base.fastscan = has_fastscan ? mkt_fastscan_bits : 0;
-
-	UnlockReleaseBuffer(meta_buf);
-
-	/* Cached RaBitQ params + rotated global mean */
-	MktannIndexCache cache		  = mktann_cache_get(index);
-	ss->index_base.params		  = cache.params;
-	ss->index_base.pt_global_mean = (float *)cache.pt_global_mean;
+	uint32_t max_k		  = MKT_DEFAULT_K;
+	uint32_t max_nprobe	  = info.nlist < 512 ? info.nlist : 512;
+	bool	 has_fastscan = ss->index_base.fastscan != 0;
 
 	/* Initialize PG storage */
 	mktann_storage_init(&ss->storage, index, NULL, ss->index_base.metric);
@@ -143,7 +119,7 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 											opts->boundary_epsilon > 0.0);
 	if (has_replication)
 	{
-		uint32_t avg_per_cluster = meta->ntuples / Max(meta->nlist, 1);
+		uint32_t avg_per_cluster = info.ntuples / Max(info.nlist, 1);
 		uint32_t est_entries	 = max_nprobe * avg_per_cluster * 2;
 		uint32_t cap			 = 1024;
 		while (cap < est_entries * 2)

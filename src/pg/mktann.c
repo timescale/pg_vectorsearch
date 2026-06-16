@@ -14,12 +14,21 @@
 #include <commands/vacuum.h>
 #include <fmgr.h>
 #include <storage/bufmgr.h>
+#include <storage/lmgr.h>
 #include <utils/float.h>
+#include <utils/memutils.h>
 #include <utils/selfuncs.h>
 
+#include "index/index_base.h"
+#include "index/posting_insert.h"
+#include "index/query_scan.h"
 #include "mkt_pg.h"
+#include "mkt_vector.h"
 #include "mktann_build.h"
+#include "mktann_cache.h"
 #include "mktann_scan.h"
+#include "mktann_storage.h"
+#include "quant/rabitq.h"
 
 PG_FUNCTION_INFO_V1(mktann_handler);
 
@@ -33,6 +42,14 @@ mktann_buildempty(Relation index)
 	/* nothing to do */
 }
 
+/*
+ * Beam width used when routing an inserted vector to its nearest leaf. Wide
+ * enough that multi-level tree descent lands the true nearest leaf; we still
+ * insert into a single list (results[0]). Phase 0 does no SOAR replication on
+ * insert — that's restored in bulk at rebuild / compaction.
+ */
+#define MKT_INSERT_ROUTE_BEAM 8
+
 static bool
 mktann_insert(
 		Relation		  index,
@@ -44,6 +61,87 @@ mktann_insert(
 		bool			  index_unchanged,
 		struct IndexInfo *index_info)
 {
+	(void)heap;
+	(void)check_unique;
+	(void)index_info;
+
+	/* HOT / unchanged indexed value: the existing index entry still applies.
+	 * NULL vectors get no entry. */
+	if (index_unchanged || isnull[0])
+		return false;
+
+	/* Per-insert scratch context: beam-search + encode allocations are freed
+	 * in one shot and don't accumulate in the inserting transaction. */
+	MemoryContext insert_ctx = AllocSetContextCreate(
+			CurrentMemoryContext, "mktann insert", ALLOCSET_DEFAULT_SIZES);
+	MemoryContext old_ctx = MemoryContextSwitchTo(insert_ctx);
+
+	/* Immutable index parameters from the per-backend cache (metapage read at
+	 * most once per backend, not once per insert). */
+	MktIndexBase base;
+	mktann_index_base_init(index, &base);
+	Dimension dim = base.dim;
+
+	MktannStorage storage;
+	mktann_storage_init(&storage, index, NULL, base.metric);
+	base.centroid_storage = &storage.base;
+	base.posting_storage  = &storage.base;
+	base.page_base		  = NULL;
+
+	/* Inserted vector. */
+	MktVector *vec	= DatumGetMktVector(values[0]);
+	VectorRef  vref = MktVectorToRef(vec);
+	if (vref.dim != dim)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("inserted vector dimension %u does not match index "
+						"dimension %u",
+						vref.dim,
+						dim)));
+
+	/*
+	 * Route to the nearest leaf the same way a query does. mkt_query_route
+	 * normalizes (cosine) + rotates into qs.pt_query and runs the beam search;
+	 * qs.pt_query is then exactly the rotated residual base the encode needs.
+	 */
+	MktQueryState qs;
+	mkt_query_state_init(&qs, &base, 1, MKT_INSERT_ROUTE_BEAM);
+	uint32_t n = mkt_query_route(
+			&qs,
+			vref.data,
+			MKT_INSERT_ROUTE_BEAM,
+			MKT_DISTANCE_MODE_ASYMMETRIC,
+			NULL);
+
+	BlockNumber head = (n > 0) ? qs.beam_results[0].posting_head
+							   : InvalidBlockNumber;
+	if (head != InvalidBlockNumber)
+	{
+		RaBitQScratch enc;
+		mkt_rabitq_scratch_init(&enc, dim);
+
+		/*
+		 * Serialize concurrent inserts into this cluster with a heavyweight
+		 * page lock on the head — distinct from the buffer content locks the
+		 * insert primitive takes per page, so it doesn't fight the
+		 * single-buffer storage model. Released here, not held to xact end.
+		 */
+		LockPage(index, head, ExclusiveLock);
+		mkt_posting_insert_one(
+				&storage.base,
+				base.params,
+				dim,
+				head,
+				*heap_tid,
+				qs.pt_query,
+				&enc);
+		UnlockPage(index, head, ExclusiveLock);
+	}
+
+	MemoryContextSwitchTo(old_ctx);
+	MemoryContextDelete(insert_ctx);
+
+	/* bool result is only meaningful for unique indexes. */
 	return false;
 }
 

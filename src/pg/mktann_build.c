@@ -801,7 +801,8 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 	if (!did_parallel)
 	{
-		/* Serial fallback: sample, cluster, build */
+		/* Serial fallback: sample, cluster, build. Leaves tree == NULL when
+		 * the heap has no indexable tuples. */
 		if (!do_serial_build(
 					&bs,
 					&storage.base,
@@ -812,13 +813,22 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 					&heap_tuples,
 					&indtuples,
 					&soar_dupes))
-		{
-			/* No tuples in the heap */
-			MemoryContextSwitchTo(caller_ctx);
-			MemoryContextDelete(build_ctx);
-			return palloc0(sizeof(IndexBuildResult));
-		}
+			tree = NULL;
 	}
+
+	/*
+	 * An empty heap (via either path) yields no centroid tree. Refuse the
+	 * build rather than emit a centroidless index that cannot route inserts or
+	 * be scanned — failing loudly at CREATE INDEX beats a cryptic read error
+	 * on the first insert. (A later phase can build a degenerate
+	 * single-cluster index so an empty table is indexable.)
+	 */
+	if (tree == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot build a \"mktann\" index on an empty table"),
+				 errhint("Insert data before creating the index, or REINDEX "
+						 "once the table has rows.")));
 
 	if (soar_dupes > 0)
 		elog(LOG,

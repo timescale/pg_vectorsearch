@@ -249,6 +249,25 @@ extract_candidates(MktQueryState *qs)
 }
 
 uint32_t
+mkt_query_route(
+		MktQueryState		   *qs,
+		const float			   *query,
+		uint32_t				nprobe,
+		MktDistanceMode			mode,
+		MktCentroidSearchStats *beam_stats)
+{
+	if (nprobe > qs->max_nprobe)
+		nprobe = qs->max_nprobe;
+
+	const float *qvec = prepare_query(qs, query);
+	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
+
+	MktCentroidSearchStats local = {0};
+	return search_centroids(
+			qs, qvec, nprobe, mode, beam_stats ? beam_stats : &local);
+}
+
+uint32_t
 mkt_query_execute(
 		MktQueryState  *qs,
 		const float	   *query,
@@ -266,13 +285,12 @@ mkt_query_execute(
 	mkt_topk_reset(&qs->topk);
 	qs->topk.k = k;
 
-	const float *qvec = prepare_query(qs, query);
-
-	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
-
 	MktCentroidSearchStats beam_stats = {0};
 	uint32_t			   ncentroids =
-			search_centroids(qs, qvec, nprobe, mode, &beam_stats);
+			mkt_query_route(qs, query, nprobe, mode, &beam_stats);
+
+	/* qvec (prepared/normalized) is reused by the rerank below. */
+	const float *qvec = prepare_query(qs, query);
 
 	scan_clusters(qs, qs->beam_results, ncentroids, mode, &qs->topk, stats);
 
