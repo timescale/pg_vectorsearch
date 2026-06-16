@@ -65,6 +65,8 @@ else
           '--load-extension=meerkat',
           'mutations_mvcc',
           'mutations_concurrent',
+          'mutations_vacuumfull',
+          'mutations_reindex',
         ],
         depends: [meerkat_ext_so],
         timeout: 120,
