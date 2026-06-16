@@ -57,8 +57,16 @@ mkt_posting_insert_one(
 	 * before any write); the caller's per-cluster lock prevents a concurrent
 	 * fill in between.
 	 */
-	Page tcheck	  = mkt_storage_read_page(storage, tail_blkno);
-	bool has_room = mkt_posting_page_has_room(tcheck);
+	Page tcheck = mkt_storage_read_page(storage, tail_blkno);
+	/*
+	 * Only append into an AoS tail that has room. A FASTSCAN page packs codes
+	 * in immutable 32-vector groups, so an insert can never append to it — it
+	 * starts a fresh AoS overflow page instead (the scan merges the mixed
+	 * chain by per-page format).
+	 */
+	bool tail_is_aos = (mkt_posting_opaque(tcheck)->flags &
+						MKT_POSTING_PAGE_FASTSCAN) == 0;
+	bool has_room	 = tail_is_aos && mkt_posting_page_has_room(tcheck);
 	mkt_storage_release_page(storage, tail_blkno);
 
 	BlockNumber new_tail	 = tail_blkno;
