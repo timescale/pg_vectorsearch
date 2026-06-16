@@ -72,28 +72,14 @@ RESET enable_seqscan;
 RESET mkt.nprobe;
 DROP TABLE mutfs;
 
--- ===== Empty index: KNOWN PHASE 0 LIMITATION (pinned, fix later) ============
--- Building on a 0-row table currently yields an index with no centroids to
--- route inserts to, so subsequent DML fails. Follow-up: build a degenerate
--- single-cluster index on an empty heap. This pins the CURRENT behaviour (the
--- raw error names a volatile relfilenode, so we report SQLSTATE); when the gap
--- is fixed the message flips to "supported" and this expected output must be
--- updated.
+-- ===== Empty index: building on a 0-row table is refused =====================
+-- Phase 0 limitation: an empty heap has no centroids to route inserts to, so
+-- the build fails loudly instead of producing an unusable index. A later phase
+-- can build a degenerate single-cluster index; when it does, this expected
+-- output must be updated.
 CREATE TABLE mutempty (id int, v vector(3));
 CREATE INDEX idx_mutempty ON mutempty USING mktann (v)
-    WITH (nlist = 4, centroid_compression = true);
-SET enable_seqscan = off;
-SET mkt.nprobe = 4;
-DO $$
-BEGIN
-    INSERT INTO mutempty VALUES (1, '[10,0,0]');
-    PERFORM id FROM mutempty ORDER BY v <-> '[10,0,0]' LIMIT 1;
-    RAISE NOTICE 'empty-index DML: supported';
-EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'empty-index DML: not yet supported (SQLSTATE %)', SQLSTATE;
-END $$;
-RESET enable_seqscan;
-RESET mkt.nprobe;
+    WITH (nlist = 4, centroid_compression = true);  -- expect ERROR
 DROP TABLE mutempty;
 
 -- ===== A freshly inserted vector is a genuine nearest neighbour =============
