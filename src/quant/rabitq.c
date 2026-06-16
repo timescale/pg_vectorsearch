@@ -548,11 +548,33 @@ mkt_rabitq_encode_into_ex(
 
 	float *residual	   = scratch->residual;
 	float *transformed = scratch->transformed;
-	float *xu_cb	   = scratch->xu_cb;
 
+	/* residual = input - centroid; transformed = P^T * residual. The signs +
+	 * factor math is shared with encode_from_pt (which the insert path calls
+	 * directly with a pre-rotated residual). */
 	mkt_vector_sub(input.data, centroid.data, residual, dim);
 	mkt_matrix_transpose_vector_mul(params->P, residual, transformed, dim);
-	rabitq_extract_signs(transformed, output->bits, dim);
+
+	return mkt_rabitq_encode_from_pt(params, transformed, output, scratch);
+}
+
+int
+mkt_rabitq_encode_from_pt(
+		const RaBitQParams *params,
+		const float		   *pt_residual,
+		RaBitQData		   *output,
+		RaBitQScratch	   *scratch)
+{
+	if (params == NULL || pt_residual == NULL || output == NULL ||
+		scratch == NULL)
+		return -1;
+
+	Dimension dim	= params->dim;
+	float	 *xu_cb = scratch->xu_cb;
+
+	/* pt_residual is the rotated residual P^T*(input-centroid); everything
+	 * below operates on it exactly as encode_into_ex did on `transformed`. */
+	rabitq_extract_signs(pt_residual, output->bits, dim);
 
 	float cb = -0.5f;
 	for (Dimension i = 0; i < dim; i++)
@@ -563,8 +585,8 @@ mkt_rabitq_encode_into_ex(
 		xu_cb[i]	 = (float)bit + cb;
 	}
 
-	float l2_sqr	   = mkt_l2_norm_squared(transformed, dim);
-	float ip_resi_xucb = mkt_dot_product(transformed, xu_cb, dim);
+	float l2_sqr	   = mkt_l2_norm_squared(pt_residual, dim);
+	float ip_resi_xucb = mkt_dot_product(pt_residual, xu_cb, dim);
 
 	if (fabsf(ip_resi_xucb) < 1e-10f)
 		ip_resi_xucb = 1e-10f;
