@@ -195,6 +195,7 @@ do_parallel_build(
 				shared->metric,
 				shared->km_max_iterations,
 				shared->km_nredo,
+				shared->avq_eta,
 				subtrees_base,
 				shared->subtree_slot_size);
 

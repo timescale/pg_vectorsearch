@@ -141,6 +141,7 @@ mkt_subtree_build_partitioned(
 		DistanceMetric	  metric,
 		uint32_t		  km_max_iterations,
 		uint32_t		  km_nredo,
+		float			  avq_eta,
 		char			 *subtrees_base,
 		uint64_t		  slot_size)
 {
@@ -165,6 +166,8 @@ mkt_subtree_build_partitioned(
 	 * attempts (different seeds) and keeps the lowest-cost one — escapes
 	 * bad local minima for tighter clusters / better routing. */
 	opts.nredo = km_nredo > 0 ? km_nredo : 1;
+	/* AVQ anisotropic leaf recentering (<=1 disables; applied in hkmeans). */
+	opts.avq_eta = avq_eta;
 	/*
 	 * Per-child problems are small (~nsamples/fan_out points, k=fan_out) and
 	 * run on every participant at once. The Lloyd dot-product kernel beats the
@@ -700,6 +703,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 				shared->metric,
 				shared->km_max_iterations,
 				shared->km_nredo,
+				shared->avq_eta,
 				subtrees_base,
 				shared->subtree_slot_size);
 	}

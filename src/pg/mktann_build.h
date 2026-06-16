@@ -30,6 +30,7 @@ typedef struct MktannBuildParams
 	uint32_t		  nlist;
 	uint32_t		  fan_out;
 	uint32_t		  kmeans_nredo;
+	double			  avq_eta;
 	double			  soar_lambda;
 	double			  boundary_epsilon;
 	bool			  fastscan;

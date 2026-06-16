@@ -58,6 +58,13 @@ typedef struct KMeansOptions
 	bool			verbose;		/* print per-iteration stats */
 	KMeansAlgorithm algorithm;		/* assignment algorithm, default: auto */
 	const float	   *initial_centroids; /* skip init, use these */
+	/*
+	 * AVQ (anisotropic) leaf recentering: parallel cost multiplier eta.
+	 * 0 or <=1 disables it (ordinary mean centroids). When > 1, leaf
+	 * centroids are recomputed via mkt_avq_center() after k-means and the
+	 * points are re-tokenized against them — ScaNN's avq_after_primary.
+	 */
+	float avq_eta;
 } KMeansOptions;
 
 #define MKT_KMEANS_OPTIONS_DEFAULT \
@@ -66,7 +73,8 @@ typedef struct KMeansOptions
 	 .seed			 = 42,         \
 	 .nredo			 = 1,          \
 	 .verbose		 = false,      \
-	 .algorithm		 = KMEANS_ALGO_AUTO}
+	 .algorithm		 = KMEANS_ALGO_AUTO, \
+	 .avq_eta		 = 0.0f}
 
 /*
  * Run k-means clustering on typed vectors.

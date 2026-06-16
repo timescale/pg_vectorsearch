@@ -11,9 +11,87 @@
 #include <math.h>
 #include <string.h>
 
+#include "algo/avq.h"
 #include "algo/distance.h"
 #include "algo/hkmeans.h"
 #include "core/memory.h"
+
+/*
+ * AVQ leaf recentering (ScaNN avq_after_primary): replace each leaf
+ * centroid with the anisotropic center of its assigned training points,
+ * then leave re-tokenization to the downstream assignment pass. eta is
+ * the parallel cost multiplier; the caller guarantees eta > 1.
+ *
+ * Points are gathered per cluster via a counting sort (O(count)). For
+ * cosine the AVQ center is re-normalized to unit length, matching the
+ * unit-norm leaf centroids the rest of the pipeline expects.
+ */
+static void
+hk_avq_recenter_leaves(
+		const float		*vectors,
+		const uint32_t	*vec_indices,
+		uint32_t		 count,
+		const ClusterId *assignments,
+		uint32_t		 nleaf,
+		Dimension		 dim,
+		DistanceMetric	 metric,
+		float			 eta,
+		float			*centroids)
+{
+	uint32_t *cnt = mkt_alloc0((size_t)nleaf * sizeof(uint32_t));
+	for (uint32_t v = 0; v < count; v++)
+		cnt[assignments[v]]++;
+
+	uint32_t *off = mkt_alloc((size_t)nleaf * sizeof(uint32_t));
+	uint32_t *pos = mkt_alloc((size_t)nleaf * sizeof(uint32_t));
+	uint32_t  acc = 0;
+	for (uint32_t c = 0; c < nleaf; c++)
+	{
+		off[c] = acc;
+		pos[c] = acc;
+		acc += cnt[c];
+	}
+
+	/* Gather all member vectors into cluster-contiguous segments. */
+	float *buf = mkt_alloc((size_t)count * dim * sizeof(float));
+	for (uint32_t v = 0; v < count; v++)
+	{
+		uint32_t c	  = assignments[v];
+		uint32_t orig = vec_indices ? vec_indices[v] : v;
+		memcpy(buf + (size_t)pos[c] * dim,
+			   vectors + (size_t)orig * dim,
+			   (size_t)dim * sizeof(float));
+		pos[c]++;
+	}
+
+	for (uint32_t c = 0; c < nleaf; c++)
+	{
+		if (cnt[c] == 0)
+			continue; /* keep k-means centroid for an empty leaf */
+
+		float *cen = centroids + (size_t)c * dim;
+		mkt_avq_center(buf + (size_t)off[c] * dim, cnt[c], dim, eta, cen);
+
+		if (metric == DISTANCE_COSINE)
+		{
+			double nrm = 0.0;
+			for (Dimension d = 0; d < dim; d++)
+				nrm += (double)cen[d] * cen[d];
+			nrm = sqrt(nrm);
+			if (nrm > 1e-20)
+			{
+				float inv = (float)(1.0 / nrm);
+				for (Dimension d = 0; d < dim; d++)
+					cen[d] *= inv;
+			}
+		}
+	}
+
+	mkt_free(buf);
+	mkt_free(pos);
+	mkt_free(off);
+	mkt_free(cnt);
+}
 
 /* BFS work queue entry */
 typedef struct HKWorkItem
@@ -187,7 +265,24 @@ mkt_hkmeans_f32(
 		tn->is_leaf_parent = is_leaf_parent;
 
 		if (is_leaf_parent)
+		{
+			/* AVQ: recenter leaf centroids anisotropically (ScaNN
+			 * avq_after_primary). The downstream assignment pass
+			 * re-tokenizes points against the recentered leaves. */
+			if (local_opts.avq_eta > 1.0f)
+				hk_avq_recenter_leaves(
+						vectors,
+						item.vec_indices,
+						item.count,
+						km->assignments,
+						km->nlist,
+						dim,
+						metric,
+						local_opts.avq_eta,
+						tn->centroids);
+
 			nleaves += km->nlist;
+		}
 		else
 		{
 			/*

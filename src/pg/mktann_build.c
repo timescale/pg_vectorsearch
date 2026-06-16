@@ -419,6 +419,7 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 							? (uint32_t)opts->kmeans_nredo
 							: 1;
 
+	p->avq_eta			= (opts != NULL) ? opts->avq_eta : 0.0;
 	p->soar_lambda		= (opts != NULL) ? opts->soar_lambda : 0.0;
 	p->boundary_epsilon = (opts != NULL) ? opts->boundary_epsilon : 0.0;
 	p->fastscan			= (opts != NULL) ? opts->fastscan : false;
@@ -468,6 +469,7 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
 	km_opts.nredo		  = bs->params.kmeans_nredo;
+	km_opts.avq_eta		  = (float)bs->params.avq_eta;
 
 	HKMeansResult *tree = mkt_hkmeans_f32(
 			bs->samples,
@@ -766,6 +768,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				.boundary_epsilon = bs.params.boundary_epsilon,
 				.fastscan		  = bs.params.fastscan,
 				.kmeans_nredo	  = bs.params.kmeans_nredo,
+				.avq_eta		  = bs.params.avq_eta,
 		};
 
 		pgstat_progress_update_param(

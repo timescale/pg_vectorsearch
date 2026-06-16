@@ -204,6 +204,14 @@ _PG_init(void)
 			NoLock);
 	add_real_reloption(
 			mktann_relopt_kind,
+			"avq_eta",
+			"AVQ anisotropic centroid eta (<=1 = off, e.g. 2-4)",
+			0.0,
+			0.0,
+			1000.0,
+			NoLock);
+	add_real_reloption(
+			mktann_relopt_kind,
 			"soar_lambda",
 			"SOAR replication lambda (0 = off)",
 			0.0,

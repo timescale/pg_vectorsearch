@@ -102,6 +102,7 @@ typedef struct MktannOptions
 	int	   fan_out;				 /* children per tree node (2-255) */
 	int	   nlist;				 /* number of clusters (0 = auto) */
 	int	   kmeans_nredo;		 /* k-means restarts (1 = no restart) */
+	double avq_eta;				 /* AVQ anisotropic eta (0/<=1 = off) */
 	double soar_lambda;			 /* SOAR replication lambda (0=off) */
 	double boundary_epsilon;	 /* boundary replication threshold (0=off) */
 	int	   centroid_compression; /* MktCentroidCompression */

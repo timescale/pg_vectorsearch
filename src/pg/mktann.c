@@ -113,6 +113,7 @@ mktann_options(Datum reloptions, bool validate)
 			{"kmeans_nredo",
 			 RELOPT_TYPE_INT,
 			 offsetof(MktannOptions, kmeans_nredo)},
+			{"avq_eta", RELOPT_TYPE_REAL, offsetof(MktannOptions, avq_eta)},
 			{"soar_lambda",
 			 RELOPT_TYPE_REAL,
 			 offsetof(MktannOptions, soar_lambda)},
