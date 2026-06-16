@@ -49,10 +49,20 @@ typedef struct LeafEntry
 /*
  * BFS the centroid tree and collect all leaf entries. Returns
  * the count and fills *out (palloc'd array). Caller must pfree.
+ *
+ * Format-aware: FASTSCAN centroid pages store children in a packed
+ * group section (no per-entry meta), and leaf status is page-level
+ * (bottom tree level) rather than a per-entry flag. nlevels and dim
+ * come from the meta page; dim is only needed to locate group children
+ * on FASTSCAN pages.
  */
 static int
 collect_leaf_entries(
-		Relation index, BlockNumber first_centroid, LeafEntry **out)
+		Relation	index,
+		BlockNumber first_centroid,
+		uint8_t		nlevels,
+		Dimension	dim,
+		LeafEntry **out)
 {
 	int			 wl_cap	 = 64;
 	int			 wl_len	 = 0;
@@ -75,6 +85,9 @@ collect_leaf_entries(
 
 		const MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
 		uint16_t					 nentries = opaque->entry_count;
+		MktCentroidFormat			 fmt =
+				(MktCentroidFormat)(opaque->flags & MKT_CENTROID_FMT_MASK);
+		bool is_leaf_page = (opaque->level == nlevels - 1);
 
 		if (BlockNumberIsValid(opaque->next_blkno))
 		{
@@ -88,33 +101,53 @@ collect_leaf_entries(
 
 		for (uint16_t i = 0; i < nentries; i++)
 		{
-			const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
+			BlockNumber child;
+			bool		is_leaf;
 
-			if (entry->flags & MKT_CENTROID_FLAG_LEAF)
+			if (fmt == MKT_CENTROID_FMT_FASTSCAN)
 			{
-				if (BlockNumberIsValid(entry->child_blkno))
-				{
-					if (leaves_len >= leaves_cap)
-					{
-						leaves_cap *= 2;
-						leaves = repalloc(
-								leaves, leaves_cap * sizeof(LeafEntry));
-					}
-					leaves[leaves_len++] = (LeafEntry){
-							.posting_head  = entry->child_blkno,
-							.centroid_page = blkno,
-							.entry_idx	   = i,
-					};
-				}
+				/* No per-entry meta: read the child from the packed
+				 * group array and take leaf status from the page level. */
+				char	   *content = (char *) PageGetContents(page);
+				uint32_t	g		= i / MKT_FASTSCAN_GROUP;
+				uint32_t	slot	= i % MKT_FASTSCAN_GROUP;
+				BlockNumber *grp	= mkt_centroid_fastscan_group_child(
+						   content, g, dim);
+				child	= grp[slot];
+				is_leaf = is_leaf_page;
 			}
-			else if (BlockNumberIsValid(entry->child_blkno))
+			else
+			{
+				const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
+				child	= entry->child_blkno;
+				is_leaf = (entry->flags & MKT_CENTROID_FLAG_LEAF) != 0;
+			}
+
+			if (!BlockNumberIsValid(child))
+				continue;
+
+			if (is_leaf)
+			{
+				if (leaves_len >= leaves_cap)
+				{
+					leaves_cap *= 2;
+					leaves =
+							repalloc(leaves, leaves_cap * sizeof(LeafEntry));
+				}
+				leaves[leaves_len++] = (LeafEntry){
+						.posting_head  = child,
+						.centroid_page = blkno,
+						.entry_idx	   = i,
+				};
+			}
+			else
 			{
 				if (wl_len >= wl_cap)
 				{
 					wl_cap *= 2;
 					wl = repalloc(wl, wl_cap * sizeof(BlockNumber));
 				}
-				wl[wl_len++] = entry->child_blkno;
+				wl[wl_len++] = child;
 			}
 		}
 
@@ -490,6 +523,8 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 	}
 
 	BlockNumber first_centroid = meta->first_centroid;
+	uint8_t		nlevels		   = meta->nlevels;
+	Dimension	dim			   = (Dimension) meta->dim;
 	UnlockReleaseBuffer(meta_buf);
 
 	if (!BlockNumberIsValid(first_centroid))
@@ -499,7 +534,8 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 	}
 
 	LeafEntry *leaves;
-	int		   nleaves = collect_leaf_entries(index, first_centroid, &leaves);
+	int		   nleaves =
+			collect_leaf_entries(index, first_centroid, nlevels, dim, &leaves);
 
 	/* Walk each posting chain */
 	for (int c = 0; c < nleaves; c++)
@@ -647,11 +683,13 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 
 	BlockNumber first_centroid = meta->first_centroid;
 	Dimension	dim			   = meta->dim;
+	uint8_t		nlevels		   = meta->nlevels;
 	UnlockReleaseBuffer(meta_buf);
 
 	/* Find the leaf entry for this cluster */
 	LeafEntry *leaves;
-	int		   nleaves = collect_leaf_entries(index, first_centroid, &leaves);
+	int		   nleaves =
+			collect_leaf_entries(index, first_centroid, nlevels, dim, &leaves);
 
 	if (cluster_id < 0 || cluster_id >= nleaves)
 	{
