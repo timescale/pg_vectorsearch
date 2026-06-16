@@ -21,6 +21,7 @@ test_config_h = configure_file(
 unit_test_sources = files(
   'mkt_test.c',
   'run_tests.c',
+  'test_avq.c',
   'test_barrier.c',
   'test_shm_toc.c',
   'test_parallel_scan.c',
