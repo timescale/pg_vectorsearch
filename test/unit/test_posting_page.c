@@ -116,10 +116,12 @@ TEST(posting_entry_meta_size)
 
 TEST(posting_page_opaque_size)
 {
+	/* 24B since adding per-cluster head metadata (live_count + tail_blkno)
+	 * for runtime inserts / LIRE size tracking. */
 	ASSERT_EQ(
-			16,
+			24,
 			sizeof(MktPostingPageOpaque),
-			"MktPostingPageOpaque must be 16 bytes");
+			"MktPostingPageOpaque must be 24 bytes");
 }
 
 /* ----------------------------------------------------------------
