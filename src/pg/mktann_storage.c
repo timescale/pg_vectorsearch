@@ -104,6 +104,18 @@ pg_commit_page(MktStorage *self, BlockNumber blkno)
 	}
 	else
 	{
+		/*
+		 * meerkat pages store their data in the content area between pd_lower
+		 * and pd_upper — the region PostgreSQL treats as the free "hole" and
+		 * omits from standard-layout full-page images (GenericXLog assumes the
+		 * standard layout). Cover the hole (pd_lower = pd_upper) before
+		 * logging so the entire page is preserved; pd_lower is otherwise
+		 * unused by meerkat (scans locate data via PageGetContents /
+		 * pd_special).
+		 */
+		PageHeader ph = (PageHeader)BufferGetPage(s->cur_buf);
+		ph->pd_lower  = ph->pd_upper;
+
 		GenericXLogState *state = GenericXLogStart(s->index);
 		GenericXLogRegisterBuffer(state, s->cur_buf, GENERIC_XLOG_FULL_IMAGE);
 		GenericXLogFinish(state);
