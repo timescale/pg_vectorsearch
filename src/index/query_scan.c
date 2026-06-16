@@ -180,6 +180,41 @@ search_centroids(
 			beam_stats);
 }
 
+/*
+ * Run only the centroid beam search for a query and return the selected
+ * clusters' posting-head block numbers (the clusters the full scan would
+ * read). Diagnostic entry point for routing introspection — mirrors the
+ * front half of mkt_query_execute without scanning/reranking.
+ */
+uint32_t
+mkt_query_scanned_heads(
+		MktQueryState  *qs,
+		const float	   *query,
+		uint32_t		nprobe,
+		MktDistanceMode mode,
+		BlockNumber	   *out_heads,
+		uint32_t		out_cap)
+{
+	if (nprobe > qs->max_nprobe)
+		nprobe = qs->max_nprobe;
+
+	const float *qvec = prepare_query(qs, query);
+	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
+
+	MktCentroidSearchStats beam_stats = {0};
+	uint32_t			   ncentroids =
+			search_centroids(qs, qvec, nprobe, mode, &beam_stats);
+
+	uint32_t m = 0;
+	for (uint32_t i = 0; i < ncentroids && m < out_cap; i++)
+	{
+		BlockNumber ph = qs->beam_results[i].posting_head;
+		if (ph != InvalidBlockNumber)
+			out_heads[m++] = ph;
+	}
+	return m;
+}
+
 static void
 scan_clusters(
 		MktQueryState			*qs,

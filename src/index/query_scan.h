@@ -108,6 +108,16 @@ void mkt_query_state_cleanup(MktQueryState *qs);
  * Off by default; the hot path skips clock_gettime entirely when off. */
 void mkt_query_set_profile(bool enabled);
 
+/* Run only the centroid beam search; write the selected clusters' posting
+ * heads into out_heads (up to out_cap). Returns the count. Diagnostic. */
+uint32_t mkt_query_scanned_heads(
+		MktQueryState  *qs,
+		const float	   *query,
+		uint32_t		nprobe,
+		MktDistanceMode mode,
+		BlockNumber	   *out_heads,
+		uint32_t		out_cap);
+
 uint32_t mkt_query_execute(
 		MktQueryState  *qs,
 		const float	   *query,

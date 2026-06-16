@@ -742,6 +742,30 @@ CREATE FUNCTION mkt.convert_posting_to_fastscan(
     AS 'MODULE_PATHNAME', 'mkt_convert_posting_to_fastscan'
     LANGUAGE C STRICT;
 
+-- Map heap TIDs to the index cluster(s) that hold them. For routing
+-- analysis: which clusters contain a query's true nearest neighbors.
+-- Scans the index's posting pages directly (works on fastscan-centroid
+-- indexes, unlike the centroid-tree walk in posting_pages).
+CREATE FUNCTION mkt.tids_clusters(regclass, tid[])
+    RETURNS TABLE (
+        tid        tid,
+        cluster_id integer
+    )
+    AS 'MODULE_PATHNAME', 'mkt_tids_clusters'
+    LANGUAGE C STRICT PARALLEL SAFE;
+
+-- Run only the centroid beam search for a query and return the clusters
+-- it selects at the given nprobe (rank, cluster_id, posting head block).
+-- Pairs with tids_clusters to measure the routing-ranking gap.
+CREATE FUNCTION mkt.scanned_clusters(regclass, vector, integer)
+    RETURNS TABLE (
+        rank         integer,
+        cluster_id   integer,
+        posting_head integer
+    )
+    AS 'MODULE_PATHNAME', 'mkt_scanned_clusters'
+    LANGUAGE C STRICT PARALLEL SAFE;
+
 -- =====================================================================
 -- pgvector binary cast support
 -- =====================================================================

@@ -16,8 +16,10 @@
 
 #include <access/generic_xlog.h>
 #include <access/relation.h>
+#include <catalog/pg_type.h>
 #include <funcapi.h>
 #include <storage/bufmgr.h>
+#include <utils/array.h>
 #include <utils/builtins.h>
 #include <utils/rel.h>
 
@@ -29,6 +31,7 @@
 
 PG_FUNCTION_INFO_V1(mkt_centroid_pages);
 PG_FUNCTION_INFO_V1(mkt_posting_pages);
+PG_FUNCTION_INFO_V1(mkt_tids_clusters);
 PG_FUNCTION_INFO_V1(mkt_convert_posting_to_fastscan);
 
 /* ----------------------------------------------------------------
@@ -328,6 +331,116 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 	pfree(worklist);
 	relation_close(index, AccessShareLock);
 
+	PG_RETURN_NULL();
+}
+
+/* ----------------------------------------------------------------
+ * mkt.tids_clusters(regclass, tid[])
+ *
+ * Diagnostic: for each input heap TID, return which cluster(s) it is
+ * stored in (primary + any SOAR/boundary replica). One pass over all
+ * leaf posting lists; emits (tid, cluster_id) for matched TIDs only.
+ * Lets a caller compare "where the true nearest neighbors live" against
+ * "which clusters a query scans". Fastscan posting pages only.
+ * ---------------------------------------------------------------- */
+static int
+cmp_u64(const void *a, const void *b)
+{
+	uint64 x = *(const uint64 *)a, y = *(const uint64 *)b;
+	return (x > y) - (x < y);
+}
+
+Datum
+mkt_tids_clusters(PG_FUNCTION_ARGS)
+{
+	Oid			   indexoid = PG_GETARG_OID(0);
+	ArrayType	  *arr		= PG_GETARG_ARRAYTYPE_P(1);
+	ReturnSetInfo *rsinfo	= (ReturnSetInfo *)fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	/* Deconstruct tid[] into a sorted array of encoded uint64 keys. */
+	Datum *elems;
+	bool  *elnulls;
+	int	   nelems;
+	deconstruct_array(
+			arr, TIDOID, sizeof(ItemPointerData), false, TYPALIGN_SHORT,
+			&elems, &elnulls, &nelems);
+	uint64 *keys = palloc(Max(nelems, 1) * sizeof(uint64));
+	int		nk	 = 0;
+	for (int i = 0; i < nelems; i++)
+	{
+		if (elnulls[i])
+			continue;
+		keys[nk++] =
+				mkt_posting_encode_tid((ItemPointer)DatumGetPointer(elems[i]));
+	}
+	qsort(keys, nk, sizeof(uint64), cmp_u64);
+
+	Relation index = relation_open(indexoid, AccessShareLock);
+
+	Buffer meta_buf = ReadBuffer(index, 0);
+	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
+	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+			BufferGetPage(meta_buf));
+	Dimension dim = (Dimension)meta->dim;
+	UnlockReleaseBuffer(meta_buf);
+
+	/* Scan every block and pick out posting pages directly (identified by
+	 * page_id), rather than walking the centroid tree to find posting
+	 * heads — that avoids any dependency on the leaf-enumeration path and
+	 * each posting page already carries its cluster_id. */
+	BlockNumber nblocks = RelationGetNumberOfBlocks(index);
+	for (BlockNumber blkno = 1; nk > 0 && blkno < nblocks; blkno++)
+	{
+		Buffer buf = ReadBuffer(index, blkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		Page page = BufferGetPage(buf);
+
+		if (PageGetSpecialSize(page) ==
+			MAXALIGN(sizeof(MktPostingPageOpaque)))
+		{
+			const MktPostingPageOpaque *op = mkt_posting_opaque(page);
+
+			if (op->page_id == MKT_POSTING_PAGE_ID &&
+				(op->flags & MKT_POSTING_PAGE_FASTSCAN))
+			{
+				char *content = (op->flags & MKT_POSTING_PAGE_FIRST)
+									? mkt_posting_content_first(page, dim)
+									: mkt_posting_content(page);
+				uint32_t count	 = op->entry_count;
+				uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) /
+								   MKT_FASTSCAN_GROUP;
+				for (uint32_t g = 0; g < ngroups; g++)
+				{
+					ItemPointerData *tids =
+							mkt_fastscan_group_tids(content, g, dim);
+					uint32_t gc = count - g * MKT_FASTSCAN_GROUP;
+					if (gc > MKT_FASTSCAN_GROUP)
+						gc = MKT_FASTSCAN_GROUP;
+					for (uint32_t v = 0; v < gc; v++)
+					{
+						uint64 enc = mkt_posting_encode_tid(&tids[v]);
+						if (bsearch(&enc, keys, nk, sizeof(uint64), cmp_u64))
+						{
+							Datum		values[2];
+							bool		nulls[2] = {0};
+							ItemPointer out = palloc(sizeof(ItemPointerData));
+							*out	  = tids[v];
+							values[0] = PointerGetDatum(out);
+							values[1] = Int32GetDatum((int32)op->cluster_id);
+							tuplestore_putvalues(
+									rsinfo->setResult, rsinfo->setDesc, values,
+									nulls);
+						}
+					}
+				}
+			}
+		}
+		UnlockReleaseBuffer(buf);
+	}
+
+	relation_close(index, AccessShareLock);
 	PG_RETURN_NULL();
 }
 

@@ -11,7 +11,9 @@
 
 #include <postgres.h>
 
+#include <access/relation.h>
 #include <access/relscan.h>
+#include <funcapi.h>
 #include <portability/instr_time.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
@@ -339,4 +341,96 @@ mktann_endscan(IndexScanDesc scan)
 		MemoryContextDelete(ss->scan_ctx);
 		scan->opaque = NULL;
 	}
+}
+
+/* ----------------------------------------------------------------
+ * mkt.scanned_clusters(regclass, vector, nprobe)
+ *
+ * Diagnostic: run only the centroid beam search for a query and return
+ * the clusters it selects (rank, cluster_id, posting_head). Pairs with
+ * mkt.tids_clusters to measure the routing-ranking gap — i.e. whether
+ * the clusters that actually hold a query's true nearest neighbors are
+ * among the ones the beam scans at a given nprobe.
+ * ---------------------------------------------------------------- */
+PG_FUNCTION_INFO_V1(mkt_scanned_clusters);
+
+Datum
+mkt_scanned_clusters(PG_FUNCTION_ARGS)
+{
+	Oid			   indexoid = PG_GETARG_OID(0);
+	MktVector	  *query	= DatumGetMktVector(PG_GETARG_DATUM(1));
+	int32		   nprobe	= PG_GETARG_INT32(2);
+	ReturnSetInfo *rsinfo	= (ReturnSetInfo *)fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	Relation index = relation_open(indexoid, AccessShareLock);
+
+	/* Replicate the query-state setup from mktann_beginscan. */
+	Buffer meta_buf = ReadBuffer(index, 0);
+	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
+	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+			BufferGetPage(meta_buf));
+	Dimension dim		   = meta->dim;
+	uint32_t  max_nprobe   = meta->nlist < 512 ? meta->nlist : 512;
+	bool	  has_fastscan = (meta->flags & MKT_META_FLAG_FASTSCAN) != 0;
+
+	MktIndexBase ib;
+	memset(&ib, 0, sizeof(ib));
+	ib.dim			   = dim;
+	ib.metric		   = (DistanceMetric)meta->metric;
+	ib.centroid_format = (MktCentroidFormat)meta->centroid_format;
+	ib.nlevels		   = meta->nlevels;
+	ib.first_centroid  = meta->first_centroid;
+	ib.rabitq_seed	   = meta->rabitq_seed;
+	ib.fastscan		   = has_fastscan ? mkt_fastscan_bits : 0;
+	UnlockReleaseBuffer(meta_buf);
+
+	MktannIndexCache cache = mktann_cache_get(index);
+	ib.params			   = cache.params;
+	ib.pt_global_mean	   = (float *)cache.pt_global_mean;
+
+	MktannStorage storage;
+	mktann_storage_init(&storage, index, NULL, ib.metric);
+	ib.centroid_storage = &storage.base;
+	ib.posting_storage	= &storage.base;
+	ib.page_base		= NULL;
+
+	MktQueryState qstate;
+	mkt_query_state_init(&qstate, &ib, MKT_DEFAULT_K, max_nprobe);
+	if (has_fastscan)
+		mkt_posting_scan_enable_fastscan(&qstate.pscan, mkt_fastscan_bits);
+
+	if (nprobe < 1)
+		nprobe = 1;
+	if ((uint32_t)nprobe > max_nprobe)
+		nprobe = max_nprobe;
+
+	VectorRef	 qref  = MktVectorToRef(query);
+	BlockNumber *heads = palloc(max_nprobe * sizeof(BlockNumber));
+	uint32_t	 n	   = mkt_query_scanned_heads(
+			   &qstate, qref.data, (uint32_t)nprobe,
+			   (MktDistanceMode)mkt_distance_mode, heads, max_nprobe);
+
+	for (uint32_t i = 0; i < n; i++)
+	{
+		Buffer buf = ReadBuffer(index, heads[i]);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		const MktPostingPageOpaque *op =
+				mkt_posting_opaque(BufferGetPage(buf));
+		int32 cluster_id = (int32)op->cluster_id;
+		UnlockReleaseBuffer(buf);
+
+		Datum values[3];
+		bool  nulls[3] = {0};
+		values[0]	   = Int32GetDatum((int32)i);
+		values[1]	   = Int32GetDatum(cluster_id);
+		values[2]	   = Int32GetDatum((int32)heads[i]);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	pfree(heads);
+	mkt_query_state_cleanup(&qstate);
+	relation_close(index, AccessShareLock);
+	PG_RETURN_NULL();
 }
