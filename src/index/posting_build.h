@@ -206,6 +206,17 @@ typedef struct MktPostingBuilder
 	BlockNumber prev_blkno;
 	bool		is_first;
 
+	/*
+	 * Head-metadata bookkeeping. owns_head is set for head builders (those
+	 * that produce the FIRST page) and drives whether finish() stamps the
+	 * head's live_count / tail_blkno. n_entries counts every entry added
+	 * through this builder, so a head builder that holds the whole chain
+	 * (serial build, and the parallel leader's head builder when no
+	 * continuations were streamed) stamps an exact live_count with no walk.
+	 */
+	bool	 owns_head;
+	uint32_t n_entries;
+
 	char mem_page[BLCKSZ] __attribute__((aligned(8)));
 	bool page_dirty;
 
