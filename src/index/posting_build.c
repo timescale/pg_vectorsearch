@@ -601,6 +601,8 @@ builder_init_common(
 	builder->head_blkno = InvalidBlockNumber;
 	builder->prev_blkno = InvalidBlockNumber;
 	builder->is_first	= true;
+	builder->owns_head	= (first_page_flags & MKT_POSTING_PAGE_FIRST) != 0;
+	builder->n_entries	= 0;
 	builder->page_ops	= ops;
 
 	builder->reserve_start		 = InvalidBlockNumber;
@@ -939,6 +941,7 @@ mkt_posting_builder_add_encoded(
 				->write_entry(builder, tid, f_add, f_rescale, f_error, bits);
 	}
 	builder->page_dirty = true;
+	builder->n_entries++;
 }
 
 void
@@ -973,6 +976,27 @@ mkt_posting_builder_finish(MktPostingBuilder *builder)
 {
 	builder->page_ops->finalize(builder);
 	flush_page(builder);
+
+	/*
+	 * Stamp the head's per-cluster metadata from state the builder already
+	 * tracked, so the runtime insert path finds the chain tail in O(1) with no
+	 * walk. prev_blkno is the last page flushed (the chain tail) and n_entries
+	 * is the exact entry count. Skipped in deferred mode (storage == NULL),
+	 * where the parallel leader writes and stamps the head itself; for a head
+	 * builder that holds the whole chain (serial build, and the leader's head
+	 * builder when no continuations were streamed) these values are final.
+	 */
+	if (builder->owns_head && builder->storage != NULL &&
+		builder->head_blkno != InvalidBlockNumber)
+	{
+		Page hp =
+				mkt_storage_write_page(builder->storage, builder->head_blkno);
+		MktPostingPageOpaque *op = mkt_posting_opaque(hp);
+		op->tail_blkno			 = builder->prev_blkno;
+		op->live_count			 = builder->n_entries;
+		mkt_storage_commit_page(builder->storage, builder->head_blkno);
+	}
+
 	return builder->head_blkno;
 }
 

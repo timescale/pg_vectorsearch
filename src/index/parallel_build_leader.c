@@ -395,6 +395,10 @@ do_parallel_build(
 	uint32_t	*cl_used	= mkt_alloc0((size_t)nlist * sizeof(uint32_t));
 	BlockNumber *cont_first = mkt_alloc((size_t)nlist * sizeof(BlockNumber));
 	BlockNumber *cont_last	= mkt_alloc((size_t)nlist * sizeof(BlockNumber));
+	/* Live entries streamed in continuation pages, per cluster. The head's
+	 * folded partials are counted by the head builder's n_entries; the two sum
+	 * to the cluster's total live_count, stamped into the head at finalize. */
+	uint32_t *cont_live = mkt_alloc0((size_t)nlist * sizeof(uint32_t));
 	for (uint32_t c = 0; c < nlist; c++)
 	{
 		cont_first[c] = InvalidBlockNumber;
@@ -416,8 +420,9 @@ do_parallel_build(
 			res = shm_mq_receive(rh[wi + 1], &len, &data, true);
 			if (res == SHM_MQ_SUCCESS)
 			{
-				Page		src = (Page)data;
-				uint32_t	c	= mkt_posting_opaque(src)->cluster_id;
+				Page	 src = (Page)data;
+				uint32_t c	 = mkt_posting_opaque(src)->cluster_id;
+				cont_live[c] += mkt_posting_opaque(src)->entry_count;
 				uint32_t	off = ++cl_used[c]; /* 1.. ; 0 = head */
 				BlockNumber blk;
 				Page		dst;
@@ -610,18 +615,33 @@ do_parallel_build(
 		}
 
 		mkt_posting_builder_finish(&hb);
+		/* finish() stamped the head with the head builder's own tail/live,
+		 * which is already final when no continuations were streamed (all of
+		 * the cluster's entries were folded into the head). Capture them
+		 * before cleanup so the splice below can override with the spliced
+		 * tail and full live count when continuations exist. */
+		BlockNumber hb_tail = hb.prev_blkno;
+		uint32_t	hb_live = hb.n_entries;
 		mkt_posting_builder_cleanup(&hb);
 
 		/* Splice the worker continuation chain (already linked internally
 		 * during the drain, in real block order) between the head and the head
 		 * builder's own overflow chain: head -> cont_first .. cont_last ->
 		 * ov1, where ov1 is whatever the head builder linked to (its overflow,
-		 * or InvalidBlockNumber when the head didn't overflow). */
+		 * or InvalidBlockNumber when the head didn't overflow). The head's
+		 * tail_blkno / live_count are re-stamped here to cover the spliced-in
+		 * continuations: the tail is the last overflow page (ov1 chain) when
+		 * the head overflowed, else the last continuation; the live count is
+		 * the streamed continuations plus the folded partials (hb_live). */
 		if (cont_first[c] != InvalidBlockNumber)
 		{
 			Page		hp	= mkt_storage_write_page(storage, head_blk);
 			BlockNumber ov1 = mkt_posting_opaque(hp)->next_blkno;
 			mkt_posting_opaque(hp)->next_blkno = cont_first[c];
+			mkt_posting_opaque(hp)->tail_blkno = (ov1 == InvalidBlockNumber)
+													   ? cont_last[c]
+													   : hb_tail;
+			mkt_posting_opaque(hp)->live_count = cont_live[c] + hb_live;
 			mkt_storage_commit_page(storage, head_blk);
 
 			Page lp = mkt_storage_write_page(storage, cont_last[c]);
@@ -638,6 +658,7 @@ do_parallel_build(
 	mkt_free(cl_used);
 	mkt_free(cont_first);
 	mkt_free(cont_last);
+	mkt_free(cont_live);
 	if (unpack_buf != NULL)
 		mkt_free(unpack_buf);
 	mkt_free(pt_centroids);

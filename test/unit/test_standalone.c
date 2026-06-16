@@ -288,6 +288,49 @@ TEST(query_exec_recall)
 }
 
 /*
+ * Verify each cluster head's stamped metadata against a ground-truth walk.
+ * The build populates head->tail_blkno / head->live_count directly (no runtime
+ * chain walk), and the parallel leader recomputes them after splicing in the
+ * workers' streamed continuations — so the stamped tail must be the real last
+ * block and the stamped live count the real entry count.
+ */
+static void
+verify_head_meta(MktTestResult *result, MktIndex *idx)
+{
+	MktStorage *st = idx->base.posting_storage;
+	for (uint32_t c = 0; c < idx->nlist; c++)
+	{
+		BlockNumber head = idx->posting_heads[c];
+		if (head == InvalidBlockNumber)
+			continue;
+
+		BlockNumber blk	  = head;
+		BlockNumber tail  = head;
+		uint32_t	count = 0;
+		while (blk != InvalidBlockNumber)
+		{
+			Page		pg	 = mkt_storage_read_page(st, blk);
+			BlockNumber next = mkt_posting_opaque(pg)->next_blkno;
+			count += mkt_posting_page_count(pg);
+			tail = blk;
+			mkt_storage_release_page(st, blk);
+			blk = next;
+		}
+
+		Page hp = mkt_storage_read_page(st, head);
+		ASSERT_EQ(
+				count,
+				mkt_posting_head_live_count(hp),
+				"stamped live_count must match the walked entry count");
+		ASSERT_EQ(
+				tail,
+				mkt_posting_head_tail(hp),
+				"stamped tail_blkno must match the actual chain tail");
+		mkt_storage_release_page(st, head);
+	}
+}
+
+/*
  * Paged + parallel build runs the shared do_parallel_build driver (the same
  * code path as the PG extension). Build, query, and check recall to confirm
  * the driver produces a correct, queryable index in the standalone back-end.
@@ -308,6 +351,8 @@ TEST(query_exec_recall_pages_parallel)
 
 	MktIndex *idx = build_from_array(vecs, nvecs, dim, &config);
 	ASSERT_NOT_NULL(idx, "paged parallel build should succeed");
+
+	verify_head_meta(result, idx);
 
 	MktQueryCtx *qctx = mkt_query_ctx_create(idx, k, 20);
 
@@ -719,6 +764,8 @@ TEST(parallel_fastscan_no_lost_partials)
 			written,
 			"every vector must be written to the posting pages (no dropped "
 			"trailing partials)");
+
+	verify_head_meta(result, idx);
 
 	mkt_index_destroy(idx);
 }
