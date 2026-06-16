@@ -109,4 +109,21 @@ uint32_t mkt_query_execute(
 		bool			rerank,
 		MktQueryStats  *stats);
 
+/*
+ * Route a vector to its nearest leaf posting list(s) — the centroid-search
+ * half of mkt_query_execute, without scanning postings. Normalizes the vector
+ * (cosine), rotates it into qs->pt_query, and runs the beam search. Returns
+ * the number of leaves found; qs->beam_results[0..return) hold them
+ * (posting_head), and qs->pt_query holds P^T * (normalized vector) for the
+ * caller to reuse (the insert path encodes from it). beam_stats may be NULL.
+ *
+ * Shared so an inserted vector routes exactly the way a query does.
+ */
+uint32_t mkt_query_route(
+		MktQueryState		   *qs,
+		const float			   *query,
+		uint32_t				nprobe,
+		MktDistanceMode			mode,
+		MktCentroidSearchStats *beam_stats);
+
 #endif /* MKT_QUERY_SCAN_H */
