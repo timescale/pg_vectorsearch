@@ -1,0 +1,75 @@
+Parsed test spec with 3 sessions
+
+starting permutation: w_ins c_chk w_commit c_chk
+step w_ins: INSERT INTO iso VALUES (1001, '[100,0,0]');
+step c_chk: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+
+found
+-----
+    0
+(1 row)
+
+step w_commit: COMMIT;
+step c_chk: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+
+found
+-----
+    1
+(1 row)
+
+
+starting permutation: w_ins c_chk w_abort c_chk
+step w_ins: INSERT INTO iso VALUES (1001, '[100,0,0]');
+step c_chk: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+
+found
+-----
+    0
+(1 row)
+
+step w_abort: ROLLBACK;
+step c_chk: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+
+found
+-----
+    0
+(1 row)
+
+
+starting permutation: w_ins m_reindex w_commit c_chk
+step w_ins: INSERT INTO iso VALUES (1001, '[100,0,0]');
+step m_reindex: REINDEX INDEX iso_idx; <waiting ...>
+step w_commit: COMMIT;
+step m_reindex: <... completed>
+step c_chk: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+
+found
+-----
+    1
+(1 row)
+
+
+starting permutation: w_ins m_vacfull w_commit c_chk
+step w_ins: INSERT INTO iso VALUES (1001, '[100,0,0]');
+step m_vacfull: VACUUM FULL iso; <waiting ...>
+step w_commit: COMMIT;
+step m_vacfull: <... completed>
+step c_chk: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+
+found
+-----
+    1
+(1 row)
+
