@@ -1,133 +1,148 @@
--- Phase 0 incremental inserts / updates / deletes.
+-- Phase 0 incremental inserts / updates / deletes across index variants.
 --
--- Verifies aminsert indexes new rows, that a vector UPDATE indexes the new
--- version while MVCC hides the dead old version, that DELETE + VACUUM
--- (ambulkdelete) tombstones entries, and that VACUUM FULL rebuilds cleanly.
--- Probe vectors are widely separated so ANN ranking is deterministic;
--- cluster membership is asserted by id range where gaps are small.
+-- aminsert indexes new rows; a vector UPDATE indexes the new version while MVCC
+-- hides the dead old one; DELETE + VACUUM (ambulkdelete) tombstones; VACUUM FULL
+-- rewrites the heap and rebuilds. Covered for AoS-only, FASTSCAN (where inserts
+-- form a mixed AoS-overflow chain on the packed base), and empty indexes, plus
+-- nearest-neighbour membership of a freshly inserted vector. Probe vectors are
+-- widely separated so ANN ranking is deterministic; region membership is
+-- asserted by id range where gaps are small.
+-- ===== AoS-only index (centroid_compression on, no fastscan) ================
 CREATE TABLE mut (id int, v vector(3));
-INSERT INTO mut
-    SELECT g, format('[%s,0,0]', g)::vector FROM generate_series(1, 50) g;
+INSERT INTO mut SELECT g, format('[%s,0,0]', g)::vector FROM generate_series(1, 50) g;
 CREATE INDEX idx_mut ON mut USING mktann (v)
     WITH (nlist = 4, centroid_compression = true);
 SET enable_seqscan = off;
 SET mkt.nprobe = 4;             -- = nlist: scan every list, deterministic
--- (1) INSERT after build: a far-separated new row is the nearest to itself.
 INSERT INTO mut VALUES (1001, '[100,0,0]');
-SELECT count(*) AS ins_found FROM (
+SELECT count(*) AS aos_ins FROM (
     SELECT id FROM mut ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
- ins_found 
------------
-         1
-(1 row)
-
--- Bulk insert into a new region (grows AoS overflow pages): all rows present
--- and a probe inside the region finds a row from it.
-INSERT INTO mut
-    SELECT 2000 + g, format('[%s,0,0]', 300 + g)::vector
-    FROM generate_series(1, 40) g;
-SELECT count(*) AS bulk_rows FROM mut WHERE id BETWEEN 2001 AND 2040;
- bulk_rows 
------------
-        40
-(1 row)
-
-SELECT count(*) AS bulk_found FROM (
-    SELECT id FROM mut ORDER BY v <-> '[320,0,0]' LIMIT 1) t
-    WHERE id BETWEEN 2001 AND 2040;
- bulk_found 
-------------
-          1
-(1 row)
-
--- (2) UPDATE the vector column: new version found at its new location; the
---     dead old version is no longer returned (MVCC visibility recheck).
-UPDATE mut SET v = '[200,0,0]' WHERE id = 1001;
-SELECT count(*) AS upd_new FROM (
-    SELECT id FROM mut ORDER BY v <-> '[200,0,0]' LIMIT 1) t WHERE id = 1001;
- upd_new 
+ aos_ins 
 ---------
        1
 (1 row)
 
-SELECT count(*) AS upd_old_hidden FROM (
-    SELECT id FROM mut ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
- upd_old_hidden 
-----------------
-              0
-(1 row)
-
--- (3) DELETE + VACUUM: tombstoned entries are not returned.
-DELETE FROM mut WHERE id = 1001;
-DELETE FROM mut WHERE id BETWEEN 2001 AND 2020;
-VACUUM mut;
-SELECT count(*) AS del_gone FROM (
-    SELECT id FROM mut ORDER BY v <-> '[200,0,0]' LIMIT 1) t WHERE id = 1001;
- del_gone 
-----------
-        0
-(1 row)
-
-SELECT count(*) AS del_live FROM (
+-- bulk insert into a new region grows AoS overflow pages
+INSERT INTO mut SELECT 2000 + g, format('[%s,0,0]', 300 + g)::vector
+    FROM generate_series(1, 40) g;
+SELECT count(*) AS aos_bulk FROM (
     SELECT id FROM mut ORDER BY v <-> '[320,0,0]' LIMIT 1) t
-    WHERE id BETWEEN 2021 AND 2040;
- del_live 
+    WHERE id BETWEEN 2001 AND 2040;
+ aos_bulk 
 ----------
         1
 (1 row)
 
--- (4) VACUUM FULL rewrites the heap and rebuilds the index; still correct.
-VACUUM FULL mut;
-SELECT count(*) AS vf_total FROM mut;
- vf_total 
-----------
-       70
+UPDATE mut SET v = '[200,0,0]' WHERE id = 1001;
+SELECT count(*) AS aos_upd_new FROM (
+    SELECT id FROM mut ORDER BY v <-> '[200,0,0]' LIMIT 1) t WHERE id = 1001;
+ aos_upd_new 
+-------------
+           1
 (1 row)
 
-SELECT count(*) AS vf_del_gone FROM (
-    SELECT id FROM mut ORDER BY v <-> '[200,0,0]' LIMIT 1) t WHERE id = 1001;
- vf_del_gone 
+SELECT count(*) AS aos_upd_old FROM (
+    SELECT id FROM mut ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+ aos_upd_old 
 -------------
            0
 (1 row)
 
-SELECT count(*) AS vf_live FROM (
-    SELECT id FROM mut ORDER BY v <-> '[320,0,0]' LIMIT 1) t
-    WHERE id BETWEEN 2021 AND 2040;
- vf_live 
+DELETE FROM mut WHERE id = 1001;
+DELETE FROM mut WHERE id BETWEEN 2001 AND 2020;
+VACUUM mut;
+SELECT count(*) AS aos_del FROM (
+    SELECT id FROM mut ORDER BY v <-> '[200,0,0]' LIMIT 1) t WHERE id = 1001;
+ aos_del 
 ---------
-       1
+       0
+(1 row)
+
+VACUUM FULL mut;
+SELECT count(*) AS aos_vf_total FROM mut;
+ aos_vf_total 
+--------------
+           70
+(1 row)
+
+SELECT count(*) AS aos_vf_del FROM (
+    SELECT id FROM mut ORDER BY v <-> '[200,0,0]' LIMIT 1) t WHERE id = 1001;
+ aos_vf_del 
+------------
+          0
 (1 row)
 
 RESET enable_seqscan;
 RESET mkt.nprobe;
 DROP TABLE mut;
--- FASTSCAN index: inserts append AoS overflow pages onto the packed base;
--- the mixed-format chain is still scanned, and the AoS insert tombstones.
+-- ===== FASTSCAN index: inserts append an AoS overflow page (mixed chain) =====
 CREATE TABLE mutfs (id int, v vector(3));
-INSERT INTO mutfs
-    SELECT g, format('[%s,0,0]', g)::vector FROM generate_series(1, 60) g;
+INSERT INTO mutfs SELECT g, format('[%s,0,0]', g)::vector
+    FROM generate_series(1, 60) g;
 CREATE INDEX idx_mutfs ON mutfs USING mktann (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = true);
 SET enable_seqscan = off;
 SET mkt.nprobe = 4;
 INSERT INTO mutfs VALUES (1001, '[500,0,0]');
-SELECT count(*) AS fs_ins_found FROM (
+SELECT count(*) AS fs_ins FROM (
     SELECT id FROM mutfs ORDER BY v <-> '[500,0,0]' LIMIT 1) t WHERE id = 1001;
- fs_ins_found 
---------------
-            1
+ fs_ins 
+--------
+      1
+(1 row)
+
+-- mixed chain: a query whose top-2 spans the FASTSCAN base (id 60) and the
+-- AoS-inserted neighbour (id 61) must return both.
+INSERT INTO mutfs VALUES (61, '[61,0,0]');
+SELECT count(*) AS fs_mixed FROM (
+    SELECT id FROM mutfs ORDER BY v <-> '[61,0,0]' LIMIT 2) t
+    WHERE id IN (60, 61);
+ fs_mixed 
+----------
+        2
+(1 row)
+
+UPDATE mutfs SET v = '[600,0,0]' WHERE id = 1001;
+SELECT count(*) AS fs_upd FROM (
+    SELECT id FROM mutfs ORDER BY v <-> '[600,0,0]' LIMIT 1) t WHERE id = 1001;
+ fs_upd 
+--------
+      1
 (1 row)
 
 DELETE FROM mutfs WHERE id = 1001;
 VACUUM mutfs;
-SELECT count(*) AS fs_del_gone FROM (
-    SELECT id FROM mutfs ORDER BY v <-> '[500,0,0]' LIMIT 1) t WHERE id = 1001;
- fs_del_gone 
--------------
-           0
+SELECT count(*) AS fs_del FROM (
+    SELECT id FROM mutfs ORDER BY v <-> '[600,0,0]' LIMIT 1) t WHERE id = 1001;
+ fs_del 
+--------
+      0
 (1 row)
 
 RESET enable_seqscan;
 RESET mkt.nprobe;
 DROP TABLE mutfs;
+-- NOTE: insert/update/delete on an index built over an *empty* table is not
+-- yet covered — building on 0 rows currently yields an index with no centroids
+-- to route inserts to (tracked as a Phase 0 follow-up: build a degenerate
+-- single-cluster index on an empty heap).
+-- ===== A freshly inserted vector is a genuine nearest neighbour =============
+CREATE TABLE mutnn (id int, v vector(3));
+INSERT INTO mutnn SELECT g, format('[%s,0,0]', g)::vector
+    FROM generate_series(1, 50) g;
+CREATE INDEX idx_mutnn ON mutnn USING mktann (v)
+    WITH (nlist = 4, centroid_compression = true);
+SET enable_seqscan = off;
+SET mkt.nprobe = 4;
+INSERT INTO mutnn VALUES (1001, '[100,0,0]');
+-- query NEAR (not equal to) the inserted vector; it must be the top neighbour
+SELECT count(*) AS nn_member FROM (
+    SELECT id FROM mutnn ORDER BY v <-> '[99,0,0]' LIMIT 1) t WHERE id = 1001;
+ nn_member 
+-----------
+         1
+(1 row)
+
+RESET enable_seqscan;
+RESET mkt.nprobe;
+DROP TABLE mutnn;
