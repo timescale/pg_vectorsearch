@@ -107,7 +107,17 @@ typedef struct MktPostingPageOpaque
 	uint16_t	flags;		 /* FIRST | OVERFLOW | FASTSCAN */
 	uint16_t	page_id;	 /* MKT_POSTING_PAGE_ID */
 	uint16_t	max_entries; /* capacity of this page */
-} MktPostingPageOpaque;		 /* 16B */
+	/*
+	 * Per-cluster head metadata — meaningful only on the FIRST page. Lets the
+	 * runtime insert path find the chain tail in O(1) and track per-cluster
+	 * live size (for LIRE split/merge in a later phase). tail_blkno ==
+	 * InvalidBlockNumber means "not yet computed": the first insert walks the
+	 * chain to fill both fields, then maintains them incrementally. Left
+	 * zero / Invalid on overflow (non-first) pages.
+	 */
+	uint32_t	live_count;
+	BlockNumber tail_blkno;
+} MktPostingPageOpaque; /* 24B */
 
 /*
  * Flat-mode header (at start of flat page buffer).
@@ -209,6 +219,23 @@ mkt_posting_page_has_room(Page page)
 {
 	MktPostingPageOpaque *op = mkt_posting_opaque(page);
 	return op->entry_count < op->max_entries;
+}
+
+/*
+ * Per-cluster head metadata (read from the FIRST page). tail_blkno ==
+ * InvalidBlockNumber means it has not been computed yet — see
+ * mkt_posting_insert_one, which fills it lazily on the first insert.
+ */
+static inline uint32_t
+mkt_posting_head_live_count(Page head)
+{
+	return mkt_posting_opaque(head)->live_count;
+}
+
+static inline BlockNumber
+mkt_posting_head_tail(Page head)
+{
+	return mkt_posting_opaque(head)->tail_blkno;
 }
 
 /* ----------------------------------------------------------------
