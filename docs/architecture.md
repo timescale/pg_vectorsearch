@@ -548,6 +548,19 @@ Meerkat adopts the **LIRE (Lightweight Incremental RE-balancing)** protocol
 from SPFresh for maintaining index quality under continuous updates without
 full rebuilds.
 
+> **Implementation status — Phase 0 (correctness).** The index now supports
+> incremental `INSERT`. `aminsert` routes each new vector to its nearest leaf
+> and appends it to that cluster's posting list (an append-friendly AoS overflow
+> page — even on FASTSCAN indexes, whose packed base is immutable); the scan
+> merges base + appended pages by per-page format. Centroids are **fixed** in
+> this phase, so heavy churn drifts the partitioning and degrades recall over
+> time — run `REINDEX [CONCURRENTLY]` to refresh it (the same posture as
+> `ivfflat`). **SOAR / boundary replication is applied in bulk**, at build and
+> at compaction, not on the foreground insert (which assigns to a single list);
+> new rows therefore carry a small recall debt that a rebuild or compaction
+> repays. The split / merge / reassign and background-worker pieces below are the
+> later phases.
+
 #### Foreground/Background Architecture
 
 | Stage | Operations | Characteristics |
