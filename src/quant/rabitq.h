@@ -278,6 +278,25 @@ int mkt_rabitq_encode_into_ex(
 		RaBitQScratch	   *scratch);
 
 /*
+ * Encode from an already-rotated residual: pt_residual = P^T * (input -
+ * centroid). The caller supplies the rotated residual directly, so this skips
+ * the residual subtraction and P^T multiply that encode_into_ex performs; it
+ * runs only the sign-extract + factor math. Used by the runtime insert path,
+ * which rotates the inserted vector once and subtracts the posting head's
+ * stored pt_centroid (P^T is linear: P^T*(v-c) = P^T*v - P^T*c), avoiding any
+ * dependency on the raw leaf centroid (unavailable for RABITQ/FASTSCAN
+ * centroid formats). Only scratch->xu_cb is used.
+ *
+ * pt_residual must be [params->dim] floats. Returns 0 on success, -1 on
+ * failure.
+ */
+int mkt_rabitq_encode_from_pt(
+		const RaBitQParams *params,
+		const float		   *pt_residual,
+		RaBitQData		   *output,
+		RaBitQScratch	   *scratch);
+
+/*
  * Batch encode multiple vectors into separate output arrays.
  *
  * More efficient than calling mkt_rabitq_encode_into() repeatedly because:

@@ -318,6 +318,77 @@ TEST(encode_into_preallocated)
 	mkt_rabitq_destroy(params);
 }
 
+/*
+ * encode_from_pt (the runtime-insert encode primitive) must reproduce
+ * encode_into_ex. encode_into_ex subtracts then rotates; the insert path
+ * rotates each vector and subtracts in the rotated domain (P^T is linear:
+ * P^T*(v-c) = P^T*v - P^T*c). The two differ only by floating-point op order,
+ * so factors match within tolerance and the codes are near-identical (a
+ * near-zero rotated coordinate could flip sign).
+ */
+TEST(encode_from_pt_matches_encode_into_ex)
+{
+	Dimension	  dim	   = 64;
+	RaBitQParams *params   = mkt_rabitq_create(dim, 777);
+	float		 *input	   = alloc_test_vector(dim, 11);
+	float		 *centroid = alloc_test_vector(dim, 22);
+
+	ASSERT_NOT_NULL(params, "params should be created");
+
+	VectorRef input_ref	   = {.data = input, .dim = dim};
+	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+
+	RaBitQScratch scratch;
+	mkt_rabitq_scratch_init(&scratch, dim);
+
+	size_t		size = MKT_RABITQ_DATA_SIZE(dim);
+	RaBitQData *ref	 = mkt_alloc(size);
+	RaBitQData *pt	 = mkt_alloc(size);
+
+	/* Reference path (build-style): subtract then rotate. */
+	ASSERT_EQ(
+			0,
+			mkt_rabitq_encode_into_ex(
+					params, input_ref, centroid_ref, ref, &scratch),
+			"encode_into_ex should succeed");
+
+	/* Insert path: rotate each, subtract in the rotated domain,
+	 * encode_from_pt. */
+	float *pt_input	   = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
+	float *pt_centroid = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
+	float *pt_residual = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
+	mkt_rabitq_rotate(params, input, pt_input);
+	mkt_rabitq_rotate(params, centroid, pt_centroid);
+	for (Dimension i = 0; i < dim; i++)
+		pt_residual[i] = pt_input[i] - pt_centroid[i];
+
+	ASSERT_EQ(
+			0,
+			mkt_rabitq_encode_from_pt(params, pt_residual, pt, &scratch),
+			"encode_from_pt should succeed");
+
+	/* Factors match within fp tolerance (relative + small absolute). */
+	ASSERT_TRUE(
+			fabsf(ref->f_add - pt->f_add) <= 1e-3f * fabsf(ref->f_add) + 1e-4f,
+			"f_add should match within tolerance");
+	ASSERT_TRUE(
+			fabsf(ref->f_rescale - pt->f_rescale) <=
+					1e-3f * fabsf(ref->f_rescale) + 1e-4f,
+			"f_rescale should match within tolerance");
+
+	/* Codes near-identical; allow a couple of near-zero sign flips. */
+	int hamming = 0;
+	for (Dimension i = 0; i < MKT_RABITQ_BYTES(dim); i++)
+		hamming += __builtin_popcount((unsigned)(ref->bits[i] ^ pt->bits[i]));
+	ASSERT_TRUE(
+			hamming <= 2, "codes should be near-identical (<=2 bit flips)");
+
+	/* No mkt_free needed: standalone mkt_alloc/_aligned are arena-backed and
+	 * mkt_free is a no-op; the arena is reclaimed on context teardown. */
+	mkt_rabitq_scratch_cleanup(&scratch);
+	mkt_rabitq_destroy(params);
+}
+
 TEST(encode_null_inputs)
 {
 	Dimension	  dim	   = 8;
