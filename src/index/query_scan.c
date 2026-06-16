@@ -168,6 +168,7 @@ search_centroids(
 			.nprobe		= nprobe,
 			.dim		= dim,
 			.metric		= idx->metric,
+			.route_ip	= idx->route_ip,
 			.scratch	= qs->centroid_scratch,
 	};
 

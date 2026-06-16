@@ -22,9 +22,13 @@
  * then leave re-tokenization to the downstream assignment pass. eta is
  * the parallel cost multiplier; the caller guarantees eta > 1.
  *
- * Points are gathered per cluster via a counting sort (O(count)). For
- * cosine the AVQ center is re-normalized to unit length, matching the
- * unit-norm leaf centroids the rest of the pipeline expects.
+ * Points are gathered per cluster via a counting sort (O(count)). The
+ * AVQ center keeps its solved magnitude (NOT renormalized): that
+ * magnitude is the per-cluster weight ScaNN's dot-product routing uses.
+ * Cosine routing divides it out at query time, so keeping it is harmless
+ * there and available to IP routing (the mkt.route_ip toggle). For a
+ * faithful magnitude test, build with centroid_compression=off (float
+ * centroids store the magnitude exactly).
  */
 static void
 hk_avq_recenter_leaves(
@@ -34,7 +38,6 @@ hk_avq_recenter_leaves(
 		const ClusterId *assignments,
 		uint32_t		 nleaf,
 		Dimension		 dim,
-		DistanceMetric	 metric,
 		float			 eta,
 		float			*centroids)
 {
@@ -70,21 +73,8 @@ hk_avq_recenter_leaves(
 			continue; /* keep k-means centroid for an empty leaf */
 
 		float *cen = centroids + (size_t)c * dim;
+		/* Keep the AVQ magnitude (no renormalize) — see header note. */
 		mkt_avq_center(buf + (size_t)off[c] * dim, cnt[c], dim, eta, cen);
-
-		if (metric == DISTANCE_COSINE)
-		{
-			double nrm = 0.0;
-			for (Dimension d = 0; d < dim; d++)
-				nrm += (double)cen[d] * cen[d];
-			nrm = sqrt(nrm);
-			if (nrm > 1e-20)
-			{
-				float inv = (float)(1.0 / nrm);
-				for (Dimension d = 0; d < dim; d++)
-					cen[d] *= inv;
-			}
-		}
 	}
 
 	mkt_free(buf);
@@ -277,7 +267,6 @@ mkt_hkmeans_f32(
 						km->assignments,
 						km->nlist,
 						dim,
-						metric,
 						local_opts.avq_eta,
 						tn->centroids);
 

@@ -34,6 +34,7 @@ extern int		   mkt_query_limit;	   /* max results per query (0=auto) */
 extern int		   mkt_fastscan_bits;  /* fastscan LUT bits (8 or 16) */
 extern bool		   mkt_rerank;		   /* enable reranking (default: true) */
 extern int		   mkt_rerank_pool;	   /* max candidates to rerank (0=all) */
+extern bool		   mkt_route_ip;	   /* route by IP (keep centroid norm) */
 extern relopt_kind mktann_relopt_kind; /* index reloption kind */
 
 /* ----------------------------------------------------------------

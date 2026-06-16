@@ -258,7 +258,16 @@ score_page(
 				break;
 			case DISTANCE_COSINE:
 			{
-				float dot	 = mkt_dot_product(state->query, fvec, dim);
+				float dot = mkt_dot_product(state->query, fvec, dim);
+				if (state->route_ip)
+				{
+					/* Route by <q,c> without normalizing the centroid:
+					 * its magnitude becomes a per-cluster routing weight
+					 * (e.g. AVQ). Rerank stays cosine, so results are
+					 * unchanged — only cluster selection differs. */
+					dist = -dot;
+					break;
+				}
 				float norm_v = mkt_l2_norm_squared(fvec, dim);
 				float denom	 = sqrtf(norm_q * norm_v);
 				dist		 = (denom > 0.0f) ? 1.0f - dot / denom : 1.0f;
@@ -398,7 +407,12 @@ score_page(
 				break;
 			case DISTANCE_COSINE:
 			{
-				float dot	 = mkt_f16_dot_product(hvec, state->query, dim);
+				float dot = mkt_f16_dot_product(hvec, state->query, dim);
+				if (state->route_ip)
+				{
+					dist = -dot;
+					break;
+				}
 				float norm_v = mkt_f16_norm_sq(hvec, dim);
 				float denom	 = sqrtf(norm_q * norm_v);
 				dist		 = (denom > 0.0f) ? 1.0f - dot / denom : 1.0f;

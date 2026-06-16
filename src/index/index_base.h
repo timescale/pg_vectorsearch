@@ -36,6 +36,7 @@ typedef struct MktIndexBase
 	DistanceMetric	  metric;
 	MktCentroidFormat centroid_format;
 	int				  fastscan; /* 0=off, 8=uint8, 16=uint16 hacc */
+	bool			  route_ip; /* route by <q,c> (keep centroid magnitude) */
 } MktIndexBase;
 
 static inline RaBitQParams *

@@ -26,6 +26,7 @@ int	 mkt_query_limit   = 0;
 int	 mkt_fastscan_bits = 16;
 bool mkt_rerank		   = true;
 int	 mkt_rerank_pool   = 0;
+bool mkt_route_ip	   = false;
 static bool mkt_profile = false;
 
 static void
@@ -131,6 +132,21 @@ _PG_init(void)
 			NULL,
 			&mkt_rerank,
 			true,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomBoolVariable(
+			"mkt.route_ip",
+			"Route by inner product (keep centroid magnitude) instead of "
+			"cosine.",
+			"Experimental: scores centroids by <q,c> without normalizing the "
+			"centroid, so AVQ centroid magnitude acts as a per-cluster routing "
+			"weight. Posting scan and rerank are unaffected.",
+			&mkt_route_ip,
+			false,
 			PGC_USERSET,
 			0,
 			NULL,
