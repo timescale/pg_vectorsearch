@@ -360,6 +360,12 @@ mktann_resolve_format(Relation index, DistanceMetric metric)
 	if (compressed)
 		return MKT_CENTROID_FMT_RABITQ;
 
+	/* Uncompressed: fp16 centroids (half the bytes/bandwidth of fp32, ~lossless
+	 * for routing) when requested, else fp32. Both keep full routing accuracy
+	 * vs 1-bit RaBitQ centroids; fp16 is the cheaper way to pay for it. */
+	if (opts != NULL && opts->centroid_half)
+		return MKT_CENTROID_FMT_HALF;
+
 	Oid col_type = TupleDescAttr(index->rd_att, 0)->atttypid;
 	if (col_type == mkt_halfvec_type_oid())
 		return MKT_CENTROID_FMT_HALF;

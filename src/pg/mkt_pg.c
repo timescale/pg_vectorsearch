@@ -263,6 +263,13 @@ _PG_init(void)
 			"(requires centroid_compression=true)",
 			false,
 			NoLock);
+	add_bool_reloption(
+			mktann_relopt_kind,
+			"centroid_half",
+			"Store uncompressed centroids as fp16 instead of fp32 "
+			"(requires centroid_compression=false)",
+			false,
+			NoLock);
 
 	mkt_distance_init();
 	mkt_rabitq_init_simd();

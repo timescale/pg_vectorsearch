@@ -109,6 +109,7 @@ typedef struct MktannOptions
 	int	   centroid_compression; /* MktCentroidCompression */
 	bool   fastscan;			 /* use VPSHUFB fastscan posting format */
 	bool   centroid_fastscan;	 /* emit FASTSCAN-format centroid pages */
+	bool   centroid_half;		 /* uncompressed centroids as fp16 (vs fp32) */
 } MktannOptions;
 
 #define MKTANN_DEFAULT_FAN_OUT 32
