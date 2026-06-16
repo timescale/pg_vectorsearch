@@ -163,6 +163,23 @@ mktann_insert(
 	return false;
 }
 
+/*
+ * Adapt PostgreSQL's IndexBulkDeleteCallback (takes ItemPointer) to the
+ * shared tombstone predicate (takes ItemPointerData by value).
+ */
+typedef struct MktannBulkDeleteCtx
+{
+	IndexBulkDeleteCallback cb;
+	void				   *cb_state;
+} MktannBulkDeleteCtx;
+
+static bool
+mktann_tid_is_dead(ItemPointerData tid, void *state)
+{
+	MktannBulkDeleteCtx *c = (MktannBulkDeleteCtx *)state;
+	return c->cb(&tid, c->cb_state);
+}
+
 static IndexBulkDeleteResult *
 mktann_bulkdelete(
 		IndexVacuumInfo		   *info,
@@ -172,6 +189,58 @@ mktann_bulkdelete(
 {
 	if (stats == NULL)
 		stats = palloc0(sizeof(IndexBulkDeleteResult));
+
+	Relation	index	= info->index;
+	BlockNumber nblocks = RelationGetNumberOfBlocks(index);
+	if (nblocks <= 1)
+		return stats; /* block 0 is the metadata page */
+
+	/* Metadata page → dim + metric for the storage / tombstone walk. */
+	Buffer mb = ReadBuffer(index, 0);
+	LockBuffer(mb, BUFFER_LOCK_SHARE);
+	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+			BufferGetPage(mb));
+	Dimension	   dim	  = meta->dim;
+	DistanceMetric metric = (DistanceMetric)meta->metric;
+	UnlockReleaseBuffer(mb);
+
+	MktannStorage storage;
+	mktann_storage_init(&storage, index, NULL, metric);
+
+	MktannBulkDeleteCtx ctx = {.cb = callback, .cb_state = cb_state};
+
+	/*
+	 * Walk every page; tombstone each posting chain from its FIRST (head)
+	 * page — the head walk covers the overflow pages, so we only act on heads.
+	 * Guard on the special-area size before reading the opaque so a centroid
+	 * page (different opaque) is never misread.
+	 */
+	for (BlockNumber blk = 1; blk < nblocks; blk++)
+	{
+		vacuum_delay_point(false);
+
+		Buffer buf = ReadBuffer(index, blk);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		Page page	 = BufferGetPage(buf);
+		bool is_head = false;
+		if (!PageIsNew(page) &&
+			PageGetSpecialSize(page) == sizeof(MktPostingPageOpaque))
+		{
+			MktPostingPageOpaque *op = mkt_posting_opaque(page);
+			is_head					 = op->page_id == MKT_POSTING_PAGE_ID &&
+					  (op->flags & MKT_POSTING_PAGE_FIRST);
+		}
+		UnlockReleaseBuffer(buf);
+
+		if (is_head)
+		{
+			stats->tuples_removed += mkt_posting_tombstone_chain(
+					&storage.base, dim, blk, mktann_tid_is_dead, &ctx);
+			stats->num_index_tuples +=
+					mkt_posting_chain_count(&storage.base, dim, blk);
+		}
+	}
+
 	return stats;
 }
 
