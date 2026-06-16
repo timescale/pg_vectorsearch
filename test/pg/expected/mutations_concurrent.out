@@ -1,0 +1,28 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1_ins s2_ins chk_both s1_upd s1_del chk_both chk_find
+step s1_ins: INSERT INTO iso VALUES (1001, '[100,0,0]');
+step s2_ins: INSERT INTO iso VALUES (1002, '[101,0,0]');
+step chk_both: SELECT count(*) AS present FROM iso WHERE id IN (1001, 1002);
+present
+-------
+      2
+(1 row)
+
+step s1_upd: UPDATE iso SET v = '[150,0,0]' WHERE id = 1001;
+step s1_del: DELETE FROM iso WHERE id = 1002;
+step chk_both: SELECT count(*) AS present FROM iso WHERE id IN (1001, 1002);
+present
+-------
+      1
+(1 row)
+
+step chk_find: 
+    SELECT count(*) AS found_updated FROM (
+        SELECT id FROM iso ORDER BY v <-> '[150,0,0]' LIMIT 1) t WHERE id = 1001;
+
+found_updated
+-------------
+            1
+(1 row)
+

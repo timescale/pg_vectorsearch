@@ -45,6 +45,33 @@ else
       is_parallel: false,
       protocol: 'tap',
     )
+
+    # Isolation tests for incremental writes (concurrency + MVCC). Unlike the
+    # build-progress spec below, these need no injection points.
+    pg_isolation_regress_mut = find_program(
+      pg_pkglibdir / 'pgxs' / 'src' / 'test' / 'isolation' / 'pg_isolation_regress',
+      'pg_isolation_regress',
+      required: false,
+    )
+    if pg_isolation_regress_mut.found()
+      test('isolation_mutations',
+        pg_isolation_regress_mut,
+        args: [
+          '--inputdir=' + meson.current_source_dir(),
+          '--outputdir=' + meson.current_build_dir(),
+          '--bindir=' + pg_bindir,
+          '--temp-instance=' + meson.project_build_root() / 'mut_isolation_testdb',
+          '--temp-config=' + meson.current_build_dir() / 'meerkat_test.conf',
+          '--load-extension=meerkat',
+          'mutations_mvcc',
+          'mutations_concurrent',
+        ],
+        depends: [meerkat_ext_so],
+        timeout: 120,
+        is_parallel: false,
+        protocol: 'tap',
+      )
+    endif
   else
     message('pg_regress not found, skipping PostgreSQL regression tests')
   endif
