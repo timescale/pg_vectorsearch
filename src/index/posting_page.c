@@ -25,6 +25,10 @@ mkt_posting_page_init(
 	opaque->flags				 = flags;
 	opaque->page_id				 = MKT_POSTING_PAGE_ID;
 	opaque->max_entries			 = (uint16_t)max;
+	/* Head metadata starts "not computed"; the first insert fills it (the
+	 * fields are only consulted on the FIRST page). */
+	opaque->live_count = 0;
+	opaque->tail_blkno = InvalidBlockNumber;
 }
 
 bool
