@@ -38,6 +38,13 @@ typedef struct MktIndexBase
 	int				  fastscan; /* 0=off, 8=uint8, 16=uint16 hacc */
 	bool			  route_ip; /* route by <q,c> (keep centroid magnitude) */
 	int				  centroid_rerank; /* two-stage: beam shortlist factor (0=off) */
+
+	/* Two-stage rerank pt_centroid cache (PG only; NULL in standalone).
+	 * Returns the cluster's stored centroid (P^T*c, dim floats) for a posting
+	 * head block, backed by a per-backend cache so the rerank avoids a buffer
+	 * pin per candidate. */
+	void *pt_centroid_cache;
+	const float *(*pt_centroid_fn)(void *cache, BlockNumber head_blkno);
 } MktIndexBase;
 
 static inline RaBitQParams *

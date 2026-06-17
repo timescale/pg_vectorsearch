@@ -66,4 +66,17 @@ void mktann_storage_set_rel(MktannStorage *s, Relation rel);
  */
 MktStorage *mktann_centroid_cache_get(Relation index, MktannStorage *backing);
 
+/*
+ * Per-backend cache of cluster centroids (P^T*c) keyed by posting-head block,
+ * for the two-stage routing rerank. Returns an opaque cache handle and sets
+ * *fn_out to the lookup function (cache, head_blkno) -> dim floats. Misses are
+ * populated from `backing`. Resets when the index relation changes.
+ */
+typedef const float *(*MktPtCentroidFn)(void *cache, BlockNumber head_blkno);
+void *mktann_pt_centroid_cache_get(
+		Relation		 index,
+		MktannStorage	*backing,
+		Dimension		 dim,
+		MktPtCentroidFn *fn_out);
+
 #endif /* MKTANN_STORAGE_H */

@@ -140,6 +140,12 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	ss->index_base.posting_storage	= &ss->storage.base;
 	ss->index_base.page_base		= NULL;
 
+	/* Two-stage routing rerank: cache cluster centroids by posting head so
+	 * the rerank avoids a buffer pin per candidate. */
+	if (mkt_centroid_rerank > 1)
+		ss->index_base.pt_centroid_cache = mktann_pt_centroid_cache_get(
+				index, &ss->storage, dim, &ss->index_base.pt_centroid_fn);
+
 	/* Initialize shared query state */
 	mkt_query_state_init(&ss->qstate, &ss->index_base, max_k, max_nprobe);
 
@@ -399,6 +405,9 @@ mkt_scanned_clusters(PG_FUNCTION_ARGS)
 	ib.centroid_storage = &storage.base;
 	ib.posting_storage	= &storage.base;
 	ib.page_base		= NULL;
+	if (mkt_centroid_rerank > 1)
+		ib.pt_centroid_cache = mktann_pt_centroid_cache_get(
+				index, &storage, dim, &ib.pt_centroid_fn);
 
 	MktQueryState qstate;
 	mkt_query_state_init(&qstate, &ib, MKT_DEFAULT_K, max_nprobe);

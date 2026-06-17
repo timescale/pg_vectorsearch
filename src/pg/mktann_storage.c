@@ -521,6 +521,94 @@ mktann_centroid_cache_get(Relation index, MktannStorage *backing)
 }
 
 /* ----------------------------------------------------------------
+ * pt_centroid cache for two-stage routing rerank.
+ *
+ * Two-stage rerank scores factor*nprobe candidate clusters by the exact
+ * query-centroid distance, which needs each cluster's stored centroid
+ * (P^T*c, on its posting head). Reading the head per candidate is a
+ * buffer pin (BufTableLookup over the 128 GB pool) — the same cost that
+ * makes the wider shortlist expensive. Cache just the centroid vector
+ * (dim floats), keyed by head block, in backend-local memory: after
+ * warmup every rerank lookup is a direct pointer load, no pin.
+ * ---------------------------------------------------------------- */
+
+typedef struct PtCentroidCache
+{
+	MktannStorage *backing;
+	float		 **cents; /* head blkno -> dim floats (NULL = uncached) */
+	uint32_t	   cap;
+	Dimension	   dim;
+	Oid			   relid;
+	bool		   active;
+} PtCentroidCache;
+
+static PtCentroidCache ptc_state;
+
+static const float *
+ptc_lookup(void *self, BlockNumber blkno)
+{
+	PtCentroidCache *c = (PtCentroidCache *)self;
+
+	if (blkno >= c->cap)
+	{
+		uint32_t	  newcap = blkno + 1024;
+		MemoryContext old	 = MemoryContextSwitchTo(TopMemoryContext);
+		c->cents			 = c->cents == NULL
+									 ? palloc0(newcap * sizeof(float *))
+									 : repalloc(c->cents, newcap * sizeof(float *));
+		MemoryContextSwitchTo(old);
+		for (uint32_t i = c->cap; i < newcap; i++)
+			c->cents[i] = NULL;
+		c->cap = newcap;
+	}
+
+	if (c->cents[blkno] == NULL)
+	{
+		/* Miss: read the head once, copy out its pt_centroid, release. */
+		MktStorage	*b	 = &c->backing->base;
+		Page		 pg	 = b->ops->read_page(b, blkno);
+		const float *pt	 = mkt_posting_pt_centroid(pg);
+		float		*buf = MemoryContextAlloc(
+				   TopMemoryContext, (size_t)c->dim * sizeof(float));
+		memcpy(buf, pt, (size_t)c->dim * sizeof(float));
+		b->ops->release_page(b, blkno);
+		c->cents[blkno] = buf;
+	}
+
+	return c->cents[blkno];
+}
+
+void *
+mktann_pt_centroid_cache_get(
+		Relation		index,
+		MktannStorage  *backing,
+		Dimension		dim,
+		MktPtCentroidFn *fn_out)
+{
+	Oid relid = RelationGetRelid(index);
+
+	if (!ptc_state.active || ptc_state.relid != relid)
+	{
+		if (ptc_state.cents != NULL)
+		{
+			for (uint32_t i = 0; i < ptc_state.cap; i++)
+				if (ptc_state.cents[i] != NULL)
+					pfree(ptc_state.cents[i]);
+			pfree(ptc_state.cents);
+		}
+		ptc_state.cents	 = NULL;
+		ptc_state.cap	 = 0;
+		ptc_state.relid	 = relid;
+		ptc_state.active = true;
+	}
+
+	ptc_state.backing = backing;
+	ptc_state.dim	  = dim;
+	*fn_out			  = ptc_lookup;
+	return &ptc_state;
+}
+
+/* ----------------------------------------------------------------
  * Static vtables
  * ---------------------------------------------------------------- */
 

@@ -260,7 +260,11 @@ rerank_beam(
 	const MktIndexBase *idx = qs->index;
 	Dimension			dim = idx->dim;
 
-	qs->pscan.storage = idx->posting_storage;
+	/* Pin-free path: fetch centroids from the per-backend pt_centroid cache.
+	 * Fallback (no cache, e.g. standalone): read each posting head directly. */
+	bool use_cache = (idx->pt_centroid_fn != NULL);
+	if (!use_cache)
+		qs->pscan.storage = idx->posting_storage;
 	float norm_q = (idx->metric == DISTANCE_COSINE)
 						 ? mkt_l2_norm(qs->pt_query, dim)
 						 : 0.0f;
@@ -273,11 +277,21 @@ rerank_beam(
 			qs->beam_results[j].distance = INFINITY;
 			continue;
 		}
-		mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
-		const float *pt_cent = mkt_posting_scan_pt_centroid(&qs->pscan);
+
+		const float *pt_cent;
+		if (use_cache)
+		{
+			pt_cent = idx->pt_centroid_fn(idx->pt_centroid_cache, ph);
+		}
+		else
+		{
+			mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
+			pt_cent = mkt_posting_scan_pt_centroid(&qs->pscan);
+		}
 		if (pt_cent == NULL)
 		{
-			mkt_posting_scan_end_cluster(&qs->pscan);
+			if (!use_cache)
+				mkt_posting_scan_end_cluster(&qs->pscan);
 			qs->beam_results[j].distance = INFINITY;
 			continue;
 		}
@@ -296,9 +310,11 @@ rerank_beam(
 		else
 			d = mkt_l2_distance_squared(qs->pt_query, pt_cent, dim);
 		qs->beam_results[j].distance = d;
-		mkt_posting_scan_end_cluster(&qs->pscan);
+		if (!use_cache)
+			mkt_posting_scan_end_cluster(&qs->pscan);
 	}
-	qs->pscan.storage = NULL;
+	if (!use_cache)
+		qs->pscan.storage = NULL;
 
 	qsort(qs->beam_results,
 		  ncentroids,
