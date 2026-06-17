@@ -384,18 +384,28 @@ scan_clusters(
 		if (idx->early_terminate && idx->term_radius > 0.0f &&
 			idx->metric == DISTANCE_COSINE)
 		{
+			/*
+			 * The RaBitQ scan estimates SQUARED-L2 (||q-v||^2 = 2(1-cos) for
+			 * unit vectors), so the topk threshold is in those units — work
+			 * the bound in squared-L2. With s=cos(q,c), ||q-c|| = sqrt(2(1-s))
+			 * and the cluster radius R = max||m-c|| = sqrt(2*term_radius)
+			 * (term_radius = max(1-cos(m,c))). Any member m satisfies
+			 * ||q-m|| >= ||q-c|| - R, so (||q-c||-R)^2 is a lower bound on its
+			 * squared-L2 distance. If that already exceeds the k-th threshold,
+			 * the cluster can't contribute — skip it (recall-safe).
+			 */
 			float thr = mkt_topk_threshold(topk);
 			float nc  = mkt_l2_norm(pt_cent, dim);
 			if (nc > 0.0f)
 			{
-				float s = mkt_dot_product(qs->pt_query, pt_cent, dim) / nc;
-				float m = 1.0f - idx->term_radius; /* cos(theta_max) */
-				if (s <= m)					/* theta(q,c) >= theta_max */
+				float s	   = mkt_dot_product(qs->pt_query, pt_cent, dim) / nc;
+				float dqc2 = 2.0f * (1.0f - s); /* ||q-c||^2 */
+				float dqc  = dqc2 > 0.0f ? sqrtf(dqc2) : 0.0f;
+				float R	   = sqrtf(2.0f * idx->term_radius);
+				if (dqc > R)
 				{
-					float s2	 = s * s < 1.0f ? s * s : 1.0f;
-					float m2	 = m * m;
-					float cos_lb = s * m + sqrtf((1.0f - s2) * (1.0f - m2));
-					if (1.0f - cos_lb >= thr)
+					float lb = dqc - R;
+					if (lb * lb >= thr)
 					{
 						mkt_posting_scan_end_cluster(&qs->pscan);
 						continue;
