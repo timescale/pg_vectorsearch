@@ -181,6 +181,9 @@ search_centroids(
 			beam_stats);
 }
 
+static uint32_t rerank_beam(
+		MktQueryState *qs, uint32_t ncentroids, uint32_t nprobe);
+
 /*
  * Run only the centroid beam search for a query and return the selected
  * clusters' posting-head block numbers (the clusters the full scan would
@@ -202,9 +205,23 @@ mkt_query_scanned_heads(
 	const float *qvec = prepare_query(qs, query);
 	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
 
+	/* Two-stage routing (mkt.centroid_rerank): widen the beam, then re-rank
+	 * the shortlist by exact centroid distance. Mirrors mkt_query_execute so
+	 * the diagnostic measures what the scan actually selects. */
+	uint32_t factor = (uint32_t)qs->index->centroid_rerank;
+	uint32_t beam_n = nprobe;
+	if (factor > 1)
+	{
+		beam_n = factor * nprobe;
+		if (beam_n > qs->max_nprobe)
+			beam_n = qs->max_nprobe;
+	}
+
 	MktCentroidSearchStats beam_stats = {0};
 	uint32_t			   ncentroids =
-			search_centroids(qs, qvec, nprobe, mode, &beam_stats);
+			search_centroids(qs, qvec, beam_n, mode, &beam_stats);
+	if (factor > 1 && ncentroids > nprobe)
+		ncentroids = rerank_beam(qs, ncentroids, nprobe);
 
 	uint32_t m = 0;
 	for (uint32_t i = 0; i < ncentroids && m < out_cap; i++)
@@ -214,6 +231,81 @@ mkt_query_scanned_heads(
 			out_heads[m++] = ph;
 	}
 	return m;
+}
+
+static int
+cmp_centroid_result(const void *a, const void *b)
+{
+	Distance da = ((const MktCentroidResult *)a)->distance;
+	Distance db = ((const MktCentroidResult *)b)->distance;
+	return (da > db) - (da < db);
+}
+
+/*
+ * Two-stage centroid routing. The (fast, compressed) beam already filled
+ * qs->beam_results[0..ncentroids) with a shortlist. Re-rank that shortlist
+ * by the EXACT full-precision query-centroid distance — read each cluster's
+ * stored centroid (P^T*c on the posting head) and use the rotated query, so
+ * <pt_query, pt_centroid> = <q,c> exactly — then keep the best nprobe. This
+ * recovers float-centroid routing accuracy (compressed centroids mis-rank
+ * boundary clusters) while the beam itself stays cheap. Returns the new
+ * count (min(ncentroids, nprobe)).
+ */
+static uint32_t
+rerank_beam(
+		MktQueryState *qs,
+		uint32_t	   ncentroids,
+		uint32_t	   nprobe)
+{
+	const MktIndexBase *idx = qs->index;
+	Dimension			dim = idx->dim;
+
+	qs->pscan.storage = idx->posting_storage;
+	float norm_q = (idx->metric == DISTANCE_COSINE)
+						 ? mkt_l2_norm(qs->pt_query, dim)
+						 : 0.0f;
+
+	for (uint32_t j = 0; j < ncentroids; j++)
+	{
+		BlockNumber ph = qs->beam_results[j].posting_head;
+		if (ph == InvalidBlockNumber)
+		{
+			qs->beam_results[j].distance = INFINITY;
+			continue;
+		}
+		mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
+		const float *pt_cent = mkt_posting_scan_pt_centroid(&qs->pscan);
+		if (pt_cent == NULL)
+		{
+			mkt_posting_scan_end_cluster(&qs->pscan);
+			qs->beam_results[j].distance = INFINITY;
+			continue;
+		}
+		/* pt_query and pt_cent are both rotated by P^T (orthonormal), so
+		 * their dot product equals <q,c> and their norms equal ||q||,||c||. */
+		Distance d;
+		if (idx->metric == DISTANCE_INNER_PRODUCT)
+			d = -mkt_dot_product(qs->pt_query, pt_cent, dim);
+		else if (idx->metric == DISTANCE_COSINE)
+		{
+			float dot	= mkt_dot_product(qs->pt_query, pt_cent, dim);
+			float nc	= mkt_l2_norm(pt_cent, dim);
+			float denom = norm_q * nc;
+			d			= (denom > 0.0f) ? 1.0f - dot / denom : 1.0f;
+		}
+		else
+			d = mkt_l2_distance_squared(qs->pt_query, pt_cent, dim);
+		qs->beam_results[j].distance = d;
+		mkt_posting_scan_end_cluster(&qs->pscan);
+	}
+	qs->pscan.storage = NULL;
+
+	qsort(qs->beam_results,
+		  ncentroids,
+		  sizeof(MktCentroidResult),
+		  cmp_centroid_result);
+
+	return ncentroids < nprobe ? ncentroids : nprobe;
 }
 
 static void
@@ -328,10 +420,24 @@ mkt_query_execute(
 
 	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
 
+	/* Two-stage centroid routing: widen the (cheap) beam to factor*nprobe,
+	 * then re-rank that shortlist by exact full-precision centroid distance
+	 * and keep the best nprobe. */
+	uint32_t factor = (uint32_t)qs->index->centroid_rerank;
+	uint32_t beam_n = nprobe;
+	if (factor > 1)
+	{
+		beam_n = factor * nprobe;
+		if (beam_n > qs->max_nprobe)
+			beam_n = qs->max_nprobe;
+	}
+
 	uint64_t			   t0		  = mkt_now_ns();
 	MktCentroidSearchStats beam_stats = {0};
 	uint32_t			   ncentroids =
-			search_centroids(qs, qvec, nprobe, mode, &beam_stats);
+			search_centroids(qs, qvec, beam_n, mode, &beam_stats);
+	if (factor > 1 && ncentroids > nprobe)
+		ncentroids = rerank_beam(qs, ncentroids, nprobe);
 
 	uint64_t t1 = mkt_now_ns();
 	scan_clusters(qs, qs->beam_results, ncentroids, mode, &qs->topk, stats);

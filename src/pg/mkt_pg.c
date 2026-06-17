@@ -27,6 +27,7 @@ int	 mkt_fastscan_bits = 16;
 bool mkt_rerank		   = true;
 int	 mkt_rerank_pool   = 0;
 bool mkt_route_ip	   = false;
+int	 mkt_centroid_rerank = 0;
 static bool mkt_profile = false;
 
 static void
@@ -147,6 +148,23 @@ _PG_init(void)
 			"weight. Posting scan and rerank are unaffected.",
 			&mkt_route_ip,
 			false,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.centroid_rerank",
+			"Two-stage centroid routing: beam shortlist factor (0/1 = off).",
+			"The compressed beam selects factor*nprobe candidate clusters, then "
+			"re-ranks them by exact full-precision query-centroid distance (from "
+			"the posting-head centroid) and scans the top nprobe. Recovers "
+			"float-centroid routing accuracy at compressed beam speed.",
+			&mkt_centroid_rerank,
+			0,
+			0,
+			64,
 			PGC_USERSET,
 			0,
 			NULL,

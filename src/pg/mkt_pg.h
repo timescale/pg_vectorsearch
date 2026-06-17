@@ -35,6 +35,7 @@ extern int		   mkt_fastscan_bits;  /* fastscan LUT bits (8 or 16) */
 extern bool		   mkt_rerank;		   /* enable reranking (default: true) */
 extern int		   mkt_rerank_pool;	   /* max candidates to rerank (0=all) */
 extern bool		   mkt_route_ip;	   /* route by IP (keep centroid norm) */
+extern int		   mkt_centroid_rerank; /* two-stage beam shortlist factor */
 extern relopt_kind mktann_relopt_kind; /* index reloption kind */
 
 /* ----------------------------------------------------------------

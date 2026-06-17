@@ -119,7 +119,8 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 
 	bool has_fastscan		= meta->flags & MKT_META_FLAG_FASTSCAN;
 	ss->index_base.fastscan = has_fastscan ? mkt_fastscan_bits : 0;
-	ss->index_base.route_ip = mkt_route_ip;
+	ss->index_base.route_ip		   = mkt_route_ip;
+	ss->index_base.centroid_rerank = mkt_centroid_rerank;
 
 	UnlockReleaseBuffer(meta_buf);
 
@@ -386,6 +387,7 @@ mkt_scanned_clusters(PG_FUNCTION_ARGS)
 	ib.rabitq_seed	   = meta->rabitq_seed;
 	ib.fastscan		   = has_fastscan ? mkt_fastscan_bits : 0;
 	ib.route_ip		   = mkt_route_ip;
+	ib.centroid_rerank = mkt_centroid_rerank;
 	UnlockReleaseBuffer(meta_buf);
 
 	MktannIndexCache cache = mktann_cache_get(index);
