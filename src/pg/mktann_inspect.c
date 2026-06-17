@@ -16,16 +16,23 @@
 
 #include <access/generic_xlog.h>
 #include <access/relation.h>
+#include <access/table.h>
+#include <access/tableam.h>
 #include <catalog/pg_type.h>
+#include <executor/tuptable.h>
 #include <funcapi.h>
 #include <storage/bufmgr.h>
 #include <utils/array.h>
 #include <utils/builtins.h>
 #include <utils/rel.h>
 
+#include "algo/kmeans.h"
+#include "algo/vecops.h"
 #include "index/centroid_page.h"
 #include "index/posting_convert.h"
 #include "index/posting_page.h"
+#include "mkt_pg.h"
+#include "mkt_vector.h"
 #include "mktann_meta.h"
 #include "mktann_storage.h"
 
@@ -737,4 +744,157 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	relation_close(index, RowExclusiveLock);
 
 	PG_RETURN_INT32((int32)new_head);
+}
+
+/* ----------------------------------------------------------------
+ * mkt.cluster_subcentroids(regclass, k, max_members)
+ *
+ * Diagnostic for the sub-centroid routing idea: for each leaf cluster,
+ * gather up to max_members of its actual member vectors from the heap,
+ * run k-means(k) on them, and return the k sub-centroids. Lets us test
+ * (offline, no rebuild) whether routing by nearest sub-centroid instead
+ * of the single mean would reduce the clusters scanned at target recall.
+ * Read-only. Cosine: vectors are normalized before clustering.
+ * ---------------------------------------------------------------- */
+PG_FUNCTION_INFO_V1(mkt_cluster_subcentroids);
+
+Datum
+mkt_cluster_subcentroids(PG_FUNCTION_ARGS)
+{
+	Oid			   indexoid	   = PG_GETARG_OID(0);
+	int32		   K		   = PG_GETARG_INT32(1);
+	int32		   max_members = PG_GETARG_INT32(2);
+	ReturnSetInfo *rsinfo	   = (ReturnSetInfo *)fcinfo->resultinfo;
+
+	if (K < 1)
+		K = 1;
+	if (max_members < K)
+		max_members = K;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	Relation index = relation_open(indexoid, AccessShareLock);
+
+	Buffer meta_buf = ReadBuffer(index, 0);
+	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
+	const MktannMetaPage *meta =
+			(const MktannMetaPage *)PageGetSpecialPointer(BufferGetPage(meta_buf));
+	Dimension	   dim	  = (Dimension)meta->dim;
+	uint32_t	   nlist  = meta->nlist;
+	DistanceMetric metric = (DistanceMetric)meta->metric;
+	UnlockReleaseBuffer(meta_buf);
+
+	/* Per-cluster member-tid buffers (capped at max_members). */
+	ItemPointerData **members = palloc0((size_t)nlist * sizeof(ItemPointerData *));
+	uint32_t		 *counts  = palloc0((size_t)nlist * sizeof(uint32_t));
+
+	BlockNumber nblocks = RelationGetNumberOfBlocks(index);
+	for (BlockNumber blkno = 1; blkno < nblocks; blkno++)
+	{
+		Buffer buf = ReadBuffer(index, blkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		Page page = BufferGetPage(buf);
+
+		if (PageGetSpecialSize(page) == MAXALIGN(sizeof(MktPostingPageOpaque)))
+		{
+			const MktPostingPageOpaque *op = mkt_posting_opaque(page);
+			if (op->page_id == MKT_POSTING_PAGE_ID &&
+				(op->flags & MKT_POSTING_PAGE_FASTSCAN) &&
+				op->cluster_id < nlist)
+			{
+				uint32_t c = op->cluster_id;
+				if (counts[c] < (uint32_t)max_members)
+				{
+					char *content = (op->flags & MKT_POSTING_PAGE_FIRST)
+										? mkt_posting_content_first(page, dim)
+										: mkt_posting_content(page);
+					uint32_t cnt	 = op->entry_count;
+					uint32_t ngroups = (cnt + MKT_FASTSCAN_GROUP - 1) /
+									   MKT_FASTSCAN_GROUP;
+					for (uint32_t g = 0;
+						 g < ngroups && counts[c] < (uint32_t)max_members; g++)
+					{
+						ItemPointerData *tids =
+								mkt_fastscan_group_tids(content, g, dim);
+						uint32_t gc = cnt - g * MKT_FASTSCAN_GROUP;
+						if (gc > MKT_FASTSCAN_GROUP)
+							gc = MKT_FASTSCAN_GROUP;
+						for (uint32_t v = 0;
+							 v < gc && counts[c] < (uint32_t)max_members; v++)
+						{
+							if (members[c] == NULL)
+								members[c] = palloc(
+										(size_t)max_members *
+										sizeof(ItemPointerData));
+							members[c][counts[c]++] = tids[v];
+						}
+					}
+				}
+			}
+		}
+		UnlockReleaseBuffer(buf);
+	}
+
+	/* Heap + a slot to fetch member vectors. */
+	Relation		heap	   = table_open(index->rd_index->indrelid,
+											AccessShareLock);
+	int				vec_attnum = index->rd_index->indkey.values[0];
+	TupleTableSlot *slot	   = table_slot_create(heap, NULL);
+	float		   *vecs = palloc((size_t)max_members * dim * sizeof(float));
+
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		if (counts[c] == 0)
+			continue;
+
+		uint32_t n = 0;
+		for (uint32_t i = 0; i < counts[c]; i++)
+		{
+			if (!table_tuple_fetch_row_version(heap, &members[c][i], SnapshotAny,
+											   slot))
+				continue;
+			bool  isnull;
+			Datum val = slot_getattr(slot, vec_attnum, &isnull);
+			if (!isnull)
+			{
+				MktVector *vec = DatumGetMktVector(val);
+				float	  *dst = vecs + (size_t)n * dim;
+				memcpy(dst, vec->x, (size_t)dim * sizeof(float));
+				if (metric == DISTANCE_COSINE)
+				{
+					float nrm = mkt_l2_norm(dst, dim);
+					if (nrm > 0.0f)
+						for (Dimension d = 0; d < dim; d++)
+							dst[d] /= nrm;
+				}
+				n++;
+			}
+			ExecClearTuple(slot);
+		}
+		if (n == 0)
+			continue;
+
+		uint32_t	  kk   = (uint32_t)K < n ? (uint32_t)K : n;
+		KMeansResult *r	   = mkt_kmeans_f32(vecs, n, dim, kk, metric, NULL);
+		if (r == NULL)
+			continue;
+		for (uint32_t j = 0; j < r->nlist; j++)
+		{
+			MktVector *sv = mkt_vector_create(dim);
+			memcpy(sv->x, r->centroids + (size_t)j * dim,
+				   (size_t)dim * sizeof(float));
+			Datum values[2];
+			bool  nulls[2] = {0};
+			values[0]	   = Int32GetDatum((int32)c);
+			values[1]	   = PointerGetDatum(sv);
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values,
+								 nulls);
+		}
+		mkt_kmeans_result_destroy(r);
+	}
+
+	ExecDropSingleTupleTableSlot(slot);
+	table_close(heap, AccessShareLock);
+	relation_close(index, AccessShareLock);
+	PG_RETURN_NULL();
 }
