@@ -123,6 +123,7 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	ss->index_base.centroid_rerank = mkt_centroid_rerank;
 	ss->index_base.early_terminate = mkt_early_terminate;
 	ss->index_base.term_radius	   = (float)mkt_term_radius;
+	ss->index_base.term_alpha	   = (float)mkt_term_alpha;
 
 	UnlockReleaseBuffer(meta_buf);
 

@@ -40,6 +40,7 @@ typedef struct MktIndexBase
 	int				  centroid_rerank; /* two-stage: beam shortlist factor (0=off) */
 	bool			  early_terminate; /* skip clusters that can't hold a closer NN */
 	float			  term_radius;	   /* global max (1-cos(v,centroid)) for the bound */
+	float			  term_alpha;	   /* heuristic stop: d(q,c)^2 > alpha*kth (0=off) */
 
 	/* Two-stage rerank pt_centroid cache (PG only; NULL in standalone).
 	 * Returns the cluster's stored centroid (P^T*c, dim floats) for a posting

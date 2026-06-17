@@ -373,43 +373,49 @@ scan_clusters(
 		}
 
 		/*
-		 * Early termination (cosine): skip this cluster if even its closest
-		 * possible member can't beat the current k-th neighbor. With s =
-		 * cos(q,c) and m = cos(theta_max) (theta_max = global cluster radius),
-		 * the best member angle is theta(q,c) - theta_max, so its similarity
-		 * is at most s*m + sqrt((1-s^2)(1-m^2)); 1 minus that is a true lower
-		 * bound on member distance. Recall-safe (only prunes provably-empty
-		 * clusters); skip (not break) so it's order-independent.
+		 * Cluster-level termination (cosine). The RaBitQ scan estimates
+		 * SQUARED-L2 (||q-v||^2 = 2(1-cos) for unit vectors), so the topk
+		 * threshold is in those units; ||q-c||^2 = 2(1-cos(q,c)).
+		 *
+		 * (a) Recall-safe radius skip: any member m has ||q-m|| >= ||q-c|| - R
+		 *     with R = max||m-c|| = sqrt(2*term_radius); if (||q-c||-R)^2 >=
+		 *     threshold the cluster can't contribute. (In 768-D R is large, so
+		 *     this rarely fires.)
+		 * (b) Heuristic stop (term_alpha): once ||q-c||^2 > alpha*threshold,
+		 *     stop scanning entirely. NOT recall-safe (a member could sit up to
+		 *     R closer than the centroid), but beam order is ascending in
+		 *     ||q-c|| so this prunes the tail; alpha trades recall for speed.
 		 */
-		if (idx->early_terminate && idx->term_radius > 0.0f &&
-			idx->metric == DISTANCE_COSINE)
+		if (idx->metric == DISTANCE_COSINE &&
+			((idx->early_terminate && idx->term_radius > 0.0f) ||
+			 idx->term_alpha > 0.0f))
 		{
-			/*
-			 * The RaBitQ scan estimates SQUARED-L2 (||q-v||^2 = 2(1-cos) for
-			 * unit vectors), so the topk threshold is in those units — work
-			 * the bound in squared-L2. With s=cos(q,c), ||q-c|| = sqrt(2(1-s))
-			 * and the cluster radius R = max||m-c|| = sqrt(2*term_radius)
-			 * (term_radius = max(1-cos(m,c))). Any member m satisfies
-			 * ||q-m|| >= ||q-c|| - R, so (||q-c||-R)^2 is a lower bound on its
-			 * squared-L2 distance. If that already exceeds the k-th threshold,
-			 * the cluster can't contribute — skip it (recall-safe).
-			 */
-			float thr = mkt_topk_threshold(topk);
-			float nc  = mkt_l2_norm(pt_cent, dim);
+			float nc = mkt_l2_norm(pt_cent, dim);
 			if (nc > 0.0f)
 			{
 				float s	   = mkt_dot_product(qs->pt_query, pt_cent, dim) / nc;
 				float dqc2 = 2.0f * (1.0f - s); /* ||q-c||^2 */
-				float dqc  = dqc2 > 0.0f ? sqrtf(dqc2) : 0.0f;
-				float R	   = sqrtf(2.0f * idx->term_radius);
-				if (dqc > R)
+				float thr  = mkt_topk_threshold(topk);
+
+				if (idx->early_terminate && idx->term_radius > 0.0f)
 				{
-					float lb = dqc - R;
-					if (lb * lb >= thr)
+					float dqc = dqc2 > 0.0f ? sqrtf(dqc2) : 0.0f;
+					float R	  = sqrtf(2.0f * idx->term_radius);
+					if (dqc > R)
 					{
-						mkt_posting_scan_end_cluster(&qs->pscan);
-						continue;
+						float lb = dqc - R;
+						if (lb * lb >= thr)
+						{
+							mkt_posting_scan_end_cluster(&qs->pscan);
+							continue;
+						}
 					}
+				}
+
+				if (idx->term_alpha > 0.0f && dqc2 > idx->term_alpha * thr)
+				{
+					mkt_posting_scan_end_cluster(&qs->pscan);
+					break; /* remaining clusters are farther — stop */
 				}
 			}
 		}

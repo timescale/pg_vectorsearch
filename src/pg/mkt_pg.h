@@ -38,6 +38,7 @@ extern bool		   mkt_route_ip;	   /* route by IP (keep centroid norm) */
 extern int		   mkt_centroid_rerank; /* two-stage beam shortlist factor */
 extern bool		   mkt_early_terminate; /* stop scanning when no closer NN possible */
 extern double	   mkt_term_radius;	   /* global max (1-cos(v,centroid)) */
+extern double	   mkt_term_alpha;	   /* heuristic stop factor (0 = off) */
 extern relopt_kind mktann_relopt_kind; /* index reloption kind */
 
 /* ----------------------------------------------------------------

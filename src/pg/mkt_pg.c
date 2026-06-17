@@ -30,6 +30,7 @@ bool   mkt_route_ip		 = false;
 int	   mkt_centroid_rerank = 0;
 bool   mkt_early_terminate = false;
 double mkt_term_radius	 = 0.0; /* global max (1-cos(v,centroid)); 0 = off */
+double mkt_term_alpha	 = 0.0; /* heuristic stop: d(q,c)^2 > alpha*kth; 0 = off */
 static bool mkt_profile = false;
 
 static void
@@ -182,6 +183,24 @@ _PG_init(void)
 			0.0,
 			0.0,
 			2.0,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomRealVariable(
+			"mkt.term_alpha",
+			"Heuristic early stop: stop scanning when a cluster's centroid "
+			"distance^2 exceeds alpha times the current k-th neighbor distance.",
+			"NOT recall-safe (a closer member could exist within the cluster "
+			"radius); alpha trades recall for speed (larger = safer/slower). "
+			"0 disables. Cosine only. Captures the per-query depth variation "
+			"that the recall-safe radius bound cannot.",
+			&mkt_term_alpha,
+			0.0,
+			0.0,
+			100.0,
 			PGC_USERSET,
 			0,
 			NULL,
