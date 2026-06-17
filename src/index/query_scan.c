@@ -372,6 +372,38 @@ scan_clusters(
 			continue;
 		}
 
+		/*
+		 * Early termination (cosine): skip this cluster if even its closest
+		 * possible member can't beat the current k-th neighbor. With s =
+		 * cos(q,c) and m = cos(theta_max) (theta_max = global cluster radius),
+		 * the best member angle is theta(q,c) - theta_max, so its similarity
+		 * is at most s*m + sqrt((1-s^2)(1-m^2)); 1 minus that is a true lower
+		 * bound on member distance. Recall-safe (only prunes provably-empty
+		 * clusters); skip (not break) so it's order-independent.
+		 */
+		if (idx->early_terminate && idx->term_radius > 0.0f &&
+			idx->metric == DISTANCE_COSINE)
+		{
+			float thr = mkt_topk_threshold(topk);
+			float nc  = mkt_l2_norm(pt_cent, dim);
+			if (nc > 0.0f)
+			{
+				float s = mkt_dot_product(qs->pt_query, pt_cent, dim) / nc;
+				float m = 1.0f - idx->term_radius; /* cos(theta_max) */
+				if (s <= m)					/* theta(q,c) >= theta_max */
+				{
+					float s2	 = s * s < 1.0f ? s * s : 1.0f;
+					float m2	 = m * m;
+					float cos_lb = s * m + sqrtf((1.0f - s2) * (1.0f - m2));
+					if (1.0f - cos_lb >= thr)
+					{
+						mkt_posting_scan_end_cluster(&qs->pscan);
+						continue;
+					}
+				}
+			}
+		}
+
 		mkt_rabitq_init_query_state(
 				&qs->cluster_qs, qs->pt_query, pt_cent, dim, mode);
 

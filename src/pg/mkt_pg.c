@@ -26,8 +26,10 @@ int	 mkt_query_limit   = 0;
 int	 mkt_fastscan_bits = 16;
 bool mkt_rerank		   = true;
 int	 mkt_rerank_pool   = 0;
-bool mkt_route_ip	   = false;
-int	 mkt_centroid_rerank = 0;
+bool   mkt_route_ip		 = false;
+int	   mkt_centroid_rerank = 0;
+bool   mkt_early_terminate = false;
+double mkt_term_radius	 = 0.0; /* global max (1-cos(v,centroid)); 0 = off */
 static bool mkt_profile = false;
 
 static void
@@ -148,6 +150,38 @@ _PG_init(void)
 			"weight. Posting scan and rerank are unaffected.",
 			&mkt_route_ip,
 			false,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomBoolVariable(
+			"mkt.early_terminate",
+			"Stop scanning clusters once none can hold a closer neighbor.",
+			"Recall-safe: skips a cluster when its best possible member "
+			"distance (from the centroid and the global cluster radius) is "
+			"already worse than the current k-th neighbor. Needs "
+			"mkt.term_radius set. Cosine only.",
+			&mkt_early_terminate,
+			false,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomRealVariable(
+			"mkt.term_radius",
+			"Global cluster radius (max 1-cos(vector,centroid)) for early "
+			"termination.",
+			"The max angular extent of any cluster; used as the triangle-"
+			"inequality bound. 0 disables. Must over-estimate the true max to "
+			"stay recall-safe.",
+			&mkt_term_radius,
+			0.0,
+			0.0,
+			2.0,
 			PGC_USERSET,
 			0,
 			NULL,

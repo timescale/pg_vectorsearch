@@ -38,6 +38,8 @@ typedef struct MktIndexBase
 	int				  fastscan; /* 0=off, 8=uint8, 16=uint16 hacc */
 	bool			  route_ip; /* route by <q,c> (keep centroid magnitude) */
 	int				  centroid_rerank; /* two-stage: beam shortlist factor (0=off) */
+	bool			  early_terminate; /* skip clusters that can't hold a closer NN */
+	float			  term_radius;	   /* global max (1-cos(v,centroid)) for the bound */
 
 	/* Two-stage rerank pt_centroid cache (PG only; NULL in standalone).
 	 * Returns the cluster's stored centroid (P^T*c, dim floats) for a posting

@@ -121,6 +121,8 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	ss->index_base.fastscan = has_fastscan ? mkt_fastscan_bits : 0;
 	ss->index_base.route_ip		   = mkt_route_ip;
 	ss->index_base.centroid_rerank = mkt_centroid_rerank;
+	ss->index_base.early_terminate = mkt_early_terminate;
+	ss->index_base.term_radius	   = (float)mkt_term_radius;
 
 	UnlockReleaseBuffer(meta_buf);
 

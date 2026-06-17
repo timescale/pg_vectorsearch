@@ -36,6 +36,8 @@ extern bool		   mkt_rerank;		   /* enable reranking (default: true) */
 extern int		   mkt_rerank_pool;	   /* max candidates to rerank (0=all) */
 extern bool		   mkt_route_ip;	   /* route by IP (keep centroid norm) */
 extern int		   mkt_centroid_rerank; /* two-stage beam shortlist factor */
+extern bool		   mkt_early_terminate; /* stop scanning when no closer NN possible */
+extern double	   mkt_term_radius;	   /* global max (1-cos(v,centroid)) */
 extern relopt_kind mktann_relopt_kind; /* index reloption kind */
 
 /* ----------------------------------------------------------------
