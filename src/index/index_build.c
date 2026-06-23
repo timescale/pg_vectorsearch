@@ -225,15 +225,18 @@ mkt_find_soar_secondary_cand(
 		Dimension		dim,
 		uint32_t		primary_cluster,
 		const float	   *normalized_residual,
-		double			lambda)
+		double			lambda,
+		double			ortho_cutoff)
 {
 	/* Same OA objective as mkt_find_soar_secondary, but iterating a
 	 * candidate leaf list rather than all leaves. The l2 >= best_oa prune
 	 * still applies (lambda * gap^2 >= 0). */
-	float	 qrv	 = mkt_dot_product(normalized_residual, vec, dim);
-	float	 lam	 = (float)lambda;
-	float	 best_oa = INFINITY;
-	uint32_t best_c	 = primary_cluster;
+	float	 qrv	  = mkt_dot_product(normalized_residual, vec, dim);
+	float	 lam	  = (float)lambda;
+	float	 best_oa  = INFINITY;
+	float	 best_l2  = 0.0f;
+	float	 best_gap = 0.0f;
+	uint32_t best_c	  = primary_cluster;
 
 	for (uint32_t k = 0; k < ncand; k++)
 	{
@@ -252,9 +255,21 @@ mkt_find_soar_secondary_cand(
 		float oa  = l2 + lam * gap * gap;
 		if (oa < best_oa)
 		{
-			best_oa = oa;
-			best_c	= i;
+			best_oa	 = oa;
+			best_l2	 = l2;
+			best_gap = gap;
+			best_c	 = i;
 		}
+	}
+
+	/* Adaptive spilling: drop the replica when the chosen secondary's
+	 * residual is too parallel to the primary residual (low marginal
+	 * coverage). q = 1 - (r_hat . r2)^2 / ||r2||^2 in [0,1]; 1 = orthogonal. */
+	if (ortho_cutoff > 0.0 && best_c != primary_cluster && best_l2 > 0.0f)
+	{
+		float q = 1.0f - (best_gap * best_gap) / best_l2;
+		if (q < (float)ortho_cutoff)
+			best_c = primary_cluster;
 	}
 
 	return best_c;

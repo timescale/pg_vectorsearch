@@ -77,6 +77,12 @@ typedef struct MktCentroidSearchState
 	Dimension				dim;
 	DistanceMetric			metric;	  /* distance metric for routing */
 	bool					route_ip; /* score <q,c> w/o normalizing centroid */
+	/* Scale applied to the per-centroid RaBitQ error bound used only for
+	 * topk pruning during routing. 0 = prune by the point estimate (no
+	 * error slack): far fewer subtree expansions, recall-neutral on tested
+	 * data since the error-overlap extras never changed the top-nprobe
+	 * selection. 1 = legacy conservative bound. */
+	float					error_scale;
 	/* Pre-allocated scratch. Must be non-NULL and sized for at least
 	 * this state's beam_width / nprobe. */
 	MktCentroidScratch	   *scratch;

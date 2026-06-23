@@ -457,11 +457,12 @@ mkt_index_build(
 				.centroid_format = idx->base.centroid_format,
 				/* The tree expands to up to fan_out^nlevels leaves; size the
 				 * shared regions for that bound (matches the PG caller). */
-				.nlist			  = max_nlist,
-				.fan_out		  = fan_out,
-				.soar_lambda	  = config->soar_lambda,
-				.boundary_epsilon = config->boundary_epsilon,
-				.fastscan		  = config->fastscan != 0,
+				.nlist			   = max_nlist,
+				.fan_out		   = fan_out,
+				.soar_lambda	   = config->soar_lambda,
+				.boundary_epsilon  = config->boundary_epsilon,
+				.soar_ortho_cutoff = config->soar_ortho_cutoff,
+				.fastscan		   = config->fastscan != 0,
 		};
 
 		double heap_tuples = 0, indtuples = 0, soar_dupes = 0;
@@ -618,10 +619,11 @@ mkt_index_build(
 
 	double				 ms_setup = (double)(now_ns() - t_phase) / 1e6;
 	const MktBuildParams bp		  = {
-				  .dim				= dim,
-				  .metric			= config->metric,
-				  .soar_lambda		= config->soar_lambda,
-				  .boundary_epsilon = config->boundary_epsilon,
+				  .dim				 = dim,
+				  .metric			 = config->metric,
+				  .soar_lambda		 = config->soar_lambda,
+				  .boundary_epsilon	 = config->boundary_epsilon,
+				  .soar_ortho_cutoff = config->soar_ortho_cutoff,
 	  };
 
 	/* --- Phase: posting --- */

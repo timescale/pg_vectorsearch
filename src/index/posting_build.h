@@ -32,6 +32,7 @@ typedef struct MktBuildParams
 	DistanceMetric metric;
 	double		   soar_lambda;
 	double		   boundary_epsilon;
+	double		   soar_ortho_cutoff;
 } MktBuildParams;
 
 typedef struct MktBuildAssignment
@@ -139,6 +140,7 @@ typedef struct MktSecondaryBatch
 	uint32_t *c2;		 /* [max_batch] arg of best2 */
 	float	 *best_oa;	 /* [max_batch] best SOAR oa distance */
 	uint32_t *best_oa_c; /* [max_batch] arg of best_oa */
+	float	 *best_oa_q; /* [max_batch] orthogonality quality of best_oa_c */
 } MktSecondaryBatch;
 
 /* True when CBLAS is available (the batched path needs sgemm). */

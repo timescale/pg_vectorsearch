@@ -35,6 +35,8 @@ extern int		   mkt_fastscan_bits;  /* fastscan LUT bits (8 or 16) */
 extern bool		   mkt_rerank;		   /* enable reranking (default: true) */
 extern int		   mkt_rerank_pool;	   /* max candidates to rerank (0=all) */
 extern bool		   mkt_route_ip;	   /* route by IP (keep centroid norm) */
+extern double mkt_centroid_error_scale;
+extern double mkt_centroid_beam_scale;
 extern int		   mkt_centroid_rerank; /* two-stage beam shortlist factor */
 extern bool		   mkt_early_terminate; /* stop scanning when no closer NN possible */
 extern double	   mkt_term_radius;	   /* global max (1-cos(v,centroid)) */
@@ -110,6 +112,7 @@ typedef struct MktannOptions
 	double avq_eta;				 /* AVQ anisotropic eta (0/<=1 = off) */
 	double soar_lambda;			 /* SOAR replication lambda (0=off) */
 	double boundary_epsilon;	 /* boundary replication threshold (0=off) */
+	double soar_ortho_cutoff;	 /* min SOAR secondary orthogonality (0=keep all) */
 	int	   centroid_compression; /* MktCentroidCompression */
 	bool   fastscan;			 /* use VPSHUFB fastscan posting format */
 	bool   centroid_fastscan;	 /* emit FASTSCAN-format centroid pages */
@@ -122,7 +125,7 @@ typedef struct MktannOptions
 
 #define MKTANN_DEFAULT_NLIST 0
 #define MKTANN_MIN_NLIST	 0
-#define MKTANN_MAX_NLIST	 100000
+#define MKTANN_MAX_NLIST	 2000000
 
 /*
  * MktannGetDistanceMode - Resolve effective distance mode for a scan.

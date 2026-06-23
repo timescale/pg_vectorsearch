@@ -779,10 +779,11 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	PostingCbState cbs = {
 			.tree		= tree,
-			.bp			= {.dim				 = dim,
-						   .metric			 = shared->metric,
-						   .soar_lambda		 = shared->soar_lambda,
-						   .boundary_epsilon = shared->boundary_epsilon},
+			.bp			= {.dim				  = dim,
+						   .metric			  = shared->metric,
+						   .soar_lambda		  = shared->soar_lambda,
+						   .boundary_epsilon  = shared->boundary_epsilon,
+						   .soar_ortho_cutoff = shared->soar_ortho_cutoff},
 			.bufs		= bufs,
 			.ws			= &ws,
 			.indtuples	= 0,

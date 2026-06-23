@@ -37,6 +37,8 @@ typedef struct MktQueryStats
 	uint64_t centroid_ns;		/* time in centroid beam search */
 	uint64_t posting_ns;		/* time in posting-list scan */
 	uint64_t rerank_ns;			/* time in exact rerank (heap fetches) */
+	uint64_t prep_ns;			/* time in query prepare + P^T rotation */
+	uint64_t build_ns;			/* time building results after rerank */
 } MktQueryStats;
 
 /* ----------------------------------------------------------------

@@ -221,10 +221,11 @@ build_callback(
 	VectorRef  vref = MktVectorToRef(vec);
 
 	const MktBuildParams bp = {
-			.dim			  = bs->params.dim,
-			.metric			  = bs->params.metric,
-			.soar_lambda	  = bs->params.soar_lambda,
-			.boundary_epsilon = bs->params.boundary_epsilon,
+			.dim			   = bs->params.dim,
+			.metric			   = bs->params.metric,
+			.soar_lambda	   = bs->params.soar_lambda,
+			.boundary_epsilon  = bs->params.boundary_epsilon,
+			.soar_ortho_cutoff = bs->params.soar_ortho_cutoff,
 	};
 
 	MktBuildAssignment asgn = mkt_build_assign_vector(
@@ -425,10 +426,11 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 							? (uint32_t)opts->kmeans_nredo
 							: 1;
 
-	p->avq_eta			= (opts != NULL) ? opts->avq_eta : 0.0;
-	p->soar_lambda		= (opts != NULL) ? opts->soar_lambda : 0.0;
-	p->boundary_epsilon = (opts != NULL) ? opts->boundary_epsilon : 0.0;
-	p->fastscan			= (opts != NULL) ? opts->fastscan : false;
+	p->avq_eta			 = (opts != NULL) ? opts->avq_eta : 0.0;
+	p->soar_lambda		 = (opts != NULL) ? opts->soar_lambda : 0.0;
+	p->boundary_epsilon	 = (opts != NULL) ? opts->boundary_epsilon : 0.0;
+	p->soar_ortho_cutoff = (opts != NULL) ? opts->soar_ortho_cutoff : 0.0;
+	p->fastscan			 = (opts != NULL) ? opts->fastscan : false;
 }
 
 /* ----------------------------------------------------------------
@@ -770,11 +772,12 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				.centroid_format  = bs.params.centroid_format,
 				.nlist			  = bs.params.nlist,
 				.fan_out		  = bs.params.fan_out,
-				.soar_lambda	  = bs.params.soar_lambda,
-				.boundary_epsilon = bs.params.boundary_epsilon,
-				.fastscan		  = bs.params.fastscan,
-				.kmeans_nredo	  = bs.params.kmeans_nredo,
-				.avq_eta		  = bs.params.avq_eta,
+				.soar_lambda	   = bs.params.soar_lambda,
+				.boundary_epsilon  = bs.params.boundary_epsilon,
+				.soar_ortho_cutoff = bs.params.soar_ortho_cutoff,
+				.fastscan		   = bs.params.fastscan,
+				.kmeans_nredo	   = bs.params.kmeans_nredo,
+				.avq_eta		   = bs.params.avq_eta,
 		};
 
 		pgstat_progress_update_param(

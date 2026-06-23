@@ -371,11 +371,12 @@ score_page(
 
 				Distance est = f_add_arr[v] + g_add -
 							   2.0f * f_rescale_arr[v] * final_dot;
-				/* Matches rabitq_lower_bound(): err_margin =
-				 * multiplier * f_error * g_error, plus a small
-				 * floating-point margin proportional to |est|. */
-				Distance err = err_mult * f_error_arr[v] * g_error +
-							   1e-5f * fabsf(est);
+				/* Error bound scaled by state->error_scale (0 = prune by
+				 * point estimate only; the conservative bound expands
+				 * extra subtrees with no recall benefit for routing). */
+				Distance err =
+						state->error_scale *
+						(err_mult * f_error_arr[v] * g_error + 1e-5f * fabsf(est));
 
 				uint32_t page_idx			  = g_start + v;
 				cands[cand_count].child_blkno = child[v];
@@ -589,9 +590,12 @@ mkt_centroid_beam_search(
 	if (stats)
 		stats->dist_calcs += raw_count;
 
-	/* Enforce beam_width >= nprobe */
-	if (beam_width < nprobe)
-		beam_width = nprobe;
+	/* beam_width is the per-level keep for INTERMEDIATE levels; the leaf
+	 * level always keeps nprobe (see `keep` below). Allowing beam_width <
+	 * nprobe narrows the intermediate beam (fewer centroids scored) at a
+	 * recall/speed tradeoff; callers control it via centroid_beam_scale. */
+	if (beam_width < 1)
+		beam_width = 1;
 
 	/* Select top-K from level 0 into buf_b.
 	 *

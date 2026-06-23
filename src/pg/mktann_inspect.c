@@ -26,6 +26,8 @@
 #include <utils/builtins.h>
 #include <utils/rel.h>
 
+#include <math.h>
+
 #include "algo/kmeans.h"
 #include "algo/vecops.h"
 #include "index/centroid_page.h"
@@ -895,6 +897,466 @@ mkt_cluster_subcentroids(PG_FUNCTION_ARGS)
 
 	ExecDropSingleTupleTableSlot(slot);
 	table_close(heap, AccessShareLock);
+	relation_close(index, AccessShareLock);
+	PG_RETURN_NULL();
+}
+
+/* ----------------------------------------------------------------
+ * mkt.cluster_entry_points(regclass, k, max_members)
+ *
+ * Diagnostic for the multiple-entry-points routing idea: for each leaf
+ * cluster, gather up to max_members of its actual member vectors from
+ * the heap and select K of them by farthest-point-sampling (FPS) —
+ * seed = member farthest from the cluster mean (a boundary point),
+ * then greedily add the member maximizing the min-distance to the
+ * already-selected set. Returns the K members as routing "entry
+ * points", tagged with their FPS order k=1..K so one materialization
+ * serves every K (filter k <= K). Lets us test (offline, no rebuild)
+ * whether routing by nearest-of-K real member entry points reaches the
+ * NN-clusters at a LOWER nprobe than the single centroid (mean) does.
+ * Unlike cluster_subcentroids (interior k-means means), these are real
+ * boundary-covering points — the variable prior tests never probed.
+ * Read-only. Cosine: vectors are normalized before selection.
+ * ---------------------------------------------------------------- */
+PG_FUNCTION_INFO_V1(mkt_cluster_entry_points);
+
+Datum
+mkt_cluster_entry_points(PG_FUNCTION_ARGS)
+{
+	Oid			   indexoid	   = PG_GETARG_OID(0);
+	int32		   K		   = PG_GETARG_INT32(1);
+	int32		   max_members = PG_GETARG_INT32(2);
+	ReturnSetInfo *rsinfo	   = (ReturnSetInfo *)fcinfo->resultinfo;
+
+	if (K < 1)
+		K = 1;
+	if (max_members < K)
+		max_members = K;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	Relation index = relation_open(indexoid, AccessShareLock);
+
+	Buffer meta_buf = ReadBuffer(index, 0);
+	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
+	const MktannMetaPage *meta =
+			(const MktannMetaPage *)PageGetSpecialPointer(BufferGetPage(meta_buf));
+	Dimension	   dim	  = (Dimension)meta->dim;
+	uint32_t	   nlist  = meta->nlist;
+	DistanceMetric metric = (DistanceMetric)meta->metric;
+	UnlockReleaseBuffer(meta_buf);
+
+	/* Per-cluster member-tid buffers (capped at max_members). */
+	ItemPointerData **members = palloc0((size_t)nlist * sizeof(ItemPointerData *));
+	uint32_t		 *counts  = palloc0((size_t)nlist * sizeof(uint32_t));
+
+	BlockNumber nblocks = RelationGetNumberOfBlocks(index);
+	for (BlockNumber blkno = 1; blkno < nblocks; blkno++)
+	{
+		Buffer buf = ReadBuffer(index, blkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		Page page = BufferGetPage(buf);
+
+		if (PageGetSpecialSize(page) == MAXALIGN(sizeof(MktPostingPageOpaque)))
+		{
+			const MktPostingPageOpaque *op = mkt_posting_opaque(page);
+			if (op->page_id == MKT_POSTING_PAGE_ID &&
+				(op->flags & MKT_POSTING_PAGE_FASTSCAN) &&
+				op->cluster_id < nlist)
+			{
+				uint32_t c = op->cluster_id;
+				if (counts[c] < (uint32_t)max_members)
+				{
+					char *content = (op->flags & MKT_POSTING_PAGE_FIRST)
+										? mkt_posting_content_first(page, dim)
+										: mkt_posting_content(page);
+					uint32_t cnt	 = op->entry_count;
+					uint32_t ngroups = (cnt + MKT_FASTSCAN_GROUP - 1) /
+									   MKT_FASTSCAN_GROUP;
+					for (uint32_t g = 0;
+						 g < ngroups && counts[c] < (uint32_t)max_members; g++)
+					{
+						ItemPointerData *tids =
+								mkt_fastscan_group_tids(content, g, dim);
+						uint32_t gc = cnt - g * MKT_FASTSCAN_GROUP;
+						if (gc > MKT_FASTSCAN_GROUP)
+							gc = MKT_FASTSCAN_GROUP;
+						for (uint32_t v = 0;
+							 v < gc && counts[c] < (uint32_t)max_members; v++)
+						{
+							if (members[c] == NULL)
+								members[c] = palloc(
+										(size_t)max_members *
+										sizeof(ItemPointerData));
+							members[c][counts[c]++] = tids[v];
+						}
+					}
+				}
+			}
+		}
+		UnlockReleaseBuffer(buf);
+	}
+
+	/* Heap + a slot to fetch member vectors. */
+	Relation		heap	   = table_open(index->rd_index->indrelid,
+											AccessShareLock);
+	int				vec_attnum = index->rd_index->indkey.values[0];
+	TupleTableSlot *slot	   = table_slot_create(heap, NULL);
+	float		   *vecs = palloc((size_t)max_members * dim * sizeof(float));
+	float		   *mean = palloc(dim * sizeof(float));
+	float		   *mind = palloc((size_t)max_members * sizeof(float));
+	uint32_t	   *sel	 = palloc((size_t)max_members * sizeof(uint32_t));
+
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		if (counts[c] == 0)
+			continue;
+
+		uint32_t n = 0;
+		for (uint32_t i = 0; i < counts[c]; i++)
+		{
+			if (!table_tuple_fetch_row_version(heap, &members[c][i], SnapshotAny,
+											   slot))
+				continue;
+			bool  isnull;
+			Datum val = slot_getattr(slot, vec_attnum, &isnull);
+			if (!isnull)
+			{
+				MktVector *vec = DatumGetMktVector(val);
+				float	  *dst = vecs + (size_t)n * dim;
+				memcpy(dst, vec->x, (size_t)dim * sizeof(float));
+				if (metric == DISTANCE_COSINE)
+				{
+					float nrm = mkt_l2_norm(dst, dim);
+					if (nrm > 0.0f)
+						for (Dimension d = 0; d < dim; d++)
+							dst[d] /= nrm;
+				}
+				n++;
+			}
+			ExecClearTuple(slot);
+		}
+		if (n == 0)
+			continue;
+
+		uint32_t kk = (uint32_t)K < n ? (uint32_t)K : n;
+
+		/* FPS seed: member farthest from the cluster mean (a boundary
+		 * point — the kind a near-but-orphaned query approaches). */
+		memset(mean, 0, (size_t)dim * sizeof(float));
+		for (uint32_t i = 0; i < n; i++)
+			for (Dimension d = 0; d < dim; d++)
+				mean[d] += vecs[(size_t)i * dim + d];
+		for (Dimension d = 0; d < dim; d++)
+			mean[d] /= (float)n;
+
+		uint32_t s0	  = 0;
+		float	 best = -1.0f;
+		for (uint32_t i = 0; i < n; i++)
+		{
+			float dd = mkt_l2_distance_squared(vecs + (size_t)i * dim, mean, dim);
+			if (dd > best)
+			{
+				best = dd;
+				s0	 = i;
+			}
+		}
+		sel[0] = s0;
+		for (uint32_t i = 0; i < n; i++)
+			mind[i] = mkt_l2_distance_squared(
+					vecs + (size_t)i * dim, vecs + (size_t)s0 * dim, dim);
+
+		/* Greedy max-min: each new entry point is the member farthest
+		 * from all already-selected entry points. */
+		for (uint32_t j = 1; j < kk; j++)
+		{
+			uint32_t nx	  = 0;
+			float	 bb	  = -1.0f;
+			for (uint32_t i = 0; i < n; i++)
+				if (mind[i] > bb)
+				{
+					bb = mind[i];
+					nx = i;
+				}
+			sel[j] = nx;
+			for (uint32_t i = 0; i < n; i++)
+			{
+				float dd = mkt_l2_distance_squared(
+						vecs + (size_t)i * dim, vecs + (size_t)nx * dim, dim);
+				if (dd < mind[i])
+					mind[i] = dd;
+			}
+		}
+
+		for (uint32_t j = 0; j < kk; j++)
+		{
+			MktVector *sv = mkt_vector_create(dim);
+			memcpy(sv->x, vecs + (size_t)sel[j] * dim,
+				   (size_t)dim * sizeof(float));
+			Datum values[3];
+			bool  nulls[3] = {0};
+			values[0]	   = Int32GetDatum((int32)c);
+			values[1]	   = Int32GetDatum((int32)(j + 1));
+			values[2]	   = PointerGetDatum(sv);
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values,
+								 nulls);
+		}
+	}
+
+	ExecDropSingleTupleTableSlot(slot);
+	table_close(heap, AccessShareLock);
+	relation_close(index, AccessShareLock);
+	PG_RETURN_NULL();
+}
+
+/* ----------------------------------------------------------------
+ * mkt.aniso_scanned(regclass, query, nprobe, alpha, max_members)
+ *
+ * Diagnostic for ANISOTROPIC (direction-aware) cluster routing. Point-
+ * based ideas (sub-centroids, entry points) replaced the mean and died
+ * to high-D false-near noise. This KEEPS the mean-similarity ranking and
+ * adds a smooth aggregate correction crediting a cluster for how much its
+ * member residuals SPREAD TOWARD the query:
+ *
+ *   score(c) = <q, c_hat> + alpha * sqrt( mean_i <q, v_i - c_hat>^2 )
+ *              \__ mean __/   \__ RMS residual projection onto q ______/
+ *
+ * c_hat = unit mean of sampled members (cosine center); v_i = unit
+ * members. Ranks clusters by score DESC, returns top-nprobe (rank,
+ * cluster_id). alpha=0 == mean-only routing, so alpha=0 vs alpha>0
+ * isolates the anisotropic term on identical data. Per-backend cache
+ * (built once) amortizes member-gather across a query sweep. Read-only.
+ * ---------------------------------------------------------------- */
+typedef struct AnisoCache
+{
+	Oid		  relid;
+	uint32_t  nlist;
+	Dimension dim;
+	uint32_t  M;	   /* members stored per cluster */
+	float	 *cmean;   /* nlist*dim, unit-normalized sampled mean */
+	float	 *members; /* nlist*M*dim, unit-normalized */
+	uint16_t *mcount;
+	bool	  valid;
+} AnisoCache;
+
+static AnisoCache aniso = {0};
+
+static void
+aniso_cache_build(Relation index, uint32_t M)
+{
+	Buffer meta_buf = ReadBuffer(index, 0);
+	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
+	const MktannMetaPage *meta =
+			(const MktannMetaPage *)PageGetSpecialPointer(BufferGetPage(meta_buf));
+	Dimension	   dim	  = (Dimension)meta->dim;
+	uint32_t	   nlist  = meta->nlist;
+	DistanceMetric metric = (DistanceMetric)meta->metric;
+	UnlockReleaseBuffer(meta_buf);
+
+	MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
+	float	 *cmean	  = palloc0((size_t)nlist * dim * sizeof(float));
+	float	 *members = MemoryContextAllocHuge(
+			 TopMemoryContext, (size_t)nlist * M * dim * sizeof(float));
+	uint16_t *mcount  = palloc0((size_t)nlist * sizeof(uint16_t));
+	MemoryContextSwitchTo(old);
+
+	/* Pass 1: gather up to M member tids per cluster. */
+	ItemPointerData **tids = palloc0((size_t)nlist * sizeof(ItemPointerData *));
+	BlockNumber		  nblocks = RelationGetNumberOfBlocks(index);
+	for (BlockNumber blkno = 1; blkno < nblocks; blkno++)
+	{
+		Buffer buf = ReadBuffer(index, blkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		Page page = BufferGetPage(buf);
+		if (PageGetSpecialSize(page) == MAXALIGN(sizeof(MktPostingPageOpaque)))
+		{
+			const MktPostingPageOpaque *op = mkt_posting_opaque(page);
+			if (op->page_id == MKT_POSTING_PAGE_ID &&
+				(op->flags & MKT_POSTING_PAGE_FASTSCAN) && op->cluster_id < nlist)
+			{
+				uint32_t c = op->cluster_id;
+				if (mcount[c] < M)
+				{
+					char *content = (op->flags & MKT_POSTING_PAGE_FIRST)
+										? mkt_posting_content_first(page, dim)
+										: mkt_posting_content(page);
+					uint32_t cnt	 = op->entry_count;
+					uint32_t ngroups = (cnt + MKT_FASTSCAN_GROUP - 1) /
+									   MKT_FASTSCAN_GROUP;
+					for (uint32_t g = 0; g < ngroups && mcount[c] < M; g++)
+					{
+						ItemPointerData *gt =
+								mkt_fastscan_group_tids(content, g, dim);
+						uint32_t gc = cnt - g * MKT_FASTSCAN_GROUP;
+						if (gc > MKT_FASTSCAN_GROUP)
+							gc = MKT_FASTSCAN_GROUP;
+						for (uint32_t v = 0; v < gc && mcount[c] < M; v++)
+						{
+							if (tids[c] == NULL)
+								tids[c] = palloc((size_t)M *
+												 sizeof(ItemPointerData));
+							tids[c][mcount[c]++] = gt[v];
+						}
+					}
+				}
+			}
+		}
+		UnlockReleaseBuffer(buf);
+	}
+
+	/* Pass 2: fetch vectors, normalize, store members, accumulate mean. */
+	Relation		heap	   = table_open(index->rd_index->indrelid,
+											AccessShareLock);
+	int				vec_attnum = index->rd_index->indkey.values[0];
+	TupleTableSlot *slot	   = table_slot_create(heap, NULL);
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		uint32_t got = 0;
+		for (uint32_t i = 0; i < mcount[c]; i++)
+		{
+			if (!table_tuple_fetch_row_version(heap, &tids[c][i], SnapshotAny,
+											   slot))
+				continue;
+			bool  isnull;
+			Datum val = slot_getattr(slot, vec_attnum, &isnull);
+			if (!isnull)
+			{
+				MktVector *vec = DatumGetMktVector(val);
+				float	  *dst = members + ((size_t)c * M + got) * dim;
+				memcpy(dst, vec->x, (size_t)dim * sizeof(float));
+				if (metric == DISTANCE_COSINE)
+				{
+					float nrm = mkt_l2_norm(dst, dim);
+					if (nrm > 0.0f)
+						for (Dimension d = 0; d < dim; d++)
+							dst[d] /= nrm;
+				}
+				float *cm = cmean + (size_t)c * dim;
+				for (Dimension d = 0; d < dim; d++)
+					cm[d] += dst[d];
+				got++;
+			}
+			ExecClearTuple(slot);
+		}
+		mcount[c] = (uint16_t)got;
+		if (got > 0)
+		{
+			float *cm  = cmean + (size_t)c * dim;
+			float  nrm = mkt_l2_norm(cm, dim);
+			if (nrm > 0.0f)
+				for (Dimension d = 0; d < dim; d++)
+					cm[d] /= nrm;
+		}
+	}
+	ExecDropSingleTupleTableSlot(slot);
+	table_close(heap, AccessShareLock);
+
+	aniso.relid	  = RelationGetRelid(index);
+	aniso.nlist	  = nlist;
+	aniso.dim	  = dim;
+	aniso.M		  = M;
+	aniso.cmean	  = cmean;
+	aniso.members = members;
+	aniso.mcount  = mcount;
+	aniso.valid	  = true;
+}
+
+typedef struct AnisoScore
+{
+	float	score;
+	int32_t cid;
+} AnisoScore;
+
+static int
+aniso_cmp_desc(const void *a, const void *b)
+{
+	float x = ((const AnisoScore *)a)->score;
+	float y = ((const AnisoScore *)b)->score;
+	return (x < y) - (x > y);
+}
+
+PG_FUNCTION_INFO_V1(mkt_aniso_scanned);
+
+Datum
+mkt_aniso_scanned(PG_FUNCTION_ARGS)
+{
+	Oid			   indexoid	   = PG_GETARG_OID(0);
+	MktVector	  *q		   = DatumGetMktVector(PG_GETARG_DATUM(1));
+	int32		   nprobe	   = PG_GETARG_INT32(2);
+	float		   alpha	   = (float)PG_GETARG_FLOAT8(3);
+	int32		   M		   = PG_GETARG_INT32(4);
+	ReturnSetInfo *rsinfo	   = (ReturnSetInfo *)fcinfo->resultinfo;
+
+	if (M < 1)
+		M = 1;
+	if (nprobe < 1)
+		nprobe = 1;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	Relation index = relation_open(indexoid, AccessShareLock);
+
+	if (!aniso.valid || aniso.relid != RelationGetRelid(index) ||
+		aniso.M != (uint32_t)M)
+	{
+		/* (Re)build: drop stale cache, then build at the requested M. */
+		if (aniso.cmean)
+			pfree(aniso.cmean);
+		if (aniso.members)
+			pfree(aniso.members);
+		if (aniso.mcount)
+			pfree(aniso.mcount);
+		aniso.cmean = aniso.members = NULL;
+		aniso.mcount = NULL;
+		aniso.valid	 = false;
+		aniso_cache_build(index, (uint32_t)M);
+	}
+
+	Dimension dim	= aniso.dim;
+	uint32_t  nlist = aniso.nlist;
+
+	/* Normalize the query (cosine). */
+	float *qn  = palloc((size_t)dim * sizeof(float));
+	memcpy(qn, q->x, (size_t)dim * sizeof(float));
+	float qnrm = mkt_l2_norm(qn, dim);
+	if (qnrm > 0.0f)
+		for (Dimension d = 0; d < dim; d++)
+			qn[d] /= qnrm;
+
+	AnisoScore *scores = palloc((size_t)nlist * sizeof(AnisoScore));
+	uint32_t	nscored = 0;
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		if (aniso.mcount[c] == 0)
+			continue;
+		float qc = mkt_dot_product(qn, aniso.cmean + (size_t)c * dim, dim);
+		float sumsq = 0.0f;
+		uint32_t mc = aniso.mcount[c];
+		for (uint32_t i = 0; i < mc; i++)
+		{
+			float pi = mkt_dot_product(
+					qn, aniso.members + ((size_t)c * aniso.M + i) * dim, dim);
+			float dd = pi - qc;
+			sumsq += dd * dd;
+		}
+		float var = sumsq / (float)mc;
+		scores[nscored].score = qc + alpha * sqrtf(var);
+		scores[nscored].cid	  = (int32)c;
+		nscored++;
+	}
+
+	qsort(scores, nscored, sizeof(AnisoScore), aniso_cmp_desc);
+
+	uint32_t topn = (uint32_t)nprobe < nscored ? (uint32_t)nprobe : nscored;
+	for (uint32_t i = 0; i < topn; i++)
+	{
+		Datum values[2];
+		bool  nulls[2] = {0};
+		values[0]	   = Int32GetDatum((int32)(i + 1));
+		values[1]	   = Int32GetDatum(scores[i].cid);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
 	relation_close(index, AccessShareLock);
 	PG_RETURN_NULL();
 }

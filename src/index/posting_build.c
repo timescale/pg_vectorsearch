@@ -200,7 +200,8 @@ mkt_build_assign_vector(
 						dim,
 						best_c,
 						r,
-						params->soar_lambda);
+						params->soar_lambda,
+						params->soar_ortho_cutoff);
 			}
 			else
 			{
@@ -274,6 +275,7 @@ mkt_secondary_batch_init(
 	s->c2			  = mkt_alloc(max_batch * sizeof(uint32_t));
 	s->best_oa		  = mkt_alloc(max_batch * sizeof(float));
 	s->best_oa_c	  = mkt_alloc(max_batch * sizeof(uint32_t));
+	s->best_oa_q	  = mkt_alloc(max_batch * sizeof(float));
 
 	for (uint32_t j = 0; j < nleaves; j++)
 		s->cent_norms[j] =
@@ -293,6 +295,7 @@ mkt_secondary_batch_free(MktSecondaryBatch *s)
 	mkt_free(s->c2);
 	mkt_free(s->best_oa);
 	mkt_free(s->best_oa_c);
+	mkt_free(s->best_oa_q);
 	*s = (MktSecondaryBatch){0};
 }
 
@@ -361,6 +364,7 @@ mkt_secondary_batch_assign(
 		s->c2[i]		= primary[i];
 		s->best_oa[i]	= INFINITY;
 		s->best_oa_c[i] = primary[i];
+		s->best_oa_q[i] = 1.0f;
 	}
 
 	/* SOAR residual (normalized, from the primary centroid) for every
@@ -444,6 +448,8 @@ mkt_secondary_batch_assign(
 					{
 						s->best_oa[i]	= oa;
 						s->best_oa_c[i] = j;
+						s->best_oa_q[i] =
+								(l2 > 0.0f) ? 1.0f - (gap * gap) / l2 : 1.0f;
 					}
 				}
 			}
@@ -471,8 +477,12 @@ mkt_secondary_batch_assign(
 		if (!should_replicate)
 			out_secondary[i] = MKT_INVALID_CLUSTER;
 		else if (has_soar)
-			out_secondary[i] = (s->best_oa_c[i] != p) ? s->best_oa_c[i]
-													  : MKT_INVALID_CLUSTER;
+		{
+			bool keep = s->best_oa_c[i] != p &&
+						(params->soar_ortho_cutoff <= 0.0 ||
+						 s->best_oa_q[i] >= (float)params->soar_ortho_cutoff);
+			out_secondary[i] = keep ? s->best_oa_c[i] : MKT_INVALID_CLUSTER;
+		}
 		else
 			out_secondary[i] = (s->c2[i] != p) ? s->c2[i]
 											   : MKT_INVALID_CLUSTER;
