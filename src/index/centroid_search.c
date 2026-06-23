@@ -211,7 +211,8 @@ score_page(
 			cands[cand_count].child_blkno = meta->child_blkno;
 			ItemPointerSet(&cands[cand_count].origin, page_blkno, page_idx);
 			cands[cand_count].distance = cs->distances[j];
-			cands[cand_count].error = cs->distances[j] - cs->lower_bounds[j];
+			cands[cand_count].error	   = state->error_scale *
+									  (cs->distances[j] - cs->lower_bounds[j]);
 			cand_count++;
 		}
 		break;
@@ -344,8 +345,9 @@ score_page(
 				/* Matches rabitq_lower_bound(): err_margin =
 				 * multiplier * f_error * g_error, plus a small
 				 * floating-point margin proportional to |est|. */
-				Distance err = err_mult * f_error_arr[v] * g_error +
-							   1e-5f * fabsf(est);
+				Distance err = state->error_scale *
+							   (err_mult * f_error_arr[v] * g_error +
+								1e-5f * fabsf(est));
 
 				uint32_t page_idx			  = g_start + v;
 				cands[cand_count].child_blkno = child[v];

@@ -140,14 +140,15 @@ search_centroids(
 	}
 
 	MktCentroidSearchState search = {
-			.qstate		= rqs,
-			.query		= qvec,
-			.storage	= idx->centroid_storage,
-			.beam_width = nprobe,
-			.nprobe		= nprobe,
-			.dim		= dim,
-			.metric		= idx->metric,
-			.scratch	= qs->centroid_scratch,
+			.qstate		 = rqs,
+			.query		 = qvec,
+			.storage	 = idx->centroid_storage,
+			.beam_width	 = nprobe,
+			.nprobe		 = nprobe,
+			.dim		 = dim,
+			.metric		 = idx->metric,
+			.error_scale = idx->centroid_error_scale,
+			.scratch	 = qs->centroid_scratch,
 	};
 
 	return mkt_centroid_beam_search(

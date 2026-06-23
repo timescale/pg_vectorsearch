@@ -19,11 +19,12 @@
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-int	 mkt_distance_mode = MKT_DISTANCE_MODE_DEFAULT;
-int	 mkt_nprobe		   = 10;
-int	 mkt_query_limit   = 0;
-int	 mkt_fastscan_bits = 16;
-bool mkt_rerank		   = true;
+int	   mkt_distance_mode		= MKT_DISTANCE_MODE_DEFAULT;
+int	   mkt_nprobe				= 10;
+int	   mkt_query_limit			= 0;
+int	   mkt_fastscan_bits		= 16;
+bool   mkt_rerank				= true;
+double mkt_centroid_error_scale = 0.0;
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
@@ -122,6 +123,34 @@ _PG_init(void)
 			NULL,
 			&mkt_rerank,
 			true,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomRealVariable(
+			"mkt.centroid_error_scale",
+			"Centroid-search beam width, as a multiple of the RaBitQ "
+			"distance-error margin.",
+			"During centroid routing each candidate centroid has an "
+			"approximate (RaBitQ-quantized) distance plus an error margin; "
+			"this multiplies that margin when deciding which centroids the "
+			"beam keeps at each tree level. 0 (default) ignores the margin "
+			"and "
+			"keeps only the closest centroids by point estimate -- the "
+			"narrowest and fastest beam. 1 widens the beam to also keep "
+			"centroids whose error interval still overlaps the cutoff -- ones "
+			"that might rank among the closest once quantization error is "
+			"accounted for -- the most recall-conservative setting, at the "
+			"cost of scoring more centroids. Larger values widen it further. "
+			"Applies to both compressed centroid formats (RaBitQ and "
+			"FASTSCAN); float/half centroid pages have exact distances (no "
+			"error margin) and are unaffected.",
+			&mkt_centroid_error_scale,
+			0.0,
+			0.0,
+			10.0,
 			PGC_USERSET,
 			0,
 			NULL,
