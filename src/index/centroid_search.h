@@ -76,6 +76,7 @@ typedef struct MktCentroidSearchState
 	uint32_t				nprobe;		/* target leaf count */
 	Dimension				dim;
 	DistanceMetric			metric; /* distance metric for routing */
+	float error_scale; /* scales pruning error bound (1=default, 0=drop) */
 	/* Pre-allocated scratch. Must be non-NULL and sized for at least
 	 * this state's beam_width / nprobe. */
 	MktCentroidScratch *scratch;

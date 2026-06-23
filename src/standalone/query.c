@@ -287,14 +287,15 @@ exec_fallback(
 
 	/* Beam search */
 	MktCentroidSearchState state = {
-			.qstate		= qs,
-			.query		= qvec,
-			.storage	= &idx->centroid_storage.base,
-			.beam_width = nprobe,
-			.nprobe		= nprobe,
-			.dim		= dim,
-			.metric		= idx->base.metric,
-			.scratch	= ctx->centroid_scratch,
+			.qstate		 = qs,
+			.query		 = qvec,
+			.storage	 = &idx->centroid_storage.base,
+			.beam_width	 = nprobe,
+			.nprobe		 = nprobe,
+			.dim		 = dim,
+			.metric		 = idx->base.metric,
+			.error_scale = 0.0f,
+			.scratch	 = ctx->centroid_scratch,
 	};
 
 	MktCentroidSearchStats beam_stats = {0};

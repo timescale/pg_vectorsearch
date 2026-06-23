@@ -162,6 +162,7 @@ mktann_index_base_init(Relation index, MktIndexBase *base)
 	*base		   = c->base;
 	base->params   = get_or_create_params(c->base.dim, c->base.rabitq_seed);
 	base->fastscan = c->has_fastscan ? mkt_fastscan_bits : 0;
+	base->centroid_error_scale = (float)mkt_centroid_error_scale;
 }
 
 MktannScanInfo

@@ -28,12 +28,14 @@
  * GUC variables
  * ---------------------------------------------------------------- */
 
-extern int		   mkt_distance_mode;  /* MktDistanceMode */
-extern int		   mkt_nprobe;		   /* clusters to probe per query */
-extern int		   mkt_query_limit;	   /* max results per query (0=auto) */
-extern int		   mkt_fastscan_bits;  /* fastscan LUT bits (8 or 16) */
-extern bool		   mkt_rerank;		   /* enable reranking (default: true) */
-extern relopt_kind mktann_relopt_kind; /* index reloption kind */
+extern int	  mkt_distance_mode;		/* MktDistanceMode */
+extern int	  mkt_nprobe;				/* clusters to probe per query */
+extern int	  mkt_query_limit;			/* max results per query (0=auto) */
+extern int	  mkt_fastscan_bits;		/* fastscan LUT bits (8 or 16) */
+extern bool	  mkt_rerank;				/* enable reranking (default: true) */
+extern double mkt_centroid_error_scale; /* scales centroid pruning error bound
+										   (1=default, 0=drop) */
+extern relopt_kind mktann_relopt_kind;	/* index reloption kind */
 
 /* ----------------------------------------------------------------
  * Datum conversion macros
