@@ -259,7 +259,9 @@ mkt_pbuild_setup_shared(
 	 * sampling more rows than exist just over-sizes the sample DSM (at
 	 * high nlist, nlist*256 can far exceed ntuples and blow past shared
 	 * memory: e.g. nlist=480k → 123M samples vs 50M rows → 377GB DSM). */
-	uint32_t total_samples	= Max(10000, (int)(nlist * 256));
+	uint32_t total_samples	= (uint32_t)Max(
+			(uint64_t)10000,
+			(uint64_t)nlist * (uint64_t)mkt_kmeans_sample_per_centroid);
 	double	 rel_tuples		= heap->rd_rel->reltuples;
 	if (rel_tuples > 0.0 && total_samples > (uint32_t)rel_tuples)
 		total_samples = (uint32_t)rel_tuples;

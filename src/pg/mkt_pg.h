@@ -37,6 +37,7 @@ extern int		   mkt_rerank_pool;	   /* max candidates to rerank (0=all) */
 extern bool		   mkt_route_ip;	   /* route by IP (keep centroid norm) */
 extern double mkt_centroid_error_scale;
 extern double mkt_centroid_beam_scale;
+extern int    mkt_kmeans_sample_per_centroid;
 extern int		   mkt_centroid_rerank; /* two-stage beam shortlist factor */
 extern bool		   mkt_early_terminate; /* stop scanning when no closer NN possible */
 extern double	   mkt_term_radius;	   /* global max (1-cos(v,centroid)) */

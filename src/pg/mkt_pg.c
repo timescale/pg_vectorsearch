@@ -29,6 +29,7 @@ int	 mkt_rerank_pool   = 0;
 bool   mkt_route_ip		 = false;
 double mkt_centroid_error_scale = 0.0;
 double mkt_centroid_beam_scale  = 1.0;
+int	   mkt_kmeans_sample_per_centroid = 256;
 int	   mkt_centroid_rerank = 0;
 bool   mkt_early_terminate = false;
 double mkt_term_radius	 = 0.0; /* global max (1-cos(v,centroid)); 0 = off */
@@ -188,6 +189,21 @@ _PG_init(void)
 			1.0,
 			0.01,
 			1.0,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.kmeans_sample_per_centroid",
+			"K-means training samples per centroid at build time.",
+			"Sample budget is nlist * this value, capped to the table row "
+			"count. Higher trains centroids on more data (experiment knob).",
+			&mkt_kmeans_sample_per_centroid,
+			256,
+			1,
+			1000000,
 			PGC_USERSET,
 			0,
 			NULL,
