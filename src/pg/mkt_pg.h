@@ -110,6 +110,7 @@ typedef struct MktannOptions
 	double avq_eta;				 /* AVQ anisotropic eta (0/<=1 = off) */
 	double soar_lambda;			 /* SOAR replication lambda (0=off) */
 	double boundary_epsilon;	 /* boundary replication threshold (0=off) */
+	double soar_ortho_cutoff;	 /* min SOAR secondary orthogonality (0=keep all) */
 	int	   centroid_compression; /* MktCentroidCompression */
 	bool   fastscan;			 /* use VPSHUFB fastscan posting format */
 	bool   centroid_fastscan;	 /* emit FASTSCAN-format centroid pages */

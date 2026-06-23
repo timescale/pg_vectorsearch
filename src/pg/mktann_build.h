@@ -33,6 +33,7 @@ typedef struct MktannBuildParams
 	double			  avq_eta;
 	double			  soar_lambda;
 	double			  boundary_epsilon;
+	double			  soar_ortho_cutoff;
 	bool			  fastscan;
 } MktannBuildParams;
 

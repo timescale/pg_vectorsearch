@@ -158,6 +158,12 @@ uint32_t mkt_find_soar_secondary(
  * domain. Makes the per-vector cost O(ncand) rather than O(nleaves), so
  * build time is independent of nlist / tree depth. cand_leaves are leaf
  * indices into leaf_centroids.
+ *
+ * ortho_cutoff (0 = off) gates replication on the chosen secondary's
+ * orthogonality quality q = 1 - (r_hat . r2)^2 / ||r2||^2, where r2 is the
+ * secondary residual. When q < ortho_cutoff the secondary is too parallel to
+ * the primary residual to add coverage, so primary_cluster is returned (the
+ * caller treats that as "no secondary").
  */
 uint32_t mkt_find_soar_secondary_cand(
 		const float	   *vec,
@@ -167,6 +173,7 @@ uint32_t mkt_find_soar_secondary_cand(
 		Dimension		dim,
 		uint32_t		primary_cluster,
 		const float	   *normalized_residual,
-		double			lambda);
+		double			lambda,
+		double			ortho_cutoff);
 
 #endif /* MKT_INDEX_BUILD_H */

@@ -102,6 +102,7 @@ typedef struct MktBuildShared
 	uint32_t		  fan_out;
 	double			  soar_lambda;
 	double			  boundary_epsilon;
+	double			  soar_ortho_cutoff;
 	bool			  fastscan;
 	MktCentroidFormat centroid_format;
 	uint64_t		  rabitq_seed;
@@ -633,6 +634,7 @@ typedef struct MktBuildConfig
 	uint32_t		  fan_out;
 	double			  soar_lambda;
 	double			  boundary_epsilon;
+	double			  soar_ortho_cutoff;
 	bool			  fastscan;
 	uint32_t		  kmeans_nredo; /* k-means restarts (>=1) */
 	double			  avq_eta;		/* AVQ anisotropic eta (<=1 = off) */

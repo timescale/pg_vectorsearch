@@ -76,6 +76,7 @@ typedef struct MktIndexConfig
 	uint32_t		  km_max_iter;		/* k-means iterations (0 = default) */
 	double			  soar_lambda;		/* SOAR replication (0 = off) */
 	double			  boundary_epsilon; /* boundary gate threshold (0 = off) */
+	double			  soar_ortho_cutoff; /* min SOAR orthogonality (0 = keep all) */
 	bool			  encode_rabitq;	/* encode posting lists with RaBitQ */
 	MktPostingFormat  posting_fmt;		/* flat or pages */
 	int				  fastscan;			/* 0=off, 8=uint8 LUT, 16=uint16 LUT */

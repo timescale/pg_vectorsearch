@@ -313,6 +313,14 @@ _PG_init(void)
 			0.0,
 			100.0,
 			NoLock);
+	add_real_reloption(
+			mktann_relopt_kind,
+			"soar_ortho_cutoff",
+			"Min SOAR secondary orthogonality quality to replicate (0 = keep all)",
+			0.0,
+			0.0,
+			1.0,
+			NoLock);
 	add_enum_reloption(
 			mktann_relopt_kind,
 			"centroid_compression",

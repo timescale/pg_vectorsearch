@@ -351,6 +351,7 @@ mkt_pbuild_setup_shared(
 	shared->subtree_slot_size	   = slot_size;
 	shared->soar_lambda			   = config->soar_lambda;
 	shared->boundary_epsilon	   = config->boundary_epsilon;
+	shared->soar_ortho_cutoff	   = config->soar_ortho_cutoff;
 	shared->fastscan			   = config->fastscan;
 	shared->centroid_format		   = config->centroid_format;
 	shared->rabitq_seed			   = rabitq_seed;
