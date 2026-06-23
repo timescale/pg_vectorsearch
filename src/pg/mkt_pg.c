@@ -25,6 +25,7 @@ int	   mkt_query_limit			= 0;
 int	   mkt_fastscan_bits		= 16;
 bool   mkt_rerank				= true;
 double mkt_centroid_error_scale = 0.0;
+double mkt_centroid_beam_scale	= 0.25;
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
@@ -151,6 +152,30 @@ _PG_init(void)
 			0.0,
 			0.0,
 			10.0,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomRealVariable(
+			"mkt.centroid_beam_scale",
+			"Intermediate centroid beam width as a fraction of nprobe.",
+			"Sets the beam width at the intermediate tree levels to this "
+			"fraction of nprobe; the leaf level always returns the full "
+			"nprobe. 0.25 (default) keeps a narrow intermediate beam, scoring "
+			"fewer centroids per level during routing -- the leaf level still "
+			"returns nprobe because beam_width*fan_out covers the top-nprobe "
+			"leaves. 1.0 keeps the full beam (beam_width = nprobe) at every "
+			"level -- the widest and most recall-conservative setting. "
+			"Smaller "
+			"values score fewer centroids and are faster at high nprobe, with "
+			"a small recall risk if a near leaf's ancestor falls outside the "
+			"narrowed beam.",
+			&mkt_centroid_beam_scale,
+			0.25,
+			0.01,
+			1.0,
 			PGC_USERSET,
 			0,
 			NULL,

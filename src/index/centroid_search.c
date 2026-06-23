@@ -537,9 +537,11 @@ mkt_centroid_beam_search(
 	if (stats)
 		stats->dist_calcs += raw_count;
 
-	/* Enforce beam_width >= nprobe */
-	if (beam_width < nprobe)
-		beam_width = nprobe;
+	/* beam_width is the intermediate-level keep; the leaf level always
+	 * returns nprobe (see keep below), and beam_width*fan_out >= nprobe
+	 * covers the top-nprobe leaves, so beam_width may be < nprobe. */
+	if (beam_width < 1)
+		beam_width = 1;
 
 	/* Select top-K from level 0 into buf_b.
 	 *
