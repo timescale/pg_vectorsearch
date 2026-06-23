@@ -16,13 +16,20 @@
 typedef MemoryContext		  MktMemCtx;
 typedef MemoryContextCallback MktMemCtxCallback;
 
-/* Direct mappings to palloc family */
-#define mkt_alloc(size)				 palloc(size)
-#define mkt_alloc0(size)			 palloc0(size)
-#define mkt_realloc(ptr, size)		 repalloc(ptr, size)
+/* Direct mappings to palloc family.
+ * Use the HUGE variants so legitimately-large build buffers (k-means
+ * sample shards, per-cluster arrays at high nlist) are not rejected by
+ * the 1GB MaxAllocSize cap. For sub-1GB allocations these behave
+ * identically to plain palloc (same context, same cost). */
+#define mkt_alloc(size)				 palloc_extended((size), MCXT_ALLOC_HUGE)
+#define mkt_alloc0(size) \
+	palloc_extended((size), MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO)
+#define mkt_realloc(ptr, size)		 repalloc_huge((ptr), (size))
 #define mkt_free(ptr)				 pfree(ptr)
-#define mkt_memctx_alloc(ctx, size)	 MemoryContextAlloc(ctx, size)
-#define mkt_memctx_alloc0(ctx, size) MemoryContextAllocZero(ctx, size)
+#define mkt_memctx_alloc(ctx, size)	 \
+	MemoryContextAllocExtended((ctx), (size), MCXT_ALLOC_HUGE)
+#define mkt_memctx_alloc0(ctx, size) \
+	MemoryContextAllocExtended((ctx), (size), MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO)
 #define mkt_alloc_aligned(sz, al)	 palloc_aligned(sz, al, 0)
 #define mkt_free_aligned(ptr)		 pfree(ptr)
 

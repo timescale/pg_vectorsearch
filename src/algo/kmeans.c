@@ -988,6 +988,22 @@ mkt_kmeans(
 		metric != DISTANCE_L2)
 		algo = KMEANS_ALGO_LLOYD;
 
+	/* Elkan keeps an O(nvecs*nlist) lower-bound array; for large nlist it
+	 * exceeds the 1GB single-allocation limit (palloc MaxAllocSize), and its
+	 * single-bound pruning also degrades at high k. Fall back to CBLAS-Lloyd
+	 * (tiled GEMM assignment: fast at high k, only block*k working memory)
+	 * when BLAS is available, else Hamerly (O(nvecs) memory but weak pruning
+	 * at high k). */
+	if (algo == KMEANS_ALGO_ELKAN &&
+		(uint64_t)nvecs * nlist * sizeof(float) > (uint64_t)0x40000000)
+	{
+#ifdef MKT_HAVE_CBLAS
+		algo = KMEANS_ALGO_CBLAS;
+#else
+		algo = KMEANS_ALGO_HAMERLY;
+#endif
+	}
+
 	/* Select algorithm vtable */
 	const KMeansAlgoOps *algo_ops;
 	switch (algo)
