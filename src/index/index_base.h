@@ -37,6 +37,8 @@ typedef struct MktIndexBase
 	MktCentroidFormat centroid_format;
 	int				  fastscan; /* 0=off, 8=uint8, 16=uint16 hacc */
 	float centroid_error_scale; /* scales centroid pruning error (1=default) */
+	float centroid_beam_scale;	/* intermediate beam width / nprobe
+								   (0.25=default) */
 } MktIndexBase;
 
 static inline RaBitQParams *

@@ -139,11 +139,15 @@ search_centroids(
 		rqs = &qs->beam_qs;
 	}
 
+	uint32_t beam_w = (uint32_t)(nprobe * idx->centroid_beam_scale);
+	if (beam_w < 1)
+		beam_w = 1;
+
 	MktCentroidSearchState search = {
 			.qstate		 = rqs,
 			.query		 = qvec,
 			.storage	 = idx->centroid_storage,
-			.beam_width	 = nprobe,
+			.beam_width	 = beam_w,
 			.nprobe		 = nprobe,
 			.dim		 = dim,
 			.metric		 = idx->metric,
