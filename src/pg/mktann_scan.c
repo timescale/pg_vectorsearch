@@ -106,7 +106,7 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 
 	Dimension dim		 = meta->dim;
 	uint32_t  max_k		 = MKT_DEFAULT_K;
-	uint32_t  max_nprobe = meta->nlist < 512 ? meta->nlist : 512;
+	uint32_t  max_nprobe = meta->nlist < 4096 ? meta->nlist : 4096;
 
 	/* Populate MktIndexBase from meta page */
 	ss->index_base.dim			   = dim;
@@ -120,6 +120,8 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	bool has_fastscan		= meta->flags & MKT_META_FLAG_FASTSCAN;
 	ss->index_base.fastscan = has_fastscan ? mkt_fastscan_bits : 0;
 	ss->index_base.route_ip		   = mkt_route_ip;
+	ss->index_base.centroid_error_scale = (float)mkt_centroid_error_scale;
+	ss->index_base.centroid_beam_scale = (float)mkt_centroid_beam_scale;
 	ss->index_base.centroid_rerank = mkt_centroid_rerank;
 	ss->index_base.early_terminate = mkt_early_terminate;
 	ss->index_base.term_radius	   = (float)mkt_term_radius;
@@ -279,6 +281,8 @@ execute_search(IndexScanDesc scan)
 	ss->stats.centroid_search_ns	  = qstats.centroid_ns;
 	ss->stats.posting_scan_ns		  = qstats.posting_ns;
 	ss->stats.rerank_ns				  = qstats.rerank_ns;
+	ss->stats.prep_ns				  = qstats.prep_ns;
+	ss->stats.build_ns				  = qstats.build_ns;
 
 	/* Copy results from result ordering. The error-bound rerank can return
 	 * more than the beginscan max_k (the rerank set is inflated beyond k to
@@ -383,7 +387,7 @@ mkt_scanned_clusters(PG_FUNCTION_ARGS)
 	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
 			BufferGetPage(meta_buf));
 	Dimension dim		   = meta->dim;
-	uint32_t  max_nprobe   = meta->nlist < 512 ? meta->nlist : 512;
+	uint32_t  max_nprobe   = meta->nlist < 4096 ? meta->nlist : 4096;
 	bool	  has_fastscan = (meta->flags & MKT_META_FLAG_FASTSCAN) != 0;
 
 	MktIndexBase ib;
@@ -396,6 +400,8 @@ mkt_scanned_clusters(PG_FUNCTION_ARGS)
 	ib.rabitq_seed	   = meta->rabitq_seed;
 	ib.fastscan		   = has_fastscan ? mkt_fastscan_bits : 0;
 	ib.route_ip		   = mkt_route_ip;
+	ib.centroid_error_scale = (float)mkt_centroid_error_scale;
+	ib.centroid_beam_scale = (float)mkt_centroid_beam_scale;
 	ib.centroid_rerank = mkt_centroid_rerank;
 	UnlockReleaseBuffer(meta_buf);
 

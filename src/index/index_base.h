@@ -37,6 +37,10 @@ typedef struct MktIndexBase
 	MktCentroidFormat centroid_format;
 	int				  fastscan; /* 0=off, 8=uint8, 16=uint16 hacc */
 	bool			  route_ip; /* route by <q,c> (keep centroid magnitude) */
+	float			  centroid_error_scale; /* scale on centroid routing error
+											 * bound (0=prune by point est) */
+	float			  centroid_beam_scale;	/* intermediate beam width =
+											 * nprobe*scale (1.0=legacy) */
 	int				  centroid_rerank; /* two-stage: beam shortlist factor (0=off) */
 	bool			  early_terminate; /* skip clusters that can't hold a closer NN */
 	float			  term_radius;	   /* global max (1-cos(v,centroid)) for the bound */

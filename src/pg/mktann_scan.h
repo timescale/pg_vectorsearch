@@ -24,6 +24,8 @@ typedef struct MktannScanStats
 	uint64_t centroid_search_ns;
 	uint64_t posting_scan_ns;
 	uint64_t rerank_ns;
+	uint64_t prep_ns;
+	uint64_t build_ns;
 
 	/* Centroid beam search */
 	uint32_t clusters_scanned;

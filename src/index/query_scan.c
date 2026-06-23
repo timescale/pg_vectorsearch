@@ -160,16 +160,27 @@ search_centroids(
 		rqs = &qs->beam_qs;
 	}
 
+	/* Intermediate beam width can be narrower than nprobe: the leaf level
+	 * still returns nprobe, but higher levels only need enough candidates
+	 * to cover the top-nprobe leaves. Scoring fewer centroids at high
+	 * nprobe is the dominant centroid-search saving. */
+	float	 bscale = idx->centroid_beam_scale > 0.0f ? idx->centroid_beam_scale
+													  : 1.0f;
+	uint32_t beam_w = (uint32_t)(nprobe * bscale);
+	if (beam_w < 1)
+		beam_w = 1;
+
 	MktCentroidSearchState search = {
 			.qstate		= rqs,
 			.query		= qvec,
 			.storage	= idx->centroid_storage,
-			.beam_width = nprobe,
+			.beam_width = beam_w,
 			.nprobe		= nprobe,
 			.dim		= dim,
-			.metric		= idx->metric,
-			.route_ip	= idx->route_ip,
-			.scratch	= qs->centroid_scratch,
+			.metric		 = idx->metric,
+			.route_ip	 = idx->route_ip,
+			.error_scale = idx->centroid_error_scale,
+			.scratch	 = qs->centroid_scratch,
 	};
 
 	return mkt_centroid_beam_search(
@@ -480,6 +491,7 @@ mkt_query_execute(
 	mkt_topk_reset(&qs->topk);
 	qs->topk.k = k;
 
+	uint64_t tprep = mkt_now_ns();
 	const float *qvec = prepare_query(qs, query);
 
 	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
@@ -567,6 +579,8 @@ mkt_query_execute(
 		stats->centroid_ns		   = t1 - t0;
 		stats->posting_ns		   = t2 - t1;
 		stats->rerank_ns		   = t3 - t2;
+		stats->prep_ns			   = t0 - tprep;
+		stats->build_ns			   = t3 >= t2 ? (mkt_now_ns() - t3) : 0;
 	}
 
 	return qs->nresults;

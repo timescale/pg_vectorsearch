@@ -27,6 +27,8 @@ int	 mkt_fastscan_bits = 16;
 bool mkt_rerank		   = true;
 int	 mkt_rerank_pool   = 0;
 bool   mkt_route_ip		 = false;
+double mkt_centroid_error_scale = 0.0;
+double mkt_centroid_beam_scale  = 1.0;
 int	   mkt_centroid_rerank = 0;
 bool   mkt_early_terminate = false;
 double mkt_term_radius	 = 0.0; /* global max (1-cos(v,centroid)); 0 = off */
@@ -73,9 +75,27 @@ static relopt_enum_elt_def centroid_compression_relopt_members[] = {
 
 void _PG_init(void);
 
+#ifdef MKT_HAVE_CBLAS
+extern void openblas_set_num_threads(int);
+#endif
+
 void
 _PG_init(void)
 {
+#ifdef MKT_HAVE_CBLAS
+	/*
+	 * Each PG backend (and each parallel build worker) is a separate
+	 * process. With OpenBLAS defaulting to one thread per core, every
+	 * small BLAS call (e.g. the per-query P^T·q rotation) would spawn
+	 * threads-per-core — on a many-core box the thread spawn/join
+	 * overhead dwarfs the tiny matrix op, and parallel builds would
+	 * oversubscribe (workers × cores). meerkat's runtime BLAS ops are
+	 * small; parallelism comes from PG worker processes, not BLAS
+	 * threads. Pin BLAS to one thread per process.
+	 */
+	openblas_set_num_threads(1);
+#endif
+
 	DefineCustomEnumVariable(
 			"mkt.distance_mode",
 			"RaBitQ distance computation mode.",
@@ -136,6 +156,38 @@ _PG_init(void)
 			NULL,
 			&mkt_rerank,
 			true,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomRealVariable(
+			"mkt.centroid_error_scale",
+			"Scale on the centroid routing error bound used for topk pruning.",
+			"0 (default) prunes the centroid beam by the point estimate only "
+			"(far fewer subtree expansions, recall-neutral on tested data). "
+			"1.0 restores the legacy conservative error bound.",
+			&mkt_centroid_error_scale,
+			0.0,
+			0.0,
+			10.0,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomRealVariable(
+			"mkt.centroid_beam_scale",
+			"Intermediate centroid beam width as a fraction of nprobe.",
+			"1.0 (default) keeps beam_width=nprobe at every tree level. <1 "
+			"keeps a narrower beam at intermediate levels (scores far fewer "
+			"centroids at high nprobe); the leaf level still returns nprobe.",
+			&mkt_centroid_beam_scale,
+			1.0,
+			0.01,
+			1.0,
 			PGC_USERSET,
 			0,
 			NULL,

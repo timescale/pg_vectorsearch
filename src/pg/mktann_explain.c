@@ -89,6 +89,10 @@ mktann_explain_hook(
 			es);
 	ExplainPropertyFloat(
 			"Rerank Time", "us", (double)stats->rerank_ns / 1000.0, 1, es);
+	ExplainPropertyFloat(
+			"Prep+Rotate Time", "us", (double)stats->prep_ns / 1000.0, 1, es);
+	ExplainPropertyFloat(
+			"Result Build Time", "us", (double)stats->build_ns / 1000.0, 1, es);
 
 	ExplainCloseGroup("Mktann", "Mktann", true, es);
 }
