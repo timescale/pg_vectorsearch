@@ -118,7 +118,7 @@ typedef struct MktannOptions
 
 #define MKTANN_DEFAULT_NLIST 0
 #define MKTANN_MIN_NLIST	 0
-#define MKTANN_MAX_NLIST	 100000
+#define MKTANN_MAX_NLIST	 2000000
 
 /*
  * MktannGetDistanceMode - Resolve effective distance mode for a scan.

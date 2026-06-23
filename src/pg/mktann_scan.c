@@ -98,7 +98,7 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	MktannScanInfo info = mktann_cache_scan_info(index);
 
 	uint32_t max_k		  = MKT_DEFAULT_K;
-	uint32_t max_nprobe	  = info.nlist < 512 ? info.nlist : 512;
+	uint32_t max_nprobe	  = info.nlist < 4096 ? info.nlist : 4096;
 	bool	 has_fastscan = ss->index_base.fastscan != 0;
 
 	/* Initialize PG storage */
