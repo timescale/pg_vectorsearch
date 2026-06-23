@@ -175,6 +175,59 @@ SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 99999);
 -- Error: not an mktann index
 SELECT mkt.convert_posting_to_fastscan('idx_btree'::regclass, 0);
 
+-- =====================================================================
+-- mkt.tids_clusters
+-- =====================================================================
+
+-- Fresh index with AoS posting lists for a clean format round-trip.
+-- (Cluster ids are k-means dependent, so assert structure, not the
+-- specific tid -> cluster mapping.)
+CREATE INDEX idx_tc ON embeddings USING mktann (v)
+    WITH (centroid_compression = true);
+
+-- AoS path: every heap TID maps to exactly one cluster (no SOAR/boundary
+-- replication configured), and every reported cluster_id is a real cluster.
+SELECT count(*) = (SELECT count(*) FROM embeddings) AS all_rows_mapped,
+       count(DISTINCT tid) = count(*) AS one_cluster_each,
+       bool_and(cluster_id IN (
+           SELECT cluster_id FROM mkt.posting_pages('idx_tc'::regclass)
+       )) AS clusters_valid
+    FROM mkt.tids_clusters('idx_tc'::regclass,
+                           (SELECT array_agg(ctid) FROM embeddings));
+
+-- The mapping must be identical whether posting lists are AoS or fastscan:
+-- capture it, convert every cluster, and diff both directions (0 == equal).
+CREATE TEMP TABLE tc_aos AS
+    SELECT tid, cluster_id
+        FROM mkt.tids_clusters('idx_tc'::regclass,
+                               (SELECT array_agg(ctid) FROM embeddings));
+
+SELECT count(*) > 0 AS converted_all FROM (
+    SELECT mkt.convert_posting_to_fastscan('idx_tc'::regclass, cluster_id)
+        FROM mkt.posting_pages('idx_tc'::regclass)
+        WHERE is_first
+) t;
+
+CREATE TEMP TABLE tc_fastscan AS
+    SELECT tid, cluster_id
+        FROM mkt.tids_clusters('idx_tc'::regclass,
+                               (SELECT array_agg(ctid) FROM embeddings));
+
+SELECT
+    (SELECT count(*) FROM
+        (SELECT * FROM tc_aos EXCEPT SELECT * FROM tc_fastscan) a)
+        AS aos_only,
+    (SELECT count(*) FROM
+        (SELECT * FROM tc_fastscan EXCEPT SELECT * FROM tc_aos) b)
+        AS fastscan_only;
+
+-- A TID that isn't in the index is simply not reported (no error).
+SELECT count(*) AS absent_hits
+    FROM mkt.tids_clusters('idx_tc'::regclass, ARRAY['(99999,1)']::tid[]);
+
+DROP TABLE tc_aos;
+DROP TABLE tc_fastscan;
+
 -- Cleanup
 DROP TABLE embeddings;
 DROP TABLE wide;

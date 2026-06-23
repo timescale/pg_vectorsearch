@@ -731,6 +731,19 @@ CREATE FUNCTION mkt.posting_pages(regclass)
     AS 'MODULE_PATHNAME', 'mkt_posting_pages'
     LANGUAGE C STRICT PARALLEL SAFE;
 
+-- Map heap TIDs to the index cluster(s) that hold them (primary plus any
+-- SOAR/boundary replica). For routing analysis: compare where a query's
+-- true nearest neighbors live against which clusters the query scans.
+-- Scans posting pages directly -- each already carries its cluster_id --
+-- so it needs neither the centroid tree nor its format.
+CREATE FUNCTION mkt.tids_clusters(regclass, tid[])
+    RETURNS TABLE (
+        tid        tid,
+        cluster_id integer
+    )
+    AS 'MODULE_PATHNAME', 'mkt_tids_clusters'
+    LANGUAGE C STRICT PARALLEL SAFE;
+
 -- Convert one cluster's posting chain from AoS to fastscan format.
 -- Updates centroid entries and metadata flag atomically.
 -- Returns the new posting head block number.
