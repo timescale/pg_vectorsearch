@@ -126,13 +126,23 @@ mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out)
 uint32_t
 mkt_auto_nlist(double count)
 {
-	double	 c	   = count > 1.0 ? count : 1.0;
-	uint32_t nlist = (uint32_t)sqrt(c);
-	if (nlist < 1)
-		nlist = 1;
-	if (nlist > 10000)
-		nlist = 10000;
-	return nlist;
+	/*
+	 * Target ~256 vectors per IVF list -- the k-means convergence floor (the
+	 * densest partitioning that still gives each centroid enough training
+	 * data) and the measured recall/QPS sweet spot. The hierarchical centroid
+	 * tree keeps routing cheap even at a high list count, so nlist scales
+	 * linearly with the row count.
+	 *
+	 * Floor it at sqrt(count): for small tables count/256 collapses toward a
+	 * single list, which under-partitions and can starve the k-means build.
+	 * The linear target overtakes the sqrt floor at 256^2 = 65536 rows.
+	 * Back-ends clamp the result to their own nlist ceiling.
+	 */
+	double	 c		   = count > 1.0 ? count : 1.0;
+	uint32_t linear	   = (uint32_t)(c / 256.0 + 0.5);
+	uint32_t min_lists = (uint32_t)sqrt(c);
+	uint32_t nlist	   = linear > min_lists ? linear : min_lists;
+	return nlist < 1 ? 1 : nlist;
 }
 
 uint32_t
