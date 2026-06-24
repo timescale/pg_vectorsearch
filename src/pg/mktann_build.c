@@ -410,6 +410,8 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 										   (BLCKSZ /
 											(sizeof(float) * dim + 32));
 		p->nlist		 = mkt_auto_nlist(reltuples);
+		if (p->nlist > MKTANN_MAX_NLIST)
+			p->nlist = MKTANN_MAX_NLIST;
 	}
 
 	p->fan_out =

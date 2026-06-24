@@ -104,11 +104,12 @@ uint32_t
 mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out);
 
 /*
- * Auto-tune nlist from a (possibly estimated) vector count: sqrt(count),
- * clamped to [1, 10000]. Used by every build path when nlist is not set
+ * Auto-tune nlist from a (possibly estimated) vector count: ~one list per
+ * 256 vectors (count / 256), floored at sqrt(count) so small tables still get
+ * enough lists to build. Used by every build path when nlist is not set
  * explicitly. The count source differs by back-end (reltuples / heap-block
- * estimate in PostgreSQL, the in-memory vector count standalone), but the
- * resolution is the same.
+ * estimate in PostgreSQL, the in-memory vector count standalone). Back-ends
+ * clamp the result to their own nlist ceiling.
  */
 uint32_t mkt_auto_nlist(double count);
 
