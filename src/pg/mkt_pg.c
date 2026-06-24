@@ -19,13 +19,14 @@
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-int	   mkt_distance_mode		= MKT_DISTANCE_MODE_DEFAULT;
-int	   mkt_nprobe				= 10;
-int	   mkt_query_limit			= 0;
-int	   mkt_fastscan_bits		= 16;
-bool   mkt_rerank				= true;
-double mkt_centroid_error_scale = 0.0;
-double mkt_centroid_beam_scale	= 0.25;
+int	   mkt_distance_mode			  = MKT_DISTANCE_MODE_DEFAULT;
+int	   mkt_nprobe					  = 10;
+int	   mkt_query_limit				  = 0;
+int	   mkt_fastscan_bits			  = 16;
+bool   mkt_rerank					  = true;
+double mkt_centroid_error_scale		  = 0.0;
+double mkt_centroid_beam_scale		  = 0.25;
+int	   mkt_kmeans_sample_per_centroid = 256;
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
@@ -176,6 +177,23 @@ _PG_init(void)
 			0.25,
 			0.01,
 			1.0,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.kmeans_sample_per_centroid",
+			"K-means training samples per centroid at build time.",
+			"Sample budget is nlist * this value, capped to the table row "
+			"count. Lower it for very high nlist so the training sample stays "
+			"within MaxAllocSize / shared memory; higher trains centroids on "
+			"more data.",
+			&mkt_kmeans_sample_per_centroid,
+			256,
+			1,
+			1000000,
 			PGC_USERSET,
 			0,
 			NULL,

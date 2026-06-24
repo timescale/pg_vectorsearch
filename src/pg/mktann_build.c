@@ -434,7 +434,8 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	Dimension dim	= bs->params.dim;
 	uint32_t  nlist = bs->params.nlist;
 
-	bs->max_samples = Max(10000, (int)(nlist * 256));
+	bs->max_samples =
+			Max(10000, (int)(nlist * mkt_kmeans_sample_per_centroid));
 	{
 		size_t max_by_mem = MaxAllocSize / (dim * sizeof(float));
 		if ((size_t)bs->max_samples > max_by_mem)

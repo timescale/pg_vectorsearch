@@ -37,6 +37,9 @@ extern double mkt_centroid_error_scale; /* scales centroid pruning error bound
 										   (1=default, 0=drop) */
 extern double mkt_centroid_beam_scale;	/* intermediate beam width as fraction
 										   of nprobe (0.25=default) */
+extern int
+		mkt_kmeans_sample_per_centroid; /* k-means training samples per
+										   centroid at build (256=default) */
 extern relopt_kind mktann_relopt_kind;	/* index reloption kind */
 
 /* ----------------------------------------------------------------

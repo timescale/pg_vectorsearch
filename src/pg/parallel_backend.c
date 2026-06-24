@@ -256,17 +256,17 @@ mkt_pbuild_setup_shared(
 	uint32_t nlist_c   = (nlist + fan_out - 1) / fan_out;
 	uint64_t slot_size = mkt_hkmeans_max_blob_size(nlist_c, fan_out, dim);
 
-	/* Compute sample budget per worker. Cap to the number of rows that
-	 * actually exist: at high nlist, nlist*256 can far exceed the table
-	 * (e.g. nlist=480k -> 123M samples vs 50M rows), over-sizing the sample
-	 * DSM into hundreds of GB. estimate_rel_size() gives the planner's row
-	 * estimate: it uses the observed tuples-per-page density (reltuples /
-	 * relpages) when the table has been analyzed -- measured from the real
-	 * on-disk layout, so it counts all columns and is correct even when the
-	 * vector column is TOASTed out of line -- and falls back to a
-	 * tuple-width estimate from column stats only on a never-analyzed
+	/* Compute sample budget per worker. The per-centroid factor
+	 * (mkt.kmeans_sample_per_centroid, default 256) is tunable so very high
+	 * nlist doesn't over-size the sample DSM into hundreds of GB — e.g.
+	 * nlist=400k * 256 = 102M samples (~314GB) blows past shared memory, so
+	 * lower the factor for big indexes. Also capped to the rows that actually
+	 * exist: estimate_rel_size() gives the planner's row estimate from the
+	 * observed tuples-per-page density (correct even when the vector column is
+	 * TOASTed out of line), falling back to column stats on a never-analyzed
 	 * table. */
-	uint64_t	want_samples  = (uint64_t)nlist * 256;
+	uint64_t want_samples = (uint64_t)nlist *
+							(uint64_t)mkt_kmeans_sample_per_centroid;
 	uint32_t	total_samples = (uint32_t)Max((uint64_t)10000, want_samples);
 	BlockNumber est_pages;
 	double		est_tuples;
