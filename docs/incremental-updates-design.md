@@ -294,6 +294,46 @@ scan time to mask dead lanes; physical removal happens at compaction. The AoS
 write tier can use the entry flag directly (the currently-unused
 `MKT_POSTING_FLAG_DELETED` is the starting point).
 
+**Page-level tombstones (implemented).** When VACUUM leaves an entire page dead
+— common for bulk/range deletes (`DELETE FROM t`, `DELETE ... WHERE id BETWEEN
+...`) that wipe whole pages or clusters — the page is flagged
+`MKT_POSTING_PAGE_TOMBSTONED` and the scan skips its scoring kernel entirely
+(both AoS and FASTSCAN), only following the chain past it. This is also the
+granularity at which FASTSCAN deletes get recorded at all (packed groups can't
+be flagged per entry), detected by testing every group TID with an early exit
+on the first live one. The page stays linked in the chain — this is a scan
+optimization, not reclamation.
+
+**Page reclamation (future).** The page tombstone is the prerequisite for
+reusing the space; two options, in increasing cost/power:
+
+- *In-chain reuse on insert (cluster-local).* A new insert reuses a tombstoned
+  page in place (clear the flag, overwrite). This needs **none** of btree's
+  page-recycle machinery, precisely because the page never leaves its cluster's
+  chain: VACUUM only tombstones entries dead to *every* snapshot, so
+  overwriting loses nothing a reader needs, and a concurrent scanner that lands
+  on the page mid-reuse just sees valid same-cluster candidates (MVCC rechecks
+  them) — there's no "repurposed into a different key range" hazard. The only
+  cost is *finding* a reusable page; a per-cluster write cursor / first-free
+  hint in the head opaque keeps the common path O(1) (the bounded hunt runs
+  only when the current write page fills, the same cadence at which append
+  already allocates). Limitation: reuse is cluster-local, so under skew (some
+  clusters shrink while others grow) dead pages stay stranded in the shrunk
+  clusters.
+- *Unlink + FSM (global).* Unlink an all-dead page (`prev->next_blkno =
+  page->next_blkno`) and record it in the Free Space Map for *any* cluster to
+  reuse via `GetFreeIndexPage`. This is the standard index reclaim path and
+  bounds bloat globally, but it inherits btree's page-deletion complexity: a
+  freed page can't be recycled until no snapshot could still be mid-scan
+  through it (a deletion-XID / `GlobalVisCheckRemovableXid` gate), head pages
+  can't be unlinked (the centroid tree references them by block number), and
+  the FSM is only a hint so reuse must re-verify under lock. Best done within
+  the compaction phase, which already has the VACUUM/visibility context.
+
+Neither returns space to the OS without a trailing-page truncation pass; both
+bound growth by reuse. The cluster-local scheme is the simpler first step; FSM
+is the heavier follow-on for cross-cluster balance.
+
 **Returning k live results.** IVF scans the *full* posting lists of the nprobe
 nearest centroids, so the candidate pool is normally far larger than k; dead and
 MVCC-invisible entries are filtered during top-k selection at no extra scan

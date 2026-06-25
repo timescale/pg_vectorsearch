@@ -115,6 +115,7 @@ mkt_posting_scan_begin_cluster(
 	scan->cur_count		  = 0;
 	scan->fs_lut_valid	  = false;
 	scan->pages_read	  = 0;
+	scan->pages_skipped	  = 0;
 	scan->entries_scanned = 0;
 	scan->entries_pruned  = 0;
 
@@ -150,6 +151,7 @@ mkt_posting_scan_begin_flat(
 	scan->cur_max_entries = hdr->max_entries;
 	scan->cur_count		  = hdr->entry_count;
 	scan->pages_read	  = 1;
+	scan->pages_skipped	  = 0;
 	scan->entries_scanned = 0;
 	scan->entries_pruned  = 0;
 }
@@ -263,62 +265,73 @@ mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 				break;
 		}
 
-		char	*content = scan->cur_content;
-		uint32_t count	 = scan->cur_count;
-
-		/* --- Score: batch IP over all entries on this page ---
-		 *
-		 * AoS layout: entry i's bits live at content + i * entry_size
-		 * + MKT_POSTING_ENTRY_BITS_OFFSET. The SIMD kernel just needs
-		 * the first entry's bits pointer and a stride of entry_size. */
-		const uint8_t *bits_base = mkt_posting_first_bits(content);
-
-		uint32_t padded = (count + 3) & ~3u;
-		mkt_rabitq_inner_product_multi(
-				scan->qstate->transformed,
-				bits_base,
-				entry_size,
-				dim,
-				padded,
-				scratch);
-
-		/* Convert raw IPs to distances, reading f_add/f_rescale per
-		 * entry via the strided AoS accessor. */
-		for (uint32_t i = 0; i < count; i++)
+		/* A page tombstoned by VACUUM (all entries dead) is skipped — no
+		 * scoring kernel; the chain-follow below still advances past it. */
+		if (!(mkt_posting_opaque(scan->cur_page)->flags &
+			  MKT_POSTING_PAGE_TOMBSTONED))
 		{
-			MktPostingEntryHeader *e = mkt_posting_entry_at(content, i, dim);
-			float final_dot = (2.0f * scratch[i] - sum_t) * inv_sqrt_d;
-			distances[i] = e->f_add + g_add - 2.0f * e->f_rescale * final_dot;
-		}
+			char	*content = scan->cur_content;
+			uint32_t count	 = scan->cur_count;
 
-		/* --- Prune + insert approximate distances --- */
-		Distance threshold = mkt_topk_threshold(topk);
+			/* --- Score: batch IP over all entries on this page ---
+			 *
+			 * AoS layout: entry i's bits live at content + i * entry_size
+			 * + MKT_POSTING_ENTRY_BITS_OFFSET. The SIMD kernel just needs
+			 * the first entry's bits pointer and a stride of entry_size. */
+			const uint8_t *bits_base = mkt_posting_first_bits(content);
 
-		for (uint32_t i = 0; i < count; i++)
-		{
-			MktPostingEntryHeader *e = mkt_posting_entry_at(content, i, dim);
-			scan->entries_scanned++;
+			uint32_t padded = (count + 3) & ~3u;
+			mkt_rabitq_inner_product_multi(
+					scan->qstate->transformed,
+					bits_base,
+					entry_size,
+					dim,
+					padded,
+					scratch);
 
-			if (e->meta.flags & MKT_POSTING_FLAG_DELETED)
+			/* Convert raw IPs to distances, reading f_add/f_rescale per
+			 * entry via the strided AoS accessor. */
+			for (uint32_t i = 0; i < count; i++)
 			{
-				scan->entries_pruned++;
-				continue;
+				MktPostingEntryHeader *e =
+						mkt_posting_entry_at(content, i, dim);
+				float final_dot = (2.0f * scratch[i] - sum_t) * inv_sqrt_d;
+				distances[i]	= e->f_add + g_add -
+							   2.0f * e->f_rescale * final_dot;
 			}
 
-			Distance est = distances[i];
-			Distance err = e->f_error * g_error;
-			Distance lb	 = est - err;
+			/* --- Prune + insert approximate distances --- */
+			Distance threshold = mkt_topk_threshold(topk);
 
-			if (lb >= threshold)
+			for (uint32_t i = 0; i < count; i++)
 			{
-				scan->entries_pruned++;
-				continue;
-			}
+				MktPostingEntryHeader *e =
+						mkt_posting_entry_at(content, i, dim);
+				scan->entries_scanned++;
 
-			uint64_t id = mkt_posting_encode_tid(&e->meta.tid);
-			mkt_topk_insert(topk, est, err, id);
-			threshold = mkt_topk_threshold(topk);
-		}
+				if (e->meta.flags & MKT_POSTING_FLAG_DELETED)
+				{
+					scan->entries_pruned++;
+					continue;
+				}
+
+				Distance est = distances[i];
+				Distance err = e->f_error * g_error;
+				Distance lb	 = est - err;
+
+				if (lb >= threshold)
+				{
+					scan->entries_pruned++;
+					continue;
+				}
+
+				uint64_t id = mkt_posting_encode_tid(&e->meta.tid);
+				mkt_topk_insert(topk, est, err, id);
+				threshold = mkt_topk_threshold(topk);
+			}
+		} /* end: page not tombstoned */
+		else
+			scan->pages_skipped++;
 
 		/* Follow chain: read next_blkno, then release current */
 		BlockNumber prev_blkno = scan->cur_blkno;
@@ -633,7 +646,12 @@ mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk)
 
 		MktPostingPageOpaque *opaque = mkt_posting_opaque(scan->cur_page);
 
-		if (opaque->flags & MKT_POSTING_PAGE_FASTSCAN)
+		if (opaque->flags & MKT_POSTING_PAGE_TOMBSTONED)
+		{
+			/* All entries dead — skip scoring; the chain-follow advances. */
+			scan->pages_skipped++;
+		}
+		else if (opaque->flags & MKT_POSTING_PAGE_FASTSCAN)
 			scan_fastscan_page(scan, topk);
 		else
 			mkt_posting_scan_cluster(scan, topk);

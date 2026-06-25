@@ -479,3 +479,83 @@ TEST(tombstone_marks_and_scan_skips)
 	mkt_rabitq_scratch_cleanup(&scratch);
 	mkt_rabitq_destroy(params);
 }
+
+/* Whole-page tombstone: when every entry on a page is dead, the page gets the
+ * MKT_POSTING_PAGE_TOMBSTONED flag and the scan skips it. Covers AoS, where
+ * entries are also individually flagged. */
+TEST(tombstone_all_flags_aos_page)
+{
+	Dimension		dim		 = 128;
+	TestPageStorage storage	 = make_test_storage(32);
+	RaBitQParams   *params	 = mkt_rabitq_create(dim, 5);
+	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(8, dim);
+
+	/* 8 entries on a single AoS head page. */
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, 8, false);
+
+	const uint32_t dead_vids[] = {0, 1, 2, 3, 4, 5, 6, 7};
+	DeadSet		   dead		   = {.vids = dead_vids, .n = 8};
+	ASSERT_EQ(
+			8,
+			mkt_posting_tombstone_chain(
+					&storage.base, dim, head, vid_is_dead, &dead),
+			"all 8 entries tombstoned");
+
+	Page hp = mkt_storage_read_page(&storage.base, head);
+	ASSERT_TRUE(
+			(mkt_posting_opaque(hp)->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0,
+			"fully-dead AoS page is flagged tombstoned");
+	ASSERT_EQ(0, mkt_posting_head_live_count(hp), "live_count is zero");
+	mkt_storage_release_page(&storage.base, head);
+
+	ASSERT_EQ(
+			0,
+			scan_count(&storage, params, dim, centroid, head, 64, false),
+			"scan skips the tombstoned page");
+
+	mkt_rabitq_destroy(params);
+}
+
+/* FASTSCAN entries can't be flagged individually, but a wholly-dead FASTSCAN
+ * page is tombstoned at page granularity (and its entries leave live_count).
+ */
+TEST(tombstone_all_flags_fastscan_page)
+{
+	Dimension		dim		 = 128;
+	TestPageStorage storage	 = make_test_storage(32);
+	RaBitQParams   *params	 = mkt_rabitq_create(dim, 9);
+	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	uint32_t		nbuilt	 = 40; /* > 1 fastscan group */
+	float		   *vecs	 = make_test_vectors(nbuilt, dim);
+
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, nbuilt, true);
+
+	uint32_t *dead_vids = mkt_alloc(nbuilt * sizeof(uint32_t));
+	for (uint32_t i = 0; i < nbuilt; i++)
+		dead_vids[i] = i;
+	DeadSet dead = {.vids = dead_vids, .n = nbuilt};
+
+	ASSERT_EQ(
+			nbuilt,
+			mkt_posting_tombstone_chain(
+					&storage.base, dim, head, vid_is_dead, &dead),
+			"all fastscan entries accounted as tombstoned");
+
+	Page hp = mkt_storage_read_page(&storage.base, head);
+	ASSERT_TRUE(
+			(mkt_posting_opaque(hp)->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0,
+			"fully-dead FASTSCAN page is flagged tombstoned");
+	ASSERT_EQ(
+			0, mkt_posting_head_live_count(hp), "fastscan live_count is zero");
+	mkt_storage_release_page(&storage.base, head);
+
+	ASSERT_EQ(
+			0,
+			scan_count(&storage, params, dim, centroid, head, 128, true),
+			"fastscan scan skips the tombstoned page(s)");
+
+	mkt_rabitq_destroy(params);
+}
