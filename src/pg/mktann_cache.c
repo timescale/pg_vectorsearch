@@ -110,7 +110,23 @@ get_cache_data(Relation index)
 
 	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
 			meta_page);
-	Assert(meta->magic == MKT_META_MAGIC);
+	/* Reject an index whose metapage was written by an incompatible format
+	 * (loud in release too, not just a debug Assert) — its layout would
+	 * otherwise be misread. */
+	if (meta->magic != MKT_META_MAGIC)
+	{
+		uint32_t got = meta->magic;
+		UnlockReleaseBuffer(meta_buf);
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("index \"%s\" has an incompatible on-disk format "
+						"(metapage magic 0x%08X, expected 0x%08X)",
+						RelationGetRelationName(index),
+						got,
+						(uint32_t)MKT_META_MAGIC),
+				 errhint("REINDEX the index to rebuild it in the current "
+						 "format.")));
+	}
 
 	Dimension dim  = meta->dim;
 	uint64_t  seed = meta->rabitq_seed;
@@ -134,6 +150,7 @@ get_cache_data(Relation index)
 	c->base.dim				= dim;
 	c->base.nlevels			= meta->nlevels;
 	c->base.first_centroid	= meta->first_centroid;
+	c->base.first_posting	= meta->first_posting;
 	c->base.metric			= (DistanceMetric)meta->metric;
 	c->base.centroid_format = (MktCentroidFormat)meta->centroid_format;
 	c->base.rabitq_seed		= seed;
@@ -185,11 +202,16 @@ mktann_index_base_init(Relation index, MktIndexBase *base)
 }
 
 void
-mktann_cache_meta(Relation index, Dimension *dim, DistanceMetric *metric)
+mktann_cache_meta(
+		Relation		index,
+		Dimension	   *dim,
+		DistanceMetric *metric,
+		BlockNumber	   *first_posting)
 {
 	AmCacheData *c = get_cache_data(index);
 	*dim		   = c->base.dim;
 	*metric		   = c->base.metric;
+	*first_posting = c->base.first_posting;
 }
 
 MktannScanInfo

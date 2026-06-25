@@ -278,6 +278,7 @@ write_meta_page(
 		uint8_t			  nlevels,
 		uint8_t			  fan_out,
 		BlockNumber		  first_centroid,
+		BlockNumber		  first_posting,
 		uint32_t		  ntuples,
 		uint32_t		  nlist,
 		MktCentroidFormat centroid_format,
@@ -297,6 +298,7 @@ write_meta_page(
 	meta->nlevels		  = nlevels;
 	meta->centroid_format = (uint8_t)centroid_format;
 	meta->first_centroid  = first_centroid;
+	meta->first_posting	  = first_posting;
 	meta->ntuples		  = ntuples;
 	meta->nlist			  = nlist;
 	meta->metric		  = (uint8_t)metric;
@@ -1014,7 +1016,6 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 		BlockNumber *nfb = palloc(tree->nnodes * sizeof(BlockNumber));
 		BlockNumber	 fc	 = 1;
 		BlockNumber	 fp	 = mkt_compute_centroid_layout(tree, max_ent, fc, nfb);
-		(void)fp;
 
 		if (global_mean == NULL)
 		{
@@ -1030,6 +1031,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				(uint8_t)tree->nlevels,
 				(uint8_t)p->fan_out,
 				fc,
+				fp,
 				0,
 				nlist,
 				p->centroid_format,

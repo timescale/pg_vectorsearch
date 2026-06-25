@@ -33,6 +33,7 @@ typedef struct MktIndexBase
 	Dimension		  dim;
 	uint8_t			  nlevels;
 	BlockNumber		  first_centroid;
+	BlockNumber		  first_posting;
 	DistanceMetric	  metric;
 	MktCentroidFormat centroid_format;
 	int				  fastscan; /* 0=off, 8=uint8, 16=uint16 hacc */
