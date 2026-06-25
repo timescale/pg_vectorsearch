@@ -15,6 +15,12 @@ CREATE INDEX idx_mut ON mut USING mktann (v)
 SET enable_seqscan = off;
 SET mkt.nprobe = 4;             -- = nlist: scan every list, deterministic
 
+-- Guard: the ORDER BY probes below must be served by the index, not a seq scan
+-- (enable_seqscan=off only penalizes seqscan, it does not forbid it, so a
+-- regression that made the index unusable would silently fall back and the
+-- correctness checks would still pass on the heap).
+EXPLAIN (COSTS OFF) SELECT id FROM mut ORDER BY v <-> '[100,0,0]' LIMIT 1;
+
 INSERT INTO mut VALUES (1001, '[100,0,0]');
 SELECT count(*) AS aos_ins FROM (
     SELECT id FROM mut ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
@@ -44,6 +50,9 @@ CREATE INDEX idx_mutfs ON mutfs USING mktann (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = true);
 SET enable_seqscan = off;
 SET mkt.nprobe = 4;
+
+-- Guard: index serves the probe, not a seq scan (see the AoS section).
+EXPLAIN (COSTS OFF) SELECT id FROM mutfs ORDER BY v <-> '[500,0,0]' LIMIT 1;
 
 INSERT INTO mutfs VALUES (1001, '[500,0,0]');
 SELECT count(*) AS fs_ins FROM (
@@ -76,6 +85,8 @@ CREATE INDEX idx_mutnn ON mutnn USING mktann (v)
     WITH (nlist = 4, centroid_compression = true);
 SET enable_seqscan = off;
 SET mkt.nprobe = 4;
+-- Guard: index serves the probe, not a seq scan (see the AoS section).
+EXPLAIN (COSTS OFF) SELECT id FROM mutnn ORDER BY v <-> '[99,0,0]' LIMIT 1;
 INSERT INTO mutnn VALUES (1001, '[100,0,0]');
 -- query NEAR (not equal to) the inserted vector; it must be the top neighbour
 SELECT count(*) AS nn_member FROM (
