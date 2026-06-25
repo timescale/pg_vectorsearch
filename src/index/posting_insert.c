@@ -139,3 +139,95 @@ mkt_posting_insert_one(
 
 	return true;
 }
+
+/*
+ * Contract is in the header. Implementation notes not stated there: each page
+ * is read-scanned first and only write-locked / WAL-logged when it actually
+ * has a dead entry to mark, so vacuuming a chain with no dead tuples dirties
+ * nothing. Marking is idempotent — an already-deleted entry is skipped, not
+ * recounted — so a repeated VACUUM over the same dead TIDs is a no-op.
+ */
+uint32_t
+mkt_posting_tombstone_chain(
+		MktStorage *storage,
+		Dimension	dim,
+		BlockNumber head_blkno,
+		bool (*is_dead)(ItemPointerData tid, void *state),
+		void *state)
+{
+	if (storage == NULL || is_dead == NULL || head_blkno == InvalidBlockNumber)
+		return 0;
+
+	uint32_t	total_marked = 0;
+	BlockNumber blk			 = head_blkno;
+
+	while (blk != InvalidBlockNumber)
+	{
+		/* Read-scan first so clean pages aren't dirtied / WAL-logged. */
+		Page						p	 = mkt_storage_read_page(storage, blk);
+		const MktPostingPageOpaque *op	 = mkt_posting_opaque(p);
+		BlockNumber					next = op->next_blkno;
+		bool	 is_fastscan = (op->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
+		bool	 first		 = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+		uint32_t n			 = op->entry_count;
+		bool	 needs_mark	 = false;
+
+		/* FASTSCAN base pages can't be edited in place; their dead entries
+		 * rely on MVCC recheck and are reclaimed at compaction. */
+		if (!is_fastscan)
+		{
+			char *content = first ? mkt_posting_content_first(p, dim)
+								  : mkt_posting_content(p);
+			for (uint32_t i = 0; i < n; i++)
+			{
+				MktPostingEntryHeader *h =
+						mkt_posting_entry_at(content, i, dim);
+				if (!(h->meta.flags & MKT_POSTING_FLAG_DELETED) &&
+					is_dead(h->meta.tid, state))
+				{
+					needs_mark = true;
+					break;
+				}
+			}
+		}
+		mkt_storage_release_page(storage, blk);
+
+		if (needs_mark)
+		{
+			Page				  wp  = mkt_storage_write_page(storage, blk);
+			MktPostingPageOpaque *wop = mkt_posting_opaque(wp);
+			char *content			  = (wop->flags & MKT_POSTING_PAGE_FIRST)
+											  ? mkt_posting_content_first(wp, dim)
+											  : mkt_posting_content(wp);
+			for (uint32_t i = 0; i < wop->entry_count; i++)
+			{
+				MktPostingEntryHeader *h =
+						mkt_posting_entry_at(content, i, dim);
+				if (!(h->meta.flags & MKT_POSTING_FLAG_DELETED) &&
+					is_dead(h->meta.tid, state))
+				{
+					h->meta.flags |= MKT_POSTING_FLAG_DELETED;
+					total_marked++;
+				}
+			}
+			mkt_storage_commit_page(storage, blk);
+		}
+
+		blk = next;
+	}
+
+	/* Keep the head's live_count current (one head write per cluster). It is
+	 * stamped at build and maintained by inserts, so it is always meaningful
+	 * here; clamp defensively. */
+	if (total_marked > 0)
+	{
+		Page				  hw = mkt_storage_write_page(storage, head_blkno);
+		MktPostingPageOpaque *op = mkt_posting_opaque(hw);
+		op->live_count			 = (op->live_count >= total_marked)
+										 ? op->live_count - total_marked
+										 : 0;
+		mkt_storage_commit_page(storage, head_blkno);
+	}
+
+	return total_marked;
+}

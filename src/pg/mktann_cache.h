@@ -44,6 +44,13 @@
 void mktann_index_base_init(Relation index, MktIndexBase *base);
 
 /*
+ * Immutable dim + distance metric from the cache, without forcing the lazy
+ * rotation-matrix work that mktann_index_base_init does. For metadata-only
+ * callers such as VACUUM's ambulkdelete.
+ */
+void mktann_cache_meta(Relation index, Dimension *dim, DistanceMetric *metric);
+
+/*
  * Build-time scan-planning scalars (immutable), from the same cache.
  */
 typedef struct MktannScanInfo
