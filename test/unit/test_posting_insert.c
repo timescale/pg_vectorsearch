@@ -399,3 +399,83 @@ TEST(insert_into_fastscan_cluster_mixed_chain)
 	mkt_rabitq_scratch_cleanup(&scratch);
 	mkt_rabitq_destroy(params);
 }
+
+/* Dead-TID predicate for the tombstone test: a TID is dead if its vector id
+ * is in the set. */
+typedef struct DeadSet
+{
+	const uint32_t *vids;
+	uint32_t		n;
+} DeadSet;
+
+static bool
+vid_is_dead(ItemPointerData tid, void *state)
+{
+	const DeadSet *d   = (const DeadSet *)state;
+	uint32_t	   vid = mkt_posting_get_vector_id(&tid);
+	for (uint32_t i = 0; i < d->n; i++)
+		if (d->vids[i] == vid)
+			return true;
+	return false;
+}
+
+TEST(tombstone_marks_and_scan_skips)
+{
+	Dimension		dim		 = 128;
+	TestPageStorage storage	 = make_test_storage(32);
+	RaBitQParams   *params	 = mkt_rabitq_create(dim, 11);
+	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(8, dim);
+
+	/* 5 built + 3 inserted = 8 live AoS entries. */
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, 5, false);
+	RaBitQScratch scratch;
+	mkt_rabitq_scratch_init(&scratch, dim);
+	for (uint32_t i = 0; i < 3; i++)
+		insert_vec(
+				&storage,
+				params,
+				dim,
+				head,
+				100 + i,
+				vecs + (size_t)(5 + i) * dim,
+				&scratch);
+
+	ASSERT_EQ(
+			8,
+			chain_live_count(&storage, dim, head),
+			"all 8 live before delete");
+
+	/* Tombstone two built ids and one inserted id. */
+	const uint32_t dead_vids[] = {1, 3, 101};
+	DeadSet		   dead		   = {.vids = dead_vids, .n = 3};
+	uint32_t	   marked	   = mkt_posting_tombstone_chain(
+			   &storage.base, dim, head, vid_is_dead, &dead);
+
+	ASSERT_EQ(3, marked, "three entries tombstoned");
+	ASSERT_EQ(
+			5,
+			chain_live_count(&storage, dim, head),
+			"live count drops by the tombstoned entries");
+
+	Page hp = mkt_storage_read_page(&storage.base, head);
+	ASSERT_EQ(
+			5, mkt_posting_head_live_count(hp), "head live_count decremented");
+	mkt_storage_release_page(&storage.base, head);
+
+	ASSERT_EQ(
+			5,
+			scan_count(&storage, params, dim, centroid, head, 64, false),
+			"scan skips tombstoned entries");
+
+	/* Re-tombstoning the same ids marks nothing new (idempotent). */
+	ASSERT_EQ(
+			0,
+			mkt_posting_tombstone_chain(
+					&storage.base, dim, head, vid_is_dead, &dead),
+			"already-deleted entries are not re-counted");
+
+	mkt_rabitq_scratch_cleanup(&scratch);
+	mkt_rabitq_destroy(params);
+}

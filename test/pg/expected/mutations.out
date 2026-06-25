@@ -109,3 +109,141 @@ SELECT count(*) AS nn_member FROM (
 RESET enable_seqscan;
 RESET mkt.nprobe;
 DROP TABLE mutnn;
+-- ===== DELETE: dead rows leave the result; VACUUM tombstones the entries =====
+-- A deleted row must never be returned by an index scan (MVCC filters it even
+-- before VACUUM), and VACUUM's ambulkdelete must run cleanly and tombstone the
+-- dead entries while leaving the rest of the index correct and usable. Probes
+-- are outliers so the assertions are exact-NN, not recall-dependent.
+CREATE TABLE mutdel (id int, v vector(3));
+INSERT INTO mutdel SELECT g, format('[%s,0,0]', g)::vector
+    FROM generate_series(1, 50) g;
+INSERT INTO mutdel VALUES (1001, '[100,0,0]'), (1002, '[200,0,0]');
+CREATE INDEX idx_mutdel ON mutdel USING mktann (v)
+    WITH (nlist = 4, centroid_compression = true);
+SET enable_seqscan = off;
+SET mkt.nprobe = 4;
+-- Guard: index serves the probe, not a seq scan (see the AoS section).
+EXPLAIN (COSTS OFF) SELECT id FROM mutdel ORDER BY v <-> '[100,0,0]' LIMIT 1;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Limit
+   ->  Index Scan using idx_mutdel on mutdel
+         Order By: (v <-> '[100,0,0]'::vector)
+(3 rows)
+
+-- Present before delete: the [100] outlier is its own nearest neighbour.
+SELECT id AS del_before FROM mutdel ORDER BY v <-> '[100,0,0]' LIMIT 1;
+ del_before 
+------------
+       1001
+(1 row)
+
+DELETE FROM mutdel WHERE id = 1001;
+-- Gone immediately (MVCC recheck), even though VACUUM has not run: the nearest
+-- live row to [100] is now id 50, not the deleted 1001.
+SELECT id AS del_after FROM mutdel ORDER BY v <-> '[100,0,0]' LIMIT 1;
+ del_after 
+-----------
+        50
+(1 row)
+
+-- Physical entries are unchanged by DELETE (no reclaim yet): 52 rows indexed.
+SELECT sum(entry_count) AS del_entries_pre_vacuum
+    FROM mkt.posting_pages('idx_mutdel'::regclass);
+ del_entries_pre_vacuum 
+------------------------
+                     52
+(1 row)
+
+VACUUM mutdel;   -- runs ambulkdelete: tombstones the dead 1001 entry
+-- Still correct after VACUUM, and the other outlier is unaffected.
+SELECT id AS del_after_vacuum FROM mutdel ORDER BY v <-> '[100,0,0]' LIMIT 1;
+ del_after_vacuum 
+------------------
+               50
+(1 row)
+
+SELECT id AS del_other FROM mutdel ORDER BY v <-> '[200,0,0]' LIMIT 1;
+ del_other 
+-----------
+      1002
+(1 row)
+
+-- Tombstones are skipped, not physically removed in Phase 0, so the page entry
+-- count is unchanged; reclaim happens at a later compaction/rebuild.
+SELECT sum(entry_count) AS del_entries_post_vacuum
+    FROM mkt.posting_pages('idx_mutdel'::regclass);
+ del_entries_post_vacuum 
+-------------------------
+                      52
+(1 row)
+
+RESET enable_seqscan;
+RESET mkt.nprobe;
+DROP TABLE mutdel;
+-- ===== UPDATE: insert-new + clean-old, and HOT for non-indexed columns =======
+-- Postgres turns a vector-column UPDATE into a new tuple (aminsert) plus a dead
+-- old version (cleaned by VACUUM, like DELETE). An UPDATE that leaves the
+-- vector unchanged is HOT (index_unchanged), so no index work happens and the
+-- row stays findable. The payload column is non-indexed, to drive the HOT case.
+CREATE TABLE mutupd (id int, payload int, v vector(3));
+INSERT INTO mutupd SELECT g, 0, format('[%s,0,0]', g)::vector
+    FROM generate_series(1, 50) g;
+INSERT INTO mutupd VALUES (1001, 0, '[100,0,0]');
+CREATE INDEX idx_mutupd ON mutupd USING mktann (v)
+    WITH (nlist = 4, centroid_compression = true);
+SET enable_seqscan = off;
+SET mkt.nprobe = 4;
+-- Guard: index serves the probe, not a seq scan (see the AoS section).
+EXPLAIN (COSTS OFF) SELECT id FROM mutupd ORDER BY v <-> '[100,0,0]' LIMIT 1;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Limit
+   ->  Index Scan using idx_mutupd on mutupd
+         Order By: (v <-> '[100,0,0]'::vector)
+(3 rows)
+
+-- Before: the outlier sits at [100].
+SELECT id AS upd_before FROM mutupd ORDER BY v <-> '[100,0,0]' LIMIT 1;
+ upd_before 
+------------
+       1001
+(1 row)
+
+-- Move the vector to [200]: non-HOT, so aminsert indexes the new version.
+UPDATE mutupd SET v = '[200,0,0]' WHERE id = 1001;
+-- New location is found ...
+SELECT id AS upd_new_loc FROM mutupd ORDER BY v <-> '[200,0,0]' LIMIT 1;
+ upd_new_loc 
+-------------
+        1001
+(1 row)
+
+-- ... and the old location no longer returns it (dead old version, MVCC): the
+-- nearest live row to [100] is id 50.
+SELECT id AS upd_old_loc FROM mutupd ORDER BY v <-> '[100,0,0]' LIMIT 1;
+ upd_old_loc 
+-------------
+          50
+(1 row)
+
+-- HOT update of a non-indexed column does no index work; the row is unchanged
+-- in the index and still found at [200].
+UPDATE mutupd SET payload = payload + 1 WHERE id = 1001;
+SELECT id AS upd_hot FROM mutupd ORDER BY v <-> '[200,0,0]' LIMIT 1;
+ upd_hot 
+---------
+    1001
+(1 row)
+
+-- VACUUM cleans the dead old version; the current version stays findable.
+VACUUM mutupd;
+SELECT id AS upd_after_vacuum FROM mutupd ORDER BY v <-> '[200,0,0]' LIMIT 1;
+ upd_after_vacuum 
+------------------
+             1001
+(1 row)
+
+RESET enable_seqscan;
+RESET mkt.nprobe;
+DROP TABLE mutupd;
