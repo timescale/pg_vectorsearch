@@ -163,7 +163,15 @@ mkt_posting_tombstone_chain(
 
 	while (blk != InvalidBlockNumber)
 	{
-		/* Read-scan first so clean pages aren't dirtied / WAL-logged. */
+		/*
+		 * Phase 1: under a SHARE lock, scan the page's entries to find whether
+		 * it has any dead entry that still needs marking. This is only a probe
+		 * — nothing is mutated — so a page with no dead tuples is never
+		 * dirtied or WAL-logged. The AoS scan early-breaks at the first such
+		 * entry (it only needs to know "is there work?"); the FASTSCAN scan
+		 * instead checks whether the whole page is dead, since packed entries
+		 * can't be flagged individually.
+		 */
 		Page						p	 = mkt_storage_read_page(storage, blk);
 		const MktPostingPageOpaque *op	 = mkt_posting_opaque(p);
 		BlockNumber					next = op->next_blkno;
@@ -225,6 +233,14 @@ mkt_posting_tombstone_chain(
 		}
 		mkt_storage_release_page(storage, blk);
 
+		/*
+		 * Phase 2: only if phase 1 found work, take the EXCLUSIVE write lock
+		 * (which WAL-logs the page on commit) and mark the dead entries. The
+		 * share lock was dropped above and PG has no atomic lock upgrade, so
+		 * the page may have changed; re-derive everything from scratch here
+		 * (re-read entry_count, re-test is_dead and the DELETED flag) rather
+		 * than trusting phase 1's findings. This makes marking idempotent.
+		 */
 		if (needs_mark)
 		{
 			Page				  wp  = mkt_storage_write_page(storage, blk);

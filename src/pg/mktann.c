@@ -194,12 +194,13 @@ mktann_bulkdelete(
 	if (nblocks <= 1)
 		return stats; /* block 0 is the metadata page */
 
-	/* dim + metric from the per-backend cache (metapage read at most once per
-	 * backend). mktann_cache_meta skips the rotation-matrix work the scan /
-	 * insert cache path does — VACUUM never needs it. */
+	/* dim + metric + first_posting from the per-backend cache (metapage read
+	 * at most once per backend). mktann_cache_meta skips the rotation-matrix
+	 * work the scan / insert cache path does — VACUUM never needs it. */
 	Dimension	   dim;
 	DistanceMetric metric;
-	mktann_cache_meta(index, &dim, &metric);
+	BlockNumber	   first_posting;
+	mktann_cache_meta(index, &dim, &metric, &first_posting);
 
 	MktannStorage storage;
 	mktann_storage_init(&storage, index, NULL, metric);
@@ -207,26 +208,54 @@ mktann_bulkdelete(
 	MktannBulkDeleteCtx ctx = {.cb = callback, .cb_state = cb_state};
 
 	/*
-	 * Walk every page; act only on chain heads. Guard on the special-area size
-	 * before reading the opaque so a centroid page (different opaque layout)
-	 * is never misread as a posting opaque.
+	 * The index is laid out as: block 0 metadata, then the contiguous centroid
+	 * region, then the posting pages. first_posting (from the metapage) is one
+	 * past the last centroid page, so start there and skip the whole centroid
+	 * region without scanning it.
+	 *
+	 * Within the posting region we act only on chain heads; overflow pages are
+	 * reached via the chain from their head, and new/empty pages are expected
+	 * (extension slack). A page that is neither a posting page nor empty is
+	 * the only anomaly worth surfacing (corruption or a format bug); count
+	 * those and emit a single WARNING after the walk rather than one per page,
+	 * so a badly corrupt index can't flood the log (bulkdelete also runs once
+	 * per dead-tuple batch, i.e. potentially many times per VACUUM).
 	 */
-	for (BlockNumber blk = 1; blk < nblocks; blk++)
+	uint32_t	unrecognized = 0;
+	BlockNumber first_bad	 = InvalidBlockNumber;
+	BlockNumber start		 = Max(first_posting, 1);
+
+	for (BlockNumber blk = start; blk < nblocks; blk++)
 	{
 		vacuum_delay_point(false);
 
 		Buffer buf = ReadBuffer(index, blk);
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
-		Page page	 = BufferGetPage(buf);
-		bool is_head = false;
-		if (!PageIsNew(page) &&
+		Page page		= BufferGetPage(buf);
+		bool is_head	= false;
+		bool recognized = PageIsNew(page); /* an empty page is expected */
+		/*
+		 * Guard on the special-area size before reading the opaque so a page
+		 * of another kind is never misread through the posting layout.
+		 */
+		if (!recognized &&
 			PageGetSpecialSize(page) == sizeof(MktPostingPageOpaque))
 		{
 			MktPostingPageOpaque *op = mkt_posting_opaque(page);
-			is_head					 = op->page_id == MKT_POSTING_PAGE_ID &&
-					  (op->flags & MKT_POSTING_PAGE_FIRST);
+			if (op->page_id == MKT_POSTING_PAGE_ID)
+			{
+				recognized = true;
+				is_head	   = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+			}
 		}
 		UnlockReleaseBuffer(buf);
+
+		if (!recognized)
+		{
+			if (first_bad == InvalidBlockNumber)
+				first_bad = blk;
+			unrecognized++;
+		}
 
 		if (!is_head)
 			continue;
@@ -240,6 +269,17 @@ mktann_bulkdelete(
 		stats->num_index_tuples += mkt_posting_head_live_count(hp);
 		mkt_storage_release_page(&storage.base, blk);
 	}
+
+	/* One summary line per call, not one per bad page (see loop comment). */
+	if (unrecognized > 0)
+		ereport(WARNING,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("skipped %u unrecognized page(s) in index \"%s\" "
+						"during bulkdelete (first at block %u); index may be "
+						"corrupt",
+						unrecognized,
+						RelationGetRelationName(index),
+						first_bad)));
 
 	return stats;
 }

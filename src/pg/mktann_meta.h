@@ -19,7 +19,13 @@
 
 #include "mkt_types.h"
 
-#define MKT_META_MAGIC ((uint32_t)0x4D4B5401) /* "MKT\x01" */
+/*
+ * "MKT" + a format-version byte. Bump the low byte on any incompatible
+ * metapage/layout change so an index built by an older format is rejected at
+ * open rather than silently misread. v2 added MktannMetaPage.first_posting,
+ * which shifted the struct layout.
+ */
+#define MKT_META_MAGIC ((uint32_t)0x4D4B5402) /* "MKT\x02" */
 
 /* Metadata flags */
 #define MKT_META_FLAG_FASTSCAN 0x01
@@ -31,14 +37,17 @@ typedef struct MktannMetaPage
 	uint8_t		nlevels;		 /* centroid tree depth */
 	uint8_t		centroid_format; /* MktCentroidFormat */
 	BlockNumber first_centroid;	 /* root centroid page */
-	uint32_t	ntuples;		 /* total indexed tuples */
-	uint32_t	nlist;			 /* number of leaf centroids */
-	uint8_t		metric;			 /* DistanceMetric */
-	uint8_t		fan_out;		 /* children per tree node */
-	uint8_t		flags;			 /* MKT_META_FLAG_* */
-	uint8_t		reserved;
-	uint64_t	rabitq_seed; /* seed for RaBitQ params */
-	/* Global mean vector stored inline after struct */
+	BlockNumber first_posting;	 /* first posting page (one past the last
+								  * centroid page); lets VACUUM skip the whole
+								  * centroid region without scanning it */
+	uint32_t ntuples;			 /* total indexed tuples */
+	uint32_t nlist;				 /* number of leaf centroids */
+	uint8_t	 metric;			 /* DistanceMetric */
+	uint8_t	 fan_out;			 /* children per tree node */
+	uint8_t	 flags;				 /* MKT_META_FLAG_* */
+	uint8_t	 reserved;
+	uint64_t rabitq_seed; /* seed for RaBitQ params */
+						  /* Global mean vector stored inline after struct */
 } MktannMetaPage;
 
 /* Total special-area size including inline global mean */
