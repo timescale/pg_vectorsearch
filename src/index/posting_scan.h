@@ -77,7 +77,9 @@ typedef struct MktPostingScan
 	uint32_t  seen_gen;		 /* current generation (bumped per query) */
 
 	/* Stats */
-	uint32_t pages_read;
+	uint32_t pages_read;	/* posting pages fetched (incl. skipped) */
+	uint32_t pages_skipped; /* tombstoned (all-dead) pages skipped, not scored
+							 */
 	uint32_t entries_scanned;
 	uint32_t entries_pruned;
 } MktPostingScan;

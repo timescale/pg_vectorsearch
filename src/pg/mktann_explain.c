@@ -66,6 +66,16 @@ mktann_explain_hook(
 	ExplainPropertyInteger(
 			"Posting Pages Read", NULL, stats->posting_pages_read, es);
 	ExplainPropertyInteger(
+			"Posting Pages Scanned",
+			NULL,
+			stats->posting_pages_read - stats->posting_pages_skipped,
+			es);
+	ExplainPropertyInteger(
+			"Posting Dead Pages Skipped",
+			NULL,
+			stats->posting_pages_skipped,
+			es);
+	ExplainPropertyInteger(
 			"Posting Entries Scanned",
 			NULL,
 			stats->posting_entries_scanned,

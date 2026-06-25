@@ -96,7 +96,9 @@ SELECT count(*) > 0 AS has_pages,
        bool_and(entry_count > 0) AS all_have_entries,
        bool_and(max_entries > 0) AS all_have_capacity,
        bool_and(chain_pos >= 0) AS valid_chain_pos,
-       count(*) FILTER (WHERE is_first) > 0 AS has_first_pages
+       count(*) FILTER (WHERE is_first) > 0 AS has_first_pages,
+       bool_and(NOT tombstoned) AS none_tombstoned,
+       bool_and(dead_count = 0) AS none_dead
     FROM mkt.posting_pages('idx_l2c'::regclass);
 
 -- First page of each cluster has chain_pos=0

@@ -167,17 +167,27 @@ mkt_posting_tombstone_chain(
 		Page						p	 = mkt_storage_read_page(storage, blk);
 		const MktPostingPageOpaque *op	 = mkt_posting_opaque(p);
 		BlockNumber					next = op->next_blkno;
-		bool	 is_fastscan = (op->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
-		bool	 first		 = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
-		uint32_t n			 = op->entry_count;
-		bool	 needs_mark	 = false;
+		uint16_t					flags = op->flags;
+		uint32_t					n	  = op->entry_count;
 
-		/* FASTSCAN base pages can't be edited in place; their dead entries
-		 * rely on MVCC recheck and are reclaimed at compaction. */
+		/* Already fully tombstoned: nothing to mark, and skip so its entries
+		 * aren't counted into the live_count decrement twice. */
+		if (flags & MKT_POSTING_PAGE_TOMBSTONED)
+		{
+			mkt_storage_release_page(storage, blk);
+			blk = next;
+			continue;
+		}
+
+		bool  is_fastscan = (flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
+		bool  first		  = (flags & MKT_POSTING_PAGE_FIRST) != 0;
+		char *content	  = first ? mkt_posting_content_first(p, dim)
+								  : mkt_posting_content(p);
+		bool  needs_mark  = false; /* AoS: has a not-yet-deleted dead entry */
+		bool  fs_all_dead = false; /* FASTSCAN: every entry is dead */
+
 		if (!is_fastscan)
 		{
-			char *content = first ? mkt_posting_content_first(p, dim)
-								  : mkt_posting_content(p);
 			for (uint32_t i = 0; i < n; i++)
 			{
 				MktPostingEntryHeader *h =
@@ -190,26 +200,65 @@ mkt_posting_tombstone_chain(
 				}
 			}
 		}
+		else if (n > 0)
+		{
+			/* FASTSCAN entries can't be flagged individually, but a wholly
+			 * dead page can be tombstoned at page granularity. Early-exit on
+			 * the first live TID, so live pages cost little. */
+			fs_all_dead		 = true;
+			uint32_t ngroups = (n + MKT_FASTSCAN_GROUP - 1) /
+							   MKT_FASTSCAN_GROUP;
+			for (uint32_t g = 0; g < ngroups && fs_all_dead; g++)
+			{
+				uint32_t g_count = n - g * MKT_FASTSCAN_GROUP;
+				if (g_count > MKT_FASTSCAN_GROUP)
+					g_count = MKT_FASTSCAN_GROUP;
+				ItemPointerData *tids =
+						mkt_fastscan_group_tids(content, g, dim);
+				for (uint32_t v = 0; v < g_count; v++)
+					if (!is_dead(tids[v], state))
+					{
+						fs_all_dead = false;
+						break;
+					}
+			}
+		}
 		mkt_storage_release_page(storage, blk);
 
 		if (needs_mark)
 		{
 			Page				  wp  = mkt_storage_write_page(storage, blk);
 			MktPostingPageOpaque *wop = mkt_posting_opaque(wp);
-			char *content			  = (wop->flags & MKT_POSTING_PAGE_FIRST)
+			char				 *c	  = (wop->flags & MKT_POSTING_PAGE_FIRST)
 											  ? mkt_posting_content_first(wp, dim)
 											  : mkt_posting_content(wp);
+			uint32_t			  deleted_on_page = 0;
 			for (uint32_t i = 0; i < wop->entry_count; i++)
 			{
-				MktPostingEntryHeader *h =
-						mkt_posting_entry_at(content, i, dim);
-				if (!(h->meta.flags & MKT_POSTING_FLAG_DELETED) &&
-					is_dead(h->meta.tid, state))
+				MktPostingEntryHeader *h = mkt_posting_entry_at(c, i, dim);
+				if (h->meta.flags & MKT_POSTING_FLAG_DELETED)
+				{
+					deleted_on_page++;
+					continue;
+				}
+				if (is_dead(h->meta.tid, state))
 				{
 					h->meta.flags |= MKT_POSTING_FLAG_DELETED;
 					total_marked++;
+					deleted_on_page++;
 				}
 			}
+			/* Whole page now dead: flag it so the scan skips its scoring. */
+			if (wop->entry_count > 0 && deleted_on_page == wop->entry_count)
+				wop->flags |= MKT_POSTING_PAGE_TOMBSTONED;
+			mkt_storage_commit_page(storage, blk);
+		}
+		else if (fs_all_dead)
+		{
+			Page				  wp  = mkt_storage_write_page(storage, blk);
+			MktPostingPageOpaque *wop = mkt_posting_opaque(wp);
+			wop->flags |= MKT_POSTING_PAGE_TOMBSTONED;
+			total_marked += n; /* FASTSCAN entries weren't otherwise counted */
 			mkt_storage_commit_page(storage, blk);
 		}
 

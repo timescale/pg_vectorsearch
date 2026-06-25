@@ -58,6 +58,15 @@
 #define MKT_POSTING_PAGE_FIRST	  0x0001
 #define MKT_POSTING_PAGE_OVERFLOW 0x0002
 #define MKT_POSTING_PAGE_FASTSCAN 0x0004 /* reserved for phase 2 */
+/*
+ * Every entry on the page is dead. Set by the VACUUM tombstone pass when a
+ * page's whole contents are deleted (AoS: all entries flagged; FASTSCAN: all
+ * group TIDs dead — the only way a packed page's deletes are recorded, since
+ * its entries can't be flagged individually). The scan skips the page's
+ * scoring kernel entirely; the page stays linked so compaction can later
+ * reclaim it. Cleared if the page is ever reused for new entries.
+ */
+#define MKT_POSTING_PAGE_TOMBSTONED 0x0008
 
 /* ----------------------------------------------------------------
  * Structs
