@@ -437,6 +437,23 @@ cc_build_view(
 	return &v->iface;
 }
 
+/* Pin a READY slot, release the registry lock, and return its per-scan view.
+ * Caller holds cc_ctl->lock (shared or exclusive); `i` is the slot index. */
+static MktCentroidCompact *
+cc_pin_ready_locked(int i)
+{
+	CcSlot	   *s		   = &cc_ctl->slots[i];
+	dsa_pointer dp_content = s->content;
+	dsa_pointer dp_index   = s->index;
+	uint32_t	index_len  = s->index_len;
+	BlockNumber base	   = s->base_blkno;
+
+	pg_atomic_fetch_add_u32(&s->refcount, 1);				  /* pin */
+	s->last_used = pg_atomic_fetch_add_u64(&cc_ctl->tick, 1); /* LRU touch */
+	LWLockRelease(cc_ctl->lock);
+	return cc_build_view(i, dp_content, dp_index, index_len, base);
+}
+
 /*
  * Get (building if needed) the shared compact cache for `index`, pinning it
  * for the current scan. Returns a per-scan view to set on
@@ -471,16 +488,7 @@ mkt_centroid_compact_get(
 		if (s->state == CC_FREE || s->relfile != relfile)
 			continue;
 		if (s->state == CC_READY)
-		{
-			pg_atomic_fetch_add_u32(&s->refcount, 1); /* pin */
-			s->last_used		   = pg_atomic_fetch_add_u64(&cc_ctl->tick, 1);
-			dsa_pointer dp_content = s->content;
-			dsa_pointer dp_index   = s->index;
-			uint32_t	index_len  = s->index_len;
-			BlockNumber base	   = s->base_blkno;
-			LWLockRelease(cc_ctl->lock);
-			return cc_build_view(i, dp_content, dp_index, index_len, base);
-		}
+			return cc_pin_ready_locked(i);
 		LWLockRelease(cc_ctl->lock); /* BUILDING elsewhere: read pages */
 		return NULL;
 	}
@@ -496,16 +504,7 @@ mkt_centroid_compact_get(
 		{
 			/* Another backend built or claimed it while we waited. */
 			if (s->state == CC_READY)
-			{
-				pg_atomic_fetch_add_u32(&s->refcount, 1);
-				s->last_used = pg_atomic_fetch_add_u64(&cc_ctl->tick, 1);
-				dsa_pointer dp_content = s->content;
-				dsa_pointer dp_index   = s->index;
-				uint32_t	index_len  = s->index_len;
-				BlockNumber base	   = s->base_blkno;
-				LWLockRelease(cc_ctl->lock);
-				return cc_build_view(i, dp_content, dp_index, index_len, base);
-			}
+				return cc_pin_ready_locked(i);
 			LWLockRelease(cc_ctl->lock);
 			return NULL;
 		}
