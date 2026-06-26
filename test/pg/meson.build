@@ -194,6 +194,32 @@ else
         is_parallel: false,
         protocol: 'tap',
       )
+
+      # Centroid-cache BUILDING-state race: needs both injection points AND a
+      # preloaded instance (so the cache is active), hence its own config.
+      cache_iso_conf = configure_file(
+        output: 'meerkat_cache_isolation.conf',
+        command: ['sh', '-c',
+          'printf "search_path = \'mkt, public\'\n' +
+          'shared_preload_libraries = \'meerkat\'\n" > @OUTPUT@'],
+      )
+
+      test('isolation_cache_building',
+        pg_isolation_regress,
+        args: [
+          '--inputdir=' + meson.current_source_dir(),
+          '--outputdir=' + meson.current_build_dir(),
+          '--bindir=' + pg_bindir,
+          '--temp-instance=' + meson.project_build_root() / 'cache_building_testdb',
+          '--temp-config=' + meson.current_build_dir() / 'meerkat_cache_isolation.conf',
+          '--load-extension=meerkat',
+          'centroid_cache_building',
+        ],
+        depends: [meerkat_ext_so],
+        timeout: 120,
+        is_parallel: false,
+        protocol: 'tap',
+      )
     endif
   endif
 endif

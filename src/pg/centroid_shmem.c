@@ -32,6 +32,7 @@
 #include <storage/shmem.h>
 #include <utils/builtins.h>
 #include <utils/dsa.h>
+#include <utils/injection_point.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
 
@@ -527,6 +528,12 @@ mkt_centroid_compact_get(
 	cc_ctl->slots[slot].relfile = relfile;
 	cc_ctl->slots[slot].state	= CC_BUILDING;
 	LWLockRelease(cc_ctl->lock); /* build without holding the lock */
+
+	/* The slot is now BUILDING with the lock released: a concurrent reader
+	 * that matches this relfilenode sees BUILDING and falls back to page
+	 * reads. This injection point lets a test pause here to exercise that
+	 * race deterministically (no-op without USE_INJECTION_POINTS). */
+	INJECTION_POINT("mkt-centroid-cache-build", NULL);
 
 	char	   *content;
 	Size		used;
