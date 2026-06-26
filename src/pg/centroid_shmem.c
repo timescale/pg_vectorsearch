@@ -24,11 +24,13 @@
 
 #include <postgres.h>
 
+#include <funcapi.h>
 #include <miscadmin.h>
 #include <port/atomics.h>
 #include <storage/ipc.h>
 #include <storage/lwlock.h>
 #include <storage/shmem.h>
+#include <utils/builtins.h>
 #include <utils/dsa.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
@@ -586,4 +588,67 @@ mkt_centroid_shmem_unpin(MktCentroidCompact *compact)
 		return;
 	CcView *v = (CcView *)compact;
 	pg_atomic_fetch_sub_u32(&cc_ctl->slots[v->slot].refcount, 1);
+}
+
+/* ----------------------------------------------------------------
+ * SQL introspection (for tests and observability)
+ * ---------------------------------------------------------------- */
+
+static const char *cc_state_names[] = {
+		[CC_FREE]	  = "free",
+		[CC_BUILDING] = "building",
+		[CC_READY]	  = "ready",
+};
+
+PG_FUNCTION_INFO_V1(mkt_centroid_cache_available);
+PG_FUNCTION_INFO_V1(mkt_centroid_cache_stats);
+
+/* mkt_centroid_cache_available() -> bool: is the shared cache usable (i.e. was
+ * meerkat preloaded)? When false, enabling the cache errors and queries read
+ * centroid pages. */
+Datum
+mkt_centroid_cache_available(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(mkt_centroid_shmem_available());
+}
+
+/* mkt_centroid_cache_stats() -> one row per occupied (non-FREE) slot. Reads a
+ * consistent snapshot under the SHARED registry lock. Returns no rows when the
+ * cache is unavailable (not preloaded). relfilenode is reported as an oid so
+ * it can be joined to pg_class.relfilenode; an orphan slot (dropped/reindexed
+ * index) shows a relfilenode that no longer resolves to a relation. */
+Datum
+mkt_centroid_cache_stats(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *)fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (cc_ctl == NULL)
+		return (Datum)0; /* not preloaded: no rows */
+
+	LWLockAcquire(cc_ctl->lock, LW_SHARED);
+	for (int i = 0; i < CC_MAX_SLOTS; i++)
+	{
+		CcSlot *s = &cc_ctl->slots[i];
+		if (s->state == CC_FREE)
+			continue;
+
+		Datum values[7];
+		bool  nulls[7] = {0};
+
+		values[0] = Int32GetDatum(i);
+		values[1] = ObjectIdGetDatum((Oid)s->relfile);
+		values[2] = CStringGetTextDatum(cc_state_names[s->state]);
+		values[3] = Int64GetDatum((int64)s->bytes);
+		values[4] = Int32GetDatum((int32)s->index_len);
+		values[5] = Int64GetDatum((int64)s->last_used);
+		values[6] = Int32GetDatum((int32)pg_atomic_read_u32(&s->refcount));
+
+		tuplestore_putvalues(
+				rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	LWLockRelease(cc_ctl->lock);
+
+	return (Datum)0;
 }
