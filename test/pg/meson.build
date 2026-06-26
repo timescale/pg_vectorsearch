@@ -63,6 +63,7 @@ else
     cache_test_names = [
       'centroid_cache',
       'centroid_cache_lru',
+      'centroid_cache_drop',
     ]
 
     test('regress_cache',
@@ -100,6 +101,25 @@ else
           '--temp-config=' + meson.current_build_dir() / 'meerkat_test.conf',
           '--load-extension=meerkat',
           'mutations_concurrent',
+        ],
+        depends: [meerkat_ext_so],
+        timeout: 120,
+        is_parallel: false,
+        protocol: 'tap',
+      )
+
+      # Centroid-cache concurrency (REINDEX vs cache-using readers), against a
+      # PRELOADED temp instance so the cache is active.
+      test('isolation_cache',
+        pg_isolation_regress_mut,
+        args: [
+          '--inputdir=' + meson.current_source_dir(),
+          '--outputdir=' + meson.current_build_dir(),
+          '--bindir=' + pg_bindir,
+          '--temp-instance=' + meson.project_build_root() / 'cache_isolation_testdb',
+          '--temp-config=' + meson.current_build_dir() / 'meerkat_cache.conf',
+          '--load-extension=meerkat',
+          'centroid_cache_concurrency',
         ],
         depends: [meerkat_ext_so],
         timeout: 120,

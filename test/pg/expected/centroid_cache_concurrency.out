@@ -1,0 +1,50 @@
+Parsed test spec with 3 sessions
+
+starting permutation: r_chk m_reindex r_chk
+step r_chk: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM iso ORDER BY v <-> '[100,0,0,0]' LIMIT 1) t
+    WHERE id = 1001;
+
+found
+-----
+    1
+(1 row)
+
+step m_reindex: REINDEX INDEX iso_idx;
+step r_chk: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM iso ORDER BY v <-> '[100,0,0,0]' LIMIT 1) t
+    WHERE id = 1001;
+
+found
+-----
+    1
+(1 row)
+
+
+starting permutation: tr_begin tr_chk m_reindex tr_commit r_chk
+step tr_begin: BEGIN;
+step tr_chk: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM iso ORDER BY v <-> '[100,0,0,0]' LIMIT 1) t
+    WHERE id = 1001;
+
+found
+-----
+    1
+(1 row)
+
+step m_reindex: REINDEX INDEX iso_idx; <waiting ...>
+step tr_commit: COMMIT;
+step m_reindex: <... completed>
+step r_chk: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM iso ORDER BY v <-> '[100,0,0,0]' LIMIT 1) t
+    WHERE id = 1001;
+
+found
+-----
+    1
+(1 row)
+
