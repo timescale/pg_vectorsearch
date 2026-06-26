@@ -25,11 +25,11 @@ CREATE INDEX idx_fs ON emb USING mktann (v vector_cosine_ops)
     WITH (nlist = 64, fastscan = true, centroid_fastscan = true,
           centroid_compression = true);
 
--- Baseline result with the cache OFF (page reads).
+-- Baseline result with the cache OFF (page reads), captured for parity.
 SET mkt.enable_centroid_cache = off;
-SELECT array_agg(id ORDER BY id) AS ids FROM (
+CREATE TEMP TABLE parity_off AS
     SELECT id FROM emb
-    ORDER BY v <=> '[0.3,0.2,0,0.4,0,0.1,0.1,0.2]' LIMIT 10) t \gset off_
+    ORDER BY v <=> '[0.3,0.2,0,0.4,0,0.1,0.1,0.2]' LIMIT 10;
 
 -- No slot is built while the cache is off.
 SELECT count(*) AS slots_idx_fs_off
@@ -38,17 +38,21 @@ SELECT count(*) AS slots_idx_fs_off
 
 -- Cache ON: the first query builds exactly one READY slot for idx_fs.
 SET mkt.enable_centroid_cache = on;
-SELECT array_agg(id ORDER BY id) AS ids FROM (
+CREATE TEMP TABLE parity_on AS
     SELECT id FROM emb
-    ORDER BY v <=> '[0.3,0.2,0,0.4,0,0.1,0.1,0.2]' LIMIT 10) t \gset on_
+    ORDER BY v <=> '[0.3,0.2,0,0.4,0,0.1,0.1,0.2]' LIMIT 10;
 
 SELECT s.state, s.bytes > 0 AS has_bytes, s.index_len > 0 AS has_index,
        s.refcount
     FROM mkt.centroid_cache_stats() s
     JOIN pg_class c ON c.relfilenode = s.relfilenode AND c.relname = 'idx_fs';
 
--- Result parity: the cache returns exactly the page-reads result.
-SELECT :'off_ids' = :'on_ids' AS parity_ok;
+-- Result parity: the cache returns exactly the page-reads result, i.e. the
+-- symmetric difference of the two id sets is empty.
+SELECT count(*) AS parity_diff FROM (
+    (SELECT id FROM parity_off EXCEPT SELECT id FROM parity_on)
+    UNION ALL
+    (SELECT id FROM parity_on EXCEPT SELECT id FROM parity_off)) d;
 
 -- ------------------------------------------------------------------
 -- non-FASTSCAN index: not cacheable (cache is FASTSCAN-only)

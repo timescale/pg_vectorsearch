@@ -20,20 +20,24 @@ CREATE INDEX d_idx ON d USING mktann (v vector_cosine_ops)
     WITH (nlist = 16, fastscan = true, centroid_fastscan = true,
           centroid_compression = true);
 
--- Build the slot and capture the index's relfilenode.
+-- Build the slot, then capture d_idx's relfilenode (before dropping it).
 SELECT count(*) AS hits FROM (
     SELECT id FROM d ORDER BY v <=> '[0.1,0.1,0.1,0.1]' LIMIT 5) t;
-SELECT relfilenode AS rfn FROM pg_class WHERE relname = 'd_idx' \gset
+CREATE TEMP TABLE d_rfn AS
+    SELECT relfilenode FROM pg_class WHERE relname = 'd_idx';
 
 -- A slot exists for d_idx.
 SELECT count(*) AS slot_before_drop
-    FROM mkt.centroid_cache_stats() WHERE relfilenode = :rfn;
+    FROM mkt.centroid_cache_stats() s
+    JOIN d_rfn r ON r.relfilenode = s.relfilenode;
 
 DROP INDEX d_idx;
 
 -- Lazy: the slot lingers (keyed by the dropped relfilenode)...
 SELECT count(*) AS orphan_slot_after_drop
-    FROM mkt.centroid_cache_stats() WHERE relfilenode = :rfn;
+    FROM mkt.centroid_cache_stats() s
+    JOIN d_rfn r ON r.relfilenode = s.relfilenode;
 -- ...and that relfilenode no longer resolves to any relation (a true orphan).
 SELECT count(*) AS rfn_in_pg_class
-    FROM pg_class WHERE relfilenode = :rfn;
+    FROM pg_class c
+    JOIN d_rfn r ON c.relfilenode = r.relfilenode;
