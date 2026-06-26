@@ -17,6 +17,16 @@ else
         'echo "search_path = \'mkt, public\'" > @OUTPUT@'],
     )
 
+    # Same, plus shared_preload_libraries for the centroid-cache tests: the
+    # cache's control struct + LWLock + DSA only exist when meerkat is
+    # preloaded, so the cache is exercised only under this config.
+    pg_cache_conf = configure_file(
+      output: 'meerkat_cache.conf',
+      command: ['sh', '-c',
+        'printf "search_path = \'mkt, public\'\n' +
+        'shared_preload_libraries = \'meerkat\'\n" > @OUTPUT@'],
+    )
+
     test_names = [
       'vector',
       'halfvec',
@@ -28,6 +38,8 @@ else
       'rerank',
       'inspect',
       'parallel',
+      # cache must be unavailable when NOT preloaded (this instance is not)
+      'centroid_cache_disabled',
     ]
 
     test('regress',
@@ -40,6 +52,29 @@ else
         '--temp-config=' + meson.current_build_dir() / 'meerkat_test.conf',
         '--load-extension=meerkat',
       ] + test_names,
+      depends: [meerkat_ext_so],
+      timeout: 300,
+      is_parallel: false,
+      protocol: 'tap',
+    )
+
+    # Centroid-cache regression tests, run against a PRELOADED temp instance so
+    # the shared cache is active. Separate instance/config from `regress`.
+    cache_test_names = [
+      'centroid_cache',
+      'centroid_cache_lru',
+    ]
+
+    test('regress_cache',
+      pg_regress,
+      args: [
+        '--inputdir=' + meson.current_source_dir(),
+        '--outputdir=' + meson.current_build_dir(),
+        '--bindir=' + pg_bindir,
+        '--temp-instance=' + meson.project_build_root() / 'cache_testdb',
+        '--temp-config=' + meson.current_build_dir() / 'meerkat_cache.conf',
+        '--load-extension=meerkat',
+      ] + cache_test_names,
       depends: [meerkat_ext_so],
       timeout: 300,
       is_parallel: false,
