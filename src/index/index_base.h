@@ -9,6 +9,7 @@
 #ifndef MKT_INDEX_BASE_H
 #define MKT_INDEX_BASE_H
 
+#include "index/centroid_compact.h"
 #include "index/centroid_page.h"
 #include "index/storage.h"
 #include "mkt_types.h"
@@ -25,6 +26,11 @@ typedef struct MktIndexBase
 	 * Standalone: separate ArrayPageStorage for centroids vs postings. */
 	MktStorage *centroid_storage;
 	MktStorage *posting_storage;
+
+	/* Optional compact in-memory centroid source (FASTSCAN only). When set,
+	 * the beam search reads node groups from here instead of centroid pages.
+	 * NULL = read centroids via centroid_storage. */
+	MktCentroidCompact *centroid_compact;
 
 	/* Non-NULL for inline page access (standalone postings) */
 	char *page_base;

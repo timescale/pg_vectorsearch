@@ -107,6 +107,20 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	ss->index_base.posting_storage	= &ss->storage.base;
 	ss->index_base.page_base		= NULL;
 
+	/* Centroids are immutable and re-read every query; optionally serve them
+	 * from a per-backend compact cache (FASTSCAN only) to avoid buffer-manager
+	 * pins. Off by default — see mkt.enable_centroid_cache. NULL → read
+	 * pages. */
+	ss->index_base.centroid_compact = NULL;
+	if (mkt_enable_centroid_cache &&
+		ss->index_base.centroid_format == MKT_CENTROID_FMT_FASTSCAN)
+		ss->index_base.centroid_compact = mkt_centroid_compact_get(
+				index,
+				&ss->storage,
+				ss->index_base.first_centroid,
+				ss->index_base.nlevels,
+				ss->index_base.dim);
+
 	/* Initialize shared query state */
 	mkt_query_state_init(&ss->qstate, &ss->index_base, max_k, max_nprobe);
 
@@ -302,6 +316,9 @@ mktann_endscan(IndexScanDesc scan)
 
 	if (ss != NULL)
 	{
+		/* Release the shared centroid-cache pin before freeing scan_ctx (the
+		 * compact view lives there). No-op when not using the cache. */
+		mkt_centroid_shmem_unpin(ss->index_base.centroid_compact);
 		mkt_query_state_cleanup(&ss->qstate);
 		MemoryContextDelete(ss->scan_ctx);
 		scan->opaque = NULL;

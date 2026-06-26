@@ -16,6 +16,7 @@ extension_sources = files(
   'mktann_explain.c',
   'mktann_scan.c',
   'mktann_storage.c',
+  'centroid_shmem.c',
 )
 
 pg_ext_cflags = [
