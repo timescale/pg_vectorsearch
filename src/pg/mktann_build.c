@@ -33,11 +33,8 @@
 #include <access/tableam.h>
 #include <access/xloginsert.h>
 #include <catalog/index.h>
-#include <catalog/pg_operator_d.h>
-#include <catalog/pg_type_d.h>
 #include <commands/progress.h>
 #include <common/pg_prng.h>
-#include <executor/tuptable.h>
 #include <math.h>
 #include <miscadmin.h>
 #include <pgstat.h>
@@ -46,7 +43,6 @@
 #include <utils/memutils.h>
 #include <utils/rel.h>
 #include <utils/sampling.h>
-#include <utils/tuplesort.h>
 
 #include "algo/distance.h"
 #include "algo/hkmeans.h"
@@ -90,17 +86,18 @@ typedef struct MktannBuildState
 	 * then spills) instead of the old builders[nlist] array (one ~8KB working
 	 * page per cluster = O(nlist) = O(N)).
 	 */
-	Tuplesortstate *post_sort;
-	TupleDesc		post_tupdesc;
-	TupleTableSlot *post_slot;
-	/* Entries are RaBitQ-encoded during the scan (relative to the assigned
-	 * cluster centroid) and the compact code is stored in the sort, so the
-	 * build phase replays it via add_encoded. */
+	/* Posting entries are RaBitQ-encoded during the scan (relative to the
+	 * assigned cluster centroid) and fed to a cluster-keyed sorter — the same
+	 * MktSorter seam the parallel build uses, here in non-parallel mode (no
+	 * coordinate). The shared build loop (mkt_posting_build_lists) reads them
+	 * back grouped by cluster and writes one resident page builder at a time.
+	 */
+	MktSorter	 *sorter;
+	char		 *entry; /* scratch, mkt_posting_entry_size(dim) bytes */
 	RaBitQParams *rq_params;
-	const float	 *leaf_cents;	/* [nlist*dim] cluster centroids */
-	RaBitQData	 *enc_buf;		/* scratch RaBitQ output */
-	RaBitQScratch enc_scratch;	/* scratch encode buffers */
-	uint32_t	  packed_bytes; /* (dim+7)/8 = bytes of sign bits */
+	const float	 *leaf_cents;  /* [nlist*dim] cluster centroids */
+	RaBitQData	 *enc_buf;	   /* scratch RaBitQ output */
+	RaBitQScratch enc_scratch; /* scratch encode buffers */
 
 	/* Per-worker scratch buffers for parallel-ready assignment */
 	MktBuildWorkerBufs worker_bufs;
@@ -220,44 +217,6 @@ sample_rows(MktannBuildState *bs)
  * stream into posting builders
  * ---------------------------------------------------------------- */
 
-/*
- * Encode one vector relative to its assigned cluster centroid and append the
- * resulting posting entry to the cluster-keyed tuplesort. The payload bytea
- * carries: tid | f_add | f_rescale | f_error | sign-bits[packed_bytes]. The
- * build phase reads tuples back grouped by cluster and replays them with
- * add_encoded, so the encoding is preserved bit-for-bit. Call within a
- * per-tuple context (tuplesort copies the tuple).
- */
-static void
-post_sort_put(
-		MktannBuildState *bs,
-		uint32_t		  cluster,
-		ItemPointerData	  tid,
-		const float		 *vec)
-{
-	Size   bytes   = mkt_posting_entry_size(bs->params.dim);
-	bytea *payload = (bytea *)palloc(VARHDRSZ + bytes);
-	SET_VARSIZE(payload, VARHDRSZ + bytes);
-	mkt_posting_entry_encode(
-			bs->rq_params,
-			vec,
-			bs->leaf_cents + (size_t)cluster * bs->params.dim,
-			bs->params.dim,
-			bs->enc_buf,
-			&bs->enc_scratch,
-			tid,
-			VARDATA(payload));
-
-	TupleTableSlot *slot = bs->post_slot;
-	ExecClearTuple(slot);
-	slot->tts_values[0] = Int32GetDatum((int32)cluster);
-	slot->tts_isnull[0] = false;
-	slot->tts_values[1] = PointerGetDatum(payload);
-	slot->tts_isnull[1] = false;
-	ExecStoreVirtualTuple(slot);
-	tuplesort_puttupleslot(bs->post_sort, slot);
-}
-
 static void
 build_callback(
 		Relation	index,
@@ -290,18 +249,22 @@ build_callback(
 	MktBuildAssignment asgn = mkt_build_assign_vector(
 			bs->tree, vref.data, &bp, &bs->worker_bufs);
 
-	post_sort_put(bs, asgn.primary, *tid, asgn.enc_vector);
+	if (mkt_posting_emit_assignment(
+				bs->sorter,
+				&asgn,
+				bs->rq_params,
+				bs->leaf_cents,
+				bs->params.dim,
+				*tid,
+				bs->enc_buf,
+				&bs->enc_scratch,
+				bs->entry))
+		bs->soar_dupes++;
 	bs->indtuples++;
 
 	if (((uint64_t)bs->indtuples % 10000) == 0)
 		pgstat_progress_update_param(
 				PROGRESS_CREATEIDX_TUPLES_DONE, (int64)bs->indtuples);
-
-	if (asgn.secondary != MKT_INVALID_CLUSTER)
-	{
-		post_sort_put(bs, asgn.secondary, *tid, asgn.enc_vector);
-		bs->soar_dupes++;
-	}
 
 	MemoryContextSwitchTo(old_ctx);
 	MemoryContextReset(bs->tmp_ctx);
@@ -530,19 +493,12 @@ refine_callback(
 		return;
 
 	Dimension	 dim = rs->dim;
-	const float *v	 = MktVectorToRef(DatumGetMktVector(values[0])).data;
+	const float *vin = MktVectorToRef(DatumGetMktVector(values[0])).data;
 
-	/* The tree is trained in the normalized space for cosine, so route and
-	 * accumulate the normalized vector to match. */
-	if (rs->metric == DISTANCE_COSINE)
-	{
-		memcpy(rs->scratch, v, (size_t)dim * sizeof(float));
-		mkt_l2_normalize(rs->scratch, dim);
-		v = rs->scratch;
-	}
-
-	uint32_t leaf = mkt_hkmeans_assign(rs->tree, v, rs->metric, NULL);
-	double	*sum  = rs->sums + (size_t)leaf * dim;
+	const float *v;
+	uint32_t	 leaf = mkt_refine_assign_leaf(
+			rs->tree, vin, dim, rs->metric, rs->scratch, &v);
+	double *sum = rs->sums + (size_t)leaf * dim;
 	for (Dimension j = 0; j < dim; j++)
 		sum[j] += v[j];
 	rs->cnts[leaf]++;
@@ -746,42 +702,19 @@ do_serial_build(
 
 	RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
 
-	float *ref_vecs = hk_leaf_centroids(tree);
-	if (p->metric == DISTANCE_COSINE)
-		for (uint32_t c = 0; c < nlist; c++)
-			mkt_l2_normalize(ref_vecs + (size_t)c * dim, dim);
-
-	float *pt_centroids = palloc((size_t)nlist * dim * sizeof(float));
-	for (uint32_t c = 0; c < nlist; c++)
-		mkt_rabitq_rotate(
-				rq_params,
-				ref_vecs + (size_t)c * dim,
-				pt_centroids + (size_t)c * dim);
-
-	uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, p->centroid_format);
-	BlockNumber *node_first_blkno = palloc(tree->nnodes * sizeof(BlockNumber));
-	BlockNumber	 first_centroid	  = 1;
-	BlockNumber	 first_posting	  = mkt_compute_centroid_layout(
-			tree, max_ent, first_centroid, node_first_blkno);
-
-	/* Block 0 = metadata page */
-	mkt_storage_extend(storage, 1);
-
-	write_meta_page(
+	/* ref_vecs (the leaf centroids, normalized in place for cosine by the
+	 * setup below) is reused as the posting encode reference. */
+	float	   *ref_vecs	  = hk_leaf_centroids(tree);
+	float	   *pt_centroids  = palloc((size_t)nlist * dim * sizeof(float));
+	BlockNumber first_posting = mkt_build_setup_centroid_layout(
 			storage,
+			tree,
+			rq_params,
 			dim,
-			(uint8_t)tree->nlevels,
-			(uint8_t)p->fan_out,
-			first_centroid,
-			0,
 			nlist,
-			p->centroid_format,
 			p->metric,
-			rabitq_seed,
-			global_mean);
-
-	uint32_t n_centroid_pages = first_posting - first_centroid;
-	mkt_storage_extend(storage, n_centroid_pages);
+			p->centroid_format,
+			pt_centroids);
 
 	BlockNumber *posting_heads = palloc(nlist * sizeof(BlockNumber));
 
@@ -807,38 +740,28 @@ do_serial_build(
 	mkt_storage_extend(storage, reserve.total);
 
 	/*
-	 * Cluster-keyed tuplesort: (int4 cluster_id, bytea payload=tid+enc). The
-	 * scan streams every posting entry here; the build phase below reads them
-	 * back grouped by cluster and builds each list with a single resident page
-	 * builder. Memory is bounded by maintenance_work_mem (the sort spills if
-	 * exceeded), replacing the old builders[nlist] array (O(N)).
+	 * Cluster-keyed sorter: the scan streams every posting entry here (keyed
+	 * by cluster); mkt_posting_build_lists then reads them back grouped by
+	 * cluster and builds each list with a single resident page builder. Memory
+	 * is bounded by maintenance_work_mem (the sort spills if exceeded),
+	 * replacing the old builders[nlist] array (O(N)).
 	 */
-	bs->rq_params	 = rq_params;
-	bs->leaf_cents	 = ref_vecs;
-	bs->packed_bytes = (dim + 7) / 8;
-	bs->enc_buf		 = palloc(MKT_RABITQ_DATA_SIZE(dim));
+	bs->rq_params  = rq_params;
+	bs->leaf_cents = ref_vecs;
+	bs->enc_buf	   = palloc(MKT_RABITQ_DATA_SIZE(dim));
 	mkt_rabitq_scratch_init(&bs->enc_scratch, dim);
-	bs->post_tupdesc = CreateTemplateTupleDesc(2);
-	TupleDescInitEntry(bs->post_tupdesc, 1, "cluster", INT4OID, -1, 0);
-	TupleDescInitEntry(bs->post_tupdesc, 2, "payload", BYTEAOID, -1, 0);
-	{
-		AttrNumber attNums[1]	 = {1};
-		Oid		   sortOps[1]	 = {Int4LessOperator};
-		Oid		   sortColls[1]	 = {InvalidOid};
-		bool	   nullsFirst[1] = {false};
-		bs->post_sort			 = tuplesort_begin_heap(
-				   bs->post_tupdesc,
-				   1,
-				   attNums,
-				   sortOps,
-				   sortColls,
-				   nullsFirst,
-				   maintenance_work_mem,
-				   NULL,
-				   TUPLESORT_NONE);
-	}
-	bs->post_slot =
-			MakeSingleTupleTableSlot(bs->post_tupdesc, &TTSOpsMinimalTuple);
+	bs->entry = palloc(mkt_posting_entry_size(dim));
+	/* region == NULL: a plain, non-parallel cluster-keyed sort bounded by
+	 * maintenance_work_mem (spills if exceeded), replacing the old
+	 * builders[nlist] array (O(N)). Same seam the parallel leader uses. */
+	bs->sorter = mkt_pbuild_sort_begin(
+			NULL,
+			NULL,
+			0,
+			0,
+			true,
+			(uint32_t)mkt_posting_entry_size(dim),
+			maintenance_work_mem);
 
 	bs->tree		= tree;
 	bs->worker_bufs = mkt_build_worker_bufs_create(dim);
@@ -876,65 +799,25 @@ do_serial_build(
 	 */
 	pgstat_progress_update_param(
 			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_POSTING);
-	tuplesort_performsort(bs->post_sort);
+	mkt_posting_build_lists(
+			bs->sorter,
+			storage,
+			nlist,
+			dim,
+			p->fastscan,
+			rq_params,
+			ref_vecs,
+			pt_centroids,
+			&reserve,
+			first_posting,
+			posting_heads);
+	bs->sorter = NULL; /* ended by mkt_posting_build_lists */
 
-	bool have = tuplesort_gettupleslot(
-			bs->post_sort, true, false, bs->post_slot, NULL);
-	for (uint32_t c = 0; c < nlist; c++)
-	{
-		MktPostingBuilder b;
-		if (p->fastscan)
-			mkt_posting_builder_init_fastscan(
-					&b,
-					storage,
-					rq_params,
-					dim,
-					c,
-					ref_vecs + (size_t)c * dim,
-					pt_centroids + (size_t)c * dim);
-		else
-			mkt_posting_builder_init(
-					&b,
-					storage,
-					rq_params,
-					dim,
-					c,
-					ref_vecs + (size_t)c * dim,
-					pt_centroids + (size_t)c * dim);
-		mkt_posting_builder_set_shared_reserve(
-				&b,
-				first_posting + reserve.starts[c],
-				reserve.counts[c],
-				&reserve.nexts[c]);
-		mkt_posting_builder_set_first_blkno(
-				&b, first_posting + reserve.starts[c]);
-
-		while (have)
-		{
-			bool  isnull;
-			int32 cl = DatumGetInt32(slot_getattr(bs->post_slot, 1, &isnull));
-			if ((uint32_t)cl != c)
-				break;
-			bytea *pl = DatumGetByteaPP(
-					slot_getattr(bs->post_slot, 2, &isnull));
-			mkt_posting_entry_add(&b, VARDATA_ANY(pl), dim);
-			have = tuplesort_gettupleslot(
-					bs->post_sort, true, false, bs->post_slot, NULL);
-		}
-
-		posting_heads[c] = mkt_posting_builder_finish(&b);
-		mkt_posting_builder_cleanup(&b);
-	}
-
-	tuplesort_end(bs->post_sort);
-	bs->post_sort = NULL;
-	ExecDropSingleTupleTableSlot(bs->post_slot);
-	bs->post_slot = NULL;
-	FreeTupleDesc(bs->post_tupdesc);
-	bs->post_tupdesc = NULL;
 	mkt_rabitq_scratch_cleanup(&bs->enc_scratch);
 	pfree(bs->enc_buf);
 	bs->enc_buf = NULL;
+	pfree(bs->entry);
+	bs->entry = NULL;
 	mkt_posting_reserve_free(&reserve);
 
 	elog(LOG,

@@ -15,8 +15,18 @@
 /* Only for standalone builds — PG builds use real headers */
 #ifdef MKT_STANDALONE
 
+#include <assert.h>
 #include <stdint.h>
 #include <string.h>
+
+/*
+ * PostgreSQL's Assert() in standalone builds. Maps to the C library assert,
+ * which is likewise compiled out when NDEBUG is defined, so shared code can
+ * use Assert() under either back-end.
+ */
+#ifndef Assert
+#define Assert(condition) assert(condition)
+#endif
 
 typedef uintptr_t Datum;
 typedef char	 *Pointer;

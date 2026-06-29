@@ -13,13 +13,19 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
+#include "core/memory.h"
 #include "index/parallel_build.h"
 #include "mkt_test.h"
 
 TEST_GROUP(SortSeam);
+
+/* The shared region (coordinator metadata) is allocated from the per-test
+ * arena. The sort's record buffers live in their own dedicated arenas managed
+ * by the seam (the leader deletes them at sort_end), independent of this one.
+ */
+TEST_MEMCTX_FIXTURE();
 
 /* Deterministic PRNG so failures reproduce. */
 static uint32_t g_rng;
@@ -48,7 +54,7 @@ TEST(sort_seam_merges_sorted_by_cluster)
 
 	const uint32_t entry_size = sizeof(uint32_t); /* payload = unique seq id */
 
-	void *region = malloc(mkt_pbuild_sort_shared_size(W));
+	void *region = mkt_alloc(mkt_pbuild_sort_shared_size(W));
 	mkt_pbuild_sort_shared_init(region, W, NULL);
 
 	uint32_t cluster_of[TOTAL];
@@ -108,7 +114,6 @@ TEST(sort_seam_merges_sorted_by_cluster)
 				"per-cluster counts preserved");
 
 	mkt_pbuild_sort_end(lead);
-	free(region);
 }
 
 /* Workers that put nothing must merge to an empty stream (no entries, no
@@ -116,7 +121,7 @@ TEST(sort_seam_merges_sorted_by_cluster)
 TEST(sort_seam_empty)
 {
 	const uint32_t entry_size = sizeof(uint32_t);
-	void		  *region	  = malloc(mkt_pbuild_sort_shared_size(2));
+	void		  *region	  = mkt_alloc(mkt_pbuild_sort_shared_size(2));
 	mkt_pbuild_sort_shared_init(region, 2, NULL);
 
 	for (int w = 0; w < 2; w++)
@@ -136,5 +141,4 @@ TEST(sort_seam_empty)
 			mkt_pbuild_sort_getnext(lead, &cluster, &entry),
 			"an empty sort yields no entries");
 	mkt_pbuild_sort_end(lead);
-	free(region);
 }

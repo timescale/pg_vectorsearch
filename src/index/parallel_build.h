@@ -807,6 +807,74 @@ extern bool mkt_pbuild_sort_getnext(
 		MktSorter *sorter, uint32_t *cluster, const void **entry);
 extern void mkt_pbuild_sort_end(MktSorter *sorter);
 
+/*
+ * Build every cluster's posting list from a populated (not yet performsorted)
+ * cluster-keyed sorter. Shared by the serial build and the parallel leader:
+ * performsort, then read entries grouped by cluster and write each list with a
+ * single resident page builder. Fills posting_heads[nlist] and ends the
+ * sorter.
+ */
+extern void mkt_posting_build_lists(
+		MktSorter		   *sorter,
+		MktStorage		   *storage,
+		uint32_t			nlist,
+		Dimension			dim,
+		bool				fastscan,
+		const RaBitQParams *rq_params,
+		const float		   *ref_vecs,
+		const float		   *pt_centroids,
+		MktPostingReserve  *reserve,
+		BlockNumber			first_posting,
+		BlockNumber		   *posting_heads);
+
+/*
+ * Emit a vector's posting entries into the cluster-keyed sorter: the primary,
+ * plus the secondary (SOAR / boundary replica) when present. Each is
+ * RaBitQ-encoded relative to its own cluster centroid; the scratch buffers are
+ * reused. Shared by the serial build callback and the parallel posting worker.
+ * Returns true when a secondary entry was written.
+ */
+extern bool mkt_posting_emit_assignment(
+		MktSorter				 *sorter,
+		const MktBuildAssignment *asgn,
+		const RaBitQParams		 *params,
+		const float				 *leaf_centroids,
+		Dimension				  dim,
+		ItemPointerData			  tid,
+		RaBitQData				 *enc_buf,
+		RaBitQScratch			 *enc_scratch,
+		void					 *entry);
+
+/*
+ * Route a vector to its refinement leaf (normalizing into scratch for cosine,
+ * since the tree is trained in normalized space). Sets *out_v to the vector to
+ * accumulate and returns its leaf. Shared by the serial and parallel refine
+ * passes so both route identically.
+ */
+extern uint32_t mkt_refine_assign_leaf(
+		const HKMeansResult *tree,
+		const float			*vec,
+		Dimension			 dim,
+		DistanceMetric		 metric,
+		float				*scratch,
+		const float		   **out_v);
+
+/*
+ * Shared pre-posting centroid setup: normalize leaf centroids for cosine,
+ * compute the rotated P^T*centroids into pt_centroids[nlist*dim], reserve
+ * block 0 (metadata) plus the centroid pages, and return the posting-area
+ * start block. Shared by the serial build and the parallel leader.
+ */
+extern BlockNumber mkt_build_setup_centroid_layout(
+		MktStorage		   *storage,
+		HKMeansResult	   *tree,
+		const RaBitQParams *rq_params,
+		Dimension			dim,
+		uint32_t			nlist,
+		DistanceMetric		metric,
+		MktCentroidFormat	centroid_format,
+		float			   *pt_centroids);
+
 /* ----------------------------------------------------------------
  * Parallel build entry — shared driver (parallel_build_leader.c)
  *

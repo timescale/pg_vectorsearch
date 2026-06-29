@@ -399,19 +399,41 @@ mkt_pbuild_accum_unlock(MktBuildShared *shared, uint32_t stripe)
 typedef struct MktSortShared
 {
 	int nparticipants;
-	/* char *bufs[nparticipants]; size_t counts[nparticipants] follow. */
+	/*
+	 * Three per-participant arrays follow, in order:
+	 *   char	  *bufs[nparticipants];	  worker record buffer (transferred)
+	 *   size_t	   counts[nparticipants]; worker record count
+	 *   MktMemCtx arenas[nparticipants]; worker arena (ownership transferred)
+	 * Each worker allocates its records from its own dedicated arena and, at
+	 * performsort, hands the buffer + arena to the leader, which gathers,
+	 * sorts, and deletes every worker arena (plus its own) in one go at
+	 * sort_end.
+	 */
 } MktSortShared;
+
+/*
+ * Offset of the per-participant arrays. MktSortShared is only int-sized, so
+ * its size is not a multiple of the pointer alignment; round up so bufs[] (and
+ * the size_t/pointer arrays after it) start 8-byte aligned.
+ */
+#define MKT_SORTSHARED_HDR (((sizeof(MktSortShared)) + 7u) & ~(size_t)7u)
 
 static char **
 ss_bufs(MktSortShared *s)
 {
-	return (char **)((char *)s + sizeof(MktSortShared));
+	return (char **)((char *)s + MKT_SORTSHARED_HDR);
 }
 
 static size_t *
 ss_counts(MktSortShared *s)
 {
 	return (size_t *)(ss_bufs(s) + s->nparticipants);
+}
+
+static MktMemCtx *
+ss_arenas(MktSortShared *s)
+{
+	return (MktMemCtx *)(ss_counts(s) + s->nparticipants);
 }
 
 struct MktSorter
@@ -425,6 +447,7 @@ struct MktSorter
 	size_t		   cursor; /* leader getnext position */
 	MktSortShared *sh;
 	int			   participant;
+	MktMemCtx arena; /* dedicated; holds buf (and merged buf for leader) */
 };
 
 static int
@@ -438,8 +461,9 @@ mkt_sort_cluster_cmp(const void *a, const void *b)
 Size
 mkt_pbuild_sort_shared_size(int nparticipants)
 {
-	return sizeof(MktSortShared) + (size_t)nparticipants * sizeof(char *) +
-		   (size_t)nparticipants * sizeof(size_t);
+	return MKT_SORTSHARED_HDR +
+		   (size_t)nparticipants *
+				   (sizeof(char *) + sizeof(size_t) + sizeof(MktMemCtx));
 }
 
 void
@@ -450,6 +474,7 @@ mkt_pbuild_sort_shared_init(void *region, int nparticipants, void *seg)
 	s->nparticipants = nparticipants;
 	memset(ss_bufs(s), 0, (size_t)nparticipants * sizeof(char *));
 	memset(ss_counts(s), 0, (size_t)nparticipants * sizeof(size_t));
+	memset(ss_arenas(s), 0, (size_t)nparticipants * sizeof(MktMemCtx));
 }
 
 MktSorter *
@@ -465,12 +490,18 @@ mkt_pbuild_sort_begin(
 	(void)seg;
 	(void)nparticipants;
 	(void)work_mem_kb;
+	/* The sorter struct itself stays a plain malloc: it is tiny and freed
+	 * deterministically by its own thread at sort_end. Its records go in a
+	 * dedicated arena (created here, not the worker's thread-local context,
+	 * which is deleted when the worker returns) whose ownership transfers to
+	 * the leader at performsort. */
 	MktSorter *s   = calloc(1, sizeof(MktSorter));
 	s->is_leader   = is_leader;
 	s->entry_size  = entry_size;
 	s->stride	   = (sizeof(uint32_t) + entry_size + 3u) & ~(size_t)3u;
 	s->sh		   = (MktSortShared *)region;
 	s->participant = participant;
+	s->arena	   = mkt_memctx_create(NULL, "mkt_sort");
 	return s;
 }
 
@@ -479,8 +510,15 @@ mkt_pbuild_sort_put(MktSorter *s, uint32_t cluster, const void *entry)
 {
 	if (s->n == s->cap)
 	{
-		s->cap = s->cap ? s->cap * 2 : 4096;
-		s->buf = realloc(s->buf, s->cap * s->stride);
+		/* Grow by doubling. The arena cannot free or grow in place, so the old
+		 * buffer is left behind and reclaimed when the arena is deleted — the
+		 * cost of arena-backed growth in the in-memory standalone path. */
+		size_t newcap = s->cap ? s->cap * 2 : 4096;
+		char  *nbuf	  = mkt_memctx_alloc(s->arena, newcap * s->stride);
+		if (s->buf)
+			memcpy(nbuf, s->buf, s->n * s->stride);
+		s->buf = nbuf;
+		s->cap = newcap;
 	}
 	char *rec = s->buf + s->n * s->stride;
 	memcpy(rec, &cluster, sizeof(uint32_t));
@@ -493,10 +531,14 @@ mkt_pbuild_sort_performsort(MktSorter *s)
 {
 	if (!s->is_leader)
 	{
-		/* Hand the buffer to the coordinator; the leader frees it. */
+		/* Hand the buffer and its arena to the coordinator; the leader reads
+		 * the records and deletes the arena. Drop our references so sort_end
+		 * below does not delete the arena out from under the leader. */
 		ss_bufs(s->sh)[s->participant]	 = s->buf;
 		ss_counts(s->sh)[s->participant] = s->n;
+		ss_arenas(s->sh)[s->participant] = s->arena;
 		s->buf							 = NULL;
+		s->arena						 = NULL;
 		return;
 	}
 
@@ -505,7 +547,7 @@ mkt_pbuild_sort_performsort(MktSorter *s)
 	size_t		   total = 0;
 	for (int i = 0; i < sh->nparticipants; i++)
 		total += ss_counts(sh)[i];
-	s->buf	   = total ? malloc(total * s->stride) : NULL;
+	s->buf	   = total ? mkt_memctx_alloc(s->arena, total * s->stride) : NULL;
 	size_t off = 0;
 	for (int i = 0; i < sh->nparticipants; i++)
 	{
@@ -538,15 +580,21 @@ mkt_pbuild_sort_end(MktSorter *s)
 {
 	if (s->is_leader)
 	{
-		/* Free the worker buffers handed over at performsort. */
+		/* Delete the worker arenas handed over at performsort (this frees
+		 * their record buffers); then our own arena frees the merged buffer
+		 * below. */
 		MktSortShared *sh = s->sh;
 		for (int i = 0; i < sh->nparticipants; i++)
 		{
-			free(ss_bufs(sh)[i]);
-			ss_bufs(sh)[i] = NULL;
+			if (ss_arenas(sh)[i])
+				mkt_memctx_delete(ss_arenas(sh)[i]);
+			ss_arenas(sh)[i] = NULL;
+			ss_bufs(sh)[i]	 = NULL;
 		}
 	}
-	free(s->buf);
+	if (s->arena) /* NULL on a worker after performsort transferred ownership
+				   */
+		mkt_memctx_delete(s->arena);
 	free(s);
 }
 
