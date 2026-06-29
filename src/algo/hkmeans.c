@@ -201,12 +201,29 @@ mkt_hkmeans_f32(
 			for (uint32_t v = 0; v < item.count; v++)
 				counts[km->assignments[v]]++;
 
-			bool first = true;
+			/*
+			 * Keep only non-empty clusters as children, compacting their
+			 * centroids to match. k-means can leave a cluster empty on
+			 * degenerate/collapsing data; tree descent indexes a node's
+			 * children as first_child + c over its centroids, so the kept
+			 * centroids and the enqueued child nodes must stay 1:1 and
+			 * contiguous. (Empty internal clusters previously left
+			 * nchildren > children-created, so descent could read past the
+			 * nodes array.) item.count > 0 here, so at least one cluster is
+			 * non-empty and kept >= 1.
+			 */
+			uint32_t kept	= 0;
+			tn->first_child = q_tail;
 			for (uint32_t c = 0; c < km->nlist; c++)
 			{
 				uint32_t sub_n = counts[c];
 				if (sub_n == 0)
 					continue;
+
+				if (kept != c)
+					memcpy(tn->centroids + (size_t)kept * dim,
+						   km->centroids + (size_t)c * dim,
+						   (size_t)dim * sizeof(float));
 
 				uint32_t *sub_indices = mkt_alloc(sub_n * sizeof(uint32_t));
 				uint32_t  idx		  = 0;
@@ -220,19 +237,16 @@ mkt_hkmeans_f32(
 					}
 				}
 
-				if (first)
-				{
-					tn->first_child = q_tail;
-					first			= false;
-				}
-
 				queue[q_tail++] = (HKWorkItem){
 						.vec_indices  = sub_indices,
 						.count		  = sub_n,
 						.level		  = item.level + 1,
-						.idx_in_level = item.idx_in_level * fan_out + c,
+						.idx_in_level = item.idx_in_level * fan_out + kept,
 				};
+				kept++;
 			}
+			tn->nchildren  = kept;
+			tn->cent_bytes = (size_t)kept * dim * sizeof(float);
 		}
 
 		mkt_kmeans_result_destroy(km);
@@ -581,8 +595,15 @@ mkt_hkmeans_assign(
 			}
 		}
 
-		bool is_leaf = (level == tree->nlevels - 1);
-		if (is_leaf)
+		/*
+		 * A node with no internal children is a leaf-parent: its children are
+		 * leaf centroids, reached via first_leaf. This is the authoritative
+		 * test -- using level == nlevels - 1 instead breaks on non-uniform
+		 * depth trees, where a branch that bottoms out early leaves a
+		 * leaf-parent above the max level; first_child (NO_CHILD = UINT32_MAX)
+		 * would then be added to best_c and index past the nodes array.
+		 */
+		if (node->first_child == HKMEANS_NO_CHILD)
 		{
 			if (out_distance != NULL)
 				*out_distance = best_dist;
@@ -681,48 +702,57 @@ mkt_hkmeans_assign_topk(
 	uint32_t beam_n = 1;
 	beam[0]			= 0; /* root */
 
-	for (uint32_t level = 0; level < tree->nlevels; level++)
-	{
-		bool	 is_leaf = (level == tree->nlevels - 1);
-		uint32_t cap	 = is_leaf ? k : beam_width;
+	/*
+	 * Terminal leaves found so far. A leaf-parent (first_child == NO_CHILD)
+	 * can appear at any level on a non-uniform-depth tree, so its leaf
+	 * children are collected here directly rather than assumed to all sit at
+	 * nlevels - 1.
+	 */
+	uint32_t res_id[MKT_HK_MAX_TOPK];
+	Distance res_d[MKT_HK_MAX_TOPK];
+	uint32_t res_n = 0;
 
-		/* Bounded best-`cap` collection of this level's candidates. For
-		 * internal levels these are child node indices; at the leaf
-		 * level they are global leaf indices. */
-		uint32_t best_id[MKT_HK_MAX_TOPK];
-		Distance best_d[MKT_HK_MAX_TOPK];
-		uint32_t best_n = 0;
+	for (uint32_t level = 0; level < tree->nlevels && beam_n > 0; level++)
+	{
+		/* Internal child nodes to expand at the next level. */
+		uint32_t next[MKT_HK_MAX_TOPK];
+		Distance next_d[MKT_HK_MAX_TOPK];
+		uint32_t next_n = 0;
 
 		for (uint32_t b = 0; b < beam_n; b++)
 		{
 			const HKMeansNode *node	 = &nodes[beam[b]];
 			const float		  *cents = hk_node_centroids(tree, node);
+			bool node_leaf			 = (node->first_child == HKMEANS_NO_CHILD);
 			for (uint32_t c = 0; c < node->nchildren; c++)
 			{
 				VectorRef qref = {.data = vec, .dim = dim};
 				VectorRef cref = {.data = cents + (size_t)c * dim, .dim = dim};
 				Distance  d	   = mkt_distance(qref, cref, metric);
-				uint32_t  id   = is_leaf ? node->first_leaf + c
-										 : node->first_child + c;
-				topk_insert(best_id, best_d, &best_n, cap, id, d);
+				if (node_leaf)
+					topk_insert(
+							res_id, res_d, &res_n, k, node->first_leaf + c, d);
+				else
+					topk_insert(
+							next,
+							next_d,
+							&next_n,
+							beam_width,
+							node->first_child + c,
+							d);
 			}
 		}
 
-		if (is_leaf)
-		{
-			topk_sort(best_id, best_d, best_n);
-			for (uint32_t i = 0; i < best_n; i++)
-			{
-				out_leaves[i] = best_id[i];
-				if (out_dists != NULL)
-					out_dists[i] = best_d[i];
-			}
-			return best_n;
-		}
-
-		memcpy(beam, best_id, best_n * sizeof(uint32_t));
-		beam_n = best_n;
+		memcpy(beam, next, next_n * sizeof(uint32_t));
+		beam_n = next_n;
 	}
 
-	return 0;
+	topk_sort(res_id, res_d, res_n);
+	for (uint32_t i = 0; i < res_n; i++)
+	{
+		out_leaves[i] = res_id[i];
+		if (out_dists != NULL)
+			out_dists[i] = res_d[i];
+	}
+	return res_n;
 }

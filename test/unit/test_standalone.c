@@ -290,9 +290,9 @@ TEST(query_exec_recall)
 /*
  * Verify each cluster head's stamped metadata against a ground-truth walk.
  * The build populates head->tail_blkno / head->live_count directly (no runtime
- * chain walk), and the parallel leader recomputes them after splicing in the
- * workers' streamed continuations — so the stamped tail must be the real last
- * block and the stamped live count the real entry count.
+ * chain walk): the parallel leader builds each list from the cluster-sorted
+ * entry stream and stamps the head as it writes — so the stamped tail must be
+ * the real last block and the stamped live count the real entry count.
  */
 static void
 verify_head_meta(MktTestResult *result, MktIndex *idx)
@@ -732,13 +732,13 @@ count_posting_entries(MktIndex *idx)
 }
 
 /*
- * Regression guard for the parallel fastscan build. Each worker streams its
- * full pages to the leader and holds only its trailing (under-full) page per
- * cluster; the leader folds those held partials into each list head during
- * finalize, unpacking fastscan groups to re-pack them. With no SOAR/boundary
- * replication every input vector is written to the posting pages exactly
- * once — walk the pages and require all of them to survive (a dropped
- * trailing partial would show up as written < nvecs).
+ * Regression guard for the parallel fastscan build. Workers RaBitQ-encode
+ * every vector and feed it to the cluster-keyed sorter; the leader builds each
+ * list's fastscan pages from the merged stream, including the trailing
+ * (under-full) group. With no SOAR/boundary replication every input vector is
+ * written to the posting pages exactly once — walk the pages and require all
+ * of them to survive (a dropped trailing entry would show up as written <
+ * nvecs).
  */
 TEST(parallel_fastscan_no_lost_partials)
 {

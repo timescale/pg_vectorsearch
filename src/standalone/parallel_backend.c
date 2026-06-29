@@ -16,6 +16,7 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "algo/hkmeans.h"
@@ -218,20 +219,14 @@ mkt_pbuild_setup_shared(
 			mkt_dsm_root_assign_size(nparticipants, max_per_worker));
 	shm_toc_estimate_chunk(&pcxt->estimator, max_tree_sz);
 	shm_toc_estimate_chunk(
-			&pcxt->estimator, mkt_dsm_posting_queues_size(nparticipants));
-	shm_toc_estimate_chunk(
-			&pcxt->estimator,
-			mkt_dsm_worker_output_size(nlist, nparticipants));
-	shm_toc_estimate_chunk(
-			&pcxt->estimator, mkt_dsm_partials_size(nlist, nparticipants));
+			&pcxt->estimator, mkt_pbuild_sort_shared_size(nparticipants));
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_dsm_child_subtrees_size(fan_out, slot_size));
 	shm_toc_estimate_chunk(&pcxt->estimator, usage_sz);
 	shm_toc_estimate_chunk(&pcxt->estimator, bufuse_sz);
 	/* Keyed regions: shared, barrier, samples, centroids, km_workers,
-	 * root_assign, tree, posting_queues, worker_output, partials,
-	 * child_subtrees. */
-	shm_toc_estimate_keys(&pcxt->estimator, 11);
+	 * root_assign, tree, sortshared, child_subtrees. */
+	shm_toc_estimate_keys(&pcxt->estimator, 9);
 
 	InitializeParallelDSM(pcxt);
 
@@ -255,14 +250,16 @@ mkt_pbuild_setup_shared(
 	shared->rabitq_seed		  = rabitq_seed;
 	shared->nparticipants	  = nparticipants;
 	shared->concurrent		  = config->concurrent; /* never set standalone */
+	shared->work_mem_kb		  = 0; /* standalone sorter is in-memory */
 	shared->max_samples_per_worker = max_per_worker;
 	shared->km_max_iterations	   = 20;
 	shared->km_tolerance		   = 1e-4f;
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
-	shared->reltuples			   = 0.0;
-	shared->indtuples			   = 0.0;
-	shared->soar_dupes			   = 0.0;
+	shared->refine_iters = 0; /* standalone builds are not mem-bounded */
+	shared->reltuples	 = 0.0;
+	shared->indtuples	 = 0.0;
+	shared->soar_dupes	 = 0.0;
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SHARED, shared);
 
 	/* Dynamic barrier (0 parties): the leader and every worker attach as they
@@ -301,30 +298,11 @@ mkt_pbuild_setup_shared(
 	memset(dsm_tree, 0, max_tree_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_TREE, dsm_tree);
 
-	/* Per-worker shm_mq posting-page queues: the leader is the receiver of
-	 * every queue; the workers attach as senders in phase 3 and stream pages.
-	 */
-	Size  queues_sz	  = mkt_dsm_posting_queues_size(nparticipants);
-	char *queues_base = shm_toc_allocate(pcxt->toc, queues_sz);
-	memset(queues_base, 0, queues_sz);
-	for (int i = 0; i < nparticipants; i++)
-	{
-		shm_mq *mq = shm_mq_create(
-				mkt_dsm_posting_queue(queues_base, i),
-				mkt_dsm_posting_queue_bytes());
-		shm_mq_set_receiver(mq, MyProc);
-	}
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_POSTING_QUEUES, queues_base);
-
-	Size  out_sz		= mkt_dsm_worker_output_size(nlist, nparticipants);
-	char *worker_output = shm_toc_allocate(pcxt->toc, out_sz);
-	memset(worker_output, 0, out_sz);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_WORKER_OUTPUT, worker_output);
-
-	Size  part_sz	   = mkt_dsm_partials_size(nlist, nparticipants);
-	char *dsm_partials = shm_toc_allocate(pcxt->toc, part_sz);
-	memset(dsm_partials, 0, part_sz);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_PARTIALS, dsm_partials);
+	/* Shared coordinator for the cluster-keyed posting sort (sort seam). */
+	Size  sort_sz	 = mkt_pbuild_sort_shared_size(nparticipants);
+	void *sortshared = shm_toc_allocate(pcxt->toc, sort_sz);
+	memset(sortshared, 0, sort_sz);
+	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SORTSHARED, sortshared);
 
 	/* Per-child subtree blobs (phase 2c, work-partitioned). */
 	char *child_subtrees_base = shm_toc_allocate(
@@ -344,8 +322,8 @@ mkt_pbuild_setup_shared(
 	lead->km_workers_base	  = km_workers_base;
 	lead->dsm_ra			  = dsm_ra;
 	lead->dsm_tree			  = dsm_tree;
-	lead->queues_base		  = queues_base;
-	lead->dsm_partials		  = dsm_partials;
+	lead->queues_base		  = NULL; /* sort-seam path: no shm_mq queues */
+	lead->dsm_partials		  = NULL; /* sort-seam path: no partials region */
 	lead->child_subtrees_base = child_subtrees_base;
 	lead->walusage			  = walusage;
 	lead->bufferusage		  = bufferusage;
@@ -388,6 +366,188 @@ mkt_pbuild_rescan(Relation heap, MktBuildShared *shared)
 	(void)heap;
 	mkt_parallel_scan_init(
 			&sh->scan, sh->scan.vectors, sh->scan.nvecs, sh->scan.dim);
+}
+
+/*
+ * Leaf-refinement accumulator lock seam. Standalone never refines
+ * (refine_iters is always 0), so these are unused stubs to satisfy the link.
+ */
+void
+mkt_pbuild_accum_lock(MktBuildShared *shared, uint32_t stripe)
+{
+	(void)shared;
+	(void)stripe;
+}
+
+void
+mkt_pbuild_accum_unlock(MktBuildShared *shared, uint32_t stripe)
+{
+	(void)shared;
+	(void)stripe;
+}
+
+/* ----------------------------------------------------------------
+ * Posting sort seam (standalone back-end) — in-memory cluster sort
+ *
+ * Each worker collects fixed-size records ([uint32 cluster][entry]) into a
+ * malloc'd buffer and, at performsort, hands ownership to the shared
+ * coordinator (one slot per worker). After the phase barrier the leader
+ * gathers every worker's records into one buffer, qsorts by cluster, and
+ * streams them back via getnext. Standalone is in-memory by design, so this
+ * mirrors the PG parallel-tuplesort seam without bounding memory.
+ * ---------------------------------------------------------------- */
+typedef struct MktSortShared
+{
+	int nparticipants;
+	/* char *bufs[nparticipants]; size_t counts[nparticipants] follow. */
+} MktSortShared;
+
+static char **
+ss_bufs(MktSortShared *s)
+{
+	return (char **)((char *)s + sizeof(MktSortShared));
+}
+
+static size_t *
+ss_counts(MktSortShared *s)
+{
+	return (size_t *)(ss_bufs(s) + s->nparticipants);
+}
+
+struct MktSorter
+{
+	bool		   is_leader;
+	uint32_t	   entry_size;
+	size_t		   stride; /* align4(4 + entry_size) */
+	char		  *buf;	   /* worker: own records; leader: merged */
+	size_t		   n;	   /* record count */
+	size_t		   cap;	   /* capacity (records) */
+	size_t		   cursor; /* leader getnext position */
+	MktSortShared *sh;
+	int			   participant;
+};
+
+static int
+mkt_sort_cluster_cmp(const void *a, const void *b)
+{
+	uint32_t ca = *(const uint32_t *)a;
+	uint32_t cb = *(const uint32_t *)b;
+	return (ca > cb) - (ca < cb);
+}
+
+Size
+mkt_pbuild_sort_shared_size(int nparticipants)
+{
+	return sizeof(MktSortShared) + (size_t)nparticipants * sizeof(char *) +
+		   (size_t)nparticipants * sizeof(size_t);
+}
+
+void
+mkt_pbuild_sort_shared_init(void *region, int nparticipants, void *seg)
+{
+	(void)seg;
+	MktSortShared *s = (MktSortShared *)region;
+	s->nparticipants = nparticipants;
+	memset(ss_bufs(s), 0, (size_t)nparticipants * sizeof(char *));
+	memset(ss_counts(s), 0, (size_t)nparticipants * sizeof(size_t));
+}
+
+MktSorter *
+mkt_pbuild_sort_begin(
+		void	*region,
+		void	*seg,
+		int		 participant,
+		int		 nparticipants,
+		bool	 is_leader,
+		uint32_t entry_size,
+		int		 work_mem_kb)
+{
+	(void)seg;
+	(void)nparticipants;
+	(void)work_mem_kb;
+	MktSorter *s   = calloc(1, sizeof(MktSorter));
+	s->is_leader   = is_leader;
+	s->entry_size  = entry_size;
+	s->stride	   = (sizeof(uint32_t) + entry_size + 3u) & ~(size_t)3u;
+	s->sh		   = (MktSortShared *)region;
+	s->participant = participant;
+	return s;
+}
+
+void
+mkt_pbuild_sort_put(MktSorter *s, uint32_t cluster, const void *entry)
+{
+	if (s->n == s->cap)
+	{
+		s->cap = s->cap ? s->cap * 2 : 4096;
+		s->buf = realloc(s->buf, s->cap * s->stride);
+	}
+	char *rec = s->buf + s->n * s->stride;
+	memcpy(rec, &cluster, sizeof(uint32_t));
+	memcpy(rec + sizeof(uint32_t), entry, s->entry_size);
+	s->n++;
+}
+
+void
+mkt_pbuild_sort_performsort(MktSorter *s)
+{
+	if (!s->is_leader)
+	{
+		/* Hand the buffer to the coordinator; the leader frees it. */
+		ss_bufs(s->sh)[s->participant]	 = s->buf;
+		ss_counts(s->sh)[s->participant] = s->n;
+		s->buf							 = NULL;
+		return;
+	}
+
+	/* Leader: gather every worker's records, then sort by cluster. */
+	MktSortShared *sh	 = s->sh;
+	size_t		   total = 0;
+	for (int i = 0; i < sh->nparticipants; i++)
+		total += ss_counts(sh)[i];
+	s->buf	   = total ? malloc(total * s->stride) : NULL;
+	size_t off = 0;
+	for (int i = 0; i < sh->nparticipants; i++)
+	{
+		size_t c = ss_counts(sh)[i];
+		if (c == 0)
+			continue;
+		memcpy(s->buf + off * s->stride, ss_bufs(sh)[i], c * s->stride);
+		off += c;
+	}
+	s->n	  = total;
+	s->cursor = 0;
+	if (total)
+		qsort(s->buf, total, s->stride, mkt_sort_cluster_cmp);
+}
+
+bool
+mkt_pbuild_sort_getnext(MktSorter *s, uint32_t *cluster, const void **entry)
+{
+	if (s->cursor >= s->n)
+		return false;
+	char *rec = s->buf + s->cursor * s->stride;
+	memcpy(cluster, rec, sizeof(uint32_t));
+	*entry = rec + sizeof(uint32_t);
+	s->cursor++;
+	return true;
+}
+
+void
+mkt_pbuild_sort_end(MktSorter *s)
+{
+	if (s->is_leader)
+	{
+		/* Free the worker buffers handed over at performsort. */
+		MktSortShared *sh = s->sh;
+		for (int i = 0; i < sh->nparticipants; i++)
+		{
+			free(ss_bufs(sh)[i]);
+			ss_bufs(sh)[i] = NULL;
+		}
+	}
+	free(s->buf);
+	free(s);
 }
 
 #endif /* MKT_STANDALONE */

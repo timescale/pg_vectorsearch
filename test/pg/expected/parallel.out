@@ -132,6 +132,41 @@ SELECT * FROM pbuild_check('(v) WITH (boundary_epsilon = 0.1)');
 
 RESET enable_seqscan;
 -- ============================================================
+-- Sample budget bound by maintenance_work_mem
+-- ============================================================
+-- The k-means sample set is held in one shared-memory region and bounded by
+-- maintenance_work_mem. A low setting on a 768-dim table forces the stride
+-- sampler to draw a coarser (uniform) subsample to fit (~341 samples at 1MB,
+-- below the row count); the build must still succeed and produce a usable
+-- index.
+CREATE TABLE wide_emb (id serial, v vector(768));
+INSERT INTO wide_emb (v)
+    SELECT (
+        SELECT array_agg((sin(i * 0.1 + j))::real)
+        FROM generate_series(0, 767) j
+    )::vector(768)
+    FROM generate_series(1, 600) i;
+ALTER TABLE wide_emb SET (parallel_workers = 2);
+SET max_parallel_maintenance_workers = 2;
+SET maintenance_work_mem = '1MB';
+CREATE INDEX idx_wide_budget ON wide_emb USING mktann (v)
+    WITH (centroid_compression = true);
+SET enable_seqscan = off;
+SELECT (SELECT relpages > 0 FROM pg_class WHERE relname = 'idx_wide_budget')
+           AS has_pages,
+       (SELECT count(*) FROM (
+            SELECT id FROM wide_emb
+            ORDER BY v <-> (SELECT v FROM wide_emb WHERE id = 1) LIMIT 5) t)
+           AS nres;
+ has_pages | nres 
+-----------+------
+ t         |    5
+(1 row)
+
+RESET enable_seqscan;
+RESET maintenance_work_mem;
+DROP TABLE wide_emb;
+-- ============================================================
 -- Edge case: parallel build of an empty table must not crash
 -- ============================================================
 CREATE TABLE empty_emb (id serial, v vector(3));

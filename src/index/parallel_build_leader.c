@@ -89,8 +89,6 @@ do_parallel_build(
 	char			 *km_workers_base = lead.km_workers_base;
 	MktDsmRootAssign *dsm_ra		  = lead.dsm_ra;
 	void			 *dsm_tree		  = lead.dsm_tree;
-	char			 *queues_base	  = lead.queues_base;
-	char			 *dsm_partials	  = lead.dsm_partials;
 	WalUsage		 *walusage		  = lead.walusage;
 	BufferUsage		 *bufferusage	  = lead.bufferusage;
 	int				  nparticipants	  = lead.nparticipants;
@@ -257,6 +255,36 @@ do_parallel_build(
 				max_tree_sz);
 	memcpy(dsm_tree, tree, tree->total_size);
 
+	/*
+	 * Phase 2.5: parallel full-table leaf refinement (gated on refine_iters,
+	 * set only for maintenance_work_mem-bounded builds). The tree is now
+	 * published to DSM; the leader and workers refine its leaf centroids on
+	 * the whole table, then the leader copies the refined leaves back into the
+	 * local tree so the centroid pages / P^T centroids below are built from
+	 * them.
+	 */
+	if (shared->refine_iters > 0)
+	{
+		/* Barrier: tree published; workers may read it now. */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		MktDsmRefineAccum *accum =
+				shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_REFINE_ACCUM, false);
+		mkt_pbuild_exec_refine(
+				0,
+				heap,
+				index,
+				index_info,
+				shared,
+				(HKMeansResult *)dsm_tree,
+				accum,
+				barrier);
+
+		memcpy(hk_leaf_centroids(tree),
+			   hk_leaf_centroids((HKMeansResult *)dsm_tree),
+			   (size_t)nlist * dim * sizeof(float));
+	}
+
 	/* Normalize leaf centroids for cosine */
 	float *ref_vecs = hk_leaf_centroids(tree);
 	if (shared->metric == DISTANCE_COSINE)
@@ -299,11 +327,18 @@ do_parallel_build(
 	/* Re-init the scan for the posting phase (back-end seam). */
 	mkt_pbuild_rescan(heap, shared);
 
-	/* Barrier: tree ready, workers can start posting scan. This is the last
-	 * barrier; phase 3 (drain) uses the shm_mq queues, not the barrier, so the
-	 * leader detaches once released. */
+	/* Initialize the shared cluster sorter for the launched-worker count
+	 * BEFORE the tree-ready barrier, so it is ready when workers attach in
+	 * phase 3. The leader merges only (it does not sort a share). */
+	void *sortshared =
+			shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_SORTSHARED, false);
+	mkt_pbuild_sort_shared_init(
+			sortshared, pcxt->nworkers_launched, pcxt->seg);
+
+	/* Barrier: tree ready + sorter initialized; workers start the posting
+	 * scan+sort. The leader stays attached and meets them at the phase-3
+	 * barrier below once all worker sorts have finished. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-	BarrierDetach(barrier);
 
 	instr_time t_scan_start;
 	INSTR_TIME_SET_CURRENT(t_scan_start);
@@ -373,115 +408,11 @@ do_parallel_build(
 	 * there is no separate spill region to pre-extend. */
 	mkt_storage_extend(storage, reserve.total);
 
-	/* Attach as receiver to each launched worker's queue. */
-	int				nq = pcxt->nworkers_launched;
-	shm_mq_handle **rh = mkt_alloc0(
-			(size_t)nparticipants * sizeof(shm_mq_handle *));
-	for (int wi = 0; wi < nq; wi++)
-	{
-		shm_mq *mq = (shm_mq *)mkt_dsm_posting_queue(queues_base, wi + 1);
-		rh[wi + 1] = shm_mq_attach(mq, pcxt->seg, NULL);
-	}
-
-	/*
-	 * Drain: place each continuation page at the next offset within its
-	 * list's reserved range (offset 0 is the head, written in finalize); a
-	 * list that outgrows its (over-)reservation extends the relation on demand
-	 * via new_page. cl_used[c] counts placed continuations and drives the
-	 * placement; cont_first/cont_last record the actual block numbers so the
-	 * chain is linked from real placements rather than assuming the
-	 * continuations are contiguous (they aren't, once a list overflows).
-	 */
-	uint32_t	*cl_used	= mkt_alloc0((size_t)nlist * sizeof(uint32_t));
-	BlockNumber *cont_first = mkt_alloc((size_t)nlist * sizeof(BlockNumber));
-	BlockNumber *cont_last	= mkt_alloc((size_t)nlist * sizeof(BlockNumber));
-	/* Live entries streamed in continuation pages, per cluster. The head's
-	 * folded partials are counted by the head builder's n_entries; the two sum
-	 * to the cluster's total live_count, stamped into the head at finalize. */
-	uint32_t *cont_live = mkt_alloc0((size_t)nlist * sizeof(uint32_t));
-	for (uint32_t c = 0; c < nlist; c++)
-	{
-		cont_first[c] = InvalidBlockNumber;
-		cont_last[c]  = InvalidBlockNumber;
-	}
-	bool *qdone = mkt_alloc0((size_t)(nq > 0 ? nq : 1) * sizeof(bool));
-	int	  ndone = 0;
-	while (ndone < nq)
-	{
-		bool progressed = false;
-		for (int wi = 0; wi < nq; wi++)
-		{
-			Size		  len;
-			void		 *data;
-			shm_mq_result res;
-
-			if (qdone[wi])
-				continue;
-			res = shm_mq_receive(rh[wi + 1], &len, &data, true);
-			if (res == SHM_MQ_SUCCESS)
-			{
-				Page	 src = (Page)data;
-				uint32_t c	 = mkt_posting_opaque(src)->cluster_id;
-				cont_live[c] += mkt_posting_opaque(src)->entry_count;
-				uint32_t	off = ++cl_used[c]; /* 1.. ; 0 = head */
-				BlockNumber blk;
-				Page		dst;
-				if (off < reserve.counts[c])
-				{
-					/* Within the cluster's reserved (over-estimated) range. */
-					blk = first_posting + reserve.starts[c] + off;
-					dst = mkt_storage_write_page(storage, blk);
-				}
-				else
-				{
-					/* Cluster outgrew its reservation: extend on demand. The
-					 * page lands at the end of the relation (non-sequential
-					 * for this list, but rare) and is linked in by block
-					 * number below. */
-					dst = mkt_storage_new_page(storage, &blk);
-				}
-				memcpy(dst, src, BLCKSZ);
-				mkt_storage_commit_page(storage, blk);
-
-				/* Link into this cluster's continuation chain using actual
-				 * block numbers. The previous page's next_blkno is fixed up
-				 * once its successor's block is known; the final page's link
-				 * is set in finalize. */
-				if (cont_last[c] == InvalidBlockNumber)
-				{
-					cont_first[c] = blk;
-				}
-				else
-				{
-					Page prev = mkt_storage_write_page(storage, cont_last[c]);
-					mkt_posting_opaque(prev)->next_blkno = blk;
-					mkt_storage_commit_page(storage, cont_last[c]);
-				}
-				cont_last[c] = blk;
-				progressed	 = true;
-			}
-			else if (res == SHM_MQ_DETACHED)
-			{
-				qdone[wi] = true;
-				ndone++;
-				progressed = true;
-			}
-		}
-		if (!progressed)
-		{
-			WaitLatch(
-					MyLatch,
-					WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
-					-1L,
-					WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-			ResetLatch(MyLatch);
-			CHECK_FOR_INTERRUPTS();
-		}
-	}
-	for (int wi = 0; wi < nq; wi++)
-		shm_mq_detach(rh[wi + 1]);
-	mkt_free(rh);
-	mkt_free(qdone);
+	/* Barrier: wait until every worker has finished sorting its run, then
+	 * merge and build. The leader does not scan; the workers cover the heap
+	 * cooperatively. */
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+	BarrierDetach(barrier);
 
 	WaitForParallelWorkersToFinish(pcxt);
 
@@ -501,23 +432,26 @@ do_parallel_build(
 	INSTR_TIME_SET_CURRENT(t_merge_start);
 
 	/*
-	 * Finalize each list: write its head page (the list's reserved offset 0)
-	 * with centroid metadata, fold every worker's trailing partial page into
-	 * the head (re-packed optimally, overflowing past the continuations / into
-	 * spill), then splice the chain head -> continuations -> overflow.
+	 * Merge the workers' sorted runs and build each cluster's posting list
+	 * with a single resident page builder, in cluster order (same loop as the
+	 * serial path). Entries arrive grouped by cluster, so there is no
+	 * partial-page fold and no chain to splice.
 	 */
-	uint32_t packed_bytes = (dim + 7) / 8;
-	uint8_t *unpack_buf	  = shared->fastscan
-								  ? mkt_alloc(MKT_FASTSCAN_GROUP * packed_bytes)
-								  : NULL;
+	MktSorter *sorter = mkt_pbuild_sort_begin(
+			sortshared,
+			pcxt->seg,
+			0,
+			pcxt->nworkers_launched,
+			true,
+			(uint32_t)mkt_posting_entry_size(dim),
+			shared->work_mem_kb);
+	mkt_pbuild_sort_performsort(sorter);
+
+	uint32_t	cur_cluster = 0;
+	const void *entry		= NULL;
+	bool		have = mkt_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
 	for (uint32_t c = 0; c < nlist; c++)
 	{
-		BlockNumber head_blk = first_posting + reserve.starts[c];
-
-		/* Overflow from the head builder is claimed after the
-		 * continuations (offsets 1..cl_used are already written). */
-		mkt_atomic_init_u32(&reserve.nexts[c], cl_used[c] + 1);
-
 		MktPostingBuilder hb;
 		if (shared->fastscan)
 			mkt_posting_builder_init_fastscan(
@@ -542,125 +476,23 @@ do_parallel_build(
 				first_posting + reserve.starts[c],
 				reserve.counts[c],
 				&reserve.nexts[c]);
-		mkt_posting_builder_set_first_blkno(&hb, head_blk);
+		mkt_posting_builder_set_first_blkno(
+				&hb, first_posting + reserve.starts[c]);
 
-		/*
-		 * Fold every worker's trailing partial page for this cluster into the
-		 * head builder, which re-packs it optimally. Worker pages are always
-		 * continuations (only the leader makes heads), so content lives at the
-		 * continuation offset. For fastscan we unpack each group's codes back
-		 * to per-vector 1-bit form so add_encoded can re-pack them.
-		 */
-		for (int w = 0; w < nparticipants; w++)
+		while (have && cur_cluster == c)
 		{
-			Page pg = mkt_dsm_worker_partials(dsm_partials, nlist, w) +
-					  (size_t)c * BLCKSZ;
-			/* A worker only writes a partial for clusters it actually touched
-			 * (see mkt_posting_worker_finish); the slot for an untouched
-			 * (worker, cluster) pair is still zero from the partials buffer's
-			 * memset. Skip it before reading the page opaque, whose special
-			 * pointer would be invalid on an uninitialized page. */
-			if (PageIsNew(pg))
-				continue;
-			MktPostingPageOpaque *op = mkt_posting_opaque(pg);
-			if (op->entry_count == 0)
-				continue;
-			char	*ct	 = mkt_posting_content(pg);
-			uint32_t cnt = op->entry_count;
-
-			if (shared->fastscan)
-			{
-				uint32_t ngroups = (cnt + MKT_FASTSCAN_GROUP - 1) /
-								   MKT_FASTSCAN_GROUP;
-				for (uint32_t g = 0; g < ngroups; g++)
-				{
-					uint32_t g_count = cnt - g * MKT_FASTSCAN_GROUP;
-					if (g_count > MKT_FASTSCAN_GROUP)
-						g_count = MKT_FASTSCAN_GROUP;
-					mkt_fastscan_unpack_codes(
-							mkt_fastscan_group_codes(ct, g, dim),
-							g_count,
-							dim,
-							unpack_buf);
-					ItemPointerData *tids =
-							mkt_fastscan_group_tids(ct, g, dim);
-					float *fa = mkt_fastscan_group_f_add(ct, g, dim);
-					float *fr = mkt_fastscan_group_f_rescale(ct, g, dim);
-					float *fe = mkt_fastscan_group_f_error(ct, g, dim);
-					for (uint32_t v = 0; v < g_count; v++)
-						mkt_posting_builder_add_encoded(
-								&hb,
-								tids[v],
-								fa[v],
-								fr[v],
-								fe[v],
-								unpack_buf + (size_t)v * packed_bytes);
-				}
-			}
-			else
-			{
-				for (uint32_t e = 0; e < cnt; e++)
-				{
-					MktPostingEntryHeader *hdr =
-							mkt_posting_entry_at(ct, e, dim);
-					mkt_posting_builder_add_encoded(
-							&hb,
-							hdr->meta.tid,
-							hdr->f_add,
-							hdr->f_rescale,
-							hdr->f_error,
-							hdr->bits);
-				}
-			}
+			mkt_posting_entry_add(&hb, entry, dim);
+			have = mkt_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
 		}
 
-		mkt_posting_builder_finish(&hb);
-		/* finish() stamped the head with the head builder's own tail/live,
-		 * which is already final when no continuations were streamed (all of
-		 * the cluster's entries were folded into the head). Capture them
-		 * before cleanup so the splice below can override with the spliced
-		 * tail and full live count when continuations exist. */
-		BlockNumber hb_tail = hb.prev_blkno;
-		uint32_t	hb_live = hb.n_entries;
+		posting_heads[c] = mkt_posting_builder_finish(&hb);
 		mkt_posting_builder_cleanup(&hb);
-
-		/* Splice the worker continuation chain (already linked internally
-		 * during the drain, in real block order) between the head and the head
-		 * builder's own overflow chain: head -> cont_first .. cont_last ->
-		 * ov1, where ov1 is whatever the head builder linked to (its overflow,
-		 * or InvalidBlockNumber when the head didn't overflow). The head's
-		 * tail_blkno / live_count are re-stamped here to cover the spliced-in
-		 * continuations: the tail is the last overflow page (ov1 chain) when
-		 * the head overflowed, else the last continuation; the live count is
-		 * the streamed continuations plus the folded partials (hb_live). */
-		if (cont_first[c] != InvalidBlockNumber)
-		{
-			Page		hp	= mkt_storage_write_page(storage, head_blk);
-			BlockNumber ov1 = mkt_posting_opaque(hp)->next_blkno;
-			mkt_posting_opaque(hp)->next_blkno = cont_first[c];
-			mkt_posting_opaque(hp)->tail_blkno = (ov1 == InvalidBlockNumber)
-													   ? cont_last[c]
-													   : hb_tail;
-			mkt_posting_opaque(hp)->live_count = cont_live[c] + hb_live;
-			mkt_storage_commit_page(storage, head_blk);
-
-			Page lp = mkt_storage_write_page(storage, cont_last[c]);
-			mkt_posting_opaque(lp)->next_blkno = ov1;
-			mkt_storage_commit_page(storage, cont_last[c]);
-		}
-
-		posting_heads[c] = head_blk;
 	}
+	mkt_pbuild_sort_end(sorter);
 
 	uint32_t total_pages = RelationGetNumberOfBlocks(index) - first_posting;
 
 	mkt_posting_reserve_free(&reserve);
-	mkt_free(cl_used);
-	mkt_free(cont_first);
-	mkt_free(cont_last);
-	mkt_free(cont_live);
-	if (unpack_buf != NULL)
-		mkt_free(unpack_buf);
 	mkt_free(pt_centroids);
 
 	instr_time t_merge_end;

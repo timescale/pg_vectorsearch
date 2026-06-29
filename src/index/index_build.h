@@ -135,21 +135,27 @@ uint32_t mkt_find_secondary_cluster(
  * Find secondary cluster via SOAR (Spilling with Orthogonality-
  * Amplified Residuals).
  *
- * Computes the orthogonality-amplified distance for each candidate
- * centroid:
+ * Computes the orthogonality-amplified distance for each searched centroid:
  *   OA(vec, c) = ||vec - c||^2 + lambda * dot(vec - c, r)^2
- * where r is the normalized residual from the primary centroid.
+ * where r is the normalized residual from the primary centroid, and returns
+ * the centroid minimizing OA distance (excluding primary). When lambda=0 this
+ * degenerates to the standard 2nd-nearest.
  *
- * Returns the centroid minimizing OA distance (excluding primary).
- * When lambda=0, this degenerates to standard 2nd-nearest.
+ * The search set is `count` leaves: the ids cand_leaves[0..count) when
+ * cand_leaves is non-NULL (the beam-descent candidates — O(count)), otherwise
+ * a full scan of leaves 0..count (pass count = nleaves). The candidate form is
+ * used in production because the SOAR optimum is always among the nearest
+ * leaves, so the result is unchanged while scaling to large nlist; NULL is for
+ * callers/tests that want the exhaustive scan.
  */
 uint32_t mkt_find_soar_secondary(
-		const float *vec,
-		const float *leaf_centroids,
-		uint32_t	 nleaves,
-		Dimension	 dim,
-		uint32_t	 primary_cluster,
-		const float *normalized_residual,
-		double		 lambda);
+		const float	   *vec,
+		const float	   *leaf_centroids,
+		const uint32_t *cand_leaves,
+		uint32_t		count,
+		Dimension		dim,
+		uint32_t		primary_cluster,
+		const float	   *normalized_residual,
+		double			lambda);
 
 #endif /* MKT_INDEX_BUILD_H */

@@ -353,6 +353,33 @@ BlockNumber mkt_posting_builder_finish_partial(MktPostingBuilder *builder);
 
 void mkt_posting_builder_cleanup(MktPostingBuilder *builder);
 
+/* ----------------------------------------------------------------
+ * Compact posting entry for the cluster-sorted build path.
+ *
+ * A fixed-size blob keyed (externally) by cluster id, carrying the RaBitQ code
+ * so the sort moves ~108 bytes/vector instead of dim*4. Layout:
+ *   [ItemPointerData tid][float f_add][float f_rescale][float f_error]
+ *   [uint8 sign_bits[(dim+7)/8]]
+ * mkt_posting_entry_encode() fills it (relative to the assigned cluster
+ * centroid); mkt_posting_entry_add() replays it into a builder via
+ * add_encoded. Used by both the serial (mktann_build.c) and parallel
+ * (sort-seam) builds, so the format has a single definition.
+ * ---------------------------------------------------------------- */
+Size mkt_posting_entry_size(Dimension dim);
+
+void mkt_posting_entry_encode(
+		const RaBitQParams *params,
+		const float		   *vec,
+		const float		   *centroid,
+		Dimension			dim,
+		RaBitQData		   *enc_buf, /* scratch, MKT_RABITQ_DATA_SIZE(dim) */
+		RaBitQScratch	   *scratch, /* scratch, scratch_init(dim) */
+		ItemPointerData		tid,
+		void			   *out_entry); /* mkt_posting_entry_size(dim) bytes */
+
+void mkt_posting_entry_add(
+		MktPostingBuilder *builder, const void *entry, Dimension dim);
+
 /*
  * Set a full-page sink for deferred mode (storage == NULL). When set,
  * completed pages are streamed to `sink(ctx, cluster_id, page)` instead

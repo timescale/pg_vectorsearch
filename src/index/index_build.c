@@ -175,35 +175,46 @@ mkt_find_secondary_cluster(
 	return primary_cluster;
 }
 
+/*
+ * SOAR secondary cluster: the leaf (other than the primary) minimizing the
+ * orthogonality-amplified distance, decomposed so both terms use the SIMD
+ * vecops kernels:
+ *
+ *   oa(c) = ||v - c||^2 + lambda * (r_hat . (v - c))^2
+ *         = ||v - c||^2 + lambda * (r_hat.v - r_hat.c)^2
+ *
+ * r_hat.v is constant across centroids, so only ||v - c||^2 and r_hat.c are
+ * per-centroid. Since lambda * (...)^2 >= 0, ||v - c||^2 is a lower bound on
+ * oa: when it already exceeds the running best we skip the dot product (exact
+ * pruning — no recall impact).
+ *
+ * The search set is `count` leaves: the ids cand_leaves[0..count) when
+ * cand_leaves is non-NULL, otherwise leaves 0..count (a full scan, called with
+ * count == nleaves). The candidate form is O(count) rather than O(nleaves);
+ * because the minimizer always has a small ||v - c||^2 (a far leaf cannot win)
+ * it lies among the nearest leaves the beam already found, so the result is
+ * unchanged while scaling to large nlist — where a full scan would read the
+ * entire (multi-hundred-MB) leaf-centroid array per replicated vector.
+ */
 uint32_t
 mkt_find_soar_secondary(
-		const float *vec,
-		const float *leaf_centroids,
-		uint32_t	 nleaves,
-		Dimension	 dim,
-		uint32_t	 primary_cluster,
-		const float *normalized_residual,
-		double		 lambda)
+		const float	   *vec,
+		const float	   *leaf_centroids,
+		const uint32_t *cand_leaves,
+		uint32_t		count,
+		Dimension		dim,
+		uint32_t		primary_cluster,
+		const float	   *normalized_residual,
+		double			lambda)
 {
-	/*
-	 * Orthogonality-amplified distance, decomposed so both terms use the
-	 * SIMD vecops kernels:
-	 *
-	 *   oa(c) = ||v - c||^2 + lambda * (r_hat . (v - c))^2
-	 *         = ||v - c||^2 + lambda * (r_hat.v - r_hat.c)^2
-	 *
-	 * r_hat.v is constant across centroids, so only ||v - c||^2 and
-	 * r_hat.c are per-centroid. Since lambda * (...)^2 >= 0, ||v - c||^2
-	 * is a lower bound on oa: when it already exceeds the running best we
-	 * skip the dot product (exact pruning — no recall impact).
-	 */
 	float	 qrv	 = mkt_dot_product(normalized_residual, vec, dim);
 	float	 lam	 = (float)lambda;
 	float	 best_oa = INFINITY;
 	uint32_t best_c	 = primary_cluster;
 
-	for (uint32_t i = 0; i < nleaves; i++)
+	for (uint32_t k = 0; k < count; k++)
 	{
+		uint32_t i = cand_leaves ? cand_leaves[k] : k;
 		if (i == primary_cluster)
 			continue;
 

@@ -16,6 +16,9 @@
 #include <access/table.h>
 #include <access/tableam.h>
 #include <catalog/index.h>
+#include <catalog/pg_operator_d.h>
+#include <catalog/pg_type_d.h>
+#include <executor/tuptable.h>
 #include <miscadmin.h>
 #include <optimizer/plancat.h>
 #include <pgstat.h>
@@ -25,6 +28,7 @@
 #include <tcop/tcopprot.h>
 #include <utils/rel.h>
 #include <utils/snapmgr.h>
+#include <utils/tuplesort.h>
 #include <utils/wait_event.h>
 
 #include "index/index_build.h"
@@ -48,6 +52,8 @@ typedef struct MktBuildSharedPg
 	Oid			   indexrelid;
 	int64		   queryid;
 	slock_t		   mutex;
+	/* Striped locks guarding the shared leaf-refinement accumulator. */
+	slock_t accum_locks[MKT_REFINE_LOCK_STRIPES];
 } MktBuildSharedPg;
 
 #define ParallelTableScanFromMktShared(shared)  \
@@ -292,26 +298,68 @@ mkt_pbuild_setup_shared(
 	uint32_t nlist_c   = (nlist + fan_out - 1) / fan_out;
 	uint64_t slot_size = mkt_hkmeans_max_blob_size(nlist_c, fan_out, dim);
 
-	/* Compute sample budget per worker. Cap to the number of rows that
-	 * actually exist: at high nlist, nlist*256 can far exceed the table
-	 * (e.g. nlist=480k -> 123M samples vs 50M rows), over-sizing the sample
-	 * DSM into hundreds of GB. estimate_rel_size() gives the planner's row
-	 * estimate: it uses the observed tuples-per-page density (reltuples /
-	 * relpages) when the table has been analyzed -- measured from the real
-	 * on-disk layout, so it counts all columns and is correct even when the
-	 * vector column is TOASTed out of line -- and falls back to a
-	 * tuple-width estimate from column stats only on a never-analyzed
-	 * table. */
-	uint64_t	want_samples  = (uint64_t)nlist * 256;
-	uint32_t	total_samples = (uint32_t)Max((uint64_t)10000, want_samples);
+	/*
+	 * Size the k-means sample set. The samples live in one shared-memory
+	 * region (total_samples * dim floats) that must stay resident for the
+	 * whole tree build -- root k-means and every subtree -- so its size is the
+	 * build's dominant memory cost. The ideal is ~256 samples per list, but at
+	 * fine nlist that can dwarf available RAM (nlist=480k -> 123M samples ->
+	 * ~360 GB), which previously overflowed the DSM.
+	 *
+	 * Bound it by maintenance_work_mem: that is the build's memory budget and
+	 * the knob operators already raise for large index builds. When the budget
+	 * is smaller than the ideal the stride sampler simply draws a coarser (but
+	 * still uniform) subsample to fit. estimate_rel_size() caps it to the rows
+	 * that actually exist so small tables don't over-allocate; it is only a
+	 * hint now -- the budget is the hard bound, so an inaccurate estimate can
+	 * no longer over-commit shared memory.
+	 */
+	uint64_t want_samples = (uint64_t)nlist * 256;
+
+	/* maintenance_work_mem is in kB; reserve it for the sample region. */
+	uint64_t mem_bytes = (uint64_t)maintenance_work_mem * UINT64CONST(1024);
+	uint64_t per_vec   = (uint64_t)dim * sizeof(float);
+	uint64_t budget	   = per_vec > 0 ? mem_bytes / per_vec : want_samples;
+	if (budget < 10000)
+		budget = 10000; /* k-means needs a workable minimum */
+
+	uint64_t total64 = Min(want_samples, budget);
+
 	BlockNumber est_pages;
 	double		est_tuples;
 	double		allvisfrac;
 	estimate_rel_size(heap, NULL, &est_pages, &est_tuples, &allvisfrac);
-	if (est_tuples > 0.0 && (double)total_samples > est_tuples)
-		total_samples = (uint32_t)est_tuples;
+	if (est_tuples > 0.0 && (double)total64 > est_tuples)
+		total64 = (uint64_t)est_tuples;
+
+	/* total64 <= want_samples = nlist*256 <= 512M (nlist reloption max 2M), so
+	 * it always fits a uint32. */
+	uint32_t total_samples = (uint32_t)Max(total64, UINT64CONST(1));
+
+	if (want_samples > budget && est_tuples > (double)budget)
+		elog(LOG,
+			 "meerkat: k-means sample set limited to %u of the ideal %lu "
+			 "vectors by maintenance_work_mem (%d kB); raise "
+			 "maintenance_work_mem for finer centroid training on large "
+			 "tables",
+			 total_samples,
+			 (unsigned long)want_samples,
+			 maintenance_work_mem);
+
 	uint32_t max_per_worker = (total_samples + nparticipants - 1) /
 							  nparticipants;
+
+	/*
+	 * Refine leaf centroids on the full table afterward only when the
+	 * structure was built from a strict subset (i.e. the sample was
+	 * budget-bounded below the table). Both leader and workers gate the refine
+	 * phase on shared->refine_iters so they run the identical barrier
+	 * sequence.
+	 */
+	uint32_t refine_iters = ((double)total_samples < est_tuples &&
+							 mkt_leaf_refine_iters > 0)
+								  ? (uint32_t)mkt_leaf_refine_iters
+								  : 0;
 
 	EnterParallelMode();
 
@@ -360,18 +408,15 @@ mkt_pbuild_setup_shared(
 					   (Size)nlist * 2 * sizeof(HKMeansNode) +
 					   (Size)nlist * dim * sizeof(float) * 2;
 	shm_toc_estimate_chunk(&pcxt->estimator, max_tree_sz);
-	/* Bounded streaming posting phase: per-worker shm_mq queues carry full
-	 * pages from the workers to the leader, which writes them. */
+	/* Shared coordinator for the cluster-keyed posting sort (sort seam). Sized
+	 * for the planned participant count (upper bound on launched workers). */
 	shm_toc_estimate_chunk(
-			&pcxt->estimator, mkt_dsm_posting_queues_size(nparticipants));
-	/* Worker output (active flags) */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator,
-			mkt_dsm_worker_output_size(nlist, nparticipants));
-	/* Per-worker trailing partial pages (both formats): the leader folds
-	 * them into each list's head during finalize. */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator, mkt_dsm_partials_size(nlist, nparticipants));
+			&pcxt->estimator, mkt_pbuild_sort_shared_size(nparticipants));
+
+	/* Shared leaf-refinement accumulator (one copy; only when refining). */
+	if (refine_iters > 0)
+		shm_toc_estimate_chunk(
+				&pcxt->estimator, mkt_dsm_refine_accum_size(nlist, dim));
 
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -386,10 +431,12 @@ mkt_pbuild_setup_shared(
 	}
 
 	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
-	 * tree, posting_queues, worker_output, partials, child_subtrees, wal,
-	 * buffer + optionally query_text */
-	int nkeys = 13;
+	 * tree, sortshared, child_subtrees, wal, buffer + optionally
+	 * refine_accum / query_text */
+	int nkeys = 11;
 	if (debug_query_string)
+		nkeys++;
+	if (refine_iters > 0)
 		nkeys++;
 	shm_toc_estimate_keys(&pcxt->estimator, nkeys);
 
@@ -419,12 +466,16 @@ mkt_pbuild_setup_shared(
 	shared->centroid_format		   = config->centroid_format;
 	shared->rabitq_seed			   = rabitq_seed;
 	shared->nparticipants		   = nparticipants;
+	shared->work_mem_kb			   = maintenance_work_mem;
 	shared->max_samples_per_worker = max_per_worker;
 	shared->km_max_iterations	   = 20;
 	shared->km_tolerance		   = 1e-4f;
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
+	shared->refine_iters		   = refine_iters;
 	SpinLockInit(&pg->mutex);
+	for (int i = 0; i < MKT_REFINE_LOCK_STRIPES; i++)
+		SpinLockInit(&pg->accum_locks[i]);
 	shared->reltuples  = 0.0;
 	shared->indtuples  = 0.0;
 	shared->soar_dupes = 0.0;
@@ -493,35 +544,25 @@ mkt_pbuild_setup_shared(
 	memset(dsm_tree, 0, max_tree_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_TREE, dsm_tree);
 
-	/* Per-worker shm_mq posting-page queues. The leader is the receiver of
-	 * every queue; the launched workers attach as senders in phase 3 and
-	 * stream their full pages. Create and register the receiver here,
-	 * before launch. */
-	Size  queues_sz	  = mkt_dsm_posting_queues_size(nparticipants);
-	char *queues_base = shm_toc_allocate(pcxt->toc, queues_sz);
-	memset(queues_base, 0, queues_sz);
-	for (int i = 0; i < nparticipants; i++)
+	/* Shared coordinator for the cluster-keyed posting sort (sort seam). Sized
+	 * for the planned participant count; the leader calls
+	 * mkt_pbuild_sort_shared_init with the actual launched count after launch.
+	 */
+	Size  sort_sz	 = mkt_pbuild_sort_shared_size(nparticipants);
+	void *sortshared = shm_toc_allocate(pcxt->toc, sort_sz);
+	memset(sortshared, 0, sort_sz);
+	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SORTSHARED, sortshared);
+
+	/* Shared leaf-refinement accumulator (sized to the nlist cap; the actual
+	 * nleaves <= nlist is set on the tree). Only when refining. */
+	if (refine_iters > 0)
 	{
-		shm_mq *mq = shm_mq_create(
-				mkt_dsm_posting_queue(queues_base, i),
-				mkt_dsm_posting_queue_bytes());
-		shm_mq_set_receiver(mq, MyProc);
+		Size			   acc_sz = mkt_dsm_refine_accum_size(nlist, dim);
+		MktDsmRefineAccum *accum  = shm_toc_allocate(pcxt->toc, acc_sz);
+		accum->nleaves			  = nlist;
+		accum->dim				  = dim;
+		shm_toc_insert(pcxt->toc, MKT_DSM_KEY_REFINE_ACCUM, accum);
 	}
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_POSTING_QUEUES, queues_base);
-
-	/* Worker output (active flags) */
-	Size  out_sz		= mkt_dsm_worker_output_size(nlist, nparticipants);
-	char *worker_output = shm_toc_allocate(pcxt->toc, out_sz);
-	memset(worker_output, 0, out_sz);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_WORKER_OUTPUT, worker_output);
-
-	/* Per-worker trailing partial pages (both AoS and fastscan). Each worker
-	 * holds at most one partial page per cluster here; the leader folds them
-	 * into the list's head during finalize. */
-	Size  part_sz	   = mkt_dsm_partials_size(nlist, nparticipants);
-	char *dsm_partials = shm_toc_allocate(pcxt->toc, part_sz);
-	memset(dsm_partials, 0, part_sz);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_PARTIALS, dsm_partials);
 
 	WalUsage *walusage = shm_toc_allocate(
 			pcxt->toc, mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -550,8 +591,8 @@ mkt_pbuild_setup_shared(
 	lead->km_workers_base	  = km_workers_base;
 	lead->dsm_ra			  = dsm_ra;
 	lead->dsm_tree			  = dsm_tree;
-	lead->queues_base		  = queues_base;
-	lead->dsm_partials		  = dsm_partials;
+	lead->queues_base		  = NULL; /* sort-seam path: no shm_mq queues */
+	lead->dsm_partials		  = NULL; /* sort-seam path: no partials region */
 	lead->walusage			  = walusage;
 	lead->bufferusage		  = bufferusage;
 	lead->nparticipants		  = nparticipants;
@@ -592,4 +633,157 @@ mkt_pbuild_rescan(Relation heap, MktBuildShared *shared)
 {
 	table_parallelscan_reinitialize(
 			heap, ParallelTableScanFromMktShared(shared));
+}
+
+/*
+ * Striped-lock seam for the shared leaf-refinement accumulator. Contention is
+ * low because rows spread across nleaves leaves into MKT_REFINE_LOCK_STRIPES
+ * stripes.
+ */
+void
+mkt_pbuild_accum_lock(MktBuildShared *shared, uint32_t stripe)
+{
+	MktBuildSharedPg *pg = (MktBuildSharedPg *)shared;
+	SpinLockAcquire(&pg->accum_locks[stripe]);
+}
+
+void
+mkt_pbuild_accum_unlock(MktBuildShared *shared, uint32_t stripe)
+{
+	MktBuildSharedPg *pg = (MktBuildSharedPg *)shared;
+	SpinLockRelease(&pg->accum_locks[stripe]);
+}
+
+/* ----------------------------------------------------------------
+ * Posting sort seam (PG back-end) — parallel tuplesort
+ *
+ * Each entry is sorted by a uint32 cluster id; the payload is a fixed-size
+ * opaque blob carried in a bytea column. Workers feed partial runs into the
+ * shared Sharedsort (in the build DSM); the leader merges and reads them back
+ * grouped by cluster. Memory is bounded by maintenance_work_mem (tuplesort
+ * spills past it). The standalone back-end provides the same-named seam over
+ * in-memory arrays.
+ * ---------------------------------------------------------------- */
+struct MktSorter
+{
+	Tuplesortstate *ts;
+	TupleDesc		tupdesc;
+	TupleTableSlot *slot;
+	SortCoordinate	coord;
+	uint32_t		entry_size;
+	bytea		   *payload; /* reusable scratch: VARHDRSZ + entry_size */
+	bool			is_leader;
+};
+
+Size
+mkt_pbuild_sort_shared_size(int nparticipants)
+{
+	return tuplesort_estimate_shared(nparticipants);
+}
+
+void
+mkt_pbuild_sort_shared_init(void *region, int nparticipants, void *seg)
+{
+	tuplesort_initialize_shared(
+			(Sharedsort *)region, nparticipants, (dsm_segment *)seg);
+}
+
+MktSorter *
+mkt_pbuild_sort_begin(
+		void	*region,
+		void	*seg,
+		int		 participant,
+		int		 nparticipants,
+		bool	 is_leader,
+		uint32_t entry_size,
+		int		 work_mem_kb)
+{
+	(void)participant;
+	MktSorter *s  = palloc0(sizeof(MktSorter));
+	s->entry_size = entry_size;
+	s->is_leader  = is_leader;
+
+	s->tupdesc = CreateTemplateTupleDesc(2);
+	TupleDescInitEntry(s->tupdesc, 1, "cluster", INT4OID, -1, 0);
+	TupleDescInitEntry(s->tupdesc, 2, "payload", BYTEAOID, -1, 0);
+
+	s->coord			 = palloc0(sizeof(SortCoordinateData));
+	s->coord->sharedsort = (Sharedsort *)region;
+	if (is_leader)
+	{
+		s->coord->isWorker		= false;
+		s->coord->nParticipants = nparticipants;
+	}
+	else
+	{
+		s->coord->isWorker		= true;
+		s->coord->nParticipants = -1;
+	}
+
+	AttrNumber attNums[1]	= {1};
+	Oid		   sortOps[1]	= {Int4LessOperator};
+	Oid		   sortColls[1] = {InvalidOid};
+	bool	   nullsF[1]	= {false};
+	s->ts					= tuplesort_begin_heap(
+			  s->tupdesc,
+			  1,
+			  attNums,
+			  sortOps,
+			  sortColls,
+			  nullsF,
+			  work_mem_kb,
+			  s->coord,
+			  TUPLESORT_NONE);
+
+	/* Workers attach to the shared fileset; the leader holds it via the
+	 * backend's dsm reference and must not attach (per tuplesort.h). */
+	if (!is_leader)
+		tuplesort_attach_shared((Sharedsort *)region, (dsm_segment *)seg);
+
+	s->slot	   = MakeSingleTupleTableSlot(s->tupdesc, &TTSOpsMinimalTuple);
+	s->payload = (bytea *)palloc(VARHDRSZ + entry_size);
+	SET_VARSIZE(s->payload, VARHDRSZ + entry_size);
+	return s;
+}
+
+void
+mkt_pbuild_sort_put(MktSorter *s, uint32_t cluster, const void *entry)
+{
+	memcpy(VARDATA(s->payload), entry, s->entry_size);
+	ExecClearTuple(s->slot);
+	s->slot->tts_values[0] = Int32GetDatum((int32)cluster);
+	s->slot->tts_isnull[0] = false;
+	s->slot->tts_values[1] = PointerGetDatum(s->payload);
+	s->slot->tts_isnull[1] = false;
+	ExecStoreVirtualTuple(s->slot);
+	tuplesort_puttupleslot(s->ts, s->slot);
+}
+
+void
+mkt_pbuild_sort_performsort(MktSorter *s)
+{
+	tuplesort_performsort(s->ts);
+}
+
+bool
+mkt_pbuild_sort_getnext(MktSorter *s, uint32_t *cluster, const void **entry)
+{
+	bool isnull;
+	if (!tuplesort_gettupleslot(s->ts, true, false, s->slot, NULL))
+		return false;
+	*cluster  = (uint32_t)DatumGetInt32(slot_getattr(s->slot, 1, &isnull));
+	bytea *pl = DatumGetByteaPP(slot_getattr(s->slot, 2, &isnull));
+	*entry	  = VARDATA_ANY(pl);
+	return true;
+}
+
+void
+mkt_pbuild_sort_end(MktSorter *s)
+{
+	tuplesort_end(s->ts);
+	ExecDropSingleTupleTableSlot(s->slot);
+	FreeTupleDesc(s->tupdesc);
+	pfree(s->coord);
+	pfree(s->payload);
+	pfree(s);
 }
