@@ -1,4 +1,4 @@
-Parsed test spec with 3 sessions
+Parsed test spec with 4 sessions
 
 starting permutation: w_ins c_chk w_commit c_chk
 step w_ins: INSERT INTO iso VALUES (1001, '[100,0,0]');
@@ -71,5 +71,22 @@ step c_chk:
 found
 -----
     1
+(1 row)
+
+
+starting permutation: w_ins w2_begin w2_ins w_commit w2_commit c_chk2
+step w_ins: INSERT INTO iso VALUES (1001, '[100,0,0]');
+step w2_begin: BEGIN;
+step w2_ins: INSERT INTO iso VALUES (1002, '[99,0,0]');
+step w_commit: COMMIT;
+step w2_commit: COMMIT;
+step c_chk2: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 2) t
+        WHERE id IN (1001, 1002);
+
+found
+-----
+    2
 (1 row)
 

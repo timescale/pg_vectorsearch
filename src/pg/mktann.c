@@ -16,6 +16,7 @@
 #include <storage/bufmgr.h>
 #include <storage/lmgr.h>
 #include <utils/float.h>
+#include <utils/injection_point.h>
 #include <utils/memutils.h>
 #include <utils/selfuncs.h>
 
@@ -127,6 +128,14 @@ mktann_insert(
 		 * single-buffer storage model. Released here, not held to xact end.
 		 */
 		LockPage(index, head, ExclusiveLock);
+		/*
+		 * Test hook: fires while this insert holds the per-cluster page lock,
+		 * so an isolation test can pause here and observe a second insert into
+		 * the same cluster block on the lock (proving the serialization and
+		 * that it does not deadlock). No-op unless PG was built with injection
+		 * points and a test attached an action.
+		 */
+		INJECTION_POINT("mktann-insert-locked", NULL);
 		mkt_posting_insert_one(
 				&storage.base,
 				base.params,

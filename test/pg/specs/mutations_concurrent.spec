@@ -37,6 +37,15 @@ step w_ins    { INSERT INTO iso VALUES (1001, '[100,0,0]'); }
 step w_commit { COMMIT; }
 step w_abort  { ROLLBACK; }
 
+# A second writer that inserts another far-out point (id 1002 at [99,0,0]) which
+# routes to the same cluster as 1001. BEGIN is an explicit step (not setup) so it
+# runs only in the permutation that uses it — a setup BEGIN would leak an open
+# transaction into the permutations that don't.
+session writer2
+step w2_begin  { BEGIN; }
+step w2_ins    { INSERT INTO iso VALUES (1002, '[99,0,0]'); }
+step w2_commit { COMMIT; }
+
 # Maintenance operations that rebuild the index. Both take an ACCESS EXCLUSIVE
 # lock, so when issued against a table with an open writer they must block
 # until that writer's transaction ends.
@@ -54,6 +63,14 @@ step c_chk
 {
     SELECT count(*) AS found FROM (
         SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+}
+# Both far-out rows present: the top-2 nearest neighbors of [100,0,0] must be
+# exactly 1001 and 1002. Returns 2 only if both concurrent inserts landed.
+step c_chk2
+{
+    SELECT count(*) AS found FROM (
+        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 2) t
+        WHERE id IN (1001, 1002);
 }
 
 # --- MVCC visibility (the core aminsert contract) ---------------------------
@@ -84,3 +101,14 @@ permutation w_ins m_reindex w_commit c_chk
 # commits it proceeds, and the committed row 1001 is present in the rebuilt
 # index. Expect 1.
 permutation w_ins m_vacfull w_commit c_chk
+
+# --- Two concurrent inserts into the same posting list ----------------------
+# Both writers append to the same cluster's chain from separate, overlapping
+# transactions: the per-insert page lock is released at statement end, so they
+# do not block each other, and the second insert builds on the chain metadata
+# (tail/live) the first left in shared buffers. This guards the insert path's
+# chain maintenance under concurrency — neither row may be lost or corrupt the
+# list — and, by completing, that the per-cluster locking never deadlocks/hangs.
+# After both commit, the top-2 nearest of [100,0,0] are exactly 1001 and 1002.
+# Expect 2.
+permutation w_ins w2_begin w2_ins w_commit w2_commit c_chk2
