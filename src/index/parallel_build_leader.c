@@ -61,6 +61,163 @@
 #include "mktann_storage.h"
 #endif
 
+/*
+ * Build every cluster's posting list from a populated (not yet performsorted)
+ * cluster-keyed sorter. Shared by the serial build and the parallel leader:
+ * performsort, then read entries grouped by cluster and write each list with a
+ * single resident page builder (head at the cluster's reserved block,
+ * continuations claimed from the reserve). Fills posting_heads[nlist] and ends
+ * the sorter.
+ *
+ * Why iterate clusters 0..nlist rather than just draining the sorter until it
+ * is empty: EVERY cluster needs a posting-list head, including clusters that
+ * received no vectors. The centroid tree's leaf entries reference
+ * posting_heads[c] for every c in [0, nlist) (see mkt_write_centroid_tree), so
+ * an empty cluster still needs a valid (empty) head block to point at. A loop
+ * over the cluster index emits a head for every cluster uniformly — an empty
+ * cluster's inner while simply does not run and finish() returns an empty
+ * head. A drain-until-empty loop would only produce heads for clusters present
+ * in the stream and would have to separately backfill empty heads for gap
+ * clusters and for all trailing clusters past the last one seen. The
+ * index-driven loop also pairs each cluster with its own pre-reserved block
+ * range (reserve->starts[c]).
+ *
+ * This REQUIRES (and assumes) the sorter returns entries in ascending cluster
+ * order, matching the 0..nlist iteration order: the sorter is keyed on the
+ * cluster id (PG tuplesort on the int4 key; standalone qsort by cluster), so
+ * all entries for a cluster are contiguous and clusters appear in increasing
+ * order. Thus while walking c upward, any remaining entry has cur_cluster >= c
+ * (it equals c for a non-empty cluster, or is greater when c is empty). The
+ * asserts below make that contract explicit: an out-of-order key would pair
+ * entries with the wrong cluster, and an out-of-range id (>= nlist) would
+ * never match any c and be silently dropped (leaving the sorter non-empty at
+ * the end).
+ */
+void
+mkt_posting_build_lists(
+		MktSorter		   *sorter,
+		MktStorage		   *storage,
+		uint32_t			nlist,
+		Dimension			dim,
+		bool				fastscan,
+		const RaBitQParams *rq_params,
+		const float		   *ref_vecs,
+		const float		   *pt_centroids,
+		MktPostingReserve  *reserve,
+		BlockNumber			first_posting,
+		BlockNumber		   *posting_heads)
+{
+	mkt_pbuild_sort_performsort(sorter);
+
+	uint32_t	cur_cluster = 0;
+	const void *entry		= NULL;
+	bool		have = mkt_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		MktPostingBuilder hb;
+		if (fastscan)
+			mkt_posting_builder_init_fastscan(
+					&hb,
+					storage,
+					rq_params,
+					dim,
+					c,
+					ref_vecs + (size_t)c * dim,
+					pt_centroids + (size_t)c * dim);
+		else
+			mkt_posting_builder_init(
+					&hb,
+					storage,
+					rq_params,
+					dim,
+					c,
+					ref_vecs + (size_t)c * dim,
+					pt_centroids + (size_t)c * dim);
+		mkt_posting_builder_set_shared_reserve(
+				&hb,
+				first_posting + reserve->starts[c],
+				reserve->counts[c],
+				&reserve->nexts[c]);
+		mkt_posting_builder_set_first_blkno(
+				&hb, first_posting + reserve->starts[c]);
+
+		/* Ascending, grouped order: a pending entry is never for a cluster we
+		 * already finished. If it were < c we would have skipped its head. */
+		Assert(!have || cur_cluster >= c);
+
+		while (have && cur_cluster == c)
+		{
+			mkt_posting_entry_add(&hb, entry, dim);
+			have = mkt_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
+		}
+
+		posting_heads[c] = mkt_posting_builder_finish(&hb);
+		mkt_posting_builder_cleanup(&hb);
+	}
+
+	/* Every entry must have landed in some cluster's list. A leftover entry
+	 * means an id >= nlist (out of range) that matched no c and would
+	 * otherwise be silently dropped. */
+	Assert(!have);
+
+	mkt_pbuild_sort_end(sorter);
+}
+
+/*
+ * Shared pre-posting centroid setup: normalize the leaf centroids for cosine
+ * (in place — the tree is trained in normalized space), compute the rotated
+ * P^T*centroids for leaf posting entries into the caller-allocated
+ * pt_centroids[nlist*dim], reserve block 0 (the metadata page, written later
+ * by the shared finalize) plus the centroid pages, and return the posting-area
+ * start block. The page layout is deterministic from the tree, so the shared
+ * finalize recomputes it for the centroid-tree write; only first_posting is
+ * needed here (for the posting reserve, which differs between serial and
+ * parallel). Shared by the serial build and the parallel leader.
+ */
+BlockNumber
+mkt_build_setup_centroid_layout(
+		MktStorage		   *storage,
+		HKMeansResult	   *tree,
+		const RaBitQParams *rq_params,
+		Dimension			dim,
+		uint32_t			nlist,
+		DistanceMetric		metric,
+		MktCentroidFormat	centroid_format,
+		float			   *pt_centroids)
+{
+	float *ref_vecs = hk_leaf_centroids(tree);
+	if (metric == DISTANCE_COSINE)
+		for (uint32_t c = 0; c < nlist; c++)
+			mkt_l2_normalize(ref_vecs + (size_t)c * dim, dim);
+
+	for (uint32_t c = 0; c < nlist; c++)
+		mkt_rabitq_rotate(
+				rq_params,
+				ref_vecs + (size_t)c * dim,
+				pt_centroids + (size_t)c * dim);
+
+	/* Block 0 = metadata page; extend so it exists (contents written later).
+	 */
+	mkt_storage_extend(storage, 1);
+
+	uint32_t	max_ent = mkt_centroid_max_entries_fmt(dim, centroid_format);
+	BlockNumber first_centroid = 1;
+	/*
+	 * mkt_compute_centroid_layout both returns where the posting area starts
+	 * and fills a per-node first-block array. Here we only need the former (to
+	 * size the posting reserve), so the array is throwaway scratch we free at
+	 * once. The other callers — the centroid-tree writers in the build
+	 * finalize — pass a long-lived array and keep it to place each node's
+	 * centroid pages.
+	 */
+	BlockNumber *nfb = mkt_alloc((size_t)tree->nnodes * sizeof(BlockNumber));
+	BlockNumber	 first_posting =
+			mkt_compute_centroid_layout(tree, max_ent, first_centroid, nfb);
+	mkt_free(nfb);
+	mkt_storage_extend(storage, first_posting - first_centroid);
+	return first_posting;
+}
+
 bool
 do_parallel_build(
 		Relation			  heap,
@@ -285,36 +442,22 @@ do_parallel_build(
 			   (size_t)nlist * dim * sizeof(float));
 	}
 
-	/* Normalize leaf centroids for cosine */
-	float *ref_vecs = hk_leaf_centroids(tree);
-	if (shared->metric == DISTANCE_COSINE)
-		for (uint32_t c = 0; c < nlist; c++)
-			mkt_l2_normalize(ref_vecs + (size_t)c * dim, dim);
-
-	/* Compute P^T * centroids */
-	RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
-	float *pt_centroids		= mkt_alloc((size_t)nlist * dim * sizeof(float));
-	for (uint32_t c = 0; c < nlist; c++)
-		mkt_rabitq_rotate(
-				rq_params,
-				ref_vecs + (size_t)c * dim,
-				pt_centroids + (size_t)c * dim);
-
-	/* Block 0 = metadata page. Extend 1 page so block 0 exists. */
-	mkt_storage_extend(storage, 1);
-
-	/* Compute exact centroid page layout from the real tree,
-	 * then extend for centroid + posting pages. Same layout
-	 * logic as the serial path. */
-	uint32_t cent_max_ent =
-			mkt_centroid_max_entries_fmt(dim, shared->centroid_format);
-	BlockNumber *node_first_blkno = mkt_alloc(
-			tree->nnodes * sizeof(BlockNumber));
-	BlockNumber first_centroid = 1;
-	BlockNumber first_posting  = mkt_compute_centroid_layout(
-			 tree, cent_max_ent, first_centroid, node_first_blkno);
-	uint32_t n_centroid_pages = first_posting - first_centroid;
-	mkt_storage_extend(storage, n_centroid_pages);
+	/* Shared pre-posting setup: normalize leaf centroids (in place) for
+	 * cosine, rotate P^T*centroids, reserve block 0 + the centroid pages, and
+	 * get the posting-area start. ref_vecs (now normalized) is reused below
+	 * for posting encode reference. */
+	RaBitQParams *rq_params	  = mkt_rabitq_create(dim, rabitq_seed);
+	float		 *ref_vecs	  = hk_leaf_centroids(tree);
+	float	   *pt_centroids  = mkt_alloc((size_t)nlist * dim * sizeof(float));
+	BlockNumber first_posting = mkt_build_setup_centroid_layout(
+			storage,
+			tree,
+			rq_params,
+			dim,
+			nlist,
+			shared->metric,
+			shared->centroid_format,
+			pt_centroids);
 
 	instr_time t_km_end;
 	INSTR_TIME_SET_CURRENT(t_km_end);
@@ -445,50 +588,18 @@ do_parallel_build(
 			true,
 			(uint32_t)mkt_posting_entry_size(dim),
 			shared->work_mem_kb);
-	mkt_pbuild_sort_performsort(sorter);
-
-	uint32_t	cur_cluster = 0;
-	const void *entry		= NULL;
-	bool		have = mkt_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
-	for (uint32_t c = 0; c < nlist; c++)
-	{
-		MktPostingBuilder hb;
-		if (shared->fastscan)
-			mkt_posting_builder_init_fastscan(
-					&hb,
-					storage,
-					rq_params,
-					dim,
-					c,
-					ref_vecs + (size_t)c * dim,
-					pt_centroids + (size_t)c * dim);
-		else
-			mkt_posting_builder_init(
-					&hb,
-					storage,
-					rq_params,
-					dim,
-					c,
-					ref_vecs + (size_t)c * dim,
-					pt_centroids + (size_t)c * dim);
-		mkt_posting_builder_set_shared_reserve(
-				&hb,
-				first_posting + reserve.starts[c],
-				reserve.counts[c],
-				&reserve.nexts[c]);
-		mkt_posting_builder_set_first_blkno(
-				&hb, first_posting + reserve.starts[c]);
-
-		while (have && cur_cluster == c)
-		{
-			mkt_posting_entry_add(&hb, entry, dim);
-			have = mkt_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
-		}
-
-		posting_heads[c] = mkt_posting_builder_finish(&hb);
-		mkt_posting_builder_cleanup(&hb);
-	}
-	mkt_pbuild_sort_end(sorter);
+	mkt_posting_build_lists(
+			sorter,
+			storage,
+			nlist,
+			dim,
+			shared->fastscan,
+			rq_params,
+			ref_vecs,
+			pt_centroids,
+			&reserve,
+			first_posting,
+			posting_heads);
 
 	uint32_t total_pages = RelationGetNumberOfBlocks(index) - first_posting;
 

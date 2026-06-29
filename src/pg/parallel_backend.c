@@ -707,17 +707,24 @@ mkt_pbuild_sort_begin(
 	TupleDescInitEntry(s->tupdesc, 1, "cluster", INT4OID, -1, 0);
 	TupleDescInitEntry(s->tupdesc, 2, "payload", BYTEAOID, -1, 0);
 
-	s->coord			 = palloc0(sizeof(SortCoordinateData));
-	s->coord->sharedsort = (Sharedsort *)region;
-	if (is_leader)
+	/* region == NULL: a plain, non-parallel sort (the serial build) — no
+	 * coordinate, no attach. Otherwise a parallel participant: a leader
+	 * merging runs, or a worker producing one (which attaches to the shared
+	 * fileset). */
+	if (region != NULL)
 	{
-		s->coord->isWorker		= false;
-		s->coord->nParticipants = nparticipants;
-	}
-	else
-	{
-		s->coord->isWorker		= true;
-		s->coord->nParticipants = -1;
+		s->coord			 = palloc0(sizeof(SortCoordinateData));
+		s->coord->sharedsort = (Sharedsort *)region;
+		if (is_leader)
+		{
+			s->coord->isWorker		= false;
+			s->coord->nParticipants = nparticipants;
+		}
+		else
+		{
+			s->coord->isWorker		= true;
+			s->coord->nParticipants = -1;
+		}
 	}
 
 	AttrNumber attNums[1]	= {1};
@@ -737,7 +744,7 @@ mkt_pbuild_sort_begin(
 
 	/* Workers attach to the shared fileset; the leader holds it via the
 	 * backend's dsm reference and must not attach (per tuplesort.h). */
-	if (!is_leader)
+	if (region != NULL && !is_leader)
 		tuplesort_attach_shared((Sharedsort *)region, (dsm_segment *)seg);
 
 	s->slot	   = MakeSingleTupleTableSlot(s->tupdesc, &TTSOpsMinimalTuple);
@@ -783,7 +790,8 @@ mkt_pbuild_sort_end(MktSorter *s)
 	tuplesort_end(s->ts);
 	ExecDropSingleTupleTableSlot(s->slot);
 	FreeTupleDesc(s->tupdesc);
-	pfree(s->coord);
+	if (s->coord != NULL) /* NULL for a non-parallel (serial) sort */
+		pfree(s->coord);
 	pfree(s->payload);
 	pfree(s);
 }

@@ -489,6 +489,33 @@ typedef struct RefineCbState
 	float *scratch; /* per-participant normalized copy (cosine) */
 } RefineCbState;
 
+/*
+ * Route a vector to its refinement leaf, exactly as both the serial and
+ * parallel refine passes must: for cosine the tree is trained in normalized
+ * space, so normalize into scratch first and accumulate that copy. Sets *out_v
+ * to the vector to accumulate (the normalized copy for cosine, else the input)
+ * and returns its leaf. Sharing this keeps the two paths' routing identical.
+ */
+uint32_t
+mkt_refine_assign_leaf(
+		const HKMeansResult *tree,
+		const float			*vec,
+		Dimension			 dim,
+		DistanceMetric		 metric,
+		float				*scratch,
+		const float		   **out_v)
+{
+	const float *v = vec;
+	if (metric == DISTANCE_COSINE)
+	{
+		memcpy(scratch, vec, (size_t)dim * sizeof(float));
+		mkt_l2_normalize(scratch, dim);
+		v = scratch;
+	}
+	*out_v = v;
+	return mkt_hkmeans_assign(tree, v, metric, NULL);
+}
+
 static void
 mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
 {
@@ -497,15 +524,9 @@ mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
 
 	(void)tid;
 
-	const float *v = vec;
-	if (rs->metric == DISTANCE_COSINE)
-	{
-		memcpy(rs->scratch, vec, (size_t)dim * sizeof(float));
-		mkt_l2_normalize(rs->scratch, dim);
-		v = rs->scratch;
-	}
-
-	uint32_t leaf	= mkt_hkmeans_assign(rs->tree, v, rs->metric, NULL);
+	const float *v;
+	uint32_t	 leaf = mkt_refine_assign_leaf(
+			rs->tree, vec, dim, rs->metric, rs->scratch, &v);
 	uint32_t stripe = leaf % MKT_REFINE_LOCK_STRIPES;
 
 	mkt_pbuild_accum_lock(rs->shared, stripe);
@@ -744,41 +765,73 @@ typedef struct PostingSortCbState
 	double				 soar_dupes;
 } PostingSortCbState;
 
+/*
+ * Emit a vector's posting entries into the cluster-keyed sorter: the primary,
+ * plus the secondary (SOAR / boundary replica) when the assignment has one.
+ * Each entry is RaBitQ-encoded relative to its own cluster centroid; the
+ * scratch buffers (enc_buf, enc_scratch, entry) are reused across both. Shared
+ * by the serial build callback and the parallel posting worker. Returns true
+ * when a secondary entry was written (the caller counts replicas).
+ */
+bool
+mkt_posting_emit_assignment(
+		MktSorter				 *sorter,
+		const MktBuildAssignment *asgn,
+		const RaBitQParams		 *params,
+		const float				 *leaf_centroids,
+		Dimension				  dim,
+		ItemPointerData			  tid,
+		RaBitQData				 *enc_buf,
+		RaBitQScratch			 *enc_scratch,
+		void					 *entry)
+{
+	mkt_posting_entry_encode(
+			params,
+			asgn->enc_vector,
+			leaf_centroids + (size_t)asgn->primary * dim,
+			dim,
+			enc_buf,
+			enc_scratch,
+			tid,
+			entry);
+	mkt_pbuild_sort_put(sorter, asgn->primary, entry);
+
+	if (asgn->secondary == MKT_INVALID_CLUSTER)
+		return false;
+
+	mkt_posting_entry_encode(
+			params,
+			asgn->enc_vector,
+			leaf_centroids + (size_t)asgn->secondary * dim,
+			dim,
+			enc_buf,
+			enc_scratch,
+			tid,
+			entry);
+	mkt_pbuild_sort_put(sorter, asgn->secondary, entry);
+	return true;
+}
+
 static void
 posting_sort_cb(void *state, ItemPointerData tid, const float *vec)
 {
 	PostingSortCbState *cbs = (PostingSortCbState *)state;
-	Dimension			dim = cbs->dim;
 
 	MktBuildAssignment asgn =
 			mkt_build_assign_vector(cbs->tree, vec, &cbs->bp, &cbs->bufs);
 
-	mkt_posting_entry_encode(
-			cbs->rq_params,
-			asgn.enc_vector,
-			cbs->leaf_cents + (size_t)asgn.primary * dim,
-			dim,
-			cbs->enc_buf,
-			cbs->enc_scratch,
-			tid,
-			cbs->entry);
-	mkt_pbuild_sort_put(cbs->sorter, asgn.primary, cbs->entry);
-	cbs->indtuples++;
-
-	if (asgn.secondary != MKT_INVALID_CLUSTER)
-	{
-		mkt_posting_entry_encode(
+	if (mkt_posting_emit_assignment(
+				cbs->sorter,
+				&asgn,
 				cbs->rq_params,
-				asgn.enc_vector,
-				cbs->leaf_cents + (size_t)asgn.secondary * dim,
-				dim,
+				cbs->leaf_cents,
+				cbs->dim,
+				tid,
 				cbs->enc_buf,
 				cbs->enc_scratch,
-				tid,
-				cbs->entry);
-		mkt_pbuild_sort_put(cbs->sorter, asgn.secondary, cbs->entry);
+				cbs->entry))
 		cbs->soar_dupes++;
-	}
+	cbs->indtuples++;
 }
 
 /* ----------------------------------------------------------------
