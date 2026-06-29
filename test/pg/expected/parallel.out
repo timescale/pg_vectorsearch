@@ -146,6 +146,42 @@ SELECT count(*) FROM empty_emb;
 
 DROP TABLE empty_emb;
 RESET max_parallel_maintenance_workers;
+-- ============================================================
+-- CREATE INDEX CONCURRENTLY builds a correct index
+-- ============================================================
+-- CIC drives ambuild through index_concurrently_build with an MVCC snapshot in
+-- its own transactions; the parallel workers must take weak locks and mark their
+-- IndexInfo concurrent, or the build errors (XID assigned in a worker / snapshot
+-- mismatch). CIC cannot run inside a function/txn block, so build it inline.
+-- Well-separated points on a line: with nprobe >= nlist the top-10 of [0.5,0,0]
+-- must be exactly ids 1..10.
+CREATE TABLE cic_pts (id int, v vector(3));
+INSERT INTO cic_pts SELECT g, format('[%s,0,0]', g)::vector
+    FROM generate_series(1, 50) g;
+ALTER TABLE cic_pts SET (parallel_workers = 2);
+SET max_parallel_maintenance_workers = 2;
+CREATE INDEX CONCURRENTLY cic_idx ON cic_pts USING mktann (v)
+    WITH (centroid_compression = true);
+-- CIC must have actually produced a valid index (not errored out).
+SELECT relpages > 0 AS cic_has_pages FROM pg_class WHERE relname = 'cic_idx';
+ cic_has_pages 
+---------------
+ t
+(1 row)
+
+SET enable_seqscan = off;
+SET mkt.nprobe = 10000;
+SELECT array_agg(id ORDER BY id) = ARRAY[1,2,3,4,5,6,7,8,9,10] AS cic_exact
+    FROM (SELECT id FROM cic_pts ORDER BY v <-> '[0.5,0,0]' LIMIT 10) t;
+ cic_exact 
+-----------
+ t
+(1 row)
+
+RESET mkt.nprobe;
+RESET enable_seqscan;
+RESET max_parallel_maintenance_workers;
+DROP TABLE cic_pts;
 -- Cleanup
 DROP FUNCTION pbuild_check(text, text);
 DROP TABLE embeddings;

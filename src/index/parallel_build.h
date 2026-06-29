@@ -106,6 +106,11 @@ typedef struct MktBuildShared
 	MktCentroidFormat centroid_format;
 	uint64_t		  rabitq_seed;
 	int				  nparticipants;
+	/* CREATE INDEX CONCURRENTLY: the leader scans with an MVCC snapshot and
+	 * participants take weak relation locks. Workers must mark their rebuilt
+	 * IndexInfo concurrent too, or heapam's snapshot/OldestXmin check trips.
+	 */
+	bool concurrent;
 
 	/* K-means config */
 	uint32_t max_samples_per_worker;
@@ -630,6 +635,8 @@ typedef struct MktBuildConfig
 	double			  soar_lambda;
 	double			  boundary_epsilon;
 	bool			  fastscan;
+	/* CREATE INDEX CONCURRENTLY: take weak locks + an MVCC scan snapshot. */
+	bool concurrent;
 } MktBuildConfig;
 
 /* ----------------------------------------------------------------

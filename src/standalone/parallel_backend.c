@@ -243,17 +243,18 @@ mkt_pbuild_setup_shared(
 	sh->index = index;
 	mkt_parallel_scan_init(&sh->scan, heap->vectors, heap->nvecs, dim);
 
-	shared->dim					   = dim;
-	shared->metric				   = config->metric;
-	shared->nlist				   = nlist;
-	shared->fan_out				   = fan_out; /* resolved (auto if config 0) */
-	shared->subtree_slot_size	   = slot_size;
-	shared->soar_lambda			   = config->soar_lambda;
-	shared->boundary_epsilon	   = config->boundary_epsilon;
-	shared->fastscan			   = config->fastscan;
-	shared->centroid_format		   = config->centroid_format;
-	shared->rabitq_seed			   = rabitq_seed;
-	shared->nparticipants		   = nparticipants;
+	shared->dim				  = dim;
+	shared->metric			  = config->metric;
+	shared->nlist			  = nlist;
+	shared->fan_out			  = fan_out; /* resolved (auto if config 0) */
+	shared->subtree_slot_size = slot_size;
+	shared->soar_lambda		  = config->soar_lambda;
+	shared->boundary_epsilon  = config->boundary_epsilon;
+	shared->fastscan		  = config->fastscan;
+	shared->centroid_format	  = config->centroid_format;
+	shared->rabitq_seed		  = rabitq_seed;
+	shared->nparticipants	  = nparticipants;
+	shared->concurrent		  = config->concurrent; /* never set standalone */
 	shared->max_samples_per_worker = max_per_worker;
 	shared->km_max_iterations	   = 20;
 	shared->km_tolerance		   = 1e-4f;
