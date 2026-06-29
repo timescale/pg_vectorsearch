@@ -1,0 +1,28 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1_ins s2_ins wake chk
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s1_ins: INSERT INTO ins VALUES (1001, '[100,0,0]'); <waiting ...>
+step s2_ins: INSERT INTO ins VALUES (1002, '[99,0,0]'); <waiting ...>
+step wake: SELECT injection_points_wakeup('mktann-insert-locked');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s1_ins: <... completed>
+step s2_ins: <... completed>
+step chk: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM ins ORDER BY v <-> '[100,0,0]' LIMIT 2) t
+        WHERE id IN (1001, 1002);
+
+found
+-----
+    2
+(1 row)
+

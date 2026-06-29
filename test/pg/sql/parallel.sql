@@ -129,6 +129,89 @@ DROP TABLE empty_emb;
 RESET max_parallel_maintenance_workers;
 
 -- ============================================================
+-- Exactness: every build path returns the exact top-k
+-- ============================================================
+-- A smoke check (has_pages + returns LIMIT) cannot catch a build that produces
+-- a *wrong* index. Here the data is well-separated so the 10 nearest neighbors
+-- of the probe are unambiguous, and the query uses nprobe >= nlist (probe every
+-- cluster) so the result depends only on the index contents, not on which lists
+-- happened to be probed nor on how clustering placed the centroids. Each build
+-- path must therefore return exactly the seqscan top-10.
+--
+-- exact_check builds the index from a definition tail, collects the index
+-- top-10 (forcing an index scan, probing all lists) and the seqscan top-10 for
+-- the same probe, and returns whether the two id sets match.
+CREATE FUNCTION exact_check(tbl text, idxdef text, q text)
+    RETURNS bool LANGUAGE plpgsql AS $$
+DECLARE
+    idx_ids int[];
+    seq_ids int[];
+BEGIN
+    EXECUTE format('CREATE INDEX ex_idx ON %I USING mktann %s', tbl, idxdef);
+    SET LOCAL enable_seqscan = off;
+    SET LOCAL mkt.nprobe = 10000; -- >= nlist for these tables: probe all
+    EXECUTE format(
+        'SELECT array_agg(id ORDER BY id) FROM '
+        '(SELECT id FROM %I ORDER BY v <-> %L LIMIT 10) t', tbl, q)
+        INTO idx_ids;
+    SET LOCAL enable_seqscan = on;
+    SET LOCAL enable_indexscan = off;
+    EXECUTE format(
+        'SELECT array_agg(id ORDER BY id) FROM '
+        '(SELECT id FROM %I ORDER BY v <-> %L LIMIT 10) t', tbl, q)
+        INTO seq_ids;
+    SET LOCAL enable_indexscan = on;
+    EXECUTE 'DROP INDEX ex_idx';
+    RETURN idx_ids = seq_ids;
+END $$;
+
+-- 50 well-separated points on a line; the 10 nearest to [0.5,0,0] are ids 1..10
+-- (strictly increasing distance, gaps of 1.0), so quantization cannot reorder
+-- the top-10.
+CREATE TABLE line3 (id int, v vector(3));
+INSERT INTO line3 SELECT g, format('[%s,0,0]', g)::vector
+    FROM generate_series(1, 50) g;
+ALTER TABLE line3 SET (parallel_workers = 2);
+
+SET max_parallel_maintenance_workers = 2;
+SELECT exact_check('line3', '(v) WITH (centroid_compression = true)',
+                   '[0.5,0,0]') AS parallel_exact;
+SELECT exact_check('line3', '(v) WITH (fan_out = 4, soar_lambda = 1.0)',
+                   '[0.5,0,0]') AS parallel_soar_exact;
+SELECT exact_check('line3', '(v) WITH (fastscan = true)',
+                   '[0.5,0,0]') AS parallel_fastscan_exact;
+SET max_parallel_maintenance_workers = 0;
+SELECT exact_check('line3', '(v) WITH (centroid_compression = true)',
+                   '[0.5,0,0]') AS serial_exact;
+SELECT exact_check('line3', '(v) WITH (fastscan = true, soar_lambda = 1.0)',
+                   '[0.5,0,0]') AS serial_soar_exact;
+DROP TABLE line3;
+
+-- 768-dim well-separated points (only the first coordinate varies). At
+-- maintenance_work_mem = 1MB the k-means sample (~341 vectors) is bounded below
+-- the 600 rows, exercising the bounded subsample + full-table leaf refinement;
+-- the bounded/refined index must still return the exact top-10.
+CREATE TABLE line768 (id int, v vector(768));
+INSERT INTO line768
+    SELECT g, ('[' || g || repeat(',0', 767) || ']')::vector(768)
+    FROM generate_series(1, 600) g;
+ALTER TABLE line768 SET (parallel_workers = 2);
+
+SET max_parallel_maintenance_workers = 2;
+SET maintenance_work_mem = '1MB';
+SET mkt.leaf_refine_iters = 0;
+SELECT exact_check('line768', '(v) WITH (centroid_compression = true)',
+                   '[0.5' || repeat(',0', 767) || ']') AS bounded_norefine_exact;
+SET mkt.leaf_refine_iters = 2;
+SELECT exact_check('line768', '(v) WITH (centroid_compression = true)',
+                   '[0.5' || repeat(',0', 767) || ']') AS bounded_refine_exact;
+RESET mkt.leaf_refine_iters;
+RESET maintenance_work_mem;
+RESET max_parallel_maintenance_workers;
+DROP TABLE line768;
+DROP FUNCTION exact_check(text, text, text);
+
+-- ============================================================
 -- CREATE INDEX CONCURRENTLY builds a correct index
 -- ============================================================
 -- CIC drives ambuild through index_concurrently_build with an MVCC snapshot in
