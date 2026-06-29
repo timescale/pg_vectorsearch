@@ -653,6 +653,13 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			shm_toc_lookup(toc, MKT_DSM_KEY_ROOT_ASSIGN, false);
 	uint32_t   km_k		 = shared->km_k;
 	IndexInfo *indexInfo = BuildIndexInfo(indexRel);
+#ifndef MKT_STANDALONE
+	/* The leader marked the build concurrent and scans with an MVCC snapshot;
+	 * the worker's freshly built IndexInfo defaults to non-concurrent, so it
+	 * must be aligned or heapam's snapshot/OldestXmin assert trips in the scan
+	 * (a valid OldestXmin paired with an MVCC snapshot). Matches nbtsort. */
+	indexInfo->ii_Concurrent = shared->concurrent;
+#endif
 
 	mkt_pbuild_exec_sampling(
 			worker_id,

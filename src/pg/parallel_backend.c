@@ -120,6 +120,22 @@ mkt_build_scan(
 }
 
 /*
+ * Relation lock modes a parallel worker uses for the heap and index. A
+ * concurrent build (CREATE INDEX CONCURRENTLY) must take weak locks: the
+ * leader holds only ShareUpdateExclusive on the heap, and acquiring a strong
+ * index lock in a worker logs it for hot-standby and assigns an XID, which is
+ * illegal in a parallel worker. Matches PostgreSQL's btree parallel build. The
+ * same pair is used to open the relations on attach and to close them on
+ * detach.
+ */
+static void
+worker_lockmodes(bool concurrent, LOCKMODE *heapmode, LOCKMODE *indexmode)
+{
+	*heapmode  = concurrent ? ShareUpdateExclusiveLock : ShareLock;
+	*indexmode = concurrent ? RowExclusiveLock : AccessExclusiveLock;
+}
+
+/*
  * Join the parallel build: look up the shared state, open the heap and index,
  * start per-worker instrumentation, and attach to the phase barrier. The
  * standalone back-end provides a same-named function that takes the shared
@@ -137,10 +153,13 @@ mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
 	pgstat_report_activity(STATE_RUNNING, debug_query_string);
 	pgstat_report_query_id(pg->queryid, false);
 
+	LOCKMODE heapmode, indexmode;
+	worker_lockmodes(shared->concurrent, &heapmode, &indexmode);
+
 	w->shared	 = shared;
 	w->barrier	 = barrier;
-	w->heapRel	 = table_open(pg->heaprelid, ShareLock);
-	w->indexRel	 = index_open(pg->indexrelid, AccessExclusiveLock);
+	w->heapRel	 = table_open(pg->heaprelid, heapmode);
+	w->indexRel	 = index_open(pg->indexrelid, indexmode);
 	w->worker_id = ParallelWorkerNumber + 1;
 	w->dim		 = shared->dim;
 
@@ -170,9 +189,21 @@ mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
 			&bufferusage[ParallelWorkerNumber],
 			&walusage[ParallelWorkerNumber]);
 
-	index_close(w->indexRel, AccessExclusiveLock);
-	table_close(w->heapRel, ShareLock);
+	LOCKMODE heapmode, indexmode;
+	worker_lockmodes(w->shared->concurrent, &heapmode, &indexmode);
+	index_close(w->indexRel, indexmode);
+	table_close(w->heapRel, heapmode);
 }
+
+/*
+ * Snapshot used to initialize the parallel heap scan for CREATE INDEX
+ * CONCURRENTLY (an MVCC snapshot; SnapshotAny/NULL for a normal build). It
+ * must stay registered for the whole parallel operation and is released at
+ * teardown. A file-static is safe: an index build is single-threaded and
+ * non-reentrant in the leader backend, and every parallel-build exit path runs
+ * mkt_pbuild_teardown.
+ */
+static Snapshot mkt_pbuild_snapshot = NULL;
 
 /*
  * Tear the parallel context down and leave parallel mode. The standalone
@@ -182,6 +213,11 @@ mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
 void
 mkt_pbuild_teardown(ParallelContext *pcxt)
 {
+	if (mkt_pbuild_snapshot != NULL)
+	{
+		UnregisterSnapshot(mkt_pbuild_snapshot);
+		mkt_pbuild_snapshot = NULL;
+	}
 	DestroyParallelContext(pcxt);
 	ExitParallelMode();
 }
@@ -282,9 +318,19 @@ mkt_pbuild_setup_shared(
 	ParallelContext *pcxt = CreateParallelContext(
 			"meerkat", "mkt_parallel_build_main", nworkers);
 
-	/* Estimate DSM size for ALL phases */
-	Snapshot snapshot	= SnapshotAny;
-	Size	 est_shared = add_size(
+	/*
+	 * The heap scan's snapshot. A normal build sees all tuples (SnapshotAny);
+	 * CREATE INDEX CONCURRENTLY must use an MVCC snapshot so it indexes only
+	 * tuples visible to it (heapam asserts SnapshotAny <-> a valid OldestXmin,
+	 * so the concurrent path must not pass SnapshotAny). Register it for the
+	 * duration — its serialized size also affects the DSM estimate below — and
+	 * release it in mkt_pbuild_teardown. Mirrors PostgreSQL's nbtsort.c.
+	 */
+	Snapshot snapshot	= config->concurrent
+								? RegisterSnapshot(GetTransactionSnapshot())
+								: SnapshotAny;
+	mkt_pbuild_snapshot = (snapshot != SnapshotAny) ? snapshot : NULL;
+	Size est_shared		= add_size(
 			BUFFERALIGN(sizeof(MktBuildSharedPg)),
 			table_parallelscan_estimate(heap, snapshot));
 
@@ -361,6 +407,7 @@ mkt_pbuild_setup_shared(
 	pg->heaprelid				   = RelationGetRelid(heap);
 	pg->indexrelid				   = RelationGetRelid(index);
 	pg->queryid					   = pgstat_get_my_query_id();
+	shared->concurrent			   = config->concurrent;
 	shared->dim					   = dim;
 	shared->metric				   = config->metric;
 	shared->nlist				   = nlist;
