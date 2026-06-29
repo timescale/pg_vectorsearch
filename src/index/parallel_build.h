@@ -81,6 +81,8 @@ typedef void (*MktBuildScanCb)(
 #define MKT_DSM_KEY_ROOT_ASSIGN	   UINT64CONST(0xB00000000000000E)
 #define MKT_DSM_KEY_POSTING_QUEUES UINT64CONST(0xB00000000000000F)
 #define MKT_DSM_KEY_CHILD_SUBTREES UINT64CONST(0xB000000000000010)
+#define MKT_DSM_KEY_REFINE_ACCUM   UINT64CONST(0xB000000000000011)
+#define MKT_DSM_KEY_SORTSHARED	   UINT64CONST(0xB000000000000012)
 
 /* ----------------------------------------------------------------
  * MktBuildShared — back-end-neutral shared build state
@@ -111,12 +113,22 @@ typedef struct MktBuildShared
 	 * IndexInfo concurrent too, or heapam's snapshot/OldestXmin check trips.
 	 */
 	bool concurrent;
+	/* Posting sort work budget (KB); PG sets it from maintenance_work_mem,
+	 * standalone leaves it 0 (its in-memory sorter ignores it). The shared
+	 * phase-3 code reads this instead of the PG-only GUC. */
+	int work_mem_kb;
 
 	/* K-means config */
 	uint32_t max_samples_per_worker;
 	uint32_t km_max_iterations;
 	float	 km_tolerance;
 	uint32_t km_k; /* root k-means k (= fan_out) */
+
+	/* Full-table leaf-centroid refinement passes (0 = off). Set by the leader
+	 * when the sample set is maintenance_work_mem-bounded; standalone leaves
+	 * it 0. Both leader and workers gate the refine phase on this, so they run
+	 * the same barrier sequence. */
+	uint32_t refine_iters;
 
 	/* Counters — updated concurrently under the back-end's lock */
 	double reltuples;
@@ -502,6 +514,70 @@ extern void mkt_pbuild_exec_root_assign(
 		Barrier			 *barrier);
 
 /* ----------------------------------------------------------------
+ * Full-table leaf-centroid refinement (parallel)
+ *
+ * A single shared accumulator (sums[nleaves*dim] + counts[nleaves]) holds the
+ * per-leaf running mean for all participants -- one copy, independent of the
+ * worker count, so it scales to fine nlist where per-worker accumulators would
+ * not. Concurrent updates are guarded by a striped lock array owned by the
+ * back-end (mkt_pbuild_accum_lock/unlock); contention is low because rows
+ * spread across nleaves leaves. sums uses float (means of normalized vectors).
+ * ---------------------------------------------------------------- */
+
+#define MKT_REFINE_LOCK_STRIPES 256
+
+typedef struct MktDsmRefineAccum
+{
+	uint32_t  nleaves;
+	Dimension dim;
+	/* float sums[nleaves * dim], then uint64 counts[nleaves], packed after. */
+	float sums[FLEXIBLE_ARRAY_MEMBER];
+} MktDsmRefineAccum;
+
+static inline float *
+mkt_dsm_refine_sums(MktDsmRefineAccum *a)
+{
+	return a->sums;
+}
+
+static inline uint64_t *
+mkt_dsm_refine_counts(MktDsmRefineAccum *a)
+{
+	return (uint64_t *)(a->sums + (size_t)a->nleaves * a->dim);
+}
+
+static inline Size
+mkt_dsm_refine_accum_size(uint32_t nleaves, Dimension dim)
+{
+	Size sz = offsetof(MktDsmRefineAccum, sums);
+	sz += (Size)nleaves * dim * sizeof(float);
+	sz += (Size)nleaves * sizeof(uint64_t);
+	return sz;
+}
+
+/*
+ * Refine the tree's leaf centroids on the whole table: refine_iters streaming
+ * passes, each routing every row to its leaf and recomputing per-leaf means.
+ * Both leader (participant 0) and workers call it; gated by
+ * shared->refine_iters so they run the same barriers. The leader
+ * zeroes/divides and reinitializes the scan each pass. tree points at the
+ * shared (DSM) tree, updated in place.
+ */
+extern void mkt_pbuild_exec_refine(
+		int				   participant_id,
+		Relation		   heap,
+		Relation		   index,
+		struct IndexInfo  *index_info,
+		MktBuildShared	  *shared,
+		HKMeansResult	  *tree,
+		MktDsmRefineAccum *accum,
+		Barrier			  *barrier);
+
+/* Striped lock seam for the refine accumulator (back-end owns the locks). */
+extern void mkt_pbuild_accum_lock(MktBuildShared *shared, uint32_t stripe);
+extern void mkt_pbuild_accum_unlock(MktBuildShared *shared, uint32_t stripe);
+
+/* ----------------------------------------------------------------
  * Phase 3: Posting build callback — shared by leader and workers
  *
  * Uses MktPostingWorkerState in deferred mode (storage=NULL): each worker
@@ -689,6 +765,47 @@ extern bool mkt_pbuild_setup_shared(
  * standalone, the work-stealing cursor.
  */
 extern void mkt_pbuild_rescan(Relation heap, MktBuildShared *shared);
+
+/* ----------------------------------------------------------------
+ * Posting sort seam — cluster-keyed external sort of encoded entries.
+ *
+ * Back-end seam (like mkt_build_scan): the PG back-end implements it with a
+ * parallel tuplesort whose shared coordinator (Sharedsort) lives in the build
+ * DSM; the standalone back-end with per-participant in-memory arrays merged
+ * and sorted by cluster. The shared phase-3 code
+ * (parallel_build_worker/leader) calls only this seam, so the posting build
+ * stays bounded by maintenance_work_mem without the standalone core depending
+ * on PostgreSQL's tuplesort.
+ *
+ * Lifecycle:
+ *   leader, in setup_shared before launch:  size the DSM region with
+ *       mkt_pbuild_sort_shared_size(); after launch:
+ * mkt_pbuild_sort_shared_init(). each worker:  begin(is_leader=false) ->
+ * put... -> performsort -> end. leader:       begin(is_leader=true) ->
+ * performsort -> getnext... -> end. Entries are fixed-size opaque blobs sorted
+ * by the uint32 cluster key. `seg` and `region` are void* to keep PostgreSQL
+ * types out of the shared header (the PG impl casts seg to dsm_segment*);
+ * `region` is the MKT_DSM_KEY_SORTSHARED chunk.
+ * ---------------------------------------------------------------- */
+typedef struct MktSorter MktSorter;
+
+extern Size mkt_pbuild_sort_shared_size(int nparticipants);
+extern void
+mkt_pbuild_sort_shared_init(void *region, int nparticipants, void *seg);
+extern MktSorter *mkt_pbuild_sort_begin(
+		void	*region,
+		void	*seg,
+		int		 participant,
+		int		 nparticipants,
+		bool	 is_leader,
+		uint32_t entry_size,
+		int		 work_mem_kb);
+extern void
+mkt_pbuild_sort_put(MktSorter *sorter, uint32_t cluster, const void *entry);
+extern void mkt_pbuild_sort_performsort(MktSorter *sorter);
+extern bool mkt_pbuild_sort_getnext(
+		MktSorter *sorter, uint32_t *cluster, const void **entry);
+extern void mkt_pbuild_sort_end(MktSorter *sorter);
 
 /* ----------------------------------------------------------------
  * Parallel build entry — shared driver (parallel_build_leader.c)

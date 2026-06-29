@@ -26,6 +26,7 @@ int	   mkt_fastscan_bits		= 16;
 bool   mkt_rerank				= true;
 double mkt_centroid_error_scale = 0.0;
 double mkt_centroid_beam_scale	= 0.25;
+int	   mkt_leaf_refine_iters	= 2;
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
@@ -99,6 +100,26 @@ _PG_init(void)
 			0,
 			0,
 			100000,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.leaf_refine_iters",
+			"Full-table leaf-centroid refinement passes for memory-bounded "
+			"builds.",
+			"When maintenance_work_mem caps the k-means sample below the "
+			"ideal, "
+			"the tree structure is built from the subsample and the leaf "
+			"centroids are then refined on the whole table this many passes "
+			"(0 disables refinement). Only takes effect when the build is "
+			"sample-bounded.",
+			&mkt_leaf_refine_iters,
+			2,
+			0,
+			10,
 			PGC_USERSET,
 			0,
 			NULL,

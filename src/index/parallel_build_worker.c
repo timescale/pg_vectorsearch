@@ -475,6 +475,123 @@ mkt_pbuild_exec_root_assign(
 }
 
 /* ----------------------------------------------------------------
+ * Phase 2.5: parallel full-table leaf-centroid refinement
+ * ---------------------------------------------------------------- */
+
+typedef struct RefineCbState
+{
+	MktBuildShared		*shared;
+	const HKMeansResult *tree;
+	float				*sums;	 /* shared accumulator */
+	uint64_t			*counts; /* shared accumulator */
+	Dimension			 dim;
+	DistanceMetric		 metric;
+	float *scratch; /* per-participant normalized copy (cosine) */
+} RefineCbState;
+
+static void
+mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
+{
+	RefineCbState *rs  = (RefineCbState *)state;
+	Dimension	   dim = rs->dim;
+
+	(void)tid;
+
+	const float *v = vec;
+	if (rs->metric == DISTANCE_COSINE)
+	{
+		memcpy(rs->scratch, vec, (size_t)dim * sizeof(float));
+		mkt_l2_normalize(rs->scratch, dim);
+		v = rs->scratch;
+	}
+
+	uint32_t leaf	= mkt_hkmeans_assign(rs->tree, v, rs->metric, NULL);
+	uint32_t stripe = leaf % MKT_REFINE_LOCK_STRIPES;
+
+	mkt_pbuild_accum_lock(rs->shared, stripe);
+	float *sum = rs->sums + (size_t)leaf * dim;
+	for (Dimension j = 0; j < dim; j++)
+		sum[j] += v[j];
+	rs->counts[leaf]++;
+	mkt_pbuild_accum_unlock(rs->shared, stripe);
+}
+
+void
+mkt_pbuild_exec_refine(
+		int				   participant_id,
+		Relation		   heap,
+		Relation		   index,
+		struct IndexInfo  *index_info,
+		MktBuildShared	  *shared,
+		HKMeansResult	  *tree,
+		MktDsmRefineAccum *accum,
+		Barrier			  *barrier)
+{
+	Dimension dim	  = shared->dim;
+	uint32_t  nleaves = tree->nleaves;
+	float	 *sums	  = mkt_dsm_refine_sums(accum);
+	uint64_t *counts  = mkt_dsm_refine_counts(accum);
+	float	 *cents	  = hk_leaf_centroids(tree);
+
+	RefineCbState rs = {
+			.shared	 = shared,
+			.tree	 = tree,
+			.sums	 = sums,
+			.counts	 = counts,
+			.dim	 = dim,
+			.metric	 = shared->metric,
+			.scratch = mkt_alloc((size_t)dim * sizeof(float)),
+	};
+
+	for (uint32_t it = 0; it < shared->refine_iters; it++)
+	{
+		/* Leader zeroes the shared accumulator and reinitializes the scan. */
+		if (participant_id == 0)
+		{
+			memset(sums, 0, (size_t)nleaves * dim * sizeof(float));
+			memset(counts, 0, (size_t)nleaves * sizeof(uint64_t));
+			mkt_pbuild_rescan(heap, shared);
+		}
+		/* Barrier: accumulator cleared + scan reset before anyone scans. */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		/* All participants cooperatively scan the heap and accumulate. */
+		mkt_build_scan(
+				heap,
+				index,
+				index_info,
+				shared,
+				true,
+				participant_id == 0,
+				mkt_refine_cb,
+				&rs);
+
+		/* Barrier: every row accumulated before the leader divides. */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		/* Leader recomputes leaf centroids = full-table per-leaf means. */
+		if (participant_id == 0)
+		{
+			for (uint32_t l = 0; l < nleaves; l++)
+			{
+				if (counts[l] == 0)
+					continue; /* keep the subsample centroid for empty leaf */
+				float *sum = sums + (size_t)l * dim;
+				float *c   = cents + (size_t)l * dim;
+				double inv = 1.0 / (double)counts[l];
+				for (Dimension j = 0; j < dim; j++)
+					c[j] = (float)(sum[j] * inv);
+			}
+		}
+		/* Barrier: refined centroids visible before the next pass / posting.
+		 */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+	}
+
+	mkt_free(rs.scratch);
+}
+
+/* ----------------------------------------------------------------
  * Phase 3: Posting build callback
  *
  * Uses MktPostingWorkerState in deferred batch mode (storage=NULL).
@@ -603,25 +720,65 @@ posting_cb(void *state, ItemPointerData tid, const float *vec)
 	mkt_memctx_reset(cbs->tmp_ctx);
 }
 
-/*
- * Page sink: stream one completed full page to the leader over this
- * worker's shm_mq. The page carries its own cluster id and first/
- * continuation flag in its header, so only the BLCKSZ page is sent.
- * The send blocks when the ring is full (backpressure) — that is what
- * bounds worker memory to ~one working page per cluster.
- */
-static void
-mktann_posting_page_sink(void *ctx, uint32_t cluster_id, const char *page)
+/* ----------------------------------------------------------------
+ * Phase 3: posting scan -> cluster-keyed sort (sort-seam path)
+ *
+ * Each worker assigns + RaBitQ-encodes every vector and feeds the compact
+ * entry into the shared cluster-keyed sorter (primary + optional SOAR
+ * secondary). The leader merges and builds the pages. Memory is bounded by
+ * maintenance_work_mem inside the sorter.
+ * ---------------------------------------------------------------- */
+typedef struct PostingSortCbState
 {
-	shm_mq_handle *mqh = (shm_mq_handle *)ctx;
-	shm_mq_result  res;
+	const HKMeansResult *tree;
+	MktBuildParams		 bp;
+	MktBuildWorkerBufs	 bufs;
+	const RaBitQParams	*rq_params;
+	RaBitQData			*enc_buf;
+	RaBitQScratch		*enc_scratch;
+	const float			*leaf_cents;
+	MktSorter			*sorter;
+	Dimension			 dim;
+	char				*entry; /* scratch, mkt_posting_entry_size(dim) */
+	double				 indtuples;
+	double				 soar_dupes;
+} PostingSortCbState;
 
-	(void)cluster_id; /* carried in the page header */
-	res = shm_mq_send(mqh, BLCKSZ, page, false, true);
-	if (res != SHM_MQ_SUCCESS)
-		mkt_error(
-				"mktann: posting page queue send failed (result %d)",
-				(int)res);
+static void
+posting_sort_cb(void *state, ItemPointerData tid, const float *vec)
+{
+	PostingSortCbState *cbs = (PostingSortCbState *)state;
+	Dimension			dim = cbs->dim;
+
+	MktBuildAssignment asgn =
+			mkt_build_assign_vector(cbs->tree, vec, &cbs->bp, &cbs->bufs);
+
+	mkt_posting_entry_encode(
+			cbs->rq_params,
+			asgn.enc_vector,
+			cbs->leaf_cents + (size_t)asgn.primary * dim,
+			dim,
+			cbs->enc_buf,
+			cbs->enc_scratch,
+			tid,
+			cbs->entry);
+	mkt_pbuild_sort_put(cbs->sorter, asgn.primary, cbs->entry);
+	cbs->indtuples++;
+
+	if (asgn.secondary != MKT_INVALID_CLUSTER)
+	{
+		mkt_posting_entry_encode(
+				cbs->rq_params,
+				asgn.enc_vector,
+				cbs->leaf_cents + (size_t)asgn.secondary * dim,
+				dim,
+				cbs->enc_buf,
+				cbs->enc_scratch,
+				tid,
+				cbs->entry);
+		mkt_pbuild_sort_put(cbs->sorter, asgn.secondary, cbs->entry);
+		cbs->soar_dupes++;
+	}
 }
 
 /* ----------------------------------------------------------------
@@ -709,88 +866,75 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * tree next. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-	/* Barrier: leader built tree, set up posting reserve. This is the worker's
-	 * last barrier — phase 3 streams pages over the shm_mq, so detach once
-	 * released so the leader's drain isn't gated on a stale party count. */
+	/* ---- Phase 2.5: parallel leaf refinement (maintenance_work_mem-bounded
+	 * builds only). Gated on refine_iters so the leader and workers run the
+	 * identical barrier sequence. The leader publishes the grafted tree to DSM
+	 * before the first barrier here. ---- */
+	if (shared->refine_iters > 0)
+	{
+		/* Barrier: leader has grafted + published the tree to DSM. */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		HKMeansResult *rtree = shm_toc_lookup(toc, MKT_DSM_KEY_TREE, false);
+		MktDsmRefineAccum *accum =
+				shm_toc_lookup(toc, MKT_DSM_KEY_REFINE_ACCUM, false);
+		mkt_pbuild_exec_refine(
+				worker_id,
+				heapRel,
+				indexRel,
+				indexInfo,
+				shared,
+				rtree,
+				accum,
+				barrier);
+	}
+
+	/* Barrier: leader built + published the tree and initialized the shared
+	 * sorter. Stay attached — the phase-3 barrier below syncs all worker sorts
+	 * before the leader merges. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-	BarrierDetach(barrier);
 
-	/* ---- Phase 3: Posting scan (deferred batch) ---- */
-
+	/* ---- Phase 3: posting scan -> cluster-keyed sort ---- */
 	HKMeansResult *tree = shm_toc_lookup(toc, MKT_DSM_KEY_TREE, false);
-	char		  *worker_output =
-			shm_toc_lookup(toc, MKT_DSM_KEY_WORKER_OUTPUT, false);
-	char *dsm_partials = shm_toc_lookup(toc, MKT_DSM_KEY_PARTIALS, true);
-	char *queues_base = shm_toc_lookup(toc, MKT_DSM_KEY_POSTING_QUEUES, false);
+	void *sortshared	= shm_toc_lookup(toc, MKT_DSM_KEY_SORTSHARED, false);
 
-	uint32_t nlist = shared->nlist;
+	uint32_t	  entry_size = (uint32_t)mkt_posting_entry_size(dim);
+	RaBitQParams *rq_params	 = mkt_rabitq_create(dim, shared->rabitq_seed);
+	const float	 *leaf_cents = hk_leaf_centroids(tree);
+	RaBitQData	 *enc_buf	 = mkt_alloc(MKT_RABITQ_DATA_SIZE(dim));
+	RaBitQScratch enc_scratch;
+	mkt_rabitq_scratch_init(&enc_scratch, dim);
 
-	/* Attach this worker's posting-page queue as the sender; full pages
-	 * are streamed to the leader over it as they fill. */
-	shm_mq *mq = (shm_mq *)mkt_dsm_posting_queue(queues_base, worker_id);
-	shm_mq_set_sender(mq, MyProc);
-	shm_mq_handle *qhandle = shm_mq_attach(mq, seg, NULL);
-
-	RaBitQParams *rq_params = mkt_rabitq_create(dim, shared->rabitq_seed);
-
-	const float *leaf_cents	  = hk_leaf_centroids(tree);
-	float		*pt_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
-	for (uint32_t c = 0; c < nlist; c++)
-		mkt_rabitq_rotate(
-				rq_params,
-				leaf_cents + (size_t)c * dim,
-				pt_centroids + (size_t)c * dim);
-
-	char *my_partials =
-			(dsm_partials != NULL)
-					? mkt_dsm_worker_partials(dsm_partials, nlist, worker_id)
-					: NULL;
-
-	MktMemCtx worker_ctx = mkt_memctx_create(NULL, "mktann worker posting");
-	MktMemCtx prev		 = mkt_memctx_switch(worker_ctx);
-
-	MktPostingWorkerState ws;
-	mkt_posting_worker_init(
-			&ws,
-			(uint32_t)worker_id,
-			nlist,
-			dim,
-			shared->fastscan,
-			NULL,
-			rq_params,
-			leaf_cents,
-			pt_centroids,
-			NULL,
-			my_partials);
-
-	/* Stream each completed full page to the leader over the queue
-	 * instead of accumulating it; only the trailing partial per cluster
-	 * is retained (copied to the partials DSM buffer by worker_finish). */
-	mkt_posting_worker_set_page_sink(&ws, mktann_posting_page_sink, qhandle);
+	/* worker_id is 1..N for launched workers; the sorter's 0-based worker
+	 * index is worker_id - 1. Worker sorts run concurrently, so each gets a
+	 * share of the budget (mwm / participants) to bound peak memory; the
+	 * leader merge runs alone afterward and uses the full budget. */
+	int worker_wm = shared->work_mem_kb /
+					(shared->nparticipants > 0 ? shared->nparticipants : 1);
+	if (worker_wm < 64)
+		worker_wm = 64;
+	MktSorter *sorter = mkt_pbuild_sort_begin(
+			sortshared, seg, worker_id - 1, 0, false, entry_size, worker_wm);
 
 	MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
+	PostingSortCbState cbs	= {
+			 .tree		  = tree,
+			 .bp		  = {.dim			   = dim,
+							 .metric		   = shared->metric,
+							 .soar_lambda	   = shared->soar_lambda,
+							 .boundary_epsilon = shared->boundary_epsilon},
+			 .bufs		  = bufs,
+			 .rq_params	  = rq_params,
+			 .enc_buf	  = enc_buf,
+			 .enc_scratch = &enc_scratch,
+			 .leaf_cents  = leaf_cents,
+			 .sorter	  = sorter,
+			 .dim		  = dim,
+			 .entry		  = mkt_alloc(entry_size),
+			 .indtuples	  = 0,
+			 .soar_dupes  = 0,
+	 };
 
-	mkt_memctx_switch(prev);
-
-	PostingCbState cbs = {
-			.tree		= tree,
-			.bp			= {.dim				 = dim,
-						   .metric			 = shared->metric,
-						   .soar_lambda		 = shared->soar_lambda,
-						   .boundary_epsilon = shared->boundary_epsilon},
-			.bufs		= bufs,
-			.ws			= &ws,
-			.indtuples	= 0,
-			.soar_dupes = 0,
-			.tmp_ctx	= mkt_memctx_create(NULL, "mktann parallel tuple"),
-			.worker_ctx = worker_ctx,
-	};
-
-	MktMemCtx batch_ctx = mkt_memctx_switch(worker_ctx);
-	posting_cb_batch_init(&cbs);
-	mkt_memctx_switch(batch_ctx);
-
-	/* Second parallel scan for posting build */
 	mkt_build_scan(
 			heapRel,
 			indexRel,
@@ -798,39 +942,22 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			shared,
 			true,
 			false,
-			posting_cb,
+			posting_sort_cb,
 			&cbs);
 
-	posting_cb_batch_flush(&cbs);
-	posting_cb_batch_cleanup(&cbs);
+	mkt_pbuild_sort_performsort(sorter);
 
-	mkt_posting_worker_finish(&ws);
-
-	/*
-	 * All full pages have been streamed to the leader; detach the queue
-	 * to signal this worker is done (the leader drains until every queue
-	 * detaches). The trailing partial page per cluster was copied to the
-	 * partials DSM buffer by worker_finish for the leader to merge.
-	 */
-	shm_mq_detach(qhandle);
-
-	/* Copy active flags to worker_output */
-	bool *wa = mkt_dsm_worker_active(worker_output, nlist, worker_id);
-	memcpy(wa, ws.active, nlist * sizeof(bool));
+	/* Barrier: every worker has finished sorting; the leader merges next. */
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+	BarrierDetach(barrier);
 
 	mkt_pbuild_worker_add_counts(shared, cbs.indtuples, cbs.soar_dupes);
 
-	mkt_posting_worker_cleanup(&ws);
+	mkt_pbuild_sort_end(sorter);
+	mkt_free(cbs.entry);
 	mkt_build_worker_bufs_free(&bufs);
-	mkt_free(pt_centroids);
-
-	/* Reclaim the two top-level contexts holding this worker's posting state.
-	 * The arena's mkt_free is a no-op (memory is released on context delete),
-	 * so the per-tuple temp context and the worker posting context — both
-	 * created with no parent above — must be deleted explicitly or every
-	 * worker's posting buffers leak. */
-	mkt_memctx_delete(cbs.tmp_ctx);
-	mkt_memctx_delete(worker_ctx);
+	mkt_rabitq_scratch_cleanup(&enc_scratch);
+	mkt_free(enc_buf);
 
 	mkt_pbuild_worker_detach(toc, &w);
 }

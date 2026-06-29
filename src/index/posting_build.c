@@ -142,25 +142,24 @@ mkt_build_assign_vector(
 
 	if (has_soar || has_boundary)
 	{
-		const float *leaves	 = hk_leaf_centroids(tree);
-		uint32_t	 nleaves = tree->nleaves;
+		const float *leaves = hk_leaf_centroids(tree);
+
+		/* Beam-descend once for the nearest leaves. These candidates serve
+		 * both the boundary test (2nd-nearest) and the SOAR search: the SOAR
+		 * objective is minimized by a near leaf, so the secondary is always
+		 * among them — avoiding an O(nleaves) full scan per vector, which does
+		 * not scale to large nlist. */
+		uint32_t ncand = mkt_hkmeans_assign_topk(
+				tree,
+				enc_vec,
+				params->metric,
+				MKT_SECONDARY_TOPK,
+				MKT_SECONDARY_BEAM_WIDTH,
+				bufs->cand_leaves,
+				bufs->cand_dists);
 
 		uint32_t boundary_c2 = best_c;
 		if (has_boundary)
-		{
-			/* Beam-descend for the nearest leaves; the 2nd-nearest is
-			 * the boundary candidate. Far cheaper than scanning all
-			 * leaves, and exact when the true 2nd-nearest is within the
-			 * explored subtrees (which it is for boundary vectors). */
-			uint32_t ncand = mkt_hkmeans_assign_topk(
-					tree,
-					enc_vec,
-					params->metric,
-					MKT_SECONDARY_TOPK,
-					MKT_SECONDARY_BEAM_WIDTH,
-					bufs->cand_leaves,
-					bufs->cand_dists);
-
 			boundary_c2 = mkt_find_secondary_cluster(
 					bufs->cand_leaves,
 					bufs->cand_dists,
@@ -168,7 +167,6 @@ mkt_build_assign_vector(
 					best_c,
 					min_dist,
 					params->boundary_epsilon);
-		}
 
 		bool should_replicate = has_boundary ? (boundary_c2 != best_c) : true;
 
@@ -193,7 +191,8 @@ mkt_build_assign_vector(
 				secondary = mkt_find_soar_secondary(
 						enc_vec,
 						leaves,
-						nleaves,
+						bufs->cand_leaves,
+						ncand,
 						dim,
 						best_c,
 						r,
@@ -214,6 +213,65 @@ mkt_build_assign_vector(
 			.secondary	= secondary,
 			.enc_vector = enc_vec,
 	};
+}
+
+/* ----------------------------------------------------------------
+ * Compact posting entry (cluster-sorted build path) — see posting_build.h.
+ * ---------------------------------------------------------------- */
+
+Size
+mkt_posting_entry_size(Dimension dim)
+{
+	return sizeof(ItemPointerData) + 3 * sizeof(float) + (Size)((dim + 7) / 8);
+}
+
+void
+mkt_posting_entry_encode(
+		const RaBitQParams *params,
+		const float		   *vec,
+		const float		   *centroid,
+		Dimension			dim,
+		RaBitQData		   *enc_buf,
+		RaBitQScratch	   *scratch,
+		ItemPointerData		tid,
+		void			   *out_entry)
+{
+	VectorRef vref = {.data = vec, .dim = dim};
+	VectorRef cref = {.data = centroid, .dim = dim};
+	mkt_rabitq_encode_into_ex(params, vref, cref, enc_buf, scratch);
+	float f_error =
+			mkt_rabitq_derive_f_error(enc_buf->f_add, enc_buf->f_rescale, dim);
+
+	char *p = (char *)out_entry;
+	memcpy(p, &tid, sizeof(ItemPointerData));
+	p += sizeof(ItemPointerData);
+	memcpy(p, &enc_buf->f_add, sizeof(float));
+	p += sizeof(float);
+	memcpy(p, &enc_buf->f_rescale, sizeof(float));
+	p += sizeof(float);
+	memcpy(p, &f_error, sizeof(float));
+	p += sizeof(float);
+	memcpy(p, enc_buf->bits, (size_t)((dim + 7) / 8));
+}
+
+void
+mkt_posting_entry_add(
+		MktPostingBuilder *builder, const void *entry, Dimension dim)
+{
+	const char	   *p = (const char *)entry;
+	ItemPointerData tid;
+	float			f_add, f_rescale, f_error;
+	memcpy(&tid, p, sizeof(ItemPointerData));
+	p += sizeof(ItemPointerData);
+	memcpy(&f_add, p, sizeof(float));
+	p += sizeof(float);
+	memcpy(&f_rescale, p, sizeof(float));
+	p += sizeof(float);
+	memcpy(&f_error, p, sizeof(float));
+	p += sizeof(float);
+	(void)dim;
+	mkt_posting_builder_add_encoded(
+			builder, tid, f_add, f_rescale, f_error, (const uint8_t *)p);
 }
 
 uint32_t

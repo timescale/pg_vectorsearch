@@ -41,6 +41,8 @@ unit_test_sources = files(
   'test_platform.c',
   'test_rabitq.c',
   'test_secondary_batch.c',
+  'test_soar.c',
+  'test_sortseam.c',
   'test_standalone.c',
   'test_thread_pool.c',
   'test_topk.c',
