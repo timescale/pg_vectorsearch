@@ -476,6 +476,7 @@ mkt_index_build(
 				&index_info,
 				&cfg,
 				&idx->posting_storage.base,
+				NULL, /* no build-progress seam in standalone (no-op stub) */
 				&tree,
 				idx->posting_heads,
 				&heap_tuples,

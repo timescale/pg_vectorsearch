@@ -33,13 +33,9 @@
 #include <access/tableam.h>
 #include <access/xloginsert.h>
 #include <catalog/index.h>
-#include <commands/progress.h>
 #include <common/pg_prng.h>
 #include <math.h>
 #include <miscadmin.h>
-#include <pgstat.h>
-#include <utils/backend_progress.h>
-#include <utils/injection_point.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
 #include <utils/sampling.h>
@@ -116,6 +112,8 @@ typedef struct MktannBuildState
 	struct IndexInfo *index_info;
 	MemoryContext	  build_ctx; /* all build allocations */
 	MemoryContext	  tmp_ctx;	 /* per-tuple scratch */
+
+	MktBuildProgress *prog; /* phase/progress reporting seam (serial path) */
 } MktannBuildState;
 
 /* ----------------------------------------------------------------
@@ -263,8 +261,7 @@ build_callback(
 	bs->indtuples++;
 
 	if (((uint64_t)bs->indtuples % 10000) == 0)
-		pgstat_progress_update_param(
-				PROGRESS_CREATEIDX_TUPLES_DONE, (int64)bs->indtuples);
+		mkt_build_report_progress(bs->prog, bs->indtuples);
 
 	MemoryContextSwitchTo(old_ctx);
 	MemoryContextReset(bs->tmp_ctx);
@@ -447,6 +444,21 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 	p->fastscan			= (opts != NULL) ? opts->fastscan : false;
 }
 
+/*
+ * Estimated heap row count for the progress total. Uses the planner's
+ * reltuples when available, else a heap-size guess (same form the nlist
+ * auto-tune uses). This is what makes pg_stat_progress_create_index report a
+ * meaningful percent_complete during the scan phases.
+ */
+static double
+estimate_heap_tuples(Relation heap, Dimension dim)
+{
+	if (heap->rd_rel->reltuples > 0)
+		return heap->rd_rel->reltuples;
+	return RelationGetNumberOfBlocks(heap) *
+		   (BLCKSZ / (double)(sizeof(float) * dim + 32));
+}
+
 /* ----------------------------------------------------------------
  * Sample and cluster vectors
  * ---------------------------------------------------------------- */
@@ -593,10 +605,7 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	if ((uint32_t)bs->nsamples < nlist)
 		nlist = (uint32_t)bs->nsamples;
 
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_KMEANS);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, 0);
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
+	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_KMEANS);
 
 	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
@@ -630,6 +639,7 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 		instr_time t_ref_start;
 		INSTR_TIME_SET_CURRENT(t_ref_start);
 
+		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_REFINE);
 		refine_leaf_centroids(bs, tree, mkt_leaf_refine_iters);
 
 		instr_time t_ref_end;
@@ -682,8 +692,7 @@ do_serial_build(
 	const MktannBuildParams *p	 = &bs->params;
 	Dimension				 dim = p->dim;
 
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SAMPLE);
+	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SAMPLE);
 
 	float		  *global_mean = NULL;
 	HKMeansResult *tree		   = run_clustering(bs, &global_mean);
@@ -697,8 +706,7 @@ do_serial_build(
 	uint32_t nlist	 = tree->nleaves;
 	bs->params.nlist = nlist;
 
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SETUP);
+	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SETUP);
 
 	RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
 
@@ -768,12 +776,10 @@ do_serial_build(
 	bs->indtuples	= 0;
 	bs->soar_dupes	= 0;
 
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_SCAN);
-	/* Test hook: lets an isolation test observe an in-progress serial build
-	 * (e.g. the progress view's phase). No-op unless PG was built with
-	 * injection points and a test has attached an action. */
-	INJECTION_POINT("mktann-build-load", NULL);
+	/* Reports the scan phase and fires the "mktann-build-load" test hook (see
+	 * the seam): lets an isolation test observe the in-progress serial build.
+	 */
+	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SCAN);
 
 	instr_time t_serial_start;
 	INSTR_TIME_SET_CURRENT(t_serial_start);
@@ -797,8 +803,7 @@ do_serial_build(
 	 * single resident page builder, in cluster order. Empty clusters still get
 	 * an (empty) head page, matching the previous per-cluster behavior.
 	 */
-	pgstat_progress_update_param(
-			PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_POSTING);
+	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_POSTING);
 	mkt_posting_build_lists(
 			bs->sorter,
 			storage,
@@ -864,6 +869,23 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	Dimension				 dim		 = p->dim;
 	uint64_t				 rabitq_seed = 42;
 
+	/*
+	 * Build introspection: one reporting context the serial and parallel paths
+	 * share, so pg_stat_progress_create_index advances through the same phases
+	 * either way and (when mkt.log_build_stats is on) per-phase stats land in
+	 * the server log.
+	 */
+	MktBuildStats	 stats = {0};
+	MktBuildProgress prog;
+	mkt_build_progress_begin(
+			&prog,
+			index_info->ii_ParallelWorkers > 0,
+			mkt_log_build_stats,
+			build_ctx,
+			&stats,
+			estimate_heap_tuples(heap, dim));
+	bs.prog = &prog;
+
 	MktannStorage storage;
 	mktann_storage_init(&storage, index, NULL, p->metric);
 	storage.build_mode = true;
@@ -913,20 +935,16 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				.concurrent		  = index_info->ii_Concurrent,
 		};
 
-		pgstat_progress_update_param(
-				PROGRESS_CREATEIDX_SUBPHASE,
-				PROGRESS_MKTANN_PHASE_SCAN_PARALLEL);
-		/* Test hook: lets an isolation test observe an in-progress parallel
-		 * build (e.g. the progress view's phase). No-op unless PG was built
-		 * with injection points and a test has attached an action. */
-		INJECTION_POINT("mktann-build-load", NULL);
-
+		/* do_parallel_build reports every phase through the seam (sampling,
+		 * k-means, subtrees, graft, refine, setup, scan, posting) and fires
+		 * the per-phase test hooks, so no phase is set here. */
 		did_parallel = do_parallel_build(
 				heap,
 				index,
 				index_info,
 				&cfg,
 				&storage.base,
+				&prog,
 				&tree,
 				posting_heads,
 				&heap_tuples,
@@ -1019,8 +1037,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				rabitq_seed,
 				global_mean);
 
-		pgstat_progress_update_param(
-				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_CENTROID);
+		mkt_build_report_phase(&prog, MKT_BUILD_PHASE_CENTROID);
 		mkt_write_centroid_tree(
 				&storage.base,
 				tree,
@@ -1040,8 +1057,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			meta->flags |= MKT_META_FLAG_FASTSCAN;
 		mkt_storage_commit_page(&storage.base, 0);
 
-		pgstat_progress_update_param(
-				PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_MKTANN_PHASE_WAL);
+		mkt_build_report_phase(&prog, MKT_BUILD_PHASE_WAL);
 		log_newpage_range(
 				index,
 				MAIN_FORKNUM,
@@ -1051,6 +1067,10 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 		pfree(nfb);
 	}
+
+	/* Flush the final phase timing + emit the build summary (heap_ctx is read
+	 * here, so this must run before build_ctx is deleted below). */
+	mkt_build_progress_end(&prog);
 
 	/* Cleanup */
 	mkt_free(tree);
@@ -1068,27 +1088,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 char *
 mktann_buildphasename(int64 phasenum)
 {
-	switch (phasenum)
-	{
-	case PROGRESS_CREATEIDX_SUBPHASE_INITIALIZE:
-		return "initializing";
-	case PROGRESS_MKTANN_PHASE_SAMPLE:
-		return "sampling vectors";
-	case PROGRESS_MKTANN_PHASE_KMEANS:
-		return "clustering (k-means)";
-	case PROGRESS_MKTANN_PHASE_SETUP:
-		return "preparing RaBitQ encoding";
-	case PROGRESS_MKTANN_PHASE_SCAN:
-		return "scanning table";
-	case PROGRESS_MKTANN_PHASE_SCAN_PARALLEL:
-		return "scanning table (parallel)";
-	case PROGRESS_MKTANN_PHASE_POSTING:
-		return "finalizing posting lists";
-	case PROGRESS_MKTANN_PHASE_CENTROID:
-		return "writing centroid pages";
-	case PROGRESS_MKTANN_PHASE_WAL:
-		return "WAL logging";
-	default:
-		return NULL;
-	}
+	/* Single source of truth for the phase names (index/build_progress.c),
+	 * shared with the build logs so the two never drift. */
+	return unconstify(char *, mkt_build_phase_name((int)phasenum));
 }

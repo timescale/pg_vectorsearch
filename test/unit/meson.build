@@ -22,6 +22,7 @@ unit_test_sources = files(
   'mkt_test.c',
   'run_tests.c',
   'test_barrier.c',
+  'test_build_progress.c',
   'test_shm_toc.c',
   'test_parallel_scan.c',
   'test_latch.c',

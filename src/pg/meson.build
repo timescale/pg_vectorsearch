@@ -10,6 +10,7 @@ extension_sources = files(
   'mktann.c',
   'mktann_build.c',
   'parallel_backend.c',
+  'build_progress.c',
   '../index/parallel_build_leader.c',
   '../index/parallel_build_worker.c',
   'mktann_cache.c',

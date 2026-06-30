@@ -43,6 +43,7 @@
 #include "algo/vecops.h"
 #include "core/log.h"
 #include "core/memory.h"
+#include "index/build_progress.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
@@ -220,16 +221,17 @@ mkt_build_setup_centroid_layout(
 
 bool
 do_parallel_build(
-		Relation			  heap,
-		Relation			  index,
-		struct IndexInfo	 *index_info,
-		const MktBuildConfig *config,
-		MktStorage			 *storage,
-		HKMeansResult		**out_tree,
-		BlockNumber			 *posting_heads,
-		double				 *out_heap_tuples,
-		double				 *out_indtuples,
-		double				 *out_soar_dupes)
+		Relation				 heap,
+		Relation				 index,
+		struct IndexInfo		*index_info,
+		const MktBuildConfig	*config,
+		MktStorage				*storage,
+		struct MktBuildProgress *prog,
+		HKMeansResult		   **out_tree,
+		BlockNumber				*posting_heads,
+		double					*out_heap_tuples,
+		double					*out_indtuples,
+		double					*out_soar_dupes)
 {
 	int nworkers = index_info->ii_ParallelWorkers;
 
@@ -256,6 +258,22 @@ do_parallel_build(
 	uint32_t		  fan_out		  = lead.fan_out;
 	Size			  max_tree_sz	  = lead.max_tree_sz;
 
+	/*
+	 * Introspection: name the dataset-scaling allocations up front (always
+	 * logged, regardless of the GUC) so an OOM in any of them is
+	 * pre-explained, and record the committed DSM size so the per-phase memory
+	 * lines can add it. nlist here is the worst-case upper bound (the tree is
+	 * not built yet).
+	 */
+	mkt_build_report_dsm_bytes(prog, (uint64_t)lead.dsm_total);
+	mkt_build_report_planned_alloc(
+			prog,
+			(uint64_t)mkt_dsm_samples_size(
+					nparticipants, lead.max_per_worker, dim),
+			(uint64_t)max_tree_sz,
+			(uint64_t)nlist * dim * sizeof(float),
+			(uint64_t)lead.dsm_total);
+
 	instr_time t_launch_start;
 	INSTR_TIME_SET_CURRENT(t_launch_start);
 
@@ -274,6 +292,7 @@ do_parallel_build(
 
 	/* ---- Phase 1: sampling (leader runs the worker body as participant 0)
 	 * ---- */
+	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SAMPLE);
 	mkt_pbuild_exec_sampling(
 			0, heap, index, index_info, shared, dsm_samples, barrier);
 
@@ -290,6 +309,7 @@ do_parallel_build(
 	/* ---- Phase 2: root k-means. The leader runs the worker body as
 	 * participant 0; inside it additionally seeds the initial centroids and
 	 * reduces the per-iteration accumulators (gated on participant 0). ---- */
+	mkt_build_report_phase(prog, MKT_BUILD_PHASE_KMEANS);
 	uint32_t km_iters = mkt_pbuild_exec_kmeans(
 			0, shared, dsm_samples, centroids_base, km_workers_base, barrier);
 
@@ -336,6 +356,7 @@ do_parallel_build(
 		 * Phase 2c: the leader builds the subtrees it owns (participant 0), to
 		 * whatever depth nlist/fan_out requires — no two-level cap.
 		 */
+		mkt_build_report_phase(prog, MKT_BUILD_PHASE_SUBTREES);
 		char *subtrees_base = lead.child_subtrees_base;
 		mkt_subtree_build_partitioned(
 				0,
@@ -357,6 +378,7 @@ do_parallel_build(
 
 		/* Graft the fan_out subtrees under a fresh root (the root centroids).
 		 */
+		mkt_build_report_phase(prog, MKT_BUILD_PHASE_GRAFT);
 		const HKMeansResult **subs = mkt_alloc(
 				(size_t)km_k * sizeof(HKMeansResult *));
 		for (uint32_t c = 0; c < km_k; c++)
@@ -376,6 +398,7 @@ do_parallel_build(
 		 * build the one-level tree straight from cents.
 		 */
 		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+		mkt_build_report_phase(prog, MKT_BUILD_PHASE_GRAFT);
 		tree = mkt_hkmeans_build_flat(cents, km_k, fan_out, dim);
 
 		nlist = tree ? tree->nleaves : 0;
@@ -425,6 +448,7 @@ do_parallel_build(
 		/* Barrier: tree published; workers may read it now. */
 		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
+		mkt_build_report_phase(prog, MKT_BUILD_PHASE_REFINE);
 		MktDsmRefineAccum *accum =
 				shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_REFINE_ACCUM, false);
 		mkt_pbuild_exec_refine(
@@ -446,6 +470,7 @@ do_parallel_build(
 	 * cosine, rotate P^T*centroids, reserve block 0 + the centroid pages, and
 	 * get the posting-area start. ref_vecs (now normalized) is reused below
 	 * for posting encode reference. */
+	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SETUP);
 	RaBitQParams *rq_params	  = mkt_rabitq_create(dim, rabitq_seed);
 	float		 *ref_vecs	  = hk_leaf_centroids(tree);
 	float	   *pt_centroids  = mkt_alloc((size_t)nlist * dim * sizeof(float));
@@ -466,6 +491,12 @@ do_parallel_build(
 			"mktann: tree+setup %.1fms, %u clusters",
 			INSTR_TIME_GET_MILLISEC(t_km_end),
 			nlist);
+
+	/* Phase 3: the workers scan + assign + encode + stream; the leader drains.
+	 * Report this before releasing the workers so the progress view reflects
+	 * it for the whole (multi-hour at scale) scan. The seam fires the
+	 * "mktann-build-load" test hook here. */
+	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
 
 	/* Re-init the scan for the posting phase (back-end seam). */
 	mkt_pbuild_rescan(heap, shared);
@@ -571,6 +602,13 @@ do_parallel_build(
 	*out_soar_dupes	 = shared->soar_dupes;
 	*out_tree		 = tree;
 
+	/* The workers cover the heap cooperatively while the leader blocks on the
+	 * scan barrier above, so there is no leader-side loop to advance the % mid
+	 * scan; publish the final scanned count now that the workers have
+	 * finished.
+	 */
+	mkt_build_report_progress(prog, shared->indtuples);
+
 	instr_time t_merge_start;
 	INSTR_TIME_SET_CURRENT(t_merge_start);
 
@@ -580,6 +618,7 @@ do_parallel_build(
 	 * serial path). Entries arrive grouped by cluster, so there is no
 	 * partial-page fold and no chain to splice.
 	 */
+	mkt_build_report_phase(prog, MKT_BUILD_PHASE_POSTING);
 	MktSorter *sorter = mkt_pbuild_sort_begin(
 			sortshared,
 			pcxt->seg,

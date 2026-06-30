@@ -10,11 +10,15 @@ else
   )
 
   if pg_regress.found()
-    # Generate postgresql.conf snippet for temp instance
+    # Generate postgresql.conf snippet for temp instance. logging_collector is
+    # on so build_logging.sql can read the server log via pg_current_logfile()
+    # (it asserts the build-introspection log output); harmless for the other
+    # tests, which do not read the log.
     pg_test_conf = configure_file(
       output: 'meerkat_test.conf',
       command: ['sh', '-c',
-        'echo "search_path = \'mkt, public\'" > @OUTPUT@'],
+        'printf "search_path = \'mkt, public\'\\nlogging_collector = on\\n" ' +
+        '> @OUTPUT@'],
     )
 
     test_names = [
@@ -28,6 +32,7 @@ else
       'rerank',
       'inspect',
       'parallel',
+      'build_logging',
     ]
 
     test('regress',
@@ -134,6 +139,7 @@ else
           '--temp-config=' + meson.current_build_dir() / 'meerkat_isolation.conf',
           '--load-extension=meerkat',
           'build_progress',
+          'build_progress_phases',
           'insert_serialize',
         ],
         depends: [meerkat_ext_so],

@@ -750,6 +750,8 @@ typedef struct MktPBuildLeader
 	uint64_t				rabitq_seed;
 	uint32_t				fan_out;
 	Size					max_tree_sz;
+	Size					dsm_total; /* committed DSM chunk bytes (for the
+										  planned-allocation introspection line) */
 } MktPBuildLeader;
 
 extern bool mkt_pbuild_setup_shared(
@@ -883,18 +885,27 @@ extern BlockNumber mkt_build_setup_centroid_layout(
  * heads. Returns false if parallelism could not start, so the caller falls
  * back to a serial build. The PG caller fills config from its resolved build
  * params; the standalone caller fills it from its index config.
+ *
+ * prog is the build-progress reporting seam (phases + % to
+ * pg_stat_progress_create_index, per-phase stats under mkt.log_build_stats).
+ * The PG caller passes its MktBuildProgress so the parallel phases surface the
+ * same way the serial ones do; the standalone caller passes NULL (the seam is
+ * a no-op stub there).
  * ---------------------------------------------------------------- */
 
+struct MktBuildProgress; /* index/build_progress.h */
+
 extern bool do_parallel_build(
-		Relation			  heap,
-		Relation			  index,
-		struct IndexInfo	 *index_info,
-		const MktBuildConfig *config,
-		MktStorage			 *storage,
-		HKMeansResult		**out_tree,
-		BlockNumber			 *posting_heads,
-		double				 *out_heap_tuples,
-		double				 *out_indtuples,
-		double				 *out_soar_dupes);
+		Relation				 heap,
+		Relation				 index,
+		struct IndexInfo		*index_info,
+		const MktBuildConfig	*config,
+		MktStorage				*storage,
+		struct MktBuildProgress *prog,
+		HKMeansResult		   **out_tree,
+		BlockNumber				*posting_heads,
+		double					*out_heap_tuples,
+		double					*out_indtuples,
+		double					*out_soar_dupes);
 
 #endif /* MKT_PARALLEL_BUILD_H */
