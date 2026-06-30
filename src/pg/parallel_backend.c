@@ -440,6 +440,10 @@ mkt_pbuild_setup_shared(
 		nkeys++;
 	shm_toc_estimate_keys(&pcxt->estimator, nkeys);
 
+	/* Total bytes the leader is about to commit to the DSM segment (sum of all
+	 * estimated chunks), for the planned-allocation introspection line. */
+	Size dsm_total = pcxt->estimator.space_for_chunks;
+
 	InitializeParallelDSM(pcxt);
 
 	if (pcxt->seg == NULL)
@@ -603,6 +607,7 @@ mkt_pbuild_setup_shared(
 	lead->rabitq_seed		  = rabitq_seed;
 	lead->fan_out			  = fan_out;
 	lead->max_tree_sz		  = max_tree_sz;
+	lead->dsm_total			  = dsm_total;
 	return true;
 }
 

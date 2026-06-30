@@ -28,6 +28,7 @@ typedef struct MktBuildStats
 	double ms_total;	/* total build time */
 	double ms_sample;	/* sampling vectors for clustering */
 	double ms_kmeans;	/* hierarchical k-means clustering */
+	double ms_refine;	/* full-table leaf-centroid refinement */
 	double ms_setup;	/* RaBitQ params, centroid rotation, etc */
 	double ms_posting;	/* posting build total (parallel + merge) */
 	double ms_parallel; /* parallel encode+write phase */

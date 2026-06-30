@@ -28,12 +28,13 @@
  * GUC variables
  * ---------------------------------------------------------------- */
 
-extern int	  mkt_distance_mode;		/* MktDistanceMode */
-extern int	  mkt_nprobe;				/* clusters to probe per query */
-extern int	  mkt_query_limit;			/* max results per query (0=auto) */
-extern int	  mkt_fastscan_bits;		/* fastscan LUT bits (8 or 16) */
-extern bool	  mkt_rerank;				/* enable reranking (default: true) */
-extern int	  mkt_leaf_refine_iters;	/* full-table leaf refine passes */
+extern int	  mkt_distance_mode;	 /* MktDistanceMode */
+extern int	  mkt_nprobe;			 /* clusters to probe per query */
+extern int	  mkt_query_limit;		 /* max results per query (0=auto) */
+extern int	  mkt_fastscan_bits;	 /* fastscan LUT bits (8 or 16) */
+extern bool	  mkt_rerank;			 /* enable reranking (default: true) */
+extern bool	  mkt_log_build_stats;	 /* log per-phase build stats (def: off) */
+extern int	  mkt_leaf_refine_iters; /* full-table leaf refine passes */
 extern double mkt_centroid_error_scale; /* scales centroid pruning error bound
 										   (1=default, 0=drop) */
 extern double mkt_centroid_beam_scale;	/* intermediate beam width as fraction

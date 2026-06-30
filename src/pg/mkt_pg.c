@@ -24,6 +24,7 @@ int	   mkt_nprobe				= 10;
 int	   mkt_query_limit			= 0;
 int	   mkt_fastscan_bits		= 16;
 bool   mkt_rerank				= true;
+bool   mkt_log_build_stats		= false;
 double mkt_centroid_error_scale = 0.0;
 double mkt_centroid_beam_scale	= 0.25;
 int	   mkt_leaf_refine_iters	= 2;
@@ -147,6 +148,22 @@ _PG_init(void)
 			true,
 			PGC_USERSET,
 			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomBoolVariable(
+			"mkt.log_build_stats",
+			"Log per-phase index-build resource statistics.",
+			"When on, each build phase logs its elapsed time, build-heap "
+			"usage, and CPU/maxrss (via the server's ShowUsage), plus a final "
+			"summary, at LOG. Off by default; modeled on the core btree "
+			"log_btree_build_stats developer option. The up-front "
+			"planned-allocation line is logged regardless of this setting.",
+			&mkt_log_build_stats,
+			false,
+			PGC_SUSET,
+			GUC_NOT_IN_SAMPLE,
 			NULL,
 			NULL,
 			NULL);

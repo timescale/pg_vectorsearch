@@ -240,22 +240,31 @@ mkt_find_soar_secondary(
 void
 mkt_build_stats_print(const MktBuildStats *s)
 {
-	mkt_log("build: sample %.1fms, kmeans %.1fms, setup %.1fms, "
-			"posting %.1fms "
-			"(parallel %.1fms + merge %.1fms, "
-			"%u workers + leader, %u pages, "
-			"%u partial pages merged into %u), "
-			"centroid %.1fms, total %.1fms\n",
+	/* Per-phase breakdown — the single shared build summary, filled by both
+	 * the PostgreSQL build (via the build-progress seam) and the standalone
+	 * build. */
+	mkt_log("build: sample %.1fms, kmeans %.1fms, refine %.1fms, setup "
+			"%.1fms, "
+			"posting %.1fms, centroid %.1fms, total %.1fms\n",
 			s->ms_sample,
 			s->ms_kmeans,
+			s->ms_refine,
 			s->ms_setup,
 			s->ms_posting,
-			s->ms_parallel,
-			s->ms_merge,
-			s->nworkers,
-			s->total_pages,
-			s->merge_input,
-			s->merge_output,
 			s->ms_centroid,
 			s->ms_total);
+
+	/* Posting-merge sub-detail: only the standalone parallel path populates
+	 * these. Skip the line (and its zeros) when unset — e.g. the PostgreSQL
+	 * build, which tracks posting as one phase. */
+	if (s->ms_parallel > 0.0 || s->ms_merge > 0.0 || s->total_pages > 0)
+		mkt_log("build: posting detail — parallel %.1fms + merge %.1fms, "
+				"%u workers + leader, %u pages, "
+				"%u partial pages merged into %u\n",
+				s->ms_parallel,
+				s->ms_merge,
+				s->nworkers,
+				s->total_pages,
+				s->merge_input,
+				s->merge_output);
 }
