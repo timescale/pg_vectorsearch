@@ -135,11 +135,25 @@ bool mkt_stream_centroid_plan(
 		MktStreamTreePlan	*out);
 
 /*
+ * Per-leaf callback fired during the write pass, once per leaf, with the leaf's
+ * global index and its float centroid (still resident at that moment). The
+ * build uses it to write each posting-list head page carrying pt_centroid =
+ * P^T*centroid — the exact encode reference — which cannot be recovered from a
+ * compressed centroid page afterward. May be NULL.
+ */
+typedef void (*MktStreamLeafCb)(
+		void *arg, uint32_t leaf, const float *centroid);
+
+/*
  * WRITE pass: cluster the sample again (identical tree) and stream the centroid
  * pages to `storage` via on-demand block allocation (post-order, root last).
- * Leaf entry c links to posting_heads[c]. Blocks [0, storage's next block) must
- * already exist (e.g. the metadata page). Returns the root block (the value the
- * metadata page's first_centroid must carry), or InvalidBlockNumber on failure.
+ * Leaf entry c links to posting_heads[c], and on_leaf (if set) fires per leaf so
+ * the caller can write that leaf's head page from the resident float centroid.
+ * Centroid pages occupy reserved blocks [first_centroid, first_centroid +
+ * plan.centroid_pages) post-order (root last), and posting heads live in the
+ * far posting area — so the caller must pre-extend the relation to cover both
+ * before calling. Returns the root block (the value the metadata page's
+ * first_centroid must carry), or InvalidBlockNumber on failure.
  */
 BlockNumber mkt_stream_centroid_write(
 		MktStorage		   *storage,
@@ -153,7 +167,10 @@ BlockNumber mkt_stream_centroid_write(
 		const RaBitQParams *rq_params,
 		const float		   *global_mean,
 		const KMeansOptions *opts,
-		const BlockNumber  *posting_heads);
+		const BlockNumber  *posting_heads,
+		BlockNumber			first_centroid,
+		MktStreamLeafCb		on_leaf,
+		void			   *on_leaf_arg);
 
 /*
  * Auto-tune fan_out from nlist.

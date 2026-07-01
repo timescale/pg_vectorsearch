@@ -136,14 +136,17 @@ typedef struct StreamCtx
 	const RaBitQParams *rq_params;
 	const float		   *global_mean;
 	const BlockNumber  *posting_heads;
+	MktStreamLeafCb		on_leaf;
+	void			   *on_leaf_arg;
 	/* plan-phase page-count helpers */
 	uint32_t max_ent; /* non-fastscan entries/page */
 	uint32_t fs_gpp;  /* fastscan groups/page */
 	/* accumulators */
-	uint32_t  nleaves;		  /* running (== next first_leaf) */
-	uint32_t *leaf_counts;	  /* plan only, [nlist] */
-	uint32_t  centroid_pages; /* plan only */
-	bool	  ok;
+	uint32_t	nleaves;	   /* running (== next first_leaf) */
+	uint32_t   *leaf_counts;   /* plan only, [nlist] */
+	uint32_t	centroid_pages; /* plan only */
+	BlockNumber next_blk;	   /* write only: next reserved centroid block */
+	bool		ok;
 } StreamCtx;
 
 /* Pages one node of `n` entries occupies — must match the writers' packing. */
@@ -160,7 +163,13 @@ stream_pages_for(const StreamCtx *c, uint32_t n)
 	return (n + me - 1) / me;
 }
 
-/* Write one node's centroid page(s); returns the first block. */
+/*
+ * Write one node's centroid page(s) at the next reserved block (post-order, so
+ * blocks are assigned in write order); returns the node's first block. The
+ * relation is pre-extended by the caller to cover the centroid + posting area,
+ * so writes use reserved blocks rather than appending (posting heads, which live
+ * in the far posting area, are written during this pass too).
+ */
 static BlockNumber
 stream_write_node(
 		StreamCtx		  *c,
@@ -170,20 +179,26 @@ stream_write_node(
 		bool			   is_leaf,
 		const BlockNumber *child_blks)
 {
-	uint16_t flags = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
+	uint16_t	flags = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
+	BlockNumber start = c->next_blk;
 
 	if (c->format == MKT_CENTROID_FMT_FASTSCAN)
-		return mkt_centroid_write_fastscan_pages(
+		mkt_centroid_write_fastscan_pages(
 				c->storage, c->dim, n, (uint8_t)level, flags, c->rq_params,
-				cents, c->global_mean, child_blks, InvalidBlockNumber);
+				cents, c->global_mean, child_blks, start);
+	else
+	{
+		CentroidEncoderState est;
+		CentroidEncoder		*enc = centroid_encoder_init(
+				&est, c->format, cents, c->dim, c->rq_params, c->global_mean);
+		uint16_t child_count = is_leaf ? 0 : (uint16_t)c->fan_out;
+		mkt_centroid_write_pages(
+				c->storage, c->dim, n, c->format, (uint8_t)level, flags,
+				child_count, enc, child_blks, NULL, start);
+	}
 
-	CentroidEncoderState est;
-	CentroidEncoder		*enc = centroid_encoder_init(
-			&est, c->format, cents, c->dim, c->rq_params, c->global_mean);
-	uint16_t child_count = is_leaf ? 0 : (uint16_t)c->fan_out;
-	return mkt_centroid_write_pages(
-			c->storage, c->dim, n, c->format, (uint8_t)level, flags, child_count,
-			enc, child_blks, NULL, InvalidBlockNumber);
+	c->next_blk += stream_pages_for(c, n);
+	return start;
 }
 
 /*
@@ -239,9 +254,17 @@ stream_node(
 			kept++;
 		}
 		if (c->emit)
+		{
 			blk = stream_write_node(
 					c, km->centroids, kept, level, true,
 					c->posting_heads ? &c->posting_heads[c->nleaves] : NULL);
+			/* Emit each leaf's head page from its resident float centroid. */
+			if (c->on_leaf != NULL)
+				for (uint32_t kk = 0; kk < kept; kk++)
+					c->on_leaf(
+							c->on_leaf_arg, c->nleaves + kk,
+							km->centroids + (size_t)kk * c->dim);
+		}
 		else
 			c->centroid_pages += stream_pages_for(c, kept);
 		c->nleaves += kept;
@@ -316,12 +339,18 @@ mkt_stream_centroid_plan(
 {
 	StreamCtx c;
 	stream_ctx_init(&c, dim, nlist, fan_out, metric, format, opts);
-	c.vectors	  = vectors;
-	c.emit		  = false;
-	/* Upper bound on leaves is fan_out^nlevels; nlist is that bound for a
-	 * balanced tree, but compaction can drop empty clusters, so size for the
-	 * worst case and report the actual count. */
-	c.leaf_counts = mkt_alloc0((size_t)nlist * sizeof(uint32_t));
+	c.vectors = vectors;
+	c.emit	  = false;
+	/* Actual leaf count is not known until k-means runs and can exceed the
+	 * target nlist (a leaf-parent may split into up to fan_out leaves, so the
+	 * tree holds up to fan_out^nlevels of them). Size leaf_counts for that worst
+	 * case (clamped >= nlist) and report the actual count. */
+	uint32_t max_leaves = 1;
+	for (uint32_t l = 0; l < c.nlevels; l++)
+		max_leaves *= c.fan_out;
+	if (max_leaves < nlist)
+		max_leaves = nlist;
+	c.leaf_counts = mkt_alloc0((size_t)max_leaves * sizeof(uint32_t));
 
 	stream_node(&c, NULL, nvecs, 0);
 
@@ -351,7 +380,10 @@ mkt_stream_centroid_write(
 		const RaBitQParams *rq_params,
 		const float		   *global_mean,
 		const KMeansOptions *opts,
-		const BlockNumber  *posting_heads)
+		const BlockNumber  *posting_heads,
+		BlockNumber			first_centroid,
+		MktStreamLeafCb		on_leaf,
+		void			   *on_leaf_arg)
 {
 	StreamCtx c;
 	stream_ctx_init(&c, dim, nlist, fan_out, metric, format, opts);
@@ -361,6 +393,9 @@ mkt_stream_centroid_write(
 	c.rq_params		= rq_params;
 	c.global_mean	= global_mean;
 	c.posting_heads = posting_heads;
+	c.next_blk		= first_centroid;
+	c.on_leaf		= on_leaf;
+	c.on_leaf_arg	= on_leaf_arg;
 
 	BlockNumber root = stream_node(&c, NULL, nvecs, 0);
 	return c.ok ? root : InvalidBlockNumber;
