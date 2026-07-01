@@ -181,6 +181,13 @@ size_t
 mkt_hkmeans_max_blob_size(uint32_t nlist, uint32_t fan_out, Dimension dim);
 
 /*
+ * Tree depth for `nlist` leaves at `fan_out` — the same value the tree build
+ * uses internally. Exposed so the streaming (page-backed) centroid-tree build
+ * can compute the level structure without materializing a tree.
+ */
+uint32_t mkt_hkmeans_nlevels(uint32_t nlist, uint32_t fan_out);
+
+/*
  * Build a one-level (flat) tree directly from pre-computed leaf centroids.
  *
  * For a flat clustering (nleaves <= fan_out) the root k-means already produced

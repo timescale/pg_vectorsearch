@@ -6,11 +6,15 @@
  */
 
 #include <math.h>
+#include <string.h>
 
+#include "algo/kmeans.h"
 #include "algo/vecops.h"
 #include "core/log.h"
 #include "core/memory.h"
+#include "index/centroid_build.h"
 #include "index/index_build.h"
+#include "quant/fastscan.h"
 
 BlockNumber
 mkt_compute_centroid_layout(
@@ -109,6 +113,257 @@ mkt_write_centroid_tree(
 				leaf_pt,
 				node_first_blkno[i]);
 	}
+}
+
+/* ----------------------------------------------------------------
+ * Streaming (page-backed) centroid-tree build
+ * ---------------------------------------------------------------- */
+
+typedef struct StreamCtx
+{
+	/* inputs */
+	const float		 *vectors;
+	Dimension		  dim;
+	uint32_t		  nlist;
+	uint32_t		  fan_out;
+	uint32_t		  nlevels;
+	DistanceMetric	  metric;
+	KMeansOptions	  opts;
+	/* write-phase */
+	bool				emit;
+	MktStorage		   *storage;
+	MktCentroidFormat	format;
+	const RaBitQParams *rq_params;
+	const float		   *global_mean;
+	const BlockNumber  *posting_heads;
+	/* plan-phase page-count helpers */
+	uint32_t max_ent; /* non-fastscan entries/page */
+	uint32_t fs_gpp;  /* fastscan groups/page */
+	/* accumulators */
+	uint32_t  nleaves;		  /* running (== next first_leaf) */
+	uint32_t *leaf_counts;	  /* plan only, [nlist] */
+	uint32_t  centroid_pages; /* plan only */
+	bool	  ok;
+} StreamCtx;
+
+/* Pages one node of `n` entries occupies — must match the writers' packing. */
+static uint32_t
+stream_pages_for(const StreamCtx *c, uint32_t n)
+{
+	if (c->format == MKT_CENTROID_FMT_FASTSCAN)
+	{
+		uint32_t ngroups = (n + MKT_FASTSCAN_GROUP - 1) / MKT_FASTSCAN_GROUP;
+		uint32_t gpp	 = c->fs_gpp ? c->fs_gpp : 1;
+		return (ngroups + gpp - 1) / gpp;
+	}
+	uint32_t me = c->max_ent ? c->max_ent : 1;
+	return (n + me - 1) / me;
+}
+
+/* Write one node's centroid page(s); returns the first block. */
+static BlockNumber
+stream_write_node(
+		StreamCtx		  *c,
+		const float		  *cents,
+		uint32_t		   n,
+		uint32_t		   level,
+		bool			   is_leaf,
+		const BlockNumber *child_blks)
+{
+	uint16_t flags = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
+
+	if (c->format == MKT_CENTROID_FMT_FASTSCAN)
+		return mkt_centroid_write_fastscan_pages(
+				c->storage, c->dim, n, (uint8_t)level, flags, c->rq_params,
+				cents, c->global_mean, child_blks, InvalidBlockNumber);
+
+	CentroidEncoderState est;
+	CentroidEncoder		*enc = centroid_encoder_init(
+			&est, c->format, cents, c->dim, c->rq_params, c->global_mean);
+	uint16_t child_count = is_leaf ? 0 : (uint16_t)c->fan_out;
+	return mkt_centroid_write_pages(
+			c->storage, c->dim, n, c->format, (uint8_t)level, flags, child_count,
+			enc, child_blks, NULL, InvalidBlockNumber);
+}
+
+/*
+ * DFS one node. slice[count] are indices into c->vectors (NULL == identity for
+ * the root). Returns the node's first block (write phase) or InvalidBlockNumber
+ * (plan phase). Post-order: children are written before the parent so the
+ * parent's entries can carry their child block numbers.
+ */
+static BlockNumber
+stream_node(
+		StreamCtx *c, const uint32_t *slice, uint32_t count, uint32_t level)
+{
+	if (!c->ok)
+		return InvalidBlockNumber;
+
+	bool	 is_leaf_parent = (level == c->nlevels - 1);
+	uint32_t k				= (c->nlevels == 1) ? c->nlist : c->fan_out;
+	if (k > count)
+		k = count;
+
+	KMeansResult *km = mkt_kmeans(
+			c->vectors, slice, MKT_VEC_F32, count, c->dim, k, c->metric,
+			&c->opts);
+	c->opts.initial_centroids = NULL; /* root only (matches mkt_hkmeans_f32) */
+	if (km == NULL)
+	{
+		c->ok = false;
+		return InvalidBlockNumber;
+	}
+
+	/* Count assignments per cluster (km->cluster_sizes may be stale). */
+	uint32_t *counts = mkt_alloc0((size_t)km->nlist * sizeof(uint32_t));
+	for (uint32_t v = 0; v < count; v++)
+		counts[km->assignments[v]]++;
+
+	BlockNumber blk = InvalidBlockNumber;
+
+	if (is_leaf_parent)
+	{
+		/* Keep non-empty clusters as leaves, compacting their centroids so the
+		 * kept centroids stay contiguous (descent indexes them densely). */
+		uint32_t kept = 0;
+		for (uint32_t cl = 0; cl < km->nlist; cl++)
+		{
+			if (counts[cl] == 0)
+				continue;
+			if (kept != cl)
+				memcpy(km->centroids + (size_t)kept * c->dim,
+					   km->centroids + (size_t)cl * c->dim,
+					   (size_t)c->dim * sizeof(float));
+			if (c->leaf_counts != NULL)
+				c->leaf_counts[c->nleaves + kept] = counts[cl];
+			kept++;
+		}
+		if (c->emit)
+			blk = stream_write_node(
+					c, km->centroids, kept, level, true,
+					c->posting_heads ? &c->posting_heads[c->nleaves] : NULL);
+		else
+			c->centroid_pages += stream_pages_for(c, kept);
+		c->nleaves += kept;
+	}
+	else
+	{
+		/* Recurse each non-empty cluster (post-order), then write this node. */
+		BlockNumber *child_blocks =
+				mkt_alloc((size_t)km->nlist * sizeof(BlockNumber));
+		uint32_t kept = 0;
+		for (uint32_t cl = 0; cl < km->nlist && c->ok; cl++)
+		{
+			if (counts[cl] == 0)
+				continue;
+			if (kept != cl)
+				memcpy(km->centroids + (size_t)kept * c->dim,
+					   km->centroids + (size_t)cl * c->dim,
+					   (size_t)c->dim * sizeof(float));
+
+			uint32_t  sub_n = counts[cl];
+			uint32_t *sub	= mkt_alloc((size_t)sub_n * sizeof(uint32_t));
+			uint32_t  idx	= 0;
+			for (uint32_t v = 0; v < count; v++)
+				if (km->assignments[v] == cl)
+					sub[idx++] = slice ? slice[v] : v;
+			child_blocks[kept] = stream_node(c, sub, sub_n, level + 1);
+			mkt_free(sub);
+			kept++;
+		}
+		if (c->emit)
+			blk = stream_write_node(
+					c, km->centroids, kept, level, false, child_blocks);
+		else
+			c->centroid_pages += stream_pages_for(c, kept);
+		mkt_free(child_blocks);
+	}
+
+	mkt_free(counts);
+	mkt_kmeans_result_destroy(km);
+	return blk;
+}
+
+static void
+stream_ctx_init(StreamCtx *c, Dimension dim, uint32_t nlist, uint32_t fan_out,
+				DistanceMetric metric, MktCentroidFormat format,
+				const KMeansOptions *opts)
+{
+	memset(c, 0, sizeof(*c));
+	c->dim	   = dim;
+	c->nlist   = nlist;
+	c->fan_out = fan_out < 2 ? 2 : fan_out;
+	c->nlevels = mkt_hkmeans_nlevels(nlist, c->fan_out);
+	c->metric  = metric;
+	c->format  = format;
+	c->opts	   = opts ? *opts : (KMeansOptions)MKT_KMEANS_OPTIONS_DEFAULT;
+	c->max_ent = mkt_centroid_max_entries_fmt(dim, format);
+	c->fs_gpp  = mkt_centroid_fastscan_max_groups(dim);
+	c->ok	   = true;
+}
+
+bool
+mkt_stream_centroid_plan(
+		const float			*vectors,
+		uint32_t			 nvecs,
+		Dimension			 dim,
+		uint32_t			 nlist,
+		uint32_t			 fan_out,
+		DistanceMetric		 metric,
+		MktCentroidFormat	 format,
+		const KMeansOptions *opts,
+		MktStreamTreePlan	*out)
+{
+	StreamCtx c;
+	stream_ctx_init(&c, dim, nlist, fan_out, metric, format, opts);
+	c.vectors	  = vectors;
+	c.emit		  = false;
+	/* Upper bound on leaves is fan_out^nlevels; nlist is that bound for a
+	 * balanced tree, but compaction can drop empty clusters, so size for the
+	 * worst case and report the actual count. */
+	c.leaf_counts = mkt_alloc0((size_t)nlist * sizeof(uint32_t));
+
+	stream_node(&c, NULL, nvecs, 0);
+
+	if (!c.ok)
+	{
+		mkt_free(c.leaf_counts);
+		return false;
+	}
+
+	out->nleaves		= c.nleaves;
+	out->nlevels		= c.nlevels;
+	out->centroid_pages = c.centroid_pages;
+	out->leaf_counts	= c.leaf_counts;
+	return true;
+}
+
+BlockNumber
+mkt_stream_centroid_write(
+		MktStorage		   *storage,
+		const float		   *vectors,
+		uint32_t			nvecs,
+		Dimension			dim,
+		uint32_t			nlist,
+		uint32_t			fan_out,
+		DistanceMetric		metric,
+		MktCentroidFormat	format,
+		const RaBitQParams *rq_params,
+		const float		   *global_mean,
+		const KMeansOptions *opts,
+		const BlockNumber  *posting_heads)
+{
+	StreamCtx c;
+	stream_ctx_init(&c, dim, nlist, fan_out, metric, format, opts);
+	c.vectors		= vectors;
+	c.emit			= true;
+	c.storage		= storage;
+	c.rq_params		= rq_params;
+	c.global_mean	= global_mean;
+	c.posting_heads = posting_heads;
+
+	BlockNumber root = stream_node(&c, NULL, nvecs, 0);
+	return c.ok ? root : InvalidBlockNumber;
 }
 
 uint32_t
