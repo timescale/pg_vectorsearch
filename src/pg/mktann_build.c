@@ -447,149 +447,25 @@ estimate_heap_tuples(Relation heap, Dimension dim)
  * Sample and cluster vectors
  * ---------------------------------------------------------------- */
 
-/* ----------------------------------------------------------------
- * Streaming leaf-centroid refinement
- *
- * When maintenance_work_mem forces the k-means sample set below the ideal, the
- * tree structure is trained on that bounded subsample, but the leaf centroids
- * can still be trained on the whole table: a streaming pass routes every row
- * to its leaf (tree descent) and accumulates per-leaf means. Memory is bounded
- * by the tree plus the accumulators -- no large sample buffer -- so it works
- * under the same budget. A few passes act as leaf-level Lloyd iterations over
- * all rows, recovering most of the quality a full in-memory sample would have
- * given.
- * ---------------------------------------------------------------- */
-
-typedef struct RefineState
-{
-	const HKMeansResult *tree;
-	double				*sums;	  /* [tile * dim], indexed by leaf - tile_lo */
-	uint64_t			*cnts;	  /* [tile] */
-	float				*scratch; /* [dim] normalized copy for cosine */
-	Dimension			 dim;
-	DistanceMetric		 metric;
-	uint32_t tile_lo; /* accumulate only leaves in [tile_lo, tile_hi) */
-	uint32_t tile_hi;
-} RefineState;
-
-static void
-refine_callback(
-		Relation	index,
-		ItemPointer tid,
-		Datum	   *values,
-		bool	   *isnull,
-		bool		tuple_is_alive,
-		void	   *state)
-{
-	RefineState *rs = (RefineState *)state;
-
-	(void)index;
-	(void)tid;
-	(void)tuple_is_alive;
-
-	if (isnull[0])
-		return;
-
-	Dimension	 dim = rs->dim;
-	const float *vin = MktVectorToRef(DatumGetMktVector(values[0])).data;
-
-	const float *v;
-	uint32_t	 leaf = mkt_refine_assign_leaf(
-			rs->tree, vin, dim, rs->metric, rs->scratch, &v);
-	/* Only the current tile's leaves are resident in the accumulator. */
-	if (leaf < rs->tile_lo || leaf >= rs->tile_hi)
-		return;
-	double *sum = rs->sums + (size_t)(leaf - rs->tile_lo) * dim;
-	for (Dimension j = 0; j < dim; j++)
-		sum[j] += v[j];
-	rs->cnts[leaf - rs->tile_lo]++;
-}
-
 /*
- * Refine leaf centroids on the full table. The accumulator (sums[nleaves*dim]
- * doubles + counts) is O(nleaves*dim) = O(N), so it is bounded by tiling: at
- * most `tile` leaves are resident, and the heap is re-scanned once per tile.
- * `tile` is sized to maintenance_work_mem, so when the whole accumulator fits
- * (the common case — even the large mwm of a big build) there is a single tile
- * and a single scan per iteration, identical to the untiled version. Only a
- * tight mwm relative to nleaves forces multiple tiles (and re-scans); those
- * update centroids in place between tiles (the bounded-memory trade-off).
+ * Draw the maintenance_work_mem-bounded k-means sample into bs->samples (left
+ * resident for the caller to cluster + free), normalize it for cosine, resolve
+ * the leaf target against the sample size, and compute the global mean (the
+ * sample mean — the encoder centering the streaming build needs up front,
+ * before any centroid page is written). Returns false (and frees the sample)
+ * when the heap yields no indexable rows.
  */
-static void
-refine_leaf_centroids(MktannBuildState *bs, HKMeansResult *tree, int iters)
-{
-	Dimension dim	  = bs->params.dim;
-	uint32_t  nleaves = tree->nleaves;
-	float	 *cents	  = hk_leaf_centroids(tree);
-
-	/* Tile size: as many leaves as fit a bounded accumulator. Capped by
-	 * MaxAllocSize (each palloc stays legal) as well as maintenance_work_mem,
-	 * so the accumulator is a constant ceiling independent of nlist — nleaves
-	 * above it just means more (re-scanned) tiles, not a bigger allocation. */
-	uint64_t cap_bytes =
-			Min((uint64_t)maintenance_work_mem * 1024, (uint64_t)MaxAllocSize);
-	uint64_t per_leaf = (uint64_t)dim * sizeof(double) + sizeof(uint64_t);
-	uint32_t tile	  = (uint32_t)
-			Min((uint64_t)nleaves, Max(UINT64CONST(1), cap_bytes / per_leaf));
-
-	RefineState rs = {
-			.tree	 = tree,
-			.sums	 = palloc((size_t)tile * dim * sizeof(double)),
-			.cnts	 = palloc((size_t)tile * sizeof(uint64_t)),
-			.scratch = palloc((size_t)dim * sizeof(float)),
-			.dim	 = dim,
-			.metric	 = bs->params.metric,
-	};
-
-	for (int it = 0; it < iters; it++)
-	{
-		for (uint32_t lo = 0; lo < nleaves; lo += tile)
-		{
-			uint32_t hi = Min(lo + tile, nleaves);
-			rs.tile_lo	= lo;
-			rs.tile_hi	= hi;
-			memset(rs.sums, 0, (size_t)(hi - lo) * dim * sizeof(double));
-			memset(rs.cnts, 0, (size_t)(hi - lo) * sizeof(uint64_t));
-
-			table_index_build_scan(
-					bs->heap,
-					bs->index,
-					bs->index_info,
-					true,
-					false,
-					refine_callback,
-					(void *)&rs,
-					NULL);
-
-			for (uint32_t l = lo; l < hi; l++)
-			{
-				if (rs.cnts[l - lo] == 0)
-					continue; /* keep subsample centroid for an empty leaf */
-				double *sum = rs.sums + (size_t)(l - lo) * dim;
-				float  *c	= cents + (size_t)l * dim;
-				double	inv = 1.0 / (double)rs.cnts[l - lo];
-				for (Dimension j = 0; j < dim; j++)
-					c[j] = (float)(sum[j] * inv);
-			}
-		}
-	}
-
-	pfree(rs.sums);
-	pfree(rs.cnts);
-	pfree(rs.scratch);
-}
-
-static HKMeansResult *
-run_clustering(MktannBuildState *bs, float **out_global_mean)
+static bool
+sample_for_build(
+		MktannBuildState *bs, float **out_global_mean, uint32_t *out_nlist)
 {
 	Dimension dim	= bs->params.dim;
 	uint32_t  nlist = bs->params.nlist;
 
-	/*
-	 * Bound the sample buffer by maintenance_work_mem (and MaxAllocSize). When
-	 * the budget forces a subsample, the tree structure is built from it and
-	 * the leaf centroids are refined on the full table below.
-	 */
+	/* Bound the sample buffer by maintenance_work_mem (and MaxAllocSize). The
+	 * tree is trained on this sample; leaf centroids are refined on the full
+	 * table by a later (page-backed) refine pass when subsampling loses
+	 * quality. */
 	uint64_t ideal_samples = Max((uint64_t)10000, (uint64_t)nlist * 256);
 	uint64_t budget		   = (uint64_t)maintenance_work_mem * 1024 /
 					  (dim * sizeof(float));
@@ -597,7 +473,6 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 	uint64_t cap	   = Min(budget, alloc_cap);
 	if (cap < 10000)
 		cap = 10000;
-	bool subsampled = ideal_samples > cap;
 	bs->max_samples = (int)Min(ideal_samples, cap);
 
 	bs->nsamples = 0;
@@ -609,75 +484,27 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
 		bs->nsamples = bs->max_samples;
 
 	if (bs->params.metric == DISTANCE_COSINE)
-	{
 		for (int i = 0; i < bs->nsamples; i++)
 			mkt_l2_normalize(bs->samples + (size_t)i * dim, dim);
-	}
 
 	if (bs->nsamples == 0)
-		return NULL;
+	{
+		pfree(bs->samples);
+		bs->samples = NULL;
+		return false;
+	}
 
 	if ((uint32_t)bs->nsamples < nlist)
 		nlist = (uint32_t)bs->nsamples;
 
-	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_KMEANS);
-
-	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
-	km_opts.nredo		  = bs->params.kmeans_nredo;
-
-	HKMeansResult *tree = mkt_hkmeans_f32(
-			bs->samples,
-			(uint32_t)bs->nsamples,
-			NULL,
-			dim,
-			nlist,
-			bs->params.fan_out,
-			bs->params.metric,
-			&km_opts);
-
-	if (tree == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("hierarchical k-means failed")));
-
-	pfree(bs->samples);
-	bs->samples = NULL;
-
-	/*
-	 * The tree was trained on a budget-bounded subsample. Refine its leaf
-	 * centroids on the whole table so they are full-data means, not
-	 * subsample means -- bounded memory, a few streaming passes.
-	 */
-	if (subsampled && mkt_leaf_refine_iters > 0)
-	{
-		instr_time t_ref_start;
-		INSTR_TIME_SET_CURRENT(t_ref_start);
-
-		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_REFINE);
-		refine_leaf_centroids(bs, tree, mkt_leaf_refine_iters);
-
-		instr_time t_ref_end;
-		INSTR_TIME_SET_CURRENT(t_ref_end);
-		INSTR_TIME_SUBTRACT(t_ref_end, t_ref_start);
-		elog(LOG,
-			 "mktann: leaf refinement %.1fms (%d passes) -- structure from a "
-			 "%d-sample subsample (maintenance_work_mem-bounded), %u leaves "
-			 "refined on the full table",
-			 INSTR_TIME_GET_MILLISEC(t_ref_end),
-			 mkt_leaf_refine_iters,
-			 bs->max_samples,
-			 tree->nleaves);
-	}
-
 	float *global_mean = palloc(dim * sizeof(float));
-	mkt_vector_mean(hk_leaf_centroids(tree), tree->nleaves, dim, global_mean);
-
+	mkt_vector_mean(bs->samples, (uint32_t)bs->nsamples, dim, global_mean);
 	if (bs->params.metric == DISTANCE_COSINE)
 		mkt_l2_normalize(global_mean, dim);
 
 	*out_global_mean = global_mean;
-	return tree;
+	*out_nlist		 = nlist;
+	return true;
 }
 
 /* ----------------------------------------------------------------
@@ -685,12 +512,49 @@ run_clustering(MktannBuildState *bs, float **out_global_mean)
  * ---------------------------------------------------------------- */
 
 /*
+ * Per-leaf head-page writer for the streaming build. Fired by
+ * mkt_stream_centroid_write once per leaf (during the write pass, while the
+ * leaf's float centroid is still resident), it writes that cluster's
+ * posting-list head page carrying pt_centroid = P^T*centroid — the exact encode
+ * reference the scan reads — at the leaf's reserved head block.
+ */
+typedef struct SerialHeadCtx
+{
+	MktStorage		   *storage;
+	const RaBitQParams *rq_params;
+	Dimension			dim;
+	bool				fastscan;
+	const BlockNumber  *posting_heads;
+	float			   *pt; /* [dim] scratch */
+} SerialHeadCtx;
+
+static void
+serial_write_head(void *arg, uint32_t leaf, const float *centroid)
+{
+	SerialHeadCtx *h = (SerialHeadCtx *)arg;
+	mkt_rabitq_rotate(h->rq_params, centroid, h->pt);
+
+	MktPostingBuilder hb;
+	if (h->fastscan)
+		mkt_posting_builder_init_fastscan(
+				&hb, h->storage, h->rq_params, h->dim, leaf, centroid, h->pt);
+	else
+		mkt_posting_builder_init(
+				&hb, h->storage, h->rq_params, h->dim, leaf, centroid, h->pt);
+	mkt_posting_builder_set_first_blkno(&hb, h->posting_heads[leaf]);
+	mkt_posting_builder_finish(&hb);
+	mkt_posting_builder_cleanup(&hb);
+}
+
+/*
  * Serial build fallback, mirroring do_parallel_build's role for the
- * non-parallel path: sample + cluster, reserve the posting page layout, then
- * scan the heap once through build_callback to fill the posting builders.
+ * non-parallel path. Streams the centroid tree straight to pages (no in-RAM
+ * tree, no O(nlist*dim) blob), then scans the heap once through build_callback
+ * (page-backed routing) to fill the posting lists.
  *
- * out_posting_heads is allocated here (sized to the resolved tree->nleaves).
- * Returns false with *out_tree == NULL when the heap has no tuples.
+ * *out_tree is a lightweight metadata carrier (leaf/level counts) — the build
+ * no longer materializes a tree. out_posting_heads is allocated here. Returns
+ * false with *out_tree == NULL when the heap has no tuples.
  */
 static bool
 do_serial_build(
@@ -712,125 +576,121 @@ do_serial_build(
 
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SAMPLE);
 
-	float		  *global_mean = NULL;
-	HKMeansResult *tree		   = run_clustering(bs, &global_mean);
-
-	if (tree == NULL)
+	float	*global_mean  = NULL;
+	uint32_t target_nlist = 0;
+	if (!sample_for_build(bs, &global_mean, &target_nlist))
 	{
 		*out_tree = NULL;
 		return false;
 	}
 
-	uint32_t nlist	 = tree->nleaves;
+	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
+	km_opts.nredo		  = p->kmeans_nredo;
+
+	/*
+	 * Plan pass: cluster the sample and discover the tree shape (leaf count,
+	 * depth, per-leaf sample counts, centroid page count) without writing. The
+	 * write pass below re-clusters the same sample (fixed k-means seed ->
+	 * identical tree) and streams the pages, so target_nlist (not the resolved
+	 * leaf count) must drive both passes.
+	 */
+	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_KMEANS);
+	MktStreamTreePlan plan;
+	if (!mkt_stream_centroid_plan(
+				bs->samples,
+				(uint32_t)bs->nsamples,
+				dim,
+				target_nlist,
+				p->fan_out,
+				p->metric,
+				p->centroid_format,
+				&km_opts,
+				&plan))
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("hierarchical k-means failed")));
+
+	uint32_t nlist	 = plan.nleaves;
 	bs->params.nlist = nlist;
 
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SETUP);
-
 	RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
 
-	/* ref_vecs (the leaf centroids, normalized in place for cosine by the
-	 * setup below) is reused as the posting encode reference; its rotated
-	 * P^T*centroid is computed per-cluster in mkt_posting_build_lists. */
-	float	   *ref_vecs	  = hk_leaf_centroids(tree);
-	BlockNumber first_posting = mkt_build_setup_centroid_layout(
-			storage, tree, dim, nlist, p->metric, p->centroid_format);
-
-	BlockNumber *posting_heads = palloc(nlist * sizeof(BlockNumber));
+	/* Centroid area is [first_centroid, first_posting); block 0 is metadata. */
+	BlockNumber first_centroid = 1;
+	BlockNumber first_posting  = first_centroid + plan.centroid_pages;
 
 	/*
-	 * Reserve a contiguous page range per cluster via the shared
-	 * reserve_init (same as the parallel and standalone paths). Serial has
-	 * no per-cluster sample assignment, so it feeds a uniform estimate:
-	 * the heap-size cardinality guess split evenly. reserve_init applies
-	 * the format + replication headroom and the page math.
+	 * Reserve a contiguous posting range per cluster from the plan's per-leaf
+	 * sample counts, extrapolated to the full table (handles skew; slight
+	 * over-estimate for headroom). reserve_init applies the format +
+	 * replication headroom and the page math.
 	 */
 	bool   replicate = p->soar_lambda > 0.0 || p->boundary_epsilon > 0.0;
 	double est_rows	 = RelationGetNumberOfBlocks(bs->heap) *
 					  (BLCKSZ / (double)(dim * sizeof(float) + 32));
-	uint32_t  base	 = (uint32_t)ceil(est_rows / nlist);
+	double	  scale	 = bs->nsamples > 0 ? est_rows / (double)bs->nsamples : 1.0;
 	uint32_t *counts = palloc(nlist * sizeof(uint32_t));
 	for (uint32_t c = 0; c < nlist; c++)
-		counts[c] = base;
+		counts[c] = (uint32_t)((double)plan.leaf_counts[c] * scale);
 
 	MktPostingReserve reserve;
 	mkt_posting_reserve_init(
 			&reserve, counts, nlist, 1, dim, p->fastscan, replicate);
 	pfree(counts);
-	mkt_storage_extend(storage, reserve.total);
 
-	/*
-	 * Write the centroid pages now, BEFORE the posting scan, so vector
-	 * assignment can route against them (page-backed) the same way the query
-	 * and insert paths do. Each leaf's posting-list head is the first block of
-	 * its reserved range (first_posting + reserve.starts[c]) — already fixed —
-	 * so the leaf->head links are final; mkt_posting_build_lists later fills
-	 * those exact blocks. The metadata page is written after the scan (it
-	 * needs the tuple count), so this path finalizes the index itself
-	 * (out_finalized) and the caller's shared tail skips its centroid/meta
-	 * write.
-	 */
+	BlockNumber *posting_heads = palloc(nlist * sizeof(BlockNumber));
 	for (uint32_t c = 0; c < nlist; c++)
 		posting_heads[c] = first_posting + reserve.starts[c];
-	{
-		uint32_t max_ent =
-				mkt_centroid_max_entries_fmt(dim, p->centroid_format);
-		BlockNumber *nfb = palloc((size_t)tree->nnodes * sizeof(BlockNumber));
-		mkt_compute_centroid_layout(tree, max_ent, 1, nfb);
-		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_CENTROID);
-		mkt_write_centroid_tree(
-				storage,
-				tree,
-				dim,
-				p->fan_out,
-				p->centroid_format,
-				rq_params,
-				global_mean,
-				posting_heads,
-				nfb,
-				NULL);
-		pfree(nfb);
-	}
 
 	/*
-	 * Pre-write each cluster's posting-list head page carrying its pt_centroid
-	 * (P^T * centroid), empty, before the scan. This is the page-backed encode
-	 * reference: the scan reads pt_centroid from the head to encode, and
-	 * mkt_posting_build_lists re-creates each head full (reading the same
-	 * pt_centroid), so the tree's float leaf centroids are not needed after
-	 * this point. (build_lists overwrites these heads; the double write is
-	 * nlist pages — a later pass can switch to append-in-place if it matters.)
+	 * Pre-extend the relation to cover metadata + centroid + posting areas so
+	 * the streaming write can place centroids at reserved blocks and each
+	 * leaf's head page (in the far posting area) already exists when the write
+	 * pass emits it.
 	 */
-	{
-		float *pt = palloc((size_t)dim * sizeof(float));
-		for (uint32_t c = 0; c < nlist; c++)
-		{
-			mkt_rabitq_rotate(rq_params, ref_vecs + (size_t)c * dim, pt);
-			MktPostingBuilder hb;
-			if (p->fastscan)
-				mkt_posting_builder_init_fastscan(
-						&hb,
-						storage,
-						rq_params,
-						dim,
-						c,
-						ref_vecs + (size_t)c * dim,
-						pt);
-			else
-				mkt_posting_builder_init(
-						&hb,
-						storage,
-						rq_params,
-						dim,
-						c,
-						ref_vecs + (size_t)c * dim,
-						pt);
-			mkt_posting_builder_set_first_blkno(
-					&hb, first_posting + reserve.starts[c]);
-			mkt_posting_builder_finish(&hb);
-			mkt_posting_builder_cleanup(&hb);
-		}
-		pfree(pt);
-	}
+	mkt_storage_extend(storage, first_posting + reserve.total);
+
+	/*
+	 * Write pass: stream the centroid pages (reserved blocks, post-order, root
+	 * last) and, per leaf, its head page carrying pt_centroid. Both build and
+	 * query then route page-backed over these centroid pages. This path
+	 * finalizes centroids + metadata itself (out_finalized).
+	 */
+	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_CENTROID);
+	SerialHeadCtx headctx = {
+			.storage	   = storage,
+			.rq_params	   = rq_params,
+			.dim		   = dim,
+			.fastscan	   = p->fastscan,
+			.posting_heads = posting_heads,
+			.pt			   = palloc((size_t)dim * sizeof(float)),
+	};
+	BlockNumber root = mkt_stream_centroid_write(
+			storage,
+			bs->samples,
+			(uint32_t)bs->nsamples,
+			dim,
+			target_nlist,
+			p->fan_out,
+			p->metric,
+			p->centroid_format,
+			rq_params,
+			global_mean,
+			&km_opts,
+			posting_heads,
+			first_centroid,
+			serial_write_head,
+			&headctx);
+	pfree(headctx.pt);
+	mkt_free(plan.leaf_counts);
+	pfree(bs->samples);
+	bs->samples = NULL;
+	if (root == InvalidBlockNumber)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("streaming centroid write failed")));
 
 	/*
 	 * Page-backed routing: build a MktIndexBase from the just-written index so
@@ -848,8 +708,8 @@ do_serial_build(
 	idx_base.posting_storage  = storage;
 	idx_base.page_base		  = NULL;
 	idx_base.dim			  = dim;
-	idx_base.nlevels		  = (uint8_t)tree->nlevels;
-	idx_base.first_centroid	  = 1;
+	idx_base.nlevels		  = (uint8_t)plan.nlevels;
+	idx_base.first_centroid	  = root;
 	idx_base.metric			  = p->metric;
 	idx_base.centroid_format  = p->centroid_format;
 	idx_base.fastscan =
@@ -947,17 +807,17 @@ do_serial_build(
 		 INSTR_TIME_GET_MILLISEC(t_serial_scan),
 		 bs->indtuples,
 		 bs->soar_dupes,
-		 tree->nleaves);
+		 nlist);
 
-	/* Metadata page (needs the final tuple count), then finalize: the centroid
-	 * pages were already written above, so the caller's shared tail skips its
-	 * centroid/meta write for this path. */
+	/* Metadata page (needs the final tuple count). first_centroid is the root
+	 * block, which the streaming write placed last. This path finalizes the
+	 * centroid pages + metadata itself, so the caller's tail does WAL only. */
 	write_meta_page(
 			storage,
 			dim,
-			(uint8_t)tree->nlevels,
+			(uint8_t)plan.nlevels,
 			(uint8_t)p->fan_out,
-			1,
+			root,
 			0,
 			nlist,
 			p->centroid_format,
@@ -974,7 +834,14 @@ do_serial_build(
 	}
 	*out_finalized = true;
 
-	*out_tree		   = tree;
+	/* No tree is materialized any more; hand back a lightweight carrier with the
+	 * leaf/level counts the caller needs (the empty-table check + metadata). */
+	HKMeansResult *meta_tree = palloc0(sizeof(HKMeansResult));
+	meta_tree->nleaves		 = nlist;
+	meta_tree->nlevels		 = plan.nlevels;
+	meta_tree->dim			 = dim;
+
+	*out_tree		   = meta_tree;
 	*out_global_mean   = global_mean;
 	*out_posting_heads = posting_heads;
 	*out_heap_tuples   = heap_tuples;
