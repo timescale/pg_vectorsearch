@@ -479,11 +479,13 @@ estimate_heap_tuples(Relation heap, Dimension dim)
 typedef struct RefineState
 {
 	const HKMeansResult *tree;
-	double				*sums;	  /* [nleaves * dim] */
-	uint64_t			*cnts;	  /* [nleaves] */
+	double				*sums;	  /* [tile * dim], indexed by leaf - tile_lo */
+	uint64_t			*cnts;	  /* [tile] */
 	float				*scratch; /* [dim] normalized copy for cosine */
 	Dimension			 dim;
 	DistanceMetric		 metric;
+	uint32_t tile_lo; /* accumulate only leaves in [tile_lo, tile_hi) */
+	uint32_t tile_hi;
 } RefineState;
 
 static void
@@ -510,12 +512,25 @@ refine_callback(
 	const float *v;
 	uint32_t	 leaf = mkt_refine_assign_leaf(
 			rs->tree, vin, dim, rs->metric, rs->scratch, &v);
-	double *sum = rs->sums + (size_t)leaf * dim;
+	/* Only the current tile's leaves are resident in the accumulator. */
+	if (leaf < rs->tile_lo || leaf >= rs->tile_hi)
+		return;
+	double *sum = rs->sums + (size_t)(leaf - rs->tile_lo) * dim;
 	for (Dimension j = 0; j < dim; j++)
 		sum[j] += v[j];
-	rs->cnts[leaf]++;
+	rs->cnts[leaf - rs->tile_lo]++;
 }
 
+/*
+ * Refine leaf centroids on the full table. The accumulator (sums[nleaves*dim]
+ * doubles + counts) is O(nleaves*dim) = O(N), so it is bounded by tiling: at
+ * most `tile` leaves are resident, and the heap is re-scanned once per tile.
+ * `tile` is sized to maintenance_work_mem, so when the whole accumulator fits
+ * (the common case — even the large mwm of a big build) there is a single tile
+ * and a single scan per iteration, identical to the untiled version. Only a
+ * tight mwm relative to nleaves forces multiple tiles (and re-scans); those
+ * update centroids in place between tiles (the bounded-memory trade-off).
+ */
 static void
 refine_leaf_centroids(MktannBuildState *bs, HKMeansResult *tree, int iters)
 {
@@ -523,10 +538,20 @@ refine_leaf_centroids(MktannBuildState *bs, HKMeansResult *tree, int iters)
 	uint32_t  nleaves = tree->nleaves;
 	float	 *cents	  = hk_leaf_centroids(tree);
 
+	/* Tile size: as many leaves as fit a bounded accumulator. Capped by
+	 * MaxAllocSize (each palloc stays legal) as well as maintenance_work_mem,
+	 * so the accumulator is a constant ceiling independent of nlist — nleaves
+	 * above it just means more (re-scanned) tiles, not a bigger allocation. */
+	uint64_t cap_bytes =
+			Min((uint64_t)maintenance_work_mem * 1024, (uint64_t)MaxAllocSize);
+	uint64_t per_leaf = (uint64_t)dim * sizeof(double) + sizeof(uint64_t);
+	uint32_t tile	  = (uint32_t)
+			Min((uint64_t)nleaves, Max(UINT64CONST(1), cap_bytes / per_leaf));
+
 	RefineState rs = {
 			.tree	 = tree,
-			.sums	 = palloc((size_t)nleaves * dim * sizeof(double)),
-			.cnts	 = palloc((size_t)nleaves * sizeof(uint64_t)),
+			.sums	 = palloc((size_t)tile * dim * sizeof(double)),
+			.cnts	 = palloc((size_t)tile * sizeof(uint64_t)),
 			.scratch = palloc((size_t)dim * sizeof(float)),
 			.dim	 = dim,
 			.metric	 = bs->params.metric,
@@ -534,28 +559,34 @@ refine_leaf_centroids(MktannBuildState *bs, HKMeansResult *tree, int iters)
 
 	for (int it = 0; it < iters; it++)
 	{
-		memset(rs.sums, 0, (size_t)nleaves * dim * sizeof(double));
-		memset(rs.cnts, 0, (size_t)nleaves * sizeof(uint64_t));
-
-		table_index_build_scan(
-				bs->heap,
-				bs->index,
-				bs->index_info,
-				true,
-				false,
-				refine_callback,
-				(void *)&rs,
-				NULL);
-
-		for (uint32_t l = 0; l < nleaves; l++)
+		for (uint32_t lo = 0; lo < nleaves; lo += tile)
 		{
-			if (rs.cnts[l] == 0)
-				continue; /* keep the subsample centroid for an empty leaf */
-			double *sum = rs.sums + (size_t)l * dim;
-			float  *c	= cents + (size_t)l * dim;
-			double	inv = 1.0 / (double)rs.cnts[l];
-			for (Dimension j = 0; j < dim; j++)
-				c[j] = (float)(sum[j] * inv);
+			uint32_t hi = Min(lo + tile, nleaves);
+			rs.tile_lo	= lo;
+			rs.tile_hi	= hi;
+			memset(rs.sums, 0, (size_t)(hi - lo) * dim * sizeof(double));
+			memset(rs.cnts, 0, (size_t)(hi - lo) * sizeof(uint64_t));
+
+			table_index_build_scan(
+					bs->heap,
+					bs->index,
+					bs->index_info,
+					true,
+					false,
+					refine_callback,
+					(void *)&rs,
+					NULL);
+
+			for (uint32_t l = lo; l < hi; l++)
+			{
+				if (rs.cnts[l - lo] == 0)
+					continue; /* keep subsample centroid for an empty leaf */
+				double *sum = rs.sums + (size_t)(l - lo) * dim;
+				float  *c	= cents + (size_t)l * dim;
+				double	inv = 1.0 / (double)rs.cnts[l - lo];
+				for (Dimension j = 0; j < dim; j++)
+					c[j] = (float)(sum[j] * inv);
+			}
 		}
 	}
 
@@ -711,18 +742,11 @@ do_serial_build(
 	RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
 
 	/* ref_vecs (the leaf centroids, normalized in place for cosine by the
-	 * setup below) is reused as the posting encode reference. */
+	 * setup below) is reused as the posting encode reference; its rotated
+	 * P^T*centroid is computed per-cluster in mkt_posting_build_lists. */
 	float	   *ref_vecs	  = hk_leaf_centroids(tree);
-	float	   *pt_centroids  = palloc((size_t)nlist * dim * sizeof(float));
 	BlockNumber first_posting = mkt_build_setup_centroid_layout(
-			storage,
-			tree,
-			rq_params,
-			dim,
-			nlist,
-			p->metric,
-			p->centroid_format,
-			pt_centroids);
+			storage, tree, dim, nlist, p->metric, p->centroid_format);
 
 	BlockNumber *posting_heads = palloc(nlist * sizeof(BlockNumber));
 
@@ -812,7 +836,6 @@ do_serial_build(
 			p->fastscan,
 			rq_params,
 			ref_vecs,
-			pt_centroids,
 			&reserve,
 			first_posting,
 			posting_heads);
