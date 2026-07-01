@@ -401,6 +401,60 @@ mkt_stream_centroid_write(
 	return c.ok ? root : InvalidBlockNumber;
 }
 
+BlockNumber
+mkt_write_subtree_streaming(
+		MktStorage			*storage,
+		const HKMeansResult *subtree,
+		Dimension			 dim,
+		uint32_t			 fan_out,
+		MktCentroidFormat	 format,
+		const RaBitQParams	*rq_params,
+		const float			*global_mean,
+		const BlockNumber	*posting_heads,
+		uint32_t			 leaf_offset,
+		BlockNumber			 first_block,
+		MktStreamLeafCb		 on_leaf,
+		void				*on_leaf_arg,
+		uint32_t			*out_pages)
+{
+	uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, format);
+
+	/* Lay the subtree's nodes out at reserved blocks starting at first_block
+	 * (BFS: node 0 = subtree root at first_block). */
+	BlockNumber *nfb =
+			mkt_alloc((size_t)subtree->nnodes * sizeof(BlockNumber));
+	BlockNumber next =
+			mkt_compute_centroid_layout(subtree, max_ent, first_block, nfb);
+
+	/* Leaf entries link to the global posting heads; leaf_offset maps the
+	 * subtree's local leaf indices to the global posting_heads array. */
+	mkt_write_centroid_tree(
+			storage,
+			subtree,
+			dim,
+			fan_out,
+			format,
+			rq_params,
+			global_mean,
+			posting_heads + leaf_offset,
+			nfb,
+			NULL);
+	mkt_free(nfb);
+
+	/* Head pages carry pt_centroid from the resident float leaf centroids. */
+	if (on_leaf != NULL)
+	{
+		const float *leaves = hk_leaf_centroids(subtree);
+		for (uint32_t i = 0; i < subtree->nleaves; i++)
+			on_leaf(
+					on_leaf_arg, leaf_offset + i, leaves + (size_t)i * dim);
+	}
+
+	if (out_pages != NULL)
+		*out_pages = (uint32_t)(next - first_block);
+	return first_block;
+}
+
 uint32_t
 mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out)
 {
