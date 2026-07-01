@@ -41,6 +41,14 @@ compute_nlevels(uint32_t nlist, uint32_t fan_out)
 	return n < 1 ? 1 : n;
 }
 
+uint32_t
+mkt_hkmeans_nlevels(uint32_t nlist, uint32_t fan_out)
+{
+	if (fan_out < 2)
+		fan_out = 2;
+	return compute_nlevels(nlist, fan_out);
+}
+
 /*
  * power_u32 - Compute base^exp for small unsigned integers.
  */

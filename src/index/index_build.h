@@ -92,6 +92,69 @@ void mkt_write_centroid_tree(
 		const BlockNumber	*node_first_blkno,
 		const float			*pt_centroids);
 
+/* ----------------------------------------------------------------
+ * Streaming (page-backed) centroid-tree build
+ *
+ * Builds the hierarchical k-means tree top-down (DFS) and streams centroid
+ * pages straight to storage, never materializing the whole tree in RAM. Peak
+ * memory is the caller's sample buffer + an O(fan_out*depth*dim) recursion
+ * stack — no O(nlist*dim) blob, no graft. Runs in two deterministic passes
+ * (k-means seed fixed, so the same sample yields the identical tree both
+ * times): a PLAN pass that discovers the tree shape without writing, then a
+ * WRITE pass that emits pages with the posting-list heads the caller derived
+ * from the plan's per-leaf counts.
+ *
+ * global_mean must be precomputed (the sample mean); the centroid encoder needs
+ * it before any page is written, so it cannot be the mean of the (not-yet-known)
+ * leaf centroids.
+ * ---------------------------------------------------------------- */
+
+typedef struct MktStreamTreePlan
+{
+	uint32_t  nleaves;
+	uint32_t  nlevels;
+	uint32_t  centroid_pages; /* pages the write pass will emit */
+	uint32_t *leaf_counts;	  /* [nleaves] sample count per leaf (mkt_alloc;
+							   * caller frees with mkt_free) */
+} MktStreamTreePlan;
+
+/*
+ * PLAN pass: cluster the sample and report the tree shape (leaf count, depth,
+ * per-leaf sample counts, and the number of centroid pages the write pass will
+ * emit) without writing anything. Returns false on k-means failure.
+ */
+bool mkt_stream_centroid_plan(
+		const float			*vectors,
+		uint32_t			 nvecs,
+		Dimension			 dim,
+		uint32_t			 nlist,
+		uint32_t			 fan_out,
+		DistanceMetric		 metric,
+		MktCentroidFormat	 format,
+		const KMeansOptions *opts,
+		MktStreamTreePlan	*out);
+
+/*
+ * WRITE pass: cluster the sample again (identical tree) and stream the centroid
+ * pages to `storage` via on-demand block allocation (post-order, root last).
+ * Leaf entry c links to posting_heads[c]. Blocks [0, storage's next block) must
+ * already exist (e.g. the metadata page). Returns the root block (the value the
+ * metadata page's first_centroid must carry), or InvalidBlockNumber on failure.
+ */
+BlockNumber mkt_stream_centroid_write(
+		MktStorage		   *storage,
+		const float		   *vectors,
+		uint32_t			nvecs,
+		Dimension			dim,
+		uint32_t			nlist,
+		uint32_t			fan_out,
+		DistanceMetric		metric,
+		MktCentroidFormat	format,
+		const RaBitQParams *rq_params,
+		const float		   *global_mean,
+		const KMeansOptions *opts,
+		const BlockNumber  *posting_heads);
+
 /*
  * Auto-tune fan_out from nlist.
  *
