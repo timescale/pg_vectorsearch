@@ -103,18 +103,24 @@ mkt_posting_build_lists(
 		bool				fastscan,
 		const RaBitQParams *rq_params,
 		const float		   *ref_vecs,
-		const float		   *pt_centroids,
 		MktPostingReserve  *reserve,
 		BlockNumber			first_posting,
 		BlockNumber		   *posting_heads)
 {
 	mkt_pbuild_sort_performsort(sorter);
 
+	/* Each list's RaBitQ reference is P^T * its centroid. We rotate it on the
+	 * fly here, one cluster at a time, into this scratch — instead of a
+	 * precomputed pt_centroids[nlist*dim] array (O(nlist*dim) = O(N)). */
+	float *pt_centroid = mkt_alloc((size_t)dim * sizeof(float));
+
 	uint32_t	cur_cluster = 0;
 	const void *entry		= NULL;
 	bool		have = mkt_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
 	for (uint32_t c = 0; c < nlist; c++)
 	{
+		mkt_rabitq_rotate(rq_params, ref_vecs + (size_t)c * dim, pt_centroid);
+
 		MktPostingBuilder hb;
 		if (fastscan)
 			mkt_posting_builder_init_fastscan(
@@ -124,7 +130,7 @@ mkt_posting_build_lists(
 					dim,
 					c,
 					ref_vecs + (size_t)c * dim,
-					pt_centroids + (size_t)c * dim);
+					pt_centroid);
 		else
 			mkt_posting_builder_init(
 					&hb,
@@ -133,7 +139,7 @@ mkt_posting_build_lists(
 					dim,
 					c,
 					ref_vecs + (size_t)c * dim,
-					pt_centroids + (size_t)c * dim);
+					pt_centroid);
 		mkt_posting_builder_set_shared_reserve(
 				&hb,
 				first_posting + reserve->starts[c],
@@ -161,41 +167,34 @@ mkt_posting_build_lists(
 	 * otherwise be silently dropped. */
 	Assert(!have);
 
+	mkt_free(pt_centroid);
 	mkt_pbuild_sort_end(sorter);
 }
 
 /*
  * Shared pre-posting centroid setup: normalize the leaf centroids for cosine
- * (in place — the tree is trained in normalized space), compute the rotated
- * P^T*centroids for leaf posting entries into the caller-allocated
- * pt_centroids[nlist*dim], reserve block 0 (the metadata page, written later
- * by the shared finalize) plus the centroid pages, and return the posting-area
- * start block. The page layout is deterministic from the tree, so the shared
- * finalize recomputes it for the centroid-tree write; only first_posting is
- * needed here (for the posting reserve, which differs between serial and
- * parallel). Shared by the serial build and the parallel leader.
+ * (in place — the tree is trained in normalized space), reserve block 0 (the
+ * metadata page, written later by the shared finalize) plus the centroid
+ * pages, and return the posting-area start block. The page layout is
+ * deterministic from the tree, so the shared finalize recomputes it for the
+ * centroid-tree write; only first_posting is needed here (for the posting
+ * reserve, which differs between serial and parallel). The rotated
+ * P^T*centroid each posting list needs is computed on the fly, per cluster, in
+ * mkt_posting_build_lists. Shared by the serial build and the parallel leader.
  */
 BlockNumber
 mkt_build_setup_centroid_layout(
-		MktStorage		   *storage,
-		HKMeansResult	   *tree,
-		const RaBitQParams *rq_params,
-		Dimension			dim,
-		uint32_t			nlist,
-		DistanceMetric		metric,
-		MktCentroidFormat	centroid_format,
-		float			   *pt_centroids)
+		MktStorage		 *storage,
+		HKMeansResult	 *tree,
+		Dimension		  dim,
+		uint32_t		  nlist,
+		DistanceMetric	  metric,
+		MktCentroidFormat centroid_format)
 {
 	float *ref_vecs = hk_leaf_centroids(tree);
 	if (metric == DISTANCE_COSINE)
 		for (uint32_t c = 0; c < nlist; c++)
 			mkt_l2_normalize(ref_vecs + (size_t)c * dim, dim);
-
-	for (uint32_t c = 0; c < nlist; c++)
-		mkt_rabitq_rotate(
-				rq_params,
-				ref_vecs + (size_t)c * dim,
-				pt_centroids + (size_t)c * dim);
 
 	/* Block 0 = metadata page; extend so it exists (contents written later).
 	 */
@@ -271,7 +270,9 @@ do_parallel_build(
 			(uint64_t)mkt_dsm_samples_size(
 					nparticipants, lead.max_per_worker, dim),
 			(uint64_t)max_tree_sz,
-			(uint64_t)nlist * dim * sizeof(float),
+			/* pt_centroids is no longer a bulk nlist*dim array — it is rotated
+			 * per-cluster on the fly in mkt_posting_build_lists. */
+			0,
 			(uint64_t)lead.dsm_total);
 
 	instr_time t_launch_start;
@@ -467,22 +468,20 @@ do_parallel_build(
 	}
 
 	/* Shared pre-posting setup: normalize leaf centroids (in place) for
-	 * cosine, rotate P^T*centroids, reserve block 0 + the centroid pages, and
-	 * get the posting-area start. ref_vecs (now normalized) is reused below
-	 * for posting encode reference. */
+	 * cosine, reserve block 0 + the centroid pages, and get the posting-area
+	 * start. ref_vecs (now normalized) is reused below for posting encode
+	 * reference; its rotated P^T*centroid is computed per-cluster in
+	 * mkt_posting_build_lists. */
 	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SETUP);
-	RaBitQParams *rq_params	  = mkt_rabitq_create(dim, rabitq_seed);
-	float		 *ref_vecs	  = hk_leaf_centroids(tree);
-	float	   *pt_centroids  = mkt_alloc((size_t)nlist * dim * sizeof(float));
-	BlockNumber first_posting = mkt_build_setup_centroid_layout(
-			storage,
-			tree,
-			rq_params,
-			dim,
-			nlist,
-			shared->metric,
-			shared->centroid_format,
-			pt_centroids);
+	RaBitQParams *rq_params		= mkt_rabitq_create(dim, rabitq_seed);
+	float		 *ref_vecs		= hk_leaf_centroids(tree);
+	BlockNumber	  first_posting = mkt_build_setup_centroid_layout(
+			  storage,
+			  tree,
+			  dim,
+			  nlist,
+			  shared->metric,
+			  shared->centroid_format);
 
 	instr_time t_km_end;
 	INSTR_TIME_SET_CURRENT(t_km_end);
@@ -635,7 +634,6 @@ do_parallel_build(
 			shared->fastscan,
 			rq_params,
 			ref_vecs,
-			pt_centroids,
 			&reserve,
 			first_posting,
 			posting_heads);
@@ -643,7 +641,6 @@ do_parallel_build(
 	uint32_t total_pages = RelationGetNumberOfBlocks(index) - first_posting;
 
 	mkt_posting_reserve_free(&reserve);
-	mkt_free(pt_centroids);
 
 	instr_time t_merge_end;
 	INSTR_TIME_SET_CURRENT(t_merge_end);

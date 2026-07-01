@@ -556,6 +556,26 @@ mkt_dsm_refine_accum_size(uint32_t nleaves, Dimension dim)
 }
 
 /*
+ * Leaves per refine tile: the accumulator holds at most this many leaves, so
+ * it is a bounded constant (cap_bytes, derived from maintenance_work_mem and
+ * MaxAllocSize by the caller) rather than O(nleaves). nleaves above it just
+ * means more re-scanned tiles, not a bigger allocation. The DSM region is
+ * sized for this (capacity = accum->nleaves); the leader and workers derive
+ * the tile count from it identically, so they stay in barrier lockstep.
+ */
+static inline uint32_t
+mkt_refine_tile_leaves(uint32_t nleaves, Dimension dim, uint64_t cap_bytes)
+{
+	uint64_t per_leaf = (uint64_t)dim * sizeof(float) + sizeof(uint64_t);
+	uint64_t t		  = cap_bytes / (per_leaf ? per_leaf : 1);
+	if (t < 1)
+		t = 1;
+	if (t > nleaves)
+		t = nleaves;
+	return (uint32_t)t;
+}
+
+/*
  * Refine the tree's leaf centroids on the whole table: refine_iters streaming
  * passes, each routing every row to its leaf and recomputing per-leaf means.
  * Both leader (participant 0) and workers call it; gated by
@@ -576,51 +596,6 @@ extern void mkt_pbuild_exec_refine(
 /* Striped lock seam for the refine accumulator (back-end owns the locks). */
 extern void mkt_pbuild_accum_lock(MktBuildShared *shared, uint32_t stripe);
 extern void mkt_pbuild_accum_unlock(MktBuildShared *shared, uint32_t stripe);
-
-/* ----------------------------------------------------------------
- * Phase 3: Posting build callback — shared by leader and workers
- *
- * Uses MktPostingWorkerState in deferred mode (storage=NULL): each worker
- * streams its completed pages to the leader over its shm_mq queue and the
- * leader places them, holding only a trailing partial page per cluster.
- * ---------------------------------------------------------------- */
-
-typedef struct PostingCbState
-{
-	const HKMeansResult	  *tree;
-	MktBuildParams		   bp;
-	MktBuildWorkerBufs	   bufs;
-	MktPostingWorkerState *ws;
-	double				   indtuples;
-	double				   soar_dupes;
-	MktMemCtx			   tmp_ctx;
-	MktMemCtx			   worker_ctx;
-
-	/* Batched secondary assignment: when replication is on and CBLAS is
-	 * available, tuples are buffered and the secondary search runs as a
-	 * GEMM over the batch (centroids read once per batch). */
-	bool			  use_batch;
-	MktSecondaryBatch sb;
-	float			 *enc_batch;	   /* [B * dim] */
-	ItemPointerData	 *batch_tids;	   /* [B] */
-	uint32_t		 *batch_primary;   /* [B] */
-	float			 *batch_pdist;	   /* [B] */
-	uint32_t		 *batch_secondary; /* [B] */
-	uint32_t		  batch_count;
-} PostingCbState;
-
-/* Initialize/flush/clean the batch buffers; no-op when batching is off
- * (e.g. no replication or no CBLAS). Call init in the worker context
- * before the scan, flush + cleanup after it. */
-void posting_cb_batch_init(PostingCbState *cbs);
-void posting_cb_batch_flush(PostingCbState *cbs);
-void posting_cb_batch_cleanup(PostingCbState *cbs);
-
-/*
- * Shared posting logic, called per live tuple with a raw vector pointer; fed
- * by mkt_build_scan in both back-ends.
- */
-extern void posting_cb(void *state, ItemPointerData tid, const float *vec);
 
 /*
  * Scan every vector cooperatively, invoking cb per live tuple. Back-end seam:
@@ -824,7 +799,6 @@ extern void mkt_posting_build_lists(
 		bool				fastscan,
 		const RaBitQParams *rq_params,
 		const float		   *ref_vecs,
-		const float		   *pt_centroids,
 		MktPostingReserve  *reserve,
 		BlockNumber			first_posting,
 		BlockNumber		   *posting_heads);
@@ -863,19 +837,18 @@ extern uint32_t mkt_refine_assign_leaf(
 
 /*
  * Shared pre-posting centroid setup: normalize leaf centroids for cosine,
- * compute the rotated P^T*centroids into pt_centroids[nlist*dim], reserve
- * block 0 (metadata) plus the centroid pages, and return the posting-area
- * start block. Shared by the serial build and the parallel leader.
+ * reserve block 0 (metadata) plus the centroid pages, and return the
+ * posting-area start block. Shared by the serial build and the parallel
+ * leader. The rotated P^T*centroid each posting list needs is computed on the
+ * fly, per cluster, in mkt_posting_build_lists (no nlist*dim array).
  */
 extern BlockNumber mkt_build_setup_centroid_layout(
-		MktStorage		   *storage,
-		HKMeansResult	   *tree,
-		const RaBitQParams *rq_params,
-		Dimension			dim,
-		uint32_t			nlist,
-		DistanceMetric		metric,
-		MktCentroidFormat	centroid_format,
-		float			   *pt_centroids);
+		MktStorage		 *storage,
+		HKMeansResult	 *tree,
+		Dimension		  dim,
+		uint32_t		  nlist,
+		DistanceMetric	  metric,
+		MktCentroidFormat centroid_format);
 
 /* ----------------------------------------------------------------
  * Parallel build entry — shared driver (parallel_build_leader.c)
