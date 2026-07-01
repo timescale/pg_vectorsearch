@@ -10,8 +10,8 @@
  *
  * Single-pass streaming build:
  *   6. Write metadata page, reserve centroid blocks
- *   7. Single heap scan: assign via tree descent, stream into
- *      posting builders
+ *   7. Single heap scan: route each row page-backed (the same
+ *      mkt_query_route the query/insert use), stream into posting builders
  *   8. Finish builders, write centroid pages with posting heads
  *   9. Update metadata with tuple count
  *  10. WAL-log all pages
@@ -46,11 +46,13 @@
 #include "algo/vecops.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
+#include "index/index_base.h"
 #include "index/index_build.h"
 #include "index/parallel_build.h"
 #include "index/posting_build.h"
 #include "index/posting_build_parallel.h"
 #include "index/posting_page.h"
+#include "index/query_scan.h"
 #include "mkt_halfvec.h"
 #include "mkt_pg.h"
 #include "mkt_vector.h"
@@ -67,9 +69,6 @@
 typedef struct MktannBuildState
 {
 	MktannBuildParams params;
-
-	/* Tree for centroid assignment */
-	const HKMeansResult *tree;
 
 	double indtuples;  /* total count */
 	double soar_dupes; /* replicated SOAR vectors */
@@ -91,12 +90,8 @@ typedef struct MktannBuildState
 	MktSorter	 *sorter;
 	char		 *entry; /* scratch, mkt_posting_entry_size(dim) bytes */
 	RaBitQParams *rq_params;
-	const float	 *leaf_cents;  /* [nlist*dim] cluster centroids */
 	RaBitQData	 *enc_buf;	   /* scratch RaBitQ output */
 	RaBitQScratch enc_scratch; /* scratch encode buffers */
-
-	/* Per-worker scratch buffers for parallel-ready assignment */
-	MktBuildWorkerBufs worker_bufs;
 
 	/* Sampling */
 	float *samples;		/* [max_samples * dim] row-major */
@@ -114,6 +109,21 @@ typedef struct MktannBuildState
 	MemoryContext	  tmp_ctx;	 /* per-tuple scratch */
 
 	MktBuildProgress *prog; /* phase/progress reporting seam (serial path) */
+
+	/*
+	 * Page-backed assignment (routes each row the same way the query/insert do,
+	 * so the in-RAM tree is not needed for the scan). qs owns the routing
+	 * scratch; posting_heads[c] = the head block of leaf c (ascending), used to
+	 * map a routed head block back to its leaf index for the sorter key. The
+	 * cand_* / pt_* buffers gather the beam candidates' pt_centroids (read from
+	 * their head pages) for the encode + SOAR/boundary secondary search.
+	 */
+	MktQueryState	   qs;
+	const BlockNumber *posting_heads; /* [nlist], ascending */
+	float			  *cand_pt;		  /* [MKT_SECONDARY_TOPK * dim] */
+	uint32_t		  *cand_leaf;	  /* [MKT_SECONDARY_TOPK] leaf id per cand */
+	Distance		  *cand_dist;	  /* [MKT_SECONDARY_TOPK] (boundary test) */
+	float			  *pt_r; /* [dim] residual scratch (encode + SOAR) */
 } MktannBuildState;
 
 /* ----------------------------------------------------------------
@@ -211,9 +221,26 @@ sample_rows(MktannBuildState *bs)
 }
 
 /* ----------------------------------------------------------------
- * Build callback — single-pass: assign via tree descent,
- * stream into posting builders
+ * Build callback — single-pass: route each row page-backed,
+ * stream encoded entries into the cluster-keyed sorter
  * ---------------------------------------------------------------- */
+
+/* Map a routed posting-head block back to its leaf index (posting_heads is
+ * ascending, so a binary search). */
+static uint32_t
+head_to_leaf(const MktannBuildState *bs, BlockNumber head)
+{
+	uint32_t lo = 0, hi = bs->params.nlist;
+	while (lo < hi)
+	{
+		uint32_t mid = lo + (hi - lo) / 2;
+		if (bs->posting_heads[mid] < head)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	return lo;
+}
 
 static void
 build_callback(
@@ -234,31 +261,102 @@ build_callback(
 
 	MemoryContext old_ctx = MemoryContextSwitchTo(bs->tmp_ctx);
 
-	MktVector *vec	= DatumGetMktVector(values[0]);
-	VectorRef  vref = MktVectorToRef(vec);
+	MktVector	*vec	 = DatumGetMktVector(values[0]);
+	VectorRef	 vref	 = MktVectorToRef(vec);
+	Dimension	 dim	 = bs->params.dim;
+	MktStorage	*storage = bs->qs.index->posting_storage;
 
-	const MktBuildParams bp = {
-			.dim			  = bs->params.dim,
-			.metric			  = bs->params.metric,
-			.soar_lambda	  = bs->params.soar_lambda,
-			.boundary_epsilon = bs->params.boundary_epsilon,
-	};
+	/*
+	 * Route page-backed, exactly as the query/insert do: descend the centroid
+	 * pages, giving the nearest leaves' posting-head blocks + qs.pt_query (the
+	 * rotated vector). No in-RAM tree.
+	 */
+	uint32_t n = mkt_query_route(
+			&bs->qs, vref.data, MKT_SECONDARY_TOPK, MKT_DISTANCE_MODE_ASYMMETRIC,
+			NULL);
+	if (n == 0)
+	{
+		MemoryContextSwitchTo(old_ctx);
+		MemoryContextReset(bs->tmp_ctx);
+		return;
+	}
 
-	MktBuildAssignment asgn = mkt_build_assign_vector(
-			bs->tree, vref.data, &bp, &bs->worker_bufs);
+	/* Gather the beam candidates: leaf index, distance, and pt_centroid (read
+	 * from each head page — the exact float encode reference). */
+	for (uint32_t i = 0; i < n; i++)
+	{
+		BlockNumber h	 = bs->qs.beam_results[i].posting_head;
+		bs->cand_leaf[i] = head_to_leaf(bs, h);
+		bs->cand_dist[i] = bs->qs.beam_results[i].distance;
+		Page hp			 = mkt_storage_read_page(storage, h);
+		memcpy(bs->cand_pt + (size_t)i * dim,
+			   mkt_posting_pt_centroid(hp),
+			   (size_t)dim * sizeof(float));
+		mkt_storage_release_page(storage, h);
+	}
 
-	if (mkt_posting_emit_assignment(
-				bs->sorter,
-				&asgn,
-				bs->rq_params,
-				bs->leaf_cents,
-				bs->params.dim,
-				*tid,
-				bs->enc_buf,
-				&bs->enc_scratch,
-				bs->entry))
-		bs->soar_dupes++;
+	/* Primary: encode pt_query - pt_centroid[0] and stream to the sorter. */
+	uint32_t primary = bs->cand_leaf[0];
+	for (Dimension d = 0; d < dim; d++)
+		bs->pt_r[d] = bs->qs.pt_query[d] - bs->cand_pt[d];
+	mkt_posting_entry_encode_from_pt(
+			bs->rq_params, bs->pt_r, dim, bs->enc_buf, &bs->enc_scratch, *tid,
+			bs->entry);
+	mkt_pbuild_sort_put(bs->sorter, primary, bs->entry);
 	bs->indtuples++;
+
+	/* Secondary (SOAR / boundary), mirroring mkt_build_assign_vector but in
+	 * rotated space over the gathered candidates (positions index cand_pt). */
+	bool has_soar	  = bs->params.soar_lambda > 0.0;
+	bool has_boundary = bs->params.boundary_epsilon > 0.0;
+	if (has_soar || has_boundary)
+	{
+		bool boundary_repl = false;
+		if (has_boundary && n > 1)
+		{
+			double d0 = (double)bs->cand_dist[0];
+			double gr = (d0 != 0.0)
+							  ? ((double)bs->cand_dist[1] - d0) / fabs(d0)
+							  : INFINITY;
+			boundary_repl = gr <= bs->params.boundary_epsilon;
+		}
+		bool	 should = has_boundary ? boundary_repl : true;
+		uint32_t sec_pos = 0; /* 0 = primary position = no secondary */
+		if (should && has_soar)
+		{
+			float norm = 0.0f;
+			for (Dimension d = 0; d < dim; d++)
+				norm += bs->pt_r[d] * bs->pt_r[d];
+			if (norm > 1e-7f)
+			{
+				float inv = 1.0f / sqrtf(norm);
+				for (Dimension d = 0; d < dim; d++)
+					bs->pt_r[d] *= inv;
+			}
+			/* cand_leaves = NULL -> candidate position is the index; primary is
+			 * position 0. leaf_centroids = cand_pt (rotated); vec = pt_query;
+			 * OA is norm-preserving under P^T, so this matches float-space. */
+			sec_pos = mkt_find_soar_secondary(
+					bs->qs.pt_query, bs->cand_pt, NULL, n, dim, 0, bs->pt_r,
+					bs->params.soar_lambda);
+		}
+		else if (should && n > 1)
+		{
+			sec_pos = 1; /* boundary-only: the 2nd-nearest candidate */
+		}
+
+		if (sec_pos != 0 && bs->cand_leaf[sec_pos] != primary)
+		{
+			for (Dimension d = 0; d < dim; d++)
+				bs->pt_r[d] = bs->qs.pt_query[d] -
+							  bs->cand_pt[(size_t)sec_pos * dim + d];
+			mkt_posting_entry_encode_from_pt(
+					bs->rq_params, bs->pt_r, dim, bs->enc_buf, &bs->enc_scratch,
+					*tid, bs->entry);
+			mkt_pbuild_sort_put(bs->sorter, bs->cand_leaf[sec_pos], bs->entry);
+			bs->soar_dupes++;
+		}
+	}
 
 	if (((uint64_t)bs->indtuples % 10000) == 0)
 		mkt_build_report_progress(bs->prog, bs->indtuples);
@@ -851,15 +949,47 @@ do_serial_build(
 	}
 
 	/*
+	 * Page-backed routing: build a MktIndexBase from the just-written index so
+	 * the scan routes each row exactly as the query/insert do (mkt_query_route
+	 * over the centroid pages). The tree is no longer used for assignment. The
+	 * base is stack-local but outlives the scan (all within this function); qs
+	 * holds it by pointer until mkt_query_state_cleanup below.
+	 */
+	MktIndexBase idx_base = {0};
+	idx_base.params		   = rq_params;
+	idx_base.pt_global_mean = palloc((size_t)dim * sizeof(float));
+	mkt_rabitq_rotate(rq_params, global_mean, idx_base.pt_global_mean);
+	idx_base.rabitq_seed	 = rabitq_seed;
+	idx_base.centroid_storage = storage;
+	idx_base.posting_storage  = storage;
+	idx_base.page_base		  = NULL;
+	idx_base.dim			  = dim;
+	idx_base.nlevels		  = (uint8_t)tree->nlevels;
+	idx_base.first_centroid	  = 1;
+	idx_base.metric			  = p->metric;
+	idx_base.centroid_format  = p->centroid_format;
+	idx_base.fastscan =
+			(p->centroid_format == MKT_CENTROID_FMT_FASTSCAN) ? mkt_fastscan_bits
+															  : 0;
+	idx_base.centroid_error_scale = (float)mkt_centroid_error_scale;
+	idx_base.centroid_beam_scale  = (float)mkt_centroid_beam_scale;
+	mkt_query_state_init(&bs->qs, &idx_base, 1, MKT_SECONDARY_TOPK);
+
+	bs->posting_heads = posting_heads;
+	bs->cand_pt = palloc((size_t)MKT_SECONDARY_TOPK * dim * sizeof(float));
+	bs->cand_leaf = palloc(MKT_SECONDARY_TOPK * sizeof(uint32_t));
+	bs->cand_dist = palloc(MKT_SECONDARY_TOPK * sizeof(Distance));
+	bs->pt_r	  = palloc((size_t)dim * sizeof(float));
+
+	/*
 	 * Cluster-keyed sorter: the scan streams every posting entry here (keyed
 	 * by cluster); mkt_posting_build_lists then reads them back grouped by
 	 * cluster and builds each list with a single resident page builder. Memory
 	 * is bounded by maintenance_work_mem (the sort spills if exceeded),
 	 * replacing the old builders[nlist] array (O(N)).
 	 */
-	bs->rq_params  = rq_params;
-	bs->leaf_cents = ref_vecs;
-	bs->enc_buf	   = palloc(MKT_RABITQ_DATA_SIZE(dim));
+	bs->rq_params = rq_params;
+	bs->enc_buf	  = palloc(MKT_RABITQ_DATA_SIZE(dim));
 	mkt_rabitq_scratch_init(&bs->enc_scratch, dim);
 	bs->entry = palloc(mkt_posting_entry_size(dim));
 	/* region == NULL: a plain, non-parallel cluster-keyed sort bounded by
@@ -874,10 +1004,8 @@ do_serial_build(
 			(uint32_t)mkt_posting_entry_size(dim),
 			maintenance_work_mem);
 
-	bs->tree		= tree;
-	bs->worker_bufs = mkt_build_worker_bufs_create(dim);
-	bs->indtuples	= 0;
-	bs->soar_dupes	= 0;
+	bs->indtuples  = 0;
+	bs->soar_dupes = 0;
 
 	/* Reports the scan phase and fires the "mktann-build-load" test hook (see
 	 * the seam): lets an isolation test observe the in-progress serial build.
@@ -922,6 +1050,7 @@ do_serial_build(
 			posting_heads);
 	bs->sorter = NULL; /* ended by mkt_posting_build_lists */
 
+	mkt_query_state_cleanup(&bs->qs);
 	mkt_rabitq_scratch_cleanup(&bs->enc_scratch);
 	pfree(bs->enc_buf);
 	bs->enc_buf = NULL;

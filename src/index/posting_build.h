@@ -377,6 +377,21 @@ void mkt_posting_entry_encode(
 		ItemPointerData		tid,
 		void			   *out_entry); /* mkt_posting_entry_size(dim) bytes */
 
+/*
+ * Page-backed twin of mkt_posting_entry_encode: encodes from a pre-computed
+ * rotated residual (pt_query - pt_centroid) instead of a float vector +
+ * centroid. Used by the page-backed build, where pt_centroid is read from the
+ * posting head page (no in-RAM float centroids).
+ */
+void mkt_posting_entry_encode_from_pt(
+		const RaBitQParams *params,
+		const float		   *pt_residual,
+		Dimension			dim,
+		RaBitQData		   *enc_buf,
+		RaBitQScratch	   *scratch,
+		ItemPointerData		tid,
+		void			   *out_entry);
+
 void mkt_posting_entry_add(
 		MktPostingBuilder *builder, const void *entry, Dimension dim);
 

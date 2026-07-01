@@ -255,6 +255,35 @@ mkt_posting_entry_encode(
 }
 
 void
+mkt_posting_entry_encode_from_pt(
+		const RaBitQParams *params,
+		const float		   *pt_residual,
+		Dimension			dim,
+		RaBitQData		   *enc_buf,
+		RaBitQScratch	   *scratch,
+		ItemPointerData		tid,
+		void			   *out_entry)
+{
+	/* Page-backed twin of mkt_posting_entry_encode: the caller already has the
+	 * rotated residual (pt_query - pt_centroid), e.g. from routing + the head
+	 * page's pt_centroid, so no float centroid is needed. */
+	mkt_rabitq_encode_from_pt(params, pt_residual, enc_buf, scratch);
+	float f_error =
+			mkt_rabitq_derive_f_error(enc_buf->f_add, enc_buf->f_rescale, dim);
+
+	char *p = (char *)out_entry;
+	memcpy(p, &tid, sizeof(ItemPointerData));
+	p += sizeof(ItemPointerData);
+	memcpy(p, &enc_buf->f_add, sizeof(float));
+	p += sizeof(float);
+	memcpy(p, &enc_buf->f_rescale, sizeof(float));
+	p += sizeof(float);
+	memcpy(p, &f_error, sizeof(float));
+	p += sizeof(float);
+	memcpy(p, enc_buf->bits, (size_t)((dim + 7) / 8));
+}
+
+void
 mkt_posting_entry_add(
 		MktPostingBuilder *builder, const void *entry, Dimension dim)
 {
