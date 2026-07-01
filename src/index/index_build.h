@@ -173,6 +173,30 @@ BlockNumber mkt_stream_centroid_write(
 		void			   *on_leaf_arg);
 
 /*
+ * Stream one already-built subtree (an HKMeansResult produced by the parallel
+ * workers) to centroid pages at reserved blocks [first_block, first_block +
+ * *out_pages), BFS layout (subtree root at first_block). Leaf entries link to
+ * posting_heads[leaf_offset + local_leaf]; on_leaf fires per leaf with its float
+ * centroid so the caller can write the head page. Returns the subtree root block
+ * (== first_block). Used by the parallel batched streaming build so the whole
+ * tree is never materialized as one blob (no graft).
+ */
+BlockNumber mkt_write_subtree_streaming(
+		MktStorage			*storage,
+		const HKMeansResult *subtree,
+		Dimension			 dim,
+		uint32_t			 fan_out,
+		MktCentroidFormat	 format,
+		const RaBitQParams	*rq_params,
+		const float			*global_mean,
+		const BlockNumber	*posting_heads,
+		uint32_t			 leaf_offset,
+		BlockNumber			 first_block,
+		MktStreamLeafCb		 on_leaf,
+		void				*on_leaf_arg,
+		uint32_t			*out_pages);
+
+/*
  * Auto-tune fan_out from nlist.
  *
  * When fan_out equals default_fan_out, derive a value that gives a
