@@ -720,10 +720,13 @@ do_serial_build(
 		BlockNumber		**out_posting_heads,
 		double			 *out_heap_tuples,
 		double			 *out_indtuples,
-		double			 *out_soar_dupes)
+		double			 *out_soar_dupes,
+		bool			 *out_finalized)
 {
 	const MktannBuildParams *p	 = &bs->params;
 	Dimension				 dim = p->dim;
+
+	*out_finalized = false;
 
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SAMPLE);
 
@@ -772,6 +775,80 @@ do_serial_build(
 			&reserve, counts, nlist, 1, dim, p->fastscan, replicate);
 	pfree(counts);
 	mkt_storage_extend(storage, reserve.total);
+
+	/*
+	 * Write the centroid pages now, BEFORE the posting scan, so vector
+	 * assignment can route against them (page-backed) the same way the query
+	 * and insert paths do. Each leaf's posting-list head is the first block of
+	 * its reserved range (first_posting + reserve.starts[c]) — already fixed —
+	 * so the leaf->head links are final; mkt_posting_build_lists later fills
+	 * those exact blocks. The metadata page is written after the scan (it
+	 * needs the tuple count), so this path finalizes the index itself
+	 * (out_finalized) and the caller's shared tail skips its centroid/meta
+	 * write.
+	 */
+	for (uint32_t c = 0; c < nlist; c++)
+		posting_heads[c] = first_posting + reserve.starts[c];
+	{
+		uint32_t max_ent =
+				mkt_centroid_max_entries_fmt(dim, p->centroid_format);
+		BlockNumber *nfb = palloc((size_t)tree->nnodes * sizeof(BlockNumber));
+		mkt_compute_centroid_layout(tree, max_ent, 1, nfb);
+		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_CENTROID);
+		mkt_write_centroid_tree(
+				storage,
+				tree,
+				dim,
+				p->fan_out,
+				p->centroid_format,
+				rq_params,
+				global_mean,
+				posting_heads,
+				nfb,
+				NULL);
+		pfree(nfb);
+	}
+
+	/*
+	 * Pre-write each cluster's posting-list head page carrying its pt_centroid
+	 * (P^T * centroid), empty, before the scan. This is the page-backed encode
+	 * reference: the scan reads pt_centroid from the head to encode, and
+	 * mkt_posting_build_lists re-creates each head full (reading the same
+	 * pt_centroid), so the tree's float leaf centroids are not needed after
+	 * this point. (build_lists overwrites these heads; the double write is
+	 * nlist pages — a later pass can switch to append-in-place if it matters.)
+	 */
+	{
+		float *pt = palloc((size_t)dim * sizeof(float));
+		for (uint32_t c = 0; c < nlist; c++)
+		{
+			mkt_rabitq_rotate(rq_params, ref_vecs + (size_t)c * dim, pt);
+			MktPostingBuilder hb;
+			if (p->fastscan)
+				mkt_posting_builder_init_fastscan(
+						&hb,
+						storage,
+						rq_params,
+						dim,
+						c,
+						ref_vecs + (size_t)c * dim,
+						pt);
+			else
+				mkt_posting_builder_init(
+						&hb,
+						storage,
+						rq_params,
+						dim,
+						c,
+						ref_vecs + (size_t)c * dim,
+						pt);
+			mkt_posting_builder_set_first_blkno(
+					&hb, first_posting + reserve.starts[c]);
+			mkt_posting_builder_finish(&hb);
+			mkt_posting_builder_cleanup(&hb);
+		}
+		pfree(pt);
+	}
 
 	/*
 	 * Cluster-keyed sorter: the scan streams every posting entry here (keyed
@@ -837,7 +914,9 @@ do_serial_build(
 			dim,
 			p->fastscan,
 			rq_params,
-			ref_vecs,
+			/* ref_vecs = NULL: read each list's pt_centroid from the head page
+			 * pre-written above (page-backed), not from the in-RAM tree. */
+			NULL,
 			&reserve,
 			first_posting,
 			posting_heads);
@@ -857,6 +936,31 @@ do_serial_build(
 		 bs->indtuples,
 		 bs->soar_dupes,
 		 tree->nleaves);
+
+	/* Metadata page (needs the final tuple count), then finalize: the centroid
+	 * pages were already written above, so the caller's shared tail skips its
+	 * centroid/meta write for this path. */
+	write_meta_page(
+			storage,
+			dim,
+			(uint8_t)tree->nlevels,
+			(uint8_t)p->fan_out,
+			1,
+			0,
+			nlist,
+			p->centroid_format,
+			p->metric,
+			rabitq_seed,
+			global_mean);
+	{
+		Page			page = mkt_storage_write_page(storage, 0);
+		MktannMetaPage *meta = (MktannMetaPage *)PageGetSpecialPointer(page);
+		meta->ntuples		 = (uint32_t)bs->indtuples;
+		if (p->fastscan)
+			meta->flags |= MKT_META_FLAG_FASTSCAN;
+		mkt_storage_commit_page(storage, 0);
+	}
+	*out_finalized = true;
 
 	*out_tree		   = tree;
 	*out_global_mean   = global_mean;
@@ -921,6 +1025,10 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	double		   soar_dupes	 = 0;
 	BlockNumber	  *posting_heads = NULL;
 	float		  *global_mean	 = NULL;
+
+	/* Set by a build path that writes its own centroid pages + metadata (the
+	 * serial page-backed path), so the shared finalize below does WAL only. */
+	bool centroids_finalized = false;
 
 	/* Try parallel build first (sampling + k-means + posting) */
 	bool did_parallel = false;
@@ -1001,7 +1109,8 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 					&posting_heads,
 					&heap_tuples,
 					&indtuples,
-					&soar_dupes))
+					&soar_dupes,
+					&centroids_finalized))
 			tree = NULL;
 	}
 
@@ -1028,59 +1137,69 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			 indtuples,
 			 bs.params.soar_lambda);
 
-	/* Write centroid pages + metadata + WAL */
+	/* Finalize: write centroid pages + metadata (unless the build path already
+	 * did — the serial page-backed path writes them itself), then WAL-log the
+	 * whole index. */
 	{
-		uint32_t nlist = tree->nleaves;
-
-		RaBitQParams *rq = mkt_rabitq_create(dim, rabitq_seed);
-
-		uint32_t max_ent =
-				mkt_centroid_max_entries_fmt(dim, p->centroid_format);
-		BlockNumber *nfb = palloc(tree->nnodes * sizeof(BlockNumber));
-		BlockNumber	 fc	 = 1;
-		BlockNumber	 fp	 = mkt_compute_centroid_layout(tree, max_ent, fc, nfb);
-
-		if (global_mean == NULL)
+		if (!centroids_finalized)
 		{
-			global_mean = palloc(dim * sizeof(float));
-			mkt_vector_mean(hk_leaf_centroids(tree), nlist, dim, global_mean);
-			if (p->metric == DISTANCE_COSINE)
-				mkt_l2_normalize(global_mean, dim);
+			uint32_t nlist = tree->nleaves;
+
+			RaBitQParams *rq = mkt_rabitq_create(dim, rabitq_seed);
+
+			uint32_t max_ent =
+					mkt_centroid_max_entries_fmt(dim, p->centroid_format);
+			BlockNumber *nfb = palloc(tree->nnodes * sizeof(BlockNumber));
+			BlockNumber	 fc	 = 1;
+			BlockNumber	 fp	 = mkt_compute_centroid_layout(
+					 tree, max_ent, fc, nfb);
+
+			if (global_mean == NULL)
+			{
+				global_mean = palloc(dim * sizeof(float));
+				mkt_vector_mean(
+						hk_leaf_centroids(tree), nlist, dim, global_mean);
+				if (p->metric == DISTANCE_COSINE)
+					mkt_l2_normalize(global_mean, dim);
+			}
+
+			write_meta_page(
+					&storage.base,
+					dim,
+					(uint8_t)tree->nlevels,
+					(uint8_t)p->fan_out,
+					fc,
+					fp,
+					0,
+					nlist,
+					p->centroid_format,
+					p->metric,
+					rabitq_seed,
+					global_mean);
+
+			mkt_build_report_phase(&prog, MKT_BUILD_PHASE_CENTROID);
+			mkt_write_centroid_tree(
+					&storage.base,
+					tree,
+					dim,
+					p->fan_out,
+					p->centroid_format,
+					rq,
+					global_mean,
+					posting_heads,
+					nfb,
+					NULL);
+
+			Page			page = mkt_storage_write_page(&storage.base, 0);
+			MktannMetaPage *meta = (MktannMetaPage *)PageGetSpecialPointer(
+					page);
+			meta->ntuples = (uint32_t)indtuples;
+			if (p->fastscan)
+				meta->flags |= MKT_META_FLAG_FASTSCAN;
+			mkt_storage_commit_page(&storage.base, 0);
+
+			pfree(nfb);
 		}
-
-		write_meta_page(
-				&storage.base,
-				dim,
-				(uint8_t)tree->nlevels,
-				(uint8_t)p->fan_out,
-				fc,
-				fp,
-				0,
-				nlist,
-				p->centroid_format,
-				p->metric,
-				rabitq_seed,
-				global_mean);
-
-		mkt_build_report_phase(&prog, MKT_BUILD_PHASE_CENTROID);
-		mkt_write_centroid_tree(
-				&storage.base,
-				tree,
-				dim,
-				p->fan_out,
-				p->centroid_format,
-				rq,
-				global_mean,
-				posting_heads,
-				nfb,
-				NULL);
-
-		Page			page = mkt_storage_write_page(&storage.base, 0);
-		MktannMetaPage *meta = (MktannMetaPage *)PageGetSpecialPointer(page);
-		meta->ntuples		 = (uint32_t)indtuples;
-		if (p->fastscan)
-			meta->flags |= MKT_META_FLAG_FASTSCAN;
-		mkt_storage_commit_page(&storage.base, 0);
 
 		mkt_build_report_phase(&prog, MKT_BUILD_PHASE_WAL);
 		log_newpage_range(
@@ -1089,8 +1208,6 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				0,
 				RelationGetNumberOfBlocks(index),
 				true);
-
-		pfree(nfb);
 	}
 
 	/* Flush the final phase timing + emit the build summary (heap_ctx is read
