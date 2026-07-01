@@ -83,6 +83,11 @@ typedef void (*MktBuildScanCb)(
 #define MKT_DSM_KEY_CHILD_SUBTREES UINT64CONST(0xB000000000000010)
 #define MKT_DSM_KEY_REFINE_ACCUM   UINT64CONST(0xB000000000000011)
 #define MKT_DSM_KEY_SORTSHARED	   UINT64CONST(0xB000000000000012)
+/* Page-backed phase-3 routing: leaf posting-head blocks (head->leaf map) and the
+ * global mean, both published by the leader before the tree-ready barrier so
+ * workers can route exactly as the query/insert paths do. */
+#define MKT_DSM_KEY_POSTING_HEADS  UINT64CONST(0xB000000000000013)
+#define MKT_DSM_KEY_GLOBAL_MEAN	   UINT64CONST(0xB000000000000014)
 
 /* ----------------------------------------------------------------
  * MktBuildShared — back-end-neutral shared build state
@@ -141,6 +146,14 @@ typedef struct MktBuildShared
 	/* Per-child subtree blob slot size (bytes) in the child-subtrees region;
 	 * set by the leader before launch so workers can index their slot. */
 	uint64_t subtree_slot_size;
+
+	/* Page-backed routing knobs (mirror the mkt.centroid_* GUCs), so phase-3
+	 * workers build a MktIndexBase that routes identically to the query path.
+	 * fastscan_bits is the FASTSCAN centroid bit width (base.fastscan when the
+	 * centroid format is FASTSCAN; 0 otherwise). */
+	float centroid_error_scale;
+	float centroid_beam_scale;
+	int	  fastscan_bits;
 } MktBuildShared;
 
 /* ----------------------------------------------------------------
@@ -644,6 +657,17 @@ extern void mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w);
 extern void mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w);
 
 /*
+ * Page-backed phase-3 routing storage seam — back-end-specific. Workers read
+ * centroid + posting head pages while routing, so each needs a MktStorage over
+ * the index. PG (separate process) opens one on the worker's indexRel;
+ * standalone (threads) returns the leader's shared in-memory store published via
+ * mkt_pbuild_publish_storage before launch. Release is a no-op for standalone.
+ */
+extern void mkt_pbuild_publish_storage(MktBuildShared *shared, MktStorage *s);
+extern MktStorage *mkt_pbuild_worker_storage(MktPBuildWorker *w);
+extern void		   mkt_pbuild_worker_storage_release(MktStorage *s);
+
+/*
  * Accumulate one worker's tuple counts into the shared state under the
  * back-end's lock (the lock lives in the back-end's derived shared struct).
  */
@@ -804,24 +828,6 @@ extern void mkt_posting_build_lists(
 		BlockNumber		   *posting_heads);
 
 /*
- * Emit a vector's posting entries into the cluster-keyed sorter: the primary,
- * plus the secondary (SOAR / boundary replica) when present. Each is
- * RaBitQ-encoded relative to its own cluster centroid; the scratch buffers are
- * reused. Shared by the serial build callback and the parallel posting worker.
- * Returns true when a secondary entry was written.
- */
-extern bool mkt_posting_emit_assignment(
-		MktSorter				 *sorter,
-		const MktBuildAssignment *asgn,
-		const RaBitQParams		 *params,
-		const float				 *leaf_centroids,
-		Dimension				  dim,
-		ItemPointerData			  tid,
-		RaBitQData				 *enc_buf,
-		RaBitQScratch			 *enc_scratch,
-		void					 *entry);
-
-/*
  * Route a vector to its refinement leaf (normalizing into scratch for cosine,
  * since the tree is trained in normalized space). Sets *out_v to the vector to
  * accumulate and returns its leaf. Shared by the serial and parallel refine
@@ -879,6 +885,14 @@ extern bool do_parallel_build(
 		BlockNumber				*posting_heads,
 		double					*out_heap_tuples,
 		double					*out_indtuples,
-		double					*out_soar_dupes);
+		double					*out_soar_dupes,
+		/* The build routes page-backed, so it writes the centroid pages + heads
+		 * into `storage` before the scan and computes the global mean. Callers
+		 * receive both: *out_global_mean is the (owned) mean used for the centroid
+		 * pages (so the caller's metadata write matches), and
+		 * *out_centroids_written signals that centroid pages already exist in
+		 * `storage` (the caller must not rewrite them there). May be NULL. */
+		float				   **out_global_mean,
+		bool					*out_centroids_written);
 
 #endif /* MKT_PARALLEL_BUILD_H */

@@ -36,6 +36,7 @@
 #include "mkt_pg.h"
 #include "mkt_vector.h"
 #include "mktann_build.h"
+#include "mktann_storage.h"
 #include "quant/matrix.h"
 
 /*
@@ -199,6 +200,37 @@ mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
 	worker_lockmodes(w->shared->concurrent, &heapmode, &indexmode);
 	index_close(w->indexRel, indexmode);
 	table_close(w->heapRel, heapmode);
+}
+
+/*
+ * Page-backed routing storage seam (see parallel_build.h). PG workers are
+ * separate processes, so each opens its own MktStorage on the worker's index
+ * relation; the leader's storage pointer cannot cross the process boundary, so
+ * publish is a no-op here.
+ */
+void
+mkt_pbuild_publish_storage(MktBuildShared *shared, MktStorage *s)
+{
+	(void)shared;
+	(void)s;
+}
+
+MktStorage *
+mkt_pbuild_worker_storage(MktPBuildWorker *w)
+{
+	/* No table relation needed (routing reads index pages only, no rerank). */
+	MktannStorage *s = palloc(sizeof(MktannStorage));
+	mktann_storage_init(s, w->indexRel, NULL, w->shared->metric);
+	s->build_mode = true; /* reads only; matches the leader's build storage */
+	return &s->base; /* base is the first member */
+}
+
+void
+mkt_pbuild_worker_storage_release(MktStorage *s)
+{
+	/* The route helper releases every page it reads, so no buffer stays pinned;
+	 * just free the wrapper (allocated in the worker's memory context). */
+	pfree(s);
 }
 
 /*
@@ -413,6 +445,13 @@ mkt_pbuild_setup_shared(
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_pbuild_sort_shared_size(nparticipants));
 
+	/* Page-backed routing: leaf posting-head blocks (head->leaf map) and the
+	 * global mean, published by the leader before the tree-ready barrier. Sized
+	 * for the worst-case leaf count (nlist here is the max bound). */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator, (Size)nlist * sizeof(BlockNumber));
+	shm_toc_estimate_chunk(&pcxt->estimator, (Size)dim * sizeof(float));
+
 	/* Shared leaf-refinement accumulator (one copy; only when refining). Sized
 	 * to a bounded tile (cap_bytes = min(maintenance_work_mem, MaxAllocSize)),
 	 * not O(nlist): refine processes leaves in tiles of this capacity. */
@@ -438,9 +477,9 @@ mkt_pbuild_setup_shared(
 	}
 
 	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
-	 * tree, sortshared, child_subtrees, wal, buffer + optionally
-	 * refine_accum / query_text */
-	int nkeys = 11;
+	 * tree, sortshared, child_subtrees, wal, buffer, posting_heads,
+	 * global_mean + optionally refine_accum / query_text */
+	int nkeys = 13;
 	if (debug_query_string)
 		nkeys++;
 	if (refine_iters > 0)
@@ -484,6 +523,9 @@ mkt_pbuild_setup_shared(
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
 	shared->refine_iters		   = refine_iters;
+	shared->centroid_error_scale   = (float)mkt_centroid_error_scale;
+	shared->centroid_beam_scale	   = (float)mkt_centroid_beam_scale;
+	shared->fastscan_bits		   = mkt_fastscan_bits;
 	SpinLockInit(&pg->mutex);
 	for (int i = 0; i < MKT_REFINE_LOCK_STRIPES; i++)
 		SpinLockInit(&pg->accum_locks[i]);
@@ -563,6 +605,17 @@ mkt_pbuild_setup_shared(
 	void *sortshared = shm_toc_allocate(pcxt->toc, sort_sz);
 	memset(sortshared, 0, sort_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SORTSHARED, sortshared);
+
+	/* Page-backed routing regions (filled by the leader before the tree-ready
+	 * barrier): the leaf posting-head blocks and the global mean. */
+	BlockNumber *dsm_heads =
+			shm_toc_allocate(pcxt->toc, (Size)nlist * sizeof(BlockNumber));
+	memset(dsm_heads, 0, (Size)nlist * sizeof(BlockNumber));
+	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_POSTING_HEADS, dsm_heads);
+
+	float *dsm_gmean = shm_toc_allocate(pcxt->toc, (Size)dim * sizeof(float));
+	memset(dsm_gmean, 0, (Size)dim * sizeof(float));
+	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, dsm_gmean);
 
 	/* Shared leaf-refinement accumulator, sized to the bounded tile capacity
 	 * (refine_tile_cap); the refine exec processes leaves in tiles of this

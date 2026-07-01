@@ -41,6 +41,9 @@ typedef struct MktBuildSharedStandalone
 	Relation		heap;
 	Relation		index;
 	MktParallelScan scan;
+	/* Leader's in-memory page store, published for phase-3 page-backed routing;
+	 * workers are threads so they share the pointer directly. */
+	MktStorage *storage;
 } MktBuildSharedStandalone;
 
 /*
@@ -103,6 +106,29 @@ mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
 {
 	(void)toc;
 	(void)w;
+}
+
+/*
+ * Page-backed routing storage seam (see parallel_build.h). Workers are threads
+ * in the leader's process, so they share the leader's in-memory page store: the
+ * leader publishes it and workers return the same pointer. Release is a no-op.
+ */
+void
+mkt_pbuild_publish_storage(MktBuildShared *shared, MktStorage *s)
+{
+	((MktBuildSharedStandalone *)shared)->storage = s;
+}
+
+MktStorage *
+mkt_pbuild_worker_storage(MktPBuildWorker *w)
+{
+	return ((MktBuildSharedStandalone *)w->shared)->storage;
+}
+
+void
+mkt_pbuild_worker_storage_release(MktStorage *s)
+{
+	(void)s; /* shared with the leader; not owned by the worker */
 }
 
 /*
@@ -224,9 +250,14 @@ mkt_pbuild_setup_shared(
 			&pcxt->estimator, mkt_dsm_child_subtrees_size(fan_out, slot_size));
 	shm_toc_estimate_chunk(&pcxt->estimator, usage_sz);
 	shm_toc_estimate_chunk(&pcxt->estimator, bufuse_sz);
+	/* Page-backed routing regions (leader fills before the tree-ready barrier). */
+	shm_toc_estimate_chunk(
+			&pcxt->estimator, (Size)nlist * sizeof(BlockNumber));
+	shm_toc_estimate_chunk(&pcxt->estimator, (Size)dim * sizeof(float));
 	/* Keyed regions: shared, barrier, samples, centroids, km_workers,
-	 * root_assign, tree, sortshared, child_subtrees. */
-	shm_toc_estimate_keys(&pcxt->estimator, 9);
+	 * root_assign, tree, sortshared, child_subtrees, posting_heads,
+	 * global_mean. */
+	shm_toc_estimate_keys(&pcxt->estimator, 11);
 
 	InitializeParallelDSM(pcxt);
 
@@ -257,6 +288,11 @@ mkt_pbuild_setup_shared(
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
 	shared->refine_iters = 0; /* standalone builds are not mem-bounded */
+	/* Page-backed routing knobs: match the PG GUC defaults so the shared route
+	 * helper uses a valid beam width during the build scan. */
+	shared->centroid_error_scale = 0.0f;
+	shared->centroid_beam_scale	 = 0.25f;
+	shared->fastscan_bits		 = 16;
 	shared->reltuples	 = 0.0;
 	shared->indtuples	 = 0.0;
 	shared->soar_dupes	 = 0.0;
@@ -308,6 +344,16 @@ mkt_pbuild_setup_shared(
 	char *child_subtrees_base = shm_toc_allocate(
 			pcxt->toc, mkt_dsm_child_subtrees_size(fan_out, slot_size));
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CHILD_SUBTREES, child_subtrees_base);
+
+	/* Page-backed routing regions (leader fills before the tree-ready barrier). */
+	BlockNumber *dsm_heads =
+			shm_toc_allocate(pcxt->toc, (Size)nlist * sizeof(BlockNumber));
+	memset(dsm_heads, 0, (Size)nlist * sizeof(BlockNumber));
+	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_POSTING_HEADS, dsm_heads);
+
+	float *dsm_gmean = shm_toc_allocate(pcxt->toc, (Size)dim * sizeof(float));
+	memset(dsm_gmean, 0, (Size)dim * sizeof(float));
+	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, dsm_gmean);
 
 	/* Dummy usage regions so the leader's instrumentation loop is safe. */
 	WalUsage	*walusage	 = shm_toc_allocate(pcxt->toc, usage_sz);

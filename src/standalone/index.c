@@ -481,7 +481,13 @@ mkt_index_build(
 				idx->posting_heads,
 				&heap_tuples,
 				&indtuples,
-				&soar_dupes);
+				&soar_dupes,
+				/* Standalone writes its own centroid store + computes its own
+				 * global mean below, so it ignores both outputs (the driver
+				 * still writes centroid pages into posting_storage for the
+				 * workers' page-backed routing). */
+				NULL,
+				NULL);
 		mkt_memctx_switch(idx_ctx);
 
 		/* The driver always launches at least one worker, so it does not fail
