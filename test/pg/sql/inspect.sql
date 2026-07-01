@@ -91,9 +91,12 @@ SELECT * FROM mkt_centroid_pages('idx_wide'::regclass)
 
 -- Posting pages summary for single-level index
 -- (Use idx_l2c which has embeddings with 1000 rows, ~32 clusters)
+-- Note: an empty head page (is_first) is valid — page-backed build routing can
+-- leave a cluster empty — but an empty continuation page would be a bug, so
+-- all_have_entries requires entries on every non-head page.
 SELECT count(*) > 0 AS has_pages,
        count(DISTINCT cluster_id) > 0 AS has_clusters,
-       bool_and(entry_count > 0) AS all_have_entries,
+       bool_and(entry_count > 0 OR is_first) AS all_have_entries,
        bool_and(max_entries > 0) AS all_have_capacity,
        bool_and(chain_pos >= 0) AS valid_chain_pos,
        count(*) FILTER (WHERE is_first) > 0 AS has_first_pages
