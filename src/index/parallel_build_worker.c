@@ -640,94 +640,17 @@ mkt_pbuild_exec_refine(
 /* ----------------------------------------------------------------
  * Phase 3: posting scan -> cluster-keyed sort (sort-seam path)
  *
- * Each worker assigns + RaBitQ-encodes every vector and feeds the compact
- * entry into the shared cluster-keyed sorter (primary + optional SOAR
- * secondary). The leader merges and builds the pages. Memory is bounded by
- * maintenance_work_mem inside the sorter.
+ * Each worker routes every vector page-backed (the same mkt_query_route the
+ * query and insert paths use), RaBitQ-encodes against the target list's head
+ * pt_centroid, and feeds the compact entry into the shared cluster-keyed sorter
+ * (primary + optional SOAR / boundary secondary), via the shared
+ * MktBuildRouteCtx helper. The leader merges and builds the pages. Memory is
+ * bounded by maintenance_work_mem inside the sorter.
  * ---------------------------------------------------------------- */
-typedef struct PostingSortCbState
-{
-	const HKMeansResult *tree;
-	MktBuildParams		 bp;
-	MktBuildWorkerBufs	 bufs;
-	const RaBitQParams	*rq_params;
-	RaBitQData			*enc_buf;
-	RaBitQScratch		*enc_scratch;
-	const float			*leaf_cents;
-	MktSorter			*sorter;
-	Dimension			 dim;
-	char				*entry; /* scratch, mkt_posting_entry_size(dim) */
-	double				 indtuples;
-	double				 soar_dupes;
-} PostingSortCbState;
-
-/*
- * Emit a vector's posting entries into the cluster-keyed sorter: the primary,
- * plus the secondary (SOAR / boundary replica) when the assignment has one.
- * Each entry is RaBitQ-encoded relative to its own cluster centroid; the
- * scratch buffers (enc_buf, enc_scratch, entry) are reused across both. Shared
- * by the serial build callback and the parallel posting worker. Returns true
- * when a secondary entry was written (the caller counts replicas).
- */
-bool
-mkt_posting_emit_assignment(
-		MktSorter				 *sorter,
-		const MktBuildAssignment *asgn,
-		const RaBitQParams		 *params,
-		const float				 *leaf_centroids,
-		Dimension				  dim,
-		ItemPointerData			  tid,
-		RaBitQData				 *enc_buf,
-		RaBitQScratch			 *enc_scratch,
-		void					 *entry)
-{
-	mkt_posting_entry_encode(
-			params,
-			asgn->enc_vector,
-			leaf_centroids + (size_t)asgn->primary * dim,
-			dim,
-			enc_buf,
-			enc_scratch,
-			tid,
-			entry);
-	mkt_pbuild_sort_put(sorter, asgn->primary, entry);
-
-	if (asgn->secondary == MKT_INVALID_CLUSTER)
-		return false;
-
-	mkt_posting_entry_encode(
-			params,
-			asgn->enc_vector,
-			leaf_centroids + (size_t)asgn->secondary * dim,
-			dim,
-			enc_buf,
-			enc_scratch,
-			tid,
-			entry);
-	mkt_pbuild_sort_put(sorter, asgn->secondary, entry);
-	return true;
-}
-
 static void
-posting_sort_cb(void *state, ItemPointerData tid, const float *vec)
+route_scan_cb(void *state, ItemPointerData tid, const float *vec)
 {
-	PostingSortCbState *cbs = (PostingSortCbState *)state;
-
-	MktBuildAssignment asgn =
-			mkt_build_assign_vector(cbs->tree, vec, &cbs->bp, &cbs->bufs);
-
-	if (mkt_posting_emit_assignment(
-				cbs->sorter,
-				&asgn,
-				cbs->rq_params,
-				cbs->leaf_cents,
-				cbs->dim,
-				tid,
-				cbs->enc_buf,
-				cbs->enc_scratch,
-				cbs->entry))
-		cbs->soar_dupes++;
-	cbs->indtuples++;
+	mkt_build_route_emit((MktBuildRouteCtx *)state, vec, tid);
 }
 
 /* ----------------------------------------------------------------
@@ -843,16 +766,16 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * before the leader merges. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-	/* ---- Phase 3: posting scan -> cluster-keyed sort ---- */
+	/* ---- Phase 3: posting scan -> cluster-keyed sort (page-backed) ---- */
 	HKMeansResult *tree = shm_toc_lookup(toc, MKT_DSM_KEY_TREE, false);
 	void *sortshared	= shm_toc_lookup(toc, MKT_DSM_KEY_SORTSHARED, false);
+	const BlockNumber *posting_heads =
+			shm_toc_lookup(toc, MKT_DSM_KEY_POSTING_HEADS, false);
+	const float *global_mean =
+			shm_toc_lookup(toc, MKT_DSM_KEY_GLOBAL_MEAN, false);
 
 	uint32_t	  entry_size = (uint32_t)mkt_posting_entry_size(dim);
 	RaBitQParams *rq_params	 = mkt_rabitq_create(dim, shared->rabitq_seed);
-	const float	 *leaf_cents = hk_leaf_centroids(tree);
-	RaBitQData	 *enc_buf	 = mkt_alloc(MKT_RABITQ_DATA_SIZE(dim));
-	RaBitQScratch enc_scratch;
-	mkt_rabitq_scratch_init(&enc_scratch, dim);
 
 	/* worker_id is 1..N for launched workers; the sorter's 0-based worker
 	 * index is worker_id - 1. Worker sorts run concurrently, so each gets a
@@ -865,34 +788,52 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	MktSorter *sorter = mkt_pbuild_sort_begin(
 			sortshared, seg, worker_id - 1, 0, false, entry_size, worker_wm);
 
-	MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
-	PostingSortCbState cbs	= {
-			 .tree		  = tree,
-			 .bp		  = {.dim			   = dim,
-							 .metric		   = shared->metric,
-							 .soar_lambda	   = shared->soar_lambda,
-							 .boundary_epsilon = shared->boundary_epsilon},
-			 .bufs		  = bufs,
-			 .rq_params	  = rq_params,
-			 .enc_buf	  = enc_buf,
-			 .enc_scratch = &enc_scratch,
-			 .leaf_cents  = leaf_cents,
-			 .sorter	  = sorter,
-			 .dim		  = dim,
-			 .entry		  = mkt_alloc(entry_size),
-			 .indtuples	  = 0,
-			 .soar_dupes  = 0,
-	 };
+	/* Per-worker storage over the index for page-backed head/centroid reads
+	 * (PG opens one on the worker's indexRel; standalone shares the leader's). */
+	MktStorage *storage = mkt_pbuild_worker_storage(&w);
+
+	/* Routing base — the same MktIndexBase the query/insert build, so the worker
+	 * routes each row identically. nlevels comes from the published tree; the
+	 * scales + global mean + fastscan bits from the shared state. */
+	MktIndexBase base		 = {0};
+	base.params				 = rq_params;
+	base.pt_global_mean		 = mkt_alloc((size_t)dim * sizeof(float));
+	mkt_rabitq_rotate(rq_params, global_mean, base.pt_global_mean);
+	base.rabitq_seed		 = shared->rabitq_seed;
+	base.centroid_storage	 = storage;
+	base.posting_storage	 = storage;
+	base.page_base			 = NULL;
+	base.dim				 = dim;
+	base.nlevels			 = (uint8_t)tree->nlevels;
+	base.first_centroid		 = 1;
+	base.metric				 = shared->metric;
+	base.centroid_format	 = shared->centroid_format;
+	base.fastscan =
+			(shared->centroid_format == MKT_CENTROID_FMT_FASTSCAN)
+					? shared->fastscan_bits
+					: 0;
+	base.centroid_error_scale = shared->centroid_error_scale;
+	base.centroid_beam_scale  = shared->centroid_beam_scale;
+
+	MktQueryState qs;
+	mkt_query_state_init(&qs, &base, 1, MKT_SECONDARY_TOPK);
+
+	MktBuildRouteCtx route;
+	mkt_build_route_ctx_init(
+			&route,
+			&qs,
+			sorter,
+			rq_params,
+			storage,
+			posting_heads,
+			shared->nlist,
+			dim,
+			shared->soar_lambda,
+			shared->boundary_epsilon);
 
 	mkt_build_scan(
-			heapRel,
-			indexRel,
-			indexInfo,
-			shared,
-			true,
-			false,
-			posting_sort_cb,
-			&cbs);
+			heapRel, indexRel, indexInfo, shared, true, false, route_scan_cb,
+			&route);
 
 	mkt_pbuild_sort_performsort(sorter);
 
@@ -900,13 +841,13 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 	BarrierDetach(barrier);
 
-	mkt_pbuild_worker_add_counts(shared, cbs.indtuples, cbs.soar_dupes);
+	mkt_pbuild_worker_add_counts(shared, route.indtuples, route.soar_dupes);
 
 	mkt_pbuild_sort_end(sorter);
-	mkt_free(cbs.entry);
-	mkt_build_worker_bufs_free(&bufs);
-	mkt_rabitq_scratch_cleanup(&enc_scratch);
-	mkt_free(enc_buf);
+	mkt_build_route_ctx_cleanup(&route);
+	mkt_query_state_cleanup(&qs);
+	mkt_free(base.pt_global_mean);
+	mkt_pbuild_worker_storage_release(storage);
 
 	mkt_pbuild_worker_detach(toc, &w);
 }

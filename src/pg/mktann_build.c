@@ -1041,6 +1041,10 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	/* Set by a build path that writes its own centroid pages + metadata (the
 	 * serial page-backed path), so the shared finalize below does WAL only. */
 	bool centroids_finalized = false;
+	/* Set by the parallel path, which writes the centroid pages itself but not
+	 * the metadata page: the finalize still runs (for meta) but skips its own
+	 * centroid tree write. */
+	bool parallel_centroids = false;
 
 	/* Try parallel build first (sampling + k-means + posting) */
 	bool did_parallel = false;
@@ -1094,18 +1098,18 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				posting_heads,
 				&heap_tuples,
 				&indtuples,
-				&soar_dupes);
+				&soar_dupes,
+				/* do_parallel_build routes page-backed: it wrote the centroid +
+				 * head pages into the index before the scan and returns the
+				 * global mean it used (so the metadata write below matches). It
+				 * does NOT write the metadata page (needs the final tuple count),
+				 * so the finalize below still runs — it only skips the centroid
+				 * tree write when parallel_centroids is set. */
+				&global_mean,
+				&parallel_centroids);
 
 		if (did_parallel && tree != NULL)
-		{
-			uint32_t nlist	= tree->nleaves;
-			bs.params.nlist = nlist;
-
-			global_mean = palloc(dim * sizeof(float));
-			mkt_vector_mean(hk_leaf_centroids(tree), nlist, dim, global_mean);
-			if (p->metric == DISTANCE_COSINE)
-				mkt_l2_normalize(global_mean, dim);
-		}
+			bs.params.nlist = tree->nleaves;
 	}
 
 	if (!did_parallel)
@@ -1189,18 +1193,24 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 					rabitq_seed,
 					global_mean);
 
-			mkt_build_report_phase(&prog, MKT_BUILD_PHASE_CENTROID);
-			mkt_write_centroid_tree(
-					&storage.base,
-					tree,
-					dim,
-					p->fan_out,
-					p->centroid_format,
-					rq,
-					global_mean,
-					posting_heads,
-					nfb,
-					NULL);
+			/* The parallel path already wrote the centroid + head pages before
+			 * its scan (page-backed routing); only the serial-fallback path
+			 * needs the finalize to write them here. */
+			if (!parallel_centroids)
+			{
+				mkt_build_report_phase(&prog, MKT_BUILD_PHASE_CENTROID);
+				mkt_write_centroid_tree(
+						&storage.base,
+						tree,
+						dim,
+						p->fan_out,
+						p->centroid_format,
+						rq,
+						global_mean,
+						posting_heads,
+						nfb,
+						NULL);
+			}
 
 			Page			page = mkt_storage_write_page(&storage.base, 0);
 			MktannMetaPage *meta = (MktannMetaPage *)PageGetSpecialPointer(
