@@ -23,7 +23,9 @@
 #include "algo/vecops.h"
 #include "core/memory.h"
 #include "index/index_build.h"
+#include "index/parallel_build.h"
 #include "index/posting_build.h"
+#include "index/query_scan.h"
 #include "quant/fastscan.h"
 
 /* ================================================================
@@ -281,6 +283,168 @@ mkt_posting_entry_encode_from_pt(
 	memcpy(p, &f_error, sizeof(float));
 	p += sizeof(float);
 	memcpy(p, enc_buf->bits, (size_t)((dim + 7) / 8));
+}
+
+/* Map a routed posting-head block back to its leaf index. posting_heads is
+ * ascending (leaf c's head = first_posting + reserve.starts[c]), so binary
+ * search. */
+static uint32_t
+route_head_to_leaf(const BlockNumber *posting_heads, uint32_t nlist,
+				   BlockNumber head)
+{
+	uint32_t lo = 0, hi = nlist;
+	while (lo < hi)
+	{
+		uint32_t mid = lo + (hi - lo) / 2;
+		if (posting_heads[mid] < head)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	return lo;
+}
+
+void
+mkt_build_route_ctx_init(
+		MktBuildRouteCtx   *ctx,
+		MktQueryState	   *qs,
+		MktSorter		   *sorter,
+		const RaBitQParams *rq_params,
+		MktStorage		   *storage,
+		const BlockNumber  *posting_heads,
+		uint32_t			nlist,
+		Dimension			dim,
+		double				soar_lambda,
+		double				boundary_epsilon)
+{
+	ctx->qs				  = qs;
+	ctx->sorter			  = sorter;
+	ctx->rq_params		  = rq_params;
+	ctx->storage		  = storage;
+	ctx->posting_heads	  = posting_heads;
+	ctx->nlist			  = nlist;
+	ctx->dim			  = dim;
+	ctx->soar_lambda	  = soar_lambda;
+	ctx->boundary_epsilon = boundary_epsilon;
+
+	ctx->cand_pt   = mkt_alloc((size_t)MKT_SECONDARY_TOPK * dim * sizeof(float));
+	ctx->cand_leaf = mkt_alloc(MKT_SECONDARY_TOPK * sizeof(uint32_t));
+	ctx->cand_dist = mkt_alloc(MKT_SECONDARY_TOPK * sizeof(Distance));
+	ctx->pt_r	   = mkt_alloc((size_t)dim * sizeof(float));
+	ctx->enc_buf   = mkt_alloc(MKT_RABITQ_DATA_SIZE(dim));
+	mkt_rabitq_scratch_init(&ctx->enc_scratch, dim);
+	ctx->entry = mkt_alloc(mkt_posting_entry_size(dim));
+
+	ctx->indtuples	= 0;
+	ctx->soar_dupes = 0;
+}
+
+void
+mkt_build_route_ctx_cleanup(MktBuildRouteCtx *ctx)
+{
+	mkt_free(ctx->cand_pt);
+	mkt_free(ctx->cand_leaf);
+	mkt_free(ctx->cand_dist);
+	mkt_free(ctx->pt_r);
+	mkt_free(ctx->enc_buf);
+	mkt_rabitq_scratch_cleanup(&ctx->enc_scratch);
+	mkt_free(ctx->entry);
+}
+
+bool
+mkt_build_route_emit(
+		MktBuildRouteCtx *ctx, const float *vec, ItemPointerData tid)
+{
+	Dimension dim = ctx->dim;
+
+	/*
+	 * Route page-backed, exactly as the query/insert do: descend the centroid
+	 * pages, giving the nearest leaves' posting-head blocks + qs->pt_query (the
+	 * rotated vector). No in-RAM tree.
+	 */
+	uint32_t n = mkt_query_route(
+			ctx->qs, vec, MKT_SECONDARY_TOPK, MKT_DISTANCE_MODE_ASYMMETRIC,
+			NULL);
+	if (n == 0)
+		return false;
+
+	/* Gather the beam candidates: leaf index, distance, and pt_centroid (read
+	 * from each head page -- the float encode reference). */
+	for (uint32_t i = 0; i < n; i++)
+	{
+		BlockNumber h	  = ctx->qs->beam_results[i].posting_head;
+		ctx->cand_leaf[i] = route_head_to_leaf(ctx->posting_heads, ctx->nlist, h);
+		ctx->cand_dist[i] = ctx->qs->beam_results[i].distance;
+		Page hp			  = mkt_storage_read_page(ctx->storage, h);
+		memcpy(ctx->cand_pt + (size_t)i * dim,
+			   mkt_posting_pt_centroid(hp),
+			   (size_t)dim * sizeof(float));
+		mkt_storage_release_page(ctx->storage, h);
+	}
+
+	/* Primary: encode pt_query - pt_centroid[0] and stream to the sorter. */
+	uint32_t primary = ctx->cand_leaf[0];
+	for (Dimension d = 0; d < dim; d++)
+		ctx->pt_r[d] = ctx->qs->pt_query[d] - ctx->cand_pt[d];
+	mkt_posting_entry_encode_from_pt(
+			ctx->rq_params, ctx->pt_r, dim, ctx->enc_buf, &ctx->enc_scratch, tid,
+			ctx->entry);
+	mkt_pbuild_sort_put(ctx->sorter, primary, ctx->entry);
+	ctx->indtuples++;
+
+	/* Secondary (SOAR / boundary), in rotated space over the gathered
+	 * candidates (positions index cand_pt). OA scoring and distances are
+	 * norm-preserving under P^T, so this matches the float-space result. */
+	bool has_soar	  = ctx->soar_lambda > 0.0;
+	bool has_boundary = ctx->boundary_epsilon > 0.0;
+	if (!has_soar && !has_boundary)
+		return false;
+
+	bool boundary_repl = false;
+	if (has_boundary && n > 1)
+	{
+		double d0 = (double)ctx->cand_dist[0];
+		double gr = (d0 != 0.0) ? ((double)ctx->cand_dist[1] - d0) / fabs(d0)
+							   : INFINITY;
+		boundary_repl = gr <= ctx->boundary_epsilon;
+	}
+	bool	 should	 = has_boundary ? boundary_repl : true;
+	uint32_t sec_pos = 0; /* 0 = primary position = no secondary */
+	if (should && has_soar)
+	{
+		float norm = 0.0f;
+		for (Dimension d = 0; d < dim; d++)
+			norm += ctx->pt_r[d] * ctx->pt_r[d];
+		if (norm > 1e-7f)
+		{
+			float inv = 1.0f / sqrtf(norm);
+			for (Dimension d = 0; d < dim; d++)
+				ctx->pt_r[d] *= inv;
+		}
+		/* cand_leaves = NULL -> candidate position is the index; primary is
+		 * position 0. leaf_centroids = cand_pt (rotated); vec = pt_query. */
+		sec_pos = mkt_find_soar_secondary(
+				ctx->qs->pt_query, ctx->cand_pt, NULL, n, dim, 0, ctx->pt_r,
+				ctx->soar_lambda);
+	}
+	else if (should && n > 1)
+	{
+		sec_pos = 1; /* boundary-only: the 2nd-nearest candidate */
+	}
+
+	if (sec_pos != 0 && ctx->cand_leaf[sec_pos] != primary)
+	{
+		for (Dimension d = 0; d < dim; d++)
+			ctx->pt_r[d] = ctx->qs->pt_query[d] -
+						   ctx->cand_pt[(size_t)sec_pos * dim + d];
+		mkt_posting_entry_encode_from_pt(
+				ctx->rq_params, ctx->pt_r, dim, ctx->enc_buf, &ctx->enc_scratch,
+				tid, ctx->entry);
+		mkt_pbuild_sort_put(ctx->sorter, ctx->cand_leaf[sec_pos], ctx->entry);
+		ctx->soar_dupes++;
+		return true;
+	}
+	return false;
 }
 
 void

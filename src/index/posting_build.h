@@ -16,9 +16,13 @@
 #include "core/atomics.h"
 #include "core/memory.h"
 #include "index/posting_page.h"
+#include "index/query_scan.h"
 #include "index/storage.h"
 #include "mkt_types.h"
 #include "quant/rabitq.h"
+
+/* Opaque: the cluster-keyed sorter (defined in parallel_build.h). */
+typedef struct MktSorter MktSorter;
 
 /* ----------------------------------------------------------------
  * Vector-to-cluster assignment
@@ -93,6 +97,62 @@ uint32_t mkt_build_assign_primary(
 		const MktBuildParams *params,
 		float				 *enc_out,
 		Distance			 *out_dist);
+
+/* ----------------------------------------------------------------
+ * Page-backed build routing (unified with the query/insert path)
+ *
+ * Routes each vector to its posting list exactly as a query does --
+ * mkt_query_route over the centroid pages -- then encodes the RaBitQ
+ * residual against the pt_centroid read from the target list's head page
+ * and streams it to the cluster-keyed sorter (primary + optional SOAR /
+ * boundary secondary). Shared by the serial build and the parallel posting
+ * workers so build, insert, and query all route identically. The centroid
+ * and head pages must already be written when this runs.
+ * ---------------------------------------------------------------- */
+typedef struct MktBuildRouteCtx
+{
+	MktQueryState	   *qs;			  /* routing state (not owned) */
+	MktSorter		   *sorter;		  /* cluster-keyed output (not owned) */
+	const RaBitQParams *rq_params;	  /* not owned */
+	MktStorage		   *storage;	  /* head-page reads (not owned) */
+	const BlockNumber  *posting_heads; /* [nlist], ascending (not owned) */
+	uint32_t			nlist;
+	Dimension			dim;
+	double				soar_lambda;
+	double				boundary_epsilon;
+
+	/* Owned scratch (allocated in init, freed in cleanup). */
+	float		 *cand_pt;	 /* [MKT_SECONDARY_TOPK * dim] gathered pt_centroids */
+	uint32_t	 *cand_leaf; /* [MKT_SECONDARY_TOPK] leaf per candidate */
+	Distance	 *cand_dist; /* [MKT_SECONDARY_TOPK] candidate distances */
+	float		 *pt_r;		 /* [dim] rotated residual scratch */
+	RaBitQData	 *enc_buf;	 /* RaBitQ encode output */
+	RaBitQScratch enc_scratch;
+	char		 *entry; /* [mkt_posting_entry_size(dim)] */
+
+	/* Counters. */
+	double indtuples;
+	double soar_dupes;
+} MktBuildRouteCtx;
+
+void mkt_build_route_ctx_init(
+		MktBuildRouteCtx   *ctx,
+		MktQueryState	   *qs,
+		MktSorter		   *sorter,
+		const RaBitQParams *rq_params,
+		MktStorage		   *storage,
+		const BlockNumber  *posting_heads,
+		uint32_t			nlist,
+		Dimension			dim,
+		double				soar_lambda,
+		double				boundary_epsilon);
+
+void mkt_build_route_ctx_cleanup(MktBuildRouteCtx *ctx);
+
+/* Route one vector, encode, and stream its entries to the sorter. Returns
+ * true when a secondary (SOAR / boundary) replica was also emitted. */
+bool mkt_build_route_emit(
+		MktBuildRouteCtx *ctx, const float *vec, ItemPointerData tid);
 
 /* ----------------------------------------------------------------
  * Batched secondary (boundary + SOAR) assignment
