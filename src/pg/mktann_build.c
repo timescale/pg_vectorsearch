@@ -457,7 +457,10 @@ estimate_heap_tuples(Relation heap, Dimension dim)
  */
 static bool
 sample_for_build(
-		MktannBuildState *bs, float **out_global_mean, uint32_t *out_nlist)
+		MktannBuildState *bs,
+		float		    **out_global_mean,
+		uint32_t		 *out_nlist,
+		bool			 *out_subsampled)
 {
 	Dimension dim	= bs->params.dim;
 	uint32_t  nlist = bs->params.nlist;
@@ -473,6 +476,7 @@ sample_for_build(
 	uint64_t cap	   = Min(budget, alloc_cap);
 	if (cap < 10000)
 		cap = 10000;
+	*out_subsampled = ideal_samples > cap;
 	bs->max_samples = (int)Min(ideal_samples, cap);
 
 	bs->nsamples = 0;
@@ -546,6 +550,158 @@ serial_write_head(void *arg, uint32_t leaf, const float *centroid)
 	mkt_posting_builder_cleanup(&hb);
 }
 
+/* Map a routed posting-head block back to its leaf index (posting_heads is
+ * ascending). */
+static uint32_t
+head_to_leaf(const BlockNumber *posting_heads, uint32_t nlist, BlockNumber head)
+{
+	uint32_t lo = 0, hi = nlist;
+	while (lo < hi)
+	{
+		uint32_t mid = lo + (hi - lo) / 2;
+		if (posting_heads[mid] < head)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	return lo;
+}
+
+/* ----------------------------------------------------------------
+ * Page-backed leaf refinement (streaming build)
+ *
+ * The streaming write trained the centroids on the maintenance_work_mem-bounded
+ * sample. When that subsampled, refine the per-leaf encode reference on the full
+ * table: route every row page-backed to its leaf (the same routing the scan +
+ * query use), accumulate per-leaf means, and rewrite each leaf's head-page
+ * pt_centroid to the full-table mean. This tightens the RaBitQ residuals (the
+ * dominant recall factor) for every vector in the leaf. The accumulator is
+ * tiled to a bounded ceiling (like the posting reserve), so memory stays
+ * O(maintenance_work_mem) regardless of nlist; nleaves above the tile just
+ * means more (re-scanned) tiles. Routing stays on the sample-trained centroid
+ * pages, so a single pass reaches the fixed point (assignments do not shift).
+ * ---------------------------------------------------------------- */
+
+typedef struct RefineHeadState
+{
+	MktQueryState	  *qs;
+	const BlockNumber *posting_heads;
+	uint32_t		   nlist;
+	Dimension		   dim;
+	bool			   cosine;
+	MemoryContext	   tmp_ctx;
+	double			  *sums; /* [tile * dim], indexed by leaf - tile_lo */
+	uint64_t		  *cnts; /* [tile] */
+	float			  *scratch; /* [dim] normalized copy for cosine */
+	uint32_t		   tile_lo;
+	uint32_t		   tile_hi;
+} RefineHeadState;
+
+static void
+refine_head_cb(
+		Relation	index,
+		ItemPointer tid,
+		Datum	   *values,
+		bool	   *isnull,
+		bool		tuple_is_alive,
+		void	   *state)
+{
+	RefineHeadState *rs = (RefineHeadState *)state;
+
+	(void)index;
+	(void)tid;
+	(void)tuple_is_alive;
+
+	if (isnull[0])
+		return;
+
+	MemoryContext old_ctx = MemoryContextSwitchTo(rs->tmp_ctx);
+
+	const float *vin = MktVectorToRef(DatumGetMktVector(values[0])).data;
+	uint32_t	 n	 = mkt_query_route(
+			 rs->qs, vin, 1, MKT_DISTANCE_MODE_ASYMMETRIC, NULL);
+	if (n > 0)
+	{
+		uint32_t leaf = head_to_leaf(
+				rs->posting_heads, rs->nlist,
+				rs->qs->beam_results[0].posting_head);
+		if (leaf >= rs->tile_lo && leaf < rs->tile_hi)
+		{
+			const float *v = vin;
+			if (rs->cosine)
+			{
+				memcpy(rs->scratch, vin, (size_t)rs->dim * sizeof(float));
+				mkt_l2_normalize(rs->scratch, rs->dim);
+				v = rs->scratch;
+			}
+			double *sum = rs->sums + (size_t)(leaf - rs->tile_lo) * rs->dim;
+			for (Dimension j = 0; j < rs->dim; j++)
+				sum[j] += v[j];
+			rs->cnts[leaf - rs->tile_lo]++;
+		}
+	}
+
+	MemoryContextSwitchTo(old_ctx);
+	MemoryContextReset(rs->tmp_ctx);
+}
+
+static void
+serial_refine_heads(
+		MktannBuildState  *bs,
+		SerialHeadCtx	  *headctx,
+		MktQueryState	  *qs,
+		const BlockNumber *posting_heads,
+		uint32_t		   nlist)
+{
+	Dimension dim = bs->params.dim;
+
+	uint64_t cap_bytes =
+			Min((uint64_t)maintenance_work_mem * 1024, (uint64_t)MaxAllocSize);
+	uint64_t per_leaf = (uint64_t)dim * sizeof(double) + sizeof(uint64_t);
+	uint32_t tile	  = (uint32_t)
+			Min((uint64_t)nlist, Max(UINT64CONST(1), cap_bytes / per_leaf));
+
+	RefineHeadState rs = {
+			.qs			   = qs,
+			.posting_heads = posting_heads,
+			.nlist		   = nlist,
+			.dim		   = dim,
+			.cosine		   = (bs->params.metric == DISTANCE_COSINE),
+			.tmp_ctx	   = bs->tmp_ctx,
+			.sums		   = palloc((size_t)tile * dim * sizeof(double)),
+			.cnts		   = palloc((size_t)tile * sizeof(uint64_t)),
+			.scratch	   = palloc((size_t)dim * sizeof(float)),
+	};
+
+	for (uint32_t lo = 0; lo < nlist; lo += tile)
+	{
+		uint32_t hi = Min(lo + tile, nlist);
+		rs.tile_lo	= lo;
+		rs.tile_hi	= hi;
+		memset(rs.sums, 0, (size_t)(hi - lo) * dim * sizeof(double));
+		memset(rs.cnts, 0, (size_t)(hi - lo) * sizeof(uint64_t));
+
+		table_index_build_scan(
+				bs->heap, bs->index, bs->index_info, true, false,
+				refine_head_cb, (void *)&rs, NULL);
+
+		for (uint32_t l = lo; l < hi; l++)
+		{
+			if (rs.cnts[l - lo] == 0)
+				continue; /* keep the sample-trained head for an empty leaf */
+			double *sum = rs.sums + (size_t)(l - lo) * dim;
+			double	inv = 1.0 / (double)rs.cnts[l - lo];
+			for (Dimension j = 0; j < dim; j++)
+				rs.scratch[j] = (float)(sum[j] * inv);
+			serial_write_head(headctx, l, rs.scratch);
+		}
+	}
+
+	pfree(rs.sums);
+	pfree(rs.cnts);
+	pfree(rs.scratch);
+}
+
 /*
  * Serial build fallback, mirroring do_parallel_build's role for the
  * non-parallel path. Streams the centroid tree straight to pages (no in-RAM
@@ -578,7 +734,8 @@ do_serial_build(
 
 	float	*global_mean  = NULL;
 	uint32_t target_nlist = 0;
-	if (!sample_for_build(bs, &global_mean, &target_nlist))
+	bool	 subsampled	  = false;
+	if (!sample_for_build(bs, &global_mean, &target_nlist, &subsampled))
 	{
 		*out_tree = NULL;
 		return false;
@@ -718,6 +875,40 @@ do_serial_build(
 	idx_base.centroid_error_scale = (float)mkt_centroid_error_scale;
 	idx_base.centroid_beam_scale  = (float)mkt_centroid_beam_scale;
 	mkt_query_state_init(&bs->qs, &idx_base, 1, MKT_SECONDARY_TOPK);
+
+	/*
+	 * When the sample was budget-limited, refine each leaf's encode reference on
+	 * the full table (page-backed, bounded) before the encode scan, so residuals
+	 * are taken against full-table means rather than subsample means.
+	 */
+	if (subsampled && mkt_leaf_refine_iters > 0)
+	{
+		instr_time t_ref_start;
+		INSTR_TIME_SET_CURRENT(t_ref_start);
+		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_REFINE);
+
+		SerialHeadCtx rhead = {
+				.storage	   = storage,
+				.rq_params	   = rq_params,
+				.dim		   = dim,
+				.fastscan	   = p->fastscan,
+				.posting_heads = posting_heads,
+				.pt			   = palloc((size_t)dim * sizeof(float)),
+		};
+		serial_refine_heads(bs, &rhead, &bs->qs, posting_heads, nlist);
+		pfree(rhead.pt);
+
+		instr_time t_ref_end;
+		INSTR_TIME_SET_CURRENT(t_ref_end);
+		INSTR_TIME_SUBTRACT(t_ref_end, t_ref_start);
+		elog(LOG,
+			 "mktann: page-backed leaf refinement %.1fms -- structure from a "
+			 "%d-sample subsample, %u leaf encode references refined on the full "
+			 "table",
+			 INSTR_TIME_GET_MILLISEC(t_ref_end),
+			 bs->max_samples,
+			 nlist);
+	}
 
 	/*
 	 * Cluster-keyed sorter: the scan streams every posting entry here (keyed
