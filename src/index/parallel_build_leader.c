@@ -109,9 +109,16 @@ mkt_posting_build_lists(
 {
 	mkt_pbuild_sort_performsort(sorter);
 
-	/* Each list's RaBitQ reference is P^T * its centroid. We rotate it on the
-	 * fly here, one cluster at a time, into this scratch — instead of a
-	 * precomputed pt_centroids[nlist*dim] array (O(nlist*dim) = O(N)). */
+	/*
+	 * Each list's RaBitQ reference is P^T * its centroid. Two sources:
+	 *   ref_vecs != NULL: rotate the in-RAM float centroid on the fly into
+	 * this scratch (in-RAM tree still resident). ref_vecs == NULL: page-backed
+	 * — the head page was pre-written with its pt_centroid during the centroid
+	 * build, so read it from the head (which is then re-created, full, below).
+	 * No in-RAM float centroids needed, so the tree can be freed before this
+	 * runs. Either way it is one dim-vector, not a pt_centroids[nlist*dim]
+	 * array.
+	 */
 	float *pt_centroid = mkt_alloc((size_t)dim * sizeof(float));
 
 	uint32_t	cur_cluster = 0;
@@ -119,27 +126,27 @@ mkt_posting_build_lists(
 	bool		have = mkt_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
 	for (uint32_t c = 0; c < nlist; c++)
 	{
-		mkt_rabitq_rotate(rq_params, ref_vecs + (size_t)c * dim, pt_centroid);
+		const float *cvec = (ref_vecs != NULL) ? ref_vecs + (size_t)c * dim
+											   : NULL;
+		if (ref_vecs != NULL)
+			mkt_rabitq_rotate(rq_params, cvec, pt_centroid);
+		else
+		{
+			BlockNumber head_blk = first_posting + reserve->starts[c];
+			Page		hp		 = mkt_storage_read_page(storage, head_blk);
+			memcpy(pt_centroid,
+				   mkt_posting_pt_centroid(hp),
+				   (size_t)dim * sizeof(float));
+			mkt_storage_release_page(storage, head_blk);
+		}
 
 		MktPostingBuilder hb;
 		if (fastscan)
 			mkt_posting_builder_init_fastscan(
-					&hb,
-					storage,
-					rq_params,
-					dim,
-					c,
-					ref_vecs + (size_t)c * dim,
-					pt_centroid);
+					&hb, storage, rq_params, dim, c, cvec, pt_centroid);
 		else
 			mkt_posting_builder_init(
-					&hb,
-					storage,
-					rq_params,
-					dim,
-					c,
-					ref_vecs + (size_t)c * dim,
-					pt_centroid);
+					&hb, storage, rq_params, dim, c, cvec, pt_centroid);
 		mkt_posting_builder_set_shared_reserve(
 				&hb,
 				first_posting + reserve->starts[c],
