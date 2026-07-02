@@ -443,11 +443,9 @@ mkt_pbuild_setup_shared(
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_pbuild_sort_shared_size(nparticipants));
 
-	/* Page-backed routing: leaf posting-head blocks (head->leaf map) and the
-	 * global mean, published by the leader before the tree-ready barrier. Sized
-	 * for the worst-case leaf count (nlist here is the max bound). */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator, (Size)nlist * sizeof(BlockNumber));
+	/* Page-backed routing: the global mean, published by the leader before the
+	 * tree-ready barrier. The posting-head base (leaf c's head = first_posting +
+	 * c) is a scalar in MktBuildShared, so no O(nlist) head array is shared. */
 	shm_toc_estimate_chunk(&pcxt->estimator, (Size)dim * sizeof(float));
 
 	/* Shared leaf-refinement accumulator (one copy; only when refining). Sized
@@ -475,9 +473,9 @@ mkt_pbuild_setup_shared(
 	}
 
 	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
-	 * sortshared, child_subtrees, wal, buffer, posting_heads, global_mean +
-	 * optionally refine_accum / query_text */
-	int nkeys = 12;
+	 * sortshared, child_subtrees, wal, buffer, global_mean + optionally
+	 * refine_accum / query_text */
+	int nkeys = 11;
 	if (debug_query_string)
 		nkeys++;
 	if (refine_iters > 0)
@@ -600,13 +598,9 @@ mkt_pbuild_setup_shared(
 	memset(sortshared, 0, sort_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SORTSHARED, sortshared);
 
-	/* Page-backed routing regions (filled by the leader before the tree-ready
-	 * barrier): the leaf posting-head blocks and the global mean. */
-	BlockNumber *dsm_heads =
-			shm_toc_allocate(pcxt->toc, (Size)nlist * sizeof(BlockNumber));
-	memset(dsm_heads, 0, (Size)nlist * sizeof(BlockNumber));
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_POSTING_HEADS, dsm_heads);
-
+	/* Page-backed routing region (filled by the leader before the tree-ready
+	 * barrier): the global mean. The posting-head base is a scalar in
+	 * MktBuildShared, so there is no O(nlist) head array here. */
 	float *dsm_gmean = shm_toc_allocate(pcxt->toc, (Size)dim * sizeof(float));
 	memset(dsm_gmean, 0, (Size)dim * sizeof(float));
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, dsm_gmean);

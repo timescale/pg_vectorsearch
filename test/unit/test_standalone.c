@@ -300,7 +300,7 @@ verify_head_meta(MktTestResult *result, MktIndex *idx)
 	MktStorage *st = idx->base.posting_storage;
 	for (uint32_t c = 0; c < idx->nlist; c++)
 	{
-		BlockNumber head = idx->posting_heads[c];
+		BlockNumber head = idx->first_posting + c;
 		if (head == InvalidBlockNumber)
 			continue;
 
@@ -526,12 +526,12 @@ TEST(posting_convert_aos_to_fastscan)
 	MktIndex *idx = mkt_index_build(&array_src.base, &cfg, NULL);
 	ASSERT_NOT_NULL(idx, "AoS index built");
 	ASSERT_TRUE(
-			idx->posting_heads[0] != InvalidBlockNumber,
+			idx->first_posting != InvalidBlockNumber,
 			"cluster 0 has pages");
 
 	/* Count AoS entries for cluster 0 */
 	uint32_t	aos_count = 0;
-	BlockNumber blkno	  = idx->posting_heads[0];
+	BlockNumber blkno	  = idx->first_posting;
 	while (blkno != InvalidBlockNumber)
 	{
 		Page page = idx->posting_storage.pages + (size_t)blkno * BLCKSZ;
@@ -543,7 +543,7 @@ TEST(posting_convert_aos_to_fastscan)
 
 	/* Convert cluster 0 to fastscan */
 	BlockNumber fs_head = mkt_posting_convert_to_fastscan(
-			&idx->posting_storage.base, idx->posting_heads[0], dim);
+			&idx->posting_storage.base, idx->first_posting, dim);
 	ASSERT_TRUE(fs_head != InvalidBlockNumber, "fastscan chain created");
 
 	/* Count fastscan entries */
@@ -718,7 +718,7 @@ count_posting_entries(MktIndex *idx)
 
 	for (uint32_t c = 0; c < idx->nlist; c++)
 	{
-		BlockNumber blk = idx->posting_heads[c];
+		BlockNumber blk = idx->first_posting + c;
 		while (blk != InvalidBlockNumber)
 		{
 			Page		pg	 = mkt_storage_read_page(st, blk);

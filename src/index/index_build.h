@@ -70,11 +70,12 @@ BlockNumber mkt_compute_centroid_layout(
  * Iterates the tree in BFS order, encoding each node's centroids
  * and writing them to pages via the storage abstraction. Leaf
  * nodes get MKT_CENTROID_FLAG_LEAF; internal nodes get child_blkno
- * pointers from node_first_blkno. Leaf nodes optionally get
- * posting_heads as child block numbers.
+ * pointers from node_first_blkno. Leaf entry j of a node gets the
+ * formula-derived posting head posting_base + node->first_leaf + j
+ * (no O(nlist) posting-head array).
  *
- * posting_heads may be NULL (centroid-only build without posting
- * lists).
+ * posting_base may be InvalidBlockNumber (centroid-only build without
+ * posting lists).
  */
 /*
  * pt_centroids: optional P^T * centroid array [nlist * dim] for leaf
@@ -88,7 +89,7 @@ void mkt_write_centroid_tree(
 		MktCentroidFormat	 centroid_format,
 		const RaBitQParams	*rq_params,
 		const float			*global_mean,
-		const BlockNumber	*posting_heads,
+		BlockNumber			 posting_base,
 		const BlockNumber	*node_first_blkno,
 		const float			*pt_centroids);
 
@@ -147,7 +148,7 @@ typedef void (*MktStreamLeafCb)(
 /*
  * WRITE pass: cluster the sample again (identical tree) and stream the centroid
  * pages to `storage` via on-demand block allocation (post-order, root last).
- * Leaf entry c links to posting_heads[c], and on_leaf (if set) fires per leaf so
+ * Leaf c's head is first_posting + c, and on_leaf (if set) fires per leaf so
  * the caller can write that leaf's head page from the resident float centroid.
  * Centroid pages occupy reserved blocks [first_centroid, first_centroid +
  * plan.centroid_pages) post-order (root last), and posting heads live in the
@@ -167,7 +168,7 @@ BlockNumber mkt_stream_centroid_write(
 		const RaBitQParams *rq_params,
 		const float		   *global_mean,
 		const KMeansOptions *opts,
-		const BlockNumber  *posting_heads,
+		BlockNumber			first_posting,
 		BlockNumber			first_centroid,
 		MktStreamLeafCb		on_leaf,
 		void			   *on_leaf_arg);
@@ -175,11 +176,11 @@ BlockNumber mkt_stream_centroid_write(
 /*
  * Stream one already-built subtree (an HKMeansResult produced by the parallel
  * workers) to centroid pages at reserved blocks [first_block, first_block +
- * *out_pages), BFS layout (subtree root at first_block). Leaf entries link to
- * posting_heads[leaf_offset + local_leaf]; on_leaf fires per leaf with its float
- * centroid so the caller can write the head page. Returns the subtree root block
- * (== first_block). Used by the parallel batched streaming build so the whole
- * tree is never materialized as one blob (no graft).
+ * *out_pages), BFS layout (subtree root at first_block). Leaf local_leaf's head
+ * is first_posting + leaf_offset + local_leaf (formula-derived); on_leaf fires
+ * per leaf with its float centroid so the caller can write the head page.
+ * Returns the subtree root block (== first_block). Used by the parallel batched
+ * streaming build so the whole tree is never materialized as one blob.
  */
 BlockNumber mkt_write_subtree_streaming(
 		MktStorage			*storage,
@@ -189,7 +190,7 @@ BlockNumber mkt_write_subtree_streaming(
 		MktCentroidFormat	 format,
 		const RaBitQParams	*rq_params,
 		const float			*global_mean,
-		const BlockNumber	*posting_heads,
+		BlockNumber			 first_posting,
 		uint32_t			 leaf_offset,
 		BlockNumber			 first_block,
 		MktStreamLeafCb		 on_leaf,
