@@ -446,7 +446,8 @@ do_parallel_build(
 	 * nlevels == 1 (flat) the root k-means already produced every leaf, so
 	 * the tree is built from the centroids directly. For nlevels >= 2 each
 	 * participant builds the full subtree — to whatever depth nlist/fan_out
-	 * needs — for the root children it owns, and the leader grafts them.
+	 * needs — for the root children it owns, and the leader streams each to
+	 * centroid pages a batch at a time (no in-RAM whole-tree assembly).
 	 */
 	uint32_t nlevels = 1;
 	{
