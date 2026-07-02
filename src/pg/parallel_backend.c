@@ -362,18 +362,28 @@ mkt_pbuild_setup_shared(
 
 	uint64_t total64 = Min(want_samples, budget);
 
-	BlockNumber est_pages;
-	double		est_tuples;
-	double		allvisfrac;
-	estimate_rel_size(heap, NULL, &est_pages, &est_tuples, &allvisfrac);
-	if (est_tuples > 0.0 && (double)total64 > est_tuples)
-		total64 = (uint64_t)est_tuples;
+	/*
+	 * Row count for the sample cap + the refine decision. Derive it from the
+	 * relation's physical block count (RelationGetNumberOfBlocks -- an smgr
+	 * lseek, always current) and the fixed row width, NOT from reltuples: a
+	 * freshly loaded table is often never analyzed (reltuples == 0), and even
+	 * when set it is a planner statistic that can be stale. This is the same
+	 * estimate the sampler already uses to size its stride, so the refine gate
+	 * makes no assumption the sampling did not already make.
+	 */
+	double est_rows = RelationGetNumberOfBlocks(heap) *
+					  (BLCKSZ / (double)(dim * sizeof(float) + 32));
+	if (est_rows > 0.0 && (double)total64 > est_rows)
+		total64 = (uint64_t)est_rows; /* the whole table fits the sample */
 
 	/* total64 <= want_samples = nlist*256 <= 512M (nlist reloption max 2M), so
 	 * it always fits a uint32. */
 	uint32_t total_samples = (uint32_t)Max(total64, UINT64CONST(1));
 
-	if (want_samples > budget && est_tuples > (double)budget)
+	/* Subsampled = the sample is a strict subset of the table. */
+	bool subsampled = (double)total_samples < est_rows;
+
+	if (subsampled)
 		elog(LOG,
 			 "meerkat: k-means sample set limited to %u of the ideal %lu "
 			 "vectors by maintenance_work_mem (%d kB); raise "
@@ -387,16 +397,14 @@ mkt_pbuild_setup_shared(
 							  nparticipants;
 
 	/*
-	 * Refine leaf centroids on the full table afterward only when the
-	 * structure was built from a strict subset (i.e. the sample was
-	 * budget-bounded below the table). Both leader and workers gate the refine
-	 * phase on shared->refine_iters so they run the identical barrier
-	 * sequence.
+	 * Refine leaf centroids on the full table afterward only when the structure
+	 * was built from a strict subset. Both leader and workers gate the refine
+	 * phase on shared->refine_iters so they run the identical barrier sequence.
 	 */
-	uint32_t refine_iters = ((double)total_samples < est_tuples &&
-							 mkt_leaf_refine_iters > 0)
-								  ? (uint32_t)mkt_leaf_refine_iters
-								  : 0;
+	uint32_t refine_iters =
+			(subsampled && mkt_leaf_refine_iters > 0)
+					? (uint32_t)mkt_leaf_refine_iters
+					: 0;
 
 	EnterParallelMode();
 
