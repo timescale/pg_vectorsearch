@@ -604,48 +604,29 @@ mkt_pbuild_exec_root_assign(
 }
 
 /* ----------------------------------------------------------------
- * Phase 2.5: parallel full-table leaf-centroid refinement
+ * Phase 2.5: parallel full-table leaf-encode-reference refinement
+ *
+ * Page-backed mirror of the serial serial_refine_heads: route every row
+ * exactly as the query/insert do (mkt_query_route k=1 over the centroid pages,
+ * then head -> leaf), accumulate per-leaf means into the tiled DSM accumulator,
+ * and rewrite each leaf's head-page pt_centroid to the full-table mean. No
+ * in-RAM tree.
  * ---------------------------------------------------------------- */
 
 typedef struct RefineCbState
 {
-	MktBuildShared		*shared;
-	const HKMeansResult *tree;
-	float				*sums; /* shared accumulator, indexed leaf - tile_lo */
-	uint64_t			*counts; /* shared accumulator */
-	Dimension			 dim;
-	DistanceMetric		 metric;
+	MktBuildShared	  *shared;
+	MktQueryState	  *qs;			/* page-backed router (workers) */
+	const BlockNumber *posting_heads; /* head -> leaf map */
+	uint32_t		   nlist;
+	float			  *sums; /* shared accumulator, indexed leaf - tile_lo */
+	uint64_t		  *counts; /* shared accumulator */
+	Dimension		   dim;
+	bool			   cosine;
 	uint32_t tile_lo; /* accumulate only leaves in [tile_lo, tile_hi) */
 	uint32_t tile_hi;
 	float	*scratch; /* per-participant normalized copy (cosine) */
 } RefineCbState;
-
-/*
- * Route a vector to its refinement leaf, exactly as both the serial and
- * parallel refine passes must: for cosine the tree is trained in normalized
- * space, so normalize into scratch first and accumulate that copy. Sets *out_v
- * to the vector to accumulate (the normalized copy for cosine, else the input)
- * and returns its leaf. Sharing this keeps the two paths' routing identical.
- */
-uint32_t
-mkt_refine_assign_leaf(
-		const HKMeansResult *tree,
-		const float			*vec,
-		Dimension			 dim,
-		DistanceMetric		 metric,
-		float				*scratch,
-		const float		   **out_v)
-{
-	const float *v = vec;
-	if (metric == DISTANCE_COSINE)
-	{
-		memcpy(scratch, vec, (size_t)dim * sizeof(float));
-		mkt_l2_normalize(scratch, dim);
-		v = scratch;
-	}
-	*out_v = v;
-	return mkt_hkmeans_assign(tree, v, metric, NULL);
-}
 
 static void
 mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
@@ -655,12 +636,27 @@ mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
 
 	(void)tid;
 
-	const float *v;
-	uint32_t	 leaf = mkt_refine_assign_leaf(
-			rs->tree, vec, dim, rs->metric, rs->scratch, &v);
+	/* Route page-backed (raw vector; mkt_query_route rotates internally). */
+	uint32_t n =
+			mkt_query_route(rs->qs, vec, 1, MKT_DISTANCE_MODE_ASYMMETRIC, NULL);
+	if (n == 0)
+		return;
+	uint32_t leaf = mkt_route_head_to_leaf(
+			rs->posting_heads, rs->nlist, rs->qs->beam_results[0].posting_head);
 	/* Only the current tile's leaves are resident in the accumulator. */
 	if (leaf < rs->tile_lo || leaf >= rs->tile_hi)
 		return;
+
+	/* For cosine the centroids are trained in normalized space, so accumulate
+	 * the normalized copy. */
+	const float *v = vec;
+	if (rs->cosine)
+	{
+		memcpy(rs->scratch, vec, (size_t)dim * sizeof(float));
+		mkt_l2_normalize(rs->scratch, dim);
+		v = rs->scratch;
+	}
+
 	uint32_t idx	= leaf - rs->tile_lo;
 	uint32_t stripe = idx % MKT_REFINE_LOCK_STRIPES;
 
@@ -673,21 +669,23 @@ mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
 }
 
 void
-mkt_pbuild_exec_refine(
-		int				   participant_id,
-		Relation		   heap,
-		Relation		   index,
-		struct IndexInfo  *index_info,
-		MktBuildShared	  *shared,
-		HKMeansResult	  *tree,
-		MktDsmRefineAccum *accum,
-		Barrier			  *barrier)
+mkt_pbuild_exec_refine_paged(
+		int					  participant_id,
+		Relation			  heap,
+		Relation			  index,
+		struct IndexInfo	 *index_info,
+		MktBuildShared		 *shared,
+		struct MktQueryState *qs,
+		const BlockNumber	 *posting_heads,
+		MktDsmRefineAccum	 *accum,
+		Barrier				 *barrier,
+		MktRefineHeadFn		  write_head,
+		void				 *write_head_ctx)
 {
 	Dimension dim	  = shared->dim;
-	uint32_t  nleaves = tree->nleaves;
+	uint32_t  nleaves = shared->nlist; /* actual leaf count (published) */
 	float	 *sums	  = mkt_dsm_refine_sums(accum);
 	uint64_t *counts  = mkt_dsm_refine_counts(accum);
-	float	 *cents	  = hk_leaf_centroids(tree);
 
 	/* The accumulator holds at most accum->nleaves leaves (the bounded tile
 	 * capacity), so leaves are processed in tiles, re-scanning the heap per
@@ -697,13 +695,15 @@ mkt_pbuild_exec_refine(
 	uint32_t tile = accum->nleaves;
 
 	RefineCbState rs = {
-			.shared	 = shared,
-			.tree	 = tree,
-			.sums	 = sums,
-			.counts	 = counts,
-			.dim	 = dim,
-			.metric	 = shared->metric,
-			.scratch = mkt_alloc((size_t)dim * sizeof(float)),
+			.shared		   = shared,
+			.qs			   = qs,
+			.posting_heads = posting_heads,
+			.nlist		   = nleaves,
+			.sums		   = sums,
+			.counts		   = counts,
+			.dim		   = dim,
+			.cosine		   = (shared->metric == DISTANCE_COSINE),
+			.scratch	   = mkt_alloc((size_t)dim * sizeof(float)),
 	};
 
 	for (uint32_t it = 0; it < shared->refine_iters; it++)
@@ -727,23 +727,25 @@ mkt_pbuild_exec_refine(
 			BarrierArriveAndWait(
 					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-			/* All participants cooperatively scan the heap and accumulate. */
-			mkt_build_scan(
-					heap,
-					index,
-					index_info,
-					shared,
-					true,
-					participant_id == 0,
-					mkt_refine_cb,
-					&rs);
+			/* Workers cooperatively scan the heap and accumulate page-backed;
+			 * the leader does not route (it has no qs), it only clears/divides,
+			 * mirroring the phase-3 division of labor. */
+			if (participant_id != 0)
+				mkt_build_scan(
+						heap,
+						index,
+						index_info,
+						shared,
+						true,
+						false,
+						mkt_refine_cb,
+						&rs);
 
 			/* Barrier: every row accumulated before the leader divides. */
 			BarrierArriveAndWait(
 					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-			/* Leader recomputes this tile's leaf centroids = per-leaf means.
-			 */
+			/* Leader rewrites this tile's leaf head pages = per-leaf means. */
 			if (participant_id == 0)
 			{
 				for (uint32_t l = lo; l < hi; l++)
@@ -751,13 +753,13 @@ mkt_pbuild_exec_refine(
 					if (counts[l - lo] == 0)
 						continue; /* keep subsample centroid for empty leaf */
 					float *sum = sums + (size_t)(l - lo) * dim;
-					float *c   = cents + (size_t)l * dim;
 					double inv = 1.0 / (double)counts[l - lo];
 					for (Dimension j = 0; j < dim; j++)
-						c[j] = (float)(sum[j] * inv);
+						rs.scratch[j] = (float)(sum[j] * inv);
+					write_head(write_head_ctx, l, rs.scratch);
 				}
 			}
-			/* Barrier: refined centroids visible before the next tile/pass. */
+			/* Barrier: refined heads written before the next tile/pass. */
 			BarrierArriveAndWait(
 					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 		}
@@ -870,15 +872,12 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 					NULL);
 	}
 
-	/* C1b: the centroid tree is no longer materialized in DSM, so the old
-	 * tree-based leaf refinement is gone; page-backed parallel refinement is a
-	 * follow-up (C2). */
-
 	/* Barrier: leader finished streaming the centroid tree + published the
-	 * routing state + initialized the sorter; workers start phase 3. */
+	 * routing state + initialized the sorter; workers build their page-backed
+	 * router next (from the just-published shared state). */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-	/* ---- Phase 3: posting scan -> cluster-keyed sort (page-backed) ---- */
+	/* ---- Phase 3 setup: page-backed router shared by refine + posting scan --- */
 	void *sortshared = shm_toc_lookup(toc, MKT_DSM_KEY_SORTSHARED, false);
 	const BlockNumber *posting_heads =
 			shm_toc_lookup(toc, MKT_DSM_KEY_POSTING_HEADS, false);
@@ -887,17 +886,6 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	uint32_t	  entry_size = (uint32_t)mkt_posting_entry_size(dim);
 	RaBitQParams *rq_params	 = mkt_rabitq_create(dim, shared->rabitq_seed);
-
-	/* worker_id is 1..N for launched workers; the sorter's 0-based worker
-	 * index is worker_id - 1. Worker sorts run concurrently, so each gets a
-	 * share of the budget (mwm / participants) to bound peak memory; the
-	 * leader merge runs alone afterward and uses the full budget. */
-	int worker_wm = shared->work_mem_kb /
-					(shared->nparticipants > 0 ? shared->nparticipants : 1);
-	if (worker_wm < 64)
-		worker_wm = 64;
-	MktSorter *sorter = mkt_pbuild_sort_begin(
-			sortshared, seg, worker_id - 1, 0, false, entry_size, worker_wm);
 
 	/* Per-worker storage over the index for page-backed head/centroid reads
 	 * (PG opens one on the worker's indexRel; standalone shares the leader's). */
@@ -930,6 +918,32 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	MktQueryState qs;
 	mkt_query_state_init(&qs, &base, 1, MKT_SECONDARY_TOPK);
 
+	/* ---- Phase 2.5: page-backed full-table refine (only when subsampled) ----
+	 * Workers route + accumulate; the leader clears/divides and rewrites heads.
+	 * Gated on shared->refine_iters (identical on both sides) so the barrier
+	 * sequence stays in lockstep. */
+	if (shared->refine_iters > 0)
+	{
+		MktDsmRefineAccum *accum =
+				shm_toc_lookup(toc, MKT_DSM_KEY_REFINE_ACCUM, false);
+		mkt_pbuild_exec_refine_paged(
+				worker_id, heapRel, indexRel, indexInfo, shared, &qs,
+				posting_heads, accum, barrier, NULL, NULL);
+	}
+
+	/* ---- Phase 3: posting scan -> cluster-keyed sort (page-backed) ---- */
+
+	/* worker_id is 1..N for launched workers; the sorter's 0-based worker
+	 * index is worker_id - 1. Worker sorts run concurrently, so each gets a
+	 * share of the budget (mwm / participants) to bound peak memory; the
+	 * leader merge runs alone afterward and uses the full budget. */
+	int worker_wm = shared->work_mem_kb /
+					(shared->nparticipants > 0 ? shared->nparticipants : 1);
+	if (worker_wm < 64)
+		worker_wm = 64;
+	MktSorter *sorter = mkt_pbuild_sort_begin(
+			sortshared, seg, worker_id - 1, 0, false, entry_size, worker_wm);
+
 	MktBuildRouteCtx route;
 	mkt_build_route_ctx_init(
 			&route,
@@ -942,6 +956,10 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			dim,
 			shared->soar_lambda,
 			shared->boundary_epsilon);
+
+	/* Barrier: the leader reset the scan for the posting phase (after refine
+	 * consumed it); workers may now scan. */
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 	mkt_build_scan(
 			heapRel, indexRel, indexInfo, shared, true, false, route_scan_cb,
