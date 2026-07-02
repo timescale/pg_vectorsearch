@@ -154,6 +154,12 @@ typedef struct MktBuildShared
 	float centroid_error_scale;
 	float centroid_beam_scale;
 	int	  fastscan_bits;
+
+	/* Published by the leader after the streaming tree write (the tree is no
+	 * longer materialized in DSM): the centroid-tree root block (workers' phase-3
+	 * MktIndexBase.first_centroid) and the tree depth (base.nlevels). */
+	BlockNumber first_centroid;
+	uint8_t		nlevels;
 } MktBuildShared;
 
 /* ----------------------------------------------------------------
@@ -492,6 +498,66 @@ extern void mkt_subtree_build_partitioned(
 		uint32_t		  km_max_iterations,
 		char			 *subtrees_base,
 		uint64_t		  slot_size);
+
+/*
+ * Build ONE root-child's subtree into `slot`. Used by the batched streaming
+ * build, where each participant builds one child per batch into a ring slot
+ * indexed by participant (so only nparticipants subtrees are resident) and the
+ * leader streams each to pages.
+ */
+extern void mkt_build_child_subtree(
+		uint32_t		  child,
+		int				  nparticipants,
+		MktDsmSamples	 *dsm_samples,
+		MktDsmRootAssign *dsm_ra,
+		const float		 *root_cents,
+		uint32_t		  nlist,
+		uint32_t		  fan_out,
+		Dimension		  dim,
+		DistanceMetric	  metric,
+		uint32_t		  km_max_iterations,
+		char			 *slot,
+		uint64_t		  slot_size);
+
+/*
+ * Per-batch leader callback for the batched subtree stream. Fired only on the
+ * leader (participant 0), between the two per-batch barriers, so it can read the
+ * batch's finished subtrees from the slots [0, batch_size) before they are
+ * reused. base_child is the first child index in this batch.
+ */
+typedef void (*MktBatchCb)(
+		void	*arg,
+		uint32_t base_child,
+		uint32_t batch_size,
+		char	*subtrees_base,
+		uint64_t slot_size);
+
+/*
+ * Batched subtree build shared by the leader (participant 0) and workers: in
+ * ceil(km_k / nparticipants) batches, each participant builds one child's
+ * subtree into its ring slot, then (leader only) batch_cb consumes the batch;
+ * two barriers per batch keep all participants in lockstep. Called identically
+ * by leader and workers (workers pass batch_cb = NULL), so the barrier sequence
+ * matches by construction. The caller invokes it once per pass (plan, then
+ * write).
+ */
+extern void mkt_pbuild_stream_subtrees(
+		int				  participant_id,
+		int				  nparticipants,
+		MktDsmSamples	 *dsm_samples,
+		MktDsmRootAssign *dsm_ra,
+		const float		 *root_cents,
+		uint32_t		  km_k,
+		uint32_t		  nlist,
+		uint32_t		  fan_out,
+		Dimension		  dim,
+		DistanceMetric	  metric,
+		uint32_t		  km_max_iterations,
+		char			 *subtrees_base,
+		uint64_t		  slot_size,
+		Barrier			 *barrier,
+		MktBatchCb		  batch_cb,
+		void			 *cb_arg);
 
 /*
  * Per-participant execution of phases 1, 2, and 2b, shared by the leader
