@@ -234,6 +234,135 @@ mkt_subtree_build_partitioned(
 	mkt_free(child_count);
 }
 
+/*
+ * Build ONE root-child's subtree into `slot` (a DSM ring slot indexed by
+ * participant, not by child, so the batched streaming build keeps only
+ * nparticipants subtrees resident). Same clustering as
+ * mkt_subtree_build_partitioned's per-child body, without the ownership loop.
+ */
+void
+mkt_build_child_subtree(
+		uint32_t		  child,
+		int				  nparticipants,
+		MktDsmSamples	 *dsm_samples,
+		MktDsmRootAssign *dsm_ra,
+		const float		 *root_cents,
+		uint32_t		  nlist,
+		uint32_t		  fan_out,
+		Dimension		  dim,
+		DistanceMetric	  metric,
+		uint32_t		  km_max_iterations,
+		char			 *slot,
+		uint64_t		  slot_size)
+{
+	uint32_t nlist_c = (nlist + fan_out - 1) / fan_out;
+
+	uint32_t cc = 0;
+	for (int t = 0; t < nparticipants; t++)
+	{
+		const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
+		uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
+		for (uint32_t i = 0; i < n; i++)
+			if (ra[i] == child)
+				cc++;
+	}
+
+	KMeansOptions opts	   = MKT_KMEANS_OPTIONS_DEFAULT;
+	opts.max_iterations	   = km_max_iterations;
+	opts.algorithm		   = KMEANS_ALGO_LLOYD;
+	opts.initial_centroids = NULL;
+
+	HKMeansResult *sub = NULL;
+	if (cc == 0)
+	{
+		float *seed = mkt_alloc((size_t)dim * sizeof(float));
+		memcpy(seed, root_cents + (size_t)child * dim,
+			   (size_t)dim * sizeof(float));
+		sub = mkt_hkmeans_f32(
+				seed, 1, NULL, dim, nlist_c, fan_out, metric, &opts);
+		mkt_free(seed);
+	}
+	else
+	{
+		const float *vbase = mkt_dsm_worker_samples(dsm_samples, 0);
+		uint32_t	 mpw   = dsm_samples->max_per_worker;
+		uint32_t	*idx   = mkt_alloc((size_t)cc * sizeof(uint32_t));
+		uint32_t	 g	   = 0;
+		for (int t = 0; t < nparticipants; t++)
+		{
+			const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
+			uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
+			for (uint32_t i = 0; i < n; i++)
+				if (ra[i] == child)
+					idx[g++] = (uint32_t)t * mpw + i;
+		}
+		sub = mkt_hkmeans_f32(
+				vbase, cc, idx, dim, nlist_c, fan_out, metric, &opts);
+		mkt_free(idx);
+	}
+
+	if (sub != NULL)
+	{
+		if ((uint64_t)sub->total_size > slot_size)
+			mkt_error(
+					"mktann: subtree blob %u exceeds slot (%u > %lu)",
+					child, sub->total_size, (unsigned long)slot_size);
+		memcpy(slot, sub, sub->total_size);
+		mkt_free(sub);
+	}
+}
+
+void
+mkt_pbuild_stream_subtrees(
+		int				  participant_id,
+		int				  nparticipants,
+		MktDsmSamples	 *dsm_samples,
+		MktDsmRootAssign *dsm_ra,
+		const float		 *root_cents,
+		uint32_t		  km_k,
+		uint32_t		  nlist,
+		uint32_t		  fan_out,
+		Dimension		  dim,
+		DistanceMetric	  metric,
+		uint32_t		  km_max_iterations,
+		char			 *subtrees_base,
+		uint64_t		  slot_size,
+		Barrier			 *barrier,
+		MktBatchCb		  batch_cb,
+		void			 *cb_arg)
+{
+	uint32_t np		  = (uint32_t)nparticipants;
+	uint32_t nbatches = (km_k + np - 1) / np;
+	char	*slot =
+			mkt_dsm_child_subtree(subtrees_base, participant_id, slot_size);
+
+	for (uint32_t b = 0; b < nbatches; b++)
+	{
+		uint32_t my_child = b * np + (uint32_t)participant_id;
+		if (my_child < km_k)
+			mkt_build_child_subtree(
+					my_child, nparticipants, dsm_samples, dsm_ra, root_cents,
+					nlist, fan_out, dim, metric, km_max_iterations, slot,
+					slot_size);
+
+		/* All participants have built this batch's subtrees into their slots. */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		/* Leader consumes the batch before the slots are reused. */
+		if (participant_id == 0 && batch_cb != NULL)
+		{
+			uint32_t base_child = b * np;
+			uint32_t bs			= km_k - base_child;
+			if (bs > np)
+				bs = np;
+			batch_cb(cb_arg, base_child, bs, subtrees_base, slot_size);
+		}
+
+		/* Leader done with the batch; slots free for the next batch. */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+	}
+}
+
 /* ----------------------------------------------------------------
  * Phases 1, 2, 2b: per-participant execution, shared by leader and workers
  *
@@ -680,7 +809,6 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	char *km_workers_base = shm_toc_lookup(toc, MKT_DSM_KEY_KM_WORKERS, false);
 	MktDsmRootAssign *dsm_ra =
 			shm_toc_lookup(toc, MKT_DSM_KEY_ROOT_ASSIGN, false);
-	uint32_t   km_k		 = shared->km_k;
 	IndexInfo *indexInfo = BuildIndexInfo(indexRel);
 #ifndef MKT_STANDALONE
 	/* The leader marked the build concurrent and scans with an MVCC snapshot;
@@ -708,67 +836,50 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	mkt_pbuild_exec_root_assign(
 			worker_id, shared, dsm_samples, dsm_ra, centroids_base, barrier);
 
-	/* ---- Phase 2c: Child subtrees (work-partitioned, barrier-free) ----
+	/* ---- Phase 2c: batched streaming subtree build (page-backed) ----
 	 *
-	 * For a hierarchical tree (>= 2 levels) each participant builds the full
-	 * subtree for the root children it owns. A flat (1-level) build has no
-	 * children — the leader clusters it serially and we just meet the barrier.
-	 * The participant computes nlevels itself so it agrees with the leader. */
+	 * For a hierarchical tree (>= 2 levels) the workers build per-root-child
+	 * subtrees into a bounded ring of slots and the leader streams each batch to
+	 * centroid pages — no graft blob, subtree DSM bounded to nparticipants slots.
+	 * Two passes (plan discovers the layout, write streams it); workers pass no
+	 * callback (leader-only consumes each batch). The barrier sequence is inside
+	 * mkt_pbuild_stream_subtrees, identical for leader and workers. A flat
+	 * (1-level) build has no subtrees — the leader writes the single level
+	 * directly, and neither side runs the subtree barriers. */
 	if (mkt_compute_nlevels(shared->nlist, shared->fan_out) >= 2)
 	{
 		char *subtrees_base =
 				shm_toc_lookup(toc, MKT_DSM_KEY_CHILD_SUBTREES, false);
-		mkt_subtree_build_partitioned(
-				worker_id,
-				shared->nparticipants,
-				dsm_samples,
-				dsm_ra,
-				cents,
-				km_k,
-				shared->nlist,
-				shared->fan_out,
-				dim,
-				shared->metric,
-				shared->km_max_iterations,
-				subtrees_base,
-				shared->subtree_slot_size);
+		for (int pass = 0; pass < 2; pass++)
+			mkt_pbuild_stream_subtrees(
+					worker_id,
+					shared->nparticipants,
+					dsm_samples,
+					dsm_ra,
+					cents,
+					shared->km_k,
+					shared->nlist,
+					shared->fan_out,
+					dim,
+					shared->metric,
+					shared->km_max_iterations,
+					subtrees_base,
+					shared->subtree_slot_size,
+					barrier,
+					NULL,
+					NULL);
 	}
 
-	/* Barrier: all participants done building subtrees; the leader grafts the
-	 * tree next. */
-	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+	/* C1b: the centroid tree is no longer materialized in DSM, so the old
+	 * tree-based leaf refinement is gone; page-backed parallel refinement is a
+	 * follow-up (C2). */
 
-	/* ---- Phase 2.5: parallel leaf refinement (maintenance_work_mem-bounded
-	 * builds only). Gated on refine_iters so the leader and workers run the
-	 * identical barrier sequence. The leader publishes the grafted tree to DSM
-	 * before the first barrier here. ---- */
-	if (shared->refine_iters > 0)
-	{
-		/* Barrier: leader has grafted + published the tree to DSM. */
-		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-
-		HKMeansResult *rtree = shm_toc_lookup(toc, MKT_DSM_KEY_TREE, false);
-		MktDsmRefineAccum *accum =
-				shm_toc_lookup(toc, MKT_DSM_KEY_REFINE_ACCUM, false);
-		mkt_pbuild_exec_refine(
-				worker_id,
-				heapRel,
-				indexRel,
-				indexInfo,
-				shared,
-				rtree,
-				accum,
-				barrier);
-	}
-
-	/* Barrier: leader built + published the tree and initialized the shared
-	 * sorter. Stay attached — the phase-3 barrier below syncs all worker sorts
-	 * before the leader merges. */
+	/* Barrier: leader finished streaming the centroid tree + published the
+	 * routing state + initialized the sorter; workers start phase 3. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 	/* ---- Phase 3: posting scan -> cluster-keyed sort (page-backed) ---- */
-	HKMeansResult *tree = shm_toc_lookup(toc, MKT_DSM_KEY_TREE, false);
-	void *sortshared	= shm_toc_lookup(toc, MKT_DSM_KEY_SORTSHARED, false);
+	void *sortshared = shm_toc_lookup(toc, MKT_DSM_KEY_SORTSHARED, false);
 	const BlockNumber *posting_heads =
 			shm_toc_lookup(toc, MKT_DSM_KEY_POSTING_HEADS, false);
 	const float *global_mean =
@@ -793,8 +904,9 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	MktStorage *storage = mkt_pbuild_worker_storage(&w);
 
 	/* Routing base — the same MktIndexBase the query/insert build, so the worker
-	 * routes each row identically. nlevels comes from the published tree; the
-	 * scales + global mean + fastscan bits from the shared state. */
+	 * routes each row identically. nlevels + first_centroid (the streamed tree's
+	 * root block) come from the shared state the leader published; the scales +
+	 * global mean + fastscan bits also from shared. */
 	MktIndexBase base		 = {0};
 	base.params				 = rq_params;
 	base.pt_global_mean		 = mkt_alloc((size_t)dim * sizeof(float));
@@ -804,8 +916,8 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	base.posting_storage	 = storage;
 	base.page_base			 = NULL;
 	base.dim				 = dim;
-	base.nlevels			 = (uint8_t)tree->nlevels;
-	base.first_centroid		 = 1;
+	base.nlevels			 = shared->nlevels;
+	base.first_centroid		 = shared->first_centroid;
 	base.metric				 = shared->metric;
 	base.centroid_format	 = shared->centroid_format;
 	base.fastscan =
