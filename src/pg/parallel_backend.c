@@ -345,6 +345,11 @@ mkt_pbuild_setup_shared(
 	 * that actually exist so small tables don't over-allocate; it is only a
 	 * hint now -- the budget is the hard bound, so an inaccurate estimate can
 	 * no longer over-commit shared memory.
+	 *
+	 * The sample is held resident for the whole k-means (same trade-off as the
+	 * serial path -- see the design/limitation note in sample_for_build in
+	 * mktann_build.c: mini-batch/online or disk-spill k-means would shrink this
+	 * below mwm at a speed or quality cost, deferred).
 	 */
 	uint64_t want_samples = (uint64_t)nlist * 256;
 

@@ -467,7 +467,24 @@ sample_for_build(
 	 * mwm trains finer centroids on big tables. It is a fixed working set — it
 	 * never scales with the row count beyond the mwm cap. The tree is trained on
 	 * this sample; leaf centroids are refined on the full table by a later
-	 * (page-backed) refine pass when subsampling loses quality. */
+	 * (page-backed) refine pass when subsampling loses quality.
+	 *
+	 * Design note — the whole sample is held resident on purpose. Lloyd k-means
+	 * makes ~km_max_iterations random-access passes over every sample point, so
+	 * one heap read + in-RAM iteration is far cheaper than re-streaming per
+	 * iteration; the hierarchical build then partitions this one buffer in place
+	 * (index ranges, no per-level copies). The cost is that peak build RAM is the
+	 * mwm the operator granted — bounded, but not small.
+	 *
+	 * Limitation / alternatives if a much smaller footprint is ever wanted (all
+	 * trade speed or quality, so deferred):
+	 *   - mini-batch / online k-means: stream bounded batches from the table and
+	 *     update centroids incrementally (memory O(batch + centroids-in-flight),
+	 *     well below mwm) — converges to slightly lower-quality centroids and is
+	 *     an algorithmic rewrite of the clustering core;
+	 *   - spill the sample to disk (tuplestore/BufFile) and re-stream each
+	 *     iteration — bounded to a read buffer, but ~km_max_iterations× the I/O;
+	 *     strictly slower whenever the sample fits mwm (the common case). */
 	uint64_t ideal_samples = Max((uint64_t)10000, (uint64_t)nlist * 256);
 	uint64_t cap		   = (uint64_t)maintenance_work_mem * 1024 /
 					  (dim * sizeof(float));
