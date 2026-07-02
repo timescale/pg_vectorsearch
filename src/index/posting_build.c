@@ -288,9 +288,9 @@ mkt_posting_entry_encode_from_pt(
 /* Map a routed posting-head block back to its leaf index. posting_heads is
  * ascending (leaf c's head = first_posting + reserve.starts[c]), so binary
  * search. */
-static uint32_t
-route_head_to_leaf(const BlockNumber *posting_heads, uint32_t nlist,
-				   BlockNumber head)
+uint32_t
+mkt_route_head_to_leaf(
+		const BlockNumber *posting_heads, uint32_t nlist, BlockNumber head)
 {
 	uint32_t lo = 0, hi = nlist;
 	while (lo < hi)
@@ -373,7 +373,8 @@ mkt_build_route_emit(
 	for (uint32_t i = 0; i < n; i++)
 	{
 		BlockNumber h	  = ctx->qs->beam_results[i].posting_head;
-		ctx->cand_leaf[i] = route_head_to_leaf(ctx->posting_heads, ctx->nlist, h);
+		ctx->cand_leaf[i] =
+				mkt_route_head_to_leaf(ctx->posting_heads, ctx->nlist, h);
 		ctx->cand_dist[i] = ctx->qs->beam_results[i].distance;
 		Page hp			  = mkt_storage_read_page(ctx->storage, h);
 		memcpy(ctx->cand_pt + (size_t)i * dim,

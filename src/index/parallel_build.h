@@ -655,22 +655,37 @@ mkt_refine_tile_leaves(uint32_t nleaves, Dimension dim, uint64_t cap_bytes)
 }
 
 /*
- * Refine the tree's leaf centroids on the whole table: refine_iters streaming
- * passes, each routing every row to its leaf and recomputing per-leaf means.
- * Both leader (participant 0) and workers call it; gated by
- * shared->refine_iters so they run the same barriers. The leader
- * zeroes/divides and reinitializes the scan each pass. tree points at the
- * shared (DSM) tree, updated in place.
+ * Per-refined-leaf head-page writer (mirrors the serial serial_write_head): the
+ * leader rewrites the leaf's posting-list head with the full-table pt_centroid.
+ * Workers pass NULL (they never divide/write). Kept generic so the exec (worker
+ * side) does not depend on the leader-side LeaderHeadCtx.
  */
-extern void mkt_pbuild_exec_refine(
-		int				   participant_id,
-		Relation		   heap,
-		Relation		   index,
-		struct IndexInfo  *index_info,
-		MktBuildShared	  *shared,
-		HKMeansResult	  *tree,
-		MktDsmRefineAccum *accum,
-		Barrier			  *barrier);
+typedef void (*MktRefineHeadFn)(
+		void *ctx, uint32_t leaf, const float *centroid);
+
+/*
+ * Refine the leaf encode references on the whole table, page-backed: for each
+ * of refine_iters passes, every row is routed exactly as the query/insert do
+ * (mkt_query_route k=1 over the centroid pages, head -> leaf), per-leaf means
+ * accumulate into the tiled DSM accumulator, and the leader rewrites each leaf's
+ * head-page pt_centroid to the full-table mean. Both leader (participant 0) and
+ * workers call it; gated by shared->refine_iters so they run the same barriers.
+ * The workers route with their own page-backed qs; the leader passes qs == NULL
+ * (it does not scan) and a write_head callback. Leaves are processed in tiles of
+ * accum->nleaves, so the accumulator stays bounded regardless of nlist.
+ */
+extern void mkt_pbuild_exec_refine_paged(
+		int					participant_id,
+		Relation			heap,
+		Relation			index,
+		struct IndexInfo   *index_info,
+		MktBuildShared	   *shared,
+		struct MktQueryState *qs,
+		const BlockNumber  *posting_heads,
+		MktDsmRefineAccum  *accum,
+		Barrier			   *barrier,
+		MktRefineHeadFn		write_head,
+		void			   *write_head_ctx);
 
 /* Striped lock seam for the refine accumulator (back-end owns the locks). */
 extern void mkt_pbuild_accum_lock(MktBuildShared *shared, uint32_t stripe);
@@ -892,20 +907,6 @@ extern void mkt_posting_build_lists(
 		MktPostingReserve  *reserve,
 		BlockNumber			first_posting,
 		BlockNumber		   *posting_heads);
-
-/*
- * Route a vector to its refinement leaf (normalizing into scratch for cosine,
- * since the tree is trained in normalized space). Sets *out_v to the vector to
- * accumulate and returns its leaf. Shared by the serial and parallel refine
- * passes so both route identically.
- */
-extern uint32_t mkt_refine_assign_leaf(
-		const HKMeansResult *tree,
-		const float			*vec,
-		Dimension			 dim,
-		DistanceMetric		 metric,
-		float				*scratch,
-		const float		   **out_v);
 
 /*
  * Shared pre-posting centroid setup: normalize leaf centroids for cosine,

@@ -154,6 +154,12 @@ void mkt_build_route_ctx_cleanup(MktBuildRouteCtx *ctx);
 bool mkt_build_route_emit(
 		MktBuildRouteCtx *ctx, const float *vec, ItemPointerData tid);
 
+/* Map a routed posting-head block back to its ascending leaf index (binary
+ * search over posting_heads). Shared by the route/encode path and the
+ * page-backed refine pass. */
+uint32_t mkt_route_head_to_leaf(
+		const BlockNumber *posting_heads, uint32_t nlist, BlockNumber head);
+
 /* ----------------------------------------------------------------
  * Batched secondary (boundary + SOAR) assignment
  *

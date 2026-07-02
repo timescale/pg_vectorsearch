@@ -729,9 +729,6 @@ do_parallel_build(
 	 * (multi-hour at scale) scan. The seam fires the "mktann-build-load" hook. */
 	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
 
-	/* Re-init the scan for the posting phase (back-end seam). */
-	mkt_pbuild_rescan(heap, shared);
-
 	/* Initialize the shared cluster sorter for the launched-worker count BEFORE
 	 * the ready barrier, so it is ready when workers attach in phase 3. The
 	 * leader merges only (it does not sort a share). */
@@ -741,7 +738,40 @@ do_parallel_build(
 			sortshared, pcxt->nworkers_launched, pcxt->seg);
 
 	/* Barrier: centroid/head pages written + routing state published + sorter
-	 * ready; workers start the page-backed posting scan+sort. */
+	 * ready; workers build their page-backed router next. */
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+	/* ---- Phase 2.5: page-backed full-table refine (only when subsampled) ----
+	 * The workers route + accumulate; the leader (participant 0) clears the tiled
+	 * accumulator, resets the scan per tile, and rewrites each leaf's head-page
+	 * pt_centroid to the full-table mean. Gated on shared->refine_iters, matching
+	 * the workers, so the internal barriers stay in lockstep. */
+	if (shared->refine_iters > 0)
+	{
+		mkt_build_report_phase(prog, MKT_BUILD_PHASE_REFINE);
+		MktDsmRefineAccum *accum =
+				shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_REFINE_ACCUM, false);
+		LeaderHeadCtx rhead = {
+				.storage	   = storage,
+				.rq_params	   = rq_params,
+				.dim		   = dim,
+				.fastscan	   = shared->fastscan,
+				.posting_heads = posting_heads,
+				.pt			   = mkt_alloc((size_t)dim * sizeof(float)),
+		};
+		mkt_pbuild_exec_refine_paged(
+				0, heap, index, index_info, shared, NULL, posting_heads, accum,
+				barrier, leader_write_head, &rhead);
+		mkt_free(rhead.pt);
+		mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
+	}
+
+	/* Re-init the scan for the posting phase (the refine passes above consumed
+	 * it). Guarded by the barrier below so no worker scans before the reset. */
+	mkt_pbuild_rescan(heap, shared);
+
+	/* Barrier: scan reset for the posting phase; workers start the page-backed
+	 * posting scan+sort. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 	instr_time t_scan_start;
