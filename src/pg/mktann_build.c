@@ -465,22 +465,28 @@ sample_for_build(
 	Dimension dim	= bs->params.dim;
 	uint32_t  nlist = bs->params.nlist;
 
-	/* Bound the sample buffer by maintenance_work_mem (and MaxAllocSize). The
-	 * tree is trained on this sample; leaf centroids are refined on the full
-	 * table by a later (page-backed) refine pass when subsampling loses
-	 * quality. */
+	/* Bound the sample buffer purely by maintenance_work_mem (Option A): a
+	 * single huge allocation, not clamped to the 1 GB palloc ceiling, so a large
+	 * mwm trains finer centroids on big tables. It is a fixed working set — it
+	 * never scales with the row count beyond the mwm cap. The tree is trained on
+	 * this sample; leaf centroids are refined on the full table by a later
+	 * (page-backed) refine pass when subsampling loses quality. */
 	uint64_t ideal_samples = Max((uint64_t)10000, (uint64_t)nlist * 256);
-	uint64_t budget		   = (uint64_t)maintenance_work_mem * 1024 /
+	uint64_t cap		   = (uint64_t)maintenance_work_mem * 1024 /
 					  (dim * sizeof(float));
-	uint64_t alloc_cap = (uint64_t)(MaxAllocSize / (dim * sizeof(float)));
-	uint64_t cap	   = Min(budget, alloc_cap);
 	if (cap < 10000)
 		cap = 10000;
 	*out_subsampled = ideal_samples > cap;
-	bs->max_samples = (int)Min(ideal_samples, cap);
+	uint64_t want = Min(ideal_samples, cap);
+	/* nsamples/max_samples index the sample with int (reservoir state), so keep
+	 * the count within int range; the mwm budget is the real bound. */
+	if (want > (uint64_t)INT_MAX)
+		want = (uint64_t)INT_MAX;
+	bs->max_samples = (int)want;
 
 	bs->nsamples = 0;
-	bs->samples	 = palloc((size_t)bs->max_samples * dim * sizeof(float));
+	bs->samples	 = MemoryContextAllocHuge(
+			 CurrentMemoryContext, (size_t)bs->max_samples * dim * sizeof(float));
 
 	sample_rows(bs);
 
