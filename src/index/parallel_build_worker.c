@@ -34,7 +34,6 @@
 #include "core/memory.h"
 #include "index/parallel_build.h"
 #include "index/posting_build.h"
-#include "index/posting_build_parallel.h"
 #include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------
@@ -497,17 +496,17 @@ mkt_pbuild_exec_root_assign(
 
 typedef struct RefineCbState
 {
-	MktBuildShared	  *shared;
-	MktQueryState	  *qs;			/* page-backed router (workers) */
-	const BlockNumber *posting_heads; /* head -> leaf map */
-	uint32_t		   nlist;
-	float			  *sums; /* shared accumulator, indexed leaf - tile_lo */
-	uint64_t		  *counts; /* shared accumulator */
-	Dimension		   dim;
-	bool			   cosine;
-	uint32_t tile_lo; /* accumulate only leaves in [tile_lo, tile_hi) */
-	uint32_t tile_hi;
-	float	*scratch; /* per-participant normalized copy (cosine) */
+	MktBuildShared *shared;
+	MktQueryState  *qs;			  /* page-backed router (workers) */
+	BlockNumber		first_posting; /* head -> leaf: leaf = head - first_posting */
+	uint32_t		nlist;
+	float		   *sums;   /* shared accumulator, indexed leaf - tile_lo */
+	uint64_t	   *counts; /* shared accumulator */
+	Dimension		dim;
+	bool			cosine;
+	uint32_t		tile_lo; /* accumulate only leaves in [tile_lo, tile_hi) */
+	uint32_t		tile_hi;
+	float		   *scratch; /* per-participant normalized copy (cosine) */
 } RefineCbState;
 
 static void
@@ -524,7 +523,7 @@ mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
 	if (n == 0)
 		return;
 	uint32_t leaf = mkt_route_head_to_leaf(
-			rs->posting_heads, rs->nlist, rs->qs->beam_results[0].posting_head);
+			rs->first_posting, rs->qs->beam_results[0].posting_head);
 	/* Only the current tile's leaves are resident in the accumulator. */
 	if (leaf < rs->tile_lo || leaf >= rs->tile_hi)
 		return;
@@ -558,7 +557,7 @@ mkt_pbuild_exec_refine_paged(
 		struct IndexInfo	 *index_info,
 		MktBuildShared		 *shared,
 		struct MktQueryState *qs,
-		const BlockNumber	 *posting_heads,
+		BlockNumber			  first_posting,
 		MktDsmRefineAccum	 *accum,
 		Barrier				 *barrier,
 		MktRefineHeadFn		  write_head,
@@ -579,7 +578,7 @@ mkt_pbuild_exec_refine_paged(
 	RefineCbState rs = {
 			.shared		   = shared,
 			.qs			   = qs,
-			.posting_heads = posting_heads,
+			.first_posting = first_posting,
 			.nlist		   = nleaves,
 			.sums		   = sums,
 			.counts		   = counts,
@@ -760,9 +759,8 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 	/* ---- Phase 3 setup: page-backed router shared by refine + posting scan --- */
-	void *sortshared = shm_toc_lookup(toc, MKT_DSM_KEY_SORTSHARED, false);
-	const BlockNumber *posting_heads =
-			shm_toc_lookup(toc, MKT_DSM_KEY_POSTING_HEADS, false);
+	void		*sortshared	  = shm_toc_lookup(toc, MKT_DSM_KEY_SORTSHARED, false);
+	BlockNumber	 first_posting = shared->first_posting;
 	const float *global_mean =
 			shm_toc_lookup(toc, MKT_DSM_KEY_GLOBAL_MEAN, false);
 
@@ -810,7 +808,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 				shm_toc_lookup(toc, MKT_DSM_KEY_REFINE_ACCUM, false);
 		mkt_pbuild_exec_refine_paged(
 				worker_id, heapRel, indexRel, indexInfo, shared, &qs,
-				posting_heads, accum, barrier, NULL, NULL);
+				first_posting, accum, barrier, NULL, NULL);
 	}
 
 	/* ---- Phase 3: posting scan -> cluster-keyed sort (page-backed) ---- */
@@ -833,7 +831,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			sorter,
 			rq_params,
 			storage,
-			posting_heads,
+			first_posting,
 			shared->nlist,
 			dim,
 			shared->soar_lambda,

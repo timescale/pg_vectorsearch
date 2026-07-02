@@ -249,13 +249,12 @@ mkt_pbuild_setup_shared(
 			mkt_dsm_child_subtrees_size(nparticipants, slot_size));
 	shm_toc_estimate_chunk(&pcxt->estimator, usage_sz);
 	shm_toc_estimate_chunk(&pcxt->estimator, bufuse_sz);
-	/* Page-backed routing regions (leader fills before the tree-ready barrier). */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator, (Size)nlist * sizeof(BlockNumber));
+	/* Page-backed routing region (leader fills before the tree-ready barrier):
+	 * the global mean. The posting-head base is a scalar in MktBuildShared. */
 	shm_toc_estimate_chunk(&pcxt->estimator, (Size)dim * sizeof(float));
 	/* Keyed regions: shared, barrier, samples, centroids, km_workers,
-	 * root_assign, sortshared, child_subtrees, posting_heads, global_mean. */
-	shm_toc_estimate_keys(&pcxt->estimator, 10);
+	 * root_assign, sortshared, child_subtrees, global_mean. */
+	shm_toc_estimate_keys(&pcxt->estimator, 9);
 
 	InitializeParallelDSM(pcxt);
 
@@ -340,12 +339,8 @@ mkt_pbuild_setup_shared(
 			pcxt->toc, mkt_dsm_child_subtrees_size(nparticipants, slot_size));
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CHILD_SUBTREES, child_subtrees_base);
 
-	/* Page-backed routing regions (leader fills before the tree-ready barrier). */
-	BlockNumber *dsm_heads =
-			shm_toc_allocate(pcxt->toc, (Size)nlist * sizeof(BlockNumber));
-	memset(dsm_heads, 0, (Size)nlist * sizeof(BlockNumber));
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_POSTING_HEADS, dsm_heads);
-
+	/* Page-backed routing region (leader fills before the tree-ready barrier):
+	 * the global mean. The posting-head base is a scalar in MktBuildShared. */
 	float *dsm_gmean = shm_toc_allocate(pcxt->toc, (Size)dim * sizeof(float));
 	memset(dsm_gmean, 0, (Size)dim * sizeof(float));
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, dsm_gmean);

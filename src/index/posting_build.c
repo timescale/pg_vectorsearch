@@ -285,25 +285,6 @@ mkt_posting_entry_encode_from_pt(
 	memcpy(p, enc_buf->bits, (size_t)((dim + 7) / 8));
 }
 
-/* Map a routed posting-head block back to its leaf index. posting_heads is
- * ascending (leaf c's head = first_posting + reserve.starts[c]), so binary
- * search. */
-uint32_t
-mkt_route_head_to_leaf(
-		const BlockNumber *posting_heads, uint32_t nlist, BlockNumber head)
-{
-	uint32_t lo = 0, hi = nlist;
-	while (lo < hi)
-	{
-		uint32_t mid = lo + (hi - lo) / 2;
-		if (posting_heads[mid] < head)
-			lo = mid + 1;
-		else
-			hi = mid;
-	}
-	return lo;
-}
-
 void
 mkt_build_route_ctx_init(
 		MktBuildRouteCtx   *ctx,
@@ -311,7 +292,7 @@ mkt_build_route_ctx_init(
 		MktSorter		   *sorter,
 		const RaBitQParams *rq_params,
 		MktStorage		   *storage,
-		const BlockNumber  *posting_heads,
+		BlockNumber			first_posting,
 		uint32_t			nlist,
 		Dimension			dim,
 		double				soar_lambda,
@@ -321,7 +302,7 @@ mkt_build_route_ctx_init(
 	ctx->sorter			  = sorter;
 	ctx->rq_params		  = rq_params;
 	ctx->storage		  = storage;
-	ctx->posting_heads	  = posting_heads;
+	ctx->first_posting	  = first_posting;
 	ctx->nlist			  = nlist;
 	ctx->dim			  = dim;
 	ctx->soar_lambda	  = soar_lambda;
@@ -373,8 +354,7 @@ mkt_build_route_emit(
 	for (uint32_t i = 0; i < n; i++)
 	{
 		BlockNumber h	  = ctx->qs->beam_results[i].posting_head;
-		ctx->cand_leaf[i] =
-				mkt_route_head_to_leaf(ctx->posting_heads, ctx->nlist, h);
+		ctx->cand_leaf[i] = mkt_route_head_to_leaf(ctx->first_posting, h);
 		ctx->cand_dist[i] = ctx->qs->beam_results[i].distance;
 		Page hp			  = mkt_storage_read_page(ctx->storage, h);
 		memcpy(ctx->cand_pt + (size_t)i * dim,

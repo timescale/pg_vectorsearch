@@ -47,10 +47,18 @@ mkt_write_centroid_tree(
 		MktCentroidFormat	 centroid_format,
 		const RaBitQParams	*rq_params,
 		const float			*global_mean,
-		const BlockNumber	*posting_heads,
+		BlockNumber			 posting_base,
 		const BlockNumber	*node_first_blkno,
 		const float			*pt_centroids)
 {
+	/* Leaf child blocks are formula-derived (posting_base + global leaf index),
+	 * so no O(nlist) posting-head array is needed. Each node has at most fan_out
+	 * leaf entries, so this scratch is O(fan_out). */
+	BlockNumber *leaf_blks =
+			(posting_base != InvalidBlockNumber)
+					? mkt_alloc((size_t)fan_out * sizeof(BlockNumber))
+					: NULL;
+
 	for (uint32_t i = 0; i < tree->nnodes; i++)
 	{
 		const HKMeansNode *node	   = &hk_nodes(tree)[i];
@@ -60,8 +68,12 @@ mkt_write_centroid_tree(
 		uint16_t child_count = is_leaf ? 0 : (uint16_t)fan_out;
 
 		const BlockNumber *child_blks;
-		if (is_leaf && posting_heads != NULL)
-			child_blks = &posting_heads[node->first_leaf];
+		if (is_leaf && leaf_blks != NULL)
+		{
+			for (uint32_t j = 0; j < node->nchildren; j++)
+				leaf_blks[j] = posting_base + node->first_leaf + j;
+			child_blks = leaf_blks;
+		}
 		else if (!is_leaf)
 			child_blks = &node_first_blkno[node->first_child];
 		else
@@ -113,6 +125,9 @@ mkt_write_centroid_tree(
 				leaf_pt,
 				node_first_blkno[i]);
 	}
+
+	if (leaf_blks != NULL)
+		mkt_free(leaf_blks);
 }
 
 /* ----------------------------------------------------------------
@@ -135,7 +150,7 @@ typedef struct StreamCtx
 	MktCentroidFormat	format;
 	const RaBitQParams *rq_params;
 	const float		   *global_mean;
-	const BlockNumber  *posting_heads;
+	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
 	MktStreamLeafCb		on_leaf;
 	void			   *on_leaf_arg;
 	/* plan-phase page-count helpers */
@@ -255,9 +270,19 @@ stream_node(
 		}
 		if (c->emit)
 		{
+			/* Leaf heads are formula-derived (first_posting + global leaf
+			 * index); kept <= fan_out, so this scratch is O(fan_out). */
+			BlockNumber *leaf_blks = NULL;
+			if (c->first_posting != InvalidBlockNumber)
+			{
+				leaf_blks = mkt_alloc((size_t)kept * sizeof(BlockNumber));
+				for (uint32_t kk = 0; kk < kept; kk++)
+					leaf_blks[kk] = c->first_posting + c->nleaves + kk;
+			}
 			blk = stream_write_node(
-					c, km->centroids, kept, level, true,
-					c->posting_heads ? &c->posting_heads[c->nleaves] : NULL);
+					c, km->centroids, kept, level, true, leaf_blks);
+			if (leaf_blks != NULL)
+				mkt_free(leaf_blks);
 			/* Emit each leaf's head page from its resident float centroid. */
 			if (c->on_leaf != NULL)
 				for (uint32_t kk = 0; kk < kept; kk++)
@@ -380,7 +405,7 @@ mkt_stream_centroid_write(
 		const RaBitQParams *rq_params,
 		const float		   *global_mean,
 		const KMeansOptions *opts,
-		const BlockNumber  *posting_heads,
+		BlockNumber			first_posting,
 		BlockNumber			first_centroid,
 		MktStreamLeafCb		on_leaf,
 		void			   *on_leaf_arg)
@@ -392,7 +417,7 @@ mkt_stream_centroid_write(
 	c.storage		= storage;
 	c.rq_params		= rq_params;
 	c.global_mean	= global_mean;
-	c.posting_heads = posting_heads;
+	c.first_posting = first_posting;
 	c.next_blk		= first_centroid;
 	c.on_leaf		= on_leaf;
 	c.on_leaf_arg	= on_leaf_arg;
@@ -410,7 +435,7 @@ mkt_write_subtree_streaming(
 		MktCentroidFormat	 format,
 		const RaBitQParams	*rq_params,
 		const float			*global_mean,
-		const BlockNumber	*posting_heads,
+		BlockNumber			 first_posting,
 		uint32_t			 leaf_offset,
 		BlockNumber			 first_block,
 		MktStreamLeafCb		 on_leaf,
@@ -426,8 +451,9 @@ mkt_write_subtree_streaming(
 	BlockNumber next =
 			mkt_compute_centroid_layout(subtree, max_ent, first_block, nfb);
 
-	/* Leaf entries link to the global posting heads; leaf_offset maps the
-	 * subtree's local leaf indices to the global posting_heads array. */
+	/* Leaf entries link to formula-derived posting heads (first_posting +
+	 * global leaf index); leaf_offset maps the subtree's local leaf indices to
+	 * the global index space. */
 	mkt_write_centroid_tree(
 			storage,
 			subtree,
@@ -436,7 +462,7 @@ mkt_write_subtree_streaming(
 			format,
 			rq_params,
 			global_mean,
-			posting_heads + leaf_offset,
+			first_posting + leaf_offset,
 			nfb,
 			NULL);
 	mkt_free(nfb);

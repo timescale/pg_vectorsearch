@@ -41,7 +41,6 @@
 #include "core/memory.h"
 #include "index/centroid_page.h" /* MktCentroidFormat */
 #include "index/posting_build.h"
-#include "index/posting_build_parallel.h"
 #include "index/storage.h" /* MktStorage */
 #include "mkt_types.h"
 #include "quant/rabitq.h"
@@ -82,10 +81,10 @@ typedef void (*MktBuildScanCb)(
 #define MKT_DSM_KEY_CHILD_SUBTREES UINT64CONST(0xB000000000000010)
 #define MKT_DSM_KEY_REFINE_ACCUM   UINT64CONST(0xB000000000000011)
 #define MKT_DSM_KEY_SORTSHARED	   UINT64CONST(0xB000000000000012)
-/* Page-backed phase-3 routing: leaf posting-head blocks (head->leaf map) and the
- * global mean, both published by the leader before the tree-ready barrier so
- * workers can route exactly as the query/insert paths do. */
-#define MKT_DSM_KEY_POSTING_HEADS  UINT64CONST(0xB000000000000013)
+/* Page-backed phase-3 routing: the global mean, published by the leader before
+ * the tree-ready barrier so workers route exactly as the query/insert paths do.
+ * The posting-head base (leaf c's head = first_posting + c) is a scalar in
+ * MktBuildShared, not a shared array. */
 #define MKT_DSM_KEY_GLOBAL_MEAN	   UINT64CONST(0xB000000000000014)
 
 /* ----------------------------------------------------------------
@@ -159,6 +158,11 @@ typedef struct MktBuildShared
 	 * MktIndexBase.first_centroid) and the tree depth (base.nlevels). */
 	BlockNumber first_centroid;
 	uint8_t		nlevels;
+
+	/* Published by the leader before phase 3: the first posting-head block.
+	 * Cluster c's head is first_posting + c (formula), so workers map a routed
+	 * head block back to its leaf by subtraction — no O(nlist) head array. */
+	BlockNumber first_posting;
 } MktBuildShared;
 
 /* ----------------------------------------------------------------
@@ -653,7 +657,7 @@ extern void mkt_pbuild_exec_refine_paged(
 		struct IndexInfo   *index_info,
 		MktBuildShared	   *shared,
 		struct MktQueryState *qs,
-		const BlockNumber  *posting_heads,
+		BlockNumber			first_posting,
 		MktDsmRefineAccum  *accum,
 		Barrier			   *barrier,
 		MktRefineHeadFn		write_head,
@@ -863,8 +867,9 @@ extern void mkt_pbuild_sort_end(MktSorter *sorter);
  * Build every cluster's posting list from a populated (not yet performsorted)
  * cluster-keyed sorter. Shared by the serial build and the parallel leader:
  * performsort, then read entries grouped by cluster and write each list with a
- * single resident page builder. Fills posting_heads[nlist] and ends the
- * sorter.
+ * single resident page builder. Cluster c's head is the formula first_posting +
+ * c (a pre-extended head region); continuation pages are appended at the end of
+ * the relation and chained, so no O(nlist) reserve is needed. Ends the sorter.
  */
 extern void mkt_posting_build_lists(
 		MktSorter		   *sorter,
@@ -874,9 +879,7 @@ extern void mkt_posting_build_lists(
 		bool				fastscan,
 		const RaBitQParams *rq_params,
 		const float		   *ref_vecs,
-		MktPostingReserve  *reserve,
-		BlockNumber			first_posting,
-		BlockNumber		   *posting_heads);
+		BlockNumber			first_posting);
 
 /*
  * Shared pre-posting centroid setup: normalize leaf centroids for cosine,
@@ -919,7 +922,6 @@ extern bool do_parallel_build(
 		MktStorage				*storage,
 		struct MktBuildProgress *prog,
 		HKMeansResult		   **out_tree,
-		BlockNumber				*posting_heads,
 		double					*out_heap_tuples,
 		double					*out_indtuples,
 		double					*out_soar_dupes,
@@ -930,6 +932,10 @@ extern bool do_parallel_build(
 		 * *out_centroids_written signals that centroid pages already exist in
 		 * `storage` (the caller must not rewrite them there). May be NULL. */
 		float				   **out_global_mean,
-		bool					*out_centroids_written);
+		bool					*out_centroids_written,
+		/* The posting-head base: cluster c's head is *out_first_posting + c.
+		 * Callers that need to locate head pages after the build (e.g. the
+		 * standalone driver + its tests) capture it; may be NULL. */
+		BlockNumber				*out_first_posting);
 
 #endif /* MKT_PARALLEL_BUILD_H */
