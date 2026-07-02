@@ -120,7 +120,17 @@ typedef struct MktannOptions
 
 #define MKTANN_DEFAULT_NLIST 0
 #define MKTANN_MIN_NLIST	 0
-#define MKTANN_MAX_NLIST	 2000000
+/*
+ * No artificial partition ceiling: the build allocates nothing proportional to
+ * nlist (posting-list heads are formula-derived, the centroid tree streams to
+ * pages, the k-means sample is maintenance_work_mem-bounded), so nlist scales
+ * with the table. The ceiling is the one real format constraint — the parallel
+ * posting sort keys entries by an INT4 cluster id (see mkt_pbuild_sort_put),
+ * so a cluster id must fit a signed 32-bit int. nlist is also auto-clamped to
+ * the (mwm-bounded) sample count, and auto nlist = rows/256 reaches INT32_MAX
+ * only near ~550B rows; widen the sort key to INT8 to go beyond that.
+ */
+#define MKTANN_MAX_NLIST	 PG_INT32_MAX
 
 /*
  * MktannGetDistanceMode - Resolve effective distance mode for a scan.
