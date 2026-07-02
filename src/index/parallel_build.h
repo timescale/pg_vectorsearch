@@ -68,7 +68,6 @@ typedef void (*MktBuildScanCb)(
  * ---------------------------------------------------------------- */
 
 #define MKT_DSM_KEY_SHARED		   UINT64CONST(0xB000000000000001)
-#define MKT_DSM_KEY_TREE		   UINT64CONST(0xB000000000000002)
 #define MKT_DSM_KEY_WORKER_OUTPUT  UINT64CONST(0xB000000000000004)
 #define MKT_DSM_KEY_PARTIALS	   UINT64CONST(0xB000000000000005)
 #define MKT_DSM_KEY_WAL_USAGE	   UINT64CONST(0xB000000000000006)
@@ -255,23 +254,25 @@ mkt_dsm_centroids(char *base)
  * Child subtrees: per-root-child HKMeansResult blobs in DSM
  *
  * After the root k-means splits the samples into fan_out groups, each group's
- * subtree is built independently (work-partitioned across participants) and
- * written, as a contiguous HKMeansResult, into a fixed-size slot here. The
- * leader then grafts the fan_out subtrees under a fresh root. One slot per
- * root child; slot size is the worst-case blob for a subtree (shared in
+ * subtree is built independently and written, as a contiguous HKMeansResult,
+ * into a fixed-size slot. The batched streaming build keeps only a bounded ring
+ * of nparticipants slots resident (each participant owns slot participant_id;
+ * the leader streams each batch to pages before the next batch reuses the ring),
+ * so the region is O(nparticipants * slot_size), independent of the partition
+ * count. Slot size is the worst-case blob for a subtree (shared in
  * MktBuildShared.subtree_slot_size).
  * ---------------------------------------------------------------- */
 
 static inline Size
-mkt_dsm_child_subtrees_size(uint32_t fan_out, uint64_t slot_size)
+mkt_dsm_child_subtrees_size(uint32_t nslots, uint64_t slot_size)
 {
-	return (Size)fan_out * (Size)slot_size;
+	return (Size)nslots * (Size)slot_size;
 }
 
 static inline char *
-mkt_dsm_child_subtree(char *base, uint32_t child, uint64_t slot_size)
+mkt_dsm_child_subtree(char *base, uint32_t slot, uint64_t slot_size)
 {
-	return base + (Size)child * (Size)slot_size;
+	return base + (Size)slot * (Size)slot_size;
 }
 
 /*
@@ -469,35 +470,6 @@ extern void mkt_km_assign_and_accumulate(
 		float		  *out_sums,
 		uint32_t	  *out_cnts,
 		float		  *out_cost);
-
-/*
- * Phase 2c: work-partitioned subtree build (shared by leader and workers).
- *
- * After the root k-means, each participant builds the full subtree for the
- * root children it owns (child where child % nparticipants == participant_id):
- * it gathers that child's samples from the pooled DSM sample slots (via the
- * root assignment), runs hierarchical k-means to depth nlevels-1, and writes
- * the resulting contiguous HKMeansResult into the child's fixed-size slot in
- * the child-subtrees region. The children are independent, so there is no
- * synchronization inside this call — only the single barrier the caller issues
- * afterward. The leader then grafts the fan_out subtrees under a fresh root.
- * root_cents (km_k * dim) supplies the centroid for any (degenerate) empty
- * child. slot_size is MktBuildShared.subtree_slot_size.
- */
-extern void mkt_subtree_build_partitioned(
-		int				  participant_id,
-		int				  nparticipants,
-		MktDsmSamples	 *dsm_samples,
-		MktDsmRootAssign *dsm_ra,
-		const float		 *root_cents,
-		uint32_t		  km_k,
-		uint32_t		  nlist,
-		uint32_t		  fan_out,
-		Dimension		  dim,
-		DistanceMetric	  metric,
-		uint32_t		  km_max_iterations,
-		char			 *subtrees_base,
-		uint64_t		  slot_size);
 
 /*
  * Build ONE root-child's subtree into `slot`. Used by the batched streaming
@@ -816,7 +788,6 @@ typedef struct MktPBuildLeader
 	float				   *cents;
 	char				   *km_workers_base;
 	MktDsmRootAssign	   *dsm_ra;
-	void				   *dsm_tree;
 	char				   *queues_base;
 	char				   *dsm_partials;
 	char				   *child_subtrees_base; /* per-child subtree blobs */
@@ -829,7 +800,6 @@ typedef struct MktPBuildLeader
 	uint32_t				nlist;
 	uint64_t				rabitq_seed;
 	uint32_t				fan_out;
-	Size					max_tree_sz;
 	Size					dsm_total; /* committed DSM chunk bytes (for the
 										  planned-allocation introspection line) */
 } MktPBuildLeader;

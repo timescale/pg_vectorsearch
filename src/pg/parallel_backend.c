@@ -423,9 +423,13 @@ mkt_pbuild_setup_shared(
 	/* K-means shared centroids + norms (root level, k=km_k) */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_dsm_centroids_size(km_k, dim));
-	/* Per-child subtree blobs (work-partitioned phase 2c) */
+	/* Per-child subtree blobs: a bounded ring of nparticipants slots (the
+	 * batched streaming build keeps at most one slot per participant resident),
+	 * not one slot per root child — so this is independent of the partition
+	 * count. */
 	shm_toc_estimate_chunk(
-			&pcxt->estimator, mkt_dsm_child_subtrees_size(fan_out, slot_size));
+			&pcxt->estimator,
+			mkt_dsm_child_subtrees_size(nparticipants, slot_size));
 	/* K-means per-worker accumulators */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
@@ -434,12 +438,6 @@ mkt_pbuild_setup_shared(
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
 			mkt_dsm_root_assign_size(nparticipants, max_per_worker));
-	/* Tree blob (placeholder — allocated later by leader, but
-	 * we need the max possible size. Use a generous estimate.) */
-	Size max_tree_sz = sizeof(HKMeansResult) +
-					   (Size)nlist * 2 * sizeof(HKMeansNode) +
-					   (Size)nlist * dim * sizeof(float) * 2;
-	shm_toc_estimate_chunk(&pcxt->estimator, max_tree_sz);
 	/* Shared coordinator for the cluster-keyed posting sort (sort seam). Sized
 	 * for the planned participant count (upper bound on launched workers). */
 	shm_toc_estimate_chunk(
@@ -477,9 +475,9 @@ mkt_pbuild_setup_shared(
 	}
 
 	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
-	 * tree, sortshared, child_subtrees, wal, buffer, posting_heads,
-	 * global_mean + optionally refine_accum / query_text */
-	int nkeys = 13;
+	 * sortshared, child_subtrees, wal, buffer, posting_heads, global_mean +
+	 * optionally refine_accum / query_text */
+	int nkeys = 12;
 	if (debug_query_string)
 		nkeys++;
 	if (refine_iters > 0)
@@ -571,11 +569,12 @@ mkt_pbuild_setup_shared(
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CENTROIDS, centroids_base);
 	float *cents = mkt_dsm_centroids(centroids_base);
 
-	/* Per-child subtree blobs (phase 2c, work-partitioned): each participant
-	 * builds the full subtree for the root children it owns into its slot, and
-	 * the leader grafts them into the final tree. */
+	/* Per-child subtree blobs (phase 2c): a bounded ring of nparticipants slots.
+	 * Each participant builds a subtree into its own slot; the leader streams the
+	 * batch to centroid pages before the ring is reused, so the region never
+	 * scales with the partition count. */
 	char *child_subtrees_base = shm_toc_allocate(
-			pcxt->toc, mkt_dsm_child_subtrees_size(fan_out, slot_size));
+			pcxt->toc, mkt_dsm_child_subtrees_size(nparticipants, slot_size));
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CHILD_SUBTREES, child_subtrees_base);
 
 	/* Per-worker k-means accumulators */
@@ -591,11 +590,6 @@ mkt_pbuild_setup_shared(
 	dsm_ra->nparticipants  = nparticipants;
 	dsm_ra->max_per_worker = max_per_worker;
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_ROOT_ASSIGN, dsm_ra);
-
-	/* Tree blob — allocated now, populated after k-means */
-	void *dsm_tree = shm_toc_allocate(pcxt->toc, max_tree_sz);
-	memset(dsm_tree, 0, max_tree_sz);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_TREE, dsm_tree);
 
 	/* Shared coordinator for the cluster-keyed posting sort (sort seam). Sized
 	 * for the planned participant count; the leader calls
@@ -657,7 +651,6 @@ mkt_pbuild_setup_shared(
 	lead->child_subtrees_base = child_subtrees_base;
 	lead->km_workers_base	  = km_workers_base;
 	lead->dsm_ra			  = dsm_ra;
-	lead->dsm_tree			  = dsm_tree;
 	lead->queues_base		  = NULL; /* sort-seam path: no shm_mq queues */
 	lead->dsm_partials		  = NULL; /* sort-seam path: no partials region */
 	lead->walusage			  = walusage;
@@ -669,7 +662,6 @@ mkt_pbuild_setup_shared(
 	lead->nlist				  = nlist;
 	lead->rabitq_seed		  = rabitq_seed;
 	lead->fan_out			  = fan_out;
-	lead->max_tree_sz		  = max_tree_sz;
 	lead->dsm_total			  = dsm_total;
 	return true;
 }

@@ -257,24 +257,15 @@ TEST(multi_tile_matches_reference)
 #define NEXTF() \
 	(rng = rng * 1103515245 + 12345, ((float)(rng % 2000) / 1000.0f - 1.0f))
 
-	float *root = mkt_alloc((size_t)fan_out * dim * sizeof(float));
-	for (uint32_t i = 0; i < fan_out * dim; i++)
-		root[i] = NEXTF();
+	/* The tiled kernel scans the flat list of leaf centroids regardless of
+	 * tree depth, so a single flat tree with > MKT_SECONDARY_TILE leaves
+	 * exercises the multi-tile reduction directly. */
+	float *cents = mkt_alloc((size_t)nleaves * dim * sizeof(float));
+	for (uint32_t i = 0; i < nleaves * dim; i++)
+		cents[i] = NEXTF();
 
-	/* Build each root child as a flat subtree, then graft them under the
-	 * root — the production multi-level path (build_flat + graft). */
-	const HKMeansResult **subtrees = mkt_alloc(
-			fan_out * sizeof(HKMeansResult *));
-	for (uint32_t c = 0; c < fan_out; c++)
-	{
-		float *cc = mkt_alloc((size_t)nchild * dim * sizeof(float));
-		for (uint32_t i = 0; i < nchild * dim; i++)
-			cc[i] = NEXTF();
-		subtrees[c] = mkt_hkmeans_build_flat(cc, nchild, fan_out, dim);
-	}
-
-	HKMeansResult *tree = mkt_hkmeans_graft(root, fan_out, subtrees, dim);
-	ASSERT_NOT_NULL(tree, "two-level tree built");
+	HKMeansResult *tree = mkt_hkmeans_build_flat(cents, nleaves, fan_out, dim);
+	ASSERT_NOT_NULL(tree, "flat multi-tile tree built");
 	ASSERT_EQ(nleaves, tree->nleaves, "4096 leaves");
 	ASSERT_TRUE(tree->nleaves > MKT_SECONDARY_TILE, "spans multiple tiles");
 
