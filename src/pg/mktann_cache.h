@@ -44,6 +44,18 @@
 void mktann_index_base_init(Relation index, MktIndexBase *base);
 
 /*
+ * Immutable dim + distance metric + first posting page from the cache, without
+ * forcing the lazy rotation-matrix work that mktann_index_base_init does. For
+ * metadata-only callers such as VACUUM's ambulkdelete (which uses
+ * first_posting to skip straight past the centroid region).
+ */
+void mktann_cache_meta(
+		Relation		index,
+		Dimension	   *dim,
+		DistanceMetric *metric,
+		BlockNumber	   *first_posting);
+
+/*
  * Build-time scan-planning scalars (immutable), from the same cache.
  */
 typedef struct MktannScanInfo

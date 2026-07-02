@@ -360,7 +360,11 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
  * mkt.posting_pages(regclass)
  *
  * Returns one row per posting page: blkno, cluster_id, is_first,
- * entry_count, max_entries, next_blkno, chain_pos.
+ * tombstoned, entry_count, dead_count, max_entries, next_blkno,
+ * chain_pos, format. Tombstoned (all-dead, but still linked) pages stay
+ * in the output so bloat is visible; filter with WHERE NOT tombstoned
+ * for live pages. dead_count is the per-entry DELETED tally for AoS
+ * pages and NULL for fastscan pages (no per-entry state).
  *
  * Walks all posting chains by finding leaf centroids (which store
  * posting_head block numbers) and following next_blkno links.
@@ -430,24 +434,48 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 
 			const MktPostingPageOpaque *op = mkt_posting_opaque(page);
 			bool is_first	 = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+			bool tombstoned	 = (op->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0;
 			bool is_fastscan = (op->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
 
-			Datum values[8];
-			bool  nulls[8] = {0};
+			Datum values[10];
+			bool  nulls[10] = {0};
 
 			values[0] = Int32GetDatum((int32)blkno);
 			values[1] = Int32GetDatum((int32)op->cluster_id);
 			values[2] = BoolGetDatum(is_first);
-			values[3] = Int32GetDatum((int32)op->entry_count);
-			values[4] = Int32GetDatum((int32)op->max_entries);
+			values[3] = BoolGetDatum(tombstoned);
+			values[4] = Int32GetDatum((int32)op->entry_count);
 
-			if (BlockNumberIsValid(op->next_blkno))
-				values[5] = Int32GetDatum((int32)op->next_blkno);
+			if (!is_fastscan)
+			{
+				/* AoS entries carry a per-entry DELETED flag; count them.
+				 * FASTSCAN packs entries into SIMD groups with no per-entry
+				 * state (deletion is page-granular there), so dead_count is
+				 * NULL for fastscan pages. */
+				char *content = is_first ? mkt_posting_content_first(page, dim)
+										 : mkt_posting_content(page);
+				int32 dead	  = 0;
+				for (uint32_t i = 0; i < op->entry_count; i++)
+				{
+					const MktPostingEntryHeader *h =
+							mkt_posting_entry_at(content, i, dim);
+					if (h->meta.flags & MKT_POSTING_FLAG_DELETED)
+						dead++;
+				}
+				values[5] = Int32GetDatum(dead);
+			}
 			else
 				nulls[5] = true;
 
-			values[6] = Int32GetDatum(chain_pos);
-			values[7] = CStringGetTextDatum(is_fastscan ? "fastscan" : "aos");
+			values[6] = Int32GetDatum((int32)op->max_entries);
+
+			if (BlockNumberIsValid(op->next_blkno))
+				values[7] = Int32GetDatum((int32)op->next_blkno);
+			else
+				nulls[7] = true;
+
+			values[8] = Int32GetDatum(chain_pos);
+			values[9] = CStringGetTextDatum(is_fastscan ? "fastscan" : "aos");
 
 			tuplestore_putvalues(
 					rsinfo->setResult, rsinfo->setDesc, values, nulls);

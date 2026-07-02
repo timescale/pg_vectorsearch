@@ -195,6 +195,7 @@ scan_clusters(
 	}
 
 	uint32_t total_pages   = 0;
+	uint32_t total_skipped = 0;
 	uint32_t total_entries = 0;
 
 	for (uint32_t j = 0; j < n_results; j++)
@@ -220,6 +221,7 @@ scan_clusters(
 		else
 			mkt_posting_scan_cluster(&qs->pscan, topk);
 		total_pages += qs->pscan.pages_read;
+		total_skipped += qs->pscan.pages_skipped;
 		total_entries += qs->pscan.entries_scanned;
 		mkt_posting_scan_end_cluster(&qs->pscan);
 	}
@@ -229,6 +231,7 @@ scan_clusters(
 	if (stats != NULL)
 	{
 		stats->posting_pages_read	   = total_pages;
+		stats->posting_pages_skipped   = total_skipped;
 		stats->posting_entries_scanned = total_entries;
 	}
 }

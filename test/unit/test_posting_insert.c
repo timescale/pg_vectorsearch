@@ -399,3 +399,163 @@ TEST(insert_into_fastscan_cluster_mixed_chain)
 	mkt_rabitq_scratch_cleanup(&scratch);
 	mkt_rabitq_destroy(params);
 }
+
+/* Dead-TID predicate for the tombstone test: a TID is dead if its vector id
+ * is in the set. */
+typedef struct DeadSet
+{
+	const uint32_t *vids;
+	uint32_t		n;
+} DeadSet;
+
+static bool
+vid_is_dead(ItemPointerData tid, void *state)
+{
+	const DeadSet *d   = (const DeadSet *)state;
+	uint32_t	   vid = mkt_posting_get_vector_id(&tid);
+	for (uint32_t i = 0; i < d->n; i++)
+		if (d->vids[i] == vid)
+			return true;
+	return false;
+}
+
+TEST(tombstone_marks_and_scan_skips)
+{
+	Dimension		dim		 = 128;
+	TestPageStorage storage	 = make_test_storage(32);
+	RaBitQParams   *params	 = mkt_rabitq_create(dim, 11);
+	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(8, dim);
+
+	/* 5 built + 3 inserted = 8 live AoS entries. */
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, 5, false);
+	RaBitQScratch scratch;
+	mkt_rabitq_scratch_init(&scratch, dim);
+	for (uint32_t i = 0; i < 3; i++)
+		insert_vec(
+				&storage,
+				params,
+				dim,
+				head,
+				100 + i,
+				vecs + (size_t)(5 + i) * dim,
+				&scratch);
+
+	ASSERT_EQ(
+			8,
+			chain_live_count(&storage, dim, head),
+			"all 8 live before delete");
+
+	/* Tombstone two built ids and one inserted id. */
+	const uint32_t dead_vids[] = {1, 3, 101};
+	DeadSet		   dead		   = {.vids = dead_vids, .n = 3};
+	uint32_t	   marked	   = mkt_posting_tombstone_chain(
+			   &storage.base, dim, head, vid_is_dead, &dead);
+
+	ASSERT_EQ(3, marked, "three entries tombstoned");
+	ASSERT_EQ(
+			5,
+			chain_live_count(&storage, dim, head),
+			"live count drops by the tombstoned entries");
+
+	Page hp = mkt_storage_read_page(&storage.base, head);
+	ASSERT_EQ(
+			5, mkt_posting_head_live_count(hp), "head live_count decremented");
+	mkt_storage_release_page(&storage.base, head);
+
+	ASSERT_EQ(
+			5,
+			scan_count(&storage, params, dim, centroid, head, 64, false),
+			"scan skips tombstoned entries");
+
+	/* Re-tombstoning the same ids marks nothing new (idempotent). */
+	ASSERT_EQ(
+			0,
+			mkt_posting_tombstone_chain(
+					&storage.base, dim, head, vid_is_dead, &dead),
+			"already-deleted entries are not re-counted");
+
+	mkt_rabitq_scratch_cleanup(&scratch);
+	mkt_rabitq_destroy(params);
+}
+
+/* Whole-page tombstone: when every entry on a page is dead, the page gets the
+ * MKT_POSTING_PAGE_TOMBSTONED flag and the scan skips it. Covers AoS, where
+ * entries are also individually flagged. */
+TEST(tombstone_all_flags_aos_page)
+{
+	Dimension		dim		 = 128;
+	TestPageStorage storage	 = make_test_storage(32);
+	RaBitQParams   *params	 = mkt_rabitq_create(dim, 5);
+	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(8, dim);
+
+	/* 8 entries on a single AoS head page. */
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, 8, false);
+
+	const uint32_t dead_vids[] = {0, 1, 2, 3, 4, 5, 6, 7};
+	DeadSet		   dead		   = {.vids = dead_vids, .n = 8};
+	ASSERT_EQ(
+			8,
+			mkt_posting_tombstone_chain(
+					&storage.base, dim, head, vid_is_dead, &dead),
+			"all 8 entries tombstoned");
+
+	Page hp = mkt_storage_read_page(&storage.base, head);
+	ASSERT_TRUE(
+			(mkt_posting_opaque(hp)->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0,
+			"fully-dead AoS page is flagged tombstoned");
+	ASSERT_EQ(0, mkt_posting_head_live_count(hp), "live_count is zero");
+	mkt_storage_release_page(&storage.base, head);
+
+	ASSERT_EQ(
+			0,
+			scan_count(&storage, params, dim, centroid, head, 64, false),
+			"scan skips the tombstoned page");
+
+	mkt_rabitq_destroy(params);
+}
+
+/* FASTSCAN entries can't be flagged individually, but a wholly-dead FASTSCAN
+ * page is tombstoned at page granularity (and its entries leave live_count).
+ */
+TEST(tombstone_all_flags_fastscan_page)
+{
+	Dimension		dim		 = 128;
+	TestPageStorage storage	 = make_test_storage(32);
+	RaBitQParams   *params	 = mkt_rabitq_create(dim, 9);
+	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	uint32_t		nbuilt	 = 40; /* > 1 fastscan group */
+	float		   *vecs	 = make_test_vectors(nbuilt, dim);
+
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, nbuilt, true);
+
+	uint32_t *dead_vids = mkt_alloc(nbuilt * sizeof(uint32_t));
+	for (uint32_t i = 0; i < nbuilt; i++)
+		dead_vids[i] = i;
+	DeadSet dead = {.vids = dead_vids, .n = nbuilt};
+
+	ASSERT_EQ(
+			nbuilt,
+			mkt_posting_tombstone_chain(
+					&storage.base, dim, head, vid_is_dead, &dead),
+			"all fastscan entries accounted as tombstoned");
+
+	Page hp = mkt_storage_read_page(&storage.base, head);
+	ASSERT_TRUE(
+			(mkt_posting_opaque(hp)->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0,
+			"fully-dead FASTSCAN page is flagged tombstoned");
+	ASSERT_EQ(
+			0, mkt_posting_head_live_count(hp), "fastscan live_count is zero");
+	mkt_storage_release_page(&storage.base, head);
+
+	ASSERT_EQ(
+			0,
+			scan_count(&storage, params, dim, centroid, head, 128, true),
+			"fastscan scan skips the tombstoned page(s)");
+
+	mkt_rabitq_destroy(params);
+}

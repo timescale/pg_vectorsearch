@@ -58,6 +58,33 @@
 #define MKT_POSTING_PAGE_FIRST	  0x0001
 #define MKT_POSTING_PAGE_OVERFLOW 0x0002
 #define MKT_POSTING_PAGE_FASTSCAN 0x0004 /* reserved for phase 2 */
+/*
+ * Every entry on the page is dead. Set by the VACUUM tombstone pass when a
+ * page's whole contents are deleted (AoS: all entries flagged; FASTSCAN: all
+ * group TIDs dead — the only way a packed page's deletes are recorded, since
+ * its entries can't be flagged individually). The scan skips the page's
+ * scoring kernel entirely; the page stays linked so compaction can later
+ * reclaim it. Cleared if the page is ever reused for new entries.
+ */
+#define MKT_POSTING_PAGE_TOMBSTONED 0x0008
+/*
+ * The page has been unlinked from its cluster chain and is awaiting physical
+ * reclaim (future page-recycle work; not yet emitted by any code path).
+ *
+ * Distinct from TOMBSTONED: a tombstoned page is all-dead but still LINKED, so
+ * scans skip it and follow the chain past it. A DELETED page has additionally
+ * been spliced out (prev->next_blkno swung past it) and recorded in the FSM;
+ * it is off the chain entirely.
+ *
+ * When this flag is set, the head-metadata overlay in the opaque (see the
+ * union below) holds the deletion XID instead of live_count/tail_blkno. The
+ * recycle gate compares that XID against the oldest snapshot before letting an
+ * insert reinitialize the page for a new chain, so a scanner that still holds
+ * a stale pointer to the page can never have it repurposed underneath it.
+ * Only overflow pages are ever DELETED — chain heads are pinned by the
+ * centroid tree and never unlinked.
+ */
+#define MKT_POSTING_PAGE_DELETED 0x0010
 
 /* ----------------------------------------------------------------
  * Structs
@@ -104,19 +131,45 @@ typedef struct MktPostingPageOpaque
 	BlockNumber next_blkno; /* next page in chain */
 	uint32_t	cluster_id;
 	uint16_t	entry_count; /* entries on this page */
-	uint16_t	flags;		 /* FIRST | OVERFLOW | FASTSCAN */
-	uint16_t	page_id;	 /* MKT_POSTING_PAGE_ID */
-	uint16_t	max_entries; /* capacity of this page */
+	uint16_t	flags;		 /* FIRST | OVERFLOW | FASTSCAN | TOMBSTONED |
+							  * DELETED */
+	uint16_t page_id;		 /* MKT_POSTING_PAGE_ID */
+	uint16_t max_entries;	 /* capacity of this page */
+
 	/*
-	 * Per-cluster head metadata — meaningful only on the FIRST page. Lets the
-	 * runtime insert path find the chain tail in O(1) and track per-cluster
-	 * live size (for LIRE split/merge in a later phase). tail_blkno ==
-	 * InvalidBlockNumber means "not yet computed": the first insert walks the
-	 * chain to fill both fields, then maintains them incrementally. Left
-	 * zero / Invalid on overflow (non-first) pages.
+	 * Overlay (8 bytes). On a live page these are the per-cluster head
+	 * metadata; on a page flagged MKT_POSTING_PAGE_DELETED they instead carry
+	 * the deletion XID for the recycle gate. The two uses never collide: head
+	 * metadata is meaningful only on FIRST pages, which are never DELETED
+	 * (heads are pinned by the centroid tree), and the deletion XID is set
+	 * only on unlinked overflow pages, which by definition hold no live
+	 * entries — so live_count/tail_blkno are already dead weight there. The
+	 * anonymous struct/union keeps op->live_count, op->tail_blkno, and
+	 * op->delete_xid all directly accessible; gate the latter on the DELETED
+	 * flag. Storing the XID as a backend-neutral uint64_t (not PG's
+	 * FullTransactionId) keeps this header usable by the standalone engine;
+	 * the PG side converts via U64FromFullTransactionId / the inverse.
 	 */
-	uint32_t	live_count;
-	BlockNumber tail_blkno;
+	union
+	{
+		struct
+		{
+			/*
+			 * Lets the runtime insert path find the chain tail in O(1) and
+			 * track per-cluster live size (for LIRE split/merge in a later
+			 * phase). tail_blkno == InvalidBlockNumber means "not yet
+			 * computed": the first insert walks the chain to fill both fields,
+			 * then maintains them incrementally. Left zero / Invalid on
+			 * overflow (non-first) pages.
+			 */
+			uint32_t	live_count;
+			BlockNumber tail_blkno;
+		};
+
+		/* Valid only when MKT_POSTING_PAGE_DELETED is set (see flag comment).
+		 */
+		uint64_t delete_xid;
+	};
 } MktPostingPageOpaque; /* 24B */
 
 /*

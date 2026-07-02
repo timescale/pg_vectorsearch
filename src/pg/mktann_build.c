@@ -259,6 +259,7 @@ write_meta_page(
 		uint8_t			  nlevels,
 		uint8_t			  fan_out,
 		BlockNumber		  first_centroid,
+		BlockNumber		  first_posting,
 		uint32_t		  ntuples,
 		uint32_t		  nlist,
 		MktCentroidFormat centroid_format,
@@ -278,6 +279,7 @@ write_meta_page(
 	meta->nlevels		  = nlevels;
 	meta->centroid_format = (uint8_t)centroid_format;
 	meta->first_centroid  = first_centroid;
+	meta->first_posting	  = first_posting;
 	meta->ntuples		  = ntuples;
 	meta->nlist			  = nlist;
 	meta->metric		  = (uint8_t)metric;
@@ -989,6 +991,7 @@ do_serial_build(
 			(uint8_t)plan.nlevels,
 			(uint8_t)p->fan_out,
 			root,
+			first_posting,
 			0,
 			nlist,
 			p->centroid_format,
@@ -1073,6 +1076,9 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	double		   indtuples   = 0;
 	double		   soar_dupes  = 0;
 	float		  *global_mean = NULL;
+	/* Posting-area start block, surfaced by the parallel build so the finalize
+	 * can record it in the metadata page (vacuum skips the centroid region). */
+	BlockNumber meta_first_posting = InvalidBlockNumber;
 
 	/* Set by a build path that writes its own centroid pages + metadata (the
 	 * serial page-backed path), so the shared finalize below does WAL only. */
@@ -1140,9 +1146,9 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				 * tree write when parallel_centroids is set. */
 				&global_mean,
 				&parallel_centroids,
-				/* PG reads head pages via the centroid tree at query time, so it
-				 * does not need the posting-head base after the build. */
-				NULL);
+				/* Surfaced for the metadata page: the posting-area start block
+				 * lets vacuum skip the centroid region (main's write_meta_page). */
+				&meta_first_posting);
 
 		if (did_parallel && tree != NULL)
 			bs.params.nlist = tree->nleaves;
@@ -1207,24 +1213,27 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 					mkt_l2_normalize(global_mean, dim);
 			}
 
+			/* Both remaining build paths write their own centroid + head pages
+			 * before the scan (page-backed routing); the finalize only needs the
+			 * metadata page here. first_posting comes from the build (via
+			 * out_first_posting) and is stored so vacuum can skip the centroid
+			 * region. (parallel_centroids is always set when this runs — the
+			 * serial path sets centroids_finalized and skips it.) */
+			(void)parallel_centroids;
+
 			write_meta_page(
 					&storage.base,
 					dim,
 					(uint8_t)tree->nlevels,
 					(uint8_t)p->fan_out,
 					fc,
+					meta_first_posting,
 					0,
 					nlist,
 					p->centroid_format,
 					p->metric,
 					rabitq_seed,
 					global_mean);
-
-			/* Both remaining build paths write their own centroid + head pages
-			 * before the scan (page-backed routing); the finalize only needs the
-			 * metadata page here. (parallel_centroids is always set when this
-			 * runs — the serial path sets centroids_finalized and skips it.) */
-			(void)parallel_centroids;
 
 			Page			page = mkt_storage_write_page(&storage.base, 0);
 			MktannMetaPage *meta = (MktannMetaPage *)PageGetSpecialPointer(
@@ -1234,7 +1243,6 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				meta->flags |= MKT_META_FLAG_FASTSCAN;
 			mkt_storage_commit_page(&storage.base, 0);
 		}
-
 		mkt_build_report_phase(&prog, MKT_BUILD_PHASE_WAL);
 		log_newpage_range(
 				index,

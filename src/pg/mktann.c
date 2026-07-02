@@ -154,6 +154,31 @@ mktann_insert(
 	return false;
 }
 
+/*
+ * Adapt PostgreSQL's IndexBulkDeleteCallback (takes ItemPointer) to the shared
+ * tombstone predicate (takes ItemPointerData by value).
+ */
+typedef struct MktannBulkDeleteCtx
+{
+	IndexBulkDeleteCallback cb;
+	void				   *cb_state;
+} MktannBulkDeleteCtx;
+
+static bool
+tid_is_dead(ItemPointerData tid, void *state)
+{
+	MktannBulkDeleteCtx *c = (MktannBulkDeleteCtx *)state;
+	return c->cb(&tid, c->cb_state);
+}
+
+/*
+ * VACUUM's dead-tuple removal. Block-scans the index and tombstones each
+ * posting chain from its FIRST (head) page via mkt_posting_tombstone_chain —
+ * the head walk covers the chain's overflow pages, so only heads are acted on.
+ * Tombstoned entries are skipped by later scans; physical reclaim happens at a
+ * later compaction/rebuild. This is the cleanup path for both explicit DELETEs
+ * and the dead old-version of every vector-column UPDATE.
+ */
 static IndexBulkDeleteResult *
 mktann_bulkdelete(
 		IndexVacuumInfo		   *info,
@@ -163,6 +188,99 @@ mktann_bulkdelete(
 {
 	if (stats == NULL)
 		stats = palloc0(sizeof(IndexBulkDeleteResult));
+
+	Relation	index	= info->index;
+	BlockNumber nblocks = RelationGetNumberOfBlocks(index);
+	if (nblocks <= 1)
+		return stats; /* block 0 is the metadata page */
+
+	/* dim + metric + first_posting from the per-backend cache (metapage read
+	 * at most once per backend). mktann_cache_meta skips the rotation-matrix
+	 * work the scan / insert cache path does — VACUUM never needs it. */
+	Dimension	   dim;
+	DistanceMetric metric;
+	BlockNumber	   first_posting;
+	mktann_cache_meta(index, &dim, &metric, &first_posting);
+
+	MktannStorage storage;
+	mktann_storage_init(&storage, index, NULL, metric);
+
+	MktannBulkDeleteCtx ctx = {.cb = callback, .cb_state = cb_state};
+
+	/*
+	 * The index is laid out as: block 0 metadata, then the contiguous centroid
+	 * region, then the posting pages. first_posting (from the metapage) is one
+	 * past the last centroid page, so start there and skip the whole centroid
+	 * region without scanning it.
+	 *
+	 * Within the posting region we act only on chain heads; overflow pages are
+	 * reached via the chain from their head, and new/empty pages are expected
+	 * (extension slack). A page that is neither a posting page nor empty is
+	 * the only anomaly worth surfacing (corruption or a format bug); count
+	 * those and emit a single WARNING after the walk rather than one per page,
+	 * so a badly corrupt index can't flood the log (bulkdelete also runs once
+	 * per dead-tuple batch, i.e. potentially many times per VACUUM).
+	 */
+	uint32_t	unrecognized = 0;
+	BlockNumber first_bad	 = InvalidBlockNumber;
+	BlockNumber start		 = Max(first_posting, 1);
+
+	for (BlockNumber blk = start; blk < nblocks; blk++)
+	{
+		vacuum_delay_point(false);
+
+		Buffer buf = ReadBuffer(index, blk);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		Page page		= BufferGetPage(buf);
+		bool is_head	= false;
+		bool recognized = PageIsNew(page); /* an empty page is expected */
+		/*
+		 * Guard on the special-area size before reading the opaque so a page
+		 * of another kind is never misread through the posting layout.
+		 */
+		if (!recognized &&
+			PageGetSpecialSize(page) == sizeof(MktPostingPageOpaque))
+		{
+			MktPostingPageOpaque *op = mkt_posting_opaque(page);
+			if (op->page_id == MKT_POSTING_PAGE_ID)
+			{
+				recognized = true;
+				is_head	   = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+			}
+		}
+		UnlockReleaseBuffer(buf);
+
+		if (!recognized)
+		{
+			if (first_bad == InvalidBlockNumber)
+				first_bad = blk;
+			unrecognized++;
+		}
+
+		if (!is_head)
+			continue;
+
+		stats->tuples_removed += mkt_posting_tombstone_chain(
+				&storage.base, dim, blk, tid_is_dead, &ctx);
+
+		/* Live tuples remaining: the head's maintained live_count, which the
+		 * tombstone pass just decremented (O(1), no rescan). */
+		Page hp = mkt_storage_read_page(&storage.base, blk);
+		stats->num_index_tuples += mkt_posting_head_live_count(hp);
+		mkt_storage_release_page(&storage.base, blk);
+	}
+
+	/* One summary line per call, not one per bad page (see loop comment). */
+	if (unrecognized > 0)
+		ereport(WARNING,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("skipped %u unrecognized page(s) in index \"%s\" "
+						"during bulkdelete (first at block %u); index may be "
+						"corrupt",
+						unrecognized,
+						RelationGetRelationName(index),
+						first_bad)));
+
 	return stats;
 }
 

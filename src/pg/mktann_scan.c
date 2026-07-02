@@ -229,6 +229,7 @@ execute_search(IndexScanDesc scan)
 	ss->stats.clusters_scanned		  = qstats.clusters_scanned;
 	ss->stats.centroid_pages_read	  = qstats.centroid_pages_read;
 	ss->stats.posting_pages_read	  = qstats.posting_pages_read;
+	ss->stats.posting_pages_skipped	  = qstats.posting_pages_skipped;
 	ss->stats.posting_entries_scanned = qstats.posting_entries_scanned;
 	ss->stats.rerank_candidates		  = ss->qstate.ncandidates;
 	ss->stats.rerank_results		  = ss->qstate.nresults;

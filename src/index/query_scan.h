@@ -31,6 +31,7 @@ typedef struct MktQueryStats
 {
 	uint32_t centroid_pages_read;
 	uint32_t posting_pages_read;
+	uint32_t posting_pages_skipped; /* tombstoned all-dead pages skipped */
 	uint32_t posting_entries_scanned;
 	uint32_t clusters_scanned;
 } MktQueryStats;

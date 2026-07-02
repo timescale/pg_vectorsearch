@@ -139,3 +139,160 @@ mkt_posting_insert_one(
 
 	return true;
 }
+
+/*
+ * Contract is in the header. Implementation notes not stated there: each page
+ * is read-scanned first and only write-locked / WAL-logged when it actually
+ * has a dead entry to mark, so vacuuming a chain with no dead tuples dirties
+ * nothing. Marking is idempotent — an already-deleted entry is skipped, not
+ * recounted — so a repeated VACUUM over the same dead TIDs is a no-op.
+ */
+uint32_t
+mkt_posting_tombstone_chain(
+		MktStorage *storage,
+		Dimension	dim,
+		BlockNumber head_blkno,
+		bool (*is_dead)(ItemPointerData tid, void *state),
+		void *state)
+{
+	if (storage == NULL || is_dead == NULL || head_blkno == InvalidBlockNumber)
+		return 0;
+
+	uint32_t	total_marked = 0;
+	BlockNumber blk			 = head_blkno;
+
+	while (blk != InvalidBlockNumber)
+	{
+		/*
+		 * Phase 1: under a SHARE lock, scan the page's entries to find whether
+		 * it has any dead entry that still needs marking. This is only a probe
+		 * — nothing is mutated — so a page with no dead tuples is never
+		 * dirtied or WAL-logged. The AoS scan early-breaks at the first such
+		 * entry (it only needs to know "is there work?"); the FASTSCAN scan
+		 * instead checks whether the whole page is dead, since packed entries
+		 * can't be flagged individually.
+		 */
+		Page						p	 = mkt_storage_read_page(storage, blk);
+		const MktPostingPageOpaque *op	 = mkt_posting_opaque(p);
+		BlockNumber					next = op->next_blkno;
+		uint16_t					flags = op->flags;
+		uint32_t					n	  = op->entry_count;
+
+		/* Already fully tombstoned: nothing to mark, and skip so its entries
+		 * aren't counted into the live_count decrement twice. */
+		if (flags & MKT_POSTING_PAGE_TOMBSTONED)
+		{
+			mkt_storage_release_page(storage, blk);
+			blk = next;
+			continue;
+		}
+
+		bool  is_fastscan = (flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
+		bool  first		  = (flags & MKT_POSTING_PAGE_FIRST) != 0;
+		char *content	  = first ? mkt_posting_content_first(p, dim)
+								  : mkt_posting_content(p);
+		bool  needs_mark  = false; /* AoS: has a not-yet-deleted dead entry */
+		bool  fs_all_dead = false; /* FASTSCAN: every entry is dead */
+
+		if (!is_fastscan)
+		{
+			for (uint32_t i = 0; i < n; i++)
+			{
+				MktPostingEntryHeader *h =
+						mkt_posting_entry_at(content, i, dim);
+				if (!(h->meta.flags & MKT_POSTING_FLAG_DELETED) &&
+					is_dead(h->meta.tid, state))
+				{
+					needs_mark = true;
+					break;
+				}
+			}
+		}
+		else if (n > 0)
+		{
+			/* FASTSCAN entries can't be flagged individually, but a wholly
+			 * dead page can be tombstoned at page granularity. Early-exit on
+			 * the first live TID, so live pages cost little. */
+			fs_all_dead		 = true;
+			uint32_t ngroups = (n + MKT_FASTSCAN_GROUP - 1) /
+							   MKT_FASTSCAN_GROUP;
+			for (uint32_t g = 0; g < ngroups && fs_all_dead; g++)
+			{
+				uint32_t g_count = n - g * MKT_FASTSCAN_GROUP;
+				if (g_count > MKT_FASTSCAN_GROUP)
+					g_count = MKT_FASTSCAN_GROUP;
+				ItemPointerData *tids =
+						mkt_fastscan_group_tids(content, g, dim);
+				for (uint32_t v = 0; v < g_count; v++)
+					if (!is_dead(tids[v], state))
+					{
+						fs_all_dead = false;
+						break;
+					}
+			}
+		}
+		mkt_storage_release_page(storage, blk);
+
+		/*
+		 * Phase 2: only if phase 1 found work, take the EXCLUSIVE write lock
+		 * (which WAL-logs the page on commit) and mark the dead entries. The
+		 * share lock was dropped above and PG has no atomic lock upgrade, so
+		 * the page may have changed; re-derive everything from scratch here
+		 * (re-read entry_count, re-test is_dead and the DELETED flag) rather
+		 * than trusting phase 1's findings. This makes marking idempotent.
+		 */
+		if (needs_mark)
+		{
+			Page				  wp  = mkt_storage_write_page(storage, blk);
+			MktPostingPageOpaque *wop = mkt_posting_opaque(wp);
+			char				 *c	  = (wop->flags & MKT_POSTING_PAGE_FIRST)
+											  ? mkt_posting_content_first(wp, dim)
+											  : mkt_posting_content(wp);
+			uint32_t			  deleted_on_page = 0;
+			for (uint32_t i = 0; i < wop->entry_count; i++)
+			{
+				MktPostingEntryHeader *h = mkt_posting_entry_at(c, i, dim);
+				if (h->meta.flags & MKT_POSTING_FLAG_DELETED)
+				{
+					deleted_on_page++;
+					continue;
+				}
+				if (is_dead(h->meta.tid, state))
+				{
+					h->meta.flags |= MKT_POSTING_FLAG_DELETED;
+					total_marked++;
+					deleted_on_page++;
+				}
+			}
+			/* Whole page now dead: flag it so the scan skips its scoring. */
+			if (wop->entry_count > 0 && deleted_on_page == wop->entry_count)
+				wop->flags |= MKT_POSTING_PAGE_TOMBSTONED;
+			mkt_storage_commit_page(storage, blk);
+		}
+		else if (fs_all_dead)
+		{
+			Page				  wp  = mkt_storage_write_page(storage, blk);
+			MktPostingPageOpaque *wop = mkt_posting_opaque(wp);
+			wop->flags |= MKT_POSTING_PAGE_TOMBSTONED;
+			total_marked += n; /* FASTSCAN entries weren't otherwise counted */
+			mkt_storage_commit_page(storage, blk);
+		}
+
+		blk = next;
+	}
+
+	/* Keep the head's live_count current (one head write per cluster). It is
+	 * stamped at build and maintained by inserts, so it is always meaningful
+	 * here; clamp defensively. */
+	if (total_marked > 0)
+	{
+		Page				  hw = mkt_storage_write_page(storage, head_blkno);
+		MktPostingPageOpaque *op = mkt_posting_opaque(hw);
+		op->live_count			 = (op->live_count >= total_marked)
+										 ? op->live_count - total_marked
+										 : 0;
+		mkt_storage_commit_page(storage, head_blkno);
+	}
+
+	return total_marked;
+}
