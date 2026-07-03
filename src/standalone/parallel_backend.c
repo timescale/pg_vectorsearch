@@ -285,10 +285,11 @@ mkt_pbuild_setup_shared(
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
 	shared->refine_iters = 0; /* standalone builds are not mem-bounded */
-	/* Page-backed routing knobs: match the PG GUC defaults so the shared route
-	 * helper uses a valid beam width during the build scan. */
-	shared->centroid_error_scale = 0.0f;
-	shared->centroid_beam_scale	 = 0.25f;
+	/* Page-backed routing knobs: route the build scan for accuracy, not
+	 * query speed, matching the PG build (see MKT_BUILD_CENTROID_* in
+	 * posting_build.h). */
+	shared->centroid_error_scale = MKT_BUILD_CENTROID_ERROR_SCALE;
+	shared->centroid_beam_scale	 = MKT_BUILD_CENTROID_BEAM_SCALE;
 	shared->fastscan_bits		 = 16;
 	shared->reltuples	 = 0.0;
 	shared->indtuples	 = 0.0;

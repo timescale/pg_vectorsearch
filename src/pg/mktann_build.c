@@ -857,8 +857,13 @@ do_serial_build(
 	idx_base.fastscan =
 			(p->centroid_format == MKT_CENTROID_FMT_FASTSCAN) ? mkt_fastscan_bits
 															  : 0;
-	idx_base.centroid_error_scale = (float)mkt_centroid_error_scale;
-	idx_base.centroid_beam_scale  = (float)mkt_centroid_beam_scale;
+	/*
+	 * Route the build for accuracy, not query speed: use the build-time
+	 * routing constants rather than the query-tuned GUCs (see
+	 * MKT_BUILD_CENTROID_* in posting_build.h).
+	 */
+	idx_base.centroid_error_scale = MKT_BUILD_CENTROID_ERROR_SCALE;
+	idx_base.centroid_beam_scale  = MKT_BUILD_CENTROID_BEAM_SCALE;
 	mkt_query_state_init(&bs->qs, &idx_base, 1, MKT_SECONDARY_TOPK);
 
 	/*
