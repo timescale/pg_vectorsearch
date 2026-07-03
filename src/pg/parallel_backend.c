@@ -524,8 +524,10 @@ mkt_pbuild_setup_shared(
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
 	shared->refine_iters		   = refine_iters;
-	shared->centroid_error_scale   = (float)mkt_centroid_error_scale;
-	shared->centroid_beam_scale	   = (float)mkt_centroid_beam_scale;
+	/* Build routes for accuracy, not query speed (see MKT_BUILD_CENTROID_*
+	 * in posting_build.h): decouple from the query-tuned GUCs. */
+	shared->centroid_error_scale   = MKT_BUILD_CENTROID_ERROR_SCALE;
+	shared->centroid_beam_scale	   = MKT_BUILD_CENTROID_BEAM_SCALE;
 	shared->fastscan_bits		   = mkt_fastscan_bits;
 	SpinLockInit(&pg->mutex);
 	for (int i = 0; i < MKT_REFINE_LOCK_STRIPES; i++)
