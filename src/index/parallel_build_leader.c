@@ -233,6 +233,9 @@ typedef struct LeaderHeadCtx
 	bool				fastscan;
 	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
 	float			   *pt;			   /* [dim] scratch */
+	float			   *pt_cache; /* optional [nlist * dim] rotated-centroid
+								   * cache for the exact batched secondary
+								   * (NULL = disabled) */
 } LeaderHeadCtx;
 
 static void
@@ -240,6 +243,10 @@ leader_write_head(void *arg, uint32_t leaf, const float *centroid)
 {
 	LeaderHeadCtx *h = (LeaderHeadCtx *)arg;
 	mkt_rabitq_rotate(h->rq_params, centroid, h->pt);
+	if (h->pt_cache != NULL)
+		memcpy(h->pt_cache + (size_t)leaf * h->dim,
+			   h->pt,
+			   (size_t)h->dim * sizeof(float));
 
 	MktPostingBuilder hb;
 	if (h->fastscan)
@@ -261,6 +268,9 @@ typedef struct PlanCbArg
 	uint32_t *pages_arr;	 /* [km_k] */
 	uint32_t  max_ent;
 	uint32_t  subtree_nlevels; /* actual depth of the (uniform) subtrees */
+	Dimension dim;
+	double	 *leaf_sum; /* [dim] leaf-centroid sum across all subtrees, for
+						 * the leaf_mean the leader uses as global_mean */
 } PlanCbArg;
 
 static void
@@ -284,6 +294,14 @@ plan_batch_cb(
 		a->pages_arr[child] =
 				(uint32_t)mkt_compute_centroid_layout(sub, a->max_ent, 0, nfb);
 		mkt_free(nfb);
+
+		if (a->leaf_sum != NULL)
+		{
+			const float *lc = hk_leaf_centroids(sub);
+			for (uint32_t l = 0; l < sub->nleaves; l++)
+				for (Dimension d = 0; d < a->dim; d++)
+					a->leaf_sum[d] += lc[(size_t)l * a->dim + d];
+		}
 	}
 }
 
@@ -477,30 +495,16 @@ do_parallel_build(
 			shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_CHILD_SUBTREES, false);
 	uint64_t slot_size = shared->subtree_slot_size;
 
-	/* global_mean = sample mean (the encoder centering; needed before any page
-	 * is written, so it cannot be the mean of the not-yet-known leaves). */
+	/*
+	 * global_mean = mean of the LEAF centroids (the encoder centering),
+	 * matching the in-RAM-tree build -- an unweighted per-cluster mean, not
+	 * the per-vector sample mean. The quantization quality of every centroid
+	 * and posting code depends on this anchor. Pages are written only in the
+	 * WRITE pass, and the PLAN pass builds the identical subtrees first, so
+	 * the leaf-centroid sum is accumulated there (plan_batch_cb) and the mean
+	 * is ready before any page is encoded. Filled per branch below.
+	 */
 	float *global_mean = mkt_alloc((size_t)dim * sizeof(float));
-	{
-		double	*acc   = mkt_alloc0((size_t)dim * sizeof(double));
-		uint64_t total = 0;
-		for (int w = 0; w < nparticipants; w++)
-		{
-			float	*sw = mkt_dsm_worker_samples(dsm_samples, w);
-			uint32_t nw = mkt_dsm_sample_counts(dsm_samples)[w];
-			for (uint32_t i = 0; i < nw; i++)
-			{
-				const float *v = sw + (size_t)i * dim;
-				for (Dimension j = 0; j < dim; j++)
-					acc[j] += v[j];
-			}
-			total += nw;
-		}
-		for (Dimension j = 0; j < dim; j++)
-			global_mean[j] = total ? (float)(acc[j] / (double)total) : 0.0f;
-		if (shared->metric == DISTANCE_COSINE)
-			mkt_l2_normalize(global_mean, dim);
-		mkt_free(acc);
-	}
 
 	BlockNumber first_centroid = 1; /* block 0 = metadata */
 	BlockNumber first_posting  = 0;
@@ -512,13 +516,16 @@ do_parallel_build(
 		uint32_t *nleaves_arr = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
 		uint32_t *pages_arr	  = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
 
-		/* PLAN pass: build subtrees, discover leaf + page counts. */
+		/* PLAN pass: build subtrees, discover leaf + page counts (and the
+		 * leaf-centroid sum for global_mean). */
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_SUBTREES);
 		PlanCbArg planarg = {
 				.nleaves_arr	 = nleaves_arr,
 				.pages_arr		 = pages_arr,
 				.max_ent		 = max_ent,
 				.subtree_nlevels = 1,
+				.dim			 = dim,
+				.leaf_sum		 = mkt_alloc0((size_t)dim * sizeof(double)),
 		};
 		mkt_pbuild_stream_subtrees(
 				0, nparticipants, dsm_samples, dsm_ra, cents, km_k, nlist,
@@ -549,6 +556,24 @@ do_parallel_build(
 		BlockNumber subtree_base = first_centroid + root_pages;
 		first_posting			 = subtree_base + bo;
 
+		/* The leaf-pt cache was sized for the REQUESTED nlist, but k-means
+		 * can produce more leaves (a leaf-parent may split into up to fan_out
+		 * leaves). Disable the cache -- workers fall back to the beam
+		 * secondary -- rather than overrun the DSM region. */
+		if ((uint64_t)actual_nlist * dim * sizeof(float) >
+			shared->leaf_pt_bytes)
+			shared->leaf_pt_bytes = 0;
+
+		/* Leaf-centroid mean from the PLAN pass -> the encoder centering. */
+		for (Dimension d = 0; d < dim; d++)
+			global_mean[d] = actual_nlist > 0 ? (float)(planarg.leaf_sum[d] /
+														(double)actual_nlist)
+											  : 0.0f;
+		if (shared->metric == DISTANCE_COSINE)
+			mkt_l2_normalize(global_mean, dim);
+		mkt_free(planarg.leaf_sum);
+		planarg.leaf_sum = NULL;
+
 		/* Head blocks are formula-derived: leaf c's head is first_posting + c, a
 		 * contiguous head region of actual_nlist pages. Pre-extend the relation
 		 * to cover the centroid pages + the head region so the write pass can
@@ -567,6 +592,12 @@ do_parallel_build(
 				.fastscan	   = shared->fastscan,
 				.first_posting = first_posting,
 				.pt			   = mkt_alloc((size_t)dim * sizeof(float)),
+				.pt_cache	   = shared->leaf_pt_bytes > 0
+									   ? shm_toc_lookup(
+											 pcxt->toc,
+											 MKT_DSM_KEY_LEAF_PT,
+											 false)
+									   : NULL,
 		};
 		WriteCbArg writearg = {
 				.storage		  = storage,
@@ -637,6 +668,18 @@ do_parallel_build(
 		mkt_free(nfb);
 		first_posting = first_centroid + centroid_pages;
 
+		/* Cache sized for the worst-case leaf count; disable rather than
+		 * overrun if k-means still exceeded it. */
+		if ((uint64_t)actual_nlist * dim * sizeof(float) >
+			shared->leaf_pt_bytes)
+			shared->leaf_pt_bytes = 0;
+
+		/* Leaf-centroid mean -> the encoder centering (flat tree in hand). */
+		mkt_vector_mean(
+				hk_leaf_centroids(flat), actual_nlist, dim, global_mean);
+		if (shared->metric == DISTANCE_COSINE)
+			mkt_l2_normalize(global_mean, dim);
+
 		/* Head region: actual_nlist pages at first_posting (leaf c -> head
 		 * first_posting + c). Pre-extend to cover centroid + head region;
 		 * continuations append past it. No O(nlist) reserve. */
@@ -650,6 +693,12 @@ do_parallel_build(
 				.fastscan	   = shared->fastscan,
 				.first_posting = first_posting,
 				.pt			   = mkt_alloc((size_t)dim * sizeof(float)),
+				.pt_cache	   = shared->leaf_pt_bytes > 0
+									   ? shm_toc_lookup(
+											 pcxt->toc,
+											 MKT_DSM_KEY_LEAF_PT,
+											 false)
+									   : NULL,
 		};
 		uint32_t pages;
 		root_blk = mkt_write_subtree_streaming(
@@ -725,6 +774,12 @@ do_parallel_build(
 				.fastscan	   = shared->fastscan,
 				.first_posting = first_posting,
 				.pt			   = mkt_alloc((size_t)dim * sizeof(float)),
+				.pt_cache	   = shared->leaf_pt_bytes > 0
+									   ? shm_toc_lookup(
+											 pcxt->toc,
+											 MKT_DSM_KEY_LEAF_PT,
+											 false)
+									   : NULL,
 		};
 		mkt_pbuild_exec_refine_paged(
 				0, heap, index, index_info, shared, NULL, first_posting, accum,

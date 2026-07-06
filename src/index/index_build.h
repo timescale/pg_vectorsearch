@@ -105,9 +105,12 @@ void mkt_write_centroid_tree(
  * WRITE pass that emits pages with the posting-list heads the caller derived
  * from the plan's per-leaf counts.
  *
- * global_mean must be precomputed (the sample mean); the centroid encoder needs
- * it before any page is written, so it cannot be the mean of the (not-yet-known)
- * leaf centroids.
+ * global_mean (the encoder centering) must be known before any page is
+ * written. The PLAN pass runs the identical clustering, so it also reports
+ * the mean of the leaf centroids (plan.leaf_mean) for the caller to use as
+ * global_mean -- matching the in-RAM-tree build, which centers on the
+ * leaf-centroid mean rather than the per-vector sample mean. The quantization
+ * quality of every centroid and posting code depends on this anchor.
  * ---------------------------------------------------------------- */
 
 typedef struct MktStreamTreePlan
@@ -117,6 +120,8 @@ typedef struct MktStreamTreePlan
 	uint32_t  centroid_pages; /* pages the write pass will emit */
 	uint32_t *leaf_counts;	  /* [nleaves] sample count per leaf (mkt_alloc;
 							   * caller frees with mkt_free) */
+	float	 *leaf_mean;	  /* [dim] unweighted mean of the leaf centroids
+							   * (mkt_alloc; caller frees with mkt_free) */
 } MktStreamTreePlan;
 
 /*

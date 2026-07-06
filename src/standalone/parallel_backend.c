@@ -252,9 +252,16 @@ mkt_pbuild_setup_shared(
 	/* Page-backed routing region (leader fills before the tree-ready barrier):
 	 * the global mean. The posting-head base is a scalar in MktBuildShared. */
 	shm_toc_estimate_chunk(&pcxt->estimator, (Size)dim * sizeof(float));
+	/* Rotated leaf-centroid cache for the exact batched secondary. Standalone
+	 * is in-memory, so it is unconditional (no maintenance_work_mem gate).
+	 * Sized for the worst-case leaf count (k-means can produce more leaves
+	 * than the target nlist); the leader re-checks before filling. */
+	uint64_t leaf_pt_bytes = (uint64_t)mkt_max_nlist(nlist, fan_out) * dim *
+							 sizeof(float);
+	shm_toc_estimate_chunk(&pcxt->estimator, (Size)leaf_pt_bytes);
 	/* Keyed regions: shared, barrier, samples, centroids, km_workers,
-	 * root_assign, sortshared, child_subtrees, global_mean. */
-	shm_toc_estimate_keys(&pcxt->estimator, 9);
+	 * root_assign, sortshared, child_subtrees, global_mean, leaf_pt. */
+	shm_toc_estimate_keys(&pcxt->estimator, 10);
 
 	InitializeParallelDSM(pcxt);
 
@@ -284,7 +291,8 @@ mkt_pbuild_setup_shared(
 	shared->km_tolerance		   = 1e-4f;
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
-	shared->refine_iters = 0; /* standalone builds are not mem-bounded */
+	shared->refine_iters  = 0; /* standalone builds are not mem-bounded */
+	shared->leaf_pt_bytes = leaf_pt_bytes;
 	/* Page-backed routing knobs: route the build scan for accuracy, not
 	 * query speed, matching the PG build (see MKT_BUILD_CENTROID_* in
 	 * posting_build.h). */
@@ -345,6 +353,12 @@ mkt_pbuild_setup_shared(
 	float *dsm_gmean = shm_toc_allocate(pcxt->toc, (Size)dim * sizeof(float));
 	memset(dsm_gmean, 0, (Size)dim * sizeof(float));
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, dsm_gmean);
+
+	/* Rotated leaf-centroid cache (exact batched secondary); leader fills it
+	 * during the streaming head write. */
+	float *leaf_pt = shm_toc_allocate(pcxt->toc, (Size)leaf_pt_bytes);
+	memset(leaf_pt, 0, (Size)leaf_pt_bytes);
+	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_LEAF_PT, leaf_pt);
 
 	/* Dummy usage regions so the leader's instrumentation loop is safe. */
 	WalUsage	*walusage	 = shm_toc_allocate(pcxt->toc, usage_sz);

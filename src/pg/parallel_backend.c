@@ -465,6 +465,20 @@ mkt_pbuild_setup_shared(
 				&pcxt->estimator,
 				mkt_dsm_refine_accum_size(refine_tile_cap, dim));
 
+	/* Rotated leaf-centroid cache for the exact batched secondary search,
+	 * maintenance_work_mem-gated: enabled only when the cache fits a quarter
+	 * of the budget (the replica search falls back to the routing beam's
+	 * candidates otherwise, so the build stays memory-bounded). Sized for the
+	 * worst-case leaf count -- k-means can produce more leaves than the
+	 * target nlist -- since the actual count is only known after the PLAN
+	 * pass; the leader re-checks against the real count before filling. */
+	uint64_t leaf_pt_bytes = (uint64_t)mkt_max_nlist(nlist, fan_out) * dim *
+							 sizeof(float);
+	if (leaf_pt_bytes > ((uint64_t)maintenance_work_mem * 1024) / 4)
+		leaf_pt_bytes = 0;
+	if (leaf_pt_bytes > 0)
+		shm_toc_estimate_chunk(&pcxt->estimator, (Size)leaf_pt_bytes);
+
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mul_size(sizeof(WalUsage), pcxt->nworkers));
 	shm_toc_estimate_chunk(
@@ -479,11 +493,13 @@ mkt_pbuild_setup_shared(
 
 	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
 	 * sortshared, child_subtrees, wal, buffer, global_mean + optionally
-	 * refine_accum / query_text */
+	 * refine_accum / leaf_pt / query_text */
 	int nkeys = 11;
 	if (debug_query_string)
 		nkeys++;
 	if (refine_iters > 0)
+		nkeys++;
+	if (leaf_pt_bytes > 0)
 		nkeys++;
 	shm_toc_estimate_keys(&pcxt->estimator, nkeys);
 
@@ -524,6 +540,7 @@ mkt_pbuild_setup_shared(
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
 	shared->refine_iters		   = refine_iters;
+	shared->leaf_pt_bytes		   = leaf_pt_bytes;
 	/* Build routes for accuracy, not query speed (see MKT_BUILD_CENTROID_*
 	 * in posting_build.h): decouple from the query-tuned GUCs. */
 	shared->centroid_error_scale   = MKT_BUILD_CENTROID_ERROR_SCALE;
@@ -624,6 +641,15 @@ mkt_pbuild_setup_shared(
 		accum->nleaves			 = refine_tile_cap;
 		accum->dim				 = dim;
 		shm_toc_insert(pcxt->toc, MKT_DSM_KEY_REFINE_ACCUM, accum);
+	}
+
+	/* Rotated leaf-centroid cache (exact batched secondary); the leader fills
+	 * it during the streaming head write, before the tree-ready barrier. */
+	if (leaf_pt_bytes > 0)
+	{
+		float *leaf_pt = shm_toc_allocate(pcxt->toc, (Size)leaf_pt_bytes);
+		memset(leaf_pt, 0, (Size)leaf_pt_bytes);
+		shm_toc_insert(pcxt->toc, MKT_DSM_KEY_LEAF_PT, leaf_pt);
 	}
 
 	WalUsage *walusage = shm_toc_allocate(
