@@ -127,71 +127,6 @@ uint32_t mkt_build_assign_primary(
 		Distance			 *out_dist);
 
 /* ----------------------------------------------------------------
- * Page-backed build routing (unified with the query/insert path)
- *
- * Routes each vector to its posting list exactly as a query does --
- * mkt_query_route over the centroid pages -- then encodes the RaBitQ
- * residual against the pt_centroid read from the target list's head page
- * and streams it to the cluster-keyed sorter (primary + optional SOAR /
- * boundary secondary). Shared by the serial build and the parallel posting
- * workers so build, insert, and query all route identically. The centroid
- * and head pages must already be written when this runs.
- * ---------------------------------------------------------------- */
-typedef struct MktBuildRouteCtx
-{
-	MktQueryState	   *qs;		   /* routing state (not owned) */
-	MktSorter		   *sorter;	   /* cluster-keyed output (not owned) */
-	const RaBitQParams *rq_params; /* not owned */
-	MktStorage		   *storage;   /* head-page reads (not owned) */
-	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
-	uint32_t			nlist;
-	Dimension			dim;
-	double				soar_lambda;
-	double				boundary_epsilon;
-
-	/* Owned scratch (allocated in init, freed in cleanup). */
-	float		 *cand_pt;	 /* [MKT_SECONDARY_TOPK * dim] gathered pt_centroids */
-	uint32_t	 *cand_leaf; /* [MKT_SECONDARY_TOPK] leaf per candidate */
-	Distance	 *cand_dist; /* [MKT_SECONDARY_TOPK] candidate distances */
-	float		 *pt_r;		 /* [dim] rotated residual scratch */
-	RaBitQData	 *enc_buf;	 /* RaBitQ encode output */
-	RaBitQScratch enc_scratch;
-	char		 *entry; /* [mkt_posting_entry_size(dim)] */
-
-	/* Counters. */
-	double indtuples;
-	double soar_dupes;
-} MktBuildRouteCtx;
-
-void mkt_build_route_ctx_init(
-		MktBuildRouteCtx   *ctx,
-		MktQueryState	   *qs,
-		MktSorter		   *sorter,
-		const RaBitQParams *rq_params,
-		MktStorage		   *storage,
-		BlockNumber			first_posting,
-		uint32_t			nlist,
-		Dimension			dim,
-		double				soar_lambda,
-		double				boundary_epsilon);
-
-void mkt_build_route_ctx_cleanup(MktBuildRouteCtx *ctx);
-
-/* Route one vector, encode, and stream its entries to the sorter. Returns
- * true when a secondary (SOAR / boundary) replica was also emitted. */
-bool mkt_build_route_emit(
-		MktBuildRouteCtx *ctx, const float *vec, ItemPointerData tid);
-
-/* Map a routed posting-head block back to its leaf index. Head blocks are the
- * formula first_posting + leaf, so this is a subtraction. Shared by the
- * route/encode path and the page-backed refine pass. */
-static inline uint32_t
-mkt_route_head_to_leaf(BlockNumber first_posting, BlockNumber head)
-{
-	return (uint32_t)(head - first_posting);
-}
-
-/* ----------------------------------------------------------------
  * Batched secondary (boundary + SOAR) assignment
  *
  * Primary assignment stays per-vector (tree descent); the secondary
@@ -248,6 +183,103 @@ void mkt_secondary_batch_assign(
 		const float			 *primary_dist,
 		const MktBuildParams *params,
 		uint32_t			 *out_secondary);
+
+/* ----------------------------------------------------------------
+ * Page-backed build routing (unified with the query/insert path)
+ *
+ * Routes each vector to its posting list exactly as a query does --
+ * mkt_query_route over the centroid pages -- then encodes the RaBitQ
+ * residual against the pt_centroid read from the target list's head page
+ * and streams it to the cluster-keyed sorter (primary + optional SOAR /
+ * boundary secondary). Shared by the serial build and the parallel posting
+ * workers so build, insert, and query all route identically. The centroid
+ * and head pages must already be written when this runs.
+ * ---------------------------------------------------------------- */
+typedef struct MktBuildRouteCtx
+{
+	MktQueryState	   *qs;		   /* routing state (not owned) */
+	MktSorter		   *sorter;	   /* cluster-keyed output (not owned) */
+	const RaBitQParams *rq_params; /* not owned */
+	MktStorage		   *storage;   /* head-page reads (not owned) */
+	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
+	uint32_t			nlist;
+	Dimension			dim;
+	double				soar_lambda;
+	double				boundary_epsilon;
+
+	/* Owned scratch (allocated in init, freed in cleanup). */
+	float		 *cand_pt;	 /* [MKT_SECONDARY_TOPK * dim] gathered pt_centroids */
+	uint32_t	 *cand_leaf; /* [MKT_SECONDARY_TOPK] leaf per candidate */
+	Distance	 *cand_dist; /* [MKT_SECONDARY_TOPK] candidate distances */
+	float		 *pt_r;		 /* [dim] rotated residual scratch */
+	RaBitQData	 *enc_buf;	 /* RaBitQ encode output */
+	RaBitQScratch enc_scratch;
+	char		 *entry; /* [mkt_posting_entry_size(dim)] */
+
+	/*
+	 * Exact batched secondary (optional). When leaf_pt is set (see
+	 * mkt_build_route_secondary_exact), the SOAR/boundary secondary is not
+	 * picked from the beam candidates but batched through
+	 * mkt_secondary_batch_assign over ALL leaf pt_centroids -- the same
+	 * exact replica search the in-RAM-tree build runs. All math is in
+	 * rotated (P^T) space, which preserves distances and dot products, so
+	 * the result matches the float-space search. Batch buffers are owned.
+	 */
+	const float		 *leaf_pt; /* [nlist * dim] rotated leaf centroids */
+	DistanceMetric	  metric;
+	MktSecondaryBatch sb;
+	float			 *batch_ptq;	 /* [BATCH * dim] rotated queries */
+	ItemPointerData	 *batch_tid;	 /* [BATCH] */
+	uint32_t		 *batch_primary; /* [BATCH] */
+	float			 *batch_pdist;	 /* [BATCH] float primary distance */
+	uint32_t		 *batch_sec;	 /* [BATCH] flush output */
+	uint32_t		  batch_count;
+
+	/* Counters. */
+	double indtuples;
+	double soar_dupes;
+} MktBuildRouteCtx;
+
+void mkt_build_route_ctx_init(
+		MktBuildRouteCtx   *ctx,
+		MktQueryState	   *qs,
+		MktSorter		   *sorter,
+		const RaBitQParams *rq_params,
+		MktStorage		   *storage,
+		BlockNumber			first_posting,
+		uint32_t			nlist,
+		Dimension			dim,
+		double				soar_lambda,
+		double				boundary_epsilon);
+
+void mkt_build_route_ctx_cleanup(MktBuildRouteCtx *ctx);
+
+/*
+ * Switch the route context to the exact batched secondary. leaf_pt is the
+ * [nlist * dim] array of rotated (P^T) leaf centroids -- identical values to
+ * the head pages' pt_centroid -- owned by the caller and valid for the whole
+ * scan. Call after init and before the first emit.
+ */
+void mkt_build_route_secondary_exact(
+		MktBuildRouteCtx *ctx, const float *leaf_pt, DistanceMetric metric);
+
+/* Flush any batched secondaries. Must be called after the scan when the
+ * exact batched secondary is enabled (safe to call otherwise). */
+void mkt_build_route_flush(MktBuildRouteCtx *ctx);
+
+/* Route one vector, encode, and stream its entries to the sorter. Returns
+ * true when a secondary (SOAR / boundary) replica was also emitted. */
+bool mkt_build_route_emit(
+		MktBuildRouteCtx *ctx, const float *vec, ItemPointerData tid);
+
+/* Map a routed posting-head block back to its leaf index. Head blocks are the
+ * formula first_posting + leaf, so this is a subtraction. Shared by the
+ * route/encode path and the page-backed refine pass. */
+static inline uint32_t
+mkt_route_head_to_leaf(BlockNumber first_posting, BlockNumber head)
+{
+	return (uint32_t)(head - first_posting);
+}
 
 /* ----------------------------------------------------------------
  * Page format ops — the only part that differs between formats

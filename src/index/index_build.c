@@ -159,6 +159,8 @@ typedef struct StreamCtx
 	/* accumulators */
 	uint32_t	nleaves;	   /* running (== next first_leaf) */
 	uint32_t   *leaf_counts;   /* plan only, [nlist] */
+	double	   *leaf_sum;	   /* plan only, [dim]: leaf-centroid sum for the
+								* leaf_mean the caller uses as global_mean */
 	uint32_t	centroid_pages; /* plan only */
 	BlockNumber next_blk;	   /* write only: next reserved centroid block */
 	bool		ok;
@@ -291,7 +293,16 @@ stream_node(
 							km->centroids + (size_t)kk * c->dim);
 		}
 		else
+		{
 			c->centroid_pages += stream_pages_for(c, kept);
+			if (c->leaf_sum != NULL)
+				for (uint32_t kk = 0; kk < kept; kk++)
+				{
+					const float *lc = km->centroids + (size_t)kk * c->dim;
+					for (Dimension d = 0; d < c->dim; d++)
+						c->leaf_sum[d] += lc[d];
+				}
+		}
 		c->nleaves += kept;
 	}
 	else
@@ -376,12 +387,14 @@ mkt_stream_centroid_plan(
 	if (max_leaves < nlist)
 		max_leaves = nlist;
 	c.leaf_counts = mkt_alloc0((size_t)max_leaves * sizeof(uint32_t));
+	c.leaf_sum	  = mkt_alloc0((size_t)dim * sizeof(double));
 
 	stream_node(&c, NULL, nvecs, 0);
 
 	if (!c.ok)
 	{
 		mkt_free(c.leaf_counts);
+		mkt_free(c.leaf_sum);
 		return false;
 	}
 
@@ -389,6 +402,12 @@ mkt_stream_centroid_plan(
 	out->nlevels		= c.nlevels;
 	out->centroid_pages = c.centroid_pages;
 	out->leaf_counts	= c.leaf_counts;
+	out->leaf_mean		= mkt_alloc((size_t)dim * sizeof(float));
+	for (Dimension d = 0; d < dim; d++)
+		out->leaf_mean[d] = c.nleaves > 0
+								  ? (float)(c.leaf_sum[d] / (double)c.nleaves)
+								  : 0.0f;
+	mkt_free(c.leaf_sum);
 	return true;
 }
 

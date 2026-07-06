@@ -552,6 +552,9 @@ typedef struct SerialHeadCtx
 	bool				fastscan;
 	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
 	float			   *pt;			   /* [dim] scratch */
+	float			   *pt_cache; /* optional [nlist * dim] rotated-centroid
+								   * cache for the exact batched secondary
+								   * (NULL = disabled) */
 } SerialHeadCtx;
 
 static void
@@ -559,6 +562,10 @@ serial_write_head(void *arg, uint32_t leaf, const float *centroid)
 {
 	SerialHeadCtx *h = (SerialHeadCtx *)arg;
 	mkt_rabitq_rotate(h->rq_params, centroid, h->pt);
+	if (h->pt_cache != NULL)
+		memcpy(h->pt_cache + (size_t)leaf * h->dim,
+			   h->pt,
+			   (size_t)h->dim * sizeof(float));
 
 	MktPostingBuilder hb;
 	if (h->fastscan)
@@ -775,6 +782,19 @@ do_serial_build(
 	uint32_t nlist	 = plan.nleaves;
 	bs->params.nlist = nlist;
 
+	/*
+	 * Re-center the encoder on the leaf-centroid mean the plan pass reported
+	 * (the write pass reproduces the identical tree). The in-RAM-tree build
+	 * centers on the mean of the leaf centroids, not the per-vector sample
+	 * mean, and the quantization quality of every centroid and posting code
+	 * depends on this anchor.
+	 */
+	memcpy(global_mean, plan.leaf_mean, (size_t)dim * sizeof(float));
+	if (p->metric == DISTANCE_COSINE)
+		mkt_l2_normalize(global_mean, dim);
+	mkt_free(plan.leaf_mean);
+	plan.leaf_mean = NULL;
+
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SETUP);
 	RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
 
@@ -802,6 +822,23 @@ do_serial_build(
 	 * finalizes centroids + metadata itself (out_finalized).
 	 */
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_CENTROID);
+
+	/*
+	 * Rotated leaf-centroid cache for the exact batched SOAR/boundary
+	 * secondary search, maintenance_work_mem-gated: only when nlist*dim
+	 * floats fit a quarter of the budget (the replica search falls back to
+	 * the routing beam's candidates otherwise, keeping the build bounded).
+	 * Captured for free during the streaming head write below; the refine
+	 * pass updates it through the same callback.
+	 */
+	uint64_t leaf_pt_bytes = (uint64_t)nlist * dim * sizeof(float);
+	if (leaf_pt_bytes > ((uint64_t)maintenance_work_mem * 1024) / 4)
+		leaf_pt_bytes = 0;
+	float *leaf_pt = leaf_pt_bytes > 0
+						   ? MemoryContextAllocHuge(
+									 CurrentMemoryContext, (Size)leaf_pt_bytes)
+						   : NULL;
+
 	SerialHeadCtx headctx = {
 			.storage	   = storage,
 			.rq_params	   = rq_params,
@@ -809,6 +846,7 @@ do_serial_build(
 			.fastscan	   = p->fastscan,
 			.first_posting = first_posting,
 			.pt			   = palloc((size_t)dim * sizeof(float)),
+			.pt_cache	   = leaf_pt,
 	};
 	BlockNumber root = mkt_stream_centroid_write(
 			storage,
@@ -884,6 +922,7 @@ do_serial_build(
 				.fastscan	   = p->fastscan,
 				.first_posting = first_posting,
 				.pt			   = palloc((size_t)dim * sizeof(float)),
+				.pt_cache	   = leaf_pt,
 		};
 		serial_refine_heads(bs, &rhead, &bs->qs, first_posting, nlist);
 		pfree(rhead.pt);
@@ -933,6 +972,11 @@ do_serial_build(
 			p->soar_lambda,
 			p->boundary_epsilon);
 
+	/* Exact batched SOAR/boundary secondary over the rotated leaf-centroid
+	 * cache when it fit the budget; beam-candidate secondary otherwise. */
+	if (leaf_pt != NULL)
+		mkt_build_route_secondary_exact(&bs->route, leaf_pt, p->metric);
+
 	/* Reports the scan phase and fires the "mktann-build-load" test hook (see
 	 * the seam): lets an isolation test observe the in-progress serial build.
 	 */
@@ -950,6 +994,14 @@ do_serial_build(
 			build_callback,
 			(void *)bs,
 			NULL);
+
+	/* Emit any batched secondaries left in the final partial batch. */
+	mkt_build_route_flush(&bs->route);
+	if (leaf_pt != NULL)
+	{
+		pfree(leaf_pt);
+		leaf_pt = NULL;
+	}
 
 	instr_time t_serial_scan;
 	INSTR_TIME_SET_CURRENT(t_serial_scan);
