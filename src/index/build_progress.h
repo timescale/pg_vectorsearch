@@ -31,11 +31,10 @@
 #define MKT_BUILD_PHASE_WAL			  8
 #define MKT_BUILD_PHASE_SCAN_PARALLEL 9	 /* parallel posting scan / drain */
 #define MKT_BUILD_PHASE_SUBTREES	  10 /* phase 2c subtree build */
-#define MKT_BUILD_PHASE_GRAFT		  11 /* tree assembly (graft / flat) */
-#define MKT_BUILD_PHASE_REFINE		  12 /* full-table leaf refinement */
+#define MKT_BUILD_PHASE_REFINE		  11 /* full-table leaf refinement */
 
 /* Highest valid phase value (for range checks and exhaustive iteration). */
-#define MKT_BUILD_PHASE_MAX 12
+#define MKT_BUILD_PHASE_MAX 11
 
 /*
  * Human-readable name for a build phase, identical under PostgreSQL and

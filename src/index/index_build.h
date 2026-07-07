@@ -99,7 +99,8 @@ void mkt_write_centroid_tree(
  * Builds the hierarchical k-means tree top-down (DFS) and streams centroid
  * pages straight to storage, never materializing the whole tree in RAM. Peak
  * memory is the caller's sample buffer + an O(fan_out*depth*dim) recursion
- * stack — no O(nlist*dim) blob, no graft. Runs in two deterministic passes
+ * stack; the whole tree would be O(nlist*dim). Runs in two deterministic
+ * passes
  * (k-means seed fixed, so the same sample yields the identical tree both
  * times): a PLAN pass that discovers the tree shape without writing, then a
  * WRITE pass that emits pages with the posting-list heads the caller derived
