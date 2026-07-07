@@ -28,6 +28,17 @@ typedef struct MktannStorage
 	DistanceMetric metric;	   /* distance metric for reranking */
 	bool		   build_mode; /* skip per-page WAL during build */
 	uint32_t	   read_count; /* debug: total page reads */
+
+	/*
+	 * Build-time centroid-page cache: a local copy of the blocks below
+	 * first_posting (metadata + centroid tree), which are immutable during
+	 * the posting and refine scans. Routing descends these pages on every
+	 * row, so serving them from local memory removes the buffer-manager
+	 * pin/lock protocol from the scans' hottest loop. NULL when disabled
+	 * (reads go through the buffer cache as usual).
+	 */
+	char	   *cent_cache;
+	BlockNumber cent_cache_nblocks;
 } MktannStorage;
 
 /*
@@ -47,5 +58,18 @@ void mktann_storage_init(
  * use the read_stream-optimized rerank path when applicable.
  */
 void mktann_storage_set_rel(MktannStorage *s, Relation rel);
+
+/*
+ * Copy blocks [0, nblocks) into a local centroid-page cache so build-scan
+ * routing reads them without buffer-manager traffic. Enabled only when the
+ * copy fits max_bytes (build memory stays bounded); a no-op otherwise. The
+ * caller must guarantee those blocks are immutable while the cache lives —
+ * true between the centroid-tree write and the end of the posting scan.
+ */
+void mktann_storage_cache_centroids(
+		MktannStorage *s, BlockNumber nblocks, uint64_t max_bytes);
+
+/* Drop the centroid-page cache (safe if not loaded). */
+void mktann_storage_uncache_centroids(MktannStorage *s);
 
 #endif /* MKTANN_STORAGE_H */

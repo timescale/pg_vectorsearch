@@ -132,6 +132,16 @@ mkt_pbuild_worker_storage_release(MktStorage *s)
 	(void)s; /* shared with the leader; not owned by the worker */
 }
 
+void
+mkt_pbuild_worker_storage_cache_tree(
+		MktStorage *s, BlockNumber nblocks, uint64_t max_bytes)
+{
+	/* Standalone pages already live in memory; nothing to cache. */
+	(void)s;
+	(void)nblocks;
+	(void)max_bytes;
+}
+
 /*
  * Tear the parallel context down (joins the worker threads and frees the
  * arena) and leave parallel mode.

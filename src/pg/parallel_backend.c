@@ -230,8 +230,17 @@ void
 mkt_pbuild_worker_storage_release(MktStorage *s)
 {
 	/* The route helper releases every page it reads, so no buffer stays pinned;
-	 * just free the wrapper (allocated in the worker's memory context). */
+	 * drop the tree cache (if loaded) and free the wrapper (allocated in the
+	 * worker's memory context). */
+	mktann_storage_uncache_centroids((MktannStorage *)s);
 	pfree(s);
+}
+
+void
+mkt_pbuild_worker_storage_cache_tree(
+		MktStorage *s, BlockNumber nblocks, uint64_t max_bytes)
+{
+	mktann_storage_cache_centroids((MktannStorage *)s, nblocks, max_bytes);
 }
 
 /*

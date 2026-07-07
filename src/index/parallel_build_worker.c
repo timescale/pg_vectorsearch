@@ -772,6 +772,13 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * (PG opens one on the worker's indexRel; standalone shares the leader's). */
 	MktStorage *storage = mkt_pbuild_worker_storage(&w);
 
+	/* Local copy of the (immutable) metadata + centroid pages so the refine
+	 * and posting scans route without buffer-manager traffic. Bounded by a
+	 * slice of the sort budget; skipped when the region does not fit. */
+	mkt_pbuild_worker_storage_cache_tree(
+			storage, shared->first_posting,
+			(uint64_t)shared->work_mem_kb * 1024 / 16);
+
 	/* Routing base — the same MktIndexBase the query/insert build, so the worker
 	 * routes each row identically. nlevels + first_centroid (the streamed tree's
 	 * root block) come from the shared state the leader published; the scales +

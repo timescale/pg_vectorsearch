@@ -737,6 +737,16 @@ extern MktStorage *mkt_pbuild_worker_storage(MktPBuildWorker *w);
 extern void		   mkt_pbuild_worker_storage_release(MktStorage *s);
 
 /*
+ * Cache the immutable tree region (blocks [0, nblocks): metadata + centroid
+ * pages) in local memory so the posting/refine scans route without
+ * buffer-manager traffic. Bounded: a no-op when the copy would exceed
+ * max_bytes. The standalone back-end reads pages from memory already, so its
+ * implementation is empty.
+ */
+extern void mkt_pbuild_worker_storage_cache_tree(
+		MktStorage *s, BlockNumber nblocks, uint64_t max_bytes);
+
+/*
  * Accumulate one worker's tuple counts into the shared state under the
  * back-end's lock (the lock lives in the back-end's derived shared struct).
  */

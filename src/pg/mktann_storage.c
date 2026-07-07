@@ -40,6 +40,11 @@ pg_read_page(MktStorage *self, BlockNumber blkno)
 {
 	MktannStorage *s = PG_STORAGE(self);
 
+	/* Immutable centroid pages come from the local cache when loaded: no
+	 * pin, no lock, no cur_buf (release is a matching no-op). */
+	if (s->cent_cache != NULL && blkno < s->cent_cache_nblocks)
+		return (Page)(s->cent_cache + (size_t)blkno * BLCKSZ);
+
 	Buffer buf = ReadBuffer(s->index, blkno);
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
 	s->cur_buf = buf;
@@ -53,9 +58,43 @@ pg_release_page(MktStorage *self, BlockNumber blkno)
 {
 	MktannStorage *s = PG_STORAGE(self);
 
+	if (s->cent_cache != NULL && blkno < s->cent_cache_nblocks)
+		return;
+
 	(void)blkno;
 	UnlockReleaseBuffer(s->cur_buf);
 	s->cur_buf = InvalidBuffer;
+}
+
+void
+mktann_storage_cache_centroids(
+		MktannStorage *s, BlockNumber nblocks, uint64_t max_bytes)
+{
+	uint64_t bytes = (uint64_t)nblocks * BLCKSZ;
+
+	if (nblocks == 0 || bytes > max_bytes)
+		return;
+
+	char *cache = MemoryContextAllocHuge(CurrentMemoryContext, (Size)bytes);
+	for (BlockNumber b = 0; b < nblocks; b++)
+	{
+		Buffer buf = ReadBuffer(s->index, b);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		memcpy(cache + (size_t)b * BLCKSZ, BufferGetPage(buf), BLCKSZ);
+		UnlockReleaseBuffer(buf);
+	}
+	s->cent_cache		  = cache;
+	s->cent_cache_nblocks = nblocks;
+}
+
+void
+mktann_storage_uncache_centroids(MktannStorage *s)
+{
+	if (s->cent_cache == NULL)
+		return;
+	pfree(s->cent_cache);
+	s->cent_cache		  = NULL;
+	s->cent_cache_nblocks = 0;
 }
 
 /* ----------------------------------------------------------------
@@ -479,6 +518,8 @@ mktann_storage_init(
 	s->index	  = index;
 	s->rel		  = rel;
 	s->build_mode = false;
+	s->cent_cache = NULL;
+	s->cent_cache_nblocks = 0;
 	s->cur_buf	  = InvalidBuffer;
 	s->metric	  = metric;
 	s->read_count = 0;

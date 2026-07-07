@@ -903,6 +903,13 @@ do_serial_build(
 	idx_base.centroid_beam_scale  = MKT_BUILD_CENTROID_BEAM_SCALE;
 	mkt_query_state_init(&bs->qs, &idx_base, 1, MKT_SECONDARY_TOPK);
 
+	/* Local copy of the (immutable) metadata + centroid pages so the refine
+	 * and posting scans route without buffer-manager traffic. Bounded by a
+	 * slice of the build budget; skipped when the region does not fit. */
+	mktann_storage_cache_centroids(
+			(MktannStorage *)storage, first_posting,
+			(uint64_t)maintenance_work_mem * 1024 / 16);
+
 	/*
 	 * When the sample was budget-limited, refine each leaf's encode reference on
 	 * the full table (page-backed, bounded) before the encode scan, so residuals
@@ -1001,6 +1008,11 @@ do_serial_build(
 		pfree(leaf_pt);
 		leaf_pt = NULL;
 	}
+
+	/* The sorter's read-back and the posting writes below do not route, so
+	 * the tree cache is dead weight past this point; return its memory before
+	 * the sort spins up. */
+	mktann_storage_uncache_centroids((MktannStorage *)storage);
 
 	instr_time t_serial_scan;
 	INSTR_TIME_SET_CURRENT(t_serial_scan);
