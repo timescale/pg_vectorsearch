@@ -393,8 +393,15 @@ mkt_stream_centroid_plan(
 	 * The recursion's per-node scratch (k-means temporaries, index slices,
 	 * child-block arrays) lives in its own context so anything a node fails
 	 * to free is reclaimed here, at the end of the pass, rather than
-	 * accumulating for the rest of the build. Outputs (leaf_counts,
-	 * leaf_mean) are allocated in the caller's context outside the switch.
+	 * accumulating for the rest of the build. This pass-scoped context is
+	 * the deliberate leak-containment boundary: node lifetimes nest (a
+	 * parent's k-means result and child arrays stay live across its
+	 * children), so finer-grained reclamation such as resets at node or
+	 * sibling boundaries would free live ancestor state — and would turn a
+	 * missed free (a bounded, observable leak) into a use-after-free.
+	 * Within a node, explicit frees remain the mechanism; the context caps
+	 * their blast radius at one pass. Outputs (leaf_counts, leaf_mean) are
+	 * allocated in the caller's context outside the switch.
 	 */
 	MktMemCtx scratch = mkt_memctx_create(NULL, "mkt stream plan");
 	MktMemCtx old_ctx = mkt_memctx_switch(scratch);
@@ -452,9 +459,9 @@ mkt_stream_centroid_write(
 	c.on_leaf		= on_leaf;
 	c.on_leaf_arg	= on_leaf_arg;
 
-	/* Same per-pass scratch context as the PLAN pass: per-node k-means
-	 * temporaries and page-write scratch are reclaimed when the pass ends.
-	 * on_leaf runs under it too; its allocations must not outlive the call. */
+	/* Same pass-scoped scratch as the PLAN pass -- the leak-containment
+	 * boundary (see the note there). on_leaf runs under it too; its
+	 * allocations must not outlive the call. */
 	MktMemCtx scratch = mkt_memctx_create(NULL, "mkt stream write");
 	MktMemCtx old_ctx = mkt_memctx_switch(scratch);
 	BlockNumber root  = stream_node(&c, NULL, nvecs, 0);
