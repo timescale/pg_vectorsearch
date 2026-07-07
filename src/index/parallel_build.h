@@ -156,9 +156,9 @@ typedef struct MktBuildShared
 	float centroid_beam_scale;
 	int	  fastscan_bits;
 
-	/* Published by the leader after the streaming tree write (the tree is no
-	 * longer materialized in DSM): the centroid-tree root block (workers' phase-3
-	 * MktIndexBase.first_centroid) and the tree depth (base.nlevels). */
+	/* Published by the leader after the streaming tree write: the centroid-tree
+	 * root block (workers' phase-3 MktIndexBase.first_centroid) and the tree
+	 * depth (base.nlevels). The tree itself lives only on pages. */
 	BlockNumber first_centroid;
 	uint8_t		nlevels;
 
@@ -169,6 +169,7 @@ typedef struct MktBuildShared
 	 * during the streaming head write (refine updates it); phase-3 workers
 	 * feed it to mkt_build_route_secondary_exact. */
 	uint64_t leaf_pt_bytes;
+
 
 	/* Published by the leader before phase 3: the first posting-head block.
 	 * Cluster c's head is first_posting + c (formula), so workers map a routed
@@ -758,6 +759,31 @@ struct BufferUsage;
 
 extern void mkt_pbuild_teardown(struct ParallelContext *pcxt);
 extern bool mkt_pbuild_launch(struct ParallelContext *pcxt, Barrier *barrier);
+
+/* ----------------------------------------------------------------
+ * Leader-only subtree blob store — back-end-specific spillable storage
+ *
+ * The PLAN pass produces every subtree exactly once; the leader appends each
+ * blob here and, after computing the block layout, reads them back in the
+ * same order to stream centroid + head pages -- reading a blob back costs
+ * far less than re-running its clustering, and the streaming needs no
+ * worker participation. The PG implementation is a BufFile temp file: small
+ * blob sets stay
+ * in the kernel page cache, large ones spill to pgsql_tmp, so build memory
+ * stays bounded regardless of the partition count. Standalone keeps the
+ * blobs in memory (in-memory engine). Sequential put/rewind/get only.
+ * ---------------------------------------------------------------- */
+
+typedef struct MktBlobStore MktBlobStore;
+
+extern MktBlobStore *mkt_pbuild_blobstore_begin(void);
+extern void			 mkt_pbuild_blobstore_put(
+			 MktBlobStore *bs, const void *blob, uint64_t size);
+extern void mkt_pbuild_blobstore_rewind(MktBlobStore *bs);
+/* Read the next blob into buf (capacity max_size); returns its size. */
+extern uint64_t mkt_pbuild_blobstore_get(
+		MktBlobStore *bs, void *buf, uint64_t max_size);
+extern void mkt_pbuild_blobstore_end(MktBlobStore *bs);
 
 /* ----------------------------------------------------------------
  * Build configuration — back-end-neutral input to the setup seam

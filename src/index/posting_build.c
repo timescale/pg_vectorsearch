@@ -428,6 +428,47 @@ mkt_build_route_emit(
 	if (n == 0)
 		return false;
 
+	/*
+	 * Exact batched secondary: the leaf cache holds every leaf's rotated
+	 * centroid (the same values as the head pages), so no head page is read
+	 * at all -- the primary encodes against the cache, and the SOAR/boundary
+	 * secondary is deferred to mkt_secondary_batch_assign over ALL leaves.
+	 * The gate distance is the exact float distance to the primary centroid
+	 * (rotation-invariant), matching what the in-RAM-tree build passes --
+	 * not the beam's quantized estimate.
+	 */
+	if (ctx->leaf_pt != NULL)
+	{
+		uint32_t primary = mkt_route_head_to_leaf(
+				ctx->first_posting, ctx->qs->beam_results[0].posting_head);
+		const float *ptc = ctx->leaf_pt + (size_t)primary * dim;
+
+		for (Dimension d = 0; d < dim; d++)
+			ctx->pt_r[d] = ctx->qs->pt_query[d] - ptc[d];
+		mkt_posting_entry_encode_from_pt(
+				ctx->rq_params, ctx->pt_r, dim, ctx->enc_buf, &ctx->enc_scratch,
+				tid, ctx->entry);
+		mkt_pbuild_sort_put(ctx->sorter, primary, ctx->entry);
+		ctx->indtuples++;
+
+		if (ctx->soar_lambda <= 0.0 && ctx->boundary_epsilon <= 0.0)
+			return false;
+
+		uint32_t  b	   = ctx->batch_count;
+		VectorRef qref = {.data = ctx->qs->pt_query, .dim = dim};
+		VectorRef cref = {.data = ptc, .dim = dim};
+		memcpy(ctx->batch_ptq + (size_t)b * dim,
+			   ctx->qs->pt_query,
+			   (size_t)dim * sizeof(float));
+		ctx->batch_tid[b]	  = tid;
+		ctx->batch_primary[b] = primary;
+		ctx->batch_pdist[b]	  = (float)mkt_distance(qref, cref, ctx->metric);
+		ctx->batch_count	  = b + 1;
+		if (ctx->batch_count == MKT_SECONDARY_BATCH)
+			mkt_build_route_flush(ctx);
+		return false;
+	}
+
 	/* Gather the beam candidates: leaf index, distance, and pt_centroid (read
 	 * from each head page -- the float encode reference). */
 	for (uint32_t i = 0; i < n; i++)
@@ -459,30 +500,6 @@ mkt_build_route_emit(
 	bool has_boundary = ctx->boundary_epsilon > 0.0;
 	if (!has_soar && !has_boundary)
 		return false;
-
-	/*
-	 * Exact batched secondary: defer to mkt_secondary_batch_assign over ALL
-	 * leaves. The gate distance is the exact float distance to the primary
-	 * centroid (rotation-invariant), matching what the in-RAM-tree build
-	 * passes -- not the beam's quantized estimate.
-	 */
-	if (ctx->leaf_pt != NULL)
-	{
-		uint32_t  b	   = ctx->batch_count;
-		VectorRef qref = {.data = ctx->qs->pt_query, .dim = dim};
-		VectorRef cref =
-				{.data = ctx->leaf_pt + (size_t)primary * dim, .dim = dim};
-		memcpy(ctx->batch_ptq + (size_t)b * dim,
-			   ctx->qs->pt_query,
-			   (size_t)dim * sizeof(float));
-		ctx->batch_tid[b]	  = tid;
-		ctx->batch_primary[b] = primary;
-		ctx->batch_pdist[b]	  = (float)mkt_distance(qref, cref, ctx->metric);
-		ctx->batch_count	  = b + 1;
-		if (ctx->batch_count == MKT_SECONDARY_BATCH)
-			mkt_build_route_flush(ctx);
-		return false;
-	}
 
 	bool boundary_repl = false;
 	if (has_boundary && n > 1)

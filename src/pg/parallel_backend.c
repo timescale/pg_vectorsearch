@@ -22,6 +22,7 @@
 #include <miscadmin.h>
 #include <optimizer/plancat.h>
 #include <pgstat.h>
+#include <storage/buffile.h>
 #include <storage/latch.h>
 #include <storage/proc.h>
 #include <storage/spin.h>
@@ -261,6 +262,63 @@ mkt_pbuild_teardown(ParallelContext *pcxt)
 }
 
 /*
+ * Leader-only subtree blob store (see parallel_build.h): a BufFile temp
+ * file. Small blob sets never leave the kernel page cache; large ones spill
+ * to pgsql_tmp automatically, so the store adds no unbounded memory. Blobs
+ * are length-prefixed and read back strictly in append order.
+ */
+struct MktBlobStore
+{
+	BufFile *file;
+};
+
+MktBlobStore *
+mkt_pbuild_blobstore_begin(void)
+{
+	MktBlobStore *bs = palloc(sizeof(MktBlobStore));
+	bs->file		 = BufFileCreateTemp(false);
+	return bs;
+}
+
+void
+mkt_pbuild_blobstore_put(MktBlobStore *bs, const void *blob, uint64_t size)
+{
+	BufFileWrite(bs->file, &size, sizeof(size));
+	BufFileWrite(bs->file, blob, (size_t)size);
+}
+
+void
+mkt_pbuild_blobstore_rewind(MktBlobStore *bs)
+{
+	if (BufFileSeek(bs->file, 0, 0, SEEK_SET) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not rewind subtree blob store")));
+}
+
+uint64_t
+mkt_pbuild_blobstore_get(MktBlobStore *bs, void *buf, uint64_t max_size)
+{
+	uint64_t size;
+	BufFileReadExact(bs->file, &size, sizeof(size));
+	if (size > max_size)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("subtree blob larger than its slot (%llu > %llu)",
+						(unsigned long long)size,
+						(unsigned long long)max_size)));
+	BufFileReadExact(bs->file, buf, (size_t)size);
+	return size;
+}
+
+void
+mkt_pbuild_blobstore_end(MktBlobStore *bs)
+{
+	BufFileClose(bs->file);
+	pfree(bs);
+}
+
+/*
  * Launch the worker participants and wait until they have all attached to the
  * barrier (so the dynamic party reaches launched+1 before the leader advances
  * the first phase). Returns false — after tearing the context down — if no
@@ -336,15 +394,15 @@ mkt_pbuild_setup_shared(
 	 * whole tree build -- root k-means and every subtree -- so its size is the
 	 * build's dominant memory cost. The ideal is ~256 samples per list, but at
 	 * fine nlist that can dwarf available RAM (nlist=480k -> 123M samples ->
-	 * ~360 GB), which previously overflowed the DSM.
+	 * ~360 GB), far beyond what a DSM segment can hold.
 	 *
 	 * Bound it by maintenance_work_mem: that is the build's memory budget and
 	 * the knob operators already raise for large index builds. When the budget
 	 * is smaller than the ideal the stride sampler simply draws a coarser (but
 	 * still uniform) subsample to fit. estimate_rel_size() caps it to the rows
 	 * that actually exist so small tables don't over-allocate; it is only a
-	 * hint now -- the budget is the hard bound, so an inaccurate estimate can
-	 * no longer over-commit shared memory.
+	 * hint -- the budget is the hard bound, so an inaccurate estimate cannot
+	 * over-commit shared memory.
 	 *
 	 * The sample is held resident for the whole k-means (same trade-off as the
 	 * serial path -- see the design/limitation note in sample_for_build in
@@ -392,10 +450,17 @@ mkt_pbuild_setup_shared(
 	 * budget-bounded below the table). Both leader and workers gate the refine
 	 * phase on shared->refine_iters so they run the identical barrier
 	 * sequence.
+	 *
+	 * One pass, regardless of mkt.leaf_refine_iters: the page-backed refine
+	 * routes every row over the centroid PAGES, which it never rewrites (it
+	 * updates the heads' encode references), so the row-to-leaf assignment is
+	 * identical in every pass and a second pass recomputes the same means --
+	 * a full-table scan for a no-op. The in-RAM-tree refine iterated because
+	 * it moved the routing centroids themselves between passes.
 	 */
 	uint32_t refine_iters = ((double)total_samples < est_tuples &&
 							 mkt_leaf_refine_iters > 0)
-								  ? (uint32_t)mkt_leaf_refine_iters
+								  ? 1
 								  : 0;
 
 	EnterParallelMode();

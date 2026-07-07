@@ -261,7 +261,9 @@ leader_write_head(void *arg, uint32_t leaf, const float *centroid)
 }
 
 /* PLAN-pass batch callback: record each subtree's leaf count + centroid-page
- * count (no writes) so the leader can size the reserve + block layout. */
+ * count (no writes) so the leader can size the reserve + block layout, and
+ * keep the blob in the spillable store for the streaming pass to read back
+ * in the same (child) order. */
 typedef struct PlanCbArg
 {
 	uint32_t *nleaves_arr;	 /* [km_k] */
@@ -271,6 +273,7 @@ typedef struct PlanCbArg
 	Dimension dim;
 	double	 *leaf_sum; /* [dim] leaf-centroid sum across all subtrees, for
 						 * the leaf_mean the leader uses as global_mean */
+	MktBlobStore *store; /* subtree blobs, in child order */
 } PlanCbArg;
 
 static void
@@ -302,44 +305,8 @@ plan_batch_cb(
 				for (Dimension d = 0; d < a->dim; d++)
 					a->leaf_sum[d] += lc[(size_t)l * a->dim + d];
 		}
-	}
-}
 
-/* WRITE-pass batch callback: stream each subtree's centroid + head pages to its
- * reserved block range, recording the subtree's root block for the root page. */
-typedef struct WriteCbArg
-{
-	MktStorage		   *storage;
-	Dimension			dim;
-	uint32_t			fan_out;
-	MktCentroidFormat	fmt;
-	const RaBitQParams *rq;
-	const float		   *gmean;
-	BlockNumber			first_posting;
-	const uint32_t	   *leaf_off;	 /* [km_k] */
-	const uint32_t	   *block_off;	 /* [km_k], pages before this subtree */
-	BlockNumber			subtree_base; /* first block of the subtree area */
-	BlockNumber		   *subtree_root_blk; /* [km_k] out */
-	LeaderHeadCtx	   *head;
-} WriteCbArg;
-
-static void
-write_batch_cb(
-		void *arg, uint32_t base_child, uint32_t bs, char *base,
-		uint64_t slot_size)
-{
-	WriteCbArg *a = (WriteCbArg *)arg;
-	for (uint32_t s = 0; s < bs; s++)
-	{
-		const HKMeansResult *sub =
-				(const HKMeansResult *)mkt_dsm_child_subtree(base, s, slot_size);
-		uint32_t	child	 = base_child + s;
-		BlockNumber base_blk = a->subtree_base + a->block_off[child];
-		uint32_t	pages;
-		a->subtree_root_blk[child] = mkt_write_subtree_streaming(
-				a->storage, sub, a->dim, a->fan_out, a->fmt, a->rq, a->gmean,
-				a->first_posting, a->leaf_off[child], base_blk, leader_write_head,
-				a->head, &pages);
+		mkt_pbuild_blobstore_put(a->store, sub, sub->total_size);
 	}
 }
 
@@ -401,11 +368,11 @@ do_parallel_build(
 			prog,
 			(uint64_t)mkt_dsm_samples_size(
 					nparticipants, lead.max_per_worker, dim),
-			/* No graft blob any more: the tree is streamed to pages from a
-			 * bounded ring of subtree slots (part of dsm_total), not held whole. */
+			/* The tree is streamed to pages from a bounded ring of subtree
+			 * slots (part of dsm_total); it is never held whole in memory. */
 			0,
-			/* pt_centroids is no longer a bulk nlist*dim array — it is rotated
-			 * per-cluster on the fly in mkt_posting_build_lists. */
+			/* Per-cluster encode references are rotated one at a time in
+			 * mkt_posting_build_lists; no bulk nlist*dim array exists. */
 			0,
 			(uint64_t)lead.dsm_total);
 
@@ -483,9 +450,10 @@ do_parallel_build(
 	mkt_pbuild_exec_root_assign(
 			0, shared, dsm_samples, dsm_ra, centroids_base, barrier);
 
-	/* ---- C1b: batched two-pass streaming tree build (no graft blob) -------
+	/* ---- Batched streaming tree build --------------------------------------
 	 * Workers build per-root-child subtrees into a bounded ring of slots; the
-	 * leader streams each batch to centroid pages. Peak subtree DSM is
+	 * leader records each batch's layout counts, keeps the blobs in a
+	 * spillable store, and streams them to centroid pages. Peak subtree DSM is
 	 * nparticipants slots, independent of nlist. ------------------------------ */
 	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SETUP);
 	RaBitQParams	 *rq_params = mkt_rabitq_create(dim, rabitq_seed);
@@ -496,11 +464,11 @@ do_parallel_build(
 	uint64_t slot_size = shared->subtree_slot_size;
 
 	/*
-	 * global_mean = mean of the LEAF centroids (the encoder centering),
-	 * matching the in-RAM-tree build -- an unweighted per-cluster mean, not
-	 * the per-vector sample mean. The quantization quality of every centroid
-	 * and posting code depends on this anchor. Pages are written only in the
-	 * WRITE pass, and the PLAN pass builds the identical subtrees first, so
+	 * global_mean = mean of the LEAF centroids (the encoder centering) -- an
+	 * unweighted per-cluster mean, not the per-vector sample mean. The
+	 * quantization quality of every centroid and posting code depends on this
+	 * anchor. Pages are written only after the PLAN pass has built every
+	 * subtree, so
 	 * the leaf-centroid sum is accumulated there (plan_batch_cb) and the mean
 	 * is ready before any page is encoded. Filled per branch below.
 	 */
@@ -526,6 +494,7 @@ do_parallel_build(
 				.subtree_nlevels = 1,
 				.dim			 = dim,
 				.leaf_sum		 = mkt_alloc0((size_t)dim * sizeof(double)),
+				.store			 = mkt_pbuild_blobstore_begin(),
 		};
 		mkt_pbuild_stream_subtrees(
 				0, nparticipants, dsm_samples, dsm_ra, cents, km_k, nlist,
@@ -581,7 +550,11 @@ do_parallel_build(
 		 * during mkt_posting_build_lists. No O(nlist) reserve arrays. */
 		mkt_storage_extend(storage, first_posting + actual_nlist);
 
-		/* WRITE pass: stream each subtree + its head pages, then the root page. */
+		/* Streaming pass: read each subtree blob back from the store (child
+		 * order matches the append order) and stream its centroid + head
+		 * pages to the reserved block range, then the root page. Leader-only:
+		 * the PLAN pass already produced every subtree, so the workers have
+		 * nothing to contribute here and run no barriers for this phase. */
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_CENTROID);
 		BlockNumber *subtree_root_blk =
 				mkt_alloc((size_t)km_k * sizeof(BlockNumber));
@@ -599,24 +572,21 @@ do_parallel_build(
 											 false)
 									   : NULL,
 		};
-		WriteCbArg writearg = {
-				.storage		  = storage,
-				.dim			  = dim,
-				.fan_out		  = fan_out,
-				.fmt			  = fmt,
-				.rq				  = rq_params,
-				.gmean			  = global_mean,
-				.first_posting	  = first_posting,
-				.leaf_off		  = leaf_off,
-				.block_off		  = block_off,
-				.subtree_base	  = subtree_base,
-				.subtree_root_blk = subtree_root_blk,
-				.head			  = &head,
-		};
-		mkt_pbuild_stream_subtrees(
-				0, nparticipants, dsm_samples, dsm_ra, cents, km_k, nlist,
-				fan_out, dim, shared->metric, shared->km_max_iterations,
-				subtrees_base, slot_size, barrier, write_batch_cb, &writearg);
+		HKMeansResult *blob = mkt_alloc(slot_size);
+		mkt_pbuild_blobstore_rewind(planarg.store);
+		for (uint32_t c = 0; c < km_k; c++)
+		{
+			(void)mkt_pbuild_blobstore_get(planarg.store, blob, slot_size);
+			BlockNumber base_blk = subtree_base + block_off[c];
+			uint32_t	pages;
+			subtree_root_blk[c] = mkt_write_subtree_streaming(
+					storage, blob, dim, fan_out, fmt, rq_params, global_mean,
+					first_posting, leaf_off[c], base_blk, leader_write_head,
+					&head, &pages);
+		}
+		mkt_free(blob);
+		mkt_pbuild_blobstore_end(planarg.store);
+		planarg.store = NULL;
 
 		/* Root centroid page at the reserved first_centroid (children = subtree
 		 * roots). Written last, but in place, so first_centroid stays 1. */
@@ -734,7 +704,7 @@ do_parallel_build(
 	if (out_centroids_written)
 		*out_centroids_written = true;
 
-	/* Lightweight metadata carrier in place of the (no longer built) tree. */
+	/* Lightweight metadata carrier; no in-RAM tree exists to hand back. */
 	tree		  = mkt_alloc0(sizeof(HKMeansResult));
 	tree->nleaves = nlist;
 	tree->nlevels = out_nlevels;

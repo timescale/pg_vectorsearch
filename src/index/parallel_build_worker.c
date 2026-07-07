@@ -722,35 +722,36 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* ---- Phase 2c: batched streaming subtree build (page-backed) ----
 	 *
 	 * For a hierarchical tree (>= 2 levels) the workers build per-root-child
-	 * subtrees into a bounded ring of slots and the leader streams each batch to
-	 * centroid pages — no graft blob, subtree DSM bounded to nparticipants slots.
-	 * Two passes (plan discovers the layout, write streams it); workers pass no
-	 * callback (leader-only consumes each batch). The barrier sequence is inside
-	 * mkt_pbuild_stream_subtrees, identical for leader and workers. A flat
-	 * (1-level) build has no subtrees — the leader writes the single level
-	 * directly, and neither side runs the subtree barriers. */
+	 * subtrees into a bounded ring of slots (subtree DSM is nparticipants
+	 * slots, independent of the partition count); the leader consumes each
+	 * batch, recording layout counts and keeping the blob in a spillable
+	 * store, and later streams every subtree's pages by itself from that
+	 * store. Workers pass no callback (leader-only consumes each batch). The
+	 * barrier sequence is inside mkt_pbuild_stream_subtrees, identical for
+	 * leader and workers. A flat (1-level) build has no subtrees — the leader
+	 * writes the single level directly, and neither side runs the subtree
+	 * barriers. */
 	if (mkt_compute_nlevels(shared->nlist, shared->fan_out) >= 2)
 	{
 		char *subtrees_base =
 				shm_toc_lookup(toc, MKT_DSM_KEY_CHILD_SUBTREES, false);
-		for (int pass = 0; pass < 2; pass++)
-			mkt_pbuild_stream_subtrees(
-					worker_id,
-					shared->nparticipants,
-					dsm_samples,
-					dsm_ra,
-					cents,
-					shared->km_k,
-					shared->nlist,
-					shared->fan_out,
-					dim,
-					shared->metric,
-					shared->km_max_iterations,
-					subtrees_base,
-					shared->subtree_slot_size,
-					barrier,
-					NULL,
-					NULL);
+		mkt_pbuild_stream_subtrees(
+				worker_id,
+				shared->nparticipants,
+				dsm_samples,
+				dsm_ra,
+				cents,
+				shared->km_k,
+				shared->nlist,
+				shared->fan_out,
+				dim,
+				shared->metric,
+				shared->km_max_iterations,
+				subtrees_base,
+				shared->subtree_slot_size,
+				barrier,
+				NULL,
+				NULL);
 	}
 
 	/* Barrier: leader finished streaming the centroid tree + published the

@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "algo/hkmeans.h"
+#include "core/log.h"
 #include "core/memory.h"
 #include "index/index_build.h" /* mkt_auto_fan_out */
 #include "index/parallel_build.h"
@@ -140,6 +141,75 @@ mkt_pbuild_teardown(ParallelContext *pcxt)
 {
 	DestroyParallelContext(pcxt);
 	ExitParallelMode();
+}
+
+/*
+ * Leader-only subtree blob store (see parallel_build.h). Standalone is the
+ * in-memory engine, so the store is a growing byte buffer with a read
+ * cursor; the PG back-end spills through a BufFile temp file instead.
+ */
+struct MktBlobStore
+{
+	char	*data;
+	uint64_t size;
+	uint64_t cap;
+	uint64_t rpos;
+};
+
+MktBlobStore *
+mkt_pbuild_blobstore_begin(void)
+{
+	return mkt_alloc0(sizeof(MktBlobStore));
+}
+
+void
+mkt_pbuild_blobstore_put(MktBlobStore *bs, const void *blob, uint64_t size)
+{
+	uint64_t need = bs->size + sizeof(size) + size;
+	if (need > bs->cap)
+	{
+		uint64_t cap = bs->cap ? bs->cap : (uint64_t)1 << 20;
+		while (cap < need)
+			cap *= 2;
+		char *grown = mkt_alloc(cap);
+		if (bs->data != NULL)
+		{
+			memcpy(grown, bs->data, bs->size);
+			mkt_free(bs->data);
+		}
+		bs->data = grown;
+		bs->cap	 = cap;
+	}
+	memcpy(bs->data + bs->size, &size, sizeof(size));
+	bs->size += sizeof(size);
+	memcpy(bs->data + bs->size, blob, size);
+	bs->size += size;
+}
+
+void
+mkt_pbuild_blobstore_rewind(MktBlobStore *bs)
+{
+	bs->rpos = 0;
+}
+
+uint64_t
+mkt_pbuild_blobstore_get(MktBlobStore *bs, void *buf, uint64_t max_size)
+{
+	uint64_t size;
+	memcpy(&size, bs->data + bs->rpos, sizeof(size));
+	bs->rpos += sizeof(size);
+	if (size > max_size)
+		mkt_error("subtree blob larger than its slot");
+	memcpy(buf, bs->data + bs->rpos, size);
+	bs->rpos += size;
+	return size;
+}
+
+void
+mkt_pbuild_blobstore_end(MktBlobStore *bs)
+{
+	mkt_free(bs->data);
+	mkt_free(bs);
 }
 
 /*
