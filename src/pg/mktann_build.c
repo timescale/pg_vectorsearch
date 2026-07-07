@@ -237,7 +237,10 @@ build_callback(
 	VectorRef  vref = MktVectorToRef(vec);
 
 	/* Route + encode + stream via the shared page-backed helper (the parallel
-	 * posting workers use the very same call). */
+	 * posting workers use the very same call). tmp_ctx is reset after every
+	 * tuple, so nothing reachable from this call may allocate memory that
+	 * outlives the callback: the route context's buffers (candidates, batch,
+	 * encode scratch) are all preallocated for exactly this reason. */
 	mkt_build_route_emit(&bs->route, vref.data, *tid);
 
 	if (((uint64_t)bs->route.indtuples % 10000) == 0)

@@ -389,7 +389,18 @@ mkt_stream_centroid_plan(
 	c.leaf_counts = mkt_alloc0((size_t)max_leaves * sizeof(uint32_t));
 	c.leaf_sum	  = mkt_alloc0((size_t)dim * sizeof(double));
 
+	/*
+	 * The recursion's per-node scratch (k-means temporaries, index slices,
+	 * child-block arrays) lives in its own context so anything a node fails
+	 * to free is reclaimed here, at the end of the pass, rather than
+	 * accumulating for the rest of the build. Outputs (leaf_counts,
+	 * leaf_mean) are allocated in the caller's context outside the switch.
+	 */
+	MktMemCtx scratch = mkt_memctx_create(NULL, "mkt stream plan");
+	MktMemCtx old_ctx = mkt_memctx_switch(scratch);
 	stream_node(&c, NULL, nvecs, 0);
+	mkt_memctx_switch(old_ctx);
+	mkt_memctx_delete(scratch);
 
 	if (!c.ok)
 	{
@@ -441,7 +452,14 @@ mkt_stream_centroid_write(
 	c.on_leaf		= on_leaf;
 	c.on_leaf_arg	= on_leaf_arg;
 
-	BlockNumber root = stream_node(&c, NULL, nvecs, 0);
+	/* Same per-pass scratch context as the PLAN pass: per-node k-means
+	 * temporaries and page-write scratch are reclaimed when the pass ends.
+	 * on_leaf runs under it too; its allocations must not outlive the call. */
+	MktMemCtx scratch = mkt_memctx_create(NULL, "mkt stream write");
+	MktMemCtx old_ctx = mkt_memctx_switch(scratch);
+	BlockNumber root  = stream_node(&c, NULL, nvecs, 0);
+	mkt_memctx_switch(old_ctx);
+	mkt_memctx_delete(scratch);
 	return c.ok ? root : InvalidBlockNumber;
 }
 

@@ -143,6 +143,10 @@ worker_lockmodes(bool concurrent, LOCKMODE *heapmode, LOCKMODE *indexmode)
 	*indexmode = concurrent ? RowExclusiveLock : AccessExclusiveLock;
 }
 
+/* Per-worker build memory context (see mkt_pbuild_worker_attach). */
+static MemoryContext mkt_pbuild_worker_ctx	  = NULL;
+static MemoryContext mkt_pbuild_worker_oldctx = NULL;
+
 /*
  * Join the parallel build: look up the shared state, open the heap and index,
  * start per-worker instrumentation, and attach to the phase barrier. The
@@ -171,6 +175,17 @@ mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
 	w->worker_id = ParallelWorkerNumber + 1;
 	w->dim		 = shared->dim;
 
+	/*
+	 * All of this worker's build allocations (routing state, per-child
+	 * subtree blobs, batch buffers) go into a named context so
+	 * pg_backend_memory_contexts attributes them to the build and they are
+	 * reclaimed together at detach. A file-static is safe for the same
+	 * reason as mkt_pbuild_snapshot: one build per worker, non-reentrant.
+	 */
+	mkt_pbuild_worker_ctx = AllocSetContextCreate(
+			CurrentMemoryContext, "mkt worker build", ALLOCSET_DEFAULT_SIZES);
+	mkt_pbuild_worker_oldctx = MemoryContextSwitchTo(mkt_pbuild_worker_ctx);
+
 	InstrStartParallelQuery();
 
 	/*
@@ -190,6 +205,11 @@ mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
 void
 mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
 {
+	MemoryContextSwitchTo(mkt_pbuild_worker_oldctx);
+	MemoryContextDelete(mkt_pbuild_worker_ctx);
+	mkt_pbuild_worker_ctx	 = NULL;
+	mkt_pbuild_worker_oldctx = NULL;
+
 	BufferUsage *bufferusage =
 			shm_toc_lookup(toc, MKT_DSM_KEY_BUFFER_USAGE, false);
 	WalUsage *walusage = shm_toc_lookup(toc, MKT_DSM_KEY_WAL_USAGE, false);
@@ -243,6 +263,7 @@ mkt_pbuild_worker_storage_release(MktStorage *s)
  * mkt_pbuild_teardown.
  */
 static Snapshot mkt_pbuild_snapshot = NULL;
+
 
 /*
  * Tear the parallel context down and leave parallel mode. The standalone
