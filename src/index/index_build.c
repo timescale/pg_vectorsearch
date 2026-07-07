@@ -156,6 +156,14 @@ typedef struct StreamCtx
 	/* plan-phase page-count helpers */
 	uint32_t max_ent; /* non-fastscan entries/page */
 	uint32_t fs_gpp;  /* fastscan groups/page */
+	/*
+	 * Per-pass scratch context: the entry points create it, switch into it
+	 * around the recursion, and delete it when the pass ends, so per-node
+	 * k-means temporaries are reclaimed even if a node misses a free.
+	 * Outputs that outlive the pass are allocated in the caller's context
+	 * before the switch.
+	 */
+	MktMemCtx scratch;
 	/* accumulators */
 	uint32_t	nleaves;	   /* running (== next first_leaf) */
 	uint32_t   *leaf_counts;   /* plan only, [nlist] */
@@ -389,18 +397,11 @@ mkt_stream_centroid_plan(
 	c.leaf_counts = mkt_alloc0((size_t)max_leaves * sizeof(uint32_t));
 	c.leaf_sum	  = mkt_alloc0((size_t)dim * sizeof(double));
 
-	/*
-	 * The recursion's per-node scratch (k-means temporaries, index slices,
-	 * child-block arrays) lives in its own context so anything a node fails
-	 * to free is reclaimed here, at the end of the pass, rather than
-	 * accumulating for the rest of the build. Outputs (leaf_counts,
-	 * leaf_mean) are allocated in the caller's context outside the switch.
-	 */
-	MktMemCtx scratch = mkt_memctx_create(NULL, "mkt stream plan");
-	MktMemCtx old_ctx = mkt_memctx_switch(scratch);
+	c.scratch		  = mkt_memctx_create(NULL, "mkt stream plan");
+	MktMemCtx old_ctx = mkt_memctx_switch(c.scratch);
 	stream_node(&c, NULL, nvecs, 0);
 	mkt_memctx_switch(old_ctx);
-	mkt_memctx_delete(scratch);
+	mkt_memctx_delete(c.scratch);
 
 	if (!c.ok)
 	{
@@ -452,14 +453,13 @@ mkt_stream_centroid_write(
 	c.on_leaf		= on_leaf;
 	c.on_leaf_arg	= on_leaf_arg;
 
-	/* Same per-pass scratch context as the PLAN pass: per-node k-means
-	 * temporaries and page-write scratch are reclaimed when the pass ends.
-	 * on_leaf runs under it too; its allocations must not outlive the call. */
-	MktMemCtx scratch = mkt_memctx_create(NULL, "mkt stream write");
-	MktMemCtx old_ctx = mkt_memctx_switch(scratch);
+	/* on_leaf runs under the scratch context too; its allocations must not
+	 * outlive the call. */
+	c.scratch		  = mkt_memctx_create(NULL, "mkt stream write");
+	MktMemCtx old_ctx = mkt_memctx_switch(c.scratch);
 	BlockNumber root  = stream_node(&c, NULL, nvecs, 0);
 	mkt_memctx_switch(old_ctx);
-	mkt_memctx_delete(scratch);
+	mkt_memctx_delete(c.scratch);
 	return c.ok ? root : InvalidBlockNumber;
 }
 
