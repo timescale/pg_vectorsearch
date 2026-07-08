@@ -369,6 +369,23 @@ mkt_query_route(
 	return search_centroids(qs, qvec, nprobe, mode, bs);
 }
 
+/* Cap on the rerank candidate pool (mkt.rerank_pool). Candidates are
+ * sorted by approximate distance, so capping keeps the most promising
+ * ones and bounds the exact-distance heap fetches. 0 (default) resolves
+ * to an automatic cap of 16 * k — measured recall-neutral across the
+ * probe range while bounding pathological survivor counts; -1 disables
+ * the cap entirely; positive values are absolute. The effective cap is
+ * never below k, so a cap can never truncate the result set. */
+#define MKT_RERANK_POOL_AUTO_MULT 16
+
+static int32_t g_rerank_pool = 0;
+
+void
+mkt_query_set_rerank_pool(int32_t n)
+{
+	g_rerank_pool = n;
+}
+
 uint32_t
 mkt_query_execute(
 		MktQueryState  *qs,
@@ -430,6 +447,18 @@ mkt_query_execute(
 			qs, qs->beam_results, ncentroids, nprobe, mode, &qs->topk, stats);
 
 	uint32_t ncands = extract_candidates(qs);
+
+	/* Rerank-pool cap: the first `pool` candidates by approximate
+	 * distance are the most promising; see mkt_query_set_rerank_pool. */
+	if (g_rerank_pool >= 0)
+	{
+		uint32_t pool = (g_rerank_pool == 0) ? MKT_RERANK_POOL_AUTO_MULT * k
+											 : (uint32_t)g_rerank_pool;
+		if (pool < k)
+			pool = k;
+		if (ncands > pool)
+			ncands = pool;
+	}
 
 	uint64_t t2 = mkt_query_now_ns();
 
