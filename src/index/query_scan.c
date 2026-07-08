@@ -9,6 +9,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 #include "algo/topk.h"
 #include "algo/vecops.h"
@@ -257,6 +258,15 @@ extract_candidates(MktQueryState *qs)
 	return ncands;
 }
 
+/* Monotonic nanosecond clock for per-phase query instrumentation. */
+static inline uint64_t
+mkt_query_now_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
 uint32_t
 mkt_query_route(
 		MktQueryState		   *qs,
@@ -268,12 +278,15 @@ mkt_query_route(
 	if (nprobe > qs->max_nprobe)
 		nprobe = qs->max_nprobe;
 
-	const float *qvec = prepare_query(qs, query);
-	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
-
 	MktCentroidSearchStats local = {0};
-	return search_centroids(
-			qs, qvec, nprobe, mode, beam_stats ? beam_stats : &local);
+	MktCentroidSearchStats *bs = beam_stats ? beam_stats : &local;
+
+	const float *qvec = prepare_query(qs, query);
+	uint64_t	 t_rot = mkt_query_now_ns();
+	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
+	bs->rotation_ns = mkt_query_now_ns() - t_rot;
+
+	return search_centroids(qs, qvec, nprobe, mode, bs);
 }
 
 uint32_t
@@ -294,6 +307,8 @@ mkt_query_execute(
 	mkt_topk_reset(&qs->topk);
 	qs->topk.k = k;
 
+	uint64_t t0 = mkt_query_now_ns();
+
 	MktCentroidSearchStats beam_stats = {0};
 	uint32_t			   ncentroids =
 			mkt_query_route(qs, query, nprobe, mode, &beam_stats);
@@ -301,9 +316,13 @@ mkt_query_execute(
 	/* qvec (prepared/normalized) is reused by the rerank below. */
 	const float *qvec = prepare_query(qs, query);
 
+	uint64_t t1 = mkt_query_now_ns();
+
 	scan_clusters(qs, qs->beam_results, ncentroids, mode, &qs->topk, stats);
 
 	uint32_t ncands = extract_candidates(qs);
+
+	uint64_t t2 = mkt_query_now_ns();
 
 	/* Rerank with exact distances if enabled and storage supports it */
 	MktStorage *ps = qs->index->posting_storage;
@@ -343,10 +362,19 @@ mkt_query_execute(
 	}
 #endif
 
+	uint64_t t3 = mkt_query_now_ns();
+
 	if (stats != NULL)
 	{
 		stats->centroid_pages_read = beam_stats.pages_read;
 		stats->clusters_scanned	   = ncentroids;
+		stats->centroid_ns		   = t1 - t0;
+		stats->posting_ns		   = t2 - t1;
+		stats->rerank_ns		   = t3 - t2;
+		stats->rotation_ns		   = beam_stats.rotation_ns;
+		stats->centroid_lut_ns	   = beam_stats.lut_ns;
+		stats->centroid_pageread_ns = beam_stats.pageread_ns;
+		stats->centroid_score_ns   = beam_stats.score_ns;
 	}
 
 	return qs->nresults;

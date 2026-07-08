@@ -10,6 +10,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 #include "algo/topk.h"
 #include "algo/vecops.h"
@@ -27,6 +28,15 @@ typedef struct Candidate
 	Distance		distance;
 	Distance		error; /* symmetric error (0 for exact) */
 } Candidate;
+
+/* Monotonic nanosecond clock for fine-grained centroid instrumentation. */
+static inline uint64_t
+cs_now_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 
 /* ----------------------------------------------------------------
  * Per-scan scratch (public allocation; see centroid_search.h)
@@ -66,6 +76,10 @@ struct MktCentroidScratch
 	float	 fs_lut_delta;
 	float	 fs_lut_bias;
 	bool	 fs_lut_valid;
+	/* Fine-grained timing accumulators (ns), reset per beam search. */
+	uint64_t t_lut_ns;
+	uint64_t t_pageread_ns;
+	uint64_t t_score_ns;
 };
 
 MktCentroidScratch *
@@ -153,6 +167,7 @@ score_fastscan_content(
 
 	if (!cs->fs_lut_valid)
 	{
+		uint64_t t_lut = cs_now_ns();
 		mkt_fastscan_build_lut_hacc(
 				state->qstate->transformed,
 				dim,
@@ -160,6 +175,7 @@ score_fastscan_content(
 				&cs->fs_lut_delta,
 				&cs->fs_lut_bias);
 		cs->fs_lut_valid = true;
+		cs->t_lut_ns += cs_now_ns() - t_lut;
 	}
 	float lut_delta = cs->fs_lut_delta;
 	float lut_bias	= cs->fs_lut_bias;
@@ -430,28 +446,39 @@ score_node(
 		const char *content		= mkt_centroid_compact_lookup(
 				state->compact, blkno, &entry_count);
 		if (content != NULL)
-			return score_fastscan_content(
-					state,
-					content,
-					entry_count,
-					blkno,
-					dim,
-					cands,
-					cand_count,
-					cand_cap,
-					cs);
+		{
+			uint64_t t_s = cs_now_ns();
+			cand_count	 = score_fastscan_content(
+					 state,
+					 content,
+					 entry_count,
+					 blkno,
+					 dim,
+					 cands,
+					 cand_count,
+					 cand_cap,
+					 cs);
+			cs->t_score_ns += cs_now_ns() - t_s;
+			return cand_count;
+		}
 		/* miss: fall back to the page path (not expected once built) */
 	}
 
 	BlockNumber cb = blkno;
 	while (cb != InvalidBlockNumber)
 	{
-		Page page = mkt_storage_read_page(state->storage, cb);
+		uint64_t t_r  = cs_now_ns();
+		Page	 page = mkt_storage_read_page(state->storage, cb);
+		cs->t_pageread_ns += cs_now_ns() - t_r;
 		(*pages_read)++;
-		cand_count = score_page(
-				state, page, cb, dim, cands, cand_count, cand_cap, cs);
+		uint64_t t_s = cs_now_ns();
+		cand_count	 = score_page(
+				 state, page, cb, dim, cands, cand_count, cand_cap, cs);
+		cs->t_score_ns += cs_now_ns() - t_s;
 		BlockNumber nb = MKT_CENTROID_OPAQUE(page)->next_blkno;
+		t_r			   = cs_now_ns();
 		mkt_storage_release_page(state->storage, cb);
+		cs->t_pageread_ns += cs_now_ns() - t_r;
 		cb = nb;
 	}
 	return cand_count;
@@ -561,6 +588,11 @@ mkt_centroid_beam_search(
 	 * first FASTSCAN page encountered, then reused for all subsequent
 	 * pages in this query. */
 	scratch->fs_lut_valid = false;
+
+	/* Reset fine-grained timing accumulators for this query. */
+	scratch->t_lut_ns	   = 0;
+	scratch->t_pageread_ns = 0;
+	scratch->t_score_ns	   = 0;
 
 	/* centroid_vecs: will be used later for copying centroid vectors */
 	(void)centroid_vecs;
@@ -709,7 +741,12 @@ mkt_centroid_beam_search(
 	}
 
 	if (stats)
-		stats->pages_read = centroid_pages_read;
+	{
+		stats->pages_read	= centroid_pages_read;
+		stats->lut_ns		= scratch->t_lut_ns;
+		stats->pageread_ns	= scratch->t_pageread_ns;
+		stats->score_ns		= scratch->t_score_ns;
+	}
 
 	if (owned_scratch != NULL)
 		mkt_centroid_scratch_free(owned_scratch);

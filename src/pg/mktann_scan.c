@@ -11,8 +11,11 @@
 
 #include <postgres.h>
 
+#include <fmgr.h>
+
 #include <access/relscan.h>
 #include <portability/instr_time.h>
+#include <utils/builtins.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
 
@@ -29,6 +32,64 @@
 /* Default nprobe — will become a GUC later */
 #define MKT_DEFAULT_NPROBE 10
 #define MKT_DEFAULT_K	   10
+
+/* ----------------------------------------------------------------
+ * Process-global per-phase accumulators (diagnostic).
+ *
+ * Summed across every mktann index scan in this backend so phase
+ * timing can be measured over a large query set (e.g. a full 10k-query
+ * benchmark run in one session) instead of eyeballing EXPLAIN on a
+ * single query. Exposed via mkt_phase_stats() / mkt_phase_stats_reset().
+ * ---------------------------------------------------------------- */
+static uint64_t g_phase_nqueries = 0;
+static uint64_t g_phase_centroid_ns = 0;
+static uint64_t g_phase_posting_ns = 0;
+static uint64_t g_phase_rerank_ns = 0;
+static uint64_t g_phase_entries = 0;
+static uint64_t g_phase_rotation_ns = 0;
+static uint64_t g_phase_clut_ns = 0;
+static uint64_t g_phase_cpageread_ns = 0;
+static uint64_t g_phase_cscore_ns = 0;
+
+PG_FUNCTION_INFO_V1(mkt_phase_stats_reset);
+Datum
+mkt_phase_stats_reset(PG_FUNCTION_ARGS)
+{
+	g_phase_nqueries	 = 0;
+	g_phase_centroid_ns	 = 0;
+	g_phase_posting_ns	 = 0;
+	g_phase_rerank_ns	 = 0;
+	g_phase_entries		 = 0;
+	g_phase_rotation_ns	 = 0;
+	g_phase_clut_ns		 = 0;
+	g_phase_cpageread_ns = 0;
+	g_phase_cscore_ns	 = 0;
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(mkt_phase_stats);
+Datum
+mkt_phase_stats(PG_FUNCTION_ARGS)
+{
+	char	 buf[256];
+	uint64_t n = g_phase_nqueries ? g_phase_nqueries : 1;
+	snprintf(
+			buf,
+			sizeof(buf),
+			"queries=%lu | per-query us: centroid=%.1f "
+			"[rot=%.1f lut=%.1f pageread=%.1f score=%.1f] "
+			"posting=%.1f rerank=%.1f | entries/q=%lu",
+			(unsigned long)g_phase_nqueries,
+			(double)g_phase_centroid_ns / n / 1e3,
+			(double)g_phase_rotation_ns / n / 1e3,
+			(double)g_phase_clut_ns / n / 1e3,
+			(double)g_phase_cpageread_ns / n / 1e3,
+			(double)g_phase_cscore_ns / n / 1e3,
+			(double)g_phase_posting_ns / n / 1e3,
+			(double)g_phase_rerank_ns / n / 1e3,
+			(unsigned long)(g_phase_entries / n));
+	PG_RETURN_TEXT_P(cstring_to_text(buf));
+}
 
 /* ----------------------------------------------------------------
  * Scan result entry
@@ -248,6 +309,20 @@ execute_search(IndexScanDesc scan)
 	ss->stats.rerank_candidates		  = ss->qstate.ncandidates;
 	ss->stats.rerank_results		  = ss->qstate.nresults;
 	ss->stats.storage_reads			  = ss->storage.read_count;
+	ss->stats.centroid_ns			  = qstats.centroid_ns;
+	ss->stats.posting_ns			  = qstats.posting_ns;
+	ss->stats.rerank_ns				  = qstats.rerank_ns;
+
+	/* Accumulate into the process-global diagnostic counters. */
+	g_phase_nqueries++;
+	g_phase_centroid_ns += qstats.centroid_ns;
+	g_phase_posting_ns += qstats.posting_ns;
+	g_phase_rerank_ns += qstats.rerank_ns;
+	g_phase_entries += qstats.posting_entries_scanned;
+	g_phase_rotation_ns += qstats.rotation_ns;
+	g_phase_clut_ns += qstats.centroid_lut_ns;
+	g_phase_cpageread_ns += qstats.centroid_pageread_ns;
+	g_phase_cscore_ns += qstats.centroid_score_ns;
 
 	/* Copy results from result ordering. The error-bound rerank can return
 	 * more than the beginscan max_k (the rerank set is inflated beyond k to
