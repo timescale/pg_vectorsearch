@@ -16,6 +16,7 @@
 #include "git_commit.h"
 #include "mkt_pg.h"
 #include "mktann_explain.h"
+#include "mktann_storage.h"
 
 PG_MODULE_MAGIC;
 
@@ -61,6 +62,13 @@ mkt_probe_cutoff_assign_hook(double newval, void *extra)
 
 static double mkt_probe_beta	 = 0.0;
 static int	  mkt_probe_min_scan = 32;
+static bool	  mkt_recent_buffers = true;
+
+static void
+mkt_recent_buffers_assign_hook(bool newval, void *extra)
+{
+	mktann_storage_set_recent_buffers(newval);
+}
 
 static void
 mkt_probe_beta_assign_hook(double newval, void *extra)
@@ -368,6 +376,22 @@ _PG_init(void)
 			0,
 			NULL,
 			mkt_probe_min_scan_assign_hook,
+			NULL);
+
+	DefineCustomBoolVariable(
+			"mkt.recent_buffers",
+			"Re-pin index pages via a backend-local buffer-id cache.",
+			"Skips the shared buffer-mapping hash lookup (a large share of "
+			"warm scan CPU) by remembering each block's buffer id and "
+			"re-pinning it with ReadRecentBuffer. Stale ids fall back to a "
+			"normal read and self-heal. Costs 4 bytes per index block per "
+			"backend.",
+			&mkt_recent_buffers,
+			true,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_recent_buffers_assign_hook,
 			NULL);
 
 	MarkGUCPrefixReserved("mkt");

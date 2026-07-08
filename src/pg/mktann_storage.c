@@ -19,6 +19,7 @@
 #include <executor/tuptable.h>
 #include <storage/bufmgr.h>
 #include <storage/read_stream.h>
+#include <utils/memutils.h>
 #include <utils/snapmgr.h>
 
 #include "algo/distance.h"
@@ -32,6 +33,74 @@
 #define PG_STORAGE(self) ((MktannStorage *)(self))
 
 /* ----------------------------------------------------------------
+ * Backend-local buffer-id cache (mkt.recent_buffers)
+ *
+ * ~22% of warm query CPU is BufTableLookup hash probes inside
+ * ReadBuffer, for index pages that essentially never leave
+ * shared_buffers. Remember the buffer id per block (per backend) and
+ * re-pin it via ReadRecentBuffer, which validates the tag and pins
+ * without touching the buffer mapping table. A stale id (page evicted
+ * or buffer reused) just fails validation and falls back to
+ * ReadBuffer, which refreshes the cached id — correctness never
+ * depends on the cache.
+ *
+ * The cache stores 4-byte buffer ids, not page data, so it does not
+ * duplicate shared_buffers (~11 MB per backend for a 21 GB index).
+ * One relation is cached at a time per backend; switching indexes
+ * swaps the cache.
+ * ---------------------------------------------------------------- */
+static bool			  g_recent_buffers = true;
+static RelFileLocator g_bufcache_locator; /* zeroed = invalid */
+static Buffer		 *g_bufcache	 = NULL;
+static BlockNumber	  g_bufcache_len = 0;
+static MemoryContext  g_bufcache_ctx = NULL;
+
+void
+mktann_storage_set_recent_buffers(bool enabled)
+{
+	g_recent_buffers = enabled;
+}
+
+static inline Buffer *
+bufcache_slot(Relation index, BlockNumber blkno)
+{
+	const RelFileLocator *loc = &index->rd_locator;
+
+	if (unlikely(
+				g_bufcache == NULL ||
+				!RelFileLocatorEquals(g_bufcache_locator, *loc)))
+	{
+		BlockNumber nblocks = RelationGetNumberOfBlocks(index);
+
+		/* Headroom so post-build inserts don't invalidate the cache. */
+		nblocks += nblocks / 8 + 1024;
+
+		/* Backend-lifetime cache data belongs under CacheMemoryContext
+		 * (as a named child, so it is attributed in
+		 * pg_backend_memory_contexts rather than hiding in the top
+		 * context). */
+		if (g_bufcache_ctx == NULL)
+			g_bufcache_ctx = AllocSetContextCreate(
+					CacheMemoryContext,
+					"mktann recent-buffers cache",
+					ALLOCSET_START_SMALL_SIZES);
+
+		if (g_bufcache != NULL)
+			pfree(g_bufcache);
+		g_bufcache = MemoryContextAlloc(
+				g_bufcache_ctx, (Size)nblocks * sizeof(Buffer));
+		for (BlockNumber i = 0; i < nblocks; i++)
+			g_bufcache[i] = InvalidBuffer;
+		g_bufcache_len	   = nblocks;
+		g_bufcache_locator = *loc;
+	}
+
+	if (unlikely(blkno >= g_bufcache_len))
+		return NULL;
+	return &g_bufcache[blkno];
+}
+
+/* ----------------------------------------------------------------
  * Read path
  * ---------------------------------------------------------------- */
 
@@ -39,8 +108,28 @@ static Page
 pg_read_page(MktStorage *self, BlockNumber blkno)
 {
 	MktannStorage *s = PG_STORAGE(self);
+	Buffer		   buf;
 
-	Buffer buf = ReadBuffer(s->index, blkno);
+	if (g_recent_buffers)
+	{
+		Buffer *slot = bufcache_slot(s->index, blkno);
+
+		if (slot != NULL && *slot != InvalidBuffer &&
+			ReadRecentBuffer(
+					s->index->rd_locator, MAIN_FORKNUM, blkno, *slot))
+		{
+			buf = *slot;
+		}
+		else
+		{
+			buf = ReadBuffer(s->index, blkno);
+			if (slot != NULL)
+				*slot = buf;
+		}
+	}
+	else
+		buf = ReadBuffer(s->index, blkno);
+
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
 	s->cur_buf = buf;
 	s->read_count++;
