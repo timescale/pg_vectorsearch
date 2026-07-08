@@ -12,6 +12,7 @@
 
 #include "algo/distance.h"
 #include "algo/kmeans.h"
+#include "index/query_scan.h"
 #include "git_commit.h"
 #include "mkt_pg.h"
 #include "mktann_explain.h"
@@ -28,6 +29,13 @@ bool   mkt_log_build_stats		= false;
 double mkt_centroid_error_scale = 0.0;
 double mkt_centroid_beam_scale	= 0.25;
 int	   mkt_leaf_refine_iters	= 2;
+static int mkt_rerank_pool		= 0;
+
+static void
+mkt_rerank_pool_assign_hook(int newval, void *extra)
+{
+	mkt_query_set_rerank_pool((uint32_t)newval);
+}
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
@@ -218,6 +226,22 @@ _PG_init(void)
 			0,
 			NULL,
 			NULL,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.rerank_pool",
+			"Max candidates to exact-rerank per query (0 = all survivors).",
+			"Rerank only the top-N candidates by approximate distance. Caps "
+			"the exact-distance heap fetches, which are a large fixed cost at "
+			"low nprobe. 0 disables the cap.",
+			&mkt_rerank_pool,
+			0,
+			0,
+			1000000,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_rerank_pool_assign_hook,
 			NULL);
 
 	MarkGUCPrefixReserved("mkt");

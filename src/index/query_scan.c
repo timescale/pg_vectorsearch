@@ -275,6 +275,18 @@ mkt_query_route(
 			qs, qvec, nprobe, mode, beam_stats ? beam_stats : &local);
 }
 
+/* Optional cap on the rerank candidate pool (0 = rerank all survivors).
+ * Set via the mkt.rerank_pool GUC. Candidates are sorted by approximate
+ * distance, so capping keeps the most promising ones and cuts the
+ * exact-distance heap fetches — a large fixed per-query cost at low nprobe. */
+static uint32_t g_rerank_pool = 0;
+
+void
+mkt_query_set_rerank_pool(uint32_t n)
+{
+	g_rerank_pool = n;
+}
+
 uint32_t
 mkt_query_execute(
 		MktQueryState  *qs,
@@ -303,6 +315,12 @@ mkt_query_execute(
 	scan_clusters(qs, qs->beam_results, ncentroids, mode, &qs->topk, stats);
 
 	uint32_t ncands = extract_candidates(qs);
+
+	/* Optional rerank-pool cap: candidates are sorted by approximate
+	 * distance, so the first g_rerank_pool are the most promising. Capping
+	 * cuts exact-distance heap fetches at a small recall risk. */
+	if (g_rerank_pool > 0 && ncands > g_rerank_pool)
+		ncands = g_rerank_pool;
 
 	/* Rerank with exact distances if enabled and storage supports it */
 	MktStorage *ps = qs->index->posting_storage;

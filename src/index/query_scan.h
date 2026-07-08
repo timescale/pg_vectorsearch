@@ -110,6 +110,9 @@ uint32_t mkt_query_execute(
 		bool			rerank,
 		MktQueryStats  *stats);
 
+/* Cap the exact-rerank candidate pool (0 = rerank all survivors). */
+void mkt_query_set_rerank_pool(uint32_t n);
+
 /*
  * Route a vector to its nearest leaf posting list(s) — the centroid-search
  * half of mkt_query_execute, without scanning postings. Normalizes the vector
