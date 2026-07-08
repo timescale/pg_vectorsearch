@@ -47,6 +47,7 @@ typedef struct MktTopKEntry
 	Distance distance; /* estimated distance */
 	Distance error;	   /* symmetric error margin (>= 0) */
 	uint64_t id;	   /* encoded TID or generic identifier */
+	uint32_t src;	   /* diagnostic: source rank stamped at insert */
 } MktTopKEntry;
 
 /* ----------------------------------------------------------------
@@ -65,6 +66,7 @@ typedef struct MktTopK
 	MktTopKEntry *candidates;	 /* growable candidate buffer */
 	uint32_t	  cand_count;	 /* buffered candidates */
 	uint32_t	  cand_capacity; /* allocated capacity */
+	uint32_t	  cur_src;		 /* diagnostic: rank stamped onto inserts */
 	MktMemCtx	  memctx;		 /* owning context for all allocations */
 } MktTopK;
 
