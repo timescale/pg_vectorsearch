@@ -374,6 +374,7 @@ fastscan_prune_16(
 		float		   inv_sqrt_d,
 		float		   g_add,
 		float		   g_error,
+		float		   lut_margin,
 		float		   threshold)
 {
 	/* Convert 16 int32 accumulators to float */
@@ -399,10 +400,14 @@ fastscan_prune_16(
 	__m512 est_v = _mm512_add_ps(fa, gadd);
 	est_v = _mm512_fnmadd_ps(_mm512_mul_ps(two_v, fr), final_dot, est_v);
 
-	/* err = f_error * g_error */
+	/* err = f_error * g_error + f_rescale * lut_margin
+	 * (lut_margin accounts for uint8 LUT quantization when the 8-bit
+	 * fastscan LUT is active; 0 under the 16-bit LUT) */
 	__m512 fe	  = _mm512_loadu_ps(f_error);
 	__m512 gerr_v = _mm512_set1_ps(g_error);
 	__m512 err_v  = _mm512_mul_ps(fe, gerr_v);
+	__m512 lm_v	  = _mm512_set1_ps(lut_margin);
+	err_v		  = _mm512_fmadd_ps(fr, lm_v, err_v);
 
 	/* lb = est - err; survivors = lb < threshold */
 	__m512	  lb_v	= _mm512_sub_ps(est_v, err_v);
@@ -434,6 +439,7 @@ fastscan_prune_group_avx512(
 		float			 inv_sqrt_d,
 		float			 g_add,
 		float			 g_error,
+		float			 lut_margin,
 		Distance		*threshold_p)
 {
 	Distance threshold = *threshold_p;
@@ -456,6 +462,7 @@ fastscan_prune_group_avx512(
 				inv_sqrt_d,
 				g_add,
 				g_error,
+				lut_margin,
 				threshold);
 
 		if (surv == 0)
@@ -526,10 +533,26 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 	float lut_scale = scan->fs_lut_scale;
 	float lut_bias	= scan->fs_lut_bias;
 
-	float	 g_add		= scan->qstate->g_add;
-	float	 sum_t		= scan->qstate->sum_transformed;
-	float	 inv_sqrt_d = scan->qstate->inv_sqrt_d;
-	float	 g_error	= scan->qstate->g_error;
+	float g_add		 = scan->qstate->g_add;
+	float sum_t		 = scan->qstate->sum_transformed;
+	float inv_sqrt_d = scan->qstate->inv_sqrt_d;
+	float g_error	 = scan->qstate->g_error;
+
+	/* Extra error margin for uint8 LUT quantization (8-bit mode only).
+	 * The accumulated binary_ip carries the sum of nsq = dim/4 LUT
+	 * roundings, each uniform in [-scale/2, scale/2]: sigma =
+	 * scale * sqrt(nsq / 12). Budget 2 sigma of ip error; est error =
+	 * 4 * f_rescale * inv_sqrt_d * ip_err, so fold everything except
+	 * the per-entry f_rescale into one scalar. Without this margin the
+	 * fs8 "lower bound" is not a bound and true neighbors get pruned
+	 * before rerank (~1.5-2pp recall loss on cohere-100M). */
+	float lut_margin = 0.0f;
+	if (scan->fs_lut_bits == 8)
+	{
+		float sigma = lut_scale * sqrtf((float)(dim / 4) / 12.0f);
+		lut_margin	= 4.0f * inv_sqrt_d * 2.0f * sigma;
+	}
+
 	uint32_t max_groups = mkt_fastscan_max_groups(
 			dim, opaque->flags & MKT_POSTING_PAGE_FIRST);
 	uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) / MKT_FASTSCAN_GROUP;
@@ -601,6 +624,7 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 					inv_sqrt_d,
 					g_add,
 					g_error,
+					lut_margin,
 					&threshold);
 		}
 		else
@@ -615,8 +639,9 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 				float	 final_dot = (2.0f * binary_ip - sum_t) * inv_sqrt_d;
 				Distance est	   = f_add[v] + g_add -
 							   2.0f * f_rescale[v] * final_dot;
-				Distance err = f_error[v] * g_error;
-				Distance lb	 = est - err;
+				Distance err = f_error[v] * g_error +
+							   f_rescale[v] * lut_margin;
+				Distance lb = est - err;
 
 				if (lb >= threshold)
 				{
