@@ -15,19 +15,27 @@
 #include "git_commit.h"
 #include "mkt_pg.h"
 #include "mktann_explain.h"
+#include "mktann_storage.h"
 
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-int	   mkt_distance_mode		= MKT_DISTANCE_MODE_DEFAULT;
-int	   mkt_nprobe				= 10;
-int	   mkt_query_limit			= 0;
-int	   mkt_fastscan_bits		= 16;
-bool   mkt_rerank				= true;
-bool   mkt_log_build_stats		= false;
-double mkt_centroid_error_scale = 0.0;
-double mkt_centroid_beam_scale	= 0.25;
-int	   mkt_leaf_refine_iters	= 2;
+int			mkt_distance_mode		 = MKT_DISTANCE_MODE_DEFAULT;
+int			mkt_nprobe				 = 10;
+int			mkt_query_limit			 = 0;
+int			mkt_fastscan_bits		 = 16;
+bool		mkt_rerank				 = true;
+bool		mkt_log_build_stats		 = false;
+double		mkt_centroid_error_scale = 0.0;
+double		mkt_centroid_beam_scale	 = 0.25;
+int			mkt_leaf_refine_iters	 = 2;
+static bool mkt_recent_buffers		 = true;
+
+static void
+mkt_recent_buffers_assign_hook(bool newval, void *extra)
+{
+	mktann_storage_set_recent_buffers(newval);
+}
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
@@ -218,6 +226,22 @@ _PG_init(void)
 			0,
 			NULL,
 			NULL,
+			NULL);
+
+	DefineCustomBoolVariable(
+			"mkt.recent_buffers",
+			"Re-pin index pages via a backend-local buffer-id cache.",
+			"Skips the shared buffer-mapping hash lookup (a large share of "
+			"warm scan CPU) by remembering each block's buffer id and "
+			"re-pinning it with ReadRecentBuffer. Stale ids fall back to a "
+			"normal read and self-heal. Costs 4 bytes per index block per "
+			"backend.",
+			&mkt_recent_buffers,
+			true,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_recent_buffers_assign_hook,
 			NULL);
 
 	MarkGUCPrefixReserved("mkt");
