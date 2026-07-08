@@ -32,6 +32,7 @@ double		  mkt_centroid_beam_scale  = 0.25;
 int			  mkt_leaf_refine_iters	   = 2;
 static bool	  mkt_recent_buffers	   = true;
 static double mkt_probe_expand		   = 2.0;
+static int	  mkt_rerank_pool		   = 0;
 
 static void
 mkt_recent_buffers_assign_hook(bool newval, void *extra)
@@ -43,6 +44,12 @@ static void
 mkt_probe_expand_assign_hook(double newval, void *extra)
 {
 	mkt_query_set_probe_expand(newval);
+}
+
+static void
+mkt_rerank_pool_assign_hook(int newval, void *extra)
+{
+	mkt_query_set_rerank_pool((int32_t)newval);
 }
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
@@ -273,6 +280,26 @@ _PG_init(void)
 			0,
 			NULL,
 			mkt_probe_expand_assign_hook,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.rerank_pool",
+			"Max candidates to exact-rerank per query (0 = automatic, "
+			"-1 = unlimited).",
+			"Rerank only the most promising candidates by approximate "
+			"distance, bounding the exact-distance heap fetches. 0 (the "
+			"default) caps at 16 * k, measured recall-neutral across the "
+			"probe range; -1 reranks every threshold survivor; positive "
+			"values set an absolute cap. The effective cap is never below "
+			"the query's k, so results are never truncated.",
+			&mkt_rerank_pool,
+			0,
+			-1,
+			1000000,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_rerank_pool_assign_hook,
 			NULL);
 
 	MarkGUCPrefixReserved("mkt");
