@@ -16,6 +16,7 @@
 #include <utils/lsyscache.h>
 #include <utils/rel.h>
 
+#include "core/platform.h"
 #include "mktann_explain.h"
 #include "mktann_scan.h"
 
@@ -84,6 +85,30 @@ mktann_explain_hook(
 			"Rerank Candidates", NULL, stats->rerank_candidates, es);
 	ExplainPropertyInteger("Rerank Results", NULL, stats->rerank_results, es);
 	ExplainPropertyInteger("Storage Reads", NULL, stats->storage_reads, es);
+
+	/* Per-phase wall time (ms). Emitted only under EXPLAIN (ANALYZE,
+	 * VERBOSE, TIMING ON) so regression output stays stable without it. */
+	if (es->timing)
+	{
+		ExplainPropertyFloat(
+				"Centroid Search Time",
+				"ms",
+				(double)stats->centroid_ns / MKT_NS_PER_MS,
+				3,
+				es);
+		ExplainPropertyFloat(
+				"Posting Scan Time",
+				"ms",
+				(double)stats->posting_ns / MKT_NS_PER_MS,
+				3,
+				es);
+		ExplainPropertyFloat(
+				"Rerank Time",
+				"ms",
+				(double)stats->rerank_ns / MKT_NS_PER_MS,
+				3,
+				es);
+	}
 
 	ExplainCloseGroup("Mktann", "Mktann", true, es);
 }
