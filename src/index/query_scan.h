@@ -43,6 +43,9 @@ typedef struct MktQueryStats
 	uint64_t centroid_lut_ns;	   /* fastscan LUT build (once/query) */
 	uint64_t centroid_pageread_ns; /* centroid page read/release */
 	uint64_t centroid_score_ns;	   /* centroid page scoring (incl. lut) */
+	/* Routing-quality diagnostic: deepest probe rank (0-based) among the
+	 * final top-k results, i.e. how many probed clusters were needed. */
+	uint32_t max_contrib_rank;
 } MktQueryStats;
 
 /* ----------------------------------------------------------------
