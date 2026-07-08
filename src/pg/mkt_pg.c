@@ -13,6 +13,7 @@
 
 #include "algo/distance.h"
 #include "algo/kmeans.h"
+#include "index/posting_scan.h"
 #include "git_commit.h"
 #include "mkt_pg.h"
 #include "mktann_explain.h"
@@ -32,6 +33,13 @@ double mkt_centroid_beam_scale	 = 0.25;
 int	   mkt_leaf_refine_iters	 = 2;
 bool   mkt_enable_centroid_cache = false;
 int	   mkt_centroid_cache_max_mb = 512;
+static bool mkt_scan_readahead	 = true;
+
+static void
+mkt_scan_readahead_assign_hook(bool newval, void *extra)
+{
+	mkt_posting_set_readahead(newval);
+}
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
@@ -286,6 +294,18 @@ _PG_init(void)
 			0,
 			NULL,
 			NULL,
+			NULL);
+
+	DefineCustomBoolVariable(
+			"mkt.scan_readahead",
+			"Prefetch next posting page's codes during the current scan.",
+			"Hides code-load latency in the fastscan posting scan.",
+			&mkt_scan_readahead,
+			true,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_scan_readahead_assign_hook,
 			NULL);
 
 	MarkGUCPrefixReserved("mkt");

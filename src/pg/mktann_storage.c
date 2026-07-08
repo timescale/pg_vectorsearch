@@ -62,6 +62,44 @@ pg_release_page(MktStorage *self, BlockNumber blkno)
 	s->cur_buf = InvalidBuffer;
 }
 
+/* Pin a page into the read-ahead slot (held alongside cur_buf). */
+static Page
+pg_read_ahead(MktStorage *self, BlockNumber blkno)
+{
+	MktannStorage *s = PG_STORAGE(self);
+
+	Buffer buf = ReadBuffer(s->index, blkno);
+	LockBuffer(buf, BUFFER_LOCK_SHARE);
+	s->ra_buf = buf;
+	s->read_count++;
+
+	return BufferGetPage(buf);
+}
+
+/* Release the current page and make the read-ahead page current. */
+static void
+pg_promote_ahead(MktStorage *self, BlockNumber old_blkno)
+{
+	MktannStorage *s = PG_STORAGE(self);
+
+	(void)old_blkno;
+	if (BufferIsValid(s->cur_buf))
+		UnlockReleaseBuffer(s->cur_buf);
+	s->cur_buf = s->ra_buf;
+	s->ra_buf  = InvalidBuffer;
+}
+
+/* Drop the read-ahead pin without promoting it. */
+static void
+pg_release_ahead(MktStorage *self)
+{
+	MktannStorage *s = PG_STORAGE(self);
+
+	if (BufferIsValid(s->ra_buf))
+		UnlockReleaseBuffer(s->ra_buf);
+	s->ra_buf = InvalidBuffer;
+}
+
 /* ----------------------------------------------------------------
  * Write path
  * ---------------------------------------------------------------- */
@@ -451,6 +489,9 @@ pg_rerank_readstream(
 static const MktStorageOps pg_storage_ops = {
 		.read_page	  = pg_read_page,
 		.release_page = pg_release_page,
+		.read_ahead	  = pg_read_ahead,
+		.promote_ahead = pg_promote_ahead,
+		.release_ahead = pg_release_ahead,
 		.write_page	  = pg_write_page,
 		.new_page	  = pg_new_page,
 		.commit_page  = pg_commit_page,
@@ -461,6 +502,9 @@ static const MktStorageOps pg_storage_ops = {
 static const MktStorageOps pg_storage_readstream_ops = {
 		.read_page	  = pg_read_page,
 		.release_page = pg_release_page,
+		.read_ahead	  = pg_read_ahead,
+		.promote_ahead = pg_promote_ahead,
+		.release_ahead = pg_release_ahead,
 		.write_page	  = pg_write_page,
 		.new_page	  = pg_new_page,
 		.commit_page  = pg_commit_page,
@@ -484,6 +528,7 @@ mktann_storage_init(
 	s->rel		  = rel;
 	s->build_mode = false;
 	s->cur_buf	  = InvalidBuffer;
+	s->ra_buf	  = InvalidBuffer;
 	s->metric	  = metric;
 	s->read_count = 0;
 }

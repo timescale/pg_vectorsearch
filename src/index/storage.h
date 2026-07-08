@@ -52,6 +52,19 @@ typedef struct MktStorageOps
 	Page (*read_page)(MktStorage *self, BlockNumber blkno);
 	void (*release_page)(MktStorage *self, BlockNumber blkno);
 
+	/*
+	 * Read-ahead path (optional; NULL if unsupported).
+	 *
+	 * read_ahead pins a page into a secondary slot held *alongside* the
+	 * current page, so the caller can prefetch its contents while still
+	 * scanning the current page. promote_ahead releases the current page
+	 * and makes the read-ahead page current. release_ahead drops the
+	 * read-ahead pin without promoting (cleanup / abort).
+	 */
+	Page (*read_ahead)(MktStorage *self, BlockNumber blkno);
+	void (*promote_ahead)(MktStorage *self, BlockNumber old_blkno);
+	void (*release_ahead)(MktStorage *self);
+
 	/* Write path (durability/WAL is internal to implementation) */
 	Page (*write_page)(MktStorage *self, BlockNumber blkno);
 	Page (*new_page)(MktStorage *self, BlockNumber *blkno_out);
@@ -116,6 +129,28 @@ static inline void
 mkt_storage_release_page(MktStorage *s, BlockNumber blkno)
 {
 	s->ops->release_page(s, blkno);
+}
+
+static inline Page
+mkt_storage_read_ahead(MktStorage *s, BlockNumber blkno)
+{
+	if (s->ops->read_ahead != NULL)
+		return s->ops->read_ahead(s, blkno);
+	return NULL;
+}
+
+static inline void
+mkt_storage_promote_ahead(MktStorage *s, BlockNumber old_blkno)
+{
+	if (s->ops->promote_ahead != NULL)
+		s->ops->promote_ahead(s, old_blkno);
+}
+
+static inline void
+mkt_storage_release_ahead(MktStorage *s)
+{
+	if (s->ops->release_ahead != NULL)
+		s->ops->release_ahead(s);
 }
 
 static inline Page
