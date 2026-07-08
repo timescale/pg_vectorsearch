@@ -10,10 +10,12 @@
 
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 #include "algo/topk.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
+#include "core/platform.h"
 #include "index/centroid_search.h"
 #include "mkt_halfvec.h"
 
@@ -66,7 +68,20 @@ struct MktCentroidScratch
 	float	 fs_lut_delta;
 	float	 fs_lut_bias;
 	bool	 fs_lut_valid;
+	/* Fine-grained timing accumulators (ns), reset per beam search. */
+	uint64_t t_lut_ns;
+	uint64_t t_pageread_ns;
+	uint64_t t_score_ns;
 };
+
+/* Monotonic nanosecond clock for fine-grained centroid instrumentation. */
+static inline uint64_t
+cs_now_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * MKT_NS_PER_SEC + (uint64_t)ts.tv_nsec;
+}
 
 MktCentroidScratch *
 mkt_centroid_scratch_create(Dimension dim, uint32_t max_beam_width)
@@ -299,6 +314,7 @@ score_page(
 		 * and reuse them on every subsequent FASTSCAN page. */
 		if (!cs->fs_lut_valid)
 		{
+			uint64_t t_lut = cs_now_ns();
 			mkt_fastscan_build_lut_hacc(
 					state->qstate->transformed,
 					dim,
@@ -306,6 +322,7 @@ score_page(
 					&cs->fs_lut_delta,
 					&cs->fs_lut_bias);
 			cs->fs_lut_valid = true;
+			cs->t_lut_ns += cs_now_ns() - t_lut;
 		}
 		float lut_delta = cs->fs_lut_delta;
 		float lut_bias	= cs->fs_lut_bias;
@@ -587,6 +604,11 @@ mkt_centroid_beam_search(
 	 * pages in this query. */
 	scratch->fs_lut_valid = false;
 
+	/* Reset fine-grained timing accumulators for this query. */
+	scratch->t_lut_ns	   = 0;
+	scratch->t_pageread_ns = 0;
+	scratch->t_score_ns	   = 0;
+
 	/* centroid_vecs: will be used later for copying centroid vectors */
 	(void)centroid_vecs;
 
@@ -619,7 +641,9 @@ mkt_centroid_beam_search(
 
 	while (blkno != InvalidBlockNumber)
 	{
-		Page page = mkt_storage_read_page(state->storage, blkno);
+		uint64_t t_r  = cs_now_ns();
+		Page	 page = mkt_storage_read_page(state->storage, blkno);
+		scratch->t_pageread_ns += cs_now_ns() - t_r;
 		MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
 		centroid_pages_read++;
 
@@ -631,18 +655,24 @@ mkt_centroid_beam_search(
 			level0_full = true;
 		}
 		else
-			raw_count = score_page(
-					state,
-					page,
-					blkno,
-					dim,
-					buf_a,
-					raw_count,
-					cand_cap,
-					scratch);
+		{
+			uint64_t t_s = cs_now_ns();
+			raw_count	 = score_page(
+					   state,
+					   page,
+					   blkno,
+					   dim,
+					   buf_a,
+					   raw_count,
+					   cand_cap,
+					   scratch);
+			scratch->t_score_ns += cs_now_ns() - t_s;
+		}
 
 		BlockNumber next_blkno = opaque->next_blkno;
+		t_r					   = cs_now_ns();
 		mkt_storage_release_page(state->storage, blkno);
+		scratch->t_pageread_ns += cs_now_ns() - t_r;
 		blkno = next_blkno;
 	}
 	if (stats && !level0_full)
@@ -687,20 +717,26 @@ mkt_centroid_beam_search(
 			BlockNumber cb = child_blkno;
 			while (cb != InvalidBlockNumber)
 			{
-				Page page = mkt_storage_read_page(state->storage, cb);
+				uint64_t t_r  = cs_now_ns();
+				Page	 page = mkt_storage_read_page(state->storage, cb);
+				scratch->t_pageread_ns += cs_now_ns() - t_r;
 				centroid_pages_read++;
-				next_count = score_page(
-						state,
-						page,
-						cb,
-						dim,
-						expand_buf,
-						next_count,
-						cand_cap,
-						scratch);
+				uint64_t t_s = cs_now_ns();
+				next_count	 = score_page(
+						  state,
+						  page,
+						  cb,
+						  dim,
+						  expand_buf,
+						  next_count,
+						  cand_cap,
+						  scratch);
+				scratch->t_score_ns += cs_now_ns() - t_s;
 				MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
 				BlockNumber			   nb	  = opaque->next_blkno;
+				t_r							  = cs_now_ns();
 				mkt_storage_release_page(state->storage, cb);
+				scratch->t_pageread_ns += cs_now_ns() - t_r;
 				cb = nb;
 			}
 		}
@@ -785,7 +821,12 @@ mkt_centroid_beam_search(
 	}
 
 	if (stats)
-		stats->pages_read = centroid_pages_read;
+	{
+		stats->pages_read  = centroid_pages_read;
+		stats->lut_ns	   = scratch->t_lut_ns;
+		stats->pageread_ns = scratch->t_pageread_ns;
+		stats->score_ns	   = scratch->t_score_ns;
+	}
 
 	if (owned_scratch != NULL)
 		mkt_centroid_scratch_free(owned_scratch);

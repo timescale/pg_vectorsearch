@@ -98,6 +98,13 @@ void mkt_simd_reset_cache(void);
  * Use sparingly - modern CPUs have good branch predictors.
  * Most useful for error paths that are rarely taken.
  */
+/* Time-unit conversion factors for nanosecond-based instrumentation
+ * (cf. PostgreSQL's NS_PER_S family in portability/instr_time.h; defined
+ * here so shared, non-PG code can use them too). */
+#define MKT_NS_PER_SEC 1000000000ULL
+#define MKT_NS_PER_MS  1000000ULL
+#define MKT_NS_PER_US  1000ULL
+
 #define mkt_likely(x)	__builtin_expect(!!(x), 1)
 #define mkt_unlikely(x) __builtin_expect(!!(x), 0)
 
