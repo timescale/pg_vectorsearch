@@ -85,6 +85,26 @@ mktann_explain_hook(
 	ExplainPropertyInteger("Rerank Results", NULL, stats->rerank_results, es);
 	ExplainPropertyInteger("Storage Reads", NULL, stats->storage_reads, es);
 
+	/* Per-phase wall time (ms). Emitted only under EXPLAIN (ANALYZE,
+	 * VERBOSE, TIMING ON) so regression output stays stable without it. */
+	if (es->timing)
+	{
+		ExplainPropertyFloat(
+				"Centroid Search Time",
+				"ms",
+				(double)stats->centroid_ns / 1e6,
+				3,
+				es);
+		ExplainPropertyFloat(
+				"Posting Scan Time",
+				"ms",
+				(double)stats->posting_ns / 1e6,
+				3,
+				es);
+		ExplainPropertyFloat(
+				"Rerank Time", "ms", (double)stats->rerank_ns / 1e6, 3, es);
+	}
+
 	ExplainCloseGroup("Mktann", "Mktann", true, es);
 }
 
