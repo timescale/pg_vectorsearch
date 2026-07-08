@@ -274,6 +274,11 @@ scan_clusters(
 		if (ph == InvalidBlockNumber)
 			continue;
 
+		/* Diagnostic: stamp candidates inserted while scanning this cluster
+		 * with its probe rank j, so we can measure how deep in the probe
+		 * order the final top-k results actually came from. */
+		topk->cur_src = j;
+
 		mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
 
 		const float *pt_cent = mkt_posting_scan_pt_centroid(&qs->pscan);
@@ -468,9 +473,21 @@ mkt_query_execute(
 
 	uint64_t t3 = mkt_query_now_ns();
 
+	/* Routing-quality diagnostic: deepest probe rank contributing a final
+	 * top-k result. Low values (relative to nprobe) => over-probing; values
+	 * near nprobe => neighbors genuinely routed deep (mis-routing). */
+	uint32_t max_rank = 0;
+	for (uint32_t i = 0; i < qs->nresults; i++)
+	{
+		uint32_t r = qs->candidates[qs->result_order[i]].src;
+		if (r > max_rank)
+			max_rank = r;
+	}
+
 	if (stats != NULL)
 	{
 		/* clusters_scanned is set by scan_clusters (actual count). */
+		stats->max_contrib_rank		= max_rank;
 		stats->centroid_pages_read	= beam_stats.pages_read;
 		stats->centroid_ns			= t1 - t0;
 		stats->posting_ns			= t2 - t1;
