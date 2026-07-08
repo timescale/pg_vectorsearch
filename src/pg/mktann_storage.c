@@ -19,14 +19,18 @@
 #include <executor/tuptable.h>
 #include <storage/bufmgr.h>
 #include <storage/read_stream.h>
+#include <utils/memutils.h>
 #include <utils/snapmgr.h>
 
 #include "algo/distance.h"
 #include "algo/topk.h"
 #include "algo/vecops.h"
+#include "index/centroid_compact.h"
+#include "index/centroid_page.h"
 #include "index/posting_page.h"
 #include "mkt_pg.h"
 #include "mktann_storage.h"
+#include "quant/fastscan.h"
 
 /* Downcast from base to concrete type */
 #define PG_STORAGE(self) ((MktannStorage *)(self))

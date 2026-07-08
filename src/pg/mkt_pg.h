@@ -35,6 +35,9 @@ extern int	  mkt_fastscan_bits;	 /* fastscan LUT bits (8 or 16) */
 extern bool	  mkt_rerank;			 /* enable reranking (default: true) */
 extern bool	  mkt_log_build_stats;	 /* log per-phase build stats (def: off) */
 extern int	  mkt_leaf_refine_iters; /* full-table leaf refine passes */
+extern bool	  mkt_enable_centroid_cache; /* compact centroid cache, FASTSCAN
+											only (default: off) */
+extern int	  mkt_centroid_cache_max_mb; /* compact cache budget (MB) */
 extern double mkt_centroid_error_scale; /* scales centroid pruning error bound
 										   (1=default, 0=drop) */
 extern double mkt_centroid_beam_scale;	/* intermediate beam width as fraction

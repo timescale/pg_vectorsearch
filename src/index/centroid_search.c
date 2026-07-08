@@ -130,6 +130,94 @@ mkt_centroid_scratch_free(MktCentroidScratch *s)
 }
 
 /*
+ * Score a contiguous run of FASTSCAN group sections (one tree node), appending
+ * candidates. `content` points at back-to-back group sections (identical to a
+ * page's contents region) and `entry_count` is the node's centroid count.
+ * Shared by the page path (score_page) and the compact-cache path
+ * (score_node).
+ */
+static uint32_t
+score_fastscan_content(
+		const MktCentroidSearchState *state,
+		const char					 *content,
+		uint32_t					  entry_count,
+		BlockNumber					  origin_blkno,
+		Dimension					  dim,
+		Candidate					 *cands,
+		uint32_t					  cand_count,
+		uint32_t					  cand_cap,
+		MktCentroidScratch			 *cs)
+{
+	if (entry_count == 0)
+		return cand_count;
+
+	if (!cs->fs_lut_valid)
+	{
+		mkt_fastscan_build_lut_hacc(
+				state->qstate->transformed,
+				dim,
+				cs->fs_lut,
+				&cs->fs_lut_delta,
+				&cs->fs_lut_bias);
+		cs->fs_lut_valid = true;
+	}
+	float lut_delta = cs->fs_lut_delta;
+	float lut_bias	= cs->fs_lut_bias;
+
+	float g_add		 = state->qstate->g_add;
+	float sum_t		 = state->qstate->sum_transformed;
+	float inv_sqrt_d = state->qstate->inv_sqrt_d;
+	float g_error	 = state->qstate->g_error;
+	float err_mult	 = state->qstate->error_multiplier;
+
+	uint32_t ngroups = (entry_count + MKT_FASTSCAN_GROUP - 1) /
+					   MKT_FASTSCAN_GROUP;
+
+	int32_t accum[MKT_FASTSCAN_GROUP];
+
+	for (uint32_t g = 0; g < ngroups; g++)
+	{
+		uint32_t g_start = g * MKT_FASTSCAN_GROUP;
+		uint32_t g_count = entry_count - g_start;
+		if (g_count > MKT_FASTSCAN_GROUP)
+			g_count = MKT_FASTSCAN_GROUP;
+
+		const BlockNumber *child = (const BlockNumber *)
+				mkt_centroid_fastscan_group_child((char *)content, g, dim);
+		const float *f_add_arr =
+				mkt_centroid_fastscan_group_f_add((char *)content, g, dim);
+		const float *f_rescale_arr =
+				mkt_centroid_fastscan_group_f_rescale((char *)content, g, dim);
+		const float *f_error_arr =
+				mkt_centroid_fastscan_group_f_error((char *)content, g, dim);
+		const uint8_t *codes =
+				mkt_centroid_fastscan_group_codes((char *)content, g, dim);
+
+		mkt_fastscan_accumulate_hacc(codes, cs->fs_lut, accum, dim);
+
+		for (uint32_t v = 0; v < g_count && cand_count < cand_cap; v++)
+		{
+			float binary_ip = (float)accum[v] * lut_delta + lut_bias;
+			float final_dot = (2.0f * binary_ip - sum_t) * inv_sqrt_d;
+
+			Distance est = f_add_arr[v] + g_add -
+						   2.0f * f_rescale_arr[v] * final_dot;
+			Distance err = state->error_scale *
+						   (err_mult * f_error_arr[v] * g_error +
+							1e-5f * fabsf(est));
+
+			uint32_t page_idx			  = g_start + v;
+			cands[cand_count].child_blkno = child[v];
+			ItemPointerSet(&cands[cand_count].origin, origin_blkno, page_idx);
+			cands[cand_count].distance = est;
+			cands[cand_count].error	   = err;
+			cand_count++;
+		}
+	}
+	return cand_count;
+}
+
+/*
  * Score all centroids on a single page, appending to candidates.
  * Returns the new candidate count.
  *
@@ -259,107 +347,23 @@ score_page(
 		break;
 	}
 	case MKT_CENTROID_FMT_FASTSCAN:
-	{
-		/* Fastscan centroid pages: same RaBitQ codes as the RABITQ
-		 * format but rearranged into 32-vector groups so we can
-		 * score them with mkt_fastscan_accumulate (~150 M vec/s on
-		 * Graviton 4) instead of the per-vector kernel used by the
-		 * RABITQ branch above.
-		 *
-		 * Layout per group section:
-		 *   BlockNumber child_blkno[32]
-		 *   float       f_add[32]
-		 *   float       f_rescale[32]
-		 *   float       f_error[32]
-		 *   uint8_t     codes[nsq_pairs*32]
-		 *
-		 * The LUT depends on the query (and via qstate->transformed,
-		 * implicitly on the cluster's centroid for posting scans;
-		 * for centroid descent the relevant query state is the
-		 * pre-cluster qstate->transformed which is just P^T*query
-		 * minus the global_mean rotation already absorbed by
-		 * pt_global_mean). It is rebuilt once per centroid page
-		 * scored. Amortising the LUT build across all 32 entries in
-		 * a group is the whole reason this is faster than the
-		 * per-vector kernel. */
-		/* Build the LUT once per query — qstate->transformed is
-		 * constant across the whole centroid descent, so we cache
-		 * the LUT bytes + lut_delta + lut_bias in MktCentroidScratch
-		 * and reuse them on every subsequent FASTSCAN page. */
-		if (!cs->fs_lut_valid)
-		{
-			mkt_fastscan_build_lut_hacc(
-					state->qstate->transformed,
-					dim,
-					cs->fs_lut,
-					&cs->fs_lut_delta,
-					&cs->fs_lut_bias);
-			cs->fs_lut_valid = true;
-		}
-		float lut_delta = cs->fs_lut_delta;
-		float lut_bias	= cs->fs_lut_bias;
-
-		float g_add		 = state->qstate->g_add;
-		float sum_t		 = state->qstate->sum_transformed;
-		float inv_sqrt_d = state->qstate->inv_sqrt_d;
-		float g_error	 = state->qstate->g_error;
-		float err_mult	 = state->qstate->error_multiplier;
-
-		char	*content	 = (char *)PageGetContents(page);
-		uint32_t entry_count = count;
-		uint32_t ngroups	 = (entry_count + MKT_FASTSCAN_GROUP - 1) /
-						   MKT_FASTSCAN_GROUP;
-
-		int32_t accum[MKT_FASTSCAN_GROUP];
-
-		for (uint32_t g = 0; g < ngroups; g++)
-		{
-			uint32_t g_start = g * MKT_FASTSCAN_GROUP;
-			uint32_t g_count = entry_count - g_start;
-			if (g_count > MKT_FASTSCAN_GROUP)
-				g_count = MKT_FASTSCAN_GROUP;
-
-			const BlockNumber *child = (const BlockNumber *)
-					mkt_centroid_fastscan_group_child(content, g, dim);
-			const float *f_add_arr =
-					mkt_centroid_fastscan_group_f_add(content, g, dim);
-			const float *f_rescale_arr =
-					mkt_centroid_fastscan_group_f_rescale(content, g, dim);
-			const float *f_error_arr =
-					mkt_centroid_fastscan_group_f_error(content, g, dim);
-			const uint8_t *codes =
-					mkt_centroid_fastscan_group_codes(content, g, dim);
-
-			mkt_fastscan_accumulate_hacc(codes, cs->fs_lut, accum, dim);
-
-			for (uint32_t v = 0; v < g_count && cand_count < cand_cap; v++)
-			{
-				/* De-quantise the LUT accumulator the same way the
-				 * posting fastscan path does (see prune_group_neon
-				 * in posting_scan.c). */
-				float binary_ip = (float)accum[v] * lut_delta + lut_bias;
-				float final_dot = (2.0f * binary_ip - sum_t) * inv_sqrt_d;
-
-				Distance est = f_add_arr[v] + g_add -
-							   2.0f * f_rescale_arr[v] * final_dot;
-				/* Matches rabitq_lower_bound(): err_margin =
-				 * multiplier * f_error * g_error, plus a small
-				 * floating-point margin proportional to |est|. */
-				Distance err = state->error_scale *
-							   (err_mult * f_error_arr[v] * g_error +
-								1e-5f * fabsf(est));
-
-				uint32_t page_idx			  = g_start + v;
-				cands[cand_count].child_blkno = child[v];
-				ItemPointerSet(
-						&cands[cand_count].origin, page_blkno, page_idx);
-				cands[cand_count].distance = est;
-				cands[cand_count].error	   = err;
-				cand_count++;
-			}
-		}
+		/* A FASTSCAN page stores its 32-vector group sections back-to-back
+		 * in the page contents — byte-for-byte the same layout the compact
+		 * cache copies — so scoring a page is identical to scoring a cached
+		 * node. Share the one implementation (score_fastscan_content); this
+		 * also makes cache/page result parity structural rather than a
+		 * coincidence of two copies staying in sync. */
+		cand_count = score_fastscan_content(
+				state,
+				(const char *)PageGetContents(page),
+				count,
+				page_blkno,
+				dim,
+				cands,
+				cand_count,
+				cand_cap,
+				cs);
 		break;
-	}
 	case MKT_CENTROID_FMT_HALF:
 	{
 		float norm_q = (state->metric == DISTANCE_COSINE)
@@ -400,6 +404,56 @@ score_page(
 	}
 	}
 
+	return cand_count;
+}
+
+/*
+ * Score one tree node (a beam candidate's children), starting at `blkno`.
+ * With the compact cache the node's groups are contiguous in memory and read
+ * lock-free; otherwise walk the centroid page chain via storage. Returns the
+ * updated candidate count.
+ */
+static uint32_t
+score_node(
+		const MktCentroidSearchState *state,
+		BlockNumber					  blkno,
+		Dimension					  dim,
+		Candidate					 *cands,
+		uint32_t					  cand_count,
+		uint32_t					  cand_cap,
+		MktCentroidScratch			 *cs,
+		uint32_t					 *pages_read)
+{
+	if (state->compact != NULL)
+	{
+		uint32_t	entry_count = 0;
+		const char *content		= mkt_centroid_compact_lookup(
+				state->compact, blkno, &entry_count);
+		if (content != NULL)
+			return score_fastscan_content(
+					state,
+					content,
+					entry_count,
+					blkno,
+					dim,
+					cands,
+					cand_count,
+					cand_cap,
+					cs);
+		/* miss: fall back to the page path (not expected once built) */
+	}
+
+	BlockNumber cb = blkno;
+	while (cb != InvalidBlockNumber)
+	{
+		Page page = mkt_storage_read_page(state->storage, cb);
+		(*pages_read)++;
+		cand_count = score_page(
+				state, page, cb, dim, cands, cand_count, cand_cap, cs);
+		BlockNumber nb = MKT_CENTROID_OPAQUE(page)->next_blkno;
+		mkt_storage_release_page(state->storage, cb);
+		cb = nb;
+	}
 	return cand_count;
 }
 
@@ -519,21 +573,17 @@ mkt_centroid_beam_search(
 
 	uint32_t centroid_pages_read = 0;
 
-	/* Level 0: read root centroid page(s), score ALL centroids */
-	uint32_t	raw_count = 0;
-	BlockNumber blkno	  = first_centroid_blkno;
-
-	while (blkno != InvalidBlockNumber)
-	{
-		Page page = mkt_storage_read_page(state->storage, blkno);
-		centroid_pages_read++;
-		raw_count = score_page(
-				state, page, blkno, dim, buf_a, raw_count, cand_cap, scratch);
-		MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
-		BlockNumber			   next_blkno = opaque->next_blkno;
-		mkt_storage_release_page(state->storage, blkno);
-		blkno = next_blkno;
-	}
+	/* Level 0: score ALL centroids of the root node (compact buffer when
+	 * available, else the root page chain). */
+	uint32_t raw_count = score_node(
+			state,
+			first_centroid_blkno,
+			dim,
+			buf_a,
+			0,
+			cand_cap,
+			scratch,
+			&centroid_pages_read);
 	if (stats)
 		stats->dist_calcs += raw_count;
 
@@ -568,25 +618,15 @@ mkt_centroid_beam_search(
 			if (child_blkno == InvalidBlockNumber)
 				continue;
 
-			BlockNumber cb = child_blkno;
-			while (cb != InvalidBlockNumber)
-			{
-				Page page = mkt_storage_read_page(state->storage, cb);
-				centroid_pages_read++;
-				next_count = score_page(
-						state,
-						page,
-						cb,
-						dim,
-						expand_buf,
-						next_count,
-						cand_cap,
-						scratch);
-				MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
-				BlockNumber			   nb	  = opaque->next_blkno;
-				mkt_storage_release_page(state->storage, cb);
-				cb = nb;
-			}
+			next_count = score_node(
+					state,
+					child_blkno,
+					dim,
+					expand_buf,
+					next_count,
+					cand_cap,
+					scratch,
+					&centroid_pages_read);
 		}
 		if (stats)
 			stats->dist_calcs += next_count;

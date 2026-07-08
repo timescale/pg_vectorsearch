@@ -758,6 +758,34 @@ CREATE FUNCTION mkt.convert_posting_to_fastscan(
     LANGUAGE C STRICT;
 
 -- =====================================================================
+-- Shared centroid cache introspection
+-- =====================================================================
+
+-- True if the shared centroid cache is usable (i.e. meerkat is preloaded).
+-- When false, enabling mkt.enable_centroid_cache errors and queries read
+-- centroid pages.
+CREATE FUNCTION mkt.centroid_cache_available()
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'mkt_centroid_cache_available'
+    LANGUAGE C STRICT PARALLEL SAFE;
+
+-- One row per occupied (non-free) cache slot; no rows when not preloaded.
+-- relfilenode joins to pg_class.relfilenode; an orphan slot (dropped or
+-- reindexed index) shows a relfilenode that no longer resolves to a relation.
+CREATE FUNCTION mkt.centroid_cache_stats()
+    RETURNS TABLE (
+        slot        integer,
+        relfilenode oid,
+        state       text,
+        bytes       bigint,
+        index_len   integer,
+        last_used   bigint,
+        refcount    integer
+    )
+    AS 'MODULE_PATHNAME', 'mkt_centroid_cache_stats'
+    LANGUAGE C PARALLEL SAFE;
+
+-- =====================================================================
 -- pgvector binary cast support
 -- =====================================================================
 --

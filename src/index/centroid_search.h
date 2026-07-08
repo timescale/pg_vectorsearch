@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 
+#include "index/centroid_compact.h"
 #include "index/centroid_page.h"
 #include "index/storage.h"
 #include "mkt_types.h"
@@ -69,14 +70,17 @@ void mkt_centroid_scratch_free(MktCentroidScratch *scratch);
  * ---------------------------------------------------------------- */
 typedef struct MktCentroidSearchState
 {
-	const RaBitQQueryState *qstate;		/* query for RaBitQ pages */
-	const float			   *query;		/* raw query for float/half pages */
-	MktStorage			   *storage;	/* page and vector I/O */
-	uint32_t				beam_width; /* candidates per level (>= nprobe) */
-	uint32_t				nprobe;		/* target leaf count */
-	Dimension				dim;
-	DistanceMetric			metric; /* distance metric for routing */
-	float error_scale; /* scales pruning error bound (1=default, 0=drop) */
+	const RaBitQQueryState *qstate;	 /* query for RaBitQ pages */
+	const float			   *query;	 /* raw query for float/half pages */
+	MktStorage			   *storage; /* page and vector I/O */
+	/* Optional compact FASTSCAN centroid source. When non-NULL, nodes are
+	 * scored from this contiguous in-memory layout instead of pages. */
+	const MktCentroidCompact *compact;
+	uint32_t	   beam_width; /* candidates per level (>= nprobe) */
+	uint32_t	   nprobe;	   /* target leaf count */
+	Dimension	   dim;
+	DistanceMetric metric; /* distance metric for routing */
+	float error_scale;	   /* scales pruning error bound (1=default, 0=drop) */
 	/* Pre-allocated scratch. Must be non-NULL and sized for at least
 	 * this state's beam_width / nprobe. */
 	MktCentroidScratch *scratch;

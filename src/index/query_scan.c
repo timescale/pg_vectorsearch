@@ -147,6 +147,7 @@ search_centroids(
 			.qstate		 = rqs,
 			.query		 = qvec,
 			.storage	 = idx->centroid_storage,
+			.compact	 = idx->centroid_compact,
 			.beam_width	 = beam_w,
 			.nprobe		 = nprobe,
 			.dim		 = dim,

@@ -1,0 +1,42 @@
+Parsed test spec with 2 sessions
+
+starting permutation: bld_query rd_during wakeup rd_after
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step bld_query: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM emb ORDER BY v <-> '[100,0,0,0]' LIMIT 1) t WHERE id = 1001;
+ <waiting ...>
+step rd_during: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM emb ORDER BY v <-> '[100,0,0,0]' LIMIT 1) t WHERE id = 1001;
+
+found
+-----
+    1
+(1 row)
+
+step wakeup: SELECT injection_points_wakeup('mkt-centroid-cache-build');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step bld_query: <... completed>
+found
+-----
+    1
+(1 row)
+
+step rd_after: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM emb ORDER BY v <-> '[100,0,0,0]' LIMIT 1) t WHERE id = 1001;
+
+found
+-----
+    1
+(1 row)
+

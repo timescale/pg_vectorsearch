@@ -7,6 +7,7 @@
 #include <access/reloptions.h>
 #include <catalog/namespace.h>
 #include <fmgr.h>
+#include <miscadmin.h>
 #include <utils/builtins.h>
 #include <utils/guc.h>
 
@@ -15,19 +16,22 @@
 #include "git_commit.h"
 #include "mkt_pg.h"
 #include "mktann_explain.h"
+#include "mktann_storage.h"
 
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-int	   mkt_distance_mode		= MKT_DISTANCE_MODE_DEFAULT;
-int	   mkt_nprobe				= 10;
-int	   mkt_query_limit			= 0;
-int	   mkt_fastscan_bits		= 16;
-bool   mkt_rerank				= true;
-bool   mkt_log_build_stats		= false;
-double mkt_centroid_error_scale = 0.0;
-double mkt_centroid_beam_scale	= 0.25;
-int	   mkt_leaf_refine_iters	= 2;
+int	   mkt_distance_mode		 = MKT_DISTANCE_MODE_DEFAULT;
+int	   mkt_nprobe				 = 10;
+int	   mkt_query_limit			 = 0;
+int	   mkt_fastscan_bits		 = 16;
+bool   mkt_rerank				 = true;
+bool   mkt_log_build_stats		 = false;
+double mkt_centroid_error_scale	 = 0.0;
+double mkt_centroid_beam_scale	 = 0.25;
+int	   mkt_leaf_refine_iters	 = 2;
+bool   mkt_enable_centroid_cache = false;
+int	   mkt_centroid_cache_max_mb = 512;
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
 		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
@@ -63,9 +67,35 @@ static relopt_enum_elt_def centroid_compression_relopt_members[] = {
 
 void _PG_init(void);
 
+/*
+ * GUC check hook for mkt.enable_centroid_cache. The shared cache lives in
+ * shared memory reserved at postmaster start, so it can only be enabled when
+ * meerkat is in shared_preload_libraries. Reject an attempt to turn it on
+ * otherwise rather than silently falling back to page reads.
+ */
+static bool
+check_enable_centroid_cache(bool *newval, void **extra, GucSource source)
+{
+	if (*newval && !mkt_centroid_shmem_available())
+	{
+		GUC_check_errdetail(
+				"The shared centroid cache requires meerkat in "
+				"shared_preload_libraries.");
+		return false;
+	}
+	return true;
+}
+
 void
 _PG_init(void)
 {
+	/* Register the shared centroid-cache shmem hooks before defining its GUC,
+	 * so the check hook sees the preloaded state when a postgresql.conf value
+	 * is applied at definition time. The cache is unavailable (page reads)
+	 * when not preloaded. */
+	if (process_shared_preload_libraries_in_progress)
+		mkt_centroid_shmem_init();
+
 	DefineCustomEnumVariable(
 			"mkt.distance_mode",
 			"RaBitQ distance computation mode.",
@@ -164,6 +194,44 @@ _PG_init(void)
 			false,
 			PGC_SUSET,
 			GUC_NOT_IN_SAMPLE,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomBoolVariable(
+			"mkt.enable_centroid_cache",
+			"Serve FASTSCAN centroids from a shared compact cache.",
+			"Builds a dedicated, back-to-back FASTSCAN copy of the centroid "
+			"tree (per node) in shared memory, avoiding buffer-manager pins "
+			"and "
+			"page overhead on the immutable centroid region. FASTSCAN "
+			"centroids "
+			"only. Off by default. Requires "
+			"shared_preload_libraries='meerkat' "
+			"(errors if enabled otherwise). Shared across backends, bounded "
+			"by "
+			"mkt.centroid_cache_max_mb with LRU eviction across indexes.",
+			&mkt_enable_centroid_cache,
+			false,
+			PGC_USERSET,
+			0,
+			check_enable_centroid_cache,
+			NULL,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.centroid_cache_max_mb",
+			"Shared budget for the compact centroid cache, in MB.",
+			"Total shared-memory bytes across all cached indexes; least-"
+			"recently-used indexes are evicted to stay under it. An index "
+			"whose "
+			"compact centroid form exceeds the whole budget is not cached.",
+			&mkt_centroid_cache_max_mb,
+			512,
+			0,
+			1048576,
+			PGC_USERSET,
+			0,
 			NULL,
 			NULL,
 			NULL);
