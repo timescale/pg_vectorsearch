@@ -12,7 +12,6 @@
 
 #include <access/amapi.h>
 #include <access/relscan.h>
-#include <portability/instr_time.h>
 
 /* ----------------------------------------------------------------
  * Scan statistics (populated by execute_search)
@@ -20,10 +19,10 @@
 
 typedef struct MktannScanStats
 {
-	/* Phase timing */
-	instr_time centroid_search;
-	instr_time posting_scan;
-	instr_time rerank;
+	/* Phase timing, wall-clock nanoseconds (from the last query) */
+	uint64_t centroid_ns;
+	uint64_t posting_ns;
+	uint64_t rerank_ns;
 
 	/* Centroid beam search */
 	uint32_t clusters_scanned;

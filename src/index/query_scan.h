@@ -34,6 +34,15 @@ typedef struct MktQueryStats
 	uint32_t posting_pages_skipped; /* tombstoned all-dead pages skipped */
 	uint32_t posting_entries_scanned;
 	uint32_t clusters_scanned;
+	/* Per-phase wall time in nanoseconds (0 when not measured). */
+	uint64_t centroid_ns; /* query rotation + centroid beam search */
+	uint64_t posting_ns;  /* cluster scan + candidate extraction */
+	uint64_t rerank_ns;	  /* exact-distance rerank (heap fetches) */
+	/* Fine-grained centroid sub-phases (subsets of centroid_ns). */
+	uint64_t rotation_ns;		   /* query rotation P^T*query */
+	uint64_t centroid_lut_ns;	   /* fastscan LUT build (once/query) */
+	uint64_t centroid_pageread_ns; /* centroid page read/release */
+	uint64_t centroid_score_ns;	   /* centroid page scoring (incl. lut) */
 } MktQueryStats;
 
 /* ----------------------------------------------------------------
