@@ -309,8 +309,12 @@ mkt_query_execute(
 	uint32_t			   ncentroids =
 			mkt_query_route(qs, query, nprobe, mode, &beam_stats);
 
-	/* qvec (prepared/normalized) is reused by the rerank below. */
-	const float *qvec = prepare_query(qs, query);
+	/* mkt_query_route already normalized the query into qs->query_buf (for
+	 * cosine) via prepare_query; reuse it for the rerank below instead of
+	 * re-normalizing (a redundant O(dim) memcpy+norm+scale per query). For
+	 * non-cosine metrics prepare_query is a no-op and returns the raw query. */
+	const float *qvec =
+			(qs->index->metric == DISTANCE_COSINE) ? qs->query_buf : query;
 
 	scan_clusters(qs, qs->beam_results, ncentroids, mode, &qs->topk, stats);
 
