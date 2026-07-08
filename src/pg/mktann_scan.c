@@ -50,6 +50,9 @@ static uint64_t g_phase_rotation_ns = 0;
 static uint64_t g_phase_clut_ns = 0;
 static uint64_t g_phase_cpageread_ns = 0;
 static uint64_t g_phase_cscore_ns = 0;
+/* Routing-depth histogram: how deep (probe rank) the final top-k came from. */
+static uint64_t g_route_sum = 0;
+static uint64_t g_route_le[7] = {0}; /* <=8,16,32,64,128,256,>256 */
 
 PG_FUNCTION_INFO_V1(mkt_phase_stats_reset);
 Datum
@@ -64,7 +67,34 @@ mkt_phase_stats_reset(PG_FUNCTION_ARGS)
 	g_phase_clut_ns		 = 0;
 	g_phase_cpageread_ns = 0;
 	g_phase_cscore_ns	 = 0;
+	g_route_sum			 = 0;
+	for (int i = 0; i < 7; i++)
+		g_route_le[i] = 0;
 	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(mkt_routing_stats);
+Datum
+mkt_routing_stats(PG_FUNCTION_ARGS)
+{
+	char	 buf[320];
+	uint64_t n = g_phase_nqueries ? g_phase_nqueries : 1;
+	snprintf(
+			buf,
+			sizeof(buf),
+			"queries=%lu avg_deepest_contrib_rank=%.1f | "
+			"deepest-rank histogram: <=8:%.1f%% <=16:%.1f%% <=32:%.1f%% "
+			"<=64:%.1f%% <=128:%.1f%% <=256:%.1f%% >256:%.1f%%",
+			(unsigned long)g_phase_nqueries,
+			(double)g_route_sum / n,
+			100.0 * g_route_le[0] / n,
+			100.0 * g_route_le[1] / n,
+			100.0 * g_route_le[2] / n,
+			100.0 * g_route_le[3] / n,
+			100.0 * g_route_le[4] / n,
+			100.0 * g_route_le[5] / n,
+			100.0 * g_route_le[6] / n);
+	PG_RETURN_TEXT_P(cstring_to_text(buf));
 }
 
 PG_FUNCTION_INFO_V1(mkt_phase_stats);
@@ -323,6 +353,25 @@ execute_search(IndexScanDesc scan)
 	g_phase_clut_ns += qstats.centroid_lut_ns;
 	g_phase_cpageread_ns += qstats.centroid_pageread_ns;
 	g_phase_cscore_ns += qstats.centroid_score_ns;
+
+	{
+		uint32_t r = qstats.max_contrib_rank;
+		g_route_sum += r;
+		if (r <= 8)
+			g_route_le[0]++;
+		else if (r <= 16)
+			g_route_le[1]++;
+		else if (r <= 32)
+			g_route_le[2]++;
+		else if (r <= 64)
+			g_route_le[3]++;
+		else if (r <= 128)
+			g_route_le[4]++;
+		else if (r <= 256)
+			g_route_le[5]++;
+		else
+			g_route_le[6]++;
+	}
 
 	/* Copy results from result ordering. The error-bound rerank can return
 	 * more than the beginscan max_k (the rerank set is inflated beyond k to

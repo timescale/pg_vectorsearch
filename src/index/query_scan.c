@@ -206,6 +206,11 @@ scan_clusters(
 		if (ph == InvalidBlockNumber)
 			continue;
 
+		/* Diagnostic: stamp candidates inserted while scanning this cluster
+		 * with its probe rank j, so we can measure how deep in the probe
+		 * order the final top-k results actually came from. */
+		topk->cur_src = j;
+
 		mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
 
 		const float *pt_cent = mkt_posting_scan_pt_centroid(&qs->pscan);
@@ -256,6 +261,17 @@ extract_candidates(MktQueryState *qs)
 	mkt_topk_extract_sorted(&qs->topk, qs->candidates, &ncands);
 	qs->ncandidates = ncands;
 	return ncands;
+}
+
+/* Optional cap on the rerank candidate pool (0 = rerank all survivors).
+ * Set via the mkt.rerank_pool GUC. Candidates are sorted by approximate
+ * distance, so capping keeps the most promising ones and cuts heap fetches. */
+static uint32_t g_rerank_pool = 0;
+
+void
+mkt_query_set_rerank_pool(uint32_t n)
+{
+	g_rerank_pool = n;
 }
 
 /* Monotonic nanosecond clock for per-phase query instrumentation. */
@@ -322,6 +338,12 @@ mkt_query_execute(
 
 	uint32_t ncands = extract_candidates(qs);
 
+	/* Optional rerank-pool cap: candidates are sorted by approximate
+	 * distance, so the first g_rerank_pool are the most promising. Capping
+	 * cuts exact-distance heap fetches at a small recall risk. */
+	if (g_rerank_pool > 0 && ncands > g_rerank_pool)
+		ncands = g_rerank_pool;
+
 	uint64_t t2 = mkt_query_now_ns();
 
 	/* Rerank with exact distances if enabled and storage supports it */
@@ -364,10 +386,22 @@ mkt_query_execute(
 
 	uint64_t t3 = mkt_query_now_ns();
 
+	/* Routing-quality diagnostic: deepest probe rank contributing a final
+	 * top-k result. Low values (relative to nprobe) => over-probing; values
+	 * near nprobe => neighbors genuinely routed deep (mis-routing). */
+	uint32_t max_rank = 0;
+	for (uint32_t i = 0; i < qs->nresults; i++)
+	{
+		uint32_t r = qs->candidates[qs->result_order[i]].src;
+		if (r > max_rank)
+			max_rank = r;
+	}
+
 	if (stats != NULL)
 	{
 		stats->centroid_pages_read = beam_stats.pages_read;
 		stats->clusters_scanned	   = ncentroids;
+		stats->max_contrib_rank	   = max_rank;
 		stats->centroid_ns		   = t1 - t0;
 		stats->posting_ns		   = t2 - t1;
 		stats->rerank_ns		   = t3 - t2;

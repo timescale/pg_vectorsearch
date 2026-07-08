@@ -244,6 +244,7 @@ mkt_topk_insert_unique(
 			.distance = distance,
 			.error	  = error,
 			.id		  = id,
+			.src	  = topk->cur_src,
 	};
 }
 
@@ -313,6 +314,7 @@ append:
 			.distance = distance,
 			.error	  = error,
 			.id		  = id,
+			.src	  = topk->cur_src,
 	};
 }
 

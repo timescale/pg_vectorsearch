@@ -43,6 +43,9 @@ typedef struct MktQueryStats
 	uint64_t centroid_lut_ns;	 /* fastscan LUT build (once/query) */
 	uint64_t centroid_pageread_ns; /* centroid page read/release */
 	uint64_t centroid_score_ns;	 /* centroid scoring (incl. lut) */
+	/* Routing-quality diagnostic: deepest probe rank (0-based) among the
+	 * final top-k results, i.e. how many clusters we actually needed. */
+	uint32_t max_contrib_rank;
 } MktQueryStats;
 
 /* ----------------------------------------------------------------
@@ -118,6 +121,9 @@ uint32_t mkt_query_execute(
 		MktDistanceMode mode,
 		bool			rerank,
 		MktQueryStats  *stats);
+
+/* Cap the rerank candidate pool (0 = rerank all survivors). */
+void mkt_query_set_rerank_pool(uint32_t n);
 
 /*
  * Route a vector to its nearest leaf posting list(s) — the centroid-search
