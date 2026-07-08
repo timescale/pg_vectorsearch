@@ -48,4 +48,11 @@ void mktann_storage_init(
  */
 void mktann_storage_set_rel(MktannStorage *s, Relation rel);
 
+/*
+ * Toggle the backend-local buffer-id cache (mkt.recent_buffers): re-pin
+ * index pages via ReadRecentBuffer instead of a buffer-mapping hash
+ * lookup per page. Stale entries self-heal via ReadBuffer fallback.
+ */
+void mktann_storage_set_recent_buffers(bool enabled);
+
 #endif /* MKTANN_STORAGE_H */
