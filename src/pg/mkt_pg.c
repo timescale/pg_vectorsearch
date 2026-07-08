@@ -29,12 +29,49 @@ bool   mkt_log_build_stats		= false;
 double mkt_centroid_error_scale = 0.0;
 double mkt_centroid_beam_scale	= 0.25;
 int	   mkt_leaf_refine_iters	= 2;
-static int mkt_rerank_pool		= 0;
+static int	  mkt_rerank_pool	 = 0;
+static double mkt_probe_expand	 = 1.0;
+static int	  mkt_probe_patience = 0;
 
 static void
 mkt_rerank_pool_assign_hook(int newval, void *extra)
 {
 	mkt_query_set_rerank_pool((uint32_t)newval);
+}
+
+static void
+mkt_probe_expand_assign_hook(double newval, void *extra)
+{
+	mkt_query_set_probe_expand(newval);
+}
+
+static void
+mkt_probe_patience_assign_hook(int newval, void *extra)
+{
+	mkt_query_set_probe_patience((uint32_t)newval);
+}
+
+static double mkt_probe_cutoff = 0.0;
+
+static void
+mkt_probe_cutoff_assign_hook(double newval, void *extra)
+{
+	mkt_query_set_probe_cutoff(newval);
+}
+
+static double mkt_probe_beta	 = 0.0;
+static int	  mkt_probe_min_scan = 32;
+
+static void
+mkt_probe_beta_assign_hook(double newval, void *extra)
+{
+	mkt_query_set_probe_beta(newval, (uint32_t)mkt_probe_min_scan);
+}
+
+static void
+mkt_probe_min_scan_assign_hook(int newval, void *extra)
+{
+	mkt_query_set_probe_beta(mkt_probe_beta, (uint32_t)newval);
 }
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
@@ -242,6 +279,95 @@ _PG_init(void)
 			0,
 			NULL,
 			mkt_rerank_pool_assign_hook,
+			NULL);
+
+	DefineCustomRealVariable(
+			"mkt.probe_expand",
+			"Probe-candidate expansion factor for exact centroid re-rank.",
+			"When > 1, route ceil(nprobe * expand) leaf candidates through "
+			"the centroid beam, re-rank them by exact query-centroid "
+			"distance (full-precision rotated centroid from each cluster's "
+			"first posting page), and scan only the best nprobe in that "
+			"order. Corrects the probe-order noise of 1-bit RaBitQ centroid "
+			"routing. 1 (default) disables the extra phase.",
+			&mkt_probe_expand,
+			1.0,
+			1.0,
+			16.0,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_probe_expand_assign_hook,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.probe_patience",
+			"Stop scanning after this many clusters without top-k "
+			"improvement (0 = scan all nprobe).",
+			"Adaptive early termination for the posting scan: once the "
+			"top-k heap is full, stop after `patience` consecutive clusters "
+			"that fail to improve the k-th best distance. Easy queries stop "
+			"early; hard queries still scan up to nprobe clusters.",
+			&mkt_probe_patience,
+			0,
+			0,
+			100000,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_probe_patience_assign_hook,
+			NULL);
+
+	DefineCustomRealVariable(
+			"mkt.probe_cutoff",
+			"Stop scanning when the next cluster's exact centroid distance "
+			"exceeds cutoff * k-th best distance (0 = off).",
+			"Distance-based adaptive termination. Requires "
+			"mkt.probe_expand > 1 (exact centroid distances). Clusters are "
+			"scanned in ascending exact centroid distance, so the first "
+			"cluster past the cutoff ends the scan. Larger values scan "
+			"deeper (higher recall); smaller values stop earlier.",
+			&mkt_probe_cutoff,
+			0.0,
+			0.0,
+			100.0,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_probe_cutoff_assign_hook,
+			NULL);
+
+	DefineCustomRealVariable(
+			"mkt.probe_beta",
+			"Stop scanning at rank beta * last-top-k-improvement rank "
+			"(0 = off).",
+			"Rank-based adaptive termination: scan at least "
+			"mkt.probe_min_scan clusters, then stop once the current probe "
+			"rank exceeds beta times the last rank that improved the top-k. "
+			"Easy queries stop early; hard queries extend their own "
+			"deadline. Scale-free (no dependence on distance magnitudes).",
+			&mkt_probe_beta,
+			0.0,
+			0.0,
+			100.0,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_probe_beta_assign_hook,
+			NULL);
+
+	DefineCustomIntVariable(
+			"mkt.probe_min_scan",
+			"Minimum clusters to scan before mkt.probe_beta can stop.",
+			NULL,
+			&mkt_probe_min_scan,
+			32,
+			1,
+			100000,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_probe_min_scan_assign_hook,
 			NULL);
 
 	MarkGUCPrefixReserved("mkt");

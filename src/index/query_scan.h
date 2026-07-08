@@ -78,6 +78,12 @@ typedef struct MktQueryState
 	uint32_t			cand_cap;
 	uint32_t			ncandidates;
 
+	/* Probe-order scratch: exact centroid distance + index per routed
+	 * cluster, used to re-rank the expanded probe set (mkt.probe_expand).
+	 * Sized to max_nprobe at init. */
+	float	 *probe_dists;
+	uint32_t *probe_order;
+
 	/* TID dedup hash for replicated vectors (NULL = disabled).
 	 * Uses generation counter — no memset per query. */
 	uint64_t *dedup_set;
@@ -124,6 +130,37 @@ uint32_t mkt_query_execute(
 
 /* Cap the exact-rerank candidate pool (0 = rerank all survivors). */
 void mkt_query_set_rerank_pool(uint32_t n);
+
+/*
+ * Probe-order controls (mkt.probe_expand / mkt.probe_patience).
+ *
+ * expand > 1 routes ceil(nprobe * expand) leaf candidates through the
+ * centroid beam, re-ranks them by EXACT query-centroid distance (the
+ * full-precision rotated centroid on each cluster's first posting
+ * page), and scans only the best nprobe in that order. Fixes the
+ * probe-order noise of 1-bit RaBitQ centroid routing.
+ *
+ * patience > 0 stops the cluster scan early once `patience`
+ * consecutive clusters produce no improvement to the current top-k
+ * threshold (only after the top-k heap is full).
+ */
+void mkt_query_set_probe_expand(double expand);
+void mkt_query_set_probe_patience(uint32_t patience);
+
+/*
+ * Distance-based early termination (mkt.probe_cutoff, 0 = off).
+ * Requires probe_expand > 1 (exact centroid distances from phase A).
+ * Once the top-k heap is full, stop scanning when the next cluster's
+ * exact centroid distance exceeds cutoff * (k-th best distance).
+ */
+void mkt_query_set_probe_cutoff(double cutoff);
+
+/*
+ * Rank-based adaptive termination (mkt.probe_beta, 0 = off): stop the
+ * cluster scan at rank max(min_scan, beta * last-rank-that-improved-
+ * the-top-k). Scale-free per-query adaptation.
+ */
+void mkt_query_set_probe_beta(double beta, uint32_t min_scan);
 
 /*
  * Route a vector to its nearest leaf posting list(s) — the centroid-search

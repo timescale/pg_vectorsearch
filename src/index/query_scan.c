@@ -7,7 +7,9 @@
  * topk candidate buffer growth).
  */
 
+#include <float.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -67,6 +69,11 @@ mkt_query_state_init(
 	 * worst case beam_width == max_nprobe. */
 	qs->beam_results	 = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
 	qs->centroid_scratch = mkt_centroid_scratch_create(dim, max_nprobe);
+
+	/* Probe-order scratch (exact centroid re-rank of the expanded
+	 * probe set; see mkt_query_set_probe_expand). */
+	qs->probe_dists = mkt_alloc(max_nprobe * sizeof(float));
+	qs->probe_order = mkt_alloc(max_nprobe * sizeof(uint32_t));
 
 	/* Top-K */
 	mkt_topk_init(&qs->topk, max_k);
@@ -165,11 +172,69 @@ search_centroids(
 			beam_stats);
 }
 
+/* Probe-order controls (mkt.probe_expand / mkt.probe_patience /
+ * mkt.probe_cutoff); see query_scan.h. Defaults preserve the classic
+ * single-phase scan. */
+static double	g_probe_expand	 = 1.0;
+static uint32_t g_probe_patience = 0;
+static double	g_probe_cutoff	 = 0.0;
+
+void
+mkt_query_set_probe_expand(double expand)
+{
+	g_probe_expand = expand;
+}
+
+void
+mkt_query_set_probe_patience(uint32_t patience)
+{
+	g_probe_patience = patience;
+}
+
+void
+mkt_query_set_probe_cutoff(double cutoff)
+{
+	g_probe_cutoff = cutoff;
+}
+
+/* Rank-based adaptive termination (mkt.probe_beta, 0 = off): stop at
+ * rank max(floor, beta * last rank that improved the top-k). Easy
+ * queries whose results settle early stop early; hard queries keep
+ * extending their own deadline. Scale-free — no dependence on absolute
+ * distance magnitudes (unlike probe_cutoff). */
+static double	g_probe_beta	  = 0.0;
+static uint32_t g_probe_min_scan = 32;
+
+void
+mkt_query_set_probe_beta(double beta, uint32_t min_scan)
+{
+	g_probe_beta	 = beta;
+	g_probe_min_scan = min_scan;
+}
+
+/* qsort comparator for probe_order indices by probe_dists (context via
+ * a file-static base pointer; the scan path is single-threaded per
+ * backend). */
+static const float *g_probe_sort_dists;
+
+static int
+cmp_probe_order(const void *a, const void *b)
+{
+	float da = g_probe_sort_dists[*(const uint32_t *)a];
+	float db = g_probe_sort_dists[*(const uint32_t *)b];
+	if (da < db)
+		return -1;
+	if (da > db)
+		return 1;
+	return 0;
+}
+
 static void
 scan_clusters(
 		MktQueryState			*qs,
 		const MktCentroidResult *beam_results,
 		uint32_t				 n_results,
+		uint32_t				 scan_limit,
 		MktDistanceMode			 mode,
 		MktTopK					*topk,
 		MktQueryStats			*stats)
@@ -195,20 +260,88 @@ scan_clusters(
 		qs->pscan.seen_tids_cap = 0;
 	}
 
+	/*
+	 * Phase A (only when the probe set was expanded): re-rank the routed
+	 * clusters by EXACT query-centroid distance. The beam's RaBitQ
+	 * distances are 1-bit estimates whose noise scrambles the probe
+	 * order; each cluster's first posting page stores the full-precision
+	 * rotated centroid, so one page read + one O(dim) distance per
+	 * candidate recovers the true order. Only the best `scan_limit`
+	 * clusters are then scanned.
+	 */
+	const uint32_t *order  = NULL;
+	uint32_t		n_scan = n_results;
+
+	if (n_results > scan_limit)
+	{
+		for (uint32_t j = 0; j < n_results; j++)
+		{
+			qs->probe_order[j] = j;
+			qs->probe_dists[j] = FLT_MAX;
+
+			BlockNumber ph = beam_results[j].posting_head;
+			if (ph == InvalidBlockNumber)
+				continue;
+
+			mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
+			const float *pt_cent = mkt_posting_scan_pt_centroid(&qs->pscan);
+			if (pt_cent != NULL)
+				qs->probe_dists[j] = mkt_l2_distance_squared(
+						qs->pt_query, pt_cent, dim);
+			mkt_posting_scan_end_cluster(&qs->pscan);
+		}
+
+		g_probe_sort_dists = qs->probe_dists;
+		qsort(qs->probe_order,
+			  n_results,
+			  sizeof(uint32_t),
+			  cmp_probe_order);
+
+		order  = qs->probe_order;
+		n_scan = scan_limit;
+	}
+
 	uint32_t total_pages   = 0;
 	uint32_t total_skipped = 0;
 	uint32_t total_entries = 0;
+	uint32_t scanned	   = 0;
 
-	for (uint32_t j = 0; j < n_results; j++)
+	/* Phase B: scan clusters in probe order, optionally stopping early
+	 * once `patience` consecutive clusters fail to improve the top-k
+	 * threshold (checked only while the top-k heap is full). */
+	uint32_t stall		  = 0;
+	uint32_t last_improve = 0; /* last rank that improved the top-k */
+
+	for (uint32_t r = 0; r < n_scan; r++)
 	{
+		/* Rank-based adaptive termination: stop once r exceeds both the
+		 * floor and beta * (last rank that improved the top-k). */
+		if (g_probe_beta > 0.0 && r >= g_probe_min_scan &&
+			(double)r > g_probe_beta * (double)(last_improve + 1))
+			break;
+
+		uint32_t	j  = order ? order[r] : r;
 		BlockNumber ph = beam_results[j].posting_head;
 		if (ph == InvalidBlockNumber)
 			continue;
 
 		/* Diagnostic: stamp candidates inserted while scanning this cluster
-		 * with its probe rank j, so we can measure how deep in the probe
+		 * with its probe rank r, so we can measure how deep in the probe
 		 * order the final top-k results actually came from. */
-		topk->cur_src = j;
+		topk->cur_src = r;
+
+		bool	 heap_was_full = (topk->ub_count == topk->k);
+		Distance prev_thresh   = heap_was_full ? topk->ub_heap[0] : 0.0f;
+
+		/* Distance-based early termination: once the top-k heap is full,
+		 * stop when the next cluster's EXACT centroid distance exceeds
+		 * cutoff * (current k-th best distance). Clusters are visited in
+		 * ascending exact centroid distance (order != NULL), so every
+		 * later cluster is at least this far away. Requires phase A
+		 * (probe_expand > 1) for the exact distances. */
+		if (g_probe_cutoff > 0.0 && order != NULL && heap_was_full &&
+			qs->probe_dists[j] > (float)g_probe_cutoff * prev_thresh)
+			break;
 
 		mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
 
@@ -230,12 +363,29 @@ scan_clusters(
 		total_skipped += qs->pscan.pages_skipped;
 		total_entries += qs->pscan.entries_scanned;
 		mkt_posting_scan_end_cluster(&qs->pscan);
+		scanned++;
+
+		bool improved = !heap_was_full || topk->ub_heap[0] != prev_thresh;
+		if (improved)
+			last_improve = r;
+
+		if (g_probe_patience > 0)
+		{
+			if (!improved)
+			{
+				if (++stall >= g_probe_patience)
+					break;
+			}
+			else
+				stall = 0;
+		}
 	}
 
 	qs->pscan.storage = NULL;
 
 	if (stats != NULL)
 	{
+		stats->clusters_scanned		   = scanned;
 		stats->posting_pages_read	   = total_pages;
 		stats->posting_pages_skipped   = total_skipped;
 		stats->posting_entries_scanned = total_entries;
@@ -305,6 +455,7 @@ mkt_query_set_rerank_pool(uint32_t n)
 	g_rerank_pool = n;
 }
 
+
 uint32_t
 mkt_query_execute(
 		MktQueryState  *qs,
@@ -325,9 +476,24 @@ mkt_query_execute(
 
 	uint64_t t0 = mkt_query_now_ns();
 
+	/* Probe expansion: route extra leaf candidates so phase A of
+	 * scan_clusters can pick the best `nprobe` by exact centroid
+	 * distance. n_route == nprobe (expand <= 1) keeps the classic
+	 * single-phase behavior. */
+	uint32_t n_route = nprobe;
+	if (g_probe_expand > 1.0)
+	{
+		double expanded = (double)nprobe * g_probe_expand;
+		n_route			= (uint32_t)(expanded + 0.5);
+		if (n_route > qs->max_nprobe)
+			n_route = qs->max_nprobe;
+		if (n_route < nprobe)
+			n_route = nprobe;
+	}
+
 	MktCentroidSearchStats beam_stats = {0};
 	uint32_t			   ncentroids =
-			mkt_query_route(qs, query, nprobe, mode, &beam_stats);
+			mkt_query_route(qs, query, n_route, mode, &beam_stats);
 
 	/* mkt_query_route already normalized the query into qs->query_buf (for
 	 * cosine) via prepare_query; reuse it for the rerank below instead of
@@ -338,7 +504,8 @@ mkt_query_execute(
 
 	uint64_t t1 = mkt_query_now_ns();
 
-	scan_clusters(qs, qs->beam_results, ncentroids, mode, &qs->topk, stats);
+	scan_clusters(
+			qs, qs->beam_results, ncentroids, nprobe, mode, &qs->topk, stats);
 
 	uint32_t ncands = extract_candidates(qs);
 
@@ -403,9 +570,10 @@ mkt_query_execute(
 
 	if (stats != NULL)
 	{
-		stats->max_contrib_rank = max_rank;
+		/* clusters_scanned is set by scan_clusters (actual count, which
+		 * can be below nprobe under patience early-exit). */
+		stats->max_contrib_rank		= max_rank;
 		stats->centroid_pages_read	= beam_stats.pages_read;
-		stats->clusters_scanned		= ncentroids;
 		stats->centroid_ns			= t1 - t0;
 		stats->posting_ns			= t2 - t1;
 		stats->rerank_ns			= t3 - t2;
