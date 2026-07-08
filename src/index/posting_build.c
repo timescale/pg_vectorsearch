@@ -317,77 +317,12 @@ mkt_build_route_ctx_init(
 	mkt_rabitq_scratch_init(&ctx->enc_scratch, dim);
 	ctx->entry = mkt_alloc(mkt_posting_entry_size(dim));
 
-	ctx->leaf_pt	 = NULL;
-	ctx->batch_count = 0;
 
 	ctx->indtuples	= 0;
 	ctx->soar_dupes = 0;
 }
 
-void
-mkt_build_route_secondary_exact(
-		MktBuildRouteCtx *ctx, const float *leaf_pt, DistanceMetric metric)
-{
-	Dimension dim = ctx->dim;
-	uint32_t  B	  = MKT_SECONDARY_BATCH;
 
-	ctx->leaf_pt = leaf_pt;
-	ctx->metric	 = metric;
-	mkt_secondary_batch_init(&ctx->sb, leaf_pt, ctx->nlist, dim, B);
-	ctx->batch_ptq	   = mkt_alloc((size_t)B * dim * sizeof(float));
-	ctx->batch_tid	   = mkt_alloc(B * sizeof(ItemPointerData));
-	ctx->batch_primary = mkt_alloc(B * sizeof(uint32_t));
-	ctx->batch_pdist   = mkt_alloc(B * sizeof(float));
-	ctx->batch_sec	   = mkt_alloc(B * sizeof(uint32_t));
-	ctx->batch_count   = 0;
-}
-
-void
-mkt_build_route_flush(MktBuildRouteCtx *ctx)
-{
-	if (ctx->leaf_pt == NULL || ctx->batch_count == 0)
-		return;
-
-	Dimension dim = ctx->dim;
-	uint32_t  n	  = ctx->batch_count;
-
-	MktBuildParams bp = {
-			.dim			  = dim,
-			.metric			  = ctx->metric,
-			.soar_lambda	  = ctx->soar_lambda,
-			.boundary_epsilon = ctx->boundary_epsilon,
-	};
-	mkt_secondary_batch_assign(
-			&ctx->sb,
-			ctx->batch_ptq,
-			n,
-			ctx->batch_primary,
-			ctx->batch_pdist,
-			&bp,
-			ctx->batch_sec);
-
-	for (uint32_t i = 0; i < n; i++)
-	{
-		uint32_t sec = ctx->batch_sec[i];
-		if (sec == MKT_INVALID_CLUSTER || sec == ctx->batch_primary[i])
-			continue;
-		const float *ptq = ctx->batch_ptq + (size_t)i * dim;
-		const float *ptc = ctx->leaf_pt + (size_t)sec * dim;
-		for (Dimension d = 0; d < dim; d++)
-			ctx->pt_r[d] = ptq[d] - ptc[d];
-		mkt_posting_entry_encode_from_pt(
-				ctx->rq_params,
-				ctx->pt_r,
-				dim,
-				ctx->enc_buf,
-				&ctx->enc_scratch,
-				ctx->batch_tid[i],
-				ctx->entry);
-		mkt_pbuild_sort_put(ctx->sorter, sec, ctx->entry);
-		ctx->soar_dupes++;
-	}
-	ctx->batch_count = 0;
-}
 
 void
 mkt_build_route_ctx_cleanup(MktBuildRouteCtx *ctx)
@@ -399,16 +334,6 @@ mkt_build_route_ctx_cleanup(MktBuildRouteCtx *ctx)
 	mkt_free(ctx->enc_buf);
 	mkt_rabitq_scratch_cleanup(&ctx->enc_scratch);
 	mkt_free(ctx->entry);
-	if (ctx->leaf_pt != NULL)
-	{
-		mkt_secondary_batch_free(&ctx->sb);
-		mkt_free(ctx->batch_ptq);
-		mkt_free(ctx->batch_tid);
-		mkt_free(ctx->batch_primary);
-		mkt_free(ctx->batch_pdist);
-		mkt_free(ctx->batch_sec);
-		ctx->leaf_pt = NULL;
-	}
 }
 
 bool
@@ -428,46 +353,6 @@ mkt_build_route_emit(
 	if (n == 0)
 		return false;
 
-	/*
-	 * Exact batched secondary: the leaf cache holds every leaf's rotated
-	 * centroid (the same values as the head pages), so no head page is read
-	 * at all -- the primary encodes against the cache, and the SOAR/boundary
-	 * secondary is deferred to mkt_secondary_batch_assign over ALL leaves.
-	 * The gate distance is the exact float distance to the primary centroid
-	 * (rotation-invariant), matching what the in-RAM-tree build passes --
-	 * not the beam's quantized estimate.
-	 */
-	if (ctx->leaf_pt != NULL)
-	{
-		uint32_t primary = mkt_route_head_to_leaf(
-				ctx->first_posting, ctx->qs->beam_results[0].posting_head);
-		const float *ptc = ctx->leaf_pt + (size_t)primary * dim;
-
-		for (Dimension d = 0; d < dim; d++)
-			ctx->pt_r[d] = ctx->qs->pt_query[d] - ptc[d];
-		mkt_posting_entry_encode_from_pt(
-				ctx->rq_params, ctx->pt_r, dim, ctx->enc_buf, &ctx->enc_scratch,
-				tid, ctx->entry);
-		mkt_pbuild_sort_put(ctx->sorter, primary, ctx->entry);
-		ctx->indtuples++;
-
-		if (ctx->soar_lambda <= 0.0 && ctx->boundary_epsilon <= 0.0)
-			return false;
-
-		uint32_t  b	   = ctx->batch_count;
-		VectorRef qref = {.data = ctx->qs->pt_query, .dim = dim};
-		VectorRef cref = {.data = ptc, .dim = dim};
-		memcpy(ctx->batch_ptq + (size_t)b * dim,
-			   ctx->qs->pt_query,
-			   (size_t)dim * sizeof(float));
-		ctx->batch_tid[b]	  = tid;
-		ctx->batch_primary[b] = primary;
-		ctx->batch_pdist[b]	  = (float)mkt_distance(qref, cref, ctx->metric);
-		ctx->batch_count	  = b + 1;
-		if (ctx->batch_count == MKT_SECONDARY_BATCH)
-			mkt_build_route_flush(ctx);
-		return false;
-	}
 
 	/* Gather the beam candidates: leaf index, distance, and pt_centroid (read
 	 * from each head page -- the float encode reference). */

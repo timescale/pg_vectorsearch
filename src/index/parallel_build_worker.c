@@ -838,15 +838,6 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			shared->soar_lambda,
 			shared->boundary_epsilon);
 
-	/* Exact batched SOAR/boundary secondary over the shared rotated
-	 * leaf-centroid cache when the leader could size it within the
-	 * maintenance_work_mem budget (leaf_pt_bytes > 0); the beam-candidate
-	 * secondary otherwise. */
-	if (shared->leaf_pt_bytes > 0)
-		mkt_build_route_secondary_exact(
-				&route,
-				shm_toc_lookup(toc, MKT_DSM_KEY_LEAF_PT, false),
-				shared->metric);
 
 	/* Barrier: the leader reset the scan for the posting phase (after refine
 	 * consumed it); workers may now scan. */
@@ -856,7 +847,6 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			heapRel, indexRel, indexInfo, shared, true, false, route_scan_cb,
 			&route);
 
-	mkt_build_route_flush(&route);
 
 	mkt_pbuild_sort_performsort(sorter);
 

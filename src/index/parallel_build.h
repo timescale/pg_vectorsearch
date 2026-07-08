@@ -86,9 +86,6 @@ typedef void (*MktBuildScanCb)(
  * The posting-head base (leaf c's head = first_posting + c) is a scalar in
  * MktBuildShared, not a shared array. */
 #define MKT_DSM_KEY_GLOBAL_MEAN	   UINT64CONST(0xB000000000000014)
-/* Rotated leaf-centroid cache for the exact batched secondary search; present
- * only when MktBuildShared.leaf_pt_bytes > 0. */
-#define MKT_DSM_KEY_LEAF_PT UINT64CONST(0xB000000000000015)
 
 /* ----------------------------------------------------------------
  * MktBuildShared — back-end-neutral shared build state
@@ -162,13 +159,6 @@ typedef struct MktBuildShared
 	BlockNumber first_centroid;
 	uint8_t		nlevels;
 
-	/* Bytes of the rotated leaf-centroid cache (MKT_DSM_KEY_LEAF_PT); 0 when
-	 * disabled. Sized nlist * dim * sizeof(float) iff that fits within the
-	 * maintenance_work_mem budget, so the exact batched secondary search stays
-	 * memory-bounded (beam-candidate fallback otherwise). The leader fills it
-	 * during the streaming head write (refine updates it); phase-3 workers
-	 * feed it to mkt_build_route_secondary_exact. */
-	uint64_t leaf_pt_bytes;
 
 
 	/* Published by the leader before phase 3: the first posting-head block.

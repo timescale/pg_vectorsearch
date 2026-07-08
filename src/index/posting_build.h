@@ -216,24 +216,6 @@ typedef struct MktBuildRouteCtx
 	RaBitQScratch enc_scratch;
 	char		 *entry; /* [mkt_posting_entry_size(dim)] */
 
-	/*
-	 * Exact batched secondary (optional). When leaf_pt is set (see
-	 * mkt_build_route_secondary_exact), the SOAR/boundary secondary is not
-	 * picked from the beam candidates but batched through
-	 * mkt_secondary_batch_assign over ALL leaf pt_centroids -- the same
-	 * exact replica search the in-RAM-tree build runs. All math is in
-	 * rotated (P^T) space, which preserves distances and dot products, so
-	 * the result matches the float-space search. Batch buffers are owned.
-	 */
-	const float		 *leaf_pt; /* [nlist * dim] rotated leaf centroids */
-	DistanceMetric	  metric;
-	MktSecondaryBatch sb;
-	float			 *batch_ptq;	 /* [BATCH * dim] rotated queries */
-	ItemPointerData	 *batch_tid;	 /* [BATCH] */
-	uint32_t		 *batch_primary; /* [BATCH] */
-	float			 *batch_pdist;	 /* [BATCH] float primary distance */
-	uint32_t		 *batch_sec;	 /* [BATCH] flush output */
-	uint32_t		  batch_count;
 
 	/* Counters. */
 	double indtuples;
@@ -254,18 +236,6 @@ void mkt_build_route_ctx_init(
 
 void mkt_build_route_ctx_cleanup(MktBuildRouteCtx *ctx);
 
-/*
- * Switch the route context to the exact batched secondary. leaf_pt is the
- * [nlist * dim] array of rotated (P^T) leaf centroids -- identical values to
- * the head pages' pt_centroid -- owned by the caller and valid for the whole
- * scan. Call after init and before the first emit.
- */
-void mkt_build_route_secondary_exact(
-		MktBuildRouteCtx *ctx, const float *leaf_pt, DistanceMetric metric);
-
-/* Flush any batched secondaries. Must be called after the scan when the
- * exact batched secondary is enabled (safe to call otherwise). */
-void mkt_build_route_flush(MktBuildRouteCtx *ctx);
 
 /* Route one vector, encode, and stream its entries to the sorter. Returns
  * true when a secondary (SOAR / boundary) replica was also emitted. */
