@@ -101,20 +101,6 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 		if (idx->base.fastscan)
 			mkt_posting_scan_enable_fastscan(
 					&ctx->search.pscan, idx->base.fastscan);
-
-		if (idx->has_replication)
-		{
-			/* Size for max load at ~50%. Generation counter
-			 * avoids per-query memset. */
-			uint32_t est = max_nprobe * (idx->nvecs / idx->nlist) * 2;
-			uint32_t cap = 1024;
-			while (cap < est * 2)
-				cap *= 2;
-			ctx->search.dedup_set  = mkt_alloc(cap * sizeof(uint64_t));
-			ctx->search.dedup_gens = mkt_alloc0(cap * sizeof(uint32_t));
-			ctx->search.dedup_cap  = cap;
-			ctx->search.dedup_gen  = 0;
-		}
 	}
 	else
 	{
