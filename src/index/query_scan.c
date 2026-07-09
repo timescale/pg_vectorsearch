@@ -152,6 +152,17 @@ search_centroids(
 	if (beam_w < 1)
 		beam_w = 1;
 
+	/* Coverage floor: an intermediate keep of beam_w exposes at most
+	 * beam_w * fan_out leaves, so returning the top nprobe leaves needs
+	 * beam_w >= ceil(nprobe / fan_out) -- below that, whole subtrees are
+	 * unreachable at ANY nprobe, not just ranked lower. */
+	if (idx->fan_out > 0)
+	{
+		uint32_t floor_w = (nprobe + idx->fan_out - 1) / idx->fan_out;
+		if (beam_w < floor_w)
+			beam_w = floor_w;
+	}
+
 	MktCentroidSearchState search = {
 			.qstate		 = rqs,
 			.query		 = qvec,

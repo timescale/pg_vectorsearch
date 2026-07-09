@@ -30,8 +30,11 @@ typedef struct MktIndexBase
 	char *page_base;
 
 	/* Index metadata */
-	Dimension		  dim;
-	uint8_t			  nlevels;
+	Dimension dim;
+	uint8_t	  nlevels;
+	/* Children per tree node; floors the intermediate beam width so the
+	 * top-nprobe leaves stay reachable (0 = unknown, no floor). */
+	uint8_t			  fan_out;
 	BlockNumber		  first_centroid;
 	BlockNumber		  first_posting;
 	DistanceMetric	  metric;

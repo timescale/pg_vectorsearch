@@ -560,6 +560,7 @@ mkt_index_build(
 	nlist			  = tree->nleaves;
 	idx->nlist		  = nlist;
 	idx->base.nlevels = (uint8_t)tree->nlevels;
+	idx->base.fan_out = (uint8_t)(fan_out <= UINT8_MAX ? fan_out : UINT8_MAX);
 
 	/* Normalize leaf centroids for cosine */
 	if (idx->base.metric == DISTANCE_COSINE)
