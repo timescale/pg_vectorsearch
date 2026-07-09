@@ -93,6 +93,16 @@ mkt_posting_scan_enable_fastscan(MktPostingScan *scan, int lut_bits)
 	else
 		scan->fs_lut = mkt_alloc0(MKT_FASTSCAN_LUT_HACC_BYTES(scan->dim));
 	scan->fs_accum = mkt_alloc(MKT_FASTSCAN_GROUP * sizeof(int32_t));
+
+	/* Resolve dispatch once per scan (see posting_scan.h). */
+	scan->fs_accum_hacc = mkt_fastscan_get_accumulate_hacc();
+#if defined(MKT_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
+	scan->fs_has_avx512 = mkt_has_simd(SIMD_AVX512F);
+#else
+	scan->fs_has_avx512 = false;
+#endif
+	scan->fs_max_groups_first = mkt_fastscan_max_groups(scan->dim, true);
+	scan->fs_max_groups_over  = mkt_fastscan_max_groups(scan->dim, false);
 }
 
 static bool advance_page(MktPostingScan *scan);
@@ -530,8 +540,9 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 	float	 sum_t		= scan->qstate->sum_transformed;
 	float	 inv_sqrt_d = scan->qstate->inv_sqrt_d;
 	float	 g_error	= scan->qstate->g_error;
-	uint32_t max_groups = mkt_fastscan_max_groups(
-			dim, opaque->flags & MKT_POSTING_PAGE_FIRST);
+	uint32_t max_groups = (opaque->flags & MKT_POSTING_PAGE_FIRST)
+								? scan->fs_max_groups_first
+								: scan->fs_max_groups_over;
 	uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) / MKT_FASTSCAN_GROUP;
 	if (ngroups > max_groups)
 		ngroups = max_groups;
@@ -565,8 +576,7 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 		}
 		else
 		{
-			mkt_fastscan_accumulate_hacc(
-					codes, scan->fs_lut, scan->fs_accum, dim);
+			scan->fs_accum_hacc(codes, scan->fs_lut, scan->fs_accum, dim);
 		}
 
 		/* Prefetch next group's codes during prune phase */
@@ -585,8 +595,7 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 
 #ifdef MKT_SIMD_FULL
 #if defined(__x86_64__) || defined(_M_X64)
-		if (mkt_likely(g_count == MKT_FASTSCAN_GROUP) &&
-			mkt_has_simd(SIMD_AVX512F))
+		if (mkt_likely(g_count == MKT_FASTSCAN_GROUP) && scan->fs_has_avx512)
 		{
 			fastscan_prune_group_avx512(
 					scan,

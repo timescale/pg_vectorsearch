@@ -468,9 +468,6 @@ fastscan_accumulate_scalar(
 typedef void (*MktFastscanAccumulateFn)(
 		const uint8_t *, const uint8_t *, uint16_t *, Dimension);
 
-typedef void (*MktFastscanAccumulateHaccFn)(
-		const uint8_t *, const uint8_t *, int32_t *, Dimension);
-
 typedef void (*MktFastscanBuildLutFn)(
 		const float *, Dimension, uint8_t *, float *, float *);
 
@@ -571,6 +568,14 @@ mkt_fastscan_accumulate(
 	if (mkt_unlikely(!atomic_load(&g_fastscan_initialized)))
 		mkt_fastscan_init_simd();
 	g_fastscan_accumulate_fn(codes, lut, accum, dim);
+}
+
+MktFastscanAccumulateHaccFn
+mkt_fastscan_get_accumulate_hacc(void)
+{
+	if (mkt_unlikely(!atomic_load(&g_fastscan_initialized)))
+		mkt_fastscan_init_simd();
+	return g_fastscan_accumulate_hacc_fn;
 }
 
 void
