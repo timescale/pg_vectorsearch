@@ -130,7 +130,8 @@ static uint32_t
 search_centroids(
 		MktQueryState		   *qs,
 		const float			   *qvec,
-		uint32_t				nprobe,
+		uint32_t				beam_nprobe,
+		uint32_t				keep_nprobe,
 		MktDistanceMode			mode,
 		MktCentroidSearchStats *beam_stats)
 {
@@ -146,7 +147,9 @@ search_centroids(
 		rqs = &qs->beam_qs;
 	}
 
-	uint32_t beam_w = (uint32_t)(nprobe * idx->centroid_beam_scale);
+	/* EXPERIMENT: beam width follows the scanned count (beam_nprobe),
+	 * not the expanded output count (keep_nprobe). */
+	uint32_t beam_w = (uint32_t)(beam_nprobe * idx->centroid_beam_scale);
 	if (beam_w < 1)
 		beam_w = 1;
 
@@ -155,7 +158,7 @@ search_centroids(
 			.query		 = qvec,
 			.storage	 = idx->centroid_storage,
 			.beam_width	 = beam_w,
-			.nprobe		 = nprobe,
+			.nprobe		 = keep_nprobe,
 			.dim		 = dim,
 			.metric		 = idx->metric,
 			.error_scale = idx->centroid_error_scale,
@@ -342,6 +345,33 @@ extract_candidates(MktQueryState *qs)
 	return ncands;
 }
 
+static uint32_t
+query_route_ex(
+		MktQueryState		   *qs,
+		const float			   *query,
+		uint32_t				beam_nprobe,
+		uint32_t				keep_nprobe,
+		MktDistanceMode			mode,
+		MktCentroidSearchStats *beam_stats)
+{
+	if (beam_nprobe > qs->max_nprobe)
+		beam_nprobe = qs->max_nprobe;
+	if (keep_nprobe > qs->max_nprobe)
+		keep_nprobe = qs->max_nprobe;
+
+	const float *qvec = prepare_query(qs, query);
+	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
+
+	MktCentroidSearchStats local = {0};
+	return search_centroids(
+			qs,
+			qvec,
+			beam_nprobe,
+			keep_nprobe,
+			mode,
+			beam_stats ? beam_stats : &local);
+}
+
 uint32_t
 mkt_query_route(
 		MktQueryState		   *qs,
@@ -350,15 +380,7 @@ mkt_query_route(
 		MktDistanceMode			mode,
 		MktCentroidSearchStats *beam_stats)
 {
-	if (nprobe > qs->max_nprobe)
-		nprobe = qs->max_nprobe;
-
-	const float *qvec = prepare_query(qs, query);
-	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
-
-	MktCentroidSearchStats local = {0};
-	return search_centroids(
-			qs, qvec, nprobe, mode, beam_stats ? beam_stats : &local);
+	return query_route_ex(qs, query, nprobe, nprobe, mode, beam_stats);
 }
 
 uint32_t
@@ -402,7 +424,7 @@ mkt_query_execute(
 
 	MktCentroidSearchStats beam_stats = {0};
 	uint32_t			   ncentroids =
-			mkt_query_route(qs, query, n_route, mode, &beam_stats);
+			query_route_ex(qs, query, nprobe, n_route, mode, &beam_stats);
 
 	/* qvec (prepared/normalized) is reused by the rerank below. */
 	const float *qvec = prepare_query(qs, query);
