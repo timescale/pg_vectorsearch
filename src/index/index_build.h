@@ -1,9 +1,43 @@
 /*
  * index_build.h - Shared index build utilities
  *
- * Generic helpers for building meerkat indexes, usable from both
- * the PostgreSQL IAM build and the standalone CLI. All functions
- * operate on the MktStorage abstraction and HKMeansResult tree.
+ * Generic helpers for building meerkat indexes, usable from both the
+ * PostgreSQL IAM build and the standalone CLI. All functions operate on the
+ * MktStorage abstraction and (where a tree is materialized at all) the
+ * HKMeansResult tree.
+ *
+ * Who runs what: the build has a serial shape and a parallel shape, and
+ * this header serves both.
+ *
+ *   Serial (one process; do_serial_build in pg/mktann_build.c):
+ *     mkt_stream_centroid_plan   clusters the sample once (recording each
+ *                                node into a blob store) and sizes the page
+ *                                layout;
+ *     mkt_stream_centroid_write  replays the recorded nodes and streams
+ *                                every centroid + head page.
+ *
+ *   Parallel (leader + N workers; see parallel_build.h for the barrier
+ *   choreography). Clustering is divided by ROOT CHILD: after the
+ *   cooperative sampling scan and the barrier-synchronized root k-means,
+ *   the root's children are scheduled largest-first in batches of
+ *   nparticipants, and each participant clusters one child's subtree per
+ *   batch into its slot of a bounded DSM ring. Page writing is NOT
+ *   divided: between the batch barriers the leader alone consumes each
+ *   batch (recording layout counts, spilling the subtree blobs), and after
+ *   the last batch the leader alone streams every page --
+ *     mkt_write_subtree_streaming  writes one worker-built subtree's pages
+ *                                  at its reserved block range and maps its
+ *                                  local leaves into the global leaf index
+ *                                  space (leaf_offset = prefix sum of the
+ *                                  preceding children's leaf counts);
+ *     mkt_centroid_write_node      writes the root page above the subtree
+ *                                  roots.
+ *   The posting scan that follows is cooperative again (workers route and
+ *   encode into a shared sort; the leader merges), but that machinery
+ *   lives in posting_build.h / parallel_build.h, not here.
+ *
+ *   The standalone in-RAM build (no paging) uses mkt_write_centroid_tree
+ *   directly on a fully materialized tree.
  */
 
 #ifndef MKT_INDEX_BUILD_H
@@ -108,6 +142,13 @@ void mkt_write_centroid_tree(
  * nodes and emits the pages. Posting-list heads are formula-derived from
  * the global leaf index, so the plan only sizes the page layout.
  *
+ * These two entry points are the SERIAL build's whole clustering story
+ * (single process, no barriers). The parallel build divides the same work
+ * differently -- workers cluster per-root-child subtrees and only the
+ * leader writes pages, via mkt_write_subtree_streaming below -- but both
+ * shapes produce the identical page layout: reserved centroid blocks
+ * first, then the head region at first_posting, heads formula-derived.
+ *
  * global_mean (the encoder centering) must be known before any page is
  * written; the PLAN pass reports the mean of the leaf centroids
  * (plan.leaf_mean) for that. The anchor is the leaf-centroid mean, not the
@@ -202,13 +243,23 @@ BlockNumber mkt_stream_centroid_write(
 		void				*on_leaf_arg);
 
 /*
- * Stream one already-built subtree (an HKMeansResult produced by the parallel
- * workers) to centroid pages at reserved blocks [first_block, first_block +
- * *out_pages), BFS layout (subtree root at first_block). Leaf local_leaf's
- * head is first_posting + leaf_offset + local_leaf (formula-derived); on_leaf
- * fires per leaf with its float centroid so the caller can write the head
- * page. Returns the subtree root block (== first_block). Used by the parallel
- * batched streaming build so the whole tree is never materialized as one blob.
+ * Stream one already-built subtree (an HKMeansResult a parallel worker
+ * clustered into its ring slot, then spilled through the blob store) to
+ * centroid pages at reserved blocks [first_block, first_block + *out_pages),
+ * BFS layout (subtree root at first_block). Leader-only: workers cluster,
+ * the leader writes -- it calls this once per root child, replaying the
+ * blobs in the batch-schedule order while placing each at the child's own
+ * reserved range, so the whole tree is never materialized as one blob and
+ * page writing needs no cross-process coordination.
+ *
+ * The caller supplies the subtree's coordinates in the global layout, both
+ * prefix sums over the preceding children (from the PLAN pass's per-child
+ * counts): first_block for the block range, and leaf_offset for the leaf
+ * index space -- leaf local_leaf's head is first_posting + leaf_offset +
+ * local_leaf (formula-derived). level_offset places the subtree's
+ * relative node levels at their absolute tree depth (1 under the root).
+ * on_leaf fires per leaf with its float centroid so the caller can write
+ * the head page. Returns the subtree root block (== first_block).
  */
 BlockNumber mkt_write_subtree_streaming(
 		MktStorage			*storage,

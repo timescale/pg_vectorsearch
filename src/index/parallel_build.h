@@ -518,13 +518,21 @@ typedef void (*MktBatchCb)(
 		uint64_t		slot_size);
 
 /*
- * Batched subtree build shared by the leader (participant 0) and workers: in
- * ceil(km_k / nparticipants) batches, each participant builds one child's
- * subtree into its ring slot, then (leader only) batch_cb consumes the batch;
- * two barriers per batch keep all participants in lockstep. Called identically
- * by leader and workers (workers pass batch_cb = NULL), so the barrier
- * sequence matches by construction. The caller invokes it once per pass (plan,
- * then write).
+ * Batched subtree build shared by the leader (participant 0) and workers:
+ * in ceil(km_k / nparticipants) batches, each participant clusters one root
+ * child's subtree into its ring slot, then (leader only) batch_cb consumes
+ * the batch -- recording its layout and spilling the blobs for the
+ * leader-only streaming write that follows; two barriers per batch keep all
+ * participants in lockstep. Children are scheduled largest-first (LPT, by
+ * root-assigned sample count with an id tie-break): every batch runs at the
+ * pace of its slowest subtree, so the skewed children go into the full
+ * batches and the tail batch gets the small ones. The schedule derives from
+ * shared state, so every participant computes it identically with no
+ * coordination; out_child_order (leader passes a km_k buffer, workers NULL)
+ * returns it so the blob replay can place each subtree at its child's
+ * reserved range. Called identically by leader and workers (workers pass
+ * batch_cb = NULL), so the barrier sequence matches by construction; one
+ * invocation per build.
  */
 extern void mkt_pbuild_stream_subtrees(
 		int				  participant_id,
