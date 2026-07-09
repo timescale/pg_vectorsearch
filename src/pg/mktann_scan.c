@@ -195,7 +195,14 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	mktann_index_base_init(index, &ss->index_base);
 	MktannScanInfo info = mktann_cache_scan_info(index);
 
+	/* Size the top-K for the requested result count: mkt.query_limit is
+	 * set before the query runs (same contract as the nprobe sizing
+	 * below). Without this, mkt_query_execute clamps k to the allocated
+	 * max_k and a query_limit above the default silently returned only
+	 * MKT_DEFAULT_K results. */
 	uint32_t max_k = MKT_DEFAULT_K;
+	if (mkt_query_limit > 0 && (uint32_t)mkt_query_limit > max_k)
+		max_k = (uint32_t)mkt_query_limit;
 
 	/* Size the per-scan query buffers to the nprobe actually requested
 	 * (the GUC is set before the query runs) rather than the worst-case
