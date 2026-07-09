@@ -131,7 +131,6 @@ typedef struct MktBuildRouteCtx
 	const RaBitQParams *rq_params;	   /* not owned */
 	MktStorage		   *storage;	   /* head-page reads (not owned) */
 	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
-	uint32_t			nlist;
 	Dimension			dim;
 	double				soar_lambda;
 	double				boundary_epsilon;
@@ -157,7 +156,6 @@ void mkt_build_route_ctx_init(
 		const RaBitQParams *rq_params,
 		MktStorage		   *storage,
 		BlockNumber			first_posting,
-		uint32_t			nlist,
 		Dimension			dim,
 		double				soar_lambda,
 		double				boundary_epsilon);
@@ -291,10 +289,6 @@ typedef struct MktPostingBuilder
 	 * restamped. */
 	bool adopted_head;
 
-	BlockNumber		   reserve_start;
-	uint32_t		   reserve_count;
-	uint32_t		   reserve_used;
-	mkt_atomic_uint32 *shared_reserve_next;
 	BlockNumber		   fixed_first_blkno;
 
 	RaBitQData	 *enc_buf;
@@ -402,17 +396,6 @@ void mkt_posting_builder_init_continuation_fastscan(
 		uint32_t			cluster_id,
 		const float		   *centroid);
 
-/*
- * Shared reserve: multiple builders (from different threads) for the
- * same cluster claim page slots atomically from a shared counter.
- * Falls back to storage->new_page() if the reserved range is exhausted.
- * Used by every build path (serial, parallel, standalone).
- */
-void mkt_posting_builder_set_shared_reserve(
-		MktPostingBuilder *builder,
-		BlockNumber		   start,
-		uint32_t		   count,
-		mkt_atomic_uint32 *next);
 
 /*
  * Pin the first page to a specific block number. The first flush

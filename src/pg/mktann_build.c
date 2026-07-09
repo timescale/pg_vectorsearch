@@ -634,7 +634,6 @@ serial_refine_heads(
 	RefineHeadState rs = {
 			.qs			   = qs,
 			.first_posting = first_posting,
-			.nlist		   = nlist,
 			.dim		   = dim,
 			.cosine		   = (bs->params.metric == DISTANCE_COSINE),
 			.tmp_ctx	   = bs->tmp_ctx,
@@ -774,8 +773,6 @@ do_serial_build(
 	BlockNumber first_centroid = 1;
 	BlockNumber first_posting  = first_centroid + plan.centroid_pages;
 
-	mkt_free(plan.leaf_counts);
-	plan.leaf_counts = NULL;
 
 	/*
 	 * Head blocks are formula-derived: leaf c's head is first_posting + c, a
@@ -935,7 +932,6 @@ do_serial_build(
 			rq_params,
 			storage,
 			first_posting,
-			nlist,
 			dim,
 			p->soar_lambda,
 			p->boundary_epsilon);

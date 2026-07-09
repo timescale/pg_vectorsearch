@@ -743,7 +743,6 @@ mkt_pbuild_setup_shared(
 	lead->sample_seg		  = sample_seg;
 	lead->centroids_base	  = centroids_base;
 	lead->cents				  = cents;
-	lead->child_subtrees_base = child_subtrees_base;
 	lead->km_workers_base	  = km_workers_base;
 	lead->dsm_ra			  = dsm_ra;
 	lead->queues_base		  = NULL; /* sort-seam path: no shm_mq queues */

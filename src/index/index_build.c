@@ -166,10 +166,9 @@ typedef struct StreamCtx
 	float		 *replay_cents;	 /* write: [fan_out * dim] */
 	uint16_t	 *replay_assign; /* write: [nvecs] */
 	/* accumulators */
-	uint32_t  nleaves;			/* running (== next first_leaf) */
-	uint32_t *leaf_counts;		/* plan only, [nlist] */
-	double	 *leaf_sum;			/* plan only, [dim]: leaf-centroid sum for the
-								 * leaf_mean the caller uses as global_mean */
+	uint32_t  nleaves; /* running (== next first_leaf) */
+	double	 *leaf_sum; /* plan only, [dim]: leaf-centroid sum for the
+						 * leaf_mean the caller uses as global_mean */
 	uint32_t	centroid_pages; /* plan only */
 	BlockNumber next_blk;		/* write only: next reserved centroid block */
 	bool		ok;
@@ -356,8 +355,6 @@ stream_node(
 				memcpy(cents + (size_t)kept * c->dim,
 					   cents + (size_t)cl * c->dim,
 					   (size_t)c->dim * sizeof(float));
-			if (c->leaf_counts != NULL)
-				c->leaf_counts[c->nleaves + kept] = counts[cl];
 			kept++;
 		}
 		if (c->emit)
@@ -500,17 +497,7 @@ mkt_stream_centroid_plan(
 	c.vectors = vectors;
 	c.emit	  = false;
 	c.store	  = store;
-	/* Actual leaf count is not known until k-means runs and can exceed the
-	 * target nlist (a leaf-parent may split into up to fan_out leaves, so the
-	 * tree holds up to fan_out^nlevels of them). Size leaf_counts for that
-	 * worst case (clamped >= nlist) and report the actual count. */
-	uint32_t max_leaves = 1;
-	for (uint32_t l = 0; l < c.nlevels; l++)
-		max_leaves *= c.fan_out;
-	if (max_leaves < nlist)
-		max_leaves = nlist;
-	c.leaf_counts = mkt_alloc0((size_t)max_leaves * sizeof(uint32_t));
-	c.leaf_sum	  = mkt_alloc0((size_t)dim * sizeof(double));
+	c.leaf_sum = mkt_alloc0((size_t)dim * sizeof(double));
 
 	/*
 	 * The recursion's per-node scratch (k-means temporaries, index slices,
@@ -534,7 +521,6 @@ mkt_stream_centroid_plan(
 
 	if (!c.ok)
 	{
-		mkt_free(c.leaf_counts);
 		mkt_free(c.leaf_sum);
 		return false;
 	}
@@ -542,7 +528,6 @@ mkt_stream_centroid_plan(
 	out->nleaves		= c.nleaves;
 	out->nlevels		= c.nlevels;
 	out->centroid_pages = c.centroid_pages;
-	out->leaf_counts	= c.leaf_counts;
 	out->leaf_mean		= mkt_alloc((size_t)dim * sizeof(float));
 	for (Dimension d = 0; d < dim; d++)
 		out->leaf_mean[d] = c.nleaves > 0

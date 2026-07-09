@@ -281,7 +281,6 @@ mkt_build_route_ctx_init(
 		const RaBitQParams *rq_params,
 		MktStorage		   *storage,
 		BlockNumber			first_posting,
-		uint32_t			nlist,
 		Dimension			dim,
 		double				soar_lambda,
 		double				boundary_epsilon)
@@ -291,7 +290,6 @@ mkt_build_route_ctx_init(
 	ctx->rq_params		  = rq_params;
 	ctx->storage		  = storage;
 	ctx->first_posting	  = first_posting;
-	ctx->nlist			  = nlist;
 	ctx->dim			  = dim;
 	ctx->soar_lambda	  = soar_lambda;
 	ctx->boundary_epsilon = boundary_epsilon;
@@ -522,26 +520,6 @@ flush_page(MktPostingBuilder *builder)
 		blkno = builder->fixed_first_blkno;
 		spage = mkt_storage_write_page(builder->storage, blkno);
 	}
-	else if (builder->shared_reserve_next != NULL)
-	{
-		uint32_t slot =
-				mkt_atomic_fetch_add_u32(builder->shared_reserve_next, 1);
-		if (slot < builder->reserve_count)
-		{
-			blkno = builder->reserve_start + slot;
-			spage = mkt_storage_write_page(builder->storage, blkno);
-		}
-		else
-		{
-			spage = mkt_storage_new_page(builder->storage, &blkno);
-		}
-	}
-	else if (builder->reserve_used < builder->reserve_count)
-	{
-		blkno = builder->reserve_start + builder->reserve_used;
-		builder->reserve_used++;
-		spage = mkt_storage_write_page(builder->storage, blkno);
-	}
 	else
 	{
 		spage = mkt_storage_new_page(builder->storage, &blkno);
@@ -598,8 +576,6 @@ builder_init_common(
 	builder->n_entries	= 0;
 	builder->page_ops	= ops;
 
-	builder->reserve_start		 = InvalidBlockNumber;
-	builder->shared_reserve_next = NULL;
 	builder->fixed_first_blkno	 = InvalidBlockNumber;
 
 	mkt_posting_page_init(
@@ -899,8 +875,6 @@ mkt_posting_builder_adopt_head(
 	builder->owns_head	= true;
 	builder->page_ops	= fastscan ? &fs_page_ops : &aos_page_ops;
 
-	builder->reserve_start		 = InvalidBlockNumber;
-	builder->shared_reserve_next = NULL;
 	builder->fixed_first_blkno	 = head_blk;
 	builder->adopted_head		 = true;
 
@@ -974,21 +948,6 @@ mkt_posting_builder_init_continuation_fastscan(
 	builder->fs.max_groups = mkt_fastscan_max_groups(dim, false);
 }
 
-/* ----------------------------------------------------------------
- * Public API — add / finish / cleanup / reserve
- * ---------------------------------------------------------------- */
-
-void
-mkt_posting_builder_set_shared_reserve(
-		MktPostingBuilder *builder,
-		BlockNumber		   start,
-		uint32_t		   count,
-		mkt_atomic_uint32 *next)
-{
-	builder->reserve_start		 = start;
-	builder->reserve_count		 = count;
-	builder->shared_reserve_next = next;
-}
 
 void
 mkt_posting_builder_set_first_blkno(

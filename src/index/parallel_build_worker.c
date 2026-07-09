@@ -552,7 +552,6 @@ typedef struct RefineCbState
 	MktBuildShared *shared;
 	MktQueryState  *qs;		   /* page-backed router (workers) */
 	BlockNumber first_posting; /* head -> leaf: leaf = head - first_posting */
-	uint32_t	nlist;
 	double	   *sums;	/* shared accumulator, indexed leaf - tile_lo */
 	uint64_t   *counts; /* shared accumulator */
 	Dimension	dim;
@@ -624,7 +623,6 @@ mkt_pbuild_exec_refine_paged(
 			.shared		   = shared,
 			.qs			   = qs,
 			.first_posting = first_posting,
-			.nlist		   = nleaves,
 			.sums		   = sums,
 			.counts		   = counts,
 			.dim		   = dim,
@@ -897,7 +895,6 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			rq_params,
 			storage,
 			first_posting,
-			shared->nlist,
 			dim,
 			shared->soar_lambda,
 			shared->boundary_epsilon);

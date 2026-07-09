@@ -100,28 +100,26 @@ void mkt_write_centroid_tree(
  * Builds the hierarchical k-means tree top-down (DFS) and streams centroid
  * pages straight to storage, never materializing the whole tree in RAM. Peak
  * memory is the caller's sample buffer + an O(fan_out*depth*dim) recursion
- * stack; the whole tree would be O(nlist*dim). Runs in two deterministic
- * passes
- * (k-means seed fixed, so the same sample yields the identical tree both
- * times): a PLAN pass that discovers the tree shape without writing, then a
- * WRITE pass that emits pages with the posting-list heads the caller derived
- * from the plan's per-leaf counts.
+ * stack; the whole tree would be O(nlist*dim). Runs as two passes over the
+ * same recursion: a PLAN pass that clusters the sample once -- recording
+ * each node's clustering into the caller's blob store -- and reports the
+ * tree shape without writing; then a WRITE pass that replays the recorded
+ * nodes and emits the pages. Posting-list heads are formula-derived from
+ * the global leaf index, so the plan only sizes the page layout.
  *
  * global_mean (the encoder centering) must be known before any page is
- * written. The PLAN pass runs the identical clustering, so it also reports
- * the mean of the leaf centroids (plan.leaf_mean) for the caller to use as
- * global_mean -- matching the in-RAM-tree build, which centers on the
- * leaf-centroid mean rather than the per-vector sample mean. The quantization
- * quality of every centroid and posting code depends on this anchor.
+ * written; the PLAN pass reports the mean of the leaf centroids
+ * (plan.leaf_mean) for that. The anchor is the leaf-centroid mean, not the
+ * per-vector sample mean: it centers the quantization on what the tree
+ * actually stores, and the quality of every centroid and posting code
+ * depends on it.
  * ---------------------------------------------------------------- */
 
 typedef struct MktStreamTreePlan
 {
-	uint32_t  nleaves;
-	uint32_t  nlevels;
-	uint32_t  centroid_pages; /* pages the write pass will emit */
-	uint32_t *leaf_counts;	  /* [nleaves] sample count per leaf (mkt_alloc;
-							   * caller frees with mkt_free) */
+	uint32_t nleaves;
+	uint32_t nlevels;
+	uint32_t centroid_pages; /* pages the write pass will emit */
 	float *leaf_mean;		  /* [dim] unweighted mean of the leaf centroids
 							   * (mkt_alloc; caller frees with mkt_free) */
 } MktStreamTreePlan;

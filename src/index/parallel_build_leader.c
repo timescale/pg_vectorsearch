@@ -148,52 +148,6 @@ mkt_posting_build_lists(
 	mkt_pbuild_sort_end(sorter);
 }
 
-/*
- * Shared pre-posting centroid setup: normalize the leaf centroids for cosine
- * (in place — the tree is trained in normalized space), reserve block 0 (the
- * metadata page, written later by the shared finalize) plus the centroid
- * pages, and return the posting-area start block. The page layout is
- * deterministic from the tree, so the shared finalize recomputes it for the
- * centroid-tree write; only first_posting is needed here (for the posting
- * reserve, which differs between serial and parallel). The rotated
- * P^T*centroid each posting list needs is computed on the fly, per cluster, in
- * mkt_posting_build_lists. Shared by the serial build and the parallel leader.
- */
-BlockNumber
-mkt_build_setup_centroid_layout(
-		MktStorage		 *storage,
-		HKMeansResult	 *tree,
-		Dimension		  dim,
-		uint32_t		  nlist,
-		DistanceMetric	  metric,
-		MktCentroidFormat centroid_format)
-{
-	float *ref_vecs = hk_leaf_centroids(tree);
-	if (metric == DISTANCE_COSINE)
-		for (uint32_t c = 0; c < nlist; c++)
-			mkt_l2_normalize(ref_vecs + (size_t)c * dim, dim);
-
-	/* Block 0 = metadata page; extend so it exists (contents written later).
-	 */
-	mkt_storage_extend(storage, 1);
-
-	uint32_t	max_ent = mkt_centroid_max_entries_fmt(dim, centroid_format);
-	BlockNumber first_centroid = 1;
-	/*
-	 * mkt_compute_centroid_layout both returns where the posting area starts
-	 * and fills a per-node first-block array. Here we only need the former (to
-	 * size the posting reserve), so the array is throwaway scratch we free at
-	 * once. The other callers — the centroid-tree writers in the build
-	 * finalize — pass a long-lived array and keep it to place each node's
-	 * centroid pages.
-	 */
-	BlockNumber *nfb = mkt_alloc((size_t)tree->nnodes * sizeof(BlockNumber));
-	BlockNumber	 first_posting =
-			mkt_compute_centroid_layout(tree, max_ent, first_centroid, nfb);
-	mkt_free(nfb);
-	mkt_storage_extend(storage, first_posting - first_centroid);
-	return first_posting;
-}
 
 /* ----------------------------------------------------------------
  * Batched streaming tree build — leader-side callbacks

@@ -441,7 +441,6 @@ mkt_pbuild_setup_shared(
 	lead->dsm_ra			  = dsm_ra;
 	lead->queues_base		  = NULL; /* sort-seam path: no shm_mq queues */
 	lead->dsm_partials		  = NULL; /* sort-seam path: no partials region */
-	lead->child_subtrees_base = child_subtrees_base;
 	lead->walusage			  = walusage;
 	lead->bufferusage		  = bufferusage;
 	lead->nparticipants		  = nparticipants;

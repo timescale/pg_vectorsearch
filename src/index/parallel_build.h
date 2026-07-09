@@ -882,7 +882,6 @@ typedef struct MktPBuildLeader
 	MktDsmRootAssign	   *dsm_ra;
 	char				   *queues_base;
 	char				   *dsm_partials;
-	char				   *child_subtrees_base; /* per-child subtree blobs */
 	struct WalUsage		   *walusage;
 	struct BufferUsage	   *bufferusage;
 	int						nparticipants;
@@ -969,20 +968,6 @@ extern void mkt_posting_build_lists(
 		const RaBitQParams *rq_params,
 		BlockNumber			first_posting);
 
-/*
- * Shared pre-posting centroid setup: normalize leaf centroids for cosine,
- * reserve block 0 (metadata) plus the centroid pages, and return the
- * posting-area start block. Shared by the serial build and the parallel
- * leader. The rotated P^T*centroid each posting list needs is computed on the
- * fly, per cluster, in mkt_posting_build_lists (no nlist*dim array).
- */
-extern BlockNumber mkt_build_setup_centroid_layout(
-		MktStorage		 *storage,
-		HKMeansResult	 *tree,
-		Dimension		  dim,
-		uint32_t		  nlist,
-		DistanceMetric	  metric,
-		MktCentroidFormat centroid_format);
 
 /* ----------------------------------------------------------------
  * Parallel build entry — shared driver (parallel_build_leader.c)
