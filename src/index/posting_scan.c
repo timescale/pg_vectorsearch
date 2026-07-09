@@ -624,14 +624,19 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk, FsClusterCtx *ctx)
 					codes, scan->fs_lut, scan->fs_accum, dim);
 		}
 
-		/* Prefetch next group's codes during prune phase */
-		if (g + 1 < ngroups)
+		/* Prefetch upcoming groups' codes during the prune phase. Two
+		 * groups of lead (~6 KB at dim=768) gives the loads time to
+		 * complete before the kernel needs them — pages hold only ~2
+		 * groups, so the hardware prefetcher cannot establish a stream
+		 * and the kernel otherwise stalls on the first group of every
+		 * page. */
+		for (uint32_t ahead = 1; ahead <= 2 && g + ahead < ngroups; ahead++)
 		{
 			uint8_t *next_codes =
-					mkt_fastscan_group_codes(content, g + 1, dim);
+					mkt_fastscan_group_codes(content, g + ahead, dim);
 			uint32_t code_bytes = MKT_FASTSCAN_GROUP_BYTES(dim);
 			for (uint32_t p = 0; p < code_bytes; p += 64)
-				__builtin_prefetch(next_codes + p, 0, 1);
+				__builtin_prefetch(next_codes + p, 0, 3);
 		}
 
 		/* Vectorized distance + prune: compute 16 distances at a
