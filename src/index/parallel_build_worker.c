@@ -279,8 +279,9 @@ mkt_pbuild_exec_sampling(
 	};
 
 	/* progress: only the leader (participant 0) drives the PG progress view.
-	 */
-	mkt_build_scan(
+	 * The scan count is discarded: the posting pass is the one full scan that
+	 * feeds shared->reltuples, so the extra passes must not double-count. */
+	(void)mkt_build_scan(
 			heap,
 			index,
 			index_info,
@@ -598,8 +599,9 @@ mkt_pbuild_exec_refine(
 			BarrierArriveAndWait(
 					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-			/* All participants cooperatively scan the heap and accumulate. */
-			mkt_build_scan(
+			/* All participants cooperatively scan the heap and accumulate.
+			 * The scan count is discarded (see the sampling pass). */
+			(void)mkt_build_scan(
 					heap,
 					index,
 					index_info,
@@ -833,7 +835,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			shared->soar_lambda,
 			shared->boundary_epsilon);
 
-	mkt_build_scan(
+	double heap_tuples = mkt_build_scan(
 			heapRel,
 			indexRel,
 			indexInfo,
@@ -849,7 +851,8 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 	BarrierDetach(barrier);
 
-	mkt_pbuild_worker_add_counts(shared, route.indtuples, route.soar_dupes);
+	mkt_pbuild_worker_add_counts(
+			shared, route.indtuples, route.soar_dupes, heap_tuples);
 
 	mkt_pbuild_sort_end(sorter);
 	mkt_build_route_ctx_cleanup(&route);

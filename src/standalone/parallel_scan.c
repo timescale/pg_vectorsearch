@@ -23,10 +23,11 @@ mkt_parallel_scan_init(
 	atomic_store(&ps->cursor, 0);
 }
 
-void
+double
 mkt_parallel_scan_run(MktParallelScan *ps, MktBuildScanCb cb, void *state)
 {
-	Dimension dim = ps->dim;
+	Dimension dim	  = ps->dim;
+	double	  scanned = 0;
 
 	for (;;)
 	{
@@ -48,7 +49,9 @@ mkt_parallel_scan_run(MktParallelScan *ps, MktBuildScanCb cb, void *state)
 			ItemPointerSet(&tid, i, 1);
 			cb(state, tid, ps->vectors + (size_t)i * dim);
 		}
+		scanned += end - start;
 	}
+	return scanned;
 }
 
 #endif /* MKT_STANDALONE */

@@ -52,7 +52,7 @@ typedef struct MktBuildSharedStandalone
  * vector array); every participant runs it cooperatively. The PG flags
  * (allow_sync/progress) and the relation/index-info handles are unused here.
  */
-void
+double
 mkt_build_scan(
 		Relation		  heap,
 		Relation		  index,
@@ -71,7 +71,7 @@ mkt_build_scan(
 	(void)allow_sync;
 	(void)progress;
 
-	mkt_parallel_scan_run(&sh->scan, cb, state);
+	return mkt_parallel_scan_run(&sh->scan, cb, state);
 }
 
 /*
@@ -399,13 +399,17 @@ mkt_pbuild_setup_shared(
  */
 void
 mkt_pbuild_worker_add_counts(
-		MktBuildShared *shared, double indtuples, double soar_dupes)
+		MktBuildShared *shared,
+		double			indtuples,
+		double			soar_dupes,
+		double			heap_tuples)
 {
 	MktBuildSharedStandalone *sh = (MktBuildSharedStandalone *)shared;
 
 	pthread_mutex_lock(&sh->mutex);
 	shared->indtuples += indtuples;
 	shared->soar_dupes += soar_dupes;
+	shared->reltuples += heap_tuples;
 	pthread_mutex_unlock(&sh->mutex);
 }
 

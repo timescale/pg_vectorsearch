@@ -202,7 +202,7 @@ SELECT reltuples::bigint AS reltuples_never_analyzed
     FROM pg_class WHERE relname = 'relstats';
  reltuples_never_analyzed 
 --------------------------
-                       -1
+                     1000
 (1 row)
 
 DROP INDEX relstats_idx;
@@ -213,7 +213,7 @@ SELECT reltuples::bigint AS reltuples_after_rebuild
     FROM pg_class WHERE relname = 'relstats';
  reltuples_after_rebuild 
 -------------------------
-                       0
+                    1000
 (1 row)
 
 RESET max_parallel_maintenance_workers;
