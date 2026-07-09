@@ -33,6 +33,7 @@ else
       'inspect',
       'parallel',
       'build_logging',
+      'query_settings',
     ]
 
     test('regress',
