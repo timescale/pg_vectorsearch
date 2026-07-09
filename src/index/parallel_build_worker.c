@@ -482,11 +482,13 @@ typedef struct RefineCbState
 {
 	MktBuildShared		*shared;
 	const HKMeansResult *tree;
-	float				*sums;	 /* shared accumulator */
+	float				*sums; /* shared accumulator, indexed leaf - tile_lo */
 	uint64_t			*counts; /* shared accumulator */
 	Dimension			 dim;
 	DistanceMetric		 metric;
-	float *scratch; /* per-participant normalized copy (cosine) */
+	uint32_t tile_lo; /* accumulate only leaves in [tile_lo, tile_hi) */
+	uint32_t tile_hi;
+	float	*scratch; /* per-participant normalized copy (cosine) */
 } RefineCbState;
 
 /*
@@ -527,13 +529,17 @@ mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
 	const float *v;
 	uint32_t	 leaf = mkt_refine_assign_leaf(
 			rs->tree, vec, dim, rs->metric, rs->scratch, &v);
-	uint32_t stripe = leaf % MKT_REFINE_LOCK_STRIPES;
+	/* Only the current tile's leaves are resident in the accumulator. */
+	if (leaf < rs->tile_lo || leaf >= rs->tile_hi)
+		return;
+	uint32_t idx	= leaf - rs->tile_lo;
+	uint32_t stripe = idx % MKT_REFINE_LOCK_STRIPES;
 
 	mkt_pbuild_accum_lock(rs->shared, stripe);
-	float *sum = rs->sums + (size_t)leaf * dim;
+	float *sum = rs->sums + (size_t)idx * dim;
 	for (Dimension j = 0; j < dim; j++)
 		sum[j] += v[j];
-	rs->counts[leaf]++;
+	rs->counts[idx]++;
 	mkt_pbuild_accum_unlock(rs->shared, stripe);
 }
 
@@ -554,6 +560,13 @@ mkt_pbuild_exec_refine(
 	uint64_t *counts  = mkt_dsm_refine_counts(accum);
 	float	 *cents	  = hk_leaf_centroids(tree);
 
+	/* The accumulator holds at most accum->nleaves leaves (the bounded tile
+	 * capacity), so leaves are processed in tiles, re-scanning the heap per
+	 * tile. nleaves <= capacity is a single tile (the common case). Leader and
+	 * workers derive `tile` identically from the DSM capacity, so the barrier
+	 * sequence below stays in lockstep. */
+	uint32_t tile = accum->nleaves;
+
 	RefineCbState rs = {
 			.shared	 = shared,
 			.tree	 = tree,
@@ -566,47 +579,59 @@ mkt_pbuild_exec_refine(
 
 	for (uint32_t it = 0; it < shared->refine_iters; it++)
 	{
-		/* Leader zeroes the shared accumulator and reinitializes the scan. */
-		if (participant_id == 0)
+		for (uint32_t lo = 0; lo < nleaves; lo += tile)
 		{
-			memset(sums, 0, (size_t)nleaves * dim * sizeof(float));
-			memset(counts, 0, (size_t)nleaves * sizeof(uint64_t));
-			mkt_pbuild_rescan(heap, shared);
-		}
-		/* Barrier: accumulator cleared + scan reset before anyone scans. */
-		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+			uint32_t hi = (lo + tile < nleaves) ? lo + tile : nleaves;
+			rs.tile_lo	= lo;
+			rs.tile_hi	= hi;
 
-		/* All participants cooperatively scan the heap and accumulate. */
-		mkt_build_scan(
-				heap,
-				index,
-				index_info,
-				shared,
-				true,
-				participant_id == 0,
-				mkt_refine_cb,
-				&rs);
-
-		/* Barrier: every row accumulated before the leader divides. */
-		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-
-		/* Leader recomputes leaf centroids = full-table per-leaf means. */
-		if (participant_id == 0)
-		{
-			for (uint32_t l = 0; l < nleaves; l++)
+			/* Leader zeroes the (tile-sized) accumulator and resets the scan.
+			 */
+			if (participant_id == 0)
 			{
-				if (counts[l] == 0)
-					continue; /* keep the subsample centroid for empty leaf */
-				float *sum = sums + (size_t)l * dim;
-				float *c   = cents + (size_t)l * dim;
-				double inv = 1.0 / (double)counts[l];
-				for (Dimension j = 0; j < dim; j++)
-					c[j] = (float)(sum[j] * inv);
+				memset(sums, 0, (size_t)(hi - lo) * dim * sizeof(float));
+				memset(counts, 0, (size_t)(hi - lo) * sizeof(uint64_t));
+				mkt_pbuild_rescan(heap, shared);
 			}
+			/* Barrier: accumulator cleared + scan reset before anyone scans.
+			 */
+			BarrierArriveAndWait(
+					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+			/* All participants cooperatively scan the heap and accumulate. */
+			mkt_build_scan(
+					heap,
+					index,
+					index_info,
+					shared,
+					true,
+					participant_id == 0,
+					mkt_refine_cb,
+					&rs);
+
+			/* Barrier: every row accumulated before the leader divides. */
+			BarrierArriveAndWait(
+					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+			/* Leader recomputes this tile's leaf centroids = per-leaf means.
+			 */
+			if (participant_id == 0)
+			{
+				for (uint32_t l = lo; l < hi; l++)
+				{
+					if (counts[l - lo] == 0)
+						continue; /* keep subsample centroid for empty leaf */
+					float *sum = sums + (size_t)(l - lo) * dim;
+					float *c   = cents + (size_t)l * dim;
+					double inv = 1.0 / (double)counts[l - lo];
+					for (Dimension j = 0; j < dim; j++)
+						c[j] = (float)(sum[j] * inv);
+				}
+			}
+			/* Barrier: refined centroids visible before the next tile/pass. */
+			BarrierArriveAndWait(
+					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 		}
-		/* Barrier: refined centroids visible before the next pass / posting.
-		 */
-		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 	}
 
 	mkt_free(rs.scratch);
