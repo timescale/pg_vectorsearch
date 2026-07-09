@@ -206,6 +206,26 @@ const float *mkt_refine_route_row(
  */
 typedef void (*MktLeafWriteFn)(void *ctx, uint32_t leaf, const float *vec);
 
+/*
+ * Shared leaf-head writer: writes leaf's posting-list head page (at the
+ * formula-derived block first_posting + leaf) carrying pt_centroid =
+ * P^T * centroid -- the encode reference the scan reads. Used as the
+ * MktLeafWriteFn of both the streaming tree write and the refine pass, by
+ * the serial build and the parallel leader alike. pt is caller-owned [dim]
+ * scratch.
+ */
+typedef struct MktHeadWriteCtx
+{
+	MktStorage		   *storage;
+	const RaBitQParams *rq_params;
+	Dimension			dim;
+	bool				fastscan;
+	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
+	float			   *pt;			   /* [dim] scratch */
+} MktHeadWriteCtx;
+
+void mkt_write_leaf_head(void *arg, uint32_t leaf, const float *centroid);
+
 void mkt_refine_write_means(
 		const double  *sums,
 		const uint64_t *counts,

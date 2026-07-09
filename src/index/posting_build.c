@@ -1199,3 +1199,25 @@ mkt_refine_write_means(
 		write_head(write_head_ctx, l, scratch);
 	}
 }
+
+/* See posting_build.h: the one leaf-head writer both builds share. */
+void
+mkt_write_leaf_head(void *arg, uint32_t leaf, const float *centroid)
+{
+	MktHeadWriteCtx *h = (MktHeadWriteCtx *)arg;
+	mkt_rabitq_rotate(h->rq_params, centroid, h->pt);
+
+	MktPostingBuilder hb;
+	mkt_posting_builder_init_fmt(
+			&hb,
+			h->storage,
+			h->rq_params,
+			h->dim,
+			leaf,
+			centroid,
+			h->pt,
+			h->fastscan);
+	mkt_posting_builder_set_first_blkno(&hb, h->first_posting + leaf);
+	mkt_posting_builder_finish(&hb);
+	mkt_posting_builder_cleanup(&hb);
+}

@@ -507,40 +507,6 @@ sample_for_build(
  * Serial build
  * ---------------------------------------------------------------- */
 
-/*
- * Per-leaf head-page writer for the streaming build. Fired by
- * mkt_stream_centroid_write once per leaf (during the write pass, while the
- * leaf's float centroid is still resident), it writes that cluster's
- * posting-list head page carrying pt_centroid = P^T*centroid — the exact
- * encode reference the scan reads — at the leaf's reserved head block.
- */
-typedef struct SerialHeadCtx
-{
-	MktStorage		   *storage;
-	const RaBitQParams *rq_params;
-	Dimension			dim;
-	bool				fastscan;
-	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
-	float			   *pt;			   /* [dim] scratch */
-} SerialHeadCtx;
-
-static void
-serial_write_head(void *arg, uint32_t leaf, const float *centroid)
-{
-	SerialHeadCtx *h = (SerialHeadCtx *)arg;
-	mkt_rabitq_rotate(h->rq_params, centroid, h->pt);
-
-	MktPostingBuilder hb;
-	if (h->fastscan)
-		mkt_posting_builder_init_fastscan(
-				&hb, h->storage, h->rq_params, h->dim, leaf, centroid, h->pt);
-	else
-		mkt_posting_builder_init(
-				&hb, h->storage, h->rq_params, h->dim, leaf, centroid, h->pt);
-	mkt_posting_builder_set_first_blkno(&hb, h->first_posting + leaf);
-	mkt_posting_builder_finish(&hb);
-	mkt_posting_builder_cleanup(&hb);
-}
 
 /* ----------------------------------------------------------------
  * Page-backed leaf refinement (streaming build)
@@ -620,7 +586,7 @@ refine_head_cb(
 static void
 serial_refine_heads(
 		MktannBuildState *bs,
-		SerialHeadCtx	 *headctx,
+		MktHeadWriteCtx	 *headctx,
 		MktQueryState	 *qs,
 		BlockNumber		  first_posting,
 		uint32_t		  nlist)
@@ -667,7 +633,7 @@ serial_refine_heads(
 				hi,
 				dim,
 				rs.scratch,
-				serial_write_head,
+				mkt_write_leaf_head,
 				headctx);
 	}
 
@@ -799,7 +765,7 @@ do_serial_build(
 	 */
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_CENTROID);
 
-	SerialHeadCtx headctx = {
+	MktHeadWriteCtx headctx = {
 			.storage	   = storage,
 			.rq_params	   = rq_params,
 			.dim		   = dim,
@@ -822,7 +788,7 @@ do_serial_build(
 			node_store,
 			first_posting,
 			first_centroid,
-			serial_write_head,
+			mkt_write_leaf_head,
 			&headctx);
 	mkt_pbuild_blobstore_end(node_store);
 	pfree(headctx.pt);
@@ -879,7 +845,7 @@ do_serial_build(
 		INSTR_TIME_SET_CURRENT(t_ref_start);
 		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_REFINE);
 
-		SerialHeadCtx rhead = {
+		MktHeadWriteCtx rhead = {
 				.storage	   = storage,
 				.rq_params	   = rq_params,
 				.dim		   = dim,

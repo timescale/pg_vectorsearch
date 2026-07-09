@@ -153,36 +153,6 @@ mkt_posting_build_lists(
  * Batched streaming tree build — leader-side callbacks
  * ---------------------------------------------------------------- */
 
-/* Per-leaf head-page writer (mirrors the serial serial_write_head): writes the
- * cluster's posting-list head carrying pt_centroid = P^T*centroid at its
- * reserved head block. Passed to mkt_write_subtree_streaming. */
-typedef struct LeaderHeadCtx
-{
-	MktStorage		   *storage;
-	const RaBitQParams *rq_params;
-	Dimension			dim;
-	bool				fastscan;
-	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
-	float			   *pt;			   /* [dim] scratch */
-} LeaderHeadCtx;
-
-static void
-leader_write_head(void *arg, uint32_t leaf, const float *centroid)
-{
-	LeaderHeadCtx *h = (LeaderHeadCtx *)arg;
-	mkt_rabitq_rotate(h->rq_params, centroid, h->pt);
-
-	MktPostingBuilder hb;
-	if (h->fastscan)
-		mkt_posting_builder_init_fastscan(
-				&hb, h->storage, h->rq_params, h->dim, leaf, centroid, h->pt);
-	else
-		mkt_posting_builder_init(
-				&hb, h->storage, h->rq_params, h->dim, leaf, centroid, h->pt);
-	mkt_posting_builder_set_first_blkno(&hb, h->first_posting + leaf);
-	mkt_posting_builder_finish(&hb);
-	mkt_posting_builder_cleanup(&hb);
-}
 
 /* PLAN-pass batch callback: record each subtree's leaf count + centroid-page
  * count (no writes) so the leader can size the reserve + block layout, and
@@ -516,7 +486,7 @@ do_parallel_build(
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_CENTROID);
 		BlockNumber *subtree_root_blk = mkt_alloc(
 				(size_t)km_k * sizeof(BlockNumber));
-		LeaderHeadCtx head = {
+		MktHeadWriteCtx head = {
 				.storage	   = storage,
 				.rq_params	   = rq_params,
 				.dim		   = dim,
@@ -545,7 +515,7 @@ do_parallel_build(
 					first_posting,
 					leaf_off[c],
 					base_blk,
-					leader_write_head,
+					mkt_write_leaf_head,
 					&head,
 					&pages);
 		}
@@ -645,7 +615,7 @@ do_parallel_build(
 		(void)ext_base;
 
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_CENTROID);
-		LeaderHeadCtx head = {
+		MktHeadWriteCtx head = {
 				.storage	   = storage,
 				.rq_params	   = rq_params,
 				.dim		   = dim,
@@ -665,7 +635,7 @@ do_parallel_build(
 				first_posting,
 				0,
 				first_centroid,
-				leader_write_head,
+				mkt_write_leaf_head,
 				&head,
 				&pages);
 		mkt_free(head.pt);
@@ -740,7 +710,7 @@ do_parallel_build(
 	{
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_REFINE);
 		MktDsmRefineAccum *accum = refine_accum;
-		LeaderHeadCtx	   rhead = {
+		MktHeadWriteCtx rhead = {
 				.storage	   = storage,
 				.rq_params	   = rq_params,
 				.dim		   = dim,
@@ -758,7 +728,7 @@ do_parallel_build(
 				first_posting,
 				accum,
 				barrier,
-				leader_write_head,
+				mkt_write_leaf_head,
 				&rhead);
 		mkt_free(rhead.pt);
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
