@@ -29,7 +29,7 @@ bool		  mkt_rerank				= true;
 bool		  mkt_log_build_stats		= false;
 double		  mkt_centroid_error_scale	= 0.0;
 double		  mkt_centroid_beam_scale	= 0.25;
-int			  mkt_leaf_refine_threshold = 64;
+int			  mkt_leaf_refine_threshold = 0;
 static bool	  mkt_recent_buffers		= true;
 static double mkt_probe_expand			= 2.0;
 static int	  mkt_rerank_pool			= 0;
@@ -139,11 +139,11 @@ _PG_init(void)
 			"(stderr ~ spread/sqrt(n)), so with enough samples per leaf the "
 			"full-table refine scan buys no recall. Below this many samples "
 			"per leaf the sample mean is noisy and the build re-centers the "
-			"references from the whole table (one extra scan). 0 disables "
-			"refinement; a large value refines whenever the sample was "
-			"bounded below the table.",
+			"references from the whole table (one extra scan). 0 (the "
+			"default) disables refinement; a large value refines whenever "
+			"the sample was bounded below the table.",
 			&mkt_leaf_refine_threshold,
-			64,
+			0,
 			0,
 			INT_MAX,
 			PGC_USERSET,
