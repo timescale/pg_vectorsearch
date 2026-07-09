@@ -568,7 +568,17 @@ mkt_index_build(
 		nlist					 = tree->nleaves;
 		idx->nlist				 = nlist;
 		idx->base.nlevels		 = (uint8_t)tree->nlevels;
-		idx->base.first_centroid = 1; /* driver wrote the root at block 1 */
+		idx->base.nlist			 = nlist;
+		idx->base.fan_out =
+				(uint8_t)(fan_out <= UINT8_MAX ? fan_out : UINT8_MAX);
+		/* Query knobs: mirror the PG GUC defaults so the paged beam search
+		 * behaves identically in both engines (a zero beam scale would
+		 * collapse the beam to width 1 and skip the coverage floors). */
+		idx->base.centroid_error_scale = 0.0f;
+		idx->base.centroid_beam_scale  = 0.25f;
+		/* The streaming build reserves block 0 for the meta page and writes
+		 * the root centroid page in place at block 1, after its subtrees. */
+		idx->base.first_centroid = 1;
 		idx->base.params		 = mkt_rabitq_create(dim, 42);
 		/* The paged query needs no per-cluster lists, but the bindings API
 		 * reads idx->clusters[c].count for build stats; give it zeroed entries
