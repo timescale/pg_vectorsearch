@@ -688,8 +688,9 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* ---- Phases 1, 2, 2b: the shared per-participant bodies (the leader runs
 	 * the very same code as participant 0). Each call includes its phase
 	 * barrier(s). ---- */
+	void		  *sample_seg = NULL;
 	MktDsmSamples *dsm_samples =
-			shm_toc_lookup(toc, MKT_DSM_KEY_SAMPLES, false);
+			mkt_pbuild_samples_attach(toc, shared, &sample_seg);
 	char  *centroids_base = shm_toc_lookup(toc, MKT_DSM_KEY_CENTROIDS, false);
 	float *cents		  = mkt_dsm_centroids(centroids_base);
 	char *km_workers_base = shm_toc_lookup(toc, MKT_DSM_KEY_KM_WORKERS, false);
@@ -812,8 +813,10 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * barrier sequence stays in lockstep. */
 	if (shared->refine_iters > 0)
 	{
-		MktDsmRefineAccum *accum =
-				shm_toc_lookup(toc, MKT_DSM_KEY_REFINE_ACCUM, false);
+		/* The accumulator overlays the sample region (dead since the subtree
+		 * phase); the leader initialized its header before the tree-ready
+		 * barrier above. */
+		MktDsmRefineAccum *accum = mkt_pbuild_refine_overlay(dsm_samples);
 		mkt_pbuild_exec_refine_paged(
 				worker_id,
 				heapRel,
@@ -827,6 +830,11 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 				NULL,
 				NULL);
 	}
+
+	/* The samples (and the refine overlay riding in them) are dead; hand the
+	 * segment back before the posting sort claims its own memory budget. */
+	mkt_pbuild_samples_release(dsm_samples, sample_seg);
+	dsm_samples = NULL;
 
 	/* ---- Phase 3: posting scan -> cluster-keyed sort (page-backed) ---- */
 

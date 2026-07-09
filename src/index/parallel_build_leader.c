@@ -363,7 +363,12 @@ do_parallel_build(
 
 	/* ---- Launch workers + wait until they've all attached ---- */
 	if (!mkt_pbuild_launch(pcxt, barrier, shared))
+	{
+		/* Teardown already ran; hand the sample segment back too so the
+		 * serial fallback starts from a clean budget. */
+		mkt_pbuild_samples_release(dsm_samples, lead.sample_seg);
 		return false;
+	}
 
 	/* The launch may have narrowed the participant count to the party that
 	 * actually attached; partition the phases below over that count. */
@@ -645,6 +650,7 @@ do_parallel_build(
 		if (flat == NULL)
 		{
 			mkt_free(global_mean);
+			mkt_pbuild_samples_release(dsm_samples, lead.sample_seg);
 			WaitForParallelWorkersToFinish(pcxt);
 			mkt_pbuild_teardown(pcxt);
 			return false;
@@ -742,6 +748,18 @@ do_parallel_build(
 	 */
 	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
 
+	/* The samples are dead (their last readers were the subtree builders);
+	 * lay the refine accumulator over them before the ready barrier so the
+	 * workers -- who pass that barrier ahead of the refine phase -- see an
+	 * initialized header. */
+	MktDsmRefineAccum *refine_accum = NULL;
+	if (shared->refine_iters > 0)
+	{
+		refine_accum		  = mkt_pbuild_refine_overlay(dsm_samples);
+		refine_accum->nleaves = shared->refine_tile_cap;
+		refine_accum->dim	  = dim;
+	}
+
 	/* Initialize the shared cluster sorter for the launched-worker count
 	 * BEFORE the ready barrier, so it is ready when workers attach in phase 3.
 	 * The leader merges only (it does not sort a share). */
@@ -763,9 +781,8 @@ do_parallel_build(
 	if (shared->refine_iters > 0)
 	{
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_REFINE);
-		MktDsmRefineAccum *accum =
-				shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_REFINE_ACCUM, false);
-		LeaderHeadCtx rhead = {
+		MktDsmRefineAccum *accum = refine_accum;
+		LeaderHeadCtx	   rhead = {
 				.storage	   = storage,
 				.rq_params	   = rq_params,
 				.dim		   = dim,
@@ -788,6 +805,11 @@ do_parallel_build(
 		mkt_free(rhead.pt);
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
 	}
+
+	/* The samples (and the refine overlay riding in them) are dead; hand the
+	 * segment back before the posting sort claims its own memory budget. */
+	mkt_pbuild_samples_release(dsm_samples, lead.sample_seg);
+	dsm_samples = NULL;
 
 	/* Re-init the scan for the posting phase (the refine passes above consumed
 	 * it). Guarded by the barrier below so no worker scans before the reset.

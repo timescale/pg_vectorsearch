@@ -363,7 +363,8 @@ mkt_pbuild_setup_shared(
 	shared->km_tolerance		   = 1e-4f;
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
-	shared->refine_iters = 0; /* standalone builds are not mem-bounded */
+	shared->refine_iters = 0;
+	shared->refine_tile_cap = 0; /* standalone builds are not mem-bounded */
 	/* Page-backed routing knobs: route the build scan for accuracy, not
 	 * query speed, matching the PG build (see MKT_BUILD_CENTROID_* in
 	 * posting_build.h). */
@@ -433,6 +434,7 @@ mkt_pbuild_setup_shared(
 	lead->shared			  = shared;
 	lead->barrier			  = barrier;
 	lead->dsm_samples		  = dsm_samples;
+	lead->sample_seg		  = NULL;
 	lead->centroids_base	  = centroids_base;
 	lead->cents				  = cents;
 	lead->km_workers_base	  = km_workers_base;
@@ -456,6 +458,26 @@ mkt_pbuild_setup_shared(
  * Accumulate one worker's tuple counts under the mutex (the analog of PG's
  * spinlock in the derived shared struct).
  */
+/*
+ * Sample-region seam: standalone keeps the samples in the shared arena for
+ * the whole build (it does not bound memory), so attach is a plain lookup
+ * and release is a no-op.
+ */
+MktDsmSamples *
+mkt_pbuild_samples_attach(shm_toc *toc, MktBuildShared *shared, void **seg_out)
+{
+	(void)shared;
+	*seg_out = NULL;
+	return (MktDsmSamples *)shm_toc_lookup(toc, MKT_DSM_KEY_SAMPLES, false);
+}
+
+void
+mkt_pbuild_samples_release(MktDsmSamples *samples, void *seg)
+{
+	(void)samples;
+	(void)seg;
+}
+
 void
 mkt_pbuild_worker_add_counts(
 		MktBuildShared *shared,

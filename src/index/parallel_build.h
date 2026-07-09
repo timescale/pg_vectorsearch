@@ -79,7 +79,6 @@ typedef void (*MktBuildScanCb)(
 #define MKT_DSM_KEY_ROOT_ASSIGN	   UINT64CONST(0xB00000000000000E)
 #define MKT_DSM_KEY_POSTING_QUEUES UINT64CONST(0xB00000000000000F)
 #define MKT_DSM_KEY_CHILD_SUBTREES UINT64CONST(0xB000000000000010)
-#define MKT_DSM_KEY_REFINE_ACCUM   UINT64CONST(0xB000000000000011)
 #define MKT_DSM_KEY_SORTSHARED	   UINT64CONST(0xB000000000000012)
 /* Page-backed phase-3 routing: the global mean, published by the leader before
  * the tree-ready barrier so workers route exactly as the query/insert paths
@@ -137,6 +136,12 @@ typedef struct MktBuildShared
 	 * it 0. Both leader and workers gate the refine phase on this, so they run
 	 * the same barrier sequence. */
 	uint32_t refine_iters;
+
+	/* Tile capacity (leaves) of the refine accumulator that overlays the
+	 * sample region once sampling is done; set with refine_iters at setup
+	 * (the back-end bounds it by its memory budget AND the sample region's
+	 * size, since the overlay lives inside that region). */
+	uint32_t refine_tile_cap;
 
 	/* Counters — updated concurrently under the back-end's lock */
 	double reltuples;
@@ -767,6 +772,34 @@ struct WalUsage;
 struct BufferUsage;
 
 extern void mkt_pbuild_teardown(struct ParallelContext *pcxt);
+
+/*
+ * Sample-region seam. The k-means sample is the build's largest working set
+ * (up to the whole memory budget), but it is dead once the subtrees are
+ * clustered -- long before the posting sort claims its own budget. The PG
+ * back-end therefore keeps it in a dedicated DSM segment handed back through
+ * this seam right after the refine pass (the refine accumulator overlays the
+ * then-dead sample region, so it rides along for free), keeping the build's
+ * peak at one budget instead of stacking sample + accumulator + sort.
+ * Workers attach at startup and every participant releases independently;
+ * the segment is destroyed with the last detach. The standalone back-end
+ * keeps the samples in its arena (it does not bound memory) and treats
+ * release as a no-op.
+ */
+extern MktDsmSamples *mkt_pbuild_samples_attach(
+		shm_toc *toc, MktBuildShared *shared, void **seg_out);
+extern void mkt_pbuild_samples_release(MktDsmSamples *samples, void *seg);
+
+/*
+ * The refine accumulator overlays the (dead) sample region: same base
+ * address, initialized by the leader after the last sample use and before
+ * the tree-ready barrier that workers pass ahead of the refine phase.
+ */
+static inline MktDsmRefineAccum *
+mkt_pbuild_refine_overlay(MktDsmSamples *samples)
+{
+	return (MktDsmRefineAccum *)samples;
+}
 extern bool mkt_pbuild_launch(
 		struct ParallelContext *pcxt,
 		Barrier				   *barrier,
@@ -837,6 +870,9 @@ typedef struct MktPBuildLeader
 	MktBuildShared		   *shared;
 	Barrier				   *barrier;
 	MktDsmSamples		   *dsm_samples;
+	/* Back-end token for releasing the sample region early (PG: the DSM
+	 * segment the samples live in; standalone: NULL). */
+	void				   *sample_seg;
 	char				   *centroids_base;
 	float				   *cents;
 	char				   *km_workers_base;

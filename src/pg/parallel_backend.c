@@ -53,7 +53,9 @@ typedef struct MktBuildSharedPg
 	Oid			   heaprelid;
 	Oid			   indexrelid;
 	int64		   queryid;
-	slock_t		   mutex;
+	/* DSM handle of the dedicated sample segment (sample-region seam). */
+	dsm_handle sample_handle;
+	slock_t	   mutex;
 	/* Striped locks guarding the shared leaf-refinement accumulator. */
 	slock_t accum_locks[MKT_REFINE_LOCK_STRIPES];
 } MktBuildSharedPg;
@@ -523,10 +525,6 @@ mkt_pbuild_setup_shared(
 
 	shm_toc_estimate_chunk(&pcxt->estimator, est_shared);
 	shm_toc_estimate_chunk(&pcxt->estimator, sizeof(Barrier));
-	/* Sampling */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator,
-			mkt_dsm_samples_size(nparticipants, max_per_worker, dim));
 	/* K-means shared centroids + norms (root level, k=km_k) */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_dsm_centroids_size(km_k, dim));
@@ -556,17 +554,19 @@ mkt_pbuild_setup_shared(
 	 */
 	shm_toc_estimate_chunk(&pcxt->estimator, (Size)dim * sizeof(float));
 
-	/* Shared leaf-refinement accumulator (one copy; only when refining). Sized
-	 * to a bounded tile (cap_bytes = min(maintenance_work_mem, MaxAllocSize)),
-	 * not O(nlist): refine processes leaves in tiles of this capacity. */
+	/* The leaf-refinement accumulator overlays the sample segment once the
+	 * samples are dead (see the sample-region seam), so it needs no DSM chunk
+	 * of its own; its tile capacity is bounded by the memory budget, by
+	 * MaxAllocSize, and by the region it overlays. */
+	Size	 samp_sz = mkt_dsm_samples_size(nparticipants, max_per_worker, dim);
 	uint64_t refine_cap_bytes =
 			Min((uint64_t)maintenance_work_mem * 1024, (uint64_t)MaxAllocSize);
+	if (refine_cap_bytes >
+		(uint64_t)samp_sz - offsetof(MktDsmRefineAccum, sums))
+		refine_cap_bytes =
+				(uint64_t)samp_sz - offsetof(MktDsmRefineAccum, sums);
 	uint32_t refine_tile_cap =
 			mkt_refine_tile_leaves(nlist, dim, refine_cap_bytes);
-	if (refine_iters > 0)
-		shm_toc_estimate_chunk(
-				&pcxt->estimator,
-				mkt_dsm_refine_accum_size(refine_tile_cap, dim));
 
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -582,11 +582,10 @@ mkt_pbuild_setup_shared(
 
 	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
 	 * sortshared, child_subtrees, wal, buffer, global_mean + optionally
-	 * refine_accum / query_text */
-	int nkeys = 11;
+	 * query_text (samples live in their own segment; the refine accumulator
+	 * overlays them) */
+	int nkeys = 10;
 	if (debug_query_string)
-		nkeys++;
-	if (refine_iters > 0)
 		nkeys++;
 	shm_toc_estimate_keys(&pcxt->estimator, nkeys);
 
@@ -627,6 +626,7 @@ mkt_pbuild_setup_shared(
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
 	shared->refine_iters		   = refine_iters;
+	shared->refine_tile_cap		   = refine_iters > 0 ? refine_tile_cap : 0;
 	/* Build routes for accuracy, not query speed (see MKT_BUILD_CENTROID_*
 	 * in posting_build.h): decouple from the query-tuned GUCs. */
 	shared->centroid_error_scale = MKT_BUILD_CENTROID_ERROR_SCALE;
@@ -655,9 +655,12 @@ mkt_pbuild_setup_shared(
 	BarrierInit(barrier, 0);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_BARRIER, barrier);
 
-	/* Sample slots */
-	Size samp_sz = mkt_dsm_samples_size(nparticipants, max_per_worker, dim);
-	MktDsmSamples *dsm_samples = shm_toc_allocate(pcxt->toc, samp_sz);
+	/* Sample slots, in a dedicated DSM segment so the build's largest
+	 * working set can be handed back (last detach destroys it) before the
+	 * posting sort claims its own budget -- see the sample-region seam.
+	 * Workers attach via the handle published in the shared state. */
+	dsm_segment *sample_seg = dsm_create(samp_sz, 0);
+	MktDsmSamples *dsm_samples = dsm_segment_address(sample_seg);
 	/* Only the header + per-participant counts are read before being written;
 	 * the sample data is filled by the sampling pass and read back bounded by
 	 * those counts, so zeroing the (multi-GB) data region is wasted work. */
@@ -668,7 +671,7 @@ mkt_pbuild_setup_shared(
 	dsm_samples->nparticipants	= nparticipants;
 	dsm_samples->max_per_worker = max_per_worker;
 	dsm_samples->dim			= dim;
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SAMPLES, dsm_samples);
+	pg->sample_handle			= dsm_segment_handle(sample_seg);
 
 	/* Shared centroids + norms (root k-means, k=km_k) */
 	Size  cent_sz		 = mkt_dsm_centroids_size(km_k, dim);
@@ -715,19 +718,6 @@ mkt_pbuild_setup_shared(
 	memset(dsm_gmean, 0, (Size)dim * sizeof(float));
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, dsm_gmean);
 
-	/* Shared leaf-refinement accumulator, sized to the bounded tile capacity
-	 * (refine_tile_cap); the refine exec processes leaves in tiles of this
-	 * size, re-scanning the heap per tile. accum->nleaves carries the capacity
-	 * so the leader and workers derive the tile count identically. Only when
-	 * refining. */
-	if (refine_iters > 0)
-	{
-		Size acc_sz = mkt_dsm_refine_accum_size(refine_tile_cap, dim);
-		MktDsmRefineAccum *accum = shm_toc_allocate(pcxt->toc, acc_sz);
-		accum->nleaves			 = refine_tile_cap;
-		accum->dim				 = dim;
-		shm_toc_insert(pcxt->toc, MKT_DSM_KEY_REFINE_ACCUM, accum);
-	}
 
 	WalUsage *walusage = shm_toc_allocate(
 			pcxt->toc, mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -750,6 +740,7 @@ mkt_pbuild_setup_shared(
 	lead->shared			  = shared;
 	lead->barrier			  = barrier;
 	lead->dsm_samples		  = dsm_samples;
+	lead->sample_seg		  = sample_seg;
 	lead->centroids_base	  = centroids_base;
 	lead->cents				  = cents;
 	lead->child_subtrees_base = child_subtrees_base;
@@ -789,6 +780,36 @@ mkt_pbuild_worker_add_counts(
 	shared->soar_dupes += soar_dupes;
 	shared->reltuples += heap_tuples;
 	SpinLockRelease(&pg->mutex);
+}
+
+/*
+ * Sample-region seam (see parallel_build.h): the samples live in their own
+ * DSM segment; workers attach by the handle the leader published, and every
+ * participant detaches independently once the refine pass is done -- the
+ * last detach destroys the segment and returns the build's largest working
+ * set before the posting sort claims its budget.
+ */
+MktDsmSamples *
+mkt_pbuild_samples_attach(shm_toc *toc, MktBuildShared *shared, void **seg_out)
+{
+	MktBuildSharedPg *pg = (MktBuildSharedPg *)shared;
+
+	(void)toc;
+	dsm_segment *seg = dsm_attach(pg->sample_handle);
+	if (seg == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("could not attach to mktann sample segment")));
+	*seg_out = seg;
+	return (MktDsmSamples *)dsm_segment_address(seg);
+}
+
+void
+mkt_pbuild_samples_release(MktDsmSamples *samples, void *seg)
+{
+	(void)samples;
+	if (seg != NULL)
+		dsm_detach((dsm_segment *)seg);
 }
 
 /*
