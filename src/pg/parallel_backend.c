@@ -100,7 +100,7 @@ mkt_pg_scan_adapter(
  * gates pg_stat_progress_create_index reporting, so only the leader sets it
  * (otherwise every participant would inflate the tuples-scanned counter).
  */
-void
+double
 mkt_build_scan(
 		Relation		  heap,
 		Relation		  index,
@@ -115,7 +115,7 @@ mkt_build_scan(
 	TableScanDesc	 scan = table_beginscan_parallel(
 			   heap, ParallelTableScanFromMktShared(shared));
 
-	table_index_build_scan(
+	return table_index_build_scan(
 			heap,
 			index,
 			indexInfo,
@@ -690,13 +690,17 @@ mkt_pbuild_setup_shared(
  */
 void
 mkt_pbuild_worker_add_counts(
-		MktBuildShared *shared, double indtuples, double soar_dupes)
+		MktBuildShared *shared,
+		double			indtuples,
+		double			soar_dupes,
+		double			heap_tuples)
 {
 	MktBuildSharedPg *pg = (MktBuildSharedPg *)shared;
 
 	SpinLockAcquire(&pg->mutex);
 	shared->indtuples += indtuples;
 	shared->soar_dupes += soar_dupes;
+	shared->reltuples += heap_tuples;
 	SpinLockRelease(&pg->mutex);
 }
 

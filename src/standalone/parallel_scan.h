@@ -42,9 +42,10 @@ extern void mkt_parallel_scan_init(
 /*
  * Claim and process chunks until the input is exhausted, invoking cb for each
  * vector. Safe to call concurrently from any number of threads on the same
- * MktParallelScan; together they cover every vector exactly once.
+ * MktParallelScan; together they cover every vector exactly once. Returns the
+ * number of vectors this caller processed (the callers' sum is nvecs).
  */
-extern void
+extern double
 mkt_parallel_scan_run(MktParallelScan *ps, MktBuildScanCb cb, void *state);
 
 #endif /* MKT_PARALLEL_SCAN_H */
