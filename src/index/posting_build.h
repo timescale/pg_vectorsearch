@@ -55,6 +55,34 @@ typedef struct MktBuildAssignment
 #define MKT_SECONDARY_TOPK		 8
 #define MKT_SECONDARY_BEAM_WIDTH 16
 
+/*
+ * Build-time centroid routing accuracy.
+ *
+ * The build assigns every vector exactly once, so it routes the centroid
+ * descent for accuracy, not query speed. It must NOT inherit the
+ * query-tuned mkt.centroid_beam_scale, which trades recall for QPS: a
+ * small beam_scale makes the beam narrower than the MKT_SECONDARY_TOPK
+ * candidates the secondary (boundary/SOAR) search requests, loosening
+ * clustering and permanently lowering query recall.
+ *
+ * BEAM_SCALE = 1.0 makes beam_w = nprobe = MKT_SECONDARY_TOPK, i.e. the
+ * descent keeps as many candidates as the secondary search returns. This
+ * matches the build query-state buffers (beam_results / centroid_scratch
+ * are sized for max_nprobe = MKT_SECONDARY_TOPK). The query-tuned default
+ * (0.25) instead yields beam_w = 2, far narrower than the k candidates the
+ * descent must produce.
+ *
+ * ERROR_SCALE = 0 matches the query default and, empirically, main's
+ * assignment recall: with a full-width beam the extra candidates a larger
+ * error bound would keep do not change the leaf chosen. It must stay 0
+ * here — a positive error_scale in the single-candidate refine route
+ * (nprobe = 1) overflows the beam-search candidate buffer and corrupts the
+ * build. (That buffer-sizing bug is orthogonal; the build has no need for
+ * a wider bound.)
+ */
+#define MKT_BUILD_CENTROID_BEAM_SCALE  1.0f
+#define MKT_BUILD_CENTROID_ERROR_SCALE 0.0f
+
 typedef struct MktBuildWorkerBufs
 {
 	float	 *norm_buf;		/* [dim] for cosine normalization */
