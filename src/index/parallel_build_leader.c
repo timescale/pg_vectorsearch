@@ -536,7 +536,15 @@ do_parallel_build(
 		 * pass can write both at reserved blocks; continuation pages are
 		 * appended past it during mkt_posting_build_lists. No O(nlist) reserve
 		 * arrays. */
-		mkt_storage_extend(storage, first_posting + actual_nlist);
+		/* mkt_storage_extend extends BY npages; the count doubles as the
+		 * absolute layout end only because the relation holds nothing but
+		 * the meta-page slot yet. The reserved layout (heads at
+		 * first_posting + leaf) silently shifts if a page ever sneaks in
+		 * before this point, so pin the invariant. */
+		BlockNumber ext_base =
+				mkt_storage_extend(storage, first_posting + actual_nlist);
+		Assert(ext_base == 0 || ext_base == InvalidBlockNumber);
+		(void)ext_base;
 
 		/* Streaming pass: read each subtree blob back from the store (child
 		 * order matches the append order) and stream its centroid + head
@@ -659,7 +667,15 @@ do_parallel_build(
 		/* Head region: actual_nlist pages at first_posting (leaf c -> head
 		 * first_posting + c). Pre-extend to cover centroid + head region;
 		 * continuations append past it. No O(nlist) reserve. */
-		mkt_storage_extend(storage, first_posting + actual_nlist);
+		/* mkt_storage_extend extends BY npages; the count doubles as the
+		 * absolute layout end only because the relation holds nothing but
+		 * the meta-page slot yet. The reserved layout (heads at
+		 * first_posting + leaf) silently shifts if a page ever sneaks in
+		 * before this point, so pin the invariant. */
+		BlockNumber ext_base =
+				mkt_storage_extend(storage, first_posting + actual_nlist);
+		Assert(ext_base == 0 || ext_base == InvalidBlockNumber);
+		(void)ext_base;
 
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_CENTROID);
 		LeaderHeadCtx head = {

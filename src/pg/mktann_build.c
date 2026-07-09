@@ -796,7 +796,14 @@ do_serial_build(
 	 * when the write pass emits it; continuation pages are appended past the
 	 * head region during mkt_posting_build_lists. No O(nlist) reserve arrays.
 	 */
-	mkt_storage_extend(storage, first_posting + nlist);
+	/* mkt_storage_extend extends BY npages; the count doubles as the
+	 * absolute layout end only because the relation holds nothing but the
+	 * meta-page slot yet. The reserved layout (heads at first_posting + leaf)
+	 * silently shifts if a page ever sneaks in before this point, so pin the
+	 * invariant. */
+	BlockNumber ext_base = mkt_storage_extend(storage, first_posting + nlist);
+	Assert(ext_base == 0 || ext_base == InvalidBlockNumber);
+	(void)ext_base;
 
 	/*
 	 * Write pass: stream the centroid pages (reserved blocks, post-order, root
