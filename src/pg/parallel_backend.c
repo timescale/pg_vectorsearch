@@ -22,6 +22,7 @@
 #include <miscadmin.h>
 #include <optimizer/plancat.h>
 #include <pgstat.h>
+#include <storage/buffile.h>
 #include <storage/latch.h>
 #include <storage/proc.h>
 #include <storage/spin.h>
@@ -142,6 +143,10 @@ worker_lockmodes(bool concurrent, LOCKMODE *heapmode, LOCKMODE *indexmode)
 	*indexmode = concurrent ? RowExclusiveLock : AccessExclusiveLock;
 }
 
+/* Per-worker build memory context (see mkt_pbuild_worker_attach). */
+static MemoryContext mkt_pbuild_worker_ctx	  = NULL;
+static MemoryContext mkt_pbuild_worker_oldctx = NULL;
+
 /*
  * Join the parallel build: look up the shared state, open the heap and index,
  * start per-worker instrumentation, and attach to the phase barrier. The
@@ -170,6 +175,17 @@ mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
 	w->worker_id = ParallelWorkerNumber + 1;
 	w->dim		 = shared->dim;
 
+	/*
+	 * All of this worker's build allocations (routing state, per-child
+	 * subtree blobs, batch buffers) go into a named context so
+	 * pg_backend_memory_contexts attributes them to the build and they are
+	 * reclaimed together at detach. A file-static is safe for the same
+	 * reason as mkt_pbuild_snapshot: one build per worker, non-reentrant.
+	 */
+	mkt_pbuild_worker_ctx = AllocSetContextCreate(
+			CurrentMemoryContext, "mkt worker build", ALLOCSET_DEFAULT_SIZES);
+	mkt_pbuild_worker_oldctx = MemoryContextSwitchTo(mkt_pbuild_worker_ctx);
+
 	InstrStartParallelQuery();
 
 	/*
@@ -189,6 +205,11 @@ mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
 void
 mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
 {
+	MemoryContextSwitchTo(mkt_pbuild_worker_oldctx);
+	MemoryContextDelete(mkt_pbuild_worker_ctx);
+	mkt_pbuild_worker_ctx	 = NULL;
+	mkt_pbuild_worker_oldctx = NULL;
+
 	BufferUsage *bufferusage =
 			shm_toc_lookup(toc, MKT_DSM_KEY_BUFFER_USAGE, false);
 	WalUsage *walusage = shm_toc_lookup(toc, MKT_DSM_KEY_WAL_USAGE, false);
@@ -259,6 +280,63 @@ mkt_pbuild_teardown(ParallelContext *pcxt)
 	}
 	DestroyParallelContext(pcxt);
 	ExitParallelMode();
+}
+
+/*
+ * Leader-only subtree blob store (see parallel_build.h): a BufFile temp
+ * file. Small blob sets never leave the kernel page cache; large ones spill
+ * to pgsql_tmp automatically, so the store adds no unbounded memory. Blobs
+ * are length-prefixed and read back strictly in append order.
+ */
+struct MktBlobStore
+{
+	BufFile *file;
+};
+
+MktBlobStore *
+mkt_pbuild_blobstore_begin(void)
+{
+	MktBlobStore *bs = palloc(sizeof(MktBlobStore));
+	bs->file		 = BufFileCreateTemp(false);
+	return bs;
+}
+
+void
+mkt_pbuild_blobstore_put(MktBlobStore *bs, const void *blob, uint64_t size)
+{
+	BufFileWrite(bs->file, &size, sizeof(size));
+	BufFileWrite(bs->file, blob, (size_t)size);
+}
+
+void
+mkt_pbuild_blobstore_rewind(MktBlobStore *bs)
+{
+	if (BufFileSeek(bs->file, 0, 0, SEEK_SET) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not rewind subtree blob store")));
+}
+
+uint64_t
+mkt_pbuild_blobstore_get(MktBlobStore *bs, void *buf, uint64_t max_size)
+{
+	uint64_t size;
+	BufFileReadExact(bs->file, &size, sizeof(size));
+	if (size > max_size)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("subtree blob larger than its slot (%llu > %llu)",
+						(unsigned long long)size,
+						(unsigned long long)max_size)));
+	BufFileReadExact(bs->file, buf, (size_t)size);
+	return size;
+}
+
+void
+mkt_pbuild_blobstore_end(MktBlobStore *bs)
+{
+	BufFileClose(bs->file);
+	pfree(bs);
 }
 
 /*
@@ -345,15 +423,15 @@ mkt_pbuild_setup_shared(
 	 * whole tree build -- root k-means and every subtree -- so its size is the
 	 * build's dominant memory cost. The ideal is ~256 samples per list, but at
 	 * fine nlist that can dwarf available RAM (nlist=480k -> 123M samples ->
-	 * ~360 GB), which previously overflowed the DSM.
+	 * ~360 GB), far beyond what a DSM segment can hold.
 	 *
 	 * Bound it by maintenance_work_mem: that is the build's memory budget and
 	 * the knob operators already raise for large index builds. When the budget
 	 * is smaller than the ideal the stride sampler simply draws a coarser (but
 	 * still uniform) subsample to fit. estimate_rel_size() caps it to the rows
 	 * that actually exist so small tables don't over-allocate; it is only a
-	 * hint now -- the budget is the hard bound, so an inaccurate estimate can
-	 * no longer over-commit shared memory.
+	 * hint -- the budget is the hard bound, so an inaccurate estimate cannot
+	 * over-commit shared memory.
 	 */
 	uint64_t want_samples = (uint64_t)nlist * 256;
 
@@ -396,10 +474,17 @@ mkt_pbuild_setup_shared(
 	 * budget-bounded below the table). Both leader and workers gate the refine
 	 * phase on shared->refine_iters so they run the identical barrier
 	 * sequence.
+	 *
+	 * One pass, regardless of mkt.leaf_refine_iters: the page-backed refine
+	 * routes every row over the centroid PAGES, which it never rewrites (it
+	 * updates the heads' encode references), so the row-to-leaf assignment is
+	 * identical in every pass and a second pass recomputes the same means --
+	 * a full-table scan for a no-op. The in-RAM-tree refine iterated because
+	 * it moved the routing centroids themselves between passes.
 	 */
 	uint32_t refine_iters = ((double)total_samples < est_tuples &&
 							 mkt_leaf_refine_iters > 0)
-								  ? (uint32_t)mkt_leaf_refine_iters
+								  ? 1
 								  : 0;
 
 	EnterParallelMode();
@@ -432,9 +517,13 @@ mkt_pbuild_setup_shared(
 	/* K-means shared centroids + norms (root level, k=km_k) */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_dsm_centroids_size(km_k, dim));
-	/* Per-child subtree blobs (work-partitioned phase 2c) */
+	/* Per-child subtree blobs: a bounded ring of nparticipants slots (the
+	 * batched streaming build keeps at most one slot per participant
+	 * resident), not one slot per root child — so this is independent of the
+	 * partition count. */
 	shm_toc_estimate_chunk(
-			&pcxt->estimator, mkt_dsm_child_subtrees_size(fan_out, slot_size));
+			&pcxt->estimator,
+			mkt_dsm_child_subtrees_size(nparticipants, slot_size));
 	/* K-means per-worker accumulators */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
@@ -443,22 +532,15 @@ mkt_pbuild_setup_shared(
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
 			mkt_dsm_root_assign_size(nparticipants, max_per_worker));
-	/* Tree blob (placeholder — allocated later by leader, but
-	 * we need the max possible size. Use a generous estimate.) */
-	Size max_tree_sz = sizeof(HKMeansResult) +
-					   (Size)nlist * 2 * sizeof(HKMeansNode) +
-					   (Size)nlist * dim * sizeof(float) * 2;
-	shm_toc_estimate_chunk(&pcxt->estimator, max_tree_sz);
 	/* Shared coordinator for the cluster-keyed posting sort (sort seam). Sized
 	 * for the planned participant count (upper bound on launched workers). */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_pbuild_sort_shared_size(nparticipants));
 
-	/* Page-backed routing: leaf posting-head blocks (head->leaf map) and the
-	 * global mean, published by the leader before the tree-ready barrier.
-	 * Sized for the worst-case leaf count (nlist here is the max bound). */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator, (Size)nlist * sizeof(BlockNumber));
+	/* Page-backed routing: the global mean, published by the leader before the
+	 * tree-ready barrier. The posting-head base (leaf c's head = first_posting
+	 * + c) is a scalar in MktBuildShared, so no O(nlist) head array is shared.
+	 */
 	shm_toc_estimate_chunk(&pcxt->estimator, (Size)dim * sizeof(float));
 
 	/* Shared leaf-refinement accumulator (one copy; only when refining). Sized
@@ -486,9 +568,9 @@ mkt_pbuild_setup_shared(
 	}
 
 	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
-	 * tree, sortshared, child_subtrees, wal, buffer, posting_heads,
-	 * global_mean + optionally refine_accum / query_text */
-	int nkeys = 13;
+	 * sortshared, child_subtrees, wal, buffer, global_mean + optionally
+	 * refine_accum / query_text */
+	int nkeys = 11;
 	if (debug_query_string)
 		nkeys++;
 	if (refine_iters > 0)
@@ -582,11 +664,12 @@ mkt_pbuild_setup_shared(
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CENTROIDS, centroids_base);
 	float *cents = mkt_dsm_centroids(centroids_base);
 
-	/* Per-child subtree blobs (phase 2c, work-partitioned): each participant
-	 * builds the full subtree for the root children it owns into its slot, and
-	 * the leader grafts them into the final tree. */
+	/* Per-child subtree blobs (phase 2c): a bounded ring of nparticipants
+	 * slots. Each participant builds a subtree into its own slot; the leader
+	 * streams the batch to centroid pages before the ring is reused, so the
+	 * region never scales with the partition count. */
 	char *child_subtrees_base = shm_toc_allocate(
-			pcxt->toc, mkt_dsm_child_subtrees_size(fan_out, slot_size));
+			pcxt->toc, mkt_dsm_child_subtrees_size(nparticipants, slot_size));
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CHILD_SUBTREES, child_subtrees_base);
 
 	/* Per-worker k-means accumulators */
@@ -603,11 +686,6 @@ mkt_pbuild_setup_shared(
 	dsm_ra->max_per_worker = max_per_worker;
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_ROOT_ASSIGN, dsm_ra);
 
-	/* Tree blob — allocated now, populated after k-means */
-	void *dsm_tree = shm_toc_allocate(pcxt->toc, max_tree_sz);
-	memset(dsm_tree, 0, max_tree_sz);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_TREE, dsm_tree);
-
 	/* Shared coordinator for the cluster-keyed posting sort (sort seam). Sized
 	 * for the planned participant count; the leader calls
 	 * mkt_pbuild_sort_shared_init with the actual launched count after launch.
@@ -617,13 +695,9 @@ mkt_pbuild_setup_shared(
 	memset(sortshared, 0, sort_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SORTSHARED, sortshared);
 
-	/* Page-backed routing regions (filled by the leader before the tree-ready
-	 * barrier): the leaf posting-head blocks and the global mean. */
-	BlockNumber *dsm_heads =
-			shm_toc_allocate(pcxt->toc, (Size)nlist * sizeof(BlockNumber));
-	memset(dsm_heads, 0, (Size)nlist * sizeof(BlockNumber));
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_POSTING_HEADS, dsm_heads);
-
+	/* Page-backed routing region (filled by the leader before the tree-ready
+	 * barrier): the global mean. The posting-head base is a scalar in
+	 * MktBuildShared, so there is no O(nlist) head array here. */
 	float *dsm_gmean = shm_toc_allocate(pcxt->toc, (Size)dim * sizeof(float));
 	memset(dsm_gmean, 0, (Size)dim * sizeof(float));
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, dsm_gmean);
@@ -668,7 +742,6 @@ mkt_pbuild_setup_shared(
 	lead->child_subtrees_base = child_subtrees_base;
 	lead->km_workers_base	  = km_workers_base;
 	lead->dsm_ra			  = dsm_ra;
-	lead->dsm_tree			  = dsm_tree;
 	lead->queues_base		  = NULL; /* sort-seam path: no shm_mq queues */
 	lead->dsm_partials		  = NULL; /* sort-seam path: no partials region */
 	lead->walusage			  = walusage;
@@ -680,7 +753,6 @@ mkt_pbuild_setup_shared(
 	lead->nlist				  = nlist;
 	lead->rabitq_seed		  = rabitq_seed;
 	lead->fan_out			  = fan_out;
-	lead->max_tree_sz		  = max_tree_sz;
 	lead->dsm_total			  = dsm_total;
 	return true;
 }

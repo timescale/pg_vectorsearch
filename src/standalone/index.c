@@ -30,7 +30,6 @@
 #include "index/index_build.h"
 #include "index/parallel_build.h"
 #include "index/posting_build.h"
-#include "index/posting_build_parallel.h"
 #include "index/posting_convert.h"
 #include "index/posting_page.h"
 #include "standalone/index.h"
@@ -410,10 +409,11 @@ mkt_index_build(
 	bool use_driver = config->encode_rabitq &&
 					  config->posting_fmt == MKT_POSTING_FMT_PAGES;
 
-	HKMeansResult *tree		  = NULL;
-	float		  *km_vectors = NULL;
-	uint32_t	   km_nvecs	  = 0;
-	double		   ms_kmeans  = 0;
+	HKMeansResult *tree			  = NULL;
+	float		  *km_vectors	  = NULL;
+	uint32_t	   km_nvecs		  = 0;
+	double		   ms_kmeans	  = 0;
+	float		  *sa_global_mean = NULL; /* sample mean from the driver */
 
 	if (use_driver)
 	{
@@ -424,18 +424,18 @@ mkt_index_build(
 		idx->base.fastscan = config->fastscan != 0;
 
 		/* Upper bound on leaves (fan_out^nlevels, matching the tree the driver
-		 * builds), so posting_heads has a slot per leaf. */
+		 * builds). */
 		uint32_t max_nlist = mkt_max_nlist(nlist, fan_out);
 
 		/*
 		 * Long-lived posting storage for the driver's streamed pages. The
 		 * driver reserves a centroid region at the front (left unwritten here
 		 * — the centroid pages go to centroid_storage below) and writes
-		 * posting pages after it, returning absolute head block numbers.
+		 * posting pages after it. Head blocks are formula-derived
+		 * (first_posting + leaf), so no head array is needed.
 		 */
 		uint32_t est_pages	 = idx->nvecs / 4 + max_nlist + 256;
 		idx->posting_storage = make_array_page_storage(est_pages, idx_ctx);
-		idx->posting_heads	 = mkt_alloc(max_nlist * sizeof(BlockNumber));
 
 		RelationData heap_rel = {
 				.vectors = idx->all_vectors,
@@ -477,16 +477,17 @@ mkt_index_build(
 				&idx->posting_storage.base,
 				NULL, /* no build-progress seam in standalone (no-op stub) */
 				&tree,
-				idx->posting_heads,
 				&heap_tuples,
 				&indtuples,
 				&soar_dupes,
-				/* Standalone writes its own centroid store + computes its own
-				 * global mean below, so it ignores both outputs (the driver
-				 * still writes centroid pages into posting_storage for the
-				 * workers' page-backed routing). */
+				/* The driver streams the centroid tree into posting_storage
+				 * (no in-RAM tree). Capture the sample-mean global mean it
+				 * used so the page-backed query centering matches; the
+				 * returned *out_tree is a lightweight carrier (leaf/level
+				 * counts only). */
+				&sa_global_mean,
 				NULL,
-				NULL);
+				&idx->first_posting);
 		mkt_memctx_switch(idx_ctx);
 
 		/* The driver always launches at least one worker, so it does not fail
@@ -555,6 +556,61 @@ mkt_index_build(
 		mkt_memctx_switch(old_ctx);
 		mkt_memctx_delete(idx_ctx); /* frees idx, build_ctx, everything */
 		return NULL;
+	}
+
+	if (use_driver)
+	{
+		/* Paged parallel build: do_parallel_build streamed the whole centroid
+		 * tree + posting heads into posting_storage (no in-RAM tree). The
+		 * query routes page-backed over those pages via idx->base, so skip the
+		 * tree-centroid finalize entirely (the returned tree is only a carrier
+		 * of leaf/level counts). */
+		nlist					 = tree->nleaves;
+		idx->nlist				 = nlist;
+		idx->base.nlevels		 = (uint8_t)tree->nlevels;
+		idx->base.first_centroid = 1; /* driver wrote the root at block 1 */
+		idx->base.params		 = mkt_rabitq_create(dim, 42);
+		/* The paged query needs no per-cluster lists, but the bindings API
+		 * reads idx->clusters[c].count for build stats; give it zeroed entries
+		 * (count 0 -> the API falls back to size estimates). */
+		idx->clusters = mkt_alloc0((size_t)nlist * sizeof(MktClusterList));
+		idx->base.pt_global_mean = mkt_alloc(dim * sizeof(float));
+		if (sa_global_mean != NULL)
+			mkt_rabitq_rotate(
+					idx->base.params,
+					sa_global_mean,
+					idx->base.pt_global_mean);
+		else
+			memset(idx->base.pt_global_mean, 0, (size_t)dim * sizeof(float));
+		idx->has_posting_data = true;
+		idx->posting_fmt	  = config->posting_fmt;
+
+		mkt_free(tree);
+		mkt_memctx_switch(old_ctx);
+		mkt_memctx_delete(build_ctx);
+
+		if (stats != NULL)
+		{
+			stats->ms_sample = ms_sample;
+			stats->ms_kmeans = ms_kmeans;
+			stats->ms_total	 = ms_sample + ms_kmeans;
+			stats->nworkers	 = nworkers;
+		}
+
+		idx->base.centroid_storage = &idx->posting_storage.base;
+		idx->base.posting_storage  = &idx->posting_storage.base;
+		idx->base.page_base		   = idx->posting_storage.pages;
+
+		idx->posting_storage.all_vectors = idx->all_vectors;
+		idx->posting_storage.nvecs		 = idx->nvecs;
+		idx->posting_storage.metric		 = idx->base.metric;
+		uint32_t rerank_cap				 = 256;
+		mkt_topk_init(&idx->posting_storage.rerank_topk, rerank_cap);
+		idx->posting_storage.rerank_entries = mkt_alloc(
+				rerank_cap * sizeof(MktTopKEntry));
+		idx->posting_storage.rerank_cap = rerank_cap;
+
+		return idx;
 	}
 
 	nlist			  = tree->nleaves;
@@ -695,22 +751,11 @@ mkt_index_build(
 	double ms_posting = (double)(now_ns() - t_phase) / 1e6;
 	t_phase			  = now_ns();
 	{
-		/* For paged mode, store actual posting block numbers so the
-		 * shared scan can use posting_head directly. For flat mode,
-		 * store cluster indices (the inline loop maps them). */
-		BlockNumber *leaf_heads;
-		if (idx->has_posting_data &&
-			config->posting_fmt == MKT_POSTING_FMT_PAGES)
-		{
-			leaf_heads = idx->posting_heads;
-		}
-		else
-		{
-			leaf_heads = mkt_alloc(nlist * sizeof(BlockNumber));
-			for (uint32_t i = 0; i < nlist; i++)
-				leaf_heads[i] = (BlockNumber)i;
-		}
-
+		/* This (non-driver) path stores cluster indices as leaf child blocks;
+		 * the inline flat query maps them to per-cluster lists. Leaf j's child
+		 * is posting_base + global_leaf_index, so posting_base = 0 yields the
+		 * leaf (cluster) index directly. The paged build takes the use_driver
+		 * path, which writes the centroid tree itself and returns above. */
 		mkt_memctx_switch(build_ctx);
 		bool needs_rq_params =
 				(idx->base.centroid_format == MKT_CENTROID_FMT_RABITQ ||
@@ -723,7 +768,7 @@ mkt_index_build(
 				idx->base.centroid_format,
 				needs_rq_params ? idx->base.params : NULL,
 				idx->global_mean,
-				leaf_heads,
+				0, /* posting_base: leaf child = global leaf (cluster) index */
 				node_first_blkno,
 				NULL); /* pt_centroids on posting pages, not here */
 		mkt_memctx_switch(idx_ctx);

@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "algo/hkmeans.h"
+#include "core/log.h"
 #include "core/memory.h"
 #include "index/index_build.h" /* mkt_auto_fan_out */
 #include "index/parallel_build.h"
@@ -144,6 +145,75 @@ mkt_pbuild_teardown(ParallelContext *pcxt)
 }
 
 /*
+ * Leader-only subtree blob store (see parallel_build.h). Standalone is the
+ * in-memory engine, so the store is a growing byte buffer with a read
+ * cursor; the PG back-end spills through a BufFile temp file instead.
+ */
+struct MktBlobStore
+{
+	char	*data;
+	uint64_t size;
+	uint64_t cap;
+	uint64_t rpos;
+};
+
+MktBlobStore *
+mkt_pbuild_blobstore_begin(void)
+{
+	return mkt_alloc0(sizeof(MktBlobStore));
+}
+
+void
+mkt_pbuild_blobstore_put(MktBlobStore *bs, const void *blob, uint64_t size)
+{
+	uint64_t need = bs->size + sizeof(size) + size;
+	if (need > bs->cap)
+	{
+		uint64_t cap = bs->cap ? bs->cap : (uint64_t)1 << 20;
+		while (cap < need)
+			cap *= 2;
+		char *grown = mkt_alloc(cap);
+		if (bs->data != NULL)
+		{
+			memcpy(grown, bs->data, bs->size);
+			mkt_free(bs->data);
+		}
+		bs->data = grown;
+		bs->cap	 = cap;
+	}
+	memcpy(bs->data + bs->size, &size, sizeof(size));
+	bs->size += sizeof(size);
+	memcpy(bs->data + bs->size, blob, size);
+	bs->size += size;
+}
+
+void
+mkt_pbuild_blobstore_rewind(MktBlobStore *bs)
+{
+	bs->rpos = 0;
+}
+
+uint64_t
+mkt_pbuild_blobstore_get(MktBlobStore *bs, void *buf, uint64_t max_size)
+{
+	uint64_t size;
+	memcpy(&size, bs->data + bs->rpos, sizeof(size));
+	bs->rpos += sizeof(size);
+	if (size > max_size)
+		mkt_error("subtree blob larger than its slot");
+	memcpy(buf, bs->data + bs->rpos, size);
+	bs->rpos += size;
+	return size;
+}
+
+void
+mkt_pbuild_blobstore_end(MktBlobStore *bs)
+{
+	mkt_free(bs->data);
+	mkt_free(bs);
+}
+
+/*
  * Launch the workers on the thread pool and wait until the whole party has
  * attached to the phase barrier. Returns false (after teardown) if none
  * started. The poll uses a 1ms latch timeout rather than a wakeup, since no
@@ -229,13 +299,10 @@ mkt_pbuild_setup_shared(
 	ParallelContext *pcxt = CreateParallelContext(
 			"meerkat", "mkt_parallel_build_main", nworkers);
 
-	int	 nw_usage	 = nworkers > 0 ? nworkers : 1;
-	Size usage_sz	 = (Size)nw_usage * sizeof(WalUsage);
-	Size bufuse_sz	 = (Size)nw_usage * sizeof(BufferUsage);
-	Size est_shared	 = BUFFERALIGN(sizeof(MktBuildSharedStandalone));
-	Size max_tree_sz = sizeof(HKMeansResult) +
-					   (Size)nlist * 2 * sizeof(HKMeansNode) +
-					   (Size)nlist * dim * sizeof(float) * 2;
+	int	 nw_usage	= nworkers > 0 ? nworkers : 1;
+	Size usage_sz	= (Size)nw_usage * sizeof(WalUsage);
+	Size bufuse_sz	= (Size)nw_usage * sizeof(BufferUsage);
+	Size est_shared = BUFFERALIGN(sizeof(MktBuildSharedStandalone));
 
 	shm_toc_estimate_chunk(&pcxt->estimator, est_shared);
 	shm_toc_estimate_chunk(&pcxt->estimator, sizeof(Barrier));
@@ -250,22 +317,21 @@ mkt_pbuild_setup_shared(
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
 			mkt_dsm_root_assign_size(nparticipants, max_per_worker));
-	shm_toc_estimate_chunk(&pcxt->estimator, max_tree_sz);
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_pbuild_sort_shared_size(nparticipants));
+	/* Per-child subtree blobs: a bounded ring of nparticipants slots (not one
+	 * per root child), independent of the partition count. */
 	shm_toc_estimate_chunk(
-			&pcxt->estimator, mkt_dsm_child_subtrees_size(fan_out, slot_size));
+			&pcxt->estimator,
+			mkt_dsm_child_subtrees_size(nparticipants, slot_size));
 	shm_toc_estimate_chunk(&pcxt->estimator, usage_sz);
 	shm_toc_estimate_chunk(&pcxt->estimator, bufuse_sz);
-	/* Page-backed routing regions (leader fills before the tree-ready
-	 * barrier). */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator, (Size)nlist * sizeof(BlockNumber));
+	/* Page-backed routing region (leader fills before the tree-ready barrier):
+	 * the global mean. The posting-head base is a scalar in MktBuildShared. */
 	shm_toc_estimate_chunk(&pcxt->estimator, (Size)dim * sizeof(float));
 	/* Keyed regions: shared, barrier, samples, centroids, km_workers,
-	 * root_assign, tree, sortshared, child_subtrees, posting_heads,
-	 * global_mean. */
-	shm_toc_estimate_keys(&pcxt->estimator, 11);
+	 * root_assign, sortshared, child_subtrees, global_mean. */
+	shm_toc_estimate_keys(&pcxt->estimator, 9);
 
 	InitializeParallelDSM(pcxt);
 
@@ -339,28 +405,20 @@ mkt_pbuild_setup_shared(
 	dsm_ra->max_per_worker = max_per_worker;
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_ROOT_ASSIGN, dsm_ra);
 
-	void *dsm_tree = shm_toc_allocate(pcxt->toc, max_tree_sz);
-	memset(dsm_tree, 0, max_tree_sz);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_TREE, dsm_tree);
-
 	/* Shared coordinator for the cluster-keyed posting sort (sort seam). */
 	Size  sort_sz	 = mkt_pbuild_sort_shared_size(nparticipants);
 	void *sortshared = shm_toc_allocate(pcxt->toc, sort_sz);
 	memset(sortshared, 0, sort_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SORTSHARED, sortshared);
 
-	/* Per-child subtree blobs (phase 2c, work-partitioned). */
+	/* Per-child subtree blobs (phase 2c): a bounded ring of nparticipants
+	 * slots, independent of the partition count. */
 	char *child_subtrees_base = shm_toc_allocate(
-			pcxt->toc, mkt_dsm_child_subtrees_size(fan_out, slot_size));
+			pcxt->toc, mkt_dsm_child_subtrees_size(nparticipants, slot_size));
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CHILD_SUBTREES, child_subtrees_base);
 
-	/* Page-backed routing regions (leader fills before the tree-ready
-	 * barrier). */
-	BlockNumber *dsm_heads =
-			shm_toc_allocate(pcxt->toc, (Size)nlist * sizeof(BlockNumber));
-	memset(dsm_heads, 0, (Size)nlist * sizeof(BlockNumber));
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_POSTING_HEADS, dsm_heads);
-
+	/* Page-backed routing region (leader fills before the tree-ready barrier):
+	 * the global mean. The posting-head base is a scalar in MktBuildShared. */
 	float *dsm_gmean = shm_toc_allocate(pcxt->toc, (Size)dim * sizeof(float));
 	memset(dsm_gmean, 0, (Size)dim * sizeof(float));
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, dsm_gmean);
@@ -377,7 +435,6 @@ mkt_pbuild_setup_shared(
 	lead->cents				  = cents;
 	lead->km_workers_base	  = km_workers_base;
 	lead->dsm_ra			  = dsm_ra;
-	lead->dsm_tree			  = dsm_tree;
 	lead->queues_base		  = NULL; /* sort-seam path: no shm_mq queues */
 	lead->dsm_partials		  = NULL; /* sort-seam path: no partials region */
 	lead->child_subtrees_base = child_subtrees_base;
@@ -390,7 +447,6 @@ mkt_pbuild_setup_shared(
 	lead->nlist				  = nlist;
 	lead->rabitq_seed		  = rabitq_seed;
 	lead->fan_out			  = fan_out;
-	lead->max_tree_sz		  = max_tree_sz;
 	return true;
 }
 

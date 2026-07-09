@@ -41,7 +41,6 @@
 #include "core/memory.h"
 #include "index/centroid_page.h" /* MktCentroidFormat */
 #include "index/posting_build.h"
-#include "index/posting_build_parallel.h"
 #include "index/storage.h" /* MktStorage */
 #include "mkt_types.h"
 #include "quant/rabitq.h"
@@ -68,7 +67,6 @@ typedef void (*MktBuildScanCb)(
  * ---------------------------------------------------------------- */
 
 #define MKT_DSM_KEY_SHARED		   UINT64CONST(0xB000000000000001)
-#define MKT_DSM_KEY_TREE		   UINT64CONST(0xB000000000000002)
 #define MKT_DSM_KEY_WORKER_OUTPUT  UINT64CONST(0xB000000000000004)
 #define MKT_DSM_KEY_PARTIALS	   UINT64CONST(0xB000000000000005)
 #define MKT_DSM_KEY_WAL_USAGE	   UINT64CONST(0xB000000000000006)
@@ -83,11 +81,11 @@ typedef void (*MktBuildScanCb)(
 #define MKT_DSM_KEY_CHILD_SUBTREES UINT64CONST(0xB000000000000010)
 #define MKT_DSM_KEY_REFINE_ACCUM   UINT64CONST(0xB000000000000011)
 #define MKT_DSM_KEY_SORTSHARED	   UINT64CONST(0xB000000000000012)
-/* Page-backed phase-3 routing: leaf posting-head blocks (head->leaf map) and
- * the global mean, both published by the leader before the tree-ready barrier
- * so workers can route exactly as the query/insert paths do. */
-#define MKT_DSM_KEY_POSTING_HEADS UINT64CONST(0xB000000000000013)
-#define MKT_DSM_KEY_GLOBAL_MEAN	  UINT64CONST(0xB000000000000014)
+/* Page-backed phase-3 routing: the global mean, published by the leader before
+ * the tree-ready barrier so workers route exactly as the query/insert paths
+ * do. The posting-head base (leaf c's head = first_posting + c) is a scalar in
+ * MktBuildShared, not a shared array. */
+#define MKT_DSM_KEY_GLOBAL_MEAN UINT64CONST(0xB000000000000014)
 
 /* ----------------------------------------------------------------
  * MktBuildShared — back-end-neutral shared build state
@@ -159,6 +157,18 @@ typedef struct MktBuildShared
 	float centroid_error_scale;
 	float centroid_beam_scale;
 	int	  fastscan_bits;
+
+	/* Published by the leader after the streaming tree write: the
+	 * centroid-tree root block (workers' phase-3 MktIndexBase.first_centroid)
+	 * and the tree depth (base.nlevels). The tree itself lives only on pages.
+	 */
+	BlockNumber first_centroid;
+	uint8_t		nlevels;
+
+	/* Published by the leader before phase 3: the first posting-head block.
+	 * Cluster c's head is first_posting + c (formula), so workers map a routed
+	 * head block back to its leaf by subtraction — no O(nlist) head array. */
+	BlockNumber first_posting;
 } MktBuildShared;
 
 /* ----------------------------------------------------------------
@@ -254,23 +264,25 @@ mkt_dsm_centroids(char *base)
  * Child subtrees: per-root-child HKMeansResult blobs in DSM
  *
  * After the root k-means splits the samples into fan_out groups, each group's
- * subtree is built independently (work-partitioned across participants) and
- * written, as a contiguous HKMeansResult, into a fixed-size slot here. The
- * leader then grafts the fan_out subtrees under a fresh root. One slot per
- * root child; slot size is the worst-case blob for a subtree (shared in
- * MktBuildShared.subtree_slot_size).
+ * subtree is built independently and written, as a contiguous HKMeansResult,
+ * into a fixed-size slot. The batched streaming build keeps only a bounded
+ * ring of nparticipants slots resident (each participant owns slot
+ * participant_id; the leader streams each batch to pages before the next batch
+ * reuses the ring), so the region is O(nparticipants * slot_size), independent
+ * of the partition count. Slot size is the worst-case blob for a subtree
+ * (shared in MktBuildShared.subtree_slot_size).
  * ---------------------------------------------------------------- */
 
 static inline Size
-mkt_dsm_child_subtrees_size(uint32_t fan_out, uint64_t slot_size)
+mkt_dsm_child_subtrees_size(uint32_t nslots, uint64_t slot_size)
 {
-	return (Size)fan_out * (Size)slot_size;
+	return (Size)nslots * (Size)slot_size;
 }
 
 static inline char *
-mkt_dsm_child_subtree(char *base, uint32_t child, uint64_t slot_size)
+mkt_dsm_child_subtree(char *base, uint32_t slot, uint64_t slot_size)
 {
-	return base + (Size)child * (Size)slot_size;
+	return base + (Size)slot * (Size)slot_size;
 }
 
 /*
@@ -470,20 +482,48 @@ extern void mkt_km_assign_and_accumulate(
 		float		  *out_cost);
 
 /*
- * Phase 2c: work-partitioned subtree build (shared by leader and workers).
- *
- * After the root k-means, each participant builds the full subtree for the
- * root children it owns (child where child % nparticipants == participant_id):
- * it gathers that child's samples from the pooled DSM sample slots (via the
- * root assignment), runs hierarchical k-means to depth nlevels-1, and writes
- * the resulting contiguous HKMeansResult into the child's fixed-size slot in
- * the child-subtrees region. The children are independent, so there is no
- * synchronization inside this call — only the single barrier the caller issues
- * afterward. The leader then grafts the fan_out subtrees under a fresh root.
- * root_cents (km_k * dim) supplies the centroid for any (degenerate) empty
- * child. slot_size is MktBuildShared.subtree_slot_size.
+ * Build ONE root-child's subtree into `slot`. Used by the batched streaming
+ * build, where each participant builds one child per batch into a ring slot
+ * indexed by participant (so only nparticipants subtrees are resident) and the
+ * leader streams each to pages.
  */
-extern void mkt_subtree_build_partitioned(
+extern void mkt_build_child_subtree(
+		uint32_t		  child,
+		int				  nparticipants,
+		MktDsmSamples	 *dsm_samples,
+		MktDsmRootAssign *dsm_ra,
+		const float		 *root_cents,
+		uint32_t		  nlist,
+		uint32_t		  fan_out,
+		Dimension		  dim,
+		DistanceMetric	  metric,
+		uint32_t		  km_max_iterations,
+		char			 *slot,
+		uint64_t		  slot_size);
+
+/*
+ * Per-batch leader callback for the batched subtree stream. Fired only on the
+ * leader (participant 0), between the two per-batch barriers, so it can read
+ * the batch's finished subtrees from the slots [0, batch_size) before they are
+ * reused. base_child is the first child index in this batch.
+ */
+typedef void (*MktBatchCb)(
+		void	*arg,
+		uint32_t base_child,
+		uint32_t batch_size,
+		char	*subtrees_base,
+		uint64_t slot_size);
+
+/*
+ * Batched subtree build shared by the leader (participant 0) and workers: in
+ * ceil(km_k / nparticipants) batches, each participant builds one child's
+ * subtree into its ring slot, then (leader only) batch_cb consumes the batch;
+ * two barriers per batch keep all participants in lockstep. Called identically
+ * by leader and workers (workers pass batch_cb = NULL), so the barrier
+ * sequence matches by construction. The caller invokes it once per pass (plan,
+ * then write).
+ */
+extern void mkt_pbuild_stream_subtrees(
 		int				  participant_id,
 		int				  nparticipants,
 		MktDsmSamples	 *dsm_samples,
@@ -496,7 +536,10 @@ extern void mkt_subtree_build_partitioned(
 		DistanceMetric	  metric,
 		uint32_t		  km_max_iterations,
 		char			 *subtrees_base,
-		uint64_t		  slot_size);
+		uint64_t		  slot_size,
+		Barrier			 *barrier,
+		MktBatchCb		  batch_cb,
+		void			 *cb_arg);
 
 /*
  * Per-participant execution of phases 1, 2, and 2b, shared by the leader
@@ -594,22 +637,38 @@ mkt_refine_tile_leaves(uint32_t nleaves, Dimension dim, uint64_t cap_bytes)
 }
 
 /*
- * Refine the tree's leaf centroids on the whole table: refine_iters streaming
- * passes, each routing every row to its leaf and recomputing per-leaf means.
- * Both leader (participant 0) and workers call it; gated by
- * shared->refine_iters so they run the same barriers. The leader
- * zeroes/divides and reinitializes the scan each pass. tree points at the
- * shared (DSM) tree, updated in place.
+ * Per-refined-leaf head-page writer (mirrors the serial serial_write_head):
+ * the leader rewrites the leaf's posting-list head with the full-table
+ * pt_centroid. Workers pass NULL (they never divide/write). Kept generic so
+ * the exec (worker side) does not depend on the leader-side LeaderHeadCtx.
  */
-extern void mkt_pbuild_exec_refine(
-		int				   participant_id,
-		Relation		   heap,
-		Relation		   index,
-		struct IndexInfo  *index_info,
-		MktBuildShared	  *shared,
-		HKMeansResult	  *tree,
-		MktDsmRefineAccum *accum,
-		Barrier			  *barrier);
+typedef void (*MktRefineHeadFn)(
+		void *ctx, uint32_t leaf, const float *centroid);
+
+/*
+ * Refine the leaf encode references on the whole table, page-backed: for each
+ * of refine_iters passes, every row is routed exactly as the query/insert do
+ * (mkt_query_route k=1 over the centroid pages, head -> leaf), per-leaf means
+ * accumulate into the tiled DSM accumulator, and the leader rewrites each
+ * leaf's head-page pt_centroid to the full-table mean. Both leader
+ * (participant 0) and workers call it; gated by shared->refine_iters so they
+ * run the same barriers. The workers route with their own page-backed qs; the
+ * leader passes qs == NULL (it does not scan) and a write_head callback.
+ * Leaves are processed in tiles of accum->nleaves, so the accumulator stays
+ * bounded regardless of nlist.
+ */
+extern void mkt_pbuild_exec_refine_paged(
+		int					  participant_id,
+		Relation			  heap,
+		Relation			  index,
+		struct IndexInfo	 *index_info,
+		MktBuildShared		 *shared,
+		struct MktQueryState *qs,
+		BlockNumber			  first_posting,
+		MktDsmRefineAccum	 *accum,
+		Barrier				 *barrier,
+		MktRefineHeadFn		  write_head,
+		void				 *write_head_ctx);
 
 /* Striped lock seam for the refine accumulator (back-end owns the locks). */
 extern void mkt_pbuild_accum_lock(MktBuildShared *shared, uint32_t stripe);
@@ -715,6 +774,31 @@ extern bool mkt_pbuild_launch(
 		MktBuildShared		   *shared);
 
 /* ----------------------------------------------------------------
+ * Leader-only subtree blob store — back-end-specific spillable storage
+ *
+ * The PLAN pass produces every subtree exactly once; the leader appends each
+ * blob here and, after computing the block layout, reads them back in the
+ * same order to stream centroid + head pages -- reading a blob back costs
+ * far less than re-running its clustering, and the streaming needs no
+ * worker participation. The PG implementation is a BufFile temp file: small
+ * blob sets stay
+ * in the kernel page cache, large ones spill to pgsql_tmp, so build memory
+ * stays bounded regardless of the partition count. Standalone keeps the
+ * blobs in memory (in-memory engine). Sequential put/rewind/get only.
+ * ---------------------------------------------------------------- */
+
+typedef struct MktBlobStore MktBlobStore;
+
+extern MktBlobStore *mkt_pbuild_blobstore_begin(void);
+extern void
+mkt_pbuild_blobstore_put(MktBlobStore *bs, const void *blob, uint64_t size);
+extern void mkt_pbuild_blobstore_rewind(MktBlobStore *bs);
+/* Read the next blob into buf (capacity max_size); returns its size. */
+extern uint64_t
+mkt_pbuild_blobstore_get(MktBlobStore *bs, void *buf, uint64_t max_size);
+extern void mkt_pbuild_blobstore_end(MktBlobStore *bs);
+
+/* ----------------------------------------------------------------
  * Build configuration — back-end-neutral input to the setup seam
  *
  * The fields the setup seam needs to size and populate the shared state. The
@@ -758,7 +842,6 @@ typedef struct MktPBuildLeader
 	float				   *cents;
 	char				   *km_workers_base;
 	MktDsmRootAssign	   *dsm_ra;
-	void				   *dsm_tree;
 	char				   *queues_base;
 	char				   *dsm_partials;
 	char				   *child_subtrees_base; /* per-child subtree blobs */
@@ -771,7 +854,6 @@ typedef struct MktPBuildLeader
 	uint32_t				nlist;
 	uint64_t				rabitq_seed;
 	uint32_t				fan_out;
-	Size					max_tree_sz;
 	Size					dsm_total; /* committed DSM chunk bytes (for the
 										  planned-allocation introspection line) */
 } MktPBuildLeader;
@@ -835,7 +917,9 @@ extern void mkt_pbuild_sort_end(MktSorter *sorter);
  * Build every cluster's posting list from a populated (not yet performsorted)
  * cluster-keyed sorter. Shared by the serial build and the parallel leader:
  * performsort, then read entries grouped by cluster and write each list with a
- * single resident page builder. Fills posting_heads[nlist] and ends the
+ * single resident page builder. Cluster c's head is the formula first_posting
+ * + c (a pre-extended head region); continuation pages are appended at the end
+ * of the relation and chained, so no O(nlist) reserve is needed. Ends the
  * sorter.
  */
 extern void mkt_posting_build_lists(
@@ -845,23 +929,7 @@ extern void mkt_posting_build_lists(
 		Dimension			dim,
 		bool				fastscan,
 		const RaBitQParams *rq_params,
-		MktPostingReserve  *reserve,
-		BlockNumber			first_posting,
-		BlockNumber		   *posting_heads);
-
-/*
- * Route a vector to its refinement leaf (normalizing into scratch for cosine,
- * since the tree is trained in normalized space). Sets *out_v to the vector to
- * accumulate and returns its leaf. Shared by the serial and parallel refine
- * passes so both route identically.
- */
-extern uint32_t mkt_refine_assign_leaf(
-		const HKMeansResult *tree,
-		const float			*vec,
-		Dimension			 dim,
-		DistanceMetric		 metric,
-		float				*scratch,
-		const float		   **out_v);
+		BlockNumber			first_posting);
 
 /*
  * Shared pre-posting centroid setup: normalize leaf centroids for cosine,
@@ -904,7 +972,6 @@ extern bool do_parallel_build(
 		MktStorage				*storage,
 		struct MktBuildProgress *prog,
 		HKMeansResult		   **out_tree,
-		BlockNumber				*posting_heads,
 		double					*out_heap_tuples,
 		double					*out_indtuples,
 		double					*out_soar_dupes,
@@ -915,6 +982,10 @@ extern bool do_parallel_build(
 		 * *out_centroids_written signals that centroid pages already exist in
 		 * `storage` (the caller must not rewrite them there). May be NULL. */
 		float **out_global_mean,
-		bool   *out_centroids_written);
+		bool   *out_centroids_written,
+		/* The posting-head base: cluster c's head is *out_first_posting + c.
+		 * Callers that need to locate head pages after the build (e.g. the
+		 * standalone driver + its tests) capture it; may be NULL. */
+		BlockNumber *out_first_posting);
 
 #endif /* MKT_PARALLEL_BUILD_H */

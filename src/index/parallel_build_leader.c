@@ -2,12 +2,12 @@
  * parallel_build_leader.c - PG parallel index build, leader side
  *
  * The leader sets up the DSM, launches workers, participates in the
- * sampling + k-means phases as worker_id 0, then (phase 3) reserves the
- * posting layout, drains the workers' streamed pages over their shm_mq
- * queues, and finalizes each list (head + trailing-partial merge + chain
- * stitch). do_parallel_build returns the tree + posting heads to
- * mktann_build, which writes the centroid tree and metadata. Returns false
- * if parallelism could not start, so the caller falls back to a serial build.
+ * sampling + k-means phases as worker_id 0, streams the centroid tree to
+ * pages, then (phase 3) merges the workers' cluster-keyed sorted runs and
+ * builds each posting list. Head blocks are formula-derived (cluster c's head
+ * is first_posting + c), so no per-partition head array is materialized.
+ * Returns false if parallelism could not start, so the caller falls back to a
+ * serial build.
  */
 
 #ifdef MKT_STANDALONE
@@ -49,7 +49,6 @@
 #include "index/index_build.h"
 #include "index/parallel_build.h"
 #include "index/posting_build.h"
-#include "index/posting_build_parallel.h"
 #include "index/posting_page.h"
 #include "mkt_halfvec.h"
 #include "mkt_vector.h"
@@ -66,22 +65,20 @@
  * Build every cluster's posting list from a populated (not yet performsorted)
  * cluster-keyed sorter. Shared by the serial build and the parallel leader:
  * performsort, then read entries grouped by cluster and write each list with a
- * single resident page builder (head at the cluster's reserved block,
- * continuations claimed from the reserve). Fills posting_heads[nlist] and ends
- * the sorter.
+ * single resident page builder (head at first_posting + c, continuations
+ * appended at the relation's end and chained). Ends the sorter.
  *
  * Why iterate clusters 0..nlist rather than just draining the sorter until it
  * is empty: EVERY cluster needs a posting-list head, including clusters that
  * received no vectors. The centroid tree's leaf entries reference
- * posting_heads[c] for every c in [0, nlist) (see mkt_write_centroid_tree), so
- * an empty cluster still needs a valid (empty) head block to point at. A loop
- * over the cluster index emits a head for every cluster uniformly — an empty
- * cluster's inner while simply does not run and finish() returns an empty
- * head. A drain-until-empty loop would only produce heads for clusters present
- * in the stream and would have to separately backfill empty heads for gap
- * clusters and for all trailing clusters past the last one seen. The
- * index-driven loop also pairs each cluster with its own pre-reserved block
- * range (reserve->starts[c]).
+ * first_posting
+ * + c for every c in [0, nlist) (see mkt_write_centroid_tree), so an empty
+ * cluster still needs a valid (empty) head block to point at. A loop over the
+ * cluster index emits a head for every cluster uniformly — an empty cluster's
+ * inner while simply does not run and finish() returns an empty head. A
+ * drain-until-empty loop would only produce heads for clusters present in the
+ * stream and would have to separately backfill empty heads for gap clusters
+ * and for all trailing clusters past the last one seen.
  *
  * This REQUIRES (and assumes) the sorter returns entries in ascending cluster
  * order, matching the 0..nlist iteration order: the sorter is keyed on the
@@ -102,9 +99,7 @@ mkt_posting_build_lists(
 		Dimension			dim,
 		bool				fastscan,
 		const RaBitQParams *rq_params,
-		MktPostingReserve  *reserve,
-		BlockNumber			first_posting,
-		BlockNumber		   *posting_heads)
+		BlockNumber			first_posting)
 {
 	mkt_pbuild_sort_performsort(sorter);
 
@@ -120,12 +115,17 @@ mkt_posting_build_lists(
 	bool		have = mkt_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
 	for (uint32_t c = 0; c < nlist; c++)
 	{
-		BlockNumber		  head_blk = first_posting + reserve->starts[c];
+		/* Head block of cluster c is the formula first_posting + c; the head
+		 * region [first_posting, first_posting + nlist) was pre-extended and
+		 * its pt_centroid written during the centroid streaming. Continuation
+		 * pages are appended at the relation's end and chained (no per-cluster
+		 * reserve), so no O(nlist) reserve arrays are needed. Adopt the
+		 * pre-written head and append in place: no second head construction,
+		 * and a cluster with no entries keeps its on-disk head untouched. */
+		BlockNumber		  head_blk = first_posting + c;
 		MktPostingBuilder hb;
 		mkt_posting_builder_adopt_head(
 				&hb, storage, rq_params, dim, c, head_blk, fastscan);
-		mkt_posting_builder_set_shared_reserve(
-				&hb, head_blk, reserve->counts[c], &reserve->nexts[c]);
 
 		/* Ascending, grouped order: a pending entry is never for a cluster we
 		 * already finished. If it were < c we would have skipped its head. */
@@ -137,7 +137,7 @@ mkt_posting_build_lists(
 			have = mkt_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
 		}
 
-		posting_heads[c] = mkt_posting_builder_finish(&hb);
+		(void)mkt_posting_builder_finish(&hb);
 		mkt_posting_builder_cleanup(&hb);
 	}
 
@@ -195,6 +195,95 @@ mkt_build_setup_centroid_layout(
 	return first_posting;
 }
 
+/* ----------------------------------------------------------------
+ * Batched streaming tree build — leader-side callbacks
+ * ---------------------------------------------------------------- */
+
+/* Per-leaf head-page writer (mirrors the serial serial_write_head): writes the
+ * cluster's posting-list head carrying pt_centroid = P^T*centroid at its
+ * reserved head block. Passed to mkt_write_subtree_streaming. */
+typedef struct LeaderHeadCtx
+{
+	MktStorage		   *storage;
+	const RaBitQParams *rq_params;
+	Dimension			dim;
+	bool				fastscan;
+	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
+	float			   *pt;			   /* [dim] scratch */
+} LeaderHeadCtx;
+
+static void
+leader_write_head(void *arg, uint32_t leaf, const float *centroid)
+{
+	LeaderHeadCtx *h = (LeaderHeadCtx *)arg;
+	mkt_rabitq_rotate(h->rq_params, centroid, h->pt);
+
+	MktPostingBuilder hb;
+	if (h->fastscan)
+		mkt_posting_builder_init_fastscan(
+				&hb, h->storage, h->rq_params, h->dim, leaf, centroid, h->pt);
+	else
+		mkt_posting_builder_init(
+				&hb, h->storage, h->rq_params, h->dim, leaf, centroid, h->pt);
+	mkt_posting_builder_set_first_blkno(&hb, h->first_posting + leaf);
+	mkt_posting_builder_finish(&hb);
+	mkt_posting_builder_cleanup(&hb);
+}
+
+/* PLAN-pass batch callback: record each subtree's leaf count + centroid-page
+ * count (no writes) so the leader can size the reserve + block layout, and
+ * keep the blob in the spillable store for the streaming pass to read back
+ * in the same (child) order. */
+typedef struct PlanCbArg
+{
+	uint32_t *nleaves_arr; /* [km_k] */
+	uint32_t *pages_arr;   /* [km_k] */
+	uint32_t  max_ent;
+	uint32_t  subtree_nlevels; /* actual depth of the (uniform) subtrees */
+	Dimension dim;
+	double	 *leaf_sum;	 /* [dim] leaf-centroid sum across all subtrees, for
+						  * the leaf_mean the leader uses as global_mean */
+	MktBlobStore *store; /* subtree blobs, in child order */
+} PlanCbArg;
+
+static void
+plan_batch_cb(
+		void	*arg,
+		uint32_t base_child,
+		uint32_t bs,
+		char	*base,
+		uint64_t slot_size)
+{
+	PlanCbArg *a = (PlanCbArg *)arg;
+	for (uint32_t s = 0; s < bs; s++)
+	{
+		const HKMeansResult *sub = (const HKMeansResult *)
+				mkt_dsm_child_subtree(base, s, slot_size);
+		uint32_t	 child = base_child + s;
+		BlockNumber *nfb   = mkt_alloc(
+				  (size_t)sub->nnodes * sizeof(BlockNumber));
+		/* Subtrees are built to a uniform depth, so any non-empty one gives
+		 * the streamed tree's subtree depth (full depth = this + 1 root
+		 * level). */
+		if (sub->nleaves > 0)
+			a->subtree_nlevels = sub->nlevels;
+		a->nleaves_arr[child] = sub->nleaves;
+		a->pages_arr[child]	  = (uint32_t)
+				mkt_compute_centroid_layout(sub, a->max_ent, 0, nfb);
+		mkt_free(nfb);
+
+		if (a->leaf_sum != NULL)
+		{
+			const float *lc = hk_leaf_centroids(sub);
+			for (uint32_t l = 0; l < sub->nleaves; l++)
+				for (Dimension d = 0; d < a->dim; d++)
+					a->leaf_sum[d] += lc[(size_t)l * a->dim + d];
+		}
+
+		mkt_pbuild_blobstore_put(a->store, sub, sub->total_size);
+	}
+}
+
 bool
 do_parallel_build(
 		Relation				 heap,
@@ -204,17 +293,19 @@ do_parallel_build(
 		MktStorage				*storage,
 		struct MktBuildProgress *prog,
 		HKMeansResult		   **out_tree,
-		BlockNumber				*posting_heads,
 		double					*out_heap_tuples,
 		double					*out_indtuples,
 		double					*out_soar_dupes,
 		float				   **out_global_mean,
-		bool					*out_centroids_written)
+		bool					*out_centroids_written,
+		BlockNumber				*out_first_posting)
 {
 	int nworkers = index_info->ii_ParallelWorkers;
 
 	if (out_centroids_written)
 		*out_centroids_written = false;
+	if (out_first_posting)
+		*out_first_posting = InvalidBlockNumber;
 	if (out_global_mean)
 		*out_global_mean = NULL;
 
@@ -230,7 +321,6 @@ do_parallel_build(
 	float			 *cents			  = lead.cents;
 	char			 *km_workers_base = lead.km_workers_base;
 	MktDsmRootAssign *dsm_ra		  = lead.dsm_ra;
-	void			 *dsm_tree		  = lead.dsm_tree;
 	WalUsage		 *walusage		  = lead.walusage;
 	BufferUsage		 *bufferusage	  = lead.bufferusage;
 	int				  nparticipants	  = lead.nparticipants;
@@ -239,7 +329,6 @@ do_parallel_build(
 	uint32_t		  nlist			  = lead.nlist;
 	uint64_t		  rabitq_seed	  = lead.rabitq_seed;
 	uint32_t		  fan_out		  = lead.fan_out;
-	Size			  max_tree_sz	  = lead.max_tree_sz;
 
 	/*
 	 * Introspection: name the dataset-scaling allocations up front (always
@@ -253,9 +342,11 @@ do_parallel_build(
 			prog,
 			(uint64_t)mkt_dsm_samples_size(
 					nparticipants, lead.max_per_worker, dim),
-			(uint64_t)max_tree_sz,
-			/* pt_centroids is no longer a bulk nlist*dim array — it is rotated
-			 * per-cluster on the fly in mkt_posting_build_lists. */
+			/* The tree is streamed to pages from a bounded ring of subtree
+			 * slots (part of dsm_total); it is never held whole in memory. */
+			0,
+			/* Per-cluster encode references are rotated one at a time in
+			 * mkt_posting_build_lists; no bulk nlist*dim array exists. */
 			0,
 			(uint64_t)lead.dsm_total);
 
@@ -319,7 +410,8 @@ do_parallel_build(
 	 * nlevels == 1 (flat) the root k-means already produced every leaf, so
 	 * the tree is built from the centroids directly. For nlevels >= 2 each
 	 * participant builds the full subtree — to whatever depth nlist/fan_out
-	 * needs — for the root children it owns, and the leader grafts them.
+	 * needs — for the root children it owns, and the leader streams each to
+	 * centroid pages a batch at a time (no in-RAM whole-tree assembly).
 	 */
 	uint32_t nlevels = 1;
 	{
@@ -333,22 +425,58 @@ do_parallel_build(
 
 	HKMeansResult *tree = NULL;
 
-	instr_time t_child_start;
-	INSTR_TIME_SET_CURRENT(t_child_start);
-
 	/* ---- Phase 2b: root assignment (leader as participant 0). ---- */
 	mkt_pbuild_exec_root_assign(
 			0, shared, dsm_samples, dsm_ra, centroids_base, barrier);
 
+	/* ---- Batched streaming tree build --------------------------------------
+	 * Workers build per-root-child subtrees into a bounded ring of slots; the
+	 * leader records each batch's layout counts, keeps the blobs in a
+	 * spillable store, and streams them to centroid pages. Peak subtree DSM is
+	 * nparticipants slots, independent of nlist.
+	 * ------------------------------ */
+	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SETUP);
+	RaBitQParams	 *rq_params = mkt_rabitq_create(dim, rabitq_seed);
+	MktCentroidFormat fmt		= shared->centroid_format;
+	uint32_t		  max_ent	= mkt_centroid_max_entries_fmt(dim, fmt);
+	char			 *subtrees_base =
+			shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_CHILD_SUBTREES, false);
+	uint64_t slot_size = shared->subtree_slot_size;
+
+	/*
+	 * global_mean = mean of the LEAF centroids (the encoder centering) -- an
+	 * unweighted per-cluster mean, not the per-vector sample mean. The
+	 * quantization quality of every centroid and posting code depends on this
+	 * anchor. Pages are written only after the PLAN pass has built every
+	 * subtree, so
+	 * the leaf-centroid sum is accumulated there (plan_batch_cb) and the mean
+	 * is ready before any page is encoded. Filled per branch below.
+	 */
+	float *global_mean = mkt_alloc((size_t)dim * sizeof(float));
+
+	BlockNumber first_centroid = 1; /* block 0 = metadata */
+	BlockNumber first_posting  = 0;
+	BlockNumber root_blk	   = InvalidBlockNumber;
+	uint8_t		out_nlevels	   = (uint8_t)nlevels;
+
 	if (nlevels >= 2)
 	{
-		/*
-		 * Phase 2c: the leader builds the subtrees it owns (participant 0), to
-		 * whatever depth nlist/fan_out requires — no two-level cap.
-		 */
+		uint32_t *nleaves_arr = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
+		uint32_t *pages_arr	  = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
+
+		/* PLAN pass: build subtrees, discover leaf + page counts (and the
+		 * leaf-centroid sum for global_mean). */
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_SUBTREES);
-		char *subtrees_base = lead.child_subtrees_base;
-		mkt_subtree_build_partitioned(
+		PlanCbArg planarg = {
+				.nleaves_arr	 = nleaves_arr,
+				.pages_arr		 = pages_arr,
+				.max_ent		 = max_ent,
+				.subtree_nlevels = 1,
+				.dim			 = dim,
+				.leaf_sum		 = mkt_alloc0((size_t)dim * sizeof(double)),
+				.store			 = mkt_pbuild_blobstore_begin(),
+		};
+		mkt_pbuild_stream_subtrees(
 				0,
 				nparticipants,
 				dsm_samples,
@@ -361,239 +489,218 @@ do_parallel_build(
 				shared->metric,
 				shared->km_max_iterations,
 				subtrees_base,
-				shared->subtree_slot_size);
+				slot_size,
+				barrier,
+				plan_batch_cb,
+				&planarg);
 
-		/* Barrier: all participants done building subtrees. */
-		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+		/* The streamed tree's depth is the (uniform) subtree depth plus the
+		 * root level. This is the actual written depth — k-means can produce
+		 * subtrees deeper than the uniform target — and it is what the
+		 * page-backed query must descend, so publish it (not the pre-k-means
+		 * target nlevels). */
+		out_nlevels = (uint8_t)(planarg.subtree_nlevels + 1);
 
-		/* Graft the fan_out subtrees under a fresh root (the root centroids).
-		 */
-		mkt_build_report_phase(prog, MKT_BUILD_PHASE_GRAFT);
-		const HKMeansResult **subs = mkt_alloc(
-				(size_t)km_k * sizeof(HKMeansResult *));
+		/* Root page(s) occupy the reserved block(s) at first_centroid;
+		 * subtrees follow, so meta.first_centroid stays 1 (root written last,
+		 * in place). */
+		uint32_t	root_pages = (km_k + max_ent - 1) / max_ent;
+		uint32_t   *leaf_off   = mkt_alloc((size_t)km_k * sizeof(uint32_t));
+		uint32_t   *block_off  = mkt_alloc((size_t)km_k * sizeof(uint32_t));
+		uint32_t	lo		   = 0;
+		BlockNumber bo		   = 0;
 		for (uint32_t c = 0; c < km_k; c++)
-			subs[c] = (const HKMeansResult *)mkt_dsm_child_subtree(
-					subtrees_base, c, shared->subtree_slot_size);
-		tree = mkt_hkmeans_graft(cents, km_k, subs, dim);
-		mkt_free(subs);
+		{
+			leaf_off[c]	 = lo;
+			block_off[c] = (uint32_t)bo;
+			lo += nleaves_arr[c];
+			bo += pages_arr[c];
+		}
+		uint32_t	actual_nlist = lo;
+		BlockNumber subtree_base = first_centroid + root_pages;
+		first_posting			 = subtree_base + bo;
 
-		nlist = tree ? tree->nleaves : 0;
+		/* Leaf-centroid mean from the PLAN pass -> the encoder centering. */
+		for (Dimension d = 0; d < dim; d++)
+			global_mean[d] = actual_nlist > 0 ? (float)(planarg.leaf_sum[d] /
+														(double)actual_nlist)
+											  : 0.0f;
+		if (shared->metric == DISTANCE_COSINE)
+			mkt_l2_normalize(global_mean, dim);
+		mkt_free(planarg.leaf_sum);
+		planarg.leaf_sum = NULL;
+
+		/* Head blocks are formula-derived: leaf c's head is first_posting + c,
+		 * a contiguous head region of actual_nlist pages. Pre-extend the
+		 * relation to cover the centroid pages + the head region so the write
+		 * pass can write both at reserved blocks; continuation pages are
+		 * appended past it during mkt_posting_build_lists. No O(nlist) reserve
+		 * arrays. */
+		mkt_storage_extend(storage, first_posting + actual_nlist);
+
+		/* Streaming pass: read each subtree blob back from the store (child
+		 * order matches the append order) and stream its centroid + head
+		 * pages to the reserved block range, then the root page. Leader-only:
+		 * the PLAN pass already produced every subtree, so the workers have
+		 * nothing to contribute here and run no barriers for this phase. */
+		mkt_build_report_phase(prog, MKT_BUILD_PHASE_CENTROID);
+		BlockNumber *subtree_root_blk = mkt_alloc(
+				(size_t)km_k * sizeof(BlockNumber));
+		LeaderHeadCtx head = {
+				.storage	   = storage,
+				.rq_params	   = rq_params,
+				.dim		   = dim,
+				.fastscan	   = shared->fastscan,
+				.first_posting = first_posting,
+				.pt			   = mkt_alloc((size_t)dim * sizeof(float)),
+		};
+		HKMeansResult *blob = mkt_alloc(slot_size);
+		mkt_pbuild_blobstore_rewind(planarg.store);
+		for (uint32_t c = 0; c < km_k; c++)
+		{
+			(void)mkt_pbuild_blobstore_get(planarg.store, blob, slot_size);
+			BlockNumber base_blk = subtree_base + block_off[c];
+			uint32_t	pages;
+			subtree_root_blk[c] = mkt_write_subtree_streaming(
+					storage,
+					blob,
+					dim,
+					fan_out,
+					fmt,
+					rq_params,
+					global_mean,
+					first_posting,
+					leaf_off[c],
+					base_blk,
+					leader_write_head,
+					&head,
+					&pages);
+		}
+		mkt_free(blob);
+		mkt_pbuild_blobstore_end(planarg.store);
+		planarg.store = NULL;
+
+		/* Root centroid page at the reserved first_centroid (children =
+		 * subtree roots). Written last, but in place, so first_centroid
+		 * stays 1. */
+		root_blk = first_centroid;
+		if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+			mkt_centroid_write_fastscan_pages(
+					storage,
+					dim,
+					km_k,
+					0,
+					0,
+					rq_params,
+					cents,
+					global_mean,
+					subtree_root_blk,
+					root_blk);
+		else
+		{
+			CentroidEncoderState est;
+			CentroidEncoder		*enc = centroid_encoder_init(
+					&est, fmt, cents, dim, rq_params, global_mean);
+			mkt_centroid_write_pages(
+					storage,
+					dim,
+					km_k,
+					fmt,
+					0,
+					0,
+					(uint16_t)fan_out,
+					enc,
+					subtree_root_blk,
+					NULL,
+					root_blk);
+		}
+
+		mkt_free(head.pt);
+		mkt_free(subtree_root_blk);
+		mkt_free(leaf_off);
+		mkt_free(block_off);
+		mkt_free(nleaves_arr);
+		mkt_free(pages_arr);
+		nlist = actual_nlist;
 	}
 	else
 	{
-		/*
-		 * Flat (nlevels == 1, nlist <= fan_out): root k-means ran with
-		 * km_k == nlist, so cents already holds every leaf centroid. The
-		 * workers skip the subtree build; match their child-done barrier, then
-		 * build the one-level tree straight from cents.
+		/* Flat (nlevels == 1): cents already holds every leaf centroid; stream
+		 * the one-level tree directly (root = leaf-parent at first_centroid).
 		 */
-		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-		mkt_build_report_phase(prog, MKT_BUILD_PHASE_GRAFT);
-		tree = mkt_hkmeans_build_flat(cents, km_k, fan_out, dim);
+		if (shared->metric == DISTANCE_COSINE)
+			for (uint32_t c = 0; c < km_k; c++)
+				mkt_l2_normalize(cents + (size_t)c * dim, dim);
 
-		nlist = tree ? tree->nleaves : 0;
-	}
-
-	{
-		instr_time t_child_elapsed;
-		INSTR_TIME_SET_CURRENT(t_child_elapsed);
-		INSTR_TIME_SUBTRACT(t_child_elapsed, t_child_start);
-		mkt_debug(
-				"mktann: child kmeans %.1fms (nlevels=%u, "
-				"%u children, %u leaves)",
-				INSTR_TIME_GET_MILLISEC(t_child_elapsed),
-				nlevels,
-				km_k,
-				tree ? tree->nleaves : 0);
-	}
-
-	if (tree == NULL)
-	{
-		WaitForParallelWorkersToFinish(pcxt);
-		mkt_pbuild_teardown(pcxt);
-		return false;
-	}
-
-	/* Update nlist in shared state (workers read it for phase 3). */
-	shared->nlist = nlist;
-
-	/* Copy tree into pre-allocated DSM slot */
-	if (tree->total_size > max_tree_sz)
-		mkt_error(
-				"mktann: tree too large for DSM (%u > %zu)",
-				tree->total_size,
-				max_tree_sz);
-	memcpy(dsm_tree, tree, tree->total_size);
-
-	/*
-	 * Phase 2.5: parallel full-table leaf refinement (gated on refine_iters,
-	 * set only for maintenance_work_mem-bounded builds). The tree is now
-	 * published to DSM; the leader and workers refine its leaf centroids on
-	 * the whole table, then the leader copies the refined leaves back into the
-	 * local tree so the centroid pages / P^T centroids below are built from
-	 * them.
-	 */
-	if (shared->refine_iters > 0)
-	{
-		/* Barrier: tree published; workers may read it now. */
-		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-
-		mkt_build_report_phase(prog, MKT_BUILD_PHASE_REFINE);
-		MktDsmRefineAccum *accum =
-				shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_REFINE_ACCUM, false);
-		mkt_pbuild_exec_refine(
-				0,
-				heap,
-				index,
-				index_info,
-				shared,
-				(HKMeansResult *)dsm_tree,
-				accum,
-				barrier);
-
-		memcpy(hk_leaf_centroids(tree),
-			   hk_leaf_centroids((HKMeansResult *)dsm_tree),
-			   (size_t)nlist * dim * sizeof(float));
-	}
-
-	/* Shared pre-posting setup: normalize leaf centroids (in place) for
-	 * cosine, reserve block 0 + the centroid pages, and get the posting-area
-	 * start. ref_vecs (now normalized) is reused below for posting encode
-	 * reference; its rotated P^T*centroid is computed per-cluster in
-	 * mkt_posting_build_lists. */
-	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SETUP);
-	RaBitQParams *rq_params		= mkt_rabitq_create(dim, rabitq_seed);
-	float		 *ref_vecs		= hk_leaf_centroids(tree);
-	BlockNumber	  first_posting = mkt_build_setup_centroid_layout(
-			  storage,
-			  tree,
-			  dim,
-			  nlist,
-			  shared->metric,
-			  shared->centroid_format);
-
-	instr_time t_km_end;
-	INSTR_TIME_SET_CURRENT(t_km_end);
-	INSTR_TIME_SUBTRACT(t_km_end, t_km_start);
-	mkt_debug(
-			"mktann: tree+setup %.1fms, %u clusters",
-			INSTR_TIME_GET_MILLISEC(t_km_end),
-			nlist);
-
-	/* --- Pre-scan setup for page-backed routing --------------------------
-	 * Compute the global mean, reserve each cluster's posting range, then
-	 * write the centroid + empty head pages and publish the routing state, all
-	 * BEFORE releasing the workers, so their scan routes each row page-backed
-	 * exactly as the query and insert paths do.
-	 * ------------------------------------ */
-
-	/* Global mean of the (normalized) leaf centroids — returned so the
-	 * caller's metadata write uses the same value the centroid pages were
-	 * built with. */
-	float *global_mean = mkt_alloc((size_t)dim * sizeof(float));
-	mkt_global_mean(ref_vecs, nlist, dim, shared->metric, global_mean);
-
-	/* Per-cluster page estimate from the sample assignment (in-RAM tree, a
-	 * bounded throwaway sizing), extrapolated to the full table (handles skew;
-	 * slight over-estimate for headroom). */
-	HKMeansResult *tree_r	 = (HKMeansResult *)dsm_tree;
-	uint32_t *cluster_counts = mkt_alloc0((size_t)nlist * sizeof(uint32_t));
-	uint32_t  n_est_samples	 = 0;
-	for (int w = 0; w < nparticipants; w++)
-	{
-		float	*sw = mkt_dsm_worker_samples(dsm_samples, w);
-		uint32_t nw = mkt_dsm_sample_counts(dsm_samples)[w];
-		n_est_samples += nw;
-		for (uint32_t i = 0; i < nw; i++)
+		HKMeansResult *flat =
+				mkt_hkmeans_build_flat(cents, km_k, fan_out, dim);
+		if (flat == NULL)
 		{
-			Distance d;
-			cluster_counts[mkt_hkmeans_assign(
-					tree_r, sw + (size_t)i * dim, shared->metric, &d)]++;
+			mkt_free(global_mean);
+			WaitForParallelWorkersToFinish(pcxt);
+			mkt_pbuild_teardown(pcxt);
+			return false;
 		}
-	}
-	bool replicate = shared->soar_lambda > 0.0 ||
-					 shared->boundary_epsilon > 0.0;
-	{
-		double est_rows = RelationGetNumberOfBlocks(heap) *
-						  (BLCKSZ / (double)(dim * sizeof(float) + 32));
-		double scale = n_est_samples > 0 ? est_rows / n_est_samples : 1.0;
-		for (uint32_t c = 0; c < nlist; c++)
-			cluster_counts[c] = (uint32_t)((double)cluster_counts[c] * scale);
-	}
 
-	/* Leader-local reserve (0-based ranges; first_posting added on write). */
-	MktPostingReserve reserve;
-	mkt_posting_reserve_init(
-			&reserve,
-			cluster_counts,
-			nlist,
-			nparticipants,
-			dim,
-			shared->fastscan,
-			replicate);
-	mkt_free(cluster_counts);
-	mkt_storage_extend(storage, reserve.total);
+		uint32_t	 actual_nlist = flat->nleaves;
+		BlockNumber *nfb		  = mkt_alloc(
+				 (size_t)flat->nnodes * sizeof(BlockNumber));
+		uint32_t centroid_pages = (uint32_t)
+				mkt_compute_centroid_layout(flat, max_ent, 0, nfb);
+		mkt_free(nfb);
+		first_posting = first_centroid + centroid_pages;
 
-	/* Each cluster's posting-list head block (deterministic from the reserve),
-	 * needed by the workers to map a routed head back to its leaf index. */
-	for (uint32_t c = 0; c < nlist; c++)
-		posting_heads[c] = first_posting + reserve.starts[c];
+		/* Leaf-centroid mean -> the encoder centering (flat tree in hand). */
+		mkt_vector_mean(
+				hk_leaf_centroids(flat), actual_nlist, dim, global_mean);
+		if (shared->metric == DISTANCE_COSINE)
+			mkt_l2_normalize(global_mean, dim);
 
-	/* Write the centroid pages (leaf->head links) into `storage` before the
-	 * scan; the workers route against them. */
-	{
-		uint32_t max_ent =
-				mkt_centroid_max_entries_fmt(dim, shared->centroid_format);
-		BlockNumber *nfb = mkt_alloc(
-				(size_t)tree->nnodes * sizeof(BlockNumber));
-		mkt_compute_centroid_layout(tree, max_ent, 1, nfb);
+		/* Head region: actual_nlist pages at first_posting (leaf c -> head
+		 * first_posting + c). Pre-extend to cover centroid + head region;
+		 * continuations append past it. No O(nlist) reserve. */
+		mkt_storage_extend(storage, first_posting + actual_nlist);
+
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_CENTROID);
-		mkt_write_centroid_tree(
+		LeaderHeadCtx head = {
+				.storage	   = storage,
+				.rq_params	   = rq_params,
+				.dim		   = dim,
+				.fastscan	   = shared->fastscan,
+				.first_posting = first_posting,
+				.pt			   = mkt_alloc((size_t)dim * sizeof(float)),
+		};
+		uint32_t pages;
+		root_blk = mkt_write_subtree_streaming(
 				storage,
-				tree,
+				flat,
 				dim,
 				fan_out,
-				shared->centroid_format,
+				fmt,
 				rq_params,
 				global_mean,
-				posting_heads,
-				nfb,
-				NULL);
-		mkt_free(nfb);
+				first_posting,
+				0,
+				first_centroid,
+				leader_write_head,
+				&head,
+				&pages);
+		mkt_free(head.pt);
+		out_nlevels = (uint8_t)flat->nlevels;
+		mkt_free(flat);
+		nlist = actual_nlist;
 	}
 
-	/* Pre-write each cluster's empty head page carrying its pt_centroid (the
-	 * page-backed encode reference the scan reads); mkt_posting_build_lists
-	 * then adopts each head and appends its entries in place. */
+	/* Publish the routing state the workers read in phase 3: nlist, the tree
+	 * root block + depth, the posting-head base (leaf c's head = first_posting
+	 * + c), the global mean, and the page store. */
+	shared->nlist		   = nlist;
+	shared->first_centroid = root_blk;
+	shared->nlevels		   = out_nlevels;
+	shared->first_posting  = first_posting;
+	if (out_first_posting)
+		*out_first_posting = first_posting;
 	{
-		float *pt = mkt_alloc((size_t)dim * sizeof(float));
-		for (uint32_t c = 0; c < nlist; c++)
-		{
-			mkt_rabitq_rotate(rq_params, ref_vecs + (size_t)c * dim, pt);
-			MktPostingBuilder hb;
-			mkt_posting_builder_init_fmt(
-					&hb,
-					storage,
-					rq_params,
-					dim,
-					c,
-					ref_vecs + (size_t)c * dim,
-					pt,
-					shared->fastscan);
-			mkt_posting_builder_set_first_blkno(
-					&hb, first_posting + reserve.starts[c]);
-			mkt_posting_builder_finish(&hb);
-			mkt_posting_builder_cleanup(&hb);
-		}
-		mkt_free(pt);
-	}
-
-	/* Publish the routing state the workers read in phase 3: head blocks, the
-	 * global mean, and the page store. */
-	{
-		BlockNumber *dsm_heads =
-				shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_POSTING_HEADS, false);
-		memcpy(dsm_heads, posting_heads, (size_t)nlist * sizeof(BlockNumber));
 		float *dsm_gmean =
 				shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, false);
 		memcpy(dsm_gmean, global_mean, (size_t)dim * sizeof(float));
@@ -603,19 +710,21 @@ do_parallel_build(
 	if (out_global_mean)
 		*out_global_mean = global_mean; /* caller owns it (metadata write) */
 	else
-		mkt_free(global_mean); /* not needed past the centroid write + publish
-								*/
+		mkt_free(global_mean);
 	if (out_centroids_written)
 		*out_centroids_written = true;
+
+	/* Lightweight metadata carrier; no in-RAM tree exists to hand back. */
+	tree		  = mkt_alloc0(sizeof(HKMeansResult));
+	tree->nleaves = nlist;
+	tree->nlevels = out_nlevels;
+	tree->dim	  = dim;
 
 	/* Phase 3: workers scan + route page-backed + encode + sort; the leader
 	 * merges. Report before releasing workers so progress reflects the whole
 	 * (multi-hour at scale) scan. The seam fires the "mktann-build-load" hook.
 	 */
 	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
-
-	/* Re-init the scan for the posting phase (back-end seam). */
-	mkt_pbuild_rescan(heap, shared);
 
 	/* Initialize the shared cluster sorter for the launched-worker count
 	 * BEFORE the ready barrier, so it is ready when workers attach in phase 3.
@@ -626,7 +735,51 @@ do_parallel_build(
 			sortshared, pcxt->nworkers_launched, pcxt->seg);
 
 	/* Barrier: centroid/head pages written + routing state published + sorter
-	 * ready; workers start the page-backed posting scan+sort. */
+	 * ready; workers build their page-backed router next. */
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+	/* ---- Phase 2.5: page-backed full-table refine (only when subsampled)
+	 * ---- The workers route + accumulate; the leader (participant 0) clears
+	 * the tiled accumulator, resets the scan per tile, and rewrites each
+	 * leaf's head-page pt_centroid to the full-table mean. Gated on
+	 * shared->refine_iters, matching the workers, so the internal barriers
+	 * stay in lockstep. */
+	if (shared->refine_iters > 0)
+	{
+		mkt_build_report_phase(prog, MKT_BUILD_PHASE_REFINE);
+		MktDsmRefineAccum *accum =
+				shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_REFINE_ACCUM, false);
+		LeaderHeadCtx rhead = {
+				.storage	   = storage,
+				.rq_params	   = rq_params,
+				.dim		   = dim,
+				.fastscan	   = shared->fastscan,
+				.first_posting = first_posting,
+				.pt			   = mkt_alloc((size_t)dim * sizeof(float)),
+		};
+		mkt_pbuild_exec_refine_paged(
+				0,
+				heap,
+				index,
+				index_info,
+				shared,
+				NULL,
+				first_posting,
+				accum,
+				barrier,
+				leader_write_head,
+				&rhead);
+		mkt_free(rhead.pt);
+		mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
+	}
+
+	/* Re-init the scan for the posting phase (the refine passes above consumed
+	 * it). Guarded by the barrier below so no worker scans before the reset.
+	 */
+	mkt_pbuild_rescan(heap, shared);
+
+	/* Barrier: scan reset for the posting phase; workers start the page-backed
+	 * posting scan+sort. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 	instr_time t_scan_start;
@@ -684,13 +837,9 @@ do_parallel_build(
 			dim,
 			shared->fastscan,
 			rq_params,
-			&reserve,
-			first_posting,
-			posting_heads);
+			first_posting);
 
 	uint32_t total_pages = RelationGetNumberOfBlocks(index) - first_posting;
-
-	mkt_posting_reserve_free(&reserve);
 
 	instr_time t_merge_end;
 	INSTR_TIME_SET_CURRENT(t_merge_end);

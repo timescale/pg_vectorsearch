@@ -130,7 +130,7 @@ typedef struct MktBuildRouteCtx
 	MktSorter		   *sorter;		   /* cluster-keyed output (not owned) */
 	const RaBitQParams *rq_params;	   /* not owned */
 	MktStorage		   *storage;	   /* head-page reads (not owned) */
-	const BlockNumber  *posting_heads; /* [nlist], ascending (not owned) */
+	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
 	uint32_t			nlist;
 	Dimension			dim;
 	double				soar_lambda;
@@ -156,7 +156,7 @@ void mkt_build_route_ctx_init(
 		MktSorter		   *sorter,
 		const RaBitQParams *rq_params,
 		MktStorage		   *storage,
-		const BlockNumber  *posting_heads,
+		BlockNumber			first_posting,
 		uint32_t			nlist,
 		Dimension			dim,
 		double				soar_lambda,
@@ -168,6 +168,15 @@ void mkt_build_route_ctx_cleanup(MktBuildRouteCtx *ctx);
  * true when a secondary (SOAR / boundary) replica was also emitted. */
 bool mkt_build_route_emit(
 		MktBuildRouteCtx *ctx, const float *vec, ItemPointerData tid);
+
+/* Map a routed posting-head block back to its leaf index. Head blocks are the
+ * formula first_posting + leaf, so this is a subtraction. Shared by the
+ * route/encode path and the page-backed refine pass. */
+static inline uint32_t
+mkt_route_head_to_leaf(BlockNumber first_posting, BlockNumber head)
+{
+	return (uint32_t)(head - first_posting);
+}
 
 /* ----------------------------------------------------------------
  * Page format ops — the only part that differs between formats

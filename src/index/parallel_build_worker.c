@@ -34,7 +34,6 @@
 #include "core/memory.h"
 #include "index/parallel_build.h"
 #include "index/posting_build.h"
-#include "index/posting_build_parallel.h"
 #include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------
@@ -116,19 +115,89 @@ mkt_km_assign_and_accumulate(
 			out_cost);
 }
 
-/* ----------------------------------------------------------------
- * Phase 2c: work-partitioned subtree build (shared kernel)
- *
- * See the contract on the declaration in parallel_build.h. Each participant
- * builds the full subtree for the root children it owns and writes the
- * contiguous HKMeansResult into that child's DSM slot; the leader grafts them.
- * This generalizes the build to arbitrary depth — the subtree is however many
- * levels nlist/fan_out needs — so the parallel path is not capped at two
- * levels.
- * ---------------------------------------------------------------- */
+/*
+ * Build ONE root-child's subtree into `slot` (a DSM ring slot indexed by
+ * participant, not by child, so the batched streaming build keeps only
+ * nparticipants subtrees resident). The subtree is clustered from this child's
+ * root-assigned samples, indexed in place (no contiguous per-child copy).
+ */
+void
+mkt_build_child_subtree(
+		uint32_t		  child,
+		int				  nparticipants,
+		MktDsmSamples	 *dsm_samples,
+		MktDsmRootAssign *dsm_ra,
+		const float		 *root_cents,
+		uint32_t		  nlist,
+		uint32_t		  fan_out,
+		Dimension		  dim,
+		DistanceMetric	  metric,
+		uint32_t		  km_max_iterations,
+		char			 *slot,
+		uint64_t		  slot_size)
+{
+	uint32_t nlist_c = (nlist + fan_out - 1) / fan_out;
+
+	uint32_t cc = 0;
+	for (int t = 0; t < nparticipants; t++)
+	{
+		const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
+		uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
+		for (uint32_t i = 0; i < n; i++)
+			if (ra[i] == child)
+				cc++;
+	}
+
+	KMeansOptions opts	   = MKT_KMEANS_OPTIONS_DEFAULT;
+	opts.max_iterations	   = km_max_iterations;
+	opts.algorithm		   = KMEANS_ALGO_LLOYD;
+	opts.initial_centroids = NULL;
+
+	HKMeansResult *sub = NULL;
+	if (cc == 0)
+	{
+		float *seed = mkt_alloc((size_t)dim * sizeof(float));
+		memcpy(seed,
+			   root_cents + (size_t)child * dim,
+			   (size_t)dim * sizeof(float));
+		sub = mkt_hkmeans_f32(
+				seed, 1, NULL, dim, nlist_c, fan_out, metric, &opts);
+		mkt_free(seed);
+	}
+	else
+	{
+		const float *vbase = mkt_dsm_worker_samples(dsm_samples, 0);
+		uint32_t	 mpw   = dsm_samples->max_per_worker;
+		uint32_t	*idx   = mkt_alloc((size_t)cc * sizeof(uint32_t));
+		uint32_t	 g	   = 0;
+		for (int t = 0; t < nparticipants; t++)
+		{
+			const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
+			uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
+			for (uint32_t i = 0; i < n; i++)
+				if (ra[i] == child)
+					idx[g++] = (uint32_t)t * mpw + i;
+		}
+		sub = mkt_hkmeans_f32(
+				vbase, cc, idx, dim, nlist_c, fan_out, metric, &opts);
+		mkt_free(idx);
+	}
+
+	if (sub != NULL)
+	{
+		if ((uint64_t)sub->total_size > slot_size)
+			mkt_error(
+					"mktann: subtree blob %u exceeds slot (%u > %lu)",
+					child,
+					sub->total_size,
+					(unsigned long)slot_size);
+		memcpy(slot, sub, sub->total_size);
+		mkt_free(sub);
+	}
+}
 
 void
-mkt_subtree_build_partitioned(
+mkt_pbuild_stream_subtrees(
 		int				  participant_id,
 		int				  nparticipants,
 		MktDsmSamples	 *dsm_samples,
@@ -141,97 +210,51 @@ mkt_subtree_build_partitioned(
 		DistanceMetric	  metric,
 		uint32_t		  km_max_iterations,
 		char			 *subtrees_base,
-		uint64_t		  slot_size)
+		uint64_t		  slot_size,
+		Barrier			 *barrier,
+		MktBatchCb		  batch_cb,
+		void			 *cb_arg)
 {
-	/* Leaves each subtree targets, so its depth is the global depth minus the
-	 * root level (all subtrees share it, keeping the grafted tree uniform). */
-	uint32_t nlist_c = (nlist + fan_out - 1) / fan_out;
+	uint32_t np		  = (uint32_t)nparticipants;
+	uint32_t nbatches = (km_k + np - 1) / np;
+	char	*slot =
+			mkt_dsm_child_subtree(subtrees_base, participant_id, slot_size);
 
-	/* Per-child sample counts across all participants (one pass). */
-	uint32_t *child_count = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
-	for (int t = 0; t < nparticipants; t++)
+	for (uint32_t b = 0; b < nbatches; b++)
 	{
-		const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
-		uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
-		for (uint32_t i = 0; i < n; i++)
-			if (ra[i] < km_k)
-				child_count[ra[i]]++;
+		uint32_t my_child = b * np + (uint32_t)participant_id;
+		if (my_child < km_k)
+			mkt_build_child_subtree(
+					my_child,
+					nparticipants,
+					dsm_samples,
+					dsm_ra,
+					root_cents,
+					nlist,
+					fan_out,
+					dim,
+					metric,
+					km_max_iterations,
+					slot,
+					slot_size);
+
+		/* All participants have built this batch's subtrees into their slots.
+		 */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		/* Leader consumes the batch before the slots are reused. */
+		if (participant_id == 0 && batch_cb != NULL)
+		{
+			uint32_t base_child = b * np;
+			uint32_t bs			= km_k - base_child;
+			if (bs > np)
+				bs = np;
+			batch_cb(cb_arg, base_child, bs, subtrees_base, slot_size);
+		}
+
+		/* Leader done with the batch; slots free for the next batch. */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 	}
-
-	KMeansOptions opts	= MKT_KMEANS_OPTIONS_DEFAULT;
-	opts.max_iterations = km_max_iterations;
-	/*
-	 * Per-child problems are small (~nsamples/fan_out points, k=fan_out) and
-	 * run on every participant at once. The Lloyd dot-product kernel beats the
-	 * CBLAS sgemm path here — sgemm's per-call overhead dominates at this
-	 * size, and avoiding BLAS keeps the concurrent per-participant builds off
-	 * a shared library. This is the kernel the pre-subtree child phase used.
-	 */
-	opts.algorithm = KMEANS_ALGO_LLOYD;
-
-	for (uint32_t child = (uint32_t)participant_id; child < km_k;
-		 child += (uint32_t)nparticipants)
-	{
-		uint32_t cc	  = child_count[child];
-		char	*slot = mkt_dsm_child_subtree(subtrees_base, child, slot_size);
-
-		HKMeansResult *sub = NULL;
-		opts.initial_centroids =
-				NULL; /* default seeding, as the serial path */
-		if (cc == 0)
-		{
-			/* Empty root cluster (k-means reseeding makes this effectively
-			 * impossible at nlevels >= 2). Seed the subtree with the root
-			 * centroid as a single sample so it still has the same depth as
-			 * its siblings and the graft stays uniform. */
-			float *seed = mkt_alloc((size_t)dim * sizeof(float));
-			memcpy(seed,
-				   root_cents + (size_t)child * dim,
-				   (size_t)dim * sizeof(float));
-			sub = mkt_hkmeans_f32(
-					seed, 1, NULL, dim, nlist_c, fan_out, metric, &opts);
-			mkt_free(seed);
-		}
-		else
-		{
-			/* Index this child's samples in place instead of copying them
-			 * into a contiguous [cc * dim] buffer: cc is ~total_samples /
-			 * fan_out, which exceeds MaxAllocSize at high nlist. The
-			 * per-participant DSM sample blocks form one flat array, so a
-			 * sample's global slot is t * max_per_worker + i; hkmeans
-			 * clusters via indirect access (cc uint32 indices, not cc
-			 * full vectors). */
-			const float *vbase = mkt_dsm_worker_samples(dsm_samples, 0);
-			uint32_t	 mpw   = dsm_samples->max_per_worker;
-			uint32_t	*idx   = mkt_alloc((size_t)cc * sizeof(uint32_t));
-			uint32_t	 g	   = 0;
-			for (int t = 0; t < nparticipants; t++)
-			{
-				const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
-				uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
-				for (uint32_t i = 0; i < n; i++)
-					if (ra[i] == child)
-						idx[g++] = (uint32_t)t * mpw + i;
-			}
-			sub = mkt_hkmeans_f32(
-					vbase, cc, idx, dim, nlist_c, fan_out, metric, &opts);
-			mkt_free(idx);
-		}
-
-		if (sub != NULL)
-		{
-			if ((uint64_t)sub->total_size > slot_size)
-				mkt_error(
-						"mktann: subtree blob %u exceeds slot (%u > %lu)",
-						child,
-						sub->total_size,
-						(unsigned long)slot_size);
-			memcpy(slot, sub, sub->total_size);
-			mkt_free(sub);
-		}
-	}
-
-	mkt_free(child_count);
 }
 
 /* ----------------------------------------------------------------
@@ -476,48 +499,29 @@ mkt_pbuild_exec_root_assign(
 }
 
 /* ----------------------------------------------------------------
- * Phase 2.5: parallel full-table leaf-centroid refinement
+ * Phase 2.5: parallel full-table leaf-encode-reference refinement
+ *
+ * Page-backed mirror of the serial serial_refine_heads: route every row
+ * exactly as the query/insert do (mkt_query_route k=1 over the centroid pages,
+ * then head -> leaf), accumulate per-leaf means into the tiled DSM
+ * accumulator, and rewrite each leaf's head-page pt_centroid to the full-table
+ * mean. No in-RAM tree.
  * ---------------------------------------------------------------- */
 
 typedef struct RefineCbState
 {
-	MktBuildShared		*shared;
-	const HKMeansResult *tree;
-	float				*sums; /* shared accumulator, indexed leaf - tile_lo */
-	uint64_t			*counts; /* shared accumulator */
-	Dimension			 dim;
-	DistanceMetric		 metric;
-	uint32_t tile_lo; /* accumulate only leaves in [tile_lo, tile_hi) */
-	uint32_t tile_hi;
-	float	*scratch; /* per-participant normalized copy (cosine) */
+	MktBuildShared *shared;
+	MktQueryState  *qs;		   /* page-backed router (workers) */
+	BlockNumber first_posting; /* head -> leaf: leaf = head - first_posting */
+	uint32_t	nlist;
+	float	   *sums;	/* shared accumulator, indexed leaf - tile_lo */
+	uint64_t   *counts; /* shared accumulator */
+	Dimension	dim;
+	bool		cosine;
+	uint32_t	tile_lo; /* accumulate only leaves in [tile_lo, tile_hi) */
+	uint32_t	tile_hi;
+	float	   *scratch; /* per-participant normalized copy (cosine) */
 } RefineCbState;
-
-/*
- * Route a vector to its refinement leaf, exactly as both the serial and
- * parallel refine passes must: for cosine the tree is trained in normalized
- * space, so normalize into scratch first and accumulate that copy. Sets *out_v
- * to the vector to accumulate (the normalized copy for cosine, else the input)
- * and returns its leaf. Sharing this keeps the two paths' routing identical.
- */
-uint32_t
-mkt_refine_assign_leaf(
-		const HKMeansResult *tree,
-		const float			*vec,
-		Dimension			 dim,
-		DistanceMetric		 metric,
-		float				*scratch,
-		const float		   **out_v)
-{
-	const float *v = vec;
-	if (metric == DISTANCE_COSINE)
-	{
-		memcpy(scratch, vec, (size_t)dim * sizeof(float));
-		mkt_l2_normalize(scratch, dim);
-		v = scratch;
-	}
-	*out_v = v;
-	return mkt_hkmeans_assign(tree, v, metric, NULL);
-}
 
 static void
 mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
@@ -527,12 +531,27 @@ mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
 
 	(void)tid;
 
-	const float *v;
-	uint32_t	 leaf = mkt_refine_assign_leaf(
-			rs->tree, vec, dim, rs->metric, rs->scratch, &v);
+	/* Route page-backed (raw vector; mkt_query_route rotates internally). */
+	uint32_t n = mkt_query_route(
+			rs->qs, vec, 1, MKT_DISTANCE_MODE_ASYMMETRIC, NULL);
+	if (n == 0)
+		return;
+	uint32_t leaf = mkt_route_head_to_leaf(
+			rs->first_posting, rs->qs->beam_results[0].posting_head);
 	/* Only the current tile's leaves are resident in the accumulator. */
 	if (leaf < rs->tile_lo || leaf >= rs->tile_hi)
 		return;
+
+	/* For cosine the centroids are trained in normalized space, so accumulate
+	 * the normalized copy. */
+	const float *v = vec;
+	if (rs->cosine)
+	{
+		memcpy(rs->scratch, vec, (size_t)dim * sizeof(float));
+		mkt_l2_normalize(rs->scratch, dim);
+		v = rs->scratch;
+	}
+
 	uint32_t idx	= leaf - rs->tile_lo;
 	uint32_t stripe = idx % MKT_REFINE_LOCK_STRIPES;
 
@@ -545,21 +564,23 @@ mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
 }
 
 void
-mkt_pbuild_exec_refine(
-		int				   participant_id,
-		Relation		   heap,
-		Relation		   index,
-		struct IndexInfo  *index_info,
-		MktBuildShared	  *shared,
-		HKMeansResult	  *tree,
-		MktDsmRefineAccum *accum,
-		Barrier			  *barrier)
+mkt_pbuild_exec_refine_paged(
+		int					  participant_id,
+		Relation			  heap,
+		Relation			  index,
+		struct IndexInfo	 *index_info,
+		MktBuildShared		 *shared,
+		struct MktQueryState *qs,
+		BlockNumber			  first_posting,
+		MktDsmRefineAccum	 *accum,
+		Barrier				 *barrier,
+		MktRefineHeadFn		  write_head,
+		void				 *write_head_ctx)
 {
 	Dimension dim	  = shared->dim;
-	uint32_t  nleaves = tree->nleaves;
+	uint32_t  nleaves = shared->nlist; /* actual leaf count (published) */
 	float	 *sums	  = mkt_dsm_refine_sums(accum);
 	uint64_t *counts  = mkt_dsm_refine_counts(accum);
-	float	 *cents	  = hk_leaf_centroids(tree);
 
 	/* The accumulator holds at most accum->nleaves leaves (the bounded tile
 	 * capacity), so leaves are processed in tiles, re-scanning the heap per
@@ -569,13 +590,15 @@ mkt_pbuild_exec_refine(
 	uint32_t tile = accum->nleaves;
 
 	RefineCbState rs = {
-			.shared	 = shared,
-			.tree	 = tree,
-			.sums	 = sums,
-			.counts	 = counts,
-			.dim	 = dim,
-			.metric	 = shared->metric,
-			.scratch = mkt_alloc((size_t)dim * sizeof(float)),
+			.shared		   = shared,
+			.qs			   = qs,
+			.first_posting = first_posting,
+			.nlist		   = nleaves,
+			.sums		   = sums,
+			.counts		   = counts,
+			.dim		   = dim,
+			.cosine		   = (shared->metric == DISTANCE_COSINE),
+			.scratch	   = mkt_alloc((size_t)dim * sizeof(float)),
 	};
 
 	for (uint32_t it = 0; it < shared->refine_iters; it++)
@@ -599,24 +622,25 @@ mkt_pbuild_exec_refine(
 			BarrierArriveAndWait(
 					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-			/* All participants cooperatively scan the heap and accumulate.
-			 * The scan count is discarded (see the sampling pass). */
-			(void)mkt_build_scan(
-					heap,
-					index,
-					index_info,
-					shared,
-					true,
-					participant_id == 0,
-					mkt_refine_cb,
-					&rs);
+			/* Workers cooperatively scan the heap and accumulate page-backed;
+			 * the leader does not route (it has no qs), it only
+			 * clears/divides, mirroring the phase-3 division of labor. */
+			if (participant_id != 0)
+				(void)mkt_build_scan(
+						heap,
+						index,
+						index_info,
+						shared,
+						true,
+						false,
+						mkt_refine_cb,
+						&rs);
 
 			/* Barrier: every row accumulated before the leader divides. */
 			BarrierArriveAndWait(
 					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-			/* Leader recomputes this tile's leaf centroids = per-leaf means.
-			 */
+			/* Leader rewrites this tile's leaf head pages = per-leaf means. */
 			if (participant_id == 0)
 			{
 				for (uint32_t l = lo; l < hi; l++)
@@ -624,13 +648,13 @@ mkt_pbuild_exec_refine(
 					if (counts[l - lo] == 0)
 						continue; /* keep subsample centroid for empty leaf */
 					float *sum = sums + (size_t)(l - lo) * dim;
-					float *c   = cents + (size_t)l * dim;
 					double inv = 1.0 / (double)counts[l - lo];
 					for (Dimension j = 0; j < dim; j++)
-						c[j] = (float)(sum[j] * inv);
+						rs.scratch[j] = (float)(sum[j] * inv);
+					write_head(write_head_ctx, l, rs.scratch);
 				}
 			}
-			/* Barrier: refined centroids visible before the next tile/pass. */
+			/* Barrier: refined heads written before the next tile/pass. */
 			BarrierArriveAndWait(
 					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 		}
@@ -682,7 +706,6 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	char *km_workers_base = shm_toc_lookup(toc, MKT_DSM_KEY_KM_WORKERS, false);
 	MktDsmRootAssign *dsm_ra =
 			shm_toc_lookup(toc, MKT_DSM_KEY_ROOT_ASSIGN, false);
-	uint32_t   km_k		 = shared->km_k;
 	IndexInfo *indexInfo = BuildIndexInfo(indexRel);
 #ifndef MKT_STANDALONE
 	/* The leader marked the build concurrent and scans with an MVCC snapshot;
@@ -710,85 +733,55 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	mkt_pbuild_exec_root_assign(
 			worker_id, shared, dsm_samples, dsm_ra, centroids_base, barrier);
 
-	/* ---- Phase 2c: Child subtrees (work-partitioned, barrier-free) ----
+	/* ---- Phase 2c: batched streaming subtree build (page-backed) ----
 	 *
-	 * For a hierarchical tree (>= 2 levels) each participant builds the full
-	 * subtree for the root children it owns. A flat (1-level) build has no
-	 * children — the leader clusters it serially and we just meet the barrier.
-	 * The participant computes nlevels itself so it agrees with the leader. */
+	 * For a hierarchical tree (>= 2 levels) the workers build per-root-child
+	 * subtrees into a bounded ring of slots (subtree DSM is nparticipants
+	 * slots, independent of the partition count); the leader consumes each
+	 * batch, recording layout counts and keeping the blob in a spillable
+	 * store, and later streams every subtree's pages by itself from that
+	 * store. Workers pass no callback (leader-only consumes each batch). The
+	 * barrier sequence is inside mkt_pbuild_stream_subtrees, identical for
+	 * leader and workers. A flat (1-level) build has no subtrees — the leader
+	 * writes the single level directly, and neither side runs the subtree
+	 * barriers. */
 	if (mkt_compute_nlevels(shared->nlist, shared->fan_out) >= 2)
 	{
 		char *subtrees_base =
 				shm_toc_lookup(toc, MKT_DSM_KEY_CHILD_SUBTREES, false);
-		mkt_subtree_build_partitioned(
+		mkt_pbuild_stream_subtrees(
 				worker_id,
 				shared->nparticipants,
 				dsm_samples,
 				dsm_ra,
 				cents,
-				km_k,
+				shared->km_k,
 				shared->nlist,
 				shared->fan_out,
 				dim,
 				shared->metric,
 				shared->km_max_iterations,
 				subtrees_base,
-				shared->subtree_slot_size);
+				shared->subtree_slot_size,
+				barrier,
+				NULL,
+				NULL);
 	}
 
-	/* Barrier: all participants done building subtrees; the leader grafts the
-	 * tree next. */
+	/* Barrier: leader finished streaming the centroid tree + published the
+	 * routing state + initialized the sorter; workers build their page-backed
+	 * router next (from the just-published shared state). */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-	/* ---- Phase 2.5: parallel leaf refinement (maintenance_work_mem-bounded
-	 * builds only). Gated on refine_iters so the leader and workers run the
-	 * identical barrier sequence. The leader publishes the grafted tree to DSM
-	 * before the first barrier here. ---- */
-	if (shared->refine_iters > 0)
-	{
-		/* Barrier: leader has grafted + published the tree to DSM. */
-		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-
-		HKMeansResult *rtree = shm_toc_lookup(toc, MKT_DSM_KEY_TREE, false);
-		MktDsmRefineAccum *accum =
-				shm_toc_lookup(toc, MKT_DSM_KEY_REFINE_ACCUM, false);
-		mkt_pbuild_exec_refine(
-				worker_id,
-				heapRel,
-				indexRel,
-				indexInfo,
-				shared,
-				rtree,
-				accum,
-				barrier);
-	}
-
-	/* Barrier: leader built + published the tree and initialized the shared
-	 * sorter. Stay attached — the phase-3 barrier below syncs all worker sorts
-	 * before the leader merges. */
-	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-
-	/* ---- Phase 3: posting scan -> cluster-keyed sort (page-backed) ---- */
-	HKMeansResult *tree = shm_toc_lookup(toc, MKT_DSM_KEY_TREE, false);
-	void *sortshared	= shm_toc_lookup(toc, MKT_DSM_KEY_SORTSHARED, false);
-	const BlockNumber *posting_heads =
-			shm_toc_lookup(toc, MKT_DSM_KEY_POSTING_HEADS, false);
+	/* ---- Phase 3 setup: page-backed router shared by refine + posting scan
+	 * --- */
+	void *sortshared = shm_toc_lookup(toc, MKT_DSM_KEY_SORTSHARED, false);
+	BlockNumber	 first_posting = shared->first_posting;
 	const float *global_mean =
 			shm_toc_lookup(toc, MKT_DSM_KEY_GLOBAL_MEAN, false);
 
 	uint32_t	  entry_size = (uint32_t)mkt_posting_entry_size(dim);
 	RaBitQParams *rq_params	 = mkt_rabitq_create(dim, shared->rabitq_seed);
-
-	/* worker_id is 1..N for launched workers; the sorter's 0-based worker
-	 * index is worker_id - 1. Worker sorts run concurrently, so each gets a
-	 * share of the budget (mwm / participants) to bound peak memory; the
-	 * leader merge runs alone afterward and uses the full budget. */
-	int worker_wm = shared->work_mem_kb /
-					(shared->nparticipants > 0 ? shared->nparticipants : 1);
-	if (worker_wm < 64)
-		worker_wm = 64;
-	MktSorter *sorter = mkt_pbuild_sort_begin(
-			sortshared, seg, worker_id - 1, 0, false, entry_size, worker_wm);
 
 	/* Per-worker storage over the index for page-backed head/centroid reads
 	 * (PG opens one on the worker's indexRel; standalone shares the leader's).
@@ -796,8 +789,9 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	MktStorage *storage = mkt_pbuild_worker_storage(&w);
 
 	/* Routing base — the same MktIndexBase the query/insert build, so the
-	 * worker routes each row identically. nlevels comes from the published
-	 * tree; the scales + global mean + fastscan bits from the shared state. */
+	 * worker routes each row identically. nlevels + first_centroid (the
+	 * streamed tree's root block) come from the shared state the leader
+	 * published; the scales + global mean + fastscan bits also from shared. */
 	MktIndexBase base	= {0};
 	base.params			= rq_params;
 	base.pt_global_mean = mkt_alloc((size_t)dim * sizeof(float));
@@ -807,8 +801,8 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	base.posting_storage  = storage;
 	base.page_base		  = NULL;
 	base.dim			  = dim;
-	base.nlevels		  = (uint8_t)tree->nlevels;
-	base.first_centroid	  = 1;
+	base.nlevels		  = shared->nlevels;
+	base.first_centroid	  = shared->first_centroid;
 	base.metric			  = shared->metric;
 	base.centroid_format  = shared->centroid_format;
 	base.fastscan = (shared->centroid_format == MKT_CENTROID_FMT_FASTSCAN)
@@ -823,6 +817,41 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	MktQueryState qs;
 	mkt_query_state_init(&qs, &base, 1, MKT_SECONDARY_TOPK);
 
+	/* ---- Phase 2.5: page-backed full-table refine (only when subsampled)
+	 * ---- Workers route + accumulate; the leader clears/divides and rewrites
+	 * heads. Gated on shared->refine_iters (identical on both sides) so the
+	 * barrier sequence stays in lockstep. */
+	if (shared->refine_iters > 0)
+	{
+		MktDsmRefineAccum *accum =
+				shm_toc_lookup(toc, MKT_DSM_KEY_REFINE_ACCUM, false);
+		mkt_pbuild_exec_refine_paged(
+				worker_id,
+				heapRel,
+				indexRel,
+				indexInfo,
+				shared,
+				&qs,
+				first_posting,
+				accum,
+				barrier,
+				NULL,
+				NULL);
+	}
+
+	/* ---- Phase 3: posting scan -> cluster-keyed sort (page-backed) ---- */
+
+	/* worker_id is 1..N for launched workers; the sorter's 0-based worker
+	 * index is worker_id - 1. Worker sorts run concurrently, so each gets a
+	 * share of the budget (mwm / participants) to bound peak memory; the
+	 * leader merge runs alone afterward and uses the full budget. */
+	int worker_wm = shared->work_mem_kb /
+					(shared->nparticipants > 0 ? shared->nparticipants : 1);
+	if (worker_wm < 64)
+		worker_wm = 64;
+	MktSorter *sorter = mkt_pbuild_sort_begin(
+			sortshared, seg, worker_id - 1, 0, false, entry_size, worker_wm);
+
 	MktBuildRouteCtx route;
 	mkt_build_route_ctx_init(
 			&route,
@@ -830,11 +859,15 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			sorter,
 			rq_params,
 			storage,
-			posting_heads,
+			first_posting,
 			shared->nlist,
 			dim,
 			shared->soar_lambda,
 			shared->boundary_epsilon);
+
+	/* Barrier: the leader reset the scan for the posting phase (after refine
+	 * consumed it); workers may now scan. */
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 	double heap_tuples = mkt_build_scan(
 			heapRel,

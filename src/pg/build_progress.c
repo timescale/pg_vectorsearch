@@ -50,8 +50,6 @@ injection_name_for_phase(int phase)
 		return "mktann-build-kmeans";
 	case MKT_BUILD_PHASE_SUBTREES:
 		return "mktann-build-subtrees";
-	case MKT_BUILD_PHASE_GRAFT:
-		return "mktann-build-graft";
 	case MKT_BUILD_PHASE_REFINE:
 		return "mktann-build-refine";
 	case MKT_BUILD_PHASE_SCAN:
@@ -78,7 +76,6 @@ accumulate_stats(MktBuildStats *s, int phase, double ms)
 		break;
 	case MKT_BUILD_PHASE_KMEANS:
 	case MKT_BUILD_PHASE_SUBTREES:
-	case MKT_BUILD_PHASE_GRAFT:
 		s->ms_kmeans += ms;
 		break;
 	case MKT_BUILD_PHASE_REFINE:

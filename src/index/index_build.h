@@ -70,11 +70,12 @@ BlockNumber mkt_compute_centroid_layout(
  * Iterates the tree in BFS order, encoding each node's centroids
  * and writing them to pages via the storage abstraction. Leaf
  * nodes get MKT_CENTROID_FLAG_LEAF; internal nodes get child_blkno
- * pointers from node_first_blkno. Leaf nodes optionally get
- * posting_heads as child block numbers.
+ * pointers from node_first_blkno. Leaf entry j of a node gets the
+ * formula-derived posting head posting_base + node->first_leaf + j
+ * (no O(nlist) posting-head array).
  *
- * posting_heads may be NULL (centroid-only build without posting
- * lists).
+ * posting_base may be InvalidBlockNumber (centroid-only build without
+ * posting lists).
  */
 /*
  * pt_centroids: optional P^T * centroid array [nlist * dim] for leaf
@@ -88,9 +89,120 @@ void mkt_write_centroid_tree(
 		MktCentroidFormat	 centroid_format,
 		const RaBitQParams	*rq_params,
 		const float			*global_mean,
-		const BlockNumber	*posting_heads,
+		BlockNumber			 posting_base,
 		const BlockNumber	*node_first_blkno,
 		const float			*pt_centroids);
+
+/* ----------------------------------------------------------------
+ * Streaming (page-backed) centroid-tree build
+ *
+ * Builds the hierarchical k-means tree top-down (DFS) and streams centroid
+ * pages straight to storage, never materializing the whole tree in RAM. Peak
+ * memory is the caller's sample buffer + an O(fan_out*depth*dim) recursion
+ * stack; the whole tree would be O(nlist*dim). Runs in two deterministic
+ * passes
+ * (k-means seed fixed, so the same sample yields the identical tree both
+ * times): a PLAN pass that discovers the tree shape without writing, then a
+ * WRITE pass that emits pages with the posting-list heads the caller derived
+ * from the plan's per-leaf counts.
+ *
+ * global_mean (the encoder centering) must be known before any page is
+ * written. The PLAN pass runs the identical clustering, so it also reports
+ * the mean of the leaf centroids (plan.leaf_mean) for the caller to use as
+ * global_mean -- matching the in-RAM-tree build, which centers on the
+ * leaf-centroid mean rather than the per-vector sample mean. The quantization
+ * quality of every centroid and posting code depends on this anchor.
+ * ---------------------------------------------------------------- */
+
+typedef struct MktStreamTreePlan
+{
+	uint32_t  nleaves;
+	uint32_t  nlevels;
+	uint32_t  centroid_pages; /* pages the write pass will emit */
+	uint32_t *leaf_counts;	  /* [nleaves] sample count per leaf (mkt_alloc;
+							   * caller frees with mkt_free) */
+	float *leaf_mean;		  /* [dim] unweighted mean of the leaf centroids
+							   * (mkt_alloc; caller frees with mkt_free) */
+} MktStreamTreePlan;
+
+/*
+ * PLAN pass: cluster the sample and report the tree shape (leaf count, depth,
+ * per-leaf sample counts, and the number of centroid pages the write pass will
+ * emit) without writing anything. Returns false on k-means failure.
+ */
+bool mkt_stream_centroid_plan(
+		const float			*vectors,
+		uint32_t			 nvecs,
+		Dimension			 dim,
+		uint32_t			 nlist,
+		uint32_t			 fan_out,
+		DistanceMetric		 metric,
+		MktCentroidFormat	 format,
+		const KMeansOptions *opts,
+		MktStreamTreePlan	*out);
+
+/*
+ * Per-leaf callback fired during the write pass, once per leaf, with the
+ * leaf's global index and its float centroid (still resident at that moment).
+ * The build uses it to write each posting-list head page carrying pt_centroid
+ * = P^T*centroid — the exact encode reference — which cannot be recovered from
+ * a compressed centroid page afterward. May be NULL.
+ */
+typedef void (*MktStreamLeafCb)(
+		void *arg, uint32_t leaf, const float *centroid);
+
+/*
+ * WRITE pass: cluster the sample again (identical tree) and stream the
+ * centroid pages to `storage` via on-demand block allocation (post-order, root
+ * last). Leaf c's head is first_posting + c, and on_leaf (if set) fires per
+ * leaf so the caller can write that leaf's head page from the resident float
+ * centroid. Centroid pages occupy reserved blocks [first_centroid,
+ * first_centroid + plan.centroid_pages) post-order (root last), and posting
+ * heads live in the far posting area — so the caller must pre-extend the
+ * relation to cover both before calling. Returns the root block (the value the
+ * metadata page's first_centroid must carry), or InvalidBlockNumber on
+ * failure.
+ */
+BlockNumber mkt_stream_centroid_write(
+		MktStorage			*storage,
+		const float			*vectors,
+		uint32_t			 nvecs,
+		Dimension			 dim,
+		uint32_t			 nlist,
+		uint32_t			 fan_out,
+		DistanceMetric		 metric,
+		MktCentroidFormat	 format,
+		const RaBitQParams	*rq_params,
+		const float			*global_mean,
+		const KMeansOptions *opts,
+		BlockNumber			 first_posting,
+		BlockNumber			 first_centroid,
+		MktStreamLeafCb		 on_leaf,
+		void				*on_leaf_arg);
+
+/*
+ * Stream one already-built subtree (an HKMeansResult produced by the parallel
+ * workers) to centroid pages at reserved blocks [first_block, first_block +
+ * *out_pages), BFS layout (subtree root at first_block). Leaf local_leaf's
+ * head is first_posting + leaf_offset + local_leaf (formula-derived); on_leaf
+ * fires per leaf with its float centroid so the caller can write the head
+ * page. Returns the subtree root block (== first_block). Used by the parallel
+ * batched streaming build so the whole tree is never materialized as one blob.
+ */
+BlockNumber mkt_write_subtree_streaming(
+		MktStorage			*storage,
+		const HKMeansResult *subtree,
+		Dimension			 dim,
+		uint32_t			 fan_out,
+		MktCentroidFormat	 format,
+		const RaBitQParams	*rq_params,
+		const float			*global_mean,
+		BlockNumber			 first_posting,
+		uint32_t			 leaf_offset,
+		BlockNumber			 first_block,
+		MktStreamLeafCb		 on_leaf,
+		void				*on_leaf_arg,
+		uint32_t			*out_pages);
 
 /*
  * Auto-tune fan_out from nlist.
