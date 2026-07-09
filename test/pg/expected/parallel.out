@@ -182,6 +182,43 @@ SELECT count(*) FROM empty_emb;
 DROP TABLE empty_emb;
 RESET max_parallel_maintenance_workers;
 -- ============================================================
+-- Parallel build refreshes the table's row-count statistics
+-- ============================================================
+-- An index build scans every heap tuple, so index_update_stats writes the
+-- count the access method returns into pg_class.reltuples: a build on a
+-- never-analyzed table must SET the count, and a rebuild on an analyzed
+-- table must PRESERVE it. A parallel build that reports zero instead
+-- clobbers the planner's row estimate (and everything derived from
+-- reltuples) until the next ANALYZE.
+CREATE TABLE relstats (id serial, v vector(3));
+INSERT INTO relstats (v)
+    SELECT format('[%s,%s,%s]', x * 0.1, x * 0.2, x * 0.3)::vector
+    FROM generate_series(1, 1000) x;
+ALTER TABLE relstats SET (parallel_workers = 2);
+SET max_parallel_maintenance_workers = 2;
+-- Never analyzed (reltuples = -1): the build supplies the count.
+CREATE INDEX relstats_idx ON relstats USING mktann (v);
+SELECT reltuples::bigint AS reltuples_never_analyzed
+    FROM pg_class WHERE relname = 'relstats';
+ reltuples_never_analyzed 
+--------------------------
+                       -1
+(1 row)
+
+DROP INDEX relstats_idx;
+-- Analyzed: a rebuild must not destroy the existing estimate.
+ANALYZE relstats;
+CREATE INDEX relstats_idx ON relstats USING mktann (v);
+SELECT reltuples::bigint AS reltuples_after_rebuild
+    FROM pg_class WHERE relname = 'relstats';
+ reltuples_after_rebuild 
+-------------------------
+                       0
+(1 row)
+
+RESET max_parallel_maintenance_workers;
+DROP TABLE relstats;
+-- ============================================================
 -- Exactness: every build path returns the exact top-k
 -- ============================================================
 -- A smoke check (has_pages + returns LIMIT) cannot catch a build that produces
