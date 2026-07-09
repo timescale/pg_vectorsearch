@@ -175,7 +175,15 @@ score_page(
 		const uint8_t *bits_base =
 				mkt_centroid_data(page, count - 1, dim)->bits;
 
-		/* Batch distance + error bound computation */
+		/* Batch distance + error bound computation. With error_scale = 0
+		 * (the default) the pruning bounds are multiplied by zero anyway,
+		 * so skip computing them entirely: the batch functions take a
+		 * NULL lower_bounds and omit the per-entry error derivation (a
+		 * divide + sqrt per centroid that also blocks vectorization of
+		 * the distance-apply loop). */
+		bool	  want_bounds = (state->error_scale != 0.0f);
+		Distance *lb		  = want_bounds ? cs->lower_bounds : NULL;
+
 		if (state->qstate->mode == MKT_DISTANCE_MODE_SYMMETRIC)
 			mkt_rabitq_distance_batch_symmetric_with_bound(
 					state->qstate,
@@ -186,7 +194,7 @@ score_page(
 					count,
 					dim,
 					cs->distances,
-					cs->lower_bounds,
+					lb,
 					cs->symmetric_scratch);
 		else
 			mkt_rabitq_distance_batch_multi_with_bound(
@@ -198,7 +206,7 @@ score_page(
 					count,
 					dim,
 					cs->distances,
-					cs->lower_bounds,
+					lb,
 					cs->multi_scratch);
 
 		/* Build candidates (result j → page entry count-1-j) */
@@ -211,8 +219,11 @@ score_page(
 			cands[cand_count].child_blkno = meta->child_blkno;
 			ItemPointerSet(&cands[cand_count].origin, page_blkno, page_idx);
 			cands[cand_count].distance = cs->distances[j];
-			cands[cand_count].error	   = state->error_scale *
-									  (cs->distances[j] - cs->lower_bounds[j]);
+			cands[cand_count].error	   = want_bounds
+											   ? state->error_scale *
+														 (cs->distances[j] -
+														  cs->lower_bounds[j])
+											   : 0.0f;
 			cand_count++;
 		}
 		break;
@@ -344,10 +355,14 @@ score_page(
 							   2.0f * f_rescale_arr[v] * final_dot;
 				/* Matches rabitq_lower_bound(): err_margin =
 				 * multiplier * f_error * g_error, plus a small
-				 * floating-point margin proportional to |est|. */
-				Distance err = state->error_scale *
-							   (err_mult * f_error_arr[v] * g_error +
-								1e-5f * fabsf(est));
+				 * floating-point margin proportional to |est|.
+				 * error_scale = 0 (the default) zeroes the margin, so
+				 * skip the arithmetic in that case. */
+				Distance err = 0.0f;
+				if (state->error_scale != 0.0f)
+					err = state->error_scale *
+						  (err_mult * f_error_arr[v] * g_error +
+						   1e-5f * fabsf(est));
 
 				uint32_t page_idx			  = g_start + v;
 				cands[cand_count].child_blkno = child[v];
