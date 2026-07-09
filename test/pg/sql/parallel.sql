@@ -456,6 +456,27 @@ DROP TABLE degen;
 
 
 -- ============================================================
+-- Serial posting sort spilled to disk
+-- ============================================================
+-- The serial build's cluster-keyed posting sort stays in RAM until it
+-- exceeds maintenance_work_mem, then switches to an external merge sort.
+-- 8000 rows of 768-dim entries (~100+ bytes each RaBitQ-encoded) blow the
+-- 1MB budget several times over, so this exercises the spilled path; the
+-- parallel builds above cover the always-tape-backed coordinated sort.
+-- The spilled build must still return the exact top-10.
+CREATE TABLE spill_serial (id int, v vec32(768));
+INSERT INTO spill_serial
+    SELECT g, ('[' || g || repeat(',0', 767) || ']')::vec32(768)
+    FROM generate_series(1, 8000) g;
+SET max_parallel_maintenance_workers = 0;
+SET maintenance_work_mem = '1MB';
+SELECT exact_check('spill_serial', '(v) WITH (centroid_compression = true)',
+                   '[0.5' || repeat(',0', 767) || ']') AS spilled_sort_exact;
+RESET maintenance_work_mem;
+RESET max_parallel_maintenance_workers;
+DROP TABLE spill_serial;
+
+-- ============================================================
 -- CREATE INDEX CONCURRENTLY builds a correct index
 -- ============================================================
 -- CIC drives ambuild through index_concurrently_build with an MVCC snapshot in
