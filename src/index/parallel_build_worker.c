@@ -1,14 +1,18 @@
 /*
- * parallel_build_worker.c - PG parallel index build, worker side
+ * parallel_build_worker.c - Parallel index build, per-participant bodies
  *
- * Multi-phase parallel build:
- *   Phase 1 (sampling): cooperative heap scan, each worker collects
- *     samples into its own slot.
- *   Phase 2 (k-means): leader seeds the initial centroids, then
- *     iterative assignment + accumulation on per-worker samples,
- *     barrier-synchronized with leader reduce.
- *   Phase 3 (posting): cooperative heap scan, tree descent +
- *     RaBitQ encode + streaming to posting pages.
+ * The leader runs these as participant 0 alongside the workers:
+ *   Sampling: cooperative heap scan, each participant fills its own
+ *     sample slot.
+ *   K-means: leader seeds the initial centroids, then iterative
+ *     assignment + accumulation over the per-participant samples,
+ *     barrier-synchronized with a leader reduce.
+ *   Subtrees: batched largest-first schedule; each participant clusters
+ *     its batch's child into a ring slot the leader consumes.
+ *   Refine (when subsampled): route the full table page-backed and
+ *     accumulate per-leaf means into the shared tiled accumulator.
+ *   Posting: cooperative heap scan, page-backed routing + RaBitQ encode
+ *     into the cluster-keyed shared sort.
  */
 
 #ifdef MKT_STANDALONE

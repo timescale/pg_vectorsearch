@@ -8,8 +8,12 @@
  * mirror of src/pg/parallel_backend.c: the shared state lives in a heap arena
  * instead of a DSM segment, workers run on the thread pool instead of
  * background processes, and the scan walks the in-memory vector array instead
- * of a heap relation. The leader still drains the workers' streamed pages over
- * the shm_mq shim exactly as in PG.
+ * of a heap relation. Memory bounding is deliberately out of scope here: the
+ * standalone engine holds its vectors, samples, and subtree blobs in RAM (it
+ * exists to isolate and benchmark the shared build logic), so the
+ * maintenance_work_mem-style budgets the PG back-end enforces have no
+ * standalone equivalent -- bounded-memory behavior (sample caps, spill,
+ * refine tiling) is exercised only through the PG build.
  */
 
 #ifdef MKT_STANDALONE

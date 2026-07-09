@@ -57,10 +57,7 @@
  *   SECONDARY (SOAR + boundary) -> per-vector path in
  *     mkt_build_assign_vector: boundary via a wider tree beam
  *     (mkt_hkmeans_assign_topk), SOAR via a per-vector SIMD scan
- *     (mkt_find_soar_secondary). A batched all-centroid sgemm kernel
- *     (mkt_secondary_batch_*) existed for the old deferred posting
- *     callback and became dead when the cluster-keyed sort build
- *     replaced that path; it was removed along with it.
+ *     (mkt_find_soar_secondary).
  * ================================================================ */
 
 static void

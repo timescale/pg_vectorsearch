@@ -72,13 +72,11 @@ typedef struct MktBuildAssignment
  * (0.25) instead yields beam_w = 2, far narrower than the k candidates the
  * descent must produce.
  *
- * ERROR_SCALE = 0 matches the query default and, empirically, main's
- * assignment recall: with a full-width beam the extra candidates a larger
- * error bound would keep do not change the leaf chosen. It must stay 0
- * here — a positive error_scale in the single-candidate refine route
- * (nprobe = 1) overflows the beam-search candidate buffer and corrupts the
- * build. (That buffer-sizing bug is orthogonal; the build has no need for
- * a wider bound.)
+ * ERROR_SCALE = 0 matches the query default; with a full-width beam the
+ * extra candidates a larger error bound would keep do not change the leaf
+ * chosen (measured: assignment recall is unchanged). It must stay 0 here —
+ * a positive error_scale in the single-candidate refine route (nprobe = 1)
+ * overflows the beam-search candidate buffer and corrupts the build.
  */
 #define MKT_BUILD_CENTROID_BEAM_SCALE  1.0f
 #define MKT_BUILD_CENTROID_ERROR_SCALE 0.0f

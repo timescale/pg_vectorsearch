@@ -490,12 +490,11 @@ mkt_pbuild_setup_shared(
 	 * phase on shared->refine_iters so they run the identical barrier
 	 * sequence.
 	 *
-	 * One pass, regardless of mkt.leaf_refine_iters: the page-backed refine
-	 * routes every row over the centroid PAGES, which it never rewrites (it
-	 * updates the heads' encode references), so the row-to-leaf assignment is
-	 * identical in every pass and a second pass recomputes the same means --
-	 * a full-table scan for a no-op. The in-RAM-tree refine iterated because
-	 * it moved the routing centroids themselves between passes.
+	 * One pass, regardless of mkt.leaf_refine_iters: the refine routes every
+	 * row over the centroid PAGES, which it never rewrites (it updates the
+	 * heads' encode references, which routing does not read), so the
+	 * row-to-leaf assignment is a fixed point -- a second pass would rescan
+	 * the whole table to recompute the exact same means.
 	 */
 	uint32_t refine_iters = ((double)total_samples < est_tuples &&
 							 mkt_leaf_refine_iters > 0)

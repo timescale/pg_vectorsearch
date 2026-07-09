@@ -415,7 +415,7 @@ mkt_index_build(
 	float		  *km_vectors	  = NULL;
 	uint32_t	   km_nvecs		  = 0;
 	double		   ms_kmeans	  = 0;
-	float		  *sa_global_mean = NULL; /* sample mean from the driver */
+	float		  *sa_global_mean = NULL; /* driver's leaf-centroid mean */
 
 	if (use_driver)
 	{
@@ -712,7 +712,8 @@ mkt_index_build(
 		if (use_driver)
 		{
 			/* do_parallel_build already streamed the posting pages into
-			 * posting_storage and filled posting_heads. */
+			 * posting_storage; heads are formula-derived from
+			 * first_posting. */
 		}
 		else
 		{

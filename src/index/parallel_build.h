@@ -1,15 +1,18 @@
 /*
- * parallel_build.h - PG parallel index build (worker + leader shared decls)
+ * parallel_build.h - Parallel index build (worker + leader shared decls)
  *
- * Two-phase parallel build:
- *   Phase 1 (sampling + k-means): workers cooperatively scan the
- *     heap, collect samples, pick initial centroids, then iterate
- *     k-means assignment + accumulation via PG Barrier. The leader
- *     merges per-worker sums between iterations.
- *   Phase 2 (posting): workers cooperatively scan the heap again,
- *     assign vectors to clusters via tree descent, and stream
- *     posting pages to the buffer cache.
- * The leader merges partial pages and writes centroid pages.
+ * Phased parallel build, barrier-synchronized:
+ *   Sampling: workers cooperatively scan the heap into a bounded,
+ *     budget-sized sample region (a dedicated segment, released once
+ *     clustering is done).
+ *   Clustering: root k-means over the sample (leader reduces between
+ *     iterations), then per-root-child subtrees in batched ring slots;
+ *     the leader records each batch's layout and spills the subtree
+ *     blobs, then streams every centroid + head page to disk by itself.
+ *   Refine (when subsampled): workers route the full table page-backed
+ *     and accumulate per-leaf means; the leader rewrites the heads.
+ *   Posting: workers route + encode into a cluster-keyed shared sort;
+ *     the leader merges runs and writes the posting lists.
  */
 
 #ifndef MKT_PARALLEL_BUILD_H
