@@ -164,6 +164,21 @@ void mkt_fastscan_build_lut_hacc(
  * High-accuracy accumulate: two VPSHUFB passes per code block.
  * Output is 32 int32 values (not uint16).
  */
+/*
+ * Function-pointer type of the 16-bit (hacc) accumulate kernel, and a
+ * resolver that returns the SIMD variant selected for this CPU
+ * (initializing dispatch if needed). Hot per-group callers cache the
+ * pointer per scan instead of paying the guarded wrapper's atomic load
+ * and double indirection on every group.
+ */
+typedef void (*MktFastscanAccumulateHaccFn)(
+		const uint8_t *codes,
+		const uint8_t *lut,
+		int32_t		  *accum,
+		Dimension	   dim);
+
+MktFastscanAccumulateHaccFn mkt_fastscan_get_accumulate_hacc(void);
+
 void mkt_fastscan_accumulate_hacc(
 		const uint8_t *codes,
 		const uint8_t *lut,

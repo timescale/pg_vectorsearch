@@ -67,6 +67,14 @@ typedef struct MktPostingScan
 	float	 fs_lut_bias;  /* LUT dequantization bias */
 	bool	 fs_lut_valid; /* LUT built for current cluster */
 	int		 fs_lut_bits;  /* 8 or 16 */
+	/* Dispatch results cached at enable_fastscan: the resolved hacc
+	 * kernel, the AVX-512 capability, and the per-page group capacities
+	 * (first vs overflow page). Avoids an atomic load + double
+	 * indirection per 32-vector group and an integer division per page. */
+	MktFastscanAccumulateHaccFn fs_accum_hacc;
+	bool						fs_has_avx512;
+	uint32_t					fs_max_groups_first;
+	uint32_t					fs_max_groups_over;
 
 	/* Stats */
 	uint32_t pages_read;	/* posting pages fetched (incl. skipped) */
