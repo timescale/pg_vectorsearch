@@ -248,18 +248,18 @@ typedef struct PlanCbArg
 
 static void
 plan_batch_cb(
-		void	*arg,
-		uint32_t base_child,
-		uint32_t bs,
-		char	*base,
-		uint64_t slot_size)
+		void		   *arg,
+		const uint32_t *children,
+		uint32_t		bs,
+		char		   *base,
+		uint64_t		slot_size)
 {
 	PlanCbArg *a = (PlanCbArg *)arg;
 	for (uint32_t s = 0; s < bs; s++)
 	{
 		const HKMeansResult *sub = (const HKMeansResult *)
 				mkt_dsm_child_subtree(base, s, slot_size);
-		uint32_t	 child = base_child + s;
+		uint32_t	 child = children[s];
 		BlockNumber *nfb   = mkt_alloc(
 				  (size_t)sub->nnodes * sizeof(BlockNumber));
 		/* Subtrees are built to a uniform depth, so any non-empty one gives
@@ -481,6 +481,10 @@ do_parallel_build(
 				.leaf_sum		 = mkt_alloc0((size_t)dim * sizeof(double)),
 				.store			 = mkt_pbuild_blobstore_begin(),
 		};
+		/* The batch schedule is largest-first; the blob store receives the
+		 * subtrees in that order, so the replay below needs the same order
+		 * to place each blob at its child's reserved block range. */
+		uint32_t *child_order = mkt_alloc((size_t)km_k * sizeof(uint32_t));
 		mkt_pbuild_stream_subtrees(
 				0,
 				nparticipants,
@@ -497,7 +501,8 @@ do_parallel_build(
 				slot_size,
 				barrier,
 				plan_batch_cb,
-				&planarg);
+				&planarg,
+				child_order);
 
 		/* The streamed tree's depth is the (uniform) subtree depth plus the
 		 * root level. This is the actual written depth — k-means can produce
@@ -569,8 +574,11 @@ do_parallel_build(
 		};
 		HKMeansResult *blob = mkt_alloc(slot_size);
 		mkt_pbuild_blobstore_rewind(planarg.store);
-		for (uint32_t c = 0; c < km_k; c++)
+		for (uint32_t i = 0; i < km_k; i++)
 		{
+			/* Blobs arrive in the largest-first batch order; c is the child
+			 * whose reserved block range this blob belongs to. */
+			uint32_t c = child_order[i];
 			(void)mkt_pbuild_blobstore_get(planarg.store, blob, slot_size);
 			BlockNumber base_blk = subtree_base + block_off[c];
 			uint32_t	pages;
@@ -590,6 +598,7 @@ do_parallel_build(
 					&pages);
 		}
 		mkt_free(blob);
+		mkt_free(child_order);
 		mkt_pbuild_blobstore_end(planarg.store);
 		planarg.store = NULL;
 

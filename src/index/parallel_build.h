@@ -494,6 +494,7 @@ extern void mkt_km_assign_and_accumulate(
  */
 extern void mkt_build_child_subtree(
 		uint32_t		  child,
+		uint32_t		  child_count,
 		int				  nparticipants,
 		MktDsmSamples	 *dsm_samples,
 		MktDsmRootAssign *dsm_ra,
@@ -510,14 +511,15 @@ extern void mkt_build_child_subtree(
  * Per-batch leader callback for the batched subtree stream. Fired only on the
  * leader (participant 0), between the two per-batch barriers, so it can read
  * the batch's finished subtrees from the slots [0, batch_size) before they are
- * reused. base_child is the first child index in this batch.
+ * reused. children[s] is the child id whose subtree sits in slot s (the batch
+ * schedule is largest-first, not sequential).
  */
 typedef void (*MktBatchCb)(
-		void	*arg,
-		uint32_t base_child,
-		uint32_t batch_size,
-		char	*subtrees_base,
-		uint64_t slot_size);
+		void		   *arg,
+		const uint32_t *children,
+		uint32_t		batch_size,
+		char		   *subtrees_base,
+		uint64_t		slot_size);
 
 /*
  * Batched subtree build shared by the leader (participant 0) and workers: in
@@ -544,7 +546,8 @@ extern void mkt_pbuild_stream_subtrees(
 		uint64_t		  slot_size,
 		Barrier			 *barrier,
 		MktBatchCb		  batch_cb,
-		void			 *cb_arg);
+		void			 *cb_arg,
+		uint32_t		 *out_child_order);
 
 /*
  * Per-participant execution of phases 1, 2, and 2b, shared by the leader

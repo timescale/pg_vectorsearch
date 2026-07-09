@@ -124,6 +124,7 @@ mkt_km_assign_and_accumulate(
 void
 mkt_build_child_subtree(
 		uint32_t		  child,
+		uint32_t		  child_count,
 		int				  nparticipants,
 		MktDsmSamples	 *dsm_samples,
 		MktDsmRootAssign *dsm_ra,
@@ -137,16 +138,9 @@ mkt_build_child_subtree(
 		uint64_t		  slot_size)
 {
 	uint32_t nlist_c = (nlist + fan_out - 1) / fan_out;
-
-	uint32_t cc = 0;
-	for (int t = 0; t < nparticipants; t++)
-	{
-		const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
-		uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
-		for (uint32_t i = 0; i < n; i++)
-			if (ra[i] == child)
-				cc++;
-	}
+	/* The caller's histogram already counted this child's samples (one pass
+	 * over the assignments instead of one per child). */
+	uint32_t cc = child_count;
 
 	KMeansOptions opts	   = MKT_KMEANS_OPTIONS_DEFAULT;
 	opts.max_iterations	   = km_max_iterations;
@@ -213,19 +207,60 @@ mkt_pbuild_stream_subtrees(
 		uint64_t		  slot_size,
 		Barrier			 *barrier,
 		MktBatchCb		  batch_cb,
-		void			 *cb_arg)
+		void			 *cb_arg,
+		uint32_t		 *out_child_order)
 {
 	uint32_t np		  = (uint32_t)nparticipants;
 	uint32_t nbatches = (km_k + np - 1) / np;
 	char	*slot =
 			mkt_dsm_child_subtree(subtrees_base, participant_id, slot_size);
 
+	/* One histogram pass over the root assignments feeds every child's
+	 * sample count (mkt_build_child_subtree needs it, and counting per
+	 * child would re-scan the assignments km_k times). */
+	uint32_t *child_count = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
+	for (int t = 0; t < nparticipants; t++)
+	{
+		const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
+		uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
+		for (uint32_t i = 0; i < n; i++)
+			child_count[ra[i]]++;
+	}
+
+	/* Schedule children largest-first (LPT): every batch waits for its
+	 * slowest subtree at two barriers, so the skewed children must land in
+	 * the full batches, leaving the tail batch the small ones. Counts are
+	 * identical for every participant (same shared assignments) and ties
+	 * break on the child id, so all participants and the leader's blob
+	 * replay derive the same order with no coordination. */
+	uint32_t *order = mkt_alloc((size_t)km_k * sizeof(uint32_t));
+	for (uint32_t i = 0; i < km_k; i++)
+		order[i] = i;
+	for (uint32_t i = 1; i < km_k; i++)
+	{
+		uint32_t id = order[i];
+		uint32_t j	= i;
+		while (j > 0 && (child_count[order[j - 1]] < child_count[id] ||
+						 (child_count[order[j - 1]] == child_count[id] &&
+						  order[j - 1] > id)))
+		{
+			order[j] = order[j - 1];
+			j--;
+		}
+		order[j] = id;
+	}
+	if (out_child_order != NULL)
+		memcpy(out_child_order, order, (size_t)km_k * sizeof(uint32_t));
+
 	for (uint32_t b = 0; b < nbatches; b++)
 	{
-		uint32_t my_child = b * np + (uint32_t)participant_id;
-		if (my_child < km_k)
+		uint32_t my_idx = b * np + (uint32_t)participant_id;
+		if (my_idx < km_k)
+		{
+			uint32_t my_child = order[my_idx];
 			mkt_build_child_subtree(
 					my_child,
+					child_count[my_child],
 					nparticipants,
 					dsm_samples,
 					dsm_ra,
@@ -237,6 +272,7 @@ mkt_pbuild_stream_subtrees(
 					km_max_iterations,
 					slot,
 					slot_size);
+		}
 
 		/* All participants have built this batch's subtrees into their slots.
 		 */
@@ -245,16 +281,19 @@ mkt_pbuild_stream_subtrees(
 		/* Leader consumes the batch before the slots are reused. */
 		if (participant_id == 0 && batch_cb != NULL)
 		{
-			uint32_t base_child = b * np;
-			uint32_t bs			= km_k - base_child;
+			uint32_t base = b * np;
+			uint32_t bs	  = km_k - base;
 			if (bs > np)
 				bs = np;
-			batch_cb(cb_arg, base_child, bs, subtrees_base, slot_size);
+			batch_cb(cb_arg, order + base, bs, subtrees_base, slot_size);
 		}
 
 		/* Leader done with the batch; slots free for the next batch. */
 		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 	}
+
+	mkt_free(order);
+	mkt_free(child_count);
 }
 
 /* ----------------------------------------------------------------
@@ -754,6 +793,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 				subtrees_base,
 				shared->subtree_slot_size,
 				barrier,
+				NULL,
 				NULL,
 				NULL);
 	}

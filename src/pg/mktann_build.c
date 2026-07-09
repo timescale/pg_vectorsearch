@@ -450,16 +450,13 @@ estimate_heap_tuples(Relation heap, Dimension dim)
 
 /*
  * Draw the maintenance_work_mem-bounded k-means sample into bs->samples (left
- * resident for the caller to cluster + free), normalize it for cosine, resolve
- * the leaf target against the sample size, and compute the global mean (the
- * sample mean — the encoder centering the streaming build needs up front,
- * before any centroid page is written). Returns false (and frees the sample)
- * when the heap yields no indexable rows.
+ * resident for the caller to cluster + free), normalize it for cosine, and
+ * resolve the leaf target against the sample size. Returns false (and frees
+ * the sample) when the heap yields no indexable rows.
  */
 static bool
 sample_for_build(
 		MktannBuildState *bs,
-		float			**out_global_mean,
 		uint32_t		 *out_nlist,
 		bool			 *out_subsampled)
 {
@@ -502,16 +499,7 @@ sample_for_build(
 	if ((uint32_t)bs->nsamples < nlist)
 		nlist = (uint32_t)bs->nsamples;
 
-	float *global_mean = palloc(dim * sizeof(float));
-	mkt_global_mean(
-			bs->samples,
-			(uint32_t)bs->nsamples,
-			dim,
-			bs->params.metric,
-			global_mean);
-
-	*out_global_mean = global_mean;
-	*out_nlist		 = nlist;
+	*out_nlist = nlist;
 	return true;
 }
 
@@ -719,10 +707,9 @@ do_serial_build(
 
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SAMPLE);
 
-	float	*global_mean  = NULL;
 	uint32_t target_nlist = 0;
 	bool	 subsampled	  = false;
-	if (!sample_for_build(bs, &global_mean, &target_nlist, &subsampled))
+	if (!sample_for_build(bs, &target_nlist, &subsampled))
 	{
 		*out_tree = NULL;
 		return false;
@@ -770,6 +757,9 @@ do_serial_build(
 	 * mean, and the quantization quality of every centroid and posting code
 	 * depends on this anchor.
 	 */
+	/* The streamed pages encode against the leaf-centroid mean the plan
+	 * pass accumulated. */
+	float *global_mean = palloc((size_t)dim * sizeof(float));
 	memcpy(global_mean, plan.leaf_mean, (size_t)dim * sizeof(float));
 	if (p->metric == DISTANCE_COSINE)
 		mkt_l2_normalize(global_mean, dim);
