@@ -149,6 +149,7 @@ get_cache_data(Relation index)
 	 */
 	c->base.dim				= dim;
 	c->base.nlevels			= meta->nlevels;
+	c->base.fan_out			= meta->fan_out;
 	c->base.first_centroid	= meta->first_centroid;
 	c->base.first_posting	= meta->first_posting;
 	c->base.metric			= (DistanceMetric)meta->metric;
