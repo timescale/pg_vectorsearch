@@ -311,7 +311,11 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 				values[2] = Int16GetDatum((int16)opaque->level);
 				values[3] = CStringGetTextDatum(centroid_format_names[fmt]);
 
-				if (!is_leaf && BlockNumberIsValid(entry->child_blkno))
+				/* Leaf entries carry their posting-list head block in
+				 * child_blkno (formula-derived: first_posting + leaf), so
+				 * expose it -- structural tests join it against the posting
+				 * heads. */
+				if (BlockNumberIsValid(entry->child_blkno))
 					values[4] = Int32GetDatum((int32)entry->child_blkno);
 				else
 					nulls[4] = true;

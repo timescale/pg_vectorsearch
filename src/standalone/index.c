@@ -774,6 +774,7 @@ mkt_index_build(
 				tree,
 				dim,
 				fan_out,
+				0, /* in-RAM tree levels are absolute */
 				idx->base.centroid_format,
 				needs_rq_params ? idx->base.params : NULL,
 				idx->global_mean,

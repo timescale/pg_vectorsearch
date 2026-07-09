@@ -45,6 +45,7 @@ mkt_write_centroid_tree(
 		const HKMeansResult *tree,
 		Dimension			 dim,
 		uint32_t			 fan_out,
+		uint8_t				 level_offset,
 		MktCentroidFormat	 centroid_format,
 		const RaBitQParams	*rq_params,
 		const float			*global_mean,
@@ -88,7 +89,7 @@ mkt_write_centroid_tree(
 					storage,
 					dim,
 					node->nchildren,
-					(uint8_t)node->level,
+					(uint8_t)(level_offset + node->level),
 					flags,
 					rq_params,
 					hk_node_centroids(tree, node),
@@ -118,7 +119,7 @@ mkt_write_centroid_tree(
 				dim,
 				node->nchildren,
 				centroid_format,
-				(uint8_t)node->level,
+				(uint8_t)(level_offset + node->level),
 				flags,
 				child_count,
 				encoder,
@@ -634,6 +635,7 @@ mkt_write_subtree_streaming(
 		const HKMeansResult *subtree,
 		Dimension			 dim,
 		uint32_t			 fan_out,
+		uint8_t				 level_offset,
 		MktCentroidFormat	 format,
 		const RaBitQParams	*rq_params,
 		const float			*global_mean,
@@ -656,11 +658,14 @@ mkt_write_subtree_streaming(
 	/* Leaf entries link to formula-derived posting heads (first_posting +
 	 * global leaf index); leaf_offset maps the subtree's local leaf indices to
 	 * the global index space. */
+	/* Subtree node levels are subtree-relative; level_offset places them at
+	 * their absolute depth (the tree root above them is level 0). */
 	mkt_write_centroid_tree(
 			storage,
 			subtree,
 			dim,
 			fan_out,
+			level_offset,
 			format,
 			rq_params,
 			global_mean,

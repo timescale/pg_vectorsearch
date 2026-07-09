@@ -501,6 +501,7 @@ do_parallel_build(
 					blob,
 					dim,
 					fan_out,
+					1, /* subtrees hang off the level-0 root */
 					fmt,
 					rq_params,
 					global_mean,
@@ -604,6 +605,7 @@ do_parallel_build(
 				flat,
 				dim,
 				fan_out,
+				0, /* the flat tree IS the root level */
 				fmt,
 				rq_params,
 				global_mean,
