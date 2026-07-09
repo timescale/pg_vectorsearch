@@ -480,7 +480,13 @@ mkt_index_build(
 				idx->posting_heads,
 				&heap_tuples,
 				&indtuples,
-				&soar_dupes);
+				&soar_dupes,
+				/* Standalone writes its own centroid store + computes its own
+				 * global mean below, so it ignores both outputs (the driver
+				 * still writes centroid pages into posting_storage for the
+				 * workers' page-backed routing). */
+				NULL,
+				NULL);
 		mkt_memctx_switch(idx_ctx);
 
 		/* The driver always launches at least one worker, so it does not fail
@@ -564,9 +570,12 @@ mkt_index_build(
 
 	/* Global mean */
 	idx->global_mean = mkt_alloc(dim * sizeof(float));
-	mkt_vector_mean(hk_leaf_centroids(tree), nlist, dim, idx->global_mean);
-	if (idx->base.metric == DISTANCE_COSINE)
-		normalize_vector(idx->global_mean, dim);
+	mkt_global_mean(
+			hk_leaf_centroids(tree),
+			nlist,
+			dim,
+			idx->base.metric,
+			idx->global_mean);
 
 	/* Save leaf centroids for per-cluster query preparation */
 	idx->leaf_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));

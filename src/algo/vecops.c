@@ -226,6 +226,19 @@ mkt_vector_mean(
 	mkt_vector_scale(out, 1.0f / (float)nvecs, out, dim);
 }
 
+void
+mkt_global_mean(
+		const float	  *centroids,
+		uint32_t	   ncentroids,
+		Dimension	   dim,
+		DistanceMetric metric,
+		float		  *out)
+{
+	mkt_vector_mean(centroids, ncentroids, dim, out);
+	if (metric == DISTANCE_COSINE)
+		mkt_l2_normalize(out, dim);
+}
+
 float
 mkt_l2_distance_squared(const float *a, const float *b, Dimension dim)
 {

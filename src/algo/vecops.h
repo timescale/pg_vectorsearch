@@ -81,6 +81,20 @@ void mkt_vector_mean(
 		const float *vectors, uint32_t nvecs, Dimension dim, float *out);
 
 /*
+ * Global mean for index metadata: the element-wise mean of the (leaf)
+ * centroids, L2-normalized when the metric is cosine so it lives on the
+ * unit sphere with the vectors it recenters. Every writer of the
+ * metapage's global mean must use this so the cosine normalization
+ * cannot be missed at one site.
+ */
+void mkt_global_mean(
+		const float	  *centroids,
+		uint32_t	   ncentroids,
+		Dimension	   dim,
+		DistanceMetric metric,
+		float		  *out);
+
+/*
  * L2 distance squared: sum((a[i] - b[i])^2)
  *
  * Returns ||a - b||^2. Equivalent to mkt_l2_norm_squared of the difference,
