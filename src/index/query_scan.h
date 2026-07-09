@@ -66,6 +66,12 @@ typedef struct MktQueryState
 	uint32_t			cand_cap;
 	uint32_t			ncandidates;
 
+	/* Probe-order scratch: exact centroid distance + index per routed
+	 * cluster, used to re-rank the expanded probe set (mkt.probe_expand).
+	 * Sized to max_nprobe at init. */
+	float	 *probe_dists;
+	uint32_t *probe_order;
+
 	/* Result ordering (indices into candidates + final distances) */
 	uint32_t *result_order;
 	Distance *result_dists;
@@ -102,6 +108,23 @@ uint32_t mkt_query_execute(
 		MktDistanceMode mode,
 		bool			rerank,
 		MktQueryStats  *stats);
+
+/*
+ * Probe-order refinement (mkt.probe_expand).
+ *
+ * Routes ceil(nprobe * expand) leaf candidates through the centroid
+ * beam, re-ranks them by EXACT query-centroid distance (the
+ * full-precision rotated centroid on each cluster's first posting
+ * page), and scans only the best nprobe in that order — fixing the
+ * probe-order noise of compressed (RaBitQ) centroid routing.
+ *
+ * 1.0 means no expansion (identity). Enabled by default (2.0): gains
+ * saturate around a factor of 2. The extra routed candidates are
+ * capped (MKT_PROBE_EXPAND_MAX_EXTRA) so overhead stays bounded at
+ * large nprobe, and the phase is skipped for indexes whose centroid
+ * pages are exact (float/half) — there is no ordering noise to fix.
+ */
+void mkt_query_set_probe_expand(double expand);
 
 /*
  * Route a vector to its nearest leaf posting list(s) — the centroid-search
