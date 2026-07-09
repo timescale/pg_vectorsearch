@@ -1,0 +1,48 @@
+Parsed test spec with 2 sessions
+
+starting permutation: b_start w_cancel b_detach b_rebuild b_check
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step b_start: 
+    SET max_parallel_maintenance_workers = 2;
+    CREATE INDEX i_cancel ON emb USING mktann (v)
+        WITH (nlist = 12, fan_out = 4);
+ <waiting ...>
+step w_cancel: 
+    SELECT count(pg_cancel_backend(pid)) > 0 AS canceled
+        FROM pg_stat_activity
+        WHERE query LIKE '%CREATE INDEX i_cancel%'
+          AND backend_type = 'client backend'
+          AND pid <> pg_backend_pid();
+
+canceled
+--------
+t       
+(1 row)
+
+step b_start: <... completed>
+ERROR:  canceling statement due to user request
+step b_detach: 
+    SELECT injection_points_detach('mktann-build-subtrees');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+step b_rebuild: 
+    SET max_parallel_maintenance_workers = 2;
+    CREATE INDEX i_again ON emb USING mktann (v)
+        WITH (nlist = 12, fan_out = 4);
+
+step b_check: 
+    SELECT count(*) FROM pg_class WHERE relname IN ('i_cancel', 'i_again');
+
+count
+-----
+    1
+(1 row)
+
