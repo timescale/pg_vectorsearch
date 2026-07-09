@@ -620,9 +620,12 @@ extern void mkt_pbuild_accum_unlock(MktBuildShared *shared, uint32_t stripe);
  * the PG implementation (parallel_backend_pg.c) drives a parallel heap scan
  * and unwraps each tuple; the standalone implementation iterates its in-memory
  * vector array. allow_sync/progress are PG table_index_build_scan flags,
- * ignored in standalone.
+ * ignored in standalone. Returns the number of heap tuples this participant
+ * scanned; the posting pass accumulates those into shared->reltuples so the
+ * build reports the table's true row count (index_update_stats writes it to
+ * pg_class.reltuples).
  */
-extern void mkt_build_scan(
+extern double mkt_build_scan(
 		Relation		  heap,
 		Relation		  index,
 		struct IndexInfo *indexInfo,
@@ -676,9 +679,15 @@ extern void		   mkt_pbuild_worker_storage_release(MktStorage *s);
 /*
  * Accumulate one worker's tuple counts into the shared state under the
  * back-end's lock (the lock lives in the back-end's derived shared struct).
+ * heap_tuples is the participant's posting-scan share of the heap; the sum
+ * across participants is the table's row count, returned to PostgreSQL as
+ * IndexBuildResult.heap_tuples.
  */
 extern void mkt_pbuild_worker_add_counts(
-		MktBuildShared *shared, double indtuples, double soar_dupes);
+		MktBuildShared *shared,
+		double			indtuples,
+		double			soar_dupes,
+		double			heap_tuples);
 
 /* ----------------------------------------------------------------
  * Leader launch/teardown seam — back-end-specific (parallel_backend.c for PG)
