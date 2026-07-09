@@ -413,10 +413,17 @@ mkt_pbuild_setup_shared(
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_pbuild_sort_shared_size(nparticipants));
 
-	/* Shared leaf-refinement accumulator (one copy; only when refining). */
+	/* Shared leaf-refinement accumulator (one copy; only when refining). Sized
+	 * to a bounded tile (cap_bytes = min(maintenance_work_mem, MaxAllocSize)),
+	 * not O(nlist): refine processes leaves in tiles of this capacity. */
+	uint64_t refine_cap_bytes =
+			Min((uint64_t)maintenance_work_mem * 1024, (uint64_t)MaxAllocSize);
+	uint32_t refine_tile_cap =
+			mkt_refine_tile_leaves(nlist, dim, refine_cap_bytes);
 	if (refine_iters > 0)
 		shm_toc_estimate_chunk(
-				&pcxt->estimator, mkt_dsm_refine_accum_size(nlist, dim));
+				&pcxt->estimator,
+				mkt_dsm_refine_accum_size(refine_tile_cap, dim));
 
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -557,14 +564,17 @@ mkt_pbuild_setup_shared(
 	memset(sortshared, 0, sort_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SORTSHARED, sortshared);
 
-	/* Shared leaf-refinement accumulator (sized to the nlist cap; the actual
-	 * nleaves <= nlist is set on the tree). Only when refining. */
+	/* Shared leaf-refinement accumulator, sized to the bounded tile capacity
+	 * (refine_tile_cap); the refine exec processes leaves in tiles of this
+	 * size, re-scanning the heap per tile. accum->nleaves carries the capacity
+	 * so the leader and workers derive the tile count identically. Only when
+	 * refining. */
 	if (refine_iters > 0)
 	{
-		Size			   acc_sz = mkt_dsm_refine_accum_size(nlist, dim);
-		MktDsmRefineAccum *accum  = shm_toc_allocate(pcxt->toc, acc_sz);
-		accum->nleaves			  = nlist;
-		accum->dim				  = dim;
+		Size acc_sz = mkt_dsm_refine_accum_size(refine_tile_cap, dim);
+		MktDsmRefineAccum *accum = shm_toc_allocate(pcxt->toc, acc_sz);
+		accum->nleaves			 = refine_tile_cap;
+		accum->dim				 = dim;
 		shm_toc_insert(pcxt->toc, MKT_DSM_KEY_REFINE_ACCUM, accum);
 	}
 
