@@ -842,6 +842,7 @@ do_serial_build(
 	idx_base.dim			  = dim;
 	idx_base.nlevels		  = (uint8_t)tree->nlevels;
 	idx_base.fan_out		  = (uint8_t)Min(bs->params.fan_out, UINT8_MAX);
+	idx_base.nlist			  = tree->nleaves;
 	idx_base.first_centroid	  = 1;
 	idx_base.metric			  = p->metric;
 	idx_base.centroid_format  = p->centroid_format;

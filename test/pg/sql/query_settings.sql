@@ -154,5 +154,28 @@ RESET mkt.nprobe;
 RESET enable_seqscan;
 DROP TABLE beam_floor_test;
 
+-- The fan_out floor above assumes a balanced tree: it keeps
+-- ceil(nprobe / fan_out) children, which exposes nprobe leaves only when
+-- every child carries fan_out of them. k-means regularly hands children
+-- fewer leaves, and the kept set then covers less than the whole index --
+-- pruning subtrees that stay unreachable at ANY nprobe. When nprobe
+-- covers every leaf the beam must keep whole levels: probing everything
+-- must return everything, whatever shape the tree took.
+CREATE TABLE beam_cover_test (id int, v vector(3));
+INSERT INTO beam_cover_test SELECT g, format('[%s,0,0]', g)::vector
+    FROM generate_series(1, 50) g;
+CREATE INDEX beam_cover_idx ON beam_cover_test USING mktann (v)
+    WITH (nlist = 12, fan_out = 4);
+SET enable_seqscan = off;
+SET mkt.nprobe = 10000;
+SET mkt.query_limit = 100;
+SELECT count(*) = 50 AS unbalanced_tree_all_reachable FROM (
+    SELECT id FROM beam_cover_test
+    ORDER BY v <-> '[0.5,0,0]' LIMIT 100) t;
+RESET mkt.query_limit;
+RESET mkt.nprobe;
+RESET enable_seqscan;
+DROP TABLE beam_cover_test;
+
 -- Cleanup
 DROP TABLE query_settings_test;

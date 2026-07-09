@@ -163,6 +163,16 @@ search_centroids(
 			beam_w = floor_w;
 	}
 
+	/* Probe-everything floor: the fan_out floor above assumes each child
+	 * carries fan_out leaves, but an unbalanced tree can hold fewer — a
+	 * kept set of ceil(nprobe / fan_out) children then exposes fewer than
+	 * nprobe leaves and prunes whole subtrees that can never be reached at
+	 * ANY nprobe. When nprobe covers every leaf, keep whole levels (a
+	 * level's entry count never exceeds nlist, so beam_w = nprobe bounds
+	 * it) — probing everything must reach everything. */
+	if (idx->nlist > 0 && nprobe >= idx->nlist && beam_w < nprobe)
+		beam_w = nprobe;
+
 	MktCentroidSearchState search = {
 			.qstate		 = rqs,
 			.query		 = qvec,

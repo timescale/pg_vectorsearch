@@ -818,6 +818,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	base.centroid_beam_scale  = shared->centroid_beam_scale;
 	base.fan_out = (uint8_t)(shared->fan_out <= UINT8_MAX ? shared->fan_out
 														  : UINT8_MAX);
+	base.nlist	 = shared->nlist;
 
 	MktQueryState qs;
 	mkt_query_state_init(&qs, &base, 1, MKT_SECONDARY_TOPK);

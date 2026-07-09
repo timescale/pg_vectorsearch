@@ -34,7 +34,11 @@ typedef struct MktIndexBase
 	uint8_t	  nlevels;
 	/* Children per tree node; floors the intermediate beam width so the
 	 * top-nprobe leaves stay reachable (0 = unknown, no floor). */
-	uint8_t			  fan_out;
+	uint8_t fan_out;
+	/* Leaf (posting-list) count; when nprobe covers every leaf the
+	 * intermediate beam keeps whole levels so no subtree is pruned
+	 * (0 = unknown, no full-coverage floor). */
+	uint32_t		  nlist;
 	BlockNumber		  first_centroid;
 	BlockNumber		  first_posting;
 	DistanceMetric	  metric;
