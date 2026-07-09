@@ -645,18 +645,44 @@ do_parallel_build(
 	*out_nlist		  = nlist;
 	*out_tree_nlevels = out_nlevels;
 
-	/* Phase 3: workers scan + route page-backed + encode + sort; the leader
-	 * merges. Report before releasing workers so progress reflects the whole
-	 * (multi-hour at scale) scan. The seam fires the "mktann-build-load" hook.
-	 */
-	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
+	/* The refine decision, now that the actual leaf count is known: refine
+	 * only when the sample was bounded below the table AND the leaves are
+	 * sample-thin -- a leaf's encode reference is a sample mean whose error
+	 * shrinks with its sample count, so past the threshold the full-table
+	 * scan recomputes what the sample already got right. Published before
+	 * the ready barrier; workers gate the refine phase (and its barriers)
+	 * on it after that barrier. */
+	{
+		uint64_t collected = 0;
+		uint64_t seen	   = 0;
+		for (int t = 0; t < nparticipants; t++)
+		{
+			collected += mkt_dsm_sample_counts(dsm_samples)[t];
+			seen += mkt_dsm_sample_seen(dsm_samples)[t];
+		}
+		/* kept < seen means the sampling scans skipped real rows, so the
+		 * sample is a strict subset of the table (kept == seen means the
+		 * sample IS the table -- nothing to refine from). */
+		shared->refine = shared->refine_threshold > 0 && collected < seen &&
+						 shared->refine_tile_cap > 0 && nlist > 0 &&
+						 collected / nlist <
+								 (uint64_t)shared->refine_threshold;
+		mkt_debug(
+				"mktann: refine gate: kept=%lu seen=%lu nlist=%u "
+				"threshold=%u -> %s",
+				(unsigned long)collected,
+				(unsigned long)seen,
+				nlist,
+				shared->refine_threshold,
+				shared->refine ? "refine" : "skip");
+	}
 
 	/* The samples are dead (their last readers were the subtree builders);
 	 * lay the refine accumulator over them before the ready barrier so the
 	 * workers -- who pass that barrier ahead of the refine phase -- see an
 	 * initialized header. */
 	MktDsmRefineAccum *refine_accum = NULL;
-	if (shared->refine_iters > 0)
+	if (shared->refine)
 	{
 		refine_accum		  = mkt_pbuild_refine_overlay(dsm_samples);
 		refine_accum->nleaves = shared->refine_tile_cap;
@@ -679,9 +705,9 @@ do_parallel_build(
 	 * ---- The workers route + accumulate; the leader (participant 0) clears
 	 * the tiled accumulator, resets the scan per tile, and rewrites each
 	 * leaf's head-page pt_centroid to the full-table mean. Gated on
-	 * shared->refine_iters, matching the workers, so the internal barriers
-	 * stay in lockstep. */
-	if (shared->refine_iters > 0)
+	 * shared->refine, matching the workers, so the internal barriers stay
+	 * in lockstep. */
+	if (shared->refine)
 	{
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_REFINE);
 		MktDsmRefineAccum *accum = refine_accum;
@@ -706,8 +732,14 @@ do_parallel_build(
 				mkt_write_leaf_head,
 				&rhead);
 		mkt_free(rhead.pt);
-		mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
 	}
+
+	/* Phase 3: workers scan + route page-backed + encode + sort; the leader
+	 * merges. Reported exactly once -- the seam fires the "mktann-build-load"
+	 * test hook, and a 'wait' attached there must pause the build a single
+	 * time -- and before the scan-reset barrier below releases the workers,
+	 * so progress reflects the whole (multi-hour at scale) scan. */
+	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
 
 	/* The samples (and the refine overlay riding in them) are dead; hand the
 	 * segment back before the posting sort claims its own memory budget. */

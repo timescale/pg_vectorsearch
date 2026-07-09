@@ -375,7 +375,8 @@ mkt_pbuild_setup_shared(
 	shared->km_tolerance		   = 1e-4f;
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
-	shared->refine_iters		   = 0;
+	shared->refine_threshold	   = 0; /* standalone builds do not refine */
+	shared->refine				   = false;
 	shared->refine_tile_cap = 0; /* standalone builds are not mem-bounded */
 	/* Page-backed routing knobs: route the build scan for accuracy, not
 	 * query speed, matching the PG build (see MKT_BUILD_CENTROID_* in
@@ -521,7 +522,7 @@ mkt_pbuild_rescan(Relation heap, MktBuildShared *shared)
 
 /*
  * Leaf-refinement accumulator lock seam. Standalone never refines
- * (refine_iters is always 0), so these are unused stubs to satisfy the link.
+ * (standalone never refines), so these are unused stubs to satisfy the link.
  */
 void
 mkt_pbuild_accum_lock(MktBuildShared *shared, uint32_t stripe)

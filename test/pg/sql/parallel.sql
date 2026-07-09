@@ -319,13 +319,13 @@ ALTER TABLE line768 SET (parallel_workers = 2);
 
 SET max_parallel_maintenance_workers = 2;
 SET maintenance_work_mem = '1MB';
-SET mkt.leaf_refine_iters = 0;
+SET mkt.leaf_refine_threshold = 0;
 SELECT exact_check('line768', '(v) WITH (centroid_compression = true)',
                    '[0.5' || repeat(',0', 767) || ']') AS bounded_norefine_exact;
-SET mkt.leaf_refine_iters = 2;
+SET mkt.leaf_refine_threshold = 100000;
 SELECT exact_check('line768', '(v) WITH (centroid_compression = true)',
                    '[0.5' || repeat(',0', 767) || ']') AS bounded_refine_exact;
-RESET mkt.leaf_refine_iters;
+RESET mkt.leaf_refine_threshold;
 RESET maintenance_work_mem;
 RESET max_parallel_maintenance_workers;
 DROP TABLE line768;
@@ -346,7 +346,7 @@ ALTER TABLE line12k SET (parallel_workers = 2);
 -- gates above are parallel and flat); with fastscan posting heads the
 -- refine rewrites fastscan head pages.
 SET max_parallel_maintenance_workers = 0;
-SET mkt.leaf_refine_iters = 2;
+SET mkt.leaf_refine_threshold = 100000;
 -- The 1MB budget forces the sample cap to its 10000-vector floor, below the
 -- 12000 rows, so the build is genuinely subsampled and refine runs.
 SET maintenance_work_mem = '1MB';
@@ -359,7 +359,7 @@ SELECT exact_check('line12k',
                    '(v) WITH (nlist = 48, fan_out = 4, fastscan = true)',
                    :'probe12k') AS serial_refine_fastscan_exact;
 RESET maintenance_work_mem;
-RESET mkt.leaf_refine_iters;
+RESET mkt.leaf_refine_threshold;
 
 -- Subtree blobs several times the BufFile buffer (nlist 64 / fan_out 8 at
 -- dim 64 gives ~multi-page blobs), so the leader's replay crosses buffer

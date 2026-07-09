@@ -134,14 +134,24 @@ typedef struct MktBuildShared
 	float	 km_tolerance;
 	uint32_t km_k; /* root k-means k (= fan_out) */
 
-	/* Full-table leaf-centroid refinement passes (0 = off). Set by the leader
-	 * when the sample set is maintenance_work_mem-bounded; standalone leaves
-	 * it 0. Both leader and workers gate the refine phase on this, so they run
-	 * the same barrier sequence. */
-	uint32_t refine_iters;
+	/* Refine gate input, set at setup: the sample-per-leaf threshold below
+	 * which a subsampled build refines the leaf encode references on the
+	 * full table (0 = refinement off; standalone leaves it 0). Whether the
+	 * build IS subsampled is decided empirically from the sampling pass:
+	 * each participant counts the live rows its scan saw next to the rows
+	 * it kept, and kept < seen means the sample excludes real rows. */
+	uint32_t refine_threshold;
+
+	/* The refine decision. The LEADER makes it after clustering -- the
+	 * actual leaf count is only known then, and dividing the collected
+	 * samples by the worst-case leaf bound would understate samples-per-leaf
+	 * and refine too eagerly -- and publishes it before the tree-ready
+	 * barrier. Workers read it after that barrier, so leader and workers
+	 * gate the refine phase (and its barriers) identically. */
+	bool refine;
 
 	/* Tile capacity (leaves) of the refine accumulator that overlays the
-	 * sample region once sampling is done; set with refine_iters at setup
+	 * sample region once sampling is done; sized at setup
 	 * (the back-end bounds it by its memory budget AND the sample region's
 	 * size, since the overlay lives inside that region). */
 	uint32_t refine_tile_cap;
@@ -182,7 +192,7 @@ typedef struct MktBuildShared
 /* ----------------------------------------------------------------
  * K-means sampling: per-worker sample slots in DSM
  *
- * Layout: [sample_counts[nparticipants]] then
+ * Layout: [sample_counts[nparticipants]] [rows_seen[nparticipants]] then
  *         [samples[worker_id][max_per_worker * dim]] packed.
  * ---------------------------------------------------------------- */
 
@@ -191,7 +201,9 @@ typedef struct MktDsmSamples
 	uint32_t  nparticipants;
 	uint32_t  max_per_worker;
 	Dimension dim;
-	/* counts[nparticipants], then the per-worker sample blocks
+	/* counts[nparticipants] (rows kept), then seen[nparticipants] (live
+	 * rows the sampling scan visited; kept < seen means the sample is a
+	 * strict subset of the table), then the per-worker sample blocks
 	 * (samples[worker][max_per_worker * dim]) packed right after. */
 	uint32_t counts[];
 } MktDsmSamples;
@@ -202,11 +214,17 @@ mkt_dsm_sample_counts(MktDsmSamples *s)
 	return s->counts;
 }
 
+static inline uint32_t *
+mkt_dsm_sample_seen(MktDsmSamples *s)
+{
+	return s->counts + s->nparticipants;
+}
+
 static inline float *
 mkt_dsm_worker_samples(MktDsmSamples *s, int worker_id)
 {
-	/* The sample blocks begin right after counts[nparticipants]. */
-	float *samples = (float *)(s->counts + s->nparticipants);
+	/* The sample blocks begin after counts[] and seen[]. */
+	float *samples = (float *)(s->counts + 2 * s->nparticipants);
 	return samples + (size_t)worker_id * s->max_per_worker * s->dim;
 }
 
@@ -214,7 +232,7 @@ static inline Size
 mkt_dsm_samples_size(int nparticipants, uint32_t max_per_worker, Dimension dim)
 {
 	Size sz = offsetof(MktDsmSamples, counts);
-	sz += (Size)nparticipants * sizeof(uint32_t);
+	sz += (Size)nparticipants * 2 * sizeof(uint32_t);
 	sz += (Size)nparticipants * max_per_worker * dim * sizeof(float);
 	return sz;
 }
@@ -455,6 +473,7 @@ typedef struct SampleCbState
 {
 	float		  *samples;
 	uint32_t	   count;
+	uint32_t	   seen;
 	uint32_t	   max_samples;
 	uint32_t	   stride;
 	uint32_t	   stride_counter;
@@ -657,12 +676,14 @@ mkt_refine_tile_leaves(uint32_t nleaves, Dimension dim, uint64_t cap_bytes)
  */
 
 /*
- * Refine the leaf encode references on the whole table, page-backed: for each
- * of refine_iters passes, every row is routed exactly as the query/insert do
- * (mkt_query_route k=1 over the centroid pages, head -> leaf), per-leaf means
+ * Refine the leaf encode references on the whole table, page-backed (one
+ * pass; routing reads only the centroid pages, which refine never rewrites,
+ * so the assignment is a fixed point): every row is routed exactly as the
+ * query/insert do (mkt_query_route k=1 over the centroid pages, head ->
+ * leaf), per-leaf means
  * accumulate into the tiled DSM accumulator, and the leader rewrites each
  * leaf's head-page pt_centroid to the full-table mean. Both leader
- * (participant 0) and workers call it; gated by shared->refine_iters so they
+ * (participant 0) and workers call it; gated by shared->refine so they
  * run the same barriers. The workers route with their own page-backed qs; the
  * leader passes qs == NULL (it does not scan) and a write_head callback.
  * Leaves are processed in tiles of accum->nleaves, so the accumulator stays

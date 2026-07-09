@@ -21,18 +21,18 @@
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-int			  mkt_distance_mode		   = MKT_DISTANCE_MODE_DEFAULT;
-int			  mkt_nprobe			   = 10;
-int			  mkt_query_limit		   = 0;
-int			  mkt_fastscan_bits		   = 16;
-bool		  mkt_rerank			   = true;
-bool		  mkt_log_build_stats	   = false;
-double		  mkt_centroid_error_scale = 0.0;
-double		  mkt_centroid_beam_scale  = 0.25;
-int			  mkt_leaf_refine_iters	   = 2;
-static bool	  mkt_recent_buffers	   = true;
-static double mkt_probe_expand		   = 2.0;
-static int	  mkt_rerank_pool		   = 0;
+int			  mkt_distance_mode			= MKT_DISTANCE_MODE_DEFAULT;
+int			  mkt_nprobe				= 10;
+int			  mkt_query_limit			= 0;
+int			  mkt_fastscan_bits			= 16;
+bool		  mkt_rerank				= true;
+bool		  mkt_log_build_stats		= false;
+double		  mkt_centroid_error_scale	= 0.0;
+double		  mkt_centroid_beam_scale	= 0.25;
+int			  mkt_leaf_refine_threshold = 64;
+static bool	  mkt_recent_buffers		= true;
+static double mkt_probe_expand			= 2.0;
+static int	  mkt_rerank_pool			= 0;
 
 static void
 mkt_recent_buffers_assign_hook(bool newval, void *extra)
@@ -131,19 +131,21 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomIntVariable(
-			"mkt.leaf_refine_iters",
-			"Full-table leaf-centroid refinement passes for memory-bounded "
-			"builds.",
-			"When maintenance_work_mem caps the k-means sample below the "
-			"ideal, "
-			"the tree structure is built from the subsample and the leaf "
-			"centroids are then refined on the whole table this many passes "
-			"(0 disables refinement). Only takes effect when the build is "
-			"sample-bounded.",
-			&mkt_leaf_refine_iters,
-			2,
+			"mkt.leaf_refine_threshold",
+			"Sample-per-leaf count below which a subsampled build refines "
+			"the leaf centroids on the full table.",
+			"The k-means sample trains each leaf's encode reference; the "
+			"reference's error shrinks with the leaf's sample count "
+			"(stderr ~ spread/sqrt(n)), so with enough samples per leaf the "
+			"full-table refine scan buys no recall. Below this many samples "
+			"per leaf the sample mean is noisy and the build re-centers the "
+			"references from the whole table (one extra scan). 0 disables "
+			"refinement; a large value refines whenever the sample was "
+			"bounded below the table.",
+			&mkt_leaf_refine_threshold,
+			64,
 			0,
-			10,
+			INT_MAX,
 			PGC_USERSET,
 			0,
 			NULL,

@@ -55,6 +55,8 @@ mkt_sample_cb(void *state, ItemPointerData tid, const float *vec)
 
 	(void)tid;
 
+	sc->seen++;
+
 	/* Stride-based subsampling */
 	if (sc->stride_counter > 0)
 	{
@@ -337,6 +339,7 @@ mkt_pbuild_exec_sampling(
 	SampleCbState sc = {
 			.samples	 = mkt_dsm_worker_samples(dsm_samples, participant_id),
 			.count		 = 0,
+			.seen		 = 0,
 			.max_samples = shared->max_samples_per_worker,
 			.stride		 = stride,
 			.stride_counter = 0,
@@ -358,6 +361,7 @@ mkt_pbuild_exec_sampling(
 			&sc);
 
 	mkt_dsm_sample_counts(dsm_samples)[participant_id] = sc.count;
+	mkt_dsm_sample_seen(dsm_samples)[participant_id]   = sc.seen;
 
 	/* Barrier: all participants done sampling. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
@@ -634,7 +638,9 @@ mkt_pbuild_exec_refine_paged(
 			.scratch	   = mkt_alloc((size_t)dim * sizeof(float)),
 	};
 
-	for (uint32_t it = 0; it < shared->refine_iters; it++)
+	/* Single pass: routing reads only the centroid pages, which refine
+	 * never rewrites, so the assignment is a fixed point and one pass
+	 * reaches it. */
 	{
 		for (uint32_t lo = 0; lo < nleaves; lo += tile)
 		{
@@ -851,9 +857,9 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	/* ---- Phase 2.5: page-backed full-table refine (only when subsampled)
 	 * ---- Workers route + accumulate; the leader clears/divides and rewrites
-	 * heads. Gated on shared->refine_iters (identical on both sides) so the
+	 * heads. Gated on shared->refine (identical on both sides) so the
 	 * barrier sequence stays in lockstep. */
-	if (shared->refine_iters > 0)
+	if (shared->refine)
 	{
 		/* The accumulator overlays the sample region (dead since the subtree
 		 * phase); the leader initialized its header before the tree-ready

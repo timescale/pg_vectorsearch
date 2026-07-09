@@ -484,22 +484,14 @@ mkt_pbuild_setup_shared(
 							  nparticipants;
 
 	/*
-	 * Refine leaf centroids on the full table afterward only when the
-	 * structure was built from a strict subset (i.e. the sample was
-	 * budget-bounded below the table). Both leader and workers gate the refine
-	 * phase on shared->refine_iters so they run the identical barrier
-	 * sequence.
-	 *
-	 * One pass, regardless of mkt.leaf_refine_iters: the refine routes every
-	 * row over the centroid PAGES, which it never rewrites (it updates the
-	 * heads' encode references, which routing does not read), so the
-	 * row-to-leaf assignment is a fixed point -- a second pass would rescan
-	 * the whole table to recompute the exact same means.
+	 * The refine decision itself is the leader's, made after clustering when
+	 * the actual leaf count is known (see MktBuildShared.refine); setup only
+	 * publishes the gate inputs. The pass is single-shot by design: refine
+	 * routes every row over the centroid PAGES, which it never rewrites (it
+	 * updates the heads' encode references, which routing does not read), so
+	 * the row-to-leaf assignment is a fixed point -- a second pass would
+	 * rescan the whole table to recompute the exact same means.
 	 */
-	uint32_t refine_iters = ((double)total_samples < est_tuples &&
-							 mkt_leaf_refine_iters > 0)
-								  ? 1
-								  : 0;
 
 	EnterParallelMode();
 
@@ -624,8 +616,9 @@ mkt_pbuild_setup_shared(
 	shared->km_tolerance		   = 1e-4f;
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
-	shared->refine_iters		   = refine_iters;
-	shared->refine_tile_cap		   = refine_iters > 0 ? refine_tile_cap : 0;
+	shared->refine_threshold	   = (uint32_t)mkt_leaf_refine_threshold;
+	shared->refine			= false; /* leader decides post-clustering */
+	shared->refine_tile_cap = refine_tile_cap;
 	/* Build routes for accuracy, not query speed (see MKT_BUILD_CENTROID_*
 	 * in posting_build.h): decouple from the query-tuned GUCs. */
 	shared->centroid_error_scale = MKT_BUILD_CENTROID_ERROR_SCALE;

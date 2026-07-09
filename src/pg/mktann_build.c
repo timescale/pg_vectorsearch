@@ -830,12 +830,17 @@ do_serial_build(
 	mkt_query_state_init(&bs->qs, &idx_base, 1, MKT_SECONDARY_TOPK);
 
 	/*
-	 * When the sample was budget-limited, refine each leaf's encode reference
-	 * on the full table (page-backed, bounded) before the encode scan, so
-	 * residuals are taken against full-table means rather than subsample
-	 * means.
+	 * When the sample was budget-limited AND the leaves are sample-thin
+	 * (below mkt.leaf_refine_threshold samples per leaf -- a leaf's encode
+	 * reference is a sample mean whose error shrinks with its count, so
+	 * well-fed leaves gain nothing from the extra scan), refine each leaf's
+	 * encode reference on the full table (page-backed, bounded) before the
+	 * encode scan.
 	 */
-	if (subsampled && mkt_leaf_refine_iters > 0)
+	if (subsampled && bs->nsamples >= bs->max_samples &&
+		mkt_leaf_refine_threshold > 0 &&
+		(uint32_t)bs->nsamples / Max(nlist, 1) <
+				(uint32_t)mkt_leaf_refine_threshold)
 	{
 		instr_time t_ref_start;
 		INSTR_TIME_SET_CURRENT(t_ref_start);
