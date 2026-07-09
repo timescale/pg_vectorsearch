@@ -514,7 +514,7 @@ typedef struct RefineCbState
 	MktQueryState  *qs;		   /* page-backed router (workers) */
 	BlockNumber first_posting; /* head -> leaf: leaf = head - first_posting */
 	uint32_t	nlist;
-	float	   *sums;	/* shared accumulator, indexed leaf - tile_lo */
+	double	   *sums;	/* shared accumulator, indexed leaf - tile_lo */
 	uint64_t   *counts; /* shared accumulator */
 	Dimension	dim;
 	bool		cosine;
@@ -531,32 +531,24 @@ mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
 
 	(void)tid;
 
-	/* Route page-backed (raw vector; mkt_query_route rotates internally). */
-	uint32_t n = mkt_query_route(
-			rs->qs, vec, 1, MKT_DISTANCE_MODE_ASYMMETRIC, NULL);
-	if (n == 0)
-		return;
-	uint32_t leaf = mkt_route_head_to_leaf(
-			rs->first_posting, rs->qs->beam_results[0].posting_head);
-	/* Only the current tile's leaves are resident in the accumulator. */
-	if (leaf < rs->tile_lo || leaf >= rs->tile_hi)
+	uint32_t	 idx;
+	const float *v = mkt_refine_route_row(
+			rs->qs,
+			rs->first_posting,
+			vec,
+			dim,
+			rs->cosine,
+			rs->scratch,
+			rs->tile_lo,
+			rs->tile_hi,
+			&idx);
+	if (v == NULL)
 		return;
 
-	/* For cosine the centroids are trained in normalized space, so accumulate
-	 * the normalized copy. */
-	const float *v = vec;
-	if (rs->cosine)
-	{
-		memcpy(rs->scratch, vec, (size_t)dim * sizeof(float));
-		mkt_l2_normalize(rs->scratch, dim);
-		v = rs->scratch;
-	}
-
-	uint32_t idx	= leaf - rs->tile_lo;
 	uint32_t stripe = idx % MKT_REFINE_LOCK_STRIPES;
 
 	mkt_pbuild_accum_lock(rs->shared, stripe);
-	float *sum = rs->sums + (size_t)idx * dim;
+	double *sum = rs->sums + (size_t)idx * dim;
 	for (Dimension j = 0; j < dim; j++)
 		sum[j] += v[j];
 	rs->counts[idx]++;
@@ -574,12 +566,12 @@ mkt_pbuild_exec_refine_paged(
 		BlockNumber			  first_posting,
 		MktDsmRefineAccum	 *accum,
 		Barrier				 *barrier,
-		MktRefineHeadFn		  write_head,
+		MktLeafWriteFn		  write_head,
 		void				 *write_head_ctx)
 {
 	Dimension dim	  = shared->dim;
 	uint32_t  nleaves = shared->nlist; /* actual leaf count (published) */
-	float	 *sums	  = mkt_dsm_refine_sums(accum);
+	double	 *sums	  = mkt_dsm_refine_sums(accum);
 	uint64_t *counts  = mkt_dsm_refine_counts(accum);
 
 	/* The accumulator holds at most accum->nleaves leaves (the bounded tile
@@ -613,7 +605,7 @@ mkt_pbuild_exec_refine_paged(
 			 */
 			if (participant_id == 0)
 			{
-				memset(sums, 0, (size_t)(hi - lo) * dim * sizeof(float));
+				memset(sums, 0, (size_t)(hi - lo) * dim * sizeof(double));
 				memset(counts, 0, (size_t)(hi - lo) * sizeof(uint64_t));
 				mkt_pbuild_rescan(heap, shared);
 			}
@@ -642,18 +634,15 @@ mkt_pbuild_exec_refine_paged(
 
 			/* Leader rewrites this tile's leaf head pages = per-leaf means. */
 			if (participant_id == 0)
-			{
-				for (uint32_t l = lo; l < hi; l++)
-				{
-					if (counts[l - lo] == 0)
-						continue; /* keep subsample centroid for empty leaf */
-					float *sum = sums + (size_t)(l - lo) * dim;
-					double inv = 1.0 / (double)counts[l - lo];
-					for (Dimension j = 0; j < dim; j++)
-						rs.scratch[j] = (float)(sum[j] * inv);
-					write_head(write_head_ctx, l, rs.scratch);
-				}
-			}
+				mkt_refine_write_means(
+						sums,
+						counts,
+						lo,
+						hi,
+						dim,
+						rs.scratch,
+						write_head,
+						write_head_ctx);
 			/* Barrier: refined heads written before the next tile/pass. */
 			BarrierArriveAndWait(
 					barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);

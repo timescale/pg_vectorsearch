@@ -606,26 +606,23 @@ refine_head_cb(
 	MemoryContext old_ctx = MemoryContextSwitchTo(rs->tmp_ctx);
 
 	const float *vin = MktVectorToRef(DatumGetMktVector(values[0])).data;
-	uint32_t	 n	 = mkt_query_route(
-			  rs->qs, vin, 1, MKT_DISTANCE_MODE_ASYMMETRIC, NULL);
-	if (n > 0)
+	uint32_t	 idx;
+	const float *v = mkt_refine_route_row(
+			rs->qs,
+			rs->first_posting,
+			vin,
+			rs->dim,
+			rs->cosine,
+			rs->scratch,
+			rs->tile_lo,
+			rs->tile_hi,
+			&idx);
+	if (v != NULL)
 	{
-		uint32_t leaf = mkt_route_head_to_leaf(
-				rs->first_posting, rs->qs->beam_results[0].posting_head);
-		if (leaf >= rs->tile_lo && leaf < rs->tile_hi)
-		{
-			const float *v = vin;
-			if (rs->cosine)
-			{
-				memcpy(rs->scratch, vin, (size_t)rs->dim * sizeof(float));
-				mkt_l2_normalize(rs->scratch, rs->dim);
-				v = rs->scratch;
-			}
-			double *sum = rs->sums + (size_t)(leaf - rs->tile_lo) * rs->dim;
-			for (Dimension j = 0; j < rs->dim; j++)
-				sum[j] += v[j];
-			rs->cnts[leaf - rs->tile_lo]++;
-		}
+		double *sum = rs->sums + (size_t)idx * rs->dim;
+		for (Dimension j = 0; j < rs->dim; j++)
+			sum[j] += v[j];
+		rs->cnts[idx]++;
 	}
 
 	MemoryContextSwitchTo(old_ctx);
@@ -644,9 +641,7 @@ serial_refine_heads(
 
 	uint64_t cap_bytes =
 			Min((uint64_t)maintenance_work_mem * 1024, (uint64_t)MaxAllocSize);
-	uint64_t per_leaf = (uint64_t)dim * sizeof(double) + sizeof(uint64_t);
-	uint32_t tile	  = (uint32_t)
-			Min((uint64_t)nlist, Max(UINT64CONST(1), cap_bytes / per_leaf));
+	uint32_t tile = mkt_refine_tile_leaves(nlist, dim, cap_bytes);
 
 	RefineHeadState rs = {
 			.qs			   = qs,
@@ -678,16 +673,15 @@ serial_refine_heads(
 				(void *)&rs,
 				NULL);
 
-		for (uint32_t l = lo; l < hi; l++)
-		{
-			if (rs.cnts[l - lo] == 0)
-				continue; /* keep the sample-trained head for an empty leaf */
-			double *sum = rs.sums + (size_t)(l - lo) * dim;
-			double	inv = 1.0 / (double)rs.cnts[l - lo];
-			for (Dimension j = 0; j < dim; j++)
-				rs.scratch[j] = (float)(sum[j] * inv);
-			serial_write_head(headctx, l, rs.scratch);
-		}
+		mkt_refine_write_means(
+				rs.sums,
+				rs.cnts,
+				lo,
+				hi,
+				dim,
+				rs.scratch,
+				serial_write_head,
+				headctx);
 	}
 
 	pfree(rs.sums);

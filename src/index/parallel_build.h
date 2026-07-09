@@ -582,7 +582,8 @@ extern void mkt_pbuild_exec_root_assign(
  * worker count, so it scales to fine nlist where per-worker accumulators would
  * not. Concurrent updates are guarded by a striped lock array owned by the
  * back-end (mkt_pbuild_accum_lock/unlock); contention is low because rows
- * spread across nleaves leaves. sums uses float (means of normalized vectors).
+ * spread across nleaves leaves. sums accumulate in double so the refined
+ * means match the serial build bit-for-bit at any table size.
  * ---------------------------------------------------------------- */
 
 #define MKT_REFINE_LOCK_STRIPES 256
@@ -591,11 +592,12 @@ typedef struct MktDsmRefineAccum
 {
 	uint32_t  nleaves;
 	Dimension dim;
-	/* float sums[nleaves * dim], then uint64 counts[nleaves], packed after. */
-	float sums[FLEXIBLE_ARRAY_MEMBER];
+	/* double sums[nleaves * dim], then uint64 counts[nleaves], packed after.
+	 */
+	double sums[FLEXIBLE_ARRAY_MEMBER];
 } MktDsmRefineAccum;
 
-static inline float *
+static inline double *
 mkt_dsm_refine_sums(MktDsmRefineAccum *a)
 {
 	return a->sums;
@@ -611,7 +613,7 @@ static inline Size
 mkt_dsm_refine_accum_size(uint32_t nleaves, Dimension dim)
 {
 	Size sz = offsetof(MktDsmRefineAccum, sums);
-	sz += (Size)nleaves * dim * sizeof(float);
+	sz += (Size)nleaves * dim * sizeof(double);
 	sz += (Size)nleaves * sizeof(uint64_t);
 	return sz;
 }
@@ -627,7 +629,7 @@ mkt_dsm_refine_accum_size(uint32_t nleaves, Dimension dim)
 static inline uint32_t
 mkt_refine_tile_leaves(uint32_t nleaves, Dimension dim, uint64_t cap_bytes)
 {
-	uint64_t per_leaf = (uint64_t)dim * sizeof(float) + sizeof(uint64_t);
+	uint64_t per_leaf = (uint64_t)dim * sizeof(double) + sizeof(uint64_t);
 	uint64_t t		  = cap_bytes / (per_leaf ? per_leaf : 1);
 	if (t < 1)
 		t = 1;
@@ -637,13 +639,10 @@ mkt_refine_tile_leaves(uint32_t nleaves, Dimension dim, uint64_t cap_bytes)
 }
 
 /*
- * Per-refined-leaf head-page writer (mirrors the serial serial_write_head):
- * the leader rewrites the leaf's posting-list head with the full-table
- * pt_centroid. Workers pass NULL (they never divide/write). Kept generic so
- * the exec (worker side) does not depend on the leader-side LeaderHeadCtx.
+ * The per-refined-leaf head writer is the shared MktLeafWriteFn from
+ * posting_build.h: the leader rewrites each leaf's posting-list head with
+ * the full-table pt_centroid; workers pass NULL (they never divide/write).
  */
-typedef void (*MktRefineHeadFn)(
-		void *ctx, uint32_t leaf, const float *centroid);
 
 /*
  * Refine the leaf encode references on the whole table, page-backed: for each
@@ -667,7 +666,7 @@ extern void mkt_pbuild_exec_refine_paged(
 		BlockNumber			  first_posting,
 		MktDsmRefineAccum	 *accum,
 		Barrier				 *barrier,
-		MktRefineHeadFn		  write_head,
+		MktLeafWriteFn		  write_head,
 		void				 *write_head_ctx);
 
 /* Striped lock seam for the refine accumulator (back-end owns the locks). */

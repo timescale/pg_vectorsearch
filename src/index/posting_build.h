@@ -178,6 +178,46 @@ mkt_route_head_to_leaf(BlockNumber first_posting, BlockNumber head)
 	return (uint32_t)(head - first_posting);
 }
 
+/*
+ * Shared refine kernels: the serial and parallel refine passes route,
+ * filter, and average identically -- only the accumulator ownership
+ * (private vs striped-locked DSM) differs, so that add stays with the
+ * caller.
+ *
+ * mkt_refine_route_row routes one row page-backed (k=1, exactly as the
+ * query and insert paths do), maps the head back to its leaf, and returns
+ * the vector to accumulate (the normalized copy in scratch for cosine) --
+ * or NULL when the row routed nowhere or outside [tile_lo, tile_hi).
+ * *out_idx is the tile-relative leaf index.
+ */
+const float *mkt_refine_route_row(
+		struct MktQueryState *qs,
+		BlockNumber			  first_posting,
+		const float			 *vec,
+		Dimension			  dim,
+		bool				  cosine,
+		float				 *scratch,
+		uint32_t			  tile_lo,
+		uint32_t			  tile_hi,
+		uint32_t			 *out_idx);
+
+/*
+ * Divide one tile's sums by their counts and hand each refined leaf mean to
+ * write_head (leaves with no routed rows keep their sample-trained head).
+ * scratch is a caller-owned [dim] float buffer.
+ */
+typedef void (*MktLeafWriteFn)(void *ctx, uint32_t leaf, const float *vec);
+
+void mkt_refine_write_means(
+		const double  *sums,
+		const uint64_t *counts,
+		uint32_t		lo,
+		uint32_t		hi,
+		Dimension		dim,
+		float		   *scratch,
+		MktLeafWriteFn	write_head,
+		void		   *write_head_ctx);
+
 /* ----------------------------------------------------------------
  * Page format ops — the only part that differs between formats
  *

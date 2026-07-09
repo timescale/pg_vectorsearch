@@ -1181,3 +1181,62 @@ mkt_flat_posting_builder_cleanup(MktFlatPostingBuilder *builder)
 		builder->enc_buf = NULL;
 	}
 }
+
+/* See posting_build.h: the route/filter/normalize half of the refine pass,
+ * shared verbatim by the serial and parallel builds. */
+const float *
+mkt_refine_route_row(
+		struct MktQueryState *qs,
+		BlockNumber			  first_posting,
+		const float			 *vec,
+		Dimension			  dim,
+		bool				  cosine,
+		float				 *scratch,
+		uint32_t			  tile_lo,
+		uint32_t			  tile_hi,
+		uint32_t			 *out_idx)
+{
+	uint32_t n = mkt_query_route(qs, vec, 1, MKT_DISTANCE_MODE_ASYMMETRIC,
+								 NULL);
+	if (n == 0)
+		return NULL;
+
+	uint32_t leaf =
+			mkt_route_head_to_leaf(first_posting, qs->beam_results[0].posting_head);
+	if (leaf < tile_lo || leaf >= tile_hi)
+		return NULL;
+	*out_idx = leaf - tile_lo;
+
+	/* Cosine centroids are trained in normalized space, so the mean must
+	 * average the normalized vectors. */
+	if (cosine)
+	{
+		memcpy(scratch, vec, (size_t)dim * sizeof(float));
+		mkt_l2_normalize(scratch, dim);
+		return scratch;
+	}
+	return vec;
+}
+
+void
+mkt_refine_write_means(
+		const double  *sums,
+		const uint64_t *counts,
+		uint32_t		lo,
+		uint32_t		hi,
+		Dimension		dim,
+		float		   *scratch,
+		MktLeafWriteFn	write_head,
+		void		   *write_head_ctx)
+{
+	for (uint32_t l = lo; l < hi; l++)
+	{
+		if (counts[l - lo] == 0)
+			continue; /* keep the sample-trained head for an empty leaf */
+		const double *sum = sums + (size_t)(l - lo) * dim;
+		double		  inv = 1.0 / (double)counts[l - lo];
+		for (Dimension j = 0; j < dim; j++)
+			scratch[j] = (float)(sum[j] * inv);
+		write_head(write_head_ctx, l, scratch);
+	}
+}
