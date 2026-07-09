@@ -40,7 +40,7 @@ else
       pg_regress,
       args: [
         '--inputdir=' + meson.current_source_dir(),
-        '--outputdir=' + meson.current_build_dir(),
+        '--outputdir=' + meson.current_build_dir() / 'regress',
         '--bindir=' + pg_bindir,
         '--temp-instance=' + meson.project_build_root() / 'testdb',
         '--temp-config=' + meson.current_build_dir() / 'meerkat_test.conf',
@@ -65,7 +65,7 @@ else
         pg_isolation_regress_mut,
         args: [
           '--inputdir=' + meson.current_source_dir(),
-          '--outputdir=' + meson.current_build_dir(),
+          '--outputdir=' + meson.current_build_dir() / 'isolation_mutations',
           '--bindir=' + pg_bindir,
           '--temp-instance=' + meson.project_build_root() / 'mut_isolation_testdb',
           '--temp-config=' + meson.current_build_dir() / 'meerkat_test.conf',
@@ -134,7 +134,7 @@ else
         pg_isolation_regress,
         args: [
           '--inputdir=' + meson.current_source_dir(),
-          '--outputdir=' + meson.current_build_dir(),
+          '--outputdir=' + meson.current_build_dir() / 'isolation',
           '--bindir=' + pg_bindir,
           '--temp-instance=' + meson.project_build_root() / 'isolation_testdb',
           '--temp-config=' + meson.current_build_dir() / 'meerkat_isolation.conf',

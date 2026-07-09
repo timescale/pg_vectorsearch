@@ -134,17 +134,21 @@ jobs:
 
       - name: Show regression diffs and server logs
         if: failure()
+        # Each suite writes to its own outputdir (regression.diffs plus the
+        # temp instance's server log under <outputdir>/log), so a failing
+        # suite's evidence survives later suites. find + cat tolerates
+        # whatever subset exists; the trailing true keeps the step from
+        # failing when nothing matched. The server logs carry the crash
+        # signal and, on an assert build, the
+        # "TRAP: failed Assert(...) File:Line".
         run: |
-          for f in builddir/test/pg/regression.diffs; do
-            [ -f "$f" ] && echo "=== $f ===" && cat "$f"
-          done
-          # Temp-instance server logs carry the crash signal and, on an
-          # assert build, the "TRAP: failed Assert(...) File:Line".
-          for d in builddir/testdb builddir/isolation_testdb; do
-            for f in "$d"/log/*; do
-              [ -f "$f" ] && echo "=== $f ===" && cat "$f"
-            done
-          done
+          find builddir/test/pg -name 'regression.diffs' \
+            -exec sh -c 'echo "=== $1 ==="; cat "$1"' _ {} \; 2>/dev/null
+          find builddir/test/pg builddir/testdb builddir/*_testdb \
+            -path '*/log/*' -type f \
+            -exec sh -c 'echo "=== $1 ==="; tail -100 "$1"' _ {} \; \
+            2>/dev/null
+          true
 
       - name: Upload test logs
         if: always()
@@ -153,6 +157,8 @@ jobs:
           name: test-logs-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.standalone && 'standalone' || matrix.pg }}
           path: |
             builddir/meson-logs/
+            builddir/test/pg/**/regression.diffs
+            builddir/test/pg/**/log/
             builddir/testdb/log/
             builddir/isolation_testdb/log/
           retention-days: 7
