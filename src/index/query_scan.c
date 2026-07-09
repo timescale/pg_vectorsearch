@@ -7,7 +7,9 @@
  * topk candidate buffer growth).
  */
 
+#include <float.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "algo/topk.h"
@@ -66,6 +68,11 @@ mkt_query_state_init(
 	 * worst case beam_width == max_nprobe. */
 	qs->beam_results	 = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
 	qs->centroid_scratch = mkt_centroid_scratch_create(dim, max_nprobe);
+
+	/* Probe-order scratch (exact centroid re-rank of the expanded
+	 * probe set; see mkt_query_set_probe_expand). */
+	qs->probe_dists = mkt_alloc(max_nprobe * sizeof(float));
+	qs->probe_order = mkt_alloc(max_nprobe * sizeof(uint32_t));
 
 	/* Top-K */
 	mkt_topk_init(&qs->topk, max_k);
@@ -164,11 +171,48 @@ search_centroids(
 			beam_stats);
 }
 
+/* Probe-order refinement factor (mkt.probe_expand); see query_scan.h.
+ * Enabled by default: expansion gains saturate around a factor of 2,
+ * so 2.0 captures ~all the recall benefit of exact probe ordering.
+ * 1.0 means no expansion (identity). */
+static double g_probe_expand = 2.0;
+
+/* Cap on extra routed candidates. At large nprobe a deep scan already
+ * covers cluster membership, so ordering refinement adds little while
+ * the phase-A cost keeps growing linearly; capping the expansion keeps
+ * the overhead bounded (measured to retain nearly all of the recall
+ * gain at high nprobe). */
+#define MKT_PROBE_EXPAND_MAX_EXTRA 256
+
+void
+mkt_query_set_probe_expand(double expand)
+{
+	g_probe_expand = expand;
+}
+
+/* qsort comparator for probe_order indices by probe_dists (context via
+ * a file-static base pointer; the scan path is single-threaded per
+ * backend). */
+static const float *g_probe_sort_dists;
+
+static int
+cmp_probe_order(const void *a, const void *b)
+{
+	float da = g_probe_sort_dists[*(const uint32_t *)a];
+	float db = g_probe_sort_dists[*(const uint32_t *)b];
+	if (da < db)
+		return -1;
+	if (da > db)
+		return 1;
+	return 0;
+}
+
 static void
 scan_clusters(
 		MktQueryState			*qs,
 		const MktCentroidResult *beam_results,
 		uint32_t				 n_results,
+		uint32_t				 scan_limit,
 		MktDistanceMode			 mode,
 		MktTopK					*topk,
 		MktQueryStats			*stats)
@@ -178,12 +222,52 @@ scan_clusters(
 
 	qs->pscan.storage = idx->posting_storage;
 
+	/*
+	 * Phase A (only when the probe set was expanded): re-rank the routed
+	 * clusters by EXACT query-centroid distance. The beam's RaBitQ
+	 * distances are 1-bit estimates whose noise scrambles the probe
+	 * order; each cluster's first posting page stores the full-precision
+	 * rotated centroid, so one page read + one O(dim) distance per
+	 * candidate recovers the true order. Only the best `scan_limit`
+	 * clusters are then scanned.
+	 */
+	const uint32_t *order  = NULL;
+	uint32_t		n_scan = n_results;
+
+	if (n_results > scan_limit)
+	{
+		for (uint32_t j = 0; j < n_results; j++)
+		{
+			qs->probe_order[j] = j;
+			qs->probe_dists[j] = FLT_MAX;
+
+			BlockNumber ph = beam_results[j].posting_head;
+			if (ph == InvalidBlockNumber)
+				continue;
+
+			mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
+			const float *pt_cent = mkt_posting_scan_pt_centroid(&qs->pscan);
+			if (pt_cent != NULL)
+				qs->probe_dists[j] =
+						mkt_l2_distance_squared(qs->pt_query, pt_cent, dim);
+			mkt_posting_scan_end_cluster(&qs->pscan);
+		}
+
+		g_probe_sort_dists = qs->probe_dists;
+		qsort(qs->probe_order, n_results, sizeof(uint32_t), cmp_probe_order);
+
+		order  = qs->probe_order;
+		n_scan = scan_limit;
+	}
+
 	uint32_t total_pages   = 0;
 	uint32_t total_skipped = 0;
 	uint32_t total_entries = 0;
+	uint32_t scanned	   = 0;
 
-	for (uint32_t j = 0; j < n_results; j++)
+	for (uint32_t r = 0; r < n_scan; r++)
 	{
+		uint32_t	j  = order ? order[r] : r;
 		BlockNumber ph = beam_results[j].posting_head;
 		if (ph == InvalidBlockNumber)
 			continue;
@@ -208,12 +292,14 @@ scan_clusters(
 		total_skipped += qs->pscan.pages_skipped;
 		total_entries += qs->pscan.entries_scanned;
 		mkt_posting_scan_end_cluster(&qs->pscan);
+		scanned++;
 	}
 
 	qs->pscan.storage = NULL;
 
 	if (stats != NULL)
 	{
+		stats->clusters_scanned		   = scanned;
 		stats->posting_pages_read	   = total_pages;
 		stats->posting_pages_skipped   = total_skipped;
 		stats->posting_entries_scanned = total_entries;
@@ -277,9 +363,30 @@ mkt_query_execute(
 	mkt_topk_reset(&qs->topk);
 	qs->topk.k = k;
 
+	/* Probe expansion: route extra leaf candidates so phase A of
+	 * scan_clusters can pick the best `nprobe` by exact centroid
+	 * distance. n_route == nprobe (expand == 1, no expansion) keeps
+	 * the classic single-phase behavior. Skipped entirely when the
+	 * centroid pages are exact (float/half): the beam distances are
+	 * already exact, so there is no ordering noise to correct. */
+	uint32_t n_route = nprobe;
+	if (g_probe_expand > 1.0 &&
+		qs->index->centroid_format != MKT_CENTROID_FMT_FLOAT &&
+		qs->index->centroid_format != MKT_CENTROID_FMT_HALF)
+	{
+		double expanded = (double)nprobe * g_probe_expand;
+		n_route			= (uint32_t)(expanded + 0.5);
+		if (n_route > nprobe + MKT_PROBE_EXPAND_MAX_EXTRA)
+			n_route = nprobe + MKT_PROBE_EXPAND_MAX_EXTRA;
+		if (n_route > qs->max_nprobe)
+			n_route = qs->max_nprobe;
+		if (n_route < nprobe)
+			n_route = nprobe;
+	}
+
 	MktCentroidSearchStats beam_stats = {0};
 	uint32_t			   ncentroids =
-			mkt_query_route(qs, query, nprobe, mode, &beam_stats);
+			mkt_query_route(qs, query, n_route, mode, &beam_stats);
 
 	/* mkt_query_route already normalized the query into qs->query_buf (for
 	 * cosine) via prepare_query; reuse it for the rerank below instead of
@@ -289,7 +396,8 @@ mkt_query_execute(
 	const float *qvec = (qs->index->metric == DISTANCE_COSINE) ? qs->query_buf
 															   : query;
 
-	scan_clusters(qs, qs->beam_results, ncentroids, mode, &qs->topk, stats);
+	scan_clusters(
+			qs, qs->beam_results, ncentroids, nprobe, mode, &qs->topk, stats);
 
 	uint32_t ncands = extract_candidates(qs);
 
@@ -333,8 +441,8 @@ mkt_query_execute(
 
 	if (stats != NULL)
 	{
+		/* clusters_scanned is set by scan_clusters (actual count). */
 		stats->centroid_pages_read = beam_stats.pages_read;
-		stats->clusters_scanned	   = ncentroids;
 	}
 
 	return qs->nresults;
