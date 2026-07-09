@@ -342,15 +342,7 @@ do_parallel_build(
 	 * needs — for the root children it owns, and the leader streams each to
 	 * centroid pages a batch at a time (no in-RAM whole-tree assembly).
 	 */
-	uint32_t nlevels = 1;
-	{
-		uint32_t n = nlist;
-		while (n > fan_out)
-		{
-			n = (n + fan_out - 1) / fan_out;
-			nlevels++;
-		}
-	}
+	uint32_t nlevels = mkt_compute_nlevels(nlist, fan_out);
 
 	/* ---- Phase 2b: root assignment (leader as participant 0). ---- */
 	mkt_pbuild_exec_root_assign(
@@ -528,36 +520,19 @@ do_parallel_build(
 		 * subtree roots). Written last, but in place, so first_centroid
 		 * stays 1. */
 		root_blk = first_centroid;
-		if (fmt == MKT_CENTROID_FMT_FASTSCAN)
-			mkt_centroid_write_fastscan_pages(
-					storage,
-					dim,
-					km_k,
-					0,
-					0,
-					rq_params,
-					cents,
-					global_mean,
-					subtree_root_blk,
-					root_blk);
-		else
-		{
-			CentroidEncoderState est;
-			CentroidEncoder		*enc = centroid_encoder_init(
-					&est, fmt, cents, dim, rq_params, global_mean);
-			mkt_centroid_write_pages(
-					storage,
-					dim,
-					km_k,
-					fmt,
-					0,
-					0,
-					(uint16_t)fan_out,
-					enc,
-					subtree_root_blk,
-					NULL,
-					root_blk);
-		}
+		mkt_centroid_write_node(
+				storage,
+				dim,
+				cents,
+				km_k,
+				fmt,
+				0,
+				0,
+				(uint16_t)fan_out,
+				rq_params,
+				global_mean,
+				subtree_root_blk,
+				root_blk);
 
 		mkt_free(head.pt);
 		mkt_free(subtree_root_blk);

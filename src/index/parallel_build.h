@@ -298,14 +298,7 @@ mkt_dsm_child_subtree(char *base, uint32_t slot, uint64_t slot_size)
 static inline uint32_t
 mkt_compute_nlevels(uint32_t nlist, uint32_t fan_out)
 {
-	uint32_t nlevels = 1;
-	uint32_t n		 = nlist;
-	while (n > fan_out)
-	{
-		n = (n + fan_out - 1) / fan_out;
-		nlevels++;
-	}
-	return nlevels;
+	return mkt_hkmeans_nlevels(nlist, fan_out);
 }
 
 /*

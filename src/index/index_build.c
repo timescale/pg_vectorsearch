@@ -174,6 +174,59 @@ typedef struct StreamCtx
 	bool		ok;
 } StreamCtx;
 
+/*
+ * Write one tree node's centroid page(s) in the node's format: the fastscan
+ * writer carries its own encoder; every other format goes through the
+ * generic encoder + page writer. Shared by the streaming DFS and the
+ * parallel leader's root-page write.
+ */
+void
+mkt_centroid_write_node(
+		MktStorage		   *storage,
+		Dimension			dim,
+		const float		   *cents,
+		uint32_t			n,
+		MktCentroidFormat	fmt,
+		uint8_t				level,
+		uint16_t			flags,
+		uint16_t			child_count,
+		const RaBitQParams *rq_params,
+		const float		   *global_mean,
+		const BlockNumber  *child_blks,
+		BlockNumber			blkno)
+{
+	if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+		mkt_centroid_write_fastscan_pages(
+				storage,
+				dim,
+				n,
+				level,
+				flags,
+				rq_params,
+				cents,
+				global_mean,
+				child_blks,
+				blkno);
+	else
+	{
+		CentroidEncoderState est;
+		CentroidEncoder		*enc = centroid_encoder_init(
+				&est, fmt, cents, dim, rq_params, global_mean);
+		mkt_centroid_write_pages(
+				storage,
+				dim,
+				n,
+				fmt,
+				level,
+				flags,
+				child_count,
+				enc,
+				child_blks,
+				NULL,
+				blkno);
+	}
+}
+
 /* Pages one node of `n` entries occupies — must match the writers' packing. */
 static uint32_t
 stream_pages_for(const StreamCtx *c, uint32_t n)
@@ -207,37 +260,19 @@ stream_write_node(
 	uint16_t	flags = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
 	BlockNumber start = c->next_blk;
 
-	if (c->format == MKT_CENTROID_FMT_FASTSCAN)
-		mkt_centroid_write_fastscan_pages(
-				c->storage,
-				c->dim,
-				n,
-				(uint8_t)level,
-				flags,
-				c->rq_params,
-				cents,
-				c->global_mean,
-				child_blks,
-				start);
-	else
-	{
-		CentroidEncoderState est;
-		CentroidEncoder		*enc = centroid_encoder_init(
-				&est, c->format, cents, c->dim, c->rq_params, c->global_mean);
-		uint16_t child_count = is_leaf ? 0 : (uint16_t)c->fan_out;
-		mkt_centroid_write_pages(
-				c->storage,
-				c->dim,
-				n,
-				c->format,
-				(uint8_t)level,
-				flags,
-				child_count,
-				enc,
-				child_blks,
-				NULL,
-				start);
-	}
+	mkt_centroid_write_node(
+			c->storage,
+			c->dim,
+			cents,
+			n,
+			c->format,
+			(uint8_t)level,
+			flags,
+			is_leaf ? 0 : (uint16_t)c->fan_out,
+			c->rq_params,
+			c->global_mean,
+			child_blks,
+			start);
 
 	c->next_blk += stream_pages_for(c, n);
 	return start;

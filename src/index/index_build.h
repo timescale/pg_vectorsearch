@@ -115,6 +115,25 @@ void mkt_write_centroid_tree(
  * depends on it.
  * ---------------------------------------------------------------- */
 
+/*
+ * Write one tree node's centroid page(s) in the node's format (fastscan or
+ * encoder-based). child_count is the non-leaf entries' child capacity;
+ * pass 0 for leaf-parent nodes.
+ */
+void mkt_centroid_write_node(
+		MktStorage		   *storage,
+		Dimension			dim,
+		const float		   *cents,
+		uint32_t			n,
+		MktCentroidFormat	fmt,
+		uint8_t				level,
+		uint16_t			flags,
+		uint16_t			child_count,
+		const struct RaBitQParams *rq_params,
+		const float		   *global_mean,
+		const BlockNumber  *child_blks,
+		BlockNumber			blkno);
+
 typedef struct MktStreamTreePlan
 {
 	uint32_t nleaves;
