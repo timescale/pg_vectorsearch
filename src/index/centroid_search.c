@@ -479,6 +479,70 @@ select_topk_bounded(
 	return nresults;
 }
 
+/*
+ * Emit all of a centroid page's children as candidates without scoring.
+ *
+ * Used when a level's selection cannot reject anything (keep >= entry
+ * count): the distances would exist only to rank candidates for a
+ * selection that keeps them all, and the next level re-scores its own
+ * children from scratch, so computing them is pure waste. Candidates
+ * are emitted with zero distance/error.
+ */
+static uint32_t
+emit_page_children(
+		Page		page,
+		BlockNumber page_blkno,
+		Dimension	dim,
+		Candidate  *cands,
+		uint32_t	cand_count,
+		uint32_t	cand_cap)
+{
+	MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
+	uint16_t			   count  = opaque->entry_count;
+	MktCentroidFormat	   fmt	  = mkt_centroid_page_format(page);
+
+	if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+	{
+		char	*content = (char *)PageGetContents(page);
+		uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) /
+						   MKT_FASTSCAN_GROUP;
+
+		for (uint32_t g = 0; g < ngroups; g++)
+		{
+			uint32_t g_start = g * MKT_FASTSCAN_GROUP;
+			uint32_t g_count = count - g_start;
+			if (g_count > MKT_FASTSCAN_GROUP)
+				g_count = MKT_FASTSCAN_GROUP;
+
+			const BlockNumber *child = (const BlockNumber *)
+					mkt_centroid_fastscan_group_child(content, g, dim);
+
+			for (uint32_t v = 0; v < g_count && cand_count < cand_cap; v++)
+			{
+				cands[cand_count].child_blkno = child[v];
+				ItemPointerSet(
+						&cands[cand_count].origin, page_blkno, g_start + v);
+				cands[cand_count].distance = 0.0f;
+				cands[cand_count].error	   = 0.0f;
+				cand_count++;
+			}
+		}
+		return cand_count;
+	}
+
+	for (uint16_t i = 0; i < count && cand_count < cand_cap; i++)
+	{
+		const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, i);
+
+		cands[cand_count].child_blkno = meta->child_blkno;
+		ItemPointerSet(&cands[cand_count].origin, page_blkno, i);
+		cands[cand_count].distance = 0.0f;
+		cands[cand_count].error	   = 0.0f;
+		cand_count++;
+	}
+	return cand_count;
+}
+
 uint32_t
 mkt_centroid_beam_search(
 		const MktCentroidSearchState *state,
@@ -534,43 +598,80 @@ mkt_centroid_beam_search(
 
 	uint32_t centroid_pages_read = 0;
 
-	/* Level 0: read root centroid page(s), score ALL centroids */
-	uint32_t	raw_count = 0;
-	BlockNumber blkno	  = first_centroid_blkno;
-
-	while (blkno != InvalidBlockNumber)
-	{
-		Page page = mkt_storage_read_page(state->storage, blkno);
-		centroid_pages_read++;
-		raw_count = score_page(
-				state, page, blkno, dim, buf_a, raw_count, cand_cap, scratch);
-		MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
-		BlockNumber			   next_blkno = opaque->next_blkno;
-		mkt_storage_release_page(state->storage, blkno);
-		blkno = next_blkno;
-	}
-	if (stats)
-		stats->dist_calcs += raw_count;
-
 	/* beam_width is the intermediate-level keep; the leaf level always
 	 * returns nprobe (see keep below), and beam_width*fan_out >= nprobe
 	 * covers the top-nprobe leaves, so beam_width may be < nprobe. */
 	if (beam_width < 1)
 		beam_width = 1;
 
-	/* Select top-K from level 0 into buf_b.
+	uint32_t level0_keep = (nlevels == 1) ? nprobe : beam_width;
+
+	/* Level 0: read root centroid page(s), score ALL centroids.
+	 *
+	 * Fast path: when the root is a single page whose entry count does
+	 * not exceed the level-0 keep, selection cannot reject anything —
+	 * scoring would rank candidates for a no-op selection, and level 1
+	 * re-scores its own children anyway. Emit the children directly
+	 * and skip both the scoring and the top-K pass. */
+	uint32_t	raw_count	= 0;
+	bool		level0_full = false;
+	BlockNumber blkno		= first_centroid_blkno;
+
+	while (blkno != InvalidBlockNumber)
+	{
+		Page page = mkt_storage_read_page(state->storage, blkno);
+		MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
+		centroid_pages_read++;
+
+		if (raw_count == 0 && opaque->next_blkno == InvalidBlockNumber &&
+			opaque->entry_count <= level0_keep && nlevels > 1)
+		{
+			raw_count =
+					emit_page_children(page, blkno, dim, buf_a, 0, cand_cap);
+			level0_full = true;
+		}
+		else
+			raw_count = score_page(
+					state,
+					page,
+					blkno,
+					dim,
+					buf_a,
+					raw_count,
+					cand_cap,
+					scratch);
+
+		BlockNumber next_blkno = opaque->next_blkno;
+		mkt_storage_release_page(state->storage, blkno);
+		blkno = next_blkno;
+	}
+	if (stats && !level0_full)
+		stats->dist_calcs += raw_count;
+
+	/* Select top-K from level 0 into buf_b (skipped when the fast path
+	 * already kept everything).
 	 *
 	 * Error-bound-aware selection via MktTopK: keeps the beam_width
 	 * candidates with smallest upper bounds, plus any additional
 	 * candidates whose lower bound overlaps the threshold. For
 	 * exact formats (error=0) this returns exactly beam_width. */
-	uint32_t keep		= (nlevels == 1) ? nprobe : beam_width;
-	uint32_t cand_count = select_topk_bounded(
-			scratch, buf_a, raw_count, keep, buf_b, cand_cap);
+	Candidate *live;
+	Candidate *expand_buf;
+	uint32_t   cand_count;
 
-	/* buf_b is now the live set */
-	Candidate *live		  = buf_b;
-	Candidate *expand_buf = buf_a;
+	if (level0_full)
+	{
+		live	   = buf_a;
+		expand_buf = buf_b;
+		cand_count = raw_count;
+	}
+	else
+	{
+		cand_count = select_topk_bounded(
+				scratch, buf_a, raw_count, level0_keep, buf_b, cand_cap);
+		live	   = buf_b;
+		expand_buf = buf_a;
+	}
 
 	/* Intermediate levels: expand winners via child_blkno */
 	for (uint8_t level = 1; level < nlevels; level++)
@@ -607,9 +708,9 @@ mkt_centroid_beam_search(
 			stats->dist_calcs += next_count;
 
 		/* Select winners into live; expand_buf is the raw input. */
-		keep	   = (level == nlevels - 1) ? nprobe : beam_width;
-		cand_count = select_topk_bounded(
-				scratch, expand_buf, next_count, keep, live, cand_cap);
+		uint32_t keep = (level == nlevels - 1) ? nprobe : beam_width;
+		cand_count	  = select_topk_bounded(
+				   scratch, expand_buf, next_count, keep, live, cand_cap);
 	}
 
 	/* Build results in caller-owned memory (cap at nprobe) */
