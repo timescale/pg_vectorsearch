@@ -168,7 +168,7 @@ SELECT count(*) = 60 AS all_rows_reachable FROM (
     ORDER BY v <-> '[0.5,0,0]' LIMIT 100) t;
  all_rows_reachable 
 --------------------
- f
+ t
 (1 row)
 
 RESET mkt.query_limit;
