@@ -113,31 +113,6 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	if (has_fastscan)
 		mkt_posting_scan_enable_fastscan(&ss->qstate.pscan, mkt_fastscan_bits);
 
-	/* Enable TID dedup if index uses vector replication */
-	MktannOptions *opts	 = (MktannOptions *)index->rd_options;
-	bool has_replication = opts != NULL && (opts->soar_lambda > 0.0 ||
-											opts->boundary_epsilon > 0.0);
-	if (has_replication)
-	{
-		/* Size the dedup set to the nprobe actually requested for this
-		 * scan (the GUC is set before the query runs), not the worst-case
-		 * max_nprobe. The buffer is zeroed once per scan via palloc0, so
-		 * oversizing it to max_nprobe (4096) burned a large per-query memset
-		 * — tens of MB at low nlist — regardless of the real nprobe. */
-		uint32_t req_nprobe = mkt_nprobe > 0 ? (uint32_t)mkt_nprobe : 1;
-		if (req_nprobe > max_nprobe)
-			req_nprobe = max_nprobe;
-		uint32_t avg_per_cluster = info.ntuples / Max(info.nlist, 1);
-		uint32_t est_entries	 = req_nprobe * avg_per_cluster * 2;
-		uint32_t cap			 = 1024;
-		while (cap < est_entries * 2)
-			cap *= 2;
-		ss->qstate.dedup_set  = palloc(cap * sizeof(uint64_t));
-		ss->qstate.dedup_gens = palloc0(cap * sizeof(uint32_t));
-		ss->qstate.dedup_cap  = cap;
-		ss->qstate.dedup_gen  = 0;
-	}
-
 	/* Pre-allocate result buffer. The error-bound rerank can return more than
 	 * max_k results, so this is a starting size; rescan grows it as needed. */
 	ss->results		= palloc(max_k * sizeof(MktannScanResult));

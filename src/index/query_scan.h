@@ -66,13 +66,6 @@ typedef struct MktQueryState
 	uint32_t			cand_cap;
 	uint32_t			ncandidates;
 
-	/* TID dedup hash for replicated vectors (NULL = disabled).
-	 * Uses generation counter — no memset per query. */
-	uint64_t *dedup_set;
-	uint32_t *dedup_gens;
-	uint32_t  dedup_cap; /* power of 2 */
-	uint32_t  dedup_gen; /* bumped per query */
-
 	/* Result ordering (indices into candidates + final distances) */
 	uint32_t *result_order;
 	Distance *result_dists;
