@@ -1,0 +1,91 @@
+-- Query-time GUC behavior
+--
+-- Home for tests of the mkt.* GUCs that shape an index scan (query
+-- limit, probe count, rerank pool, ...): defaults, bounds, and their
+-- interaction with the query.
+-- Tie-free deterministic data (grid data would produce distance ties)
+CREATE TABLE query_settings_test (id serial, v vector(32));
+INSERT INTO query_settings_test (v)
+    SELECT (
+        SELECT array_agg(sin(i * 0.1 + j * 0.7)::real)
+        FROM generate_series(0, 31) j
+    )::vector(32)
+    FROM generate_series(1, 500) i;
+CREATE INDEX idx_query_settings ON query_settings_test USING mktann (v)
+    WITH (centroid_compression = true);
+SET enable_seqscan = off;
+-- Probe everything so results are deterministic.
+SET mkt.nprobe = 1000;
+-- mkt.query_limit sizes the scan's top-K, so a LIMIT above the
+-- built-in default k returns the full result count (a regression here
+-- silently truncates results to the default).
+SET mkt.query_limit = 50;
+SELECT count(*) AS rows_k50 FROM (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 50) t;
+ rows_k50 
+----------
+       50
+(1 row)
+
+SET mkt.query_limit = 200;
+SELECT count(*) AS rows_k200 FROM (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 200) t;
+ rows_k200 
+-----------
+       200
+(1 row)
+
+-- A LIMIT below query_limit returns the LIMIT, not the GUC value.
+SET mkt.query_limit = 100;
+SELECT count(*) AS rows_limit_below_guc FROM (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 7) t;
+ rows_limit_below_guc 
+----------------------
+                    7
+(1 row)
+
+-- The enlarged top-K must hold the right rows, not merely enough rows:
+-- the index top-50 must match the exact top-50.
+SET mkt.query_limit = 50;
+CREATE TEMP TABLE result_k50 AS
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 50;
+RESET enable_seqscan;
+SET enable_indexscan = off;
+CREATE TEMP TABLE truth_k50 AS
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 50;
+RESET enable_indexscan;
+SELECT count(*) AS matching_top50
+    FROM truth_k50 t JOIN result_k50 r USING (id);
+ matching_top50 
+----------------
+             50
+(1 row)
+
+-- Default (query_limit = 0): the scan returns at most the built-in
+-- default k regardless of a larger LIMIT. This pins the current
+-- contract; update deliberately if the default ever changes.
+RESET mkt.query_limit;
+SET enable_seqscan = off;
+SELECT count(*) AS rows_default_guc FROM (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 50) t;
+ rows_default_guc 
+------------------
+               10
+(1 row)
+
+RESET enable_seqscan;
+RESET mkt.nprobe;
+-- Cleanup
+DROP TABLE query_settings_test;
