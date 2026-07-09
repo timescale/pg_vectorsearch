@@ -13,6 +13,7 @@
 #include "algo/distance.h"
 #include "algo/kmeans.h"
 #include "git_commit.h"
+#include "index/query_scan.h"
 #include "mkt_pg.h"
 #include "mktann_explain.h"
 #include "mktann_storage.h"
@@ -20,21 +21,28 @@
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-int			mkt_distance_mode		 = MKT_DISTANCE_MODE_DEFAULT;
-int			mkt_nprobe				 = 10;
-int			mkt_query_limit			 = 0;
-int			mkt_fastscan_bits		 = 16;
-bool		mkt_rerank				 = true;
-bool		mkt_log_build_stats		 = false;
-double		mkt_centroid_error_scale = 0.0;
-double		mkt_centroid_beam_scale	 = 0.25;
-int			mkt_leaf_refine_iters	 = 2;
-static bool mkt_recent_buffers		 = true;
+int			  mkt_distance_mode		   = MKT_DISTANCE_MODE_DEFAULT;
+int			  mkt_nprobe			   = 10;
+int			  mkt_query_limit		   = 0;
+int			  mkt_fastscan_bits		   = 16;
+bool		  mkt_rerank			   = true;
+bool		  mkt_log_build_stats	   = false;
+double		  mkt_centroid_error_scale = 0.0;
+double		  mkt_centroid_beam_scale  = 0.25;
+int			  mkt_leaf_refine_iters	   = 2;
+static bool	  mkt_recent_buffers	   = true;
+static double mkt_probe_expand		   = 2.0;
 
 static void
 mkt_recent_buffers_assign_hook(bool newval, void *extra)
 {
 	mktann_storage_set_recent_buffers(newval);
+}
+
+static void
+mkt_probe_expand_assign_hook(double newval, void *extra)
+{
+	mkt_query_set_probe_expand(newval);
 }
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
@@ -242,6 +250,29 @@ _PG_init(void)
 			0,
 			NULL,
 			mkt_recent_buffers_assign_hook,
+			NULL);
+
+	DefineCustomRealVariable(
+			"mkt.probe_expand",
+			"Probe-candidate expansion factor for exact centroid re-rank.",
+			"Routes ceil(nprobe * expand) leaf candidates through the "
+			"centroid beam, re-ranks them by exact query-centroid distance "
+			"(the full-precision rotated centroid on each cluster's first "
+			"posting page), and scans only the best nprobe in that order. "
+			"Corrects the probe-order noise of compressed (RaBitQ) centroid "
+			"routing; skipped automatically for indexes with exact "
+			"float/half centroids. 1.0 means no expansion (identity). "
+			"Gains saturate around 2 (the default); the extra routed "
+			"candidates are capped at 256, which bounds the overhead at "
+			"large nprobe while retaining nearly all of the recall gain.",
+			&mkt_probe_expand,
+			2.0,
+			1.0,
+			16.0,
+			PGC_USERSET,
+			0,
+			NULL,
+			mkt_probe_expand_assign_hook,
 			NULL);
 
 	MarkGUCPrefixReserved("mkt");
