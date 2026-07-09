@@ -357,7 +357,7 @@ pg_rerank(
 
 	MktTopKEntry *entries = palloc(topk.cand_count * sizeof(MktTopKEntry));
 	uint32_t	  nresults;
-	mkt_topk_extract_sorted(&topk, entries, &nresults);
+	mkt_topk_extract_sorted_unique(&topk, entries, &nresults);
 
 	for (uint32_t i = 0; i < nresults; i++)
 	{
@@ -513,7 +513,7 @@ pg_rerank_readstream(
 
 	MktTopKEntry *entries = palloc(topk.cand_count * sizeof(MktTopKEntry));
 	uint32_t	  nresults;
-	mkt_topk_extract_sorted(&topk, entries, &nresults);
+	mkt_topk_extract_sorted_unique(&topk, entries, &nresults);
 
 	for (uint32_t i = 0; i < nresults; i++)
 	{

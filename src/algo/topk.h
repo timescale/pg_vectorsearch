@@ -61,6 +61,7 @@ typedef struct MktTopK
 	uint64_t	 *ub_ids;		 /* parallel array: ID for each heap entry */
 	uint32_t	  ub_count;		 /* entries in threshold heap (<= k) */
 	uint32_t	  k;			 /* target K */
+	uint32_t	  k_capacity;	 /* allocated ub_heap/ub_ids capacity */
 	MktTopKEntry *candidates;	 /* growable candidate buffer */
 	uint32_t	  cand_count;	 /* buffered candidates */
 	uint32_t	  cand_capacity; /* allocated capacity */
@@ -148,6 +149,10 @@ mkt_topk_threshold(const MktTopK *topk)
  * mkt_topk_cleanup() when done with the results.
  */
 void mkt_topk_extract_sorted(
+		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out);
+
+/* As above, but skips the duplicate-id pass; ids must be unique. */
+void mkt_topk_extract_sorted_unique(
 		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out);
 
 #endif /* MKT_TOPK_H */
