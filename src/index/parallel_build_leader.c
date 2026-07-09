@@ -271,8 +271,13 @@ do_parallel_build(
 	BarrierAttach(barrier);
 
 	/* ---- Launch workers + wait until they've all attached ---- */
-	if (!mkt_pbuild_launch(pcxt, barrier))
+	if (!mkt_pbuild_launch(pcxt, barrier, shared))
 		return false;
+
+	/* The launch may have narrowed the participant count to the party that
+	 * actually attached; partition the phases below over that count. */
+	nparticipants = shared->nparticipants;
+
 	/* ==== Leader participates in all phases as worker_id=0 ==== */
 
 	/* ---- Phase 1: sampling (leader runs the worker body as participant 0)

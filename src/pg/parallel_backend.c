@@ -270,7 +270,8 @@ mkt_pbuild_teardown(ParallelContext *pcxt)
  * at the barrier instead.
  */
 bool
-mkt_pbuild_launch(ParallelContext *pcxt, Barrier *barrier)
+mkt_pbuild_launch(
+		ParallelContext *pcxt, Barrier *barrier, MktBuildShared *shared)
 {
 	LaunchParallelWorkers(pcxt);
 
@@ -299,6 +300,13 @@ mkt_pbuild_launch(ParallelContext *pcxt, Barrier *barrier)
 				WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 		ResetLatch(MyLatch);
 	}
+
+	/* The launch can fall short of the plan (the parallel-worker pool under
+	 * max_parallel_workers is shared with concurrent queries). Narrow the
+	 * participant count to the party that attached so the phases partition
+	 * their work over participants that exist; the per-participant DSM
+	 * regions keep their planned size and leave the tail slots unused. */
+	shared->nparticipants = pcxt->nworkers_launched + 1;
 	return true;
 }
 
