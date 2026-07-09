@@ -9,6 +9,7 @@
 #ifndef MKT_INDEX_BUILD_H
 #define MKT_INDEX_BUILD_H
 
+struct MktBlobStore;
 #include <stdint.h>
 
 #include "algo/hkmeans.h"
@@ -139,6 +140,7 @@ bool mkt_stream_centroid_plan(
 		DistanceMetric		 metric,
 		MktCentroidFormat	 format,
 		const KMeansOptions *opts,
+		struct MktBlobStore *store,
 		MktStreamTreePlan	*out);
 
 /*
@@ -175,6 +177,7 @@ BlockNumber mkt_stream_centroid_write(
 		const RaBitQParams	*rq_params,
 		const float			*global_mean,
 		const KMeansOptions *opts,
+		struct MktBlobStore *store,
 		BlockNumber			 first_posting,
 		BlockNumber			 first_centroid,
 		MktStreamLeafCb		 on_leaf,

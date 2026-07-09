@@ -14,6 +14,7 @@
 #include "core/memory.h"
 #include "index/centroid_build.h"
 #include "index/index_build.h"
+#include "index/parallel_build.h" /* MktBlobStore seam (plan/write replay) */
 #include "quant/fastscan.h"
 
 BlockNumber
@@ -156,6 +157,14 @@ typedef struct StreamCtx
 	/* plan-phase page-count helpers */
 	uint32_t max_ent; /* non-fastscan entries/page */
 	uint32_t fs_gpp;  /* fastscan groups/page */
+	/* Node replay through the caller's blob store: the plan pass records
+	 * each node's clustering ({k, centroids, assignments}, recursion order)
+	 * and the write pass replays it instead of re-running k-means. NULL
+	 * keeps the self-contained re-cluster behavior (unit/standalone
+	 * callers). */
+	MktBlobStore *store;
+	float		 *replay_cents;	 /* write: [fan_out * dim] */
+	uint16_t	 *replay_assign; /* write: [nvecs] */
 	/* accumulators */
 	uint32_t  nleaves;			/* running (== next first_leaf) */
 	uint32_t *leaf_counts;		/* plan only, [nlist] */
@@ -253,26 +262,84 @@ stream_node(
 	if (k > count)
 		k = count;
 
-	KMeansResult *km = mkt_kmeans(
-			c->vectors,
-			slice,
-			MKT_VEC_F32,
-			count,
-			c->dim,
-			k,
-			c->metric,
-			&c->opts);
-	c->opts.initial_centroids = NULL; /* root only (matches mkt_hkmeans_f32) */
-	if (km == NULL)
+	/* This node's clustering: replayed from the blob store on the write
+	 * pass when the plan pass recorded it, otherwise computed (and, on the
+	 * plan pass, recorded). The record travels in recursion order, so the
+	 * write pass consumes it in exactly the order it was produced. */
+	KMeansResult   *km			= NULL;
+	float		   *cents		= NULL;
+	const uint32_t *assign32	= NULL;
+	const uint16_t *assign16	= NULL;
+	uint32_t		nclusters	= 0;
+
+	if (c->store != NULL && c->emit)
 	{
-		c->ok = false;
-		return InvalidBlockNumber;
+		uint32_t rec_k = 0;
+		if (mkt_pbuild_blobstore_get(c->store, &rec_k, sizeof(rec_k)) !=
+					sizeof(rec_k) ||
+			rec_k == 0 || rec_k > c->fan_out ||
+			mkt_pbuild_blobstore_get(
+					c->store,
+					c->replay_cents,
+					(uint64_t)rec_k * c->dim * sizeof(float)) !=
+					(uint64_t)rec_k * c->dim * sizeof(float) ||
+			mkt_pbuild_blobstore_get(
+					c->store,
+					c->replay_assign,
+					(uint64_t)count * sizeof(uint16_t)) !=
+					(uint64_t)count * sizeof(uint16_t))
+		{
+			c->ok = false;
+			return InvalidBlockNumber;
+		}
+		nclusters = rec_k;
+		cents	  = c->replay_cents;
+		assign16  = c->replay_assign;
 	}
+	else
+	{
+		km = mkt_kmeans(
+				c->vectors,
+				slice,
+				MKT_VEC_F32,
+				count,
+				c->dim,
+				k,
+				c->metric,
+				&c->opts);
+		if (km == NULL)
+		{
+			c->ok = false;
+			return InvalidBlockNumber;
+		}
+		nclusters = km->nlist;
+		cents	  = km->centroids;
+		assign32  = km->assignments;
+
+		if (c->store != NULL)
+		{
+			/* Record for the write pass. Assignments fit uint16: a node
+			 * clusters into at most fan_out (<= the meta page's 8-bit
+			 * fan_out) groups. */
+			uint16_t *a16 = mkt_alloc((size_t)count * sizeof(uint16_t));
+			for (uint32_t v = 0; v < count; v++)
+				a16[v] = (uint16_t)km->assignments[v];
+			mkt_pbuild_blobstore_put(c->store, &nclusters, sizeof(nclusters));
+			mkt_pbuild_blobstore_put(
+					c->store, cents, (uint64_t)nclusters * c->dim * sizeof(float));
+			mkt_pbuild_blobstore_put(
+					c->store, a16, (uint64_t)count * sizeof(uint16_t));
+			mkt_free(a16);
+		}
+	}
+	c->opts.initial_centroids = NULL; /* root only (matches mkt_hkmeans_f32) */
+
+#define STREAM_ASSIGN(v) (assign32 ? assign32[(v)] : (uint32_t)assign16[(v)])
 
 	/* Count assignments per cluster (km->cluster_sizes may be stale). */
-	uint32_t *counts = mkt_alloc0((size_t)km->nlist * sizeof(uint32_t));
+	uint32_t *counts = mkt_alloc0((size_t)nclusters * sizeof(uint32_t));
 	for (uint32_t v = 0; v < count; v++)
-		counts[km->assignments[v]]++;
+		counts[STREAM_ASSIGN(v)]++;
 
 	BlockNumber blk = InvalidBlockNumber;
 
@@ -281,13 +348,13 @@ stream_node(
 		/* Keep non-empty clusters as leaves, compacting their centroids so the
 		 * kept centroids stay contiguous (descent indexes them densely). */
 		uint32_t kept = 0;
-		for (uint32_t cl = 0; cl < km->nlist; cl++)
+		for (uint32_t cl = 0; cl < nclusters; cl++)
 		{
 			if (counts[cl] == 0)
 				continue;
 			if (kept != cl)
-				memcpy(km->centroids + (size_t)kept * c->dim,
-					   km->centroids + (size_t)cl * c->dim,
+				memcpy(cents + (size_t)kept * c->dim,
+					   cents + (size_t)cl * c->dim,
 					   (size_t)c->dim * sizeof(float));
 			if (c->leaf_counts != NULL)
 				c->leaf_counts[c->nleaves + kept] = counts[cl];
@@ -304,8 +371,7 @@ stream_node(
 				for (uint32_t kk = 0; kk < kept; kk++)
 					leaf_blks[kk] = c->first_posting + c->nleaves + kk;
 			}
-			blk = stream_write_node(
-					c, km->centroids, kept, level, true, leaf_blks);
+			blk = stream_write_node(c, cents, kept, level, true, leaf_blks);
 			if (leaf_blks != NULL)
 				mkt_free(leaf_blks);
 			/* Emit each leaf's head page from its resident float centroid. */
@@ -314,7 +380,7 @@ stream_node(
 					c->on_leaf(
 							c->on_leaf_arg,
 							c->nleaves + kk,
-							km->centroids + (size_t)kk * c->dim);
+							cents + (size_t)kk * c->dim);
 		}
 		else
 		{
@@ -322,7 +388,7 @@ stream_node(
 			if (c->leaf_sum != NULL)
 				for (uint32_t kk = 0; kk < kept; kk++)
 				{
-					const float *lc = km->centroids + (size_t)kk * c->dim;
+					const float *lc = cents + (size_t)kk * c->dim;
 					for (Dimension d = 0; d < c->dim; d++)
 						c->leaf_sum[d] += lc[d];
 				}
@@ -334,38 +400,63 @@ stream_node(
 		/* Recurse each non-empty cluster (post-order), then write this node.
 		 */
 		BlockNumber *child_blocks = mkt_alloc(
-				(size_t)km->nlist * sizeof(BlockNumber));
+				(size_t)nclusters * sizeof(BlockNumber));
+		/* The children's replay records interleave with this node's slice
+		 * gathers, so the parent's replayed assignments must survive the
+		 * recursion: snapshot them (the shared replay scratch is reused by
+		 * every level). O(count) like the slice arrays themselves. */
+		uint16_t *my_assign = NULL;
+		if (assign16 != NULL)
+		{
+			my_assign = mkt_alloc((size_t)count * sizeof(uint16_t));
+			memcpy(my_assign, assign16, (size_t)count * sizeof(uint16_t));
+			assign16 = my_assign;
+		}
+		float *my_cents = NULL;
+		if (km == NULL)
+		{
+			my_cents = mkt_alloc((size_t)nclusters * c->dim * sizeof(float));
+			memcpy(my_cents,
+				   cents,
+				   (size_t)nclusters * c->dim * sizeof(float));
+			cents = my_cents;
+		}
 		uint32_t kept = 0;
-		for (uint32_t cl = 0; cl < km->nlist && c->ok; cl++)
+		for (uint32_t cl = 0; cl < nclusters && c->ok; cl++)
 		{
 			if (counts[cl] == 0)
 				continue;
 			if (kept != cl)
-				memcpy(km->centroids + (size_t)kept * c->dim,
-					   km->centroids + (size_t)cl * c->dim,
+				memcpy(cents + (size_t)kept * c->dim,
+					   cents + (size_t)cl * c->dim,
 					   (size_t)c->dim * sizeof(float));
 
 			uint32_t  sub_n = counts[cl];
 			uint32_t *sub	= mkt_alloc((size_t)sub_n * sizeof(uint32_t));
 			uint32_t  idx	= 0;
 			for (uint32_t v = 0; v < count; v++)
-				if (km->assignments[v] == cl)
+				if (STREAM_ASSIGN(v) == cl)
 					sub[idx++] = slice ? slice[v] : v;
 			child_blocks[kept] = stream_node(c, sub, sub_n, level + 1);
 			mkt_free(sub);
 			kept++;
 		}
 		if (c->emit)
-			blk = stream_write_node(
-					c, km->centroids, kept, level, false, child_blocks);
+			blk = stream_write_node(c, cents, kept, level, false, child_blocks);
+		if (my_assign != NULL)
+			mkt_free(my_assign);
+		if (my_cents != NULL)
+			mkt_free(my_cents);
 		else
 			c->centroid_pages += stream_pages_for(c, kept);
 		mkt_free(child_blocks);
 	}
 
 	mkt_free(counts);
-	mkt_kmeans_result_destroy(km);
+	if (km != NULL)
+		mkt_kmeans_result_destroy(km);
 	return blk;
+#undef STREAM_ASSIGN
 }
 
 static void
@@ -401,12 +492,14 @@ mkt_stream_centroid_plan(
 		DistanceMetric		 metric,
 		MktCentroidFormat	 format,
 		const KMeansOptions *opts,
+		MktBlobStore		*store,
 		MktStreamTreePlan	*out)
 {
 	StreamCtx c;
 	stream_ctx_init(&c, dim, nlist, fan_out, metric, format, opts);
 	c.vectors = vectors;
 	c.emit	  = false;
+	c.store	  = store;
 	/* Actual leaf count is not known until k-means runs and can exceed the
 	 * target nlist (a leaf-parent may split into up to fan_out leaves, so the
 	 * tree holds up to fan_out^nlevels of them). Size leaf_counts for that
@@ -472,6 +565,7 @@ mkt_stream_centroid_write(
 		const RaBitQParams	*rq_params,
 		const float			*global_mean,
 		const KMeansOptions *opts,
+		MktBlobStore		*store,
 		BlockNumber			 first_posting,
 		BlockNumber			 first_centroid,
 		MktStreamLeafCb		 on_leaf,
@@ -482,6 +576,16 @@ mkt_stream_centroid_write(
 	c.vectors		= vectors;
 	c.emit			= true;
 	c.storage		= storage;
+	c.store			= store;
+	if (store != NULL)
+	{
+		/* A node clusters into at most fan_out groups (the flat root's k =
+		 * nlist <= fan_out). The assignment scratch covers the root's full
+		 * sample; deeper slices are strictly smaller. */
+		c.replay_cents =
+				mkt_alloc((size_t)c.fan_out * dim * sizeof(float));
+		c.replay_assign = mkt_alloc((size_t)nvecs * sizeof(uint16_t));
+	}
 	c.rq_params		= rq_params;
 	c.global_mean	= global_mean;
 	c.first_posting = first_posting;
@@ -497,6 +601,10 @@ mkt_stream_centroid_write(
 	BlockNumber root	= stream_node(&c, NULL, nvecs, 0);
 	mkt_memctx_switch(old_ctx);
 	mkt_memctx_delete(scratch);
+	if (c.replay_cents != NULL)
+		mkt_free(c.replay_cents);
+	if (c.replay_assign != NULL)
+		mkt_free(c.replay_assign);
 	return c.ok ? root : InvalidBlockNumber;
 }
 

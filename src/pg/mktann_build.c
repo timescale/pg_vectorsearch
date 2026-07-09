@@ -733,13 +733,16 @@ do_serial_build(
 	km_opts.nredo		  = p->kmeans_nredo;
 
 	/*
-	 * Plan pass: cluster the sample and discover the tree shape (leaf count,
-	 * depth, per-leaf sample counts, centroid page count) without writing. The
-	 * write pass below re-clusters the same sample (fixed k-means seed ->
-	 * identical tree) and streams the pages, so target_nlist (not the resolved
-	 * leaf count) must drive both passes.
+	 * Plan pass: cluster the sample once and discover the tree shape (leaf
+	 * count, depth, per-leaf sample counts, centroid page count) without
+	 * writing. Each node's clustering is recorded in a spillable blob store
+	 * (BufFile-backed, so the resident cost stays one node) and the write
+	 * pass below replays it instead of running k-means again -- the same
+	 * single-clustering shape as the parallel build's subtree store.
+	 * target_nlist (not the resolved leaf count) drives both passes.
 	 */
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_KMEANS);
+	MktBlobStore	 *node_store = mkt_pbuild_blobstore_begin();
 	MktStreamTreePlan plan;
 	if (!mkt_stream_centroid_plan(
 				bs->samples,
@@ -750,10 +753,12 @@ do_serial_build(
 				p->metric,
 				p->centroid_format,
 				&km_opts,
+				node_store,
 				&plan))
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("hierarchical k-means failed")));
+	mkt_pbuild_blobstore_rewind(node_store);
 
 	uint32_t nlist	 = plan.nleaves;
 	bs->params.nlist = nlist;
@@ -827,10 +832,12 @@ do_serial_build(
 			rq_params,
 			global_mean,
 			&km_opts,
+			node_store,
 			first_posting,
 			first_centroid,
 			serial_write_head,
 			&headctx);
+	mkt_pbuild_blobstore_end(node_store);
 	pfree(headctx.pt);
 	pfree(bs->samples);
 	bs->samples = NULL;
