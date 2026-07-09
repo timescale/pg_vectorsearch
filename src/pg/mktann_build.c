@@ -456,9 +456,7 @@ estimate_heap_tuples(Relation heap, Dimension dim)
  */
 static bool
 sample_for_build(
-		MktannBuildState *bs,
-		uint32_t		 *out_nlist,
-		bool			 *out_subsampled)
+		MktannBuildState *bs, uint32_t *out_nlist, bool *out_subsampled)
 {
 	Dimension dim	= bs->params.dim;
 	uint32_t  nlist = bs->params.nlist;
@@ -506,7 +504,6 @@ sample_for_build(
 /* ----------------------------------------------------------------
  * Serial build
  * ---------------------------------------------------------------- */
-
 
 /* ----------------------------------------------------------------
  * Page-backed leaf refinement (streaming build)
@@ -738,7 +735,6 @@ do_serial_build(
 	 */
 	BlockNumber first_centroid = 1;
 	BlockNumber first_posting  = first_centroid + plan.centroid_pages;
-
 
 	/*
 	 * Head blocks are formula-derived: leaf c's head is first_posting + c, a
@@ -980,9 +976,9 @@ do_serial_build(
 	*out_nlist		  = nlist;
 	*out_tree_nlevels = (uint8_t)plan.nlevels;
 	*out_global_mean  = global_mean;
-	*out_heap_tuples = heap_tuples;
-	*out_indtuples	 = bs->indtuples;
-	*out_soar_dupes	 = bs->soar_dupes;
+	*out_heap_tuples  = heap_tuples;
+	*out_indtuples	  = bs->indtuples;
+	*out_soar_dupes	  = bs->soar_dupes;
 	return true;
 }
 
@@ -1034,10 +1030,10 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	mktann_storage_init(&storage, index, NULL, p->metric);
 	storage.build_mode = true;
 
-	double		   heap_tuples = 0;
-	double		   indtuples   = 0;
-	double		   soar_dupes  = 0;
-	float		  *global_mean = NULL;
+	double heap_tuples = 0;
+	double indtuples   = 0;
+	double soar_dupes  = 0;
+	float *global_mean = NULL;
 	/* Posting-area start block, surfaced by the parallel build so the finalize
 	 * can record it in the metadata page (vacuum skips the centroid region).
 	 */

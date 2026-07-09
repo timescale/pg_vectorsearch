@@ -225,7 +225,7 @@ typedef struct MktHeadWriteCtx
 void mkt_write_leaf_head(void *arg, uint32_t leaf, const float *centroid);
 
 void mkt_refine_write_means(
-		const double  *sums,
+		const double   *sums,
 		const uint64_t *counts,
 		uint32_t		lo,
 		uint32_t		hi,
@@ -307,7 +307,7 @@ typedef struct MktPostingBuilder
 	 * restamped. */
 	bool adopted_head;
 
-	BlockNumber		   fixed_first_blkno;
+	BlockNumber fixed_first_blkno;
 
 	RaBitQData	 *enc_buf;
 	RaBitQScratch enc_scratch;
@@ -413,7 +413,6 @@ void mkt_posting_builder_init_continuation_fastscan(
 		Dimension			dim,
 		uint32_t			cluster_id,
 		const float		   *centroid);
-
 
 /*
  * Pin the first page to a specific block number. The first flush

@@ -799,6 +799,7 @@ mkt_pbuild_refine_overlay(MktDsmSamples *samples)
 {
 	return (MktDsmRefineAccum *)samples;
 }
+
 extern bool mkt_pbuild_launch(
 		struct ParallelContext *pcxt,
 		Barrier				   *barrier,
@@ -871,24 +872,24 @@ typedef struct MktPBuildLeader
 	MktDsmSamples		   *dsm_samples;
 	/* Back-end token for releasing the sample region early (PG: the DSM
 	 * segment the samples live in; standalone: NULL). */
-	void				   *sample_seg;
-	char				   *centroids_base;
-	float				   *cents;
-	char				   *km_workers_base;
-	MktDsmRootAssign	   *dsm_ra;
-	char				   *queues_base;
-	char				   *dsm_partials;
-	struct WalUsage		   *walusage;
-	struct BufferUsage	   *bufferusage;
-	int						nparticipants;
-	uint32_t				km_k;
-	uint32_t				max_per_worker;
-	Dimension				dim;
-	uint32_t				nlist;
-	uint64_t				rabitq_seed;
-	uint32_t				fan_out;
-	Size					dsm_total; /* committed DSM chunk bytes (for the
-										  planned-allocation introspection line) */
+	void			   *sample_seg;
+	char			   *centroids_base;
+	float			   *cents;
+	char			   *km_workers_base;
+	MktDsmRootAssign   *dsm_ra;
+	char			   *queues_base;
+	char			   *dsm_partials;
+	struct WalUsage	   *walusage;
+	struct BufferUsage *bufferusage;
+	int					nparticipants;
+	uint32_t			km_k;
+	uint32_t			max_per_worker;
+	Dimension			dim;
+	uint32_t			nlist;
+	uint64_t			rabitq_seed;
+	uint32_t			fan_out;
+	Size				dsm_total; /* committed DSM chunk bytes (for the
+									  planned-allocation introspection line) */
 } MktPBuildLeader;
 
 extern bool mkt_pbuild_setup_shared(
@@ -964,7 +965,6 @@ extern void mkt_posting_build_lists(
 		const RaBitQParams *rq_params,
 		BlockNumber			first_posting);
 
-
 /* ----------------------------------------------------------------
  * Parallel build entry — shared driver (parallel_build_leader.c)
  *
@@ -993,11 +993,11 @@ extern bool do_parallel_build(
 		/* No in-RAM tree is materialized; the streamed tree's shape (leaf
 		 * count + depth) comes back through these for the caller's metadata
 		 * write. *out_nlist == 0 means the heap had no indexable rows. */
-		uint32_t				*out_nlist,
-		uint8_t					*out_tree_nlevels,
-		double					*out_heap_tuples,
-		double					*out_indtuples,
-		double					*out_soar_dupes,
+		uint32_t *out_nlist,
+		uint8_t	 *out_tree_nlevels,
+		double	 *out_heap_tuples,
+		double	 *out_indtuples,
+		double	 *out_soar_dupes,
 		/* The build routes page-backed, so it writes the centroid pages +
 		 * heads into `storage` before the scan and computes the global mean;
 		 * *out_global_mean is the (owned) mean the centroid pages encode

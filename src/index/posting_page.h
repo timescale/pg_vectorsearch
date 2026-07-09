@@ -550,7 +550,6 @@ mkt_fastscan_max_groups(Dimension dim, bool is_first)
 	return usable / section;
 }
 
-
 /* ----------------------------------------------------------------
  * Fastscan group accessors
  *

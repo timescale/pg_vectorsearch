@@ -148,11 +148,9 @@ mkt_posting_build_lists(
 	mkt_pbuild_sort_end(sorter);
 }
 
-
 /* ----------------------------------------------------------------
  * Batched streaming tree build — leader-side callbacks
  * ---------------------------------------------------------------- */
-
 
 /* PLAN-pass batch callback: record each subtree's leaf count + centroid-page
  * count (no writes) so the leader can size the reserve + block layout, and
@@ -687,14 +685,14 @@ do_parallel_build(
 	{
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_REFINE);
 		MktDsmRefineAccum *accum = refine_accum;
-		MktHeadWriteCtx rhead = {
-				.storage	   = storage,
-				.rq_params	   = rq_params,
-				.dim		   = dim,
-				.fastscan	   = shared->fastscan,
-				.first_posting = first_posting,
-				.pt			   = mkt_alloc((size_t)dim * sizeof(float)),
-		};
+		MktHeadWriteCtx	   rhead = {
+				   .storage		  = storage,
+				   .rq_params	  = rq_params,
+				   .dim			  = dim,
+				   .fastscan	  = shared->fastscan,
+				   .first_posting = first_posting,
+				   .pt			  = mkt_alloc((size_t)dim * sizeof(float)),
+		   };
 		mkt_pbuild_exec_refine_paged(
 				0,
 				heap,

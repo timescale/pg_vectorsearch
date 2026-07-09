@@ -87,10 +87,10 @@ static void
 tps_init(TestPageStorage *s, uint32_t page_cap, uint32_t next_blkno)
 {
 	memset(s, 0, sizeof(*s));
-	s->base.ops	   = &tps_ops;
-	s->pages	   = mkt_alloc0((size_t)page_cap * BLCKSZ);
-	s->page_cap	   = page_cap;
-	s->next_blkno  = next_blkno;
+	s->base.ops	  = &tps_ops;
+	s->pages	  = mkt_alloc0((size_t)page_cap * BLCKSZ);
+	s->page_cap	  = page_cap;
+	s->next_blkno = next_blkno;
 }
 
 /* Deterministic pseudo-random vectors (local copy of the standalone test
@@ -201,14 +201,13 @@ verify_leaf_links(
 				char	*content = (char *)PageGetContents(page);
 				uint32_t g		 = i / MKT_FASTSCAN_GROUP;
 				uint32_t slot	 = i % MKT_FASTSCAN_GROUP;
-				child = mkt_centroid_fastscan_group_child(content, g, dim)
-								[slot];
+				child			 = mkt_centroid_fastscan_group_child(
+						   content, g, dim)[slot];
 				is_leaf = true;
 			}
 			else
 			{
-				const MktCentroidEntryMeta *entry =
-						mkt_centroid_meta(page, i);
+				const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
 				is_leaf = (entry->flags & MKT_CENTROID_FLAG_LEAF) != 0;
 				child	= entry->child_blkno;
 			}
@@ -216,8 +215,7 @@ verify_leaf_links(
 				continue;
 
 			ASSERT_TRUE(
-					child >= first_posting &&
-							child < first_posting + nleaves,
+					child >= first_posting && child < first_posting + nleaves,
 					"leaf child within the head region");
 			uint32_t leaf = child - first_posting;
 			ASSERT_TRUE(!seen[leaf], "each head linked exactly once");
@@ -300,9 +298,10 @@ check_stream_roundtrip(
 			"root lands inside the planned centroid range");
 	ASSERT_EQ(plan.nleaves, probe.count, "on_leaf fires once per leaf");
 	ASSERT_TRUE(probe.ascending, "on_leaf leaf indices are dense ascending");
-	ASSERT_EQ(first_posting + plan.nleaves,
-			  sa.next_blkno,
-			  "write pass appends nothing past the reserved layout");
+	ASSERT_EQ(
+			first_posting + plan.nleaves,
+			sa.next_blkno,
+			"write pass appends nothing past the reserved layout");
 
 	verify_leaf_links(
 			result,

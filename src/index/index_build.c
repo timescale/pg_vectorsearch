@@ -167,9 +167,9 @@ typedef struct StreamCtx
 	float		 *replay_cents;	 /* write: [fan_out * dim] */
 	uint16_t	 *replay_assign; /* write: [nvecs] */
 	/* accumulators */
-	uint32_t  nleaves; /* running (== next first_leaf) */
-	double	 *leaf_sum; /* plan only, [dim]: leaf-centroid sum for the
-						 * leaf_mean the caller uses as global_mean */
+	uint32_t nleaves;			/* running (== next first_leaf) */
+	double	*leaf_sum;			/* plan only, [dim]: leaf-centroid sum for the
+								 * leaf_mean the caller uses as global_mean */
 	uint32_t	centroid_pages; /* plan only */
 	BlockNumber next_blk;		/* write only: next reserved centroid block */
 	bool		ok;
@@ -301,11 +301,11 @@ stream_node(
 	 * pass when the plan pass recorded it, otherwise computed (and, on the
 	 * plan pass, recorded). The record travels in recursion order, so the
 	 * write pass consumes it in exactly the order it was produced. */
-	KMeansResult   *km			= NULL;
-	float		   *cents		= NULL;
-	const uint32_t *assign32	= NULL;
-	const uint16_t *assign16	= NULL;
-	uint32_t		nclusters	= 0;
+	KMeansResult   *km		  = NULL;
+	float		   *cents	  = NULL;
+	const uint32_t *assign32  = NULL;
+	const uint16_t *assign16  = NULL;
+	uint32_t		nclusters = 0;
 
 	if (c->store != NULL && c->emit)
 	{
@@ -361,7 +361,9 @@ stream_node(
 				a16[v] = (uint16_t)km->assignments[v];
 			mkt_pbuild_blobstore_put(c->store, &nclusters, sizeof(nclusters));
 			mkt_pbuild_blobstore_put(
-					c->store, cents, (uint64_t)nclusters * c->dim * sizeof(float));
+					c->store,
+					cents,
+					(uint64_t)nclusters * c->dim * sizeof(float));
 			mkt_pbuild_blobstore_put(
 					c->store, a16, (uint64_t)count * sizeof(uint16_t));
 			mkt_free(a16);
@@ -475,7 +477,8 @@ stream_node(
 			kept++;
 		}
 		if (c->emit)
-			blk = stream_write_node(c, cents, kept, level, false, child_blocks);
+			blk = stream_write_node(
+					c, cents, kept, level, false, child_blocks);
 		if (my_assign != NULL)
 			mkt_free(my_assign);
 		if (my_cents != NULL)
@@ -530,9 +533,9 @@ mkt_stream_centroid_plan(
 {
 	StreamCtx c;
 	stream_ctx_init(&c, dim, nlist, fan_out, metric, format, opts);
-	c.vectors = vectors;
-	c.emit	  = false;
-	c.store	  = store;
+	c.vectors  = vectors;
+	c.emit	   = false;
+	c.store	   = store;
 	c.leaf_sum = mkt_alloc0((size_t)dim * sizeof(double));
 
 	/*
@@ -594,17 +597,16 @@ mkt_stream_centroid_write(
 {
 	StreamCtx c;
 	stream_ctx_init(&c, dim, nlist, fan_out, metric, format, opts);
-	c.vectors		= vectors;
-	c.emit			= true;
-	c.storage		= storage;
-	c.store			= store;
+	c.vectors = vectors;
+	c.emit	  = true;
+	c.storage = storage;
+	c.store	  = store;
 	if (store != NULL)
 	{
 		/* A node clusters into at most fan_out groups (the flat root's k =
 		 * nlist <= fan_out). The assignment scratch covers the root's full
 		 * sample; deeper slices are strictly smaller. */
-		c.replay_cents =
-				mkt_alloc((size_t)c.fan_out * dim * sizeof(float));
+		c.replay_cents	= mkt_alloc((size_t)c.fan_out * dim * sizeof(float));
 		c.replay_assign = mkt_alloc((size_t)nvecs * sizeof(uint16_t));
 	}
 	c.rq_params		= rq_params;

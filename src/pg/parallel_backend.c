@@ -557,13 +557,13 @@ mkt_pbuild_setup_shared(
 	 * samples are dead (see the sample-region seam), so it needs no DSM chunk
 	 * of its own; its tile capacity is bounded by the memory budget, by
 	 * MaxAllocSize, and by the region it overlays. */
-	Size	 samp_sz = mkt_dsm_samples_size(nparticipants, max_per_worker, dim);
+	Size samp_sz = mkt_dsm_samples_size(nparticipants, max_per_worker, dim);
 	uint64_t refine_cap_bytes =
 			Min((uint64_t)maintenance_work_mem * 1024, (uint64_t)MaxAllocSize);
 	if (refine_cap_bytes >
 		(uint64_t)samp_sz - offsetof(MktDsmRefineAccum, sums))
-		refine_cap_bytes =
-				(uint64_t)samp_sz - offsetof(MktDsmRefineAccum, sums);
+		refine_cap_bytes = (uint64_t)samp_sz -
+						   offsetof(MktDsmRefineAccum, sums);
 	uint32_t refine_tile_cap =
 			mkt_refine_tile_leaves(nlist, dim, refine_cap_bytes);
 
@@ -658,7 +658,7 @@ mkt_pbuild_setup_shared(
 	 * working set can be handed back (last detach destroys it) before the
 	 * posting sort claims its own budget -- see the sample-region seam.
 	 * Workers attach via the handle published in the shared state. */
-	dsm_segment *sample_seg = dsm_create(samp_sz, 0);
+	dsm_segment	  *sample_seg  = dsm_create(samp_sz, 0);
 	MktDsmSamples *dsm_samples = dsm_segment_address(sample_seg);
 	/* Only the header + per-participant counts are read before being written;
 	 * the sample data is filled by the sampling pass and read back bounded by
@@ -717,7 +717,6 @@ mkt_pbuild_setup_shared(
 	memset(dsm_gmean, 0, (Size)dim * sizeof(float));
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, dsm_gmean);
 
-
 	WalUsage *walusage = shm_toc_allocate(
 			pcxt->toc, mul_size(sizeof(WalUsage), pcxt->nworkers));
 	memset(walusage, 0, mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -735,27 +734,27 @@ mkt_pbuild_setup_shared(
 		shm_toc_insert(pcxt->toc, MKT_DSM_KEY_QUERY_TEXT, sq);
 	}
 
-	lead->pcxt				  = pcxt;
-	lead->shared			  = shared;
-	lead->barrier			  = barrier;
-	lead->dsm_samples		  = dsm_samples;
-	lead->sample_seg		  = sample_seg;
-	lead->centroids_base	  = centroids_base;
-	lead->cents				  = cents;
-	lead->km_workers_base	  = km_workers_base;
-	lead->dsm_ra			  = dsm_ra;
-	lead->queues_base		  = NULL; /* sort-seam path: no shm_mq queues */
-	lead->dsm_partials		  = NULL; /* sort-seam path: no partials region */
-	lead->walusage			  = walusage;
-	lead->bufferusage		  = bufferusage;
-	lead->nparticipants		  = nparticipants;
-	lead->km_k				  = km_k;
-	lead->max_per_worker	  = max_per_worker;
-	lead->dim				  = dim;
-	lead->nlist				  = nlist;
-	lead->rabitq_seed		  = rabitq_seed;
-	lead->fan_out			  = fan_out;
-	lead->dsm_total			  = dsm_total;
+	lead->pcxt			  = pcxt;
+	lead->shared		  = shared;
+	lead->barrier		  = barrier;
+	lead->dsm_samples	  = dsm_samples;
+	lead->sample_seg	  = sample_seg;
+	lead->centroids_base  = centroids_base;
+	lead->cents			  = cents;
+	lead->km_workers_base = km_workers_base;
+	lead->dsm_ra		  = dsm_ra;
+	lead->queues_base	  = NULL; /* sort-seam path: no shm_mq queues */
+	lead->dsm_partials	  = NULL; /* sort-seam path: no partials region */
+	lead->walusage		  = walusage;
+	lead->bufferusage	  = bufferusage;
+	lead->nparticipants	  = nparticipants;
+	lead->km_k			  = km_k;
+	lead->max_per_worker  = max_per_worker;
+	lead->dim			  = dim;
+	lead->nlist			  = nlist;
+	lead->rabitq_seed	  = rabitq_seed;
+	lead->fan_out		  = fan_out;
+	lead->dsm_total		  = dsm_total;
 	return true;
 }
 

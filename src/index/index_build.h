@@ -122,26 +122,26 @@ void mkt_write_centroid_tree(
  * pass 0 for leaf-parent nodes.
  */
 void mkt_centroid_write_node(
-		MktStorage		   *storage,
-		Dimension			dim,
-		const float		   *cents,
-		uint32_t			n,
-		MktCentroidFormat	fmt,
-		uint8_t				level,
-		uint16_t			flags,
-		uint16_t			child_count,
+		MktStorage				  *storage,
+		Dimension				   dim,
+		const float				  *cents,
+		uint32_t				   n,
+		MktCentroidFormat		   fmt,
+		uint8_t					   level,
+		uint16_t				   flags,
+		uint16_t				   child_count,
 		const struct RaBitQParams *rq_params,
-		const float		   *global_mean,
-		const BlockNumber  *child_blks,
-		BlockNumber			blkno);
+		const float				  *global_mean,
+		const BlockNumber		  *child_blks,
+		BlockNumber				   blkno);
 
 typedef struct MktStreamTreePlan
 {
 	uint32_t nleaves;
 	uint32_t nlevels;
 	uint32_t centroid_pages; /* pages the write pass will emit */
-	float *leaf_mean;		  /* [dim] unweighted mean of the leaf centroids
-							   * (mkt_alloc; caller frees with mkt_free) */
+	float	*leaf_mean;		 /* [dim] unweighted mean of the leaf centroids
+							  * (mkt_alloc; caller frees with mkt_free) */
 } MktStreamTreePlan;
 
 /*

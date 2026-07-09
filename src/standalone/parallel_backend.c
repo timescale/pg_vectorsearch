@@ -169,7 +169,7 @@ MktBlobStore *
 mkt_pbuild_blobstore_begin(void)
 {
 	MktBlobStore *bs = mkt_alloc0(sizeof(MktBlobStore));
-	bs->ctx = mkt_current_memctx; /* the creating context */
+	bs->ctx			 = mkt_current_memctx; /* the creating context */
 	return bs;
 }
 
@@ -375,7 +375,7 @@ mkt_pbuild_setup_shared(
 	shared->km_tolerance		   = 1e-4f;
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
-	shared->refine_iters = 0;
+	shared->refine_iters		   = 0;
 	shared->refine_tile_cap = 0; /* standalone builds are not mem-bounded */
 	/* Page-backed routing knobs: route the build scan for accuracy, not
 	 * query speed, matching the PG build (see MKT_BUILD_CENTROID_* in
@@ -442,26 +442,26 @@ mkt_pbuild_setup_shared(
 	WalUsage	*walusage	 = shm_toc_allocate(pcxt->toc, usage_sz);
 	BufferUsage *bufferusage = shm_toc_allocate(pcxt->toc, bufuse_sz);
 
-	lead->pcxt				  = pcxt;
-	lead->shared			  = shared;
-	lead->barrier			  = barrier;
-	lead->dsm_samples		  = dsm_samples;
-	lead->sample_seg		  = NULL;
-	lead->centroids_base	  = centroids_base;
-	lead->cents				  = cents;
-	lead->km_workers_base	  = km_workers_base;
-	lead->dsm_ra			  = dsm_ra;
-	lead->queues_base		  = NULL; /* sort-seam path: no shm_mq queues */
-	lead->dsm_partials		  = NULL; /* sort-seam path: no partials region */
-	lead->walusage			  = walusage;
-	lead->bufferusage		  = bufferusage;
-	lead->nparticipants		  = nparticipants;
-	lead->km_k				  = km_k;
-	lead->max_per_worker	  = max_per_worker;
-	lead->dim				  = dim;
-	lead->nlist				  = nlist;
-	lead->rabitq_seed		  = rabitq_seed;
-	lead->fan_out			  = fan_out;
+	lead->pcxt			  = pcxt;
+	lead->shared		  = shared;
+	lead->barrier		  = barrier;
+	lead->dsm_samples	  = dsm_samples;
+	lead->sample_seg	  = NULL;
+	lead->centroids_base  = centroids_base;
+	lead->cents			  = cents;
+	lead->km_workers_base = km_workers_base;
+	lead->dsm_ra		  = dsm_ra;
+	lead->queues_base	  = NULL; /* sort-seam path: no shm_mq queues */
+	lead->dsm_partials	  = NULL; /* sort-seam path: no partials region */
+	lead->walusage		  = walusage;
+	lead->bufferusage	  = bufferusage;
+	lead->nparticipants	  = nparticipants;
+	lead->km_k			  = km_k;
+	lead->max_per_worker  = max_per_worker;
+	lead->dim			  = dim;
+	lead->nlist			  = nlist;
+	lead->rabitq_seed	  = rabitq_seed;
+	lead->fan_out		  = fan_out;
 	return true;
 }
 

@@ -556,8 +556,8 @@ typedef struct RefineCbState
 	MktBuildShared *shared;
 	MktQueryState  *qs;		   /* page-backed router (workers) */
 	BlockNumber first_posting; /* head -> leaf: leaf = head - first_posting */
-	double	   *sums;	/* shared accumulator, indexed leaf - tile_lo */
-	uint64_t   *counts; /* shared accumulator */
+	double	   *sums;		   /* shared accumulator, indexed leaf - tile_lo */
+	uint64_t   *counts;		   /* shared accumulator */
 	Dimension	dim;
 	bool		cosine;
 	uint32_t	tile_lo; /* accumulate only leaves in [tile_lo, tile_hi) */

@@ -573,7 +573,7 @@ builder_init_common(
 	builder->n_entries	= 0;
 	builder->page_ops	= ops;
 
-	builder->fixed_first_blkno	 = InvalidBlockNumber;
+	builder->fixed_first_blkno = InvalidBlockNumber;
 
 	mkt_posting_page_init(
 			builder->mem_page, cluster_id, dim, first_page_flags);
@@ -872,8 +872,8 @@ mkt_posting_builder_adopt_head(
 	builder->owns_head	= true;
 	builder->page_ops	= fastscan ? &fs_page_ops : &aos_page_ops;
 
-	builder->fixed_first_blkno	 = head_blk;
-	builder->adopted_head		 = true;
+	builder->fixed_first_blkno = head_blk;
+	builder->adopted_head	   = true;
 
 	/* Start from the pre-written head itself: it already carries the
 	 * cluster's header and pt_centroid. It must be empty — the pre-scan
@@ -944,7 +944,6 @@ mkt_posting_builder_init_continuation_fastscan(
 	builder->fs.codes_buf  = mkt_alloc(MKT_FASTSCAN_GROUP_BYTES(dim));
 	builder->fs.max_groups = mkt_fastscan_max_groups(dim, false);
 }
-
 
 void
 mkt_posting_builder_set_first_blkno(
@@ -1152,13 +1151,13 @@ mkt_refine_route_row(
 		uint32_t			  tile_hi,
 		uint32_t			 *out_idx)
 {
-	uint32_t n = mkt_query_route(qs, vec, 1, MKT_DISTANCE_MODE_ASYMMETRIC,
-								 NULL);
+	uint32_t n =
+			mkt_query_route(qs, vec, 1, MKT_DISTANCE_MODE_ASYMMETRIC, NULL);
 	if (n == 0)
 		return NULL;
 
-	uint32_t leaf =
-			mkt_route_head_to_leaf(first_posting, qs->beam_results[0].posting_head);
+	uint32_t leaf = mkt_route_head_to_leaf(
+			first_posting, qs->beam_results[0].posting_head);
 	if (leaf < tile_lo || leaf >= tile_hi)
 		return NULL;
 	*out_idx = leaf - tile_lo;
@@ -1176,7 +1175,7 @@ mkt_refine_route_row(
 
 void
 mkt_refine_write_means(
-		const double  *sums,
+		const double   *sums,
 		const uint64_t *counts,
 		uint32_t		lo,
 		uint32_t		hi,

@@ -564,12 +564,12 @@ mkt_index_build(
 		 * query routes page-backed over those pages via idx->base, so skip the
 		 * tree-centroid finalize entirely (the returned tree is only a carrier
 		 * of leaf/level counts). */
-		nlist					 = drv_nlist;
-		idx->nlist				 = nlist;
-		idx->base.nlevels		 = drv_nlevels;
-		idx->base.nlist			 = nlist;
-		idx->base.fan_out =
-				(uint8_t)(fan_out <= UINT8_MAX ? fan_out : UINT8_MAX);
+		nlist			  = drv_nlist;
+		idx->nlist		  = nlist;
+		idx->base.nlevels = drv_nlevels;
+		idx->base.nlist	  = nlist;
+		idx->base.fan_out = (uint8_t)(fan_out <= UINT8_MAX ? fan_out
+														   : UINT8_MAX);
 		/* Query knobs: mirror the PG GUC defaults so the paged beam search
 		 * behaves identically in both engines (a zero beam scale would
 		 * collapse the beam to width 1 and skip the coverage floors). */
