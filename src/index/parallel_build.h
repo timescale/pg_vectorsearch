@@ -107,7 +107,12 @@ typedef struct MktBuildShared
 	bool			  fastscan;
 	MktCentroidFormat centroid_format;
 	uint64_t		  rabitq_seed;
-	int				  nparticipants;
+	/* Planned as 1 + planned workers (it sizes the per-participant DSM
+	 * regions), then narrowed by mkt_pbuild_launch to 1 + the workers that
+	 * actually started when the launch falls short. Work partitioned by
+	 * participant must use this count; region sizing keeps the planned
+	 * value and leaves the tail slots unused. */
+	int nparticipants;
 	/* CREATE INDEX CONCURRENTLY: the leader scans with an MVCC snapshot and
 	 * participants take weak relation locks. Workers must mark their rebuilt
 	 * IndexInfo concurrent too, or heapam's snapshot/OldestXmin check trips.
@@ -655,9 +660,14 @@ extern void mkt_pbuild_worker_add_counts(
  *
  * mkt_pbuild_launch starts the workers and blocks until the whole party has
  * attached to the phase barrier (returning false, after teardown, if none
- * started). mkt_pbuild_teardown frees the parallel context. The standalone
- * versions spawn/join threads and free the shared arena. (struct
- * ParallelContext is PostgreSQL's; standalone provides its own definition.)
+ * started). Fewer workers can start than were planned (the launch competes
+ * for the max_parallel_workers pool), so launch narrows
+ * shared->nparticipants to the party that actually attached. Every phase
+ * that partitions work by participant reads the count after at least one
+ * barrier, which orders the narrowing write ahead of the read.
+ * mkt_pbuild_teardown frees the parallel context. The standalone versions
+ * spawn/join threads and free the shared arena. (struct ParallelContext is
+ * PostgreSQL's; standalone provides its own definition.)
  * ---------------------------------------------------------------- */
 
 struct ParallelContext;
@@ -665,7 +675,10 @@ struct WalUsage;
 struct BufferUsage;
 
 extern void mkt_pbuild_teardown(struct ParallelContext *pcxt);
-extern bool mkt_pbuild_launch(struct ParallelContext *pcxt, Barrier *barrier);
+extern bool mkt_pbuild_launch(
+		struct ParallelContext *pcxt,
+		Barrier				   *barrier,
+		MktBuildShared		   *shared);
 
 /* ----------------------------------------------------------------
  * Build configuration — back-end-neutral input to the setup seam

@@ -123,7 +123,8 @@ mkt_pbuild_teardown(ParallelContext *pcxt)
  * one sets the leader's latch during attach.
  */
 bool
-mkt_pbuild_launch(ParallelContext *pcxt, Barrier *barrier)
+mkt_pbuild_launch(
+		ParallelContext *pcxt, Barrier *barrier, MktBuildShared *shared)
 {
 	LaunchParallelWorkers(pcxt);
 
@@ -145,6 +146,11 @@ mkt_pbuild_launch(ParallelContext *pcxt, Barrier *barrier)
 				WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 		ResetLatch(MyLatch);
 	}
+
+	/* Same contract as the PG back-end: the participant count reflects the
+	 * party that attached. The thread pool always starts every planned
+	 * worker, so this is the planned count. */
+	shared->nparticipants = pcxt->nworkers_launched + 1;
 	return true;
 }
 

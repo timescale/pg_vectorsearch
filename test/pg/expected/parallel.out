@@ -274,15 +274,13 @@ SET max_parallel_maintenance_workers = 2;
 SET max_parallel_workers = 1;
 SELECT exact_check('line3', '(v) WITH (nlist = 12, fan_out = 4)',
                    '[0.5,0,0]') AS shortfall_exact;
-WARNING:  detected write past chunk end in mktann build 0x5b4d7cf7f5a0
  shortfall_exact 
 -----------------
- f
+ t
 (1 row)
 
 CREATE INDEX line3_short ON line3 USING mktann (v)
     WITH (nlist = 12, fan_out = 4);
-WARNING:  detected write past chunk end in mktann build 0x5b4d7cea71c0
 -- Structural check: no two internal entries may point at the same child
 -- page. A participant that never launches must not leave its root children
 -- unbuilt (their block ranges collapse onto the next child's pages, leaving
@@ -292,7 +290,7 @@ SELECT count(*) = count(DISTINCT child_blkno) AS no_duplicate_children
   FROM mkt_centroid_pages('line3_short') WHERE NOT is_leaf;
  no_duplicate_children 
 -----------------------
- f
+ t
 (1 row)
 
 -- Reachability: probing every list with the result cap lifted must return
