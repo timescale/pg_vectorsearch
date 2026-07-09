@@ -994,18 +994,19 @@ extern bool do_parallel_build(
 		const MktBuildConfig	*config,
 		MktStorage				*storage,
 		struct MktBuildProgress *prog,
-		HKMeansResult		   **out_tree,
+		/* No in-RAM tree is materialized; the streamed tree's shape (leaf
+		 * count + depth) comes back through these for the caller's metadata
+		 * write. *out_nlist == 0 means the heap had no indexable rows. */
+		uint32_t				*out_nlist,
+		uint8_t					*out_tree_nlevels,
 		double					*out_heap_tuples,
 		double					*out_indtuples,
 		double					*out_soar_dupes,
 		/* The build routes page-backed, so it writes the centroid pages +
-		 * heads into `storage` before the scan and computes the global mean.
-		 * Callers receive both: *out_global_mean is the (owned) mean used for
-		 * the centroid pages (so the caller's metadata write matches), and
-		 * *out_centroids_written signals that centroid pages already exist in
-		 * `storage` (the caller must not rewrite them there). May be NULL. */
+		 * heads into `storage` before the scan and computes the global mean;
+		 * *out_global_mean is the (owned) mean the centroid pages encode
+		 * against, so the caller's metadata write matches. May be NULL. */
 		float **out_global_mean,
-		bool   *out_centroids_written,
 		/* The posting-head base: cluster c's head is *out_first_posting + c.
 		 * Callers that need to locate head pages after the build (e.g. the
 		 * standalone driver + its tests) capture it; may be NULL. */

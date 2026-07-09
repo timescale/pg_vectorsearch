@@ -682,37 +682,37 @@ serial_refine_heads(
  * tree, no O(nlist*dim) blob), then scans the heap once through build_callback
  * (page-backed routing) to fill the posting lists.
  *
- * *out_tree is a lightweight metadata carrier (leaf/level counts) — the build
- * materializes no in-RAM tree. Posting-list heads are formula-derived
- * (first_posting + leaf), so no head array is returned. Returns false with
- * *out_tree == NULL when the heap has no tuples.
+ * No in-RAM tree is materialized; the streamed tree's shape (leaf count +
+ * depth) comes back through out_nlist/out_tree_nlevels. Posting-list heads
+ * are formula-derived (first_posting + leaf), so no head array is returned.
+ * Returns false (with *out_nlist == 0) when the heap has no tuples. The
+ * serial path writes its own metadata page; the caller must not finalize
+ * again.
  */
 static bool
 do_serial_build(
 		MktannBuildState *bs,
 		MktStorage		 *storage,
 		uint64_t		  rabitq_seed,
-		HKMeansResult	**out_tree,
+		uint32_t		 *out_nlist,
+		uint8_t			 *out_tree_nlevels,
 		float			**out_global_mean,
 		double			 *out_heap_tuples,
 		double			 *out_indtuples,
-		double			 *out_soar_dupes,
-		bool			 *out_finalized)
+		double			 *out_soar_dupes)
 {
 	const MktannBuildParams *p	 = &bs->params;
 	Dimension				 dim = p->dim;
 
-	*out_finalized = false;
+	*out_nlist		  = 0;
+	*out_tree_nlevels = 0;
 
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SAMPLE);
 
 	uint32_t target_nlist = 0;
 	bool	 subsampled	  = false;
 	if (!sample_for_build(bs, &target_nlist, &subsampled))
-	{
-		*out_tree = NULL;
 		return false;
-	}
 
 	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
@@ -1011,18 +1011,9 @@ do_serial_build(
 			meta->flags |= MKT_META_FLAG_FASTSCAN;
 		mkt_storage_commit_page(storage, 0);
 	}
-	*out_finalized = true;
-
-	/* No in-RAM tree is materialized; hand back a lightweight carrier with the
-	 * leaf/level counts the caller needs (the empty-table check + metadata).
-	 */
-	HKMeansResult *meta_tree = palloc0(sizeof(HKMeansResult));
-	meta_tree->nleaves		 = nlist;
-	meta_tree->nlevels		 = plan.nlevels;
-	meta_tree->dim			 = dim;
-
-	*out_tree		 = meta_tree;
-	*out_global_mean = global_mean;
+	*out_nlist		  = nlist;
+	*out_tree_nlevels = (uint8_t)plan.nlevels;
+	*out_global_mean  = global_mean;
 	*out_heap_tuples = heap_tuples;
 	*out_indtuples	 = bs->indtuples;
 	*out_soar_dupes	 = bs->soar_dupes;
@@ -1077,7 +1068,6 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	mktann_storage_init(&storage, index, NULL, p->metric);
 	storage.build_mode = true;
 
-	HKMeansResult *tree		   = NULL;
 	double		   heap_tuples = 0;
 	double		   indtuples   = 0;
 	double		   soar_dupes  = 0;
@@ -1087,13 +1077,12 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	 */
 	BlockNumber meta_first_posting = InvalidBlockNumber;
 
-	/* Set by a build path that writes its own centroid pages + metadata (the
-	 * serial page-backed path), so the shared finalize below does WAL only. */
-	bool centroids_finalized = false;
-	/* Set by the parallel path, which writes the centroid pages itself but not
-	 * the metadata page: the finalize still runs (for meta) but skips its own
-	 * centroid tree write. */
-	bool parallel_centroids = false;
+	/* The streamed tree's shape, from whichever build path ran (0 leaves =
+	 * empty heap). The serial path writes its own metadata page; the
+	 * parallel path leaves it for the finalize below (it needs the final
+	 * tuple count). */
+	uint32_t built_nlist   = 0;
+	uint8_t	 built_nlevels = 0;
 
 	/* Try parallel build first (sampling + k-means + posting) */
 	bool did_parallel = false;
@@ -1106,12 +1095,12 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 		 * the workers run, and DSM segments cannot be resized once created.
 		 * Several of those regions are sized per leaf (centroids, posting
 		 * heads, per-cluster assignment state), so the leader has to commit to
-		 * a leaf count at allocation time — but the real count (tree->nleaves)
-		 * is only known after k-means clusters the sample, which happens
-		 * inside the workers. hkmeans targets `nlist` leaves at this fan_out
-		 * but can produce up to fan_out^nlevels of them, so we size every
-		 * per-leaf region for that worst-case upper bound here, then narrow to
-		 * the actual tree->nleaves once the tree comes back below.
+		 * a leaf count at allocation time — but the real count is only known
+		 * after k-means clusters the sample, which happens inside the
+		 * workers. hkmeans targets `nlist` leaves at this fan_out but can
+		 * produce up to fan_out^nlevels of them, so we size every per-leaf
+		 * region for that worst-case upper bound here, then narrow to the
+		 * actual built leaf count below.
 		 *
 		 * nlist and fan_out are already resolved (resolve_build_params).
 		 */
@@ -1141,7 +1130,8 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				&cfg,
 				&storage.base,
 				&prog,
-				&tree,
+				&built_nlist,
+				&built_nlevels,
 				&heap_tuples,
 				&indtuples,
 				&soar_dupes,
@@ -1149,34 +1139,30 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				 * + head pages into the index before the scan and returns the
 				 * global mean it used (so the metadata write below matches).
 				 * It does NOT write the metadata page (needs the final tuple
-				 * count), so the finalize below still runs — it only skips the
-				 * centroid tree write when parallel_centroids is set. */
+				 * count), so the finalize below still runs. */
 				&global_mean,
-				&parallel_centroids,
 				/* Surfaced for the metadata page: the posting-area start block
-				 * lets vacuum skip the centroid region (main's
-				 * write_meta_page). */
+				 * lets vacuum skip the centroid region without scanning it. */
 				&meta_first_posting);
 
-		if (did_parallel && tree != NULL)
-			bs.params.nlist = tree->nleaves;
+		if (did_parallel && built_nlist > 0)
+			bs.params.nlist = built_nlist;
 	}
 
 	if (!did_parallel)
 	{
-		/* Serial fallback: sample, cluster, build. Leaves tree == NULL when
+		/* Serial fallback: sample, cluster, build. Reports zero leaves when
 		 * the heap has no indexable tuples. */
-		if (!do_serial_build(
-					&bs,
-					&storage.base,
-					rabitq_seed,
-					&tree,
-					&global_mean,
-					&heap_tuples,
-					&indtuples,
-					&soar_dupes,
-					&centroids_finalized))
-			tree = NULL;
+		(void)do_serial_build(
+				&bs,
+				&storage.base,
+				rabitq_seed,
+				&built_nlist,
+				&built_nlevels,
+				&global_mean,
+				&heap_tuples,
+				&indtuples,
+				&soar_dupes);
 	}
 
 	/*
@@ -1186,7 +1172,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	 * on the first insert. (A later phase can build a degenerate
 	 * single-cluster index so an empty table is indexable.)
 	 */
-	if (tree == NULL)
+	if (built_nlist == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot build a \"mktann\" index on an empty table"),
@@ -1206,40 +1192,26 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	 * did — the serial page-backed path writes them itself), then WAL-log the
 	 * whole index. */
 	{
-		if (!centroids_finalized)
+		if (did_parallel)
 		{
-			uint32_t nlist = tree->nleaves;
-
+			/* The parallel build wrote its centroid + head pages before the
+			 * scan but left the metadata page for here (it needs the final
+			 * tuple count); the serial path wrote its own. first_posting
+			 * comes from the build and lets vacuum skip the centroid region
+			 * without scanning it. */
 			BlockNumber fc = 1;
 
-			if (global_mean == NULL)
-			{
-				global_mean = palloc(dim * sizeof(float));
-				mkt_global_mean(
-						hk_leaf_centroids(tree),
-						nlist,
-						dim,
-						p->metric,
-						global_mean);
-			}
-
-			/* Both remaining build paths write their own centroid + head pages
-			 * before the scan (page-backed routing); the finalize only needs
-			 * the metadata page here. first_posting comes from the build (via
-			 * out_first_posting) and is stored so vacuum can skip the centroid
-			 * region. (parallel_centroids is always set when this runs — the
-			 * serial path sets centroids_finalized and skips it.) */
-			(void)parallel_centroids;
+			Assert(global_mean != NULL);
 
 			write_meta_page(
 					&storage.base,
 					dim,
-					(uint8_t)tree->nlevels,
+					built_nlevels,
 					(uint8_t)p->fan_out,
 					fc,
 					meta_first_posting,
 					0,
-					nlist,
+					built_nlist,
 					p->centroid_format,
 					p->metric,
 					rabitq_seed,
@@ -1267,7 +1239,6 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	mkt_build_progress_end(&prog);
 
 	/* Cleanup */
-	mkt_free(tree);
 
 	MemoryContextSwitchTo(caller_ctx);
 	MemoryContextDelete(build_ctx);

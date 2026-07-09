@@ -410,6 +410,8 @@ mkt_index_build(
 					  config->posting_fmt == MKT_POSTING_FMT_PAGES;
 
 	HKMeansResult *tree			  = NULL;
+	uint32_t	   drv_nlist	  = 0; /* driver path: streamed tree shape */
+	uint8_t		   drv_nlevels	  = 0;
 	float		  *km_vectors	  = NULL;
 	uint32_t	   km_nvecs		  = 0;
 	double		   ms_kmeans	  = 0;
@@ -476,25 +478,22 @@ mkt_index_build(
 				&cfg,
 				&idx->posting_storage.base,
 				NULL, /* no build-progress seam in standalone (no-op stub) */
-				&tree,
+				&drv_nlist,
+				&drv_nlevels,
 				&heap_tuples,
 				&indtuples,
 				&soar_dupes,
 				/* The driver streams the centroid tree into posting_storage
-				 * (no in-RAM tree). Capture the sample-mean global mean it
-				 * used so the page-backed query centering matches; the
-				 * returned *out_tree is a lightweight carrier (leaf/level
-				 * counts only). */
+				 * (no in-RAM tree). Capture the leaf-centroid mean it encoded
+				 * against so the page-backed query centering matches. */
 				&sa_global_mean,
-				NULL,
 				&idx->first_posting);
 		mkt_memctx_switch(idx_ctx);
 
 		/* The driver always launches at least one worker, so it does not fail
-		 * here; on the off chance it does, the tree==NULL guard below returns.
-		 */
+		 * here; on the off chance it does, the empty guard below returns. */
 		if (!ok)
-			tree = NULL;
+			drv_nlist = 0;
 
 		ms_kmeans = (double)(now_ns() - t_phase) / 1e6;
 	}
@@ -551,7 +550,7 @@ mkt_index_build(
 
 	mkt_memctx_switch(idx_ctx);
 
-	if (tree == NULL)
+	if (use_driver ? drv_nlist == 0 : tree == NULL)
 	{
 		mkt_memctx_switch(old_ctx);
 		mkt_memctx_delete(idx_ctx); /* frees idx, build_ctx, everything */
@@ -565,9 +564,9 @@ mkt_index_build(
 		 * query routes page-backed over those pages via idx->base, so skip the
 		 * tree-centroid finalize entirely (the returned tree is only a carrier
 		 * of leaf/level counts). */
-		nlist					 = tree->nleaves;
+		nlist					 = drv_nlist;
 		idx->nlist				 = nlist;
-		idx->base.nlevels		 = (uint8_t)tree->nlevels;
+		idx->base.nlevels		 = drv_nlevels;
 		idx->base.nlist			 = nlist;
 		idx->base.fan_out =
 				(uint8_t)(fan_out <= UINT8_MAX ? fan_out : UINT8_MAX);
@@ -595,7 +594,6 @@ mkt_index_build(
 		idx->has_posting_data = true;
 		idx->posting_fmt	  = config->posting_fmt;
 
-		mkt_free(tree);
 		mkt_memctx_switch(old_ctx);
 		mkt_memctx_delete(build_ctx);
 

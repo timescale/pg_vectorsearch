@@ -246,18 +246,18 @@ do_parallel_build(
 		const MktBuildConfig	*config,
 		MktStorage				*storage,
 		struct MktBuildProgress *prog,
-		HKMeansResult		   **out_tree,
+		uint32_t				*out_nlist,
+		uint8_t					*out_tree_nlevels,
 		double					*out_heap_tuples,
 		double					*out_indtuples,
 		double					*out_soar_dupes,
 		float				   **out_global_mean,
-		bool					*out_centroids_written,
 		BlockNumber				*out_first_posting)
 {
 	int nworkers = index_info->ii_ParallelWorkers;
 
-	if (out_centroids_written)
-		*out_centroids_written = false;
+	*out_nlist		  = 0;
+	*out_tree_nlevels = 0;
 	if (out_first_posting)
 		*out_first_posting = InvalidBlockNumber;
 	if (out_global_mean)
@@ -381,8 +381,6 @@ do_parallel_build(
 			nlevels++;
 		}
 	}
-
-	HKMeansResult *tree = NULL;
 
 	/* ---- Phase 2b: root assignment (leader as participant 0). ---- */
 	mkt_pbuild_exec_root_assign(
@@ -696,14 +694,11 @@ do_parallel_build(
 		*out_global_mean = global_mean; /* caller owns it (metadata write) */
 	else
 		mkt_free(global_mean);
-	if (out_centroids_written)
-		*out_centroids_written = true;
 
-	/* Lightweight metadata carrier; no in-RAM tree exists to hand back. */
-	tree		  = mkt_alloc0(sizeof(HKMeansResult));
-	tree->nleaves = nlist;
-	tree->nlevels = out_nlevels;
-	tree->dim	  = dim;
+	/* No in-RAM tree exists; the caller's metadata write needs only the
+	 * shape. */
+	*out_nlist		  = nlist;
+	*out_tree_nlevels = out_nlevels;
 
 	/* Phase 3: workers scan + route page-backed + encode + sort; the leader
 	 * merges. Report before releasing workers so progress reflects the whole
@@ -804,7 +799,6 @@ do_parallel_build(
 	*out_heap_tuples = shared->reltuples;
 	*out_indtuples	 = shared->indtuples;
 	*out_soar_dupes	 = shared->soar_dupes;
-	*out_tree		 = tree;
 
 	/* The workers cover the heap cooperatively while the leader blocks on the
 	 * scan barrier above, so there is no leader-side loop to advance the % mid
