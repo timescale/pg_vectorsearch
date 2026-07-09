@@ -76,5 +76,57 @@ SELECT count(*) AS rows_default_guc FROM (
 RESET enable_seqscan;
 RESET mkt.nprobe;
 
+-- ============================================================
+-- mkt.probe_expand: the routing-depth diagnostic reports scan ranks
+-- ============================================================
+-- With probe expansion the beam routes extra cluster candidates and
+-- scan_clusters re-ranks them by exact centroid distance before scanning
+-- the best nprobe. The deepest-contributing-rank diagnostic
+-- (mkt_routing_stats) must report positions in that final scan order, so
+-- with nprobe = 8 every reported rank is below 8 -- the histogram's <=8
+-- bucket holds 100% of queries. Ranks above nprobe are impossible unless
+-- the diagnostic leaks pre-re-rank beam indexes.
+CREATE FUNCTION mkt_routing_stats() RETURNS text
+    AS '$libdir/meerkat', 'mkt_routing_stats' LANGUAGE C;
+CREATE FUNCTION mkt_phase_stats_reset() RETURNS void
+    AS '$libdir/meerkat', 'mkt_phase_stats_reset' LANGUAGE C;
+
+-- 40 clusters of 50 points: each cluster sits on a pseudo-random direction
+-- at radius ~1 from the origin, members add small deterministic noise. A
+-- probe near the origin is nearly equidistant from every cluster, so the
+-- exact probe order is decided by near-ties that the 1-bit beam estimates
+-- scramble -- exactly the regime probe expansion exists to repair, and the
+-- one where beam indexes differ visibly from scan ranks.
+CREATE TABLE probe_depth_test (id serial, v vector(32));
+INSERT INTO probe_depth_test (v)
+    SELECT (SELECT array_agg((sin(c * 12.9898 + j * 78.233) +
+                              0.05 * sin((c * 50 + m) * 3.7 + j * 1.3))::real)
+            FROM generate_series(0, 31) j)::vector(32)
+    FROM generate_series(0, 39) c, generate_series(1, 50) m;
+CREATE INDEX probe_depth_idx ON probe_depth_test USING mktann (v)
+    WITH (centroid_compression = true, nlist = 40);
+
+SET enable_seqscan = off;
+SET mkt.nprobe = 8;
+SET mkt.probe_expand = 4.0;
+SELECT mkt_phase_stats_reset();
+DO $$
+DECLARE q vector(32);
+BEGIN
+    FOR g IN 1..20 LOOP
+        SELECT (SELECT array_agg((0.03 * sin(g * 7.7 + j * 2.9))::real)
+                FROM generate_series(0, 31) j)::vector(32) INTO q;
+        PERFORM id FROM probe_depth_test ORDER BY v <-> q LIMIT 10;
+    END LOOP;
+END $$;
+SELECT mkt_routing_stats() LIKE '%<=8:100.0%%' AS ranks_within_nprobe;
+
+RESET mkt.probe_expand;
+RESET mkt.nprobe;
+RESET enable_seqscan;
+DROP TABLE probe_depth_test;
+DROP FUNCTION mkt_routing_stats();
+DROP FUNCTION mkt_phase_stats_reset();
+
 -- Cleanup
 DROP TABLE query_settings_test;

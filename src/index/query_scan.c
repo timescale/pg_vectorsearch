@@ -275,9 +275,10 @@ scan_clusters(
 			continue;
 
 		/* Diagnostic: stamp candidates inserted while scanning this cluster
-		 * with its probe rank j, so we can measure how deep in the probe
-		 * order the final top-k results actually came from. */
-		topk->cur_src = j;
+		 * with its scan rank r (the position in the exact-re-ranked probe
+		 * order, not the beam index j), so the deepest contributing rank
+		 * measures how many probed clusters the query actually needed. */
+		topk->cur_src = r;
 
 		mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
 
