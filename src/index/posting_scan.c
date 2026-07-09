@@ -150,6 +150,9 @@ mkt_posting_scan_begin_flat(
 	scan->cur_content	  = mkt_flat_posting_content(flat_buf);
 	scan->cur_max_entries = hdr->max_entries;
 	scan->cur_count		  = hdr->entry_count;
+	/* The LUT depends on the cluster's transformed query — invalidate
+	 * like begin_cluster does (a stale LUT would score wrong here). */
+	scan->fs_lut_valid	  = false;
 	scan->pages_read	  = 1;
 	scan->pages_skipped	  = 0;
 	scan->entries_scanned = 0;
@@ -498,45 +501,54 @@ fastscan_prune_group_avx512(
  * chains).
  * ---------------------------------------------------------------- */
 
-static void
-scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
+/*
+ * Per-cluster constants for the fastscan page loop, hoisted out of the
+ * per-page path. scan->qstate reloads cannot be hoisted by the
+ * compiler across pages (they alias the scan bookkeeping stores), and
+ * the threshold survives across pages so later pages start with the
+ * tightest known bound.
+ */
+typedef struct FsClusterCtx
 {
-	Dimension dim	  = scan->dim;
-	uint32_t  count	  = scan->cur_count;
-	char	 *content = scan->cur_content;
+	float	 lut_scale;
+	float	 lut_bias;
+	float	 lut_margin;
+	float	 g_add;
+	float	 sum_t;
+	float	 inv_sqrt_d;
+	float	 g_error;
+	Distance threshold;
+} FsClusterCtx;
 
-	MktPostingPageOpaque *opaque = mkt_posting_opaque(scan->cur_page);
+/* Build the LUT + hoisted constants; called once per cluster on the
+ * first FASTSCAN page. */
+static void
+fs_cluster_ctx_init(MktPostingScan *scan, MktTopK *topk, FsClusterCtx *ctx)
+{
+	Dimension dim = scan->dim;
 
-	/* Fall back to AoS kernel for non-fastscan pages */
-	if (!(opaque->flags & MKT_POSTING_PAGE_FASTSCAN))
-		return; /* caller handles AoS via the standard path */
+	if (scan->fs_lut_bits == 8)
+		mkt_fastscan_build_lut(
+				scan->qstate->transformed,
+				dim,
+				scan->fs_lut,
+				&scan->fs_lut_scale,
+				&scan->fs_lut_bias);
+	else
+		mkt_fastscan_build_lut_hacc(
+				scan->qstate->transformed,
+				dim,
+				scan->fs_lut,
+				&scan->fs_lut_scale,
+				&scan->fs_lut_bias);
+	scan->fs_lut_valid = true;
 
-	/* Build LUT from transformed query (once per cluster) */
-	if (!scan->fs_lut_valid)
-	{
-		if (scan->fs_lut_bits == 8)
-			mkt_fastscan_build_lut(
-					scan->qstate->transformed,
-					dim,
-					scan->fs_lut,
-					&scan->fs_lut_scale,
-					&scan->fs_lut_bias);
-		else
-			mkt_fastscan_build_lut_hacc(
-					scan->qstate->transformed,
-					dim,
-					scan->fs_lut,
-					&scan->fs_lut_scale,
-					&scan->fs_lut_bias);
-		scan->fs_lut_valid = true;
-	}
-	float lut_scale = scan->fs_lut_scale;
-	float lut_bias	= scan->fs_lut_bias;
-
-	float g_add		 = scan->qstate->g_add;
-	float sum_t		 = scan->qstate->sum_transformed;
-	float inv_sqrt_d = scan->qstate->inv_sqrt_d;
-	float g_error	 = scan->qstate->g_error;
+	ctx->lut_scale	= scan->fs_lut_scale;
+	ctx->lut_bias	= scan->fs_lut_bias;
+	ctx->g_add		= scan->qstate->g_add;
+	ctx->sum_t		= scan->qstate->sum_transformed;
+	ctx->inv_sqrt_d = scan->qstate->inv_sqrt_d;
+	ctx->g_error	= scan->qstate->g_error;
 
 	/* Extra error margin for uint8 LUT quantization (8-bit mode only).
 	 * The accumulated binary_ip carries the sum of nsq = dim/4 LUT
@@ -546,12 +558,32 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 	 * the per-entry f_rescale into one scalar. Without this margin the
 	 * fs8 "lower bound" is not a bound and true neighbors get pruned
 	 * before rerank (~1.5-2pp recall loss on cohere-100M). */
-	float lut_margin = 0.0f;
+	ctx->lut_margin = 0.0f;
 	if (scan->fs_lut_bits == 8)
 	{
-		float sigma = lut_scale * sqrtf((float)(dim / 4) / 12.0f);
-		lut_margin	= 4.0f * inv_sqrt_d * 2.0f * sigma;
+		float sigma		= ctx->lut_scale * sqrtf((float)(dim / 4) / 12.0f);
+		ctx->lut_margin = 4.0f * ctx->inv_sqrt_d * 2.0f * sigma;
 	}
+
+	ctx->threshold = mkt_topk_threshold(topk);
+}
+
+static void
+scan_fastscan_page(MktPostingScan *scan, MktTopK *topk, FsClusterCtx *ctx)
+{
+	Dimension dim	  = scan->dim;
+	uint32_t  count	  = scan->cur_count;
+	char	 *content = scan->cur_content;
+
+	MktPostingPageOpaque *opaque = mkt_posting_opaque(scan->cur_page);
+
+	float lut_scale	 = ctx->lut_scale;
+	float lut_bias	 = ctx->lut_bias;
+	float lut_margin = ctx->lut_margin;
+	float g_add		 = ctx->g_add;
+	float sum_t		 = ctx->sum_t;
+	float inv_sqrt_d = ctx->inv_sqrt_d;
+	float g_error	 = ctx->g_error;
 
 	uint32_t max_groups = mkt_fastscan_max_groups(
 			dim, opaque->flags & MKT_POSTING_PAGE_FIRST);
@@ -559,7 +591,7 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 	if (ngroups > max_groups)
 		ngroups = max_groups;
 
-	Distance threshold = mkt_topk_threshold(topk);
+	Distance threshold = ctx->threshold;
 
 	for (uint32_t g = 0; g < ngroups; g++)
 	{
@@ -655,11 +687,16 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 			}
 		}
 	}
+
+	/* Persist the tightened threshold for the cluster's next page. */
+	ctx->threshold = threshold;
 }
 
 void
 mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk)
 {
+	FsClusterCtx ctx = {0};
+
 	/* Process pages until chain is exhausted */
 	for (;;)
 	{
@@ -677,7 +714,11 @@ mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk)
 			scan->pages_skipped++;
 		}
 		else if (opaque->flags & MKT_POSTING_PAGE_FASTSCAN)
-			scan_fastscan_page(scan, topk);
+		{
+			if (!scan->fs_lut_valid)
+				fs_cluster_ctx_init(scan, topk, &ctx);
+			scan_fastscan_page(scan, topk, &ctx);
+		}
 		else
 			mkt_posting_scan_cluster(scan, topk);
 
