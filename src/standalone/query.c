@@ -296,8 +296,7 @@ exec_fallback(
 	mkt_memctx_switch(old_ctx);
 
 	/* Reset top-K */
-	mkt_topk_reset(&ctx->topk);
-	ctx->topk.k = k;
+	mkt_topk_reset_to_k(&ctx->topk, k);
 
 	/* Flat mode or brute-force */
 	if (idx->has_posting_data && idx->base.params != NULL)
@@ -351,8 +350,7 @@ exec_fallback(
 		uint32_t n_cands;
 		mkt_topk_extract_sorted(&ctx->topk, ctx->rerank_buf, &n_cands);
 
-		mkt_topk_reset(&ctx->rerank_topk);
-		ctx->rerank_topk.k = k;
+		mkt_topk_reset_to_k(&ctx->rerank_topk, k);
 
 		for (uint32_t i = 0; i < n_cands; i++)
 		{

@@ -150,8 +150,7 @@ aps_rerank(
 	if (s->all_vectors == NULL || count == 0)
 		return 0;
 
-	mkt_topk_reset(&s->rerank_topk);
-	s->rerank_topk.k = keep;
+	mkt_topk_reset_to_k(&s->rerank_topk, keep);
 
 	for (uint32_t i = 0; i < count; i++)
 	{
