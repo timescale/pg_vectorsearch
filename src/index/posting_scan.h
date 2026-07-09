@@ -68,14 +68,6 @@ typedef struct MktPostingScan
 	bool	 fs_lut_valid; /* LUT built for current cluster */
 	int		 fs_lut_bits;  /* 8 or 16 */
 
-	/* TID dedup for replicated vectors (NULL = no dedup).
-	 * Open-addressing hash with generation counter — no memset
-	 * needed per query, just bump seen_gen. */
-	uint64_t *seen_tids;	 /* hash set: TID per slot */
-	uint32_t *seen_gens;	 /* generation per slot */
-	uint32_t  seen_tids_cap; /* must be power of 2 */
-	uint32_t  seen_gen;		 /* current generation (bumped per query) */
-
 	/* Stats */
 	uint32_t pages_read;	/* posting pages fetched (incl. skipped) */
 	uint32_t pages_skipped; /* tombstoned (all-dead) pages skipped, not scored
