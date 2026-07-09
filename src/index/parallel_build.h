@@ -577,51 +577,6 @@ extern void mkt_pbuild_exec_refine(
 extern void mkt_pbuild_accum_lock(MktBuildShared *shared, uint32_t stripe);
 extern void mkt_pbuild_accum_unlock(MktBuildShared *shared, uint32_t stripe);
 
-/* ----------------------------------------------------------------
- * Phase 3: Posting build callback — shared by leader and workers
- *
- * Uses MktPostingWorkerState in deferred mode (storage=NULL): each worker
- * streams its completed pages to the leader over its shm_mq queue and the
- * leader places them, holding only a trailing partial page per cluster.
- * ---------------------------------------------------------------- */
-
-typedef struct PostingCbState
-{
-	const HKMeansResult	  *tree;
-	MktBuildParams		   bp;
-	MktBuildWorkerBufs	   bufs;
-	MktPostingWorkerState *ws;
-	double				   indtuples;
-	double				   soar_dupes;
-	MktMemCtx			   tmp_ctx;
-	MktMemCtx			   worker_ctx;
-
-	/* Batched secondary assignment: when replication is on and CBLAS is
-	 * available, tuples are buffered and the secondary search runs as a
-	 * GEMM over the batch (centroids read once per batch). */
-	bool			  use_batch;
-	MktSecondaryBatch sb;
-	float			 *enc_batch;	   /* [B * dim] */
-	ItemPointerData	 *batch_tids;	   /* [B] */
-	uint32_t		 *batch_primary;   /* [B] */
-	float			 *batch_pdist;	   /* [B] */
-	uint32_t		 *batch_secondary; /* [B] */
-	uint32_t		  batch_count;
-} PostingCbState;
-
-/* Initialize/flush/clean the batch buffers; no-op when batching is off
- * (e.g. no replication or no CBLAS). Call init in the worker context
- * before the scan, flush + cleanup after it. */
-void posting_cb_batch_init(PostingCbState *cbs);
-void posting_cb_batch_flush(PostingCbState *cbs);
-void posting_cb_batch_cleanup(PostingCbState *cbs);
-
-/*
- * Shared posting logic, called per live tuple with a raw vector pointer; fed
- * by mkt_build_scan in both back-ends.
- */
-extern void posting_cb(void *state, ItemPointerData tid, const float *vec);
-
 /*
  * Scan every vector cooperatively, invoking cb per live tuple. Back-end seam:
  * the PG implementation (parallel_backend_pg.c) drives a parallel heap scan
