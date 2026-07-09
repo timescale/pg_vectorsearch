@@ -185,6 +185,41 @@ SELECT exact_check('line3', '(v) WITH (centroid_compression = true)',
                    '[0.5,0,0]') AS serial_exact;
 SELECT exact_check('line3', '(v) WITH (fastscan = true, soar_lambda = 1.0)',
                    '[0.5,0,0]') AS serial_soar_exact;
+
+-- Worker shortfall: the number of workers that actually launch is capped by
+-- the free slots under max_parallel_workers at CREATE INDEX time, which can
+-- be below the planned count. The build must produce the same tree shape
+-- with however many workers attach: every root child subtree clustered and
+-- written exactly once. max_parallel_workers is session-settable, so setting
+-- it below the planned worker count reproduces the shortfall
+-- deterministically (two workers planned, one launches). nlist > fan_out
+-- forces the multi-level tree whose subtree batches are keyed on the
+-- participant count.
+SET max_parallel_maintenance_workers = 2;
+SET max_parallel_workers = 1;
+SELECT exact_check('line3', '(v) WITH (nlist = 12, fan_out = 4)',
+                   '[0.5,0,0]') AS shortfall_exact;
+CREATE INDEX line3_short ON line3 USING mktann (v)
+    WITH (nlist = 12, fan_out = 4);
+-- Structural check: no two internal entries may point at the same child
+-- page. A participant that never launches must not leave its root children
+-- unbuilt (their block ranges collapse onto the next child's pages, leaving
+-- the root with aliased duplicate child pointers while the planned
+-- partitions silently never exist).
+SELECT count(*) = count(DISTINCT child_blkno) AS no_duplicate_children
+  FROM mkt_centroid_pages('line3_short') WHERE NOT is_leaf;
+-- Reachability: probing every list with the result cap lifted must return
+-- every row.
+SET enable_seqscan = off;
+SET mkt.nprobe = 10000;
+SET mkt.query_limit = 100;
+SELECT count(*) AS shortfall_reachable FROM (
+    SELECT id FROM line3 ORDER BY v <-> '[0.5,0,0]' LIMIT 100) t;
+RESET mkt.query_limit;
+RESET mkt.nprobe;
+RESET enable_seqscan;
+RESET max_parallel_workers;
+DROP INDEX line3_short;
 DROP TABLE line3;
 
 -- 768-dim well-separated points (only the first coordinate varies). At
