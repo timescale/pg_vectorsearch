@@ -441,8 +441,8 @@ select_topk_bounded(
 		return 0;
 
 	/* Reuse the per-scan topk and extract buffer instead of allocating
-	 * new ones every level. mkt_topk_reset_to_k re-allocates the
-	 * heap/candidates within the topk's existing memctx (cheap). */
+	 * new ones every level; mkt_topk_reset_to_k is O(1) unless k grows
+	 * past the allocated capacity. */
 	MktTopK *topk = &scratch->level_topk;
 	mkt_topk_reset_to_k(topk, k);
 
@@ -463,7 +463,7 @@ select_topk_bounded(
 	}
 
 	uint32_t nresults;
-	mkt_topk_extract_sorted(topk, scratch->entries_buf, &nresults);
+	mkt_topk_extract_sorted_unique(topk, scratch->entries_buf, &nresults);
 
 	if (nresults > out_cap)
 		nresults = out_cap;

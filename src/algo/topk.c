@@ -13,6 +13,7 @@
 
 #include "algo/topk.h"
 #include "core/memory.h"
+#include "core/platform.h"
 
 #define MKT_TOPK_INITIAL_CAP_MIN 32
 
@@ -116,11 +117,12 @@ cmp_by_distance(const void *a, const void *b)
 void
 mkt_topk_init(MktTopK *topk, uint32_t k)
 {
-	topk->memctx   = mkt_memctx_create(NULL, "topk");
-	topk->k		   = k;
-	topk->ub_heap  = mkt_memctx_alloc(topk->memctx, k * sizeof(Distance));
-	topk->ub_ids   = mkt_memctx_alloc(topk->memctx, k * sizeof(uint64_t));
-	topk->ub_count = 0;
+	topk->memctx	 = mkt_memctx_create(NULL, "topk");
+	topk->k			 = k;
+	topk->k_capacity = k;
+	topk->ub_heap	 = mkt_memctx_alloc(topk->memctx, k * sizeof(Distance));
+	topk->ub_ids	 = mkt_memctx_alloc(topk->memctx, k * sizeof(uint64_t));
+	topk->ub_count	 = 0;
 
 	uint32_t cap = k * 2;
 	if (cap < MKT_TOPK_INITIAL_CAP_MIN)
@@ -177,28 +179,41 @@ mkt_topk_destroy(MktTopK *topk)
 void
 mkt_topk_reset(MktTopK *topk)
 {
-	/* Reset the arena to reclaim grown buffers, then re-allocate
-	 * the initial ub_heap and candidates from the fresh arena. */
-	mkt_memctx_reset(topk->memctx);
-
-	topk->ub_heap = mkt_memctx_alloc(topk->memctx, topk->k * sizeof(Distance));
-	topk->ub_ids  = mkt_memctx_alloc(topk->memctx, topk->k * sizeof(uint64_t));
-	topk->ub_count = 0;
-
-	uint32_t cap = topk->k * 2;
-	if (cap < MKT_TOPK_INITIAL_CAP_MIN)
-		cap = MKT_TOPK_INITIAL_CAP_MIN;
-	topk->candidates =
-			mkt_memctx_alloc(topk->memctx, cap * sizeof(MktTopKEntry));
-	topk->cand_count	= 0;
-	topk->cand_capacity = cap;
+	mkt_topk_reset_to_k(topk, topk->k);
 }
 
 void
 mkt_topk_reset_to_k(MktTopK *topk, uint32_t k)
 {
-	topk->k = k;
-	mkt_topk_reset(topk);
+	/* O(1) reset: buffers are retained across resets (grow-only), so a
+	 * reused top-K reaches a steady state with zero allocator traffic.
+	 * Only a k above the allocated capacity re-allocates — reset the
+	 * arena first so the outgrown blocks are reclaimed rather than
+	 * leaked into the context. The candidate buffer keeps its
+	 * high-water capacity, avoiding the doubling-regrowth copies that
+	 * a fresh buffer paid on every use. */
+	if (mkt_unlikely(k > topk->k_capacity))
+	{
+		uint32_t cand_cap = topk->cand_capacity;
+		uint32_t min_cap  = k * 2;
+
+		if (cand_cap < min_cap)
+			cand_cap = min_cap;
+		if (cand_cap < MKT_TOPK_INITIAL_CAP_MIN)
+			cand_cap = MKT_TOPK_INITIAL_CAP_MIN;
+
+		mkt_memctx_reset(topk->memctx);
+		topk->ub_heap = mkt_memctx_alloc(topk->memctx, k * sizeof(Distance));
+		topk->ub_ids  = mkt_memctx_alloc(topk->memctx, k * sizeof(uint64_t));
+		topk->candidates = mkt_memctx_alloc(
+				topk->memctx, cand_cap * sizeof(MktTopKEntry));
+		topk->cand_capacity = cand_cap;
+		topk->k_capacity	= k;
+	}
+
+	topk->k			 = k;
+	topk->ub_count	 = 0;
+	topk->cand_count = 0;
 }
 
 void
@@ -359,6 +374,34 @@ mkt_topk_extract_sorted(
 		}
 		out = w;
 	}
+
+	*count_out = out;
+}
+
+/*
+ * Same as mkt_topk_extract_sorted but skips the duplicate-id pass.
+ * For callers whose ids are unique by construction (array indices,
+ * beam-search buffer positions), the dedup scan can never remove
+ * anything and is quadratic in the survivor count.
+ */
+void
+mkt_topk_extract_sorted_unique(
+		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out)
+{
+	Distance threshold = mkt_topk_threshold(topk);
+
+	/* Filter stale candidates and copy survivors to results */
+	uint32_t out = 0;
+	for (uint32_t i = 0; i < topk->cand_count; i++)
+	{
+		Distance lb = topk->candidates[i].distance - topk->candidates[i].error;
+		if (lb <= threshold)
+			results[out++] = topk->candidates[i];
+	}
+
+	/* Sort by distance ascending */
+	if (out > 1)
+		qsort(results, out, sizeof(MktTopKEntry), cmp_by_distance);
 
 	*count_out = out;
 }

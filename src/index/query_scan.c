@@ -225,7 +225,12 @@ extract_candidates(MktQueryState *qs)
 {
 	if (qs->topk.cand_count > qs->cand_cap)
 	{
-		qs->cand_cap   = qs->topk.cand_count;
+		/* Grow geometrically so a run of gradually larger queries does
+		 * not realloc+copy on every step to the high-water mark. */
+		uint32_t want = qs->cand_cap * 2;
+		if (want < qs->topk.cand_count)
+			want = qs->topk.cand_count;
+		qs->cand_cap   = want;
 		qs->candidates = mkt_realloc(
 				qs->candidates, qs->cand_cap * sizeof(MktTopKEntry));
 		qs->result_order =
@@ -274,8 +279,10 @@ mkt_query_execute(
 	if (nprobe > qs->max_nprobe)
 		nprobe = qs->max_nprobe;
 
-	mkt_topk_reset(&qs->topk);
-	qs->topk.k = k;
+	/* reset_to_k also (re)sizes the heap when k grows between queries —
+	 * resetting first and assigning k afterwards left the heap sized for
+	 * the previous k. */
+	mkt_topk_reset_to_k(&qs->topk, k);
 
 	MktCentroidSearchStats beam_stats = {0};
 	uint32_t			   ncentroids =
