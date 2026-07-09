@@ -417,6 +417,19 @@ mkt_pbuild_setup_shared(
 	uint32_t nlist_c   = (nlist + fan_out - 1) / fan_out;
 	uint64_t slot_size = mkt_hkmeans_max_blob_size(nlist_c, fan_out, dim);
 
+	/* The blob format addresses its interior with 32-bit offsets
+	 * (HKMeansResult); a slot past that limit would wrap into an undersized
+	 * ring and corrupt the streamed tree, so refuse the configuration --
+	 * it only arises when a small explicit fan_out meets a huge nlist. */
+	if (slot_size > (uint64_t)UINT32_MAX)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("mktann partition tree too large for its subtree "
+						"format (nlist %u, fan_out %u)",
+						nlist,
+						fan_out),
+				 errhint("Increase fan_out or decrease nlist.")));
+
 	/*
 	 * Size the k-means sample set. The samples live in one shared-memory
 	 * region (total_samples * dim floats) that must stay resident for the

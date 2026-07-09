@@ -363,17 +363,25 @@ mkt_hkmeans_max_blob_size(uint32_t nlist, uint32_t fan_out, Dimension dim)
 		fan_out = 2;
 
 	uint32_t nlevels = compute_nlevels(nlist, fan_out);
-	uint32_t nnodes	 = max_total_nodes(fan_out, nlevels);
-	/* Leaves are bounded by fan_out^nlevels (every leaf-parent full). */
-	uint32_t nleaves = power_u32(fan_out, nlevels);
-	/* Internal centroids: every non-leaf node holds up to fan_out of them. */
-	uint32_t intern_nodes = nlevels >= 2
-								  ? max_total_nodes(fan_out, nlevels - 1)
-								  : 0;
 
-	return sizeof(HKMeansResult) + (size_t)nnodes * sizeof(HKMeansNode) +
-		   (size_t)nleaves * dim * sizeof(float) +
-		   (size_t)intern_nodes * fan_out * dim * sizeof(float);
+	/* All worst-case counts are fan_out powers; at large nlist with a small
+	 * fan_out they exceed 32 bits, so the whole bound is computed in 64-bit
+	 * (the caller compares it against the blob format's 32-bit offset limit
+	 * and fails the build rather than wrapping into an undersized slot). */
+	uint64_t nleaves	  = 1; /* fan_out^nlevels: every leaf-parent full */
+	uint64_t nnodes		  = 0; /* sum of fan_out^l, l = 0..nlevels-1 */
+	uint64_t intern_nodes = 0; /* same sum, one level shorter */
+	for (uint32_t l = 0; l < nlevels; l++)
+	{
+		nnodes += nleaves; /* fan_out^l before the multiply below */
+		if (nlevels >= 2 && l < nlevels - 1)
+			intern_nodes += nleaves;
+		nleaves *= fan_out;
+	}
+
+	return sizeof(HKMeansResult) + nnodes * sizeof(HKMeansNode) +
+		   nleaves * dim * sizeof(float) +
+		   intern_nodes * fan_out * dim * sizeof(float);
 }
 
 HKMeansResult *

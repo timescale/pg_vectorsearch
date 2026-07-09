@@ -279,6 +279,8 @@ mkt_pbuild_setup_shared(
 	 * ~nlist/fan_out leaves; size the slot for that tree's worst case. */
 	uint32_t nlist_c   = (nlist + fan_out - 1) / fan_out;
 	uint64_t slot_size = mkt_hkmeans_max_blob_size(nlist_c, fan_out, dim);
+	/* Same 32-bit blob-offset limit as the PG back-end (HKMeansResult). */
+	Assert(slot_size <= (uint64_t)UINT32_MAX);
 
 	uint32_t total_samples = nlist * 256;
 	if (total_samples < 10000)
