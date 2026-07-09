@@ -102,51 +102,30 @@ mkt_posting_build_lists(
 		Dimension			dim,
 		bool				fastscan,
 		const RaBitQParams *rq_params,
-		const float		   *ref_vecs,
 		MktPostingReserve  *reserve,
 		BlockNumber			first_posting,
 		BlockNumber		   *posting_heads)
 {
 	mkt_pbuild_sort_performsort(sorter);
 
-	/* Each list's RaBitQ reference is P^T * its centroid. We rotate it on the
-	 * fly here, one cluster at a time, into this scratch — instead of a
-	 * precomputed pt_centroids[nlist*dim] array (O(nlist*dim) = O(N)). */
-	float *pt_centroid = mkt_alloc((size_t)dim * sizeof(float));
-
+	/*
+	 * Each list's head was pre-written with its pt_centroid (P^T * centroid,
+	 * the RaBitQ encode reference) during the centroid build: adopt it and
+	 * append the sorted entries in place. No second head construction, no
+	 * in-RAM float centroids — the tree can be freed before this runs — and
+	 * a cluster with no entries keeps its on-disk head untouched.
+	 */
 	uint32_t	cur_cluster = 0;
 	const void *entry		= NULL;
 	bool		have = mkt_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
 	for (uint32_t c = 0; c < nlist; c++)
 	{
-		mkt_rabitq_rotate(rq_params, ref_vecs + (size_t)c * dim, pt_centroid);
-
+		BlockNumber		  head_blk = first_posting + reserve->starts[c];
 		MktPostingBuilder hb;
-		if (fastscan)
-			mkt_posting_builder_init_fastscan(
-					&hb,
-					storage,
-					rq_params,
-					dim,
-					c,
-					ref_vecs + (size_t)c * dim,
-					pt_centroid);
-		else
-			mkt_posting_builder_init(
-					&hb,
-					storage,
-					rq_params,
-					dim,
-					c,
-					ref_vecs + (size_t)c * dim,
-					pt_centroid);
+		mkt_posting_builder_adopt_head(
+				&hb, storage, rq_params, dim, c, head_blk, fastscan);
 		mkt_posting_builder_set_shared_reserve(
-				&hb,
-				first_posting + reserve->starts[c],
-				reserve->counts[c],
-				&reserve->nexts[c]);
-		mkt_posting_builder_set_first_blkno(
-				&hb, first_posting + reserve->starts[c]);
+				&hb, head_blk, reserve->counts[c], &reserve->nexts[c]);
 
 		/* Ascending, grouped order: a pending entry is never for a cluster we
 		 * already finished. If it were < c we would have skipped its head. */
@@ -166,8 +145,6 @@ mkt_posting_build_lists(
 	 * means an id >= nlist (out of range) that matched no c and would
 	 * otherwise be silently dropped. */
 	Assert(!have);
-
-	mkt_free(pt_centroid);
 	mkt_pbuild_sort_end(sorter);
 }
 
@@ -230,9 +207,16 @@ do_parallel_build(
 		BlockNumber				*posting_heads,
 		double					*out_heap_tuples,
 		double					*out_indtuples,
-		double					*out_soar_dupes)
+		double					*out_soar_dupes,
+		float				   **out_global_mean,
+		bool					*out_centroids_written)
 {
 	int nworkers = index_info->ii_ParallelWorkers;
+
+	if (out_centroids_written)
+		*out_centroids_written = false;
+	if (out_global_mean)
+		*out_global_mean = NULL;
 
 	MktPBuildLeader lead;
 	if (!mkt_pbuild_setup_shared(&lead, heap, index, config, nworkers))
@@ -491,50 +475,23 @@ do_parallel_build(
 			INSTR_TIME_GET_MILLISEC(t_km_end),
 			nlist);
 
-	/* Phase 3: the workers scan + assign + encode + stream; the leader drains.
-	 * Report this before releasing the workers so the progress view reflects
-	 * it for the whole (multi-hour at scale) scan. The seam fires the
-	 * "mktann-build-load" test hook here. */
-	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
+	/* --- Pre-scan setup for page-backed routing --------------------------
+	 * Compute the global mean, reserve each cluster's posting range, then
+	 * write the centroid + empty head pages and publish the routing state, all
+	 * BEFORE releasing the workers, so their scan routes each row page-backed
+	 * exactly as the query and insert paths do.
+	 * ------------------------------------ */
 
-	/* Re-init the scan for the posting phase (back-end seam). */
-	mkt_pbuild_rescan(heap, shared);
+	/* Global mean of the (normalized) leaf centroids — returned so the
+	 * caller's metadata write uses the same value the centroid pages were
+	 * built with. */
+	float *global_mean = mkt_alloc((size_t)dim * sizeof(float));
+	mkt_global_mean(ref_vecs, nlist, dim, shared->metric, global_mean);
 
-	/* Initialize the shared cluster sorter for the launched-worker count
-	 * BEFORE the tree-ready barrier, so it is ready when workers attach in
-	 * phase 3. The leader merges only (it does not sort a share). */
-	void *sortshared =
-			shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_SORTSHARED, false);
-	mkt_pbuild_sort_shared_init(
-			sortshared, pcxt->nworkers_launched, pcxt->seg);
-
-	/* Barrier: tree ready + sorter initialized; workers start the posting
-	 * scan+sort. The leader stays attached and meets them at the phase-3
-	 * barrier below once all worker sorts have finished. */
-	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-
-	instr_time t_scan_start;
-	INSTR_TIME_SET_CURRENT(t_scan_start);
-
-	/*
-	 * ---- Phase 3: leader pre-reserves layout, then drains worker queues ----
-	 *
-	 * Bounded streaming build: the launched workers (worker_id 1..N) scan,
-	 * assign + RaBitQ-encode, and stream completed full pages over their
-	 * shm_mq; the leader does NOT scan here. It estimates each list's size,
-	 * reserves a contiguous block range per list, pre-extends the relation,
-	 * then drains every queue — placing each page in its list's range and
-	 * linking it into the cluster's chain — until all queues detach. The
-	 * finalize below writes each list's head (with centroid metadata) and
-	 * splices the chain. For both AoS and fastscan, each worker holds its
-	 * trailing partial page per cluster and the finalize folds those into the
-	 * head, so the head is populated and there is no per-worker under-full
-	 * page left in the chain.
-	 */
-	HKMeansResult *tree_r = (HKMeansResult *)dsm_tree;
-
-	/* Per-cluster page estimate from the sample assignment, extrapolated
-	 * to the full table (handles skew; slight over-estimate for headroom). */
+	/* Per-cluster page estimate from the sample assignment (in-RAM tree, a
+	 * bounded throwaway sizing), extrapolated to the full table (handles skew;
+	 * slight over-estimate for headroom). */
+	HKMeansResult *tree_r	 = (HKMeansResult *)dsm_tree;
 	uint32_t *cluster_counts = mkt_alloc0((size_t)nlist * sizeof(uint32_t));
 	uint32_t  n_est_samples	 = 0;
 	for (int w = 0; w < nparticipants; w++)
@@ -549,8 +506,6 @@ do_parallel_build(
 					tree_r, sw + (size_t)i * dim, shared->metric, &d)]++;
 		}
 	}
-	/* Extrapolate per-cluster sample counts to the full table; the reserve
-	 * estimator applies the format + replication headroom. */
 	bool replicate = shared->soar_lambda > 0.0 ||
 					 shared->boundary_epsilon > 0.0;
 	{
@@ -561,8 +516,7 @@ do_parallel_build(
 			cluster_counts[c] = (uint32_t)((double)cluster_counts[c] * scale);
 	}
 
-	/* Leader-local reserve (0-based ranges; first_posting added on write).
-	 * first_posting is the centroid-layout posting start computed above. */
+	/* Leader-local reserve (0-based ranges; first_posting added on write). */
 	MktPostingReserve reserve;
 	mkt_posting_reserve_init(
 			&reserve,
@@ -573,17 +527,109 @@ do_parallel_build(
 			shared->fastscan,
 			replicate);
 	mkt_free(cluster_counts);
-
-	/* Pre-extend the relation to cover the reserved ranges. mkt_storage_extend
-	 * handles any backend-specific batching internally (the PG storage chunks
-	 * around the ExtendBufferedRelBy pin limit). A cluster that outgrows its
-	 * (over-)reservation overflows via on-demand new_page during the drain, so
-	 * there is no separate spill region to pre-extend. */
 	mkt_storage_extend(storage, reserve.total);
 
+	/* Each cluster's posting-list head block (deterministic from the reserve),
+	 * needed by the workers to map a routed head back to its leaf index. */
+	for (uint32_t c = 0; c < nlist; c++)
+		posting_heads[c] = first_posting + reserve.starts[c];
+
+	/* Write the centroid pages (leaf->head links) into `storage` before the
+	 * scan; the workers route against them. */
+	{
+		uint32_t max_ent =
+				mkt_centroid_max_entries_fmt(dim, shared->centroid_format);
+		BlockNumber *nfb = mkt_alloc(
+				(size_t)tree->nnodes * sizeof(BlockNumber));
+		mkt_compute_centroid_layout(tree, max_ent, 1, nfb);
+		mkt_build_report_phase(prog, MKT_BUILD_PHASE_CENTROID);
+		mkt_write_centroid_tree(
+				storage,
+				tree,
+				dim,
+				fan_out,
+				shared->centroid_format,
+				rq_params,
+				global_mean,
+				posting_heads,
+				nfb,
+				NULL);
+		mkt_free(nfb);
+	}
+
+	/* Pre-write each cluster's empty head page carrying its pt_centroid (the
+	 * page-backed encode reference the scan reads); mkt_posting_build_lists
+	 * then adopts each head and appends its entries in place. */
+	{
+		float *pt = mkt_alloc((size_t)dim * sizeof(float));
+		for (uint32_t c = 0; c < nlist; c++)
+		{
+			mkt_rabitq_rotate(rq_params, ref_vecs + (size_t)c * dim, pt);
+			MktPostingBuilder hb;
+			mkt_posting_builder_init_fmt(
+					&hb,
+					storage,
+					rq_params,
+					dim,
+					c,
+					ref_vecs + (size_t)c * dim,
+					pt,
+					shared->fastscan);
+			mkt_posting_builder_set_first_blkno(
+					&hb, first_posting + reserve.starts[c]);
+			mkt_posting_builder_finish(&hb);
+			mkt_posting_builder_cleanup(&hb);
+		}
+		mkt_free(pt);
+	}
+
+	/* Publish the routing state the workers read in phase 3: head blocks, the
+	 * global mean, and the page store. */
+	{
+		BlockNumber *dsm_heads =
+				shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_POSTING_HEADS, false);
+		memcpy(dsm_heads, posting_heads, (size_t)nlist * sizeof(BlockNumber));
+		float *dsm_gmean =
+				shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, false);
+		memcpy(dsm_gmean, global_mean, (size_t)dim * sizeof(float));
+	}
+	mkt_pbuild_publish_storage(shared, storage);
+
+	if (out_global_mean)
+		*out_global_mean = global_mean; /* caller owns it (metadata write) */
+	else
+		mkt_free(global_mean); /* not needed past the centroid write + publish
+								*/
+	if (out_centroids_written)
+		*out_centroids_written = true;
+
+	/* Phase 3: workers scan + route page-backed + encode + sort; the leader
+	 * merges. Report before releasing workers so progress reflects the whole
+	 * (multi-hour at scale) scan. The seam fires the "mktann-build-load" hook.
+	 */
+	mkt_build_report_phase(prog, MKT_BUILD_PHASE_SCAN_PARALLEL);
+
+	/* Re-init the scan for the posting phase (back-end seam). */
+	mkt_pbuild_rescan(heap, shared);
+
+	/* Initialize the shared cluster sorter for the launched-worker count
+	 * BEFORE the ready barrier, so it is ready when workers attach in phase 3.
+	 * The leader merges only (it does not sort a share). */
+	void *sortshared =
+			shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_SORTSHARED, false);
+	mkt_pbuild_sort_shared_init(
+			sortshared, pcxt->nworkers_launched, pcxt->seg);
+
+	/* Barrier: centroid/head pages written + routing state published + sorter
+	 * ready; workers start the page-backed posting scan+sort. */
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+	instr_time t_scan_start;
+	INSTR_TIME_SET_CURRENT(t_scan_start);
+
 	/* Barrier: wait until every worker has finished sorting its run, then
-	 * merge and build. The leader does not scan; the workers cover the heap
-	 * cooperatively. */
+	 * merge and build. The leader does not scan; the workers cover the heap.
+	 */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 	BarrierDetach(barrier);
 
@@ -633,7 +679,6 @@ do_parallel_build(
 			dim,
 			shared->fastscan,
 			rq_params,
-			ref_vecs,
 			&reserve,
 			first_posting,
 			posting_heads);
