@@ -97,9 +97,24 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	mktann_index_base_init(index, &ss->index_base);
 	MktannScanInfo info = mktann_cache_scan_info(index);
 
-	uint32_t max_k		  = MKT_DEFAULT_K;
-	uint32_t max_nprobe	  = info.nlist < 4096 ? info.nlist : 4096;
-	bool	 has_fastscan = ss->index_base.fastscan != 0;
+	uint32_t max_k = MKT_DEFAULT_K;
+
+	/* Size the per-scan query buffers to the nprobe actually requested
+	 * (the GUC is set before the query runs) rather than the worst-case
+	 * ceiling: the centroid-search scratch alone is
+	 * O(max_nprobe * entries_per_page) candidates, several MB per query
+	 * at the ceiling but a few hundred KB at typical nprobe. Headroom
+	 * covers routing more leaf candidates than are scanned (bounded
+	 * probe expansion); requests beyond the sizing are clamped by
+	 * mkt_query_execute exactly as they were against the old ceiling. */
+	uint32_t req_nprobe = mkt_nprobe > 0 ? (uint32_t)mkt_nprobe : 1;
+	uint32_t max_nprobe = req_nprobe + Min(req_nprobe, 256) + 16;
+	if (max_nprobe > 4096)
+		max_nprobe = 4096;
+	if (max_nprobe > info.nlist)
+		max_nprobe = info.nlist;
+
+	bool has_fastscan = ss->index_base.fastscan != 0;
 
 	/* Initialize PG storage */
 	mktann_storage_init(&ss->storage, index, NULL, ss->index_base.metric);
