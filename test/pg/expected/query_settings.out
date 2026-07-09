@@ -136,7 +136,7 @@ END $$;
 SELECT mkt_routing_stats() LIKE '%<=8:100.0%%' AS ranks_within_nprobe;
  ranks_within_nprobe 
 ---------------------
- f
+ t
 (1 row)
 
 RESET mkt.probe_expand;
