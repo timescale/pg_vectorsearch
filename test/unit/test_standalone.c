@@ -388,6 +388,65 @@ TEST(query_exec_recall_pages_parallel)
 	mkt_index_destroy(idx);
 }
 
+TEST(query_exec_recall_pages_parallel_depth3)
+{
+	/* Depth-3 streamed tree through the driver (explicit fan_out; the auto
+	 * sqrt fan_out never exceeds two levels at test scale): batched subtree
+	 * ring across several batches, blob replay, formula heads. */
+	uint32_t dim = 32, nvecs = 2000, k = 10;
+	float	*vecs = make_vectors(nvecs, dim, 42);
+
+	MktIndexConfig config = {
+			.nlist		   = 40,
+			.fan_out	   = 4,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = MKT_POSTING_FMT_PAGES,
+			.nworkers	   = 2,
+	};
+
+	MktIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "paged parallel depth-3 build should succeed");
+
+	verify_head_meta(result, idx);
+
+	MktQueryCtx *qctx = mkt_query_ctx_create(idx, k, 40);
+
+	uint32_t total_hits = 0;
+	uint32_t nqueries	= 10;
+	for (uint32_t q = 0; q < nqueries; q++)
+	{
+		const float *query = vecs + (size_t)(q * 100) * dim;
+
+		uint32_t result_ids[10];
+		uint32_t count = mkt_query_exec(
+				qctx,
+				query,
+				k,
+				40,
+				MKT_DISTANCE_MODE_ASYMMETRIC,
+				true,
+				result_ids);
+
+		uint32_t truth[10];
+		brute_force_knn(vecs, nvecs, dim, query, k, truth);
+		for (uint32_t i = 0; i < count; i++)
+			for (uint32_t j = 0; j < k; j++)
+				if (result_ids[i] == truth[j])
+				{
+					total_hits++;
+					break;
+				}
+	}
+	/* Probing every list with exact rerank: recall should be near-perfect. */
+	double recall = (double)total_hits / (nqueries * k);
+	ASSERT_TRUE(recall > 0.9, "depth-3 paged recall at full probe");
+
+	mkt_query_ctx_destroy(qctx);
+	mkt_index_destroy(idx);
+}
+
 TEST(query_exec_null_fails)
 {
 	uint32_t ids[10];

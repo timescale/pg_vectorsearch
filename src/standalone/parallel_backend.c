@@ -159,12 +159,18 @@ struct MktBlobStore
 	uint64_t size;
 	uint64_t cap;
 	uint64_t rpos;
+	/* The store outlives pass-scoped scratch contexts (the plan pass fills
+	 * it, the write pass drains it), so growth allocates in the context the
+	 * store was created in, not the caller's current one. */
+	MktMemCtx ctx;
 };
 
 MktBlobStore *
 mkt_pbuild_blobstore_begin(void)
 {
-	return mkt_alloc0(sizeof(MktBlobStore));
+	MktBlobStore *bs = mkt_alloc0(sizeof(MktBlobStore));
+	bs->ctx = mkt_current_memctx; /* the creating context */
+	return bs;
 }
 
 void
@@ -176,7 +182,9 @@ mkt_pbuild_blobstore_put(MktBlobStore *bs, const void *blob, uint64_t size)
 		uint64_t cap = bs->cap ? bs->cap : (uint64_t)1 << 20;
 		while (cap < need)
 			cap *= 2;
-		char *grown = mkt_alloc(cap);
+		MktMemCtx old	= mkt_memctx_switch(bs->ctx);
+		char	 *grown = mkt_alloc(cap);
+		mkt_memctx_switch(old);
 		if (bs->data != NULL)
 		{
 			memcpy(grown, bs->data, bs->size);
