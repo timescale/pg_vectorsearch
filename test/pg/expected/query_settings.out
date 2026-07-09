@@ -145,5 +145,35 @@ RESET enable_seqscan;
 DROP TABLE probe_depth_test;
 DROP FUNCTION mkt_routing_stats();
 DROP FUNCTION mkt_phase_stats_reset();
+-- ============================================================
+-- mkt.centroid_beam_scale: a narrow beam must keep every leaf reachable
+-- ============================================================
+-- The beam scale narrows the intermediate-level beam to nprobe * scale.
+-- An intermediate keep of W can expose at most W * fan_out leaves, so
+-- covering the top nprobe leaves requires W >= nprobe / fan_out. At
+-- fan_out = 3 the default scale (0.25) computes W below that bound for
+-- every possible leaf count, so entire clusters drop out of reach at
+-- ANY nprobe: probing every list must return every row, at the default
+-- beam scale, for an index whose fan_out is smaller than 1 / scale.
+CREATE TABLE beam_floor_test (id int, v vector(3));
+INSERT INTO beam_floor_test SELECT g, format('[%s,0,0]', g)::vector
+    FROM generate_series(1, 60) g;
+CREATE INDEX beam_floor_idx ON beam_floor_test USING mktann (v)
+    WITH (nlist = 12, fan_out = 3);
+SET enable_seqscan = off;
+SET mkt.nprobe = 10000;
+SET mkt.query_limit = 100;
+SELECT count(*) = 60 AS all_rows_reachable FROM (
+    SELECT id FROM beam_floor_test
+    ORDER BY v <-> '[0.5,0,0]' LIMIT 100) t;
+ all_rows_reachable 
+--------------------
+ f
+(1 row)
+
+RESET mkt.query_limit;
+RESET mkt.nprobe;
+RESET enable_seqscan;
+DROP TABLE beam_floor_test;
 -- Cleanup
 DROP TABLE query_settings_test;
