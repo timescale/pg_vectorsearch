@@ -262,11 +262,18 @@ static int
 cmp_tid_order(const void *a, const void *b, void *arg)
 {
 	const MktTopKEntry *cands = arg;
-	ItemPointerData		tid_a = mkt_posting_decode_tid(
-			cands[*(const uint32_t *)a].id);
-	ItemPointerData tid_b = mkt_posting_decode_tid(
-			cands[*(const uint32_t *)b].id);
-	return ItemPointerCompare(&tid_a, &tid_b);
+
+	/* Encoded ids are (block << 16) | offset — strictly monotonic in
+	 * (block, offset), so raw id comparison IS TID order; no need to
+	 * decode both TIDs on every comparison. */
+	uint64_t id_a = cands[*(const uint32_t *)a].id;
+	uint64_t id_b = cands[*(const uint32_t *)b].id;
+
+	if (id_a < id_b)
+		return -1;
+	if (id_a > id_b)
+		return 1;
+	return 0;
 }
 
 /*
@@ -350,7 +357,7 @@ pg_rerank(
 			}
 		}
 
-		mkt_topk_insert(&topk, d, 0.0f, (uint64_t)idx);
+		mkt_topk_insert_unique(&topk, d, 0.0f, (uint64_t)idx);
 	}
 
 	ExecDropSingleTupleTableSlot(slot);
@@ -404,7 +411,7 @@ rerank_stream_cb(
 		/* Already exact — insert directly, no heap fetch */
 		if (st->candidates[idx].error == 0.0f)
 		{
-			mkt_topk_insert(
+			mkt_topk_insert_unique(
 					st->topk,
 					st->candidates[idx].distance,
 					0.0f,
@@ -504,7 +511,7 @@ pg_rerank_readstream(
 			ExecClearTuple(slot);
 		}
 
-		mkt_topk_insert(&topk, d, 0.0f, (uint64_t)idx);
+		mkt_topk_insert_unique(&topk, d, 0.0f, (uint64_t)idx);
 		ReleaseBuffer(buf);
 	}
 
