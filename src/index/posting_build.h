@@ -98,19 +98,6 @@ MktBuildAssignment mkt_build_assign_vector(
 		const MktBuildParams *params,
 		MktBuildWorkerBufs	 *bufs);
 
-/*
- * Primary cluster via tree descent, plus the encoded vector written into
- * enc_out[dim] (normalized for cosine, copied otherwise). Used by the
- * batched secondary path, which needs the encoded vectors contiguous.
- * Returns the primary cluster; *out_dist receives its distance.
- */
-uint32_t mkt_build_assign_primary(
-		const HKMeansResult	 *tree,
-		const float			 *vec,
-		const MktBuildParams *params,
-		float				 *enc_out,
-		Distance			 *out_dist);
-
 /* ----------------------------------------------------------------
  * Page-backed build routing (unified with the query/insert path)
  *
@@ -387,16 +374,6 @@ typedef struct MktPostingBuilder
 	/* Page format dispatch */
 	const MktPostingPageOps *page_ops;
 
-	/*
-	 * Full-page sink for deferred mode (storage == NULL). A completed page is
-	 * handed to this callback — the parallel build streams full pages to the
-	 * leader (over shm_mq) so worker memory stays bounded to one working page
-	 * per cluster. The page's cluster id and flags (first vs continuation) are
-	 * carried in the page itself.
-	 */
-	void (*page_sink)(void *ctx, uint32_t cluster_id, const char *page);
-	void *sink_ctx;
-
 	/* Format-specific state (only fastscan uses this) */
 	struct
 	{
@@ -466,27 +443,6 @@ void mkt_posting_builder_adopt_head(
 		bool				fastscan);
 
 /*
- * Initialize continuation builder (no pt_centroid on first page).
- * Used by parallel workers that are not responsible for the first
- * page of a cluster's posting list.
- */
-void mkt_posting_builder_init_continuation(
-		MktPostingBuilder  *builder,
-		MktStorage		   *storage,
-		const RaBitQParams *params,
-		Dimension			dim,
-		uint32_t			cluster_id,
-		const float		   *centroid);
-
-void mkt_posting_builder_init_continuation_fastscan(
-		MktPostingBuilder  *builder,
-		MktStorage		   *storage,
-		const RaBitQParams *params,
-		Dimension			dim,
-		uint32_t			cluster_id,
-		const float		   *centroid);
-
-/*
  * Pin the first page to a specific block number. The first flush
  * writes to this block; later pages are appended via new_page.
  */
@@ -516,14 +472,6 @@ void mkt_posting_builder_add_encoded(
 		const uint8_t	  *bits);
 
 BlockNumber mkt_posting_builder_finish(MktPostingBuilder *builder);
-
-/*
- * Finalize entries but don't flush the last page. The partial page
- * data remains in builder->mem_page for merging by the caller.
- * Returns the head of the flushed chain (InvalidBlockNumber if no
- * pages were flushed).
- */
-BlockNumber mkt_posting_builder_finish_partial(MktPostingBuilder *builder);
 
 void mkt_posting_builder_cleanup(MktPostingBuilder *builder);
 
@@ -568,18 +516,6 @@ void mkt_posting_entry_encode_from_pt(
 
 void mkt_posting_entry_add(
 		MktPostingBuilder *builder, const void *entry, Dimension dim);
-
-/*
- * Set a full-page sink for deferred mode (storage == NULL). When set,
- * completed pages are streamed to `sink(ctx, cluster_id, page)` instead
- * of accumulated in the batch — the PG parallel build uses this to send
- * full pages to the leader over shm_mq. NULL (default) keeps batch
- * accumulation.
- */
-void mkt_posting_builder_set_page_sink(
-		MktPostingBuilder *builder,
-		void (*sink)(void *ctx, uint32_t cluster_id, const char *page),
-		void *sink_ctx);
 
 /* ----------------------------------------------------------------
  * Flat builder — one buffer per cluster (standalone benchmark)

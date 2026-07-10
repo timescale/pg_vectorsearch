@@ -593,9 +593,6 @@ do_parallel_build(
 			/* The tree is streamed to pages from a bounded ring of subtree
 			 * slots (part of dsm_total); it is never held whole in memory. */
 			0,
-			/* Per-cluster encode references are rotated one at a time in
-			 * mkt_posting_build_lists; no bulk nlist*dim array exists. */
-			0,
 			(uint64_t)lead.dsm_total);
 
 	instr_time t_launch_start;

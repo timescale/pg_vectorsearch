@@ -29,7 +29,10 @@
 #endif
 
 typedef uintptr_t Datum;
-typedef char	 *Pointer;
+
+/* Opaque DSM segment; unused in standalone (threads share the heap). */
+typedef struct dsm_segment dsm_segment;
+typedef char			  *Pointer;
 
 #define PointerGetDatum(p) ((Datum)(p))
 #define DatumGetPointer(d) ((Pointer)(d))

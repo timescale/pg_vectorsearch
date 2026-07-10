@@ -85,13 +85,11 @@ mkt_build_report_planned_alloc(
 		MktBuildProgress *p,
 		uint64_t		  sample_bytes,
 		uint64_t		  centroid_tree_bytes,
-		uint64_t		  pt_centroids_bytes,
 		uint64_t		  dsm_total_bytes)
 {
 	(void)p;
 	(void)sample_bytes;
 	(void)centroid_tree_bytes;
-	(void)pt_centroids_bytes;
 	(void)dsm_total_bytes;
 }
 

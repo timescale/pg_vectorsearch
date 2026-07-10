@@ -27,15 +27,14 @@
 #ifdef MKT_STANDALONE
 #include "standalone/barrier.h"
 #include "standalone/pg_compat.h" /* Size, BlockNumber, ItemPointerData, Relation */
-#include "standalone/shm_mq.h"
 #include "standalone/shm_toc.h"
 #else
 #include <postgres.h>
 
 #include <storage/barrier.h>
 #include <storage/block.h>
+#include <storage/dsm.h>
 #include <storage/itemptr.h>
-#include <storage/shm_mq.h>
 #include <storage/shm_toc.h>
 #include <utils/rel.h>
 #endif
@@ -69,19 +68,16 @@ typedef void (*MktBuildScanCb)(
  * their keys live here with the rest for one contiguous numbering.
  * ---------------------------------------------------------------- */
 
-#define MKT_DSM_KEY_SHARED		   UINT64CONST(0xB000000000000001)
-#define MKT_DSM_KEY_WORKER_OUTPUT  UINT64CONST(0xB000000000000004)
-#define MKT_DSM_KEY_PARTIALS	   UINT64CONST(0xB000000000000005)
-#define MKT_DSM_KEY_WAL_USAGE	   UINT64CONST(0xB000000000000006)
-#define MKT_DSM_KEY_BUFFER_USAGE   UINT64CONST(0xB000000000000007)
-#define MKT_DSM_KEY_QUERY_TEXT	   UINT64CONST(0xB000000000000008)
-#define MKT_DSM_KEY_BARRIER		   UINT64CONST(0xB000000000000009)
-#define MKT_DSM_KEY_SAMPLES		   UINT64CONST(0xB00000000000000A)
-#define MKT_DSM_KEY_CENTROIDS	   UINT64CONST(0xB00000000000000B)
-#define MKT_DSM_KEY_KM_WORKERS	   UINT64CONST(0xB00000000000000C)
-#define MKT_DSM_KEY_ROOT_ASSIGN	   UINT64CONST(0xB00000000000000E)
-#define MKT_DSM_KEY_POSTING_QUEUES UINT64CONST(0xB00000000000000F)
-#define MKT_DSM_KEY_SORTSHARED	   UINT64CONST(0xB000000000000012)
+#define MKT_DSM_KEY_SHARED		 UINT64CONST(0xB000000000000001)
+#define MKT_DSM_KEY_WAL_USAGE	 UINT64CONST(0xB000000000000006)
+#define MKT_DSM_KEY_BUFFER_USAGE UINT64CONST(0xB000000000000007)
+#define MKT_DSM_KEY_QUERY_TEXT	 UINT64CONST(0xB000000000000008)
+#define MKT_DSM_KEY_BARRIER		 UINT64CONST(0xB000000000000009)
+#define MKT_DSM_KEY_SAMPLES		 UINT64CONST(0xB00000000000000A)
+#define MKT_DSM_KEY_CENTROIDS	 UINT64CONST(0xB00000000000000B)
+#define MKT_DSM_KEY_KM_WORKERS	 UINT64CONST(0xB00000000000000C)
+#define MKT_DSM_KEY_ROOT_ASSIGN	 UINT64CONST(0xB00000000000000E)
+#define MKT_DSM_KEY_SORTSHARED	 UINT64CONST(0xB000000000000012)
 /* Page-backed phase-3 routing: the global mean, published by the leader before
  * the tree-ready barrier so workers route exactly as the query/insert paths
  * do. The posting-head base (leaf c's head = first_posting + c) is a scalar in
@@ -405,61 +401,6 @@ static inline bool *
 mkt_dsm_worker_active(char *base, uint32_t nlist, int worker_id)
 {
 	return (bool *)(base + (Size)worker_id * nlist * sizeof(bool));
-}
-
-/* ----------------------------------------------------------------
- * Partials buffer in DSM
- *
- * partials[worker_id * nlist + cluster] = one BLCKSZ page
- * Only allocated when !fastscan.
- * ---------------------------------------------------------------- */
-
-static inline Size
-mkt_dsm_partials_size(uint32_t nlist, int nparticipants)
-{
-	return (Size)nparticipants * nlist * BLCKSZ;
-}
-
-static inline char *
-mkt_dsm_worker_partials(char *base, uint32_t nlist, int worker_id)
-{
-	return base + (Size)worker_id * nlist * BLCKSZ;
-}
-
-/* ----------------------------------------------------------------
- * Per-worker shm_mq posting-page queues
- *
- * Each worker streams its completed full pages to the leader over a
- * single-reader/single-writer shm_mq (worker = sender, leader =
- * receiver). One message = one BLCKSZ page; the leader reads the
- * cluster id and first/continuation flag from the page header to place
- * it in that list's reserved block range. The ring doubles as the flush
- * buffer: when it fills, the worker's send blocks (backpressure), which
- * is what keeps worker memory bounded to ~one working page per cluster.
- * A worker detaches its queue when done; the leader drains until all
- * queues are detached.
- * ---------------------------------------------------------------- */
-
-#define MKT_DSM_POSTING_QUEUE_PAGES 8
-
-static inline Size
-mkt_dsm_posting_queue_bytes(void)
-{
-	/* Ring large enough for several full-page messages, plus slack for
-	 * shm_mq's internal header. */
-	return (Size)MKT_DSM_POSTING_QUEUE_PAGES * (BLCKSZ + 64) + 1024;
-}
-
-static inline Size
-mkt_dsm_posting_queues_size(int nparticipants)
-{
-	return (Size)nparticipants * MAXALIGN(mkt_dsm_posting_queue_bytes());
-}
-
-static inline char *
-mkt_dsm_posting_queue(char *base, int worker_id)
-{
-	return base + (Size)worker_id * MAXALIGN(mkt_dsm_posting_queue_bytes());
 }
 
 /* ----------------------------------------------------------------
@@ -926,8 +867,6 @@ typedef struct MktPBuildLeader
 	float			   *cents;
 	char			   *km_workers_base;
 	MktDsmRootAssign   *dsm_ra;
-	char			   *queues_base;
-	char			   *dsm_partials;
 	struct WalUsage	   *walusage;
 	struct BufferUsage *bufferusage;
 	int					nparticipants;

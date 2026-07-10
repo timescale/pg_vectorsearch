@@ -26,7 +26,6 @@ unit_test_sources = files(
   'test_shm_toc.c',
   'test_parallel_scan.c',
   'test_latch.c',
-  'test_shm_mq.c',
   'test_parallel_ctx.c',
   'test_centroid_page.c',
   'test_centroid_search.c',

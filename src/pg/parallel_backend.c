@@ -707,8 +707,6 @@ mkt_pbuild_setup_shared(
 	lead->cents			  = cents;
 	lead->km_workers_base = km_workers_base;
 	lead->dsm_ra		  = dsm_ra;
-	lead->queues_base	  = NULL; /* sort-seam path: no shm_mq queues */
-	lead->dsm_partials	  = NULL; /* sort-seam path: no partials region */
 	lead->walusage		  = walusage;
 	lead->bufferusage	  = bufferusage;
 	lead->nparticipants	  = nparticipants;

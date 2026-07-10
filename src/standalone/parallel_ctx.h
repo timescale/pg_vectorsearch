@@ -16,8 +16,7 @@
  *
  * Each launched thread gets a stable latch (owned by the context, freed only
  * at DestroyParallelContext after every worker has been joined) so the leader
- * can safely set it while draining — see the latch-lifetime note in
- * mkt_shm_mq.h.
+ * can safely set it while a worker may still be blocked on it.
  */
 
 #ifndef MKT_PARALLEL_CTX_H
@@ -26,7 +25,7 @@
 #include <stddef.h>
 
 #include "standalone/latch.h"
-#include "standalone/shm_mq.h" /* dsm_segment */
+#include "standalone/pg_compat.h" /* dsm_segment */
 #include "standalone/shm_toc.h"
 #include "standalone/thread_pool.h"
 
