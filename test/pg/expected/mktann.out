@@ -232,7 +232,7 @@ SELECT count(*) BETWEEN 20 AND 120 AS toast_auto_nlist
   FROM mkt_centroid_pages('hd_i') WHERE is_leaf;
  toast_auto_nlist 
 ------------------
- f
+ t
 (1 row)
 
 DROP TABLE hd;

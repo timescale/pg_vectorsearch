@@ -30,6 +30,7 @@
 
 #include <postgres.h>
 
+#include <access/heaptoast.h>
 #include <access/htup_details.h>
 #include <access/table.h>
 #include <access/tableam.h>
@@ -379,6 +380,8 @@ mktann_get_fan_out(Relation index)
 	return MKTANN_DEFAULT_FAN_OUT;
 }
 
+static double estimate_heap_tuples(Relation heap, Dimension dim);
+
 static void
 resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 {
@@ -408,12 +411,7 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 	}
 	else
 	{
-		double reltuples = (heap->rd_rel->reltuples > 0)
-								 ? heap->rd_rel->reltuples
-								 : RelationGetNumberOfBlocks(heap) *
-										   (BLCKSZ /
-											(sizeof(float) * dim + 32));
-		p->nlist		 = mkt_auto_nlist(reltuples);
+		p->nlist = mkt_auto_nlist(estimate_heap_tuples(heap, dim));
 		if (p->nlist > MKTANN_MAX_NLIST)
 			p->nlist = MKTANN_MAX_NLIST;
 	}
@@ -431,18 +429,26 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 }
 
 /*
- * Estimated heap row count for the progress total. Uses the planner's
- * reltuples when available, else a heap-size guess (same form the nlist
- * auto-tune uses). This is what makes pg_stat_progress_create_index report a
- * meaningful percent_complete during the scan phases.
+ * Estimated heap row count. Uses the planner's reltuples when available,
+ * else a density guess from the main-fork size. Feeds the automatic
+ * partition count and the pg_stat_progress_create_index total.
+ *
+ * The density must account for TOAST: a vector datum above the threshold is
+ * stored out of line and the main-fork row is just the header, the other
+ * columns and an 18-byte toast pointer, so a width taken from the dimension
+ * would undercount the rows by up to two orders of magnitude (and past ~2k
+ * dimensions it exceeds the page size, reading as zero rows per page).
  */
 static double
 estimate_heap_tuples(Relation heap, Dimension dim)
 {
 	if (heap->rd_rel->reltuples > 0)
 		return heap->rd_rel->reltuples;
-	return RelationGetNumberOfBlocks(heap) *
-		   (BLCKSZ / (double)(sizeof(float) * dim + 32));
+
+	Size   vec_sz = sizeof(float) * dim + 8;
+	double width  = (vec_sz > TOAST_TUPLE_THRESHOLD) ? 64.0
+													 : (double)(vec_sz + 32);
+	return RelationGetNumberOfBlocks(heap) * (BLCKSZ / width);
 }
 
 /* ----------------------------------------------------------------
