@@ -907,11 +907,13 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* ---- Phase 3: posting scan -> cluster-keyed sort (page-backed) ---- */
 
 	/* worker_id is 1..N for launched workers; the sorter's 0-based worker
-	 * index is worker_id - 1. Worker sorts run concurrently, so each gets a
-	 * share of the budget (mwm / participants) to bound peak memory; the
-	 * leader merge runs alone afterward and uses the full budget. */
-	int worker_wm = shared->work_mem_kb /
-					(shared->nparticipants > 0 ? shared->nparticipants : 1);
+	 * index is worker_id - 1. Only the workers sort concurrently -- the
+	 * leader's merge-only sorter opens after every worker sort finishes and
+	 * uses the full budget -- so the budget splits across the workers
+	 * alone; splitting across all participants would strand one share for
+	 * the whole sort phase. */
+	int nsorters  = shared->nparticipants > 1 ? shared->nparticipants - 1 : 1;
+	int worker_wm = shared->work_mem_kb / nsorters;
 	if (worker_wm < 64)
 		worker_wm = 64;
 	MktSorter *sorter = mkt_pbuild_sort_begin(
