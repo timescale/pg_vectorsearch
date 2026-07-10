@@ -883,9 +883,11 @@ mkt_posting_builder_adopt_head(
 	memcpy(builder->mem_page, hp, BLCKSZ);
 	mkt_storage_release_page(storage, head_blk);
 
-	builder->enc_buf = params ? mkt_alloc(MKT_RABITQ_DATA_SIZE(dim)) : NULL;
-	if (params)
-		mkt_rabitq_scratch_init(&builder->enc_scratch, dim);
+	/* No encoder scratch: an adopted head only ever receives pre-encoded
+	 * entries (mkt_posting_entry_add from the cluster-keyed sort), and this
+	 * runs once per posting list -- per-list encoder allocations would be
+	 * O(nlist) churn for buffers the raw-vector add path never touches. */
+	builder->enc_buf = NULL;
 
 	if (fastscan)
 	{
@@ -976,6 +978,9 @@ void
 mkt_posting_builder_add(
 		MktPostingBuilder *builder, ItemPointerData tid, const float *vector)
 {
+	/* Adopted heads carry no encoder (their entries arrive pre-encoded). */
+	Assert(builder->enc_buf != NULL);
+
 	VectorRef vref = {.data = vector, .dim = builder->dim};
 	VectorRef cref = {.data = builder->centroid, .dim = builder->dim};
 	mkt_rabitq_encode_into_ex(
