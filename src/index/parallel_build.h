@@ -201,9 +201,11 @@ typedef struct MktDsmSamples
 	uint32_t  nparticipants;
 	uint32_t  max_per_worker;
 	Dimension dim;
-	/* counts[nparticipants] (rows kept), then seen[nparticipants] (live
-	 * rows the sampling scan visited; kept < seen means the sample is a
-	 * strict subset of the table), then the per-worker sample blocks
+	/* counts[nparticipants] (rows kept), then MAXALIGN'd
+	 * seen[nparticipants] (live rows the sampling scan visited; kept < seen
+	 * means the sample is a strict subset of the table -- 64-bit, since a
+	 * participant's scan share is unbounded and a wrapped counter would
+	 * silently flip the refine gate), then the per-worker sample blocks
 	 * (samples[worker][max_per_worker * dim]) packed right after. */
 	uint32_t counts[];
 } MktDsmSamples;
@@ -214,17 +216,17 @@ mkt_dsm_sample_counts(MktDsmSamples *s)
 	return s->counts;
 }
 
-static inline uint32_t *
+static inline uint64_t *
 mkt_dsm_sample_seen(MktDsmSamples *s)
 {
-	return s->counts + s->nparticipants;
+	return (uint64_t *)MAXALIGN(s->counts + s->nparticipants);
 }
 
 static inline float *
 mkt_dsm_worker_samples(MktDsmSamples *s, int worker_id)
 {
 	/* The sample blocks begin after counts[] and seen[]. */
-	float *samples = (float *)(s->counts + 2 * s->nparticipants);
+	float *samples = (float *)(mkt_dsm_sample_seen(s) + s->nparticipants);
 	return samples + (size_t)worker_id * s->max_per_worker * s->dim;
 }
 
@@ -232,7 +234,9 @@ static inline Size
 mkt_dsm_samples_size(int nparticipants, uint32_t max_per_worker, Dimension dim)
 {
 	Size sz = offsetof(MktDsmSamples, counts);
-	sz += (Size)nparticipants * 2 * sizeof(uint32_t);
+	sz += (Size)nparticipants * sizeof(uint32_t);
+	sz = MAXALIGN(sz);
+	sz += (Size)nparticipants * sizeof(uint64_t);
 	sz += (Size)nparticipants * max_per_worker * dim * sizeof(float);
 	return sz;
 }
@@ -473,7 +477,7 @@ typedef struct SampleCbState
 {
 	float		  *samples;
 	uint32_t	   count;
-	uint32_t	   seen;
+	uint64_t	   seen;
 	uint32_t	   max_samples;
 	uint32_t	   stride;
 	uint32_t	   stride_counter;
