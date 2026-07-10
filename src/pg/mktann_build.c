@@ -748,14 +748,7 @@ do_serial_build(
 	 * when the write pass emits it; continuation pages are appended past the
 	 * head region during mkt_posting_build_lists. No O(nlist) reserve arrays.
 	 */
-	/* mkt_storage_extend extends BY npages; the count doubles as the
-	 * absolute layout end only because the relation holds nothing but the
-	 * meta-page slot yet. The reserved layout (heads at first_posting + leaf)
-	 * silently shifts if a page ever sneaks in before this point, so pin the
-	 * invariant. */
-	BlockNumber ext_base = mkt_storage_extend(storage, first_posting + nlist);
-	Assert(ext_base == 0 || ext_base == InvalidBlockNumber);
-	(void)ext_base;
+	mkt_build_reserve_layout(storage, first_posting + nlist);
 
 	/*
 	 * Write pass: stream the centroid pages (reserved blocks, post-order, root
@@ -765,14 +758,9 @@ do_serial_build(
 	 */
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_CENTROID);
 
-	MktHeadWriteCtx headctx = {
-			.storage	   = storage,
-			.rq_params	   = rq_params,
-			.dim		   = dim,
-			.fastscan	   = p->fastscan,
-			.first_posting = first_posting,
-			.pt			   = palloc(vec_nbytes),
-	};
+	MktHeadWriteCtx headctx;
+	mkt_head_write_ctx_init(
+			&headctx, storage, rq_params, dim, p->fastscan, first_posting);
 	BlockNumber root = mkt_routing_tree_write(
 			storage,
 			(uint32_t)bs->nsamples,
@@ -788,7 +776,7 @@ do_serial_build(
 			mkt_write_leaf_head,
 			&headctx);
 	mkt_pbuild_blobstore_end(node_store);
-	pfree(headctx.pt);
+	mkt_head_write_ctx_cleanup(&headctx);
 	pfree(bs->samples);
 	bs->samples = NULL;
 	if (root == InvalidBlockNumber)
@@ -847,16 +835,11 @@ do_serial_build(
 		INSTR_TIME_SET_CURRENT(t_ref_start);
 		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_REFINE);
 
-		MktHeadWriteCtx rhead = {
-				.storage	   = storage,
-				.rq_params	   = rq_params,
-				.dim		   = dim,
-				.fastscan	   = p->fastscan,
-				.first_posting = first_posting,
-				.pt			   = palloc(vec_nbytes),
-		};
+		MktHeadWriteCtx rhead;
+		mkt_head_write_ctx_init(
+				&rhead, storage, rq_params, dim, p->fastscan, first_posting);
 		serial_refine_heads(bs, &rhead, &bs->qs, first_posting, nlist);
-		pfree(rhead.pt);
+		mkt_head_write_ctx_cleanup(&rhead);
 
 		instr_time t_ref_end;
 		INSTR_TIME_SET_CURRENT(t_ref_end);

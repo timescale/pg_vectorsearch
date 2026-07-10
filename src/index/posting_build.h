@@ -222,6 +222,30 @@ typedef struct MktHeadWriteCtx
 	float			   *pt;			   /* [dim] scratch */
 } MktHeadWriteCtx;
 
+/* Stack-init/cleanup pair: allocates/frees the [dim] pt scratch. */
+static inline void
+mkt_head_write_ctx_init(
+		MktHeadWriteCtx	   *h,
+		MktStorage		   *storage,
+		const RaBitQParams *rq_params,
+		Dimension			dim,
+		bool				fastscan,
+		BlockNumber			first_posting)
+{
+	h->storage		 = storage;
+	h->rq_params	 = rq_params;
+	h->dim			 = dim;
+	h->fastscan		 = fastscan;
+	h->first_posting = first_posting;
+	h->pt			 = mkt_alloc((size_t)dim * sizeof(float));
+}
+
+static inline void
+mkt_head_write_ctx_cleanup(MktHeadWriteCtx *h)
+{
+	mkt_free(h->pt);
+}
+
 void mkt_write_leaf_head(void *arg, uint32_t leaf, const float *centroid);
 
 void mkt_refine_write_means(

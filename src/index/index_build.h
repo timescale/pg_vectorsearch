@@ -194,6 +194,22 @@ typedef struct MktStreamTreePlan
  * depth, centroid page count, leaf-centroid mean) without writing anything.
  * Returns false on k-means failure.
  */
+/*
+ * Reserve the fixed page layout: extend the relation so blocks
+ * [0, end_blkno) exist before any is written. mkt_storage_extend extends BY
+ * npages; the count doubles as the absolute layout end only because the
+ * relation holds nothing but the meta-page slot yet -- the reserved layout
+ * (heads at first_posting + leaf) silently shifts if a page ever sneaks in
+ * before this point, so the invariant is pinned here.
+ */
+static inline void
+mkt_build_reserve_layout(MktStorage *storage, BlockNumber end_blkno)
+{
+	BlockNumber ext_base = mkt_storage_extend(storage, end_blkno);
+	Assert(ext_base == 0 || ext_base == InvalidBlockNumber);
+	(void)ext_base;
+}
+
 bool mkt_routing_tree_plan(
 		const float			*vectors,
 		uint32_t			 nvecs,

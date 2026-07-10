@@ -245,7 +245,6 @@ build_routing_tree_batched(
 	Dimension		  dim			= shared->dim;
 	int				  nparticipants = shared->nparticipants;
 	MktCentroidFormat fmt			= shared->centroid_format;
-	const size_t	  vec_nbytes	= (size_t)dim * sizeof(float);
 
 	/* Size the ring slot from the actual per-child sample counts: a subtree
 	 * can never hold more leaves than the samples routed to its root child,
@@ -378,15 +377,7 @@ build_routing_tree_batched(
 	 * pass can write both at reserved blocks; continuation pages are
 	 * appended past it during mkt_posting_build_lists. No O(nlist) reserve
 	 * arrays. */
-	/* mkt_storage_extend extends BY npages; the count doubles as the
-	 * absolute layout end only because the relation holds nothing but
-	 * the meta-page slot yet. The reserved layout (heads at
-	 * first_posting + leaf) silently shifts if a page ever sneaks in
-	 * before this point, so pin the invariant. */
-	BlockNumber ext_base =
-			mkt_storage_extend(storage, first_posting + actual_nlist);
-	Assert(ext_base == 0 || ext_base == InvalidBlockNumber);
-	(void)ext_base;
+	mkt_build_reserve_layout(storage, first_posting + actual_nlist);
 
 	/* Streaming pass: read each subtree blob back from the store (child
 	 * order matches the append order) and stream its centroid + head
@@ -396,14 +387,9 @@ build_routing_tree_batched(
 	mkt_build_report_phase(prog, MKT_BUILD_PHASE_CENTROID);
 	BlockNumber *subtree_root_blk = mkt_alloc(
 			(size_t)km_k * sizeof(BlockNumber));
-	MktHeadWriteCtx head = {
-			.storage	   = storage,
-			.rq_params	   = rq_params,
-			.dim		   = dim,
-			.fastscan	   = shared->fastscan,
-			.first_posting = first_posting,
-			.pt			   = mkt_alloc(vec_nbytes),
-	};
+	MktHeadWriteCtx head;
+	mkt_head_write_ctx_init(
+			&head, storage, rq_params, dim, shared->fastscan, first_posting);
 	HKMeansResult *blob = mkt_alloc(slot_size);
 	mkt_pbuild_blobstore_rewind(planarg.store);
 	for (uint32_t i = 0; i < km_k; i++)
@@ -451,7 +437,7 @@ build_routing_tree_batched(
 			subtree_root_blk,
 			root_blk);
 
-	mkt_free(head.pt);
+	mkt_head_write_ctx_cleanup(&head);
 	mkt_free(subtree_root_blk);
 	mkt_free(leaf_off);
 	mkt_free(block_off);
@@ -486,9 +472,8 @@ build_routing_tree_flat(
 		float			 *global_mean,
 		TreeLayout		 *out)
 {
-	Dimension		  dim		 = shared->dim;
-	MktCentroidFormat fmt		 = shared->centroid_format;
-	const size_t	  vec_nbytes = (size_t)dim * sizeof(float);
+	Dimension		  dim = shared->dim;
+	MktCentroidFormat fmt = shared->centroid_format;
 
 	/* Flat (nlevels == 1): cents already holds every leaf centroid; stream
 	 * the one-level tree directly (root = leaf-parent at first_centroid).
@@ -516,25 +501,12 @@ build_routing_tree_flat(
 	/* Head region: actual_nlist pages at first_posting (leaf c -> head
 	 * first_posting + c). Pre-extend to cover centroid + head region;
 	 * continuations append past it. No O(nlist) reserve. */
-	/* mkt_storage_extend extends BY npages; the count doubles as the
-	 * absolute layout end only because the relation holds nothing but
-	 * the meta-page slot yet. The reserved layout (heads at
-	 * first_posting + leaf) silently shifts if a page ever sneaks in
-	 * before this point, so pin the invariant. */
-	BlockNumber ext_base =
-			mkt_storage_extend(storage, first_posting + actual_nlist);
-	Assert(ext_base == 0 || ext_base == InvalidBlockNumber);
-	(void)ext_base;
+	mkt_build_reserve_layout(storage, first_posting + actual_nlist);
 
 	mkt_build_report_phase(prog, MKT_BUILD_PHASE_CENTROID);
-	MktHeadWriteCtx head = {
-			.storage	   = storage,
-			.rq_params	   = rq_params,
-			.dim		   = dim,
-			.fastscan	   = shared->fastscan,
-			.first_posting = first_posting,
-			.pt			   = mkt_alloc(vec_nbytes),
-	};
+	MktHeadWriteCtx head;
+	mkt_head_write_ctx_init(
+			&head, storage, rq_params, dim, shared->fastscan, first_posting);
 	BlockNumber root_blk = mkt_routing_subtree_write(
 			storage,
 			flat,
@@ -549,7 +521,7 @@ build_routing_tree_flat(
 			first_centroid,
 			mkt_write_leaf_head,
 			&head);
-	mkt_free(head.pt);
+	mkt_head_write_ctx_cleanup(&head);
 
 	out->first_posting = first_posting;
 	out->root_blk	   = root_blk;
@@ -864,14 +836,14 @@ do_parallel_build(
 	{
 		mkt_build_report_phase(prog, MKT_BUILD_PHASE_REFINE);
 		MktDsmRefineAccum *accum = refine_accum;
-		MktHeadWriteCtx	   rhead = {
-				   .storage		  = storage,
-				   .rq_params	  = rq_params,
-				   .dim			  = dim,
-				   .fastscan	  = shared->fastscan,
-				   .first_posting = first_posting,
-				   .pt			  = mkt_alloc(vec_nbytes),
-		   };
+		MktHeadWriteCtx	   rhead;
+		mkt_head_write_ctx_init(
+				&rhead,
+				storage,
+				rq_params,
+				dim,
+				shared->fastscan,
+				first_posting);
 		mkt_pbuild_exec_refine_paged(
 				0,
 				heap,
@@ -884,7 +856,7 @@ do_parallel_build(
 				barrier,
 				mkt_write_leaf_head,
 				&rhead);
-		mkt_free(rhead.pt);
+		mkt_head_write_ctx_cleanup(&rhead);
 	}
 
 	/* Phase 3: workers scan + route page-backed + encode + sort; the leader
