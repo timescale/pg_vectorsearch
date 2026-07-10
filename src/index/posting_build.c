@@ -335,6 +335,16 @@ mkt_build_route_emit(
 	if (n == 0)
 		return false;
 
+	/* Only the secondary selection (SOAR / boundary) looks past the nearest
+	 * candidate; with both off, gathering the rest would pin and copy their
+	 * head pages for nothing on every row. The route still descends with the
+	 * full candidate width either way -- the beam width is what buys the
+	 * primary assignment its accuracy. */
+	bool has_soar	  = ctx->soar_lambda > 0.0;
+	bool has_boundary = ctx->boundary_epsilon > 0.0;
+	if (!has_soar && !has_boundary)
+		n = 1;
+
 	/* Gather the beam candidates: leaf index, distance, and pt_centroid (read
 	 * from each head page -- the float encode reference). */
 	for (uint32_t i = 0; i < n; i++)
@@ -367,8 +377,6 @@ mkt_build_route_emit(
 	/* Secondary (SOAR / boundary), in rotated space over the gathered
 	 * candidates (positions index cand_pt). OA scoring and distances are
 	 * norm-preserving under P^T, so this matches the float-space result. */
-	bool has_soar	  = ctx->soar_lambda > 0.0;
-	bool has_boundary = ctx->boundary_epsilon > 0.0;
 	if (!has_soar && !has_boundary)
 		return false;
 
