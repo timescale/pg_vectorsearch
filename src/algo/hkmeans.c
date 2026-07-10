@@ -357,31 +357,52 @@ mkt_hkmeans_f32(
 }
 
 size_t
-mkt_hkmeans_max_blob_size(uint32_t nlist, uint32_t fan_out, Dimension dim)
+mkt_hkmeans_max_blob_size_capped(
+		uint32_t nlist, uint32_t fan_out, Dimension dim, uint64_t max_leaves)
 {
 	if (fan_out < 2)
 		fan_out = 2;
+	if (max_leaves < 1)
+		max_leaves = 1;
 
 	uint32_t nlevels = compute_nlevels(nlist, fan_out);
 
 	/* All worst-case counts are fan_out powers; at large nlist with a small
 	 * fan_out they exceed 32 bits, so the whole bound is computed in 64-bit
 	 * (the caller compares it against the blob format's 32-bit offset limit
-	 * and fails the build rather than wrapping into an undersized slot). */
-	uint64_t nleaves	  = 1; /* fan_out^nlevels: every leaf-parent full */
-	uint64_t nnodes		  = 0; /* sum of fan_out^l, l = 0..nlevels-1 */
+	 * and fails the build rather than wrapping into an undersized slot).
+	 *
+	 * max_leaves caps every level's node count: a node exists only where at
+	 * least one training vector landed, so no level can hold more nodes
+	 * than the tree has vectors -- the depth stays the full nlevels (few
+	 * vectors under a deep target degenerate into chains), but each level's
+	 * width is min(fan_out^l, max_leaves). UINT64_MAX = the analytic
+	 * worst case. */
+	uint64_t width		  = 1; /* fan_out^l, capped at max_leaves */
+	uint64_t nleaves	  = 0;
+	uint64_t nnodes		  = 0; /* sum of capped widths, l = 0..nlevels-1 */
 	uint64_t intern_nodes = 0; /* same sum, one level shorter */
 	for (uint32_t l = 0; l < nlevels; l++)
 	{
-		nnodes += nleaves; /* fan_out^l before the multiply below */
+		nnodes += width;
 		if (nlevels >= 2 && l < nlevels - 1)
-			intern_nodes += nleaves;
-		nleaves *= fan_out;
+			intern_nodes += width;
+		if (width >= max_leaves / fan_out)
+			width = max_leaves;
+		else
+			width *= fan_out;
 	}
+	nleaves = width;
 
 	return sizeof(HKMeansResult) + nnodes * sizeof(HKMeansNode) +
 		   nleaves * dim * sizeof(float) +
 		   intern_nodes * fan_out * dim * sizeof(float);
+}
+
+size_t
+mkt_hkmeans_max_blob_size(uint32_t nlist, uint32_t fan_out, Dimension dim)
+{
+	return mkt_hkmeans_max_blob_size_capped(nlist, fan_out, dim, UINT64_MAX);
 }
 
 HKMeansResult *

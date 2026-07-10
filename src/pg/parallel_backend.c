@@ -55,6 +55,10 @@ typedef struct MktBuildSharedPg
 	int64		   queryid;
 	/* DSM handle of the dedicated sample segment (sample-region seam). */
 	dsm_handle sample_handle;
+	/* DSM handle of the per-child subtree ring, created by the leader after
+	 * root assignment (when the per-child sample counts that bound the slot
+	 * size are known) and published before the ring barrier. */
+	dsm_handle subtree_ring_handle;
 	slock_t	   mutex;
 	/* Striped locks guarding the shared leaf-refinement accumulator. */
 	slock_t accum_locks[MKT_REFINE_LOCK_STRIPES];
@@ -414,24 +418,6 @@ mkt_pbuild_setup_shared(
 												  : mkt_auto_fan_out(0, nlist, 0);
 	uint32_t  km_k			= fan_out < nlist ? fan_out : nlist;
 
-	/* Per-child subtree blob slot: each root child's subtree targets
-	 * ~nlist/fan_out leaves; size the slot for that tree's worst case. */
-	uint32_t nlist_c   = (nlist + fan_out - 1) / fan_out;
-	uint64_t slot_size = mkt_hkmeans_max_blob_size(nlist_c, fan_out, dim);
-
-	/* The blob format addresses its interior with 32-bit offsets
-	 * (HKMeansResult); a slot past that limit would wrap into an undersized
-	 * ring and corrupt the streamed tree, so refuse the configuration --
-	 * it only arises when a small explicit fan_out meets a huge nlist. */
-	if (slot_size > (uint64_t)UINT32_MAX)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("mktann partition tree too large for its subtree "
-						"format (nlist %u, fan_out %u)",
-						nlist,
-						fan_out),
-				 errhint("Increase fan_out or decrease nlist.")));
-
 	/*
 	 * Size the k-means sample set. The samples live in one shared-memory
 	 * region (total_samples * dim floats) that must stay resident for the
@@ -519,13 +505,6 @@ mkt_pbuild_setup_shared(
 	/* K-means shared centroids + norms (root level, k=km_k) */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_dsm_centroids_size(km_k, dim));
-	/* Per-child subtree blobs: a bounded ring of nparticipants slots (the
-	 * batched streaming build keeps at most one slot per participant
-	 * resident), not one slot per root child — so this is independent of the
-	 * partition count. */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator,
-			mkt_dsm_child_subtrees_size(nparticipants, slot_size));
 	/* K-means per-worker accumulators */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
@@ -571,11 +550,11 @@ mkt_pbuild_setup_shared(
 		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
 	}
 
-	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
-	 * sortshared, child_subtrees, wal, buffer, global_mean + optionally
-	 * query_text (samples live in their own segment; the refine accumulator
-	 * overlays them) */
-	int nkeys = 10;
+	/* nkeys: shared, barrier, centroids, km_workers, root_assign,
+	 * sortshared, wal, buffer, global_mean + optionally query_text (samples
+	 * and the subtree ring live in their own segments; the refine
+	 * accumulator overlays the samples) */
+	int nkeys = 9;
 	if (debug_query_string)
 		nkeys++;
 	shm_toc_estimate_keys(&pcxt->estimator, nkeys);
@@ -603,7 +582,7 @@ mkt_pbuild_setup_shared(
 	shared->metric				   = config->metric;
 	shared->nlist				   = nlist;
 	shared->fan_out				   = fan_out; /* resolved (auto if config 0) */
-	shared->subtree_slot_size	   = slot_size;
+	shared->subtree_slot_size	   = 0; /* leader sizes the ring post-assign */
 	shared->soar_lambda			   = config->soar_lambda;
 	shared->boundary_epsilon	   = config->boundary_epsilon;
 	shared->fastscan			   = config->fastscan;
@@ -671,14 +650,6 @@ mkt_pbuild_setup_shared(
 	memset(centroids_base, 0, cent_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CENTROIDS, centroids_base);
 	float *cents = mkt_dsm_centroids(centroids_base);
-
-	/* Per-child subtree blobs (phase 2c): a bounded ring of nparticipants
-	 * slots. Each participant builds a subtree into its own slot; the leader
-	 * streams the batch to centroid pages before the ring is reused, so the
-	 * region never scales with the partition count. */
-	char *child_subtrees_base = shm_toc_allocate(
-			pcxt->toc, mkt_dsm_child_subtrees_size(nparticipants, slot_size));
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CHILD_SUBTREES, child_subtrees_base);
 
 	/* Per-worker k-means accumulators */
 	Size  km_sz			  = mkt_dsm_km_workers_size(nparticipants, km_k, dim);
@@ -798,6 +769,51 @@ void
 mkt_pbuild_samples_release(MktDsmSamples *samples, void *seg)
 {
 	(void)samples;
+	if (seg != NULL)
+		dsm_detach((dsm_segment *)seg);
+}
+
+/*
+ * Subtree-ring seam: the ring of nparticipants subtree slots lives in its
+ * own DSM segment, created by the leader only after root assignment -- the
+ * per-child sample counts known then bound the slot far below the analytic
+ * worst case. The handle travels in shared; every participant detaches when
+ * the streaming pass is done, and the last detach frees the memory.
+ */
+char *
+mkt_pbuild_subtree_ring_create(
+		MktBuildShared *shared,
+		int				nparticipants,
+		uint64_t		slot_size,
+		void		  **seg_out)
+{
+	MktBuildSharedPg *pg = (MktBuildSharedPg *)shared;
+
+	dsm_segment *seg = dsm_create(
+			mkt_dsm_child_subtrees_size(nparticipants, slot_size), 0);
+	pg->subtree_ring_handle	  = dsm_segment_handle(seg);
+	shared->subtree_slot_size = slot_size;
+	*seg_out				  = seg;
+	return (char *)dsm_segment_address(seg);
+}
+
+char *
+mkt_pbuild_subtree_ring_attach(MktBuildShared *shared, void **seg_out)
+{
+	MktBuildSharedPg *pg = (MktBuildSharedPg *)shared;
+
+	dsm_segment *seg = dsm_attach(pg->subtree_ring_handle);
+	if (seg == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("could not attach to mktann subtree segment")));
+	*seg_out = seg;
+	return (char *)dsm_segment_address(seg);
+}
+
+void
+mkt_pbuild_subtree_ring_release(void *seg)
+{
 	if (seg != NULL)
 		dsm_detach((dsm_segment *)seg);
 }

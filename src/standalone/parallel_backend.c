@@ -49,6 +49,9 @@ typedef struct MktBuildSharedStandalone
 	/* Leader's in-memory page store, published for phase-3 page-backed
 	 * routing; workers are threads so they share the pointer directly. */
 	MktStorage *storage;
+	/* Per-child subtree ring, allocated by the leader post-assign; workers
+	 * are threads and read the pointer directly. */
+	char *subtree_ring;
 } MktBuildSharedStandalone;
 
 /*
@@ -288,13 +291,6 @@ mkt_pbuild_setup_shared(
 	uint32_t   km_k			 = fan_out < nlist ? fan_out : nlist;
 	const Size vec_nbytes	 = (Size)dim * sizeof(float);
 
-	/* Per-child subtree blob slot: each root child's subtree targets
-	 * ~nlist/fan_out leaves; size the slot for that tree's worst case. */
-	uint32_t nlist_c   = (nlist + fan_out - 1) / fan_out;
-	uint64_t slot_size = mkt_hkmeans_max_blob_size(nlist_c, fan_out, dim);
-	/* Same 32-bit blob-offset limit as the PG back-end (HKMeansResult). */
-	Assert(slot_size <= (uint64_t)UINT32_MAX);
-
 	uint32_t total_samples = nlist * 256;
 	if (total_samples < 10000)
 		total_samples = 10000;
@@ -334,19 +330,15 @@ mkt_pbuild_setup_shared(
 			mkt_dsm_root_assign_size(nparticipants, max_per_worker));
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_pbuild_sort_shared_size(nparticipants));
-	/* Per-child subtree blobs: a bounded ring of nparticipants slots (not one
-	 * per root child), independent of the partition count. */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator,
-			mkt_dsm_child_subtrees_size(nparticipants, slot_size));
 	shm_toc_estimate_chunk(&pcxt->estimator, usage_sz);
 	shm_toc_estimate_chunk(&pcxt->estimator, bufuse_sz);
 	/* Page-backed routing region (leader fills before the tree-ready barrier):
 	 * the global mean. The posting-head base is a scalar in MktBuildShared. */
 	shm_toc_estimate_chunk(&pcxt->estimator, vec_nbytes);
 	/* Keyed regions: shared, barrier, samples, centroids, km_workers,
-	 * root_assign, sortshared, child_subtrees, global_mean. */
-	shm_toc_estimate_keys(&pcxt->estimator, 9);
+	 * root_assign, sortshared, global_mean (the subtree ring is allocated
+	 * by the leader post-assign, outside the toc). */
+	shm_toc_estimate_keys(&pcxt->estimator, 8);
 
 	InitializeParallelDSM(pcxt);
 
@@ -362,7 +354,7 @@ mkt_pbuild_setup_shared(
 	shared->metric			  = config->metric;
 	shared->nlist			  = nlist;
 	shared->fan_out			  = fan_out; /* resolved (auto if config 0) */
-	shared->subtree_slot_size = slot_size;
+	shared->subtree_slot_size = 0; /* leader sizes the ring post-assign */
 	shared->soar_lambda		  = config->soar_lambda;
 	shared->boundary_epsilon  = config->boundary_epsilon;
 	shared->fastscan		  = config->fastscan;
@@ -428,12 +420,6 @@ mkt_pbuild_setup_shared(
 	memset(sortshared, 0, sort_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SORTSHARED, sortshared);
 
-	/* Per-child subtree blobs (phase 2c): a bounded ring of nparticipants
-	 * slots, independent of the partition count. */
-	char *child_subtrees_base = shm_toc_allocate(
-			pcxt->toc, mkt_dsm_child_subtrees_size(nparticipants, slot_size));
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CHILD_SUBTREES, child_subtrees_base);
-
 	/* Page-backed routing region (leader fills before the tree-ready barrier):
 	 * the global mean. The posting-head base is a scalar in MktBuildShared. */
 	float *dsm_gmean = shm_toc_allocate(pcxt->toc, vec_nbytes);
@@ -489,6 +475,43 @@ mkt_pbuild_samples_release(MktDsmSamples *samples, void *seg)
 {
 	(void)samples;
 	(void)seg;
+}
+
+/*
+ * Subtree-ring seam (thread back-end): one heap allocation the leader makes
+ * after root assignment; workers share the pointer. Only the creator gets a
+ * non-NULL seg to free at release.
+ */
+char *
+mkt_pbuild_subtree_ring_create(
+		MktBuildShared *shared,
+		int				nparticipants,
+		uint64_t		slot_size,
+		void		  **seg_out)
+{
+	MktBuildSharedStandalone *sa = (MktBuildSharedStandalone *)shared;
+
+	sa->subtree_ring = mkt_alloc(
+			mkt_dsm_child_subtrees_size(nparticipants, slot_size));
+	shared->subtree_slot_size = slot_size;
+	*seg_out				  = sa->subtree_ring;
+	return sa->subtree_ring;
+}
+
+char *
+mkt_pbuild_subtree_ring_attach(MktBuildShared *shared, void **seg_out)
+{
+	MktBuildSharedStandalone *sa = (MktBuildSharedStandalone *)shared;
+
+	*seg_out = NULL;
+	return sa->subtree_ring;
+}
+
+void
+mkt_pbuild_subtree_ring_release(void *seg)
+{
+	if (seg != NULL)
+		mkt_free(seg);
 }
 
 void

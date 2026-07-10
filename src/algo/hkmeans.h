@@ -159,6 +159,14 @@ size_t
 mkt_hkmeans_max_blob_size(uint32_t nlist, uint32_t fan_out, Dimension dim);
 
 /*
+ * Same bound with every level's width capped at max_leaves: a node exists
+ * only where a training vector landed, so a subtree clustered from
+ * max_leaves vectors can never exceed it, whatever the nlist target.
+ */
+size_t mkt_hkmeans_max_blob_size_capped(
+		uint32_t nlist, uint32_t fan_out, Dimension dim, uint64_t max_leaves);
+
+/*
  * Tree depth for `nlist` leaves at `fan_out` — the same value the tree build
  * uses internally. Exposed so the streaming (page-backed) centroid-tree build
  * can compute the level structure without materializing a tree.

@@ -197,6 +197,24 @@ mkt_build_child_subtree(
 }
 
 void
+mkt_pbuild_count_children(
+		MktDsmSamples	 *dsm_samples,
+		MktDsmRootAssign *dsm_ra,
+		int				  nparticipants,
+		uint32_t		  km_k,
+		uint32_t		 *out_counts)
+{
+	memset(out_counts, 0, (size_t)km_k * sizeof(uint32_t));
+	for (int t = 0; t < nparticipants; t++)
+	{
+		const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
+		uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
+		for (uint32_t i = 0; i < n; i++)
+			out_counts[ra[i]]++;
+	}
+}
+
+void
 mkt_pbuild_stream_subtrees(
 		int				  participant_id,
 		int				  nparticipants,
@@ -225,13 +243,8 @@ mkt_pbuild_stream_subtrees(
 	 * sample count (mkt_build_child_subtree needs it, and counting per
 	 * child would re-scan the assignments km_k times). */
 	uint32_t *child_count = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
-	for (int t = 0; t < nparticipants; t++)
-	{
-		const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
-		uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
-		for (uint32_t i = 0; i < n; i++)
-			child_count[ra[i]]++;
-	}
+	mkt_pbuild_count_children(
+			dsm_samples, dsm_ra, nparticipants, km_k, child_count);
 
 	/* Schedule children largest-first (LPT): every batch waits for its
 	 * slowest subtree at two barriers, so the skewed children must land in
@@ -785,8 +798,13 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * barriers. */
 	if (mkt_compute_nlevels(shared->nlist, shared->fan_out) >= 2)
 	{
+		/* Ring barrier: the leader creates the subtree ring (sized from the
+		 * per-child sample counts) and publishes its handle + slot size
+		 * before arriving; attach only after. */
+		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+		void *ring_seg = NULL;
 		char *subtrees_base =
-				shm_toc_lookup(toc, MKT_DSM_KEY_CHILD_SUBTREES, false);
+				mkt_pbuild_subtree_ring_attach(shared, &ring_seg);
 		mkt_pbuild_stream_subtrees(
 				worker_id,
 				shared->nparticipants,
@@ -805,6 +823,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 				NULL,
 				NULL,
 				NULL);
+		mkt_pbuild_subtree_ring_release(ring_seg);
 	}
 
 	/* Barrier: leader finished streaming the centroid tree + published the

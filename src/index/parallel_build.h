@@ -81,7 +81,6 @@ typedef void (*MktBuildScanCb)(
 #define MKT_DSM_KEY_KM_WORKERS	   UINT64CONST(0xB00000000000000C)
 #define MKT_DSM_KEY_ROOT_ASSIGN	   UINT64CONST(0xB00000000000000E)
 #define MKT_DSM_KEY_POSTING_QUEUES UINT64CONST(0xB00000000000000F)
-#define MKT_DSM_KEY_CHILD_SUBTREES UINT64CONST(0xB000000000000010)
 #define MKT_DSM_KEY_SORTSHARED	   UINT64CONST(0xB000000000000012)
 /* Page-backed phase-3 routing: the global mean, published by the leader before
  * the tree-ready barrier so workers route exactly as the query/insert paths
@@ -166,6 +165,8 @@ typedef struct MktBuildShared
 
 	/* Per-child subtree blob slot size (bytes) in the child-subtrees region;
 	 * set by the leader before launch so workers can index their slot. */
+	/* Written by the leader after root assignment (see the subtree-ring
+	 * seam); workers read it after the ring barrier. */
 	uint64_t subtree_slot_size;
 
 	/* Page-backed routing knobs (mirror the mkt.centroid_* GUCs), so phase-3
@@ -299,8 +300,11 @@ mkt_dsm_centroids(char *base)
  * ring of nparticipants slots resident (each participant owns slot
  * participant_id; the leader streams each batch to pages before the next batch
  * reuses the ring), so the region is O(nparticipants * slot_size), independent
- * of the partition count. Slot size is the worst-case blob for a subtree
- * (shared in MktBuildShared.subtree_slot_size).
+ * of the partition count. The leader sizes the slot only after root
+ * assignment -- a subtree can never hold more leaves than its child's
+ * samples, which caps the slot far below the analytic worst case -- and
+ * creates the ring as its own segment then (the subtree-ring seam below);
+ * the slot size travels in MktBuildShared.subtree_slot_size.
  * ---------------------------------------------------------------- */
 
 static inline Size
@@ -821,6 +825,29 @@ extern void mkt_pbuild_teardown(struct ParallelContext *pcxt);
 extern MktDsmSamples *mkt_pbuild_samples_attach(
 		shm_toc *toc, MktBuildShared *shared, void **seg_out);
 extern void mkt_pbuild_samples_release(MktDsmSamples *samples, void *seg);
+
+/* Subtree-ring seam: leader creates the ring (own segment) after root
+ * assignment and publishes the slot size; workers attach after the ring
+ * barrier; everyone releases when the subtree batches are done. */
+extern char *mkt_pbuild_subtree_ring_create(
+		MktBuildShared *shared,
+		int				nparticipants,
+		uint64_t		slot_size,
+		void		  **seg_out);
+extern char *
+mkt_pbuild_subtree_ring_attach(MktBuildShared *shared, void **seg_out);
+extern void mkt_pbuild_subtree_ring_release(void *seg);
+
+/* One histogram over the shared root assignments: out_counts[km_k] = how
+ * many samples landed in each root child. Every participant derives the
+ * same counts (same shared data); the leader additionally sizes the
+ * subtree-ring slot from them. */
+extern void mkt_pbuild_count_children(
+		MktDsmSamples	 *dsm_samples,
+		MktDsmRootAssign *dsm_ra,
+		int				  nparticipants,
+		uint32_t		  km_k,
+		uint32_t		 *out_counts);
 
 /*
  * The refine accumulator overlays the (dead) sample region: same base

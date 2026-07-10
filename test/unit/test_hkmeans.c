@@ -534,3 +534,53 @@ TEST(assign_topk_beam1_equals_greedy)
 	mkt_free(tree);
 	mkt_free(data);
 }
+
+/*
+ * The capped blob bound must dominate any tree actually built from
+ * max_leaves vectors, whatever the nlist target -- including the chain
+ * shape, where few vectors under a deep target produce one narrow node per
+ * level. The parallel build sizes its subtree ring slots with this bound.
+ */
+TEST(max_blob_size_capped_bounds_actual)
+{
+	struct
+	{
+		uint32_t nvecs;
+		uint32_t nlist;
+		uint32_t fan_out;
+	} cases[] = {
+			{5, 1000, 10},	/* chains: 3 deep levels, 5 vectors */
+			{50, 1000, 10}, /* partial width at every level */
+			{200, 64, 4},	/* deeper than wide */
+			{300, 16, 8},	/* two full levels */
+			{7, 100000, 4}, /* extreme target, tiny data */
+	};
+
+	Dimension dim = 16;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+	{
+		uint32_t nvecs	 = cases[i].nvecs;
+		uint32_t nlist	 = cases[i].nlist;
+		uint32_t fan_out = cases[i].fan_out;
+		float	*data =
+				make_clustered_data(4, (nvecs + 3) / 4, dim, 42 + (unsigned)i);
+
+		KMeansOptions  opts = MKT_KMEANS_OPTIONS_DEFAULT;
+		HKMeansResult *tree = mkt_hkmeans_f32(
+				data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
+		ASSERT_NOT_NULL(tree, "tree builds");
+
+		size_t capped =
+				mkt_hkmeans_max_blob_size_capped(nlist, fan_out, dim, nvecs);
+		size_t uncapped = mkt_hkmeans_max_blob_size(nlist, fan_out, dim);
+
+		ASSERT_TRUE(
+				(size_t)tree->total_size <= capped,
+				"actual blob within the capped bound");
+		ASSERT_TRUE(capped <= uncapped, "cap never exceeds the worst case");
+
+		mkt_free(tree);
+		mkt_free(data);
+	}
+}

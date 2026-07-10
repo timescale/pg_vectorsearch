@@ -235,7 +235,6 @@ build_routing_tree_batched(
 		uint32_t		  km_k,
 		uint32_t		  nlist,
 		uint32_t		  fan_out,
-		char			 *subtrees_base,
 		Barrier			 *barrier,
 		RaBitQParams	 *rq_params,
 		uint32_t		  max_ent,
@@ -245,9 +244,62 @@ build_routing_tree_batched(
 {
 	Dimension		  dim			= shared->dim;
 	int				  nparticipants = shared->nparticipants;
-	uint64_t		  slot_size		= shared->subtree_slot_size;
 	MktCentroidFormat fmt			= shared->centroid_format;
 	const size_t	  vec_nbytes	= (size_t)dim * sizeof(float);
+
+	/* Size the ring slot from the actual per-child sample counts: a subtree
+	 * can never hold more leaves than the samples routed to its root child,
+	 * which caps the slot far below the analytic worst case (nlist here is
+	 * the worst-case sizing bound, up to fan_out x the requested count). */
+	uint32_t max_cc = 1;
+	{
+		uint32_t *child_count = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
+		mkt_pbuild_count_children(
+				dsm_samples, dsm_ra, nparticipants, km_k, child_count);
+		for (uint32_t c = 0; c < km_k; c++)
+			if (child_count[c] > max_cc)
+				max_cc = child_count[c];
+		mkt_free(child_count);
+	}
+	uint32_t nlist_c = (nlist + fan_out - 1) / fan_out;
+	uint64_t slot_size =
+			mkt_hkmeans_max_blob_size_capped(nlist_c, fan_out, dim, max_cc);
+
+	/* The slot must fit one allocation (the leader reads each spilled blob
+	 * back through a palloc'd buffer), which also keeps the blob format's
+	 * 32-bit interior offsets valid. */
+	if (slot_size > (uint64_t)MaxAllocSize)
+		mkt_error(
+				"mktann: subtree slot %llu MB exceeds the allocation limit "
+				"(nlist %u, fan_out %u); increase fan_out or decrease nlist",
+				(unsigned long long)(slot_size >> 20),
+				nlist,
+				fan_out);
+	/* The ring is the build's only region outside the sample budget; hold
+	 * it to the same standard. work_mem_kb == 0 = unbudgeted back-end. */
+	if (shared->work_mem_kb > 0 &&
+		(uint64_t)nparticipants * slot_size >
+				(uint64_t)shared->work_mem_kb * 1024)
+		mkt_error(
+				"mktann: subtree ring %llu MB exceeds maintenance_work_mem "
+				"(nlist %u, fan_out %u); increase maintenance_work_mem or "
+				"fan_out",
+				(unsigned long long)(((uint64_t)nparticipants * slot_size) >>
+									 20),
+				nlist,
+				fan_out);
+
+	/* Ring barrier: create + publish (handle, slot size) before arriving;
+	 * the workers attach after. */
+	void *ring_seg		= NULL;
+	char *subtrees_base = mkt_pbuild_subtree_ring_create(
+			shared, nparticipants, slot_size, &ring_seg);
+	mkt_debug(
+			"mktann: subtree ring %d x %llu KB (largest child %u samples)",
+			nparticipants,
+			(unsigned long long)(slot_size >> 10),
+			max_cc);
+	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 	uint32_t *nleaves_arr = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
 	uint32_t *pages_arr	  = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
@@ -286,6 +338,10 @@ build_routing_tree_batched(
 			plan_batch_cb,
 			&planarg,
 			child_order);
+
+	/* Every batch is consumed into the blob store; the ring is dead before
+	 * the write pass starts. */
+	mkt_pbuild_subtree_ring_release(ring_seg);
 
 	/* Root page(s) occupy the reserved block(s) at first_centroid;
 	 * subtrees follow, so meta.first_centroid stays 1 (root written last,
@@ -657,8 +713,6 @@ do_parallel_build(
 	RaBitQParams	 *rq_params = mkt_rabitq_create(dim, rabitq_seed);
 	MktCentroidFormat fmt		= shared->centroid_format;
 	uint32_t		  max_ent	= mkt_centroid_max_entries_fmt(dim, fmt);
-	char			 *subtrees_base =
-			shm_toc_lookup(pcxt->toc, MKT_DSM_KEY_CHILD_SUBTREES, false);
 
 	/*
 	 * global_mean = mean of the LEAF centroids (the encoder centering) -- an
@@ -690,7 +744,6 @@ do_parallel_build(
 				km_k,
 				nlist,
 				fan_out,
-				subtrees_base,
 				barrier,
 				rq_params,
 				max_ent,
