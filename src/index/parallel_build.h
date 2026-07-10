@@ -320,17 +320,6 @@ mkt_dsm_child_subtree(char *base, uint32_t slot, uint64_t slot_size)
 }
 
 /*
- * Number of hierarchy levels for nlist leaves with the given fan_out. The
- * leader and workers compute this identically to agree on whether the build
- * is flat (1 level, no child subtrees) or hierarchical (>= 2 levels).
- */
-static inline uint32_t
-mkt_compute_nlevels(uint32_t nlist, uint32_t fan_out)
-{
-	return mkt_hkmeans_nlevels(nlist, fan_out);
-}
-
-/*
  * Worst-case leaf count for a tree targeting `nlist` leaves at this fan_out:
  * fan_out^nlevels (clamped to >= nlist). The exact leaf count isn't known
  * until k-means runs, so the parallel build uses this to size its DSM regions
@@ -339,7 +328,7 @@ mkt_compute_nlevels(uint32_t nlist, uint32_t fan_out)
 static inline uint32_t
 mkt_max_nlist(uint32_t nlist, uint32_t fan_out)
 {
-	uint32_t nlevels   = mkt_compute_nlevels(nlist, fan_out);
+	uint32_t nlevels   = mkt_hkmeans_nlevels(nlist, fan_out);
 	uint32_t max_nlist = 1;
 	for (uint32_t l = 0; l < nlevels; l++)
 		max_nlist *= fan_out;

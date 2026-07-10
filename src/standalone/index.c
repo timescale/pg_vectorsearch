@@ -709,40 +709,32 @@ mkt_index_build(
 	{
 		idx->posting_fmt = config->posting_fmt;
 
-		if (use_driver)
-		{
-			/* do_parallel_build already streamed the posting pages into
-			 * posting_storage; heads are formula-derived from
-			 * first_posting. */
-		}
-		else
-		{
-			/* Flat mode needs per-cluster vector lists */
-			assign_to_cluster_lists(idx, tree, &bp, dim, nlist);
+		/* The driver path returned above, so this is always the flat
+		 * mode, which needs per-cluster vector lists. */
+		assign_to_cluster_lists(idx, tree, &bp, dim, nlist);
 
-			idx->flat_pages = mkt_alloc(nlist * sizeof(char *));
+		idx->flat_pages = mkt_alloc(nlist * sizeof(char *));
 
-			for (uint32_t c = 0; c < nlist; c++)
+		for (uint32_t c = 0; c < nlist; c++)
+		{
+			MktClusterList *cl	 = &idx->clusters[c];
+			const float	   *cent = hk_leaf_centroids(tree) + (size_t)c * dim;
+
+			MktFlatPostingBuilder builder;
+			mkt_flat_posting_builder_init(
+					&builder, idx->base.params, dim, c, cent, cl->count);
+
+			for (uint32_t i = 0; i < cl->count; i++)
 			{
-				MktClusterList *cl = &idx->clusters[c];
-				const float *cent  = hk_leaf_centroids(tree) + (size_t)c * dim;
-
-				MktFlatPostingBuilder builder;
-				mkt_flat_posting_builder_init(
-						&builder, idx->base.params, dim, c, cent, cl->count);
-
-				for (uint32_t i = 0; i < cl->count; i++)
-				{
-					uint32_t		vid = cl->ids[i];
-					const float	   *vec = idx->all_vectors + (size_t)vid * dim;
-					ItemPointerData tid;
-					mkt_posting_set_vector_id(&tid, vid);
-					mkt_flat_posting_builder_add(&builder, tid, vec);
-				}
-
-				idx->flat_pages[c] = mkt_flat_posting_builder_finish(&builder);
-				mkt_flat_posting_builder_cleanup(&builder);
+				uint32_t		vid = cl->ids[i];
+				const float	   *vec = idx->all_vectors + (size_t)vid * dim;
+				ItemPointerData tid;
+				mkt_posting_set_vector_id(&tid, vid);
+				mkt_flat_posting_builder_add(&builder, tid, vec);
 			}
+
+			idx->flat_pages[c] = mkt_flat_posting_builder_finish(&builder);
+			mkt_flat_posting_builder_cleanup(&builder);
 		}
 
 		idx->has_posting_data = true;

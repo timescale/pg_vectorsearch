@@ -413,22 +413,20 @@ build_routing_tree_batched(
 		uint32_t c = child_order[i];
 		(void)mkt_pbuild_blobstore_get(planarg.store, blob, slot_size);
 		BlockNumber base_blk = subtree_base + block_off[c];
-		uint32_t	pages;
-		subtree_root_blk[c] = mkt_routing_subtree_write(
-				storage,
-				blob,
-				dim,
-				fan_out,
-				1, /* subtrees hang off the level-0 root */
-				fmt,
-				rq_params,
-				global_mean,
-				first_posting,
-				leaf_off[c],
-				base_blk,
-				mkt_write_leaf_head,
-				&head,
-				&pages);
+		subtree_root_blk[c]	 = mkt_routing_subtree_write(
+				 storage,
+				 blob,
+				 dim,
+				 fan_out,
+				 1, /* subtrees hang off the level-0 root */
+				 fmt,
+				 rq_params,
+				 global_mean,
+				 first_posting,
+				 leaf_off[c],
+				 base_blk,
+				 mkt_write_leaf_head,
+				 &head);
 	}
 	mkt_free(blob);
 	mkt_free(child_order);
@@ -537,7 +535,6 @@ build_routing_tree_flat(
 			.first_posting = first_posting,
 			.pt			   = mkt_alloc(vec_nbytes),
 	};
-	uint32_t	pages;
 	BlockNumber root_blk = mkt_routing_subtree_write(
 			storage,
 			flat,
@@ -551,8 +548,7 @@ build_routing_tree_flat(
 			0,
 			first_centroid,
 			mkt_write_leaf_head,
-			&head,
-			&pages);
+			&head);
 	mkt_free(head.pt);
 
 	out->first_posting = first_posting;
@@ -697,7 +693,7 @@ do_parallel_build(
 	 * needs — for the root children it owns, and the leader streams each to
 	 * centroid pages a batch at a time (no in-RAM whole-tree assembly).
 	 */
-	uint32_t nlevels = mkt_compute_nlevels(nlist, fan_out);
+	uint32_t nlevels = mkt_hkmeans_nlevels(nlist, fan_out);
 
 	/* ---- Phase 2b: root assignment (leader as participant 0). ---- */
 	mkt_pbuild_exec_root_assign(

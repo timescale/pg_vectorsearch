@@ -783,8 +783,7 @@ mkt_routing_subtree_write(
 		uint32_t			 leaf_offset,
 		BlockNumber			 first_block,
 		MktStreamLeafCb		 on_leaf,
-		void				*on_leaf_arg,
-		uint32_t			*out_pages)
+		void				*on_leaf_arg)
 {
 	uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, format);
 
@@ -792,8 +791,7 @@ mkt_routing_subtree_write(
 	 * (BFS: node 0 = subtree root at first_block). */
 	BlockNumber *nfb = mkt_alloc(
 			(size_t)subtree->nnodes * sizeof(BlockNumber));
-	BlockNumber next =
-			mkt_compute_centroid_layout(subtree, max_ent, first_block, nfb);
+	(void)mkt_compute_centroid_layout(subtree, max_ent, first_block, nfb);
 
 	/* Leaf entries link to formula-derived posting heads (first_posting +
 	 * global leaf index); leaf_offset maps the subtree's local leaf indices to
@@ -822,8 +820,6 @@ mkt_routing_subtree_write(
 			on_leaf(on_leaf_arg, leaf_offset + i, leaves + (size_t)i * dim);
 	}
 
-	if (out_pages != NULL)
-		*out_pages = (uint32_t)(next - first_block);
 	return first_block;
 }
 

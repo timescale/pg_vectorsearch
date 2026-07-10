@@ -246,7 +246,7 @@ BlockNumber mkt_routing_tree_write(
 /*
  * Stream one already-built subtree (an HKMeansResult a parallel worker
  * clustered into its ring slot, then spilled through the blob store) to
- * centroid pages at reserved blocks [first_block, first_block + *out_pages),
+ * centroid pages at its reserved block range,
  * BFS layout (subtree root at first_block). Leader-only: workers cluster,
  * the leader writes -- it calls this once per root child, replaying the
  * blobs in the batch-schedule order while placing each at the child's own
@@ -275,8 +275,7 @@ BlockNumber mkt_routing_subtree_write(
 		uint32_t			 leaf_offset,
 		BlockNumber			 first_block,
 		MktStreamLeafCb		 on_leaf,
-		void				*on_leaf_arg,
-		uint32_t			*out_pages);
+		void				*on_leaf_arg);
 
 /*
  * Auto-tune fan_out from nlist.

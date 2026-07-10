@@ -796,7 +796,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * leader and workers. A flat (1-level) build has no subtrees — the leader
 	 * writes the single level directly, and neither side runs the subtree
 	 * barriers. */
-	if (mkt_compute_nlevels(shared->nlist, shared->fan_out) >= 2)
+	if (mkt_hkmeans_nlevels(shared->nlist, shared->fan_out) >= 2)
 	{
 		/* Ring barrier: the leader creates the subtree ring (sized from the
 		 * per-child sample counts) and publishes its handle + slot size
