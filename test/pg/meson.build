@@ -143,6 +143,7 @@ else
           'build_progress_phases',
           'build_cancel',
           'refine_gate',
+          'scan_progress',
           'insert_serialize',
         ],
         depends: [meerkat_ext_so],
