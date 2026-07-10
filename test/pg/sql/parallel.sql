@@ -308,6 +308,25 @@ SELECT exact_check('line3', '(v) WITH (nlist = 40, fan_out = 4)',
 RESET max_parallel_workers;
 DROP TABLE line3;
 
+-- ============================================================
+-- Serial fallback after a failed parallel launch
+-- ============================================================
+-- Planning asks for parallel workers but the launch returns none
+-- (max_parallel_workers = 0), so the build lands on the serial path after
+-- the parallel attempt already sized its shared memory. The fallback index
+-- must return the exact top-10.
+CREATE TABLE line1k (id int, v vector(3));
+INSERT INTO line1k SELECT g, format('[%s,0,0]', g)::vector
+    FROM generate_series(1, 1000) g;
+ALTER TABLE line1k SET (parallel_workers = 2);
+SET max_parallel_maintenance_workers = 2;
+SET max_parallel_workers = 0;
+SELECT exact_check('line1k', '(v) WITH (nlist = 20, fan_out = 4)',
+                   '[500,0,0]') AS fallback_exact;
+RESET max_parallel_workers;
+RESET max_parallel_maintenance_workers;
+DROP TABLE line1k;
+
 -- 768-dim well-separated points (only the first coordinate varies). At
 -- maintenance_work_mem = 1MB the k-means sample (~341 vectors) is bounded below
 -- the 600 rows, exercising the bounded subsample + full-table leaf refinement;
