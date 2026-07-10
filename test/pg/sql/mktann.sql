@@ -170,3 +170,25 @@ CREATE INDEX hd_i ON hd USING mktann (v);
 SELECT count(*) BETWEEN 20 AND 120 AS toast_auto_nlist
   FROM mkt_centroid_pages('hd_i') WHERE is_leaf;
 DROP TABLE hd;
+
+-- ============================================================
+-- Index layout dimension ceiling
+-- ============================================================
+-- A posting list's first page carries the float encode reference and must
+-- still fit one entry, which caps the indexable dimension. One past the
+-- ceiling is rejected up front (it would corrupt the first-page capacity
+-- arithmetic); the ceiling itself builds and answers exactly.
+CREATE TABLE dimcap (id int, v vector(1969));
+CREATE INDEX dimcap_i ON dimcap USING mktann (v);
+DROP TABLE dimcap;
+CREATE TABLE dimcap (id int, v vector(1968));
+INSERT INTO dimcap
+    SELECT g, (SELECT ('[' || string_agg((sin(g + j))::text, ',') || ']')
+               FROM generate_series(1, 1968) j)::vector(1968)
+    FROM generate_series(1, 20) g;
+CREATE INDEX dimcap_i ON dimcap USING mktann (v) WITH (nlist = 4);
+SET enable_seqscan = off;
+SELECT id FROM dimcap ORDER BY v <-> (SELECT v FROM dimcap WHERE id = 7)
+    LIMIT 1;
+RESET enable_seqscan;
+DROP TABLE dimcap;

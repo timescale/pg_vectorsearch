@@ -396,6 +396,11 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("column cannot have more than %d dimensions",
 						MKT_VECTOR_MAX_DIM)));
+	if (dim > MKT_INDEX_MAX_DIM)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("mktann indexes support at most %d dimensions",
+						MKT_INDEX_MAX_DIM)));
 
 	p->dim			   = dim;
 	p->metric		   = mktann_get_metric(index);
