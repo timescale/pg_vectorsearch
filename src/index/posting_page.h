@@ -212,6 +212,30 @@ typedef struct MktFlatPostingHeader
 	  MKT_POSTING_ENTRY_ALIGN - 1u) &                                     \
 	 ~(MKT_POSTING_ENTRY_ALIGN - 1u))
 
+/*
+ * Hard dimension ceiling for the index layout. A posting list's first page
+ * carries the list's float encode reference (MAXALIGN(dim * sizeof(float))
+ * bytes) and must still hold at least one posting entry; that binds before
+ * the float-format centroid page (one dim * sizeof(float) entry, ~2036) and
+ * the metadata page's inline mean. Past the ceiling the first-page capacity
+ * arithmetic underflows, so index creation must reject the dimension up
+ * front. The static assert keeps the number honest against layout changes.
+ */
+#define MKT_INDEX_MAX_DIM 1968
+
+static_assert(
+		BLCKSZ - MAXALIGN(SizeOfPageHeaderData) -
+						sizeof(MktPostingPageOpaque) -
+						MAXALIGN(MKT_INDEX_MAX_DIM * sizeof(float)) >=
+				MKT_POSTING_ENTRY_SIZE(MKT_INDEX_MAX_DIM),
+		"posting first page must fit the encode reference plus one entry");
+static_assert(
+		BLCKSZ - MAXALIGN(SizeOfPageHeaderData) -
+						sizeof(MktPostingPageOpaque) -
+						MAXALIGN((MKT_INDEX_MAX_DIM + 1) * sizeof(float)) <
+				MKT_POSTING_ENTRY_SIZE(MKT_INDEX_MAX_DIM + 1),
+		"the ceiling is tight: one dimension more must not fit");
+
 /* Usable space on a BLCKSZ page (between content start and opaque) */
 static inline uint32_t
 mkt_posting_page_usable(void)

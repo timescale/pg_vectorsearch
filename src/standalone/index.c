@@ -24,6 +24,7 @@
 #include "algo/kmeans_internal.h"
 #include "algo/topk.h"
 #include "algo/vecops.h"
+#include "core/log.h"
 #include "core/memory.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
@@ -331,6 +332,14 @@ mkt_index_build(
 {
 	if (src == NULL || src->nvecs == 0 || src->dim == 0 || config == NULL)
 		return NULL;
+	if (src->dim > MKT_INDEX_MAX_DIM)
+	{
+		mkt_warn(
+				"index build: %u dimensions exceeds the layout ceiling %u",
+				(unsigned)src->dim,
+				(unsigned)MKT_INDEX_MAX_DIM);
+		return NULL;
+	}
 
 	uint32_t  nvecs = src->nvecs;
 	Dimension dim	= src->dim;
