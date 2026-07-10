@@ -209,3 +209,30 @@ DROP FUNCTION test_explain_stats();
 RESET enable_seqscan;
 -- Cleanup
 DROP TABLE embeddings;
+-- ============================================================
+-- Auto nlist on an unanalyzed TOASTed table
+-- ============================================================
+-- With no reltuples yet, the partition count is derived from the heap size.
+-- Incompressible rows this wide land in TOAST, so the main fork holds only
+-- narrow stubs and a width-from-dimension guess undercounts the rows by
+-- almost two orders of magnitude, starving the automatic partition count.
+-- autovacuum is off so no analyze sneaks in a real reltuples before the
+-- build. 2000 rows target ~44 partitions; the band tolerates estimator
+-- slack in both directions but not the undercount.
+CREATE TABLE hd (id int, v vector(768)) WITH (autovacuum_enabled = off);
+-- external (uncompressed) storage makes the TOASTing deterministic
+ALTER TABLE hd ALTER COLUMN v SET STORAGE EXTERNAL;
+INSERT INTO hd
+    SELECT g, (SELECT ('[' || string_agg((sin(g * 0.7 + j))::text, ',') ||
+                       ']')
+               FROM generate_series(1, 768) j)::vector(768)
+    FROM generate_series(1, 2000) g;
+CREATE INDEX hd_i ON hd USING mktann (v);
+SELECT count(*) BETWEEN 20 AND 120 AS toast_auto_nlist
+  FROM mkt_centroid_pages('hd_i') WHERE is_leaf;
+ toast_auto_nlist 
+------------------
+ f
+(1 row)
+
+DROP TABLE hd;
