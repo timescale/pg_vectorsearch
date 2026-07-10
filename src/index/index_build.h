@@ -178,6 +178,7 @@ void mkt_centroid_write_node(
 		const struct RaBitQParams *rq_params,
 		const float				  *global_mean,
 		const BlockNumber		  *child_blks,
+		const float				  *leaf_pt,
 		BlockNumber				   blkno);
 
 typedef struct MktStreamTreePlan

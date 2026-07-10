@@ -86,48 +86,23 @@ mkt_write_centroid_tree(
 		else
 			child_blks = NULL;
 
-		if (centroid_format == MKT_CENTROID_FMT_FASTSCAN)
-		{
-			(void)child_count;
-			(void)pt_centroids; /* pt_centroids live on posting pages */
-			mkt_centroid_write_fastscan_pages(
-					storage,
-					dim,
-					node->nchildren,
-					(uint8_t)(level_offset + node->level),
-					flags,
-					rq_params,
-					hk_node_centroids(tree, node),
-					global_mean,
-					child_blks,
-					node_first_blkno[i]);
-			continue;
-		}
-
-		CentroidEncoderState enc_state;
-		CentroidEncoder		*encoder = centroid_encoder_init(
-				&enc_state,
-				centroid_format,
-				hk_node_centroids(tree, node),
-				dim,
-				rq_params,
-				global_mean);
-
 		/* Pass pt_centroids for leaf nodes only */
 		const float *leaf_pt = (is_leaf && pt_centroids != NULL)
 									 ? pt_centroids +
 											   (size_t)node->first_leaf * dim
 									 : NULL;
 
-		mkt_centroid_write_pages(
+		mkt_centroid_write_node(
 				storage,
 				dim,
+				hk_node_centroids(tree, node),
 				node->nchildren,
 				centroid_format,
 				(uint8_t)(level_offset + node->level),
 				flags,
 				child_count,
-				encoder,
+				rq_params,
+				global_mean,
 				child_blks,
 				leaf_pt,
 				node_first_blkno[i]);
@@ -202,9 +177,12 @@ mkt_centroid_write_node(
 		const RaBitQParams *rq_params,
 		const float		   *global_mean,
 		const BlockNumber  *child_blks,
+		const float		   *leaf_pt,
 		BlockNumber			blkno)
 {
 	if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+		/* fastscan carries its own encoder; pt_centroids live on posting
+		 * pages, never inline. */
 		mkt_centroid_write_fastscan_pages(
 				storage,
 				dim,
@@ -231,7 +209,7 @@ mkt_centroid_write_node(
 				child_count,
 				enc,
 				child_blks,
-				NULL,
+				leaf_pt,
 				blkno);
 	}
 }
@@ -281,6 +259,7 @@ write_node_pages(
 			c->rq_params,
 			c->global_mean,
 			child_blks,
+			NULL,
 			start);
 
 	c->next_blk += node_npages(c, n);

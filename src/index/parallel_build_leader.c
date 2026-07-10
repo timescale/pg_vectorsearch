@@ -435,6 +435,7 @@ build_routing_tree_batched(
 			rq_params,
 			global_mean,
 			subtree_root_blk,
+			NULL,
 			root_blk);
 
 	mkt_head_write_ctx_cleanup(&head);
