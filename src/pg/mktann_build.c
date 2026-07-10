@@ -1,25 +1,27 @@
 /*
  * mktann_build.c - Index build for mktann
  *
- * Build phases:
- *   1. Determine dimension from index column typmod
- *   2. Resolve distance metric, centroid format, fan_out from relopts
- *   3. Sample vectors for clustering (BlockSampler + reservoir)
- *   4. Run hierarchical k-means (mkt_hkmeans_f32)
- *   5. Compute global mean from leaf centroids
- *
- * Single-pass streaming build:
- *   6. Write metadata page, reserve centroid blocks
+ * Serial build phases (do_serial_build; the parallel shape lives in
+ * parallel_build_leader.c and falls back here when no workers launch):
+ *   1. Resolve dimension, metric, centroid format, nlist, fan_out
+ *   2. Sample vectors for clustering (BlockSampler + reservoir)
+ *   3. Routing-tree PLAN pass: cluster the sample once, recording each
+ *      node into a spillable blob store, and size the page layout
+ *   4. Pre-extend the relation for the centroid pages + posting heads
+ *   5. Routing-tree WRITE pass: replay the recorded nodes and stream
+ *      every centroid page and posting-head page (pt_centroid resident)
+ *   6. Optional leaf refinement (mkt.leaf_refine_threshold) re-centers
+ *      the head encode references from the full table
  *   7. Single heap scan: route each row page-backed (the same
- *      mkt_query_route the query/insert use), stream into posting builders
- *   8. Finish builders, write centroid pages with posting heads
- *   9. Update metadata with tuple count
- *  10. WAL-log all pages
+ *      mkt_query_route the query/insert use) into the cluster-keyed sort,
+ *      then build each posting list
+ *   8. Write the metadata page (final tuple count) and WAL-log
  *
  * Block layout:
  *   Block 0:        Metadata page
- *   Blocks 1..C:    Centroid pages (reserved, written after scan)
- *   Blocks C+1..N:  Posting pages (streamed during scan)
+ *   Blocks 1..C:    Centroid pages (streamed before the scan)
+ *   Blocks C+1..H:  Posting-list head pages (leaf c at C+1+c)
+ *   Blocks H+1..N:  Posting continuation pages (appended during the scan)
  *
  * Memory layout:
  *   build_ctx  — all build-phase allocations; deleted in one shot
@@ -683,7 +685,7 @@ do_serial_build(
 
 	/*
 	 * Plan pass: cluster the sample once and discover the tree shape (leaf
-	 * count, depth, per-leaf sample counts, centroid page count) without
+	 * count, depth, centroid page count, leaf-centroid mean) without
 	 * writing. Each node's clustering is recorded in a spillable blob store
 	 * (BufFile-backed, so the resident cost stays one node) and the write
 	 * pass below replays it instead of running k-means again -- the same
@@ -758,8 +760,8 @@ do_serial_build(
 	/*
 	 * Write pass: stream the centroid pages (reserved blocks, post-order, root
 	 * last) and, per leaf, its head page carrying pt_centroid. Both build and
-	 * query then route page-backed over these centroid pages. This path
-	 * finalizes centroids + metadata itself (out_finalized).
+	 * query then route page-backed over these centroid pages; the metadata
+	 * page is written after the scan, when the tuple count is final.
 	 */
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_CENTROID);
 

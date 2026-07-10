@@ -162,11 +162,10 @@ typedef struct RoutingTreeCtx
 	/* plan-phase page-count helpers */
 	uint32_t max_ent; /* non-fastscan entries/page */
 	uint32_t fs_gpp;  /* fastscan groups/page */
-	/* Node replay through the caller's blob store: the plan pass records
-	 * each node's clustering ({k, centroids, assignments}, recursion order)
-	 * and the write pass replays it instead of re-running k-means. NULL
-	 * keeps the self-contained re-cluster behavior (unit/standalone
-	 * callers). */
+	/* Node replay: the plan pass records each node's clustering
+	 * ({k, centroids, assignments}, recursion order) here, and the write
+	 * pass replays it instead of re-running k-means. Both passes require
+	 * the store. */
 	MktBlobStore *store;
 	float		 *replay_cents; /* write: [fan_out * dim] */
 	/* One node's uint16 assignments, shared by both passes (the plan pass
@@ -677,8 +676,8 @@ mkt_routing_tree_plan(
 	 * sibling boundaries would free live ancestor state — and would turn a
 	 * missed free (a bounded, observable leak) into a use-after-free.
 	 * Within a node, explicit frees remain the mechanism; the context caps
-	 * their blast radius at one pass. Outputs (leaf_counts, leaf_mean) are
-	 * allocated in the caller's context outside the switch.
+	 * their blast radius at one pass. The output (leaf_mean) is allocated
+	 * in the caller's context outside the switch.
 	 */
 	MktMemCtx scratch = mkt_memctx_create(NULL, "mkt stream plan");
 	MktMemCtx old_ctx = mkt_memctx_switch(scratch);

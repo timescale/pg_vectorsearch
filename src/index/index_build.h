@@ -190,9 +190,9 @@ typedef struct MktStreamTreePlan
 } MktStreamTreePlan;
 
 /*
- * PLAN pass: cluster the sample and report the tree shape (leaf count, depth,
- * per-leaf sample counts, and the number of centroid pages the write pass will
- * emit) without writing anything. Returns false on k-means failure.
+ * PLAN pass: cluster the sample and report the tree shape (leaf count,
+ * depth, centroid page count, leaf-centroid mean) without writing anything.
+ * Returns false on k-means failure.
  */
 bool mkt_routing_tree_plan(
 		const float			*vectors,

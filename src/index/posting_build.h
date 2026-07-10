@@ -416,7 +416,7 @@ void mkt_posting_builder_init_continuation_fastscan(
 
 /*
  * Pin the first page to a specific block number. The first flush
- * writes to this block; subsequent pages use the reserve or new_page.
+ * writes to this block; later pages are appended via new_page.
  */
 void mkt_posting_builder_set_first_blkno(
 		MktPostingBuilder *builder, BlockNumber blkno);
