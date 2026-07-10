@@ -850,27 +850,24 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * worker routes each row identically. nlevels + first_centroid (the
 	 * streamed tree's root block) come from the shared state the leader
 	 * published; the scales + global mean + fastscan bits also from shared. */
-	MktIndexBase base	= {0};
-	base.params			= rq_params;
-	base.pt_global_mean = mkt_alloc((size_t)dim * sizeof(float));
-	mkt_rabitq_rotate(rq_params, global_mean, base.pt_global_mean);
-	base.rabitq_seed	  = shared->rabitq_seed;
-	base.centroid_storage = storage;
-	base.posting_storage  = storage;
-	base.page_base		  = NULL;
-	base.dim			  = dim;
-	base.nlevels		  = shared->nlevels;
-	base.first_centroid	  = shared->first_centroid;
-	base.metric			  = shared->metric;
-	base.centroid_format  = shared->centroid_format;
-	base.fastscan = (shared->centroid_format == MKT_CENTROID_FMT_FASTSCAN)
-						  ? shared->fastscan_bits
-						  : 0;
-	base.centroid_error_scale = shared->centroid_error_scale;
-	base.centroid_beam_scale  = shared->centroid_beam_scale;
-	base.fan_out = (uint8_t)(shared->fan_out <= UINT8_MAX ? shared->fan_out
-														  : UINT8_MAX);
-	base.nlist	 = shared->nlist;
+	MktIndexBase base;
+	mkt_build_router_base_init(
+			&base,
+			rq_params,
+			storage,
+			dim,
+			shared->nlevels,
+			shared->first_centroid,
+			shared->metric,
+			shared->centroid_format,
+			shared->fastscan_bits,
+			shared->centroid_error_scale,
+			shared->centroid_beam_scale,
+			shared->fan_out,
+			shared->nlist,
+			shared->rabitq_seed,
+			global_mean,
+			mkt_alloc((size_t)dim * sizeof(float)));
 
 	MktQueryState qs;
 	mkt_query_state_init(&qs, &base, 1, MKT_SECONDARY_TOPK);

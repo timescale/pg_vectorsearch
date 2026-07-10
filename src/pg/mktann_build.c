@@ -791,31 +791,27 @@ do_serial_build(
 	 * base is stack-local but outlives the scan (all within this function); qs
 	 * holds it by pointer until mkt_query_state_cleanup below.
 	 */
-	MktIndexBase idx_base	= {0};
-	idx_base.params			= rq_params;
-	idx_base.pt_global_mean = palloc(vec_nbytes);
-	mkt_rabitq_rotate(rq_params, global_mean, idx_base.pt_global_mean);
-	idx_base.rabitq_seed	  = rabitq_seed;
-	idx_base.centroid_storage = storage;
-	idx_base.posting_storage  = storage;
-	idx_base.page_base		  = NULL;
-	idx_base.dim			  = dim;
-	idx_base.nlevels		  = (uint8_t)plan.nlevels;
-	idx_base.fan_out		  = (uint8_t)Min(bs->params.fan_out, UINT8_MAX);
-	idx_base.nlist			  = nlist;
-	idx_base.first_centroid	  = root;
-	idx_base.metric			  = p->metric;
-	idx_base.centroid_format  = p->centroid_format;
-	idx_base.fastscan = (p->centroid_format == MKT_CENTROID_FMT_FASTSCAN)
-							  ? mkt_fastscan_bits
-							  : 0;
-	/*
-	 * Route the build for accuracy, not query speed: use the build-time
-	 * routing constants rather than the query-tuned GUCs (see
-	 * MKT_BUILD_CENTROID_* in posting_build.h).
-	 */
-	idx_base.centroid_error_scale = MKT_BUILD_CENTROID_ERROR_SCALE;
-	idx_base.centroid_beam_scale  = MKT_BUILD_CENTROID_BEAM_SCALE;
+	MktIndexBase idx_base;
+	/* Route the build for accuracy, not query speed: the build-time routing
+	 * constants rather than the query-tuned GUCs (see MKT_BUILD_CENTROID_*
+	 * in posting_build.h). */
+	mkt_build_router_base_init(
+			&idx_base,
+			rq_params,
+			storage,
+			dim,
+			(uint8_t)plan.nlevels,
+			root,
+			p->metric,
+			p->centroid_format,
+			mkt_fastscan_bits,
+			MKT_BUILD_CENTROID_ERROR_SCALE,
+			MKT_BUILD_CENTROID_BEAM_SCALE,
+			bs->params.fan_out,
+			nlist,
+			rabitq_seed,
+			global_mean,
+			palloc(vec_nbytes));
 	mkt_query_state_init(&bs->qs, &idx_base, 1, MKT_SECONDARY_TOPK);
 
 	/*

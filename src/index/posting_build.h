@@ -248,6 +248,54 @@ mkt_head_write_ctx_cleanup(MktHeadWriteCtx *h)
 
 void mkt_write_leaf_head(void *arg, uint32_t leaf, const float *centroid);
 
+/*
+ * Build-time page-backed router base: the same MktIndexBase the query and
+ * insert paths build, so the build scan routes each row identically. Both
+ * back-ends must construct it the same way -- this is the one place. The
+ * caller owns pt_global_mean ([dim], filled with the rotated global mean)
+ * and frees it after mkt_query_state_cleanup.
+ */
+static inline void
+mkt_build_router_base_init(
+		MktIndexBase	 *base,
+		RaBitQParams	 *params,
+		MktStorage		 *storage,
+		Dimension		  dim,
+		uint8_t			  nlevels,
+		BlockNumber		  first_centroid,
+		DistanceMetric	  metric,
+		MktCentroidFormat centroid_format,
+		int				  fastscan_bits,
+		double			  error_scale,
+		double			  beam_scale,
+		uint32_t		  fan_out,
+		uint32_t		  nlist,
+		uint64_t		  rabitq_seed,
+		const float		 *global_mean,
+		float			 *pt_global_mean)
+{
+	memset(base, 0, sizeof(*base));
+	base->params		 = params;
+	base->pt_global_mean = pt_global_mean;
+	mkt_rabitq_rotate(params, global_mean, base->pt_global_mean);
+	base->rabitq_seed		   = rabitq_seed;
+	base->centroid_storage	   = storage;
+	base->posting_storage	   = storage;
+	base->page_base			   = NULL;
+	base->dim				   = dim;
+	base->nlevels			   = nlevels;
+	base->first_centroid	   = first_centroid;
+	base->metric			   = metric;
+	base->centroid_format	   = centroid_format;
+	base->fastscan			   = (centroid_format == MKT_CENTROID_FMT_FASTSCAN)
+									   ? fastscan_bits
+									   : 0;
+	base->centroid_error_scale = error_scale;
+	base->centroid_beam_scale  = beam_scale;
+	base->fan_out = (uint8_t)(fan_out <= UINT8_MAX ? fan_out : UINT8_MAX);
+	base->nlist	  = nlist;
+}
+
 void mkt_refine_write_means(
 		const double   *sums,
 		const uint64_t *counts,
