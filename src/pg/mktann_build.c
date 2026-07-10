@@ -268,6 +268,7 @@ write_meta_page(
 		MktCentroidFormat centroid_format,
 		DistanceMetric	  metric,
 		uint64_t		  rabitq_seed,
+		bool			  fastscan,
 		const float		 *global_mean)
 {
 	/* Block 0 must already exist (extended or new_page'd by caller).
@@ -287,7 +288,7 @@ write_meta_page(
 	meta->nlist			  = nlist;
 	meta->metric		  = (uint8_t)metric;
 	meta->fan_out		  = (uint8_t)fan_out;
-	meta->flags			  = 0;
+	meta->flags			  = fastscan ? MKT_META_FLAG_FASTSCAN : 0;
 	meta->reserved		  = 0;
 	meta->rabitq_seed	  = rabitq_seed;
 
@@ -944,20 +945,13 @@ do_serial_build(
 			(uint8_t)p->fan_out,
 			root,
 			first_posting,
-			0,
+			(uint32_t)bs->indtuples,
 			nlist,
 			p->centroid_format,
 			p->metric,
 			rabitq_seed,
+			p->fastscan,
 			global_mean);
-	{
-		Page			page = mkt_storage_write_page(storage, 0);
-		MktannMetaPage *meta = (MktannMetaPage *)PageGetSpecialPointer(page);
-		meta->ntuples		 = (uint32_t)bs->indtuples;
-		if (p->fastscan)
-			meta->flags |= MKT_META_FLAG_FASTSCAN;
-		mkt_storage_commit_page(storage, 0);
-	}
 	*out_nlist		  = nlist;
 	*out_tree_nlevels = (uint8_t)plan.nlevels;
 	*out_global_mean  = global_mean;
@@ -1157,20 +1151,13 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 					(uint8_t)p->fan_out,
 					fc,
 					meta_first_posting,
-					0,
+					(uint32_t)indtuples,
 					built_nlist,
 					p->centroid_format,
 					p->metric,
 					rabitq_seed,
+					p->fastscan,
 					global_mean);
-
-			Page			page = mkt_storage_write_page(&storage.base, 0);
-			MktannMetaPage *meta = (MktannMetaPage *)PageGetSpecialPointer(
-					page);
-			meta->ntuples = (uint32_t)indtuples;
-			if (p->fastscan)
-				meta->flags |= MKT_META_FLAG_FASTSCAN;
-			mkt_storage_commit_page(&storage.base, 0);
 		}
 		mkt_build_report_phase(&prog, MKT_BUILD_PHASE_WAL);
 		log_newpage_range(
