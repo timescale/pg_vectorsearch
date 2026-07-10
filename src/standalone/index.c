@@ -32,6 +32,7 @@
 #include "index/posting_build.h"
 #include "index/posting_convert.h"
 #include "index/posting_page.h"
+#include "quant/rabitq.h"
 #include "standalone/index.h"
 
 static uint64_t
@@ -578,7 +579,7 @@ mkt_index_build(
 		/* The streaming build reserves block 0 for the meta page and writes
 		 * the root centroid page in place at block 1, after its subtrees. */
 		idx->base.first_centroid = 1;
-		idx->base.params		 = mkt_rabitq_create(dim, 42);
+		idx->base.params = mkt_rabitq_create(dim, MKT_RABITQ_BUILD_SEED);
 		/* The paged query needs no per-cluster lists, but the bindings API
 		 * reads idx->clusters[c].count for build stats; give it zeroed entries
 		 * (count 0 -> the API falls back to size estimates). */
@@ -650,7 +651,7 @@ mkt_index_build(
 		   (size_t)nlist * dim * sizeof(float));
 
 	/* RaBitQ params */
-	idx->base.params = mkt_rabitq_create(dim, 42);
+	idx->base.params = mkt_rabitq_create(dim, MKT_RABITQ_BUILD_SEED);
 
 	/* Precompute P^T * centroids for zero-alloc query path. */
 	idx->pt_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));

@@ -39,6 +39,7 @@
 #include "mktann_build.h"
 #include "mktann_storage.h"
 #include "quant/matrix.h"
+#include "quant/rabitq.h"
 
 /*
  * PG-specific shared build state: the neutral MktBuildShared plus the relation
@@ -413,7 +414,7 @@ mkt_pbuild_setup_shared(
 	Dimension dim			= config->dim;
 	uint32_t  nlist			= config->nlist;
 	int		  nparticipants = nworkers + 1;
-	uint64_t  rabitq_seed	= 42;
+	uint64_t  rabitq_seed	= MKT_RABITQ_BUILD_SEED;
 	uint32_t  fan_out		= config->fan_out > 0 ? config->fan_out
 												  : mkt_auto_fan_out(0, nlist, 0);
 	uint32_t  km_k			= fan_out < nlist ? fan_out : nlist;

@@ -992,7 +992,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 	const MktannBuildParams *p			 = &bs.params;
 	Dimension				 dim		 = p->dim;
-	uint64_t				 rabitq_seed = 42;
+	uint64_t				 rabitq_seed = MKT_RABITQ_BUILD_SEED;
 
 	/*
 	 * Build introspection: one reporting context the serial and parallel paths
