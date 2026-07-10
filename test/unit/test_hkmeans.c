@@ -192,105 +192,6 @@ TEST(three_level_tree)
 }
 
 /*
- * Grafting per-child subtrees yields a deeper, structurally-valid tree.
- *
- * Mirrors what the parallel build does: one root split into fan_out groups,
- * each group's subtree built independently, then grafted under a fresh root.
- * Here the subtrees are 2-level, so the graft must be a valid 3-level tree.
- */
-TEST(graft_subtrees_three_level)
-{
-	Dimension dim	  = 8;
-	uint32_t  fan_out = 3;
-
-	HKMeansResult *subs[3];
-	float		  *roots = mkt_alloc((size_t)fan_out * dim * sizeof(float));
-	float		  *sub_data[3];
-	uint32_t	   total_leaves = 0;
-
-	for (uint32_t c = 0; c < fan_out; c++)
-	{
-		sub_data[c] = make_clustered_data(6, 20, dim, 100 + c);
-		subs[c]		= mkt_hkmeans_f32(
-				sub_data[c], 6 * 20, NULL, dim, 6, fan_out, DISTANCE_L2, NULL);
-		ASSERT_NOT_NULL(subs[c], "subtree built");
-		ASSERT_EQ(2, subs[c]->nlevels, "subtree is 2-level");
-		total_leaves += subs[c]->nleaves;
-		/* Any fan_out centroids work for the structural test. */
-		memcpy(roots + (size_t)c * dim, sub_data[c], dim * sizeof(float));
-	}
-
-	HKMeansResult *tree = mkt_hkmeans_graft(
-			roots, fan_out, (const HKMeansResult *const *)subs, dim);
-
-	ASSERT_NOT_NULL(tree, "graft returns a tree");
-	ASSERT_EQ(3, tree->nlevels, "grafted tree is 3-level");
-	ASSERT_EQ(fan_out, tree->fan_out, "fan_out preserved");
-	ASSERT_EQ(total_leaves, tree->nleaves, "nleaves = sum of subtree leaves");
-	ASSERT_EQ(0u, hk_nodes(tree)[0].level, "root at level 0");
-	ASSERT_EQ(
-			fan_out, hk_nodes(tree)[0].nchildren, "root has fan_out children");
-	ASSERT_EQ(
-			1u,
-			hk_nodes(tree)[0].first_child,
-			"root children start at index 1");
-
-	/* Structural invariants: contiguous children one level deeper;
-	 * leaf-parents only at the deepest level with valid leaf ranges. */
-	HKMeansNode *nodes = hk_nodes(tree);
-	for (uint32_t i = 0; i < tree->nnodes; i++)
-	{
-		HKMeansNode *n = &nodes[i];
-		if (n->first_child != HKMEANS_NO_CHILD)
-		{
-			for (uint32_t c = 0; c < n->nchildren; c++)
-			{
-				uint32_t ci = n->first_child + c;
-				ASSERT_TRUE(ci < tree->nnodes, "child index in range");
-				ASSERT_EQ(
-						n->level + 1,
-						nodes[ci].level,
-						"child one level deeper");
-			}
-		}
-		else
-		{
-			ASSERT_EQ(
-					tree->nlevels - 1,
-					n->level,
-					"leaf-parent at deepest level");
-			ASSERT_TRUE(
-					n->first_leaf + n->nchildren <= tree->nleaves,
-					"leaf range within bounds");
-		}
-	}
-
-	/* Every leaf centroid finite; every query routes to a valid leaf. */
-	for (uint32_t i = 0; i < tree->nleaves * dim; i++)
-		ASSERT_TRUE(
-				isfinite(hk_leaf_centroids(tree)[i]), "leaf centroid finite");
-
-	float *queries = make_clustered_data(12, 1, dim, 7777);
-	for (uint32_t i = 0; i < 12; i++)
-	{
-		Distance d;
-		uint32_t leaf = mkt_hkmeans_assign(
-				tree, queries + (size_t)i * dim, DISTANCE_L2, &d);
-		ASSERT_TRUE(leaf < tree->nleaves, "assigned leaf in range");
-		ASSERT_TRUE(isfinite((float)d), "assignment distance finite");
-	}
-
-	mkt_free(queries);
-	mkt_free(tree);
-	for (uint32_t c = 0; c < fan_out; c++)
-	{
-		mkt_free(subs[c]);
-		mkt_free(sub_data[c]);
-	}
-	mkt_free(roots);
-}
-
-/*
  * build_flat assembles a one-level tree directly from leaf centroids, matching
  * the shape mkt_hkmeans_f32 produces for a flat (nlist <= fan_out) build.
  */
@@ -632,4 +533,54 @@ TEST(assign_topk_beam1_equals_greedy)
 
 	mkt_free(tree);
 	mkt_free(data);
+}
+
+/*
+ * The capped blob bound must dominate any tree actually built from
+ * max_leaves vectors, whatever the nlist target -- including the chain
+ * shape, where few vectors under a deep target produce one narrow node per
+ * level. The parallel build sizes its subtree ring slots with this bound.
+ */
+TEST(max_blob_size_capped_bounds_actual)
+{
+	struct
+	{
+		uint32_t nvecs;
+		uint32_t nlist;
+		uint32_t fan_out;
+	} cases[] = {
+			{5, 1000, 10},	/* chains: 3 deep levels, 5 vectors */
+			{50, 1000, 10}, /* partial width at every level */
+			{200, 64, 4},	/* deeper than wide */
+			{300, 16, 8},	/* two full levels */
+			{7, 100000, 4}, /* extreme target, tiny data */
+	};
+
+	Dimension dim = 16;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+	{
+		uint32_t nvecs	 = cases[i].nvecs;
+		uint32_t nlist	 = cases[i].nlist;
+		uint32_t fan_out = cases[i].fan_out;
+		float	*data =
+				make_clustered_data(4, (nvecs + 3) / 4, dim, 42 + (unsigned)i);
+
+		KMeansOptions  opts = MKT_KMEANS_OPTIONS_DEFAULT;
+		HKMeansResult *tree = mkt_hkmeans_f32(
+				data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
+		ASSERT_NOT_NULL(tree, "tree builds");
+
+		size_t capped =
+				mkt_hkmeans_max_blob_size_capped(nlist, fan_out, dim, nvecs);
+		size_t uncapped = mkt_hkmeans_max_blob_size(nlist, fan_out, dim);
+
+		ASSERT_TRUE(
+				(size_t)tree->total_size <= capped,
+				"actual blob within the capped bound");
+		ASSERT_TRUE(capped <= uncapped, "cap never exceeds the worst case");
+
+		mkt_free(tree);
+		mkt_free(data);
+	}
 }

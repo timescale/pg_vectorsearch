@@ -22,6 +22,7 @@
 #include <miscadmin.h>
 #include <optimizer/plancat.h>
 #include <pgstat.h>
+#include <storage/buffile.h>
 #include <storage/latch.h>
 #include <storage/proc.h>
 #include <storage/spin.h>
@@ -52,7 +53,13 @@ typedef struct MktBuildSharedPg
 	Oid			   heaprelid;
 	Oid			   indexrelid;
 	int64		   queryid;
-	slock_t		   mutex;
+	/* DSM handle of the dedicated sample segment (sample-region seam). */
+	dsm_handle sample_handle;
+	/* DSM handle of the per-child subtree ring, created by the leader after
+	 * root assignment (when the per-child sample counts that bound the slot
+	 * size are known) and published before the ring barrier. */
+	dsm_handle subtree_ring_handle;
+	slock_t	   mutex;
 	/* Striped locks guarding the shared leaf-refinement accumulator. */
 	slock_t accum_locks[MKT_REFINE_LOCK_STRIPES];
 } MktBuildSharedPg;
@@ -142,6 +149,10 @@ worker_lockmodes(bool concurrent, LOCKMODE *heapmode, LOCKMODE *indexmode)
 	*indexmode = concurrent ? RowExclusiveLock : AccessExclusiveLock;
 }
 
+/* Per-worker build memory context (see mkt_pbuild_worker_attach). */
+static MemoryContext mkt_pbuild_worker_ctx	  = NULL;
+static MemoryContext mkt_pbuild_worker_oldctx = NULL;
+
 /*
  * Join the parallel build: look up the shared state, open the heap and index,
  * start per-worker instrumentation, and attach to the phase barrier. The
@@ -170,6 +181,17 @@ mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
 	w->worker_id = ParallelWorkerNumber + 1;
 	w->dim		 = shared->dim;
 
+	/*
+	 * All of this worker's build allocations (routing state, per-child
+	 * subtree blobs, batch buffers) go into a named context so
+	 * pg_backend_memory_contexts attributes them to the build and they are
+	 * reclaimed together at detach. A file-static is safe for the same
+	 * reason as mkt_pbuild_snapshot: one build per worker, non-reentrant.
+	 */
+	mkt_pbuild_worker_ctx = AllocSetContextCreate(
+			CurrentMemoryContext, "mkt worker build", ALLOCSET_DEFAULT_SIZES);
+	mkt_pbuild_worker_oldctx = MemoryContextSwitchTo(mkt_pbuild_worker_ctx);
+
 	InstrStartParallelQuery();
 
 	/*
@@ -189,6 +211,11 @@ mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
 void
 mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
 {
+	MemoryContextSwitchTo(mkt_pbuild_worker_oldctx);
+	MemoryContextDelete(mkt_pbuild_worker_ctx);
+	mkt_pbuild_worker_ctx	 = NULL;
+	mkt_pbuild_worker_oldctx = NULL;
+
 	BufferUsage *bufferusage =
 			shm_toc_lookup(toc, MKT_DSM_KEY_BUFFER_USAGE, false);
 	WalUsage *walusage = shm_toc_lookup(toc, MKT_DSM_KEY_WAL_USAGE, false);
@@ -259,6 +286,63 @@ mkt_pbuild_teardown(ParallelContext *pcxt)
 	}
 	DestroyParallelContext(pcxt);
 	ExitParallelMode();
+}
+
+/*
+ * Leader-only subtree blob store (see parallel_build.h): a BufFile temp
+ * file. Small blob sets never leave the kernel page cache; large ones spill
+ * to pgsql_tmp automatically, so the store adds no unbounded memory. Blobs
+ * are length-prefixed and read back strictly in append order.
+ */
+struct MktBlobStore
+{
+	BufFile *file;
+};
+
+MktBlobStore *
+mkt_pbuild_blobstore_begin(void)
+{
+	MktBlobStore *bs = palloc(sizeof(MktBlobStore));
+	bs->file		 = BufFileCreateTemp(false);
+	return bs;
+}
+
+void
+mkt_pbuild_blobstore_put(MktBlobStore *bs, const void *blob, uint64_t size)
+{
+	BufFileWrite(bs->file, &size, sizeof(size));
+	BufFileWrite(bs->file, blob, (size_t)size);
+}
+
+void
+mkt_pbuild_blobstore_rewind(MktBlobStore *bs)
+{
+	if (BufFileSeek(bs->file, 0, 0, SEEK_SET) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not rewind subtree blob store")));
+}
+
+uint64_t
+mkt_pbuild_blobstore_get(MktBlobStore *bs, void *buf, uint64_t max_size)
+{
+	uint64_t size;
+	BufFileReadExact(bs->file, &size, sizeof(size));
+	if (size > max_size)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("subtree blob larger than its slot (%llu > %llu)",
+						(unsigned long long)size,
+						(unsigned long long)max_size)));
+	BufFileReadExact(bs->file, buf, (size_t)size);
+	return size;
+}
+
+void
+mkt_pbuild_blobstore_end(MktBlobStore *bs)
+{
+	BufFileClose(bs->file);
+	pfree(bs);
 }
 
 /*
@@ -334,33 +418,28 @@ mkt_pbuild_setup_shared(
 												  : mkt_auto_fan_out(0, nlist, 0);
 	uint32_t  km_k			= fan_out < nlist ? fan_out : nlist;
 
-	/* Per-child subtree blob slot: each root child's subtree targets
-	 * ~nlist/fan_out leaves; size the slot for that tree's worst case. */
-	uint32_t nlist_c   = (nlist + fan_out - 1) / fan_out;
-	uint64_t slot_size = mkt_hkmeans_max_blob_size(nlist_c, fan_out, dim);
-
 	/*
 	 * Size the k-means sample set. The samples live in one shared-memory
 	 * region (total_samples * dim floats) that must stay resident for the
 	 * whole tree build -- root k-means and every subtree -- so its size is the
 	 * build's dominant memory cost. The ideal is ~256 samples per list, but at
 	 * fine nlist that can dwarf available RAM (nlist=480k -> 123M samples ->
-	 * ~360 GB), which previously overflowed the DSM.
+	 * ~360 GB), far beyond what a DSM segment can hold.
 	 *
 	 * Bound it by maintenance_work_mem: that is the build's memory budget and
 	 * the knob operators already raise for large index builds. When the budget
 	 * is smaller than the ideal the stride sampler simply draws a coarser (but
 	 * still uniform) subsample to fit. estimate_rel_size() caps it to the rows
 	 * that actually exist so small tables don't over-allocate; it is only a
-	 * hint now -- the budget is the hard bound, so an inaccurate estimate can
-	 * no longer over-commit shared memory.
+	 * hint -- the budget is the hard bound, so an inaccurate estimate cannot
+	 * over-commit shared memory.
 	 */
 	uint64_t want_samples = (uint64_t)nlist * 256;
 
 	/* maintenance_work_mem is in kB; reserve it for the sample region. */
-	uint64_t mem_bytes = (uint64_t)maintenance_work_mem * UINT64CONST(1024);
-	uint64_t per_vec   = (uint64_t)dim * sizeof(float);
-	uint64_t budget	   = per_vec > 0 ? mem_bytes / per_vec : want_samples;
+	uint64_t mem_bytes	= (uint64_t)maintenance_work_mem * UINT64CONST(1024);
+	uint64_t vec_nbytes = (uint64_t)dim * sizeof(float);
+	uint64_t budget = vec_nbytes > 0 ? mem_bytes / vec_nbytes : want_samples;
 	if (budget < 10000)
 		budget = 10000; /* k-means needs a workable minimum */
 
@@ -391,16 +470,14 @@ mkt_pbuild_setup_shared(
 							  nparticipants;
 
 	/*
-	 * Refine leaf centroids on the full table afterward only when the
-	 * structure was built from a strict subset (i.e. the sample was
-	 * budget-bounded below the table). Both leader and workers gate the refine
-	 * phase on shared->refine_iters so they run the identical barrier
-	 * sequence.
+	 * The refine decision itself is the leader's, made after clustering when
+	 * the actual leaf count is known (see MktBuildShared.refine); setup only
+	 * publishes the gate inputs. The pass is single-shot by design: refine
+	 * routes every row over the centroid PAGES, which it never rewrites (it
+	 * updates the heads' encode references, which routing does not read), so
+	 * the row-to-leaf assignment is a fixed point -- a second pass would
+	 * rescan the whole table to recompute the exact same means.
 	 */
-	uint32_t refine_iters = ((double)total_samples < est_tuples &&
-							 mkt_leaf_refine_iters > 0)
-								  ? (uint32_t)mkt_leaf_refine_iters
-								  : 0;
 
 	EnterParallelMode();
 
@@ -425,16 +502,9 @@ mkt_pbuild_setup_shared(
 
 	shm_toc_estimate_chunk(&pcxt->estimator, est_shared);
 	shm_toc_estimate_chunk(&pcxt->estimator, sizeof(Barrier));
-	/* Sampling */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator,
-			mkt_dsm_samples_size(nparticipants, max_per_worker, dim));
 	/* K-means shared centroids + norms (root level, k=km_k) */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_dsm_centroids_size(km_k, dim));
-	/* Per-child subtree blobs (work-partitioned phase 2c) */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator, mkt_dsm_child_subtrees_size(fan_out, slot_size));
 	/* K-means per-worker accumulators */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
@@ -443,35 +513,30 @@ mkt_pbuild_setup_shared(
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
 			mkt_dsm_root_assign_size(nparticipants, max_per_worker));
-	/* Tree blob (placeholder — allocated later by leader, but
-	 * we need the max possible size. Use a generous estimate.) */
-	Size max_tree_sz = sizeof(HKMeansResult) +
-					   (Size)nlist * 2 * sizeof(HKMeansNode) +
-					   (Size)nlist * dim * sizeof(float) * 2;
-	shm_toc_estimate_chunk(&pcxt->estimator, max_tree_sz);
 	/* Shared coordinator for the cluster-keyed posting sort (sort seam). Sized
 	 * for the planned participant count (upper bound on launched workers). */
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_pbuild_sort_shared_size(nparticipants));
 
-	/* Page-backed routing: leaf posting-head blocks (head->leaf map) and the
-	 * global mean, published by the leader before the tree-ready barrier.
-	 * Sized for the worst-case leaf count (nlist here is the max bound). */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator, (Size)nlist * sizeof(BlockNumber));
-	shm_toc_estimate_chunk(&pcxt->estimator, (Size)dim * sizeof(float));
+	/* Page-backed routing: the global mean, published by the leader before the
+	 * tree-ready barrier. The posting-head base (leaf c's head = first_posting
+	 * + c) is a scalar in MktBuildShared, so no O(nlist) head array is shared.
+	 */
+	shm_toc_estimate_chunk(&pcxt->estimator, (Size)vec_nbytes);
 
-	/* Shared leaf-refinement accumulator (one copy; only when refining). Sized
-	 * to a bounded tile (cap_bytes = min(maintenance_work_mem, MaxAllocSize)),
-	 * not O(nlist): refine processes leaves in tiles of this capacity. */
+	/* The leaf-refinement accumulator overlays the sample segment once the
+	 * samples are dead (see the sample-region seam), so it needs no DSM chunk
+	 * of its own; its tile capacity is bounded by the memory budget, by
+	 * MaxAllocSize, and by the region it overlays. */
+	Size samp_sz = mkt_dsm_samples_size(nparticipants, max_per_worker, dim);
 	uint64_t refine_cap_bytes =
 			Min((uint64_t)maintenance_work_mem * 1024, (uint64_t)MaxAllocSize);
+	if (refine_cap_bytes >
+		(uint64_t)samp_sz - offsetof(MktDsmRefineAccum, sums))
+		refine_cap_bytes = (uint64_t)samp_sz -
+						   offsetof(MktDsmRefineAccum, sums);
 	uint32_t refine_tile_cap =
 			mkt_refine_tile_leaves(nlist, dim, refine_cap_bytes);
-	if (refine_iters > 0)
-		shm_toc_estimate_chunk(
-				&pcxt->estimator,
-				mkt_dsm_refine_accum_size(refine_tile_cap, dim));
 
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -485,13 +550,12 @@ mkt_pbuild_setup_shared(
 		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
 	}
 
-	/* nkeys: shared, barrier, samples, centroids, km_workers, root_assign,
-	 * tree, sortshared, child_subtrees, wal, buffer, posting_heads,
-	 * global_mean + optionally refine_accum / query_text */
-	int nkeys = 13;
+	/* nkeys: shared, barrier, centroids, km_workers, root_assign,
+	 * sortshared, wal, buffer, global_mean + optionally query_text (samples
+	 * and the subtree ring live in their own segments; the refine
+	 * accumulator overlays the samples) */
+	int nkeys = 9;
 	if (debug_query_string)
-		nkeys++;
-	if (refine_iters > 0)
 		nkeys++;
 	shm_toc_estimate_keys(&pcxt->estimator, nkeys);
 
@@ -518,7 +582,7 @@ mkt_pbuild_setup_shared(
 	shared->metric				   = config->metric;
 	shared->nlist				   = nlist;
 	shared->fan_out				   = fan_out; /* resolved (auto if config 0) */
-	shared->subtree_slot_size	   = slot_size;
+	shared->subtree_slot_size	   = 0; /* leader sizes the ring post-assign */
 	shared->soar_lambda			   = config->soar_lambda;
 	shared->boundary_epsilon	   = config->boundary_epsilon;
 	shared->fastscan			   = config->fastscan;
@@ -531,7 +595,9 @@ mkt_pbuild_setup_shared(
 	shared->km_tolerance		   = 1e-4f;
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
-	shared->refine_iters		   = refine_iters;
+	shared->refine_threshold	   = (uint32_t)mkt_leaf_refine_threshold;
+	shared->refine			= false; /* leader decides post-clustering */
+	shared->refine_tile_cap = refine_tile_cap;
 	/* Build routes for accuracy, not query speed (see MKT_BUILD_CENTROID_*
 	 * in posting_build.h): decouple from the query-tuned GUCs. */
 	shared->centroid_error_scale = MKT_BUILD_CENTROID_ERROR_SCALE;
@@ -560,9 +626,12 @@ mkt_pbuild_setup_shared(
 	BarrierInit(barrier, 0);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_BARRIER, barrier);
 
-	/* Sample slots */
-	Size samp_sz = mkt_dsm_samples_size(nparticipants, max_per_worker, dim);
-	MktDsmSamples *dsm_samples = shm_toc_allocate(pcxt->toc, samp_sz);
+	/* Sample slots, in a dedicated DSM segment so the build's largest
+	 * working set can be handed back (last detach destroys it) before the
+	 * posting sort claims its own budget -- see the sample-region seam.
+	 * Workers attach via the handle published in the shared state. */
+	dsm_segment	  *sample_seg  = dsm_create(samp_sz, 0);
+	MktDsmSamples *dsm_samples = dsm_segment_address(sample_seg);
 	/* Only the header + per-participant counts are read before being written;
 	 * the sample data is filled by the sampling pass and read back bounded by
 	 * those counts, so zeroing the (multi-GB) data region is wasted work. */
@@ -573,7 +642,7 @@ mkt_pbuild_setup_shared(
 	dsm_samples->nparticipants	= nparticipants;
 	dsm_samples->max_per_worker = max_per_worker;
 	dsm_samples->dim			= dim;
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SAMPLES, dsm_samples);
+	pg->sample_handle			= dsm_segment_handle(sample_seg);
 
 	/* Shared centroids + norms (root k-means, k=km_k) */
 	Size  cent_sz		 = mkt_dsm_centroids_size(km_k, dim);
@@ -581,13 +650,6 @@ mkt_pbuild_setup_shared(
 	memset(centroids_base, 0, cent_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CENTROIDS, centroids_base);
 	float *cents = mkt_dsm_centroids(centroids_base);
-
-	/* Per-child subtree blobs (phase 2c, work-partitioned): each participant
-	 * builds the full subtree for the root children it owns into its slot, and
-	 * the leader grafts them into the final tree. */
-	char *child_subtrees_base = shm_toc_allocate(
-			pcxt->toc, mkt_dsm_child_subtrees_size(fan_out, slot_size));
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CHILD_SUBTREES, child_subtrees_base);
 
 	/* Per-worker k-means accumulators */
 	Size  km_sz			  = mkt_dsm_km_workers_size(nparticipants, km_k, dim);
@@ -603,11 +665,6 @@ mkt_pbuild_setup_shared(
 	dsm_ra->max_per_worker = max_per_worker;
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_ROOT_ASSIGN, dsm_ra);
 
-	/* Tree blob — allocated now, populated after k-means */
-	void *dsm_tree = shm_toc_allocate(pcxt->toc, max_tree_sz);
-	memset(dsm_tree, 0, max_tree_sz);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_TREE, dsm_tree);
-
 	/* Shared coordinator for the cluster-keyed posting sort (sort seam). Sized
 	 * for the planned participant count; the leader calls
 	 * mkt_pbuild_sort_shared_init with the actual launched count after launch.
@@ -617,30 +674,12 @@ mkt_pbuild_setup_shared(
 	memset(sortshared, 0, sort_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SORTSHARED, sortshared);
 
-	/* Page-backed routing regions (filled by the leader before the tree-ready
-	 * barrier): the leaf posting-head blocks and the global mean. */
-	BlockNumber *dsm_heads =
-			shm_toc_allocate(pcxt->toc, (Size)nlist * sizeof(BlockNumber));
-	memset(dsm_heads, 0, (Size)nlist * sizeof(BlockNumber));
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_POSTING_HEADS, dsm_heads);
-
-	float *dsm_gmean = shm_toc_allocate(pcxt->toc, (Size)dim * sizeof(float));
-	memset(dsm_gmean, 0, (Size)dim * sizeof(float));
+	/* Page-backed routing region (filled by the leader before the tree-ready
+	 * barrier): the global mean. The posting-head base is a scalar in
+	 * MktBuildShared, so there is no O(nlist) head array here. */
+	float *dsm_gmean = shm_toc_allocate(pcxt->toc, (Size)vec_nbytes);
+	memset(dsm_gmean, 0, (Size)vec_nbytes);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, dsm_gmean);
-
-	/* Shared leaf-refinement accumulator, sized to the bounded tile capacity
-	 * (refine_tile_cap); the refine exec processes leaves in tiles of this
-	 * size, re-scanning the heap per tile. accum->nleaves carries the capacity
-	 * so the leader and workers derive the tile count identically. Only when
-	 * refining. */
-	if (refine_iters > 0)
-	{
-		Size acc_sz = mkt_dsm_refine_accum_size(refine_tile_cap, dim);
-		MktDsmRefineAccum *accum = shm_toc_allocate(pcxt->toc, acc_sz);
-		accum->nleaves			 = refine_tile_cap;
-		accum->dim				 = dim;
-		shm_toc_insert(pcxt->toc, MKT_DSM_KEY_REFINE_ACCUM, accum);
-	}
 
 	WalUsage *walusage = shm_toc_allocate(
 			pcxt->toc, mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -659,29 +698,27 @@ mkt_pbuild_setup_shared(
 		shm_toc_insert(pcxt->toc, MKT_DSM_KEY_QUERY_TEXT, sq);
 	}
 
-	lead->pcxt				  = pcxt;
-	lead->shared			  = shared;
-	lead->barrier			  = barrier;
-	lead->dsm_samples		  = dsm_samples;
-	lead->centroids_base	  = centroids_base;
-	lead->cents				  = cents;
-	lead->child_subtrees_base = child_subtrees_base;
-	lead->km_workers_base	  = km_workers_base;
-	lead->dsm_ra			  = dsm_ra;
-	lead->dsm_tree			  = dsm_tree;
-	lead->queues_base		  = NULL; /* sort-seam path: no shm_mq queues */
-	lead->dsm_partials		  = NULL; /* sort-seam path: no partials region */
-	lead->walusage			  = walusage;
-	lead->bufferusage		  = bufferusage;
-	lead->nparticipants		  = nparticipants;
-	lead->km_k				  = km_k;
-	lead->max_per_worker	  = max_per_worker;
-	lead->dim				  = dim;
-	lead->nlist				  = nlist;
-	lead->rabitq_seed		  = rabitq_seed;
-	lead->fan_out			  = fan_out;
-	lead->max_tree_sz		  = max_tree_sz;
-	lead->dsm_total			  = dsm_total;
+	lead->pcxt			  = pcxt;
+	lead->shared		  = shared;
+	lead->barrier		  = barrier;
+	lead->dsm_samples	  = dsm_samples;
+	lead->sample_seg	  = sample_seg;
+	lead->centroids_base  = centroids_base;
+	lead->cents			  = cents;
+	lead->km_workers_base = km_workers_base;
+	lead->dsm_ra		  = dsm_ra;
+	lead->queues_base	  = NULL; /* sort-seam path: no shm_mq queues */
+	lead->dsm_partials	  = NULL; /* sort-seam path: no partials region */
+	lead->walusage		  = walusage;
+	lead->bufferusage	  = bufferusage;
+	lead->nparticipants	  = nparticipants;
+	lead->km_k			  = km_k;
+	lead->max_per_worker  = max_per_worker;
+	lead->dim			  = dim;
+	lead->nlist			  = nlist;
+	lead->rabitq_seed	  = rabitq_seed;
+	lead->fan_out		  = fan_out;
+	lead->dsm_total		  = dsm_total;
 	return true;
 }
 
@@ -704,6 +741,81 @@ mkt_pbuild_worker_add_counts(
 	shared->soar_dupes += soar_dupes;
 	shared->reltuples += heap_tuples;
 	SpinLockRelease(&pg->mutex);
+}
+
+/*
+ * Sample-region seam (see parallel_build.h): the samples live in their own
+ * DSM segment; workers attach by the handle the leader published, and every
+ * participant detaches independently once the refine pass is done -- the
+ * last detach destroys the segment and returns the build's largest working
+ * set before the posting sort claims its budget.
+ */
+MktDsmSamples *
+mkt_pbuild_samples_attach(shm_toc *toc, MktBuildShared *shared, void **seg_out)
+{
+	MktBuildSharedPg *pg = (MktBuildSharedPg *)shared;
+
+	(void)toc;
+	dsm_segment *seg = dsm_attach(pg->sample_handle);
+	if (seg == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("could not attach to mktann sample segment")));
+	*seg_out = seg;
+	return (MktDsmSamples *)dsm_segment_address(seg);
+}
+
+void
+mkt_pbuild_samples_release(MktDsmSamples *samples, void *seg)
+{
+	(void)samples;
+	if (seg != NULL)
+		dsm_detach((dsm_segment *)seg);
+}
+
+/*
+ * Subtree-ring seam: the ring of nparticipants subtree slots lives in its
+ * own DSM segment, created by the leader only after root assignment -- the
+ * per-child sample counts known then bound the slot far below the analytic
+ * worst case. The handle travels in shared; every participant detaches when
+ * the streaming pass is done, and the last detach frees the memory.
+ */
+char *
+mkt_pbuild_subtree_ring_create(
+		MktBuildShared *shared,
+		int				nparticipants,
+		uint64_t		slot_size,
+		void		  **seg_out)
+{
+	MktBuildSharedPg *pg = (MktBuildSharedPg *)shared;
+
+	dsm_segment *seg = dsm_create(
+			mkt_dsm_child_subtrees_size(nparticipants, slot_size), 0);
+	pg->subtree_ring_handle	  = dsm_segment_handle(seg);
+	shared->subtree_slot_size = slot_size;
+	*seg_out				  = seg;
+	return (char *)dsm_segment_address(seg);
+}
+
+char *
+mkt_pbuild_subtree_ring_attach(MktBuildShared *shared, void **seg_out)
+{
+	MktBuildSharedPg *pg = (MktBuildSharedPg *)shared;
+
+	dsm_segment *seg = dsm_attach(pg->subtree_ring_handle);
+	if (seg == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("could not attach to mktann subtree segment")));
+	*seg_out = seg;
+	return (char *)dsm_segment_address(seg);
+}
+
+void
+mkt_pbuild_subtree_ring_release(void *seg)
+{
+	if (seg != NULL)
+		dsm_detach((dsm_segment *)seg);
 }
 
 /*

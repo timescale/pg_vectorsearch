@@ -46,6 +46,10 @@ typedef char	*Page;
 /* Alignment macros matching PostgreSQL (8-byte on 64-bit) */
 #define MAXALIGN(len) (((uintptr_t)(len) + 7) & ~(uintptr_t)7)
 
+/* Single-palloc ceiling, as in PG's memutils.h (mkt_alloc maps to malloc in
+ * standalone, but the shared build code sizes against one limit). */
+#define MaxAllocSize ((size_t)0x3fffffff)
+
 /* Page layout version — matches PostgreSQL 8.3+ */
 #define PG_PAGE_LAYOUT_VERSION 4
 

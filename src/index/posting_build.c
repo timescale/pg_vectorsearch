@@ -20,6 +20,7 @@
 #endif
 #endif
 
+#include "algo/distance.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
 #include "index/index_build.h"
@@ -56,10 +57,7 @@
  *   SECONDARY (SOAR + boundary) -> per-vector path in
  *     mkt_build_assign_vector: boundary via a wider tree beam
  *     (mkt_hkmeans_assign_topk), SOAR via a per-vector SIMD scan
- *     (mkt_find_soar_secondary). A batched all-centroid sgemm kernel
- *     (mkt_secondary_batch_*) existed for the old deferred posting
- *     callback and became dead when the cluster-keyed sort build
- *     replaced that path; it was removed along with it.
+ *     (mkt_find_soar_secondary).
  * ================================================================ */
 
 static void
@@ -272,25 +270,6 @@ mkt_posting_entry_encode_from_pt(
 	memcpy(p, enc_buf->bits, (size_t)((dim + 7) / 8));
 }
 
-/* Map a routed posting-head block back to its leaf index. posting_heads is
- * ascending (leaf c's head = first_posting + reserve.starts[c]), so binary
- * search. */
-static uint32_t
-route_head_to_leaf(
-		const BlockNumber *posting_heads, uint32_t nlist, BlockNumber head)
-{
-	uint32_t lo = 0, hi = nlist;
-	while (lo < hi)
-	{
-		uint32_t mid = lo + (hi - lo) / 2;
-		if (posting_heads[mid] < head)
-			lo = mid + 1;
-		else
-			hi = mid;
-	}
-	return lo;
-}
-
 void
 mkt_build_route_ctx_init(
 		MktBuildRouteCtx   *ctx,
@@ -298,8 +277,7 @@ mkt_build_route_ctx_init(
 		MktSorter		   *sorter,
 		const RaBitQParams *rq_params,
 		MktStorage		   *storage,
-		const BlockNumber  *posting_heads,
-		uint32_t			nlist,
+		BlockNumber			first_posting,
 		Dimension			dim,
 		double				soar_lambda,
 		double				boundary_epsilon)
@@ -308,8 +286,7 @@ mkt_build_route_ctx_init(
 	ctx->sorter			  = sorter;
 	ctx->rq_params		  = rq_params;
 	ctx->storage		  = storage;
-	ctx->posting_heads	  = posting_heads;
-	ctx->nlist			  = nlist;
+	ctx->first_posting	  = first_posting;
 	ctx->dim			  = dim;
 	ctx->soar_lambda	  = soar_lambda;
 	ctx->boundary_epsilon = boundary_epsilon;
@@ -362,9 +339,8 @@ mkt_build_route_emit(
 	 * from each head page -- the float encode reference). */
 	for (uint32_t i = 0; i < n; i++)
 	{
-		BlockNumber h = ctx->qs->beam_results[i].posting_head;
-		ctx->cand_leaf[i] =
-				route_head_to_leaf(ctx->posting_heads, ctx->nlist, h);
+		BlockNumber h	  = ctx->qs->beam_results[i].posting_head;
+		ctx->cand_leaf[i] = mkt_route_head_to_leaf(ctx->first_posting, h);
 		ctx->cand_dist[i] = ctx->qs->beam_results[i].distance;
 		Page hp			  = mkt_storage_read_page(ctx->storage, h);
 		memcpy(ctx->cand_pt + (size_t)i * dim,
@@ -541,26 +517,6 @@ flush_page(MktPostingBuilder *builder)
 		blkno = builder->fixed_first_blkno;
 		spage = mkt_storage_write_page(builder->storage, blkno);
 	}
-	else if (builder->shared_reserve_next != NULL)
-	{
-		uint32_t slot =
-				mkt_atomic_fetch_add_u32(builder->shared_reserve_next, 1);
-		if (slot < builder->reserve_count)
-		{
-			blkno = builder->reserve_start + slot;
-			spage = mkt_storage_write_page(builder->storage, blkno);
-		}
-		else
-		{
-			spage = mkt_storage_new_page(builder->storage, &blkno);
-		}
-	}
-	else if (builder->reserve_used < builder->reserve_count)
-	{
-		blkno = builder->reserve_start + builder->reserve_used;
-		builder->reserve_used++;
-		spage = mkt_storage_write_page(builder->storage, blkno);
-	}
 	else
 	{
 		spage = mkt_storage_new_page(builder->storage, &blkno);
@@ -617,9 +573,7 @@ builder_init_common(
 	builder->n_entries	= 0;
 	builder->page_ops	= ops;
 
-	builder->reserve_start		 = InvalidBlockNumber;
-	builder->shared_reserve_next = NULL;
-	builder->fixed_first_blkno	 = InvalidBlockNumber;
+	builder->fixed_first_blkno = InvalidBlockNumber;
 
 	mkt_posting_page_init(
 			builder->mem_page, cluster_id, dim, first_page_flags);
@@ -918,10 +872,8 @@ mkt_posting_builder_adopt_head(
 	builder->owns_head	= true;
 	builder->page_ops	= fastscan ? &fs_page_ops : &aos_page_ops;
 
-	builder->reserve_start		 = InvalidBlockNumber;
-	builder->shared_reserve_next = NULL;
-	builder->fixed_first_blkno	 = head_blk;
-	builder->adopted_head		 = true;
+	builder->fixed_first_blkno = head_blk;
+	builder->adopted_head	   = true;
 
 	/* Start from the pre-written head itself: it already carries the
 	 * cluster's header and pt_centroid. It must be empty — the pre-scan
@@ -991,22 +943,6 @@ mkt_posting_builder_init_continuation_fastscan(
 			 (size_t)MKT_FASTSCAN_GROUP * packed_bytes);
 	builder->fs.codes_buf  = mkt_alloc(MKT_FASTSCAN_GROUP_BYTES(dim));
 	builder->fs.max_groups = mkt_fastscan_max_groups(dim, false);
-}
-
-/* ----------------------------------------------------------------
- * Public API — add / finish / cleanup / reserve
- * ---------------------------------------------------------------- */
-
-void
-mkt_posting_builder_set_shared_reserve(
-		MktPostingBuilder *builder,
-		BlockNumber		   start,
-		uint32_t		   count,
-		mkt_atomic_uint32 *next)
-{
-	builder->reserve_start		 = start;
-	builder->reserve_count		 = count;
-	builder->shared_reserve_next = next;
 }
 
 void
@@ -1199,4 +1135,85 @@ mkt_flat_posting_builder_cleanup(MktFlatPostingBuilder *builder)
 		mkt_free(builder->enc_buf);
 		builder->enc_buf = NULL;
 	}
+}
+
+/* See posting_build.h: the route/filter/normalize half of the refine pass,
+ * shared verbatim by the serial and parallel builds. */
+const float *
+mkt_refine_route_row(
+		struct MktQueryState *qs,
+		BlockNumber			  first_posting,
+		const float			 *vec,
+		Dimension			  dim,
+		bool				  cosine,
+		float				 *scratch,
+		uint32_t			  tile_lo,
+		uint32_t			  tile_hi,
+		uint32_t			 *out_idx)
+{
+	uint32_t n =
+			mkt_query_route(qs, vec, 1, MKT_DISTANCE_MODE_ASYMMETRIC, NULL);
+	if (n == 0)
+		return NULL;
+
+	uint32_t leaf = mkt_route_head_to_leaf(
+			first_posting, qs->beam_results[0].posting_head);
+	if (leaf < tile_lo || leaf >= tile_hi)
+		return NULL;
+	*out_idx = leaf - tile_lo;
+
+	/* Cosine centroids are trained in normalized space, so the mean must
+	 * average the normalized vectors. */
+	if (cosine)
+	{
+		memcpy(scratch, vec, (size_t)dim * sizeof(float));
+		mkt_l2_normalize(scratch, dim);
+		return scratch;
+	}
+	return vec;
+}
+
+void
+mkt_refine_write_means(
+		const double   *sums,
+		const uint64_t *counts,
+		uint32_t		lo,
+		uint32_t		hi,
+		Dimension		dim,
+		float		   *scratch,
+		MktLeafWriteFn	write_head,
+		void		   *write_head_ctx)
+{
+	for (uint32_t l = lo; l < hi; l++)
+	{
+		if (counts[l - lo] == 0)
+			continue; /* keep the sample-trained head for an empty leaf */
+		const double *sum = sums + (size_t)(l - lo) * dim;
+		double		  inv = 1.0 / (double)counts[l - lo];
+		for (Dimension j = 0; j < dim; j++)
+			scratch[j] = (float)(sum[j] * inv);
+		write_head(write_head_ctx, l, scratch);
+	}
+}
+
+/* See posting_build.h: the one leaf-head writer both builds share. */
+void
+mkt_write_leaf_head(void *arg, uint32_t leaf, const float *centroid)
+{
+	MktHeadWriteCtx *h = (MktHeadWriteCtx *)arg;
+	mkt_rabitq_rotate(h->rq_params, centroid, h->pt);
+
+	MktPostingBuilder hb;
+	mkt_posting_builder_init_fmt(
+			&hb,
+			h->storage,
+			h->rq_params,
+			h->dim,
+			leaf,
+			centroid,
+			h->pt,
+			h->fastscan);
+	mkt_posting_builder_set_first_blkno(&hb, h->first_posting + leaf);
+	mkt_posting_builder_finish(&hb);
+	mkt_posting_builder_cleanup(&hb);
 }

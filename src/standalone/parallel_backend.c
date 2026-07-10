@@ -8,8 +8,12 @@
  * mirror of src/pg/parallel_backend.c: the shared state lives in a heap arena
  * instead of a DSM segment, workers run on the thread pool instead of
  * background processes, and the scan walks the in-memory vector array instead
- * of a heap relation. The leader still drains the workers' streamed pages over
- * the shm_mq shim exactly as in PG.
+ * of a heap relation. Memory bounding is deliberately out of scope here: the
+ * standalone engine holds its vectors, samples, and subtree blobs in RAM (it
+ * exists to isolate and benchmark the shared build logic), so the
+ * maintenance_work_mem-style budgets the PG back-end enforces have no
+ * standalone equivalent -- bounded-memory behavior (sample caps, spill,
+ * refine tiling) is exercised only through the PG build.
  */
 
 #ifdef MKT_STANDALONE
@@ -20,6 +24,7 @@
 #include <string.h>
 
 #include "algo/hkmeans.h"
+#include "core/log.h"
 #include "core/memory.h"
 #include "index/index_build.h" /* mkt_auto_fan_out */
 #include "index/parallel_build.h"
@@ -44,6 +49,9 @@ typedef struct MktBuildSharedStandalone
 	/* Leader's in-memory page store, published for phase-3 page-backed
 	 * routing; workers are threads so they share the pointer directly. */
 	MktStorage *storage;
+	/* Per-child subtree ring, allocated by the leader post-assign; workers
+	 * are threads and read the pointer directly. */
+	char *subtree_ring;
 } MktBuildSharedStandalone;
 
 /*
@@ -144,6 +152,83 @@ mkt_pbuild_teardown(ParallelContext *pcxt)
 }
 
 /*
+ * Leader-only subtree blob store (see parallel_build.h). Standalone is the
+ * in-memory engine, so the store is a growing byte buffer with a read
+ * cursor; the PG back-end spills through a BufFile temp file instead.
+ */
+struct MktBlobStore
+{
+	char	*data;
+	uint64_t size;
+	uint64_t cap;
+	uint64_t rpos;
+	/* The store outlives pass-scoped scratch contexts (the plan pass fills
+	 * it, the write pass drains it), so growth allocates in the context the
+	 * store was created in, not the caller's current one. */
+	MktMemCtx ctx;
+};
+
+MktBlobStore *
+mkt_pbuild_blobstore_begin(void)
+{
+	MktBlobStore *bs = mkt_alloc0(sizeof(MktBlobStore));
+	bs->ctx			 = mkt_current_memctx; /* the creating context */
+	return bs;
+}
+
+void
+mkt_pbuild_blobstore_put(MktBlobStore *bs, const void *blob, uint64_t size)
+{
+	uint64_t need = bs->size + sizeof(size) + size;
+	if (need > bs->cap)
+	{
+		uint64_t cap = bs->cap ? bs->cap : (uint64_t)1 << 20;
+		while (cap < need)
+			cap *= 2;
+		MktMemCtx old	= mkt_memctx_switch(bs->ctx);
+		char	 *grown = mkt_alloc(cap);
+		mkt_memctx_switch(old);
+		if (bs->data != NULL)
+		{
+			memcpy(grown, bs->data, bs->size);
+			mkt_free(bs->data);
+		}
+		bs->data = grown;
+		bs->cap	 = cap;
+	}
+	memcpy(bs->data + bs->size, &size, sizeof(size));
+	bs->size += sizeof(size);
+	memcpy(bs->data + bs->size, blob, size);
+	bs->size += size;
+}
+
+void
+mkt_pbuild_blobstore_rewind(MktBlobStore *bs)
+{
+	bs->rpos = 0;
+}
+
+uint64_t
+mkt_pbuild_blobstore_get(MktBlobStore *bs, void *buf, uint64_t max_size)
+{
+	uint64_t size;
+	memcpy(&size, bs->data + bs->rpos, sizeof(size));
+	bs->rpos += sizeof(size);
+	if (size > max_size)
+		mkt_error("subtree blob larger than its slot");
+	memcpy(buf, bs->data + bs->rpos, size);
+	bs->rpos += size;
+	return size;
+}
+
+void
+mkt_pbuild_blobstore_end(MktBlobStore *bs)
+{
+	mkt_free(bs->data);
+	mkt_free(bs);
+}
+
+/*
  * Launch the workers on the thread pool and wait until the whole party has
  * attached to the phase barrier. Returns false (after teardown) if none
  * started. The poll uses a 1ms latch timeout rather than a wakeup, since no
@@ -197,18 +282,14 @@ mkt_pbuild_setup_shared(
 		const MktBuildConfig *config,
 		int					  nworkers)
 {
-	Dimension dim			= config->dim;
-	uint32_t  nlist			= config->nlist;
-	int		  nparticipants = nworkers + 1;
-	uint64_t  rabitq_seed	= 42;
-	uint32_t  fan_out		= config->fan_out > 0 ? config->fan_out
-												  : mkt_auto_fan_out(0, nlist, 0);
-	uint32_t  km_k			= fan_out < nlist ? fan_out : nlist;
-
-	/* Per-child subtree blob slot: each root child's subtree targets
-	 * ~nlist/fan_out leaves; size the slot for that tree's worst case. */
-	uint32_t nlist_c   = (nlist + fan_out - 1) / fan_out;
-	uint64_t slot_size = mkt_hkmeans_max_blob_size(nlist_c, fan_out, dim);
+	Dimension  dim			 = config->dim;
+	uint32_t   nlist		 = config->nlist;
+	int		   nparticipants = nworkers + 1;
+	uint64_t   rabitq_seed	 = 42;
+	uint32_t   fan_out		 = config->fan_out > 0 ? config->fan_out
+												   : mkt_auto_fan_out(0, nlist, 0);
+	uint32_t   km_k			 = fan_out < nlist ? fan_out : nlist;
+	const Size vec_nbytes	 = (Size)dim * sizeof(float);
 
 	uint32_t total_samples = nlist * 256;
 	if (total_samples < 10000)
@@ -229,13 +310,10 @@ mkt_pbuild_setup_shared(
 	ParallelContext *pcxt = CreateParallelContext(
 			"meerkat", "mkt_parallel_build_main", nworkers);
 
-	int	 nw_usage	 = nworkers > 0 ? nworkers : 1;
-	Size usage_sz	 = (Size)nw_usage * sizeof(WalUsage);
-	Size bufuse_sz	 = (Size)nw_usage * sizeof(BufferUsage);
-	Size est_shared	 = BUFFERALIGN(sizeof(MktBuildSharedStandalone));
-	Size max_tree_sz = sizeof(HKMeansResult) +
-					   (Size)nlist * 2 * sizeof(HKMeansNode) +
-					   (Size)nlist * dim * sizeof(float) * 2;
+	int	 nw_usage	= nworkers > 0 ? nworkers : 1;
+	Size usage_sz	= (Size)nw_usage * sizeof(WalUsage);
+	Size bufuse_sz	= (Size)nw_usage * sizeof(BufferUsage);
+	Size est_shared = BUFFERALIGN(sizeof(MktBuildSharedStandalone));
 
 	shm_toc_estimate_chunk(&pcxt->estimator, est_shared);
 	shm_toc_estimate_chunk(&pcxt->estimator, sizeof(Barrier));
@@ -250,22 +328,17 @@ mkt_pbuild_setup_shared(
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
 			mkt_dsm_root_assign_size(nparticipants, max_per_worker));
-	shm_toc_estimate_chunk(&pcxt->estimator, max_tree_sz);
 	shm_toc_estimate_chunk(
 			&pcxt->estimator, mkt_pbuild_sort_shared_size(nparticipants));
-	shm_toc_estimate_chunk(
-			&pcxt->estimator, mkt_dsm_child_subtrees_size(fan_out, slot_size));
 	shm_toc_estimate_chunk(&pcxt->estimator, usage_sz);
 	shm_toc_estimate_chunk(&pcxt->estimator, bufuse_sz);
-	/* Page-backed routing regions (leader fills before the tree-ready
-	 * barrier). */
-	shm_toc_estimate_chunk(
-			&pcxt->estimator, (Size)nlist * sizeof(BlockNumber));
-	shm_toc_estimate_chunk(&pcxt->estimator, (Size)dim * sizeof(float));
+	/* Page-backed routing region (leader fills before the tree-ready barrier):
+	 * the global mean. The posting-head base is a scalar in MktBuildShared. */
+	shm_toc_estimate_chunk(&pcxt->estimator, vec_nbytes);
 	/* Keyed regions: shared, barrier, samples, centroids, km_workers,
-	 * root_assign, tree, sortshared, child_subtrees, posting_heads,
-	 * global_mean. */
-	shm_toc_estimate_keys(&pcxt->estimator, 11);
+	 * root_assign, sortshared, global_mean (the subtree ring is allocated
+	 * by the leader post-assign, outside the toc). */
+	shm_toc_estimate_keys(&pcxt->estimator, 8);
 
 	InitializeParallelDSM(pcxt);
 
@@ -281,7 +354,7 @@ mkt_pbuild_setup_shared(
 	shared->metric			  = config->metric;
 	shared->nlist			  = nlist;
 	shared->fan_out			  = fan_out; /* resolved (auto if config 0) */
-	shared->subtree_slot_size = slot_size;
+	shared->subtree_slot_size = 0; /* leader sizes the ring post-assign */
 	shared->soar_lambda		  = config->soar_lambda;
 	shared->boundary_epsilon  = config->boundary_epsilon;
 	shared->fastscan		  = config->fastscan;
@@ -295,7 +368,9 @@ mkt_pbuild_setup_shared(
 	shared->km_tolerance		   = 1e-4f;
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
-	shared->refine_iters = 0; /* standalone builds are not mem-bounded */
+	shared->refine_threshold	   = 0; /* standalone builds do not refine */
+	shared->refine				   = false;
+	shared->refine_tile_cap = 0; /* standalone builds are not mem-bounded */
 	/* Page-backed routing knobs: route the build scan for accuracy, not
 	 * query speed, matching the PG build (see MKT_BUILD_CENTROID_* in
 	 * posting_build.h). */
@@ -339,58 +414,42 @@ mkt_pbuild_setup_shared(
 	dsm_ra->max_per_worker = max_per_worker;
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_ROOT_ASSIGN, dsm_ra);
 
-	void *dsm_tree = shm_toc_allocate(pcxt->toc, max_tree_sz);
-	memset(dsm_tree, 0, max_tree_sz);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_TREE, dsm_tree);
-
 	/* Shared coordinator for the cluster-keyed posting sort (sort seam). */
 	Size  sort_sz	 = mkt_pbuild_sort_shared_size(nparticipants);
 	void *sortshared = shm_toc_allocate(pcxt->toc, sort_sz);
 	memset(sortshared, 0, sort_sz);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SORTSHARED, sortshared);
 
-	/* Per-child subtree blobs (phase 2c, work-partitioned). */
-	char *child_subtrees_base = shm_toc_allocate(
-			pcxt->toc, mkt_dsm_child_subtrees_size(fan_out, slot_size));
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CHILD_SUBTREES, child_subtrees_base);
-
-	/* Page-backed routing regions (leader fills before the tree-ready
-	 * barrier). */
-	BlockNumber *dsm_heads =
-			shm_toc_allocate(pcxt->toc, (Size)nlist * sizeof(BlockNumber));
-	memset(dsm_heads, 0, (Size)nlist * sizeof(BlockNumber));
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_POSTING_HEADS, dsm_heads);
-
-	float *dsm_gmean = shm_toc_allocate(pcxt->toc, (Size)dim * sizeof(float));
-	memset(dsm_gmean, 0, (Size)dim * sizeof(float));
+	/* Page-backed routing region (leader fills before the tree-ready barrier):
+	 * the global mean. The posting-head base is a scalar in MktBuildShared. */
+	float *dsm_gmean = shm_toc_allocate(pcxt->toc, vec_nbytes);
+	memset(dsm_gmean, 0, vec_nbytes);
 	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, dsm_gmean);
 
 	/* Dummy usage regions so the leader's instrumentation loop is safe. */
 	WalUsage	*walusage	 = shm_toc_allocate(pcxt->toc, usage_sz);
 	BufferUsage *bufferusage = shm_toc_allocate(pcxt->toc, bufuse_sz);
 
-	lead->pcxt				  = pcxt;
-	lead->shared			  = shared;
-	lead->barrier			  = barrier;
-	lead->dsm_samples		  = dsm_samples;
-	lead->centroids_base	  = centroids_base;
-	lead->cents				  = cents;
-	lead->km_workers_base	  = km_workers_base;
-	lead->dsm_ra			  = dsm_ra;
-	lead->dsm_tree			  = dsm_tree;
-	lead->queues_base		  = NULL; /* sort-seam path: no shm_mq queues */
-	lead->dsm_partials		  = NULL; /* sort-seam path: no partials region */
-	lead->child_subtrees_base = child_subtrees_base;
-	lead->walusage			  = walusage;
-	lead->bufferusage		  = bufferusage;
-	lead->nparticipants		  = nparticipants;
-	lead->km_k				  = km_k;
-	lead->max_per_worker	  = max_per_worker;
-	lead->dim				  = dim;
-	lead->nlist				  = nlist;
-	lead->rabitq_seed		  = rabitq_seed;
-	lead->fan_out			  = fan_out;
-	lead->max_tree_sz		  = max_tree_sz;
+	lead->pcxt			  = pcxt;
+	lead->shared		  = shared;
+	lead->barrier		  = barrier;
+	lead->dsm_samples	  = dsm_samples;
+	lead->sample_seg	  = NULL;
+	lead->centroids_base  = centroids_base;
+	lead->cents			  = cents;
+	lead->km_workers_base = km_workers_base;
+	lead->dsm_ra		  = dsm_ra;
+	lead->queues_base	  = NULL; /* sort-seam path: no shm_mq queues */
+	lead->dsm_partials	  = NULL; /* sort-seam path: no partials region */
+	lead->walusage		  = walusage;
+	lead->bufferusage	  = bufferusage;
+	lead->nparticipants	  = nparticipants;
+	lead->km_k			  = km_k;
+	lead->max_per_worker  = max_per_worker;
+	lead->dim			  = dim;
+	lead->nlist			  = nlist;
+	lead->rabitq_seed	  = rabitq_seed;
+	lead->fan_out		  = fan_out;
 	return true;
 }
 
@@ -398,6 +457,63 @@ mkt_pbuild_setup_shared(
  * Accumulate one worker's tuple counts under the mutex (the analog of PG's
  * spinlock in the derived shared struct).
  */
+/*
+ * Sample-region seam: standalone keeps the samples in the shared arena for
+ * the whole build (it does not bound memory), so attach is a plain lookup
+ * and release is a no-op.
+ */
+MktDsmSamples *
+mkt_pbuild_samples_attach(shm_toc *toc, MktBuildShared *shared, void **seg_out)
+{
+	(void)shared;
+	*seg_out = NULL;
+	return (MktDsmSamples *)shm_toc_lookup(toc, MKT_DSM_KEY_SAMPLES, false);
+}
+
+void
+mkt_pbuild_samples_release(MktDsmSamples *samples, void *seg)
+{
+	(void)samples;
+	(void)seg;
+}
+
+/*
+ * Subtree-ring seam (thread back-end): one heap allocation the leader makes
+ * after root assignment; workers share the pointer. Only the creator gets a
+ * non-NULL seg to free at release.
+ */
+char *
+mkt_pbuild_subtree_ring_create(
+		MktBuildShared *shared,
+		int				nparticipants,
+		uint64_t		slot_size,
+		void		  **seg_out)
+{
+	MktBuildSharedStandalone *sa = (MktBuildSharedStandalone *)shared;
+
+	sa->subtree_ring = mkt_alloc(
+			mkt_dsm_child_subtrees_size(nparticipants, slot_size));
+	shared->subtree_slot_size = slot_size;
+	*seg_out				  = sa->subtree_ring;
+	return sa->subtree_ring;
+}
+
+char *
+mkt_pbuild_subtree_ring_attach(MktBuildShared *shared, void **seg_out)
+{
+	MktBuildSharedStandalone *sa = (MktBuildSharedStandalone *)shared;
+
+	*seg_out = NULL;
+	return sa->subtree_ring;
+}
+
+void
+mkt_pbuild_subtree_ring_release(void *seg)
+{
+	if (seg != NULL)
+		mkt_free(seg);
+}
+
 void
 mkt_pbuild_worker_add_counts(
 		MktBuildShared *shared,
@@ -430,7 +546,7 @@ mkt_pbuild_rescan(Relation heap, MktBuildShared *shared)
 
 /*
  * Leaf-refinement accumulator lock seam. Standalone never refines
- * (refine_iters is always 0), so these are unused stubs to satisfy the link.
+ * (standalone never refines), so these are unused stubs to satisfy the link.
  */
 void
 mkt_pbuild_accum_lock(MktBuildShared *shared, uint32_t stripe)

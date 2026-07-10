@@ -72,13 +72,11 @@ typedef struct MktBuildAssignment
  * (0.25) instead yields beam_w = 2, far narrower than the k candidates the
  * descent must produce.
  *
- * ERROR_SCALE = 0 matches the query default and, empirically, main's
- * assignment recall: with a full-width beam the extra candidates a larger
- * error bound would keep do not change the leaf chosen. It must stay 0
- * here — a positive error_scale in the single-candidate refine route
- * (nprobe = 1) overflows the beam-search candidate buffer and corrupts the
- * build. (That buffer-sizing bug is orthogonal; the build has no need for
- * a wider bound.)
+ * ERROR_SCALE = 0 matches the query default; with a full-width beam the
+ * extra candidates a larger error bound would keep do not change the leaf
+ * chosen (measured: assignment recall is unchanged). It must stay 0 here —
+ * a positive error_scale in the single-candidate refine route (nprobe = 1)
+ * overflows the beam-search candidate buffer and corrupts the build.
  */
 #define MKT_BUILD_CENTROID_BEAM_SCALE  1.0f
 #define MKT_BUILD_CENTROID_ERROR_SCALE 0.0f
@@ -130,8 +128,7 @@ typedef struct MktBuildRouteCtx
 	MktSorter		   *sorter;		   /* cluster-keyed output (not owned) */
 	const RaBitQParams *rq_params;	   /* not owned */
 	MktStorage		   *storage;	   /* head-page reads (not owned) */
-	const BlockNumber  *posting_heads; /* [nlist], ascending (not owned) */
-	uint32_t			nlist;
+	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
 	Dimension			dim;
 	double				soar_lambda;
 	double				boundary_epsilon;
@@ -156,8 +153,7 @@ void mkt_build_route_ctx_init(
 		MktSorter		   *sorter,
 		const RaBitQParams *rq_params,
 		MktStorage		   *storage,
-		const BlockNumber  *posting_heads,
-		uint32_t			nlist,
+		BlockNumber			first_posting,
 		Dimension			dim,
 		double				soar_lambda,
 		double				boundary_epsilon);
@@ -168,6 +164,147 @@ void mkt_build_route_ctx_cleanup(MktBuildRouteCtx *ctx);
  * true when a secondary (SOAR / boundary) replica was also emitted. */
 bool mkt_build_route_emit(
 		MktBuildRouteCtx *ctx, const float *vec, ItemPointerData tid);
+
+/* Map a routed posting-head block back to its leaf index. Head blocks are the
+ * formula first_posting + leaf, so this is a subtraction. Shared by the
+ * route/encode path and the page-backed refine pass. */
+static inline uint32_t
+mkt_route_head_to_leaf(BlockNumber first_posting, BlockNumber head)
+{
+	return (uint32_t)(head - first_posting);
+}
+
+/*
+ * Shared refine kernels: the serial and parallel refine passes route,
+ * filter, and average identically -- only the accumulator ownership
+ * (private vs striped-locked DSM) differs, so that add stays with the
+ * caller.
+ *
+ * mkt_refine_route_row routes one row page-backed (k=1, exactly as the
+ * query and insert paths do), maps the head back to its leaf, and returns
+ * the vector to accumulate (the normalized copy in scratch for cosine) --
+ * or NULL when the row routed nowhere or outside [tile_lo, tile_hi).
+ * *out_idx is the tile-relative leaf index.
+ */
+const float *mkt_refine_route_row(
+		struct MktQueryState *qs,
+		BlockNumber			  first_posting,
+		const float			 *vec,
+		Dimension			  dim,
+		bool				  cosine,
+		float				 *scratch,
+		uint32_t			  tile_lo,
+		uint32_t			  tile_hi,
+		uint32_t			 *out_idx);
+
+/*
+ * Divide one tile's sums by their counts and hand each refined leaf mean to
+ * write_head (leaves with no routed rows keep their sample-trained head).
+ * scratch is a caller-owned [dim] float buffer.
+ */
+typedef void (*MktLeafWriteFn)(void *ctx, uint32_t leaf, const float *vec);
+
+/*
+ * Shared leaf-head writer: writes leaf's posting-list head page (at the
+ * formula-derived block first_posting + leaf) carrying pt_centroid =
+ * P^T * centroid -- the encode reference the scan reads. Used as the
+ * MktLeafWriteFn of both the streaming tree write and the refine pass, by
+ * the serial build and the parallel leader alike. pt is caller-owned [dim]
+ * scratch.
+ */
+typedef struct MktHeadWriteCtx
+{
+	MktStorage		   *storage;
+	const RaBitQParams *rq_params;
+	Dimension			dim;
+	bool				fastscan;
+	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
+	float			   *pt;			   /* [dim] scratch */
+} MktHeadWriteCtx;
+
+/* Stack-init/cleanup pair: allocates/frees the [dim] pt scratch. */
+static inline void
+mkt_head_write_ctx_init(
+		MktHeadWriteCtx	   *h,
+		MktStorage		   *storage,
+		const RaBitQParams *rq_params,
+		Dimension			dim,
+		bool				fastscan,
+		BlockNumber			first_posting)
+{
+	h->storage		 = storage;
+	h->rq_params	 = rq_params;
+	h->dim			 = dim;
+	h->fastscan		 = fastscan;
+	h->first_posting = first_posting;
+	h->pt			 = mkt_alloc((size_t)dim * sizeof(float));
+}
+
+static inline void
+mkt_head_write_ctx_cleanup(MktHeadWriteCtx *h)
+{
+	mkt_free(h->pt);
+}
+
+void mkt_write_leaf_head(void *arg, uint32_t leaf, const float *centroid);
+
+/*
+ * Build-time page-backed router base: the same MktIndexBase the query and
+ * insert paths build, so the build scan routes each row identically. Both
+ * back-ends must construct it the same way -- this is the one place. The
+ * caller owns pt_global_mean ([dim], filled with the rotated global mean)
+ * and frees it after mkt_query_state_cleanup.
+ */
+static inline void
+mkt_build_router_base_init(
+		MktIndexBase	 *base,
+		RaBitQParams	 *params,
+		MktStorage		 *storage,
+		Dimension		  dim,
+		uint8_t			  nlevels,
+		BlockNumber		  first_centroid,
+		DistanceMetric	  metric,
+		MktCentroidFormat centroid_format,
+		int				  fastscan_bits,
+		double			  error_scale,
+		double			  beam_scale,
+		uint32_t		  fan_out,
+		uint32_t		  nlist,
+		uint64_t		  rabitq_seed,
+		const float		 *global_mean,
+		float			 *pt_global_mean)
+{
+	memset(base, 0, sizeof(*base));
+	base->params		 = params;
+	base->pt_global_mean = pt_global_mean;
+	mkt_rabitq_rotate(params, global_mean, base->pt_global_mean);
+	base->rabitq_seed		   = rabitq_seed;
+	base->centroid_storage	   = storage;
+	base->posting_storage	   = storage;
+	base->page_base			   = NULL;
+	base->dim				   = dim;
+	base->nlevels			   = nlevels;
+	base->first_centroid	   = first_centroid;
+	base->metric			   = metric;
+	base->centroid_format	   = centroid_format;
+	base->fastscan			   = (centroid_format == MKT_CENTROID_FMT_FASTSCAN)
+									   ? fastscan_bits
+									   : 0;
+	base->centroid_error_scale = error_scale;
+	base->centroid_beam_scale  = beam_scale;
+	base->fan_out = (uint8_t)(fan_out <= UINT8_MAX ? fan_out : UINT8_MAX);
+	base->nlist	  = nlist;
+}
+
+void mkt_refine_write_means(
+		const double   *sums,
+		const uint64_t *counts,
+		uint32_t		lo,
+		uint32_t		hi,
+		Dimension		dim,
+		float		   *scratch,
+		MktLeafWriteFn	write_head,
+		void		   *write_head_ctx);
 
 /* ----------------------------------------------------------------
  * Page format ops — the only part that differs between formats
@@ -242,11 +379,7 @@ typedef struct MktPostingBuilder
 	 * restamped. */
 	bool adopted_head;
 
-	BlockNumber		   reserve_start;
-	uint32_t		   reserve_count;
-	uint32_t		   reserve_used;
-	mkt_atomic_uint32 *shared_reserve_next;
-	BlockNumber		   fixed_first_blkno;
+	BlockNumber fixed_first_blkno;
 
 	RaBitQData	 *enc_buf;
 	RaBitQScratch enc_scratch;
@@ -354,20 +487,8 @@ void mkt_posting_builder_init_continuation_fastscan(
 		const float		   *centroid);
 
 /*
- * Shared reserve: multiple builders (from different threads) for the
- * same cluster claim page slots atomically from a shared counter.
- * Falls back to storage->new_page() if the reserved range is exhausted.
- * Used by every build path (serial, parallel, standalone).
- */
-void mkt_posting_builder_set_shared_reserve(
-		MktPostingBuilder *builder,
-		BlockNumber		   start,
-		uint32_t		   count,
-		mkt_atomic_uint32 *next);
-
-/*
  * Pin the first page to a specific block number. The first flush
- * writes to this block; subsequent pages use the reserve or new_page.
+ * writes to this block; later pages are appended via new_page.
  */
 void mkt_posting_builder_set_first_blkno(
 		MktPostingBuilder *builder, BlockNumber blkno);

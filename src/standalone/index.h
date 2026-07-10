@@ -103,11 +103,11 @@ typedef struct MktIndex
 
 	/* Posting data for RaBitQ scan (flat or paged) */
 	MktPostingFormat posting_fmt;
-	BlockNumber		*posting_heads;	   /* paged mode: [nlist] head blocks */
-	char		   **flat_pages;	   /* flat mode: [nlist] buffers */
-	uint32_t		 max_cluster_size; /* largest cluster entry count */
-	bool			 has_posting_data;
-	bool			 has_replication;
+	BlockNumber first_posting;	  /* paged mode: cluster c's head = this + c */
+	char	  **flat_pages;		  /* flat mode: [nlist] buffers */
+	uint32_t	max_cluster_size; /* largest cluster entry count */
+	bool		has_posting_data;
+	bool		has_replication;
 
 	/* Per-cluster ID lists for brute-force fallback */
 	MktClusterList *clusters; /* [nlist] */

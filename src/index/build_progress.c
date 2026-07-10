@@ -23,7 +23,6 @@ static const char *const phase_names[] = {
 		[MKT_BUILD_PHASE_WAL]			= "WAL logging",
 		[MKT_BUILD_PHASE_SCAN_PARALLEL] = "scanning table (parallel)",
 		[MKT_BUILD_PHASE_SUBTREES]		= "clustering (subtrees)",
-		[MKT_BUILD_PHASE_GRAFT]			= "clustering (assembly)",
 		[MKT_BUILD_PHASE_REFINE]		= "refining centroids",
 };
 
