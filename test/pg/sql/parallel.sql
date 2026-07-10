@@ -251,6 +251,60 @@ RESET mkt.nprobe;
 RESET enable_seqscan;
 RESET max_parallel_workers;
 DROP INDEX line3_short;
+
+-- FASTSCAN centroids through the streaming writers, at the fastscan group
+-- boundary and one past it (32 and 33 leaves requested). The group math is
+-- computed independently by the plan pass and the page writers; a one-page
+-- disagreement would overrun the reserved range into the head region, so
+-- exactness at nprobe >= nlist is the gate. Serial and parallel.
+SET max_parallel_maintenance_workers = 2;
+SELECT exact_check('line3',
+                   '(v) WITH (centroid_compression = true, '
+                   'centroid_fastscan = true, nlist = 32, fan_out = 8)',
+                   '[0.5,0,0]') AS parallel_cfs_group_exact;
+SELECT exact_check('line3',
+                   '(v) WITH (centroid_compression = true, '
+                   'centroid_fastscan = true, nlist = 33, fan_out = 8)',
+                   '[0.5,0,0]') AS parallel_cfs_group1_exact;
+SET max_parallel_maintenance_workers = 0;
+SELECT exact_check('line3',
+                   '(v) WITH (centroid_compression = true, '
+                   'centroid_fastscan = true, nlist = 33, fan_out = 8)',
+                   '[0.5,0,0]') AS serial_cfs_group1_exact;
+
+-- Depth-3 tree through the parallel streaming build (subtrees with internal
+-- pages; the earlier parallel exactness gates build 1-2 levels). Includes
+-- the head bijection: every centroid leaf entry must point at exactly one
+-- posting head whose cluster id matches the formula (head = first_posting +
+-- cluster), and no head may be shared -- a wrong-head mapping degrades
+-- recall silently, passing the exactness gate.
+SET max_parallel_maintenance_workers = 2;
+SELECT exact_check('line3', '(v) WITH (nlist = 40, fan_out = 4)',
+                   '[0.5,0,0]') AS parallel_depth3_exact;
+CREATE INDEX line3_d3 ON line3 USING mktann (v)
+    WITH (nlist = 40, fan_out = 4);
+SELECT count(*) = count(DISTINCT child_blkno) AS d3_no_duplicate_children
+  FROM mkt_centroid_pages('line3_d3') WHERE NOT is_leaf;
+WITH leaves AS (
+    SELECT child_blkno FROM mkt_centroid_pages('line3_d3') WHERE is_leaf
+), heads AS (
+    SELECT blkno, cluster_id FROM mkt.posting_pages('line3_d3')
+    WHERE is_first
+)
+SELECT (SELECT count(*) FROM leaves) = (SELECT count(*) FROM heads)
+       AND NOT EXISTS (
+           SELECT 1 FROM leaves l LEFT JOIN heads h ON h.blkno = l.child_blkno
+           WHERE h.blkno IS NULL)
+       AND (SELECT count(DISTINCT blkno - cluster_id) FROM heads) = 1
+       AS d3_head_bijection;
+DROP INDEX line3_d3;
+
+-- Shortfall at depth 3: the largest-first batch schedule and the blob
+-- replay must agree under a narrowed participant count too.
+SET max_parallel_workers = 1;
+SELECT exact_check('line3', '(v) WITH (nlist = 40, fan_out = 4)',
+                   '[0.5,0,0]') AS shortfall_depth3_exact;
+RESET max_parallel_workers;
 DROP TABLE line3;
 
 -- 768-dim well-separated points (only the first coordinate varies). At
@@ -265,16 +319,103 @@ ALTER TABLE line768 SET (parallel_workers = 2);
 
 SET max_parallel_maintenance_workers = 2;
 SET maintenance_work_mem = '1MB';
-SET mkt.leaf_refine_iters = 0;
+SET mkt.leaf_refine_threshold = 0;
 SELECT exact_check('line768', '(v) WITH (centroid_compression = true)',
                    '[0.5' || repeat(',0', 767) || ']') AS bounded_norefine_exact;
-SET mkt.leaf_refine_iters = 2;
+SET mkt.leaf_refine_threshold = 100000;
 SELECT exact_check('line768', '(v) WITH (centroid_compression = true)',
                    '[0.5' || repeat(',0', 767) || ']') AS bounded_refine_exact;
-RESET mkt.leaf_refine_iters;
+RESET mkt.leaf_refine_threshold;
 RESET maintenance_work_mem;
 RESET max_parallel_maintenance_workers;
 DROP TABLE line768;
+
+-- ============================================================
+-- Serial refine + big subtree blobs (12k rows: the serial sample cap
+-- floors at 10000, so the build is genuinely subsampled)
+-- ============================================================
+CREATE TABLE line12k (id int, v vector(64));
+INSERT INTO line12k
+    SELECT g, (SELECT ('[' || string_agg((sin(g * 0.01 + j))::text, ',') ||
+                       ']')
+               FROM generate_series(1, 64) j)::vector(64)
+    FROM generate_series(1, 12000) g;
+ALTER TABLE line12k SET (parallel_workers = 2);
+
+-- Serial page-backed refine over a multi-level tree (the bounded exactness
+-- gates above are parallel and flat); with fastscan posting heads the
+-- refine rewrites fastscan head pages.
+SET max_parallel_maintenance_workers = 0;
+SET mkt.leaf_refine_threshold = 100000;
+-- The 1MB budget forces the sample cap to its 10000-vector floor, below the
+-- 12000 rows, so the build is genuinely subsampled and refine runs.
+SET maintenance_work_mem = '1MB';
+-- The probe mirrors mid-table row 6000's construction (sin(60 + j)) without
+-- reading line12k, so no scan is open on it while exact_check indexes it.
+SELECT exact_check('line12k', '(v) WITH (nlist = 48, fan_out = 4)',
+                   (SELECT '[' || string_agg((sin(60 + j))::text, ',') || ']'
+                    FROM generate_series(1, 64) j))
+    AS serial_refine_multilevel_exact;
+SELECT exact_check('line12k',
+                   '(v) WITH (nlist = 48, fan_out = 4, fastscan = true)',
+                   (SELECT '[' || string_agg((sin(60 + j))::text, ',') || ']'
+                    FROM generate_series(1, 64) j))
+    AS serial_refine_fastscan_exact;
+RESET maintenance_work_mem;
+RESET mkt.leaf_refine_threshold;
+
+-- Subtree blobs several times the BufFile buffer (nlist 64 / fan_out 8 at
+-- dim 64 gives ~multi-page blobs), so the leader's replay crosses buffer
+-- boundaries; a framing bug would stream a garbage subtree with no error.
+SET max_parallel_maintenance_workers = 2;
+SELECT exact_check('line12k', '(v) WITH (nlist = 64, fan_out = 8)',
+                   (SELECT '[' || string_agg((sin(60 + j))::text, ',') || ']'
+                    FROM generate_series(1, 64) j))
+    AS parallel_bigblob_exact;
+DROP TABLE line12k;
+
+-- ============================================================
+-- Degenerate data through the streaming build
+-- ============================================================
+-- One row, and all-identical rows: k-means collapses to mostly-empty
+-- clusters, exercising the empty-cluster compaction and a head region far
+-- smaller than the requested nlist. Serial and parallel.
+CREATE TABLE degen (id int, v vector(3));
+INSERT INTO degen VALUES (1, '[1,2,3]');
+CREATE INDEX degen_one ON degen USING mktann (v) WITH (nlist = 8);
+SET enable_seqscan = off;
+SELECT count(*) AS one_row FROM (
+    SELECT id FROM degen ORDER BY v <-> '[0,0,0]' LIMIT 10) t;
+RESET enable_seqscan;
+DROP INDEX degen_one;
+INSERT INTO degen SELECT g, '[1,2,3]' FROM generate_series(2, 100) g;
+ALTER TABLE degen SET (parallel_workers = 2);
+SET max_parallel_maintenance_workers = 2;
+CREATE INDEX degen_same ON degen USING mktann (v)
+    WITH (nlist = 12, fan_out = 4);
+SET enable_seqscan = off;
+SET mkt.nprobe = 10000;
+SET mkt.query_limit = 150;
+SELECT count(*) AS identical_rows FROM (
+    SELECT id FROM degen ORDER BY v <-> '[1,2,3]' LIMIT 150) t;
+RESET mkt.query_limit;
+RESET mkt.nprobe;
+RESET enable_seqscan;
+SET max_parallel_maintenance_workers = 0;
+DROP INDEX degen_same;
+CREATE INDEX degen_serial ON degen USING mktann (v)
+    WITH (nlist = 12, fan_out = 4);
+SET enable_seqscan = off;
+SET mkt.nprobe = 10000;
+SET mkt.query_limit = 150;
+SELECT count(*) AS identical_rows_serial FROM (
+    SELECT id FROM degen ORDER BY v <-> '[1,2,3]' LIMIT 150) t;
+RESET mkt.query_limit;
+RESET mkt.nprobe;
+RESET enable_seqscan;
+RESET max_parallel_maintenance_workers;
+DROP TABLE degen;
+
 DROP FUNCTION exact_check(text, text, text);
 
 -- ============================================================

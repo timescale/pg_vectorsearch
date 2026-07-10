@@ -151,34 +151,19 @@ uint32_t mkt_hkmeans_assign_topk(
 		Distance			*out_dists);
 
 /*
- * Graft per-child subtrees under a fresh root into one BFS-ordered tree.
- *
- * The parallel build splits the samples into fan_out groups with one root
- * k-means, then builds each group's subtree independently (and in parallel).
- * This assembles the final tree: a new level-0 root holding root_centroids
- * (fan_out children), with subtrees[c] grafted beneath child c — every
- * subtree node shifted down one level, re-indexed into global BFS order, and
- * its centroids/leaves copied into the packed result. All non-NULL subtrees
- * must share the same depth (they do when built with the same target nlist),
- * so the grafted tree has uniform leaf depth = subtree depth + 1.
- *
- * For depth-1 subtrees (a single flat split) this reduces to the two-level
- * tree; deeper subtrees yield 3+ level trees. Returns a single contiguous
- * allocation; caller frees with mkt_free().
- */
-HKMeansResult *mkt_hkmeans_graft(
-		const float				   *root_centroids,
-		uint32_t					fan_out,
-		const HKMeansResult *const *subtrees,
-		Dimension					dim);
-
-/*
  * Upper bound (bytes) on the contiguous size of a tree built for `nlist`
  * leaves with `fan_out`. Used to size the fixed per-subtree DSM slots the
  * parallel build's participants write their subtrees into.
  */
 size_t
 mkt_hkmeans_max_blob_size(uint32_t nlist, uint32_t fan_out, Dimension dim);
+
+/*
+ * Tree depth for `nlist` leaves at `fan_out` — the same value the tree build
+ * uses internally. Exposed so the streaming (page-backed) centroid-tree build
+ * can compute the level structure without materializing a tree.
+ */
+uint32_t mkt_hkmeans_nlevels(uint32_t nlist, uint32_t fan_out);
 
 /*
  * Build a one-level (flat) tree directly from pre-computed leaf centroids.

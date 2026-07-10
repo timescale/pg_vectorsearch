@@ -141,6 +141,8 @@ else
           '--load-extension=meerkat',
           'build_progress',
           'build_progress_phases',
+          'build_cancel',
+          'refine_gate',
           'insert_serialize',
         ],
         depends: [meerkat_ext_so],
