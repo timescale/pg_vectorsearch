@@ -70,8 +70,6 @@
  * Centroid data format (stored in low 2 bits of opaque->flags)
  * ---------------------------------------------------------------- */
 #define MKT_CENTROID_FMT_MASK ((uint8_t)0x03)
-#define MKT_CENTROID_OPAQUE_LEAF \
-	((uint8_t)0x04) /* page contains leaf entries */
 
 typedef enum MktCentroidFormat
 {
@@ -94,11 +92,10 @@ typedef enum MktCentroidFormat
 	 * Per-entry MktCentroidEntryMeta (4 B child_blkno + 4 B
 	 * child_count/flags) is replaced by the array-of-fields layout
 	 * above; child_count and per-entry flags are dropped because the
-	 * page-level MKT_CENTROID_OPAQUE_LEAF bit already tells the scan
-	 * whether children are posting heads vs. nested centroid pages,
-	 * and child_count is only used at build time. Final group may be
-	 * partial; unused slots have child_blkno = InvalidBlockNumber and
-	 * zero-padded codes.
+	 * scan already knows from its descent level whether children are
+	 * posting heads vs. nested centroid pages, and child_count is only
+	 * used at build time. Final group may be partial; unused slots
+	 * have child_blkno = InvalidBlockNumber and zero-padded codes.
 	 */
 	MKT_CENTROID_FMT_FASTSCAN = 3,
 } MktCentroidFormat;

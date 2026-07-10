@@ -104,7 +104,7 @@ InitializeParallelDSM(ParallelContext *pcxt)
 	/*
 	 * A non-NULL sentinel: PG sets seg to the DSM segment and the driver
 	 * treats NULL as "could not start". Standalone always starts, so seg just
-	 * has to be non-NULL (the shm_mq shim ignores it).
+	 * has to be non-NULL; nothing dereferences it.
 	 */
 	pcxt->seg = (dsm_segment *)pcxt;
 }

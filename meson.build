@@ -309,7 +309,6 @@ mkt_core_sources = files(
   'src/standalone/shm_toc.c',
   'src/standalone/parallel_scan.c',
   'src/standalone/latch.c',
-  'src/standalone/shm_mq.c',
   'src/standalone/parallel_ctx.c',
   'src/standalone/parallel_backend.c',
   'src/standalone/thread_pool.c',

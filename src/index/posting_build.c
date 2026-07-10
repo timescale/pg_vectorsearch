@@ -458,35 +458,12 @@ mkt_posting_entry_add(
 			builder, tid, f_add, f_rescale, f_error, (const uint8_t *)p);
 }
 
-uint32_t
-mkt_build_assign_primary(
-		const HKMeansResult	 *tree,
-		const float			 *vec,
-		const MktBuildParams *params,
-		float				 *enc_out,
-		Distance			 *out_dist)
-{
-	uint32_t best_c = mkt_hkmeans_assign(tree, vec, params->metric, out_dist);
-
-	if (params->metric == DISTANCE_COSINE)
-		normalize_vec(enc_out, vec, params->dim);
-	else
-		memcpy(enc_out, vec, (size_t)params->dim * sizeof(float));
-
-	return best_c;
-}
-
 /* ----------------------------------------------------------------
  * Shared helpers
  * ---------------------------------------------------------------- */
 
 /*
- * Flush the in-memory page.
- *
- * Deferred mode (storage == NULL): streams the full page to the page sink
- * (the leader writes it). No block numbers, no chain linking.
- *
- * Direct mode (storage != NULL): writes to storage and links
+ * Flush the in-memory page: write to storage and link
  * into the chain. Prefers reserved contiguous blocks.
  */
 static void
@@ -503,20 +480,6 @@ flush_page(MktPostingBuilder *builder)
 	 */
 	if (!builder->page_dirty && !builder->is_first)
 		return;
-
-	if (builder->storage == NULL)
-	{
-		/*
-		 * Deferred mode: stream the full page to the sink — the leader writes
-		 * it — for bounded memory.
-		 */
-		builder->page_sink(
-				builder->sink_ctx, builder->cluster_id, builder->mem_page);
-		builder->is_first = false;
-		builder->page_ops->reinit_page(builder);
-		builder->page_dirty = false;
-		return;
-	}
 
 	BlockNumber blkno;
 	Page		spage;
@@ -908,54 +871,6 @@ mkt_posting_builder_adopt_head(
 }
 
 void
-mkt_posting_builder_init_continuation(
-		MktPostingBuilder  *builder,
-		MktStorage		   *storage,
-		const RaBitQParams *params,
-		Dimension			dim,
-		uint32_t			cluster_id,
-		const float		   *centroid)
-{
-	builder_init_common(
-			builder,
-			storage,
-			params,
-			dim,
-			cluster_id,
-			centroid,
-			NULL,
-			&aos_page_ops,
-			MKT_POSTING_PAGE_OVERFLOW);
-}
-
-void
-mkt_posting_builder_init_continuation_fastscan(
-		MktPostingBuilder  *builder,
-		MktStorage		   *storage,
-		const RaBitQParams *params,
-		Dimension			dim,
-		uint32_t			cluster_id,
-		const float		   *centroid)
-{
-	builder_init_common(
-			builder,
-			storage,
-			params,
-			dim,
-			cluster_id,
-			centroid,
-			NULL,
-			&fs_page_ops,
-			MKT_POSTING_PAGE_OVERFLOW | MKT_POSTING_PAGE_FASTSCAN);
-
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
-	builder->fs.bits_buf  = mkt_alloc(
-			 (size_t)MKT_FASTSCAN_GROUP * packed_bytes);
-	builder->fs.codes_buf  = mkt_alloc(MKT_FASTSCAN_GROUP_BYTES(dim));
-	builder->fs.max_groups = mkt_fastscan_max_groups(dim, false);
-}
-
-void
 mkt_posting_builder_set_first_blkno(
 		MktPostingBuilder *builder, BlockNumber blkno)
 {
@@ -1033,13 +948,10 @@ mkt_posting_builder_finish(MktPostingBuilder *builder)
 	 * Stamp the head's per-cluster metadata from state the builder already
 	 * tracked, so the runtime insert path finds the chain tail in O(1) with no
 	 * walk. prev_blkno is the last page flushed (the chain tail) and n_entries
-	 * is the exact entry count. Skipped in deferred mode (storage == NULL),
-	 * where the parallel leader writes and stamps the head itself; for a head
-	 * builder that holds the whole chain (serial build, and the leader's head
-	 * builder when no continuations were streamed) these values are final.
+	 * is the exact entry count; for a head builder that holds the whole
+	 * chain these values are final.
 	 */
-	if (builder->owns_head && builder->storage != NULL &&
-		builder->head_blkno != InvalidBlockNumber)
+	if (builder->owns_head && builder->head_blkno != InvalidBlockNumber)
 	{
 		Page hp =
 				mkt_storage_write_page(builder->storage, builder->head_blkno);
@@ -1050,23 +962,6 @@ mkt_posting_builder_finish(MktPostingBuilder *builder)
 	}
 
 	return builder->head_blkno;
-}
-
-BlockNumber
-mkt_posting_builder_finish_partial(MktPostingBuilder *builder)
-{
-	builder->page_ops->finalize(builder);
-	return builder->head_blkno;
-}
-
-void
-mkt_posting_builder_set_page_sink(
-		MktPostingBuilder *builder,
-		void (*sink)(void *ctx, uint32_t cluster_id, const char *page),
-		void *sink_ctx)
-{
-	builder->page_sink = sink;
-	builder->sink_ctx  = sink_ctx;
 }
 
 void

@@ -200,7 +200,6 @@ mkt_build_report_planned_alloc(
 		MktBuildProgress *p,
 		uint64_t		  sample_bytes,
 		uint64_t		  centroid_tree_bytes,
-		uint64_t		  pt_centroids_bytes,
 		uint64_t		  dsm_total_bytes)
 {
 	(void)p;
@@ -210,12 +209,10 @@ mkt_build_report_planned_alloc(
 	 * pre-explained in the log even on a default-configured server. */
 	ereport(LOG,
 			(errmsg("mktann build: planned allocations — samples %.0f MB, "
-					"centroid tree ~%.0f MB, pt_centroids %.0f MB, DSM %.0f "
-					"MB "
+					"centroid tree ~%.0f MB, DSM %.0f MB "
 					"(maintenance_work_mem %d kB)",
 					(double)sample_bytes / mb,
 					(double)centroid_tree_bytes / mb,
-					(double)pt_centroids_bytes / mb,
 					(double)dsm_total_bytes / mb,
 					maintenance_work_mem),
 			 errhidestmt(true)));

@@ -97,7 +97,6 @@ void mkt_build_report_planned_alloc(
 		MktBuildProgress *p,
 		uint64_t		  sample_bytes,
 		uint64_t		  centroid_tree_bytes,
-		uint64_t		  pt_centroids_bytes,
 		uint64_t		  dsm_total_bytes);
 
 /* Terminal: flush the last phase's timing and emit the final summary. */
