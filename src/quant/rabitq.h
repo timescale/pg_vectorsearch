@@ -32,6 +32,14 @@
 #define MKT_RABITQ_EPSILON 1.9f
 
 /*
+ * Rotation seed for every index build. The rotation matrix is derived from
+ * the seed at decode time too, so every site that creates build-time RaBitQ
+ * params MUST use this seed: an index encoded under one seed and read under
+ * another decodes garbage with no error.
+ */
+#define MKT_RABITQ_BUILD_SEED UINT64_C(42)
+
+/*
  * RaBitQVector - Quantized vector (PostgreSQL varlena-compatible)
  *
  * Stores D bits packed into ceil(D/8) bytes, plus two float factors
