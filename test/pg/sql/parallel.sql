@@ -350,14 +350,17 @@ SET mkt.leaf_refine_threshold = 100000;
 -- The 1MB budget forces the sample cap to its 10000-vector floor, below the
 -- 12000 rows, so the build is genuinely subsampled and refine runs.
 SET maintenance_work_mem = '1MB';
--- Materialize the probe first: a scalar subquery on line12k would hold a
--- scan open while exact_check creates an index on it.
-SELECT v::text AS probe12k FROM line12k WHERE id = 6000 \gset
+-- The probe mirrors mid-table row 6000's construction (sin(60 + j)) without
+-- reading line12k, so no scan is open on it while exact_check indexes it.
 SELECT exact_check('line12k', '(v) WITH (nlist = 48, fan_out = 4)',
-                   :'probe12k') AS serial_refine_multilevel_exact;
+                   (SELECT '[' || string_agg((sin(60 + j))::text, ',') || ']'
+                    FROM generate_series(1, 64) j))
+    AS serial_refine_multilevel_exact;
 SELECT exact_check('line12k',
                    '(v) WITH (nlist = 48, fan_out = 4, fastscan = true)',
-                   :'probe12k') AS serial_refine_fastscan_exact;
+                   (SELECT '[' || string_agg((sin(60 + j))::text, ',') || ']'
+                    FROM generate_series(1, 64) j))
+    AS serial_refine_fastscan_exact;
 RESET maintenance_work_mem;
 RESET mkt.leaf_refine_threshold;
 
@@ -366,7 +369,9 @@ RESET mkt.leaf_refine_threshold;
 -- boundaries; a framing bug would stream a garbage subtree with no error.
 SET max_parallel_maintenance_workers = 2;
 SELECT exact_check('line12k', '(v) WITH (nlist = 64, fan_out = 8)',
-                   :'probe12k') AS parallel_bigblob_exact;
+                   (SELECT '[' || string_agg((sin(60 + j))::text, ',') || ']'
+                    FROM generate_series(1, 64) j))
+    AS parallel_bigblob_exact;
 DROP TABLE line12k;
 
 -- ============================================================
