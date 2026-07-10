@@ -300,7 +300,7 @@ verify_head_meta(MktTestResult *result, MktIndex *idx)
 	MktStorage *st = idx->base.posting_storage;
 	for (uint32_t c = 0; c < idx->nlist; c++)
 	{
-		BlockNumber head = idx->posting_heads[c];
+		BlockNumber head = idx->first_posting + c;
 		if (head == InvalidBlockNumber)
 			continue;
 
@@ -383,6 +383,69 @@ TEST(query_exec_recall_pages_parallel)
 
 	double recall = (double)total_hits / (nqueries * k);
 	ASSERT_TRUE(recall > 0.2, "paged parallel recall should be > 0.2");
+
+	mkt_query_ctx_destroy(qctx);
+	mkt_index_destroy(idx);
+}
+
+TEST(query_exec_recall_pages_parallel_depth3)
+{
+	/* Depth-3 streamed tree through the driver (explicit fan_out; the auto
+	 * sqrt fan_out never exceeds two levels at test scale): batched subtree
+	 * ring across several batches, blob replay, formula heads. */
+	uint32_t dim = 32, nvecs = 2000, k = 10;
+	float	*vecs = make_vectors(nvecs, dim, 42);
+
+	MktIndexConfig config = {
+			.nlist		   = 40,
+			.fan_out	   = 4,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = MKT_POSTING_FMT_PAGES,
+			.nworkers	   = 2,
+	};
+
+	MktIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "paged parallel depth-3 build should succeed");
+
+	verify_head_meta(result, idx);
+
+	MktQueryCtx *qctx = mkt_query_ctx_create(idx, k, 40);
+
+	uint32_t total_hits = 0;
+	uint32_t nqueries	= 10;
+	for (uint32_t q = 0; q < nqueries; q++)
+	{
+		const float *query = vecs + (size_t)(q * 100) * dim;
+
+		uint32_t result_ids[10];
+		uint32_t count = mkt_query_exec(
+				qctx,
+				query,
+				k,
+				40,
+				MKT_DISTANCE_MODE_ASYMMETRIC,
+				true,
+				result_ids);
+
+		uint32_t truth[10];
+		brute_force_knn(vecs, nvecs, dim, query, k, truth);
+		for (uint32_t i = 0; i < count; i++)
+			for (uint32_t j = 0; j < k; j++)
+				if (result_ids[i] == truth[j])
+				{
+					total_hits++;
+					break;
+				}
+	}
+	/* This asserts pipeline correctness, not search quality: a framing or
+	 * replay bug streams a garbage subtree and collapses recall to near
+	 * zero, while a healthy build lands in 0.84-0.91 (the parallel build is
+	 * not bit-reproducible -- work-stealing scan order varies the k-means
+	 * seeding -- so the exact value moves run to run). */
+	double recall = (double)total_hits / (nqueries * k);
+	ASSERT_TRUE(recall > 0.75, "depth-3 paged recall at full probe");
 
 	mkt_query_ctx_destroy(qctx);
 	mkt_index_destroy(idx);
@@ -526,12 +589,11 @@ TEST(posting_convert_aos_to_fastscan)
 	MktIndex *idx = mkt_index_build(&array_src.base, &cfg, NULL);
 	ASSERT_NOT_NULL(idx, "AoS index built");
 	ASSERT_TRUE(
-			idx->posting_heads[0] != InvalidBlockNumber,
-			"cluster 0 has pages");
+			idx->first_posting != InvalidBlockNumber, "cluster 0 has pages");
 
 	/* Count AoS entries for cluster 0 */
 	uint32_t	aos_count = 0;
-	BlockNumber blkno	  = idx->posting_heads[0];
+	BlockNumber blkno	  = idx->first_posting;
 	while (blkno != InvalidBlockNumber)
 	{
 		Page page = idx->posting_storage.pages + (size_t)blkno * BLCKSZ;
@@ -543,7 +605,7 @@ TEST(posting_convert_aos_to_fastscan)
 
 	/* Convert cluster 0 to fastscan */
 	BlockNumber fs_head = mkt_posting_convert_to_fastscan(
-			&idx->posting_storage.base, idx->posting_heads[0], dim);
+			&idx->posting_storage.base, idx->first_posting, dim);
 	ASSERT_TRUE(fs_head != InvalidBlockNumber, "fastscan chain created");
 
 	/* Count fastscan entries */
@@ -718,7 +780,7 @@ count_posting_entries(MktIndex *idx)
 
 	for (uint32_t c = 0; c < idx->nlist; c++)
 	{
-		BlockNumber blk = idx->posting_heads[c];
+		BlockNumber blk = idx->first_posting + c;
 		while (blk != InvalidBlockNumber)
 		{
 			Page		pg	 = mkt_storage_read_page(st, blk);

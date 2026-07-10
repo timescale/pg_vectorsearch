@@ -44,6 +44,7 @@ unit_test_sources = files(
   'test_soar.c',
   'test_sortseam.c',
   'test_standalone.c',
+  'test_stream_build.c',
   'test_thread_pool.c',
   'test_topk.c',
   'test_vecops.c',
