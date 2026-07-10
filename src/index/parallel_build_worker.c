@@ -36,6 +36,7 @@
 #include "algo/vecops.h"
 #include "core/log.h"
 #include "core/memory.h"
+#include "index/build_progress.h"
 #include "index/parallel_build.h"
 #include "index/posting_build.h"
 #include "quant/rabitq.h"
@@ -56,6 +57,11 @@ mkt_sample_cb(void *state, ItemPointerData tid, const float *vec)
 	(void)tid;
 
 	sc->seen++;
+	/* The sampling pass walks the whole heap; surface that in the progress
+	 * view in coarse batches (the leader publishes exact counts at phase
+	 * boundaries). */
+	if ((sc->seen & 1023) == 0)
+		mkt_build_progress_incr_tuples(1024);
 
 	/* Stride-based subsampling */
 	if (sc->stride_counter > 0)
@@ -375,6 +381,11 @@ mkt_pbuild_exec_sampling(
 
 	mkt_dsm_sample_counts(dsm_samples)[participant_id] = sc.count;
 	mkt_dsm_sample_seen(dsm_samples)[participant_id]   = sc.seen;
+
+	/* Flush the sub-batch remainder so the participant's contribution to
+	 * the progress view is exact (and so every participant makes at least
+	 * one flush per scan, whatever share the work-stealing gave it). */
+	mkt_build_progress_incr_tuples((int64_t)(sc.seen & 1023));
 
 	/* Barrier: all participants done sampling. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
@@ -726,7 +737,11 @@ mkt_pbuild_exec_refine_paged(
 static void
 route_scan_cb(void *state, ItemPointerData tid, const float *vec)
 {
-	mkt_build_route_emit((MktBuildRouteCtx *)state, vec, tid);
+	MktBuildRouteCtx *ctx = (MktBuildRouteCtx *)state;
+
+	mkt_build_route_emit(ctx, vec, tid);
+	if (((uint64_t)ctx->indtuples & 1023) == 0)
+		mkt_build_progress_incr_tuples(1024);
 }
 
 /* ----------------------------------------------------------------
@@ -941,6 +956,10 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			false,
 			route_scan_cb,
 			&route);
+
+	/* Sub-batch progress remainder, as in the sampling scan. */
+	mkt_build_progress_incr_tuples(
+			(int64_t)((uint64_t)route.indtuples & 1023));
 
 	mkt_pbuild_sort_performsort(sorter);
 

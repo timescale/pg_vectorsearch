@@ -87,6 +87,15 @@ void mkt_build_report_phase(MktBuildProgress *p, int phase);
 /* Update the current scan phase's progress (publishes TUPLES_TOTAL once). */
 void mkt_build_report_progress(MktBuildProgress *p, double done);
 
+/*
+ * Batched mid-scan advance of the tuples-done counter, callable from any
+ * participant: a parallel worker's increment piggybacks to the leader over
+ * the parallel message queue and is applied even while the leader blocks at
+ * a barrier. The leader still publishes the exact final count when a scan
+ * finishes; these keep the view moving while it runs.
+ */
+void mkt_build_progress_incr_tuples(int64_t n);
+
 /* Record the committed DSM size (parallel) so per-phase memory lines can add
  * it. */
 void mkt_build_report_dsm_bytes(MktBuildProgress *p, uint64_t dsm_bytes);

@@ -67,6 +67,12 @@ mkt_build_report_phase(MktBuildProgress *p, int phase)
 }
 
 void
+mkt_build_progress_incr_tuples(int64_t n)
+{
+	(void)n;
+}
+
+void
 mkt_build_report_progress(MktBuildProgress *p, double done)
 {
 	(void)p;

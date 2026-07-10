@@ -172,9 +172,38 @@ mkt_build_report_phase(MktBuildProgress *p, int phase)
 	p->phase_start_ns = now_ns();
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE, phase);
 
+	/* Each scan-shaped phase walks the heap from the start, so its
+	 * tuples-done count restarts; the phases in between leave the previous
+	 * scan's final count standing. */
+	if (phase == MKT_BUILD_PHASE_SAMPLE || phase == MKT_BUILD_PHASE_SCAN ||
+		phase == MKT_BUILD_PHASE_SCAN_PARALLEL)
+		pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
+
 	const char *ip = injection_name_for_phase(phase);
 	if (ip != NULL)
 		INJECTION_POINT(ip, NULL);
+}
+
+void
+mkt_build_progress_incr_tuples(int64_t n)
+{
+	/* From a worker this piggybacks over the parallel message queue and the
+	 * leader applies it (also while blocked at a barrier -- interrupt
+	 * processing runs inside its condition-variable sleeps); in the leader
+	 * it applies directly. */
+	pgstat_progress_parallel_incr_param(PROGRESS_CREATEIDX_TUPLES_DONE, n);
+
+	/* Test hook: lets an isolation test pause a build at its first
+	 * mid-scan progress flush and observe the advanced counter. Fires once
+	 * per backend so waking the build once suffices. */
+#ifdef USE_INJECTION_POINTS
+	static bool fired = false;
+	if (!fired)
+	{
+		fired = true;
+		INJECTION_POINT("mktann-scan-progress", NULL);
+	}
+#endif
 }
 
 void
