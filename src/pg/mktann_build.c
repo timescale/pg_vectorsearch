@@ -1051,7 +1051,8 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 		 *
 		 * nlist and fan_out are already resolved (resolve_build_params).
 		 */
-		uint32_t max_nlist = mkt_max_nlist(p->nlist, p->fan_out);
+		uint32_t requested_nlist = p->nlist;
+		uint32_t max_nlist		 = mkt_max_nlist(p->nlist, p->fan_out);
 
 		bs.params.nlist = max_nlist;
 
@@ -1094,6 +1095,13 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 		if (did_parallel && built_nlist > 0)
 			bs.params.nlist = built_nlist;
+		else if (!did_parallel)
+		{
+			/* The worst-case bound exists only to size the parallel DSM
+			 * regions. The serial fallback clusters from scratch, so it must
+			 * target the requested partition count, not the sizing bound. */
+			bs.params.nlist = requested_nlist;
+		}
 	}
 
 	if (!did_parallel)
