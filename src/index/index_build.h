@@ -53,9 +53,152 @@ struct MktBlobStore;
 #include "algo/hkmeans.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
+#include "index/centroid_search.h" /* MktExactInternalCentroids */
 #include "index/storage.h"
 #include "mkt_types.h"
 #include "quant/rabitq.h"
+
+/* ----------------------------------------------------------------
+ * Exact internal-centroid collection (build-time routing accuracy)
+ *
+ * While the centroid tree streams to pages, the writer collects every
+ * INTERNAL node's float centroids — the exact values the pages' RaBitQ
+ * codes were encoded from — keyed by (page, entry). The build descent
+ * then scores the internal levels exactly through the
+ * MktCentroidSearchState.exact_internal hook instead of the 1-bit
+ * estimates; the leaf level keeps the estimates and is exact-re-ranked
+ * per row via the head pages' full-precision pt_centroids.
+ *
+ * Addressing: internal and leaf-parent pages interleave in the centroid
+ * region (the serial write is post-order, the parallel write packs per
+ * subtree), so a single flat formula over the region would also carry
+ * the — vastly more numerous — leaf entries. Instead a per-page offset
+ * array maps each region page to the first slot of a dense
+ * internal-entry array (MKT_EXACT_INTERNAL_NONE for leaf-parent pages).
+ * Within a node, entry e lands on page e / stride at page index
+ * e % stride, where stride is the format's fixed page capacity
+ * (mkt_centroid_max_entries_fmt) — the exact packing every centroid
+ * writer uses, and each node starts on a fresh reserved page.
+ *
+ * Size: internal entries number nnodes - 1 (every non-root node is one
+ * parent entry), ~nlist / fan_out — a few thousand × dim floats even at
+ * very large nlist.
+ * ---------------------------------------------------------------- */
+typedef struct MktExactCentroidCollector
+{
+	Dimension	dim;
+	BlockNumber base;	  /* first block of the centroid-page region */
+	uint32_t	npages;	  /* region length in pages */
+	uint32_t	stride;	  /* entries per full page for the format */
+	uint32_t   *page_off; /* [npages] first slot per page (or NONE) */
+	float	   *cents;	  /* [cap * dim] collected centroids */
+	uint32_t	nslots;
+	uint32_t	cap;
+	/* Collection budget: when the packed centroids would exceed it the
+	 * collector latches overflowed, releases its arrays, and the
+	 * collection/view degrade to empty — the build descent falls back to
+	 * estimate-scored internal levels instead of allocating unbounded
+	 * memory under adversarial nlist/fan_out configurations. */
+	uint64_t max_bytes;
+	bool	 overflowed;
+	/* Dedicated context owning page_off and cents, created at init as
+	 * a child of the caller's (build-scoped) current context. add_node
+	 * grows cents during tree streaming, which runs inside a
+	 * pass-scoped scratch context that dies before the collector's
+	 * consumers (the build's encode scan and refine pass), so every
+	 * collector allocation goes to this context — and cleanup is a
+	 * single context delete, so nothing can dangle or double-free. */
+	MktMemCtx ctx;
+} MktExactCentroidCollector;
+
+/*
+ * Whether a build collects exact internal centroids: only multi-level
+ * trees have internal levels to score, and only the estimated centroid
+ * formats gain anything (FLOAT/HALF descents already score exactly).
+ * Shared by the serial and parallel builds so the two cannot drift.
+ */
+static inline bool
+mkt_exact_centroid_enabled(uint32_t nlevels, MktCentroidFormat fmt)
+{
+	return nlevels >= 2 && (fmt == MKT_CENTROID_FMT_RABITQ ||
+							fmt == MKT_CENTROID_FMT_FASTSCAN);
+}
+
+/*
+ * Collection budget from the build's memory budget (KB): an eighth —
+ * the collection is small (~nlist / fan_out centroids) next to the
+ * sort buffers, so the fraction only matters as a cap under
+ * adversarial nlist/fan_out. 0 (standalone default) means unbounded.
+ */
+static inline uint64_t
+mkt_exact_centroid_budget(uint64_t work_mem_kb)
+{
+	return work_mem_kb > 0 ? work_mem_kb * 1024 / 8 : UINT64_MAX;
+}
+
+/*
+ * Estimated collection size for a planned tree shape: the collected
+ * slots are every non-root node, a geometric series over the levels
+ * that sums to roughly nlist / (fan_out - 1), off only by per-level
+ * rounding. Known from the build parameters alone, so an under-budget
+ * configuration can be reported at build start and the collector can
+ * pre-size its array; the collector still enforces the budget against
+ * the real size at collection time.
+ */
+static inline uint64_t
+mkt_exact_centroid_expected_slots(uint64_t nlist, uint32_t fan_out)
+{
+	return (fan_out > 1) ? nlist / (fan_out - 1) + 1 : nlist;
+}
+
+static inline uint64_t
+mkt_exact_centroid_expected_bytes(
+		uint64_t nlist, uint32_t fan_out, Dimension dim)
+{
+	return mkt_exact_centroid_expected_slots(nlist, fan_out) * dim *
+		   sizeof(float);
+}
+
+/* expected_slots pre-sizes the centroid array (0 = small default);
+ * pass mkt_exact_centroid_expected_slots for the planned shape so
+ * growth is a rounding case, not the normal path. */
+void mkt_exact_centroid_collector_init(
+		MktExactCentroidCollector *c,
+		Dimension				   dim,
+		MktCentroidFormat		   fmt,
+		BlockNumber				   base,
+		uint32_t				   npages,
+		uint64_t				   max_bytes,
+		uint64_t				   expected_slots);
+
+/* Collect one internal node's centroids, written at first_blk. */
+void mkt_exact_centroid_collector_add_node(
+		MktExactCentroidCollector *c,
+		BlockNumber				   first_blk,
+		const float				  *cents,
+		uint32_t				   n);
+
+void mkt_exact_centroid_collector_cleanup(MktExactCentroidCollector *c);
+
+/* View straight over the collector's arrays (same-process use). */
+void mkt_exact_centroid_view(
+		const MktExactCentroidCollector *c, MktExactInternalCentroids *view);
+
+/*
+ * Collection (de)serialization: the collector's sealed output, in the
+ * transport format described in index_build.c, for publishing to the
+ * parallel workers through the back-end seam (DSM segment / shared
+ * allocation). A NULL collector yields a valid empty collection whose
+ * view never matches any page (the hook stays inert) — used when
+ * collection is off, e.g. for exact centroid formats (FLOAT/HALF
+ * score exactly already).
+ */
+uint64_t
+	 mkt_exact_centroid_collection_size(const MktExactCentroidCollector *c);
+void mkt_exact_centroid_collection_write(
+		const MktExactCentroidCollector *c, void *collection);
+void mkt_exact_centroid_collection_view(
+		const void *collection, MktExactInternalCentroids *view);
 
 /* ----------------------------------------------------------------
  * Build statistics — shared between standalone and PG builds
@@ -119,19 +262,21 @@ BlockNumber mkt_compute_centroid_layout(
 /*
  * pt_centroids: optional P^T * centroid array [nlist * dim] for leaf
  * entries, stored alongside routing data. NULL to skip.
+ * collector: optional exact internal-centroid collection (NULL to skip).
  */
 void mkt_write_centroid_tree(
-		MktStorage			*storage,
-		const HKMeansResult *tree,
-		Dimension			 dim,
-		uint32_t			 fan_out,
-		uint8_t				 level_offset,
-		MktCentroidFormat	 centroid_format,
-		const RaBitQParams	*rq_params,
-		const float			*global_mean,
-		BlockNumber			 posting_base,
-		const BlockNumber	*node_first_blkno,
-		const float			*pt_centroids);
+		MktStorage				  *storage,
+		const HKMeansResult		  *tree,
+		Dimension				   dim,
+		uint32_t				   fan_out,
+		uint8_t					   level_offset,
+		MktCentroidFormat		   centroid_format,
+		const RaBitQParams		  *rq_params,
+		const float				  *global_mean,
+		BlockNumber				   posting_base,
+		const BlockNumber		  *node_first_blkno,
+		const float				  *pt_centroids,
+		MktExactCentroidCollector *collector);
 
 /* ----------------------------------------------------------------
  * Streaming (page-backed) centroid-tree build
@@ -164,7 +309,9 @@ void mkt_write_centroid_tree(
 /*
  * Write one tree node's centroid page(s) in the node's format (fastscan or
  * encoder-based). child_count is the non-leaf entries' child capacity;
- * pass 0 for leaf-parent nodes.
+ * pass 0 for leaf-parent nodes. collector (optional, may be NULL) receives
+ * the node's exact float centroids when the node is internal (no
+ * MKT_CENTROID_FLAG_LEAF in flags).
  */
 void mkt_centroid_write_node(
 		MktStorage				  *storage,
@@ -179,7 +326,8 @@ void mkt_centroid_write_node(
 		const float				  *global_mean,
 		const BlockNumber		  *child_blks,
 		const float				  *leaf_pt,
-		BlockNumber				   blkno);
+		BlockNumber				   blkno,
+		MktExactCentroidCollector *collector);
 
 typedef struct MktStreamTreePlan
 {
@@ -246,20 +394,21 @@ typedef void (*MktStreamLeafCb)(
  * failure.
  */
 BlockNumber mkt_routing_tree_write(
-		MktStorage			*storage,
-		uint32_t			 nvecs,
-		Dimension			 dim,
-		DistanceMetric		 metric,
-		uint32_t			 nlist,
-		uint32_t			 fan_out,
-		MktCentroidFormat	 format,
-		const RaBitQParams	*rq_params,
-		const float			*global_mean,
-		struct MktBlobStore *store,
-		BlockNumber			 first_posting,
-		BlockNumber			 first_centroid,
-		MktStreamLeafCb		 on_leaf,
-		void				*on_leaf_arg);
+		MktStorage				  *storage,
+		uint32_t				   nvecs,
+		Dimension				   dim,
+		DistanceMetric			   metric,
+		uint32_t				   nlist,
+		uint32_t				   fan_out,
+		MktCentroidFormat		   format,
+		const RaBitQParams		  *rq_params,
+		const float				  *global_mean,
+		struct MktBlobStore		  *store,
+		BlockNumber				   first_posting,
+		BlockNumber				   first_centroid,
+		MktStreamLeafCb			   on_leaf,
+		void					  *on_leaf_arg,
+		MktExactCentroidCollector *collector);
 
 /*
  * Stream one already-built subtree (an HKMeansResult a parallel worker
@@ -281,20 +430,21 @@ BlockNumber mkt_routing_tree_write(
  * the head page. Returns the subtree root block (== first_block).
  */
 BlockNumber mkt_routing_subtree_write(
-		MktStorage			*storage,
-		const HKMeansResult *subtree,
-		Dimension			 dim,
-		DistanceMetric		 metric,
-		uint32_t			 fan_out,
-		uint8_t				 level_offset,
-		MktCentroidFormat	 format,
-		const RaBitQParams	*rq_params,
-		const float			*global_mean,
-		BlockNumber			 first_posting,
-		uint32_t			 leaf_offset,
-		BlockNumber			 first_block,
-		MktStreamLeafCb		 on_leaf,
-		void				*on_leaf_arg);
+		MktStorage				  *storage,
+		const HKMeansResult		  *subtree,
+		Dimension				   dim,
+		DistanceMetric			   metric,
+		uint32_t				   fan_out,
+		uint8_t					   level_offset,
+		MktCentroidFormat		   format,
+		const RaBitQParams		  *rq_params,
+		const float				  *global_mean,
+		BlockNumber				   first_posting,
+		uint32_t				   leaf_offset,
+		BlockNumber				   first_block,
+		MktStreamLeafCb			   on_leaf,
+		void					  *on_leaf_arg,
+		MktExactCentroidCollector *collector);
 
 /*
  * Auto-tune fan_out from nlist.

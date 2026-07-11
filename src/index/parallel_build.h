@@ -768,6 +768,21 @@ extern char *
 mkt_pbuild_subtree_ring_attach(MktBuildShared *shared, void **seg_out);
 extern void mkt_pbuild_subtree_ring_release(void *seg);
 
+/* Exact-internal-centroids seam: the leader serializes the exact
+ * centroid collection (mkt_exact_centroid_collection_write, a few MB
+ * even at very large nlist) it gathered while streaming the tree, and
+ * publishes it before the tree-ready barrier; workers attach after that
+ * barrier and hook it into their phase-2.5/3 routing base
+ * (MktIndexBase.exact_internal). PG uses a dedicated DSM segment whose
+ * handle travels in the back-end shared struct; standalone shares the
+ * leader's allocation. Every participant releases when its routing is
+ * done; the segment dies with the last detach. */
+extern char *mkt_pbuild_exact_centroids_create(
+		MktBuildShared *shared, uint64_t nbytes, void **seg_out);
+extern char *
+mkt_pbuild_exact_centroids_attach(MktBuildShared *shared, void **seg_out);
+extern void mkt_pbuild_exact_centroids_release(void *seg);
+
 /* One histogram over the shared root assignments: out_counts[km_k] = how
  * many samples landed in each root child. Every participant derives the
  * same counts (same shared data); the leader additionally sizes the

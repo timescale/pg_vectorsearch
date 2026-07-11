@@ -29,6 +29,37 @@
 #include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------
+ * Exact internal-node centroids (build-time scoring hook)
+ *
+ * The build assigns every vector exactly once, so its descent can afford
+ * exact scoring where the query cannot. The internal tree levels are tiny
+ * (everything above the leaf entries — a few thousand nodes even at very
+ * large nlist), and the build knows all their float centroids: the writer
+ * collects them per page while the tree streams to storage (see
+ * MktExactCentroidCollector in index_build.h).
+ *
+ * The view addresses a slot per (page, entry): pages of the centroid
+ * region [base, base + npages) map through page_off[] to the first slot
+ * of that page's entries (entries are dense per page, in page-entry
+ * order). Pages that carry no internal entries — the leaf level — hold
+ * MKT_EXACT_INTERNAL_NONE and fall back to the estimated scoring.
+ *
+ * Only the build route sets the hook; queries never do. The view is
+ * non-owning: the collector arrays or collection it was built over must
+ * outlive every consumer (see mkt_exact_centroid_collector_cleanup / the seam
+ * release functions).
+ * ---------------------------------------------------------------- */
+#define MKT_EXACT_INTERNAL_NONE UINT32_MAX
+
+typedef struct MktExactInternalCentroids
+{
+	const float	   *cents;	  /* original-space centroids, dim floats/slot */
+	const uint32_t *page_off; /* [npages] first slot per page (or NONE) */
+	BlockNumber		base;	  /* first block of the centroid-page region */
+	uint32_t		npages;	  /* region length in pages */
+} MktExactInternalCentroids;
+
+/* ----------------------------------------------------------------
  * Search result entry
  * ---------------------------------------------------------------- */
 typedef struct MktCentroidResult
@@ -80,6 +111,11 @@ typedef struct MktCentroidSearchState
 	/* Pre-allocated scratch. Must be non-NULL and sized for at least
 	 * this state's beam_width / nprobe. */
 	MktCentroidScratch *scratch;
+	/* Optional (NULL for queries): exact internal-node centroids. When a
+	 * RaBitQ/fastscan page has a slot here, its entries are scored by
+	 * exact L2 (error = 0) instead of the 1-bit estimate; leaf-level
+	 * pages have no slot and keep the estimates. */
+	const MktExactInternalCentroids *exact_internal;
 } MktCentroidSearchState;
 
 /* ----------------------------------------------------------------

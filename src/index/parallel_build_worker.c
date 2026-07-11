@@ -39,6 +39,7 @@
 #include "core/log.h"
 #include "core/memory.h"
 #include "index/build_progress.h"
+#include "index/index_build.h"
 #include "index/parallel_build.h"
 #include "index/posting_build.h"
 #include "quant/rabitq.h"
@@ -856,6 +857,15 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	const float *global_mean =
 			shm_toc_lookup(toc, MKT_DSM_KEY_GLOBAL_MEAN, false);
 
+	/* Exact internal-node centroids, published by the leader before the
+	 * tree-ready barrier above: the build descent scores the internal
+	 * tree levels exactly (an empty collection leaves the hook inert). */
+	void					 *exact_seg = NULL;
+	MktExactInternalCentroids exact_centroids;
+	mkt_exact_centroid_collection_view(
+			mkt_pbuild_exact_centroids_attach(shared, &exact_seg),
+			&exact_centroids);
+
 	uint32_t	  entry_size = (uint32_t)mkt_posting_entry_size(dim);
 	RaBitQParams *rq_params	 = mkt_rabitq_create(dim, shared->rabitq_seed);
 
@@ -886,6 +896,9 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			shared->rabitq_seed,
 			global_mean,
 			mkt_alloc((size_t)dim * sizeof(float)));
+	/* Build-only accuracy hook: exact scoring of the internal tree levels
+	 * (the query and insert paths never set this). */
+	base.exact_internal = &exact_centroids;
 
 	MktQueryState qs;
 	mkt_query_state_init(&qs, &base, 1, MKT_SECONDARY_TOPK);
@@ -977,6 +990,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	mkt_build_route_ctx_cleanup(&route);
 	mkt_query_state_cleanup(&qs);
 	mkt_free(base.pt_global_mean);
+	mkt_pbuild_exact_centroids_release(exact_seg);
 	mkt_pbuild_worker_storage_release(storage);
 
 	mkt_pbuild_worker_detach(toc, &w);
