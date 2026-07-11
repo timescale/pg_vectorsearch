@@ -87,7 +87,14 @@ MktCentroidScratch *
 mkt_centroid_scratch_create(Dimension dim, uint32_t max_beam_width)
 {
 	uint32_t max_per_page = mkt_centroid_max_entries(dim);
-	uint32_t cand_cap	  = max_beam_width * max_per_page;
+
+	/* A kept node's children can span two pages when fan_out exceeds
+	 * the per-page entry capacity (e.g. fan_out 74 vs 72 entries at
+	 * dim 768), so a level can expose up to beam * 2 pages of
+	 * candidates; sizing by pages * capacity keeps the buffer an upper
+	 * bound and stops the level scan from silently truncating the
+	 * farthest kept parent's tail children. */
+	uint32_t cand_cap = max_beam_width * max_per_page * 2;
 	if (cand_cap < max_per_page * 4)
 		cand_cap = max_per_page * 4;
 
