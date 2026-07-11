@@ -104,6 +104,12 @@ bufcache_slot(Relation index, BlockNumber blkno)
  * Read path
  * ---------------------------------------------------------------- */
 
+/* Buffer-id cache effectiveness counters (diagnostic; exposed via
+ * mkt_routing_stats). */
+uint64_t mkt_bufcache_hits;
+uint64_t mkt_bufcache_cold;
+uint64_t mkt_bufcache_stale;
+
 static Page
 pg_read_page(MktStorage *self, BlockNumber blkno)
 {
@@ -118,9 +124,16 @@ pg_read_page(MktStorage *self, BlockNumber blkno)
 			ReadRecentBuffer(s->index->rd_locator, MAIN_FORKNUM, blkno, *slot))
 		{
 			buf = *slot;
+			mkt_bufcache_hits++;
 		}
 		else
 		{
+			/* Diagnostic: distinguish never-populated slots (first
+			 * touch) from stale ids (eviction churn). */
+			if (slot == NULL || *slot == InvalidBuffer)
+				mkt_bufcache_cold++;
+			else
+				mkt_bufcache_stale++;
 			buf = ReadBuffer(s->index, blkno);
 			if (slot != NULL)
 				*slot = buf;
