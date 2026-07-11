@@ -782,7 +782,8 @@ mkt_index_build(
 				idx->global_mean,
 				0, /* posting_base: leaf child = global leaf (cluster) index */
 				node_first_blkno,
-				NULL); /* pt_centroids on posting pages, not here */
+				NULL,  /* pt_centroids on posting pages, not here */
+				NULL); /* in-RAM assignment descends the exact float tree */
 		mkt_memctx_switch(idx_ctx);
 	}
 

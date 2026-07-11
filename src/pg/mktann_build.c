@@ -47,6 +47,7 @@
 #include "algo/hkmeans.h"
 #include "algo/kmeans.h"
 #include "algo/vecops.h"
+#include "core/log.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/index_base.h"
@@ -432,6 +433,32 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 	p->soar_lambda		= (opts != NULL) ? opts->soar_lambda : 0.0;
 	p->boundary_epsilon = (opts != NULL) ? opts->boundary_epsilon : 0.0;
 	p->fastscan			= (opts != NULL) ? opts->fastscan : false;
+
+	/* The exact-centroid collection size is known from the resolved
+	 * shape alone, so an under-budgeted maintenance_work_mem can be
+	 * reported now — at build start, before the expensive phases —
+	 * with the setting that would fit. The collector still enforces
+	 * the budget against the real size at collection time. */
+	if (p->centroid_format == MKT_CENTROID_FMT_RABITQ ||
+		p->centroid_format == MKT_CENTROID_FMT_FASTSCAN)
+	{
+		uint64_t expected =
+				mkt_exact_centroid_expected_bytes(p->nlist, p->fan_out, dim);
+		uint64_t budget = mkt_exact_centroid_budget(
+				(uint64_t)maintenance_work_mem);
+		if (expected > budget)
+			mkt_warn(
+					"maintenance_work_mem is likely too small for exact "
+					"centroid collection (about " UINT64_FORMAT
+					" kB needed for nlist=%u, fan_out=%u; the budget is "
+					"one eighth of maintenance_work_mem): the build will "
+					"fall back to estimated internal scoring — raise "
+					"maintenance_work_mem to at least " UINT64_FORMAT " kB",
+					expected / 1024 + 1,
+					p->nlist,
+					p->fan_out,
+					expected * 8 / 1024 + 1);
+	}
 }
 
 /*
@@ -770,6 +797,23 @@ do_serial_build(
 	 */
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_CENTROID);
 
+	/* Exact internal-centroid collection for the build descent (see
+	 * MktExactCentroidCollector in index_build.h). */
+	MktExactCentroidCollector  exact_centroids = {0};
+	MktExactCentroidCollector *collector =
+			mkt_exact_centroid_enabled(plan.nlevels, p->centroid_format)
+					? &exact_centroids
+					: NULL;
+	if (collector != NULL)
+		mkt_exact_centroid_collector_init(
+				collector,
+				dim,
+				p->centroid_format,
+				first_centroid,
+				plan.centroid_pages,
+				mkt_exact_centroid_budget((uint64_t)maintenance_work_mem),
+				mkt_exact_centroid_expected_slots(p->nlist, p->fan_out));
+
 	MktHeadWriteCtx headctx;
 	mkt_head_write_ctx_init(
 			&headctx, storage, rq_params, dim, p->fastscan, first_posting);
@@ -787,7 +831,8 @@ do_serial_build(
 			first_posting,
 			first_centroid,
 			mkt_write_leaf_head,
-			&headctx);
+			&headctx,
+			collector);
 	mkt_pbuild_blobstore_end(node_store);
 	mkt_head_write_ctx_cleanup(&headctx);
 	pfree(bs->samples);
@@ -825,6 +870,15 @@ do_serial_build(
 			rabitq_seed,
 			global_mean,
 			palloc(vec_nbytes));
+	/* Build-only accuracy hook: score the internal tree levels against the
+	 * exact centroids collected during the streaming write (the query and
+	 * insert paths never set this; see MktExactInternalCentroids). */
+	MktExactInternalCentroids exact_view;
+	if (collector != NULL)
+	{
+		mkt_exact_centroid_view(collector, &exact_view);
+		idx_base.exact_internal = &exact_view;
+	}
 	mkt_query_state_init(&bs->qs, &idx_base, 1, MKT_SECONDARY_TOPK);
 
 	/*
@@ -938,6 +992,8 @@ do_serial_build(
 	bs->soar_dupes = bs->route.soar_dupes;
 	mkt_build_route_ctx_cleanup(&bs->route);
 	mkt_query_state_cleanup(&bs->qs);
+	if (collector != NULL)
+		mkt_exact_centroid_collector_cleanup(collector);
 
 	elog(LOG,
 		 "mktann: serial build scan %.1fms, "

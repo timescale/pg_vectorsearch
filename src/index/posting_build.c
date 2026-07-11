@@ -315,6 +315,28 @@ mkt_build_route_ctx_cleanup(MktBuildRouteCtx *ctx)
 	mkt_free(ctx->entry);
 }
 
+/* Swap two gathered route candidates (leaf, exact distance, and the
+ * pt_centroid row, via the ctx's pt_r scratch). */
+static void
+route_swap_candidates(
+		MktBuildRouteCtx *ctx, uint32_t a, uint32_t b, Dimension dim)
+{
+	uint32_t leaf = ctx->cand_leaf[a];
+	Distance dist = ctx->cand_dist[a];
+
+	ctx->cand_leaf[a] = ctx->cand_leaf[b];
+	ctx->cand_dist[a] = ctx->cand_dist[b];
+	ctx->cand_leaf[b] = leaf;
+	ctx->cand_dist[b] = dist;
+
+	float *pa	  = ctx->cand_pt + (size_t)a * dim;
+	float *pb	  = ctx->cand_pt + (size_t)b * dim;
+	size_t nbytes = (size_t)dim * sizeof(float);
+	memcpy(ctx->pt_r, pa, nbytes);
+	memcpy(pa, pb, nbytes);
+	memcpy(pb, ctx->pt_r, nbytes);
+}
+
 bool
 mkt_build_route_emit(
 		MktBuildRouteCtx *ctx, const float *vec, ItemPointerData tid)
@@ -335,28 +357,56 @@ mkt_build_route_emit(
 	if (n == 0)
 		return false;
 
-	/* Only the secondary selection (SOAR / boundary) looks past the nearest
-	 * candidate; with both off, gathering the rest would pin and copy their
-	 * head pages for nothing on every row. The route still descends with the
-	 * full candidate width either way -- the beam width is what buys the
-	 * primary assignment its accuracy. */
 	bool has_soar	  = ctx->soar_lambda > 0.0;
 	bool has_boundary = ctx->boundary_epsilon > 0.0;
-	if (!has_soar && !has_boundary)
-		n = 1;
 
-	/* Gather the beam candidates: leaf index, distance, and pt_centroid (read
-	 * from each head page -- the float encode reference). */
+	/* Gather the beam candidates: leaf index and pt_centroid (read from each
+	 * head page -- the full-precision float encode reference). The gather is
+	 * unconditional: the exact primary re-rank below needs every finalist's
+	 * pt_centroid, secondary selection or not. */
 	for (uint32_t i = 0; i < n; i++)
 	{
 		BlockNumber h	  = ctx->qs->beam_results[i].posting_head;
 		ctx->cand_leaf[i] = mkt_route_head_to_leaf(ctx->first_posting, h);
-		ctx->cand_dist[i] = ctx->qs->beam_results[i].distance;
 		Page hp			  = mkt_storage_read_page(ctx->storage, h);
 		memcpy(ctx->cand_pt + (size_t)i * dim,
 			   mkt_posting_pt_centroid(hp),
 			   (size_t)dim * sizeof(float));
 		mkt_storage_release_page(ctx->storage, h);
+	}
+
+	/*
+	 * Exact re-rank of the leaf finalists: the beam's leaf-level distances
+	 * are 1-bit estimates whose noise misfiles rows, but each finalist's
+	 * full-precision rotated centroid was just gathered, so one O(dim)
+	 * distance per candidate recovers the true order (P^T preserves both
+	 * L2 and dot products). The re-rank must use the index metric so the
+	 * primary matches query-time routing: inner product ranks by -dot,
+	 * while L2 and cosine rank by squared L2 (cosine queries and encode
+	 * references are unit-normalized, making the two orders identical).
+	 * Only the first two positions are order-sensitive -- the primary and,
+	 * for the boundary gate, the exact 2nd-nearest -- and SOAR scans all
+	 * candidates order-independently, so a top-2 selection suffices.
+	 */
+	bool rank_by_dot = ctx->qs->index->metric == DISTANCE_INNER_PRODUCT;
+	for (uint32_t i = 0; i < n; i++)
+	{
+		const float *cand = ctx->cand_pt + (size_t)i * dim;
+		ctx->cand_dist[i] =
+				rank_by_dot ? -mkt_dot_product(ctx->qs->pt_query, cand, dim)
+							: mkt_l2_distance_squared(
+									  ctx->qs->pt_query, cand, dim);
+	}
+
+	uint32_t top = (n < 2) ? n : 2;
+	for (uint32_t r = 0; r < top; r++)
+	{
+		uint32_t best = r;
+		for (uint32_t i = r + 1; i < n; i++)
+			if (ctx->cand_dist[i] < ctx->cand_dist[best])
+				best = i;
+		if (best != r)
+			route_swap_candidates(ctx, r, best, dim);
 	}
 
 	/* Primary: encode pt_query - pt_centroid[0] and stream to the sorter. */

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "algo/distance.h"
+#include "algo/vecops.h"
 #include "core/memory.h"
 #include "index/posting_build.h"
 #include "index/posting_convert.h"
@@ -830,4 +831,231 @@ TEST(parallel_fastscan_no_lost_partials)
 	verify_head_meta(result, idx);
 
 	mkt_index_destroy(idx);
+}
+
+/*
+ * Build/query reachability tripwire: every indexed row should be
+ * findable by the query router at a modest probe count. The build
+ * places rows by exact centroid distance while queries route through
+ * the compressed tree with exact candidate re-ranking, so a small
+ * fraction of rows can sit one rank past a narrow probe set — the
+ * floors below are calibrated with slack. A regression in build
+ * placement (rows filed outside the query's reach) trips them long
+ * before it costs measurable benchmark recall.
+ */
+TEST(paged_build_self_reachability)
+{
+	uint32_t dim = 24, nvecs = 20000;
+	float	*vecs = make_vectors(nvecs, dim, 7);
+
+	MktIndexConfig config = {
+			.nlist		   = 256,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = MKT_POSTING_FMT_PAGES,
+			.nworkers	   = 2,
+	};
+
+	MktIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "paged parallel build should succeed");
+
+	MktQueryCtx *qctx = mkt_query_ctx_create(idx, 1, 16);
+
+	uint32_t nq		 = 500;
+	uint32_t hits_4	 = 0;
+	uint32_t hits_16 = 0;
+	for (uint32_t q = 0; q < nq; q++)
+	{
+		const float *self = vecs + (size_t)(q * (nvecs / nq)) * dim;
+		uint32_t	 id;
+		uint32_t	 got;
+
+		got = mkt_query_exec(
+				qctx, self, 1, 4, MKT_DISTANCE_MODE_ASYMMETRIC, true, &id);
+		if (got == 1 && id == q * (nvecs / nq))
+			hits_4++;
+
+		got = mkt_query_exec(
+				qctx, self, 1, 16, MKT_DISTANCE_MODE_ASYMMETRIC, true, &id);
+		if (got == 1 && id == q * (nvecs / nq))
+			hits_16++;
+	}
+
+	TEST_PRINT(
+			"  self-reachability: np4 %u/%u, np16 %u/%u\n",
+			hits_4,
+			nq,
+			hits_16,
+			nq);
+	/* Floors calibrated on this synthetic regime (uniform data, 1-bit
+	 * routing at low dim is noisy): healthy builds measure ~65%/~85%.
+	 * The sharper signal is the SLOPE — misplaced rows are unreachable
+	 * at any probe count, so a placement regression flattens the curve
+	 * (measured during the assignment-regression post-mortem: broken
+	 * builds were rank-flat while healthy ones climbed steeply). */
+	ASSERT_TRUE(
+			hits_4 >= (nq * 50) / 100,
+			"row placement must be reachable at nprobe 4 (>=50%)");
+	ASSERT_TRUE(
+			hits_16 >= (nq * 75) / 100,
+			"row placement must be reachable at nprobe 16 (>=75%)");
+	ASSERT_TRUE(
+			hits_16 >= hits_4 + (nq * 5) / 100,
+			"reachability must climb with nprobe (flat = misplaced rows)");
+
+	mkt_query_ctx_destroy(qctx);
+	mkt_index_destroy(idx);
+	mkt_free(vecs);
+}
+
+/*
+ * Build-time assignment parity: the page-backed build descent must file
+ * each row in its exact nearest cluster when the candidate pool covers
+ * every leaf. The build scores the INTERNAL tree levels against the exact
+ * float centroids collected during the streaming tree write
+ * (MktExactInternalCentroids) and exact-re-ranks the TOPK leaf finalists
+ * against the head pages' full-precision pt_centroids; with nlist <=
+ * MKT_SECONDARY_TOPK the finalists cover ALL leaves, so the primary
+ * assignment must equal a brute-force nearest-centroid scan exactly —
+ * both sides compute the same metric kernel on the same rotated floats
+ * (P^T preserves L2 and dot products alike). Parameterized over the
+ * centroid format (each descent scores — and collects exact internal
+ * centroids for — its own format branch) and the metric (inner product
+ * must rank the finalists by -dot to match query-time routing, not L2).
+ */
+static void
+check_paged_assignment_parity(
+		MktTestResult *result, MktCentroidFormat fmt, DistanceMetric metric)
+{
+	uint32_t dim = 24, nvecs = 3000;
+	float	*vecs = make_vectors(nvecs, dim, 11);
+
+	MktIndexConfig config = {
+			.nlist		   = 27,
+			.fan_out	   = 3, /* 3-level tree: scored internal levels */
+			.metric		   = metric,
+			.centroid_fmt  = fmt,
+			.encode_rabitq = true,
+			.posting_fmt   = MKT_POSTING_FMT_PAGES,
+			.nworkers	   = 2,
+			/* soar_lambda / boundary_epsilon left 0: no replication, so
+			 * list membership identifies the primary assignment. */
+	};
+
+	MktIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "paged parallel build should succeed");
+	ASSERT_TRUE(
+			idx->base.nlevels >= 3,
+			"tree must have scored internal levels (the exact ones)");
+	ASSERT_TRUE(
+			idx->nlist <= MKT_SECONDARY_TOPK,
+			"candidate pool must cover every leaf for exact parity");
+
+	MktStorage *st = idx->base.posting_storage;
+
+	/* Gather each cluster's encode reference (P^T * centroid) and each
+	 * vector's assigned cluster from the posting pages. */
+	float	 *pt_cents = mkt_alloc((size_t)idx->nlist * dim * sizeof(float));
+	uint32_t *assigned = mkt_alloc(nvecs * sizeof(uint32_t));
+	for (uint32_t i = 0; i < nvecs; i++)
+		assigned[i] = UINT32_MAX;
+
+	for (uint32_t c = 0; c < idx->nlist; c++)
+	{
+		BlockNumber blk = idx->first_posting + c;
+
+		Page head = mkt_storage_read_page(st, blk);
+		memcpy(pt_cents + (size_t)c * dim,
+			   mkt_posting_pt_centroid(head),
+			   (size_t)dim * sizeof(float));
+		mkt_storage_release_page(st, blk);
+
+		while (blk != InvalidBlockNumber)
+		{
+			Page	 pg		 = mkt_storage_read_page(st, blk);
+			bool	 first	 = (mkt_posting_opaque(pg)->flags &
+							MKT_POSTING_PAGE_FIRST) != 0;
+			char	*content = first ? mkt_posting_content_first(pg, dim)
+									 : mkt_posting_content(pg);
+			uint32_t count	 = mkt_posting_page_count(pg);
+
+			for (uint32_t i = 0; i < count; i++)
+			{
+				const MktPostingEntryHeader *e =
+						mkt_posting_entry_at(content, i, dim);
+				uint32_t vid = mkt_posting_get_vector_id(&e->meta.tid);
+				ASSERT_TRUE(vid < nvecs, "tid decodes to a vector id");
+				ASSERT_EQ(
+						UINT32_MAX,
+						assigned[vid],
+						"no replication: one list per vector");
+				assigned[vid] = c;
+			}
+			BlockNumber next = mkt_posting_opaque(pg)->next_blkno;
+			mkt_storage_release_page(st, blk);
+			blk = next;
+		}
+	}
+
+	/* Brute-force nearest centroid in the rotated space, computed with
+	 * the same kernel on the same floats the assign path used — so
+	 * parity must be exact, not approximate. Inner product ranks by
+	 * -dot, matching the query descent; the others by squared L2. */
+	bool   rank_by_dot = (metric == DISTANCE_INNER_PRODUCT);
+	float *pt_vec	   = mkt_alloc((size_t)dim * sizeof(float));
+	for (uint32_t i = 0; i < nvecs; i++)
+	{
+		mkt_rabitq_rotate(idx->base.params, vecs + (size_t)i * dim, pt_vec);
+
+		uint32_t best	   = 0;
+		float	 best_dist = 0.0f;
+		for (uint32_t c = 0; c < idx->nlist; c++)
+		{
+			const float *cand = pt_cents + (size_t)c * dim;
+			float		 d = rank_by_dot ? -mkt_dot_product(pt_vec, cand, dim)
+										 : mkt_l2_distance_squared(pt_vec, cand, dim);
+			if (c == 0 || d < best_dist)
+			{
+				best_dist = d;
+				best	  = c;
+			}
+		}
+		ASSERT_EQ(
+				best,
+				assigned[i],
+				"row must be filed in its exact nearest cluster");
+	}
+
+	mkt_free(pt_vec);
+	mkt_free(pt_cents);
+	mkt_free(assigned);
+	mkt_index_destroy(idx);
+	mkt_free(vecs);
+}
+
+TEST(paged_build_assignment_parity)
+{
+	check_paged_assignment_parity(
+			result, MKT_CENTROID_FMT_RABITQ, DISTANCE_L2);
+}
+
+TEST(paged_build_assignment_parity_float)
+{
+	check_paged_assignment_parity(result, MKT_CENTROID_FMT_FLOAT, DISTANCE_L2);
+}
+
+TEST(paged_build_assignment_parity_fastscan)
+{
+	check_paged_assignment_parity(
+			result, MKT_CENTROID_FMT_FASTSCAN, DISTANCE_L2);
+}
+
+TEST(paged_build_assignment_parity_ip)
+{
+	/* Rows must be filed in their -dot-nearest list, not L2-nearest:
+	 * inner-product queries route by -dot, and a build/query metric
+	 * mismatch misfiles every row whose two orders disagree. */
+	check_paged_assignment_parity(
+			result, MKT_CENTROID_FMT_FLOAT, DISTANCE_INNER_PRODUCT);
 }

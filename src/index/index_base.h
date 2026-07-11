@@ -47,6 +47,11 @@ typedef struct MktIndexBase
 	float centroid_error_scale; /* scales centroid pruning error (1=default) */
 	float centroid_beam_scale;	/* intermediate beam width / nprobe
 								   (0.25=default) */
+	/* Build-only: exact internal-node centroids for the build descent
+	 * (see MktExactInternalCentroids in centroid_search.h). NULL — the
+	 * default everywhere the base is zero-initialized — keeps the
+	 * estimated scoring; the query and insert paths never set it. */
+	const struct MktExactInternalCentroids *exact_internal;
 } MktIndexBase;
 
 static inline RaBitQParams *

@@ -164,6 +164,29 @@ mkt_centroid_scratch_free(MktCentroidScratch *s)
 }
 
 /*
+ * Build-time exact-scoring hook: resolve a page's exact-centroid slots,
+ * or NULL when the hook is unset, the page lies outside the collected
+ * region, or the page carries no internal entries (the leaf level).
+ */
+static const float *
+exact_internal_slots(
+		const MktCentroidSearchState *state,
+		BlockNumber					  page_blkno,
+		Dimension					  dim)
+{
+	const MktExactInternalCentroids *ex = state->exact_internal;
+
+	if (ex == NULL || page_blkno < ex->base ||
+		page_blkno - ex->base >= ex->npages)
+		return NULL;
+
+	uint32_t off = ex->page_off[page_blkno - ex->base];
+	if (off == MKT_EXACT_INTERNAL_NONE)
+		return NULL;
+	return ex->cents + (size_t)off * dim;
+}
+
+/*
  * Score all centroids on a single page, appending to candidates.
  * Returns the new candidate count.
  *
@@ -189,6 +212,45 @@ score_page(
 
 	if (count == 0)
 		return cand_count;
+
+	/* Build-time hook: when the build collected this page's exact float
+	 * centroids (internal levels only; see MktExactInternalCentroids), score
+	 * them with exact L2 instead of the RaBitQ estimate. The estimated
+	 * formats approximate the original-space squared L2 (the rotation is
+	 * norm-preserving), so this is the same quantity with the estimate
+	 * noise removed (error = 0). Exact formats (FLOAT/HALF) never take
+	 * this path — they are exact already, including their metric
+	 * handling. */
+	if (fmt == MKT_CENTROID_FMT_RABITQ || fmt == MKT_CENTROID_FMT_FASTSCAN)
+	{
+		const float *exact = exact_internal_slots(state, page_blkno, dim);
+
+		if (exact != NULL)
+		{
+			char *content = (char *)PageGetContents(page);
+
+			for (uint16_t i = 0; i < count && cand_count < cand_cap; i++)
+			{
+				BlockNumber child;
+
+				if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+					child = mkt_centroid_fastscan_group_child(
+							content,
+							i / MKT_FASTSCAN_GROUP,
+							dim)[i % MKT_FASTSCAN_GROUP];
+				else
+					child = mkt_centroid_meta(page, i)->child_blkno;
+
+				cands[cand_count].child_blkno = child;
+				ItemPointerSet(&cands[cand_count].origin, page_blkno, i);
+				cands[cand_count].distance = mkt_l2_distance_squared(
+						state->query, exact + (size_t)i * dim, dim);
+				cands[cand_count].error = 0.0f;
+				cand_count++;
+			}
+			return cand_count;
+		}
+	}
 
 	switch (fmt)
 	{

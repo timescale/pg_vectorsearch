@@ -53,6 +53,10 @@ typedef struct MktBuildSharedStandalone
 	/* Per-child subtree ring, allocated by the leader post-assign; workers
 	 * are threads and read the pointer directly. */
 	char *subtree_ring;
+	/* Exact centroid collection, allocated by the leader after the
+	 * streaming tree write; workers are threads and read the pointer
+	 * directly. */
+	char *exact_centroids;
 } MktBuildSharedStandalone;
 
 /*
@@ -508,6 +512,43 @@ mkt_pbuild_subtree_ring_attach(MktBuildShared *shared, void **seg_out)
 
 void
 mkt_pbuild_subtree_ring_release(void *seg)
+{
+	if (seg != NULL)
+		mkt_free(seg);
+}
+
+/*
+ * Exact-centroid seam (thread back-end): one heap allocation the leader makes
+ * after the streaming tree write; workers share the pointer. Only the
+ * creator gets a non-NULL seg to free at release, so the collection outlives
+ * every worker's routing (the leader releases last, after the merge).
+ */
+char *
+mkt_pbuild_exact_centroids_create(
+		MktBuildShared *shared, uint64_t nbytes, void **seg_out)
+{
+	MktBuildSharedStandalone *sa = (MktBuildSharedStandalone *)shared;
+
+	sa->exact_centroids = mkt_alloc(nbytes);
+	*seg_out			= sa->exact_centroids;
+	return sa->exact_centroids;
+}
+
+char *
+mkt_pbuild_exact_centroids_attach(MktBuildShared *shared, void **seg_out)
+{
+	MktBuildSharedStandalone *sa = (MktBuildSharedStandalone *)shared;
+
+	*seg_out = NULL;
+	if (sa->exact_centroids == NULL)
+		mkt_error(
+				"exact centroid collection attached before the leader "
+				"published it");
+	return sa->exact_centroids;
+}
+
+void
+mkt_pbuild_exact_centroids_release(void *seg)
 {
 	if (seg != NULL)
 		mkt_free(seg);

@@ -227,21 +227,22 @@ typedef struct TreeLayout
  */
 static bool
 build_routing_tree_batched(
-		MktBuildShared	 *shared,
-		MktStorage		 *storage,
-		MktBuildProgress *prog,
-		MktDsmSamples	 *dsm_samples,
-		MktDsmRootAssign *dsm_ra,
-		float			 *cents,
-		uint32_t		  km_k,
-		uint32_t		  nlist,
-		uint32_t		  fan_out,
-		Barrier			 *barrier,
-		RaBitQParams	 *rq_params,
-		uint32_t		  max_ent,
-		BlockNumber		  first_centroid,
-		float			 *global_mean,
-		TreeLayout		 *out)
+		MktBuildShared			  *shared,
+		MktStorage				  *storage,
+		MktBuildProgress		  *prog,
+		MktDsmSamples			  *dsm_samples,
+		MktDsmRootAssign		  *dsm_ra,
+		float					  *cents,
+		uint32_t				   km_k,
+		uint32_t				   nlist,
+		uint32_t				   fan_out,
+		Barrier					  *barrier,
+		RaBitQParams			  *rq_params,
+		uint32_t				   max_ent,
+		BlockNumber				   first_centroid,
+		float					  *global_mean,
+		MktExactCentroidCollector *collector,
+		TreeLayout				  *out)
 {
 	Dimension		  dim			= shared->dim;
 	int				  nparticipants = shared->nparticipants;
@@ -362,6 +363,19 @@ build_routing_tree_batched(
 	BlockNumber subtree_base  = first_centroid + root_pages;
 	BlockNumber first_posting = subtree_base + bo;
 
+	/* The centroid-page region [first_centroid, first_posting) is now
+	 * sized; the streaming pass below collects every internal node's
+	 * exact centroids into it (the root included). */
+	if (collector != NULL)
+		mkt_exact_centroid_collector_init(
+				collector,
+				dim,
+				fmt,
+				first_centroid,
+				(uint32_t)(first_posting - first_centroid),
+				mkt_exact_centroid_budget(shared->work_mem_kb),
+				mkt_exact_centroid_expected_slots(actual_nlist, fan_out));
+
 	/* Leaf-centroid mean from the PLAN pass -> the encoder centering. */
 	for (Dimension d = 0; d < dim; d++)
 		global_mean[d] = actual_nlist > 0 ? (float)(planarg.leaf_sum[d] /
@@ -414,7 +428,8 @@ build_routing_tree_batched(
 				 leaf_off[c],
 				 base_blk,
 				 mkt_write_leaf_head,
-				 &head);
+				 &head,
+				 collector);
 	}
 	mkt_free(blob);
 	mkt_free(child_order);
@@ -438,7 +453,8 @@ build_routing_tree_batched(
 			global_mean,
 			subtree_root_blk,
 			NULL,
-			root_blk);
+			root_blk,
+			collector);
 
 	mkt_head_write_ctx_cleanup(&head);
 	mkt_free(subtree_root_blk);
@@ -524,7 +540,10 @@ build_routing_tree_flat(
 			0,
 			first_centroid,
 			mkt_write_leaf_head,
-			&head);
+			&head,
+			/* the flat tree's only level is the leaf level — nothing
+			 * internal to collect */
+			NULL);
 	mkt_head_write_ctx_cleanup(&head);
 
 	out->first_posting = first_posting;
@@ -700,6 +719,12 @@ do_parallel_build(
 	BlockNumber root_blk	   = InvalidBlockNumber;
 	uint8_t		out_nlevels	   = (uint8_t)nlevels;
 
+	/* Exact internal-centroid collection for the phase-2.5/3 build
+	 * descent (see MktExactCentroidCollector in index_build.h). */
+	MktExactCentroidCollector  exact_centroids = {0};
+	MktExactCentroidCollector *collector =
+			mkt_exact_centroid_enabled(nlevels, fmt) ? &exact_centroids : NULL;
+
 	TreeLayout layout;
 	bool	   tree_ok;
 	if (nlevels >= 2)
@@ -718,6 +743,7 @@ do_parallel_build(
 				max_ent,
 				first_centroid,
 				global_mean,
+				collector,
 				&layout);
 	else
 		tree_ok = build_routing_tree_flat(
@@ -734,6 +760,8 @@ do_parallel_build(
 				&layout);
 	if (!tree_ok)
 	{
+		if (collector != NULL)
+			mkt_exact_centroid_collector_cleanup(collector);
 		mkt_free(global_mean);
 		mkt_pbuild_samples_release(dsm_samples, lead.sample_seg);
 		WaitForParallelWorkersToFinish(pcxt);
@@ -744,6 +772,17 @@ do_parallel_build(
 	first_posting = layout.first_posting;
 	root_blk	  = layout.root_blk;
 	out_nlevels	  = layout.nlevels;
+
+	/* Publish the exact internal-node centroids the tree write collected,
+	 * for the workers' phase-2.5/3 build descent (exact-centroid seam; must
+	 * precede the tree-ready barrier). Without a collector the collection
+	 * is an empty header and the workers' scoring hook stays inert. */
+	void *exact_seg	  = NULL;
+	char *exact_cents = mkt_pbuild_exact_centroids_create(
+			shared, mkt_exact_centroid_collection_size(collector), &exact_seg);
+	mkt_exact_centroid_collection_write(collector, exact_cents);
+	if (collector != NULL)
+		mkt_exact_centroid_collector_cleanup(collector);
 
 	/* Publish the routing state the workers read in phase 3: nlist, the tree
 	 * root block + depth, the posting-head base (leaf c's head = first_posting
@@ -952,6 +991,10 @@ do_parallel_build(
 			total_pages,
 			INSTR_TIME_GET_MILLISEC(t_scan_end),
 			INSTR_TIME_GET_MILLISEC(t_merge_end));
+
+	/* Workers detached from the exact-centroid collection when routing ended;
+	 * the leader's release is the last and frees it. */
+	mkt_pbuild_exact_centroids_release(exact_seg);
 
 	mkt_pbuild_teardown(pcxt);
 

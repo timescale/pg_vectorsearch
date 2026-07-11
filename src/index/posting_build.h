@@ -46,14 +46,24 @@ typedef struct MktBuildAssignment
 } MktBuildAssignment;
 
 /*
- * Beam search parameters for the boundary (border-neighbor) secondary
- * search. The boundary cluster is the 2nd-nearest centroid by plain
- * distance, so a tree beam-descent finds it far cheaper than scanning
- * all leaves. SOAR's orthogonality-amplified search stays exact (its
- * optimum need not be among the nearest-by-distance leaves).
+ * Beam parameters of the build-time leaf-candidate pool. The page-backed
+ * assign path routes each row with nprobe = MKT_SECONDARY_TOPK, then
+ * exact-re-ranks those leaf finalists against their head pages'
+ * full-precision pt_centroids: the primary is the exact-nearest finalist,
+ * the boundary cluster the exact 2nd-nearest, and SOAR's
+ * orthogonality-amplified search scans all of them exactly (its optimum
+ * need not be the nearest-by-distance leaf, but it is always among the
+ * near ones). The in-RAM assign path (mkt_build_assign_vector) descends
+ * the exact float tree with the same widths.
+ *
+ * TOPK 32 / BEAM_WIDTH 64: with the internal levels scored exactly (see
+ * MKT_BUILD_CENTROID_BEAM_SCALE below), leaf assignment quality is bounded
+ * by how often the true nearest leaf sits inside the estimated top-TOPK of
+ * the exactly-chosen parents' children; widening 8/16 -> 32/64 measurably
+ * recovers assignment recall at acceptable build cost.
  */
-#define MKT_SECONDARY_TOPK		 8
-#define MKT_SECONDARY_BEAM_WIDTH 16
+#define MKT_SECONDARY_TOPK		 32
+#define MKT_SECONDARY_BEAM_WIDTH 64
 
 /*
  * Build-time centroid routing accuracy.
@@ -72,11 +82,21 @@ typedef struct MktBuildAssignment
  * (0.25) instead yields beam_w = 2, far narrower than the k candidates the
  * descent must produce.
  *
- * ERROR_SCALE = 0 matches the query default; with a full-width beam the
- * extra candidates a larger error bound would keep do not change the leaf
- * chosen (measured: assignment recall is unchanged). It must stay 0 here —
- * a positive error_scale in the single-candidate refine route (nprobe = 1)
- * overflows the beam-search candidate buffer and corrupts the build.
+ * 1.0 needs no slack above that: the build descent scores the INTERNAL
+ * tree levels against the exact float centroids collected while the tree
+ * streamed to pages (MktExactInternalCentroids), so the kept parents are the
+ * true top-beam_w — there is no estimate noise at those levels for a wider
+ * beam to paper over. (Widening was only ever a half-measure for that
+ * noise: beam scale 4 recovered about half the misassignment loss at 4x
+ * the descent cost; exact internal scoring removes the cause.) The leaf
+ * level keeps the 1-bit estimates — it is far too large to collect — and
+ * its noise is absorbed by the exact re-rank of the TOPK finalists above.
+ *
+ * ERROR_SCALE = 0 matches the query default; with exact internal scoring
+ * the bounds are exact (error = 0) and pruning slack is meaningless. It
+ * must stay 0 here — a positive error_scale in the single-candidate refine
+ * route (nprobe = 1) overflows the beam-search candidate buffer and
+ * corrupts the build.
  */
 #define MKT_BUILD_CENTROID_BEAM_SCALE  1.0f
 #define MKT_BUILD_CENTROID_ERROR_SCALE 0.0f
@@ -102,12 +122,16 @@ MktBuildAssignment mkt_build_assign_vector(
  * Page-backed build routing (unified with the query/insert path)
  *
  * Routes each vector to its posting list exactly as a query does --
- * mkt_query_route over the centroid pages -- then encodes the RaBitQ
- * residual against the pt_centroid read from the target list's head page
- * and streams it to the cluster-keyed sorter (primary + optional SOAR /
- * boundary secondary). Shared by the serial build and the parallel posting
- * workers so build, insert, and query all route identically. The centroid
- * and head pages must already be written when this runs.
+ * mkt_query_route over the centroid pages -- then exact-re-ranks the TOPK
+ * leaf finalists against their head pages' full-precision pt_centroids
+ * (the primary is the exact-nearest finalist), encodes the RaBitQ
+ * residual against the chosen list's pt_centroid and streams it to the
+ * cluster-keyed sorter (primary + optional SOAR / boundary secondary).
+ * Shared by the serial build and the parallel posting workers. The
+ * descent is the query's; on top of it the build exact-re-ranks the
+ * finalists (queries re-rank their probe set instead, inserts keep the
+ * plain estimate route). The centroid and head pages must already be
+ * written when this runs.
  * ---------------------------------------------------------------- */
 typedef struct MktBuildRouteCtx
 {

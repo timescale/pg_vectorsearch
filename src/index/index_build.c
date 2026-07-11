@@ -5,6 +5,7 @@
  * the PostgreSQL IAM build and the standalone CLI.
  */
 
+#include <inttypes.h>
 #include <math.h>
 #include <string.h>
 
@@ -16,6 +17,299 @@
 #include "index/index_build.h"
 #include "index/parallel_build.h" /* MktBlobStore seam (plan/write replay) */
 #include "quant/fastscan.h"
+
+/* ----------------------------------------------------------------
+ * Exact internal-centroid collection — see index_build.h
+ * ---------------------------------------------------------------- */
+
+/*
+ * A collection is the collector's sealed output: the exact centroids
+ * of the internal tree nodes, keyed by where each centroid's
+ * compressed twin sits on disk (centroid page, entry index on that
+ * page). Serialized as one contiguous allocation with no internal
+ * pointers, so it can be handed across the parallel-build seam (a DSM
+ * segment under PostgreSQL, a plain heap allocation standalone) and
+ * consumed in place by any backend that maps it.
+ *
+ *   +--------------------------------+
+ *   | ExactCentroidCollectionHeader  |  base, npages, nslots, dim
+ *   +--------------------------------+
+ *   | uint32_t page_off[npages]      |  slot base per page, or NONE
+ *   +--------------------------------+
+ *   | float cents[nslots * dim]      |  centroids, densely packed
+ *   +--------------------------------+
+ *
+ * The collection covers the centroid-page region [base, base +
+ * npages): a
+ * page's page_off element is indexed by its offset from the starting
+ * page (blkno - base). Pages that carry internal entries hold the
+ * index of their first centroid in cents[]; their entries then map
+ * 1:1 and in page-entry order to the following slots, so entry i of
+ * page b scores against cents + (page_off[b - base] + i) * dim. Slot
+ * ranges of different pages are disjoint, but not ordered: cents[] is
+ * appended in tree-write order (post-order serial, per-subtree
+ * parallel), not block order. Leaf-level pages — collection skips
+ * them — hold MKT_EXACT_INTERNAL_NONE instead.
+ *
+ * An empty collection (collecting off or over budget) is just the header
+ * with npages = 0 and base = InvalidBlockNumber, which no block can
+ * match — the consumer's scoring hook stays inert. nslots and dim are
+ * self-description (sizing and debugging); the view reads only base
+ * and npages, and slot extents come from page_off plus the pages' own
+ * entry counts.
+ *
+ * Lifecycle: the LEADER produces it — it alone streams the tree to
+ * pages, collecting into MktExactCentroidCollector as it writes —
+ * then sizes and fills the collection from the collector and publishes it
+ * before the tree-ready barrier. The WORKERS attach after that
+ * barrier and wrap it in a MktExactInternalCentroids view to score
+ * the internal tree levels while routing rows to their posting lists
+ * (and again in the refine pass); they only ever read it. The collection's
+ * memory is deliberately not context-managed and not the collector's:
+ * under PostgreSQL it is a DSM segment (process-shared, refcounted by
+ * the resource-owner machinery — a memory context is process-private
+ * and could not cross the seam), standalone a heap allocation the
+ * leader frees after the threads join. That split also lets the
+ * leader clean up the collector right after serializing, halving the
+ * peak, while the collection lives on until the last worker detaches.
+ * The serial build skips serialization entirely: same process, so its view
+ * points straight into the collector's arrays.
+ */
+typedef struct ExactCentroidCollectionHeader
+{
+	BlockNumber base;
+	uint32_t	npages;
+	uint32_t	nslots;
+	uint32_t	dim;
+} ExactCentroidCollectionHeader;
+
+/* Fallback initial cents[] capacity (slots) when the caller passes no
+ * expected_slots pre-size; add_node doubles from here. Covers a
+ * typical two-level tree (fan_out + 1 nodes) without regrowing while
+ * staying well under any realistic budget. */
+#define CENTROID_COLLECTOR_INIT_CAPACITY 256
+
+void
+mkt_exact_centroid_collector_init(
+		MktExactCentroidCollector *c,
+		Dimension				   dim,
+		MktCentroidFormat		   fmt,
+		BlockNumber				   base,
+		uint32_t				   npages,
+		uint64_t				   max_bytes,
+		uint64_t				   expected_slots)
+{
+	memset(c, 0, sizeof(*c));
+	c->dim	  = dim;
+	c->base	  = base;
+	c->npages = npages;
+	c->stride = mkt_centroid_max_entries_fmt(dim, fmt);
+	/* Every allocation goes to the collector's dedicated child context
+	 * (see the ownership contract on MktExactCentroidCollector). */
+	c->ctx = mkt_memctx_create(mkt_memctx_current(), "mkt exact centroids");
+	c->page_off = mkt_memctx_alloc(c->ctx, (size_t)npages * sizeof(uint32_t));
+	memset(c->page_off, 0xFF, (size_t)npages * sizeof(uint32_t));
+	c->max_bytes = max_bytes;
+	/* Pre-size to the caller's estimate so growth is a rounding case,
+	 * never past what the budget admits; an over-budget estimate is
+	 * pointless to allocate in full -- collection will latch overflowed
+	 * at the boundary anyway. */
+	uint64_t cap	 = expected_slots > 0 ? expected_slots
+										  : CENTROID_COLLECTOR_INIT_CAPACITY;
+	uint64_t max_cap = max_bytes / ((uint64_t)dim * sizeof(float));
+	if (cap > max_cap)
+		cap = max_cap;
+	if (cap == 0)
+		cap = 1;
+	c->cap	 = (uint32_t)cap;
+	c->cents = mkt_memctx_alloc(c->ctx, (size_t)c->cap * dim * sizeof(float));
+}
+
+/*
+ * Ensure cents[] holds at least total slots. Reached only when the
+ * init pre-size undershot (per-level rounding in the estimate): grow
+ * geometrically — a fixed-step policy would copy O(n^2) bytes over
+ * the collection's lifetime, doubling copies less than 2x the final
+ * size in total — and clamp the capacity to the budget so the
+ * allocation never overshoots what the caller's budget check admits
+ * (that check guarantees the clamped capacity still fits).
+ */
+static void
+exact_centroid_collector_reserve(MktExactCentroidCollector *c, uint32_t total)
+{
+	if (total <= c->cap)
+		return;
+
+	uint64_t max_cap = c->max_bytes / ((uint64_t)c->dim * sizeof(float));
+	Assert(total <= max_cap);
+	uint64_t new_cap = (uint64_t)c->cap * 2;
+	while (new_cap < total)
+		new_cap *= 2;
+	if (new_cap > max_cap)
+		new_cap = max_cap;
+
+	/* Grow inside the collector's own context, not the streaming
+	 * scratch context this is called under (that scratch dies at
+	 * the end of the write pass, while the collector must survive
+	 * until after the encode scan and the refine pass). The old
+	 * array is freed eagerly (a no-op on the standalone arena) so
+	 * both generations are never held at once. */
+	float *grown =
+			mkt_memctx_alloc(c->ctx, (size_t)new_cap * c->dim * sizeof(float));
+	memcpy(grown, c->cents, (size_t)c->nslots * c->dim * sizeof(float));
+	mkt_free(c->cents);
+	c->cents = grown;
+	c->cap	 = (uint32_t)new_cap;
+}
+
+void
+mkt_exact_centroid_collector_add_node(
+		MktExactCentroidCollector *c,
+		BlockNumber				   first_blk,
+		const float				  *cents,
+		uint32_t				   n)
+{
+	if (n == 0 || c->overflowed)
+		return;
+
+	/* Enforce the collection budget: degrade to an empty (inert)
+	 * collection rather than grow without bound. The arrays are dead
+	 * once the flag latches (every consumer checks it first), so
+	 * release them right away — the encode scan that follows is the
+	 * build's memory peak. */
+	uint64_t need = ((uint64_t)c->nslots + n) * c->dim * sizeof(float);
+	if (need > c->max_bytes)
+	{
+		mkt_warn(
+				"exact centroid collection over budget (needs more "
+				"than %" PRIu64 " of %" PRIu64 " bytes); build descent "
+				"falls back to estimated internal scoring — consider "
+				"raising the build memory budget",
+				need,
+				c->max_bytes);
+		c->overflowed = true;
+		mkt_exact_centroid_collector_cleanup(c);
+		return;
+	}
+
+	exact_centroid_collector_reserve(c, c->nslots + n);
+
+	/* The node's entries pack stride per page from first_blk — the same
+	 * packing every centroid writer uses (each node starts on a fresh
+	 * reserved page). Record each page's slot base and append its
+	 * centroids in page-entry order. */
+	uint32_t npages_node = (n + c->stride - 1) / c->stride;
+	for (uint32_t p = 0; p < npages_node; p++)
+	{
+		BlockNumber blk = first_blk + p;
+		if (blk < c->base || blk - c->base >= c->npages)
+		{
+			/* Plan/write divergence: a node landed outside the planned
+			 * centroid region. Degrade to inert rather than write
+			 * page_off out of bounds in release builds. */
+			Assert(false);
+			c->overflowed = true;
+			mkt_exact_centroid_collector_cleanup(c);
+			return;
+		}
+
+		uint32_t count = n - p * c->stride;
+		if (count > c->stride)
+			count = c->stride;
+
+		c->page_off[blk - c->base] = c->nslots;
+		memcpy(c->cents + (size_t)c->nslots * c->dim,
+			   cents + (size_t)p * c->stride * c->dim,
+			   (size_t)count * c->dim * sizeof(float));
+		c->nslots += count;
+	}
+}
+
+void
+mkt_exact_centroid_collector_cleanup(MktExactCentroidCollector *c)
+{
+	/* Everything the collector allocated lives in its dedicated
+	 * context: one delete releases it all, exactly once (idempotent —
+	 * a second call is a no-op). Callers must not run this until the
+	 * last view consumer is done. */
+	if (c->ctx != NULL)
+		mkt_memctx_delete(c->ctx);
+	c->ctx		= NULL;
+	c->page_off = NULL;
+	c->cents	= NULL;
+}
+
+void
+mkt_exact_centroid_view(
+		const MktExactCentroidCollector *c, MktExactInternalCentroids *view)
+{
+	if (c->overflowed)
+	{
+		/* Inert view: a zero-page region matches no block. */
+		view->cents	   = NULL;
+		view->page_off = NULL;
+		view->base	   = InvalidBlockNumber;
+		view->npages   = 0;
+		return;
+	}
+	view->cents	   = c->cents;
+	view->page_off = c->page_off;
+	view->base	   = c->base;
+	view->npages   = c->npages;
+}
+
+uint64_t
+mkt_exact_centroid_collection_size(const MktExactCentroidCollector *c)
+{
+	if (c == NULL || c->overflowed)
+		return sizeof(ExactCentroidCollectionHeader);
+	return sizeof(ExactCentroidCollectionHeader) +
+		   (uint64_t)c->npages * sizeof(uint32_t) +
+		   (uint64_t)c->nslots * c->dim * sizeof(float);
+}
+
+void
+mkt_exact_centroid_collection_write(
+		const MktExactCentroidCollector *c, void *collection)
+{
+	ExactCentroidCollectionHeader *hdr = (ExactCentroidCollectionHeader *)
+			collection;
+
+	if (c == NULL || c->overflowed)
+	{
+		/* Empty collection: a zero-page region matches no block, so the view
+		 * built from it leaves the scoring hook inert. */
+		hdr->base	= InvalidBlockNumber;
+		hdr->npages = 0;
+		hdr->nslots = 0;
+		hdr->dim	= 0;
+		return;
+	}
+
+	hdr->base	= c->base;
+	hdr->npages = c->npages;
+	hdr->nslots = c->nslots;
+	hdr->dim	= c->dim;
+
+	char *p = (char *)collection + sizeof(*hdr);
+	memcpy(p, c->page_off, (size_t)c->npages * sizeof(uint32_t));
+	p += (size_t)c->npages * sizeof(uint32_t);
+	memcpy(p, c->cents, (size_t)c->nslots * c->dim * sizeof(float));
+}
+
+void
+mkt_exact_centroid_collection_view(
+		const void *collection, MktExactInternalCentroids *view)
+{
+	const ExactCentroidCollectionHeader *hdr =
+			(const ExactCentroidCollectionHeader *)collection;
+	const char *p = (const char *)collection + sizeof(*hdr);
+
+	view->page_off = (const uint32_t *)p;
+	view->cents	 = (const float *)(p + (size_t)hdr->npages * sizeof(uint32_t));
+	view->base	 = hdr->base;
+	view->npages = hdr->npages;
+}
 
 /* Assign each node of a materialized tree its first block, packing nodes
  * in index order from first_blkno; returns the block after the last. */
@@ -46,17 +340,18 @@ mkt_compute_centroid_layout(
  * the standalone in-RAM build still writes through it. */
 void
 mkt_write_centroid_tree(
-		MktStorage			*storage,
-		const HKMeansResult *tree,
-		Dimension			 dim,
-		uint32_t			 fan_out,
-		uint8_t				 level_offset,
-		MktCentroidFormat	 centroid_format,
-		const RaBitQParams	*rq_params,
-		const float			*global_mean,
-		BlockNumber			 posting_base,
-		const BlockNumber	*node_first_blkno,
-		const float			*pt_centroids)
+		MktStorage				  *storage,
+		const HKMeansResult		  *tree,
+		Dimension				   dim,
+		uint32_t				   fan_out,
+		uint8_t					   level_offset,
+		MktCentroidFormat		   centroid_format,
+		const RaBitQParams		  *rq_params,
+		const float				  *global_mean,
+		BlockNumber				   posting_base,
+		const BlockNumber		  *node_first_blkno,
+		const float				  *pt_centroids,
+		MktExactCentroidCollector *collector)
 {
 	/* Leaf child blocks are formula-derived (posting_base + global leaf
 	 * index), so no O(nlist) posting-head array is needed. Each node has at
@@ -105,7 +400,8 @@ mkt_write_centroid_tree(
 				global_mean,
 				child_blks,
 				leaf_pt,
-				node_first_blkno[i]);
+				node_first_blkno[i],
+				collector);
 	}
 
 	if (leaf_blks != NULL)
@@ -134,6 +430,8 @@ typedef struct RoutingTreeCtx
 	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
 	MktStreamLeafCb		on_leaf;
 	void			   *on_leaf_arg;
+	/* write-phase: optional exact internal-centroid collection */
+	MktExactCentroidCollector *collector;
 	/* plan-phase page-count helpers */
 	uint32_t max_ent; /* non-fastscan entries/page */
 	uint32_t fs_gpp;  /* fastscan groups/page */
@@ -166,20 +464,26 @@ typedef struct RoutingTreeCtx
  */
 void
 mkt_centroid_write_node(
-		MktStorage		   *storage,
-		Dimension			dim,
-		const float		   *cents,
-		uint32_t			n,
-		MktCentroidFormat	fmt,
-		uint8_t				level,
-		uint16_t			flags,
-		uint16_t			child_count,
-		const RaBitQParams *rq_params,
-		const float		   *global_mean,
-		const BlockNumber  *child_blks,
-		const float		   *leaf_pt,
-		BlockNumber			blkno)
+		MktStorage				  *storage,
+		Dimension				   dim,
+		const float				  *cents,
+		uint32_t				   n,
+		MktCentroidFormat		   fmt,
+		uint8_t					   level,
+		uint16_t				   flags,
+		uint16_t				   child_count,
+		const RaBitQParams		  *rq_params,
+		const float				  *global_mean,
+		const BlockNumber		  *child_blks,
+		const float				  *leaf_pt,
+		BlockNumber				   blkno,
+		MktExactCentroidCollector *collector)
 {
+	/* Every internal node of every build shape passes through here; the
+	 * leaf level (LEAF flag) is exact-re-ranked per row instead. */
+	if (collector != NULL && (flags & MKT_CENTROID_FLAG_LEAF) == 0)
+		mkt_exact_centroid_collector_add_node(collector, blkno, cents, n);
+
 	if (fmt == MKT_CENTROID_FMT_FASTSCAN)
 		/* fastscan carries its own encoder; pt_centroids live on posting
 		 * pages, never inline. */
@@ -260,7 +564,8 @@ write_node_pages(
 			c->global_mean,
 			child_blks,
 			NULL,
-			start);
+			start,
+			c->collector);
 
 	c->next_blk += node_npages(c, n);
 	return start;
@@ -696,20 +1001,21 @@ mkt_routing_tree_plan(
  * from the recorded nodes; returns the root block. */
 BlockNumber
 mkt_routing_tree_write(
-		MktStorage		   *storage,
-		uint32_t			nvecs,
-		Dimension			dim,
-		DistanceMetric		metric,
-		uint32_t			nlist,
-		uint32_t			fan_out,
-		MktCentroidFormat	format,
-		const RaBitQParams *rq_params,
-		const float		   *global_mean,
-		MktBlobStore	   *store,
-		BlockNumber			first_posting,
-		BlockNumber			first_centroid,
-		MktStreamLeafCb		on_leaf,
-		void			   *on_leaf_arg)
+		MktStorage				  *storage,
+		uint32_t				   nvecs,
+		Dimension				   dim,
+		DistanceMetric			   metric,
+		uint32_t				   nlist,
+		uint32_t				   fan_out,
+		MktCentroidFormat		   format,
+		const RaBitQParams		  *rq_params,
+		const float				  *global_mean,
+		MktBlobStore			  *store,
+		BlockNumber				   first_posting,
+		BlockNumber				   first_centroid,
+		MktStreamLeafCb			   on_leaf,
+		void					  *on_leaf_arg,
+		MktExactCentroidCollector *collector)
 {
 	/* Replay never clusters: everything it needs is on the tape, so it
 	 * takes no sample vectors, metric or k-means options. */
@@ -736,6 +1042,7 @@ mkt_routing_tree_write(
 	c.next_blk		= first_centroid;
 	c.on_leaf		= on_leaf;
 	c.on_leaf_arg	= on_leaf_arg;
+	c.collector		= collector;
 
 	/* Same pass-scoped scratch as the PLAN pass -- the leak-containment
 	 * boundary (see the note there). on_leaf runs under it too; its
@@ -759,20 +1066,21 @@ mkt_routing_tree_write(
  * space -- see the header comment. */
 BlockNumber
 mkt_routing_subtree_write(
-		MktStorage			*storage,
-		const HKMeansResult *subtree,
-		Dimension			 dim,
-		DistanceMetric		 metric,
-		uint32_t			 fan_out,
-		uint8_t				 level_offset,
-		MktCentroidFormat	 format,
-		const RaBitQParams	*rq_params,
-		const float			*global_mean,
-		BlockNumber			 first_posting,
-		uint32_t			 leaf_offset,
-		BlockNumber			 first_block,
-		MktStreamLeafCb		 on_leaf,
-		void				*on_leaf_arg)
+		MktStorage				  *storage,
+		const HKMeansResult		  *subtree,
+		Dimension				   dim,
+		DistanceMetric			   metric,
+		uint32_t				   fan_out,
+		uint8_t					   level_offset,
+		MktCentroidFormat		   format,
+		const RaBitQParams		  *rq_params,
+		const float				  *global_mean,
+		BlockNumber				   first_posting,
+		uint32_t				   leaf_offset,
+		BlockNumber				   first_block,
+		MktStreamLeafCb			   on_leaf,
+		void					  *on_leaf_arg,
+		MktExactCentroidCollector *collector)
 {
 	uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, format);
 
@@ -808,7 +1116,8 @@ mkt_routing_subtree_write(
 			global_mean,
 			first_posting + leaf_offset,
 			nfb,
-			NULL);
+			NULL,
+			collector);
 	mkt_free(nfb);
 
 	/* Head pages carry pt_centroid from the resident float leaf centroids. */

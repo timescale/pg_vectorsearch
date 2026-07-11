@@ -725,6 +725,8 @@ SELECT exact_check('line12kb', '(v) WITH (nlist = 4096, fan_out = 8)',
                    (SELECT '[' || string_agg((sin(60 + j))::text, ',') || ']'
                     FROM generate_series(1, 64) j))
     AS multitile_refine_exact;
+WARNING:  maintenance_work_mem is likely too small for exact centroid collection (about 147 kB needed for nlist=4096, fan_out=8; the budget is one eighth of maintenance_work_mem): the build will fall back to estimated internal scoring — raise maintenance_work_mem to at least 1173 kB
+WARNING:  exact centroid collection over budget (needs more than 133120 of 131072 bytes); build descent falls back to estimated internal scoring — consider raising the build memory budget
  multitile_refine_exact 
 ------------------------
  t

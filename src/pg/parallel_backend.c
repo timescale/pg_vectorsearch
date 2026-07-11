@@ -60,6 +60,10 @@ typedef struct MktBuildSharedPg
 	 * root assignment (when the per-child sample counts that bound the slot
 	 * size are known) and published before the ring barrier. */
 	dsm_handle subtree_ring_handle;
+	/* DSM handle of the exact centroid collection, created by the leader
+	 * after the streaming tree write and published before the tree-ready
+	 * barrier (exact-centroid seam). */
+	dsm_handle exact_centroids_handle;
 	slock_t	   mutex;
 	/* Striped locks guarding the shared leaf-refinement accumulator. */
 	slock_t accum_locks[MKT_REFINE_LOCK_STRIPES];
@@ -812,6 +816,47 @@ mkt_pbuild_subtree_ring_attach(MktBuildShared *shared, void **seg_out)
 
 void
 mkt_pbuild_subtree_ring_release(void *seg)
+{
+	if (seg != NULL)
+		dsm_detach((dsm_segment *)seg);
+}
+
+/*
+ * Exact-centroid seam: the exact centroid collection lives in its own DSM
+ * segment, created by the leader only after the streaming tree write (its
+ * size — a few MB — is known then). The handle travels in shared; every
+ * participant detaches when its page-backed routing is done, and the last
+ * detach frees the memory.
+ */
+char *
+mkt_pbuild_exact_centroids_create(
+		MktBuildShared *shared, uint64_t nbytes, void **seg_out)
+{
+	MktBuildSharedPg *pg = (MktBuildSharedPg *)shared;
+
+	dsm_segment *seg		   = dsm_create(nbytes, 0);
+	pg->exact_centroids_handle = dsm_segment_handle(seg);
+	*seg_out				   = seg;
+	return (char *)dsm_segment_address(seg);
+}
+
+char *
+mkt_pbuild_exact_centroids_attach(MktBuildShared *shared, void **seg_out)
+{
+	MktBuildSharedPg *pg = (MktBuildSharedPg *)shared;
+
+	dsm_segment *seg = dsm_attach(pg->exact_centroids_handle);
+	if (seg == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("could not attach to mktann exact-centroid "
+						"segment")));
+	*seg_out = seg;
+	return (char *)dsm_segment_address(seg);
+}
+
+void
+mkt_pbuild_exact_centroids_release(void *seg)
 {
 	if (seg != NULL)
 		dsm_detach((dsm_segment *)seg);

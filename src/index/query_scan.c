@@ -183,6 +183,8 @@ search_centroids(
 			.metric		 = idx->metric,
 			.error_scale = idx->centroid_error_scale,
 			.scratch	 = qs->centroid_scratch,
+			/* NULL on every query path; only the build route sets it. */
+			.exact_internal = idx->exact_internal,
 	};
 
 	return mkt_centroid_beam_search(
