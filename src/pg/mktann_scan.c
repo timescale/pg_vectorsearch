@@ -73,6 +73,14 @@ mkt_phase_stats_reset(PG_FUNCTION_ARGS)
 	g_phase_cpageread_ns = 0;
 	g_phase_cscore_ns	 = 0;
 	g_route_sum			 = 0;
+	{
+		extern uint64_t mkt_bufcache_hits;
+		extern uint64_t mkt_bufcache_cold;
+		extern uint64_t mkt_bufcache_stale;
+		mkt_bufcache_hits  = 0;
+		mkt_bufcache_cold  = 0;
+		mkt_bufcache_stale = 0;
+	}
 	for (int i = 0; i < 7; i++)
 		g_route_le[i] = 0;
 	PG_RETURN_VOID();
@@ -83,14 +91,22 @@ PG_FUNCTION_INFO_V1(mkt_routing_stats);
 Datum
 mkt_routing_stats(PG_FUNCTION_ARGS)
 {
-	char	 buf[320];
-	uint64_t n = g_phase_nqueries ? g_phase_nqueries : 1;
+	char			buf[448];
+	uint64_t		n = g_phase_nqueries ? g_phase_nqueries : 1;
+	extern uint64_t mkt_bufcache_hits;
+	extern uint64_t mkt_bufcache_cold;
+	extern uint64_t mkt_bufcache_stale;
 	snprintf(
 			buf,
 			sizeof(buf),
+			"bufcache hits=" UINT64_FORMAT " cold=" UINT64_FORMAT
+			" stale=" UINT64_FORMAT " | "
 			"queries=%lu avg_deepest_contrib_rank=%.1f | "
 			"deepest-rank histogram: <=8:%.1f%% <=16:%.1f%% <=32:%.1f%% "
 			"<=64:%.1f%% <=128:%.1f%% <=256:%.1f%% >256:%.1f%%",
+			mkt_bufcache_hits,
+			mkt_bufcache_cold,
+			mkt_bufcache_stale,
 			(unsigned long)g_phase_nqueries,
 			(double)g_route_sum / n,
 			100.0 * g_route_le[0] / n,
