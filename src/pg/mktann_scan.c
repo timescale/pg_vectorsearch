@@ -73,14 +73,9 @@ mkt_phase_stats_reset(PG_FUNCTION_ARGS)
 	g_phase_cpageread_ns = 0;
 	g_phase_cscore_ns	 = 0;
 	g_route_sum			 = 0;
-	{
-		extern uint64_t mkt_bufcache_hits;
-		extern uint64_t mkt_bufcache_cold;
-		extern uint64_t mkt_bufcache_stale;
-		mkt_bufcache_hits  = 0;
-		mkt_bufcache_cold  = 0;
-		mkt_bufcache_stale = 0;
-	}
+	mkt_bufcache_hits	 = 0;
+	mkt_bufcache_cold	 = 0;
+	mkt_bufcache_stale	 = 0;
 	for (int i = 0; i < 7; i++)
 		g_route_le[i] = 0;
 	PG_RETURN_VOID();
@@ -91,11 +86,8 @@ PG_FUNCTION_INFO_V1(mkt_routing_stats);
 Datum
 mkt_routing_stats(PG_FUNCTION_ARGS)
 {
-	char			buf[448];
-	uint64_t		n = g_phase_nqueries ? g_phase_nqueries : 1;
-	extern uint64_t mkt_bufcache_hits;
-	extern uint64_t mkt_bufcache_cold;
-	extern uint64_t mkt_bufcache_stale;
+	char	 buf[448];
+	uint64_t n = g_phase_nqueries ? g_phase_nqueries : 1;
 	snprintf(
 			buf,
 			sizeof(buf),
