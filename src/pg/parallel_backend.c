@@ -459,12 +459,12 @@ mkt_pbuild_setup_shared(
 
 	if (want_samples > budget && est_tuples > (double)budget)
 		elog(LOG,
-			 "meerkat: k-means sample set limited to %u of the ideal %lu "
-			 "vectors by maintenance_work_mem (%d kB); raise "
-			 "maintenance_work_mem for finer centroid training on large "
-			 "tables",
+			 "meerkat: k-means sample set limited to %u of the "
+			 "ideal " UINT64_FORMAT " vectors by maintenance_work_mem "
+			 "(%d kB); raise maintenance_work_mem for finer centroid "
+			 "training on large tables",
 			 total_samples,
-			 (unsigned long)want_samples,
+			 want_samples,
 			 maintenance_work_mem);
 
 	uint32_t max_per_worker = (total_samples + nparticipants - 1) /
