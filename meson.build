@@ -651,7 +651,6 @@ if build_pg_extension
     c_args: mkt_pg_cflags,
     include_directories: src_inc,
     dependencies: [m_dep] + (have_cblas ? [cblas_dep] : []),
-    override_options: ['werror=false'],
   )
 
   subdir('src/pg')

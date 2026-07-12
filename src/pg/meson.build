@@ -65,7 +65,7 @@ meerkat_ext_so = shared_library('meerkat',
   install_rpath: pg_libdir,
   install: true,
   install_dir: pg_pkglibdir,
-  override_options: ['b_lundef=false', 'warning_level=1', 'werror=false'],
+  override_options: ['b_lundef=false'],
 )
 
 # Install extension control and SQL files
