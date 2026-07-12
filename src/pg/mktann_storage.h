@@ -19,6 +19,13 @@
 /* ----------------------------------------------------------------
  * PG buffer cache storage
  * ---------------------------------------------------------------- */
+
+/* Buffer-id cache effectiveness counters (diagnostic; reset and read
+ * by the mkt_routing_stats SQL functions). */
+extern uint64_t mkt_bufcache_hits;
+extern uint64_t mkt_bufcache_cold;
+extern uint64_t mkt_bufcache_stale;
+
 typedef struct MktannStorage
 {
 	MktStorage	   base; /* must be first */
