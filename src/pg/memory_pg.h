@@ -35,6 +35,7 @@ typedef MemoryContextCallback MktMemCtxCallback;
 #define mkt_memctx_delete(ctx)			MemoryContextDelete(ctx)
 #define mkt_memctx_reset(ctx)			MemoryContextReset(ctx)
 #define mkt_memctx_switch(ctx)			MemoryContextSwitchTo(ctx)
+#define mkt_memctx_current()			CurrentMemoryContext
 #define mkt_memctx_total_allocated(ctx) ((size_t)0)
 
 /* Callback registration - wraps PostgreSQL's

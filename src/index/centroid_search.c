@@ -39,6 +39,13 @@ typedef struct Candidate
  * ---------------------------------------------------------------- */
 struct MktCentroidScratch
 {
+	/* Owning context, captured at scratch_create: every buffer below
+	 * lives here until scratch_free. Beam search runs under whatever
+	 * context the caller routes from — during index builds that is a
+	 * per-row scratch context reset after every tuple — so any lazy
+	 * (re)allocation of a scratch buffer must go to this context, never
+	 * to the current one. */
+	MktMemCtx  memctx;
 	uint32_t   cand_cap;	 /* size of buf_a / buf_b */
 	uint32_t   max_per_page; /* size of the f_add..symmetric_scratch arrays */
 	Candidate *buf_a;
@@ -98,10 +105,22 @@ mkt_centroid_scratch_create(Dimension dim, uint32_t max_beam_width)
 	if (cand_cap < max_per_page * 4)
 		cand_cap = max_per_page * 4;
 
-	MktCentroidScratch *s = mkt_alloc(sizeof(MktCentroidScratch));
+	/* The scratch owns a dedicated child context: every buffer —
+	 * including later growth, which can run under a caller's per-row
+	 * reset context — lives and dies with it, and cleanup is a single
+	 * context delete. */
+	MktMemCtx ctx =
+			mkt_memctx_create(mkt_memctx_current(), "mkt centroid scratch");
+	MktMemCtx			old_ctx = mkt_memctx_switch(ctx);
+	MktCentroidScratch *s		= mkt_alloc(sizeof(MktCentroidScratch));
 	if (s == NULL)
+	{
+		mkt_memctx_switch(old_ctx);
+		mkt_memctx_delete(ctx);
 		return NULL;
+	}
 
+	s->memctx			 = mkt_memctx_current();
 	s->cand_cap			 = cand_cap;
 	s->max_per_page		 = max_per_page;
 	s->buf_a			 = mkt_alloc(cand_cap * sizeof(Candidate));
@@ -129,6 +148,7 @@ mkt_centroid_scratch_create(Dimension dim, uint32_t max_beam_width)
 	 * per page; the buffer is reusable. */
 	s->fs_lut_bytes = MKT_FASTSCAN_LUT_HACC_BYTES(dim);
 	s->fs_lut		= mkt_alloc(s->fs_lut_bytes);
+	mkt_memctx_switch(old_ctx);
 	return s;
 }
 
@@ -138,17 +158,9 @@ mkt_centroid_scratch_free(MktCentroidScratch *s)
 	if (s == NULL)
 		return;
 	mkt_topk_cleanup(&s->level_topk);
-	mkt_free(s->entries_buf);
-	mkt_free(s->buf_a);
-	mkt_free(s->buf_b);
-	mkt_free(s->f_add);
-	mkt_free(s->f_rescale);
-	mkt_free(s->distances);
-	mkt_free(s->lower_bounds);
-	mkt_free(s->multi_scratch);
-	mkt_free(s->symmetric_scratch);
-	mkt_free(s->fs_lut);
-	mkt_free(s);
+	/* Everything the scratch owns — struct included — lives in its
+	 * context; one delete frees it all. */
+	mkt_memctx_delete(s->memctx);
 }
 
 /*
@@ -475,14 +487,19 @@ select_topk_bounded(
 	for (uint32_t i = 0; i < count; i++)
 		mkt_topk_insert_unique(topk, cands[i].distance, cands[i].error, i);
 
-	/* entries_buf must hold topk->cand_count survivors; grow if needed. */
+	/* entries_buf must hold topk->cand_count survivors; grow if needed.
+	 * Grow in the scratch's owning context: this runs under whatever
+	 * context the route was issued from — during index builds a per-row
+	 * scratch context that is reset after every tuple — while the buffer
+	 * must survive for the scratch's whole lifetime. */
 	if (topk->cand_count > scratch->entries_cap)
 	{
 		uint32_t new_cap = scratch->entries_cap * 2;
 		while (new_cap < topk->cand_count)
 			new_cap *= 2;
 		mkt_free(scratch->entries_buf);
-		scratch->entries_buf = mkt_alloc(new_cap * sizeof(MktTopKEntry));
+		scratch->entries_buf = mkt_memctx_alloc(
+				scratch->memctx, new_cap * sizeof(MktTopKEntry));
 		scratch->entries_cap = new_cap;
 	}
 

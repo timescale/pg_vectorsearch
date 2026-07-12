@@ -54,6 +54,10 @@ typedef MktArena *MktMemCtx;
 /* Current memory context (thread-local) */
 extern _Thread_local MktMemCtx mkt_current_memctx;
 
+/* Accessor mirroring the PG side's CurrentMemoryContext, so shared code
+ * can capture an owning context without mode-specific #ifdefs. */
+#define mkt_memctx_current() mkt_current_memctx
+
 /* Allocation functions */
 void *mkt_alloc(size_t size);
 void *mkt_alloc0(size_t size);
