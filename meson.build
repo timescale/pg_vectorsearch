@@ -640,7 +640,10 @@ if build_pg_extension
   # through a GOT entry that is not yet relocated, crashing the backend on
   # CREATE EXTENSION (glibc-relocation-order dependent). The function-pointer
   # fallback dispatches lazily on first call instead, with equivalent cost.
-  mkt_pg_cflags = ['-I' + pg_includedir_server, '-DMKT_DISABLE_IFUNC'] \
+  # -isystem: PostgreSQL headers are third-party — their warnings (e.g.
+  # -Wunused-parameter on inline ilist.h helpers with newer GCC) are not
+  # ours to fix and must not gate our werror builds.
+  mkt_pg_cflags = ['-isystem' + pg_includedir_server, '-DMKT_DISABLE_IFUNC'] \
     + pg_cflags
 
   mkt_pg_lib = static_library('mkt_pg',
