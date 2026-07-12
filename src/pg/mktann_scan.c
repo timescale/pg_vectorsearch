@@ -101,13 +101,13 @@ mkt_routing_stats(PG_FUNCTION_ARGS)
 			sizeof(buf),
 			"bufcache hits=" UINT64_FORMAT " cold=" UINT64_FORMAT
 			" stale=" UINT64_FORMAT " | "
-			"queries=%lu avg_deepest_contrib_rank=%.1f | "
+			"queries=" UINT64_FORMAT " avg_deepest_contrib_rank=%.1f | "
 			"deepest-rank histogram: <=8:%.1f%% <=16:%.1f%% <=32:%.1f%% "
 			"<=64:%.1f%% <=128:%.1f%% <=256:%.1f%% >256:%.1f%%",
 			mkt_bufcache_hits,
 			mkt_bufcache_cold,
 			mkt_bufcache_stale,
-			(unsigned long)g_phase_nqueries,
+			g_phase_nqueries,
 			(double)g_route_sum / n,
 			100.0 * g_route_le[0] / n,
 			100.0 * g_route_le[1] / n,
@@ -129,10 +129,10 @@ mkt_phase_stats(PG_FUNCTION_ARGS)
 	snprintf(
 			buf,
 			sizeof(buf),
-			"queries=%lu | per-query us: centroid=%.1f "
+			"queries=" UINT64_FORMAT " | per-query us: centroid=%.1f "
 			"[rot=%.1f lut=%.1f pageread=%.1f score=%.1f] "
-			"posting=%.1f rerank=%.1f | entries/q=%lu",
-			(unsigned long)g_phase_nqueries,
+			"posting=%.1f rerank=%.1f | entries/q=" UINT64_FORMAT,
+			g_phase_nqueries,
 			(double)g_phase_centroid_ns / n / MKT_NS_PER_US,
 			(double)g_phase_rotation_ns / n / MKT_NS_PER_US,
 			(double)g_phase_clut_ns / n / MKT_NS_PER_US,
@@ -140,7 +140,7 @@ mkt_phase_stats(PG_FUNCTION_ARGS)
 			(double)g_phase_cscore_ns / n / MKT_NS_PER_US,
 			(double)g_phase_posting_ns / n / MKT_NS_PER_US,
 			(double)g_phase_rerank_ns / n / MKT_NS_PER_US,
-			(unsigned long)(g_phase_entries / n));
+			g_phase_entries / n);
 	PG_RETURN_TEXT_P(cstring_to_text(buf));
 }
 

@@ -19,6 +19,7 @@
 #include <error_c.h>
 #include <getopt.h>
 #include <hdf5.h>
+#include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -603,10 +604,10 @@ verify_distances(
 
 	if (!verbose && dist_mismatches > 0)
 	{
-		printf("  %u/%lu pairs exceeded %.0f%% relative "
+		printf("  %u/%" PRIu64 " pairs exceeded %.0f%% relative "
 			   "difference threshold\n",
 			   dist_mismatches,
-			   (unsigned long)total_pairs,
+			   total_pairs,
 			   (double)DIST_MISMATCH_REL_THRESHOLD * 100.0);
 	}
 
@@ -787,7 +788,7 @@ cmd_verify_rabitq(CmdContext *ctx)
 	printf("  test:  %u queries (of %llu available)\n",
 		   nq,
 		   (unsigned long long)test_rows);
-	printf("  seed: %lu\n\n", (unsigned long)seed);
+	printf("  seed: %" PRIu64 "\n\n", seed);
 
 	/* Compute centroid */
 	float *centroid = malloc(dim * sizeof(float));
@@ -802,9 +803,7 @@ cmd_verify_rabitq(CmdContext *ctx)
 	compute_centroid(train, ntrain, dim, centroid);
 
 	/* Initialize RaBitQ parameters */
-	printf("Initializing RaBitQ (dim=%u, seed=%lu)...\n\n",
-		   dim,
-		   (unsigned long)seed);
+	printf("Initializing RaBitQ (dim=%u, seed=%" PRIu64 ")...\n\n", dim, seed);
 	RaBitQParams *params = mkt_rabitq_create(dim, seed);
 	if (params == NULL)
 	{

@@ -31,6 +31,8 @@
 #include <utils/wait_event.h>
 #endif
 
+#include <inttypes.h>
+
 #include "algo/hkmeans.h"
 #include "algo/kmeans_internal.h"
 #include "algo/vecops.h"
@@ -193,10 +195,11 @@ mkt_build_child_subtree(
 	{
 		if ((uint64_t)sub->total_size > slot_size)
 			mkt_error(
-					"mktann: subtree blob %u exceeds slot (%u > %lu)",
+					"mktann: subtree blob %u exceeds slot "
+					"(%u > %" PRIu64 ")",
 					child,
 					sub->total_size,
-					(unsigned long)slot_size);
+					slot_size);
 		memcpy(slot, sub, sub->total_size);
 		mkt_free(sub);
 	}

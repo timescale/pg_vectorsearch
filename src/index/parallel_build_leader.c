@@ -34,6 +34,7 @@
 #include <utils/sampling.h>
 #endif
 
+#include <inttypes.h>
 #include <math.h>
 
 #include "algo/distance.h"
@@ -793,10 +794,10 @@ do_parallel_build(
 						 collected / nlist <
 								 (uint64_t)shared->refine_threshold;
 		mkt_debug(
-				"mktann: refine gate: kept=%lu seen=%lu nlist=%u "
-				"threshold=%u -> %s",
-				(unsigned long)collected,
-				(unsigned long)seen,
+				"mktann: refine gate: kept=%" PRIu64 " seen=%" PRIu64
+				" nlist=%u threshold=%u -> %s",
+				collected,
+				seen,
 				nlist,
 				shared->refine_threshold,
 				shared->refine ? "refine" : "skip");
