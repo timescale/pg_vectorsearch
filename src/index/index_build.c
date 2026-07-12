@@ -491,6 +491,14 @@ replay_leaf_parent(
 	uint32_t kept =
 			compact_nonempty_centroids(cents, counts, nclusters, c->dim);
 
+	/* Cosine routes and encodes against unit-norm references; k-means
+	 * means drift below unit norm, so normalize the leaf centroids in
+	 * place before the leaf codes and head references are written from
+	 * them (the flat-tree path already does). */
+	if (c->metric == DISTANCE_COSINE)
+		for (uint32_t kk = 0; kk < kept; kk++)
+			mkt_l2_normalize(cents + (size_t)kk * c->dim, c->dim);
+
 	/* Leaf heads are formula-derived (first_posting + global leaf index);
 	 * kept <= fan_out, so the pass-lifetime scratch covers every node. */
 	BlockNumber *leaf_blks = NULL;
@@ -691,6 +699,7 @@ mkt_routing_tree_write(
 		MktStorage		   *storage,
 		uint32_t			nvecs,
 		Dimension			dim,
+		DistanceMetric		metric,
 		uint32_t			nlist,
 		uint32_t			fan_out,
 		MktCentroidFormat	format,
@@ -709,6 +718,7 @@ mkt_routing_tree_write(
 
 	RoutingTreeCtx c;
 	routing_tree_ctx_init(&c, dim, nlist, fan_out, format);
+	c.metric  = metric;
 	c.storage = storage;
 	c.store	  = store;
 	{
@@ -752,6 +762,7 @@ mkt_routing_subtree_write(
 		MktStorage			*storage,
 		const HKMeansResult *subtree,
 		Dimension			 dim,
+		DistanceMetric		 metric,
 		uint32_t			 fan_out,
 		uint8_t				 level_offset,
 		MktCentroidFormat	 format,
@@ -776,6 +787,16 @@ mkt_routing_subtree_write(
 	 * the global index space. */
 	/* Subtree node levels are subtree-relative; level_offset places them at
 	 * their absolute depth (the tree root above them is level 0). */
+	/* Cosine: normalize the subtree's leaf centroids in place before the
+	 * leaf codes and head references are written from them (matches the
+	 * flat-tree path; k-means means drift below unit norm). */
+	if (metric == DISTANCE_COSINE)
+	{
+		float *lv = hk_leaf_centroids(subtree);
+		for (uint32_t li = 0; li < subtree->nleaves; li++)
+			mkt_l2_normalize(lv + (size_t)li * dim, dim);
+	}
+
 	mkt_write_centroid_tree(
 			storage,
 			subtree,

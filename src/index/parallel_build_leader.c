@@ -403,6 +403,7 @@ build_routing_tree_batched(
 				 storage,
 				 blob,
 				 dim,
+				 shared->metric,
 				 fan_out,
 				 1, /* subtrees hang off the level-0 root */
 				 fmt,
@@ -512,6 +513,7 @@ build_routing_tree_flat(
 			storage,
 			flat,
 			dim,
+			shared->metric,
 			fan_out,
 			0, /* the flat tree IS the root level */
 			fmt,

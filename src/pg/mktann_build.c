@@ -777,6 +777,7 @@ do_serial_build(
 			storage,
 			(uint32_t)bs->nsamples,
 			dim,
+			p->metric,
 			target_nlist,
 			p->fan_out,
 			p->centroid_format,
