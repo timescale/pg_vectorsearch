@@ -35,7 +35,8 @@ if cc.get_id() == 'clang'
   ]
 endif
 
-pg_ext_cflags += ['-I' + pg_includedir_server]
+# -isystem: see mkt_pg_cflags in the top-level meson.build.
+pg_ext_cflags += ['-isystem' + pg_includedir_server]
 pg_ext_cflags += pg_cflags
 
 # Add PostgreSQL source tree headers for IDE navigation.
