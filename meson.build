@@ -9,10 +9,26 @@ project('meerkat', 'c',
 )
 
 cc = meson.get_compiler('c')
+fs = import('fs')
 
 # Get build options
 simd_mode = get_option('simd')
 use_native = get_option('native')
+
+# Developer tools (CLI, standalone shared library, unit tests). 'auto'
+# means enabled in a git checkout and disabled when building from a
+# release tarball (which has no .git — the same signal vcs_tag keys
+# on), so release-artifact consumers build only the PG extension by
+# default while repo/CI builds keep exercising everything. CI passes
+# -Dtools=enabled/disabled explicitly rather than relying on 'auto'.
+tools_opt = get_option('tools')
+build_tools = tools_opt.enabled() or (
+  tools_opt.auto() and fs.exists(meson.project_source_root() / '.git'))
+if build_tools
+  message('Developer tools (CLI, standalone library, unit tests): enabled')
+else
+  message('Developer tools (CLI, standalone library, unit tests): disabled')
+endif
 
 # Common flags (MKT_STANDALONE added per-target, not globally)
 add_project_arguments(
@@ -423,6 +439,7 @@ mkt_core_dep = declare_dependency(
   dependencies: [m_dep, thread_dep] + (have_cblas ? [cblas_dep] : []),
 )
 
+if build_tools
 # CLI tool
 mkt_cli_sources = files(
   'src/cli/main.c',
@@ -484,6 +501,7 @@ mkt_symlink = custom_target('mkt-symlink',
 
 # Unit tests
 subdir('test/unit')
+endif # build_tools
 
 # ============================================================================
 # PostgreSQL extension
