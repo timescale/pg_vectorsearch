@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.os }} ${{ matrix.arch }} ${{ matrix.standalone && 'standalone' || matrix.pg }}
+    name: ${{ matrix.os }} ${{ matrix.arch }} ${{ matrix.standalone && 'standalone' || matrix.pg }}${{ matrix.tools == 'disabled' && ' ext-only' || '' }}
     runs-on: ${{ matrix.runner }}
 
     strategy:
@@ -71,6 +71,14 @@ jobs:
             os: macOS
             arch: arm64
             pg: packaged
+          # Extension-only: -Dtools=disabled skips the CLI, standalone
+          # library, and unit tests — the default when building from a
+          # release tarball. Keeps that build shape working on every PR.
+          - runner: ubuntu-latest
+            os: Linux
+            arch: x64
+            pg: packaged
+            tools: disabled
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -123,6 +131,7 @@ jobs:
         env:
           PG_CONFIG: ${{ steps.pg.outputs.pg-config }}
           STANDALONE: ${{ matrix.standalone }}
+          TOOLS: ${{ matrix.tools || 'enabled' }}
         run: |
           if [ -n "$STANDALONE" ]; then
             args="-Dpostgresql=disabled"
@@ -130,6 +139,9 @@ jobs:
             args="-Dpostgresql=enabled"
             [ -n "$PG_CONFIG" ] && args="$args -Dpg_config=$PG_CONFIG"
           fi
+          # CI never relies on the 'auto' tools heuristic: full jobs
+          # force-enable, the ext-only job force-disables.
+          args="$args -Dtools=$TOOLS"
           ./scripts/ci/build.sh builddir $args
 
       - name: Show regression diffs and server logs

@@ -84,10 +84,16 @@ meson install -C builddir
 | `simd` | `full`, `compiler`, `none` | `full` | SIMD implementation mode |
 | `native` | `true`, `false` | `false` | Use `-march=native` for local builds |
 | `blas` | `auto`, `enabled`, `disabled` | `auto` | CBLAS for matrix operations |
+| `tools` | `auto`, `enabled`, `disabled` | `auto` | Developer tools (CLI, standalone library, unit tests) |
 
 Use `-Dpostgresql=enabled` to require the extension build (fails if PostgreSQL
 is not found). Use `-Dpostgresql=disabled` to build only the standalone library
 and CLI tools.
+
+The `tools` default (`auto`) builds the developer tools in a git checkout but
+skips them when building from a release tarball, so packagers get an
+extension-only build unless they pass `-Dtools=enabled`. PostgreSQL regression
+tests are unaffected.
 
 ### Optional: BLAS Library
 
