@@ -1,0 +1,124 @@
+-- Parallel index scan: Gather Merge over per-worker streams.
+--
+-- Correctness contract: a parallel scan returns the same TID set as the
+-- serial scan (order compared through distances, which are unique here
+-- by construction), with zero duplicate rows even when SOAR replication
+-- stores the same TID in several clusters (replicas scanned by
+-- different workers are deduped through the shared claim table).
+-- Well-separated line data: distances to the probe are strictly
+-- increasing, so the top-k is unambiguous and order-stable.
+CREATE TABLE pscan_pts (id int, v vector(3));
+INSERT INTO pscan_pts SELECT g, format('[%s,0,0]', g)::vector
+    FROM generate_series(1, 5000) g;
+-- SOAR + boundary replication: replicas of one TID in several clusters.
+CREATE INDEX pscan_idx ON pscan_pts USING mktann (v)
+    WITH (nlist = 64, fan_out = 8, soar_lambda = 1.0,
+          boundary_epsilon = 0.2);
+ALTER TABLE pscan_pts SET (parallel_workers = 2);
+-- Force parallel-friendly costing (the honest cost model is a separate
+-- concern; these settings make the partial path win deterministically).
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_index_scan_size = 0;
+SET max_parallel_workers_per_gather = 2;
+SET enable_seqscan = off;
+SET mkt.nprobe = 64; -- probe everything: exact results
+SET mkt.query_limit = 20;
+-- Plan shape: Gather Merge over a parallel mktann index scan.
+EXPLAIN (COSTS OFF)
+SELECT id FROM pscan_pts ORDER BY v <-> '[0.5,0,0]' LIMIT 10;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Limit
+   ->  Gather Merge
+         Workers Planned: 2
+         ->  Parallel Index Scan using pscan_idx on pscan_pts
+               Order By: (v <-> '[0.5,0,0]'::vector)
+(5 rows)
+
+-- Parallel results.
+CREATE TEMP TABLE pscan_par AS
+SELECT row_number() OVER () AS rank, id
+FROM (SELECT id FROM pscan_pts ORDER BY v <-> '[0.5,0,0]' LIMIT 20) t;
+-- No duplicates (SOAR replicas claimed exactly once across workers).
+SELECT count(*) AS rows, count(DISTINCT id) AS distinct_ids FROM pscan_par;
+ rows | distinct_ids 
+------+--------------
+   20 |           20
+(1 row)
+
+-- Serial reference.
+SET max_parallel_workers_per_gather = 0;
+CREATE TEMP TABLE pscan_ser AS
+SELECT row_number() OVER () AS rank, id
+FROM (SELECT id FROM pscan_pts ORDER BY v <-> '[0.5,0,0]' LIMIT 20) t;
+-- Identical results, identical order (distances unique by construction).
+SELECT count(*) AS mismatches
+FROM pscan_par p FULL JOIN pscan_ser s USING (rank)
+WHERE p.id IS DISTINCT FROM s.id;
+ mismatches 
+------------
+          0
+(1 row)
+
+-- Same again with a leader that only coordinates.
+SET max_parallel_workers_per_gather = 2;
+SET parallel_leader_participation = off;
+SELECT count(*) AS mismatches
+FROM (SELECT row_number() OVER () AS rank, id
+      FROM (SELECT id FROM pscan_pts
+            ORDER BY v <-> '[0.5,0,0]' LIMIT 20) t) p
+    FULL JOIN pscan_ser s USING (rank)
+WHERE p.id IS DISTINCT FROM s.id;
+ mismatches 
+------------
+          0
+(1 row)
+
+RESET parallel_leader_participation;
+-- Rescan coverage: the same prepared statement re-executed re-runs the
+-- rendezvous against a reinitialized shared area.
+PREPARE pscan_q(vector) AS
+SELECT id FROM pscan_pts ORDER BY v <-> $1 LIMIT 5;
+EXECUTE pscan_q('[0.5,0,0]');
+ id 
+----
+  1
+  2
+  3
+  4
+  5
+(5 rows)
+
+EXECUTE pscan_q('[100.5,0,0]');
+ id  
+-----
+ 101
+ 100
+ 102
+  99
+ 103
+(5 rows)
+
+DEALLOCATE pscan_q;
+-- Cursors cannot run parallel plans; the serial fallback must serve them.
+BEGIN;
+DECLARE pscan_cur CURSOR FOR
+SELECT id FROM pscan_pts ORDER BY v <-> '[0.5,0,0]' LIMIT 3;
+FETCH ALL FROM pscan_cur;
+ id 
+----
+  1
+  2
+  3
+(3 rows)
+
+COMMIT;
+RESET enable_seqscan;
+RESET max_parallel_workers_per_gather;
+RESET min_parallel_index_scan_size;
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
+RESET mkt.nprobe;
+RESET mkt.query_limit;
+DROP TABLE pscan_pts;

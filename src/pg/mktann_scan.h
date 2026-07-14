@@ -72,4 +72,11 @@ bool mktann_gettuple(IndexScanDesc scan, ScanDirection direction);
  */
 void mktann_endscan(IndexScanDesc scan);
 
+/* Default result count when mkt.query_limit is unset. */
+#define MKT_DEFAULT_K 10
+
+/* Per-scan sizing shared by the serial scan and the parallel-scan DSM
+ * estimate (session GUCs + metapage cache). */
+void mktann_scan_sizing(Relation index, uint32_t *max_k, uint32_t *max_nprobe);
+
 #endif /* MKTANN_SCAN_H */

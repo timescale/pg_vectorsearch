@@ -211,6 +211,15 @@ mktann_index_base_init(Relation index, MktIndexBase *base)
  * caller owns the params' lifetime (they must outlive the scan); they
  * are never installed into the process-local cache.
  */
+/* The backend-cached rotation params for this index (built on first
+ * use). For the parallel-scan leader to publish into shared memory. */
+RaBitQParams *
+mktann_cache_params(Relation index)
+{
+	AmCacheData *c = get_cache_data(index);
+	return get_or_create_params(c->base.dim, c->base.rabitq_seed);
+}
+
 void
 mktann_index_base_init_with_params(
 		Relation index, MktIndexBase *base, RaBitQParams *params)

@@ -19,6 +19,7 @@
 #include "mkt_pg.h"
 #include "mktann_explain.h"
 #include "mktann_storage.h"
+#include "pg/mktann_cost.h"
 
 PG_MODULE_MAGIC;
 
@@ -307,6 +308,10 @@ _PG_init(void)
 			NULL);
 
 	MarkGUCPrefixReserved(MKT_EXTENSION_SCHEMA);
+
+	/* Partial-path re-costing: parallel phases divide across workers
+	 * (see mktann_cost.c). */
+	mktann_cost_register_hook();
 
 	mkt_cblas_pin_single_thread();
 

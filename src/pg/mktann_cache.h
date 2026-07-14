@@ -49,6 +49,9 @@ void mktann_index_base_init(Relation index, MktIndexBase *base);
 void mktann_index_base_init_with_params(
 		Relation index, MktIndexBase *base, RaBitQParams *params);
 
+/* Backend-cached rotation params (leader-side publication source). */
+RaBitQParams *mktann_cache_params(Relation index);
+
 /*
  * Immutable dim + distance metric + first posting page from the cache, without
  * forcing the lazy rotation-matrix work that mktann_index_base_init does. For

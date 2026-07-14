@@ -27,6 +27,8 @@
 #include "mkt_vector.h"
 #include "mktann_build.h"
 #include "mktann_cache.h"
+#include "mktann_cost.h"
+#include "mktann_parallel.h"
 #include "mktann_scan.h"
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
@@ -293,39 +295,6 @@ mktann_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 	return stats;
 }
 
-static void
-mktann_costestimate(
-		PlannerInfo *root,
-		IndexPath	*path,
-		double		 loop_count,
-		Cost		*startup_cost,
-		Cost		*total_cost,
-		Selectivity *selectivity,
-		double		*correlation,
-		double		*index_pages)
-{
-	/* Never use the index without ORDER BY <op> */
-	if (path->indexorderbys == NIL)
-	{
-		*startup_cost			  = get_float8_infinity();
-		*total_cost				  = get_float8_infinity();
-		*selectivity			  = 0;
-		*correlation			  = 0;
-		*index_pages			  = 0;
-		path->path.disabled_nodes = 2;
-		return;
-	}
-
-	GenericCosts costs = {0};
-	genericcostestimate(root, path, loop_count, &costs);
-
-	*startup_cost = costs.indexStartupCost;
-	*total_cost	  = costs.indexTotalCost;
-	*selectivity  = costs.indexSelectivity;
-	*correlation  = costs.indexCorrelation;
-	*index_pages  = costs.numIndexPages;
-}
-
 static bytea *
 mktann_options(Datum reloptions, bool validate)
 {
@@ -394,7 +363,7 @@ mktann_handler(PG_FUNCTION_ARGS)
 	amroutine->amstorage			   = false;
 	amroutine->amclusterable		   = false;
 	amroutine->ampredlocks			   = false;
-	amroutine->amcanparallel		   = false;
+	amroutine->amcanparallel		   = true;
 	amroutine->amcanbuildparallel	   = true;
 	amroutine->amcaninclude			   = false;
 	amroutine->amusemaintenanceworkmem = false;
@@ -432,9 +401,9 @@ mktann_handler(PG_FUNCTION_ARGS)
 	amroutine->amrestrpos  = NULL;
 
 	/* Parallel scan (not supported) */
-	amroutine->amestimateparallelscan = NULL;
-	amroutine->aminitparallelscan	  = NULL;
-	amroutine->amparallelrescan		  = NULL;
+	amroutine->amestimateparallelscan = mktann_estimateparallelscan;
+	amroutine->aminitparallelscan	  = mktann_initparallelscan;
+	amroutine->amparallelrescan		  = mktann_parallelrescan;
 
 	/* Planning */
 	amroutine->amtranslatestrategy = NULL;

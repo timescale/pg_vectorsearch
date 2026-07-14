@@ -15,6 +15,8 @@ extension_sources = files(
   '../index/parallel_build_worker.c',
   'mktann_cache.c',
   'mktann_explain.c',
+  'mktann_cost.c',
+  'mktann_parallel.c',
   'mktann_scan.c',
   'mktann_storage.c',
 )

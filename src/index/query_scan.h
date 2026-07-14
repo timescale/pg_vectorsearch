@@ -151,6 +151,43 @@ uint32_t mkt_query_execute(
 		bool			rerank,
 		MktQueryStats  *stats);
 
+/*
+ * Produce the query's probe list end to end: probe expansion, centroid
+ * descent, and phase-A exact re-rank into qs->probe_heads. Used by the
+ * parallel rendezvous winner; the serial path composes the same pieces
+ * inside mkt_query_execute. Returns the probe count.
+ */
+uint32_t mkt_query_route_probes(
+		MktQueryState		   *qs,
+		const float			   *query,
+		uint32_t				nprobe,
+		MktDistanceMode			mode,
+		MktCentroidSearchStats *beam_stats);
+
+/*
+ * Parallel-participant execution: like mkt_query_execute, but the probe
+ * list is read from the published shared state instead of being routed;
+ * clusters are claimed through the shared cursor; candidates are capped
+ * to pool_limit and claimed in the shared TID table before the exact
+ * rerank (per-participant emission topology). The caller runs the
+ * rendezvous first. Results land in qs exactly as in the serial path.
+ */
+struct MktQueryShared;
+uint32_t mkt_query_execute_parallel(
+		MktQueryState		  *qs,
+		const float			  *query,
+		uint32_t			   k,
+		MktDistanceMode		   mode,
+		bool				   rerank,
+		MktQueryStats		  *stats,
+		struct MktQueryShared *shared,
+		uint32_t			   pool_limit);
+
+/* Resolve the effective rerank-pool cap for k (mkt.rerank_pool
+ * semantics: 0 = auto 16*k, -1 = unlimited -> UINT32_MAX, else the
+ * value, never below k). */
+uint32_t mkt_query_rerank_pool(uint32_t k);
+
 /* Cap the exact-rerank candidate pool: 0 = automatic (16 * k),
  * -1 = unlimited, positive = absolute cap (never effective below k). */
 void mkt_query_set_rerank_pool(int32_t n);

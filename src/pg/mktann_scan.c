@@ -11,11 +11,13 @@
 
 #include <postgres.h>
 
+#include <access/parallel.h>
 #include <access/relscan.h>
 #include <fmgr.h>
 #include <utils/builtins.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
+#include <utils/wait_classes.h>
 
 #include "algo/vecops.h"
 #include "core/platform.h"
@@ -24,13 +26,13 @@
 #include "mkt_pg.h"
 #include "mkt_vector.h"
 #include "mktann_cache.h"
+#include "mktann_parallel.h"
 #include "mktann_scan.h"
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
 
 /* Default nprobe — will become a GUC later */
 #define MKT_DEFAULT_NPROBE 10
-#define MKT_DEFAULT_K	   10
 
 /* ----------------------------------------------------------------
  * Process-global per-phase accumulators (diagnostic).
@@ -184,6 +186,44 @@ mktann_scan_get_stats(IndexScanDesc scan)
 	return ss ? &ss->stats : NULL;
 }
 
+/*
+ * Per-scan sizing from the session GUCs and the index metapage cache.
+ * Shared by the serial scan and the parallel-scan DSM estimate so the
+ * two can never disagree within one executor startup.
+ *
+ * max_k: mkt.query_limit is set before the query runs; without sizing
+ * to it, mkt_query_execute clamps k to the allocated max_k and a
+ * query_limit above the default silently returns only MKT_DEFAULT_K
+ * results.
+ *
+ * max_nprobe: sized to the nprobe actually requested rather than the
+ * worst-case ceiling -- the centroid-search scratch alone is
+ * O(max_nprobe * entries_per_page) candidates, several MB per query at
+ * the ceiling but a few hundred KB at typical nprobe. Headroom covers
+ * routing more leaf candidates than are scanned (bounded probe
+ * expansion); requests beyond the sizing are clamped by
+ * mkt_query_execute exactly as they were against the old ceiling.
+ */
+void
+mktann_scan_sizing(Relation index, uint32_t *max_k, uint32_t *max_nprobe)
+{
+	MktannScanInfo info = mktann_cache_scan_info(index);
+
+	uint32_t k = MKT_DEFAULT_K;
+	if (mkt_query_limit > 0 && (uint32_t)mkt_query_limit > k)
+		k = (uint32_t)mkt_query_limit;
+
+	uint32_t req_nprobe = mkt_nprobe > 0 ? (uint32_t)mkt_nprobe : 1;
+	uint32_t np			= req_nprobe + Min(req_nprobe, 256) + 16;
+	if (np > 4096)
+		np = 4096;
+	if (np > info.nlist)
+		np = info.nlist;
+
+	*max_k		= k;
+	*max_nprobe = np;
+}
+
 /* ----------------------------------------------------------------
  * beginscan
  * ---------------------------------------------------------------- */
@@ -232,34 +272,43 @@ mktann_scan_prepare(IndexScanDesc scan)
 	MemoryContext old_ctx = MemoryContextSwitchTo(ss->scan_ctx);
 	Relation	  index	  = scan->indexRelation;
 
-	/* Immutable index parameters from the per-backend cache (metapage read at
-	 * most once per backend). */
-	mktann_index_base_init(index, &ss->index_base);
-	MktannScanInfo info = mktann_cache_scan_info(index);
+	/* Immutable index parameters from the per-backend cache (metapage
+	 * read at most once per backend). A parallel worker binds the
+	 * leader-published rotation params from the scan's shared area
+	 * instead of building its own (O(dim^3)); on any mismatch it falls
+	 * back to the normal per-process construction. */
+	RaBitQParams *shared_params = NULL;
+	if (scan->parallel_scan != NULL && IsParallelWorker())
+	{
+		MktannParallelScan *pscan = mktann_parallel_area(scan);
+		if (pscan->params_ready)
+			shared_params = mktann_parallel_params(pscan);
+	}
+	if (shared_params != NULL)
+	{
+		mktann_index_base_init_with_params(
+				index, &ss->index_base, shared_params);
+		if (shared_params->dim != ss->index_base.dim ||
+			shared_params->seed != ss->index_base.rabitq_seed)
+		{
+			ereport(WARNING,
+					(errmsg("published rotation params do not match the "
+							"index (dim %u seed " UINT64_FORMAT
+							" vs dim %u seed " UINT64_FORMAT
+							"); rebuilding locally",
+							shared_params->dim,
+							shared_params->seed,
+							ss->index_base.dim,
+							ss->index_base.rabitq_seed)));
+			mktann_index_base_init(index, &ss->index_base);
+		}
+	}
+	else
+		mktann_index_base_init(index, &ss->index_base);
 
-	/* Size the top-K for the requested result count: mkt.query_limit is
-	 * set before the query runs (same contract as the nprobe sizing
-	 * below). Without this, mkt_query_execute clamps k to the allocated
-	 * max_k and a query_limit above the default silently returned only
-	 * MKT_DEFAULT_K results. */
-	uint32_t max_k = MKT_DEFAULT_K;
-	if (mkt_query_limit > 0 && (uint32_t)mkt_query_limit > max_k)
-		max_k = (uint32_t)mkt_query_limit;
-
-	/* Size the per-scan query buffers to the nprobe actually requested
-	 * (the GUC is set before the query runs) rather than the worst-case
-	 * ceiling: the centroid-search scratch alone is
-	 * O(max_nprobe * entries_per_page) candidates, several MB per query
-	 * at the ceiling but a few hundred KB at typical nprobe. Headroom
-	 * covers routing more leaf candidates than are scanned (bounded
-	 * probe expansion); requests beyond the sizing are clamped by
-	 * mkt_query_execute exactly as they were against the old ceiling. */
-	uint32_t req_nprobe = mkt_nprobe > 0 ? (uint32_t)mkt_nprobe : 1;
-	uint32_t max_nprobe = req_nprobe + Min(req_nprobe, 256) + 16;
-	if (max_nprobe > 4096)
-		max_nprobe = 4096;
-	if (max_nprobe > info.nlist)
-		max_nprobe = info.nlist;
+	uint32_t max_k;
+	uint32_t max_nprobe;
+	mktann_scan_sizing(index, &max_k, &max_nprobe);
 
 	bool has_fastscan = ss->index_base.fastscan != 0;
 
@@ -311,6 +360,108 @@ mktann_rescan(
 }
 
 /* ----------------------------------------------------------------
+ * Parallel search execution
+ *
+ * One-time upfront coordination: the first participant to arrive runs
+ * the descent + probe re-rank and publishes the probe list; every
+ * participant -- including the winner -- then executes independently,
+ * as its own mini-query over the clusters it claims from the shared
+ * cursor, reranks its claimed candidates through its own storage, and
+ * emits its own exact-distance-ordered stream for Gather Merge.
+ * ---------------------------------------------------------------- */
+
+static void
+execute_search_parallel(
+		IndexScanDesc	 scan,
+		MktannScanState *ss,
+		const float		*query,
+		uint32_t		 k,
+		uint32_t		 nprobe,
+		MktQueryStats	*qstats)
+{
+	MktannParallelScan *pscan	= mktann_parallel_area(scan);
+	MktQueryShared	   *core	= &pscan->core;
+	bool				elected = false;
+
+	/* Rendezvous (btree-seize style): claim the descent or wait for the
+	 * published probe list. ConditionVariableSleep is interrupt-safe. */
+	SpinLockAcquire(&pscan->mutex);
+	for (;;)
+	{
+		if (pscan->state == MKTANN_PSCAN_READY)
+			break;
+		if (pscan->state == MKTANN_PSCAN_FAILED)
+		{
+			SpinLockRelease(&pscan->mutex);
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("parallel mktann scan failed in another "
+							"participant")));
+		}
+		if (pscan->state == MKTANN_PSCAN_PENDING)
+		{
+			pscan->state = MKTANN_PSCAN_DESCENDING;
+			elected		 = true;
+			break;
+		}
+		SpinLockRelease(&pscan->mutex);
+		ConditionVariableSleep(&pscan->cv, PG_WAIT_EXTENSION);
+		SpinLockAcquire(&pscan->mutex);
+	}
+	SpinLockRelease(&pscan->mutex);
+	ConditionVariableCancelSleep();
+
+	if (elected)
+	{
+		PG_TRY();
+		{
+			MktCentroidSearchStats bs = {0};
+
+			uint32_t n = mkt_query_route_probes(
+					&ss->qstate,
+					query,
+					nprobe,
+					(MktDistanceMode)mkt_distance_mode,
+					&bs);
+			mkt_pquery_publish_probes(core, ss->qstate.probe_heads, n);
+			qstats->centroid_pages_read = bs.pages_read;
+
+			SpinLockAcquire(&pscan->mutex);
+			pscan->state = MKTANN_PSCAN_READY;
+			SpinLockRelease(&pscan->mutex);
+			ConditionVariableBroadcast(&pscan->cv);
+		}
+		PG_CATCH();
+		{
+			SpinLockAcquire(&pscan->mutex);
+			pscan->state = MKTANN_PSCAN_FAILED;
+			SpinLockRelease(&pscan->mutex);
+			ConditionVariableBroadcast(&pscan->cv);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+	}
+
+	/* Independent execution against the published plan. */
+	mkt_query_execute_parallel(
+			&ss->qstate,
+			query,
+			k,
+			(MktDistanceMode)mkt_distance_mode,
+			mkt_rerank,
+			qstats,
+			core,
+			pscan->sized_pool);
+
+	if (mkt_atomic_read_u32(&core->claims_full) != 0)
+		ereport(WARNING,
+				(errmsg("parallel mktann claim table overflow; duplicate "
+						"results are possible (re-plan with current "
+						"parallel settings to resize)"),
+				 errhidestmt(true)));
+}
+
+/* ----------------------------------------------------------------
  * Search execution (called on first gettuple)
  * ---------------------------------------------------------------- */
 
@@ -347,14 +498,17 @@ execute_search(IndexScanDesc scan)
 	MktQueryStats qstats   = {0};
 	ss->storage.read_count = 0;
 
-	mkt_query_execute(
-			&ss->qstate,
-			qref.data,
-			k,
-			nprobe,
-			(MktDistanceMode)mkt_distance_mode,
-			mkt_rerank,
-			&qstats);
+	if (scan->parallel_scan != NULL)
+		execute_search_parallel(scan, ss, qref.data, k, nprobe, &qstats);
+	else
+		mkt_query_execute(
+				&ss->qstate,
+				qref.data,
+				k,
+				nprobe,
+				(MktDistanceMode)mkt_distance_mode,
+				mkt_rerank,
+				&qstats);
 
 	ss->stats.clusters_scanned		  = qstats.clusters_scanned;
 	ss->stats.centroid_pages_read	  = qstats.centroid_pages_read;

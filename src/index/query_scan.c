@@ -23,6 +23,7 @@
 #include "index/centroid_search.h"
 #include "index/posting_page.h"
 #include "index/posting_scan.h"
+#include "index/query_parallel.h"
 #include "index/query_scan.h"
 #include "quant/rabitq.h"
 
@@ -407,6 +408,128 @@ mkt_query_set_rerank_pool(int32_t n)
 }
 
 uint32_t
+mkt_query_rerank_pool(uint32_t k)
+{
+	if (g_rerank_pool < 0)
+		return UINT32_MAX;
+
+	uint32_t pool = (g_rerank_pool == 0) ? MKT_RERANK_POOL_AUTO_MULT * k
+										 : (uint32_t)g_rerank_pool;
+	return pool < k ? k : pool;
+}
+
+/*
+ * Exact rerank (when enabled and supported by the storage) and final
+ * result ordering into qs->result_order/result_dists. Returns the
+ * routing-quality diagnostic: the deepest probe rank contributing a
+ * final result (low relative to nprobe => over-probing; near nprobe =>
+ * neighbors genuinely routed deep).
+ */
+static uint32_t
+rerank_and_finish(
+		MktQueryState *qs,
+		const float	  *qvec,
+		uint32_t	   k,
+		uint32_t	   ncands,
+		bool		   rerank)
+{
+	MktStorage *ps = qs->index->posting_storage;
+
+	if (rerank && ncands > 0 && ps != NULL && ps->ops->rerank != NULL)
+	{
+		qs->nresults = mkt_storage_rerank(
+				ps,
+				qvec,
+				qs->index->dim,
+				qs->candidates,
+				ncands,
+				k,
+				qs->result_order,
+				qs->result_dists);
+	}
+	else
+	{
+		qs->nresults = ncands < k ? ncands : k;
+		for (uint32_t i = 0; i < qs->nresults; i++)
+		{
+			qs->result_order[i] = i;
+			qs->result_dists[i] = qs->candidates[i].distance;
+		}
+	}
+
+#ifndef NDEBUG
+	for (uint32_t i = 0; i < qs->nresults; i++)
+	{
+		uint64_t id_i = qs->candidates[qs->result_order[i]].id;
+		for (uint32_t j = i + 1; j < qs->nresults; j++)
+			if (id_i == qs->candidates[qs->result_order[j]].id)
+				mkt_warn(
+						MKT_EXTENSION_NAME ": duplicate result at positions "
+										   "%u and %u",
+						i,
+						j);
+	}
+#endif
+
+	uint32_t max_rank = 0;
+	for (uint32_t i = 0; i < qs->nresults; i++)
+	{
+		uint32_t r = qs->candidates[qs->result_order[i]].src;
+		if (r > max_rank)
+			max_rank = r;
+	}
+	return max_rank;
+}
+
+/* Probe expansion: route extra leaf candidates so phase A can pick the
+ * best `nprobe` by exact centroid distance. n_route == nprobe
+ * (expand == 1, no expansion) keeps the classic single-phase behavior.
+ * Skipped entirely when the centroid pages are exact (float/half): the
+ * beam distances are already exact, so there is no ordering noise to
+ * correct. */
+static uint32_t
+route_expansion(const MktQueryState *qs, uint32_t nprobe)
+{
+	uint32_t n_route = nprobe;
+
+	if (g_probe_expand > 1.0 &&
+		qs->index->centroid_format != MKT_CENTROID_FMT_FLOAT &&
+		qs->index->centroid_format != MKT_CENTROID_FMT_HALF)
+	{
+		double expanded = (double)nprobe * g_probe_expand;
+		n_route			= (uint32_t)(expanded + 0.5);
+		if (n_route > nprobe + MKT_PROBE_EXPAND_MAX_EXTRA)
+			n_route = nprobe + MKT_PROBE_EXPAND_MAX_EXTRA;
+		if (n_route > qs->max_nprobe)
+			n_route = qs->max_nprobe;
+		if (n_route < nprobe)
+			n_route = nprobe;
+	}
+	return n_route;
+}
+
+uint32_t
+mkt_query_route_probes(
+		MktQueryState		   *qs,
+		const float			   *query,
+		uint32_t				nprobe,
+		MktDistanceMode			mode,
+		MktCentroidSearchStats *beam_stats)
+{
+	if (nprobe > qs->max_nprobe)
+		nprobe = qs->max_nprobe;
+
+	uint32_t n_route = route_expansion(qs, nprobe);
+	uint32_t ncent	 = mkt_query_route(qs, query, n_route, mode, beam_stats);
+
+	qs->pscan.storage = qs->index->posting_storage;
+	uint32_t n_scan	  = mkt_query_order_probes(qs, ncent, nprobe);
+	qs->pscan.storage = NULL;
+
+	return n_scan;
+}
+
+uint32_t
 mkt_query_execute(
 		MktQueryState  *qs,
 		const float	   *query,
@@ -426,26 +549,7 @@ mkt_query_execute(
 	 * the previous k. */
 	mkt_topk_reset_to_k(&qs->topk, k);
 
-	/* Probe expansion: route extra leaf candidates so phase A of
-	 * scan_clusters can pick the best `nprobe` by exact centroid
-	 * distance. n_route == nprobe (expand == 1, no expansion) keeps
-	 * the classic single-phase behavior. Skipped entirely when the
-	 * centroid pages are exact (float/half): the beam distances are
-	 * already exact, so there is no ordering noise to correct. */
-	uint32_t n_route = nprobe;
-	if (g_probe_expand > 1.0 &&
-		qs->index->centroid_format != MKT_CENTROID_FMT_FLOAT &&
-		qs->index->centroid_format != MKT_CENTROID_FMT_HALF)
-	{
-		double expanded = (double)nprobe * g_probe_expand;
-		n_route			= (uint32_t)(expanded + 0.5);
-		if (n_route > nprobe + MKT_PROBE_EXPAND_MAX_EXTRA)
-			n_route = nprobe + MKT_PROBE_EXPAND_MAX_EXTRA;
-		if (n_route > qs->max_nprobe)
-			n_route = qs->max_nprobe;
-		if (n_route < nprobe)
-			n_route = nprobe;
-	}
+	uint32_t n_route = route_expansion(qs, nprobe);
 
 	uint64_t t0 = mkt_query_now_ns();
 
@@ -484,68 +588,15 @@ mkt_query_execute(
 
 	/* Rerank-pool cap: the first `pool` candidates by approximate
 	 * distance are the most promising; see mkt_query_set_rerank_pool. */
-	if (g_rerank_pool >= 0)
-	{
-		uint32_t pool = (g_rerank_pool == 0) ? MKT_RERANK_POOL_AUTO_MULT * k
-											 : (uint32_t)g_rerank_pool;
-		if (pool < k)
-			pool = k;
-		if (ncands > pool)
-			ncands = pool;
-	}
+	uint32_t pool = mkt_query_rerank_pool(k);
+	if (ncands > pool)
+		ncands = pool;
 
 	uint64_t t2 = mkt_query_now_ns();
 
-	/* Rerank with exact distances if enabled and storage supports it */
-	MktStorage *ps = qs->index->posting_storage;
-	if (rerank && ncands > 0 && ps != NULL && ps->ops->rerank != NULL)
-	{
-		qs->nresults = mkt_storage_rerank(
-				ps,
-				qvec,
-				qs->index->dim,
-				qs->candidates,
-				ncands,
-				k,
-				qs->result_order,
-				qs->result_dists);
-	}
-	else
-	{
-		qs->nresults = ncands < k ? ncands : k;
-		for (uint32_t i = 0; i < qs->nresults; i++)
-		{
-			qs->result_order[i] = i;
-			qs->result_dists[i] = qs->candidates[i].distance;
-		}
-	}
-
-#ifndef NDEBUG
-	for (uint32_t i = 0; i < qs->nresults; i++)
-	{
-		uint64_t id_i = qs->candidates[qs->result_order[i]].id;
-		for (uint32_t j = i + 1; j < qs->nresults; j++)
-			if (id_i == qs->candidates[qs->result_order[j]].id)
-				mkt_warn(
-						MKT_EXTENSION_NAME ": duplicate result at positions "
-										   "%u and %u",
-						i,
-						j);
-	}
-#endif
+	uint32_t max_rank = rerank_and_finish(qs, qvec, k, ncands, rerank);
 
 	uint64_t t3 = mkt_query_now_ns();
-
-	/* Routing-quality diagnostic: deepest probe rank contributing a final
-	 * top-k result. Low values (relative to nprobe) => over-probing; values
-	 * near nprobe => neighbors genuinely routed deep (mis-routing). */
-	uint32_t max_rank = 0;
-	for (uint32_t i = 0; i < qs->nresults; i++)
-	{
-		uint32_t r = qs->candidates[qs->result_order[i]].src;
-		if (r > max_rank)
-			max_rank = r;
-	}
 
 	if (stats != NULL)
 	{
@@ -559,6 +610,82 @@ mkt_query_execute(
 		stats->centroid_lut_ns		= beam_stats.lut_ns;
 		stats->centroid_pageread_ns = beam_stats.pageread_ns;
 		stats->centroid_score_ns	= beam_stats.score_ns;
+	}
+
+	return qs->nresults;
+}
+
+uint32_t
+mkt_query_execute_parallel(
+		MktQueryState		  *qs,
+		const float			  *query,
+		uint32_t			   k,
+		MktDistanceMode		   mode,
+		bool				   rerank,
+		MktQueryStats		  *stats,
+		struct MktQueryShared *shared,
+		uint32_t			   pool_limit)
+{
+	if (k > qs->max_k)
+		k = qs->max_k;
+
+	mkt_topk_reset_to_k(&qs->topk, k);
+
+	/* Each participant rotates the query itself (O(dim^2) against the
+	 * shared rotation params) — the probe list is published, the rotated
+	 * vector is cheap to recompute and keeps participants independent. */
+	const float *qvec = prepare_query(qs, query);
+	uint64_t	 t0	  = mkt_query_now_ns();
+	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
+
+	if (stats != NULL)
+	{
+		stats->rotation_ns			   = mkt_query_now_ns() - t0;
+		stats->clusters_scanned		   = 0;
+		stats->posting_pages_read	   = 0;
+		stats->posting_pages_skipped   = 0;
+		stats->posting_entries_scanned = 0;
+	}
+
+	qs->pscan.storage = qs->index->posting_storage;
+	bool ok			  = mkt_pquery_scan(qs, shared, mode, &qs->topk, stats);
+	qs->pscan.storage = NULL;
+
+	uint64_t t1 = mkt_query_now_ns();
+
+	if (!ok)
+	{
+		qs->nresults = 0;
+		return 0;
+	}
+
+	uint32_t ncands = extract_candidates(qs);
+
+	/* Per-participant pool cap (each participant keeps its own most
+	 * promising pool -- a superset of the serial global pool), then
+	 * claim before the exact rerank so a claim loser also skips its
+	 * heap fetches. */
+	uint32_t pool = mkt_query_rerank_pool(k);
+	if (pool_limit > 0 && pool > pool_limit)
+		pool = pool_limit;
+	if (ncands > pool)
+		ncands = pool;
+
+	ncands			= mkt_pquery_filter_claims(shared, qs->candidates, ncands);
+	qs->ncandidates = ncands;
+
+	uint64_t t2 = mkt_query_now_ns();
+
+	uint32_t max_rank = rerank_and_finish(qs, qvec, k, ncands, rerank);
+
+	uint64_t t3 = mkt_query_now_ns();
+
+	if (stats != NULL)
+	{
+		stats->max_contrib_rank = max_rank;
+		stats->centroid_ns		= 0;
+		stats->posting_ns		= t1 - t0;
+		stats->rerank_ns		= t3 - t2;
 	}
 
 	return qs->nresults;
