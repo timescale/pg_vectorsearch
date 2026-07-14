@@ -640,10 +640,16 @@ DROP TABLE cic_pts;
 -- ============================================================
 -- Cosine metric through the streamed tree
 -- ============================================================
--- Distinct directions per row (two varying coordinates), so cosine ordering
--- is well defined and ties cannot occur. Covers the cosine-specific code in
--- the streamed build: sample normalization, root/global-mean normalization,
--- multi-level batched and flat parallel shapes, and the serial shape.
+-- Distinct directions per row (two varying coordinates). The probe sits
+-- outside the angle range (all candidates on one side), because a probe
+-- between grid points ties symmetric neighbors EXACTLY in cosine distance
+-- (cos is even), making top-10 membership rounding-dependent — with a
+-- mid-range probe the ranks 10/11 candidates carry bit-identical
+-- distances and the winner varies by platform. One-sided, distances are
+-- strictly increasing with gaps of thousands of ulps. Covers the
+-- cosine-specific code in the streamed build: sample normalization,
+-- root/global-mean normalization, multi-level batched and flat parallel
+-- shapes, and the serial shape.
 CREATE TABLE cosdirs (id int, v vector(8));
 INSERT INTO cosdirs
     SELECT g, ('[' || cos(g * 0.001) || ',' || sin(g * 0.001) ||
@@ -653,7 +659,7 @@ ALTER TABLE cosdirs SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
 -- multi-level batched parallel tree
 SELECT exact_check('cosdirs', '(v vector_cosine_ops) WITH (nlist = 48, fan_out = 4)',
-                   '[' || cos(1.0) || ',' || sin(1.0) || repeat(',0.01', 6) || ']',
+                   '[' || cos(-0.5) || ',' || sin(-0.5) || repeat(',0.01', 6) || ']',
                    '<=>') AS cos_parallel_multilevel_exact;
  cos_parallel_multilevel_exact 
 -------------------------------
@@ -662,7 +668,7 @@ SELECT exact_check('cosdirs', '(v vector_cosine_ops) WITH (nlist = 48, fan_out =
 
 -- flat parallel tree
 SELECT exact_check('cosdirs', '(v vector_cosine_ops) WITH (nlist = 8, fan_out = 8)',
-                   '[' || cos(1.0) || ',' || sin(1.0) || repeat(',0.01', 6) || ']',
+                   '[' || cos(-0.5) || ',' || sin(-0.5) || repeat(',0.01', 6) || ']',
                    '<=>') AS cos_parallel_flat_exact;
  cos_parallel_flat_exact 
 -------------------------
@@ -672,7 +678,7 @@ SELECT exact_check('cosdirs', '(v vector_cosine_ops) WITH (nlist = 8, fan_out = 
 SET max_parallel_maintenance_workers = 0;
 -- serial streamed tree
 SELECT exact_check('cosdirs', '(v vector_cosine_ops) WITH (nlist = 48, fan_out = 4)',
-                   '[' || cos(1.0) || ',' || sin(1.0) || repeat(',0.01', 6) || ']',
+                   '[' || cos(-0.5) || ',' || sin(-0.5) || repeat(',0.01', 6) || ']',
                    '<=>') AS cos_serial_multilevel_exact;
  cos_serial_multilevel_exact 
 -----------------------------
