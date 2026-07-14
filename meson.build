@@ -760,9 +760,13 @@ endif
 # Usage: scan-build meson compile -C builddir
 # Or with report: scan-build -o reports meson compile -C builddir
 
-# Pre-commit hooks
+# Pre-commit hooks. Only when this source tree is itself a git
+# checkout: without .git (a release tarball — including the tree
+# `meson dist` unpacks for its check, which sits INSIDE the repo),
+# `pre-commit install` would walk up to the enclosing repository and
+# clobber its hooks with a config path relative to the wrong root.
 pre_commit = find_program('pre-commit', required: false)
-if pre_commit.found()
+if pre_commit.found() and fs.exists(meson.project_source_root() / '.git')
   # Install hooks automatically during setup (may fail in sandbox, that's OK)
   install_result = run_command(pre_commit, 'install', '--install-hooks',
     check: false, capture: true)
