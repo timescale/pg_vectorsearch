@@ -338,4 +338,3 @@ DROP TABLE tc_fastscan;
 -- Cleanup
 DROP TABLE embeddings;
 DROP TABLE wide;
-
