@@ -84,6 +84,12 @@ typedef struct MktQueryState
 	float	 *probe_dists;
 	uint32_t *probe_order;
 
+	/* The query's probe list: posting-head blocks in final scan-rank
+	 * order (the output of mkt_query_order_probes). Entries can be
+	 * InvalidBlockNumber (empty clusters); they consume a rank but are
+	 * skipped by the scan. Sized to max_nprobe at init. */
+	BlockNumber *probe_heads;
+
 	/* Result ordering (indices into candidates + final distances) */
 	uint32_t *result_order;
 	Distance *result_dists;
@@ -112,6 +118,30 @@ void mkt_query_state_cleanup(MktQueryState *qs);
  * Results are in qs->candidates[0..return_count), sorted by
  * distance ascending. The caller owns reranking (if any).
  */
+/*
+ * Phase A: turn the routed beam results (qs->beam_results[0..n_results))
+ * into the final probe list qs->probe_heads[0..n_scan), re-ranked by
+ * exact query-centroid distance when the probe set was expanded past
+ * scan_limit. Returns n_scan. Requires qs->pscan.storage to be set.
+ */
+uint32_t mkt_query_order_probes(
+		MktQueryState *qs, uint32_t n_results, uint32_t scan_limit);
+
+/*
+ * Scan one probed cluster (one posting-list chain) into topk. rank is
+ * the cluster's position in the probe list; it stamps inserted
+ * candidates for the routing-quality diagnostics. Page/entry counts
+ * are accumulated into *stats when non-NULL. This is the parallel
+ * work unit: participants call it for the clusters they claim.
+ */
+void mkt_query_scan_cluster(
+		MktQueryState  *qs,
+		BlockNumber		posting_head,
+		uint32_t		rank,
+		MktDistanceMode mode,
+		MktTopK		   *topk,
+		MktQueryStats  *stats);
+
 uint32_t mkt_query_execute(
 		MktQueryState  *qs,
 		const float	   *query,

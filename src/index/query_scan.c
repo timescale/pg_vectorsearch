@@ -77,6 +77,7 @@ mkt_query_state_init(
 	 * probe set; see mkt_query_set_probe_expand). */
 	qs->probe_dists = mkt_alloc(max_nprobe * sizeof(float));
 	qs->probe_order = mkt_alloc(max_nprobe * sizeof(uint32_t));
+	qs->probe_heads = mkt_alloc(max_nprobe * sizeof(BlockNumber));
 
 	/* Top-K */
 	mkt_topk_init(&qs->topk, max_k);
@@ -234,20 +235,11 @@ cmp_probe_order(const void *a, const void *b)
 	return 0;
 }
 
-static void
-scan_clusters(
-		MktQueryState			*qs,
-		const MktCentroidResult *beam_results,
-		uint32_t				 n_results,
-		uint32_t				 scan_limit,
-		MktDistanceMode			 mode,
-		MktTopK					*topk,
-		MktQueryStats			*stats)
+uint32_t
+mkt_query_order_probes(
+		MktQueryState *qs, uint32_t n_results, uint32_t scan_limit)
 {
-	const MktIndexBase *idx = qs->index;
-	Dimension			dim = idx->dim;
-
-	qs->pscan.storage = idx->posting_storage;
+	Dimension dim = qs->index->dim;
 
 	/*
 	 * Phase A (only when the probe set was expanded): re-rank the routed
@@ -256,7 +248,7 @@ scan_clusters(
 	 * order; each cluster's first posting page stores the full-precision
 	 * rotated centroid, so one page read + one O(dim) distance per
 	 * candidate recovers the true order. Only the best `scan_limit`
-	 * clusters are then scanned.
+	 * clusters make the probe list.
 	 */
 	const uint32_t *order  = NULL;
 	uint32_t		n_scan = n_results;
@@ -268,7 +260,7 @@ scan_clusters(
 			qs->probe_order[j] = j;
 			qs->probe_dists[j] = FLT_MAX;
 
-			BlockNumber ph = beam_results[j].posting_head;
+			BlockNumber ph = qs->beam_results[j].posting_head;
 			if (ph == InvalidBlockNumber)
 				continue;
 
@@ -287,56 +279,58 @@ scan_clusters(
 		n_scan = scan_limit;
 	}
 
-	uint32_t total_pages   = 0;
-	uint32_t total_skipped = 0;
-	uint32_t total_entries = 0;
-	uint32_t scanned	   = 0;
-
 	for (uint32_t r = 0; r < n_scan; r++)
+		qs->probe_heads[r] =
+				qs->beam_results[order ? order[r] : r].posting_head;
+
+	return n_scan;
+}
+
+void
+mkt_query_scan_cluster(
+		MktQueryState  *qs,
+		BlockNumber		posting_head,
+		uint32_t		rank,
+		MktDistanceMode mode,
+		MktTopK		   *topk,
+		MktQueryStats  *stats)
+{
+	const MktIndexBase *idx = qs->index;
+
+	if (posting_head == InvalidBlockNumber)
+		return;
+
+	/* Diagnostic: stamp candidates inserted while scanning this cluster
+	 * with its scan rank (the position in the exact-re-ranked probe
+	 * order, not the beam index), so the deepest contributing rank
+	 * measures how many probed clusters the query actually needed. */
+	topk->cur_src = rank;
+
+	mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, posting_head);
+
+	const float *pt_cent = mkt_posting_scan_pt_centroid(&qs->pscan);
+	if (pt_cent == NULL)
 	{
-		uint32_t	j  = order ? order[r] : r;
-		BlockNumber ph = beam_results[j].posting_head;
-		if (ph == InvalidBlockNumber)
-			continue;
-
-		/* Diagnostic: stamp candidates inserted while scanning this cluster
-		 * with its scan rank r (the position in the exact-re-ranked probe
-		 * order, not the beam index j), so the deepest contributing rank
-		 * measures how many probed clusters the query actually needed. */
-		topk->cur_src = r;
-
-		mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
-
-		const float *pt_cent = mkt_posting_scan_pt_centroid(&qs->pscan);
-		if (pt_cent == NULL)
-		{
-			mkt_posting_scan_end_cluster(&qs->pscan);
-			continue;
-		}
-
-		mkt_rabitq_init_query_state(
-				&qs->cluster_qs, qs->pt_query, pt_cent, dim, mode);
-
-		if (idx->fastscan && qs->pscan.fs_lut != NULL)
-			mkt_posting_scan_cluster_fastscan(&qs->pscan, topk);
-		else
-			mkt_posting_scan_cluster(&qs->pscan, topk);
-		total_pages += qs->pscan.pages_read;
-		total_skipped += qs->pscan.pages_skipped;
-		total_entries += qs->pscan.entries_scanned;
 		mkt_posting_scan_end_cluster(&qs->pscan);
-		scanned++;
+		return;
 	}
 
-	qs->pscan.storage = NULL;
+	mkt_rabitq_init_query_state(
+			&qs->cluster_qs, qs->pt_query, pt_cent, idx->dim, mode);
+
+	if (idx->fastscan && qs->pscan.fs_lut != NULL)
+		mkt_posting_scan_cluster_fastscan(&qs->pscan, topk);
+	else
+		mkt_posting_scan_cluster(&qs->pscan, topk);
 
 	if (stats != NULL)
 	{
-		stats->clusters_scanned		   = scanned;
-		stats->posting_pages_read	   = total_pages;
-		stats->posting_pages_skipped   = total_skipped;
-		stats->posting_entries_scanned = total_entries;
+		stats->clusters_scanned++;
+		stats->posting_pages_read += qs->pscan.pages_read;
+		stats->posting_pages_skipped += qs->pscan.pages_skipped;
+		stats->posting_entries_scanned += qs->pscan.entries_scanned;
 	}
+	mkt_posting_scan_end_cluster(&qs->pscan);
 }
 
 static uint32_t
@@ -469,8 +463,22 @@ mkt_query_execute(
 
 	uint64_t t1 = mkt_query_now_ns();
 
-	scan_clusters(
-			qs, qs->beam_results, ncentroids, nprobe, mode, &qs->topk, stats);
+	if (stats != NULL)
+	{
+		stats->clusters_scanned		   = 0;
+		stats->posting_pages_read	   = 0;
+		stats->posting_pages_skipped   = 0;
+		stats->posting_entries_scanned = 0;
+	}
+
+	qs->pscan.storage = qs->index->posting_storage;
+
+	uint32_t n_scan = mkt_query_order_probes(qs, ncentroids, nprobe);
+	for (uint32_t r = 0; r < n_scan; r++)
+		mkt_query_scan_cluster(
+				qs, qs->probe_heads[r], r, mode, &qs->topk, stats);
+
+	qs->pscan.storage = NULL;
 
 	uint32_t ncands = extract_candidates(qs);
 

@@ -161,6 +161,9 @@ typedef struct MktannScanState
 	uint32_t		  nresults;
 	uint32_t		  curr;
 	bool			  first;
+	/* Heavy state below is built lazily on first use (mktann_scan_prepare);
+	 * ambeginscan cannot see scan->parallel_scan yet. */
+	bool prepared;
 
 	/* Shared query state (pre-allocated, zero-alloc hot path) */
 	MktQueryState qstate;
@@ -197,6 +200,37 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	MktannScanState *ss = palloc0(sizeof(MktannScanState));
 	ss->scan_ctx		= scan_ctx;
 	ss->first			= true;
+
+	/* Order-by arrays */
+	if (norderbys > 0)
+	{
+		scan->xs_orderbyvals  = palloc0(norderbys * sizeof(Datum));
+		scan->xs_orderbynulls = palloc(norderbys * sizeof(bool));
+		memset(scan->xs_orderbynulls, true, norderbys * sizeof(bool));
+	}
+
+	MemoryContextSwitchTo(old_ctx);
+	scan->opaque = ss;
+	return scan;
+}
+
+/*
+ * Heavy scan-state construction, deferred to first use: everything the
+ * search needs beyond what ambeginscan can know. Deferral matters for
+ * parallel scans -- scan->parallel_scan is attached only after
+ * ambeginscan returns, and a parallel worker binds the leader-published
+ * rotation params instead of building its own.
+ */
+static void
+mktann_scan_prepare(IndexScanDesc scan)
+{
+	MktannScanState *ss = (MktannScanState *)scan->opaque;
+
+	if (ss->prepared)
+		return;
+
+	MemoryContext old_ctx = MemoryContextSwitchTo(ss->scan_ctx);
+	Relation	  index	  = scan->indexRelation;
 
 	/* Immutable index parameters from the per-backend cache (metapage read at
 	 * most once per backend). */
@@ -246,17 +280,8 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	ss->results		= palloc(max_k * sizeof(MktannScanResult));
 	ss->results_cap = max_k;
 
-	/* Order-by arrays */
-	if (norderbys > 0)
-	{
-		scan->xs_orderbyvals  = palloc0(norderbys * sizeof(Datum));
-		scan->xs_orderbynulls = palloc(norderbys * sizeof(bool));
-		memset(scan->xs_orderbynulls, true, norderbys * sizeof(bool));
-	}
-
+	ss->prepared = true;
 	MemoryContextSwitchTo(old_ctx);
-	scan->opaque = ss;
-	return scan;
 }
 
 /* ----------------------------------------------------------------
@@ -293,6 +318,8 @@ static void
 execute_search(IndexScanDesc scan)
 {
 	MktannScanState *ss = (MktannScanState *)scan->opaque;
+
+	mktann_scan_prepare(scan);
 
 	/* Lazily set heap relation for reranking (rel is NULL at
 	 * beginscan time; heapRelation becomes available later) */
@@ -439,7 +466,8 @@ mktann_endscan(IndexScanDesc scan)
 
 	if (ss != NULL)
 	{
-		mkt_query_state_cleanup(&ss->qstate);
+		if (ss->prepared)
+			mkt_query_state_cleanup(&ss->qstate);
 		MemoryContextDelete(ss->scan_ctx);
 		scan->opaque = NULL;
 	}

@@ -43,6 +43,12 @@
  */
 void mktann_index_base_init(Relation index, MktIndexBase *base);
 
+/* Variant for parallel query workers: bind caller-supplied rotation
+ * params (e.g. from the scan's shared memory) instead of building them
+ * in the process-local cache. */
+void mktann_index_base_init_with_params(
+		Relation index, MktIndexBase *base, RaBitQParams *params);
+
 /*
  * Immutable dim + distance metric + first posting page from the cache, without
  * forcing the lazy rotation-matrix work that mktann_index_base_init does. For

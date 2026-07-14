@@ -203,6 +203,35 @@ mktann_index_base_init(Relation index, MktIndexBase *base)
 	base->centroid_beam_scale  = (float)mkt_centroid_beam_scale;
 }
 
+/*
+ * Like mktann_index_base_init, but binds the supplied rotation params
+ * instead of the process-local cache. For parallel query workers: the
+ * leader publishes its RaBitQParams through the scan's shared memory so
+ * a fresh worker process skips the O(dim^3) matrix construction. The
+ * caller owns the params' lifetime (they must outlive the scan); they
+ * are never installed into the process-local cache.
+ */
+void
+mktann_index_base_init_with_params(
+		Relation index, MktIndexBase *base, RaBitQParams *params)
+{
+	AmCacheData *c = get_cache_data(index);
+
+	if (!c->pt_ready)
+	{
+		mkt_rabitq_rotate(
+				params, cache_global_mean(c), cache_pt_global_mean(c));
+		c->base.pt_global_mean = cache_pt_global_mean(c);
+		c->pt_ready			   = true;
+	}
+
+	*base					   = c->base;
+	base->params			   = params;
+	base->fastscan			   = c->has_fastscan ? mkt_fastscan_bits : 0;
+	base->centroid_error_scale = (float)mkt_centroid_error_scale;
+	base->centroid_beam_scale  = (float)mkt_centroid_beam_scale;
+}
+
 void
 mktann_cache_meta(
 		Relation		index,
