@@ -460,10 +460,10 @@ mkt_git_commit(PG_FUNCTION_ARGS)
  * meson.build via mkt_config.h, the single source of truth for the
  * version string.
  */
-PG_FUNCTION_INFO_V1(mkt_version);
+PG_FUNCTION_INFO_V1(mkt_extension_version);
 
 Datum
-mkt_version(PG_FUNCTION_ARGS)
+mkt_extension_version(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_TEXT_P(cstring_to_text(MKT_VERSION));
 }

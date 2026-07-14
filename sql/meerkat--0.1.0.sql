@@ -12,7 +12,7 @@ CREATE FUNCTION git_commit() RETURNS text
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION extension_version() RETURNS text
-    AS 'MODULE_PATHNAME', 'mkt_version'
+    AS 'MODULE_PATHNAME', 'mkt_extension_version'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION extension_name() RETURNS text
