@@ -18,11 +18,12 @@ Semantic versioning: `MAJOR.MINOR.PATCH`.
   `--`, no leading or trailing `-`.
 
 The version lives in exactly one place: `meson.build`'s project
-version. The control file, the versioned install script, the
+version. The control files, the versioned install script, the
 version-named shared library, the CLI banner, and the SQL
-`mkt.extension_version()` function all derive from it at build time. Prerelease
-versions additionally get an install-time `RAISE WARNING` notice
-baked into the generated SQL.
+`mkt.extension_version()` function all derive from it at build time.
+The install script itself warns at `CREATE EXTENSION` time when
+`mkt.extension_version()` reports a prerelease suffix — a runtime
+check, so final releases have nothing to strip.
 
 ## Upgradability policy
 
@@ -40,13 +41,17 @@ baked into the generated SQL.
   planned follow-up work (nothing to test while alphas have no
   upgrade path).
 - **Side-by-side versions:** the shared library is version-named
-  (`meerkat-<version>.so`) and every install script pins its own
-  library, so several extension versions can be installed in one
-  cluster and databases upgrade independently. C symbols may change
-  freely between versions; the corresponding obligation is that an
-  upgrade script repoints *every* C function to the new version's
-  library (generated from the canonical `sql/meerkat.sql` with the
-  new module path).
+  (`meerkat-<version>.so`) and each release ships a per-version
+  secondary control file (`meerkat--<version>.control`) whose
+  `module_pathname` PostgreSQL uses to resolve `MODULE_PATHNAME` in
+  that version's install and upgrade scripts — so several extension
+  versions can be installed in one cluster and databases upgrade
+  independently, while all scripts stay version-blind. C symbols may
+  change freely between versions; the corresponding obligation is
+  that an upgrade script repoints *every* C function to the new
+  version's library via version-agnostic
+  `CREATE OR REPLACE ... AS 'MODULE_PATHNAME'` statements (see
+  `sql/README.md`).
 - **Alpha releases have no upgrade path.** Recovery from an alpha is
   `DROP EXTENSION meerkat CASCADE` + install the new version +
   re-create indexes. Note what the cascade takes with it: dropping
