@@ -20,12 +20,13 @@ add_project_arguments(
   language: 'c',
 )
 
-# Extension naming. These feed the mkt_config.h defines that C string
-# literals use — a place where generation exists anyway, so
-# single-sourcing is free. Plain files (the SQL script, the control
-# file) keep literal names instead: a rename is a once-ever event and
-# replacing the literal there is as easy as replacing a placeholder
-# would be. Keep these variables in sync with those literals.
+# Extension naming. These feed generated file names and the
+# mkt_config.h defines that C string literals use — places where
+# generation exists anyway, so single-sourcing is free. Plain files
+# (sql/meerkat.sql, the control template) keep literal names instead:
+# a rename is a once-ever event and replacing the literal there is as
+# easy as replacing a placeholder would be. Keep these variables in
+# sync with those literals.
 extension_name = meson.project_name()
 am_name = 'mktann'      # index access method name
 extension_schema = 'mkt' # extension schema; doubles as the GUC prefix
@@ -38,6 +39,11 @@ config_data.set_quoted('MKT_VERSION', meson.project_version())
 config_data.set_quoted('MKT_EXTENSION_NAME', extension_name)
 config_data.set_quoted('MKT_AM_NAME', am_name)
 config_data.set_quoted('MKT_EXTENSION_SCHEMA', extension_schema)
+# The extension shared library is version-named (meerkat-<version>.so)
+# so multiple extension versions can be installed side by side; C code
+# that references the library by name (parallel workers) uses this.
+config_data.set_quoted('MKT_MODULE_NAME',
+  extension_name + '-' + meson.project_version())
 if simd_mode == 'full'
   config_data.set('MKT_SIMD_FULL', 1)
 endif

@@ -50,10 +50,18 @@ if pg_srcdir_path != ''
   endif
 endif
 
+# The extension shared library is version-named so multiple extension
+# versions can be installed side by side. Every install script pins its
+# own library (see the SQL generation below), letting databases in one
+# cluster run different versions and upgrade independently.
+ext_version = meson.project_version()
+ext_module_name = extension_name + '-' + ext_version
+ext_module_pathname = '$libdir' / ext_module_name
+
 # Build the extension as a shared library. The vcs_tag-generated
 # git_commit.h is listed as a source so ninja produces it before
 # compiling any TU that #includes it.
-meerkat_ext_so = shared_library('meerkat',
+meerkat_ext_so = shared_library(ext_module_name,
   extension_sources,
   git_commit_h,
   c_args: pg_ext_cflags,
@@ -68,12 +76,54 @@ meerkat_ext_so = shared_library('meerkat',
   override_options: ['b_lundef=false', 'warning_level=1', 'werror=false'],
 )
 
-# Install extension control and SQL files
-install_data(
-  meson.project_source_root() / 'meerkat.control',
+# Generate and install the extension control and SQL files. The
+# version comes from meson.build (single source of truth); the SQL
+# install script is a copy of the canonical sql/meerkat.sql under the
+# versioned name. The control template is kept header-free so git
+# displays it as a rename of meerkat.control (the files must stay
+# >50% similar for rename detection).
+ext_control_data = configuration_data()
+ext_control_data.set('VERSION', ext_version)
+
+configure_file(
+  input: meson.project_source_root() / 'meerkat.control.in',
+  output: extension_name + '.control',
+  configuration: ext_control_data,
+  install: true,
   install_dir: pg_sharedir / 'extension',
 )
-install_data(
-  meson.project_source_root() / 'sql' / 'meerkat--0.1.0.sql',
+
+# Per-version (secondary) control file: PostgreSQL substitutes this
+# version's module_pathname for MODULE_PATHNAME in its install and
+# upgrade scripts, so every installed version binds its own
+# version-named library — including each step of an upgrade chain. A
+# single generated line, no template. The primary control deliberately
+# omits module_pathname: a missing secondary control (a packaging bug)
+# then fails loudly at CREATE/ALTER EXTENSION instead of silently
+# binding the newest version's library.
+configure_file(
+  output: extension_name + '--' + ext_version + '.control',
+  command: ['echo', 'module_pathname = \'' + ext_module_pathname + '\''],
+  capture: true,
+  install: true,
   install_dir: pg_sharedir / 'extension',
 )
+
+# The canonical SQL is installed verbatim under the versioned name
+# (pgvector-style): MODULE_PATHNAME and @extschema@ are resolved by
+# PostgreSQL when the script runs, so nothing needs substituting.
+custom_target('meerkat-sql',
+  input: meson.project_source_root() / 'sql' / 'meerkat.sql',
+  output: extension_name + '--' + ext_version + '.sql',
+  command: ['cp', '@INPUT@', '@OUTPUT@'],
+  build_by_default: true,
+  install: true,
+  install_dir: pg_sharedir / 'extension',
+)
+
+# Upgrade scripts (sql/meerkat--A--B.sql) are listed here
+# explicitly as they are added; see sql/README.md.
+ext_update_scripts = []
+if ext_update_scripts.length() > 0
+  install_data(ext_update_scripts, install_dir: pg_sharedir / 'extension')
+endif

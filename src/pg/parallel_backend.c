@@ -490,7 +490,7 @@ mkt_pbuild_setup_shared(
 	EnterParallelMode();
 
 	ParallelContext *pcxt = CreateParallelContext(
-			MKT_EXTENSION_NAME, "mkt_parallel_build_main", nworkers);
+			MKT_MODULE_NAME, "mkt_parallel_build_main", nworkers);
 
 	/*
 	 * The heap scan's snapshot. A normal build sees all tuples (SnapshotAny);

@@ -86,10 +86,19 @@ RESET mkt.nprobe;
 -- with nprobe = 8 every reported rank is below 8 -- the histogram's <=8
 -- bucket holds 100% of queries. Ranks above nprobe are impossible unless
 -- the diagnostic leaks pre-re-rank beam indexes.
-CREATE FUNCTION mkt_routing_stats() RETURNS text
-    AS '$libdir/meerkat', 'mkt_routing_stats' LANGUAGE C;
-CREATE FUNCTION mkt_phase_stats_reset() RETURNS void
-    AS '$libdir/meerkat', 'mkt_phase_stats_reset' LANGUAGE C;
+-- The diagnostic functions live in the version-named extension
+-- library (meerkat-<version>.so); resolve its path from an existing
+-- extension function instead of hardcoding the version.
+DO $$
+DECLARE lib text;
+BEGIN
+    SELECT probin INTO STRICT lib
+        FROM pg_proc WHERE proname = 'mktann_handler';
+    EXECUTE format('CREATE FUNCTION mkt_routing_stats() RETURNS text
+        AS %L, ''mkt_routing_stats'' LANGUAGE C', lib);
+    EXECUTE format('CREATE FUNCTION mkt_phase_stats_reset() RETURNS void
+        AS %L, ''mkt_phase_stats_reset'' LANGUAGE C', lib);
+END $$;
 
 -- 40 clusters of 50 points: each cluster sits on a pseudo-random direction
 -- at radius ~1 from the origin, members add small deterministic noise. A

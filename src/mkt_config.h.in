@@ -26,6 +26,13 @@
 #mesondefine MKT_EXTENSION_SCHEMA
 
 /*
+ * Name of the version-named extension shared library
+ * ("meerkat-<version>"). Used where the library is referenced by name,
+ * e.g. when launching parallel workers.
+ */
+#mesondefine MKT_MODULE_NAME
+
+/*
  * SIMD mode configuration:
  * - MKT_SIMD_FULL=1: Hand-optimized SIMD + compiler baseline (default)
  * - MKT_SIMD_NONE=1: No SIMD, truly scalar

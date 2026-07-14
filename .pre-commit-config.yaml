@@ -50,7 +50,10 @@ repos:
     hooks:
       - id: squawk
         files: ^(sql|test/(.+/)?(sql|compat))/.*\.sql$
-        exclude: ^(sql/meerkat--|test/pg/compat/)
+        # The extension install script and upgrade scripts are DDL, not
+        # migrations — squawk's migration rules don't apply (they get a
+        # pgspot audit in CI instead).
+        exclude: ^(sql/meerkat\.sql|sql/updates/|test/pg/compat/)
 
   # Markdown linting
   - repo: https://github.com/DavidAnson/markdownlint-cli2
