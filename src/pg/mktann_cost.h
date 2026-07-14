@@ -18,12 +18,17 @@
 /* Per-phase costs of one mktann search at the session's GUCs. */
 typedef struct MktannCosts
 {
-	Cost		descent; /* centroid descent + probe re-rank (serial part) */
-	Cost		scan;	 /* posting-cluster scan (divides across workers) */
-	Cost		rerank;	 /* exact rerank of the candidate pool (divides) */
+	Cost descent;		 /* centroid descent + probe re-rank (serial part) */
+	Cost scan;			 /* posting-cluster scan (divides across workers) */
+	Cost rerank;		 /* exact rerank of the candidate pool (divides) */
+	Cost io;			 /* storage reads for non-resident posting pages
+						  * (divides across workers; ~0 when the index is
+						  * resident in shared buffers) */
 	double		emitted; /* rows the scan returns (the rerank pool) */
 	double		index_pages;
 	Selectivity selectivity;
+	bool		unreadable; /* on-disk format this build cannot read;
+							 * the path must be disabled, not costed */
 } MktannCosts;
 
 /* Compute the model for one index at the current GUCs (opens the index

@@ -35,7 +35,9 @@
 #include <math.h>
 #include <optimizer/cost.h>
 #include <optimizer/optimizer.h>
+#include <optimizer/pathnode.h>
 #include <optimizer/paths.h>
+#include <storage/buf_internals.h>
 #include <utils/float.h>
 #include <utils/lsyscache.h>
 #include <utils/rel.h>
@@ -47,6 +49,7 @@
 #include "pg/mktann_cache.h"
 #include "pg/mktann_cost.h"
 #include "pg/mktann_scan.h"
+#include "pg/mktann_storage.h"
 
 /*
  * Provisional per-unit work factors, in cpu_operator_cost units.
@@ -60,7 +63,98 @@
 #define MKT_COST_PHASE_A	50.0  /* exact re-rank of one routed cluster */
 #define MKT_COST_FETCH		450.0 /* rerank heap fetch + exact distance */
 
+/*
+ * Posting-chain reads are dependent, synchronous, single-page random
+ * reads with no prefetch -- the access pattern random_page_cost
+ * understates most (it is tuned against scans that overlap I/O).
+ * Measured on NVMe: ~475us per cold chained read vs the ~110us the
+ * GUC's ratio implies; priced as a multiple of random_page_cost so
+ * device-relative tuning still flows through.
+ */
+#define MKT_COST_SYNC_READ_MULT 4.0
+
 static set_rel_pathlist_hook_type prev_pathlist_hook = NULL;
+
+/*
+ * Estimated fraction of the index's posting region resident in shared
+ * buffers, from probing the buffer mapping table for a fixed sample of
+ * evenly spaced posting blocks (a few microseconds; no pages are read
+ * or pinned). This is the signal the stock planner lacks: whether this
+ * query's page reads are memory pointer chases or storage I/O. The
+ * miss fraction prices an I/O term that is what makes parallel workers
+ * win exactly where measurements show they win -- storage-bound scans
+ * -- while fully-resident scans keep costs below the parallel setup
+ * threshold and stay serial.
+ *
+ * Pages in the OS page cache but not in shared buffers count as
+ * misses, overstating I/O for the warm-OS/cold-buffers case the same
+ * way the stock cost model's cache assumptions are approximate; the
+ * estimate only needs to separate "mostly resident" from "mostly not".
+ */
+#define MKT_RESIDENCY_SAMPLES 64
+
+static double
+mktann_residency(Relation index, BlockNumber first_posting)
+{
+	BlockNumber nblocks = RelationGetNumberOfBlocks(index);
+
+	if (nblocks <= first_posting)
+		return 1.0;
+
+	uint64 span	   = nblocks - first_posting;
+	int	   samples = (int)Min(span, MKT_RESIDENCY_SAMPLES);
+	int	   hits	   = 0;
+
+	for (int i = 0; i < samples; i++)
+	{
+		BlockNumber blkno = first_posting +
+							(BlockNumber)((span * (2 * (uint64)i + 1)) /
+										  (2 * samples));
+		BufferTag tag;
+		InitBufferTag(&tag, &index->rd_locator, MAIN_FORKNUM, blkno);
+
+		uint32	hash = BufTableHashCode(&tag);
+		LWLock *lock = BufMappingPartitionLock(hash);
+
+		LWLockAcquire(lock, LW_SHARED);
+		int buf_id = BufTableLookup(&tag, hash);
+		LWLockRelease(lock);
+
+		if (buf_id >= 0)
+			hits++;
+	}
+
+	double sampled = (double)hits / samples;
+
+	/*
+	 * Blend in this backend's own read experience. The global sample
+	 * cannot see a partially-warm index whose HOT clusters are
+	 * resident (organic warm-up without a full prewarm): queries
+	 * there read warm pages while 64 spread samples say "cold". The
+	 * recent-buffers counters record what this session's reads
+	 * actually hit, so once it has real volume, believe whichever
+	 * signal says warmer -- a genuinely cold session keeps a low hit
+	 * rate, and eviction pushes the rate back down via stale misses.
+	 */
+	uint64 reads = mkt_bufcache_hits + mkt_bufcache_cold + mkt_bufcache_stale;
+	double session_rate = 0.0;
+
+	if (reads >= 1000)
+		session_rate = (double)mkt_bufcache_hits / (double)reads;
+
+	elog(DEBUG1,
+		 "mktann residency: %d/%d sampled posting blocks resident, "
+		 "session hit rate %.2f over " UINT64_FORMAT " reads "
+		 "(first_posting=%u nblocks=%u)",
+		 hits,
+		 samples,
+		 session_rate,
+		 reads,
+		 first_posting,
+		 nblocks);
+
+	return Max(sampled, session_rate);
+}
 
 /* The mktann access method's OID, resolved once per backend. */
 static Oid
@@ -80,11 +174,22 @@ mktann_compute_costs(Oid indexoid)
 
 	Relation index = relation_open(indexoid, AccessShareLock);
 
+	if (!mktann_cache_format_ok(index))
+	{
+		/* An index this build cannot read must not abort planning for
+		 * the whole table; report "cannot serve" and let costestimate
+		 * disable the path. */
+		relation_close(index, AccessShareLock);
+		c.unreadable = true;
+		return c;
+	}
+
 	Dimension	   dim;
 	DistanceMetric metric;
 	BlockNumber	   first_posting;
 	mktann_cache_meta(index, &dim, &metric, &first_posting);
-	MktannScanInfo info = mktann_cache_scan_info(index);
+	MktannScanInfo info		= mktann_cache_scan_info(index);
+	double		   resident = mktann_residency(index, first_posting);
 
 	relation_close(index, AccessShareLock);
 
@@ -122,6 +227,14 @@ mktann_compute_costs(Oid indexoid)
 	c.index_pages = beam_pages + n * cluster_pages;
 	c.selectivity = Min(1.0, pool / ntuples);
 
+	/* Storage I/O for the non-resident posting pages this scan will
+	 * touch: the per-cluster chains plus Phase A's one first-page read
+	 * per routed cluster. Random synchronous reads with
+	 * per-participant streams -- the phase divides across workers like
+	 * the scan CPU does. */
+	c.io = (n * cluster_pages + n_route) * (1.0 - resident) *
+		   random_page_cost * MKT_COST_SYNC_READ_MULT;
+
 	return c;
 }
 
@@ -138,8 +251,11 @@ mktann_costestimate(
 {
 	(void)root;
 
-	/* Never use the index without ORDER BY <op> */
-	if (path->indexorderbys == NIL)
+	MktannCosts c = mktann_compute_costs(path->indexinfo->indexoid);
+
+	/* Never use the index without ORDER BY <op>, and never use an index
+	 * whose on-disk format this build cannot read. */
+	if (path->indexorderbys == NIL || c.unreadable)
 	{
 		*startup_cost			  = get_float8_infinity();
 		*total_cost				  = get_float8_infinity();
@@ -150,15 +266,14 @@ mktann_costestimate(
 		return;
 	}
 
-	MktannCosts c = mktann_compute_costs(path->indexinfo->indexoid);
-
 	/* All search work happens before the first tuple. Repeated inner
 	 * scans re-run the whole search (no amrescan shortcut). */
-	*startup_cost = (c.descent + c.scan + c.rerank) * Max(loop_count, 1.0);
-	*total_cost	  = *startup_cost + c.emitted * cpu_index_tuple_cost;
-	*selectivity  = c.selectivity;
-	*correlation  = 0;
-	*index_pages  = c.index_pages;
+	*startup_cost = (c.descent + c.scan + c.rerank + c.io) *
+					Max(loop_count, 1.0);
+	*total_cost	 = *startup_cost + c.emitted * cpu_index_tuple_cost;
+	*selectivity = c.selectivity;
+	*correlation = 0;
+	*index_pages = c.index_pages;
 }
 
 /* The divisor cost_index applies to parallel paths (costsize.c). */
@@ -176,6 +291,98 @@ parallel_divisor(int workers)
 	return Max(divisor, 1.0);
 }
 
+/* Amdahl re-cost of one partial mktann path: the descent runs once
+ * (the rendezvous winner); the scan, rerank and storage I/O divide
+ * across participants (each runs its own read stream). Each
+ * participant emits up to its own pool, but Gather Merge stops
+ * pulling at LIMIT -- per-tuple cost is charged on the (divided) row
+ * estimate carried by the partial path. */
+static void
+recost_partial(IndexPath *ipath, const MktannCosts *c)
+{
+	double divisor = parallel_divisor(ipath->path.parallel_workers);
+	Cost   startup = c->descent + (c->scan + c->rerank + c->io) / divisor;
+
+	elog(DEBUG1,
+		 "mktann re-cost: partial path workers=%d startup %.1f -> %.1f",
+		 ipath->path.parallel_workers,
+		 ipath->path.startup_cost,
+		 startup);
+
+	ipath->path.startup_cost = startup;
+	ipath->path.total_cost = startup + ipath->path.rows * cpu_index_tuple_cost;
+}
+
+/*
+ * Core builds a partial index path only when compute_parallel_worker
+ * approves, and that gate divides by the estimated HEAP page count --
+ * for an ANN scan the heap fetches are just the rerank pool (a few
+ * hundred tuples), always below min_parallel_table_scan_size, so the
+ * gate rejects parallelism no matter how many index pages the scan
+ * reads. cost_index recognizes this exact trap for index-only scans
+ * and passes heap_pages = -1 there; an mktann scan has the same shape
+ * (index work dominates, heap is an afterthought), so when core made
+ * no partial path we build one ourselves, sizing workers from the
+ * index side alone.
+ */
+static void
+mktann_build_partial_path(PlannerInfo *root, RelOptInfo *rel)
+{
+	(void)root;
+
+	if (!rel->consider_parallel || max_parallel_workers_per_gather <= 0)
+		return;
+
+	ListCell *lc;
+
+	/* Core already made one (e.g. the table sets parallel_workers)? */
+	foreach (lc, rel->partial_pathlist)
+	{
+		Path *p = (Path *)lfirst(lc);
+
+		if (IsA(p, IndexPath) &&
+			((IndexPath *)p)->indexinfo->relam == mktann_am_oid())
+			return;
+	}
+
+	foreach (lc, rel->pathlist)
+	{
+		Path *p = (Path *)lfirst(lc);
+
+		if (!IsA(p, IndexPath))
+			continue;
+
+		IndexPath *spath = (IndexPath *)p;
+		if (spath->indexinfo->relam != mktann_am_oid() ||
+			spath->indexorderbys == NIL || spath->path.param_info != NULL ||
+			!spath->path.parallel_safe)
+			continue;
+
+		MktannCosts c = mktann_compute_costs(spath->indexinfo->indexoid);
+		if (c.unreadable)
+			continue;
+
+		int workers = compute_parallel_worker(
+				rel,
+				-1 /* heap pages: not the driver, as for index-only */,
+				c.index_pages,
+				max_parallel_workers_per_gather);
+		if (workers <= 0)
+			continue;
+
+		IndexPath *ppath = makeNode(IndexPath);
+
+		*ppath = *spath; /* flat copy; clause lists are shared */
+		ppath->path.parallel_aware	 = true;
+		ppath->path.parallel_workers = workers;
+		ppath->path.rows			 = clamp_row_est(
+				spath->path.rows / parallel_divisor(workers));
+		recost_partial(ppath, &c);
+
+		add_partial_path(rel, (Path *)ppath);
+	}
+}
+
 static void
 mktann_cost_pathlist_hook(
 		PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTblEntry *rte)
@@ -183,9 +390,10 @@ mktann_cost_pathlist_hook(
 	if (prev_pathlist_hook)
 		prev_pathlist_hook(root, rel, rti, rte);
 
-	if (rel->reloptkind != RELOPT_BASEREL || rel->partial_pathlist == NIL)
+	if (rel->reloptkind != RELOPT_BASEREL || rel->pathlist == NIL)
 		return;
 
+	/* Re-cost the partial mktann paths core built (reloption route). */
 	ListCell *lc;
 	foreach (lc, rel->partial_pathlist)
 	{
@@ -199,19 +407,14 @@ mktann_cost_pathlist_hook(
 			ipath->indexorderbys == NIL || path->parallel_workers <= 0)
 			continue;
 
-		MktannCosts c		= mktann_compute_costs(ipath->indexinfo->indexoid);
-		double		divisor = parallel_divisor(path->parallel_workers);
+		MktannCosts c = mktann_compute_costs(ipath->indexinfo->indexoid);
+		if (c.unreadable)
+			continue;
 
-		/* The descent runs once (the rendezvous winner); the scan and
-		 * rerank divide across participants. Each participant emits up
-		 * to its own pool, but Gather Merge stops pulling at LIMIT --
-		 * per-tuple cost is charged on the divided row estimate the
-		 * planner already put on the partial path. */
-		Cost startup = c.descent + (c.scan + c.rerank) / divisor;
-
-		path->startup_cost = startup;
-		path->total_cost   = startup + path->rows * cpu_index_tuple_cost;
+		recost_partial(ipath, &c);
 	}
+
+	mktann_build_partial_path(root, rel);
 }
 
 void

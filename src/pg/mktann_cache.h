@@ -52,6 +52,10 @@ void mktann_index_base_init_with_params(
 /* Backend-cached rotation params (leader-side publication source). */
 RaBitQParams *mktann_cache_params(Relation index);
 
+/* Non-throwing metapage format check for plan-time callers: true if the
+ * index's on-disk format is one this build can read. */
+bool mktann_cache_format_ok(Relation index);
+
 /*
  * Immutable dim + distance metric + first posting page from the cache, without
  * forcing the lazy rotation-matrix work that mktann_index_base_init does. For

@@ -92,6 +92,28 @@ cache_pt_global_mean(AmCacheData *c)
 }
 
 /*
+ * Non-throwing on-disk format probe. The planner costs every mktann
+ * index on the queried table, including ones it will never choose; an
+ * index written by an incompatible format must yield "cannot serve"
+ * costs there, not abort the whole query. Scan paths keep the loud
+ * ERROR in get_cache_data.
+ */
+bool
+mktann_cache_format_ok(Relation index)
+{
+	if (index->rd_amcache != NULL)
+		return true; /* already read and validated */
+
+	Buffer meta_buf = ReadBuffer(index, 0);
+	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
+	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+			BufferGetPage(meta_buf));
+	bool ok = meta->magic == MKT_META_MAGIC;
+	UnlockReleaseBuffer(meta_buf);
+	return ok;
+}
+
+/*
  * Return the per-backend cache, populating rd_amcache (one metapage read) on
  * first use. pt_global_mean is stored in the cache; params are NOT frozen here
  * (the process-local single-entry cache can evict them) — callers rebind via
