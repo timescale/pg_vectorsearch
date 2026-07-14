@@ -742,7 +742,7 @@ CREATE OPERATOR CLASS vector_cosine_ops
 -- index inspection functions
 -- =====================================================================
 
-CREATE FUNCTION mkt_centroid_pages(regclass)
+CREATE FUNCTION centroid_pages(regclass)
     RETURNS TABLE (
         blkno       integer,
         entry       smallint,
@@ -823,7 +823,7 @@ CREATE FUNCTION mkt.convert_posting_to_fastscan(
 -- Helper: create binary casts between meerkat and pgvector types.
 -- Uses exception handling for idempotency (CREATE CAST has no IF NOT
 -- EXISTS clause).
-CREATE FUNCTION mkt_create_pgvector_casts() RETURNS void
+CREATE FUNCTION create_pgvector_casts() RETURNS void
     LANGUAGE plpgsql AS $$
 BEGIN
     BEGIN
@@ -860,7 +860,7 @@ BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_extension WHERE extname = 'vector'
     ) THEN
-        PERFORM @extschema@.mkt_create_pgvector_casts();
+        PERFORM @extschema@.create_pgvector_casts();
         EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
             '(public.vector AS @extschema@.vector)';
         EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
@@ -874,7 +874,7 @@ END;
 $$;
 
 -- Event trigger: create casts when pgvector is installed after meerkat.
-CREATE FUNCTION mkt_on_extension_create()
+CREATE FUNCTION on_extension_create()
     RETURNS event_trigger LANGUAGE plpgsql AS $$
 DECLARE
     obj record;
@@ -883,7 +883,7 @@ BEGIN
                WHERE object_type = 'extension'
     LOOP
         IF obj.object_identity = 'vector' THEN
-            PERFORM @extschema@.mkt_create_pgvector_casts();
+            PERFORM @extschema@.create_pgvector_casts();
         END IF;
     END LOOP;
 END;
@@ -892,4 +892,4 @@ $$;
 CREATE EVENT TRIGGER mkt_pgvector_cast_trigger
     ON ddl_command_end
     WHEN TAG IN ('CREATE EXTENSION')
-    EXECUTE FUNCTION mkt_on_extension_create();
+    EXECUTE FUNCTION on_extension_create();

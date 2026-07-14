@@ -325,7 +325,7 @@ CREATE INDEX line3_short ON line3 USING mktann (v)
 -- the root with aliased duplicate child pointers while the planned
 -- partitions silently never exist).
 SELECT count(*) = count(DISTINCT child_blkno) AS no_duplicate_children
-  FROM mkt_centroid_pages('line3_short') WHERE NOT is_leaf;
+  FROM centroid_pages('line3_short') WHERE NOT is_leaf;
  no_duplicate_children 
 -----------------------
  t
@@ -399,14 +399,14 @@ SELECT exact_check('line3', '(v) WITH (nlist = 40, fan_out = 4)',
 CREATE INDEX line3_d3 ON line3 USING mktann (v)
     WITH (nlist = 40, fan_out = 4);
 SELECT count(*) = count(DISTINCT child_blkno) AS d3_no_duplicate_children
-  FROM mkt_centroid_pages('line3_d3') WHERE NOT is_leaf;
+  FROM centroid_pages('line3_d3') WHERE NOT is_leaf;
  d3_no_duplicate_children 
 --------------------------
  t
 (1 row)
 
 WITH leaves AS (
-    SELECT child_blkno FROM mkt_centroid_pages('line3_d3') WHERE is_leaf
+    SELECT child_blkno FROM centroid_pages('line3_d3') WHERE is_leaf
 ), heads AS (
     SELECT blkno, cluster_id FROM mkt.posting_pages('line3_d3')
     WHERE is_first

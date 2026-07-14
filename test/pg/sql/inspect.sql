@@ -1,4 +1,4 @@
--- mkt_centroid_pages inspection function
+-- centroid_pages inspection function
 
 -- Create table with vector column
 CREATE TABLE embeddings (id serial, v vector(3));
@@ -21,20 +21,20 @@ SELECT level,
        count(*) FILTER (WHERE is_leaf) = count(*) AS all_are_leaves,
        count(*) > 0 AS has_entries,
        min(format) AS format
-    FROM mkt_centroid_pages('idx_l2c'::regclass)
+    FROM centroid_pages('idx_l2c'::regclass)
     GROUP BY level ORDER BY level;
 
 -- Multi-level tree (fan_out = 4) — internal nodes show tree topology
 CREATE INDEX idx_ml ON embeddings USING mktann (v)
     WITH (fan_out = 4, centroid_compression = true);
 
-SELECT * FROM mkt_centroid_pages('idx_ml'::regclass)
+SELECT * FROM centroid_pages('idx_ml'::regclass)
     WHERE NOT is_leaf
     ORDER BY blkno, entry;
 
 -- Leaf summary for multi-level tree
 SELECT level, count(*) AS leaf_entries
-    FROM mkt_centroid_pages('idx_ml'::regclass)
+    FROM centroid_pages('idx_ml'::regclass)
     WHERE is_leaf
     GROUP BY level
     ORDER BY level;
@@ -48,7 +48,7 @@ SELECT level,
        count(*) FILTER (WHERE is_leaf) = count(*) AS all_are_leaves,
        count(*) > 0 AS has_entries,
        min(format) AS format
-    FROM mkt_centroid_pages('idx_float'::regclass)
+    FROM centroid_pages('idx_float'::regclass)
     GROUP BY level ORDER BY level;
 
 -- centroid_compression tri-state on L2 (default opclass): the default and
@@ -59,11 +59,11 @@ CREATE INDEX idx_cc_auto ON embeddings USING mktann (v)
 CREATE INDEX idx_cc_on ON embeddings USING mktann (v)
     WITH (centroid_compression = on);
 SELECT
-    (SELECT min(format) FROM mkt_centroid_pages('idx_cc_default'::regclass))
+    (SELECT min(format) FROM centroid_pages('idx_cc_default'::regclass))
         AS default_fmt,
-    (SELECT min(format) FROM mkt_centroid_pages('idx_cc_auto'::regclass))
+    (SELECT min(format) FROM centroid_pages('idx_cc_auto'::regclass))
         AS auto_fmt,
-    (SELECT min(format) FROM mkt_centroid_pages('idx_cc_on'::regclass))
+    (SELECT min(format) FROM centroid_pages('idx_cc_on'::regclass))
         AS on_fmt;
 
 -- Higher-dim vectors to force page overflow (next_blkno chains).
@@ -82,7 +82,7 @@ CREATE INDEX idx_wide ON wide USING mktann (v)
     WITH (centroid_compression = off);
 
 -- Entries from chained pages appear naturally in output
-SELECT * FROM mkt_centroid_pages('idx_wide'::regclass)
+SELECT * FROM centroid_pages('idx_wide'::regclass)
     ORDER BY blkno, entry;
 
 -- =====================================================================
@@ -126,7 +126,7 @@ SELECT bool_and(chain_pos > 0) AS continuation_pages_ok
 
 -- Error case: not an mktann index
 CREATE INDEX IF NOT EXISTS idx_btree ON embeddings (id);
-SELECT * FROM mkt_centroid_pages('idx_btree'::regclass);
+SELECT * FROM centroid_pages('idx_btree'::regclass);
 SELECT * FROM mkt.posting_pages('idx_btree'::regclass);
 
 -- =====================================================================
