@@ -8,6 +8,8 @@
 
 #include <postgres.h>
 
+#include "mkt_config.h"
+
 #include <commands/defrem.h>
 #include <commands/explain.h>
 #include <commands/explain_format.h>
@@ -46,7 +48,7 @@ mktann_explain_hook(
 
 	Relation rel	 = scan->indexRelation;
 	char	*am_name = get_am_name(rel->rd_rel->relam);
-	if (am_name == NULL || strcmp(am_name, "mktann") != 0)
+	if (am_name == NULL || strcmp(am_name, MKT_AM_NAME) != 0)
 	{
 		if (am_name != NULL)
 			pfree(am_name);

@@ -12,6 +12,8 @@
 
 #include <postgres.h>
 
+#include "mkt_config.h"
+
 #include <access/parallel.h>
 #include <access/table.h>
 #include <access/tableam.h>
@@ -463,7 +465,8 @@ mkt_pbuild_setup_shared(
 
 	if (want_samples > budget && est_tuples > (double)budget)
 		elog(LOG,
-			 "meerkat: k-means sample set limited to %u of the "
+			 MKT_EXTENSION_NAME
+			 ": k-means sample set limited to %u of the "
 			 "ideal " UINT64_FORMAT " vectors by maintenance_work_mem "
 			 "(%d kB); raise maintenance_work_mem for finer centroid "
 			 "training on large tables",
@@ -487,7 +490,7 @@ mkt_pbuild_setup_shared(
 	EnterParallelMode();
 
 	ParallelContext *pcxt = CreateParallelContext(
-			"meerkat", "mkt_parallel_build_main", nworkers);
+			MKT_EXTENSION_NAME, "mkt_parallel_build_main", nworkers);
 
 	/*
 	 * The heap scan's snapshot. A normal build sees all tuples (SnapshotAny);

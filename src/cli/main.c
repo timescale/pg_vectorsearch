@@ -102,7 +102,7 @@ print_usage(const char *prog)
 static void
 print_version(void)
 {
-	printf("meerkat 0.1.0\n");
+	printf("%s %s\n", MKT_EXTENSION_NAME, MKT_VERSION);
 	printf("PostgreSQL index access method for ANN vector search\n");
 }
 

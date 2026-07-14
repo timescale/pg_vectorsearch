@@ -18,6 +18,8 @@
 
 #ifdef MKT_STANDALONE
 
+#include "mkt_config.h"
+
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -313,7 +315,7 @@ mkt_pbuild_setup_shared(
 
 	EnterParallelMode();
 	ParallelContext *pcxt = CreateParallelContext(
-			"meerkat", "mkt_parallel_build_main", nworkers);
+			MKT_EXTENSION_NAME, "mkt_parallel_build_main", nworkers);
 
 	int	 nw_usage	= nworkers > 0 ? nworkers : 1;
 	Size usage_sz	= (Size)nw_usage * sizeof(WalUsage);
