@@ -37,12 +37,13 @@
  */
 typedef struct MktannParallelSizing
 {
-	uint32		  max_nprobe;
-	uint32		  pool;
-	uint32		  nparticipants;
-	uint32		  nclaim_slots;
-	Size		  params_size;
-	RaBitQParams *params; /* backend-lifetime cache pointer */
+	uint32		 max_nprobe;
+	uint32		 pool;
+	uint32		 nparticipants;
+	uint32		 nclaim_slots;
+	uint32		 dim;
+	uint64		 seed;
+	const float *pt_gm; /* backend-lifetime cache pointer */
 } MktannParallelSizing;
 
 #define MKTANN_SIZING_QUEUE_LEN 8
@@ -51,12 +52,13 @@ static MktannParallelSizing sizing_queue[MKTANN_SIZING_QUEUE_LEN];
 static uint32				sizing_head; /* next to consume */
 static uint32				sizing_tail; /* next to fill */
 
-/* Layout: header, heads[], claims[], params -- offsets from area start. */
+/* Layout: header, heads[], claims[], rotated global mean -- offsets
+ * from area start. */
 typedef struct MktannParallelLayout
 {
 	Size heads_off;
 	Size claims_off;
-	Size params_off;
+	Size pt_gm_off;
 	Size total;
 } MktannParallelLayout;
 
@@ -68,9 +70,9 @@ parallel_layout(const MktannParallelSizing *sz)
 	lo.heads_off  = MAXALIGN(sizeof(MktannParallelScan));
 	lo.claims_off = lo.heads_off +
 					MAXALIGN(mkt_pquery_heads_size(sz->max_nprobe));
-	lo.params_off = lo.claims_off +
-					MAXALIGN(mkt_pquery_claims_size(sz->nclaim_slots));
-	lo.total = lo.params_off + MAXALIGN(sz->params_size);
+	lo.pt_gm_off = lo.claims_off +
+				   MAXALIGN(mkt_pquery_claims_size(sz->nclaim_slots));
+	lo.total = lo.pt_gm_off + MAXALIGN((Size)sz->dim * sizeof(float));
 	return lo;
 }
 
@@ -98,8 +100,17 @@ parallel_sizing(Relation index)
 	sz.pool			 = pool;
 	sz.nparticipants = (uint32)max_parallel_workers_per_gather + 1;
 	sz.nclaim_slots	 = mkt_pquery_claim_slots(sz.nparticipants, pool);
-	sz.params		 = mktann_cache_params(index);
-	sz.params_size	 = MKT_RABITQ_PARAMS_SIZE(sz.params->dim);
+
+	/* Ensure the cluster-shared params segment exists before workers
+	 * launch (creation memcpys from this backend's cache, built here by
+	 * mktann_cache_params if needed), and grab the rotated global mean
+	 * for init to publish. Both pointers are backend-lifetime. */
+	RaBitQParams *params = mktann_cache_params(index);
+
+	sz.dim	= params->dim;
+	sz.seed = params->seed;
+	(void)mktann_params_shared(sz.dim, sz.seed);
+	sz.pt_gm = mktann_cache_pt_global_mean(index);
 	return sz;
 }
 
@@ -146,12 +157,15 @@ mktann_initparallelscan(void *target)
 
 	SpinLockInit(&pscan->mutex);
 	ConditionVariableInit(&pscan->cv);
-	pscan->state	  = MKTANN_PSCAN_PENDING;
-	pscan->sized_pool = sz.pool;
-	pscan->params_off = lo.params_off;
+	pscan->state	   = MKTANN_PSCAN_PENDING;
+	pscan->sized_pool  = sz.pool;
+	pscan->params_dim  = sz.dim;
+	pscan->params_seed = sz.seed;
+	pscan->pt_gm_off   = lo.pt_gm_off;
 
-	memcpy((char *)pscan + lo.params_off, sz.params, sz.params_size);
-	pscan->params_ready = true;
+	memcpy((char *)pscan + lo.pt_gm_off,
+		   sz.pt_gm,
+		   (Size)sz.dim * sizeof(float));
 }
 
 void

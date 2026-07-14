@@ -12,6 +12,7 @@
 #include <postgres.h>
 
 #include <storage/bufmgr.h>
+#include <storage/dsm_registry.h>
 #include <utils/memutils.h>
 
 #include "mkt_pg.h"
@@ -242,22 +243,119 @@ mktann_cache_params(Relation index)
 	return get_or_create_params(c->base.dim, c->base.rabitq_seed);
 }
 
-void
-mktann_index_base_init_with_params(
-		Relation index, MktIndexBase *base, RaBitQParams *params)
+/* ----------------------------------------------------------------
+ * Cluster-wide rotation params (DSM registry)
+ *
+ * The rotation matrix depends only on (dim, seed), so one copy in a
+ * postmaster-lifetime named DSM segment serves every backend and every
+ * parallel worker: the alternative -- copying the ~MB flat struct into
+ * each parallel scan's per-query DSM -- put the copy on every parallel
+ * query's critical path. The segment is created (and filled) by
+ * whichever process asks first; parallel workers merely attach.
+ * ---------------------------------------------------------------- */
+
+/* Creation-callback inputs (GetNamedDSMSegment callbacks take no
+ * arguments; the registry serializes creation, so a static stage is
+ * safe). src == NULL means "build from dim+seed" -- the O(dim^3)
+ * construction, paid at most once per postmaster lifetime per
+ * (dim, seed). */
+static struct
+{
+	const RaBitQParams *src;
+	Dimension			dim;
+	uint64_t			seed;
+} params_segment_stage;
+
+static void
+params_segment_init(void *ptr)
+{
+	if (params_segment_stage.src != NULL)
+		memcpy(ptr,
+			   params_segment_stage.src,
+			   MKT_RABITQ_PARAMS_SIZE(params_segment_stage.dim));
+	else
+		mkt_rabitq_init(
+				(RaBitQParams *)ptr,
+				params_segment_stage.dim,
+				params_segment_stage.seed);
+}
+
+RaBitQParams *
+mktann_params_shared(Dimension dim, uint64_t seed)
+{
+	/* One-entry attach memo, mirroring the process-local params cache:
+	 * repeated parallel scans in one backend attach once. */
+	static RaBitQParams *attached;
+	static Dimension	 attached_dim;
+	static uint64_t		 attached_seed;
+
+	if (attached != NULL && attached_dim == dim && attached_seed == seed)
+		return attached;
+
+	char name[64];
+	snprintf(
+			name,
+			sizeof(name),
+			"meerkat-rabitq-%u-%016" PRIx64,
+			(unsigned)dim,
+			seed);
+
+	/* Seed the creation callback from the process-local cache when this
+	 * backend already built the matrix (the leader always has: sizing
+	 * runs get_or_create_params before workers exist). */
+	params_segment_stage.src  = (cached_params != NULL && cached_dim == dim &&
+								 cached_seed == seed)
+									  ? cached_params
+									  : NULL;
+	params_segment_stage.dim  = dim;
+	params_segment_stage.seed = seed;
+
+	bool  found;
+	void *ptr = GetNamedDSMSegment(
+			name, MKT_RABITQ_PARAMS_SIZE(dim), params_segment_init, &found);
+
+	attached	  = (RaBitQParams *)ptr;
+	attached_dim  = dim;
+	attached_seed = seed;
+	return attached;
+}
+
+/* Rotated global mean from the per-backend cache, computing it on
+ * first use (needs the rotation matrix). For the parallel-scan leader
+ * to publish through the scan's shared memory, sparing each worker the
+ * per-query O(dim^2) rotation. */
+const float *
+mktann_cache_pt_global_mean(Relation index)
 {
 	AmCacheData *c = get_cache_data(index);
 
 	if (!c->pt_ready)
 	{
+		RaBitQParams *params =
+				get_or_create_params(c->base.dim, c->base.rabitq_seed);
 		mkt_rabitq_rotate(
 				params, cache_global_mean(c), cache_pt_global_mean(c));
 		c->base.pt_global_mean = cache_pt_global_mean(c);
 		c->pt_ready			   = true;
 	}
+	return cache_pt_global_mean(c);
+}
 
-	*base					   = c->base;
-	base->params			   = params;
+void
+mktann_index_base_init_shared(
+		Relation	  index,
+		MktIndexBase *base,
+		RaBitQParams *params,
+		const float	 *pt_global_mean)
+{
+	AmCacheData *c = get_cache_data(index);
+
+	*base		 = c->base;
+	base->params = params;
+	/* Read-only here: the in-place rotate in mkt_index_ensure_rabitq
+	 * only runs when params is NULL, and params is always supplied on
+	 * this path. */
+	base->pt_global_mean	   = unconstify(float *, pt_global_mean);
 	base->fastscan			   = c->has_fastscan ? mkt_fastscan_bits : 0;
 	base->centroid_error_scale = (float)mkt_centroid_error_scale;
 	base->centroid_beam_scale  = (float)mkt_centroid_beam_scale;

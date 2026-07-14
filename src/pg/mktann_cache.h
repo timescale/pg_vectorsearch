@@ -44,13 +44,25 @@
 void mktann_index_base_init(Relation index, MktIndexBase *base);
 
 /* Variant for parallel query workers: bind caller-supplied rotation
- * params (e.g. from the scan's shared memory) instead of building them
- * in the process-local cache. */
-void mktann_index_base_init_with_params(
-		Relation index, MktIndexBase *base, RaBitQParams *params);
+ * params and rotated global mean (from cluster-shared / scan-shared
+ * memory) instead of building them locally. Both must outlive the
+ * scan; neither is installed into any process-local cache. */
+void mktann_index_base_init_shared(
+		Relation	  index,
+		MktIndexBase *base,
+		RaBitQParams *params,
+		const float	 *pt_global_mean);
 
 /* Backend-cached rotation params (leader-side publication source). */
 RaBitQParams *mktann_cache_params(Relation index);
+
+/* Cluster-shared rotation params in a postmaster-lifetime named DSM
+ * segment, created and filled on first request per (dim, seed). */
+RaBitQParams *mktann_params_shared(Dimension dim, uint64_t seed);
+
+/* Rotated global mean from the per-backend cache (computed on first
+ * use). Pointer valid until relcache invalidation. */
+const float *mktann_cache_pt_global_mean(Relation index);
 
 /* Non-throwing metapage format check for plan-time callers: true if the
  * index's on-disk format is one this build can read. */

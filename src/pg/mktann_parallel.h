@@ -5,8 +5,10 @@
  * backend-neutral MktQueryShared first (probe list, work cursor, claim
  * table; see index/query_parallel.h) and adds the PG-only pieces: the
  * one-shot probe-list rendezvous (spinlock + condition variable, btree
- * seize-style) and the leader-published rotation params that spare each
- * fresh worker process the O(dim^3) matrix construction.
+ * seize-style) and the leader-published rotated global mean. The
+ * rotation params themselves live in a postmaster-lifetime named DSM
+ * segment keyed by (dim, seed) -- see mktann_params_shared() -- so the
+ * per-query area carries only the identity workers need to attach.
  */
 
 #ifndef MKTANN_PARALLEL_H
@@ -47,10 +49,15 @@ typedef struct MktannParallelScan
 	 * rather than resized). */
 	uint32 sized_pool; /* per-participant rerank/claim budget */
 
-	/* Leader-published rotation params (flat RaBitQParams copy; dim and
-	 * seed are embedded in the struct for worker-side validation). */
-	bool   params_ready;
-	uint64 params_off; /* from the start of this struct */
+	/* Identity of the cluster-shared rotation params segment (see
+	 * mktann_params_shared); workers cross-check against their own
+	 * index cache before attaching. */
+	uint32 params_dim;
+	uint64 params_seed;
+
+	/* Leader-published rotated global mean (dim floats), sparing each
+	 * worker the per-query O(dim^2) rotation. */
+	uint64 pt_gm_off; /* from the start of this struct */
 } MktannParallelScan;
 
 static inline MktannParallelScan *
@@ -60,10 +67,10 @@ mktann_parallel_area(IndexScanDesc scan)
 								  scan->parallel_scan->ps_offset_am);
 }
 
-static inline RaBitQParams *
-mktann_parallel_params(MktannParallelScan *pscan)
+static inline const float *
+mktann_parallel_pt_gm(MktannParallelScan *pscan)
 {
-	return (RaBitQParams *)((char *)pscan + pscan->params_off);
+	return (const float *)((char *)pscan + pscan->pt_gm_off);
 }
 
 /* Index AM callbacks (amroutine). */

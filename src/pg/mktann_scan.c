@@ -273,37 +273,43 @@ mktann_scan_prepare(IndexScanDesc scan)
 	Relation	  index	  = scan->indexRelation;
 
 	/* Immutable index parameters from the per-backend cache (metapage
-	 * read at most once per backend). A parallel worker binds the
-	 * leader-published rotation params from the scan's shared area
-	 * instead of building its own (O(dim^3)); on any mismatch it falls
-	 * back to the normal per-process construction. */
-	RaBitQParams *shared_params = NULL;
+	 * read at most once per backend). A parallel worker attaches the
+	 * cluster-shared rotation params segment and binds the
+	 * leader-published rotated global mean instead of building either
+	 * (O(dim^3) and O(dim^2) respectively); on a leader/index identity
+	 * mismatch -- a cached plan surviving a REINDEX to different
+	 * geometry -- it falls back to the normal per-process path. */
+	bool bound_shared = false;
 	if (scan->parallel_scan != NULL && IsParallelWorker())
 	{
 		MktannParallelScan *pscan = mktann_parallel_area(scan);
-		if (pscan->params_ready)
-			shared_params = mktann_parallel_params(pscan);
-	}
-	if (shared_params != NULL)
-	{
-		mktann_index_base_init_with_params(
-				index, &ss->index_base, shared_params);
-		if (shared_params->dim != ss->index_base.dim ||
-			shared_params->seed != ss->index_base.rabitq_seed)
+
+		Dimension	   dim;
+		DistanceMetric metric;
+		BlockNumber	   first_posting;
+		mktann_cache_meta(index, &dim, &metric, &first_posting);
+
+		if (pscan->params_dim == dim)
 		{
+			RaBitQParams *params = mktann_params_shared(
+					pscan->params_dim, pscan->params_seed);
+
+			mktann_index_base_init_shared(
+					index,
+					&ss->index_base,
+					params,
+					mktann_parallel_pt_gm(pscan));
+			bound_shared = pscan->params_seed == ss->index_base.rabitq_seed;
+		}
+		if (!bound_shared)
 			ereport(WARNING,
 					(errmsg("published rotation params do not match the "
 							"index (dim %u seed " UINT64_FORMAT
-							" vs dim %u seed " UINT64_FORMAT
 							"); rebuilding locally",
-							shared_params->dim,
-							shared_params->seed,
-							ss->index_base.dim,
-							ss->index_base.rabitq_seed)));
-			mktann_index_base_init(index, &ss->index_base);
-		}
+							pscan->params_dim,
+							pscan->params_seed)));
 	}
-	else
+	if (!bound_shared)
 		mktann_index_base_init(index, &ss->index_base);
 
 	uint32_t max_k;
