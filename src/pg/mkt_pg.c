@@ -4,6 +4,8 @@
 
 #include <postgres.h>
 
+#include "mkt_config.h"
+
 #include <access/reloptions.h>
 #include <catalog/namespace.h>
 #include <fmgr.h>
@@ -90,7 +92,7 @@ void
 _PG_init(void)
 {
 	DefineCustomEnumVariable(
-			"mkt.distance_mode",
+			MKT_EXTENSION_SCHEMA ".distance_mode",
 			"RaBitQ distance computation mode.",
 			"default (use index setting), asymmetric, or symmetric",
 			&mkt_distance_mode,
@@ -103,7 +105,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomIntVariable(
-			"mkt.nprobe",
+			MKT_EXTENSION_SCHEMA ".nprobe",
 			"Number of clusters to probe per query.",
 			NULL,
 			&mkt_nprobe,
@@ -117,7 +119,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomIntVariable(
-			"mkt.query_limit",
+			MKT_EXTENSION_SCHEMA ".query_limit",
 			"Maximum number of results per query (0 = auto).",
 			NULL,
 			&mkt_query_limit,
@@ -131,7 +133,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomIntVariable(
-			"mkt.leaf_refine_threshold",
+			MKT_EXTENSION_SCHEMA ".leaf_refine_threshold",
 			"Sample-per-leaf count below which a subsampled build refines "
 			"the leaf centroids on the full table.",
 			"The k-means sample trains each leaf's encode reference; the "
@@ -153,7 +155,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomEnumVariable(
-			"mkt.fastscan_bits",
+			MKT_EXTENSION_SCHEMA ".fastscan_bits",
 			"Fastscan LUT quantization bits.",
 			"8 is faster, 16 is more accurate",
 			&mkt_fastscan_bits,
@@ -166,7 +168,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomBoolVariable(
-			"mkt.rerank",
+			MKT_EXTENSION_SCHEMA ".rerank",
 			"Enable reranking with exact distances.",
 			NULL,
 			&mkt_rerank,
@@ -178,7 +180,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomBoolVariable(
-			"mkt.log_build_stats",
+			MKT_EXTENSION_SCHEMA ".log_build_stats",
 			"Log per-phase index-build resource statistics.",
 			"When on, each build phase logs its elapsed time, build-heap "
 			"usage, and CPU/maxrss (via the server's ShowUsage), plus a final "
@@ -194,7 +196,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomRealVariable(
-			"mkt.centroid_error_scale",
+			MKT_EXTENSION_SCHEMA ".centroid_error_scale",
 			"Centroid-search beam width, as a multiple of the RaBitQ "
 			"distance-error margin.",
 			"During centroid routing each candidate centroid has an "
@@ -222,7 +224,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomRealVariable(
-			"mkt.centroid_beam_scale",
+			MKT_EXTENSION_SCHEMA ".centroid_beam_scale",
 			"Intermediate centroid beam width as a fraction of nprobe.",
 			"Sets the beam width at the intermediate tree levels to this "
 			"fraction of nprobe; the leaf level always returns the full "
@@ -246,7 +248,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomBoolVariable(
-			"mkt.recent_buffers",
+			MKT_EXTENSION_SCHEMA ".recent_buffers",
 			"Re-pin index pages via a backend-local buffer-id cache.",
 			"Skips the shared buffer-mapping hash lookup (a large share of "
 			"warm scan CPU) by remembering each block's buffer id and "
@@ -262,7 +264,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomRealVariable(
-			"mkt.probe_expand",
+			MKT_EXTENSION_SCHEMA ".probe_expand",
 			"Probe-candidate expansion factor for exact centroid re-rank.",
 			"Routes ceil(nprobe * expand) leaf candidates through the "
 			"centroid beam, re-ranks them by exact query-centroid distance "
@@ -285,7 +287,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomIntVariable(
-			"mkt.rerank_pool",
+			MKT_EXTENSION_SCHEMA ".rerank_pool",
 			"Max candidates to exact-rerank per query (0 = automatic, "
 			"-1 = unlimited).",
 			"Rerank only the most promising candidates by approximate "
@@ -304,7 +306,7 @@ _PG_init(void)
 			mkt_rerank_pool_assign_hook,
 			NULL);
 
-	MarkGUCPrefixReserved("mkt");
+	MarkGUCPrefixReserved(MKT_EXTENSION_SCHEMA);
 
 	mkt_cblas_pin_single_thread();
 
@@ -451,6 +453,32 @@ Datum
 mkt_git_commit(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_TEXT_P(cstring_to_text(MKT_GIT_COMMIT));
+}
+
+/*
+ * Return the extension version the binary was built as. Comes from
+ * meson.build via mkt_config.h, the single source of truth for the
+ * version string.
+ */
+PG_FUNCTION_INFO_V1(mkt_extension_version);
+
+Datum
+mkt_extension_version(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_TEXT_P(cstring_to_text(MKT_VERSION));
+}
+
+/*
+ * Return the extension name the binary was built as (from meson.build
+ * via mkt_config.h). Lets SQL refer to the extension by name without
+ * hardcoding it, e.g. in the prerelease install notice.
+ */
+PG_FUNCTION_INFO_V1(mkt_extension_name);
+
+Datum
+mkt_extension_name(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_TEXT_P(cstring_to_text(MKT_EXTENSION_NAME));
 }
 
 /* ----------------------------------------------------------------

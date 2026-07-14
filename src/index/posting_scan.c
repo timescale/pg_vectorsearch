@@ -219,8 +219,8 @@ advance_page(MktPostingScan *scan)
 	if (opaque->page_id != MKT_POSTING_PAGE_ID)
 	{
 		mkt_warn(
-				"meerkat: posting scan hit non-posting page "
-				"(blkno=%u, page_id=0x%04X)",
+				MKT_EXTENSION_NAME ": posting scan hit non-posting page "
+								   "(blkno=%u, page_id=0x%04X)",
 				scan->cur_blkno,
 				opaque->page_id);
 		/* Release the pin taken above before bailing (storage-backed only;

@@ -9,6 +9,23 @@
 #define MKT_CONFIG_H
 
 /*
+ * Project version (from meson.build). Single source of truth for the
+ * version string surfaced by the CLI and the SQL version() function.
+ */
+#mesondefine MKT_VERSION
+
+/*
+ * Extension naming (from meson.build, the single source of truth for
+ * all user-facing names): the extension name, the index access method
+ * name, and the schema/GUC prefix. C string literals that surface any
+ * of these to users go through these defines; C-internal identifiers
+ * keep literal names.
+ */
+#mesondefine MKT_EXTENSION_NAME
+#mesondefine MKT_AM_NAME
+#mesondefine MKT_EXTENSION_SCHEMA
+
+/*
  * SIMD mode configuration:
  * - MKT_SIMD_FULL=1: Hand-optimized SIMD + compiler baseline (default)
  * - MKT_SIMD_NONE=1: No SIMD, truly scalar

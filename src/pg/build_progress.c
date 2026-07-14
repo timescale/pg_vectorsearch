@@ -10,6 +10,8 @@
 
 #include <postgres.h>
 
+#include "mkt_config.h"
+
 #include <commands/progress.h>
 #include <miscadmin.h>
 #include <pgstat.h>
@@ -115,8 +117,8 @@ flush_phase(MktBuildProgress *p)
 								 : 0.0;
 
 	ereport(LOG,
-			(errmsg("mktann build: phase \"%s\" done in %.0f ms "
-					"(build heap %.1f MB, DSM %.1f MB)",
+			(errmsg(MKT_AM_NAME " build: phase \"%s\" done in %.0f ms "
+								"(build heap %.1f MB, DSM %.1f MB)",
 					mkt_build_phase_name(p->cur_phase),
 					ms,
 					heap_mb,
@@ -124,7 +126,7 @@ flush_phase(MktBuildProgress *p)
 			 errhidestmt(true)));
 
 	/* btree-style CPU + maxrss for the phase, then reset for the next one. */
-	ShowUsage("mktann build phase resource usage");
+	ShowUsage(MKT_AM_NAME " build phase resource usage");
 	ResetUsage();
 }
 

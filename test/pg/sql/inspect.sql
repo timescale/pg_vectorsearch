@@ -262,3 +262,35 @@ SELECT
 FROM pg_proc p
 JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname = 'mkt' AND p.proname = 'git_commit';
+
+-- ---------------------------------------------------------------------
+-- mkt.extension_name() / mkt.extension_version() — the extension name
+-- and version the loaded library was built as.
+-- ---------------------------------------------------------------------
+
+SELECT mkt.extension_name();
+
+-- The binary's version must match the installed extension's version;
+-- a mismatch means the library and the SQL scripts come from
+-- different builds (e.g. a stale install).
+SELECT mkt.extension_version() =
+    (SELECT extversion FROM pg_extension
+     WHERE extname = mkt.extension_name())
+    AS version_matches_extension;
+
+-- Same contract as mkt.git_commit() above: consumed as strings (e.g.
+-- by rekall), so both must return text and be IMMUTABLE STRICT
+-- PARALLEL SAFE.
+SELECT pg_typeof(mkt.extension_name())::text = 'text' AND
+       pg_typeof(mkt.extension_version())::text = 'text' AS returns_text;
+
+SELECT
+    p.proname,
+    p.provolatile      = 'i' AS immutable,
+    p.proisstrict            AS strict,
+    p.proparallel      = 's' AS parallel_safe
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'mkt'
+  AND p.proname IN ('extension_name', 'extension_version')
+ORDER BY p.proname;

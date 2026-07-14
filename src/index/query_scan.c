@@ -7,6 +7,8 @@
  * topk candidate buffer growth).
  */
 
+#include "mkt_config.h"
+
 #include <float.h>
 #include <math.h>
 #include <stdlib.h>
@@ -517,8 +519,8 @@ mkt_query_execute(
 		for (uint32_t j = i + 1; j < qs->nresults; j++)
 			if (id_i == qs->candidates[qs->result_order[j]].id)
 				mkt_warn(
-						"meerkat: duplicate result at positions "
-						"%u and %u",
+						MKT_EXTENSION_NAME ": duplicate result at positions "
+										   "%u and %u",
 						i,
 						j);
 	}
