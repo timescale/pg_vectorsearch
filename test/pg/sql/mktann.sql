@@ -168,7 +168,7 @@ INSERT INTO hd
     FROM generate_series(1, 2000) g;
 CREATE INDEX hd_i ON hd USING mktann (v);
 SELECT count(*) BETWEEN 20 AND 120 AS toast_auto_nlist
-  FROM mkt_centroid_pages('hd_i') WHERE is_leaf;
+  FROM centroid_pages('hd_i') WHERE is_leaf;
 DROP TABLE hd;
 
 -- ============================================================
