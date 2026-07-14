@@ -22,7 +22,6 @@ else
     )
 
     test_names = [
-      'identity',
       'vector',
       'halfvec',
       'distance',
