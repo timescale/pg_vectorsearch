@@ -106,25 +106,18 @@ bufcache_slot(Relation index, BlockNumber blkno)
 		 * re-validates the tag under its own pin, exactly as it does
 		 * for ids that went stale after a normal miss fill.
 		 *
-		 * Parallel query workers skip the seeding and fill on miss:
-		 * the O(NBuffers) descriptor sweep is a backend-lifetime cost,
-		 * and a worker's lifetime is one query -- at large
-		 * shared_buffers the sweep costs more than the scan work the
-		 * worker exists to share (and it would be repaid on every
-		 * parallel query, in every worker).
+		 * (Never reached in parallel workers: pg_read_page bypasses
+		 * the cache there, so neither this O(NBuffers) sweep nor the
+		 * slot array's allocation lands on a per-query critical path.)
 		 */
-		if (!IsParallelWorker())
+		for (int b = 0; b < NBuffers; b++)
 		{
-			for (int b = 0; b < NBuffers; b++)
-			{
-				BufferDesc *hdr = GetBufferDescriptor(b);
+			BufferDesc *hdr = GetBufferDescriptor(b);
 
-				if (BufTagMatchesRelFileLocator(&hdr->tag, loc) &&
-					BufTagGetForkNum(&hdr->tag) == MAIN_FORKNUM &&
-					hdr->tag.blockNum < g_bufcache_len)
-					g_bufcache[hdr->tag.blockNum] = BufferDescriptorGetBuffer(
-							hdr);
-			}
+			if (BufTagMatchesRelFileLocator(&hdr->tag, loc) &&
+				BufTagGetForkNum(&hdr->tag) == MAIN_FORKNUM &&
+				hdr->tag.blockNum < g_bufcache_len)
+				g_bufcache[hdr->tag.blockNum] = BufferDescriptorGetBuffer(hdr);
 		}
 	}
 
@@ -149,7 +142,15 @@ pg_read_page(MktStorage *self, BlockNumber blkno)
 	MktannStorage *s = PG_STORAGE(self);
 	Buffer		   buf;
 
-	if (g_recent_buffers)
+	/*
+	 * Parallel workers bypass the cache entirely: within one query
+	 * every posting page is read at most once, so a worker could never
+	 * hit -- it would only pay the slot array's allocation and zeroing
+	 * (4 bytes per index block) on its first read, on the query's
+	 * critical path, every query. The cache pays off in backends that
+	 * live across queries.
+	 */
+	if (g_recent_buffers && !IsParallelWorker())
 	{
 		Buffer *slot = bufcache_slot(s->index, blkno);
 
