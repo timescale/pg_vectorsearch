@@ -315,7 +315,7 @@ mkt_pbuild_setup_shared(
 
 	EnterParallelMode();
 	ParallelContext *pcxt = CreateParallelContext(
-			MKT_EXTENSION_NAME, "mkt_parallel_build_main", nworkers);
+			MKT_MODULE_NAME, "mkt_parallel_build_main", nworkers);
 
 	int	 nw_usage	= nworkers > 0 ? nworkers : 1;
 	Size usage_sz	= (Size)nw_usage * sizeof(WalUsage);

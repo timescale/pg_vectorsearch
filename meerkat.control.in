@@ -1,5 +1,5 @@
+# module_pathname goes into meerkat--<version>.control
 comment = 'Meerkat: ANN vector search for PostgreSQL'
-default_version = '0.1.0'
-module_pathname = '$libdir/meerkat'
+default_version = '@VERSION@'
 relocatable = false
 schema = 'mkt'

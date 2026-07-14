@@ -1,4 +1,17 @@
-/* meerkat--0.1.0.sql */
+/*
+ * meerkat.sql - canonical extension install script
+ *
+ * The build copies this file verbatim to the version-named install
+ * script (meerkat--<version>.sql); see src/pg/meson.build.
+ * PostgreSQL resolves the placeholders when the script runs:
+ *
+ *   MODULE_PATHNAME  the version-named extension library, from the
+ *                    version's own control file
+ *                    (meerkat--<version>.control) — so every version
+ *                    binds its own library, including each step of an
+ *                    upgrade chain
+ *   @extschema@      the extension schema, at CREATE EXTENSION time
+ */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION meerkat" to load this file.\quit
@@ -18,6 +31,23 @@ CREATE FUNCTION extension_version() RETURNS text
 CREATE FUNCTION extension_name() RETURNS text
     AS 'MODULE_PATHNAME', 'mkt_extension_name'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- Prerelease install notice: warn at CREATE EXTENSION time when this
+-- build is a prerelease (any -suffix version, e.g. -alpha1 or -dev).
+-- A runtime check against extension_version(), so final releases
+-- carry nothing to strip and the notice can never ship stale.
+DO $$
+BEGIN
+    IF pg_catalog.strpos(@extschema@.extension_version(), '-')
+        OPERATOR(pg_catalog.>) 0
+    THEN
+        RAISE WARNING '% % is a prerelease: upgrading to later '
+            'versions might not be possible (reinstall instead) and '
+            'its indexes may need rebuilding',
+            @extschema@.extension_name(), @extschema@.extension_version();
+    END IF;
+END;
+$$;
 
 -- =====================================================================
 -- vector type
