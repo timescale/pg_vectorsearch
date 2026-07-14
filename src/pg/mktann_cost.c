@@ -31,6 +31,7 @@
 #include <postgres.h>
 
 #include <access/relation.h>
+#include <access/xact.h>
 #include <commands/defrem.h>
 #include <math.h>
 #include <optimizer/cost.h>
@@ -167,10 +168,41 @@ mktann_am_oid(void)
 	return am_oid;
 }
 
+/*
+ * Statement-scoped memo. One planning pass costs each mktann index on
+ * the queried table two or three times (amcostestimate for the serial
+ * path, the pathlist hook for the partial path), and each computation
+ * opens the index and samples the buffer mapping table. The inputs
+ * (GUCs, residency) are fixed for the duration of one statement, so
+ * later calls replay the first result. Keyed by statement start time
+ * rather than any planner pointer: palloc reuse can hand a new
+ * planning cycle an old PlannerInfo address, while two statements
+ * cannot share a start timestamp.
+ */
+#define MKT_COST_MEMO_SLOTS 16
+
+typedef struct MktannCostMemo
+{
+	Oid			indexoid;
+	TimestampTz stmt_start;
+	MktannCosts costs;
+} MktannCostMemo;
+
+static MktannCostMemo cost_memo[MKT_COST_MEMO_SLOTS];
+static uint32		  cost_memo_next;
+
 MktannCosts
 mktann_compute_costs(Oid indexoid)
 {
-	MktannCosts c = {0};
+	MktannCosts c		   = {0};
+	TimestampTz stmt_start = GetCurrentStatementStartTimestamp();
+
+	for (int i = 0; i < MKT_COST_MEMO_SLOTS; i++)
+	{
+		if (cost_memo[i].indexoid == indexoid &&
+			cost_memo[i].stmt_start == stmt_start)
+			return cost_memo[i].costs;
+	}
 
 	Relation index = relation_open(indexoid, AccessShareLock);
 
@@ -181,7 +213,7 @@ mktann_compute_costs(Oid indexoid)
 		 * disable the path. */
 		relation_close(index, AccessShareLock);
 		c.unreadable = true;
-		return c;
+		goto memoize;
 	}
 
 	Dimension	   dim;
@@ -234,6 +266,12 @@ mktann_compute_costs(Oid indexoid)
 	 * the scan CPU does. */
 	c.io = (n * cluster_pages + n_route) * (1.0 - resident) *
 		   random_page_cost * MKT_COST_SYNC_READ_MULT;
+
+memoize:
+	cost_memo[cost_memo_next] = (MktannCostMemo){.indexoid	 = indexoid,
+												 .stmt_start = stmt_start,
+												 .costs		 = c};
+	cost_memo_next			  = (cost_memo_next + 1) % MKT_COST_MEMO_SLOTS;
 
 	return c;
 }
