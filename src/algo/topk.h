@@ -116,6 +116,10 @@ void mkt_topk_reset_to_k(MktTopK *topk, uint32_t k);
  * mkt_topk_insert; centroid beam search and similar code that
  * inserts each candidate exactly once should use this fast path.
  */
+/* Replay a collected entry through full insert semantics, preserving
+ * its scan-rank stamp (parallel merge; see topk.c). */
+void mkt_topk_insert_entry(MktTopK *topk, const MktTopKEntry *entry);
+
 void mkt_topk_insert_unique(
 		MktTopK *topk, Distance distance, Distance error, uint64_t id);
 

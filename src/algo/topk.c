@@ -333,6 +333,24 @@ append:
 	};
 }
 
+/*
+ * Replay a previously collected entry, preserving its original scan
+ * rank (src). The merge of per-participant candidate buffers replays
+ * every entry through the full insert semantics -- including the
+ * duplicate-id heap dedup, since SOAR replicas of one TID can arrive
+ * from different participants -- to reproduce exactly the topk state a
+ * single serial scan over all clusters would have built.
+ */
+void
+mkt_topk_insert_entry(MktTopK *topk, const MktTopKEntry *entry)
+{
+	uint32_t saved = topk->cur_src;
+
+	topk->cur_src = entry->src;
+	mkt_topk_insert(topk, entry->distance, entry->error, entry->id);
+	topk->cur_src = saved;
+}
+
 /* ----------------------------------------------------------------
  * Extract sorted
  * ---------------------------------------------------------------- */
