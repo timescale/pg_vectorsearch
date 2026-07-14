@@ -57,3 +57,4 @@ regression.out
 
 # Agent files
 CLAUDE.local.md
+dist/
