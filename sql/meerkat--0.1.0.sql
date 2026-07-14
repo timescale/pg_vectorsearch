@@ -11,6 +11,14 @@ CREATE FUNCTION git_commit() RETURNS text
     AS 'MODULE_PATHNAME', 'mkt_git_commit'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION extension_version() RETURNS text
+    AS 'MODULE_PATHNAME', 'mkt_version'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION extension_name() RETURNS text
+    AS 'MODULE_PATHNAME', 'mkt_extension_name'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 -- =====================================================================
 -- vector type
 -- =====================================================================
