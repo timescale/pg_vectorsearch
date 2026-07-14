@@ -1,63 +1,4 @@
--- Extension introspection: build identity and index internals.
--- ---------------------------------------------------------------------
--- Build identity: mkt.extension_name(), mkt.extension_version(), and
--- mkt.git_commit() report what the loaded library was built as. First
--- in the file, before any index churn: the version check is a
--- stale-install canary. Verify the contracts without printing the
--- actual hash so the expected output stays deterministic.
--- ---------------------------------------------------------------------
-SELECT extension_name();
- extension_name 
-----------------
- meerkat
-(1 row)
-
--- The binary's version must match the installed extension's version; a
--- mismatch means the library and the SQL scripts come from different
--- builds (e.g. a stale install).
-SELECT extension_version() =
-    (SELECT extversion FROM pg_extension WHERE extname = extension_name())
-    AS version_matches_extension;
- version_matches_extension 
----------------------------
- t
-(1 row)
-
--- Format: 40-char lowercase hex (git's full SHA-1) or the "unknown"
--- fallback used when vcs_tag had no git checkout available (e.g. a
--- build from a release tarball).
-SELECT git_commit() ~ '^([0-9a-f]{40}|unknown)$' AS git_commit_shape;
- git_commit_shape 
-------------------
- t
-(1 row)
-
--- Callers (e.g. rekall) consume these as strings, so the return type
--- must be text, and all three must be IMMUTABLE STRICT PARALLEL SAFE:
--- the values don't change within a backend's lifetime, the inputs are
--- void so STRICT is trivially satisfied, and there's no per-backend
--- state that would break parallel workers.
-SELECT
-    p.proname,
-    p.prorettype::regtype::text = 'text' AS returns_text,
-    p.provolatile      = 'i' AS immutable,
-    p.proisstrict            AS strict,
-    p.proparallel      = 's' AS parallel_safe
-FROM pg_proc p
-JOIN pg_namespace n ON n.oid = p.pronamespace
-WHERE n.nspname = 'mkt'
-  AND p.proname IN ('git_commit', 'extension_name', 'extension_version')
-ORDER BY p.proname;
-      proname      | returns_text | immutable | strict | parallel_safe 
--------------------+--------------+-----------+--------+---------------
- extension_name    | t            | t         | t      | t
- extension_version | t            | t         | t      | t
- git_commit        | t            | t         | t      | t
-(3 rows)
-
--- ---------------------------------------------------------------------
--- Index-internals introspection
--- ---------------------------------------------------------------------
+-- mkt_centroid_pages inspection function
 -- Create table with vector column
 CREATE TABLE embeddings (id serial, v vector(3));
 -- Insert deterministic data (grid of vectors)
@@ -397,3 +338,88 @@ DROP TABLE tc_fastscan;
 -- Cleanup
 DROP TABLE embeddings;
 DROP TABLE wide;
+-- ---------------------------------------------------------------------
+-- mkt.git_commit() — exposes the git commit the extension was built
+-- from. Verify the contract without printing the actual hash so the
+-- expected output stays deterministic across builds.
+-- ---------------------------------------------------------------------
+-- Format: 40-char lowercase hex (git's full SHA-1) or the "unknown"
+-- fallback used when vcs_tag had no git checkout available.
+SELECT mkt.git_commit() ~ '^([0-9a-f]{40}|unknown)$' AS valid_format;
+ valid_format 
+--------------
+ t
+(1 row)
+
+-- Callers (e.g. rekall) use this as a string, so the return type
+-- must be text.
+SELECT pg_typeof(mkt.git_commit())::text = 'text' AS returns_text;
+ returns_text 
+--------------
+ t
+(1 row)
+
+-- The function must be IMMUTABLE STRICT PARALLEL SAFE — the commit
+-- doesn't change within a single backend's lifetime, the input is
+-- void so STRICT is trivially satisfied, and there's no per-backend
+-- state that would break parallel workers.
+SELECT
+    p.provolatile      = 'i' AS immutable,
+    p.proisstrict            AS strict,
+    p.proparallel      = 's' AS parallel_safe
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'mkt' AND p.proname = 'git_commit';
+ immutable | strict | parallel_safe 
+-----------+--------+---------------
+ t         | t      | t
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- mkt.extension_name() / mkt.extension_version() — the extension name
+-- and version the loaded library was built as.
+-- ---------------------------------------------------------------------
+SELECT mkt.extension_name();
+ extension_name 
+----------------
+ meerkat
+(1 row)
+
+-- The binary's version must match the installed extension's version;
+-- a mismatch means the library and the SQL scripts come from
+-- different builds (e.g. a stale install).
+SELECT mkt.extension_version() =
+    (SELECT extversion FROM pg_extension
+     WHERE extname = mkt.extension_name())
+    AS version_matches_extension;
+ version_matches_extension 
+---------------------------
+ t
+(1 row)
+
+-- Same contract as mkt.git_commit() above: consumed as strings (e.g.
+-- by rekall), so both must return text and be IMMUTABLE STRICT
+-- PARALLEL SAFE.
+SELECT pg_typeof(mkt.extension_name())::text = 'text' AND
+       pg_typeof(mkt.extension_version())::text = 'text' AS returns_text;
+ returns_text 
+--------------
+ t
+(1 row)
+
+SELECT
+    p.proname,
+    p.provolatile      = 'i' AS immutable,
+    p.proisstrict            AS strict,
+    p.proparallel      = 's' AS parallel_safe
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'mkt'
+  AND p.proname IN ('extension_name', 'extension_version')
+ORDER BY p.proname;
+      proname      | immutable | strict | parallel_safe 
+-------------------+-----------+--------+---------------
+ extension_name    | t         | t      | t
+ extension_version | t         | t      | t
+(2 rows)
+
