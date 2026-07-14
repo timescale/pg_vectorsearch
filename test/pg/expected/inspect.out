@@ -7,20 +7,22 @@
 -- actual hash so the expected output stays deterministic.
 -- ---------------------------------------------------------------------
 SELECT extension_name();
-ERROR:  function extension_name() does not exist
-LINE 1: SELECT extension_name();
-               ^
-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ extension_name 
+----------------
+ meerkat
+(1 row)
+
 -- The binary's version must match the installed extension's version; a
 -- mismatch means the library and the SQL scripts come from different
 -- builds (e.g. a stale install).
 SELECT extension_version() =
     (SELECT extversion FROM pg_extension WHERE extname = extension_name())
     AS version_matches_extension;
-ERROR:  function extension_version() does not exist
-LINE 1: SELECT extension_version() =
-               ^
-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ version_matches_extension 
+---------------------------
+ t
+(1 row)
+
 -- Format: 40-char lowercase hex (git's full SHA-1) or the "unknown"
 -- fallback used when vcs_tag had no git checkout available (e.g. a
 -- build from a release tarball).
@@ -46,10 +48,12 @@ JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname = 'mkt'
   AND p.proname IN ('git_commit', 'extension_name', 'extension_version')
 ORDER BY p.proname;
-  proname   | returns_text | immutable | strict | parallel_safe 
-------------+--------------+-----------+--------+---------------
- git_commit | t            | t         | t      | t
-(1 row)
+      proname      | returns_text | immutable | strict | parallel_safe 
+-------------------+--------------+-----------+--------+---------------
+ extension_name    | t            | t         | t      | t
+ extension_version | t            | t         | t      | t
+ git_commit        | t            | t         | t      | t
+(3 rows)
 
 -- ---------------------------------------------------------------------
 -- Index-internals introspection
