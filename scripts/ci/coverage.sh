@@ -81,9 +81,15 @@ MIN_COVERAGE=85
 # variants (scalar, AVX2, AVX-512 on x86; scalar, NEON on ARM), achieving
 # full coverage of testable code paths. We only exclude code for foreign
 # architectures that cannot execute at all.
+#
+# The --filter whitelist restricts the report to the project's own
+# sources. Without it, anything under --root gets counted — in CI the
+# debug PostgreSQL install lives inside the repo, so PG's own header
+# inlines (near-100% covered) entered the report and inflated the
+# aggregate the MIN_COVERAGE gate checks, masking under-tested project
+# code.
 GCOVR_EXCLUDES=(
-    --exclude 'builddir.*'
-    --exclude 'test/.*'
+    --filter 'src/.*'
     --exclude 'src/cli/.*'
     --exclude '.*_pg\.h'
 )
@@ -141,6 +147,11 @@ GCOV_TOOL=()
 CC_BASE=$(basename "${CC:-cc}")
 if [[ "$CC_BASE" == clang* ]]; then
     GCOV_TOOL=(--gcov-executable "llvm-cov gcov")
+elif [[ "$CC_BASE" == gcc-* ]] && command -v "gcov-${CC_BASE#gcc-}" >/dev/null; then
+    # gcov must match the gcc that produced the .gcda files: a
+    # major-version mismatch makes gcov emit no records and the report
+    # silently comes out empty.
+    GCOV_TOOL=(--gcov-executable "gcov-${CC_BASE#gcc-}")
 fi
 
 # Generate coverage reports
