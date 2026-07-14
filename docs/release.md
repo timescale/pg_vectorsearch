@@ -32,13 +32,14 @@ check, so final releases have nothing to strip.
   tag. Fixes go into the next version.
 - **Upgrade scripts** live flat in `sql/` as adjacent-version
   `meerkat--A--B.sql` scripts (PostgreSQL chains them; inspect with
-  `SELECT * FROM pg_extension_update_paths('meerkat')`). From the
-  first non-alpha release on, every catalog-affecting change must
-  land in the same PR as its addition to the pending upgrade script.
+  `SELECT * FROM pg_extension_update_paths('meerkat')`). While an
+  upgrade path to the next release is being maintained, every
+  catalog-affecting change must land in the same PR as its addition
+  to the pending upgrade script.
 - **Upgrade equals fresh install:** `ALTER EXTENSION meerkat UPDATE`
   must produce catalog state identical to a fresh
   `CREATE EXTENSION`. A pg_dump-diff CI harness enforcing this is
-  planned follow-up work (nothing to test while alphas have no
+  planned follow-up work (nothing to test before the first shipped
   upgrade path).
 - **Side-by-side versions:** the shared library is version-named
   (`meerkat-<version>.so`) and each release ships a per-version
@@ -52,13 +53,19 @@ check, so final releases have nothing to strip.
   version's library via version-agnostic
   `CREATE OR REPLACE ... AS 'MODULE_PATHNAME'` statements (see
   `sql/README.md`).
-- **Alpha releases have no upgrade path.** Recovery from an alpha is
+- **Prereleases carry no upgrade guarantee.** Whether a prerelease
+  gets an upgrade path is decided case by case per version pair: if
+  the delta is worth shipping, ship it; otherwise users reinstall.
+  Each release's notes ("Breaking changes & upgrade notes") state
+  which it is. The install script warns at CREATE EXTENSION time
+  that upgrading from a prerelease might not be possible. When
+  reinstalling is the answer, recovery is
   `DROP EXTENSION meerkat CASCADE` + install the new version +
-  re-create indexes. Note what the cascade takes with it: dropping
-  the extension drops the `mktann` access method and therefore every
-  index built with it, and drops the `vector`/`halfvec` types and
-  therefore dependent table columns — dump/restore or recreate those
-  columns. Release notes for alphas must say this.
+  re-create indexes — and note what the cascade takes with it:
+  dropping the extension drops the `mktann` access method and
+  therefore every index built with it, and drops the
+  `vector`/`halfvec` types and therefore dependent table columns —
+  dump/restore or recreate those columns.
 
 ### On-disk format audit
 

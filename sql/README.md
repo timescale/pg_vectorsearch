@@ -33,8 +33,11 @@ adjacent pairs are needed (check the available paths with
   statements derived from the canonical `sql/meerkat.sql` (a small
   generator to build when the first supported upgrade is owed),
   followed by the hand-written migration statements.
-- Every catalog-affecting change during a development cycle must land
-  in the same PR as its addition to the pending upgrade script (from
-  the first non-alpha release on; alphas have no upgrade path).
+- While an upgrade path to the next release is being maintained,
+  every catalog-affecting change during the development cycle must
+  land in the same PR as its addition to the pending upgrade script.
+  Whether a given version pair gets a path is a case-by-case release
+  decision (prereleases carry no guarantee); each release's notes
+  state it.
 
 See `docs/release.md` for the full release process and upgrade policy.

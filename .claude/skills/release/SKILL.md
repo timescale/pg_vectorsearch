@@ -40,8 +40,9 @@ release PR as the human review gate.
    `CHANGELOG.md` yourself: read the generated commit list and the
    diffs since the last tag, then write user-facing prose (what can
    users do now, what breaks, what to know) — not a commit recap.
-   For alphas, the breaking-changes section must state the
-   no-upgrade-path policy (see docs/release.md). Fix any stale
+   The breaking-changes section must state whether an upgrade path
+   from the previous release exists — for prereleases that is a
+   case-by-case decision (see docs/release.md). Fix any stale
    version references the docs-freshness check flags (README.md,
    docs/).
 4. **Finish the branch.** Re-run
