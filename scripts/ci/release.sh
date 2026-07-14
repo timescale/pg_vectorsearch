@@ -9,7 +9,9 @@
 # Steps (default: all, in this order):
 #   verify    guards (version match, tag absent, docs freshness) and
 #             a full build + test run via scripts/ci/build.sh
-#   package   source tarball + sha256 + release-notes file into dist/
+#   package   source tarball via meson dist (which rebuilds and tests
+#             the unpacked tarball) + sha256 + release notes into
+#             dist/; requires the verify step's build directory
 #   publish   THE RELEASE: gh release create (tag + release + notes,
 #             nothing else — follow-up failures can't break it)
 #   upload    attach dist/ artifacts to the release page (idempotent)
@@ -92,13 +94,23 @@ step_verify() {
 }
 
 step_package() {
-    log "package: source tarball"
+    log "package: source tarball (meson dist)"
+    # meson dist packages HEAD of the current checkout: it must be the
+    # verified commit, and the build directory from the verify step
+    # must exist (dist configures the unpacked tarball with the same
+    # options, builds it, and runs the tests — the artifact consumers
+    # get is the artifact that was tested).
+    [[ "$(git rev-parse HEAD)" == "$TARGET_SHA" ]] ||
+        die "checkout is at $(git rev-parse HEAD), not the verified" \
+            "RELEASE_TARGET_SHA $TARGET_SHA"
+    [[ -d "$BUILDDIR" ]] ||
+        die "build directory '$BUILDDIR' not found — run the verify" \
+            "step first"
+    meson dist -C "$BUILDDIR" --formats gztar
     mkdir -p "$DIST"
-    git archive --format=tar.gz \
-        --prefix="$EXTENSION_NAME-$VERSION/" \
-        -o "$TARBALL" "$TARGET_SHA"
-    (cd "$DIST" && sha256sum "$(basename "$TARBALL")" \
-        >"$(basename "$TARBALL").sha256")
+    cp "$BUILDDIR/meson-dist/$EXTENSION_NAME-$VERSION.tar.gz" "$TARBALL"
+    cp "$BUILDDIR/meson-dist/$EXTENSION_NAME-$VERSION.tar.gz.sha256sum" \
+        "$TARBALL.sha256"
 
     log "package: release notes from CHANGELOG.md"
     changelog_section "$VERSION" >"$NOTES"

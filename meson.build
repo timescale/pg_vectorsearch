@@ -292,7 +292,10 @@ mkt_config_h = configure_file(
 
 # Embed the git commit hash at build time. vcs_tag re-runs when HEAD
 # moves, so a plain `ninja` picks up a fresh commit without a full
-# reconfigure. Falls back to "unknown" outside of a git checkout.
+# reconfigure. Falls back to "unknown" outside of a git checkout —
+# except in release tarballs (`meson dist`), where the dist script
+# below bakes the packaged commit into the template so git_commit()
+# stays meaningful.
 git_commit_h = vcs_tag(
   input: 'src/git_commit.h.in',
   output: 'git_commit.h',
@@ -300,6 +303,7 @@ git_commit_h = vcs_tag(
   command: ['git', 'rev-parse', 'HEAD'],
   replace_string: '@VCS_TAG@',
 )
+meson.add_dist_script('scripts/dist-git-commit.sh')
 
 # Generate .clang-format-ignore to exclude build directory from formatting
 configure_file(

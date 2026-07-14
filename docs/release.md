@@ -190,7 +190,9 @@ For an out-of-band release, perform the same steps by hand:
 ```bash
 # verify: guards + build + tests on the release commit
 ./scripts/ci/release.sh X.Y.Z verify
-# package: tarball + sha256 + notes into dist/
+# package: meson dist tarball + sha256 + notes into dist/ (meson dist
+# also rebuilds and tests the unpacked tarball; needs verify's
+# build directory)
 ./scripts/ci/release.sh X.Y.Z package
 # publish: THE RELEASE — tag + GitHub release + notes, nothing else
 ./scripts/ci/release.sh X.Y.Z publish
