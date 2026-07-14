@@ -1,0 +1,77 @@
+# git-cliff configuration — generates the "### Changes" section of each
+# CHANGELOG.md release entry from the (pre-commit-enforced) conventional
+# commit history since the previous release tag. The hand-written parts
+# of a release entry (blurb, breaking changes, thanks, ...) come from
+# .release-notes-template.md and are inserted by scripts/release.sh;
+# git-cliff never touches them.
+#
+# The changelog holds only per-release deltas (pgvector/TimescaleDB
+# style): the initial release carries no generated commit list — there
+# is no previous release to delta against, and the full pre-release
+# history would drown readers — so scripts/release.sh skips git-cliff
+# when no earlier release tag exists.
+#
+# Pinned version: git-cliff 2.13.1.
+#
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+# Must stay byte-identical to the committed CHANGELOG.md stub:
+# `git-cliff --prepend` strips a leading match of this header before
+# prepending, so a mismatch would duplicate it on every release.
+header = """
+# Changelog
+"""
+
+# The version header and generated commit list. The hand-written
+# template sections are inserted after the version header by
+# scripts/release.sh, so this body must keep the `## [version]` line
+# recognizable and emit only the "### Changes" block after it.
+#
+# The generated list is a complete delta and serves as raw material:
+# it is generated once when the release PR is prepared, and trimming
+# it down to the notable items is part of editing that PR (nothing
+# regenerates or re-validates it afterwards). The compare link always
+# covers the full delta, so cutting list items loses nothing.
+body = """
+
+## [{% if version %}{{ version | trim_start_matches(pat="v") }}{% else %}unreleased{% endif %}]\
+{% if version %} - {{ timestamp | date(format="%Y-%m-%d") }}{% endif %}
+
+### Changes
+{% for group, commits in commits | group_by(attribute="group") %}
+#### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}*{{ commit.scope }}*: {% endif %}{{ commit.message | upper_first }} \
+([{{ commit.id | truncate(length=7, end="") }}](https://github.com/timescale/meerkat/commit/{{ commit.id }}))\
+{% endfor %}
+{% endfor %}
+{%- if version and previous.version %}
+[Full changelog](https://github.com/timescale/meerkat/compare/{{ previous.version }}...{{ version }})
+{% endif %}
+"""
+
+trim = true
+
+[git]
+# Only conventional commits make the list; the commit-msg hook enforces
+# the format, so anything unparsable is historical noise.
+conventional_commits = true
+filter_unconventional = true
+protect_breaking_commits = true
+tag_pattern = "v[0-9].*"
+sort_commits = "newest"
+
+# The <!-- N --> prefixes order the groups in the output and are
+# stripped by the body template (invisible in rendered markdown either
+# way). chore/ci/style/test commits are internal housekeeping and are
+# omitted from release notes.
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Bug fixes" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^build", group = "<!-- 3 -->Build" },
+  { message = "^docs", group = "<!-- 4 -->Documentation" },
+  { message = "^refactor", group = "<!-- 5 -->Refactoring" },
+  { message = "^(chore|ci|style|test)", skip = true },
+]
