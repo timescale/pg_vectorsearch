@@ -14,6 +14,7 @@
 #include <access/generic_xlog.h>
 #include <access/heapam.h>
 #include <access/htup_details.h>
+#include <access/parallel.h>
 #include <access/tableam.h>
 #include <catalog/pg_am_d.h>
 #include <executor/tuptable.h>
@@ -104,15 +105,26 @@ bufcache_slot(Relation index, BlockNumber blkno)
 		 * torn or stale id is harmless because ReadRecentBuffer
 		 * re-validates the tag under its own pin, exactly as it does
 		 * for ids that went stale after a normal miss fill.
+		 *
+		 * Parallel query workers skip the seeding and fill on miss:
+		 * the O(NBuffers) descriptor sweep is a backend-lifetime cost,
+		 * and a worker's lifetime is one query -- at large
+		 * shared_buffers the sweep costs more than the scan work the
+		 * worker exists to share (and it would be repaid on every
+		 * parallel query, in every worker).
 		 */
-		for (int b = 0; b < NBuffers; b++)
+		if (!IsParallelWorker())
 		{
-			BufferDesc *hdr = GetBufferDescriptor(b);
+			for (int b = 0; b < NBuffers; b++)
+			{
+				BufferDesc *hdr = GetBufferDescriptor(b);
 
-			if (BufTagMatchesRelFileLocator(&hdr->tag, loc) &&
-				BufTagGetForkNum(&hdr->tag) == MAIN_FORKNUM &&
-				hdr->tag.blockNum < g_bufcache_len)
-				g_bufcache[hdr->tag.blockNum] = BufferDescriptorGetBuffer(hdr);
+				if (BufTagMatchesRelFileLocator(&hdr->tag, loc) &&
+					BufTagGetForkNum(&hdr->tag) == MAIN_FORKNUM &&
+					hdr->tag.blockNum < g_bufcache_len)
+					g_bufcache[hdr->tag.blockNum] = BufferDescriptorGetBuffer(
+							hdr);
+			}
 		}
 	}
 
