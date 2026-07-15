@@ -25,6 +25,7 @@
 #endif
 
 #include "cmd.h"
+#include "index/query_scan.h"
 #include "standalone/api.h"
 #include "standalone/vector_source.h"
 
@@ -34,7 +35,7 @@
 
 #define DEFAULT_DIM		768
 #define DEFAULT_NLIST	0 /* auto */
-#define DEFAULT_NPROBE	10
+#define DEFAULT_NPROBE	0 /* 0 = auto from nlist */
 #define DEFAULT_K		10
 #define DEFAULT_QUERIES 100
 #define DEFAULT_RUNS	5
@@ -183,7 +184,8 @@ print_usage(CmdContext *ctx)
 		   DEFAULT_DIM);
 	printf("  --nlist <int>      Clusters (0=auto)\n");
 	printf("  --fan-out <int>    Tree branching factor (0=auto)\n");
-	printf("  --nprobe <int>     Probes (default: %d)\n", DEFAULT_NPROBE);
+	printf("  --nprobe <int>     Probes (0 = auto from nlist; default: %d)\n",
+		   DEFAULT_NPROBE);
 	printf("  -k <int>           Top-k (default: %d)\n", DEFAULT_K);
 	printf("  --queries <int>    Query count (default: %d)\n",
 		   DEFAULT_QUERIES);
@@ -522,6 +524,11 @@ cmd_bench_search(CmdContext *ctx)
 	if (info.max_cluster > avg * 10)
 		printf("  WARNING: cluster imbalance (max/avg=%.0fx)\n",
 			   (double)info.max_cluster / avg);
+
+	/* --nprobe 0: derive from the built cluster count, same rule as the
+	 * extension's mkt.nprobe = 0. */
+	if (config.nprobe == 0)
+		config.nprobe = mkt_auto_nprobe(info.nlist);
 
 	/* --------------------------------------------------------
 	 * Run queries via bindings API

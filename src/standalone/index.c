@@ -584,7 +584,7 @@ mkt_index_build(
 		 * behaves identically in both engines (a zero beam scale would
 		 * collapse the beam to width 1 and skip the coverage floors). */
 		idx->base.centroid_error_scale = 0.0f;
-		idx->base.centroid_beam_scale  = 0.25f;
+		idx->base.centroid_beam_scale  = 0.5f;
 		/* The streaming build reserves block 0 for the meta page and writes
 		 * the root centroid page in place at block 1, after its subtrees. */
 		idx->base.first_centroid = 1;

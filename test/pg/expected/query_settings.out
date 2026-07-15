@@ -211,5 +211,42 @@ RESET mkt.query_limit;
 RESET mkt.nprobe;
 RESET enable_seqscan;
 DROP TABLE beam_cover_test;
+-- ============================================================
+-- Auto nprobe (mkt.nprobe = 0, the default)
+-- ============================================================
+-- The default derives nprobe from the index's cluster count
+-- (~0.5*sqrt(nlist), floored at 10). Verify the default is auto and
+-- that a query under it is served by the index and finds an exact
+-- nearest neighbor (50 rows, nlist=12: the floor of 10 probes covers
+-- most lists and the probe vector is a distinct-distance match).
+SHOW mkt.nprobe;
+ mkt.nprobe 
+------------
+ 0
+(1 row)
+
+CREATE TABLE auto_nprobe_test (id int, v vector(3));
+INSERT INTO auto_nprobe_test SELECT g, format('[%s,0,0]', g)::vector
+    FROM generate_series(1, 50) g;
+CREATE INDEX auto_nprobe_idx ON auto_nprobe_test USING mktann (v)
+    WITH (nlist = 12);
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF) SELECT id FROM auto_nprobe_test
+    ORDER BY v <-> '[25,0,0]' LIMIT 1;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Limit
+   ->  Index Scan using auto_nprobe_idx on auto_nprobe_test
+         Order By: (v <-> '[25,0,0]'::vector)
+(3 rows)
+
+SELECT id FROM auto_nprobe_test ORDER BY v <-> '[25,0,0]' LIMIT 1;
+ id 
+----
+ 25
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE auto_nprobe_test;
 -- Cleanup
 DROP TABLE query_settings_test;

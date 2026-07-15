@@ -220,7 +220,8 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	 * covers routing more leaf candidates than are scanned (bounded
 	 * probe expansion); requests beyond the sizing are clamped by
 	 * mkt_query_execute exactly as they were against the old ceiling. */
-	uint32_t req_nprobe = mkt_nprobe > 0 ? (uint32_t)mkt_nprobe : 1;
+	uint32_t req_nprobe = mkt_nprobe > 0 ? (uint32_t)mkt_nprobe
+										 : mkt_auto_nprobe(info.nlist);
 	uint32_t max_nprobe = req_nprobe + Min(req_nprobe, 256) + 16;
 	if (max_nprobe > 4096)
 		max_nprobe = 4096;
@@ -315,7 +316,8 @@ execute_search(IndexScanDesc scan)
 	/* Execute shared search */
 	uint32_t k		= mkt_query_limit > 0 ? (uint32_t)mkt_query_limit
 										  : ss->qstate.max_k;
-	uint32_t nprobe = (uint32_t)mkt_nprobe;
+	uint32_t nprobe = mkt_nprobe > 0 ? (uint32_t)mkt_nprobe
+									 : mkt_auto_nprobe(ss->index_base.nlist);
 
 	MktQueryStats qstats   = {0};
 	ss->storage.read_count = 0;

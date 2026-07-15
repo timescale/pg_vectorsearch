@@ -15,6 +15,7 @@
 #include "index/posting_convert.h"
 #include "index/posting_page.h"
 #include "index/posting_scan.h"
+#include "index/query_scan.h"
 #include "index/storage.h"
 #include "mkt_test.h"
 #include "quant/fastscan.h"
@@ -169,6 +170,27 @@ TEST(index_build_float32_centroids)
 	ASSERT_NOT_NULL(idx, "float32 centroid build should succeed");
 
 	mkt_index_destroy(idx);
+}
+
+/* ----------------------------------------------------------------
+ * Auto nprobe
+ * ---------------------------------------------------------------- */
+
+TEST(auto_nprobe)
+{
+	/* Floor: small indexes probe at least 10 lists, but never more
+	 * than the lists that exist. */
+	ASSERT_EQ(mkt_auto_nprobe(4), 4, "clamped to nlist");
+	ASSERT_EQ(mkt_auto_nprobe(10), 10, "floor at 10");
+	ASSERT_EQ(mkt_auto_nprobe(100), 10, "floor still binding at 100");
+
+	/* Curve: ~0.5 * sqrt(nlist). */
+	ASSERT_EQ(mkt_auto_nprobe(40000), 100, "10M-scale auto nlist");
+	ASSERT_EQ(mkt_auto_nprobe(240000), 245, "50M-scale auto nlist");
+	ASSERT_EQ(mkt_auto_nprobe(400000), 317, "100M-scale auto nlist");
+
+	/* Cap: past the measured range explicit settings take over. */
+	ASSERT_EQ(mkt_auto_nprobe(2000000000), 2048, "capped at 2048");
 }
 
 /* ----------------------------------------------------------------
