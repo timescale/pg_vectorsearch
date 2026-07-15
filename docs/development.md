@@ -2,6 +2,18 @@
 
 ## Building
 
+For the common build-and-install flow there is a thin Makefile wrapper
+(release build against the installed PostgreSQL by default):
+
+```bash
+make                 # build the extension
+sudo make install    # configure + build + install
+make install PG_CONFIG=/path/to/pg_config   # pick a PostgreSQL
+```
+
+See the Makefile header for the other variables (BUILDTYPE, BUILDDIR,
+MESON_ARGS). Everything below uses meson directly.
+
 ```bash
 # Setup build directory
 meson setup builddir
