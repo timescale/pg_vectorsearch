@@ -14,7 +14,8 @@ INSERT INTO embeddings (v)
 -- (Leaf count varies across platforms due to k-means convergence,
 -- so check structure and format without asserting exact counts.)
 CREATE INDEX idx_l2c ON embeddings USING mktann (v)
-    WITH (centroid_compression = true);
+    WITH (centroid_compression = true, centroid_fastscan = off,
+          fastscan = off, soar_lambda = 0, boundary_epsilon = 0);
 
 SELECT level,
        count(child_blkno) = count(*) AS all_have_children,
@@ -26,7 +27,8 @@ SELECT level,
 
 -- Multi-level tree (fan_out = 4) — internal nodes show tree topology
 CREATE INDEX idx_ml ON embeddings USING mktann (v)
-    WITH (fan_out = 4, centroid_compression = true);
+    WITH (fan_out = 4, centroid_compression = true,
+          centroid_fastscan = off);
 
 SELECT * FROM centroid_pages('idx_ml'::regclass)
     WHERE NOT is_leaf
@@ -53,11 +55,12 @@ SELECT level,
 
 -- centroid_compression tri-state on L2 (default opclass): the default and
 -- 'auto' compress, 'on' compresses, 'off' is float (idx_float above).
-CREATE INDEX idx_cc_default ON embeddings USING mktann (v);
+CREATE INDEX idx_cc_default ON embeddings USING mktann (v)
+    WITH (centroid_fastscan = off);
 CREATE INDEX idx_cc_auto ON embeddings USING mktann (v)
-    WITH (centroid_compression = auto);
+    WITH (centroid_compression = auto, centroid_fastscan = off);
 CREATE INDEX idx_cc_on ON embeddings USING mktann (v)
-    WITH (centroid_compression = on);
+    WITH (centroid_compression = on, centroid_fastscan = off);
 SELECT
     (SELECT min(format) FROM centroid_pages('idx_cc_default'::regclass))
         AS default_fmt,
@@ -188,7 +191,8 @@ SELECT mkt.convert_posting_to_fastscan('idx_btree'::regclass, 0);
 -- (Cluster ids are k-means dependent, so assert structure, not the
 -- specific tid -> cluster mapping.)
 CREATE INDEX idx_tc ON embeddings USING mktann (v)
-    WITH (centroid_compression = true);
+    WITH (centroid_compression = true, fastscan = off,
+          soar_lambda = 0, boundary_epsilon = 0);
 
 -- AoS path: every heap TID maps to exactly one cluster (no SOAR/boundary
 -- replication configured), and every reported cluster_id is a real cluster.
@@ -234,6 +238,39 @@ DROP TABLE tc_aos;
 DROP TABLE tc_fastscan;
 
 -- Cleanup
+-- =====================================================================
+-- Default index shape
+-- =====================================================================
+-- With no options, an L2/cosine index resolves to the tuned defaults:
+-- FASTSCAN centroid and posting layouts, and SOAR + boundary
+-- replication (so posting entries exceed the row count while
+-- tids_clusters still reports every row, deduplicated by TID).
+CREATE INDEX idx_default ON embeddings USING mktann (v);
+
+SELECT (SELECT min(format)
+            FROM centroid_pages('idx_default'::regclass)) AS centroid_fmt,
+       (SELECT min(format) FROM mkt.posting_pages('idx_default'::regclass)
+            WHERE is_first) AS posting_fmt;
+
+SELECT sum(entry_count) >= (SELECT count(*) FROM embeddings) AS replicated
+    FROM mkt.posting_pages('idx_default'::regclass);
+
+SELECT count(DISTINCT tid) = (SELECT count(*) FROM embeddings)
+        AS all_rows_mapped
+    FROM mkt.tids_clusters('idx_default'::regclass,
+                           (SELECT array_agg(ctid) FROM embeddings));
+
+-- Queries are served by the index and return exact top-1 on a
+-- distinct-distance probe (nprobe >= nlist: scan every list, so the
+-- result does not depend on routing).
+SET enable_seqscan = off;
+SET mkt.nprobe = 64;
+SELECT id FROM embeddings ORDER BY v <-> '[0.31,0.32,0.33]' LIMIT 1;
+RESET mkt.nprobe;
+RESET enable_seqscan;
+
+DROP INDEX idx_default;
+
 DROP TABLE embeddings;
 DROP TABLE wide;
 

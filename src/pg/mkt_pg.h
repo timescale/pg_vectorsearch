@@ -100,6 +100,26 @@ typedef enum
 	MKT_CENTROID_COMPRESSION_OFF  = 2,
 } MktCentroidCompression;
 
+/*
+ * MktFastscanMode - tri-state control for the packed FASTSCAN page
+ * layouts (posting pages via `fastscan`, centroid pages via
+ * `centroid_fastscan`).
+ *
+ * Both layouts store fixed 32-candidate groups whose byte size grows
+ * with the vector dimension, so past a dimension threshold a single
+ * group no longer fits a page. AUTO uses the layout where it fits
+ * (and, for centroids, where RaBitQ compression is in effect — the
+ * FASTSCAN layout exists only over compressed centroids). ON forces
+ * the layout and errors at build time where it is unavailable. OFF
+ * disables it.
+ */
+typedef enum
+{
+	MKT_FASTSCAN_MODE_AUTO = 0,
+	MKT_FASTSCAN_MODE_ON   = 1,
+	MKT_FASTSCAN_MODE_OFF  = 2,
+} MktFastscanMode;
+
 typedef struct MktannOptions
 {
 	int32  vl_len_;				 /* varlena header (required by reloptions) */
@@ -110,8 +130,8 @@ typedef struct MktannOptions
 	double soar_lambda;			 /* SOAR replication lambda (0=off) */
 	double boundary_epsilon;	 /* boundary replication threshold (0=off) */
 	int	   centroid_compression; /* MktCentroidCompression */
-	bool   fastscan;			 /* use VPSHUFB fastscan posting format */
-	bool   centroid_fastscan;	 /* emit FASTSCAN-format centroid pages */
+	int	   fastscan;			 /* MktFastscanMode, posting pages */
+	int	   centroid_fastscan;	 /* MktFastscanMode, centroid pages */
 } MktannOptions;
 
 #define MKTANN_DEFAULT_FAN_OUT 32
@@ -121,6 +141,16 @@ typedef struct MktannOptions
 #define MKTANN_DEFAULT_NLIST 0
 #define MKTANN_MIN_NLIST	 0
 #define MKTANN_MAX_NLIST	 2000000
+
+/*
+ * Replication defaults. Both forms of secondary assignment are on by
+ * default: SOAR (lambda 1.0) plus a wide boundary band (epsilon 0.35)
+ * won the recall/QPS Pareto frontier at every benchmarked scale
+ * (10M-100M vectors), at a few percent of index size for the boundary
+ * band and a modest build-time cost for SOAR.
+ */
+#define MKTANN_DEFAULT_SOAR_LAMBDA		1.0
+#define MKTANN_DEFAULT_BOUNDARY_EPSILON 0.35
 
 /*
  * MktannGetDistanceMode - Resolve effective distance mode for a scan.

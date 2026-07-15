@@ -11,7 +11,8 @@
 CREATE TABLE mut (id int, v vector(3));
 INSERT INTO mut SELECT g, format('[%s,0,0]', g)::vector FROM generate_series(1, 50) g;
 CREATE INDEX idx_mut ON mut USING mktann (v)
-    WITH (nlist = 4, centroid_compression = true);
+    WITH (nlist = 4, centroid_compression = true, fastscan = off,
+          soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
 SET mkt.nprobe = 4;             -- = nlist: scan every list, deterministic
 
@@ -47,7 +48,8 @@ CREATE TABLE mutfs (id int, v vector(3));
 INSERT INTO mutfs SELECT g, format('[%s,0,0]', g)::vector
     FROM generate_series(1, 60) g;
 CREATE INDEX idx_mutfs ON mutfs USING mktann (v)
-    WITH (nlist = 4, centroid_compression = true, fastscan = true);
+    WITH (nlist = 4, centroid_compression = true, fastscan = on,
+          soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
 SET mkt.nprobe = 4;
 
@@ -74,7 +76,8 @@ DROP TABLE mutfs;
 -- output must be updated.
 CREATE TABLE mutempty (id int, v vector(3));
 CREATE INDEX idx_mutempty ON mutempty USING mktann (v)
-    WITH (nlist = 4, centroid_compression = true);  -- expect ERROR
+    WITH (nlist = 4, centroid_compression = true, fastscan = off,
+          soar_lambda = 0, boundary_epsilon = 0);  -- expect ERROR
 DROP TABLE mutempty;
 
 -- ===== A freshly inserted vector is a genuine nearest neighbour =============
@@ -82,7 +85,8 @@ CREATE TABLE mutnn (id int, v vector(3));
 INSERT INTO mutnn SELECT g, format('[%s,0,0]', g)::vector
     FROM generate_series(1, 50) g;
 CREATE INDEX idx_mutnn ON mutnn USING mktann (v)
-    WITH (nlist = 4, centroid_compression = true);
+    WITH (nlist = 4, centroid_compression = true, fastscan = off,
+          soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
 SET mkt.nprobe = 4;
 -- Guard: index serves the probe, not a seq scan (see the AoS section).
@@ -105,7 +109,8 @@ INSERT INTO mutdel SELECT g, format('[%s,0,0]', g)::vector
     FROM generate_series(1, 50) g;
 INSERT INTO mutdel VALUES (1001, '[100,0,0]'), (1002, '[200,0,0]');
 CREATE INDEX idx_mutdel ON mutdel USING mktann (v)
-    WITH (nlist = 4, centroid_compression = true);
+    WITH (nlist = 4, centroid_compression = true, fastscan = off,
+          soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
 SET mkt.nprobe = 4;
 
@@ -154,7 +159,8 @@ INSERT INTO mutupd SELECT g, 0, format('[%s,0,0]', g)::vector
     FROM generate_series(1, 50) g;
 INSERT INTO mutupd VALUES (1001, 0, '[100,0,0]');
 CREATE INDEX idx_mutupd ON mutupd USING mktann (v)
-    WITH (nlist = 4, centroid_compression = true);
+    WITH (nlist = 4, centroid_compression = true, fastscan = off,
+          soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
 SET mkt.nprobe = 4;
 
@@ -191,7 +197,8 @@ CREATE TABLE muttomb (id int, v vector(3));
 INSERT INTO muttomb SELECT g, format('[%s,0,0]', g)::vector
     FROM generate_series(1, 200) g;
 CREATE INDEX idx_muttomb ON muttomb USING mktann (v)
-    WITH (nlist = 4, centroid_compression = true);
+    WITH (nlist = 4, centroid_compression = true, fastscan = off,
+          soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
 SET mkt.nprobe = 4;
 
@@ -245,7 +252,8 @@ CREATE TABLE mutfstomb (id int, v vector(3));
 INSERT INTO mutfstomb SELECT g, format('[%s,0,0]', g)::vector
     FROM generate_series(1, 200) g;
 CREATE INDEX idx_mutfstomb ON mutfstomb USING mktann (v)
-    WITH (nlist = 4, centroid_compression = true, fastscan = true);
+    WITH (nlist = 4, centroid_compression = true, fastscan = on,
+          soar_lambda = 0, boundary_epsilon = 0);
 -- The build produced fastscan pages and none are tombstoned yet. dead_count
 -- is NULL for fastscan pages: packed groups have no per-entry DELETED state.
 SELECT count(*) FILTER (WHERE format = 'fastscan') > 0 AS has_fastscan_pages,
@@ -271,7 +279,8 @@ CREATE TABLE mutlife (id int, v vector(3));
 INSERT INTO mutlife SELECT g, format('[%s,0,0]', g)::vector
     FROM generate_series(1, 50) g;
 CREATE INDEX idx_mutlife ON mutlife USING mktann (v)
-    WITH (nlist = 4, centroid_compression = true);
+    WITH (nlist = 4, centroid_compression = true, fastscan = off,
+          soar_lambda = 0, boundary_epsilon = 0);
 
 -- Baseline: 50 entries, nothing dead, nothing tombstoned.
 SELECT sum(entry_count) AS entries,
@@ -322,7 +331,8 @@ CREATE TABLE mutmix (id int, v vector(3));
 INSERT INTO mutmix SELECT g, format('[%s,0,0]', g)::vector
     FROM generate_series(1, 50) g;
 CREATE INDEX idx_mutmix ON mutmix USING mktann (v)
-    WITH (nlist = 4, centroid_compression = true);
+    WITH (nlist = 4, centroid_compression = true, fastscan = off,
+          soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
 SET mkt.nprobe = 4;
 
@@ -364,7 +374,8 @@ INSERT INTO mutchain SELECT g, format('[%s,0,0]', g * 0.01)::vector
 INSERT INTO mutchain SELECT 10000 + g, format('[%s,0,0]', 1000 + g * 0.01)::vector
     FROM generate_series(1, 10) g;
 CREATE INDEX idx_mutchain ON mutchain USING mktann (v)
-    WITH (nlist = 2, centroid_compression = true);
+    WITH (nlist = 2, centroid_compression = true, fastscan = off,
+          soar_lambda = 0, boundary_epsilon = 0);
 -- Grow the first region's chain: ids 11..1210 all route to its cluster.
 INSERT INTO mutchain SELECT g, format('[%s,0,0]', g * 0.01)::vector
     FROM generate_series(11, 1210) g;

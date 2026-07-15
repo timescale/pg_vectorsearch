@@ -86,6 +86,16 @@ static relopt_enum_elt_def centroid_compression_relopt_members[] = {
 		{NULL, 0},
 };
 
+/* Shared by the `fastscan` and `centroid_fastscan` options. */
+static relopt_enum_elt_def fastscan_mode_relopt_members[] = {
+		{"auto", MKT_FASTSCAN_MODE_AUTO},
+		{"on", MKT_FASTSCAN_MODE_ON},
+		{"true", MKT_FASTSCAN_MODE_ON},
+		{"off", MKT_FASTSCAN_MODE_OFF},
+		{"false", MKT_FASTSCAN_MODE_OFF},
+		{NULL, 0},
+};
+
 void _PG_init(void);
 
 void
@@ -347,7 +357,7 @@ _PG_init(void)
 			mktann_relopt_kind,
 			"soar_lambda",
 			"SOAR replication lambda (0 = off)",
-			0.0,
+			MKTANN_DEFAULT_SOAR_LAMBDA,
 			0.0,
 			100.0,
 			NoLock);
@@ -355,7 +365,7 @@ _PG_init(void)
 			mktann_relopt_kind,
 			"boundary_epsilon",
 			"Boundary replication gap threshold (0 = off)",
-			0.0,
+			MKTANN_DEFAULT_BOUNDARY_EPSILON,
 			0.0,
 			100.0,
 			NoLock);
@@ -367,18 +377,22 @@ _PG_init(void)
 			MKT_CENTROID_COMPRESSION_AUTO,
 			"auto compresses for L2/cosine and skips inner product",
 			NoLock);
-	add_bool_reloption(
+	add_enum_reloption(
 			mktann_relopt_kind,
 			"fastscan",
-			"Use VPSHUFB fastscan posting page format",
-			false,
+			"VPSHUFB fastscan posting page format",
+			fastscan_mode_relopt_members,
+			MKT_FASTSCAN_MODE_AUTO,
+			"auto uses it up to the dimension where a group fits a page",
 			NoLock);
-	add_bool_reloption(
+	add_enum_reloption(
 			mktann_relopt_kind,
 			"centroid_fastscan",
-			"Emit FASTSCAN-format centroid pages "
-			"(requires centroid_compression=true)",
-			false,
+			"FASTSCAN-format centroid pages",
+			fastscan_mode_relopt_members,
+			MKT_FASTSCAN_MODE_AUTO,
+			"auto follows the resolved centroid compression and the "
+			"dimension limit; on errors where either is unavailable",
 			NoLock);
 
 	mkt_distance_init();

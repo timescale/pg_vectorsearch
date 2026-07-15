@@ -312,12 +312,13 @@ mktann_get_metric(Relation index)
 }
 
 static MktCentroidFormat
-mktann_resolve_format(Relation index, DistanceMetric metric)
+mktann_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 {
 	MktannOptions *opts = (MktannOptions *)index->rd_options;
 	int			   cc	= (opts != NULL) ? opts->centroid_compression
 										 : MKT_CENTROID_COMPRESSION_AUTO;
-	bool cfastscan		= (opts != NULL) ? opts->centroid_fastscan : false;
+	int			   cfs	= (opts != NULL) ? opts->centroid_fastscan
+										 : MKT_FASTSCAN_MODE_AUTO;
 
 	/*
 	 * RaBitQ centroids estimate L2 distance, which routes correctly for
@@ -347,22 +348,33 @@ mktann_resolve_format(Relation index, DistanceMetric metric)
 	/*
 	 * FASTSCAN centroids are a packed layout over the RaBitQ-compressed
 	 * representation, so they require compression (and, like RaBitQ
-	 * centroids, don't apply to inner product).
+	 * centroids, don't apply to inner product). The layout stores fixed
+	 * 32-candidate groups, so past the dimension where a group no
+	 * longer fits a page it cannot be used at all. AUTO uses it exactly
+	 * where it is available; ON errors where it is not.
 	 */
-	if (cfastscan)
+	bool cfs_fits = mkt_centroid_fastscan_max_groups(dim) > 0;
+	if (cfs == MKT_FASTSCAN_MODE_ON)
 	{
 		if (metric == DISTANCE_INNER_PRODUCT)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("centroid_fastscan is not supported "
+					 errmsg("centroid_fastscan=on is not supported "
 							"with vector_ip_ops")));
 		if (!compressed)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("centroid_fastscan requires "
+					 errmsg("centroid_fastscan=on requires "
 							"centroid_compression")));
-		return MKT_CENTROID_FMT_FASTSCAN;
+		if (!cfs_fits)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("centroid_fastscan=on does not support "
+							"%d dimensions",
+							dim)));
 	}
+	if (compressed && cfs != MKT_FASTSCAN_MODE_OFF && cfs_fits)
+		return MKT_CENTROID_FMT_FASTSCAN;
 
 	if (compressed)
 		return MKT_CENTROID_FMT_RABITQ;
@@ -371,6 +383,36 @@ mktann_resolve_format(Relation index, DistanceMetric metric)
 	if (col_type == mkt_halfvec_type_oid())
 		return MKT_CENTROID_FMT_HALF;
 	return MKT_CENTROID_FMT_FLOAT;
+}
+
+/*
+ * Resolve the posting-page format. Like the centroid layout, a
+ * fastscan posting group has a dimension-dependent fixed size; the
+ * binding constraint is a cluster's first page, which also carries
+ * the full-precision centroid reference. AUTO uses fastscan exactly
+ * where a group fits; ON errors where it does not.
+ */
+static bool
+mktann_resolve_fastscan(Relation index, Dimension dim)
+{
+	MktannOptions *opts = (MktannOptions *)index->rd_options;
+	int	 fs	  = (opts != NULL) ? opts->fastscan : MKT_FASTSCAN_MODE_AUTO;
+	bool fits = mkt_fastscan_max_groups(dim, true) > 0;
+
+	switch (fs)
+	{
+	case MKT_FASTSCAN_MODE_ON:
+		if (!fits)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("fastscan=on does not support %d dimensions",
+							dim)));
+		return true;
+	case MKT_FASTSCAN_MODE_OFF:
+		return false;
+	default: /* AUTO */
+		return fits;
+	}
 }
 
 static uint32_t
@@ -405,7 +447,7 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 
 	p->dim			   = dim;
 	p->metric		   = mktann_get_metric(index);
-	p->centroid_format = mktann_resolve_format(index, p->metric);
+	p->centroid_format = mktann_resolve_format(index, p->metric, dim);
 	p->fan_out		   = mktann_get_fan_out(index);
 
 	/* nlist: use relopt if set, otherwise auto from sqrt(reltuples) */
@@ -430,9 +472,11 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 							? (uint32_t)opts->kmeans_nredo
 							: 1;
 
-	p->soar_lambda		= (opts != NULL) ? opts->soar_lambda : 0.0;
-	p->boundary_epsilon = (opts != NULL) ? opts->boundary_epsilon : 0.0;
-	p->fastscan			= (opts != NULL) ? opts->fastscan : false;
+	p->soar_lambda		= (opts != NULL) ? opts->soar_lambda
+										 : MKTANN_DEFAULT_SOAR_LAMBDA;
+	p->boundary_epsilon = (opts != NULL) ? opts->boundary_epsilon
+										 : MKTANN_DEFAULT_BOUNDARY_EPSILON;
+	p->fastscan			= mktann_resolve_fastscan(index, dim);
 
 	/* The exact-centroid collection size is known from the resolved
 	 * shape alone, so an under-budgeted maintenance_work_mem can be
