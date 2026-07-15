@@ -306,7 +306,7 @@ write_meta_page(
 static DistanceMetric
 mktann_get_metric(Relation index)
 {
-	FmgrInfo *procinfo = index_getprocinfo(index, 1, MKTANN_METRIC_PROC);
+	FmgrInfo *procinfo = index_getprocinfo(index, 1, MKT_ANN_METRIC_PROC);
 	return (DistanceMetric)DatumGetInt32(
 			FunctionCall1Coll(procinfo, InvalidOid, (Datum)0));
 }
@@ -419,9 +419,9 @@ static uint32_t
 mktann_get_fan_out(Relation index)
 {
 	MktannOptions *opts = (MktannOptions *)index->rd_options;
-	if (opts != NULL && opts->fan_out >= MKTANN_MIN_FAN_OUT)
+	if (opts != NULL && opts->fan_out >= MKT_ANN_MIN_FAN_OUT)
 		return (uint32_t)opts->fan_out;
-	return MKTANN_DEFAULT_FAN_OUT;
+	return MKT_ANN_DEFAULT_FAN_OUT;
 }
 
 static double estimate_heap_tuples(Relation heap, Dimension dim);
@@ -461,21 +461,21 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 	else
 	{
 		p->nlist = mkt_auto_nlist(estimate_heap_tuples(heap, dim));
-		if (p->nlist > MKTANN_MAX_NLIST)
-			p->nlist = MKTANN_MAX_NLIST;
+		if (p->nlist > MKT_ANN_MAX_NLIST)
+			p->nlist = MKT_ANN_MAX_NLIST;
 	}
 
 	p->fan_out =
-			mkt_auto_fan_out(p->fan_out, p->nlist, MKTANN_DEFAULT_FAN_OUT);
+			mkt_auto_fan_out(p->fan_out, p->nlist, MKT_ANN_DEFAULT_FAN_OUT);
 
 	p->kmeans_nredo = (opts != NULL && opts->kmeans_nredo > 0)
 							? (uint32_t)opts->kmeans_nredo
 							: 1;
 
 	p->soar_lambda		= (opts != NULL) ? opts->soar_lambda
-										 : MKTANN_DEFAULT_SOAR_LAMBDA;
+										 : MKT_ANN_DEFAULT_SOAR_LAMBDA;
 	p->boundary_epsilon = (opts != NULL) ? opts->boundary_epsilon
-										 : MKTANN_DEFAULT_BOUNDARY_EPSILON;
+										 : MKT_ANN_DEFAULT_BOUNDARY_EPSILON;
 	p->fastscan			= mktann_resolve_fastscan(index, dim);
 
 	/* The exact-centroid collection size is known from the resolved

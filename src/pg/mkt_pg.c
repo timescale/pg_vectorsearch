@@ -335,17 +335,17 @@ _PG_init(void)
 			mktann_relopt_kind,
 			"fan_out",
 			"Children per tree node (2-255)",
-			MKTANN_DEFAULT_FAN_OUT,
-			MKTANN_MIN_FAN_OUT,
-			MKTANN_MAX_FAN_OUT,
+			MKT_ANN_DEFAULT_FAN_OUT,
+			MKT_ANN_MIN_FAN_OUT,
+			MKT_ANN_MAX_FAN_OUT,
 			NoLock);
 	add_int_reloption(
 			mktann_relopt_kind,
 			"nlist",
 			"Number of IVF clusters (0 = auto from sqrt(rows))",
-			MKTANN_DEFAULT_NLIST,
-			MKTANN_MIN_NLIST,
-			MKTANN_MAX_NLIST,
+			MKT_ANN_DEFAULT_NLIST,
+			MKT_ANN_MIN_NLIST,
+			MKT_ANN_MAX_NLIST,
 			NoLock);
 	add_int_reloption(
 			mktann_relopt_kind,
@@ -359,7 +359,7 @@ _PG_init(void)
 			mktann_relopt_kind,
 			"soar_lambda",
 			"SOAR replication lambda (0 = off)",
-			MKTANN_DEFAULT_SOAR_LAMBDA,
+			MKT_ANN_DEFAULT_SOAR_LAMBDA,
 			0.0,
 			100.0,
 			NoLock);
@@ -367,7 +367,7 @@ _PG_init(void)
 			mktann_relopt_kind,
 			"boundary_epsilon",
 			"Boundary replication gap threshold (0 = off)",
-			MKTANN_DEFAULT_BOUNDARY_EPSILON,
+			MKT_ANN_DEFAULT_BOUNDARY_EPSILON,
 			0.0,
 			100.0,
 			NoLock);
