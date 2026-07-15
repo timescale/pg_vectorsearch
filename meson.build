@@ -4,6 +4,10 @@ project('pg_vectorsearch', 'c',
   # control files, the version-named library, the versioned install
   # SQL, VS_VERSION (pg_vectorsearch_version()) and the dist tarball.
   version: files('VERSION'),
+  # Verified floor: 0.61 (Ubuntu 22.04) configures and builds; older
+  # meson fails on newer syntax with errors that don't name the real
+  # problem, so make the requirement explicit.
+  meson_version: '>= 0.61',
   default_options: [
     'c_std=c2x',  # C23 (use c2x for older meson/gcc compatibility)
     'warning_level=2',
