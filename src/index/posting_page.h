@@ -36,6 +36,7 @@
 #ifndef MKT_POSTING_PAGE_H
 #define MKT_POSTING_PAGE_H
 
+#include <assert.h> /* static_assert pre-C23 (e.g. gcc 11's -std=c2x) */
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
