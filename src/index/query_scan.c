@@ -154,6 +154,17 @@ search_centroids(
 	if (beam_w < 1)
 		beam_w = 1;
 
+	/* Routing floor: at small nprobe the beam should cover every probed
+	 * list — a scaled-down beam there saves next to nothing and
+	 * mis-routes (see MKT_CENTROID_BEAM_FLOOR). */
+	{
+		uint32_t floor_w = nprobe < MKT_CENTROID_BEAM_FLOOR
+								 ? nprobe
+								 : MKT_CENTROID_BEAM_FLOOR;
+		if (beam_w < floor_w)
+			beam_w = floor_w;
+	}
+
 	/* Coverage floor: an intermediate keep of beam_w exposes at most
 	 * beam_w * fan_out leaves, so returning the top nprobe leaves needs
 	 * beam_w >= ceil(nprobe / fan_out) -- below that, whole subtrees are
@@ -554,4 +565,19 @@ mkt_query_execute(
 	}
 
 	return qs->nresults;
+}
+
+uint32_t
+mkt_auto_nprobe(uint32_t nlist)
+{
+	/* See the header: ~0.5 * sqrt(nlist), floored at 10, capped at
+	 * 2048, never above nlist. */
+	uint32_t nprobe = (uint32_t)ceil(0.5 * sqrt((double)nlist));
+	if (nprobe < 10)
+		nprobe = 10;
+	if (nprobe > 2048)
+		nprobe = 2048;
+	if (nlist > 0 && nprobe > nlist)
+		nprobe = nlist;
+	return nprobe;
 }

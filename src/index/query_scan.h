@@ -159,4 +159,25 @@ uint32_t mkt_query_route(
 		MktDistanceMode			mode,
 		MktCentroidSearchStats *beam_stats);
 
+/*
+ * Default nprobe for an index with `nlist` clusters, used when the
+ * caller does not set one. Recall at a fixed nprobe/nlist ratio rises
+ * with cluster count, so iso-recall nprobe grows roughly with
+ * sqrt(nlist): 0.5 * sqrt(nlist) measured ~0.93-0.96 recall@10 across
+ * the 10M-100M benchmark sweeps. Floored at 10 so tiny indexes probe
+ * a meaningful set, capped at 2048 (past the measured range; explicit
+ * settings go higher), and never above nlist itself.
+ */
+uint32_t mkt_auto_nprobe(uint32_t nlist);
+
+/*
+ * Floor for the centroid-search beam width, in tree candidates. The
+ * benchmark-tuned query shapes keep the beam equal to nprobe at small
+ * nprobe (wide routing matters most when few lists are probed) and at
+ * half of nprobe beyond it; with centroid_beam_scale at its 0.5
+ * default, flooring the beam at this many candidates — never more
+ * than nprobe — reproduces exactly that two-regime shape.
+ */
+#define MKT_CENTROID_BEAM_FLOOR 80
+
 #endif /* MKT_QUERY_SCAN_H */

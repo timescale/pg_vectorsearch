@@ -24,13 +24,13 @@ PG_MODULE_MAGIC;
 
 /* GUC variables */
 int			  mkt_distance_mode			= MKT_DISTANCE_MODE_DEFAULT;
-int			  mkt_nprobe				= 10;
+int			  mkt_nprobe				= 0;
 int			  mkt_query_limit			= 0;
 int			  mkt_fastscan_bits			= 16;
 bool		  mkt_rerank				= true;
 bool		  mkt_log_build_stats		= false;
 double		  mkt_centroid_error_scale	= 0.0;
-double		  mkt_centroid_beam_scale	= 0.25;
+double		  mkt_centroid_beam_scale	= 0.5;
 int			  mkt_leaf_refine_threshold = 0;
 static bool	  mkt_recent_buffers		= true;
 static double mkt_probe_expand			= 2.0;
@@ -117,10 +117,12 @@ _PG_init(void)
 	DefineCustomIntVariable(
 			MKT_EXTENSION_SCHEMA ".nprobe",
 			"Number of clusters to probe per query.",
-			NULL,
+			"0 derives it from the index's cluster count "
+			"(~0.5*sqrt(nlist), targeting ~0.95 recall). Lower it for "
+			"speed, raise it for recall.",
 			&mkt_nprobe,
-			10,
-			1,
+			0,
+			0,
 			10000,
 			PGC_USERSET,
 			0,
@@ -238,17 +240,17 @@ _PG_init(void)
 			"Intermediate centroid beam width as a fraction of nprobe.",
 			"Sets the beam width at the intermediate tree levels to this "
 			"fraction of nprobe; the leaf level always returns the full "
-			"nprobe. 0.25 (default) keeps a narrow intermediate beam, scoring "
-			"fewer centroids per level during routing -- the leaf level still "
-			"returns nprobe because beam_width*fan_out covers the top-nprobe "
-			"leaves. 1.0 keeps the full beam (beam_width = nprobe) at every "
-			"level -- the widest and most recall-conservative setting. "
-			"Smaller "
-			"values score fewer centroids and are faster at high nprobe, with "
-			"a small recall risk if a near leaf's ancestor falls outside the "
-			"narrowed beam.",
+			"nprobe, and the beam never drops below a small floor of "
+			"candidates (or nprobe itself, whichever is less) — at small "
+			"nprobe a scaled-down beam saves next to nothing and "
+			"mis-routes. 0.5 (default) matches the benchmark-tuned "
+			"routing shape. 1.0 keeps the full beam (beam_width = nprobe) "
+			"at every level -- the widest and most recall-conservative "
+			"setting. Smaller values score fewer centroids and are faster "
+			"at high nprobe, with a small recall risk if a near leaf's "
+			"ancestor falls outside the narrowed beam.",
 			&mkt_centroid_beam_scale,
-			0.25,
+			0.5,
 			0.01,
 			1.0,
 			PGC_USERSET,
