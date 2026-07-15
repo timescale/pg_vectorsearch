@@ -21,8 +21,8 @@
  * Support function numbers
  * ---------------------------------------------------------------- */
 
-#define MKTANN_DISTANCE_PROC 1 /* distance operator function */
-#define MKTANN_METRIC_PROC	 2 /* metric identifier function */
+#define MKT_ANN_DISTANCE_PROC 1 /* distance operator function */
+#define MKT_ANN_METRIC_PROC	  2 /* metric identifier function */
 
 /* ----------------------------------------------------------------
  * GUC variables
@@ -134,13 +134,13 @@ typedef struct MktannOptions
 	int	   centroid_fastscan;	 /* MktFastscanMode, centroid pages */
 } MktannOptions;
 
-#define MKTANN_DEFAULT_FAN_OUT 32
-#define MKTANN_MIN_FAN_OUT	   2
-#define MKTANN_MAX_FAN_OUT	   255
+#define MKT_ANN_DEFAULT_FAN_OUT 32
+#define MKT_ANN_MIN_FAN_OUT		2
+#define MKT_ANN_MAX_FAN_OUT		255
 
-#define MKTANN_DEFAULT_NLIST 0
-#define MKTANN_MIN_NLIST	 0
-#define MKTANN_MAX_NLIST	 2000000
+#define MKT_ANN_DEFAULT_NLIST 0
+#define MKT_ANN_MIN_NLIST	  0
+#define MKT_ANN_MAX_NLIST	  2000000
 
 /*
  * Replication defaults. Both forms of secondary assignment are on by
@@ -149,8 +149,8 @@ typedef struct MktannOptions
  * (10M-100M vectors), at a few percent of index size for the boundary
  * band and a modest build-time cost for SOAR.
  */
-#define MKTANN_DEFAULT_SOAR_LAMBDA		1.0
-#define MKTANN_DEFAULT_BOUNDARY_EPSILON 0.35
+#define MKT_ANN_DEFAULT_SOAR_LAMBDA		 1.0
+#define MKT_ANN_DEFAULT_BOUNDARY_EPSILON 0.35
 
 /*
  * MktannGetDistanceMode - Resolve effective distance mode for a scan.
