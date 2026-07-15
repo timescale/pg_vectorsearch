@@ -158,10 +158,24 @@ CREATE INDEX ON items USING meerkat (embedding mkt.vector_l2_ops);
 SELECT * FROM items
 ORDER BY embedding <-> '[...]'::mkt.vector
 LIMIT 10;
+
+-- Speed/recall dial: probes more clusters for higher recall. The
+-- default (0 = auto) derives it from the index size, targeting
+-- ~0.95 recall; lower is faster, higher is more accurate.
+SET mkt.nprobe = 40;
+
+-- Queries with LIMIT above 10 must size the scan accordingly
+SET mkt.query_limit = 100;
 ```
+
+Defaults are tuned from large-scale benchmarks; most deployments only
+ever adjust `mkt.nprobe` (and `mkt.query_limit` for larger LIMITs).
+See the [tuning guide][tuning-doc] for every index parameter and GUC,
+their tradeoffs, and when changing them makes sense.
 
 ## Documentation
 
+- [Tuning][tuning-doc] - Index parameters, GUCs, tradeoffs, defaults
 - [Architecture][arch-doc] - High-level design and data structures
 - [Implementation][impl-doc] - Detailed specifications and development phases
 - [SIMD][simd-doc] - SIMD build options and distance computation
@@ -201,4 +215,5 @@ TBD
 [scann-alloydb]: https://services.google.com/fh/files/misc/scann_for_alloydb_whitepaper.pdf
 [arch-doc]: docs/architecture.md
 [impl-doc]: docs/implementation.md
+[tuning-doc]: docs/tuning.md
 [simd-doc]: docs/simd.md
