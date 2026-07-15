@@ -15,6 +15,8 @@ on:
       - 'meson_options.txt'
       - 'scripts/ci/build.sh'
       - 'scripts/ci/build-pg-debug.sh'
+      - 'scripts/ci/makefile-check.sh'
+      - 'Makefile'
       - '.github/actions/setup-pg-debug/**'
   pull_request:
     branches: [main]
@@ -28,6 +30,8 @@ on:
       - 'meson_options.txt'
       - 'scripts/ci/build.sh'
       - 'scripts/ci/build-pg-debug.sh'
+      - 'scripts/ci/makefile-check.sh'
+      - 'Makefile'
       - '.github/actions/setup-pg-debug/**'
 
 concurrency:
@@ -168,3 +172,50 @@ jobs:
             builddir/testdb/log/
             builddir/isolation_testdb/log/
           retention-days: 7
+
+  makefile:
+    name: Makefile wrapper PG${{ matrix.pg-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg-version: ['18']
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build gcc make bison flex libgsl-dev curl \
+            ca-certificates
+
+      - name: Install PostgreSQL (packaged)
+        env:
+          PG_VERSION: ${{ matrix.pg-version }}
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y \
+            "postgresql-$PG_VERSION" "postgresql-server-dev-$PG_VERSION"
+          echo "/usr/lib/postgresql/$PG_VERSION/bin" >> "$GITHUB_PATH"
+          # The runner image neither creates a cluster on package
+          # install nor starts services; the smoke test needs both.
+          # The preinstalled PostgreSQL claims port 5432 in the
+          # cluster configs, so the new cluster lands on another port
+          # — export it for the check script.
+          sudo pg_createcluster "$PG_VERSION" main || true
+          sudo pg_ctlcluster "$PG_VERSION" main start
+          echo "PGPORT=$(pg_lsclusters -h | awk -v v="$PG_VERSION" '$1 == v {print $3}')" >> "$GITHUB_ENV"
+
+      # `make` + `make install` against the default installed
+      # PostgreSQL, artifact checks, and a live CREATE EXTENSION in
+      # the packaged cluster.
+      - name: Check the Makefile wrapper
+        env:
+          MAKE_CHECK_SMOKE: '1'
+        run: ./scripts/ci/makefile-check.sh
