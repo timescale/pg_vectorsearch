@@ -825,6 +825,25 @@ CREATE FUNCTION mkt.tids_clusters(regclass, tid[])
     AS 'MODULE_PATHNAME', 'mkt_tids_clusters'
     LANGUAGE C STRICT PARALLEL SAFE;
 
+-- Effective index settings, one (name, setting, source) row per
+-- setting, with automatic values resolved to what the index actually
+-- uses: nlist/fan_out/nlevels and the page formats as the build chose
+-- them (from the metadata page), build options read back from the
+-- catalog with defaults filled in, and the session-effective nprobe
+-- and distance_mode for this index. The source column tells where
+-- each value came from: 'option' (explicit reloption), 'auto'
+-- (resolved automatic default), 'default' (reloption default),
+-- 'column'/'opclass' (index definition), 'derived' (computed from
+-- other settings), or 'session' (GUC override).
+CREATE FUNCTION mkt.index_settings(regclass)
+    RETURNS TABLE (
+        name    text,
+        setting text,
+        source  text
+    )
+    AS 'MODULE_PATHNAME', 'mkt_index_settings'
+    LANGUAGE C STRICT PARALLEL SAFE;
+
 -- Convert one cluster's posting chain from AoS to fastscan format.
 -- Updates centroid entries and metadata flag atomically.
 -- Returns the new posting head block number.

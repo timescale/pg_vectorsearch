@@ -10,6 +10,7 @@
  *   mkt.centroid_pages(regclass) -- centroid tree structure
  *   mkt.posting_pages(regclass)  -- posting list page chains
  *   mkt.tids_clusters(regclass, tid[]) -- which cluster(s) hold each TID
+ *   mkt.index_settings(regclass) -- effective (resolved) settings
  */
 
 #include <postgres.h>
@@ -19,21 +20,26 @@
 #include <catalog/pg_class.h>
 #include <funcapi.h>
 #include <miscadmin.h>
+#include <nodes/parsenodes.h>
 #include <storage/bufmgr.h>
 #include <utils/acl.h>
 #include <utils/array.h>
 #include <utils/builtins.h>
 #include <utils/lsyscache.h>
 #include <utils/rel.h>
+#include <utils/syscache.h>
 
 #include "index/centroid_page.h"
 #include "index/posting_page.h"
+#include "index/query_scan.h"
 #include "inspect.h"
 #include "mktann_meta.h"
+#include "support_pg.h"
 
 PG_FUNCTION_INFO_V1(mkt_centroid_pages);
 PG_FUNCTION_INFO_V1(mkt_posting_pages);
 PG_FUNCTION_INFO_V1(mkt_tids_clusters);
+PG_FUNCTION_INFO_V1(mkt_index_settings);
 
 /*
  * The functions below iterate an on-disk entry_count read straight from a
@@ -726,6 +732,221 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 		UnlockReleaseBuffer(buf);
 	}
 
+	relation_close(index, AccessShareLock);
+	PG_RETURN_NULL();
+}
+
+/* ----------------------------------------------------------------
+ * mkt.index_settings(regclass)
+ *
+ * Returns one (name, setting, source) row per effective index
+ * setting, with automatic values resolved to what the build (or the
+ * current session) actually uses. The source column tells where the
+ * value came from:
+ *
+ *   'option'  -- reloption set explicitly at CREATE INDEX
+ *   'auto'    -- resolved from an automatic default (nlist from the
+ *                row count, formats from metric/dimension, nprobe
+ *                from nlist)
+ *   'default' -- reloption default in effect
+ *   'column'  -- from the indexed column definition
+ *   'opclass' -- from the operator class
+ *   'derived' -- computed from other settings
+ *   'session' -- a session GUC overriding the index setting
+ *
+ * Values the build persists (nlist, fan_out, nlevels, formats) come
+ * from the metadata page and are authoritative for the index as
+ * built. Options only consumed during the build but not persisted
+ * (soar_lambda, boundary_epsilon, kmeans_nredo) are read from the
+ * catalog, so they reflect the build only as long as they have not
+ * been changed with ALTER INDEX ... SET afterwards.
+ * ---------------------------------------------------------------- */
+
+/* Metric name lookup (indexed by DistanceMetric); the names match
+ * the vector_<metric>_ops opclass names. */
+static const char *metric_names[] = {
+		[DISTANCE_L2]			 = "l2",
+		[DISTANCE_INNER_PRODUCT] = "ip",
+		[DISTANCE_COSINE]		 = "cosine",
+};
+
+/* The reloptions explicitly set on a relation, as a list of DefElem.
+ * Unlike rd_options this excludes defaults, so it tells apart "set
+ * to the default value" from "defaulted". Caller must free with
+ * list_free_deep. */
+static List *
+explicit_reloptions(Oid relid)
+{
+	HeapTuple tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for relation %u", relid);
+
+	bool  isnull;
+	Datum datum =
+			SysCacheGetAttr(RELOID, tuple, Anum_pg_class_reloptions, &isnull);
+	List *options = isnull ? NIL : untransformRelOptions(datum);
+	ReleaseSysCache(tuple);
+	return options;
+}
+
+static bool
+reloption_is_set(const List *options, const char *name)
+{
+	ListCell *lc;
+	foreach (lc, options)
+	{
+		const DefElem *def = lfirst_node(DefElem, lc);
+		if (strcmp(def->defname, name) == 0)
+			return true;
+	}
+	return false;
+}
+
+static void
+settings_row(
+		ReturnSetInfo *rsinfo,
+		const char	  *name,
+		const char	  *setting,
+		const char	  *source)
+{
+	Datum values[3];
+	bool  nulls[3] = {0};
+
+	values[0] = CStringGetTextDatum(name);
+	values[1] = CStringGetTextDatum(setting);
+	values[2] = CStringGetTextDatum(source);
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+}
+
+Datum
+mkt_index_settings(PG_FUNCTION_ARGS)
+{
+	Oid			   indexoid = PG_GETARG_OID(0);
+	ReturnSetInfo *rsinfo	= (ReturnSetInfo *)fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	Relation index = relation_open(indexoid, AccessShareLock);
+
+	if (index->rd_rel->relkind != RELKIND_INDEX)
+	{
+		relation_close(index, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not an index",
+						RelationGetRelationName(index))));
+	}
+
+	require_index_select(index, AccessShareLock);
+
+	Buffer meta_buf = ReadBuffer(index, 0);
+	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
+	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+			BufferGetPage(meta_buf));
+
+	if (meta->magic != MKT_META_MAGIC)
+	{
+		UnlockReleaseBuffer(meta_buf);
+		relation_close(index, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not an mktann index",
+						RelationGetRelationName(index))));
+	}
+
+	Dimension		  dim			  = meta->dim;
+	uint8_t			  nlevels		  = meta->nlevels;
+	MktCentroidFormat centroid_format = (MktCentroidFormat)
+												meta->centroid_format;
+	uint32_t	   nlist	= meta->nlist;
+	DistanceMetric metric	= (DistanceMetric)meta->metric;
+	uint8_t		   fan_out	= meta->fan_out;
+	bool		   fastscan = (meta->flags & MKT_META_FLAG_FASTSCAN) != 0;
+	UnlockReleaseBuffer(meta_buf);
+
+	const MktannOptions *opts = (const MktannOptions *)index->rd_options;
+	List				*set  = explicit_reloptions(indexoid);
+
+	/* Index definition */
+	settings_row(rsinfo, "dim", psprintf("%d", dim), "column");
+	settings_row(rsinfo, "metric", metric_names[metric], "opclass");
+
+	/* Build-resolved shape, from the metadata page */
+	settings_row(
+			rsinfo,
+			"nlist",
+			psprintf("%u", nlist),
+			reloption_is_set(set, "nlist") ? "option" : "auto");
+	settings_row(
+			rsinfo,
+			"fan_out",
+			psprintf("%u", (uint32_t)fan_out),
+			reloption_is_set(set, "fan_out") ? "option" : "auto");
+	settings_row(
+			rsinfo, "nlevels", psprintf("%u", (uint32_t)nlevels), "derived");
+	settings_row(
+			rsinfo,
+			"centroid_format",
+			centroid_format_names[centroid_format],
+			(reloption_is_set(set, "centroid_compression") ||
+			 reloption_is_set(set, "centroid_fastscan"))
+					? "option"
+					: "auto");
+	settings_row(
+			rsinfo,
+			"fastscan",
+			fastscan ? "on" : "off",
+			reloption_is_set(set, "fastscan") ? "option" : "auto");
+
+	/* Build options not persisted in the index: current catalog
+	 * values, with reloption defaults filled in */
+	settings_row(
+			rsinfo,
+			"soar_lambda",
+			psprintf(
+					"%g",
+					(opts != NULL) ? opts->soar_lambda
+								   : MKT_ANN_DEFAULT_SOAR_LAMBDA),
+			reloption_is_set(set, "soar_lambda") ? "option" : "default");
+	settings_row(
+			rsinfo,
+			"boundary_epsilon",
+			psprintf(
+					"%g",
+					(opts != NULL) ? opts->boundary_epsilon
+								   : MKT_ANN_DEFAULT_BOUNDARY_EPSILON),
+			reloption_is_set(set, "boundary_epsilon") ? "option" : "default");
+	settings_row(
+			rsinfo,
+			"kmeans_nredo",
+			psprintf("%d", (opts != NULL) ? opts->kmeans_nredo : 1),
+			reloption_is_set(set, "kmeans_nredo") ? "option" : "default");
+
+	/* Query-time settings whose effective value depends on this
+	 * index: the session GUC wins when set, otherwise the index
+	 * option or automatic resolution applies. */
+	if (mkt_distance_mode != MKT_DISTANCE_MODE_DEFAULT)
+		settings_row(
+				rsinfo,
+				"distance_mode",
+				mkt_distance_mode_name((MktDistanceMode)mkt_distance_mode),
+				"session");
+	else
+		settings_row(
+				rsinfo,
+				"distance_mode",
+				mkt_distance_mode_name(MktannGetDistanceMode(index)),
+				reloption_is_set(set, "distance_mode") ? "option" : "default");
+	settings_row(
+			rsinfo,
+			"nprobe",
+			psprintf(
+					"%u",
+					(mkt_nprobe > 0) ? (uint32_t)mkt_nprobe
+									 : mkt_auto_nprobe(nlist)),
+			(mkt_nprobe > 0) ? "session" : "auto");
+
+	list_free_deep(set);
 	relation_close(index, AccessShareLock);
 	PG_RETURN_NULL();
 }

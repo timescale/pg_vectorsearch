@@ -291,6 +291,7 @@ SET ROLE regress_inspect_unpriv;
 SELECT * FROM mkt.centroid_pages('idx_l2c'::regclass);
 SELECT * FROM mkt.posting_pages('idx_l2c'::regclass);
 SELECT * FROM mkt.tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
+SELECT * FROM mkt.index_settings('idx_l2c'::regclass);
 
 -- The mutating function requires ownership, not merely SELECT.
 SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 0);
@@ -308,6 +309,8 @@ SELECT count(*) > 0 AS posting_ok
     FROM mkt.posting_pages('idx_l2c'::regclass);
 SELECT count(*) >= 0 AS tids_ok
     FROM mkt.tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
+SELECT count(*) > 0 AS settings_ok
+    FROM mkt.index_settings('idx_l2c'::regclass);
 
 -- ...but SELECT is still not enough to mutate the index.
 SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 0);
@@ -350,6 +353,53 @@ SELECT id FROM embeddings ORDER BY v <-> '[0.31,0.32,0.33]' LIMIT 1;
 RESET mkt.nprobe;
 RESET enable_seqscan;
 
+-- =====================================================================
+-- mkt.index_settings
+-- =====================================================================
+
+-- Explicit options are reported back as set, with source 'option'.
+-- (nlist and nlevels are asserted by predicate, not value: the built
+-- cluster count can vary with k-means convergence across platforms.)
+CREATE INDEX idx_settings ON embeddings USING mktann (v)
+    WITH (nlist = 20, fan_out = 8, centroid_compression = on,
+          centroid_fastscan = off, fastscan = off, soar_lambda = 0.5,
+          boundary_epsilon = 0.1, kmeans_nredo = 2,
+          distance_mode = symmetric);
+
+SELECT name, setting, source
+    FROM mkt.index_settings('idx_settings'::regclass)
+    WHERE name NOT IN ('nlist', 'nlevels');
+
+SELECT name, setting::int > 0 AS positive, source
+    FROM mkt.index_settings('idx_settings'::regclass)
+    WHERE name IN ('nlist', 'nlevels');
+
+-- The default index resolves its automatic settings: every value is
+-- concrete (no 'auto' sentinels like nlist=0) and the sources tell
+-- that defaults were in effect. The small table resolves to the
+-- auto-nprobe floor of 10.
+SELECT name,
+       setting <> '0' AND setting <> '' AS resolved,
+       source
+    FROM mkt.index_settings('idx_default'::regclass);
+
+SELECT name, setting, source
+    FROM mkt.index_settings('idx_default'::regclass)
+    WHERE name = 'nprobe';
+
+-- Session GUCs override the index setting and report source 'session'.
+SET mkt.nprobe = 33;
+SET mkt.distance_mode = 'symmetric';
+SELECT name, setting, source
+    FROM mkt.index_settings('idx_default'::regclass)
+    WHERE name IN ('distance_mode', 'nprobe');
+RESET mkt.nprobe;
+RESET mkt.distance_mode;
+
+-- Error: not an mktann index
+SELECT * FROM mkt.index_settings('idx_btree'::regclass);
+
+DROP INDEX idx_settings;
 DROP INDEX idx_default;
 
 DROP TABLE embeddings;

@@ -137,3 +137,40 @@ Take effect during `CREATE INDEX` / `REINDEX`.
 read, and rerank counts, which is usually enough to see whether a
 recall problem is routing (raise `mkt.nprobe`) or sizing
 (`mkt.query_limit`).
+
+## Inspecting effective settings
+
+Most settings default to automatic values (`nlist = 0`,
+`mkt.nprobe = 0`, `fastscan = auto`, ...), so neither
+`pg_class.reloptions` nor `pg_settings` shows what an index actually
+uses. `mkt.index_settings(regclass)` reports the resolved values:
+
+```sql
+SELECT * FROM mkt.index_settings('my_index');
+       name       | setting | source
+------------------+---------+---------
+ dim              | 768     | column
+ metric           | cosine  | opclass
+ nlist            | 3906    | auto
+ fan_out          | 16      | auto
+ nlevels          | 3       | derived
+ centroid_format  | fastscan| auto
+ fastscan         | on      | auto
+ soar_lambda      | 1       | default
+ boundary_epsilon | 0.35    | default
+ kmeans_nredo     | 1       | default
+ distance_mode    | asymmetric | default
+ nprobe           | 32      | auto
+```
+
+The `source` column tells where each value came from: `option`
+(explicit reloption), `auto` (resolved automatic default), `default`
+(reloption default), `column`/`opclass` (index definition), `derived`
+(computed from other settings), or `session` (a GUC overriding the
+index setting, as with `SET mkt.nprobe`). Values the build persists
+(`nlist`, `fan_out`, `nlevels`, the page formats) are read from the
+index metadata and are authoritative for the index as built; options
+the build consumes without persisting (`soar_lambda`,
+`boundary_epsilon`, `kmeans_nredo`) are read from the catalog and
+reflect the build only if they have not been changed with
+`ALTER INDEX ... SET` since.
