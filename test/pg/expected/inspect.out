@@ -400,6 +400,8 @@ SELECT * FROM mkt.posting_pages('idx_l2c'::regclass);
 ERROR:  permission denied for table embeddings
 SELECT * FROM mkt.tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
 ERROR:  permission denied for table embeddings
+SELECT * FROM mkt.index_settings('idx_l2c'::regclass);
+ERROR:  permission denied for table embeddings
 -- The mutating function requires ownership, not merely SELECT.
 SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 0);
 ERROR:  must be owner of table embeddings
@@ -425,6 +427,13 @@ SELECT count(*) >= 0 AS tids_ok
     FROM mkt.tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
  tids_ok 
 ---------
+ t
+(1 row)
+
+SELECT count(*) > 0 AS settings_ok
+    FROM mkt.index_settings('idx_l2c'::regclass);
+ settings_ok 
+-------------
  t
 (1 row)
 
@@ -482,6 +491,93 @@ SELECT id FROM embeddings ORDER BY v <-> '[0.31,0.32,0.33]' LIMIT 1;
 
 RESET mkt.nprobe;
 RESET enable_seqscan;
+-- =====================================================================
+-- mkt.index_settings
+-- =====================================================================
+-- Explicit options are reported back as set, with source 'option'.
+-- (nlist and nlevels are asserted by predicate, not value: the built
+-- cluster count can vary with k-means convergence across platforms.)
+CREATE INDEX idx_settings ON embeddings USING mktann (v)
+    WITH (nlist = 20, fan_out = 8, centroid_compression = on,
+          centroid_fastscan = off, fastscan = off, soar_lambda = 0.5,
+          boundary_epsilon = 0.1, kmeans_nredo = 2,
+          distance_mode = symmetric);
+SELECT name, setting, source
+    FROM mkt.index_settings('idx_settings'::regclass)
+    WHERE name NOT IN ('nlist', 'nlevels');
+       name       |  setting  | source  
+------------------+-----------+---------
+ dim              | 3         | column
+ metric           | l2        | opclass
+ fan_out          | 8         | option
+ centroid_format  | rabitq    | option
+ fastscan         | off       | option
+ soar_lambda      | 0.5       | option
+ boundary_epsilon | 0.1       | option
+ kmeans_nredo     | 2         | option
+ distance_mode    | symmetric | option
+ nprobe           | 10        | auto
+(10 rows)
+
+SELECT name, setting::int > 0 AS positive, source
+    FROM mkt.index_settings('idx_settings'::regclass)
+    WHERE name IN ('nlist', 'nlevels');
+  name   | positive | source  
+---------+----------+---------
+ nlist   | t        | option
+ nlevels | t        | derived
+(2 rows)
+
+-- The default index resolves its automatic settings: every value is
+-- concrete (no 'auto' sentinels like nlist=0) and the sources tell
+-- that defaults were in effect. The small table resolves to the
+-- auto-nprobe floor of 10.
+SELECT name,
+       setting <> '0' AND setting <> '' AS resolved,
+       source
+    FROM mkt.index_settings('idx_default'::regclass);
+       name       | resolved | source  
+------------------+----------+---------
+ dim              | t        | column
+ metric           | t        | opclass
+ nlist            | t        | auto
+ fan_out          | t        | auto
+ nlevels          | t        | derived
+ centroid_format  | t        | auto
+ fastscan         | t        | auto
+ soar_lambda      | t        | default
+ boundary_epsilon | t        | default
+ kmeans_nredo     | t        | default
+ distance_mode    | t        | default
+ nprobe           | t        | auto
+(12 rows)
+
+SELECT name, setting, source
+    FROM mkt.index_settings('idx_default'::regclass)
+    WHERE name = 'nprobe';
+  name  | setting | source 
+--------+---------+--------
+ nprobe | 10      | auto
+(1 row)
+
+-- Session GUCs override the index setting and report source 'session'.
+SET mkt.nprobe = 33;
+SET mkt.distance_mode = 'symmetric';
+SELECT name, setting, source
+    FROM mkt.index_settings('idx_default'::regclass)
+    WHERE name IN ('distance_mode', 'nprobe');
+     name      |  setting  | source  
+---------------+-----------+---------
+ distance_mode | symmetric | session
+ nprobe        | 33        | session
+(2 rows)
+
+RESET mkt.nprobe;
+RESET mkt.distance_mode;
+-- Error: not an mktann index
+SELECT * FROM mkt.index_settings('idx_btree'::regclass);
+ERROR:  "idx_btree" is not an mktann index
+DROP INDEX idx_settings;
 DROP INDEX idx_default;
 DROP TABLE embeddings;
 DROP TABLE wide;
