@@ -81,7 +81,13 @@ benchmark_lut_build(const BenchConfig *config)
 
 	printf("LUT construction (dim=%u, %u queries):\n", dim, queries);
 
-	float *transformed = mkt_alloc(dim * sizeof(float));
+	/* Pre-generate all query vectors outside the timed loop -- rand()
+	 * is not free (768 calls/query is comparable to the LUT build
+	 * itself), and timing it alongside the kernel dilutes any
+	 * measured improvement in the kernel. */
+	float *transformed = mkt_alloc((size_t)queries * dim * sizeof(float));
+	for (uint32_t q = 0; q < queries; q++)
+		fill_random_floats(transformed + (size_t)q * dim, dim, 42 + q);
 
 	uint32_t lut_bytes = MKT_FASTSCAN_LUT_BYTES(dim);
 	uint8_t *lut	   = mkt_alloc_aligned(lut_bytes, 64);
@@ -96,10 +102,8 @@ benchmark_lut_build(const BenchConfig *config)
 	{
 		uint64_t start = get_time_ns();
 		for (uint32_t q = 0; q < queries; q++)
-		{
-			fill_random_floats(transformed, dim, 42 + q);
-			mkt_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
-		}
+			mkt_fastscan_build_lut(
+					transformed + (size_t)q * dim, dim, lut, &scale, &bias);
 		uint64_t end = get_time_ns();
 		double	 vps = (double)queries / (ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
@@ -116,11 +120,12 @@ benchmark_lut_build(const BenchConfig *config)
 	{
 		uint64_t start = get_time_ns();
 		for (uint32_t q = 0; q < queries; q++)
-		{
-			fill_random_floats(transformed, dim, 42 + q);
 			mkt_fastscan_build_lut_hacc(
-					transformed, dim, lut_hacc, &scale, &bias);
-		}
+					transformed + (size_t)q * dim,
+					dim,
+					lut_hacc,
+					&scale,
+					&bias);
 		uint64_t end = get_time_ns();
 		double	 vps = (double)queries / (ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
