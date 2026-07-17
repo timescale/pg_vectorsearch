@@ -21,6 +21,13 @@
 
 /*
  * L2 squared distance using NEON.
+ *
+ * Four independent accumulators break the loop-carried dependency
+ * chain: a single `sum_vec = vfmaq_f32(sum_vec, ...)` chain forces
+ * each FMA to wait for the previous one's ~4-cycle latency, capping
+ * throughput well below Neoverse V2's 2 FMA/cycle issue rate. Four
+ * accumulators let independent iterations overlap in the OOO
+ * scheduler; only the final horizontal reduction combines them.
  */
 Distance
 mkt_distance_l2_neon(VectorRef a, VectorRef b)
@@ -34,20 +41,36 @@ mkt_distance_l2_neon(VectorRef a, VectorRef b)
 	const float *pb	 = b.data;
 	Dimension	 dim = a.dim;
 
-	float32x4_t sum_vec = vdupq_n_f32(0.0f);
+	float32x4_t sum0 = vdupq_n_f32(0.0f);
+	float32x4_t sum1 = vdupq_n_f32(0.0f);
+	float32x4_t sum2 = vdupq_n_f32(0.0f);
+	float32x4_t sum3 = vdupq_n_f32(0.0f);
 
-	/* Main loop: 4 floats per iteration */
+	/* Main loop: 16 floats (4 independent lanes of 4) per iteration */
 	Dimension i = 0;
+	for (; i + 16 <= dim; i += 16)
+	{
+		float32x4_t d0 = vsubq_f32(vld1q_f32(pa + i), vld1q_f32(pb + i));
+		float32x4_t d1 =
+				vsubq_f32(vld1q_f32(pa + i + 4), vld1q_f32(pb + i + 4));
+		float32x4_t d2 =
+				vsubq_f32(vld1q_f32(pa + i + 8), vld1q_f32(pb + i + 8));
+		float32x4_t d3 =
+				vsubq_f32(vld1q_f32(pa + i + 12), vld1q_f32(pb + i + 12));
+		sum0 = vfmaq_f32(sum0, d0, d0);
+		sum1 = vfmaq_f32(sum1, d1, d1);
+		sum2 = vfmaq_f32(sum2, d2, d2);
+		sum3 = vfmaq_f32(sum3, d3, d3);
+	}
 	for (; i + 4 <= dim; i += 4)
 	{
-		float32x4_t va	 = vld1q_f32(pa + i);
-		float32x4_t vb	 = vld1q_f32(pb + i);
-		float32x4_t diff = vsubq_f32(va, vb);
-		sum_vec			 = vfmaq_f32(sum_vec, diff, diff);
+		float32x4_t d0 = vsubq_f32(vld1q_f32(pa + i), vld1q_f32(pb + i));
+		sum0		   = vfmaq_f32(sum0, d0, d0);
 	}
 
 	/* Horizontal reduction */
-	float sum = mkt_horizontal_sum_neon(sum_vec);
+	float sum = mkt_horizontal_sum_neon(vaddq_f32(
+			vaddq_f32(sum0, sum1), vaddq_f32(sum2, sum3)));
 
 	/* Scalar tail */
 	for (; i < dim; i++)
@@ -60,7 +83,8 @@ mkt_distance_l2_neon(VectorRef a, VectorRef b)
 }
 
 /*
- * Negative inner product using NEON.
+ * Negative inner product using NEON. See mkt_distance_l2_neon for
+ * why four independent accumulators beat one.
  */
 Distance
 mkt_distance_ip_neon(VectorRef a, VectorRef b)
@@ -74,17 +98,27 @@ mkt_distance_ip_neon(VectorRef a, VectorRef b)
 	const float *pb	 = b.data;
 	Dimension	 dim = a.dim;
 
-	float32x4_t dot_vec = vdupq_n_f32(0.0f);
+	float32x4_t dot0 = vdupq_n_f32(0.0f);
+	float32x4_t dot1 = vdupq_n_f32(0.0f);
+	float32x4_t dot2 = vdupq_n_f32(0.0f);
+	float32x4_t dot3 = vdupq_n_f32(0.0f);
 
 	Dimension i = 0;
-	for (; i + 4 <= dim; i += 4)
+	for (; i + 16 <= dim; i += 16)
 	{
-		float32x4_t va = vld1q_f32(pa + i);
-		float32x4_t vb = vld1q_f32(pb + i);
-		dot_vec		   = vfmaq_f32(dot_vec, va, vb);
+		dot0 = vfmaq_f32(dot0, vld1q_f32(pa + i), vld1q_f32(pb + i));
+		dot1 = vfmaq_f32(
+				dot1, vld1q_f32(pa + i + 4), vld1q_f32(pb + i + 4));
+		dot2 = vfmaq_f32(
+				dot2, vld1q_f32(pa + i + 8), vld1q_f32(pb + i + 8));
+		dot3 = vfmaq_f32(
+				dot3, vld1q_f32(pa + i + 12), vld1q_f32(pb + i + 12));
 	}
+	for (; i + 4 <= dim; i += 4)
+		dot0 = vfmaq_f32(dot0, vld1q_f32(pa + i), vld1q_f32(pb + i));
 
-	float dot = mkt_horizontal_sum_neon(dot_vec);
+	float dot = mkt_horizontal_sum_neon(vaddq_f32(
+			vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)));
 
 	for (; i < dim; i++)
 		dot += pa[i] * pb[i];
@@ -93,7 +127,10 @@ mkt_distance_ip_neon(VectorRef a, VectorRef b)
 }
 
 /*
- * Cosine distance using NEON.
+ * Cosine distance using NEON. Each of the three quantities (dot,
+ * norm_a, norm_b) gets two independent accumulators (see
+ * mkt_distance_l2_neon) so the FMA dependency chain per quantity is
+ * half as long.
  */
 Distance
 mkt_distance_cosine_neon(VectorRef a, VectorRef b)
@@ -107,23 +144,38 @@ mkt_distance_cosine_neon(VectorRef a, VectorRef b)
 	const float *pb	 = b.data;
 	Dimension	 dim = a.dim;
 
-	float32x4_t dot_vec	   = vdupq_n_f32(0.0f);
-	float32x4_t norm_a_vec = vdupq_n_f32(0.0f);
-	float32x4_t norm_b_vec = vdupq_n_f32(0.0f);
+	float32x4_t dot0 = vdupq_n_f32(0.0f), dot1 = vdupq_n_f32(0.0f);
+	float32x4_t na0 = vdupq_n_f32(0.0f), na1 = vdupq_n_f32(0.0f);
+	float32x4_t nb0 = vdupq_n_f32(0.0f), nb1 = vdupq_n_f32(0.0f);
 
 	Dimension i = 0;
+	for (; i + 8 <= dim; i += 8)
+	{
+		float32x4_t va0 = vld1q_f32(pa + i);
+		float32x4_t vb0 = vld1q_f32(pb + i);
+		float32x4_t va1 = vld1q_f32(pa + i + 4);
+		float32x4_t vb1 = vld1q_f32(pb + i + 4);
+
+		dot0 = vfmaq_f32(dot0, va0, vb0);
+		na0	 = vfmaq_f32(na0, va0, va0);
+		nb0	 = vfmaq_f32(nb0, vb0, vb0);
+
+		dot1 = vfmaq_f32(dot1, va1, vb1);
+		na1	 = vfmaq_f32(na1, va1, va1);
+		nb1	 = vfmaq_f32(nb1, vb1, vb1);
+	}
 	for (; i + 4 <= dim; i += 4)
 	{
-		float32x4_t va = vld1q_f32(pa + i);
-		float32x4_t vb = vld1q_f32(pb + i);
-		dot_vec		   = vfmaq_f32(dot_vec, va, vb);
-		norm_a_vec	   = vfmaq_f32(norm_a_vec, va, va);
-		norm_b_vec	   = vfmaq_f32(norm_b_vec, vb, vb);
+		float32x4_t va0 = vld1q_f32(pa + i);
+		float32x4_t vb0 = vld1q_f32(pb + i);
+		dot0			= vfmaq_f32(dot0, va0, vb0);
+		na0				= vfmaq_f32(na0, va0, va0);
+		nb0				= vfmaq_f32(nb0, vb0, vb0);
 	}
 
-	float dot	 = mkt_horizontal_sum_neon(dot_vec);
-	float norm_a = mkt_horizontal_sum_neon(norm_a_vec);
-	float norm_b = mkt_horizontal_sum_neon(norm_b_vec);
+	float dot	 = mkt_horizontal_sum_neon(vaddq_f32(dot0, dot1));
+	float norm_a = mkt_horizontal_sum_neon(vaddq_f32(na0, na1));
+	float norm_b = mkt_horizontal_sum_neon(vaddq_f32(nb0, nb1));
 
 	for (; i < dim; i++)
 	{
