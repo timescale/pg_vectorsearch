@@ -27,7 +27,9 @@
 
 #include <arm_neon.h>
 #include <stdint.h>
+#include <string.h>
 
+#include "algo/simd_utils.h"
 #include "quant/fastscan.h"
 
 /* Accumulate one VQTBL1 result into even/odd byte accumulators.
@@ -236,6 +238,250 @@ mkt_fastscan_accumulate_hacc_neon(
 }
 
 #undef HACC_ACCUM
+
+/* ----------------------------------------------------------------
+ * NEON LUT construction
+ *
+ * The scalar builder (fastscan_build_lut_scalar /
+ * fastscan_build_lut_hacc_scalar in fastscan.c) computes 16 entries
+ * per subquantizer via scalar float ops plus a branchy per-entry
+ * clamp -- it was never vectorized for ARM (only AVX-512 has a
+ * hand-optimized builder; AVX2 and NEON both fell back to it). At
+ * dim=768 (nsq=192), `mkt bench fastscan-kernel` measures ~369K
+ * uint16-LUT builds/s scalar (~2.71us/build) vs ~804K/s here
+ * (~1.24us/build), a ~2.2x improvement. Per probed cluster, the
+ * scalar LUT build cost rivals or exceeds the whole fastscan
+ * accumulate phase for that cluster (~2.2us for an average
+ * ~240-vector cluster at ~9.3ns/vector), so it's a significant
+ * fraction of the posting-scan phase at typical nlist/nprobe ratios.
+ *
+ * This builds all 4 entries for a given f_base value (f0/f4/f8/f12)
+ * in one instruction via broadcast-add against a shared {0, s0, s1,
+ * p01} vector, replacing the scalar per-entry adds. The clamp
+ * (max/min against [0, range]) and float->uint conversion are done
+ * 4-wide instead of once per entry with a branch.
+ */
+
+void
+mkt_fastscan_build_lut_neon(
+		const float *transformed,
+		Dimension	 dim,
+		uint8_t		*lut_out,
+		float		*delta_out,
+		float		*bias_out)
+{
+	uint32_t nsq	   = MKT_FASTSCAN_NSQ(dim);
+	uint32_t nsq_pairs = MKT_FASTSCAN_NSQ_PAIRS(dim);
+
+	/* Vectorized min/max: split positive/negative and sum */
+	float32x4_t pos_sum = vdupq_n_f32(0.0f);
+	float32x4_t neg_sum = vdupq_n_f32(0.0f);
+	float32x4_t zero4	 = vdupq_n_f32(0.0f);
+
+	Dimension d = 0;
+	for (; d + 4 <= dim; d += 4)
+	{
+		float32x4_t v = vld1q_f32(transformed + d);
+		pos_sum		  = vaddq_f32(pos_sum, vmaxq_f32(v, zero4));
+		neg_sum		  = vaddq_f32(neg_sum, vminq_f32(v, zero4));
+	}
+	float global_max = mkt_horizontal_sum_neon(pos_sum);
+	float global_min = mkt_horizontal_sum_neon(neg_sum);
+	for (; d < dim; d++)
+	{
+		if (transformed[d] > 0)
+			global_max += transformed[d];
+		else
+			global_min += transformed[d];
+	}
+
+	float range = global_max - global_min;
+	if (range < MKT_FASTSCAN_MIN_RANGE)
+		range = MKT_FASTSCAN_MIN_RANGE;
+
+	float delta		= range / (float)UINT8_MAX;
+	float inv_delta = 1.0f / delta;
+	*delta_out		= delta;
+	*bias_out		= global_min * (float)nsq;
+
+	float bias_scaled = -global_min * inv_delta + 0.5f;
+
+	memset(lut_out, 0, nsq_pairs * 2 * 16);
+
+	float32x4_t lo_v = vdupq_n_f32(0.0f);
+	float32x4_t hi_v = vdupq_n_f32((float)UINT8_MAX);
+
+	const float *q = transformed;
+	for (uint32_t sq = 0; sq < nsq; sq++)
+	{
+		uint8_t *out = lut_out + sq * 16;
+
+		Dimension base = sq * 4;
+		float	  s0   = (base + 0 < dim) ? q[0] * inv_delta : 0.0f;
+		float	  s1   = (base + 1 < dim) ? q[1] * inv_delta : 0.0f;
+		float	  s2   = (base + 2 < dim) ? q[2] * inv_delta : 0.0f;
+		float	  s3   = (base + 3 < dim) ? q[3] * inv_delta : 0.0f;
+
+		float p01 = s0 + s1;
+		float p23 = s2 + s3;
+		float f0  = bias_scaled;
+		float f4  = f0 + s2;
+		float f8  = f0 + s3;
+		float f12 = f0 + p23;
+
+		float		addend_arr[4] = {0.0f, s0, s1, p01};
+		float32x4_t addend		  = vld1q_f32(addend_arr);
+
+		float32x4_t e0 = vaddq_f32(vdupq_n_f32(f0), addend);
+		float32x4_t e1 = vaddq_f32(vdupq_n_f32(f4), addend);
+		float32x4_t e2 = vaddq_f32(vdupq_n_f32(f8), addend);
+		float32x4_t e3 = vaddq_f32(vdupq_n_f32(f12), addend);
+
+		e0 = vminq_f32(vmaxq_f32(e0, lo_v), hi_v);
+		e1 = vminq_f32(vmaxq_f32(e1, lo_v), hi_v);
+		e2 = vminq_f32(vmaxq_f32(e2, lo_v), hi_v);
+		e3 = vminq_f32(vmaxq_f32(e3, lo_v), hi_v);
+
+		/* Truncate toward zero, matching scalar (int)(val) -- safe
+		 * since values are already clamped to [0, UINT8_MAX]. */
+		uint32x4_t i0 = vcvtq_u32_f32(e0);
+		uint32x4_t i1 = vcvtq_u32_f32(e1);
+		uint32x4_t i2 = vcvtq_u32_f32(e2);
+		uint32x4_t i3 = vcvtq_u32_f32(e3);
+
+		uint16x4_t n0 = vmovn_u32(i0);
+		uint16x4_t n1 = vmovn_u32(i1);
+		uint16x4_t n2 = vmovn_u32(i2);
+		uint16x4_t n3 = vmovn_u32(i3);
+
+		uint8x8_t b01 = vmovn_u16(vcombine_u16(n0, n1)); /* entries 0..7 */
+		uint8x8_t b23 = vmovn_u16(vcombine_u16(n2, n3)); /* entries 8..15 */
+
+		vst1_u8(out, b01);
+		vst1_u8(out + 8, b23);
+
+		q += 4;
+	}
+}
+
+/* ----------------------------------------------------------------
+ * NEON high-accuracy LUT construction (uint16 entries -> split
+ * lo/hi byte tables). Same broadcast-add trick as the uint8
+ * builder above; the extra work is splitting each uint16 entry
+ * into its low and high byte before storing to the interleaved
+ * lo/hi layout (see fastscan_build_lut_hacc_scalar).
+ * ---------------------------------------------------------------- */
+
+void
+mkt_fastscan_build_lut_hacc_neon(
+		const float *transformed,
+		Dimension	 dim,
+		uint8_t		*lut_out,
+		float		*delta_out,
+		float		*bias_out)
+{
+	uint32_t nsq = MKT_FASTSCAN_NSQ(dim);
+
+	float32x4_t pos_sum = vdupq_n_f32(0.0f);
+	float32x4_t neg_sum = vdupq_n_f32(0.0f);
+	float32x4_t zero4	 = vdupq_n_f32(0.0f);
+
+	Dimension d = 0;
+	for (; d + 4 <= dim; d += 4)
+	{
+		float32x4_t v = vld1q_f32(transformed + d);
+		pos_sum		  = vaddq_f32(pos_sum, vmaxq_f32(v, zero4));
+		neg_sum		  = vaddq_f32(neg_sum, vminq_f32(v, zero4));
+	}
+	float global_max = mkt_horizontal_sum_neon(pos_sum);
+	float global_min = mkt_horizontal_sum_neon(neg_sum);
+	for (; d < dim; d++)
+	{
+		if (transformed[d] > 0)
+			global_max += transformed[d];
+		else
+			global_min += transformed[d];
+	}
+
+	float range = global_max - global_min;
+	if (range < MKT_FASTSCAN_MIN_RANGE)
+		range = MKT_FASTSCAN_MIN_RANGE;
+
+	float delta		= range / (float)UINT16_MAX;
+	float inv_delta = 1.0f / delta;
+	*delta_out		= delta;
+	*bias_out		= global_min * (float)nsq;
+
+	float bias_scaled = -global_min * inv_delta + 0.5f;
+
+	uint32_t lut_bytes = MKT_FASTSCAN_LUT_HACC_BYTES(dim);
+	memset(lut_out, 0, lut_bytes);
+
+	float32x4_t lo_v = vdupq_n_f32(0.0f);
+	float32x4_t hi_v = vdupq_n_f32((float)UINT16_MAX);
+
+	const float *q = transformed;
+	for (uint32_t sq = 0; sq < nsq; sq++)
+	{
+		Dimension base = sq * 4;
+		float	  s0   = (base + 0 < dim) ? q[0] * inv_delta : 0.0f;
+		float	  s1   = (base + 1 < dim) ? q[1] * inv_delta : 0.0f;
+		float	  s2   = (base + 2 < dim) ? q[2] * inv_delta : 0.0f;
+		float	  s3   = (base + 3 < dim) ? q[3] * inv_delta : 0.0f;
+
+		float p01 = s0 + s1;
+		float p23 = s2 + s3;
+		float f0  = bias_scaled;
+		float f4  = f0 + s2;
+		float f8  = f0 + s3;
+		float f12 = f0 + p23;
+
+		float		addend_arr[4] = {0.0f, s0, s1, p01};
+		float32x4_t addend		  = vld1q_f32(addend_arr);
+
+		float32x4_t e0 = vaddq_f32(vdupq_n_f32(f0), addend);
+		float32x4_t e1 = vaddq_f32(vdupq_n_f32(f4), addend);
+		float32x4_t e2 = vaddq_f32(vdupq_n_f32(f8), addend);
+		float32x4_t e3 = vaddq_f32(vdupq_n_f32(f12), addend);
+
+		e0 = vminq_f32(vmaxq_f32(e0, lo_v), hi_v);
+		e1 = vminq_f32(vmaxq_f32(e1, lo_v), hi_v);
+		e2 = vminq_f32(vmaxq_f32(e2, lo_v), hi_v);
+		e3 = vminq_f32(vmaxq_f32(e3, lo_v), hi_v);
+
+		uint32x4_t i0 = vcvtq_u32_f32(e0);
+		uint32x4_t i1 = vcvtq_u32_f32(e1);
+		uint32x4_t i2 = vcvtq_u32_f32(e2);
+		uint32x4_t i3 = vcvtq_u32_f32(e3);
+
+		uint16x4_t n0 = vmovn_u32(i0);
+		uint16x4_t n1 = vmovn_u32(i1);
+		uint16x4_t n2 = vmovn_u32(i2);
+		uint16x4_t n3 = vmovn_u32(i3);
+
+		/* n0/n1 -> entries 0..7, n2/n3 -> entries 8..15 */
+		uint16x8_t lo8_16 = vcombine_u16(n0, n1);
+		uint16x8_t hi8_16 = vcombine_u16(n2, n3);
+
+		uint8x8_t lo_byte_a = vmovn_u16(lo8_16);	   /* low bytes 0..7 */
+		uint8x8_t lo_byte_b = vmovn_u16(hi8_16);	   /* low bytes 8..15 */
+		uint8x8_t hi_byte_a = vshrn_n_u16(lo8_16, 8); /* high bytes 0..7 */
+		uint8x8_t hi_byte_b = vshrn_n_u16(hi8_16, 8); /* high bytes 8..15 */
+
+		uint8x16_t lo_bytes = vcombine_u8(lo_byte_a, lo_byte_b);
+		uint8x16_t hi_bytes = vcombine_u8(hi_byte_a, hi_byte_b);
+
+		uint32_t group4		  = sq / 4;
+		uint32_t pos_in_group = sq % 4;
+		uint8_t *lo_dst		  = lut_out + group4 * 128 + pos_in_group * 16;
+		uint8_t *hi_dst		  = lo_dst + 64;
+
+		vst1q_u8(lo_dst, lo_bytes);
+		vst1q_u8(hi_dst, hi_bytes);
+
+		q += 4;
+	}
+}
 
 #endif /* aarch64 */
 
