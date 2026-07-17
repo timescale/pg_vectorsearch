@@ -549,6 +549,22 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 
 	Distance threshold = mkt_topk_threshold(topk);
 
+	/* How many groups ahead to prefetch. A fastscan page holds at
+	 * most 1 group (first page, 32 vectors) or 2 groups (overflow
+	 * page, 64 vectors) at dim=768 -- ngroups here is per-page, so
+	 * anything more than 1 group ahead never fires. The old code
+	 * prefetched only the immediately-next group's *codes*, and only
+	 * *after* the current group's accumulate call returned -- so the
+	 * only lead time before that data was needed (the next loop
+	 * iteration's accumulate call) was the current group's prune
+	 * loop, which can be a handful of cycles when most candidates
+	 * are pruned. Issuing the prefetch at the top of the loop, before
+	 * this group's own accumulate work, gives a full accumulate call
+	 * of extra lead time, and prefetching the whole section (not
+	 * just codes) also warms tids/f_add/f_rescale/f_error, which the
+	 * prune loop reads immediately after. */
+	const uint32_t prefetch_groups = 1;
+
 	for (uint32_t g = 0; g < ngroups; g++)
 	{
 		uint32_t g_start = g * MKT_FASTSCAN_GROUP;
@@ -566,6 +582,17 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 		float			*f_error   = f_rescale + MKT_FASTSCAN_GROUP;
 		uint8_t			*codes	   = (uint8_t *)(f_error + MKT_FASTSCAN_GROUP);
 
+		/* Prefetch a future group's whole section (metadata + codes)
+		 * before doing this group's own work, maximizing lead time. */
+		if (g + prefetch_groups < ngroups)
+		{
+			char *pf_base = mkt_fastscan_group_base(
+					content, g + prefetch_groups, dim);
+			uint32_t section_bytes = mkt_fastscan_group_section_bytes(dim);
+			for (uint32_t p = 0; p < section_bytes; p += 64)
+				__builtin_prefetch(pf_base + p, 0, 1);
+		}
+
 		/* Run VPSHUFB accumulate kernel */
 		if (scan->fs_lut_bits == 8)
 		{
@@ -577,16 +604,6 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 		else
 		{
 			scan->fs_accum_hacc(codes, scan->fs_lut, scan->fs_accum, dim);
-		}
-
-		/* Prefetch next group's codes during prune phase */
-		if (g + 1 < ngroups)
-		{
-			uint8_t *next_codes =
-					mkt_fastscan_group_codes(content, g + 1, dim);
-			uint32_t code_bytes = MKT_FASTSCAN_GROUP_BYTES(dim);
-			for (uint32_t p = 0; p < code_bytes; p += 64)
-				__builtin_prefetch(next_codes + p, 0, 1);
 		}
 
 		/* Vectorized distance + prune: compute 16 distances at a
