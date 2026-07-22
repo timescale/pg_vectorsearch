@@ -36,6 +36,7 @@ else
       'query_settings',
       'empty_table',
       'zero_vectors',
+      'row_estimate',
     ]
 
     test('regress',
