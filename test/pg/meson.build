@@ -34,6 +34,7 @@ else
       'parallel',
       'build_logging',
       'query_settings',
+      'empty_table',
     ]
 
     test('regress',

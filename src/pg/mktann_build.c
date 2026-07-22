@@ -535,10 +535,11 @@ estimate_heap_tuples(Relation heap, Dimension dim)
 /*
  * Draw the maintenance_work_mem-bounded k-means sample into bs->samples (left
  * resident for the caller to cluster + free), normalize it for cosine, and
- * resolve the leaf target against the sample size. Returns false (and frees
- * the sample) when the heap yields no indexable rows.
+ * resolve the leaf target against the sample size. A heap with no indexable
+ * rows yields one synthetic sample and a single-cluster target, so the
+ * build always proceeds.
  */
-static bool
+static void
 sample_for_build(
 		MktannBuildState *bs, uint32_t *out_nlist, bool *out_subsampled)
 {
@@ -574,16 +575,30 @@ sample_for_build(
 
 	if (bs->nsamples == 0)
 	{
-		pfree(bs->samples);
-		bs->samples = NULL;
-		return false;
+		/*
+		 * No indexable rows (empty table, or every row dead or NULL).
+		 * Synthesize one unit-basis sample so the normal machinery
+		 * emits a valid single-cluster index: the sample only shapes
+		 * the leaf centroid -- the heap scan that fills posting lists
+		 * still contributes nothing -- and later inserts route to that
+		 * leaf like any single-cluster index (empty posting heads are
+		 * a supported shape; every cluster gets one). A unit vector
+		 * rather than zeros keeps the centroid safe for cosine
+		 * normalization and the RaBitQ norm factors. Clustering
+		 * quality after bulk loading comes from REINDEX, exactly as
+		 * for any index built far below its final row count.
+		 */
+		bs->samples		= repalloc(bs->samples, vec_nbytes);
+		bs->max_samples = 1;
+		memset(bs->samples, 0, vec_nbytes);
+		bs->samples[0] = 1.0f;
+		bs->nsamples   = 1;
 	}
 
 	if ((uint32_t)bs->nsamples < nlist)
 		nlist = (uint32_t)bs->nsamples;
 
 	*out_nlist = nlist;
-	return true;
 }
 
 /* ----------------------------------------------------------------
@@ -733,11 +748,12 @@ serial_refine_heads(
  * No in-RAM tree is materialized; the streamed tree's shape (leaf count +
  * depth) comes back through out_nlist/out_tree_nlevels. Posting-list heads
  * are formula-derived (first_posting + leaf), so no head array is returned.
- * Returns false (with *out_nlist == 0) when the heap has no tuples. The
- * serial path writes its own metadata page; the caller must not finalize
- * again.
+ * A heap with no indexable rows still builds: the sampler substitutes one
+ * synthetic sample and the result is a valid single-cluster index with an
+ * empty posting head. The serial path writes its own metadata page; the
+ * caller must not finalize again.
  */
-static bool
+static void
 do_serial_build(
 		MktannBuildState *bs,
 		MktStorage		 *storage,
@@ -759,8 +775,7 @@ do_serial_build(
 
 	uint32_t target_nlist = 0;
 	bool	 subsampled	  = false;
-	if (!sample_for_build(bs, &target_nlist, &subsampled))
-		return false;
+	sample_for_build(bs, &target_nlist, &subsampled);
 
 	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
@@ -1070,7 +1085,6 @@ do_serial_build(
 	*out_heap_tuples  = heap_tuples;
 	*out_indtuples	  = bs->indtuples;
 	*out_soar_dupes	  = bs->soar_dupes;
-	return true;
 }
 
 /* ----------------------------------------------------------------
@@ -1199,6 +1213,36 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				 * lets vacuum skip the centroid region without scanning it. */
 				&meta_first_posting);
 
+		if (did_parallel && built_nlist == 0)
+		{
+			/*
+			 * The parallel path found no indexable rows (a non-empty heap
+			 * whose rows are all dead or NULL can reach it). It wrote no
+			 * pages for the zero-leaf layout, so the serial fallback below
+			 * -- whose sampler substitutes a synthetic sample and emits a
+			 * valid single-cluster index -- starts from a clean relation.
+			 * Enforced at runtime: falling back onto a relation the
+			 * parallel path already wrote to would corrupt the index.
+			 */
+			if (RelationGetNumberOfBlocks(index) > 1)
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("parallel index build reported no leaves "
+								"but wrote %u pages",
+								RelationGetNumberOfBlocks(index))));
+
+			/* The zero-leaf return leaves out_global_mean NULL today;
+			 * free defensively so a future change to that contract
+			 * cannot leak the parallel mean when the serial build
+			 * replaces it. */
+			if (global_mean != NULL)
+			{
+				pfree(global_mean);
+				global_mean = NULL;
+			}
+			did_parallel = false;
+		}
+
 		if (did_parallel && built_nlist > 0)
 			bs.params.nlist = built_nlist;
 		else if (!did_parallel)
@@ -1212,9 +1256,9 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 	if (!did_parallel)
 	{
-		/* Serial fallback: sample, cluster, build. Reports zero leaves when
-		 * the heap has no indexable tuples. */
-		(void)do_serial_build(
+		/* Serial fallback: sample, cluster, build. Always emits at least
+		 * one leaf, even when the heap has no indexable tuples. */
+		do_serial_build(
 				&bs,
 				&storage.base,
 				rabitq_seed,
@@ -1226,19 +1270,15 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				&soar_dupes);
 	}
 
-	/*
-	 * An empty heap (via either path) yields no centroid tree. Refuse the
-	 * build rather than emit a centroidless index that cannot route inserts or
-	 * be scanned — failing loudly at CREATE INDEX beats a cryptic read error
-	 * on the first insert. (A later phase can build a degenerate
-	 * single-cluster index so an empty table is indexable.)
-	 */
+	/* Both paths produce at least one leaf now: a heap with no indexable
+	 * rows builds a single-cluster index around a synthetic centroid (see
+	 * sample_for_build), so inserts route and scans return empty.
+	 * Enforced at runtime: finalizing a zero-leaf layout would produce a
+	 * broken index. */
 	if (built_nlist == 0)
 		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot build a \"mktann\" index on an empty table"),
-				 errhint("Insert data before creating the index, or REINDEX "
-						 "once the table has rows.")));
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("index build produced no clusters")));
 
 	if (soar_dupes > 0)
 		elog(LOG,
