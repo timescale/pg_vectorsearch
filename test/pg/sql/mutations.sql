@@ -69,15 +69,14 @@ RESET enable_seqscan;
 RESET mkt.nprobe;
 DROP TABLE mutfs;
 
--- ===== Empty index: building on a 0-row table is refused =====================
--- Phase 0 limitation: an empty heap has no centroids to route inserts to, so
--- the build fails loudly instead of producing an unusable index. A later phase
--- can build a degenerate single-cluster index; when it does, this expected
--- output must be updated.
+-- ===== Empty index: building on a 0-row table succeeds =======================
+-- The build substitutes a synthetic sample and emits a degenerate
+-- single-cluster index that later inserts route into. Full coverage lives
+-- in the empty_table test; here we just pin that the build no longer errors.
 CREATE TABLE mutempty (id int, v vector(3));
 CREATE INDEX idx_mutempty ON mutempty USING mktann (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
-          soar_lambda = 0, boundary_epsilon = 0);  -- expect ERROR
+          soar_lambda = 0, boundary_epsilon = 0);
 DROP TABLE mutempty;
 
 -- ===== A freshly inserted vector is a genuine nearest neighbour =============
