@@ -424,10 +424,11 @@ mktann_get_fan_out(Relation index)
 	return MKT_ANN_DEFAULT_FAN_OUT;
 }
 
-static double estimate_heap_tuples(Relation heap, Dimension dim);
+static double estimate_heap_tuples(Relation heap);
 
 static void
-resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
+resolve_build_params(
+		Relation heap, Relation index, MktannBuildParams *p, double *est_rows)
 {
 	Dimension dim = (Dimension)TupleDescAttr(index->rd_att, 0)->atttypmod;
 	if (dim == 0)
@@ -450,9 +451,15 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 	p->centroid_format = mktann_resolve_format(index, p->metric, dim);
 	p->fan_out		   = mktann_get_fan_out(index);
 
-	/* nlist: use relopt if set, otherwise auto from sqrt(reltuples) */
+	/* nlist: use relopt if set, otherwise auto from sqrt(reltuples).
+	 * The row estimate is computed once and surfaced to the caller (the
+	 * progress-reporting total needs it too): the never-analyzed
+	 * fallback samples heap pages, and sampling twice would double that
+	 * cost and could even disagree with itself on a growing heap. */
 	MktannOptions *opts		 = (MktannOptions *)index->rd_options;
 	uint32_t	   nlist_opt = (opts != NULL) ? (uint32_t)opts->nlist : 0;
+
+	*est_rows = estimate_heap_tuples(heap);
 
 	if (nlist_opt > 0)
 	{
@@ -460,7 +467,7 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 	}
 	else
 	{
-		p->nlist = mkt_auto_nlist(estimate_heap_tuples(heap, dim));
+		p->nlist = mkt_auto_nlist(*est_rows);
 		if (p->nlist > MKT_ANN_MAX_NLIST)
 			p->nlist = MKT_ANN_MAX_NLIST;
 	}
@@ -507,25 +514,57 @@ resolve_build_params(Relation heap, Relation index, MktannBuildParams *p)
 
 /*
  * Estimated heap row count. Uses the planner's reltuples when available,
- * else a density guess from the main-fork size. Feeds the automatic
- * partition count and the pg_stat_progress_create_index total.
+ * else samples real pages and counts normal line pointers (no
+ * visibility checks -- dead-but-unpruned rows count, like reltuples
+ * right after a bulk delete). Feeds the automatic partition count and
+ * the pg_stat_progress_create_index total.
  *
- * The density must account for TOAST: a vector datum above the threshold is
- * stored out of line and the main-fork row is just the header, the other
- * columns and an 18-byte toast pointer, so a width taken from the dimension
- * would undercount the rows by up to two orders of magnitude (and past ~2k
- * dimensions it exceeds the page size, reading as zero rows per page).
+ * The density is measured rather than derived from the vector width
+ * because any width formula must assume a storage strategy, and a wrong
+ * assumption is catastrophic in both directions: a TOASTed column's
+ * main-fork rows are ~64 bytes where the dimension predicts kilobytes
+ * (undercounting rows two orders of magnitude), while a PLAIN-stored
+ * vector column holds ~2 rows per page where the TOAST assumption
+ * predicts ~128 (overcounting 64x -- and the automatic partition count
+ * inherits the error, sharding the index into starved clusters).
  */
 static double
-estimate_heap_tuples(Relation heap, Dimension dim)
+estimate_heap_tuples(Relation heap)
 {
 	if (heap->rd_rel->reltuples > 0)
 		return heap->rd_rel->reltuples;
 
-	Size   vec_sz = sizeof(float) * dim + 8;
-	double width  = (vec_sz > TOAST_TUPLE_THRESHOLD) ? 64.0
-													 : (double)(vec_sz + 32);
-	return RelationGetNumberOfBlocks(heap) * (BLCKSZ / width);
+	BlockNumber nblocks = RelationGetNumberOfBlocks(heap);
+	if (nblocks == 0)
+		return 0;
+
+	uint32_t samples = Min(nblocks, 32);
+	double	 rows	 = 0;
+
+	for (uint32_t i = 0; i < samples; i++)
+	{
+		BlockNumber blkno = (BlockNumber)(((uint64_t)nblocks *
+										   (2 * (uint64_t)i + 1)) /
+										  (2 * samples));
+		Buffer		buf	  = ReadBuffer(heap, blkno);
+
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		Page page = BufferGetPage(buf);
+
+		/* An extended-but-unwritten page has pd_lower == 0, where
+		 * PageGetMaxOffsetNumber underflows; such pages hold no rows. */
+		if (!PageIsNew(page))
+		{
+			OffsetNumber max = PageGetMaxOffsetNumber(page);
+			for (OffsetNumber off = FirstOffsetNumber; off <= max; off++)
+			{
+				if (ItemIdIsNormal(PageGetItemId(page, off)))
+					rows += 1;
+			}
+		}
+		UnlockReleaseBuffer(buf);
+	}
+	return rows / samples * nblocks;
 }
 
 /* ----------------------------------------------------------------
@@ -1151,7 +1190,8 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	bs.tmp_ctx			= AllocSetContextCreate(
 			 build_ctx, "mktann build tuple", ALLOCSET_DEFAULT_SIZES);
 
-	resolve_build_params(heap, index, &bs.params);
+	double est_rows;
+	resolve_build_params(heap, index, &bs.params, &est_rows);
 
 	const MktannBuildParams *p			 = &bs.params;
 	Dimension				 dim		 = p->dim;
@@ -1171,7 +1211,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			mkt_log_build_stats,
 			build_ctx,
 			&stats,
-			estimate_heap_tuples(heap, dim));
+			est_rows);
 	bs.prog = &prog;
 
 	MktannStorage storage;

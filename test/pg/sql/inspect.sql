@@ -10,6 +10,12 @@ INSERT INTO embeddings (v)
          generate_series(0, 9) y,
          generate_series(0, 9) z;
 
+-- Pin reltuples via ANALYZE so automatic index sizing works from the
+-- recorded row count: this test asserts tree structure, which must not
+-- wobble with the page-sampling estimator used for never-analyzed
+-- tables.
+ANALYZE embeddings;
+
 -- Single-level RaBitQ index — summary per level
 -- (Leaf count varies across platforms due to k-means convergence,
 -- so check structure and format without asserting exact counts.)
@@ -81,6 +87,7 @@ INSERT INTO wide (v)
     )::vector(256)
     FROM generate_series(1, 100) i;
 
+ANALYZE wide;
 CREATE INDEX idx_wide ON wide USING mktann (v)
     WITH (centroid_compression = off);
 
