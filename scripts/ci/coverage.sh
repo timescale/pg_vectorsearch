@@ -145,13 +145,22 @@ esac
 # Select the right gcov tool to match the compiler
 GCOV_TOOL=()
 CC_BASE=$(basename "${CC:-cc}")
-if [[ "$CC_BASE" == clang* ]]; then
+# An unversioned wrapper like cc can resolve to clang, so check what the
+# compiler reports about itself rather than trusting its name alone.
+if [[ "$CC_BASE" == clang* ]] ||
+    "${CC:-cc}" --version 2>/dev/null | head -1 | grep -qi clang; then
     GCOV_TOOL=(--gcov-executable "llvm-cov gcov")
-elif [[ "$CC_BASE" == gcc-* ]] && command -v "gcov-${CC_BASE#gcc-}" >/dev/null; then
+else
     # gcov must match the gcc that produced the .gcda files: a
     # major-version mismatch makes gcov emit no records and the report
-    # silently comes out empty.
-    GCOV_TOOL=(--gcov-executable "gcov-${CC_BASE#gcc-}")
+    # silently comes out empty. The default gcov can lag or lead the
+    # default gcc (e.g. cc resolves to gcc-14 while gcov is 15), so
+    # resolve the major version from the compiler itself rather than
+    # from its name.
+    GCC_MAJOR=$("${CC:-cc}" -dumpversion 2>/dev/null | cut -d. -f1)
+    if [[ -n "$GCC_MAJOR" ]] && command -v "gcov-${GCC_MAJOR}" >/dev/null; then
+        GCOV_TOOL=(--gcov-executable "gcov-${GCC_MAJOR}")
+    fi
 fi
 
 # Generate coverage reports
