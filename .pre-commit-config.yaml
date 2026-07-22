@@ -46,7 +46,7 @@ repos:
 
   # SQL linting (uses libpg_query — real PostgreSQL parser)
   - repo: https://github.com/sbdchd/squawk
-    rev: "v2.40.0"
+    rev: "v2.60.0"
     hooks:
       - id: squawk
         files: ^(sql|test/(.+/)?(sql|compat))/.*\.sql$
