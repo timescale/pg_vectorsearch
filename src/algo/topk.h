@@ -150,6 +150,11 @@ mkt_topk_threshold(const MktTopK *topk)
  * Does not reset the collection — call mkt_topk_reset() or
  * mkt_topk_cleanup() when done with the results.
  */
+void mkt_topk_extract_sorted_capped(
+		MktTopK		 *topk,
+		MktTopKEntry *results,
+		uint32_t	 *count_out,
+		uint32_t	  cap);
 void mkt_topk_extract_sorted(
 		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out);
 
