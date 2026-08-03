@@ -351,7 +351,7 @@ scan_clusters(
 }
 
 static uint32_t
-extract_candidates(MktQueryState *qs)
+extract_candidates(MktQueryState *qs, uint32_t cap)
 {
 	if (qs->topk.cand_count > qs->cand_cap)
 	{
@@ -370,7 +370,7 @@ extract_candidates(MktQueryState *qs)
 	}
 
 	uint32_t ncands;
-	mkt_topk_extract_sorted(&qs->topk, qs->candidates, &ncands);
+	mkt_topk_extract_sorted_capped(&qs->topk, qs->candidates, &ncands, cap);
 	qs->ncandidates = ncands;
 	return ncands;
 }
@@ -409,10 +409,14 @@ mkt_query_route(
 /* Cap on the rerank candidate pool (mkt.rerank_pool). Candidates are
  * sorted by approximate distance, so capping keeps the most promising
  * ones and bounds the exact-distance heap fetches. 0 (default) resolves
- * to an automatic cap of 16 * k — measured recall-neutral across the
- * probe range while bounding pathological survivor counts; -1 disables
- * the cap entirely; positive values are absolute. The effective cap is
- * never below k, so a cap can never truncate the result set. */
+ * to an automatic cap of max(16 * k, candidate-buffer count / 8): the
+ * buffer population directly measures estimate noise, so the floor of
+ * 16 * k (measured recall-neutral on accurate estimates) grows with it
+ * when noisy estimates flood the buffer and ranking into a flat 16 * k
+ * pool would silently cap recall far below what the probed clusters
+ * contain. -1 disables the cap entirely; positive values are absolute.
+ * The effective cap is never below k, so a cap can never truncate the
+ * result set. */
 #define MKT_RERANK_POOL_AUTO_MULT 16
 
 static int32_t g_rerank_pool = 0;
@@ -483,19 +487,37 @@ mkt_query_execute(
 	scan_clusters(
 			qs, qs->beam_results, ncentroids, nprobe, mode, &qs->topk, stats);
 
-	uint32_t ncands = extract_candidates(qs);
-
 	/* Rerank-pool cap: the first `pool` candidates by approximate
-	 * distance are the most promising; see mkt_query_set_rerank_pool. */
-	if (g_rerank_pool >= 0)
+	 * distance are the most promising; see mkt_query_set_rerank_pool.
+	 * Resolved before extraction so the extract can select the capped
+	 * prefix instead of fully sorting an unbounded survivor set.
+	 *
+	 * The automatic cap scales with the candidate-buffer population,
+	 * which directly measures estimate noise: accurate estimates keep
+	 * the threshold tight and the buffer small (the 16*k floor
+	 * applies, as before), while noisy estimates (low dimension, wide
+	 * norm spread) flood the buffer -- and then ranking into a 16*k
+	 * pool is meaningless, silently capping recall well below what
+	 * the probed clusters contain. 1/8th of the buffer restores the
+	 * recall ceiling at a rerank cost proportionate to the observed
+	 * noise. */
+	uint32_t pool = 0;
+	if (g_rerank_pool > 0)
 	{
-		uint32_t pool = (g_rerank_pool == 0) ? MKT_RERANK_POOL_AUTO_MULT * k
-											 : (uint32_t)g_rerank_pool;
+		pool = (uint32_t)g_rerank_pool;
 		if (pool < k)
 			pool = k;
-		if (ncands > pool)
-			ncands = pool;
 	}
+	else if (g_rerank_pool == 0)
+	{
+		pool = MKT_RERANK_POOL_AUTO_MULT * k;
+		if (pool < qs->topk.cand_count / 8)
+			pool = qs->topk.cand_count / 8;
+		if (pool < k)
+			pool = k;
+	}
+
+	uint32_t ncands = extract_candidates(qs, pool);
 
 	uint64_t t2 = mkt_query_now_ns();
 
