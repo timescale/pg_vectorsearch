@@ -469,3 +469,71 @@ TEST(topk_reset)
 	ASSERT_EQ(1, topk.cand_count, "cand_count after re-insert");
 	mkt_topk_cleanup(&topk);
 }
+
+/* ----------------------------------------------------------------
+ * Capped extraction (quickselect + dedup) vs brute force
+ * ---------------------------------------------------------------- */
+
+/* Adversarial distance distributions for the quickselect partition:
+ * all-equal (pivot-equal band), sorted, reverse-sorted, two-valued,
+ * and scattered, each with duplicate ids (SOAR-style replicas). The
+ * capped extract must return exactly the cap best unique ids, sorted;
+ * bounds bugs in the partition surface under the sanitizer jobs. */
+TEST(topk_extract_capped_adversarial)
+{
+	const uint32_t n	  = 500;
+	const uint32_t k	  = 10;
+	const uint32_t caps[] = {1, 10, 33, 160, 500, 1000};
+
+	for (int dist_kind = 0; dist_kind < 5; dist_kind++)
+	{
+		for (size_t c = 0; c < sizeof(caps) / sizeof(caps[0]); c++)
+		{
+			MktTopK topk;
+			mkt_topk_init(&topk, k);
+			/* Every id twice (replica), error large enough that no
+			 * candidate is threshold-pruned: the buffer holds all. */
+			for (uint32_t i = 0; i < n; i++)
+			{
+				float d;
+				switch (dist_kind)
+				{
+				case 0:
+					d = 1.0f;
+					break;
+				case 1:
+					d = (float)i;
+					break;
+				case 2:
+					d = (float)(n - i);
+					break;
+				case 3:
+					d = (float)(i % 2);
+					break;
+				default:
+					d = (float)((i * 7919u) % 257u);
+					break;
+				}
+				mkt_topk_insert(&topk, d, 1000.0f, (uint64_t)(i % 250) + 1);
+			}
+
+			MktTopKEntry *res = mkt_alloc(
+					topk.cand_count * sizeof(MktTopKEntry));
+			uint32_t out;
+			mkt_topk_extract_sorted_capped(&topk, res, &out, caps[c]);
+
+			uint32_t expect = caps[c] < 250 ? caps[c] : 250;
+			ASSERT_EQ(expect, out, "capped extract returns cap uniques");
+			for (uint32_t i = 1; i < out; i++)
+				ASSERT_TRUE(
+						res[i - 1].distance <= res[i].distance,
+						"capped extract sorted ascending");
+			for (uint32_t i = 0; i < out; i++)
+				for (uint32_t j = i + 1; j < out; j++)
+					ASSERT_TRUE(res[i].id != res[j].id, "no duplicate ids");
+
+			mkt_free(res);
+			mkt_topk_cleanup(&topk);
+		}
+	}
+}

@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "algo/topk.h"
+#include "core/idset.h"
 #include "core/memory.h"
 #include "core/platform.h"
 
@@ -333,17 +334,127 @@ append:
 	};
 }
 
+/*
+ * Deduplicate a distance-sorted candidate prefix in place, keeping the
+ * first (best-distance) entry per ID, tracked in an id set. A rescan
+ * of prior survivors per entry would go quadratic in the survivor
+ * count; the set keeps this pass linear. Returns the deduplicated
+ * count, additionally truncated to `cap` unique entries when cap > 0.
+ */
+static uint32_t
+dedup_sorted_prefix(MktTopKEntry *results, uint32_t n, uint32_t cap)
+{
+	if (n <= 1)
+		return n;
+
+	MktIdSet seen;
+	mkt_idset_init(&seen, n);
+
+	uint32_t w = 0;
+	for (uint32_t r = 0; r < n; r++)
+	{
+		if (!mkt_idset_test_add(&seen, results[r].id))
+			continue;
+		results[w++] = results[r];
+		if (cap > 0 && w == cap)
+			break;
+	}
+	mkt_idset_cleanup(&seen);
+	return w;
+}
+
+/*
+ * Partially order `results` so the `want` smallest-distance entries
+ * occupy the front (in arbitrary order within each side). Iterative
+ * Hoare quickselect with median-of-three pivots: expected O(n), no
+ * recursion, no external randomness.
+ */
+static void
+quickselect_by_distance(MktTopKEntry *results, uint32_t n, uint32_t want)
+{
+	uint32_t lo = 0, hi = n;
+
+	while (hi - lo > 1 && want > lo && want < hi)
+	{
+		uint32_t mid = lo + (hi - lo) / 2;
+		Distance a	 = results[lo].distance;
+		Distance b	 = results[mid].distance;
+		Distance c	 = results[hi - 1].distance;
+		Distance pivot;
+		if ((a <= b && b <= c) || (c <= b && b <= a))
+			pivot = b;
+		else if ((b <= a && a <= c) || (c <= a && a <= b))
+			pivot = a;
+		else
+			pivot = c;
+
+		/* The median-of-three pivot exists in the range, so each scan
+		 * has a stopper; the explicit bounds checks make that local
+		 * rather than an invariant to trust (j is unsigned, so an
+		 * unchecked descent past lo would wrap). */
+		uint32_t i = lo, j = hi - 1;
+		while (i <= j)
+		{
+			while (i < hi - 1 && results[i].distance < pivot)
+				i++;
+			while (j > lo && results[j].distance > pivot)
+				j--;
+			if (i <= j)
+			{
+				MktTopKEntry tmp = results[i];
+				results[i]		 = results[j];
+				results[j]		 = tmp;
+				i++;
+				if (j == 0)
+					break;
+				j--;
+			}
+		}
+		/* Entries [lo, j] <= pivot <= entries [i, hi). Recurse into the
+		 * side containing the selection boundary. */
+		if (want <= j + 1)
+			hi = j + 1;
+		else if (want >= i)
+			lo = i;
+		else
+			return; /* boundary falls in the pivot-equal middle band */
+	}
+}
+
 /* ----------------------------------------------------------------
  * Extract sorted
  * ---------------------------------------------------------------- */
 
+/* The uncapped form of mkt_topk_extract_sorted_capped. */
 void
 mkt_topk_extract_sorted(
 		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out)
 {
+	mkt_topk_extract_sorted_capped(topk, results, count_out, 0);
+}
+
+/*
+ * Extract the threshold survivors sorted by distance ascending and
+ * deduplicated (first, i.e. best-distance, entry per id), keeping at
+ * most the best `cap` unique candidates; cap == 0 keeps them all. The
+ * survivor count is unbounded when distance estimates are noisy -- a
+ * loose threshold admits most scanned entries, every SOAR replica
+ * included -- so sorting all survivors is wasted work when only a
+ * small prefix is kept. A quickselect partition narrows to the
+ * smallest 3*cap entries first: every id occurs at most twice (primary
+ * posting plus at most one SOAR replica), so the smallest 2*cap
+ * entries already contain the best cap unique ids and 3*cap leaves
+ * margin.
+ */
+void
+mkt_topk_extract_sorted_capped(
+		MktTopK		 *topk,
+		MktTopKEntry *results,
+		uint32_t	 *count_out,
+		uint32_t	  cap)
+{
 	Distance threshold = mkt_topk_threshold(topk);
 
-	/* Filter stale candidates and copy survivors to results */
 	uint32_t out = 0;
 	for (uint32_t i = 0; i < topk->cand_count; i++)
 	{
@@ -352,32 +463,17 @@ mkt_topk_extract_sorted(
 			results[out++] = topk->candidates[i];
 	}
 
-	/* Sort by distance ascending */
-	if (out > 1)
-		qsort(results, out, sizeof(MktTopKEntry), cmp_by_distance);
-
-	/* Deduplicate: keep the first (best distance) for each ID. */
-	if (out > 1)
+	uint32_t sel = out;
+	if (cap > 0 && out > cap * 3)
 	{
-		uint32_t w = 1;
-		for (uint32_t r = 1; r < out; r++)
-		{
-			bool dup = false;
-			for (uint32_t j = 0; j < w; j++)
-			{
-				if (results[r].id == results[j].id)
-				{
-					dup = true;
-					break;
-				}
-			}
-			if (!dup)
-				results[w++] = results[r];
-		}
-		out = w;
+		sel = cap * 3;
+		quickselect_by_distance(results, out, sel);
 	}
 
-	*count_out = out;
+	if (sel > 1)
+		qsort(results, sel, sizeof(MktTopKEntry), cmp_by_distance);
+
+	*count_out = dedup_sorted_prefix(results, sel, cap);
 }
 
 /*
