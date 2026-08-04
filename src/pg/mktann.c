@@ -20,6 +20,7 @@
 #include <utils/memutils.h>
 #include <utils/selfuncs.h>
 
+#include "algo/vecops.h"
 #include "index/index_base.h"
 #include "index/posting_insert.h"
 #include "index/query_scan.h"
@@ -100,6 +101,11 @@ mktann_insert(
 						vref.dim,
 						dim)));
 
+	/* No defined distance under cosine: encoded as unreachable below.
+	 * Squared norm -- zero iff the norm is zero, without the sqrt. */
+	bool degenerate = base.metric == DISTANCE_COSINE &&
+					  mkt_l2_norm_squared(vref.data, dim) == 0.0f;
+
 	/*
 	 * Route to the nearest leaf the same way a query does. mkt_query_route
 	 * normalizes (cosine) + rotates into qs.pt_query and runs the beam search;
@@ -143,7 +149,8 @@ mktann_insert(
 				head,
 				*heap_tid,
 				qs.pt_query,
-				&enc);
+				&enc,
+				degenerate);
 		UnlockPage(index, head, ExclusiveLock);
 	}
 

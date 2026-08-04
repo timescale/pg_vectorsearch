@@ -45,7 +45,8 @@ bool mkt_posting_insert_one(
 		BlockNumber			head_blkno,
 		ItemPointerData		tid,
 		const float		   *pt_input,
-		RaBitQScratch	   *scratch);
+		RaBitQScratch	   *scratch,
+		bool				unreachable);
 
 /*
  * Tombstone every AoS entry in the cluster chain whose TID is_dead() reports
