@@ -570,8 +570,49 @@ sample_for_build(
 		bs->nsamples = bs->max_samples;
 
 	if (bs->params.metric == DISTANCE_COSINE)
+	{
+		/*
+		 * Normalize the sample onto the unit sphere, dropping zero-norm
+		 * vectors: they carry no direction, so under cosine they sit at
+		 * the origin -- far from every real point -- and k-means drags
+		 * centroids toward them, warping the encode references (and so
+		 * the distance estimates) for every vector in the affected
+		 * subtree. They stay in the posting lists like any other row;
+		 * they just don't get a vote on the clustering.
+		 *
+		 * Dropped here, by compacting the retained sample, rather than
+		 * at collection time: the reservoir offers every live heap row,
+		 * so a collection-time check would compute an O(dim) norm per
+		 * table row to filter out a tiny fraction, while this pass
+		 * touches only the <= max_samples retained rows (and copies
+		 * nothing at all when no zeros were sampled). The cost is a
+		 * sample budget short by the sampled-zero count -- in expectation
+		 * the table's zero fraction, far below k-means run-to-run
+		 * variance -- and slots spent on zeros bought nothing before
+		 * this pass existed either. nlist is clamped to the compacted
+		 * count below, so even a zero-heavy table degrades to fewer
+		 * leaves rather than starved ones (all-zero degenerates to the
+		 * synthetic single-cluster build).
+		 */
+		int kept = 0;
 		for (int i = 0; i < bs->nsamples; i++)
-			mkt_l2_normalize(bs->samples + (size_t)i * dim, dim);
+		{
+			float *v = bs->samples + (size_t)i * dim;
+			if (mkt_l2_norm(v, dim) == 0.0f)
+				continue;
+			mkt_l2_normalize(v, dim);
+			/* The buffer is a dense row-major matrix consumed directly
+			 * by k-means, so a dropped row leaves a hole that must be
+			 * closed: shift each kept row down over it. Until the first
+			 * drop, kept == i and rows stay normalized in place. */
+			if (kept != i)
+				memcpy(bs->samples + (size_t)kept * dim,
+					   v,
+					   (size_t)dim * sizeof(float));
+			kept++;
+		}
+		bs->nsamples = kept;
+	}
 
 	if (bs->nsamples == 0)
 	{

@@ -82,12 +82,19 @@ mkt_sample_cb(void *state, ItemPointerData tid, const float *vec)
 
 	memcpy(dest, vec, dim * sizeof(float));
 
-	/* Normalize for cosine */
+	/* Normalize for cosine. Zero-norm vectors are dropped from the
+	 * sample: they carry no direction, so under cosine they sit at the
+	 * origin -- equidistant from every real point -- and k-means drags
+	 * centroids toward them, warping the encode references (and so the
+	 * distance estimates) for every vector in the affected subtree.
+	 * They stay in the posting lists like any other row; they just
+	 * don't get a vote on the clustering. */
 	if (sc->metric == DISTANCE_COSINE)
 	{
 		float norm = mkt_l2_norm(dest, dim);
-		if (norm > 0.0f)
-			mkt_vector_scale(dest, 1.0f / norm, dest, dim);
+		if (norm == 0.0f)
+			return;
+		mkt_vector_scale(dest, 1.0f / norm, dest, dim);
 	}
 
 	sc->count++;
