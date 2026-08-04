@@ -337,11 +337,43 @@ route_swap_candidates(
 	memcpy(pb, ctx->pt_r, nbytes);
 }
 
+/*
+ * Stamp a serialized posting entry as unreachable: estimated distance
+ * +inf with zero error, so every scan prunes it before it can enter
+ * the top-k threshold heap or the candidate buffer. Used for vectors
+ * with no defined distance under the index metric (a zero-norm vector
+ * under cosine): their exact distance is NaN, but their quantized
+ * estimate would look mid-range -- an impostor entering the top-k
+ * upper-bound heap of every query and falsely tightening its pruning
+ * threshold. The row stays indexed; it just can never be a result.
+ */
+static void
+mark_entry_unreachable(void *entry)
+{
+	/* Serialized layout (see mkt_posting_entry_encode_from_pt):
+	 * [tid][f_add][f_rescale][f_error][bits]. p starts at f_add; the
+	 * advance steps over the just-written f_add plus the untouched
+	 * f_rescale to land exactly on f_error. */
+	char	   *p	 = (char *)entry + sizeof(ItemPointerData);
+	const float inf	 = INFINITY;
+	const float zero = 0.0f;
+
+	memcpy(p, &inf, sizeof(float));
+	p += 2 * sizeof(float);
+	memcpy(p, &zero, sizeof(float));
+}
+
 bool
 mkt_build_route_emit(
 		MktBuildRouteCtx *ctx, const float *vec, ItemPointerData tid)
 {
 	Dimension dim = ctx->dim;
+
+	/* No defined distance under cosine: encode as unreachable below.
+	 * Squared norm -- zero iff the norm is zero -- skips the sqrt on
+	 * this per-tuple build path. */
+	bool degenerate = ctx->qs->index->metric == DISTANCE_COSINE &&
+					  mkt_l2_norm_squared(vec, dim) == 0.0f;
 
 	/*
 	 * Route page-backed, exactly as the query/insert do: descend the centroid
@@ -421,6 +453,8 @@ mkt_build_route_emit(
 			&ctx->enc_scratch,
 			tid,
 			ctx->entry);
+	if (degenerate)
+		mark_entry_unreachable(ctx->entry);
 	mkt_pbuild_sort_put(ctx->sorter, primary, ctx->entry);
 	ctx->indtuples++;
 
@@ -481,6 +515,8 @@ mkt_build_route_emit(
 				&ctx->enc_scratch,
 				tid,
 				ctx->entry);
+		if (degenerate)
+			mark_entry_unreachable(ctx->entry);
 		mkt_pbuild_sort_put(ctx->sorter, ctx->cand_leaf[sec_pos], ctx->entry);
 		ctx->soar_dupes++;
 		return true;

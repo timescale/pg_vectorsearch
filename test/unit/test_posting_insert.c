@@ -123,7 +123,7 @@ insert_vec(
 	float *pt = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
 	mkt_rabitq_rotate(params, vec, pt);
 	mkt_posting_insert_one(
-			&st->base, params, dim, head, vid_to_tid(vid), pt, scratch);
+			&st->base, params, dim, head, vid_to_tid(vid), pt, scratch, false);
 }
 
 static void

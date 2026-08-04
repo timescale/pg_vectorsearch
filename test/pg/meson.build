@@ -35,6 +35,7 @@ else
       'build_logging',
       'query_settings',
       'empty_table',
+      'zero_vectors',
     ]
 
     test('regress',

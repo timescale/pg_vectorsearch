@@ -2,6 +2,8 @@
  * posting_insert.c - Runtime insert primitives (see header)
  */
 
+#include <math.h>
+
 #include "core/memory.h"
 #include "index/posting_insert.h"
 
@@ -13,7 +15,8 @@ mkt_posting_insert_one(
 		BlockNumber			head_blkno,
 		ItemPointerData		tid,
 		const float		   *pt_input,
-		RaBitQScratch	   *scratch)
+		RaBitQScratch	   *scratch,
+		bool				unreachable)
 {
 	if (storage == NULL || params == NULL || pt_input == NULL ||
 		scratch == NULL || head_blkno == InvalidBlockNumber)
@@ -44,6 +47,16 @@ mkt_posting_insert_one(
 	mkt_rabitq_encode_from_pt(params, pt_residual, rdata, scratch);
 	float f_error =
 			mkt_rabitq_derive_f_error(rdata->f_add, rdata->f_rescale, dim);
+
+	/* No defined distance under the index metric: estimated distance
+	 * +inf with zero error, so scans prune the entry before it can
+	 * enter the top-k threshold heap (see mark_entry_unreachable in
+	 * posting_build.c for the full rationale). */
+	if (unreachable)
+	{
+		rdata->f_add = INFINITY;
+		f_error		 = 0.0f;
+	}
 
 	/*
 	 * tail_blkno / live are read straight from the head: the build stamps both

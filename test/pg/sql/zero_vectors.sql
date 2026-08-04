@@ -1,0 +1,51 @@
+-- Zero-norm vectors under cosine.
+--
+-- A zero vector has no direction, so its cosine distance to anything
+-- is undefined (NaN) and it can never be a nearest neighbor. Naively
+-- indexed, its quantized estimate looks mid-range from every query --
+-- an impostor entering the top-k threshold heap and pruning genuine
+-- neighbors -- and in the clustering sample it drags centroids toward
+-- the origin. The build and inserts encode such rows as unreachable
+-- and keep them out of the sample; queries must return only real
+-- neighbors, unaffected by the zero rows.
+--
+-- Vectors span a grid of distinct directions (x, y) so cosine
+-- distances are well separated (near-collinear vectors collapse into
+-- float ties and make top-k order meaningless).
+
+SET enable_seqscan = off;
+
+CREATE TABLE zv (id int, v vector(8));
+INSERT INTO zv
+SELECT x * 100 + y, ('[' || x || ',' || y || ',0,0,0,0,0,0]')::vector
+FROM generate_series(1, 25) x, generate_series(1, 25) y;
+-- Sprinkle zero vectors through the heap.
+INSERT INTO zv SELECT 10000 + g, '[0,0,0,0,0,0,0,0]'::vector
+FROM generate_series(1, 20) g;
+CREATE INDEX zv_idx ON zv USING mktann (v vector_cosine_ops);
+
+SET mkt.nprobe = 64;
+-- Nearest direction to (13.05, 17.02) is (13, 17) -- a direction
+-- with no collinear multiple inside the grid; no zero-vector ids,
+-- no NaN fallout.
+SELECT id FROM zv ORDER BY v OPERATOR(mkt.<=>) '[13.05,17.02,0,0,0,0,0,0]' LIMIT 1;
+
+-- Inserted zero vectors are likewise unreachable, and inserted real
+-- vectors keep working alongside them: direction (3, 500) is far from
+-- every grid direction.
+INSERT INTO zv VALUES (20000, '[0,0,0,0,0,0,0,0]');
+INSERT INTO zv VALUES (20001, '[3,500,0,0,0,0,0,0]');
+SELECT id FROM zv ORDER BY v OPERATOR(mkt.<=>) '[3,500,0,0,0,0,0,0]' LIMIT 1;
+
+-- The zero rows are still physically indexed (entries counted), just
+-- never returned.
+SELECT sum(entry_count) >= 647 AS all_rows_indexed
+FROM mkt.posting_pages('zv_idx');
+
+VACUUM zv;
+-- squawk-ignore require-concurrent-reindex
+REINDEX INDEX zv_idx;
+SELECT id FROM zv ORDER BY v OPERATOR(mkt.<=>) '[13.05,17.02,0,0,0,0,0,0]' LIMIT 1;
+
+RESET enable_seqscan;
+DROP TABLE zv;
