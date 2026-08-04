@@ -224,8 +224,12 @@ mkt_topk_insert_unique(
 	Distance lb = distance - error;
 	Distance ub = distance + error;
 
-	/* Prune: lower bound exceeds threshold */
-	if (lb >= mkt_topk_threshold(topk))
+	/* Prune: lower bound exceeds threshold. Written NaN-safe: a NaN
+	 * estimate (e.g. a zero vector normalized for cosine) fails every
+	 * comparison, so the naive lb >= threshold guard would admit it --
+	 * and one NaN upper bound in the heap corrupts the threshold for
+	 * the rest of the scan. */
+	if (!(lb < mkt_topk_threshold(topk)))
 		return;
 
 	/* No dedup scan: caller guarantees ids are unique. */
@@ -274,8 +278,12 @@ mkt_topk_insert(MktTopK *topk, Distance distance, Distance error, uint64_t id)
 	Distance lb = distance - error;
 	Distance ub = distance + error;
 
-	/* Prune: lower bound exceeds threshold */
-	if (lb >= mkt_topk_threshold(topk))
+	/* Prune: lower bound exceeds threshold. Written NaN-safe: a NaN
+	 * estimate (e.g. a zero vector normalized for cosine) fails every
+	 * comparison, so the naive lb >= threshold guard would admit it --
+	 * and one NaN upper bound in the heap corrupts the threshold for
+	 * the rest of the scan. */
+	if (!(lb < mkt_topk_threshold(topk)))
 		return;
 
 	/* Dedup: check if this ID is already in the heap. If so,
