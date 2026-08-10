@@ -597,10 +597,12 @@ sample_for_build(
 		int kept = 0;
 		for (int i = 0; i < bs->nsamples; i++)
 		{
-			float *v = bs->samples + (size_t)i * dim;
-			if (mkt_l2_norm(v, dim) == 0.0f)
+			float *v	   = bs->samples + (size_t)i * dim;
+			float  norm_sq = mkt_l2_norm_squared(v, dim);
+
+			if (norm_sq == 0.0f)
 				continue;
-			mkt_l2_normalize(v, dim);
+			mkt_vector_scale(v, 1.0f / sqrtf(norm_sq), v, dim);
 			/* The buffer is a dense row-major matrix consumed directly
 			 * by k-means, so a dropped row leaves a hole that must be
 			 * closed: shift each kept row down over it. Until the first
