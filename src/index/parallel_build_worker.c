@@ -32,6 +32,7 @@
 #endif
 
 #include <inttypes.h>
+#include <math.h>
 
 #include "algo/hkmeans.h"
 #include "algo/kmeans_internal.h"
@@ -80,22 +81,25 @@ mkt_sample_cb(void *state, ItemPointerData tid, const float *vec)
 	Dimension dim  = sc->dim;
 	float	 *dest = sc->samples + (size_t)sc->count * dim;
 
-	memcpy(dest, vec, dim * sizeof(float));
-
 	/* Normalize for cosine. Zero-norm vectors are dropped from the
 	 * sample: they carry no direction, so under cosine they sit at the
 	 * origin -- equidistant from every real point -- and k-means drags
 	 * centroids toward them, warping the encode references (and so the
 	 * distance estimates) for every vector in the affected subtree.
 	 * They stay in the posting lists like any other row; they just
-	 * don't get a vote on the clustering. */
+	 * don't get a vote on the clustering. The check runs on the source
+	 * so a dropped vector costs no copy, and the scale writes straight
+	 * into the sample slot, normalizing and copying in one pass. */
 	if (sc->metric == DISTANCE_COSINE)
 	{
-		float norm = mkt_l2_norm(dest, dim);
-		if (norm == 0.0f)
+		float norm_sq = mkt_l2_norm_squared(vec, dim);
+
+		if (norm_sq == 0.0f)
 			return;
-		mkt_vector_scale(dest, 1.0f / norm, dest, dim);
+		mkt_vector_scale(vec, 1.0f / sqrtf(norm_sq), dest, dim);
 	}
+	else
+		memcpy(dest, vec, dim * sizeof(float));
 
 	sc->count++;
 }
