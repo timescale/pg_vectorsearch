@@ -157,6 +157,10 @@ mktann_insert(
 	MemoryContextSwitchTo(old_ctx);
 	MemoryContextDelete(insert_ctx);
 
+	/* Check the RaBitQParams checkout back in — see mktann_index_base_init
+	 * above. */
+	mktann_release_params(dim, base.rabitq_seed);
+
 	/* bool result is only meaningful for unique indexes. */
 	return false;
 }

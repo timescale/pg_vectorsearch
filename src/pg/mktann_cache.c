@@ -1,10 +1,21 @@
 /*
  * mktann_cache.c - Per-index cached state for mktann
  *
+ * Note for Darwin: this file calls PostgreSQL's dynahash API
+ * (hash_create/hash_search/...), whose bare names collide with unrelated
+ * symbols of the same name in Apple's libSystem. Correct resolution here
+ * depends on the extension being linked as a bundle with -bundle_loader
+ * pointing at the postgres binary (see meson.build and src/pg/meson.build)
+ * rather than the flat -undefined dynamic_lookup namespace search meson
+ * uses by default for modules on Darwin -- without that, dyld can
+ * silently bind these calls to libSystem's versions instead of
+ * postgres's, corrupting state on first use.
+ *
  * The rotation matrix P is O(dim³) to generate, so it lives in a
- * process-local static in CacheMemoryContext (keyed by dim+seed)
- * that survives relcache invalidation. The global mean, P^T·global_mean,
- * and an immutable MktIndexBase template live in rd_amcache (allocated in
+ * process-local, reference-counted hash table in CacheMemoryContext (keyed by
+ * dim+seed) that survives relcache invalidation — see get_or_create_params /
+ * mktann_release_params below. The global mean, P^T·global_mean, and an
+ * immutable MktIndexBase template live in rd_amcache (allocated in
  * rd_indexcxt) and are cheap to re-populate when invalidated. The metadata
  * page is read at most once per backend, when rd_amcache is first populated.
  */
@@ -12,6 +23,7 @@
 #include <postgres.h>
 
 #include <storage/bufmgr.h>
+#include <utils/hsearch.h>
 #include <utils/memutils.h>
 
 #include "mkt_pg.h"
@@ -21,35 +33,191 @@
 /* ----------------------------------------------------------------
  * Process-local RaBitQParams cache
  *
- * Single entry — most deployments have one meerkat index per
- * backend. If dim+seed match, reuse; otherwise regenerate.
+ * Most deployments have one meerkat index per backend, but a backend can
+ * legitimately have several scans of differently-dimensioned (or
+ * differently-seeded) indexes open at once (e.g. a join across two
+ * vector-indexed tables). A fixed number of slots can't represent that
+ * without either dangling a live scan's pointer (freeing an in-use entry to
+ * make room for another) or hard-erroring once every slot is checked out.
+ *
+ * Instead this is a backend-private dynahash table (plain hash_create() in
+ * CacheMemoryContext -- not shared memory, so no shared_preload_libraries
+ * entry is needed, and nothing here is shared across backends) keyed by
+ * dim+seed, sized to grow as needed:
+ *
+ *   - get_or_create_params() looks up (dim, seed). On a hit, it bumps the
+ *     entry's refcount and a decaying usage score and returns the cached
+ *     matrix. On a miss, once the table is at or past a soft target size,
+ *     it first tries to reclaim one idle (refcount == 0) entry -- the one
+ *     with the lowest decayed usage, mirroring pg_stat_statements'
+ *     entry_dealloc() -- before generating a new matrix. A held
+ *     (refcount > 0) entry is *never* an eviction candidate, so a
+ *     checked-out RaBitQParams* stays valid for as long as its owner holds
+ *     it, no matter how many other dimensions get checked out around it.
+ *     If nothing is currently idle, the table simply grows past the soft
+ *     target rather than failing a live caller -- the target only bounds
+ *     memory in the common case (few distinct live dimensions per
+ *     backend); it is never a hard cap.
+ *   - mktann_release_params() checks an entry back in (refcount--).
  * ---------------------------------------------------------------- */
 
-static RaBitQParams *cached_params;
-static Dimension	 cached_dim;
-static uint64_t		 cached_seed;
+/* Above this many live entries, try to reclaim an idle one before growing
+ * further. Not a hard cap -- see above. */
+#define MKT_RABITQ_CACHE_TARGET_ENTRIES 8
+
+#define MKT_RABITQ_USAGE_INCREMENT 1.0
+#define MKT_RABITQ_USAGE_DECAY	   0.99
+
+typedef struct RaBitQCacheKey
+{
+	Dimension dim;
+	uint64_t  seed;
+} RaBitQCacheKey;
+
+typedef struct RaBitQCacheEntry
+{
+	RaBitQCacheKey key;	   /* hash key; must be first */
+	RaBitQParams  *params; /* NULL until fully initialized (see below) */
+	int			   refcount;
+	double		   usage;
+} RaBitQCacheEntry;
+
+static HTAB *rabitq_cache = NULL;
+
+static void
+rabitq_cache_init(void)
+{
+	HASHCTL ctl;
+
+	memset(&ctl, 0, sizeof(ctl));
+	ctl.keysize	  = sizeof(RaBitQCacheKey);
+	ctl.entrysize = sizeof(RaBitQCacheEntry);
+	ctl.hcxt	  = CacheMemoryContext;
+
+	rabitq_cache = hash_create(
+			"mktann rabitq params cache",
+			MKT_RABITQ_CACHE_TARGET_ENTRIES,
+			&ctl,
+			HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+
+/*
+ * Decay every entry's usage score and reclaim the least-used entry with no
+ * live checkouts, if one exists. A no-op (not an error) when every entry is
+ * currently held -- the caller grows the table instead. Modeled on
+ * pg_stat_statements' entry_dealloc().
+ */
+static void
+rabitq_cache_evict_one(void)
+{
+	HASH_SEQ_STATUS	  seq;
+	RaBitQCacheEntry *entry;
+	RaBitQCacheEntry *victim = NULL;
+
+	hash_seq_init(&seq, rabitq_cache);
+	while ((entry = hash_seq_search(&seq)) != NULL)
+	{
+		entry->usage *= MKT_RABITQ_USAGE_DECAY;
+		if (entry->refcount == 0 &&
+			(victim == NULL || entry->usage < victim->usage))
+			victim = entry;
+	}
+	/* The scan above always runs to completion (hash_seq_search returned
+	 * NULL) before anything below mutates the table -- deleting mid-scan
+	 * is only safe for the entry hash_seq_search just returned, which is
+	 * why the victim is removed after, not during, the loop. */
+
+	if (victim != NULL)
+	{
+		pfree(victim->params);
+		hash_search(rabitq_cache, &victim->key, HASH_REMOVE, NULL);
+	}
+}
 
 static RaBitQParams *
 get_or_create_params(Dimension dim, uint64_t seed)
 {
-	if (cached_params != NULL && cached_dim == dim && cached_seed == seed)
-		return cached_params;
+	RaBitQCacheKey key = {0}; /* zero incl. padding: HASH_BLOBS compares
+							   * the whole struct */
+	RaBitQCacheEntry *entry;
+	bool			  found;
 
-	if (cached_params != NULL)
+	if (rabitq_cache == NULL)
+		rabitq_cache_init();
+
+	key.dim	 = dim;
+	key.seed = seed;
+
+	entry = hash_search(rabitq_cache, &key, HASH_FIND, &found);
+	if (found && entry->params != NULL)
 	{
-		pfree(cached_params);
-		cached_params = NULL;
+		entry->usage += MKT_RABITQ_USAGE_INCREMENT;
+		entry->refcount++;
+		return entry->params;
 	}
 
+	/* Miss (or a dead entry left by a failed init below -- params == NULL,
+	 * refcount == 0, safe to recreate): try to make room first, but only
+	 * when this is about to grow the table with a genuinely new key. */
+	if (!found &&
+		hash_get_num_entries(rabitq_cache) >= MKT_RABITQ_CACHE_TARGET_ENTRIES)
+		rabitq_cache_evict_one();
+
+	entry = hash_search(rabitq_cache, &key, HASH_ENTER, &found);
+
+	/* Mark it dead/pending before any allocation that could throw: a
+	 * failure below then leaves a well-defined, idle, re-creatable entry
+	 * instead of one that looks live with garbage params. */
+	entry->params	= NULL;
+	entry->refcount = 0;
+	entry->usage	= 0;
+
 	MemoryContext old = MemoryContextSwitchTo(CacheMemoryContext);
-	cached_params	  = palloc(MKT_RABITQ_PARAMS_SIZE(dim));
+	entry->params	  = palloc(MKT_RABITQ_PARAMS_SIZE(dim));
 	MemoryContextSwitchTo(old);
 
-	mkt_rabitq_init(cached_params, dim, seed);
-	cached_dim	= dim;
-	cached_seed = seed;
+	mkt_rabitq_init(entry->params, dim, seed);
+	entry->refcount = 1;
+	entry->usage	= MKT_RABITQ_USAGE_INCREMENT;
 
-	return cached_params;
+	return entry->params;
+}
+
+/*
+ * Check an entry back in (public API; see mktann_cache.h). dim+seed must
+ * match a currently-held entry exactly as returned by a prior
+ * get_or_create_params call; a mismatch indicates a caller bug, not a
+ * runtime condition.
+ */
+void
+mktann_release_params(Dimension dim, uint64_t seed)
+{
+	RaBitQCacheKey	  key = {0};
+	RaBitQCacheEntry *entry;
+	bool			  found;
+
+	if (rabitq_cache == NULL)
+	{
+		Assert(false);
+		return;
+	}
+
+	key.dim	 = dim;
+	key.seed = seed;
+
+	entry = hash_search(rabitq_cache, &key, HASH_FIND, &found);
+	if (found)
+	{
+		Assert(entry->refcount > 0);
+		if (entry->refcount > 0)
+			entry->refcount--;
+		return;
+	}
+
+	/* Should be unreachable: every release_params call is paired with a
+	 * prior successful get_or_create_params for the same dim/seed, and a
+	 * held entry is never evicted. */
+	Assert(false);
 }
 
 /* ----------------------------------------------------------------
@@ -93,9 +261,10 @@ cache_pt_global_mean(AmCacheData *c)
 
 /*
  * Return the per-backend cache, populating rd_amcache (one metapage read) on
- * first use. pt_global_mean is stored in the cache; params are NOT frozen here
- * (the process-local single-entry cache can evict them) — callers rebind via
- * get_or_create_params.
+ * first use. pt_global_mean is stored in the cache; params are NOT frozen
+ * here (the process-local params cache is reference-counted per checkout,
+ * not per-index) — callers rebind via get_or_create_params /
+ * mktann_release_params.
  */
 static AmCacheData *
 get_cache_data(Relation index)
@@ -193,9 +362,11 @@ mktann_index_base_init(Relation index, MktIndexBase *base)
 	}
 
 	/* Copy the immutable template, then rebind the fields that cannot be
-	 * frozen for the backend's lifetime: params (process-local cache may have
-	 * evicted them) and fastscan (resolved from the session GUC). Storage
-	 * pointers stay zeroed for the caller. */
+	 * frozen for the backend's lifetime: params (checked out from the
+	 * refcounted process-local cache; the caller must pair this with a
+	 * matching mktann_release_params(base->dim, base->rabitq_seed) once it's
+	 * done with base->params) and fastscan (resolved from the session GUC).
+	 * Storage pointers stay zeroed for the caller. */
 	*base					   = c->base;
 	base->params			   = params;
 	base->fastscan			   = c->has_fastscan ? mkt_fastscan_bits : 0;

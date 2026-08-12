@@ -442,6 +442,10 @@ mktann_endscan(IndexScanDesc scan)
 	if (ss != NULL)
 	{
 		mkt_query_state_cleanup(&ss->qstate);
+		/* Check the RaBitQParams checkout back in before the scan's own
+		 * memory goes away — see mktann_index_base_init / the beginscan
+		 * call above. */
+		mktann_release_params(ss->index_base.dim, ss->index_base.rabitq_seed);
 		MemoryContextDelete(ss->scan_ctx);
 		scan->opaque = NULL;
 	}
