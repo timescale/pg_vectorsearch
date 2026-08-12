@@ -61,7 +61,7 @@ ext_module_pathname = '$libdir' / ext_module_name
 # Build the extension as a shared library. The vcs_tag-generated
 # git_commit.h is listed as a source so ninja produces it before
 # compiling any TU that #includes it.
-meerkat_ext_so = shared_library(ext_module_name,
+meerkat_ext_so = shared_module(ext_module_name,
   extension_sources,
   git_commit_h,
   c_args: pg_ext_cflags,

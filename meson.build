@@ -621,6 +621,22 @@ if build_pg_extension
     endif
   endforeach
 
+  if host_machine.system() == 'darwin'
+    # meson links modules with `-undefined dynamic_lookup` on Darwin, which
+    # resolves undefined symbols via a FLAT namespace search across every
+    # loaded image, not just postgres. That's ambiguous: some PostgreSQL
+    # symbol names (hash_create, hash_search, ...) collide with unrelated
+    # symbols of the same name in Apple's libSystem, and dyld can bind to
+    # the wrong one, silently. The upstream PostgreSQL build (both the
+    # autoconf Makefile.darwin and the meson build) never lets this happen:
+    # they always pass -bundle_loader pointing at the postgres binary
+    # itself, which makes the linker resolve our undefined symbols against
+    # postgres's own exported symbol table specifically (proper two-level
+    # namespace binding) instead of a flat, first-match-wins search. Match
+    # that here.
+    pg_ldflags += ['-Wl,-bundle_loader,' + pg_bindir / 'postgres']
+  endif
+
   # Core sources compiled for PG (without MKT_STANDALONE, without
   # memory_standalone.c)
   mkt_pg_core_sources = files(
