@@ -192,3 +192,63 @@ SELECT id FROM dimcap ORDER BY v <-> (SELECT v FROM dimcap WHERE id = 7)
     LIMIT 1;
 RESET enable_seqscan;
 DROP TABLE dimcap;
+
+-- ============================================================
+-- RaBitQ rotation-matrix cache liveness across differently-dimensioned scans
+-- ============================================================
+-- The per-backend cache that holds the (expensive to build) RaBitQ
+-- rotation matrix is keyed by (dim, seed). A scan checks the matrix out
+-- at beginscan and holds a direct reference to it (mktann_rescan never
+-- re-derives it), so the cache must never free an entry that a
+-- still-open scan is holding, no matter how many other dimensions get
+-- checked out and evicted around it.
+--
+-- idx_a is dimension 8. idx_c is dimension 256 -- a different (dim, seed)
+-- cache key. A single query's target list runs a correlated subquery
+-- against each, once per outer row of "probes": PostgreSQL reuses
+-- (rescans) the same inner scan node across outer rows rather than
+-- starting a fresh scan each time, so row 2's evaluation of idx_a's
+-- subquery rescans the exact same scan idx_a's row-1 evaluation opened,
+-- with whatever matrix pointer that scan cached back then -- after row
+-- 1's idx_c subquery evaluation has already checked out (and, if the
+-- cache does not keep it alive, evicted) a dimension-256 entry in
+-- between. If the dimension-8 entry was freed instead of kept alive,
+-- idx_a's row-2 result reads freed memory and returns a wrong nearest
+-- neighbor.
+SET enable_seqscan = off;
+
+CREATE TABLE cache_a (id int, v vector(8));
+INSERT INTO cache_a
+    SELECT g, format('[%s,0,0,0,0,0,0,0]', g)::vector
+    FROM generate_series(1, 2000) g;
+CREATE INDEX idx_a ON cache_a USING mktann (v) WITH (nlist = 64);
+
+CREATE TABLE cache_c (id int, v vector(256));
+INSERT INTO cache_c
+    SELECT g, ('[' || g::text || repeat(',0', 255) || ']')::vector
+    FROM generate_series(1, 2000) g;
+CREATE INDEX idx_c ON cache_c USING mktann (v) WITH (nlist = 64);
+
+-- Non-integer query points avoid distance ties, so each nearest-1 answer
+-- is unambiguous: row 1 probes near 1500, row 2 probes near 1600.
+CREATE TABLE probes (rown int, qa vector(8), qc vector(256));
+INSERT INTO probes VALUES
+    (1, '[1500.3,0,0,0,0,0,0,0]',
+        ('[' || '1500.6' || repeat(',0', 255) || ']')::vector),
+    (2, '[1600.3,0,0,0,0,0,0,0]',
+        ('[' || '1600.6' || repeat(',0', 255) || ']')::vector);
+
+-- Both subqueries must return their query point's exact nearest integer
+-- on every row, including row 2 -- the row whose idx_a evaluation
+-- rescans a scan that idx_c's row-1 evaluation may have invalidated in
+-- between.
+SELECT
+    rown,
+    (SELECT id FROM cache_a ORDER BY v <-> qa LIMIT 1) AS nearest_a,
+    (SELECT id FROM cache_c ORDER BY v <-> qc LIMIT 1) AS nearest_c
+FROM probes ORDER BY rown;
+
+RESET enable_seqscan;
+DROP TABLE probes;
+DROP TABLE cache_a;
+DROP TABLE cache_c;
