@@ -1,16 +1,6 @@
 /*
  * mktann_cache.c - Per-index cached state for mktann
  *
- * Note for Darwin: this file calls PostgreSQL's dynahash API
- * (hash_create/hash_search/...), whose bare names collide with unrelated
- * symbols of the same name in Apple's libSystem. Correct resolution here
- * depends on the extension being linked as a bundle with -bundle_loader
- * pointing at the postgres binary (see meson.build and src/pg/meson.build)
- * rather than the flat -undefined dynamic_lookup namespace search meson
- * uses by default for modules on Darwin -- without that, dyld can
- * silently bind these calls to libSystem's versions instead of
- * postgres's, corrupting state on first use.
- *
  * The rotation matrix P is O(dim³) to generate, so it lives in a
  * process-local, reference-counted hash table in CacheMemoryContext (keyed by
  * dim+seed) that survives relcache invalidation — see get_or_create_params /
