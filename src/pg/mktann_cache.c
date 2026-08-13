@@ -38,15 +38,13 @@
  *     entry's refcount and a decaying usage score and returns the cached
  *     matrix. On a miss, once the table is at or past a soft target size,
  *     it first tries to reclaim one idle (refcount == 0) entry -- the one
- *     with the lowest decayed usage, mirroring pg_stat_statements'
- *     entry_dealloc() -- before generating a new matrix. A held
- *     (refcount > 0) entry is *never* an eviction candidate, so a
+ *     with the lowest decayed usage -- before generating a new matrix. A
+ *     held (refcount > 0) entry is *never* an eviction candidate, so a
  *     checked-out RaBitQParams* stays valid for as long as its owner holds
  *     it, no matter how many other dimensions get checked out around it.
  *     If nothing is currently idle, the table simply grows past the soft
- *     target rather than failing a live caller -- the target only bounds
- *     memory in the common case (few distinct live dimensions per
- *     backend); it is never a hard cap.
+ *     target rather than failing a live caller -- the target is not a
+ *     hard cap.
  *   - mktann_release_params() checks an entry back in (refcount--).
  * ---------------------------------------------------------------- */
 
@@ -93,8 +91,7 @@ rabitq_cache_init(void)
 /*
  * Decay every entry's usage score and reclaim the least-used entry with no
  * live checkouts, if one exists. A no-op (not an error) when every entry is
- * currently held -- the caller grows the table instead. Modeled on
- * pg_stat_statements' entry_dealloc().
+ * currently held -- the caller grows the table instead.
  */
 static void
 rabitq_cache_evict_one(void)
