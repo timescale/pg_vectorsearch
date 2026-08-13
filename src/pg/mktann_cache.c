@@ -23,8 +23,7 @@
 /* ----------------------------------------------------------------
  * Process-local RaBitQParams cache
  *
- * Most deployments have one meerkat index per backend, but a backend can
- * legitimately have several scans of differently-dimensioned (or
+ * A backend can have several scans of differently-dimensioned (or
  * differently-seeded) indexes open at once (e.g. a join across two
  * vector-indexed tables). A fixed number of slots can't represent that
  * without either dangling a live scan's pointer (freeing an in-use entry to
