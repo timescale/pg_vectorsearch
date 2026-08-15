@@ -207,16 +207,6 @@ plan_batch_cb(
 	}
 }
 
-/* What both routing-tree shapes hand back to do_parallel_build: the layout
- * facts the leader publishes to the workers before phase 3. */
-typedef struct TreeLayout
-{
-	BlockNumber first_posting; /* leaf c's head = first_posting + c */
-	BlockNumber root_blk;	   /* tree root page */
-	uint8_t		nlevels;	   /* written depth */
-	uint32_t	nlist;		   /* actual leaf count */
-} TreeLayout;
-
 /*
  * Assemble and write the routing tree for the hierarchical shape
  * (nlevels >= 2): each participant builds the subtree of every root child
@@ -505,53 +495,36 @@ build_routing_tree_flat(
 	if (flat == NULL)
 		return false;
 
-	uint32_t	 actual_nlist = flat->nleaves;
-	BlockNumber *nfb = mkt_alloc((size_t)flat->nnodes * sizeof(BlockNumber));
-	uint32_t	 centroid_pages = (uint32_t)
-			mkt_compute_centroid_layout(flat, max_ent, 0, nfb);
-	mkt_free(nfb);
-	BlockNumber first_posting = first_centroid + centroid_pages;
-
-	/* Leaf-centroid mean -> the encoder centering (flat tree in hand). */
-	mkt_vector_mean(hk_leaf_centroids(flat), actual_nlist, dim, global_mean);
-	if (shared->metric == DISTANCE_COSINE)
-		mkt_l2_normalize(global_mean, dim);
-
-	/* Head region: actual_nlist pages at first_posting (leaf c -> head
-	 * first_posting + c). Pre-extend to cover centroid + head region;
-	 * continuations append past it. No O(nlist) reserve. */
-	mkt_build_reserve_layout(storage, first_posting + actual_nlist);
-
 	mkt_build_report_phase(prog, MKT_BUILD_PHASE_CENTROID);
+
+	/* mkt_head_write_ctx_init needs first_posting up front (the head ctx
+	 * becomes on_leaf_arg for the write call that resolves it) -- probe
+	 * the layout before writing. */
+	BlockNumber first_posting =
+			mkt_materialized_tree_first_posting(flat, max_ent, first_centroid);
 	MktHeadWriteCtx head;
 	mkt_head_write_ctx_init(
 			&head, storage, rq_params, dim, shared->fastscan, first_posting);
-	BlockNumber root_blk = mkt_routing_subtree_write(
+	bool ok = mkt_write_materialized_tree(
 			storage,
 			flat,
 			dim,
 			shared->metric,
 			fan_out,
-			0, /* the flat tree IS the root level */
 			fmt,
 			rq_params,
-			global_mean,
-			first_posting,
-			0,
+			max_ent,
 			first_centroid,
+			global_mean,
 			mkt_write_leaf_head,
 			&head,
 			/* the flat tree's only level is the leaf level — nothing
 			 * internal to collect */
-			NULL);
+			NULL,
+			out);
 	mkt_head_write_ctx_cleanup(&head);
-
-	out->first_posting = first_posting;
-	out->root_blk	   = root_blk;
-	out->nlevels	   = (uint8_t)flat->nlevels;
-	out->nlist		   = actual_nlist;
 	mkt_free(flat);
-	return true;
+	return ok;
 }
 
 bool

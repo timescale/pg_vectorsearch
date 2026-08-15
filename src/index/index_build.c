@@ -1131,6 +1131,83 @@ mkt_routing_subtree_write(
 	return first_block;
 }
 
+BlockNumber
+mkt_materialized_tree_first_posting(
+		const HKMeansResult *tree,
+		uint32_t			 max_entries,
+		BlockNumber			 first_centroid)
+{
+	BlockNumber *nfb = mkt_alloc((size_t)tree->nnodes * sizeof(BlockNumber));
+	BlockNumber	 first_posting =
+			mkt_compute_centroid_layout(tree, max_entries, first_centroid, nfb);
+	mkt_free(nfb);
+	return first_posting;
+}
+
+/* Write a fully materialized, already-built tree (flat or hierarchical) to
+ * centroid + head pages at first_centroid -- the shared tail both the
+ * parallel leader's flat shape and the external-centroids build stream
+ * through, since neither needs the plan/write replay that the serial
+ * build's own (too-large-for-RAM) tree requires. */
+bool
+mkt_write_materialized_tree(
+		MktStorage				  *storage,
+		const HKMeansResult		  *tree,
+		Dimension				   dim,
+		DistanceMetric			   metric,
+		uint32_t				   fan_out,
+		MktCentroidFormat		   format,
+		const RaBitQParams		  *rq_params,
+		uint32_t				   max_entries,
+		BlockNumber				   first_centroid,
+		float					  *global_mean,
+		MktStreamLeafCb			   on_leaf,
+		void					  *on_leaf_arg,
+		MktExactCentroidCollector *collector,
+		TreeLayout				  *out)
+{
+	if (tree->nleaves == 0)
+		return false;
+
+	BlockNumber *nfb = mkt_alloc((size_t)tree->nnodes * sizeof(BlockNumber));
+	uint32_t	 centroid_pages = (uint32_t)
+			mkt_compute_centroid_layout(tree, max_entries, 0, nfb);
+	mkt_free(nfb);
+	BlockNumber first_posting = first_centroid + centroid_pages;
+
+	mkt_vector_mean(hk_leaf_centroids(tree), tree->nleaves, dim, global_mean);
+	if (metric == DISTANCE_COSINE)
+		mkt_l2_normalize(global_mean, dim);
+
+	/* Head region: nleaves pages at first_posting (leaf c -> head
+	 * first_posting + c). Pre-extend to cover centroid + head region;
+	 * continuations append past it. No O(nlist) reserve. */
+	mkt_build_reserve_layout(storage, first_posting + tree->nleaves);
+
+	BlockNumber root_blk = mkt_routing_subtree_write(
+			storage,
+			tree,
+			dim,
+			metric,
+			fan_out,
+			0, /* the tree IS the root level */
+			format,
+			rq_params,
+			global_mean,
+			first_posting,
+			0,
+			first_centroid,
+			on_leaf,
+			on_leaf_arg,
+			collector);
+
+	out->first_posting = first_posting;
+	out->root_blk		= root_blk;
+	out->nlevels		= (uint8_t)tree->nlevels;
+	out->nlist			= tree->nleaves;
+	return true;
+}
+
 /* Resolve the tree fan-out when the user left it at the default: sqrt of
  * the partition count, falling to cbrt when that exceeds a page's worth of
  * children. */

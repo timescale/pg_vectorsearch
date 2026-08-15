@@ -446,6 +446,64 @@ BlockNumber mkt_routing_subtree_write(
 		void					  *on_leaf_arg,
 		MktExactCentroidCollector *collector);
 
+/* What a routing-tree write hands back to its caller: the layout facts
+ * needed for the metadata page and (parallel build) for publishing to
+ * workers before phase 3. */
+typedef struct TreeLayout
+{
+	BlockNumber first_posting; /* leaf c's head = first_posting + c */
+	BlockNumber root_blk;		/* tree root page */
+	uint8_t		nlevels;		/* written depth */
+	uint32_t	nlist;			/* actual leaf count */
+} TreeLayout;
+
+/*
+ * Layout probe: the first_posting a materialized tree's centroid pages
+ * will occupy, without writing anything. Exposed so a caller that must
+ * build a first_posting-dependent MktHeadWriteCtx (the on_leaf_arg it then
+ * passes to mkt_write_materialized_tree) can do so first; that call
+ * recomputes the same layout internally, but the computation is O(nnodes)
+ * -- negligible next to the page I/O either call does.
+ */
+BlockNumber mkt_materialized_tree_first_posting(
+		const HKMeansResult *tree,
+		uint32_t			 max_entries,
+		BlockNumber			 first_centroid);
+
+/*
+ * Write an already-built, fully in-RAM HKMeansResult to centroid + head
+ * pages, computing its block layout and leaf-centroid mean as it goes.
+ * For any tree small enough to hold whole in RAM at once: the parallel
+ * build's flat (nlevels == 1) shape, and a tree loaded from precomputed
+ * external centroids regardless of depth (a centroids table is metadata,
+ * assumed small, not the dataset). A tree too large to hold whole in
+ * RAM should stream instead -- see build_routing_tree_batched in
+ * parallel_build_leader.c, or mkt_routing_tree_plan/_write above for the
+ * serial build's own streaming shape.
+ *
+ * global_mean must point at dim floats; filled with the (metric ==
+ * DISTANCE_COSINE ? normalized : plain) mean of tree's leaf centroids.
+ * on_leaf/on_leaf_arg/collector are passed straight through to
+ * mkt_routing_subtree_write -- see there. Returns false (without
+ * modifying storage) only if the tree itself is degenerate (no leaves);
+ * every other failure mode raises through the storage layer.
+ */
+bool mkt_write_materialized_tree(
+		MktStorage				  *storage,
+		const HKMeansResult		  *tree,
+		Dimension				   dim,
+		DistanceMetric			   metric,
+		uint32_t				   fan_out,
+		MktCentroidFormat		   format,
+		const RaBitQParams		  *rq_params,
+		uint32_t				   max_entries,
+		BlockNumber				   first_centroid,
+		float					  *global_mean,
+		MktStreamLeafCb			   on_leaf,
+		void					  *on_leaf_arg,
+		MktExactCentroidCollector *collector,
+		TreeLayout				  *out);
+
 /*
  * Auto-tune fan_out from nlist.
  *
