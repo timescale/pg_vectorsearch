@@ -243,6 +243,222 @@ TEST(build_flat_from_centroids)
 }
 
 /*
+ * External build, flat: every row has has_parent = false, matching a
+ * VectorChord-style centroids table with no parent column populated.
+ * Same shape and routing behaviour as build_flat_from_centroids above,
+ * just sourced from (id, parent, vector) rows instead of a bare array.
+ */
+TEST(build_from_external_flat)
+{
+	Dimension dim	  = 8;
+	uint32_t  n		  = 5;
+	uint32_t  fan_out = 16;
+
+	float *vecs = mkt_alloc((size_t)n * dim * sizeof(float));
+	memset(vecs, 0, (size_t)n * dim * sizeof(float));
+	for (uint32_t i = 0; i < n; i++)
+		vecs[(size_t)i * dim] = (float)(i + 1);
+
+	int32_t ids[]		= {10, 11, 12, 13, 14};
+	bool	has_parent[] = {false, false, false, false, false};
+	int32_t parents[]	= {0, 0, 0, 0, 0}; /* unused when has_parent is false */
+
+	HKMeansResult *tree = mkt_hkmeans_build_from_external(
+			ids, has_parent, parents, vecs, n, fan_out, dim);
+
+	ASSERT_NOT_NULL(tree, "external flat build returns a tree");
+	ASSERT_EQ(1, tree->nlevels, "flat: 1 level");
+	ASSERT_EQ(1, tree->nnodes, "flat: 1 node");
+	ASSERT_EQ(n, tree->nleaves, "nleaves preserved");
+	ASSERT_EQ(
+			HKMEANS_NO_CHILD,
+			hk_nodes(tree)[0].first_child,
+			"root is a leaf-parent");
+
+	float *q = mkt_alloc((size_t)dim * sizeof(float));
+	for (uint32_t i = 0; i < n; i++)
+	{
+		memset(q, 0, (size_t)dim * sizeof(float));
+		q[0]		  = (float)(i + 1);
+		uint32_t leaf = mkt_hkmeans_assign(tree, q, DISTANCE_L2, NULL);
+		ASSERT_EQ(i, leaf, "query routes to its nearest external leaf");
+	}
+
+	mkt_free(q);
+	mkt_free(tree);
+	mkt_free(vecs);
+}
+
+/*
+ * External build, hierarchical: a two-level tree with two top-level
+ * centroids (ids 1, 2), each parenting a few leaves. Exercises the
+ * non-flat path -- parent resolution, per-node leaf/internal detection,
+ * and correct routing through both levels.
+ */
+TEST(build_from_external_hierarchical)
+{
+	Dimension dim	  = 4;
+	uint32_t  fan_out = 8;
+
+	/* ids: 1, 2 are top-level; 101-103 are children of 1; 201-202 are
+	 * children of 2. Leaf value = id, in dim 0, so routing is checkable
+	 * by id. Top-level centroid values (100, 200) sit near their own
+	 * children's range rather than matching their id literally, so root
+	 * routing is a meaningful nearest-centroid decision and not an
+	 * artifact of reusing id as the vector value at every level. */
+	int32_t	 ids[]		 = {1, 2, 101, 102, 103, 201, 202};
+	bool	 has_parent[] = {false, false, true, true, true, true, true};
+	int32_t	 parents[]	 = {0, 0, 1, 1, 1, 2, 2};
+	float	 vals[]		 = {100, 200, 101, 102, 103, 201, 202};
+	uint32_t n			 = 7;
+
+	float *vecs = mkt_alloc((size_t)n * dim * sizeof(float));
+	memset(vecs, 0, (size_t)n * dim * sizeof(float));
+	for (uint32_t i = 0; i < n; i++)
+		vecs[(size_t)i * dim] = vals[i];
+
+	HKMeansResult *tree = mkt_hkmeans_build_from_external(
+			ids, has_parent, parents, vecs, n, fan_out, dim);
+
+	ASSERT_NOT_NULL(tree, "external hierarchical build returns a tree");
+	ASSERT_EQ(2, tree->nlevels, "2-level tree");
+	ASSERT_EQ(5, tree->nleaves, "5 leaves (101,102,103,201,202)");
+	/* 3 nodes: root + two internal (id 1's and id 2's children). */
+	ASSERT_EQ(3, tree->nnodes, "root + 2 internal nodes");
+	ASSERT_EQ(
+			2,
+			hk_nodes(tree)[0].nchildren,
+			"root has 2 children (top-level ids 1, 2)");
+	ASSERT_TRUE(
+			hk_nodes(tree)[0].first_child != HKMEANS_NO_CHILD,
+			"root is internal, not leaf-parent");
+
+	/* A query nearest to a given leaf id's vector routes to that leaf's
+	 * value, regardless of which top-level branch it lives under. */
+	float	   *q		   = mkt_alloc((size_t)dim * sizeof(float));
+	int32_t		leaf_ids[] = {101, 102, 103, 201, 202};
+	for (uint32_t i = 0; i < 5; i++)
+	{
+		memset(q, 0, (size_t)dim * sizeof(float));
+		q[0]		  = (float)leaf_ids[i];
+		uint32_t leaf = mkt_hkmeans_assign(tree, q, DISTANCE_L2, NULL);
+		ASSERT_TRUE(
+				hk_leaf_centroids(tree)[(size_t)leaf * dim] ==
+						(float)leaf_ids[i],
+				"query routes to the leaf carrying its own id's vector");
+	}
+
+	mkt_free(q);
+	mkt_free(tree);
+	mkt_free(vecs);
+}
+
+/*
+ * Malformed external inputs must return NULL rather than build a
+ * corrupt or partial tree.
+ */
+TEST(build_from_external_rejects_malformed)
+{
+	Dimension dim	  = 4;
+	uint32_t  fan_out = 8;
+	float	  vecs[28] = {0}; /* 7 rows * 4 dim, values don't matter here */
+
+	/* Duplicate id. */
+	{
+		int32_t ids[]		 = {1, 1, 2};
+		bool	has_parent[] = {false, false, false};
+		int32_t parents[]	 = {0, 0, 0};
+		ASSERT_NULL(
+				mkt_hkmeans_build_from_external(
+						ids, has_parent, parents, vecs, 3, fan_out, dim),
+				"duplicate id rejected");
+	}
+
+	/* Parent id that doesn't resolve to any row. */
+	{
+		int32_t ids[]		 = {1, 2, 3};
+		bool	has_parent[] = {false, true, false};
+		int32_t parents[]	 = {0, 999, 0};
+		ASSERT_NULL(
+				mkt_hkmeans_build_from_external(
+						ids, has_parent, parents, vecs, 3, fan_out, dim),
+				"unresolvable parent rejected");
+	}
+
+	/* Self-referential parent (a length-1 cycle). */
+	{
+		int32_t ids[]		 = {1, 2};
+		bool	has_parent[] = {false, true};
+		int32_t parents[]	 = {0, 2};
+		ASSERT_NULL(
+				mkt_hkmeans_build_from_external(
+						ids, has_parent, parents, vecs, 2, fan_out, dim),
+				"self-referential parent rejected");
+	}
+
+	/* A two-node cycle: 1 and 2 are each other's parent, neither is a
+	 * root-level row, so both are unreachable from the implicit root. */
+	{
+		int32_t ids[]		 = {1, 2};
+		bool	has_parent[] = {true, true};
+		int32_t parents[]	 = {2, 1};
+		ASSERT_NULL(
+				mkt_hkmeans_build_from_external(
+						ids, has_parent, parents, vecs, 2, fan_out, dim),
+				"two-node cycle rejected");
+	}
+
+	/* Mixed leaf/internal siblings: id 2 has a child (3), id 1 does not
+	 * -- both are top-level, so the root's children are mixed. */
+	{
+		int32_t ids[]		 = {1, 2, 3};
+		bool	has_parent[] = {false, false, true};
+		int32_t parents[]	 = {0, 0, 2};
+		ASSERT_NULL(
+				mkt_hkmeans_build_from_external(
+						ids, has_parent, parents, vecs, 3, fan_out, dim),
+				"mixed leaf/internal siblings rejected");
+	}
+
+	/* A node with more children than fan_out. */
+	{
+		uint32_t small_fan_out = 2;
+		int32_t	 ids[]		   = {1, 2, 3};
+		bool	 has_parent[]  = {false, false, false};
+		int32_t	 parents[]	   = {0, 0, 0};
+		ASSERT_NULL(
+				mkt_hkmeans_build_from_external(
+						ids,
+						has_parent,
+						parents,
+						vecs,
+						3,
+						small_fan_out,
+						dim),
+				"root exceeding fan_out rejected");
+	}
+
+	/* NULL/degenerate inputs. */
+	{
+		int32_t ids[]		 = {1};
+		bool	has_parent[] = {false};
+		int32_t parents[]	 = {0};
+		ASSERT_NULL(
+				mkt_hkmeans_build_from_external(
+						NULL, has_parent, parents, vecs, 1, fan_out, dim),
+				"NULL ids");
+		ASSERT_NULL(
+				mkt_hkmeans_build_from_external(
+						ids, has_parent, parents, vecs, 0, fan_out, dim),
+				"n=0");
+		ASSERT_NULL(
+				mkt_hkmeans_build_from_external(
+						ids, has_parent, parents, vecs, 1, 1, dim),
+				"fan_out=1");
+	}
+}
+
+/*
  * Structural invariants of a two-level tree.
  */
 TEST(structural_invariants)

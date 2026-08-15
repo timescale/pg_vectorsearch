@@ -16,6 +16,7 @@
 #ifndef MKT_HKMEANS_H
 #define MKT_HKMEANS_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "algo/kmeans.h"
@@ -188,5 +189,33 @@ HKMeansResult *mkt_hkmeans_build_flat(
 		uint32_t	 nleaves,
 		uint32_t	 fan_out,
 		Dimension	 dim);
+
+/*
+ * Build a tree from externally supplied (id, parent, vector) rows -- e.g.
+ * centroids computed offline and loaded from a table, in the same shape
+ * as VectorChord's external-build format. No clustering runs; the rows'
+ * ids and parents describe the tree shape directly.
+ *
+ * has_parent[i] == false marks row i as a top-level centroid (a child of
+ * the implicit root). Otherwise parents[i] must equal ids[j] for some
+ * other row j, which becomes i's parent node. Depth may be non-uniform
+ * across branches (mkt_hkmeans_assign already supports this), but a
+ * single node's own children must be uniformly either all leaves or all
+ * internal -- a node cannot mix the two, since HKMeansNode records only
+ * one first_child value for the whole set.
+ *
+ * Returns NULL on a malformed input: a duplicate id, a parent that does
+ * not resolve to another row's id, a cycle, a node with more than
+ * fan_out children, or a node mixing leaf and internal children. Caller
+ * frees the result with mkt_free().
+ */
+HKMeansResult *mkt_hkmeans_build_from_external(
+		const int32_t *ids,
+		const bool	  *has_parent,
+		const int32_t *parents,
+		const float	  *vectors,
+		uint32_t	   n,
+		uint32_t	   fan_out,
+		Dimension	   dim);
 
 #endif /* MKT_HKMEANS_H */

@@ -9,6 +9,7 @@
  */
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "algo/distance.h"
@@ -440,6 +441,291 @@ mkt_hkmeans_build_flat(
 	root->centroid_offset = result->leaf_offset;
 	memcpy(hk_leaf_centroids(result), centroids, leaf_sz);
 
+	return result;
+}
+
+/* Row index paired with its external id, sorted for id -> row-index
+ * resolution via binary search. n is expected to be modest (thousands to
+ * perhaps a few hundred thousand centroids), so an O(n log n) sort beats
+ * pulling in a hash table dependency for this one-time tree assembly. */
+typedef struct ExtIdSlot
+{
+	int32_t	 id;
+	uint32_t idx;
+} ExtIdSlot;
+
+static int
+ext_id_cmp(const void *a, const void *b)
+{
+	int32_t ia = ((const ExtIdSlot *)a)->id;
+	int32_t ib = ((const ExtIdSlot *)b)->id;
+	return (ia > ib) - (ia < ib);
+}
+
+static uint32_t
+ext_id_lookup(const ExtIdSlot *sorted, uint32_t n, int32_t id)
+{
+	uint32_t lo = 0, hi = n;
+	while (lo < hi)
+	{
+		uint32_t mid = lo + (hi - lo) / 2;
+		if (sorted[mid].id == id)
+			return sorted[mid].idx;
+		if (sorted[mid].id < id)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	return UINT32_MAX;
+}
+
+/* One BFS queue entry: a node's children, as a [start, end) slice of
+ * child_of (the CSR-bucketed rows-by-parent array). */
+typedef struct ExtBFSItem
+{
+	uint32_t start;
+	uint32_t end;
+	uint32_t level;
+} ExtBFSItem;
+
+/* Resolved shape of one node, filled during the BFS and consumed during
+ * packing. is_leaf_parent mirrors HKMeansNode's own leaf/internal split
+ * (a node's children are uniformly leaves or uniformly internal). */
+typedef struct ExtNodeInfo
+{
+	uint32_t start;
+	uint32_t end;
+	uint32_t level;
+	bool	 is_leaf_parent;
+	uint32_t first_child; /* node index, when internal */
+	uint32_t first_leaf;  /* leaf offset, when leaf-parent */
+} ExtNodeInfo;
+
+HKMeansResult *
+mkt_hkmeans_build_from_external(
+		const int32_t *ids,
+		const bool	  *has_parent,
+		const int32_t *parents,
+		const float	  *vectors,
+		uint32_t	   n,
+		uint32_t	   fan_out,
+		Dimension	   dim)
+{
+	if (ids == NULL || has_parent == NULL || parents == NULL ||
+		vectors == NULL || n == 0 || dim == 0 || fan_out < 2)
+		return NULL;
+
+	MktMemCtx work_ctx	 = mkt_memctx_create(NULL, "hkmeans_external_work");
+	MktMemCtx caller_ctx = mkt_memctx_switch(work_ctx);
+
+	bool ok = true;
+
+	/* Sort by id to resolve parents in O(log n) and to catch duplicate
+	 * ids (adjacent equal entries after sort). */
+	ExtIdSlot *sorted = mkt_alloc((size_t)n * sizeof(ExtIdSlot));
+	for (uint32_t i = 0; i < n; i++)
+		sorted[i] = (ExtIdSlot){.id = ids[i], .idx = i};
+	qsort(sorted, n, sizeof(ExtIdSlot), ext_id_cmp);
+	for (uint32_t i = 1; i < n; i++)
+		if (sorted[i].id == sorted[i - 1].id)
+		{
+			ok = false;
+			break;
+		}
+
+	/* Resolve each row's parent to a row index; n itself is the "no
+	 * parent" sentinel (a child of the implicit, unmaterialized root). */
+	uint32_t *parent_idx = mkt_alloc((size_t)n * sizeof(uint32_t));
+	for (uint32_t i = 0; ok && i < n; i++)
+	{
+		if (!has_parent[i])
+		{
+			parent_idx[i] = n;
+			continue;
+		}
+		uint32_t p = ext_id_lookup(sorted, n, parents[i]);
+		if (p == UINT32_MAX || p == i)
+		{
+			ok = false; /* unresolvable or self-referential parent */
+			break;
+		}
+		parent_idx[i] = p;
+	}
+
+	/* Bucket rows by parent (CSR: count, prefix-sum, fill). Bucket n
+	 * holds the implicit root's children. */
+	uint32_t *child_count = NULL;
+	uint32_t *child_start = NULL;
+	uint32_t *child_of	  = NULL;
+	if (ok)
+	{
+		child_count = mkt_alloc(((size_t)n + 1) * sizeof(uint32_t));
+		memset(child_count, 0, ((size_t)n + 1) * sizeof(uint32_t));
+		for (uint32_t i = 0; i < n; i++)
+			child_count[parent_idx[i]]++;
+
+		child_start = mkt_alloc(((size_t)n + 2) * sizeof(uint32_t));
+		child_start[0] = 0;
+		for (uint32_t i = 0; i <= n; i++)
+			child_start[i + 1] = child_start[i] + child_count[i];
+
+		uint32_t *fill_pos = mkt_alloc(((size_t)n + 1) * sizeof(uint32_t));
+		memcpy(fill_pos, child_start, ((size_t)n + 1) * sizeof(uint32_t));
+
+		child_of = mkt_alloc((size_t)n * sizeof(uint32_t));
+		for (uint32_t i = 0; i < n; i++)
+			child_of[fill_pos[parent_idx[i]]++] = i;
+
+		if (child_count[n] == 0 || child_count[n] > fan_out)
+			ok = false; /* no top-level rows, or root exceeds fan_out */
+	}
+
+	/* BFS from the implicit root, discovering each node's shape. */
+	uint32_t	 max_nodes = n + 1; /* every row could become its own node */
+	ExtBFSItem	*queue	   = mkt_alloc((size_t)max_nodes * sizeof(ExtBFSItem));
+	ExtNodeInfo *node_info = mkt_alloc((size_t)max_nodes * sizeof(ExtNodeInfo));
+	uint32_t	 q_tail	   = 0;
+	uint32_t	 nnodes	   = 0;
+	uint32_t	 nleaves   = 0;
+	uint32_t	 nlevels   = 1;
+	uint32_t	 visited   = 0;
+
+	if (ok)
+		queue[q_tail++] = (ExtBFSItem){
+				.start = child_start[n], .end = child_start[n + 1], .level = 0};
+
+	for (uint32_t qi = 0; ok && qi < q_tail; qi++)
+	{
+		ExtBFSItem item  = queue[qi];
+		uint32_t   count = item.end - item.start;
+
+		if (count == 0 || count > fan_out)
+		{
+			ok = false;
+			break;
+		}
+
+		bool any_children = false, any_leaf = false;
+		for (uint32_t k = item.start; k < item.end; k++)
+		{
+			bool has_kids = child_count[child_of[k]] > 0;
+			any_children |= has_kids;
+			any_leaf |= !has_kids;
+		}
+		if (any_children && any_leaf)
+		{
+			ok = false; /* mixed leaf/internal siblings under one parent */
+			break;
+		}
+
+		uint32_t node_idx			  = nnodes++;
+		node_info[node_idx].start	  = item.start;
+		node_info[node_idx].end	  = item.end;
+		node_info[node_idx].level	  = item.level;
+		node_info[node_idx].is_leaf_parent = !any_children;
+		visited += count;
+
+		if (any_children)
+		{
+			node_info[node_idx].first_child = q_tail;
+			for (uint32_t k = item.start; k < item.end; k++)
+			{
+				uint32_t row	 = child_of[k];
+				queue[q_tail++] = (ExtBFSItem){
+						.start = child_start[row],
+						.end   = child_start[row + 1],
+						.level = item.level + 1};
+			}
+			if (item.level + 2 > nlevels)
+				nlevels = item.level + 2;
+		}
+		else
+		{
+			node_info[node_idx].first_leaf = nleaves;
+			nleaves += count;
+			if (item.level + 1 > nlevels)
+				nlevels = item.level + 1;
+		}
+	}
+
+	/* Every row must be reached exactly once; anything left over is part
+	 * of a cycle or an orphaned parent reference. */
+	if (ok && visited != n)
+		ok = false;
+
+	if (!ok)
+	{
+		mkt_memctx_switch(caller_ctx);
+		mkt_memctx_delete(work_ctx);
+		return NULL;
+	}
+
+	/* Pack into the standard contiguous layout -- mirrors mkt_hkmeans_f32's
+	 * final assembly, just sourced from node_info instead of TmpNode. */
+	size_t hdr_sz	 = sizeof(HKMeansResult);
+	size_t nodes_sz	 = (size_t)nnodes * sizeof(HKMeansNode);
+	size_t leaf_sz	 = (size_t)nleaves * dim * sizeof(float);
+	size_t intern_sz = 0;
+	for (uint32_t i = 0; i < nnodes; i++)
+		if (!node_info[i].is_leaf_parent)
+			intern_sz += (size_t)(node_info[i].end - node_info[i].start) *
+						 dim * sizeof(float);
+	size_t total = hdr_sz + nodes_sz + leaf_sz + intern_sz;
+
+	mkt_memctx_switch(caller_ctx);
+	HKMeansResult *result = mkt_alloc(total);
+	memset(result, 0, total);
+
+	result->nodes_offset = (uint32_t)hdr_sz;
+	result->leaf_offset	  = (uint32_t)(hdr_sz + nodes_sz);
+	result->total_size	  = (uint32_t)total;
+	result->nnodes		  = nnodes;
+	result->nlevels		  = nlevels;
+	result->nleaves		  = nleaves;
+	result->fan_out		  = fan_out;
+	result->dim			  = dim;
+
+	HKMeansNode *nodes		= hk_nodes(result);
+	float		*leaf_cents = hk_leaf_centroids(result);
+	char		*intern_dst = (char *)result + hdr_sz + nodes_sz + leaf_sz;
+
+	for (uint32_t i = 0; i < nnodes; i++)
+	{
+		const ExtNodeInfo *ni	  = &node_info[i];
+		uint32_t			count = ni->end - ni->start;
+
+		nodes[i].nchildren	 = count;
+		nodes[i].level		 = ni->level;
+		nodes[i].first_child = ni->is_leaf_parent ? HKMEANS_NO_CHILD
+												   : ni->first_child;
+		nodes[i].first_leaf	 = ni->is_leaf_parent ? ni->first_leaf : 0;
+
+		float *dst;
+		if (ni->is_leaf_parent)
+		{
+			dst = leaf_cents + (size_t)ni->first_leaf * dim;
+			nodes[i].centroid_offset =
+					result->leaf_offset +
+					(uint32_t)((size_t)ni->first_leaf * dim * sizeof(float));
+		}
+		else
+		{
+			dst = (float *)intern_dst;
+			nodes[i].centroid_offset =
+					(uint32_t)(intern_dst - (char *)result);
+			intern_dst += (size_t)count * dim * sizeof(float);
+		}
+
+		for (uint32_t k = 0; k < count; k++)
+		{
+			uint32_t row = child_of[ni->start + k];
+			memcpy(dst + (size_t)k * dim,
+				   vectors + (size_t)row * dim,
+				   (size_t)dim * sizeof(float));
+		}
+	}
+
+	mkt_memctx_delete(work_ctx);
 	return result;
 }
 
