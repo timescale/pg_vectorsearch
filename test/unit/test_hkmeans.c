@@ -438,6 +438,25 @@ TEST(build_from_external_rejects_malformed)
 				"root exceeding fan_out rejected");
 	}
 
+	/* Unbalanced depth: root's two children are id=2 (a leaf-parent, its
+	 * own children 10/11 are leaves) and id=3 (internal -- its child 4
+	 * is itself the leaf-parent, one level deeper than id=2's leaves).
+	 * A tree writer that identifies leaf-parents via level == nlevels-1
+	 * instead of first_child == HKMEANS_NO_CHILD would misroute id=2's
+	 * real leaf children through the internal-node path -- this must be
+	 * rejected here instead. */
+	{
+		float	unbal_vecs[32] = {0}; /* 8 rows * 4 dim */
+		int32_t ids[]		   = {1, 2, 3, 10, 11, 4, 20, 21};
+		bool	has_parent[]   = {
+				 false, true, true, true, true, true, true, true};
+		int32_t parents[] = {0, 1, 1, 2, 2, 3, 4, 4};
+		ASSERT_NULL(
+				mkt_hkmeans_build_from_external(
+						ids, has_parent, parents, unbal_vecs, 8, 4, dim),
+				"unbalanced leaf depth rejected");
+	}
+
 	/* NULL/degenerate inputs. */
 	{
 		int32_t ids[]		 = {1};

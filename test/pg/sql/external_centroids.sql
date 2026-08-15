@@ -86,7 +86,29 @@ CREATE INDEX idx_ext_bad ON public.ext_items USING mktann (v)
 CREATE INDEX idx_ext_unqualified ON public.ext_items USING mktann (v)
     WITH (centroids_table = 'ext_flat_centroids', fan_out = 4);
 
+-- Unbalanced depth: id 2's branch bottoms out to leaves one level
+-- shallower than id 3's branch. Every branch must reach its leaves at
+-- the same depth (like a normal k-means tree always does); this must
+-- be rejected rather than silently mis-route id 2's leaf children
+-- through the internal-node path.
+CREATE TABLE public.ext_unbalanced_centroids (
+    id int, parent int, vector vector(4)
+);
+INSERT INTO public.ext_unbalanced_centroids VALUES
+    (1, NULL, '[4.5,4.5,0,0]'),
+    (2, 1, '[2,2,0,0]'),
+    (3, 1, '[7,7,0,0]'),
+    (10, 2, '[2,1,0,0]'),
+    (11, 2, '[2,3,0,0]'),
+    (4, 3, '[7,7,0,0]'),
+    (20, 4, '[7,6,0,0]'),
+    (21, 4, '[7,8,0,0]');
+
+CREATE INDEX idx_ext_unbalanced ON public.ext_items USING mktann (v)
+    WITH (centroids_table = 'public.ext_unbalanced_centroids', fan_out = 4);
+
 DROP TABLE public.ext_items CASCADE;
+DROP TABLE public.ext_unbalanced_centroids;
 DROP TABLE public.ext_flat_centroids;
 DROP TABLE public.ext_hier_centroids;
 DROP TABLE public.ext_bad_centroids;

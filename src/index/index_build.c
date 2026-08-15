@@ -363,8 +363,13 @@ mkt_write_centroid_tree(
 
 	for (uint32_t i = 0; i < tree->nnodes; i++)
 	{
-		const HKMeansNode *node	   = &hk_nodes(tree)[i];
-		bool			   is_leaf = (node->level == tree->nlevels - 1);
+		const HKMeansNode *node = &hk_nodes(tree)[i];
+		/* first_child == HKMEANS_NO_CHILD is the authoritative leaf-parent
+		 * marker (also used in the query path); node->level == nlevels - 1
+		 * happens to be equivalent for every internally-clustered tree
+		 * (uniform depth by construction) but is not guaranteed for a
+		 * tree assembled from externally supplied centroids. */
+		bool is_leaf = (node->first_child == HKMEANS_NO_CHILD);
 
 		uint16_t flags		 = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
 		uint16_t child_count = is_leaf ? 0 : (uint16_t)fan_out;

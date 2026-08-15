@@ -653,6 +653,22 @@ mkt_hkmeans_build_from_external(
 	if (ok && visited != n)
 		ok = false;
 
+	/* Every leaf-parent must sit at the tree's deepest level. Downstream
+	 * consumers (mkt_write_centroid_tree) identify a leaf-parent via
+	 * node->level == nlevels - 1, not is_leaf_parent directly -- an
+	 * unbalanced tree (one branch's leaf-parent shallower than another
+	 * branch's) would silently mis-route that node's real leaf children
+	 * through the internal-node path instead, reading a bogus child
+	 * index. Reject here rather than let that corrupt memory downstream. */
+	if (ok)
+		for (uint32_t i = 0; i < nnodes; i++)
+			if (node_info[i].is_leaf_parent &&
+				node_info[i].level != nlevels - 1)
+			{
+				ok = false;
+				break;
+			}
+
 	if (!ok)
 	{
 		mkt_memctx_switch(caller_ctx);

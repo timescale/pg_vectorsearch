@@ -61,6 +61,11 @@ mkt_external_centroids_build(
 
 	char *qualified = resolve_table_ident(table_opt);
 
+	/* Captured before SPI_connect() switches CurrentMemoryContext to its
+	 * own per-call context -- this is the actual caller's context the
+	 * output arrays must outlive SPI_finish() in. */
+	MemoryContext oldcontext = CurrentMemoryContext;
+
 	if (SPI_connect() != SPI_OK_CONNECT)
 		elog(ERROR, "mktann: SPI_connect failed reading centroids_table");
 
@@ -116,8 +121,7 @@ mkt_external_centroids_build(
 
 	/* Own output arrays in the caller's context so they survive the
 	 * SPI_finish() below (which pops SPI's memory context away). */
-	MemoryContext oldcontext = CurrentMemoryContext;
-	int32_t		 *ids	   = MemoryContextAlloc(
+	int32_t *ids = MemoryContextAlloc(
 			oldcontext, sizeof(int32_t) * (size_t)n);
 	bool	*has_parent = MemoryContextAlloc(
 			oldcontext, sizeof(bool) * (size_t)n);
@@ -197,8 +201,10 @@ mkt_external_centroids_build(
 				 errdetail("Check for: a duplicate id; a parent value "
 						   "that does not match another row's id; a "
 						   "cycle; a node whose children are a mix of "
-						   "leaves and non-leaves; or a node with more "
-						   "children than fan_out (%u).",
+						   "leaves and non-leaves; a node with more "
+						   "children than fan_out (%u); or leaves that "
+						   "sit at inconsistent depths (every branch "
+						   "must bottom out at the same level).",
 						   fan_out)));
 
 	return tree;
