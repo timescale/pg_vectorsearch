@@ -1,0 +1,118 @@
+-- centroids_table: build the routing tree from precomputed centroids
+-- instead of clustering (mirrors VectorChord's external-build format:
+-- a table of (id, parent, vector) rows).
+CREATE TABLE public.ext_items (id serial, v vector(4));
+-- Two well-separated quadrant pairs so nearest-neighbor answers are
+-- unambiguous regardless of how the tree routes them.
+INSERT INTO public.ext_items (v)
+    SELECT format('[%s,%s,%s,%s]', x, y, x % 2, y % 2)::vector
+    FROM generate_series(0, 9) x,
+         generate_series(0, 9) y;
+-- ------------------------------------------------------------------
+-- Flat (nlevels == 1): every centroid's parent is NULL.
+-- ------------------------------------------------------------------
+CREATE TABLE public.ext_flat_centroids (id int, parent int, vector vector(4));
+INSERT INTO public.ext_flat_centroids VALUES
+    (1, NULL, '[2,2,0,0]'),
+    (2, NULL, '[7,2,0,0]'),
+    (3, NULL, '[2,7,0,0]'),
+    (4, NULL, '[7,7,0,0]');
+CREATE INDEX idx_ext_flat ON public.ext_items USING mktann (v)
+    WITH (centroids_table = 'public.ext_flat_centroids', fan_out = 4);
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_ext_flat';
+ has_pages 
+-----------
+ t
+(1 row)
+
+-- Tree shape: one level, 4 leaves, no internal routing node.
+SELECT level, is_leaf, count(*) FROM mkt.centroid_pages('idx_ext_flat'::regclass)
+    GROUP BY level, is_leaf ORDER BY level;
+ level | is_leaf | count 
+-------+---------+-------
+     0 | t       |     4
+(1 row)
+
+-- Every row routes to a real posting list (4 clusters).
+SELECT count(DISTINCT cluster_id) FROM mkt.posting_pages('idx_ext_flat'::regclass);
+ count 
+-------
+     4
+(1 row)
+
+-- Nearest neighbor to (9,9) is (9,9) itself.
+SET enable_seqscan = off;
+SELECT id, v FROM public.ext_items
+    ORDER BY v <-> '[9,9,1,1]' LIMIT 1;
+ id  |     v     
+-----+-----------
+ 100 | [9,9,1,1]
+(1 row)
+
+RESET enable_seqscan;
+-- ------------------------------------------------------------------
+-- Hierarchical (nlevels == 2): two routing centroids at the root, each
+-- parenting two leaves.
+-- ------------------------------------------------------------------
+CREATE TABLE public.ext_hier_centroids (id int, parent int, vector vector(4));
+INSERT INTO public.ext_hier_centroids VALUES
+    (1, NULL, '[4.5,4.5,0,0]'),
+    (2, NULL, '[4.5,4.5,0,0]'),
+    (10, 1, '[2,2,0,0]'),
+    (11, 1, '[7,2,0,0]'),
+    (20, 2, '[2,7,0,0]'),
+    (21, 2, '[7,7,0,0]');
+CREATE INDEX idx_ext_hier ON public.ext_items USING mktann (v)
+    WITH (centroids_table = 'public.ext_hier_centroids', fan_out = 4);
+SELECT relpages > 0 AS has_pages FROM pg_class
+    WHERE relname = 'idx_ext_hier';
+ has_pages 
+-----------
+ t
+(1 row)
+
+-- Tree shape: root (level 0, 2 children, not a leaf) + 4 leaves (level 1).
+SELECT level, is_leaf, count(*) FROM mkt.centroid_pages('idx_ext_hier'::regclass)
+    GROUP BY level, is_leaf ORDER BY level;
+ level | is_leaf | count 
+-------+---------+-------
+     0 | f       |     2
+     1 | t       |     4
+(2 rows)
+
+SELECT count(DISTINCT cluster_id) FROM mkt.posting_pages('idx_ext_hier'::regclass);
+ count 
+-------
+     4
+(1 row)
+
+SET enable_seqscan = off;
+SELECT id, v FROM public.ext_items
+    ORDER BY v <-> '[9,9,1,1]' LIMIT 1;
+ id  |     v     
+-----+-----------
+ 100 | [9,9,1,1]
+(1 row)
+
+RESET enable_seqscan;
+-- ------------------------------------------------------------------
+-- Validation: a malformed centroids_table raises a specific error.
+-- ------------------------------------------------------------------
+CREATE TABLE public.ext_bad_centroids (id int, parent int, vector vector(4));
+INSERT INTO public.ext_bad_centroids VALUES
+    (1, NULL, '[0,0,0,0]'),
+    (2, 99, '[9,0,0,0]');  -- parent 99 does not exist
+CREATE INDEX idx_ext_bad ON public.ext_items USING mktann (v)
+    WITH (centroids_table = 'public.ext_bad_centroids', fan_out = 4);
+ERROR:  centroids_table "public.ext_bad_centroids" does not describe a valid tree
+DETAIL:  Check for: a duplicate id; a parent value that does not match another row's id; a cycle; a node whose children are a mix of leaves and non-leaves; or a node with more children than fan_out (4).
+-- An unqualified table name never resolves: index builds run with
+-- search_path restricted to pg_catalog, pg_temp.
+CREATE INDEX idx_ext_unqualified ON public.ext_items USING mktann (v)
+    WITH (centroids_table = 'ext_flat_centroids', fan_out = 4);
+ERROR:  relation "ext_flat_centroids" does not exist
+DROP TABLE public.ext_items CASCADE;
+DROP TABLE public.ext_flat_centroids;
+DROP TABLE public.ext_hier_centroids;
+DROP TABLE public.ext_bad_centroids;

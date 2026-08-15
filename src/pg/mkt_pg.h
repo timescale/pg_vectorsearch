@@ -132,6 +132,12 @@ typedef struct MktannOptions
 	int	   centroid_compression; /* MktCentroidCompression */
 	int	   fastscan;			 /* MktFastscanMode, posting pages */
 	int	   centroid_fastscan;	 /* MktFastscanMode, centroid pages */
+	int	   centroids_table;		 /* string reloption offset (0 = unset);
+								  * see GET_STRING_RELOPTION. Table of
+								  * precomputed (id, parent, vector)
+								  * centroids to build the routing tree
+								  * from instead of clustering -- see
+								  * mktann_external_centroids.c. */
 } MktannOptions;
 
 #define MKT_ANN_DEFAULT_FAN_OUT 32

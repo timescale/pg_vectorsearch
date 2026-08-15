@@ -60,6 +60,7 @@
 #include "mkt_pg.h"
 #include "mkt_vector.h"
 #include "mktann_build.h"
+#include "mktann_external_centroids.h"
 #include "mktann_meta.h"
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
@@ -853,135 +854,218 @@ do_serial_build(
 	*out_nlist		  = 0;
 	*out_tree_nlevels = 0;
 
-	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SAMPLE);
-
-	uint32_t target_nlist = 0;
-	bool	 subsampled	  = false;
-	sample_for_build(bs, &target_nlist, &subsampled);
-
-	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
-	km_opts.nredo		  = p->kmeans_nredo;
-
-	/*
-	 * Plan pass: cluster the sample once and discover the tree shape (leaf
-	 * count, depth, centroid page count, leaf-centroid mean) without
-	 * writing. Each node's clustering is recorded in a spillable blob store
-	 * (BufFile-backed, so the resident cost stays one node) and the write
-	 * pass below replays it instead of running k-means again -- the same
-	 * single-clustering shape as the parallel build's subtree store.
-	 * target_nlist (not the resolved leaf count) drives both passes.
-	 */
-	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_KMEANS);
-	MktBlobStore	 *node_store = mkt_pbuild_blobstore_begin();
-	MktStreamTreePlan plan;
-	if (!mkt_routing_tree_plan(
-				bs->samples,
-				(uint32_t)bs->nsamples,
-				dim,
-				target_nlist,
-				p->fan_out,
-				p->metric,
-				p->centroid_format,
-				&km_opts,
-				node_store,
-				&plan))
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("hierarchical k-means failed")));
-	mkt_pbuild_blobstore_rewind(node_store);
-
-	uint32_t nlist	 = plan.nleaves;
-	bs->params.nlist = nlist;
-
-	/*
-	 * Re-center the encoder on the leaf-centroid mean the plan pass reported
-	 * (the write pass reproduces the identical tree). The in-RAM-tree build
-	 * centers on the mean of the leaf centroids, not the per-vector sample
-	 * mean, and the quantization quality of every centroid and posting code
-	 * depends on this anchor.
-	 */
-	/* The streamed pages encode against the leaf-centroid mean the plan
-	 * pass accumulated. */
 	const size_t vec_nbytes = (size_t)dim * sizeof(float);
 
-	float *global_mean = palloc(vec_nbytes);
-	memcpy(global_mean, plan.leaf_mean, vec_nbytes);
-	if (p->metric == DISTANCE_COSINE)
-		mkt_l2_normalize(global_mean, dim);
-	mkt_free(plan.leaf_mean);
-	plan.leaf_mean = NULL;
+	MktannOptions *opts = (MktannOptions *)bs->index->rd_options;
+	bool use_external_centroids = mkt_external_centroids_requested(opts);
 
-	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SETUP);
+	uint32_t	 nlist;
+	uint8_t		 tree_nlevels;
+	float		*global_mean;
+	bool		 subsampled = false;
+	BlockNumber	 first_centroid = 1; /* block 0 is metadata */
+	BlockNumber	 first_posting;
+	BlockNumber	 root;
 	RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
 
-	/* Centroid area is [first_centroid, first_posting); block 0 is metadata.
-	 */
-	BlockNumber first_centroid = 1;
-	BlockNumber first_posting  = first_centroid + plan.centroid_pages;
-
-	/*
-	 * Head blocks are formula-derived: leaf c's head is first_posting + c, a
-	 * contiguous head region of nlist pages. Pre-extend the relation to cover
-	 * metadata + centroid + head region so the streaming write can place
-	 * centroids at reserved blocks and each leaf's head page already exists
-	 * when the write pass emits it; continuation pages are appended past the
-	 * head region during mkt_posting_build_lists. No O(nlist) reserve arrays.
-	 */
-	mkt_build_reserve_layout(storage, first_posting + nlist);
-
-	/*
-	 * Write pass: stream the centroid pages (reserved blocks, post-order, root
-	 * last) and, per leaf, its head page carrying pt_centroid. Both build and
-	 * query then route page-backed over these centroid pages; the metadata
-	 * page is written after the scan, when the tuple count is final.
-	 */
-	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_CENTROID);
-
 	/* Exact internal-centroid collection for the build descent (see
-	 * MktExactCentroidCollector in index_build.h). */
+	 * MktExactCentroidCollector in index_build.h). Shared by both branches
+	 * below, sized once each tree's shape (nlevels, leaf count) is known. */
 	MktExactCentroidCollector  exact_centroids = {0};
-	MktExactCentroidCollector *collector =
-			mkt_exact_centroid_enabled(plan.nlevels, p->centroid_format)
-					? &exact_centroids
-					: NULL;
-	if (collector != NULL)
-		mkt_exact_centroid_collector_init(
-				collector,
-				dim,
-				p->centroid_format,
-				first_centroid,
-				plan.centroid_pages,
-				mkt_exact_centroid_budget((uint64_t)maintenance_work_mem),
-				mkt_exact_centroid_expected_slots(p->nlist, p->fan_out));
+	MktExactCentroidCollector *collector	   = NULL;
 
-	MktHeadWriteCtx headctx;
-	mkt_head_write_ctx_init(
-			&headctx, storage, rq_params, dim, p->fastscan, first_posting);
-	BlockNumber root = mkt_routing_tree_write(
-			storage,
-			(uint32_t)bs->nsamples,
-			dim,
-			p->metric,
-			target_nlist,
-			p->fan_out,
-			p->centroid_format,
-			rq_params,
-			global_mean,
-			node_store,
-			first_posting,
-			first_centroid,
-			mkt_write_leaf_head,
-			&headctx,
-			collector);
-	mkt_pbuild_blobstore_end(node_store);
-	mkt_head_write_ctx_cleanup(&headctx);
-	pfree(bs->samples);
-	bs->samples = NULL;
-	if (root == InvalidBlockNumber)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("streaming centroid write failed")));
+	if (use_external_centroids)
+	{
+		/*
+		 * Externally supplied centroids: skip sampling and k-means entirely
+		 * -- the routing tree comes fully built (flat or hierarchical) from
+		 * centroids_table (see mktann_external_centroids.c). Only the
+		 * page-write and posting-scan phases below run; the posting scan
+		 * always runs single-process here (see mktann_build()), same as
+		 * every other serial build.
+		 */
+		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_KMEANS);
+		HKMeansResult *tree =
+				mkt_external_centroids_build(opts, dim, p->fan_out);
+
+		nlist			 = tree->nleaves;
+		tree_nlevels	 = (uint8_t)tree->nlevels;
+		bs->params.nlist = nlist;
+
+		global_mean = palloc(vec_nbytes);
+
+		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SETUP);
+		uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, p->centroid_format);
+		first_posting	 = mkt_materialized_tree_first_posting(
+				 tree, max_ent, first_centroid);
+		mkt_build_reserve_layout(storage, first_posting + nlist);
+
+		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_CENTROID);
+		collector = mkt_exact_centroid_enabled(tree_nlevels, p->centroid_format)
+							? &exact_centroids
+							: NULL;
+		if (collector != NULL)
+			mkt_exact_centroid_collector_init(
+					collector,
+					dim,
+					p->centroid_format,
+					first_centroid,
+					(uint32_t)(first_posting - first_centroid),
+					mkt_exact_centroid_budget((uint64_t)maintenance_work_mem),
+					mkt_exact_centroid_expected_slots(nlist, p->fan_out));
+
+		MktHeadWriteCtx headctx;
+		mkt_head_write_ctx_init(
+				&headctx, storage, rq_params, dim, p->fastscan, first_posting);
+		TreeLayout layout;
+		bool	   ok = mkt_write_materialized_tree(
+					 storage,
+					 tree,
+					 dim,
+					 p->metric,
+					 p->fan_out,
+					 p->centroid_format,
+					 rq_params,
+					 max_ent,
+					 first_centroid,
+					 global_mean,
+					 mkt_write_leaf_head,
+					 &headctx,
+					 collector,
+					 &layout);
+		mkt_head_write_ctx_cleanup(&headctx);
+		mkt_free(tree);
+		if (!ok)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("writing externally supplied centroid tree "
+							"failed")));
+		root = layout.root_blk;
+	}
+	else
+	{
+		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SAMPLE);
+
+		uint32_t target_nlist = 0;
+		sample_for_build(bs, &target_nlist, &subsampled);
+
+		KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
+		km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
+		km_opts.nredo		  = p->kmeans_nredo;
+
+		/*
+		 * Plan pass: cluster the sample once and discover the tree shape (leaf
+		 * count, depth, centroid page count, leaf-centroid mean) without
+		 * writing. Each node's clustering is recorded in a spillable blob store
+		 * (BufFile-backed, so the resident cost stays one node) and the write
+		 * pass below replays it instead of running k-means again -- the same
+		 * single-clustering shape as the parallel build's subtree store.
+		 * target_nlist (not the resolved leaf count) drives both passes.
+		 */
+		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_KMEANS);
+		MktBlobStore	 *node_store = mkt_pbuild_blobstore_begin();
+		MktStreamTreePlan plan;
+		if (!mkt_routing_tree_plan(
+					bs->samples,
+					(uint32_t)bs->nsamples,
+					dim,
+					target_nlist,
+					p->fan_out,
+					p->metric,
+					p->centroid_format,
+					&km_opts,
+					node_store,
+					&plan))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("hierarchical k-means failed")));
+		mkt_pbuild_blobstore_rewind(node_store);
+
+		nlist			 = plan.nleaves;
+		tree_nlevels	 = (uint8_t)plan.nlevels;
+		bs->params.nlist = nlist;
+
+		/*
+		 * Re-center the encoder on the leaf-centroid mean the plan pass
+		 * reported (the write pass reproduces the identical tree). The
+		 * in-RAM-tree build centers on the mean of the leaf centroids, not
+		 * the per-vector sample mean, and the quantization quality of every
+		 * centroid and posting code depends on this anchor.
+		 */
+		/* The streamed pages encode against the leaf-centroid mean the plan
+		 * pass accumulated. */
+		global_mean = palloc(vec_nbytes);
+		memcpy(global_mean, plan.leaf_mean, vec_nbytes);
+		if (p->metric == DISTANCE_COSINE)
+			mkt_l2_normalize(global_mean, dim);
+		mkt_free(plan.leaf_mean);
+		plan.leaf_mean = NULL;
+
+		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SETUP);
+
+		/* Centroid area is [first_centroid, first_posting); block 0 is
+		 * metadata. */
+		first_posting = first_centroid + plan.centroid_pages;
+
+		/*
+		 * Head blocks are formula-derived: leaf c's head is first_posting + c, a
+		 * contiguous head region of nlist pages. Pre-extend the relation to cover
+		 * metadata + centroid + head region so the streaming write can place
+		 * centroids at reserved blocks and each leaf's head page already exists
+		 * when the write pass emits it; continuation pages are appended past the
+		 * head region during mkt_posting_build_lists. No O(nlist) reserve arrays.
+		 */
+		mkt_build_reserve_layout(storage, first_posting + nlist);
+
+		/*
+		 * Write pass: stream the centroid pages (reserved blocks, post-order, root
+		 * last) and, per leaf, its head page carrying pt_centroid. Both build and
+		 * query then route page-backed over these centroid pages; the metadata
+		 * page is written after the scan, when the tuple count is final.
+		 */
+		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_CENTROID);
+
+		collector = mkt_exact_centroid_enabled(plan.nlevels, p->centroid_format)
+							? &exact_centroids
+							: NULL;
+		if (collector != NULL)
+			mkt_exact_centroid_collector_init(
+					collector,
+					dim,
+					p->centroid_format,
+					first_centroid,
+					plan.centroid_pages,
+					mkt_exact_centroid_budget((uint64_t)maintenance_work_mem),
+					mkt_exact_centroid_expected_slots(p->nlist, p->fan_out));
+
+		MktHeadWriteCtx headctx;
+		mkt_head_write_ctx_init(
+				&headctx, storage, rq_params, dim, p->fastscan, first_posting);
+		root = mkt_routing_tree_write(
+				storage,
+				(uint32_t)bs->nsamples,
+				dim,
+				p->metric,
+				target_nlist,
+				p->fan_out,
+				p->centroid_format,
+				rq_params,
+				global_mean,
+				node_store,
+				first_posting,
+				first_centroid,
+				mkt_write_leaf_head,
+				&headctx,
+				collector);
+		mkt_pbuild_blobstore_end(node_store);
+		mkt_head_write_ctx_cleanup(&headctx);
+		pfree(bs->samples);
+		bs->samples = NULL;
+		if (root == InvalidBlockNumber)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("streaming centroid write failed")));
+	}
 
 	/*
 	 * Page-backed routing: build a MktIndexBase from the just-written index so
@@ -999,7 +1083,7 @@ do_serial_build(
 			rq_params,
 			storage,
 			dim,
-			(uint8_t)plan.nlevels,
+			tree_nlevels,
 			root,
 			p->metric,
 			p->centroid_format,
@@ -1150,7 +1234,7 @@ do_serial_build(
 	write_meta_page(
 			storage,
 			dim,
-			(uint8_t)plan.nlevels,
+			tree_nlevels,
 			(uint8_t)p->fan_out,
 			root,
 			first_posting,
@@ -1162,7 +1246,7 @@ do_serial_build(
 			p->fastscan,
 			global_mean);
 	*out_nlist		  = nlist;
-	*out_tree_nlevels = (uint8_t)plan.nlevels;
+	*out_tree_nlevels = tree_nlevels;
 	*out_global_mean  = global_mean;
 	*out_heap_tuples  = heap_tuples;
 	*out_indtuples	  = bs->indtuples;
@@ -1198,6 +1282,17 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	uint64_t				 rabitq_seed = MKT_RABITQ_BUILD_SEED;
 
 	/*
+	 * Externally supplied centroids (centroids_table) always take the
+	 * serial build path: the tree comes pre-built, in RAM, from a small
+	 * metadata table, so there is no sampling/k-means phase for parallel
+	 * workers to divide up. Only the posting-list scan could in principle
+	 * still parallelize, but that retrofit is deferred (see the PR
+	 * discussion) -- every centroids_table build runs single-process.
+	 */
+	MktannOptions *build_opts = (MktannOptions *)index->rd_options;
+	bool use_external_centroids = mkt_external_centroids_requested(build_opts);
+
+	/*
 	 * Build introspection: one reporting context the serial and parallel paths
 	 * share, so pg_stat_progress_create_index advances through the same phases
 	 * either way and (when mkt.log_build_stats is on) per-phase stats land in
@@ -1207,7 +1302,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	MktBuildProgress prog;
 	mkt_build_progress_begin(
 			&prog,
-			index_info->ii_ParallelWorkers > 0,
+			index_info->ii_ParallelWorkers > 0 && !use_external_centroids,
 			mkt_log_build_stats,
 			build_ctx,
 			&stats,
@@ -1234,9 +1329,11 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	uint32_t built_nlist   = 0;
 	uint8_t	 built_nlevels = 0;
 
-	/* Try parallel build first (sampling + k-means + posting) */
+	/* Try parallel build first (sampling + k-means + posting). Skipped
+	 * entirely for centroids_table builds -- see use_external_centroids
+	 * above. */
 	bool did_parallel = false;
-	if (index_info->ii_ParallelWorkers > 0)
+	if (index_info->ii_ParallelWorkers > 0 && !use_external_centroids)
 	{
 		/*
 		 * Estimate the leaf count up front.

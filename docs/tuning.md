@@ -106,6 +106,38 @@ noted per row — most shape query behavior, some only the build.
 | `fan_out` | `32` | Routing-tree shape (depth vs width). | Children per routing-tree node. | Never; the auto shape adapts. |
 | `kmeans_nredo` | `1` | Build time vs marginal cluster quality. | K-means restarts during build. | Never. |
 | `distance_mode` | `asymmetric` | Accuracy vs speed of distance estimates. | RaBitQ distance estimator. `symmetric` is faster with a larger estimation error. | Never; the rerank stage depends on asymmetric accuracy. |
+| `centroids_table` | unset | Skips in-database k-means entirely. | Build the routing tree from a table of precomputed `(id, parent, vector)` rows instead of clustering the heap — see below. | Reusing centroids computed once (e.g. more k-means iterations/samples than fit in a build) across multiple indexes or rebuilds. |
+
+#### centroids_table: precomputed centroids
+
+Points the build at a table of `(id, parent, vector)` rows instead of
+clustering: top-level routing centroids have `parent IS NULL`; every
+other row's `parent` names another row's `id`, up to `fan_out`
+children per parent (a flat, single-level tree is just every row with
+`parent IS NULL`). This is the same shape as VectorChord's
+`build.external` table, so centroids computed once outside Postgres —
+or built by VectorChord — can drive a mktann index too, and the
+routing tree is written straight from them (no clustering, no
+sampling); only the heap scan that builds posting lists still runs.
+
+```sql
+CREATE INDEX ON items USING mktann (embedding vector_l2_ops)
+    WITH (centroids_table = 'public.my_centroids');
+```
+
+The value must be schema-qualified. Index builds (like other
+maintenance commands) run with `search_path` restricted to
+`pg_catalog, pg_temp` regardless of the session's own setting, so an
+unqualified name never resolves.
+
+A malformed table (a duplicate id, a parent that does not match
+another row's id, a cycle, or a node whose children are a mix of
+leaves and non-leaves) fails the build with a specific error rather
+than silently falling back to clustering.
+
+This build always runs single-process, even when parallel workers
+would otherwise be used: the tree comes pre-built from a small table,
+so there is no sampling/k-means phase to divide across workers.
 
 ### Query-time GUCs
 

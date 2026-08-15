@@ -397,6 +397,17 @@ _PG_init(void)
 			"auto follows the resolved centroid compression and the "
 			"dimension limit; on errors where either is unavailable",
 			NoLock);
+	add_string_reloption(
+			mktann_relopt_kind,
+			"centroids_table",
+			"Table of precomputed (id, parent, vector) centroids to "
+			"build the routing tree from, skipping in-database k-means "
+			"(unset = cluster normally). Must be schema-qualified: index "
+			"builds run with search_path restricted to pg_catalog, "
+			"pg_temp, so an unqualified name never resolves.",
+			NULL,
+			NULL,
+			NoLock);
 
 	mkt_distance_init();
 	mkt_rabitq_init_simd();

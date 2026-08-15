@@ -9,6 +9,7 @@ extension_sources = files(
   'mkt_pg_rabitq_params.c',
   'mktann.c',
   'mktann_build.c',
+  'mktann_external_centroids.c',
   'parallel_backend.c',
   'build_progress.c',
   '../index/parallel_build_leader.c',

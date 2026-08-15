@@ -28,6 +28,7 @@ else
       'operators',
       'rabitq',
       'mktann',
+      'external_centroids',
       'mutations',
       'rerank',
       'inspect',
