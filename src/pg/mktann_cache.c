@@ -2,12 +2,15 @@
  * mktann_cache.c - Per-index cached state for mktann
  *
  * The rotation matrix P is O(dim³) to generate, so it lives in a
- * process-local, reference-counted hash table in CacheMemoryContext (keyed by
- * dim+seed) that survives relcache invalidation — see get_or_create_params /
- * mktann_release_params below. The global mean, P^T·global_mean, and an
- * immutable MktIndexBase template live in rd_amcache (allocated in
- * rd_indexcxt) and are cheap to re-populate when invalidated. The metadata
- * page is read at most once per backend, when rd_amcache is first populated.
+ * process-local, reference-counted hash table (keyed by dim+seed) that
+ * survives relcache invalidation — see get_or_create_params /
+ * mktann_release_params below. The table and the matrices it owns live in a
+ * dedicated child context of CacheMemoryContext, so the cache's footprint is
+ * visible as its own line in a memory-context dump. The global mean,
+ * P^T·global_mean, and an immutable MktIndexBase template live in rd_amcache
+ * (allocated in rd_indexcxt) and are cheap to re-populate when invalidated.
+ * The metadata page is read at most once per backend, when rd_amcache is first
+ * populated.
  */
 
 #include <postgres.h>
@@ -30,9 +33,9 @@
  * make room for another) or hard-erroring once every slot is checked out.
  *
  * Instead this is a backend-private dynahash table (plain hash_create() in
- * CacheMemoryContext -- not shared memory, so no shared_preload_libraries
- * entry is needed, and nothing here is shared across backends) keyed by
- * dim+seed, sized to grow as needed:
+ * rabitq_cache_cxt, a child of CacheMemoryContext -- not shared memory, so
+ * no shared_preload_libraries entry is needed, and nothing here is shared
+ * across backends) keyed by dim+seed, sized to grow as needed:
  *
  *   - get_or_create_params() looks up (dim, seed). On a hit, it bumps the
  *     entry's refcount and a decaying usage score and returns the cached
@@ -71,15 +74,25 @@ typedef struct RaBitQCacheEntry
 
 static HTAB *rabitq_cache = NULL;
 
+/* Owns the hash table and every cached matrix; child of
+ * CacheMemoryContext, so it has backend lifetime but shows up as its own
+ * line in a memory-context dump. */
+static MemoryContext rabitq_cache_cxt = NULL;
+
 static void
 rabitq_cache_init(void)
 {
 	HASHCTL ctl;
 
+	rabitq_cache_cxt = AllocSetContextCreate(
+			CacheMemoryContext,
+			"mktann rabitq params cache",
+			ALLOCSET_DEFAULT_SIZES);
+
 	memset(&ctl, 0, sizeof(ctl));
 	ctl.keysize	  = sizeof(RaBitQCacheKey);
 	ctl.entrysize = sizeof(RaBitQCacheEntry);
-	ctl.hcxt	  = CacheMemoryContext;
+	ctl.hcxt	  = rabitq_cache_cxt;
 
 	rabitq_cache = hash_create(
 			"mktann rabitq params cache",
@@ -158,9 +171,8 @@ get_or_create_params(Dimension dim, uint64_t seed)
 	entry->refcount = 0;
 	entry->usage	= 0;
 
-	MemoryContext old = MemoryContextSwitchTo(CacheMemoryContext);
-	entry->params	  = palloc(MKT_RABITQ_PARAMS_SIZE(dim));
-	MemoryContextSwitchTo(old);
+	entry->params =
+			MemoryContextAlloc(rabitq_cache_cxt, MKT_RABITQ_PARAMS_SIZE(dim));
 
 	mkt_rabitq_init(entry->params, dim, seed);
 	entry->refcount = 1;
