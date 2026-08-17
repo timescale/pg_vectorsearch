@@ -62,6 +62,20 @@ void mktann_index_base_init(Relation index, MktIndexBase *base);
 void mktann_release_params(Dimension dim, uint64_t seed);
 
 /*
+ * Test support: one snapshot row per cached RaBitQ rotation matrix in
+ * this backend's params cache. Consumed by the test-only module
+ * test/pg/src/test_helpers.c; no SQL surface in the extension.
+ */
+typedef struct MktRabitqCacheStat
+{
+	int32_t dim;
+	int32_t refcount;
+	double	usage;
+} MktRabitqCacheStat;
+
+int mktann_rabitq_cache_stats(MktRabitqCacheStat *stats, int max_stats);
+
+/*
  * Immutable dim + distance metric + first posting page from the cache, without
  * forcing the lazy rotation-matrix work that mktann_index_base_init does. For
  * metadata-only callers such as VACUUM's ambulkdelete (which uses

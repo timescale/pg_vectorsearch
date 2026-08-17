@@ -323,3 +323,233 @@ RESET enable_seqscan;
 DROP TABLE probes;
 DROP TABLE cache_a;
 DROP TABLE cache_c;
+-- ============================================================
+-- Per-backend RaBitQ params cache: refcounting, decay, eviction
+-- ============================================================
+-- Reconnect first: the cache is per-backend state, and the exact usage
+-- arithmetic below relies on a fresh backend whose cache is empty and
+-- on counting every checkout from zero, independent of everything the
+-- sections above did.
+\c -
+-- Test-only introspection (the extension ships no SQL surface for the
+-- cache): rabitq_params_cache() from the always-built helper module.
+-- pg_regress feeds this script to psql on stdin, so relative \ir would
+-- resolve against the harness working directory; include by absolute
+-- path via the PG_ABS_SRCDIR pg_regress exports.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set helper_sql :abs_srcdir '/sql/test_helpers.sql'
+\i :helper_sql
+-- SQL entry points for the test-only helper module
+-- (test/pg/src/test_helpers.c). Not a test: \ir this file from tests
+-- that need the extra introspection, and DROP the functions when done.
+-- The extension library must be loaded before the helper module
+-- resolves its exported symbols (RTLD_NOW), hence the probe call.
+SELECT mkt.extension_version() IS NOT NULL AS extension_loaded;
+ extension_loaded 
+------------------
+ t
+(1 row)
+
+CREATE OR REPLACE FUNCTION rabitq_params_cache(
+    OUT dim integer,
+    OUT refcount integer,
+    OUT usage float8)
+RETURNS SETOF record
+AS '$libdir/meerkat_test_helpers', 'mkt_test_rabitq_params_cache'
+LANGUAGE C PARALLEL RESTRICTED;
+-- Checkouts happen at query time (a scan's first fetch) and at index
+-- tuple insertion; index BUILDS generate their rotation matrix
+-- privately and never touch this cache -- the setup below creates all
+-- ten indexes first and the stats stay empty until the first query.
+SET enable_seqscan = off;
+-- Ten tiny tables+indexes, dims 8..80. Rows are inserted before each
+-- index exists, so nothing here checks a matrix out.
+DO $$
+DECLARE d int;
+BEGIN
+    FOREACH d IN ARRAY ARRAY[8, 16, 24, 32, 40, 48, 56, 64, 72, 80] LOOP
+        EXECUTE format('CREATE TABLE cache_t%s (id int, v vector(%s))',
+                       d, d);
+        EXECUTE format($i$INSERT INTO cache_t%s
+            SELECT g, ('[' || g::text || repeat(',0', %s - 1) || ']')::vector
+            FROM generate_series(1, 256) g$i$, d, d);
+        EXECUTE format('CREATE INDEX cache_i%s ON cache_t%s '
+                       'USING mktann (v) WITH (nlist = 4)', d, d);
+    END LOOP;
+END $$;
+SELECT dim, refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() ORDER BY dim;
+ dim | refcount | usage 
+-----+----------+-------
+(0 rows)
+
+-- Fill the cache to its soft target (8 entries) with a distinct usage
+-- score per entry — the first checkout of a dimension enters at 1.0,
+-- every further checkout adds 1.0 — so each eviction below has exactly
+-- one possible victim. dim 8 is queried once: the unique minimum.
+DO $$
+DECLARE d int; i int; r int;
+BEGIN
+    FOREACH d IN ARRAY ARRAY[8, 16, 24, 32, 40, 48, 56, 64] LOOP
+        FOR i IN 1 .. d / 8 LOOP
+            EXECUTE format(
+                'SELECT id FROM cache_t%s ORDER BY v <-> %L LIMIT 1',
+                d, '[1' || repeat(',0', d - 1) || ']') INTO r;
+        END LOOP;
+    END LOOP;
+END $$;
+SELECT dim, refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() ORDER BY dim;
+ dim | refcount | usage  
+-----+----------+--------
+   8 |        0 | 1.0000
+  16 |        0 | 2.0000
+  24 |        0 | 3.0000
+  32 |        0 | 4.0000
+  40 |        0 | 5.0000
+  48 |        0 | 6.0000
+  56 |        0 | 7.0000
+  64 |        0 | 8.0000
+(8 rows)
+
+-- A miss with the cache at its target — the first dim-72 query — decays
+-- every usage score by 0.99 and evicts the least-used idle entry: dim 8.
+SELECT id FROM cache_t72
+ORDER BY v <-> ('[1' || repeat(',0', 71) || ']')::vector LIMIT 1;
+ id 
+----
+  1
+(1 row)
+
+SELECT dim, refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() ORDER BY dim;
+ dim | refcount | usage  
+-----+----------+--------
+  16 |        0 | 1.9800
+  24 |        0 | 2.9700
+  32 |        0 | 3.9600
+  40 |        0 | 4.9500
+  48 |        0 | 5.9400
+  56 |        0 | 6.9300
+  64 |        0 | 7.9200
+  72 |        0 | 1.0000
+(8 rows)
+
+-- Refcounting: a scan checks its entry out at its first fetch (scan
+-- setup is lazy — DECLARE alone holds nothing) and checks it back in
+-- when the scan closes. Two concurrent scans of the same-dimension
+-- index hold two checkouts.
+BEGIN;
+DECLARE c16a CURSOR FOR
+    SELECT id FROM cache_t16 ORDER BY v <-> ('[1' || repeat(',0', 15) || ']')::vector LIMIT 5;
+DECLARE c16b CURSOR FOR
+    SELECT id FROM cache_t16 ORDER BY v <-> ('[2' || repeat(',0', 15) || ']')::vector LIMIT 5;
+SELECT refcount FROM rabitq_params_cache() WHERE dim = 16;
+ refcount 
+----------
+        0
+(1 row)
+
+FETCH 1 FROM c16a;
+ id 
+----
+  1
+(1 row)
+
+SELECT refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() WHERE dim = 16;
+ refcount | usage  
+----------+--------
+        1 | 2.9800
+(1 row)
+
+FETCH 1 FROM c16b;
+ id 
+----
+  2
+(1 row)
+
+SELECT refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() WHERE dim = 16;
+ refcount | usage  
+----------+--------
+        2 | 3.9800
+(1 row)
+
+CLOSE c16a;
+SELECT refcount FROM rabitq_params_cache() WHERE dim = 16;
+ refcount 
+----------
+        1
+(1 row)
+
+CLOSE c16b;
+SELECT refcount FROM rabitq_params_cache() WHERE dim = 16;
+ refcount 
+----------
+        0
+(1 row)
+
+COMMIT;
+-- Held-entry immunity: check dim 72 out (usage 2.0 — the strict global
+-- minimum: every idle entry is >= 2.9403 by now) and, while holding it,
+-- force another miss with the first dim-80 query. The sweep must skip
+-- the held global minimum and evict the least-used idle entry instead:
+-- dim 24.
+BEGIN;
+DECLARE c72 CURSOR FOR
+    SELECT id FROM cache_t72 ORDER BY v <-> ('[1' || repeat(',0', 71) || ']')::vector LIMIT 5;
+FETCH 1 FROM c72;
+ id 
+----
+  1
+(1 row)
+
+SELECT refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() WHERE dim = 72;
+ refcount | usage  
+----------+--------
+        1 | 2.0000
+(1 row)
+
+SELECT id FROM cache_t80
+ORDER BY v <-> ('[1' || repeat(',0', 79) || ']')::vector LIMIT 1;
+ id 
+----
+  1
+(1 row)
+
+-- dim 24 gone; dim 72 survived its own global-minimum usage because it
+-- was held. Everything else decayed by another factor of 0.99.
+SELECT dim, refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() ORDER BY dim;
+ dim | refcount | usage  
+-----+----------+--------
+  16 |        0 | 3.9402
+  32 |        0 | 3.9204
+  40 |        0 | 4.9005
+  48 |        0 | 5.8806
+  56 |        0 | 6.8607
+  64 |        0 | 7.8408
+  72 |        1 | 1.9800
+  80 |        0 | 1.0000
+(8 rows)
+
+COMMIT;
+-- The commit closed the held scan: checkout released.
+SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
+ refcount 
+----------
+        0
+(1 row)
+
+-- Cleanup.
+DO $$
+DECLARE d int;
+BEGIN
+    FOREACH d IN ARRAY ARRAY[8, 16, 24, 32, 40, 48, 56, 64, 72, 80] LOOP
+        EXECUTE format('DROP TABLE IF EXISTS cache_t%s', d);
+    END LOOP;
+END $$;
+DROP FUNCTION rabitq_params_cache();
+RESET enable_seqscan;

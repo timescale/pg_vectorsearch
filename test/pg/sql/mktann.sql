@@ -252,3 +252,130 @@ RESET enable_seqscan;
 DROP TABLE probes;
 DROP TABLE cache_a;
 DROP TABLE cache_c;
+
+-- ============================================================
+-- Per-backend RaBitQ params cache: refcounting, decay, eviction
+-- ============================================================
+-- Reconnect first: the cache is per-backend state, and the exact usage
+-- arithmetic below relies on a fresh backend whose cache is empty and
+-- on counting every checkout from zero, independent of everything the
+-- sections above did.
+\c -
+-- Test-only introspection (the extension ships no SQL surface for the
+-- cache): rabitq_params_cache() from the always-built helper module.
+-- pg_regress feeds this script to psql on stdin, so relative \ir would
+-- resolve against the harness working directory; include by absolute
+-- path via the PG_ABS_SRCDIR pg_regress exports.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set helper_sql :abs_srcdir '/sql/test_helpers.sql'
+\i :helper_sql
+
+-- Checkouts happen at query time (a scan's first fetch) and at index
+-- tuple insertion; index BUILDS generate their rotation matrix
+-- privately and never touch this cache -- the setup below creates all
+-- ten indexes first and the stats stay empty until the first query.
+SET enable_seqscan = off;
+
+-- Ten tiny tables+indexes, dims 8..80. Rows are inserted before each
+-- index exists, so nothing here checks a matrix out.
+DO $$
+DECLARE d int;
+BEGIN
+    FOREACH d IN ARRAY ARRAY[8, 16, 24, 32, 40, 48, 56, 64, 72, 80] LOOP
+        EXECUTE format('CREATE TABLE cache_t%s (id int, v vector(%s))',
+                       d, d);
+        EXECUTE format($i$INSERT INTO cache_t%s
+            SELECT g, ('[' || g::text || repeat(',0', %s - 1) || ']')::vector
+            FROM generate_series(1, 256) g$i$, d, d);
+        EXECUTE format('CREATE INDEX cache_i%s ON cache_t%s '
+                       'USING mktann (v) WITH (nlist = 4)', d, d);
+    END LOOP;
+END $$;
+
+SELECT dim, refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() ORDER BY dim;
+
+-- Fill the cache to its soft target (8 entries) with a distinct usage
+-- score per entry — the first checkout of a dimension enters at 1.0,
+-- every further checkout adds 1.0 — so each eviction below has exactly
+-- one possible victim. dim 8 is queried once: the unique minimum.
+DO $$
+DECLARE d int; i int; r int;
+BEGIN
+    FOREACH d IN ARRAY ARRAY[8, 16, 24, 32, 40, 48, 56, 64] LOOP
+        FOR i IN 1 .. d / 8 LOOP
+            EXECUTE format(
+                'SELECT id FROM cache_t%s ORDER BY v <-> %L LIMIT 1',
+                d, '[1' || repeat(',0', d - 1) || ']') INTO r;
+        END LOOP;
+    END LOOP;
+END $$;
+
+SELECT dim, refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() ORDER BY dim;
+
+-- A miss with the cache at its target — the first dim-72 query — decays
+-- every usage score by 0.99 and evicts the least-used idle entry: dim 8.
+SELECT id FROM cache_t72
+ORDER BY v <-> ('[1' || repeat(',0', 71) || ']')::vector LIMIT 1;
+
+SELECT dim, refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() ORDER BY dim;
+
+-- Refcounting: a scan checks its entry out at its first fetch (scan
+-- setup is lazy — DECLARE alone holds nothing) and checks it back in
+-- when the scan closes. Two concurrent scans of the same-dimension
+-- index hold two checkouts.
+BEGIN;
+DECLARE c16a CURSOR FOR
+    SELECT id FROM cache_t16 ORDER BY v <-> ('[1' || repeat(',0', 15) || ']')::vector LIMIT 5;
+DECLARE c16b CURSOR FOR
+    SELECT id FROM cache_t16 ORDER BY v <-> ('[2' || repeat(',0', 15) || ']')::vector LIMIT 5;
+SELECT refcount FROM rabitq_params_cache() WHERE dim = 16;
+FETCH 1 FROM c16a;
+SELECT refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() WHERE dim = 16;
+FETCH 1 FROM c16b;
+SELECT refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() WHERE dim = 16;
+CLOSE c16a;
+SELECT refcount FROM rabitq_params_cache() WHERE dim = 16;
+CLOSE c16b;
+SELECT refcount FROM rabitq_params_cache() WHERE dim = 16;
+COMMIT;
+
+-- Held-entry immunity: check dim 72 out (usage 2.0 — the strict global
+-- minimum: every idle entry is >= 2.9403 by now) and, while holding it,
+-- force another miss with the first dim-80 query. The sweep must skip
+-- the held global minimum and evict the least-used idle entry instead:
+-- dim 24.
+BEGIN;
+DECLARE c72 CURSOR FOR
+    SELECT id FROM cache_t72 ORDER BY v <-> ('[1' || repeat(',0', 71) || ']')::vector LIMIT 5;
+FETCH 1 FROM c72;
+SELECT refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() WHERE dim = 72;
+
+SELECT id FROM cache_t80
+ORDER BY v <-> ('[1' || repeat(',0', 79) || ']')::vector LIMIT 1;
+
+-- dim 24 gone; dim 72 survived its own global-minimum usage because it
+-- was held. Everything else decayed by another factor of 0.99.
+SELECT dim, refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() ORDER BY dim;
+COMMIT;
+
+-- The commit closed the held scan: checkout released.
+SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
+
+-- Cleanup.
+DO $$
+DECLARE d int;
+BEGIN
+    FOREACH d IN ARRAY ARRAY[8, 16, 24, 32, 40, 48, 56, 64, 72, 80] LOOP
+        EXECUTE format('DROP TABLE IF EXISTS cache_t%s', d);
+    END LOOP;
+END $$;
+
+DROP FUNCTION rabitq_params_cache();
+RESET enable_seqscan;

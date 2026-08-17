@@ -218,6 +218,37 @@ mktann_release_params(Dimension dim, uint64_t seed)
 	Assert(false);
 }
 
+/*
+ * Test support: snapshot the cache into a caller-provided array and
+ * return the number of entries written. A plain exported symbol (no SQL
+ * surface): the test-only module test/pg/src/test_helpers.c
+ * wraps it in a set-returning function so the regression tests can
+ * observe refcounts, usage decay, and eviction. Inert otherwise.
+ */
+int
+mktann_rabitq_cache_stats(MktRabitqCacheStat *stats, int max_stats)
+{
+	HASH_SEQ_STATUS	  seq;
+	RaBitQCacheEntry *entry;
+	int				  n = 0;
+
+	if (rabitq_cache == NULL)
+		return 0;
+
+	/* The scan must run to completion (see rabitq_cache_evict_one). */
+	hash_seq_init(&seq, rabitq_cache);
+	while ((entry = hash_seq_search(&seq)) != NULL)
+	{
+		if (n >= max_stats)
+			continue;
+		stats[n].dim	  = (int32_t)entry->key.dim;
+		stats[n].refcount = entry->refcount;
+		stats[n].usage	  = entry->usage;
+		n++;
+	}
+	return n;
+}
+
 /* ----------------------------------------------------------------
  * rd_amcache layout
  *

@@ -52,8 +52,12 @@ repos:
         files: ^(sql|test/(.+/)?(sql|compat))/.*\.sql$
         # The extension install script and upgrade scripts are DDL, not
         # migrations — squawk's migration rules don't apply (they get a
-        # pgspot audit in CI instead).
-        exclude: ^(sql/|test/pg/compat/)
+        # pgspot audit in CI instead). mktann.sql uses psql
+        # metacommands (\c, \i), which squawk's server-grammar parser
+        # cannot represent — and an unparseable file gets no rule
+        # coverage anyway; pg_regress executes every statement, which
+        # subsumes the syntax check.
+        exclude: ^(sql/|test/pg/compat/|test/pg/sql/mktann\.sql$)
 
   # Markdown linting
   - repo: https://github.com/DavidAnson/markdownlint-cli2
