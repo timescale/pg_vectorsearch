@@ -560,9 +560,9 @@ SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
 -- scan or insert that never reaches its normal release still returns
 -- its refcount when the owner is released. Without that, one aborted
 -- query would pin its entry unevictable for the backend's lifetime.
--- An aborted transaction drops the cursor's portal without running
--- endscan: the owner sweep must return the checkout (usage keeps its
--- checkout bump; only the refcount reverts).
+-- Abort with an open cursor (the portal is dropped without endscan).
+-- Expected: refcount 1 while the cursor is open, back to 0 after
+-- ROLLBACK; usage keeps its checkout bump.
 BEGIN;
 DECLARE cabort CURSOR FOR
     SELECT id FROM cache_t80 ORDER BY v <-> ('[1' || repeat(',0', 79) || ']')::vector LIMIT 5;
@@ -589,9 +589,10 @@ FROM rabitq_params_cache() WHERE dim = 80;
         0 | 2.0000
 (1 row)
 
--- Savepoint scoping: rolling back a subtransaction returns only the
--- checkouts made inside it — the outer scan's checkout survives and
--- the outer cursor stays usable.
+-- Savepoint scoping: two cursors, the inner one opened inside a
+-- savepoint that is rolled back. Expected: refcount 1 (outer) -> 2
+-- (inner) -> 1 after ROLLBACK TO with the outer cursor still
+-- fetchable -> 0 after COMMIT.
 BEGIN;
 DECLARE couter CURSOR FOR
     SELECT id FROM cache_t72 ORDER BY v <-> ('[1' || repeat(',0', 71) || ']')::vector LIMIT 5;
@@ -642,12 +643,8 @@ SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
         0
 (1 row)
 
--- Insert path: aminsert brackets one checkout/release around each
--- inserted tuple (usage +1, refcount back to 0). Its error paths go
--- through the same owner registration the scan tests above exercise;
--- the in-AM dimension-mismatch error itself is not separately
--- reachable (typmod'd columns reject mismatches before the AM, and
--- undimensioned vector columns cannot be indexed at all).
+-- Insert path: each inserted tuple checks the matrix out and releases
+-- it. Expected: usage up by exactly 1.0, refcount back at 0.
 INSERT INTO cache_t80
     SELECT 999, ('[9' || repeat(',0', 79) || ']')::vector;
 SELECT refcount, round(usage::numeric, 4) AS usage
