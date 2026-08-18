@@ -59,7 +59,7 @@ mkt_rabitq_params_generate_pg(PG_FUNCTION_ARGS)
 	int32 dim  = PG_GETARG_INT32(0);
 	int64 seed = PG_GETARG_INT64(1);
 
-	mkt_pg_check_dim_valid(dim);
+	mkt_pg_check_rabitq_params_dim_valid(dim);
 
 	int				size   = MKT_RABITQ_PARAMS_PG_SIZE(dim);
 	RaBitQParamsPG *result = (RaBitQParamsPG *)palloc0(size);

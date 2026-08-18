@@ -218,6 +218,7 @@ Oid mkt_halfvec_type_oid(void);
  * ---------------------------------------------------------------- */
 
 void mkt_pg_check_dim_valid(int dim);
+void mkt_pg_check_rabitq_params_dim_valid(int dim);
 void mkt_pg_check_dims_match(int dim_a, int dim_b);
 void mkt_pg_check_expected_dim(int actual, int expected);
 void mkt_pg_check_value_finite(float val);

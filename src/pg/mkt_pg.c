@@ -15,6 +15,7 @@
 #include "algo/distance.h"
 #include "algo/kmeans.h"
 #include "git_commit.h"
+#include "index/posting_page.h"
 #include "index/query_scan.h"
 #include "mkt_pg.h"
 #include "mktann_explain.h"
@@ -419,6 +420,29 @@ mkt_pg_check_dim_valid(int dim)
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("vector cannot have more than %d dimensions",
 						MKT_VECTOR_MAX_DIM)));
+}
+
+/*
+ * rabitq_params_generate() builds a dim x dim orthogonal matrix by
+ * Gram-Schmidt -- O(dim^3) in time, O(dim^2) in memory -- and is callable by
+ * any role, so an oversized dim is a CPU/memory denial-of-service vector (at
+ * the generic vector cap a single call runs for minutes at 100% CPU). Bound
+ * it by MKT_INDEX_MAX_DIM: generating params for a dimension no meerkat index
+ * can hold is pointless, so the largest indexable dimension is the natural
+ * ceiling, and it tracks the index limit automatically.
+ */
+void
+mkt_pg_check_rabitq_params_dim_valid(int dim)
+{
+	mkt_pg_check_dim_valid(dim);
+	if (dim > MKT_INDEX_MAX_DIM)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("cannot generate rabitq_params for more than %d "
+						"dimensions",
+						MKT_INDEX_MAX_DIM),
+				 errhint("Building the transform matrix is O(dim^3); no "
+						 "mktann index supports more dimensions than this.")));
 }
 
 void
