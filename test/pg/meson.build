@@ -39,6 +39,21 @@ else
       'row_estimate',
     ]
 
+    # Test-only SQL entry points (extra introspection the extension
+    # itself must not ship). Always built; a test CREATEs its functions
+    # against this library explicitly. Installed next to the extension
+    # so tests can reference it as $libdir/meerkat_test_helpers.
+    meerkat_test_helpers_so = shared_module('meerkat_test_helpers',
+      'src/test_helpers.c',
+      c_args: pg_ext_cflags,
+      link_args: pg_ldflags,
+      include_directories: src_inc,
+      name_prefix: '',
+      install: true,
+      install_dir: pg_pkglibdir,
+      override_options: ['b_lundef=false', 'warning_level=1', 'werror=false'],
+    )
+
     test('regress',
       pg_regress,
       args: [
@@ -49,7 +64,7 @@ else
         '--temp-config=' + meson.current_build_dir() / 'meerkat_test.conf',
         '--load-extension=meerkat',
       ] + test_names,
-      depends: [meerkat_ext_so],
+      depends: [meerkat_ext_so, meerkat_test_helpers_so],
       timeout: 300,
       is_parallel: false,
       protocol: 'tap',

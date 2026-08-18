@@ -8,8 +8,15 @@
  * invalidation, e.g. REINDEX).
  *
  * What lives where:
- *   - The rotation matrix P (O(dim³) to build) is a process-local static in
- *     CacheMemoryContext keyed by dim+seed; it survives relcache invalidation.
+ *   - The rotation matrix P (O(dim³) to build) lives in a dynamically-sized,
+ *     reference-counted, process-local hash table in CacheMemoryContext keyed
+ *     by dim+seed; it survives relcache invalidation. Every checkout of
+ *     base->params from mktann_index_base_init MUST be paired with a
+ *     matching mktann_release_params(base->dim, base->rabitq_seed) once the
+ *     caller is done with it (scan close / end of insert) — the table only
+ *     frees an entry once its checkout count drops to zero, so a live
+ *     scan's params pointer is never invalidated out from under it by
+ *     another index of a different dim/seed.
  *   - The global mean, P^T·global_mean, and a fully-populated immutable
  *     MktIndexBase template live in rd_amcache.
  *
@@ -26,6 +33,7 @@
 #include <postgres.h>
 
 #include <utils/rel.h>
+#include <utils/resowner.h>
 
 #include "index/index_base.h"
 
@@ -40,8 +48,39 @@
  *
  * Pointers placed into *base stay valid until the next relcache invalidation;
  * do not retain them across yield points.
+ *
+ * base->params is checked out from the process-local rotation-matrix cache
+ * and MUST be released with a matching mktann_release_params(base->dim,
+ * base->rabitq_seed, owner) when the caller is done with it, where owner is
+ * the CurrentResourceOwner observed at this call — see mktann_cache.c. The
+ * checkout is registered with that owner, so an error path that skips the
+ * release (aborted scan, failed insert) still returns the refcount when the
+ * owner is released.
  */
 void mktann_index_base_init(Relation index, MktIndexBase *base);
+
+/*
+ * Release a params checkout obtained via mktann_index_base_init. dim and seed
+ * must be exactly the values observed on the corresponding base->dim /
+ * base->rabitq_seed at checkout time; owner is the CurrentResourceOwner that
+ * was in effect at the mktann_index_base_init call.
+ */
+void mktann_release_params(Dimension dim, uint64_t seed, ResourceOwner owner);
+
+/*
+ * Test support: one snapshot row per cached RaBitQ rotation matrix in
+ * this backend's params cache. Consumed by the test-only module
+ * test/pg/src/test_helpers.c; no SQL surface in the extension.
+ */
+typedef struct MktRabitqCacheStat
+{
+	int32_t dim;
+	int32_t refcount;
+	double	usage;
+} MktRabitqCacheStat;
+
+int mktann_rabitq_cache_stats(MktRabitqCacheStat *stats, int max_stats);
+int mktann_rabitq_cache_clear(void);
 
 /*
  * Immutable dim + distance metric + first posting page from the cache, without

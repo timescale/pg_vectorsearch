@@ -171,6 +171,11 @@ typedef struct MktannScanState
 	/* EXPLAIN ANALYZE stats (accumulated across rescans) */
 	MktannScanStats stats;
 
+	/* Resource owner the params checkout was registered with (the
+	 * CurrentResourceOwner at the mktann_index_base_init call below);
+	 * the endscan release must name the same owner. */
+	ResourceOwner params_owner;
+
 	MemoryContext scan_ctx;
 } MktannScanState;
 
@@ -201,6 +206,7 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	/* Immutable index parameters from the per-backend cache (metapage read at
 	 * most once per backend). */
 	mktann_index_base_init(index, &ss->index_base);
+	ss->params_owner	= CurrentResourceOwner;
 	MktannScanInfo info = mktann_cache_scan_info(index);
 
 	/* Size the top-K for the requested result count: mkt.query_limit is
@@ -442,6 +448,13 @@ mktann_endscan(IndexScanDesc scan)
 	if (ss != NULL)
 	{
 		mkt_query_state_cleanup(&ss->qstate);
+		/* Check the RaBitQParams checkout back in before the scan's own
+		 * memory goes away — see mktann_index_base_init / the beginscan
+		 * call above. */
+		mktann_release_params(
+				ss->index_base.dim,
+				ss->index_base.rabitq_seed,
+				ss->params_owner);
 		MemoryContextDelete(ss->scan_ctx);
 		scan->opaque = NULL;
 	}
