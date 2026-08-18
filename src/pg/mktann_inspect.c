@@ -33,6 +33,47 @@ PG_FUNCTION_INFO_V1(mkt_posting_pages);
 PG_FUNCTION_INFO_V1(mkt_tids_clusters);
 PG_FUNCTION_INFO_V1(mkt_convert_posting_to_fastscan);
 
+/*
+ * The functions below iterate an on-disk entry_count read straight from a
+ * page. Reject a count past the format's real per-page capacity before
+ * looping so a corrupt or truncated page can't drive a read past the page.
+ */
+static void
+check_centroid_count(
+		BlockNumber		  blkno,
+		uint32_t		  count,
+		Dimension		  dim,
+		MktCentroidFormat fmt)
+{
+	uint32_t max_entries = mkt_centroid_max_entries_fmt(dim, fmt);
+	if (count > max_entries)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("centroid page %u has an invalid entry count "
+						"(%u > %u)",
+						blkno,
+						count,
+						max_entries),
+				 errhint("The index may be corrupted; REINDEX it.")));
+}
+
+static void
+check_posting_count(
+		BlockNumber blkno, uint32_t count, Dimension dim, bool is_first)
+{
+	uint32_t max_entries = is_first ? mkt_posting_max_entries_first(dim)
+									: mkt_posting_max_entries(dim);
+	if (count > max_entries)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("posting page %u has an invalid entry count "
+						"(%u > %u)",
+						blkno,
+						count,
+						max_entries),
+				 errhint("The index may be corrupted; REINDEX it.")));
+}
+
 /* ----------------------------------------------------------------
  * Shared helpers
  * ---------------------------------------------------------------- */
@@ -81,6 +122,8 @@ collect_leaf_entries(
 		MktCentroidFormat			 fmt = (MktCentroidFormat)(opaque->flags &
 													   MKT_CENTROID_FMT_MASK);
 		bool is_leaf_page				 = (opaque->level == nlevels - 1);
+
+		check_centroid_count(blkno, nentries, dim, fmt);
 
 		if (BlockNumberIsValid(opaque->next_blkno))
 		{
@@ -248,6 +291,8 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 		 * so child_blkno lives in the group array and per-entry
 		 * flags don't exist — the leaf bit is page-level. */
 		uint16_t nentries = opaque->entry_count;
+
+		check_centroid_count(blkno, nentries, dim, fmt);
 
 		if (fmt == MKT_CENTROID_FMT_FASTSCAN)
 		{
@@ -459,6 +504,7 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 				char *content = is_first ? mkt_posting_content_first(page, dim)
 										 : mkt_posting_content(page);
 				int32 dead	  = 0;
+				check_posting_count(blkno, op->entry_count, dim, is_first);
 				for (uint32_t i = 0; i < op->entry_count; i++)
 				{
 					const MktPostingEntryHeader *h =
@@ -751,6 +797,12 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 										 ? mkt_posting_content_first(page, dim)
 										 : mkt_posting_content(page);
 				uint32_t count	 = op->entry_count;
+
+				check_posting_count(
+						blkno,
+						count,
+						dim,
+						(op->flags & MKT_POSTING_PAGE_FIRST) != 0);
 
 				if (op->flags & MKT_POSTING_PAGE_FASTSCAN)
 				{

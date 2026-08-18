@@ -50,10 +50,14 @@ mkt_posting_scan_init(
 	scan->packed_bytes = MKT_RABITQ_BYTES(dim);
 	scan->cur_blkno	   = InvalidBlockNumber;
 
-	/* Pre-allocate batch buffers — pad to multiple of 4 for IP kernel */
-	uint32_t padded		 = (max_entries_per_page + 3) & ~3u;
-	scan->page_distances = mkt_alloc(padded * sizeof(Distance));
-	scan->page_scratch	 = mkt_alloc(padded * sizeof(float));
+	/* Pre-allocate batch buffers — pad to multiple of 4 for IP kernel.
+	 * max_entries_cap is the trusted per-page capacity these buffers are
+	 * sized for; a page whose on-disk entry_count exceeds it (corruption)
+	 * would overrun page_distances/page_scratch and is rejected on load. */
+	scan->max_entries_cap = max_entries_per_page;
+	uint32_t padded		  = (max_entries_per_page + 3) & ~3u;
+	scan->page_distances  = mkt_alloc(padded * sizeof(Distance));
+	scan->page_scratch	  = mkt_alloc(padded * sizeof(float));
 }
 
 void
@@ -159,6 +163,13 @@ mkt_posting_scan_begin_flat(
 	scan->cur_page		  = flat_buf;
 	scan->cur_content	  = mkt_flat_posting_content(flat_buf);
 	scan->cur_max_entries = hdr->max_entries;
+	if (hdr->entry_count > scan->max_entries_cap)
+		mkt_error(
+				MKT_EXTENSION_NAME
+				": flat posting page has an invalid entry count (%u > %u); "
+				"the index may be corrupted -- REINDEX it",
+				(unsigned)hdr->entry_count,
+				scan->max_entries_cap);
 	scan->cur_count		  = hdr->entry_count;
 	scan->pages_read	  = 1;
 	scan->pages_skipped	  = 0;
@@ -237,7 +248,28 @@ advance_page(MktPostingScan *scan)
 					? mkt_posting_content_first(scan->cur_page, scan->dim)
 					: mkt_posting_content(scan->cur_page);
 	scan->cur_max_entries = opaque->max_entries;
-	scan->cur_count		  = opaque->entry_count;
+	/* Reject an entry_count past what a valid page of this format can
+	 * hold. AoS pages drive the page_distances/page_scratch batch (sized
+	 * to max_entries_cap), so an over-count there is an out-of-bounds
+	 * write; fastscan pages are scored per 32-vector group and hold more
+	 * entries per page, so bound them by the fastscan capacity instead of
+	 * the smaller AoS one. */
+	uint32_t page_cap;
+	if (opaque->flags & MKT_POSTING_PAGE_FASTSCAN)
+		page_cap = (opaque->flags & MKT_POSTING_PAGE_FIRST)
+						 ? mkt_fastscan_max_entries_first(scan->dim)
+						 : mkt_fastscan_max_entries(scan->dim);
+	else
+		page_cap = scan->max_entries_cap;
+	if (opaque->entry_count > page_cap)
+		mkt_error(
+				MKT_EXTENSION_NAME
+				": posting page %u has an invalid entry count (%u > %u); "
+				"the index may be corrupted -- REINDEX it",
+				scan->cur_blkno,
+				(unsigned)opaque->entry_count,
+				page_cap);
+	scan->cur_count = opaque->entry_count;
 	scan->pages_read++;
 	return true;
 }
