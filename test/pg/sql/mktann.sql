@@ -256,7 +256,9 @@ DROP TABLE cache_c;
 -- ============================================================
 -- Per-backend RaBitQ params cache: refcounting, decay, eviction
 -- ============================================================
--- Include test helpers for introspecting the cache.
+-- Include test helpers for introspecting the cache. The helper file
+-- silences its own definitions and docs (see sql/test_helpers.sql), so
+-- they don't land in this test's expected output.
 \getenv abs_srcdir PG_ABS_SRCDIR
 \set helper_sql :abs_srcdir '/sql/test_helpers.sql'
 \i :helper_sql

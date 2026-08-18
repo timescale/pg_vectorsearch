@@ -56,8 +56,9 @@ repos:
         # metacommands (\c, \i), which squawk's server-grammar parser
         # cannot represent — and an unparseable file gets no rule
         # coverage anyway; pg_regress executes every statement, which
-        # subsumes the syntax check.
-        exclude: ^(sql/|test/pg/compat/|test/pg/sql/mktann\.sql$)
+        # subsumes the syntax check. test_helpers.sql (included by
+        # mktann.sql) is excluded for the same reason.
+        exclude: ^(sql/|test/pg/compat/|test/pg/sql/(mktann|test_helpers)\.sql$)
 
   # Markdown linting
   - repo: https://github.com/DavidAnson/markdownlint-cli2
