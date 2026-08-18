@@ -58,18 +58,13 @@ mkt_fastscan_accumulate_avx2(
 	__m256i accu2	 = _mm256_setzero_si256();
 	__m256i accu3	 = _mm256_setzero_si256();
 
-	for (uint32_t i = 0; i < code_length; i += 64)
-	{
+	/* One 32B column (8 dims) per iteration. code_length is a multiple
+	 * of 32 but not necessarily 64, so stepping 64B (two columns) at a
+	 * time would read a phantom column past the code region whenever
+	 * ceil(dim/8) is odd. The accumulators are order-independent, so a
+	 * 32B stride is equivalent and never over-reads. */
+	for (uint32_t i = 0; i < code_length; i += 32)
 		ACCUM_32B(codes + i, lut + i, accu0, accu1, accu2, accu3, low_mask);
-		ACCUM_32B(
-				codes + i + 32,
-				lut + i + 32,
-				accu0,
-				accu1,
-				accu2,
-				accu3,
-				low_mask);
-	}
 
 	_mm256_storeu_si256((__m256i *)accum, reduce_accu_pair(accu0, accu1));
 	_mm256_storeu_si256(
@@ -113,35 +108,34 @@ mkt_fastscan_accumulate_hacc_avx2(
 		int32_t		  *accum,
 		Dimension	   dim)
 {
-	uint32_t nsq	  = MKT_FASTSCAN_NSQ(dim);
-	__m256i	 low_mask = _mm256_set1_epi8(0x0F);
+	__m256i low_mask = _mm256_set1_epi8(0x0F);
 
 	__m256i accu[2][4];
 	for (int q = 0; q < 2; q++)
 		for (int r = 0; r < 4; r++)
 			accu[q][r] = _mm256_setzero_si256();
 
-	for (uint32_t m = 0; m < nsq; m += 4)
+	/* One 32B column (2 subquantizers) per iteration. The high-accuracy
+	 * LUT is laid out in 128B blocks of 4 subquantizers ([4x16 lo][4x16
+	 * hi]); column c lives in block c/2 at within-block offset (c%2)*32,
+	 * with the hi table 64B after the lo. Iterating whole columns reads
+	 * exactly code_length bytes -- stepping 64B (4 sq) at a time would
+	 * read a phantom column past the code region when ceil(dim/8) is
+	 * odd. Trailing phantom subquantizers (nsq not a multiple of 2) have
+	 * a zeroed LUT, so they contribute nothing. */
+	uint32_t ncols = MKT_FASTSCAN_GROUP_BYTES(dim) / MKT_FASTSCAN_GROUP;
+	for (uint32_t c = 0; c < ncols; c++)
 	{
-		/* Process 64B codes in two 32B loads */
-		for (int half = 0; half < 2; half++)
-		{
-			const uint8_t *cp = codes + half * 32;
-			__m256i		   c  = _mm256_loadu_si256((const __m256i *)cp);
-			__m256i		   lo = _mm256_and_si256(c, low_mask);
-			__m256i hi = _mm256_and_si256(_mm256_srli_epi16(c, 4), low_mask);
+		__m256i cc = _mm256_loadu_si256((const __m256i *)(codes + c * 32));
+		__m256i lo = _mm256_and_si256(cc, low_mask);
+		__m256i hi = _mm256_and_si256(_mm256_srli_epi16(cc, 4), low_mask);
 
-			__m256i tab_lo = _mm256_loadu_si256(
-					(const __m256i *)(lut + half * 32));
-			HACC_ACCUM_256(tab_lo, lo, hi, accu[0]);
+		const uint8_t *lut_blk = lut + (c / 2) * 128 + (c % 2) * 32;
+		__m256i		   tab_lo  = _mm256_loadu_si256((const __m256i *)lut_blk);
+		HACC_ACCUM_256(tab_lo, lo, hi, accu[0]);
 
-			__m256i tab_hi = _mm256_loadu_si256(
-					(const __m256i *)(lut + 64 + half * 32));
-			HACC_ACCUM_256(tab_hi, lo, hi, accu[1]);
-		}
-
-		codes += 64;
-		lut += 128;
+		__m256i tab_hi = _mm256_loadu_si256((const __m256i *)(lut_blk + 64));
+		HACC_ACCUM_256(tab_hi, lo, hi, accu[1]);
 	}
 
 	/* Reduce: vectors 0-15 (accu[][0,1]), 16-31 (accu[][2,3]) */

@@ -43,27 +43,40 @@ mkt_fastscan_accumulate_avx512(
 	__m512i		  accu2	  = _mm512_setzero_si512();
 	__m512i		  accu3	  = _mm512_setzero_si512();
 
-	for (uint32_t i = 0; i < code_length; i += 64)
+	/* Accumulate one code block from already-loaded code/LUT registers. */
+#define ACCUM_BLOCK_512(c_, tab_)                                             \
+	do                                                                        \
+	{                                                                         \
+		__m512i lo_	 = _mm512_and_si512((c_), lo_mask);                       \
+		__m512i hi_	 = _mm512_and_si512(_mm512_srli_epi16((c_), 4), lo_mask); \
+		__m512i rlo_ = _mm512_shuffle_epi8((tab_), lo_);                      \
+		__m512i rhi_ = _mm512_shuffle_epi8((tab_), hi_);                      \
+		accu0		 = _mm512_add_epi16(accu0, rlo_);                         \
+		accu1		 = _mm512_add_epi16(accu1, _mm512_srli_epi16(rlo_, 8));   \
+		accu2		 = _mm512_add_epi16(accu2, rhi_);                         \
+		accu3		 = _mm512_add_epi16(accu3, _mm512_srli_epi16(rhi_, 8));   \
+	} while (0)
+
+	/* Full 64B blocks with plain loads (unchanged from the original hot
+	 * path). code_length is a multiple of 32 but not always 64: a lone
+	 * trailing 32B column (when ceil(dim/8) is odd) is read with a masked
+	 * load that touches only the valid 32B -- masked-out lanes read as
+	 * zero and shuffle to zero, so the phantom column contributes nothing
+	 * and nothing is read past the code region. */
+	uint32_t i = 0;
+	for (; i + 64 <= code_length; i += 64)
+		ACCUM_BLOCK_512(
+				_mm512_loadu_si512((const __m512i *)(codes + i)),
+				_mm512_loadu_si512((const __m512i *)(lut + i)));
+	if (i < code_length)
 	{
-		__m512i c	= _mm512_loadu_si512((const __m512i *)(codes + i));
-		__m512i tab = _mm512_loadu_si512((const __m512i *)(lut + i));
-
-		__m512i lo = _mm512_and_si512(c, lo_mask);
-		__m512i hi = _mm512_and_si512(_mm512_srli_epi16(c, 4), lo_mask);
-
-		__m512i res_lo = _mm512_shuffle_epi8(tab, lo);
-		__m512i res_hi = _mm512_shuffle_epi8(tab, hi);
-
-		/* Even/odd byte accumulation:
-		 * accu0 accumulates even-byte values (vectors 0-7 per lane)
-		 * accu1 accumulates odd-byte values (vectors 8-15 per lane)
-		 * The add_epi16 on uint8 results causes upper byte
-		 * contamination which accu1 tracks via srli. */
-		accu0 = _mm512_add_epi16(accu0, res_lo);
-		accu1 = _mm512_add_epi16(accu1, _mm512_srli_epi16(res_lo, 8));
-		accu2 = _mm512_add_epi16(accu2, res_hi);
-		accu3 = _mm512_add_epi16(accu3, _mm512_srli_epi16(res_hi, 8));
+		__mmask64 m = 0x00000000FFFFFFFFULL;
+		ACCUM_BLOCK_512(
+				_mm512_maskz_loadu_epi8(m, codes + i),
+				_mm512_maskz_loadu_epi8(m, lut + i));
 	}
+
+#undef ACCUM_BLOCK_512
 
 	/* Remove upper byte contamination */
 	accu0 = _mm512_sub_epi16(accu0, _mm512_slli_epi16(accu1, 8));
@@ -135,29 +148,47 @@ mkt_fastscan_accumulate_hacc_avx512(
 		int32_t		  *accum,
 		Dimension	   dim)
 {
-	uint32_t	  nsq	  = MKT_FASTSCAN_NSQ(dim);
-	const __m512i lo_mask = _mm512_set1_epi8(0x0F);
+	uint32_t	  code_length = MKT_FASTSCAN_GROUP_BYTES(dim);
+	const __m512i lo_mask	  = _mm512_set1_epi8(0x0F);
 
 	__m512i accu[2][4];
 	for (int q = 0; q < 2; q++)
 		for (int r = 0; r < 4; r++)
 			accu[q][r] = _mm512_setzero_si512();
 
-	for (uint32_t m = 0; m < nsq; m += 4)
+	/* Accumulate one code block from already-loaded code/LUT registers. */
+#define HACC_BLOCK_512(c_, tl_, th_)                                         \
+	do                                                                       \
+	{                                                                        \
+		__m512i lo_ = _mm512_and_si512((c_), lo_mask);                       \
+		__m512i hi_ = _mm512_and_si512(_mm512_srli_epi16((c_), 4), lo_mask); \
+		HACC_ACCUM_512((tl_), lo_, hi_, accu[0]);                            \
+		HACC_ACCUM_512((th_), lo_, hi_, accu[1]);                            \
+	} while (0)
+
+	/* Full 64B blocks (4 subquantizers) with plain loads -- unchanged
+	 * from the original hot path. A lone trailing 32B column (2
+	 * subquantizers, when ceil(dim/8) is odd) is read with a masked load
+	 * that touches only the valid 32B; masked-out code and LUT lanes read
+	 * as zero and shuffle to zero, so the phantom subquantizers
+	 * contribute nothing and nothing is read past the code region. */
+	const uint8_t *lp = lut;
+	uint32_t	   i  = 0;
+	for (; i + 64 <= code_length; i += 64, lp += 128)
+		HACC_BLOCK_512(
+				_mm512_loadu_si512((const __m512i *)(codes + i)),
+				_mm512_loadu_si512((const __m512i *)lp),
+				_mm512_loadu_si512((const __m512i *)(lp + 64)));
+	if (i < code_length)
 	{
-		__m512i c  = _mm512_loadu_si512((const __m512i *)codes);
-		__m512i lo = _mm512_and_si512(c, lo_mask);
-		__m512i hi = _mm512_and_si512(_mm512_srli_epi16(c, 4), lo_mask);
-
-		__m512i tab_lo = _mm512_loadu_si512((const __m512i *)lut);
-		HACC_ACCUM_512(tab_lo, lo, hi, accu[0]);
-
-		__m512i tab_hi = _mm512_loadu_si512((const __m512i *)(lut + 64));
-		HACC_ACCUM_512(tab_hi, lo, hi, accu[1]);
-
-		codes += 64;
-		lut += 128;
+		__mmask64 m = 0x00000000FFFFFFFFULL;
+		HACC_BLOCK_512(
+				_mm512_maskz_loadu_epi8(m, codes + i),
+				_mm512_maskz_loadu_epi8(m, lp),
+				_mm512_maskz_loadu_epi8(m, lp + 64));
 	}
+
+#undef HACC_BLOCK_512
 
 	/* Reduce and combine lo + (hi << 8) */
 	__m512i lo0 = hacc_reduce_16(accu[0][0], accu[0][1]);

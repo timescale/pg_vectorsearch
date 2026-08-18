@@ -6,6 +6,7 @@
  */
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "core/memory.h"
@@ -683,6 +684,92 @@ TEST_PARAMETERIZED(
 	}
 
 	ASSERT_TRUE(max_err < scale * 200.0f, "hacc accumulate matches reference");
+
+	reinit_fastscan_with_simd(0xFFFFFFFF);
+}
+
+/* ----------------------------------------------------------------
+ * Regression (F2/F4): the SIMD accumulate kernels read codes/LUT in
+ * 64B chunks, but a group's code region is ceil(dim/8)*32 bytes -- a
+ * multiple of 32, not always 64. When ceil(dim/8) is odd (e.g. dim 8,
+ * 100, 1000; but not 768) the final chunk read 32 bytes past the code
+ * region (and, for the 8-bit path, past the LUT). The buffers here are
+ * plain malloc'd at exactly the required size so the sanitizer CI
+ * (sanitizers.yml) flags any reintroduced over-read -- the unit test's
+ * usual arena allocator would hide it inside a larger block. Values are
+ * also checked against the scalar reference at each dim.
+ * ---------------------------------------------------------------- */
+TEST_PARAMETERIZED(
+		fastscan_odd_dim_no_overread, "scalar", "avx2", "avx512", "neon")
+{
+	SKIP_IF_FASTSCAN_SIMD_NOT_AVAILABLE(param);
+
+	/* ceil(dim/8): 8->1, 100->13, 1000->125 are odd (the buggy case);
+	 * 768->96 is the even control that never triggered the over-read. */
+	const uint32_t dims[] = {8, 100, 768, 1000};
+	const uint32_t count  = 40; /* 2 groups: exercises a non-final and a
+								 * final group */
+
+	for (uint32_t di = 0; di < sizeof(dims) / sizeof(dims[0]); di++)
+	{
+		uint32_t dim		  = dims[di];
+		uint32_t packed_bytes = (dim + 7) / 8;
+		uint32_t group_bytes  = MKT_FASTSCAN_GROUP_BYTES(dim);
+		uint32_t ngroups	  = (count + MKT_FASTSCAN_GROUP - 1) /
+						   MKT_FASTSCAN_GROUP;
+
+		float *transformed = malloc(dim * sizeof(float));
+		fill_random_floats(transformed, dim, 42 + di);
+		uint8_t *bits = malloc((size_t)count * packed_bytes);
+		fill_random_bits(bits, count * packed_bytes, 99 + di);
+
+		/* Exact-size, instrumented buffers: an over-read past group_bytes
+		 * (codes) or the LUT size faults under ASan. */
+		uint8_t *codes = malloc((size_t)ngroups * group_bytes);
+		mkt_fastscan_pack_codes(bits, count, dim, codes);
+
+		float	 scale, bias;
+		uint8_t *lut8 = malloc(MKT_FASTSCAN_LUT_BYTES(dim));
+		mkt_fastscan_build_lut(transformed, dim, lut8, &scale, &bias);
+		float	 hscale, hbias;
+		uint8_t *lut16 = malloc(MKT_FASTSCAN_LUT_HACC_BYTES(dim));
+		mkt_fastscan_build_lut_hacc(transformed, dim, lut16, &hscale, &hbias);
+
+		for (uint32_t g = 0; g < ngroups; g++)
+		{
+			uint16_t acc8[MKT_FASTSCAN_GROUP];
+			int32_t	 acc16[MKT_FASTSCAN_GROUP];
+			mkt_fastscan_accumulate(
+					codes + (size_t)g * group_bytes, lut8, acc8, dim);
+			mkt_fastscan_accumulate_hacc(
+					codes + (size_t)g * group_bytes, lut16, acc16, dim);
+
+			uint32_t g_count = (g + 1) * MKT_FASTSCAN_GROUP <= count
+									 ? MKT_FASTSCAN_GROUP
+									 : count - g * MKT_FASTSCAN_GROUP;
+			for (uint32_t v = 0; v < g_count; v++)
+			{
+				const uint8_t *vb = bits +
+									(size_t)(g * MKT_FASTSCAN_GROUP + v) *
+											packed_bytes;
+				float ref	   = reference_binary_ip(transformed, vb, dim);
+				float approx8  = (float)acc8[v] * scale + bias;
+				float approx16 = (float)acc16[v] * hscale + hbias;
+				ASSERT_TRUE(
+						fabsf(approx8 - ref) < scale * 200.0f,
+						"8-bit accumulate matches reference at odd dim");
+				ASSERT_TRUE(
+						fabsf(approx16 - ref) < hscale * 200.0f,
+						"hacc accumulate matches reference at odd dim");
+			}
+		}
+
+		free(transformed);
+		free(bits);
+		free(codes);
+		free(lut8);
+		free(lut16);
+	}
 
 	reinit_fastscan_with_simd(0xFFFFFFFF);
 }
