@@ -11,3 +11,7 @@ CREATE OR REPLACE FUNCTION rabitq_params_cache(
 RETURNS SETOF record
 AS '$libdir/meerkat_test_helpers', 'mkt_test_rabitq_params_cache'
 LANGUAGE C PARALLEL RESTRICTED;
+CREATE OR REPLACE FUNCTION rabitq_cache_clear()
+RETURNS integer
+AS '$libdir/meerkat_test_helpers', 'mkt_test_rabitq_cache_clear'
+LANGUAGE C PARALLEL RESTRICTED;

@@ -51,3 +51,16 @@ mkt_test_rabitq_params_cache(PG_FUNCTION_ARGS)
 
 	PG_RETURN_VOID();
 }
+
+/*
+ * Reset the backend's params cache to its initial state; returns the
+ * number of entries dropped. Errors if any entry is checked out. Lets
+ * a test section start from an empty cache without reconnecting.
+ */
+PG_FUNCTION_INFO_V1(mkt_test_rabitq_cache_clear);
+
+Datum
+mkt_test_rabitq_cache_clear(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(mktann_rabitq_cache_clear());
+}

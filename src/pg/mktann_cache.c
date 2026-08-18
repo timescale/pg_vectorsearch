@@ -20,6 +20,7 @@
 #include <utils/memutils.h>
 #include <utils/resowner.h>
 
+#include "core/log.h"
 #include "mkt_pg.h"
 #include "mktann_cache.h"
 #include "mktann_meta.h"
@@ -119,10 +120,12 @@ rabitq_cache_init(void)
 {
 	HASHCTL ctl;
 
-	rabitq_cache_cxt = AllocSetContextCreate(
-			CacheMemoryContext,
-			"mktann rabitq params cache",
-			ALLOCSET_DEFAULT_SIZES);
+	/* The context survives mktann_rabitq_cache_clear() resets. */
+	if (rabitq_cache_cxt == NULL)
+		rabitq_cache_cxt = AllocSetContextCreate(
+				CacheMemoryContext,
+				"mktann rabitq params cache",
+				ALLOCSET_DEFAULT_SIZES);
 
 	memset(&ctl, 0, sizeof(ctl));
 	ctl.keysize	  = sizeof(RaBitQCacheKey);
@@ -302,6 +305,44 @@ mktann_rabitq_cache_stats(MktRabitqCacheStat *stats, int max_stats)
 		stats[n].usage	  = entry->usage;
 		n++;
 	}
+	return n;
+}
+
+/*
+ * Test support: reset the cache to its initial state, freeing the hash
+ * table and every cached matrix in one context reset (they all live in
+ * rabitq_cache_cxt). Returns the number of entries dropped. Refuses if
+ * any entry is currently checked out -- freeing a held matrix is
+ * exactly the use-after-free this cache exists to prevent. Exported
+ * for the test-only module test/pg/src/test_helpers.c; inert otherwise.
+ */
+int
+mktann_rabitq_cache_clear(void)
+{
+	HASH_SEQ_STATUS	  seq;
+	RaBitQCacheEntry *entry;
+	int				  n = 0;
+
+	if (rabitq_cache == NULL)
+		return 0;
+
+	hash_seq_init(&seq, rabitq_cache);
+	while ((entry = hash_seq_search(&seq)) != NULL)
+	{
+		if (entry->refcount > 0)
+		{
+			hash_seq_term(&seq);
+			mkt_error(
+					"cannot clear the RaBitQ params cache: entry for "
+					"dimension %u has %d live checkout(s)",
+					(unsigned)entry->key.dim,
+					entry->refcount);
+		}
+		n++;
+	}
+
+	rabitq_cache = NULL;
+	MemoryContextReset(rabitq_cache_cxt);
 	return n;
 }
 

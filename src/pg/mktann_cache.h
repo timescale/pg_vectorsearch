@@ -80,6 +80,7 @@ typedef struct MktRabitqCacheStat
 } MktRabitqCacheStat;
 
 int mktann_rabitq_cache_stats(MktRabitqCacheStat *stats, int max_stats);
+int mktann_rabitq_cache_clear(void);
 
 /*
  * Immutable dim + distance metric + first posting page from the cache, without

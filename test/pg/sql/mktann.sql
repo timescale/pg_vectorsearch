@@ -256,19 +256,21 @@ DROP TABLE cache_c;
 -- ============================================================
 -- Per-backend RaBitQ params cache: refcounting, decay, eviction
 -- ============================================================
--- Reconnect first: the cache is per-backend state, and the exact usage
--- arithmetic below relies on a fresh backend whose cache is empty and
--- on counting every checkout from zero, independent of everything the
--- sections above did.
-\c -
 -- Test-only introspection (the extension ships no SQL surface for the
--- cache): rabitq_params_cache() from the always-built helper module.
--- pg_regress feeds this script to psql on stdin, so relative \ir would
--- resolve against the harness working directory; include by absolute
--- path via the PG_ABS_SRCDIR pg_regress exports.
+-- cache): rabitq_params_cache() / rabitq_cache_clear() from the
+-- always-built helper module. pg_regress feeds this script to psql on
+-- stdin, so relative \ir would resolve against the harness working
+-- directory; include by absolute path via the PG_ABS_SRCDIR pg_regress
+-- exports.
 \getenv abs_srcdir PG_ABS_SRCDIR
 \set helper_sql :abs_srcdir '/sql/test_helpers.sql'
 \i :helper_sql
+
+-- The cache is per-backend state and the exact usage arithmetic below
+-- counts every checkout from zero, so start from an empty cache,
+-- independent of whatever the sections above checked out. (The count
+-- dropped here depends on those sections, so only assert the reset.)
+SELECT rabitq_cache_clear() >= 0 AS cleared;
 
 -- Checkouts happen at query time (a scan's first fetch) and at index
 -- tuple insertion; index BUILDS generate their rotation matrix
@@ -430,4 +432,5 @@ BEGIN
 END $$;
 
 DROP FUNCTION rabitq_params_cache();
+DROP FUNCTION rabitq_cache_clear();
 RESET enable_seqscan;
