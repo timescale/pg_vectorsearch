@@ -42,6 +42,8 @@ typedef struct MktPostingScan
 	const RaBitQParams *params;
 	Dimension			dim;
 	uint32_t			packed_bytes; /* MKT_RABITQ_BYTES(dim) */
+	uint32_t max_entries_cap;		  /* page_distances/page_scratch capacity;
+									   * trusted bound for on-disk entry_count */
 
 	/* Per-cluster state (set at begin_cluster/begin_flat) */
 	RaBitQQueryState *qstate;

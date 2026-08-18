@@ -7,10 +7,15 @@
  * - Edge cases (null inputs, zero levels, invalid block number)
  */
 
+#include <signal.h>
+#include <stdio.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "algo/vecops.h"
 #include "core/memory.h"
+#include "index/centroid_page.h"
 #include "index/centroid_search.h"
 #include "mkt_halfvec.h"
 #include "mkt_test.h"
@@ -246,6 +251,98 @@ TEST(beam_search_two_levels)
 		mkt_free(all_leaf_vecs[i]);
 	mkt_free(all_leaf_vecs);
 	mkt_free(pages);
+	mkt_rabitq_destroy(params);
+}
+
+/* Regression (F3/F9): a page's entry_count is read straight off disk and
+ * drives the per-entry loops in score_page, which fill the scratch arrays
+ * sized to the format's real per-page capacity. A count past that capacity
+ * (corruption, a truncated write) must be rejected before it overruns the
+ * scratch. Build a valid root page, corrupt its entry_count beyond the
+ * RABITQ capacity, and confirm the scan aborts (mkt_error) rather than
+ * writing out of bounds. Runs in a forked child so the abort doesn't take
+ * the test process down; the parent asserts the child died by SIGABRT. */
+TEST(beam_search_rejects_corrupt_entry_count)
+{
+	Dimension	  dim	 = 64;
+	RaBitQParams *params = mkt_rabitq_create(dim, 42);
+	ASSERT_NOT_NULL(params, "params created");
+
+	float *centroid = mkt_alloc(dim * sizeof(float));
+	for (Dimension i = 0; i < dim; i++)
+		centroid[i] = 0.0f;
+	VectorRef cent_ref = {.data = centroid, .dim = dim};
+
+	char *pages = mkt_alloc(2 * (size_t)BLCKSZ);
+	memset(pages, 0, 2 * (size_t)BLCKSZ);
+	Page root_page = pages;
+	mkt_centroid_page_init(root_page, 0);
+
+	float **vecs = mkt_alloc(4 * sizeof(void *));
+	for (int c = 0; c < 4; c++)
+	{
+		vecs[c]			= make_test_vector(dim, c * 37 + 1);
+		VectorRef	v	= {.data = vecs[c], .dim = dim};
+		RaBitQData *enc = mkt_rabitq_encode(params, v, cent_ref);
+		ASSERT_TRUE(
+				mkt_centroid_page_add(root_page, dim, 1, 0, 0, enc),
+				"root entry added");
+		mkt_free(enc);
+	}
+
+	/* Corrupt: claim one more entry than the format can hold. */
+	MktCentroidPageOpaque *op = MKT_CENTROID_OPAQUE(root_page);
+	op->entry_count			  = (uint16_t)(mkt_centroid_max_entries_fmt(
+										   dim, MKT_CENTROID_FMT_RABITQ) +
+								   1);
+
+	float			 *query = make_test_vector(dim, 5555);
+	VectorRef		  qref	= {.data = query, .dim = dim};
+	RaBitQQueryState *qstate =
+			mkt_rabitq_prepare_query(params, qref, cent_ref);
+	TestStorage storage = {
+			.base.ops = &test_storage_ops,
+			.pages	  = pages,
+			.vecs	  = (const float **)vecs,
+			.dim	  = dim,
+	};
+	MktCentroidSearchState st = {
+			.qstate		= qstate,
+			.query		= query,
+			.storage	= &storage.base,
+			.beam_width = 2,
+			.nprobe		= 4,
+			.dim		= dim,
+	};
+
+	fflush(NULL);
+	pid_t pid = fork();
+	ASSERT_TRUE(pid >= 0, "fork succeeded");
+	if (pid == 0)
+	{
+		/* Child: the corrupt count must trip mkt_error -> abort() before
+		 * any out-of-bounds scratch write. Silence stderr so the expected
+		 * diagnostic doesn't clutter the test log. */
+		if (freopen("/dev/null", "w", stderr) == NULL)
+			_exit(2);
+		MktCentroidResult results[4];
+		mkt_centroid_beam_search(&st, 0, 2, results, NULL, NULL);
+		_exit(0); /* reached only if the check failed to fire */
+	}
+
+	int status = 0;
+	waitpid(pid, &status, 0);
+	ASSERT_TRUE(
+			WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
+			"corrupt entry_count aborts instead of overflowing the scratch");
+
+	mkt_rabitq_free_query(qstate);
+	for (int c = 0; c < 4; c++)
+		mkt_free(vecs[c]);
+	mkt_free(vecs);
+	mkt_free(pages);
+	mkt_free(centroid);
+	mkt_free(query);
 	mkt_rabitq_destroy(params);
 }
 

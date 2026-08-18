@@ -8,12 +8,15 @@
  * error-bound-aware pruning.
  */
 
+#include "mkt_config.h"
+
 #include <math.h>
 #include <string.h>
 #include <time.h>
 
 #include "algo/topk.h"
 #include "algo/vecops.h"
+#include "core/log.h"
 #include "core/memory.h"
 #include "core/platform.h"
 #include "index/centroid_search.h"
@@ -209,6 +212,23 @@ score_page(
 	MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
 	uint16_t			   count  = opaque->entry_count;
 	MktCentroidFormat	   fmt	  = mkt_centroid_page_format(page);
+
+	/* The on-disk entry_count drives every loop below -- the RABITQ
+	 * branch fills the max_per_page-sized scratch arrays with `count`
+	 * entries, and the other branches read `count` entries off the page.
+	 * A count past the format's real capacity (corruption, a truncated
+	 * write) would overrun the scratch or read past the page, so reject
+	 * it loudly rather than act on it. The RABITQ capacity equals the
+	 * scratch size the state was built with (mkt_centroid_max_entries). */
+	uint32_t max_entries = mkt_centroid_max_entries_fmt(dim, fmt);
+	if (count > max_entries)
+		mkt_error(
+				MKT_EXTENSION_NAME
+				": centroid page %u has an invalid entry count (%u > %u); "
+				"the index may be corrupted -- REINDEX it",
+				page_blkno,
+				(unsigned)count,
+				max_entries);
 
 	if (count == 0)
 		return cand_count;
