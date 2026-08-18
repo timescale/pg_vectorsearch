@@ -16,10 +16,16 @@
 
 #include <access/generic_xlog.h>
 #include <access/relation.h>
+#include <catalog/index.h>
+#include <catalog/objectaddress.h>
+#include <catalog/pg_class.h>
 #include <funcapi.h>
+#include <miscadmin.h>
 #include <storage/bufmgr.h>
+#include <utils/acl.h>
 #include <utils/array.h>
 #include <utils/builtins.h>
+#include <utils/lsyscache.h>
 #include <utils/rel.h>
 
 #include "index/centroid_page.h"
@@ -72,6 +78,47 @@ check_posting_count(
 						count,
 						max_entries),
 				 errhint("The index may be corrupted; REINDEX it.")));
+}
+
+/*
+ * Authorization for the inspection functions. They expose an index's
+ * internal structure (block numbers, cluster ids, tombstone state), so
+ * gate them on the caller's privileges on the *table* the index belongs
+ * to -- the same model PostgreSQL's pgrowlocks/pgstattuple use for
+ * relation inspection. EXECUTE stays granted to PUBLIC; these runtime
+ * checks do the per-object authorization that a static GRANT cannot
+ * express for a regclass argument. Superusers pass automatically.
+ *
+ * Read-only inspectors require SELECT on the table (its owner has that,
+ * so an owner can always inspect their own index). The conversion
+ * function mutates the index, so it requires table ownership.
+ */
+static void
+require_index_select(Relation index, LOCKMODE lockmode)
+{
+	Oid		  heaprelid = IndexGetRelation(RelationGetRelid(index), false);
+	AclResult aclresult =
+			pg_class_aclcheck(heaprelid, GetUserId(), ACL_SELECT);
+	if (aclresult != ACLCHECK_OK)
+	{
+		char	  *relname = get_rel_name(heaprelid);
+		ObjectType objtype = get_relkind_objtype(get_rel_relkind(heaprelid));
+		relation_close(index, lockmode);
+		aclcheck_error(aclresult, objtype, relname);
+	}
+}
+
+static void
+require_index_owner(Relation index, LOCKMODE lockmode)
+{
+	Oid heaprelid = IndexGetRelation(RelationGetRelid(index), false);
+	if (!object_ownercheck(RelationRelationId, heaprelid, GetUserId()))
+	{
+		char	  *relname = get_rel_name(heaprelid);
+		ObjectType objtype = get_relkind_objtype(get_rel_relkind(heaprelid));
+		relation_close(index, lockmode);
+		aclcheck_error(ACLCHECK_NOT_OWNER, objtype, relname);
+	}
 }
 
 /* ----------------------------------------------------------------
@@ -229,6 +276,8 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 				 errmsg("\"%s\" is not an index",
 						RelationGetRelationName(index))));
 	}
+
+	require_index_select(index, AccessShareLock);
 
 	/* Read metapage and verify magic */
 	Buffer meta_buf = ReadBuffer(index, 0);
@@ -437,6 +486,8 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 						RelationGetRelationName(index))));
 	}
 
+	require_index_select(index, AccessShareLock);
+
 	Buffer meta_buf = ReadBuffer(index, 0);
 	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
 	Page meta_page = BufferGetPage(meta_buf);
@@ -620,6 +671,8 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 						RelationGetRelationName(index))));
 	}
 
+	require_index_owner(index, RowExclusiveLock);
+
 	/* Read metadata */
 	Buffer meta_buf = ReadBuffer(index, 0);
 	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
@@ -768,6 +821,8 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 	qsort(keys, nk, sizeof(uint64), cmp_u64);
 
 	Relation index = relation_open(indexoid, AccessShareLock);
+
+	require_index_select(index, AccessShareLock);
 
 	Buffer meta_buf = ReadBuffer(index, 0);
 	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
