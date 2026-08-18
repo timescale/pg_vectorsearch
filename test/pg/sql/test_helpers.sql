@@ -1,8 +1,15 @@
 -- SQL entry points for the test-only helper module
--- (test/pg/src/test_helpers.c). Not a test: \ir this file from tests
--- that need the extra introspection, and DROP the functions when done.
--- The extension library must be loaded before the helper module
--- resolves its exported symbols (RTLD_NOW), hence the probe call.
+-- (test/pg/src/test_helpers.c).
+--
+-- Include from a test with:
+--     \getenv abs_srcdir PG_ABS_SRCDIR
+--     \set helper_sql :abs_srcdir '/sql/test_helpers.sql'
+--     \i :helper_sql
+-- (absolute path because pg_regress feeds test scripts to psql on
+-- stdin), and DROP the functions when the test is done.
+--
+-- The probe below loads the extension library, which the helper
+-- module's symbols require (RTLD_NOW).
 SELECT mkt.extension_version() IS NOT NULL AS extension_loaded;
 CREATE OR REPLACE FUNCTION rabitq_params_cache(
     OUT dim integer,

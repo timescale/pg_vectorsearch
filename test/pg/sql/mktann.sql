@@ -256,12 +256,7 @@ DROP TABLE cache_c;
 -- ============================================================
 -- Per-backend RaBitQ params cache: refcounting, decay, eviction
 -- ============================================================
--- Test-only introspection (the extension ships no SQL surface for the
--- cache): rabitq_params_cache() / rabitq_cache_clear() from the
--- always-built helper module. pg_regress feeds this script to psql on
--- stdin, so relative \ir would resolve against the harness working
--- directory; include by absolute path via the PG_ABS_SRCDIR pg_regress
--- exports.
+-- Include test helpers for introspecting the cache.
 \getenv abs_srcdir PG_ABS_SRCDIR
 \set helper_sql :abs_srcdir '/sql/test_helpers.sql'
 \i :helper_sql
