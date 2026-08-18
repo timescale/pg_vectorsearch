@@ -33,6 +33,7 @@
 #include <postgres.h>
 
 #include <utils/rel.h>
+#include <utils/resowner.h>
 
 #include "index/index_base.h"
 
@@ -50,16 +51,21 @@
  *
  * base->params is checked out from the process-local rotation-matrix cache
  * and MUST be released with a matching mktann_release_params(base->dim,
- * base->rabitq_seed) when the caller is done with it — see mktann_cache.c.
+ * base->rabitq_seed, owner) when the caller is done with it, where owner is
+ * the CurrentResourceOwner observed at this call — see mktann_cache.c. The
+ * checkout is registered with that owner, so an error path that skips the
+ * release (aborted scan, failed insert) still returns the refcount when the
+ * owner is released.
  */
 void mktann_index_base_init(Relation index, MktIndexBase *base);
 
 /*
  * Release a params checkout obtained via mktann_index_base_init. dim and seed
  * must be exactly the values observed on the corresponding base->dim /
- * base->rabitq_seed at checkout time.
+ * base->rabitq_seed at checkout time; owner is the CurrentResourceOwner that
+ * was in effect at the mktann_index_base_init call.
  */
-void mktann_release_params(Dimension dim, uint64_t seed);
+void mktann_release_params(Dimension dim, uint64_t seed, ResourceOwner owner);
 
 /*
  * Test support: one snapshot row per cached RaBitQ rotation matrix in

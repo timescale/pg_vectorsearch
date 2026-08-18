@@ -79,8 +79,12 @@ mktann_insert(
 	MemoryContext old_ctx = MemoryContextSwitchTo(insert_ctx);
 
 	/* Immutable index parameters from the per-backend cache (metapage read at
-	 * most once per backend, not once per insert). */
-	MktIndexBase base;
+	 * most once per backend, not once per insert). The checkout is
+	 * registered with the current resource owner; capture it for the
+	 * release below (and for the error paths in between, which release
+	 * through the owner instead). */
+	ResourceOwner params_owner = CurrentResourceOwner;
+	MktIndexBase  base;
 	mktann_index_base_init(index, &base);
 	Dimension dim = base.dim;
 
@@ -159,7 +163,7 @@ mktann_insert(
 
 	/* Check the RaBitQParams checkout back in — see mktann_index_base_init
 	 * above. */
-	mktann_release_params(dim, base.rabitq_seed);
+	mktann_release_params(dim, base.rabitq_seed, params_owner);
 
 	/* bool result is only meaningful for unique indexes. */
 	return false;

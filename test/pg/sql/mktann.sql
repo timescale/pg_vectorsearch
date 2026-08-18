@@ -368,6 +368,58 @@ COMMIT;
 -- The commit closed the held scan: checkout released.
 SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
 
+-- ============================================================
+-- Error safety: checkouts must be returned on every error path
+-- ============================================================
+-- Checkouts are registered with the checkout-time resource owner, so a
+-- scan or insert that never reaches its normal release still returns
+-- its refcount when the owner is released. Without that, one aborted
+-- query would pin its entry unevictable for the backend's lifetime.
+
+-- An aborted transaction drops the cursor's portal without running
+-- endscan: the owner sweep must return the checkout (usage keeps its
+-- checkout bump; only the refcount reverts).
+BEGIN;
+DECLARE cabort CURSOR FOR
+    SELECT id FROM cache_t80 ORDER BY v <-> ('[1' || repeat(',0', 79) || ']')::vector LIMIT 5;
+FETCH 1 FROM cabort;
+SELECT refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() WHERE dim = 80;
+SELECT 1 / 0;
+ROLLBACK;
+SELECT refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() WHERE dim = 80;
+
+-- Savepoint scoping: rolling back a subtransaction returns only the
+-- checkouts made inside it — the outer scan's checkout survives and
+-- the outer cursor stays usable.
+BEGIN;
+DECLARE couter CURSOR FOR
+    SELECT id FROM cache_t72 ORDER BY v <-> ('[1' || repeat(',0', 71) || ']')::vector LIMIT 5;
+FETCH 1 FROM couter;
+SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
+SAVEPOINT s1;
+DECLARE cinner CURSOR FOR
+    SELECT id FROM cache_t72 ORDER BY v <-> ('[2' || repeat(',0', 71) || ']')::vector LIMIT 5;
+FETCH 1 FROM cinner;
+SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
+ROLLBACK TO s1;
+SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
+FETCH 1 FROM couter;
+COMMIT;
+SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
+
+-- Insert path: aminsert brackets one checkout/release around each
+-- inserted tuple (usage +1, refcount back to 0). Its error paths go
+-- through the same owner registration the scan tests above exercise;
+-- the in-AM dimension-mismatch error itself is not separately
+-- reachable (typmod'd columns reject mismatches before the AM, and
+-- undimensioned vector columns cannot be indexed at all).
+INSERT INTO cache_t80
+    SELECT 999, ('[9' || repeat(',0', 79) || ']')::vector;
+SELECT refcount, round(usage::numeric, 4) AS usage
+FROM rabitq_params_cache() WHERE dim = 80;
+
 -- Cleanup.
 DO $$
 DECLARE d int;

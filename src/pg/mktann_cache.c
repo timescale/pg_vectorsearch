@@ -18,6 +18,7 @@
 #include <storage/bufmgr.h>
 #include <utils/hsearch.h>
 #include <utils/memutils.h>
+#include <utils/resowner.h>
 
 #include "mkt_pg.h"
 #include "mktann_cache.h"
@@ -49,6 +50,9 @@
  *     target rather than failing a live caller -- the target is not a
  *     hard cap.
  *   - mktann_release_params() checks an entry back in (refcount--).
+ *     Checkouts are additionally tracked by the checkout-time resource
+ *     owner, so error paths that skip the release still return the
+ *     refcount -- see rabitq_params_ref_desc below.
  * ---------------------------------------------------------------- */
 
 /* Above this many live entries, try to reclaim an idle one before growing
@@ -78,6 +82,37 @@ static HTAB *rabitq_cache = NULL;
  * CacheMemoryContext, so it has backend lifetime but shows up as its own
  * line in a memory-context dump. */
 static MemoryContext rabitq_cache_cxt = NULL;
+
+/*
+ * Error safety for the refcounts: every checkout is also registered
+ * with the resource owner current at checkout time. If an error keeps
+ * the matching release from running -- an aborted scan's portal is
+ * dropped without amendscan, or an insert errors between checkout and
+ * release -- the owner's release sweep calls back here and returns the
+ * refcount, so no entry is left unevictable. A checkout leaked on the
+ * commit path additionally gets PostgreSQL's standard "resource was not
+ * closed" warning, turning a pairing bug into a visible failure.
+ */
+static void rabitq_params_ref_release(Datum res);
+
+static const ResourceOwnerDesc rabitq_params_ref_desc = {
+		.name			  = "mktann rabitq params ref",
+		.release_phase	  = RESOURCE_RELEASE_BEFORE_LOCKS,
+		.release_priority = RELEASE_PRIO_FIRST,
+		.ReleaseResource  = rabitq_params_ref_release,
+		.DebugPrint		  = NULL,
+};
+
+static void
+rabitq_params_ref_release(Datum res)
+{
+	RaBitQCacheEntry *entry = (RaBitQCacheEntry *)DatumGetPointer(res);
+
+	/* Only reached for checkouts no normal release forgot: error paths. */
+	Assert(entry->refcount > 0);
+	if (entry->refcount > 0)
+		entry->refcount--;
+}
 
 static void
 rabitq_cache_init(void)
@@ -150,8 +185,15 @@ get_or_create_params(Dimension dim, uint64_t seed)
 	entry = hash_search(rabitq_cache, &key, HASH_FIND, &found);
 	if (found && entry->params != NULL)
 	{
+		/* Enlarge first: it can allocate, and nothing may fail between
+		 * the refcount bump and the (no-fail) Remember. */
+		ResourceOwnerEnlarge(CurrentResourceOwner);
 		entry->usage += MKT_RABITQ_USAGE_INCREMENT;
 		entry->refcount++;
+		ResourceOwnerRemember(
+				CurrentResourceOwner,
+				PointerGetDatum(entry),
+				&rabitq_params_ref_desc);
 		return entry->params;
 	}
 
@@ -166,17 +208,27 @@ get_or_create_params(Dimension dim, uint64_t seed)
 
 	/* Mark it dead/pending before any allocation that could throw: a
 	 * failure below then leaves a well-defined, idle, re-creatable entry
-	 * instead of one that looks live with garbage params. */
+	 * instead of one that looks live with garbage params. The matrix is
+	 * generated into a local pointer and only published once fully
+	 * initialized, for the same reason (an error out of mkt_rabitq_init
+	 * must not leave a live-looking entry holding a garbage matrix). */
 	entry->params	= NULL;
 	entry->refcount = 0;
 	entry->usage	= 0;
 
-	entry->params =
-			MemoryContextAlloc(rabitq_cache_cxt, MKT_RABITQ_PARAMS_SIZE(dim));
+	ResourceOwnerEnlarge(CurrentResourceOwner);
 
-	mkt_rabitq_init(entry->params, dim, seed);
+	RaBitQParams *params =
+			MemoryContextAlloc(rabitq_cache_cxt, MKT_RABITQ_PARAMS_SIZE(dim));
+	mkt_rabitq_init(params, dim, seed);
+
+	entry->params	= params;
 	entry->refcount = 1;
 	entry->usage	= MKT_RABITQ_USAGE_INCREMENT;
+	ResourceOwnerRemember(
+			CurrentResourceOwner,
+			PointerGetDatum(entry),
+			&rabitq_params_ref_desc);
 
 	return entry->params;
 }
@@ -188,7 +240,7 @@ get_or_create_params(Dimension dim, uint64_t seed)
  * runtime condition.
  */
 void
-mktann_release_params(Dimension dim, uint64_t seed)
+mktann_release_params(Dimension dim, uint64_t seed, ResourceOwner owner)
 {
 	RaBitQCacheKey	  key = {0};
 	RaBitQCacheEntry *entry;
@@ -206,6 +258,10 @@ mktann_release_params(Dimension dim, uint64_t seed)
 	entry = hash_search(rabitq_cache, &key, HASH_FIND, &found);
 	if (found)
 	{
+		/* Forget first: it errors on a pairing bug (wrong owner), and
+		 * the refcount must stay consistent with the registrations. */
+		ResourceOwnerForget(
+				owner, PointerGetDatum(entry), &rabitq_params_ref_desc);
 		Assert(entry->refcount > 0);
 		if (entry->refcount > 0)
 			entry->refcount--;
