@@ -84,6 +84,15 @@ FROM mkt.posting_pages('grow2_idx');
 SELECT id FROM grow2
 ORDER BY v OPERATOR(mkt.<->) '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
 
+-- Unlogged tables are refused: meerkat has no valid empty-index image to
+-- seed the init fork with, so a crash would wipe the index. Fail at CREATE
+-- INDEX time rather than corrupt later; SET LOGGED is the escape hatch.
+CREATE UNLOGGED TABLE unlogged_t (id int, v vector(8));
+CREATE INDEX ON unlogged_t USING mktann (v vector_l2_ops);
+ALTER TABLE unlogged_t SET LOGGED;
+CREATE INDEX ON unlogged_t USING mktann (v vector_l2_ops);
+DROP TABLE unlogged_t;
+
 RESET enable_seqscan;
 DROP TABLE empty_cos;
 DROP TABLE all_dead;

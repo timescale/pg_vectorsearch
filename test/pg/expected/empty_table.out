@@ -141,6 +141,16 @@ ORDER BY v OPERATOR(mkt.<->) '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
   999
 (3 rows)
 
+-- Unlogged tables are refused: meerkat has no valid empty-index image to
+-- seed the init fork with, so a crash would wipe the index. Fail at CREATE
+-- INDEX time rather than corrupt later; SET LOGGED is the escape hatch.
+CREATE UNLOGGED TABLE unlogged_t (id int, v vector(8));
+CREATE INDEX ON unlogged_t USING mktann (v vector_l2_ops);
+ERROR:  mktann indexes do not support unlogged tables
+HINT:  Use a logged table, or run ALTER TABLE ... SET LOGGED before creating the index.
+ALTER TABLE unlogged_t SET LOGGED;
+CREATE INDEX ON unlogged_t USING mktann (v vector_l2_ops);
+DROP TABLE unlogged_t;
 RESET enable_seqscan;
 DROP TABLE empty_cos;
 DROP TABLE all_dead;

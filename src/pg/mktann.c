@@ -38,10 +38,23 @@ PG_FUNCTION_INFO_V1(mktann_handler);
  * Trivial stubs (no separate file needed)
  * ---------------------------------------------------------------- */
 
+/*
+ * ambuildempty populates the init fork of an unlogged index so that crash
+ * recovery has a valid image to copy over the main fork. meerkat has no
+ * notion of a valid "empty" index image -- even a build over zero rows
+ * produces a real single-cluster tree -- so a no-op here would leave the
+ * init fork at zero blocks and let recovery wipe the whole index, metadata
+ * page included. Rather than seed the init fork with an index shape nothing
+ * else ever exercises, refuse unlogged tables outright at CREATE INDEX time.
+ */
 static void
 mktann_buildempty(Relation index)
 {
-	/* nothing to do */
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("mktann indexes do not support unlogged tables"),
+			 errhint("Use a logged table, or run ALTER TABLE ... SET LOGGED "
+					 "before creating the index.")));
 }
 
 /*
