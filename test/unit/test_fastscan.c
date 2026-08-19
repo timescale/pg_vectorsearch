@@ -45,9 +45,9 @@ get_fastscan_simd_mask(const char *variant, uint32_t *simd_mask)
 	}
 	if (strcmp(variant, "avx512") == 0)
 	{
-		if (!(mkt_detect_simd() & SIMD_AVX512F))
+		if (!mkt_has_all_simd(MKT_SIMD_AVX512_BW))
 			return false;
-		*simd_mask = SIMD_AVX512F;
+		*simd_mask = MKT_SIMD_AVX512_BW;
 		return true;
 	}
 #elif defined(__aarch64__) || defined(_M_ARM64)

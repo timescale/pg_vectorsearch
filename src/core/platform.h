@@ -23,7 +23,22 @@ typedef enum
 	SIMD_AVX512F		  = 1 << 3,
 	SIMD_NEON			  = 1 << 4,
 	SIMD_AVX512_VPOPCNTDQ = 1 << 5,
+	SIMD_AVX512DQ		  = 1 << 6,
+	SIMD_AVX512BW		  = 1 << 7,
 } SimdCapability;
+
+/*
+ * The AVX-512 kernels are compiled for specific sub-extensions (see the
+ * MKT_TARGET_AVX512* attributes in simd_utils.h and the target attributes in
+ * the *_avx512.c files), not plain AVX512F. Dispatch -- and the test/bench
+ * overrides that force a path -- must require every bit the kernels use: a
+ * CPU can implement F without BW or DQ (e.g. Knights Landing), and running
+ * the compiled kernels there faults with SIGILL. VPOPCNTDQ kernels are gated
+ * separately on SIMD_AVX512_VPOPCNTDQ (which already implies F).
+ */
+#define MKT_SIMD_AVX512_DQ \
+	(SIMD_AVX512F | SIMD_AVX512DQ) /* distance, rabitq */
+#define MKT_SIMD_AVX512_BW (SIMD_AVX512F | SIMD_AVX512BW) /* fastscan */
 
 /*
  * Detect CPU SIMD capabilities at runtime.
@@ -42,6 +57,16 @@ static inline int
 mkt_has_simd(SimdCapability cap)
 {
 	return (mkt_detect_simd() & cap) != 0;
+}
+
+/*
+ * Check that ALL bits in mask are available. Use with the MKT_SIMD_AVX512_*
+ * masks so a multi-bit requirement (F + BW, F + DQ) is tested as a unit.
+ */
+static inline int
+mkt_has_all_simd(SimdCapability mask)
+{
+	return (mkt_detect_simd() & mask) == (SimdCapability)mask;
 }
 
 /*

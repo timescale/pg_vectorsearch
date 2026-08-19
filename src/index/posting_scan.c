@@ -101,7 +101,7 @@ mkt_posting_scan_enable_fastscan(MktPostingScan *scan, int lut_bits)
 	/* Resolve dispatch once per scan (see posting_scan.h). */
 	scan->fs_accum_hacc = mkt_fastscan_get_accumulate_hacc();
 #if defined(MKT_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
-	scan->fs_has_avx512 = mkt_has_simd(SIMD_AVX512F);
+	scan->fs_has_avx512 = mkt_has_all_simd(MKT_SIMD_AVX512_BW);
 #else
 	scan->fs_has_avx512 = false;
 #endif

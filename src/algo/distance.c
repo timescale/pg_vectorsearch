@@ -319,7 +319,7 @@ mkt_distance_init(void)
 	SimdCapability caps = mkt_detect_simd();
 
 #if defined(__x86_64__) || defined(_M_X64)
-	if (caps & SIMD_AVX512F)
+	if ((caps & MKT_SIMD_AVX512_DQ) == MKT_SIMD_AVX512_DQ)
 	{
 		g_distance_l2_fn	 = mkt_distance_l2_avx512;
 		g_distance_ip_fn	 = mkt_distance_ip_avx512;
@@ -443,7 +443,7 @@ static Distance (*resolve_distance_l2(void))(VectorRef, VectorRef)
 	SimdCapability caps = mkt_detect_simd();
 
 #if defined(__x86_64__) || defined(_M_X64)
-	if (caps & SIMD_AVX512F)
+	if ((caps & MKT_SIMD_AVX512_DQ) == MKT_SIMD_AVX512_DQ)
 		return mkt_distance_l2_avx512;
 	else if (caps & SIMD_AVX2)
 		return mkt_distance_l2_avx2;
@@ -460,7 +460,7 @@ static Distance (*resolve_distance_ip(void))(VectorRef, VectorRef)
 	SimdCapability caps = mkt_detect_simd();
 
 #if defined(__x86_64__) || defined(_M_X64)
-	if (caps & SIMD_AVX512F)
+	if ((caps & MKT_SIMD_AVX512_DQ) == MKT_SIMD_AVX512_DQ)
 		return mkt_distance_ip_avx512;
 	else if (caps & SIMD_AVX2)
 		return mkt_distance_ip_avx2;
@@ -477,7 +477,7 @@ static Distance (*resolve_distance_cosine(void))(VectorRef, VectorRef)
 	SimdCapability caps = mkt_detect_simd();
 
 #if defined(__x86_64__) || defined(_M_X64)
-	if (caps & SIMD_AVX512F)
+	if ((caps & MKT_SIMD_AVX512_DQ) == MKT_SIMD_AVX512_DQ)
 		return mkt_distance_cosine_avx512;
 	else if (caps & SIMD_AVX2)
 		return mkt_distance_cosine_avx2;

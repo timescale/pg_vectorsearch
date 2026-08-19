@@ -142,6 +142,14 @@ detect_simd_x86(void)
 			{
 				caps |= SIMD_AVX512F;
 
+				/* AVX512DQ: EBX bit 17 */
+				if (ebx & (1 << 17))
+					caps |= SIMD_AVX512DQ;
+
+				/* AVX512BW: EBX bit 30 */
+				if (ebx & (1 << 30))
+					caps |= SIMD_AVX512BW;
+
 				/* VPOPCNTDQ: ECX bit 14 (Ice Lake 2019+) */
 				if (ecx & (1 << 14))
 					caps |= SIMD_AVX512_VPOPCNTDQ;
