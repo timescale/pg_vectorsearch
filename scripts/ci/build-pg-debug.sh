@@ -34,10 +34,22 @@ fi
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
-url="https://ftp.postgresql.org/pub/source/v${VERSION}/postgresql-${VERSION}.tar.bz2"
+tarball="postgresql-${VERSION}.tar.bz2"
+url="https://ftp.postgresql.org/pub/source/v${VERSION}/${tarball}"
 echo "==> Downloading $url"
-curl -fsSL "$url" -o "$workdir/postgresql.tar.bz2"
-tar -xf "$workdir/postgresql.tar.bz2" -C "$workdir"
+curl -fsSL "$url" -o "$workdir/$tarball"
+curl -fsSL "${url}.sha256" -o "$workdir/${tarball}.sha256"
+
+# Verify the tarball against PostgreSQL's published checksum before trusting
+# it. TLS protects the download in transit but not the artifact at rest, so
+# this guards against a tampered or corrupted tarball at the origin/mirror.
+echo "==> Verifying checksum"
+if ! (cd "$workdir" && sha256sum -c "${tarball}.sha256"); then
+    echo "==> ERROR: checksum verification failed for $tarball" >&2
+    exit 1
+fi
+
+tar -xf "$workdir/$tarball" -C "$workdir"
 
 (
     cd "$workdir/postgresql-${VERSION}"
