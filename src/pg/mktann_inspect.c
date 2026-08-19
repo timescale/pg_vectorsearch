@@ -600,26 +600,48 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
  * ---------------------------------------------------------------- */
 
 /*
- * Update a centroid leaf entry's posting head pointer via WAL.
+ * Point a centroid leaf entry at new_head via WAL, but only if it still
+ * points at expected_old_head. The compare-and-set runs under the same
+ * exclusive lock as the write, with no gap, so it is the concurrency gate
+ * for conversion: convert_posting_to_fastscan holds only RowExclusiveLock
+ * (which does not conflict with itself), so two calls can race on one
+ * cluster. The head pointer -- not the posting page's fastscan flag -- is
+ * what conversion actually updates, so it is the correct thing to test.
+ *
+ * Returns true if it performed the update. Returns false if another
+ * converter already moved the head, writing the current head to
+ * *current_head_out (the caller's freshly built chain is then orphaned,
+ * to be reclaimed by a later rebuild/VACUUM).
  */
-static void
+static bool
 update_centroid_posting_head(
-		Relation	index,
-		BlockNumber centroid_page,
-		uint16_t	entry_idx,
-		BlockNumber new_head)
+		Relation	 index,
+		BlockNumber	 centroid_page,
+		uint16_t	 entry_idx,
+		BlockNumber	 expected_old_head,
+		BlockNumber	 new_head,
+		BlockNumber *current_head_out)
 {
-	GenericXLogState *state = GenericXLogStart(index);
-	Buffer			  buf	= ReadBuffer(index, centroid_page);
+	Buffer buf = ReadBuffer(index, centroid_page);
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-	Page page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
 
 	MktCentroidEntryMeta *entry = (MktCentroidEntryMeta *)
-			mkt_centroid_meta(page, entry_idx);
+			mkt_centroid_meta(BufferGetPage(buf), entry_idx);
+	if (entry->child_blkno != expected_old_head)
+	{
+		*current_head_out = entry->child_blkno;
+		UnlockReleaseBuffer(buf);
+		return false;
+	}
+
+	GenericXLogState *state = GenericXLogStart(index);
+	Page page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
+	entry	  = (MktCentroidEntryMeta *)mkt_centroid_meta(page, entry_idx);
 	entry->child_blkno = new_head;
 
 	GenericXLogFinish(state);
 	UnlockReleaseBuffer(buf);
+	return true;
 }
 
 /*
@@ -741,7 +763,24 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	BlockNumber new_head =
 			mkt_posting_convert_to_fastscan(&storage.base, old_head, dim);
 
-	update_centroid_posting_head(index, centroid_page, entry_idx, new_head);
+	/*
+	 * Publish the new head, but only if a concurrent converter has not
+	 * already moved it. If it has, our new_head chain is orphaned and the
+	 * winner's head is returned instead.
+	 */
+	BlockNumber current_head;
+	if (!update_centroid_posting_head(
+				index,
+				centroid_page,
+				entry_idx,
+				old_head,
+				new_head,
+				&current_head))
+	{
+		relation_close(index, RowExclusiveLock);
+		PG_RETURN_INT32((int32)current_head);
+	}
+
 	ensure_meta_fastscan_flag(index);
 
 	relation_close(index, RowExclusiveLock);
