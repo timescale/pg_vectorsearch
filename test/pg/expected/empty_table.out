@@ -151,6 +151,24 @@ HINT:  Use a logged table, or run ALTER TABLE ... SET LOGGED before creating the
 ALTER TABLE unlogged_t SET LOGGED;
 CREATE INDEX ON unlogged_t USING mktann (v vector_l2_ops);
 DROP TABLE unlogged_t;
+-- A temp table builds a normal, queryable index while skipping WAL: the
+-- bulk-build finalize guards its log_newpage on RelationNeedsWAL (false for
+-- temp relations), matching core index AMs. The index must still answer.
+CREATE TEMP TABLE temp_t (id int, v vector(8));
+INSERT INTO temp_t
+SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vector
+FROM generate_series(1, 50) g;
+CREATE INDEX ON temp_t USING mktann (v vector_l2_ops);
+SELECT id FROM temp_t
+ORDER BY v OPERATOR(mkt.<->) '[10.4,1,0,0,0,0,0,0]' LIMIT 3;
+ id 
+----
+ 10
+ 11
+  9
+(3 rows)
+
+DROP TABLE temp_t;
 RESET enable_seqscan;
 DROP TABLE empty_cos;
 DROP TABLE all_dead;

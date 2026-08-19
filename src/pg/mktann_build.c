@@ -1403,12 +1403,22 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 					global_mean);
 		}
 		mkt_build_report_phase(&prog, MKT_BUILD_PHASE_WAL);
-		log_newpage_range(
-				index,
-				MAIN_FORKNUM,
-				0,
-				RelationGetNumberOfBlocks(index),
-				true);
+		/*
+		 * WAL-log the built pages only when the relation is WAL-logged, the
+		 * same guard every core index AM (GiST/GIN/SP-GiST) applies here.
+		 * Temp relations and same-transaction builds under wal_level=minimal
+		 * skip this: emitting WAL for them is wasted volume, and doing so
+		 * against a session-local temp relfilenode is something no core AM
+		 * does. (Unlogged tables never reach this path -- their build is
+		 * rejected up front in mktann_buildempty.)
+		 */
+		if (RelationNeedsWAL(index))
+			log_newpage_range(
+					index,
+					MAIN_FORKNUM,
+					0,
+					RelationGetNumberOfBlocks(index),
+					true);
 	}
 
 	/* Flush the final phase timing + emit the build summary (heap_ctx is read
