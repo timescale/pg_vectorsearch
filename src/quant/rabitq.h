@@ -126,8 +126,15 @@ typedef struct RaBitQParams
 } RaBitQParams;
 
 /* Total byte size for a RaBitQParams with dim x dim matrix */
+/*
+ * The matrix is dim*dim floats. Cast to a fixed 64-bit type before the
+ * multiply so the product is computed in 64 bits on every platform: plain
+ * int32 overflows once dim exceeds ~46340, and size_t would still be 32-bit
+ * on ILP32 targets. Unreachable at today's dimension caps, but keeps the
+ * arithmetic robust if a cap is ever raised.
+ */
 #define MKT_RABITQ_PARAMS_SIZE(dim) \
-	(offsetof(RaBitQParams, P) + (size_t)(dim) * (dim) * sizeof(float))
+	(offsetof(RaBitQParams, P) + (uint64_t)(dim) * (dim) * sizeof(float))
 
 /*
  * RaBitQScratch - Pre-allocated scratch buffers for encoding

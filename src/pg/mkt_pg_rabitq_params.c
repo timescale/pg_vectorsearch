@@ -11,9 +11,27 @@
 #include <fmgr.h>
 #include <lib/stringinfo.h>
 #include <utils/builtins.h>
+#include <utils/memutils.h>
 
+#include "index/posting_page.h"
 #include "mkt_pg.h"
 #include "quant/matrix.h"
+
+/*
+ * The generator caps dim at MKT_INDEX_MAX_DIM (see
+ * mkt_pg_check_rabitq_params_dim_valid). Prove at compile time that a
+ * matrix that large still fits a single allocation, so raising the cap
+ * without revisiting MKT_RABITQ_PARAMS_PG_SIZE breaks the build here
+ * rather than silently over-allocating (or, on 32-bit, overflowing the
+ * size computation) at run time.
+ */
+StaticAssertDecl(
+		offsetof(RaBitQParamsPG, P) + (uint64_t)MKT_INDEX_MAX_DIM *
+											  MKT_INDEX_MAX_DIM *
+											  sizeof(float) <=
+				MaxAllocSize,
+		"rabitq_params matrix at MKT_INDEX_MAX_DIM exceeds MaxAllocSize; "
+		"revisit MKT_RABITQ_PARAMS_PG_SIZE and the dim cap together");
 
 /* ----------------------------------------------------------------
  * Type I/O
@@ -61,7 +79,7 @@ mkt_rabitq_params_generate_pg(PG_FUNCTION_ARGS)
 
 	mkt_pg_check_rabitq_params_dim_valid(dim);
 
-	int				size   = MKT_RABITQ_PARAMS_PG_SIZE(dim);
+	Size			size   = MKT_RABITQ_PARAMS_PG_SIZE(dim);
 	RaBitQParamsPG *result = (RaBitQParamsPG *)palloc0(size);
 	SET_VARSIZE(result, size);
 	result->dim	   = (int16_t)dim;

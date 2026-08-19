@@ -75,8 +75,16 @@ typedef struct RaBitQParamsPG
 	float	 P[];
 } RaBitQParamsPG;
 
+/*
+ * The matrix is dim*dim floats. Cast to a fixed 64-bit type before the
+ * multiply so the product is computed in 64 bits on every platform: plain
+ * int32 overflows once dim exceeds ~46340, and size_t would still be 32-bit
+ * on ILP32 targets. Unreachable at today's dimension caps, but keeps the
+ * arithmetic robust if a cap is ever raised, matching the sibling
+ * MKT_RABITQ_PARAMS_SIZE macro in rabitq.h.
+ */
 #define MKT_RABITQ_PARAMS_PG_SIZE(dim) \
-	(offsetof(RaBitQParamsPG, P) + (dim) * (dim) * sizeof(float))
+	(offsetof(RaBitQParamsPG, P) + (uint64_t)(dim) * (dim) * sizeof(float))
 
 #define DatumGetRaBitQParamsPG(x)	 ((RaBitQParamsPG *)PG_DETOAST_DATUM(x))
 #define PG_GETARG_RABITQ_PARAMS_P(x) DatumGetRaBitQParamsPG(PG_GETARG_DATUM(x))
