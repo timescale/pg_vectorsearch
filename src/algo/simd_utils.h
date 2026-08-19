@@ -238,25 +238,29 @@ mkt_horizontal_sum_u64_neon(uint64x2_t v)
  * Selects the best available implementation based on runtime CPU detection.
  * Falls back to scalar if no SIMD implementation is available.
  */
-#define INIT_DISPATCH(name, scalar, avx512, avx2, neon) \
-	static inline int name##_init(void)                 \
-	{                                                   \
-		if (g_##name##_initialized)                     \
-			return 0;                                   \
-                                                        \
-		SimdCapability caps = mkt_detect_simd();        \
-                                                        \
-		if ((caps & SIMD_AVX512F) && (avx512) != NULL)  \
-			g_##name##_fn = avx512;                     \
-		else if ((caps & SIMD_AVX2) && (avx2) != NULL)  \
-			g_##name##_fn = avx2;                       \
-		else if ((caps & SIMD_NEON) && (neon) != NULL)  \
-			g_##name##_fn = neon;                       \
-		else                                            \
-			g_##name##_fn = scalar;                     \
-                                                        \
-		g_##name##_initialized = true;                  \
-		return 0;                                       \
+#define INIT_DISPATCH(name, scalar, avx512, avx2, neon)                      \
+	static inline int name##_init(void)                                      \
+	{                                                                        \
+		if (g_##name##_initialized)                                          \
+			return 0;                                                        \
+                                                                             \
+		SimdCapability caps = mkt_detect_simd();                             \
+                                                                             \
+		/* Require every AVX-512 sub-extension any kernel                    \
+		 * here may use (F+DQ+BW), not just F -- see                         \
+		 * MKT_SIMD_AVX512_* in platform.h. */                               \
+		SimdCapability avx512_req = MKT_SIMD_AVX512_DQ | MKT_SIMD_AVX512_BW; \
+		if (((caps & avx512_req) == avx512_req) && (avx512) != NULL)         \
+			g_##name##_fn = avx512;                                          \
+		else if ((caps & SIMD_AVX2) && (avx2) != NULL)                       \
+			g_##name##_fn = avx2;                                            \
+		else if ((caps & SIMD_NEON) && (neon) != NULL)                       \
+			g_##name##_fn = neon;                                            \
+		else                                                                 \
+			g_##name##_fn = scalar;                                          \
+                                                                             \
+		g_##name##_initialized = true;                                       \
+		return 0;                                                            \
 	}
 
 /*

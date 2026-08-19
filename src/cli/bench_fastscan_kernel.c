@@ -472,7 +472,7 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 
 #if defined(__x86_64__) || defined(_M_X64)
 	SimdLevel levels[] = {
-			{SIMD_AVX512F, "avx512", true},
+			{MKT_SIMD_AVX512_BW, "avx512", true},
 			{SIMD_AVX2, "avx2", false},
 			{0, "scalar", false},
 	};

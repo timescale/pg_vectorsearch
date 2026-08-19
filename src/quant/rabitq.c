@@ -159,7 +159,7 @@ mkt_rabitq_init_simd(void)
 	SimdCapability caps = mkt_detect_simd();
 
 #if defined(__x86_64__) || defined(_M_X64)
-	if (caps & SIMD_AVX512F)
+	if ((caps & MKT_SIMD_AVX512_DQ) == MKT_SIMD_AVX512_DQ)
 	{
 		g_inner_product_fn		 = mkt_rabitq_inner_product_avx512;
 		g_inner_product_multi_fn = mkt_rabitq_inner_product_multi_avx512;

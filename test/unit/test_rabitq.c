@@ -857,10 +857,10 @@ get_rabitq_simd_mask(
 	else if (strcmp(variant, "avx512") == 0)
 	{
 		SimdCapability caps = mkt_detect_simd();
-		if (!(caps & SIMD_AVX512F))
+		if ((caps & MKT_SIMD_AVX512_DQ) != MKT_SIMD_AVX512_DQ)
 			return false;
 		*expected_name = "avx512";
-		*simd_mask	   = SIMD_AVX512F;
+		*simd_mask	   = MKT_SIMD_AVX512_DQ;
 		return true;
 	}
 	else if (strcmp(variant, "neon") == 0)

@@ -39,7 +39,7 @@ static const ImplSpec impls[] = {
 		{"compiler", SIMD_NONE},
 #if defined(MKT_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
 		{"avx2", SIMD_AVX2},
-		{"avx512", SIMD_AVX512F},
+		{"avx512", MKT_SIMD_AVX512_DQ},
 #endif
 #if defined(MKT_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
 		{"neon", SIMD_NEON},

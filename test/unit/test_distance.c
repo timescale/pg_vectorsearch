@@ -332,11 +332,11 @@ get_simd_mask_for_variant(
 	else if (strcmp(variant, "avx512") == 0)
 	{
 		SimdCapability caps = mkt_detect_simd();
-		if (!(caps & SIMD_AVX512F))
+		if ((caps & MKT_SIMD_AVX512_DQ) != MKT_SIMD_AVX512_DQ)
 			return false; /* Not available */
 
 		*expected_name = "avx512";
-		*simd_mask	   = SIMD_AVX512F;
+		*simd_mask	   = MKT_SIMD_AVX512_DQ;
 		return true;
 	}
 	else if (strcmp(variant, "neon") == 0)
@@ -1094,14 +1094,14 @@ TEST(force_avx512_implementation)
 {
 	/* Check if AVX-512 is available */
 	SimdCapability caps = mkt_detect_simd();
-	if (!(caps & SIMD_AVX512F))
+	if ((caps & MKT_SIMD_AVX512_DQ) != MKT_SIMD_AVX512_DQ)
 	{
 		TEST_PRINT("AVX-512 not available, skipping test\n");
 		return;
 	}
 
 	/* Force AVX-512 mode */
-	reinit_distance_with_simd(SIMD_AVX512F);
+	reinit_distance_with_simd(MKT_SIMD_AVX512_DQ);
 
 	const char *name = mkt_distance_impl_name();
 	ASSERT_STR_EQ("avx512", name, "should use AVX-512 implementation");
@@ -1198,9 +1198,9 @@ TEST(test_all_avx_dimensions)
 		}
 
 		/* AVX-512 (if available) */
-		if (caps & SIMD_AVX512F)
+		if ((caps & MKT_SIMD_AVX512_DQ) == MKT_SIMD_AVX512_DQ)
 		{
-			reinit_distance_with_simd(SIMD_AVX512F);
+			reinit_distance_with_simd(MKT_SIMD_AVX512_DQ);
 			Distance d_avx512 = mkt_distance_l2(va, vb);
 
 			char msg[128];

@@ -492,7 +492,7 @@ mkt_fastscan_init_simd(void)
 #ifdef MKT_SIMD_FULL
 #if defined(__x86_64__) || defined(_M_X64)
 	SimdCapability caps = mkt_detect_simd();
-	if (caps & SIMD_AVX512F)
+	if ((caps & MKT_SIMD_AVX512_BW) == MKT_SIMD_AVX512_BW)
 	{
 		g_fastscan_accumulate_fn	  = mkt_fastscan_accumulate_avx512;
 		g_fastscan_accumulate_hacc_fn = mkt_fastscan_accumulate_hacc_avx512;
