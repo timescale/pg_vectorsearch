@@ -27,8 +27,8 @@
 #include "algo/topk.h"
 #include "algo/vecops.h"
 #include "index/posting_page.h"
-#include "mkt_pg.h"
 #include "mktann_storage.h"
+#include "support_pg.h"
 
 /* Downcast from base to concrete type */
 #define PG_STORAGE(self) ((MktannStorage *)(self))

@@ -17,10 +17,10 @@
 #include "cmd.h"
 #include "core/memory.h"
 #include "core/platform.h"
-#include "mkt_halfvec.h"
-#include "mkt_types.h"
+#include "core/types.h"
 #include "quant/matrix.h"
 #include "quant/rabitq.h"
+#include "types/halfvec.h"
 
 #ifdef MKT_HAVE_FAISS
 #include <RaBitQuantizer_c.h>

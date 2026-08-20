@@ -15,10 +15,10 @@
 #include <utils/rel.h>
 
 #include "algo/hkmeans.h"
+#include "core/types.h"
 #include "index/build_progress.h" /* canonical MKT_BUILD_PHASE_* */
 #include "index/index_base.h"
 #include "index/parallel_build.h" /* MktBuildConfig */
-#include "mkt_types.h"
 #include "mktann_storage.h"
 
 /* Build parameters resolved from the index relation/opclass, shared by the

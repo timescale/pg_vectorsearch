@@ -39,7 +39,7 @@
 #include "algo/vecops.h"
 #include "core/log.h"
 #include "core/memory.h"
-#include "mkt_halfvec.h"
+#include "types/halfvec.h"
 
 /*
  * Precompute ||c||² for all centroids (L2 only).

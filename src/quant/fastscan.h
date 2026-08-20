@@ -25,7 +25,7 @@
 
 #include <stdint.h>
 
-#include "mkt_types.h"
+#include "core/types.h"
 
 /* Minimum LUT range to avoid division by near-zero */
 #define MKT_FASTSCAN_MIN_RANGE 1e-10f

@@ -1,12 +1,12 @@
 # meerkat PostgreSQL extension
 
 extension_sources = files(
-  'mkt_pg.c',
+  'support_pg.c',
   'mktann_inspect.c',
-  'mkt_pg_vector.c',
-  'mkt_pg_halfvec.c',
-  'mkt_pg_rabitq.c',
-  'mkt_pg_rabitq_params.c',
+  'vector_pg.c',
+  'halfvec_pg.c',
+  'rabitq_pg.c',
+  'rabitq_params_pg.c',
   'mktann.c',
   'mktann_build.c',
   'parallel_backend.c',

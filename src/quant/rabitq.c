@@ -22,10 +22,10 @@
 #include "algo/vecops.h"
 #include "core/memory.h"
 #include "core/platform.h"
-#include "mkt_halfvec.h"
-#include "mkt_vector.h"
 #include "quant/matrix.h"
 #include "quant/rabitq.h"
+#include "types/halfvec.h"
+#include "types/vector.h"
 
 /*
  * Compiler-Vectorized Implementation

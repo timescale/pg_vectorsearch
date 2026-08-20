@@ -20,7 +20,7 @@
 #include "core/memory.h"
 #include "core/platform.h"
 #include "index/centroid_search.h"
-#include "mkt_halfvec.h"
+#include "types/halfvec.h"
 
 /* ----------------------------------------------------------------
  * Internal candidate for beam search

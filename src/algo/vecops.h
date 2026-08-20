@@ -8,7 +8,7 @@
 #ifndef MKT_VECOPS_H
 #define MKT_VECOPS_H
 
-#include "mkt_types.h"
+#include "core/types.h"
 
 /*
  * Dot product: sum(a[i] * b[i])

@@ -11,8 +11,8 @@
 #include <lib/stringinfo.h>
 #include <utils/array.h>
 
-#include "mkt_pg.h"
 #include "quant/matrix.h"
+#include "support_pg.h"
 
 /* ----------------------------------------------------------------
  * Type I/O

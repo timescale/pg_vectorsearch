@@ -8,8 +8,8 @@
 #include "algo/kmeans.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
-#include "mkt_halfvec.h"
 #include "mkt_test.h"
+#include "types/halfvec.h"
 
 TEST_GROUP(KMeans);
 TEST_MEMCTX_FIXTURE();

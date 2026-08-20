@@ -10,7 +10,7 @@
 #define DISTANCE_PGVECTOR_H
 
 #include "algo/distance.h"
-#include "mkt_types.h"
+#include "core/types.h"
 
 /* Single-pair distance functions */
 Distance mkt_distance_l2_pgvector(VectorRef a, VectorRef b);

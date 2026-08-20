@@ -51,15 +51,15 @@
 #include "index/parallel_build.h"
 #include "index/posting_build.h"
 #include "index/posting_page.h"
-#include "mkt_halfvec.h"
-#include "mkt_vector.h"
 #include "quant/fastscan.h"
+#include "types/halfvec.h"
+#include "types/vector.h"
 
 #ifndef MKT_STANDALONE
-#include "mkt_pg.h"
 #include "mktann_build.h"
 #include "mktann_meta.h"
 #include "mktann_storage.h"
+#include "support_pg.h"
 #endif
 
 /*

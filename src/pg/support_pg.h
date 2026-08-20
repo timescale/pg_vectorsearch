@@ -13,9 +13,9 @@
 #include <utils/lsyscache.h>
 #include <utils/rel.h>
 
-#include "mkt_halfvec.h"
-#include "mkt_vector.h"
 #include "quant/rabitq.h"
+#include "types/halfvec.h"
+#include "types/vector.h"
 
 /* ----------------------------------------------------------------
  * Support function numbers

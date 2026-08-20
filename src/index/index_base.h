@@ -9,9 +9,9 @@
 #ifndef MKT_INDEX_BASE_H
 #define MKT_INDEX_BASE_H
 
+#include "core/types.h"
 #include "index/centroid_page.h"
 #include "index/storage.h"
-#include "mkt_types.h"
 #include "quant/rabitq.h"
 
 typedef struct MktIndexBase

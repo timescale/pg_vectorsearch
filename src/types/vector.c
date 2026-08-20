@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include "core/memory.h"
-#include "mkt_vector.h"
+#include "types/vector.h"
 
 /* (No extern vtable — inline vtable in mkt_vector.h, dispatch via MktVecType)
  */

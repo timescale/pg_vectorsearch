@@ -15,7 +15,7 @@
 #include <utils/float.h>
 
 #include "algo/distance.h"
-#include "mkt_pg.h"
+#include "support_pg.h"
 
 /* ----------------------------------------------------------------
  * Type I/O

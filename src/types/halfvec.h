@@ -22,7 +22,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "mkt_types.h"
+#include "core/types.h"
 
 /* ----------------------------------------------------------------
  * Half type detection (independent flags, prefer _Float16)

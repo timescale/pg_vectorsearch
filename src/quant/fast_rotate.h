@@ -23,7 +23,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "mkt_types.h"
+#include "core/types.h"
 
 /* Mixed-radix support: factor dim = N * K with N a power-of-two.
  * MIXING_DIM_MAX caps K so we can keep the K×K mixing matrix on the

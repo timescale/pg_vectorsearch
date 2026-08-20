@@ -14,8 +14,8 @@
 #include <stdint.h>
 
 #include "algo/kmeans.h"
-#include "mkt_halfvec.h"
-#include "mkt_vector.h"
+#include "types/halfvec.h"
+#include "types/vector.h"
 
 /* Block size for assignment step (matches FAISS) */
 #define KMEANS_BLOCK_SIZE 4096

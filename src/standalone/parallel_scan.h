@@ -14,8 +14,8 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
+#include "core/types.h"
 #include "index/parallel_build.h" /* MktBuildScanCb */
-#include "mkt_types.h"
 
 /* Vectors scanned per claimed chunk (balances work-stealing vs. contention).
  */

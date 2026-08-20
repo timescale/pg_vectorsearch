@@ -41,8 +41,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "core/types.h"
 #include "index/storage.h"
-#include "mkt_types.h"
 #include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------

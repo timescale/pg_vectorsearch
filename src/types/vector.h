@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "mkt_types.h"
+#include "core/types.h"
 
 #define MKT_VECTOR_MAX_DIM 16000
 

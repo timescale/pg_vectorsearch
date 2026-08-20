@@ -56,13 +56,13 @@
 #include "index/posting_build.h"
 #include "index/posting_page.h"
 #include "index/query_scan.h"
-#include "mkt_halfvec.h"
-#include "mkt_pg.h"
-#include "mkt_vector.h"
 #include "mktann_build.h"
 #include "mktann_meta.h"
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
+#include "support_pg.h"
+#include "types/halfvec.h"
+#include "types/vector.h"
 
 /* ----------------------------------------------------------------
  * Build state (MktannBuildParams is in mktann_build.h, shared with the

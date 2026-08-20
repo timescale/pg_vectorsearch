@@ -24,7 +24,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "mkt_types.h"
+#include "core/types.h"
 #include "quant/fast_rotate.h"
 
 /*

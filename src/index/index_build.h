@@ -51,11 +51,11 @@ struct MktBlobStore;
 #include <stdint.h>
 
 #include "algo/hkmeans.h"
+#include "core/types.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/centroid_search.h" /* MktExactInternalCentroids */
 #include "index/storage.h"
-#include "mkt_types.h"
 #include "quant/rabitq.h"
 
 /* ----------------------------------------------------------------
