@@ -180,6 +180,23 @@ pg_release_page(MktStorage *self, BlockNumber blkno)
 	s->cur_buf = InvalidBuffer;
 }
 
+/*
+ * Issue an async prefetch (posix_fadvise WILLNEED) for one index page so a
+ * batch of upcoming random reads can overlap instead of stalling serially on
+ * a cold cache. No-op for pages already in shared buffers. Gated on
+ * effective_io_concurrency so an operator can disable prefetching (0).
+ */
+static void
+pg_prefetch_page(MktStorage *self, BlockNumber blkno)
+{
+	MktannStorage *s = PG_STORAGE(self);
+
+	if (effective_io_concurrency == 0)
+		return;
+
+	PrefetchBuffer(s->index, MAIN_FORKNUM, blkno);
+}
+
 /* ----------------------------------------------------------------
  * Write path
  * ---------------------------------------------------------------- */
@@ -576,6 +593,7 @@ pg_rerank_readstream(
 static const MktStorageOps pg_storage_ops = {
 		.read_page	  = pg_read_page,
 		.release_page = pg_release_page,
+		.prefetch	  = pg_prefetch_page,
 		.write_page	  = pg_write_page,
 		.new_page	  = pg_new_page,
 		.commit_page  = pg_commit_page,
@@ -586,6 +604,7 @@ static const MktStorageOps pg_storage_ops = {
 static const MktStorageOps pg_storage_readstream_ops = {
 		.read_page	  = pg_read_page,
 		.release_page = pg_release_page,
+		.prefetch	  = pg_prefetch_page,
 		.write_page	  = pg_write_page,
 		.new_page	  = pg_new_page,
 		.commit_page  = pg_commit_page,

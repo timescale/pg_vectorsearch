@@ -261,6 +261,17 @@ scan_clusters(
 	qs->pscan.storage = idx->posting_storage;
 
 	/*
+	 * Warm the cache before the serial per-cluster reads below. Both the
+	 * Phase-A re-rank and the scan itself fetch each probed cluster's head
+	 * page one at a time; on a cold buffer cache that is a string of
+	 * synchronous random reads. Issue async prefetches for every head up
+	 * front so the reads overlap. Best-effort and a no-op where the storage
+	 * has no prefetch (standalone) or the page is already resident.
+	 */
+	for (uint32_t j = 0; j < n_results; j++)
+		mkt_storage_prefetch(qs->pscan.storage, beam_results[j].posting_head);
+
+	/*
 	 * Phase A (only when the probe set was expanded): re-rank the routed
 	 * clusters by EXACT query-centroid distance. The beam's RaBitQ
 	 * distances are 1-bit estimates whose noise scrambles the probe

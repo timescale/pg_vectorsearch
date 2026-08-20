@@ -52,6 +52,15 @@ typedef struct MktStorageOps
 	Page (*read_page)(MktStorage *self, BlockNumber blkno);
 	void (*release_page)(MktStorage *self, BlockNumber blkno);
 
+	/*
+	 * Advisory async prefetch: hint that blkno will be read soon so the
+	 * implementation can start the I/O (e.g. posix_fadvise via
+	 * PrefetchBuffer). Best-effort -- a later read_page still performs the
+	 * actual read. NULL = unsupported; callers reach it through
+	 * mkt_storage_prefetch(), which tolerates a NULL op and an invalid block.
+	 */
+	void (*prefetch)(MktStorage *self, BlockNumber blkno);
+
 	/* Write path (durability/WAL is internal to implementation) */
 	Page (*write_page)(MktStorage *self, BlockNumber blkno);
 	Page (*new_page)(MktStorage *self, BlockNumber *blkno_out);
@@ -116,6 +125,13 @@ static inline void
 mkt_storage_release_page(MktStorage *s, BlockNumber blkno)
 {
 	s->ops->release_page(s, blkno);
+}
+
+static inline void
+mkt_storage_prefetch(MktStorage *s, BlockNumber blkno)
+{
+	if (s != NULL && s->ops->prefetch != NULL && blkno != InvalidBlockNumber)
+		s->ops->prefetch(s, blkno);
 }
 
 static inline Page
