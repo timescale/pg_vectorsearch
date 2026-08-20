@@ -30,6 +30,7 @@ unit_test_sources = files(
   'test_centroid_page.c',
   'test_centroid_search.c',
   'test_fastscan.c',
+  'test_fast_rotate.c',
   'test_posting_page.c',
   'test_posting_insert.c',
   'test_distance.c',

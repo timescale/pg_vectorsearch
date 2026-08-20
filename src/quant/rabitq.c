@@ -416,6 +416,19 @@ rabitq_hamming_multi_compiler(
  * Lifecycle functions
  */
 
+/*
+ * Apply the index rotation P^T*in -> out. Uses the O(d log d) Randomized
+ * Hadamard Transform when armed (supported dims), else the dense matrix.
+ */
+static inline void
+rabitq_rotate(const RaBitQParams *p, const float *in, float *out)
+{
+	if (p->use_fast_rotate)
+		mkt_fast_rotate_apply(&p->fr, in, out);
+	else
+		mkt_matrix_transpose_vector_mul(p->P, in, out, p->dim);
+}
+
 RaBitQParams *
 mkt_rabitq_create(Dimension dim, uint64_t seed)
 {
@@ -436,14 +449,16 @@ mkt_rabitq_create(Dimension dim, uint64_t seed)
 RaBitQParams *
 mkt_rabitq_create_from_matrix(Dimension dim, uint64_t seed, const float *P)
 {
-	size_t		  size	 = MKT_RABITQ_PARAMS_SIZE(dim);
+	/* Stores an explicit dense matrix, so always allocate the full layout. */
+	size_t		  size	 = MKT_RABITQ_PARAMS_DENSE_SIZE(dim);
 	RaBitQParams *params = mkt_alloc(size);
 	if (params == NULL)
 		return NULL;
 
-	params->dim			 = dim;
-	params->seed		 = seed;
-	params->packed_bytes = MKT_RABITQ_BYTES(dim);
+	params->dim				= dim;
+	params->seed			= seed;
+	params->packed_bytes	= MKT_RABITQ_BYTES(dim);
+	params->use_fast_rotate = false;
 	memcpy(params->P, P, (size_t)dim * dim * sizeof(float));
 
 	return params;
@@ -459,8 +474,17 @@ mkt_rabitq_init(RaBitQParams *params, Dimension dim, uint64_t seed)
 	params->seed		 = seed;
 	params->packed_bytes = MKT_RABITQ_BYTES(dim);
 
-	/* Generate random orthogonal matrix into inline P[] */
-	if (mkt_random_orthogonal_matrix(params->P, dim, seed) != 0)
+	/*
+	 * Prefer the O(d log d) Randomized Hadamard rotation where the dim
+	 * supports it: the dense P is neither built (no O(d^3) QR) nor stored
+	 * (no O(d^2) per-backend matrix). Same seed, so build-encode and
+	 * query-rotate stay consistent. Unsupported dims fall back to the
+	 * dense random orthogonal matrix in P[].
+	 */
+	params->use_fast_rotate = mkt_fast_rotate_supported(dim);
+	if (params->use_fast_rotate)
+		mkt_fast_rotate_init(&params->fr, dim, seed);
+	else if (mkt_random_orthogonal_matrix(params->P, dim, seed) != 0)
 		return -1;
 
 	return 0;
@@ -553,7 +577,7 @@ mkt_rabitq_encode_into_ex(
 	 * factor math is shared with encode_from_pt (which the insert path calls
 	 * directly with a pre-rotated residual). */
 	mkt_vector_sub(input.data, centroid.data, residual, dim);
-	mkt_matrix_transpose_vector_mul(params->P, residual, transformed, dim);
+	rabitq_rotate(params, residual, transformed);
 
 	return mkt_rabitq_encode_from_pt(params, transformed, output, scratch);
 }
@@ -641,7 +665,7 @@ mkt_rabitq_encode_into(
 	 * P^T to the residual is equivalent to rotating both vectors then
 	 * subtracting.
 	 */
-	mkt_matrix_transpose_vector_mul(params->P, residual, transformed, dim);
+	rabitq_rotate(params, residual, transformed);
 
 	/* Step 3: Extract sign bits (LSB-first packing, FAISS-compatible) */
 	rabitq_extract_signs(transformed, output->bits, dim);
@@ -756,12 +780,18 @@ rabitq_encode_batch_impl(
 	 * This is the key optimization: matrix P stays in cache while
 	 * processing all vectors.
 	 */
-	mkt_matrix_transpose_vector_mul_batch(
-			params->P, residuals, transformed, count, dim);
+	if (params->use_fast_rotate)
+		for (uint16_t i = 0; i < count; i++)
+			mkt_fast_rotate_apply(
+					&params->fr,
+					residuals + (size_t)i * dim,
+					transformed + (size_t)i * dim);
+	else
+		mkt_matrix_transpose_vector_mul_batch(
+				params->P, residuals, transformed, count, dim);
 
 	/* Step 3: Rotate centroid once (shared across all vectors) */
-	mkt_matrix_transpose_vector_mul(
-			params->P, centroid.data, cent_rotated, dim);
+	rabitq_rotate(params, centroid.data, cent_rotated);
 
 	/* Step 4: Process each transformed vector to extract bits and factors */
 	for (uint16_t i = 0; i < count; i++)
@@ -1042,8 +1072,7 @@ mkt_rabitq_prepare_query_ex(
 	mkt_vector_sub(query.data, centroid.data, residual, dim);
 
 	/* Transform through P^T */
-	mkt_matrix_transpose_vector_mul(
-			params->P, residual, state->transformed, dim);
+	rabitq_rotate(params, residual, state->transformed);
 
 	/* Compute g_add = ||query - centroid||^2 */
 	state->g_add = mkt_l2_norm_squared(state->transformed, dim);
@@ -1115,7 +1144,7 @@ void
 mkt_rabitq_rotate(
 		const RaBitQParams *params, const float *input, float *output)
 {
-	mkt_matrix_transpose_vector_mul(params->P, input, output, params->dim);
+	rabitq_rotate(params, input, output);
 }
 
 void
