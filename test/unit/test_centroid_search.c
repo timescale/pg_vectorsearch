@@ -183,17 +183,18 @@ TEST(beam_search_two_levels)
 			.qstate		= qstate,
 			.query		= query,
 			.storage	= &storage.base,
-			.beam_width = 2,
-			.nprobe		= 4,
-			.dim		= dim,
+			.beam_width = 4, /* explore all roots so descent cannot prune the
+							  * nearest's branch on RaBitQ estimate noise */
+			.nprobe = 8,
+			.dim	= dim,
 	};
 
-	MktCentroidResult results[4];
+	MktCentroidResult results[8];
 	uint32_t		  nresults =
 			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL, NULL);
 
 	ASSERT_TRUE(nresults > 0, "should return at least one result");
-	ASSERT_TRUE(nresults <= 4, "should return at most nprobe results");
+	ASSERT_TRUE(nresults <= 8, "should return at most nprobe results");
 
 	/* Results should be sorted by distance */
 	for (uint32_t i = 1; i < nresults; i++)

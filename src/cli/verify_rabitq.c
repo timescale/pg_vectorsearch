@@ -226,8 +226,7 @@ verify_encoding(
 		const float *v = vectors + (size_t)i * dim;
 		for (Dimension j = 0; j < dim; j++)
 			residual[j] = v[j] - centroid[j];
-		mkt_matrix_transpose_vector_mul(
-				params->P, residual, transformed + (size_t)i * dim, dim);
+		mkt_rabitq_rotate(params, residual, transformed + (size_t)i * dim);
 	}
 	free(residual);
 
@@ -402,8 +401,8 @@ verify_distances(
 		const float *v = train + (size_t)i * dim;
 		for (Dimension j = 0; j < dim; j++)
 			residual[j] = v[j] - centroid[j];
-		mkt_matrix_transpose_vector_mul(
-				params->P, residual, train_transformed + (size_t)i * dim, dim);
+		mkt_rabitq_rotate(
+				params, residual, train_transformed + (size_t)i * dim);
 	}
 	free(residual);
 
@@ -518,7 +517,7 @@ verify_distances(
 		/* FAISS distances */
 		for (Dimension j = 0; j < dim; j++)
 			q_buf[j] = query[j] - centroid[j];
-		mkt_matrix_transpose_vector_mul(params->P, q_buf, qt_buf, dim);
+		mkt_rabitq_rotate(params, q_buf, qt_buf);
 
 		FaissRaBitQDistanceComputer *faiss_dc = NULL;
 		faiss_RaBitQuantizer_get_distance_computer(

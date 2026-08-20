@@ -557,8 +557,11 @@ benchmark_faiss_encode(
 			for (Dimension j = 0; j < dim; j++)
 				residual[j] = vectors[i * dim + j] - centroid[j];
 		}
-		mkt_matrix_transpose_vector_mul_batch(
-				params->P, transformed, transformed, count, dim);
+		for (uint32_t i = 0; i < count; i++)
+			mkt_rabitq_rotate(
+					params,
+					transformed + (size_t)i * dim,
+					transformed + (size_t)i * dim);
 		faiss_RaBitQuantizer_compute_codes(
 				faiss_rq, transformed, codes, count);
 	}
@@ -577,8 +580,11 @@ benchmark_faiss_encode(
 			for (Dimension j = 0; j < dim; j++)
 				residual[j] = vectors[i * dim + j] - centroid[j];
 		}
-		mkt_matrix_transpose_vector_mul_batch(
-				params->P, transformed, transformed, count, dim);
+		for (uint32_t i = 0; i < count; i++)
+			mkt_rabitq_rotate(
+					params,
+					transformed + (size_t)i * dim,
+					transformed + (size_t)i * dim);
 		faiss_RaBitQuantizer_compute_codes(
 				faiss_rq, transformed, codes, count);
 
@@ -807,8 +813,7 @@ compare_correctness(
 		for (Dimension j = 0; j < dim; j++)
 			v_centered[j] = vectors[i * dim + j] - centroid[j];
 
-		mkt_matrix_transpose_vector_mul(
-				params->P, v_centered, transformed + i * dim, dim);
+		mkt_rabitq_rotate(params, v_centered, transformed + i * dim);
 		mkt_free(v_centered);
 	}
 
@@ -816,8 +821,7 @@ compare_correctness(
 	float *q_centered = mkt_alloc(dim * sizeof(float));
 	for (Dimension j = 0; j < dim; j++)
 		q_centered[j] = query[j] - centroid[j];
-	mkt_matrix_transpose_vector_mul(
-			params->P, q_centered, query_transformed, dim);
+	mkt_rabitq_rotate(params, q_centered, query_transformed);
 	mkt_free(q_centered);
 
 	/* Create FAISS quantizer */

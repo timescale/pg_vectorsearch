@@ -21,9 +21,11 @@
 #ifndef MKT_RABITQ_H
 #define MKT_RABITQ_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "mkt_types.h"
+#include "quant/fast_rotate.h"
 
 /*
  * Error constant from RaBitQ paper (empirically tuned by authors).
@@ -118,23 +120,46 @@ typedef struct RaBitQBatch
  */
 typedef struct RaBitQParams
 {
-	Dimension dim;						/* Vector dimension */
-	uint32_t  packed_bytes;				/* ceil(dim / 8) */
-	uint64_t  seed;						/* Seed for reproducibility */
-	float	  P[FLEXIBLE_ARRAY_MEMBER]; /* Random orthogonal matrix
-										 * (dim x dim), row-major */
+	Dimension dim;			/* Vector dimension */
+	uint32_t  packed_bytes; /* ceil(dim / 8) */
+	uint64_t  seed;			/* Seed for reproducibility */
+	/*
+	 * Rotation. When use_fast_rotate is set (dim is a supported N*K
+	 * shape) the orthonormal rotation P^T*x is computed by the O(d log d)
+	 * Randomized Hadamard Transform in `fr`, and the dense matrix P is
+	 * neither built nor stored (the trailing P[] is allocated only for
+	 * unsupported dims, which fall back to the dense O(d^2) multiply).
+	 */
+	bool				use_fast_rotate;
+	MktFastRotateParams fr;
+	float				P[FLEXIBLE_ARRAY_MEMBER]; /* dense P^T (dense path) */
 } RaBitQParams;
 
-/* Total byte size for a RaBitQParams with dim x dim matrix */
 /*
- * The matrix is dim*dim floats. Cast to a fixed 64-bit type before the
- * multiply so the product is computed in 64 bits on every platform: plain
- * int32 overflows once dim exceeds ~46340, and size_t would still be 32-bit
- * on ILP32 targets. Unreachable at today's dimension caps, but keeps the
- * arithmetic robust if a cap is ever raised.
+ * Dense layout size: header + the dim*dim float matrix. Cast to a fixed
+ * 64-bit type before the multiply so the product is computed in 64 bits on
+ * every platform (plain int32 overflows past dim ~46340, and size_t is still
+ * 32-bit on ILP32). Used when an explicit dense matrix is stored
+ * (mkt_rabitq_create_from_matrix) or when the fast rotation is unavailable.
  */
-#define MKT_RABITQ_PARAMS_SIZE(dim) \
+#define MKT_RABITQ_PARAMS_DENSE_SIZE(dim) \
 	(offsetof(RaBitQParams, P) + (uint64_t)(dim) * (dim) * sizeof(float))
+
+/*
+ * Allocation size for seed-derived params. When the fast (Hadamard) rotation
+ * supports the dim, the dense matrix P is not built or stored, so only the
+ * header (which includes the small `fr` params) is needed -- saving the
+ * O(dim^2) per-backend matrix and its O(dim^3) build. Otherwise the full
+ * dense layout is allocated.
+ */
+static inline uint64_t
+mkt_rabitq_params_size(Dimension dim)
+{
+	return mkt_fast_rotate_supported(dim) ? (uint64_t)offsetof(RaBitQParams, P)
+										  : MKT_RABITQ_PARAMS_DENSE_SIZE(dim);
+}
+
+#define MKT_RABITQ_PARAMS_SIZE(dim) mkt_rabitq_params_size(dim)
 
 /*
  * RaBitQScratch - Pre-allocated scratch buffers for encoding
