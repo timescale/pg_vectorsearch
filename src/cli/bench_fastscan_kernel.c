@@ -21,7 +21,7 @@
 #include "cmd.h"
 #include "core/memory.h"
 #include "core/platform.h"
-#include "mkt_types.h"
+#include "core/types.h"
 #include "quant/fastscan.h"
 #include "quant/rabitq.h"
 

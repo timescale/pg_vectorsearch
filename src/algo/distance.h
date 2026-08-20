@@ -32,7 +32,7 @@
 
 #include "mkt_config.h"
 
-#include "mkt_types.h"
+#include "core/types.h"
 
 /*
  * Initialize distance computation system.

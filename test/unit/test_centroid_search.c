@@ -17,10 +17,10 @@
 #include "core/memory.h"
 #include "index/centroid_page.h"
 #include "index/centroid_search.h"
-#include "mkt_halfvec.h"
 #include "mkt_test.h"
 #include "quant/rabitq.h"
 #include "standalone/pg_compat.h"
+#include "types/halfvec.h"
 
 TEST_GROUP(CentroidSearch);
 TEST_MEMCTX_FIXTURE();

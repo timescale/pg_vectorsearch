@@ -17,9 +17,9 @@
 #include "git_commit.h"
 #include "index/posting_page.h"
 #include "index/query_scan.h"
-#include "mkt_pg.h"
 #include "mktann_explain.h"
 #include "mktann_storage.h"
+#include "support_pg.h"
 
 PG_MODULE_MAGIC;
 

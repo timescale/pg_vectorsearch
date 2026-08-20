@@ -17,11 +17,11 @@
 #include <stdint.h>
 
 #include "core/memory.h"
+#include "core/types.h"
 #include "index/centroid_page.h"
 #include "index/index_base.h"
 #include "index/index_build.h"
 #include "index/storage.h"
-#include "mkt_types.h"
 #include "quant/rabitq.h"
 #include "standalone/vector_source.h"
 

@@ -15,10 +15,10 @@
 #include "algo/hkmeans.h"
 #include "core/atomics.h"
 #include "core/memory.h"
+#include "core/types.h"
 #include "index/posting_page.h"
 #include "index/query_scan.h"
 #include "index/storage.h"
-#include "mkt_types.h"
 #include "quant/rabitq.h"
 
 /* Opaque: the cluster-keyed sorter (defined in parallel_build.h). */

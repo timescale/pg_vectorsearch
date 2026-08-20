@@ -21,12 +21,12 @@
 #include "core/platform.h"
 #include "index/posting_page.h"
 #include "index/query_scan.h"
-#include "mkt_pg.h"
-#include "mkt_vector.h"
 #include "mktann_cache.h"
 #include "mktann_scan.h"
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
+#include "support_pg.h"
+#include "types/vector.h"
 
 /* Default nprobe — will become a GUC later */
 #define MKT_DEFAULT_NPROBE 10

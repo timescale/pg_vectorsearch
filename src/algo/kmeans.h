@@ -15,7 +15,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "mkt_types.h"
+#include "core/types.h"
 
 /*
  * KMeansResult - Output of k-means clustering

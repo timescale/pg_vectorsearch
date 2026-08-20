@@ -14,8 +14,8 @@
 #include <utils/memutils.h>
 
 #include "index/posting_page.h"
-#include "mkt_pg.h"
 #include "quant/matrix.h"
+#include "support_pg.h"
 
 /*
  * The generator caps dim at MKT_INDEX_MAX_DIM (see

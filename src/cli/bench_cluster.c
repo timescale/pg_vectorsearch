@@ -19,9 +19,9 @@
 #include "cmd.h"
 #include "core/memory.h"
 #include "core/platform.h"
+#include "core/types.h"
 #include "kmeans_pgvector.h"
-#include "mkt_halfvec.h"
-#include "mkt_types.h"
+#include "types/halfvec.h"
 
 /* Default parameters */
 #define DEFAULT_DIM	  128

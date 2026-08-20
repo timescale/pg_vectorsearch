@@ -25,7 +25,7 @@
 #include "algo/kmeans.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
-#include "mkt_types.h"
+#include "core/types.h"
 
 /* ----------------------------------------------------------------
  * PostgreSQL type compatibility

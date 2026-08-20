@@ -10,7 +10,7 @@
 
 #include <stdint.h>
 
-#include "mkt_types.h"
+#include "core/types.h"
 
 /*
  * Generate random orthogonal matrix using QR decomposition.

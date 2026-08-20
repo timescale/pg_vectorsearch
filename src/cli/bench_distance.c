@@ -19,9 +19,9 @@
 #include "cmd.h"
 #include "core/memory.h"
 #include "core/platform.h"
+#include "core/types.h"
 #include "distance_pgvector.h"
-#include "mkt_types.h"
-#include "mkt_vector.h"
+#include "types/vector.h"
 
 /* Default parameters */
 #define DEFAULT_DIM	  768

@@ -21,7 +21,7 @@
 #include <immintrin.h>
 
 #include "algo/simd_utils.h"
-#include "mkt_types.h"
+#include "core/types.h"
 #include "quant/rabitq.h"
 
 /*

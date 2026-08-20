@@ -19,7 +19,7 @@
 #include <stdint.h>
 
 #include "algo/kmeans.h"
-#include "mkt_types.h"
+#include "core/types.h"
 
 /*
  * HKMeansNode - One node in the BFS-ordered tree

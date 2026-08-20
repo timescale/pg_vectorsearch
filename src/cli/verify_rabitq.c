@@ -28,7 +28,7 @@
 
 #include "cmd.h"
 #include "core/memory.h"
-#include "mkt_types.h"
+#include "core/types.h"
 #include "quant/matrix.h"
 #include "quant/rabitq.h"
 

@@ -17,7 +17,7 @@
 #include <storage/bufpage.h>
 #pragma GCC diagnostic pop
 
-#include "mkt_types.h"
+#include "core/types.h"
 
 /*
  * "MKT" + a format-version byte. Bump the low byte on any incompatible

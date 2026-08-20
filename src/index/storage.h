@@ -30,7 +30,7 @@
 #define MKT_STORAGE_H
 
 #include "algo/topk.h"
-#include "mkt_types.h"
+#include "core/types.h"
 
 #ifdef MKT_STANDALONE
 #include "standalone/pg_compat.h"

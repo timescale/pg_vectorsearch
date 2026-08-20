@@ -38,10 +38,10 @@
 #include <string.h>
 
 #include "core/memory.h"
-#include "mkt_halfvec.h"
-#include "mkt_types.h"
+#include "core/types.h"
 #include "quant/fastscan.h"
 #include "quant/rabitq.h"
+#include "types/halfvec.h"
 
 /* Include PG compat for standalone, real PG headers for extension */
 #ifdef MKT_STANDALONE

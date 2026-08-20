@@ -15,7 +15,7 @@
 #include <utils/float.h>
 
 #include "algo/distance.h"
-#include "mkt_pg.h"
+#include "support_pg.h"
 
 /* Stack threshold for float32 conversion buffers (4 KB = 1024 floats) */
 #define MKT_HALFVEC_STACK_DIM 1024

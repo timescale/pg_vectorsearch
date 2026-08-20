@@ -24,13 +24,13 @@
 #include "index/index_base.h"
 #include "index/posting_insert.h"
 #include "index/query_scan.h"
-#include "mkt_pg.h"
-#include "mkt_vector.h"
 #include "mktann_build.h"
 #include "mktann_cache.h"
 #include "mktann_scan.h"
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
+#include "support_pg.h"
+#include "types/vector.h"
 
 PG_FUNCTION_INFO_V1(mktann_handler);
 

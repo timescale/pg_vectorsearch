@@ -37,7 +37,7 @@
 #include <stdint.h>
 
 #include "core/memory.h"
-#include "mkt_types.h"
+#include "core/types.h"
 
 /* ----------------------------------------------------------------
  * Top-K entry

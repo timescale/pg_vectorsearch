@@ -41,10 +41,10 @@
 
 #include "algo/hkmeans.h"
 #include "core/memory.h"
+#include "core/types.h"
 #include "index/centroid_page.h" /* MktCentroidFormat */
 #include "index/posting_build.h"
 #include "index/storage.h" /* MktStorage */
-#include "mkt_types.h"
 #include "quant/rabitq.h"
 
 /* Forward decl so mkt_build_scan's prototype can reference it without pulling

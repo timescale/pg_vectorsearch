@@ -13,8 +13,8 @@
 #include <string.h>
 
 #include "core/memory.h"
-#include "mkt_halfvec.h"
-#include "mkt_vector.h"
+#include "types/halfvec.h"
+#include "types/vector.h"
 
 /* ----------------------------------------------------------------
  * Bulk conversion
