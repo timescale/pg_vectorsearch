@@ -408,7 +408,18 @@ mkt_posting_split(
 		}
 	}
 
-	/* 8. Tombstone the old chain (now unreachable) for later reclaim. */
+	/*
+	 * 8. Retire the old chain, now unreachable via the tree. A concurrent
+	 * scanner may still hold a stale head pointer read before the flip, so the
+	 * backend that can see snapshots (PG) defers reclaim behind an XID gate,
+	 * keeping the chain readable meanwhile. Where there are no such scanners
+	 * (env->retire_chain == NULL, e.g. standalone), tombstone it immediately.
+	 */
+	if (env->retire_chain != NULL)
+	{
+		env->retire_chain(env->ctx, base->posting_storage, head);
+	}
+	else
 	{
 		BlockNumber blk = head;
 		while (blk != InvalidBlockNumber)

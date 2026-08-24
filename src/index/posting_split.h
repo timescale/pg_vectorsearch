@@ -56,6 +56,15 @@ typedef struct MktSplitEnv
 {
 	bool (*fetch_vector)(
 			void *ctx, ItemPointerData tid, float *out, Dimension dim);
+	/*
+	 * Retire the split's old chain (unreachable via the tree once the flip
+	 * commits). NULL means the core tombstones it immediately — correct where
+	 * no concurrent snapshot-holding scanner can still reach it (standalone).
+	 * A backend with MVCC snapshots supplies this to defer reclaim behind an
+	 * XID gate, keeping the chain readable for in-flight scanners meanwhile.
+	 */
+	void (*retire_chain)(
+			void *ctx, MktStorage *posting_storage, BlockNumber head);
 	void *ctx;
 } MktSplitEnv;
 

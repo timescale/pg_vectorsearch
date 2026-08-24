@@ -50,7 +50,15 @@ RESET enable_seqscan;
 
 SELECT count(*) AS after_matches FROM truth t JOIN after a USING (id);
 
--- A second pass is a no-op: both lists are now under the threshold.
+-- The split retires the old list lazily: it stays readable (not tombstoned)
+-- until its deletion XID clears the global visibility horizon, so a concurrent
+-- scan holding a stale pointer never misses it. Right after the split nothing
+-- is tombstoned yet. (Physical reclaim happens on a later maintenance pass once
+-- the horizon advances; that timing is snapshot-dependent, so not asserted.)
+SELECT count(*) AS tombstoned_before_reclaim
+    FROM mkt.posting_pages('split_idx') WHERE tombstoned;
+
+-- A second pass splits nothing (both lists are under the threshold).
 SELECT mkt.compact('split_idx') AS second_pass;
 
 -- split_postinglist rejects a non-index argument.
