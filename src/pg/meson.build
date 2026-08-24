@@ -3,6 +3,7 @@
 extension_sources = files(
   'support_pg.c',
   'mktann_inspect.c',
+  'mktann_maint.c',
   'vector_pg.c',
   'halfvec_pg.c',
   'rabitq_pg.c',

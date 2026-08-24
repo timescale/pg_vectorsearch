@@ -796,6 +796,28 @@ CREATE FUNCTION mkt.convert_posting_to_fastscan(
     LANGUAGE C STRICT;
 
 -- =====================================================================
+-- Incremental maintenance (posting-list split)
+-- =====================================================================
+
+-- Split one posting list (given its head block number) into two balanced
+-- lists. Returns true if a split happened, false if it was declined.
+CREATE FUNCTION mkt.split_postinglist(
+        index_oid regclass,
+        head_blkno bigint
+    )
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'mkt_split_postinglist'
+    LANGUAGE C STRICT;
+
+-- Scan an index and split every posting list that is flagged for split or,
+-- when mkt.max_postinglist_size > 0, exceeds that size. Returns the number of
+-- lists split.
+CREATE FUNCTION mkt.compact(index_oid regclass)
+    RETURNS integer
+    AS 'MODULE_PATHNAME', 'mkt_compact'
+    LANGUAGE C STRICT;
+
+-- =====================================================================
 -- pgvector binary cast support
 -- =====================================================================
 --
