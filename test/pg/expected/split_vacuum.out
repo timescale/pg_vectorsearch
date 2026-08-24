@@ -1,0 +1,44 @@
+-- VACUUM-driven incremental split
+--
+-- With mkt.max_postinglist_size set, VACUUM's cleanup phase splits oversized
+-- posting lists. Verified indirectly: after VACUUM, mkt.compact finds nothing
+-- left to split (it would return 1 if VACUUM had not split), and index-scan
+-- results still match the sequential-scan ground truth.
+CREATE TABLE split_vt (id serial, v vector(4));
+INSERT INTO split_vt (v)
+    SELECT ARRAY[(i % 3)::real, (i % 2)::real, 0, 0]::vector(4)
+    FROM generate_series(1, 12) i;
+INSERT INTO split_vt (v)
+    SELECT ARRAY[10 + (i % 3)::real, 10 + (i % 2)::real, 10, 10]::vector(4)
+    FROM generate_series(1, 12) i;
+CREATE INDEX split_vt_idx ON split_vt USING mktann (v)
+    WITH (nlist = 1, centroid_fastscan = off);
+SET mkt.nprobe = 10;
+SET mkt.max_postinglist_size = 20;
+-- Ground truth (sequential scan).
+SET enable_indexscan = off;
+CREATE TEMP TABLE gt AS
+    SELECT id FROM split_vt ORDER BY v <-> '[0,0,0,0]'::vector(4) LIMIT 10;
+RESET enable_indexscan;
+-- VACUUM runs cleanup, which splits the single 24-entry list (> 20).
+VACUUM split_vt;
+-- Index results still match the ground truth after the VACUUM-driven split.
+SET enable_seqscan = off;
+CREATE TEMP TABLE res AS
+    SELECT id FROM split_vt ORDER BY v <-> '[0,0,0,0]'::vector(4) LIMIT 10;
+RESET enable_seqscan;
+SELECT count(*) AS matches FROM gt JOIN res USING (id);
+ matches 
+---------
+      10
+(1 row)
+
+-- VACUUM already split it; the two ~12-entry lists are under the threshold, so
+-- an explicit compact now finds nothing to do (would be 1 if VACUUM had not).
+SELECT mkt.compact('split_vt_idx') AS remaining;
+ remaining 
+-----------
+         0
+(1 row)
+
+DROP TABLE split_vt;
