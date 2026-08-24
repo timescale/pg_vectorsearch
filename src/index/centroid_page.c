@@ -76,3 +76,30 @@ mkt_centroid_page_add_entry(
 	memcpy(dest, data, data_size);
 	return true;
 }
+
+void
+mkt_centroid_page_overwrite_entry(
+		Page		page,
+		Dimension	dim,
+		uint32_t	index,
+		BlockNumber child_blkno,
+		const void *data)
+{
+	MktCentroidFormat fmt		= mkt_centroid_page_format(page);
+	uint32_t		  data_size = mkt_centroid_data_size(dim, fmt);
+
+	/*
+	 * In-place replacement of an existing entry: rewrite the fixed-size
+	 * metadata slot (forward region) and the fixed-size data slot (backward
+	 * region) without touching pd_lower/pd_upper or entry_count, so the page
+	 * layout is unchanged and no relayout is needed. child_count/flags are
+	 * preserved (a leaf entry stays a leaf). Used by the incremental split to
+	 * repoint a leaf at its first child list and update its routing centroid.
+	 */
+	MktCentroidEntryMeta *meta = mkt_centroid_meta_mut(page, index);
+	meta->child_blkno		   = child_blkno;
+
+	void *dest = (char *)PageGetSpecialPointer(page) -
+				 (size_t)(index + 1) * data_size;
+	memcpy(dest, data, data_size);
+}

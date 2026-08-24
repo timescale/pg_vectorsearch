@@ -444,6 +444,20 @@ bool mkt_centroid_page_add_entry(
 		uint16_t	flags,
 		const void *data);
 
+/*
+ * Overwrite an existing entry in place: replace its child_blkno and its
+ * routing data (data must be data_size bytes in the page's format), leaving
+ * child_count/flags, entry_count, and the page layout untouched. Used by the
+ * incremental posting-list split to repoint a leaf entry at its first child
+ * list and update its routing centroid.
+ */
+void mkt_centroid_page_overwrite_entry(
+		Page		page,
+		Dimension	dim,
+		uint32_t	index,
+		BlockNumber child_blkno,
+		const void *data);
+
 /* Backward-compatible add (RaBitQ-typed parameter) */
 static inline bool
 mkt_centroid_page_add(
