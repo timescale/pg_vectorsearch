@@ -16,6 +16,8 @@
 #include <access/relation.h>
 #include <access/table.h>
 #include <access/tableam.h>
+#include <access/transam.h>
+#include <access/xact.h>
 #include <catalog/index.h>
 #include <catalog/pg_class.h>
 #include <executor/tuptable.h>
@@ -98,6 +100,64 @@ pg_split_fetch_vector(
 	return ok;
 }
 
+/*
+ * Retire the split's old chain (the MktSplitEnv seam). Rather than tombstoning
+ * it now — which would make scans skip a head a concurrent query may still be
+ * about to read from a stale pre-flip pointer — mark each page DELETED and
+ * stamp the head with the current next-XID. The chain stays linked and
+ * readable; VACUUM physically retires it once that XID clears the global
+ * visibility horizon (see reclaim_retired_chain). Scans read DELETED pages
+ * (only TOMBSTONED is skipped), so an in-flight scanner still sees the full
+ * old list.
+ */
+static void
+pg_retire_chain(void *ctx, MktStorage *posting_storage, BlockNumber head)
+{
+	(void)ctx;
+	/*
+	 * Stamp with this transaction's XID — the one that made the chain
+	 * unreachable by committing the centroid flip. Any scan that could still
+	 * hold a stale pointer took its snapshot no later than this XID, so once
+	 * the global horizon passes it no such scan remains and the chain is safe
+	 * to reclaim (the invariant btree page deletion uses). The split has
+	 * already written WAL, so an XID is assigned.
+	 */
+	uint64 dxid = U64FromFullTransactionId(GetTopFullTransactionId());
+
+	BlockNumber blk = head;
+	while (blk != InvalidBlockNumber)
+	{
+		Page page = mkt_storage_write_page(posting_storage, blk);
+		MktPostingPageOpaque *op   = mkt_posting_opaque(page);
+		BlockNumber			  next = op->next_blkno;
+		op->flags |= MKT_POSTING_PAGE_DELETED;
+		op->delete_xid =
+				dxid; /* overlays live_count/tail_blkno (unused now) */
+		mkt_storage_commit_page(posting_storage, blk);
+		blk = next;
+	}
+}
+
+/*
+ * Physically retire a DELETED chain once no snapshot can still hold a stale
+ * pointer into it: tombstone every page so scans skip it and a later
+ * page-recycle pass can reclaim the space. Caller has checked the XID gate.
+ */
+static void
+reclaim_retired_chain(MktStorage *posting_storage, BlockNumber head)
+{
+	BlockNumber blk = head;
+	while (blk != InvalidBlockNumber)
+	{
+		Page page = mkt_storage_write_page(posting_storage, blk);
+		MktPostingPageOpaque *op   = mkt_posting_opaque(page);
+		BlockNumber			  next = op->next_blkno;
+		op->flags |= MKT_POSTING_PAGE_TOMBSTONED;
+		mkt_storage_commit_page(posting_storage, blk);
+		blk = next;
+	}
+}
+
 /* ----------------------------------------------------------------
  * Helpers
  * ---------------------------------------------------------------- */
@@ -159,7 +219,10 @@ split_one_head(
 		return false;
 	}
 
-	MktSplitEnv	   env = {pg_split_fetch_vector, fc};
+	MktSplitEnv env =
+			{.fetch_vector = pg_split_fetch_vector,
+			 .retire_chain = pg_retire_chain,
+			 .ctx		   = fc};
 	MktSplitConfig cfg = {0};
 	int			   rc  = mkt_posting_split(base, head, &cfg, &env, res);
 	UnlockPage(index, head, ExclusiveLock);
@@ -260,21 +323,13 @@ mkt_split_postinglist(PG_FUNCTION_ARGS)
 }
 
 /*
- * mkt.compact(index regclass) -> integer
- *
- * Scan the index for posting-list heads flagged for split (or, when
- * mkt.max_postinglist_size > 0, over that size) and split each. Returns the
- * number of lists split. New heads created during the pass land past the
- * snapshotted block count and are left for a later call.
- */
-/*
- * Scan an already-open index and split every posting-list head that is flagged
+ * Scan an already-open index: split every live head that is flagged
  * MKT_POSTING_PAGE_NEEDS_SPLIT or (when mkt.max_postinglist_size > 0) exceeds
- * that size. Returns the number of lists split. Callable from the SQL entry
- * point and from VACUUM cleanup; the caller owns the index lock.
- *
- * New heads created during the pass land past the snapshotted block count and
- * are left for a later call.
+ * that size, and physically retire any DELETED chain whose delete_xid has
+ * cleared the global visibility horizon. Returns the number of lists split.
+ * Callable from the SQL entry point and from VACUUM cleanup; the caller owns
+ * the index lock. New heads created during the pass land past the snapshotted
+ * block count and are left for a later call.
  */
 int32
 mktann_compact_index(Relation index)
@@ -293,19 +348,33 @@ mktann_compact_index(Relation index)
 
 		Page p = mkt_storage_read_page(&m.storage.base, blk);
 		const MktPostingPageOpaque *op = mkt_posting_opaque(p);
-		bool candidate				   = op->page_id == MKT_POSTING_PAGE_ID &&
-						 (op->flags & MKT_POSTING_PAGE_FIRST) &&
-						 !(op->flags & MKT_POSTING_PAGE_TOMBSTONED) &&
+		bool is_head				   = op->page_id == MKT_POSTING_PAGE_ID &&
+					   (op->flags & MKT_POSTING_PAGE_FIRST) &&
+					   !(op->flags & MKT_POSTING_PAGE_TOMBSTONED);
+		bool retired   = is_head && (op->flags & MKT_POSTING_PAGE_DELETED);
+		bool candidate = is_head && !retired &&
 						 ((op->flags & MKT_POSTING_PAGE_NEEDS_SPLIT) ||
 						  (threshold > 0 && op->live_count >= threshold));
+		/* delete_xid overlays live_count and is meaningful only when DELETED.
+		 */
+		uint64 dxid = retired ? op->delete_xid : 0;
 		mkt_storage_release_page(&m.storage.base, blk);
 
-		if (!candidate)
-			continue;
-
-		MktSplitResult res;
-		if (split_one_head(index, &m.base, &m.fetch, blk, 0, &res))
-			nsplits++;
+		if (candidate)
+		{
+			MktSplitResult res;
+			if (split_one_head(index, &m.base, &m.fetch, blk, 0, &res))
+				nsplits++;
+		}
+		else if (
+				retired && GlobalVisCheckRemovableFullXid(
+								   m.heap, FullTransactionIdFromU64(dxid)))
+		{
+			/* No snapshot can still hold a stale pointer into this chain, so
+			 * it is safe to physically retire it (its own commits are durable
+			 * independent of maint_end, which only persists nlist). */
+			reclaim_retired_chain(&m.storage.base, blk);
+		}
 	}
 
 	maint_end(index, &m, nsplits > 0);

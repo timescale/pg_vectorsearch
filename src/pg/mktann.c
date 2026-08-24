@@ -158,11 +158,14 @@ mktann_insert(
 		 */
 		LockPage(index, head, ExclusiveLock);
 
-		Page hp			= mkt_storage_read_page(&storage.base, head);
-		bool tombstoned = (mkt_posting_opaque(hp)->flags &
-						   MKT_POSTING_PAGE_TOMBSTONED) != 0;
+		/* If the head was split away while we waited for the lock it is now
+		 * retired — TOMBSTONED (immediate) or DELETED (XID-gated). Either way
+		 * re-route to the new head. */
+		uint16_t hflags = mkt_posting_opaque(
+								  mkt_storage_read_page(&storage.base, head))
+								  ->flags;
 		mkt_storage_release_page(&storage.base, head);
-		if (tombstoned)
+		if (hflags & (MKT_POSTING_PAGE_TOMBSTONED | MKT_POSTING_PAGE_DELETED))
 		{
 			UnlockPage(index, head, ExclusiveLock);
 			continue; /* head was split; re-route */
@@ -297,7 +300,11 @@ mktann_bulkdelete(
 			if (op->page_id == MKT_POSTING_PAGE_ID)
 			{
 				recognized = true;
-				is_head	   = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+				/* Skip a retired (DELETED) chain: it is superseded by a split,
+				 * its live_count slot now holds delete_xid, and cleanup
+				 * reclaims it once safe. */
+				is_head = (op->flags & MKT_POSTING_PAGE_FIRST) != 0 &&
+						  !(op->flags & MKT_POSTING_PAGE_DELETED);
 			}
 		}
 		UnlockReleaseBuffer(buf);

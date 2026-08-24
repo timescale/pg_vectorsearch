@@ -175,7 +175,7 @@ TEST(split_preserves_entries_and_structure)
 	ASSERT_EQ(idx->base.nlevels, 1u, "flat tree");
 
 	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {fetch_vec, &fc};
+	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
 	MktSplitResult res;
 	int			   rc = mkt_posting_split(
 			   &idx->base, idx->first_posting, NULL, &env, &res);
@@ -198,7 +198,7 @@ TEST(split_keeps_vectors_retrievable)
 	ASSERT_NOT_NULL(idx, "build ok");
 
 	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {fetch_vec, &fc};
+	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
 	MktSplitResult res;
 	ASSERT_EQ(
 			mkt_posting_split(
@@ -245,7 +245,7 @@ TEST(split_fastscan_posting)
 	ASSERT_NOT_NULL(idx, "fastscan build ok");
 
 	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {fetch_vec, &fc};
+	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
 	MktSplitResult res;
 	ASSERT_EQ(
 			mkt_posting_split(
@@ -288,7 +288,7 @@ TEST(split_declines_below_threshold)
 	ASSERT_NOT_NULL(idx, "build ok");
 
 	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {fetch_vec, &fc};
+	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
 	MktSplitConfig cfg = {.min_split_entries = 1000000}; /* never reached */
 	MktSplitResult res;
 	int			   rc = mkt_posting_split(
@@ -316,7 +316,7 @@ TEST(split_handles_degenerate_data)
 	ASSERT_NOT_NULL(idx, "build ok");
 
 	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {fetch_vec, &fc};
+	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
 	MktSplitResult res;
 	int			   rc = mkt_posting_split(
 			   &idx->base, idx->first_posting, NULL, &env, &res);
@@ -339,7 +339,7 @@ TEST(split_recall_matches_rebuild)
 	MktIndex *idx_a = build_paged(vecs, n, dim, 1);
 	ASSERT_NOT_NULL(idx_a, "build A ok");
 	FetchCtx	   fc  = {idx_a->all_vectors};
-	MktSplitEnv	   env = {fetch_vec, &fc};
+	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
 	MktSplitResult res;
 	ASSERT_EQ(
 			mkt_posting_split(
