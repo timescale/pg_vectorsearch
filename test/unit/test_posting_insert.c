@@ -123,7 +123,15 @@ insert_vec(
 	float *pt = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
 	mkt_rabitq_rotate(params, vec, pt);
 	mkt_posting_insert_one(
-			&st->base, params, dim, head, vid_to_tid(vid), pt, scratch, false);
+			&st->base,
+			params,
+			dim,
+			head,
+			vid_to_tid(vid),
+			pt,
+			scratch,
+			false,
+			0);
 }
 
 static void
@@ -291,6 +299,68 @@ TEST(insert_appends_and_counts)
 			"live_count should track built + inserted");
 	mkt_storage_release_page(&storage.base, head);
 
+	mkt_rabitq_scratch_cleanup(&scratch);
+	mkt_rabitq_destroy(params);
+}
+
+TEST(insert_flags_needs_split_at_threshold)
+{
+	Dimension		dim		 = 64;
+	TestPageStorage storage	 = make_test_storage(32);
+	RaBitQParams   *params	 = mkt_rabitq_create(dim, 42);
+	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(20, dim);
+
+	/* Build 5 entries; threshold 8. */
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, 5, false);
+
+	RaBitQScratch scratch;
+	mkt_rabitq_scratch_init(&scratch, dim);
+	float *pt = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
+
+	/* Two inserts (live -> 7): below threshold, so no flag. */
+	for (uint32_t i = 0; i < 2; i++)
+	{
+		mkt_rabitq_rotate(params, vecs + (size_t)(5 + i) * dim, pt);
+		mkt_posting_insert_one(
+				&storage.base,
+				params,
+				dim,
+				head,
+				vid_to_tid(100 + i),
+				pt,
+				&scratch,
+				false,
+				8);
+	}
+	Page hp = mkt_storage_read_page(&storage.base, head);
+	ASSERT_TRUE(
+			(mkt_posting_opaque(hp)->flags & MKT_POSTING_PAGE_NEEDS_SPLIT) ==
+					0,
+			"below threshold -> not flagged");
+	mkt_storage_release_page(&storage.base, head);
+
+	/* One more insert (live -> 8 == threshold): flag set. */
+	mkt_rabitq_rotate(params, vecs + (size_t)7 * dim, pt);
+	mkt_posting_insert_one(
+			&storage.base,
+			params,
+			dim,
+			head,
+			vid_to_tid(200),
+			pt,
+			&scratch,
+			false,
+			8);
+	hp = mkt_storage_read_page(&storage.base, head);
+	ASSERT_TRUE(
+			(mkt_posting_opaque(hp)->flags & MKT_POSTING_PAGE_NEEDS_SPLIT) !=
+					0,
+			"reaching threshold -> flagged");
+	mkt_storage_release_page(&storage.base, head);
+
+	mkt_free_aligned(pt);
 	mkt_rabitq_scratch_cleanup(&scratch);
 	mkt_rabitq_destroy(params);
 }
