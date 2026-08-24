@@ -131,21 +131,28 @@ mktann_insert(
 	 * normalizes (cosine) + rotates into qs.pt_query and runs the beam search;
 	 * qs.pt_query is then exactly the rotated residual base the encode needs.
 	 */
-	MktQueryState qs;
-	mkt_query_state_init(&qs, &base, 1, MKT_INSERT_ROUTE_BEAM);
-	uint32_t n = mkt_query_route(
-			&qs,
-			vref.data,
-			MKT_INSERT_ROUTE_BEAM,
-			MKT_DISTANCE_MODE_ASYMMETRIC,
-			NULL);
-
-	BlockNumber head = (n > 0) ? qs.beam_results[0].posting_head
-							   : InvalidBlockNumber;
-	if (head != InvalidBlockNumber)
+	/*
+	 * Route to a leaf, lock its head, and append. If the head was split away
+	 * while we waited for the lock it is now tombstoned; re-route to the new
+	 * head and retry. Bounded so a pathological churn can't spin forever.
+	 */
+	RaBitQScratch enc;
+	bool		  enc_init = false;
+	for (int attempt = 0; attempt < 8; attempt++)
 	{
-		RaBitQScratch enc;
-		mkt_rabitq_scratch_init(&enc, dim);
+		MktQueryState qs;
+		mkt_query_state_init(&qs, &base, 1, MKT_INSERT_ROUTE_BEAM);
+		uint32_t n = mkt_query_route(
+				&qs,
+				vref.data,
+				MKT_INSERT_ROUTE_BEAM,
+				MKT_DISTANCE_MODE_ASYMMETRIC,
+				NULL);
+
+		BlockNumber head = (n > 0) ? qs.beam_results[0].posting_head
+								   : InvalidBlockNumber;
+		if (head == InvalidBlockNumber)
+			break; /* no leaf to insert into */
 
 		/*
 		 * Serialize concurrent inserts into this cluster with a heavyweight
@@ -154,6 +161,22 @@ mktann_insert(
 		 * single-buffer storage model. Released here, not held to xact end.
 		 */
 		LockPage(index, head, ExclusiveLock);
+
+		Page hp			= mkt_storage_read_page(&storage.base, head);
+		bool tombstoned = (mkt_posting_opaque(hp)->flags &
+						   MKT_POSTING_PAGE_TOMBSTONED) != 0;
+		mkt_storage_release_page(&storage.base, head);
+		if (tombstoned)
+		{
+			UnlockPage(index, head, ExclusiveLock);
+			continue; /* head was split; re-route */
+		}
+
+		if (!enc_init)
+		{
+			mkt_rabitq_scratch_init(&enc, dim);
+			enc_init = true;
+		}
 		/*
 		 * Test hook: fires while this insert holds the per-cluster page lock,
 		 * so an isolation test can pause here and observe a second insert into
@@ -173,6 +196,7 @@ mktann_insert(
 				degenerate,
 				(uint32_t)mkt_max_postinglist_size);
 		UnlockPage(index, head, ExclusiveLock);
+		break;
 	}
 
 	MemoryContextSwitchTo(old_ctx);

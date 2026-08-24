@@ -63,6 +63,26 @@ build_paged(const float *vecs, uint32_t nvecs, uint32_t dim, uint32_t nlist)
 	return mkt_index_build(&src.base, &config, NULL);
 }
 
+/* Build with fastscan-packed posting pages (SoA groups), to exercise the
+ * fastscan branch of the split's entry collection. */
+static MktIndex *
+build_paged_fastscan(
+		const float *vecs, uint32_t nvecs, uint32_t dim, uint32_t nlist)
+{
+	MktIndexConfig config = {
+			.nlist		   = nlist,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = MKT_POSTING_FMT_PAGES,
+			.fastscan	   = 16,
+			.nworkers	   = 0,
+	};
+	MktArraySource src;
+	mkt_array_source_init(&src, vecs, nvecs, dim);
+	return mkt_index_build(&src.base, &config, NULL);
+}
+
 /* Split env: fetch full-precision vectors from the in-RAM store by id. */
 typedef struct FetchCtx
 {
@@ -211,6 +231,51 @@ TEST(split_keeps_vectors_retrievable)
 	double self_recall = (double)found / (double)checked;
 	ASSERT_TRUE(
 			self_recall > 0.98, "nearly all vectors retrievable post-split");
+
+	mkt_index_destroy(idx);
+}
+
+TEST(split_fastscan_posting)
+{
+	/* Fastscan posting pages store TIDs in SoA 32-groups; the split must read
+	 * them correctly (the AoS reader would misalign). */
+	uint32_t  dim = 16, n = 1200;
+	float	 *vecs = make_two_blobs(n, dim, 99);
+	MktIndex *idx  = build_paged_fastscan(vecs, n, dim, 1);
+	ASSERT_NOT_NULL(idx, "fastscan build ok");
+
+	FetchCtx	   fc  = {idx->all_vectors};
+	MktSplitEnv	   env = {fetch_vec, &fc};
+	MktSplitResult res;
+	ASSERT_EQ(
+			mkt_posting_split(
+					&idx->base, idx->first_posting, NULL, &env, &res),
+			0,
+			"split ok");
+	ASSERT_TRUE(res.did_split, "split happened");
+	ASSERT_EQ(res.count0 + res.count1, n, "every entry preserved from SoA");
+
+	MktQueryCtx *q		 = mkt_query_ctx_create(idx, 1, 2);
+	uint32_t	 checked = 0, found = 0;
+	for (uint32_t vid = 0; vid < n; vid += 5)
+	{
+		uint32_t res_id = UINT32_MAX;
+		uint32_t c		= mkt_query_exec(
+				 q,
+				 vecs + (size_t)vid * dim,
+				 1,
+				 2,
+				 MKT_DISTANCE_MODE_ASYMMETRIC,
+				 true,
+				 &res_id);
+		checked++;
+		if (c == 1 && res_id == vid)
+			found++;
+	}
+	mkt_query_ctx_destroy(q);
+	ASSERT_TRUE(
+			(double)found / checked > 0.98,
+			"retrievable after fastscan split");
 
 	mkt_index_destroy(idx);
 }

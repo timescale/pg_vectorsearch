@@ -43,6 +43,25 @@ split_entries_grow(SplitEntries *e, Dimension dim)
 	e->cap	= new_cap;
 }
 
+/* Fetch one entry's vector and, on success, record its tid. */
+static void
+collect_one(
+		SplitEntries	  *out,
+		const MktSplitEnv *env,
+		Dimension		   dim,
+		ItemPointerData	   tid)
+{
+	if (out->count == out->cap)
+		split_entries_grow(out, dim);
+
+	if (env->fetch_vector(
+				env->ctx, tid, out->vecs + (size_t)out->count * dim, dim))
+	{
+		out->tids[out->count] = tid;
+		out->count++;
+	}
+}
+
 /*
  * Walk the posting chain from `head`, fetching each live entry's
  * full-precision vector via env. Fills `out`. Returns 0 on success.
@@ -76,27 +95,39 @@ collect_entries(
 
 		if (!tombstone)
 		{
-			char *content = is_first ? mkt_posting_content_first(page, dim)
-									 : mkt_posting_content(page);
-			for (uint16_t i = 0; i < cnt; i++)
+			char *content	  = is_first ? mkt_posting_content_first(page, dim)
+										 : mkt_posting_content(page);
+			bool  is_fastscan = (op->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
+
+			if (is_fastscan)
 			{
-				MktPostingEntryHeader *hdr =
-						mkt_posting_entry_at(content, i, dim);
-				if (hdr->meta.flags & MKT_POSTING_FLAG_DELETED)
-					continue;
-
-				if (out->count == out->cap)
-					split_entries_grow(out, dim);
-
-				ItemPointerData tid = hdr->meta.tid;
-				if (env->fetch_vector(
-							env->ctx,
-							tid,
-							out->vecs + (size_t)out->count * dim,
-							dim))
+				/* SoA: tids live in fixed 32-entry group sections. The last
+				 * group may be partial; entry_count bounds the valid slots.
+				 * Live pages have no per-entry delete flag (deletes tombstone
+				 * the whole page, handled above). */
+				uint32_t ngroups = ((uint32_t)cnt + MKT_FASTSCAN_GROUP - 1) /
+								   MKT_FASTSCAN_GROUP;
+				for (uint32_t g = 0; g < ngroups; g++)
 				{
-					out->tids[out->count] = tid;
-					out->count++;
+					ItemPointerData *tids =
+							mkt_fastscan_group_tids(content, g, dim);
+					uint32_t base_i = g * MKT_FASTSCAN_GROUP;
+					uint32_t valid	= (cnt - base_i) < MKT_FASTSCAN_GROUP
+											? (cnt - base_i)
+											: MKT_FASTSCAN_GROUP;
+					for (uint32_t v = 0; v < valid; v++)
+						collect_one(out, env, dim, tids[v]);
+				}
+			}
+			else
+			{
+				for (uint16_t i = 0; i < cnt; i++)
+				{
+					MktPostingEntryHeader *hdr =
+							mkt_posting_entry_at(content, i, dim);
+					if (hdr->meta.flags & MKT_POSTING_FLAG_DELETED)
+						continue;
+					collect_one(out, env, dim, hdr->meta.tid);
 				}
 			}
 		}

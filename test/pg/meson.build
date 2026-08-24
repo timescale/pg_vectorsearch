@@ -39,6 +39,7 @@ else
       'empty_table',
       'zero_vectors',
       'row_estimate',
+      'split',
     ]
 
     # Test-only SQL entry points (extra introspection the extension
