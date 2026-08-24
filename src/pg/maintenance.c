@@ -40,6 +40,7 @@
 #include "index/posting_page.h"
 #include "index/posting_split.h"
 #include "inspect.h"
+#include "maintenance.h"
 #include "mktann_cache.h"
 #include "mktann_meta.h"
 #include "mktann_storage.h"
@@ -511,29 +512,17 @@ mkt_split_postinglist(PG_FUNCTION_ARGS)
 }
 
 /*
- * mkt.compact(index regclass) -> integer
+ * Scan an already-open index and split every posting-list head that is flagged
+ * MKT_POSTING_PAGE_NEEDS_SPLIT or (when mkt.max_postinglist_size > 0) exceeds
+ * that size. Returns the number of lists split. Callable from the SQL entry
+ * point and from VACUUM cleanup; the caller owns the index lock.
  *
- * Scan the index for posting-list heads flagged for split (or, when
- * mkt.max_postinglist_size > 0, over that size) and split each. Returns the
- * number of lists split. New heads created during the pass land past the
- * snapshotted block count and are left for a later call.
+ * New heads created during the pass land past the snapshotted block count and
+ * are left for a later call.
  */
-Datum
-mkt_compact(PG_FUNCTION_ARGS)
+int32
+mktann_compact_index(Relation index)
 {
-	Oid		 indexoid = PG_GETARG_OID(0);
-	Relation index	  = relation_open(indexoid, RowExclusiveLock);
-
-	if (index->rd_rel->relkind != RELKIND_INDEX)
-	{
-		relation_close(index, RowExclusiveLock);
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not an index",
-						RelationGetRelationName(index))));
-	}
-	require_index_owner(index, RowExclusiveLock);
-
 	MaintCtx m;
 	maint_begin(index, &m);
 
@@ -564,6 +553,35 @@ mkt_compact(PG_FUNCTION_ARGS)
 	}
 
 	maint_end(index, &m, nsplits > 0);
+	return nsplits;
+}
+
+/*
+ * mkt.compact(index regclass) -> integer
+ *
+ * Scan the index for posting-list heads flagged for split (or, when
+ * mkt.max_postinglist_size > 0, over that size) and split each. Returns the
+ * number of lists split. New heads created during the pass land past the
+ * snapshotted block count and are left for a later call.
+ */
+Datum
+mkt_compact(PG_FUNCTION_ARGS)
+{
+	Oid		 indexoid = PG_GETARG_OID(0);
+	Relation index	  = relation_open(indexoid, RowExclusiveLock);
+
+	if (index->rd_rel->relkind != RELKIND_INDEX)
+	{
+		relation_close(index, RowExclusiveLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not an index",
+						RelationGetRelationName(index))));
+	}
+	require_index_owner(index, RowExclusiveLock);
+
+	int32 nsplits = mktann_compact_index(index);
+
 	relation_close(index, RowExclusiveLock);
 
 	PG_RETURN_INT32(nsplits);

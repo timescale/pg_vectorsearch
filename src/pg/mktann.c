@@ -24,6 +24,7 @@
 #include "index/index_base.h"
 #include "index/posting_insert.h"
 #include "index/query_scan.h"
+#include "maintenance.h"
 #include "mktann_build.h"
 #include "mktann_cache.h"
 #include "mktann_scan.h"
@@ -127,14 +128,12 @@ mktann_insert(
 					  mkt_l2_norm_squared(vref.data, dim) == 0.0f;
 
 	/*
-	 * Route to the nearest leaf the same way a query does. mkt_query_route
-	 * normalizes (cosine) + rotates into qs.pt_query and runs the beam search;
-	 * qs.pt_query is then exactly the rotated residual base the encode needs.
-	 */
-	/*
-	 * Route to a leaf, lock its head, and append. If the head was split away
-	 * while we waited for the lock it is now tombstoned; re-route to the new
-	 * head and retry. Bounded so a pathological churn can't spin forever.
+	 * Route to a leaf the same way a query does (mkt_query_route normalizes
+	 * for cosine, rotates into qs.pt_query, and runs the beam search;
+	 * qs.pt_query is then exactly the rotated residual the encode needs), lock
+	 * its head, and append. If the head was split away while we waited for the
+	 * lock it is now tombstoned; re-route to the new head and retry. Bounded
+	 * so a pathological churn can't spin forever.
 	 */
 	RaBitQScratch enc;
 	bool		  enc_init = false;
@@ -343,6 +342,17 @@ mktann_bulkdelete(
 static IndexBulkDeleteResult *
 mktann_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
+	/*
+	 * Drive incremental splits from cleanup, which runs on every VACUUM
+	 * (including insert-only autovacuums that bypass bulkdelete). Gated on the
+	 * GUC so an index with auto-split disabled pays no extra scan; when
+	 * enabled, split flagged/oversized lists here. Skipped in an
+	 * estimated-only pass (no live scan) and when the index can't be modified.
+	 */
+	if (mkt_max_postinglist_size > 0 && !info->analyze_only &&
+		info->index != NULL)
+		mktann_compact_index(info->index);
+
 	if (stats == NULL)
 		stats = palloc0(sizeof(IndexBulkDeleteResult));
 	stats->num_pages = RelationGetNumberOfBlocks(info->index);

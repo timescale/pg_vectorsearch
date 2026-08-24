@@ -40,6 +40,7 @@ else
       'zero_vectors',
       'row_estimate',
       'split',
+      'split_vacuum',
     ]
 
     # Test-only SQL entry points (extra introspection the extension
