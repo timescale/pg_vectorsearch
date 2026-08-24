@@ -299,7 +299,8 @@ mkt_posting_split(
 				ent.tids[i],
 				pt_v,
 				&scratch,
-				false);
+				false,
+				0 /* re-inserts during a split never re-trigger a split */);
 	}
 	res.count0 = km->cluster_sizes[0];
 	res.count1 = km->cluster_sizes[1];

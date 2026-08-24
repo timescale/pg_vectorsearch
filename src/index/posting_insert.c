@@ -16,7 +16,8 @@ mkt_posting_insert_one(
 		ItemPointerData		tid,
 		const float		   *pt_input,
 		RaBitQScratch	   *scratch,
-		bool				unreachable)
+		bool				unreachable,
+		uint32_t			split_threshold)
 {
 	if (storage == NULL || params == NULL || pt_input == NULL ||
 		scratch == NULL || head_blkno == InvalidBlockNumber)
@@ -104,7 +105,9 @@ mkt_posting_insert_one(
 			MktPostingPageOpaque *op = mkt_posting_opaque(wp);
 			op->tail_blkno			 = new_tail;
 			op->live_count			 = live + 1;
-			head_updated			 = true;
+			if (split_threshold > 0 && live + 1 >= split_threshold)
+				op->flags |= MKT_POSTING_PAGE_NEEDS_SPLIT;
+			head_updated = true;
 		}
 		mkt_storage_commit_page(storage, tail_blkno);
 	}
@@ -134,7 +137,9 @@ mkt_posting_insert_one(
 			MktPostingPageOpaque *op = mkt_posting_opaque(lp);
 			op->tail_blkno			 = t2;
 			op->live_count			 = live + 1;
-			head_updated			 = true;
+			if (split_threshold > 0 && live + 1 >= split_threshold)
+				op->flags |= MKT_POSTING_PAGE_NEEDS_SPLIT;
+			head_updated = true;
 		}
 		mkt_storage_commit_page(storage, tail_blkno);
 		new_tail = t2;
@@ -147,6 +152,8 @@ mkt_posting_insert_one(
 		MktPostingPageOpaque *op = mkt_posting_opaque(hw);
 		op->tail_blkno			 = new_tail;
 		op->live_count			 = live + 1;
+		if (split_threshold > 0 && live + 1 >= split_threshold)
+			op->flags |= MKT_POSTING_PAGE_NEEDS_SPLIT;
 		mkt_storage_commit_page(storage, head_blkno);
 	}
 

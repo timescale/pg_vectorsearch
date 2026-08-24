@@ -167,7 +167,8 @@ mktann_insert(
 				*heap_tid,
 				qs.pt_query,
 				&enc,
-				degenerate);
+				degenerate,
+				(uint32_t)mkt_max_postinglist_size);
 		UnlockPage(index, head, ExclusiveLock);
 	}
 

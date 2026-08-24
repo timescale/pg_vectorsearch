@@ -28,6 +28,7 @@ int			  mkt_distance_mode			= MKT_DISTANCE_MODE_DEFAULT;
 int			  mkt_nprobe				= 0;
 int			  mkt_query_limit			= 0;
 int			  mkt_fastscan_bits			= 16;
+int			  mkt_max_postinglist_size	= 0;
 bool		  mkt_rerank				= true;
 bool		  mkt_log_build_stats		= false;
 double		  mkt_centroid_error_scale	= 0.0;
@@ -318,6 +319,24 @@ _PG_init(void)
 			0,
 			NULL,
 			mkt_rerank_pool_assign_hook,
+			NULL);
+
+	DefineCustomIntVariable(
+			MKT_EXTENSION_SCHEMA ".max_postinglist_size",
+			"Posting-list size that flags a list for incremental split "
+			"(0 = disabled).",
+			"When a cluster's live entry count reaches this value, inserts "
+			"flag its posting-list head for an incremental split into two "
+			"balanced lists. The flag is advisory: the split itself is "
+			"performed by the maintenance paths. 0 disables the check.",
+			&mkt_max_postinglist_size,
+			0,
+			0,
+			INT_MAX,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
 			NULL);
 
 	MarkGUCPrefixReserved(MKT_EXTENSION_SCHEMA);

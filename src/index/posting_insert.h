@@ -35,6 +35,10 @@
  * The head's tail_blkno / live_count are filled lazily on first use (one chain
  * walk when tail_blkno == InvalidBlockNumber) and maintained thereafter.
  *
+ * split_threshold: when > 0 and the post-insert live_count reaches it, the
+ * head is flagged MKT_POSTING_PAGE_NEEDS_SPLIT (advisory; consumed by the
+ * split maintenance paths). 0 disables the check with zero extra I/O.
+ *
  * scratch is used for the encode (xu_cb) and to hold the rotated residual.
  * Returns true on success.
  */
@@ -46,7 +50,8 @@ bool mkt_posting_insert_one(
 		ItemPointerData		tid,
 		const float		   *pt_input,
 		RaBitQScratch	   *scratch,
-		bool				unreachable);
+		bool				unreachable,
+		uint32_t			split_threshold);
 
 /*
  * Tombstone every AoS entry in the cluster chain whose TID is_dead() reports

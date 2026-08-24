@@ -86,6 +86,15 @@
  * centroid tree and never unlinked.
  */
 #define MKT_POSTING_PAGE_DELETED 0x0010
+/*
+ * The list has grown past the configured split threshold and is a candidate
+ * for an incremental split. Set on the FIRST page by the insert path when
+ * live_count crosses the threshold; consumed (and cleared) by the maintenance
+ * paths that actually run the split. Advisory only — a split can also be
+ * triggered by scanning live_count directly, so a missed flag never loses
+ * correctness, just eager discovery.
+ */
+#define MKT_POSTING_PAGE_NEEDS_SPLIT 0x0020
 
 /* ----------------------------------------------------------------
  * Structs
