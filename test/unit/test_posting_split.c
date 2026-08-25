@@ -1485,3 +1485,377 @@ TEST(split_drops_unfetchable_vectors)
 
 	prism_index_destroy(idx);
 }
+
+/* ----------------------------------------------------------------
+ * LIRE boundary reassignment
+ * ---------------------------------------------------------------- */
+
+/*
+ * A flat (single-level) tree with `nlist` leaves: fan_out == nlist keeps the
+ * build from adding an intermediate level, which is the shape phase-1 split
+ * requires. Reassignment needs neighbors, so these tests cannot use the
+ * one-list fixtures above.
+ */
+static PrismIndex *
+build_flat(const float *vecs, uint32_t nvecs, uint32_t dim, uint32_t nlist)
+{
+	PrismIndexConfig config = {
+			.nlist		   = nlist,
+			.fan_out	   = nlist,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+			.nworkers	   = 0,
+	};
+	VsArraySource src;
+	vs_array_source_init(&src, vecs, nvecs, dim);
+	return prism_index_build(&src.base, &config, NULL);
+}
+
+/* As above, with fastscan-packed posting pages. */
+static PrismIndex *
+build_flat_fastscan(
+		const float *vecs, uint32_t nvecs, uint32_t dim, uint32_t nlist)
+{
+	PrismIndexConfig config = {
+			.nlist		   = nlist,
+			.fan_out	   = nlist,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+			.fastscan	   = 16,
+			.nworkers	   = 0,
+	};
+	VsArraySource src;
+	vs_array_source_init(&src, vecs, nvecs, dim);
+	return prism_index_build(&src.base, &config, NULL);
+}
+
+/*
+ * nblobs clusters spaced along dimension 0, so adjacent clusters share a
+ * boundary -- the regime where a split can pull entries in from a neighbor.
+ * Tighter spacing means more entries near a boundary.
+ */
+static float *
+make_spaced_blobs(
+		uint32_t nblobs,
+		uint32_t per,
+		uint32_t dim,
+		float	 spacing,
+		uint32_t seed)
+{
+	srand(seed);
+	uint32_t n	  = nblobs * per;
+	float	*data = vs_alloc((size_t)n * dim * sizeof(float));
+	for (uint32_t b = 0; b < nblobs; b++)
+		for (uint32_t i = 0; i < per; i++)
+		{
+			uint32_t idx = b * per + i;
+			for (uint32_t j = 0; j < dim; j++)
+				data[(size_t)idx * dim + j] = (j == 0 ? (float)b * spacing
+													  : 0.0f) +
+											  (float)(rand() % 2000 - 1000) /
+													  1000.0f;
+		}
+	return data;
+}
+
+/*
+ * Every entry the tree can reach, summed over the leaves. The invariant a
+ * reassignment must hold is that this does not change: entries move between
+ * lists, none appear and none are lost.
+ */
+static uint32_t
+count_indexed_entries(PrismIndexBase *base)
+{
+	uint32_t	total = 0;
+	BlockNumber cblk  = base->first_centroid;
+
+	while (cblk != InvalidBlockNumber)
+	{
+		Page page = vs_storage_read_page(base->centroid_storage, cblk);
+		const PrismCentroidPageOpaque *op	= PRISM_CENTROID_OPAQUE(page);
+		uint16_t					   cnt	= op->entry_count;
+		BlockNumber					   next = op->next_blkno;
+
+		for (uint16_t i = 0; i < cnt; i++)
+		{
+			BlockNumber ch = prism_centroid_meta(page, i)->child_blkno;
+			if (ch != InvalidBlockNumber)
+				total += chain_entry_count(base, ch);
+		}
+		vs_storage_release_page(base->centroid_storage, cblk);
+		cblk = next;
+	}
+	return total;
+}
+
+/* The leaf head blocks, in tree order, up to `cap` of them. */
+static uint32_t
+collect_leaf_heads(PrismIndexBase *base, BlockNumber *out, uint32_t cap)
+{
+	uint32_t	n	 = 0;
+	BlockNumber cblk = base->first_centroid;
+
+	while (cblk != InvalidBlockNumber && n < cap)
+	{
+		Page page = vs_storage_read_page(base->centroid_storage, cblk);
+		const PrismCentroidPageOpaque *op	= PRISM_CENTROID_OPAQUE(page);
+		uint16_t					   cnt	= op->entry_count;
+		BlockNumber					   next = op->next_blkno;
+
+		for (uint16_t i = 0; i < cnt && n < cap; i++)
+		{
+			BlockNumber ch = prism_centroid_meta(page, i)->child_blkno;
+			if (ch != InvalidBlockNumber)
+				out[n++] = ch;
+		}
+		vs_storage_release_page(base->centroid_storage, cblk);
+		cblk = next;
+	}
+	return n;
+}
+
+TEST(split_reassign_moves_boundary_entries)
+{
+	/*
+	 * Four blobs close enough to share boundaries. Splitting one of them
+	 * puts new centroids near its neighbors, so some of their entries now
+	 * belong to a new list.
+	 */
+	uint32_t dim = 16, nblobs = 4, per = 400, n = nblobs * per;
+	float	*vecs = make_spaced_blobs(nblobs, per, dim, 1.2f, 55);
+
+	PrismIndex	 *idx = build_flat(vecs, n, dim, nblobs);
+	FetchCtx	  fc  = {idx->all_vectors};
+	PrismSplitEnv env = {.fetch_vector = fetch_vec, .ctx = &fc};
+
+	ASSERT_EQ(idx->base.nlist, nblobs, "fixture builds one leaf per blob");
+	uint32_t indexed_before = count_indexed_entries(&idx->base);
+	ASSERT_EQ(indexed_before, n, "and indexes every vector");
+
+	BlockNumber heads_before[16];
+	uint32_t nheads_before = collect_leaf_heads(&idx->base, heads_before, 16);
+	ASSERT_EQ(nheads_before, nblobs, "one head per leaf before the split");
+
+	PrismSplitConfig cfg = {.reassign_neighbors = 3};
+	PrismSplitResult res;
+	ASSERT_EQ(
+			prism_posting_split(
+					&idx->base, idx->first_posting, &cfg, &env, &res),
+			0,
+			"split ok");
+	ASSERT_TRUE(res.did_split, "the list split");
+	ASSERT_TRUE(res.reassigned > 0, "and pulled entries in from neighbors");
+
+	/* The invariant: entries moved between lists, none were lost. */
+	ASSERT_EQ(
+			count_indexed_entries(&idx->base),
+			indexed_before,
+			"every entry is still reachable, in one list or another");
+
+	/*
+	 * A rewritten neighbor is a new chain under the same centroid, so its
+	 * leaf points somewhere else than it did. At least one must have moved,
+	 * or nothing was rewritten and the count above proves nothing.
+	 */
+	BlockNumber heads_after[16];
+	uint32_t	nheads_after = collect_leaf_heads(&idx->base, heads_after, 16);
+	ASSERT_TRUE(
+			nheads_after > nheads_before, "the split added at least one leaf");
+
+	uint32_t repointed = 0;
+	for (uint32_t i = 0; i < nheads_before; i++)
+	{
+		bool still_there = false;
+		for (uint32_t j = 0; j < nheads_after; j++)
+			if (heads_after[j] == heads_before[i])
+				still_there = true;
+		if (!still_there)
+			repointed++;
+	}
+	/* The split's own leaf is repointed too, so a rewritten neighbor is one
+	 * more than that. */
+	ASSERT_TRUE(
+			repointed >= 2, "a neighbor was rewritten, not just the split");
+
+	prism_index_destroy(idx);
+}
+
+TEST(split_reassign_preserves_recall)
+{
+	/*
+	 * Reassignment only relocates an entry to the centroid it is nearest, so
+	 * against a plain split of the same data it must not cost recall.
+	 * Asserted relative to the plain split, since absolute recall is a
+	 * property of the data.
+	 */
+	uint32_t dim = 16, nblobs = 4, per = 400, n = nblobs * per;
+	uint32_t k = 10, nprobe = 8, nq = 20;
+	float	*vecs = make_spaced_blobs(nblobs, per, dim, 1.2f, 55);
+
+	PrismIndex		*a	   = build_flat(vecs, n, dim, nblobs);
+	FetchCtx		 fca   = {a->all_vectors};
+	PrismSplitEnv	 ea	   = {.fetch_vector = fetch_vec, .ctx = &fca};
+	PrismSplitConfig plain = {0};
+	PrismSplitResult ra;
+	ASSERT_EQ(
+			prism_posting_split(&a->base, a->first_posting, &plain, &ea, &ra),
+			0,
+			"plain split ok");
+	ASSERT_TRUE(ra.did_split, "plain split happened");
+	ASSERT_EQ(ra.reassigned, 0u, "and reassignment stayed off");
+	double plain_recall = measure_recall(a, vecs, n, dim, k, nprobe, nq);
+
+	PrismIndex		*b	  = build_flat(vecs, n, dim, nblobs);
+	FetchCtx		 fcb  = {b->all_vectors};
+	PrismSplitEnv	 eb	  = {.fetch_vector = fetch_vec, .ctx = &fcb};
+	PrismSplitConfig with = {.reassign_neighbors = 3};
+	PrismSplitResult rb;
+	ASSERT_EQ(
+			prism_posting_split(&b->base, b->first_posting, &with, &eb, &rb),
+			0,
+			"reassigning split ok");
+	ASSERT_TRUE(rb.did_split, "reassigning split happened");
+	ASSERT_TRUE(
+			rb.reassigned > 0,
+			"and moved entries, so this compares something");
+	double reassign_recall = measure_recall(b, vecs, n, dim, k, nprobe, nq);
+
+	ASSERT_TRUE(
+			reassign_recall >= plain_recall - 0.05,
+			"reassignment does not cost recall against a plain split");
+
+	prism_index_destroy(a);
+	prism_index_destroy(b);
+}
+
+TEST(split_reassign_clamps_neighbor_count)
+{
+	/*
+	 * A caller asking for more neighbors than the index has -- or than
+	 * PRISM_SPLIT_REASSIGN_MAX allows -- gets the cap, not a rewrite of
+	 * everything and not an allocation sized by the request.
+	 */
+	uint32_t dim = 16, nblobs = 4, per = 300, n = nblobs * per;
+	float	*vecs = make_spaced_blobs(nblobs, per, dim, 1.2f, 71);
+
+	PrismIndex	 *idx = build_flat(vecs, n, dim, nblobs);
+	FetchCtx	  fc  = {idx->all_vectors};
+	PrismSplitEnv env = {.fetch_vector = fetch_vec, .ctx = &fc};
+
+	uint32_t indexed_before = count_indexed_entries(&idx->base);
+	ASSERT_EQ(indexed_before, n, "fixture indexes every vector");
+
+	PrismSplitConfig cfg = {.reassign_neighbors = 100000};
+	PrismSplitResult res;
+	ASSERT_EQ(
+			prism_posting_split(
+					&idx->base, idx->first_posting, &cfg, &env, &res),
+			0,
+			"split ok with an absurd neighbor count");
+	ASSERT_TRUE(res.did_split, "the list split");
+	ASSERT_EQ(
+			count_indexed_entries(&idx->base),
+			indexed_before,
+			"and no entry was lost along the way");
+
+	prism_index_destroy(idx);
+}
+
+TEST(split_reassign_declines_for_inner_product)
+{
+	/*
+	 * "Closer to another centroid" is not a partition invariant under an
+	 * inner product, so there is nothing for reassignment to restore and it
+	 * does not run -- the split itself still does.
+	 */
+	uint32_t dim = 16, nblobs = 4, per = 300, n = nblobs * per;
+	float	*vecs = make_spaced_blobs(nblobs, per, dim, 1.2f, 88);
+
+	PrismIndexConfig config = {
+			.nlist		   = nblobs,
+			.fan_out	   = nblobs,
+			.metric		   = DISTANCE_INNER_PRODUCT,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+			.nworkers	   = 0,
+	};
+	VsArraySource src;
+	vs_array_source_init(&src, vecs, n, dim);
+	PrismIndex *idx = prism_index_build(&src.base, &config, NULL);
+	ASSERT_NOT_NULL(idx, "inner-product build ok");
+
+	FetchCtx	  fc  = {idx->all_vectors};
+	PrismSplitEnv env = {.fetch_vector = fetch_vec, .ctx = &fc};
+
+	uint32_t indexed_before = count_indexed_entries(&idx->base);
+
+	PrismSplitConfig cfg = {.reassign_neighbors = 3};
+	PrismSplitResult res;
+	ASSERT_EQ(
+			prism_posting_split(
+					&idx->base, idx->first_posting, &cfg, &env, &res),
+			0,
+			"split ok");
+	ASSERT_TRUE(res.did_split, "the list still splits");
+	ASSERT_EQ(res.reassigned, 0u, "but nothing is reassigned");
+	ASSERT_EQ(
+			count_indexed_entries(&idx->base),
+			indexed_before,
+			"and the entry count is untouched");
+
+	prism_index_destroy(idx);
+}
+
+TEST(split_reassign_keeps_fastscan)
+{
+	/*
+	 * A rewritten neighbor comes out in the index's posting format, not as
+	 * the AoS appends a per-entry insert would leave behind. That is the
+	 * point of rewriting the chain instead of editing it: a fastscan page
+	 * packs entries in groups of 32 and cannot give one up in place.
+	 */
+	uint32_t dim = 16, nblobs = 4, per = 400, n = nblobs * per;
+	float	*vecs = make_spaced_blobs(nblobs, per, dim, 1.2f, 91);
+
+	PrismIndex	 *idx = build_flat_fastscan(vecs, n, dim, nblobs);
+	FetchCtx	  fc  = {idx->all_vectors};
+	PrismSplitEnv env = {.fetch_vector = fetch_vec, .ctx = &fc};
+
+	BlockNumber heads_before[16];
+	uint32_t	nbefore = collect_leaf_heads(&idx->base, heads_before, 16);
+	for (uint32_t i = 0; i < nbefore; i++)
+		ASSERT_TRUE(
+				head_is_fastscan(&idx->base, heads_before[i]),
+				"every list starts fastscan-packed");
+
+	uint32_t indexed_before = count_indexed_entries(&idx->base);
+
+	PrismSplitConfig cfg = {.reassign_neighbors = 3};
+	PrismSplitResult res;
+	ASSERT_EQ(
+			prism_posting_split(
+					&idx->base, idx->first_posting, &cfg, &env, &res),
+			0,
+			"split ok");
+	ASSERT_TRUE(res.did_split, "the list split");
+	ASSERT_TRUE(res.reassigned > 0, "and entries came in from neighbors");
+
+	BlockNumber heads_after[16];
+	uint32_t	nafter = collect_leaf_heads(&idx->base, heads_after, 16);
+	for (uint32_t i = 0; i < nafter; i++)
+		ASSERT_TRUE(
+				head_is_fastscan(&idx->base, heads_after[i]),
+				"and every list is still fastscan-packed afterwards");
+
+	ASSERT_EQ(
+			count_indexed_entries(&idx->base),
+			indexed_before,
+			"with no entry lost in the rewrite");
+
+	prism_index_destroy(idx);
+}
