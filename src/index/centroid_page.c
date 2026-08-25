@@ -78,6 +78,15 @@ mkt_centroid_page_add_entry(
 }
 
 void
+mkt_centroid_page_set_child(Page page, uint32_t index, BlockNumber child_blkno)
+{
+	/* Repoint a leaf at a new posting head, leaving its routing centroid and
+	 * everything else intact (used when a list is rewritten in place, e.g. by
+	 * reassignment, keeping the same centroid). */
+	mkt_centroid_meta_mut(page, index)->child_blkno = child_blkno;
+}
+
+void
 mkt_centroid_page_overwrite_entry(
 		Page		page,
 		Dimension	dim,

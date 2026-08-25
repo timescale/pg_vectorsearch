@@ -63,6 +63,27 @@ build_paged(const float *vecs, uint32_t nvecs, uint32_t dim, uint32_t nlist)
 	return mkt_index_build(&src.base, &config, NULL);
 }
 
+/* Build a flat (single-level) tree with `nlist` leaves by forcing a fan-out
+ * large enough that no intermediate level is created. */
+static MktIndex *
+build_flat(const float *vecs, uint32_t nvecs, uint32_t dim, uint32_t nlist)
+{
+	/* fan_out == nlist keeps the tree single-level (nlevels == 1) with exactly
+	 * nlist leaves — the shape the phase-1 split requires. */
+	MktIndexConfig config = {
+			.nlist		   = nlist,
+			.fan_out	   = nlist,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = MKT_POSTING_FMT_PAGES,
+			.nworkers	   = 0,
+	};
+	MktArraySource src;
+	mkt_array_source_init(&src, vecs, nvecs, dim);
+	return mkt_index_build(&src.base, &config, NULL);
+}
+
 /* Build with fastscan-packed posting pages (SoA groups), to exercise the
  * fastscan branch of the split's entry collection. */
 static MktIndex *
@@ -81,6 +102,32 @@ build_paged_fastscan(
 	MktArraySource src;
 	mkt_array_source_init(&src, vecs, nvecs, dim);
 	return mkt_index_build(&src.base, &config, NULL);
+}
+
+/* nblobs Gaussian-ish clusters spaced along dim 0, so adjacent clusters share
+ * a boundary — the regime where a split can pull entries in from neighbors. */
+static float *
+make_blobs(
+		uint32_t nblobs,
+		uint32_t per,
+		uint32_t dim,
+		float	 spacing,
+		uint32_t seed)
+{
+	srand(seed);
+	uint32_t n	  = nblobs * per;
+	float	*data = mkt_alloc((size_t)n * dim * sizeof(float));
+	for (uint32_t b = 0; b < nblobs; b++)
+		for (uint32_t i = 0; i < per; i++)
+		{
+			uint32_t idx = b * per + i;
+			for (uint32_t j = 0; j < dim; j++)
+				data[(size_t)idx * dim + j] = (j == 0 ? (float)b * spacing
+													  : 0.0f) +
+											  (float)(rand() % 2000 - 1000) /
+													  1000.0f;
+		}
+	return data;
 }
 
 /* Split env: fetch full-precision vectors from the in-RAM store by id. */
@@ -278,6 +325,85 @@ TEST(split_fastscan_posting)
 			"retrievable after fastscan split");
 
 	mkt_index_destroy(idx);
+}
+
+static double
+self_recall(
+		MktIndex	*idx,
+		const float *vecs,
+		uint32_t	 n,
+		uint32_t	 dim,
+		uint32_t	 nprobe)
+{
+	MktQueryCtx *q		 = mkt_query_ctx_create(idx, 1, nprobe);
+	uint32_t	 checked = 0, found = 0;
+	for (uint32_t vid = 0; vid < n; vid += 5)
+	{
+		uint32_t res_id = UINT32_MAX;
+		uint32_t c		= mkt_query_exec(
+				 q,
+				 vecs + (size_t)vid * dim,
+				 1,
+				 nprobe,
+				 MKT_DISTANCE_MODE_ASYMMETRIC,
+				 true,
+				 &res_id);
+		checked++;
+		if (c == 1 && res_id == vid)
+			found++;
+	}
+	mkt_query_ctx_destroy(q);
+	return (double)found / (double)checked;
+}
+
+TEST(split_reassign_preserves_recall)
+{
+	/* LIRE reassignment must move entries correctly (no losses) and not hurt
+	 * recall versus a split with reassignment off. */
+	uint32_t dim = 16, nblobs = 4, per = 400, n = nblobs * per;
+	uint32_t k = 10, nprobe = 8, nq = 20;
+	float	*vecs = make_blobs(nblobs, per, dim, 3.0f, 55);
+
+	/* Split with reassignment OFF. */
+	MktIndex	  *a   = build_flat(vecs, n, dim, nblobs);
+	FetchCtx	   fca = {a->all_vectors};
+	MktSplitEnv	   ea  = {.fetch_vector = fetch_vec, .ctx = &fca};
+	MktSplitResult ra;
+	MktSplitConfig c0 = {0};
+	ASSERT_EQ(
+			mkt_posting_split(&a->base, a->first_posting, &c0, &ea, &ra),
+			0,
+			"split A ok");
+	ASSERT_TRUE(ra.did_split, "A split");
+	double rA = measure_recall(a, vecs, n, dim, k, nprobe, nq);
+
+	/* Split the same list with reassignment ON. */
+	MktIndex	  *b   = build_flat(vecs, n, dim, nblobs);
+	FetchCtx	   fcb = {b->all_vectors};
+	MktSplitEnv	   eb  = {.fetch_vector = fetch_vec, .ctx = &fcb};
+	MktSplitResult rb;
+	MktSplitConfig cr = {.reassign_neighbors = 3};
+	ASSERT_EQ(
+			mkt_posting_split(&b->base, b->first_posting, &cr, &eb, &rb),
+			0,
+			"split B ok");
+	ASSERT_TRUE(rb.did_split, "B split");
+	double rB = measure_recall(b, vecs, n, dim, k, nprobe, nq);
+
+	double selfA = self_recall(a, vecs, n, dim, nprobe);
+	double selfB = self_recall(b, vecs, n, dim, nprobe);
+
+	/* Reassignment only relocates boundary entries to their nearer centroid,
+	 * so relative to a plain split it must not lose entries or hurt recall.
+	 * (Absolute recall depends on the dataset, so assert relative to A.) */
+	ASSERT_TRUE(rb.did_split, "B split happened");
+	ASSERT_TRUE(
+			rB >= rA - 0.05, "reassign does not hurt recall vs plain split");
+	ASSERT_TRUE(
+			selfB >= selfA - 0.02, "reassign loses no entries vs plain split");
+
+	mkt_index_destroy(a);
+	mkt_index_destroy(b);
 }
 
 TEST(split_declines_below_threshold)

@@ -74,17 +74,27 @@ typedef struct MktSplitConfig
 	uint32_t min_split_entries; /* refuse to split below this (0 -> 2) */
 	uint32_t km_max_iter;		/* k-means iterations (0 -> default) */
 	uint64_t km_seed;			/* k-means seed (0 -> default) */
+	/*
+	 * LIRE boundary reassignment: after the split, examine this many nearest
+	 * neighbor leaves and pull in any entry now closer to a new centroid,
+	 * restoring the nearest-partition invariant across the new boundary. 0
+	 * disables it. Each affected neighbor is rewritten in place (see
+	 * posting_split.c); the caller must hold the right locks where concurrent
+	 * (PG wiring is not yet enabled — used from standalone).
+	 */
+	uint32_t reassign_neighbors;
 } MktSplitConfig;
 
 typedef struct MktSplitResult
 {
-	bool did_split;		   /* false if the split was declined (too few
-							* entries, or 2-means produced an empty cluster) */
-	BlockNumber head0;	   /* first new posting head (former leaf slot) */
-	BlockNumber head1;	   /* second new posting head (appended leaf) */
-	uint32_t	count0;	   /* live entries routed to head0 */
-	uint32_t	count1;	   /* live entries routed to head1 */
-	uint32_t	new_nlist; /* leaf count after the split */
+	bool did_split;			/* false if the split was declined (too few
+							 * entries, or 2-means produced an empty cluster) */
+	BlockNumber head0;		/* first new posting head (former leaf slot) */
+	BlockNumber head1;		/* second new posting head (appended leaf) */
+	uint32_t	count0;		/* live entries routed to head0 */
+	uint32_t	count1;		/* live entries routed to head1 */
+	uint32_t	new_nlist;	/* leaf count after the split */
+	uint32_t	reassigned; /* entries pulled in from neighbors (LIRE) */
 } MktSplitResult;
 
 /*

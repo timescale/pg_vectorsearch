@@ -458,6 +458,14 @@ void mkt_centroid_page_overwrite_entry(
 		BlockNumber child_blkno,
 		const void *data);
 
+/*
+ * Repoint an existing leaf entry at a new child (posting head) block, leaving
+ * its routing centroid, flags, and the page layout unchanged. Used when a list
+ * is rewritten in place under the same centroid (reassignment).
+ */
+void mkt_centroid_page_set_child(
+		Page page, uint32_t index, BlockNumber child_blkno);
+
 /* Backward-compatible add (RaBitQ-typed parameter) */
 static inline bool
 mkt_centroid_page_add(

@@ -3,6 +3,7 @@
  */
 
 #include "algo/kmeans.h"
+#include "algo/vecops.h"
 #include "core/memory.h"
 #include "index/centroid_page.h"
 #include "index/posting_insert.h"
@@ -231,6 +232,213 @@ find_leaf_and_tail(
 	return (*found_page == InvalidBlockNumber) ? -1 : 0;
 }
 
+/*
+ * Retire a now-unreachable chain: the env defers reclaim behind an XID gate
+ * (PG) or the core tombstones it immediately (standalone / NULL seam).
+ */
+static void
+retire_or_tombstone_chain(
+		MktIndexBase *base, const MktSplitEnv *env, BlockNumber head)
+{
+	if (env->retire_chain != NULL)
+	{
+		env->retire_chain(env->ctx, base->posting_storage, head);
+		return;
+	}
+	BlockNumber blk = head;
+	while (blk != InvalidBlockNumber)
+	{
+		Page page = mkt_storage_write_page(base->posting_storage, blk);
+		MktPostingPageOpaque *op   = mkt_posting_opaque(page);
+		BlockNumber			  next = op->next_blkno;
+		op->flags |= MKT_POSTING_PAGE_TOMBSTONED;
+		mkt_storage_commit_page(base->posting_storage, blk);
+		blk = next;
+	}
+}
+
+/* ----------------------------------------------------------------
+ * LIRE boundary reassignment
+ * ---------------------------------------------------------------- */
+
+/* Read a posting head's stored P^T*centroid into out[dim]. */
+static void
+read_head_pt_centroid(
+		MktStorage *st, BlockNumber head, Dimension dim, float *out)
+{
+	Page page = mkt_storage_read_page(st, head);
+	memcpy(out, mkt_posting_pt_centroid(page), (size_t)dim * sizeof(float));
+	mkt_storage_release_page(st, head);
+}
+
+/*
+ * After a split, restore the nearest-partition invariant across the new
+ * boundary: for the k_neighbors leaves nearest the new centroids, pull in any
+ * entry now closer to c0/c1 than to its own centroid. Everything is done in
+ * rotated (P^T) space using the heads' stored pt_centroids, which are exact.
+ *
+ * An affected neighbor is rewritten in place: a fresh head under the same
+ * centroid receives the entries that stay, the movers go to h0/h1, the leaf is
+ * repointed at the new head, and the old chain is retired. This reuses the
+ * split's machinery and needs no per-entry deletion (so it is agnostic to AoS
+ * vs FASTSCAN posting layout). Returns the number of entries moved.
+ */
+static uint32_t
+reassign_neighbors(
+		MktIndexBase	  *base,
+		const MktSplitEnv *env,
+		RaBitQParams	  *params,
+		RaBitQScratch	  *scratch,
+		BlockNumber		   h0,
+		BlockNumber		   h1,
+		const float		  *pt_c0,
+		const float		  *pt_c1,
+		uint32_t		   k_neighbors)
+{
+	Dimension dim = base->dim;
+	if (k_neighbors == 0)
+		return 0;
+
+	/* 1. Enumerate leaf head blocks from the flat centroid chain (excluding
+	 * the two new heads). */
+	uint32_t	 cap	= base->nlist + 8;
+	BlockNumber *heads	= mkt_alloc((size_t)cap * sizeof(BlockNumber));
+	uint32_t	 nheads = 0;
+	BlockNumber	 cblk	= base->first_centroid;
+	while (cblk != InvalidBlockNumber)
+	{
+		Page page = mkt_storage_read_page(base->centroid_storage, cblk);
+		const MktCentroidPageOpaque *op	  = MKT_CENTROID_OPAQUE(page);
+		uint16_t					 cnt  = op->entry_count;
+		BlockNumber					 next = op->next_blkno;
+		for (uint16_t i = 0; i < cnt && nheads < cap; i++)
+		{
+			BlockNumber ch = mkt_centroid_meta(page, i)->child_blkno;
+			if (ch != h0 && ch != h1 && ch != InvalidBlockNumber)
+				heads[nheads++] = ch;
+		}
+		mkt_storage_release_page(base->centroid_storage, cblk);
+		cblk = next;
+	}
+
+	/* 2. Keep the k_neighbors heads whose centroid is nearest either new
+	 * centroid (simple partial selection over the small leaf set). */
+	float *pt_cL = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
+	float *dists = mkt_alloc((size_t)(nheads ? nheads : 1) * sizeof(float));
+	for (uint32_t i = 0; i < nheads; i++)
+	{
+		read_head_pt_centroid(base->posting_storage, heads[i], dim, pt_cL);
+		float d0 = mkt_l2_distance_squared(pt_cL, pt_c0, dim);
+		float d1 = mkt_l2_distance_squared(pt_cL, pt_c1, dim);
+		dists[i] = d0 < d1 ? d0 : d1;
+	}
+	uint32_t nsel = k_neighbors < nheads ? k_neighbors : nheads;
+	for (uint32_t s = 0; s < nsel; s++)
+	{
+		uint32_t best = s;
+		for (uint32_t j = s + 1; j < nheads; j++)
+			if (dists[j] < dists[best])
+				best = j;
+		float tmpd		 = dists[s];
+		dists[s]		 = dists[best];
+		dists[best]		 = tmpd;
+		BlockNumber tmph = heads[s];
+		heads[s]		 = heads[best];
+		heads[best]		 = tmph;
+	}
+
+	/* 3. Rewrite each selected neighbor, moving entries closer to c0/c1. */
+	float	*pt_e  = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
+	uint32_t moved = 0;
+	for (uint32_t s = 0; s < nsel; s++)
+	{
+		BlockNumber L = heads[s];
+		read_head_pt_centroid(base->posting_storage, L, dim, pt_cL);
+
+		SplitEntries ne;
+		collect_entries(base->posting_storage, dim, L, env, &ne);
+		if (ne.count == 0)
+		{
+			split_entries_free(&ne);
+			continue;
+		}
+
+		/* Decide per entry: 0 = stay in L, 1 = move to h0, 2 = move to h1. */
+		uint8_t *tgt	   = mkt_alloc((size_t)ne.count);
+		uint32_t local_mov = 0;
+		for (uint32_t i = 0; i < ne.count; i++)
+		{
+			mkt_rabitq_rotate(params, ne.vecs + (size_t)i * dim, pt_e);
+			float dL = mkt_l2_distance_squared(pt_e, pt_cL, dim);
+			float d0 = mkt_l2_distance_squared(pt_e, pt_c0, dim);
+			float d1 = mkt_l2_distance_squared(pt_e, pt_c1, dim);
+			if (d0 < dL && d0 <= d1)
+				tgt[i] = 1;
+			else if (d1 < dL)
+				tgt[i] = 2;
+			else
+				tgt[i] = 0;
+			if (tgt[i] != 0)
+				local_mov++;
+		}
+
+		if (local_mov == 0)
+		{
+			mkt_free(tgt);
+			split_entries_free(&ne);
+			continue;
+		}
+
+		/* Rewrite L in place under the same centroid; movers go to h0/h1. */
+		BlockNumber Lnew = new_posting_head(
+				base->posting_storage, dim, ne.cluster_id, pt_cL);
+		for (uint32_t i = 0; i < ne.count; i++)
+		{
+			mkt_rabitq_rotate(params, ne.vecs + (size_t)i * dim, pt_e);
+			BlockNumber dst = tgt[i] == 0 ? Lnew : (tgt[i] == 1 ? h0 : h1);
+			mkt_posting_insert_one(
+					base->posting_storage,
+					params,
+					dim,
+					dst,
+					ne.tids[i],
+					pt_e,
+					scratch,
+					false,
+					0);
+		}
+
+		BlockNumber found_page, tail_page;
+		uint32_t	found_idx;
+		uint8_t		level;
+		if (find_leaf_and_tail(
+					base->centroid_storage,
+					base->first_centroid,
+					L,
+					&found_page,
+					&found_idx,
+					&tail_page,
+					&level) == 0)
+		{
+			Page cp =
+					mkt_storage_write_page(base->centroid_storage, found_page);
+			mkt_centroid_page_set_child(cp, found_idx, Lnew);
+			mkt_storage_commit_page(base->centroid_storage, found_page);
+		}
+		retire_or_tombstone_chain(base, env, L);
+
+		moved += local_mov;
+		mkt_free(tgt);
+		split_entries_free(&ne);
+	}
+
+	mkt_free_aligned(pt_e);
+	mkt_free(dists);
+	mkt_free_aligned(pt_cL);
+	mkt_free(heads);
+	return moved;
+}
+
 /* ----------------------------------------------------------------
  * Split
  * ---------------------------------------------------------------- */
@@ -415,30 +623,34 @@ mkt_posting_split(
 	 * keeping the chain readable meanwhile. Where there are no such scanners
 	 * (env->retire_chain == NULL, e.g. standalone), tombstone it immediately.
 	 */
-	if (env->retire_chain != NULL)
-	{
-		env->retire_chain(env->ctx, base->posting_storage, head);
-	}
-	else
-	{
-		BlockNumber blk = head;
-		while (blk != InvalidBlockNumber)
-		{
-			Page page = mkt_storage_write_page(base->posting_storage, blk);
-			MktPostingPageOpaque *op   = mkt_posting_opaque(page);
-			BlockNumber			  next = op->next_blkno;
-			op->flags |= MKT_POSTING_PAGE_TOMBSTONED;
-			mkt_storage_commit_page(base->posting_storage, blk);
-			blk = next;
-		}
-	}
+	retire_or_tombstone_chain(base, env, head);
 
 	base->nlist += 1;
 
-	res.did_split = true;
-	res.head0	  = h0;
-	res.head1	  = h1;
-	res.new_nlist = base->nlist;
+	/*
+	 * 9. LIRE boundary reassignment: pull entries in neighboring leaves that
+	 * are now closer to a new centroid. Restores the nearest-partition
+	 * invariant across the new boundary. Runs after the flip so the neighbors'
+	 * heads and centroids are stable. Reuses pt_c0/pt_c1 and the scratch.
+	 */
+	uint32_t reassigned = 0;
+	if (cfg != NULL && cfg->reassign_neighbors > 0)
+		reassigned = reassign_neighbors(
+				base,
+				env,
+				params,
+				&scratch,
+				h0,
+				h1,
+				pt_c0,
+				pt_c1,
+				cfg->reassign_neighbors);
+
+	res.did_split  = true;
+	res.head0	   = h0;
+	res.head1	   = h1;
+	res.new_nlist  = base->nlist;
+	res.reassigned = reassigned;
 
 	mkt_rabitq_scratch_cleanup(&scratch);
 	mkt_free(rd0);
