@@ -466,6 +466,13 @@ void mkt_centroid_page_overwrite_entry(
 void mkt_centroid_page_set_child(
 		Page page, uint32_t index, BlockNumber child_blkno);
 
+/*
+ * Make a leaf entry unreachable to routing (f_add = +inf) without removing it,
+ * so queries are never routed to a dissolved list (merge). RaBitQ pages only;
+ * a later centroid compaction reclaims the dead slot.
+ */
+void mkt_centroid_page_poison_entry(Page page, Dimension dim, uint32_t index);
+
 /* Backward-compatible add (RaBitQ-typed parameter) */
 static inline bool
 mkt_centroid_page_add(

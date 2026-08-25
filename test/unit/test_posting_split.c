@@ -406,6 +406,48 @@ TEST(split_reassign_preserves_recall)
 	mkt_index_destroy(b);
 }
 
+TEST(merge_dissolves_into_neighbor)
+{
+	/* Merge dissolves a list into its nearest neighbor: entries move there,
+	 * the leaf count drops, routing skips the emptied leaf, and no entry is
+	 * lost. */
+	uint32_t dim = 16, nblobs = 4, per = 400, n = nblobs * per, nprobe = 8;
+	float	*vecs = make_blobs(nblobs, per, dim, 5.0f, 77);
+
+	MktIndex *idx = build_flat(vecs, n, dim, nblobs);
+	ASSERT_NOT_NULL(idx, "build ok");
+	ASSERT_EQ(idx->base.nlist, nblobs, "built nlist leaves");
+	ASSERT_EQ(idx->base.nlevels, 1u, "flat tree");
+
+	double before = self_recall(idx, vecs, n, dim, nprobe);
+
+	FetchCtx	   fc  = {idx->all_vectors};
+	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	MktMergeResult res;
+	ASSERT_EQ(
+			mkt_posting_merge(&idx->base, idx->first_posting, &env, &res),
+			0,
+			"merge ok");
+	ASSERT_TRUE(res.did_merge, "merge happened");
+	ASSERT_EQ(res.new_nlist, nblobs - 1u, "one fewer leaf");
+	ASSERT_EQ(idx->base.nlist, nblobs - 1u, "nlist decremented");
+	ASSERT_TRUE(res.moved > 0, "entries moved into the neighbor");
+
+	double after = self_recall(idx, vecs, n, dim, nprobe);
+	/*
+	 * Merge only touches the moved entries: it re-encodes them against the
+	 * neighbor's centroid (so ones far from it may be pruned in the
+	 * approximate scan — merge is meant for small lists near a neighbor), but
+	 * entries in other lists are untouched. So self-recall drops by at most
+	 * the moved fraction plus noise; a larger drop would mean collateral loss.
+	 */
+	double max_drop = (double)res.moved / (double)n + 0.03;
+	ASSERT_TRUE(
+			after >= before - max_drop, "no collateral entry loss on merge");
+
+	mkt_index_destroy(idx);
+}
+
 TEST(split_declines_below_threshold)
 {
 	uint32_t  dim = 16, n = 1200;

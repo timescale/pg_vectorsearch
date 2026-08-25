@@ -110,4 +110,27 @@ int mkt_posting_split(
 		const MktSplitEnv	 *env,
 		MktSplitResult		 *out);
 
+typedef struct MktMergeResult
+{
+	bool		did_merge; /* false if declined (no other leaf, empty list) */
+	BlockNumber target;	   /* neighbor head that absorbed the list */
+	uint32_t	moved;	   /* entries moved into the neighbor */
+	uint32_t	new_nlist; /* leaf count after the merge */
+} MktMergeResult;
+
+/*
+ * Dissolve the posting list whose head is `head` into its nearest neighbor
+ * leaf: re-encode and append its entries there, poison its (now empty) leaf so
+ * routing skips it, and retire its chain. The counterpart to split, for
+ * undersized lists; the caller decides when a list is small enough and must
+ * hold an exclusive lock on it (no-op in standalone). Flat tree + RaBitQ
+ * centroid only. Returns 0 on success (out->did_merge reports whether a merge
+ * happened), negative on error.
+ */
+int mkt_posting_merge(
+		MktIndexBase	  *base,
+		BlockNumber		   head,
+		const MktSplitEnv *env,
+		MktMergeResult	  *out);
+
 #endif /* MKT_POSTING_SPLIT_H */

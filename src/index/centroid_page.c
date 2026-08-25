@@ -7,6 +7,8 @@
  * opaque flags and determines per-entry data size.
  */
 
+#include <math.h>
+
 #include "index/centroid_page.h"
 
 void
@@ -84,6 +86,25 @@ mkt_centroid_page_set_child(Page page, uint32_t index, BlockNumber child_blkno)
 	 * everything else intact (used when a list is rewritten in place, e.g. by
 	 * reassignment, keeping the same centroid). */
 	mkt_centroid_meta_mut(page, index)->child_blkno = child_blkno;
+}
+
+void
+mkt_centroid_page_poison_entry(Page page, Dimension dim, uint32_t index)
+{
+	/*
+	 * Make a leaf entry unreachable to routing without removing it: set its
+	 * RaBitQ f_add to +inf so scoring always estimates +inf distance and it is
+	 * never selected. Used when a list is dissolved (merge) — the entry stays
+	 * in place (a later centroid compaction reclaims the slot) but no query is
+	 * routed to the now-empty list. RaBitQ centroid pages only.
+	 */
+	MktCentroidFormat fmt = mkt_centroid_page_format(page);
+	if (fmt != MKT_CENTROID_FMT_RABITQ)
+		return;
+	uint32_t	data_size = mkt_centroid_data_size(dim, fmt);
+	RaBitQData *d = (RaBitQData *)((char *)PageGetSpecialPointer(page) -
+								   (size_t)(index + 1) * data_size);
+	d->f_add	  = INFINITY;
 }
 
 void
