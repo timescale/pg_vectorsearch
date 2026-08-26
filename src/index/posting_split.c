@@ -273,24 +273,130 @@ read_head_pt_centroid(
 	mkt_storage_release_page(st, head);
 }
 
+/* True if a posting head is still routable (not retired/tombstoned). */
+static bool
+posting_head_live(MktStorage *st, BlockNumber head)
+{
+	Page	 page  = mkt_storage_read_page(st, head);
+	uint16_t flags = mkt_posting_opaque(page)->flags;
+	mkt_storage_release_page(st, head);
+	return (flags &
+			(MKT_POSTING_PAGE_DELETED | MKT_POSTING_PAGE_TOMBSTONED)) == 0;
+}
+
 /*
- * After a split, restore the nearest-partition invariant across the new
- * boundary: for the k_neighbors leaves nearest the new centroids, pull in any
- * entry now closer to c0/c1 than to its own centroid. Everything is done in
- * rotated (P^T) space using the heads' stored pt_centroids, which are exact.
+ * Routing table over the flat tree's live leaves: parallel arrays of head
+ * block and P^T-space centroid. Used to route a reassignment candidate to its
+ * true nearest posting -- our IVF-tree equivalent of LIRE's SPTAG search.
+ * Retired heads (the split's old chain, merge-poisoned leaves) are excluded so
+ * nothing routes into a dead list.
+ */
+typedef struct LeafTable
+{
+	BlockNumber *head; /* [n] */
+	float		*pt;   /* [n * dim], P^T space */
+	uint32_t	 n;
+} LeafTable;
+
+static void
+leaf_table_build(MktIndexBase *base, Dimension dim, LeafTable *lt)
+{
+	uint32_t cap = base->nlist + 8;
+	lt->head	 = mkt_alloc((size_t)cap * sizeof(BlockNumber));
+	lt->pt		 = mkt_alloc_aligned((size_t)cap * dim * sizeof(float), 64);
+	lt->n		 = 0;
+
+	BlockNumber cblk = base->first_centroid;
+	while (cblk != InvalidBlockNumber)
+	{
+		Page page = mkt_storage_read_page(base->centroid_storage, cblk);
+		const MktCentroidPageOpaque *op	  = MKT_CENTROID_OPAQUE(page);
+		uint16_t					 cnt  = op->entry_count;
+		BlockNumber					 next = op->next_blkno;
+		for (uint16_t i = 0; i < cnt && lt->n < cap; i++)
+		{
+			BlockNumber ch = mkt_centroid_meta(page, i)->child_blkno;
+			if (ch == InvalidBlockNumber)
+				continue;
+			if (!posting_head_live(base->posting_storage, ch))
+				continue;
+			lt->head[lt->n] = ch;
+			read_head_pt_centroid(
+					base->posting_storage,
+					ch,
+					dim,
+					lt->pt + (size_t)lt->n * dim);
+			lt->n++;
+		}
+		mkt_storage_release_page(base->centroid_storage, cblk);
+		cblk = next;
+	}
+}
+
+static void
+leaf_table_free(LeafTable *lt)
+{
+	mkt_free(lt->head);
+	mkt_free_aligned(lt->pt);
+	lt->head = NULL;
+	lt->pt	 = NULL;
+	lt->n	 = 0;
+}
+
+/* Nearest live leaf head to pt_v (exact scan; off the hot path). */
+static BlockNumber
+route_nearest_leaf(const LeafTable *lt, Dimension dim, const float *pt_v)
+{
+	BlockNumber best  = InvalidBlockNumber;
+	float		bestd = INFINITY;
+	for (uint32_t i = 0; i < lt->n; i++)
+	{
+		float d = mkt_l2_distance_squared(pt_v, lt->pt + (size_t)i * dim, dim);
+		if (d < bestd)
+		{
+			bestd = d;
+			best  = lt->head[i];
+		}
+	}
+	return best;
+}
+
+/* One posting examined for reassignment, with a per-entry disposition. */
+typedef struct AffectedList
+{
+	BlockNumber	 head;	  /* the posting being examined */
+	SplitEntries ent;	  /* its live entries + full-precision vectors */
+	BlockNumber *target;  /* [ent.count]: move target, or Invalid = stay */
+	uint32_t	 movers;  /* entries with a target */
+	BlockNumber	 newhead; /* fresh head if rewritten, else Invalid */
+} AffectedList;
+
+/*
+ * LIRE reassignment after a split (paper section 3.3). Restores nearest-
+ * partition assignment (NPA) across the new boundary by re-examining the two
+ * split halves and the k nearest neighbor leaves of the deleted centroid A_o:
  *
- * An affected neighbor is rewritten in place: a fresh head under the same
- * centroid receives the entries that stay, the movers go to h0/h1, the leaf is
- * repointed at the new head, and the old chain is retired. This reuses the
- * split's machinery and needs no per-entry deletion (so it is agnostic to AoS
- * vs FASTSCAN posting layout). Returns the number of entries moved.
+ *   push-out (cond 1): a vector in h0/h1 with D(v,A_o) <= D(v,c_i) for BOTH
+ * new centroids may belong in a pre-existing neighbor. pull-in  (cond 2): a
+ * vector in a neighbor with D(v,c_i) <= D(v,A_o) for SOME new centroid may
+ * belong in h0/h1 (or elsewhere).
+ *
+ * The two conditions are a cheap necessary-condition filter; each surviving
+ * candidate is routed to its true nearest live leaf and moved only if that
+ * differs from where it sits (the NPA re-check drops false positives). Moves
+ * are applied by rewriting each source posting in place (fresh head + repoint
+ * + retire), so no per-entry delete is needed (FASTSCAN-safe). A candidate can
+ * land in ANY posting, not just h0/h1. Everything is in rotated (P^T) space
+ * using the heads' stored pt_centroids, which are exact. Returns the number of
+ * entries moved.
  */
 static uint32_t
-reassign_neighbors(
+reassign_lire(
 		MktIndexBase	  *base,
 		const MktSplitEnv *env,
 		RaBitQParams	  *params,
 		RaBitQScratch	  *scratch,
+		const float		  *pt_ao,
 		BlockNumber		   h0,
 		BlockNumber		   h1,
 		const float		  *pt_c0,
@@ -301,122 +407,166 @@ reassign_neighbors(
 	if (k_neighbors == 0)
 		return 0;
 
-	/* 1. Enumerate leaf head blocks from the flat centroid chain (excluding
-	 * the two new heads). */
-	uint32_t	 cap	= base->nlist + 8;
-	BlockNumber *heads	= mkt_alloc((size_t)cap * sizeof(BlockNumber));
-	uint32_t	 nheads = 0;
-	BlockNumber	 cblk	= base->first_centroid;
-	while (cblk != InvalidBlockNumber)
-	{
-		Page page = mkt_storage_read_page(base->centroid_storage, cblk);
-		const MktCentroidPageOpaque *op	  = MKT_CENTROID_OPAQUE(page);
-		uint16_t					 cnt  = op->entry_count;
-		BlockNumber					 next = op->next_blkno;
-		for (uint16_t i = 0; i < cnt && nheads < cap; i++)
-		{
-			BlockNumber ch = mkt_centroid_meta(page, i)->child_blkno;
-			if (ch != h0 && ch != h1 && ch != InvalidBlockNumber)
-				heads[nheads++] = ch;
-		}
-		mkt_storage_release_page(base->centroid_storage, cblk);
-		cblk = next;
-	}
+	/* 1. Snapshot the live leaves as a read-only routing table. */
+	LeafTable lt;
+	leaf_table_build(base, dim, &lt);
 
-	/* 2. Keep the k_neighbors heads whose centroid is nearest either new
-	 * centroid (simple partial selection over the small leaf set). */
-	float *pt_cL = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
-	float *dists = mkt_alloc((size_t)(nheads ? nheads : 1) * sizeof(float));
-	for (uint32_t i = 0; i < nheads; i++)
+	/* 2. Rank neighbor leaves (excluding h0/h1) by distance to A_o; keep k. */
+	uint32_t	 ncand = 0;
+	BlockNumber *cand  = mkt_alloc(
+			 (size_t)(lt.n ? lt.n : 1) * sizeof(BlockNumber));
+	float *cd = mkt_alloc((size_t)(lt.n ? lt.n : 1) * sizeof(float));
+	for (uint32_t i = 0; i < lt.n; i++)
 	{
-		read_head_pt_centroid(base->posting_storage, heads[i], dim, pt_cL);
-		float d0 = mkt_l2_distance_squared(pt_cL, pt_c0, dim);
-		float d1 = mkt_l2_distance_squared(pt_cL, pt_c1, dim);
-		dists[i] = d0 < d1 ? d0 : d1;
+		if (lt.head[i] == h0 || lt.head[i] == h1)
+			continue;
+		cand[ncand] = lt.head[i];
+		cd[ncand] =
+				mkt_l2_distance_squared(lt.pt + (size_t)i * dim, pt_ao, dim);
+		ncand++;
 	}
-	uint32_t nsel = k_neighbors < nheads ? k_neighbors : nheads;
+	uint32_t nsel = k_neighbors < ncand ? k_neighbors : ncand;
 	for (uint32_t s = 0; s < nsel; s++)
 	{
 		uint32_t best = s;
-		for (uint32_t j = s + 1; j < nheads; j++)
-			if (dists[j] < dists[best])
+		for (uint32_t j = s + 1; j < ncand; j++)
+			if (cd[j] < cd[best])
 				best = j;
-		float tmpd		 = dists[s];
-		dists[s]		 = dists[best];
-		dists[best]		 = tmpd;
-		BlockNumber tmph = heads[s];
-		heads[s]		 = heads[best];
-		heads[best]		 = tmph;
+		float tmpd		 = cd[s];
+		cd[s]			 = cd[best];
+		cd[best]		 = tmpd;
+		BlockNumber tmph = cand[s];
+		cand[s]			 = cand[best];
+		cand[best]		 = tmph;
 	}
 
-	/* 3. Rewrite each selected neighbor, moving entries closer to c0/c1. */
-	float	*pt_e  = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
-	uint32_t moved = 0;
-	for (uint32_t s = 0; s < nsel; s++)
+	/* 3. Affected set: the two split halves + the selected neighbors. */
+	uint32_t	  naff = 2 + nsel;
+	AffectedList *aff  = mkt_alloc((size_t)naff * sizeof(AffectedList));
+	for (uint32_t a = 0; a < naff; a++)
 	{
-		BlockNumber L = heads[s];
-		read_head_pt_centroid(base->posting_storage, L, dim, pt_cL);
+		aff[a].head	   = (a == 0) ? h0 : (a == 1) ? h1 : cand[a - 2];
+		aff[a].target  = NULL;
+		aff[a].movers  = 0;
+		aff[a].newhead = InvalidBlockNumber;
+	}
 
-		SplitEntries ne;
-		collect_entries(base->posting_storage, dim, L, env, &ne);
-		if (ne.count == 0)
-		{
-			split_entries_free(&ne);
+	float *pt_v = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
+
+	/* 4. Plan: classify every entry via the filter, then route candidates. */
+	for (uint32_t a = 0; a < naff; a++)
+	{
+		bool is_split_half = (a < 2);
+		collect_entries(
+				base->posting_storage, dim, aff[a].head, env, &aff[a].ent);
+		uint32_t cnt = aff[a].ent.count;
+		if (cnt == 0)
 			continue;
-		}
-
-		/* Decide per entry: 0 = stay in L, 1 = move to h0, 2 = move to h1. */
-		uint8_t *tgt	   = mkt_alloc((size_t)ne.count);
-		uint32_t local_mov = 0;
-		for (uint32_t i = 0; i < ne.count; i++)
+		aff[a].target = mkt_alloc((size_t)cnt * sizeof(BlockNumber));
+		for (uint32_t i = 0; i < cnt; i++)
 		{
-			mkt_rabitq_rotate(params, ne.vecs + (size_t)i * dim, pt_e);
-			float dL = mkt_l2_distance_squared(pt_e, pt_cL, dim);
-			float d0 = mkt_l2_distance_squared(pt_e, pt_c0, dim);
-			float d1 = mkt_l2_distance_squared(pt_e, pt_c1, dim);
-			if (d0 < dL && d0 <= d1)
-				tgt[i] = 1;
-			else if (d1 < dL)
-				tgt[i] = 2;
-			else
-				tgt[i] = 0;
-			if (tgt[i] != 0)
-				local_mov++;
-		}
+			aff[a].target[i] = InvalidBlockNumber; /* stay */
+			mkt_rabitq_rotate(params, aff[a].ent.vecs + (size_t)i * dim, pt_v);
+			float dao = mkt_l2_distance_squared(pt_v, pt_ao, dim);
+			float d0  = mkt_l2_distance_squared(pt_v, pt_c0, dim);
+			float d1  = mkt_l2_distance_squared(pt_v, pt_c1, dim);
 
-		if (local_mov == 0)
-		{
-			mkt_free(tgt);
-			split_entries_free(&ne);
+			bool candidate = is_split_half ? (dao <= d0 && dao <= d1)  /* c1 */
+										   : (d0 <= dao || d1 <= dao); /* c2 */
+			if (!candidate)
+				continue;
+
+			BlockNumber tgt = route_nearest_leaf(&lt, dim, pt_v);
+			if (tgt != InvalidBlockNumber && tgt != aff[a].head)
+			{
+				aff[a].target[i] = tgt;
+				aff[a].movers++;
+			}
+		}
+	}
+
+	/* 5. Allocate a fresh head for each posting that loses entries. */
+	for (uint32_t a = 0; a < naff; a++)
+	{
+		if (aff[a].movers == 0)
 			continue;
-		}
+		float *pt_c = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
+		read_head_pt_centroid(base->posting_storage, aff[a].head, dim, pt_c);
+		aff[a].newhead = new_posting_head(
+				base->posting_storage, dim, aff[a].ent.cluster_id, pt_c);
+		mkt_free_aligned(pt_c);
+	}
 
-		/* Rewrite L in place under the same centroid; movers go to h0/h1. */
-		BlockNumber Lnew = new_posting_head(
-				base->posting_storage, dim, ne.cluster_id, pt_cL);
-		for (uint32_t i = 0; i < ne.count; i++)
+	/* 6. Re-insert the stayers of each rewritten posting into its new head. */
+	for (uint32_t a = 0; a < naff; a++)
+	{
+		if (aff[a].movers == 0)
+			continue;
+		for (uint32_t i = 0; i < aff[a].ent.count; i++)
 		{
-			mkt_rabitq_rotate(params, ne.vecs + (size_t)i * dim, pt_e);
-			BlockNumber dst = tgt[i] == 0 ? Lnew : (tgt[i] == 1 ? h0 : h1);
+			if (aff[a].target[i] != InvalidBlockNumber)
+				continue; /* mover: handled in step 7 */
+			mkt_rabitq_rotate(params, aff[a].ent.vecs + (size_t)i * dim, pt_v);
 			mkt_posting_insert_one(
 					base->posting_storage,
 					params,
 					dim,
-					dst,
-					ne.tids[i],
-					pt_e,
+					aff[a].newhead,
+					aff[a].ent.tids[i],
+					pt_v,
 					scratch,
 					false,
 					0);
 		}
+	}
 
+	/*
+	 * 7. Insert every mover into its routed target -- redirected to the
+	 * target's new head when that target is itself being rewritten.
+	 */
+	uint32_t moved = 0;
+	for (uint32_t a = 0; a < naff; a++)
+	{
+		if (aff[a].movers == 0)
+			continue;
+		for (uint32_t i = 0; i < aff[a].ent.count; i++)
+		{
+			BlockNumber tgt = aff[a].target[i];
+			if (tgt == InvalidBlockNumber)
+				continue;
+			for (uint32_t b = 0; b < naff; b++)
+				if (aff[b].head == tgt && aff[b].newhead != InvalidBlockNumber)
+				{
+					tgt = aff[b].newhead;
+					break;
+				}
+			mkt_rabitq_rotate(params, aff[a].ent.vecs + (size_t)i * dim, pt_v);
+			mkt_posting_insert_one(
+					base->posting_storage,
+					params,
+					dim,
+					tgt,
+					aff[a].ent.tids[i],
+					pt_v,
+					scratch,
+					false,
+					0);
+			moved++;
+		}
+	}
+
+	/* 8. Repoint each rewritten leaf slot and retire the old chain. */
+	for (uint32_t a = 0; a < naff; a++)
+	{
+		if (aff[a].movers == 0)
+			continue;
 		BlockNumber found_page, tail_page;
 		uint32_t	found_idx;
 		uint8_t		level;
 		if (find_leaf_and_tail(
 					base->centroid_storage,
 					base->first_centroid,
-					L,
+					aff[a].head,
 					&found_page,
 					&found_idx,
 					&tail_page,
@@ -424,20 +574,23 @@ reassign_neighbors(
 		{
 			Page cp =
 					mkt_storage_write_page(base->centroid_storage, found_page);
-			mkt_centroid_page_set_child(cp, found_idx, Lnew);
+			mkt_centroid_page_set_child(cp, found_idx, aff[a].newhead);
 			mkt_storage_commit_page(base->centroid_storage, found_page);
 		}
-		retire_or_tombstone_chain(base, env, L);
-
-		moved += local_mov;
-		mkt_free(tgt);
-		split_entries_free(&ne);
+		retire_or_tombstone_chain(base, env, aff[a].head);
 	}
 
-	mkt_free_aligned(pt_e);
-	mkt_free(dists);
-	mkt_free_aligned(pt_cL);
-	mkt_free(heads);
+	for (uint32_t a = 0; a < naff; a++)
+	{
+		if (aff[a].target != NULL)
+			mkt_free(aff[a].target);
+		split_entries_free(&aff[a].ent);
+	}
+	mkt_free_aligned(pt_v);
+	mkt_free(aff);
+	mkt_free(cand);
+	mkt_free(cd);
+	leaf_table_free(&lt);
 	return moved;
 }
 
@@ -509,11 +662,16 @@ mkt_posting_split(
 		return 0;
 	}
 
-	/* 3. Rotate the two new centroids into P^T space. */
+	/* 3. Rotate the two new centroids into P^T space. Also capture the old
+	 * (deleted) centroid A_o now, before the tree flip repoints its leaf slot
+	 * and step 8 retires its head -- LIRE reassignment needs A_o's value as
+	 * the necessary-condition threshold. */
 	float *pt_c0 = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
 	float *pt_c1 = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
+	float *pt_ao = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
 	mkt_rabitq_rotate(params, km->centroids, pt_c0);
 	mkt_rabitq_rotate(params, km->centroids + dim, pt_c1);
+	read_head_pt_centroid(base->posting_storage, head, dim, pt_ao);
 
 	/* 4. Create the two new heads. head0 reuses the old cluster id; head1
 	 * gets a fresh id (the next leaf index). */
@@ -582,6 +740,7 @@ mkt_posting_split(
 		mkt_free_aligned(pt_v);
 		mkt_free_aligned(pt_c0);
 		mkt_free_aligned(pt_c1);
+		mkt_free_aligned(pt_ao);
 		mkt_kmeans_result_destroy(km);
 		split_entries_free(&ent);
 		return -1;
@@ -630,18 +789,20 @@ mkt_posting_split(
 	base->nlist += 1;
 
 	/*
-	 * 9. LIRE boundary reassignment: pull entries in neighboring leaves that
-	 * are now closer to a new centroid. Restores the nearest-partition
-	 * invariant across the new boundary. Runs after the flip so the neighbors'
-	 * heads and centroids are stable. Reuses pt_c0/pt_c1 and the scratch.
+	 * 9. LIRE boundary reassignment (paper section 3.3): restore NPA across
+	 * the new boundary by re-examining the two split halves (push-out) and the
+	 * k nearest neighbor leaves of A_o (pull-in), routing each candidate to
+	 * its true nearest live leaf. Runs after the flip and the retire above so
+	 * the routing table sees h0/h1 and excludes the dead old chain.
 	 */
 	uint32_t reassigned = 0;
 	if (cfg != NULL && cfg->reassign_neighbors > 0)
-		reassigned = reassign_neighbors(
+		reassigned = reassign_lire(
 				base,
 				env,
 				params,
 				&scratch,
+				pt_ao,
 				h0,
 				h1,
 				pt_c0,
@@ -661,6 +822,7 @@ mkt_posting_split(
 	mkt_free_aligned(pt_v);
 	mkt_free_aligned(pt_c0);
 	mkt_free_aligned(pt_c1);
+	mkt_free_aligned(pt_ao);
 	mkt_kmeans_result_destroy(km);
 	split_entries_free(&ent);
 

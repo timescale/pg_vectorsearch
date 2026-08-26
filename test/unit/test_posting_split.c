@@ -13,10 +13,14 @@
 #include <string.h>
 
 #include "algo/distance.h"
+#include "algo/vecops.h"
 #include "core/memory.h"
+#include "index/centroid_page.h"
+#include "index/index_base.h"
 #include "index/posting_page.h"
 #include "index/posting_split.h"
 #include "mkt_test.h"
+#include "quant/rabitq.h"
 #include "standalone/index.h"
 #include "standalone/query.h"
 
@@ -356,6 +360,140 @@ self_recall(
 	return (double)found / (double)checked;
 }
 
+/* ----------------------------------------------------------------
+ * NPA (nearest-partition-assignment) inspection helpers
+ *
+ * The reassignment core enforces NPA by exact L2 over the heads' stored
+ * pt_centroids. These helpers recompute that ground truth from the test's
+ * in-RAM vectors so a test can assert an entry sits in its truly-nearest leaf.
+ * Rotation is orthonormal, so nearest-in-rotated == nearest-in-original; we
+ * rotate the query vector and compare against stored pt_centroids directly.
+ * AoS posting layout only (the build_flat path used by these tests).
+ * ---------------------------------------------------------------- */
+
+/* Live leaf head blocks of the flat centroid chain. Returns the count. */
+static uint32_t
+enum_leaf_heads(MktIndex *idx, BlockNumber *out, uint32_t cap)
+{
+	uint32_t	n	 = 0;
+	BlockNumber cblk = idx->base.first_centroid;
+	while (cblk != InvalidBlockNumber)
+	{
+		Page page = mkt_storage_read_page(idx->base.centroid_storage, cblk);
+		const MktCentroidPageOpaque *op	  = MKT_CENTROID_OPAQUE(page);
+		uint16_t					 cnt  = op->entry_count;
+		BlockNumber					 next = op->next_blkno;
+		for (uint16_t i = 0; i < cnt && n < cap; i++)
+		{
+			BlockNumber ch = mkt_centroid_meta(page, i)->child_blkno;
+			if (ch == InvalidBlockNumber)
+				continue;
+			Page	 hp = mkt_storage_read_page(idx->base.posting_storage, ch);
+			uint16_t fl = mkt_posting_opaque(hp)->flags;
+			mkt_storage_release_page(idx->base.posting_storage, ch);
+			if (fl & (MKT_POSTING_PAGE_DELETED | MKT_POSTING_PAGE_TOMBSTONED))
+				continue;
+			out[n++] = ch;
+		}
+		mkt_storage_release_page(idx->base.centroid_storage, cblk);
+		cblk = next;
+	}
+	return n;
+}
+
+/* The live leaf head whose chain currently contains vector id `vid`. */
+static BlockNumber
+containing_head(
+		MktIndex *idx, uint32_t vid, const BlockNumber *heads, uint32_t nheads)
+{
+	Dimension dim = idx->base.dim;
+	for (uint32_t h = 0; h < nheads; h++)
+	{
+		BlockNumber blk = heads[h];
+		while (blk != InvalidBlockNumber)
+		{
+			Page page = mkt_storage_read_page(idx->base.posting_storage, blk);
+			const MktPostingPageOpaque *op	 = mkt_posting_opaque(page);
+			BlockNumber					next = op->next_blkno;
+			uint16_t					cnt	 = op->entry_count;
+			bool  first	  = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+			bool  tomb	  = (op->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0;
+			char *content = first ? mkt_posting_content_first(page, dim)
+								  : mkt_posting_content(page);
+			if (!tomb)
+				for (uint16_t i = 0; i < cnt; i++)
+				{
+					MktPostingEntryHeader *hdr =
+							mkt_posting_entry_at(content, i, dim);
+					if (hdr->meta.flags & MKT_POSTING_FLAG_DELETED)
+						continue;
+					if (mkt_posting_get_vector_id(&hdr->meta.tid) == vid)
+					{
+						mkt_storage_release_page(
+								idx->base.posting_storage, blk);
+						return heads[h];
+					}
+				}
+			mkt_storage_release_page(idx->base.posting_storage, blk);
+			blk = next;
+		}
+	}
+	return InvalidBlockNumber;
+}
+
+/* Nearest leaf head to `vec` by exact L2 over stored pt_centroids. */
+static BlockNumber
+nearest_head(
+		MktIndex		  *idx,
+		RaBitQParams	  *params,
+		const float		  *vec,
+		const BlockNumber *heads,
+		uint32_t		   nheads,
+		float			  *pt_scratch)
+{
+	Dimension dim = idx->base.dim;
+	mkt_rabitq_rotate(params, vec, pt_scratch);
+	BlockNumber best = InvalidBlockNumber;
+	float		bd	 = INFINITY;
+	for (uint32_t h = 0; h < nheads; h++)
+	{
+		Page hp = mkt_storage_read_page(idx->base.posting_storage, heads[h]);
+		const float *pc = mkt_posting_pt_centroid(hp);
+		float		 d	= mkt_l2_distance_squared(pt_scratch, pc, dim);
+		mkt_storage_release_page(idx->base.posting_storage, heads[h]);
+		if (d < bd)
+		{
+			bd	 = d;
+			best = heads[h];
+		}
+	}
+	return best;
+}
+
+/* Number of entries whose containing leaf is not their nearest leaf. */
+static uint32_t
+count_npa_violations(
+		MktIndex *idx, const float *vecs, uint32_t n, uint32_t dim)
+{
+	RaBitQParams *params = mkt_index_ensure_rabitq(&idx->base);
+	BlockNumber	  heads[256];
+	uint32_t	  nheads = enum_leaf_heads(idx, heads, 256);
+	float		 *pt	 = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
+	uint32_t	  viol	 = 0;
+	for (uint32_t vid = 0; vid < n; vid++)
+	{
+		BlockNumber ch = containing_head(idx, vid, heads, nheads);
+		if (ch == InvalidBlockNumber)
+			continue;
+		BlockNumber nh = nearest_head(
+				idx, params, vecs + (size_t)vid * dim, heads, nheads, pt);
+		if (ch != nh)
+			viol++;
+	}
+	mkt_free_aligned(pt);
+	return viol;
+}
+
 TEST(split_reassign_preserves_recall)
 {
 	/* LIRE reassignment must move entries correctly (no losses) and not hurt
@@ -402,8 +540,107 @@ TEST(split_reassign_preserves_recall)
 	ASSERT_TRUE(
 			selfB >= selfA - 0.02, "reassign loses no entries vs plain split");
 
+	/* Direct NPA check: reassignment must not leave MORE entries misplaced
+	 * than a plain split — it routes boundary entries to their true-nearest
+	 * leaf, so violations can only stay equal or drop. */
+	uint32_t violA = count_npa_violations(a, vecs, n, dim);
+	uint32_t violB = count_npa_violations(b, vecs, n, dim);
+	ASSERT_TRUE(violB <= violA, "reassign does not increase NPA violations");
+
 	mkt_index_destroy(a);
 	mkt_index_destroy(b);
+}
+
+TEST(reassign_restores_npa)
+{
+	/*
+	 * With overlapping blobs a plain split leaves boundary entries misassigned
+	 * (their true-nearest leaf is now a neighbor). LIRE reassignment must
+	 * strictly reduce the NPA-violation count by routing them home.
+	 */
+	uint32_t dim = 16, nblobs = 4, per = 300, n = nblobs * per;
+	float	*vecs = make_blobs(nblobs, per, dim, 1.5f, 202);
+
+	MktIndex	  *a   = build_flat(vecs, n, dim, nblobs);
+	FetchCtx	   fca = {a->all_vectors};
+	MktSplitEnv	   ea  = {.fetch_vector = fetch_vec, .ctx = &fca};
+	MktSplitResult ra;
+	MktSplitConfig c0 = {0};
+	ASSERT_EQ(
+			mkt_posting_split(&a->base, a->first_posting, &c0, &ea, &ra),
+			0,
+			"plain split ok");
+	ASSERT_TRUE(ra.did_split, "plain split");
+
+	MktIndex	  *b   = build_flat(vecs, n, dim, nblobs);
+	FetchCtx	   fcb = {b->all_vectors};
+	MktSplitEnv	   eb  = {.fetch_vector = fetch_vec, .ctx = &fcb};
+	MktSplitResult rb;
+	MktSplitConfig cr = {.reassign_neighbors = 3};
+	ASSERT_EQ(
+			mkt_posting_split(&b->base, b->first_posting, &cr, &eb, &rb),
+			0,
+			"reassign split ok");
+	ASSERT_TRUE(rb.did_split, "reassign split");
+	ASSERT_TRUE(rb.reassigned > 0, "reassignment moved entries");
+
+	uint32_t violA = count_npa_violations(a, vecs, n, dim);
+	uint32_t violB = count_npa_violations(b, vecs, n, dim);
+	ASSERT_TRUE(violB < violA, "reassign strictly reduces NPA violations");
+
+	mkt_index_destroy(a);
+	mkt_index_destroy(b);
+}
+
+TEST(reassign_places_outside_split_halves)
+{
+	/*
+	 * Route-anywhere property: a boundary entry may belong in a pre-existing
+	 * neighbor, not just one of the two split halves. The old pull-in-only
+	 * logic could only place entries into h0/h1; LIRE routing must be able to
+	 * land an entry in a third posting. We split the first leaf and check that
+	 * at least one entry ends up in a leaf that is neither split half.
+	 */
+	uint32_t dim = 16, nblobs = 4, per = 300, n = nblobs * per;
+	float	*vecs = make_blobs(nblobs, per, dim, 1.5f, 202);
+
+	MktIndex   *idx = build_flat(vecs, n, dim, nblobs);
+	FetchCtx	fc	= {idx->all_vectors};
+	MktSplitEnv env = {.fetch_vector = fetch_vec, .ctx = &fc};
+
+	/* Snapshot the members of the list we are about to split. */
+	BlockNumber heads0[256];
+	uint32_t	nh0		 = enum_leaf_heads(idx, heads0, 256);
+	uint32_t   *was_in_P = mkt_alloc(
+			  (size_t)n * sizeof(uint32_t)); /* 1 if vid was in P */
+	memset(was_in_P, 0, (size_t)n * sizeof(uint32_t));
+	BlockNumber P = idx->first_posting;
+	for (uint32_t vid = 0; vid < n; vid++)
+		if (containing_head(idx, vid, heads0, nh0) == P)
+			was_in_P[vid] = 1;
+
+	MktSplitResult r;
+	MktSplitConfig cr = {.reassign_neighbors = 3};
+	ASSERT_EQ(mkt_posting_split(&idx->base, P, &cr, &env, &r), 0, "split ok");
+	ASSERT_TRUE(r.did_split, "split happened");
+
+	/* After split+reassign, count former members of P that now live in a leaf
+	 * other than the two split halves — i.e. pushed out to a neighbor. */
+	BlockNumber heads1[256];
+	uint32_t	nh1	   = enum_leaf_heads(idx, heads1, 256);
+	uint32_t	pushed = 0;
+	for (uint32_t vid = 0; vid < n; vid++)
+	{
+		if (!was_in_P[vid])
+			continue;
+		BlockNumber ch = containing_head(idx, vid, heads1, nh1);
+		if (ch != InvalidBlockNumber && ch != r.head0 && ch != r.head1)
+			pushed++;
+	}
+	ASSERT_TRUE(pushed > 0, "at least one entry routed to a third posting");
+
+	mkt_free(was_in_P);
+	mkt_index_destroy(idx);
 }
 
 TEST(merge_dissolves_into_neighbor)
