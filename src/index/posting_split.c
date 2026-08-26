@@ -2,6 +2,8 @@
  * posting_split.c - Incremental posting-list split (see header)
  */
 
+#include <math.h>
+
 #include "algo/kmeans.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
@@ -833,4 +835,133 @@ mkt_posting_merge(
 		return 0; /* only leaf left — nothing to merge into */
 	}
 	return mkt_posting_merge_into(base, head, target, env, out);
+}
+
+/* ----------------------------------------------------------------
+ * Centroid compaction
+ * ---------------------------------------------------------------- */
+
+/*
+ * Reclaim poisoned leaf slots (f_add == +inf, left by merge) from the flat
+ * level-0 centroid chain. Rewrites the chain in place, keeping only live
+ * entries and preserving the page links, so routing no longer scores the dead
+ * slots. Returns the number of slots reclaimed, or a negative value on error.
+ *
+ * Not concurrency-safe against scans on its own (an entry can transiently
+ * appear on two pages as it migrates); run it where no scan races it, or wire
+ * the PG path via a fresh-chain-and-flip (a later commit). RaBitQ centroid,
+ * flat tree only.
+ */
+int
+mkt_centroid_compact(MktIndexBase *base)
+{
+	if (base == NULL || base->nlevels != 1 ||
+		base->centroid_format != MKT_CENTROID_FMT_RABITQ)
+		return -1;
+
+	Dimension	dim		  = base->dim;
+	uint32_t	data_size = mkt_centroid_data_size(dim, base->centroid_format);
+	MktStorage *cs		  = base->centroid_storage;
+
+	/* Pass 1: count chain pages and live (non-poisoned) leaf entries. */
+	uint32_t	nblk = 0, nlive = 0;
+	BlockNumber cblk = base->first_centroid;
+	while (cblk != InvalidBlockNumber)
+	{
+		Page						 page = mkt_storage_read_page(cs, cblk);
+		const MktCentroidPageOpaque *op	  = MKT_CENTROID_OPAQUE(page);
+		uint16_t					 cnt  = op->entry_count;
+		BlockNumber					 next = op->next_blkno;
+		nblk++;
+		for (uint16_t i = 0; i < cnt; i++)
+			if (!isinf(mkt_centroid_data(page, i, dim)->f_add))
+				nlive++;
+		mkt_storage_release_page(cs, cblk);
+		cblk = next;
+	}
+	if (nblk == 0)
+		return 0;
+
+	/* Pass 2: snapshot the chain layout and the surviving entries. */
+	BlockNumber *blocks = mkt_alloc((size_t)nblk * sizeof(BlockNumber));
+	BlockNumber *nexts	= mkt_alloc((size_t)nblk * sizeof(BlockNumber));
+	uint8_t		*levels = mkt_alloc((size_t)nblk);
+	BlockNumber *lchild = nlive ? mkt_alloc(
+										  (size_t)nlive * sizeof(BlockNumber))
+								: NULL;
+	uint16_t *lcc = nlive ? mkt_alloc((size_t)nlive * sizeof(uint16_t)) : NULL;
+	uint16_t *lflags = nlive ? mkt_alloc((size_t)nlive * sizeof(uint16_t))
+							 : NULL;
+	uint8_t	 *ldata	 = nlive ? mkt_alloc((size_t)nlive * data_size) : NULL;
+
+	uint32_t bi = 0, li = 0, removed = 0;
+	cblk = base->first_centroid;
+	while (cblk != InvalidBlockNumber)
+	{
+		Page						 page = mkt_storage_read_page(cs, cblk);
+		const MktCentroidPageOpaque *op	  = MKT_CENTROID_OPAQUE(page);
+		uint16_t					 cnt  = op->entry_count;
+		blocks[bi]						  = cblk;
+		nexts[bi]						  = op->next_blkno;
+		levels[bi]						  = op->level;
+		bi++;
+		for (uint16_t i = 0; i < cnt; i++)
+		{
+			const RaBitQData *d = mkt_centroid_data(page, i, dim);
+			if (isinf(d->f_add))
+			{
+				removed++;
+				continue;
+			}
+			const MktCentroidEntryMeta *m = mkt_centroid_meta(page, i);
+			lchild[li]					  = m->child_blkno;
+			lcc[li]						  = m->child_count;
+			lflags[li]					  = m->flags;
+			memcpy(ldata + (size_t)li * data_size, d, data_size);
+			li++;
+		}
+		BlockNumber next = op->next_blkno;
+		mkt_storage_release_page(cs, cblk);
+		cblk = next;
+	}
+
+	/* Pass 3: reinit each chain page (restoring its link + level) and refill
+	 * with the surviving entries. Since we only removed entries, they always
+	 * fit back into the same pages; any trailing page is left empty but
+	 * linked.
+	 */
+	if (removed > 0)
+	{
+		uint32_t out = 0;
+		for (uint32_t b = 0; b < nblk; b++)
+		{
+			Page page = mkt_storage_write_page(cs, blocks[b]);
+			mkt_centroid_page_init_fmt(page, levels[b], base->centroid_format);
+			MKT_CENTROID_OPAQUE(page)->next_blkno = nexts[b];
+			while (out < li && mkt_centroid_page_has_room(page, dim, false))
+			{
+				mkt_centroid_page_add_entry(
+						page,
+						dim,
+						lchild[out],
+						lcc[out],
+						lflags[out],
+						ldata + (size_t)out * data_size);
+				out++;
+			}
+			mkt_storage_commit_page(cs, blocks[b]);
+		}
+	}
+
+	mkt_free(blocks);
+	mkt_free(nexts);
+	mkt_free(levels);
+	if (nlive)
+	{
+		mkt_free(lchild);
+		mkt_free(lcc);
+		mkt_free(lflags);
+		mkt_free(ldata);
+	}
+	return (int)removed;
 }

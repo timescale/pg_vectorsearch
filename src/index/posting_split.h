@@ -149,4 +149,13 @@ int mkt_posting_merge_into(
 		const MktSplitEnv *env,
 		MktMergeResult	  *out);
 
+/*
+ * Reclaim poisoned leaf slots (left by merge) from the flat level-0 centroid
+ * chain, compacting it in place so routing no longer scores the dead entries.
+ * Returns the number of slots reclaimed, or negative on error. Not
+ * concurrency-safe against scans on its own (see posting_split.c); flat tree +
+ * RaBitQ centroid only.
+ */
+int mkt_centroid_compact(MktIndexBase *base);
+
 #endif /* MKT_POSTING_SPLIT_H */

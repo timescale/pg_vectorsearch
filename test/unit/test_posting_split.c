@@ -448,6 +448,62 @@ TEST(merge_dissolves_into_neighbor)
 	mkt_index_destroy(idx);
 }
 
+/* entry_count on the (single) flat root centroid page. */
+static uint16_t
+root_entry_count(MktIndex *idx)
+{
+	Page p = mkt_storage_read_page(
+			idx->base.centroid_storage, idx->base.first_centroid);
+	uint16_t c = MKT_CENTROID_OPAQUE(p)->entry_count;
+	mkt_storage_release_page(
+			idx->base.centroid_storage, idx->base.first_centroid);
+	return c;
+}
+
+TEST(centroid_compact_reclaims_poisoned)
+{
+	/* Two merges leave two poisoned leaf slots in the centroid page;
+	 * compaction removes them while preserving routing. */
+	uint32_t dim = 16, nblobs = 4, per = 300, n = nblobs * per, nprobe = 8;
+	float	*vecs = make_blobs(nblobs, per, dim, 1.0f, 91);
+
+	MktIndex *idx = build_flat(vecs, n, dim, nblobs);
+	ASSERT_NOT_NULL(idx, "build ok");
+	ASSERT_EQ(idx->base.nlist, nblobs, "4 leaves");
+
+	FetchCtx	   fc  = {idx->all_vectors};
+	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	MktMergeResult r;
+	ASSERT_EQ(
+			mkt_posting_merge(&idx->base, idx->first_posting, &env, &r),
+			0,
+			"merge 0 ok");
+	ASSERT_TRUE(r.did_merge, "m0");
+	ASSERT_EQ(
+			mkt_posting_merge(&idx->base, idx->first_posting + 1, &env, &r),
+			0,
+			"merge 1 ok");
+	ASSERT_TRUE(r.did_merge, "m1");
+
+	ASSERT_EQ(
+			root_entry_count(idx),
+			nblobs,
+			"poisoned slots still occupy the centroid page");
+	double sr_before = self_recall(idx, vecs, n, dim, nprobe);
+
+	int removed = mkt_centroid_compact(&idx->base);
+	ASSERT_EQ(removed, 2, "two poisoned slots reclaimed");
+	ASSERT_EQ(
+			root_entry_count(idx),
+			nblobs - 2u,
+			"centroid page compacted to the live leaves");
+
+	double sr_after = self_recall(idx, vecs, n, dim, nprobe);
+	ASSERT_TRUE(sr_after >= sr_before - 0.02, "compaction preserves recall");
+
+	mkt_index_destroy(idx);
+}
+
 TEST(merge_twice_skips_retired)
 {
 	/* Two merges in a row: the second must not pick the first (now retired)
