@@ -42,6 +42,7 @@
 #include "types/vector.h"
 
 PG_FUNCTION_INFO_V1(mkt_split_postinglist);
+PG_FUNCTION_INFO_V1(mkt_merge_postinglist);
 PG_FUNCTION_INFO_V1(mkt_compact);
 
 /*
@@ -230,6 +231,63 @@ split_one_head(
 	return rc == 0 && res->did_split;
 }
 
+/* Is `blk` a live posting-list head (first page, not tombstoned/retired)? */
+static bool
+posting_head_is_live(MktStorage *st, BlockNumber blk)
+{
+	Page						p	 = mkt_storage_read_page(st, blk);
+	const MktPostingPageOpaque *op	 = mkt_posting_opaque(p);
+	bool						live = op->page_id == MKT_POSTING_PAGE_ID &&
+				(op->flags & MKT_POSTING_PAGE_FIRST) &&
+				!(op->flags &
+				  (MKT_POSTING_PAGE_TOMBSTONED | MKT_POSTING_PAGE_DELETED));
+	mkt_storage_release_page(st, blk);
+	return live;
+}
+
+/*
+ * Merge the undersized list at `head` into its nearest neighbor. Finds the
+ * target read-only, then locks both heads in block-number order (so a
+ * concurrent op locking the same pair can't deadlock), re-verifies both are
+ * still live, and dissolves the source. Returns true and fills *res on merge.
+ */
+static bool
+merge_one_head(
+		Relation		 index,
+		MktIndexBase	*base,
+		PgSplitFetchCtx *fc,
+		BlockNumber		 head,
+		MktMergeResult	*res)
+{
+	BlockNumber target = mkt_posting_merge_find_target(base, head);
+	if (target == InvalidBlockNumber)
+		return false;
+
+	BlockNumber lo = Min(head, target);
+	BlockNumber hi = Max(head, target);
+	LockPage(index, lo, ExclusiveLock);
+	LockPage(index, hi, ExclusiveLock);
+
+	/* State may have changed between find and lock. */
+	if (!posting_head_is_live(base->posting_storage, head) ||
+		!posting_head_is_live(base->posting_storage, target))
+	{
+		UnlockPage(index, hi, ExclusiveLock);
+		UnlockPage(index, lo, ExclusiveLock);
+		return false;
+	}
+
+	MktSplitEnv env =
+			{.fetch_vector = pg_split_fetch_vector,
+			 .retire_chain = pg_retire_chain,
+			 .ctx		   = fc};
+	int rc = mkt_posting_merge_into(base, head, target, &env, res);
+
+	UnlockPage(index, hi, ExclusiveLock);
+	UnlockPage(index, lo, ExclusiveLock);
+	return rc == 0 && res->did_merge;
+}
+
 /* Common setup: base + storage + heap fetch context. */
 typedef struct MaintCtx
 {
@@ -323,6 +381,52 @@ mkt_split_postinglist(PG_FUNCTION_ARGS)
 }
 
 /*
+ * mkt.merge_postinglist(index regclass, head_blkno bigint) -> boolean
+ *
+ * Dissolve the posting list whose head page is head_blkno into its nearest
+ * neighbor. Returns true if a merge happened, false if declined (not a live
+ * head, or the only leaf).
+ */
+Datum
+mkt_merge_postinglist(PG_FUNCTION_ARGS)
+{
+	Oid		 indexoid = PG_GETARG_OID(0);
+	int64	 blk64	  = PG_GETARG_INT64(1);
+	Relation index	  = relation_open(indexoid, RowExclusiveLock);
+
+	if (index->rd_rel->relkind != RELKIND_INDEX)
+	{
+		relation_close(index, RowExclusiveLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not an index",
+						RelationGetRelationName(index))));
+	}
+	require_index_owner(index, RowExclusiveLock);
+
+	BlockNumber nblocks = RelationGetNumberOfBlocks(index);
+	if (blk64 < 1 || blk64 >= (int64)nblocks)
+	{
+		relation_close(index, RowExclusiveLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("block number " INT64_FORMAT " out of range", blk64)));
+	}
+
+	MaintCtx m;
+	maint_begin(index, &m);
+
+	MktMergeResult res;
+	bool		   did =
+			merge_one_head(index, &m.base, &m.fetch, (BlockNumber)blk64, &res);
+
+	maint_end(index, &m, did);
+	relation_close(index, RowExclusiveLock);
+
+	PG_RETURN_BOOL(did);
+}
+
+/*
  * Scan an already-open index: split every live head that is flagged
  * MKT_POSTING_PAGE_NEEDS_SPLIT or (when mkt.max_postinglist_size > 0) exceeds
  * that size, and physically retire any DELETED chain whose delete_xid has
@@ -337,10 +441,12 @@ mktann_compact_index(Relation index)
 	MaintCtx m;
 	maint_begin(index, &m);
 
-	uint32_t	threshold = (uint32_t)mkt_max_postinglist_size;
-	BlockNumber nblocks	  = RelationGetNumberOfBlocks(index);
-	BlockNumber start	  = Max(m.base.first_posting, 1);
-	int32		nsplits	  = 0;
+	uint32_t	threshold	= (uint32_t)mkt_max_postinglist_size;
+	BlockNumber nblocks		= RelationGetNumberOfBlocks(index);
+	BlockNumber start		= Max(m.base.first_posting, 1);
+	uint32_t	merge_floor = (uint32_t)mkt_min_postinglist_size;
+	int32		nsplits		= 0;
+	int32		nmerges		= 0;
 
 	for (BlockNumber blk = start; blk < nblocks; blk++)
 	{
@@ -351,20 +457,29 @@ mktann_compact_index(Relation index)
 		bool is_head				   = op->page_id == MKT_POSTING_PAGE_ID &&
 					   (op->flags & MKT_POSTING_PAGE_FIRST) &&
 					   !(op->flags & MKT_POSTING_PAGE_TOMBSTONED);
-		bool retired   = is_head && (op->flags & MKT_POSTING_PAGE_DELETED);
-		bool candidate = is_head && !retired &&
-						 ((op->flags & MKT_POSTING_PAGE_NEEDS_SPLIT) ||
-						  (threshold > 0 && op->live_count >= threshold));
-		/* delete_xid overlays live_count and is meaningful only when DELETED.
-		 */
+		bool retired	= is_head && (op->flags & MKT_POSTING_PAGE_DELETED);
+		bool split_cand = is_head && !retired &&
+						  ((op->flags & MKT_POSTING_PAGE_NEEDS_SPLIT) ||
+						   (threshold > 0 && op->live_count >= threshold));
+		/* live_count is meaningful only on a live (non-retired) head; on a
+		 * retired one that slot holds delete_xid. */
+		uint32_t live		= (is_head && !retired) ? op->live_count : 0;
+		bool	 merge_cand = is_head && !retired && !split_cand &&
+						  merge_floor > 0 && live > 0 && live < merge_floor;
 		uint64 dxid = retired ? op->delete_xid : 0;
 		mkt_storage_release_page(&m.storage.base, blk);
 
-		if (candidate)
+		if (split_cand)
 		{
 			MktSplitResult res;
 			if (split_one_head(index, &m.base, &m.fetch, blk, 0, &res))
 				nsplits++;
+		}
+		else if (merge_cand)
+		{
+			MktMergeResult res;
+			if (merge_one_head(index, &m.base, &m.fetch, blk, &res))
+				nmerges++;
 		}
 		else if (
 				retired && GlobalVisCheckRemovableFullXid(
@@ -377,7 +492,7 @@ mktann_compact_index(Relation index)
 		}
 	}
 
-	maint_end(index, &m, nsplits > 0);
+	maint_end(index, &m, nsplits > 0 || nmerges > 0);
 	return nsplits;
 }
 

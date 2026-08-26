@@ -39,6 +39,7 @@ else
       'row_estimate',
       'split',
       'split_vacuum',
+      'merge',
     ]
 
     # Test-only SQL entry points (extra introspection the extension

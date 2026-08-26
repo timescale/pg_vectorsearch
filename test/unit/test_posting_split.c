@@ -448,6 +448,39 @@ TEST(merge_dissolves_into_neighbor)
 	mkt_index_destroy(idx);
 }
 
+TEST(merge_twice_skips_retired)
+{
+	/* Two merges in a row: the second must not pick the first (now retired)
+	 * list as its target, and no entry is lost. */
+	uint32_t dim = 16, nblobs = 3, per = 300, n = nblobs * per, nprobe = 8;
+	float	*vecs = make_blobs(nblobs, per, dim, 1.0f, 88);
+
+	MktIndex *idx = build_flat(vecs, n, dim, nblobs);
+	ASSERT_NOT_NULL(idx, "build ok");
+	ASSERT_EQ(idx->base.nlist, nblobs, "3 leaves");
+
+	double		before = self_recall(idx, vecs, n, dim, nprobe);
+	FetchCtx	fc	   = {idx->all_vectors};
+	MktSplitEnv env	   = {.fetch_vector = fetch_vec, .ctx = &fc};
+
+	BlockNumber	   h0 = idx->first_posting;
+	BlockNumber	   h1 = idx->first_posting + 1;
+	MktMergeResult r0, r1;
+	ASSERT_EQ(mkt_posting_merge(&idx->base, h0, &env, &r0), 0, "merge 0 ok");
+	ASSERT_TRUE(r0.did_merge, "first merge happened");
+	ASSERT_EQ(mkt_posting_merge(&idx->base, h1, &env, &r1), 0, "merge 1 ok");
+	ASSERT_TRUE(r1.did_merge, "second merge happened");
+	ASSERT_NEQ(r1.target, h0, "second merge must skip the retired first list");
+	ASSERT_EQ(idx->base.nlist, nblobs - 2u, "two merges -> one leaf");
+
+	double after = self_recall(idx, vecs, n, dim, nprobe);
+	ASSERT_TRUE(
+			after >= before - 0.05,
+			"no entry lost across two merges (retired target would lose)");
+
+	mkt_index_destroy(idx);
+}
+
 TEST(split_declines_below_threshold)
 {
 	uint32_t  dim = 16, n = 1200;

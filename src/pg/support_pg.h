@@ -33,6 +33,7 @@ extern int	  mkt_nprobe;				/* clusters to probe per query */
 extern int	  mkt_query_limit;			/* max results per query (0=auto) */
 extern int	  mkt_fastscan_bits;		/* fastscan LUT bits (8 or 16) */
 extern int	  mkt_max_postinglist_size; /* split threshold, 0=off */
+extern int	  mkt_min_postinglist_size; /* merge floor, 0=off */
 extern bool	  mkt_rerank;				/* enable reranking (default: true) */
 extern bool	  mkt_log_build_stats; /* log per-phase build stats (def: off) */
 extern int	  mkt_leaf_refine_threshold; /* refine when samples/leaf < this */

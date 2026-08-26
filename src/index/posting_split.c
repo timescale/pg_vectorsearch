@@ -671,27 +671,14 @@ mkt_posting_split(
  * Merge
  * ---------------------------------------------------------------- */
 
-int
-mkt_posting_merge(
-		MktIndexBase	  *base,
-		BlockNumber		   head,
-		const MktSplitEnv *env,
-		MktMergeResult	  *out)
+BlockNumber
+mkt_posting_merge_find_target(MktIndexBase *base, BlockNumber head)
 {
-	MktMergeResult res = {0};
-
-	if (base == NULL || env == NULL || env->fetch_vector == NULL ||
-		head == InvalidBlockNumber)
-		return -1;
-	if (base->nlevels != 1 || base->centroid_format != MKT_CENTROID_FMT_RABITQ)
-		return -1;
-
-	RaBitQParams *params = mkt_index_ensure_rabitq(base);
-	if (params == NULL || base->pt_global_mean == NULL)
-		return -1;
+	if (base == NULL || head == InvalidBlockNumber || base->nlevels != 1)
+		return InvalidBlockNumber;
 	Dimension dim = base->dim;
 
-	/* 1. Enumerate the other leaf heads (single-buffer-safe: collect block
+	/* Enumerate the other leaf heads (single-buffer-safe: collect block
 	 * numbers first, then read posting heads). */
 	uint32_t	 cap	= base->nlist + 8;
 	BlockNumber *heads	= mkt_alloc((size_t)cap * sizeof(BlockNumber));
@@ -713,7 +700,9 @@ mkt_posting_merge(
 		cblk = next;
 	}
 
-	/* 2. Nearest other leaf to the source centroid (rotated space). */
+	/* Nearest other leaf to the source centroid (rotated space). Skip heads
+	 * that are already retired (a prior merge in the same pass may have
+	 * poisoned/retired a leaf that is still present in the tree). */
 	float *pt_src = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
 	float *pt_cL  = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
 	read_head_pt_centroid(base->posting_storage, head, dim, pt_src);
@@ -721,7 +710,17 @@ mkt_posting_merge(
 	float		best   = 0.0f;
 	for (uint32_t i = 0; i < nheads; i++)
 	{
-		read_head_pt_centroid(base->posting_storage, heads[i], dim, pt_cL);
+		Page hp = mkt_storage_read_page(base->posting_storage, heads[i]);
+		const MktPostingPageOpaque *hop = mkt_posting_opaque(hp);
+		bool live = (hop->flags & (MKT_POSTING_PAGE_TOMBSTONED |
+								   MKT_POSTING_PAGE_DELETED)) == 0;
+		if (live)
+			memcpy(pt_cL,
+				   mkt_posting_pt_centroid(hp),
+				   (size_t)dim * sizeof(float));
+		mkt_storage_release_page(base->posting_storage, heads[i]);
+		if (!live)
+			continue;
 		float d = mkt_l2_distance_squared(pt_src, pt_cL, dim);
 		if (target == InvalidBlockNumber || d < best)
 		{
@@ -730,18 +729,34 @@ mkt_posting_merge(
 		}
 	}
 
-	if (target == InvalidBlockNumber)
-	{
-		/* Only leaf left — nothing to merge into. */
-		mkt_free_aligned(pt_cL);
-		mkt_free_aligned(pt_src);
-		mkt_free(heads);
-		if (out != NULL)
-			*out = res;
-		return 0;
-	}
+	mkt_free_aligned(pt_cL);
+	mkt_free_aligned(pt_src);
+	mkt_free(heads);
+	return target;
+}
 
-	/* 3. Move the source entries into the target, re-encoded against its
+int
+mkt_posting_merge_into(
+		MktIndexBase	  *base,
+		BlockNumber		   head,
+		BlockNumber		   target,
+		const MktSplitEnv *env,
+		MktMergeResult	  *out)
+{
+	MktMergeResult res = {0};
+
+	if (base == NULL || env == NULL || env->fetch_vector == NULL ||
+		head == InvalidBlockNumber || target == InvalidBlockNumber)
+		return -1;
+	if (base->nlevels != 1 || base->centroid_format != MKT_CENTROID_FMT_RABITQ)
+		return -1;
+
+	RaBitQParams *params = mkt_index_ensure_rabitq(base);
+	if (params == NULL || base->pt_global_mean == NULL)
+		return -1;
+	Dimension dim = base->dim;
+
+	/* Move the source entries into the target, re-encoded against its
 	 * centroid. */
 	SplitEntries ent;
 	collect_entries(base->posting_storage, dim, head, env, &ent);
@@ -764,7 +779,7 @@ mkt_posting_merge(
 				0);
 	}
 
-	/* 4. Poison the source leaf so routing skips it, then retire its chain. */
+	/* Poison the source leaf so routing skips it, then retire its chain. */
 	BlockNumber found_page, tail_page;
 	uint32_t	found_idx;
 	uint8_t		level;
@@ -793,12 +808,29 @@ mkt_posting_merge(
 
 	mkt_rabitq_scratch_cleanup(&scratch);
 	mkt_free_aligned(pt_e);
-	mkt_free_aligned(pt_cL);
-	mkt_free_aligned(pt_src);
-	mkt_free(heads);
 	split_entries_free(&ent);
 
 	if (out != NULL)
 		*out = res;
 	return 0;
+}
+
+int
+mkt_posting_merge(
+		MktIndexBase	  *base,
+		BlockNumber		   head,
+		const MktSplitEnv *env,
+		MktMergeResult	  *out)
+{
+	BlockNumber target = mkt_posting_merge_find_target(base, head);
+	if (target == InvalidBlockNumber)
+	{
+		if (out != NULL)
+		{
+			MktMergeResult res = {0};
+			*out			   = res;
+		}
+		return 0; /* only leaf left — nothing to merge into */
+	}
+	return mkt_posting_merge_into(base, head, target, env, out);
 }

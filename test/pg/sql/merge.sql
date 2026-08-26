@@ -1,0 +1,44 @@
+-- Posting-list merge: mkt.merge_postinglist dissolves a list into a neighbor
+--
+-- After merging one list into the other, the index still returns the same
+-- nearest neighbors as a sequential scan.
+
+CREATE TABLE merge_test (id serial, v vector(4));
+
+-- Two nearby clusters of 20 points each (deterministic values).
+INSERT INTO merge_test (v)
+    SELECT ARRAY[(i % 3)::real, (i % 2)::real, 0, 0]::vector(4)
+    FROM generate_series(1, 20) i;
+INSERT INTO merge_test (v)
+    SELECT ARRAY[2 + (i % 3)::real, (i % 2)::real, 0, 0]::vector(4)
+    FROM generate_series(1, 20) i;
+
+CREATE INDEX merge_idx ON merge_test USING mktann (v)
+    WITH (nlist = 2, centroid_fastscan = off);
+
+SET mkt.nprobe = 10;
+
+-- Ground truth (sequential scan).
+SET enable_indexscan = off;
+CREATE TEMP TABLE gt AS
+    SELECT id FROM merge_test ORDER BY v <-> '[0,0,0,0]'::vector(4) LIMIT 10;
+RESET enable_indexscan;
+
+-- Dissolve the first posting list into its nearest neighbor.
+SELECT mkt.merge_postinglist(
+        'merge_idx',
+        (SELECT min(blkno) FROM mkt.posting_pages('merge_idx')
+         WHERE is_first)::bigint) AS merged;
+
+-- Index-scan results after the merge still match the ground truth.
+SET enable_seqscan = off;
+CREATE TEMP TABLE res AS
+    SELECT id FROM merge_test ORDER BY v <-> '[0,0,0,0]'::vector(4) LIMIT 10;
+RESET enable_seqscan;
+
+SELECT count(*) AS matches FROM gt JOIN res USING (id);
+
+-- merge_postinglist rejects a non-index argument.
+SELECT mkt.merge_postinglist('merge_test', 1);
+
+DROP TABLE merge_test;

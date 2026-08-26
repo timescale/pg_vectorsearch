@@ -133,4 +133,20 @@ int mkt_posting_merge(
 		const MktSplitEnv *env,
 		MktMergeResult	  *out);
 
+/*
+ * Split of mkt_posting_merge for callers that must lock the target before
+ * mutating it (PG): find the merge target read-only, then, with both the
+ * source `head` and `target` locked, dissolve the source into the target.
+ * mkt_posting_merge is find_target + merge_into with no locking.
+ */
+BlockNumber
+mkt_posting_merge_find_target(MktIndexBase *base, BlockNumber head);
+
+int mkt_posting_merge_into(
+		MktIndexBase	  *base,
+		BlockNumber		   head,
+		BlockNumber		   target,
+		const MktSplitEnv *env,
+		MktMergeResult	  *out);
+
 #endif /* MKT_POSTING_SPLIT_H */

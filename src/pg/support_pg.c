@@ -29,6 +29,7 @@ int			  mkt_nprobe				= 0;
 int			  mkt_query_limit			= 0;
 int			  mkt_fastscan_bits			= 16;
 int			  mkt_max_postinglist_size	= 0;
+int			  mkt_min_postinglist_size	= 0;
 bool		  mkt_rerank				= true;
 bool		  mkt_log_build_stats		= false;
 double		  mkt_centroid_error_scale	= 0.0;
@@ -330,6 +331,23 @@ _PG_init(void)
 			"balanced lists. The flag is advisory: the split itself is "
 			"performed by the maintenance paths. 0 disables the check.",
 			&mkt_max_postinglist_size,
+			0,
+			0,
+			INT_MAX,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomIntVariable(
+			MKT_EXTENSION_SCHEMA ".min_postinglist_size",
+			"Posting-list size below which a list is merged into a neighbor "
+			"(0 = disabled).",
+			"When a cluster's live entry count falls below this value (e.g. "
+			"after deletes), the maintenance paths dissolve it into its "
+			"nearest neighbor list. 0 disables merging.",
+			&mkt_min_postinglist_size,
 			0,
 			0,
 			INT_MAX,

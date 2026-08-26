@@ -809,9 +809,19 @@ CREATE FUNCTION mkt.split_postinglist(
     AS 'MODULE_PATHNAME', 'mkt_split_postinglist'
     LANGUAGE C STRICT;
 
--- Scan an index and split every posting list that is flagged for split or,
--- when mkt.max_postinglist_size > 0, exceeds that size. Returns the number of
--- lists split.
+-- Dissolve one posting list (given its head block number) into its nearest
+-- neighbor. Returns true if a merge happened, false if declined.
+CREATE FUNCTION mkt.merge_postinglist(
+        index_oid regclass,
+        head_blkno bigint
+    )
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'mkt_merge_postinglist'
+    LANGUAGE C STRICT;
+
+-- Scan an index and maintain its posting lists: split those flagged for split
+-- or (when mkt.max_postinglist_size > 0) over that size, and merge those under
+-- mkt.min_postinglist_size into a neighbor. Returns the number of lists split.
 CREATE FUNCTION mkt.compact(index_oid regclass)
     RETURNS integer
     AS 'MODULE_PATHNAME', 'mkt_compact'
