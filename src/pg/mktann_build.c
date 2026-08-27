@@ -1183,6 +1183,29 @@ do_serial_build(
 IndexBuildResult *
 mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 {
+	/*
+	 * Refuse expression indexes.
+	 *
+	 * Rerank fetches the heap tuple and reads the indexed value with
+	 * slot_getattr(slot, indkey.values[0]) -- and for an expression index
+	 * PostgreSQL stores 0 there, keeping the expression tree in indexprs
+	 * instead. attnum 0 reads tts_values[-1] and hands the garbage to
+	 * pg_detoast_datum, which segfaults the backend (measured: the crash is
+	 * in pg_rerank_readstream, not theoretical).
+	 *
+	 * Supporting them means doing at rerank time what the build already does
+	 * -- evaluating the index expression over the fetched tuple -- which
+	 * needs an ExprState and ExprContext live across the whole rerank loop
+	 * and an evaluation per candidate, in the hottest path there is. Worth
+	 * doing; not worth smuggling in as a crash fix.
+	 */
+	if (index->rd_index->indkey.values[0] == InvalidAttrNumber)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("mktann indexes do not support index expressions"),
+				 errhint("Index the column directly, or materialize the "
+						 "expression into a column and index that.")));
+
 	MemoryContext caller_ctx = CurrentMemoryContext;
 	MemoryContext build_ctx	 = AllocSetContextCreate(
 			 CurrentMemoryContext, "mktann build", ALLOCSET_DEFAULT_SIZES);
