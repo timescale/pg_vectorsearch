@@ -26,6 +26,7 @@
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
 #include "support_pg.h"
+#include "typeinfo.h"
 #include "types/vector.h"
 
 /* Default nprobe — will become a GUC later */
@@ -177,6 +178,15 @@ typedef struct MktannScanState
 	ResourceOwner params_owner;
 
 	MemoryContext scan_ctx;
+
+	/*
+	 * Reads the query vector out of the ORDER BY argument: the opclass input
+	 * type bound to this index's dimension, plus the conversion buffer a
+	 * float32 view needs. It is the same binding build and insert use for
+	 * column values, because the ORDER BY argument has the opclass's input
+	 * type -- an access, not the vector itself.
+	 */
+	MktVectorAccess query_vector_access;
 } MktannScanState;
 
 const MktannScanStats *
@@ -208,6 +218,10 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	mktann_index_base_init(index, &ss->index_base);
 	ss->params_owner	= CurrentResourceOwner;
 	MktannScanInfo info = mktann_cache_scan_info(index);
+
+	/* From the per-backend cache; the buffer must outlive a rescan. */
+	ss->query_vector_access = mkt_vector_access(
+			mktann_cache_type_info(index), ss->index_base.dim, scan_ctx);
 
 	/* Size the top-K for the requested result count: mkt.query_limit is
 	 * set before the query runs (same contract as the nprobe sizing
@@ -306,10 +320,14 @@ execute_search(IndexScanDesc scan)
 	if (scan->heapRelation != NULL && ss->storage.rel == NULL)
 		mktann_storage_set_rel(&ss->storage, scan->heapRelation);
 
-	/* Extract query vector */
-	Datum	   query_datum = scan->orderByData[0].sk_argument;
-	MktVector *query_vec   = DatumGetMktVector(query_datum);
-	VectorRef  qref		   = MktVectorToRef(query_vec);
+	/*
+	 * Extract query vector. The ORDER BY operator belongs to the opclass, so
+	 * its argument has the opclass's input type and the same descriptor
+	 * converts it -- into the scan-lifetime buffer, so a rescan does not leak
+	 * one per execution. mkt_vector_read rejects a dimension mismatch.
+	 */
+	Datum	  query_datum = scan->orderByData[0].sk_argument;
+	VectorRef qref = mkt_vector_read(&ss->query_vector_access, query_datum);
 
 	if (qref.dim != ss->index_base.dim)
 		ereport(ERROR,

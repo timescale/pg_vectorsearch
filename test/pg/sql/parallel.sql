@@ -545,6 +545,32 @@ RESET maintenance_work_mem;
 RESET max_parallel_maintenance_workers;
 DROP TABLE line12kb;
 
+-- Parallel and serial builds over a halfvec column: both decode paths widen
+-- f16 to f32 before routing, and both must produce an index whose top-10
+-- matches brute force.
+--
+-- Note this does NOT catch a build that decodes halfvec as float32: measured,
+-- it still returns the exact top-10, because the rerank stage recomputes
+-- distances from the heap and repairs the order that garbage centroids sent
+-- it to. That failure mode is caught by the halfvec correctness check in
+-- mktann.sql (which disagrees with brute force) and by the centroid-format
+-- check in inspect.sql -- keeping this arm honest about what it proves.
+CREATE TABLE hline3 (id int, v halfvec(3));
+INSERT INTO hline3 SELECT g, format('[%s,0,0]', g)::halfvec
+    FROM generate_series(1, 50) g;
+ALTER TABLE hline3 SET (parallel_workers = 2);
+
+SET max_parallel_maintenance_workers = 2;
+SELECT exact_check('hline3', '(v) WITH (centroid_compression = true)',
+                   '[0.5,0,0]') AS parallel_halfvec_exact;
+SELECT exact_check('hline3', '(v) WITH (fastscan = true)',
+                   '[0.5,0,0]') AS parallel_halfvec_fastscan_exact;
+SET max_parallel_maintenance_workers = 0;
+SELECT exact_check('hline3', '(v) WITH (centroid_compression = true)',
+                   '[0.5,0,0]') AS serial_halfvec_exact;
+RESET max_parallel_maintenance_workers;
+DROP TABLE hline3;
+
 -- Cleanup
 DROP FUNCTION exact_check(text, text, text, text);
 DROP FUNCTION pbuild_check(text, text);

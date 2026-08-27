@@ -17,8 +17,12 @@
  *     frees an entry once its checkout count drops to zero, so a live
  *     scan's params pointer is never invalidated out from under it by
  *     another index of a different dim/seed.
- *   - The global mean, P^T·global_mean, and a fully-populated immutable
- *     MktIndexBase template live in rd_amcache.
+ *   - The global mean, P^T·global_mean, the column's type descriptor, and a
+ *     fully-populated immutable MktIndexBase template live in rd_amcache.
+ *     These are pure data with nothing to release, which is what rd_amcache
+ *     can hold: it is freed with rd_indexcxt and has no teardown hook, so
+ *     anything needing an explicit release (the params checkout above) has to
+ *     stay out of it.
  *
  * mktann_index_base_init fills a caller-owned MktIndexBase from the cache. The
  * only fields it leaves for the caller are the storage pointers
@@ -104,5 +108,16 @@ typedef struct MktannScanInfo
 } MktannScanInfo;
 
 MktannScanInfo mktann_cache_scan_info(Relation index);
+
+/*
+ * The indexed column's type descriptor, from the opclass (see
+ * typeinfo.h). Immutable for the life of the relcache entry, so it is
+ * resolved once per backend here rather than per call.
+ *
+ * Only safe once the index has a metadata page: this goes through the same
+ * cache as everything else, and populating that cache reads the metapage. The
+ * build paths therefore call mkt_index_type_info() directly.
+ */
+const struct MktIndexTypeInfo *mktann_cache_type_info(Relation index);
 
 #endif /* MKTANN_CACHE_H */

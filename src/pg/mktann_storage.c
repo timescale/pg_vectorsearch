@@ -27,8 +27,10 @@
 #include "algo/topk.h"
 #include "algo/vecops.h"
 #include "index/posting_page.h"
+#include "mktann_cache.h"
 #include "mktann_storage.h"
 #include "support_pg.h"
+#include "typeinfo.h"
 
 /* Downcast from base to concrete type */
 #define PG_STORAGE(self) ((MktannStorage *)(self))
@@ -361,6 +363,14 @@ pg_rerank(
 
 	AttrNumber vec_attnum = s->index->rd_index->indkey.values[0];
 
+	/*
+	 * Widening buffer for a halfvec heap column, allocated once per rerank
+	 * call -- rerank runs once per query over the whole candidate set, so this
+	 * is not a per-tuple allocation.
+	 */
+	MktVectorAccess input =
+			mkt_vector_access(s->type_info, dim, CurrentMemoryContext);
+
 	/* Sort by TID block order for sequential I/O */
 	uint32_t *order = palloc(count * sizeof(uint32_t));
 	for (uint32_t i = 0; i < count; i++)
@@ -391,10 +401,9 @@ pg_rerank(
 				Datum val = slot_getattr(slot, vec_attnum, &isnull);
 				if (!isnull)
 				{
-					MktVector *vec	= DatumGetMktVector(val);
-					VectorRef  qref = {.data = query, .dim = dim};
-					VectorRef  vref = {.data = vec->x, .dim = dim};
-					d				= mkt_distance(qref, vref, s->metric);
+					VectorRef qref = {.data = query, .dim = dim};
+					VectorRef vref = mkt_vector_read(&input, val);
+					d			   = mkt_distance(qref, vref, s->metric);
 				}
 				else
 				{
@@ -496,6 +505,10 @@ pg_rerank_readstream(
 
 	AttrNumber vec_attnum = s->index->rd_index->indkey.values[0];
 
+	/* See pg_rerank: one widening buffer per call, not per candidate. */
+	MktVectorAccess input =
+			mkt_vector_access(s->type_info, dim, CurrentMemoryContext);
+
 	uint32_t *order = palloc(count * sizeof(uint32_t));
 	for (uint32_t i = 0; i < count; i++)
 		order[i] = i;
@@ -554,10 +567,9 @@ pg_rerank_readstream(
 			Datum val = slot_getattr(slot, vec_attnum, &isnull);
 			if (!isnull)
 			{
-				MktVector *vec	= DatumGetMktVector(val);
-				VectorRef  qref = {.data = query, .dim = dim};
-				VectorRef  vref = {.data = vec->x, .dim = dim};
-				d				= mkt_distance(qref, vref, s->metric);
+				VectorRef qref = {.data = query, .dim = dim};
+				VectorRef vref = mkt_vector_read(&input, val);
+				d			   = mkt_distance(qref, vref, s->metric);
 			}
 			ExecClearTuple(slot);
 		}
@@ -630,6 +642,13 @@ mktann_storage_init(
 	s->cur_buf	  = InvalidBuffer;
 	s->metric	  = metric;
 	s->read_count = 0;
+	/*
+	 * Left NULL: every caller inits with rel = NULL, and rerank -- the only
+	 * consumer -- returns early without a heap relation. It is resolved in
+	 * mktann_storage_set_rel, which is where the heap arrives and therefore
+	 * where rerank becomes possible.
+	 */
+	s->type_info = NULL;
 }
 
 void
@@ -638,4 +657,12 @@ mktann_storage_set_rel(MktannStorage *s, Relation rel)
 	s->rel = rel;
 	if (rel != NULL && RelationGetForm(rel)->relam == HEAP_TABLE_AM_OID)
 		s->base.ops = &pg_storage_readstream_ops;
+
+	/*
+	 * Rerank reads the heap attribute, which has the indexed column's type.
+	 * From the per-backend cache: this runs on the scan path, so the index
+	 * has a metadata page and the cache is populated.
+	 */
+	if (rel != NULL)
+		s->type_info = mktann_cache_type_info(s->index);
 }

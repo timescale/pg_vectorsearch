@@ -31,6 +31,33 @@ SELECT level,
     FROM centroid_pages('idx_l2c'::regclass)
     GROUP BY level ORDER BY level;
 
+-- Centroid format follows the column type: a halfvec column stores
+-- half-precision centroids, a vector column float, with every option
+-- otherwise identical. This is a regression test as much as a feature test --
+-- the AM resolves mkt.halfvec's OID during CREATE INDEX, where PostgreSQL
+-- has narrowed the search path (RestrictSearchPath in DefineIndex), so an
+-- unqualified type lookup silently reports "not halfvec" and the whole
+-- halfvec input path decodes as float32.
+CREATE TABLE h_embeddings (id serial, v halfvec(3));
+INSERT INTO h_embeddings (v)
+    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::halfvec
+    FROM generate_series(0, 9) x,
+         generate_series(0, 9) y,
+         generate_series(0, 9) z;
+ANALYZE h_embeddings;
+CREATE INDEX h_idx_fmt ON h_embeddings USING mktann (v)
+    WITH (centroid_compression = off, centroid_fastscan = off,
+          fastscan = off, soar_lambda = 0, boundary_epsilon = 0);
+SELECT DISTINCT format AS halfvec_centroid_format
+    FROM centroid_pages('h_idx_fmt'::regclass);
+CREATE INDEX v_idx_fmt ON embeddings USING mktann (v)
+    WITH (centroid_compression = off, centroid_fastscan = off,
+          fastscan = off, soar_lambda = 0, boundary_epsilon = 0);
+SELECT DISTINCT format AS vector_centroid_format
+    FROM centroid_pages('v_idx_fmt'::regclass);
+DROP INDEX v_idx_fmt;
+DROP TABLE h_embeddings;
+
 -- Multi-level tree (fan_out = 4) — internal nodes show tree topology
 CREATE INDEX idx_ml ON embeddings USING mktann (v)
     WITH (fan_out = 4, centroid_compression = true,

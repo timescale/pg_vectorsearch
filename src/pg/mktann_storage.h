@@ -35,6 +35,9 @@ typedef struct MktannStorage
 	DistanceMetric metric;	   /* distance metric for reranking */
 	bool		   build_mode; /* skip per-page WAL during build */
 	uint32_t	   read_count; /* debug: total page reads */
+	/* Column type, from the opclass; rerank reads the heap attribute through
+	 * it. Resolved at init. */
+	const struct MktIndexTypeInfo *type_info;
 } MktannStorage;
 
 /*

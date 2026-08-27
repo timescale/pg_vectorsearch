@@ -719,6 +719,18 @@ CREATE FUNCTION mktann_metric_ip(internal) RETURNS int4
 CREATE FUNCTION mktann_metric_cosine(internal) RETURNS int4
     AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+-- Column type descriptors (support function 3). Optional: an opclass that
+-- declares none indexes `vector`, which keeps the vector opclasses unchanged
+-- and leaves an index built before this existed working. Returning the
+-- descriptor from the opclass is what lets the access method agree with the
+-- planner about a column's type without resolving a name or comparing an OID
+-- -- see src/pg/mktann_typeinfo.h.
+CREATE FUNCTION mktann_vector_support(internal) RETURNS internal
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION mktann_halfvec_support(internal) RETURNS internal
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 -- Operator classes for vector type
 CREATE OPERATOR CLASS vector_l2_ops
     DEFAULT FOR TYPE vector USING mktann AS
@@ -737,6 +749,35 @@ CREATE OPERATOR CLASS vector_cosine_ops
     OPERATOR 1 <=> (vector, vector) FOR ORDER BY float_ops,
     FUNCTION 1 cosine_distance(vector, vector),
     FUNCTION 2 mktann_metric_cosine(internal);
+
+-- Operator classes for halfvec type
+--
+-- The index itself is unchanged: postings hold RaBitQ codes either way, and
+-- the AM widens a halfvec tuple to float32 on read (the distance and encode
+-- kernels are float32-only). What halfvec buys is the heap, which is what an
+-- exact rerank reads -- at 768d a vector row is 3080 bytes and fits 2 to an
+-- 8 kB page against halfvec's 1544 and 5. Centroids follow the column and are
+-- stored half-precision too (MKT_CENTROID_FMT_HALF).
+CREATE OPERATOR CLASS halfvec_l2_ops
+    DEFAULT FOR TYPE halfvec USING mktann AS
+    OPERATOR 1 <-> (halfvec, halfvec) FOR ORDER BY float_ops,
+    FUNCTION 1 halfvec_l2_squared_distance(halfvec, halfvec),
+    FUNCTION 2 mktann_metric_l2(internal),
+    FUNCTION 3 mktann_halfvec_support(internal);
+
+CREATE OPERATOR CLASS halfvec_ip_ops
+    FOR TYPE halfvec USING mktann AS
+    OPERATOR 1 <#> (halfvec, halfvec) FOR ORDER BY float_ops,
+    FUNCTION 1 halfvec_negative_inner_product(halfvec, halfvec),
+    FUNCTION 2 mktann_metric_ip(internal),
+    FUNCTION 3 mktann_halfvec_support(internal);
+
+CREATE OPERATOR CLASS halfvec_cosine_ops
+    FOR TYPE halfvec USING mktann AS
+    OPERATOR 1 <=> (halfvec, halfvec) FOR ORDER BY float_ops,
+    FUNCTION 1 cosine_distance(halfvec, halfvec),
+    FUNCTION 2 mktann_metric_cosine(internal),
+    FUNCTION 3 mktann_halfvec_support(internal);
 
 -- =====================================================================
 -- index inspection functions

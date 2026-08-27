@@ -523,16 +523,6 @@ mkt_extension_name(PG_FUNCTION_ARGS)
 }
 
 /* ----------------------------------------------------------------
- * Type OID helpers
- * ---------------------------------------------------------------- */
-
-Oid
-mkt_halfvec_type_oid(void)
-{
-	return TypenameGetTypid("halfvec");
-}
-
-/* ----------------------------------------------------------------
  * Metric identifier support functions (FUNCTION 2 in opclasses)
  * ---------------------------------------------------------------- */
 
