@@ -121,7 +121,7 @@ uint32_t mkt_query_execute(
 		bool			rerank,
 		MktQueryStats  *stats);
 
-/* Cap the exact-rerank candidate pool: 0 = automatic (16 * k),
+/* Cap the exact-rerank candidate pool: 0 = automatic (4 * k),
  * -1 = unlimited, positive = absolute cap (never effective below k). */
 void mkt_query_set_rerank_pool(int32_t n);
 
@@ -169,6 +169,12 @@ uint32_t mkt_query_route(
  * settings go higher), and never above nlist itself.
  */
 uint32_t mkt_auto_nprobe(uint32_t nlist);
+
+/* Resolve mkt.rerank_pool (-1 unlimited, 0 automatic, >0 absolute) into an
+ * absolute candidate cap, given the query's k and the survivor population.
+ * Returns 0 for unlimited. Exposed for testing. */
+uint32_t
+mkt_auto_rerank_pool(int32_t setting, uint32_t k, uint32_t cand_count);
 
 /*
  * Floor for the centroid-search beam width, in tree candidates. The

@@ -71,5 +71,71 @@ SELECT bool_and(abs(t.dist - r.dist) < 1e-5) AS distances_match
  t
 (1 row)
 
+-- Automatic rerank_pool: the pool must respect the MULT * k floor.
+--
+-- Asserted as bounds rather than an exact count, because the survivor
+-- population depends on floating-point distance estimates and so is not
+-- portable, whereas the cap that bounds it is. The upper bound is what
+-- cap that bounds it is. At 500 rows the survivor population is ~16, well
+-- under either the current 4 * k or the former 16 * k, so this cannot pin
+-- the multiplier -- test/unit/test_rerank_pool.c does that. What this
+-- covers is the end-to-end plumbing: that the GUC reaches the scan, that
+-- an explicit cap is honoured, and that neither ever truncates below k.
+SET enable_seqscan = off;
+SET mkt.rerank_pool = 0;   -- automatic
+DO $$
+DECLARE
+    ej json;
+    stats json;
+    cands int;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, FORMAT JSON)
+        SELECT id FROM rerank_test
+        ORDER BY v <-> (SELECT v FROM rerank_test WHERE id = 42) LIMIT 10'
+    INTO ej;
+    stats := ej->0->'Plan'->'Plans'->1->'Mktann';
+    cands := (stats->>'Rerank Candidates')::int;
+    -- A wrong JSON path yields NULL, and every comparison below would then
+    -- be NULL rather than true -- i.e. the whole test would pass without
+    -- asserting anything. Fail loudly instead.
+    IF cands IS NULL THEN
+        RAISE EXCEPTION 'Rerank Candidates not found in EXPLAIN output';
+    END IF;
+    -- Never below k: a cap must not truncate the result set.
+    IF cands < 10 THEN
+        RAISE EXCEPTION 'auto rerank pool % is below k=10', cands;
+    END IF;
+    -- Never above MULT * k = 40 for k = 10.
+    IF cands > 40 THEN
+        RAISE EXCEPTION 'auto rerank pool % exceeds 4 * k = 40', cands;
+    END IF;
+END $$;
+-- An explicit cap is honoured, and still floored at k.
+SET mkt.rerank_pool = 12;
+DO $$
+DECLARE
+    ej json;
+    cands int;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, FORMAT JSON)
+        SELECT id FROM rerank_test
+        ORDER BY v <-> (SELECT v FROM rerank_test WHERE id = 42) LIMIT 10'
+    INTO ej;
+    cands := ((ej->0->'Plan'->'Plans'->1->'Mktann')->>'Rerank Candidates')::int;
+    IF cands IS NULL THEN
+        RAISE EXCEPTION 'Rerank Candidates not found in EXPLAIN output';
+    END IF;
+    IF cands > 12 OR cands < 10 THEN
+        RAISE EXCEPTION 'explicit rerank pool 12 gave % candidates', cands;
+    END IF;
+END $$;
+RESET mkt.rerank_pool;
+RESET enable_seqscan;
+SELECT 'auto and explicit rerank_pool bounds hold' AS rerank_pool_bounds;
+            rerank_pool_bounds             
+-------------------------------------------
+ auto and explicit rerank_pool bounds hold
+(1 row)
+
 -- Cleanup
 DROP TABLE rerank_test;

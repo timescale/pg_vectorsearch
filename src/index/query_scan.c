@@ -420,15 +420,72 @@ mkt_query_route(
 /* Cap on the rerank candidate pool (mkt.rerank_pool). Candidates are
  * sorted by approximate distance, so capping keeps the most promising
  * ones and bounds the exact-distance heap fetches. 0 (default) resolves
- * to an automatic cap of max(16 * k, candidate-buffer count / 8): the
+ * to an automatic cap of max(MULT * k, candidate-buffer count / 8): the
  * buffer population directly measures estimate noise, so the floor of
- * 16 * k (measured recall-neutral on accurate estimates) grows with it
- * when noisy estimates flood the buffer and ranking into a flat 16 * k
- * pool would silently cap recall far below what the probed clusters
- * contain. -1 disables the cap entirely; positive values are absolute.
- * The effective cap is never below k, so a cap can never truncate the
- * result set. */
-#define MKT_RERANK_POOL_AUTO_MULT 16
+ * MULT * k grows with it when noisy estimates flood the buffer and
+ * ranking into a flat MULT * k pool would silently cap recall far below
+ * what the probed clusters contain. -1 disables the cap entirely;
+ * positive values are absolute. The effective cap is never below k, so a
+ * cap can never truncate the result set.
+ *
+ * The multiplier is 4, lowered from 16. 16 was chosen as recall-neutral
+ * on accurate estimates -- a recall criterion with no cost term -- but
+ * every candidate in the pool costs one random heap fetch, and 16 * k
+ * turned out to buy recall that was already there.
+ *
+ * Measured on cohere-1M (1M x 768d, angular, k=10, nlist auto = 3906),
+ * best QPS at recall >= 0.95 while sweeping nprobe, on one box resized
+ * between runs:
+ *
+ *   multiplier   8 GiB (heap cached)   4 GiB (heap not cached)
+ *   16 * k                       830                       111
+ *    8 * k                       870                       125
+ *    4 * k                      1043                       156
+ *    2 * k                       620                       257
+ *
+ * 4 * k is faster on both -- 1.26x cached, 1.41x uncached -- at the same
+ * recall bar, so this is not a speed-for-recall trade. The default
+ * operating point (auto nprobe, which the GUC documents as targeting
+ * ~0.95) moves from 0.948 to 0.946, i.e. it stays on its documented
+ * target. That co-tuning is why the multiplier cannot simply go lower:
+ * 2 * k is faster still when the heap is uncached but drops the default
+ * to 0.929, off target.
+ *
+ * Corroborated on one dataset at one k and one dimensionality. The
+ * direction is unambiguous across both memory configurations; the exact
+ * value is not calibrated beyond that. See
+ * https://github.com/timescale/meerkat/issues/213 for the analysis,
+ * including why heap residency -- which changes the cost of a rerank by
+ * two orders of magnitude -- is not visible from where this resolves. */
+#define MKT_RERANK_POOL_AUTO_MULT 4
+
+/* Resolve mkt.rerank_pool into an absolute cap. `setting` is the GUC
+ * (-1 unlimited, 0 automatic, >0 absolute); `cand_count` is the survivor
+ * population, which is only known mid-scan.
+ *
+ * Split out from the scan path so the arithmetic is unit-testable: the
+ * multiplier cannot be exercised through a small regression fixture,
+ * because the cap only binds once survivors exceed it (a 500-row table
+ * yields ~16 survivors, well under either 4 * k or the old 16 * k, so the
+ * two are indistinguishable there). */
+uint32_t
+mkt_auto_rerank_pool(int32_t setting, uint32_t k, uint32_t cand_count)
+{
+	if (setting < 0)
+		return 0; /* unlimited: 0 means "no cap" downstream */
+
+	uint32_t pool;
+	if (setting > 0)
+		pool = (uint32_t)setting;
+	else
+	{
+		pool = MKT_RERANK_POOL_AUTO_MULT * k;
+		if (pool < cand_count / 8)
+			pool = cand_count / 8;
+	}
+	/* Never below k, so a cap can never truncate the result set. */
+	return pool < k ? k : pool;
+}
 
 static int32_t g_rerank_pool = 0;
 
@@ -505,28 +562,15 @@ mkt_query_execute(
 	 *
 	 * The automatic cap scales with the candidate-buffer population,
 	 * which directly measures estimate noise: accurate estimates keep
-	 * the threshold tight and the buffer small (the 16*k floor
+	 * the threshold tight and the buffer small (the 4*k floor
 	 * applies, as before), while noisy estimates (low dimension, wide
-	 * norm spread) flood the buffer -- and then ranking into a 16*k
+	 * norm spread) flood the buffer -- and then ranking into a 4*k
 	 * pool is meaningless, silently capping recall well below what
 	 * the probed clusters contain. 1/8th of the buffer restores the
 	 * recall ceiling at a rerank cost proportionate to the observed
 	 * noise. */
-	uint32_t pool = 0;
-	if (g_rerank_pool > 0)
-	{
-		pool = (uint32_t)g_rerank_pool;
-		if (pool < k)
-			pool = k;
-	}
-	else if (g_rerank_pool == 0)
-	{
-		pool = MKT_RERANK_POOL_AUTO_MULT * k;
-		if (pool < qs->topk.cand_count / 8)
-			pool = qs->topk.cand_count / 8;
-		if (pool < k)
-			pool = k;
-	}
+	uint32_t pool =
+			mkt_auto_rerank_pool(g_rerank_pool, k, qs->topk.cand_count);
 
 	uint32_t ncands = extract_candidates(qs, pool);
 

@@ -32,6 +32,7 @@ unit_test_sources = files(
   'test_fastscan.c',
   'test_fast_rotate.c',
   'test_posting_page.c',
+  'test_rerank_pool.c',
   'test_posting_insert.c',
   'test_distance.c',
   'test_fixtures.c',
