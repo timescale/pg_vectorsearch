@@ -69,6 +69,47 @@ CREATE OR REPLACE FUNCTION casts_are_standalone() RETURNS bool AS $$
     );
 $$ LANGUAGE sql;
 
+-- Helper: count pgvector ordering operators registered in meerkat's mktann
+-- opfamilies (the operators that let the planner match a native pgvector query
+-- to a mktann index built on a public.vector column).
+CREATE OR REPLACE FUNCTION count_mktann_pgvector_ops() RETURNS int AS $$
+    SELECT count(*)::int
+    FROM pg_amop amop
+    JOIN pg_opfamily f ON f.oid = amop.amopfamily
+    JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'mktann'
+    WHERE amop.amoppurpose = 'o'
+      AND amop.amoplefttype = 'public.vector'::regtype;
+$$ LANGUAGE sql;
+
+-- Helper: total ORDER BY operators in mktann families (does not reference
+-- public.vector, so it is safe to call after pgvector has been dropped).
+CREATE OR REPLACE FUNCTION count_mktann_all_orderops() RETURNS int AS $$
+    SELECT count(*)::int
+    FROM pg_amop amop
+    JOIN pg_opfamily f ON f.oid = amop.amopfamily
+    JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'mktann'
+    WHERE amop.amoppurpose = 'o';
+$$ LANGUAGE sql;
+
+-- Helper: does the plan for `qry` use an index scan on `idx`? Forces
+-- enable_seqscan off so this tests that the ordering path is GENERATED
+-- (the fix), independent of cost tuning.
+CREATE OR REPLACE FUNCTION plan_uses_index(qry text, idx text)
+RETURNS bool AS $$
+DECLARE
+    line text;
+    hit  bool := false;
+BEGIN
+    SET LOCAL enable_seqscan = off;
+    FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || qry LOOP
+        IF line ILIKE '%Index Scan using ' || idx || '%' THEN
+            hit := true;
+        END IF;
+    END LOOP;
+    RETURN hit;
+END;
+$$ LANGUAGE plpgsql;
+
 -- =====================================================================
 -- 1. Binary casts exist
 -- =====================================================================
@@ -328,6 +369,42 @@ SELECT assert_test('mkt.cosine_distance with pgvector arg (implicit)',
     < 1e-6);
 
 -- =====================================================================
+-- 12b. Planner picks the mktann index for NATIVE pgvector queries
+-- =====================================================================
+--
+-- The point of registering pgvector's ordering operators in meerkat's
+-- opfamilies: an mktann index built on a pgvector (public.vector) column must
+-- be usable by an idiomatic `col <-> $q` query that resolves to pgvector's own
+-- operator. Binary casts alone do NOT achieve this -- without the operators
+-- the planner never generates the ordering path and silently seq-scans.
+
+SELECT assert_test('3 pgvector ops registered in mktann families',
+    count_mktann_pgvector_ops() = 3);
+
+CREATE TABLE compat_items (id int, v public.vector(16));
+INSERT INTO compat_items (id, v)
+SELECT g, (array_agg(random() ORDER BY d))::real[]::public.vector
+FROM generate_series(1, 2000) g CROSS JOIN generate_series(1, 16) d
+GROUP BY g;
+CREATE INDEX compat_items_mkt ON compat_items USING mktann (v);
+ANALYZE compat_items;
+
+SELECT assert_test('native <-> query uses mktann index',
+    plan_uses_index(
+        'SELECT id FROM compat_items ORDER BY v <-> ''['
+        || (SELECT string_agg('0.5', ',') FROM generate_series(1, 16))
+        || ']''::public.vector LIMIT 5',
+        'compat_items_mkt'));
+
+-- Results are correct (the self-match is returned as the nearest neighbor).
+SELECT assert_test('native query returns correct nearest neighbor',
+    (SELECT id FROM compat_items
+     ORDER BY v <-> (SELECT v FROM compat_items WHERE id = 1)
+     LIMIT 1) = 1);
+
+DROP TABLE compat_items;
+
+-- =====================================================================
 -- Cast lifecycle tests
 -- =====================================================================
 --
@@ -346,6 +423,9 @@ CREATE EXTENSION meerkat;
 
 SELECT assert_test('pgv-first: 4 binary casts',
     count_pgvector_casts() = 4);
+
+SELECT assert_test('pgv-first: 3 mktann pgvector ops',
+    count_mktann_pgvector_ops() = 3);
 
 SELECT assert_test('pgv-first: casts are standalone',
     casts_are_standalone());
@@ -368,6 +448,9 @@ CREATE EXTENSION vector;
 
 SELECT assert_test('mkt-first: 4 binary casts',
     count_pgvector_casts() = 4);
+
+SELECT assert_test('mkt-first: 3 mktann pgvector ops',
+    count_mktann_pgvector_ops() = 3);
 
 SELECT assert_test('mkt-first: casts are standalone',
     casts_are_standalone());
@@ -407,6 +490,12 @@ SELECT assert_test('drop-pgv: meerkat still loaded',
     EXISTS (SELECT 1 FROM pg_extension
             WHERE extname = 'meerkat'));
 
+-- The pgvector ordering operators depend on pgvector's operators, so dropping
+-- pgvector removes them from meerkat's families, leaving only the 3 native
+-- (mkt.vector) ordering operators. meerkat itself is unaffected.
+SELECT assert_test('drop-pgv: pgvector ops removed from mktann families',
+    count_mktann_all_orderops() = 3);
+
 SELECT assert_test('drop-pgv: mkt.vector still works',
     '[1,2,3]'::mkt.vector::text = '[1,2,3]');
 
@@ -422,6 +511,9 @@ CREATE EXTENSION vector;
 
 SELECT assert_test('recreate-pgv: 4 casts re-created',
     count_pgvector_casts() = 4);
+
+SELECT assert_test('recreate-pgv: 3 mktann pgvector ops re-created',
+    count_mktann_pgvector_ops() = 3);
 
 SELECT assert_test('recreate-pgv: casts are standalone',
     casts_are_standalone());

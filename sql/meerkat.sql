@@ -846,6 +846,35 @@ BEGIN
             WITHOUT FUNCTION AS ASSIGNMENT;
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;
+
+    -- Register pgvector's ordering operators in meerkat's mktann opfamilies.
+    -- The opclasses index @extschema@.vector, but a mktann index built on a
+    -- pgvector (public.vector) column resolves ORDER BY against pgvector's own
+    -- operators. Without these entries the planner never matches the index for
+    -- a native `col <-> $q` query and silently falls back to a seq scan; the
+    -- binary casts above only make the data interchangeable, not the plan.
+    -- Adding the operators here (cross-type, over public.vector) lets the
+    -- planner pick the mktann index for idiomatic pgvector queries. The amop
+    -- entries depend on pgvector's operators, so DROP EXTENSION vector removes
+    -- them automatically -- no hard dependency.
+    BEGIN
+        ALTER OPERATOR FAMILY @extschema@.vector_l2_ops USING mktann ADD
+            OPERATOR 1 public.<-> (public.vector, public.vector)
+            FOR ORDER BY pg_catalog.float_ops;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER OPERATOR FAMILY @extschema@.vector_ip_ops USING mktann ADD
+            OPERATOR 1 public.<#> (public.vector, public.vector)
+            FOR ORDER BY pg_catalog.float_ops;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER OPERATOR FAMILY @extschema@.vector_cosine_ops USING mktann ADD
+            OPERATOR 1 public.<=> (public.vector, public.vector)
+            FOR ORDER BY pg_catalog.float_ops;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
 END;
 $$;
 
