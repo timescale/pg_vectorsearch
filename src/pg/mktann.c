@@ -30,6 +30,7 @@
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
 #include "support_pg.h"
+#include "typeinfo.h"
 #include "types/vector.h"
 
 PG_FUNCTION_INFO_V1(mktann_handler);
@@ -107,9 +108,11 @@ mktann_insert(
 	base.posting_storage  = &storage.base;
 	base.page_base		  = NULL;
 
-	/* Inserted vector. */
-	MktVector *vec	= DatumGetMktVector(values[0]);
-	VectorRef  vref = MktVectorToRef(vec);
+	/* Inserted vector, converted to float32 when the column type is not. */
+	MktVectorAccess input = mkt_vector_access(
+			mktann_cache_type_info(index), dim, CurrentMemoryContext);
+	VectorRef vref = mkt_vector_read(&input, values[0]);
+
 	if (vref.dim != dim)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
@@ -406,7 +409,7 @@ mktann_handler(PG_FUNCTION_ARGS)
 
 	/* Properties */
 	amroutine->amstrategies			   = 0;
-	amroutine->amsupport			   = 2;
+	amroutine->amsupport			   = 3;
 	amroutine->amoptsprocnum		   = 0;
 	amroutine->amcanorder			   = false;
 	amroutine->amcanorderbyop		   = true;

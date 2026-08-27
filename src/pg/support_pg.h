@@ -21,8 +21,9 @@
  * Support function numbers
  * ---------------------------------------------------------------- */
 
-#define MKT_ANN_DISTANCE_PROC 1 /* distance operator function */
-#define MKT_ANN_METRIC_PROC	  2 /* metric identifier function */
+#define MKT_ANN_DISTANCE_PROC  1 /* distance operator function */
+#define MKT_ANN_METRIC_PROC	   2 /* metric identifier function */
+#define MKT_ANN_TYPE_INFO_PROC 3 /* column type descriptor (optional) */
 
 /* ----------------------------------------------------------------
  * GUC variables
@@ -214,12 +215,6 @@ mkt_pg_rabitq_alloc(int dim)
 	v->flags = 0;
 	return v;
 }
-
-/* ----------------------------------------------------------------
- * Type OID helpers (implemented in mkt_pg.c)
- * ---------------------------------------------------------------- */
-
-Oid mkt_halfvec_type_oid(void);
 
 /* ----------------------------------------------------------------
  * Validation helpers (implemented in mkt_pg.c)

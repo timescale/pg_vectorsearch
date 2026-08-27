@@ -41,6 +41,7 @@
 #include "quant/matrix.h"
 #include "quant/rabitq.h"
 #include "support_pg.h"
+#include "typeinfo.h"
 #include "types/vector.h"
 
 /*
@@ -79,11 +80,17 @@ typedef struct MktBuildSharedPg
  * Bridges PostgreSQL's heap-tuple callback to the back-end-neutral scan
  * callback: skip nulls and hand the vector's data pointer (into the varlena,
  * no copy) plus its tid to the shared logic.
+ *
+ * A halfvec column cannot be handed over no-copy -- the shared logic is
+ * float32 -- so it is widened into buf, reused across tuples. The callback
+ * consumes the pointer before returning, so one buffer per participant is
+ * enough.
  */
 typedef struct MktPgScanAdapter
 {
-	MktBuildScanCb cb;
-	void		  *state;
+	MktBuildScanCb	cb;
+	void		   *state;
+	MktVectorAccess input;
 } MktPgScanAdapter;
 
 static void
@@ -103,7 +110,8 @@ mkt_pg_scan_adapter(
 	if (isnull[0])
 		return;
 
-	a->cb(a->state, *tid, MKT_VECTOR_DATA(DatumGetMktVector(values[0])));
+	VectorRef vref = mkt_vector_read(&a->input, values[0]);
+	a->cb(a->state, *tid, vref.data);
 }
 
 /*
@@ -125,9 +133,18 @@ mkt_build_scan(
 		MktBuildScanCb	  cb,
 		void			 *state)
 {
-	MktPgScanAdapter actx = {.cb = cb, .state = state};
-	TableScanDesc	 scan = table_beginscan_parallel(
-			   heap, ParallelTableScanFromMktShared(shared));
+	Dimension dim = (Dimension)TupleDescAttr(index->rd_att, 0)->atttypmod;
+	/* Build-time path: resolved directly, since the per-backend cache reads a
+	 * metadata page this build has not written yet. */
+	MktPgScanAdapter actx = {
+			.cb	   = cb,
+			.state = state,
+			.input = mkt_vector_access(
+					mkt_index_type_info(index), dim, CurrentMemoryContext),
+	};
+
+	TableScanDesc scan = table_beginscan_parallel(
+			heap, ParallelTableScanFromMktShared(shared));
 
 	return table_index_build_scan(
 			heap,

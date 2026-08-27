@@ -456,6 +456,111 @@ SELECT assert_test('standalone: clean drop',
                 WHERE extname = 'meerkat'));
 
 -- =====================================================================
+-- Indexing pgvector-typed columns with mktann
+-- =====================================================================
+-- Checks that an mktann index over a pgvector-typed column builds, is chosen
+-- by the planner, and answers queries correctly.
+--
+-- The binary casts tested above are what make it reachable: PostgreSQL matches
+-- an opclass to a column by binary coercibility, so an opclass declared FOR
+-- TYPE mkt.halfvec accepts a public.halfvec column. The access method then has
+-- to read that column as f16, and it gets that from the opclass's own type
+-- descriptor rather than by identifying the column's type itself -- so a
+-- pgvector column and a meerkat column are handled identically, with nothing
+-- in the access method comparing type OIDs. These tests pin that down: a
+-- descriptor keyed on anything narrower would read the f16 pairs as float32
+-- and return garbage from an index the planner considers valid.
+--
+-- Note the query has to resolve to *meerkat's* distance operator for the
+-- index to be considered at all; pgvector's <-> belongs to pgvector's
+-- opfamily. That is true of vector columns too and is not specific to
+-- halfvec.
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS meerkat;
+SET search_path = mkt, public;
+
+CREATE TEMP TABLE idx_src (id int, txt text);
+INSERT INTO idx_src
+    SELECT g, '[' || (SELECT string_agg(
+                          round(sin(g * 0.7 + j * 1.3)::numeric, 4)::text, ',')
+                      FROM generate_series(1, 8) j) || ']'
+    FROM generate_series(1, 2000) g;
+
+CREATE TABLE idx_pgv_h (id int, v public.halfvec(8));
+CREATE TABLE idx_mkt_h (id int, v mkt.halfvec(8));
+INSERT INTO idx_pgv_h SELECT id, txt::public.halfvec(8) FROM idx_src;
+INSERT INTO idx_mkt_h SELECT id, txt::mkt.halfvec(8) FROM idx_src;
+ANALYZE idx_pgv_h;
+ANALYZE idx_mkt_h;
+
+-- Brute-force truth, established before any index exists.
+CREATE TEMP TABLE idx_truth AS
+    SELECT array_agg(id ORDER BY id) AS ids
+      FROM (SELECT id FROM idx_pgv_h
+             ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.halfvec(8)
+             LIMIT 10) t;
+
+CREATE INDEX idx_pgv_h_i ON idx_pgv_h USING mktann (v mkt.halfvec_l2_ops);
+CREATE INDEX idx_mkt_h_i ON idx_mkt_h USING mktann (v mkt.halfvec_l2_ops);
+
+-- The planner must actually choose the index, or the rest proves nothing.
+-- EXPLAIN cannot appear in a subquery, hence the helper.
+CREATE OR REPLACE FUNCTION plan_uses_index_scan(q text) RETURNS bool
+    LANGUAGE plpgsql AS $fn$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || q LOOP
+        IF line LIKE '%Index Scan%' THEN
+            RETURN true;
+        END IF;
+    END LOOP;
+    RETURN false;
+END $fn$;
+
+SET enable_seqscan = off;
+SELECT assert_test('mktann index is used on a pgvector halfvec column',
+    plan_uses_index_scan($q$SELECT id FROM idx_pgv_h
+        ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.halfvec(8)
+        LIMIT 10$q$));
+
+-- Recall against brute force. A misdecoded column scores near zero here, so
+-- 8 of 10 is a generous floor that still fails hard on a decode bug while
+-- tolerating ordinary ANN approximation at the default nprobe.
+SELECT assert_test(
+    'pgvector halfvec column: mktann recall >= 8/10',
+    (SELECT count(*) FROM (
+        SELECT id FROM idx_pgv_h
+         ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.halfvec(8)
+         LIMIT 10) g
+      WHERE g.id = ANY (SELECT unnest(ids) FROM idx_truth)) >= 8);
+
+-- Control: meerkat's own halfvec column, same data, same expectation.
+SELECT assert_test(
+    'mkt halfvec column: mktann recall >= 8/10',
+    (SELECT count(*) FROM (
+        SELECT id FROM idx_mkt_h
+         ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.halfvec(8)
+         LIMIT 10) g
+      WHERE g.id = ANY (SELECT unnest(ids) FROM idx_truth)) >= 8);
+
+-- Centroids follow the column for a pgvector column too, by the same
+-- binary-coercibility test. Compression off, so the format is decided by the
+-- column type rather than by RaBitQ.
+CREATE INDEX idx_fmt_i ON idx_pgv_h USING mktann (v mkt.halfvec_l2_ops)
+    WITH (centroid_compression = off, centroid_fastscan = off,
+          fastscan = off, soar_lambda = 0, boundary_epsilon = 0);
+SELECT assert_test('pgvector halfvec column gets half-precision centroids',
+    (SELECT bool_and(format = 'half')
+       FROM mkt.centroid_pages('idx_fmt_i'::regclass)));
+
+RESET enable_seqscan;
+DROP FUNCTION plan_uses_index_scan(text);
+DROP TABLE idx_pgv_h;
+DROP TABLE idx_mkt_h;
+RESET search_path;
+
+-- =====================================================================
 -- Summary
 -- =====================================================================
 

@@ -61,6 +61,7 @@
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
 #include "support_pg.h"
+#include "typeinfo.h"
 #include "types/halfvec.h"
 #include "types/vector.h"
 
@@ -117,6 +118,13 @@ typedef struct MktannBuildState
 	 */
 	MktQueryState	 qs;
 	MktBuildRouteCtx route;
+
+	/*
+	 * Column type bound to this index's dimension, with the conversion buffer
+	 * it needs. Held on the state because both callbacks run under a tmp_ctx
+	 * that is reset after every tuple.
+	 */
+	MktVectorAccess input;
 } MktannBuildState;
 
 /* ----------------------------------------------------------------
@@ -147,9 +155,9 @@ sample_callback(
 
 	MemoryContext old_ctx = MemoryContextSwitchTo(bs->tmp_ctx);
 
-	MktVector	*vec		= DatumGetMktVector(values[0]);
-	float		*src		= MKT_VECTOR_DATA(vec);
 	Dimension	 dim		= bs->params.dim;
+	VectorRef	 vref		= mkt_vector_read(&bs->input, values[0]);
+	const float *src		= vref.data;
 	const size_t vec_nbytes = (size_t)dim * sizeof(float);
 
 	if (bs->nsamples < bs->max_samples)
@@ -236,8 +244,7 @@ build_callback(
 
 	MemoryContext old_ctx = MemoryContextSwitchTo(bs->tmp_ctx);
 
-	MktVector *vec	= DatumGetMktVector(values[0]);
-	VectorRef  vref = MktVectorToRef(vec);
+	VectorRef vref = mkt_vector_read(&bs->input, values[0]);
 
 	/* Route + encode + stream via the shared page-backed helper (the parallel
 	 * posting workers use the very same call). tmp_ctx is reset after every
@@ -379,10 +386,10 @@ mktann_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 	if (compressed)
 		return MKT_CENTROID_FMT_RABITQ;
 
-	Oid col_type = TupleDescAttr(index->rd_att, 0)->atttypid;
-	if (col_type == mkt_halfvec_type_oid())
-		return MKT_CENTROID_FMT_HALF;
-	return MKT_CENTROID_FMT_FLOAT;
+	/* Uncompressed centroids follow the column type. Resolved directly rather
+	 * than through the per-backend cache: there is no metadata page to
+	 * populate that cache from until this build writes one. */
+	return mkt_index_type_info(index)->centroid_format;
 }
 
 /*
@@ -1196,6 +1203,11 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	const MktannBuildParams *p			 = &bs.params;
 	Dimension				 dim		 = p->dim;
 	uint64_t				 rabitq_seed = MKT_RABITQ_BUILD_SEED;
+
+	/* Resolved once, directly -- no metadata page exists yet for the
+	 * per-backend cache to read. The per-tuple callbacks follow the pointer.
+	 */
+	bs.input = mkt_vector_access(mkt_index_type_info(index), dim, build_ctx);
 
 	/*
 	 * Build introspection: one reporting context the serial and parallel paths

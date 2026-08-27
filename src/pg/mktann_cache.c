@@ -24,6 +24,7 @@
 #include "mktann_cache.h"
 #include "mktann_meta.h"
 #include "support_pg.h"
+#include "typeinfo.h"
 
 /* ----------------------------------------------------------------
  * Process-local RaBitQParams cache
@@ -359,12 +360,37 @@ mktann_rabitq_cache_clear(void)
  * (the scan / insert path via mktann_index_base_init), so metadata-only
  * consumers like VACUUM's ambulkdelete get dim/metric from the cache without
  * paying for rotation setup.
+ *
+ * Two separate constraints shape this, and they pull in different directions.
+ *
+ * ONE ALLOCATION, and that is not stylistic. PostgreSQL frees rd_amcache with
+ * a single targeted pfree in RelationInvalidateRelation, which does NOT delete
+ * rd_indexcxt — the relation survives with rd_isvalid = false. So a sub-object
+ * hung off this blob would leak into rd_indexcxt once per invalidation cycle.
+ * Relcache's own caches (RelationGetIndexList and friends) can be lazy
+ * per-allocation because relcache wrote per-field cleanup for each of them; an
+ * access method gets one line of cleanup written for it, so it gets one
+ * allocation. Nor can the blob be grown and swapped later: MktIndexBase
+ * .pt_global_mean points into it and a live scan holds that pointer for the
+ * duration of the scan.
+ *
+ * LAZY CONTENT, which the single allocation does not prevent. The metapage
+ * read is the floor — dim comes from it and dim sizes the blob — but the work
+ * that follows it need not be eager. The rule for a new field: fill it here if
+ * computing it is cheap or it needs the pinned metapage buffer (the
+ * global_mean memcpy is both); otherwise give it a ready-flag and compute it
+ * on first use, as pt_global_mean does. Note that anything living in this blob
+ * inherits the metapage read as a precondition even when it would not
+ * otherwise need one -- type_info, which comes from the opclass, is the case
+ * in point.
  * ---------------------------------------------------------------- */
 
 typedef struct AmCacheData
 {
-	MktIndexBase base;	   /* immutable template; params / fastscan /
-							* storage left zeroed (rebound per call) */
+	MktIndexBase base; /* immutable template; params / fastscan /
+						* storage left zeroed (rebound per call) */
+	const MktIndexTypeInfo *type_info; /* indexed column's type, from the
+										* opclass */
 	bool	 has_fastscan; /* index built with FASTSCAN posting pages */
 	bool	 pt_ready;	   /* pt_global_mean computed (rotation done) */
 	uint32_t nlist;
@@ -462,6 +488,10 @@ get_cache_data(Relation index)
 
 	UnlockReleaseBuffer(meta_buf);
 
+	/* Opclass-derived, so no metapage needed -- but resolved here so every
+	 * post-build path reads it as a pointer instead of an fmgr call. */
+	c->type_info = mkt_index_type_info(index);
+
 	index->rd_amcache = c;
 	return c;
 }
@@ -511,6 +541,12 @@ mktann_cache_meta(
 	*dim		   = c->base.dim;
 	*metric		   = c->base.metric;
 	*first_posting = c->base.first_posting;
+}
+
+const MktIndexTypeInfo *
+mktann_cache_type_info(Relation index)
+{
+	return get_cache_data(index)->type_info;
 }
 
 MktannScanInfo

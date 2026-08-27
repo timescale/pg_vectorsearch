@@ -76,6 +76,79 @@ CREATE INDEX idx_bad ON embeddings
     USING mktann (v vector_ip_ops)
     WITH (centroid_compression = true);
 
+-- ============================================================
+-- halfvec columns
+-- ============================================================
+-- The index is the same either way: postings hold RaBitQ codes, and the AM
+-- widens a halfvec tuple to float32 on read. What halfvec changes is the
+-- heap an exact rerank reads -- at 768d a vector row is 3080 bytes and fits
+-- 2 to an 8 kB page against halfvec's 1544 and 5.
+--
+-- Every coordinate below is a multiple of 0.1, none of which is exactly
+-- representable in f16, so the rows genuinely round on the way in and an
+-- exact rerank has to compare against the rounded values rather than the
+-- literals.
+CREATE TABLE h_embeddings (id serial, v halfvec(3));
+INSERT INTO h_embeddings (v)
+    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::halfvec
+    FROM generate_series(0, 9) x,
+         generate_series(0, 9) y,
+         generate_series(0, 9) z;
+ANALYZE h_embeddings;
+
+-- All three halfvec opclasses build.
+CREATE INDEX h_idx_l2 ON h_embeddings USING mktann (v)
+    WITH (centroid_compression = true);
+SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'h_idx_l2';
+CREATE INDEX h_idx_ip ON h_embeddings USING mktann (v halfvec_ip_ops);
+SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'h_idx_ip';
+CREATE INDEX h_idx_cos ON h_embeddings USING mktann (v halfvec_cosine_ops);
+SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'h_idx_cos';
+
+-- The planner picks the index for an ORDER BY over a halfvec query argument.
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT id FROM h_embeddings ORDER BY v <-> '[0.5,0.5,0.5]'::halfvec LIMIT 5;
+RESET enable_seqscan;
+
+-- Correctness against brute force. Compare the sorted distance sequence
+-- rather than ids: the grid is full of exact ties, so which of several
+-- equidistant rows comes back is arbitrary while the distances are not.
+-- Probing every cluster makes the comparison exact, so a mismatch is a
+-- decode or rerank bug and not a recall miss.
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+CREATE TEMP TABLE h_exact AS
+    SELECT round((v <-> '[0.5,0.5,0.5]'::halfvec)::numeric, 6) AS d
+        FROM h_embeddings ORDER BY 1 LIMIT 5;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+
+SET enable_seqscan = off;
+SET mkt.nprobe = 1000;
+CREATE TEMP TABLE h_idx AS
+    SELECT round((v <-> '[0.5,0.5,0.5]'::halfvec)::numeric, 6) AS d
+        FROM h_embeddings ORDER BY v <-> '[0.5,0.5,0.5]'::halfvec LIMIT 5;
+RESET mkt.nprobe;
+RESET enable_seqscan;
+
+SELECT (SELECT array_agg(d ORDER BY d) FROM h_idx)
+     = (SELECT array_agg(d ORDER BY d) FROM h_exact) AS matches_exact,
+       (SELECT count(*) FROM h_idx) AS idx_rows;
+
+-- Insert into an indexed halfvec table, then find the new row: its own value
+-- must come back at distance 0, which only holds if the insert encoded the
+-- widened f16 value and the rerank compared against the same.
+INSERT INTO h_embeddings (v) VALUES ('[0.55,0.55,0.55]');
+SET enable_seqscan = off;
+SET mkt.nprobe = 1000;
+SELECT round((v <-> '[0.55,0.55,0.55]'::halfvec)::numeric, 6) AS inserted_dist
+    FROM h_embeddings ORDER BY v <-> '[0.55,0.55,0.55]'::halfvec LIMIT 1;
+RESET mkt.nprobe;
+RESET enable_seqscan;
+
+DROP TABLE h_embeddings;
+
 -- Insert after index creation (should not crash)
 INSERT INTO embeddings (v) VALUES ('[1,1,1]');
 
