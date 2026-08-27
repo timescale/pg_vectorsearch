@@ -149,6 +149,41 @@ RESET enable_seqscan;
 
 DROP TABLE h_embeddings;
 
+-- ============================================================
+-- Expression indexes are refused
+-- ============================================================
+-- Rerank reads the indexed value back from the heap via indkey.values[0],
+-- which PostgreSQL sets to 0 for an expression index, keeping the expression
+-- in indexprs instead. Reading attribute 0 walks off the front of the slot's
+-- value array and segfaults the backend in pg_detoast_datum, so the index is
+-- refused at build time rather than left to crash at query time.
+--
+-- Supporting expression indexes means evaluating the index expression over
+-- each fetched tuple during rerank, the way the build already evaluates it
+-- over each scanned tuple.
+--
+-- The expression below carries a typmod deliberately. An expression whose
+-- result type has none is rejected earlier, by the dimension check, and so
+-- never reaches the crashing path -- it would make this test pass for the
+-- wrong reason.
+CREATE TABLE expr_t (id serial, v vector(3));
+INSERT INTO expr_t (v) VALUES ('[0.1,0.2,0.3]'), ('[0.4,0.5,0.6]');
+
+CREATE INDEX expr_idx ON expr_t
+    USING mktann ((array_to_vector(v::real[], 3, false)::vector(3)));
+
+-- A plain index on the same column is fine: it is the expression, not the
+-- column, that is unsupported.
+CREATE INDEX plain_idx ON expr_t USING mktann (v);
+SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'plain_idx';
+
+-- A partial index is also fine -- a predicate changes which rows reach the
+-- index, not where the indexed value lives.
+CREATE INDEX part_idx ON expr_t USING mktann (v) WHERE id > 1;
+SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'part_idx';
+
+DROP TABLE expr_t;
+
 -- Insert after index creation (should not crash)
 INSERT INTO embeddings (v) VALUES ('[1,1,1]');
 
