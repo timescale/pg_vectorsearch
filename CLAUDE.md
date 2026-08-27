@@ -8,7 +8,10 @@ CLAUDE.local.md.
 
 Meerkat is a PostgreSQL index access method (IAM) for Approximate Nearest
 Neighbor (ANN) vector search, inspired by Google's ScaNN for AlloyDB and
-Microsoft's SPANN. It uses the vector format from [pgvector].
+Microsoft's SPANN. It defines its own `vector` and `halfvec` types, in the
+`mkt` schema, laid out bit-for-bit like [pgvector]'s. pgvector is not a
+dependency: meerkat installs and runs without it, and interoperates with it
+where it is present.
 
 ### Architecture
 
@@ -146,7 +149,7 @@ alternative, or use `gcovr` for coverage instead.
 
 **PostgreSQL extensions:**
 
-- `../pgvector/` — Vector type and operators (dependency)
+- `../pgvector/` — Reference for the vector/halfvec formats (not a dependency)
 - `../pgvectorscale/` — DiskANN-based vector index
 - `../pg_textsearch/` — BM25 full-text search
 
@@ -286,7 +289,47 @@ mkt_vector_dot_product(const MktVector *v1, const MktVector *v2)
 
 ### Dependencies
 
-- `pgvector` extension for vector type and operators.
+None at the SQL level. Meerkat defines its own `vector`, `halfvec` and
+`rabitq` types in the `mkt` schema (see `sql/meerkat.sql`), so it installs
+and runs without pgvector.
+
+**pgvector interoperability.** The types are laid out to be
+binary-compatible with pgvector's, and the extension creates
+binary-coercible casts between the two in both directions:
+
+```sql
+CREATE CAST (public.vector  AS mkt.vector)  WITHOUT FUNCTION AS IMPLICIT;
+CREATE CAST (mkt.vector     AS public.vector) WITHOUT FUNCTION AS ASSIGNMENT;
+-- and the same pair for halfvec
+```
+
+Direction matters: pgvector → meerkat is IMPLICIT so an existing pgvector
+column works transparently, while meerkat → pgvector is ASSIGNMENT to avoid
+operator ambiguity when both extensions are installed. Install order does not
+matter — `create_pgvector_casts()` runs at `CREATE EXTENSION meerkat` if
+pgvector is already there, and an event trigger creates the casts if pgvector
+arrives later.
+
+The consequence worth remembering: because the casts are `WITHOUT FUNCTION`,
+they satisfy PostgreSQL's binary-coercibility rule for operator classes. That
+is what lets an `mktann` opclass declared `FOR TYPE mkt.vector` be used on a
+column of pgvector's `public.vector` — the two are the same bytes, so no
+conversion happens and no copy is made.
+
+The access method never asks "which type is this column?" at all — it takes a
+descriptor from the opclass (support function 3, see `src/pg/typeinfo.h`),
+which is the same authority the planner consulted when it decided the index
+applied. That is deliberate: deriving the type from the column means answering
+by name or by OID, and both are wrong somewhere. A name lookup fails during a
+build, since PostgreSQL restricts the search path around `CREATE INDEX`; OID
+equality rejects a binary-coercible column the opclass itself accepted.
+
+Operators are *not* shared, however. Each extension's distance operators
+belong to its own operator family, so a query only reaches an `mktann` index
+when the `ORDER BY` resolves to meerkat's operator — `mkt` ahead of pgvector's
+schema on the `search_path`, or an explicit `OPERATOR(mkt.<->)`. With
+pgvector's operator the planner silently chooses a sequential scan, which is
+easy to mistake for a working index scan when only the results are checked.
 
 ### Concurrency Safety
 

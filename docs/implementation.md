@@ -1545,8 +1545,10 @@ Quantization).
 #### PostgreSQL VarBit Compatibility
 
 Binary quantized vectors in PostgreSQL should be compatible with the `bit varying`
-(VarBit) type used by pgvector. This enables interoperability and reuse of
-pgvector's Hamming/Jaccard distance functions.
+(VarBit) type. VarBit is a core PostgreSQL type that pgvector also builds on, so
+matching its layout keeps binary quantized data interoperable with pgvector's
+Hamming/Jaccard distance functions where pgvector happens to be installed,
+without making meerkat depend on it.
 
 ```c
 // PostgreSQL VarBit layout (from utils/varbit.h):
@@ -4412,98 +4414,74 @@ MktVectorToRef(const MktVector *v)
 }
 ```
 
-#### pgvector Detection and OID Caching
+#### Recognising pgvector-typed Columns
 
-At extension load time, detect if pgvector is installed and cache its type OID:
+Meerkat's types live in the `mkt` schema; pgvector's live wherever pgvector was
+installed. Rather than identify a column's type, the access method takes a
+descriptor from the **opclass** — support function 3, `MKT_ANN_TYPE_INFO_PROC`,
+optional and defaulting to `vector`:
 
 ```c
-// Cached OIDs (InvalidOid if not available)
-static Oid mkt_vector_oid = InvalidOid;
-static Oid pgvector_oid = InvalidOid;
-
-void
-mkt_vector_init(void)
+const MktIndexTypeInfo *
+mkt_index_type_info(Relation index)
 {
-    // Cache our own type OID
-    mkt_vector_oid = GetSysCacheOid2(TYPENAMENSP,
-                                      Anum_pg_type_oid,
-                                      CStringGetDatum("mkt_vector"),
-                                      ObjectIdGetDatum(get_namespace_oid("public",
-                                                                          false)));
+    if (!OidIsValid(index_getprocid(index, 1, MKT_ANN_TYPE_INFO_PROC)))
+        return &type_info_vector;
 
-    // Check if pgvector is installed (type exists in pg_type)
-    Oid vector_oid = GetSysCacheOid2(TYPENAMENSP,
-                                      Anum_pg_type_oid,
-                                      CStringGetDatum("vector"),
-                                      ObjectIdGetDatum(get_namespace_oid("public",
-                                                                          false)));
-    if (OidIsValid(vector_oid)) {
-        pgvector_oid = vector_oid;
-        elog(DEBUG1, "meerkat: pgvector detected, OID %u", pgvector_oid);
-    }
-}
+    FmgrInfo *procinfo = index_getprocinfo(index, 1, MKT_ANN_TYPE_INFO_PROC);
 
-// Check if a type OID is a supported vector type
-static inline bool
-mkt_is_vector_type(Oid typoid)
-{
-    return typoid == mkt_vector_oid ||
-           (OidIsValid(pgvector_oid) && typoid == pgvector_oid);
+    return (const MktIndexTypeInfo *) DatumGetPointer(
+            FunctionCall0Coll(procinfo, InvalidOid));
 }
 ```
 
-#### Runtime Type Handling in Operators
+The opclass is the same authority the planner consulted when it decided the
+index applied, so the access method cannot disagree with it about a column an
+index was built on. Identifying the type from the column instead means
+answering by name or by OID, and both are wrong somewhere:
 
-Operators and index functions accept both `mkt_vector` and pgvector's `vector`:
+- PostgreSQL calls `RestrictSearchPath()` around `CREATE INDEX` and
+  `index_build`, so an unqualified name lookup fails *during a build* —
+  precisely where a wrong answer decides how tuples are decoded.
+- OID equality rejects a binary-coercible column the opclass itself accepted.
+  A pgvector `halfvec` column is exactly that, and the casts above are what
+  make it acceptable.
 
-```c
-Datum
-mkt_l2_distance(PG_FUNCTION_ARGS)
-{
-    Oid argtypoid = get_fn_expr_argtype(fcinfo->flinfo, 0);
+Adding a type is therefore an opclass plus a descriptor, with no new branch in
+the access method.
 
-    if (!mkt_is_vector_type(argtypoid))
-        ereport(ERROR,
-                errcode(ERRCODE_DATATYPE_MISMATCH),
-                errmsg("expected mkt_vector or vector type"));
-
-    // Binary compatible - safe to cast regardless of which type
-    MktVector *a = (MktVector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
-    MktVector *b = (MktVector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(1));
-
-    if (a->dim != b->dim)
-        ereport(ERROR,
-                errcode(ERRCODE_DATA_EXCEPTION),
-                errmsg("different vector dimensions %d and %d", a->dim, b->dim));
-
-    VectorRef va = MktVectorToRef(a);
-    VectorRef vb = MktVectorToRef(b);
-
-    PG_RETURN_FLOAT4(mkt_distance_l2(va, vb));
-}
-```
-
-#### Index Support for Both Types
-
-The index access method validates column types during `ambuild`:
+The descriptor carries the type's dimension ceiling, the centroid format it
+implies, how to unwrap a `Datum`, and a pointer to the shared
+`MktVectorTypeOps` vtable that already covers float32 and float16 for k-means
+and quantization. `MktVectorAccess` binds one to an index's dimension and the
+buffer a float32 view needs at that dimension, so the dimension check and the
+buffer allocation come from one value:
 
 ```c
-static IndexBuildResult *
-mkt_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
+typedef struct MktVectorAccess
 {
-    // Get the indexed column's type
-    Oid atttype = TupleDescAttr(RelationGetDescr(heap),
-                                 indexInfo->ii_IndexAttrNumbers[0] - 1)->atttypid;
-
-    if (!mkt_is_vector_type(atttype))
-        ereport(ERROR,
-                errcode(ERRCODE_DATATYPE_MISMATCH),
-                errmsg("meerkat index requires mkt_vector or vector column"));
-
-    // Proceed with build - both types have identical layout
-    // ...
-}
+    const MktIndexTypeInfo *ti;  /* shared, per type */
+    Dimension               dim; /* this index's column */
+    float                  *buf; /* NULL when no conversion is needed */
+} MktVectorAccess;
 ```
+
+A `vector` column needs no conversion and no copy — the varlena is read in
+place. A `halfvec` column is widened, since the distance and encode kernels are
+float32-only. The descriptor is cached in `rd_amcache` with the other immutable
+per-index facts, so scan and insert read a pointer; build paths resolve it
+directly, because populating that cache reads a metadata page a build has not
+written yet.
+
+#### Operators are not shared
+
+Type interoperability does not extend to operators. Each extension's distance
+operators belong to its own operator family, so an `mktann` index is only
+considered when the `ORDER BY` resolves to meerkat's operator — the `mkt`
+schema ahead of pgvector's on the `search_path`, or an explicit
+`OPERATOR(mkt.<->)`. A query written against pgvector's operator plans a
+sequential scan instead, which returns correct results and so is easy to
+mistake for a working index scan.
 
 **Standalone builds**: For unit tests and CLI tools, use `MktVector` without the
 varlena header, or define a minimal mock. The core algorithms operate on
