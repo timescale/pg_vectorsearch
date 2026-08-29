@@ -1446,6 +1446,21 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 		 * against a session-local temp relfilenode is something no core AM
 		 * does. (Unlogged tables never reach this path -- their build is
 		 * rejected up front in mktann_buildempty.)
+		 *
+		 * page_std = false, and it has to be. The flag promises the standard
+		 * page layout, which lets the full-page image omit everything between
+		 * pd_lower and pd_upper as free space. meerkat keeps its entries there
+		 * -- pd_lower stays at SizeOfPageHeaderData and pd_upper at pd_special
+		 * on a posting page -- so a standard image would carry the header and
+		 * the opaque and nothing else. The primary would be fine, since its
+		 * pages are already on disk; a streaming standby, which has only the
+		 * WAL, would restore every page with its entries zeroed while the
+		 * opaque still reported them present. See t/001_replication.pl.
+		 *
+		 * The insert path solves the same problem the other way, by covering
+		 * the hole (pd_lower = pd_upper) before GenericXLog; that is not an
+		 * option here because centroid pages use pd_lower for their own
+		 * capacity accounting.
 		 */
 		if (RelationNeedsWAL(index))
 			log_newpage_range(
@@ -1453,7 +1468,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 					MAIN_FORKNUM,
 					0,
 					RelationGetNumberOfBlocks(index),
-					true);
+					false);
 	}
 
 	/* Flush the final phase timing + emit the build summary (heap_ctx is read
