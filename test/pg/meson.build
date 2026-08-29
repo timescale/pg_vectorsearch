@@ -1,5 +1,7 @@
 # PostgreSQL regression tests using pg_regress
 
+fs_tap = import('fs')
+
 if not build_pg_extension
   message('Skipping regression tests (PostgreSQL headers not available)')
 else
@@ -99,6 +101,40 @@ else
     endif
   else
     message('pg_regress not found, skipping PostgreSQL regression tests')
+  endif
+
+  # ------------------------------------------------------------------
+  # TAP tests
+  #
+  # Scenarios that need more than one cluster -- streaming replication --
+  # so pg_regress cannot express them. They use PostgreSQL's own
+  # PostgreSQL::Test::Cluster, which ships in the pgxs tree, and are
+  # skipped (not failed) when perl or those modules are absent.
+  # ------------------------------------------------------------------
+  perl = find_program('perl', required: false)
+  pg_perl_dir = pg_pkglibdir / 'pgxs' / 'src' / 'test' / 'perl'
+  if perl.found() and fs_tap.is_dir(pg_perl_dir)
+    test('tap_replication',
+      find_program(meson.current_source_dir() / 't' / 'run-tap.sh'),
+      args: [
+        meson.current_source_dir() / 't' / '001_replication.pl',
+      ],
+      env: {
+        'PG_PERL_DIR': pg_perl_dir,
+        'PATH': pg_bindir + ':' + run_command(
+          'sh', '-c', 'echo $PATH', check: true).stdout().strip(),
+        'PG_REGRESS': pg_pkglibdir / 'pgxs' / 'src' / 'test' / 'regress'
+                      / 'pg_regress',
+        'TESTDATADIR': meson.current_build_dir() / 'tmp_check',
+        'TESTLOGDIR': meson.current_build_dir() / 'tap_log',
+      },
+      depends: [meerkat_ext_so],
+      timeout: 300,
+      is_parallel: false,
+      protocol: 'tap',
+    )
+  else
+    message('perl or PostgreSQL::Test not found, skipping TAP tests')
   endif
 
   # ------------------------------------------------------------------
