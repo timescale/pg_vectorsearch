@@ -600,6 +600,26 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
  * ---------------------------------------------------------------- */
 
 /*
+ * Writable pointer to a leaf entry's child block number on a centroid page.
+ * The location depends on the page format: an AoS meta array for the
+ * meta-based formats, or the packed per-group child array for a fastscan
+ * centroid page. This must match how collect_leaf_entries reads the child, or
+ * the compare-and-set in update_centroid_posting_head acts on the wrong slot.
+ */
+static BlockNumber *
+centroid_child_ptr(Page page, uint16_t entry_idx, Dimension dim)
+{
+	if (mkt_centroid_page_format(page) == MKT_CENTROID_FMT_FASTSCAN)
+	{
+		char	*content = (char *)PageGetContents(page);
+		uint32_t g		 = entry_idx / MKT_FASTSCAN_GROUP;
+		uint32_t slot	 = entry_idx % MKT_FASTSCAN_GROUP;
+		return &mkt_centroid_fastscan_group_child(content, g, dim)[slot];
+	}
+	return &mkt_centroid_meta_mut(page, entry_idx)->child_blkno;
+}
+
+/*
  * Point a centroid leaf entry at new_head via WAL, but only if it still
  * points at expected_old_head. The compare-and-set runs under the same
  * exclusive lock as the write, with no gap, so it is the concurrency gate
@@ -620,24 +640,24 @@ update_centroid_posting_head(
 		uint16_t	 entry_idx,
 		BlockNumber	 expected_old_head,
 		BlockNumber	 new_head,
+		Dimension	 dim,
 		BlockNumber *current_head_out)
 {
 	Buffer buf = ReadBuffer(index, centroid_page);
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
-	MktCentroidEntryMeta *entry = (MktCentroidEntryMeta *)
-			mkt_centroid_meta(BufferGetPage(buf), entry_idx);
-	if (entry->child_blkno != expected_old_head)
+	if (*centroid_child_ptr(BufferGetPage(buf), entry_idx, dim) !=
+		expected_old_head)
 	{
-		*current_head_out = entry->child_blkno;
+		*current_head_out =
+				*centroid_child_ptr(BufferGetPage(buf), entry_idx, dim);
 		UnlockReleaseBuffer(buf);
 		return false;
 	}
 
 	GenericXLogState *state = GenericXLogStart(index);
 	Page page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
-	entry	  = (MktCentroidEntryMeta *)mkt_centroid_meta(page, entry_idx);
-	entry->child_blkno = new_head;
+	*centroid_child_ptr(page, entry_idx, dim) = new_head;
 
 	GenericXLogFinish(state);
 	UnlockReleaseBuffer(buf);
@@ -775,6 +795,7 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 				entry_idx,
 				old_head,
 				new_head,
+				dim,
 				&current_head))
 	{
 		relation_close(index, RowExclusiveLock);
