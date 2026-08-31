@@ -21,12 +21,17 @@ PREFIX="${2:?usage: build-pg-debug.sh <version> <prefix>}"
 
 njobs="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
-# Skip when the prefix already has an injection-points build (cache hit).
+# Skip when the prefix already holds an injection-points build that also ships
+# the TAP perl modules (cache hit). Both are required, so both must be present
+# or we rebuild -- otherwise a prefix cached before TAP was added would be
+# reused without PostgreSQL::Test.
 if [[ -x "$PREFIX/bin/pg_config" ]]; then
     incdir="$("$PREFIX/bin/pg_config" --includedir-server 2>/dev/null || true)"
+    pkglibdir="$("$PREFIX/bin/pg_config" --pkglibdir 2>/dev/null || true)"
     if [[ -n "$incdir" ]] &&
-        grep -q '#define USE_INJECTION_POINTS' "$incdir/pg_config.h" 2>/dev/null; then
-        echo "==> PostgreSQL $VERSION (injection points) already installed at $PREFIX"
+        grep -q '#define USE_INJECTION_POINTS' "$incdir/pg_config.h" 2>/dev/null &&
+        [[ -f "$pkglibdir/pgxs/src/test/perl/PostgreSQL/Test/Cluster.pm" ]]; then
+        echo "==> PostgreSQL $VERSION (injection points + TAP) already installed at $PREFIX"
         exit 0
     fi
 fi
@@ -57,12 +62,17 @@ tar -xf "$workdir/$tarball" -C "$workdir"
     # cassert already turns on MEMORY_CONTEXT_CHECKING (palloc chunk sentinels)
     # and CLOBBER_FREED_MEMORY; RANDOMIZE_ALLOCATED_MEMORY additionally fills
     # fresh allocations with garbage to catch reliance on uninitialized memory.
-    echo "==> Configuring (debug + cassert + injection points + randomize)"
+    echo "==> Configuring (debug + cassert + injection points + randomize + tap)"
+    # --enable-tap-tests builds and installs the PostgreSQL::Test perl modules
+    # (needs IPC::Run at configure time; CI installs libipc-run-perl first).
+    # Without it, `make install` ships no PostgreSQL::Test and the replication
+    # TAP test's meson guard fails under -Dtap_tests=enabled.
     ./configure \
         --prefix="$PREFIX" \
         --enable-debug \
         --enable-cassert \
         --enable-injection-points \
+        --enable-tap-tests \
         --without-icu \
         --without-readline \
         --without-zlib \
@@ -79,6 +89,12 @@ tar -xf "$workdir/$tarball" -C "$workdir"
     # from SQL (it is a normal in-tree module build).
     echo "==> Installing injection_points test module"
     make -s -C src/test/modules/injection_points install
+
+    # PostgreSQL::Test (the TAP perl support) is likewise not shipped by the
+    # top-level `make install`; install it explicitly so it lands in
+    # <pkglibdir>/pgxs/src/test/perl, where the replication TAP test looks.
+    echo "==> Installing TAP perl modules (PostgreSQL::Test)"
+    make -s -C src/test/perl install
 )
 
 echo "==> Installed to $PREFIX:"

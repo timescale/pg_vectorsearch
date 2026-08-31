@@ -79,3 +79,15 @@ option('tools',
   - disabled: never build them
   PostgreSQL regression tests are unaffected by this option.'''
 )
+
+option('tap_tests',
+  type: 'feature',
+  value: 'auto',
+  description: '''Run TAP tests (multi-cluster scenarios such as streaming
+  replication). Needs perl, PostgreSQL::Test from the target PostgreSQL's
+  pgxs tree, and IPC::Run.
+  - auto: run them when those are present, skip otherwise
+  - enabled: require them, and fail configuration if they are missing --
+    use this in CI so a missing prerequisite cannot silently drop coverage
+  - disabled: never run them'''
+)

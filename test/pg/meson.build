@@ -111,9 +111,32 @@ else
   # PostgreSQL::Test::Cluster, which ships in the pgxs tree, and are
   # skipped (not failed) when perl or those modules are absent.
   # ------------------------------------------------------------------
+  tap_opt = get_option('tap_tests')
   perl = find_program('perl', required: false)
   pg_perl_dir = pg_pkglibdir / 'pgxs' / 'src' / 'test' / 'perl'
+
+  # Load the module rather than just checking the directory: PostgreSQL::Test
+  # pulls in IPC::Run, which the pgxs tree does not ship and which is missing
+  # on plenty of otherwise-ready machines. Checking for the directory alone
+  # would turn that into a test failure instead of a skip.
+  tap_ready = false
   if perl.found() and fs_tap.is_dir(pg_perl_dir)
+    tap_probe = run_command(
+      perl, '-I', pg_perl_dir, '-MPostgreSQL::Test::Cluster', '-e', '1',
+      check: false,
+    )
+    tap_ready = tap_probe.returncode() == 0
+    if not tap_ready
+      message('PostgreSQL::Test not loadable: ' + tap_probe.stderr().strip())
+    endif
+  endif
+
+  if tap_opt.enabled() and not tap_ready
+    error('tap_tests=enabled but perl + PostgreSQL::Test + IPC::Run are not '
+          + 'available (install libipc-run-perl, or use -Dtap_tests=auto)')
+  endif
+
+  if tap_ready and not tap_opt.disabled()
     test('tap_replication',
       find_program(meson.current_source_dir() / 't' / 'run-tap.sh'),
       args: [
@@ -134,7 +157,8 @@ else
       protocol: 'tap',
     )
   else
-    message('perl or PostgreSQL::Test not found, skipping TAP tests')
+    message('skipping TAP tests (perl / PostgreSQL::Test unavailable, or '
+            + 'tap_tests=disabled)')
   endif
 
   # ------------------------------------------------------------------
