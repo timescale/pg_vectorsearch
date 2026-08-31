@@ -109,6 +109,21 @@ require_index_select(Relation index, LOCKMODE lockmode)
  * ---------------------------------------------------------------- */
 
 /*
+ * Grow a doubling array before an append: when len has reached *cap, double
+ * *cap and repalloc. Returns the (possibly moved) base pointer; pass
+ * sizeof(*arr) as elem_size. A no-op with room to spare, so it is safe to call
+ * unconditionally before every append.
+ */
+static void *
+grow_if_full(void *arr, int len, int *cap, Size elem_size)
+{
+	if (len < *cap)
+		return arr;
+	*cap *= 2;
+	return repalloc(arr, (Size)*cap * elem_size);
+}
+
+/*
  * BFS the centroid tree and collect all leaf entries. Returns the count and
  * fills *out (palloc'd array). Caller must pfree. Declared in inspect.h and
  * shared with the maintenance functions; LeafEntry is defined there too.
@@ -150,11 +165,7 @@ collect_leaf_entries(
 
 		if (BlockNumberIsValid(opaque->next_blkno))
 		{
-			if (wl_len >= wl_cap)
-			{
-				wl_cap *= 2;
-				wl = repalloc(wl, wl_cap * sizeof(BlockNumber));
-			}
+			wl			 = grow_if_full(wl, wl_len, &wl_cap, sizeof(*wl));
 			wl[wl_len++] = opaque->next_blkno;
 		}
 
@@ -187,11 +198,8 @@ collect_leaf_entries(
 
 			if (is_leaf)
 			{
-				if (leaves_len >= leaves_cap)
-				{
-					leaves_cap *= 2;
-					leaves = repalloc(leaves, leaves_cap * sizeof(LeafEntry));
-				}
+				leaves = grow_if_full(
+						leaves, leaves_len, &leaves_cap, sizeof(*leaves));
 				leaves[leaves_len++] = (LeafEntry){
 						.posting_head  = child,
 						.centroid_page = blkno,
@@ -200,11 +208,7 @@ collect_leaf_entries(
 			}
 			else
 			{
-				if (wl_len >= wl_cap)
-				{
-					wl_cap *= 2;
-					wl = repalloc(wl, wl_cap * sizeof(BlockNumber));
-				}
+				wl			 = grow_if_full(wl, wl_len, &wl_cap, sizeof(*wl));
 				wl[wl_len++] = child;
 			}
 		}
