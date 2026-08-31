@@ -738,12 +738,35 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	uint8_t		nlevels		   = meta->nlevels;
 	UnlockReleaseBuffer(meta_buf);
 
-	/* Find the leaf entry for this cluster */
+	/*
+	 * Find the leaf for this cluster by its stored cluster_id -- the value
+	 * mkt.posting_pages reports and callers pass -- rather than by position in
+	 * the leaf array. Today the two coincide: the build numbers clusters in
+	 * the same order collect_leaf_entries traverses them, so leaves[i] always
+	 * has cluster_id i. That correspondence is not guaranteed to hold once
+	 * split/merge (LIRE) starts minting cluster_ids that no longer match tree
+	 * position, so match on the head's own cluster_id to keep the argument
+	 * meaning the same thing regardless of how the tree was assembled.
+	 */
 	LeafEntry *leaves;
 	int		   nleaves =
 			collect_leaf_entries(index, first_centroid, nlevels, dim, &leaves);
 
-	if (cluster_id < 0 || cluster_id >= nleaves)
+	LeafEntry *leaf = NULL;
+	for (int i = 0; i < nleaves; i++)
+	{
+		Buffer hbuf = ReadBuffer(index, leaves[i].posting_head);
+		LockBuffer(hbuf, BUFFER_LOCK_SHARE);
+		uint32_t cid = mkt_posting_opaque(BufferGetPage(hbuf))->cluster_id;
+		UnlockReleaseBuffer(hbuf);
+		if (cid == (uint32_t)cluster_id)
+		{
+			leaf = &leaves[i];
+			break;
+		}
+	}
+
+	if (leaf == NULL)
 	{
 		pfree(leaves);
 		relation_close(index, RowExclusiveLock);
@@ -752,8 +775,6 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 				 errmsg("cluster %d not found or has no posting list",
 						cluster_id)));
 	}
-
-	LeafEntry  *leaf		  = &leaves[cluster_id];
 	BlockNumber old_head	  = leaf->posting_head;
 	BlockNumber centroid_page = leaf->centroid_page;
 	uint16_t	entry_idx	  = leaf->entry_idx;
