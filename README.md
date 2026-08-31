@@ -12,8 +12,15 @@ similarity search using an IVF (Inverted File) index structure with quantized
 vectors. It is inspired by [ScaNN][scann] and [SPANN][spann].
 
 Meerkat provides its own `vector` and `halfvec` types that are binary-compatible
-with [pgvector][pgvector]. If pgvector is installed, its types and operators can
-be used interchangeably with meerkat's.
+with [pgvector][pgvector]. pgvector is not required — meerkat installs and runs
+on its own.
+
+Where pgvector is installed, meerkat creates binary casts between the two
+extensions' types, so an existing pgvector column can be indexed directly with
+no rewrite and no copy, and it adds pgvector's `<->`, `<#>` and `<=>` to its
+own index operator families. A query written against pgvector — including a
+bare `<->` that resolves to pgvector — therefore uses a meerkat index without
+being rewritten.
 
 ## Features
 

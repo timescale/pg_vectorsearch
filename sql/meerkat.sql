@@ -852,21 +852,46 @@ CREATE FUNCTION mkt.convert_posting_to_fastscan(
 --   meerkat -> pgvector: ASSIGNMENT (avoids operator ambiguity when
 --     both extensions define <->, <#>, <=>)
 --
+-- Casts alone are not enough to make an mktann index reachable from a
+-- query written against pgvector. An index is only considered for an
+-- ORDER BY when the ordering operator belongs to the index's operator
+-- family, and pgvector's <->, <#> and <=> belong to pgvector's families.
+-- Without help, `ORDER BY v <-> $1` under a pgvector-first search_path
+-- plans a sequential scan -- which returns correct rows, so it is easy to
+-- mistake for a working index scan. setup_pgvector_compat() therefore adds
+-- pgvector's three distance operators to meerkat's mktann families as ordering
+-- members alongside the casts, so either spelling of the operator reaches the
+-- index. Casts and operators are one function on purpose: they are a unit (the
+-- operators rely on the casts' binary-coercibility), so a new install path can
+-- never add one and forget the other.
+--
 -- The casts are standalone objects (not owned by either extension).
 -- PostgreSQL auto-drops them via type dependencies when the referenced
 -- types are dropped, so DROP EXTENSION on either side removes the
 -- casts without affecting the other extension.
 --
 -- Both install orderings are supported:
---   pgvector first, meerkat later: DO block below creates casts
---   meerkat first, pgvector later: event trigger creates casts
+--   pgvector first, meerkat later: DO block below sets up compat
+--   meerkat first, pgvector later: event trigger sets up compat
 
--- Helper: create binary casts between meerkat and pgvector types.
--- Uses exception handling for idempotency (CREATE CAST has no IF NOT
--- EXISTS clause).
-CREATE FUNCTION create_pgvector_casts() RETURNS void
+-- Set up pgvector interoperability in one step: the binary casts between the
+-- two extensions' types, and the membership of pgvector's distance operators
+-- in meerkat's mktann operator families. These belong together -- the casts
+-- make public.vector/public.halfvec binary-coercible to mkt.vector/mkt.halfvec,
+-- which is exactly what lets pgvector's operators join a family whose opclass
+-- is FOR TYPE mkt.<type>. Keeping them in a single function means a caller
+-- cannot add the casts and forget the operators (which would silently downgrade
+-- pgvector-operator queries to a sequential scan).
+--
+-- Casts first, then operators (the operators depend on the casts' coercibility).
+-- Idempotent throughout via exception handling (neither CREATE CAST nor ALTER
+-- OPERATOR FAMILY has an IF NOT EXISTS form).
+CREATE FUNCTION setup_pgvector_compat() RETURNS void
     LANGUAGE plpgsql AS $$
+DECLARE
+    r record;
 BEGIN
+    -- 1. Binary casts, both directions, for vector and halfvec.
     BEGIN
         CREATE CAST (public.vector AS @extschema@.vector)
             WITHOUT FUNCTION AS IMPLICIT;
@@ -887,12 +912,37 @@ BEGIN
             WITHOUT FUNCTION AS ASSIGNMENT;
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;
+
+    -- 2. pgvector's distance operators as ordering members of meerkat's mktann
+    -- families. Strategy 1 and float_ops match the opclass declarations above;
+    -- the operator's left type only has to be binary-coercible to the family's
+    -- index type, which the casts above guarantee.
+    FOR r IN
+        SELECT * FROM (VALUES
+            ('vector_l2_ops',      'vector',  '<->'),
+            ('vector_ip_ops',      'vector',  '<#>'),
+            ('vector_cosine_ops',  'vector',  '<=>'),
+            ('halfvec_l2_ops',     'halfvec', '<->'),
+            ('halfvec_ip_ops',     'halfvec', '<#>'),
+            ('halfvec_cosine_ops', 'halfvec', '<=>')
+        ) AS t(fam, typ, op)
+    LOOP
+        BEGIN
+            EXECUTE format(
+                'ALTER OPERATOR FAMILY @extschema@.%I USING mktann '
+                'ADD OPERATOR 1 public.%s (public.%I, public.%I) '
+                'FOR ORDER BY pg_catalog.float_ops',
+                r.fam, r.op, r.typ, r.typ);
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END;
+    END LOOP;
 END;
 $$;
 
 -- Create casts now if pgvector is already installed.
--- During CREATE EXTENSION, objects created in DO blocks are auto-owned
--- by the extension. We immediately disassociate the casts so that
+-- During CREATE EXTENSION, objects created in an anonymous DO ($$ ... $$)
+-- block are auto-owned by the extension. We immediately disassociate the
+-- casts so that
 -- DROP EXTENSION meerkat does not cascade to (or through) pgvector.
 -- The casts still get cleaned up via auto-dependencies on their
 -- referenced types.
@@ -901,7 +951,7 @@ BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_extension WHERE extname = 'vector'
     ) THEN
-        PERFORM @extschema@.create_pgvector_casts();
+        PERFORM @extschema@.setup_pgvector_compat();
         EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
             '(public.vector AS @extschema@.vector)';
         EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
@@ -924,7 +974,7 @@ BEGIN
                WHERE object_type = 'extension'
     LOOP
         IF obj.object_identity = 'vector' THEN
-            PERFORM @extschema@.create_pgvector_casts();
+            PERFORM @extschema@.setup_pgvector_compat();
         END IF;
     END LOOP;
 END;

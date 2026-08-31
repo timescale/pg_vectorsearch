@@ -4454,56 +4454,42 @@ mkt_is_vector_type(Oid typoid)
 
 #### Runtime Type Handling in Operators
 
-Operators and index functions accept both `mkt_vector` and pgvector's `vector`:
+#### Operator Family Membership
 
-```c
-Datum
-mkt_l2_distance(PG_FUNCTION_ARGS)
-{
-    Oid argtypoid = get_fn_expr_argtype(fcinfo->flinfo, 0);
+Type interoperability does not by itself extend to operators. PostgreSQL
+considers an index for an `ORDER BY` only when the ordering operator belongs to
+the index's operator family, and pgvector's `<->`, `<#>` and `<=>` belong to
+pgvector's own families. Casting the column is not enough.
 
-    if (!mkt_is_vector_type(argtypoid))
-        ereport(ERROR,
-                errcode(ERRCODE_DATATYPE_MISMATCH),
-                errmsg("expected mkt_vector or vector type"));
+`setup_pgvector_compat()` therefore adds pgvector's three distance operators to
+each of meerkat's six `mktann` families as ordering members, in the same step
+that creates the casts:
 
-    // Binary compatible - safe to cast regardless of which type
-    MktVector *a = (MktVector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
-    MktVector *b = (MktVector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(1));
-
-    if (a->dim != b->dim)
-        ereport(ERROR,
-                errcode(ERRCODE_DATA_EXCEPTION),
-                errmsg("different vector dimensions %d and %d", a->dim, b->dim));
-
-    VectorRef va = MktVectorToRef(a);
-    VectorRef vb = MktVectorToRef(b);
-
-    PG_RETURN_FLOAT4(mkt_distance_l2(va, vb));
-}
+```sql
+ALTER OPERATOR FAMILY mkt.halfvec_l2_ops USING mktann
+    ADD OPERATOR 1 public.<-> (public.halfvec, public.halfvec)
+        FOR ORDER BY pg_catalog.float_ops;
 ```
 
-#### Index Support for Both Types
+Strategy number and sort family match the opclass declarations. It runs on the
+same both-install-orders path as the casts: if pgvector is already installed,
+meerkat's install script adds them inline while `CREATE EXTENSION meerkat` runs
+(an anonymous `DO $$ ... $$` block — a one-off script that runs during
+install, not a lock); if pgvector is installed later, an event trigger adds them
+then. It is idempotent through exception handling. `DROP EXTENSION vector
+CASCADE` removes the members via their dependency on the operators, and a later
+reinstall re-adds them.
 
-The index access method validates column types during `ambuild`:
+The failure mode this removes is quiet: without family membership the planner
+answers a pgvector-operator query with a sequential scan, which returns correct
+rows. Results-only tests pass while measuring brute force, so the compat suite
+asserts the plan as well as the recall.
 
-```c
-static IndexBuildResult *
-mkt_ambuild(Relation heap, Relation index, IndexInfo *indexInfo)
-{
-    // Get the indexed column's type
-    Oid atttype = TupleDescAttr(RelationGetDescr(heap),
-                                 indexInfo->ii_IndexAttrNumbers[0] - 1)->atttypid;
-
-    if (!mkt_is_vector_type(atttype))
-        ereport(ERROR,
-                errcode(ERRCODE_DATATYPE_MISMATCH),
-                errmsg("meerkat index requires mkt_vector or vector column"));
-
-    // Proceed with build - both types have identical layout
-    // ...
-}
-```
+One pairing does not resolve, by design: a `mkt.vector` or `mkt.halfvec` column
+with pgvector's operator. The meerkat → pgvector cast is ASSIGNMENT rather than
+IMPLICIT specifically so that having both extensions installed does not make
+operator resolution ambiguous, and queries over meerkat's types use meerkat's
+operators.
 
 **Standalone builds**: For unit tests and CLI tools, use `MktVector` without the
 varlena header, or define a minimal mock. The core algorithms operate on
