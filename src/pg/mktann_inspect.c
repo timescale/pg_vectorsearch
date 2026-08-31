@@ -778,7 +778,16 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	/* Convert the posting chain */
 	MktannStorage storage;
 	mktann_storage_init(&storage, index, NULL, DISTANCE_L2);
-	storage.build_mode = true;
+
+	/*
+	 * Online conversion, unlike a full index build, has no closing
+	 * log_newpage_range() to blanket-WAL the new pages. Keep build_mode off
+	 * so each fastscan page is WAL-logged as it is committed (per-page
+	 * GenericXLog full image). Otherwise the pages would be dirtied but never
+	 * shipped, while the centroid repoint below *is* WAL-logged — leaving a
+	 * standby whose centroid points at posting heads it never received.
+	 */
+	storage.build_mode = false;
 
 	BlockNumber new_head =
 			mkt_posting_convert_to_fastscan(&storage.base, old_head, dim);
