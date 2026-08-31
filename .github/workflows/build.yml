@@ -94,7 +94,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            meson ninja-build gcc gdb make bison flex libgsl-dev
+            meson ninja-build gcc gdb make bison flex libgsl-dev \
+            libipc-run-perl
 
       - name: Install OpenBLAS (Linux x64 only)
         if: runner.os == 'Linux' && matrix.arch == 'x64'
@@ -146,6 +147,17 @@ jobs:
           # CI never relies on the 'auto' tools heuristic: full jobs
           # force-enable, the ext-only job force-disables.
           args="$args -Dtools=$TOOLS"
+          # Likewise for TAP. Required on the source-built PostgreSQL, which
+          # build-pg-debug.sh configures with --enable-tap-tests and installs
+          # PostgreSQL::Test from (into its pgxs tree); IPC::Run comes from
+          # libipc-run-perl above. Requiring it there means a missing
+          # prerequisite fails the build instead of quietly dropping the
+          # coverage. The packaged and macOS jobs stay on 'auto', because
+          # whether their pgxs trees carry PostgreSQL::Test is a packaging
+          # detail this repo does not control.
+          if [ -n "$PG_CONFIG" ]; then
+            args="$args -Dtap_tests=enabled"
+          fi
           ./scripts/ci/build.sh builddir $args
 
       - name: Show regression diffs and server logs
@@ -156,6 +168,9 @@ jobs:
           done
           # Temp-instance server logs carry the crash signal and, on an
           # assert build, the "TRAP: failed Assert(...) File:Line".
+          for f in builddir/test/pg/tap_log/*; do
+            [ -f "$f" ] && echo "=== $f ===" && cat "$f"
+          done
           for d in builddir/testdb builddir/isolation_testdb; do
             for f in "$d"/log/*; do
               [ -f "$f" ] && echo "=== $f ===" && cat "$f"

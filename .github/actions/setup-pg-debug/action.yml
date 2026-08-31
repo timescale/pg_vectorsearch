@@ -35,6 +35,18 @@ runs:
         key: >-
           pg-debug-${{ runner.os }}-${{ runner.arch }}-${{ inputs.pg-version }}-${{ hashFiles('scripts/ci/build-pg-debug.sh') }}
 
+    # build-pg-debug.sh configures with --enable-tap-tests, whose configure
+    # check requires IPC::Run, and running the TAP tests later needs it too.
+    # Install it here so every workflow that uses this debug PG (build,
+    # coverage, ...) has it -- at both build time (cache miss) and test time
+    # (cache hit), so it is not gated on the cache.
+    - name: Install TAP perl dependency (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libipc-run-perl
+
     - name: Build debug PostgreSQL
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
