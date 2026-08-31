@@ -286,7 +286,53 @@ mkt_vector_dot_product(const MktVector *v1, const MktVector *v2)
 
 ### Dependencies
 
-- `pgvector` extension for vector type and operators.
+None at the SQL level. Meerkat defines its own `vector`, `halfvec` and
+`rabitq` types in the `mkt` schema (see `sql/meerkat.sql`), so it installs
+and runs without pgvector.
+
+**pgvector interoperability.** The types are laid out to be
+binary-compatible with pgvector's, and the extension creates
+binary-coercible casts between the two in both directions:
+
+```sql
+CREATE CAST (public.vector  AS mkt.vector)  WITHOUT FUNCTION AS IMPLICIT;
+CREATE CAST (mkt.vector     AS public.vector) WITHOUT FUNCTION AS ASSIGNMENT;
+-- and the same pair for halfvec
+```
+
+Direction matters: pgvector → meerkat is IMPLICIT so an existing pgvector
+column works transparently, while meerkat → pgvector is ASSIGNMENT to avoid
+operator ambiguity when both extensions are installed. Install order does not
+matter — `setup_pgvector_compat()` runs at `CREATE EXTENSION meerkat` if
+pgvector is already there, and an event trigger runs it if pgvector arrives
+later.
+
+The consequence worth remembering: because the casts are `WITHOUT FUNCTION`,
+they satisfy PostgreSQL's binary-coercibility rule for operator classes. That
+is what lets an `mktann` opclass declared `FOR TYPE mkt.vector` be used on a
+column of pgvector's `public.vector` — the two are the same bytes, so no
+conversion happens and no copy is made. Anything in the access method that
+asks "which type is this column?" must ask it the same way, via
+`IsBinaryCoercible` rather than OID equality, or it will disagree with the
+planner about a column the index was built on.
+
+Operators need separate handling, because casts do not cover them. An index is
+only considered for an `ORDER BY` when the ordering operator belongs to the
+index's operator family, and pgvector's `<->`, `<#>` and `<=>` belong to
+pgvector's families. So `setup_pgvector_compat()` adds them to meerkat's
+`mktann` families as ordering members (strategy 1, `float_ops`) in the same
+step as the casts — they are a unit, since the operators rely on the casts'
+binary-coercibility. Either spelling of the operator then reaches the index.
+
+The failure this avoids is quiet rather than loud: with pgvector's operator and
+no family membership, the planner picks a sequential scan, which returns the
+right rows. Any test that checks only results will pass while measuring brute
+force — so plan checks, not just recall checks, are what pin this down.
+
+The `mkt.<type>` column with pgvector's operator is the one pairing that does
+not resolve, and deliberately so: the meerkat → pgvector cast is ASSIGNMENT,
+not IMPLICIT, precisely to keep operator calls unambiguous when both
+extensions are installed.
 
 ### Concurrency Safety
 

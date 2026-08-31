@@ -69,6 +69,44 @@ CREATE OR REPLACE FUNCTION casts_are_standalone() RETURNS bool AS $$
     );
 $$ LANGUAGE sql;
 
+-- Helper: pgvector's distance operators registered as ordering members of
+-- meerkat's mktann families (identified by the operator living in pgvector's
+-- schema, public). Safe to call after pgvector is dropped -- the joins simply
+-- match nothing, returning 0.
+CREATE OR REPLACE FUNCTION count_pgvector_mktann_ops() RETURNS int AS $$
+    SELECT count(*)::int
+    FROM pg_amop ao
+    JOIN pg_opfamily f ON f.oid = ao.amopfamily
+    JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'mktann'
+    JOIN pg_operator op ON op.oid = ao.amopopr
+    JOIN pg_namespace n ON n.oid = op.oprnamespace
+    WHERE ao.amoppurpose = 'o' AND n.nspname = 'public';
+$$ LANGUAGE sql;
+
+-- Helper: mktann's own ordering operators (in the mkt schema), so a test can
+-- assert meerkat's opclasses survive a pgvector drop untouched.
+CREATE OR REPLACE FUNCTION count_mkt_mktann_ops() RETURNS int AS $$
+    SELECT count(*)::int
+    FROM pg_amop ao
+    JOIN pg_opfamily f ON f.oid = ao.amopfamily
+    JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'mktann'
+    JOIN pg_operator op ON op.oid = ao.amopopr
+    JOIN pg_namespace n ON n.oid = op.oprnamespace
+    WHERE ao.amoppurpose = 'o' AND n.nspname = 'mkt';
+$$ LANGUAGE sql;
+
+-- Helper: true if `cmd` raises (is refused), rolling back its own subxact.
+-- Used to assert that a bare DROP EXTENSION is blocked by the binary casts, so
+-- that removing either extension needs CASCADE and cannot silently succeed.
+CREATE OR REPLACE FUNCTION stmt_is_refused(cmd text) RETURNS bool AS $$
+BEGIN
+    EXECUTE cmd;
+    RETURN false;
+EXCEPTION WHEN OTHERS THEN
+    RETURN true;
+END;
+$$ LANGUAGE plpgsql;
+
 -- =====================================================================
 -- 1. Binary casts exist
 -- =====================================================================
@@ -382,6 +420,14 @@ SELECT assert_test('mkt-first: mkt->pgvector cast works',
 -- 15. DROP meerkat CASCADE: casts dropped, pgvector survives
 -- =====================================================================
 
+-- A bare drop is refused: the binary casts depend on meerkat's types, so
+-- removing meerkat needs CASCADE and cannot silently succeed. The subxact
+-- rolls back, so meerkat is still installed afterwards.
+SELECT assert_test('drop-mkt: bare DROP is refused (needs CASCADE)',
+    stmt_is_refused('DROP EXTENSION meerkat'));
+SELECT assert_test('drop-mkt: meerkat still installed after refused bare DROP',
+    EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'meerkat'));
+
 DROP EXTENSION meerkat CASCADE;
 
 SELECT assert_test('drop-mkt: no casts remain',
@@ -394,12 +440,31 @@ SELECT assert_test('drop-mkt: pgvector still loaded',
 SELECT assert_test('drop-mkt: pgvector still works',
     '[1,2,3]'::public.vector::text = '[1,2,3]');
 
+-- pgvector's own operators are untouched -- CASCADE reached only the compat
+-- objects, never through to pgvector.
+SELECT assert_test('drop-mkt: pgvector operator still works',
+    ('[0,0]'::public.vector OPERATOR(public.<->) '[3,4]'::public.vector) = 5);
+
+-- With meerkat (and its casts) gone, pgvector is no longer encumbered: a bare
+-- DROP now succeeds without CASCADE -- meerkat only forces CASCADE while it is
+-- installed. (This drops pgvector; recreate it for the next section.)
+SELECT assert_test('drop-mkt: pgvector then drops without CASCADE',
+    NOT stmt_is_refused('DROP EXTENSION vector'));
+CREATE EXTENSION vector;
+
 -- =====================================================================
 -- 16. DROP pgvector CASCADE: casts dropped, meerkat survives
 -- =====================================================================
 
 -- Restore both (pgvector-first path)
 CREATE EXTENSION meerkat;
+
+-- Both present again: the six pgvector ordering operators are members, and a
+-- bare drop is refused (the casts block it, same as the meerkat side).
+SELECT assert_test('drop-pgv: 6 pgvector ops are members before drop',
+    count_pgvector_mktann_ops() = 6);
+SELECT assert_test('drop-pgv: bare DROP is refused (needs CASCADE)',
+    stmt_is_refused('DROP EXTENSION vector'));
 
 DROP EXTENSION vector CASCADE;
 
@@ -409,6 +474,16 @@ SELECT assert_test('drop-pgv: meerkat still loaded',
 
 SELECT assert_test('drop-pgv: mkt.vector still works',
     '[1,2,3]'::mkt.vector::text = '[1,2,3]');
+
+-- The pgvector operator members are removed with pgvector's operators, while
+-- meerkat's own six ordering operators and its opclasses are untouched.
+SELECT assert_test('drop-pgv: pgvector ops removed from mktann families',
+    count_pgvector_mktann_ops() = 0);
+SELECT assert_test('drop-pgv: meerkat native ops intact',
+    count_mkt_mktann_ops() = 6);
+SELECT assert_test('drop-pgv: mktann opclasses intact',
+    (SELECT count(*) FROM pg_opclass oc
+        JOIN pg_am am ON am.oid = oc.opcmethod AND am.amname = 'mktann') = 6);
 
 SELECT assert_test('drop-pgv: event trigger still exists',
     EXISTS (SELECT 1 FROM pg_event_trigger
@@ -471,13 +546,20 @@ SELECT assert_test('standalone: clean drop',
 -- descriptor keyed on anything narrower would read the f16 pairs as float32
 -- and return garbage from an index the planner considers valid.
 --
--- Note the query has to resolve to *meerkat's* distance operator for the
--- index to be considered at all; pgvector's <-> belongs to pgvector's
--- opfamily. That is true of vector columns too and is not specific to
--- halfvec.
+-- Each recall check is paired with a plan check. An index is only considered
+-- for an ORDER BY when the ordering operator belongs to the index's operator
+-- family, so a plan check is what distinguishes a working index scan from a
+-- sequential scan that happens to return the same rows; without it the recall
+-- assertions would pass on brute force and say nothing about the index.
+--
+-- Both spellings of the operator have to reach the index. meerkat adds
+-- pgvector's <->, <#> and <=> to its own mktann families as ordering members
+-- precisely so that a query written against pgvector -- or an unqualified
+-- <-> resolving to pgvector under a pgvector-first search_path -- is not
+-- silently downgraded to a sequential scan.
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS meerkat;
-SET search_path = mkt, public;
+SET search_path = public, mkt;
 
 CREATE TEMP TABLE idx_src (id int, txt text);
 INSERT INTO idx_src
@@ -505,7 +587,7 @@ CREATE INDEX idx_mkt_h_i ON idx_mkt_h USING mktann (v mkt.halfvec_l2_ops);
 
 -- The planner must actually choose the index, or the rest proves nothing.
 -- EXPLAIN cannot appear in a subquery, hence the helper.
-CREATE OR REPLACE FUNCTION plan_uses_index_scan(q text) RETURNS bool
+CREATE OR REPLACE FUNCTION public.plan_uses_index_scan(q text) RETURNS bool
     LANGUAGE plpgsql AS $fn$
 DECLARE
     line text;
@@ -520,7 +602,7 @@ END $fn$;
 
 SET enable_seqscan = off;
 SELECT assert_test('mktann index is used on a pgvector halfvec column',
-    plan_uses_index_scan($q$SELECT id FROM idx_pgv_h
+    public.plan_uses_index_scan($q$SELECT id FROM idx_pgv_h
         ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.halfvec(8)
         LIMIT 10$q$));
 
@@ -554,8 +636,53 @@ SELECT assert_test('pgvector halfvec column gets half-precision centroids',
     (SELECT bool_and(format = 'half')
        FROM mkt.centroid_pages('idx_fmt_i'::regclass)));
 
+-- pgvector's three distance operators are ordering members of each of
+-- meerkat's six mktann families.
+SELECT assert_test('pgvector distance operators joined the mktann families',
+    (SELECT count(*) FROM pg_amop ao
+        JOIN pg_opfamily f ON f.oid = ao.amopfamily
+        JOIN pg_am am ON am.oid = f.opfmethod
+        JOIN pg_operator op ON op.oid = ao.amopopr
+        JOIN pg_namespace opn ON opn.oid = op.oprnamespace
+       WHERE am.amname = 'mktann'
+         AND opn.nspname = 'public'
+         AND ao.amoppurpose = 'o') = 6);
+
+-- An mktann index is reachable from pgvector's operator, including as a bare
+-- <-> under a search_path that resolves to pgvector.
+SELECT assert_test(
+    'mktann index is used via pgvector''s operator on a pgvector column',
+    public.plan_uses_index_scan($q$SELECT id FROM idx_pgv_h
+        ORDER BY v OPERATOR(public.<->) '[0,0,0,0,0,0,0,0]'::halfvec(8)
+        LIMIT 10$q$));
+SELECT assert_test(
+    'mktann index is used via an unqualified <-> resolving to pgvector',
+    public.plan_uses_index_scan($q$SELECT id FROM idx_pgv_h
+        ORDER BY v <-> '[0,0,0,0,0,0,0,0]'::halfvec(8) LIMIT 10$q$));
+
+-- And returns the same neighbours through that operator as brute force does.
+SELECT assert_test(
+    'pgvector operator on mktann index: recall >= 8/10',
+    (SELECT count(*) FROM (
+        SELECT id FROM idx_pgv_h
+         ORDER BY v OPERATOR(public.<->) '[0,0,0,0,0,0,0,0]'::halfvec(8)
+         LIMIT 10) g
+      WHERE g.id = ANY (SELECT unnest(ids) FROM idx_truth)) >= 8);
+
+-- The reverse pairing -- a meerkat-typed column with pgvector's operator --
+-- does not resolve, and is not expected to: the meerkat -> pgvector cast is
+-- ASSIGNMENT rather than IMPLICIT, deliberately, so that having both
+-- extensions installed does not make every operator call ambiguous. Queries
+-- over meerkat's own types use meerkat's own operators.
+SELECT assert_test('meerkat column with pgvector operator does not resolve',
+    NOT EXISTS (
+        SELECT 1 FROM pg_operator op
+         WHERE op.oprname = '<->'
+           AND op.oprnamespace = 'public'::regnamespace
+           AND op.oprleft = 'mkt.halfvec'::regtype));
+
 RESET enable_seqscan;
-DROP FUNCTION plan_uses_index_scan(text);
+DROP FUNCTION public.plan_uses_index_scan(text);
 DROP TABLE idx_pgv_h;
 DROP TABLE idx_mkt_h;
 RESET search_path;
