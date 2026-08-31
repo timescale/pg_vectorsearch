@@ -205,6 +205,65 @@ SQL
 	$primary->safe_psql('postgres', "DELETE FROM tv WHERE id > $rows");
 }
 
+# convert_posting_to_fastscan: a runtime AoS -> fastscan rewrite. It writes NEW
+# posting pages by extending the relation and must WAL-log them itself -- there
+# is no closing log_newpage_range() for a runtime operation, so it must not run
+# in build_mode. The index is built to exercise all three failure modes at once:
+#
+#   - centroid_fastscan = on: the leaf's child block lives in the packed
+#     per-group array, at a different offset than the AoS meta array, so the
+#     repoint must be format-aware.
+#   - fan_out = 4: forces a multi-level centroid tree, so the leaf-traversal
+#     order diverges from cluster_id -- a positional leaves[cluster_id] lookup
+#     then converts the wrong cluster. (A flat tree hides this: order == id.)
+#   - converting every cluster and comparing the standby: without per-page WAL
+#     the new fastscan chains are dirtied but never shipped, while the
+#     WAL-logged centroid repoint points at them.
+{
+	my $idx = 'idx_conv';
+	$primary->safe_psql('postgres',
+		"CREATE INDEX $idx ON tv USING mktann (v) "
+	  . "WITH (fastscan = off, centroid_compression = true, "
+	  . "centroid_fastscan = on, fan_out = 4)");
+	formats_are($idx, 'aos', 'fastscan', 'convert: pre-convert formats');
+
+	# Convert every cluster (not just cluster 0 -- that alone would miss the
+	# repoint bug, which only shows up once the packed-array offset is used).
+	my $nconv = $primary->safe_psql('postgres', <<"SQL");
+SELECT count(convert_posting_to_fastscan('$idx'::regclass, cluster_id))
+FROM posting_pages('$idx'::regclass) WHERE is_first;
+SQL
+	my $nclusters = $primary->safe_psql('postgres',
+		"SELECT count(*) FROM posting_pages('$idx'::regclass) WHERE is_first");
+	is($nconv, $nclusters, "convert: converted all $nclusters clusters");
+
+	my $all_fs = $primary->safe_psql('postgres', <<"SQL");
+SELECT bool_and(format = 'fastscan')
+FROM posting_pages('$idx'::regclass) WHERE is_first;
+SQL
+	is($all_fs, 't', 'convert: every posting head is now fastscan');
+
+	# The new pages must have reached the standby: posting_pages walks the
+	# centroid-reachable chains, so it follows each repointed head into the new
+	# fastscan pages -- absent on the standby without the WAL fix. Compare the
+	# full layout across all clusters, not just one.
+	my $layout = <<"SQL";
+SELECT string_agg(cluster_id || ':' || format || ':' || entry_count,
+                  ',' ORDER BY blkno)
+FROM posting_pages('$idx'::regclass)
+SQL
+	$primary->wait_for_catchup($standby);
+	my $on_primary = $primary->safe_psql('postgres', $layout);
+	my $on_standby = $standby->safe_psql('postgres', $layout);
+	like($on_primary, qr/fastscan/, 'convert: primary posting layout has fastscan');
+	is($on_standby, $on_primary,
+		'convert: standby posting layout matches primary');
+
+	# End-to-end: the query still agrees across nodes.
+	agrees('tv', 'convert: after fastscan conversion');
+	$primary->safe_psql('postgres', "DROP INDEX mkt.$idx");
+}
+
 # Complement: pin the layout property that forces page_std = false. This
 # cannot detect the bug -- the flag changes what is logged, not the page --
 # but it fails if the layout ever moves entries out of the hole, which is the
