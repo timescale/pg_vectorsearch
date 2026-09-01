@@ -26,6 +26,16 @@ if [[ ! -f "$SRC_DIR/Makefile" ]]; then
     exit 1
 fi
 
+# make -C "$SRC_DIR" changes make's working directory to $SRC_DIR before
+# evaluating DESTDIR, so a relative STAGE_DIR would otherwise land inside
+# $SRC_DIR itself (e.g. "pg_textsearch/.stage" becomes
+# "pg_textsearch/pg_textsearch/.stage") instead of relative to the
+# directory this script was invoked from. Canonicalize both to absolute
+# paths up front so that ambiguity can't arise; STAGE_DIR need not exist
+# yet, hence -m.
+SRC_DIR="$(realpath -m "$SRC_DIR")"
+STAGE_DIR="$(realpath -m "$STAGE_DIR")"
+
 njobs="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
 echo "==> Building pg_textsearch ($SRC_DIR) against $("$PG_CONFIG" --version)"
