@@ -14,6 +14,7 @@ bin/
 !.claude/skills
 .claude/skills/*
 !.claude/skills/git-workflow
+!.claude/skills/create-pr
 .idea
 .vscode
 .mcp.json
