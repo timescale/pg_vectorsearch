@@ -8,7 +8,12 @@ bin/
 
 # Editor/IDE
 .cache/
-.claude/
+# .claude/ is local (settings, worktrees, ...) except for checked-in
+# repo skills under .claude/skills/.
+.claude/*
+!.claude/skills
+.claude/skills/*
+!.claude/skills/git-workflow
 .idea
 .vscode
 .mcp.json
