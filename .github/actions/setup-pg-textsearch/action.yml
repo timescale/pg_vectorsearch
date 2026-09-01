@@ -1,0 +1,69 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-action.json
+---
+name: Setup pg_textsearch
+description: >-
+  Build (cached) and install pg_textsearch at a pinned release tag into the
+  active PostgreSQL installation. Shared by CI jobs that test interop
+  between pg_textsearch and pg_vectorsearch.
+
+inputs:
+  ref:
+    description: pg_textsearch git tag to build.
+    required: false
+    default: 'v1.3.0'
+  pg-version:
+    description: >-
+      PostgreSQL major version being built against. Only used as part of
+      the cache key, so a build against one PostgreSQL version is never
+      reused for another.
+    required: false
+    default: '18'
+  checkout-path:
+    description: Where to check out the pg_textsearch source.
+    required: false
+    default: pg_textsearch
+
+outputs:
+  stage-path:
+    description: Path to the staged (DESTDIR) pg_textsearch install.
+    value: ${{ steps.stage.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout pg_textsearch
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      with:
+        repository: timescale/pg_textsearch
+        ref: ${{ inputs.ref }}
+        path: ${{ inputs.checkout-path }}
+        persist-credentials: false
+
+    # The staged build changes when the pinned tag, the PostgreSQL version,
+    # the platform, or build-pg-textsearch.sh itself changes -- key on all
+    # four, so a fix to that script isn't served stale from a cache keyed
+    # only on the still-unchanged tag (see setup-pg-debug's cache step,
+    # which keys on its build script for the same reason).
+    - name: Cache pg_textsearch build
+      id: cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: ${{ inputs.checkout-path }}/.stage
+        key: >-
+          pg-textsearch-${{ runner.os }}-${{ runner.arch }}-${{ inputs.ref }}-pg${{ inputs.pg-version }}-${{ hashFiles('scripts/ci/build-pg-textsearch.sh') }}
+
+    - name: Build pg_textsearch
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        CHECKOUT_PATH: ${{ inputs.checkout-path }}
+      run: ./scripts/ci/build-pg-textsearch.sh "$CHECKOUT_PATH" "$CHECKOUT_PATH/.stage"
+
+    - name: Install pg_textsearch into PostgreSQL
+      id: stage
+      shell: bash
+      env:
+        CHECKOUT_PATH: ${{ inputs.checkout-path }}
+      run: |
+        ./scripts/ci/install-pg-textsearch.sh "$CHECKOUT_PATH/.stage"
+        echo "path=$CHECKOUT_PATH/.stage" >> "$GITHUB_OUTPUT"
