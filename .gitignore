@@ -17,6 +17,7 @@ bin/
 !.claude/skills/create-pr
 !.claude/skills/testing
 !.claude/skills/review
+!.claude/skills/build-feature
 .idea
 .vscode
 .mcp.json
