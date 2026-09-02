@@ -151,8 +151,9 @@ DROP TABLE mutdel;
 -- ===== UPDATE: insert-new + clean-old, and HOT for non-indexed columns =======
 -- Postgres turns a vector-column UPDATE into a new tuple (aminsert) plus a dead
 -- old version (cleaned by VACUUM, like DELETE). An UPDATE that leaves the
--- vector unchanged is HOT (index_unchanged), so no index work happens and the
--- row stays findable. The payload column is non-indexed, to drive the HOT case.
+-- vector unchanged is HOT when the page has room, so no index work happens and
+-- the row stays findable. The payload column is non-indexed, to drive the HOT
+-- case.
 CREATE TABLE mutupd (id int, payload int, v vector(3));
 INSERT INTO mutupd SELECT g, 0, format('[%s,0,0]', g)::vector
     FROM generate_series(1, 50) g;
@@ -184,6 +185,42 @@ SELECT id AS upd_after_vacuum FROM mutupd ORDER BY v <-> '[200,0,0]' LIMIT 1;
 RESET enable_seqscan;
 RESET mkt.nprobe;
 DROP TABLE mutupd;
+
+-- ===== Non-HOT UPDATE of a non-indexed column still indexes the new version ==
+-- When the page has no room for the new version, an UPDATE that leaves the
+-- vector unchanged is not HOT: the new tuple lands on another page and
+-- Postgres calls aminsert for it with index_unchanged = true. That flag is a
+-- hint for access methods that can deduplicate against the old version, not
+-- permission to skip the insert -- the old entry points at a TID that is now
+-- dead. Sequential inserts pack every page but the last to the fill factor,
+-- so updating every row forces the non-HOT path for all but the last page.
+CREATE TABLE mutnonhot (id int, payload int, v vector(3));
+INSERT INTO mutnonhot SELECT g, 0, format('[%s,0,0]', g)::vector
+    FROM generate_series(1, 1000) g;
+CREATE INDEX idx_mutnonhot ON mutnonhot USING mktann (v)
+    WITH (nlist = 4, centroid_compression = true, fastscan = off,
+          soar_lambda = 0, boundary_epsilon = 0);
+SET enable_seqscan = off;
+SET mkt.nprobe = 4;
+SELECT sum(entry_count) AS entries_before
+    FROM mkt.posting_pages('idx_mutnonhot'::regclass);
+UPDATE mutnonhot SET payload = payload + 1;
+-- The new versions were indexed: more entries than rows ...
+SELECT sum(entry_count) > 1000 AS entries_added
+    FROM mkt.posting_pages('idx_mutnonhot'::regclass);
+-- ... and a row from a full page is found at its unchanged vector.
+SELECT id AS nonhot_found FROM mutnonhot ORDER BY v <-> '[500,0,0]' LIMIT 1;
+-- Once VACUUM has removed the dead old versions, the whole table is
+-- reachable through the index (before it, the dead entries take half the
+-- top-k and the heap fetch drops them).
+VACUUM mutnonhot;
+SET mkt.query_limit = 1000;
+SELECT count(*) AS nonhot_reachable FROM (
+    SELECT id FROM mutnonhot ORDER BY v <-> '[0,0,0]' LIMIT 1000) t;
+RESET mkt.query_limit;
+RESET enable_seqscan;
+RESET mkt.nprobe;
+DROP TABLE mutnonhot;
 
 -- ===== Page-level tombstone is reported by EXPLAIN (ANALYZE, VERBOSE) ========
 -- A scan reads a tombstoned (all-dead) page to follow the chain but skips its
