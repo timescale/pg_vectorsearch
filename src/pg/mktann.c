@@ -81,9 +81,15 @@ mktann_insert(
 	(void)check_unique;
 	(void)index_info;
 
-	/* HOT / unchanged indexed value: the existing index entry still applies.
-	 * NULL vectors get no entry. */
-	if (index_unchanged || isnull[0])
+	/* index_unchanged is deliberately ignored. PostgreSQL sets it when an
+	 * UPDATE left the indexed column untouched but still had to place the
+	 * new tuple version elsewhere (a non-HOT update); it is a hint for
+	 * access methods that can deduplicate against the old version, not a
+	 * signal that the old entry still covers the new TID. A HOT update,
+	 * where the old entry does still apply, never reaches aminsert at all.
+	 * Skipping the insert here left the new version unreachable through
+	 * the index. NULL vectors get no entry. */
+	if (isnull[0])
 		return false;
 
 	/* Per-insert scratch context: beam-search + encode allocations are freed
