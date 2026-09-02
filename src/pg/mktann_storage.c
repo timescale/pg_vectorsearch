@@ -17,6 +17,7 @@
 #include <access/tableam.h>
 #include <catalog/pg_am_d.h>
 #include <executor/tuptable.h>
+#include <pgstat.h>
 #include <storage/buf_internals.h>
 #include <storage/bufmgr.h>
 #include <storage/read_stream.h>
@@ -148,6 +149,14 @@ pg_read_page(MktStorage *self, BlockNumber blkno)
 		{
 			buf = *slot;
 			mkt_bufcache_hits++;
+			/*
+			 * ReadRecentBuffer counts the hit in the backend-wide
+			 * pgBufferUsage (EXPLAIN BUFFERS) but, taking a locator rather
+			 * than a Relation, cannot attribute it to the index the way
+			 * ReadBuffer does. Do that here, or pg_statio_*_indexes shows a
+			 * warm mktann index with almost no block hits.
+			 */
+			pgstat_count_buffer_hit(s->index);
 		}
 		else
 		{

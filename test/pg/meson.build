@@ -36,6 +36,7 @@ else
       'parallel',
       'build_logging',
       'query_settings',
+      'scan_stats',
       'empty_table',
       'zero_vectors',
       'row_estimate',
