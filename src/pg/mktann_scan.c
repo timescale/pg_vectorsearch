@@ -11,8 +11,10 @@
 
 #include <postgres.h>
 
+#include <access/genam.h>
 #include <access/relscan.h>
 #include <fmgr.h>
+#include <pgstat.h>
 #include <utils/builtins.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
@@ -314,6 +316,17 @@ static void
 execute_search(IndexScanDesc scan)
 {
 	MktannScanState *ss = (MktannScanState *)scan->opaque;
+
+	/*
+	 * Count the search where it runs, as every core AM does at the start of
+	 * its own search: pg_stat_*_indexes.idx_scan, and the per-scan counter
+	 * PostgreSQL 18 prints as EXPLAIN's "Index Searches" (also the one a
+	 * parallel scan aggregates across workers). Core's indexam.c maintains
+	 * neither; it counts only the tuples the scan returns.
+	 */
+	pgstat_count_index_scan(scan->indexRelation);
+	if (scan->instrument != NULL)
+		scan->instrument->nsearches++;
 
 	/* Lazily set heap relation for reranking (rel is NULL at
 	 * beginscan time; heapRelation becomes available later) */

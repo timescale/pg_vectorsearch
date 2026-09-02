@@ -1,0 +1,92 @@
+-- Standard PostgreSQL instrumentation of mktann scans
+--
+-- A scan must show up in the same places any index scan does: the
+-- cumulative statistics views (pg_statio_*_indexes block hits), and the
+-- per-node "Index Searches" counter EXPLAIN ANALYZE reports since
+-- PostgreSQL 18. Both are easy to lose: index pages re-pinned through the
+-- backend-local buffer-id cache (mkt.recent_buffers) bypass ReadBuffer,
+-- which is where relation-level hit counting normally happens, and the
+-- search counter is the access method's to maintain.
+
+CREATE TABLE scan_stats_test (id serial, v vector(16));
+INSERT INTO scan_stats_test (v)
+    SELECT (SELECT array_agg(sin(i * 0.3 + j * 0.9)::real)
+            FROM generate_series(0, 15) j)::vector(16)
+    FROM generate_series(1, 400) i;
+CREATE INDEX scan_stats_idx ON scan_stats_test USING mktann (v)
+    WITH (nlist = 8);
+
+SET enable_seqscan = off;
+SET mkt.nprobe = 8;
+
+-- ============================================================
+-- Block hits are attributed to the index
+-- ============================================================
+-- The first query pins every index page through ReadBuffer and fills the
+-- buffer-id cache; from the second query on, warm pages come back through
+-- ReadRecentBuffer. The hit count must keep growing across those later
+-- queries, or the statistics views under-report a warm index almost
+-- completely. pg_stat_force_next_flush makes the pending counts visible
+-- without waiting for the flush interval.
+SHOW mkt.recent_buffers;
+SELECT count(*) FROM (SELECT id FROM scan_stats_test
+    ORDER BY v <-> '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]' LIMIT 5) t;
+SELECT count(*) FROM (SELECT id FROM scan_stats_test
+    ORDER BY v <-> '[0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0]' LIMIT 5) t;
+SELECT pg_stat_force_next_flush();
+CREATE TEMP TABLE hits_before AS
+    SELECT pg_stat_get_blocks_hit('scan_stats_idx'::regclass) AS hits;
+
+SELECT count(*) FROM (SELECT id FROM scan_stats_test
+    ORDER BY v <-> '[0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0]' LIMIT 5) t;
+SELECT pg_stat_force_next_flush();
+SELECT pg_stat_get_blocks_hit('scan_stats_idx'::regclass) > hits
+    AS warm_index_hits_counted FROM hits_before;
+
+-- ============================================================
+-- Scans and searches
+-- ============================================================
+-- One search per scan, and one per rescan. Core counts only the tuples a
+-- scan returns; the scan count itself (pg_stat_*_indexes.idx_scan) and the
+-- per-node "Index Searches" EXPLAIN ANALYZE prints are the access method's
+-- to maintain, at the point where its search actually runs.
+SELECT pg_stat_force_next_flush();
+CREATE TEMP TABLE scans_before AS
+    SELECT pg_stat_get_numscans('scan_stats_idx'::regclass) AS scans;
+SELECT count(*) FROM (SELECT id FROM scan_stats_test
+    ORDER BY v <-> '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]' LIMIT 5) t;
+SELECT count(*) FROM generate_series(1, 3) g,
+    LATERAL (SELECT id FROM scan_stats_test
+        ORDER BY v <-> (SELECT v FROM scan_stats_test WHERE id = g)
+        LIMIT 5) s;
+SELECT pg_stat_force_next_flush();
+SELECT pg_stat_get_numscans('scan_stats_idx'::regclass) - scans
+    AS idx_scan_delta_one_plus_three FROM scans_before;
+
+CREATE FUNCTION scan_stats_searches(q text) RETURNS int
+    LANGUAGE plpgsql AS $$
+DECLARE
+    j json;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, '
+            'BUFFERS OFF, FORMAT JSON) ' || q INTO j;
+    RETURN (jsonb_path_query_first(j::jsonb,
+        '$.** ? (@."Node Type" == "Index Scan")."Index Searches"'))::int;
+END $$;
+
+SELECT scan_stats_searches($q$
+    SELECT id FROM scan_stats_test
+    ORDER BY v <-> '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]' LIMIT 5$q$)
+    AS searches_single_scan;
+
+SELECT scan_stats_searches($q$
+    SELECT s.id FROM generate_series(1, 3) g,
+        LATERAL (SELECT id FROM scan_stats_test
+            ORDER BY v <-> (SELECT v FROM scan_stats_test WHERE id = g)
+            LIMIT 5) s$q$)
+    AS searches_three_rescans;
+
+DROP FUNCTION scan_stats_searches(text);
+RESET mkt.nprobe;
+RESET enable_seqscan;
+DROP TABLE scan_stats_test;
