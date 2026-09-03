@@ -69,6 +69,15 @@ up performance or safety on the query path without calling that trade-off
 out explicitly and letting the user weigh in, rather than defaulting to
 "simple" silently.
 
+Think about scalability, both in terms of design and implementation. In
+particular, the plan must include a strategy for breaking big problems
+into smaller pieces. Memory usage must be bounded: building an index
+should not allocate memory proportional to the dataset, and a posting
+list split should not allocate memory proportional to the size of the
+list or the number of lists processed. Make judicious use of memory
+contexts that release memory after every tuple, every batch, every
+posting list, etc., based on what makes sense for the task at hand.
+
 ## 4. Review the plan
 
 Have an independent agent review the plan — fresh context, not the one
@@ -95,6 +104,16 @@ where it belongs. A feature isn't actually finished until its edge cases
 have test coverage, not merely once the happy path works and it compiles.
 Run the relevant tests as you go rather than waiting until step 7's
 pre-commit checks to discover something is broken.
+
+When allocating memory, take extra care to think about the consequences
+of holding onto that memory for a long time. Memory allocations **MUST**
+be bounded in the implementation. Do not allocate memory proportional to
+dataset size, posting list size, the number of posting lists, or the
+number of tuples processed, etc. Memory cannot grow unbounded — that
+will not scale and will eventually lead to memory allocation failures.
+Release memory at regular intervals: every tuple, every batch, every posting
+list, etc. Make use of child memory contexts to make releasing memory at
+regular intervals easier.
 
 ## 6. Adversarially review the branch
 
