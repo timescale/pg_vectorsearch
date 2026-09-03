@@ -50,6 +50,9 @@ Check the plan against the priority order above, plus general soundness:
   justification, and specifically flag duplication — new logic proposed
   for something existing code already does, or could do after a small
   refactor.
+- **Scalability issues**, with particular focus on memory usage — memory
+  allocations *MUST* always be bounded. For example, an index build
+  cannot allocate memory proportional to the data set.
 - Missing edge cases or unstated assumptions.
 - Steps underspecified enough to invite improvisation mid-implementation.
 
@@ -153,7 +156,7 @@ about privilege escalation. Check specifically for:
   grepping for how a similar existing function handles this rather than
   inventing a new pattern.
 
-### Performance
+### Performance & Scalability
 
 If the feature touches the query/search path, review with performance in
 mind as well as correctness — ideally no regression, and better, an
@@ -170,6 +173,24 @@ change is anywhere near the hot query path), get an actual before/after
 benchmark run — release build, per this repo's profiling docs
 (`scripts/profile.sh`, `scripts/profile-bench.sh`) — rather than accepting
 "looks fine" from a read-through alone.
+
+Take extra note of memory usage patterns. There **MUST** be no memory
+allocations that pile up in proportion to the size of the dataset or the
+work at hand. For example, an index build, or a posting list split or
+merge, cannot allocate memory proportional to the size of the index or
+the posting list being split — that will simply fail on a
+resource-constrained machine.
+
+To avoid this, make sure the code works in iterations, e.g., batches.
+Check for judicious use of memory contexts — it's often a good pattern to
+create a child memory context for transient allocations that can be
+released at regular intervals: e.g., every tuple, every batch, every
+posting list processed, or every maintenance step. Check for scan loops
+in the code; those should often use a per-tuple memory context.
+
+Spend extra effort on maintenance procedures: vacuum hooks, rebalance
+functions, etc. Such work can be long-running and consume a significant
+amount of resources.
 
 ### Reporting findings
 
