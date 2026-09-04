@@ -69,6 +69,21 @@ mkt_posting_convert_to_fastscan(
 
 		for (uint32_t i = 0; i < op->entry_count; i++)
 		{
+			MktPostingEntryHeader *src = mkt_posting_entry_at(content, i, dim);
+
+			/*
+			 * Leave behind the entries VACUUM has marked dead. A fastscan page
+			 * packs codes with no per-entry flag -- deletion there is
+			 * page-granular -- so a dead entry copied into one comes back as
+			 * live and can never be marked again: a later VACUUM can only
+			 * tombstone the page once *every* entry on it is dead, which a
+			 * page holding live entries never is. The head's live_count, which
+			 * the builder stamps from what it was given, would be wrong by the
+			 * same number.
+			 */
+			if (src->meta.flags & MKT_POSTING_FLAG_DELETED)
+				continue;
+
 			if (total_entries >= entries_cap)
 			{
 				entries_cap *= 2;
@@ -77,13 +92,12 @@ mkt_posting_convert_to_fastscan(
 				all_bits = mkt_realloc(
 						all_bits, entries_cap * (size_t)packed_bytes);
 			}
-			MktPostingEntryHeader *e  = mkt_posting_entry_at(content, i, dim);
-			staged[total_entries].tid = e->meta.tid;
-			staged[total_entries].f_add		= e->f_add;
-			staged[total_entries].f_rescale = e->f_rescale;
-			staged[total_entries].f_error	= e->f_error;
+			staged[total_entries].tid		= src->meta.tid;
+			staged[total_entries].f_add		= src->f_add;
+			staged[total_entries].f_rescale = src->f_rescale;
+			staged[total_entries].f_error	= src->f_error;
 			memcpy(all_bits + (size_t)total_entries * packed_bytes,
-				   e->bits,
+				   src->bits,
 				   packed_bytes);
 			total_entries++;
 		}
