@@ -40,6 +40,7 @@ else
       'empty_table',
       'zero_vectors',
       'row_estimate',
+      'index_stats',
     ]
 
     # Test-only SQL entry points (extra introspection the extension
