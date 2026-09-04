@@ -315,12 +315,35 @@ mktann_bulkdelete(
 	return stats;
 }
 
+/*
+ * The tuple count reported here becomes the index's pg_class.reltuples,
+ * which the planner reads as indexinfo->tuples. Two things keep it honest.
+ *
+ * With no bulk delete (a VACUUM that found nothing to remove, or ANALYZE),
+ * return NULL so the existing statistics stand. Returning a zeroed result
+ * instead would set reltuples to 0 on every such VACUUM -- which is what
+ * happened -- leaving the planner believing an index over millions of rows
+ * is empty until the next ANALYZE.
+ *
+ * After a bulk delete, the count bulkdelete accumulated is the number of
+ * live posting entries, and that is not the number of indexed heap tuples:
+ * SOAR and boundary replication store a vector in more than one list, so
+ * the entry count overstates the row count by the replication factor.
+ * Report the heap's own live count instead, as nbtree does, and carry
+ * estimated_count through so an estimate does not overwrite an exact
+ * figure (vacuumlazy skips the update when it is set).
+ */
 static IndexBulkDeleteResult *
 mktann_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
+	if (info->analyze_only)
+		return stats;
 	if (stats == NULL)
-		stats = palloc0(sizeof(IndexBulkDeleteResult));
-	stats->num_pages = RelationGetNumberOfBlocks(info->index);
+		return NULL;
+
+	stats->num_pages		= RelationGetNumberOfBlocks(info->index);
+	stats->num_index_tuples = info->num_heap_tuples;
+	stats->estimated_count	= info->estimated_count;
 	return stats;
 }
 
