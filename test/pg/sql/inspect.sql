@@ -211,6 +211,49 @@ SELECT count(*) FROM (
 ) t;
 RESET enable_seqscan;
 
+-- Entries VACUUM has marked dead must not survive the conversion. A fastscan
+-- page deletes at page granularity -- there is no per-entry flag -- so a dead
+-- entry copied into one comes back as live and can never be marked again: a
+-- later VACUUM can only tombstone a page once every entry on it is dead, which
+-- a page holding live entries never is. The count after converting is the
+-- assertion: it has to be the live rows, not the rows the list was built with.
+CREATE TABLE conv_dead (id int, v vector(4));
+INSERT INTO conv_dead
+    SELECT g, format('[%s,0,0,0]', g)::vector(4) FROM generate_series(1, 40) g;
+CREATE INDEX conv_dead_idx ON conv_dead USING mktann (v)
+    WITH (nlist = 1, fastscan = off, centroid_fastscan = off);
+
+DELETE FROM conv_dead WHERE id % 3 = 0;
+VACUUM conv_dead;
+
+-- 40 entries, 13 of them now dead
+SELECT format, entry_count, dead_count
+    FROM mkt.posting_pages('conv_dead_idx') WHERE is_first;
+
+SELECT mkt.convert_posting_to_fastscan('conv_dead_idx', cluster_id) IS NOT NULL
+        AS converted
+    FROM mkt.posting_pages('conv_dead_idx') WHERE is_first;
+
+-- 27 rows remain, so the fastscan list must hold 27 entries
+SELECT format, entry_count FROM mkt.posting_pages('conv_dead_idx')
+    WHERE is_first;
+SELECT count(*) AS live_rows FROM conv_dead;
+
+-- The count matters because a resurrected entry is not merely stale: it takes
+-- a slot in the candidate set a scan collects, so a query asking for k rows
+-- gets fewer than k, and fewer than exist. Ten is well inside the 27 rows that
+-- remain, so all ten must come back. (Checking the ids are not the deleted
+-- ones would prove nothing -- their heap rows are gone, so the executor
+-- filters them out whether or not the index still points at them.)
+SET enable_seqscan = off;
+SET mkt.nprobe = 4;
+SELECT count(*) AS rows_for_limit_10 FROM (
+    SELECT id FROM conv_dead
+    ORDER BY v <-> '[1,0,0,0]'::vector(4) LIMIT 10) t;
+RESET mkt.nprobe;
+RESET enable_seqscan;
+DROP TABLE conv_dead;
+
 -- Error: non-existent cluster_id
 SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 99999);
 
