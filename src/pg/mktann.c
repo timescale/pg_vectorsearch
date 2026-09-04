@@ -9,6 +9,7 @@
 #include <postgres.h>
 
 #include <access/amapi.h>
+#include <access/generic_xlog.h>
 #include <access/reloptions.h>
 #include <access/relscan.h>
 #include <commands/vacuum.h>
@@ -17,6 +18,7 @@
 #include <storage/lmgr.h>
 #include <utils/float.h>
 #include <utils/injection_point.h>
+#include <utils/inval.h>
 #include <utils/memutils.h>
 #include <utils/selfuncs.h>
 
@@ -26,6 +28,7 @@
 #include "index/query_scan.h"
 #include "mktann_build.h"
 #include "mktann_cache.h"
+#include "mktann_meta.h"
 #include "mktann_scan.h"
 #include "mktann_storage.h"
 #include "quant/rabitq.h"
@@ -339,6 +342,40 @@ mktann_bulkdelete(
  * estimated_count through so an estimate does not overwrite an exact
  * figure (vacuumlazy skips the update when it is set).
  */
+/*
+ * Refresh the metapage's indexed-row count. The build writes it once and
+ * inserts never touch the metapage (a per-insert metapage write would
+ * serialize every insert on one page), so without this the value the
+ * per-backend cache hands to scans stays at the build-time count for the
+ * life of the index. VACUUM already knows the live row count and already
+ * pays a metapage read, so this is the natural refresh point. Written
+ * only when it changes, so a VACUUM that removed nothing costs no WAL.
+ */
+static void
+mktann_meta_set_ntuples(Relation index, uint32_t ntuples)
+{
+	Buffer buf = ReadBuffer(index, 0);
+	LockBuffer(buf, BUFFER_LOCK_SHARE);
+	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+			BufferGetPage(buf));
+	bool changed = meta->magic == MKT_META_MAGIC && meta->ntuples != ntuples;
+	UnlockReleaseBuffer(buf);
+
+	if (!changed)
+		return;
+
+	GenericXLogState *state = GenericXLogStart(index);
+	buf						= ReadBuffer(index, 0);
+	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+	Page page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
+	((MktannMetaPage *)PageGetSpecialPointer(page))->ntuples = ntuples;
+	GenericXLogFinish(state);
+	UnlockReleaseBuffer(buf);
+
+	/* Drop the cached metapage so the next scan reads the new count. */
+	CacheInvalidateRelcache(index);
+}
+
 static IndexBulkDeleteResult *
 mktann_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
@@ -350,6 +387,14 @@ mktann_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 	stats->num_pages		= RelationGetNumberOfBlocks(info->index);
 	stats->num_index_tuples = info->num_heap_tuples;
 	stats->estimated_count	= info->estimated_count;
+
+	/* An exact live count is also the metapage's indexed-row count; an
+	 * estimate is not worth overwriting an exact figure with. */
+	if (!info->estimated_count && info->num_heap_tuples >= 0)
+	{
+		double n = Min(info->num_heap_tuples, (double)PG_UINT32_MAX);
+		mktann_meta_set_ntuples(info->index, (uint32_t)n);
+	}
 	return stats;
 }
 

@@ -859,6 +859,7 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 	MktCentroidFormat centroid_format = (MktCentroidFormat)
 												meta->centroid_format;
 	uint32_t	   nlist	= meta->nlist;
+	uint32_t	   ntuples	= meta->ntuples;
 	DistanceMetric metric	= (DistanceMetric)meta->metric;
 	uint8_t		   fan_out	= meta->fan_out;
 	bool		   fastscan = (meta->flags & MKT_META_FLAG_FASTSCAN) != 0;
@@ -884,6 +885,9 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 			reloption_is_set(set, "fan_out") ? "option" : "auto");
 	settings_row(
 			rsinfo, "nlevels", psprintf("%u", (uint32_t)nlevels), "derived");
+	/* Indexed rows as of the build or the last VACUUM that removed rows;
+	 * inserts since then are not counted. */
+	settings_row(rsinfo, "ntuples", psprintf("%u", ntuples), "derived");
 	settings_row(
 			rsinfo,
 			"centroid_format",

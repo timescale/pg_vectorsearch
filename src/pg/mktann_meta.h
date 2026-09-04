@@ -40,7 +40,9 @@ typedef struct MktannMetaPage
 	BlockNumber first_posting;	 /* first posting page (one past the last
 								  * centroid page); lets VACUUM skip the whole
 								  * centroid region without scanning it */
-	uint32_t ntuples;			 /* total indexed tuples */
+	uint32_t ntuples;			 /* indexed rows, as of the build or the last
+								  * VACUUM that removed rows; inserts do not
+								  * update it (see mktann_meta_set_ntuples) */
 	uint32_t nlist;				 /* number of leaf centroids */
 	uint8_t	 metric;			 /* DistanceMetric */
 	uint8_t	 fan_out;			 /* children per tree node */

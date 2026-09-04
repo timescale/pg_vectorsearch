@@ -40,4 +40,22 @@ ANALYZE index_stats_test;
 SELECT reltuples AS reltuples_after_analyze
     FROM pg_class WHERE relname = 'index_stats_idx';
 
+-- The metapage keeps its own indexed-row count, which the per-backend
+-- cache hands to scans. The build writes it; inserts never touch the
+-- metapage, so a VACUUM that removes rows is where it catches up with
+-- the live count.
+SELECT setting AS meta_ntuples_after_delete_vacuum
+    FROM mkt.index_settings('index_stats_idx') WHERE name = 'ntuples';
+INSERT INTO index_stats_test (v)
+    SELECT (SELECT array_agg(cos(i * 0.3 + j * 1.1)::real)
+            FROM generate_series(0, 7) j)::vector(8)
+    FROM generate_series(1, 500) i;
+SELECT setting AS meta_ntuples_after_insert_unchanged
+    FROM mkt.index_settings('index_stats_idx') WHERE name = 'ntuples';
+DELETE FROM index_stats_test WHERE id % 5 = 0;
+VACUUM index_stats_test;
+SELECT setting AS meta_ntuples_after_second_vacuum,
+       (SELECT count(*) FROM index_stats_test) AS live_rows
+    FROM mkt.index_settings('index_stats_idx') WHERE name = 'ntuples';
+
 DROP TABLE index_stats_test;

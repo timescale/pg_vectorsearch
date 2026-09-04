@@ -572,6 +572,7 @@ SELECT name, setting, source
  dim              | 3         | column
  metric           | l2        | opclass
  fan_out          | 8         | option
+ ntuples          | 1000      | derived
  centroid_format  | rabitq    | option
  fastscan         | off       | option
  soar_lambda      | 0.5       | option
@@ -579,7 +580,7 @@ SELECT name, setting, source
  kmeans_nredo     | 2         | option
  distance_mode    | symmetric | option
  nprobe           | 10        | auto
-(10 rows)
+(11 rows)
 
 SELECT name, setting::int > 0 AS positive, source
     FROM mkt.index_settings('idx_settings'::regclass)
@@ -605,6 +606,7 @@ SELECT name,
  nlist            | t        | auto
  fan_out          | t        | auto
  nlevels          | t        | derived
+ ntuples          | t        | derived
  centroid_format  | t        | auto
  fastscan         | t        | auto
  soar_lambda      | t        | default
@@ -612,7 +614,7 @@ SELECT name,
  kmeans_nredo     | t        | default
  distance_mode    | t        | default
  nprobe           | t        | auto
-(12 rows)
+(13 rows)
 
 SELECT name, setting, source
     FROM mkt.index_settings('idx_default'::regclass)

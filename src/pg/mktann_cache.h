@@ -104,7 +104,7 @@ void mktann_cache_meta(
 typedef struct MktannScanInfo
 {
 	uint32_t nlist;	  /* number of leaf centroids */
-	uint32_t ntuples; /* tuples present at build time */
+	uint32_t ntuples; /* indexed rows at the build or last VACUUM */
 } MktannScanInfo;
 
 MktannScanInfo mktann_cache_scan_info(Relation index);
