@@ -951,36 +951,62 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 -- Idempotent throughout via exception handling (neither CREATE CAST nor ALTER
 -- OPERATOR FAMILY has an IF NOT EXISTS form).
 CREATE FUNCTION setup_pgvector_compat() RETURNS void
-    LANGUAGE plpgsql AS $$
+    LANGUAGE plpgsql
+    -- Reached at runtime from the event trigger under the DDL-runner's
+    -- search_path, and from the install DO block. Pin the path so every
+    -- unqualified name here resolves in pg_catalog, not in an
+    -- attacker-controlled schema (see format() below).
+    SET search_path = pg_catalog, pg_temp
+    AS $$
 DECLARE
     r record;
+    existing_method "char";
 BEGIN
     -- 1. Binary casts, both directions, for vector and halfvec.
-    BEGIN
-        CREATE CAST (public.vector AS @extschema@.vector)
-            WITHOUT FUNCTION AS IMPLICIT;
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END;
-    BEGIN
-        CREATE CAST (public.halfvec AS @extschema@.halfvec)
-            WITHOUT FUNCTION AS IMPLICIT;
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END;
-    BEGIN
-        CREATE CAST (@extschema@.vector AS public.vector)
-            WITHOUT FUNCTION AS ASSIGNMENT;
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END;
-    BEGIN
-        CREATE CAST (@extschema@.halfvec AS public.halfvec)
-            WITHOUT FUNCTION AS ASSIGNMENT;
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END;
+    --
+    -- Create each only if absent. A cast that already exists is accepted
+    -- ONLY when it is the expected binary cast (WITHOUT FUNCTION,
+    -- castmethod 'b'); anything else is rejected as tampering. pgvector is
+    -- a "trusted" extension, so a non-superuser can install it and own
+    -- public.vector/public.halfvec, and a type owner may define a
+    -- WITH FUNCTION (or WITH INOUT) cast whose function then runs with the
+    -- privileges of whatever role later triggers the coercion. Silently
+    -- adopting such a cast (the old EXCEPTION WHEN duplicate_object THEN
+    -- NULL) would hide that; we fail loudly instead.
+    FOR r IN
+        SELECT * FROM (VALUES
+            ('public.vector',       '@extschema@.vector',   'IMPLICIT'),
+            ('public.halfvec',      '@extschema@.halfvec',  'IMPLICIT'),
+            ('@extschema@.vector',  'public.vector',        'ASSIGNMENT'),
+            ('@extschema@.halfvec', 'public.halfvec',       'ASSIGNMENT')
+        ) AS t(src, tgt, ctx)
+    LOOP
+        SELECT castmethod INTO existing_method
+        FROM pg_catalog.pg_cast
+        WHERE castsource = r.src::pg_catalog.regtype
+          AND casttarget = r.tgt::pg_catalog.regtype;
+
+        IF FOUND THEN
+            IF existing_method OPERATOR(pg_catalog.<>) 'b' THEN
+                RAISE EXCEPTION 'refusing pre-existing cast (% AS %): '
+                    'expected a binary (WITHOUT FUNCTION) cast but found '
+                    'castmethod=%; possible tampering',
+                    r.src, r.tgt, existing_method;
+            END IF;
+            -- Expected binary cast already present: nothing to do.
+        ELSE
+            EXECUTE pg_catalog.format(
+                'CREATE CAST (%s AS %s) WITHOUT FUNCTION AS %s',
+                r.src, r.tgt, r.ctx);
+        END IF;
+    END LOOP;
 
     -- 2. pgvector's distance operators as ordering members of meerkat's mktann
     -- families. Strategy 1 and float_ops match the opclass declarations above;
     -- the operator's left type only has to be binary-coercible to the family's
-    -- index type, which the casts above guarantee.
+    -- index type, which the casts above guarantee. Adding an operator family
+    -- member requires superuser, so an attacker cannot pre-plant one; the
+    -- duplicate_object catch here is pure idempotency for a legitimate re-run.
     FOR r IN
         SELECT * FROM (VALUES
             ('vector_l2_ops',      'vector',  '<->'),
@@ -992,7 +1018,7 @@ BEGIN
         ) AS t(fam, typ, op)
     LOOP
         BEGIN
-            EXECUTE format(
+            EXECUTE pg_catalog.format(
                 'ALTER OPERATOR FAMILY @extschema@.%I USING mktann '
                 'ADD OPERATOR 1 public.%s (public.%I, public.%I) '
                 'FOR ORDER BY pg_catalog.float_ops',
@@ -1030,7 +1056,12 @@ $$;
 
 -- Event trigger: create casts when pgvector is installed after meerkat.
 CREATE FUNCTION on_extension_create()
-    RETURNS event_trigger LANGUAGE plpgsql AS $$
+    RETURNS event_trigger LANGUAGE plpgsql
+    -- Runs later as an event trigger under the DDL-runner's own
+    -- search_path. Pin it so unqualified names in this body (and the one
+    -- it calls) resolve to pg_catalog, never an attacker-planted overload.
+    SET search_path = pg_catalog, pg_temp
+    AS $$
 DECLARE
     obj record;
 BEGIN

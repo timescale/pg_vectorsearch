@@ -102,4 +102,10 @@ echo "==> Running pgvector compatibility tests"
 "$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d compat_test \
     -f test/pg/compat/pgvector.sql
 
+# Run search_path / privilege-escalation hardening tests (needs pgvector,
+# which is trusted, plus superuser to exercise the event-trigger path)
+echo "==> Running search_path hardening tests"
+"$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d compat_test \
+    -f test/pg/compat/security.sql
+
 echo "==> All compatibility tests passed"
