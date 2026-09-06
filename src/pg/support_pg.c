@@ -305,11 +305,11 @@ _PG_init(void)
 			"-1 = unlimited).",
 			"Rerank only the most promising candidates by approximate "
 			"distance, bounding the exact-distance heap fetches. 0 (the "
-			"default) caps at 16 * k, growing to 1/8th of the candidate "
-			"buffer when noisy distance estimates flood it; -1 reranks "
-			"every threshold survivor; positive values set an absolute "
-			"cap. The effective cap is never below the query's k, so "
-			"results are never truncated.",
+			"default) caps at 3 * k * nprobe^0.15, growing to 1/8th of "
+			"the candidate buffer when noisy distance estimates flood "
+			"it; -1 reranks every threshold survivor; positive values "
+			"set an absolute cap. The effective cap is never below the "
+			"query's k, so results are never truncated.",
 			&mkt_rerank_pool,
 			0,
 			-1,

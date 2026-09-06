@@ -601,6 +601,18 @@ BEGIN
 END $fn$;
 
 SET enable_seqscan = off;
+
+-- Rerank every candidate RaBitQ cannot exclude, instead of the automatic
+-- pool. What follows tests decoding and operator wiring, not recall tuning,
+-- and the query makes those two indistinguishable otherwise: the origin,
+-- against vectors of near-constant norm, sits at almost the same distance
+-- from every row -- the whole dataset spans 1.89 to 2.10 and the true top
+-- ten fall within 0.0002 of each other. No approximate ordering survives
+-- that, so with a capped pool recall measures the size of the pool rather
+-- than whether the column decoded. Uncapped, a misdecoded column still
+-- fails hard, because exact distances over wrong values rank wrongly.
+SET mkt.rerank_pool = -1;
+
 SELECT assert_test('mktann index is used on a pgvector halfvec column',
     public.plan_uses_index_scan($q$SELECT id FROM idx_pgv_h
         ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.halfvec(8)
@@ -608,7 +620,7 @@ SELECT assert_test('mktann index is used on a pgvector halfvec column',
 
 -- Recall against brute force. A misdecoded column scores near zero here, so
 -- 8 of 10 is a generous floor that still fails hard on a decode bug while
--- tolerating ordinary ANN approximation at the default nprobe.
+-- tolerating the clusters the scan does not probe.
 SELECT assert_test(
     'pgvector halfvec column: mktann recall >= 8/10',
     (SELECT count(*) FROM (
