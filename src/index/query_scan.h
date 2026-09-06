@@ -121,8 +121,9 @@ uint32_t mkt_query_execute(
 		bool			rerank,
 		MktQueryStats  *stats);
 
-/* Cap the exact-rerank candidate pool: 0 = automatic (16 * k),
- * -1 = unlimited, positive = absolute cap (never effective below k). */
+/* Cap the exact-rerank candidate pool: 0 = automatic (3 * k *
+ * nprobe^0.15, growing further under noisy estimates), -1 = unlimited,
+ * positive = absolute cap (never effective below k). */
 void mkt_query_set_rerank_pool(int32_t n);
 
 /*

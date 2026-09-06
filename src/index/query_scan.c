@@ -420,15 +420,22 @@ mkt_query_route(
 /* Cap on the rerank candidate pool (mkt.rerank_pool). Candidates are
  * sorted by approximate distance, so capping keeps the most promising
  * ones and bounds the exact-distance heap fetches. 0 (default) resolves
- * to an automatic cap of max(16 * k, candidate-buffer count / 8): the
- * buffer population directly measures estimate noise, so the floor of
- * 16 * k (measured recall-neutral on accurate estimates) grows with it
- * when noisy estimates flood the buffer and ranking into a flat 16 * k
- * pool would silently cap recall far below what the probed clusters
- * contain. -1 disables the cap entirely; positive values are absolute.
- * The effective cap is never below k, so a cap can never truncate the
- * result set. */
-#define MKT_RERANK_POOL_AUTO_MULT 16
+ * to an automatic cap of max(3 * k * nprobe^0.15, candidate-buffer count
+ * / 8): the buffer population directly measures estimate noise, so the
+ * nprobe-scaled floor (fit against rekall's cohere-1m recall-vs-pool
+ * sweep: the pool needed to keep the rerank-induced recall deficit under
+ * 0.1% relative to an unbounded pool, at nprobe in {10,20,40,80,160},
+ * power-law-fits to 30 * nprobe^0.15 for k=10) grows further when noisy
+ * estimates flood the buffer and ranking into just that floor would
+ * silently cap recall far below what the probed clusters contain. A
+ * flat 16 * k floor (this formula's predecessor) was measured
+ * recall-neutral, but oversized at every nprobe on that sweep -- e.g.
+ * 2-4x more pool than needed below nprobe=80, wasting rerank work
+ * without buying recall. -1 disables the cap entirely; positive values
+ * are absolute. The effective cap is never below k, so a cap can never
+ * truncate the result set. */
+#define MKT_RERANK_POOL_AUTO_COEFF 3.0
+#define MKT_RERANK_POOL_AUTO_EXP   0.15
 
 static int32_t g_rerank_pool = 0;
 
@@ -503,15 +510,14 @@ mkt_query_execute(
 	 * Resolved before extraction so the extract can select the capped
 	 * prefix instead of fully sorting an unbounded survivor set.
 	 *
-	 * The automatic cap scales with the candidate-buffer population,
-	 * which directly measures estimate noise: accurate estimates keep
-	 * the threshold tight and the buffer small (the 16*k floor
-	 * applies, as before), while noisy estimates (low dimension, wide
-	 * norm spread) flood the buffer -- and then ranking into a 16*k
-	 * pool is meaningless, silently capping recall well below what
-	 * the probed clusters contain. 1/8th of the buffer restores the
-	 * recall ceiling at a rerank cost proportionate to the observed
-	 * noise. */
+	 * The automatic cap also scales with the candidate-buffer
+	 * population, which directly measures estimate noise: accurate
+	 * estimates keep the threshold at the nprobe-scaled floor above,
+	 * while noisy estimates (low dimension, wide norm spread) flood
+	 * the buffer -- and then ranking into just that floor is
+	 * meaningless, silently capping recall well below what the probed
+	 * clusters contain. 1/8th of the buffer restores the recall
+	 * ceiling at a rerank cost proportionate to the observed noise. */
 	uint32_t pool = 0;
 	if (g_rerank_pool > 0)
 	{
@@ -521,7 +527,9 @@ mkt_query_execute(
 	}
 	else if (g_rerank_pool == 0)
 	{
-		pool = MKT_RERANK_POOL_AUTO_MULT * k;
+		double auto_floor = MKT_RERANK_POOL_AUTO_COEFF * (double)k *
+							pow((double)nprobe, MKT_RERANK_POOL_AUTO_EXP);
+		pool = (uint32_t)(auto_floor + 0.5);
 		if (pool < qs->topk.cand_count / 8)
 			pool = qs->topk.cand_count / 8;
 		if (pool < k)
