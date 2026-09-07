@@ -21,87 +21,12 @@
 #include "index/posting_split.h"
 #include "index/storage.h"
 #include "mkt_test.h"
+#include "posting_fixtures.h"
 #include "quant/rabitq.h"
 #include "standalone/pg_compat.h"
 
 TEST_GROUP(PostingPage);
 TEST_MEMCTX_FIXTURE();
-
-/* Helper: create TID from vector_id (standalone encoding) */
-static inline ItemPointerData
-vid_to_tid(uint32_t vid)
-{
-	ItemPointerData tid;
-	mkt_posting_set_vector_id(&tid, vid);
-	return tid;
-}
-
-/* ----------------------------------------------------------------
- * Minimal ArrayPageStorage for tests
- * ---------------------------------------------------------------- */
-
-typedef struct TestPageStorage
-{
-	MktStorage base;
-	char	  *pages;
-	uint32_t   next_blkno;
-	uint32_t   page_cap;
-} TestPageStorage;
-
-static Page
-test_read_page(MktStorage *self, BlockNumber blkno)
-{
-	TestPageStorage *s = (TestPageStorage *)self;
-	return s->pages + (size_t)blkno * BLCKSZ;
-}
-
-static void
-test_release_page(MktStorage *self, BlockNumber blkno)
-{
-	(void)self;
-	(void)blkno;
-}
-
-static Page
-test_write_page(MktStorage *self, BlockNumber blkno)
-{
-	TestPageStorage *s = (TestPageStorage *)self;
-	return s->pages + (size_t)blkno * BLCKSZ;
-}
-
-static Page
-test_new_page(MktStorage *self, BlockNumber *blkno_out)
-{
-	TestPageStorage *s = (TestPageStorage *)self;
-	*blkno_out		   = s->next_blkno++;
-	return s->pages + (size_t)*blkno_out * BLCKSZ;
-}
-
-static void
-test_commit_page(MktStorage *self, BlockNumber blkno)
-{
-	(void)self;
-	(void)blkno;
-}
-
-static const MktStorageOps test_storage_ops = {
-		.read_page	  = test_read_page,
-		.release_page = test_release_page,
-		.write_page	  = test_write_page,
-		.new_page	  = test_new_page,
-		.commit_page  = test_commit_page,
-};
-
-static TestPageStorage
-make_test_storage(uint32_t num_pages)
-{
-	return (TestPageStorage){
-			.base		= {.ops = &test_storage_ops},
-			.pages		= mkt_alloc0((size_t)num_pages * BLCKSZ),
-			.next_blkno = 0,
-			.page_cap	= num_pages,
-	};
-}
 
 /* ----------------------------------------------------------------
  * Struct size tests
@@ -394,41 +319,6 @@ TEST(builder_multi_page_chain)
  * Helper: build vectors array for reranking (mirrors what
  * standalone/index.c does — flat array indexed by vector_id).
  */
-static float *
-make_test_vectors(uint32_t nvecs, Dimension dim)
-{
-	float *vecs = mkt_alloc(nvecs * dim * sizeof(float));
-	for (uint32_t i = 0; i < nvecs; i++)
-		for (Dimension d = 0; d < dim; d++)
-			vecs[(size_t)i * dim + d] = (float)((i * 13 + d * 7) % 100 - 50) /
-										10.0f;
-	return vecs;
-}
-
-/*
- * Helper: set up query state for scan tests.
- */
-static void
-setup_query_state(
-		RaBitQQueryState *qstate,
-		RaBitQParams	 *params,
-		const float		 *centroid,
-		float			 *query,
-		float			 *pt_query,
-		Dimension		  dim)
-{
-	for (Dimension d = 0; d < dim; d++)
-		query[d] = (float)(d % 10) / 5.0f;
-
-	uint32_t packed		= MKT_RABITQ_BYTES(dim);
-	qstate->transformed = mkt_alloc_aligned(dim * sizeof(float), 64);
-	qstate->query_bits	= mkt_alloc_aligned(packed, 64);
-	mkt_rabitq_init_query_constants(qstate, dim);
-	mkt_rabitq_rotate(params, query, pt_query);
-	mkt_rabitq_init_query_state(
-			qstate, pt_query, centroid, dim, MKT_DISTANCE_MODE_ASYMMETRIC);
-}
-
 TEST(scan_processes_all_entries)
 {
 	Dimension		dim		 = 128;
@@ -440,19 +330,12 @@ TEST(scan_processes_all_entries)
 	uint32_t nvecs = 20;
 	float	*vecs  = make_test_vectors(nvecs, dim);
 
-	MktPostingBuilder builder;
-	mkt_posting_builder_init(
-			&builder, &storage.base, params, dim, 0, centroid, centroid);
-	for (uint32_t i = 0; i < nvecs; i++)
-		mkt_posting_builder_add(
-				&builder, vid_to_tid(i), vecs + (size_t)i * dim);
-	BlockNumber head = mkt_posting_builder_finish(&builder);
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, nvecs, false);
 
 	/* Prepare query state */
-	float			*query	  = mkt_alloc(dim * sizeof(float));
-	float			*pt_query = mkt_alloc(dim * sizeof(float));
 	RaBitQQueryState qstate;
-	setup_query_state(&qstate, params, centroid, query, pt_query, dim);
+	setup_query_state(&qstate, params, centroid, dim);
 
 	/* Scan with large k — all entries should be reranked */
 	MktPostingScan scan;
@@ -476,7 +359,6 @@ TEST(scan_processes_all_entries)
 
 	mkt_topk_cleanup(&topk);
 	mkt_posting_scan_cleanup(&scan);
-	mkt_posting_builder_cleanup(&builder);
 	mkt_rabitq_destroy(params);
 }
 
@@ -502,13 +384,8 @@ TEST(scan_reads_a_retired_chain)
 	uint32_t nvecs = 20;
 	float	*vecs  = make_test_vectors(nvecs, dim);
 
-	MktPostingBuilder builder;
-	mkt_posting_builder_init(
-			&builder, &storage.base, params, dim, 0, centroid, centroid);
-	for (uint32_t i = 0; i < nvecs; i++)
-		mkt_posting_builder_add(
-				&builder, vid_to_tid(i), vecs + (size_t)i * dim);
-	BlockNumber head = mkt_posting_builder_finish(&builder);
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, nvecs, false);
 
 	/*
 	 * Retire the chain the way the split's PG-side retire pass does: DELETED
@@ -525,10 +402,8 @@ TEST(scan_reads_a_retired_chain)
 		blk = next;
 	}
 
-	float			*query	  = mkt_alloc(dim * sizeof(float));
-	float			*pt_query = mkt_alloc(dim * sizeof(float));
 	RaBitQQueryState qstate;
-	setup_query_state(&qstate, params, centroid, query, pt_query, dim);
+	setup_query_state(&qstate, params, centroid, dim);
 
 	MktPostingScan scan;
 	mkt_posting_scan_init(
@@ -570,7 +445,6 @@ TEST(scan_reads_a_retired_chain)
 
 	mkt_topk_cleanup(&topk);
 	mkt_posting_scan_cleanup(&scan);
-	mkt_posting_builder_cleanup(&builder);
 	mkt_rabitq_destroy(params);
 }
 
@@ -588,18 +462,11 @@ TEST(scan_skips_an_all_dead_page)
 	uint32_t nvecs = 20;
 	float	*vecs  = make_test_vectors(nvecs, dim);
 
-	MktPostingBuilder builder;
-	mkt_posting_builder_init(
-			&builder, &storage.base, params, dim, 0, centroid, centroid);
-	for (uint32_t i = 0; i < nvecs; i++)
-		mkt_posting_builder_add(
-				&builder, vid_to_tid(i), vecs + (size_t)i * dim);
-	BlockNumber head = mkt_posting_builder_finish(&builder);
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, nvecs, false);
 
-	float			*query	  = mkt_alloc(dim * sizeof(float));
-	float			*pt_query = mkt_alloc(dim * sizeof(float));
 	RaBitQQueryState qstate;
-	setup_query_state(&qstate, params, centroid, query, pt_query, dim);
+	setup_query_state(&qstate, params, centroid, dim);
 
 	MktPostingScan scan;
 	mkt_posting_scan_init(
@@ -637,7 +504,6 @@ TEST(scan_skips_an_all_dead_page)
 
 	mkt_topk_cleanup(&topk);
 	mkt_posting_scan_cleanup(&scan);
-	mkt_posting_builder_cleanup(&builder);
 	mkt_rabitq_destroy(params);
 }
 
@@ -652,19 +518,12 @@ TEST(scan_prunes_with_tight_topk)
 	uint32_t nvecs = 50;
 	float	*vecs  = make_test_vectors(nvecs, dim);
 
-	MktPostingBuilder builder;
-	mkt_posting_builder_init(
-			&builder, &storage.base, params, dim, 0, centroid, centroid);
-	for (uint32_t i = 0; i < nvecs; i++)
-		mkt_posting_builder_add(
-				&builder, vid_to_tid(i), vecs + (size_t)i * dim);
-	BlockNumber head = mkt_posting_builder_finish(&builder);
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, nvecs, false);
 
 	/* Prepare query state */
-	float			*query	  = mkt_alloc(dim * sizeof(float));
-	float			*pt_query = mkt_alloc(dim * sizeof(float));
 	RaBitQQueryState qstate;
-	setup_query_state(&qstate, params, centroid, query, pt_query, dim);
+	setup_query_state(&qstate, params, centroid, dim);
 
 	/* Scan with small k — threshold should prune some entries */
 	MktPostingScan scan;
@@ -688,7 +547,6 @@ TEST(scan_prunes_with_tight_topk)
 
 	mkt_topk_cleanup(&topk);
 	mkt_posting_scan_cleanup(&scan);
-	mkt_posting_builder_cleanup(&builder);
 	mkt_rabitq_destroy(params);
 }
 
@@ -703,19 +561,12 @@ TEST(scan_stats_tracking)
 	uint32_t nvecs = 30;
 	float	*vecs  = make_test_vectors(nvecs, dim);
 
-	MktPostingBuilder builder;
-	mkt_posting_builder_init(
-			&builder, &storage.base, params, dim, 0, centroid, centroid);
-	for (uint32_t i = 0; i < nvecs; i++)
-		mkt_posting_builder_add(
-				&builder, vid_to_tid(i), vecs + (size_t)i * dim);
-	BlockNumber head = mkt_posting_builder_finish(&builder);
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, nvecs, false);
 
 	/* Prepare query state */
-	float			*query	  = mkt_alloc(dim * sizeof(float));
-	float			*pt_query = mkt_alloc(dim * sizeof(float));
 	RaBitQQueryState qstate;
-	setup_query_state(&qstate, params, centroid, query, pt_query, dim);
+	setup_query_state(&qstate, params, centroid, dim);
 
 	MktPostingScan scan;
 	mkt_posting_scan_init(
@@ -738,6 +589,5 @@ TEST(scan_stats_tracking)
 
 	mkt_topk_cleanup(&topk);
 	mkt_posting_scan_cleanup(&scan);
-	mkt_posting_builder_cleanup(&builder);
 	mkt_rabitq_destroy(params);
 }

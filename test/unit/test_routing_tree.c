@@ -22,77 +22,12 @@
 #include "index/index_build.h"
 #include "index/parallel_build.h"
 #include "mkt_test.h"
+#include "page_storage.h"
 #include "quant/rabitq.h"
 #include "standalone/pg_compat.h"
 
 TEST_GROUP(RoutingTree);
 TEST_MEMCTX_FIXTURE();
-
-/* ----------------------------------------------------------------
- * Minimal in-memory page storage (mirrors test_posting_page.c)
- * ---------------------------------------------------------------- */
-
-typedef struct TestPageStorage
-{
-	MktStorage base;
-	char	  *pages;
-	uint32_t   next_blkno;
-	uint32_t   page_cap;
-} TestPageStorage;
-
-static Page
-tps_read_page(MktStorage *self, BlockNumber blkno)
-{
-	TestPageStorage *s = (TestPageStorage *)self;
-	return s->pages + (size_t)blkno * BLCKSZ;
-}
-
-static void
-tps_release_page(MktStorage *self, BlockNumber blkno)
-{
-	(void)self;
-	(void)blkno;
-}
-
-static Page
-tps_write_page(MktStorage *self, BlockNumber blkno)
-{
-	TestPageStorage *s = (TestPageStorage *)self;
-	return s->pages + (size_t)blkno * BLCKSZ;
-}
-
-static Page
-tps_new_page(MktStorage *self, BlockNumber *blkno_out)
-{
-	TestPageStorage *s = (TestPageStorage *)self;
-	*blkno_out		   = s->next_blkno++;
-	return s->pages + (size_t)*blkno_out * BLCKSZ;
-}
-
-static void
-tps_commit_page(MktStorage *self, BlockNumber blkno)
-{
-	(void)self;
-	(void)blkno;
-}
-
-static const MktStorageOps tps_ops = {
-		.read_page	  = tps_read_page,
-		.release_page = tps_release_page,
-		.write_page	  = tps_write_page,
-		.new_page	  = tps_new_page,
-		.commit_page  = tps_commit_page,
-};
-
-static void
-tps_init(TestPageStorage *s, uint32_t page_cap, uint32_t next_blkno)
-{
-	memset(s, 0, sizeof(*s));
-	s->base.ops	  = &tps_ops;
-	s->pages	  = mkt_alloc0((size_t)page_cap * BLCKSZ);
-	s->page_cap	  = page_cap;
-	s->next_blkno = next_blkno;
-}
 
 /* Deterministic pseudo-random vectors (local copy of the standalone test
  * helper; rand() keeps runs reproducible under the fixed seed). */
@@ -268,7 +203,7 @@ check_plan_write_roundtrip(
 
 	/* Write pass A: replay from the blob store. */
 	TestPageStorage sa;
-	tps_init(&sa, page_cap, first_posting + plan.nleaves);
+	test_storage_init(&sa, page_cap, first_posting + plan.nleaves);
 	mkt_pbuild_blobstore_rewind(store);
 	LeafProbe	probe = {.count = 0, .ascending = true};
 	BlockNumber root  = mkt_routing_tree_write(
@@ -336,7 +271,7 @@ check_plan_write_roundtrip(
 			plan_b.centroid_pages,
 			"plans agree on pages");
 	TestPageStorage sb;
-	tps_init(&sb, page_cap, first_posting + plan.nleaves);
+	test_storage_init(&sb, page_cap, first_posting + plan.nleaves);
 	mkt_pbuild_blobstore_rewind(store_b);
 	LeafProbe	probe_b = {.count = 0, .ascending = true};
 	BlockNumber root_b	= mkt_routing_tree_write(
@@ -458,7 +393,7 @@ check_exact_centroid_collection(
 			expected_slots);
 
 	TestPageStorage st;
-	tps_init(
+	test_storage_init(
 			&st,
 			first_posting + plan.nleaves + 8,
 			first_posting + plan.nleaves);
