@@ -406,7 +406,9 @@ Index metadata is stored in multiple locations depending on its nature:
 - Posting list directory (head block per leaf cluster)
 - RaBitQ normalization factors
 - Index version, dimension, distance metric
-- Statistics: cluster sizes, total vectors indexed, per-tenant stats
+- Statistics: per-cluster live counts live on each posting list's head page,
+  not here -- inserts already hold that page, so they can maintain them, while
+  a metapage counter would serialize every insert on block 0
 
 ## Multi-Tenant Support
 

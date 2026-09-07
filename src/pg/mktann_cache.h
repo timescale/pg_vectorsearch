@@ -99,12 +99,13 @@ void mktann_cache_meta(
 		BlockNumber	   *first_posting);
 
 /*
- * Build-time scan-planning scalars (immutable), from the same cache.
+ * Build-time scan-planning scalar (immutable), from the same cache. A struct
+ * rather than a bare return so a second scalar can join it without touching
+ * every caller.
  */
 typedef struct MktannScanInfo
 {
-	uint32_t nlist;	  /* number of leaf centroids */
-	uint32_t ntuples; /* tuples present at build time */
+	uint32_t nlist; /* number of leaf centroids */
 } MktannScanInfo;
 
 MktannScanInfo mktann_cache_scan_info(Relation index);
