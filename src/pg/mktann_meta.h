@@ -23,9 +23,10 @@
  * "MKT" + a format-version byte. Bump the low byte on any incompatible
  * metapage/layout change so an index built by an older format is rejected at
  * open rather than silently misread. v2 added MktannMetaPage.first_posting,
- * which shifted the struct layout.
+ * which shifted the struct layout; v3 removed the unused indexed-row count,
+ * which shifted it again.
  */
-#define MKT_META_MAGIC ((uint32_t)0x4D4B5402) /* "MKT\x02" */
+#define MKT_META_MAGIC ((uint32_t)0x4D4B5403) /* "MKT\x03" */
 
 /* Metadata flags */
 #define MKT_META_FLAG_FASTSCAN 0x01
@@ -40,7 +41,6 @@ typedef struct MktannMetaPage
 	BlockNumber first_posting;	 /* first posting page (one past the last
 								  * centroid page); lets VACUUM skip the whole
 								  * centroid region without scanning it */
-	uint32_t ntuples;			 /* total indexed tuples */
 	uint32_t nlist;				 /* number of leaf centroids */
 	uint8_t	 metric;			 /* DistanceMetric */
 	uint8_t	 fan_out;			 /* children per tree node */

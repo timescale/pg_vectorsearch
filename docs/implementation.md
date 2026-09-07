@@ -3712,7 +3712,6 @@ typedef struct {
     Dimension   dim;             // Vector dimension
     DistanceMetric metric;       // Distance metric
     uint32_t    nlist;           // Number of clusters
-    uint64_t    nvecs;           // Total vectors indexed
     BlockNumber next_meta_blkno; // Next metapage (if directory overflows)
     // RaBitQ parameters follow (orthogonal matrix seed, etc.)
     // Then: posting_list_heads[nlist] (BlockNumber per cluster)

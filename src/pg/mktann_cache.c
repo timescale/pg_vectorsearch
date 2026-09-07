@@ -394,7 +394,6 @@ typedef struct AmCacheData
 	bool	 has_fastscan; /* index built with FASTSCAN posting pages */
 	bool	 pt_ready;	   /* pt_global_mean computed (rotation done) */
 	uint32_t nlist;
-	uint32_t ntuples;
 	uint32_t global_mean_off;
 	uint32_t pt_global_mean_off;
 } AmCacheData;
@@ -464,7 +463,6 @@ get_cache_data(Relation index)
 	c->pt_global_mean_off = pt_gm_off;
 	c->has_fastscan		  = (meta->flags & MKT_META_FLAG_FASTSCAN) != 0;
 	c->nlist			  = meta->nlist;
-	c->ntuples			  = meta->ntuples;
 
 	/* Immutable base template (storage / params / fastscan rebound per call).
 	 */
@@ -553,5 +551,5 @@ MktannScanInfo
 mktann_cache_scan_info(Relation index)
 {
 	AmCacheData *c = get_cache_data(index);
-	return (MktannScanInfo){.nlist = c->nlist, .ntuples = c->ntuples};
+	return (MktannScanInfo){.nlist = c->nlist};
 }
