@@ -180,6 +180,74 @@ ever adjust `mkt.nprobe` (and `mkt.query_limit` for larger LIMITs).
 See the [tuning guide][tuning-doc] for every index parameter and GUC,
 their tradeoffs, and when changing them makes sense.
 
+## Index maintenance
+
+An insert appends to whichever posting list its vector routes to, so lists
+grow as rows arrive and never split on their own. Two procedures split them
+on demand.
+
+```sql
+-- Split every list that has outgrown the trigger. Reports what it did.
+CALL mkt.rebalance('items_embedding_idx');
+-- NOTICE:  rebalance: split 12 posting list(s), reclaimed 0 retired chain(s)
+
+-- Override the resting list size instead of deriving it from the row count.
+CALL mkt.rebalance('items_embedding_idx', 256);
+
+-- Split one named list, given the block number of its head page.
+CALL mkt.split_posting_list('items_embedding_idx', 2);
+```
+
+`target_entries` is the size a list rests at, not a ceiling: a list is left
+alone until it holds twice that, so it has room to absorb inserts instead of
+re-splitting on the next row. Passing `NULL` (the default) derives it from the
+table's row count. A list over the trigger is divided into
+`round(entries / target)` parts, which leaves each new list at the target.
+
+### nlist and splits
+
+A rebalance typically happens because the indexed dataset has grown, so the
+index needs restructuring to keep performing well: the configuration chosen at
+build time may be sub-optimal at the new size.
+
+A rebalance therefore clears `nlist` from the index's reloptions, since the
+value is no longer accurate. Later rebuilds, `REINDEX` included, size the
+index from the current row count instead.
+
+```sql
+CREATE INDEX items_idx ON items USING mktann (embedding)
+    WITH (nlist = 100, centroid_fastscan = off);
+-- reloptions: {nlist=100,centroid_fastscan=off}
+
+CALL mkt.rebalance('items_idx');   -- splits lists; list count is now higher
+-- reloptions: {centroid_fastscan=off}
+```
+
+Set `nlist` again at any time to pin a width; the next rebalance that splits
+will clear it again.
+
+A rebalance leaves the lists it replaced in place rather than deleting them
+immediately, so an index may temporarily use more disk space after a split or
+rebalance. A `REINDEX` reclaims it.
+
+Splitting currently supports flat (single-level) indexes with RaBitQ centroid
+pages; on any other shape the procedures raise an error naming the index. Note
+that both are off the default path: `CREATE INDEX` packs centroid pages for
+fastscan unless told otherwise, and a list count past the fan-out grows a
+second level. To use these, build with `centroid_fastscan = off` and an
+`nlist` that stays within one level.
+
+Inspect the result with the introspection functions:
+
+```sql
+-- Leaf count, tree depth, centroid format, and the rest
+SELECT * FROM mkt.index_settings('items_embedding_idx');
+
+-- One row per posting page; is_first marks a list's head
+SELECT count(*) AS lists FROM mkt.posting_pages('items_embedding_idx')
+ WHERE is_first;
+```
+
 ## Documentation
 
 - [Tuning][tuning-doc] - Index parameters, GUCs, tradeoffs, defaults
