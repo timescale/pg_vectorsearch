@@ -19,95 +19,12 @@
 #include "index/posting_scan.h"
 #include "index/storage.h"
 #include "mkt_test.h"
+#include "posting_fixtures.h"
 #include "quant/rabitq.h"
 #include "standalone/pg_compat.h"
 
 TEST_GROUP(PostingInsert);
 TEST_MEMCTX_FIXTURE();
-
-static inline ItemPointerData
-vid_to_tid(uint32_t vid)
-{
-	ItemPointerData tid;
-	mkt_posting_set_vector_id(&tid, vid);
-	return tid;
-}
-
-/* ---- Array-backed test storage (multi-buffer; commit/release no-ops) ---- */
-
-typedef struct TestPageStorage
-{
-	MktStorage base;
-	char	  *pages;
-	uint32_t   next_blkno;
-	uint32_t   page_cap;
-} TestPageStorage;
-
-static Page
-test_read_page(MktStorage *self, BlockNumber blkno)
-{
-	TestPageStorage *s = (TestPageStorage *)self;
-	return s->pages + (size_t)blkno * BLCKSZ;
-}
-
-static void
-test_release_page(MktStorage *self, BlockNumber blkno)
-{
-	(void)self;
-	(void)blkno;
-}
-
-static Page
-test_write_page(MktStorage *self, BlockNumber blkno)
-{
-	TestPageStorage *s = (TestPageStorage *)self;
-	return s->pages + (size_t)blkno * BLCKSZ;
-}
-
-static Page
-test_new_page(MktStorage *self, BlockNumber *blkno_out)
-{
-	TestPageStorage *s = (TestPageStorage *)self;
-	*blkno_out		   = s->next_blkno++;
-	return s->pages + (size_t)*blkno_out * BLCKSZ;
-}
-
-static void
-test_commit_page(MktStorage *self, BlockNumber blkno)
-{
-	(void)self;
-	(void)blkno;
-}
-
-static const MktStorageOps test_storage_ops = {
-		.read_page	  = test_read_page,
-		.release_page = test_release_page,
-		.write_page	  = test_write_page,
-		.new_page	  = test_new_page,
-		.commit_page  = test_commit_page,
-};
-
-static TestPageStorage
-make_test_storage(uint32_t num_pages)
-{
-	return (TestPageStorage){
-			.base		= {.ops = &test_storage_ops},
-			.pages		= mkt_alloc0((size_t)num_pages * BLCKSZ),
-			.next_blkno = 0,
-			.page_cap	= num_pages,
-	};
-}
-
-static float *
-make_test_vectors(uint32_t nvecs, Dimension dim)
-{
-	float *vecs = mkt_alloc(nvecs * dim * sizeof(float));
-	for (uint32_t i = 0; i < nvecs; i++)
-		for (Dimension d = 0; d < dim; d++)
-			vecs[(size_t)i * dim + d] = (float)((i * 13 + d * 7) % 100 - 50) /
-										10.0f;
-	return vecs;
-}
 
 /* Rotate + append one vector via the primitive under test. */
 static void
@@ -132,51 +49,6 @@ insert_vec(
 			scratch,
 			false,
 			NULL);
-}
-
-static void
-setup_query_state(
-		RaBitQQueryState *qstate,
-		RaBitQParams	 *params,
-		const float		 *centroid,
-		Dimension		  dim)
-{
-	float *query	= mkt_alloc(dim * sizeof(float));
-	float *pt_query = mkt_alloc(dim * sizeof(float));
-	for (Dimension d = 0; d < dim; d++)
-		query[d] = (float)(d % 10) / 5.0f;
-	qstate->transformed = mkt_alloc_aligned(dim * sizeof(float), 64);
-	qstate->query_bits	= mkt_alloc_aligned(MKT_RABITQ_BYTES(dim), 64);
-	mkt_rabitq_init_query_constants(qstate, dim);
-	mkt_rabitq_rotate(params, query, pt_query);
-	mkt_rabitq_init_query_state(
-			qstate, pt_query, centroid, dim, MKT_DISTANCE_MODE_ASYMMETRIC);
-}
-
-/* Build a single-cluster posting list of nbuilt vectors (AoS or fastscan). */
-static BlockNumber
-build_cluster(
-		TestPageStorage *st,
-		RaBitQParams	*params,
-		Dimension		 dim,
-		const float		*centroid,
-		const float		*vecs,
-		uint32_t		 nbuilt,
-		bool			 fastscan)
-{
-	MktPostingBuilder builder;
-	if (fastscan)
-		mkt_posting_builder_init_fastscan(
-				&builder, &st->base, params, dim, 0, centroid, centroid);
-	else
-		mkt_posting_builder_init(
-				&builder, &st->base, params, dim, 0, centroid, centroid);
-	for (uint32_t i = 0; i < nbuilt; i++)
-		mkt_posting_builder_add(
-				&builder, vid_to_tid(i), vecs + (size_t)i * dim);
-	BlockNumber head = mkt_posting_builder_finish(&builder);
-	mkt_posting_builder_cleanup(&builder);
-	return head;
 }
 
 /* Scan a cluster with a generous top-k; return how many entries land in it. */
