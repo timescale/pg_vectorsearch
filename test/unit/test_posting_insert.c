@@ -123,7 +123,15 @@ insert_vec(
 	float *pt = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
 	mkt_rabitq_rotate(params, vec, pt);
 	mkt_posting_insert_one(
-			&st->base, params, dim, head, vid_to_tid(vid), pt, scratch, false);
+			&st->base,
+			params,
+			dim,
+			head,
+			vid_to_tid(vid),
+			pt,
+			scratch,
+			false,
+			NULL);
 }
 
 static void
@@ -495,6 +503,18 @@ TEST(tombstone_all_flags_aos_page)
 	BlockNumber head =
 			build_cluster(&storage, params, dim, centroid, vecs, 8, false);
 
+	Page hp_before = mkt_storage_read_page(&storage.base, head);
+	ASSERT_TRUE(
+			(mkt_posting_opaque(hp_before)->flags &
+			 MKT_POSTING_PAGE_TOMBSTONED) == 0,
+			"the built page starts untombstoned");
+	ASSERT_EQ(8, mkt_posting_head_live_count(hp_before), "with 8 live");
+	mkt_storage_release_page(&storage.base, head);
+	ASSERT_EQ(
+			8,
+			scan_count(&storage, params, dim, centroid, head, 64, false),
+			"and the scan reads all 8");
+
 	const uint32_t dead_vids[] = {0, 1, 2, 3, 4, 5, 6, 7};
 	DeadSet		   dead		   = {.vids = dead_vids, .n = 8};
 	ASSERT_EQ(
@@ -532,6 +552,21 @@ TEST(tombstone_all_flags_fastscan_page)
 
 	BlockNumber head =
 			build_cluster(&storage, params, dim, centroid, vecs, nbuilt, true);
+
+	Page hp_before = mkt_storage_read_page(&storage.base, head);
+	ASSERT_TRUE(
+			(mkt_posting_opaque(hp_before)->flags &
+			 MKT_POSTING_PAGE_TOMBSTONED) == 0,
+			"the built fastscan page starts untombstoned");
+	ASSERT_EQ(
+			nbuilt,
+			mkt_posting_head_live_count(hp_before),
+			"with every entry live");
+	mkt_storage_release_page(&storage.base, head);
+	ASSERT_EQ(
+			nbuilt,
+			scan_count(&storage, params, dim, centroid, head, 128, true),
+			"and the scan reads them all");
 
 	uint32_t *dead_vids = mkt_alloc(nbuilt * sizeof(uint32_t));
 	for (uint32_t i = 0; i < nbuilt; i++)

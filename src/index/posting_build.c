@@ -987,6 +987,16 @@ void
 mkt_posting_builder_add(
 		MktPostingBuilder *builder, ItemPointerData tid, const float *vector)
 {
+	mkt_posting_builder_add_ex(builder, tid, vector, false);
+}
+
+void
+mkt_posting_builder_add_ex(
+		MktPostingBuilder *builder,
+		ItemPointerData	   tid,
+		const float		  *vector,
+		bool			   unreachable)
+{
 	/* Adopted heads carry no encoder (their entries arrive pre-encoded). */
 	Assert(builder->enc_buf != NULL);
 
@@ -999,15 +1009,21 @@ mkt_posting_builder_add(
 			builder->enc_buf,
 			&builder->enc_scratch);
 
+	float f_add	  = builder->enc_buf->f_add;
 	float f_error = mkt_rabitq_derive_f_error(
-			builder->enc_buf->f_add,
-			builder->enc_buf->f_rescale,
-			builder->dim);
+			f_add, builder->enc_buf->f_rescale, builder->dim);
+
+	/* Same stamp the build and insert paths apply -- see the header. */
+	if (unreachable)
+	{
+		f_add	= INFINITY;
+		f_error = 0.0f;
+	}
 
 	mkt_posting_builder_add_encoded(
 			builder,
 			tid,
-			builder->enc_buf->f_add,
+			f_add,
 			builder->enc_buf->f_rescale,
 			f_error,
 			builder->enc_buf->bits);

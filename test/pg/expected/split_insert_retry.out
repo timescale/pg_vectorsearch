@@ -1,0 +1,24 @@
+Parsed test spec with 1 sessions
+
+starting permutation: s_insert s_rows
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
+s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
+s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
+s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
+s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
+s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
+s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
+s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
+step s_insert: INSERT INTO ir VALUES (1000, '[1,0,0]');
+ERROR:  insert into index "ir_idx" gave way to concurrent maintenance 8 times
+step s_rows: SELECT count(*) AS rows FROM ir WHERE id = 1000;
+rows
+----
+   0
+(1 row)
+

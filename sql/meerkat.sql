@@ -856,6 +856,51 @@ CREATE FUNCTION mkt.convert_posting_to_fastscan(
     LANGUAGE C STRICT;
 
 -- =====================================================================
+-- Incremental maintenance (posting-list split)
+-- =====================================================================
+
+-- Split one posting list (given its head block number) into two or more
+-- balanced lists. A maintenance operation that mutates index state, so it is a
+-- procedure (CALL) rather than a function: it returns no value and can manage
+-- its own transactions. Reports the outcome via a NOTICE.
+CREATE PROCEDURE mkt.split_posting_list(
+        index_oid regclass,
+        head_blkno bigint
+    )
+    AS 'MODULE_PATHNAME', 'mkt_split_posting_list'
+    LANGUAGE C;
+
+COMMENT ON PROCEDURE mkt.split_posting_list(regclass, bigint) IS
+    'Split one posting list into two or more balanced lists. index_oid is the '
+    'index; head_blkno is the block number of the list''s head page. '
+    'Owner-only; reports the outcome via NOTICE. Use mkt.rebalance to split '
+    'every oversized list in an index.';
+
+-- Rebalance an index by splitting every posting list that has outgrown the
+-- split trigger into lists of about target_entries entries each, and reclaiming
+-- chains retired by earlier splits once no snapshot can still reach them.
+-- target_entries is the size a list rests at, not a bound: a list is left alone
+-- until it reaches twice the target, which leaves it room to absorb inserts and
+-- deletes instead of re-splitting on the next row. NULL (the default) derives
+-- the target from the table's row count, so a list rests at the size that
+-- keeps a probe's cost flat however large the table grows; the nlist reloption
+-- does not enter into it -- that is what the build was asked for, not a
+-- maintenance policy. A mutating maintenance procedure (see
+-- split_posting_list); reports the number of lists split via a NOTICE.
+-- Splitting is the only rebalancing it performs, and it is driven by the
+-- caller.
+CREATE PROCEDURE mkt.rebalance(index_oid regclass, target_entries integer DEFAULT NULL)
+    AS 'MODULE_PATHNAME', 'mkt_rebalance'
+    LANGUAGE C;
+
+COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
+    'Split every posting list that has grown past twice target_entries into '
+    'lists of about target_entries each. index_oid is the index; '
+    'target_entries is the size a list rests at (NULL, the default, derives it '
+    'from the row count). Owner-only; reports the number of lists split via '
+    'NOTICE.';
+
+-- =====================================================================
 -- pgvector binary cast support
 -- =====================================================================
 --

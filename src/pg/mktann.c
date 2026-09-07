@@ -66,6 +66,15 @@ mktann_buildempty(Relation index)
  */
 #define MKT_INSERT_ROUTE_BEAM 8
 
+/*
+ * How many times an insert re-routes when the head it locked turns out to have
+ * been split away. A split retires the head it replaces, so an insert that was
+ * waiting on the head's lock has to route again -- bounded, so churn cannot
+ * spin forever, and reaching the bound fails the insert rather than dropping
+ * the tuple.
+ */
+#define MKT_INSERT_ROUTE_ATTEMPTS 8
+
 static bool
 mktann_insert(
 		Relation		  index,
@@ -133,25 +142,42 @@ mktann_insert(
 					  mkt_l2_norm_squared(vref.data, dim) == 0.0f;
 
 	/*
-	 * Route to the nearest leaf the same way a query does. mkt_query_route
-	 * normalizes (cosine) + rotates into qs.pt_query and runs the beam search;
-	 * qs.pt_query is then exactly the rotated residual base the encode needs.
+	 * Route to a leaf the same way a query does (mkt_query_route normalizes
+	 * for cosine, rotates into qs.pt_query, and runs the beam search;
+	 * qs.pt_query is then exactly the rotated residual the encode needs), lock
+	 * its head, and append. If the head was split away while we waited for the
+	 * lock it is now tombstoned; re-route to the new head and retry. Bounded
+	 * so a pathological churn can't spin forever -- and if the bound is
+	 * reached the insert fails rather than returning as though it had indexed
+	 * the tuple.
+	 *
+	 * The query state is initialized once and reused across attempts -- each
+	 * mkt_query_route re-runs the search from scratch on it -- so a retry does
+	 * not re-allocate its beam buffers.
 	 */
+	RaBitQScratch enc;
+	bool		  enc_init = false;
 	MktQueryState qs;
 	mkt_query_state_init(&qs, &base, 1, MKT_INSERT_ROUTE_BEAM);
-	uint32_t n = mkt_query_route(
-			&qs,
-			vref.data,
-			MKT_INSERT_ROUTE_BEAM,
-			MKT_DISTANCE_MODE_ASYMMETRIC,
-			NULL);
+	bool inserted = false;
+	bool routed	  = true;
 
-	BlockNumber head = (n > 0) ? qs.beam_results[0].posting_head
-							   : InvalidBlockNumber;
-	if (head != InvalidBlockNumber)
+	for (int attempt = 0; attempt < MKT_INSERT_ROUTE_ATTEMPTS; attempt++)
 	{
-		RaBitQScratch enc;
-		mkt_rabitq_scratch_init(&enc, dim);
+		uint32_t n = mkt_query_route(
+				&qs,
+				vref.data,
+				MKT_INSERT_ROUTE_BEAM,
+				MKT_DISTANCE_MODE_ASYMMETRIC,
+				NULL);
+
+		BlockNumber head = (n > 0) ? qs.beam_results[0].posting_head
+								   : InvalidBlockNumber;
+		if (head == InvalidBlockNumber)
+		{
+			routed = false;
+			break;
+		}
 
 		/*
 		 * Serialize concurrent inserts into this cluster with a heavyweight
@@ -160,6 +186,12 @@ mktann_insert(
 		 * single-buffer storage model. Released here, not held to xact end.
 		 */
 		LockPage(index, head, ExclusiveLock);
+
+		if (!enc_init)
+		{
+			mkt_rabitq_scratch_init(&enc, dim);
+			enc_init = true;
+		}
 		/*
 		 * Test hook: fires while this insert holds the per-cluster page lock,
 		 * so an isolation test can pause here and observe a second insert into
@@ -168,17 +200,44 @@ mktann_insert(
 		 * points and a test attached an action.
 		 */
 		INJECTION_POINT("mktann-insert-locked", NULL);
-		mkt_posting_insert_one(
-				&storage.base,
-				base.params,
-				dim,
-				head,
-				*heap_tid,
-				qs.pt_query,
-				&enc,
-				degenerate);
+		/*
+		 * If the head was split away while we waited for the lock it is now
+		 * retired (TOMBSTONED immediate or DELETED XID-gated); insert_one
+		 * reports that from the head read it does anyway, and we re-route.
+		 */
+		bool head_retired = false;
+
+		/*
+		 * Test hook: stands in for finding the head retired, so a test can
+		 * drive the retry budget to its end. It replaces the insert rather
+		 * than following it -- an insert that had already written the entry
+		 * would write it again on every retry. Compiles to a constant false
+		 * unless PostgreSQL was built with injection points, and is only
+		 * true while a test holds the point attached.
+		 */
+		if (IS_INJECTION_POINT_ATTACHED("mktann-insert-force-reroute"))
+		{
+			INJECTION_POINT("mktann-insert-force-reroute", NULL);
+			head_retired = true;
+		}
+		else
+			mkt_posting_insert_one(
+					&storage.base,
+					base.params,
+					dim,
+					head,
+					*heap_tid,
+					qs.pt_query,
+					&enc,
+					degenerate,
+					&head_retired);
 		UnlockPage(index, head, ExclusiveLock);
+		if (head_retired)
+			continue; /* head was split; re-route */
+		inserted = true;
+		break;
 	}
+	mkt_query_state_cleanup(&qs);
 
 	MemoryContextSwitchTo(old_ctx);
 	MemoryContextDelete(insert_ctx);
@@ -186,6 +245,27 @@ mktann_insert(
 	/* Check the RaBitQParams checkout back in — see mktann_index_base_init
 	 * above. */
 	mktann_release_params(dim, base.rabitq_seed, params_owner);
+
+	/*
+	 * Every path out of the loop above must have indexed the tuple. Returning
+	 * normally without having done so would leave a committed row that no scan
+	 * of this index can ever find, with nothing to say it happened -- so fail
+	 * the insert and let the transaction that owns the row decide.
+	 */
+	if (!routed)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("no leaf partition found for an insert into index "
+						"\"%s\"",
+						RelationGetRelationName(index))));
+	if (!inserted)
+		ereport(ERROR,
+				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+				 errmsg("insert into index \"%s\" gave way to concurrent "
+						"maintenance %d times",
+						RelationGetRelationName(index),
+						MKT_INSERT_ROUTE_ATTEMPTS),
+				 errhint("Retry the transaction.")));
 
 	/* bool result is only meaningful for unique indexes. */
 	return false;
@@ -282,7 +362,11 @@ mktann_bulkdelete(
 			if (op->page_id == MKT_POSTING_PAGE_ID)
 			{
 				recognized = true;
-				is_head	   = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+				/* Skip a retired (DELETED) chain: it is superseded by a split,
+				 * its live_count slot now holds delete_xid, and cleanup
+				 * reclaims it once safe. */
+				is_head = (op->flags & MKT_POSTING_PAGE_FIRST) != 0 &&
+						  !(op->flags & MKT_POSTING_PAGE_DELETED);
 			}
 		}
 		UnlockReleaseBuffer(buf);
@@ -297,14 +381,39 @@ mktann_bulkdelete(
 		if (!is_head)
 			continue;
 
-		stats->tuples_removed += mkt_posting_tombstone_chain(
-				&storage.base, dim, blk, tid_is_dead, &ctx);
+		/*
+		 * Mutating a cluster's chain requires the head's page lock -- the same
+		 * lock inserts take, and the one a split holds while it rewrites the
+		 * cluster. The check above ran under a buffer lock that has since been
+		 * released, so without this a split could retire the chain in the gap:
+		 * the head's live_count slot then holds delete_xid, and the tombstone
+		 * pass would decrement that instead. A shrunken delete_xid reads as
+		 * older than it is, which brings the chain's physical reclaim forward
+		 * past the scans it was being kept alive for.
+		 */
+		LockPage(index, blk, ExclusiveLock);
 
-		/* Live tuples remaining: the head's maintained live_count, which the
-		 * tombstone pass just decremented (O(1), no rescan). */
+		/* Re-read under the lock: a live head at this point stays live. */
 		Page hp = mkt_storage_read_page(&storage.base, blk);
-		stats->num_index_tuples += mkt_posting_head_live_count(hp);
+		const MktPostingPageOpaque *hop = mkt_posting_opaque(hp);
+		bool still_head = (hop->flags & MKT_POSTING_PAGE_FIRST) != 0 &&
+						  !(hop->flags & MKT_POSTING_PAGE_DELETED) &&
+						  !(hop->flags & MKT_POSTING_PAGE_TOMBSTONED);
 		mkt_storage_release_page(&storage.base, blk);
+
+		if (still_head)
+		{
+			stats->tuples_removed += mkt_posting_tombstone_chain(
+					&storage.base, dim, blk, tid_is_dead, &ctx);
+
+			/* Live tuples remaining: the head's maintained live_count, which
+			 * the tombstone pass just decremented (O(1), no rescan). */
+			Page lp = mkt_storage_read_page(&storage.base, blk);
+			stats->num_index_tuples += mkt_posting_head_live_count(lp);
+			mkt_storage_release_page(&storage.base, blk);
+		}
+
+		UnlockPage(index, blk, ExclusiveLock);
 	}
 
 	/* One summary line per call, not one per bad page (see loop comment). */

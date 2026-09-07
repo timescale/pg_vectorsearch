@@ -41,6 +41,15 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info);
 
 char *mktann_buildphasename(int64 phasenum);
 
+/*
+ * Estimated live tuples in a heap: reltuples when the relation has been
+ * analyzed, otherwise a stride sample of heap pages. Shared with maintenance,
+ * which needs the same estimate to resolve the target list size -- see the
+ * comment on the definition for why the fallback samples rather than deriving
+ * rows from the column width.
+ */
+double mktann_estimate_heap_tuples(Relation heap);
+
 /* do_parallel_build (the shared parallel build entry) is declared in
  * index/parallel_build.h, included above. */
 

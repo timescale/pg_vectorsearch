@@ -69,21 +69,24 @@
  */
 #define MKT_POSTING_PAGE_TOMBSTONED 0x0008
 /*
- * The page has been unlinked from its cluster chain and is awaiting physical
- * reclaim (future page-recycle work; not yet emitted by any code path).
+ * The page belongs to a chain that has been logically retired — no longer
+ * reachable through the centroid tree — and is awaiting physical reclaim. A
+ * posting-list split sets this on every page of the old chain (head included)
+ * once it has repointed the leaf at the new heads.
  *
- * Distinct from TOMBSTONED: a tombstoned page is all-dead but still LINKED, so
- * scans skip it and follow the chain past it. A DELETED page has additionally
- * been spliced out (prev->next_blkno swung past it) and recorded in the FSM;
- * it is off the chain entirely.
+ * Distinct from TOMBSTONED: a tombstoned page is all-dead but still a live
+ * part of its cluster, so scans skip it and follow the chain past it. A
+ * DELETED chain is off the tree but stays physically LINKED and readable until
+ * reclaim, so an in-flight scanner that already followed a stale leaf pointer
+ * into it still sees a consistent list rather than a gap.
  *
- * When this flag is set, the head-metadata overlay in the opaque (see the
- * union below) holds the deletion XID instead of live_count/tail_blkno. The
- * recycle gate compares that XID against the oldest snapshot before letting an
- * insert reinitialize the page for a new chain, so a scanner that still holds
- * a stale pointer to the page can never have it repurposed underneath it.
- * Only overflow pages are ever DELETED — chain heads are pinned by the
- * centroid tree and never unlinked.
+ * When this flag is set on a head, the head-metadata overlay in the opaque
+ * (see the union below) holds the deletion XID instead of
+ * live_count/tail_blkno. The reclaim gate compares that XID against the global
+ * visibility horizon before physically reclaiming the chain, so a scanner that
+ * still holds a stale pointer can never have it repurposed underneath it.
+ * Unlike TOMBSTONED, this flag therefore does apply to chain heads: a split
+ * retires the whole old chain, head and all.
  */
 #define MKT_POSTING_PAGE_DELETED 0x0010
 
@@ -140,14 +143,15 @@ typedef struct MktPostingPageOpaque
 	/*
 	 * Overlay (8 bytes). On a live page these are the per-cluster head
 	 * metadata; on a page flagged MKT_POSTING_PAGE_DELETED they instead carry
-	 * the deletion XID for the recycle gate. The two uses never collide: head
-	 * metadata is meaningful only on FIRST pages, which are never DELETED
-	 * (heads are pinned by the centroid tree), and the deletion XID is set
-	 * only on unlinked overflow pages, which by definition hold no live
-	 * entries — so live_count/tail_blkno are already dead weight there. The
-	 * anonymous struct/union keeps op->live_count, op->tail_blkno, and
-	 * op->delete_xid all directly accessible; gate the latter on the DELETED
-	 * flag. Storing the XID as a backend-neutral uint64_t (not PG's
+	 * the deletion XID for the reclaim gate. The DELETED flag is the sole
+	 * discriminator — always read live_count/tail_blkno only when it is clear
+	 * and delete_xid only when it is set. A posting-list split retires the
+	 * whole old chain, its FIRST head included, so a DELETED head does carry
+	 * delete_xid here rather than head metadata; readers of head metadata
+	 * (insert, split) first check the flag and treat a retired head as gone,
+	 * so the two uses never collide. The anonymous struct/union keeps
+	 * op->live_count, op->tail_blkno, and op->delete_xid all directly
+	 * accessible. Storing the XID as a backend-neutral uint64_t (not PG's
 	 * FullTransactionId) keeps this header usable by the standalone engine;
 	 * the PG side converts via U64FromFullTransactionId / the inverse.
 	 */
@@ -172,6 +176,24 @@ typedef struct MktPostingPageOpaque
 		uint64_t delete_xid;
 	};
 } MktPostingPageOpaque; /* 24B */
+
+/*
+ * True when this page's entries are gone for good, as opposed to moved.
+ *
+ * TOMBSTONED means "nothing here worth scoring" and the scan skips the page.
+ * The reclaim pass sets the same bit on a retired chain, whose entries are not
+ * dead at all -- they were rewritten into the chain's replacements -- so
+ * skipping there drops results that a stale-pointer scan is entitled to see.
+ * DELETED separates the two: it is set only by the retire pass, so a page
+ * carrying both moved rather than died, and its contents are still intact and
+ * linked until #224 makes the pages reusable.
+ */
+static inline bool
+mkt_posting_page_all_dead(const MktPostingPageOpaque *op)
+{
+	return (op->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0 &&
+		   (op->flags & MKT_POSTING_PAGE_DELETED) == 0;
+}
 
 /*
  * Flat-mode header (at start of flat page buffer).
@@ -562,6 +584,23 @@ mkt_fastscan_max_entries_first(Dimension dim)
 					  mkt_posting_pt_centroid_size(dim);
 	uint32_t ngroups = usable / section;
 	return ngroups * MKT_FASTSCAN_GROUP;
+}
+
+/*
+ * Upper bound on the entries a single posting page can hold, whatever format
+ * it is in. Neither format's figure bounds the other: fastscan packs more
+ * than AoS at low dimension (416 vs 339 at dim 4) and fewer at high (64 vs 67
+ * at dim 768, and none at all once a group stops fitting). The overflow-page
+ * figures bound a first page too, since that gives up room to the encode
+ * reference. Callers sizing a buffer for one page's worth of entries want
+ * this rather than either half.
+ */
+static inline uint32_t
+mkt_posting_max_entries_any_format(Dimension dim)
+{
+	uint32_t aos = mkt_posting_max_entries(dim);
+	uint32_t fs	 = mkt_fastscan_max_entries(dim);
+	return aos > fs ? aos : fs;
 }
 
 /* Max groups on a page */

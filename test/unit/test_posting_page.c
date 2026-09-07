@@ -18,6 +18,7 @@
 #include "index/posting_build.h"
 #include "index/posting_page.h"
 #include "index/posting_scan.h"
+#include "index/posting_split.h"
 #include "index/storage.h"
 #include "mkt_test.h"
 #include "quant/rabitq.h"
@@ -472,6 +473,167 @@ TEST(scan_processes_all_entries)
 
 	ASSERT_EQ(nvecs, scan.entries_scanned, "all entries scanned");
 	ASSERT_EQ(nvecs, topk.cand_count, "all entries in topk");
+
+	mkt_topk_cleanup(&topk);
+	mkt_posting_scan_cleanup(&scan);
+	mkt_posting_builder_cleanup(&builder);
+	mkt_rabitq_destroy(params);
+}
+
+/*
+ * A chain the tree no longer points at is still scanned.
+ *
+ * A split rewrites a list into new chains and retires the old one, marking
+ * every page DELETED but leaving it linked and intact, so a scan that captured
+ * the old head before the flip still sees a complete list. The later reclaim
+ * pass then ORs TOMBSTONED onto those same pages -- the flag VACUUM uses for
+ * "every entry here is dead" -- and the scan used to test only that bit and
+ * skip the page. The entries are not dead, though; they were rewritten
+ * elsewhere, so skipping drops results such a scan is entitled to. DELETED is
+ * what separates the two cases.
+ */
+TEST(scan_reads_a_retired_chain)
+{
+	Dimension		dim		 = 128;
+	TestPageStorage storage	 = make_test_storage(16);
+	RaBitQParams   *params	 = mkt_rabitq_create(dim, 42);
+	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+
+	uint32_t nvecs = 20;
+	float	*vecs  = make_test_vectors(nvecs, dim);
+
+	MktPostingBuilder builder;
+	mkt_posting_builder_init(
+			&builder, &storage.base, params, dim, 0, centroid, centroid);
+	for (uint32_t i = 0; i < nvecs; i++)
+		mkt_posting_builder_add(
+				&builder, vid_to_tid(i), vecs + (size_t)i * dim);
+	BlockNumber head = mkt_posting_builder_finish(&builder);
+
+	/*
+	 * Retire the chain the way the split's PG-side retire pass does: DELETED
+	 * on every page, contents untouched. Then reclaim it, which is where
+	 * TOMBSTONED joins DELETED.
+	 */
+	for (BlockNumber blk = head; blk != InvalidBlockNumber;)
+	{
+		Page page				 = mkt_storage_write_page(&storage.base, blk);
+		MktPostingPageOpaque *op = mkt_posting_opaque(page);
+		BlockNumber			  next = op->next_blkno;
+		op->flags |= MKT_POSTING_PAGE_DELETED;
+		mkt_storage_commit_page(&storage.base, blk);
+		blk = next;
+	}
+
+	float			*query	  = mkt_alloc(dim * sizeof(float));
+	float			*pt_query = mkt_alloc(dim * sizeof(float));
+	RaBitQQueryState qstate;
+	setup_query_state(&qstate, params, centroid, query, pt_query, dim);
+
+	MktPostingScan scan;
+	mkt_posting_scan_init(
+			&scan,
+			&storage.base,
+			NULL,
+			params,
+			dim,
+			mkt_posting_max_entries(dim));
+
+	/*
+	 * Baseline first: the chain scores every entry while it is still a live
+	 * one. Without it the count after reclaim could be a state the chain was
+	 * in all along rather than one the flags left untouched.
+	 */
+	MktTopK live;
+	mkt_topk_init(&live, nvecs);
+	mkt_posting_scan_begin_cluster(&scan, &qstate, head);
+	mkt_posting_scan_cluster(&scan, &live);
+	mkt_posting_scan_end_cluster(&scan);
+	ASSERT_EQ(nvecs, scan.entries_scanned, "live chain scores every entry");
+	mkt_topk_cleanup(&live);
+
+	/* Now reclaim it: TOMBSTONED joins DELETED, which is the state a scan
+	 * holding a stale head meets. */
+	mkt_posting_chain_tombstone(&storage.base, head);
+
+	MktTopK topk;
+	mkt_topk_init(&topk, nvecs);
+
+	mkt_posting_scan_begin_cluster(&scan, &qstate, head);
+	mkt_posting_scan_cluster(&scan, &topk);
+	mkt_posting_scan_end_cluster(&scan);
+
+	/* begin_cluster zeroes the per-cluster stats, so this is the retired
+	 * chain's own count, not a running total. */
+	ASSERT_EQ(nvecs, scan.entries_scanned, "retired chain is still scanned");
+	ASSERT_EQ(nvecs, topk.cand_count, "its entries still reach the top-k");
+
+	mkt_topk_cleanup(&topk);
+	mkt_posting_scan_cleanup(&scan);
+	mkt_posting_builder_cleanup(&builder);
+	mkt_rabitq_destroy(params);
+}
+
+/*
+ * The complement: TOMBSTONED without DELETED is VACUUM's all-dead page, and
+ * skipping it is the point -- there is nothing left on it to score.
+ */
+TEST(scan_skips_an_all_dead_page)
+{
+	Dimension		dim		 = 128;
+	TestPageStorage storage	 = make_test_storage(16);
+	RaBitQParams   *params	 = mkt_rabitq_create(dim, 42);
+	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+
+	uint32_t nvecs = 20;
+	float	*vecs  = make_test_vectors(nvecs, dim);
+
+	MktPostingBuilder builder;
+	mkt_posting_builder_init(
+			&builder, &storage.base, params, dim, 0, centroid, centroid);
+	for (uint32_t i = 0; i < nvecs; i++)
+		mkt_posting_builder_add(
+				&builder, vid_to_tid(i), vecs + (size_t)i * dim);
+	BlockNumber head = mkt_posting_builder_finish(&builder);
+
+	float			*query	  = mkt_alloc(dim * sizeof(float));
+	float			*pt_query = mkt_alloc(dim * sizeof(float));
+	RaBitQQueryState qstate;
+	setup_query_state(&qstate, params, centroid, query, pt_query, dim);
+
+	MktPostingScan scan;
+	mkt_posting_scan_init(
+			&scan,
+			&storage.base,
+			NULL,
+			params,
+			dim,
+			mkt_posting_max_entries(dim));
+
+	/*
+	 * Baseline first, or a zero at the end would be indistinguishable from a
+	 * chain that had nothing scannable on it to begin with.
+	 */
+	MktTopK live;
+	mkt_topk_init(&live, nvecs);
+	mkt_posting_scan_begin_cluster(&scan, &qstate, head);
+	mkt_posting_scan_cluster(&scan, &live);
+	mkt_posting_scan_end_cluster(&scan);
+	ASSERT_EQ(nvecs, scan.entries_scanned, "live chain scores every entry");
+	mkt_topk_cleanup(&live);
+
+	/* TOMBSTONED with no DELETED: VACUUM's all-dead page. */
+	mkt_posting_chain_tombstone(&storage.base, head);
+
+	MktTopK topk;
+	mkt_topk_init(&topk, nvecs);
+
+	mkt_posting_scan_begin_cluster(&scan, &qstate, head);
+	mkt_posting_scan_cluster(&scan, &topk);
+	mkt_posting_scan_end_cluster(&scan);
+
+	ASSERT_EQ(0u, scan.entries_scanned, "all-dead page is skipped");
+	ASSERT_EQ(0u, topk.cand_count, "and nothing reaches the top-k");
 
 	mkt_topk_cleanup(&topk);
 	mkt_posting_scan_cleanup(&scan);

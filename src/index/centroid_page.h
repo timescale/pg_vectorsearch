@@ -444,6 +444,20 @@ bool mkt_centroid_page_add_entry(
 		uint16_t	flags,
 		const void *data);
 
+/*
+ * Overwrite an existing entry in place: replace its child_blkno and its
+ * routing data (data must be data_size bytes in the page's format), leaving
+ * child_count/flags, entry_count, and the page layout untouched. Used by the
+ * incremental posting-list split to repoint a leaf entry at its first child
+ * list and update its routing centroid.
+ */
+void mkt_centroid_page_overwrite_entry(
+		Page		page,
+		Dimension	dim,
+		uint32_t	index,
+		BlockNumber child_blkno,
+		const void *data);
+
 /* Backward-compatible add (RaBitQ-typed parameter) */
 static inline bool
 mkt_centroid_page_add(
@@ -459,6 +473,27 @@ mkt_centroid_page_add(
 }
 
 /*
+ * Where the metadata region ends on a page holding `nentries`.
+ *
+ * Derived from entry_count rather than read from pd_lower, because pd_lower
+ * does not survive a page write outside index build: meerkat keeps its data
+ * in the region PostgreSQL treats as the free hole, and the storage layer
+ * covers that hole (pd_lower = pd_upper) so a full-page image preserves it.
+ * Every other page kind is indifferent -- centroid pages are the only ones
+ * that grow a forward region -- so entry_count, which lives in the opaque
+ * area and does survive, is the authoritative cursor. It is also what the
+ * data-region reader already uses (mkt_centroid_entry_data indexes off
+ * pd_special), so the two regions stay consistent.
+ */
+static inline size_t
+mkt_centroid_meta_end(Page page, uint32_t nentries)
+{
+	MktCentroidFormat fmt = mkt_centroid_page_format(page);
+	return (size_t)SizeOfPageHeaderData +
+		   (size_t)nentries * mkt_centroid_meta_size(fmt);
+}
+
+/*
  * Check if a page has room for one more entry.
  * Reads data format from the page to determine entry size.
  */
@@ -470,8 +505,10 @@ mkt_centroid_page_has_room(Page page, Dimension dim, bool is_leaf)
 	size_t			  need_fwd = mkt_centroid_meta_size(fmt);
 	size_t need_bwd = is_leaf ? mkt_centroid_leaf_data_size(dim, fmt)
 							  : mkt_centroid_data_size(dim, fmt);
+	size_t lower	= mkt_centroid_meta_end(
+			   page, MKT_CENTROID_OPAQUE(page)->entry_count);
 
-	return header->pd_lower + need_fwd + need_bwd <= header->pd_upper;
+	return lower + need_fwd + need_bwd <= header->pd_upper;
 }
 
 #endif /* MKT_CENTROID_PAGE_H */

@@ -429,8 +429,6 @@ mktann_get_fan_out(Relation index)
 	return MKT_ANN_DEFAULT_FAN_OUT;
 }
 
-static double estimate_heap_tuples(Relation heap);
-
 static void
 resolve_build_params(
 		Relation heap, Relation index, MktannBuildParams *p, double *est_rows)
@@ -464,7 +462,7 @@ resolve_build_params(
 	MktannOptions *opts		 = (MktannOptions *)index->rd_options;
 	uint32_t	   nlist_opt = (opts != NULL) ? (uint32_t)opts->nlist : 0;
 
-	*est_rows = estimate_heap_tuples(heap);
+	*est_rows = mktann_estimate_heap_tuples(heap);
 
 	if (nlist_opt > 0)
 	{
@@ -533,8 +531,8 @@ resolve_build_params(
  * predicts ~128 (overcounting 64x -- and the automatic partition count
  * inherits the error, sharding the index into starved clusters).
  */
-static double
-estimate_heap_tuples(Relation heap)
+double
+mktann_estimate_heap_tuples(Relation heap)
 {
 	if (heap->rd_rel->reltuples > 0)
 		return heap->rd_rel->reltuples;
