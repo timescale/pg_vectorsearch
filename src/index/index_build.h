@@ -451,7 +451,7 @@ BlockNumber mkt_routing_subtree_write(
  *
  * When fan_out equals default_fan_out, derive a value that gives a
  * balanced tree with ~nlist leaves. Uses sqrt for moderate nlist,
- * cbrt for large nlist (> 256^2 = 65536). When fan_out has been
+ * cbrt for large nlist (> 65536). When fan_out has been
  * explicitly set (differs from default), it is returned unchanged
  * (capped to nlist if larger).
  */
@@ -459,14 +459,45 @@ uint32_t
 mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out);
 
 /*
+ * Target vectors per posting list -- the k-means convergence floor (the
+ * densest partitioning that still gives each centroid enough training data)
+ * and the measured recall/QPS sweet spot. The single source of truth for the
+ * index's intended list size: mkt_auto_nlist derives nlist from it, and
+ * mkt_target_entries_per_list inverts that to recover the size itself. Named,
+ * so there is one place to change it.
+ *
+ * Not the same quantity as the build's ~256 k-means training samples per list
+ * (mktann_build.c, parallel_backend.c), which happens to share the value for a
+ * related reason but sizes the sample region -- the build's dominant memory
+ * cost -- so the two must stay independently tunable.
+ */
+#define MKT_TARGET_ENTRIES_PER_LIST 256
+
+/*
  * Auto-tune nlist from a (possibly estimated) vector count: ~one list per
- * 256 vectors (count / 256), floored at sqrt(count) so small tables still get
- * enough lists to build. Used by every build path when nlist is not set
- * explicitly. The count source differs by back-end (reltuples / heap-block
+ * MKT_TARGET_ENTRIES_PER_LIST vectors, floored at sqrt(count) so small tables
+ * still get enough lists to build. Used by every build path when nlist is not
+ * set explicitly. The count source differs by back-end (reltuples / heap-block
  * estimate in PostgreSQL, the in-memory vector count standalone). Back-ends
  * clamp the result to their own nlist ceiling.
  */
 uint32_t mkt_auto_nlist(double count);
+
+/*
+ * Vectors per posting list at a given row count -- the resting size that
+ * maintenance should aim each list at, so a rebalanced index keeps the shape
+ * the build chose.
+ *
+ * Only partly constant. Above MKT_TARGET_ENTRIES_PER_LIST^2 rows it is the
+ * constant itself; below that mkt_auto_nlist's sqrt floor takes over and the
+ * per-list size is ~sqrt(count) instead, growing with the dataset. Hence a
+ * function rather than a bare constant at the call site.
+ *
+ * Pass the index's explicit nlist reloption when it has one, or 0 to derive it
+ * from count via mkt_auto_nlist -- so an explicit nlist is respected by
+ * maintenance rather than silently overridden.
+ */
+uint32_t mkt_target_entries_per_list(double count, uint32_t nlist);
 
 /*
  * Find secondary cluster by plain distance (2nd-nearest centroid),

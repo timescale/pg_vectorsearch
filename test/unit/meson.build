@@ -33,6 +33,7 @@ unit_test_sources = files(
   'test_fast_rotate.c',
   'test_posting_page.c',
   'test_posting_insert.c',
+  'test_posting_split.c',
   'test_distance.c',
   'test_fixtures.c',
   'test_halfvec.c',

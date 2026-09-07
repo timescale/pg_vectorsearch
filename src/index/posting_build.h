@@ -484,6 +484,20 @@ void mkt_posting_builder_add(
 		MktPostingBuilder *builder, ItemPointerData tid, const float *vector);
 
 /*
+ * Add a raw vector, optionally stamping it unreachable: estimated distance
+ * +inf with zero error, so every scan prunes it before it can enter the top-k
+ * threshold heap. For vectors with no defined distance under the index metric
+ * (a zero-norm vector under cosine) -- see mark_entry_unreachable in
+ * posting_build.c for why a naive encoding is actively harmful. The row stays
+ * indexed; it just can never be a result.
+ */
+void mkt_posting_builder_add_ex(
+		MktPostingBuilder *builder,
+		ItemPointerData	   tid,
+		const float		  *vector,
+		bool			   unreachable);
+
+/*
  * Add a pre-encoded entry. No RaBitQ encoding — data is already
  * quantized. Works with both AoS and fastscan formats.
  */

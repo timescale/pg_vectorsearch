@@ -259,9 +259,11 @@ pg_commit_page(MktStorage *self, BlockNumber blkno)
 		 * and pd_upper — the region PostgreSQL treats as the free "hole" and
 		 * omits from standard-layout full-page images (GenericXLog assumes the
 		 * standard layout). Cover the hole (pd_lower = pd_upper) before
-		 * logging so the entire page is preserved; pd_lower is otherwise
-		 * unused by meerkat (scans locate data via PageGetContents /
-		 * pd_special).
+		 * logging so the entire page is preserved; meerkat never reads
+		 * pd_lower back (scans locate data via PageGetContents /
+		 * pd_special, and centroid pages derive their metadata cursor from
+		 * entry_count -- see mkt_centroid_meta_end, which exists because of
+		 * this overwrite).
 		 */
 		PageHeader ph = (PageHeader)BufferGetPage(s->cur_buf);
 		ph->pd_lower  = ph->pd_upper;

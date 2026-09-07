@@ -17,6 +17,7 @@
 
 #include "algo/topk.h"
 #include "algo/vecops.h"
+#include "core/injection.h"
 #include "core/log.h"
 #include "core/memory.h"
 #include "core/platform.h"
@@ -501,6 +502,15 @@ mkt_query_execute(
 															   : query;
 
 	uint64_t t1 = mkt_query_now_ns();
+
+	/*
+	 * The probed heads are chosen and their centroid pages released, but none
+	 * of the lists has been opened yet. A concurrent split can replace and
+	 * retire a head in this window, which is why the old chain stays readable
+	 * until no snapshot can reach it; an isolation test pauses here to hold a
+	 * head across exactly that.
+	 */
+	MKT_INJECTION_POINT("mktann-scan-routed");
 
 	scan_clusters(
 			qs, qs->beam_results, ncentroids, nprobe, mode, &qs->topk, stats);

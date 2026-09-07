@@ -34,11 +34,10 @@ mkt_centroid_page_add_entry_begin(
 	if (!mkt_centroid_page_has_room(page, dim, false))
 		return NULL;
 
-	PageHeader			   header	 = (PageHeader)page;
-	MktCentroidPageOpaque *opaque	 = MKT_CENTROID_OPAQUE(page);
-	MktCentroidFormat	   fmt		 = mkt_centroid_page_format(page);
-	uint16_t			   index	 = opaque->entry_count;
-	uint32_t			   meta_size = mkt_centroid_meta_size(fmt);
+	PageHeader			   header = (PageHeader)page;
+	MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
+	MktCentroidFormat	   fmt	  = mkt_centroid_page_format(page);
+	uint16_t			   index  = opaque->entry_count;
 
 	/* Write metadata (forward region) */
 	MktCentroidEntryMeta *meta = mkt_centroid_meta_mut(page, index);
@@ -50,8 +49,15 @@ mkt_centroid_page_add_entry_begin(
 	uint32_t data_size = mkt_centroid_data_size(dim, fmt);
 	header->pd_upper -= data_size;
 
-	header->pd_lower += meta_size;
 	opaque->entry_count = index + 1;
+
+	/*
+	 * Recompute rather than advance: a page committed outside index build
+	 * comes back with pd_lower covering the hole (see mkt_centroid_meta_end),
+	 * so incrementing it would leave the page looking permanently full.
+	 */
+	header->pd_lower = (LocationIndex)
+			mkt_centroid_meta_end(page, opaque->entry_count);
 
 	return page + header->pd_upper;
 }
@@ -75,4 +81,31 @@ mkt_centroid_page_add_entry(
 
 	memcpy(dest, data, data_size);
 	return true;
+}
+
+void
+mkt_centroid_page_overwrite_entry(
+		Page		page,
+		Dimension	dim,
+		uint32_t	index,
+		BlockNumber child_blkno,
+		const void *data)
+{
+	MktCentroidFormat fmt		= mkt_centroid_page_format(page);
+	uint32_t		  data_size = mkt_centroid_data_size(dim, fmt);
+
+	/*
+	 * In-place replacement of an existing entry: rewrite the fixed-size
+	 * metadata slot (forward region) and the fixed-size data slot (backward
+	 * region) without touching pd_lower/pd_upper or entry_count, so the page
+	 * layout is unchanged and no relayout is needed. child_count/flags are
+	 * preserved (a leaf entry stays a leaf). Used by the incremental split to
+	 * repoint a leaf at its first child list and update its routing centroid.
+	 */
+	MktCentroidEntryMeta *meta = mkt_centroid_meta_mut(page, index);
+	meta->child_blkno		   = child_blkno;
+
+	void *dest = (char *)PageGetSpecialPointer(page) -
+				 (size_t)(index + 1) * data_size;
+	memcpy(dest, data, data_size);
 }

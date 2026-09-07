@@ -41,6 +41,7 @@ else
       'zero_vectors',
       'row_estimate',
       'index_stats',
+      'split',
     ]
 
     # Test-only SQL entry points (extra introspection the extension
@@ -123,8 +124,16 @@ else
   # would turn that into a test failure instead of a skip.
   tap_ready = false
   if perl.found() and fs_tap.is_dir(pg_perl_dir)
+    # PostgreSQL::Test::Utils opens a log file named after $0 as soon as it is
+    # loaded, so probing for the module drops a "regress_log_-e" in whatever
+    # directory this runs from -- the source tree. Point its log and scratch
+    # directories at the build tree instead.
     tap_probe = run_command(
       perl, '-I', pg_perl_dir, '-MPostgreSQL::Test::Cluster', '-e', '1',
+      env: {
+        'TESTLOGDIR': meson.current_build_dir() / 'tap_probe_log',
+        'TESTDIR': meson.current_build_dir(),
+      },
       check: false,
     )
     tap_ready = tap_probe.returncode() == 0
@@ -225,9 +234,37 @@ else
           'refine_gate',
           'scan_progress',
           'insert_serialize',
+          'split_race',
+          'maintenance_lock',
+          'split_insert_retry',
         ],
         depends: [meerkat_ext_so],
         timeout: 120,
+        is_parallel: false,
+        protocol: 'tap',
+      )
+    endif
+
+    # Crash recovery mid-split. Needs injection points to enter the window
+    # deterministically and PostgreSQL::Test to stop the cluster hard, so it
+    # is gated on both.
+    if tap_ready and not tap_opt.disabled()
+      test('tap_split_crash',
+        find_program(meson.current_source_dir() / 't' / 'run-tap.sh'),
+        args: [
+          meson.current_source_dir() / 't' / '002_split_crash.pl',
+        ],
+        env: {
+          'PG_PERL_DIR': pg_perl_dir,
+          'PATH': pg_bindir + ':' + run_command(
+            'sh', '-c', 'echo $PATH', check: true).stdout().strip(),
+          'PG_REGRESS': pg_pkglibdir / 'pgxs' / 'src' / 'test' / 'regress'
+                        / 'pg_regress',
+          'TESTDATADIR': meson.current_build_dir() / 'tmp_check_crash',
+          'TESTLOGDIR': meson.current_build_dir() / 'tap_log_crash',
+        },
+        depends: [meerkat_ext_so],
+        timeout: 300,
         is_parallel: false,
         protocol: 'tap',
       )

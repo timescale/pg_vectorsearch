@@ -245,9 +245,174 @@ throughput demands it.
 
 Stable recall under heavy mutation **without** rebuild.
 
-- Track posting sizes; **split** when `> max` (local k-means `k = 2`, two new
-  leaf centroids, update tree + cache, re-encode + reassign), **merge** when
-  `< min` (reassign to neighbors, remove centroid).
+- Track posting sizes; **split** when a list outgrows the trigger (local
+  k-means, k new leaf centroids, update tree + cache, re-encode + reassign),
+  **merge** when it falls below the merge threshold (reassign to neighbors,
+  remove centroid).
+
+#### Sizing: one target, a band around it
+
+Three sizes, derived from one:
+
+| name | value | role |
+| --- | --- | --- |
+| target `T` | `rows / nlist` — see `mkt_target_entries_per_list` | the size a list rests at |
+| split trigger | `T * MKT_SPLIT_TRIGGER_FACTOR` (2) | grow past this and the list splits |
+| merge threshold | `T / MKT_SPLIT_TRIGGER_FACTOR` | shrink below this and the list merges |
+
+The target is **not a free parameter**: it is the size the build chose, since
+`mkt_auto_nlist` targets `MKT_TARGET_ENTRIES_PER_LIST` vectors per list (above
+its sqrt-floor crossover; below it, `sqrt(rows)`). Both the automatic probe
+count and the cost model are derived from `nlist`, and the per-list size is its
+inverse — so aiming maintenance at a different size silently decouples the index
+from both. `mkt.rebalance()` therefore derives its target by default, honouring
+an explicit `nlist` reloption when the index was built with one.
+
+The **trigger is deliberately above the target**, which is the part that is easy
+to get wrong. Pin the trigger at the target and every freshly split list starts
+exactly on it — one insert from splitting again. The gap is what amortizes the
+split over the inserts that fill it, and with the merge threshold below the
+target by the same factor the target sits at the geometric centre of the band:
+room to absorb inserts and deletes, and room for the unevenness of k-means
+splits and of merges and reassignment.
+
+**Width is `round(count / T)`, not `ceil`.** At the trigger the ratio is a shade
+over the factor, so rounding up would ask for one partition more than the
+entries justify and land every one of them *below* the target. Rounding gives
+exactly `factor` parts there — a bisection at factor 2, as the paper does — and
+keeps parts within `[0.75, 1.25]` of the target elsewhere. A wider split is
+therefore only what a batch pass does when it meets a list that has been
+neglected; `MKT_SPLIT_MAX_PARTS` bounds that catch-up case.
+
+The size is re-checked **after** the entries are collected, not just from the
+head's live count: collection drops entries whose vector can no longer be
+fetched, and those are not reflected in the live count, so a list can look
+oversized and turn out not to be. LIRE does the same (garbage-collect,
+re-verify against the split limit, complete without splitting if it now fits).
+
+#### Transactions: maintenance owns its own
+
+Neither entry point runs inside a caller's transaction — the same restriction
+VACUUM has, in the form a procedure has available (a top-level `CALL` gets a
+non-atomic call context; a transaction block, a function, or a block that opens
+a subtransaction gets an atomic one).
+
+Two reasons, and the second is the load-bearing one:
+
+- These procedures reorganize the index, not the data it points at, and their
+  page writes are not transactional. A `ROLLBACK` would leave the lists split,
+  the old chains retired and the leaf count raised, while discarding the
+  relcache invalidation that tells other backends the leaf count moved — so
+  other sessions would keep clamping their probes to the pre-split count until
+  something else invalidated them. Offering a rollback that rolls nothing back
+  is worse than refusing.
+- A pass that commits as it goes cannot commit at all from inside someone
+  else's transaction. Splitting each list in its own transaction — bounding the
+  transaction of a long pass, and letting it reclaim what its own earlier
+  splits retired — is the reason a procedure was the right shape here.
+
+#### Memory: a split streams its list
+
+A split cannot hold the list it is splitting. At `entries * dim * 4` bytes, the
+tool for splitting an oversized list would fail in proportion to how oversized
+the list is — and a list that has outgrown the trigger by a long way, because
+maintenance has not run, is exactly the one that has to be splittable. The same
+reasoning the bulk build applies to its sample region.
+
+So the list is streamed twice:
+
+1. **Count and sample.** One pass counts the fetchable entries — which is also
+   the count the post-collection size re-check needs, since the head's
+   `live_count` does not know about entries whose vector can no longer be
+   fetched — and reservoir-samples them into a buffer whose size comes from
+   `MktSplitConfig.sample_budget_bytes` (the PostgreSQL layer passes
+   `maintenance_work_mem`). A reservoir rather than every n'th entry, because a
+   stride needs an estimate of the list's length and an estimate that came out
+   low would fill the sample before the chain ended, leaving the tail — the most
+   recently inserted entries — unsampled. The head's `live_count` only sizes the
+   initial buffer, where being wrong costs a realloc.
+2. **Cluster the sample**, and drop the clusters holding too few entries to be
+   worth a posting list of their own — which means dropping their centroids,
+   before anything is assigned to them.
+3. **Assign and write.** A second pass sends each entry to the list whose
+   surviving centroid is nearest, appending to `k` page builders. Each builder
+   assembles pages in its own memory and touches storage only to flush a full
+   one, so `k` of them cost `k` page images rather than `k` pinned buffers.
+
+Private memory is then the sample plus `O(k * dim)` and `O(k * BLCKSZ)`,
+whatever the list holds. What remains proportional to the list is the cost of
+*reading* it: touching a list's worth of heap and TOAST pages maps them into
+the backend, which no arrangement of the split can avoid.
+
+The sample size comes from a peak model rather than from dividing the budget by
+the vector size (`mkt_split_sample_cap`), because clustering costs more than
+the sample it clusters: per point, an assignment, an L2 norm, an initialisation
+distance, the result's own copy of the assignments, and Elkan's bounds — one per
+point plus **one per point per centroid**. At a wide dimension that is a few
+percent of the point; at a narrow one it is several times the point. The model
+reserves the per-centroid part for the widest split, since the width is not
+known until the list has been counted, along with the centroid sets and
+k-means' blocked scratch.
+
+Two ceilings sit above the budget. The sample's own allocation is capped
+(`MKT_SPLIT_MAX_SAMPLE_BYTES`) below the largest single allocation a backend
+permits, so a generous `maintenance_work_mem` cannot turn into a failed
+allocation — and the buffer is sized to `min(list, budget)` and grown if
+needed, so a generous budget does not cost generous memory on a list that does
+not fill it. Below the budget, a split that cannot afford even two partitions'
+worth of sample is refused with the shortfall named, rather than quietly
+exceeding what it was given.
+
+A list that fits the budget is sampled whole, so the sizes a split normally
+meets behave exactly as clustering the list directly would. Above the budget,
+two things change: cluster sizes come from scaled sample tallies rather than
+exact counts, and the width is capped at what the sample can speak for
+(`MKT_SPLIT_MIN_SAMPLE_PER_PART`) so a list too big for its budget is split
+less far per pass rather than split badly.
+
+Note that entries are assigned to the nearest of the centroids actually stored,
+not to k-means' own final assignments — which are one iteration stale, since
+the algorithm returns after updating centroids. That is the assignment queries
+will reproduce at scan time.
+
+#### Sizing: the floor, and why a split can decline
+
+A partition of one is worse than no partition: a page holding one entry, a
+centroid that routes a single vector, and an `nlist` inflated by lists holding
+almost no data. k-means minimizes distortion, not partition size, so an outlier
+comes out as its own cluster — and unlike LIRE, which splits with SPANN's
+multi-constraint balanced clustering, we have no size constraint to prevent it
+(see "Known divergences" below).
+
+So any cluster below the merge threshold is **folded** into the nearest
+surviving one, each entry to its own nearest surviving centroid. Surviving
+centroids are deliberately not recomputed: dragging one toward a few absorbed
+outliers would encode the many worse to encode the few better, and the resulting
+NPA drift is what reassign is for.
+
+If folding cannot leave two partitions standing, the split **widens** by one
+partition and retries (`MKT_SPLIT_WIDEN_ATTEMPTS`) before declining. At the
+bisection width a dense region plus a straggler has no second partition clearing
+the floor; the k-means seed is fixed, so declining there would decline
+identically on every later pass and leave a list above the trigger forever. One
+more partition usually resolves it. Data that resists it — identical vectors,
+say — is declined, which is the right answer.
+
+#### Known divergences from LIRE
+
+- **No balanced clustering.** LIRE splits with SPANN's multi-constraint balanced
+  clustering, so its parts land *on* the target; ours scatter around it. This is
+  index-wide, not split-local: the split calls the same k-means the build's
+  hierarchical clustering calls at every node, and changing it only in the split
+  would break the invariant that a split matches a from-scratch rebuild. The
+  property it protects is tail latency, which our throughput-at-recall
+  benchmarks do not measure — so measure before changing.
+- **Split and merge can feed each other.** An unbalanced split emits a part
+  under the merge threshold, merge folds it into a neighbour and pushes that over
+  the split trigger. The fold above closes the split half; the merge half needs
+  merge to refuse a result above the trigger, and lands with merge. Note that
+  SPFresh's convergence proof does not cover this: it rests on splits
+  monotonically growing the centroid set, which merge breaks.
 - **Bounded local reassign** to maintain NPA — re-check only affected +
   neighboring postings.
 - **Async execution** — a **dedicated background worker** (a PG dynamic
@@ -379,7 +544,7 @@ one genuinely new piece.
 - Delete / tombstone / GC (`kill_prior_tuple`, `ambulkdelete`).
 - Multi-tier scan + over-fetch + dead-tuple filtering.
 - The background-job + compaction machinery — a split is "recluster a cluster's
-  vectors into two new postings" and a compaction is "rewrite a cluster's
+  vectors into k new postings" and a compaction is "rewrite a cluster's
   postings into packed segments": the same rewrite-postings primitive.
 - The background-rewrite-vs-foreground-scan concurrency model and
   crash-consistent incremental WAL writes — the hardest concurrency hazard

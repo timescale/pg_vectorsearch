@@ -16,8 +16,12 @@ mkt_posting_insert_one(
 		ItemPointerData		tid,
 		const float		   *pt_input,
 		RaBitQScratch	   *scratch,
-		bool				unreachable)
+		bool				unreachable,
+		bool			   *head_retired)
 {
+	if (head_retired != NULL)
+		*head_retired = false;
+
 	if (storage == NULL || params == NULL || pt_input == NULL ||
 		scratch == NULL || head_blkno == InvalidBlockNumber)
 		return false;
@@ -28,11 +32,26 @@ mkt_posting_insert_one(
 	 * backing holds only one buffer at a time).
 	 */
 	Page head = mkt_storage_read_page(storage, head_blkno);
-	const MktPostingPageOpaque *hop		   = mkt_posting_opaque(head);
-	uint32_t					cluster_id = hop->cluster_id;
-	BlockNumber					tail_blkno = hop->tail_blkno;
-	uint32_t					live	   = hop->live_count;
-	const float				   *pt_cent	   = mkt_posting_pt_centroid(head);
+	const MktPostingPageOpaque *hop = mkt_posting_opaque(head);
+
+	/*
+	 * If the head was retired since it was routed to (split away by a
+	 * concurrent rebalance), don't insert into a dead chain — report it so the
+	 * caller re-routes. Checked here, on the read we already do, so the caller
+	 * needn't re-read the head just to test these flags.
+	 */
+	if (hop->flags & (MKT_POSTING_PAGE_TOMBSTONED | MKT_POSTING_PAGE_DELETED))
+	{
+		mkt_storage_release_page(storage, head_blkno);
+		if (head_retired != NULL)
+			*head_retired = true;
+		return false;
+	}
+
+	uint32_t	 cluster_id = hop->cluster_id;
+	BlockNumber	 tail_blkno = hop->tail_blkno;
+	uint32_t	 live		= hop->live_count;
+	const float *pt_cent	= mkt_posting_pt_centroid(head);
 
 	/* pt_residual = pt_input - pt_centroid (P^T linear). Reuse scratch
 	 * (encode_from_pt only touches scratch->xu_cb). */

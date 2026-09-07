@@ -1,0 +1,209 @@
+Parsed test spec with 4 sessions
+
+starting permutation: m1_head m1_reb m2_reb o_wake o_nlist
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step m1_head: SELECT blkno AS head_blkno FROM mkt.posting_pages('maint_idx')
+                    WHERE is_first ORDER BY blkno LIMIT 1;
+head_blkno
+----------
+         2
+(1 row)
+
+step m1_reb: CALL mkt.rebalance('maint_idx', 10); <waiting ...>
+step m2_reb: CALL mkt.rebalance('maint_idx', 10); <waiting ...>
+step o_wake: SELECT injection_points_wakeup('mktann-split-locked');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+m1: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
+step m1_reb: <... completed>
+m2: NOTICE:  rebalance: split 0 posting list(s), reclaimed 0 retired chain(s)
+step m2_reb: <... completed>
+step o_nlist: SELECT setting::int AS nlist FROM mkt.index_settings('maint_idx')
+                   WHERE name = 'nlist';
+nlist
+-----
+    6
+(1 row)
+
+
+starting permutation: m1_head m1_reb m2_split o_wake o_nlist
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step m1_head: SELECT blkno AS head_blkno FROM mkt.posting_pages('maint_idx')
+                    WHERE is_first ORDER BY blkno LIMIT 1;
+head_blkno
+----------
+         2
+(1 row)
+
+step m1_reb: CALL mkt.rebalance('maint_idx', 10); <waiting ...>
+step m2_split: CALL mkt.split_posting_list('maint_idx', 2); <waiting ...>
+step o_wake: SELECT injection_points_wakeup('mktann-split-locked');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+m1: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
+step m1_reb: <... completed>
+m2: NOTICE:  posting list at block 2 not split
+step m2_split: <... completed>
+step o_nlist: SELECT setting::int AS nlist FROM mkt.index_settings('maint_idx')
+                   WHERE name = 'nlist';
+nlist
+-----
+    6
+(1 row)
+
+
+starting permutation: m1_head m1_split m2_reb o_wake o_nlist
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step m1_head: SELECT blkno AS head_blkno FROM mkt.posting_pages('maint_idx')
+                    WHERE is_first ORDER BY blkno LIMIT 1;
+head_blkno
+----------
+         2
+(1 row)
+
+step m1_split: CALL mkt.split_posting_list('maint_idx', 2); <waiting ...>
+step m2_reb: CALL mkt.rebalance('maint_idx', 10); <waiting ...>
+step o_wake: SELECT injection_points_wakeup('mktann-split-locked');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+m1: NOTICE:  split posting list at block 2 into 2 lists
+step m1_split: <... completed>
+m2: NOTICE:  rebalance: split 2 posting list(s), reclaimed 0 retired chain(s)
+step m2_reb: <... completed>
+step o_nlist: SELECT setting::int AS nlist FROM mkt.index_settings('maint_idx')
+                   WHERE name = 'nlist';
+nlist
+-----
+    6
+(1 row)
+
+
+starting permutation: m1_head m1_split m2_split o_wake o_nlist
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step m1_head: SELECT blkno AS head_blkno FROM mkt.posting_pages('maint_idx')
+                    WHERE is_first ORDER BY blkno LIMIT 1;
+head_blkno
+----------
+         2
+(1 row)
+
+step m1_split: CALL mkt.split_posting_list('maint_idx', 2); <waiting ...>
+step m2_split: CALL mkt.split_posting_list('maint_idx', 2); <waiting ...>
+step o_wake: SELECT injection_points_wakeup('mktann-split-locked');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+m1: NOTICE:  split posting list at block 2 into 2 lists
+step m1_split: <... completed>
+m2: NOTICE:  posting list at block 2 not split
+step m2_split: <... completed>
+step o_nlist: SELECT setting::int AS nlist FROM mkt.index_settings('maint_idx')
+                   WHERE name = 'nlist';
+nlist
+-----
+    2
+(1 row)
+
+
+starting permutation: m1_reb d_drop o_wake o_gone
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step m1_reb: CALL mkt.rebalance('maint_idx', 10); <waiting ...>
+step d_drop: DROP INDEX maint_idx; <waiting ...>
+step o_wake: SELECT injection_points_wakeup('mktann-split-locked');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+m1: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
+step m1_reb: <... completed>
+step d_drop: <... completed>
+step o_gone: SELECT count(*) AS still_there FROM pg_class
+                   WHERE relname = 'maint_idx';
+still_there
+-----------
+          0
+(1 row)
+
+
+starting permutation: m1_reb d_reindex o_wake o_heads
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step m1_reb: CALL mkt.rebalance('maint_idx', 10); <waiting ...>
+step d_reindex: REINDEX INDEX maint_idx; <waiting ...>
+step o_wake: SELECT injection_points_wakeup('mktann-split-locked');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+m1: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
+step m1_reb: <... completed>
+step d_reindex: <... completed>
+step o_heads: SELECT count(*) AS heads FROM mkt.posting_pages('maint_idx')
+                   WHERE is_first;
+heads
+-----
+    7
+(1 row)
+
+
+starting permutation: d_begin d_alter m1_reb d_commit o_wake o_heads
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step d_begin: BEGIN;
+step d_alter: ALTER TABLE maint SET (fillfactor = 90);
+step m1_reb: CALL mkt.rebalance('maint_idx', 10); <waiting ...>
+step d_commit: COMMIT;
+step o_wake: SELECT injection_points_wakeup('mktann-split-locked');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+m1: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
+step m1_reb: <... completed>
+step o_heads: SELECT count(*) AS heads FROM mkt.posting_pages('maint_idx')
+                   WHERE is_first;
+heads
+-----
+    6
+(1 row)
+

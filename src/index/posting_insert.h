@@ -36,6 +36,13 @@
  * walk when tail_blkno == InvalidBlockNumber) and maintained thereafter.
  *
  * scratch is used for the encode (xu_cb) and to hold the rotated residual.
+ *
+ * If the head has been retired (TOMBSTONED or DELETED) — e.g. split away by a
+ * concurrent rebalance between routing and this call — nothing is inserted;
+ * the caller should re-route to the current head. This is reported via
+ * *head_retired (may be NULL), detected during the head read this does anyway,
+ * so the caller needn't read the head a second time to check.
+ *
  * Returns true on success.
  */
 bool mkt_posting_insert_one(
@@ -46,7 +53,8 @@ bool mkt_posting_insert_one(
 		ItemPointerData		tid,
 		const float		   *pt_input,
 		RaBitQScratch	   *scratch,
-		bool				unreachable);
+		bool				unreachable,
+		bool			   *head_retired);
 
 /*
  * Tombstone every AoS entry in the cluster chain whose TID is_dead() reports

@@ -308,9 +308,10 @@ mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 		}
 
 		/* A page tombstoned by VACUUM (all entries dead) is skipped — no
-		 * scoring kernel; the chain-follow below still advances past it. */
-		if (!(mkt_posting_opaque(scan->cur_page)->flags &
-			  MKT_POSTING_PAGE_TOMBSTONED))
+		 * scoring kernel; the chain-follow below still advances past it. A
+		 * retired chain also carries TOMBSTONED once reclaimed, but its
+		 * entries moved rather than died, so it is still scored. */
+		if (!mkt_posting_page_all_dead(mkt_posting_opaque(scan->cur_page)))
 		{
 			char	*content = scan->cur_content;
 			uint32_t count	 = scan->cur_count;
@@ -687,9 +688,13 @@ mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk)
 
 		MktPostingPageOpaque *opaque = mkt_posting_opaque(scan->cur_page);
 
-		if (opaque->flags & MKT_POSTING_PAGE_TOMBSTONED)
+		if (mkt_posting_page_all_dead(opaque))
 		{
-			/* All entries dead — skip scoring; the chain-follow advances. */
+			/* All entries dead — skip scoring; the chain-follow advances.
+			 * A retired chain is not that: it carries TOMBSTONED too once
+			 * reclaimed, but its entries were rewritten elsewhere, and a
+			 * scan that followed a stale leaf pointer into it must still
+			 * see them. */
 			scan->pages_skipped++;
 		}
 		else if (opaque->flags & MKT_POSTING_PAGE_FASTSCAN)
