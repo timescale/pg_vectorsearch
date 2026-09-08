@@ -56,9 +56,9 @@
 #include "types/vector.h"
 
 #ifndef MKT_STANDALONE
-#include "mktann_build.h"
-#include "mktann_meta.h"
-#include "mktann_storage.h"
+#include "build.h"
+#include "meta.h"
+#include "storage.h"
 #include "support_pg.h"
 #endif
 

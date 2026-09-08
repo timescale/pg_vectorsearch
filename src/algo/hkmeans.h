@@ -9,7 +9,7 @@
  * contiguous allocation using byte offsets instead of pointers.
  * This allows memcpy into shared memory (DSM) for parallel builds.
  *
- * Used by both the PG IAM build (mktann_build.c) and the CLI
+ * Used by both the PG IAM build (build.c) and the CLI
  * benchmark (bench_search.c).
  */
 

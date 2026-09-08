@@ -1,8 +1,8 @@
 /*
- * mktann.c - meerkat ANN index access method handler
+ * iam_handler.c - meerkat ANN index access method handler
  *
  * Registers the mktann index access method with PostgreSQL. Build and
- * scan callbacks delegate to mktann_build.c and mktann_scan.c; trivial
+ * scan callbacks delegate to build.c and scan.c; trivial
  * stubs for unimplemented callbacks remain here.
  */
 
@@ -21,14 +21,14 @@
 #include <utils/selfuncs.h>
 
 #include "algo/vecops.h"
+#include "amcache.h"
+#include "build.h"
 #include "index/index_base.h"
 #include "index/posting_insert.h"
 #include "index/query_scan.h"
-#include "mktann_build.h"
-#include "mktann_cache.h"
-#include "mktann_scan.h"
-#include "mktann_storage.h"
+#include "pg/bufstorage.h"
 #include "quant/rabitq.h"
+#include "scan.h"
 #include "support_pg.h"
 #include "typeinfo.h"
 #include "types/vector.h"

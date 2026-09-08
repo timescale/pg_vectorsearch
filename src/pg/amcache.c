@@ -1,5 +1,5 @@
 /*
- * mktann_cache.c - Per-index cached state for mktann
+ * amcache.c - Per-index cached state for mktann
  *
  * The rotation matrix P is O(dim³) to generate, so it lives in a
  * process-local, reference-counted hash table (keyed by dim+seed) that
@@ -20,9 +20,9 @@
 #include <utils/memutils.h>
 #include <utils/resowner.h>
 
+#include "amcache.h"
 #include "core/log.h"
-#include "mktann_cache.h"
-#include "mktann_meta.h"
+#include "meta.h"
 #include "support_pg.h"
 #include "typeinfo.h"
 
@@ -238,7 +238,7 @@ get_or_create_params(Dimension dim, uint64_t seed)
 }
 
 /*
- * Check an entry back in (public API; see mktann_cache.h). dim+seed must
+ * Check an entry back in (public API; see amcache.h). dim+seed must
  * match a currently-held entry exactly as returned by a prior
  * get_or_create_params call; a mismatch indicates a caller bug, not a
  * runtime condition.

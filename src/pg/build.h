@@ -1,12 +1,12 @@
 /*
- * mktann_build.h - Index build for mktann
+ * build.h - Index build for mktann
  *
  * Implements ambuild: heap sampling, k-means clustering, RaBitQ
  * encoding, and centroid page writing.
  */
 
-#ifndef MKTANN_BUILD_H
-#define MKTANN_BUILD_H
+#ifndef MKT_BUILD_H
+#define MKT_BUILD_H
 
 #include <postgres.h>
 
@@ -19,7 +19,7 @@
 #include "index/build_progress.h" /* canonical MKT_BUILD_PHASE_* */
 #include "index/index_base.h"
 #include "index/parallel_build.h" /* MktBuildConfig */
-#include "mktann_storage.h"
+#include "pg/bufstorage.h"
 
 /* Build parameters resolved from the index relation/opclass, shared by the
  * serial and parallel build paths. */
@@ -53,4 +53,4 @@ double mktann_estimate_heap_tuples(Relation heap);
 /* do_parallel_build (the shared parallel build entry) is declared in
  * index/parallel_build.h, included above. */
 
-#endif /* MKTANN_BUILD_H */
+#endif /* MKT_BUILD_H */

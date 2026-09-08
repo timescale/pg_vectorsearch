@@ -21,7 +21,7 @@ mechanisms, prior art) and proposes a phased design.
 Findings from the code:
 
 - **`aminsert` is a stub that silently drops the entry.** `mktann_insert`
-  (`src/pg/mktann.c`) just `return false;`. The `bool` result is only
+  (`src/pg/iam_handler.c`) just `return false;`. The `bool` result is only
   meaningful for unique indexes, so this is not an error — but it adds **no
   index entry**. Net effect today: rows inserted/updated after build are
   **silently missing from the index** (index scans won't return them). This is
