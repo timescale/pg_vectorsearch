@@ -636,8 +636,18 @@ find_leaf_and_tail(
 		BlockNumber *tail_page,
 		uint8_t		*level)
 {
+	/*
+	 * Define every output up front. Only found_page and tail_page are
+	 * meaningful when this fails, and the other two are written solely on
+	 * the path that finds the leaf -- so a caller that skipped the return
+	 * value, or a compiler that cannot correlate found_idx's write with
+	 * found_page's, sees an indeterminate value (GCC warns about exactly
+	 * that at -O2).
+	 */
 	*found_page = InvalidBlockNumber;
 	*tail_page	= InvalidBlockNumber;
+	*found_idx	= 0;
+	*level		= 0;
 
 	BlockNumber blk = first_centroid;
 	while (blk != InvalidBlockNumber)
