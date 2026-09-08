@@ -9,36 +9,33 @@ search.
 
 Meerkat is a PostgreSQL extension that provides high-performance vector
 similarity search using an IVF (Inverted File) index structure with quantized
-vectors. It is inspired by [ScaNN][scann] and [SPANN][spann].
+vectors.
 
-Meerkat provides its own `vector` and `halfvec` types that are binary-compatible
-with [pgvector][pgvector]. pgvector is not required — meerkat installs and runs
-on its own.
+Meerkat is compatible with the vector types and operators from
+[pgvector][pgvector], but does not require it: Meerkat provides its own
+`vector` and `halfvec` types, binary-compatible with pgvector's.
 
-Where pgvector is installed, meerkat creates binary casts between the two
-extensions' types, so an existing pgvector column can be indexed directly with
-no rewrite and no copy, and it adds pgvector's `<->`, `<#>` and `<=>` to its
-own index operator families. A query written against pgvector — including a
-bare `<->` that resolves to pgvector — therefore uses a meerkat index without
-being rewritten.
+Where pgvector is already installed, an existing `vector` column can be
+indexed as it is -- no rewrite and no copy -- and queries already written
+against pgvector's operators use the meerkat index unchanged.
 
 ## Features
 
-- **Billion-scale vector search** with hierarchical clustering
-- **Native PostgreSQL integration** via the Index Access Method (IAM) API
+- **Large-scale vector search** (100M+ vectors) with hierarchical clustering
 - **SIMD-optimized distance computation** (AVX2, AVX512, NEON)
 - **RaBitQ quantization** with theoretical error bounds for two-stage search
-- **Dynamic updates** via LIRE protocol (split, merge, reassign)
-- **Multi-tenant support** with composite key indexes
-- **Buffer cache integration** for both centroid and posting list pages
-- **MVCC and replication support** through standard PostgreSQL mechanisms
+- **Dynamic updates** — inserts, updates and deletes, with posting-list
+  splits on demand (see [Index maintenance](#index-maintenance))
 
 ## Architecture
 
-Meerkat uses a hierarchical centroid tree to partition vectors into clusters.
-Centroids are stored in dedicated pages within the PostgreSQL buffer cache.
-Vectors are RaBitQ-quantized and stored in posting lists with a
-bidirectional page layout optimized for SIMD distance computation.
+Meerkat uses a hierarchical centroid tree to partition vectors into clusters,
+and relies on the PostgreSQL buffer cache to keep that tree warm in memory.
+Vectors are RaBitQ-quantized and stored in posting lists with a page layout
+optimized for SIMD distance computation. The RaBitQ encoding carries error
+bounds that let a search rule out vectors that cannot possibly be nearest
+neighbors, so far fewer of them need reranking against the full-precision
+vectors stored in the table.
 
 ```
 Query Flow:
@@ -53,7 +50,11 @@ For detailed architecture, see [docs/architecture.md][arch-doc].
 
 ## Status
 
-**Early development** - Currently in design and planning phase.
+**Pre-release** — under active development. Index builds (serial and
+parallel), search, runtime inserts, updates and deletes, and on-demand
+posting-list splits are functional and covered by regression, isolation, TAP
+and unit tests. The on-disk format and SQL API are not yet stable, and
+upgrades between pre-release versions may not be possible.
 
 See [docs/implementation.md][impl-doc] for the implementation roadmap and
 detailed specifications.
@@ -132,7 +133,11 @@ apt install libopenblas-dev
 dnf install openblas-devel
 ```
 
-## Benchmarking
+## Micro-benchmarking
+
+The Meerkat code base is structured to allow building the core vector search
+engine outside PostgreSQL. This makes it possible to unit test the code, as
+well as run micro-benchmarks to optimize particularly hot query paths.
 
 The `mkt` CLI tool includes benchmarks for distance computation:
 
@@ -149,21 +154,25 @@ See [docs/simd.md][simd-doc] for SIMD build options and implementation details.
 ## Usage
 
 ```sql
--- Enable extension
+-- Enable extension (its objects live in the mkt schema)
 CREATE EXTENSION meerkat;
+
+-- Make meerkat's types and operators visible without qualification
+SET search_path = mkt, public;
 
 -- Create table with vector column
 CREATE TABLE items (
     id serial PRIMARY KEY,
-    embedding mkt.vector(768)
+    embedding vector(768)
 );
 
--- Create Meerkat index
-CREATE INDEX ON items USING meerkat (embedding mkt.vector_l2_ops);
+-- Create ANN index; vector_l2_ops is the default operator class
+-- (vector_ip_ops and vector_cosine_ops select other metrics)
+CREATE INDEX ON items USING mktann (embedding vector_l2_ops);
 
 -- Query nearest neighbors
 SELECT * FROM items
-ORDER BY embedding <-> '[...]'::mkt.vector
+ORDER BY embedding <-> '[...]'::vector
 LIMIT 10;
 
 -- Speed/recall dial: probes more clusters for higher recall. The
@@ -280,8 +289,6 @@ TBD
 [aocl]: https://www.amd.com/en/developer/aocl/blis.html
 [armpl]: https://developer.arm.com/Tools%20and%20Software/Arm%20Performance%20Libraries
 [openblas]: https://www.openblas.net/
-[scann]: https://github.com/google-research/google-research/tree/master/scann
-[spann]: https://www.microsoft.com/en-us/research/publication/spann-highly-efficient-billion-scale-approximate-nearest-neighbor-search/
 [pgvector]: https://github.com/pgvector/pgvector
 [pgvectorscale]: https://github.com/timescale/pgvectorscale
 [rabitq]: https://github.com/gaoj0017/RaBitQ
