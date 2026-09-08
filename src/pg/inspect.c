@@ -33,7 +33,7 @@
 #include "index/posting_page.h"
 #include "index/query_scan.h"
 #include "inspect.h"
-#include "mktann_meta.h"
+#include "meta.h"
 #include "support_pg.h"
 
 PG_FUNCTION_INFO_V1(mkt_centroid_pages);

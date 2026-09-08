@@ -1,5 +1,5 @@
 /*
- * mktann_build.c - Index build for mktann
+ * build.c - Index build for mktann
  *
  * Serial build phases (do_serial_build; the parallel shape lives in
  * parallel_build_leader.c and falls back here when no workers launch):
@@ -47,6 +47,7 @@
 #include "algo/hkmeans.h"
 #include "algo/kmeans.h"
 #include "algo/vecops.h"
+#include "build.h"
 #include "core/log.h"
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
@@ -56,9 +57,8 @@
 #include "index/posting_build.h"
 #include "index/posting_page.h"
 #include "index/query_scan.h"
-#include "mktann_build.h"
-#include "mktann_meta.h"
-#include "mktann_storage.h"
+#include "meta.h"
+#include "pg/bufstorage.h"
 #include "quant/rabitq.h"
 #include "support_pg.h"
 #include "typeinfo.h"
@@ -66,7 +66,7 @@
 #include "types/vector.h"
 
 /* ----------------------------------------------------------------
- * Build state (MktannBuildParams is in mktann_build.h, shared with the
+ * Build state (MktannBuildParams is in build.h, shared with the
  * parallel leader)
  * ---------------------------------------------------------------- */
 

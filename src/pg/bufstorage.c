@@ -1,5 +1,5 @@
 /*
- * mktann_storage.c - PG buffer cache MktStorage implementation
+ * bufstorage.c - PG buffer cache MktStorage implementation
  *
  * Read path:  ReadBuffer + LockBuffer(SHARE) -> return page
  *             UnlockReleaseBuffer on release
@@ -27,9 +27,9 @@
 #include "algo/distance.h"
 #include "algo/topk.h"
 #include "algo/vecops.h"
+#include "amcache.h"
 #include "index/posting_page.h"
-#include "mktann_cache.h"
-#include "mktann_storage.h"
+#include "pg/bufstorage.h"
 #include "support_pg.h"
 #include "typeinfo.h"
 

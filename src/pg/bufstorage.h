@@ -1,13 +1,13 @@
 /*
- * mktann_storage.h - PG buffer cache MktStorage implementation
+ * bufstorage.h - PG buffer cache MktStorage implementation
  *
  * MktannStorage embeds MktStorage as its first member and adds PG-
  * specific context (Relation, current buffer). A single static vtable
  * is shared across all instances.
  */
 
-#ifndef MKTANN_STORAGE_H
-#define MKTANN_STORAGE_H
+#ifndef MKT_BUFSTORAGE_H
+#define MKT_BUFSTORAGE_H
 
 #include <postgres.h>
 
@@ -65,4 +65,4 @@ void mktann_storage_set_rel(MktannStorage *s, Relation rel);
  */
 void mktann_storage_set_recent_buffers(bool enabled);
 
-#endif /* MKTANN_STORAGE_H */
+#endif /* MKT_BUFSTORAGE_H */

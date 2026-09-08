@@ -1,12 +1,12 @@
 /*
- * mktann_scan.h - Index scan for mktann
+ * scan.h - Index scan for mktann
  *
  * Implements ambeginscan, amrescan, amgettuple, amendscan.
  * Reads the centroid tree via beam search and returns medoid TIDs.
  */
 
-#ifndef MKTANN_SCAN_H
-#define MKTANN_SCAN_H
+#ifndef MKT_SCAN_H
+#define MKT_SCAN_H
 
 #include <postgres.h>
 
@@ -72,4 +72,4 @@ bool mktann_gettuple(IndexScanDesc scan, ScanDirection direction);
  */
 void mktann_endscan(IndexScanDesc scan);
 
-#endif /* MKTANN_SCAN_H */
+#endif /* MKT_SCAN_H */

@@ -49,6 +49,8 @@
 #include <utils/snapmgr.h>
 #include <utils/syscache.h>
 
+#include "amcache.h"
+#include "build.h"
 #include "index/centroid_page.h"
 #include "index/index_base.h"
 #include "index/index_build.h"
@@ -56,10 +58,8 @@
 #include "index/posting_page.h"
 #include "index/posting_split.h"
 #include "inspect.h"
-#include "mktann_build.h"
-#include "mktann_cache.h"
-#include "mktann_meta.h"
-#include "mktann_storage.h"
+#include "meta.h"
+#include "pg/bufstorage.h"
 #include "support_pg.h"
 #include "typeinfo.h"
 #include "types/vector.h"

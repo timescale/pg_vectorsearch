@@ -167,7 +167,7 @@ for (uint32 c = 0; c < nlist; c++) {
 
 ### Phase 1: Refactor build into worker-processable functions
 
-**Files**: `src/pg/mktann_build.c`, new `src/index/build_parallel.c`,
+**Files**: `src/pg/build.c`, new `src/index/build_parallel.c`,
 new `src/index/build_parallel.h`
 
 1. Extract per-vector work from `build_callback()` into standalone
@@ -205,7 +205,7 @@ new `src/index/build_parallel.h`
 
 ### Phase 3: PG parallel workers
 
-**Files**: `src/pg/mktann_build.c`, `src/pg/mktann.c`
+**Files**: `src/pg/build.c`, `src/pg/iam_handler.c`
 
 1. Implement `amestimateparallelscan` and `aminitparallelscan` callbacks.
 

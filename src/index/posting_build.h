@@ -522,7 +522,7 @@ void mkt_posting_builder_cleanup(MktPostingBuilder *builder);
  *   [uint8 sign_bits[(dim+7)/8]]
  * mkt_posting_entry_encode() fills it (relative to the assigned cluster
  * centroid); mkt_posting_entry_add() replays it into a builder via
- * add_encoded. Used by both the serial (mktann_build.c) and parallel
+ * add_encoded. Used by both the serial (build.c) and parallel
  * (sort-seam) builds, so the format has a single definition.
  * ---------------------------------------------------------------- */
 Size mkt_posting_entry_size(Dimension dim);

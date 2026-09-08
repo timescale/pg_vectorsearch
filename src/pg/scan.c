@@ -1,5 +1,5 @@
 /*
- * mktann_scan.c - Index scan for mktann
+ * scan.c - Index scan for mktann
  *
  * Uses MktQueryState (shared with standalone) for the search hot
  * path. PG-specific concerns: scan iterator protocol, memory
@@ -20,13 +20,13 @@
 #include <utils/rel.h>
 
 #include "algo/vecops.h"
+#include "amcache.h"
 #include "core/platform.h"
 #include "index/posting_page.h"
 #include "index/query_scan.h"
-#include "mktann_cache.h"
-#include "mktann_scan.h"
-#include "mktann_storage.h"
+#include "pg/bufstorage.h"
 #include "quant/rabitq.h"
+#include "scan.h"
 #include "support_pg.h"
 #include "typeinfo.h"
 #include "types/vector.h"

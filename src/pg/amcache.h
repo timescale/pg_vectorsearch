@@ -1,5 +1,5 @@
 /*
- * mktann_cache.h - Per-index cached state for mktann
+ * amcache.h - Per-index cached state for mktann
  *
  * Holds the index's build-time-immutable parameters so the hot paths
  * (aminsert, beginscan) don't re-read and re-parse the metadata page on every
@@ -31,8 +31,8 @@
  * they are not cached.
  */
 
-#ifndef MKTANN_CACHE_H
-#define MKTANN_CACHE_H
+#ifndef MKT_AMCACHE_H
+#define MKT_AMCACHE_H
 
 #include <postgres.h>
 
@@ -56,7 +56,7 @@
  * base->params is checked out from the process-local rotation-matrix cache
  * and MUST be released with a matching mktann_release_params(base->dim,
  * base->rabitq_seed, owner) when the caller is done with it, where owner is
- * the CurrentResourceOwner observed at this call — see mktann_cache.c. The
+ * the CurrentResourceOwner observed at this call — see amcache.c. The
  * checkout is registered with that owner, so an error path that skips the
  * release (aborted scan, failed insert) still returns the refcount when the
  * owner is released.
@@ -121,4 +121,4 @@ MktannScanInfo mktann_cache_scan_info(Relation index);
  */
 const struct MktIndexTypeInfo *mktann_cache_type_info(Relation index);
 
-#endif /* MKTANN_CACHE_H */
+#endif /* MKT_AMCACHE_H */

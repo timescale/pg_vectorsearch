@@ -1,5 +1,5 @@
 /*
- * mktann_meta.h - Metadata page layout for mktann index
+ * meta.h - Metadata page layout for mktann index
  *
  * Block 0 of every mktann index stores an MktannMetaPage in the
  * page special area. It records index parameters (dimension, tree
@@ -7,8 +7,8 @@
  * global mean vector used for RaBitQ query preparation.
  */
 
-#ifndef MKTANN_META_H
-#define MKTANN_META_H
+#ifndef MKT_META_H
+#define MKT_META_H
 
 #include <postgres.h>
 
@@ -72,4 +72,4 @@ mktann_meta_global_mean_const(const MktannMetaPage *meta)
 						   sizeof(uint64_t));
 }
 
-#endif /* MKTANN_META_H */
+#endif /* MKT_META_H */

@@ -9,16 +9,16 @@ extension_sources = files(
   'halfvec_pg.c',
   'rabitq_pg.c',
   'rabitq_params_pg.c',
-  'mktann.c',
-  'mktann_build.c',
+  'iam_handler.c',
+  'build.c',
   'parallel_backend.c',
   'build_progress.c',
   '../index/parallel_build_leader.c',
   '../index/parallel_build_worker.c',
-  'mktann_cache.c',
-  'mktann_explain.c',
-  'mktann_scan.c',
-  'mktann_storage.c',
+  'amcache.c',
+  'explain.c',
+  'scan.c',
+  'bufstorage.c',
 )
 
 pg_ext_cflags = [

@@ -17,7 +17,7 @@
 #include <fmgr.h>
 #include <funcapi.h>
 
-#include "pg/mktann_cache.h"
+#include "pg/amcache.h"
 
 PG_MODULE_MAGIC;
 

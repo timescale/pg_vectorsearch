@@ -34,10 +34,10 @@
 #include <utils/tuplesort.h>
 #include <utils/wait_event.h>
 
+#include "build.h"
 #include "index/index_build.h"
 #include "index/parallel_build.h"
-#include "mktann_build.h"
-#include "mktann_storage.h"
+#include "pg/bufstorage.h"
 #include "quant/matrix.h"
 #include "quant/rabitq.h"
 #include "support_pg.h"

@@ -13,7 +13,7 @@
  * Who runs what: the build has a serial shape and a parallel shape, and
  * this header serves both.
  *
- *   Serial (one process; do_serial_build in pg/mktann_build.c):
+ *   Serial (one process; do_serial_build in pg/build.c):
  *     mkt_routing_tree_plan   clusters the sample once (recording each
  *                             node into a blob store) and sizes the page
  *                             layout;
@@ -467,7 +467,7 @@ mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out);
  * so there is one place to change it.
  *
  * Not the same quantity as the build's ~256 k-means training samples per list
- * (mktann_build.c, parallel_backend.c), which happens to share the value for a
+ * (build.c, parallel_backend.c), which happens to share the value for a
  * related reason but sizes the sample region -- the build's dominant memory
  * cost -- so the two must stay independently tunable.
  */

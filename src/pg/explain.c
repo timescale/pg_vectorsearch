@@ -1,5 +1,5 @@
 /*
- * mktann_explain.c - EXPLAIN ANALYZE output for mktann scans
+ * explain.c - EXPLAIN ANALYZE output for mktann scans
  *
  * Injects scan stats into EXPLAIN (ANALYZE, VERBOSE) output via
  * PG's explain_per_node_hook. Shows centroid search, posting scan,
@@ -19,8 +19,8 @@
 #include <utils/rel.h>
 
 #include "core/platform.h"
-#include "mktann_explain.h"
-#include "mktann_scan.h"
+#include "explain.h"
+#include "scan.h"
 
 static explain_per_node_hook_type prev_hook = NULL;
 
