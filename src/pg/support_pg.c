@@ -42,6 +42,7 @@ int			prism_leaf_refine_threshold = 0;
 static bool prism_recent_buffers		= true;
 double		prism_probe_expand			= 2.0;
 static int	prism_rerank_pool			= 0;
+double prism_rerank_pool_cost_scale = 0.0; /* prism.rerank_pool_cost_scale */
 
 static void
 vs_recent_buffers_assign_hook(bool newval, void *extra)
@@ -335,6 +336,33 @@ _PG_init(void)
 			0,
 			NULL,
 			vs_rerank_pool_assign_hook,
+			NULL);
+
+	DefineCustomRealVariable(
+			VS_GUC_PREFIX ".rerank_pool_cost_scale",
+			"Relative cost of one exact-rerank candidate, applied to the "
+			"automatic rerank_pool only (0 = auto-detect).",
+			"The automatic rerank_pool formula (rerank_pool = 0) is fit "
+			"assuming a cache-resident rerank: every candidate is a cheap "
+			"in-memory fetch. This scale corrects that assumption when it "
+			"does not hold -- e.g. the indexed table exceeds available "
+			"cache and a candidate is a real disk read instead -- by "
+			"dividing the automatic pool by it. 0 (the default) "
+			"auto-detects a scale each scan from the ratio of the index's "
+			"table+index size to effective_cache_size, floored at 1.0 (the "
+			"original fit, unmodified, whenever the working set fits in "
+			"cache). A positive value overrides the auto-detection with an "
+			"exact scale; 1.0 reproduces the original fit exactly regardless "
+			"of relation size. Has no effect when rerank_pool is set "
+			"explicitly.",
+			&prism_rerank_pool_cost_scale,
+			0.0,
+			0.0,
+			1000.0,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
 			NULL);
 
 	MarkGUCPrefixReserved(VS_GUC_PREFIX);
