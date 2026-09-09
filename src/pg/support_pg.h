@@ -43,6 +43,10 @@ extern double mkt_centroid_beam_scale;	 /* intermediate beam width as fraction
 extern double mkt_rerank_pool_cost_scale; /* rerank candidate cost scale
 											  (0=auto-detect from relation
 											  size vs effective_cache_size) */
+extern bool	  mkt_rerank_early_exit;		 /* stop reranking once the
+											    remaining pool provably can't
+											    improve on the exact top-k
+											    found so far (prototype) */
 extern relopt_kind mktann_relopt_kind;	 /* index reloption kind */
 
 /* ----------------------------------------------------------------

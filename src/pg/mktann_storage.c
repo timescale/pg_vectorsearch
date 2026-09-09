@@ -341,6 +341,118 @@ cmp_tid_order(const void *a, const void *b, void *arg)
 }
 
 /*
+ * pg_rerank_early_exit - Rerank with adaptive early termination
+ * (mkt.rerank_early_exit prototype).
+ *
+ * `candidates` arrives sorted by estimated distance ascending
+ * (extract_candidates in query_scan.c) -- deliberately processed in
+ * that order here, unlike pg_rerank/pg_rerank_readstream's TID sort,
+ * because the stopping check below depends on it: once `keep` exact
+ * distances have been confirmed, a later candidate's own RaBitQ error
+ * bound tells us whether it could still possibly beat the worst of
+ * those k -- and the check only gets stricter as more real answers
+ * arrive, so evaluating candidates least-estimated-distance-first,
+ * checking the CURRENT threshold at each step, is safe regardless of
+ * how many candidates end up skipped.
+ *
+ * This is the ordering pg_rerank_readstream gives up for TID-sorted
+ * read_stream batching. Losing that batching is the deliberate
+ * trade this prototype makes to test whether stopping early is worth
+ * more than the I/O batching it forfeits -- see mkt.rerank_early_exit's
+ * GUC description. One heap fetch at a time, no prefetch.
+ */
+static uint32_t
+pg_rerank_early_exit(
+		MktStorage		   *self,
+		const float		   *query,
+		Dimension			dim,
+		const MktTopKEntry *candidates,
+		uint32_t			count,
+		uint32_t			keep,
+		uint32_t		   *out_indices,
+		Distance		   *out_distances)
+{
+	MktannStorage *s = PG_STORAGE(self);
+
+	if (s->rel == NULL || count == 0)
+		return 0;
+
+	AttrNumber vec_attnum = s->index->rd_index->indkey.values[0];
+
+	MktVectorAccess input =
+			mkt_vector_access(s->type_info, dim, CurrentMemoryContext);
+
+	MktTopK topk;
+	mkt_topk_init(&topk, keep);
+
+	TupleTableSlot *slot = table_slot_create(s->rel, NULL);
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		/* Once k exact distances are confirmed, skip any candidate
+		 * whose best possible true distance (estimate - error) is
+		 * already no better than the k-th best exact distance found
+		 * so far -- it cannot change the final top-k. */
+		if (topk.cand_count >= keep)
+		{
+			Distance threshold	  = mkt_topk_threshold(&topk);
+			Distance lower_bound = candidates[i].distance - candidates[i].error;
+			if (lower_bound >= threshold)
+				continue;
+		}
+
+		Distance d;
+		if (candidates[i].error == 0.0f)
+		{
+			d = candidates[i].distance;
+		}
+		else
+		{
+			ItemPointerData tid = mkt_posting_decode_tid(candidates[i].id);
+			if (table_tuple_fetch_row_version(s->rel, &tid, SnapshotAny, slot))
+			{
+				bool  isnull;
+				Datum val = slot_getattr(slot, vec_attnum, &isnull);
+				if (!isnull)
+				{
+					VectorRef qref = {.data = query, .dim = dim};
+					VectorRef vref = mkt_vector_read(&input, val);
+					d			   = mkt_distance(qref, vref, s->metric);
+				}
+				else
+				{
+					d = candidates[i].distance;
+				}
+				ExecClearTuple(slot);
+			}
+			else
+			{
+				d = candidates[i].distance;
+			}
+		}
+
+		mkt_topk_insert_unique(&topk, d, 0.0f, (uint64_t)i);
+	}
+
+	ExecDropSingleTupleTableSlot(slot);
+
+	MktTopKEntry *entries = palloc(topk.cand_count * sizeof(MktTopKEntry));
+	uint32_t	  nresults;
+	mkt_topk_extract_sorted_unique(&topk, entries, &nresults);
+
+	for (uint32_t i = 0; i < nresults; i++)
+	{
+		out_indices[i]	 = (uint32_t)entries[i].id;
+		out_distances[i] = entries[i].distance;
+	}
+
+	pfree(entries);
+	mkt_topk_cleanup(&topk);
+
+	return nresults;
+}
+
+/*
  * pg_rerank - Rerank candidates with exact L2 distances.
  *
  * Fetches full-precision vectors from the heap table and computes
@@ -509,6 +621,14 @@ pg_rerank_readstream(
 		uint32_t		   *out_indices,
 		Distance		   *out_distances)
 {
+	/* mkt.rerank_early_exit (prototype): give up TID-sorted batching for
+	 * the ability to stop before the pool is exhausted -- see
+	 * pg_rerank_early_exit and the GUC's own description. */
+	if (mkt_rerank_early_exit)
+		return pg_rerank_early_exit(
+				self, query, dim, candidates, count, keep, out_indices,
+				out_distances);
+
 	MktannStorage *s = PG_STORAGE(self);
 
 	if (s->rel == NULL || count == 0)

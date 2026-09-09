@@ -34,6 +34,7 @@ double		  mkt_centroid_error_scale	= 0.0;
 double		  mkt_centroid_beam_scale	= 0.5;
 int			  mkt_leaf_refine_threshold = 0;
 double		  mkt_rerank_pool_cost_scale = 0.0; /* mkt.rerank_pool_cost_scale */
+bool		  mkt_rerank_early_exit		 = false; /* mkt.rerank_early_exit */
 static bool	  mkt_recent_buffers		= true;
 static double mkt_probe_expand			= 2.0;
 static int	  mkt_rerank_pool			= 0;
@@ -342,6 +343,31 @@ _PG_init(void)
 			0.0,
 			0.0,
 			1000.0,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
+			NULL);
+
+	DefineCustomBoolVariable(
+			MKT_EXTENSION_SCHEMA ".rerank_early_exit",
+			"Prototype: stop reranking a query's candidate pool early once "
+			"the remaining candidates provably cannot improve on the exact "
+			"top-k found so far.",
+			"Candidates arrive at rerank sorted by estimated distance "
+			"ascending. Once k exact distances have been found, a later "
+			"candidate is skipped -- no heap fetch -- when its best possible "
+			"true distance (estimate minus its own RaBitQ error bound) is "
+			"already no better than the k-th best exact distance confirmed "
+			"so far; that bound only tightens as reranking proceeds, so the "
+			"check is safe at every step regardless of processing order. "
+			"Off by default: it trades away the read_stream path's "
+			"TID-sorted batched I/O for the ability to stop before the pool "
+			"is exhausted, which only pays off when a large fraction of the "
+			"pool would not have changed the result -- worth measuring "
+			"per-deployment, not assuming.",
+			&mkt_rerank_early_exit,
+			false,
 			PGC_USERSET,
 			0,
 			NULL,
