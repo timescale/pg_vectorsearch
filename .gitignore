@@ -1,4 +1,5 @@
 # Build directories
+builddir
 builddir/
 builddir-*/
 debug/

@@ -40,6 +40,10 @@ typedef struct MktannScanStats
 
 	/* Total storage reads */
 	uint32_t storage_reads;
+
+	/* Top-k the search was sized for (from the query's LIMIT, seeded by
+	 * filter selectivity, or mkt.query_limit, or the built-in default) */
+	uint32_t top_k;
 } MktannScanStats;
 
 const MktannScanStats *mktann_scan_get_stats(IndexScanDesc scan);

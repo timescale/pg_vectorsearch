@@ -45,6 +45,16 @@ mkt_query_state_init(
 
 	mkt_index_ensure_rabitq(index);
 
+	/*
+	 * Everything below is allocated here, including the contexts the top-k
+	 * and the centroid scratch create for themselves, so that the whole
+	 * state can be released at once. Parented to the caller's current
+	 * context, so a caller that never calls cleanup still loses it with
+	 * whatever scope it allocated the state in.
+	 */
+	qs->memctx			 = mkt_memctx_create(NULL, "mkt query state");
+	MktMemCtx caller_ctx = mkt_memctx_switch(qs->memctx);
+
 	Dimension dim		   = index->dim;
 	uint32_t  packed_bytes = MKT_RABITQ_BYTES(dim);
 
@@ -83,7 +93,7 @@ mkt_query_state_init(
 	mkt_topk_init(&qs->topk, max_k);
 
 	/* Candidate extraction buffer */
-	qs->cand_cap   = max_k * 16;
+	qs->cand_cap   = max_k * MKT_QUERY_CAND_PER_K;
 	qs->candidates = mkt_alloc(qs->cand_cap * sizeof(MktTopKEntry));
 
 	/* Result ordering */
@@ -99,6 +109,8 @@ mkt_query_state_init(
 			index->params,
 			dim,
 			max_entries);
+
+	mkt_memctx_switch(caller_ctx);
 }
 
 void
@@ -107,10 +119,22 @@ mkt_query_state_cleanup(MktQueryState *qs)
 	if (qs == NULL)
 		return;
 
+	/*
+	 * The pinned page first: it is the one resource the state holds that is
+	 * not memory, and deleting the context below would strand it.
+	 */
 	mkt_posting_scan_cleanup(&qs->pscan);
+
+	/* Sub-contexts before the context that parents them. */
 	mkt_topk_cleanup(&qs->topk);
 	mkt_centroid_scratch_free(qs->centroid_scratch);
 	qs->centroid_scratch = NULL;
+
+	if (qs->memctx != NULL)
+	{
+		mkt_memctx_delete(qs->memctx);
+		qs->memctx = NULL;
+	}
 }
 
 /* ----------------------------------------------------------------

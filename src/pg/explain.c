@@ -62,6 +62,7 @@ mktann_explain_hook(
 
 	ExplainOpenGroup("Mktann", "Mktann", true, es);
 
+	ExplainPropertyInteger("Top-K", NULL, stats->top_k, es);
 	ExplainPropertyInteger(
 			"Posting Lists Scanned", NULL, stats->clusters_scanned, es);
 	ExplainPropertyInteger(

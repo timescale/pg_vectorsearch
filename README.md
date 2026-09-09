@@ -180,12 +180,14 @@ LIMIT 10;
 -- ~0.95 recall; lower is faster, higher is more accurate.
 SET mkt.nprobe = 40;
 
--- Queries with LIMIT above 10 must size the scan accordingly
+-- The scan sizes its result set from the query's LIMIT (inflated for a
+-- WHERE clause by its estimated selectivity) and bounds it by work_mem.
+-- Set this only to cap that sizing.
 SET mkt.query_limit = 100;
 ```
 
 Defaults are tuned from large-scale benchmarks; most deployments only
-ever adjust `mkt.nprobe` (and `mkt.query_limit` for larger LIMITs).
+ever adjust `mkt.nprobe`.
 See the [tuning guide][tuning-doc] for every index parameter and GUC,
 their tradeoffs, and when changing them makes sense.
 
