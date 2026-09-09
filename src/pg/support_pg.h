@@ -40,6 +40,9 @@ extern double mkt_centroid_error_scale;	 /* scales centroid pruning error bound
 											(1=default, 0=drop) */
 extern double mkt_centroid_beam_scale;	 /* intermediate beam width as fraction
 											of nprobe (0.25=default) */
+extern double mkt_rerank_pool_cost_scale; /* rerank candidate cost scale
+											  (0=auto-detect from relation
+											  size vs effective_cache_size) */
 extern relopt_kind mktann_relopt_kind;	 /* index reloption kind */
 
 /* ----------------------------------------------------------------
