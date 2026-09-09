@@ -43,15 +43,47 @@ query scans the `nprobe` clusters nearest the query vector.
 
 ### mkt.query_limit (GUC, query time)
 
-**Affects: how many rows an index scan can return; too low silently
-truncates results.**
+**Affects: how many rows an index scan is sized to return; normally
+derived from the query, set it only to cap it.**
 
-The number of results a scan is sized to return. Queries using
-`ORDER BY ... LIMIT k` with `k > 10` **must** set it (e.g.
-`SET mkt.query_limit = 100` for `LIMIT 100`); the default sizing
-returns at most 10 rows per scan.
+An index scan computes its whole top-k on the first fetch, so it has to
+know k up front in order to use RaBitQ bounds to prune the candidate set
+that would otherwise require expensive reranking on the full vectors.
+The scan takes it from the query: a `LIMIT` (plus any `OFFSET`) directly
+above the scan, or above nodes that keep one output row per input row (a
+projection, a `row_number()` window), sizes the scan for that many rows
+-- including inside a CTE, on the inner side of a join or `LATERAL`, and
+in a cached prepared statement.
 
-- **Default:** `0` = size for 10 results.
+When the scan also filters via a `WHERE` clause, the executor applies
+the filtering after the index has emitted its top-k, so only a fraction
+of the emitted rows survive. The top-k is therefore inflated based on the
+`WHERE` clause's selectivity in order to produce enough tuples to achieve
+the required k after filtering. A filter anti-correlated with vector
+proximity, whose survivors are not spread through the top-k the way the
+estimate assumes, can still come up short; a partial index on the filter
+avoids the estimate entirely.
+
+The top-k heap is bounded by `work_mem`. A query asking for more -- a
+large `LIMIT`, or a selective filter inflating the sizing -- returns as
+many rows as that budget affords, and **raising `work_mem` is how to ask
+for more**.
+
+If none of the above mechanisms for managing the size of the top-k heap
+are sufficient, the `mkt.query_limit` GUC is a manual lever to cap the
+number of tuples returned when the query lacks a `LIMIT` or it is set
+very high.
+
+- **Default:** `0` = size from the query's `LIMIT`, never below 10; with
+  no usable `LIMIT` the query has asked for every row in order, so the
+  sizing is what `work_mem` affords or the table's row count, whichever
+  is smaller. Note an unlimited ordered scan therefore reranks every
+  candidate it scans, which is inherent to returning them all in exact
+  order. The floor keeps a little slack under a small `LIMIT` for rows
+  the heap fetch discards (deleted but not yet vacuumed).
+
+The top-k a scan actually used is reported as `Top-K` under
+`EXPLAIN (ANALYZE, VERBOSE)`.
 
 ### nlist (index parameter, set at build)
 

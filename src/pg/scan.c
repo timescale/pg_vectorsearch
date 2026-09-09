@@ -14,6 +14,7 @@
 #include <access/genam.h>
 #include <access/relscan.h>
 #include <fmgr.h>
+#include <miscadmin.h>
 #include <pgstat.h>
 #include <utils/builtins.h>
 #include <utils/memutils.h>
@@ -21,19 +22,28 @@
 
 #include "algo/vecops.h"
 #include "amcache.h"
+#include "build.h"
 #include "core/platform.h"
 #include "index/posting_page.h"
 #include "index/query_scan.h"
 #include "pg/bufstorage.h"
 #include "quant/rabitq.h"
 #include "scan.h"
+#include "scan_bound.h"
 #include "support_pg.h"
 #include "typeinfo.h"
 #include "types/vector.h"
 
 /* Default nprobe — will become a GUC later */
 #define MKT_DEFAULT_NPROBE 10
-#define MKT_DEFAULT_K	   10
+/*
+ * Smallest top-k any scan is sized for. Not a default in the sense of "what
+ * you get when you ask for nothing" -- a query with no LIMIT is sized from
+ * work_mem (see resolve_top_k) -- but a floor under every sizing, so that a
+ * LIMIT 1 has slack for a candidate that turns out to be a dead tuple the
+ * heap fetch discards, and a work_mem too small to hold more still answers.
+ */
+#define MKT_DEFAULT_K 10
 
 /* ----------------------------------------------------------------
  * Process-global per-phase accumulators (diagnostic).
@@ -165,8 +175,17 @@ typedef struct MktannScanState
 	uint32_t		  curr;
 	bool			  first;
 
-	/* Shared query state (pre-allocated, zero-alloc hot path) */
+	/* Shared query state. Allocated on the first search rather than at
+	 * beginscan, so it can be sized for the top-k the query actually
+	 * asks for -- the LIMIT hint arrives between the two (see
+	 * scan_bound.c). Rebuilt only if a later search needs a larger k. */
 	MktQueryState qstate;
+	bool		  qstate_ready;
+	uint32_t	  max_nprobe;
+	bool		  has_fastscan;
+
+	/* Rows the enclosing LIMIT will pull, 0 when unknown */
+	uint32_t scan_bound;
 
 	/* PG storage (index page I/O) */
 	MktannStorage storage;
@@ -225,15 +244,6 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	ss->query_vector_access = mkt_vector_access(
 			mktann_cache_type_info(index), ss->index_base.dim, scan_ctx);
 
-	/* Size the top-K for the requested result count: mkt.query_limit is
-	 * set before the query runs (same contract as the nprobe sizing
-	 * below). Without this, mkt_query_execute clamps k to the allocated
-	 * max_k and a query_limit above the default silently returned only
-	 * MKT_DEFAULT_K results. */
-	uint32_t max_k = MKT_DEFAULT_K;
-	if (mkt_query_limit > 0 && (uint32_t)mkt_query_limit > max_k)
-		max_k = (uint32_t)mkt_query_limit;
-
 	/* Size the per-scan query buffers to the nprobe actually requested
 	 * (the GUC is set before the query runs) rather than the worst-case
 	 * ceiling: the centroid-search scratch alone is
@@ -249,8 +259,8 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 		max_nprobe = 4096;
 	if (max_nprobe > info.nlist)
 		max_nprobe = info.nlist;
-
-	bool has_fastscan = ss->index_base.fastscan != 0;
+	ss->max_nprobe	 = max_nprobe;
+	ss->has_fastscan = ss->index_base.fastscan != 0;
 
 	/* Initialize PG storage */
 	mktann_storage_init(&ss->storage, index, NULL, ss->index_base.metric);
@@ -258,16 +268,8 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	ss->index_base.posting_storage	= &ss->storage.base;
 	ss->index_base.page_base		= NULL;
 
-	/* Initialize shared query state */
-	mkt_query_state_init(&ss->qstate, &ss->index_base, max_k, max_nprobe);
-
-	if (has_fastscan)
-		mkt_posting_scan_enable_fastscan(&ss->qstate.pscan, mkt_fastscan_bits);
-
-	/* Pre-allocate result buffer. The error-bound rerank can return more than
-	 * max_k results, so this is a starting size; rescan grows it as needed. */
-	ss->results		= palloc(max_k * sizeof(MktannScanResult));
-	ss->results_cap = max_k;
+	/* The query state and result buffer are sized on the first search
+	 * (ensure_query_state), once the top-k is known. */
 
 	/* Order-by arrays */
 	if (norderbys > 0)
@@ -306,6 +308,182 @@ mktann_rescan(
 	ss->first	 = true;
 	ss->curr	 = 0;
 	ss->nresults = 0;
+
+	/*
+	 * Size the top-k from the query's LIMIT, if this scan runs under one.
+	 * Here rather than pushed in from the executor: by rescan the executor
+	 * node already points at this scan, so scan_bound.c can find the right
+	 * node by identity, and nothing has to open the scan descriptor before
+	 * the executor would.
+	 *
+	 * Re-resolved on every rescan, not cached: a correlated LIMIT takes a
+	 * new value for each outer row, and a stale one would return too few
+	 * rows -- the very failure this exists to prevent. nodeLimit.c
+	 * re-derives its own bound per rescan for the same reason ("in case
+	 * this is a rescan and the previous time we got a different result").
+	 */
+	ss->scan_bound = mkt_scan_bound(scan);
+}
+
+/*
+ * Bytes the scan commits per row its top-k can return.
+ *
+ * Every allocation that scales with k, and none scale with the vector
+ * dimension. Sizing this from anything less makes the work_mem ceiling
+ * below a fiction: the extraction buffer alone is MKT_QUERY_CAND_PER_K
+ * entries per row, which dominates the rest by an order of magnitude.
+ *
+ *   mkt_topk_init         one upper bound and one id per row, plus a
+ *                         candidate array of two entries per row
+ *   mkt_query_state_init  MKT_QUERY_CAND_PER_K candidates per row and an
+ *                         index and a distance for each of them
+ *   execute_search        one result slot per row
+ *
+ * Keep in step with those three; MKT_QUERY_CAND_PER_K is shared with the
+ * allocator so that multiple cannot drift.
+ *
+ * This prices the state as initialized. extract_candidates doubles the
+ * extraction arrays if a query admits more candidates than the sizing
+ * allowed for, so a scan can exceed this budget; work_mem bounds what the
+ * scan asks for, not the high-water mark of a pathological query.
+ */
+#define MKT_TOP_K_BYTES_PER_ROW                                             \
+	(sizeof(Distance) + sizeof(uint64_t) + 2 * sizeof(MktTopKEntry) +       \
+	 MKT_QUERY_CAND_PER_K *                                                 \
+			 (sizeof(MktTopKEntry) + sizeof(uint32_t) + sizeof(Distance)) + \
+	 sizeof(MktannScanResult))
+
+/*
+ * Rows the top-k may be sized to, from work_mem.
+ *
+ * The ceiling belongs to the memory the administrator granted, not to a row
+ * constant: a session with work_mem raised for a large query should be able
+ * to ask for a large LIMIT, and one with it lowered should not be able to
+ * commit the backend to more. The LIMIT and the relation's row count are
+ * inputs to the sizing rather than limits on it; mkt.query_limit lowers it
+ * when set, and this bounds whatever the rest of the sizing arrives at.
+ *
+ * Floored at the built-in default so a query always answers something. A
+ * scan, unlike a split, can always return a few rows -- so a work_mem too
+ * small to hold more is a reason to return fewer, not to raise an error.
+ */
+static uint32_t
+max_top_k_for_work_mem(void)
+{
+	uint64 rows = ((uint64)work_mem * 1024) / MKT_TOP_K_BYTES_PER_ROW;
+
+	if (rows < MKT_DEFAULT_K)
+		return MKT_DEFAULT_K;
+	if (rows > PG_UINT32_MAX)
+		return PG_UINT32_MAX;
+	return (uint32_t)rows;
+}
+
+/*
+ * Resolve the top-k for a search.
+ *
+ * The rows the query's LIMIT asks for (resolved by scan_bound.c) are the
+ * primary source. With no usable LIMIT the query has asked for every row in
+ * distance order, so the scan is sized for as many as it could possibly
+ * return: what work_mem affords, or the relation's estimated row count if
+ * that is smaller -- an ordered scan cannot return more rows than exist.
+ * Sizing for a fixed handful instead would silently answer a complete
+ * ordered scan with a fraction of it.
+ *
+ * mkt.query_limit then lowers the result if it is set below it, and
+ * work_mem bounds it in every case, so a query asking for more rows than
+ * the backend may hold returns as many as it can.
+ *
+ * The built-in default is the floor. It keeps a little slack under a small
+ * LIMIT for rows the executor's heap fetch discards (deleted but not yet
+ * vacuumed), which would otherwise leave a LIMIT 1 empty when its single
+ * candidate is dead, and it leaves a query something to answer with under a
+ * work_mem too small to hold more.
+ */
+static uint32_t
+resolve_top_k(const MktannScanState *ss, Relation heap)
+{
+	uint32_t cap = max_top_k_for_work_mem();
+	uint32_t k	 = ss->scan_bound;
+
+	if (k == 0)
+	{
+		/* No LIMIT to size from: the query has asked for every row in
+		 * order, so size for as many as it could return. */
+		k = cap;
+		if (heap != NULL)
+		{
+			double rows = mktann_estimate_heap_tuples(heap);
+
+			if (rows >= 1.0 && rows < (double)cap)
+				k = (uint32_t)rows;
+		}
+	}
+
+	/*
+	 * mkt.query_limit only ever lowers the sizing. Raising it above what
+	 * the query asked for would have the scan rank rows the LIMIT then
+	 * throws away; the lever exists to cap a query that asks for too much
+	 * -- one with no LIMIT, or with one set far higher than the rows the
+	 * caller will read.
+	 */
+	if (mkt_query_limit > 0 && (uint32_t)mkt_query_limit < k)
+		k = (uint32_t)mkt_query_limit;
+
+	if (k < MKT_DEFAULT_K)
+		k = MKT_DEFAULT_K;
+
+	return k > cap ? cap : k;
+}
+
+/*
+ * Allocate (or resize) the shared query state and result buffer for a
+ * top-k of at least k. mkt_query_execute clamps k to the allocated
+ * max_k, so undersizing here is what silently truncates results.
+ *
+ * A resize discards the previous state rather than adding to it. Every
+ * buffer in it is sized to max_k, and a rescan can resize -- a correlated
+ * LIMIT resolves afresh for each outer row -- so keeping the old ones
+ * would accumulate a full set per resize for the life of the scan.
+ * mkt_query_state_cleanup owns that: the state holds its buffers in a
+ * context of its own.
+ *
+ * The result array is deliberately not part of that state. It grows with
+ * what the rerank returns rather than with the sizing, so it lives in the
+ * scan context where repalloc preserves it across a resize.
+ */
+static void
+ensure_query_state(MktannScanState *ss, uint32_t k)
+{
+	uint32_t max_k = Max(k, (uint32_t)MKT_DEFAULT_K);
+
+	if (ss->qstate_ready && max_k <= ss->qstate.max_k)
+		return;
+
+	MemoryContext old_ctx = MemoryContextSwitchTo(ss->scan_ctx);
+
+	if (ss->qstate_ready)
+	{
+		mkt_query_state_cleanup(&ss->qstate);
+		ss->qstate_ready = false;
+	}
+
+	mkt_query_state_init(&ss->qstate, &ss->index_base, max_k, ss->max_nprobe);
+	if (ss->has_fastscan)
+		mkt_posting_scan_enable_fastscan(&ss->qstate.pscan, mkt_fastscan_bits);
+	ss->qstate_ready = true;
+
+	/* The error-bound rerank can return more than max_k results, so this
+	 * is a starting size; execute_search grows it as needed. */
+	if (ss->results_cap < max_k)
+	{
+		size_t bytes	= max_k * sizeof(MktannScanResult);
+		ss->results		= ss->results ? repalloc(ss->results, bytes)
+									  : palloc(bytes);
+		ss->results_cap = max_k;
+	}
+
+	MemoryContextSwitchTo(old_ctx);
 }
 
 /* ----------------------------------------------------------------
@@ -327,6 +505,9 @@ execute_search(IndexScanDesc scan)
 	pgstat_count_index_scan(scan->indexRelation);
 	if (scan->instrument != NULL)
 		scan->instrument->nsearches++;
+
+	uint32_t k = resolve_top_k(ss, scan->heapRelation);
+	ensure_query_state(ss, k);
 
 	/* Lazily set heap relation for reranking (rel is NULL at
 	 * beginscan time; heapRelation becomes available later) */
@@ -351,8 +532,6 @@ execute_search(IndexScanDesc scan)
 						ss->index_base.dim)));
 
 	/* Execute shared search */
-	uint32_t k		= mkt_query_limit > 0 ? (uint32_t)mkt_query_limit
-										  : ss->qstate.max_k;
 	uint32_t nprobe = mkt_nprobe > 0 ? (uint32_t)mkt_nprobe
 									 : mkt_auto_nprobe(ss->index_base.nlist);
 
@@ -376,6 +555,7 @@ execute_search(IndexScanDesc scan)
 	ss->stats.rerank_candidates		  = ss->qstate.ncandidates;
 	ss->stats.rerank_results		  = ss->qstate.nresults;
 	ss->stats.storage_reads			  = ss->storage.read_count;
+	ss->stats.top_k					  = k;
 	ss->stats.centroid_ns			  = qstats.centroid_ns;
 	ss->stats.posting_ns			  = qstats.posting_ns;
 	ss->stats.rerank_ns				  = qstats.rerank_ns;
@@ -478,7 +658,8 @@ mktann_endscan(IndexScanDesc scan)
 
 	if (ss != NULL)
 	{
-		mkt_query_state_cleanup(&ss->qstate);
+		if (ss->qstate_ready)
+			mkt_query_state_cleanup(&ss->qstate);
 		/* Check the RaBitQParams checkout back in before the scan's own
 		 * memory goes away — see mktann_index_base_init / the beginscan
 		 * call above. */

@@ -4,11 +4,12 @@
 -- limit, probe count, rerank pool, ...): defaults, bounds, and their
 -- interaction with the query.
 
--- Tie-free deterministic data (grid data would produce distance ties)
-CREATE TABLE query_settings_test (id serial, v vector(32));
+-- Tie-free deterministic data (grid data would produce distance ties).
+-- grp is a 10%-selective filter column for the filtered-scan test.
+CREATE TABLE query_settings_test (id serial, grp int, v vector(32));
 
-INSERT INTO query_settings_test (v)
-    SELECT (
+INSERT INTO query_settings_test (grp, v)
+    SELECT i % 10, (
         SELECT array_agg(sin(i * 0.1 + j * 0.7)::real)
         FROM generate_series(0, 31) j
     )::vector(32)
@@ -63,16 +64,436 @@ RESET enable_indexscan;
 SELECT count(*) AS matching_top50
     FROM truth_k50 t JOIN result_k50 r USING (id);
 
--- Default (query_limit = 0): the scan returns at most the built-in
--- default k regardless of a larger LIMIT. This pins the current
--- contract; update deliberately if the default ever changes.
+-- Default (query_limit = 0): the scan sizes its top-k from the query's
+-- LIMIT, so a LIMIT above the built-in default k returns the full
+-- count without any GUC.
 RESET mkt.query_limit;
 SET enable_seqscan = off;
-SELECT count(*) AS rows_default_guc FROM (
+SELECT count(*) AS rows_limit_bound FROM (
     SELECT id FROM query_settings_test
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
     LIMIT 50) t;
 
+-- OFFSET counts toward the rows the scan must produce.
+SELECT count(*) AS rows_offset_limit FROM (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    OFFSET 45 LIMIT 10) t;
+
+-- The LIMIT reaches the scan through row-preserving nodes: a
+-- row_number() window inside a CTE (the reciprocal-rank-fusion shape).
+WITH ranked AS (
+    SELECT id, row_number() OVER (
+        ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    ) AS rank
+    FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 100)
+SELECT count(*) AS rows_cte_window FROM ranked;
+
+-- Each rescan of a scan on the inner side of a join keeps the LIMIT.
+SELECT count(*) AS rows_lateral FROM generate_series(1, 5) g,
+    LATERAL (
+        SELECT id FROM query_settings_test
+        ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = g * 7)
+        LIMIT 30) t;
+
+-- A correlated LIMIT takes a new value for each outer row, so the sizing
+-- must be re-derived per rescan rather than cached from the first one. A
+-- stale hint returns too few rows -- the failure this whole mechanism
+-- exists to prevent. nodeLimit.c re-derives its own bound per rescan for
+-- the same reason. Both directions: the limit rises, then falls.
+SELECT k.n AS requested, count(*) AS returned
+FROM (VALUES (15), (60), (25)) k(n), LATERAL (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT k.n) x
+GROUP BY k.n ORDER BY k.n;
+
+-- A LIMIT bound as a statement parameter is known at execution start.
+PREPARE limit_param(int) AS SELECT count(*) AS rows_limit_param FROM (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT $1) t;
+EXECUTE limit_param(25);
+DEALLOCATE limit_param;
+
+-- A cached generic plan is not re-planned, so the LIMIT must survive
+-- into re-executions: run past the custom-plan threshold.
+PREPARE limit_cached(int) AS SELECT count(*) AS rows_cached_plan FROM (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = $1)
+    LIMIT 40) t;
+EXECUTE limit_cached(1);
+EXECUTE limit_cached(2);
+EXECUTE limit_cached(3);
+EXECUTE limit_cached(4);
+EXECUTE limit_cached(5);
+EXECUTE limit_cached(6);
+EXECUTE limit_cached(7);
+DEALLOCATE limit_cached;
+
+-- The pushed-down top-k is the LIMIT itself, reported by EXPLAIN.
+CREATE FUNCTION query_settings_top_k(q text) RETURNS int
+    LANGUAGE plpgsql AS $$
+DECLARE
+    j json;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, FORMAT JSON) ' || q
+    INTO j;
+    -- The scan node's position among the Limit's children depends on
+    -- whether an InitPlan precedes it; find it by its Mktann section.
+    RETURN (jsonb_path_query_first(j::jsonb,
+        '$.** ? (exists(@."Mktann"))."Mktann"."Top-K"'))::int;
+END $$;
+SELECT query_settings_top_k($q$
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 50$q$) AS top_k_from_limit;
+
+-- A LIMIT that is a bound parameter must be evaluated on every execution
+-- of a generic plan, not captured once: force the generic plan and run it
+-- with two different bounds.
+SET plan_cache_mode = force_generic_plan;
+PREPARE limit_generic(int, int) AS SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = $1)
+    LIMIT $2;
+SELECT query_settings_top_k('EXECUTE limit_generic(42, 30)')
+    AS top_k_generic_first;
+SELECT query_settings_top_k('EXECUTE limit_generic(42, 70)')
+    AS top_k_generic_second;
+DEALLOCATE limit_generic;
+RESET plan_cache_mode;
+
+-- Two scans of the same index in one statement, under different LIMITs.
+-- Each must be sized by its own: the scan is matched to its Limit by
+-- scan-descriptor identity, which is the only thing that distinguishes
+-- them -- both sit in the same position relative to a Limit.
+CREATE FUNCTION query_settings_top_ks(q text) RETURNS int[]
+    LANGUAGE plpgsql AS $$
+DECLARE
+    j json;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, FORMAT JSON) ' || q
+    INTO j;
+    RETURN (SELECT array_agg(DISTINCT k ORDER BY k)
+            FROM jsonb_path_query(j::jsonb,
+                '$.** ? (exists(@."Mktann"))."Mktann"."Top-K"') k);
+END $$;
+SELECT query_settings_top_ks($q$
+    SELECT (SELECT count(*) FROM (SELECT id FROM query_settings_test
+                ORDER BY v <-> (SELECT v FROM query_settings_test
+                                WHERE id = 42) LIMIT 40) a) AS wide,
+           (SELECT count(*) FROM (SELECT id FROM query_settings_test
+                ORDER BY v <-> (SELECT v FROM query_settings_test
+                                WHERE id = 42) LIMIT 15) b) AS narrow$q$)
+    AS top_ks_two_scans;
+
+-- A query inside a function body reaches the executor through SPI, which
+-- runs it directly rather than through a portal. The sizing must still
+-- apply, or every vector query written inside a function silently
+-- truncates to the default k.
+CREATE FUNCTION query_settings_spi_rows(lim int) RETURNS bigint
+    LANGUAGE plpgsql AS $$
+DECLARE
+    n bigint;
+BEGIN
+    EXECUTE format(
+        'SELECT count(*) FROM (SELECT id FROM query_settings_test
+         ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+         LIMIT %s) t', lim)
+    INTO n;
+    RETURN n;
+END $$;
+SELECT query_settings_spi_rows(45) AS rows_via_spi;
+
+-- EXPLAIN ANALYZE must size the scan the same way the bare query does.
+-- The two run through different paths (EXPLAIN owns its own QueryDesc),
+-- and a mechanism that covered only one would make EXPLAIN -- the tool
+-- for checking this feature -- unrepresentative of the real query.
+SELECT count(*) AS rows_plain FROM (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 37) t;
+SELECT query_settings_top_k($q$
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 37$q$) AS top_k_under_explain;
+
+-- WITH TIES can pull past the count for rows tying the last one, so its
+-- count is a floor rather than a total -- but it is still what the scan
+-- sizes from. Reading it as "no bound" would size a five-row query for
+-- the whole relation. Here 5 lands on the floor of 10.
+SELECT query_settings_top_k($q$
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    FETCH FIRST 5 ROWS WITH TIES$q$) AS top_k_with_ties;
+
+-- mkt.query_limit only lowers the sizing. Above the LIMIT it is ignored
+-- --  raising it would have the scan rank rows the LIMIT then discards;
+-- below the LIMIT it caps, which is the point of the lever.
+SET mkt.query_limit = 200;
+SELECT query_settings_top_k($q$
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 50$q$) AS top_k_guc_above_limit;
+SET mkt.query_limit = 20;
+SELECT query_settings_top_k($q$
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 50$q$) AS top_k_guc_below_limit;
+RESET mkt.query_limit;
+
+-- A LIMIT computed by a scalar subquery. The Limit node evaluates its
+-- count before fetching from its child, which runs the InitPlan and
+-- leaves the parameter set by the time the scan rescans -- so the bound
+-- is usable, and a query written this way is sized like any other.
+SELECT query_settings_top_k($q$
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT (SELECT 30)$q$) AS top_k_subquery_limit;
+
+-- Without a LIMIT the query has asked for every row in distance order, so
+-- the scan is sized for as many as it could possibly return: what work_mem
+-- affords, or the relation's row count when that is smaller -- 500 here.
+-- Sizing for the built-in floor instead would answer a complete ordered
+-- scan with 10 of 500 rows.
+SELECT count(*) AS rows_no_limit FROM (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)) t;
+
+-- An explicit mkt.query_limit is the sizing when there is no LIMIT to take
+-- one from -- a request for that many candidates, not merely a floor under
+-- the automatic sizing. Both values are far below the 500 the automatic
+-- sizing reaches, so one that failed to take effect would show as 500.
+SET mkt.query_limit = 10;
+SELECT count(*) AS rows_no_limit_ql_10 FROM (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)) t;
+SET mkt.query_limit = 25;
+SELECT count(*) AS rows_no_limit_ql_25 FROM (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)) t;
+RESET mkt.query_limit;
+
+-- ============================================================
+-- Filtered scans: sized up for the rows the filter will remove
+-- ============================================================
+-- A WHERE clause is applied above the index scan, after the top-k is
+-- emitted, so sizing to the bare LIMIT would leave a 10%-selective filter
+-- over the top-20 with ~2 rows. The sizing is inflated by the planner's
+-- selectivity estimate, plus three standard deviations of headroom for the
+-- survivor count being a binomial draw rather than exact:
+-- (1 + 3/sqrt(20)) * 20 / 0.1. ANALYZE gives the planner exact statistics
+-- for this table.
+ANALYZE query_settings_test;
+
+SELECT count(*) AS rows_filtered FROM (
+    SELECT id FROM query_settings_test WHERE grp = 3
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 20) t;
+SELECT query_settings_top_k($q$
+    SELECT id FROM query_settings_test WHERE grp = 3
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 20$q$) AS top_k_filtered;
+
+-- An unfiltered scan is never inflated: the LIMIT is the whole story.
+SELECT query_settings_top_k($q$
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 20$q$) AS top_k_unfiltered;
+
+-- work_mem is the ceiling on the whole sizing, and the only one. The
+-- planner estimates this conjunction at grp = 3 (10%) times id < 20 (~4%),
+-- inflating the sizing well past what a small work_mem affords and well
+-- under what a large one does, so the clamp binds below and lifts above.
+-- A row of top-k costs the sum of everything sized to k -- dominated by
+-- the MKT_QUERY_CAND_PER_K extraction slots, not the heap entry itself --
+-- so 64kB affords far fewer rows than the heap entry alone would suggest.
+-- Asserted exactly, which pins the arithmetic and the per-row size
+-- together.
+SET work_mem = '64kB';
+SELECT query_settings_top_k($q$
+    SELECT id FROM query_settings_test WHERE grp = 3 AND id < 20
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 20$q$) AS top_k_clamped_by_work_mem;
+
+-- Raising work_mem lifts the clamp: the same query gets its full sizing.
+-- This is the answer to a filtered query returning too few rows.
+SET work_mem = '16MB';
+SELECT query_settings_top_k($q$
+    SELECT id FROM query_settings_test WHERE grp = 3 AND id < 20
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 20$q$) AS top_k_work_mem_raised;
+RESET work_mem;
+
+-- Resizing the top-k replaces the previous state rather than adding to
+-- it. Every buffer in the query state is sized to k, so a scan that
+-- resizes once per outer row would otherwise hold a full set for each --
+-- an ascending correlated LIMIT does exactly that. Hold the scan open
+-- with a cursor partway through, after four ascending sizings, and count
+-- the live query-state contexts: one, however many resizes preceded it.
+-- Zero would mean the buffers went back to being owned by the scan
+-- context, which is where they accumulated.
+BEGIN;
+DECLARE cur_resize CURSOR FOR
+    SELECT k.n, x.id FROM (VALUES (15), (60), (120), (240)) k(n), LATERAL (
+        SELECT id FROM query_settings_test
+        ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+        LIMIT k.n) x;
+MOVE FORWARD 200 FROM cur_resize;
+SELECT count(*) AS live_query_states
+    FROM pg_backend_memory_contexts WHERE name = 'mkt query state';
+CLOSE cur_resize;
+COMMIT;
+
+-- ============================================================
+-- Cursors: the sizing must reach a scan running under a portal
+-- ============================================================
+-- A cursor runs its plan a fetch at a time under its own portal, and no
+-- single FETCH need drive the scan to completion. The top-k is sized
+-- once, at rescan, before any row is fetched, so whatever it holds is
+-- the whole of what the cursor can ever yield -- however the client
+-- paces its fetches, and whichever portal shape it uses. These pin that
+-- result; the sizing arithmetic itself is pinned by the Top-K
+-- assertions above.
+--
+-- Fetch a single row at a time -- the shape most exposed to a partial
+-- scan -- and collect the whole result.
+CREATE FUNCTION query_settings_cursor_ids(q text) RETURNS int[]
+    LANGUAGE plpgsql AS $$
+DECLARE
+    c refcursor;
+    fetched int;
+    ids int[] := '{}';
+BEGIN
+    OPEN c FOR EXECUTE q;
+    LOOP
+        FETCH c INTO fetched;
+        EXIT WHEN NOT FOUND;
+        ids := ids || fetched;
+    END LOOP;
+    CLOSE c;
+    RETURN ids;
+END $$;
+
+-- Count what is left in a cursor that SQL DECLARE opened: a refcursor
+-- holding a portal's name fetches from it, which keeps the assertions
+-- below to a number instead of pages of rows (MOVE reports its count in
+-- a command tag, which this output does not carry).
+CREATE FUNCTION query_settings_drain(portal text) RETURNS int
+    LANGUAGE plpgsql AS $$
+DECLARE
+    c refcursor := portal;
+    fetched int;
+    n int := 0;
+BEGIN
+    LOOP
+        FETCH c INTO fetched;
+        EXIT WHEN NOT FOUND;
+        n := n + 1;
+    END LOOP;
+    RETURN n;
+END $$;
+
+-- The rows a cursor yields, in the order it yields them, against a
+-- sort's exact answer -- not against another index scan, which would
+-- agree with it even if both truncated. nprobe covers every list, and
+-- the data is tie-free, so the exact top-50 is a single sequence.
+RESET enable_seqscan;
+SET enable_indexscan = off;
+CREATE TEMP TABLE cursor_truth AS
+    SELECT id, row_number() OVER () AS pos FROM (
+        SELECT id FROM query_settings_test
+        ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+        LIMIT 50) t;
+RESET enable_indexscan;
+SET enable_seqscan = off;
+SELECT query_settings_cursor_ids($q$
+        SELECT id FROM query_settings_test
+        ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+        LIMIT 50$q$)
+    = (SELECT array_agg(id ORDER BY pos) FROM cursor_truth)
+    AS cursor_limit_matches_exact;
+
+-- With no LIMIT a cursor reaches every row rather than the default k.
+SELECT cardinality(query_settings_cursor_ids($q$
+        SELECT id FROM query_settings_test
+        ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)$q$))
+    AS cursor_no_limit_rows;
+
+-- Two cursors over the same index live at once with different LIMITs,
+-- fetched in lockstep: each scan is sized from its own Limit, not from
+-- whichever was opened first or fetched from last.
+CREATE FUNCTION query_settings_cursor_pair(q1 text, q2 text) RETURNS int[]
+    LANGUAGE plpgsql AS $$
+DECLARE
+    c1 refcursor;
+    c2 refcursor;
+    fetched int;
+    n1 int := 0;
+    n2 int := 0;
+    live1 bool := true;
+    live2 bool := true;
+BEGIN
+    OPEN c1 FOR EXECUTE q1;
+    OPEN c2 FOR EXECUTE q2;
+    WHILE live1 OR live2 LOOP
+        IF live1 THEN
+            FETCH c1 INTO fetched;
+            IF FOUND THEN n1 := n1 + 1; ELSE live1 := false; END IF;
+        END IF;
+        IF live2 THEN
+            FETCH c2 INTO fetched;
+            IF FOUND THEN n2 := n2 + 1; ELSE live2 := false; END IF;
+        END IF;
+    END LOOP;
+    CLOSE c1;
+    CLOSE c2;
+    RETURN ARRAY[n1, n2];
+END $$;
+SELECT query_settings_cursor_pair($q$
+        SELECT id FROM query_settings_test
+        ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+        LIMIT 12$q$, $q$
+        SELECT id FROM query_settings_test
+        ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+        LIMIT 40$q$) AS cursor_pair_rows;
+
+-- A held cursor is run to completion into a tuplestore when the
+-- declaring transaction commits, so the sizing has to be right at that
+-- point: what it kept is all a later fetch can ever see.
+BEGIN;
+DECLARE cur_hold CURSOR WITH HOLD FOR
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 35;
+COMMIT;
+SELECT query_settings_drain('cur_hold') AS cursor_hold_rows;
+CLOSE cur_hold;
+
+-- The AM declares no backward scan, so a scrollable cursor gets a
+-- Materialize over the ordered result and the reverse fetch is served
+-- from that. Forward then backward must retrace the same rows, and the
+-- rows behind the cursor stay reachable.
+BEGIN;
+DECLARE cur_scroll SCROLL CURSOR FOR
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
+    LIMIT 30;
+FETCH 3 FROM cur_scroll;
+FETCH BACKWARD 2 FROM cur_scroll;
+-- Back at the first row, so 29 remain of the 30.
+SELECT query_settings_drain('cur_scroll') AS cursor_scroll_remaining;
+CLOSE cur_scroll;
+COMMIT;
+
+DROP FUNCTION query_settings_top_k(text);
+DROP FUNCTION query_settings_top_ks(text);
+DROP FUNCTION query_settings_spi_rows(int);
+DROP FUNCTION query_settings_cursor_ids(text);
+DROP FUNCTION query_settings_cursor_pair(text, text);
+DROP FUNCTION query_settings_drain(text);
 RESET enable_seqscan;
 RESET mkt.nprobe;
 

@@ -19,6 +19,8 @@
 #include "index/posting_page.h"
 #include "index/query_scan.h"
 #include "pg/bufstorage.h"
+#include "scan.h"
+#include "scan_bound.h"
 #include "support_pg.h"
 
 PG_MODULE_MAGIC;
@@ -133,12 +135,23 @@ _PG_init(void)
 
 	DefineCustomIntVariable(
 			MKT_EXTENSION_SCHEMA ".query_limit",
-			"Maximum number of results per query (0 = auto).",
-			NULL,
+			"Caps the top-k an index scan is sized for (0 = no cap).",
+			"A scan sizes its top-k from the LIMIT above it, inflated by "
+			"the planner's selectivity estimate for any filter the "
+			"executor applies above it, and bounded by work_mem -- so a "
+			"query wanting more rows than that budget affords is answered "
+			"by raising work_mem. With no LIMIT to size from, the query "
+			"has asked for every row in order and the scan is sized for "
+			"what work_mem affords or the table's estimated row count, "
+			"whichever is smaller. Set this to cap that: it lowers the "
+			"sizing when it is below what the query asked for and is "
+			"ignored otherwise, which bounds a query that has no LIMIT or "
+			"one set far above the rows actually read. No scan is sized "
+			"below 10 rows.",
 			&mkt_query_limit,
 			0,
 			0,
-			100000,
+			INT_MAX,
 			PGC_USERSET,
 			0,
 			NULL,
@@ -402,6 +415,7 @@ _PG_init(void)
 	mkt_distance_init();
 	mkt_rabitq_init_simd();
 	mktann_explain_init();
+	mkt_scan_bound_init();
 }
 
 /* ----------------------------------------------------------------

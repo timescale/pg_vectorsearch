@@ -48,12 +48,38 @@ typedef struct MktQueryStats
 	uint32_t max_contrib_rank;
 } MktQueryStats;
 
+/*
+ * Candidate slots the extraction buffer holds per row of the top-k.
+ *
+ * The error-bound gate admits more candidates than the top-k returns, so
+ * the extraction buffer and its two ordering arrays are sized to a
+ * multiple of max_k. extract_candidates grows them further if a query
+ * turns out to admit more.
+ *
+ * The scan's work_mem budget prices a row from this (see
+ * MKT_TOP_K_BYTES_PER_ROW in src/pg/scan.c), so the two must agree.
+ */
+#define MKT_QUERY_CAND_PER_K 16
+
 /* ----------------------------------------------------------------
  * Query state — pre-allocated, reused across queries
  * ---------------------------------------------------------------- */
 
 typedef struct MktQueryState
 {
+	/*
+	 * Owns every buffer below, so that discarding the state is one delete
+	 * and cannot miss an allocation. The top-k's and the centroid
+	 * scratch's own contexts are created under it and go with it.
+	 *
+	 * Buffers here are sized to max_k and max_nprobe: resizing means
+	 * building a new state, and the old one has to go somewhere. The
+	 * posting scan's pinned page is the one thing a context teardown
+	 * cannot release, which is why mkt_query_state_cleanup exists rather
+	 * than callers deleting this directly.
+	 */
+	MktMemCtx memctx;
+
 	MktIndexBase *index;
 	uint32_t	  max_k;
 	uint32_t	  max_nprobe;
