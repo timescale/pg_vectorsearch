@@ -32,6 +32,13 @@ TEST_MEMCTX_FIXTURE();
  * Struct size tests
  * ---------------------------------------------------------------- */
 
+static void
+mark_page_deleted(MktPostingPageOpaque *op, void *state)
+{
+	(void)state;
+	op->flags |= MKT_POSTING_PAGE_DELETED;
+}
+
 TEST(posting_entry_meta_size)
 {
 	ASSERT_EQ(
@@ -392,15 +399,7 @@ TEST(scan_reads_a_retired_chain)
 	 * on every page, contents untouched. Then reclaim it, which is where
 	 * TOMBSTONED joins DELETED.
 	 */
-	for (BlockNumber blk = head; blk != InvalidBlockNumber;)
-	{
-		Page page				 = mkt_storage_write_page(&storage.base, blk);
-		MktPostingPageOpaque *op = mkt_posting_opaque(page);
-		BlockNumber			  next = op->next_blkno;
-		op->flags |= MKT_POSTING_PAGE_DELETED;
-		mkt_storage_commit_page(&storage.base, blk);
-		blk = next;
-	}
+	mkt_posting_chain_mutate(&storage.base, head, mark_page_deleted, NULL);
 
 	RaBitQQueryState qstate;
 	setup_query_state(&qstate, params, centroid, dim);

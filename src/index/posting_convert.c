@@ -14,6 +14,82 @@
 #include "quant/fastscan.h"
 #include "quant/rabitq.h"
 
+/*
+ * Entries staged out of the AoS chain before any of them is written back.
+ *
+ * The PG storage layer holds one pinned buffer at a time, so reads and
+ * writes cannot interleave: appending to the builder mid-walk would take
+ * over the buffer the walk is reading from. Staging everything first is what
+ * keeps the two apart.
+ */
+typedef struct StagedEntry
+{
+	ItemPointerData tid;
+	float			f_add;
+	float			f_rescale;
+	float			f_error;
+} StagedEntry;
+
+typedef struct StageCtx
+{
+	Dimension	 dim;
+	uint32_t	 packed_bytes;
+	uint32_t	 total_entries;
+	uint32_t	 entries_cap;
+	StagedEntry *staged;
+	uint8_t		*all_bits;
+} StageCtx;
+
+static bool
+stage_page(MktPostingChainPos *pos, void *state)
+{
+	StageCtx				   *ctx = state;
+	const MktPostingPageOpaque *op	= mkt_posting_opaque(pos->page);
+	char *content = mkt_posting_page_content(pos->page, ctx->dim);
+
+	for (uint32_t i = 0; i < op->entry_count; i++)
+	{
+		MktPostingEntryHeader *src =
+				mkt_posting_entry_at(content, i, ctx->dim);
+
+		/*
+		 * Leave behind the entries VACUUM has marked dead. A fastscan page
+		 * packs codes with no per-entry flag -- deletion there is
+		 * page-granular -- so a dead entry copied into one comes back as
+		 * live and can never be marked again: a later VACUUM can only
+		 * tombstone the page once *every* entry on it is dead, which a page
+		 * holding live entries never is. The head's live_count, which the
+		 * builder stamps from what it was given, would be wrong by the same
+		 * number.
+		 */
+		if (src->meta.flags & MKT_POSTING_FLAG_DELETED)
+			continue;
+
+		if (ctx->total_entries >= ctx->entries_cap)
+		{
+			ctx->entries_cap *= 2;
+			ctx->staged = mkt_realloc(
+					ctx->staged, ctx->entries_cap * sizeof(StagedEntry));
+			ctx->all_bits = mkt_realloc(
+					ctx->all_bits,
+					ctx->entries_cap * (size_t)ctx->packed_bytes);
+		}
+
+		StagedEntry *dst = &ctx->staged[ctx->total_entries];
+
+		dst->tid	   = src->meta.tid;
+		dst->f_add	   = src->f_add;
+		dst->f_rescale = src->f_rescale;
+		dst->f_error   = src->f_error;
+		memcpy(ctx->all_bits + (size_t)ctx->total_entries * ctx->packed_bytes,
+			   src->bits,
+			   ctx->packed_bytes);
+		ctx->total_entries++;
+	}
+
+	return true;
+}
+
 BlockNumber
 mkt_posting_convert_to_fastscan(
 		MktStorage *storage, BlockNumber aos_head, Dimension dim)
@@ -38,89 +114,30 @@ mkt_posting_convert_to_fastscan(
 	mkt_posting_builder_init_fastscan(
 			&builder, storage, NULL, dim, cluster_id, NULL, pt_centroid);
 
-	/*
-	 * Walk AoS chain and feed entries to builder. We stage all
-	 * entries first because the PG storage layer tracks only one
-	 * pinned buffer at a time — interleaving reads and writes
-	 * would clobber the buffer reference.
-	 */
-	typedef struct StagedEntry
-	{
-		ItemPointerData tid;
-		float			f_add;
-		float			f_rescale;
-		float			f_error;
-	} StagedEntry;
+	StageCtx ctx = {
+			.dim		  = dim,
+			.packed_bytes = packed_bytes,
+			.entries_cap  = 256,
+	};
+	ctx.staged	 = mkt_alloc(ctx.entries_cap * sizeof(StagedEntry));
+	ctx.all_bits = mkt_alloc(ctx.entries_cap * (size_t)packed_bytes);
 
-	uint32_t	 total_entries = 0;
-	uint32_t	 entries_cap   = 256;
-	StagedEntry *staged		   = mkt_alloc(entries_cap * sizeof(StagedEntry));
-	uint8_t		*all_bits	   = mkt_alloc(entries_cap * (size_t)packed_bytes);
-
-	BlockNumber blkno = aos_head;
-	while (blkno != InvalidBlockNumber)
-	{
-		Page				  page = mkt_storage_read_page(storage, blkno);
-		MktPostingPageOpaque *op   = mkt_posting_opaque(page);
-
-		char *content = (op->flags & MKT_POSTING_PAGE_FIRST)
-							  ? mkt_posting_content_first(page, dim)
-							  : mkt_posting_content(page);
-
-		for (uint32_t i = 0; i < op->entry_count; i++)
-		{
-			MktPostingEntryHeader *src = mkt_posting_entry_at(content, i, dim);
-
-			/*
-			 * Leave behind the entries VACUUM has marked dead. A fastscan page
-			 * packs codes with no per-entry flag -- deletion there is
-			 * page-granular -- so a dead entry copied into one comes back as
-			 * live and can never be marked again: a later VACUUM can only
-			 * tombstone the page once *every* entry on it is dead, which a
-			 * page holding live entries never is. The head's live_count, which
-			 * the builder stamps from what it was given, would be wrong by the
-			 * same number.
-			 */
-			if (src->meta.flags & MKT_POSTING_FLAG_DELETED)
-				continue;
-
-			if (total_entries >= entries_cap)
-			{
-				entries_cap *= 2;
-				staged =
-						mkt_realloc(staged, entries_cap * sizeof(StagedEntry));
-				all_bits = mkt_realloc(
-						all_bits, entries_cap * (size_t)packed_bytes);
-			}
-			staged[total_entries].tid		= src->meta.tid;
-			staged[total_entries].f_add		= src->f_add;
-			staged[total_entries].f_rescale = src->f_rescale;
-			staged[total_entries].f_error	= src->f_error;
-			memcpy(all_bits + (size_t)total_entries * packed_bytes,
-				   src->bits,
-				   packed_bytes);
-			total_entries++;
-		}
-
-		BlockNumber next = op->next_blkno;
-		mkt_storage_release_page(storage, blkno);
-		blkno = next;
-	}
+	mkt_posting_chain_walk(storage, aos_head, stage_page, &ctx);
 
 	/* Feed staged entries to the fastscan builder */
-	for (uint32_t i = 0; i < total_entries; i++)
+	for (uint32_t i = 0; i < ctx.total_entries; i++)
 	{
 		mkt_posting_builder_add_encoded(
 				&builder,
-				staged[i].tid,
-				staged[i].f_add,
-				staged[i].f_rescale,
-				staged[i].f_error,
-				all_bits + (size_t)i * packed_bytes);
+				ctx.staged[i].tid,
+				ctx.staged[i].f_add,
+				ctx.staged[i].f_rescale,
+				ctx.staged[i].f_error,
+				ctx.all_bits + (size_t)i * packed_bytes);
 	}
 
-	mkt_free(staged);
-	mkt_free(all_bits);
+	mkt_free(ctx.staged);
+	mkt_free(ctx.all_bits);
 
 	BlockNumber result = mkt_posting_builder_finish(&builder);
 	mkt_posting_builder_cleanup(&builder);

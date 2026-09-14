@@ -34,6 +34,7 @@
 #include "index/query_scan.h"
 #include "inspect.h"
 #include "meta.h"
+#include "pg/bufstorage.h"
 #include "support_pg.h"
 
 PG_FUNCTION_INFO_V1(mkt_centroid_pages);
@@ -142,6 +143,11 @@ collect_leaf_entries(
 		Dimension	dim,
 		LeafEntry **out)
 {
+	MktannStorage store;
+	MktStorage	 *st = &store.base;
+
+	mktann_storage_init_inspect(&store, index);
+
 	int			 wl_cap	 = 64;
 	int			 wl_len	 = 0;
 	int			 wl_head = 0;
@@ -157,9 +163,7 @@ collect_leaf_entries(
 	{
 		BlockNumber blkno = wl[wl_head++];
 
-		Buffer buf = ReadBuffer(index, blkno);
-		LockBuffer(buf, BUFFER_LOCK_SHARE);
-		Page page = BufferGetPage(buf);
+		Page page = mkt_storage_read_page(st, blkno);
 
 		const MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
 		uint16_t					 nentries = opaque->entry_count;
@@ -219,7 +223,7 @@ collect_leaf_entries(
 			}
 		}
 
-		UnlockReleaseBuffer(buf);
+		mkt_storage_release_page(st, blkno);
 	}
 
 	pfree(wl);
@@ -265,17 +269,20 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 
 	require_index_select(index, AccessShareLock);
 
+	MktannStorage store;
+	MktStorage	 *st = &store.base;
+
+	mktann_storage_init_inspect(&store, index);
+
 	/* Read metapage and verify magic */
-	Buffer meta_buf = ReadBuffer(index, 0);
-	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
-	Page meta_page = BufferGetPage(meta_buf);
+	Page meta_page = mkt_storage_read_page(st, 0);
 
 	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
 	if (meta->magic != MKT_META_MAGIC)
 	{
-		UnlockReleaseBuffer(meta_buf);
+		mkt_storage_release_page(st, 0);
 		relation_close(index, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -287,7 +294,7 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 	Dimension	dim			   = (Dimension)meta->dim;
 	uint8_t		nlevels		   = meta->nlevels;
 
-	UnlockReleaseBuffer(meta_buf);
+	mkt_storage_release_page(st, 0);
 
 	if (!BlockNumberIsValid(first_centroid))
 	{
@@ -310,9 +317,7 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 	{
 		BlockNumber blkno = worklist[worklist_head++];
 
-		Buffer buf = ReadBuffer(index, blkno);
-		LockBuffer(buf, BUFFER_LOCK_SHARE);
-		Page page = BufferGetPage(buf);
+		Page page = mkt_storage_read_page(st, blkno);
 
 		const MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
 		MktCentroidFormat			 fmt = (MktCentroidFormat)(opaque->flags &
@@ -431,13 +436,85 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 			worklist[worklist_len++] = opaque->next_blkno;
 		}
 
-		UnlockReleaseBuffer(buf);
+		mkt_storage_release_page(st, blkno);
 	}
 
 	pfree(worklist);
 	relation_close(index, AccessShareLock);
 
 	PG_RETURN_NULL();
+}
+
+/*
+ * One mkt.posting_pages() row per page of a chain.
+ *
+ * Everything the rows need beyond the page itself -- the tuplestore to emit
+ * into, the dimension, the running position in the chain -- rides in the
+ * walk's caller state, so the walk itself carries nothing about what it is
+ * being walked for.
+ */
+typedef struct PostingRowCtx
+{
+	ReturnSetInfo *rsinfo;
+	Dimension	   dim;
+	int			   chain_pos;
+} PostingRowCtx;
+
+static bool
+emit_posting_row(MktPostingChainPos *pos, void *state)
+{
+	PostingRowCtx			   *ctx = state;
+	Dimension					dim = ctx->dim;
+	const MktPostingPageOpaque *op	= mkt_posting_opaque(pos->page);
+	bool is_first	 = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
+	bool tombstoned	 = (op->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0;
+	bool is_fastscan = (op->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
+
+	Datum values[10];
+	bool  nulls[10] = {0};
+
+	values[0] = Int32GetDatum((int32)pos->blkno);
+	values[1] = Int32GetDatum((int32)op->cluster_id);
+	values[2] = BoolGetDatum(is_first);
+	values[3] = BoolGetDatum(tombstoned);
+	values[4] = Int32GetDatum((int32)op->entry_count);
+
+	if (!is_fastscan)
+	{
+		/* AoS entries carry a per-entry DELETED flag; count them. FASTSCAN
+		 * packs entries into SIMD groups with no per-entry state (deletion
+		 * is page-granular there), so dead_count is NULL for fastscan
+		 * pages. */
+		char *content = mkt_posting_page_content(pos->page, dim);
+		int32 dead	  = 0;
+
+		check_posting_count(pos->blkno, op->entry_count, dim, is_first);
+		for (uint32_t i = 0; i < op->entry_count; i++)
+		{
+			const MktPostingEntryHeader *h =
+					mkt_posting_entry_at(content, i, dim);
+
+			if (h->meta.flags & MKT_POSTING_FLAG_DELETED)
+				dead++;
+		}
+		values[5] = Int32GetDatum(dead);
+	}
+	else
+		nulls[5] = true;
+
+	values[6] = Int32GetDatum((int32)op->max_entries);
+
+	if (BlockNumberIsValid(pos->next))
+		values[7] = Int32GetDatum((int32)pos->next);
+	else
+		nulls[7] = true;
+
+	values[8] = Int32GetDatum(ctx->chain_pos++);
+	values[9] = CStringGetTextDatum(is_fastscan ? "fastscan" : "aos");
+
+	tuplestore_putvalues(
+			ctx->rsinfo->setResult, ctx->rsinfo->setDesc, values, nulls);
+	return true;
 }
 
 /* ----------------------------------------------------------------
@@ -474,16 +551,19 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 
 	require_index_select(index, AccessShareLock);
 
-	Buffer meta_buf = ReadBuffer(index, 0);
-	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
-	Page meta_page = BufferGetPage(meta_buf);
+	MktannStorage store;
+	MktStorage	 *st = &store.base;
+
+	mktann_storage_init_inspect(&store, index);
+
+	Page meta_page = mkt_storage_read_page(st, 0);
 
 	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
 	if (meta->magic != MKT_META_MAGIC)
 	{
-		UnlockReleaseBuffer(meta_buf);
+		mkt_storage_release_page(st, 0);
 		relation_close(index, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -494,7 +574,7 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 	BlockNumber first_centroid = meta->first_centroid;
 	Dimension	dim			   = meta->dim;
 	uint8_t		nlevels		   = meta->nlevels;
-	UnlockReleaseBuffer(meta_buf);
+	mkt_storage_release_page(st, 0);
 
 	if (!BlockNumberIsValid(first_centroid))
 	{
@@ -509,70 +589,10 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 	/* Walk each posting chain */
 	for (int c = 0; c < nleaves; c++)
 	{
-		BlockNumber blkno	  = leaves[c].posting_head;
-		int			chain_pos = 0;
+		PostingRowCtx ctx = {.rsinfo = rsinfo, .dim = dim};
 
-		while (BlockNumberIsValid(blkno))
-		{
-			Buffer buf = ReadBuffer(index, blkno);
-			LockBuffer(buf, BUFFER_LOCK_SHARE);
-			Page page = BufferGetPage(buf);
-
-			const MktPostingPageOpaque *op = mkt_posting_opaque(page);
-			bool is_first	 = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
-			bool tombstoned	 = (op->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0;
-			bool is_fastscan = (op->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
-
-			Datum values[10];
-			bool  nulls[10] = {0};
-
-			values[0] = Int32GetDatum((int32)blkno);
-			values[1] = Int32GetDatum((int32)op->cluster_id);
-			values[2] = BoolGetDatum(is_first);
-			values[3] = BoolGetDatum(tombstoned);
-			values[4] = Int32GetDatum((int32)op->entry_count);
-
-			if (!is_fastscan)
-			{
-				/* AoS entries carry a per-entry DELETED flag; count them.
-				 * FASTSCAN packs entries into SIMD groups with no per-entry
-				 * state (deletion is page-granular there), so dead_count is
-				 * NULL for fastscan pages. */
-				char *content = is_first ? mkt_posting_content_first(page, dim)
-										 : mkt_posting_content(page);
-				int32 dead	  = 0;
-				check_posting_count(blkno, op->entry_count, dim, is_first);
-				for (uint32_t i = 0; i < op->entry_count; i++)
-				{
-					const MktPostingEntryHeader *h =
-							mkt_posting_entry_at(content, i, dim);
-					if (h->meta.flags & MKT_POSTING_FLAG_DELETED)
-						dead++;
-				}
-				values[5] = Int32GetDatum(dead);
-			}
-			else
-				nulls[5] = true;
-
-			values[6] = Int32GetDatum((int32)op->max_entries);
-
-			if (BlockNumberIsValid(op->next_blkno))
-				values[7] = Int32GetDatum((int32)op->next_blkno);
-			else
-				nulls[7] = true;
-
-			values[8] = Int32GetDatum(chain_pos);
-			values[9] = CStringGetTextDatum(is_fastscan ? "fastscan" : "aos");
-
-			tuplestore_putvalues(
-					rsinfo->setResult, rsinfo->setDesc, values, nulls);
-
-			BlockNumber next = op->next_blkno;
-			UnlockReleaseBuffer(buf);
-
-			blkno = next;
-			chain_pos++;
-		}
+		mkt_posting_chain_walk(
+				st, leaves[c].posting_head, emit_posting_row, &ctx);
 	}
 
 	pfree(leaves);
@@ -656,12 +676,21 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 
 	require_index_select(index, AccessShareLock);
 
-	Buffer meta_buf = ReadBuffer(index, 0);
-	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
+	MktannStorage store;
+	MktStorage	 *st = &store.base;
+
+	mktann_storage_init_inspect(&store, index);
+
+	/*
+	 * Through a local: PageGetSpecialPointer is a macro that evaluates its
+	 * argument three times, and reading a page is not free of side effects
+	 * -- inlining the read pins the buffer once per evaluation.
+	 */
+	Page				  meta_page = mkt_storage_read_page(st, 0);
 	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
-			BufferGetPage(meta_buf));
+			meta_page);
 	Dimension dim = (Dimension)meta->dim;
-	UnlockReleaseBuffer(meta_buf);
+	mkt_storage_release_page(st, 0);
 
 	/* Scan every block and pick out posting pages directly (identified by
 	 * page_id), rather than walking the centroid tree to find posting
@@ -670,9 +699,7 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 	BlockNumber nblocks = RelationGetNumberOfBlocks(index);
 	for (BlockNumber blkno = 1; nk > 0 && blkno < nblocks; blkno++)
 	{
-		Buffer buf = ReadBuffer(index, blkno);
-		LockBuffer(buf, BUFFER_LOCK_SHARE);
-		Page page = BufferGetPage(buf);
+		Page page = mkt_storage_read_page(st, blkno);
 
 		if (PageGetSpecialSize(page) == MAXALIGN(sizeof(MktPostingPageOpaque)))
 		{
@@ -680,9 +707,7 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 
 			if (op->page_id == MKT_POSTING_PAGE_ID)
 			{
-				char	*content = (op->flags & MKT_POSTING_PAGE_FIRST)
-										 ? mkt_posting_content_first(page, dim)
-										 : mkt_posting_content(page);
+				char	*content = mkt_posting_page_content(page, dim);
 				uint32_t count	 = op->entry_count;
 
 				check_posting_count(
@@ -729,7 +754,7 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 				}
 			}
 		}
-		UnlockReleaseBuffer(buf);
+		mkt_storage_release_page(st, blkno);
 	}
 
 	relation_close(index, AccessShareLock);
@@ -839,14 +864,23 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 
 	require_index_select(index, AccessShareLock);
 
-	Buffer meta_buf = ReadBuffer(index, 0);
-	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
+	MktannStorage store;
+	MktStorage	 *st = &store.base;
+
+	mktann_storage_init_inspect(&store, index);
+
+	/*
+	 * Through a local: PageGetSpecialPointer is a macro that evaluates its
+	 * argument three times, and reading a page is not free of side effects
+	 * -- inlining the read pins the buffer once per evaluation.
+	 */
+	Page				  meta_page = mkt_storage_read_page(st, 0);
 	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
-			BufferGetPage(meta_buf));
+			meta_page);
 
 	if (meta->magic != MKT_META_MAGIC)
 	{
-		UnlockReleaseBuffer(meta_buf);
+		mkt_storage_release_page(st, 0);
 		relation_close(index, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -862,7 +896,7 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 	DistanceMetric metric	= (DistanceMetric)meta->metric;
 	uint8_t		   fan_out	= meta->fan_out;
 	bool		   fastscan = (meta->flags & MKT_META_FLAG_FASTSCAN) != 0;
-	UnlockReleaseBuffer(meta_buf);
+	mkt_storage_release_page(st, 0);
 
 	const MktannOptions *opts = (const MktannOptions *)index->rd_options;
 	List				*set  = explicit_reloptions(indexoid);

@@ -47,9 +47,7 @@ mkt_posting_page_add(
 
 	MktPostingPageOpaque *opaque  = mkt_posting_opaque(page);
 	uint32_t			  i		  = opaque->entry_count;
-	char				 *content = (opaque->flags & MKT_POSTING_PAGE_FIRST)
-										  ? mkt_posting_content_first(page, dim)
-										  : mkt_posting_content(page);
+	char				 *content = mkt_posting_page_content(page, dim);
 
 	/* Write the entry header (meta + factors) + bits in one contiguous
 	 * block at content + i * entry_size. */
@@ -64,6 +62,61 @@ mkt_posting_page_add(
 
 	opaque->entry_count = i + 1;
 	return true;
+}
+
+/* ----------------------------------------------------------------
+ * Chain walks
+ * ---------------------------------------------------------------- */
+
+void
+mkt_posting_chain_walk(
+		MktStorage		 *storage,
+		BlockNumber		  head,
+		MktPostingChainCb cb,
+		void			 *state)
+{
+	MktPostingChainPos pos = {.storage = storage, .first = true};
+	BlockNumber		   blk = head;
+
+	while (blk != InvalidBlockNumber)
+	{
+		pos.blkno = blk;
+		pos.page  = mkt_storage_read_page(storage, blk);
+		pos.next  = mkt_posting_opaque(pos.page)->next_blkno;
+
+		bool keep_going = cb(&pos, state);
+
+		/* No-op when the callback released it already. */
+		mkt_posting_chain_release(&pos);
+
+		if (!keep_going)
+			return;
+
+		pos.first = false;
+		blk		  = pos.next;
+	}
+}
+
+void
+mkt_posting_chain_mutate(
+		MktStorage			   *storage,
+		BlockNumber				head,
+		MktPostingChainMutateCb cb,
+		void				   *state)
+{
+	BlockNumber blk = head;
+
+	while (blk != InvalidBlockNumber)
+	{
+		Page				  page = mkt_storage_write_page(storage, blk);
+		MktPostingPageOpaque *op   = mkt_posting_opaque(page);
+		BlockNumber			  next = op->next_blkno;
+
+		cb(op, state);
+
+		mkt_storage_commit_page(storage, blk);
+		blk = next;
+	}
 }
 
 /* ----------------------------------------------------------------

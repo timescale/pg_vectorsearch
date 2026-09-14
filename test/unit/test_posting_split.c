@@ -1001,51 +1001,55 @@ fetch_vec_none(void *ctx, ItemPointerData tid, float *out, Dimension dim)
  * AoS posting chain -- the encoding that keeps a vector with no defined
  * distance out of every query's top-k threshold heap.
  */
+static bool
+add_entry_count(MktPostingChainPos *pos, void *state)
+{
+	*(uint32_t *)state += mkt_posting_opaque(pos->page)->entry_count;
+	return true;
+}
+
+typedef struct UnreachableCtx
+{
+	Dimension dim;
+	uint32_t  n;
+} UnreachableCtx;
+
+/* A reassigned-away entry is stamped f_add = inf with a zero error. */
+static bool
+count_unreachable_page(MktPostingChainPos *pos, void *state)
+{
+	UnreachableCtx			   *ctx = state;
+	const MktPostingPageOpaque *op	= mkt_posting_opaque(pos->page);
+	char *content = mkt_posting_page_content(pos->page, ctx->dim);
+
+	for (uint16_t i = 0; i < op->entry_count; i++)
+	{
+		const MktPostingEntryHeader *h =
+				mkt_posting_entry_at(content, i, ctx->dim);
+
+		if (isinf(h->f_add) && h->f_error == 0.0f)
+			ctx->n++;
+	}
+	return true;
+}
+
 static uint32_t
 chain_entry_count(MktIndexBase *base, BlockNumber head)
 {
-	uint32_t	n	= 0;
-	BlockNumber blk = head;
+	uint32_t n = 0;
 
-	while (blk != InvalidBlockNumber)
-	{
-		Page p = mkt_storage_read_page(base->posting_storage, blk);
-		const MktPostingPageOpaque *op	 = mkt_posting_opaque(p);
-		BlockNumber					next = op->next_blkno;
-
-		n += op->entry_count;
-		mkt_storage_release_page(base->posting_storage, blk);
-		blk = next;
-	}
+	mkt_posting_chain_walk(base->posting_storage, head, add_entry_count, &n);
 	return n;
 }
 
 static uint32_t
 count_unreachable(MktIndexBase *base, BlockNumber head, Dimension dim)
 {
-	uint32_t	n	= 0;
-	BlockNumber blk = head;
-	while (blk != InvalidBlockNumber)
-	{
-		Page p = mkt_storage_read_page(base->posting_storage, blk);
-		const MktPostingPageOpaque *op = mkt_posting_opaque(p);
-		bool  is_first = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
-		char *content  = is_first ? mkt_posting_content_first(p, dim)
-								  : mkt_posting_content(p);
+	UnreachableCtx ctx = {.dim = dim};
 
-		for (uint16_t i = 0; i < op->entry_count; i++)
-		{
-			const MktPostingEntryHeader *h =
-					mkt_posting_entry_at(content, i, dim);
-			if (isinf(h->f_add) && h->f_error == 0.0f)
-				n++;
-		}
-
-		BlockNumber next = op->next_blkno;
-		mkt_storage_release_page(base->posting_storage, blk);
-		blk = next;
-	}
-	return n;
+	mkt_posting_chain_walk(
+			base->posting_storage, head, count_unreachable_page, &ctx);
+	return ctx.n;
 }
 
 /*

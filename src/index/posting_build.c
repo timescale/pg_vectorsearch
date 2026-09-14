@@ -718,10 +718,8 @@ fs_write_group(MktPostingBuilder *builder)
 
 	Dimension dim = builder->dim;
 
-	MktPostingPageOpaque *op	  = mkt_posting_opaque(builder->mem_page);
-	char				 *content = (op->flags & MKT_POSTING_PAGE_FIRST)
-										  ? mkt_posting_content_first(builder->mem_page, dim)
-										  : mkt_posting_content(builder->mem_page);
+	MktPostingPageOpaque *op = mkt_posting_opaque(builder->mem_page);
+	char *content = mkt_posting_page_content(builder->mem_page, dim);
 
 	uint32_t g = builder->fs.groups_on_page;
 

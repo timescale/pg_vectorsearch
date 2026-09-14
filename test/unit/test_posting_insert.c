@@ -92,42 +92,46 @@ scan_count(
  * build stamps live_count). Used to validate the head's maintained live_count
  * against an independent walk — the production insert path never walks.
  */
+typedef struct LiveCtx
+{
+	Dimension dim;
+	uint32_t  live;
+} LiveCtx;
+
+/* A fastscan page has no per-entry flag, so all its entries count. */
+static bool
+count_live_page(MktPostingChainPos *pos, void *state)
+{
+	LiveCtx					   *ctx = state;
+	const MktPostingPageOpaque *op	= mkt_posting_opaque(pos->page);
+	uint32_t					n	= op->entry_count;
+
+	if (op->flags & MKT_POSTING_PAGE_FASTSCAN)
+	{
+		ctx->live += n;
+		return true;
+	}
+
+	char *content = mkt_posting_page_content(pos->page, ctx->dim);
+
+	for (uint32_t i = 0; i < n; i++)
+	{
+		const MktPostingEntryHeader *h =
+				mkt_posting_entry_at(content, i, ctx->dim);
+
+		if (!(h->meta.flags & MKT_POSTING_FLAG_DELETED))
+			ctx->live++;
+	}
+	return true;
+}
+
 static uint32_t
 chain_live_count(TestPageStorage *st, Dimension dim, BlockNumber head)
 {
-	uint32_t	live = 0;
-	BlockNumber blk	 = head;
+	LiveCtx ctx = {.dim = dim};
 
-	while (blk != InvalidBlockNumber)
-	{
-		Page						p  = mkt_storage_read_page(&st->base, blk);
-		const MktPostingPageOpaque *op = mkt_posting_opaque(p);
-		BlockNumber					next = op->next_blkno;
-		uint32_t					n	 = op->entry_count;
-
-		if (op->flags & MKT_POSTING_PAGE_FASTSCAN)
-		{
-			live += n;
-		}
-		else
-		{
-			char *content = (op->flags & MKT_POSTING_PAGE_FIRST)
-								  ? mkt_posting_content_first(p, dim)
-								  : mkt_posting_content(p);
-			for (uint32_t i = 0; i < n; i++)
-			{
-				MktPostingEntryHeader *h =
-						mkt_posting_entry_at(content, i, dim);
-				if (!(h->meta.flags & MKT_POSTING_FLAG_DELETED))
-					live++;
-			}
-		}
-
-		mkt_storage_release_page(&st->base, blk);
-		blk = next;
-	}
-
-	return live;
+	mkt_posting_chain_walk(&st->base, head, count_live_page, &ctx);
+	return ctx.live;
 }
 
 /* ---------------------------------------------------------------- */
