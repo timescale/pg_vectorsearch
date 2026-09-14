@@ -510,6 +510,14 @@ pg_prefetch_vector(void *ctx, ItemPointerData tid)
 }
 
 static void
+retire_page(MktPostingPageOpaque *op, void *state)
+{
+	op->flags |= MKT_POSTING_PAGE_DELETED;
+	/* delete_xid overlays live_count/tail_blkno, unused once retired. */
+	op->delete_xid = *(const uint64 *)state;
+}
+
+static void
 pg_retire_chain(void *ctx, MktStorage *posting_storage, BlockNumber head)
 {
 	(void)ctx;
@@ -523,18 +531,7 @@ pg_retire_chain(void *ctx, MktStorage *posting_storage, BlockNumber head)
 	 */
 	uint64 dxid = U64FromFullTransactionId(GetTopFullTransactionId());
 
-	BlockNumber blk = head;
-	while (blk != InvalidBlockNumber)
-	{
-		Page page = mkt_storage_write_page(posting_storage, blk);
-		MktPostingPageOpaque *op   = mkt_posting_opaque(page);
-		BlockNumber			  next = op->next_blkno;
-		op->flags |= MKT_POSTING_PAGE_DELETED;
-		op->delete_xid =
-				dxid; /* overlays live_count/tail_blkno (unused now) */
-		mkt_storage_commit_page(posting_storage, blk);
-		blk = next;
-	}
+	mkt_posting_chain_mutate(posting_storage, head, retire_page, &dxid);
 }
 
 /* ----------------------------------------------------------------

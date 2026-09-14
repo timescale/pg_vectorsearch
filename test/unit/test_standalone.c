@@ -317,6 +317,30 @@ TEST(query_exec_recall)
  * entry stream and stamps the head as it writes — so the stamped tail must be
  * the real last block and the stamped live count the real entry count.
  */
+/* Sums mkt_posting_page_count over a chain; `state` is a uint32_t *. */
+static bool
+sum_page_count(MktPostingChainPos *pos, void *state)
+{
+	*(uint32_t *)state += mkt_posting_page_count(pos->page);
+	return true;
+}
+
+typedef struct ChainTally
+{
+	uint32_t	count;
+	BlockNumber tail; /* last page the walk saw */
+} ChainTally;
+
+static bool
+tally_page(MktPostingChainPos *pos, void *state)
+{
+	ChainTally *t = state;
+
+	t->count += mkt_posting_page_count(pos->page);
+	t->tail = pos->blkno;
+	return true;
+}
+
 static void
 verify_head_meta(MktTestResult *result, MktIndex *idx)
 {
@@ -327,18 +351,12 @@ verify_head_meta(MktTestResult *result, MktIndex *idx)
 		if (head == InvalidBlockNumber)
 			continue;
 
-		BlockNumber blk	  = head;
-		BlockNumber tail  = head;
-		uint32_t	count = 0;
-		while (blk != InvalidBlockNumber)
-		{
-			Page		pg	 = mkt_storage_read_page(st, blk);
-			BlockNumber next = mkt_posting_opaque(pg)->next_blkno;
-			count += mkt_posting_page_count(pg);
-			tail = blk;
-			mkt_storage_release_page(st, blk);
-			blk = next;
-		}
+		ChainTally tally = {.tail = head};
+
+		mkt_posting_chain_walk(st, head, tally_page, &tally);
+
+		BlockNumber tail  = tally.tail;
+		uint32_t	count = tally.count;
 
 		Page hp = mkt_storage_read_page(st, head);
 		ASSERT_EQ(
@@ -803,15 +821,8 @@ count_posting_entries(MktIndex *idx)
 
 	for (uint32_t c = 0; c < idx->nlist; c++)
 	{
-		BlockNumber blk = idx->first_posting + c;
-		while (blk != InvalidBlockNumber)
-		{
-			Page		pg	 = mkt_storage_read_page(st, blk);
-			BlockNumber next = mkt_posting_opaque(pg)->next_blkno;
-			total += mkt_posting_page_count(pg);
-			mkt_storage_release_page(st, blk);
-			blk = next;
-		}
+		mkt_posting_chain_walk(
+				st, idx->first_posting + c, sum_page_count, &total);
 	}
 	return total;
 }

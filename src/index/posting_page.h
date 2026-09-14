@@ -410,6 +410,83 @@ mkt_posting_content_first(Page page, Dimension dim)
 	return PageGetContents(page) + mkt_posting_pt_centroid_size(dim);
 }
 
+/* ----------------------------------------------------------------
+ * Chain walks
+ *
+ * A posting list is a chain of pages linked by next_blkno. Every caller
+ * that traverses one has to read the link before releasing the page and
+ * release it before moving on; these keep that order in one place.
+ *
+ * The scan path deliberately does not use them. It holds a page across the
+ * SIMD kernels that consume it, interleaves the next page's prefetch, and
+ * handles flat mode (a single page, no chain) and page_base mode (memory it
+ * does not release) -- so its stepping is a different shape, not a
+ * duplicate of this one.
+ * ---------------------------------------------------------------- */
+
+/*
+ * Where a read walk currently is. The callback may release the page early
+ * and keep working: the next block is already read, so the walk does not
+ * need it afterwards. That matters for work which must not hold a page --
+ * fetching heap tuples through the same storage, which holds one page at a
+ * time and would take over the slot.
+ */
+typedef struct MktPostingChainPos
+{
+	MktStorage *storage;
+	BlockNumber blkno;
+	Page		page; /* NULL once released */
+	BlockNumber next; /* read before the callback runs */
+	bool		first;
+} MktPostingChainPos;
+
+static inline void
+mkt_posting_chain_release(MktPostingChainPos *pos)
+{
+	if (pos->page != NULL)
+	{
+		mkt_storage_release_page(pos->storage, pos->blkno);
+		pos->page = NULL;
+	}
+}
+
+/* Return false to stop the walk. */
+typedef bool (*MktPostingChainCb)(MktPostingChainPos *pos, void *state);
+
+void mkt_posting_chain_walk(
+		MktStorage		 *storage,
+		BlockNumber		  head,
+		MktPostingChainCb cb,
+		void			 *state);
+
+/*
+ * Mutating walk: the callback gets the opaque of a page held for write, and
+ * every page is committed. For chain-wide flag changes, where the body is a
+ * line or two and the walk is all of the code.
+ */
+typedef void (*MktPostingChainMutateCb)(MktPostingPageOpaque *op, void *state);
+
+void mkt_posting_chain_mutate(
+		MktStorage			   *storage,
+		BlockNumber				head,
+		MktPostingChainMutateCb cb,
+		void				   *state);
+
+/*
+ * Content of any posting page, first or not.
+ *
+ * A first page carries pt_centroid ahead of its entries, so the offset
+ * differs; every caller that walks a chain meets both kinds and was
+ * repeating this test. Inline, so the scan pays nothing for it.
+ */
+static inline char *
+mkt_posting_page_content(Page page, Dimension dim)
+{
+	return (mkt_posting_opaque(page)->flags & MKT_POSTING_PAGE_FIRST)
+				 ? mkt_posting_content_first(page, dim)
+				 : mkt_posting_content(page);
+}
+
 /* Paged-mode convenience wrappers — these assume non-first pages
  * (content starts right after PageHeader). For first pages with
  * pt_centroid, go through mkt_posting_content_first. */

@@ -624,6 +624,31 @@ static const MktStorageOps pg_storage_ops = {
 		.rerank		  = pg_rerank,
 };
 
+/*
+ * Read for a caller that sweeps the index rather than following a query's
+ * access pattern -- inspection. Identical to pg_read_page minus the
+ * recent-buffer cache, which for a sweep is worse than useless: its slots
+ * would fill with blocks no query asks for again, evicting the ones the
+ * query path reuses, and its hit/cold/stale counters would report the sweep
+ * instead of the workload they exist to measure.
+ *
+ * A separate entry in the ops table rather than a flag inside pg_read_page:
+ * the query path reads a page for every posting page it scans, and should
+ * not test a condition that only inspection can change.
+ */
+static Page
+pg_read_page_nocache(MktStorage *self, BlockNumber blkno)
+{
+	MktannStorage *s   = PG_STORAGE(self);
+	Buffer		   buf = ReadBuffer(s->index, blkno);
+
+	LockBuffer(buf, BUFFER_LOCK_SHARE);
+	s->cur_buf = buf;
+	s->read_count++;
+
+	return BufferGetPage(buf);
+}
+
 static const MktStorageOps pg_storage_readstream_ops = {
 		.read_page	  = pg_read_page,
 		.release_page = pg_release_page,
@@ -634,6 +659,25 @@ static const MktStorageOps pg_storage_readstream_ops = {
 		.extend		  = pg_extend,
 		.rerank		  = pg_rerank_readstream,
 };
+
+/* Inspection: the standard ops with the cache-bypassing read. */
+static const MktStorageOps pg_storage_inspect_ops = {
+		.read_page	  = pg_read_page_nocache,
+		.release_page = pg_release_page,
+		.prefetch	  = pg_prefetch_page,
+		.write_page	  = pg_write_page,
+		.new_page	  = pg_new_page,
+		.commit_page  = pg_commit_page,
+		.extend		  = pg_extend,
+		.rerank		  = NULL,
+};
+
+void
+mktann_storage_init_inspect(MktannStorage *s, Relation index)
+{
+	mktann_storage_init(s, index, NULL, DISTANCE_L2);
+	s->base.ops = &pg_storage_inspect_ops;
+}
 
 /* ----------------------------------------------------------------
  * Initialization

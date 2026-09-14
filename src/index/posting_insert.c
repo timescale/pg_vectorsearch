@@ -220,9 +220,7 @@ mkt_posting_tombstone_chain(
 		}
 
 		bool  is_fastscan = (flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
-		bool  first		  = (flags & MKT_POSTING_PAGE_FIRST) != 0;
-		char *content	  = first ? mkt_posting_content_first(p, dim)
-								  : mkt_posting_content(p);
+		char *content	  = mkt_posting_page_content(p, dim);
 		bool  needs_mark  = false; /* AoS: has a not-yet-deleted dead entry */
 		bool  fs_all_dead = false; /* FASTSCAN: every entry is dead */
 
@@ -277,9 +275,7 @@ mkt_posting_tombstone_chain(
 		{
 			Page				  wp  = mkt_storage_write_page(storage, blk);
 			MktPostingPageOpaque *wop = mkt_posting_opaque(wp);
-			char				 *c	  = (wop->flags & MKT_POSTING_PAGE_FIRST)
-											  ? mkt_posting_content_first(wp, dim)
-											  : mkt_posting_content(wp);
+			char				 *c	  = mkt_posting_page_content(wp, dim);
 			uint32_t			  deleted_on_page = 0;
 			for (uint32_t i = 0; i < wop->entry_count; i++)
 			{

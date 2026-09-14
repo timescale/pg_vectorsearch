@@ -123,6 +123,108 @@ vector_is_degenerate(const float *vec, Dimension dim, DistanceMetric metric)
  */
 typedef void (*ChainTidCb)(void *state, ItemPointerData tid);
 
+/* State a tid walk carries across its pages. */
+typedef struct ChainTidsCtx
+{
+	Dimension		 dim;
+	ChainTidCb		 cb;
+	void			*state;
+	ItemPointerData *tids; /* one page's worth, caller-owned */
+	uint32_t		 cap;
+	MktMemCtx		 entry_ctx;
+	void (*prefetch)(void *, ItemPointerData);
+	void	 *prefetch_ctx;
+	uint32_t *cluster_id_out;
+} ChainTidsCtx;
+
+static bool
+walk_one_page_tids(MktPostingChainPos *pos, void *state)
+{
+	ChainTidsCtx			   *ctx	  = state;
+	const MktPostingPageOpaque *op	  = mkt_posting_opaque(pos->page);
+	Dimension					dim	  = ctx->dim;
+	uint32_t					cnt	  = op->entry_count;
+	uint32_t					ntids = 0;
+
+	if (pos->first && ctx->cluster_id_out != NULL)
+		*ctx->cluster_id_out = op->cluster_id;
+
+	if (cnt > ctx->cap)
+		cnt = ctx->cap; /* not reachable for a well-formed page */
+
+	if (!(op->flags & MKT_POSTING_PAGE_TOMBSTONED))
+	{
+		char *content = mkt_posting_page_content(pos->page, dim);
+
+		if (op->flags & MKT_POSTING_PAGE_FASTSCAN)
+		{
+			/* SoA: tids live in fixed 32-entry group sections. The last
+			 * group may be partial; entry_count bounds the valid slots.
+			 * Live pages have no per-entry delete flag (deletes tombstone
+			 * the whole page, handled above). */
+			uint32_t ngroups = (cnt + MKT_FASTSCAN_GROUP - 1) /
+							   MKT_FASTSCAN_GROUP;
+			for (uint32_t g = 0; g < ngroups; g++)
+			{
+				ItemPointerData *gt = mkt_fastscan_group_tids(content, g, dim);
+				uint32_t		 base_i = g * MKT_FASTSCAN_GROUP;
+				uint32_t		 valid	= (cnt - base_i) < MKT_FASTSCAN_GROUP
+												? (cnt - base_i)
+												: MKT_FASTSCAN_GROUP;
+				for (uint32_t v = 0; v < valid; v++)
+					ctx->tids[ntids++] = gt[v];
+			}
+		}
+		else
+		{
+			for (uint32_t i = 0; i < cnt; i++)
+			{
+				MktPostingEntryHeader *hdr =
+						mkt_posting_entry_at(content, i, dim);
+				if (hdr->meta.flags & MKT_POSTING_FLAG_DELETED)
+					continue;
+				ctx->tids[ntids++] = hdr->meta.tid;
+			}
+		}
+	}
+
+	/*
+	 * The callback may write through this same storage -- the writing pass
+	 * appends to page builders, which flush a full page as they go -- and
+	 * the backend holds one page at a time, so a write during the callback
+	 * would take over the slot this page occupies. Hence the tids were
+	 * copied out above, and the page goes before any callback runs.
+	 */
+	mkt_posting_chain_release(pos);
+
+	/*
+	 * Dispatch, starting the read for the next tid's block while the
+	 * current one is being fetched. Only when the block changes: runs of
+	 * tids share a heap block (a low-dimension table packs many rows per
+	 * page), and re-requesting a block already in flight buys nothing.
+	 */
+	BlockNumber prefetched = InvalidBlockNumber;
+	MktMemCtx	outer	   = mkt_memctx_switch(ctx->entry_ctx);
+
+	for (uint32_t i = 0; i < ntids; i++)
+	{
+		if (ctx->prefetch != NULL && i + 1 < ntids)
+		{
+			BlockNumber nb = ItemPointerGetBlockNumber(&ctx->tids[i + 1]);
+			if (nb != prefetched)
+			{
+				ctx->prefetch(ctx->prefetch_ctx, ctx->tids[i + 1]);
+				prefetched = nb;
+			}
+		}
+		ctx->cb(ctx->state, ctx->tids[i]);
+		mkt_memctx_reset(ctx->entry_ctx);
+	}
+
+	mkt_memctx_switch(outer);
+	return true;
+}
+
 static void
 walk_chain_tids(
 		MktStorage		  *storage,
@@ -133,22 +235,10 @@ walk_chain_tids(
 		const MktSplitEnv *env,
 		uint32_t		  *cluster_id_out)
 {
-	BlockNumber blk	  = head;
-	bool		first = true;
-
 	/*
-	 * One page's worth of tids, copied out before the callback runs.
-	 *
-	 * The callback must not be invoked while the page is held: it may write
-	 * through this same storage -- the writing pass appends to page builders,
-	 * which flush a full page as they go -- and the backend storage holds one
-	 * page at a time, so a write during the callback takes over the slot this
-	 * walk was going to release.
-	 *
-	 * The buffer holds whichever page format packs the most entries, from the
-	 * same helpers page init uses to set max_entries, so the cap cannot
-	 * disagree with what a page reports. entry_count is clamped to it below
-	 * in case a page says otherwise.
+	 * One page's worth of tids, sized to whichever page format packs the
+	 * most, from the same helpers page init uses to set max_entries -- so
+	 * the cap cannot disagree with what a page reports.
 	 */
 	uint32_t		 cap  = mkt_posting_max_entries_any_format(dim);
 	ItemPointerData *tids = mkt_alloc((size_t)cap * sizeof(ItemPointerData));
@@ -159,111 +249,23 @@ walk_chain_tids(
 	 * is what knows there is an iteration, and leaving it to the fetch gives
 	 * the guarantee on whichever backend remembered to implement it. Created
 	 * after the tids buffer above, which has to outlive the resets.
-	 *
-	 * Switched into once per page rather than once per entry -- it has to be
-	 * current for the whole dispatch loop, and only the reset belongs between
-	 * entries. The page reads stay outside it, so a buffer the storage layer
-	 * might one day keep across entries is not caught by a reset.
 	 */
-	MktMemCtx entry_ctx =
-			mkt_memctx_create(mkt_memctx_current(), "mktann split entry");
+	ChainTidsCtx ctx = {
+			.dim	   = dim,
+			.cb		   = cb,
+			.state	   = state,
+			.tids	   = tids,
+			.cap	   = cap,
+			.entry_ctx = mkt_memctx_create(
+					mkt_memctx_current(), "mktann split entry"),
+			.prefetch		= (env != NULL) ? env->prefetch_vector : NULL,
+			.prefetch_ctx	= (env != NULL) ? env->ctx : NULL,
+			.cluster_id_out = cluster_id_out,
+	};
 
-	/* Loop-invariant: resolved once rather than tested per entry. */
-	void (*prefetch)(void *, ItemPointerData) = (env != NULL)
-													  ? env->prefetch_vector
-													  : NULL;
+	mkt_posting_chain_walk(storage, head, walk_one_page_tids, &ctx);
 
-	while (blk != InvalidBlockNumber)
-	{
-		Page						page = mkt_storage_read_page(storage, blk);
-		const MktPostingPageOpaque *op	 = mkt_posting_opaque(page);
-		BlockNumber					next = op->next_blkno;
-		uint32_t					cnt	 = op->entry_count;
-		bool	 is_first  = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
-		bool	 tombstone = (op->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0;
-		uint32_t ntids	   = 0;
-
-		if (first)
-		{
-			if (cluster_id_out != NULL)
-				*cluster_id_out = op->cluster_id;
-			first = false;
-		}
-
-		if (cnt > cap)
-			cnt = cap; /* not reachable for a well-formed page */
-
-		if (!tombstone)
-		{
-			char *content	  = is_first ? mkt_posting_content_first(page, dim)
-										 : mkt_posting_content(page);
-			bool  is_fastscan = (op->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
-
-			if (is_fastscan)
-			{
-				/* SoA: tids live in fixed 32-entry group sections. The last
-				 * group may be partial; entry_count bounds the valid slots.
-				 * Live pages have no per-entry delete flag (deletes tombstone
-				 * the whole page, handled above). */
-				uint32_t ngroups = (cnt + MKT_FASTSCAN_GROUP - 1) /
-								   MKT_FASTSCAN_GROUP;
-				for (uint32_t g = 0; g < ngroups; g++)
-				{
-					ItemPointerData *gt =
-							mkt_fastscan_group_tids(content, g, dim);
-					uint32_t base_i = g * MKT_FASTSCAN_GROUP;
-					uint32_t valid	= (cnt - base_i) < MKT_FASTSCAN_GROUP
-											? (cnt - base_i)
-											: MKT_FASTSCAN_GROUP;
-					for (uint32_t v = 0; v < valid; v++)
-						tids[ntids++] = gt[v];
-				}
-			}
-			else
-			{
-				for (uint32_t i = 0; i < cnt; i++)
-				{
-					MktPostingEntryHeader *hdr =
-							mkt_posting_entry_at(content, i, dim);
-					if (hdr->meta.flags & MKT_POSTING_FLAG_DELETED)
-						continue;
-					tids[ntids++] = hdr->meta.tid;
-				}
-			}
-		}
-
-		mkt_storage_release_page(storage, blk);
-
-		/*
-		 * Dispatch, starting the read for the next tid's block while the
-		 * current one is being fetched. Only when the block changes: runs of
-		 * tids share a heap block (a low-dimension table packs many rows per
-		 * page), and re-requesting a block already in flight buys nothing.
-		 */
-		BlockNumber prefetched = InvalidBlockNumber;
-		MktMemCtx	outer	   = mkt_memctx_switch(entry_ctx);
-
-		for (uint32_t i = 0; i < ntids; i++)
-		{
-			if (prefetch != NULL && i + 1 < ntids)
-			{
-				BlockNumber nb = ItemPointerGetBlockNumber(&tids[i + 1]);
-				if (nb != prefetched)
-				{
-					prefetch(env->ctx, tids[i + 1]);
-					prefetched = nb;
-				}
-			}
-			cb(state, tids[i]);
-			mkt_memctx_reset(entry_ctx);
-		}
-
-		mkt_memctx_switch(outer);
-
-		blk = next;
-	}
-
-	mkt_memctx_delete(entry_ctx);
+	mkt_memctx_delete(ctx.entry_ctx);
 	mkt_free(tids);
 }
 
@@ -602,19 +604,17 @@ write_one_vector(void *state, ItemPointerData tid)
 	w->counts[target]++;
 }
 
+static void
+tombstone_page(MktPostingPageOpaque *op, void *state)
+{
+	(void)state;
+	op->flags |= MKT_POSTING_PAGE_TOMBSTONED;
+}
+
 void
 mkt_posting_chain_tombstone(MktStorage *storage, BlockNumber head)
 {
-	BlockNumber blk = head;
-	while (blk != InvalidBlockNumber)
-	{
-		Page				  page = mkt_storage_write_page(storage, blk);
-		MktPostingPageOpaque *op   = mkt_posting_opaque(page);
-		BlockNumber			  next = op->next_blkno;
-		op->flags |= MKT_POSTING_PAGE_TOMBSTONED;
-		mkt_storage_commit_page(storage, blk);
-		blk = next;
-	}
+	mkt_posting_chain_mutate(storage, head, tombstone_page, NULL);
 }
 
 /* ----------------------------------------------------------------

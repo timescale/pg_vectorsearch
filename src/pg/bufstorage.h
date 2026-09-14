@@ -59,6 +59,13 @@ void mktann_storage_init(
 void mktann_storage_set_rel(MktannStorage *s, Relation rel);
 
 /*
+ * Storage for an inspection sweep: reads go through the shared page layer,
+ * but skip the recent-buffer cache so a sweep neither evicts the slots the
+ * query path reuses nor reports itself in the cache counters.
+ */
+void mktann_storage_init_inspect(MktannStorage *s, Relation index);
+
+/*
  * Toggle the backend-local buffer-id cache (mkt.recent_buffers): re-pin
  * index pages via ReadRecentBuffer instead of a buffer-mapping hash
  * lookup per page. Stale entries self-heal via ReadBuffer fallback.
