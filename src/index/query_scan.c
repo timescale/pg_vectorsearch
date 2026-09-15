@@ -470,6 +470,35 @@ mkt_query_set_rerank_pool(int32_t n)
 	g_rerank_pool = n;
 }
 
+/*
+ * The rerank pool for this k and nprobe, as far as it can be known without
+ * running the scan.
+ *
+ * Shared with the cost model, which has to price the fetches the scan will
+ * actually make. The scan adds one term this cannot: a floor at an eighth of
+ * the candidate buffer, which measures estimate noise and so does not exist
+ * until the clusters have been scanned.
+ */
+uint32_t
+mkt_query_rerank_pool_estimate(uint32_t k, uint32_t nprobe)
+{
+	if (g_rerank_pool < 0)
+		return 0; /* reranking off */
+
+	if (g_rerank_pool > 0)
+	{
+		uint32_t pool = (uint32_t)g_rerank_pool;
+
+		return pool < k ? k : pool;
+	}
+
+	double auto_floor = MKT_RERANK_POOL_AUTO_COEFF * (double)k *
+						pow((double)nprobe, MKT_RERANK_POOL_AUTO_EXP);
+	uint32_t pool = (uint32_t)(auto_floor + 0.5);
+
+	return pool < k ? k : pool;
+}
+
 uint32_t
 mkt_query_execute(
 		MktQueryState  *qs,
@@ -552,23 +581,17 @@ mkt_query_execute(
 	 * meaningless, silently capping recall well below what the probed
 	 * clusters contain. 1/8th of the buffer restores the recall
 	 * ceiling at a rerank cost proportionate to the observed noise. */
-	uint32_t pool = 0;
-	if (g_rerank_pool > 0)
-	{
-		pool = (uint32_t)g_rerank_pool;
-		if (pool < k)
-			pool = k;
-	}
-	else if (g_rerank_pool == 0)
-	{
-		double auto_floor = MKT_RERANK_POOL_AUTO_COEFF * (double)k *
-							pow((double)nprobe, MKT_RERANK_POOL_AUTO_EXP);
-		pool = (uint32_t)(auto_floor + 0.5);
-		if (pool < qs->topk.cand_count / 8)
-			pool = qs->topk.cand_count / 8;
-		if (pool < k)
-			pool = k;
-	}
+	uint32_t pool = mkt_query_rerank_pool_estimate(k, nprobe);
+
+	/*
+	 * The noise term needs the candidate population, which exists only now
+	 * that the clusters have been scanned -- so it cannot be part of the
+	 * shared estimate the planner uses.
+	 */
+	if (g_rerank_pool == 0 && pool < qs->topk.cand_count / 8)
+		pool = qs->topk.cand_count / 8;
+	if (pool > 0 && pool < k)
+		pool = k;
 
 	uint32_t ncands = extract_candidates(qs, pool);
 

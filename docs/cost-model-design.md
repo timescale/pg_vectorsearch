@@ -243,8 +243,8 @@ descent   = levels × beam × C_centroid_page × cop
 scan_cpu  = nprobe × C_cluster(dim, fmt) × cop            -- per-list setup (LUT for fastscan)
           + entries × (f_fs × C_fs(dim) + (1 − f_fs) × C_aos(dim)) × cop
           + topk_factor(k_eff) × entries × cop            -- heap maintenance grows with k
-index_io  = index_pages_fetched(nprobe × pages_per_list × (1 + CV²) + n_route
-                                + descent_pages, P, ...) × random_page_cost
+index_io  = index_pages_fetched(n_route + descent_pages, P, ...) × random_page_cost
+          + nprobe × (pages_per_list × (1 + CV²) − 1) × seq_page_cost
 rerank    = pool / (1 − d) × (C_fetch(dim) × cop
           + index_pages_fetched(pool, heap_pages, ...) / pool × random_page_cost)
           -- dead candidates are fetched and yield nothing
@@ -264,6 +264,16 @@ pages (the build's format when the health block is absent), and
 
 **Why each piece is there.**
 
+- *Posting chains are walked, not sought.* A posting list is a
+  forward-linked chain the build lays out contiguously, so scanning one is a
+  seek to its head followed by a sequential walk: only the head is a random
+  page. An earlier draft of this section charged `random_page_cost` for the
+  whole chain, and implementing it showed what that costs -- 91% of the
+  estimate at 100k rows and 768 dimensions, enough to lose to pgvector's
+  IVFFlat at every probe setting. It is also the correction pgvector itself
+  makes, crudely, by moving half of IVFFlat's page cost from random to
+  sequential. Random pages are the descent's centroid pages and one head per
+  routed cluster; the rest of each probed chain is sequential.
 - *Startup carries the work.* The scan materializes its result before the
   first tuple, so the LIMIT fraction must not discount it. `loop_count`
   multiplies it because a rescan inside a nested loop reruns the search.
@@ -436,19 +446,140 @@ and the `mkt bench` standalone kernels:
 
 | Constant | Form | 128d | 768d |
 |---|---|---|---|
-| `C_fs(dim)` | `a + b × dim`, ns → cop at 50 ns | ~0.5 cop | ~0.5 cop |
-| `C_aos(dim)` | `a + b × dim` | ~0.3 cop | ~0.6 cop |
-| `C_cluster(dim, fastscan)` | LUT build ∝ dim | ~400 cop | ~2,000 cop |
-| `C_fetch(dim)` | tuple deform + exact distance, `a + b × dim` | ~6 cop | ~50 cop |
+| per-entry scoring | `a + b × dim` | 4.6 ns | 15.5 ns |
+| per-probed-list setup | **flat** | 5.34 µs | 4.84 µs |
+| per-rerank-candidate, inline | **flat** | 0.93 µs | 0.87 µs |
+| per-rerank-candidate, out of line | **× 30** | — | 25.7 µs |
 | `topk_factor(k)` | `1 + c × log2(k / 10)` from the k = 10 / 1000 pair | | |
 
+Two of those shapes are the opposite of what this document first proposed,
+and the corrections came from implementing it.
+
+**Per-list setup is flat in the dimension, not proportional to it.** The
+first version extrapolated linearly from a single 128-dimension figure and
+reached ~100 µs per list at 768 dimensions; it is 4.84 µs. The lookup table
+is indexed by the query's quantized code, so its size follows the code
+width rather than the vector, and the build is dominated by fixed setup.
+That one constant was twenty times high and dominated the estimate at high
+nprobe -- enough on its own to lose every plan above `nprobe = 300` on a
+768-dimension table.
+
+**Per-candidate rerank is flat in the dimension too, and is decided instead
+by storage.** The same 768-dimension column measures 0.87 µs per candidate
+under `STORAGE PLAIN` and 25.7 µs under the default `external`, because
+every candidate then costs a fetch and a decompress from the toast
+relation. A vector crosses the 2 KB threshold at 506 dimensions, so every
+common embedding width is on the expensive side of it. This is the one term
+no competing estimator needs: HNSW and IVFFlat store their vectors inside
+index pages, which cannot be toasted, so they materialize nothing from the
+heap and pay it zero times -- which is also why neither of their cost
+functions mentions the dimension at all.
+
+**Separating per-list from per-entry needs two indexes, not two nprobes.**
+Sweeping `nprobe` leaves entries-per-list roughly constant, so the two
+costs are collinear and no fit can tell them apart -- solving the system
+returns a negative per-entry cost. Building a second index on the same rows
+with a different `nlist` and scanning both at the same `nprobe` varies
+entries-per-list while holding lists fixed, which separates them:
+
+```
+nlist =  390:  50 lists, 29,549 entries, 0.700 ms
+nlist = 2000:  50 lists,  7,564 entries, 0.359 ms
+    ->  15.5 ns/entry,  4.84 µs/list
+```
+
+`EXPLAIN (ANALYZE)` per-phase timings are not usable for the absolute
+figures here -- instrumented, they exceeded the measured throughput of the
+whole query -- but the differences between two runs of the same instrument
+are sound, which is what the method above relies on.
+
 They live in one header as named constants with the measurement they came
-from, replaceable by GUCs (`mkt.cost_*`) if a deployment needs to override
-them. A later phase can make them self-calibrating: every scan already
+from. Deliberately not settings: a knob that scaled the estimate would hide
+a miscalibration rather than fix it, and the planner's own page-cost and
+`cpu_*_cost` settings already describe the machine.
+
+A later phase can make them self-calibrating: every scan already
 measures its own per-phase nanoseconds and counts, so a slow exponential
 average of observed ns-per-entry and ns-per-fetch per backend could replace
 the static constants. That is deliberately not in the first version because
 it makes plans drift with load; it is listed under open questions.
+
+### 8.4 Both page formats, and indexes holding both
+
+The per-entry constants were measured for AoS pages by the same two-index
+method, varying `nlist` at a fixed `nprobe` so the per-list and per-entry
+terms separate:
+
+| format | dim | ns/entry | us/list |
+|---|---|---|---|
+| fastscan | 128 | 4.6 | 5.34 |
+| fastscan | 768 | 15.5 | 4.84 |
+| AoS | 128 | 15.7 | 3.32 |
+| AoS | 768 | 34.2 | 4.20 |
+
+Scoring an AoS entry costs two to three times what a fastscan entry
+costs, which is what the separate `MKT_COST_AOS_*` constants carry. The
+per-list cost, though, is within about 25% across all four rows: opening a
+cluster, reading its head page and scoring the head exactly are paid by
+both formats. An earlier version charged the per-list term only to
+fastscan, on the theory that it was the lookup table; the measurement says
+the table is the smaller part of it (~1.3 us) and the rest is format
+independent. The constants were split accordingly into
+`MKT_COST_LIST_OPEN` (both) and `MKT_COST_CLUSTER_LUT` (fastscan only).
+
+An index does not have to be all one format. A chain built as fastscan and
+then given inserts holds packed fastscan pages from the build and AoS
+pages from the inserts. A 768-dimension index built at 100k rows and then
+given 50k more came out at 827 AoS and 1775 fastscan pages, and ran 28%
+slower than a pure fastscan index of the same size -- 2.150 vs 1.676 ms --
+while costing 0.4% more, because `has_fastscan` is a single flag taken
+from the build format and every entry is priced at that rate.
+
+This is a real under-estimate and it is left in place. Closing it needs
+the per-format page counts of the section 7 health block, which the
+estimator does not have without reading the index. The size of the error
+is bounded by the ratio of the two per-entry constants, so the worst case
+is an index that has drifted almost entirely to AoS, priced as if it were
+entirely fastscan: about 2.2x the per-entry term, which at the 7% share
+that term holds is roughly 15% of the estimate. The regression test
+asserts only that such an index is still costed and still chosen.
+
+### 8.5 Where the estimate's weight actually sits
+
+Instrumenting the terms on the 1M-row 768-dimension index:
+
+| term | nprobe=1 | nprobe=100 |
+|---|---|---|
+| descent | 10.0 | 29.3 |
+| scan_cpu (per entry) | 0.7 | 73.0 |
+| random_io (descent pages) | 160.0 | 396.0 |
+| head_io (routed heads) | 2.0 | 200.0 |
+| rerank_cpu | 40.5 | 81.0 |
+| rerank_io (heap) | 120.0 | 232.0 |
+| **total** | **333.3** | **1011.4** |
+
+Two things follow. The estimate is dominated by page access, not by
+distance computation -- `scan_cpu` is 7% of the total at nprobe=100 where
+it is about 26% of the measured time. And the routed cluster heads are
+priced at `seq_page_cost` rather than `random_page_cost`, because the scan
+issues a prefetch for all of them before reading any: they are a batch of
+overlapped reads, not a sequence of seeks. Charging them as seeks put the
+estimate 3.06x out of proportion across an nprobe sweep; pricing them as
+overlapped reads brings that to 1.32x:
+
+| nprobe | cost | ms | cost/ms |
+|---|---|---|---|
+| 1 | 333.3 | 1.03 | 324 |
+| 4 | 375.0 | 1.25 | 300 |
+| 10 | 418.4 | 1.47 | 285 |
+| 32 | 522.3 | 2.02 | 259 |
+| 100 | 1011.4 | 2.96 | 342 |
+
+PostgreSQL has no general mechanism for pricing prefetched reads --
+`effective_io_concurrency` exists because batched reads do not cost what
+serial ones do, but no cost function consults it. Using `seq_page_cost`
+for a batch and `random_page_cost` for a dependent read is the closest the
+existing currency allows.
 
 ## 9. Phases
 
@@ -459,20 +590,37 @@ it makes plans drift with load; it is listed under open questions.
    through `mkt.index_settings`, so the degradation tests in phase 2 have
    something to assert on -- and per §7 that block now needs its own
    justification rather than #238's.
-2. **The serial model (main PR).** New `src/pg/cost.c` implementing §6 with
-   §8's constants, replacing `genericcostestimate` in `mktann_costestimate`.
-   Statement-scoped memo as on the branch. Regression tests in
-   `test/pg/sql/cost.sql`: the index is chosen at 300k; the sequential scan
-   or a near tie at 200 rows; a btree-plus-sort plan for a 1% anti-correlated
-   filter; estimates monotone in `nprobe`, `k` and `mkt.query_limit`; the
-   estimate rises when pages are AoS or tombstoned; and, in the pgvector
-   compat suite, mktann chosen over HNSW on the same column at 300k rows.
-3. **Shared `k` seeding with #227, which has merged.** The executor side
-   now lives in `src/pg/scan_bound.c` (`mkt_scan_bound`) and
-   `resolve_top_k` in `scan.c`, including the filter-selectivity inflation
-   and the `work_mem` ceiling. One function that both that path and the
-   estimator call, so the pool the planner prices is the pool the scan
-   uses.
+2. **The serial model -- implemented.** `src/pg/cost.c` implements §6 with
+   §8's constants, replacing `genericcostestimate` in `mktann_costestimate`,
+   and `test/pg/sql/cost.sql` asserts the plan choices and that the estimate
+   moves the right way with every input. Measured on a 100k-row,
+   768-dimension table carrying all three index types on one column:
+
+   | plan | startup | total |
+   |---|---|---|
+   | mktann | 554.6 | 844.8 |
+   | HNSW | 1380.1 | 204552.0 |
+   | IVFFlat, probes = 1 | 399.8 | 130143.0 |
+   | sequential scan + top-N sort | -- | 4071.6 |
+
+   mktann is chosen over HNSW and over the sequential scan, and at 200 rows
+   the sequential scan is correctly chosen over mktann -- the case the old
+   estimator got wrong. IVFFlat at its default `probes = 1` is cheaper, and
+   honestly so: it scans 0.3% of the data against mktann's 2.6%, for
+   correspondingly worse recall, and no cost model can see recall. At a
+   matched probe fraction (`probes = 8`) mktann wins.
+
+   Not yet covered: the AoS and tombstoned page terms, which need the health
+   block of §7, and the pgvector head-to-head as a test rather than a
+   measurement -- that belongs in the compat suite, since meerkat must not
+   depend on pgvector.
+3. **Shared `k` seeding with #227 -- done as part of phase 2.** Rather than
+   two copies of the rules, the executor's own functions are exported and
+   the estimator calls them: `mkt_scan_inflate_for_filter` for the
+   selectivity margin, `mkt_scan_resolve_top_k` for `mkt.query_limit`, the
+   floor and the `work_mem` ceiling, and `mkt_query_rerank_pool_estimate`
+   for the pool. The planner prices the pool the scan will actually build,
+   and a test asserts that lowering `mkt.query_limit` lowers the estimate.
 4. **Parallel re-costing.** Port the `set_rel_pathlist_hook` from
    `feature/parallel-query` on top of the new terms once parallel scans
    merge; its Amdahl split (descent serial, scan and rerank divided) is
@@ -485,8 +633,59 @@ it makes plans drift with load; it is listed under open questions.
 
 1. Currency anchor: 50 ns per `cpu_operator_cost` (§5, honest against the
    sequential scan, loses to HNSW's estimate at 100M with auto nprobe) or
-   100 ns (wins there, is really a bias)? Proposal: 50 ns plus a
-   `mkt.cost_scale` GUC.
+   100 ns (wins there, is really a bias)? Proposal: 50 ns, and no scaling
+   knob -- see §8.
+
+   Implementing it showed the question is larger than the factor of two.
+   Measured on the 100k/768d table, cost per millisecond of real time:
+   mktann 112, pgvector IVFFlat 107 at `probes = 1` and 75 at `probes = 8`,
+   HNSW 221 — so the index estimators agree with each other to within a
+   factor of three — against **1.2 for the sequential scan**. Almost all of
+   that two-order gap is TOAST: a 768-dimension vector is 3,076 bytes, so
+   the column is out of line, the planner sees 637 pages where the scan
+   detoasts 395 MB, and it never charges for the difference. pgvector's
+   IVFFlat estimator carries a comment about the same problem.
+
+   That decides which comparison the anchor should be honest about. Against
+   another index estimator the model is already in the right currency;
+   against a sequential scan over an out-of-line column no anchor can be,
+   because the competing estimate is missing most of its work. Inline
+   columns are unaffected — at 32 dimensions the model picks the index at
+   20k rows and the sequential scan at 200, which is the behaviour phase 2
+   asserts.
+
+   It also sets a ceiling the model has to fit under. PostgreSQL prices a
+   serial sequential scan of the 100k-row, 768-dimension table at 53,411
+   for 1,666 ms — about 32 cost units per millisecond — while the same
+   table under the default `external` storage is priced at 4,071 for
+   3,292 ms, or 1.2 units per millisecond, because `relpages` counts 637
+   pages against 395 MB of toast that the scan reads and the planner never
+   charges for. An honest estimate of our own work has to come in under
+   that understated number or the index is never chosen on precisely the
+   tables it exists for. After §8's recalibration it does, at every probe
+   setting including probing every list, but the margin there is 11% and it
+   exists only by fitting under a broken comparison.
+
+   The durable fix is not a discount on our side. PostgreSQL does not model
+   detoasting anywhere -- `costsize.c` does not mention TOAST, and ANALYZE
+   deliberately records the toasted width ("if the value is toasted, we use
+   the toasted width"), which is right for estimating heap pages and wrong
+   for estimating work. Detoasting is lazy, so the scan genuinely does not
+   know it will happen; the cost belongs to whichever function forces the
+   value, and `pg_proc.procost` is a flat per-call scalar that cannot scale
+   with an argument's width. Every distance function in both extensions sits
+   at the default `procost = 1`, so one 768-dimension comparison over a
+   toasted value is priced at 0.0025 units for work that measures 33 us.
+
+   PostgreSQL does provide the mechanism, though, and nobody uses it:
+   `SupportRequestCost` lets a planner support function set a per-evaluation
+   cost from the invoking parse node, which carries the typmod and therefore
+   the dimension. A support function on `mkt.l2_distance` and its siblings
+   would make the *sequential scan's* estimate honest rather than making
+   ours dishonest, and would correct every plan over an `mkt.vector` column
+   instead of only the ones we compete for. It cannot reach a
+   `public.vector` column, whose operators belong to pgvector. Worth its own
+   phase.
 2. Residency sampling from the branch: drop, or keep behind a GUC default
    off? Proposal: drop for now; Mackert-Lohman is the convention.
 3. The health block is refreshed by VACUUM only, with growth since the

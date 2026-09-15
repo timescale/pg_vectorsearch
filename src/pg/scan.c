@@ -43,7 +43,6 @@
  * LIMIT 1 has slack for a candidate that turns out to be a dead tuple the
  * heap fetch discards, and a work_mem too small to hold more still answers.
  */
-#define MKT_DEFAULT_K 10
 
 /* ----------------------------------------------------------------
  * Process-global per-phase accumulators (diagnostic).
@@ -403,21 +402,24 @@ max_top_k_for_work_mem(void)
 static uint32_t
 resolve_top_k(const MktannScanState *ss, Relation heap)
 {
+	double rows = heap != NULL ? mktann_estimate_heap_tuples(heap) : -1.0;
+
+	return mkt_scan_resolve_top_k(ss->scan_bound, rows);
+}
+
+uint32_t
+mkt_scan_resolve_top_k(uint32_t scan_bound, double heap_rows)
+{
 	uint32_t cap = max_top_k_for_work_mem();
-	uint32_t k	 = ss->scan_bound;
+	uint32_t k	 = scan_bound;
 
 	if (k == 0)
 	{
 		/* No LIMIT to size from: the query has asked for every row in
 		 * order, so size for as many as it could return. */
 		k = cap;
-		if (heap != NULL)
-		{
-			double rows = mktann_estimate_heap_tuples(heap);
-
-			if (rows >= 1.0 && rows < (double)cap)
-				k = (uint32_t)rows;
-		}
+		if (heap_rows >= 1.0 && heap_rows < (double)cap)
+			k = (uint32_t)heap_rows;
 	}
 
 	/*

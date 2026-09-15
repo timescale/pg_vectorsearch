@@ -1,0 +1,201 @@
+-- Cost model for index scans
+--
+-- The model prices the work a scan does rather than delegating to
+-- genericcostestimate (docs/cost-model-design.md). What these assert is not
+-- absolute numbers -- those depend on the machine's page costs -- but that
+-- the estimate moves the right way with every input, and that the planner
+-- reaches the right conclusion at both ends of the size range.
+
+CREATE TABLE cost_test (id serial, grp int, v vector(32));
+
+INSERT INTO cost_test (grp, v)
+    SELECT i % 10, (
+        SELECT array_agg(sin(i * 0.1 + j * 0.7)::real)
+        FROM generate_series(0, 31) j
+    )::vector(32)
+    FROM generate_series(1, 20000) i;
+
+CREATE INDEX idx_cost ON cost_test USING mktann (v);
+ANALYZE cost_test;
+
+-- The index scan's startup cost. This model puts the work there: a scan
+-- elects its whole top-k before it can return a row, so a LIMIT must not
+-- discount it.
+CREATE FUNCTION cost_startup(q text) RETURNS float8
+    LANGUAGE plpgsql AS $$
+DECLARE
+    j json;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || q INTO j;
+    RETURN (jsonb_path_query_first(j::jsonb,
+        '$.** ? (@."Node Type" == "Index Scan")."Startup Cost"'))::float8;
+END $$;
+
+CREATE FUNCTION plan_uses(q text, idx text) RETURNS boolean
+    LANGUAGE plpgsql AS $$
+DECLARE
+    j json;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || q INTO j;
+    RETURN j::text LIKE '%' || idx || '%';
+END $$;
+
+-- At 20,000 rows the index earns its cost and the planner takes it.
+SELECT plan_uses($q$
+    SELECT id FROM cost_test
+    ORDER BY v <-> (SELECT v FROM cost_test WHERE id = 42)
+    LIMIT 10$q$, 'idx_cost') AS index_chosen_at_20k;
+
+-- At 200 rows it does not. This is the case the old estimator got wrong: a
+-- startup cost of zero made the index look free at every size, so it won
+-- plans a sequential scan should have taken.
+CREATE TABLE cost_small (id serial, v vector(32));
+INSERT INTO cost_small (v)
+    SELECT (SELECT array_agg(sin(i * 0.1 + j * 0.7)::real)
+            FROM generate_series(0, 31) j)::vector(32)
+    FROM generate_series(1, 200) i;
+CREATE INDEX idx_cost_small ON cost_small USING mktann (v);
+ANALYZE cost_small;
+
+SELECT NOT plan_uses($q$
+    SELECT id FROM cost_small
+    ORDER BY v <-> (SELECT v FROM cost_small WHERE id = 1)
+    LIMIT 10$q$, 'idx_cost_small') AS seqscan_chosen_at_200_rows;
+
+-- Every input moves the estimate the way the work moves. Captured rather
+-- than compared inline because each needs its own GUC setting.
+CREATE TEMP TABLE costs (label text primary key, c float8);
+SET enable_seqscan = off;
+
+CREATE FUNCTION record_cost(label text, lim int DEFAULT 10) RETURNS void
+    LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO costs
+    SELECT label, cost_startup(format($q$
+        SELECT id FROM cost_test
+        ORDER BY v <-> (SELECT v FROM cost_test WHERE id = 42)
+        LIMIT %s$q$, lim));
+END $$;
+
+SET mkt.nprobe = 1;    SELECT record_cost('nprobe1');
+SET mkt.nprobe = 10;   SELECT record_cost('nprobe10');
+SET mkt.nprobe = 100;  SELECT record_cost('nprobe100');
+RESET mkt.nprobe;
+
+-- More probed clusters is more scanning, more I/O and a bigger rerank pool.
+SELECT (SELECT c FROM costs WHERE label = 'nprobe1')
+         < (SELECT c FROM costs WHERE label = 'nprobe10')
+   AND (SELECT c FROM costs WHERE label = 'nprobe10')
+         < (SELECT c FROM costs WHERE label = 'nprobe100')
+    AS cost_rises_with_nprobe;
+
+SELECT record_cost('k10', 10);
+SELECT record_cost('k1000', 1000);
+
+-- A larger LIMIT costs more: the rerank pool grows with the top-k, and the
+-- heap maintenance costs more per entry scanned.
+SELECT (SELECT c FROM costs WHERE label = 'k10')
+         < (SELECT c FROM costs WHERE label = 'k1000')
+    AS cost_rises_with_limit;
+
+-- mkt.query_limit only ever lowers the sizing (it caps a query that asks
+-- for more than the caller will read), so it can only lower the estimate --
+-- and the planner sees the same cap the scan will apply, because both call
+-- one function to resolve it.
+SET mkt.query_limit = 20;
+SELECT record_cost('k1000_capped', 1000);
+RESET mkt.query_limit;
+
+SELECT (SELECT c FROM costs WHERE label = 'k1000_capped')
+         < (SELECT c FROM costs WHERE label = 'k1000')
+    AS query_limit_lowers_cost;
+
+SET mkt.rerank_pool = 20;   SELECT record_cost('pool20');
+SET mkt.rerank_pool = 2000; SELECT record_cost('pool2000');
+RESET mkt.rerank_pool;
+
+-- Every candidate in the pool is a heap fetch and an exact distance.
+SELECT (SELECT c FROM costs WHERE label = 'pool20')
+         < (SELECT c FROM costs WHERE label = 'pool2000')
+    AS cost_rises_with_rerank_pool;
+
+-- A filter the executor applies above the scan does not restrict the scan:
+-- it throws rows away afterwards, so the scan must produce more of them to
+-- yield the LIMIT. That raises the cost, which is what lets the planner
+-- prefer a filter-first plan when the filter is selective.
+SELECT cost_startup($q$
+        SELECT id FROM cost_test
+        ORDER BY v <-> (SELECT v FROM cost_test WHERE id = 42)
+        LIMIT 10$q$)
+     < cost_startup($q$
+        SELECT id FROM cost_test WHERE grp = 3
+        ORDER BY v <-> (SELECT v FROM cost_test WHERE id = 42)
+        LIMIT 10$q$)
+    AS filter_raises_cost;
+
+-- And it raises it enough to change the plan. A tenth-selective filter
+-- means the scan must produce about ten times the LIMIT for ten to survive,
+-- so with a sequential scan available the planner stops choosing the index
+-- -- which is the whole point of pricing the inflation. The old estimator,
+-- with its startup cost of zero, took the index here and returned too few
+-- rows for its trouble.
+RESET enable_seqscan;
+SELECT NOT plan_uses($q$
+    SELECT id FROM cost_test WHERE grp = 3
+    ORDER BY v <-> (SELECT v FROM cost_test WHERE id = 42)
+    LIMIT 10$q$, 'idx_cost') AS filter_changes_the_plan;
+
+-- An AoS index is costed and remains selectable. The two formats carry
+-- different per-entry constants -- scoring an AoS entry was measured at
+-- two to three times a fastscan one (15.7 vs 4.6 ns at 128 dimensions,
+-- 34.2 vs 15.5 at 768) -- but this test deliberately does not assert
+-- which index is dearer. At regress scale the per-entry term is about 7%
+-- of the estimate, so the constants move the total by around a percent
+-- and the ordering between the two is an accident of page counts rather
+-- than of format. Asserting it would be asserting noise.
+SET enable_seqscan = off;
+CREATE INDEX idx_cost_aos ON cost_test USING mktann (v) WITH (fastscan = off);
+DROP INDEX idx_cost;
+
+SELECT (SELECT format FROM mkt.posting_pages('idx_cost_aos') LIMIT 1)
+    AS aos_index_is_aos;
+
+RESET enable_seqscan;
+SELECT plan_uses($q$
+    SELECT id FROM cost_test
+    ORDER BY v <-> (SELECT v FROM cost_test WHERE id = 42)
+    LIMIT 10$q$, 'idx_cost_aos') AS aos_index_is_chosen;
+
+-- A chain built as fastscan and then given inserts holds both formats at
+-- once: the build writes packed fastscan pages, later inserts append AoS
+-- ones. The estimate cannot see that mix without the health block of the
+-- design's section 7 -- it prices every entry at the build format's rate
+-- -- so this asserts only that such an index is still costed and still
+-- chosen, not that the number accounts for the drift. Measured, a third
+-- of the pages being AoS makes the scan about 28% slower than the
+-- estimate reflects.
+DROP INDEX idx_cost_aos;
+CREATE INDEX idx_cost ON cost_test USING mktann (v);
+
+INSERT INTO cost_test (grp, v)
+    SELECT i % 10, (
+        SELECT array_agg(sin(i * 0.37 + j * 0.7)::real)
+        FROM generate_series(0, 31) j
+    )::vector(32)
+    FROM generate_series(20001, 30000) i;
+ANALYZE cost_test;
+
+SELECT count(DISTINCT format) > 1 AS index_holds_both_formats
+    FROM mkt.posting_pages('idx_cost');
+
+RESET enable_seqscan;
+SELECT plan_uses($q$
+    SELECT id FROM cost_test
+    ORDER BY v <-> (SELECT v FROM cost_test WHERE id = 42)
+    LIMIT 10$q$, 'idx_cost') AS mixed_format_index_still_chosen;
+
+DROP FUNCTION record_cost(text, int);
+DROP FUNCTION cost_startup(text);
+DROP FUNCTION plan_uses(text, text);
+DROP TABLE cost_small;
+DROP TABLE cost_test;

@@ -237,8 +237,39 @@ size_top_k(IndexScanState *iss, int64 limit)
 	 * business proposing it: below this the estimate is noise, not a
 	 * measurement.
 	 */
-	double selectivity = plan->plan_rows / heap->rd_rel->reltuples;
+	return mkt_scan_inflate_for_filter(
+			k, plan->plan_rows / heap->rd_rel->reltuples);
+}
 
+/*
+ * Inflate a row target for a filter the executor applies above the scan.
+ *
+ * Shared with the cost model, which must price the pool the scan will
+ * actually build: if the two derived it separately they would drift, and the
+ * planner would choose a plan on a number the executor does not use. The
+ * executor divides its own plan_rows by the relation's row count; the
+ * planner has clauselist_selectivity for the same fraction.
+ */
+uint32_t
+mkt_scan_inflate_for_filter(uint32_t k, double selectivity)
+{
+	if (k == 0)
+		return 0;
+
+	/*
+	 * A row estimate is a planner guess divided by a cached count, so it can
+	 * arrive at anything: zero rows from a qual the planner reads as
+	 * impossible, more rows than the relation is recorded as holding after a
+	 * bulk load, a non-finite value from either being garbage. Only a
+	 * fraction strictly inside (0, 1) says anything about filtering; take
+	 * the target unchanged for the rest rather than dividing by them.
+	 *
+	 * MKT_FILTER_MIN_SELECTIVITY floors the divisor. Without it a plan_rows
+	 * of a millionth of a row asks for a top-k a million times the target,
+	 * and while work_mem would refuse to allocate it, the sizing has no
+	 * business proposing it: below this the estimate is noise, not a
+	 * measurement.
+	 */
 	if (!isfinite(selectivity) || selectivity >= 1.0 || selectivity <= 0.0)
 		return k;
 	if (selectivity < MKT_FILTER_MIN_SELECTIVITY)
@@ -249,9 +280,7 @@ size_top_k(IndexScanState *iss, int64 limit)
 
 	/*
 	 * Clamped only to keep the cast well defined. The ceiling that matters
-	 * is work_mem, applied by the caller: a query whose sizing does not fit
-	 * returns fewer rows, and raising work_mem is how a caller asks for
-	 * more.
+	 * is work_mem, applied by mkt_scan_resolve_top_k.
 	 */
 	return (uint32_t)Min(Max(sized, (double)k), (double)PG_UINT32_MAX);
 }

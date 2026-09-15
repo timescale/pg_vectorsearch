@@ -551,5 +551,13 @@ MktannScanInfo
 mktann_cache_scan_info(Relation index)
 {
 	AmCacheData *c = get_cache_data(index);
-	return (MktannScanInfo){.nlist = c->nlist};
+	return (MktannScanInfo){
+			.nlist			 = c->nlist,
+			.dim			 = c->base.dim,
+			.nlevels		 = c->base.nlevels,
+			.fan_out		 = c->base.fan_out,
+			.first_posting	 = c->base.first_posting,
+			.centroid_format = c->base.centroid_format,
+			.has_fastscan	 = c->has_fastscan,
+	};
 }

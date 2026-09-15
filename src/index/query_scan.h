@@ -153,6 +153,12 @@ uint32_t mkt_query_execute(
 void mkt_query_set_rerank_pool(int32_t n);
 
 /*
+ * The rerank pool for a given k and nprobe, without the scan's own
+ * noise-driven floor. Shared with the cost model.
+ */
+uint32_t mkt_query_rerank_pool_estimate(uint32_t k, uint32_t nprobe);
+
+/*
  * Probe-order refinement (mkt.probe_expand).
  *
  * Routes ceil(nprobe * expand) leaf candidates through the centroid
