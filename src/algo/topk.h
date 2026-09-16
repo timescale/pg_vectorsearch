@@ -69,8 +69,14 @@ typedef struct VsTopK
 	VsTopKEntry *candidates;	/* growable candidate buffer */
 	uint32_t	 cand_count;	/* buffered candidates */
 	uint32_t	 cand_capacity; /* allocated capacity */
-	uint32_t	 cur_src;		/* diagnostic: rank stamped onto inserts */
-	VsMemCtx	 memctx;		/* owning context for all allocations */
+	/* When > 0, the candidate buffer is bounded to this many entries and
+	 * kept as a max-heap by distance (the cand_limit smallest-distance
+	 * survivors), instead of growing without bound. Set for an explicit
+	 * rerank_pool, where collecting survivors past the cap is wasted work.
+	 * 0 = unbounded (auto pool needs the full survivor count). */
+	uint32_t cand_limit;
+	uint32_t cur_src; /* diagnostic: rank stamped onto inserts */
+	VsMemCtx memctx;  /* owning context for all allocations */
 } VsTopK;
 
 /* ----------------------------------------------------------------
@@ -84,6 +90,14 @@ typedef struct VsTopK
  * Use vs_topk_cleanup() to free.
  */
 void vs_topk_init(VsTopK *topk, uint32_t k);
+
+/*
+ * Bound the candidate buffer to `limit` entries (0 = unbounded). When set,
+ * the buffer keeps only the `limit` smallest-distance survivors as a
+ * max-heap, avoiding unbounded growth for an explicit rerank_pool. Call
+ * after reset (expects cand_count == 0); ensures capacity >= limit.
+ */
+void vs_topk_set_cand_limit(VsTopK *topk, uint32_t limit);
 
 /* Free internal buffers (does not free the VsTopK struct itself). */
 void vs_topk_cleanup(VsTopK *topk);

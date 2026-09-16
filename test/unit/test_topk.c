@@ -539,3 +539,68 @@ TEST(topk_extract_capped_adversarial)
 		}
 	}
 }
+
+/* ----------------------------------------------------------------
+ * Bounded candidate buffer (explicit rerank_pool)
+ * ---------------------------------------------------------------- */
+
+/*
+ * With a bounded candidate buffer sized to 3*pool, the reranked set (the
+ * pool smallest-distance survivors) must be identical to the unbounded
+ * path, while the buffer never grows past the cap. A loose error admits
+ * every candidate, so the unbounded buffer would hold all n -- exactly the
+ * noisy case the bound is meant to shrink.
+ */
+TEST(topk_bounded_matches_unbounded)
+{
+	const uint32_t k	= 10;
+	const uint32_t pool = 20;
+	const uint32_t n	= 1000;
+	const float	   err	= 1.0e6f; /* loose threshold: all admitted */
+
+	float *dists = vs_alloc(n * sizeof(float));
+	for (uint32_t i = 0; i < n; i++)
+		dists[i] = (float)((i * 7919u + 17u) % 100000u) / 100.0f;
+
+	/* Unbounded reference. */
+	VsTopK ub;
+	vs_topk_init(&ub, k);
+	for (uint32_t i = 0; i < n; i++)
+		vs_topk_insert(&ub, dists[i], err, i);
+	VsTopKEntry *ub_res = vs_alloc(n * sizeof(*ub_res));
+	uint32_t	 ub_cnt;
+	vs_topk_extract_sorted_capped(&ub, ub_res, &ub_cnt, pool);
+
+	/* Bounded candidate buffer at 3*pool. */
+	VsTopK bd;
+	vs_topk_init(&bd, k);
+	vs_topk_set_cand_limit(&bd, pool * 3);
+	for (uint32_t i = 0; i < n; i++)
+		vs_topk_insert(&bd, dists[i], err, i);
+	ASSERT_TRUE(
+			bd.cand_count <= pool * 3,
+			"bounded buffer must never exceed the 3*pool cap");
+	VsTopKEntry *bd_res = vs_alloc((pool * 3) * sizeof(*bd_res));
+	uint32_t	 bd_cnt;
+	vs_topk_extract_sorted_capped(&bd, bd_res, &bd_cnt, pool);
+
+	ASSERT_EQ(ub_cnt, bd_cnt, "bounded and unbounded return the same count");
+	for (uint32_t i = 0; i < bd_cnt; i++)
+	{
+		char msg[128];
+		snprintf(
+				msg,
+				sizeof(msg),
+				"result %u differs: bounded id %llu vs unbounded id %llu",
+				i,
+				(unsigned long long)bd_res[i].id,
+				(unsigned long long)ub_res[i].id);
+		ASSERT_EQ(ub_res[i].id, bd_res[i].id, msg);
+	}
+
+	vs_free(dists);
+	vs_free(ub_res);
+	vs_free(bd_res);
+	vs_topk_cleanup(&ub);
+	vs_topk_cleanup(&bd);
+}
