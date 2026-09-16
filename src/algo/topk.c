@@ -21,6 +21,13 @@
 
 #define VS_TOPK_INITIAL_CAP_MIN 32
 
+/* Resize the candidate buffer down only once it exceeds the requested
+ * bound by this factor. An explicit rerank_pool should hold memory
+ * proportional to the pool, but a session alternating pool sizes would
+ * otherwise pay an arena reset on every query, so the proportionality
+ * holds up to this constant. */
+#define VS_TOPK_SHRINK_FACTOR 4
+
 /* ----------------------------------------------------------------
  * Threshold heap (max-heap of Distance values)
  * ---------------------------------------------------------------- */
@@ -322,17 +329,52 @@ void
 vs_topk_set_cand_limit(VsTopK *topk, uint32_t limit)
 {
 	topk->cand_limit = limit;
-	if (limit > topk->cand_capacity)
+
+	/* A bound below the initial capacity is not worth holding a smaller
+	 * buffer for, and keeping this floor means an unbounded query that
+	 * follows starts doubling from the same place a fresh top-K would. */
+	uint32_t target = limit;
+	if (target != 0 && target < VS_TOPK_INITIAL_CAP_MIN)
+		target = VS_TOPK_INITIAL_CAP_MIN;
+
+	bool grow = target > topk->cand_capacity;
+	/* Divide rather than multiply: the factor cannot overflow a capacity
+	 * that a previous unbounded query grew arbitrarily large. */
+	bool shrink = target != 0 &&
+				  topk->cand_capacity / VS_TOPK_SHRINK_FACTOR > target;
+
+	if (!grow && !shrink)
+		return;
+
+	/* Reclaiming the outgrown blocks means resetting the arena, which
+	 * invalidates every allocation in it -- only sound on a fully reset
+	 * top-K, which is this function's documented call site. A caller that
+	 * resizes mid-collection instead retires the old buffer into the
+	 * arena, as the growth path always did; a shrink is pointless there,
+	 * since the entries to preserve are what makes the buffer large. */
+	if (topk->cand_count > 0 || topk->ub_count > 0)
 	{
-		VsTopKEntry *new_buf =
-				vs_memctx_alloc(topk->memctx, limit * sizeof(VsTopKEntry));
-		if (topk->cand_count > 0)
+		if (grow)
+		{
+			VsTopKEntry *new_buf = vs_memctx_alloc(
+					topk->memctx, target * sizeof(VsTopKEntry));
 			memcpy(new_buf,
 				   topk->candidates,
 				   topk->cand_count * sizeof(VsTopKEntry));
-		topk->candidates	= new_buf;
-		topk->cand_capacity = limit;
+			topk->candidates	= new_buf;
+			topk->cand_capacity = target;
+		}
+		return;
 	}
+
+	vs_memctx_reset(topk->memctx);
+	topk->ub_heap =
+			vs_memctx_alloc(topk->memctx, topk->k_capacity * sizeof(Distance));
+	topk->ub_ids =
+			vs_memctx_alloc(topk->memctx, topk->k_capacity * sizeof(uint64_t));
+	topk->candidates =
+			vs_memctx_alloc(topk->memctx, target * sizeof(VsTopKEntry));
+	topk->cand_capacity = target;
 }
 
 void
