@@ -209,21 +209,21 @@ CREATE OPERATOR < (
     LEFTARG = vector, RIGHTARG = vector,
     FUNCTION = vector_lt,
     COMMUTATOR = '>', NEGATOR = '>=',
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = pg_catalog.scalarltsel, JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR <= (
     LEFTARG = vector, RIGHTARG = vector,
     FUNCTION = vector_le,
     COMMUTATOR = '>=', NEGATOR = '>',
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = pg_catalog.scalarlesel, JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR = (
     LEFTARG = vector, RIGHTARG = vector,
     FUNCTION = vector_eq,
     COMMUTATOR = '=', NEGATOR = '<>',
-    RESTRICT = eqsel, JOIN = eqjoinsel,
+    RESTRICT = pg_catalog.eqsel, JOIN = pg_catalog.eqjoinsel,
     HASHES, MERGES
 );
 
@@ -231,21 +231,21 @@ CREATE OPERATOR <> (
     LEFTARG = vector, RIGHTARG = vector,
     FUNCTION = vector_ne,
     COMMUTATOR = '<>', NEGATOR = '=',
-    RESTRICT = neqsel, JOIN = neqjoinsel
+    RESTRICT = pg_catalog.neqsel, JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR >= (
     LEFTARG = vector, RIGHTARG = vector,
     FUNCTION = vector_ge,
     COMMUTATOR = '<=', NEGATOR = '<',
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = pg_catalog.scalargesel, JOIN = pg_catalog.scalargejoinsel
 );
 
 CREATE OPERATOR > (
     LEFTARG = vector, RIGHTARG = vector,
     FUNCTION = vector_gt,
     COMMUTATOR = '<', NEGATOR = '<=',
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = pg_catalog.scalargtsel, JOIN = pg_catalog.scalargtjoinsel
 );
 
 -- =====================================================================
@@ -434,21 +434,21 @@ CREATE OPERATOR < (
     LEFTARG = halfvec, RIGHTARG = halfvec,
     FUNCTION = halfvec_lt,
     COMMUTATOR = '>', NEGATOR = '>=',
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = pg_catalog.scalarltsel, JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR <= (
     LEFTARG = halfvec, RIGHTARG = halfvec,
     FUNCTION = halfvec_le,
     COMMUTATOR = '>=', NEGATOR = '>',
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = pg_catalog.scalarlesel, JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR = (
     LEFTARG = halfvec, RIGHTARG = halfvec,
     FUNCTION = halfvec_eq,
     COMMUTATOR = '=', NEGATOR = '<>',
-    RESTRICT = eqsel, JOIN = eqjoinsel,
+    RESTRICT = pg_catalog.eqsel, JOIN = pg_catalog.eqjoinsel,
     HASHES, MERGES
 );
 
@@ -456,21 +456,21 @@ CREATE OPERATOR <> (
     LEFTARG = halfvec, RIGHTARG = halfvec,
     FUNCTION = halfvec_ne,
     COMMUTATOR = '<>', NEGATOR = '=',
-    RESTRICT = neqsel, JOIN = neqjoinsel
+    RESTRICT = pg_catalog.neqsel, JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR >= (
     LEFTARG = halfvec, RIGHTARG = halfvec,
     FUNCTION = halfvec_ge,
     COMMUTATOR = '<=', NEGATOR = '<',
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = pg_catalog.scalargesel, JOIN = pg_catalog.scalargejoinsel
 );
 
 CREATE OPERATOR > (
     LEFTARG = halfvec, RIGHTARG = halfvec,
     FUNCTION = halfvec_gt,
     COMMUTATOR = '<', NEGATOR = '<=',
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = pg_catalog.scalargtsel, JOIN = pg_catalog.scalargtjoinsel
 );
 
 -- =====================================================================
@@ -585,21 +585,21 @@ CREATE OPERATOR < (
     LEFTARG = rabitq, RIGHTARG = rabitq,
     FUNCTION = rabitq_lt,
     COMMUTATOR = '>', NEGATOR = '>=',
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = pg_catalog.scalarltsel, JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR <= (
     LEFTARG = rabitq, RIGHTARG = rabitq,
     FUNCTION = rabitq_le,
     COMMUTATOR = '>=', NEGATOR = '>',
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = pg_catalog.scalarlesel, JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR = (
     LEFTARG = rabitq, RIGHTARG = rabitq,
     FUNCTION = rabitq_eq,
     COMMUTATOR = '=', NEGATOR = '<>',
-    RESTRICT = eqsel, JOIN = eqjoinsel,
+    RESTRICT = pg_catalog.eqsel, JOIN = pg_catalog.eqjoinsel,
     HASHES, MERGES
 );
 
@@ -607,21 +607,21 @@ CREATE OPERATOR <> (
     LEFTARG = rabitq, RIGHTARG = rabitq,
     FUNCTION = rabitq_ne,
     COMMUTATOR = '<>', NEGATOR = '=',
-    RESTRICT = neqsel, JOIN = neqjoinsel
+    RESTRICT = pg_catalog.neqsel, JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR >= (
     LEFTARG = rabitq, RIGHTARG = rabitq,
     FUNCTION = rabitq_ge,
     COMMUTATOR = '<=', NEGATOR = '<',
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = pg_catalog.scalargesel, JOIN = pg_catalog.scalargejoinsel
 );
 
 CREATE OPERATOR > (
     LEFTARG = rabitq, RIGHTARG = rabitq,
     FUNCTION = rabitq_gt,
     COMMUTATOR = '<', NEGATOR = '<=',
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = pg_catalog.scalargtsel, JOIN = pg_catalog.scalargtjoinsel
 );
 
 -- =====================================================================
@@ -1065,7 +1065,7 @@ CREATE FUNCTION on_extension_create()
 DECLARE
     obj record;
 BEGIN
-    FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands()
+    FOR obj IN SELECT * FROM pg_catalog.pg_event_trigger_ddl_commands()
                WHERE object_type = 'extension'
     LOOP
         IF obj.object_identity = 'vector' THEN

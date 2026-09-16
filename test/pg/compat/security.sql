@@ -14,6 +14,13 @@
 -- silently adopted any pre-existing cast. pgvector is a "trusted"
 -- extension, so a non-superuser can own public.vector and reach both.
 --
+-- The extension schema is never hard-coded below. @extschema@ is
+-- substituted only by CREATE EXTENSION while it reads the extension
+-- script; this is a plain psql script, so the schema is looked up from
+-- the catalog once and interpolated as a psql variable (:extschema).
+-- Dollar-quoted bodies, which psql does not interpolate, look it up again
+-- at runtime.
+--
 -- Prerequisites:
 --   pgvector and meerkat must be installed in PostgreSQL, and the
 --   connected role must be a superuser (to install extensions and
@@ -25,13 +32,6 @@
 \set ON_ERROR_STOP on
 \pset tuples_only on
 \pset format unaligned
-
--- Known, deterministic starting state: meerkat first (so its event
--- trigger is active), then pgvector (fires the trigger -> creates casts).
-DROP EXTENSION IF EXISTS meerkat CASCADE;
-DROP EXTENSION IF EXISTS vector CASCADE;
-CREATE EXTENSION meerkat;
-CREATE EXTENSION vector;
 
 CREATE TEMP TABLE test_results (name text, passed bool);
 
@@ -48,6 +48,77 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- =====================================================================
+-- 0. Install-time: a format() planted in a pre-created extension schema
+--    is not invoked by CREATE EXTENSION itself
+-- =====================================================================
+-- The real install-time attack. An attacker pre-creates the extension
+-- schema (relocatable=false pins it to a known name) and plants format()
+-- overloads before CREATE EXTENSION meerkat runs. During install the
+-- schema is on the forced search_path, so a bare format() in
+-- setup_pgvector_compat() (reached because pgvector is already present)
+-- would resolve to the plant and run as the installing superuser.
+--
+-- This is the one place that must name the schema literally: the extension
+-- does not exist yet, so its schema cannot be looked up from the catalog.
+-- The planted overloads cover both arities format() is called with -- the
+-- cast loop (fmt + 3 args) and the operator-family loop (fmt + 4 args).
+-- They delegate to pg_catalog.format so, if ever invoked, the install still
+-- succeeds (correct DDL) but the call is recorded -- the check then catches
+-- the hijack instead of the script dying with a confusing DDL error.
+DROP EXTENSION IF EXISTS meerkat CASCADE;
+DROP EXTENSION IF EXISTS vector CASCADE;
+DROP SCHEMA IF EXISTS install_probe CASCADE;
+DROP SCHEMA IF EXISTS mkt CASCADE;
+
+CREATE SCHEMA install_probe;
+CREATE TABLE install_probe.hit (arity int);
+CREATE SCHEMA mkt;   -- literal: the attacker targets the known schema name
+CREATE FUNCTION mkt.format(text, text, text, text)
+RETURNS text LANGUAGE plpgsql AS $f$
+BEGIN
+    INSERT INTO install_probe.hit VALUES (4);
+    RETURN pg_catalog.format($1, $2, $3, $4);
+END; $f$;
+CREATE FUNCTION mkt.format(text, text, text, text, text)
+RETURNS text LANGUAGE plpgsql AS $f$
+BEGIN
+    INSERT INTO install_probe.hit VALUES (5);
+    RETURN pg_catalog.format($1, $2, $3, $4, $5);
+END; $f$;
+
+-- pgvector first so the compat path runs inside CREATE EXTENSION meerkat.
+CREATE EXTENSION vector;
+CREATE EXTENSION meerkat;
+
+-- Resolve the extension's schema now that it exists. Used as :"extschema"
+-- (identifier) and :'extschema' (literal) throughout the rest of the file.
+SELECT n.nspname AS extschema
+  FROM pg_extension e
+  JOIN pg_namespace n ON n.oid = e.extnamespace
+ WHERE e.extname = 'meerkat' \gset
+
+SELECT assert_test('CREATE EXTENSION does not call a planted mkt.format()',
+    NOT EXISTS (SELECT 1 FROM install_probe.hit));
+
+-- Prove the compat path actually ran (else "not called" would be vacuous):
+-- setup_pgvector_compat() creates the pgvector->meerkat cast.
+SELECT assert_test('CREATE EXTENSION still created the pgvector compat cast',
+    EXISTS (SELECT 1 FROM pg_cast
+             WHERE castsource = 'public.vector'::regtype
+               AND casttarget = (:'extschema' || '.vector')::regtype));
+
+DROP FUNCTION mkt.format(text, text, text, text);
+DROP FUNCTION mkt.format(text, text, text, text, text);
+DROP SCHEMA install_probe CASCADE;
+
+-- Deterministic starting state for the remaining checks: drop and reinstall
+-- cleanly (meerkat first so its event trigger is active, then pgvector).
+DROP EXTENSION IF EXISTS meerkat CASCADE;
+DROP EXTENSION IF EXISTS vector CASCADE;
+CREATE EXTENSION meerkat;
+CREATE EXTENSION vector;
+
+-- =====================================================================
 -- 1. The interop functions pin their search_path
 -- =====================================================================
 -- A pinned path is what makes every unqualified name in these bodies
@@ -57,17 +128,17 @@ SELECT assert_test('setup_pgvector_compat pins search_path',
     (SELECT proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
        FROM pg_proc
       WHERE proname = 'setup_pgvector_compat'
-        AND pronamespace = 'mkt'::regnamespace));
+        AND pronamespace = :'extschema'::regnamespace));
 
 SELECT assert_test('on_extension_create pins search_path',
     (SELECT proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
        FROM pg_proc
       WHERE proname = 'on_extension_create'
-        AND pronamespace = 'mkt'::regnamespace));
+        AND pronamespace = :'extschema'::regnamespace));
 
 -- The dynamic-SQL sink is schema-qualified as pg_catalog.format.
 SELECT assert_test('setup body calls pg_catalog.format, not bare format',
-    pg_get_functiondef('mkt.setup_pgvector_compat'::regproc)
+    pg_get_functiondef((:'extschema' || '.setup_pgvector_compat')::regproc)
         LIKE '%pg_catalog.format(%');
 
 -- =====================================================================
@@ -89,7 +160,7 @@ END;
 $fmt$;
 
 SET search_path = hijack_probe, public;
-SELECT mkt.setup_pgvector_compat();   -- idempotent; casts already present
+SELECT :"extschema".setup_pgvector_compat();   -- idempotent; casts present
 RESET search_path;
 
 SELECT assert_test('planted format() overload is NOT invoked',
@@ -98,25 +169,91 @@ SELECT assert_test('planted format() overload is NOT invoked',
 DROP SCHEMA hijack_probe CASCADE;
 
 -- =====================================================================
+-- 2b. A format() planted in the EXTENSION SCHEMA is NOT invoked
+-- =====================================================================
+-- The extension schema is on the forced search_path while CREATE EXTENSION
+-- runs, so a bare format() there would resolve to a pre-planted
+-- <extschema>.format (exact arity beats pg_catalog.format's VARIADIC
+-- "any"). The helpers pin their search_path to pg_catalog and call
+-- pg_catalog.format, so a format() sitting in the extension schema must
+-- never run. The planted function raises, so the test fails loudly if it
+-- is ever reached.
+
+CREATE FUNCTION :"extschema".format(text, text, text, text, text)
+RETURNS text LANGUAGE plpgsql AS $fmt$
+BEGIN
+    RAISE EXCEPTION
+        'SECURITY: a format() planted in the extension schema was invoked '
+        '(search_path hijack)';
+END;
+$fmt$;
+
+-- Put the extension schema first on the path, as the install-time forced
+-- search_path does, then run the compat setup.
+SET search_path = :"extschema", public;
+DO $chk$
+DECLARE
+    invoked boolean := false;
+    eschema text := (SELECT n.nspname FROM pg_extension e
+                       JOIN pg_namespace n ON n.oid = e.extnamespace
+                      WHERE e.extname = 'meerkat');
+BEGIN
+    BEGIN
+        -- pg_catalog.format so the harness itself cannot be hijacked.
+        EXECUTE pg_catalog.format('SELECT %I.setup_pgvector_compat()',
+                                  eschema);
+    EXCEPTION WHEN OTHERS THEN
+        invoked := true;   -- the planted format() raised -> it was called
+    END;
+    PERFORM assert_test(
+        'format() planted in the extension schema is NOT invoked',
+        NOT invoked);
+END;
+$chk$;
+RESET search_path;
+
+DROP FUNCTION :"extschema".format(text, text, text, text, text);
+
+-- =====================================================================
 -- 3. A tampered (WITH FUNCTION) cast is rejected, not silently adopted
 -- =====================================================================
 -- Replace the expected binary cast with a WITH FUNCTION cast -- the shape
 -- a public.vector owner could plant, whose function would then run as the
 -- querying role. setup_pgvector_compat() must refuse it (RAISE), where the
 -- old blind "EXCEPTION WHEN duplicate_object THEN NULL" would have kept it.
+-- Built with dynamic SQL: the cast function's body must name the return
+-- type, so %I keeps the fixture schema-agnostic.
 
-DROP CAST IF EXISTS (public.vector AS mkt.vector);
-CREATE FUNCTION public.evil_cast(public.vector) RETURNS mkt.vector
-    LANGUAGE sql IMMUTABLE AS $ec$ SELECT '[0]'::mkt.vector $ec$;
-CREATE CAST (public.vector AS mkt.vector)
-    WITH FUNCTION public.evil_cast(public.vector) AS IMPLICIT;
+DO $fix$
+DECLARE
+    eschema text := (SELECT n.nspname FROM pg_extension e
+                       JOIN pg_namespace n ON n.oid = e.extnamespace
+                      WHERE e.extname = 'meerkat');
+BEGIN
+    EXECUTE pg_catalog.format(
+        'DROP CAST IF EXISTS (public.vector AS %I.vector)', eschema);
+    EXECUTE pg_catalog.format(
+        'CREATE FUNCTION public.evil_cast(public.vector) '
+        'RETURNS %I.vector LANGUAGE sql IMMUTABLE AS %L',
+        eschema,
+        pg_catalog.format('SELECT ''[0]''::%I.vector', eschema));
+    EXECUTE pg_catalog.format(
+        'CREATE CAST (public.vector AS %I.vector) '
+        'WITH FUNCTION public.evil_cast(public.vector) AS IMPLICIT',
+        eschema);
+END;
+$fix$;
 
 DO $chk$
 DECLARE
     raised bool := false;
+    eschema text := (SELECT n.nspname FROM pg_extension e
+                       JOIN pg_namespace n ON n.oid = e.extnamespace
+                      WHERE e.extname = 'meerkat');
 BEGIN
     BEGIN
-        PERFORM mkt.setup_pgvector_compat();
+        EXECUTE pg_catalog.format('SELECT %I.setup_pgvector_compat()',
+                                  eschema);
     EXCEPTION WHEN OTHERS THEN
         raised := true;
     END;
@@ -126,9 +263,9 @@ END;
 $chk$;
 
 -- Restore the expected binary cast.
-DROP CAST (public.vector AS mkt.vector);
+DROP CAST (public.vector AS :"extschema".vector);
 DROP FUNCTION public.evil_cast(public.vector);
-CREATE CAST (public.vector AS mkt.vector) WITHOUT FUNCTION AS IMPLICIT;
+CREATE CAST (public.vector AS :"extschema".vector) WITHOUT FUNCTION AS IMPLICIT;
 
 -- =====================================================================
 -- 4. End-to-end: a non-superuser cannot escalate via the event trigger
