@@ -579,6 +579,23 @@ prism_query_execute(
 	 * the previous k. */
 	vs_topk_reset_to_k(&qs->topk, k);
 
+	/* Bound the candidate buffer for an explicit rerank_pool: cap survivors
+	 * during the scan instead of collecting them unbounded and truncating
+	 * afterward -- past the cap they would never be reranked. 3x the pool
+	 * preserves the extract's dedup margin (an id can appear twice: primary
+	 * plus a SOAR replica). Auto (0) and disabled (-1) keep the unbounded
+	 * buffer, because auto sizes the pool from the full survivor count as a
+	 * measure of estimate noise. */
+	if (g_rerank_pool > 0)
+	{
+		uint32_t xpool = (uint32_t)g_rerank_pool;
+		if (xpool < k)
+			xpool = k;
+		vs_topk_set_cand_limit(&qs->topk, xpool * 3);
+	}
+	else
+		vs_topk_set_cand_limit(&qs->topk, 0);
+
 	/* Probe expansion: route extra leaf candidates so phase A of
 	 * scan_clusters can pick the best `nprobe` by exact centroid
 	 * distance. n_route == nprobe (expand == 1, no expansion) keeps
