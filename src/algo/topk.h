@@ -94,8 +94,15 @@ void vs_topk_init(VsTopK *topk, uint32_t k);
 /*
  * Bound the candidate buffer to `limit` entries (0 = unbounded). When set,
  * the buffer keeps only the `limit` smallest-distance survivors as a
- * max-heap, avoiding unbounded growth for an explicit rerank_pool. Call
- * after reset (expects cand_count == 0); ensures capacity >= limit.
+ * max-heap, avoiding unbounded growth for an explicit rerank_pool.
+ *
+ * Call on a reset top-K (expects cand_count == 0 and ub_count == 0). The
+ * allocation is then resized to the bound in both directions, so a
+ * backend that once ran an unbounded query does not keep its high-water
+ * buffer resident for every bounded query that follows -- the point of an
+ * explicit pool is that memory stays proportional to it. Resizing down
+ * resets the owning arena, which is why a reset top-K is required; called
+ * mid-collection it only ever grows, as it always did.
  */
 void vs_topk_set_cand_limit(VsTopK *topk, uint32_t limit);
 

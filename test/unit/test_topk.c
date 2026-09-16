@@ -604,3 +604,96 @@ TEST(topk_bounded_matches_unbounded)
 	vs_topk_cleanup(&ub);
 	vs_topk_cleanup(&bd);
 }
+
+/*
+ * An explicit pool should hold memory proportional to the pool, not to
+ * the largest query the state has ever run. A state that first collects
+ * unbounded (the auto pool's behavior) grows its buffer to the survivor
+ * count; bounding it afterwards must bring the allocation back down, not
+ * merely stop it growing.
+ */
+TEST(topk_bound_shrinks_after_unbounded)
+{
+	const uint32_t k	= 10;
+	const uint32_t n	= 5000;
+	const uint32_t pool = 20;
+	const float	   err	= 1.0e6f; /* loose threshold: all admitted */
+
+	VsTopK topk;
+	vs_topk_init(&topk, k);
+
+	for (uint32_t i = 0; i < n; i++)
+		vs_topk_insert(&topk, (float)((i * 7919u + 17u) % 100000u), err, i);
+	ASSERT_EQ(n, topk.cand_count, "unbounded run buffers every survivor");
+	uint32_t grown = topk.cand_capacity;
+	ASSERT_TRUE(grown >= n, "unbounded run grows past the survivor count");
+
+	vs_topk_reset_to_k(&topk, k);
+	ASSERT_EQ(
+			grown,
+			topk.cand_capacity,
+			"reset alone retains the high-water capacity");
+
+	vs_topk_set_cand_limit(&topk, pool * 3);
+	ASSERT_EQ(
+			pool * 3,
+			topk.cand_capacity,
+			"bounding resizes the buffer down to the bound");
+
+	/* The shrink resets the owning arena, so the threshold heap must have
+	 * been reallocated along with the candidate buffer. */
+	for (uint32_t i = 0; i < n; i++)
+		vs_topk_insert(&topk, (float)((i * 7919u + 17u) % 100000u), err, i);
+	ASSERT_TRUE(
+			topk.cand_count <= pool * 3,
+			"bounded buffer stays within the bound after a shrink");
+
+	/* extract_sorted_capped copies every survivor out before capping, so
+	 * the buffer is sized to the bound, not to the pool. */
+	VsTopKEntry *results = vs_alloc((pool * 3) * sizeof(*results));
+	uint32_t	 count;
+	vs_topk_extract_sorted_capped(&topk, results, &count, pool);
+	ASSERT_EQ(pool, count, "a full pool of candidates survives the shrink");
+	for (uint32_t i = 1; i < count; i++)
+		ASSERT_TRUE(
+				results[i - 1].distance <= results[i].distance,
+				"results stay sorted after a shrink");
+	vs_free(results);
+
+	vs_topk_cleanup(&topk);
+}
+
+/*
+ * Proportionality holds up to VS_TOPK_SHRINK_FACTOR: a bound only
+ * modestly below the current capacity must not pay an arena reset, so a
+ * session alternating pool sizes does not reallocate on every query.
+ */
+TEST(topk_bound_shrink_hysteresis)
+{
+	const uint32_t k = 10;
+	const uint32_t n = 5000;
+
+	VsTopK topk;
+	vs_topk_init(&topk, k);
+	for (uint32_t i = 0; i < n; i++)
+		vs_topk_insert(&topk, (float)i, 1.0e6f, i);
+
+	uint32_t grown = topk.cand_capacity;
+	vs_topk_reset_to_k(&topk, k);
+
+	/* Within the factor: retained. */
+	vs_topk_set_cand_limit(&topk, grown / 2);
+	ASSERT_EQ(
+			grown,
+			topk.cand_capacity,
+			"a bound within the factor retains the buffer");
+
+	/* Beyond it: resized. */
+	vs_topk_set_cand_limit(&topk, grown / 8);
+	ASSERT_EQ(
+			grown / 8,
+			topk.cand_capacity,
+			"a bound beyond the factor resizes the buffer");
+
+	vs_topk_cleanup(&topk);
+}
