@@ -941,7 +941,7 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 -- Set up pgvector interoperability in one step: the binary casts between the
 -- two extensions' types, and the membership of pgvector's distance operators
 -- in meerkat's mktann operator families. These belong together -- the casts
--- make public.vector/public.halfvec binary-coercible to mkt.vector/mkt.halfvec,
+-- make pgvector's vector/halfvec binary-coercible to mkt.vector/mkt.halfvec,
 -- which is exactly what lets pgvector's operators join a family whose opclass
 -- is FOR TYPE mkt.<type>. Keeping them in a single function means a caller
 -- cannot add the casts and forget the operators (which would silently downgrade
@@ -961,24 +961,43 @@ CREATE FUNCTION setup_pgvector_compat() RETURNS void
 DECLARE
     r record;
     existing_method "char";
+    pgv_ns text;   -- pgvector's schema (it is relocatable, so discovered)
+    pgv text;      -- ...quote_ident'd, for building qualified type names
 BEGIN
+    -- pgvector is relocatable: its types and operators live in whatever
+    -- schema it was installed into, not necessarily public. Discover it
+    -- from the catalog rather than assuming public; extnamespace stays
+    -- authoritative even after ALTER EXTENSION vector SET SCHEMA. The name
+    -- is only ever interpolated through %I / quote_ident, so it stays
+    -- injection-safe.
+    SELECT n.nspname INTO pgv_ns
+    FROM pg_catalog.pg_extension e
+    JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+    WHERE e.extname = 'vector';
+
+    IF pgv_ns IS NULL THEN
+        RAISE EXCEPTION 'pgvector (extension "vector") is not installed';
+    END IF;
+    pgv := pg_catalog.quote_ident(pgv_ns);
+
     -- 1. Binary casts, both directions, for vector and halfvec.
     --
     -- Create each only if absent. A cast that already exists is accepted
     -- ONLY when it is the expected binary cast (WITHOUT FUNCTION,
     -- castmethod 'b'); anything else is rejected as tampering. pgvector is
-    -- a "trusted" extension, so a non-superuser can install it and own
-    -- public.vector/public.halfvec, and a type owner may define a
+    -- a "trusted" extension, so a non-superuser can install it (in a schema
+    -- of their choosing) and own its vector/halfvec types, and a type owner
+    -- may define a
     -- WITH FUNCTION (or WITH INOUT) cast whose function then runs with the
     -- privileges of whatever role later triggers the coercion. Silently
     -- adopting such a cast (the old EXCEPTION WHEN duplicate_object THEN
     -- NULL) would hide that; we fail loudly instead.
     FOR r IN
         SELECT * FROM (VALUES
-            ('public.vector',       '@extschema@.vector',   'IMPLICIT'),
-            ('public.halfvec',      '@extschema@.halfvec',  'IMPLICIT'),
-            ('@extschema@.vector',  'public.vector',        'ASSIGNMENT'),
-            ('@extschema@.halfvec', 'public.halfvec',       'ASSIGNMENT')
+            (pgv || '.vector',      '@extschema@.vector',   'IMPLICIT'),
+            (pgv || '.halfvec',     '@extschema@.halfvec',  'IMPLICIT'),
+            ('@extschema@.vector',  pgv || '.vector',       'ASSIGNMENT'),
+            ('@extschema@.halfvec', pgv || '.halfvec',      'ASSIGNMENT')
         ) AS t(src, tgt, ctx)
     LOOP
         SELECT castmethod INTO existing_method
@@ -1020,9 +1039,9 @@ BEGIN
         BEGIN
             EXECUTE pg_catalog.format(
                 'ALTER OPERATOR FAMILY @extschema@.%I USING mktann '
-                'ADD OPERATOR 1 public.%s (public.%I, public.%I) '
+                'ADD OPERATOR 1 %I.%s (%I.%I, %I.%I) '
                 'FOR ORDER BY pg_catalog.float_ops',
-                r.fam, r.op, r.typ, r.typ);
+                r.fam, pgv_ns, r.op, pgv_ns, r.typ, pgv_ns, r.typ);
         EXCEPTION WHEN duplicate_object THEN NULL;
         END;
     END LOOP;
@@ -1037,19 +1056,25 @@ $$;
 -- The casts still get cleaned up via auto-dependencies on their
 -- referenced types.
 DO $$
+DECLARE
+    pgv_ns text;
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM pg_extension WHERE extname = 'vector'
-    ) THEN
+    -- pgvector is relocatable; discover its schema (NULL if not installed).
+    SELECT n.nspname INTO pgv_ns
+    FROM pg_catalog.pg_extension e
+    JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+    WHERE e.extname = 'vector';
+
+    IF pgv_ns IS NOT NULL THEN
         PERFORM @extschema@.setup_pgvector_compat();
-        EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
-            '(public.vector AS @extschema@.vector)';
-        EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
-            '(public.halfvec AS @extschema@.halfvec)';
-        EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
-            '(@extschema@.vector AS public.vector)';
-        EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
-            '(@extschema@.halfvec AS public.halfvec)';
+        EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
+            '(%I.vector AS @extschema@.vector)', pgv_ns);
+        EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
+            '(%I.halfvec AS @extschema@.halfvec)', pgv_ns);
+        EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
+            '(@extschema@.vector AS %I.vector)', pgv_ns);
+        EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
+            '(@extschema@.halfvec AS %I.halfvec)', pgv_ns);
     END IF;
 END;
 $$;
