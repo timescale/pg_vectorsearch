@@ -41,6 +41,13 @@ BEGIN
     EXECUTE 'DROP INDEX tmp_idx';
 END $$;
 
+-- The tables here are 50 to 1000 rows, which is the range where the cost
+-- model correctly prefers a sequential scan, so the scans in this file are
+-- forced through the index. That matters more here than in most files: the
+-- assertions below exist to prove a parallel-built or concurrently built
+-- tree can reach every row through the index, and every one of them returns
+-- the same count if the index is never consulted. Each is preceded by an
+-- EXPLAIN so a silent switch to a sequential scan fails rather than passes.
 SET enable_seqscan = off;
 
 -- ============================================================
@@ -105,6 +112,9 @@ CREATE INDEX idx_wide_budget ON wide_emb USING mktann (v)
     WITH (centroid_compression = true);
 
 SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM wide_emb
+    ORDER BY v <-> (SELECT v FROM wide_emb WHERE id = 1) LIMIT 5;
 SELECT (SELECT relpages > 0 FROM pg_class WHERE relname = 'idx_wide_budget')
            AS has_pages,
        (SELECT count(*) FROM (
@@ -245,6 +255,8 @@ SELECT count(*) = count(DISTINCT child_blkno) AS no_duplicate_children
 SET enable_seqscan = off;
 SET mkt.nprobe = 10000;
 SET mkt.query_limit = 100;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM line3 ORDER BY v <-> '[0.5,0,0]' LIMIT 100;
 SELECT count(*) AS shortfall_reachable FROM (
     SELECT id FROM line3 ORDER BY v <-> '[0.5,0,0]' LIMIT 100) t;
 RESET mkt.query_limit;
@@ -404,6 +416,8 @@ CREATE TABLE degen (id int, v vector(3));
 INSERT INTO degen VALUES (1, '[1,2,3]');
 CREATE INDEX degen_one ON degen USING mktann (v) WITH (nlist = 8);
 SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM degen ORDER BY v <-> '[0,0,0]' LIMIT 10;
 SELECT count(*) AS one_row FROM (
     SELECT id FROM degen ORDER BY v <-> '[0,0,0]' LIMIT 10) t;
 RESET enable_seqscan;
@@ -416,6 +430,8 @@ CREATE INDEX degen_same ON degen USING mktann (v)
 SET enable_seqscan = off;
 SET mkt.nprobe = 10000;
 SET mkt.query_limit = 150;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM degen ORDER BY v <-> '[1,2,3]' LIMIT 150;
 SELECT count(*) AS identical_rows FROM (
     SELECT id FROM degen ORDER BY v <-> '[1,2,3]' LIMIT 150) t;
 RESET mkt.query_limit;
@@ -428,6 +444,8 @@ CREATE INDEX degen_serial ON degen USING mktann (v)
 SET enable_seqscan = off;
 SET mkt.nprobe = 10000;
 SET mkt.query_limit = 150;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM degen ORDER BY v <-> '[1,2,3]' LIMIT 150;
 SELECT count(*) AS identical_rows_serial FROM (
     SELECT id FROM degen ORDER BY v <-> '[1,2,3]' LIMIT 150) t;
 RESET mkt.query_limit;
@@ -457,6 +475,8 @@ CREATE INDEX CONCURRENTLY cic_idx ON cic_pts USING mktann (v)
 SELECT relpages > 0 AS cic_has_pages FROM pg_class WHERE relname = 'cic_idx';
 SET enable_seqscan = off;
 SET mkt.nprobe = 10000;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM cic_pts ORDER BY v <-> '[0.5,0,0]' LIMIT 10;
 SELECT array_agg(id ORDER BY id) = ARRAY[1,2,3,4,5,6,7,8,9,10] AS cic_exact
     FROM (SELECT id FROM cic_pts ORDER BY v <-> '[0.5,0,0]' LIMIT 10) t;
 RESET mkt.nprobe;

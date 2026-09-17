@@ -274,8 +274,21 @@ SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 0) IS NOT NULL
  t
 (1 row)
 
--- Query still works after partial conversion (mixed AoS + fastscan)
+-- Query still works after partial conversion (mixed AoS + fastscan).
+--
+-- A small table, so a sequential scan is the plan the cost model correctly
+-- prefers and the scans here are forced through the index. The rows come
+-- back either way, so the plan is pinned once here.
 SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Limit
+   ->  Index Scan using idx_float on embeddings
+         Order By: (v <-> '[0.5,0.5,0.5]'::vector)
+(3 rows)
+
 SELECT count(*) FROM (
     SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
     FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5
@@ -567,11 +580,12 @@ CREATE INDEX idx_settings ON embeddings USING mktann (v)
 SELECT name, setting, source
     FROM mkt.index_settings('idx_settings'::regclass)
     WHERE name NOT IN ('nlist', 'nlevels');
-       name       |  setting  | source  
-------------------+-----------+---------
+       name       |  setting  |   source   
+------------------+-----------+------------
  dim              | 3         | column
  metric           | l2        | opclass
  fan_out          | 8         | option
+ centroid_pages   | 9         | maintained
  centroid_format  | rabitq    | option
  fastscan         | off       | option
  soar_lambda      | 0.5       | option
@@ -579,7 +593,7 @@ SELECT name, setting, source
  kmeans_nredo     | 2         | option
  distance_mode    | symmetric | option
  nprobe           | 10        | auto
-(10 rows)
+(11 rows)
 
 SELECT name, setting::int > 0 AS positive, source
     FROM mkt.index_settings('idx_settings'::regclass)
@@ -598,13 +612,14 @@ SELECT name,
        setting <> '0' AND setting <> '' AS resolved,
        source
     FROM mkt.index_settings('idx_default'::regclass);
-       name       | resolved | source  
-------------------+----------+---------
+       name       | resolved |   source   
+------------------+----------+------------
  dim              | t        | column
  metric           | t        | opclass
  nlist            | t        | auto
  fan_out          | t        | auto
  nlevels          | t        | derived
+ centroid_pages   | t        | maintained
  centroid_format  | t        | auto
  fastscan         | t        | auto
  soar_lambda      | t        | default
@@ -612,7 +627,7 @@ SELECT name,
  kmeans_nredo     | t        | default
  distance_mode    | t        | default
  nprobe           | t        | auto
-(12 rows)
+(13 rows)
 
 SELECT name, setting, source
     FROM mkt.index_settings('idx_default'::regclass)

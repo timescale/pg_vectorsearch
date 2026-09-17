@@ -46,7 +46,24 @@ typedef struct MktannScanStats
 	uint32_t top_k;
 } MktannScanStats;
 
+/*
+ * Floor on every scan's top-k. Not a default: it keeps a little slack under
+ * a small LIMIT for rows the heap fetch discards as dead, and leaves a query
+ * something to answer with when work_mem affords less.
+ */
+#define MKT_DEFAULT_K 10
+
 const MktannScanStats *mktann_scan_get_stats(IndexScanDesc scan);
+
+/*
+ * Resolve the top-k a scan will build, from the rows its LIMIT asks for (0
+ * when there is none) and the relation's estimated row count (negative when
+ * unknown). Applies mkt.query_limit, the built-in floor, and the work_mem
+ * ceiling.
+ *
+ * Called by mktann_beginscan and by the cost model.
+ */
+uint32_t mkt_scan_resolve_top_k(uint32_t scan_bound, double heap_rows);
 
 /*
  * Begin an index scan. Matches ambeginscan_function signature.

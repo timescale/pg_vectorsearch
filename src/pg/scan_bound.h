@@ -22,4 +22,11 @@ void mkt_scan_bound_init(void);
  */
 uint32_t mkt_scan_bound(IndexScanDesc scan);
 
+/*
+ * Inflate a row target for a filter applied above the scan, from the
+ * estimated surviving fraction. Shared by the executor's sizing and the
+ * cost model so both price the same pool.
+ */
+uint32_t mkt_scan_inflate_for_filter(uint32_t k, double selectivity);
+
 #endif /* SCAN_BOUND_H */

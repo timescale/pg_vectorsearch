@@ -549,6 +549,27 @@ persist_nlist(MktStorage *storage, uint32_t nlist)
 }
 
 /*
+ * Persist the centroid page count (block 0), in place.
+ *
+ * A split that runs out of room on a level-0 centroid page extends the
+ * relation, so the count cannot be recovered from the block layout
+ * afterwards -- see MktannMetaPage.ncentroid_pages. Written once per
+ * maintenance pass rather than per split, alongside the leaf count.
+ *
+ * Losing this write cannot corrupt anything: nothing reads the count to
+ * find a page. It would leave the planner's descent term low until the next
+ * pass.
+ */
+static void
+persist_ncentroid_pages(MktStorage *storage, uint32_t ncentroid_pages)
+{
+	Page			page  = mkt_storage_write_page(storage, 0);
+	MktannMetaPage *meta  = (MktannMetaPage *)PageGetSpecialPointer(page);
+	meta->ncentroid_pages = ncentroid_pages;
+	mkt_storage_commit_page(storage, 0);
+}
+
+/*
  * Persist the leaf count, so the ids counted from it survive a crash that
  * leaves the new leaves reachable -- see MktSplitEnv.reserve_nlist. The
  * storage handle is reached through the split's fetch context, which is the
@@ -912,6 +933,7 @@ maint_end(Relation index, MaintCtx *m, bool changed)
 	if (changed)
 	{
 		persist_nlist(&m->storage.base, m->base.nlist);
+		persist_ncentroid_pages(&m->storage.base, m->base.ncentroid_pages);
 		/* The declaration no longer describes the index -- see
 		 * clear_nlist_reloption. */
 		clear_nlist_reloption(index);

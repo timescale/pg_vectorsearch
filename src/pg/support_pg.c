@@ -26,18 +26,18 @@
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-int			  mkt_distance_mode			= MKT_DISTANCE_MODE_DEFAULT;
-int			  mkt_nprobe				= 0;
-int			  mkt_query_limit			= 0;
-int			  mkt_fastscan_bits			= 16;
-bool		  mkt_rerank				= true;
-bool		  mkt_log_build_stats		= false;
-double		  mkt_centroid_error_scale	= 0.0;
-double		  mkt_centroid_beam_scale	= 0.5;
-int			  mkt_leaf_refine_threshold = 0;
-static bool	  mkt_recent_buffers		= true;
-static double mkt_probe_expand			= 2.0;
-static int	  mkt_rerank_pool			= 0;
+int			mkt_distance_mode		  = MKT_DISTANCE_MODE_DEFAULT;
+int			mkt_nprobe				  = 0;
+int			mkt_query_limit			  = 0;
+int			mkt_fastscan_bits		  = 16;
+bool		mkt_rerank				  = true;
+bool		mkt_log_build_stats		  = false;
+double		mkt_centroid_error_scale  = 0.0;
+double		mkt_centroid_beam_scale	  = 0.5;
+int			mkt_leaf_refine_threshold = 0;
+static bool mkt_recent_buffers		  = true;
+double		mkt_probe_expand		  = 2.0;
+static int	mkt_rerank_pool			  = 0;
 
 static void
 mkt_recent_buffers_assign_hook(bool newval, void *extra)

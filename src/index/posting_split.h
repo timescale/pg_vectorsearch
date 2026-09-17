@@ -315,6 +315,12 @@ typedef struct MktSplitResult
 											* reuses the former leaf slot */
 	uint32_t count[MKT_SPLIT_MAX_PARTS];   /* live entries per new head */
 	uint32_t new_nlist;					   /* leaf count after the split */
+	/*
+	 * Centroid pages this split appended because a level-0 page had no room.
+	 * The caller persists the new total; the split cannot, the metapage
+	 * being a PostgreSQL detail the shared layer does not reach.
+	 */
+	uint32_t new_centroid_pages;
 } MktSplitResult;
 
 /*

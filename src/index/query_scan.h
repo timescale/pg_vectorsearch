@@ -153,6 +153,34 @@ uint32_t mkt_query_execute(
 void mkt_query_set_rerank_pool(int32_t n);
 
 /*
+ * Size of the rerank pool -- how many candidates the scan will score
+ * exactly -- for a given k and nprobe, without the scan's own noise-driven
+ * floor.
+ *
+ * Returns 0 when the pool is uncapped, which means every threshold survivor
+ * is reranked rather than none of them. Shared with the cost model.
+ */
+uint32_t mkt_query_rerank_pool_estimate(uint32_t k, uint32_t nprobe);
+
+/*
+ * Leaf clusters the centroid beam routes to in order to read nprobe of
+ * them, capped at cap. More than nprobe for compressed centroid formats,
+ * which route wide and let phase A re-rank on exact distances; exactly
+ * nprobe for the exact formats. Called by mkt_query_execute and the cost
+ * model.
+ */
+uint32_t mkt_query_routed_clusters(
+		uint32_t nprobe, uint32_t cap, MktCentroidFormat centroid_format);
+
+/*
+ * Centroid slots the beam keeps per intermediate level for a given nprobe.
+ * A fraction of nprobe raised by three floors below which leaves become
+ * unreachable outright. Called by mkt_query_execute and the cost model.
+ */
+uint32_t mkt_query_beam_width(
+		uint32_t nprobe, uint32_t nlist, uint32_t fan_out, double beam_scale);
+
+/*
  * Probe-order refinement (mkt.probe_expand).
  *
  * Routes ceil(nprobe * expand) leaf candidates through the centroid

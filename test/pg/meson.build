@@ -35,6 +35,7 @@ else
       'inspect',
       'parallel',
       'build_logging',
+      'cost',
       'query_settings',
       'scan_stats',
       'empty_table',

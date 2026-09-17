@@ -272,6 +272,7 @@ write_meta_page(
 		uint8_t			  fan_out,
 		BlockNumber		  first_centroid,
 		BlockNumber		  first_posting,
+		uint32_t		  ncentroid_pages,
 		uint32_t		  nlist,
 		MktCentroidFormat centroid_format,
 		DistanceMetric	  metric,
@@ -292,6 +293,7 @@ write_meta_page(
 	meta->centroid_format = (uint8_t)centroid_format;
 	meta->first_centroid  = first_centroid;
 	meta->first_posting	  = first_posting;
+	meta->ncentroid_pages = ncentroid_pages;
 	meta->nlist			  = nlist;
 	meta->metric		  = (uint8_t)metric;
 	meta->fan_out		  = (uint8_t)fan_out;
@@ -920,7 +922,7 @@ do_serial_build(
 
 	/* Centroid area is [first_centroid, first_posting); block 0 is metadata.
 	 */
-	BlockNumber first_centroid = 1;
+	BlockNumber first_centroid = MKT_FIRST_CENTROID_BLKNO;
 	BlockNumber first_posting  = first_centroid + plan.centroid_pages;
 
 	/*
@@ -1157,6 +1159,7 @@ do_serial_build(
 			(uint8_t)p->fan_out,
 			root,
 			first_posting,
+			plan.centroid_pages,
 			nlist,
 			p->centroid_format,
 			p->metric,
@@ -1424,6 +1427,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 					(uint8_t)p->fan_out,
 					fc,
 					meta_first_posting,
+					meta_first_posting - MKT_FIRST_CENTROID_BLKNO,
 					built_nlist,
 					p->centroid_format,
 					p->metric,

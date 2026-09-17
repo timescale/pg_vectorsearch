@@ -472,6 +472,7 @@ get_cache_data(Relation index)
 	c->base.nlist			= meta->nlist;
 	c->base.first_centroid	= meta->first_centroid;
 	c->base.first_posting	= meta->first_posting;
+	c->base.ncentroid_pages = meta->ncentroid_pages;
 	c->base.metric			= (DistanceMetric)meta->metric;
 	c->base.centroid_format = (MktCentroidFormat)meta->centroid_format;
 	c->base.rabitq_seed		= seed;
@@ -551,5 +552,15 @@ MktannScanInfo
 mktann_cache_scan_info(Relation index)
 {
 	AmCacheData *c = get_cache_data(index);
-	return (MktannScanInfo){.nlist = c->nlist};
+	return (MktannScanInfo){
+			.nlist			 = c->nlist,
+			.dim			 = c->base.dim,
+			.nlevels		 = c->base.nlevels,
+			.fan_out		 = c->base.fan_out,
+			.first_centroid	 = c->base.first_centroid,
+			.first_posting	 = c->base.first_posting,
+			.ncentroid_pages = c->base.ncentroid_pages,
+			.centroid_format = c->base.centroid_format,
+			.has_fastscan	 = c->has_fastscan,
+	};
 }

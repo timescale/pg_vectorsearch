@@ -14,6 +14,12 @@
 #include "index/storage.h"
 #include "quant/rabitq.h"
 
+/*
+ * Block 0 holds the metapage, so the centroid region a build reserves
+ * starts here and runs to first_posting.
+ */
+#define MKT_FIRST_CENTROID_BLKNO 1
+
 typedef struct MktIndexBase
 {
 	/* RaBitQ (must outlive the search context) */
@@ -38,9 +44,29 @@ typedef struct MktIndexBase
 	/* Leaf (posting-list) count; when nprobe covers every leaf the
 	 * intermediate beam keeps whole levels so no subtree is pruned
 	 * (0 = unknown, no full-coverage floor). */
-	uint32_t		  nlist;
-	BlockNumber		  first_centroid;
-	BlockNumber		  first_posting;
+	uint32_t nlist;
+	/*
+	 * Root of the centroid tree, which every descent starts from -- NOT the
+	 * first block of the centroid region, despite the name. Where the root
+	 * sits inside the region depends on the build: a serial build writes the
+	 * centroid pages post-order and the root lands last, a parallel one
+	 * places it first. The region itself is always
+	 * [MKT_FIRST_CENTROID_BLKNO, first_posting).
+	 */
+	BlockNumber first_centroid;
+	/*
+	 * First block of the posting-head region; leaf c's head is
+	 * first_posting + c. Fixed for the life of the index, since that formula
+	 * is how every head is located, so nothing can be inserted below it.
+	 */
+	BlockNumber first_posting;
+	/*
+	 * Centroid pages reachable from first_centroid. Maintained rather than
+	 * derived, because a split with no room on a level-0 page extends the
+	 * relation and chains the new page past first_posting, after which the
+	 * reserved block range no longer measures the count.
+	 */
+	uint32_t		  ncentroid_pages;
 	DistanceMetric	  metric;
 	MktCentroidFormat centroid_format;
 	int				  fastscan; /* 0=off, 8=uint8, 16=uint16 hacc */

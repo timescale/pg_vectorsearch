@@ -28,7 +28,12 @@ CREATE TEMP TABLE truth AS
 RESET enable_indexscan;
 
 -- Index results before the split.
+-- Small tables, so a sequential scan is the plan the cost model correctly
+-- prefers and the scan below is forced through the index. The rows come
+-- back either way, so this pins the plan.
 SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM split_test ORDER BY v <-> '[0,0,0,0]'::vector(4) LIMIT 10;
 CREATE TEMP TABLE before AS
     SELECT id FROM split_test
     ORDER BY v <-> '[0,0,0,0]'::vector(4) LIMIT 10;
@@ -41,6 +46,21 @@ SELECT count(*) AS before_matches FROM truth t JOIN before b USING (id);
 -- into two ~12-entry lists, each resting near the target with room to grow back
 -- to the trigger. rebalance is a procedure and reports the count via NOTICE.
 CALL mkt.rebalance('split_idx', 10);
+
+-- The metapage's centroid page count is maintained, not derived from the
+-- block layout: a split with no room on a level-0 centroid page chains the
+-- new page past the posting region, where no block range finds it. Assert
+-- the recorded count against what walking the tree actually finds -- that
+-- catches a wrong value from the build, a split whose addition was never
+-- persisted, and one counted twice. It is what the planner's descent term
+-- reads, so a drift here silently mis-costs every scan.
+--
+-- These lists are far too small to overflow a centroid page, so the count
+-- does not move here; the point is that it still agrees.
+SELECT (SELECT setting::int FROM mkt.index_settings('split_idx')
+          WHERE name = 'centroid_pages')
+     = (SELECT count(DISTINCT blkno) FROM mkt.centroid_pages('split_idx'))
+    AS centroid_pages_matches_the_tree;
 
 -- The new lists are written in the index's posting format (fastscan here), so a
 -- split re-optimizes the data rather than leaving AoS lists behind.
@@ -101,6 +121,13 @@ RESET enable_seqscan;
 SELECT count(*) AS wide_after_matches
     FROM wide_truth t JOIN wide_after a USING (id);
 
+-- Same invariant after a 6-way split on the wider index.
+SELECT (SELECT setting::int FROM mkt.index_settings('split_wide_idx')
+          WHERE name = 'centroid_pages')
+     = (SELECT count(DISTINCT blkno)
+          FROM mkt.centroid_pages('split_wide_idx'))
+    AS wide_centroid_pages_matches_the_tree;
+
 -- With no target the index supplies one: nlist was set explicitly at build
 -- time, so maintenance honours it rather than overriding it with its own
 -- automatic value. 60 rows over nlist = 1 is a target of 60, whose trigger of
@@ -134,6 +161,43 @@ SELECT blkno AS head_to_split FROM mkt.posting_pages('split_wide_idx')
     WHERE is_first ORDER BY blkno LIMIT 1;
 CALL mkt.split_posting_list('split_wide_idx', 3);
 RESET maintenance_work_mem;
+
+-- A split with no room left on the level-0 centroid page extends the
+-- relation and chains the new page there, which puts a centroid page past
+-- the posting region and leaves the centroid pages discontiguous. That is
+-- why the count lives on the metapage instead of being derived from
+-- first_posting: after this, no block range measures it.
+--
+-- 1024 dimensions puts about 56 leaf entries on a centroid page, and one
+-- pass takes the leaf count from 2 to 64, so a single rebalance crosses it.
+CREATE TABLE split_append (id serial, v vector(1024));
+INSERT INTO split_append (v)
+    SELECT ARRAY(SELECT ((i * 7 + g) % 97)::real
+                 FROM generate_series(1, 1024) g)::vector(1024)
+    FROM generate_series(1, 600) i;
+CREATE INDEX split_append_idx ON split_append USING mktann (v)
+    WITH (nlist = 2, centroid_fastscan = off, centroid_compression = on);
+
+SELECT setting AS centroid_pages_before
+    FROM mkt.index_settings('split_append_idx') WHERE name = 'centroid_pages';
+
+CALL mkt.rebalance('split_append_idx', 8);
+
+SELECT setting AS centroid_pages_after
+    FROM mkt.index_settings('split_append_idx') WHERE name = 'centroid_pages';
+
+-- The recorded count still matches what walking the tree finds, and the
+-- pages are no longer contiguous -- so the count was maintained, not
+-- inferred.
+SELECT (SELECT setting::int FROM mkt.index_settings('split_append_idx')
+          WHERE name = 'centroid_pages')
+     = (SELECT count(DISTINCT blkno)
+          FROM mkt.centroid_pages('split_append_idx'))
+    AS appended_count_matches_the_tree;
+
+SELECT max(blkno) - min(blkno) + 1 > count(DISTINCT blkno)
+    AS centroid_pages_are_discontiguous
+    FROM mkt.centroid_pages('split_append_idx');
 
 -- The other end: a budget too small to pay for even two partitions' worth of
 -- sample is refused, rather than quietly allocating the minimum anyway. Wide

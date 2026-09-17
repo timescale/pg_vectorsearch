@@ -26,7 +26,7 @@
  * which shifted the struct layout; v3 removed the unused indexed-row count,
  * which shifted it again.
  */
-#define MKT_META_MAGIC ((uint32_t)0x4D4B5403) /* "MKT\x03" */
+#define MKT_META_MAGIC ((uint32_t)0x4D4B5404) /* "MKT\x04" */
 
 /* Metadata flags */
 #define MKT_META_FLAG_FASTSCAN 0x01
@@ -42,9 +42,18 @@ typedef struct MktannMetaPage
 								  * centroid page); lets VACUUM skip the whole
 								  * centroid region without scanning it */
 	uint32_t nlist;				 /* number of leaf centroids */
-	uint8_t	 metric;			 /* DistanceMetric */
-	uint8_t	 fan_out;			 /* children per tree node */
-	uint8_t	 flags;				 /* MKT_META_FLAG_* */
+	/*
+	 * Centroid pages reachable from first_centroid. Maintained rather than
+	 * derived: the region a build reserves is [MKT_FIRST_CENTROID_BLKNO,
+	 * first_posting), but a split with no room on a level-0 page extends the
+	 * relation and chains the new page past the posting region, so a block
+	 * range stops measuring it. mkt.rebalance folds each split's additions
+	 * back in here.
+	 */
+	uint32_t ncentroid_pages;
+	uint8_t	 metric;  /* DistanceMetric */
+	uint8_t	 fan_out; /* children per tree node */
+	uint8_t	 flags;	  /* MKT_META_FLAG_* */
 	uint8_t	 reserved;
 	uint64_t rabitq_seed; /* seed for RaBitQ params */
 						  /* Global mean vector stored inline after struct */

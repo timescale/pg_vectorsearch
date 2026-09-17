@@ -13,6 +13,10 @@
 -- distances are well separated (near-collinear vectors collapse into
 -- float ties and make top-k order meaningless).
 
+-- Small tables, so a sequential scan is the plan the cost model correctly
+-- prefers and the scans below are forced through the index. The rows come
+-- back either way, so the plan is pinned once here: a silent fallback to a
+-- sequential scan then fails rather than passes.
 SET enable_seqscan = off;
 
 CREATE TABLE zv (id int, v vector(8));
@@ -28,6 +32,10 @@ SET mkt.nprobe = 64;
 -- Nearest direction to (13.05, 17.02) is (13, 17) -- a direction
 -- with no collinear multiple inside the grid; no zero-vector ids,
 -- no NaN fallout.
+EXPLAIN (COSTS OFF)
+SELECT id FROM zv
+    ORDER BY v OPERATOR(mkt.<=>) '[13.05,17.02,0,0,0,0,0,0]'
+    LIMIT 1;
 SELECT id FROM zv ORDER BY v OPERATOR(mkt.<=>) '[13.05,17.02,0,0,0,0,0,0]' LIMIT 1;
 
 -- Inserted zero vectors are likewise unreachable, and inserted real
