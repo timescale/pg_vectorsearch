@@ -17,11 +17,19 @@ TMPDIR_BASE=""
 PGDATA=""
 PGLOG=""
 PG_BINDIR=""
+VECTOR_CONTROL=""       # set by the event-trigger test when it flips `trusted`
+VECTOR_CONTROL_BAK=""
 
 cleanup() {
     # Save postgres log to builddir for artifact upload
     if [[ -f "${PGLOG:-}" && -d "$BUILDDIR" ]]; then
         cp "$PGLOG" "$BUILDDIR/postgres-compat.log" 2>/dev/null || true
+    fi
+    # Restore pgvector's control file if the event-trigger test flipped it
+    # (before removing TMPDIR_BASE, which holds the backup).
+    if [[ -n "$VECTOR_CONTROL_BAK" && -f "$VECTOR_CONTROL_BAK" ]]; then
+        cp "$VECTOR_CONTROL_BAK" "$VECTOR_CONTROL" 2>/dev/null \
+            || sudo cp "$VECTOR_CONTROL_BAK" "$VECTOR_CONTROL" 2>/dev/null || true
     fi
     if [[ -n "$PGDATA" && -d "$PGDATA" ]]; then
         echo "==> Stopping PostgreSQL"
@@ -107,5 +115,53 @@ echo "==> Running pgvector compatibility tests"
 echo "==> Running search_path hardening tests"
 "$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d compat_test \
     -f test/pg/compat/security.sql
+
+# Event-trigger non-superuser guard.
+#
+# On managed platforms pgvector is marked "trusted", letting a NON-superuser
+# install it. meerkat's event trigger fires on that CREATE EXTENSION as the
+# invoking (non-superuser) role; it must NOT attempt its superuser-only compat
+# DDL there, because that would fail and roll back the whole pgvector install
+# -- meerkat's presence would break pgvector. The guard warns and defers
+# instead. This is the one path security.sql can't cover (a plain psql script
+# can't mark pgvector trusted), so drive it here: flip the `trusted` flag in
+# this run's pgvector control file (restored on exit, incl. failure, by the
+# cleanup trap) to reproduce a trusted-pgvector deployment.
+echo "==> Running event-trigger non-superuser guard test"
+VECTOR_CONTROL="$("$PG_CONFIG" --sharedir)/extension/vector.control"
+VECTOR_CONTROL_BAK="$TMPDIR_BASE/vector.control.bak"
+cp "$VECTOR_CONTROL" "$VECTOR_CONTROL_BAK"
+if ! grep -q '^[[:space:]]*trusted' "$VECTOR_CONTROL"; then
+    printf 'trusted = true\n' >> "$VECTOR_CONTROL" 2>/dev/null \
+        || sudo sh -c "printf 'trusted = true\n' >> '$VECTOR_CONTROL'"
+fi
+
+"$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d postgres \
+    -c "CREATE DATABASE evt_test"
+
+# Superuser installs meerkat; a non-superuser role is set up to install pgvector
+# (a trusted extension needs only CREATE on the database).
+"$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d evt_test -v ON_ERROR_STOP=1 \
+    <<'SQL'
+CREATE EXTENSION meerkat;
+CREATE ROLE evt_nonsuper NOSUPERUSER;
+GRANT CREATE ON DATABASE evt_test TO evt_nonsuper;
+SQL
+
+# The non-superuser install must SUCCEED (guard warns and defers), not roll
+# back. Run without ON_ERROR_STOP so a regression surfaces as the assertion
+# below rather than a raw psql abort.
+"$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d evt_test \
+    -c "SET ROLE evt_nonsuper; CREATE EXTENSION vector;" || true
+
+installed="$("$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d evt_test -At \
+    -c "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='vector')")"
+if [[ "$installed" == "t" ]]; then
+    echo "    PASS: non-superuser pgvector install succeeded (compat deferred)"
+else
+    echo "    FAIL: non-superuser pgvector install rolled back --" \
+         "event-trigger guard regressed" >&2
+    exit 1
+fi
 
 echo "==> All compatibility tests passed"
