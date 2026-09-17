@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow
 ---
-name: Compatibility
+name: Compatibility & security
 
 on:
   push:
@@ -35,7 +35,7 @@ permissions:
 
 jobs:
   pgvector:
-    name: pgvector compatibility
+    name: pgvector compat + install-script security
     runs-on: ubuntu-latest
 
     steps:
@@ -53,7 +53,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build gcc libgsl-dev
+          # libipc-run-perl: lets meson's setup-time probe load PostgreSQL::Test
+          # cleanly (it needs IPC::Run) instead of logging a scary "not loadable"
+          # error; TAP tests aren't run here, but it keeps the log clean.
+          sudo apt-get install -y meson ninja-build gcc libgsl-dev libipc-run-perl
 
       - name: Install PostgreSQL 18
         run: |
@@ -65,10 +68,20 @@ jobs:
           sudo apt-get install -y postgresql-18 postgresql-server-dev-18
           echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
 
-      - name: Run pgvector compatibility tests
+      - name: Build & start test instance
         env:
           PGVECTOR_DIR: pgvector
-        run: ./scripts/ci/pgvector-compat.sh
+        run: ./scripts/ci/pgvector-compat.sh setup
+
+      - name: pgvector compatibility tests
+        run: ./scripts/ci/pgvector-compat.sh compat
+
+      - name: Install-script security tests
+        run: ./scripts/ci/pgvector-compat.sh security
+
+      - name: Stop test instance
+        if: always()
+        run: ./scripts/ci/pgvector-compat.sh teardown
 
       - name: Upload test logs
         if: always()
