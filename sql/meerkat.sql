@@ -960,7 +960,9 @@ CREATE FUNCTION setup_pgvector_compat() RETURNS void
     AS $$
 DECLARE
     r record;
-    existing_method "char";
+    existing_method  "char";
+    existing_context "char";
+    expected_context "char";
     pgv_ns text;   -- pgvector's schema (it is relocatable, so discovered)
     pgv text;      -- ...quote_ident'd, for building qualified type names
 BEGIN
@@ -984,14 +986,23 @@ BEGIN
     --
     -- Create each only if absent. A cast that already exists is accepted
     -- ONLY when it is the expected binary cast (WITHOUT FUNCTION,
-    -- castmethod 'b'); anything else is rejected as tampering. pgvector is
-    -- a "trusted" extension, so a non-superuser can install it (in a schema
-    -- of their choosing) and own its vector/halfvec types, and a type owner
-    -- may define a
-    -- WITH FUNCTION (or WITH INOUT) cast whose function then runs with the
-    -- privileges of whatever role later triggers the coercion. Silently
-    -- adopting such a cast (the old EXCEPTION WHEN duplicate_object THEN
-    -- NULL) would hide that; we fail loudly instead.
+    -- castmethod 'b') AND has the expected context (IMPLICIT vs ASSIGNMENT);
+    -- anything else is rejected as tampering. pgvector as shipped is NOT a
+    -- trusted extension (installing it needs superuser), and even a trusted
+    -- install leaves its types owned by the bootstrap superuser -- so a
+    -- WITH FUNCTION (or WITH INOUT) cast, whose function would run with the
+    -- privileges of whatever role later triggers the coercion, can only be
+    -- planted by a superuser or a role a superuser made the type's owner.
+    -- This check is therefore defense in depth and loud tamper-evidence
+    -- rather than protection against an unprivileged attacker; it costs
+    -- nothing and catches a mistaken or malicious cast whoever made it.
+    -- Validating the
+    -- context too matters because the two directions differ deliberately
+    -- (pgvector->meerkat IMPLICIT, meerkat->pgvector ASSIGNMENT): a binary
+    -- cast planted with the wrong context still has method 'b' but changes
+    -- coercion/operator-resolution behaviour. Silently adopting either (the
+    -- old EXCEPTION WHEN duplicate_object THEN NULL) would hide it; we fail
+    -- loudly instead.
     FOR r IN
         SELECT * FROM (VALUES
             (pgv || '.vector',      '@extschema@.vector',   'IMPLICIT'),
@@ -1000,19 +1011,24 @@ BEGIN
             ('@extschema@.halfvec', pgv || '.halfvec',      'ASSIGNMENT')
         ) AS t(src, tgt, ctx)
     LOOP
-        SELECT castmethod INTO existing_method
+        -- pg_cast.castcontext code for the expected context: the first letter
+        -- of the lowercased keyword (implicit->i, assignment->a).
+        expected_context := pg_catalog.substr(pg_catalog.lower(r.ctx), 1, 1);
+
+        SELECT castmethod, castcontext INTO existing_method, existing_context
         FROM pg_catalog.pg_cast
         WHERE castsource = r.src::pg_catalog.regtype
           AND casttarget = r.tgt::pg_catalog.regtype;
 
         IF FOUND THEN
-            IF existing_method OPERATOR(pg_catalog.<>) 'b' THEN
-                RAISE EXCEPTION 'refusing pre-existing cast (% AS %): '
-                    'expected a binary (WITHOUT FUNCTION) cast but found '
-                    'castmethod=%; possible tampering',
-                    r.src, r.tgt, existing_method;
+            IF existing_method OPERATOR(pg_catalog.<>) 'b'
+               OR existing_context OPERATOR(pg_catalog.<>) expected_context THEN
+                RAISE EXCEPTION 'refusing pre-existing cast (% AS %): expected '
+                    'a binary (WITHOUT FUNCTION) % cast but found castmethod=%, '
+                    'castcontext=%; possible tampering',
+                    r.src, r.tgt, r.ctx, existing_method, existing_context;
             END IF;
-            -- Expected binary cast already present: nothing to do.
+            -- Expected binary cast with the expected context already present.
         ELSE
             EXECUTE pg_catalog.format(
                 'CREATE CAST (%s AS %s) WITHOUT FUNCTION AS %s',

@@ -796,6 +796,49 @@ SELECT assert_test('custom-schema (mkt-first): event trigger created 4 casts',
         AND (s.typnamespace = 'pgv_alt'::regnamespace
              OR t.typnamespace = 'pgv_alt'::regnamespace)) = 4);
 
+-- Mirror the pgv-first checks: the event-trigger path must also add the six
+-- operators to the mktann families and yield a real index scan, or a
+-- regression there could pass on casts alone while queries silently seq-scan.
+SELECT assert_test(
+    'custom-schema (mkt-first): 6 pgvector ops are mktann members',
+    (SELECT count(*) FROM pg_amop ao
+       JOIN pg_opfamily f ON f.oid = ao.amopfamily
+       JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'mktann'
+       JOIN pg_operator op ON op.oid = ao.amopopr
+      WHERE ao.amoppurpose = 'o'
+        AND op.oprnamespace = 'pgv_alt'::regnamespace) = 6);
+
+CREATE OR REPLACE FUNCTION public.plan_uses_index_scan(q text) RETURNS bool
+    LANGUAGE plpgsql AS $fn$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || q LOOP
+        IF line LIKE '%Index Scan%' THEN RETURN true; END IF;
+    END LOOP;
+    RETURN false;
+END $fn$;
+
+CREATE TABLE idx_altb (id int, v pgv_alt.vector(8));
+INSERT INTO idx_altb
+    SELECT g, ('[' || (SELECT string_agg(
+                          round(sin(g * 0.7 + j * 1.3)::numeric, 4)::text, ',')
+                       FROM generate_series(1, 8) j) || ']')::pgv_alt.vector(8)
+    FROM generate_series(1, 2000) g;
+ANALYZE idx_altb;
+CREATE INDEX idx_altb_i ON idx_altb USING mktann (v mkt.vector_l2_ops);
+SET enable_seqscan = off;
+SET mkt.rerank_pool = -1;
+SELECT assert_test(
+    'custom-schema (mkt-first): mktann index used via pgvector operator',
+    public.plan_uses_index_scan($q$SELECT id FROM idx_altb
+        ORDER BY v OPERATOR(pgv_alt.<->) '[0,0,0,0,0,0,0,0]'::pgv_alt.vector(8)
+        LIMIT 10$q$));
+RESET enable_seqscan;
+RESET mkt.rerank_pool;
+DROP TABLE idx_altb;
+DROP FUNCTION public.plan_uses_index_scan(text);
+
 -- Restore the default public install for the summary / any later re-run.
 -- pgv_alt is empty once pgvector is gone, so a plain DROP (no CASCADE) suffices
 -- and would fail loudly if anything unexpected were left behind.

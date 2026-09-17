@@ -24,7 +24,10 @@
 -- Prerequisites:
 --   pgvector and meerkat must be installed in PostgreSQL, and the
 --   connected role must be a superuser (to install extensions and
---   exercise the event-trigger escalation path).
+--   exercise the event-trigger escalation path). This suite drops and
+--   recreates both extensions and the `mkt` schema (CASCADE) as it runs, so
+--   run it against a throwaway/clean database, not one holding data you care
+--   about. The CI script uses a fresh instance.
 --
 -- Usage:
 --   psql -f test/pg/compat/security.sql
@@ -38,6 +41,10 @@ CREATE TEMP TABLE test_results (name text, passed bool);
 CREATE OR REPLACE FUNCTION assert_test(test_name text, condition bool)
 RETURNS void AS $$
 BEGIN
+    -- Normalize NULL to false: a check that evaluates to NULL (e.g. a missing
+    -- proconfig pin) is a failure, not a pass, and must not slip past the
+    -- final "WHERE NOT passed" exit guard as neither-true-nor-false.
+    condition := COALESCE(condition, false);
     INSERT INTO test_results VALUES (test_name, condition);
     IF condition THEN
         RAISE NOTICE 'PASS: %', test_name;
@@ -301,6 +308,38 @@ DROP FUNCTION public.evil_cast(public.vector);
 CREATE CAST (public.vector AS :"extschema".vector) WITHOUT FUNCTION AS IMPLICIT;
 
 -- =====================================================================
+-- 3b. A binary cast with the WRONG context is rejected too
+-- =====================================================================
+-- The pgv->mkt direction must be IMPLICIT and mkt->pgv ASSIGNMENT. A binary
+-- (WITHOUT FUNCTION) cast planted with the wrong context still has method
+-- 'b', so a method-only check would adopt it -- changing coercion/operator
+-- resolution. setup must reject it on the castcontext mismatch.
+DROP CAST (public.vector AS :"extschema".vector);
+CREATE CAST (public.vector AS :"extschema".vector)
+    WITHOUT FUNCTION AS ASSIGNMENT;   -- wrong: this direction must be IMPLICIT
+
+DO $chk$
+DECLARE
+    raised bool := false;
+    eschema text := (SELECT n.nspname FROM pg_catalog.pg_extension e
+                       JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+                      WHERE e.extname = 'meerkat');
+BEGIN
+    BEGIN
+        EXECUTE pg_catalog.format('SELECT %I.setup_pgvector_compat()', eschema);
+    EXCEPTION WHEN OTHERS THEN
+        raised := true;
+    END;
+    PERFORM assert_test(
+        'binary cast with the wrong context is rejected (fail loud)', raised);
+END;
+$chk$;
+
+-- Restore the expected binary cast.
+DROP CAST (public.vector AS :"extschema".vector);
+CREATE CAST (public.vector AS :"extschema".vector) WITHOUT FUNCTION AS IMPLICIT;
+
+-- =====================================================================
 -- 4. End-to-end: a non-superuser cannot escalate via the event trigger
 -- =====================================================================
 -- The headline attack. A NOSUPERUSER plants an escalating format()
@@ -310,7 +349,7 @@ CREATE CAST (public.vector AS :"extschema".vector) WITHOUT FUNCTION AS IMPLICIT;
 -- attacker SUPERUSER. It must not.
 
 DROP ROLE IF EXISTS mkt_attacker;
-CREATE ROLE mkt_attacker NOSUPERUSER LOGIN;
+CREATE ROLE mkt_attacker NOSUPERUSER NOLOGIN;   -- SET ROLE needs no LOGIN
 -- Simulate a deployment where the role can create in a schema on the
 -- admin's search_path (public); the attack does not depend on which
 -- schema, only that the overload is visible.
@@ -344,23 +383,27 @@ DROP ROLE mkt_attacker;
 \echo search_path hardening test results
 \echo ====================================
 
-SELECT format('%s: %s',
+-- pg_catalog.format here too: this suite plants format() overloads, and a
+-- pre-existing one on the session path could otherwise run as the superuser
+-- during the summary.
+SELECT pg_catalog.format('%s: %s',
     CASE WHEN passed THEN 'PASS' ELSE 'FAIL' END, name)
 FROM test_results
 ORDER BY passed, name;
 
 \echo
 
-SELECT format('Total: %s passed, %s failed out of %s tests',
+SELECT pg_catalog.format('Total: %s passed, %s failed out of %s tests',
     count(*) FILTER (WHERE passed),
     count(*) FILTER (WHERE NOT passed),
     count(*))
 FROM test_results;
 
--- Exit with error if any check failed.
+-- Exit with error if any check failed. `passed IS NOT TRUE` also catches a
+-- NULL that slipped through (belt-and-suspenders with assert_test's COALESCE).
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM test_results WHERE NOT passed) THEN
+    IF EXISTS (SELECT 1 FROM test_results WHERE passed IS NOT TRUE) THEN
         RAISE EXCEPTION 'Some search_path hardening tests failed';
     END IF;
 END;
