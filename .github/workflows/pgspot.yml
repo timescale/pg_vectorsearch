@@ -1,0 +1,40 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: pgspot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sql/**'
+      - 'scripts/ci/pgspot.sh'
+      - '.github/workflows/pgspot.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'sql/**'
+      - 'scripts/ci/pgspot.sh'
+      - '.github/workflows/pgspot.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pgspot:
+    name: SQL install-script security (pgspot)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install pgspot
+        run: pip install pgspot
+
+      - name: Run pgspot
+        run: ./scripts/ci/pgspot.sh

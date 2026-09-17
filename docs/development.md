@@ -289,6 +289,7 @@ debugging. These are the same scripts used by GitHub Actions.
 | `coverage.sh` | Build with coverage, generate report |
 | `sanitizers.sh` | Build and test with sanitizers |
 | `lint.sh` | Check formatting and run clang-tidy |
+| `pgspot.sh` | Static security lint of the install-time SQL (pgspot) |
 
 ### Usage
 
@@ -310,6 +311,9 @@ debugging. These are the same scripts used by GitHub Actions.
 
 # Check formatting and run clang-tidy
 ./scripts/ci/lint.sh
+
+# Security-lint the install-time SQL (needs: pip install pgspot)
+./scripts/ci/pgspot.sh
 ```
 
 ### Custom Build Directory
@@ -331,6 +335,7 @@ The project uses GitHub Actions for CI with the following workflows:
 | `sanitizers.yml` | Push, PR | ASan and UBSan tests |
 | `coverage.yml` | Push, PR | Coverage report, upload to Codecov |
 | `lint.yml` | Push, PR | Format check and clang-tidy |
+| `pgspot.yml` | Push, PR (SQL) | pgspot security lint of install-time SQL |
 | `codeql.yml` | Push, PR, Weekly | GitHub CodeQL static analysis |
 
 ## Design Patterns
