@@ -1055,8 +1055,9 @@ BEGIN
     -- injection-safe.
     SELECT n.nspname INTO pgv_ns
     FROM pg_catalog.pg_extension e
-    JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
-    WHERE e.extname = 'vector';
+    JOIN pg_catalog.pg_namespace n
+      ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
+    WHERE e.extname OPERATOR(pg_catalog.=) 'vector';
 
     IF pgv_ns IS NULL THEN
         RAISE EXCEPTION 'pgvector (extension "vector") is not installed';
@@ -1086,10 +1087,14 @@ BEGIN
     -- loudly instead.
     FOR r IN
         SELECT * FROM (VALUES
-            (pgv || '.vector',      '@extschema@.vector',   'IMPLICIT'),
-            (pgv || '.halfvec',     '@extschema@.halfvec',  'IMPLICIT'),
-            ('@extschema@.vector',  pgv || '.vector',       'ASSIGNMENT'),
-            ('@extschema@.halfvec', pgv || '.halfvec',      'ASSIGNMENT')
+            (pgv OPERATOR(pg_catalog.||) '.vector',
+                 '@extschema@.vector',   'IMPLICIT'),
+            (pgv OPERATOR(pg_catalog.||) '.halfvec',
+                 '@extschema@.halfvec',  'IMPLICIT'),
+            ('@extschema@.vector',
+                 pgv OPERATOR(pg_catalog.||) '.vector',  'ASSIGNMENT'),
+            ('@extschema@.halfvec',
+                 pgv OPERATOR(pg_catalog.||) '.halfvec', 'ASSIGNMENT')
         ) AS t(src, tgt, ctx)
     LOOP
         -- pg_cast.castcontext code for the expected context: the first letter
@@ -1098,8 +1103,8 @@ BEGIN
 
         SELECT castmethod, castcontext INTO existing_method, existing_context
         FROM pg_catalog.pg_cast
-        WHERE castsource = r.src::pg_catalog.regtype
-          AND casttarget = r.tgt::pg_catalog.regtype;
+        WHERE castsource OPERATOR(pg_catalog.=) r.src::pg_catalog.regtype
+          AND casttarget OPERATOR(pg_catalog.=) r.tgt::pg_catalog.regtype;
 
         IF FOUND THEN
             IF existing_method OPERATOR(pg_catalog.<>) 'b'
@@ -1159,8 +1164,9 @@ BEGIN
     -- pgvector is relocatable; discover its schema (NULL if not installed).
     SELECT n.nspname INTO pgv_ns
     FROM pg_catalog.pg_extension e
-    JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
-    WHERE e.extname = 'vector';
+    JOIN pg_catalog.pg_namespace n
+      ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
+    WHERE e.extname OPERATOR(pg_catalog.=) 'vector';
 
     IF pgv_ns IS NOT NULL THEN
         PERFORM @extschema@.setup_pgvector_compat();
@@ -1189,9 +1195,9 @@ DECLARE
     is_super boolean;
 BEGIN
     FOR obj IN SELECT * FROM pg_catalog.pg_event_trigger_ddl_commands()
-               WHERE object_type = 'extension'
+               WHERE object_type OPERATOR(pg_catalog.=) 'extension'
     LOOP
-        IF obj.object_identity = 'vector' THEN
+        IF obj.object_identity OPERATOR(pg_catalog.=) 'vector' THEN
             -- setup_pgvector_compat() does superuser-only DDL (CREATE CAST
             -- WITHOUT FUNCTION, ALTER OPERATOR FAMILY). An event trigger runs
             -- as the role that ran CREATE EXTENSION, so if a NON-superuser
