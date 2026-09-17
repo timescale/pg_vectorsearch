@@ -17,6 +17,49 @@
 \echo Use "CREATE EXTENSION meerkat" to load this file.\quit
 
 -- =====================================================================
+-- schema ownership guard
+-- =====================================================================
+-- Refuse to install into a pre-existing extension schema owned by an
+-- untrusted role. meerkat is non-relocatable (schema = 'mkt') and its docs
+-- have users put that schema on their search_path
+-- (SET search_path = mkt, public) so meerkat's types and operators resolve
+-- unqualified -- which makes mkt a schema users trust on their path. But
+-- PostgreSQL does not check target-schema ownership at CREATE EXTENSION, so
+-- a role with CREATE on the database can pre-create mkt and keep owning it
+-- after install. The owner cannot touch meerkat's own objects (extension
+-- membership protects them), but can add NEW objects to mkt -- e.g. an
+-- operator on pgvector's type that shadows pgvector's own for anyone with
+-- mkt ahead of public, running the attacker's code as that role. See the
+-- security note above setup_pgvector_compat() for the alternatives weighed.
+--
+-- Allow only a schema the installer (current_user) or a superuser owns; a
+-- fresh install, where CREATE EXTENSION creates the schema, is unaffected.
+-- This assumes the fixed dedicated schema: if meerkat is ever made
+-- relocatable (installable into public, owned by pg_database_owner), this
+-- check must be revisited, or it would refuse a legitimate install there.
+DO $$
+DECLARE
+    owner_name  name;
+    owner_super boolean;
+BEGIN
+    SELECT r.rolname, r.rolsuper INTO owner_name, owner_super
+      FROM pg_catalog.pg_namespace n
+      JOIN pg_catalog.pg_roles r
+        ON r.oid OPERATOR(pg_catalog.=) n.nspowner
+     WHERE n.nspname OPERATOR(pg_catalog.=) '@extschema@';
+    IF FOUND AND NOT (owner_super
+                      OR owner_name OPERATOR(pg_catalog.=) current_user) THEN
+        RAISE EXCEPTION
+            'schema "@extschema@" already exists and is owned by "%", a role '
+            'other than the installer or a superuser', owner_name
+            USING HINT = 'meerkat refuses to install into a schema an '
+                'untrusted role controls; drop or re-own the schema, or '
+                'install as the role that owns it.';
+    END IF;
+END;
+$$;
+
+-- =====================================================================
 -- build identity
 -- =====================================================================
 
@@ -209,21 +252,21 @@ CREATE OPERATOR < (
     LEFTARG = vector, RIGHTARG = vector,
     FUNCTION = vector_lt,
     COMMUTATOR = '>', NEGATOR = '>=',
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = pg_catalog.scalarltsel, JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR <= (
     LEFTARG = vector, RIGHTARG = vector,
     FUNCTION = vector_le,
     COMMUTATOR = '>=', NEGATOR = '>',
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = pg_catalog.scalarlesel, JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR = (
     LEFTARG = vector, RIGHTARG = vector,
     FUNCTION = vector_eq,
     COMMUTATOR = '=', NEGATOR = '<>',
-    RESTRICT = eqsel, JOIN = eqjoinsel,
+    RESTRICT = pg_catalog.eqsel, JOIN = pg_catalog.eqjoinsel,
     HASHES, MERGES
 );
 
@@ -231,21 +274,21 @@ CREATE OPERATOR <> (
     LEFTARG = vector, RIGHTARG = vector,
     FUNCTION = vector_ne,
     COMMUTATOR = '<>', NEGATOR = '=',
-    RESTRICT = neqsel, JOIN = neqjoinsel
+    RESTRICT = pg_catalog.neqsel, JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR >= (
     LEFTARG = vector, RIGHTARG = vector,
     FUNCTION = vector_ge,
     COMMUTATOR = '<=', NEGATOR = '<',
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = pg_catalog.scalargesel, JOIN = pg_catalog.scalargejoinsel
 );
 
 CREATE OPERATOR > (
     LEFTARG = vector, RIGHTARG = vector,
     FUNCTION = vector_gt,
     COMMUTATOR = '<', NEGATOR = '<=',
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = pg_catalog.scalargtsel, JOIN = pg_catalog.scalargtjoinsel
 );
 
 -- =====================================================================
@@ -434,21 +477,21 @@ CREATE OPERATOR < (
     LEFTARG = halfvec, RIGHTARG = halfvec,
     FUNCTION = halfvec_lt,
     COMMUTATOR = '>', NEGATOR = '>=',
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = pg_catalog.scalarltsel, JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR <= (
     LEFTARG = halfvec, RIGHTARG = halfvec,
     FUNCTION = halfvec_le,
     COMMUTATOR = '>=', NEGATOR = '>',
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = pg_catalog.scalarlesel, JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR = (
     LEFTARG = halfvec, RIGHTARG = halfvec,
     FUNCTION = halfvec_eq,
     COMMUTATOR = '=', NEGATOR = '<>',
-    RESTRICT = eqsel, JOIN = eqjoinsel,
+    RESTRICT = pg_catalog.eqsel, JOIN = pg_catalog.eqjoinsel,
     HASHES, MERGES
 );
 
@@ -456,21 +499,21 @@ CREATE OPERATOR <> (
     LEFTARG = halfvec, RIGHTARG = halfvec,
     FUNCTION = halfvec_ne,
     COMMUTATOR = '<>', NEGATOR = '=',
-    RESTRICT = neqsel, JOIN = neqjoinsel
+    RESTRICT = pg_catalog.neqsel, JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR >= (
     LEFTARG = halfvec, RIGHTARG = halfvec,
     FUNCTION = halfvec_ge,
     COMMUTATOR = '<=', NEGATOR = '<',
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = pg_catalog.scalargesel, JOIN = pg_catalog.scalargejoinsel
 );
 
 CREATE OPERATOR > (
     LEFTARG = halfvec, RIGHTARG = halfvec,
     FUNCTION = halfvec_gt,
     COMMUTATOR = '<', NEGATOR = '<=',
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = pg_catalog.scalargtsel, JOIN = pg_catalog.scalargtjoinsel
 );
 
 -- =====================================================================
@@ -585,21 +628,21 @@ CREATE OPERATOR < (
     LEFTARG = rabitq, RIGHTARG = rabitq,
     FUNCTION = rabitq_lt,
     COMMUTATOR = '>', NEGATOR = '>=',
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = pg_catalog.scalarltsel, JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR <= (
     LEFTARG = rabitq, RIGHTARG = rabitq,
     FUNCTION = rabitq_le,
     COMMUTATOR = '>=', NEGATOR = '>',
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = pg_catalog.scalarlesel, JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR = (
     LEFTARG = rabitq, RIGHTARG = rabitq,
     FUNCTION = rabitq_eq,
     COMMUTATOR = '=', NEGATOR = '<>',
-    RESTRICT = eqsel, JOIN = eqjoinsel,
+    RESTRICT = pg_catalog.eqsel, JOIN = pg_catalog.eqjoinsel,
     HASHES, MERGES
 );
 
@@ -607,21 +650,21 @@ CREATE OPERATOR <> (
     LEFTARG = rabitq, RIGHTARG = rabitq,
     FUNCTION = rabitq_ne,
     COMMUTATOR = '<>', NEGATOR = '=',
-    RESTRICT = neqsel, JOIN = neqjoinsel
+    RESTRICT = pg_catalog.neqsel, JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR >= (
     LEFTARG = rabitq, RIGHTARG = rabitq,
     FUNCTION = rabitq_ge,
     COMMUTATOR = '<=', NEGATOR = '<',
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = pg_catalog.scalargesel, JOIN = pg_catalog.scalargejoinsel
 );
 
 CREATE OPERATOR > (
     LEFTARG = rabitq, RIGHTARG = rabitq,
     FUNCTION = rabitq_gt,
     COMMUTATOR = '<', NEGATOR = '<=',
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = pg_catalog.scalargtsel, JOIN = pg_catalog.scalargtjoinsel
 );
 
 -- =====================================================================
@@ -938,10 +981,48 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 --   pgvector first, meerkat later: DO block below sets up compat
 --   meerkat first, pgvector later: event trigger sets up compat
 
+-- Security note. This code runs at CREATE EXTENSION time (the install DO
+-- block) and later from an event trigger on any CREATE EXTENSION, in both
+-- cases as the invoking role. Three attack vectors were considered:
+--
+-- 1. search_path hijack of a builtin. An unqualified format() (or any
+--    builtin) here could resolve to an attacker-planted overload on the
+--    caller's path -- an exact-arity overload beats pg_catalog's VARIADIC one
+--    from ANY path position, so pg_catalog being implicitly first does not
+--    help. Closed by pinning SET search_path = pg_catalog, pg_temp on this
+--    function and calling every builtin as pg_catalog.<fn>.
+--
+-- 2. Cast tampering. pgvector's type owner could pre-create a WITH FUNCTION
+--    cast between the two extensions' types, whose function then runs as the
+--    querying role. Closed by the loop below: it creates a cast only when
+--    absent and RAISEs on any pre-existing cast that is not the expected
+--    binary (WITHOUT FUNCTION) cast, instead of adopting it.
+--
+-- 3. Operator shadowing via the extension schema. If an untrusted role owns
+--    mkt, it can add an operator on pgvector's type -- e.g.
+--    mkt.<->(public.vector, public.vector) -- that shadows pgvector's own for
+--    any role with mkt ahead of public, running attacker code as that role.
+--    meerkat's OWN operators (on mkt.vector) are not shadowable: a
+--    same-signature plant conflicts at install and installed objects are
+--    membership-locked. Two fixes were weighed:
+--      (a) Occupy the signatures -- have meerkat pre-create safe, delegating
+--          versions of pgvector's operators AND functions in mkt so the
+--          attacker cannot. Rejected: the surface is pgvector's whole public
+--          API across all its types and it grows with pgvector versions, so a
+--          newly added pgvector operator silently reopens the hole until
+--          meerkat catches up -- a maintenance treadmill tied to another
+--          project's API, and it still leaves non-pgvector shadows open.
+--      (b) Ensure mkt is trusted-owned -- refuse to install into a mkt owned
+--          by an untrusted role (the schema ownership guard at the top of
+--          this script). Chosen: version-independent, comprehensive (nothing
+--          hostile can live in mkt at all), ~10 lines. Cost: it assumes the
+--          fixed dedicated schema and must be revisited if meerkat ever
+--          becomes relocatable.
+--
 -- Set up pgvector interoperability in one step: the binary casts between the
 -- two extensions' types, and the membership of pgvector's distance operators
 -- in meerkat's mktann operator families. These belong together -- the casts
--- make public.vector/public.halfvec binary-coercible to mkt.vector/mkt.halfvec,
+-- make pgvector's vector/halfvec binary-coercible to mkt.vector/mkt.halfvec,
 -- which is exactly what lets pgvector's operators join a family whose opclass
 -- is FOR TYPE mkt.<type>. Keeping them in a single function means a caller
 -- cannot add the casts and forget the operators (which would silently downgrade
@@ -951,36 +1032,102 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 -- Idempotent throughout via exception handling (neither CREATE CAST nor ALTER
 -- OPERATOR FAMILY has an IF NOT EXISTS form).
 CREATE FUNCTION setup_pgvector_compat() RETURNS void
-    LANGUAGE plpgsql AS $$
+    LANGUAGE plpgsql
+    -- Reached at runtime from the event trigger under the DDL-runner's
+    -- search_path, and from the install DO block. Pin the path so every
+    -- unqualified name here resolves in pg_catalog, not in an
+    -- attacker-controlled schema (see format() below).
+    SET search_path = pg_catalog, pg_temp
+    AS $$
 DECLARE
     r record;
+    existing_method  "char";
+    existing_context "char";
+    expected_context "char";
+    pgv_ns text;   -- pgvector's schema (it is relocatable, so discovered)
+    pgv text;      -- ...quote_ident'd, for building qualified type names
 BEGIN
+    -- pgvector is relocatable: its types and operators live in whatever
+    -- schema it was installed into, not necessarily public. Discover it
+    -- from the catalog rather than assuming public; extnamespace stays
+    -- authoritative even after ALTER EXTENSION vector SET SCHEMA. The name
+    -- is only ever interpolated through %I / quote_ident, so it stays
+    -- injection-safe.
+    SELECT n.nspname INTO pgv_ns
+    FROM pg_catalog.pg_extension e
+    JOIN pg_catalog.pg_namespace n
+      ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
+    WHERE e.extname OPERATOR(pg_catalog.=) 'vector';
+
+    IF pgv_ns IS NULL THEN
+        RAISE EXCEPTION 'pgvector (extension "vector") is not installed';
+    END IF;
+    pgv := pg_catalog.quote_ident(pgv_ns);
+
     -- 1. Binary casts, both directions, for vector and halfvec.
-    BEGIN
-        CREATE CAST (public.vector AS @extschema@.vector)
-            WITHOUT FUNCTION AS IMPLICIT;
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END;
-    BEGIN
-        CREATE CAST (public.halfvec AS @extschema@.halfvec)
-            WITHOUT FUNCTION AS IMPLICIT;
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END;
-    BEGIN
-        CREATE CAST (@extschema@.vector AS public.vector)
-            WITHOUT FUNCTION AS ASSIGNMENT;
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END;
-    BEGIN
-        CREATE CAST (@extschema@.halfvec AS public.halfvec)
-            WITHOUT FUNCTION AS ASSIGNMENT;
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END;
+    --
+    -- Create each only if absent. A cast that already exists is accepted
+    -- ONLY when it is the expected binary cast (WITHOUT FUNCTION,
+    -- castmethod 'b') AND has the expected context (IMPLICIT vs ASSIGNMENT);
+    -- anything else is rejected as tampering. pgvector as shipped is NOT a
+    -- trusted extension (installing it needs superuser), and even a trusted
+    -- install leaves its types owned by the bootstrap superuser -- so a
+    -- WITH FUNCTION (or WITH INOUT) cast, whose function would run with the
+    -- privileges of whatever role later triggers the coercion, can only be
+    -- planted by a superuser or a role a superuser made the type's owner.
+    -- This check is therefore defense in depth and loud tamper-evidence
+    -- rather than protection against an unprivileged attacker; it costs
+    -- nothing and catches a mistaken or malicious cast whoever made it.
+    -- Validating the
+    -- context too matters because the two directions differ deliberately
+    -- (pgvector->meerkat IMPLICIT, meerkat->pgvector ASSIGNMENT): a binary
+    -- cast planted with the wrong context still has method 'b' but changes
+    -- coercion/operator-resolution behaviour. Silently adopting either (the
+    -- old EXCEPTION WHEN duplicate_object THEN NULL) would hide it; we fail
+    -- loudly instead.
+    FOR r IN
+        SELECT * FROM (VALUES
+            (pgv OPERATOR(pg_catalog.||) '.vector',
+                 '@extschema@.vector',   'IMPLICIT'),
+            (pgv OPERATOR(pg_catalog.||) '.halfvec',
+                 '@extschema@.halfvec',  'IMPLICIT'),
+            ('@extschema@.vector',
+                 pgv OPERATOR(pg_catalog.||) '.vector',  'ASSIGNMENT'),
+            ('@extschema@.halfvec',
+                 pgv OPERATOR(pg_catalog.||) '.halfvec', 'ASSIGNMENT')
+        ) AS t(src, tgt, ctx)
+    LOOP
+        -- pg_cast.castcontext code for the expected context: the first letter
+        -- of the lowercased keyword (implicit->i, assignment->a).
+        expected_context := pg_catalog.substr(pg_catalog.lower(r.ctx), 1, 1);
+
+        SELECT castmethod, castcontext INTO existing_method, existing_context
+        FROM pg_catalog.pg_cast
+        WHERE castsource OPERATOR(pg_catalog.=) r.src::pg_catalog.regtype
+          AND casttarget OPERATOR(pg_catalog.=) r.tgt::pg_catalog.regtype;
+
+        IF FOUND THEN
+            IF existing_method OPERATOR(pg_catalog.<>) 'b'
+               OR existing_context OPERATOR(pg_catalog.<>) expected_context THEN
+                RAISE EXCEPTION 'refusing pre-existing cast (% AS %): expected '
+                    'a binary (WITHOUT FUNCTION) % cast but found castmethod=%, '
+                    'castcontext=%; possible tampering',
+                    r.src, r.tgt, r.ctx, existing_method, existing_context;
+            END IF;
+            -- Expected binary cast with the expected context already present.
+        ELSE
+            EXECUTE pg_catalog.format(
+                'CREATE CAST (%s AS %s) WITHOUT FUNCTION AS %s',
+                r.src, r.tgt, r.ctx);
+        END IF;
+    END LOOP;
 
     -- 2. pgvector's distance operators as ordering members of meerkat's mktann
     -- families. Strategy 1 and float_ops match the opclass declarations above;
     -- the operator's left type only has to be binary-coercible to the family's
-    -- index type, which the casts above guarantee.
+    -- index type, which the casts above guarantee. Adding an operator family
+    -- member requires superuser, so an attacker cannot pre-plant one; the
+    -- duplicate_object catch here is pure idempotency for a legitimate re-run.
     FOR r IN
         SELECT * FROM (VALUES
             ('vector_l2_ops',      'vector',  '<->'),
@@ -992,11 +1139,11 @@ BEGIN
         ) AS t(fam, typ, op)
     LOOP
         BEGIN
-            EXECUTE format(
+            EXECUTE pg_catalog.format(
                 'ALTER OPERATOR FAMILY @extschema@.%I USING mktann '
-                'ADD OPERATOR 1 public.%s (public.%I, public.%I) '
+                'ADD OPERATOR 1 %I.%s (%I.%I, %I.%I) '
                 'FOR ORDER BY pg_catalog.float_ops',
-                r.fam, r.op, r.typ, r.typ);
+                r.fam, pgv_ns, r.op, pgv_ns, r.typ, pgv_ns, r.typ);
         EXCEPTION WHEN duplicate_object THEN NULL;
         END;
     END LOOP;
@@ -1011,34 +1158,67 @@ $$;
 -- The casts still get cleaned up via auto-dependencies on their
 -- referenced types.
 DO $$
+DECLARE
+    pgv_ns text;
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM pg_extension WHERE extname = 'vector'
-    ) THEN
+    -- pgvector is relocatable; discover its schema (NULL if not installed).
+    SELECT n.nspname INTO pgv_ns
+    FROM pg_catalog.pg_extension e
+    JOIN pg_catalog.pg_namespace n
+      ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
+    WHERE e.extname OPERATOR(pg_catalog.=) 'vector';
+
+    IF pgv_ns IS NOT NULL THEN
         PERFORM @extschema@.setup_pgvector_compat();
-        EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
-            '(public.vector AS @extschema@.vector)';
-        EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
-            '(public.halfvec AS @extschema@.halfvec)';
-        EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
-            '(@extschema@.vector AS public.vector)';
-        EXECUTE 'ALTER EXTENSION meerkat DROP CAST '
-            '(@extschema@.halfvec AS public.halfvec)';
+        EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
+            '(%I.vector AS @extschema@.vector)', pgv_ns);
+        EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
+            '(%I.halfvec AS @extschema@.halfvec)', pgv_ns);
+        EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
+            '(@extschema@.vector AS %I.vector)', pgv_ns);
+        EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
+            '(@extschema@.halfvec AS %I.halfvec)', pgv_ns);
     END IF;
 END;
 $$;
 
 -- Event trigger: create casts when pgvector is installed after meerkat.
 CREATE FUNCTION on_extension_create()
-    RETURNS event_trigger LANGUAGE plpgsql AS $$
+    RETURNS event_trigger LANGUAGE plpgsql
+    -- Runs later as an event trigger under the DDL-runner's own
+    -- search_path. Pin it so unqualified names in this body (and the one
+    -- it calls) resolve to pg_catalog, never an attacker-planted overload.
+    SET search_path = pg_catalog, pg_temp
+    AS $$
 DECLARE
     obj record;
+    is_super boolean;
 BEGIN
-    FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands()
-               WHERE object_type = 'extension'
+    FOR obj IN SELECT * FROM pg_catalog.pg_event_trigger_ddl_commands()
+               WHERE object_type OPERATOR(pg_catalog.=) 'extension'
     LOOP
-        IF obj.object_identity = 'vector' THEN
-            PERFORM @extschema@.setup_pgvector_compat();
+        IF obj.object_identity OPERATOR(pg_catalog.=) 'vector' THEN
+            -- setup_pgvector_compat() does superuser-only DDL (CREATE CAST
+            -- WITHOUT FUNCTION, ALTER OPERATOR FAMILY). An event trigger runs
+            -- as the role that ran CREATE EXTENSION, so if a NON-superuser
+            -- installs pgvector -- possible where it is trusted, as some
+            -- managed platforms allow -- this PERFORM would fail and roll back
+            -- the whole pgvector install, making meerkat's presence break
+            -- pgvector. Skip and warn instead; a superuser finishes the wiring
+            -- later. (SECURITY DEFINER was rejected: it would run this
+            -- superuser-only DDL for anyone who can create an extension.)
+            SELECT r.rolsuper INTO is_super
+              FROM pg_catalog.pg_roles r
+             WHERE r.rolname OPERATOR(pg_catalog.=) current_user;
+            IF is_super THEN
+                PERFORM @extschema@.setup_pgvector_compat();
+            ELSE
+                RAISE WARNING 'meerkat did not set up pgvector compatibility: '
+                    'it requires superuser privileges'
+                    USING HINT = 'A superuser should run '
+                        '@extschema@.setup_pgvector_compat() so pgvector-typed '
+                        'columns can use meerkat indexes.';
+            END IF;
         END IF;
     END LOOP;
 END;

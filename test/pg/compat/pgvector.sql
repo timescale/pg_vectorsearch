@@ -8,7 +8,10 @@
 -- identical behavior.
 --
 -- Prerequisites:
---   pgvector and meerkat must be installed in PostgreSQL.
+--   pgvector and meerkat must be installed in PostgreSQL. This suite installs
+--   and drops both extensions (and a scratch schema) as it exercises the
+--   install/drop orderings, so run it against a throwaway/clean database, not
+--   one holding data you care about. The CI script uses a fresh instance.
 --
 -- Usage:
 --   psql -f test/pg/compat/pgvector.sql
@@ -698,6 +701,152 @@ DROP FUNCTION public.plan_uses_index_scan(text);
 DROP TABLE idx_pgv_h;
 DROP TABLE idx_mkt_h;
 RESET search_path;
+
+-- =====================================================================
+-- 19. pgvector installed in a NON-default schema (dynamic discovery)
+-- =====================================================================
+-- pgvector is relocatable, so its types and operators need not live in
+-- public. setup_pgvector_compat() and the install DO block discover the
+-- schema from pg_extension.extnamespace rather than assuming public. Install
+-- pgvector into a dedicated schema and assert the compat casts, the operator
+-- family memberships, and a real index scan all still come out right -- for
+-- both install orderings.
+
+DROP EXTENSION IF EXISTS meerkat CASCADE;
+DROP EXTENSION IF EXISTS vector CASCADE;
+-- No pre-emptive DROP SCHEMA: pgv_alt is our name, but cascade-dropping whatever
+-- a user might have under it would be too aggressive. A clean DB is a documented
+-- prerequisite, so a bare CREATE fails loudly if the name is already taken.
+CREATE SCHEMA pgv_alt;
+
+-- Ordering A: pgvector (in pgv_alt) first, meerkat second (install DO block).
+CREATE EXTENSION vector SCHEMA pgv_alt;
+CREATE EXTENSION meerkat;
+
+SELECT assert_test('custom-schema (pgv-first): 4 binary compat casts',
+    (SELECT count(*) FROM pg_cast c
+       JOIN pg_type s ON s.oid = c.castsource
+       JOIN pg_type t ON t.oid = c.casttarget
+      WHERE c.castmethod = 'b'
+        AND s.typname IN ('vector', 'halfvec')
+        AND t.typname IN ('vector', 'halfvec')
+        AND (s.typnamespace = 'pgv_alt'::regnamespace
+             OR t.typnamespace = 'pgv_alt'::regnamespace)) = 4);
+
+SELECT assert_test(
+    'custom-schema (pgv-first): 6 pgvector ops are mktann members',
+    (SELECT count(*) FROM pg_amop ao
+       JOIN pg_opfamily f ON f.oid = ao.amopfamily
+       JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'mktann'
+       JOIN pg_operator op ON op.oid = ao.amopopr
+      WHERE ao.amoppurpose = 'o'
+        AND op.oprnamespace = 'pgv_alt'::regnamespace) = 6);
+
+SELECT assert_test('custom-schema: pgvector->mkt cast round-trips',
+    '[1,2,3]'::pgv_alt.vector::mkt.vector::text = '[1,2,3]');
+SELECT assert_test('custom-schema: mkt->pgvector cast round-trips',
+    '[1,2,3]'::mkt.vector::pgv_alt.vector::text = '[1,2,3]');
+
+-- A real index scan over a pgv_alt.vector column via pgvector's operator: the
+-- operator only reaches the index because discovery added it to the family.
+CREATE OR REPLACE FUNCTION public.plan_uses_index_scan(q text) RETURNS bool
+    LANGUAGE plpgsql AS $fn$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || q LOOP
+        IF line LIKE '%Index Scan%' THEN RETURN true; END IF;
+    END LOOP;
+    RETURN false;
+END $fn$;
+
+CREATE TABLE idx_alt (id int, v pgv_alt.vector(8));
+INSERT INTO idx_alt
+    SELECT g, ('[' || (SELECT string_agg(
+                          round(sin(g * 0.7 + j * 1.3)::numeric, 4)::text, ',')
+                       FROM generate_series(1, 8) j) || ']')::pgv_alt.vector(8)
+    FROM generate_series(1, 2000) g;
+ANALYZE idx_alt;
+CREATE INDEX idx_alt_i ON idx_alt USING mktann (v mkt.vector_l2_ops);
+SET enable_seqscan = off;
+SET mkt.rerank_pool = -1;
+SELECT assert_test(
+    'custom-schema: mktann index used via pgvector operator on pgv_alt column',
+    public.plan_uses_index_scan($q$SELECT id FROM idx_alt
+        ORDER BY v OPERATOR(pgv_alt.<->) '[0,0,0,0,0,0,0,0]'::pgv_alt.vector(8)
+        LIMIT 10$q$));
+RESET enable_seqscan;
+RESET mkt.rerank_pool;
+DROP TABLE idx_alt;
+DROP FUNCTION public.plan_uses_index_scan(text);
+
+-- Ordering B: meerkat first, pgvector (in pgv_alt) second (event trigger).
+DROP EXTENSION meerkat CASCADE;
+DROP EXTENSION vector CASCADE;
+CREATE EXTENSION meerkat;
+CREATE EXTENSION vector SCHEMA pgv_alt;   -- fires mkt_pgvector_cast_trigger
+
+SELECT assert_test('custom-schema (mkt-first): event trigger created 4 casts',
+    (SELECT count(*) FROM pg_cast c
+       JOIN pg_type s ON s.oid = c.castsource
+       JOIN pg_type t ON t.oid = c.casttarget
+      WHERE c.castmethod = 'b'
+        AND s.typname IN ('vector', 'halfvec')
+        AND t.typname IN ('vector', 'halfvec')
+        AND (s.typnamespace = 'pgv_alt'::regnamespace
+             OR t.typnamespace = 'pgv_alt'::regnamespace)) = 4);
+
+-- Mirror the pgv-first checks: the event-trigger path must also add the six
+-- operators to the mktann families and yield a real index scan, or a
+-- regression there could pass on casts alone while queries silently seq-scan.
+SELECT assert_test(
+    'custom-schema (mkt-first): 6 pgvector ops are mktann members',
+    (SELECT count(*) FROM pg_amop ao
+       JOIN pg_opfamily f ON f.oid = ao.amopfamily
+       JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'mktann'
+       JOIN pg_operator op ON op.oid = ao.amopopr
+      WHERE ao.amoppurpose = 'o'
+        AND op.oprnamespace = 'pgv_alt'::regnamespace) = 6);
+
+CREATE OR REPLACE FUNCTION public.plan_uses_index_scan(q text) RETURNS bool
+    LANGUAGE plpgsql AS $fn$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || q LOOP
+        IF line LIKE '%Index Scan%' THEN RETURN true; END IF;
+    END LOOP;
+    RETURN false;
+END $fn$;
+
+CREATE TABLE idx_altb (id int, v pgv_alt.vector(8));
+INSERT INTO idx_altb
+    SELECT g, ('[' || (SELECT string_agg(
+                          round(sin(g * 0.7 + j * 1.3)::numeric, 4)::text, ',')
+                       FROM generate_series(1, 8) j) || ']')::pgv_alt.vector(8)
+    FROM generate_series(1, 2000) g;
+ANALYZE idx_altb;
+CREATE INDEX idx_altb_i ON idx_altb USING mktann (v mkt.vector_l2_ops);
+SET enable_seqscan = off;
+SET mkt.rerank_pool = -1;
+SELECT assert_test(
+    'custom-schema (mkt-first): mktann index used via pgvector operator',
+    public.plan_uses_index_scan($q$SELECT id FROM idx_altb
+        ORDER BY v OPERATOR(pgv_alt.<->) '[0,0,0,0,0,0,0,0]'::pgv_alt.vector(8)
+        LIMIT 10$q$));
+RESET enable_seqscan;
+RESET mkt.rerank_pool;
+DROP TABLE idx_altb;
+DROP FUNCTION public.plan_uses_index_scan(text);
+
+-- Restore the default public install for the summary / any later re-run.
+-- pgv_alt is empty once pgvector is gone, so a plain DROP (no CASCADE) suffices
+-- and would fail loudly if anything unexpected were left behind.
+DROP EXTENSION meerkat CASCADE;
+DROP EXTENSION vector CASCADE;
+DROP SCHEMA pgv_alt;
+CREATE EXTENSION vector;
+CREATE EXTENSION meerkat;
 
 -- =====================================================================
 -- Summary
