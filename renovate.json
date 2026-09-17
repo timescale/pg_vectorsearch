@@ -1,0 +1,38 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    "schedule:weekly"
+  ],
+  "timezone": "Etc/UTC",
+  "enabledManagers": ["github-actions", "pre-commit"],
+  "pre-commit": {
+    "enabled": true
+  },
+  "dependencyDashboard": true,
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 2,
+  "packageRules": [
+    {
+      "description": "Group non-major Action updates. The main ruleset requires an approving review, so this arms GitHub's auto-merge rather than merging unattended: the PR lands by itself once someone approves it and the checks pass. Renovate keeps the digest pinned and rewrites the # vX comment.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["digest", "pin", "patch", "minor"],
+      "groupName": "github-actions",
+      "commitMessageTopic": "GitHub Actions",
+      "automerge": true
+    },
+    {
+      "description": "Action major bumps (e.g. checkout v4 -> v5) get their own reviewable PR, never auto-merged.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    },
+    {
+      "description": "pre-commit hook bumps are always reviewed -- a clang-format or squawk version can reformat/flag the whole tree.",
+      "matchManagers": ["pre-commit"],
+      "automerge": false
+    }
+  ]
+}
