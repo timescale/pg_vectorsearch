@@ -1186,12 +1186,33 @@ CREATE FUNCTION on_extension_create()
     AS $$
 DECLARE
     obj record;
+    is_super boolean;
 BEGIN
     FOR obj IN SELECT * FROM pg_catalog.pg_event_trigger_ddl_commands()
                WHERE object_type = 'extension'
     LOOP
         IF obj.object_identity = 'vector' THEN
-            PERFORM @extschema@.setup_pgvector_compat();
+            -- setup_pgvector_compat() does superuser-only DDL (CREATE CAST
+            -- WITHOUT FUNCTION, ALTER OPERATOR FAMILY). An event trigger runs
+            -- as the role that ran CREATE EXTENSION, so if a NON-superuser
+            -- installs pgvector -- possible where it is trusted, as some
+            -- managed platforms allow -- this PERFORM would fail and roll back
+            -- the whole pgvector install, making meerkat's presence break
+            -- pgvector. Skip and warn instead; a superuser finishes the wiring
+            -- later. (SECURITY DEFINER was rejected: it would run this
+            -- superuser-only DDL for anyone who can create an extension.)
+            SELECT r.rolsuper INTO is_super
+              FROM pg_catalog.pg_roles r
+             WHERE r.rolname OPERATOR(pg_catalog.=) current_user;
+            IF is_super THEN
+                PERFORM @extschema@.setup_pgvector_compat();
+            ELSE
+                RAISE WARNING 'meerkat did not set up pgvector compatibility: '
+                    'it requires superuser privileges'
+                    USING HINT = 'A superuser should run '
+                        '@extschema@.setup_pgvector_compat() so pgvector-typed '
+                        'columns can use meerkat indexes.';
+            END IF;
         END IF;
     END LOOP;
 END;
