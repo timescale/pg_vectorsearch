@@ -47,6 +47,50 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Plant attacker format() overloads across EVERY arity the install script
+-- calls format() with. The sinks currently use 2 args (ALTER EXTENSION DROP
+-- CAST), 4 (the cast loop) and 8 (the operator-family loop); planting a whole
+-- range (2..10) means a hijack is caught regardless of arity, so a future
+-- change to a format() call's arity cannot silently disarm these checks -- an
+-- earlier version planted only a 5-arg overload and quietly matched none of
+-- the real sinks. Each overload runs `body` (records the call, or escalates)
+-- and then delegates to pg_catalog.format, so if it is ever reached the DDL
+-- still runs correctly and the check reports a clean FAIL instead of aborting.
+CREATE OR REPLACE FUNCTION plant_format_overloads(tgt_schema text, body text)
+RETURNS void LANGUAGE plpgsql AS $pf$
+DECLARE
+    n int;
+    params text;
+    passthru text;
+BEGIN
+    FOR n IN 2..10 LOOP
+        params   := (SELECT string_agg('text', ', ')
+                       FROM generate_series(1, n));
+        passthru := (SELECT string_agg('$' || i, ', ')
+                       FROM generate_series(2, n) AS i);
+        EXECUTE pg_catalog.format(
+            'CREATE FUNCTION %I.format(%s) RETURNS text LANGUAGE plpgsql AS '
+            '$body$ BEGIN %s; RETURN pg_catalog.format($1, VARIADIC '
+            'ARRAY[%s]::text[]); END $body$',
+            tgt_schema, params, body, passthru);
+    END LOOP;
+END;
+$pf$;
+
+CREATE OR REPLACE FUNCTION drop_format_overloads(tgt_schema text)
+RETURNS void LANGUAGE plpgsql AS $pf$
+DECLARE
+    n int;
+    params text;
+BEGIN
+    FOR n IN 2..10 LOOP
+        params := (SELECT string_agg('text', ', ') FROM generate_series(1, n));
+        EXECUTE pg_catalog.format('DROP FUNCTION IF EXISTS %I.format(%s)',
+                                  tgt_schema, params);
+    END LOOP;
+END;
+$pf$;
+
 -- =====================================================================
 -- 0. Install-time: a format() planted in a pre-created extension schema
 --    is not invoked by CREATE EXTENSION itself
@@ -60,31 +104,16 @@ $$ LANGUAGE plpgsql;
 --
 -- This is the one place that must name the schema literally: the extension
 -- does not exist yet, so its schema cannot be looked up from the catalog.
--- The planted overloads cover both arities format() is called with -- the
--- cast loop (fmt + 3 args) and the operator-family loop (fmt + 4 args).
--- They delegate to pg_catalog.format so, if ever invoked, the install still
--- succeeds (correct DDL) but the call is recorded -- the check then catches
--- the hijack instead of the script dying with a confusing DDL error.
 DROP EXTENSION IF EXISTS meerkat CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
 DROP SCHEMA IF EXISTS install_probe CASCADE;
 DROP SCHEMA IF EXISTS mkt CASCADE;
 
 CREATE SCHEMA install_probe;
-CREATE TABLE install_probe.hit (arity int);
+CREATE TABLE install_probe.hit (seen bool);
 CREATE SCHEMA mkt;   -- literal: the attacker targets the known schema name
-CREATE FUNCTION mkt.format(text, text, text, text)
-RETURNS text LANGUAGE plpgsql AS $f$
-BEGIN
-    INSERT INTO install_probe.hit VALUES (4);
-    RETURN pg_catalog.format($1, $2, $3, $4);
-END; $f$;
-CREATE FUNCTION mkt.format(text, text, text, text, text)
-RETURNS text LANGUAGE plpgsql AS $f$
-BEGIN
-    INSERT INTO install_probe.hit VALUES (5);
-    RETURN pg_catalog.format($1, $2, $3, $4, $5);
-END; $f$;
+SELECT plant_format_overloads('mkt',
+    'INSERT INTO install_probe.hit VALUES (true)');
 
 -- pgvector first so the compat path runs inside CREATE EXTENSION meerkat.
 CREATE EXTENSION vector;
@@ -107,8 +136,7 @@ SELECT assert_test('CREATE EXTENSION still created the pgvector compat cast',
              WHERE castsource = 'public.vector'::regtype
                AND casttarget = (:'extschema' || '.vector')::regtype));
 
-DROP FUNCTION mkt.format(text, text, text, text);
-DROP FUNCTION mkt.format(text, text, text, text, text);
+SELECT drop_format_overloads('mkt');
 DROP SCHEMA install_probe CASCADE;
 
 -- Deterministic starting state for the remaining checks: drop and reinstall
@@ -124,17 +152,19 @@ CREATE EXTENSION vector;
 -- A pinned path is what makes every unqualified name in these bodies
 -- resolve in pg_catalog rather than an attacker-controlled schema.
 
+-- COALESCE so a missing pin (proconfig NULL) is a hard false, not NULL --
+-- otherwise the row escapes the final "WHERE NOT passed" exit check.
 SELECT assert_test('setup_pgvector_compat pins search_path',
-    (SELECT proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
+    COALESCE((SELECT proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
        FROM pg_proc
       WHERE proname = 'setup_pgvector_compat'
-        AND pronamespace = :'extschema'::regnamespace));
+        AND pronamespace = :'extschema'::regnamespace), false));
 
 SELECT assert_test('on_extension_create pins search_path',
-    (SELECT proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
+    COALESCE((SELECT proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
        FROM pg_proc
       WHERE proname = 'on_extension_create'
-        AND pronamespace = :'extschema'::regnamespace));
+        AND pronamespace = :'extschema'::regnamespace), false));
 
 -- The dynamic-SQL sink is schema-qualified as pg_catalog.format.
 SELECT assert_test('setup body calls pg_catalog.format, not bare format',
@@ -144,28 +174,40 @@ SELECT assert_test('setup body calls pg_catalog.format, not bare format',
 -- =====================================================================
 -- 2. A planted format() overload is NOT invoked
 -- =====================================================================
--- Put an attacker-shaped format(text,text,text,text,text) on the caller's
--- search_path, then run the compat setup. The pinned path + qualified call
--- must resolve to pg_catalog.format, so the planted body never fires.
+-- Put attacker-shaped format() overloads (every arity the compat setup calls)
+-- on the caller's search_path, then run the compat setup. The overloads RAISE
+-- rather than record a row: post-install the only format() setup reaches is in
+-- the operator loop, wrapped in "EXCEPTION WHEN duplicate_object" -- which
+-- would roll back a recorded INSERT. A raise of a different error propagates
+-- past that handler and out of setup, where the wrapper below catches it. The
+-- pinned path + qualified call must resolve to pg_catalog.format, so no
+-- planted body fires and setup completes without raising.
 
 CREATE SCHEMA hijack_probe;
-CREATE TABLE hijack_probe.hit (seen bool);
-
-CREATE FUNCTION hijack_probe.format(text, text, text, text, text)
-RETURNS text LANGUAGE plpgsql AS $fmt$
-BEGIN
-    INSERT INTO hijack_probe.hit VALUES (true);   -- observable side effect
-    RETURN 'SELECT 1';
-END;
-$fmt$;
+SELECT plant_format_overloads('hijack_probe',
+    'RAISE EXCEPTION ''planted format() overload was invoked''');
 
 SET search_path = hijack_probe, public;
-SELECT :"extschema".setup_pgvector_compat();   -- idempotent; casts present
+DO $chk$
+DECLARE
+    invoked bool := false;
+    eschema text := (SELECT n.nspname FROM pg_catalog.pg_extension e
+                       JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+                      WHERE e.extname = 'meerkat');
+BEGIN
+    BEGIN
+        -- pg_catalog.format so the wrapper itself cannot be hijacked.
+        EXECUTE pg_catalog.format('SELECT %I.setup_pgvector_compat()', eschema);
+    EXCEPTION WHEN OTHERS THEN
+        invoked := true;   -- a planted overload raised -> it was called
+    END;
+    PERFORM assert_test('planted format() overload is NOT invoked',
+        NOT invoked);
+END;
+$chk$;
 RESET search_path;
 
-SELECT assert_test('planted format() overload is NOT invoked',
-    NOT EXISTS (SELECT 1 FROM hijack_probe.hit));
-
+SELECT drop_format_overloads('hijack_probe');
 DROP SCHEMA hijack_probe CASCADE;
 
 -- =====================================================================
@@ -173,46 +215,37 @@ DROP SCHEMA hijack_probe CASCADE;
 -- =====================================================================
 -- The extension schema is on the forced search_path while CREATE EXTENSION
 -- runs, so a bare format() there would resolve to a pre-planted
--- <extschema>.format (exact arity beats pg_catalog.format's VARIADIC
--- "any"). The helpers pin their search_path to pg_catalog and call
--- pg_catalog.format, so a format() sitting in the extension schema must
--- never run. The planted function raises, so the test fails loudly if it
--- is ever reached.
+-- <extschema>.format (exact arity beats pg_catalog.format's VARIADIC "any").
+-- The helpers pin their search_path to pg_catalog and call pg_catalog.format,
+-- so format() overloads sitting in the extension schema must never run.
 
-CREATE FUNCTION :"extschema".format(text, text, text, text, text)
-RETURNS text LANGUAGE plpgsql AS $fmt$
-BEGIN
-    RAISE EXCEPTION
-        'SECURITY: a format() planted in the extension schema was invoked '
-        '(search_path hijack)';
-END;
-$fmt$;
+-- RAISE (not record) for the same reason as check 2: the operator loop's
+-- duplicate_object handler would roll back a recorded row post-install.
+SELECT plant_format_overloads(:'extschema',
+    'RAISE EXCEPTION ''format() planted in the extension schema was invoked''');
 
 -- Put the extension schema first on the path, as the install-time forced
 -- search_path does, then run the compat setup.
 SET search_path = :"extschema", public;
 DO $chk$
 DECLARE
-    invoked boolean := false;
-    eschema text := (SELECT n.nspname FROM pg_extension e
-                       JOIN pg_namespace n ON n.oid = e.extnamespace
+    invoked bool := false;
+    eschema text := (SELECT n.nspname FROM pg_catalog.pg_extension e
+                       JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
                       WHERE e.extname = 'meerkat');
 BEGIN
     BEGIN
-        -- pg_catalog.format so the harness itself cannot be hijacked.
-        EXECUTE pg_catalog.format('SELECT %I.setup_pgvector_compat()',
-                                  eschema);
+        EXECUTE pg_catalog.format('SELECT %I.setup_pgvector_compat()', eschema);
     EXCEPTION WHEN OTHERS THEN
-        invoked := true;   -- the planted format() raised -> it was called
+        invoked := true;
     END;
     PERFORM assert_test(
-        'format() planted in the extension schema is NOT invoked',
-        NOT invoked);
+        'format() planted in the extension schema is NOT invoked', NOT invoked);
 END;
 $chk$;
 RESET search_path;
 
-DROP FUNCTION :"extschema".format(text, text, text, text, text);
+SELECT drop_format_overloads(:'extschema');
 
 -- =====================================================================
 -- 3. A tampered (WITH FUNCTION) cast is rejected, not silently adopted
@@ -284,16 +317,9 @@ CREATE ROLE mkt_attacker NOSUPERUSER LOGIN;
 GRANT CREATE ON SCHEMA public TO mkt_attacker;
 
 SET ROLE mkt_attacker;
-CREATE FUNCTION public.format(text, text, text, text, text)
-RETURNS text LANGUAGE plpgsql AS $atk$
-BEGIN
-    IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = 'mkt_attacker')
-    THEN
-        EXECUTE 'ALTER ROLE mkt_attacker SUPERUSER';
-    END IF;
-    RETURN 'SELECT 1';
-END;
-$atk$;
+SELECT plant_format_overloads('public',
+    'IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = ''mkt_attacker'')'
+    ' THEN EXECUTE ''ALTER ROLE mkt_attacker SUPERUSER''; END IF');
 RESET ROLE;
 
 -- Superuser re-installs pgvector, firing the event trigger.
@@ -305,7 +331,7 @@ SELECT assert_test('non-superuser did NOT escalate via event trigger',
 
 -- Cleanup. DROP OWNED clears the schema grant (and anything else the role
 -- holds) so DROP ROLE does not fail on dependent privileges.
-DROP FUNCTION public.format(text, text, text, text, text);
+SELECT drop_format_overloads('public');
 DROP OWNED BY mkt_attacker;
 DROP ROLE mkt_attacker;
 
