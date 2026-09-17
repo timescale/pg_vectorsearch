@@ -146,6 +146,33 @@ SELECT assert_test('CREATE EXTENSION still created the pgvector compat cast',
 SELECT drop_format_overloads('mkt');
 DROP SCHEMA install_probe CASCADE;
 
+-- =====================================================================
+-- 0b. Install is refused when the extension schema is pre-owned by an
+--     untrusted role
+-- =====================================================================
+-- A role with CREATE on the database can pre-create mkt and keep owning it
+-- after install, then add objects that shadow pgvector's operators for any
+-- role with mkt ahead of public (meerkat's documented usage). The schema
+-- ownership guard at the top of the install script must refuse that install.
+DROP EXTENSION IF EXISTS meerkat CASCADE;
+DROP EXTENSION IF EXISTS vector CASCADE;
+DROP SCHEMA IF EXISTS mkt CASCADE;
+DROP ROLE IF EXISTS mkt_squatter;
+CREATE ROLE mkt_squatter NOSUPERUSER;
+CREATE SCHEMA mkt AUTHORIZATION mkt_squatter;   -- untrusted role owns mkt
+
+\set ON_ERROR_STOP off
+CREATE EXTENSION meerkat;   -- must be refused by the ownership guard
+\set ON_ERROR_STOP on
+
+SELECT assert_test(
+    'install refused when the extension schema is pre-owned by an untrusted role',
+    NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'meerkat'));
+
+DROP SCHEMA mkt CASCADE;
+DROP OWNED BY mkt_squatter;
+DROP ROLE mkt_squatter;
+
 -- Deterministic starting state for the remaining checks: drop and reinstall
 -- cleanly (meerkat first so its event trigger is active, then pgvector).
 DROP EXTENSION IF EXISTS meerkat CASCADE;

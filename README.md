@@ -191,6 +191,16 @@ ever adjust `mkt.nprobe`.
 See the [tuning guide][tuning-doc] for every index parameter and GUC,
 their tradeoffs, and when changing them makes sense.
 
+> **Security note on `search_path`.** Putting `mkt` ahead of `public`
+> (above) means you trust that schema, so it must be owned by a trusted
+> role. Don't let untrusted application roles hold `CREATE` on the database
+> or pre-create the `mkt` schema: an owner of `mkt` can add objects to it
+> that shadow same-signature objects in later-path schemas (e.g. pgvector's
+> operators) for anyone with `mkt` on their path. `CREATE EXTENSION meerkat`
+> refuses to install into a pre-existing `mkt` owned by a role other than
+> the installer or a superuser, but the schema's ownership is otherwise the
+> database administrator's responsibility.
+
 ## Index maintenance
 
 An insert appends to whichever posting list its vector routes to, so lists

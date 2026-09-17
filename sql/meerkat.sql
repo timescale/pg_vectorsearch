@@ -17,6 +17,49 @@
 \echo Use "CREATE EXTENSION meerkat" to load this file.\quit
 
 -- =====================================================================
+-- schema ownership guard
+-- =====================================================================
+-- Refuse to install into a pre-existing extension schema owned by an
+-- untrusted role. meerkat is non-relocatable (schema = 'mkt') and its docs
+-- have users put that schema on their search_path
+-- (SET search_path = mkt, public) so meerkat's types and operators resolve
+-- unqualified -- which makes mkt a schema users trust on their path. But
+-- PostgreSQL does not check target-schema ownership at CREATE EXTENSION, so
+-- a role with CREATE on the database can pre-create mkt and keep owning it
+-- after install. The owner cannot touch meerkat's own objects (extension
+-- membership protects them), but can add NEW objects to mkt -- e.g. an
+-- operator on pgvector's type that shadows pgvector's own for anyone with
+-- mkt ahead of public, running the attacker's code as that role. See the
+-- security note above setup_pgvector_compat() for the alternatives weighed.
+--
+-- Allow only a schema the installer (current_user) or a superuser owns; a
+-- fresh install, where CREATE EXTENSION creates the schema, is unaffected.
+-- This assumes the fixed dedicated schema: if meerkat is ever made
+-- relocatable (installable into public, owned by pg_database_owner), this
+-- check must be revisited, or it would refuse a legitimate install there.
+DO $$
+DECLARE
+    owner_name  name;
+    owner_super boolean;
+BEGIN
+    SELECT r.rolname, r.rolsuper INTO owner_name, owner_super
+      FROM pg_catalog.pg_namespace n
+      JOIN pg_catalog.pg_roles r
+        ON r.oid OPERATOR(pg_catalog.=) n.nspowner
+     WHERE n.nspname OPERATOR(pg_catalog.=) '@extschema@';
+    IF FOUND AND NOT (owner_super
+                      OR owner_name OPERATOR(pg_catalog.=) current_user) THEN
+        RAISE EXCEPTION
+            'schema "@extschema@" already exists and is owned by "%", a role '
+            'other than the installer or a superuser', owner_name
+            USING HINT = 'meerkat refuses to install into a schema an '
+                'untrusted role controls; drop or re-own the schema, or '
+                'install as the role that owns it.';
+    END IF;
+END;
+$$;
+
+-- =====================================================================
 -- build identity
 -- =====================================================================
 
@@ -938,6 +981,44 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 --   pgvector first, meerkat later: DO block below sets up compat
 --   meerkat first, pgvector later: event trigger sets up compat
 
+-- Security note. This code runs at CREATE EXTENSION time (the install DO
+-- block) and later from an event trigger on any CREATE EXTENSION, in both
+-- cases as the invoking role. Three attack vectors were considered:
+--
+-- 1. search_path hijack of a builtin. An unqualified format() (or any
+--    builtin) here could resolve to an attacker-planted overload on the
+--    caller's path -- an exact-arity overload beats pg_catalog's VARIADIC one
+--    from ANY path position, so pg_catalog being implicitly first does not
+--    help. Closed by pinning SET search_path = pg_catalog, pg_temp on this
+--    function and calling every builtin as pg_catalog.<fn>.
+--
+-- 2. Cast tampering. pgvector's type owner could pre-create a WITH FUNCTION
+--    cast between the two extensions' types, whose function then runs as the
+--    querying role. Closed by the loop below: it creates a cast only when
+--    absent and RAISEs on any pre-existing cast that is not the expected
+--    binary (WITHOUT FUNCTION) cast, instead of adopting it.
+--
+-- 3. Operator shadowing via the extension schema. If an untrusted role owns
+--    mkt, it can add an operator on pgvector's type -- e.g.
+--    mkt.<->(public.vector, public.vector) -- that shadows pgvector's own for
+--    any role with mkt ahead of public, running attacker code as that role.
+--    meerkat's OWN operators (on mkt.vector) are not shadowable: a
+--    same-signature plant conflicts at install and installed objects are
+--    membership-locked. Two fixes were weighed:
+--      (a) Occupy the signatures -- have meerkat pre-create safe, delegating
+--          versions of pgvector's operators AND functions in mkt so the
+--          attacker cannot. Rejected: the surface is pgvector's whole public
+--          API across all its types and it grows with pgvector versions, so a
+--          newly added pgvector operator silently reopens the hole until
+--          meerkat catches up -- a maintenance treadmill tied to another
+--          project's API, and it still leaves non-pgvector shadows open.
+--      (b) Ensure mkt is trusted-owned -- refuse to install into a mkt owned
+--          by an untrusted role (the schema ownership guard at the top of
+--          this script). Chosen: version-independent, comprehensive (nothing
+--          hostile can live in mkt at all), ~10 lines. Cost: it assumes the
+--          fixed dedicated schema and must be revisited if meerkat ever
+--          becomes relocatable.
+--
 -- Set up pgvector interoperability in one step: the binary casts between the
 -- two extensions' types, and the membership of pgvector's distance operators
 -- in meerkat's mktann operator families. These belong together -- the casts
