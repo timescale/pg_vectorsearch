@@ -17,13 +17,19 @@
 
 set -euo pipefail
 
-# PS017 (unqualified reference to the extension's OWN objects) is the
-# standard PostgreSQL idiom: meerkat references its own types and operators
-# unqualified on purpose, relying on the forced install search_path. It is
-# not an escalation vector and cannot be silenced without @extschema@, which
-# a possibly-relocatable extension must avoid. pgvector trips ~50 of the same
-# and cannot remove them either. Everything else pgspot reports stays
-# blocking -- Errors, PS005, PS016, and anything new.
+# PS017 flags an unqualified reference to an object the script itself defines
+# -- an extension's own types, operators, and functions written without a
+# schema prefix. That is deliberate, idiomatic PostgreSQL: an extension is
+# meant to reference its own objects unqualified so the same install script
+# works whatever schema it lands in, which is precisely what makes a
+# relocatable extension possible. PostgreSQL supports this on purpose --
+# during CREATE EXTENSION it puts the target schema on the search_path, so
+# these names resolve to the objects being created in the same run. They are
+# not an escalation vector, and the only way to silence them is to hard-code
+# @extschema@ on every reference, which forecloses relocation. So this class
+# is ignored; everything else pgspot reports stays blocking -- Errors, and the
+# genuinely risky warnings PS005 (function with no pinned search_path) and
+# PS016 (unqualified builtin in dynamic SQL), plus anything new.
 IGNORE_CODES=(PS017)
 
 if ! command -v pgspot >/dev/null 2>&1; then
