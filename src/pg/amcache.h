@@ -39,6 +39,7 @@
 #include <utils/rel.h>
 #include <utils/resowner.h>
 
+#include "index/centroid_page.h"
 #include "index/index_base.h"
 
 /*
@@ -105,7 +106,15 @@ void mktann_cache_meta(
  */
 typedef struct MktannScanInfo
 {
-	uint32_t nlist; /* number of leaf centroids */
+	uint32_t		  nlist; /* number of leaf centroids */
+	Dimension		  dim;
+	uint8_t			  nlevels;		   /* centroid tree depth */
+	uint8_t			  fan_out;		   /* children per tree node */
+	BlockNumber		  first_centroid;  /* root centroid page */
+	BlockNumber		  first_posting;   /* first posting-head block */
+	uint32_t		  ncentroid_pages; /* centroid pages, maintained */
+	MktCentroidFormat centroid_format;
+	bool			  has_fastscan; /* built with FASTSCAN posting pages */
 } MktannScanInfo;
 
 MktannScanInfo mktann_cache_scan_info(Relation index);

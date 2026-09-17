@@ -714,7 +714,7 @@ do_parallel_build(
 	const size_t vec_nbytes	 = (size_t)dim * sizeof(float);
 	float		*global_mean = mkt_alloc(vec_nbytes);
 
-	BlockNumber first_centroid = 1; /* block 0 = metadata */
+	BlockNumber first_centroid = MKT_FIRST_CENTROID_BLKNO;
 	BlockNumber first_posting  = 0;
 	BlockNumber root_blk	   = InvalidBlockNumber;
 	uint8_t		out_nlevels	   = (uint8_t)nlevels;

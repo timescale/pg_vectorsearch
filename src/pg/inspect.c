@@ -896,6 +896,7 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 	DistanceMetric metric	= (DistanceMetric)meta->metric;
 	uint8_t		   fan_out	= meta->fan_out;
 	bool		   fastscan = (meta->flags & MKT_META_FLAG_FASTSCAN) != 0;
+	uint32_t	   ncentroid_pages = meta->ncentroid_pages;
 	mkt_storage_release_page(st, 0);
 
 	const MktannOptions *opts = (const MktannOptions *)index->rd_options;
@@ -918,6 +919,11 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 			reloption_is_set(set, "fan_out") ? "option" : "auto");
 	settings_row(
 			rsinfo, "nlevels", psprintf("%u", (uint32_t)nlevels), "derived");
+	settings_row(
+			rsinfo,
+			"centroid_pages",
+			psprintf("%u", ncentroid_pages),
+			"maintained");
 	settings_row(
 			rsinfo,
 			"centroid_format",

@@ -11,6 +11,16 @@ INSERT INTO rerank_test (v)
     )::vector(32)
     FROM generate_series(1, 500) i;
 
+-- The query vector, hoisted into an immutable function so the planner folds
+-- it to a literal. Read with a subquery it becomes an InitPlan whose own
+-- sequential scan lands in every plan and cost below.
+SELECT v::text AS rqv FROM rerank_test WHERE id = 42 \gset
+SELECT format($f$
+    CREATE FUNCTION rqv() RETURNS vector(32)
+        LANGUAGE sql IMMUTABLE PARALLEL SAFE
+        AS $b$ SELECT %L::vector(32) $b$
+$f$, :'rqv') \gexec
+
 -- L2 distance
 CREATE INDEX idx_rerank_l2 ON rerank_test USING mktann (v)
     WITH (centroid_compression = true);
@@ -18,17 +28,23 @@ CREATE INDEX idx_rerank_l2 ON rerank_test USING mktann (v)
 -- Compute ground truth via sequential scan
 SET enable_indexscan = off;
 CREATE TEMP TABLE truth_l2 AS
-    SELECT id, v <-> (SELECT v FROM rerank_test WHERE id = 42) AS dist
+    SELECT id, v <-> rqv() AS dist
     FROM rerank_test
     ORDER BY dist LIMIT 10;
 RESET enable_indexscan;
 
 -- Compute index scan results (exercises rerank)
+-- Small tables, so a sequential scan is the plan the cost model correctly
+-- prefers and the scan below is forced through the index. The rows come
+-- back either way, so this pins the plan.
 SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM rerank_test
+    ORDER BY v <-> rqv() LIMIT 10;
 CREATE TEMP TABLE result_l2 AS
-    SELECT id, v <-> (SELECT v FROM rerank_test WHERE id = 42) AS dist
+    SELECT id, v <-> rqv() AS dist
     FROM rerank_test
-    ORDER BY v <-> (SELECT v FROM rerank_test WHERE id = 42) LIMIT 10;
+    ORDER BY v <-> rqv() LIMIT 10;
 RESET enable_seqscan;
 
 -- All ground truth top-10 must appear in index results
@@ -46,16 +62,16 @@ CREATE INDEX idx_rerank_cos ON rerank_test
 
 SET enable_indexscan = off;
 CREATE TEMP TABLE truth_cos AS
-    SELECT id, v <=> (SELECT v FROM rerank_test WHERE id = 42) AS dist
+    SELECT id, v <=> rqv() AS dist
     FROM rerank_test
     ORDER BY dist LIMIT 10;
 RESET enable_indexscan;
 
 SET enable_seqscan = off;
 CREATE TEMP TABLE result_cos AS
-    SELECT id, v <=> (SELECT v FROM rerank_test WHERE id = 42) AS dist
+    SELECT id, v <=> rqv() AS dist
     FROM rerank_test
-    ORDER BY v <=> (SELECT v FROM rerank_test WHERE id = 42) LIMIT 10;
+    ORDER BY v <=> rqv() LIMIT 10;
 RESET enable_seqscan;
 
 SELECT count(*) AS matching_ids
@@ -66,3 +82,5 @@ SELECT bool_and(abs(t.dist - r.dist) < 1e-5) AS distances_match
 
 -- Cleanup
 DROP TABLE rerank_test;
+
+DROP FUNCTION rqv();

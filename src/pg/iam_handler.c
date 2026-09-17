@@ -23,6 +23,7 @@
 #include "algo/vecops.h"
 #include "amcache.h"
 #include "build.h"
+#include "cost.h"
 #include "index/index_base.h"
 #include "index/posting_insert.h"
 #include "index/query_scan.h"
@@ -485,14 +486,15 @@ mktann_costestimate(
 		return;
 	}
 
-	GenericCosts costs = {0};
-	genericcostestimate(root, path, loop_count, &costs);
-
-	*startup_cost = costs.indexStartupCost;
-	*total_cost	  = costs.indexTotalCost;
-	*selectivity  = costs.indexSelectivity;
-	*correlation  = costs.indexCorrelation;
-	*index_pages  = costs.numIndexPages;
+	mktann_cost_estimate(
+			root,
+			path,
+			loop_count,
+			startup_cost,
+			total_cost,
+			selectivity,
+			correlation,
+			index_pages);
 }
 
 static bytea *

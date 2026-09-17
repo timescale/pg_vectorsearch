@@ -175,41 +175,8 @@ search_centroids(
 		rqs = &qs->beam_qs;
 	}
 
-	uint32_t beam_w = (uint32_t)(nprobe * idx->centroid_beam_scale);
-	if (beam_w < 1)
-		beam_w = 1;
-
-	/* Routing floor: at small nprobe the beam should cover every probed
-	 * list — a scaled-down beam there saves next to nothing and
-	 * mis-routes (see MKT_CENTROID_BEAM_FLOOR). */
-	{
-		uint32_t floor_w = nprobe < MKT_CENTROID_BEAM_FLOOR
-								 ? nprobe
-								 : MKT_CENTROID_BEAM_FLOOR;
-		if (beam_w < floor_w)
-			beam_w = floor_w;
-	}
-
-	/* Coverage floor: an intermediate keep of beam_w exposes at most
-	 * beam_w * fan_out leaves, so returning the top nprobe leaves needs
-	 * beam_w >= ceil(nprobe / fan_out) -- below that, whole subtrees are
-	 * unreachable at ANY nprobe, not just ranked lower. */
-	if (idx->fan_out > 0)
-	{
-		uint32_t floor_w = (nprobe + idx->fan_out - 1) / idx->fan_out;
-		if (beam_w < floor_w)
-			beam_w = floor_w;
-	}
-
-	/* Probe-everything floor: the fan_out floor above assumes each child
-	 * carries fan_out leaves, but an unbalanced tree can hold fewer — a
-	 * kept set of ceil(nprobe / fan_out) children then exposes fewer than
-	 * nprobe leaves and prunes whole subtrees that can never be reached at
-	 * ANY nprobe. When nprobe covers every leaf, keep whole levels (a
-	 * level's entry count never exceeds nlist, so beam_w = nprobe bounds
-	 * it) — probing everything must reach everything. */
-	if (idx->nlist > 0 && nprobe >= idx->nlist && beam_w < nprobe)
-		beam_w = nprobe;
+	uint32_t beam_w = mkt_query_beam_width(
+			nprobe, idx->nlist, idx->fan_out, idx->centroid_beam_scale);
 
 	MktCentroidSearchState search = {
 			.qstate		 = rqs,
@@ -251,6 +218,90 @@ void
 mkt_query_set_probe_expand(double expand)
 {
 	g_probe_expand = expand;
+}
+
+/*
+ * Centroid slots the beam keeps at each intermediate level.
+ *
+ * Starts at a fraction of nprobe and is then raised by three floors, each
+ * of which exists because dropping below it loses leaves outright rather
+ * than merely ranking them lower:
+ *
+ *   - Routing floor. Below MKT_CENTROID_BEAM_FLOOR a scaled-down beam saves
+ *     almost nothing and mis-routes, so the beam covers every probed list.
+ *
+ *   - Coverage floor. A kept set of beam_w parents exposes at most
+ *     beam_w * fan_out leaves, so returning nprobe of them needs
+ *     ceil(nprobe / fan_out) parents.
+ *
+ *   - Probe-everything floor. The coverage floor assumes every child
+ *     carries fan_out leaves; an unbalanced tree holds fewer, so once
+ *     nprobe covers every leaf the beam keeps whole levels.
+ *
+ * Called by mkt_query_execute and by the cost model, which prices a page
+ * read per kept slot per level.
+ */
+uint32_t
+mkt_query_beam_width(
+		uint32_t nprobe, uint32_t nlist, uint32_t fan_out, double beam_scale)
+{
+	uint32_t beam_w = (uint32_t)((double)nprobe * beam_scale);
+
+	if (beam_w < 1)
+		beam_w = 1;
+
+	uint32_t floor_w = nprobe < MKT_CENTROID_BEAM_FLOOR
+							 ? nprobe
+							 : MKT_CENTROID_BEAM_FLOOR;
+
+	if (beam_w < floor_w)
+		beam_w = floor_w;
+
+	if (fan_out > 0)
+	{
+		floor_w = (nprobe + fan_out - 1) / fan_out;
+		if (beam_w < floor_w)
+			beam_w = floor_w;
+	}
+
+	if (nlist > 0 && nprobe >= nlist && beam_w < nprobe)
+		beam_w = nprobe;
+
+	return beam_w;
+}
+
+/*
+ * Leaf clusters the centroid beam routes to when the scan will read nprobe
+ * of them, capped at cap (the most the caller can route to: the scan's beam
+ * capacity, or the number of posting lists).
+ *
+ * Exact centroid formats need no expansion -- their probe order is already
+ * correct -- so those route exactly nprobe. Compressed formats route more
+ * and let phase A re-rank the wider set on exact distances, keeping the
+ * best nprobe of them.
+ *
+ * Called by mkt_query_execute and by the cost model, which prices one head
+ * page read per routed cluster.
+ */
+uint32_t
+mkt_query_routed_clusters(
+		uint32_t nprobe, uint32_t cap, MktCentroidFormat centroid_format)
+{
+	if (g_probe_expand <= 1.0 || centroid_format == MKT_CENTROID_FMT_FLOAT ||
+		centroid_format == MKT_CENTROID_FMT_HALF)
+		return nprobe;
+
+	double	 expanded = (double)nprobe * g_probe_expand;
+	uint32_t n_route  = (uint32_t)(expanded + 0.5);
+
+	if (n_route > nprobe + MKT_PROBE_EXPAND_MAX_EXTRA)
+		n_route = nprobe + MKT_PROBE_EXPAND_MAX_EXTRA;
+	if (n_route > cap)
+		n_route = cap;
+	if (n_route < nprobe)
+		n_route = nprobe;
+
+	return n_route;
 }
 
 /* qsort comparator for probe_order indices by probe_dists (context via
@@ -470,6 +521,41 @@ mkt_query_set_rerank_pool(int32_t n)
 	g_rerank_pool = n;
 }
 
+/*
+ * Calculates the size of the rerank pool from k, the number of neighbours
+ * the query will return, and nprobe, the number of posting lists it will
+ * scan -- as far as that can be known without running the scan.
+ *
+ * A return of 0 means the pool is uncapped: it is the value
+ * mkt_topk_extract_sorted_capped reads as "keep every survivor", so 0 is
+ * the widest possible pool and not the narrowest. Callers that price the
+ * pool have to special-case it.
+ *
+ * Shared with the cost model, which has to price the fetches the scan will
+ * actually make. The scan adds one term this cannot: a floor at an eighth of
+ * the candidate buffer, which measures estimate noise and so does not exist
+ * until the clusters have been scanned.
+ */
+uint32_t
+mkt_query_rerank_pool_estimate(uint32_t k, uint32_t nprobe)
+{
+	if (g_rerank_pool < 0)
+		return 0; /* uncapped: every survivor is reranked */
+
+	if (g_rerank_pool > 0)
+	{
+		uint32_t pool = (uint32_t)g_rerank_pool;
+
+		return pool < k ? k : pool;
+	}
+
+	double auto_floor = MKT_RERANK_POOL_AUTO_COEFF * (double)k *
+						pow((double)nprobe, MKT_RERANK_POOL_AUTO_EXP);
+	uint32_t pool = (uint32_t)(auto_floor + 0.5);
+
+	return pool < k ? k : pool;
+}
+
 uint32_t
 mkt_query_execute(
 		MktQueryState  *qs,
@@ -496,20 +582,8 @@ mkt_query_execute(
 	 * the classic single-phase behavior. Skipped entirely when the
 	 * centroid pages are exact (float/half): the beam distances are
 	 * already exact, so there is no ordering noise to correct. */
-	uint32_t n_route = nprobe;
-	if (g_probe_expand > 1.0 &&
-		qs->index->centroid_format != MKT_CENTROID_FMT_FLOAT &&
-		qs->index->centroid_format != MKT_CENTROID_FMT_HALF)
-	{
-		double expanded = (double)nprobe * g_probe_expand;
-		n_route			= (uint32_t)(expanded + 0.5);
-		if (n_route > nprobe + MKT_PROBE_EXPAND_MAX_EXTRA)
-			n_route = nprobe + MKT_PROBE_EXPAND_MAX_EXTRA;
-		if (n_route > qs->max_nprobe)
-			n_route = qs->max_nprobe;
-		if (n_route < nprobe)
-			n_route = nprobe;
-	}
+	uint32_t n_route = mkt_query_routed_clusters(
+			nprobe, qs->max_nprobe, qs->index->centroid_format);
 
 	uint64_t t0 = mkt_query_now_ns();
 
@@ -552,23 +626,17 @@ mkt_query_execute(
 	 * meaningless, silently capping recall well below what the probed
 	 * clusters contain. 1/8th of the buffer restores the recall
 	 * ceiling at a rerank cost proportionate to the observed noise. */
-	uint32_t pool = 0;
-	if (g_rerank_pool > 0)
-	{
-		pool = (uint32_t)g_rerank_pool;
-		if (pool < k)
-			pool = k;
-	}
-	else if (g_rerank_pool == 0)
-	{
-		double auto_floor = MKT_RERANK_POOL_AUTO_COEFF * (double)k *
-							pow((double)nprobe, MKT_RERANK_POOL_AUTO_EXP);
-		pool = (uint32_t)(auto_floor + 0.5);
-		if (pool < qs->topk.cand_count / 8)
-			pool = qs->topk.cand_count / 8;
-		if (pool < k)
-			pool = k;
-	}
+	uint32_t pool = mkt_query_rerank_pool_estimate(k, nprobe);
+
+	/*
+	 * The noise term needs the candidate population, which exists only now
+	 * that the clusters have been scanned -- so it cannot be part of the
+	 * shared estimate the planner uses.
+	 */
+	if (g_rerank_pool == 0 && pool < qs->topk.cand_count / 8)
+		pool = qs->topk.cand_count / 8;
+	if (pool > 0 && pool < k)
+		pool = k;
 
 	uint32_t ncands = extract_candidates(qs, pool);
 

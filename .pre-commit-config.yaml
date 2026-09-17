@@ -57,8 +57,12 @@ repos:
         # cannot represent — and an unparseable file gets no rule
         # coverage anyway; pg_regress executes every statement, which
         # subsumes the syntax check. test_helpers.sql (included by
-        # mktann.sql) is excluded for the same reason.
-        exclude: ^(sql/|test/pg/compat/|test/pg/sql/(mktann|test_helpers)\.sql$)
+        # mktann.sql) is excluded for the same reason, and so are cost.sql
+        # and rerank.sql: both build an immutable function around a query
+        # vector with \gset and \gexec, which is what keeps an InitPlan
+        # out of the plans they compare.
+        exclude: >-
+          ^(sql/|test/pg/(compat/|sql/(mktann|test_helpers|cost|rerank)\.sql$))
 
   # Markdown linting
   - repo: https://github.com/DavidAnson/markdownlint-cli2

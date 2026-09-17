@@ -188,8 +188,14 @@ SELECT bool_and(format = 'aos') AS others_aos
 SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 0) IS NOT NULL
     AS idempotent;
 
--- Query still works after partial conversion (mixed AoS + fastscan)
+-- Query still works after partial conversion (mixed AoS + fastscan).
+--
+-- A small table, so a sequential scan is the plan the cost model correctly
+-- prefers and the scans here are forced through the index. The rows come
+-- back either way, so the plan is pinned once here.
 SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5;
 SELECT count(*) FROM (
     SELECT id, v <-> '[0.5,0.5,0.5]' AS dist
     FROM embeddings ORDER BY v <-> '[0.5,0.5,0.5]' LIMIT 5

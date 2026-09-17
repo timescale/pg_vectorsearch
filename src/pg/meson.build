@@ -18,6 +18,7 @@ extension_sources = files(
   'amcache.c',
   'explain.c',
   'scan.c',
+  'cost.c',
   'scan_bound.c',
   'bufstorage.c',
 )

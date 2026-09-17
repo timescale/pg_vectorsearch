@@ -7,11 +7,18 @@
 -- table, a non-empty heap whose rows are all dead, and an all-NULL
 -- column.
 
+-- Small tables, so a sequential scan is the plan the cost model correctly
+-- prefers and the scans below are forced through the index. The rows come
+-- back either way, so the plan is pinned once here: a silent fallback to a
+-- sequential scan then fails rather than passes.
 SET enable_seqscan = off;
 
 -- Truly empty table (cosine).
 CREATE TABLE empty_cos (id int, v vector(8));
 CREATE INDEX empty_cos_idx ON empty_cos USING mktann (v vector_cosine_ops);
+EXPLAIN (COSTS OFF)
+    SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[1,0,0,0,0,0,0,0]'
+    LIMIT 5;
 SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[1,0,0,0,0,0,0,0]' LIMIT 5;
 
 -- Inserts route into the degenerate index and are found.
@@ -106,6 +113,7 @@ ORDER BY v OPERATOR(mkt.<->) '[10.4,1,0,0,0,0,0,0]' LIMIT 3;
 DROP TABLE temp_t;
 
 RESET enable_seqscan;
+
 DROP TABLE empty_cos;
 DROP TABLE all_dead;
 DROP TABLE all_null;

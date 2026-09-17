@@ -1128,7 +1128,8 @@ mkt_posting_split(
 	 * vectors twice. This is one buffer-lock hold and one WAL record, cheaper
 	 * than the per-entry commits below, not a heavyweight lock.
 	 */
-	bool single_page = false;
+	uint32_t appended_centroid_pages = 0;
+	bool	 single_page			 = false;
 	if (found_page == tail_page)
 	{
 		Page cp = mkt_storage_read_page(base->centroid_storage, found_page);
@@ -1187,6 +1188,7 @@ mkt_posting_split(
 				mkt_storage_commit_page(base->centroid_storage, tail_page);
 
 				tail_page = np;
+				appended_centroid_pages++;
 			}
 		}
 
@@ -1215,7 +1217,9 @@ mkt_posting_split(
 		res.head[j]	 = new_head[j];
 		res.count[j] = counts[j];
 	}
-	res.new_nlist = base->nlist;
+	res.new_nlist		   = base->nlist;
+	res.new_centroid_pages = appended_centroid_pages;
+	base->ncentroid_pages += appended_centroid_pages;
 
 	write_phase_cleanup(&scratch, rd, k, pt_res, pt_c, centroids);
 
