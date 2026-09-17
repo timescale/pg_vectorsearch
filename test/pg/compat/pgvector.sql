@@ -8,7 +8,10 @@
 -- identical behavior.
 --
 -- Prerequisites:
---   pgvector and meerkat must be installed in PostgreSQL.
+--   pgvector and meerkat must be installed in PostgreSQL. This suite installs
+--   and drops both extensions (and a scratch schema) as it exercises the
+--   install/drop orderings, so run it against a throwaway/clean database, not
+--   one holding data you care about. The CI script uses a fresh instance.
 --
 -- Usage:
 --   psql -f test/pg/compat/pgvector.sql
@@ -711,7 +714,9 @@ RESET search_path;
 
 DROP EXTENSION IF EXISTS meerkat CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
-DROP SCHEMA IF EXISTS pgv_alt CASCADE;
+-- No pre-emptive DROP SCHEMA: pgv_alt is our name, but cascade-dropping whatever
+-- a user might have under it would be too aggressive. A clean DB is a documented
+-- prerequisite, so a bare CREATE fails loudly if the name is already taken.
 CREATE SCHEMA pgv_alt;
 
 -- Ordering A: pgvector (in pgv_alt) first, meerkat second (install DO block).
@@ -792,9 +797,11 @@ SELECT assert_test('custom-schema (mkt-first): event trigger created 4 casts',
              OR t.typnamespace = 'pgv_alt'::regnamespace)) = 4);
 
 -- Restore the default public install for the summary / any later re-run.
+-- pgv_alt is empty once pgvector is gone, so a plain DROP (no CASCADE) suffices
+-- and would fail loudly if anything unexpected were left behind.
 DROP EXTENSION meerkat CASCADE;
 DROP EXTENSION vector CASCADE;
-DROP SCHEMA pgv_alt CASCADE;
+DROP SCHEMA pgv_alt;
 CREATE EXTENSION vector;
 CREATE EXTENSION meerkat;
 
