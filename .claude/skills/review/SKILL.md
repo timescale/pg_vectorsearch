@@ -132,7 +132,12 @@ If the feature touches anything SQL-callable, privilege boundaries, or
 parses input that ultimately comes from a client, run a dedicated
 security-focused pass in addition to the general review above — a
 reviewer told to look for correctness bugs tends not to also be thinking
-about privilege escalation. Check specifically for:
+about privilege escalation. For the extension's install-time SQL (whatever
+`CREATE EXTENSION` runs), the pgvector compat path, casts, or the event
+trigger, invoke the `security-review` skill — it carries the search_path /
+privilege-escalation threat model and the negative-control procedure that
+confirms the security suite actually detects the vulnerabilities. Otherwise
+check specifically for:
 
 - SQL-callable functions with no privilege check that should have one —
   should this function require a specific role, or be reachable by any

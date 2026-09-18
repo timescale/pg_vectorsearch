@@ -19,6 +19,7 @@ bin/
 !.claude/skills/testing
 !.claude/skills/review
 !.claude/skills/build-feature
+!.claude/skills/security-review
 .idea
 .vscode
 .mcp.json
