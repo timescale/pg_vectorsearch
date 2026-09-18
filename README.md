@@ -8,22 +8,16 @@ search.
 ## Overview
 
 Meerkat is a PostgreSQL extension that provides high-performance vector
-similarity search using an IVF (Inverted File) index structure with quantized
-vectors.
+similarity search using an IVF (Inverted File) index structure with
+[RaBitQ][rabitq] quantized vectors.
 
-Meerkat is compatible with the vector types and operators from
-[pgvector][pgvector], but does not require it. Meerkat provides its own
-32-bit and 16-bit vector types, `vec32` and `vec16` (installed in the `mkt`
-schema by default). Their distinct names do not collide with pgvector's
-`vector` and `halfvec` types, so both extensions can coexist even when their
-objects are installed in the same schema.
-
-The corresponding types are binary-compatible: `vec32` with pgvector's
-`vector`, and `vec16` with pgvector's `halfvec`. Meerkat installs
-zero-copy binary casts between them when pgvector is present. An existing
-pgvector column can therefore be indexed as-is -- no rewrite or copy -- and
-queries already written against pgvector's operators can use a Meerkat index
-unchanged.
+Meerkat works with [pgvector][pgvector]'s `vector` and `halfvec` types and
+operators, but does not depend on them. It ships its own `vec32` and `vec16`
+types, binary compatible with their pgvector counterparts but named
+differently so that both extensions can coexist even with their objects in
+the same schema. Binary casts between the two mean an existing pgvector
+column can be indexed as-is, with no rewrite and no copy, and queries
+already written against pgvector's operators use a Meerkat index unchanged.
 
 ## Features
 
