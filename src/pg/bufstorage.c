@@ -375,12 +375,11 @@ pg_rerank(
 	AttrNumber vec_attnum = s->index->rd_index->indkey.values[0];
 
 	/*
-	 * Widening buffer for a halfvec heap column, allocated once per rerank
+	 * Widening buffer for a vec16 heap column, allocated once per rerank
 	 * call -- rerank runs once per query over the whole candidate set, so this
 	 * is not a per-tuple allocation.
 	 */
-	MktVectorAccess input =
-			mkt_vector_access(s->type_info, dim, CurrentMemoryContext);
+	Vec32Access input = vec32_access(s->type_info, dim, CurrentMemoryContext);
 
 	/* Sort by TID block order for sequential I/O */
 	uint32_t *order = palloc(count * sizeof(uint32_t));
@@ -412,9 +411,9 @@ pg_rerank(
 				Datum val = slot_getattr(slot, vec_attnum, &isnull);
 				if (!isnull)
 				{
-					VectorRef qref = {.data = query, .dim = dim};
-					VectorRef vref = mkt_vector_read(&input, val);
-					d			   = mkt_distance(qref, vref, s->metric);
+					Vec32Ref qref = {.data = query, .dim = dim};
+					Vec32Ref vref = vec32_read(&input, val);
+					d			  = mkt_distance(qref, vref, s->metric);
 				}
 				else
 				{
@@ -517,8 +516,7 @@ pg_rerank_readstream(
 	AttrNumber vec_attnum = s->index->rd_index->indkey.values[0];
 
 	/* See pg_rerank: one widening buffer per call, not per candidate. */
-	MktVectorAccess input =
-			mkt_vector_access(s->type_info, dim, CurrentMemoryContext);
+	Vec32Access input = vec32_access(s->type_info, dim, CurrentMemoryContext);
 
 	uint32_t *order = palloc(count * sizeof(uint32_t));
 	for (uint32_t i = 0; i < count; i++)
@@ -578,9 +576,9 @@ pg_rerank_readstream(
 			Datum val = slot_getattr(slot, vec_attnum, &isnull);
 			if (!isnull)
 			{
-				VectorRef qref = {.data = query, .dim = dim};
-				VectorRef vref = mkt_vector_read(&input, val);
-				d			   = mkt_distance(qref, vref, s->metric);
+				Vec32Ref qref = {.data = query, .dim = dim};
+				Vec32Ref vref = vec32_read(&input, val);
+				d			  = mkt_distance(qref, vref, s->metric);
 			}
 			ExecClearTuple(slot);
 		}

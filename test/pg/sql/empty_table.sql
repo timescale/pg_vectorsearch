@@ -14,8 +14,8 @@
 SET enable_seqscan = off;
 
 -- Truly empty table (cosine).
-CREATE TABLE empty_cos (id int, v vector(8));
-CREATE INDEX empty_cos_idx ON empty_cos USING mktann (v vector_cosine_ops);
+CREATE TABLE empty_cos (id int, v vec32(8));
+CREATE INDEX empty_cos_idx ON empty_cos USING mktann (v vec32_cosine_ops);
 EXPLAIN (COSTS OFF)
     SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[1,0,0,0,0,0,0,0]'
     LIMIT 5;
@@ -23,7 +23,7 @@ SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[1,0,0,0,0,0,0,0]' LIMIT 
 
 -- Inserts route into the degenerate index and are found.
 INSERT INTO empty_cos
-SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vector
+SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vec32
 FROM generate_series(1, 50) g;
 SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[10,1,0,0,0,0,0,0]' LIMIT 3;
 
@@ -33,20 +33,20 @@ REINDEX INDEX empty_cos_idx;
 SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[10,1,0,0,0,0,0,0]' LIMIT 3;
 
 -- Non-empty heap, zero live rows (l2).
-CREATE TABLE all_dead (id int, v vector(8));
+CREATE TABLE all_dead (id int, v vec32(8));
 INSERT INTO all_dead
-SELECT g, ('[' || g || ',0,0,0,0,0,0,0]')::vector
+SELECT g, ('[' || g || ',0,0,0,0,0,0,0]')::vec32
 FROM generate_series(1, 50) g;
 DELETE FROM all_dead;
-CREATE INDEX all_dead_idx ON all_dead USING mktann (v vector_l2_ops);
+CREATE INDEX all_dead_idx ON all_dead USING mktann (v vec32_l2_ops);
 SELECT id FROM all_dead ORDER BY v OPERATOR(mkt.<->) '[1,0,0,0,0,0,0,0]' LIMIT 5;
 INSERT INTO all_dead VALUES (1, '[2,0,0,0,0,0,0,0]');
 SELECT id FROM all_dead ORDER BY v OPERATOR(mkt.<->) '[1,0,0,0,0,0,0,0]' LIMIT 5;
 
 -- All rows NULL in the indexed column.
-CREATE TABLE all_null (id int, v vector(8));
+CREATE TABLE all_null (id int, v vec32(8));
 INSERT INTO all_null SELECT g, NULL FROM generate_series(1, 20) g;
-CREATE INDEX all_null_idx ON all_null USING mktann (v vector_cosine_ops);
+CREATE INDEX all_null_idx ON all_null USING mktann (v vec32_cosine_ops);
 SELECT id FROM all_null WHERE v IS NOT NULL
 ORDER BY v OPERATOR(mkt.<=>) '[1,0,0,0,0,0,0,0]' LIMIT 5;
 
@@ -57,10 +57,10 @@ VACUUM all_dead;
 -- An index grown from empty to many tuples keeps answering queries, and
 -- REINDEX re-optimizes it: the single degenerate cluster becomes a real
 -- k-means partitioning and the insert-appended AoS pages become fastscan.
-CREATE TABLE grow (id int, v vector(8));
-CREATE INDEX grow_idx ON grow USING mktann (v vector_l2_ops);
+CREATE TABLE grow (id int, v vec32(8));
+CREATE INDEX grow_idx ON grow USING mktann (v vec32_l2_ops);
 INSERT INTO grow
-SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vector
+SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vec32
 FROM generate_series(1, 2000) g;
 SELECT count(DISTINCT cluster_id) AS nclusters,
        sum(entry_count) AS entries,
@@ -78,10 +78,10 @@ SELECT id FROM grow
 ORDER BY v OPERATOR(mkt.<->) '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
 
 -- VACUUM FULL rebuilds the index and re-optimizes the same way.
-CREATE TABLE grow2 (id int, v vector(8));
-CREATE INDEX grow2_idx ON grow2 USING mktann (v vector_l2_ops);
+CREATE TABLE grow2 (id int, v vec32(8));
+CREATE INDEX grow2_idx ON grow2 USING mktann (v vec32_l2_ops);
 INSERT INTO grow2
-SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vector
+SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vec32
 FROM generate_series(1, 2000) g;
 VACUUM FULL grow2;
 SELECT count(DISTINCT cluster_id) BETWEEN 20 AND 100 AS reclustered,
@@ -94,20 +94,20 @@ ORDER BY v OPERATOR(mkt.<->) '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
 -- Unlogged tables are refused: meerkat has no valid empty-index image to
 -- seed the init fork with, so a crash would wipe the index. Fail at CREATE
 -- INDEX time rather than corrupt later; SET LOGGED is the escape hatch.
-CREATE UNLOGGED TABLE unlogged_t (id int, v vector(8));
-CREATE INDEX ON unlogged_t USING mktann (v vector_l2_ops);
+CREATE UNLOGGED TABLE unlogged_t (id int, v vec32(8));
+CREATE INDEX ON unlogged_t USING mktann (v vec32_l2_ops);
 ALTER TABLE unlogged_t SET LOGGED;
-CREATE INDEX ON unlogged_t USING mktann (v vector_l2_ops);
+CREATE INDEX ON unlogged_t USING mktann (v vec32_l2_ops);
 DROP TABLE unlogged_t;
 
 -- A temp table builds a normal, queryable index while skipping WAL: the
 -- bulk-build finalize guards its log_newpage on RelationNeedsWAL (false for
 -- temp relations), matching core index AMs. The index must still answer.
-CREATE TEMP TABLE temp_t (id int, v vector(8));
+CREATE TEMP TABLE temp_t (id int, v vec32(8));
 INSERT INTO temp_t
-SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vector
+SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vec32
 FROM generate_series(1, 50) g;
-CREATE INDEX ON temp_t USING mktann (v vector_l2_ops);
+CREATE INDEX ON temp_t USING mktann (v vec32_l2_ops);
 SELECT id FROM temp_t
 ORDER BY v OPERATOR(mkt.<->) '[10.4,1,0,0,0,0,0,0]' LIMIT 3;
 DROP TABLE temp_t;

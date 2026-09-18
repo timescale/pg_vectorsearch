@@ -128,14 +128,14 @@ TEST(l2_norm_zero_vector)
 TEST(vector_sum_basic)
 {
 	float v[] = {1.0f, 2.0f, 3.0f, 4.0f};
-	float sum = mkt_vector_sum(v, 4);
+	float sum = vec32_sum(v, 4);
 	ASSERT_FLOAT_EQ(10.0f, sum, 1e-5f, "sum of [1,2,3,4]");
 }
 
 TEST(vector_sum_negative)
 {
 	float v[] = {-1.0f, 2.0f, -3.0f, 4.0f};
-	float sum = mkt_vector_sum(v, 4);
+	float sum = vec32_sum(v, 4);
 	ASSERT_FLOAT_EQ(2.0f, sum, 1e-5f, "sum with negatives");
 }
 
@@ -149,7 +149,7 @@ TEST(vector_sub_basic)
 	float b[]	= {1.0f, 2.0f, 3.0f};
 	float out[] = {0.0f, 0.0f, 0.0f};
 
-	mkt_vector_sub(a, b, out, 3);
+	vec32_sub(a, b, out, 3);
 	ASSERT_FLOAT_EQ(4.0f, out[0], 1e-5f, "sub[0]");
 	ASSERT_FLOAT_EQ(8.0f, out[1], 1e-5f, "sub[1]");
 	ASSERT_FLOAT_EQ(12.0f, out[2], 1e-5f, "sub[2]");
@@ -161,7 +161,7 @@ TEST(vector_sub_in_place)
 	float b[] = {1.0f, 2.0f, 3.0f};
 
 	/* Output aliases input */
-	mkt_vector_sub(a, b, a, 3);
+	vec32_sub(a, b, a, 3);
 	ASSERT_FLOAT_EQ(4.0f, a[0], 1e-5f, "in-place sub[0]");
 	ASSERT_FLOAT_EQ(8.0f, a[1], 1e-5f, "in-place sub[1]");
 	ASSERT_FLOAT_EQ(12.0f, a[2], 1e-5f, "in-place sub[2]");
@@ -177,7 +177,7 @@ TEST(vector_add_basic)
 	float b[]	= {4.0f, 5.0f, 6.0f};
 	float out[] = {0.0f, 0.0f, 0.0f};
 
-	mkt_vector_add(a, b, out, 3);
+	vec32_add(a, b, out, 3);
 	ASSERT_FLOAT_EQ(5.0f, out[0], 1e-5f, "add[0]");
 	ASSERT_FLOAT_EQ(7.0f, out[1], 1e-5f, "add[1]");
 	ASSERT_FLOAT_EQ(9.0f, out[2], 1e-5f, "add[2]");
@@ -188,7 +188,7 @@ TEST(vector_add_in_place)
 	float a[] = {1.0f, 2.0f, 3.0f};
 	float b[] = {4.0f, 5.0f, 6.0f};
 
-	mkt_vector_add(a, b, a, 3);
+	vec32_add(a, b, a, 3);
 	ASSERT_FLOAT_EQ(5.0f, a[0], 1e-5f, "in-place add[0]");
 	ASSERT_FLOAT_EQ(7.0f, a[1], 1e-5f, "in-place add[1]");
 	ASSERT_FLOAT_EQ(9.0f, a[2], 1e-5f, "in-place add[2]");
@@ -200,7 +200,7 @@ TEST(vector_add_negative)
 	float b[]	= {-1.0f, 2.0f, -3.0f};
 	float out[] = {0.0f, 0.0f, 0.0f};
 
-	mkt_vector_add(a, b, out, 3);
+	vec32_add(a, b, out, 3);
 	ASSERT_FLOAT_EQ(0.0f, out[0], 1e-5f, "add negatives[0]");
 	ASSERT_FLOAT_EQ(0.0f, out[1], 1e-5f, "add negatives[1]");
 	ASSERT_FLOAT_EQ(0.0f, out[2], 1e-5f, "add negatives[2]");
@@ -215,7 +215,7 @@ TEST(vector_scale_basic)
 	float v[]	= {1.0f, 2.0f, 3.0f};
 	float out[] = {0.0f, 0.0f, 0.0f};
 
-	mkt_vector_scale(v, 2.0f, out, 3);
+	vec32_scale(v, 2.0f, out, 3);
 	ASSERT_FLOAT_EQ(2.0f, out[0], 1e-5f, "scale[0]");
 	ASSERT_FLOAT_EQ(4.0f, out[1], 1e-5f, "scale[1]");
 	ASSERT_FLOAT_EQ(6.0f, out[2], 1e-5f, "scale[2]");
@@ -226,7 +226,7 @@ TEST(vector_scale_zero)
 	float v[]	= {1.0f, 2.0f, 3.0f};
 	float out[] = {0.0f, 0.0f, 0.0f};
 
-	mkt_vector_scale(v, 0.0f, out, 3);
+	vec32_scale(v, 0.0f, out, 3);
 	ASSERT_FLOAT_EQ(0.0f, out[0], 1e-5f, "scale zero[0]");
 	ASSERT_FLOAT_EQ(0.0f, out[1], 1e-5f, "scale zero[1]");
 	ASSERT_FLOAT_EQ(0.0f, out[2], 1e-5f, "scale zero[2]");
@@ -237,7 +237,7 @@ TEST(vector_scale_negative)
 	float v[]	= {1.0f, 2.0f, 3.0f};
 	float out[] = {0.0f, 0.0f, 0.0f};
 
-	mkt_vector_scale(v, -1.0f, out, 3);
+	vec32_scale(v, -1.0f, out, 3);
 	ASSERT_FLOAT_EQ(-1.0f, out[0], 1e-5f, "scale neg[0]");
 	ASSERT_FLOAT_EQ(-2.0f, out[1], 1e-5f, "scale neg[1]");
 	ASSERT_FLOAT_EQ(-3.0f, out[2], 1e-5f, "scale neg[2]");
@@ -247,7 +247,7 @@ TEST(vector_scale_in_place)
 {
 	float v[] = {1.0f, 2.0f, 3.0f};
 
-	mkt_vector_scale(v, 3.0f, v, 3);
+	vec32_scale(v, 3.0f, v, 3);
 	ASSERT_FLOAT_EQ(3.0f, v[0], 1e-5f, "in-place scale[0]");
 	ASSERT_FLOAT_EQ(6.0f, v[1], 1e-5f, "in-place scale[1]");
 	ASSERT_FLOAT_EQ(9.0f, v[2], 1e-5f, "in-place scale[2]");
@@ -303,19 +303,19 @@ TEST(lazy_init_all_functions)
 	ASSERT_TRUE(nsq > 0, "l2_norm_squared lazy init");
 
 	mkt_vecops_force_reinit();
-	float sum = mkt_vector_sum(a, 2);
+	float sum = vec32_sum(a, 2);
 	ASSERT_FLOAT_EQ(3.0f, sum, 1e-5f, "vector_sum lazy init");
 
 	mkt_vecops_force_reinit();
-	mkt_vector_sub(a, b, out, 2);
+	vec32_sub(a, b, out, 2);
 	ASSERT_FLOAT_EQ(-2.0f, out[0], 1e-5f, "vector_sub lazy init");
 
 	mkt_vecops_force_reinit();
-	mkt_vector_add(a, b, out, 2);
+	vec32_add(a, b, out, 2);
 	ASSERT_FLOAT_EQ(4.0f, out[0], 1e-5f, "vector_add lazy init");
 
 	mkt_vecops_force_reinit();
-	mkt_vector_scale(a, 2.0f, out, 2);
+	vec32_scale(a, 2.0f, out, 2);
 	ASSERT_FLOAT_EQ(2.0f, out[0], 1e-5f, "vector_scale lazy init");
 
 	mkt_vecops_force_reinit();

@@ -1,5 +1,5 @@
 /*
- * mkt_pg_halfvec.c - PostgreSQL functions for mkt.halfvec type
+ * vec16_pg.c - PostgreSQL functions for mkt.vec16 type
  *
  * Type I/O, distance functions, comparison operators, casts.
  * Distance functions convert to float32 then delegate to SIMD core.
@@ -18,40 +18,40 @@
 #include "support_pg.h"
 
 /* Stack threshold for float32 conversion buffers (4 KB = 1024 floats) */
-#define MKT_HALFVEC_STACK_DIM 1024
+#define VEC16_STACK_DIM 1024
 
 /* ----------------------------------------------------------------
- * Helper: convert halfvec to VectorRef with float32 buffer.
+ * Helper: convert vec16 to Vec32Ref with float32 buffer.
  * Uses stack allocation for small dims, palloc for large.
  * ---------------------------------------------------------------- */
 
 #define HALFVEC_TO_FLOAT(hv, buf_name, ref_name)                          \
-	float  buf_name##_stack[MKT_HALFVEC_STACK_DIM];                       \
-	float *buf_name = ((hv)->dim <= MKT_HALFVEC_STACK_DIM)                \
+	float  buf_name##_stack[VEC16_STACK_DIM];                             \
+	float *buf_name = ((hv)->dim <= VEC16_STACK_DIM)                      \
 							? buf_name##_stack                            \
 							: (float *)palloc((hv)->dim * sizeof(float)); \
 	mkt_half_to_float_array((hv)->x, buf_name, (hv)->dim);                \
-	VectorRef ref_name = {.data = buf_name, .dim = (Dimension)(hv)->dim}
+	Vec32Ref ref_name = {.data = buf_name, .dim = (Dimension)(hv)->dim}
 
-#define HALFVEC_FREE_BUF(hv, buf_name)         \
-	do                                         \
-	{                                          \
-		if ((hv)->dim > MKT_HALFVEC_STACK_DIM) \
-			pfree(buf_name);                   \
+#define HALFVEC_FREE_BUF(hv, buf_name)   \
+	do                                   \
+	{                                    \
+		if ((hv)->dim > VEC16_STACK_DIM) \
+			pfree(buf_name);             \
 	} while (0)
 
 /* ----------------------------------------------------------------
  * Type I/O
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_in);
+PG_FUNCTION_INFO_V1(mkt_vec16_in);
 
 Datum
-mkt_halfvec_in(PG_FUNCTION_ARGS)
+mkt_vec16_in(PG_FUNCTION_ARGS)
 {
 	char *str	 = PG_GETARG_CSTRING(0);
 	int32 typmod = PG_GETARG_INT32(2);
-	float values[MKT_VECTOR_MAX_DIM];
+	float values[VEC32_MAX_DIM];
 	int	  dim = 0;
 	char *p	  = str;
 
@@ -60,7 +60,7 @@ mkt_halfvec_in(PG_FUNCTION_ARGS)
 	if (*p != '[')
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-				 errmsg("halfvec must start with \"[\"")));
+				 errmsg("vec16 must start with \"[\"")));
 	p++;
 
 	while (*p)
@@ -75,17 +75,17 @@ mkt_halfvec_in(PG_FUNCTION_ARGS)
 			if (*p != ',')
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-						 errmsg("expected \",\" or \"]\" in halfvec")));
+						 errmsg("expected \",\" or \"]\" in vec16")));
 			p++;
 			while (*p == ' ' || *p == '\t')
 				p++;
 		}
 
-		if (dim >= MKT_VECTOR_MAX_DIM)
+		if (dim >= VEC32_MAX_DIM)
 			ereport(ERROR,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-					 errmsg("halfvec cannot have more than %d dimensions",
-							MKT_VECTOR_MAX_DIM)));
+					 errmsg("vec16 cannot have more than %d dimensions",
+							VEC32_MAX_DIM)));
 
 		char *end;
 		errno	  = 0;
@@ -93,7 +93,7 @@ mkt_halfvec_in(PG_FUNCTION_ARGS)
 		if (end == p || errno == ERANGE)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-					 errmsg("invalid input syntax for type halfvec: \"%s\"",
+					 errmsg("invalid input syntax for type vec16: \"%s\"",
 							str)));
 
 		mkt_pg_check_value_finite(val);
@@ -104,7 +104,7 @@ mkt_halfvec_in(PG_FUNCTION_ARGS)
 	if (*p != ']')
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-				 errmsg("halfvec must end with \"]\"")));
+				 errmsg("vec16 must end with \"]\"")));
 	p++;
 
 	while (*p == ' ' || *p == '\t')
@@ -112,27 +112,27 @@ mkt_halfvec_in(PG_FUNCTION_ARGS)
 	if (*p != '\0')
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-				 errmsg("unexpected characters after \"]\" in halfvec")));
+				 errmsg("unexpected characters after \"]\" in vec16")));
 
 	if (dim < 1)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("halfvec must have at least 1 dimension")));
+				 errmsg("vec16 must have at least 1 dimension")));
 
 	mkt_pg_check_expected_dim(dim, typmod);
 
-	MktHalfVector *result = mkt_pg_halfvec_alloc(dim);
+	Vec16 *result = mkt_pg_vec16_alloc(dim);
 	mkt_float_to_half_array(values, result->x, dim);
 
-	PG_RETURN_MKT_HALFVEC_P(result);
+	PG_RETURN_VEC16_P(result);
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_out);
+PG_FUNCTION_INFO_V1(mkt_vec16_out);
 
 Datum
-mkt_halfvec_out(PG_FUNCTION_ARGS)
+mkt_vec16_out(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *v = PG_GETARG_MKT_HALFVEC_P(0);
+	Vec16		  *v = PG_GETARG_VEC16_P(0);
 	StringInfoData buf;
 
 	initStringInfo(&buf);
@@ -150,10 +150,10 @@ mkt_halfvec_out(PG_FUNCTION_ARGS)
 	PG_RETURN_CSTRING(buf.data);
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_typmod_in);
+PG_FUNCTION_INFO_V1(mkt_vec16_typmod_in);
 
 Datum
-mkt_halfvec_typmod_in(PG_FUNCTION_ARGS)
+mkt_vec16_typmod_in(PG_FUNCTION_ARGS)
 {
 	ArrayType *ta = PG_GETARG_ARRAYTYPE_P(0);
 	int		   n;
@@ -175,13 +175,13 @@ mkt_halfvec_typmod_in(PG_FUNCTION_ARGS)
  * Distance functions
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_l2_distance);
+PG_FUNCTION_INFO_V1(mkt_vec16_l2_distance);
 
 Datum
-mkt_halfvec_l2_distance(PG_FUNCTION_ARGS)
+mkt_vec16_l2_distance(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *a = PG_GETARG_MKT_HALFVEC_P(0);
-	MktHalfVector *b = PG_GETARG_MKT_HALFVEC_P(1);
+	Vec16 *a = PG_GETARG_VEC16_P(0);
+	Vec16 *b = PG_GETARG_VEC16_P(1);
 
 	mkt_pg_check_dims_match(a->dim, b->dim);
 
@@ -196,13 +196,13 @@ mkt_halfvec_l2_distance(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(res);
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_inner_product);
+PG_FUNCTION_INFO_V1(mkt_vec16_inner_product);
 
 Datum
-mkt_halfvec_inner_product(PG_FUNCTION_ARGS)
+mkt_vec16_inner_product(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *a = PG_GETARG_MKT_HALFVEC_P(0);
-	MktHalfVector *b = PG_GETARG_MKT_HALFVEC_P(1);
+	Vec16 *a = PG_GETARG_VEC16_P(0);
+	Vec16 *b = PG_GETARG_VEC16_P(1);
 
 	mkt_pg_check_dims_match(a->dim, b->dim);
 
@@ -217,13 +217,13 @@ mkt_halfvec_inner_product(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(res);
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_cosine_distance);
+PG_FUNCTION_INFO_V1(mkt_vec16_cosine_distance);
 
 Datum
-mkt_halfvec_cosine_distance(PG_FUNCTION_ARGS)
+mkt_vec16_cosine_distance(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *a = PG_GETARG_MKT_HALFVEC_P(0);
-	MktHalfVector *b = PG_GETARG_MKT_HALFVEC_P(1);
+	Vec16 *a = PG_GETARG_VEC16_P(0);
+	Vec16 *b = PG_GETARG_VEC16_P(1);
 
 	mkt_pg_check_dims_match(a->dim, b->dim);
 
@@ -240,13 +240,13 @@ mkt_halfvec_cosine_distance(PG_FUNCTION_ARGS)
 
 /* Private distance functions for operators */
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_l2_squared_distance);
+PG_FUNCTION_INFO_V1(mkt_vec16_l2_squared_distance);
 
 Datum
-mkt_halfvec_l2_squared_distance(PG_FUNCTION_ARGS)
+mkt_vec16_l2_squared_distance(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *a = PG_GETARG_MKT_HALFVEC_P(0);
-	MktHalfVector *b = PG_GETARG_MKT_HALFVEC_P(1);
+	Vec16 *a = PG_GETARG_VEC16_P(0);
+	Vec16 *b = PG_GETARG_VEC16_P(1);
 
 	mkt_pg_check_dims_match(a->dim, b->dim);
 
@@ -261,13 +261,13 @@ mkt_halfvec_l2_squared_distance(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(res);
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_negative_inner_product);
+PG_FUNCTION_INFO_V1(mkt_vec16_negative_inner_product);
 
 Datum
-mkt_halfvec_negative_inner_product(PG_FUNCTION_ARGS)
+mkt_vec16_negative_inner_product(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *a = PG_GETARG_MKT_HALFVEC_P(0);
-	MktHalfVector *b = PG_GETARG_MKT_HALFVEC_P(1);
+	Vec16 *a = PG_GETARG_VEC16_P(0);
+	Vec16 *b = PG_GETARG_VEC16_P(1);
 
 	mkt_pg_check_dims_match(a->dim, b->dim);
 
@@ -287,7 +287,7 @@ mkt_halfvec_negative_inner_product(PG_FUNCTION_ARGS)
  * ---------------------------------------------------------------- */
 
 static int
-mkt_halfvec_cmp_internal(MktHalfVector *a, MktHalfVector *b)
+vec16_cmp_internal(Vec16 *a, Vec16 *b)
 {
 	int min_dim = (a->dim < b->dim) ? a->dim : b->dim;
 
@@ -309,96 +309,96 @@ mkt_halfvec_cmp_internal(MktHalfVector *a, MktHalfVector *b)
 	return 0;
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_cmp);
+PG_FUNCTION_INFO_V1(mkt_vec16_cmp);
 
 Datum
-mkt_halfvec_cmp(PG_FUNCTION_ARGS)
+mkt_vec16_cmp(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *a = PG_GETARG_MKT_HALFVEC_P(0);
-	MktHalfVector *b = PG_GETARG_MKT_HALFVEC_P(1);
-	PG_RETURN_INT32(mkt_halfvec_cmp_internal(a, b));
+	Vec16 *a = PG_GETARG_VEC16_P(0);
+	Vec16 *b = PG_GETARG_VEC16_P(1);
+	PG_RETURN_INT32(vec16_cmp_internal(a, b));
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_lt);
+PG_FUNCTION_INFO_V1(mkt_vec16_lt);
 
 Datum
-mkt_halfvec_lt(PG_FUNCTION_ARGS)
+mkt_vec16_lt(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *a = PG_GETARG_MKT_HALFVEC_P(0);
-	MktHalfVector *b = PG_GETARG_MKT_HALFVEC_P(1);
-	PG_RETURN_BOOL(mkt_halfvec_cmp_internal(a, b) < 0);
+	Vec16 *a = PG_GETARG_VEC16_P(0);
+	Vec16 *b = PG_GETARG_VEC16_P(1);
+	PG_RETURN_BOOL(vec16_cmp_internal(a, b) < 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_le);
+PG_FUNCTION_INFO_V1(mkt_vec16_le);
 
 Datum
-mkt_halfvec_le(PG_FUNCTION_ARGS)
+mkt_vec16_le(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *a = PG_GETARG_MKT_HALFVEC_P(0);
-	MktHalfVector *b = PG_GETARG_MKT_HALFVEC_P(1);
-	PG_RETURN_BOOL(mkt_halfvec_cmp_internal(a, b) <= 0);
+	Vec16 *a = PG_GETARG_VEC16_P(0);
+	Vec16 *b = PG_GETARG_VEC16_P(1);
+	PG_RETURN_BOOL(vec16_cmp_internal(a, b) <= 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_eq);
+PG_FUNCTION_INFO_V1(mkt_vec16_eq);
 
 Datum
-mkt_halfvec_eq(PG_FUNCTION_ARGS)
+mkt_vec16_eq(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *a = PG_GETARG_MKT_HALFVEC_P(0);
-	MktHalfVector *b = PG_GETARG_MKT_HALFVEC_P(1);
-	PG_RETURN_BOOL(mkt_halfvec_cmp_internal(a, b) == 0);
+	Vec16 *a = PG_GETARG_VEC16_P(0);
+	Vec16 *b = PG_GETARG_VEC16_P(1);
+	PG_RETURN_BOOL(vec16_cmp_internal(a, b) == 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_ne);
+PG_FUNCTION_INFO_V1(mkt_vec16_ne);
 
 Datum
-mkt_halfvec_ne(PG_FUNCTION_ARGS)
+mkt_vec16_ne(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *a = PG_GETARG_MKT_HALFVEC_P(0);
-	MktHalfVector *b = PG_GETARG_MKT_HALFVEC_P(1);
-	PG_RETURN_BOOL(mkt_halfvec_cmp_internal(a, b) != 0);
+	Vec16 *a = PG_GETARG_VEC16_P(0);
+	Vec16 *b = PG_GETARG_VEC16_P(1);
+	PG_RETURN_BOOL(vec16_cmp_internal(a, b) != 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_ge);
+PG_FUNCTION_INFO_V1(mkt_vec16_ge);
 
 Datum
-mkt_halfvec_ge(PG_FUNCTION_ARGS)
+mkt_vec16_ge(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *a = PG_GETARG_MKT_HALFVEC_P(0);
-	MktHalfVector *b = PG_GETARG_MKT_HALFVEC_P(1);
-	PG_RETURN_BOOL(mkt_halfvec_cmp_internal(a, b) >= 0);
+	Vec16 *a = PG_GETARG_VEC16_P(0);
+	Vec16 *b = PG_GETARG_VEC16_P(1);
+	PG_RETURN_BOOL(vec16_cmp_internal(a, b) >= 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_gt);
+PG_FUNCTION_INFO_V1(mkt_vec16_gt);
 
 Datum
-mkt_halfvec_gt(PG_FUNCTION_ARGS)
+mkt_vec16_gt(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *a = PG_GETARG_MKT_HALFVEC_P(0);
-	MktHalfVector *b = PG_GETARG_MKT_HALFVEC_P(1);
-	PG_RETURN_BOOL(mkt_halfvec_cmp_internal(a, b) > 0);
+	Vec16 *a = PG_GETARG_VEC16_P(0);
+	Vec16 *b = PG_GETARG_VEC16_P(1);
+	PG_RETURN_BOOL(vec16_cmp_internal(a, b) > 0);
 }
 
 /* ----------------------------------------------------------------
  * Utility functions
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_dims);
+PG_FUNCTION_INFO_V1(mkt_vec16_dims);
 
 Datum
-mkt_halfvec_dims(PG_FUNCTION_ARGS)
+mkt_vec16_dims(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *v = PG_GETARG_MKT_HALFVEC_P(0);
+	Vec16 *v = PG_GETARG_VEC16_P(0);
 	PG_RETURN_INT32(v->dim);
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_norm);
+PG_FUNCTION_INFO_V1(mkt_vec16_norm);
 
 Datum
-mkt_halfvec_norm(PG_FUNCTION_ARGS)
+mkt_vec16_norm(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *v   = PG_GETARG_MKT_HALFVEC_P(0);
-	double		   res = 0.0;
+	Vec16 *v   = PG_GETARG_VEC16_P(0);
+	double res = 0.0;
 
 	for (int i = 0; i < v->dim; i++)
 	{
@@ -413,55 +413,55 @@ mkt_halfvec_norm(PG_FUNCTION_ARGS)
  * Cast functions
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_halfvec);
+PG_FUNCTION_INFO_V1(mkt_vec16);
 
 Datum
-mkt_halfvec(PG_FUNCTION_ARGS)
+mkt_vec16(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *v	  = PG_GETARG_MKT_HALFVEC_P(0);
-	int32		   typmod = PG_GETARG_INT32(1);
+	Vec16 *v	  = PG_GETARG_VEC16_P(0);
+	int32  typmod = PG_GETARG_INT32(1);
 
 	mkt_pg_check_expected_dim(v->dim, typmod);
 
-	PG_RETURN_MKT_HALFVEC_P(v);
+	PG_RETURN_VEC16_P(v);
 }
 
-PG_FUNCTION_INFO_V1(mkt_halfvec_to_vector);
+PG_FUNCTION_INFO_V1(mkt_vec16_to_vec32);
 
 Datum
-mkt_halfvec_to_vector(PG_FUNCTION_ARGS)
+mkt_vec16_to_vec32(PG_FUNCTION_ARGS)
 {
-	MktHalfVector *hv	  = PG_GETARG_MKT_HALFVEC_P(0);
-	int32		   typmod = PG_GETARG_INT32(1);
+	Vec16 *hv	  = PG_GETARG_VEC16_P(0);
+	int32  typmod = PG_GETARG_INT32(1);
 
 	mkt_pg_check_expected_dim(hv->dim, typmod);
 
-	MktVector *result = mkt_pg_vector_alloc(hv->dim);
+	Vec32 *result = mkt_pg_vec32_alloc(hv->dim);
 	mkt_half_to_float_array(hv->x, result->x, hv->dim);
 
-	PG_RETURN_MKT_VECTOR_P(result);
+	PG_RETURN_VEC32_P(result);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vector_to_halfvec);
+PG_FUNCTION_INFO_V1(mkt_vec32_to_vec16);
 
 Datum
-mkt_vector_to_halfvec(PG_FUNCTION_ARGS)
+mkt_vec32_to_vec16(PG_FUNCTION_ARGS)
 {
-	MktVector *v	  = PG_GETARG_MKT_VECTOR_P(0);
-	int32	   typmod = PG_GETARG_INT32(1);
+	Vec32 *v	  = PG_GETARG_VEC32_P(0);
+	int32  typmod = PG_GETARG_INT32(1);
 
 	mkt_pg_check_expected_dim(v->dim, typmod);
 
-	MktHalfVector *result = mkt_pg_halfvec_alloc(v->dim);
+	Vec16 *result = mkt_pg_vec16_alloc(v->dim);
 	mkt_float_to_half_array(v->x, result->x, v->dim);
 
-	PG_RETURN_MKT_HALFVEC_P(result);
+	PG_RETURN_VEC16_P(result);
 }
 
-PG_FUNCTION_INFO_V1(mkt_array_to_halfvec);
+PG_FUNCTION_INFO_V1(mkt_array_to_vec16);
 
 Datum
-mkt_array_to_halfvec(PG_FUNCTION_ARGS)
+mkt_array_to_vec16(PG_FUNCTION_ARGS)
 {
 	ArrayType *arr	  = PG_GETARG_ARRAYTYPE_P(0);
 	int32	   typmod = PG_GETARG_INT32(1);
@@ -519,10 +519,10 @@ mkt_array_to_halfvec(PG_FUNCTION_ARGS)
 		mkt_pg_check_value_finite(floats[i]);
 	}
 
-	MktHalfVector *result = mkt_pg_halfvec_alloc(dim);
+	Vec16 *result = mkt_pg_vec16_alloc(dim);
 	mkt_float_to_half_array(floats, result->x, dim);
 
 	pfree(floats);
 
-	PG_RETURN_MKT_HALFVEC_P(result);
+	PG_RETURN_VEC16_P(result);
 }

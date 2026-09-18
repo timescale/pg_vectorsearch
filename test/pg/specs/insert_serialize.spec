@@ -19,8 +19,8 @@
 setup
 {
     CREATE EXTENSION injection_points;
-    CREATE TABLE ins (id int, v vector(3));
-    INSERT INTO ins SELECT g, format('[%s,0,0]', g)::vector
+    CREATE TABLE ins (id int, v vec32(3));
+    INSERT INTO ins SELECT g, format('[%s,0,0]', g)::vec32
         FROM generate_series(1, 50) g;
     CREATE INDEX ins_idx ON ins USING mktann (v)
         WITH (nlist = 4, centroid_compression = true);

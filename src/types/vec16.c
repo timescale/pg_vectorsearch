@@ -1,11 +1,11 @@
 /*
- * mkt_halfvec.c - Half-precision vector operations and type dispatch
+ * vec16.c - Half-precision vector operations and type dispatch
  *
  * Implements:
  * - Bulk half<->float conversion with SIMD dispatch
- * - MktVectorTypeOps for float32 (zero-copy wrappers)
- * - MktVectorTypeOps for float16 (convert-in-register distance)
- * - MktHalfVector lifecycle
+ * - Vec32TypeOps for float32 (zero-copy wrappers)
+ * - Vec32TypeOps for float16 (convert-in-register distance)
+ * - Vec16 lifecycle
  */
 
 #include "mkt_config.h"
@@ -13,8 +13,8 @@
 #include <string.h>
 
 #include "core/memory.h"
-#include "types/halfvec.h"
-#include "types/vector.h"
+#include "types/vec16.h"
+#include "types/vec32.h"
 
 /* ----------------------------------------------------------------
  * Bulk conversion
@@ -108,17 +108,17 @@ mkt_float_to_half_array(const float *src, half *dst, uint32_t n)
 #endif
 
 /* ----------------------------------------------------------------
- * MktHalfVector lifecycle
+ * Vec16 lifecycle
  * ---------------------------------------------------------------- */
 
-MktHalfVector *
-mkt_halfvec_create(Dimension dim)
+Vec16 *
+vec16_create(Dimension dim)
 {
-	if (dim == 0 || dim > MKT_VECTOR_MAX_DIM)
+	if (dim == 0 || dim > VEC32_MAX_DIM)
 		return NULL;
 
-	size_t		   size = MKT_HALFVEC_SIZE(dim);
-	MktHalfVector *v	= mkt_alloc0(size);
+	size_t size = VEC16_SIZE(dim);
+	Vec16 *v	= mkt_alloc0(size);
 	if (v == NULL)
 		return NULL;
 
@@ -127,13 +127,13 @@ mkt_halfvec_create(Dimension dim)
 	return v;
 }
 
-MktHalfVector *
-mkt_halfvec_from_floats(const float *values, Dimension dim)
+Vec16 *
+vec16_from_floats(const float *values, Dimension dim)
 {
 	if (values == NULL)
 		return NULL;
 
-	MktHalfVector *v = mkt_halfvec_create(dim);
+	Vec16 *v = vec16_create(dim);
 	if (v == NULL)
 		return NULL;
 
@@ -142,13 +142,13 @@ mkt_halfvec_from_floats(const float *values, Dimension dim)
 }
 
 void
-mkt_halfvec_free(MktHalfVector *v)
+vec16_free(Vec16 *v)
 {
 	mkt_free(v);
 }
 
 void
-mkt_halfvec_set(MktHalfVector *v, const float *values)
+vec16_set(Vec16 *v, const float *values)
 {
 	if (v == NULL || values == NULL)
 		return;

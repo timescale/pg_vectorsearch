@@ -15,17 +15,17 @@
 
 #include <hdf5.h>
 
-#include "standalone/vector_source.h"
+#include "standalone/vec32_source.h"
 
 typedef struct MktHdf5Source
 {
-	MktVectorSource base;
-	hid_t			file;	/* HDF5 file handle */
-	hid_t			dset;	/* dataset handle */
-	hid_t			fspace; /* file dataspace */
-	hid_t			mspace; /* memory dataspace (one row) */
-	float		   *buf;	/* read buffer [dim] */
-	uint32_t		pos;	/* current row */
+	Vec32Source base;
+	hid_t		file;	/* HDF5 file handle */
+	hid_t		dset;	/* dataset handle */
+	hid_t		fspace; /* file dataspace */
+	hid_t		mspace; /* memory dataspace (one row) */
+	float	   *buf;	/* read buffer [dim] */
+	uint32_t	pos;	/* current row */
 } MktHdf5Source;
 
 /*

@@ -263,7 +263,7 @@ normalize_vector(float *v, Dimension dim)
 {
 	float norm = mkt_l2_norm(v, dim);
 	if (norm > 0.0f)
-		mkt_vector_scale(v, 1.0f / norm, v, dim);
+		vec32_scale(v, 1.0f / norm, v, dim);
 }
 
 static void
@@ -327,9 +327,7 @@ assign_to_cluster_lists(
 
 MktIndex *
 mkt_index_build(
-		MktVectorSource		 *src,
-		const MktIndexConfig *config,
-		MktBuildStats		 *stats)
+		Vec32Source *src, const MktIndexConfig *config, MktBuildStats *stats)
 {
 	if (src == NULL || src->nvecs == 0 || src->dim == 0 || config == NULL)
 		return NULL;

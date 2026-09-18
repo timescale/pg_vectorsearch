@@ -254,7 +254,7 @@ verify_encoding(
 	faiss_RaBitQuantizer_compute_codes(
 			faiss_rq, transformed, faiss_codes, count);
 
-	VectorRef cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/* Allocate buffer for mkt codes (for dump and comparison) */
 	uint8_t *mkt_codes = dump_dir ? malloc((size_t)count * nbytes) : NULL;
@@ -274,7 +274,7 @@ verify_encoding(
 		if (use_progress && !verbose)
 			print_progress("Encoding", i, count, &last_pct);
 
-		VectorRef	vec_ref = {.data = vectors + (size_t)i * dim, .dim = dim};
+		Vec32Ref	vec_ref = {.data = vectors + (size_t)i * dim, .dim = dim};
 		RaBitQData *mkt_enc = mkt_rabitq_encode(params, vec_ref, cent_ref);
 
 		if (mkt_codes)
@@ -417,11 +417,11 @@ verify_distances(
 
 	/* Encode all train vectors with meerkat into SoA arrays for
 	 * batch distance computation */
-	VectorRef cent_ref		= {.data = centroid, .dim = dim};
-	uint32_t  pbytes		= MKT_RABITQ_BYTES(dim);
-	float	 *enc_f_add		= malloc(ntrain * sizeof(float));
-	float	 *enc_f_rescale = malloc(ntrain * sizeof(float));
-	uint8_t	 *enc_bits		= malloc((size_t)ntrain * pbytes);
+	Vec32Ref cent_ref	   = {.data = centroid, .dim = dim};
+	uint32_t pbytes		   = MKT_RABITQ_BYTES(dim);
+	float	*enc_f_add	   = malloc(ntrain * sizeof(float));
+	float	*enc_f_rescale = malloc(ntrain * sizeof(float));
+	uint8_t *enc_bits	   = malloc((size_t)ntrain * pbytes);
 	if (!enc_f_add || !enc_f_rescale || !enc_bits)
 	{
 		fprintf(stderr, "Error: allocation failed for mkt codes\n");
@@ -447,10 +447,10 @@ verify_distances(
 	/* Handle ntrain > UINT16_MAX by encoding remaining in chunks */
 	for (uint32_t offset = UINT16_MAX; offset < ntrain;)
 	{
-		uint32_t  remaining	 = ntrain - offset;
-		uint16_t  chunk		 = remaining < UINT16_MAX ? (uint16_t)remaining
-													  : UINT16_MAX;
-		VectorRef chunk_cent = {.data = centroid, .dim = dim};
+		uint32_t remaining	= ntrain - offset;
+		uint16_t chunk		= remaining < UINT16_MAX ? (uint16_t)remaining
+													 : UINT16_MAX;
+		Vec32Ref chunk_cent = {.data = centroid, .dim = dim};
 		mkt_rabitq_encode_batch(
 				params,
 				train + (size_t)offset * dim,
@@ -499,7 +499,7 @@ verify_distances(
 	for (uint32_t q = 0; q < nqueries; q++)
 	{
 		const float *query	   = queries + (size_t)q * dim;
-		VectorRef	 query_ref = {.data = query, .dim = dim};
+		Vec32Ref	 query_ref = {.data = query, .dim = dim};
 
 		/* Batch meerkat distances (SIMD) */
 		RaBitQQueryState *mkt_state =

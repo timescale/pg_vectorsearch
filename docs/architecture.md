@@ -419,7 +419,7 @@ Meerkat supports multi-tenant deployments through two approaches:
 Create separate tables and indexes for each tenant:
 
 ```sql
-CREATE TABLE tenant_123_vectors (id bigint, embedding vector(768));
+CREATE TABLE tenant_123_vectors (id bigint, embedding vec32(768));
 CREATE INDEX ON tenant_123_vectors USING meerkat (embedding);
 ```
 
@@ -444,7 +444,7 @@ Store all tenants in one table with a composite index key:
 CREATE TABLE vectors (
     tenant_id int,
     id bigint,
-    embedding vector(768)
+    embedding vec32(768)
 );
 CREATE INDEX ON vectors USING meerkat ((tenant_id, embedding));
 ```
@@ -459,7 +459,7 @@ CREATE INDEX ON vectors USING meerkat ((tenant_id, embedding));
 -- Query automatically routes to tenant 42's subtree
 SELECT * FROM vectors
 WHERE tenant_id = 42
-ORDER BY embedding <-> '[...]'::vector
+ORDER BY embedding <-> '[...]'::vec32
 LIMIT 10;
 ```
 
@@ -1296,7 +1296,7 @@ SET maintenance_work_mem = '8GB';          -- Memory per worker
 
 -- Create index with parallel workers
 CREATE INDEX CONCURRENTLY ON documents
-USING meerkat (embedding vector_cosine_ops)
+USING meerkat (embedding vec32_cosine_ops)
 WITH (workers = 8);
 ```
 

@@ -93,25 +93,25 @@ END;
 $$;
 
 -- =====================================================================
--- vector type
+-- vec32 type
 -- =====================================================================
 
-CREATE FUNCTION vector_in(cstring, oid, integer) RETURNS vector
-    AS 'MODULE_PATHNAME', 'mkt_vector_in'
+CREATE FUNCTION vec32_in(cstring, oid, integer) RETURNS vec32
+    AS 'MODULE_PATHNAME', 'mkt_vec32_in'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION vector_out(vector) RETURNS cstring
-    AS 'MODULE_PATHNAME', 'mkt_vector_out'
+CREATE FUNCTION vec32_out(vec32) RETURNS cstring
+    AS 'MODULE_PATHNAME', 'mkt_vec32_out'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION vector_typmod_in(cstring[]) RETURNS integer
-    AS 'MODULE_PATHNAME', 'mkt_vector_typmod_in'
+CREATE FUNCTION vec32_typmod_in(cstring[]) RETURNS integer
+    AS 'MODULE_PATHNAME', 'mkt_vec32_typmod_in'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE TYPE vector (
-    INPUT     = vector_in,
-    OUTPUT    = vector_out,
-    TYPMOD_IN = vector_typmod_in,
+CREATE TYPE vec32 (
+    INPUT     = vec32_in,
+    OUTPUT    = vec32_out,
+    TYPMOD_IN = vec32_typmod_in,
     INTERNALLENGTH = VARIABLE,
     STORAGE   = external,
     CATEGORY  = 'U',
@@ -119,213 +119,213 @@ CREATE TYPE vector (
 );
 
 -- =====================================================================
--- vector distance functions
+-- vec32 distance functions
 -- =====================================================================
 
-CREATE FUNCTION l2_distance(vector, vector) RETURNS float8
+CREATE FUNCTION l2_distance(vec32, vec32) RETURNS float8
     AS 'MODULE_PATHNAME', 'mkt_l2_distance'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION inner_product(vector, vector) RETURNS float8
+CREATE FUNCTION inner_product(vec32, vec32) RETURNS float8
     AS 'MODULE_PATHNAME', 'mkt_inner_product'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION cosine_distance(vector, vector) RETURNS float8
+CREATE FUNCTION cosine_distance(vec32, vec32) RETURNS float8
     AS 'MODULE_PATHNAME', 'mkt_cosine_distance'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
--- vector utility functions
+-- vec32 utility functions
 -- =====================================================================
 
-CREATE FUNCTION vector_dims(vector) RETURNS integer
-    AS 'MODULE_PATHNAME', 'mkt_pg_vector_dims'
+CREATE FUNCTION vec32_dims(vec32) RETURNS integer
+    AS 'MODULE_PATHNAME', 'mkt_vec32_dims'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION vector_norm(vector) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_pg_vector_norm'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
--- =====================================================================
--- vector private functions (for operators and opclass)
--- =====================================================================
-
-CREATE FUNCTION vector_l2_squared_distance(vector, vector) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_vector_l2_squared_distance'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION vector_negative_inner_product(vector, vector) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_vector_negative_inner_product'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION vector_cmp(vector, vector) RETURNS int4
-    AS 'MODULE_PATHNAME', 'mkt_vector_cmp'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION vector_lt(vector, vector) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vector_lt'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION vector_le(vector, vector) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vector_le'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION vector_eq(vector, vector) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vector_eq'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION vector_ne(vector, vector) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vector_ne'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION vector_ge(vector, vector) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vector_ge'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION vector_gt(vector, vector) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vector_gt'
+CREATE FUNCTION vec32_norm(vec32) RETURNS float8
+    AS 'MODULE_PATHNAME', 'mkt_pg_vec32_norm'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
--- vector cast functions
+-- vec32 private functions (for operators and opclass)
 -- =====================================================================
 
-CREATE FUNCTION vector(@extschema@.vector, integer, boolean) RETURNS vector
-    AS 'MODULE_PATHNAME', 'mkt_vector'
+CREATE FUNCTION vec32_l2_squared_distance(vec32, vec32) RETURNS float8
+    AS 'MODULE_PATHNAME', 'mkt_vec32_l2_squared_distance'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION array_to_vector(real[], integer, boolean) RETURNS vector
-    AS 'MODULE_PATHNAME', 'mkt_array_to_vector'
+CREATE FUNCTION vec32_negative_inner_product(vec32, vec32) RETURNS float8
+    AS 'MODULE_PATHNAME', 'mkt_vec32_negative_inner_product'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION array_to_vector(float8[], integer, boolean) RETURNS vector
-    AS 'MODULE_PATHNAME', 'mkt_array_to_vector'
+CREATE FUNCTION vec32_cmp(vec32, vec32) RETURNS int4
+    AS 'MODULE_PATHNAME', 'mkt_vec32_cmp'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION vector_to_float4(@extschema@.vector) RETURNS real[]
-    AS 'MODULE_PATHNAME', 'mkt_vector_to_float4'
+CREATE FUNCTION vec32_lt(vec32, vec32) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_vec32_lt'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vec32_le(vec32, vec32) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_vec32_le'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vec32_eq(vec32, vec32) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_vec32_eq'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vec32_ne(vec32, vec32) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_vec32_ne'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vec32_ge(vec32, vec32) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_vec32_ge'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vec32_gt(vec32, vec32) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_vec32_gt'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
--- vector casts
+-- vec32 cast functions
 -- =====================================================================
 
-CREATE CAST (@extschema@.vector AS @extschema@.vector)
-    WITH FUNCTION vector(@extschema@.vector, integer, boolean) AS IMPLICIT;
+CREATE FUNCTION vec32(@extschema@.vec32, integer, boolean) RETURNS vec32
+    AS 'MODULE_PATHNAME', 'mkt_vec32'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE CAST (real[] AS @extschema@.vector)
-    WITH FUNCTION array_to_vector(real[], integer, boolean) AS ASSIGNMENT;
+CREATE FUNCTION array_to_vec32(real[], integer, boolean) RETURNS vec32
+    AS 'MODULE_PATHNAME', 'mkt_array_to_vec32'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE CAST (float8[] AS @extschema@.vector)
-    WITH FUNCTION array_to_vector(float8[], integer, boolean) AS ASSIGNMENT;
+CREATE FUNCTION array_to_vec32(float8[], integer, boolean) RETURNS vec32
+    AS 'MODULE_PATHNAME', 'mkt_array_to_vec32'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE CAST (@extschema@.vector AS real[])
-    WITH FUNCTION vector_to_float4(@extschema@.vector);
+CREATE FUNCTION vec32_to_float4(@extschema@.vec32) RETURNS real[]
+    AS 'MODULE_PATHNAME', 'mkt_vec32_to_float4'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
--- vector distance operators
+-- vec32 casts
+-- =====================================================================
+
+CREATE CAST (@extschema@.vec32 AS @extschema@.vec32)
+    WITH FUNCTION vec32(@extschema@.vec32, integer, boolean) AS IMPLICIT;
+
+CREATE CAST (real[] AS @extschema@.vec32)
+    WITH FUNCTION array_to_vec32(real[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (float8[] AS @extschema@.vec32)
+    WITH FUNCTION array_to_vec32(float8[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (@extschema@.vec32 AS real[])
+    WITH FUNCTION vec32_to_float4(@extschema@.vec32);
+
+-- =====================================================================
+-- vec32 distance operators
 -- =====================================================================
 
 CREATE OPERATOR <-> (
-    LEFTARG = vector, RIGHTARG = vector,
+    LEFTARG = vec32, RIGHTARG = vec32,
     FUNCTION = l2_distance,
     COMMUTATOR = '<->'
 );
 
 CREATE OPERATOR <#> (
-    LEFTARG = vector, RIGHTARG = vector,
-    FUNCTION = vector_negative_inner_product,
+    LEFTARG = vec32, RIGHTARG = vec32,
+    FUNCTION = vec32_negative_inner_product,
     COMMUTATOR = '<#>'
 );
 
 CREATE OPERATOR <=> (
-    LEFTARG = vector, RIGHTARG = vector,
+    LEFTARG = vec32, RIGHTARG = vec32,
     FUNCTION = cosine_distance,
     COMMUTATOR = '<=>'
 );
 
 -- =====================================================================
--- vector comparison operators
+-- vec32 comparison operators
 -- =====================================================================
 
 CREATE OPERATOR < (
-    LEFTARG = vector, RIGHTARG = vector,
-    FUNCTION = vector_lt,
+    LEFTARG = vec32, RIGHTARG = vec32,
+    FUNCTION = vec32_lt,
     COMMUTATOR = '>', NEGATOR = '>=',
     RESTRICT = pg_catalog.scalarltsel, JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR <= (
-    LEFTARG = vector, RIGHTARG = vector,
-    FUNCTION = vector_le,
+    LEFTARG = vec32, RIGHTARG = vec32,
+    FUNCTION = vec32_le,
     COMMUTATOR = '>=', NEGATOR = '>',
     RESTRICT = pg_catalog.scalarlesel, JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR = (
-    LEFTARG = vector, RIGHTARG = vector,
-    FUNCTION = vector_eq,
+    LEFTARG = vec32, RIGHTARG = vec32,
+    FUNCTION = vec32_eq,
     COMMUTATOR = '=', NEGATOR = '<>',
     RESTRICT = pg_catalog.eqsel, JOIN = pg_catalog.eqjoinsel,
     HASHES, MERGES
 );
 
 CREATE OPERATOR <> (
-    LEFTARG = vector, RIGHTARG = vector,
-    FUNCTION = vector_ne,
+    LEFTARG = vec32, RIGHTARG = vec32,
+    FUNCTION = vec32_ne,
     COMMUTATOR = '<>', NEGATOR = '=',
     RESTRICT = pg_catalog.neqsel, JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR >= (
-    LEFTARG = vector, RIGHTARG = vector,
-    FUNCTION = vector_ge,
+    LEFTARG = vec32, RIGHTARG = vec32,
+    FUNCTION = vec32_ge,
     COMMUTATOR = '<=', NEGATOR = '<',
     RESTRICT = pg_catalog.scalargesel, JOIN = pg_catalog.scalargejoinsel
 );
 
 CREATE OPERATOR > (
-    LEFTARG = vector, RIGHTARG = vector,
-    FUNCTION = vector_gt,
+    LEFTARG = vec32, RIGHTARG = vec32,
+    FUNCTION = vec32_gt,
     COMMUTATOR = '<', NEGATOR = '<=',
     RESTRICT = pg_catalog.scalargtsel, JOIN = pg_catalog.scalargtjoinsel
 );
 
 -- =====================================================================
--- vector btree opclass
+-- vec32 btree opclass
 -- =====================================================================
 
-CREATE OPERATOR FAMILY vector_ops USING btree;
+CREATE OPERATOR FAMILY vec32_ops USING btree;
 
-CREATE OPERATOR CLASS vector_ops DEFAULT FOR TYPE vector USING btree
-    FAMILY vector_ops AS
+CREATE OPERATOR CLASS vec32_ops DEFAULT FOR TYPE vec32 USING btree
+    FAMILY vec32_ops AS
     OPERATOR 1 <,
     OPERATOR 2 <=,
     OPERATOR 3 =,
     OPERATOR 4 >=,
     OPERATOR 5 >,
-    FUNCTION 1 vector_cmp(vector, vector);
+    FUNCTION 1 vec32_cmp(vec32, vec32);
 
 -- =====================================================================
--- halfvec type
+-- vec16 type
 -- =====================================================================
 
-CREATE FUNCTION halfvec_in(cstring, oid, integer) RETURNS halfvec
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_in'
+CREATE FUNCTION vec16_in(cstring, oid, integer) RETURNS vec16
+    AS 'MODULE_PATHNAME', 'mkt_vec16_in'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION halfvec_out(halfvec) RETURNS cstring
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_out'
+CREATE FUNCTION vec16_out(vec16) RETURNS cstring
+    AS 'MODULE_PATHNAME', 'mkt_vec16_out'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION halfvec_typmod_in(cstring[]) RETURNS integer
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_typmod_in'
+CREATE FUNCTION vec16_typmod_in(cstring[]) RETURNS integer
+    AS 'MODULE_PATHNAME', 'mkt_vec16_typmod_in'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE TYPE halfvec (
-    INPUT     = halfvec_in,
-    OUTPUT    = halfvec_out,
-    TYPMOD_IN = halfvec_typmod_in,
+CREATE TYPE vec16 (
+    INPUT     = vec16_in,
+    OUTPUT    = vec16_out,
+    TYPMOD_IN = vec16_typmod_in,
     INTERNALLENGTH = VARIABLE,
     STORAGE   = external,
     CATEGORY  = 'U',
@@ -333,203 +333,203 @@ CREATE TYPE halfvec (
 );
 
 -- =====================================================================
--- halfvec distance functions
+-- vec16 distance functions
 -- =====================================================================
 
-CREATE FUNCTION l2_distance(halfvec, halfvec) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_l2_distance'
+CREATE FUNCTION l2_distance(vec16, vec16) RETURNS float8
+    AS 'MODULE_PATHNAME', 'mkt_vec16_l2_distance'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION inner_product(halfvec, halfvec) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_inner_product'
+CREATE FUNCTION inner_product(vec16, vec16) RETURNS float8
+    AS 'MODULE_PATHNAME', 'mkt_vec16_inner_product'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION cosine_distance(halfvec, halfvec) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_cosine_distance'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
--- =====================================================================
--- halfvec utility functions
--- =====================================================================
-
-CREATE FUNCTION vector_dims(halfvec) RETURNS integer
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_dims'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION vector_norm(halfvec) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_norm'
+CREATE FUNCTION cosine_distance(vec16, vec16) RETURNS float8
+    AS 'MODULE_PATHNAME', 'mkt_vec16_cosine_distance'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
--- halfvec private functions (for operators and opclass)
+-- vec16 utility functions
 -- =====================================================================
 
-CREATE FUNCTION halfvec_l2_squared_distance(halfvec, halfvec) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_l2_squared_distance'
+CREATE FUNCTION vec32_dims(vec16) RETURNS integer
+    AS 'MODULE_PATHNAME', 'mkt_vec16_dims'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION halfvec_negative_inner_product(halfvec, halfvec) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_negative_inner_product'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION halfvec_cmp(halfvec, halfvec) RETURNS int4
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_cmp'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION halfvec_lt(halfvec, halfvec) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_lt'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION halfvec_le(halfvec, halfvec) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_le'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION halfvec_eq(halfvec, halfvec) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_eq'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION halfvec_ne(halfvec, halfvec) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_ne'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION halfvec_ge(halfvec, halfvec) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_ge'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION halfvec_gt(halfvec, halfvec) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_gt'
+CREATE FUNCTION vec32_norm(vec16) RETURNS float8
+    AS 'MODULE_PATHNAME', 'mkt_vec16_norm'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
--- halfvec cast functions
+-- vec16 private functions (for operators and opclass)
 -- =====================================================================
 
-CREATE FUNCTION halfvec(@extschema@.halfvec, integer, boolean) RETURNS halfvec
-    AS 'MODULE_PATHNAME', 'mkt_halfvec'
+CREATE FUNCTION vec16_l2_squared_distance(vec16, vec16) RETURNS float8
+    AS 'MODULE_PATHNAME', 'mkt_vec16_l2_squared_distance'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION halfvec_to_vector(@extschema@.halfvec, integer, boolean)
-    RETURNS vector
-    AS 'MODULE_PATHNAME', 'mkt_halfvec_to_vector'
+CREATE FUNCTION vec16_negative_inner_product(vec16, vec16) RETURNS float8
+    AS 'MODULE_PATHNAME', 'mkt_vec16_negative_inner_product'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION vector_to_halfvec(@extschema@.vector, integer, boolean)
-    RETURNS halfvec
-    AS 'MODULE_PATHNAME', 'mkt_vector_to_halfvec'
+CREATE FUNCTION vec16_cmp(vec16, vec16) RETURNS int4
+    AS 'MODULE_PATHNAME', 'mkt_vec16_cmp'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION array_to_halfvec(real[], integer, boolean) RETURNS halfvec
-    AS 'MODULE_PATHNAME', 'mkt_array_to_halfvec'
+CREATE FUNCTION vec16_lt(vec16, vec16) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_vec16_lt'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION array_to_halfvec(float8[], integer, boolean) RETURNS halfvec
-    AS 'MODULE_PATHNAME', 'mkt_array_to_halfvec'
+CREATE FUNCTION vec16_le(vec16, vec16) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_vec16_le'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vec16_eq(vec16, vec16) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_vec16_eq'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vec16_ne(vec16, vec16) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_vec16_ne'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vec16_ge(vec16, vec16) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_vec16_ge'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vec16_gt(vec16, vec16) RETURNS bool
+    AS 'MODULE_PATHNAME', 'mkt_vec16_gt'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
--- halfvec casts
+-- vec16 cast functions
 -- =====================================================================
 
-CREATE CAST (@extschema@.halfvec AS @extschema@.halfvec)
-    WITH FUNCTION halfvec(@extschema@.halfvec, integer, boolean) AS IMPLICIT;
+CREATE FUNCTION vec16(@extschema@.vec16, integer, boolean) RETURNS vec16
+    AS 'MODULE_PATHNAME', 'mkt_vec16'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE CAST (@extschema@.halfvec AS @extschema@.vector)
-    WITH FUNCTION halfvec_to_vector(@extschema@.halfvec, integer, boolean)
+CREATE FUNCTION vec16_to_vec32(@extschema@.vec16, integer, boolean)
+    RETURNS vec32
+    AS 'MODULE_PATHNAME', 'mkt_vec16_to_vec32'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vec32_to_vec16(@extschema@.vec32, integer, boolean)
+    RETURNS vec16
+    AS 'MODULE_PATHNAME', 'mkt_vec32_to_vec16'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_vec16(real[], integer, boolean) RETURNS vec16
+    AS 'MODULE_PATHNAME', 'mkt_array_to_vec16'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_vec16(float8[], integer, boolean) RETURNS vec16
+    AS 'MODULE_PATHNAME', 'mkt_array_to_vec16'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- =====================================================================
+-- vec16 casts
+-- =====================================================================
+
+CREATE CAST (@extschema@.vec16 AS @extschema@.vec16)
+    WITH FUNCTION vec16(@extschema@.vec16, integer, boolean) AS IMPLICIT;
+
+CREATE CAST (@extschema@.vec16 AS @extschema@.vec32)
+    WITH FUNCTION vec16_to_vec32(@extschema@.vec16, integer, boolean)
     AS IMPLICIT;
 
-CREATE CAST (@extschema@.vector AS @extschema@.halfvec)
-    WITH FUNCTION vector_to_halfvec(@extschema@.vector, integer, boolean)
+CREATE CAST (@extschema@.vec32 AS @extschema@.vec16)
+    WITH FUNCTION vec32_to_vec16(@extschema@.vec32, integer, boolean)
     AS ASSIGNMENT;
 
-CREATE CAST (real[] AS @extschema@.halfvec)
-    WITH FUNCTION array_to_halfvec(real[], integer, boolean) AS ASSIGNMENT;
+CREATE CAST (real[] AS @extschema@.vec16)
+    WITH FUNCTION array_to_vec16(real[], integer, boolean) AS ASSIGNMENT;
 
-CREATE CAST (float8[] AS @extschema@.halfvec)
-    WITH FUNCTION array_to_halfvec(float8[], integer, boolean) AS ASSIGNMENT;
+CREATE CAST (float8[] AS @extschema@.vec16)
+    WITH FUNCTION array_to_vec16(float8[], integer, boolean) AS ASSIGNMENT;
 
 -- =====================================================================
--- halfvec distance operators
+-- vec16 distance operators
 -- =====================================================================
 
 CREATE OPERATOR <-> (
-    LEFTARG = halfvec, RIGHTARG = halfvec,
+    LEFTARG = vec16, RIGHTARG = vec16,
     FUNCTION = l2_distance,
     COMMUTATOR = '<->'
 );
 
 CREATE OPERATOR <#> (
-    LEFTARG = halfvec, RIGHTARG = halfvec,
-    FUNCTION = halfvec_negative_inner_product,
+    LEFTARG = vec16, RIGHTARG = vec16,
+    FUNCTION = vec16_negative_inner_product,
     COMMUTATOR = '<#>'
 );
 
 CREATE OPERATOR <=> (
-    LEFTARG = halfvec, RIGHTARG = halfvec,
+    LEFTARG = vec16, RIGHTARG = vec16,
     FUNCTION = cosine_distance,
     COMMUTATOR = '<=>'
 );
 
 -- =====================================================================
--- halfvec comparison operators
+-- vec16 comparison operators
 -- =====================================================================
 
 CREATE OPERATOR < (
-    LEFTARG = halfvec, RIGHTARG = halfvec,
-    FUNCTION = halfvec_lt,
+    LEFTARG = vec16, RIGHTARG = vec16,
+    FUNCTION = vec16_lt,
     COMMUTATOR = '>', NEGATOR = '>=',
     RESTRICT = pg_catalog.scalarltsel, JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR <= (
-    LEFTARG = halfvec, RIGHTARG = halfvec,
-    FUNCTION = halfvec_le,
+    LEFTARG = vec16, RIGHTARG = vec16,
+    FUNCTION = vec16_le,
     COMMUTATOR = '>=', NEGATOR = '>',
     RESTRICT = pg_catalog.scalarlesel, JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR = (
-    LEFTARG = halfvec, RIGHTARG = halfvec,
-    FUNCTION = halfvec_eq,
+    LEFTARG = vec16, RIGHTARG = vec16,
+    FUNCTION = vec16_eq,
     COMMUTATOR = '=', NEGATOR = '<>',
     RESTRICT = pg_catalog.eqsel, JOIN = pg_catalog.eqjoinsel,
     HASHES, MERGES
 );
 
 CREATE OPERATOR <> (
-    LEFTARG = halfvec, RIGHTARG = halfvec,
-    FUNCTION = halfvec_ne,
+    LEFTARG = vec16, RIGHTARG = vec16,
+    FUNCTION = vec16_ne,
     COMMUTATOR = '<>', NEGATOR = '=',
     RESTRICT = pg_catalog.neqsel, JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR >= (
-    LEFTARG = halfvec, RIGHTARG = halfvec,
-    FUNCTION = halfvec_ge,
+    LEFTARG = vec16, RIGHTARG = vec16,
+    FUNCTION = vec16_ge,
     COMMUTATOR = '<=', NEGATOR = '<',
     RESTRICT = pg_catalog.scalargesel, JOIN = pg_catalog.scalargejoinsel
 );
 
 CREATE OPERATOR > (
-    LEFTARG = halfvec, RIGHTARG = halfvec,
-    FUNCTION = halfvec_gt,
+    LEFTARG = vec16, RIGHTARG = vec16,
+    FUNCTION = vec16_gt,
     COMMUTATOR = '<', NEGATOR = '<=',
     RESTRICT = pg_catalog.scalargtsel, JOIN = pg_catalog.scalargtjoinsel
 );
 
 -- =====================================================================
--- halfvec btree opclass
+-- vec16 btree opclass
 -- =====================================================================
 
-CREATE OPERATOR FAMILY halfvec_ops USING btree;
+CREATE OPERATOR FAMILY vec16_ops USING btree;
 
-CREATE OPERATOR CLASS halfvec_ops DEFAULT FOR TYPE halfvec USING btree
-    FAMILY halfvec_ops AS
+CREATE OPERATOR CLASS vec16_ops DEFAULT FOR TYPE vec16 USING btree
+    FAMILY vec16_ops AS
     OPERATOR 1 <,
     OPERATOR 2 <=,
     OPERATOR 3 =,
     OPERATOR 4 >=,
     OPERATOR 5 >,
-    FUNCTION 1 halfvec_cmp(halfvec, halfvec);
+    FUNCTION 1 vec16_cmp(vec16, vec16);
 
 -- =====================================================================
 -- rabitq type
@@ -729,15 +729,15 @@ CREATE FUNCTION rabitq_params_seed(rabitq_params) RETURNS bigint
 -- =====================================================================
 
 CREATE FUNCTION rabitq_encode(
-    input vector,
-    centroid vector,
+    input vec32,
+    centroid vec32,
     params rabitq_params
 ) RETURNS rabitq
     AS 'MODULE_PATHNAME', 'mkt_rabitq_encode_pg'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-COMMENT ON FUNCTION rabitq_encode(vector, vector, rabitq_params) IS
-'Encode a vector to RaBitQ binary quantization relative to a centroid.
+COMMENT ON FUNCTION rabitq_encode(vec32, vec32, rabitq_params) IS
+'Encode a vec32 to RaBitQ binary quantization relative to a centroid.
 Returns a rabitq value containing the quantized bits, f_add, and f_rescale.
 The params argument provides the orthogonal transform matrix (see rabitq_params_generate).';
 
@@ -763,64 +763,64 @@ CREATE FUNCTION mktann_metric_cosine(internal) RETURNS int4
     AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- Column type descriptors (support function 3). Optional: an opclass that
--- declares none indexes `vector`, which keeps the vector opclasses unchanged
+-- declares none indexes `vec32`, which keeps the vec32 opclasses unchanged
 -- and leaves an index built before this existed working. Returning the
 -- descriptor from the opclass is what lets the access method agree with the
 -- planner about a column's type without resolving a name or comparing an OID
 -- -- see src/pg/mktann_typeinfo.h.
-CREATE FUNCTION mktann_vector_support(internal) RETURNS internal
+CREATE FUNCTION mktann_vec32_support(internal) RETURNS internal
     AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION mktann_halfvec_support(internal) RETURNS internal
+CREATE FUNCTION mktann_vec16_support(internal) RETURNS internal
     AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
--- Operator classes for vector type
-CREATE OPERATOR CLASS vector_l2_ops
-    DEFAULT FOR TYPE vector USING mktann AS
-    OPERATOR 1 <-> (vector, vector) FOR ORDER BY float_ops,
-    FUNCTION 1 vector_l2_squared_distance(vector, vector),
+-- Operator classes for vec32 type
+CREATE OPERATOR CLASS vec32_l2_ops
+    DEFAULT FOR TYPE vec32 USING mktann AS
+    OPERATOR 1 <-> (vec32, vec32) FOR ORDER BY float_ops,
+    FUNCTION 1 vec32_l2_squared_distance(vec32, vec32),
     FUNCTION 2 mktann_metric_l2(internal);
 
-CREATE OPERATOR CLASS vector_ip_ops
-    FOR TYPE vector USING mktann AS
-    OPERATOR 1 <#> (vector, vector) FOR ORDER BY float_ops,
-    FUNCTION 1 vector_negative_inner_product(vector, vector),
+CREATE OPERATOR CLASS vec32_ip_ops
+    FOR TYPE vec32 USING mktann AS
+    OPERATOR 1 <#> (vec32, vec32) FOR ORDER BY float_ops,
+    FUNCTION 1 vec32_negative_inner_product(vec32, vec32),
     FUNCTION 2 mktann_metric_ip(internal);
 
-CREATE OPERATOR CLASS vector_cosine_ops
-    FOR TYPE vector USING mktann AS
-    OPERATOR 1 <=> (vector, vector) FOR ORDER BY float_ops,
-    FUNCTION 1 cosine_distance(vector, vector),
+CREATE OPERATOR CLASS vec32_cosine_ops
+    FOR TYPE vec32 USING mktann AS
+    OPERATOR 1 <=> (vec32, vec32) FOR ORDER BY float_ops,
+    FUNCTION 1 cosine_distance(vec32, vec32),
     FUNCTION 2 mktann_metric_cosine(internal);
 
--- Operator classes for halfvec type
+-- Operator classes for vec16 type
 --
 -- The index itself is unchanged: postings hold RaBitQ codes either way, and
--- the AM widens a halfvec tuple to float32 on read (the distance and encode
--- kernels are float32-only). What halfvec buys is the heap, which is what an
--- exact rerank reads -- at 768d a vector row is 3080 bytes and fits 2 to an
--- 8 kB page against halfvec's 1544 and 5. Centroids follow the column and are
+-- the AM widens a vec16 tuple to float32 on read (the distance and encode
+-- kernels are float32-only). What vec16 buys is the heap, which is what an
+-- exact rerank reads -- at 768d a vec32 row is 3080 bytes and fits 2 to an
+-- 8 kB page against vec16's 1544 and 5. Centroids follow the column and are
 -- stored half-precision too (MKT_CENTROID_FMT_HALF).
-CREATE OPERATOR CLASS halfvec_l2_ops
-    DEFAULT FOR TYPE halfvec USING mktann AS
-    OPERATOR 1 <-> (halfvec, halfvec) FOR ORDER BY float_ops,
-    FUNCTION 1 halfvec_l2_squared_distance(halfvec, halfvec),
+CREATE OPERATOR CLASS vec16_l2_ops
+    DEFAULT FOR TYPE vec16 USING mktann AS
+    OPERATOR 1 <-> (vec16, vec16) FOR ORDER BY float_ops,
+    FUNCTION 1 vec16_l2_squared_distance(vec16, vec16),
     FUNCTION 2 mktann_metric_l2(internal),
-    FUNCTION 3 mktann_halfvec_support(internal);
+    FUNCTION 3 mktann_vec16_support(internal);
 
-CREATE OPERATOR CLASS halfvec_ip_ops
-    FOR TYPE halfvec USING mktann AS
-    OPERATOR 1 <#> (halfvec, halfvec) FOR ORDER BY float_ops,
-    FUNCTION 1 halfvec_negative_inner_product(halfvec, halfvec),
+CREATE OPERATOR CLASS vec16_ip_ops
+    FOR TYPE vec16 USING mktann AS
+    OPERATOR 1 <#> (vec16, vec16) FOR ORDER BY float_ops,
+    FUNCTION 1 vec16_negative_inner_product(vec16, vec16),
     FUNCTION 2 mktann_metric_ip(internal),
-    FUNCTION 3 mktann_halfvec_support(internal);
+    FUNCTION 3 mktann_vec16_support(internal);
 
-CREATE OPERATOR CLASS halfvec_cosine_ops
-    FOR TYPE halfvec USING mktann AS
-    OPERATOR 1 <=> (halfvec, halfvec) FOR ORDER BY float_ops,
-    FUNCTION 1 cosine_distance(halfvec, halfvec),
+CREATE OPERATOR CLASS vec16_cosine_ops
+    FOR TYPE vec16 USING mktann AS
+    OPERATOR 1 <=> (vec16, vec16) FOR ORDER BY float_ops,
+    FUNCTION 1 cosine_distance(vec16, vec16),
     FUNCTION 2 mktann_metric_cosine(internal),
-    FUNCTION 3 mktann_halfvec_support(internal);
+    FUNCTION 3 mktann_vec16_support(internal);
 
 -- =====================================================================
 -- index inspection functions
@@ -947,7 +947,7 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 -- pgvector binary cast support
 -- =====================================================================
 --
--- When pgvector (the vector extension) is installed, meerkat creates
+-- When pgvector (the vec32 extension) is installed, meerkat creates
 -- zero-overhead binary casts between the two sets of types. The types
 -- have identical binary layouts (varlena header + int16 dim + int16
 -- unused + float[]), so WITHOUT FUNCTION casts produce RelabelType
@@ -1000,9 +1000,9 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 --
 -- 3. Operator shadowing via the extension schema. If an untrusted role owns
 --    mkt, it can add an operator on pgvector's type -- e.g.
---    mkt.<->(public.vector, public.vector) -- that shadows pgvector's own for
+--    mkt.<->(public.vec32, public.vec32) -- that shadows pgvector's own for
 --    any role with mkt ahead of public, running attacker code as that role.
---    meerkat's OWN operators (on mkt.vector) are not shadowable: a
+--    meerkat's OWN operators (on mkt.vec32) are not shadowable: a
 --    same-signature plant conflicts at install and installed objects are
 --    membership-locked. Two fixes were weighed:
 --      (a) Occupy the signatures -- have meerkat pre-create safe, delegating
@@ -1022,7 +1022,7 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 -- Set up pgvector interoperability in one step: the binary casts between the
 -- two extensions' types, and the membership of pgvector's distance operators
 -- in meerkat's mktann operator families. These belong together -- the casts
--- make pgvector's vector/halfvec binary-coercible to mkt.vector/mkt.halfvec,
+-- make pgvector's vector/halfvec binary-coercible to mkt.vec32/mkt.vec16,
 -- which is exactly what lets pgvector's operators join a family whose opclass
 -- is FOR TYPE mkt.<type>. Keeping them in a single function means a caller
 -- cannot add the casts and forget the operators (which would silently downgrade
@@ -1050,7 +1050,7 @@ BEGIN
     -- pgvector is relocatable: its types and operators live in whatever
     -- schema it was installed into, not necessarily public. Discover it
     -- from the catalog rather than assuming public; extnamespace stays
-    -- authoritative even after ALTER EXTENSION vector SET SCHEMA. The name
+    -- authoritative even after ALTER EXTENSION vec32 SET SCHEMA. The name
     -- is only ever interpolated through %I / quote_ident, so it stays
     -- injection-safe.
     SELECT n.nspname INTO pgv_ns
@@ -1088,12 +1088,12 @@ BEGIN
     FOR r IN
         SELECT * FROM (VALUES
             (pgv OPERATOR(pg_catalog.||) '.vector',
-                 '@extschema@.vector',   'IMPLICIT'),
+                 '@extschema@.vec32',   'IMPLICIT'),
             (pgv OPERATOR(pg_catalog.||) '.halfvec',
-                 '@extschema@.halfvec',  'IMPLICIT'),
-            ('@extschema@.vector',
+                 '@extschema@.vec16',  'IMPLICIT'),
+            ('@extschema@.vec32',
                  pgv OPERATOR(pg_catalog.||) '.vector',  'ASSIGNMENT'),
-            ('@extschema@.halfvec',
+            ('@extschema@.vec16',
                  pgv OPERATOR(pg_catalog.||) '.halfvec', 'ASSIGNMENT')
         ) AS t(src, tgt, ctx)
     LOOP
@@ -1130,12 +1130,12 @@ BEGIN
     -- duplicate_object catch here is pure idempotency for a legitimate re-run.
     FOR r IN
         SELECT * FROM (VALUES
-            ('vector_l2_ops',      'vector',  '<->'),
-            ('vector_ip_ops',      'vector',  '<#>'),
-            ('vector_cosine_ops',  'vector',  '<=>'),
-            ('halfvec_l2_ops',     'halfvec', '<->'),
-            ('halfvec_ip_ops',     'halfvec', '<#>'),
-            ('halfvec_cosine_ops', 'halfvec', '<=>')
+            ('vec32_l2_ops',      'vector',  '<->'),
+            ('vec32_ip_ops',      'vector',  '<#>'),
+            ('vec32_cosine_ops',  'vector',  '<=>'),
+            ('vec16_l2_ops',     'halfvec', '<->'),
+            ('vec16_ip_ops',     'halfvec', '<#>'),
+            ('vec16_cosine_ops', 'halfvec', '<=>')
         ) AS t(fam, typ, op)
     LOOP
         BEGIN
@@ -1171,13 +1171,13 @@ BEGIN
     IF pgv_ns IS NOT NULL THEN
         PERFORM @extschema@.setup_pgvector_compat();
         EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
-            '(%I.vector AS @extschema@.vector)', pgv_ns);
+            '(%I.vector AS @extschema@.vec32)', pgv_ns);
         EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
-            '(%I.halfvec AS @extschema@.halfvec)', pgv_ns);
+            '(%I.halfvec AS @extschema@.vec16)', pgv_ns);
         EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
-            '(@extschema@.vector AS %I.vector)', pgv_ns);
+            '(@extschema@.vec32 AS %I.vector)', pgv_ns);
         EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
-            '(@extschema@.halfvec AS %I.halfvec)', pgv_ns);
+            '(@extschema@.vec16 AS %I.halfvec)', pgv_ns);
     END IF;
 END;
 $$;

@@ -98,7 +98,7 @@ These files use per-function target attributes:
 ```c
 /* distance_avx512.c */
 __attribute__((target("avx512f,avx512dq")))
-Distance mkt_distance_l2_avx512(VectorRef a, VectorRef b)
+Distance mkt_distance_l2_avx512(Vec32Ref a, Vec32Ref b)
 {
     /* AVX-512 intrinsics */
 }
@@ -214,7 +214,7 @@ compiled as a separate library with `-mfpu=neon` to handle this case.
 On GNU systems, IFUNC provides zero-overhead dispatch:
 
 ```c
-Distance mkt_distance_l2(VectorRef a, VectorRef b)
+Distance mkt_distance_l2(Vec32Ref a, Vec32Ref b)
     __attribute__((ifunc("resolve_distance_l2")));
 ```
 
@@ -229,7 +229,7 @@ functionality with minimal overhead (~1 indirect call):
 ```c
 static DistanceFn g_distance_l2_fn = NULL;
 
-Distance mkt_distance_l2(VectorRef a, VectorRef b)
+Distance mkt_distance_l2(Vec32Ref a, Vec32Ref b)
 {
     if (mkt_unlikely(!g_initialized))
         mkt_distance_init();

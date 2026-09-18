@@ -24,8 +24,8 @@ else
     )
 
     test_names = [
-      'vector',
-      'halfvec',
+      'vec32',
+      'vec16',
       'distance',
       'operators',
       'rabitq',
@@ -39,7 +39,7 @@ else
       'query_settings',
       'scan_stats',
       'empty_table',
-      'zero_vectors',
+      'zero_vec32s',
       'row_estimate',
       'index_stats',
       'split',

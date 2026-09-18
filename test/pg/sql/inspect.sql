@@ -1,11 +1,11 @@
 -- centroid_pages inspection function
 
--- Create table with vector column
-CREATE TABLE embeddings (id serial, v vector(3));
+-- Create table with vec32 column
+CREATE TABLE embeddings (id serial, v vec32(3));
 
 -- Insert deterministic data (grid of vectors)
 INSERT INTO embeddings (v)
-    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vector
+    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vec32
     FROM generate_series(0, 9) x,
          generate_series(0, 9) y,
          generate_series(0, 9) z;
@@ -31,16 +31,16 @@ SELECT level,
     FROM centroid_pages('idx_l2c'::regclass)
     GROUP BY level ORDER BY level;
 
--- Centroid format follows the column type: a halfvec column stores
--- half-precision centroids, a vector column float, with every option
+-- Centroid format follows the column type: a vec16 column stores
+-- half-precision centroids, a vec32 column float, with every option
 -- otherwise identical. This is a regression test as much as a feature test --
--- the AM resolves mkt.halfvec's OID during CREATE INDEX, where PostgreSQL
+-- the AM resolves mkt.vec16's OID during CREATE INDEX, where PostgreSQL
 -- has narrowed the search path (RestrictSearchPath in DefineIndex), so an
--- unqualified type lookup silently reports "not halfvec" and the whole
--- halfvec input path decodes as float32.
-CREATE TABLE h_embeddings (id serial, v halfvec(3));
+-- unqualified type lookup silently reports "not vec16" and the whole
+-- vec16 input path decodes as float32.
+CREATE TABLE h_embeddings (id serial, v vec16(3));
 INSERT INTO h_embeddings (v)
-    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::halfvec
+    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vec16
     FROM generate_series(0, 9) x,
          generate_series(0, 9) y,
          generate_series(0, 9) z;
@@ -105,13 +105,13 @@ SELECT
 -- Higher-dim vectors to force page overflow (next_blkno chains).
 -- Float format with dim=256: max 7 entries/page, nlist=10 overflows.
 -- Pin float (off) so the page-chain layout this test asserts is stable.
-CREATE TABLE wide (id serial, v vector(256));
+CREATE TABLE wide (id serial, v vec32(256));
 
 INSERT INTO wide (v)
     SELECT (
         SELECT array_agg(sin(i + j * 0.1)::real)
         FROM generate_series(0, 255) j
-    )::vector(256)
+    )::vec32(256)
     FROM generate_series(1, 100) i;
 
 ANALYZE wide;
@@ -223,9 +223,9 @@ RESET enable_seqscan;
 -- later VACUUM can only tombstone a page once every entry on it is dead, which
 -- a page holding live entries never is. The count after converting is the
 -- assertion: it has to be the live rows, not the rows the list was built with.
-CREATE TABLE conv_dead (id int, v vector(4));
+CREATE TABLE conv_dead (id int, v vec32(4));
 INSERT INTO conv_dead
-    SELECT g, format('[%s,0,0,0]', g)::vector(4) FROM generate_series(1, 40) g;
+    SELECT g, format('[%s,0,0,0]', g)::vec32(4) FROM generate_series(1, 40) g;
 CREATE INDEX conv_dead_idx ON conv_dead USING mktann (v)
     WITH (nlist = 1, fastscan = off, centroid_fastscan = off);
 
@@ -255,7 +255,7 @@ SET enable_seqscan = off;
 SET mkt.nprobe = 4;
 SELECT count(*) AS rows_for_limit_10 FROM (
     SELECT id FROM conv_dead
-    ORDER BY v <-> '[1,0,0,0]'::vector(4) LIMIT 10) t;
+    ORDER BY v <-> '[1,0,0,0]'::vec32(4) LIMIT 10) t;
 RESET mkt.nprobe;
 RESET enable_seqscan;
 DROP TABLE conv_dead;

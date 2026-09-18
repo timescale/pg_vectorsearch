@@ -276,7 +276,7 @@ Example:
 
 ```C
 int
-mkt_vector_dot_product(const MktVector *v1, const MktVector *v2)
+vec32_dot_product(const Vec32 *v1, const Vec32 *v2)
 {
   ...
 }
@@ -286,17 +286,20 @@ mkt_vector_dot_product(const MktVector *v1, const MktVector *v2)
 
 ### Dependencies
 
-None at the SQL level. Meerkat defines its own `vector`, `halfvec` and
+None at the SQL level. Meerkat defines its own `vec32`, `vec16` and
 `rabitq` types in the `mkt` schema (see `sql/meerkat.sql`), so it installs
-and runs without pgvector.
+and runs without pgvector. The distinct `vec32`/`vec16` names do not collide
+with pgvector's `vector`/`halfvec`, even if both extensions put objects in the
+same schema.
 
-**pgvector interoperability.** The types are laid out to be
-binary-compatible with pgvector's, and the extension creates
+**pgvector interoperability.** `vec32` is binary-compatible with pgvector's
+`vector`, and `vec16` with pgvector's `halfvec`; Meerkat installs its types in
+the `mkt` schema by default, and the extension creates
 binary-coercible casts between the two in both directions:
 
 ```sql
-CREATE CAST (public.vector  AS mkt.vector)  WITHOUT FUNCTION AS IMPLICIT;
-CREATE CAST (mkt.vector     AS public.vector) WITHOUT FUNCTION AS ASSIGNMENT;
+CREATE CAST (public.vector  AS mkt.vec32)  WITHOUT FUNCTION AS IMPLICIT;
+CREATE CAST (mkt.vec32     AS public.vector) WITHOUT FUNCTION AS ASSIGNMENT;
 -- and the same pair for halfvec
 ```
 
@@ -309,7 +312,7 @@ later.
 
 The consequence worth remembering: because the casts are `WITHOUT FUNCTION`,
 they satisfy PostgreSQL's binary-coercibility rule for operator classes. That
-is what lets an `mktann` opclass declared `FOR TYPE mkt.vector` be used on a
+is what lets an `mktann` opclass declared `FOR TYPE mkt.vec32` be used on a
 column of pgvector's `public.vector` — the two are the same bytes, so no
 conversion happens and no copy is made. Anything in the access method that
 asks "which type is this column?" must ask it the same way, via

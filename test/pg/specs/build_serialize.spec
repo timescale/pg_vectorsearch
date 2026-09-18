@@ -16,8 +16,8 @@
 
 setup
 {
-    CREATE TABLE bld (id int, v vector(3));
-    INSERT INTO bld SELECT g, format('[%s,0,0]', g)::vector
+    CREATE TABLE bld (id int, v vec32(3));
+    INSERT INTO bld SELECT g, format('[%s,0,0]', g)::vec32
         FROM generate_series(1, 50) g;
     ALTER TABLE bld SET (parallel_workers = 2);
 }

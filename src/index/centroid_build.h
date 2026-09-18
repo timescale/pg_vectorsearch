@@ -96,11 +96,11 @@ static inline void
 centroid_encode_rabitq(CentroidEncoder *enc, uint32_t index, void *dest)
 {
 	CentroidEncoderRaBitQ *re	= (CentroidEncoderRaBitQ *)enc;
-	VectorRef			   vref = {
-						 .data = re->vectors + (size_t)index * re->dim,
-						 .dim  = re->dim,
-	 };
-	VectorRef mref = {.data = re->global_mean, .dim = re->dim};
+	Vec32Ref			   vref = {
+						  .data = re->vectors + (size_t)index * re->dim,
+						  .dim	= re->dim,
+	  };
+	Vec32Ref mref = {.data = re->global_mean, .dim = re->dim};
 	mkt_rabitq_encode_into(re->params, vref, mref, (RaBitQData *)dest);
 }
 

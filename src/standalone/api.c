@@ -73,19 +73,19 @@ parse_distance_mode(const char *s)
 
 MktHandle *
 mkt_handle_create(
-		MktVectorSource *src,
-		uint32_t		 nlist,
-		uint32_t		 fan_out,
-		const char		*metric,
-		const char		*centroid_fmt,
-		const char		*posting_fmt,
-		uint32_t		 km_nredo,
-		uint32_t		 km_max_iter,
-		double			 soar_lambda,
-		double			 boundary_epsilon,
-		int				 fastscan,
-		int32_t			 nworkers,
-		MktBuildInfo	*info)
+		Vec32Source	 *src,
+		uint32_t	  nlist,
+		uint32_t	  fan_out,
+		const char	 *metric,
+		const char	 *centroid_fmt,
+		const char	 *posting_fmt,
+		uint32_t	  km_nredo,
+		uint32_t	  km_max_iter,
+		double		  soar_lambda,
+		double		  boundary_epsilon,
+		int			  fastscan,
+		int32_t		  nworkers,
+		MktBuildInfo *info)
 {
 	/* Create context as child of the current context if one exists,
 	 * otherwise as a top-level context. This works both when called

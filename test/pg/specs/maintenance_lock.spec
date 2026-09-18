@@ -34,8 +34,8 @@
 setup
 {
     CREATE EXTENSION injection_points;
-    CREATE TABLE maint (id int, v vector(3));
-    INSERT INTO maint SELECT g, format('[%s,0,0]', g)::vector
+    CREATE TABLE maint (id int, v vec32(3));
+    INSERT INTO maint SELECT g, format('[%s,0,0]', g)::vec32
         FROM generate_series(1, 60) g;
     CREATE INDEX maint_idx ON maint USING mktann (v)
         WITH (nlist = 1, centroid_fastscan = off);

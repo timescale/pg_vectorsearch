@@ -185,7 +185,7 @@ mkt_l2_norm(const float *v, Dimension dim)
 }
 
 float
-mkt_vector_sum(const float *v, Dimension dim)
+vec32_sum(const float *v, Dimension dim)
 {
 	if (mkt_unlikely(!g_initialized))
 		mkt_vecops_init();
@@ -193,7 +193,7 @@ mkt_vector_sum(const float *v, Dimension dim)
 }
 
 void
-mkt_vector_sub(const float *a, const float *b, float *out, Dimension dim)
+vec32_sub(const float *a, const float *b, float *out, Dimension dim)
 {
 	if (mkt_unlikely(!g_initialized))
 		mkt_vecops_init();
@@ -201,7 +201,7 @@ mkt_vector_sub(const float *a, const float *b, float *out, Dimension dim)
 }
 
 void
-mkt_vector_add(const float *a, const float *b, float *out, Dimension dim)
+vec32_add(const float *a, const float *b, float *out, Dimension dim)
 {
 	if (mkt_unlikely(!g_initialized))
 		mkt_vecops_init();
@@ -209,7 +209,7 @@ mkt_vector_add(const float *a, const float *b, float *out, Dimension dim)
 }
 
 void
-mkt_vector_scale(const float *v, float scalar, float *out, Dimension dim)
+vec32_scale(const float *v, float scalar, float *out, Dimension dim)
 {
 	if (mkt_unlikely(!g_initialized))
 		mkt_vecops_init();
@@ -217,13 +217,12 @@ mkt_vector_scale(const float *v, float scalar, float *out, Dimension dim)
 }
 
 void
-mkt_vector_mean(
-		const float *vectors, uint32_t nvecs, Dimension dim, float *out)
+vec32_mean(const float *vectors, uint32_t nvecs, Dimension dim, float *out)
 {
 	memset(out, 0, dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
-		mkt_vector_add(out, vectors + (size_t)i * dim, out, dim);
-	mkt_vector_scale(out, 1.0f / (float)nvecs, out, dim);
+		vec32_add(out, vectors + (size_t)i * dim, out, dim);
+	vec32_scale(out, 1.0f / (float)nvecs, out, dim);
 }
 
 void
@@ -234,7 +233,7 @@ mkt_global_mean(
 		DistanceMetric metric,
 		float		  *out)
 {
-	mkt_vector_mean(centroids, ncentroids, dim, out);
+	vec32_mean(centroids, ncentroids, dim, out);
 	if (metric == DISTANCE_COSINE)
 		mkt_l2_normalize(out, dim);
 }

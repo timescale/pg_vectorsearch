@@ -1,17 +1,17 @@
 /*
- * vector_source.c - Array-backed vector source implementation
+ * vec32_source.c - Array-backed vector source implementation
  */
 
 #include <stddef.h>
 
-#include "standalone/vector_source.h"
+#include "standalone/vec32_source.h"
 
 static bool
 array_source_next(
-		MktVectorSource *src,
-		uint32_t		 stride,
-		const float	   **vec_out,
-		uint32_t		*id_out)
+		Vec32Source	 *src,
+		uint32_t	  stride,
+		const float **vec_out,
+		uint32_t	 *id_out)
 {
 	MktArraySource *as = (MktArraySource *)src;
 	if (as->pos >= src->nvecs)
@@ -23,7 +23,7 @@ array_source_next(
 }
 
 static void
-array_source_reset(MktVectorSource *src)
+array_source_reset(Vec32Source *src)
 {
 	MktArraySource *as = (MktArraySource *)src;
 	as->pos			   = 0;

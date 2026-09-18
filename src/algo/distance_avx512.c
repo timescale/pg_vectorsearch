@@ -23,7 +23,7 @@
  * Remaining elements handled with scalar tail loop.
  */
 MKT_TARGET_AVX512 Distance
-mkt_distance_l2_avx512(VectorRef a, VectorRef b)
+mkt_distance_l2_avx512(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -63,7 +63,7 @@ mkt_distance_l2_avx512(VectorRef a, VectorRef b)
  * Negative inner product using AVX-512.
  */
 MKT_TARGET_AVX512 Distance
-mkt_distance_ip_avx512(VectorRef a, VectorRef b)
+mkt_distance_ip_avx512(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -98,7 +98,7 @@ mkt_distance_ip_avx512(VectorRef a, VectorRef b)
  * Computes three parallel reductions: dot product, norm_a, norm_b.
  */
 MKT_TARGET_AVX512 Distance
-mkt_distance_cosine_avx512(VectorRef a, VectorRef b)
+mkt_distance_cosine_avx512(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -149,7 +149,7 @@ mkt_distance_cosine_avx512(VectorRef a, VectorRef b)
  */
 MKT_TARGET_AVX512 int
 mkt_distance_batch_l2_avx512(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -231,7 +231,7 @@ mkt_distance_batch_l2_avx512(
  */
 MKT_TARGET_AVX512 int
 mkt_distance_batch_ip_avx512(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -307,7 +307,7 @@ mkt_distance_batch_ip_avx512(
  */
 MKT_TARGET_AVX512 int
 mkt_distance_batch_cosine_avx512(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,

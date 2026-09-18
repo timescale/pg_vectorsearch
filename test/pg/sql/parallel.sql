@@ -12,10 +12,10 @@
 -- (fastscan / SOAR / boundary), since mktann.sql already covers serial
 -- L2/cosine/float/multi-level builds.
 
-CREATE TABLE embeddings (id serial, v vector(3));
+CREATE TABLE embeddings (id serial, v vec32(3));
 
 INSERT INTO embeddings (v)
-    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vector
+    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vec32
     FROM generate_series(0, 9) x,
          generate_series(0, 9) y,
          generate_series(0, 9) z;
@@ -66,7 +66,7 @@ SELECT * FROM pbuild_check('(v) WITH (centroid_compression = true)');
 SELECT * FROM pbuild_check('(v) WITH (centroid_compression = off)');
 -- Cosine
 SELECT * FROM pbuild_check(
-    '(v vector_cosine_ops) WITH (centroid_compression = off)', '<=>');
+    '(v vec32_cosine_ops) WITH (centroid_compression = off)', '<=>');
 -- Fastscan posting lists
 SELECT * FROM pbuild_check('(v) WITH (fastscan = true)');
 -- Multi-level tree
@@ -97,12 +97,12 @@ RESET enable_seqscan;
 -- sampler to draw a coarser (uniform) subsample to fit (~341 samples at 1MB,
 -- below the row count); the build must still succeed and produce a usable
 -- index.
-CREATE TABLE wide_emb (id serial, v vector(768));
+CREATE TABLE wide_emb (id serial, v vec32(768));
 INSERT INTO wide_emb (v)
     SELECT (
         SELECT array_agg((sin(i * 0.1 + j))::real)
         FROM generate_series(0, 767) j
-    )::vector(768)
+    )::vec32(768)
     FROM generate_series(1, 600) i;
 ALTER TABLE wide_emb SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
@@ -129,7 +129,7 @@ DROP TABLE wide_emb;
 -- ============================================================
 -- Edge case: parallel build of an empty table must not crash
 -- ============================================================
-CREATE TABLE empty_emb (id serial, v vector(3));
+CREATE TABLE empty_emb (id serial, v vec32(3));
 ALTER TABLE empty_emb SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
 CREATE INDEX idx_empty ON empty_emb USING mktann (v);
@@ -147,9 +147,9 @@ RESET max_parallel_maintenance_workers;
 -- table must PRESERVE it. A parallel build that reports zero instead
 -- clobbers the planner's row estimate (and everything derived from
 -- reltuples) until the next ANALYZE.
-CREATE TABLE relstats (id serial, v vector(3));
+CREATE TABLE relstats (id serial, v vec32(3));
 INSERT INTO relstats (v)
-    SELECT format('[%s,%s,%s]', x * 0.1, x * 0.2, x * 0.3)::vector
+    SELECT format('[%s,%s,%s]', x * 0.1, x * 0.2, x * 0.3)::vec32
     FROM generate_series(1, 1000) x;
 ALTER TABLE relstats SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
@@ -210,8 +210,8 @@ END $$;
 -- 50 well-separated points on a line; the 10 nearest to [0.5,0,0] are ids 1..10
 -- (strictly increasing distance, gaps of 1.0), so quantization cannot reorder
 -- the top-10.
-CREATE TABLE line3 (id int, v vector(3));
-INSERT INTO line3 SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE line3 (id int, v vec32(3));
+INSERT INTO line3 SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 ALTER TABLE line3 SET (parallel_workers = 2);
 
@@ -327,8 +327,8 @@ DROP TABLE line3;
 -- (max_parallel_workers = 0), so the build lands on the serial path after
 -- the parallel attempt already sized its shared memory. The fallback index
 -- must return the exact top-10.
-CREATE TABLE line1k (id int, v vector(3));
-INSERT INTO line1k SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE line1k (id int, v vec32(3));
+INSERT INTO line1k SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 1000) g;
 ALTER TABLE line1k SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
@@ -343,9 +343,9 @@ DROP TABLE line1k;
 -- maintenance_work_mem = 1MB the k-means sample (~341 vectors) is bounded below
 -- the 600 rows, exercising the bounded subsample + full-table leaf refinement;
 -- the bounded/refined index must still return the exact top-10.
-CREATE TABLE line768 (id int, v vector(768));
+CREATE TABLE line768 (id int, v vec32(768));
 INSERT INTO line768
-    SELECT g, ('[' || g || repeat(',0', 767) || ']')::vector(768)
+    SELECT g, ('[' || g || repeat(',0', 767) || ']')::vec32(768)
     FROM generate_series(1, 600) g;
 ALTER TABLE line768 SET (parallel_workers = 2);
 
@@ -366,11 +366,11 @@ DROP TABLE line768;
 -- Serial refine + big subtree blobs (12k rows: the serial sample cap
 -- floors at 10000, so the build is genuinely subsampled)
 -- ============================================================
-CREATE TABLE line12k (id int, v vector(64));
+CREATE TABLE line12k (id int, v vec32(64));
 INSERT INTO line12k
     SELECT g, (SELECT ('[' || string_agg((sin(g * 0.01 + j))::text, ',') ||
                        ']')
-               FROM generate_series(1, 64) j)::vector(64)
+               FROM generate_series(1, 64) j)::vec32(64)
     FROM generate_series(1, 12000) g;
 ALTER TABLE line12k SET (parallel_workers = 2);
 
@@ -379,7 +379,7 @@ ALTER TABLE line12k SET (parallel_workers = 2);
 -- refine rewrites fastscan head pages.
 SET max_parallel_maintenance_workers = 0;
 SET mkt.leaf_refine_threshold = 100000;
--- The 1MB budget forces the sample cap to its 10000-vector floor, below the
+-- The 1MB budget forces the sample cap to its 10000-vec32 floor, below the
 -- 12000 rows, so the build is genuinely subsampled and refine runs.
 SET maintenance_work_mem = '1MB';
 -- The probe mirrors mid-table row 6000's construction (sin(60 + j)) without
@@ -412,7 +412,7 @@ DROP TABLE line12k;
 -- One row, and all-identical rows: k-means collapses to mostly-empty
 -- clusters, exercising the empty-cluster compaction and a head region far
 -- smaller than the requested nlist. Serial and parallel.
-CREATE TABLE degen (id int, v vector(3));
+CREATE TABLE degen (id int, v vec32(3));
 INSERT INTO degen VALUES (1, '[1,2,3]');
 CREATE INDEX degen_one ON degen USING mktann (v) WITH (nlist = 8);
 SET enable_seqscan = off;
@@ -464,8 +464,8 @@ DROP TABLE degen;
 -- mismatch). CIC cannot run inside a function/txn block, so build it inline.
 -- Well-separated points on a line: with nprobe >= nlist the top-10 of [0.5,0,0]
 -- must be exactly ids 1..10.
-CREATE TABLE cic_pts (id int, v vector(3));
-INSERT INTO cic_pts SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE cic_pts (id int, v vec32(3));
+INSERT INTO cic_pts SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 ALTER TABLE cic_pts SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
@@ -497,24 +497,24 @@ DROP TABLE cic_pts;
 -- cosine-specific code in the streamed build: sample normalization,
 -- root/global-mean normalization, multi-level batched and flat parallel
 -- shapes, and the serial shape.
-CREATE TABLE cosdirs (id int, v vector(8));
+CREATE TABLE cosdirs (id int, v vec32(8));
 INSERT INTO cosdirs
     SELECT g, ('[' || cos(g * 0.001) || ',' || sin(g * 0.001) ||
-               repeat(',0.01', 6) || ']')::vector(8)
+               repeat(',0.01', 6) || ']')::vec32(8)
     FROM generate_series(1, 2000) g;
 ALTER TABLE cosdirs SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
 -- multi-level batched parallel tree
-SELECT exact_check('cosdirs', '(v vector_cosine_ops) WITH (nlist = 48, fan_out = 4)',
+SELECT exact_check('cosdirs', '(v vec32_cosine_ops) WITH (nlist = 48, fan_out = 4)',
                    '[' || cos(-0.5) || ',' || sin(-0.5) || repeat(',0.01', 6) || ']',
                    '<=>') AS cos_parallel_multilevel_exact;
 -- flat parallel tree
-SELECT exact_check('cosdirs', '(v vector_cosine_ops) WITH (nlist = 8, fan_out = 8)',
+SELECT exact_check('cosdirs', '(v vec32_cosine_ops) WITH (nlist = 8, fan_out = 8)',
                    '[' || cos(-0.5) || ',' || sin(-0.5) || repeat(',0.01', 6) || ']',
                    '<=>') AS cos_parallel_flat_exact;
 SET max_parallel_maintenance_workers = 0;
 -- serial streamed tree
-SELECT exact_check('cosdirs', '(v vector_cosine_ops) WITH (nlist = 48, fan_out = 4)',
+SELECT exact_check('cosdirs', '(v vec32_cosine_ops) WITH (nlist = 48, fan_out = 4)',
                    '[' || cos(-0.5) || ',' || sin(-0.5) || repeat(',0.01', 6) || ']',
                    '<=>') AS cos_serial_multilevel_exact;
 RESET max_parallel_maintenance_workers;
@@ -527,8 +527,8 @@ DROP TABLE cosdirs;
 -- root and leaf-parent at once, with leaf-ness inferred from the descent
 -- level; fastscan group layout on that page was previously only exercised
 -- via multi-level builds.
-CREATE TABLE line3f (id int, v vector(3));
-INSERT INTO line3f SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE line3f (id int, v vec32(3));
+INSERT INTO line3f SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 ALTER TABLE line3f SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
@@ -547,11 +547,11 @@ DROP TABLE line3f;
 -- otherwise never exercised. The build is genuinely subsampled (12000 rows
 -- against the 10000-sample floor) and the forced threshold refines every
 -- leaf; the refined index must still return the exact top-10.
-CREATE TABLE line12kb (id int, v vector(64));
+CREATE TABLE line12kb (id int, v vec32(64));
 INSERT INTO line12kb
     SELECT g, (SELECT ('[' || string_agg((sin(g * 0.01 + j))::text, ',') ||
                        ']')
-               FROM generate_series(1, 64) j)::vector(64)
+               FROM generate_series(1, 64) j)::vec32(64)
     FROM generate_series(1, 12000) g;
 SET max_parallel_maintenance_workers = 0;
 SET maintenance_work_mem = '1MB';
@@ -565,18 +565,18 @@ RESET maintenance_work_mem;
 RESET max_parallel_maintenance_workers;
 DROP TABLE line12kb;
 
--- Parallel and serial builds over a halfvec column: both decode paths widen
+-- Parallel and serial builds over a vec16 column: both decode paths widen
 -- f16 to f32 before routing, and both must produce an index whose top-10
 -- matches brute force.
 --
--- Note this does NOT catch a build that decodes halfvec as float32: measured,
+-- Note this does NOT catch a build that decodes vec16 as float32: measured,
 -- it still returns the exact top-10, because the rerank stage recomputes
 -- distances from the heap and repairs the order that garbage centroids sent
--- it to. That failure mode is caught by the halfvec correctness check in
+-- it to. That failure mode is caught by the vec16 correctness check in
 -- mktann.sql (which disagrees with brute force) and by the centroid-format
 -- check in inspect.sql -- keeping this arm honest about what it proves.
-CREATE TABLE hline3 (id int, v halfvec(3));
-INSERT INTO hline3 SELECT g, format('[%s,0,0]', g)::halfvec
+CREATE TABLE hline3 (id int, v vec16(3));
+INSERT INTO hline3 SELECT g, format('[%s,0,0]', g)::vec16
     FROM generate_series(1, 50) g;
 ALTER TABLE hline3 SET (parallel_workers = 2);
 

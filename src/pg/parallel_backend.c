@@ -42,7 +42,7 @@
 #include "quant/rabitq.h"
 #include "support_pg.h"
 #include "typeinfo.h"
-#include "types/vector.h"
+#include "types/vec32.h"
 
 /*
  * PG-specific shared build state: the neutral MktBuildShared plus the relation
@@ -88,9 +88,9 @@ typedef struct MktBuildSharedPg
  */
 typedef struct MktPgScanAdapter
 {
-	MktBuildScanCb	cb;
-	void		   *state;
-	MktVectorAccess input;
+	MktBuildScanCb cb;
+	void		  *state;
+	Vec32Access	   input;
 } MktPgScanAdapter;
 
 static void
@@ -110,7 +110,7 @@ mkt_pg_scan_adapter(
 	if (isnull[0])
 		return;
 
-	VectorRef vref = mkt_vector_read(&a->input, values[0]);
+	Vec32Ref vref = vec32_read(&a->input, values[0]);
 	a->cb(a->state, *tid, vref.data);
 }
 
@@ -139,7 +139,7 @@ mkt_build_scan(
 	MktPgScanAdapter actx = {
 			.cb	   = cb,
 			.state = state,
-			.input = mkt_vector_access(
+			.input = vec32_access(
 					mkt_index_type_info(index), dim, CurrentMemoryContext),
 	};
 

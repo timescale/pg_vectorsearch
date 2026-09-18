@@ -1,5 +1,5 @@
 /*
- * vector_source.h - Iterator interface for streaming vector data
+ * vec32_source.h - Iterator interface for streaming vector data
  *
  * Abstracts the data source so index builds can stream vectors from
  * memory, HDF5 files, or any other source without loading the full
@@ -10,15 +10,15 @@
  *   2. Reset, then assign all vectors to clusters (sequential reads)
  */
 
-#ifndef MKT_VECTOR_SOURCE_H
-#define MKT_VECTOR_SOURCE_H
+#ifndef VEC32_SOURCE_H
+#define VEC32_SOURCE_H
 
 #include <stdbool.h>
 #include <stdint.h>
 
-typedef struct MktVectorSource MktVectorSource;
+typedef struct Vec32Source Vec32Source;
 
-struct MktVectorSource
+struct Vec32Source
 {
 	/*
 	 * Get the next vector, advancing by stride positions.
@@ -33,20 +33,20 @@ struct MktVectorSource
 	 * id_out receives the vector ID (position in the dataset).
 	 */
 	bool (*next)(
-			MktVectorSource *src,
-			uint32_t		 stride,
-			const float	   **vec_out,
-			uint32_t		*id_out);
+			Vec32Source	 *src,
+			uint32_t	  stride,
+			const float **vec_out,
+			uint32_t	 *id_out);
 
 	/* Reset to the beginning for another pass. */
-	void (*reset)(MktVectorSource *src);
+	void (*reset)(Vec32Source *src);
 
 	/*
 	 * Bulk-read all vectors into a contiguous buffer.
 	 * dest must hold nvecs * dim floats.
 	 * Optional — NULL means not supported (use next() loop).
 	 */
-	bool (*read_all)(MktVectorSource *src, float *dest);
+	bool (*read_all)(Vec32Source *src, float *dest);
 
 	uint32_t nvecs; /* total number of vectors */
 	uint32_t dim;	/* vector dimension */
@@ -60,12 +60,12 @@ struct MktVectorSource
  */
 typedef struct MktArraySource
 {
-	MktVectorSource base;
-	const float	   *data;
-	uint32_t		pos;
+	Vec32Source	 base;
+	const float *data;
+	uint32_t	 pos;
 } MktArraySource;
 
 void mkt_array_source_init(
 		MktArraySource *src, const float *data, uint32_t nvecs, uint32_t dim);
 
-#endif /* MKT_VECTOR_SOURCE_H */
+#endif /* VEC32_SOURCE_H */

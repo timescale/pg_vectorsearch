@@ -17,8 +17,8 @@
  * - none: Truly scalar (no vectorization, for debugging/baseline)
  *
  * Usage:
- *   VectorRef a = {.data = vec1, .dim = 128};
- *   VectorRef b = {.data = vec2, .dim = 128};
+ *   Vec32Ref a = {.data = vec1, .dim = 128};
+ *   Vec32Ref b = {.data = vec2, .dim = 128};
  *
  *   Distance d = mkt_distance_l2(a, b);
  *
@@ -67,7 +67,7 @@ int mkt_distance_init(void);
  * sufficient and avoids a sqrt operation. If you need true L2 distance,
  * apply sqrtf() to the result.
  */
-Distance mkt_distance_l2(VectorRef a, VectorRef b);
+Distance mkt_distance_l2(Vec32Ref a, Vec32Ref b);
 
 /*
  * Negative inner product (for maximum similarity search).
@@ -78,7 +78,7 @@ Distance mkt_distance_l2(VectorRef a, VectorRef b);
  * consistent with distance metrics. To get the actual inner product,
  * negate the result.
  */
-Distance mkt_distance_ip(VectorRef a, VectorRef b);
+Distance mkt_distance_ip(Vec32Ref a, Vec32Ref b);
 
 /*
  * Cosine distance (1 - cosine similarity).
@@ -88,7 +88,7 @@ Distance mkt_distance_ip(VectorRef a, VectorRef b);
  * Returns 1.0 for zero vectors (maximum distance). Range is [0, 2] for
  * arbitrary vectors, [0, 1] for normalized vectors.
  */
-Distance mkt_distance_cosine(VectorRef a, VectorRef b);
+Distance mkt_distance_cosine(Vec32Ref a, Vec32Ref b);
 
 /*
  * Generic distance function with runtime metric selection.
@@ -97,7 +97,7 @@ Distance mkt_distance_cosine(VectorRef a, VectorRef b);
  * less efficient than calling the specific function directly (extra
  * branch), but useful for generic code.
  */
-Distance mkt_distance(VectorRef a, VectorRef b, DistanceMetric metric);
+Distance mkt_distance(Vec32Ref a, Vec32Ref b, DistanceMetric metric);
 
 /*
  * Batch Distance Functions
@@ -118,21 +118,21 @@ Distance mkt_distance(VectorRef a, VectorRef b, DistanceMetric metric);
  * Returns: 0 on success, -1 on error (dimension mismatch, null pointers)
  */
 int mkt_distance_batch_l2(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 
 int mkt_distance_batch_ip(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 
 int mkt_distance_batch_cosine(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -172,25 +172,25 @@ void mkt_distance_force_reinit(void);
  */
 
 /* Compiler-vectorized single-pair functions */
-Distance mkt_distance_l2_compiler(VectorRef a, VectorRef b);
-Distance mkt_distance_ip_compiler(VectorRef a, VectorRef b);
-Distance mkt_distance_cosine_compiler(VectorRef a, VectorRef b);
+Distance mkt_distance_l2_compiler(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_ip_compiler(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_cosine_compiler(Vec32Ref a, Vec32Ref b);
 
 /* Compiler-vectorized batch functions */
 int mkt_distance_batch_l2_compiler(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_ip_compiler(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_cosine_compiler(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -207,48 +207,48 @@ int mkt_distance_batch_cosine_compiler(
 
 #if defined(__x86_64__) || defined(_M_X64)
 /* AVX2 implementations */
-Distance mkt_distance_l2_avx2(VectorRef a, VectorRef b);
-Distance mkt_distance_ip_avx2(VectorRef a, VectorRef b);
-Distance mkt_distance_cosine_avx2(VectorRef a, VectorRef b);
+Distance mkt_distance_l2_avx2(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_ip_avx2(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_cosine_avx2(Vec32Ref a, Vec32Ref b);
 
 int mkt_distance_batch_l2_avx2(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_ip_avx2(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_cosine_avx2(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 
 /* AVX-512 implementations */
-Distance mkt_distance_l2_avx512(VectorRef a, VectorRef b);
-Distance mkt_distance_ip_avx512(VectorRef a, VectorRef b);
-Distance mkt_distance_cosine_avx512(VectorRef a, VectorRef b);
+Distance mkt_distance_l2_avx512(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_ip_avx512(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_cosine_avx512(Vec32Ref a, Vec32Ref b);
 
 int mkt_distance_batch_l2_avx512(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_ip_avx512(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_cosine_avx512(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -257,24 +257,24 @@ int mkt_distance_batch_cosine_avx512(
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 /* NEON implementations */
-Distance mkt_distance_l2_neon(VectorRef a, VectorRef b);
-Distance mkt_distance_ip_neon(VectorRef a, VectorRef b);
-Distance mkt_distance_cosine_neon(VectorRef a, VectorRef b);
+Distance mkt_distance_l2_neon(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_ip_neon(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_cosine_neon(Vec32Ref a, Vec32Ref b);
 
 int mkt_distance_batch_l2_neon(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_ip_neon(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_cosine_neon(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,

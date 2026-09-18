@@ -7,10 +7,10 @@
 -- extra posting entries SOAR and boundary replication add for the same
 -- row.
 
-CREATE TABLE index_stats_test (id serial, v vector(8));
+CREATE TABLE index_stats_test (id serial, v vec32(8));
 INSERT INTO index_stats_test (v)
     SELECT (SELECT array_agg(sin(i * 0.3 + j * 1.1)::real)
-            FROM generate_series(0, 7) j)::vector(8)
+            FROM generate_series(0, 7) j)::vec32(8)
     FROM generate_series(1, 2000) i;
 -- Replication on, so posting entries outnumber rows.
 CREATE INDEX index_stats_idx ON index_stats_test USING mktann (v)

@@ -20,7 +20,7 @@
 #include "core/types.h"
 #include "quant/matrix.h"
 #include "quant/rabitq.h"
-#include "types/halfvec.h"
+#include "types/vec16.h"
 
 #ifdef MKT_HAVE_FAISS
 #include <RaBitQuantizer_c.h>
@@ -217,7 +217,7 @@ benchmark_encode_single(
 {
 	printf("Single-vector encoding (dim=%u, count=%u):\n", dim, count);
 
-	VectorRef cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/* Allocate output buffers */
 	size_t	 data_size = MKT_RABITQ_DATA_SIZE(dim);
@@ -233,7 +233,7 @@ benchmark_encode_single(
 	{
 		for (uint32_t i = 0; i < count; i++)
 		{
-			VectorRef	vec_ref = {.data = vectors + i * dim, .dim = dim};
+			Vec32Ref	vec_ref = {.data = vectors + i * dim, .dim = dim};
 			RaBitQData *out		= (RaBitQData *)(outputs + i * data_size);
 			mkt_rabitq_encode_into(params, vec_ref, cent_ref, out);
 		}
@@ -248,7 +248,7 @@ benchmark_encode_single(
 
 		for (uint32_t i = 0; i < count; i++)
 		{
-			VectorRef	vec_ref = {.data = vectors + i * dim, .dim = dim};
+			Vec32Ref	vec_ref = {.data = vectors + i * dim, .dim = dim};
 			RaBitQData *out		= (RaBitQData *)(outputs + i * data_size);
 			mkt_rabitq_encode_into(params, vec_ref, cent_ref, out);
 		}
@@ -291,7 +291,7 @@ static void
 benchmark_encode_batch(
 		RaBitQParams *params,
 		const void	 *vectors,
-		MktVecType	  vec_type,
+		VecType		  vec_type,
 		const float	 *centroid,
 		uint32_t	  count,
 		Dimension	  dim,
@@ -302,7 +302,7 @@ benchmark_encode_batch(
 		   dim,
 		   count);
 
-	VectorRef cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/* Allocate batch output buffers */
 	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
@@ -399,8 +399,8 @@ benchmark_distance(
 {
 	printf("Distance computation (dim=%u, count=%u):\n", dim, count);
 
-	VectorRef query_ref = {.data = query, .dim = dim};
-	VectorRef cent_ref	= {.data = centroid, .dim = dim};
+	Vec32Ref query_ref = {.data = query, .dim = dim};
+	Vec32Ref cent_ref  = {.data = centroid, .dim = dim};
 
 	/* Allocate distances array */
 	Distance *distances = mkt_alloc(count * sizeof(Distance));
@@ -790,8 +790,8 @@ compare_correctness(
 {
 	printf("\nCorrectness comparison (vs True L2):\n");
 
-	VectorRef query_ref = {.data = query, .dim = dim};
-	VectorRef cent_ref	= {.data = centroid, .dim = dim};
+	Vec32Ref query_ref = {.data = query, .dim = dim};
+	Vec32Ref cent_ref  = {.data = centroid, .dim = dim};
 
 	/* Transform vectors with P^T for FAISS (FAISS expects rotation externally)
 	 */
@@ -858,7 +858,7 @@ compare_correctness(
 
 	for (uint32_t i = 0; i < count; i++)
 	{
-		VectorRef vec_ref = {.data = vectors + i * dim, .dim = dim};
+		Vec32Ref vec_ref = {.data = vectors + i * dim, .dim = dim};
 
 		/* True L2 squared distance */
 		float true_dist = l2_distance_sq(query, vectors + i * dim, dim);
@@ -1003,7 +1003,7 @@ static void
 benchmark_encode_comparison(
 		RaBitQParams *params,
 		const void	 *vectors,
-		MktVecType	  vec_type,
+		VecType		  vec_type,
 		const float	 *f32_vectors,
 		const float	 *centroid,
 		uint32_t	  count,
@@ -1015,9 +1015,9 @@ benchmark_encode_comparison(
 		   dim,
 		   count);
 
-	VectorRef cent_ref	   = {.data = centroid, .dim = dim};
-	size_t	  data_size	   = MKT_RABITQ_DATA_SIZE(dim);
-	uint32_t  packed_bytes = MKT_RABITQ_BYTES(dim);
+	Vec32Ref cent_ref	  = {.data = centroid, .dim = dim};
+	size_t	 data_size	  = MKT_RABITQ_DATA_SIZE(dim);
+	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
 
 	/* Allocate single-vector output buffer (always f32) */
 	uint8_t *single_outputs = mkt_alloc(count * data_size);
@@ -1055,7 +1055,7 @@ benchmark_encode_comparison(
 		/* Throwaway single-vector pass (always f32) */
 		for (uint32_t i = 0; i < count; i++)
 		{
-			VectorRef	vec_ref = {.data = f32_vectors + i * dim, .dim = dim};
+			Vec32Ref	vec_ref = {.data = f32_vectors + i * dim, .dim = dim};
 			RaBitQData *out = (RaBitQData *)(single_outputs + i * data_size);
 			mkt_rabitq_encode_into(params, vec_ref, cent_ref, out);
 		}
@@ -1080,7 +1080,7 @@ benchmark_encode_comparison(
 		uint64_t start = get_time_ns();
 		for (uint32_t i = 0; i < count; i++)
 		{
-			VectorRef	vec_ref = {.data = f32_vectors + i * dim, .dim = dim};
+			Vec32Ref	vec_ref = {.data = f32_vectors + i * dim, .dim = dim};
 			RaBitQData *out = (RaBitQData *)(single_outputs + i * data_size);
 			mkt_rabitq_encode_into(params, vec_ref, cent_ref, out);
 		}
@@ -1280,7 +1280,7 @@ cmd_bench_quantize(CmdContext *ctx)
 		return 1;
 	}
 
-	MktVecType vec_type;
+	VecType vec_type;
 	if (use_f16)
 	{
 #if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
@@ -1329,7 +1329,7 @@ cmd_bench_quantize(CmdContext *ctx)
 	else
 		generate_random_vectors((float *)vectors, count, dim);
 
-	/* f32 copy for single-encode and distance paths (VectorRef is f32) */
+	/* f32 copy for single-encode and distance paths (Vec32Ref is f32) */
 	float *f32_vectors = NULL;
 	if (use_f16)
 	{
@@ -1434,13 +1434,12 @@ cmd_bench_quantize(CmdContext *ctx)
 		}
 		else
 		{
-			VectorRef cent_ref = {.data = centroid, .dim = dim};
-			bool	  ok	   = true;
+			Vec32Ref cent_ref = {.data = centroid, .dim = dim};
+			bool	 ok		  = true;
 
 			for (uint32_t i = 0; i < count && ok; i++)
 			{
-				VectorRef vec_ref =
-						{.data = f32_vectors + i * dim, .dim = dim};
+				Vec32Ref vec_ref = {.data = f32_vectors + i * dim, .dim = dim};
 				encoded[i] = mkt_rabitq_encode(params, vec_ref, cent_ref);
 				if (encoded[i] == NULL)
 				{

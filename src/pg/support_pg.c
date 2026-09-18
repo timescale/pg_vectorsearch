@@ -428,12 +428,12 @@ mkt_pg_check_dim_valid(int dim)
 	if (dim < 1)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("vector must have at least 1 dimension")));
-	if (dim > MKT_VECTOR_MAX_DIM)
+				 errmsg("vec32 must have at least 1 dimension")));
+	if (dim > VEC32_MAX_DIM)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("vector cannot have more than %d dimensions",
-						MKT_VECTOR_MAX_DIM)));
+				 errmsg("vec32 cannot have more than %d dimensions",
+						VEC32_MAX_DIM)));
 }
 
 /*
@@ -465,7 +465,7 @@ mkt_pg_check_dims_match(int dim_a, int dim_b)
 	if (dim_a != dim_b)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("different vector dimensions %d and %d",
+				 errmsg("different vec32 dimensions %d and %d",
 						dim_a,
 						dim_b)));
 }
@@ -485,11 +485,11 @@ mkt_pg_check_value_finite(float val)
 	if (isinf(val))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("infinite value not allowed in vector")));
+				 errmsg("infinite value not allowed in vec32")));
 	if (isnan(val))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("NaN value not allowed in vector")));
+				 errmsg("NaN value not allowed in vec32")));
 }
 
 /* ----------------------------------------------------------------

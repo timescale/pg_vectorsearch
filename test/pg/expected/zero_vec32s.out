@@ -1,6 +1,6 @@
 -- Zero-norm vectors under cosine.
 --
--- A zero vector has no direction, so its cosine distance to anything
+-- A zero vec32 has no direction, so its cosine distance to anything
 -- is undefined (NaN) and it can never be a nearest neighbor. Naively
 -- indexed, its quantized estimate looks mid-range from every query --
 -- an impostor entering the top-k threshold heap and pruning genuine
@@ -12,31 +12,39 @@
 -- Vectors span a grid of distinct directions (x, y) so cosine
 -- distances are well separated (near-collinear vectors collapse into
 -- float ties and make top-k order meaningless).
-
 -- Small tables, so a sequential scan is the plan the cost model correctly
 -- prefers and the scans below are forced through the index. The rows come
 -- back either way, so the plan is pinned once here: a silent fallback to a
 -- sequential scan then fails rather than passes.
 SET enable_seqscan = off;
-
-CREATE TABLE zv (id int, v vector(8));
+CREATE TABLE zv (id int, v vec32(8));
 INSERT INTO zv
-SELECT x * 100 + y, ('[' || x || ',' || y || ',0,0,0,0,0,0]')::vector
+SELECT x * 100 + y, ('[' || x || ',' || y || ',0,0,0,0,0,0]')::vec32
 FROM generate_series(1, 25) x, generate_series(1, 25) y;
 -- Sprinkle zero vectors through the heap.
-INSERT INTO zv SELECT 10000 + g, '[0,0,0,0,0,0,0,0]'::vector
+INSERT INTO zv SELECT 10000 + g, '[0,0,0,0,0,0,0,0]'::vec32
 FROM generate_series(1, 20) g;
-CREATE INDEX zv_idx ON zv USING mktann (v vector_cosine_ops);
-
+CREATE INDEX zv_idx ON zv USING mktann (v vec32_cosine_ops);
 SET mkt.nprobe = 64;
 -- Nearest direction to (13.05, 17.02) is (13, 17) -- a direction
--- with no collinear multiple inside the grid; no zero-vector ids,
+-- with no collinear multiple inside the grid; no zero-vec32 ids,
 -- no NaN fallout.
 EXPLAIN (COSTS OFF)
 SELECT id FROM zv
     ORDER BY v OPERATOR(mkt.<=>) '[13.05,17.02,0,0,0,0,0,0]'
     LIMIT 1;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Limit
+   ->  Index Scan using zv_idx on zv
+         Order By: (v <=> '[13.05,17.02,0,0,0,0,0,0]'::vec32)
+(3 rows)
+
 SELECT id FROM zv ORDER BY v OPERATOR(mkt.<=>) '[13.05,17.02,0,0,0,0,0,0]' LIMIT 1;
+  id  
+------
+ 1317
+(1 row)
 
 -- Inserted zero vectors are likewise unreachable, and inserted real
 -- vectors keep working alongside them: direction (3, 500) is far from
@@ -44,16 +52,28 @@ SELECT id FROM zv ORDER BY v OPERATOR(mkt.<=>) '[13.05,17.02,0,0,0,0,0,0]' LIMIT
 INSERT INTO zv VALUES (20000, '[0,0,0,0,0,0,0,0]');
 INSERT INTO zv VALUES (20001, '[3,500,0,0,0,0,0,0]');
 SELECT id FROM zv ORDER BY v OPERATOR(mkt.<=>) '[3,500,0,0,0,0,0,0]' LIMIT 1;
+  id   
+-------
+ 20001
+(1 row)
 
 -- The zero rows are still physically indexed (entries counted), just
 -- never returned.
 SELECT sum(entry_count) >= 647 AS all_rows_indexed
 FROM mkt.posting_pages('zv_idx');
+ all_rows_indexed 
+------------------
+ t
+(1 row)
 
 VACUUM zv;
 -- squawk-ignore require-concurrent-reindex
 REINDEX INDEX zv_idx;
 SELECT id FROM zv ORDER BY v OPERATOR(mkt.<=>) '[13.05,17.02,0,0,0,0,0,0]' LIMIT 1;
+  id  
+------
+ 1317
+(1 row)
 
 RESET enable_seqscan;
 DROP TABLE zv;

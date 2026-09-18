@@ -415,56 +415,56 @@ main(void)
 ### Example Test File
 
 ```c
-/* test_mkt_vector.c - Vector type and operations tests */
+/* test_vec32.c - Vector type and operations tests */
 
 #include "mkt_test.h"
-#include "mkt_vector.h"
+#include "vec32.h"
 
 TEST_GROUP(Vector)
 
 TEST(vector_create_and_dim)
 {
-    MktVector *v = mkt_vector_create(128);
+    Vec32 *v = vec32_create(128);
     ASSERT_NOT_NULL(v, "vector should be allocated");
-    ASSERT_EQ(128, MKT_VECTOR_DIM(v), "dimension should be 128");
-    mkt_vector_free(v);
+    ASSERT_EQ(128, VEC32_DIM(v), "dimension should be 128");
+    vec32_free(v);
 }
 
 TEST(vector_set_get_elements)
 {
-    MktVector *v = mkt_vector_create(3);
-    MKT_VECTOR_DATA(v)[0] = 1.0f;
-    MKT_VECTOR_DATA(v)[1] = 2.0f;
-    MKT_VECTOR_DATA(v)[2] = 3.0f;
+    Vec32 *v = vec32_create(3);
+    VEC32_DATA(v)[0] = 1.0f;
+    VEC32_DATA(v)[1] = 2.0f;
+    VEC32_DATA(v)[2] = 3.0f;
 
-    ASSERT_FLOAT_EQ(1.0f, MKT_VECTOR_DATA(v)[0], 1e-6, "element 0");
-    ASSERT_FLOAT_EQ(2.0f, MKT_VECTOR_DATA(v)[1], 1e-6, "element 1");
-    ASSERT_FLOAT_EQ(3.0f, MKT_VECTOR_DATA(v)[2], 1e-6, "element 2");
+    ASSERT_FLOAT_EQ(1.0f, VEC32_DATA(v)[0], 1e-6, "element 0");
+    ASSERT_FLOAT_EQ(2.0f, VEC32_DATA(v)[1], 1e-6, "element 1");
+    ASSERT_FLOAT_EQ(3.0f, VEC32_DATA(v)[2], 1e-6, "element 2");
 
-    mkt_vector_free(v);
+    vec32_free(v);
 }
 
 TEST(vector_l2_distance)
 {
-    MktVector *a = mkt_vector_create(3);
-    MktVector *b = mkt_vector_create(3);
+    Vec32 *a = vec32_create(3);
+    Vec32 *b = vec32_create(3);
 
-    MKT_VECTOR_DATA(a)[0] = 0.0f;
-    MKT_VECTOR_DATA(a)[1] = 0.0f;
-    MKT_VECTOR_DATA(a)[2] = 0.0f;
+    VEC32_DATA(a)[0] = 0.0f;
+    VEC32_DATA(a)[1] = 0.0f;
+    VEC32_DATA(a)[2] = 0.0f;
 
-    MKT_VECTOR_DATA(b)[0] = 1.0f;
-    MKT_VECTOR_DATA(b)[1] = 0.0f;
-    MKT_VECTOR_DATA(b)[2] = 0.0f;
+    VEC32_DATA(b)[0] = 1.0f;
+    VEC32_DATA(b)[1] = 0.0f;
+    VEC32_DATA(b)[2] = 0.0f;
 
-    VectorRef va = MktVectorToRef(a);
-    VectorRef vb = MktVectorToRef(b);
+    Vec32Ref va = Vec32ToRef(a);
+    Vec32Ref vb = Vec32ToRef(b);
 
     Distance d = mkt_distance_l2(va, vb);
     ASSERT_FLOAT_EQ(1.0f, d, 1e-6, "L2 squared distance should be 1.0");
 
-    mkt_vector_free(a);
-    mkt_vector_free(b);
+    vec32_free(a);
+    vec32_free(b);
 }
 ```
 
@@ -476,7 +476,7 @@ TEST(vector_l2_distance)
 unit_test_sources = files(
   'mkt_test.c',
   'run_tests.c',
-  'test_mkt_vector.c',
+  'test_vec32.c',
   'test_mkt_distance.c',
   'test_mkt_quantize.c',
   'test_mkt_topk.c',
@@ -524,9 +524,9 @@ Total: 6 passed, 0 failed
 
 ### 1.1 Standalone Vector Type
 
-**Files**: `src/core/vector.h`, `src/core/vector.c`
+**Files**: `src/types/vec32.h`, `src/types/vec32.c`
 
-The vector type is binary-compatible with pgvector's `vector` type in both
+The vec32 type is binary-compatible with pgvector's `vector` type in both
 standalone and PostgreSQL builds. The struct layout is identical; only the
 varlena header initialization differs.
 
@@ -545,79 +545,79 @@ typedef struct Vector
 Meerkat's binary-compatible definition:
 
 ```c
-/* mkt_vector.h - Vector type compatible with pgvector */
+/* vec32.h - Vector type compatible with pgvector */
 
-#ifndef MKT_VECTOR_H
-#define MKT_VECTOR_H
+#ifndef VEC32_H
+#define VEC32_H
 
 #include <stdint.h>
 #include <stdlib.h>
 #include "mkt_types.h"
 
-#define MKT_VECTOR_MAX_DIM 16000
+#define VEC32_MAX_DIM 16000
 
 /*
- * MktVector: Binary-compatible with pgvector's Vector type.
+ * Vec32: Binary-compatible with pgvector's Vector type.
  *
  * The struct layout is identical in both standalone and PostgreSQL modes.
  * In standalone mode, vl_len_ stores the total size (not used as varlena).
  * In PostgreSQL mode, vl_len_ is managed by SET_VARSIZE/VARSIZE macros.
  */
-typedef struct MktVector
+typedef struct Vec32
 {
     int32       vl_len_;        /* varlena header / size in standalone mode */
     int16       dim;            /* number of dimensions */
     int16       unused;         /* reserved for future use, always zero */
     float       x[];            /* FLEXIBLE_ARRAY_MEMBER */
-}           MktVector;
+}           Vec32;
 
-#define MKT_VECTOR_SIZE(_dim) (offsetof(MktVector, x) + sizeof(float)*(_dim))
-#define MKT_VECTOR_DIM(v)     ((v)->dim)
-#define MKT_VECTOR_DATA(v)    ((v)->x)
+#define VEC32_SIZE(_dim) (offsetof(Vec32, x) + sizeof(float)*(_dim))
+#define VEC32_DIM(v)     ((v)->dim)
+#define VEC32_DATA(v)    ((v)->x)
 
-/* Convert to VectorRef for internal operations */
-static inline VectorRef
-MktVectorToRef(const MktVector *v)
+/* Convert to Vec32Ref for internal operations */
+static inline Vec32Ref
+Vec32ToRef(const Vec32 *v)
 {
-    return (VectorRef){ .data = v->x, .dim = v->dim };
+    return (Vec32Ref){ .data = v->x, .dim = v->dim };
 }
 
 /* Allocation and lifecycle */
-MktVector  *mkt_vector_create(Dimension dim);
-MktVector  *mkt_vector_copy(const MktVector *src);
-void        mkt_vector_free(MktVector *v);
+Vec32  *vec32_create(Dimension dim);
+Vec32  *vec32_copy(const Vec32 *src);
+void        vec32_free(Vec32 *v);
 
 /* Initialization */
-void        mkt_vector_set(MktVector *v, const float *values);
-void        mkt_vector_zero(MktVector *v);
-void        mkt_vector_fill(MktVector *v, float value);
+void        vec32_set(Vec32 *v, const float *values);
+void        vec32_zero(Vec32 *v);
+void        vec32_fill(Vec32 *v, float value);
 
 /* Operations */
-float       mkt_vector_dot(const MktVector *a, const MktVector *b);
-float       mkt_vector_norm(const MktVector *v);
-void        mkt_vector_normalize(MktVector *v);
+float       vec32_dot(const Vec32 *a, const Vec32 *b);
+float       vec32_norm(const Vec32 *v);
+void        vec32_normalize(Vec32 *v);
 
-#endif /* MKT_VECTOR_H */
+#endif /* VEC32_H */
 ```
 
 ### Implementation
 
 ```c
-/* mkt_vector.c - Vector operations */
+/* vec32.c - Vector operations */
 
-#include "mkt_vector.h"
+#include "vec32.h"
 #include "mkt_memory.h"
 #include <string.h>
 #include <math.h>
 
-MktVector *
-mkt_vector_create(Dimension dim)
+Vec32 *
+vec32_create(Dimension dim)
 {
-    if (dim > MKT_VECTOR_MAX_DIM)
+    if (dim > VEC32_MAX_DIM)
         return NULL;
 
-    size_t size = MKT_VECTOR_SIZE(dim);
-    MktVector *v = mkt_alloc(size);
+    size_t size = VEC32_SIZE(dim);
+    Vec32 *v = mkt_alloc(size);
     if (v == NULL)
         return NULL;
 
@@ -633,15 +633,15 @@ mkt_vector_create(Dimension dim)
 }
 
 void
-mkt_vector_free(MktVector *v)
+vec32_free(Vec32 *v)
 {
     mkt_free(v);
 }
 
-MktVector *
-mkt_vector_copy(const MktVector *src)
+Vec32 *
+vec32_copy(const Vec32 *src)
 {
-    MktVector *dst = mkt_vector_create(src->dim);
+    Vec32 *dst = vec32_create(src->dim);
     if (dst == NULL)
         return NULL;
 
@@ -650,13 +650,13 @@ mkt_vector_copy(const MktVector *src)
 }
 
 void
-mkt_vector_zero(MktVector *v)
+vec32_zero(Vec32 *v)
 {
     memset(v->x, 0, v->dim * sizeof(float));
 }
 
 float
-mkt_vector_dot(const MktVector *a, const MktVector *b)
+vec32_dot(const Vec32 *a, const Vec32 *b)
 {
     float sum = 0.0f;
     for (Dimension i = 0; i < a->dim; i++)
@@ -665,15 +665,15 @@ mkt_vector_dot(const MktVector *a, const MktVector *b)
 }
 
 float
-mkt_vector_norm(const MktVector *v)
+vec32_norm(const Vec32 *v)
 {
-    return sqrtf(mkt_vector_dot(v, v));
+    return sqrtf(vec32_dot(v, v));
 }
 
 void
-mkt_vector_normalize(MktVector *v)
+vec32_normalize(Vec32 *v)
 {
-    float norm = mkt_vector_norm(v);
+    float norm = vec32_norm(v);
     if (norm > 0.0f) {
         for (Dimension i = 0; i < v->dim; i++)
             v->x[i] /= norm;
@@ -684,15 +684,15 @@ mkt_vector_normalize(MktVector *v)
 The key design points:
 
 1. **Identical binary layout**: The struct has the same fields in the same order
-   regardless of build mode. A pointer to `MktVector` and pgvector's `Vector`
+   regardless of build mode. A pointer to `Vec32` and pgvector's `Vector`
    can be safely cast between each other.
 
 2. **vl_len_ handling**: In standalone mode, `vl_len_` stores the struct size
    directly. In PostgreSQL mode, it's managed by `SET_VARSIZE()`. The field
    exists in both modes to maintain binary compatibility.
 
-3. **Core algorithms use VectorRef**: Distance computation, quantization, and
-   other algorithms operate on `VectorRef` (pointer + dimension), not the full
+3. **Core algorithms use Vec32Ref**: Distance computation, quantization, and
+   other algorithms operate on `Vec32Ref` (pointer + dimension), not the full
    struct. This decouples algorithms from storage format.
 
 ### 1.2 Type Definitions
@@ -722,7 +722,7 @@ typedef float Distance;
 typedef struct {
     const float *data;
     Dimension    dim;
-} VectorRef;
+} Vec32Ref;
 
 // Mutable vector (for building/modifying)
 typedef struct {
@@ -1228,7 +1228,7 @@ versions, a manual alignment wrapper is used.
 ```c
 /* Example: using arena for temporary computation */
 void
-compute_distances(const MktVector *query, const MktVector *vectors, int n)
+compute_distances(const Vec32 *query, const Vec32 *vectors, int n)
 {
     /* Create scoped arena for temporary allocations */
     MKT_MEMCTX_SCOPE(work_ctx);
@@ -1249,7 +1249,7 @@ MktMemCtx build_ctx = mkt_memctx_create(NULL, "IndexBuild");
 MktMemCtx old = mkt_memctx_switch(build_ctx);
 
 /* All allocations go to build_ctx */
-MktVector *centroids = mkt_alloc(k * sizeof(MktVector));
+Vec32 *centroids = mkt_alloc(k * sizeof(Vec32));
 
 /* Reset to reuse memory for next phase */
 mkt_memctx_reset(build_ctx);
@@ -1346,17 +1346,17 @@ implementations selected at runtime based on CPU capabilities.
 
 ```c
 // Single vector pair distance
-Distance mkt_distance_l2(VectorRef a, VectorRef b);
-Distance mkt_distance_ip(VectorRef a, VectorRef b);  // Inner product
-Distance mkt_distance_cosine(VectorRef a, VectorRef b);
+Distance mkt_distance_l2(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_ip(Vec32Ref a, Vec32Ref b);  // Inner product
+Distance mkt_distance_cosine(Vec32Ref a, Vec32Ref b);
 
 // Generic dispatch
-Distance mkt_distance(VectorRef a, VectorRef b, DistanceMetric metric);
+Distance mkt_distance(Vec32Ref a, Vec32Ref b, DistanceMetric metric);
 
 // Batch: distances from one query to multiple vectors
 // Results written to `distances` array (must be pre-allocated)
 void mkt_distance_batch(
-    VectorRef query,
+    Vec32Ref query,
     const float *vectors,  // Contiguous array of vectors
     uint32_t count,
     Dimension dim,
@@ -1367,7 +1367,7 @@ void mkt_distance_batch(
 // Batch with early termination: stop when found k vectors below threshold
 // Returns number of vectors actually processed
 uint32_t mkt_distance_batch_threshold(
-    VectorRef query,
+    Vec32Ref query,
     const float *vectors,
     uint32_t count,
     Dimension dim,
@@ -1383,7 +1383,7 @@ uint32_t mkt_distance_batch_threshold(
 
 ```c
 // Process 16 floats per iteration
-Distance mkt_distance_l2_avx512(VectorRef a, VectorRef b) {
+Distance mkt_distance_l2_avx512(Vec32Ref a, Vec32Ref b) {
     const float *pa = a.data;
     const float *pb = b.data;
     Dimension dim = a.dim;
@@ -1416,7 +1416,7 @@ Distance mkt_distance_l2_avx512(VectorRef a, VectorRef b) {
 
 ```c
 void mkt_distance_batch_l2_avx512(
-    VectorRef query,
+    Vec32Ref query,
     const float *vectors,
     uint32_t count,
     Dimension dim,
@@ -1431,7 +1431,7 @@ void mkt_distance_batch_l2_avx512(
             mkt_prefetch_read(vectors + (i + prefetch_ahead) * dim);
         }
 
-        VectorRef v = { .data = vectors + i * dim, .dim = dim };
+        Vec32Ref v = { .data = vectors + i * dim, .dim = dim };
         distances[i] = mkt_distance_l2_avx512(query, v);
     }
 }
@@ -1442,8 +1442,8 @@ void mkt_distance_batch_l2_avx512(
 At initialization, select optimal implementation based on CPU:
 
 ```c
-typedef Distance (*DistanceFn)(VectorRef, VectorRef);
-typedef void (*DistanceBatchFn)(VectorRef, const float*, uint32_t,
+typedef Distance (*DistanceFn)(Vec32Ref, Vec32Ref);
+typedef void (*DistanceBatchFn)(Vec32Ref, const float*, uint32_t,
                                  Dimension, Distance*);
 
 static DistanceFn      g_distance_l2_fn;
@@ -1679,22 +1679,22 @@ void          mkt_rabitq_cleanup(RaBitQParams *params);
 // Encode vector to compact RaBitQ format
 RaBitQData *mkt_rabitq_encode(
     const RaBitQParams *params,
-    VectorRef input,
-    VectorRef centroid
+    Vec32Ref input,
+    Vec32Ref centroid
 );
 
 // Encode into pre-allocated buffer
 int mkt_rabitq_encode_into(
     const RaBitQParams *params,
-    VectorRef input,
-    VectorRef centroid,
+    Vec32Ref input,
+    Vec32Ref centroid,
     RaBitQData *output   // Must be MKT_RABITQ_DATA_SIZE(dim) bytes
 );
 
 // Batch encode to separate output arrays
 int mkt_rabitq_encode_batch(
     const RaBitQParams *params,
-    const float *vectors, VectorRef centroid,
+    const float *vectors, Vec32Ref centroid,
     float *f_add, float *f_rescale, uint8_t *bits,
     uint16_t count
 );
@@ -1702,7 +1702,7 @@ int mkt_rabitq_encode_batch(
 // Batch encode with heap-allocated RaBitQBatch output
 RaBitQBatch *mkt_rabitq_encode_batch_alloc(
     const RaBitQParams *params,
-    const float *vectors, VectorRef centroid,
+    const float *vectors, Vec32Ref centroid,
     uint16_t count
 );
 
@@ -1730,8 +1730,8 @@ void mkt_rabitq_distance_with_bound(
 #define MKT_RABITQ_EPSILON 1.9f
 
 int
-mkt_rabitq_encode_into(const RaBitQParams *params, VectorRef input,
-                       VectorRef centroid, RaBitQData *output)
+mkt_rabitq_encode_into(const RaBitQParams *params, Vec32Ref input,
+                       Vec32Ref centroid, RaBitQData *output)
 {
     Dimension dim = params->dim;
     float *trans = mkt_alloc(dim * sizeof(float));
@@ -1801,8 +1801,8 @@ typedef struct {
 } RaBitQQueryState;
 
 RaBitQQueryState *
-mkt_rabitq_prepare_query(const RaBitQParams *params, VectorRef query,
-                         VectorRef centroid)
+mkt_rabitq_prepare_query(const RaBitQParams *params, Vec32Ref query,
+                         Vec32Ref centroid)
 {
     // ... transforms query through P^T, precomputes factors ...
 }
@@ -2204,8 +2204,8 @@ typedef struct {
 
 RaBitQQuery *mkt_rabitq_prepare_query(
     const RaBitQParams *params,
-    VectorRef query,
-    VectorRef centroid
+    Vec32Ref query,
+    Vec32Ref centroid
 );
 
 void mkt_rabitq_free_query(RaBitQQuery *q);
@@ -2296,7 +2296,7 @@ SQ8Params *mkt_sq8_learn(
 // Quantize a single vector
 void mkt_sq8_encode(
     const SQ8Params *params,
-    VectorRef input,
+    Vec32Ref input,
     ScalarQ8 *output          // dim bytes
 );
 
@@ -2320,7 +2320,7 @@ Distance mkt_sq8_distance_l2(
 // Asymmetric distance: float query vs quantized vector
 // More accurate than symmetric (both quantized)
 Distance mkt_sq8_distance_asymmetric_l2(
-    VectorRef query,          // Full precision
+    Vec32Ref query,          // Full precision
     const ScalarQ8 *quantized,
     const SQ8Params *params
 );
@@ -2331,7 +2331,7 @@ Distance mkt_sq8_distance_asymmetric_l2(
 ```c
 void mkt_sq8_encode_avx512(
     const SQ8Params *params,
-    VectorRef input,
+    Vec32Ref input,
     ScalarQ8 *output
 ) {
     const float *mins = params->mins;
@@ -2419,7 +2419,7 @@ typedef struct {
     uint32_t  packed_bytes; // ceil(dim / 8)
 } BQParams;
 
-void mkt_bq_encode(const BQParams *params, VectorRef input, BinaryQ *output);
+void mkt_bq_encode(const BQParams *params, Vec32Ref input, BinaryQ *output);
 
 // Hamming distance between binary vectors
 uint32_t mkt_bq_distance_hamming(
@@ -2451,11 +2451,11 @@ typedef struct {
 
 // Online training (Welford's algorithm for numerical stability)
 void mkt_sbq_start_training(SBQParams *params, Dimension dim, uint8_t bits);
-void mkt_sbq_add_sample(SBQParams *params, VectorRef sample);
+void mkt_sbq_add_sample(SBQParams *params, Vec32Ref sample);
 void mkt_sbq_finish_training(SBQParams *params);
 
 // Quantize vector
-void mkt_sbq_encode(const SBQParams *params, VectorRef input, BinaryQ *output);
+void mkt_sbq_encode(const SBQParams *params, Vec32Ref input, BinaryQ *output);
 
 // For 1-bit: use Hamming distance (same as BQ)
 // For multi-bit: use popcount on thermometer codes
@@ -2725,9 +2725,9 @@ static void kmeans_plusplus_init(
 
     for (uint32_t c = 1; c < nlist; c++) {
         // Update distances to include new centroid
-        VectorRef centroid = { .data = centroids + (c - 1) * dim, .dim = dim };
+        Vec32Ref centroid = { .data = centroids + (c - 1) * dim, .dim = dim };
         for (uint32_t i = 0; i < nvecs; i++) {
-            VectorRef v = { .data = vectors + i * dim, .dim = dim };
+            Vec32Ref v = { .data = vectors + i * dim, .dim = dim };
             Distance d = mkt_distance_l2(centroid, v);
             if (d < min_distances[i]) {
                 min_distances[i] = d;
@@ -2790,13 +2790,13 @@ KMeansResult *mkt_kmeans(
 
         // Assignment step: assign each vector to nearest centroid
         for (uint32_t i = 0; i < nvecs; i++) {
-            VectorRef v = { .data = vectors + i * dim, .dim = dim };
+            Vec32Ref v = { .data = vectors + i * dim, .dim = dim };
 
             Distance best_dist = INFINITY;
             ClusterId best_cluster = 0;
 
             for (uint32_t c = 0; c < nlist; c++) {
-                VectorRef centroid = {
+                Vec32Ref centroid = {
                     .data = result->centroids + c * dim,
                     .dim = dim
                 };
@@ -2865,7 +2865,7 @@ void mkt_kmeans_compute_medoids(
     Dimension dim = result->dim;
 
     for (uint32_t c = 0; c < result->nlist; c++) {
-        VectorRef centroid = {
+        Vec32Ref centroid = {
             .data = result->centroids + c * dim,
             .dim = dim
         };
@@ -2877,7 +2877,7 @@ void mkt_kmeans_compute_medoids(
         for (uint32_t i = 0; i < nvecs; i++) {
             if (result->assignments[i] != c) continue;
 
-            VectorRef v = { .data = vectors + i * dim, .dim = dim };
+            Vec32Ref v = { .data = vectors + i * dim, .dim = dim };
             Distance d = mkt_distance_l2(centroid, v);
             if (d < best_dist) {
                 best_dist = d;
@@ -3062,7 +3062,7 @@ mkt_bench_run_method(const BenchDataset *ds, const QuantConfig *config,
 
     start = mkt_time_ns();
     for (uint32_t q = 0; q < ds->nqueries; q++) {
-        VectorRef query = {
+        Vec32Ref query = {
             .data = ds->queries + q * ds->dim,
             .dim = ds->dim
         };
@@ -3086,12 +3086,12 @@ mkt_bench_run_method(const BenchDataset *ds, const QuantConfig *config,
             MIN(ds->k, k), k);
 
         // Distance ratio for first result
-        VectorRef query = { .data = ds->queries + q * ds->dim, .dim = ds->dim };
-        VectorRef true_nn = {
+        Vec32Ref query = { .data = ds->queries + q * ds->dim, .dim = ds->dim };
+        Vec32Ref true_nn = {
             .data = ds->vectors + ds->groundtruth[q * ds->k] * ds->dim,
             .dim = ds->dim
         };
-        VectorRef found_nn = {
+        Vec32Ref found_nn = {
             .data = ds->vectors + results[q * k] * ds->dim,
             .dim = ds->dim
         };
@@ -4030,7 +4030,7 @@ CREATE TABLE my_centroids (
 COPY my_centroids FROM 'centroids.csv' WITH (FORMAT csv);
 
 -- Build index using external centroids
-CREATE INDEX ON my_table USING mktann (v vector_cosine_ops)
+CREATE INDEX ON my_table USING mktann (v vec32_cosine_ops)
     WITH (external_centroids = 'my_centroids');
 ```
 
@@ -4187,7 +4187,7 @@ skip reranking entirely.
 void mkt_search_posting_lists(
     const ClusterId *clusters,
     uint32_t nprobe,
-    VectorRef query,
+    Vec32Ref query,
     const RaBitQParams *rabitq_params,
     DistanceMetric metric,
     const SearchParams *params,
@@ -4268,7 +4268,7 @@ typedef void (*VectorFetchCallback)(
 void mkt_search_rerank(
     TopKHeap *candidates,      // Input: approximate results
     uint32_t rerank_k,         // How many to re-rank
-    VectorRef query,
+    Vec32Ref query,
     DistanceMetric metric,
     Dimension dim,
     VectorFetchCallback fetch_vector,
@@ -4290,7 +4290,7 @@ void mkt_search_rerank(
         fetch_vector(callback_data, tid, vec_buffer);
 
         // Compute precise distance
-        VectorRef v = { .data = vec_buffer, .dim = dim };
+        Vec32Ref v = { .data = vec_buffer, .dim = dim };
         Distance precise_dist = mkt_distance(query, v, metric);
 
         mkt_topk_insert(final_results, precise_dist, tid_encoded);
@@ -4359,14 +4359,17 @@ parsed by the `mktann_options()` callback using `build_reloptions()`.
 
 ### 6.2 Vector Type and pgvector Compatibility
 
-**Files**: `src/core/vector.h`, `src/core/vector.c`
+**Files**: `src/types/vec32.h`, `src/types/vec32.c`
 
-Meerkat defines its own vector type (`mkt_vector`) that is binary-compatible with
-pgvector's `vector` type. This allows:
+Meerkat defines its own `vec32` and `vec16` types, installed in the `mkt`
+schema by default. Their names are distinct from pgvector's `vector` and
+`halfvec`, so both sets of types can coexist even when the extensions are
+installed into the same schema. The corresponding pairs are binary-compatible
+(`vec32`/`vector` and `vec16`/`halfvec`). This allows:
 
-- Standalone builds without pgvector dependency
-- Direct indexing of pgvector columns without casts
-- Zero-overhead type handling (same memory layout)
+- Standalone builds without a pgvector dependency
+- Direct indexing of pgvector columns through zero-copy binary casts
+- Zero-overhead type handling through the shared memory layouts
 
 #### Type Definition
 
@@ -4388,26 +4391,26 @@ typedef struct Vector
 Meerkat's binary-compatible definition:
 
 ```c
-#define MKT_VECTOR_MAX_DIM 16000
-#define MKT_VECTOR_SIZE(_dim) (offsetof(MktVector, x) + sizeof(float)*(_dim))
+#define VEC32_MAX_DIM 16000
+#define VEC32_SIZE(_dim) (offsetof(Vec32, x) + sizeof(float)*(_dim))
 
-typedef struct MktVector
+typedef struct Vec32
 {
     int32       vl_len_;        /* varlena header (do not touch directly!) */
     int16       dim;            /* number of dimensions */
     int16       unused;         /* reserved for future use, always zero */
     float       x[FLEXIBLE_ARRAY_MEMBER];
-}           MktVector;
+}           Vec32;
 
 // Accessor macros
-#define MKT_VECTOR_DIM(v)    ((v)->dim)
-#define MKT_VECTOR_DATA(v)   ((v)->x)
+#define VEC32_DIM(v)    ((v)->dim)
+#define VEC32_DATA(v)   ((v)->x)
 
-// Convert to VectorRef for internal operations
-static inline VectorRef
-MktVectorToRef(const MktVector *v)
+// Convert to Vec32Ref for internal operations
+static inline Vec32Ref
+Vec32ToRef(const Vec32 *v)
 {
-    return (VectorRef){ .data = v->x, .dim = v->dim };
+    return (Vec32Ref){ .data = v->x, .dim = v->dim };
 }
 ```
 
@@ -4417,16 +4420,16 @@ At extension load time, detect if pgvector is installed and cache its type OID:
 
 ```c
 // Cached OIDs (InvalidOid if not available)
-static Oid mkt_vector_oid = InvalidOid;
+static Oid vec32_oid = InvalidOid;
 static Oid pgvector_oid = InvalidOid;
 
 void
-mkt_vector_init(void)
+vec32_init(void)
 {
     // Cache our own type OID
-    mkt_vector_oid = GetSysCacheOid2(TYPENAMENSP,
+    vec32_oid = GetSysCacheOid2(TYPENAMENSP,
                                       Anum_pg_type_oid,
-                                      CStringGetDatum("mkt_vector"),
+                                      CStringGetDatum("vec32"),
                                       ObjectIdGetDatum(get_namespace_oid("public",
                                                                           false)));
 
@@ -4446,7 +4449,7 @@ mkt_vector_init(void)
 static inline bool
 mkt_is_vector_type(Oid typoid)
 {
-    return typoid == mkt_vector_oid ||
+    return typoid == vec32_oid ||
            (OidIsValid(pgvector_oid) && typoid == pgvector_oid);
 }
 ```
@@ -4465,7 +4468,7 @@ each of meerkat's six `mktann` families as ordering members, in the same step
 that creates the casts:
 
 ```sql
-ALTER OPERATOR FAMILY mkt.halfvec_l2_ops USING mktann
+ALTER OPERATOR FAMILY mkt.vec16_l2_ops USING mktann
     ADD OPERATOR 1 public.<-> (public.halfvec, public.halfvec)
         FOR ORDER BY pg_catalog.float_ops;
 ```
@@ -4484,15 +4487,15 @@ answers a pgvector-operator query with a sequential scan, which returns correct
 rows. Results-only tests pass while measuring brute force, so the compat suite
 asserts the plan as well as the recall.
 
-One pairing does not resolve, by design: a `mkt.vector` or `mkt.halfvec` column
+One pairing does not resolve, by design: a `mkt.vec32` or `mkt.vec16` column
 with pgvector's operator. The meerkat → pgvector cast is ASSIGNMENT rather than
 IMPLICIT specifically so that having both extensions installed does not make
 operator resolution ambiguous, and queries over meerkat's types use meerkat's
 operators.
 
-**Standalone builds**: For unit tests and CLI tools, use `MktVector` without the
+**Standalone builds**: For unit tests and CLI tools, use `Vec32` without the
 varlena header, or define a minimal mock. The core algorithms operate on
-`VectorRef`, which is independent of PostgreSQL types.
+`Vec32Ref`, which is independent of PostgreSQL types.
 
 ### 6.3 Index Access Method Handler
 
@@ -4764,7 +4767,7 @@ typedef struct MktStorageOps
     Page (*write_page)(MktStorage *self, BlockNumber blkno);
     Page (*new_page)(MktStorage *self, BlockNumber *blkno_out);
     void (*commit_page)(MktStorage *self, BlockNumber blkno);
-    VectorRef (*fetch_vec)(MktStorage *self, ItemPointerData tid);
+    Vec32Ref (*fetch_vec)(MktStorage *self, ItemPointerData tid);
 
     /* Rerank candidates with exact distances (NULL = not supported).
      * Fetches full-precision vectors for candidates whose error > 0,
@@ -4811,7 +4814,7 @@ typedef struct MktScanOpaque {
     RaBitQParams        *rabitq_params;
 
     // Query parameters
-    VectorRef       query;
+    Vec32Ref       query;
     SearchParams    params;
     bool            first_call;
 
@@ -5402,7 +5405,7 @@ static bool mkt_aminsert(
 
     // 1. Find nearest centroid by traversing centroid pages
     ClusterId cluster;
-    VectorRef centroid;
+    Vec32Ref centroid;
     mkt_find_nearest_centroid(index, VectorToRef(vec), &cluster, &centroid);
 
     // 2. Quantize vector using RaBitQ (relative to centroid)
@@ -5536,7 +5539,7 @@ The search must support iterative result retrieval. This is essential for:
 typedef struct MktSearchIterator
 {
     /* Search parameters (immutable after init) */
-    VectorRef           query;
+    Vec32Ref           query;
     DistanceType        distance_type;
     uint32_t            nprobe;         /* clusters to search */
 
@@ -5569,7 +5572,7 @@ typedef struct MktSearchIterator
 MktSearchIterator *
 mkt_search_iterator_create(
     MktIndex *index,
-    VectorRef query,
+    Vec32Ref query,
     DistanceType distance_type,
     uint32_t nprobe,
     MktFilterContext *filter    /* NULL for unfiltered */
@@ -5761,7 +5764,7 @@ CREATE INDEX ON items USING meerkat (embedding)
 -- Query with label filter (uses fast path)
 SELECT * FROM items
 WHERE category_id = ANY(ARRAY[1, 2, 3])
-ORDER BY embedding <-> '[...]'::vector
+ORDER BY embedding <-> '[...]'::vec32
 LIMIT 10;
 ```
 
@@ -5922,7 +5925,7 @@ Centroid search should return an iterator, not a fixed array:
 ```c
 /* Return clusters lazily, not all at once */
 MktClusterIterator *
-mkt_centroid_search_iterator(CentroidSearchState *cache, VectorRef query);
+mkt_centroid_search_iterator(CentroidSearchState *cache, Vec32Ref query);
 ```
 
 **4. Statistics collection**
@@ -6057,7 +6060,7 @@ meerkat/
 │   │ # ════════════════════════════════════════════════════════════
 │   │
 │   ├── core/                     # Foundation: types, memory, platform
-│   │   ├── types.h               # Dimension, Distance, VectorRef, etc.
+│   │   ├── types.h               # Dimension, Distance, Vec32Ref, etc.
 │   │   ├── memory.h              # Memory abstraction interface
 │   │   ├── memory_standalone.h   # Arena allocator declarations
 │   │   ├── memory_standalone.c   # Arena allocator implementation

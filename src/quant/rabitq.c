@@ -24,8 +24,8 @@
 #include "core/platform.h"
 #include "quant/matrix.h"
 #include "quant/rabitq.h"
-#include "types/halfvec.h"
-#include "types/vector.h"
+#include "types/vec16.h"
+#include "types/vec32.h"
 
 /*
  * Compiler-Vectorized Implementation
@@ -512,7 +512,7 @@ mkt_rabitq_destroy(RaBitQParams *params)
 
 RaBitQData *
 mkt_rabitq_encode(
-		const RaBitQParams *params, VectorRef input, VectorRef centroid)
+		const RaBitQParams *params, Vec32Ref input, Vec32Ref centroid)
 {
 	if (params == NULL || input.data == NULL || centroid.data == NULL)
 		return NULL;
@@ -556,8 +556,8 @@ mkt_rabitq_scratch_cleanup(RaBitQScratch *scratch)
 int
 mkt_rabitq_encode_into_ex(
 		const RaBitQParams *params,
-		VectorRef			input,
-		VectorRef			centroid,
+		Vec32Ref			input,
+		Vec32Ref			centroid,
 		RaBitQData		   *output,
 		RaBitQScratch	   *scratch)
 {
@@ -576,7 +576,7 @@ mkt_rabitq_encode_into_ex(
 	/* residual = input - centroid; transformed = P^T * residual. The signs +
 	 * factor math is shared with encode_from_pt (which the insert path calls
 	 * directly with a pre-rotated residual). */
-	mkt_vector_sub(input.data, centroid.data, residual, dim);
+	vec32_sub(input.data, centroid.data, residual, dim);
 	rabitq_rotate(params, residual, transformed);
 
 	return mkt_rabitq_encode_from_pt(params, transformed, output, scratch);
@@ -626,8 +626,8 @@ mkt_rabitq_encode_from_pt(
 int
 mkt_rabitq_encode_into(
 		const RaBitQParams *params,
-		VectorRef			input,
-		VectorRef			centroid,
+		Vec32Ref			input,
+		Vec32Ref			centroid,
 		RaBitQData		   *output)
 {
 	if (params == NULL || input.data == NULL || centroid.data == NULL ||
@@ -656,7 +656,7 @@ mkt_rabitq_encode_into(
 	}
 
 	/* Step 1: Compute residual = input - centroid */
-	mkt_vector_sub(input.data, centroid.data, residual, dim);
+	vec32_sub(input.data, centroid.data, residual, dim);
 
 	/* Step 2: Transform residual through P^T
 	 * RaBitQ applies the same rotation to all vectors (data, centroid, query).
@@ -720,7 +720,7 @@ mkt_rabitq_encode_into(
 
 /*
  * Batch encode implementation — always_inline so that the specialized
- * wrappers below pass a static const MktVectorTypeOps from the header,
+ * wrappers below pass a static const Vec32TypeOps from the header,
  * enabling the compiler to inline through every vtable function pointer.
  * MKT_TARGET_CLONES on the wrappers generates AVX2/AVX-512 variants.
  *
@@ -731,14 +731,14 @@ mkt_rabitq_encode_into(
  */
 __attribute__((always_inline)) static inline int
 rabitq_encode_batch_impl(
-		const RaBitQParams	   *params,
-		const void			   *vectors,
-		VectorRef				centroid,
-		float				   *f_add,
-		float				   *f_rescale,
-		uint8_t				   *bits,
-		uint16_t				count,
-		const MktVectorTypeOps *ops)
+		const RaBitQParams *params,
+		const void		   *vectors,
+		Vec32Ref			centroid,
+		float			   *f_add,
+		float			   *f_rescale,
+		uint8_t			   *bits,
+		uint16_t			count,
+		const Vec32TypeOps *ops)
 {
 	Dimension dim		   = params->dim;
 	uint32_t  packed_bytes = params->packed_bytes;
@@ -773,7 +773,7 @@ rabitq_encode_batch_impl(
 	{
 		const float *vec = fvecs + i * dim;
 		float		*res = residuals + i * dim;
-		mkt_vector_sub(vec, centroid.data, res, dim);
+		vec32_sub(vec, centroid.data, res, dim);
 	}
 
 	/* Step 2: Batch transform all residuals through P^T
@@ -852,7 +852,7 @@ MKT_TARGET_CLONES static int
 rabitq_encode_batch_f32(
 		const RaBitQParams *params,
 		const void		   *vectors,
-		VectorRef			centroid,
+		Vec32Ref			centroid,
 		float			   *f_add,
 		float			   *f_rescale,
 		uint8_t			   *bits,
@@ -873,7 +873,7 @@ MKT_TARGET_CLONES static int
 rabitq_encode_batch_f16(
 		const RaBitQParams *params,
 		const void		   *vectors,
-		VectorRef			centroid,
+		Vec32Ref			centroid,
 		float			   *f_add,
 		float			   *f_rescale,
 		uint8_t			   *bits,
@@ -895,7 +895,7 @@ MKT_TARGET_F16C_AVX2 static int
 rabitq_encode_batch_f16c(
 		const RaBitQParams *params,
 		const void		   *vectors,
-		VectorRef			centroid,
+		Vec32Ref			centroid,
 		float			   *f_add,
 		float			   *f_rescale,
 		uint8_t			   *bits,
@@ -917,8 +917,8 @@ int
 mkt_rabitq_encode_batch(
 		const RaBitQParams *params,
 		const void		   *vectors,
-		MktVecType			vec_type,
-		VectorRef			centroid,
+		VecType				vec_type,
+		Vec32Ref			centroid,
 		float			   *f_add,
 		float			   *f_rescale,
 		uint8_t			   *bits,
@@ -999,8 +999,8 @@ RaBitQBatch *
 mkt_rabitq_encode_batch_alloc(
 		const RaBitQParams *params,
 		const void		   *vectors,
-		MktVecType			vec_type,
-		VectorRef			centroid,
+		VecType				vec_type,
+		Vec32Ref			centroid,
 		uint16_t			count)
 {
 	if (params == NULL || vectors == NULL || centroid.data == NULL ||
@@ -1035,8 +1035,8 @@ mkt_rabitq_encode_batch_alloc(
 RaBitQQueryState *
 mkt_rabitq_prepare_query_ex(
 		const RaBitQParams *params,
-		VectorRef			query,
-		VectorRef			centroid,
+		Vec32Ref			query,
+		Vec32Ref			centroid,
 		MktDistanceMode		mode)
 {
 	if (params == NULL || query.data == NULL || centroid.data == NULL)
@@ -1069,7 +1069,7 @@ mkt_rabitq_prepare_query_ex(
 		return NULL;
 	}
 
-	mkt_vector_sub(query.data, centroid.data, residual, dim);
+	vec32_sub(query.data, centroid.data, residual, dim);
 
 	/* Transform through P^T */
 	rabitq_rotate(params, residual, state->transformed);
@@ -1081,7 +1081,7 @@ mkt_rabitq_prepare_query_ex(
 	state->g_error = sqrtf(state->g_add);
 
 	/* Compute sum of transformed values for FAISS-style distance formula */
-	state->sum_transformed = mkt_vector_sum(state->transformed, dim);
+	state->sum_transformed = vec32_sum(state->transformed, dim);
 
 	/* Precompute 1/sqrt(dim) for distance formula */
 	state->inv_sqrt_d = 1.0f / sqrtf((float)dim);
@@ -1134,7 +1134,7 @@ mkt_rabitq_prepare_query_ex(
 
 RaBitQQueryState *
 mkt_rabitq_prepare_query(
-		const RaBitQParams *params, VectorRef query, VectorRef centroid)
+		const RaBitQParams *params, Vec32Ref query, Vec32Ref centroid)
 {
 	return mkt_rabitq_prepare_query_ex(
 			params, query, centroid, MKT_DISTANCE_MODE_ASYMMETRIC);
@@ -1167,14 +1167,14 @@ mkt_rabitq_init_query_state(
 		MktDistanceMode	  mode)
 {
 	/* transformed = pt_query - pt_centroid (O(dim) vector subtraction) */
-	mkt_vector_sub(pt_query, pt_centroid, state->transformed, dim);
+	vec32_sub(pt_query, pt_centroid, state->transformed, dim);
 
 	/* Compute per-centroid scalar fields from transformed.
 	 * inv_sqrt_d and c_error are dim-dependent constants set once
 	 * via mkt_rabitq_init_query_constants(). */
 	state->g_add		   = mkt_l2_norm_squared(state->transformed, dim);
 	state->g_error		   = sqrtf(state->g_add);
-	state->sum_transformed = mkt_vector_sum(state->transformed, dim);
+	state->sum_transformed = vec32_sum(state->transformed, dim);
 
 	/* Dispatch pointers */
 	state->mode = mode;

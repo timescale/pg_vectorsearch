@@ -8,8 +8,8 @@
 
 #include "core/memory.h"
 #include "mkt_test.h"
-#include "types/halfvec.h"
-#include "types/vector.h"
+#include "types/vec16.h"
+#include "types/vec32.h"
 
 TEST_GROUP(HalfVec);
 
@@ -276,8 +276,7 @@ TEST(half_sizeof)
 
 TEST(halfvec_layout)
 {
-	ASSERT_EQ(
-			8, offsetof(MktHalfVector, x), "MktHalfVector.x offset must be 8");
+	ASSERT_EQ(8, offsetof(Vec16, x), "Vec16.x offset must be 8");
 }
 
 /* ----------------------------------------------------------------
@@ -410,7 +409,7 @@ TEST(f16_ops_to_float_block)
  * pointers at -O3, which would trigger "always_inline + target mismatch"
  * errors against the MKT_TARGET_F16C_AVX2 inline functions.
  */
-static const MktVectorTypeOps *volatile f16c_ops = &mkt_f16c_type_ops;
+static const Vec32TypeOps *volatile f16c_ops = &mkt_f16c_type_ops;
 
 TEST(f16c_ops_name)
 {
@@ -613,20 +612,20 @@ TEST(f16_ops_distance_matches_f32_reference)
 }
 
 /* ----------------------------------------------------------------
- * MktHalfVector lifecycle
+ * Vec16 lifecycle
  * ---------------------------------------------------------------- */
 
 TEST(halfvec_create)
 {
-	MktHalfVector *v = mkt_halfvec_create(128);
+	Vec16 *v = vec16_create(128);
 	ASSERT_NOT_NULL(v, "halfvec should be allocated");
-	ASSERT_EQ(128, MKT_HALFVEC_DIM(v), "dim should be 128");
-	mkt_halfvec_free(v);
+	ASSERT_EQ(128, VEC16_DIM(v), "dim should be 128");
+	vec16_free(v);
 }
 
 TEST(halfvec_create_zero_dim_fails)
 {
-	MktHalfVector *v = mkt_halfvec_create(0);
+	Vec16 *v = vec16_create(0);
 	ASSERT_NULL(v, "zero dim should fail");
 }
 
@@ -634,9 +633,9 @@ TEST(halfvec_from_floats)
 {
 	float values[] = {1.0f, 2.0f, 3.0f};
 
-	MktHalfVector *v = mkt_halfvec_from_floats(values, 3);
+	Vec16 *v = vec16_from_floats(values, 3);
 	ASSERT_NOT_NULL(v, "from_floats should succeed");
-	ASSERT_EQ(3, MKT_HALFVEC_DIM(v), "dim should be 3");
+	ASSERT_EQ(3, VEC16_DIM(v), "dim should be 3");
 
 	/* Verify values via to_float */
 	float out[3];
@@ -645,22 +644,22 @@ TEST(halfvec_from_floats)
 	ASSERT_FLOAT_EQ(2.0f, out[1], 0.01f, "element 1");
 	ASSERT_FLOAT_EQ(3.0f, out[2], 0.01f, "element 2");
 
-	mkt_halfvec_free(v);
+	vec16_free(v);
 }
 
 TEST(halfvec_from_floats_null_fails)
 {
-	MktHalfVector *v = mkt_halfvec_from_floats(NULL, 3);
+	Vec16 *v = vec16_from_floats(NULL, 3);
 	ASSERT_NULL(v, "NULL values should fail");
 }
 
 TEST(halfvec_set)
 {
-	MktHalfVector *v = mkt_halfvec_create(3);
+	Vec16 *v = vec16_create(3);
 	ASSERT_NOT_NULL(v, "halfvec should be allocated");
 
 	float values[] = {4.0f, 5.0f, 6.0f};
-	mkt_halfvec_set(v, values);
+	vec16_set(v, values);
 
 	float out[3];
 	mkt_half_to_float_array(v->x, out, 3);
@@ -668,22 +667,22 @@ TEST(halfvec_set)
 	ASSERT_FLOAT_EQ(5.0f, out[1], 0.01f, "set element 1");
 	ASSERT_FLOAT_EQ(6.0f, out[2], 0.01f, "set element 2");
 
-	mkt_halfvec_free(v);
+	vec16_free(v);
 }
 
 TEST(halfvec_to_ref)
 {
 	float values[] = {1.0f, 2.0f, 3.0f};
 
-	MktHalfVector *v = mkt_halfvec_from_floats(values, 3);
+	Vec16 *v = vec16_from_floats(values, 3);
 	ASSERT_NOT_NULL(v, "halfvec should be allocated");
 
-	float	  buffer[3];
-	VectorRef ref = MktHalfVectorToRef(v, buffer);
+	float	 buffer[3];
+	Vec32Ref ref = Vec16ToRef(v, buffer);
 	ASSERT_EQ(3, ref.dim, "ref dim should be 3");
 	ASSERT_FLOAT_EQ(1.0f, ref.data[0], 0.01f, "ref element 0");
 	ASSERT_FLOAT_EQ(2.0f, ref.data[1], 0.01f, "ref element 1");
 	ASSERT_FLOAT_EQ(3.0f, ref.data[2], 0.01f, "ref element 2");
 
-	mkt_halfvec_free(v);
+	vec16_free(v);
 }

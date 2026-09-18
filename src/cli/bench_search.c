@@ -27,7 +27,7 @@
 #include "cmd.h"
 #include "index/query_scan.h"
 #include "standalone/api.h"
-#include "standalone/vector_source.h"
+#include "standalone/vec32_source.h"
 
 /* ----------------------------------------------------------------
  * Defaults

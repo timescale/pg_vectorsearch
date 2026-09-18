@@ -185,10 +185,10 @@ mkt_horizontal_sum_u64_neon(uint64x2_t v)
  * Example usage:
  *
  *   // In header:
- *   Distance my_distance_fn(VectorRef a, VectorRef b);
+ *   Distance my_distance_fn(Vec32Ref a, Vec32Ref b);
  *
  *   // In implementation:
- *   DECLARE_DISPATCH(my_distance, Distance, VectorRef, VectorRef)
+ *   DECLARE_DISPATCH(my_distance, Distance, Vec32Ref, Vec32Ref)
  *
  *   INIT_DISPATCH(my_distance,
  *                 my_distance_scalar,
@@ -196,7 +196,7 @@ mkt_horizontal_sum_u64_neon(uint64x2_t v)
  *                 my_distance_avx2,
  *                 my_distance_neon)
  *
- *   Distance my_distance_fn(VectorRef a, VectorRef b) {
+ *   Distance my_distance_fn(Vec32Ref a, Vec32Ref b) {
  *       if (mkt_unlikely(!g_my_distance_initialized))
  *           my_distance_init();
  *       return g_my_distance_fn(a, b);
@@ -282,7 +282,7 @@ mkt_horizontal_sum_u64_neon(uint64x2_t v)
  *
  * Usage:
  *   BATCH_LOOP_WITH_PREFETCH(v, count, dim, vectors) {
- *       VectorRef vec = {.data = vectors + v * dim, .dim = dim};
+ *       Vec32Ref vec = {.data = vectors + v * dim, .dim = dim};
  *       distances[v] = compute_distance(query, vec);
  *   }
  */

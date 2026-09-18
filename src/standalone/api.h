@@ -11,7 +11,7 @@
 #include <stdint.h>
 
 #include "index/index_build.h"
-#include "standalone/vector_source.h"
+#include "standalone/vec32_source.h"
 
 /* Opaque index handle (wraps MktIndex + MktQueryCtx) */
 typedef struct MktHandle MktHandle;
@@ -44,19 +44,19 @@ typedef struct MktBuildInfo
  * Returns NULL on failure.
  */
 MktHandle *mkt_handle_create(
-		MktVectorSource *src,
-		uint32_t		 nlist,
-		uint32_t		 fan_out,
-		const char		*metric,
-		const char		*centroid_fmt,
-		const char		*posting_fmt,
-		uint32_t		 km_nredo,
-		uint32_t		 km_max_iter,
-		double			 soar_lambda,
-		double			 boundary_epsilon,
-		int				 fastscan,
-		int32_t			 nworkers,
-		MktBuildInfo	*info);
+		Vec32Source	 *src,
+		uint32_t	  nlist,
+		uint32_t	  fan_out,
+		const char	 *metric,
+		const char	 *centroid_fmt,
+		const char	 *posting_fmt,
+		uint32_t	  km_nredo,
+		uint32_t	  km_max_iter,
+		double		  soar_lambda,
+		double		  boundary_epsilon,
+		int			  fastscan,
+		int32_t		  nworkers,
+		MktBuildInfo *info);
 
 /*
  * Convenience: build from a flat float32 array.

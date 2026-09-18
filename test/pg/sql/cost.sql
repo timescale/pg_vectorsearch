@@ -6,13 +6,13 @@
 -- the estimate moves the right way with every input, and that the planner
 -- reaches the right conclusion at both ends of the size range.
 
-CREATE TABLE cost_test (id serial, grp int, v vector(32));
+CREATE TABLE cost_test (id serial, grp int, v vec32(32));
 
 INSERT INTO cost_test (grp, v)
     SELECT i % 10, (
         SELECT array_agg(sin(i * 0.1 + j * 0.7)::real)
         FROM generate_series(0, 31) j
-    )::vector(32)
+    )::vec32(32)
     FROM generate_series(1, 20000) i;
 
 CREATE INDEX idx_cost ON cost_test USING mktann (v);
@@ -28,9 +28,9 @@ ANALYZE cost_test;
 -- format() and \gexec is what gets it in.
 SELECT v::text AS qv FROM cost_test WHERE id = 42 \gset
 SELECT format($f$
-    CREATE FUNCTION qv() RETURNS mkt.vector(32)
+    CREATE FUNCTION qv() RETURNS mkt.vec32(32)
         LANGUAGE sql IMMUTABLE PARALLEL SAFE
-        AS $b$ SELECT %L::mkt.vector(32) $b$
+        AS $b$ SELECT %L::mkt.vec32(32) $b$
 $f$, :'qv') \gexec
 
 -- The index scan's startup cost. This model puts the work there: a scan
@@ -71,10 +71,10 @@ SELECT plan_uses($q$
 -- A 200-row table: the one size where the model prefers a sequential scan
 -- while the index is in fact faster. No assertion on the plan here -- the
 -- case and its cause are pinned further down, under "Two hundred rows".
-CREATE TABLE cost_small (id serial, v vector(32));
+CREATE TABLE cost_small (id serial, v vec32(32));
 INSERT INTO cost_small (v)
     SELECT (SELECT array_agg(sin(i * 0.1 + j * 0.7)::real)
-            FROM generate_series(0, 31) j)::vector(32)
+            FROM generate_series(0, 31) j)::vec32(32)
     FROM generate_series(1, 200) i;
 CREATE INDEX idx_cost_small ON cost_small USING mktann (v);
 ANALYZE cost_small;
@@ -341,7 +341,7 @@ INSERT INTO cost_test (grp, v)
     SELECT i % 10, (
         SELECT array_agg(sin(i * 0.37 + j * 0.7)::real)
         FROM generate_series(0, 31) j
-    )::vector(32)
+    )::vec32(32)
     FROM generate_series(20001, 30000) i;
 ANALYZE cost_test;
 
@@ -376,10 +376,10 @@ SELECT (SELECT c FROM costs WHERE label = 'eic_on')
 --
 -- A 600-dimension vector occupies 2408 bytes, past TOAST_TUPLE_THRESHOLD,
 -- so default storage puts these out of line.
-CREATE TABLE wide_vec (id serial, v vector(600));
+CREATE TABLE wide_vec (id serial, v vec32(600));
 INSERT INTO wide_vec (v)
     SELECT (SELECT array_agg(sin(i * 0.11 + j * 0.3)::real)
-            FROM generate_series(0, 599) j)::vector(600)
+            FROM generate_series(0, 599) j)::vec32(600)
     FROM generate_series(1, 300) i;
 CREATE INDEX wide_vec_mkt ON wide_vec USING mktann (v);
 ANALYZE wide_vec;
@@ -429,10 +429,10 @@ SELECT plan_uses($q$
 -- against a centroid region that is only a few pages, which is the largest
 -- single term at this scale and pushed the crossover well past where the
 -- index starts winning.
-CREATE TABLE cost_mid (id serial, v vector(32));
+CREATE TABLE cost_mid (id serial, v vec32(32));
 INSERT INTO cost_mid (v)
     SELECT (SELECT array_agg(sin(i * 0.1 + j * 0.7)::real)
-            FROM generate_series(0, 31) j)::vector(32)
+            FROM generate_series(0, 31) j)::vec32(32)
     FROM generate_series(1, 5000) i;
 CREATE INDEX idx_cost_mid ON cost_mid USING mktann (v);
 ANALYZE cost_mid;
@@ -503,7 +503,7 @@ RESET enable_seqscan;
 -- automatic the pool approaches the heap page count of the small
 -- out-of-line heap, and the page term dominates instead (see the note on
 -- rerank_cost about that inversion).
-CREATE TABLE wide_plain (id serial, v vector(600));
+CREATE TABLE wide_plain (id serial, v vec32(600));
 ALTER TABLE wide_plain ALTER COLUMN v SET STORAGE PLAIN;
 INSERT INTO wide_plain (id, v) SELECT id, v FROM wide_vec;
 CREATE INDEX wide_plain_mkt ON wide_plain USING mktann (v);

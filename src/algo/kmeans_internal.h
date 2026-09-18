@@ -14,8 +14,8 @@
 #include <stdint.h>
 
 #include "algo/kmeans.h"
-#include "types/halfvec.h"
-#include "types/vector.h"
+#include "types/vec16.h"
+#include "types/vec32.h"
 
 /* Block size for assignment step (matches FAISS) */
 #define KMEANS_BLOCK_SIZE 4096
@@ -50,7 +50,7 @@ typedef struct KMeansState
 	/* Input (not owned) */
 	const void	   *vectors;
 	const uint32_t *indices;  /* NULL = identity mapping [0..nvecs) */
-	MktVecType		vec_type; /* element type (f32, f16, f16c) */
+	VecType			vec_type; /* element type (f32, f16, f16c) */
 	uint32_t		nvecs;
 	uint32_t		nlist;
 	Dimension		dim;

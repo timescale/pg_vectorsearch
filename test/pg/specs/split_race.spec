@@ -19,8 +19,8 @@
 setup
 {
     CREATE EXTENSION injection_points;
-    CREATE TABLE race (id int, v vector(3));
-    INSERT INTO race SELECT g, format('[%s,0,0]', g)::vector
+    CREATE TABLE race (id int, v vec32(3));
+    INSERT INTO race SELECT g, format('[%s,0,0]', g)::vec32
         FROM generate_series(1, 60) g;
     CREATE INDEX race_idx ON race USING mktann (v)
         WITH (nlist = 1, centroid_fastscan = off);

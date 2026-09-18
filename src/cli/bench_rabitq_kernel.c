@@ -162,7 +162,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 	for (Dimension i = 0; i < dim; i++)
 		centroid[i] = 0.0f;
 
-	VectorRef cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/* Generate and encode vectors */
 	float	*vectors	  = mkt_alloc((size_t)count * dim * sizeof(float));
@@ -187,7 +187,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 	/* Prepare query */
 	float *query = mkt_alloc(dim * sizeof(float));
 	generate_vector(query, dim, 99999);
-	VectorRef query_ref = {.data = query, .dim = dim};
+	Vec32Ref query_ref = {.data = query, .dim = dim};
 
 	RaBitQQueryState *state =
 			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
@@ -277,7 +277,7 @@ benchmark_accuracy(const BenchConfig *config)
 	float		 *centroid = mkt_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 		centroid[i] = 0.0f;
-	VectorRef cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/* Generate vectors */
 	float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
@@ -303,7 +303,7 @@ benchmark_accuracy(const BenchConfig *config)
 	/* Prepare query */
 	float *query = mkt_alloc(dim * sizeof(float));
 	generate_vector(query, dim, 99999);
-	VectorRef query_ref = {.data = query, .dim = dim};
+	Vec32Ref query_ref = {.data = query, .dim = dim};
 
 	RaBitQQueryState *state =
 			mkt_rabitq_prepare_query(params, query_ref, cent_ref);

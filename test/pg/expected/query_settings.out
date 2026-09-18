@@ -5,12 +5,12 @@
 -- interaction with the query.
 -- Tie-free deterministic data (grid data would produce distance ties).
 -- grp is a 10%-selective filter column for the filtered-scan test.
-CREATE TABLE query_settings_test (id serial, grp int, v vector(32));
+CREATE TABLE query_settings_test (id serial, grp int, v vec32(32));
 INSERT INTO query_settings_test (grp, v)
     SELECT i % 10, (
         SELECT array_agg(sin(i * 0.1 + j * 0.7)::real)
         FROM generate_series(0, 31) j
-    )::vector(32)
+    )::vec32(32)
     FROM generate_series(1, 500) i;
 CREATE INDEX idx_query_settings ON query_settings_test USING mktann (v)
     WITH (centroid_compression = true);
@@ -276,7 +276,7 @@ SELECT query_settings_top_ks($q$
 
 -- A query inside a function body reaches the executor through SPI, which
 -- runs it directly rather than through a portal. The sizing must still
--- apply, or every vector query written inside a function silently
+-- apply, or every vec32 query written inside a function silently
 -- truncates to the default k.
 CREATE FUNCTION query_settings_spi_rows(lim int) RETURNS bigint
     LANGUAGE plpgsql AS $$
@@ -708,11 +708,11 @@ END $$;
 -- exact probe order is decided by near-ties that the 1-bit beam estimates
 -- scramble -- exactly the regime probe expansion exists to repair, and the
 -- one where beam indexes differ visibly from scan ranks.
-CREATE TABLE probe_depth_test (id serial, v vector(32));
+CREATE TABLE probe_depth_test (id serial, v vec32(32));
 INSERT INTO probe_depth_test (v)
     SELECT (SELECT array_agg((sin(c * 12.9898 + j * 78.233) +
                               0.05 * sin((c * 50 + m) * 3.7 + j * 1.3))::real)
-            FROM generate_series(0, 31) j)::vector(32)
+            FROM generate_series(0, 31) j)::vec32(32)
     FROM generate_series(0, 39) c, generate_series(1, 50) m;
 CREATE INDEX probe_depth_idx ON probe_depth_test USING mktann (v)
     WITH (centroid_compression = true, nlist = 40);
@@ -726,11 +726,11 @@ SELECT mkt_phase_stats_reset();
 (1 row)
 
 DO $$
-DECLARE q vector(32);
+DECLARE q vec32(32);
 BEGIN
     FOR g IN 1..20 LOOP
         SELECT (SELECT array_agg((0.03 * sin(g * 7.7 + j * 2.9))::real)
-                FROM generate_series(0, 31) j)::vector(32) INTO q;
+                FROM generate_series(0, 31) j)::vec32(32) INTO q;
         PERFORM id FROM probe_depth_test ORDER BY v <-> q LIMIT 10;
     END LOOP;
 END $$;
@@ -756,8 +756,8 @@ DROP FUNCTION mkt_phase_stats_reset();
 -- every possible leaf count, so entire clusters drop out of reach at
 -- ANY nprobe: probing every list must return every row, at the default
 -- beam scale, for an index whose fan_out is smaller than 1 / scale.
-CREATE TABLE beam_floor_test (id int, v vector(3));
-INSERT INTO beam_floor_test SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE beam_floor_test (id int, v vec32(3));
+INSERT INTO beam_floor_test SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 60) g;
 CREATE INDEX beam_floor_idx ON beam_floor_test USING mktann (v)
     WITH (nlist = 12, fan_out = 3);
@@ -783,8 +783,8 @@ DROP TABLE beam_floor_test;
 -- pruning subtrees that stay unreachable at ANY nprobe. When nprobe
 -- covers every leaf the beam must keep whole levels: probing everything
 -- must return everything, whatever shape the tree took.
-CREATE TABLE beam_cover_test (id int, v vector(3));
-INSERT INTO beam_cover_test SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE beam_cover_test (id int, v vec32(3));
+INSERT INTO beam_cover_test SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 CREATE INDEX beam_cover_idx ON beam_cover_test USING mktann (v)
     WITH (nlist = 12, fan_out = 4);
@@ -810,15 +810,15 @@ DROP TABLE beam_cover_test;
 -- (~0.5*sqrt(nlist), floored at 10). Verify the default is auto and
 -- that a query under it is served by the index and finds an exact
 -- nearest neighbor (50 rows, nlist=12: the floor of 10 probes covers
--- most lists and the probe vector is a distinct-distance match).
+-- most lists and the probe vec32 is a distinct-distance match).
 SHOW mkt.nprobe;
  mkt.nprobe 
 ------------
  0
 (1 row)
 
-CREATE TABLE auto_nprobe_test (id int, v vector(3));
-INSERT INTO auto_nprobe_test SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE auto_nprobe_test (id int, v vec32(3));
+INSERT INTO auto_nprobe_test SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 CREATE INDEX auto_nprobe_idx ON auto_nprobe_test USING mktann (v)
     WITH (nlist = 12);
@@ -829,7 +829,7 @@ EXPLAIN (COSTS OFF) SELECT id FROM auto_nprobe_test
 ------------------------------------------------------------
  Limit
    ->  Index Scan using auto_nprobe_idx on auto_nprobe_test
-         Order By: (v <-> '[25,0,0]'::vector)
+         Order By: (v <-> '[25,0,0]'::vec32)
 (3 rows)
 
 SELECT id FROM auto_nprobe_test ORDER BY v <-> '[25,0,0]' LIMIT 1;

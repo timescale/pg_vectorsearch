@@ -30,48 +30,48 @@
 
 #if defined(__x86_64__) || defined(_M_X64)
 /* AVX-512 implementations (x86-64 only) */
-Distance mkt_distance_l2_avx512(VectorRef a, VectorRef b);
-Distance mkt_distance_ip_avx512(VectorRef a, VectorRef b);
-Distance mkt_distance_cosine_avx512(VectorRef a, VectorRef b);
+Distance mkt_distance_l2_avx512(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_ip_avx512(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_cosine_avx512(Vec32Ref a, Vec32Ref b);
 
 int mkt_distance_batch_l2_avx512(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_ip_avx512(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_cosine_avx512(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 
 /* AVX2 implementations (x86-64 only) */
-Distance mkt_distance_l2_avx2(VectorRef a, VectorRef b);
-Distance mkt_distance_ip_avx2(VectorRef a, VectorRef b);
-Distance mkt_distance_cosine_avx2(VectorRef a, VectorRef b);
+Distance mkt_distance_l2_avx2(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_ip_avx2(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_cosine_avx2(Vec32Ref a, Vec32Ref b);
 
 int mkt_distance_batch_l2_avx2(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_ip_avx2(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_cosine_avx2(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -80,24 +80,24 @@ int mkt_distance_batch_cosine_avx2(
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 /* NEON implementations (ARM only) */
-Distance mkt_distance_l2_neon(VectorRef a, VectorRef b);
-Distance mkt_distance_ip_neon(VectorRef a, VectorRef b);
-Distance mkt_distance_cosine_neon(VectorRef a, VectorRef b);
+Distance mkt_distance_l2_neon(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_ip_neon(Vec32Ref a, Vec32Ref b);
+Distance mkt_distance_cosine_neon(Vec32Ref a, Vec32Ref b);
 
 int mkt_distance_batch_l2_neon(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_ip_neon(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 int mkt_distance_batch_cosine_neon(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -124,7 +124,7 @@ int mkt_distance_batch_cosine_neon(
  */
 
 Distance
-mkt_distance_l2_compiler(VectorRef a, VectorRef b)
+mkt_distance_l2_compiler(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -135,7 +135,7 @@ mkt_distance_l2_compiler(VectorRef a, VectorRef b)
 }
 
 Distance
-mkt_distance_ip_compiler(VectorRef a, VectorRef b)
+mkt_distance_ip_compiler(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -166,7 +166,7 @@ compiler_cosine_similarity(int dim, const float *pa, const float *pb)
 }
 
 Distance
-mkt_distance_cosine_compiler(VectorRef a, VectorRef b)
+mkt_distance_cosine_compiler(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -193,7 +193,7 @@ mkt_distance_cosine_compiler(VectorRef a, VectorRef b)
 
 int
 mkt_distance_batch_l2_compiler(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -216,7 +216,7 @@ mkt_distance_batch_l2_compiler(
 
 int
 mkt_distance_batch_ip_compiler(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -239,7 +239,7 @@ mkt_distance_batch_ip_compiler(
 
 int
 mkt_distance_batch_cosine_compiler(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -278,14 +278,14 @@ mkt_distance_batch_cosine_compiler(
  */
 
 /* Single-pair function pointers */
-typedef Distance (*DistanceFn)(VectorRef, VectorRef);
+typedef Distance (*DistanceFn)(Vec32Ref, Vec32Ref);
 static DistanceFn g_distance_l2_fn	   = NULL;
 static DistanceFn g_distance_ip_fn	   = NULL;
 static DistanceFn g_distance_cosine_fn = NULL;
 
 /* Batch function pointers */
 typedef int (*BatchDistanceFn)(
-		VectorRef, const float *, uint32_t, Dimension, Distance *);
+		Vec32Ref, const float *, uint32_t, Dimension, Distance *);
 static BatchDistanceFn g_batch_l2_fn	 = NULL;
 static BatchDistanceFn g_batch_ip_fn	 = NULL;
 static BatchDistanceFn g_batch_cosine_fn = NULL;
@@ -438,7 +438,7 @@ mkt_distance_init(void)
 
 /* IFUNC resolvers - called once at program load */
 
-static Distance (*resolve_distance_l2(void))(VectorRef, VectorRef)
+static Distance (*resolve_distance_l2(void))(Vec32Ref, Vec32Ref)
 {
 	SimdCapability caps = mkt_detect_simd();
 
@@ -455,7 +455,7 @@ static Distance (*resolve_distance_l2(void))(VectorRef, VectorRef)
 	return mkt_distance_l2_compiler;
 }
 
-static Distance (*resolve_distance_ip(void))(VectorRef, VectorRef)
+static Distance (*resolve_distance_ip(void))(Vec32Ref, Vec32Ref)
 {
 	SimdCapability caps = mkt_detect_simd();
 
@@ -472,7 +472,7 @@ static Distance (*resolve_distance_ip(void))(VectorRef, VectorRef)
 	return mkt_distance_ip_compiler;
 }
 
-static Distance (*resolve_distance_cosine(void))(VectorRef, VectorRef)
+static Distance (*resolve_distance_cosine(void))(Vec32Ref, Vec32Ref)
 {
 	SimdCapability caps = mkt_detect_simd();
 
@@ -491,13 +491,13 @@ static Distance (*resolve_distance_cosine(void))(VectorRef, VectorRef)
 
 /* Public API with IFUNC attribute */
 
-Distance mkt_distance_l2(VectorRef a, VectorRef b)
+Distance mkt_distance_l2(Vec32Ref a, Vec32Ref b)
 		__attribute__((ifunc("resolve_distance_l2")));
 
-Distance mkt_distance_ip(VectorRef a, VectorRef b)
+Distance mkt_distance_ip(Vec32Ref a, Vec32Ref b)
 		__attribute__((ifunc("resolve_distance_ip")));
 
-Distance mkt_distance_cosine(VectorRef a, VectorRef b)
+Distance mkt_distance_cosine(Vec32Ref a, Vec32Ref b)
 		__attribute__((ifunc("resolve_distance_cosine")));
 
 #else
@@ -505,7 +505,7 @@ Distance mkt_distance_cosine(VectorRef a, VectorRef b)
 /* Fallback: manual dispatch (for testing or non-GNU toolchains) */
 
 Distance
-mkt_distance_l2(VectorRef a, VectorRef b)
+mkt_distance_l2(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(!g_initialized))
 		mkt_distance_init();
@@ -513,7 +513,7 @@ mkt_distance_l2(VectorRef a, VectorRef b)
 }
 
 Distance
-mkt_distance_ip(VectorRef a, VectorRef b)
+mkt_distance_ip(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(!g_initialized))
 		mkt_distance_init();
@@ -521,7 +521,7 @@ mkt_distance_ip(VectorRef a, VectorRef b)
 }
 
 Distance
-mkt_distance_cosine(VectorRef a, VectorRef b)
+mkt_distance_cosine(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(!g_initialized))
 		mkt_distance_init();
@@ -531,7 +531,7 @@ mkt_distance_cosine(VectorRef a, VectorRef b)
 #endif /* USE_IFUNC */
 
 Distance
-mkt_distance(VectorRef a, VectorRef b, DistanceMetric metric)
+mkt_distance(Vec32Ref a, Vec32Ref b, DistanceMetric metric)
 {
 	switch (metric)
 	{
@@ -552,7 +552,7 @@ mkt_distance(VectorRef a, VectorRef b, DistanceMetric metric)
 
 int
 mkt_distance_batch_l2(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -573,8 +573,8 @@ mkt_distance_batch_l2(
 	/* Fallback: loop over single-pair function */
 	for (uint32_t i = 0; i < count; i++)
 	{
-		VectorRef vec = {.data = vectors + i * dim, .dim = dim};
-		distances[i]  = mkt_distance_l2(query, vec);
+		Vec32Ref vec = {.data = vectors + i * dim, .dim = dim};
+		distances[i] = mkt_distance_l2(query, vec);
 	}
 
 	return 0;
@@ -582,7 +582,7 @@ mkt_distance_batch_l2(
 
 int
 mkt_distance_batch_ip(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -601,8 +601,8 @@ mkt_distance_batch_ip(
 
 	for (uint32_t i = 0; i < count; i++)
 	{
-		VectorRef vec = {.data = vectors + i * dim, .dim = dim};
-		distances[i]  = mkt_distance_ip(query, vec);
+		Vec32Ref vec = {.data = vectors + i * dim, .dim = dim};
+		distances[i] = mkt_distance_ip(query, vec);
 	}
 
 	return 0;
@@ -610,7 +610,7 @@ mkt_distance_batch_ip(
 
 int
 mkt_distance_batch_cosine(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -629,8 +629,8 @@ mkt_distance_batch_cosine(
 
 	for (uint32_t i = 0; i < count; i++)
 	{
-		VectorRef vec = {.data = vectors + i * dim, .dim = dim};
-		distances[i]  = mkt_distance_cosine(query, vec);
+		Vec32Ref vec = {.data = vectors + i * dim, .dim = dim};
+		distances[i] = mkt_distance_cosine(query, vec);
 	}
 
 	return 0;

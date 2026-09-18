@@ -194,8 +194,8 @@ TEST(page_add_single_entry)
 		centroid[i] = 0.0f;
 	}
 
-	VectorRef	vec_ref	 = {.data = vec, .dim = dim};
-	VectorRef	cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref	vec_ref	 = {.data = vec, .dim = dim};
+	Vec32Ref	cent_ref = {.data = centroid, .dim = dim};
 	RaBitQData *encoded	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
 	ASSERT_NOT_NULL(encoded, "encoding succeeded");
 
@@ -255,8 +255,8 @@ TEST(page_add_fill_to_capacity)
 		centroid[i] = 0.0f;
 	}
 
-	VectorRef	vec_ref	 = {.data = vec, .dim = dim};
-	VectorRef	cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref	vec_ref	 = {.data = vec, .dim = dim};
+	Vec32Ref	cent_ref = {.data = centroid, .dim = dim};
 	RaBitQData *encoded	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
 	ASSERT_NOT_NULL(encoded, "encoding succeeded");
 
@@ -303,8 +303,8 @@ TEST(page_has_room)
 		centroid[i] = 0.0f;
 	}
 
-	VectorRef	vec_ref	 = {.data = vec, .dim = dim};
-	VectorRef	cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref	vec_ref	 = {.data = vec, .dim = dim};
+	Vec32Ref	cent_ref = {.data = centroid, .dim = dim};
 	RaBitQData *encoded	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
 
 	uint32_t max = mkt_centroid_max_entries(dim);
@@ -339,7 +339,7 @@ TEST(page_multi_entry_round_trip)
 	float *centroid = mkt_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 		centroid[i] = 0.0f;
-	VectorRef cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/* Add entries with distinct vectors */
 	RaBitQData **encodings = mkt_alloc(count * sizeof(void *));
@@ -349,8 +349,8 @@ TEST(page_multi_entry_round_trip)
 		for (Dimension i = 0; i < dim; i++)
 			vec[i] = (float)((i * 17 + e * 31) % 100 - 50) / 10.0f;
 
-		VectorRef vec_ref = {.data = vec, .dim = dim};
-		encodings[e]	  = mkt_rabitq_encode(params, vec_ref, cent_ref);
+		Vec32Ref vec_ref = {.data = vec, .dim = dim};
+		encodings[e]	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
 		ASSERT_NOT_NULL(encodings[e], "encoding succeeded");
 
 		bool added = mkt_centroid_page_add(

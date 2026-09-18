@@ -33,13 +33,13 @@
  *  - The conversion would not disappear, only move. The kernels are element-
  *    wise SIMD over contiguous float32, so a Datum-typed quantize would widen
  *    to float32 inside the callback -- the same work, done per call instead of
- *    once at the boundary, and without the shared MktVectorTypeOps to do it.
+ *    once at the boundary, and without the shared Vec32TypeOps to do it.
  *
  * Where this contract would need revisiting is a type for which "widen to
  * dense float32" is the wrong shape -- a sparse or bit-packed vector, both of
  * which pgvector's hnsw does support. Dense float types fit it exactly.
  *
- * The conversion itself is not new here: MktVectorTypeOps already covers
+ * The conversion itself is not new here: Vec32TypeOps already covers
  * float32 and float16 for k-means and quantization, and is shared with
  * standalone. This descriptor binds an opclass to one of those vtables and
  * adds the two things only PostgreSQL needs -- how to unwrap a Datum, and
@@ -82,7 +82,7 @@ typedef struct MktIndexTypeInfo
 	 * returns its input pointer from to_float_block; f16 widens into the
 	 * caller's buffer.
 	 */
-	const MktVectorTypeOps *ops;
+	const Vec32TypeOps *ops;
 
 	/*
 	 * Datum -> raw element block, plus the value's dimension. The only part
@@ -94,14 +94,14 @@ typedef struct MktIndexTypeInfo
 
 /*
  * Descriptor for an index's column type. The support function is optional:
- * an opclass that declares none indexes `vector`, which is both the original
+ * an opclass that declares none indexes `vec32`, which is both the original
  * behaviour and what an index built before the function existed still needs.
  */
 const MktIndexTypeInfo *mkt_index_type_info(Relation index);
 
 /* Does a float32 view of this type need a caller-provided buffer? */
 static inline bool
-mkt_vector_needs_buffer(const MktIndexTypeInfo *ti)
+vec32_needs_buffer(const MktIndexTypeInfo *ti)
 {
 	return ti->ops->element_size != sizeof(float);
 }
@@ -117,12 +117,12 @@ mkt_vector_needs_buffer(const MktIndexTypeInfo *ti)
  *
  * Resolve once per build / scan / rerank and read many times.
  */
-typedef struct MktVectorAccess
+typedef struct Vec32Access
 {
 	const MktIndexTypeInfo *ti;	 /* shared, per type */
 	Dimension				dim; /* this index's column */
 	float				   *buf; /* NULL when no conversion is needed */
-} MktVectorAccess;
+} Vec32Access;
 
 /*
  * Bind a descriptor to a dimension, allocating the conversion buffer if the
@@ -133,13 +133,13 @@ typedef struct MktVectorAccess
  * one rerank call for the heap fetches. Pass CurrentMemoryContext for plain
  * palloc semantics.
  */
-static inline MktVectorAccess
-mkt_vector_access(const MktIndexTypeInfo *ti, Dimension dim, MemoryContext ctx)
+static inline Vec32Access
+vec32_access(const MktIndexTypeInfo *ti, Dimension dim, MemoryContext ctx)
 {
-	return (MktVectorAccess){
+	return (Vec32Access){
 			.ti	 = ti,
 			.dim = dim,
-			.buf = mkt_vector_needs_buffer(ti)
+			.buf = vec32_needs_buffer(ti)
 						 ? (float *)
 								   MemoryContextAlloc(ctx, sizeof(float) * dim)
 						 : NULL,
@@ -154,8 +154,8 @@ mkt_vector_access(const MktIndexTypeInfo *ti, Dimension dim, MemoryContext ctx)
  * typmod pins its dimension, so a mismatch should be unreachable -- but this
  * reads a varlena into a fixed buffer.
  */
-static inline VectorRef
-mkt_vector_read(const MktVectorAccess *a, Datum d)
+static inline Vec32Ref
+vec32_read(const Vec32Access *a, Datum d)
 {
 	Dimension	dim;
 	const void *raw = a->ti->unwrap(d, &dim);
@@ -168,7 +168,7 @@ mkt_vector_read(const MktVectorAccess *a, Datum d)
 						dim,
 						a->dim)));
 
-	return (VectorRef){
+	return (Vec32Ref){
 			.data = a->ti->ops->to_float_block(raw, a->buf, 1, dim),
 			.dim  = dim,
 	};

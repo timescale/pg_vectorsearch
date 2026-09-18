@@ -22,8 +22,8 @@
 setup
 {
     CREATE EXTENSION injection_points;
-    CREATE TABLE ir (id int, v vector(3));
-    INSERT INTO ir SELECT g, format('[%s,0,0]', g)::vector
+    CREATE TABLE ir (id int, v vec32(3));
+    INSERT INTO ir SELECT g, format('[%s,0,0]', g)::vec32
         FROM generate_series(1, 60) g;
     CREATE INDEX ir_idx ON ir USING mktann (v)
         WITH (nlist = 1, centroid_fastscan = off);

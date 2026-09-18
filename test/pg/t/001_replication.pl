@@ -29,7 +29,7 @@ my $dim  = 32;
 my $rows = 2000;
 my $k    = 10;
 
-# Query with a row's own vector rather than the origin: this data is
+# Query with a row's own vec32 rather than the origin: this data is
 # generated from sin(), so every point sits at roughly the same distance from
 # the origin and "nearest" would barely mean anything. Against a real row
 # there is an unambiguous nearest neighbour -- the row itself, at distance
@@ -47,9 +47,9 @@ $primary->safe_psql('postgres', 'CREATE EXTENSION meerkat');
 $primary->safe_psql('postgres',
 	'ALTER DATABASE postgres SET search_path = mkt, public');
 
-# Two tables so both vector types are covered; halfvec drives the
-# half-precision centroid format, which no vector column can reach.
-my %vtype = (tv => "vector($dim)", th => "halfvec($dim)");
+# Two tables so both vec32 types are covered; vec16 drives the
+# half-precision centroid format, which no vec32 column can reach.
+my %vtype = (tv => "vec32($dim)", th => "vec16($dim)");
 
 for my $name (sort keys %vtype)
 {
@@ -135,7 +135,7 @@ my @cases = (
 		centroid => 'fastscan',
 	},
 	{
-		label    => 'halfvec column, half centroids',
+		label    => 'vec16 column, half centroids',
 		table    => 'th',
 		opts     => 'fastscan = off, centroid_compression = off, '
 		          . 'centroid_fastscan = off',
@@ -187,7 +187,7 @@ SQL
 	$primary->safe_psql('postgres', <<"SQL");
 INSERT INTO tv
     SELECT g, ('[' || (SELECT string_agg((sin(g * 0.53 + j))::text, ',')
-                       FROM generate_series(1, $dim) j) || ']')::vector($dim)
+                       FROM generate_series(1, $dim) j) || ']')::vec32($dim)
     FROM generate_series($rows + 1, $rows + 12000) g;
 ALTER TABLE tv SET (parallel_workers = 3);
 ANALYZE tv;
@@ -366,10 +366,10 @@ SQL
 	my $idx  = 'idx_split_wide';
 	my $wdim = 1968;
 	$primary->safe_psql('postgres', <<"SQL");
-CREATE TABLE tw (id int, v vector($wdim));
+CREATE TABLE tw (id int, v vec32($wdim));
 INSERT INTO tw
     SELECT g, ('[' || (SELECT string_agg((sin(g * 0.7 + j))::text, ',')
-                       FROM generate_series(1, $wdim) j) || ']')::vector($wdim)
+                       FROM generate_series(1, $wdim) j) || ']')::vec32($wdim)
     FROM generate_series(1, 400) g;
 ANALYZE tw;
 SQL

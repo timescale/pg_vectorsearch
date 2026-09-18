@@ -96,7 +96,7 @@ pgvector_cosine_similarity(int dim, const float *ax, const float *bx)
  */
 
 Distance
-mkt_distance_l2_pgvector(VectorRef a, VectorRef b)
+mkt_distance_l2_pgvector(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -107,7 +107,7 @@ mkt_distance_l2_pgvector(VectorRef a, VectorRef b)
 }
 
 Distance
-mkt_distance_ip_pgvector(VectorRef a, VectorRef b)
+mkt_distance_ip_pgvector(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -118,7 +118,7 @@ mkt_distance_ip_pgvector(VectorRef a, VectorRef b)
 }
 
 Distance
-mkt_distance_cosine_pgvector(VectorRef a, VectorRef b)
+mkt_distance_cosine_pgvector(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -142,7 +142,7 @@ mkt_distance_cosine_pgvector(VectorRef a, VectorRef b)
 
 int
 mkt_distance_batch_l2_pgvector(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -165,7 +165,7 @@ mkt_distance_batch_l2_pgvector(
 
 int
 mkt_distance_batch_ip_pgvector(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -188,7 +188,7 @@ mkt_distance_batch_ip_pgvector(
 
 int
 mkt_distance_batch_cosine_pgvector(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
