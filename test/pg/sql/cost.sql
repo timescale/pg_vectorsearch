@@ -28,9 +28,9 @@ ANALYZE cost_test;
 -- format() and \gexec is what gets it in.
 SELECT v::text AS qv FROM cost_test WHERE id = 42 \gset
 SELECT format($f$
-    CREATE FUNCTION qv() RETURNS mkt.vec32(32)
+    CREATE FUNCTION qv() RETURNS vec32(32)
         LANGUAGE sql IMMUTABLE PARALLEL SAFE
-        AS $b$ SELECT %L::mkt.vec32(32) $b$
+        AS $b$ SELECT %L::vec32(32) $b$
 $f$, :'qv') \gexec
 
 -- The index scan's startup cost. This model puts the work there: a scan

@@ -1,5 +1,15 @@
 # module_pathname goes into meerkat--<version>.control
 comment = 'Meerkat: ANN vector search for PostgreSQL'
 default_version = '@VERSION@'
+# No fixed `schema`: CREATE EXTENSION meerkat installs vec32/vec16/rabitq
+# and their operators/casts/AM into whatever schema the installer chooses
+# (SCHEMA clause, or the first existing schema on search_path -- typically
+# public). The install script separately creates its own `mkt` schema for
+# the maintenance/introspection procedures (mkt.rebalance,
+# mkt.split_posting_list, ...), which always live there regardless of the
+# chosen schema. relocatable stays false: ALTER EXTENSION ... SET SCHEMA
+# would try to move every member object, including the ones deliberately
+# pinned in mkt, into one schema -- Postgres has no notion of relocating
+# part of an extension. To install into a different schema, drop and
+# recreate the extension there instead.
 relocatable = false
-schema = 'mkt'

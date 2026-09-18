@@ -34,7 +34,7 @@ SELECT level,
 -- Centroid format follows the column type: a vec16 column stores
 -- half-precision centroids, a vec32 column float, with every option
 -- otherwise identical. This is a regression test as much as a feature test --
--- the AM resolves mkt.vec16's OID during CREATE INDEX, where PostgreSQL
+-- the AM resolves vec16's OID during CREATE INDEX, where PostgreSQL
 -- has narrowed the search path (RestrictSearchPath in DefineIndex), so an
 -- unqualified type lookup silently reports "not vec16" and the whole
 -- vec16 input path decodes as float32.
@@ -455,18 +455,20 @@ DROP TABLE embeddings;
 DROP TABLE wide;
 
 -- ---------------------------------------------------------------------
--- mkt.git_commit() — exposes the git commit the extension was built
+-- git_commit() — exposes the git commit the extension was built
 -- from. Verify the contract without printing the actual hash so the
--- expected output stays deterministic across builds.
+-- expected output stays deterministic across builds. Lives alongside
+-- the types (not in mkt), so it's reached unqualified here via
+-- search_path like vec32 itself.
 -- ---------------------------------------------------------------------
 
 -- Format: 40-char lowercase hex (git's full SHA-1) or the "unknown"
 -- fallback used when vcs_tag had no git checkout available.
-SELECT mkt.git_commit() ~ '^([0-9a-f]{40}|unknown)$' AS valid_format;
+SELECT git_commit() ~ '^([0-9a-f]{40}|unknown)$' AS valid_format;
 
 -- Callers (e.g. rekall) use this as a string, so the return type
 -- must be text.
-SELECT pg_typeof(mkt.git_commit())::text = 'text' AS returns_text;
+SELECT pg_typeof(git_commit())::text = 'text' AS returns_text;
 
 -- The function must be IMMUTABLE STRICT PARALLEL SAFE — the commit
 -- doesn't change within a single backend's lifetime, the input is
@@ -477,29 +479,30 @@ SELECT
     p.proisstrict            AS strict,
     p.proparallel      = 's' AS parallel_safe
 FROM pg_proc p
-JOIN pg_namespace n ON n.oid = p.pronamespace
-WHERE n.nspname = 'mkt' AND p.proname = 'git_commit';
+WHERE p.pronamespace = (SELECT extnamespace FROM pg_extension
+                          WHERE extname = 'meerkat')
+  AND p.proname = 'git_commit';
 
 -- ---------------------------------------------------------------------
--- mkt.extension_name() / mkt.extension_version() — the extension name
--- and version the loaded library was built as.
+-- extension_name() / extension_version() — the extension name and
+-- version the loaded library was built as.
 -- ---------------------------------------------------------------------
 
-SELECT mkt.extension_name();
+SELECT extension_name();
 
 -- The binary's version must match the installed extension's version;
 -- a mismatch means the library and the SQL scripts come from
 -- different builds (e.g. a stale install).
-SELECT mkt.extension_version() =
+SELECT extension_version() =
     (SELECT extversion FROM pg_extension
-     WHERE extname = mkt.extension_name())
+     WHERE extname = extension_name())
     AS version_matches_extension;
 
--- Same contract as mkt.git_commit() above: consumed as strings (e.g.
+-- Same contract as git_commit() above: consumed as strings (e.g.
 -- by rekall), so both must return text and be IMMUTABLE STRICT
 -- PARALLEL SAFE.
-SELECT pg_typeof(mkt.extension_name())::text = 'text' AND
-       pg_typeof(mkt.extension_version())::text = 'text' AS returns_text;
+SELECT pg_typeof(extension_name())::text = 'text' AND
+       pg_typeof(extension_version())::text = 'text' AS returns_text;
 
 SELECT
     p.proname,

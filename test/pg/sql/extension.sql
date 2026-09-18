@@ -1,0 +1,228 @@
+-- Extension install: schema choice and the mkt guarantees
+--
+-- vec32/vec16/rabitq and everything built on them (operators, casts, the
+-- mktann access method) install into whichever schema CREATE EXTENSION
+-- targets. The maintenance/introspection procedures (mkt.rebalance,
+-- mkt.split_posting_list, mkt.posting_pages, mkt.tids_clusters,
+-- mkt.index_settings, mkt.convert_posting_to_fastscan, mkt.centroid_pages)
+-- are the one exception: they always live in a separate, fixed `mkt`
+-- schema regardless of that choice. The extension is not relocatable after
+-- the fact (see section 4 below) -- the schema choice is made once, at
+-- install time, which is why this is "schema choice", not "relocation".
+--
+-- This test manages its own CREATE/DROP EXTENSION cycles (including a
+-- SCHEMA clause and an expected-to-fail ALTER EXTENSION), so it runs
+-- against its own dedicated temp instance (see test/pg/meson.build)
+-- instead of the shared --load-extension=meerkat schedule, which installs
+-- meerkat once up front and depends on it staying installed for every
+-- other regression script that follows.
+
+-- =====================================================================
+-- 1. mkt ownership guard
+-- =====================================================================
+-- `mkt` is a name meerkat invents unconditionally on every install, so a
+-- pre-existing mkt owned by an untrusted role must refuse the install
+-- rather than silently adopt it.
+
+CREATE ROLE reloc_untrusted NOSUPERUSER;
+CREATE SCHEMA mkt AUTHORIZATION reloc_untrusted;
+
+CREATE EXTENSION meerkat;
+
+SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'meerkat')
+    AS meerkat_installed_after_refusal;
+
+DROP SCHEMA mkt;
+
+-- A fresh mkt (created by this install, owned by the installer) is fine.
+CREATE EXTENSION meerkat;
+
+SELECT (SELECT r.rolname FROM pg_namespace n JOIN pg_roles r
+            ON r.oid = n.nspowner WHERE n.nspname = 'mkt') = current_user
+    AS mkt_owned_by_installer;
+
+DROP EXTENSION meerkat CASCADE;
+DROP ROLE reloc_untrusted;
+
+-- =====================================================================
+-- 2. Default install (no SCHEMA clause): types land on search_path,
+--    typically public; mkt is separate.
+-- =====================================================================
+
+CREATE EXTENSION meerkat;
+
+SELECT to_regtype('public.vec32') IS NOT NULL
+   AND to_regtype('public.vec16') IS NOT NULL
+   AND to_regtype('public.rabitq') IS NOT NULL AS types_land_in_public;
+
+SELECT to_regnamespace('mkt') IS NOT NULL
+   AND to_regtype('mkt.vec32') IS NULL AS mkt_is_a_separate_schema;
+
+SELECT count(*) = 7 AS all_mkt_procedures_present FROM (VALUES
+    ('mkt.rebalance(regclass,integer)'),
+    ('mkt.split_posting_list(regclass,bigint)'),
+    ('mkt.posting_pages(regclass)'),
+    ('mkt.tids_clusters(regclass,tid[])'),
+    ('mkt.index_settings(regclass)'),
+    ('mkt.convert_posting_to_fastscan(regclass,integer)'),
+    ('mkt.centroid_pages(regclass)')
+) AS t(sig)
+WHERE to_regprocedure(sig) IS NOT NULL;
+
+SELECT to_regprocedure('public.mktann_handler(internal)') IS NOT NULL
+    AS mktann_handler_lives_in_public;
+
+-- A real index build + ANN query, to prove this is not just a catalog
+-- placement exercise.
+CREATE TABLE default_items (id serial, v vec32(4));
+INSERT INTO default_items (v)
+    SELECT ARRAY[(i % 3)::real, (i % 2)::real, 0, 0]::vec32(4)
+    FROM generate_series(1, 12) i;
+INSERT INTO default_items (v)
+    SELECT ARRAY[10 + (i % 3)::real, 10 + (i % 2)::real, 10, 10]::vec32(4)
+    FROM generate_series(1, 12) i;
+CREATE INDEX default_items_i ON default_items USING mktann (v)
+    WITH (nlist = 1, centroid_fastscan = off);
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM default_items ORDER BY v <-> '[0,0,0,0]'::vec32(4) LIMIT 3;
+SELECT id FROM default_items ORDER BY v <-> '[0,0,0,0]'::vec32(4) LIMIT 3;
+RESET enable_seqscan;
+DROP TABLE default_items;
+
+DROP EXTENSION meerkat CASCADE;
+
+SELECT to_regnamespace('mkt') IS NULL AS mkt_dropped_with_the_extension;
+SELECT to_regtype('public.vec32') IS NULL
+    AS public_vec32_dropped_with_the_extension;
+
+-- =====================================================================
+-- 3. Custom schema at install time
+-- =====================================================================
+
+CREATE SCHEMA reloc_a;
+CREATE EXTENSION meerkat SCHEMA reloc_a;
+
+SELECT to_regtype('reloc_a.vec32') IS NOT NULL
+   AND to_regtype('reloc_a.vec16') IS NOT NULL
+   AND to_regtype('reloc_a.rabitq') IS NOT NULL
+   AND to_regtype('reloc_a.rabitq_params') IS NOT NULL
+    AS types_land_in_reloc_a;
+
+SELECT count(*) = 6 AS mktann_opclasses_land_in_reloc_a
+    FROM pg_opclass oc
+    JOIN pg_namespace n ON n.oid = oc.opcnamespace
+    JOIN pg_am am ON am.oid = oc.opcmethod
+   WHERE am.amname = 'mktann' AND n.nspname = 'reloc_a';
+
+SELECT count(*) = 3 AS distance_operators_land_in_reloc_a
+    FROM pg_operator o
+    JOIN pg_namespace n ON n.oid = o.oprnamespace
+   WHERE n.nspname = 'reloc_a' AND o.oprname IN ('<->', '<#>', '<=>')
+     AND o.oprleft = 'reloc_a.vec32'::regtype;
+
+SELECT to_regnamespace('mkt') IS NOT NULL
+   AND to_regtype('mkt.vec32') IS NULL AS mkt_is_still_separate;
+
+SELECT count(*) = 7 AS all_mkt_procedures_present FROM (VALUES
+    ('mkt.rebalance(regclass,integer)'),
+    ('mkt.split_posting_list(regclass,bigint)'),
+    ('mkt.posting_pages(regclass)'),
+    ('mkt.tids_clusters(regclass,tid[])'),
+    ('mkt.index_settings(regclass)'),
+    ('mkt.convert_posting_to_fastscan(regclass,integer)'),
+    ('mkt.centroid_pages(regclass)')
+) AS t(sig)
+WHERE to_regprocedure(sig) IS NOT NULL;
+
+-- The fixed mkt procedures must operate correctly on an index whose column
+-- type lives in a non-default schema -- they take a plain regclass, so
+-- nothing about them should care where the type ended up.
+CREATE TABLE reloc_a.maint_items (id serial, v reloc_a.vec32(4));
+INSERT INTO reloc_a.maint_items (v)
+    SELECT ARRAY[(i % 3)::real, (i % 2)::real, 0, 0]::reloc_a.vec32(4)
+    FROM generate_series(1, 12) i;
+INSERT INTO reloc_a.maint_items (v)
+    SELECT ARRAY[10 + (i % 3)::real, 10 + (i % 2)::real, 10, 10]::reloc_a.vec32(4)
+    FROM generate_series(1, 12) i;
+CREATE INDEX maint_items_i ON reloc_a.maint_items
+    USING mktann (v reloc_a.vec32_l2_ops)
+    WITH (nlist = 1, centroid_fastscan = off);
+
+SELECT count(*) > 0 AS index_settings_works_on_a_reloc_a_index
+    FROM mkt.index_settings('reloc_a.maint_items_i');
+SELECT count(*) > 0 AS centroid_pages_works_on_a_reloc_a_index
+    FROM mkt.centroid_pages('reloc_a.maint_items_i');
+CALL mkt.rebalance('reloc_a.maint_items_i'::regclass);
+
+-- Drop the table first so the schema drop below cascades to exactly one
+-- thing (the extension itself, reported as a single unit rather than each
+-- of its member objects) -- deterministic regardless of catalog scan order.
+DROP TABLE reloc_a.maint_items;
+DROP SCHEMA reloc_a CASCADE;
+
+-- Confirm meerkat went with it (it was installed inside reloc_a).
+SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'meerkat')
+    AS meerkat_survived_reloc_a_drop;
+
+-- =====================================================================
+-- 4. ALTER EXTENSION ... SET SCHEMA is refused (relocatable = false)
+-- =====================================================================
+-- Not an oversight: ALTER EXTENSION SET SCHEMA moves every member object
+-- together into one schema, which would either strand the mkt-pinned
+-- procedures away from `mkt` or refuse for unrelated reasons. Refusing it
+-- outright, cleanly, up front is the documented behaviour -- see the
+-- control file. The extension must remain fully usable afterward.
+
+CREATE SCHEMA reloc_a;
+CREATE EXTENSION meerkat SCHEMA reloc_a;
+CREATE SCHEMA reloc_target;
+
+ALTER EXTENSION meerkat SET SCHEMA reloc_target;
+
+SELECT to_regtype('reloc_a.vec32') IS NOT NULL
+    AS types_still_in_reloc_a_after_refused_alter;
+SELECT '[1,2,3]'::reloc_a.vec32::text = '[1,2,3]'
+    AS meerkat_still_queryable_after_refused_alter;
+
+DROP SCHEMA reloc_target;
+
+-- =====================================================================
+-- 5. Moving schemas the supported way: drop and recreate elsewhere
+-- =====================================================================
+
+DROP EXTENSION meerkat CASCADE;
+DROP SCHEMA reloc_a CASCADE;
+
+SELECT to_regnamespace('mkt') IS NULL AS mkt_gone_too;
+
+CREATE SCHEMA reloc_b;
+CREATE EXTENSION meerkat SCHEMA reloc_b;
+
+SELECT to_regtype('reloc_b.vec32') IS NOT NULL
+   AND to_regnamespace('reloc_a') IS NULL
+    AS types_land_in_reloc_b_not_reloc_a;
+SELECT count(*) = 7 AS all_mkt_procedures_present_after_reinstall FROM (VALUES
+    ('mkt.rebalance(regclass,integer)'),
+    ('mkt.split_posting_list(regclass,bigint)'),
+    ('mkt.posting_pages(regclass)'),
+    ('mkt.tids_clusters(regclass,tid[])'),
+    ('mkt.index_settings(regclass)'),
+    ('mkt.convert_posting_to_fastscan(regclass,integer)'),
+    ('mkt.centroid_pages(regclass)')
+) AS t(sig)
+WHERE to_regprocedure(sig) IS NOT NULL;
+
+CREATE TABLE reloc_b.items (id serial, v reloc_b.vec32(4));
+INSERT INTO reloc_b.items (v)
+    SELECT ARRAY[(i % 3)::real, (i % 2)::real, 0, 0]::reloc_b.vec32(4)
+    FROM generate_series(1, 12) i;
+CREATE INDEX items_i ON reloc_b.items USING mktann (v reloc_b.vec32_l2_ops)
+    WITH (nlist = 1, centroid_fastscan = off);
+SET enable_seqscan = off;
+SELECT id FROM reloc_b.items
+    ORDER BY v OPERATOR(reloc_b.<->) '[0,0,0,0]'::reloc_b.vec32(4) LIMIT 3;
+RESET enable_seqscan;
+
+DROP EXTENSION meerkat CASCADE;
+DROP SCHEMA reloc_b CASCADE;

@@ -154,11 +154,16 @@ See [docs/simd.md][simd-doc] for SIMD build options and implementation details.
 ## Usage
 
 ```sql
--- Enable extension (its objects live in the mkt schema)
+-- Enable extension. vec32/vec16/rabitq and everything built on them
+-- (operators, casts, the mktann access method) install into whichever
+-- schema you choose -- add SCHEMA <name>, or omit it to use the first
+-- existing schema on your search_path (typically public). Maintenance and
+-- introspection procedures (mkt.rebalance, mkt.split_posting_list, ...)
+-- always live in a separate `mkt` schema the extension creates, regardless
+-- of where the types end up, so they're reachable the same way from any
+-- install.
 CREATE EXTENSION meerkat;
-
--- Make meerkat's types and operators visible without qualification
-SET search_path = mkt, public;
+-- or, e.g.: CREATE EXTENSION meerkat SCHEMA myschema;
 
 -- Create table with vector column
 CREATE TABLE items (
@@ -191,15 +196,24 @@ ever adjust `mkt.nprobe`.
 See the [tuning guide][tuning-doc] for every index parameter and GUC,
 their tradeoffs, and when changing them makes sense.
 
-> **Security note on `search_path`.** Putting `mkt` ahead of `public`
-> (above) means you trust that schema, so it must be owned by a trusted
-> role. Don't let untrusted application roles hold `CREATE` on the database
-> or pre-create the `mkt` schema: an owner of `mkt` can add objects to it
-> that shadow same-signature objects in later-path schemas (e.g. pgvector's
-> operators) for anyone with `mkt` on their path. `CREATE EXTENSION meerkat`
-> refuses to install into a pre-existing `mkt` owned by a role other than
-> the installer or a superuser, but the schema's ownership is otherwise the
-> database administrator's responsibility.
+> **Security note on `mkt`.** meerkat always creates its own `mkt` schema
+> for the maintenance/introspection procedures above, regardless of which
+> schema you installed the types into. Calls like `mkt.rebalance(...)` are
+> always written schema-qualified, so `mkt` never needs to be on any role's
+> `search_path` for meerkat to work. Don't let untrusted application roles
+> hold `CREATE` on the database or pre-create `mkt`: an owner of that schema
+> could add lookalike objects to it that a caller who has not double-checked
+> where their tooling actually points might mistake for meerkat's own.
+> `CREATE EXTENSION meerkat` refuses to install if a pre-existing `mkt` is
+> owned by a role other than the installer or a superuser, but its ownership
+> is otherwise the database administrator's responsibility.
+>
+> **Changing schemas later.** The schema choice above is made once, at
+> `CREATE EXTENSION` time. meerkat is not relocatable: `ALTER EXTENSION
+> meerkat SET SCHEMA ...` is refused, because that command would try to move
+> the `mkt`-pinned procedures too, defeating the point of pinning them. To
+> move to a different schema, drop and recreate the extension (and its
+> indexes) there instead.
 
 ## Index maintenance
 

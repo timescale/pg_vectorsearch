@@ -4361,10 +4361,12 @@ parsed by the `mktann_options()` callback using `build_reloptions()`.
 
 **Files**: `src/types/vec32.h`, `src/types/vec32.c`
 
-Meerkat defines its own `vec32` and `vec16` types, installed in the `mkt`
-schema by default. Their names are distinct from pgvector's `vector` and
-`halfvec`, so both sets of types can coexist even when the extensions are
-installed into the same schema. The corresponding pairs are binary-compatible
+Meerkat defines its own `vec32` and `vec16` types, installed into whichever
+schema `CREATE EXTENSION meerkat` targets (the `SCHEMA` clause, or the first
+existing schema on `search_path` otherwise — typically `public`). Their names
+are distinct from pgvector's `vector` and `halfvec`, so both sets of types can
+coexist even when the extensions are installed into the same schema. The
+corresponding pairs are binary-compatible
 (`vec32`/`vector` and `vec16`/`halfvec`). This allows:
 
 - Standalone builds without a pgvector dependency
@@ -4468,7 +4470,7 @@ each of meerkat's six `mktann` families as ordering members, in the same step
 that creates the casts:
 
 ```sql
-ALTER OPERATOR FAMILY mkt.vec16_l2_ops USING mktann
+ALTER OPERATOR FAMILY myschema.vec16_l2_ops USING mktann
     ADD OPERATOR 1 public.<-> (public.halfvec, public.halfvec)
         FOR ORDER BY pg_catalog.float_ops;
 ```
@@ -4487,7 +4489,7 @@ answers a pgvector-operator query with a sequential scan, which returns correct
 rows. Results-only tests pass while measuring brute force, so the compat suite
 asserts the plan as well as the recall.
 
-One pairing does not resolve, by design: a `mkt.vec32` or `mkt.vec16` column
+One pairing does not resolve, by design: a meerkat `vec32` or `vec16` column
 with pgvector's operator. The meerkat → pgvector cast is ASSIGNMENT rather than
 IMPLICIT specifically so that having both extensions installed does not make
 operator resolution ambiguous, and queries over meerkat's types use meerkat's
