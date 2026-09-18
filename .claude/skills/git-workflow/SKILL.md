@@ -65,6 +65,8 @@ checks.
 
 ### Commit messages
 
+Follow [How to write a git commit message](https://chris.beams.io/git-commit).
+
 The commit-msg hook (`.commitlintrc.yaml`) enforces Conventional Commits on
 every commit, not just the one(s) a PR is eventually opened from:
 

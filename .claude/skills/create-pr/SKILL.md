@@ -45,6 +45,8 @@ known-failing checks hoping CI catches it later.
 
 ## 3. Stage and commit
 
+Follow the `git-workflow` skill's instruction for committing.
+
 - Stage files explicitly by name. Never `git add -A` or `git commit -a`.
 - Split unrelated changes into separate commits.
 - Review with `git diff --staged` before committing.
@@ -108,10 +110,12 @@ git push --force-with-lease origin <branch>        # after amending/rebasing
 
 Title mirrors the commit header style: `<type>(<scope>): <description>`.
 
-Body style (see PR #223 and #219 for full examples) — write prose, not a
-templated checklist, and keep it short: a reviewer should get the point
-from the first sentence or two, not have to read to the bottom to find
-out what the PR actually does.
+Body styles — start with one or a few sentences describing the high-level
+idea behind the PR. Often, just adding the commit message is enough.
+
+Write prose, for humans, not a templated checklist, and keep it short: a
+reviewer should get the point from the first sentence or two, not have to read
+to the bottom to find out what the PR actually does.
 
 - Lead with a snappy, high-level summary of what changed and why it
   matters — one or two sentences, before any detail. Someone skimming
@@ -125,12 +129,8 @@ out what the PR actually does.
   organize by the reader's understanding, not by commit order. A PR with
   one coherent change doesn't need subsections at all.
 - If there's a measurable before/after (a plan change, a recall number,
-  pass vs fail) worth calling out, a single small table is enough — but
-  never a raw QPS/latency number tied to this machine; relative or
-  qualitative results only.
-- End with a **Checks** section listing what was actually run and its
-  result (e.g. `meson test — 33/33`, `scripts/ci/lint.sh — all hooks
-  pass`), not a markdown TODO checklist.
+  pass vs fail) worth calling out, add it. But never add a raw QPS/latency
+  number tied to this machine; relative or qualitative results only.
 - No "Generated with Claude Code" footer, no Co-Authored-By, no local-only
   tool names.
 - If the description is getting long, that's a signal to cut detail, not
