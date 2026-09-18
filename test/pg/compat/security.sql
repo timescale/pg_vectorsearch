@@ -14,12 +14,12 @@
 -- silently adopted any pre-existing cast. pgvector is a "trusted"
 -- extension, so a non-superuser can own public.vector and reach both.
 --
--- The extension schema is never hard-coded below. @extschema@ is
--- substituted only by CREATE EXTENSION while it reads the extension
--- script; this is a plain psql script, so the schema is looked up from
--- the catalog once and interpolated as a psql variable (:extschema).
--- Dollar-quoted bodies, which psql does not interpolate, look it up again
--- at runtime.
+-- Both functions are fixed in `mkt`, a name known ahead of time -- they
+-- are called directly, schema-qualified, below. The vec32/vec16 type
+-- schema (@extschema@) is not fixed and is never hard-coded below: it is
+-- looked up from the catalog once and interpolated as a psql variable
+-- (:extschema) wherever a cast-related fixture needs it. Dollar-quoted
+-- bodies, which psql does not interpolate, look it up again at runtime.
 --
 -- Prerequisites:
 --   pgvector and meerkat must be installed in PostgreSQL, and the
@@ -102,12 +102,13 @@ $pf$;
 -- 0. Install-time: a format() planted in a pre-created extension schema
 --    is not invoked by CREATE EXTENSION itself
 -- =====================================================================
--- The real install-time attack. An attacker pre-creates the extension
--- schema (relocatable=false pins it to a known name) and plants format()
--- overloads before CREATE EXTENSION meerkat runs. During install the
--- schema is on the forced search_path, so a bare format() in
+-- The real install-time attack. `mkt` is a known name ahead of any
+-- install (no SCHEMA clause reveals it), so an attacker can pre-create it
+-- and plant format() overloads before CREATE EXTENSION meerkat runs.
 -- setup_pgvector_compat() (reached because pgvector is already present)
--- would resolve to the plant and run as the installing superuser.
+-- ends up defined in that very schema; its pinned search_path and
+-- pg_catalog-qualified calls must still keep it from ever invoking the
+-- planted sibling.
 --
 -- This is the one place that must name the schema literally: the extension
 -- does not exist yet, so its schema cannot be looked up from the catalog.
@@ -151,9 +152,11 @@ DROP SCHEMA install_probe CASCADE;
 --     untrusted role
 -- =====================================================================
 -- A role with CREATE on the database can pre-create mkt and keep owning it
--- after install, then add objects that shadow pgvector's operators for any
--- role with mkt ahead of public (meerkat's documented usage). The schema
--- ownership guard at the top of the install script must refuse that install.
+-- after install, then add lookalike objects there that a caller who has not
+-- double-checked where their tooling points might mistake for meerkat's
+-- own (mkt.rebalance and friends are always called schema-qualified, never
+-- via search_path). The schema ownership guard at the top of the install
+-- script must refuse that install.
 DROP EXTENSION IF EXISTS meerkat CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
 DROP SCHEMA IF EXISTS mkt CASCADE;
@@ -192,17 +195,17 @@ SELECT assert_test('setup_pgvector_compat pins search_path',
     COALESCE((SELECT proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
        FROM pg_proc
       WHERE proname = 'setup_pgvector_compat'
-        AND pronamespace = :'extschema'::regnamespace), false));
+        AND pronamespace = 'mkt'::regnamespace), false));
 
 SELECT assert_test('on_extension_create pins search_path',
     COALESCE((SELECT proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
        FROM pg_proc
       WHERE proname = 'on_extension_create'
-        AND pronamespace = :'extschema'::regnamespace), false));
+        AND pronamespace = 'mkt'::regnamespace), false));
 
 -- The dynamic-SQL sink is schema-qualified as pg_catalog.format.
 SELECT assert_test('setup body calls pg_catalog.format, not bare format',
-    pg_get_functiondef((:'extschema' || '.setup_pgvector_compat')::regproc)
+    pg_get_functiondef('mkt.setup_pgvector_compat'::regproc)
         LIKE '%pg_catalog.format(%');
 
 -- =====================================================================
@@ -225,13 +228,12 @@ SET search_path = hijack_probe, public;
 DO $chk$
 DECLARE
     invoked bool := false;
-    eschema text := (SELECT n.nspname FROM pg_catalog.pg_extension e
-                       JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
-                      WHERE e.extname = 'meerkat');
 BEGIN
     BEGIN
-        -- pg_catalog.format so the wrapper itself cannot be hijacked.
-        EXECUTE pg_catalog.format('SELECT %I.setup_pgvector_compat()', eschema);
+        -- Called schema-qualified (mkt is fixed), so this call site cannot
+        -- be hijacked either -- what is under test is whether the function's
+        -- own pinned search_path holds once execution is inside its body.
+        PERFORM mkt.setup_pgvector_compat();
     EXCEPTION WHEN OTHERS THEN
         invoked := true;   -- a planted overload raised -> it was called
     END;
@@ -264,12 +266,9 @@ SET search_path = :"extschema", public;
 DO $chk$
 DECLARE
     invoked bool := false;
-    eschema text := (SELECT n.nspname FROM pg_catalog.pg_extension e
-                       JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
-                      WHERE e.extname = 'meerkat');
 BEGIN
     BEGIN
-        EXECUTE pg_catalog.format('SELECT %I.setup_pgvector_compat()', eschema);
+        PERFORM mkt.setup_pgvector_compat();
     EXCEPTION WHEN OTHERS THEN
         invoked := true;
     END;
@@ -314,13 +313,9 @@ $fix$;
 DO $chk$
 DECLARE
     raised bool := false;
-    eschema text := (SELECT n.nspname FROM pg_extension e
-                       JOIN pg_namespace n ON n.oid = e.extnamespace
-                      WHERE e.extname = 'meerkat');
 BEGIN
     BEGIN
-        EXECUTE pg_catalog.format('SELECT %I.setup_pgvector_compat()',
-                                  eschema);
+        PERFORM mkt.setup_pgvector_compat();
     EXCEPTION WHEN OTHERS THEN
         raised := true;
     END;
@@ -348,12 +343,9 @@ CREATE CAST (public.vector AS :"extschema".vec32)
 DO $chk$
 DECLARE
     raised bool := false;
-    eschema text := (SELECT n.nspname FROM pg_catalog.pg_extension e
-                       JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
-                      WHERE e.extname = 'meerkat');
 BEGIN
     BEGIN
-        EXECUTE pg_catalog.format('SELECT %I.setup_pgvector_compat()', eschema);
+        PERFORM mkt.setup_pgvector_compat();
     EXCEPTION WHEN OTHERS THEN
         raised := true;
     END;

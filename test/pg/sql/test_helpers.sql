@@ -22,7 +22,7 @@
 -- Force-load the extension library first: the helper module's symbols
 -- resolve against it (RTLD_NOW), and calling any extension C function
 -- loads it. A DO block returns nothing, so it stays silent.
-DO $$ BEGIN PERFORM extension_version(); END $$;
+DO $$ BEGIN PERFORM mkt.extension_version(); END $$;
 
 CREATE OR REPLACE FUNCTION rabitq_params_cache(
     OUT dim integer,

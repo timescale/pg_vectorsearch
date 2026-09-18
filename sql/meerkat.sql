@@ -13,9 +13,9 @@
  *   @extschema@      the schema the installer chose (SCHEMA clause, or
  *                    the first existing schema on search_path), at
  *                    CREATE EXTENSION time. Holds vec32/vec16/rabitq and
- *                    everything built on them. The maintenance and
- *                    introspection procedures (mkt.rebalance, ...) are
- *                    NOT here -- they always live in the separate `mkt`
+ *                    everything built on them. Maintenance,
+ *                    administration, and inspection functions are NOT
+ *                    here -- they always live in the separate `mkt`
  *                    schema this script creates below, regardless of
  *                    @extschema@.
  */
@@ -24,20 +24,18 @@
 \echo Use "CREATE EXTENSION meerkat" to load this file.\quit
 
 -- =====================================================================
--- mkt schema: fixed home for maintenance/introspection procedures
+-- mkt schema: fixed home for maintenance/administration/inspection
 -- =====================================================================
 -- Everything else in this script (types, operators, casts, the mktann
 -- access method) installs into @extschema@, wherever the installer chose
--- that to be -- meerkat is relocatable-at-install-time. The
--- maintenance/introspection surface (mkt.rebalance, mkt.split_posting_list,
--- mkt.posting_pages, mkt.tids_clusters, mkt.index_settings,
--- mkt.convert_posting_to_fastscan, mkt.centroid_pages) is the one
--- exception: it always lives in a schema literally named `mkt`, created
--- here, so DBAs get one fixed, predictable, always-qualified path to it no
--- matter which schema holds the types. This is why meerkat cannot be
--- relocatable in the ALTER EXTENSION ... SET SCHEMA sense (see the control
--- file): that command moves every member object together into one schema,
--- and these procedures are deliberately not in the same schema as the rest.
+-- that to be -- meerkat is relocatable-at-install-time. Maintenance,
+-- administration, and inspection functions are the one exception: they
+-- always live in a schema literally named `mkt`, created here, so DBAs
+-- get one fixed, predictable, always-qualified path to them no matter
+-- which schema holds the types. This is why meerkat cannot be relocatable
+-- in the ALTER EXTENSION ... SET SCHEMA sense (see the control file): that
+-- command moves every member object together into one schema, and these
+-- functions are deliberately not in the same schema as the rest.
 --
 -- Schema ownership guard. Refuse to install into a pre-existing `mkt`
 -- schema owned by an untrusted role. Unlike @extschema@ -- which the
@@ -112,34 +110,35 @@ END;
 $$;
 
 -- =====================================================================
--- build identity
+-- build identity (maintenance/administration/inspection: fixed in mkt,
+-- like the other procedures in this category, regardless of @extschema@)
 -- =====================================================================
 
-CREATE FUNCTION git_commit() RETURNS text
+CREATE FUNCTION mkt.git_commit() RETURNS text
     AS 'MODULE_PATHNAME', 'mkt_git_commit'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION extension_version() RETURNS text
+CREATE FUNCTION mkt.extension_version() RETURNS text
     AS 'MODULE_PATHNAME', 'mkt_extension_version'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION extension_name() RETURNS text
+CREATE FUNCTION mkt.extension_name() RETURNS text
     AS 'MODULE_PATHNAME', 'mkt_extension_name'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- Prerelease install notice: warn at CREATE EXTENSION time when this
 -- build is a prerelease (any -suffix version, e.g. -alpha1 or -dev).
--- A runtime check against extension_version(), so final releases
+-- A runtime check against mkt.extension_version(), so final releases
 -- carry nothing to strip and the notice can never ship stale.
 DO $$
 BEGIN
-    IF pg_catalog.strpos(@extschema@.extension_version(), '-')
+    IF pg_catalog.strpos(mkt.extension_version(), '-')
         OPERATOR(pg_catalog.>) 0
     THEN
         RAISE WARNING '% % is a prerelease: upgrading to later '
             'versions might not be possible (reinstall instead) and '
             'its indexes may need rebuilding',
-            @extschema@.extension_name(), @extschema@.extension_version();
+            mkt.extension_name(), mkt.extension_version();
     END IF;
 END;
 $$;
@@ -1089,7 +1088,11 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 -- Casts first, then operators (the operators depend on the casts' coercibility).
 -- Idempotent throughout via exception handling (neither CREATE CAST nor ALTER
 -- OPERATOR FAMILY has an IF NOT EXISTS form).
-CREATE FUNCTION setup_pgvector_compat() RETURNS void
+--
+-- Lives in mkt, not @extschema@: it is an administration function a
+-- superuser runs manually (see the event trigger's hint below), the same
+-- category as mkt.rebalance -- not part of the vec32/vec16 type API.
+CREATE FUNCTION mkt.setup_pgvector_compat() RETURNS void
     LANGUAGE plpgsql
     -- Reached at runtime from the event trigger under the DDL-runner's
     -- search_path, and from the install DO block. Pin the path so every
@@ -1252,8 +1255,7 @@ BEGIN
           ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
         WHERE e.extname OPERATOR(pg_catalog.=) 'meerkat';
 
-        EXECUTE pg_catalog.format('SELECT %I.setup_pgvector_compat()',
-            ext_ns);
+        PERFORM mkt.setup_pgvector_compat();
         EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
             '(%I.vector AS %I.vec32)', pgv_ns, ext_ns);
         EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
@@ -1267,7 +1269,10 @@ END;
 $$;
 
 -- Event trigger: create casts when pgvector is installed after meerkat.
-CREATE FUNCTION on_extension_create()
+-- Lives in mkt alongside setup_pgvector_compat() -- it is that function's
+-- automatic trigger, not part of the vec32/vec16 type API, and mkt is a
+-- fixed name it can reference directly (no schema discovery needed for it).
+CREATE FUNCTION mkt.on_extension_create()
     RETURNS event_trigger LANGUAGE plpgsql
     -- Runs later as an event trigger under the DDL-runner's own
     -- search_path. Pin it so unqualified names in this body (and the one
@@ -1277,9 +1282,6 @@ CREATE FUNCTION on_extension_create()
 DECLARE
     obj record;
     is_super boolean;
-    ext_ns text;   -- meerkat's own current schema, discovered rather than
-                   -- assumed via @extschema@ -- see the note on ext_ns in
-                   -- setup_pgvector_compat() above.
 BEGIN
     FOR obj IN SELECT * FROM pg_catalog.pg_event_trigger_ddl_commands()
                WHERE object_type OPERATOR(pg_catalog.=) 'extension'
@@ -1298,22 +1300,14 @@ BEGIN
               FROM pg_catalog.pg_roles r
              WHERE r.rolname OPERATOR(pg_catalog.=) current_user;
 
-            SELECT n.nspname INTO ext_ns
-              FROM pg_catalog.pg_extension e
-              JOIN pg_catalog.pg_namespace n
-                ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
-             WHERE e.extname OPERATOR(pg_catalog.=) 'meerkat';
-
             IF is_super THEN
-                EXECUTE pg_catalog.format('SELECT %I.setup_pgvector_compat()',
-                    ext_ns);
+                PERFORM mkt.setup_pgvector_compat();
             ELSE
                 RAISE WARNING 'meerkat did not set up pgvector compatibility: '
                     'it requires superuser privileges'
-                    USING HINT = pg_catalog.format(
-                        'A superuser should run %I.setup_pgvector_compat() '
-                        'so pgvector-typed columns can use meerkat indexes.',
-                        ext_ns);
+                    USING HINT = 'A superuser should run '
+                        'mkt.setup_pgvector_compat() so pgvector-typed '
+                        'columns can use meerkat indexes.';
             END IF;
         END IF;
     END LOOP;
@@ -1323,4 +1317,4 @@ $$;
 CREATE EVENT TRIGGER mkt_pgvector_cast_trigger
     ON ddl_command_end
     WHEN TAG IN ('CREATE EXTENSION')
-    EXECUTE FUNCTION on_extension_create();
+    EXECUTE FUNCTION mkt.on_extension_create();

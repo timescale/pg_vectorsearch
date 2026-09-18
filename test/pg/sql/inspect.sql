@@ -455,20 +455,20 @@ DROP TABLE embeddings;
 DROP TABLE wide;
 
 -- ---------------------------------------------------------------------
--- git_commit() — exposes the git commit the extension was built
+-- mkt.git_commit() — exposes the git commit the extension was built
 -- from. Verify the contract without printing the actual hash so the
--- expected output stays deterministic across builds. Lives alongside
--- the types (not in mkt), so it's reached unqualified here via
--- search_path like vec32 itself.
+-- expected output stays deterministic across builds. Fixed in mkt: an
+-- administration/inspection function, not part of the vec32/vec16 type
+-- API, so it does not follow @extschema@.
 -- ---------------------------------------------------------------------
 
 -- Format: 40-char lowercase hex (git's full SHA-1) or the "unknown"
 -- fallback used when vcs_tag had no git checkout available.
-SELECT git_commit() ~ '^([0-9a-f]{40}|unknown)$' AS valid_format;
+SELECT mkt.git_commit() ~ '^([0-9a-f]{40}|unknown)$' AS valid_format;
 
 -- Callers (e.g. rekall) use this as a string, so the return type
 -- must be text.
-SELECT pg_typeof(git_commit())::text = 'text' AS returns_text;
+SELECT pg_typeof(mkt.git_commit())::text = 'text' AS returns_text;
 
 -- The function must be IMMUTABLE STRICT PARALLEL SAFE — the commit
 -- doesn't change within a single backend's lifetime, the input is
@@ -479,30 +479,29 @@ SELECT
     p.proisstrict            AS strict,
     p.proparallel      = 's' AS parallel_safe
 FROM pg_proc p
-WHERE p.pronamespace = (SELECT extnamespace FROM pg_extension
-                          WHERE extname = 'meerkat')
-  AND p.proname = 'git_commit';
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'mkt' AND p.proname = 'git_commit';
 
 -- ---------------------------------------------------------------------
--- extension_name() / extension_version() — the extension name and
--- version the loaded library was built as.
+-- mkt.extension_name() / mkt.extension_version() — the extension name
+-- and version the loaded library was built as.
 -- ---------------------------------------------------------------------
 
-SELECT extension_name();
+SELECT mkt.extension_name();
 
 -- The binary's version must match the installed extension's version;
 -- a mismatch means the library and the SQL scripts come from
 -- different builds (e.g. a stale install).
-SELECT extension_version() =
+SELECT mkt.extension_version() =
     (SELECT extversion FROM pg_extension
-     WHERE extname = extension_name())
+     WHERE extname = mkt.extension_name())
     AS version_matches_extension;
 
--- Same contract as git_commit() above: consumed as strings (e.g.
+-- Same contract as mkt.git_commit() above: consumed as strings (e.g.
 -- by rekall), so both must return text and be IMMUTABLE STRICT
 -- PARALLEL SAFE.
-SELECT pg_typeof(extension_name())::text = 'text' AND
-       pg_typeof(extension_version())::text = 'text' AS returns_text;
+SELECT pg_typeof(mkt.extension_name())::text = 'text' AND
+       pg_typeof(mkt.extension_version())::text = 'text' AS returns_text;
 
 SELECT
     p.proname,

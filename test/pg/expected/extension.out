@@ -2,12 +2,10 @@
 --
 -- vec32/vec16/rabitq and everything built on them (operators, casts, the
 -- mktann access method) install into whichever schema CREATE EXTENSION
--- targets. The maintenance/introspection procedures (mkt.rebalance,
--- mkt.split_posting_list, mkt.posting_pages, mkt.tids_clusters,
--- mkt.index_settings, mkt.convert_posting_to_fastscan, mkt.centroid_pages)
--- are the one exception: they always live in a separate, fixed `mkt`
--- schema regardless of that choice. The extension is not relocatable after
--- the fact (see section 4 below) -- the schema choice is made once, at
+-- targets. Maintenance, administration, and inspection functions are the
+-- one exception: they always live in a separate, fixed `mkt` schema
+-- regardless of that choice. The extension is not relocatable after the
+-- fact (see section 4 below) -- the schema choice is made once, at
 -- install time, which is why this is "schema choice", not "relocation".
 --
 -- This test manages its own CREATE/DROP EXTENSION cycles (including a
@@ -70,7 +68,7 @@ BEGIN
     END IF;
 END;
 $$"
-extension script file "meerkat--0.1.0.sql", near line 71
+extension script file "meerkat--0.1.0.sql", near line 69
 SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'meerkat')
     AS meerkat_installed_after_refusal;
  meerkat_installed_after_refusal 
@@ -111,14 +109,19 @@ SELECT to_regnamespace('mkt') IS NOT NULL
  t
 (1 row)
 
-SELECT count(*) = 7 AS all_mkt_procedures_present FROM (VALUES
+SELECT count(*) = 12 AS all_mkt_procedures_present FROM (VALUES
     ('mkt.rebalance(regclass,integer)'),
     ('mkt.split_posting_list(regclass,bigint)'),
     ('mkt.posting_pages(regclass)'),
     ('mkt.tids_clusters(regclass,tid[])'),
     ('mkt.index_settings(regclass)'),
     ('mkt.convert_posting_to_fastscan(regclass,integer)'),
-    ('mkt.centroid_pages(regclass)')
+    ('mkt.centroid_pages(regclass)'),
+    ('mkt.git_commit()'),
+    ('mkt.extension_version()'),
+    ('mkt.extension_name()'),
+    ('mkt.setup_pgvector_compat()'),
+    ('mkt.on_extension_create()')
 ) AS t(sig)
 WHERE to_regprocedure(sig) IS NOT NULL;
  all_mkt_procedures_present 
@@ -220,14 +223,19 @@ SELECT to_regnamespace('mkt') IS NOT NULL
  t
 (1 row)
 
-SELECT count(*) = 7 AS all_mkt_procedures_present FROM (VALUES
+SELECT count(*) = 12 AS all_mkt_procedures_present FROM (VALUES
     ('mkt.rebalance(regclass,integer)'),
     ('mkt.split_posting_list(regclass,bigint)'),
     ('mkt.posting_pages(regclass)'),
     ('mkt.tids_clusters(regclass,tid[])'),
     ('mkt.index_settings(regclass)'),
     ('mkt.convert_posting_to_fastscan(regclass,integer)'),
-    ('mkt.centroid_pages(regclass)')
+    ('mkt.centroid_pages(regclass)'),
+    ('mkt.git_commit()'),
+    ('mkt.extension_version()'),
+    ('mkt.extension_name()'),
+    ('mkt.setup_pgvector_compat()'),
+    ('mkt.on_extension_create()')
 ) AS t(sig)
 WHERE to_regprocedure(sig) IS NOT NULL;
  all_mkt_procedures_present 
@@ -327,14 +335,19 @@ SELECT to_regtype('reloc_b.vec32') IS NOT NULL
  t
 (1 row)
 
-SELECT count(*) = 7 AS all_mkt_procedures_present_after_reinstall FROM (VALUES
+SELECT count(*) = 12 AS all_mkt_procedures_present_after_reinstall FROM (VALUES
     ('mkt.rebalance(regclass,integer)'),
     ('mkt.split_posting_list(regclass,bigint)'),
     ('mkt.posting_pages(regclass)'),
     ('mkt.tids_clusters(regclass,tid[])'),
     ('mkt.index_settings(regclass)'),
     ('mkt.convert_posting_to_fastscan(regclass,integer)'),
-    ('mkt.centroid_pages(regclass)')
+    ('mkt.centroid_pages(regclass)'),
+    ('mkt.git_commit()'),
+    ('mkt.extension_version()'),
+    ('mkt.extension_name()'),
+    ('mkt.setup_pgvector_compat()'),
+    ('mkt.on_extension_create()')
 ) AS t(sig)
 WHERE to_regprocedure(sig) IS NOT NULL;
  all_mkt_procedures_present_after_reinstall 

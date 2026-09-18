@@ -287,19 +287,22 @@ vec32_dot_product(const Vec32 *v1, const Vec32 *v2)
 ### Dependencies
 
 None at the SQL level. Meerkat defines its own `vec32`, `vec16` and
-`rabitq` types in the `mkt` schema (see `sql/meerkat.sql`), so it installs
-and runs without pgvector. The distinct `vec32`/`vec16` names do not collide
-with pgvector's `vector`/`halfvec`, even if both extensions put objects in the
-same schema.
+`rabitq` types (see `sql/meerkat.sql`), so it installs and runs without
+pgvector. They install into whichever schema `CREATE EXTENSION meerkat`
+targets (a `SCHEMA` clause, or the first existing schema on `search_path`
+— typically `public`); maintenance, administration, and inspection
+functions are the one exception, always living in a separate, fixed
+`mkt` schema regardless of that choice. The distinct `vec32`/`vec16`
+names do not collide with pgvector's `vector`/`halfvec`, even when both
+extensions' types end up in the same schema.
 
 **pgvector interoperability.** `vec32` is binary-compatible with pgvector's
-`vector`, and `vec16` with pgvector's `halfvec`; Meerkat installs its types in
-the `mkt` schema by default, and the extension creates
+`vector`, and `vec16` with pgvector's `halfvec`; the extension creates
 binary-coercible casts between the two in both directions:
 
 ```sql
-CREATE CAST (public.vector  AS mkt.vec32)  WITHOUT FUNCTION AS IMPLICIT;
-CREATE CAST (mkt.vec32     AS public.vector) WITHOUT FUNCTION AS ASSIGNMENT;
+CREATE CAST (public.vector  AS myschema.vec32)  WITHOUT FUNCTION AS IMPLICIT;
+CREATE CAST (myschema.vec32 AS public.vector)   WITHOUT FUNCTION AS ASSIGNMENT;
 -- and the same pair for halfvec
 ```
 

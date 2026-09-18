@@ -157,11 +157,10 @@ See [docs/simd.md][simd-doc] for SIMD build options and implementation details.
 -- Enable extension. vec32/vec16/rabitq and everything built on them
 -- (operators, casts, the mktann access method) install into whichever
 -- schema you choose -- add SCHEMA <name>, or omit it to use the first
--- existing schema on your search_path (typically public). Maintenance and
--- introspection procedures (mkt.rebalance, mkt.split_posting_list, ...)
--- always live in a separate `mkt` schema the extension creates, regardless
--- of where the types end up, so they're reachable the same way from any
--- install.
+-- existing schema on your search_path (typically public). Maintenance,
+-- administration, and inspection functions always live in a separate
+-- `mkt` schema the extension creates, regardless of where the types end
+-- up, so they're reachable the same way from any install.
 CREATE EXTENSION meerkat;
 -- or, e.g.: CREATE EXTENSION meerkat SCHEMA myschema;
 
