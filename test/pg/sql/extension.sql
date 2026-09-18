@@ -43,6 +43,35 @@ DROP EXTENSION meerkat CASCADE;
 DROP ROLE reloc_untrusted;
 
 -- =====================================================================
+-- 1b. A trusted pre-existing mkt is used, but not adopted
+-- =====================================================================
+-- mkt is verified and installed into, but never made an extension member
+-- via ALTER EXTENSION ... ADD SCHEMA -- matching how PostgreSQL itself
+-- treats a pre-existing @extschema@ for any ordinary relocatable
+-- extension (only objects the install script itself creates become
+-- members). Anything already in a pre-existing mkt that meerkat did not
+-- create must survive both install and DROP EXTENSION CASCADE.
+
+CREATE SCHEMA mkt;
+CREATE TABLE mkt.unrelated_dba_table (id int);
+INSERT INTO mkt.unrelated_dba_table VALUES (1), (2);
+
+CREATE EXTENSION meerkat;
+
+SELECT count(*) = 2 AS unrelated_table_survives_install
+    FROM mkt.unrelated_dba_table;
+
+DROP EXTENSION meerkat CASCADE;
+
+SELECT to_regnamespace('mkt') IS NOT NULL AS mkt_schema_survives_drop;
+SELECT count(*) = 2 AS unrelated_table_survives_drop
+    FROM mkt.unrelated_dba_table;
+SELECT to_regprocedure('mkt.rebalance(regclass,integer)') IS NULL
+    AS mkt_functions_removed;
+
+DROP SCHEMA mkt CASCADE;
+
+-- =====================================================================
 -- 2. Default install (no SCHEMA clause): types land on search_path,
 --    typically public; mkt is separate.
 -- =====================================================================

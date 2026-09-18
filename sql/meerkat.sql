@@ -56,24 +56,27 @@
 -- Allow only a schema the installer (current_user) or a superuser owns; a
 -- fresh install, where this script creates the schema, is unaffected.
 --
--- A plain `CREATE SCHEMA IF NOT EXISTS mkt` cannot express "adopt a
--- pre-existing, trustworthy mkt": PostgreSQL only lets IF NOT EXISTS skip
--- creation inside an extension script when the existing object is already
--- a member of THIS extension (e.g. mkt was auto-created moments ago because
--- @extschema@ itself is mkt) -- any other pre-existing mkt, however
--- trustworthy its owner, makes IF NOT EXISTS raise "schema mkt is not a
--- member of extension meerkat" instead of adopting it. So: refuse an
--- untrusted owner as before; for a trusted one not yet a member, adopt it
--- explicitly with ALTER EXTENSION ... ADD SCHEMA; otherwise (no pre-existing
--- mkt) create it fresh, which auto-tracks it as a member the normal way.
+-- A pre-existing, trusted-owned mkt is left exactly as it is: verified,
+-- then used, but never adopted into extension membership with ALTER
+-- EXTENSION ... ADD SCHEMA. That mirrors how PostgreSQL itself treats any
+-- pre-existing @extschema@ for an ordinary relocatable extension -- it
+-- records only that the extension depends on the schema (so the schema
+-- can't be dropped out from under it), never the reverse. A namespace
+-- becomes an extension member only if this script's own CREATE SCHEMA
+-- creates it (the fresh-install branch below). Adopting a pre-existing one
+-- instead would mean DROP EXTENSION meerkat CASCADE could delete a schema
+-- -- and anything unrelated a DBA had already put in it -- that meerkat
+-- never created. The cost is the mirror image of that same convention:
+-- DROP EXTENSION meerkat leaves a pre-existing mkt behind (now missing
+-- meerkat's own functions, which are members individually) rather than
+-- removing it, same as it would for any other extension's pre-existing
+-- schema.
 DO $$
 DECLARE
-    owner_name     name;
-    owner_super    boolean;
-    mkt_oid        oid;
-    already_member boolean;
+    owner_name  name;
+    owner_super boolean;
 BEGIN
-    SELECT n.oid, r.rolname, r.rolsuper INTO mkt_oid, owner_name, owner_super
+    SELECT r.rolname, r.rolsuper INTO owner_name, owner_super
       FROM pg_catalog.pg_namespace n
       JOIN pg_catalog.pg_roles r
         ON r.oid OPERATOR(pg_catalog.=) n.nspowner
@@ -91,20 +94,6 @@ BEGIN
             USING HINT = 'meerkat refuses to install into a schema an '
                 'untrusted role controls; drop or re-own the schema, or '
                 'install as the role that owns it.';
-    END IF;
-
-    SELECT EXISTS (
-        SELECT 1 FROM pg_catalog.pg_depend d
-        JOIN pg_catalog.pg_extension e
-          ON e.oid OPERATOR(pg_catalog.=) d.refobjid
-        WHERE d.classid
-                OPERATOR(pg_catalog.=) 'pg_catalog.pg_namespace'::pg_catalog.regclass
-          AND d.objid OPERATOR(pg_catalog.=) mkt_oid
-          AND e.extname OPERATOR(pg_catalog.=) 'meerkat'
-    ) INTO already_member;
-
-    IF NOT already_member THEN
-        ALTER EXTENSION meerkat ADD SCHEMA mkt;
     END IF;
 END;
 $$;
