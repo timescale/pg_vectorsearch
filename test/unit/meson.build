@@ -36,7 +36,7 @@ unit_test_sources = files(
   'test_posting_split.c',
   'test_distance.c',
   'test_fixtures.c',
-  'test_halfvec.c',
+  'test_vec16.c',
   'test_hkmeans.c',
   'test_idset.c',
   'test_kmeans.c',
@@ -50,7 +50,7 @@ unit_test_sources = files(
   'test_thread_pool.c',
   'test_topk.c',
   'test_vecops.c',
-  'test_vector.c',
+  'test_vec32.c',
 )
 
 test_dependencies = [mkt_core_dep]

@@ -141,7 +141,7 @@ SELECT assert_test('CREATE EXTENSION does not call a planted mkt.format()',
 SELECT assert_test('CREATE EXTENSION still created the pgvector compat cast',
     EXISTS (SELECT 1 FROM pg_cast
              WHERE castsource = 'public.vector'::regtype
-               AND casttarget = (:'extschema' || '.vector')::regtype));
+               AND casttarget = (:'extschema' || '.vec32')::regtype));
 
 SELECT drop_format_overloads('mkt');
 DROP SCHEMA install_probe CASCADE;
@@ -298,14 +298,14 @@ DECLARE
                       WHERE e.extname = 'meerkat');
 BEGIN
     EXECUTE pg_catalog.format(
-        'DROP CAST IF EXISTS (public.vector AS %I.vector)', eschema);
+        'DROP CAST IF EXISTS (public.vector AS %I.vec32)', eschema);
     EXECUTE pg_catalog.format(
         'CREATE FUNCTION public.evil_cast(public.vector) '
-        'RETURNS %I.vector LANGUAGE sql IMMUTABLE AS %L',
+        'RETURNS %I.vec32 LANGUAGE sql IMMUTABLE AS %L',
         eschema,
-        pg_catalog.format('SELECT ''[0]''::%I.vector', eschema));
+        pg_catalog.format('SELECT ''[0]''::%I.vec32', eschema));
     EXECUTE pg_catalog.format(
-        'CREATE CAST (public.vector AS %I.vector) '
+        'CREATE CAST (public.vector AS %I.vec32) '
         'WITH FUNCTION public.evil_cast(public.vector) AS IMPLICIT',
         eschema);
 END;
@@ -330,9 +330,9 @@ END;
 $chk$;
 
 -- Restore the expected binary cast.
-DROP CAST (public.vector AS :"extschema".vector);
+DROP CAST (public.vector AS :"extschema".vec32);
 DROP FUNCTION public.evil_cast(public.vector);
-CREATE CAST (public.vector AS :"extschema".vector) WITHOUT FUNCTION AS IMPLICIT;
+CREATE CAST (public.vector AS :"extschema".vec32) WITHOUT FUNCTION AS IMPLICIT;
 
 -- =====================================================================
 -- 3b. A binary cast with the WRONG context is rejected too
@@ -341,8 +341,8 @@ CREATE CAST (public.vector AS :"extschema".vector) WITHOUT FUNCTION AS IMPLICIT;
 -- (WITHOUT FUNCTION) cast planted with the wrong context still has method
 -- 'b', so a method-only check would adopt it -- changing coercion/operator
 -- resolution. setup must reject it on the castcontext mismatch.
-DROP CAST (public.vector AS :"extschema".vector);
-CREATE CAST (public.vector AS :"extschema".vector)
+DROP CAST (public.vector AS :"extschema".vec32);
+CREATE CAST (public.vector AS :"extschema".vec32)
     WITHOUT FUNCTION AS ASSIGNMENT;   -- wrong: this direction must be IMPLICIT
 
 DO $chk$
@@ -363,8 +363,8 @@ END;
 $chk$;
 
 -- Restore the expected binary cast.
-DROP CAST (public.vector AS :"extschema".vector);
-CREATE CAST (public.vector AS :"extschema".vector) WITHOUT FUNCTION AS IMPLICIT;
+DROP CAST (public.vector AS :"extschema".vec32);
+CREATE CAST (public.vector AS :"extschema".vec32) WITHOUT FUNCTION AS IMPLICIT;
 
 -- =====================================================================
 -- 4. End-to-end: a non-superuser cannot escalate via the event trigger

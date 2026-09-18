@@ -20,7 +20,7 @@
 #include "mkt_test.h"
 #include "quant/rabitq.h"
 #include "standalone/pg_compat.h"
-#include "types/halfvec.h"
+#include "types/vec16.h"
 
 TEST_GROUP(CentroidSearch);
 TEST_MEMCTX_FIXTURE();
@@ -101,7 +101,7 @@ TEST(beam_search_two_levels)
 	float *centroid = mkt_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 		centroid[i] = 0.0f;
-	VectorRef cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/*
 	 * Page layout:
@@ -135,7 +135,7 @@ TEST(beam_search_two_levels)
 			 * given make_test_vector uses % 100 internally. */
 			all_leaf_vecs[vec_idx] = make_test_vector(dim, r * 997 + c * 37);
 
-			VectorRef	vec_ref = {.data = all_leaf_vecs[vec_idx], .dim = dim};
+			Vec32Ref	vec_ref = {.data = all_leaf_vecs[vec_idx], .dim = dim};
 			RaBitQData *enc		= mkt_rabitq_encode(params, vec_ref, cent_ref);
 			ASSERT_NOT_NULL(enc, "leaf encoding succeeded");
 
@@ -154,7 +154,7 @@ TEST(beam_search_two_levels)
 		/* Add root centroid pointing to this leaf page.
 		 * Use the first leaf vector as the root medoid. */
 		float	   *root_vec = all_leaf_vecs[r * level1_count];
-		VectorRef	root_ref = {.data = root_vec, .dim = dim};
+		Vec32Ref	root_ref = {.data = root_vec, .dim = dim};
 		RaBitQData *root_enc = mkt_rabitq_encode(params, root_ref, cent_ref);
 		ASSERT_NOT_NULL(root_enc, "root encoding succeeded");
 
@@ -166,7 +166,7 @@ TEST(beam_search_two_levels)
 
 	/* Create query */
 	float			 *query		= make_test_vector(dim, 5555);
-	VectorRef		  query_ref = {.data = query, .dim = dim};
+	Vec32Ref		  query_ref = {.data = query, .dim = dim};
 	RaBitQQueryState *qstate =
 			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
 	ASSERT_NOT_NULL(qstate, "query state created");
@@ -272,7 +272,7 @@ TEST(beam_search_rejects_corrupt_entry_count)
 	float *centroid = mkt_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 		centroid[i] = 0.0f;
-	VectorRef cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	char *pages = mkt_alloc(2 * (size_t)BLCKSZ);
 	memset(pages, 0, 2 * (size_t)BLCKSZ);
@@ -283,7 +283,7 @@ TEST(beam_search_rejects_corrupt_entry_count)
 	for (int c = 0; c < 4; c++)
 	{
 		vecs[c]			= make_test_vector(dim, c * 37 + 1);
-		VectorRef	v	= {.data = vecs[c], .dim = dim};
+		Vec32Ref	v	= {.data = vecs[c], .dim = dim};
 		RaBitQData *enc = mkt_rabitq_encode(params, v, cent_ref);
 		ASSERT_TRUE(
 				mkt_centroid_page_add(root_page, dim, 1, 0, 0, enc),
@@ -298,7 +298,7 @@ TEST(beam_search_rejects_corrupt_entry_count)
 								   1);
 
 	float			 *query = make_test_vector(dim, 5555);
-	VectorRef		  qref	= {.data = query, .dim = dim};
+	Vec32Ref		  qref	= {.data = query, .dim = dim};
 	RaBitQQueryState *qstate =
 			mkt_rabitq_prepare_query(params, qref, cent_ref);
 	TestStorage storage = {

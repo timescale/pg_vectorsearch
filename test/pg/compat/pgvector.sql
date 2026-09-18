@@ -48,9 +48,9 @@ CREATE OR REPLACE FUNCTION count_pgvector_casts() RETURNS int AS $$
     WHERE castmethod = 'b'
       AND ((castsource::regtype::text IN ('vector', 'halfvec')
             AND casttarget::regtype::text
-                IN ('mkt.vector', 'mkt.halfvec'))
+                IN ('mkt.vec32', 'mkt.vec16'))
         OR (castsource::regtype::text
-                IN ('mkt.vector', 'mkt.halfvec')
+                IN ('mkt.vec32', 'mkt.vec16')
             AND casttarget::regtype::text
                 IN ('vector', 'halfvec')));
 $$ LANGUAGE sql;
@@ -64,9 +64,9 @@ CREATE OR REPLACE FUNCTION casts_are_standalone() RETURNS bool AS $$
           AND c.castmethod = 'b'
           AND ((c.castsource::regtype::text IN ('vector', 'halfvec')
                 AND c.casttarget::regtype::text
-                    IN ('mkt.vector', 'mkt.halfvec'))
+                    IN ('mkt.vec32', 'mkt.vec16'))
             OR (c.castsource::regtype::text
-                    IN ('mkt.vector', 'mkt.halfvec')
+                    IN ('mkt.vec32', 'mkt.vec16')
                 AND c.casttarget::regtype::text
                     IN ('vector', 'halfvec')))
     );
@@ -114,27 +114,27 @@ $$ LANGUAGE plpgsql;
 -- 1. Binary casts exist
 -- =====================================================================
 
-SELECT assert_test('cast public.vector -> mkt.vector exists',
+SELECT assert_test('cast public.vector -> mkt.vec32 exists',
     EXISTS (SELECT 1 FROM pg_cast
             WHERE castsource = 'public.vector'::regtype
-              AND casttarget = 'mkt.vector'::regtype
+              AND casttarget = 'mkt.vec32'::regtype
               AND castmethod = 'b'));
 
-SELECT assert_test('cast public.halfvec -> mkt.halfvec exists',
+SELECT assert_test('cast public.halfvec -> mkt.vec16 exists',
     EXISTS (SELECT 1 FROM pg_cast
             WHERE castsource = 'public.halfvec'::regtype
-              AND casttarget = 'mkt.halfvec'::regtype
+              AND casttarget = 'mkt.vec16'::regtype
               AND castmethod = 'b'));
 
-SELECT assert_test('cast mkt.vector -> public.vector exists',
+SELECT assert_test('cast mkt.vec32 -> public.vector exists',
     EXISTS (SELECT 1 FROM pg_cast
-            WHERE castsource = 'mkt.vector'::regtype
+            WHERE castsource = 'mkt.vec32'::regtype
               AND casttarget = 'public.vector'::regtype
               AND castmethod = 'b'));
 
-SELECT assert_test('cast mkt.halfvec -> public.halfvec exists',
+SELECT assert_test('cast mkt.vec16 -> public.halfvec exists',
     EXISTS (SELECT 1 FROM pg_cast
-            WHERE castsource = 'mkt.halfvec'::regtype
+            WHERE castsource = 'mkt.vec16'::regtype
               AND casttarget = 'public.halfvec'::regtype
               AND castmethod = 'b'));
 
@@ -149,13 +149,13 @@ SELECT assert_test('casts are standalone (not owned by extension)',
 -- =====================================================================
 
 SELECT assert_test('vector text I/O matches',
-    '[1,2,3]'::mkt.vector::text = '[1,2,3]'::public.vector::text);
+    '[1,2,3]'::mkt.vec32::text = '[1,2,3]'::public.vector::text);
 
 SELECT assert_test('halfvec text I/O matches',
-    '[1,2,3]'::mkt.halfvec::text = '[1,2,3]'::public.halfvec::text);
+    '[1,2,3]'::mkt.vec16::text = '[1,2,3]'::public.halfvec::text);
 
 SELECT assert_test('vector float precision matches',
-    '[1.5,-2.3,0]'::mkt.vector::text
+    '[1.5,-2.3,0]'::mkt.vec32::text
     = '[1.5,-2.3,0]'::public.vector::text);
 
 -- =====================================================================
@@ -163,16 +163,16 @@ SELECT assert_test('vector float precision matches',
 -- =====================================================================
 
 SELECT assert_test('vector binary cast round-trip',
-    '[1,2,3]'::public.vector::mkt.vector::text = '[1,2,3]');
+    '[1,2,3]'::public.vector::mkt.vec32::text = '[1,2,3]');
 
 SELECT assert_test('halfvec binary cast round-trip',
-    '[1,2,3]'::public.halfvec::mkt.halfvec::text = '[1,2,3]');
+    '[1,2,3]'::public.halfvec::mkt.vec16::text = '[1,2,3]');
 
 SELECT assert_test('mkt vector -> pgvector cast',
-    '[4,5,6]'::mkt.vector::public.vector::text = '[4,5,6]');
+    '[4,5,6]'::mkt.vec32::public.vector::text = '[4,5,6]');
 
 SELECT assert_test('mkt halfvec -> pgvector cast',
-    '[4,5,6]'::mkt.halfvec::public.halfvec::text = '[4,5,6]');
+    '[4,5,6]'::mkt.vec16::public.halfvec::text = '[4,5,6]');
 
 -- =====================================================================
 -- 4. Distance functions produce same results
@@ -180,32 +180,32 @@ SELECT assert_test('mkt halfvec -> pgvector cast',
 
 -- L2 distance
 SELECT assert_test('L2 distance matches',
-    abs(mkt.l2_distance('[1,2,3]'::mkt.vector,
-                        '[4,5,6]'::mkt.vector)
+    abs(mkt.l2_distance('[1,2,3]'::mkt.vec32,
+                        '[4,5,6]'::mkt.vec32)
       - public.l2_distance('[1,2,3]'::public.vector,
                            '[4,5,6]'::public.vector))
     < 1e-6);
 
 -- Inner product
 SELECT assert_test('inner product matches',
-    abs(mkt.inner_product('[1,2,3]'::mkt.vector,
-                          '[4,5,6]'::mkt.vector)
+    abs(mkt.inner_product('[1,2,3]'::mkt.vec32,
+                          '[4,5,6]'::mkt.vec32)
       - public.inner_product('[1,2,3]'::public.vector,
                              '[4,5,6]'::public.vector))
     < 1e-6);
 
 -- Cosine distance
 SELECT assert_test('cosine distance matches',
-    abs(mkt.cosine_distance('[1,0]'::mkt.vector,
-                            '[0,1]'::mkt.vector)
+    abs(mkt.cosine_distance('[1,0]'::mkt.vec32,
+                            '[0,1]'::mkt.vec32)
       - public.cosine_distance('[1,0]'::public.vector,
                                '[0,1]'::public.vector))
     < 1e-6);
 
 -- Cosine distance: identical vectors = 0
 SELECT assert_test('cosine identical = 0',
-    abs(mkt.cosine_distance('[1,1,1]'::mkt.vector,
-                            '[1,1,1]'::mkt.vector)
+    abs(mkt.cosine_distance('[1,1,1]'::mkt.vec32,
+                            '[1,1,1]'::mkt.vec32)
       - public.cosine_distance('[1,1,1]'::public.vector,
                                '[1,1,1]'::public.vector))
     < 1e-6);
@@ -216,24 +216,24 @@ SELECT assert_test('cosine identical = 0',
 
 -- <-> (L2 distance)
 SELECT assert_test('<-> operator matches',
-    abs(('[0,0]'::mkt.vector
-         OPERATOR(mkt.<->) '[3,4]'::mkt.vector)
+    abs(('[0,0]'::mkt.vec32
+         OPERATOR(mkt.<->) '[3,4]'::mkt.vec32)
       - ('[0,0]'::public.vector
          OPERATOR(public.<->) '[3,4]'::public.vector))
     < 1e-6);
 
 -- <#> (negative inner product)
 SELECT assert_test('<#> operator matches',
-    abs(('[1,2,3]'::mkt.vector
-         OPERATOR(mkt.<#>) '[4,5,6]'::mkt.vector)
+    abs(('[1,2,3]'::mkt.vec32
+         OPERATOR(mkt.<#>) '[4,5,6]'::mkt.vec32)
       - ('[1,2,3]'::public.vector
          OPERATOR(public.<#>) '[4,5,6]'::public.vector))
     < 1e-6);
 
 -- <=> (cosine distance)
 SELECT assert_test('<=> operator matches',
-    abs(('[1,0]'::mkt.vector
-         OPERATOR(mkt.<=>) '[0,1]'::mkt.vector)
+    abs(('[1,0]'::mkt.vec32
+         OPERATOR(mkt.<=>) '[0,1]'::mkt.vec32)
       - ('[1,0]'::public.vector
          OPERATOR(public.<=>) '[0,1]'::public.vector))
     < 1e-6);
@@ -243,22 +243,22 @@ SELECT assert_test('<=> operator matches',
 -- =====================================================================
 
 SELECT assert_test('halfvec L2 distance matches',
-    abs(mkt.l2_distance('[1,2,3]'::mkt.halfvec,
-                        '[4,5,6]'::mkt.halfvec)
+    abs(mkt.l2_distance('[1,2,3]'::mkt.vec16,
+                        '[4,5,6]'::mkt.vec16)
       - public.l2_distance('[1,2,3]'::public.halfvec,
                            '[4,5,6]'::public.halfvec))
     < 1e-2);  -- halfvec has lower precision
 
 SELECT assert_test('halfvec inner product matches',
-    abs(mkt.inner_product('[1,2,3]'::mkt.halfvec,
-                          '[4,5,6]'::mkt.halfvec)
+    abs(mkt.inner_product('[1,2,3]'::mkt.vec16,
+                          '[4,5,6]'::mkt.vec16)
       - public.inner_product('[1,2,3]'::public.halfvec,
                              '[4,5,6]'::public.halfvec))
     < 1e-2);
 
 SELECT assert_test('halfvec cosine distance matches',
-    abs(mkt.cosine_distance('[1,0]'::mkt.halfvec,
-                            '[0,1]'::mkt.halfvec)
+    abs(mkt.cosine_distance('[1,0]'::mkt.vec16,
+                            '[0,1]'::mkt.vec16)
       - public.cosine_distance('[1,0]'::public.halfvec,
                                '[0,1]'::public.halfvec))
     < 1e-2);
@@ -278,19 +278,19 @@ INSERT INTO pgv_items (v) VALUES
 
 -- Meerkat distance on pgvector column via binary cast
 SELECT assert_test('mkt distance on pgvector column via cast',
-    (SELECT mkt.l2_distance(v::mkt.vector,
-                            '[1,1,1]'::mkt.vector)
+    (SELECT mkt.l2_distance(v::mkt.vec32,
+                            '[1,1,1]'::mkt.vec32)
      FROM pgv_items WHERE id = 1) IS NOT NULL);
 
 -- Implicit cast: pgvector column used directly with meerkat operator
 SELECT assert_test('implicit cast with mkt operator',
-    (SELECT v OPERATOR(mkt.<->) '[1,1,1]'::mkt.vector
+    (SELECT v OPERATOR(mkt.<->) '[1,1,1]'::mkt.vec32
      FROM pgv_items WHERE id = 1) IS NOT NULL);
 
 -- ORDER BY with meerkat operators on pgvector data (implicit cast)
 SELECT assert_test('mkt ORDER BY on pgvector data via cast',
     (SELECT array_agg(id ORDER BY
-        v OPERATOR(mkt.<->) '[1,1,1]'::mkt.vector)
+        v OPERATOR(mkt.<->) '[1,1,1]'::mkt.vec32)
      FROM pgv_items) IS NOT NULL);
 
 -- =====================================================================
@@ -299,7 +299,7 @@ SELECT assert_test('mkt ORDER BY on pgvector data via cast',
 
 CREATE TEMP TABLE mkt_items (
     id serial PRIMARY KEY,
-    v mkt.vector(3)
+    v mkt.vec32(3)
 );
 INSERT INTO mkt_items (v) VALUES
     ('[1,0,0]'), ('[0,1,0]'), ('[0,0,1]'),
@@ -318,7 +318,7 @@ SELECT assert_test('pgvector distance on mkt column via cast',
 -- Same query on both types should return same ordering
 SELECT assert_test('NN ordering matches (vector)',
     (SELECT array_agg(id ORDER BY
-        v OPERATOR(mkt.<->) '[1,1,1]'::mkt.vector)
+        v OPERATOR(mkt.<->) '[1,1,1]'::mkt.vec32)
      FROM pgv_items)
     =
     (SELECT array_agg(id ORDER BY
@@ -330,10 +330,10 @@ SELECT assert_test('NN ordering matches (vector)',
 -- =====================================================================
 
 SELECT assert_test('vector -> array -> vector round-trip',
-    ('[1,2,3]'::mkt.vector)::real[]::mkt.vector::text = '[1,2,3]');
+    ('[1,2,3]'::mkt.vec32)::real[]::mkt.vec32::text = '[1,2,3]');
 
 SELECT assert_test('pgvector array cast matches mkt array cast',
-    ('[1,2,3]'::mkt.vector)::real[]::text
+    ('[1,2,3]'::mkt.vec32)::real[]::text
     = ('[1,2,3]'::public.vector)::real[]::text);
 
 -- =====================================================================
@@ -341,11 +341,11 @@ SELECT assert_test('pgvector array cast matches mkt array cast',
 -- =====================================================================
 
 SELECT assert_test('vector_dims matches',
-    mkt.vector_dims('[1,2,3]'::mkt.vector)
+    mkt.vec32_dims('[1,2,3]'::mkt.vec32)
     = public.vector_dims('[1,2,3]'::public.vector));
 
 SELECT assert_test('vector_norm matches',
-    abs(mkt.vector_norm('[3,4]'::mkt.vector)
+    abs(mkt.vec32_norm('[3,4]'::mkt.vec32)
       - public.vector_norm('[3,4]'::public.vector))
     < 1e-6);
 
@@ -356,14 +356,14 @@ SELECT assert_test('vector_norm matches',
 -- pgvector value as LHS with meerkat function (implicit cast)
 SELECT assert_test('mkt.l2_distance with pgvector arg (implicit)',
     abs(mkt.l2_distance('[1,2,3]'::public.vector,
-                        '[4,5,6]'::mkt.vector)
+                        '[4,5,6]'::mkt.vec32)
       - public.l2_distance('[1,2,3]'::public.vector,
                            '[4,5,6]'::public.vector))
     < 1e-6);
 
 SELECT assert_test('mkt.cosine_distance with pgvector arg (implicit)',
     abs(mkt.cosine_distance('[1,0]'::public.vector,
-                            '[0,1]'::mkt.vector)
+                            '[0,1]'::mkt.vec32)
       - public.cosine_distance('[1,0]'::public.vector,
                                '[0,1]'::public.vector))
     < 1e-6);
@@ -392,10 +392,10 @@ SELECT assert_test('pgv-first: casts are standalone',
     casts_are_standalone());
 
 SELECT assert_test('pgv-first: pgvector->mkt cast works',
-    '[1,2,3]'::public.vector::mkt.vector::text = '[1,2,3]');
+    '[1,2,3]'::public.vector::mkt.vec32::text = '[1,2,3]');
 
 SELECT assert_test('pgv-first: mkt->pgvector cast works',
-    '[1,2,3]'::mkt.vector::public.vector::text = '[1,2,3]');
+    '[1,2,3]'::mkt.vec32::public.vector::text = '[1,2,3]');
 
 -- =====================================================================
 -- 14. Install path: meerkat first, then pgvector (event trigger)
@@ -414,10 +414,10 @@ SELECT assert_test('mkt-first: casts are standalone',
     casts_are_standalone());
 
 SELECT assert_test('mkt-first: pgvector->mkt cast works',
-    '[1,2,3]'::public.vector::mkt.vector::text = '[1,2,3]');
+    '[1,2,3]'::public.vector::mkt.vec32::text = '[1,2,3]');
 
 SELECT assert_test('mkt-first: mkt->pgvector cast works',
-    '[1,2,3]'::mkt.vector::public.vector::text = '[1,2,3]');
+    '[1,2,3]'::mkt.vec32::public.vector::text = '[1,2,3]');
 
 -- =====================================================================
 -- 15. DROP meerkat CASCADE: casts dropped, pgvector survives
@@ -475,8 +475,8 @@ SELECT assert_test('drop-pgv: meerkat still loaded',
     EXISTS (SELECT 1 FROM pg_extension
             WHERE extname = 'meerkat'));
 
-SELECT assert_test('drop-pgv: mkt.vector still works',
-    '[1,2,3]'::mkt.vector::text = '[1,2,3]');
+SELECT assert_test('drop-pgv: mkt.vec32 still works',
+    '[1,2,3]'::mkt.vec32::text = '[1,2,3]');
 
 -- The pgvector operator members are removed with pgvector's operators, while
 -- meerkat's own six ordering operators and its opclasses are untouched.
@@ -505,7 +505,7 @@ SELECT assert_test('recreate-pgv: casts are standalone',
     casts_are_standalone());
 
 SELECT assert_test('recreate-pgv: cast works',
-    '[1,2,3]'::public.vector::mkt.vector::text = '[1,2,3]');
+    '[1,2,3]'::public.vector::mkt.vec32::text = '[1,2,3]');
 
 -- =====================================================================
 -- 18. meerkat standalone (no pgvector)
@@ -520,8 +520,8 @@ SELECT assert_test('standalone: meerkat loads without pgvector',
     EXISTS (SELECT 1 FROM pg_extension
             WHERE extname = 'meerkat'));
 
-SELECT assert_test('standalone: mkt.vector works',
-    '[1,2,3]'::mkt.vector::text = '[1,2,3]');
+SELECT assert_test('standalone: mkt.vec32 works',
+    '[1,2,3]'::mkt.vec32::text = '[1,2,3]');
 
 SELECT assert_test('standalone: event trigger exists',
     EXISTS (SELECT 1 FROM pg_event_trigger
@@ -541,7 +541,7 @@ SELECT assert_test('standalone: clean drop',
 --
 -- The binary casts tested above are what make it reachable: PostgreSQL matches
 -- an opclass to a column by binary coercibility, so an opclass declared FOR
--- TYPE mkt.halfvec accepts a public.halfvec column. The access method then has
+-- TYPE mkt.vec16 accepts a public.halfvec column. The access method then has
 -- to read that column as f16, and it gets that from the opclass's own type
 -- descriptor rather than by identifying the column's type itself -- so a
 -- pgvector column and a meerkat column are handled identically, with nothing
@@ -572,9 +572,9 @@ INSERT INTO idx_src
     FROM generate_series(1, 2000) g;
 
 CREATE TABLE idx_pgv_h (id int, v public.halfvec(8));
-CREATE TABLE idx_mkt_h (id int, v mkt.halfvec(8));
+CREATE TABLE idx_mkt_h (id int, v mkt.vec16(8));
 INSERT INTO idx_pgv_h SELECT id, txt::public.halfvec(8) FROM idx_src;
-INSERT INTO idx_mkt_h SELECT id, txt::mkt.halfvec(8) FROM idx_src;
+INSERT INTO idx_mkt_h SELECT id, txt::mkt.vec16(8) FROM idx_src;
 ANALYZE idx_pgv_h;
 ANALYZE idx_mkt_h;
 
@@ -582,11 +582,11 @@ ANALYZE idx_mkt_h;
 CREATE TEMP TABLE idx_truth AS
     SELECT array_agg(id ORDER BY id) AS ids
       FROM (SELECT id FROM idx_pgv_h
-             ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.halfvec(8)
+             ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.vec16(8)
              LIMIT 10) t;
 
-CREATE INDEX idx_pgv_h_i ON idx_pgv_h USING mktann (v mkt.halfvec_l2_ops);
-CREATE INDEX idx_mkt_h_i ON idx_mkt_h USING mktann (v mkt.halfvec_l2_ops);
+CREATE INDEX idx_pgv_h_i ON idx_pgv_h USING mktann (v mkt.vec16_l2_ops);
+CREATE INDEX idx_mkt_h_i ON idx_mkt_h USING mktann (v mkt.vec16_l2_ops);
 
 -- The planner must actually choose the index, or the rest proves nothing.
 -- EXPLAIN cannot appear in a subquery, hence the helper.
@@ -618,7 +618,7 @@ SET mkt.rerank_pool = -1;
 
 SELECT assert_test('mktann index is used on a pgvector halfvec column',
     public.plan_uses_index_scan($q$SELECT id FROM idx_pgv_h
-        ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.halfvec(8)
+        ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.vec16(8)
         LIMIT 10$q$));
 
 -- Recall against brute force. A misdecoded column scores near zero here, so
@@ -628,7 +628,7 @@ SELECT assert_test(
     'pgvector halfvec column: mktann recall >= 8/10',
     (SELECT count(*) FROM (
         SELECT id FROM idx_pgv_h
-         ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.halfvec(8)
+         ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.vec16(8)
          LIMIT 10) g
       WHERE g.id = ANY (SELECT unnest(ids) FROM idx_truth)) >= 8);
 
@@ -637,14 +637,14 @@ SELECT assert_test(
     'mkt halfvec column: mktann recall >= 8/10',
     (SELECT count(*) FROM (
         SELECT id FROM idx_mkt_h
-         ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.halfvec(8)
+         ORDER BY v OPERATOR(mkt.<->) '[0,0,0,0,0,0,0,0]'::mkt.vec16(8)
          LIMIT 10) g
       WHERE g.id = ANY (SELECT unnest(ids) FROM idx_truth)) >= 8);
 
 -- Centroids follow the column for a pgvector column too, by the same
 -- binary-coercibility test. Compression off, so the format is decided by the
 -- column type rather than by RaBitQ.
-CREATE INDEX idx_fmt_i ON idx_pgv_h USING mktann (v mkt.halfvec_l2_ops)
+CREATE INDEX idx_fmt_i ON idx_pgv_h USING mktann (v mkt.vec16_l2_ops)
     WITH (centroid_compression = off, centroid_fastscan = off,
           fastscan = off, soar_lambda = 0, boundary_epsilon = 0);
 SELECT assert_test('pgvector halfvec column gets half-precision centroids',
@@ -694,7 +694,7 @@ SELECT assert_test('meerkat column with pgvector operator does not resolve',
         SELECT 1 FROM pg_operator op
          WHERE op.oprname = '<->'
            AND op.oprnamespace = 'public'::regnamespace
-           AND op.oprleft = 'mkt.halfvec'::regtype));
+           AND op.oprleft = 'mkt.vec16'::regtype));
 
 RESET enable_seqscan;
 DROP FUNCTION public.plan_uses_index_scan(text);
@@ -728,10 +728,14 @@ SELECT assert_test('custom-schema (pgv-first): 4 binary compat casts',
        JOIN pg_type s ON s.oid = c.castsource
        JOIN pg_type t ON t.oid = c.casttarget
       WHERE c.castmethod = 'b'
-        AND s.typname IN ('vector', 'halfvec')
-        AND t.typname IN ('vector', 'halfvec')
-        AND (s.typnamespace = 'pgv_alt'::regnamespace
-             OR t.typnamespace = 'pgv_alt'::regnamespace)) = 4);
+        AND ((s.typnamespace = 'pgv_alt'::regnamespace
+              AND s.typname IN ('vector', 'halfvec')
+              AND t.typnamespace = 'mkt'::regnamespace
+              AND t.typname IN ('vec32', 'vec16'))
+          OR (t.typnamespace = 'pgv_alt'::regnamespace
+              AND t.typname IN ('vector', 'halfvec')
+              AND s.typnamespace = 'mkt'::regnamespace
+              AND s.typname IN ('vec32', 'vec16')))) = 4);
 
 SELECT assert_test(
     'custom-schema (pgv-first): 6 pgvector ops are mktann members',
@@ -743,9 +747,9 @@ SELECT assert_test(
         AND op.oprnamespace = 'pgv_alt'::regnamespace) = 6);
 
 SELECT assert_test('custom-schema: pgvector->mkt cast round-trips',
-    '[1,2,3]'::pgv_alt.vector::mkt.vector::text = '[1,2,3]');
+    '[1,2,3]'::pgv_alt.vector::mkt.vec32::text = '[1,2,3]');
 SELECT assert_test('custom-schema: mkt->pgvector cast round-trips',
-    '[1,2,3]'::mkt.vector::pgv_alt.vector::text = '[1,2,3]');
+    '[1,2,3]'::mkt.vec32::pgv_alt.vector::text = '[1,2,3]');
 
 -- A real index scan over a pgv_alt.vector column via pgvector's operator: the
 -- operator only reaches the index because discovery added it to the family.
@@ -767,7 +771,7 @@ INSERT INTO idx_alt
                        FROM generate_series(1, 8) j) || ']')::pgv_alt.vector(8)
     FROM generate_series(1, 2000) g;
 ANALYZE idx_alt;
-CREATE INDEX idx_alt_i ON idx_alt USING mktann (v mkt.vector_l2_ops);
+CREATE INDEX idx_alt_i ON idx_alt USING mktann (v mkt.vec32_l2_ops);
 SET enable_seqscan = off;
 SET mkt.rerank_pool = -1;
 SELECT assert_test(
@@ -791,10 +795,14 @@ SELECT assert_test('custom-schema (mkt-first): event trigger created 4 casts',
        JOIN pg_type s ON s.oid = c.castsource
        JOIN pg_type t ON t.oid = c.casttarget
       WHERE c.castmethod = 'b'
-        AND s.typname IN ('vector', 'halfvec')
-        AND t.typname IN ('vector', 'halfvec')
-        AND (s.typnamespace = 'pgv_alt'::regnamespace
-             OR t.typnamespace = 'pgv_alt'::regnamespace)) = 4);
+        AND ((s.typnamespace = 'pgv_alt'::regnamespace
+              AND s.typname IN ('vector', 'halfvec')
+              AND t.typnamespace = 'mkt'::regnamespace
+              AND t.typname IN ('vec32', 'vec16'))
+          OR (t.typnamespace = 'pgv_alt'::regnamespace
+              AND t.typname IN ('vector', 'halfvec')
+              AND s.typnamespace = 'mkt'::regnamespace
+              AND s.typname IN ('vec32', 'vec16')))) = 4);
 
 -- Mirror the pgv-first checks: the event-trigger path must also add the six
 -- operators to the mktann families and yield a real index scan, or a
@@ -826,7 +834,7 @@ INSERT INTO idx_altb
                        FROM generate_series(1, 8) j) || ']')::pgv_alt.vector(8)
     FROM generate_series(1, 2000) g;
 ANALYZE idx_altb;
-CREATE INDEX idx_altb_i ON idx_altb USING mktann (v mkt.vector_l2_ops);
+CREATE INDEX idx_altb_i ON idx_altb USING mktann (v mkt.vec32_l2_ops);
 SET enable_seqscan = off;
 SET mkt.rerank_pool = -1;
 SELECT assert_test(

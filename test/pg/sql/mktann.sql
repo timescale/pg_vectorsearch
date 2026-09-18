@@ -1,11 +1,11 @@
 -- mktann index access method
 
--- Create table with vector column
-CREATE TABLE embeddings (id serial, v vector(3));
+-- Create table with vec32 column
+CREATE TABLE embeddings (id serial, v vec32(3));
 
 -- Insert deterministic data (grid of vectors)
 INSERT INTO embeddings (v)
-    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vector
+    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vec32
     FROM generate_series(0, 9) x,
          generate_series(0, 9) y,
          generate_series(0, 9) z;
@@ -54,61 +54,61 @@ SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_l2_float';
 
 -- IP opclass (centroid_compression=auto falls back to float) — build works
-CREATE INDEX idx_ip ON embeddings USING mktann (v vector_ip_ops);
+CREATE INDEX idx_ip ON embeddings USING mktann (v vec32_ip_ops);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_ip';
 
 -- Cosine opclass with uncompressed float centroids — build should work
-CREATE INDEX idx_cos ON embeddings USING mktann (v vector_cosine_ops)
+CREATE INDEX idx_cos ON embeddings USING mktann (v vec32_cosine_ops)
     WITH (centroid_compression = off);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_cos';
 
 -- Cosine with compression — build should work
 CREATE INDEX idx_cosc ON embeddings
-    USING mktann (v vector_cosine_ops)
+    USING mktann (v vec32_cosine_ops)
     WITH (centroid_compression = true);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_cosc';
 
 -- Validation: compression + IP should ERROR
 CREATE INDEX idx_bad ON embeddings
-    USING mktann (v vector_ip_ops)
+    USING mktann (v vec32_ip_ops)
     WITH (centroid_compression = true);
 
 -- ============================================================
--- halfvec columns
+-- vec16 columns
 -- ============================================================
 -- The index is the same either way: postings hold RaBitQ codes, and the AM
--- widens a halfvec tuple to float32 on read. What halfvec changes is the
--- heap an exact rerank reads -- at 768d a vector row is 3080 bytes and fits
--- 2 to an 8 kB page against halfvec's 1544 and 5.
+-- widens a vec16 tuple to float32 on read. What vec16 changes is the
+-- heap an exact rerank reads -- at 768d a vec32 row is 3080 bytes and fits
+-- 2 to an 8 kB page against vec16's 1544 and 5.
 --
 -- Every coordinate below is a multiple of 0.1, none of which is exactly
 -- representable in f16, so the rows genuinely round on the way in and an
 -- exact rerank has to compare against the rounded values rather than the
 -- literals.
-CREATE TABLE h_embeddings (id serial, v halfvec(3));
+CREATE TABLE h_embeddings (id serial, v vec16(3));
 INSERT INTO h_embeddings (v)
-    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::halfvec
+    SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vec16
     FROM generate_series(0, 9) x,
          generate_series(0, 9) y,
          generate_series(0, 9) z;
 ANALYZE h_embeddings;
 
--- All three halfvec opclasses build.
+-- All three vec16 opclasses build.
 CREATE INDEX h_idx_l2 ON h_embeddings USING mktann (v)
     WITH (centroid_compression = true);
 SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'h_idx_l2';
-CREATE INDEX h_idx_ip ON h_embeddings USING mktann (v halfvec_ip_ops);
+CREATE INDEX h_idx_ip ON h_embeddings USING mktann (v vec16_ip_ops);
 SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'h_idx_ip';
-CREATE INDEX h_idx_cos ON h_embeddings USING mktann (v halfvec_cosine_ops);
+CREATE INDEX h_idx_cos ON h_embeddings USING mktann (v vec16_cosine_ops);
 SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'h_idx_cos';
 
--- The planner picks the index for an ORDER BY over a halfvec query argument.
+-- The planner picks the index for an ORDER BY over a vec16 query argument.
 SET enable_seqscan = off;
 EXPLAIN (COSTS OFF)
-SELECT id FROM h_embeddings ORDER BY v <-> '[0.5,0.5,0.5]'::halfvec LIMIT 5;
+SELECT id FROM h_embeddings ORDER BY v <-> '[0.5,0.5,0.5]'::vec16 LIMIT 5;
 RESET enable_seqscan;
 
 -- Correctness against brute force. Compare the sorted distance sequence
@@ -119,7 +119,7 @@ RESET enable_seqscan;
 SET enable_indexscan = off;
 SET enable_bitmapscan = off;
 CREATE TEMP TABLE h_exact AS
-    SELECT round((v <-> '[0.5,0.5,0.5]'::halfvec)::numeric, 6) AS d
+    SELECT round((v <-> '[0.5,0.5,0.5]'::vec16)::numeric, 6) AS d
         FROM h_embeddings ORDER BY 1 LIMIT 5;
 RESET enable_indexscan;
 RESET enable_bitmapscan;
@@ -127,8 +127,8 @@ RESET enable_bitmapscan;
 SET enable_seqscan = off;
 SET mkt.nprobe = 1000;
 CREATE TEMP TABLE h_idx AS
-    SELECT round((v <-> '[0.5,0.5,0.5]'::halfvec)::numeric, 6) AS d
-        FROM h_embeddings ORDER BY v <-> '[0.5,0.5,0.5]'::halfvec LIMIT 5;
+    SELECT round((v <-> '[0.5,0.5,0.5]'::vec16)::numeric, 6) AS d
+        FROM h_embeddings ORDER BY v <-> '[0.5,0.5,0.5]'::vec16 LIMIT 5;
 RESET mkt.nprobe;
 RESET enable_seqscan;
 
@@ -136,14 +136,14 @@ SELECT (SELECT array_agg(d ORDER BY d) FROM h_idx)
      = (SELECT array_agg(d ORDER BY d) FROM h_exact) AS matches_exact,
        (SELECT count(*) FROM h_idx) AS idx_rows;
 
--- Insert into an indexed halfvec table, then find the new row: its own value
+-- Insert into an indexed vec16 table, then find the new row: its own value
 -- must come back at distance 0, which only holds if the insert encoded the
 -- widened f16 value and the rerank compared against the same.
 INSERT INTO h_embeddings (v) VALUES ('[0.55,0.55,0.55]');
 SET enable_seqscan = off;
 SET mkt.nprobe = 1000;
-SELECT round((v <-> '[0.55,0.55,0.55]'::halfvec)::numeric, 6) AS inserted_dist
-    FROM h_embeddings ORDER BY v <-> '[0.55,0.55,0.55]'::halfvec LIMIT 1;
+SELECT round((v <-> '[0.55,0.55,0.55]'::vec16)::numeric, 6) AS inserted_dist
+    FROM h_embeddings ORDER BY v <-> '[0.55,0.55,0.55]'::vec16 LIMIT 1;
 RESET mkt.nprobe;
 RESET enable_seqscan;
 
@@ -166,11 +166,11 @@ DROP TABLE h_embeddings;
 -- result type has none is rejected earlier, by the dimension check, and so
 -- never reaches the crashing path -- it would make this test pass for the
 -- wrong reason.
-CREATE TABLE expr_t (id serial, v vector(3));
+CREATE TABLE expr_t (id serial, v vec32(3));
 INSERT INTO expr_t (v) VALUES ('[0.1,0.2,0.3]'), ('[0.4,0.5,0.6]');
 
 CREATE INDEX expr_idx ON expr_t
-    USING mktann ((array_to_vector(v::real[], 3, false)::vector(3)));
+    USING mktann ((array_to_vec32(v::real[], 3, false)::vec32(3)));
 
 -- A plain index on the same column is fine: it is the expression, not the
 -- column, that is unsupported.
@@ -266,13 +266,13 @@ DROP TABLE embeddings;
 -- autovacuum is off so no analyze sneaks in a real reltuples before the
 -- build. 2000 rows target ~44 partitions; the band tolerates estimator
 -- slack in both directions but not the undercount.
-CREATE TABLE hd (id int, v vector(768)) WITH (autovacuum_enabled = off);
+CREATE TABLE hd (id int, v vec32(768)) WITH (autovacuum_enabled = off);
 -- external (uncompressed) storage makes the TOASTing deterministic
 ALTER TABLE hd ALTER COLUMN v SET STORAGE EXTERNAL;
 INSERT INTO hd
     SELECT g, (SELECT ('[' || string_agg((sin(g * 0.7 + j))::text, ',') ||
                        ']')
-               FROM generate_series(1, 768) j)::vector(768)
+               FROM generate_series(1, 768) j)::vec32(768)
     FROM generate_series(1, 2000) g;
 CREATE INDEX hd_i ON hd USING mktann (v);
 SELECT count(*) BETWEEN 20 AND 120 AS toast_auto_nlist
@@ -286,13 +286,13 @@ DROP TABLE hd;
 -- still fit one entry, which caps the indexable dimension. One past the
 -- ceiling is rejected up front (it would corrupt the first-page capacity
 -- arithmetic); the ceiling itself builds and answers exactly.
-CREATE TABLE dimcap (id int, v vector(1969));
+CREATE TABLE dimcap (id int, v vec32(1969));
 CREATE INDEX dimcap_i ON dimcap USING mktann (v);
 DROP TABLE dimcap;
-CREATE TABLE dimcap (id int, v vector(1968));
+CREATE TABLE dimcap (id int, v vec32(1968));
 INSERT INTO dimcap
     SELECT g, (SELECT ('[' || string_agg((sin(g + j))::text, ',') || ']')
-               FROM generate_series(1, 1968) j)::vector(1968)
+               FROM generate_series(1, 1968) j)::vec32(1968)
     FROM generate_series(1, 20) g;
 CREATE INDEX dimcap_i ON dimcap USING mktann (v) WITH (nlist = 4);
 SET enable_seqscan = off;
@@ -325,26 +325,26 @@ DROP TABLE dimcap;
 -- neighbor.
 SET enable_seqscan = off;
 
-CREATE TABLE cache_a (id int, v vector(8));
+CREATE TABLE cache_a (id int, v vec32(8));
 INSERT INTO cache_a
-    SELECT g, format('[%s,0,0,0,0,0,0,0]', g)::vector
+    SELECT g, format('[%s,0,0,0,0,0,0,0]', g)::vec32
     FROM generate_series(1, 2000) g;
 CREATE INDEX idx_a ON cache_a USING mktann (v) WITH (nlist = 64);
 
-CREATE TABLE cache_c (id int, v vector(256));
+CREATE TABLE cache_c (id int, v vec32(256));
 INSERT INTO cache_c
-    SELECT g, ('[' || g::text || repeat(',0', 255) || ']')::vector
+    SELECT g, ('[' || g::text || repeat(',0', 255) || ']')::vec32
     FROM generate_series(1, 2000) g;
 CREATE INDEX idx_c ON cache_c USING mktann (v) WITH (nlist = 64);
 
 -- Non-integer query points avoid distance ties, so each nearest-1 answer
 -- is unambiguous: row 1 probes near 1500, row 2 probes near 1600.
-CREATE TABLE probes (rown int, qa vector(8), qc vector(256));
+CREATE TABLE probes (rown int, qa vec32(8), qc vec32(256));
 INSERT INTO probes VALUES
     (1, '[1500.3,0,0,0,0,0,0,0]',
-        ('[' || '1500.6' || repeat(',0', 255) || ']')::vector),
+        ('[' || '1500.6' || repeat(',0', 255) || ']')::vec32),
     (2, '[1600.3,0,0,0,0,0,0,0]',
-        ('[' || '1600.6' || repeat(',0', 255) || ']')::vector);
+        ('[' || '1600.6' || repeat(',0', 255) || ']')::vec32);
 
 -- Both subqueries must return their query point's exact nearest integer
 -- on every row, including row 2 -- the row whose idx_a evaluation
@@ -389,10 +389,10 @@ DO $$
 DECLARE d int;
 BEGIN
     FOREACH d IN ARRAY ARRAY[8, 16, 24, 32, 40, 48, 56, 64, 72, 80] LOOP
-        EXECUTE format('CREATE TABLE cache_t%s (id int, v vector(%s))',
+        EXECUTE format('CREATE TABLE cache_t%s (id int, v vec32(%s))',
                        d, d);
         EXECUTE format($i$INSERT INTO cache_t%s
-            SELECT g, ('[' || g::text || repeat(',0', %s - 1) || ']')::vector
+            SELECT g, ('[' || g::text || repeat(',0', %s - 1) || ']')::vec32
             FROM generate_series(1, 256) g$i$, d, d);
         EXECUTE format('CREATE INDEX cache_i%s ON cache_t%s '
                        'USING mktann (v) WITH (nlist = 4)', d, d);
@@ -424,7 +424,7 @@ FROM rabitq_params_cache() ORDER BY dim;
 -- A miss with the cache at its target — the first dim-72 query — decays
 -- every usage score by 0.99 and evicts the least-used idle entry: dim 8.
 SELECT id FROM cache_t72
-ORDER BY v <-> ('[1' || repeat(',0', 71) || ']')::vector LIMIT 1;
+ORDER BY v <-> ('[1' || repeat(',0', 71) || ']')::vec32 LIMIT 1;
 
 SELECT dim, refcount, round(usage::numeric, 4) AS usage
 FROM rabitq_params_cache() ORDER BY dim;
@@ -435,9 +435,9 @@ FROM rabitq_params_cache() ORDER BY dim;
 -- index hold two checkouts.
 BEGIN;
 DECLARE c16a CURSOR FOR
-    SELECT id FROM cache_t16 ORDER BY v <-> ('[1' || repeat(',0', 15) || ']')::vector LIMIT 5;
+    SELECT id FROM cache_t16 ORDER BY v <-> ('[1' || repeat(',0', 15) || ']')::vec32 LIMIT 5;
 DECLARE c16b CURSOR FOR
-    SELECT id FROM cache_t16 ORDER BY v <-> ('[2' || repeat(',0', 15) || ']')::vector LIMIT 5;
+    SELECT id FROM cache_t16 ORDER BY v <-> ('[2' || repeat(',0', 15) || ']')::vec32 LIMIT 5;
 SELECT refcount FROM rabitq_params_cache() WHERE dim = 16;
 FETCH 1 FROM c16a;
 SELECT refcount, round(usage::numeric, 4) AS usage
@@ -458,13 +458,13 @@ COMMIT;
 -- dim 24.
 BEGIN;
 DECLARE c72 CURSOR FOR
-    SELECT id FROM cache_t72 ORDER BY v <-> ('[1' || repeat(',0', 71) || ']')::vector LIMIT 5;
+    SELECT id FROM cache_t72 ORDER BY v <-> ('[1' || repeat(',0', 71) || ']')::vec32 LIMIT 5;
 FETCH 1 FROM c72;
 SELECT refcount, round(usage::numeric, 4) AS usage
 FROM rabitq_params_cache() WHERE dim = 72;
 
 SELECT id FROM cache_t80
-ORDER BY v <-> ('[1' || repeat(',0', 79) || ']')::vector LIMIT 1;
+ORDER BY v <-> ('[1' || repeat(',0', 79) || ']')::vec32 LIMIT 1;
 
 -- dim 24 gone; dim 72 survived its own global-minimum usage because it
 -- was held. Everything else decayed by another factor of 0.99.
@@ -488,7 +488,7 @@ SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
 -- ROLLBACK; usage keeps its checkout bump.
 BEGIN;
 DECLARE cabort CURSOR FOR
-    SELECT id FROM cache_t80 ORDER BY v <-> ('[1' || repeat(',0', 79) || ']')::vector LIMIT 5;
+    SELECT id FROM cache_t80 ORDER BY v <-> ('[1' || repeat(',0', 79) || ']')::vec32 LIMIT 5;
 FETCH 1 FROM cabort;
 SELECT refcount, round(usage::numeric, 4) AS usage
 FROM rabitq_params_cache() WHERE dim = 80;
@@ -503,12 +503,12 @@ FROM rabitq_params_cache() WHERE dim = 80;
 -- fetchable -> 0 after COMMIT.
 BEGIN;
 DECLARE couter CURSOR FOR
-    SELECT id FROM cache_t72 ORDER BY v <-> ('[1' || repeat(',0', 71) || ']')::vector LIMIT 5;
+    SELECT id FROM cache_t72 ORDER BY v <-> ('[1' || repeat(',0', 71) || ']')::vec32 LIMIT 5;
 FETCH 1 FROM couter;
 SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
 SAVEPOINT s1;
 DECLARE cinner CURSOR FOR
-    SELECT id FROM cache_t72 ORDER BY v <-> ('[2' || repeat(',0', 71) || ']')::vector LIMIT 5;
+    SELECT id FROM cache_t72 ORDER BY v <-> ('[2' || repeat(',0', 71) || ']')::vec32 LIMIT 5;
 FETCH 1 FROM cinner;
 SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
 ROLLBACK TO s1;
@@ -520,7 +520,7 @@ SELECT refcount FROM rabitq_params_cache() WHERE dim = 72;
 -- Insert path: each inserted tuple checks the matrix out and releases
 -- it. Expected: usage up by exactly 1.0, refcount back at 0.
 INSERT INTO cache_t80
-    SELECT 999, ('[9' || repeat(',0', 79) || ']')::vector;
+    SELECT 999, ('[9' || repeat(',0', 79) || ']')::vec32;
 SELECT refcount, round(usage::numeric, 4) AS usage
 FROM rabitq_params_cache() WHERE dim = 80;
 

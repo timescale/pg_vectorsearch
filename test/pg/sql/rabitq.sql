@@ -101,21 +101,21 @@ SELECT rabitq_dims(q) AS dims,
        round(rabitq_f_add(q)::numeric, 0) AS f_add,
        round(rabitq_f_rescale(q)::numeric, 1) AS f_rescale
 FROM (SELECT rabitq_encode(
-    '[1,2,3,4,5,6,7,8]'::vector,
-    '[0,0,0,0,0,0,0,0]'::vector,
+    '[1,2,3,4,5,6,7,8]'::vec32,
+    '[0,0,0,0,0,0,0,0]'::vec32,
     rabitq_params_generate(8, 42)
 ) AS q) t;
 
 -- Encoding dimension mismatch
 SELECT rabitq_encode(
-    '[1,2,3]'::vector,
-    '[0,0,0,0,0,0,0,0]'::vector,
+    '[1,2,3]'::vec32,
+    '[0,0,0,0,0,0,0,0]'::vec32,
     rabitq_params_generate(8, 42)
 ); -- error
 
 -- Encoding: round-trip dims check
 SELECT rabitq_dims(rabitq_encode(
-    '[1,2,3,4,5,6,7,8]'::vector,
-    '[0,0,0,0,0,0,0,0]'::vector,
+    '[1,2,3,4,5,6,7,8]'::vec32,
+    '[0,0,0,0,0,0,0,0]'::vec32,
     rabitq_params_generate(8, 42)
 ));

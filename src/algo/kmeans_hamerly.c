@@ -80,13 +80,13 @@ l2_from_dot(float norm_a, float norm_b, float dot)
  */
 __attribute__((always_inline)) static inline void
 assign_full_impl(
-		const void			   *vec,
-		float					norm_x,
-		const KMeansState	   *st,
-		uint32_t			   *out_j1,
-		float				   *out_dist1,
-		float				   *out_dist2,
-		const MktVectorTypeOps *ops)
+		const void		   *vec,
+		float				norm_x,
+		const KMeansState  *st,
+		uint32_t		   *out_j1,
+		float			   *out_dist1,
+		float			   *out_dist2,
+		const Vec32TypeOps *ops)
 {
 	uint32_t	 nlist = st->nlist;
 	Dimension	 dim   = st->dim;
@@ -132,13 +132,12 @@ precompute_norms_c(KMeansState *st)
  * Main Hamerly assignment loop.
  *
  * always_inline — the specialized wrappers below pass a static const
- * MktVectorTypeOps from the header, so the compiler inlines through
+ * Vec32TypeOps from the header, so the compiler inlines through
  * every vtable function pointer. MKT_TARGET_CLONES on the wrappers
  * generates AVX2/AVX-512 variants of the entire inlined body.
  */
 __attribute__((always_inline)) static inline void
-hamerly_assign_impl(
-		KMeansState *st, HamerlyState *hs, const MktVectorTypeOps *ops)
+hamerly_assign_impl(KMeansState *st, HamerlyState *hs, const Vec32TypeOps *ops)
 {
 	uint32_t	 nvecs = st->nvecs;
 	Dimension	 dim   = st->dim;
@@ -229,7 +228,7 @@ hamerly_assign_preconvert_impl(KMeansState *st, HamerlyState *hs, size_t esz)
 	const float *cents = st->centroids;
 	float		*buf   = st->vec_block;
 
-	const MktVectorTypeOps *f32ops = &mkt_f32_type_ops;
+	const Vec32TypeOps *f32ops = &mkt_f32_type_ops;
 
 	if (!hs->bounds_valid)
 	{

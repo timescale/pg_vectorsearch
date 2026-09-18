@@ -32,7 +32,7 @@
 #include "scan.h"
 #include "support_pg.h"
 #include "typeinfo.h"
-#include "types/vector.h"
+#include "types/vec32.h"
 
 PG_FUNCTION_INFO_V1(mktann_handler);
 
@@ -125,9 +125,9 @@ mktann_insert(
 	base.page_base		  = NULL;
 
 	/* Inserted vector, converted to float32 when the column type is not. */
-	MktVectorAccess input = mkt_vector_access(
+	Vec32Access input = vec32_access(
 			mktann_cache_type_info(index), dim, CurrentMemoryContext);
-	VectorRef vref = mkt_vector_read(&input, values[0]);
+	Vec32Ref vref = vec32_read(&input, values[0]);
 
 	if (vref.dim != dim)
 		ereport(ERROR,

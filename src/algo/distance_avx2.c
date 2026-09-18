@@ -20,7 +20,7 @@
  * L2 squared distance using AVX2.
  */
 MKT_TARGET_AVX2 Distance
-mkt_distance_l2_avx2(VectorRef a, VectorRef b)
+mkt_distance_l2_avx2(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -60,7 +60,7 @@ mkt_distance_l2_avx2(VectorRef a, VectorRef b)
  * Negative inner product using AVX2.
  */
 MKT_TARGET_AVX2 Distance
-mkt_distance_ip_avx2(VectorRef a, VectorRef b)
+mkt_distance_ip_avx2(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -93,7 +93,7 @@ mkt_distance_ip_avx2(VectorRef a, VectorRef b)
  * Cosine distance using AVX2.
  */
 MKT_TARGET_AVX2 Distance
-mkt_distance_cosine_avx2(VectorRef a, VectorRef b)
+mkt_distance_cosine_avx2(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -143,7 +143,7 @@ mkt_distance_cosine_avx2(VectorRef a, VectorRef b)
  */
 MKT_TARGET_AVX2 int
 mkt_distance_batch_l2_avx2(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -193,7 +193,7 @@ mkt_distance_batch_l2_avx2(
  */
 MKT_TARGET_AVX2 int
 mkt_distance_batch_ip_avx2(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -239,7 +239,7 @@ mkt_distance_batch_ip_avx2(
  */
 MKT_TARGET_AVX2 int
 mkt_distance_batch_cosine_avx2(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,

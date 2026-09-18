@@ -151,7 +151,7 @@ prepare_query(MktQueryState *qs, const float *query)
 	memcpy(qs->query_buf, query, dim * sizeof(float));
 	float norm = mkt_l2_norm(qs->query_buf, dim);
 	if (norm > 0.0f)
-		mkt_vector_scale(qs->query_buf, 1.0f / norm, qs->query_buf, dim);
+		vec32_scale(qs->query_buf, 1.0f / norm, qs->query_buf, dim);
 	return qs->query_buf;
 }
 

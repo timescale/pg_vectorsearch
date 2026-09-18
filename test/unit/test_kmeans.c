@@ -9,7 +9,7 @@
 #include "algo/vecops.h"
 #include "core/memory.h"
 #include "mkt_test.h"
-#include "types/halfvec.h"
+#include "types/vec16.h"
 
 TEST_GROUP(KMeans);
 TEST_MEMCTX_FIXTURE();

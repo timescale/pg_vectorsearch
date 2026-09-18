@@ -73,7 +73,7 @@ alloc_test_vector(Dimension dim, int seed)
  * Helper: compute true L2 squared distance
  */
 static float
-true_l2_distance(VectorRef a, VectorRef b)
+true_l2_distance(Vec32Ref a, Vec32Ref b)
 {
 	float sum = 0.0f;
 	for (Dimension i = 0; i < a.dim; i++)
@@ -275,8 +275,8 @@ TEST(encode_basic)
 
 	ASSERT_NOT_NULL(params, "params should be created");
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	ASSERT_NOT_NULL(encoded, "encoding should succeed");
@@ -298,8 +298,8 @@ TEST(encode_into_preallocated)
 
 	ASSERT_NOT_NULL(params, "params should be created");
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	/* Allocate output buffer */
 	size_t		size   = MKT_RABITQ_DATA_SIZE(dim);
@@ -334,8 +334,8 @@ TEST(encode_from_pt_matches_encode_into_ex)
 
 	ASSERT_NOT_NULL(params, "params should be created");
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQScratch scratch;
 	mkt_rabitq_scratch_init(&scratch, dim);
@@ -395,9 +395,9 @@ TEST(encode_null_inputs)
 	float		 *input	   = alloc_test_vector(dim, 0);
 	float		 *centroid = alloc_test_vector(dim, 0);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
-	VectorRef null_ref	   = {.data = NULL, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref null_ref	  = {.data = NULL, .dim = dim};
 
 	/* Test null params */
 	RaBitQData *enc = mkt_rabitq_encode(NULL, input_ref, centroid_ref);
@@ -420,8 +420,8 @@ TEST(encode_dimension_mismatch)
 	float		 *input	   = alloc_test_vector(16, 0);
 	float		 *centroid = alloc_test_vector(8, 0);
 
-	VectorRef input_ref	   = {.data = input, .dim = 16};
-	VectorRef centroid_ref = {.data = centroid, .dim = 8};
+	Vec32Ref input_ref	  = {.data = input, .dim = 16};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = 8};
 
 	RaBitQData *enc = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	ASSERT_NULL(enc, "dimension mismatch should return null");
@@ -436,7 +436,7 @@ TEST(encode_batch_matches_single)
 	const int	  count	   = 8;
 	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 	float		 *centroid = alloc_test_vector(dim, 0);
-	VectorRef	  cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref	  cent_ref = {.data = centroid, .dim = dim};
 
 	/* Allocate vectors */
 	float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
@@ -466,7 +466,7 @@ TEST(encode_batch_matches_single)
 	/* Encode individually and compare */
 	for (int i = 0; i < count; i++)
 	{
-		VectorRef vec_ref = {.data = vectors + i * dim, .dim = dim};
+		Vec32Ref vec_ref = {.data = vectors + i * dim, .dim = dim};
 
 		RaBitQData *single = mkt_rabitq_encode(params, vec_ref, cent_ref);
 		ASSERT_NOT_NULL(single, "single encode should succeed");
@@ -507,7 +507,7 @@ TEST(encode_batch_null_inputs)
 	RaBitQParams *params   = mkt_rabitq_create(dim, 1);
 	float		 *vectors  = alloc_test_vector(dim * 4, 0);
 	float		 *centroid = alloc_test_vector(dim, 0);
-	VectorRef	  cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref	  cent_ref = {.data = centroid, .dim = dim};
 
 	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
 	float	*f_add		  = mkt_alloc(4 * sizeof(float));
@@ -525,16 +525,16 @@ TEST(encode_batch_null_inputs)
 	ASSERT_EQ(-1, ret, "null vectors should fail");
 
 	/* Test null centroid */
-	VectorRef null_cent = {.data = NULL, .dim = dim};
-	ret					= mkt_rabitq_encode_batch(
-			params,
-			vectors,
-			MKT_VEC_F32,
-			null_cent,
-			f_add,
-			f_rescale,
-			bits,
-			4);
+	Vec32Ref null_cent = {.data = NULL, .dim = dim};
+	ret				   = mkt_rabitq_encode_batch(
+			   params,
+			   vectors,
+			   MKT_VEC_F32,
+			   null_cent,
+			   f_add,
+			   f_rescale,
+			   bits,
+			   4);
 	ASSERT_EQ(-1, ret, "null centroid should fail");
 
 	/* Test null f_add */
@@ -574,8 +574,8 @@ TEST(prepare_query_basic)
 	float		 *query	   = alloc_test_vector(dim, 100);
 	float		 *centroid = alloc_test_vector(dim, 50);
 
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQQueryState *state =
 			mkt_rabitq_prepare_query(params, query_ref, centroid_ref);
@@ -597,9 +597,9 @@ TEST(prepare_query_null_inputs)
 	float		 *query	   = alloc_test_vector(dim, 0);
 	float		 *centroid = alloc_test_vector(dim, 0);
 
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
-	VectorRef null_ref	   = {.data = NULL, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref null_ref	  = {.data = NULL, .dim = dim};
 
 	RaBitQQueryState *state =
 			mkt_rabitq_prepare_query(NULL, query_ref, centroid_ref);
@@ -626,9 +626,9 @@ TEST(distance_basic)
 	float		 *query	   = alloc_test_vector(dim, 30);
 	float		 *centroid = alloc_test_vector(dim, 50);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	ASSERT_NOT_NULL(encoded, "encoding should succeed");
@@ -669,9 +669,9 @@ TEST(distance_with_bound)
 	float		 *query	   = alloc_test_vector(dim, 30);
 	float		 *centroid = alloc_test_vector(dim, 50);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	RaBitQQueryState *state =
@@ -716,9 +716,9 @@ TEST(distance_null_inputs)
 	float		 *query	   = alloc_test_vector(dim, 10);
 	float		 *centroid = alloc_test_vector(dim, 5);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	RaBitQQueryState *state =
@@ -751,7 +751,7 @@ TEST(accuracy_correlation)
 	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 	float		 *centroid = alloc_test_vector(dim, 0);
 
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	const int num_vectors = 20;
 	const int num_queries = 5;
@@ -762,17 +762,17 @@ TEST(accuracy_correlation)
 
 	for (int v = 0; v < num_vectors; v++)
 	{
-		vectors[v]		  = alloc_test_vector(dim, v * 7);
-		VectorRef vec_ref = {.data = vectors[v], .dim = dim};
-		encoded[v]		  = mkt_rabitq_encode(params, vec_ref, centroid_ref);
+		vectors[v]		 = alloc_test_vector(dim, v * 7);
+		Vec32Ref vec_ref = {.data = vectors[v], .dim = dim};
+		encoded[v]		 = mkt_rabitq_encode(params, vec_ref, centroid_ref);
 		ASSERT_NOT_NULL(encoded[v], "encoding should succeed");
 	}
 
 	/* Test with multiple queries */
 	for (int q = 0; q < num_queries; q++)
 	{
-		float	 *query		= alloc_test_vector(dim, 100 + q * 13);
-		VectorRef query_ref = {.data = query, .dim = dim};
+		float	*query	   = alloc_test_vector(dim, 100 + q * 13);
+		Vec32Ref query_ref = {.data = query, .dim = dim};
 
 		RaBitQQueryState *state =
 				mkt_rabitq_prepare_query(params, query_ref, centroid_ref);
@@ -782,9 +782,9 @@ TEST(accuracy_correlation)
 
 		for (int v = 0; v < num_vectors; v++)
 		{
-			VectorRef vec_ref	= {.data = vectors[v], .dim = dim};
-			Distance  true_dist = true_l2_distance(vec_ref, query_ref);
-			Distance  est, lower_bound;
+			Vec32Ref vec_ref   = {.data = vectors[v], .dim = dim};
+			Distance true_dist = true_l2_distance(vec_ref, query_ref);
+			Distance est, lower_bound;
 			mkt_rabitq_distance_with_bound(
 					state, encoded[v], dim, &est, &lower_bound);
 
@@ -904,9 +904,9 @@ TEST_PARAMETERIZED(
 		float		 *query	   = alloc_test_vector(dim, 30);
 		float		 *centroid = alloc_test_vector(dim, 50);
 
-		VectorRef input_ref	   = {.data = input, .dim = dim};
-		VectorRef query_ref	   = {.data = query, .dim = dim};
-		VectorRef centroid_ref = {.data = centroid, .dim = dim};
+		Vec32Ref input_ref	  = {.data = input, .dim = dim};
+		Vec32Ref query_ref	  = {.data = query, .dim = dim};
+		Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 		RaBitQData *encoded =
 				mkt_rabitq_encode(params, input_ref, centroid_ref);
@@ -969,8 +969,8 @@ TEST(identical_vectors)
 	for (Dimension i = 0; i < dim; i++)
 		centroid[i] = 0.0f;
 
-	VectorRef data_ref	   = {.data = data, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref data_ref	  = {.data = data, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, data_ref, centroid_ref);
 	RaBitQQueryState *state =
@@ -1002,9 +1002,9 @@ TEST(zero_centroid)
 	for (Dimension i = 0; i < dim; i++)
 		centroid[i] = 0.0f;
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	ASSERT_NOT_NULL(encoded, "encoding with zero centroid should succeed");
@@ -1033,9 +1033,9 @@ TEST(small_dimension)
 	float *query	= alloc_test_vector(dim, 10);
 	float *centroid = alloc_test_vector(dim, 5);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	ASSERT_NOT_NULL(encoded, "encoding should succeed");
@@ -1064,9 +1064,9 @@ TEST(odd_dimension)
 	float *query	= alloc_test_vector(dim, 10);
 	float *centroid = alloc_test_vector(dim, 5);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	ASSERT_NOT_NULL(encoded, "encoding should succeed");
@@ -1154,8 +1154,8 @@ TEST(encode_into_null_output)
 	float		 *input	   = alloc_test_vector(dim, 0);
 	float		 *centroid = alloc_test_vector(dim, 5);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	int ret = mkt_rabitq_encode_into(params, input_ref, centroid_ref, NULL);
 	ASSERT_EQ(-1, ret, "encode_into with null output should fail");
@@ -1170,8 +1170,8 @@ TEST(encode_into_dim_mismatch_input)
 	float		 *input	   = alloc_test_vector(8, 0);
 	float		 *centroid = alloc_test_vector(dim, 5);
 
-	VectorRef input_ref	   = {.data = input, .dim = 8};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = 8};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	size_t		size   = MKT_RABITQ_DATA_SIZE(dim);
 	RaBitQData *output = mkt_alloc(size);
@@ -1190,8 +1190,8 @@ TEST(encode_into_dim_mismatch_centroid)
 	float		 *input	   = alloc_test_vector(dim, 0);
 	float		 *centroid = alloc_test_vector(8, 5);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = 8};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = 8};
 
 	size_t		size   = MKT_RABITQ_DATA_SIZE(dim);
 	RaBitQData *output = mkt_alloc(size);
@@ -1209,7 +1209,7 @@ TEST(encode_batch_dim_mismatch)
 	RaBitQParams *params   = mkt_rabitq_create(dim, 1);
 	float		 *vectors  = alloc_test_vector(dim * 2, 0);
 	float		 *centroid = alloc_test_vector(8, 0);
-	VectorRef	  cent_ref = {.data = centroid, .dim = 8};
+	Vec32Ref	  cent_ref = {.data = centroid, .dim = 8};
 
 	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
 	float	*f_add		  = mkt_alloc(2 * sizeof(float));
@@ -1242,10 +1242,10 @@ TEST(distance_dim_mismatch)
 	float		 *cent16   = alloc_test_vector(dim16, 50);
 	float		 *cent32   = alloc_test_vector(dim32, 50);
 
-	VectorRef input16_ref = {.data = input16, .dim = dim16};
-	VectorRef query32_ref = {.data = query32, .dim = dim32};
-	VectorRef cent16_ref  = {.data = cent16, .dim = dim16};
-	VectorRef cent32_ref  = {.data = cent32, .dim = dim32};
+	Vec32Ref input16_ref = {.data = input16, .dim = dim16};
+	Vec32Ref query32_ref = {.data = query32, .dim = dim32};
+	Vec32Ref cent16_ref	 = {.data = cent16, .dim = dim16};
+	Vec32Ref cent32_ref	 = {.data = cent32, .dim = dim32};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params16, input16_ref, cent16_ref);
 	RaBitQQueryState *state =
@@ -1269,9 +1269,9 @@ TEST(distance_with_bound_null_est_dist)
 	float		 *query	   = alloc_test_vector(dim, 10);
 	float		 *centroid = alloc_test_vector(dim, 5);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	RaBitQQueryState *state =
@@ -1299,8 +1299,8 @@ TEST(prepare_query_dim_mismatch)
 	float		 *query	   = alloc_test_vector(8, 0);
 	float		 *centroid = alloc_test_vector(dim, 5);
 
-	VectorRef query_ref	   = {.data = query, .dim = 8};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = 8};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQQueryState *state =
 			mkt_rabitq_prepare_query(params, query_ref, centroid_ref);
@@ -1316,8 +1316,8 @@ TEST(prepare_query_centroid_dim_mismatch)
 	float		 *query	   = alloc_test_vector(dim, 0);
 	float		 *centroid = alloc_test_vector(8, 5);
 
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = 8};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = 8};
 
 	RaBitQQueryState *state =
 			mkt_rabitq_prepare_query(params, query_ref, centroid_ref);
@@ -1337,15 +1337,15 @@ TEST(high_dimension_lower_bound)
 	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 	float		 *centroid = alloc_test_vector(dim, 0);
 
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	const int count = 10;
 	for (int i = 0; i < count; i++)
 	{
-		float	 *input		= alloc_test_vector(dim, i * 7);
-		float	 *query		= alloc_test_vector(dim, 100 + i * 13);
-		VectorRef input_ref = {.data = input, .dim = dim};
-		VectorRef query_ref = {.data = query, .dim = dim};
+		float	*input	   = alloc_test_vector(dim, i * 7);
+		float	*query	   = alloc_test_vector(dim, 100 + i * 13);
+		Vec32Ref input_ref = {.data = input, .dim = dim};
+		Vec32Ref query_ref = {.data = query, .dim = dim};
 
 		RaBitQData *encoded =
 				mkt_rabitq_encode(params, input_ref, centroid_ref);
@@ -1392,21 +1392,21 @@ bound_violations(
 		int			 *samples_out,
 		float		 *worst_over)
 {
-	float	 *centroid = alloc_test_vector(dim, 0);
-	VectorRef cent_ref = {.data = centroid, .dim = dim};
-	int		  viol = 0, samples = 0;
-	float	  worst = 0.0f;
+	float	*centroid = alloc_test_vector(dim, 0);
+	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
+	int		 viol = 0, samples = 0;
+	float	 worst = 0.0f;
 
 	for (int v = 0; v < 20; v++)
 	{
 		float	   *input	  = alloc_test_vector(dim, v * 7);
-		VectorRef	input_ref = {.data = input, .dim = dim};
+		Vec32Ref	input_ref = {.data = input, .dim = dim};
 		RaBitQData *enc		  = mkt_rabitq_encode(params, input_ref, cent_ref);
 
 		for (int q = 0; q < 20; q++)
 		{
 			float			 *query		= alloc_test_vector(dim, 100 + q * 13);
-			VectorRef		  query_ref = {.data = query, .dim = dim};
+			Vec32Ref		  query_ref = {.data = query, .dim = dim};
 			RaBitQQueryState *state =
 					mkt_rabitq_prepare_query(params, query_ref, cent_ref);
 
@@ -1514,9 +1514,9 @@ TEST(data_distance_null_inputs)
 	float		 *query	   = alloc_test_vector(dim, 10);
 	float		 *centroid = alloc_test_vector(dim, 5);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	RaBitQQueryState *state =
@@ -1559,8 +1559,8 @@ TEST(batch_matches_single)
 	RaBitQParams *params = mkt_rabitq_create(dim, 42);
 	ASSERT_NOT_NULL(params, "params created");
 
-	float	 *centroid = alloc_test_vector(dim, 0);
-	VectorRef cent_ref = {.data = centroid, .dim = dim};
+	float	*centroid = alloc_test_vector(dim, 0);
+	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/* Encode vectors into separate arrays */
 	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
@@ -1572,9 +1572,9 @@ TEST(batch_matches_single)
 
 	for (int i = 0; i < count; i++)
 	{
-		float	 *vec	  = alloc_test_vector(dim, i * 7);
-		VectorRef vec_ref = {.data = vec, .dim = dim};
-		encodings[i]	  = mkt_rabitq_encode(params, vec_ref, cent_ref);
+		float	*vec	 = alloc_test_vector(dim, i * 7);
+		Vec32Ref vec_ref = {.data = vec, .dim = dim};
+		encodings[i]	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
 		ASSERT_NOT_NULL(encodings[i], "encoding succeeded");
 
 		f_add[i]	 = encodings[i]->f_add;
@@ -1585,7 +1585,7 @@ TEST(batch_matches_single)
 	}
 
 	float			 *query		= alloc_test_vector(dim, 100);
-	VectorRef		  query_ref = {.data = query, .dim = dim};
+	Vec32Ref		  query_ref = {.data = query, .dim = dim};
 	RaBitQQueryState *qstate =
 			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
 	ASSERT_NOT_NULL(qstate, "query state created");
@@ -1627,10 +1627,10 @@ TEST(batch_null_inputs)
 	Dimension	  dim	   = 64;
 	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 	float		 *centroid = alloc_test_vector(dim, 0);
-	VectorRef	  cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref	  cent_ref = {.data = centroid, .dim = dim};
 
 	float			 *query		= alloc_test_vector(dim, 1);
-	VectorRef		  query_ref = {.data = query, .dim = dim};
+	Vec32Ref		  query_ref = {.data = query, .dim = dim};
 	RaBitQQueryState *qstate =
 			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
 
@@ -1670,7 +1670,7 @@ TEST_PARAMETERIZED(multi_matches_single, "compiler", "avx2", "avx512", "neon")
 
 		RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 		float		 *centroid = alloc_test_vector(dim, 0);
-		VectorRef	  cent_ref = {.data = centroid, .dim = dim};
+		Vec32Ref	  cent_ref = {.data = centroid, .dim = dim};
 
 		/* Generate and encode test vectors */
 		float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
@@ -1697,8 +1697,8 @@ TEST_PARAMETERIZED(multi_matches_single, "compiler", "avx2", "avx512", "neon")
 		ASSERT_EQ(0, ret, "batch encode should succeed");
 
 		/* Generate query and prepare state */
-		float	 *query		= alloc_test_vector(dim, 100);
-		VectorRef query_ref = {.data = query, .dim = dim};
+		float	*query	   = alloc_test_vector(dim, 100);
+		Vec32Ref query_ref = {.data = query, .dim = dim};
 
 		reinit_rabitq_with_simd(simd_mask);
 
@@ -1763,7 +1763,7 @@ TEST_PARAMETERIZED(multi_tail_handling, "compiler", "avx2", "avx512", "neon")
 
 		RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 		float		 *centroid = alloc_test_vector(dim, 0);
-		VectorRef	  cent_ref = {.data = centroid, .dim = dim};
+		Vec32Ref	  cent_ref = {.data = centroid, .dim = dim};
 
 		float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
 		for (int i = 0; i < count; i++)
@@ -1788,8 +1788,8 @@ TEST_PARAMETERIZED(multi_tail_handling, "compiler", "avx2", "avx512", "neon")
 				  count);
 		ASSERT_EQ(0, ret, "batch encode should succeed");
 
-		float	 *query		= alloc_test_vector(dim, 100);
-		VectorRef query_ref = {.data = query, .dim = dim};
+		float	*query	   = alloc_test_vector(dim, 100);
+		Vec32Ref query_ref = {.data = query, .dim = dim};
 
 		reinit_rabitq_with_simd(simd_mask);
 
@@ -2026,9 +2026,9 @@ TEST(symmetric_distance_basic)
 	float		 *query	   = alloc_test_vector(dim, 30);
 	float		 *centroid = alloc_test_vector(dim, 50);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	ASSERT_NOT_NULL(encoded, "encoding should succeed");
@@ -2056,22 +2056,22 @@ TEST(symmetric_distance_vs_asymmetric)
 	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 	float		 *centroid = alloc_test_vector(dim, 0);
 
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	const int num_vectors = 10;
 	float	  asym_dists[10];
 	float	  sym_dists[10];
 
-	float	 *query		= alloc_test_vector(dim, 100);
-	VectorRef query_ref = {.data = query, .dim = dim};
+	float	*query	   = alloc_test_vector(dim, 100);
+	Vec32Ref query_ref = {.data = query, .dim = dim};
 
 	RaBitQQueryState *state =
 			mkt_rabitq_prepare_query(params, query_ref, centroid_ref);
 
 	for (int i = 0; i < num_vectors; i++)
 	{
-		float	 *input		= alloc_test_vector(dim, i * 7);
-		VectorRef input_ref = {.data = input, .dim = dim};
+		float	*input	   = alloc_test_vector(dim, i * 7);
+		Vec32Ref input_ref = {.data = input, .dim = dim};
 
 		RaBitQData *encoded =
 				mkt_rabitq_encode(params, input_ref, centroid_ref);
@@ -2125,22 +2125,22 @@ TEST(symmetric_lower_bound_valid)
 	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 	float		 *centroid = alloc_test_vector(dim, 0);
 
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	int violations = 0;
 
 	for (int v = 0; v < 10; v++)
 	{
-		float	 *input		= alloc_test_vector(dim, v * 7);
-		VectorRef input_ref = {.data = input, .dim = dim};
+		float	*input	   = alloc_test_vector(dim, v * 7);
+		Vec32Ref input_ref = {.data = input, .dim = dim};
 
 		RaBitQData *encoded =
 				mkt_rabitq_encode(params, input_ref, centroid_ref);
 
 		for (int q = 0; q < 5; q++)
 		{
-			float	 *query		= alloc_test_vector(dim, 100 + q * 13);
-			VectorRef query_ref = {.data = query, .dim = dim};
+			float	*query	   = alloc_test_vector(dim, 100 + q * 13);
+			Vec32Ref query_ref = {.data = query, .dim = dim};
 
 			RaBitQQueryState *state =
 					mkt_rabitq_prepare_query(params, query_ref, centroid_ref);
@@ -2183,7 +2183,7 @@ TEST(symmetric_batch_matches_single)
 	const int	  count	   = 8;
 	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 	float		 *centroid = alloc_test_vector(dim, 0);
-	VectorRef	  cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref	  cent_ref = {.data = centroid, .dim = dim};
 
 	/* Encode vectors */
 	float	*vectors	  = mkt_alloc((size_t)count * dim * sizeof(float));
@@ -2210,8 +2210,8 @@ TEST(symmetric_batch_matches_single)
 			count);
 
 	/* Prepare query */
-	float	 *query		= alloc_test_vector(dim, 100);
-	VectorRef query_ref = {.data = query, .dim = dim};
+	float	*query	   = alloc_test_vector(dim, 100);
+	Vec32Ref query_ref = {.data = query, .dim = dim};
 
 	RaBitQQueryState *state =
 			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
@@ -2261,9 +2261,9 @@ TEST(symmetric_distance_null_inputs)
 	float		 *query	   = alloc_test_vector(dim, 10);
 	float		 *centroid = alloc_test_vector(dim, 5);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	RaBitQQueryState *state =
@@ -2306,8 +2306,8 @@ TEST(prepare_query_default_is_asymmetric)
 	float		 *query	   = alloc_test_vector(dim, 100);
 	float		 *centroid = alloc_test_vector(dim, 50);
 
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQQueryState *state =
 			mkt_rabitq_prepare_query(params, query_ref, centroid_ref);
@@ -2337,9 +2337,9 @@ TEST(prepare_query_ex_asymmetric)
 	float		 *query	   = alloc_test_vector(dim, 30);
 	float		 *centroid = alloc_test_vector(dim, 50);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 
@@ -2367,9 +2367,9 @@ TEST(prepare_query_ex_symmetric)
 	float		 *query	   = alloc_test_vector(dim, 30);
 	float		 *centroid = alloc_test_vector(dim, 50);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded = mkt_rabitq_encode(params, input_ref, centroid_ref);
 
@@ -2397,9 +2397,9 @@ TEST(dispatch_with_bound_both_modes)
 	float		 *query	   = alloc_test_vector(dim, 30);
 	float		 *centroid = alloc_test_vector(dim, 0);
 
-	VectorRef input_ref	   = {.data = input, .dim = dim};
-	VectorRef query_ref	   = {.data = query, .dim = dim};
-	VectorRef centroid_ref = {.data = centroid, .dim = dim};
+	Vec32Ref input_ref	  = {.data = input, .dim = dim};
+	Vec32Ref query_ref	  = {.data = query, .dim = dim};
+	Vec32Ref centroid_ref = {.data = centroid, .dim = dim};
 
 	RaBitQData *encoded	  = mkt_rabitq_encode(params, input_ref, centroid_ref);
 	Distance	true_dist = true_l2_distance(input_ref, query_ref);
@@ -2451,7 +2451,7 @@ TEST(batch_multi_with_bound_lower_bounds_valid)
 	const int	  count	   = 8;
 	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 	float		 *centroid = alloc_test_vector(dim, 0);
-	VectorRef	  cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref	  cent_ref = {.data = centroid, .dim = dim};
 
 	/* Generate and encode vectors */
 	float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
@@ -2478,8 +2478,8 @@ TEST(batch_multi_with_bound_lower_bounds_valid)
 	ASSERT_EQ(0, ret, "batch encode should succeed");
 
 	/* Prepare query */
-	float	 *query		= alloc_test_vector(dim, 100);
-	VectorRef query_ref = {.data = query, .dim = dim};
+	float	*query	   = alloc_test_vector(dim, 100);
+	Vec32Ref query_ref = {.data = query, .dim = dim};
 
 	RaBitQQueryState *qstate =
 			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
@@ -2533,8 +2533,8 @@ TEST(batch_multi_with_bound_lower_bounds_valid)
 		ASSERT_TRUE(lower_bounds[i] <= dists[i], msg);
 
 		/* Lower bound must be <= true L2 distance */
-		VectorRef vec_ref	= {.data = vectors + i * dim, .dim = dim};
-		Distance  true_dist = true_l2_distance(vec_ref, query_ref);
+		Vec32Ref vec_ref   = {.data = vectors + i * dim, .dim = dim};
+		Distance true_dist = true_l2_distance(vec_ref, query_ref);
 		if (lower_bounds[i] > true_dist + 1e-3f)
 			violations++;
 	}
@@ -2557,7 +2557,7 @@ TEST(batch_symmetric_with_bound_lower_bounds_valid)
 	const int	  count	   = 8;
 	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 	float		 *centroid = alloc_test_vector(dim, 0);
-	VectorRef	  cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref	  cent_ref = {.data = centroid, .dim = dim};
 
 	/* Generate and encode vectors */
 	float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
@@ -2584,8 +2584,8 @@ TEST(batch_symmetric_with_bound_lower_bounds_valid)
 	ASSERT_EQ(0, ret, "batch encode should succeed");
 
 	/* Prepare symmetric query */
-	float	 *query		= alloc_test_vector(dim, 100);
-	VectorRef query_ref = {.data = query, .dim = dim};
+	float	*query	   = alloc_test_vector(dim, 100);
+	Vec32Ref query_ref = {.data = query, .dim = dim};
 
 	RaBitQQueryState *qstate = mkt_rabitq_prepare_query_ex(
 			params, query_ref, cent_ref, MKT_DISTANCE_MODE_SYMMETRIC);
@@ -2640,8 +2640,8 @@ TEST(batch_symmetric_with_bound_lower_bounds_valid)
 
 		/* Lower bound must be <= true L2 distance (wider tolerance
 		 * for symmetric since both query and data are quantized) */
-		VectorRef vec_ref	= {.data = vectors + i * dim, .dim = dim};
-		Distance  true_dist = true_l2_distance(vec_ref, query_ref);
+		Vec32Ref vec_ref   = {.data = vectors + i * dim, .dim = dim};
+		Distance true_dist = true_l2_distance(vec_ref, query_ref);
 		if (lower_bounds[i] > true_dist + 1e-2f)
 			violations++;
 	}

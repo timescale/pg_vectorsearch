@@ -170,7 +170,7 @@ mkt_cblas_pin_single_thread(void)
  * Precompute ||x||^2 for all input vectors.
  */
 __attribute__((always_inline)) static inline void
-precompute_norms_x_impl(KMeansState *st, const MktVectorTypeOps *ops)
+precompute_norms_x_impl(KMeansState *st, const Vec32TypeOps *ops)
 {
 	size_t esz = ops->element_size;
 	for (uint32_t i = 0; i < st->nvecs; i++)
@@ -182,11 +182,11 @@ precompute_norms_x_impl(KMeansState *st, const MktVectorTypeOps *ops)
  */
 __attribute__((always_inline)) static inline float
 vector_centroid_distance_impl(
-		DistanceMetric			metric,
-		const void			   *vec,
-		const float			   *centroid,
-		Dimension				dim,
-		const MktVectorTypeOps *ops)
+		DistanceMetric		metric,
+		const void		   *vec,
+		const float		   *centroid,
+		Dimension			dim,
+		const Vec32TypeOps *ops)
 {
 	switch (metric)
 	{
@@ -205,7 +205,7 @@ vector_centroid_distance_impl(
  */
 __attribute__((always_inline)) static inline void
 kmeans_init_plusplus_impl(
-		KMeansState *st, uint64_t seed, const MktVectorTypeOps *ops)
+		KMeansState *st, uint64_t seed, const Vec32TypeOps *ops)
 {
 	Xoshiro256State rng;
 	xo_seed(&rng, seed);
@@ -280,7 +280,7 @@ kmeans_init_plusplus_impl(
  * Update step: recompute centroids as mean of assigned vectors.
  */
 __attribute__((always_inline)) static inline void
-kmeans_update_centroids_impl(KMeansState *st, const MktVectorTypeOps *ops)
+kmeans_update_centroids_impl(KMeansState *st, const Vec32TypeOps *ops)
 {
 	uint32_t  nlist = st->nlist;
 	Dimension dim	= st->dim;
@@ -307,7 +307,7 @@ kmeans_update_centroids_impl(KMeansState *st, const MktVectorTypeOps *ops)
 			continue;
 
 		float inv_size = 1.0f / (float)st->cluster_sizes[j];
-		mkt_vector_scale(
+		vec32_scale(
 				st->new_centroids + (size_t)j * dim,
 				inv_size,
 				st->new_centroids + (size_t)j * dim,
@@ -324,7 +324,7 @@ kmeans_update_centroids_impl(KMeansState *st, const MktVectorTypeOps *ops)
 			float *cent = st->new_centroids + (size_t)j * dim;
 			float  norm = mkt_l2_norm(cent, dim);
 			if (norm > 1e-10f)
-				mkt_vector_scale(cent, 1.0f / norm, cent, dim);
+				vec32_scale(cent, 1.0f / norm, cent, dim);
 		}
 	}
 
@@ -591,7 +591,7 @@ kmeans_merge_centroids(
 			float *cent = new_cents + (size_t)c * dim;
 			float  norm = mkt_l2_norm(cent, dim);
 			if (norm > 1e-10f)
-				mkt_vector_scale(cent, 1.0f / norm, cent, dim);
+				vec32_scale(cent, 1.0f / norm, cent, dim);
 		}
 	}
 
@@ -620,7 +620,7 @@ static KMeansState *
 kmeans_state_create(
 		const void	   *vectors,
 		const uint32_t *indices,
-		MktVecType		vec_type,
+		VecType			vec_type,
 		uint32_t		nvecs,
 		Dimension		dim,
 		uint32_t		nlist,
@@ -786,17 +786,17 @@ static const KMeansAlgoOps elkan_ops = {
  * Run one complete k-means attempt (init + iterate to convergence).
  *
  * always_inline — the specialized wrappers below pass a static const
- * MktVectorTypeOps from the header, so the compiler inlines through
+ * Vec32TypeOps from the header, so the compiler inlines through
  * every vtable function pointer. MKT_TARGET_CLONES on the wrappers
  * generates AVX2/AVX-512 variants of the entire inlined body.
  */
 __attribute__((always_inline)) static inline void
 kmeans_run_one_impl(
-		KMeansState			   *st,
-		const KMeansOptions	   *opts,
-		uint64_t				seed,
-		const KMeansAlgoOps	   *algo,
-		const MktVectorTypeOps *ops)
+		KMeansState			*st,
+		const KMeansOptions *opts,
+		uint64_t			 seed,
+		const KMeansAlgoOps *algo,
+		const Vec32TypeOps	*ops)
 {
 	/* Precompute input vector norms for L2 */
 	if (st->metric == DISTANCE_L2)
@@ -949,7 +949,7 @@ KMeansResult *
 mkt_kmeans(
 		const void			*vectors,
 		const uint32_t		*indices,
-		MktVecType			 vec_type,
+		VecType				 vec_type,
 		uint32_t			 nvecs,
 		Dimension			 dim,
 		uint32_t			 nlist,

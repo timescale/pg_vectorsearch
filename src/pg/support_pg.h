@@ -14,8 +14,8 @@
 #include <utils/rel.h>
 
 #include "quant/rabitq.h"
-#include "types/halfvec.h"
-#include "types/vector.h"
+#include "types/vec16.h"
+#include "types/vec32.h"
 
 /* ----------------------------------------------------------------
  * Support function numbers
@@ -47,13 +47,13 @@ extern relopt_kind mktann_relopt_kind;	 /* index reloption kind */
  * Datum conversion macros
  * ---------------------------------------------------------------- */
 
-#define DatumGetMktVector(x)	  ((MktVector *)PG_DETOAST_DATUM(x))
-#define PG_GETARG_MKT_VECTOR_P(x) DatumGetMktVector(PG_GETARG_DATUM(x))
-#define PG_RETURN_MKT_VECTOR_P(x) PG_RETURN_POINTER(x)
+#define DatumGetVec32(x)	 ((Vec32 *)PG_DETOAST_DATUM(x))
+#define PG_GETARG_VEC32_P(x) DatumGetVec32(PG_GETARG_DATUM(x))
+#define PG_RETURN_VEC32_P(x) PG_RETURN_POINTER(x)
 
-#define DatumGetMktHalfVector(x)   ((MktHalfVector *)PG_DETOAST_DATUM(x))
-#define PG_GETARG_MKT_HALFVEC_P(x) DatumGetMktHalfVector(PG_GETARG_DATUM(x))
-#define PG_RETURN_MKT_HALFVEC_P(x) PG_RETURN_POINTER(x)
+#define DatumGetVec16(x)	 ((Vec16 *)PG_DETOAST_DATUM(x))
+#define PG_GETARG_VEC16_P(x) DatumGetVec16(PG_GETARG_DATUM(x))
+#define PG_RETURN_VEC16_P(x) PG_RETURN_POINTER(x)
 
 #define DatumGetRaBitQVector(x) ((RaBitQVector *)PG_DETOAST_DATUM(x))
 #define PG_GETARG_RABITQ_P(x)	DatumGetRaBitQVector(PG_GETARG_DATUM(x))
@@ -184,22 +184,22 @@ MktannGetDistanceMode(Relation index)
  * Allocation helpers
  * ---------------------------------------------------------------- */
 
-static inline MktVector *
-mkt_pg_vector_alloc(int dim)
+static inline Vec32 *
+mkt_pg_vec32_alloc(int dim)
 {
-	int		   size = MKT_VECTOR_SIZE(dim);
-	MktVector *v	= (MktVector *)palloc0(size);
+	int	   size = VEC32_SIZE(dim);
+	Vec32 *v	= (Vec32 *)palloc0(size);
 	SET_VARSIZE(v, size);
 	v->dim	  = (int16_t)dim;
 	v->unused = 0;
 	return v;
 }
 
-static inline MktHalfVector *
-mkt_pg_halfvec_alloc(int dim)
+static inline Vec16 *
+mkt_pg_vec16_alloc(int dim)
 {
-	int			   size = MKT_HALFVEC_SIZE(dim);
-	MktHalfVector *v	= (MktHalfVector *)palloc0(size);
+	int	   size = VEC16_SIZE(dim);
+	Vec16 *v	= (Vec16 *)palloc0(size);
 	SET_VARSIZE(v, size);
 	v->dim	  = (int16_t)dim;
 	v->unused = 0;

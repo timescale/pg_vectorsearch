@@ -23,7 +23,7 @@
 #include "index/index_build.h"
 #include "index/storage.h"
 #include "quant/rabitq.h"
-#include "standalone/vector_source.h"
+#include "standalone/vec32_source.h"
 
 /* ----------------------------------------------------------------
  * Per-cluster vector ID list (for brute-force scan fallback)
@@ -140,9 +140,7 @@ typedef struct MktIndex
  * Returns NULL on failure.
  */
 MktIndex *mkt_index_build(
-		MktVectorSource		 *src,
-		const MktIndexConfig *config,
-		MktBuildStats		 *stats);
+		Vec32Source *src, const MktIndexConfig *config, MktBuildStats *stats);
 
 /*
  * Free the index and all owned memory.

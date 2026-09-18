@@ -62,8 +62,8 @@
 #include "quant/rabitq.h"
 #include "support_pg.h"
 #include "typeinfo.h"
-#include "types/halfvec.h"
-#include "types/vector.h"
+#include "types/vec16.h"
+#include "types/vec32.h"
 
 /* ----------------------------------------------------------------
  * Build state (MktannBuildParams is in build.h, shared with the
@@ -124,7 +124,7 @@ typedef struct MktannBuildState
 	 * it needs. Held on the state because both callbacks run under a tmp_ctx
 	 * that is reset after every tuple.
 	 */
-	MktVectorAccess input;
+	Vec32Access input;
 } MktannBuildState;
 
 /* ----------------------------------------------------------------
@@ -156,7 +156,7 @@ sample_callback(
 	MemoryContext old_ctx = MemoryContextSwitchTo(bs->tmp_ctx);
 
 	Dimension	 dim		= bs->params.dim;
-	VectorRef	 vref		= mkt_vector_read(&bs->input, values[0]);
+	Vec32Ref	 vref		= vec32_read(&bs->input, values[0]);
 	const float *src		= vref.data;
 	const size_t vec_nbytes = (size_t)dim * sizeof(float);
 
@@ -244,7 +244,7 @@ build_callback(
 
 	MemoryContext old_ctx = MemoryContextSwitchTo(bs->tmp_ctx);
 
-	VectorRef vref = mkt_vector_read(&bs->input, values[0]);
+	Vec32Ref vref = vec32_read(&bs->input, values[0]);
 
 	/* Route + encode + stream via the shared page-backed helper (the parallel
 	 * posting workers use the very same call). tmp_ctx is reset after every
@@ -341,7 +341,7 @@ mktann_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("centroid_compression=on is not supported "
-							"with vector_ip_ops")));
+							"with vec32_ip_ops")));
 		compressed = true;
 		break;
 	case MKT_CENTROID_COMPRESSION_OFF:
@@ -367,7 +367,7 @@ mktann_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("centroid_fastscan=on is not supported "
-							"with vector_ip_ops")));
+							"with vec32_ip_ops")));
 		if (!compressed)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -440,11 +440,11 @@ resolve_build_params(
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("column does not have dimensions")));
-	if (dim > MKT_VECTOR_MAX_DIM)
+	if (dim > VEC32_MAX_DIM)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("column cannot have more than %d dimensions",
-						MKT_VECTOR_MAX_DIM)));
+						VEC32_MAX_DIM)));
 	if (dim > MKT_INDEX_MAX_DIM)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
@@ -646,7 +646,7 @@ sample_for_build(
 
 			if (norm_sq == 0.0f)
 				continue;
-			mkt_vector_scale(v, 1.0f / sqrtf(norm_sq), v, dim);
+			vec32_scale(v, 1.0f / sqrtf(norm_sq), v, dim);
 			/* The buffer is a dense row-major matrix consumed directly
 			 * by k-means, so a dropped row leaves a hole that must be
 			 * closed: shift each kept row down over it. Until the first
@@ -743,7 +743,7 @@ refine_head_cb(
 
 	MemoryContext old_ctx = MemoryContextSwitchTo(rs->tmp_ctx);
 
-	const float *vin = MktVectorToRef(DatumGetMktVector(values[0])).data;
+	const float *vin = Vec32ToRef(DatumGetVec32(values[0])).data;
 	uint32_t	 idx;
 	const float *v = mkt_refine_route_row(
 			rs->qs,
@@ -1228,7 +1228,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	/* Resolved once, directly -- no metadata page exists yet for the
 	 * per-backend cache to read. The per-tuple callbacks follow the pointer.
 	 */
-	bs.input = mkt_vector_access(mkt_index_type_info(index), dim, build_ctx);
+	bs.input = vec32_access(mkt_index_type_info(index), dim, build_ctx);
 
 	/*
 	 * Build introspection: one reporting context the serial and parallel paths

@@ -41,7 +41,7 @@
 #include "core/types.h"
 #include "quant/fastscan.h"
 #include "quant/rabitq.h"
-#include "types/halfvec.h"
+#include "types/vec16.h"
 
 /* Include PG compat for standalone, real PG headers for extension */
 #ifdef MKT_STANDALONE

@@ -45,7 +45,7 @@ typedef uint32_t ClusterId;
 typedef float Distance;
 
 /*
- * VectorRef: Non-owning reference to vector data.
+ * Vec32Ref: Non-owning reference to vector data.
  *
  * Used for passing vectors to functions without copying.
  * The caller is responsible for ensuring the data remains valid.
@@ -54,7 +54,7 @@ typedef struct
 {
 	const float *data;
 	Dimension	 dim;
-} VectorRef;
+} Vec32Ref;
 
 /*
  * VectorMut: Mutable vector reference.
@@ -100,7 +100,7 @@ mkt_distance_mode_name(MktDistanceMode mode)
 }
 
 /*
- * MktVecType - Vector element type for dispatch
+ * VecType - Vector element type for dispatch
  *
  * Used by k-means and quantization to select the correct compile-time
  * specialization. F16C is the hand-written AVX2+FMA+F16C path; F16
@@ -111,10 +111,10 @@ typedef enum
 	MKT_VEC_F32	 = 0, /* float32 */
 	MKT_VEC_F16	 = 1, /* float16 (scalar / auto-vectorized) */
 	MKT_VEC_F16C = 2, /* float16 (hand-written F16C SIMD) */
-} MktVecType;
+} VecType;
 
 static inline size_t
-mkt_vec_element_size(MktVecType type)
+mkt_vec_element_size(VecType type)
 {
 	static const size_t sizes[] =
 			{[MKT_VEC_F32] = 4, [MKT_VEC_F16] = 2, [MKT_VEC_F16C] = 2};
@@ -122,7 +122,7 @@ mkt_vec_element_size(MktVecType type)
 }
 
 static inline const char *
-mkt_vec_type_name(MktVecType type)
+mkt_vec_type_name(VecType type)
 {
 	static const char *names[] = {
 			[MKT_VEC_F32]  = "float32",
@@ -133,14 +133,14 @@ mkt_vec_type_name(MktVecType type)
 }
 
 /*
- * MktVectorTypeOps - Inline vtable for compile-time specialization
+ * Vec32TypeOps - Inline vtable for compile-time specialization
  *
  * Contains function pointers for mixed-type distance computation
  * (vec_type × float32 centroid). Used internally by k-means and
  * quantization impl functions where always_inline enables the
  * compiler to inline through the function pointers.
  */
-typedef struct MktVectorTypeOps
+typedef struct Vec32TypeOps
 {
 	const char *name;		  /* "float32" or "float16" */
 	size_t		element_size; /* 4 or 2 */
@@ -156,6 +156,6 @@ typedef struct MktVectorTypeOps
 	/* Returns pointer to float32 data (zero-copy for f32, converts for f16) */
 	const float *(*to_float_block)(
 			const void *src, float *dst, uint32_t count, Dimension dim);
-} MktVectorTypeOps;
+} Vec32TypeOps;
 
 #endif /* MKT_TYPES_H */

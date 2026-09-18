@@ -36,39 +36,39 @@ float mkt_l2_norm(const float *v, Dimension dim);
  *
  * Returns the sum of all elements.
  */
-float mkt_vector_sum(const float *v, Dimension dim);
+float vec32_sum(const float *v, Dimension dim);
 
 /*
  * Vector subtraction: out[i] = a[i] - b[i]
  *
  * Computes element-wise difference. Output may alias input.
  */
-void mkt_vector_sub(const float *a, const float *b, float *out, Dimension dim);
+void vec32_sub(const float *a, const float *b, float *out, Dimension dim);
 
 /*
  * Vector addition: out[i] = a[i] + b[i]
  *
  * Computes element-wise sum. Output may alias input.
  */
-void mkt_vector_add(const float *a, const float *b, float *out, Dimension dim);
+void vec32_add(const float *a, const float *b, float *out, Dimension dim);
 
 /*
  * Vector scale: out[i] = v[i] * scalar
  *
  * Multiplies each element by a scalar. Output may alias input.
  */
-void mkt_vector_scale(const float *v, float scalar, float *out, Dimension dim);
+void vec32_scale(const float *v, float scalar, float *out, Dimension dim);
 
 /*
  * Normalize a raw float vector to unit L2 length, in place. No-op for a
- * zero vector. (mkt_vector_normalize in mkt_vector.h is the MktVector form.)
+ * zero vector. (vec32_normalize in vec32.h is the Vec32 form.)
  */
 static inline void
 mkt_l2_normalize(float *v, Dimension dim)
 {
 	float norm = mkt_l2_norm(v, dim);
 	if (norm > 0.0f)
-		mkt_vector_scale(v, 1.0f / norm, v, dim);
+		vec32_scale(v, 1.0f / norm, v, dim);
 }
 
 /*
@@ -77,8 +77,8 @@ mkt_l2_normalize(float *v, Dimension dim)
  * Computes the element-wise mean of nvecs row-major vectors.
  * Output must be preallocated with at least dim floats.
  */
-void mkt_vector_mean(
-		const float *vectors, uint32_t nvecs, Dimension dim, float *out);
+void
+vec32_mean(const float *vectors, uint32_t nvecs, Dimension dim, float *out);
 
 /*
  * Global mean for index metadata: the element-wise mean of the (leaf)

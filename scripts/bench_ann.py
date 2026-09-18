@@ -137,7 +137,7 @@ def build_index(conn, table: str, index_type: str, nlist: int | None, **kwargs):
                 with_clause = f" WITH ({', '.join(with_parts)})"
             sql = (
                 f"CREATE INDEX {idx_name} ON {table} "
-                f"USING mktann (v mkt.vector_cosine_ops)"
+                f"USING mktann (v mkt.vec32_cosine_ops)"
                 f"{with_clause}"
             )
         elif index_type == "hnsw":
@@ -202,15 +202,15 @@ def build_index(conn, table: str, index_type: str, nlist: int | None, **kwargs):
 def query_sql(table: str, index_type: str, k: int) -> str:
     """Return the SELECT used to dispatch to the right operator class.
 
-    mktann uses the mkt.vector_cosine_ops opclass, which is keyed on
-    mkt.<=>; the query must cast the literal to mkt.vector so the
+    mktann uses the mkt.vec32_cosine_ops opclass, which is keyed on
+    mkt.<=>; the query must cast the literal to mkt.vec32 so the
     planner can match the index. pgvector ivfflat/hnsw use the
     built-in <=> operator.
     """
     if index_type == "mktann":
         return (
             f"SELECT id FROM {table} "
-            f"ORDER BY v OPERATOR(mkt.<=>) %s::vector::mkt.vector "
+            f"ORDER BY v OPERATOR(mkt.<=>) %s::vector::mkt.vec32 "
             f"LIMIT {k}"
         )
     return f"SELECT id FROM {table} ORDER BY v <=> %s LIMIT {k}"

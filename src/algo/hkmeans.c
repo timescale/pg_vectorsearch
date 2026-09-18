@@ -464,8 +464,8 @@ mkt_hkmeans_assign(
 		for (uint32_t c = 0; c < node->nchildren; c++)
 		{
 			const float *centroid = cents + (size_t)c * dim;
-			VectorRef	 qref	  = {.data = vec, .dim = dim};
-			VectorRef	 cref	  = {.data = centroid, .dim = dim};
+			Vec32Ref	 qref	  = {.data = vec, .dim = dim};
+			Vec32Ref	 cref	  = {.data = centroid, .dim = dim};
 			Distance	 d		  = mkt_distance(qref, cref, metric);
 			if (d < best_dist)
 			{
@@ -605,9 +605,9 @@ mkt_hkmeans_assign_topk(
 			bool node_leaf			 = (node->first_child == HKMEANS_NO_CHILD);
 			for (uint32_t c = 0; c < node->nchildren; c++)
 			{
-				VectorRef qref = {.data = vec, .dim = dim};
-				VectorRef cref = {.data = cents + (size_t)c * dim, .dim = dim};
-				Distance  d	   = mkt_distance(qref, cref, metric);
+				Vec32Ref qref = {.data = vec, .dim = dim};
+				Vec32Ref cref = {.data = cents + (size_t)c * dim, .dim = dim};
+				Distance d	  = mkt_distance(qref, cref, metric);
 				if (node_leaf)
 					topk_insert(
 							res_id, res_d, &res_n, k, node->first_leaf + c, d);

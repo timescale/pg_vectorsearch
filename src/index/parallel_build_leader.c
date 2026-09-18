@@ -52,8 +52,8 @@
 #include "index/posting_build.h"
 #include "index/posting_page.h"
 #include "quant/fastscan.h"
-#include "types/halfvec.h"
-#include "types/vector.h"
+#include "types/vec16.h"
+#include "types/vec32.h"
 
 #ifndef MKT_STANDALONE
 #include "build.h"
@@ -513,7 +513,7 @@ build_routing_tree_flat(
 	BlockNumber first_posting = first_centroid + centroid_pages;
 
 	/* Leaf-centroid mean -> the encoder centering (flat tree in hand). */
-	mkt_vector_mean(hk_leaf_centroids(flat), actual_nlist, dim, global_mean);
+	vec32_mean(hk_leaf_centroids(flat), actual_nlist, dim, global_mean);
 	if (shared->metric == DISTANCE_COSINE)
 		mkt_l2_normalize(global_mean, dim);
 

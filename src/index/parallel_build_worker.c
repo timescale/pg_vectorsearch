@@ -96,7 +96,7 @@ mkt_sample_cb(void *state, ItemPointerData tid, const float *vec)
 
 		if (norm_sq == 0.0f)
 			return;
-		mkt_vector_scale(vec, 1.0f / sqrtf(norm_sq), dest, dim);
+		vec32_scale(vec, 1.0f / sqrtf(norm_sq), dest, dim);
 	}
 	else
 		memcpy(dest, vec, dim * sizeof(float));

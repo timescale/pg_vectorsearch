@@ -23,7 +23,7 @@
  * L2 squared distance using NEON.
  */
 Distance
-mkt_distance_l2_neon(VectorRef a, VectorRef b)
+mkt_distance_l2_neon(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -63,7 +63,7 @@ mkt_distance_l2_neon(VectorRef a, VectorRef b)
  * Negative inner product using NEON.
  */
 Distance
-mkt_distance_ip_neon(VectorRef a, VectorRef b)
+mkt_distance_ip_neon(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -96,7 +96,7 @@ mkt_distance_ip_neon(VectorRef a, VectorRef b)
  * Cosine distance using NEON.
  */
 Distance
-mkt_distance_cosine_neon(VectorRef a, VectorRef b)
+mkt_distance_cosine_neon(Vec32Ref a, Vec32Ref b)
 {
 	if (mkt_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
@@ -146,7 +146,7 @@ mkt_distance_cosine_neon(VectorRef a, VectorRef b)
  */
 int
 mkt_distance_batch_l2_neon(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -196,7 +196,7 @@ mkt_distance_batch_l2_neon(
  */
 int
 mkt_distance_batch_ip_neon(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
@@ -242,7 +242,7 @@ mkt_distance_batch_ip_neon(
  */
 int
 mkt_distance_batch_cosine_neon(
-		VectorRef	 query,
+		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,

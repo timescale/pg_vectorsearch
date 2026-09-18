@@ -16,10 +16,10 @@
 
 static bool
 hdf5_source_next(
-		MktVectorSource *src,
-		uint32_t		 stride,
-		const float	   **vec_out,
-		uint32_t		*id_out)
+		Vec32Source	 *src,
+		uint32_t	  stride,
+		const float **vec_out,
+		uint32_t	 *id_out)
 {
 	MktHdf5Source *hs = (MktHdf5Source *)src;
 	if (hs->pos >= src->nvecs)
@@ -45,14 +45,14 @@ hdf5_source_next(
 }
 
 static void
-hdf5_source_reset(MktVectorSource *src)
+hdf5_source_reset(Vec32Source *src)
 {
 	MktHdf5Source *hs = (MktHdf5Source *)src;
 	hs->pos			  = 0;
 }
 
 static bool
-hdf5_source_read_all(MktVectorSource *src, float *dest)
+hdf5_source_read_all(Vec32Source *src, float *dest)
 {
 	MktHdf5Source *hs	   = (MktHdf5Source *)src;
 	hsize_t		   dims[2] = {src->nvecs, src->dim};

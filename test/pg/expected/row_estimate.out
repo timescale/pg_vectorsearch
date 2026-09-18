@@ -17,7 +17,7 @@ CREATE TEMP TABLE cluster_counts (which text, n int);
 -- for tables with no reltuples, so an automatic ANALYZE sneaking in
 -- between the INSERT and the first CREATE INDEX would silently bypass
 -- the very path under test.
-CREATE TABLE est_plain (id int, v vector(512))
+CREATE TABLE est_plain (id int, v vec32(512))
     WITH (autovacuum_enabled = off);
 ALTER TABLE est_plain ALTER COLUMN v SET STORAGE PLAIN;
 INSERT INTO est_plain
@@ -26,9 +26,9 @@ SELECT g,
                string_agg((((g * 7919 + i * 104729) % 997) / 10.0)::text,
                           ',' ORDER BY i) ||
                ']'
-        FROM generate_series(1, 512) i)::vector
+        FROM generate_series(1, 512) i)::vec32
 FROM generate_series(1, 1000) g;
-CREATE TABLE est_toast (id int, v vector(512))
+CREATE TABLE est_toast (id int, v vec32(512))
     WITH (autovacuum_enabled = off);
 INSERT INTO est_toast SELECT id, v FROM est_plain;
 -- The two layouts must genuinely differ in main-fork density.
@@ -40,8 +40,8 @@ SELECT pg_relation_size('est_plain') > 8 * pg_relation_size('est_toast')
 (1 row)
 
 -- Estimate-driven builds (no stats yet).
-CREATE INDEX est_plain_idx ON est_plain USING mktann (v vector_l2_ops);
-CREATE INDEX est_toast_idx ON est_toast USING mktann (v vector_l2_ops);
+CREATE INDEX est_plain_idx ON est_plain USING mktann (v vec32_l2_ops);
+CREATE INDEX est_toast_idx ON est_toast USING mktann (v vec32_l2_ops);
 INSERT INTO cluster_counts
 SELECT 'plain_est', count(DISTINCT cluster_id)
 FROM mkt.posting_pages('est_plain_idx');

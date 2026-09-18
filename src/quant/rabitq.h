@@ -292,7 +292,7 @@ void mkt_rabitq_cleanup(RaBitQParams *params);
  * Returns NULL on failure.
  */
 RaBitQData *mkt_rabitq_encode(
-		const RaBitQParams *params, VectorRef input, VectorRef centroid);
+		const RaBitQParams *params, Vec32Ref input, Vec32Ref centroid);
 
 /*
  * Encode a vector into pre-allocated output buffer.
@@ -303,8 +303,8 @@ RaBitQData *mkt_rabitq_encode(
  */
 int mkt_rabitq_encode_into(
 		const RaBitQParams *params,
-		VectorRef			input,
-		VectorRef			centroid,
+		Vec32Ref			input,
+		Vec32Ref			centroid,
 		RaBitQData		   *output);
 
 /*
@@ -312,8 +312,8 @@ int mkt_rabitq_encode_into(
  */
 int mkt_rabitq_encode_into_ex(
 		const RaBitQParams *params,
-		VectorRef			input,
-		VectorRef			centroid,
+		Vec32Ref			input,
+		Vec32Ref			centroid,
 		RaBitQData		   *output,
 		RaBitQScratch	   *scratch);
 
@@ -359,8 +359,8 @@ int mkt_rabitq_encode_from_pt(
 int mkt_rabitq_encode_batch(
 		const RaBitQParams *params,
 		const void		   *vectors,
-		MktVecType			vec_type,
-		VectorRef			centroid,
+		VecType				vec_type,
+		Vec32Ref			centroid,
 		float			   *f_add,
 		float			   *f_rescale,
 		uint8_t			   *bits,
@@ -377,8 +377,8 @@ int mkt_rabitq_encode_batch(
 RaBitQBatch *mkt_rabitq_encode_batch_alloc(
 		const RaBitQParams *params,
 		const void		   *vectors,
-		MktVecType			vec_type,
-		VectorRef			centroid,
+		VecType				vec_type,
+		Vec32Ref			centroid,
 		uint16_t			count);
 
 /*
@@ -406,7 +406,7 @@ void mkt_rabitq_batch_destroy(RaBitQBatch *batch);
  * Returns NULL on failure.
  */
 RaBitQQueryState *mkt_rabitq_prepare_query(
-		const RaBitQParams *params, VectorRef query, VectorRef centroid);
+		const RaBitQParams *params, Vec32Ref query, Vec32Ref centroid);
 
 /*
  * Free query state.
@@ -424,8 +424,8 @@ void mkt_rabitq_free_query(RaBitQQueryState *state);
  */
 RaBitQQueryState *mkt_rabitq_prepare_query_ex(
 		const RaBitQParams *params,
-		VectorRef			query,
-		VectorRef			centroid,
+		Vec32Ref			query,
+		Vec32Ref			centroid,
 		MktDistanceMode		mode);
 
 /*

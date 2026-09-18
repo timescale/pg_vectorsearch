@@ -3,12 +3,12 @@
 -- aminsert indexes new rows into an existing index. Covered for AoS-only,
 -- FASTSCAN (where inserts form a mixed AoS-overflow chain on the packed base),
 -- and empty indexes (build is refused), plus nearest-neighbour membership of a
--- freshly inserted vector. Probe vectors are widely separated so ANN ranking is
+-- freshly inserted vec32. Probe vectors are widely separated so ANN ranking is
 -- deterministic; region membership is asserted by id range where gaps are
 -- small.
 -- ===== AoS-only index (centroid_compression on, no fastscan) ================
-CREATE TABLE mut (id int, v vector(3));
-INSERT INTO mut SELECT g, format('[%s,0,0]', g)::vector FROM generate_series(1, 50) g;
+CREATE TABLE mut (id int, v vec32(3));
+INSERT INTO mut SELECT g, format('[%s,0,0]', g)::vec32 FROM generate_series(1, 50) g;
 CREATE INDEX idx_mut ON mut USING mktann (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
@@ -19,11 +19,11 @@ SET mkt.nprobe = 4;             -- = nlist: scan every list, deterministic
 -- regression that made the index unusable would silently fall back and the
 -- correctness checks would still pass on the heap).
 EXPLAIN (COSTS OFF) SELECT id FROM mut ORDER BY v <-> '[100,0,0]' LIMIT 1;
-                  QUERY PLAN                   
------------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Limit
    ->  Index Scan using idx_mut on mut
-         Order By: (v <-> '[100,0,0]'::vector)
+         Order By: (v <-> '[100,0,0]'::vec32)
 (3 rows)
 
 INSERT INTO mut VALUES (1001, '[100,0,0]');
@@ -41,7 +41,7 @@ SELECT count(*) AS aos_ins FROM (
 -- are present. Instead count physical index entries directly via
 -- mkt.posting_pages, which is independent of search recall: the index must
 -- hold all 91 rows (50 initial + the 1001 outlier + 40 bulk).
-INSERT INTO mut SELECT 2000 + g, format('[%s,0,0]', 300 + g)::vector
+INSERT INTO mut SELECT 2000 + g, format('[%s,0,0]', 300 + g)::vec32
     FROM generate_series(1, 40) g;
 SELECT sum(entry_count) AS aos_total
     FROM mkt.posting_pages('idx_mut'::regclass);
@@ -62,8 +62,8 @@ RESET enable_seqscan;
 RESET mkt.nprobe;
 DROP TABLE mut;
 -- ===== FASTSCAN index: inserts append an AoS overflow page (mixed chain) =====
-CREATE TABLE mutfs (id int, v vector(3));
-INSERT INTO mutfs SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE mutfs (id int, v vec32(3));
+INSERT INTO mutfs SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 60) g;
 CREATE INDEX idx_mutfs ON mutfs USING mktann (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = on,
@@ -72,11 +72,11 @@ SET enable_seqscan = off;
 SET mkt.nprobe = 4;
 -- Guard: index serves the probe, not a seq scan (see the AoS section).
 EXPLAIN (COSTS OFF) SELECT id FROM mutfs ORDER BY v <-> '[500,0,0]' LIMIT 1;
-                  QUERY PLAN                   
------------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Limit
    ->  Index Scan using idx_mutfs on mutfs
-         Order By: (v <-> '[500,0,0]'::vector)
+         Order By: (v <-> '[500,0,0]'::vec32)
 (3 rows)
 
 INSERT INTO mutfs VALUES (1001, '[500,0,0]');
@@ -105,14 +105,14 @@ DROP TABLE mutfs;
 -- The build substitutes a synthetic sample and emits a degenerate
 -- single-cluster index that later inserts route into. Full coverage lives
 -- in the empty_table test; here we just pin that the build no longer errors.
-CREATE TABLE mutempty (id int, v vector(3));
+CREATE TABLE mutempty (id int, v vec32(3));
 CREATE INDEX idx_mutempty ON mutempty USING mktann (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 DROP TABLE mutempty;
--- ===== A freshly inserted vector is a genuine nearest neighbour =============
-CREATE TABLE mutnn (id int, v vector(3));
-INSERT INTO mutnn SELECT g, format('[%s,0,0]', g)::vector
+-- ===== A freshly inserted vec32 is a genuine nearest neighbour =============
+CREATE TABLE mutnn (id int, v vec32(3));
+INSERT INTO mutnn SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 CREATE INDEX idx_mutnn ON mutnn USING mktann (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
@@ -121,15 +121,15 @@ SET enable_seqscan = off;
 SET mkt.nprobe = 4;
 -- Guard: index serves the probe, not a seq scan (see the AoS section).
 EXPLAIN (COSTS OFF) SELECT id FROM mutnn ORDER BY v <-> '[99,0,0]' LIMIT 1;
-                  QUERY PLAN                  
-----------------------------------------------
+                 QUERY PLAN                  
+---------------------------------------------
  Limit
    ->  Index Scan using idx_mutnn on mutnn
-         Order By: (v <-> '[99,0,0]'::vector)
+         Order By: (v <-> '[99,0,0]'::vec32)
 (3 rows)
 
 INSERT INTO mutnn VALUES (1001, '[100,0,0]');
--- query NEAR (not equal to) the inserted vector; it must be the top neighbour
+-- query NEAR (not equal to) the inserted vec32; it must be the top neighbour
 SELECT count(*) AS nn_member FROM (
     SELECT id FROM mutnn ORDER BY v <-> '[99,0,0]' LIMIT 1) t WHERE id = 1001;
  nn_member 
@@ -145,8 +145,8 @@ DROP TABLE mutnn;
 -- before VACUUM), and VACUUM's ambulkdelete must run cleanly and tombstone the
 -- dead entries while leaving the rest of the index correct and usable. Probes
 -- are outliers so the assertions are exact-NN, not recall-dependent.
-CREATE TABLE mutdel (id int, v vector(3));
-INSERT INTO mutdel SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE mutdel (id int, v vec32(3));
+INSERT INTO mutdel SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 INSERT INTO mutdel VALUES (1001, '[100,0,0]'), (1002, '[200,0,0]');
 CREATE INDEX idx_mutdel ON mutdel USING mktann (v)
@@ -156,11 +156,11 @@ SET enable_seqscan = off;
 SET mkt.nprobe = 4;
 -- Guard: index serves the probe, not a seq scan (see the AoS section).
 EXPLAIN (COSTS OFF) SELECT id FROM mutdel ORDER BY v <-> '[100,0,0]' LIMIT 1;
-                  QUERY PLAN                   
------------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Limit
    ->  Index Scan using idx_mutdel on mutdel
-         Order By: (v <-> '[100,0,0]'::vector)
+         Order By: (v <-> '[100,0,0]'::vec32)
 (3 rows)
 
 -- Present before delete: the [100] outlier is its own nearest neighbour.
@@ -231,13 +231,13 @@ RESET enable_seqscan;
 RESET mkt.nprobe;
 DROP TABLE mutdel;
 -- ===== UPDATE: insert-new + clean-old, and HOT for non-indexed columns =======
--- Postgres turns a vector-column UPDATE into a new tuple (aminsert) plus a dead
+-- Postgres turns a vec32-column UPDATE into a new tuple (aminsert) plus a dead
 -- old version (cleaned by VACUUM, like DELETE). An UPDATE that leaves the
--- vector unchanged is HOT when the page has room, so no index work happens and
+-- vec32 unchanged is HOT when the page has room, so no index work happens and
 -- the row stays findable. The payload column is non-indexed, to drive the HOT
 -- case.
-CREATE TABLE mutupd (id int, payload int, v vector(3));
-INSERT INTO mutupd SELECT g, 0, format('[%s,0,0]', g)::vector
+CREATE TABLE mutupd (id int, payload int, v vec32(3));
+INSERT INTO mutupd SELECT g, 0, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 INSERT INTO mutupd VALUES (1001, 0, '[100,0,0]');
 CREATE INDEX idx_mutupd ON mutupd USING mktann (v)
@@ -247,11 +247,11 @@ SET enable_seqscan = off;
 SET mkt.nprobe = 4;
 -- Guard: index serves the probe, not a seq scan (see the AoS section).
 EXPLAIN (COSTS OFF) SELECT id FROM mutupd ORDER BY v <-> '[100,0,0]' LIMIT 1;
-                  QUERY PLAN                   
------------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Limit
    ->  Index Scan using idx_mutupd on mutupd
-         Order By: (v <-> '[100,0,0]'::vector)
+         Order By: (v <-> '[100,0,0]'::vec32)
 (3 rows)
 
 -- Before: the outlier sits at [100].
@@ -261,7 +261,7 @@ SELECT id AS upd_before FROM mutupd ORDER BY v <-> '[100,0,0]' LIMIT 1;
        1001
 (1 row)
 
--- Move the vector to [200]: non-HOT, so aminsert indexes the new version.
+-- Move the vec32 to [200]: non-HOT, so aminsert indexes the new version.
 UPDATE mutupd SET v = '[200,0,0]' WHERE id = 1001;
 -- New location is found ...
 SELECT id AS upd_new_loc FROM mutupd ORDER BY v <-> '[200,0,0]' LIMIT 1;
@@ -300,14 +300,14 @@ RESET mkt.nprobe;
 DROP TABLE mutupd;
 -- ===== Non-HOT UPDATE of a non-indexed column still indexes the new version ==
 -- When the page has no room for the new version, an UPDATE that leaves the
--- vector unchanged is not HOT: the new tuple lands on another page and
+-- vec32 unchanged is not HOT: the new tuple lands on another page and
 -- Postgres calls aminsert for it with index_unchanged = true. That flag is a
 -- hint for access methods that can deduplicate against the old version, not
 -- permission to skip the insert -- the old entry points at a TID that is now
 -- dead. Sequential inserts pack every page but the last to the fill factor,
 -- so updating every row forces the non-HOT path for all but the last page.
-CREATE TABLE mutnonhot (id int, payload int, v vector(3));
-INSERT INTO mutnonhot SELECT g, 0, format('[%s,0,0]', g)::vector
+CREATE TABLE mutnonhot (id int, payload int, v vec32(3));
+INSERT INTO mutnonhot SELECT g, 0, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 1000) g;
 CREATE INDEX idx_mutnonhot ON mutnonhot USING mktann (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
@@ -330,7 +330,7 @@ SELECT sum(entry_count) > 1000 AS entries_added
  t
 (1 row)
 
--- ... and a row from a full page is found at its unchanged vector.
+-- ... and a row from a full page is found at its unchanged vec32.
 SELECT id AS nonhot_found FROM mutnonhot ORDER BY v <-> '[500,0,0]' LIMIT 1;
  nonhot_found 
 --------------
@@ -360,8 +360,8 @@ DROP TABLE mutnonhot;
 -- counts (layout-dependent) don't make the test brittle: before any delete
 -- nothing is skipped (scanned == read); after deleting every row + VACUUM every
 -- probed page is tombstoned (skipped > 0, nothing scored).
-CREATE TABLE muttomb (id int, v vector(3));
-INSERT INTO muttomb SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE muttomb (id int, v vec32(3));
+INSERT INTO muttomb SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 200) g;
 CREATE INDEX idx_muttomb ON muttomb USING mktann (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
@@ -429,10 +429,10 @@ RESET mkt.nprobe;
 DROP TABLE muttomb;
 -- ===== FASTSCAN pages are page-tombstoned and reported =======================
 -- Page-level tombstoning is the only delete granularity for FASTSCAN postings
--- (packed 32-vector groups cannot be flagged per entry), so the tombstoned
+-- (packed 32-vec32 groups cannot be flagged per entry), so the tombstoned
 -- column must work on fastscan-format pages, not just AoS.
-CREATE TABLE mutfstomb (id int, v vector(3));
-INSERT INTO mutfstomb SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE mutfstomb (id int, v vec32(3));
+INSERT INTO mutfstomb SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 200) g;
 CREATE INDEX idx_mutfstomb ON mutfstomb USING mktann (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = on,
@@ -467,8 +467,8 @@ DROP TABLE mutfstomb;
 -- tombstoned flips only when a page goes all-dead, at which point
 -- dead_count = entry_count. Deletes are spread (every 5th id) so no cluster
 -- goes all-dead early, keeping the intermediate states layout-independent.
-CREATE TABLE mutlife (id int, v vector(3));
-INSERT INTO mutlife SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE mutlife (id int, v vec32(3));
+INSERT INTO mutlife SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 CREATE INDEX idx_mutlife ON mutlife USING mktann (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
@@ -539,8 +539,8 @@ DROP TABLE mutlife;
 -- ties the two columns together: a page is tombstoned iff dead_count equals
 -- entry_count. Which clusters die exactly is layout-dependent, so assertions
 -- are existential (some tombstoned, some live) plus index-wide sums.
-CREATE TABLE mutmix (id int, v vector(3));
-INSERT INTO mutmix SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE mutmix (id int, v vec32(3));
+INSERT INTO mutmix SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 CREATE INDEX idx_mutmix ON mutmix USING mktann (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
@@ -553,7 +553,7 @@ EXPLAIN (COSTS OFF) SELECT id FROM mutmix ORDER BY v <-> '[1,0,0]' LIMIT 1;
 ---------------------------------------------
  Limit
    ->  Index Scan using idx_mutmix on mutmix
-         Order By: (v <-> '[1,0,0]'::vector)
+         Order By: (v <-> '[1,0,0]'::vec32)
 (3 rows)
 
 DELETE FROM mutmix WHERE id <= 25;
@@ -599,17 +599,17 @@ DROP TABLE mutmix;
 -- one cluster's chain page by page. Inserts append at the chain tail, so pages
 -- hold contiguous id slices in chain order and the id range of any page can be
 -- computed from cumulative entry counts — no dependence on page capacity.
-CREATE TABLE mutchain (id int, v vector(3));
+CREATE TABLE mutchain (id int, v vec32(3));
 -- Seed: two well-separated regions so the build creates two clusters.
-INSERT INTO mutchain SELECT g, format('[%s,0,0]', g * 0.01)::vector
+INSERT INTO mutchain SELECT g, format('[%s,0,0]', g * 0.01)::vec32
     FROM generate_series(1, 10) g;
-INSERT INTO mutchain SELECT 10000 + g, format('[%s,0,0]', 1000 + g * 0.01)::vector
+INSERT INTO mutchain SELECT 10000 + g, format('[%s,0,0]', 1000 + g * 0.01)::vec32
     FROM generate_series(1, 10) g;
 CREATE INDEX idx_mutchain ON mutchain USING mktann (v)
     WITH (nlist = 2, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 -- Grow the first region's chain: ids 11..1210 all route to its cluster.
-INSERT INTO mutchain SELECT g, format('[%s,0,0]', g * 0.01)::vector
+INSERT INTO mutchain SELECT g, format('[%s,0,0]', g * 0.01)::vec32
     FROM generate_series(11, 1210) g;
 SET enable_seqscan = off;
 SET mkt.nprobe = 1;

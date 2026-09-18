@@ -79,10 +79,10 @@ alloc_test_vector(Dimension dim, int offset)
 
 TEST(l2_known_values)
 {
-	float	  a_data[] = {1.0f, 2.0f, 3.0f};
-	float	  b_data[] = {4.0f, 5.0f, 6.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 3};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f};
+	float	 b_data[] = {4.0f, 5.0f, 6.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 3};
 
 	/* (1-4)² + (2-5)² + (3-6)² = 9+9+9 = 27 */
 	Distance d = mkt_distance_l2(a, b);
@@ -91,9 +91,9 @@ TEST(l2_known_values)
 
 TEST(l2_identical_vectors)
 {
-	float	  a_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
-	VectorRef a		   = {.data = a_data, .dim = 4};
-	VectorRef b		   = {.data = a_data, .dim = 4};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 4};
+	Vec32Ref b		  = {.data = a_data, .dim = 4};
 
 	Distance d = mkt_distance_l2(a, b);
 	ASSERT_FLOAT_EQ(0.0f, d, 1e-6f, "identical vectors have zero distance");
@@ -101,10 +101,10 @@ TEST(l2_identical_vectors)
 
 TEST(ip_known_values)
 {
-	float	  a_data[] = {1.0f, 2.0f, 3.0f};
-	float	  b_data[] = {4.0f, 5.0f, 6.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 3};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f};
+	float	 b_data[] = {4.0f, 5.0f, 6.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 3};
 
 	/* 1*4 + 2*5 + 3*6 = 4+10+18 = 32, negated = -32 */
 	Distance d = mkt_distance_ip(a, b);
@@ -113,10 +113,10 @@ TEST(ip_known_values)
 
 TEST(ip_orthogonal)
 {
-	float	  a_data[] = {1.0f, 0.0f, 0.0f};
-	float	  b_data[] = {0.0f, 1.0f, 0.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 3};
+	float	 a_data[] = {1.0f, 0.0f, 0.0f};
+	float	 b_data[] = {0.0f, 1.0f, 0.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 3};
 
 	Distance d = mkt_distance_ip(a, b);
 	ASSERT_FLOAT_EQ(0.0f, d, 1e-6f, "orthogonal vectors");
@@ -124,9 +124,9 @@ TEST(ip_orthogonal)
 
 TEST(cosine_identical_normalized)
 {
-	float	  a_data[] = {0.6f, 0.8f, 0.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = a_data, .dim = 3};
+	float	 a_data[] = {0.6f, 0.8f, 0.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = a_data, .dim = 3};
 
 	Distance d = mkt_distance_cosine(a, b);
 	ASSERT_FLOAT_EQ(0.0f, d, 1e-6f, "identical vectors have zero distance");
@@ -134,10 +134,10 @@ TEST(cosine_identical_normalized)
 
 TEST(cosine_orthogonal)
 {
-	float	  a_data[] = {1.0f, 0.0f, 0.0f};
-	float	  b_data[] = {0.0f, 1.0f, 0.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 3};
+	float	 a_data[] = {1.0f, 0.0f, 0.0f};
+	float	 b_data[] = {0.0f, 1.0f, 0.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 3};
 
 	Distance d = mkt_distance_cosine(a, b);
 	ASSERT_FLOAT_EQ(1.0f, d, 1e-6f, "orthogonal vectors");
@@ -145,10 +145,10 @@ TEST(cosine_orthogonal)
 
 TEST(cosine_opposite)
 {
-	float	  a_data[] = {1.0f, 0.0f, 0.0f};
-	float	  b_data[] = {-1.0f, 0.0f, 0.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 3};
+	float	 a_data[] = {1.0f, 0.0f, 0.0f};
+	float	 b_data[] = {-1.0f, 0.0f, 0.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 3};
 
 	Distance d = mkt_distance_cosine(a, b);
 	ASSERT_FLOAT_EQ(2.0f, d, 1e-6f, "opposite vectors");
@@ -156,10 +156,10 @@ TEST(cosine_opposite)
 
 TEST(cosine_zero_vectors)
 {
-	float	  a_data[] = {0.0f, 0.0f, 0.0f};
-	float	  b_data[] = {1.0f, 2.0f, 3.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 3};
+	float	 a_data[] = {0.0f, 0.0f, 0.0f};
+	float	 b_data[] = {1.0f, 2.0f, 3.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 3};
 
 	Distance d = mkt_distance_cosine(a, b);
 	ASSERT_FLOAT_EQ(1.0f, d, 1e-6f, "zero vector has max distance");
@@ -233,10 +233,10 @@ compute_gsl_reference(
 
 TEST(gsl_reference_simple_integers)
 {
-	float	  a_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
-	float	  b_data[] = {5.0f, 6.0f, 7.0f, 8.0f};
-	VectorRef a		   = {.data = a_data, .dim = 4};
-	VectorRef b		   = {.data = b_data, .dim = 4};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
+	float	 b_data[] = {5.0f, 6.0f, 7.0f, 8.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 4};
+	Vec32Ref b		  = {.data = b_data, .dim = 4};
 
 	float ref_l2, ref_ip, ref_cosine;
 	compute_gsl_reference(a_data, b_data, 4, &ref_l2, &ref_ip, &ref_cosine);
@@ -269,8 +269,8 @@ TEST(gsl_reference_random_vectors)
 			b_data[i] = (float)((i * 13 + 47) % 100 - 50) / 10.0f;
 		}
 
-		VectorRef a = {.data = a_data, .dim = dim};
-		VectorRef b = {.data = b_data, .dim = dim};
+		Vec32Ref a = {.data = a_data, .dim = dim};
+		Vec32Ref b = {.data = b_data, .dim = dim};
 
 		float ref_l2, ref_ip, ref_cosine;
 		compute_gsl_reference(
@@ -395,8 +395,8 @@ TEST_PARAMETERIZED(l2_simd_variant, "compiler", "avx2", "avx512", "neon")
 		float *a_data = alloc_test_vector(dim, 0);
 		float *b_data = alloc_test_vector(dim, 17);
 
-		VectorRef a = {.data = a_data, .dim = dim};
-		VectorRef b = {.data = b_data, .dim = dim};
+		Vec32Ref a = {.data = a_data, .dim = dim};
+		Vec32Ref b = {.data = b_data, .dim = dim};
 
 		Distance d_scalar = mkt_distance_l2(a, b);
 
@@ -440,8 +440,8 @@ TEST_PARAMETERIZED(ip_simd_variant, "compiler", "avx2", "avx512", "neon")
 		float *a_data = alloc_test_vector(dim, 0);
 		float *b_data = alloc_test_vector(dim, 23);
 
-		VectorRef a = {.data = a_data, .dim = dim};
-		VectorRef b = {.data = b_data, .dim = dim};
+		Vec32Ref a = {.data = a_data, .dim = dim};
+		Vec32Ref b = {.data = b_data, .dim = dim};
 
 		Distance d_scalar = mkt_distance_ip(a, b);
 
@@ -483,8 +483,8 @@ TEST_PARAMETERIZED(cosine_simd_variant, "compiler", "avx2", "avx512", "neon")
 		float *a_data = alloc_test_vector(dim, 1);
 		float *b_data = alloc_test_vector(dim, 13);
 
-		VectorRef a = {.data = a_data, .dim = dim};
-		VectorRef b = {.data = b_data, .dim = dim};
+		Vec32Ref a = {.data = a_data, .dim = dim};
+		Vec32Ref b = {.data = b_data, .dim = dim};
 
 		Distance d_scalar = mkt_distance_cosine(a, b);
 
@@ -510,10 +510,10 @@ TEST_PARAMETERIZED(cosine_simd_variant, "compiler", "avx2", "avx512", "neon")
 
 TEST(dimension_mismatch)
 {
-	float	  a_data[] = {1.0f, 2.0f, 3.0f};
-	float	  b_data[] = {4.0f, 5.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 2};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f};
+	float	 b_data[] = {4.0f, 5.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 2};
 
 	Distance d = mkt_distance_l2(a, b);
 	ASSERT_FLOAT_EQ(-1.0f, d, 1e-6f, "should return error");
@@ -521,9 +521,9 @@ TEST(dimension_mismatch)
 
 TEST(null_pointer_a)
 {
-	float	  b_data[] = {1.0f, 2.0f, 3.0f};
-	VectorRef a		   = {.data = NULL, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 3};
+	float	 b_data[] = {1.0f, 2.0f, 3.0f};
+	Vec32Ref a		  = {.data = NULL, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 3};
 
 	Distance d = mkt_distance_l2(a, b);
 	ASSERT_FLOAT_EQ(-1.0f, d, 1e-6f, "should return error");
@@ -531,9 +531,9 @@ TEST(null_pointer_a)
 
 TEST(null_pointer_b)
 {
-	float	  a_data[] = {1.0f, 2.0f, 3.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = NULL, .dim = 3};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = NULL, .dim = 3};
 
 	Distance d = mkt_distance_l2(a, b);
 	ASSERT_FLOAT_EQ(-1.0f, d, 1e-6f, "should return error");
@@ -541,10 +541,10 @@ TEST(null_pointer_b)
 
 TEST(zero_dimension)
 {
-	float	  a_data[] = {1.0f};
-	float	  b_data[] = {2.0f};
-	VectorRef a		   = {.data = a_data, .dim = 0};
-	VectorRef b		   = {.data = b_data, .dim = 0};
+	float	 a_data[] = {1.0f};
+	float	 b_data[] = {2.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 0};
+	Vec32Ref b		  = {.data = b_data, .dim = 0};
 
 	Distance d = mkt_distance_l2(a, b);
 	ASSERT_FLOAT_EQ(-1.0f, d, 1e-6f, "should return error");
@@ -568,8 +568,8 @@ TEST(unaligned_access)
 		memcpy((char *)b_data + i * sizeof(float), &val_b, sizeof(float));
 	}
 
-	VectorRef a = {.data = a_data, .dim = 64};
-	VectorRef b = {.data = b_data, .dim = 64};
+	Vec32Ref a = {.data = a_data, .dim = 64};
+	Vec32Ref b = {.data = b_data, .dim = 64};
 
 	Distance d = mkt_distance_l2(a, b);
 	ASSERT_FLOAT_EQ(64.0f, d, 1e-5f, "unaligned should work");
@@ -577,9 +577,9 @@ TEST(unaligned_access)
 
 TEST(null_pointer_ip)
 {
-	float	  a_data[] = {1.0f, 2.0f, 3.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = NULL, .dim = 3};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = NULL, .dim = 3};
 
 	Distance d = mkt_distance_ip(a, b);
 	ASSERT_FLOAT_EQ(-1.0f, d, 1e-6f, "IP should return error for null");
@@ -587,9 +587,9 @@ TEST(null_pointer_ip)
 
 TEST(null_pointer_cosine)
 {
-	float	  a_data[] = {1.0f, 2.0f, 3.0f};
-	VectorRef a		   = {.data = NULL, .dim = 3};
-	VectorRef b		   = {.data = a_data, .dim = 3};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f};
+	Vec32Ref a		  = {.data = NULL, .dim = 3};
+	Vec32Ref b		  = {.data = a_data, .dim = 3};
 
 	Distance d = mkt_distance_cosine(a, b);
 	ASSERT_FLOAT_EQ(-1.0f, d, 1e-6f, "cosine should return error for null");
@@ -597,10 +597,10 @@ TEST(null_pointer_cosine)
 
 TEST(cosine_zero_vector)
 {
-	float	  a_data[] = {0.0f, 0.0f, 0.0f};
-	float	  b_data[] = {1.0f, 2.0f, 3.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 3};
+	float	 a_data[] = {0.0f, 0.0f, 0.0f};
+	float	 b_data[] = {1.0f, 2.0f, 3.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 3};
 
 	/* Zero vector should return maximum distance (1.0) */
 	Distance d = mkt_distance_cosine(a, b);
@@ -609,9 +609,9 @@ TEST(cosine_zero_vector)
 
 TEST(cosine_both_zero_vectors)
 {
-	float	  data[] = {0.0f, 0.0f, 0.0f};
-	VectorRef a		 = {.data = data, .dim = 3};
-	VectorRef b		 = {.data = data, .dim = 3};
+	float	 data[] = {0.0f, 0.0f, 0.0f};
+	Vec32Ref a		= {.data = data, .dim = 3};
+	Vec32Ref b		= {.data = data, .dim = 3};
 
 	Distance d = mkt_distance_cosine(a, b);
 	ASSERT_FLOAT_EQ(1.0f, d, 1e-6f, "both zero should give max distance");
@@ -621,8 +621,8 @@ TEST(invalid_metric_enum)
 {
 	float		   a_data[] = {1.0f, 2.0f, 3.0f};
 	float		   b_data[] = {4.0f, 5.0f, 6.0f};
-	VectorRef	   a		= {.data = a_data, .dim = 3};
-	VectorRef	   b		= {.data = b_data, .dim = 3};
+	Vec32Ref	   a		= {.data = a_data, .dim = 3};
+	Vec32Ref	   b		= {.data = b_data, .dim = 3};
 	DistanceMetric invalid	= (DistanceMetric)999;
 
 	Distance d = mkt_distance(a, b, invalid);
@@ -646,15 +646,15 @@ TEST(batch_l2_matches_single_pair)
 		for (Dimension i = 0; i < dim; i++)
 			vectors[v * dim + i] = (float)(v * 10 + i);
 
-	VectorRef q = {.data = query, .dim = dim};
+	Vec32Ref q = {.data = query, .dim = dim};
 
 	int ret = mkt_distance_batch_l2(q, vectors, count, dim, distances);
 	ASSERT_EQ(0, ret, "batch should succeed");
 
 	for (uint32_t v = 0; v < count; v++)
 	{
-		VectorRef vec	   = {.data = vectors + v * dim, .dim = dim};
-		Distance  d_single = mkt_distance_l2(q, vec);
+		Vec32Ref vec	  = {.data = vectors + v * dim, .dim = dim};
+		Distance d_single = mkt_distance_l2(q, vec);
 
 		char msg[128];
 		snprintf(msg, sizeof(msg), "batch[%u] should match single-pair", v);
@@ -675,15 +675,15 @@ TEST(batch_ip_matches_single_pair)
 		for (Dimension i = 0; i < dim; i++)
 			vectors[v * dim + i] = (float)(v * 5 + i + 1);
 
-	VectorRef q = {.data = query, .dim = dim};
+	Vec32Ref q = {.data = query, .dim = dim};
 
 	int ret = mkt_distance_batch_ip(q, vectors, count, dim, distances);
 	ASSERT_EQ(0, ret, "batch should succeed");
 
 	for (uint32_t v = 0; v < count; v++)
 	{
-		VectorRef vec	   = {.data = vectors + v * dim, .dim = dim};
-		Distance  d_single = mkt_distance_ip(q, vec);
+		Vec32Ref vec	  = {.data = vectors + v * dim, .dim = dim};
+		Distance d_single = mkt_distance_ip(q, vec);
 
 		char msg[128];
 		snprintf(msg, sizeof(msg), "batch[%u] should match single-pair", v);
@@ -704,15 +704,15 @@ TEST(batch_cosine_matches_single_pair)
 		for (Dimension i = 0; i < dim; i++)
 			vectors[v * dim + i] = (float)(v * 3 + i + 2);
 
-	VectorRef q = {.data = query, .dim = dim};
+	Vec32Ref q = {.data = query, .dim = dim};
 
 	int ret = mkt_distance_batch_cosine(q, vectors, count, dim, distances);
 	ASSERT_EQ(0, ret, "batch should succeed");
 
 	for (uint32_t v = 0; v < count; v++)
 	{
-		VectorRef vec	   = {.data = vectors + v * dim, .dim = dim};
-		Distance  d_single = mkt_distance_cosine(q, vec);
+		Vec32Ref vec	  = {.data = vectors + v * dim, .dim = dim};
+		Distance d_single = mkt_distance_cosine(q, vec);
 
 		char msg[128];
 		snprintf(msg, sizeof(msg), "batch[%u] should match single-pair", v);
@@ -726,7 +726,7 @@ TEST(batch_dimension_mismatch)
 	float	 vectors_data[] = {4.0f, 5.0f, 6.0f, 7.0f};
 	Distance distances[2];
 
-	VectorRef q = {.data = query_data, .dim = 3};
+	Vec32Ref q = {.data = query_data, .dim = 3};
 
 	int ret = mkt_distance_batch_l2(q, vectors_data, 2, 2, distances);
 	ASSERT_EQ(-1, ret, "should return error on dimension mismatch");
@@ -734,9 +734,9 @@ TEST(batch_dimension_mismatch)
 
 TEST(batch_null_query_data)
 {
-	float	  vectors_data[] = {1.0f, 2.0f, 3.0f};
-	Distance  distances[1];
-	VectorRef q = {.data = NULL, .dim = 3};
+	float	 vectors_data[] = {1.0f, 2.0f, 3.0f};
+	Distance distances[1];
+	Vec32Ref q = {.data = NULL, .dim = 3};
 
 	int ret = mkt_distance_batch_l2(q, vectors_data, 1, 3, distances);
 	ASSERT_EQ(-1, ret, "should return error for null query data");
@@ -744,9 +744,9 @@ TEST(batch_null_query_data)
 
 TEST(batch_null_vectors)
 {
-	float	  query_data[] = {1.0f, 2.0f, 3.0f};
-	Distance  distances[1];
-	VectorRef q = {.data = query_data, .dim = 3};
+	float	 query_data[] = {1.0f, 2.0f, 3.0f};
+	Distance distances[1];
+	Vec32Ref q = {.data = query_data, .dim = 3};
 
 	int ret = mkt_distance_batch_l2(q, NULL, 1, 3, distances);
 	ASSERT_EQ(-1, ret, "should return error for null vectors");
@@ -754,9 +754,9 @@ TEST(batch_null_vectors)
 
 TEST(batch_null_distances)
 {
-	float	  query_data[]	 = {1.0f, 2.0f, 3.0f};
-	float	  vectors_data[] = {4.0f, 5.0f, 6.0f};
-	VectorRef q				 = {.data = query_data, .dim = 3};
+	float	 query_data[]	= {1.0f, 2.0f, 3.0f};
+	float	 vectors_data[] = {4.0f, 5.0f, 6.0f};
+	Vec32Ref q				= {.data = query_data, .dim = 3};
 
 	int ret = mkt_distance_batch_l2(q, vectors_data, 1, 3, NULL);
 	ASSERT_EQ(-1, ret, "should return error for null distances array");
@@ -764,9 +764,9 @@ TEST(batch_null_distances)
 
 TEST(batch_ip_null_vectors)
 {
-	float	  query_data[] = {1.0f, 2.0f, 3.0f};
-	Distance  distances[1];
-	VectorRef q = {.data = query_data, .dim = 3};
+	float	 query_data[] = {1.0f, 2.0f, 3.0f};
+	Distance distances[1];
+	Vec32Ref q = {.data = query_data, .dim = 3};
 
 	int ret = mkt_distance_batch_ip(q, NULL, 1, 3, distances);
 	ASSERT_EQ(-1, ret, "IP batch should return error for null vectors");
@@ -774,9 +774,9 @@ TEST(batch_ip_null_vectors)
 
 TEST(batch_cosine_null_distances)
 {
-	float	  query_data[]	 = {1.0f, 2.0f, 3.0f};
-	float	  vectors_data[] = {4.0f, 5.0f, 6.0f};
-	VectorRef q				 = {.data = query_data, .dim = 3};
+	float	 query_data[]	= {1.0f, 2.0f, 3.0f};
+	float	 vectors_data[] = {4.0f, 5.0f, 6.0f};
+	Vec32Ref q				= {.data = query_data, .dim = 3};
 
 	int ret = mkt_distance_batch_cosine(q, vectors_data, 1, 3, NULL);
 	ASSERT_EQ(-1, ret, "cosine batch should return error for null distances");
@@ -796,7 +796,7 @@ TEST(batch_odd_dimension_l2)
 		for (Dimension i = 0; i < dim; i++)
 			vectors[v * dim + i] = (float)(v * 7 + i);
 
-	VectorRef q = {.data = query, .dim = dim};
+	Vec32Ref q = {.data = query, .dim = dim};
 
 	int ret = mkt_distance_batch_l2(q, vectors, count, dim, distances);
 	ASSERT_EQ(0, ret, "batch with odd dimension should succeed");
@@ -804,8 +804,8 @@ TEST(batch_odd_dimension_l2)
 	/* Verify against single-pair */
 	for (uint32_t v = 0; v < count; v++)
 	{
-		VectorRef vec	   = {.data = vectors + v * dim, .dim = dim};
-		Distance  d_single = mkt_distance_l2(q, vec);
+		Vec32Ref vec	  = {.data = vectors + v * dim, .dim = dim};
+		Distance d_single = mkt_distance_l2(q, vec);
 
 		char msg[128];
 		snprintf(msg, sizeof(msg), "batch[%u] odd dim should match", v);
@@ -827,15 +827,15 @@ TEST(batch_odd_dimension_ip)
 		for (Dimension i = 0; i < dim; i++)
 			vectors[v * dim + i] = (float)(v * 5 + i + 2);
 
-	VectorRef q = {.data = query, .dim = dim};
+	Vec32Ref q = {.data = query, .dim = dim};
 
 	int ret = mkt_distance_batch_ip(q, vectors, count, dim, distances);
 	ASSERT_EQ(0, ret, "batch with odd dimension should succeed");
 
 	for (uint32_t v = 0; v < count; v++)
 	{
-		VectorRef vec	   = {.data = vectors + v * dim, .dim = dim};
-		Distance  d_single = mkt_distance_ip(q, vec);
+		Vec32Ref vec	  = {.data = vectors + v * dim, .dim = dim};
+		Distance d_single = mkt_distance_ip(q, vec);
 
 		char msg[128];
 		snprintf(msg, sizeof(msg), "batch[%u] odd dim IP should match", v);
@@ -857,15 +857,15 @@ TEST(batch_odd_dimension_cosine)
 		for (Dimension i = 0; i < dim; i++)
 			vectors[v * dim + i] = (float)(v * 3 + i + 1);
 
-	VectorRef q = {.data = query, .dim = dim};
+	Vec32Ref q = {.data = query, .dim = dim};
 
 	int ret = mkt_distance_batch_cosine(q, vectors, count, dim, distances);
 	ASSERT_EQ(0, ret, "batch with odd dimension should succeed");
 
 	for (uint32_t v = 0; v < count; v++)
 	{
-		VectorRef vec	   = {.data = vectors + v * dim, .dim = dim};
-		Distance  d_single = mkt_distance_cosine(q, vec);
+		Vec32Ref vec	  = {.data = vectors + v * dim, .dim = dim};
+		Distance d_single = mkt_distance_cosine(q, vec);
 
 		char msg[128];
 		snprintf(msg, sizeof(msg), "batch[%u] odd dim cosine should match", v);
@@ -878,9 +878,9 @@ TEST(scalar_null_pointer_checks)
 	/* Force scalar implementation to test its error paths */
 	reinit_distance_with_simd(SIMD_NONE);
 
-	float	  a_data[] = {1.0f, 2.0f, 3.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b_null   = {.data = NULL, .dim = 3};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b_null	  = {.data = NULL, .dim = 3};
 
 	Distance d = mkt_distance_l2(a, b_null);
 	ASSERT_FLOAT_EQ(-1.0f, d, 1e-6f, "scalar L2 should error on null");
@@ -900,10 +900,10 @@ TEST(scalar_cosine_zero_vector)
 	/* Force scalar to test zero vector handling in cosine */
 	reinit_distance_with_simd(SIMD_NONE);
 
-	float	  zero[] = {0.0f, 0.0f, 0.0f};
-	float	  norm[] = {1.0f, 2.0f, 3.0f};
-	VectorRef a		 = {.data = zero, .dim = 3};
-	VectorRef b		 = {.data = norm, .dim = 3};
+	float	 zero[] = {0.0f, 0.0f, 0.0f};
+	float	 norm[] = {1.0f, 2.0f, 3.0f};
+	Vec32Ref a		= {.data = zero, .dim = 3};
+	Vec32Ref b		= {.data = norm, .dim = 3};
 
 	Distance d = mkt_distance_cosine(a, b);
 	ASSERT_FLOAT_EQ(1.0f, d, 1e-6f, "scalar cosine zero vector");
@@ -918,10 +918,10 @@ TEST(scalar_cosine_zero_vector)
 
 TEST(generic_distance_l2)
 {
-	float	  a_data[] = {1.0f, 2.0f, 3.0f};
-	float	  b_data[] = {4.0f, 5.0f, 6.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 3};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f};
+	float	 b_data[] = {4.0f, 5.0f, 6.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 3};
 
 	Distance d		  = mkt_distance(a, b, DISTANCE_L2);
 	Distance d_direct = mkt_distance_l2(a, b);
@@ -931,10 +931,10 @@ TEST(generic_distance_l2)
 
 TEST(generic_distance_ip)
 {
-	float	  a_data[] = {1.0f, 2.0f, 3.0f};
-	float	  b_data[] = {4.0f, 5.0f, 6.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 3};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f};
+	float	 b_data[] = {4.0f, 5.0f, 6.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 3};
 
 	Distance d		  = mkt_distance(a, b, DISTANCE_INNER_PRODUCT);
 	Distance d_direct = mkt_distance_ip(a, b);
@@ -944,10 +944,10 @@ TEST(generic_distance_ip)
 
 TEST(generic_distance_cosine)
 {
-	float	  a_data[] = {1.0f, 2.0f, 3.0f};
-	float	  b_data[] = {4.0f, 5.0f, 6.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 3};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f};
+	float	 b_data[] = {4.0f, 5.0f, 6.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 3};
 
 	Distance d		  = mkt_distance(a, b, DISTANCE_COSINE);
 	Distance d_direct = mkt_distance_cosine(a, b);
@@ -991,10 +991,10 @@ TEST(force_compiler_implementation)
 	ASSERT_STR_EQ("compiler", name, "should use compiler implementation");
 
 	/* Test basic functionality in scalar mode */
-	float	  a_data[] = {1.0f, 2.0f, 3.0f};
-	float	  b_data[] = {4.0f, 5.0f, 6.0f};
-	VectorRef a		   = {.data = a_data, .dim = 3};
-	VectorRef b		   = {.data = b_data, .dim = 3};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f};
+	float	 b_data[] = {4.0f, 5.0f, 6.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 3};
+	Vec32Ref b		  = {.data = b_data, .dim = 3};
 
 	Distance d = mkt_distance_l2(a, b);
 	ASSERT_FLOAT_EQ(27.0f, d, 1e-5f, "scalar L2 should work");
@@ -1010,7 +1010,7 @@ TEST(force_compiler_implementation)
 		for (Dimension j = 0; j < dim; j++)
 			vectors[i * dim + j] = (float)(i * 2 + j);
 
-	VectorRef q = {.data = query, .dim = dim};
+	Vec32Ref q = {.data = query, .dim = dim};
 
 	/* Test all batch operations in scalar mode */
 	int ret = mkt_distance_batch_l2(q, vectors, count, dim, distances);
@@ -1046,10 +1046,10 @@ TEST(force_avx2_implementation)
 
 	/* Test all metrics with AVX2 - various dimensions to exercise all paths */
 	/* Dimension 8: exact AVX2 width */
-	float	  a_data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
-	float	  b_data[] = {2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f};
-	VectorRef a		   = {.data = a_data, .dim = 8};
-	VectorRef b		   = {.data = b_data, .dim = 8};
+	float	 a_data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+	float	 b_data[] = {2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f};
+	Vec32Ref a		  = {.data = a_data, .dim = 8};
+	Vec32Ref b		  = {.data = b_data, .dim = 8};
 
 	Distance d_l2 = mkt_distance_l2(a, b);
 	ASSERT_FLOAT_EQ(8.0f, d_l2, 1e-5f, "AVX2 L2 should work");
@@ -1072,7 +1072,7 @@ TEST(force_avx2_implementation)
 		for (Dimension j = 0; j < dim; j++)
 			vectors[i * dim + j] = (float)(i + j);
 
-	VectorRef q = {.data = query, .dim = dim};
+	Vec32Ref q = {.data = query, .dim = dim};
 
 	/* Test batch L2 */
 	int ret = mkt_distance_batch_l2(q, vectors, count, dim, distances);
@@ -1110,8 +1110,8 @@ TEST(force_avx512_implementation)
 	float a_data[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 	float b_data[16] =
 			{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17};
-	VectorRef a = {.data = a_data, .dim = 16};
-	VectorRef b = {.data = b_data, .dim = 16};
+	Vec32Ref a = {.data = a_data, .dim = 16};
+	Vec32Ref b = {.data = b_data, .dim = 16};
 
 	Distance d_l2 = mkt_distance_l2(a, b);
 	ASSERT_FLOAT_EQ(16.0f, d_l2, 1e-5f, "AVX-512 L2 should work");
@@ -1134,7 +1134,7 @@ TEST(force_avx512_implementation)
 		for (Dimension j = 0; j < dim; j++)
 			vectors[i * dim + j] = (float)(i + j);
 
-	VectorRef q = {.data = query, .dim = dim};
+	Vec32Ref q = {.data = query, .dim = dim};
 
 	/* Test batch L2 */
 	int ret = mkt_distance_batch_l2(q, vectors, count, dim, distances);
@@ -1170,10 +1170,10 @@ TEST(test_all_avx_dimensions)
 	{
 		Dimension dim = dims[i];
 
-		float	 *a	 = alloc_test_vector(dim, 0);
-		float	 *b	 = alloc_test_vector(dim, 1);
-		VectorRef va = {.data = a, .dim = dim};
-		VectorRef vb = {.data = b, .dim = dim};
+		float	*a	= alloc_test_vector(dim, 0);
+		float	*b	= alloc_test_vector(dim, 1);
+		Vec32Ref va = {.data = a, .dim = dim};
+		Vec32Ref vb = {.data = b, .dim = dim};
 
 		/* Test with each available SIMD level */
 		SimdCapability caps = mkt_detect_simd();

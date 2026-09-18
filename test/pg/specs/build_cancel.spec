@@ -14,9 +14,9 @@
 setup
 {
     CREATE EXTENSION injection_points;
-    CREATE TABLE emb (v vector(3)) WITH (parallel_workers = 2);
+    CREATE TABLE emb (v vec32(3)) WITH (parallel_workers = 2);
     INSERT INTO emb (v)
-        SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vector
+        SELECT format('[%s,%s,%s]', x * 0.1, y * 0.1, z * 0.1)::vec32
         FROM generate_series(0, 9) x,
              generate_series(0, 9) y,
              generate_series(0, 9) z;

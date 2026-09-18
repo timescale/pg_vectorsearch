@@ -99,7 +99,7 @@ typedef struct KMeansOptions
 KMeansResult *mkt_kmeans(
 		const void			*vectors,
 		const uint32_t		*indices,
-		MktVecType			 vec_type,
+		VecType				 vec_type,
 		uint32_t			 nvecs,
 		Dimension			 dim,
 		uint32_t			 nlist,

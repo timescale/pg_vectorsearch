@@ -1,10 +1,10 @@
 /*
- * mkt_halfvec.h - Half-precision (float16) vector type and type dispatch
+ * vec16.h - Half-precision (float16) vector type and type dispatch
  *
  * Provides:
  * - Platform-adaptive half type (F16C, _Float16, or uint16_t fallback)
- * - MktHalfVector struct (binary-compatible with pgvector's HalfVector)
- * - MktVectorTypeOps vtable for type-generic k-means and quantization
+ * - Vec16 struct (binary-compatible with pgvector's HalfVector)
+ * - Vec32TypeOps vtable for type-generic k-means and quantization
  * - Scalar and bulk conversion between half and float
  *
  * The vtable enables mixed-type distance computation (vec_type × float32
@@ -13,8 +13,8 @@
  * (CBLAS sgemm, RaBitQ rotation).
  */
 
-#ifndef MKT_HALFVEC_H
-#define MKT_HALFVEC_H
+#ifndef VEC16_H
+#define VEC16_H
 
 #include <float.h>
 #include <math.h>
@@ -207,44 +207,43 @@ mkt_half_is_zero(half h)
 }
 
 /* ----------------------------------------------------------------
- * MktHalfVector (binary-compatible with pgvector HalfVector)
+ * Vec16 (binary-compatible with pgvector HalfVector)
  * ---------------------------------------------------------------- */
 
-typedef struct MktHalfVector
+typedef struct Vec16
 {
 	int32_t vl_len_; /* varlena header / size in standalone mode */
 	int16_t dim;	 /* number of dimensions */
 	int16_t unused;	 /* reserved for future use, always zero */
 	half	x[];	 /* flexible array member */
-} MktHalfVector;
+} Vec16;
 
-#define MKT_HALFVEC_SIZE(dim) \
-	(offsetof(MktHalfVector, x) + sizeof(half) * (dim))
-#define MKT_HALFVEC_DIM(v)	((v)->dim)
-#define MKT_HALFVEC_DATA(v) ((v)->x)
+#define VEC16_SIZE(dim) (offsetof(Vec16, x) + sizeof(half) * (dim))
+#define VEC16_DIM(v)	((v)->dim)
+#define VEC16_DATA(v)	((v)->x)
 
 /* ----------------------------------------------------------------
- * Bulk conversion (SIMD-dispatched in mkt_halfvec.c)
+ * Bulk conversion (SIMD-dispatched in vec16.c)
  * ---------------------------------------------------------------- */
 
 void mkt_half_to_float_array(const half *src, float *dst, uint32_t n);
 void mkt_float_to_half_array(const float *src, half *dst, uint32_t n);
 
 /* ----------------------------------------------------------------
- * MktHalfVector lifecycle
+ * Vec16 lifecycle
  * ---------------------------------------------------------------- */
 
-MktHalfVector *mkt_halfvec_create(Dimension dim);
-MktHalfVector *mkt_halfvec_from_floats(const float *values, Dimension dim);
-void		   mkt_halfvec_free(MktHalfVector *v);
-void		   mkt_halfvec_set(MktHalfVector *v, const float *values);
+Vec16 *vec16_create(Dimension dim);
+Vec16 *vec16_from_floats(const float *values, Dimension dim);
+void   vec16_free(Vec16 *v);
+void   vec16_set(Vec16 *v, const float *values);
 
-/* Convert to VectorRef (requires caller-provided float32 buffer) */
-static inline VectorRef
-MktHalfVectorToRef(const MktHalfVector *hv, float *buffer)
+/* Convert to Vec32Ref (requires caller-provided float32 buffer) */
+static inline Vec32Ref
+Vec16ToRef(const Vec16 *hv, float *buffer)
 {
 	mkt_half_to_float_array(hv->x, buffer, hv->dim);
-	return (VectorRef){.data = buffer, .dim = (Dimension)hv->dim};
+	return (Vec32Ref){.data = buffer, .dim = (Dimension)hv->dim};
 }
 
 /* ----------------------------------------------------------------
@@ -314,7 +313,7 @@ mkt_f16_to_float_block(
 	return dst;
 }
 
-static const MktVectorTypeOps mkt_f16_type_ops = {
+static const Vec32TypeOps mkt_f16_type_ops = {
 		.name			= "float16",
 		.element_size	= sizeof(half),
 		.dot_product	= mkt_f16_dot_product,
@@ -432,7 +431,7 @@ mkt_f16c_sum_to_float(const void *vec, float *accum, Dimension dim)
 		accum[d] += mkt_half_to_float(v[d]);
 }
 
-static const MktVectorTypeOps mkt_f16c_type_ops = {
+static const Vec32TypeOps mkt_f16c_type_ops = {
 		.name			= "float16-f16c",
 		.element_size	= sizeof(half),
 		.dot_product	= mkt_f16c_dot_product,
@@ -445,4 +444,4 @@ static const MktVectorTypeOps mkt_f16c_type_ops = {
 
 #endif /* MKT_F16C_SUPPORT && !MKT_SIMD_NONE */
 
-#endif /* MKT_HALFVEC_H */
+#endif /* VEC16_H */

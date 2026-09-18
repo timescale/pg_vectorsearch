@@ -1,67 +1,67 @@
 /*
- * mkt_vector.h - Vector type compatible with pgvector
+ * vec32.h - Vector type compatible with pgvector
  *
  * The struct layout is identical to pgvector's Vector type, enabling
  * zero-copy interoperability when running inside PostgreSQL.
  */
 
-#ifndef MKT_VECTOR_H
-#define MKT_VECTOR_H
+#ifndef VEC32_H
+#define VEC32_H
 
 #include <stdint.h>
 #include <string.h>
 
 #include "core/types.h"
 
-#define MKT_VECTOR_MAX_DIM 16000
+#define VEC32_MAX_DIM 16000
 
 /*
- * MktVector: Binary-compatible with pgvector's Vector type.
+ * Vec32: Binary-compatible with pgvector's Vector type.
  *
  * The struct layout is identical in both standalone and PostgreSQL modes.
  * In standalone mode, vl_len_ stores the total size (not used as varlena).
  * In PostgreSQL mode, vl_len_ is managed by SET_VARSIZE/VARSIZE macros.
  */
-typedef struct MktVector
+typedef struct Vec32
 {
 	int32_t vl_len_; /* varlena header / size in standalone mode */
 	int16_t dim;	 /* number of dimensions */
 	int16_t unused;	 /* reserved for future use, always zero */
 	float	x[];	 /* flexible array member */
-} MktVector;
+} Vec32;
 
-#define MKT_VECTOR_SIZE(dim) (offsetof(MktVector, x) + sizeof(float) * (dim))
-#define MKT_VECTOR_DIM(v)	 ((v)->dim)
-#define MKT_VECTOR_DATA(v)	 ((v)->x)
+#define VEC32_SIZE(dim) (offsetof(Vec32, x) + sizeof(float) * (dim))
+#define VEC32_DIM(v)	((v)->dim)
+#define VEC32_DATA(v)	((v)->x)
 
-/* Convert to VectorRef for internal operations */
-static inline VectorRef
-MktVectorToRef(const MktVector *v)
+/* Convert to Vec32Ref for internal operations */
+static inline Vec32Ref
+Vec32ToRef(const Vec32 *v)
 {
-	return (VectorRef){.data = v->x, .dim = (Dimension)v->dim};
+	return (Vec32Ref){.data = v->x, .dim = (Dimension)v->dim};
 }
 
 /* Convert to VectorMut for mutable operations */
 static inline VectorMut
-MktVectorToMut(MktVector *v)
+Vec32ToMut(Vec32 *v)
 {
 	return (VectorMut){.data = v->x, .dim = (Dimension)v->dim};
 }
 
 /* Allocation and lifecycle */
-MktVector *mkt_vector_create(Dimension dim);
-MktVector *mkt_vector_copy(const MktVector *src);
-void	   mkt_vector_free(MktVector *v);
+Vec32 *vec32_create(Dimension dim);
+Vec32 *vec32_copy(const Vec32 *src);
+void   vec32_free(Vec32 *v);
 
 /* Initialization */
-void mkt_vector_set(MktVector *v, const float *values);
-void mkt_vector_zero(MktVector *v);
-void mkt_vector_fill(MktVector *v, float value);
+void vec32_set(Vec32 *v, const float *values);
+void vec32_zero(Vec32 *v);
+void vec32_fill(Vec32 *v, float value);
 
 /* Operations */
-float mkt_vector_dot(const MktVector *a, const MktVector *b);
-float mkt_vector_norm(const MktVector *v);
-void  mkt_vector_normalize(MktVector *v);
+float vec32_dot(const Vec32 *a, const Vec32 *b);
+float vec32_norm(const Vec32 *v);
+void  vec32_normalize(Vec32 *v);
 
 /* ----------------------------------------------------------------
  * Inline vtable for compile-time specialization
@@ -129,7 +129,7 @@ mkt_f32_to_float_block(
 	return (const float *)src;
 }
 
-static const MktVectorTypeOps mkt_f32_type_ops = {
+static const Vec32TypeOps mkt_f32_type_ops = {
 		.name			= "float32",
 		.element_size	= sizeof(float),
 		.dot_product	= mkt_f32_dot_product,
@@ -140,4 +140,4 @@ static const MktVectorTypeOps mkt_f32_type_ops = {
 		.to_float_block = mkt_f32_to_float_block,
 };
 
-#endif /* MKT_VECTOR_H */
+#endif /* VEC32_H */

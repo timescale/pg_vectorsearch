@@ -25,7 +25,7 @@ mkt_rabitq_in(PG_FUNCTION_ARGS)
 {
 	char   *str	   = PG_GETARG_CSTRING(0);
 	int32	typmod = PG_GETARG_INT32(2);
-	uint8_t bits_buf[MKT_VECTOR_MAX_DIM / 8];
+	uint8_t bits_buf[VEC32_MAX_DIM / 8];
 	int		dim = 0;
 	char   *p	= str;
 
@@ -45,11 +45,11 @@ mkt_rabitq_in(PG_FUNCTION_ARGS)
 	/* Parse bit characters */
 	while (*p && *p != ':' && *p != '}')
 	{
-		if (dim >= MKT_VECTOR_MAX_DIM)
+		if (dim >= VEC32_MAX_DIM)
 			ereport(ERROR,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 					 errmsg("rabitq cannot have more than %d dimensions",
-							MKT_VECTOR_MAX_DIM)));
+							VEC32_MAX_DIM)));
 
 		if (*p == '1')
 			bits_buf[dim / 8] |= (1 << (dim % 8));
@@ -313,8 +313,8 @@ PG_FUNCTION_INFO_V1(mkt_rabitq_encode_pg);
 Datum
 mkt_rabitq_encode_pg(PG_FUNCTION_ARGS)
 {
-	MktVector	   *input	 = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector	   *centroid = PG_GETARG_MKT_VECTOR_P(1);
+	Vec32		   *input	 = PG_GETARG_VEC32_P(0);
+	Vec32		   *centroid = PG_GETARG_VEC32_P(1);
 	RaBitQParamsPG *params	 = PG_GETARG_RABITQ_PARAMS_P(2);
 
 	mkt_pg_check_dims_match(input->dim, centroid->dim);
@@ -328,8 +328,8 @@ mkt_rabitq_encode_pg(PG_FUNCTION_ARGS)
 
 	RaBitQVector *result = mkt_pg_rabitq_alloc(dim);
 
-	VectorRef	input_ref	 = MktVectorToRef(input);
-	VectorRef	centroid_ref = MktVectorToRef(centroid);
+	Vec32Ref	input_ref	 = Vec32ToRef(input);
+	Vec32Ref	centroid_ref = Vec32ToRef(centroid);
 	RaBitQData *data		 = MKT_RABITQ_DATA(result);
 
 	int ret = mkt_rabitq_encode_into(rparams, input_ref, centroid_ref, data);

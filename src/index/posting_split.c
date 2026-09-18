@@ -489,15 +489,15 @@ drop_undersized_clusters(
 			if (owner[i] != (ClusterId)victim)
 				continue;
 
-			VectorRef v		 = {sample_vecs + (size_t)i * dim, dim};
-			uint32_t  best	 = UINT32_MAX;
-			Distance  best_d = 0;
+			Vec32Ref v		= {sample_vecs + (size_t)i * dim, dim};
+			uint32_t best	= UINT32_MAX;
+			Distance best_d = 0;
 			for (uint32_t j = 0; j < k; j++)
 			{
 				if (!live[j] || j == victim)
 					continue;
-				VectorRef c = {centroid_at(km->centroids, j, dim), dim};
-				Distance  d = mkt_distance(v, c, metric);
+				Vec32Ref c = {centroid_at(km->centroids, j, dim), dim};
+				Distance d = mkt_distance(v, c, metric);
 				if (best == UINT32_MAX || d < best_d)
 				{
 					best   = j;
@@ -585,13 +585,13 @@ write_one_vector(void *state, ItemPointerData tid)
 	}
 	else
 	{
-		VectorRef v	   = {w->one, dim};
-		Distance  best = 0;
-		target		   = 0;
+		Vec32Ref v	  = {w->one, dim};
+		Distance best = 0;
+		target		  = 0;
 		for (uint32_t j = 0; j < w->k; j++)
 		{
-			VectorRef c = {centroid_at(w->centroids, j, dim), dim};
-			Distance  d = mkt_distance(v, c, w->metric);
+			Vec32Ref c = {centroid_at(w->centroids, j, dim), dim};
+			Distance d = mkt_distance(v, c, w->metric);
 			if (j == 0 || d < best)
 			{
 				best   = d;

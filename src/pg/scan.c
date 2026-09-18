@@ -32,7 +32,7 @@
 #include "scan_bound.h"
 #include "support_pg.h"
 #include "typeinfo.h"
-#include "types/vector.h"
+#include "types/vec32.h"
 
 /* Default nprobe — will become a GUC later */
 #define MKT_DEFAULT_NPROBE 10
@@ -206,7 +206,7 @@ typedef struct MktannScanState
 	 * column values, because the ORDER BY argument has the opclass's input
 	 * type -- an access, not the vector itself.
 	 */
-	MktVectorAccess query_vector_access;
+	Vec32Access query_vector_access;
 } MktannScanState;
 
 const MktannScanStats *
@@ -240,7 +240,7 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	MktannScanInfo info = mktann_cache_scan_info(index);
 
 	/* From the per-backend cache; the buffer must outlive a rescan. */
-	ss->query_vector_access = mkt_vector_access(
+	ss->query_vector_access = vec32_access(
 			mktann_cache_type_info(index), ss->index_base.dim, scan_ctx);
 
 	/* Size the per-scan query buffers to the nprobe actually requested
@@ -520,10 +520,10 @@ execute_search(IndexScanDesc scan)
 	 * Extract query vector. The ORDER BY operator belongs to the opclass, so
 	 * its argument has the opclass's input type and the same descriptor
 	 * converts it -- into the scan-lifetime buffer, so a rescan does not leak
-	 * one per execution. mkt_vector_read rejects a dimension mismatch.
+	 * one per execution. vec32_read rejects a dimension mismatch.
 	 */
-	Datum	  query_datum = scan->orderByData[0].sk_argument;
-	VectorRef qref = mkt_vector_read(&ss->query_vector_access, query_datum);
+	Datum	 query_datum = scan->orderByData[0].sk_argument;
+	Vec32Ref qref		 = vec32_read(&ss->query_vector_access, query_datum);
 
 	if (qref.dim != ss->index_base.dim)
 		ereport(ERROR,

@@ -245,7 +245,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 	/* Encode vectors with RaBitQ */
 	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 	float		 *centroid = mkt_alloc0(dim * sizeof(float));
-	VectorRef	  cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref	  cent_ref = {.data = centroid, .dim = dim};
 
 	float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
 	for (uint32_t i = 0; i < count; i++)
@@ -267,7 +267,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 
 	float *query = mkt_alloc(dim * sizeof(float));
 	fill_random_floats(query, dim, 99999);
-	VectorRef query_ref = {.data = query, .dim = dim};
+	Vec32Ref query_ref = {.data = query, .dim = dim};
 
 	RaBitQQueryState *state =
 			mkt_rabitq_prepare_query(params, query_ref, cent_ref);

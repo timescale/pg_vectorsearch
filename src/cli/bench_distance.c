@@ -21,7 +21,7 @@
 #include "core/platform.h"
 #include "core/types.h"
 #include "distance_pgvector.h"
-#include "types/vector.h"
+#include "types/vec32.h"
 
 /* Default parameters */
 #define DEFAULT_DIM	  768
@@ -258,7 +258,7 @@ benchmark_impl_loop(
 		const float	   *query_data,
 		const float	   *db_data)
 {
-	VectorRef query = {.data = query_data, .dim = dim};
+	Vec32Ref query = {.data = query_data, .dim = dim};
 
 	/* Force re-initialization with this SIMD implementation */
 	mkt_simd_set_override(impl->mask);
@@ -268,7 +268,7 @@ benchmark_impl_loop(
 	/* Warm up (ensure code is in cache) */
 	for (int i = 0; i < 10; i++)
 	{
-		VectorRef vec = {.data = db_data, .dim = dim};
+		Vec32Ref vec = {.data = db_data, .dim = dim};
 		(void)mkt_distance(query, vec, metric);
 	}
 
@@ -284,8 +284,8 @@ benchmark_impl_loop(
 
 		for (uint32_t i = 0; i < count; i++)
 		{
-			VectorRef vec = {.data = db_data + i * dim, .dim = dim};
-			distances[i]  = mkt_distance(query, vec, metric);
+			Vec32Ref vec = {.data = db_data + i * dim, .dim = dim};
+			distances[i] = mkt_distance(query, vec, metric);
 		}
 
 		uint64_t end		 = get_time_ns();
@@ -365,7 +365,7 @@ benchmark_impl_batch(
 		const float	   *query_data,
 		const float	   *db_data)
 {
-	VectorRef query = {.data = query_data, .dim = dim};
+	Vec32Ref query = {.data = query_data, .dim = dim};
 
 	/* No reinitialization needed - we call implementations directly */
 
@@ -602,7 +602,7 @@ benchmark_pgvector(
 		const float	  *query_data,
 		const float	  *db_data)
 {
-	VectorRef query = {.data = query_data, .dim = dim};
+	Vec32Ref query = {.data = query_data, .dim = dim};
 
 	/* Allocate distances array */
 	Distance *distances = mkt_alloc(count * sizeof(Distance));
@@ -814,7 +814,7 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 		Distance *throwaway = mkt_alloc(count * sizeof(Distance));
 		if (throwaway != NULL)
 		{
-			VectorRef q = {.data = query_data, .dim = dim};
+			Vec32Ref q = {.data = query_data, .dim = dim};
 
 			/* Run full benchmark iterations as throwaway */
 			for (uint32_t run = 0; run < config->runs; run++)

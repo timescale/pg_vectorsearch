@@ -21,7 +21,7 @@
 #include "core/platform.h"
 #include "core/types.h"
 #include "kmeans_pgvector.h"
-#include "types/halfvec.h"
+#include "types/vec16.h"
 
 /* Default parameters */
 #define DEFAULT_DIM	  128
@@ -105,7 +105,7 @@ normalize_vectors(float *data, uint32_t nvecs, Dimension dim)
 		float *v	= data + (size_t)i * dim;
 		float  norm = mkt_l2_norm(v, dim);
 		if (norm > 1e-10f)
-			mkt_vector_scale(v, 1.0f / norm, v, dim);
+			vec32_scale(v, 1.0f / norm, v, dim);
 	}
 }
 
@@ -366,7 +366,7 @@ static KMeansResult *
 run_bench(
 		const ClusterBenchConfig *cfg,
 		const void				 *data,
-		MktVecType				  vec_type,
+		VecType					  vec_type,
 		KMeansAlgorithm			  algo)
 {
 	const char	 *name	= mkt_kmeans_algo_name(algo);
@@ -662,7 +662,7 @@ cmd_bench_cluster(CmdContext *ctx)
 		return 1;
 	}
 
-	MktVecType	vec_type   = MKT_VEC_F32;
+	VecType		vec_type   = MKT_VEC_F32;
 	const void *bench_data = data;
 	half	   *data_f16   = NULL;
 

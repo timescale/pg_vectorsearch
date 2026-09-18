@@ -21,7 +21,7 @@
 #include "core/platform.h"
 #include "core/types.h"
 #include "quant/rabitq.h"
-#include "types/vector.h"
+#include "types/vec32.h"
 
 /* Default parameters */
 #define DEFAULT_DIM	  768
@@ -504,7 +504,7 @@ cmd_bench_page_score(CmdContext *ctx)
 	/* Generate random centroid and vectors */
 	float *centroid = mkt_alloc(dim * sizeof(float));
 	generate_random_vector(centroid, dim);
-	VectorRef cent_ref = {.data = centroid, .dim = dim};
+	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
 	for (uint32_t i = 0; i < count; i++)
@@ -537,7 +537,7 @@ cmd_bench_page_score(CmdContext *ctx)
 	/* Generate random query and prepare query state */
 	float *query = mkt_alloc(dim * sizeof(float));
 	generate_random_vector(query, dim);
-	VectorRef query_ref = {.data = query, .dim = dim};
+	Vec32Ref query_ref = {.data = query, .dim = dim};
 
 	RaBitQQueryState *qstate =
 			mkt_rabitq_prepare_query(params, query_ref, cent_ref);

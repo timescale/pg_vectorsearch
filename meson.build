@@ -273,7 +273,7 @@ endif
 
 # F16C: hardware half-precision ↔ float conversion (available on all AVX2
 # CPUs, i.e. Haswell 2013+). Enables _cvtsh_ss / _cvtss_sh scalar intrinsics
-# globally so that inline half↔float conversion in types/halfvec.h compiles to
+# globally so that inline half↔float conversion in types/vec16.h compiles to
 # single vcvtsh2ss/vcvtss2sh instructions instead of software fallback.
 if simd_mode != 'none' and cc.compiles(
   '#include <immintrin.h>\nfloat f(unsigned short h) { return _cvtsh_ss(h); }',
@@ -350,8 +350,8 @@ mkt_core_sources = files(
   'src/standalone/thread_pool.c',
   'src/index/parallel_build_leader.c',
   'src/index/parallel_build_worker.c',
-  'src/types/halfvec.c',
-  'src/types/vector.c',
+  'src/types/vec16.c',
+  'src/types/vec32.c',
   'src/algo/distance.c',
   'src/algo/kmeans.c',
   'src/algo/kmeans_elkan.c',
@@ -376,7 +376,7 @@ mkt_core_sources = files(
   'src/index/posting_split.c',
   'src/index/posting_convert.c',
   'src/index/query_scan.c',
-  'src/standalone/vector_source.c',
+  'src/standalone/vec32_source.c',
   'src/standalone/index.c',
   'src/standalone/query.c',
   'src/standalone/api.c',
@@ -643,8 +643,8 @@ if build_pg_extension
   # memory_standalone.c)
   mkt_pg_core_sources = files(
     'src/core/platform.c',
-    'src/types/vector.c',
-    'src/types/halfvec.c',
+    'src/types/vec32.c',
+    'src/types/vec16.c',
     'src/algo/distance.c',
     'src/algo/kmeans.c',
     'src/algo/kmeans_elkan.c',
@@ -722,9 +722,9 @@ mkt_core_headers = files(
   'src/standalone/memory_sa.h',
   'src/pg/memory_pg.h',
   'src/core/platform.h',
-  'src/types/halfvec.h',
+  'src/types/vec16.h',
   'src/core/types.h',
-  'src/types/vector.h',
+  'src/types/vec32.h',
 )
 
 # Format target (uses pre-commit for consistency)

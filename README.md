@@ -12,12 +12,18 @@ similarity search using an IVF (Inverted File) index structure with quantized
 vectors.
 
 Meerkat is compatible with the vector types and operators from
-[pgvector][pgvector], but does not require it: Meerkat provides its own
-`vector` and `halfvec` types, binary-compatible with pgvector's.
+[pgvector][pgvector], but does not require it. Meerkat provides its own
+32-bit and 16-bit vector types, `vec32` and `vec16` (installed in the `mkt`
+schema by default). Their distinct names do not collide with pgvector's
+`vector` and `halfvec` types, so both extensions can coexist even when their
+objects are installed in the same schema.
 
-Where pgvector is already installed, an existing `vector` column can be
-indexed as it is -- no rewrite and no copy -- and queries already written
-against pgvector's operators use the meerkat index unchanged.
+The corresponding types are binary-compatible: `vec32` with pgvector's
+`vector`, and `vec16` with pgvector's `halfvec`. Meerkat installs
+zero-copy binary casts between them when pgvector is present. An existing
+pgvector column can therefore be indexed as-is -- no rewrite or copy -- and
+queries already written against pgvector's operators can use a Meerkat index
+unchanged.
 
 ## Features
 
@@ -163,16 +169,16 @@ SET search_path = mkt, public;
 -- Create table with vector column
 CREATE TABLE items (
     id serial PRIMARY KEY,
-    embedding vector(768)
+    embedding vec32(768)
 );
 
--- Create ANN index; vector_l2_ops is the default operator class
--- (vector_ip_ops and vector_cosine_ops select other metrics)
-CREATE INDEX ON items USING mktann (embedding vector_l2_ops);
+-- Create ANN index; vec32_l2_ops is the default operator class
+-- (vec32_ip_ops and vec32_cosine_ops select other metrics)
+CREATE INDEX ON items USING mktann (embedding vec32_l2_ops);
 
 -- Query nearest neighbors
 SELECT * FROM items
-ORDER BY embedding <-> '[...]'::vector
+ORDER BY embedding <-> '[...]'::vec32
 LIMIT 10;
 
 -- Speed/recall dial: probes more clusters for higher recall. The

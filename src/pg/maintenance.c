@@ -62,7 +62,7 @@
 #include "pg/bufstorage.h"
 #include "support_pg.h"
 #include "typeinfo.h"
-#include "types/vector.h"
+#include "types/vec32.h"
 
 /*
  * Lock mode the mutating maintenance entry points take on the index.
@@ -430,7 +430,7 @@ typedef struct PgSplitFetchCtx
 	/* How to read the indexed column as float32 -- the index's own type, not
 	 * an assumed one. Carries the conversion buffer, so it outlives a fetch.
 	 */
-	MktVectorAccess access;
+	Vec32Access access;
 	/* For the reserve-nlist seam, which has only this context to work from. */
 	MktStorage *storage;
 } PgSplitFetchCtx;
@@ -459,7 +459,7 @@ pg_split_fetch_vector(
 		/*
 		 * Read through the index's own type descriptor, as the insert and
 		 * rerank paths do. Reading the datum as a float32 vector directly
-		 * would be wrong for any other indexed type: a halfvec column passes
+		 * would be wrong for any other indexed type: a vec16 column passes
 		 * the shape check this maintenance requires, and its 16-bit payload
 		 * read as `dim` floats runs off the end of the value and feeds the
 		 * split whatever follows it.
@@ -472,7 +472,7 @@ pg_split_fetch_vector(
 		 */
 		struct varlena *raw	 = (struct varlena *)DatumGetPointer(val);
 		struct varlena *flat = pg_detoast_datum(raw);
-		VectorRef vref = mkt_vector_read(&c->access, PointerGetDatum(flat));
+		Vec32Ref		vref = vec32_read(&c->access, PointerGetDatum(flat));
 
 		memcpy(out, vref.data, (size_t)dim * sizeof(float));
 		ok = true;
@@ -812,7 +812,7 @@ maint_begin(Relation index, MaintCtx *m)
 	m->fetch.heap	= m->heap;
 	m->fetch.attnum = index->rd_index->indkey.values[0];
 	m->fetch.slot	= table_slot_create(m->heap, NULL);
-	m->fetch.access = mkt_vector_access(
+	m->fetch.access = vec32_access(
 			mktann_cache_type_info(index), m->base.dim, CurrentMemoryContext);
 	m->fetch.storage = &m->storage.base;
 

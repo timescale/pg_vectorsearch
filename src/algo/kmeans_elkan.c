@@ -165,7 +165,7 @@ precompute_norms_c(KMeansState *st)
  */
 __attribute__((always_inline)) static inline void
 elkan_initial_assign_impl(
-		KMeansState *st, ElkanState *es, const MktVectorTypeOps *ops)
+		KMeansState *st, ElkanState *es, const Vec32TypeOps *ops)
 {
 	uint32_t	 nvecs = st->nvecs;
 	uint32_t	 nlist = st->nlist;
@@ -211,7 +211,7 @@ elkan_initial_assign_impl(
  * (always float32 × float32). Only vector-centroid uses the typed ops.
  */
 __attribute__((always_inline)) static inline void
-elkan_assign_impl(KMeansState *st, ElkanState *es, const MktVectorTypeOps *ops)
+elkan_assign_impl(KMeansState *st, ElkanState *es, const Vec32TypeOps *ops)
 {
 	uint32_t	 nvecs = st->nvecs;
 	uint32_t	 nlist = st->nlist;
@@ -318,7 +318,7 @@ elkan_initial_assign_preconvert_impl(
 	const float *cents = st->centroids;
 	float		*buf   = st->vec_block;
 
-	const MktVectorTypeOps *f32ops = &mkt_f32_type_ops;
+	const Vec32TypeOps *f32ops = &mkt_f32_type_ops;
 
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
@@ -361,7 +361,7 @@ elkan_assign_preconvert_impl(KMeansState *st, ElkanState *es, size_t esz)
 	const float *cents = st->centroids;
 	float		*buf   = st->vec_block;
 
-	const MktVectorTypeOps *f32ops = &mkt_f32_type_ops;
+	const Vec32TypeOps *f32ops = &mkt_f32_type_ops;
 
 	if (!es->bounds_valid)
 	{

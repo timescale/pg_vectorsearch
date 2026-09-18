@@ -1,5 +1,5 @@
 /*
- * mkt_pg_vector.c - PostgreSQL functions for mkt.vector type
+ * vec32_pg.c - PostgreSQL functions for mkt.vec32 type
  *
  * Type I/O, distance functions, comparison operators, casts.
  * Distance functions bridge to SIMD-accelerated meerkat core.
@@ -21,14 +21,14 @@
  * Type I/O
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_vector_in);
+PG_FUNCTION_INFO_V1(mkt_vec32_in);
 
 Datum
-mkt_vector_in(PG_FUNCTION_ARGS)
+mkt_vec32_in(PG_FUNCTION_ARGS)
 {
 	char *str	 = PG_GETARG_CSTRING(0);
 	int32 typmod = PG_GETARG_INT32(2);
-	float values[MKT_VECTOR_MAX_DIM];
+	float values[VEC32_MAX_DIM];
 	int	  dim = 0;
 	char *p	  = str;
 
@@ -38,7 +38,7 @@ mkt_vector_in(PG_FUNCTION_ARGS)
 	if (*p != '[')
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-				 errmsg("vector must start with \"[\"")));
+				 errmsg("vec32 must start with \"[\"")));
 	p++;
 
 	/* Parse comma-separated floats */
@@ -54,17 +54,17 @@ mkt_vector_in(PG_FUNCTION_ARGS)
 			if (*p != ',')
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-						 errmsg("expected \",\" or \"]\" in vector")));
+						 errmsg("expected \",\" or \"]\" in vec32")));
 			p++;
 			while (*p == ' ' || *p == '\t')
 				p++;
 		}
 
-		if (dim >= MKT_VECTOR_MAX_DIM)
+		if (dim >= VEC32_MAX_DIM)
 			ereport(ERROR,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-					 errmsg("vector cannot have more than %d dimensions",
-							MKT_VECTOR_MAX_DIM)));
+					 errmsg("vec32 cannot have more than %d dimensions",
+							VEC32_MAX_DIM)));
 
 		char *end;
 		errno	  = 0;
@@ -72,7 +72,7 @@ mkt_vector_in(PG_FUNCTION_ARGS)
 		if (end == p || errno == ERANGE)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-					 errmsg("invalid input syntax for type vector: \"%s\"",
+					 errmsg("invalid input syntax for type vec32: \"%s\"",
 							str)));
 
 		mkt_pg_check_value_finite(val);
@@ -83,7 +83,7 @@ mkt_vector_in(PG_FUNCTION_ARGS)
 	if (*p != ']')
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-				 errmsg("vector must end with \"]\"")));
+				 errmsg("vec32 must end with \"]\"")));
 	p++;
 
 	/* Check no trailing content */
@@ -92,27 +92,27 @@ mkt_vector_in(PG_FUNCTION_ARGS)
 	if (*p != '\0')
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-				 errmsg("unexpected characters after \"]\" in vector")));
+				 errmsg("unexpected characters after \"]\" in vec32")));
 
 	if (dim < 1)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("vector must have at least 1 dimension")));
+				 errmsg("vec32 must have at least 1 dimension")));
 
 	mkt_pg_check_expected_dim(dim, typmod);
 
-	MktVector *result = mkt_pg_vector_alloc(dim);
+	Vec32 *result = mkt_pg_vec32_alloc(dim);
 	memcpy(result->x, values, dim * sizeof(float));
 
-	PG_RETURN_MKT_VECTOR_P(result);
+	PG_RETURN_VEC32_P(result);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vector_out);
+PG_FUNCTION_INFO_V1(mkt_vec32_out);
 
 Datum
-mkt_vector_out(PG_FUNCTION_ARGS)
+mkt_vec32_out(PG_FUNCTION_ARGS)
 {
-	MktVector	  *v = PG_GETARG_MKT_VECTOR_P(0);
+	Vec32		  *v = PG_GETARG_VEC32_P(0);
 	StringInfoData buf;
 
 	initStringInfo(&buf);
@@ -130,10 +130,10 @@ mkt_vector_out(PG_FUNCTION_ARGS)
 	PG_RETURN_CSTRING(buf.data);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vector_typmod_in);
+PG_FUNCTION_INFO_V1(mkt_vec32_typmod_in);
 
 Datum
-mkt_vector_typmod_in(PG_FUNCTION_ARGS)
+mkt_vec32_typmod_in(PG_FUNCTION_ARGS)
 {
 	ArrayType *ta = PG_GETARG_ARRAYTYPE_P(0);
 	int		   n;
@@ -160,15 +160,15 @@ PG_FUNCTION_INFO_V1(mkt_l2_distance);
 Datum
 mkt_l2_distance(PG_FUNCTION_ARGS)
 {
-	MktVector *a = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector *b = PG_GETARG_MKT_VECTOR_P(1);
+	Vec32 *a = PG_GETARG_VEC32_P(0);
+	Vec32 *b = PG_GETARG_VEC32_P(1);
 
 	mkt_pg_check_dims_match(a->dim, b->dim);
 
-	VectorRef ra  = MktVectorToRef(a);
-	VectorRef rb  = MktVectorToRef(b);
-	float	  d2  = mkt_distance_l2(ra, rb);
-	double	  res = sqrt((double)d2);
+	Vec32Ref ra	 = Vec32ToRef(a);
+	Vec32Ref rb	 = Vec32ToRef(b);
+	float	 d2	 = mkt_distance_l2(ra, rb);
+	double	 res = sqrt((double)d2);
 
 	PG_RETURN_FLOAT8(res);
 }
@@ -178,14 +178,14 @@ PG_FUNCTION_INFO_V1(mkt_inner_product);
 Datum
 mkt_inner_product(PG_FUNCTION_ARGS)
 {
-	MktVector *a = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector *b = PG_GETARG_MKT_VECTOR_P(1);
+	Vec32 *a = PG_GETARG_VEC32_P(0);
+	Vec32 *b = PG_GETARG_VEC32_P(1);
 
 	mkt_pg_check_dims_match(a->dim, b->dim);
 
-	VectorRef ra  = MktVectorToRef(a);
-	VectorRef rb  = MktVectorToRef(b);
-	float	  nip = mkt_distance_ip(ra, rb);
+	Vec32Ref ra	 = Vec32ToRef(a);
+	Vec32Ref rb	 = Vec32ToRef(b);
+	float	 nip = mkt_distance_ip(ra, rb);
 	/* mkt_distance_ip returns -dot, so negate to get actual dot */
 	double res = (double)(-nip);
 
@@ -197,50 +197,50 @@ PG_FUNCTION_INFO_V1(mkt_cosine_distance);
 Datum
 mkt_cosine_distance(PG_FUNCTION_ARGS)
 {
-	MktVector *a = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector *b = PG_GETARG_MKT_VECTOR_P(1);
+	Vec32 *a = PG_GETARG_VEC32_P(0);
+	Vec32 *b = PG_GETARG_VEC32_P(1);
 
 	mkt_pg_check_dims_match(a->dim, b->dim);
 
-	VectorRef ra  = MktVectorToRef(a);
-	VectorRef rb  = MktVectorToRef(b);
-	double	  res = (double)mkt_distance_cosine(ra, rb);
+	Vec32Ref ra	 = Vec32ToRef(a);
+	Vec32Ref rb	 = Vec32ToRef(b);
+	double	 res = (double)mkt_distance_cosine(ra, rb);
 
 	PG_RETURN_FLOAT8(res);
 }
 
 /* Private distance functions for operators (preserve metric semantics) */
 
-PG_FUNCTION_INFO_V1(mkt_vector_l2_squared_distance);
+PG_FUNCTION_INFO_V1(mkt_vec32_l2_squared_distance);
 
 Datum
-mkt_vector_l2_squared_distance(PG_FUNCTION_ARGS)
+mkt_vec32_l2_squared_distance(PG_FUNCTION_ARGS)
 {
-	MktVector *a = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector *b = PG_GETARG_MKT_VECTOR_P(1);
+	Vec32 *a = PG_GETARG_VEC32_P(0);
+	Vec32 *b = PG_GETARG_VEC32_P(1);
 
 	mkt_pg_check_dims_match(a->dim, b->dim);
 
-	VectorRef ra  = MktVectorToRef(a);
-	VectorRef rb  = MktVectorToRef(b);
-	double	  res = (double)mkt_distance_l2(ra, rb);
+	Vec32Ref ra	 = Vec32ToRef(a);
+	Vec32Ref rb	 = Vec32ToRef(b);
+	double	 res = (double)mkt_distance_l2(ra, rb);
 
 	PG_RETURN_FLOAT8(res);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vector_negative_inner_product);
+PG_FUNCTION_INFO_V1(mkt_vec32_negative_inner_product);
 
 Datum
-mkt_vector_negative_inner_product(PG_FUNCTION_ARGS)
+mkt_vec32_negative_inner_product(PG_FUNCTION_ARGS)
 {
-	MktVector *a = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector *b = PG_GETARG_MKT_VECTOR_P(1);
+	Vec32 *a = PG_GETARG_VEC32_P(0);
+	Vec32 *b = PG_GETARG_VEC32_P(1);
 
 	mkt_pg_check_dims_match(a->dim, b->dim);
 
-	VectorRef ra  = MktVectorToRef(a);
-	VectorRef rb  = MktVectorToRef(b);
-	double	  res = (double)mkt_distance_ip(ra, rb);
+	Vec32Ref ra	 = Vec32ToRef(a);
+	Vec32Ref rb	 = Vec32ToRef(b);
+	double	 res = (double)mkt_distance_ip(ra, rb);
 
 	PG_RETURN_FLOAT8(res);
 }
@@ -250,7 +250,7 @@ mkt_vector_negative_inner_product(PG_FUNCTION_ARGS)
  * ---------------------------------------------------------------- */
 
 static int
-mkt_vector_cmp_internal(MktVector *a, MktVector *b)
+vec32_cmp_internal(Vec32 *a, Vec32 *b)
 {
 	int min_dim = (a->dim < b->dim) ? a->dim : b->dim;
 
@@ -270,96 +270,96 @@ mkt_vector_cmp_internal(MktVector *a, MktVector *b)
 	return 0;
 }
 
-PG_FUNCTION_INFO_V1(mkt_vector_cmp);
+PG_FUNCTION_INFO_V1(mkt_vec32_cmp);
 
 Datum
-mkt_vector_cmp(PG_FUNCTION_ARGS)
+mkt_vec32_cmp(PG_FUNCTION_ARGS)
 {
-	MktVector *a = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector *b = PG_GETARG_MKT_VECTOR_P(1);
-	PG_RETURN_INT32(mkt_vector_cmp_internal(a, b));
+	Vec32 *a = PG_GETARG_VEC32_P(0);
+	Vec32 *b = PG_GETARG_VEC32_P(1);
+	PG_RETURN_INT32(vec32_cmp_internal(a, b));
 }
 
-PG_FUNCTION_INFO_V1(mkt_vector_lt);
+PG_FUNCTION_INFO_V1(mkt_vec32_lt);
 
 Datum
-mkt_vector_lt(PG_FUNCTION_ARGS)
+mkt_vec32_lt(PG_FUNCTION_ARGS)
 {
-	MktVector *a = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector *b = PG_GETARG_MKT_VECTOR_P(1);
-	PG_RETURN_BOOL(mkt_vector_cmp_internal(a, b) < 0);
+	Vec32 *a = PG_GETARG_VEC32_P(0);
+	Vec32 *b = PG_GETARG_VEC32_P(1);
+	PG_RETURN_BOOL(vec32_cmp_internal(a, b) < 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vector_le);
+PG_FUNCTION_INFO_V1(mkt_vec32_le);
 
 Datum
-mkt_vector_le(PG_FUNCTION_ARGS)
+mkt_vec32_le(PG_FUNCTION_ARGS)
 {
-	MktVector *a = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector *b = PG_GETARG_MKT_VECTOR_P(1);
-	PG_RETURN_BOOL(mkt_vector_cmp_internal(a, b) <= 0);
+	Vec32 *a = PG_GETARG_VEC32_P(0);
+	Vec32 *b = PG_GETARG_VEC32_P(1);
+	PG_RETURN_BOOL(vec32_cmp_internal(a, b) <= 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vector_eq);
+PG_FUNCTION_INFO_V1(mkt_vec32_eq);
 
 Datum
-mkt_vector_eq(PG_FUNCTION_ARGS)
+mkt_vec32_eq(PG_FUNCTION_ARGS)
 {
-	MktVector *a = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector *b = PG_GETARG_MKT_VECTOR_P(1);
-	PG_RETURN_BOOL(mkt_vector_cmp_internal(a, b) == 0);
+	Vec32 *a = PG_GETARG_VEC32_P(0);
+	Vec32 *b = PG_GETARG_VEC32_P(1);
+	PG_RETURN_BOOL(vec32_cmp_internal(a, b) == 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vector_ne);
+PG_FUNCTION_INFO_V1(mkt_vec32_ne);
 
 Datum
-mkt_vector_ne(PG_FUNCTION_ARGS)
+mkt_vec32_ne(PG_FUNCTION_ARGS)
 {
-	MktVector *a = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector *b = PG_GETARG_MKT_VECTOR_P(1);
-	PG_RETURN_BOOL(mkt_vector_cmp_internal(a, b) != 0);
+	Vec32 *a = PG_GETARG_VEC32_P(0);
+	Vec32 *b = PG_GETARG_VEC32_P(1);
+	PG_RETURN_BOOL(vec32_cmp_internal(a, b) != 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vector_ge);
+PG_FUNCTION_INFO_V1(mkt_vec32_ge);
 
 Datum
-mkt_vector_ge(PG_FUNCTION_ARGS)
+mkt_vec32_ge(PG_FUNCTION_ARGS)
 {
-	MktVector *a = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector *b = PG_GETARG_MKT_VECTOR_P(1);
-	PG_RETURN_BOOL(mkt_vector_cmp_internal(a, b) >= 0);
+	Vec32 *a = PG_GETARG_VEC32_P(0);
+	Vec32 *b = PG_GETARG_VEC32_P(1);
+	PG_RETURN_BOOL(vec32_cmp_internal(a, b) >= 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vector_gt);
+PG_FUNCTION_INFO_V1(mkt_vec32_gt);
 
 Datum
-mkt_vector_gt(PG_FUNCTION_ARGS)
+mkt_vec32_gt(PG_FUNCTION_ARGS)
 {
-	MktVector *a = PG_GETARG_MKT_VECTOR_P(0);
-	MktVector *b = PG_GETARG_MKT_VECTOR_P(1);
-	PG_RETURN_BOOL(mkt_vector_cmp_internal(a, b) > 0);
+	Vec32 *a = PG_GETARG_VEC32_P(0);
+	Vec32 *b = PG_GETARG_VEC32_P(1);
+	PG_RETURN_BOOL(vec32_cmp_internal(a, b) > 0);
 }
 
 /* ----------------------------------------------------------------
  * Utility functions
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_pg_vector_dims);
+PG_FUNCTION_INFO_V1(mkt_vec32_dims);
 
 Datum
-mkt_pg_vector_dims(PG_FUNCTION_ARGS)
+mkt_vec32_dims(PG_FUNCTION_ARGS)
 {
-	MktVector *v = PG_GETARG_MKT_VECTOR_P(0);
+	Vec32 *v = PG_GETARG_VEC32_P(0);
 	PG_RETURN_INT32(v->dim);
 }
 
-PG_FUNCTION_INFO_V1(mkt_pg_vector_norm);
+PG_FUNCTION_INFO_V1(mkt_pg_vec32_norm);
 
 Datum
-mkt_pg_vector_norm(PG_FUNCTION_ARGS)
+mkt_pg_vec32_norm(PG_FUNCTION_ARGS)
 {
-	MktVector *v   = PG_GETARG_MKT_VECTOR_P(0);
-	double	   res = 0.0;
+	Vec32 *v   = PG_GETARG_VEC32_P(0);
+	double res = 0.0;
 
 	for (int i = 0; i < v->dim; i++)
 		res += (double)v->x[i] * (double)v->x[i];
@@ -371,23 +371,23 @@ mkt_pg_vector_norm(PG_FUNCTION_ARGS)
  * Cast functions
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_vector);
+PG_FUNCTION_INFO_V1(mkt_vec32);
 
 Datum
-mkt_vector(PG_FUNCTION_ARGS)
+mkt_vec32(PG_FUNCTION_ARGS)
 {
-	MktVector *v	  = PG_GETARG_MKT_VECTOR_P(0);
-	int32	   typmod = PG_GETARG_INT32(1);
+	Vec32 *v	  = PG_GETARG_VEC32_P(0);
+	int32  typmod = PG_GETARG_INT32(1);
 
 	mkt_pg_check_expected_dim(v->dim, typmod);
 
-	PG_RETURN_MKT_VECTOR_P(v);
+	PG_RETURN_VEC32_P(v);
 }
 
-PG_FUNCTION_INFO_V1(mkt_array_to_vector);
+PG_FUNCTION_INFO_V1(mkt_array_to_vec32);
 
 Datum
-mkt_array_to_vector(PG_FUNCTION_ARGS)
+mkt_array_to_vec32(PG_FUNCTION_ARGS)
 {
 	ArrayType *arr	  = PG_GETARG_ARRAYTYPE_P(0);
 	int32	   typmod = PG_GETARG_INT32(1);
@@ -428,7 +428,7 @@ mkt_array_to_vector(PG_FUNCTION_ARGS)
 			&nulls,
 			&nelems);
 
-	MktVector *result = mkt_pg_vector_alloc(dim);
+	Vec32 *result = mkt_pg_vec32_alloc(dim);
 
 	for (int i = 0; i < dim; i++)
 	{
@@ -447,16 +447,16 @@ mkt_array_to_vector(PG_FUNCTION_ARGS)
 		result->x[i] = val;
 	}
 
-	PG_RETURN_MKT_VECTOR_P(result);
+	PG_RETURN_VEC32_P(result);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vector_to_float4);
+PG_FUNCTION_INFO_V1(mkt_vec32_to_float4);
 
 Datum
-mkt_vector_to_float4(PG_FUNCTION_ARGS)
+mkt_vec32_to_float4(PG_FUNCTION_ARGS)
 {
-	MktVector *v	 = PG_GETARG_MKT_VECTOR_P(0);
-	Datum	  *elems = (Datum *)palloc(v->dim * sizeof(Datum));
+	Vec32 *v	 = PG_GETARG_VEC32_P(0);
+	Datum *elems = (Datum *)palloc(v->dim * sizeof(Datum));
 
 	for (int i = 0; i < v->dim; i++)
 		elems[i] = Float4GetDatum(v->x[i]);

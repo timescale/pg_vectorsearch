@@ -140,7 +140,7 @@ mkt_centroid_write_fastscan_pages(
 	uint8_t *rdata_buf	= mkt_alloc((size_t)MKT_FASTSCAN_GROUP * rdata_size);
 	uint8_t *bits_buf	= mkt_alloc((size_t)MKT_FASTSCAN_GROUP * packed_bytes);
 
-	VectorRef mref = {.data = global_mean, .dim = dim};
+	Vec32Ref mref = {.data = global_mean, .dim = dim};
 
 	bool		reserved	= (start_blkno != InvalidBlockNumber);
 	BlockNumber first_blkno = reserved ? start_blkno : InvalidBlockNumber;
@@ -195,7 +195,7 @@ mkt_centroid_write_fastscan_pages(
 		 * out into a flat packed_bytes-stride array for the packer. */
 		for (uint32_t v = 0; v < g_count; v++)
 		{
-			VectorRef vref = {
+			Vec32Ref vref = {
 					.data = vectors + (size_t)(g_start + v) * dim,
 					.dim  = dim,
 			};

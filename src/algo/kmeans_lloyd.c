@@ -39,7 +39,7 @@
 #include "algo/vecops.h"
 #include "core/log.h"
 #include "core/memory.h"
-#include "types/halfvec.h"
+#include "types/vec16.h"
 
 /*
  * Precompute ||c||² for all centroids (L2 only).
@@ -65,10 +65,10 @@ precompute_norms_c(KMeansState *st)
 #ifdef MKT_HAVE_CBLAS
 __attribute__((always_inline)) static inline void
 lloyd_assign_block_cblas_impl(
-		KMeansState			   *st,
-		uint32_t				block_start,
-		uint32_t				block_count,
-		const MktVectorTypeOps *ops)
+		KMeansState		   *st,
+		uint32_t			block_start,
+		uint32_t			block_count,
+		const Vec32TypeOps *ops)
 {
 	uint32_t nlist = st->nlist;
 	uint32_t dim   = st->dim;
@@ -632,7 +632,7 @@ lloyd_iter_reduce(void *arg, uint32_t iteration)
 			float *cent = st->new_centroids + (size_t)c * dim;
 			float  norm = mkt_l2_norm(cent, dim);
 			if (norm > 1e-10f)
-				mkt_vector_scale(cent, 1.0f / norm, cent, dim);
+				vec32_scale(cent, 1.0f / norm, cent, dim);
 		}
 	}
 

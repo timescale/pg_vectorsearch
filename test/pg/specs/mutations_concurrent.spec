@@ -10,7 +10,7 @@
 # The table holds 50 rows laid out along the x-axis at [1,0,0] .. [50,0,0].
 # The probe row (id 1001) sits far out at [100,0,0], so once it is present
 # AND visible it is the unambiguous top-1 nearest neighbor of the query
-# vector [100,0,0]. The checker query returns 1 exactly when row 1001 is that
+# vec32 [100,0,0]. The checker query returns 1 exactly when row 1001 is that
 # nearest result and 0 otherwise, which makes "is 1001 in the index and
 # MVCC-visible?" a single clean integer assertion.
 #
@@ -20,8 +20,8 @@
 
 setup
 {
-    CREATE TABLE iso (id int, v vector(3));
-    INSERT INTO iso SELECT g, format('[%s,0,0]', g)::vector
+    CREATE TABLE iso (id int, v vec32(3));
+    INSERT INTO iso SELECT g, format('[%s,0,0]', g)::vec32
         FROM generate_series(1, 50) g;
     CREATE INDEX iso_idx ON iso USING mktann (v)
         WITH (nlist = 4, centroid_compression = true);

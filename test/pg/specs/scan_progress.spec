@@ -16,10 +16,10 @@
 setup
 {
     CREATE EXTENSION injection_points;
-    CREATE TABLE emb (id int, v vector(8)) WITH (parallel_workers = 2);
+    CREATE TABLE emb (id int, v vec32(8)) WITH (parallel_workers = 2);
     INSERT INTO emb
         SELECT g, ('[' || g || ',' || g % 97 || repeat(',0.1', 6) ||
-                   ']')::vector(8)
+                   ']')::vec32(8)
         FROM generate_series(1, 30000) g;
 }
 

@@ -249,7 +249,7 @@ exec_fallback(
 		memcpy(ctx->query_buf, query, dim * sizeof(float));
 		float norm = mkt_l2_norm(ctx->query_buf, dim);
 		if (norm > 0.0f)
-			mkt_vector_scale(ctx->query_buf, 1.0f / norm, ctx->query_buf, dim);
+			vec32_scale(ctx->query_buf, 1.0f / norm, ctx->query_buf, dim);
 		qvec = ctx->query_buf;
 	}
 

@@ -15,11 +15,11 @@
 -- strings never appear in this script's own text — otherwise the script (which
 -- the server may log) would self-match.
 
-CREATE TABLE lg (v vector(8)) WITH (parallel_workers = 2);
+CREATE TABLE lg (v vec32(8)) WITH (parallel_workers = 2);
 INSERT INTO lg
     SELECT format('[%s,%s,%s,%s,%s,%s,%s,%s]',
                   i % 19, i % 7, i % 5, i % 3, i % 11, i % 13, i % 2, i % 17)
-               ::vector
+               ::vec32
     FROM generate_series(1, 5000) i;
 ANALYZE lg;
 

@@ -8,10 +8,10 @@
 -- which is where relation-level hit counting normally happens, and the
 -- search counter is the access method's to maintain.
 
-CREATE TABLE scan_stats_test (id serial, v vector(16));
+CREATE TABLE scan_stats_test (id serial, v vec32(16));
 INSERT INTO scan_stats_test (v)
     SELECT (SELECT array_agg(sin(i * 0.3 + j * 0.9)::real)
-            FROM generate_series(0, 15) j)::vector(16)
+            FROM generate_series(0, 15) j)::vec32(16)
     FROM generate_series(1, 400) i;
 CREATE INDEX scan_stats_idx ON scan_stats_test USING mktann (v)
     WITH (nlist = 8);

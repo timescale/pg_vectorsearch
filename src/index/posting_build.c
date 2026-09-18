@@ -223,8 +223,8 @@ mkt_posting_entry_encode(
 		ItemPointerData		tid,
 		void			   *out_entry)
 {
-	VectorRef vref = {.data = vec, .dim = dim};
-	VectorRef cref = {.data = centroid, .dim = dim};
+	Vec32Ref vref = {.data = vec, .dim = dim};
+	Vec32Ref cref = {.data = centroid, .dim = dim};
 	mkt_rabitq_encode_into_ex(params, vref, cref, enc_buf, scratch);
 	float f_error =
 			mkt_rabitq_derive_f_error(enc_buf->f_add, enc_buf->f_rescale, dim);
@@ -998,8 +998,8 @@ mkt_posting_builder_add_ex(
 	/* Adopted heads carry no encoder (their entries arrive pre-encoded). */
 	Assert(builder->enc_buf != NULL);
 
-	VectorRef vref = {.data = vector, .dim = builder->dim};
-	VectorRef cref = {.data = builder->centroid, .dim = builder->dim};
+	Vec32Ref vref = {.data = vector, .dim = builder->dim};
+	Vec32Ref cref = {.data = builder->centroid, .dim = builder->dim};
 	mkt_rabitq_encode_into_ex(
 			builder->params,
 			vref,
@@ -1111,8 +1111,8 @@ mkt_flat_posting_builder_add(
 {
 	Dimension dim = builder->dim;
 
-	VectorRef vref = {.data = vector, .dim = dim};
-	VectorRef cref = {.data = builder->centroid, .dim = dim};
+	Vec32Ref vref = {.data = vector, .dim = dim};
+	Vec32Ref cref = {.data = builder->centroid, .dim = dim};
 	mkt_rabitq_encode_into(builder->params, vref, cref, builder->enc_buf);
 
 	float f_error = mkt_rabitq_derive_f_error(

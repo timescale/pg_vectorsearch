@@ -2,13 +2,13 @@
 
 -- Use higher dimensionality to exercise the full rerank path
 -- (low-dim vectors can sometimes bypass rerank entirely)
-CREATE TABLE rerank_test (id serial, v vector(32));
+CREATE TABLE rerank_test (id serial, v vec32(32));
 
 INSERT INTO rerank_test (v)
     SELECT (
         SELECT array_agg(sin(i * 0.1 + j * 0.7)::real)
         FROM generate_series(0, 31) j
-    )::vector(32)
+    )::vec32(32)
     FROM generate_series(1, 500) i;
 
 -- The query vector, hoisted into an immutable function so the planner folds
@@ -16,9 +16,9 @@ INSERT INTO rerank_test (v)
 -- sequential scan lands in every plan and cost below.
 SELECT v::text AS rqv FROM rerank_test WHERE id = 42 \gset
 SELECT format($f$
-    CREATE FUNCTION rqv() RETURNS vector(32)
+    CREATE FUNCTION rqv() RETURNS vec32(32)
         LANGUAGE sql IMMUTABLE PARALLEL SAFE
-        AS $b$ SELECT %L::vector(32) $b$
+        AS $b$ SELECT %L::vec32(32) $b$
 $f$, :'rqv') \gexec
 
 -- L2 distance
@@ -57,7 +57,7 @@ SELECT bool_and(abs(t.dist - r.dist) < 1e-5) AS distances_match
 
 -- Cosine distance
 CREATE INDEX idx_rerank_cos ON rerank_test
-    USING mktann (v vector_cosine_ops)
+    USING mktann (v vec32_cosine_ops)
     WITH (centroid_compression = true);
 
 SET enable_indexscan = off;

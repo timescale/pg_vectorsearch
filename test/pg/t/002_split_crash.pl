@@ -45,8 +45,8 @@ $node->safe_psql('postgres',
 # Points spread along one axis: deterministic, and with enough structure that
 # clustering has something to find.
 $node->safe_psql('postgres', <<"SQL");
-CREATE TABLE c (id int, v vector(3));
-INSERT INTO c SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE c (id int, v vec32(3));
+INSERT INTO c SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, $rows) g;
 CREATE INDEX c_idx ON c USING mktann (v)
     WITH (nlist = 1, centroid_fastscan = off);
@@ -57,14 +57,14 @@ SQL
 my $truth = $node->safe_psql('postgres', <<"SQL");
 SET enable_indexscan = off;
 SELECT string_agg(id::text, ',' ORDER BY id) FROM (
-    SELECT id FROM c ORDER BY v <-> '[1,0,0]'::vector LIMIT $k) s;
+    SELECT id FROM c ORDER BY v <-> '[1,0,0]'::vec32 LIMIT $k) s;
 SQL
 
 my $reader = <<"SQL";
 SET enable_seqscan = off;
 SET mkt.nprobe = 10000;
 SELECT string_agg(id::text, ',' ORDER BY id) FROM (
-    SELECT id FROM c ORDER BY v <-> '[1,0,0]'::vector LIMIT $k) s;
+    SELECT id FROM c ORDER BY v <-> '[1,0,0]'::vec32 LIMIT $k) s;
 SQL
 
 my $heads = "SELECT count(*) FROM posting_pages('c_idx'::regclass) "

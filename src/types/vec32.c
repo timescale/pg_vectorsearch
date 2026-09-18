@@ -1,28 +1,28 @@
 /*
- * mkt_vector.c - Vector operations
+ * vec32.c - Vector operations
  */
 
 #include <math.h>
 #include <string.h>
 
 #include "core/memory.h"
-#include "types/vector.h"
+#include "types/vec32.h"
 
-/* (No extern vtable — inline vtable in mkt_vector.h, dispatch via MktVecType)
+/* (No extern vtable — inline vtable in vec32.h, dispatch via VecType)
  */
 
 /* ----------------------------------------------------------------
- * MktVector lifecycle
+ * Vec32 lifecycle
  * ---------------------------------------------------------------- */
 
-MktVector *
-mkt_vector_create(Dimension dim)
+Vec32 *
+vec32_create(Dimension dim)
 {
-	if (dim == 0 || dim > MKT_VECTOR_MAX_DIM)
+	if (dim == 0 || dim > VEC32_MAX_DIM)
 		return NULL;
 
-	size_t	   size = MKT_VECTOR_SIZE(dim);
-	MktVector *v	= mkt_alloc(size);
+	size_t size = VEC32_SIZE(dim);
+	Vec32 *v	= mkt_alloc(size);
 	if (v == NULL)
 		return NULL;
 
@@ -33,13 +33,13 @@ mkt_vector_create(Dimension dim)
 	return v;
 }
 
-MktVector *
-mkt_vector_copy(const MktVector *src)
+Vec32 *
+vec32_copy(const Vec32 *src)
 {
 	if (src == NULL)
 		return NULL;
 
-	MktVector *dst = mkt_vector_create((Dimension)src->dim);
+	Vec32 *dst = vec32_create((Dimension)src->dim);
 	if (dst == NULL)
 		return NULL;
 
@@ -48,32 +48,32 @@ mkt_vector_copy(const MktVector *src)
 }
 
 void
-mkt_vector_free(MktVector *v)
+vec32_free(Vec32 *v)
 {
 	mkt_free(v);
 }
 
 void
-mkt_vector_set(MktVector *v, const float *values)
+vec32_set(Vec32 *v, const float *values)
 {
 	memcpy(v->x, values, (size_t)v->dim * sizeof(float));
 }
 
 void
-mkt_vector_zero(MktVector *v)
+vec32_zero(Vec32 *v)
 {
 	memset(v->x, 0, (size_t)v->dim * sizeof(float));
 }
 
 void
-mkt_vector_fill(MktVector *v, float value)
+vec32_fill(Vec32 *v, float value)
 {
 	for (int16_t i = 0; i < v->dim; i++)
 		v->x[i] = value;
 }
 
 float
-mkt_vector_dot(const MktVector *a, const MktVector *b)
+vec32_dot(const Vec32 *a, const Vec32 *b)
 {
 	float sum = 0.0f;
 	for (int16_t i = 0; i < a->dim; i++)
@@ -82,15 +82,15 @@ mkt_vector_dot(const MktVector *a, const MktVector *b)
 }
 
 float
-mkt_vector_norm(const MktVector *v)
+vec32_norm(const Vec32 *v)
 {
-	return sqrtf(mkt_vector_dot(v, v));
+	return sqrtf(vec32_dot(v, v));
 }
 
 void
-mkt_vector_normalize(MktVector *v)
+vec32_normalize(Vec32 *v)
 {
-	float norm = mkt_vector_norm(v);
+	float norm = vec32_norm(v);
 	if (norm > 0.0f)
 	{
 		for (int16_t i = 0; i < v->dim; i++)

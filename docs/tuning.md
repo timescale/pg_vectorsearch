@@ -10,7 +10,7 @@ build time (changing them means rebuilding the index). GUCs are set
 per session or per query:
 
 ```sql
-CREATE INDEX ON items USING mktann (embedding vector_cosine_ops)
+CREATE INDEX ON items USING mktann (embedding vec32_cosine_ops)
     WITH (nlist = 40000);
 
 SET mkt.nprobe = 40;          -- session

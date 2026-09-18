@@ -2,13 +2,13 @@
 --
 -- A single-partition index is split into two lists; index-scan results must
 -- match the sequential-scan ground truth both before and after the split.
-CREATE TABLE split_test (id serial, v vector(4));
+CREATE TABLE split_test (id serial, v vec32(4));
 -- Two well-separated clusters of 12 points each (deterministic values).
 INSERT INTO split_test (v)
-    SELECT ARRAY[(i % 3)::real, (i % 2)::real, 0, 0]::vector(4)
+    SELECT ARRAY[(i % 3)::real, (i % 2)::real, 0, 0]::vec32(4)
     FROM generate_series(1, 12) i;
 INSERT INTO split_test (v)
-    SELECT ARRAY[10 + (i % 3)::real, 10 + (i % 2)::real, 10, 10]::vector(4)
+    SELECT ARRAY[10 + (i % 3)::real, 10 + (i % 2)::real, 10, 10]::vec32(4)
     FROM generate_series(1, 12) i;
 -- Single flat partition with RaBitQ centroid pages (no fastscan packing),
 -- which is the shape the phase-1 split supports.
@@ -19,7 +19,7 @@ SET mkt.nprobe = 10;
 SET enable_indexscan = off;
 CREATE TEMP TABLE truth AS
     SELECT id FROM split_test
-    ORDER BY v <-> '[0,0,0,0]'::vector(4) LIMIT 10;
+    ORDER BY v <-> '[0,0,0,0]'::vec32(4) LIMIT 10;
 RESET enable_indexscan;
 -- Index results before the split.
 -- Small tables, so a sequential scan is the plan the cost model correctly
@@ -27,17 +27,17 @@ RESET enable_indexscan;
 -- back either way, so this pins the plan.
 SET enable_seqscan = off;
 EXPLAIN (COSTS OFF)
-    SELECT id FROM split_test ORDER BY v <-> '[0,0,0,0]'::vector(4) LIMIT 10;
-                    QUERY PLAN                    
---------------------------------------------------
+    SELECT id FROM split_test ORDER BY v <-> '[0,0,0,0]'::vec32(4) LIMIT 10;
+                   QUERY PLAN                    
+-------------------------------------------------
  Limit
    ->  Index Scan using split_idx on split_test
-         Order By: (v <-> '[0,0,0,0]'::vector(4))
+         Order By: (v <-> '[0,0,0,0]'::vec32(4))
 (3 rows)
 
 CREATE TEMP TABLE before AS
     SELECT id FROM split_test
-    ORDER BY v <-> '[0,0,0,0]'::vector(4) LIMIT 10;
+    ORDER BY v <-> '[0,0,0,0]'::vec32(4) LIMIT 10;
 RESET enable_seqscan;
 SELECT count(*) AS before_matches FROM truth t JOIN before b USING (id);
  before_matches 
@@ -83,7 +83,7 @@ SELECT bool_and(format = 'fastscan') AS new_lists_fastscan
 SET enable_seqscan = off;
 CREATE TEMP TABLE after AS
     SELECT id FROM split_test
-    ORDER BY v <-> '[0,0,0,0]'::vector(4) LIMIT 10;
+    ORDER BY v <-> '[0,0,0,0]'::vec32(4) LIMIT 10;
 RESET enable_seqscan;
 SELECT count(*) AS after_matches FROM truth t JOIN after a USING (id);
  after_matches 
@@ -115,14 +115,14 @@ ERROR:  "split_test" is not an index
 -- in one pass instead of bisected repeatedly. 60 entries against a target of 10
 -- is round(60/10) = 6 parts, all of which then sit inside the band -- so the
 -- pass after it splits nothing.
-CREATE TABLE split_wide (id serial, v vector(4));
+CREATE TABLE split_wide (id serial, v vec32(4));
 INSERT INTO split_wide (v)
-    SELECT ARRAY[i::real, 0, 0, 0]::vector(4) FROM generate_series(1, 60) i;
+    SELECT ARRAY[i::real, 0, 0, 0]::vec32(4) FROM generate_series(1, 60) i;
 CREATE INDEX split_wide_idx ON split_wide USING mktann (v)
     WITH (nlist = 1, centroid_fastscan = off);
 SET enable_indexscan = off;
 CREATE TEMP TABLE wide_truth AS
-    SELECT id FROM split_wide ORDER BY v <-> '[1,0,0,0]'::vector(4) LIMIT 10;
+    SELECT id FROM split_wide ORDER BY v <-> '[1,0,0,0]'::vec32(4) LIMIT 10;
 RESET enable_indexscan;
 CALL mkt.rebalance('split_wide_idx', 10);
 NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
@@ -138,7 +138,7 @@ NOTICE:  rebalance: split 0 posting list(s), reclaimed 1 retired chain(s)
 -- Results still match the sequential-scan ground truth after a 6-way split.
 SET enable_seqscan = off;
 CREATE TEMP TABLE wide_after AS
-    SELECT id FROM split_wide ORDER BY v <-> '[1,0,0,0]'::vector(4) LIMIT 10;
+    SELECT id FROM split_wide ORDER BY v <-> '[1,0,0,0]'::vec32(4) LIMIT 10;
 RESET enable_seqscan;
 SELECT count(*) AS wide_after_matches
     FROM wide_truth t JOIN wide_after a USING (id);
@@ -207,10 +207,10 @@ RESET maintenance_work_mem;
 --
 -- 1024 dimensions puts about 56 leaf entries on a centroid page, and one
 -- pass takes the leaf count from 2 to 64, so a single rebalance crosses it.
-CREATE TABLE split_append (id serial, v vector(1024));
+CREATE TABLE split_append (id serial, v vec32(1024));
 INSERT INTO split_append (v)
     SELECT ARRAY(SELECT ((i * 7 + g) % 97)::real
-                 FROM generate_series(1, 1024) g)::vector(1024)
+                 FROM generate_series(1, 1024) g)::vec32(1024)
     FROM generate_series(1, 600) i;
 CREATE INDEX split_append_idx ON split_append USING mktann (v)
     WITH (nlist = 2, centroid_fastscan = off, centroid_compression = on);
@@ -256,9 +256,9 @@ SELECT max(blkno) - min(blkno) + 1 > count(DISTINCT blkno)
 -- vectors reach that end at a setting PostgreSQL still accepts. The shortfall
 -- is named, so the expected output pins it -- changing the memory model is
 -- meant to show up here.
-CREATE TABLE split_wide_dim (id serial, v vector(1024));
+CREATE TABLE split_wide_dim (id serial, v vec32(1024));
 INSERT INTO split_wide_dim (v)
-    SELECT ARRAY(SELECT (i % 7)::real FROM generate_series(1, 1024))::vector(1024)
+    SELECT ARRAY(SELECT (i % 7)::real FROM generate_series(1, 1024))::vec32(1024)
     FROM generate_series(1, 4) i;
 CREATE INDEX split_wide_dim_idx ON split_wide_dim USING mktann (v)
     WITH (nlist = 1, centroid_fastscan = off);
@@ -269,24 +269,24 @@ DETAIL:  Splitting 1024-dimension vectors needs at least 17866 kB, but maintenan
 HINT:  Increase maintenance_work_mem and retry.
 RESET maintenance_work_mem;
 DROP TABLE split_wide_dim;
--- The column type is the index's, not an assumed one. A halfvec index passes
+-- The column type is the index's, not an assumed one. A vec16 index passes
 -- the shape check this maintenance requires, and reading its 16-bit payload as
 -- float32 runs off the end of each value -- which clusters garbage and, with
 -- other data, would write it. Splitting one and still matching the
--- sequential-scan ground truth is what says the values were read as halfvec.
-CREATE TABLE split_half (id serial, v halfvec(8));
+-- sequential-scan ground truth is what says the values were read as vec16.
+CREATE TABLE split_half (id serial, v vec16(8));
 INSERT INTO split_half (v)
-    SELECT ARRAY[(i % 2)::real,0,0,0,0,0,0,0]::halfvec(8)
+    SELECT ARRAY[(i % 2)::real,0,0,0,0,0,0,0]::vec16(8)
     FROM generate_series(1, 30) i;
 INSERT INTO split_half (v)
-    SELECT ARRAY[10 + (i % 2)::real,10,10,10,10,10,10,10]::halfvec(8)
+    SELECT ARRAY[10 + (i % 2)::real,10,10,10,10,10,10,10]::vec16(8)
     FROM generate_series(1, 30) i;
-CREATE INDEX split_half_idx ON split_half USING mktann (v halfvec_l2_ops)
+CREATE INDEX split_half_idx ON split_half USING mktann (v vec16_l2_ops)
     WITH (nlist = 1, centroid_fastscan = off);
 SET enable_indexscan = off;
 CREATE TEMP TABLE half_truth AS
     SELECT id FROM split_half
-    ORDER BY v <-> '[0,0,0,0,0,0,0,0]'::halfvec(8) LIMIT 5;
+    ORDER BY v <-> '[0,0,0,0,0,0,0,0]'::vec16(8) LIMIT 5;
 RESET enable_indexscan;
 CALL mkt.rebalance('split_half_idx', 10);
 NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
@@ -295,7 +295,7 @@ SET mkt.nprobe = 16;
 SELECT count(*) AS half_matches_after_split
     FROM half_truth t JOIN (
         SELECT id FROM split_half
-        ORDER BY v <-> '[0,0,0,0,0,0,0,0]'::halfvec(8) LIMIT 5) a USING (id);
+        ORDER BY v <-> '[0,0,0,0,0,0,0,0]'::vec16(8) LIMIT 5) a USING (id);
  half_matches_after_split 
 --------------------------
                         5
@@ -352,10 +352,10 @@ DROP ROLE regress_split_unpriv;
 -- centroid pages and few enough lists to stay flat for rebalance to run at
 -- all, so it is worth having the boundary in a test rather than in a commit
 -- message.
-CREATE TABLE split_shape (id serial, v vector(4));
+CREATE TABLE split_shape (id serial, v vec32(4));
 INSERT INTO split_shape (v)
     SELECT ARRAY[(i % 97)::real, (i % 89)::real, (i % 83)::real,
-                 (i % 79)::real]::vector(4)
+                 (i % 79)::real]::vec32(4)
     FROM generate_series(1, 400) i;
 CREATE INDEX split_shape_fs ON split_shape USING mktann (v);
 SELECT setting AS centroid_format
@@ -392,10 +392,10 @@ DROP TABLE split_shape;
 -- the first split used to leave the leaf page looking full and every later
 -- split put its leaves on a page of their own. It takes a second and third
 -- round on the same page to show.
-CREATE TABLE split_many (id serial, v vector(4));
+CREATE TABLE split_many (id serial, v vec32(4));
 INSERT INTO split_many (v)
     SELECT ARRAY[(i % 97)::real, (i % 89)::real, (i % 83)::real,
-                 (i % 79)::real]::vector(4)
+                 (i % 79)::real]::vec32(4)
     FROM generate_series(1, 3000) i;
 CREATE INDEX split_many_idx ON split_many USING mktann (v)
     WITH (nlist = 1, centroid_fastscan = off);
@@ -403,7 +403,7 @@ SET mkt.nprobe = 200;
 SET enable_indexscan = off;
 CREATE TEMP TABLE truth_many AS
     SELECT id FROM split_many
-    ORDER BY v <-> '[0,0,0,0]'::vector(4) LIMIT 10;
+    ORDER BY v <-> '[0,0,0,0]'::vec32(4) LIMIT 10;
 RESET enable_indexscan;
 CALL mkt.rebalance('split_many_idx', 500);
 NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
@@ -424,7 +424,7 @@ SELECT count(*) > 40 AS many_leaves, count(DISTINCT blkno) = 1 AS one_page
 SET enable_seqscan = off;
 SELECT count(*) AS matches
     FROM (SELECT id FROM split_many
-          ORDER BY v <-> '[0,0,0,0]'::vector(4) LIMIT 10) r
+          ORDER BY v <-> '[0,0,0,0]'::vec32(4) LIMIT 10) r
     JOIN truth_many USING (id);
  matches 
 ---------
@@ -441,12 +441,12 @@ DROP TABLE split_many;
 -- side of the split has to walk a mixed chain, and the write side rewrites
 -- everything in the index's own format, which makes a split the point where
 -- such a list is re-optimised back to fastscan.
-CREATE TABLE split_drift (id int, v vector(3));
-INSERT INTO split_drift SELECT g, format('[%s,0,0]', g)::vector
+CREATE TABLE split_drift (id int, v vec32(3));
+INSERT INTO split_drift SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 300) g;
 CREATE INDEX split_drift_idx ON split_drift USING mktann (v)
     WITH (nlist = 1, fastscan = on, centroid_fastscan = off);
-INSERT INTO split_drift SELECT g, format('[%s,0,0]', g)::vector
+INSERT INTO split_drift SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(301, 600) g;
 SELECT string_agg(DISTINCT format, '+' ORDER BY format) AS formats_before
     FROM mkt.posting_pages('split_drift_idx');
@@ -457,7 +457,7 @@ SELECT string_agg(DISTINCT format, '+' ORDER BY format) AS formats_before
 
 SET enable_indexscan = off;
 CREATE TEMP TABLE truth_drift AS
-    SELECT id FROM split_drift ORDER BY v <-> '[1,0,0]'::vector LIMIT 10;
+    SELECT id FROM split_drift ORDER BY v <-> '[1,0,0]'::vec32 LIMIT 10;
 RESET enable_indexscan;
 CALL mkt.rebalance('split_drift_idx', 60);
 NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
@@ -474,7 +474,7 @@ SET enable_seqscan = off;
 SET mkt.nprobe = 10000;
 SELECT count(*) AS matches
     FROM (SELECT id FROM split_drift
-          ORDER BY v <-> '[1,0,0]'::vector LIMIT 10) r
+          ORDER BY v <-> '[1,0,0]'::vec32 LIMIT 10) r
     JOIN truth_drift USING (id);
  matches 
 ---------
