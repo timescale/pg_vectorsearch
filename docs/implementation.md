@@ -4489,7 +4489,7 @@ answers a pgvector-operator query with a sequential scan, which returns correct
 rows. Results-only tests pass while measuring brute force, so the compat suite
 asserts the plan as well as the recall.
 
-One pairing does not resolve, by design: a meerkat `vec32` or `vec16` column
+One pairing does not resolve, by design: a `vec32` or `vec16` column
 with pgvector's operator. The meerkat → pgvector cast is ASSIGNMENT rather than
 IMPLICIT specifically so that having both extensions installed does not make
 operator resolution ambiguous, and queries over meerkat's types use meerkat's

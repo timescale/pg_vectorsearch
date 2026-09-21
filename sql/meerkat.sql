@@ -10,67 +10,37 @@
  *                    (meerkat--<version>.control) — so every version
  *                    binds its own library, including each step of an
  *                    upgrade chain
- *   @extschema@      the schema the installer chose (SCHEMA clause, or
- *                    the first existing schema on search_path), at
- *                    CREATE EXTENSION time. Holds vec32/vec16/rabitq and
- *                    everything built on them. Maintenance,
- *                    administration, and inspection functions are NOT
- *                    here -- they always live in the separate `mkt`
- *                    schema this script creates below, regardless of
- *                    @extschema@.
  */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION meerkat" to load this file.\quit
 
 -- =====================================================================
--- mkt schema: fixed home for maintenance/administration/inspection
+-- mkt: fixed schema for maintenance, administration, and inspection
 -- =====================================================================
--- Everything else in this script (types, operators, casts, the mktann
--- access method) installs into @extschema@, wherever the installer chose
--- that to be -- meerkat is relocatable-at-install-time. Maintenance,
--- administration, and inspection functions are the one exception: they
--- always live in a schema literally named `mkt`, created here, so DBAs
--- get one fixed, predictable, always-qualified path to them no matter
--- which schema holds the types. This is why meerkat cannot be relocatable
--- in the ALTER EXTENSION ... SET SCHEMA sense (see the control file): that
--- command moves every member object together into one schema, and these
--- functions are deliberately not in the same schema as the rest.
+-- Everything else in this script installs into @extschema@. Maintenance,
+-- administration, and inspection functions always live in `mkt` instead,
+-- created here regardless of @extschema@ -- one fixed, predictable,
+-- always-qualified path to them no matter which schema holds the types.
+-- This is also why ALTER EXTENSION ... SET SCHEMA is refused (see the
+-- control file): that command moves every member object into one schema,
+-- and these functions are deliberately not in it.
 --
--- Schema ownership guard. Refuse to install into a pre-existing `mkt`
--- schema owned by an untrusted role. Unlike @extschema@ -- which the
--- installer explicitly chose (or is already first on their own
--- search_path) -- `mkt` is a name meerkat invents on its own, so the
--- installer has no reason to have already checked who owns it. PostgreSQL
--- does not check target-schema ownership at CREATE EXTENSION, so a role
--- with CREATE on the database could pre-create mkt and keep owning it after
--- install. The owner cannot touch meerkat's own objects (extension
--- membership protects them), but can add NEW objects to mkt. That is a real
--- risk here because mkt.<function> calls are always explicitly qualified
--- (never relying on search_path order to resolve), so a same-named
--- lookalike planted by an untrusted owner could fool a caller who has not
--- checked where their tooling actually points. See the security note above
--- setup_pgvector_compat() for the analogous reasoning about @extschema@
--- when pgvector is involved.
+-- The mkt schema must be owned by the extension's installer or a
+-- superuser. PostgreSQL does not check target-schema ownership at CREATE
+-- EXTENSION, so an untrusted role could otherwise pre-create mkt, keep
+-- owning it, and plant lookalike objects there that a caller who has not
+-- double-checked their tooling might mistake for the extension's own
+-- (mkt.<function> calls are always schema-qualified, never resolved via
+-- search_path). See the security note above setup_pgvector_compat() for
+-- the analogous reasoning about @extschema@ when pgvector is involved.
 --
--- Allow only a schema the installer (current_user) or a superuser owns; a
--- fresh install, where this script creates the schema, is unaffected.
---
--- A pre-existing, trusted-owned mkt is left exactly as it is: verified,
--- then used, but never adopted into extension membership with ALTER
--- EXTENSION ... ADD SCHEMA. That mirrors how PostgreSQL itself treats any
--- pre-existing @extschema@ for an ordinary relocatable extension -- it
--- records only that the extension depends on the schema (so the schema
--- can't be dropped out from under it), never the reverse. A namespace
--- becomes an extension member only if this script's own CREATE SCHEMA
--- creates it (the fresh-install branch below). Adopting a pre-existing one
--- instead would mean DROP EXTENSION meerkat CASCADE could delete a schema
--- -- and anything unrelated a DBA had already put in it -- that meerkat
--- never created. The cost is the mirror image of that same convention:
--- DROP EXTENSION meerkat leaves a pre-existing mkt behind (now missing
--- meerkat's own functions, which are members individually) rather than
--- removing it, same as it would for any other extension's pre-existing
--- schema.
+-- A pre-existing, trusted-owned mkt is used as-is, not adopted into
+-- extension membership (no ALTER EXTENSION ... ADD SCHEMA): matching how
+-- PostgreSQL treats a pre-existing @extschema@ for any relocatable
+-- extension, only objects this script itself creates become members.
+-- Otherwise DROP EXTENSION ... CASCADE could delete a schema -- and
+-- anything unrelated already in it -- that this extension never created.
 DO $$
 DECLARE
     owner_name  name;
@@ -1038,20 +1008,20 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 --    absent and RAISEs on any pre-existing cast that is not the expected
 --    binary (WITHOUT FUNCTION) cast, instead of adopting it.
 --
--- 3. Operator shadowing via a schema meerkat did not choose. If an untrusted
---    role owns a schema meerkat's own objects end up in, it can add an
---    operator on pgvector's type there -- e.g.
+-- 3. Operator shadowing via a schema the extension did not choose. If an
+--    untrusted role owns a schema the extension's own objects end up in,
+--    it can add an operator on pgvector's type there -- e.g.
 --    that_schema.<->(public.vec32, public.vec32) -- that shadows pgvector's
 --    own for any role with that_schema ahead of public, running attacker
---    code as that role. meerkat's OWN operators are not shadowable: a
---    same-signature plant conflicts at install and installed objects are
+--    code as that role. The extension's OWN operators are not shadowable:
+--    a same-signature plant conflicts at install and installed objects are
 --    membership-locked. Two fixes were weighed:
---      (a) Occupy the signatures -- have meerkat pre-create safe, delegating
---          versions of pgvector's operators AND functions in every schema it
---          touches so the attacker cannot. Rejected: the surface is
---          pgvector's whole public API across all its types and it grows
+--      (a) Occupy the signatures -- pre-create safe, delegating versions of
+--          pgvector's operators AND functions in every schema this
+--          extension touches so the attacker cannot. Rejected: the surface
+--          is pgvector's whole public API across all its types and it grows
 --          with pgvector versions, so a newly added pgvector operator
---          silently reopens the hole until meerkat catches up -- a
+--          silently reopens the hole until this extension catches up -- a
 --          maintenance treadmill tied to another project's API, and it
 --          still leaves non-pgvector shadows open.
 --      (b) Ensure the schema is trusted-owned -- refuse to install into one
@@ -1061,26 +1031,22 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 --          to `mkt`: unlike @extschema@, which the installer explicitly
 --          chose (or already had first on their own search_path -- the same
 --          standing responsibility as installing any relocatable
---          extension), `mkt` is a name meerkat invents unconditionally on
---          every install, so the installer has no independent reason to
+--          extension), `mkt` must be owned by the extension's installer or
+--          a superuser, since the installer has no independent reason to
 --          have already vetted its ownership.
 --
 -- Set up pgvector interoperability in one step: the binary casts between the
 -- two extensions' types, and the membership of pgvector's distance operators
 -- in meerkat's mktann operator families. These belong together -- the casts
--- make pgvector's vector/halfvec binary-coercible to meerkat's vec32/vec16,
--- which is exactly what lets pgvector's operators join a family whose opclass
--- is FOR TYPE <meerkat's vec32/vec16>. Keeping them in a single function
--- means a caller cannot add the casts and forget the operators (which would
--- silently downgrade pgvector-operator queries to a sequential scan).
+-- make pgvector's vector/halfvec binary-coercible to vec32/vec16, which is
+-- exactly what lets pgvector's operators join a family whose opclass is
+-- FOR TYPE <vec32/vec16>. Keeping them in a single function means a caller
+-- cannot add the casts and forget the operators (which would silently
+-- downgrade pgvector-operator queries to a sequential scan).
 --
 -- Casts first, then operators (the operators depend on the casts' coercibility).
 -- Idempotent throughout via exception handling (neither CREATE CAST nor ALTER
 -- OPERATOR FAMILY has an IF NOT EXISTS form).
---
--- Lives in mkt, not @extschema@: it is an administration function a
--- superuser runs manually (see the event trigger's hint below), the same
--- category as mkt.rebalance -- not part of the vec32/vec16 type API.
 CREATE FUNCTION mkt.setup_pgvector_compat() RETURNS void
     LANGUAGE plpgsql
     -- Reached at runtime from the event trigger under the DDL-runner's
@@ -1096,14 +1062,11 @@ DECLARE
     expected_context "char";
     pgv_ns text;   -- pgvector's schema (it is relocatable, so discovered)
     pgv text;      -- ...quote_ident'd, for building qualified type names
-    ext_ns text;   -- meerkat's own current schema. meerkat is
-                   -- install-time relocatable too (see @extschema@ in the
-                   -- header comment), so this is discovered from
+    ext_ns text;   -- The extension's own current schema, install-time
+                   -- relocatable too -- discovered from
                    -- pg_extension.extnamespace rather than baked in via
-                   -- @extschema@ substitution -- the same reasoning
-                   -- applied to pgv_ns above, and it keeps this function
-                   -- correct regardless of where meerkat's install-time
-                   -- schema choice ends up.
+                   -- @extschema@ substitution, the same reasoning applied
+                   -- to pgv_ns above.
     ext text;      -- ...quote_ident'd, for building qualified type names
 BEGIN
     -- pgvector is relocatable: its types and operators live in whatever
@@ -1226,9 +1189,9 @@ $$;
 DO $$
 DECLARE
     pgv_ns text;
-    ext_ns text;   -- meerkat's own current schema, discovered rather than
-                   -- assumed via @extschema@ -- see the note on ext_ns in
-                   -- setup_pgvector_compat() above.
+    ext_ns text;   -- The extension's own current schema, discovered rather
+                   -- than assumed via @extschema@ -- see the note on
+                   -- ext_ns in setup_pgvector_compat() above.
 BEGIN
     -- pgvector is relocatable; discover its schema (NULL if not installed).
     SELECT n.nspname INTO pgv_ns
