@@ -34,16 +34,16 @@ SET mkt.nprobe = 64;
 -- no NaN fallout.
 EXPLAIN (COSTS OFF)
 SELECT id FROM zv
-    ORDER BY v OPERATOR(mkt.<=>) '[13.05,17.02,0,0,0,0,0,0]'
+    ORDER BY v <=> '[13.05,17.02,0,0,0,0,0,0]'
     LIMIT 1;
-SELECT id FROM zv ORDER BY v OPERATOR(mkt.<=>) '[13.05,17.02,0,0,0,0,0,0]' LIMIT 1;
+SELECT id FROM zv ORDER BY v <=> '[13.05,17.02,0,0,0,0,0,0]' LIMIT 1;
 
 -- Inserted zero vectors are likewise unreachable, and inserted real
 -- vectors keep working alongside them: direction (3, 500) is far from
 -- every grid direction.
 INSERT INTO zv VALUES (20000, '[0,0,0,0,0,0,0,0]');
 INSERT INTO zv VALUES (20001, '[3,500,0,0,0,0,0,0]');
-SELECT id FROM zv ORDER BY v OPERATOR(mkt.<=>) '[3,500,0,0,0,0,0,0]' LIMIT 1;
+SELECT id FROM zv ORDER BY v <=> '[3,500,0,0,0,0,0,0]' LIMIT 1;
 
 -- The zero rows are still physically indexed (entries counted), just
 -- never returned.
@@ -53,7 +53,7 @@ FROM mkt.posting_pages('zv_idx');
 VACUUM zv;
 -- squawk-ignore require-concurrent-reindex
 REINDEX INDEX zv_idx;
-SELECT id FROM zv ORDER BY v OPERATOR(mkt.<=>) '[13.05,17.02,0,0,0,0,0,0]' LIMIT 1;
+SELECT id FROM zv ORDER BY v <=> '[13.05,17.02,0,0,0,0,0,0]' LIMIT 1;
 
 RESET enable_seqscan;
 DROP TABLE zv;

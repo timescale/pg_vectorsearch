@@ -15,7 +15,7 @@ SET enable_seqscan = off;
 CREATE TABLE empty_cos (id int, v vec32(8));
 CREATE INDEX empty_cos_idx ON empty_cos USING mktann (v vec32_cosine_ops);
 EXPLAIN (COSTS OFF)
-    SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[1,0,0,0,0,0,0,0]'
+    SELECT id FROM empty_cos ORDER BY v <=> '[1,0,0,0,0,0,0,0]'
     LIMIT 5;
                       QUERY PLAN                      
 ------------------------------------------------------
@@ -24,7 +24,7 @@ EXPLAIN (COSTS OFF)
          Order By: (v <=> '[1,0,0,0,0,0,0,0]'::vec32)
 (3 rows)
 
-SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[1,0,0,0,0,0,0,0]' LIMIT 5;
+SELECT id FROM empty_cos ORDER BY v <=> '[1,0,0,0,0,0,0,0]' LIMIT 5;
  id 
 ----
 (0 rows)
@@ -33,7 +33,7 @@ SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[1,0,0,0,0,0,0,0]' LIMIT 
 INSERT INTO empty_cos
 SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vec32
 FROM generate_series(1, 50) g;
-SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[10,1,0,0,0,0,0,0]' LIMIT 3;
+SELECT id FROM empty_cos ORDER BY v <=> '[10,1,0,0,0,0,0,0]' LIMIT 3;
  id 
 ----
  10
@@ -44,7 +44,7 @@ SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[10,1,0,0,0,0,0,0]' LIMIT
 -- REINDEX with rows present re-clusters and preserves results.
 -- squawk-ignore require-concurrent-reindex
 REINDEX INDEX empty_cos_idx;
-SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[10,1,0,0,0,0,0,0]' LIMIT 3;
+SELECT id FROM empty_cos ORDER BY v <=> '[10,1,0,0,0,0,0,0]' LIMIT 3;
  id 
 ----
  10
@@ -59,13 +59,13 @@ SELECT g, ('[' || g || ',0,0,0,0,0,0,0]')::vec32
 FROM generate_series(1, 50) g;
 DELETE FROM all_dead;
 CREATE INDEX all_dead_idx ON all_dead USING mktann (v vec32_l2_ops);
-SELECT id FROM all_dead ORDER BY v OPERATOR(mkt.<->) '[1,0,0,0,0,0,0,0]' LIMIT 5;
+SELECT id FROM all_dead ORDER BY v <-> '[1,0,0,0,0,0,0,0]' LIMIT 5;
  id 
 ----
 (0 rows)
 
 INSERT INTO all_dead VALUES (1, '[2,0,0,0,0,0,0,0]');
-SELECT id FROM all_dead ORDER BY v OPERATOR(mkt.<->) '[1,0,0,0,0,0,0,0]' LIMIT 5;
+SELECT id FROM all_dead ORDER BY v <-> '[1,0,0,0,0,0,0,0]' LIMIT 5;
  id 
 ----
   1
@@ -76,7 +76,7 @@ CREATE TABLE all_null (id int, v vec32(8));
 INSERT INTO all_null SELECT g, NULL FROM generate_series(1, 20) g;
 CREATE INDEX all_null_idx ON all_null USING mktann (v vec32_cosine_ops);
 SELECT id FROM all_null WHERE v IS NOT NULL
-ORDER BY v OPERATOR(mkt.<=>) '[1,0,0,0,0,0,0,0]' LIMIT 5;
+ORDER BY v <=> '[1,0,0,0,0,0,0,0]' LIMIT 5;
  id 
 ----
 (0 rows)
@@ -102,7 +102,7 @@ FROM mkt.posting_pages('grow_idx');
 (1 row)
 
 SELECT id FROM grow
-ORDER BY v OPERATOR(mkt.<->) '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
+ORDER BY v <-> '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
   id  
 ------
  1000
@@ -122,7 +122,7 @@ FROM mkt.posting_pages('grow_idx');
 (1 row)
 
 SELECT id FROM grow
-ORDER BY v OPERATOR(mkt.<->) '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
+ORDER BY v <-> '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
   id  
 ------
  1000
@@ -147,7 +147,7 @@ FROM mkt.posting_pages('grow2_idx');
 (1 row)
 
 SELECT id FROM grow2
-ORDER BY v OPERATOR(mkt.<->) '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
+ORDER BY v <-> '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
   id  
 ------
  1000
@@ -174,7 +174,7 @@ SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vec32
 FROM generate_series(1, 50) g;
 CREATE INDEX ON temp_t USING mktann (v vec32_l2_ops);
 SELECT id FROM temp_t
-ORDER BY v OPERATOR(mkt.<->) '[10.4,1,0,0,0,0,0,0]' LIMIT 3;
+ORDER BY v <-> '[10.4,1,0,0,0,0,0,0]' LIMIT 3;
  id 
 ----
  10

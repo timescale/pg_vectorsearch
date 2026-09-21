@@ -10,33 +10,37 @@
  *                    (meerkat--<version>.control) — so every version
  *                    binds its own library, including each step of an
  *                    upgrade chain
- *   @extschema@      the extension schema, at CREATE EXTENSION time
  */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION meerkat" to load this file.\quit
 
 -- =====================================================================
--- schema ownership guard
+-- mkt: fixed schema for maintenance, administration, and inspection
 -- =====================================================================
--- Refuse to install into a pre-existing extension schema owned by an
--- untrusted role. meerkat is non-relocatable (schema = 'mkt') and its docs
--- have users put that schema on their search_path
--- (SET search_path = mkt, public) so meerkat's types and operators resolve
--- unqualified -- which makes mkt a schema users trust on their path. But
--- PostgreSQL does not check target-schema ownership at CREATE EXTENSION, so
--- a role with CREATE on the database can pre-create mkt and keep owning it
--- after install. The owner cannot touch meerkat's own objects (extension
--- membership protects them), but can add NEW objects to mkt -- e.g. an
--- operator on pgvector's type that shadows pgvector's own for anyone with
--- mkt ahead of public, running the attacker's code as that role. See the
--- security note above setup_pgvector_compat() for the alternatives weighed.
+-- Everything else in this script installs into @extschema@. Maintenance,
+-- administration, and inspection functions always live in `mkt` instead,
+-- created here regardless of @extschema@ -- one fixed, predictable,
+-- always-qualified path to them no matter which schema holds the types.
+-- This is also why ALTER EXTENSION ... SET SCHEMA is refused (see the
+-- control file): that command moves every member object into one schema,
+-- and these functions are deliberately not in it.
 --
--- Allow only a schema the installer (current_user) or a superuser owns; a
--- fresh install, where CREATE EXTENSION creates the schema, is unaffected.
--- This assumes the fixed dedicated schema: if meerkat is ever made
--- relocatable (installable into public, owned by pg_database_owner), this
--- check must be revisited, or it would refuse a legitimate install there.
+-- The mkt schema must be owned by the extension's installer or a
+-- superuser. PostgreSQL does not check target-schema ownership at CREATE
+-- EXTENSION, so an untrusted role could otherwise pre-create mkt, keep
+-- owning it, and plant lookalike objects there that a caller who has not
+-- double-checked their tooling might mistake for the extension's own
+-- (mkt.<function> calls are always schema-qualified, never resolved via
+-- search_path). See the security note above setup_pgvector_compat() for
+-- the analogous reasoning about @extschema@ when pgvector is involved.
+--
+-- A pre-existing, trusted-owned mkt is used as-is, not adopted into
+-- extension membership (no ALTER EXTENSION ... ADD SCHEMA): matching how
+-- PostgreSQL treats a pre-existing @extschema@ for any relocatable
+-- extension, only objects this script itself creates become members.
+-- Otherwise DROP EXTENSION ... CASCADE could delete a schema -- and
+-- anything unrelated already in it -- that this extension never created.
 DO $$
 DECLARE
     owner_name  name;
@@ -46,11 +50,16 @@ BEGIN
       FROM pg_catalog.pg_namespace n
       JOIN pg_catalog.pg_roles r
         ON r.oid OPERATOR(pg_catalog.=) n.nspowner
-     WHERE n.nspname OPERATOR(pg_catalog.=) '@extschema@';
-    IF FOUND AND NOT (owner_super
-                      OR owner_name OPERATOR(pg_catalog.=) current_user) THEN
+     WHERE n.nspname OPERATOR(pg_catalog.=) 'mkt';
+
+    IF NOT FOUND THEN
+        CREATE SCHEMA mkt;
+        RETURN;
+    END IF;
+
+    IF NOT (owner_super OR owner_name OPERATOR(pg_catalog.=) current_user) THEN
         RAISE EXCEPTION
-            'schema "@extschema@" already exists and is owned by "%", a role '
+            'schema "mkt" already exists and is owned by "%", a role '
             'other than the installer or a superuser', owner_name
             USING HINT = 'meerkat refuses to install into a schema an '
                 'untrusted role controls; drop or re-own the schema, or '
@@ -60,34 +69,35 @@ END;
 $$;
 
 -- =====================================================================
--- build identity
+-- build identity (maintenance/administration/inspection: fixed in mkt,
+-- like the other procedures in this category, regardless of @extschema@)
 -- =====================================================================
 
-CREATE FUNCTION git_commit() RETURNS text
+CREATE FUNCTION mkt.git_commit() RETURNS text
     AS 'MODULE_PATHNAME', 'mkt_git_commit'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION extension_version() RETURNS text
+CREATE FUNCTION mkt.extension_version() RETURNS text
     AS 'MODULE_PATHNAME', 'mkt_extension_version'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION extension_name() RETURNS text
+CREATE FUNCTION mkt.extension_name() RETURNS text
     AS 'MODULE_PATHNAME', 'mkt_extension_name'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- Prerelease install notice: warn at CREATE EXTENSION time when this
 -- build is a prerelease (any -suffix version, e.g. -alpha1 or -dev).
--- A runtime check against extension_version(), so final releases
+-- A runtime check against mkt.extension_version(), so final releases
 -- carry nothing to strip and the notice can never ship stale.
 DO $$
 BEGIN
-    IF pg_catalog.strpos(@extschema@.extension_version(), '-')
+    IF pg_catalog.strpos(mkt.extension_version(), '-')
         OPERATOR(pg_catalog.>) 0
     THEN
         RAISE WARNING '% % is a prerelease: upgrading to later '
             'versions might not be possible (reinstall instead) and '
             'its indexes may need rebuilding',
-            @extschema@.extension_name(), @extschema@.extension_version();
+            mkt.extension_name(), mkt.extension_version();
     END IF;
 END;
 $$;
@@ -826,7 +836,7 @@ CREATE OPERATOR CLASS vec16_cosine_ops
 -- index inspection functions
 -- =====================================================================
 
-CREATE FUNCTION centroid_pages(regclass)
+CREATE FUNCTION mkt.centroid_pages(regclass)
     RETURNS TABLE (
         blkno       integer,
         entry       smallint,
@@ -998,40 +1008,46 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 --    absent and RAISEs on any pre-existing cast that is not the expected
 --    binary (WITHOUT FUNCTION) cast, instead of adopting it.
 --
--- 3. Operator shadowing via the extension schema. If an untrusted role owns
---    mkt, it can add an operator on pgvector's type -- e.g.
---    mkt.<->(public.vec32, public.vec32) -- that shadows pgvector's own for
---    any role with mkt ahead of public, running attacker code as that role.
---    meerkat's OWN operators (on mkt.vec32) are not shadowable: a
---    same-signature plant conflicts at install and installed objects are
+-- 3. Operator shadowing via a schema the extension did not choose. If an
+--    untrusted role owns a schema the extension's own objects end up in,
+--    it can add an operator on pgvector's type there -- e.g.
+--    that_schema.<->(public.vec32, public.vec32) -- that shadows pgvector's
+--    own for any role with that_schema ahead of public, running attacker
+--    code as that role. The extension's OWN operators are not shadowable:
+--    a same-signature plant conflicts at install and installed objects are
 --    membership-locked. Two fixes were weighed:
---      (a) Occupy the signatures -- have meerkat pre-create safe, delegating
---          versions of pgvector's operators AND functions in mkt so the
---          attacker cannot. Rejected: the surface is pgvector's whole public
---          API across all its types and it grows with pgvector versions, so a
---          newly added pgvector operator silently reopens the hole until
---          meerkat catches up -- a maintenance treadmill tied to another
---          project's API, and it still leaves non-pgvector shadows open.
---      (b) Ensure mkt is trusted-owned -- refuse to install into a mkt owned
---          by an untrusted role (the schema ownership guard at the top of
---          this script). Chosen: version-independent, comprehensive (nothing
---          hostile can live in mkt at all), ~10 lines. Cost: it assumes the
---          fixed dedicated schema and must be revisited if meerkat ever
---          becomes relocatable.
+--      (a) Occupy the signatures -- pre-create safe, delegating versions of
+--          pgvector's operators AND functions in every schema this
+--          extension touches so the attacker cannot. Rejected: the surface
+--          is pgvector's whole public API across all its types and it grows
+--          with pgvector versions, so a newly added pgvector operator
+--          silently reopens the hole until this extension catches up -- a
+--          maintenance treadmill tied to another project's API, and it
+--          still leaves non-pgvector shadows open.
+--      (b) Ensure the schema is trusted-owned -- refuse to install into one
+--          owned by an untrusted role (the schema ownership guard at the top
+--          of this script). Chosen: version-independent, comprehensive
+--          (nothing hostile can live there at all), ~10 lines. Applied only
+--          to `mkt`: unlike @extschema@, which the installer explicitly
+--          chose (or already had first on their own search_path -- the same
+--          standing responsibility as installing any relocatable
+--          extension), `mkt` must be owned by the extension's installer or
+--          a superuser, since the installer has no independent reason to
+--          have already vetted its ownership.
 --
 -- Set up pgvector interoperability in one step: the binary casts between the
 -- two extensions' types, and the membership of pgvector's distance operators
 -- in meerkat's mktann operator families. These belong together -- the casts
--- make pgvector's vector/halfvec binary-coercible to mkt.vec32/mkt.vec16,
--- which is exactly what lets pgvector's operators join a family whose opclass
--- is FOR TYPE mkt.<type>. Keeping them in a single function means a caller
--- cannot add the casts and forget the operators (which would silently downgrade
--- pgvector-operator queries to a sequential scan).
+-- make pgvector's vector/halfvec binary-coercible to vec32/vec16, which is
+-- exactly what lets pgvector's operators join a family whose opclass is
+-- FOR TYPE <vec32/vec16>. Keeping them in a single function means a caller
+-- cannot add the casts and forget the operators (which would silently
+-- downgrade pgvector-operator queries to a sequential scan).
 --
 -- Casts first, then operators (the operators depend on the casts' coercibility).
 -- Idempotent throughout via exception handling (neither CREATE CAST nor ALTER
 -- OPERATOR FAMILY has an IF NOT EXISTS form).
-CREATE FUNCTION setup_pgvector_compat() RETURNS void
+CREATE FUNCTION mkt.setup_pgvector_compat() RETURNS void
     LANGUAGE plpgsql
     -- Reached at runtime from the event trigger under the DDL-runner's
     -- search_path, and from the install DO block. Pin the path so every
@@ -1046,6 +1062,12 @@ DECLARE
     expected_context "char";
     pgv_ns text;   -- pgvector's schema (it is relocatable, so discovered)
     pgv text;      -- ...quote_ident'd, for building qualified type names
+    ext_ns text;   -- The extension's own current schema, install-time
+                   -- relocatable too -- discovered from
+                   -- pg_extension.extnamespace rather than baked in via
+                   -- @extschema@ substitution, the same reasoning applied
+                   -- to pgv_ns above.
+    ext text;      -- ...quote_ident'd, for building qualified type names
 BEGIN
     -- pgvector is relocatable: its types and operators live in whatever
     -- schema it was installed into, not necessarily public. Discover it
@@ -1063,6 +1085,13 @@ BEGIN
         RAISE EXCEPTION 'pgvector (extension "vector") is not installed';
     END IF;
     pgv := pg_catalog.quote_ident(pgv_ns);
+
+    SELECT n.nspname INTO ext_ns
+    FROM pg_catalog.pg_extension e
+    JOIN pg_catalog.pg_namespace n
+      ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
+    WHERE e.extname OPERATOR(pg_catalog.=) 'meerkat';
+    ext := pg_catalog.quote_ident(ext_ns);
 
     -- 1. Binary casts, both directions, for vector and halfvec.
     --
@@ -1088,12 +1117,12 @@ BEGIN
     FOR r IN
         SELECT * FROM (VALUES
             (pgv OPERATOR(pg_catalog.||) '.vector',
-                 '@extschema@.vec32',   'IMPLICIT'),
+                 ext OPERATOR(pg_catalog.||) '.vec32',   'IMPLICIT'),
             (pgv OPERATOR(pg_catalog.||) '.halfvec',
-                 '@extschema@.vec16',  'IMPLICIT'),
-            ('@extschema@.vec32',
+                 ext OPERATOR(pg_catalog.||) '.vec16',  'IMPLICIT'),
+            (ext OPERATOR(pg_catalog.||) '.vec32',
                  pgv OPERATOR(pg_catalog.||) '.vector',  'ASSIGNMENT'),
-            ('@extschema@.vec16',
+            (ext OPERATOR(pg_catalog.||) '.vec16',
                  pgv OPERATOR(pg_catalog.||) '.halfvec', 'ASSIGNMENT')
         ) AS t(src, tgt, ctx)
     LOOP
@@ -1140,10 +1169,10 @@ BEGIN
     LOOP
         BEGIN
             EXECUTE pg_catalog.format(
-                'ALTER OPERATOR FAMILY @extschema@.%I USING mktann '
+                'ALTER OPERATOR FAMILY %I.%I USING mktann '
                 'ADD OPERATOR 1 %I.%s (%I.%I, %I.%I) '
                 'FOR ORDER BY pg_catalog.float_ops',
-                r.fam, pgv_ns, r.op, pgv_ns, r.typ, pgv_ns, r.typ);
+                ext_ns, r.fam, pgv_ns, r.op, pgv_ns, r.typ, pgv_ns, r.typ);
         EXCEPTION WHEN duplicate_object THEN NULL;
         END;
     END LOOP;
@@ -1160,6 +1189,9 @@ $$;
 DO $$
 DECLARE
     pgv_ns text;
+    ext_ns text;   -- The extension's own current schema, discovered rather
+                   -- than assumed via @extschema@ -- see the note on
+                   -- ext_ns in setup_pgvector_compat() above.
 BEGIN
     -- pgvector is relocatable; discover its schema (NULL if not installed).
     SELECT n.nspname INTO pgv_ns
@@ -1169,21 +1201,30 @@ BEGIN
     WHERE e.extname OPERATOR(pg_catalog.=) 'vector';
 
     IF pgv_ns IS NOT NULL THEN
-        PERFORM @extschema@.setup_pgvector_compat();
+        SELECT n.nspname INTO ext_ns
+        FROM pg_catalog.pg_extension e
+        JOIN pg_catalog.pg_namespace n
+          ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
+        WHERE e.extname OPERATOR(pg_catalog.=) 'meerkat';
+
+        PERFORM mkt.setup_pgvector_compat();
         EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
-            '(%I.vector AS @extschema@.vec32)', pgv_ns);
+            '(%I.vector AS %I.vec32)', pgv_ns, ext_ns);
         EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
-            '(%I.halfvec AS @extschema@.vec16)', pgv_ns);
+            '(%I.halfvec AS %I.vec16)', pgv_ns, ext_ns);
         EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
-            '(@extschema@.vec32 AS %I.vector)', pgv_ns);
+            '(%I.vec32 AS %I.vector)', ext_ns, pgv_ns);
         EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
-            '(@extschema@.vec16 AS %I.halfvec)', pgv_ns);
+            '(%I.vec16 AS %I.halfvec)', ext_ns, pgv_ns);
     END IF;
 END;
 $$;
 
 -- Event trigger: create casts when pgvector is installed after meerkat.
-CREATE FUNCTION on_extension_create()
+-- Lives in mkt alongside setup_pgvector_compat() -- it is that function's
+-- automatic trigger, not part of the vec32/vec16 type API, and mkt is a
+-- fixed name it can reference directly (no schema discovery needed for it).
+CREATE FUNCTION mkt.on_extension_create()
     RETURNS event_trigger LANGUAGE plpgsql
     -- Runs later as an event trigger under the DDL-runner's own
     -- search_path. Pin it so unqualified names in this body (and the one
@@ -1210,13 +1251,14 @@ BEGIN
             SELECT r.rolsuper INTO is_super
               FROM pg_catalog.pg_roles r
              WHERE r.rolname OPERATOR(pg_catalog.=) current_user;
+
             IF is_super THEN
-                PERFORM @extschema@.setup_pgvector_compat();
+                PERFORM mkt.setup_pgvector_compat();
             ELSE
                 RAISE WARNING 'meerkat did not set up pgvector compatibility: '
                     'it requires superuser privileges'
                     USING HINT = 'A superuser should run '
-                        '@extschema@.setup_pgvector_compat() so pgvector-typed '
+                        'mkt.setup_pgvector_compat() so pgvector-typed '
                         'columns can use meerkat indexes.';
             END IF;
         END IF;
@@ -1227,4 +1269,4 @@ $$;
 CREATE EVENT TRIGGER mkt_pgvector_cast_trigger
     ON ddl_command_end
     WHEN TAG IN ('CREATE EXTENSION')
-    EXECUTE FUNCTION on_extension_create();
+    EXECUTE FUNCTION mkt.on_extension_create();

@@ -76,6 +76,26 @@ else
       protocol: 'tap',
     )
 
+    # Extension install-time schema behavior: this manages its own
+    # CREATE/DROP EXTENSION cycles (including a SCHEMA clause and an
+    # expected-to-fail ALTER EXTENSION), which would pull the extension out
+    # from under every other script in the shared schedule above -- hence
+    # its own temp instance and no --load-extension.
+    test('regress_extension',
+      pg_regress,
+      args: [
+        '--inputdir=' + meson.current_source_dir(),
+        '--outputdir=' + meson.current_build_dir(),
+        '--bindir=' + pg_bindir,
+        '--temp-instance=' + meson.project_build_root() / 'extension_testdb',
+        'extension',
+      ],
+      depends: [meerkat_ext_so],
+      timeout: 60,
+      is_parallel: false,
+      protocol: 'tap',
+    )
+
     # Isolation tests for incremental writes (MVCC visibility + rebuild vs an
     # open insert). Unlike the build-progress spec below, these need no
     # injection points.

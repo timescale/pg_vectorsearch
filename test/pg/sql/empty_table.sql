@@ -17,20 +17,20 @@ SET enable_seqscan = off;
 CREATE TABLE empty_cos (id int, v vec32(8));
 CREATE INDEX empty_cos_idx ON empty_cos USING mktann (v vec32_cosine_ops);
 EXPLAIN (COSTS OFF)
-    SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[1,0,0,0,0,0,0,0]'
+    SELECT id FROM empty_cos ORDER BY v <=> '[1,0,0,0,0,0,0,0]'
     LIMIT 5;
-SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[1,0,0,0,0,0,0,0]' LIMIT 5;
+SELECT id FROM empty_cos ORDER BY v <=> '[1,0,0,0,0,0,0,0]' LIMIT 5;
 
 -- Inserts route into the degenerate index and are found.
 INSERT INTO empty_cos
 SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vec32
 FROM generate_series(1, 50) g;
-SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[10,1,0,0,0,0,0,0]' LIMIT 3;
+SELECT id FROM empty_cos ORDER BY v <=> '[10,1,0,0,0,0,0,0]' LIMIT 3;
 
 -- REINDEX with rows present re-clusters and preserves results.
 -- squawk-ignore require-concurrent-reindex
 REINDEX INDEX empty_cos_idx;
-SELECT id FROM empty_cos ORDER BY v OPERATOR(mkt.<=>) '[10,1,0,0,0,0,0,0]' LIMIT 3;
+SELECT id FROM empty_cos ORDER BY v <=> '[10,1,0,0,0,0,0,0]' LIMIT 3;
 
 -- Non-empty heap, zero live rows (l2).
 CREATE TABLE all_dead (id int, v vec32(8));
@@ -39,16 +39,16 @@ SELECT g, ('[' || g || ',0,0,0,0,0,0,0]')::vec32
 FROM generate_series(1, 50) g;
 DELETE FROM all_dead;
 CREATE INDEX all_dead_idx ON all_dead USING mktann (v vec32_l2_ops);
-SELECT id FROM all_dead ORDER BY v OPERATOR(mkt.<->) '[1,0,0,0,0,0,0,0]' LIMIT 5;
+SELECT id FROM all_dead ORDER BY v <-> '[1,0,0,0,0,0,0,0]' LIMIT 5;
 INSERT INTO all_dead VALUES (1, '[2,0,0,0,0,0,0,0]');
-SELECT id FROM all_dead ORDER BY v OPERATOR(mkt.<->) '[1,0,0,0,0,0,0,0]' LIMIT 5;
+SELECT id FROM all_dead ORDER BY v <-> '[1,0,0,0,0,0,0,0]' LIMIT 5;
 
 -- All rows NULL in the indexed column.
 CREATE TABLE all_null (id int, v vec32(8));
 INSERT INTO all_null SELECT g, NULL FROM generate_series(1, 20) g;
 CREATE INDEX all_null_idx ON all_null USING mktann (v vec32_cosine_ops);
 SELECT id FROM all_null WHERE v IS NOT NULL
-ORDER BY v OPERATOR(mkt.<=>) '[1,0,0,0,0,0,0,0]' LIMIT 5;
+ORDER BY v <=> '[1,0,0,0,0,0,0,0]' LIMIT 5;
 
 -- Maintenance on a degenerate index.
 VACUUM empty_cos;
@@ -67,7 +67,7 @@ SELECT count(DISTINCT cluster_id) AS nclusters,
        bool_or(format = 'aos') AS has_aos_pages
 FROM mkt.posting_pages('grow_idx');
 SELECT id FROM grow
-ORDER BY v OPERATOR(mkt.<->) '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
+ORDER BY v <-> '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
 -- squawk-ignore require-concurrent-reindex
 REINDEX INDEX grow_idx;
 SELECT count(DISTINCT cluster_id) BETWEEN 20 AND 100 AS reclustered,
@@ -75,7 +75,7 @@ SELECT count(DISTINCT cluster_id) BETWEEN 20 AND 100 AS reclustered,
        sum(entry_count) >= 2000 AS entries_ok
 FROM mkt.posting_pages('grow_idx');
 SELECT id FROM grow
-ORDER BY v OPERATOR(mkt.<->) '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
+ORDER BY v <-> '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
 
 -- VACUUM FULL rebuilds the index and re-optimizes the same way.
 CREATE TABLE grow2 (id int, v vec32(8));
@@ -89,7 +89,7 @@ SELECT count(DISTINCT cluster_id) BETWEEN 20 AND 100 AS reclustered,
        sum(entry_count) >= 2000 AS entries_ok
 FROM mkt.posting_pages('grow2_idx');
 SELECT id FROM grow2
-ORDER BY v OPERATOR(mkt.<->) '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
+ORDER BY v <-> '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
 
 -- Unlogged tables are refused: meerkat has no valid empty-index image to
 -- seed the init fork with, so a crash would wipe the index. Fail at CREATE
@@ -109,7 +109,7 @@ SELECT g, ('[' || g || ',1,0,0,0,0,0,0]')::vec32
 FROM generate_series(1, 50) g;
 CREATE INDEX ON temp_t USING mktann (v vec32_l2_ops);
 SELECT id FROM temp_t
-ORDER BY v OPERATOR(mkt.<->) '[10.4,1,0,0,0,0,0,0]' LIMIT 3;
+ORDER BY v <-> '[10.4,1,0,0,0,0,0,0]' LIMIT 3;
 DROP TABLE temp_t;
 
 RESET enable_seqscan;
