@@ -1,5 +1,5 @@
 /*
- * api.h - Public C API for standalone meerkat library
+ * api.h - Public C API for standalone pg_vectorsearch library
  *
  * Single entry point for building and querying in-memory ANN indexes.
  * Used by the CLI benchmark, Python ctypes bindings, and ann-benchmarks.

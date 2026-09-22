@@ -707,9 +707,9 @@ WHERE n.nspname = 'mkt' AND p.proname = 'git_commit';
 -- and version the loaded library was built as.
 -- ---------------------------------------------------------------------
 SELECT mkt.extension_name();
- extension_name 
-----------------
- meerkat
+ extension_name  
+-----------------
+ pg_vectorsearch
 (1 row)
 
 -- The binary's version must match the installed extension's version;

@@ -1,19 +1,19 @@
 /*
- * meerkat.sql - canonical extension install script
+ * pg_vectorsearch.sql - canonical extension install script
  *
  * The build copies this file verbatim to the version-named install
- * script (meerkat--<version>.sql); see src/pg/meson.build.
+ * script (pg_vectorsearch--<version>.sql); see src/pg/meson.build.
  * PostgreSQL resolves the placeholders when the script runs:
  *
  *   MODULE_PATHNAME  the version-named extension library, from the
  *                    version's own control file
- *                    (meerkat--<version>.control) — so every version
- *                    binds its own library, including each step of an
- *                    upgrade chain
+ *                    (pg_vectorsearch--<version>.control) — so every
+ *                    version binds its own library, including each
+ *                    step of an upgrade chain
  */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
-\echo Use "CREATE EXTENSION meerkat" to load this file.\quit
+\echo Use "CREATE EXTENSION pg_vectorsearch" to load this file.\quit
 
 -- =====================================================================
 -- mkt / prism: fixed schemas for maintenance, administration, and
@@ -77,9 +77,9 @@ BEGIN
                 'schema "%" already exists and is owned by "%", a role '
                 'other than the installer or a superuser',
                 schema_name, owner_name
-                USING HINT = 'meerkat refuses to install into a schema an '
-                    'untrusted role controls; drop or re-own the schema, or '
-                    'install as the role that owns it.';
+                USING HINT = 'pg_vectorsearch refuses to install into a '
+                    'schema an untrusted role controls; drop or re-own the '
+                    'schema, or install as the role that owns it.';
         END IF;
     END LOOP;
 END;
@@ -978,17 +978,17 @@ COMMENT ON PROCEDURE prism.rebalance(regclass, integer) IS
 -- pgvector binary cast support
 -- =====================================================================
 --
--- When pgvector (the vec32 extension) is installed, meerkat creates
+-- When pgvector (the vec32 extension) is installed, pg_vectorsearch creates
 -- zero-overhead binary casts between the two sets of types. The types
 -- have identical binary layouts (varlena header + int16 dim + int16
 -- unused + float[]), so WITHOUT FUNCTION casts produce RelabelType
 -- nodes with no conversion overhead.
 --
 -- Cast directions:
---   pgvector -> meerkat: IMPLICIT (pgvector columns work transparently
---     with meerkat operators and indexes)
---   meerkat -> pgvector: ASSIGNMENT (avoids operator ambiguity when
---     both extensions define <->, <#>, <=>)
+--   pgvector -> pg_vectorsearch: IMPLICIT (pgvector columns work
+--     transparently with pg_vectorsearch operators and indexes)
+--   pg_vectorsearch -> pgvector: ASSIGNMENT (avoids operator ambiguity
+--     when both extensions define <->, <#>, <=>)
 --
 -- Casts alone are not enough to make a prism index reachable from a
 -- query written against pgvector. An index is only considered for an
@@ -1009,8 +1009,8 @@ COMMENT ON PROCEDURE prism.rebalance(regclass, integer) IS
 -- casts without affecting the other extension.
 --
 -- Both install orderings are supported:
---   pgvector first, meerkat later: DO block below sets up compat
---   meerkat first, pgvector later: event trigger sets up compat
+--   pgvector first, pg_vectorsearch later: DO block below sets up compat
+--   pg_vectorsearch first, pgvector later: event trigger sets up compat
 
 -- Security note. This code runs at CREATE EXTENSION time (the install DO
 -- block) and later from an event trigger on any CREATE EXTENSION, in both
@@ -1111,7 +1111,7 @@ BEGIN
     FROM pg_catalog.pg_extension e
     JOIN pg_catalog.pg_namespace n
       ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
-    WHERE e.extname OPERATOR(pg_catalog.=) 'meerkat';
+    WHERE e.extname OPERATOR(pg_catalog.=) 'pg_vectorsearch';
     ext := pg_catalog.quote_ident(ext_ns);
 
     -- 1. Binary casts, both directions, for vector and halfvec.
@@ -1128,10 +1128,10 @@ BEGIN
     -- This check is therefore defense in depth and loud tamper-evidence
     -- rather than protection against an unprivileged attacker; it costs
     -- nothing and catches a mistaken or malicious cast whoever made it.
-    -- Validating the
-    -- context too matters because the two directions differ deliberately
-    -- (pgvector->meerkat IMPLICIT, meerkat->pgvector ASSIGNMENT): a binary
-    -- cast planted with the wrong context still has method 'b' but changes
+    -- Validating the context too matters because the two directions differ
+    -- deliberately (pgvector->pg_vectorsearch IMPLICIT,
+    -- pg_vectorsearch->pgvector ASSIGNMENT): a binary cast planted with the
+    -- wrong context still has method 'b' but changes
     -- coercion/operator-resolution behaviour. Silently adopting either (the
     -- old EXCEPTION WHEN duplicate_object THEN NULL) would hide it; we fail
     -- loudly instead.
@@ -1205,7 +1205,7 @@ $$;
 -- During CREATE EXTENSION, objects created in an anonymous DO ($$ ... $$)
 -- block are auto-owned by the extension. We immediately disassociate the
 -- casts so that
--- DROP EXTENSION meerkat does not cascade to (or through) pgvector.
+-- DROP EXTENSION pg_vectorsearch does not cascade to (or through) pgvector.
 -- The casts still get cleaned up via auto-dependencies on their
 -- referenced types.
 DO $$
@@ -1227,25 +1227,26 @@ BEGIN
         FROM pg_catalog.pg_extension e
         JOIN pg_catalog.pg_namespace n
           ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
-        WHERE e.extname OPERATOR(pg_catalog.=) 'meerkat';
+        WHERE e.extname OPERATOR(pg_catalog.=) 'pg_vectorsearch';
 
         PERFORM prism.setup_pgvector_compat();
-        EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
+        EXECUTE pg_catalog.format('ALTER EXTENSION pg_vectorsearch DROP CAST '
             '(%I.vector AS %I.vec32)', pgv_ns, ext_ns);
-        EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
+        EXECUTE pg_catalog.format('ALTER EXTENSION pg_vectorsearch DROP CAST '
             '(%I.halfvec AS %I.vec16)', pgv_ns, ext_ns);
-        EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
+        EXECUTE pg_catalog.format('ALTER EXTENSION pg_vectorsearch DROP CAST '
             '(%I.vec32 AS %I.vector)', ext_ns, pgv_ns);
-        EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
+        EXECUTE pg_catalog.format('ALTER EXTENSION pg_vectorsearch DROP CAST '
             '(%I.vec16 AS %I.halfvec)', ext_ns, pgv_ns);
     END IF;
 END;
 $$;
 
--- Event trigger: create casts when pgvector is installed after meerkat.
--- Lives in prism alongside setup_pgvector_compat() -- it is that function's
--- automatic trigger, not part of the vec32/vec16 type API, and prism is a
--- fixed name it can reference directly (no schema discovery needed for it).
+-- Event trigger: create casts when pgvector is installed after
+-- pg_vectorsearch. Lives in prism alongside setup_pgvector_compat() -- it
+-- is that function's automatic trigger, not part of the vec32/vec16 type
+-- API, and prism is a fixed name it can reference directly (no schema
+-- discovery needed for it).
 CREATE FUNCTION prism.on_extension_create()
     RETURNS event_trigger LANGUAGE plpgsql
     -- Runs later as an event trigger under the DDL-runner's own
@@ -1265,11 +1266,12 @@ BEGIN
             -- WITHOUT FUNCTION, ALTER OPERATOR FAMILY). An event trigger runs
             -- as the role that ran CREATE EXTENSION, so if a NON-superuser
             -- installs pgvector -- possible where it is trusted, as some
-            -- managed platforms allow -- this PERFORM would fail and roll back
-            -- the whole pgvector install, making meerkat's presence break
-            -- pgvector. Skip and warn instead; a superuser finishes the wiring
-            -- later. (SECURITY DEFINER was rejected: it would run this
-            -- superuser-only DDL for anyone who can create an extension.)
+            -- managed platforms allow -- this PERFORM would fail and roll
+            -- back the whole pgvector install, making pg_vectorsearch's
+            -- presence break pgvector. Skip and warn instead; a superuser
+            -- finishes the wiring later. (SECURITY DEFINER was rejected: it
+            -- would run this superuser-only DDL for anyone who can create
+            -- an extension.)
             SELECT r.rolsuper INTO is_super
               FROM pg_catalog.pg_roles r
              WHERE r.rolname OPERATOR(pg_catalog.=) current_user;
@@ -1277,11 +1279,11 @@ BEGIN
             IF is_super THEN
                 PERFORM prism.setup_pgvector_compat();
             ELSE
-                RAISE WARNING 'meerkat did not set up pgvector compatibility: '
-                    'it requires superuser privileges'
+                RAISE WARNING 'pg_vectorsearch did not set up pgvector '
+                    'compatibility: it requires superuser privileges'
                     USING HINT = 'A superuser should run '
                         'prism.setup_pgvector_compat() so pgvector-typed '
-                        'columns can use meerkat indexes.';
+                        'columns can use prism indexes.';
             END IF;
         END IF;
     END LOOP;

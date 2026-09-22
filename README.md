@@ -1,4 +1,4 @@
-# Meerkat
+# pg_vectorsearch
 
 [![Coverage](https://img.shields.io/endpoint?url=https://timescale.github.io/meerkat/coverage-badge.json)](https://timescale.github.io/meerkat/coverage/)
 
@@ -12,8 +12,9 @@ Neighbor (ANN) search.
 PRISM uses [RaBitQ][rabitq] quantization for fast, memory-efficient
 approximate nearest-neighbor search.
 
-Meerkat works with [pgvector][pgvector]'s `vector` and `halfvec` types and
-operators, but does not depend on them. It ships its own `vec32` and `vec16`
+pg_vectorsearch works with [pgvector][pgvector]'s `vector` and `halfvec`
+types and operators, but does not depend on them. It ships its own
+`vec32` and `vec16`
 types, binary compatible with their pgvector counterparts but named
 differently so that both extensions can coexist even with their objects in
 the same schema. Binary casts between the two mean an existing pgvector
@@ -136,9 +137,10 @@ dnf install openblas-devel
 
 ## Micro-benchmarking
 
-The Meerkat code base is structured to allow building the core vector search
-engine outside PostgreSQL. This makes it possible to unit test the code, as
-well as run micro-benchmarks to optimize particularly hot query paths.
+The pg_vectorsearch code base is structured to allow building the core
+vector search engine outside PostgreSQL. This makes it possible to unit
+test the code, as well as run micro-benchmarks to optimize particularly
+hot query paths.
 
 The `mkt` CLI tool includes benchmarks for distance computation:
 
@@ -162,8 +164,8 @@ See [docs/simd.md][simd-doc] for SIMD build options and implementation details.
 -- administration, and inspection for the prism index always live in a
 -- separate `prism` schema the extension creates, regardless of where the
 -- types end up, so they're reachable the same way from any install.
-CREATE EXTENSION meerkat;
--- or, e.g.: CREATE EXTENSION meerkat SCHEMA myschema;
+CREATE EXTENSION pg_vectorsearch;
+-- or, e.g.: CREATE EXTENSION pg_vectorsearch SCHEMA myschema;
 
 -- Create table with vector column
 CREATE TABLE items (
@@ -196,27 +198,29 @@ ever adjust `prism.nprobe`.
 See the [tuning guide][tuning-doc] for every index parameter and GUC,
 their tradeoffs, and when changing them makes sense.
 
-> **Security note on `mkt` and `prism`.** meerkat always creates its own
-> `mkt` schema (extension-wide identity: `git_commit()`,
+> **Security note on `mkt` and `prism`.** pg_vectorsearch always creates
+> its own `mkt` schema (extension-wide identity: `git_commit()`,
 > `extension_version()`, `extension_name()`) and its own `prism` schema
 > (the maintenance/introspection procedures above), regardless of which
 > schema you installed the types into. Calls like `prism.rebalance(...)`
 > are always written schema-qualified, so neither `mkt` nor `prism` ever
-> needs to be on any role's `search_path` for meerkat to work. Don't let
-> untrusted application roles hold `CREATE` on the database or pre-create
-> either schema: an owner of one could add lookalike objects to it that a
-> caller who has not double-checked where their tooling actually points
-> might mistake for meerkat's own. `CREATE EXTENSION meerkat` refuses to
-> install if a pre-existing `mkt` or `prism` is owned by a role other than
-> the installer or a superuser, but its ownership is otherwise the database
-> administrator's responsibility.
+> needs to be on any role's `search_path` for pg_vectorsearch to work.
+> Don't let untrusted application roles hold `CREATE` on the database or
+> pre-create either schema: an owner of one could add lookalike objects
+> to it that a caller who has not double-checked where their tooling
+> actually points might mistake for pg_vectorsearch's own.
+> `CREATE EXTENSION pg_vectorsearch` refuses to install if a pre-existing
+> `mkt` or `prism` is owned by a role other than the installer or a
+> superuser, but its ownership is otherwise the database administrator's
+> responsibility.
 >
 > **Changing schemas later.** The schema choice above is made once, at
-> `CREATE EXTENSION` time. meerkat is not relocatable: `ALTER EXTENSION
-> meerkat SET SCHEMA ...` is refused, because that command would try to move
-> the `mkt`- and `prism`-pinned procedures too, defeating the point of
-> pinning them. To move to a different schema, drop and recreate the
-> extension (and its indexes) there instead.
+> `CREATE EXTENSION` time. pg_vectorsearch is not relocatable:
+> `ALTER EXTENSION pg_vectorsearch SET SCHEMA ...` is refused, because
+> that command would try to move the `mkt`- and `prism`-pinned procedures
+> too, defeating the point of pinning them. To move to a different
+> schema, drop and recreate the extension (and its indexes) there
+> instead.
 
 ## PRISM index maintenance
 

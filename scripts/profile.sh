@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# profile.sh - Profile meerkat CLI with perf and generate flame graphs
+# profile.sh - Profile pg_vectorsearch CLI with perf and generate flame graphs
 #
 # Usage:
 #   ./scripts/profile.sh [command] [args...]

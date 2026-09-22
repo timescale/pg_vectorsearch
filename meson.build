@@ -1,4 +1,4 @@
-project('meerkat', 'c',
+project('pg_vectorsearch', 'c',
   version: '0.1.0',
   default_options: [
     'c_std=c2x',  # C23 (use c2x for older meson/gcc compatibility)
@@ -39,7 +39,7 @@ add_project_arguments(
 # Extension naming. These feed generated file names and the
 # mkt_config.h defines that C string literals use — places where
 # generation exists anyway, so single-sourcing is free. Plain files
-# (sql/meerkat.sql, the control template) keep literal names instead:
+# (sql/pg_vectorsearch.sql, the control template) keep literal names instead:
 # a rename is a once-ever event and replacing the literal there is as
 # easy as replacing a placeholder would be. Keep these variables in
 # sync with those literals.
@@ -59,7 +59,7 @@ config_data.set_quoted('MKT_VERSION', meson.project_version())
 config_data.set_quoted('MKT_EXTENSION_NAME', extension_name)
 config_data.set_quoted('MKT_AM_NAME', am_name)
 config_data.set_quoted('MKT_GUC_PREFIX', guc_prefix)
-# The extension shared library is version-named (meerkat-<version>.so)
+# The extension shared library is version-named (pg_vectorsearch-<version>.so)
 # so multiple extension versions can be installed side by side; C code
 # that references the library by name (parallel workers) uses this.
 config_data.set_quoted('MKT_MODULE_NAME',
@@ -604,9 +604,9 @@ if build_pg_extension
     pg_version_num = pg_version.split(' ')[1].split('.')[0].split('d')[0].split('r')[0].to_int()
     if pg_version_num < 18
       if pg_required or pg_config_path != ''
-        error('Meerkat requires PostgreSQL 18+, found: ' + pg_version)
+        error('pg_vectorsearch requires PostgreSQL 18+, found: ' + pg_version)
       else
-        warning('Meerkat requires PostgreSQL 18+, found: ' + pg_version + '. Skipping extension.')
+        warning('pg_vectorsearch requires PostgreSQL 18+, found: ' + pg_version + '. Skipping extension.')
         build_pg_extension = false
       endif
     endif

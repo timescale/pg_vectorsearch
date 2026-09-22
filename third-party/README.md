@@ -1,6 +1,6 @@
 # Third-Party Patches
 
-Patches for external dependencies used by Meerkat.
+Patches for external dependencies used by pg_vectorsearch.
 
 ## faiss-rabitq-c-api.patch
 

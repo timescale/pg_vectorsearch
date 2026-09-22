@@ -1,17 +1,17 @@
 # Extension SQL
 
-This directory holds the canonical extension SQL (`meerkat.sql`,
+This directory holds the canonical extension SQL (`pg_vectorsearch.sql`,
 installed verbatim under the versioned name) and, beside it,
-pgvector-style, the scripts that upgrade an installed meerkat
+pgvector-style, the scripts that upgrade an installed pg_vectorsearch
 extension from one version to the next, named
 
 ```text
-meerkat--<from>--<to>.sql
+pg_vectorsearch--<from>--<to>.sql
 ```
 
 PostgreSQL chains adjacent-version scripts automatically, so only
 adjacent pairs are needed (check the available paths with
-`SELECT * FROM pg_extension_update_paths('meerkat');`).
+`SELECT * FROM pg_extension_update_paths('pg_vectorsearch');`).
 
 ## Rules
 
@@ -19,18 +19,19 @@ adjacent pairs are needed (check the available paths with
   they are created (listed explicitly; meson discourages globs).
 - Once a version is released its scripts are immutable — never edit a
   released script; fixes go into the next version's script. Only
-  `meerkat.sql` is a living file; everything else here is a frozen
-  release artifact.
+  `pg_vectorsearch.sql` is a living file; everything else here is a
+  frozen release artifact.
 - Scripts reference the extension library as the literal
   `'MODULE_PATHNAME'`, which PostgreSQL resolves from the *target
-  version's* control file (`meerkat--<version>.control`) when the
-  script runs — upgrade scripts stay version-blind, pgvector-style.
+  version's* control file (`pg_vectorsearch--<version>.control`) when
+  the script runs — upgrade scripts stay version-blind, pgvector-style.
 - The extension shared library is version-named
-  (`meerkat-<version>.so`) and every installed version binds its own
-  library, so an upgrade script must repoint **every** C function to
-  the new version's library: a version-agnostic block of
+  (`pg_vectorsearch-<version>.so`) and every installed version binds
+  its own library, so an upgrade script must repoint **every** C
+  function to the new version's library: a version-agnostic block of
   `CREATE OR REPLACE FUNCTION ... AS 'MODULE_PATHNAME', '<symbol>'`
-  statements derived from the canonical `sql/meerkat.sql` (a small
+  statements derived from the canonical `sql/pg_vectorsearch.sql` (a
+  small
   generator to build when the first supported upgrade is owed),
   followed by the hand-written migration statements.
 - Every catalog-affecting change during a development cycle must land

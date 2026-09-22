@@ -24,7 +24,7 @@
 -- bodies, which psql does not interpolate, look it up again at runtime.
 --
 -- Prerequisites:
---   pgvector and meerkat must be installed in PostgreSQL, and the
+--   pgvector and pg_vectorsearch must be installed in PostgreSQL, and the
 --   connected role must be a superuser (to install extensions and
 --   exercise the event-trigger escalation path). This suite drops and
 --   recreates both extensions and the `mkt`/`prism` schemas (CASCADE) as
@@ -106,7 +106,7 @@ $pf$;
 -- =====================================================================
 -- The real install-time attack. `prism` is a known name ahead of any
 -- install (no SCHEMA clause reveals it), so an attacker can pre-create it
--- and plant format() overloads before CREATE EXTENSION meerkat runs.
+-- and plant format() overloads before CREATE EXTENSION pg_vectorsearch runs.
 -- setup_pgvector_compat() (reached because pgvector is already present)
 -- ends up defined in that very schema; its pinned search_path and
 -- pg_catalog-qualified calls must still keep it from ever invoking the
@@ -114,7 +114,7 @@ $pf$;
 --
 -- This is the one place that must name the schema literally: the extension
 -- does not exist yet, so its schema cannot be looked up from the catalog.
-DROP EXTENSION IF EXISTS meerkat CASCADE;
+DROP EXTENSION IF EXISTS pg_vectorsearch CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
 DROP SCHEMA IF EXISTS install_probe CASCADE;
 DROP SCHEMA IF EXISTS prism CASCADE;
@@ -125,22 +125,23 @@ CREATE SCHEMA prism;   -- literal: the attacker targets the known schema name
 SELECT plant_format_overloads('prism',
     'INSERT INTO install_probe.hit VALUES (true)');
 
--- pgvector first so the compat path runs inside CREATE EXTENSION meerkat.
+-- pgvector first so the compat path runs inside CREATE EXTENSION
+-- pg_vectorsearch.
 CREATE EXTENSION vector;
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 
 -- Resolve the extension's schema now that it exists. Used as :"extschema"
 -- (identifier) and :'extschema' (literal) throughout the rest of the file.
 SELECT n.nspname AS extschema
   FROM pg_extension e
   JOIN pg_namespace n ON n.oid = e.extnamespace
- WHERE e.extname = 'meerkat' \gset
+ WHERE e.extname = 'pg_vectorsearch' \gset
 
 SELECT assert_test('CREATE EXTENSION does not call a planted prism.format()',
     NOT EXISTS (SELECT 1 FROM install_probe.hit));
 
 -- Prove the compat path actually ran (else "not called" would be vacuous):
--- setup_pgvector_compat() creates the pgvector->meerkat cast.
+-- setup_pgvector_compat() creates the pgvector->pg_vectorsearch cast.
 SELECT assert_test('CREATE EXTENSION still created the pgvector compat cast',
     EXISTS (SELECT 1 FROM pg_cast
              WHERE castsource = 'public.vector'::regtype
@@ -156,12 +157,12 @@ DROP SCHEMA install_probe CASCADE;
 -- A role with CREATE on the database can pre-create prism and keep owning
 -- it after install, then add lookalike objects there that a caller who has
 -- not double-checked where their tooling points might mistake for
--- meerkat's own (prism.rebalance and friends are always called
+-- pg_vectorsearch's own (prism.rebalance and friends are always called
 -- schema-qualified, never via search_path). The schema ownership guard at
 -- the top of the install script must refuse that install. (The guard is
 -- one loop over both `mkt` and `prism`, so exercising it here proves it
 -- for `mkt` too.)
-DROP EXTENSION IF EXISTS meerkat CASCADE;
+DROP EXTENSION IF EXISTS pg_vectorsearch CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
 DROP SCHEMA IF EXISTS prism CASCADE;
 DROP ROLE IF EXISTS prism_squatter;
@@ -169,22 +170,23 @@ CREATE ROLE prism_squatter NOSUPERUSER;
 CREATE SCHEMA prism AUTHORIZATION prism_squatter;   -- untrusted role owns prism
 
 \set ON_ERROR_STOP off
-CREATE EXTENSION meerkat;   -- must be refused by the ownership guard
+CREATE EXTENSION pg_vectorsearch;   -- must be refused by the ownership guard
 \set ON_ERROR_STOP on
 
 SELECT assert_test(
     'install refused when the extension schema is pre-owned by an untrusted role',
-    NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'meerkat'));
+    NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_vectorsearch'));
 
 DROP SCHEMA prism CASCADE;
 DROP OWNED BY prism_squatter;
 DROP ROLE prism_squatter;
 
 -- Deterministic starting state for the remaining checks: drop and reinstall
--- cleanly (meerkat first so its event trigger is active, then pgvector).
-DROP EXTENSION IF EXISTS meerkat CASCADE;
+-- cleanly (pg_vectorsearch first so its event trigger is active, then
+-- pgvector).
+DROP EXTENSION IF EXISTS pg_vectorsearch CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 CREATE EXTENSION vector;
 
 -- =====================================================================
@@ -299,7 +301,7 @@ DO $fix$
 DECLARE
     eschema text := (SELECT n.nspname FROM pg_extension e
                        JOIN pg_namespace n ON n.oid = e.extnamespace
-                      WHERE e.extname = 'meerkat');
+                      WHERE e.extname = 'pg_vectorsearch');
 BEGIN
     EXECUTE pg_catalog.format(
         'DROP CAST IF EXISTS (public.vector AS %I.vec32)', eschema);
@@ -368,7 +370,7 @@ CREATE CAST (public.vector AS :"extschema".vec32) WITHOUT FUNCTION AS IMPLICIT;
 -- =====================================================================
 -- The headline attack. A NOSUPERUSER plants an escalating format()
 -- overload; a superuser then runs CREATE EXTENSION vector, which fires
--- meerkat's event trigger -> setup_pgvector_compat(). If the sink were
+-- pg_vectorsearch's event trigger -> setup_pgvector_compat(). If the sink were
 -- hijackable, the planted body would run as the superuser and grant the
 -- attacker SUPERUSER. It must not.
 

@@ -2,7 +2,7 @@
  * vec32_pg.c - PostgreSQL functions for mkt.vec32 type
  *
  * Type I/O, distance functions, comparison operators, casts.
- * Distance functions bridge to SIMD-accelerated meerkat core.
+ * Distance functions bridge to SIMD-accelerated pg_vectorsearch core.
  */
 
 #include <postgres.h>

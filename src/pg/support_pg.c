@@ -1,5 +1,5 @@
 /*
- * mkt_pg.c - Meerkat PostgreSQL extension entry point
+ * mkt_pg.c - pg_vectorsearch PostgreSQL extension entry point
  */
 
 #include <postgres.h>

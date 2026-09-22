@@ -39,11 +39,12 @@ my $qvec = '(SELECT v FROM %s WHERE id = 1)';
 my $primary = PostgreSQL::Test::Cluster->new('primary');
 $primary->init(allows_streaming => 1);
 $primary->start;
-$primary->safe_psql('postgres', 'CREATE EXTENSION meerkat');
+$primary->safe_psql('postgres', 'CREATE EXTENSION pg_vectorsearch');
 
 # Set the search path once, at database level, so every session on both nodes
-# resolves meerkat's types and distance operators the same way. Note this also
-# means new tables land in the mkt schema, since it is first.
+# resolves pg_vectorsearch's types and distance operators the same way.
+# Note this also means new tables land in the mkt schema, since it is
+# first.
 $primary->safe_psql('postgres',
 	'ALTER DATABASE postgres SET search_path = mkt, prism, public');
 

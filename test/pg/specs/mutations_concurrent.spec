@@ -77,7 +77,7 @@ step c_chk2
 # aminsert places the entry into the posting list in shared buffers the moment
 # the row is inserted, so a concurrent reader's index scan *physically* finds
 # it even before commit. Correctness therefore depends on the executor's heap
-# visibility recheck, not on the index: meerkat returns candidates and MVCC
+# visibility recheck, not on the index: prism returns candidates and MVCC
 # filters them. Expect 0 while the insert is uncommitted, then 1 after commit.
 permutation w_ins c_chk w_commit c_chk
 

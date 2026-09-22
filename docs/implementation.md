@@ -1,7 +1,8 @@
 # PRISM Implementation Guide
 
-Detailed implementation specification for PRISM, the meerkat extension's
-index access method, organized for iterative development. Each section
+Detailed implementation specification for PRISM, the pg_vectorsearch
+extension's index access method, organized for iterative development.
+Each section
 builds on previous work, with standalone components developed and tested
 before PostgreSQL integration.
 
@@ -142,8 +143,9 @@ standalone C libraries testable without PostgreSQL.
 
 ## Command-Line Interface
 
-Meerkat provides a single unified CLI binary (`mkt`) with subcommands for
-development, testing, and benchmarking. This replaces multiple standalone tools.
+pg_vectorsearch provides a single unified CLI binary (`mkt`) with
+subcommands for development, testing, and benchmarking. This replaces
+multiple standalone tools.
 
 ### Usage
 
@@ -543,7 +545,7 @@ typedef struct Vector
 }           Vector;
 ```
 
-Meerkat's binary-compatible definition:
+pg_vectorsearch's binary-compatible definition:
 
 ```c
 /* vec32.h - Vector type compatible with pgvector */
@@ -1207,19 +1209,20 @@ mkt_memctx_total_allocated(MktMemCtx ctx)
 
 #### Function Mapping
 
-The following table shows how Meerkat memory functions map to PostgreSQL:
+The following table shows how pg_vectorsearch memory functions map to
+PostgreSQL:
 
-| Meerkat Function       | PostgreSQL Equivalent                   |
-|------------------------|----------------------------------------|
-| `mkt_alloc()`          | `palloc()`                             |
-| `mkt_alloc0()`         | `palloc0()`                            |
-| `mkt_realloc()`        | `repalloc()`                           |
-| `mkt_free()`           | `pfree()`                              |
-| `mkt_memctx_alloc()`   | `MemoryContextAlloc()`                 |
-| `mkt_memctx_create()`  | `AllocSetContextCreate()`              |
-| `mkt_memctx_delete()`  | `MemoryContextDelete()`                |
-| `mkt_memctx_reset()`   | `MemoryContextReset()`                 |
-| `mkt_memctx_switch()`  | `MemoryContextSwitchTo()` (inline)     |
+| pg_vectorsearch Function | PostgreSQL Equivalent              |
+|--------------------------|------------------------------------|
+| `mkt_alloc()`            | `palloc()`                         |
+| `mkt_alloc0()`           | `palloc0()`                        |
+| `mkt_realloc()`          | `repalloc()`                       |
+| `mkt_free()`             | `pfree()`                          |
+| `mkt_memctx_alloc()`     | `MemoryContextAlloc()`             |
+| `mkt_memctx_create()`    | `AllocSetContextCreate()`          |
+| `mkt_memctx_delete()`    | `MemoryContextDelete()`            |
+| `mkt_memctx_reset()`     | `MemoryContextReset()`             |
+| `mkt_memctx_switch()`    | `MemoryContextSwitchTo()` (inline) |
 
 For aligned allocation, PostgreSQL 16+ provides `palloc_aligned()`. On older
 versions, a manual alignment wrapper is used.
@@ -1561,7 +1564,7 @@ pgvector's Hamming/Jaccard distance functions.
 //   VARBITBYTES(v)       - number of data bytes
 //   VARBITS(v)           - pointer to bit data
 
-// Meerkat's binary type for standalone mode
+// pg_vectorsearch's binary type for standalone mode
 typedef uint8_t BinaryQ;
 
 // In PostgreSQL mode, use VarBit directly or ensure layout matches
@@ -4362,12 +4365,13 @@ parsed by the `prism_options()` callback using `build_reloptions()`.
 
 **Files**: `src/types/vec32.h`, `src/types/vec32.c`
 
-Meerkat defines its own `vec32` and `vec16` types, installed into whichever
-schema `CREATE EXTENSION meerkat` targets (the `SCHEMA` clause, or the first
-existing schema on `search_path` otherwise — typically `public`). Their names
-are distinct from pgvector's `vector` and `halfvec`, so both sets of types can
-coexist even when the extensions are installed into the same schema. The
-corresponding pairs are binary-compatible
+pg_vectorsearch defines its own `vec32` and `vec16` types, installed into
+whichever schema `CREATE EXTENSION pg_vectorsearch` targets (the `SCHEMA`
+clause, or the first existing schema on `search_path` otherwise —
+typically `public`). Their names are distinct from pgvector's `vector`
+and `halfvec`, so both sets of types can coexist even when the
+extensions are installed into the same schema. The corresponding pairs
+are binary-compatible
 (`vec32`/`vector` and `vec16`/`halfvec`). This allows:
 
 - Standalone builds without a pgvector dependency
@@ -4391,7 +4395,7 @@ typedef struct Vector
 }           Vector;
 ```
 
-Meerkat's binary-compatible definition:
+pg_vectorsearch's binary-compatible definition:
 
 ```c
 #define VEC32_MAX_DIM 16000
@@ -4444,7 +4448,8 @@ vec32_init(void)
                                                                           false)));
     if (OidIsValid(vector_oid)) {
         pgvector_oid = vector_oid;
-        elog(DEBUG1, "meerkat: pgvector detected, OID %u", pgvector_oid);
+        elog(DEBUG1, "pg_vectorsearch: pgvector detected, OID %u",
+             pgvector_oid);
     }
 }
 
@@ -4476,14 +4481,15 @@ ALTER OPERATOR FAMILY myschema.vec16_l2_ops USING prism
         FOR ORDER BY pg_catalog.float_ops;
 ```
 
-Strategy number and sort family match the opclass declarations. It runs on the
-same both-install-orders path as the casts: if pgvector is already installed,
-meerkat's install script adds them inline while `CREATE EXTENSION meerkat` runs
-(an anonymous `DO $$ ... $$` block — a one-off script that runs during
-install, not a lock); if pgvector is installed later, an event trigger adds them
-then. It is idempotent through exception handling. `DROP EXTENSION vector
-CASCADE` removes the members via their dependency on the operators, and a later
-reinstall re-adds them.
+Strategy number and sort family match the opclass declarations. It runs
+on the same both-install-orders path as the casts: if pgvector is
+already installed, pg_vectorsearch's install script adds them inline
+while `CREATE EXTENSION pg_vectorsearch` runs (an anonymous
+`DO $$ ... $$` block — a one-off script that runs during install, not a
+lock); if pgvector is installed later, an event trigger adds them then.
+It is idempotent through exception handling. `DROP EXTENSION vector
+CASCADE` removes the members via their dependency on the operators, and
+a later reinstall re-adds them.
 
 The failure mode this removes is quiet: without family membership the planner
 answers a pgvector-operator query with a sequential scan, which returns correct
@@ -4491,10 +4497,10 @@ rows. Results-only tests pass while measuring brute force, so the compat suite
 asserts the plan as well as the recall.
 
 One pairing does not resolve, by design: a `vec32` or `vec16` column
-with pgvector's operator. The meerkat → pgvector cast is ASSIGNMENT rather than
-IMPLICIT specifically so that having both extensions installed does not make
-operator resolution ambiguous, and queries over meerkat's types use meerkat's
-operators.
+with pgvector's operator. The pg_vectorsearch → pgvector cast is
+ASSIGNMENT rather than IMPLICIT specifically so that having both
+extensions installed does not make operator resolution ambiguous, and
+queries over pg_vectorsearch's types use pg_vectorsearch's operators.
 
 **Standalone builds**: For unit tests and CLI tools, use `Vec32` without the
 varlena header, or define a minimal mock. The core algorithms operate on
@@ -6109,8 +6115,8 @@ meerkat/
 │   │ # ════════════════════════════════════════════════════════════
 │   │
 │   └── pg/                       # PostgreSQL extension
-│       ├── meerkat.h             # Extension public header
-│       ├── meerkat.c             # Extension entry point, GUCs
+│       ├── pg_vectorsearch.h     # Extension public header
+│       ├── pg_vectorsearch.c     # Extension entry point, GUCs
 │       ├── memory_pg.h           # palloc/pfree wrappers
 │       │
 │       ├── index/                # Index data structures (page-based)
@@ -6148,8 +6154,8 @@ meerkat/
 │           └── reassign.c        # Vector reassignment
 │
 ├── sql/
-│   ├── meerkat--1.0.sql          # Extension SQL definitions
-│   └── meerkat.control           # Extension control file
+│   ├── pg_vectorsearch--1.0.sql  # Extension SQL definitions
+│   └── pg_vectorsearch.control   # Extension control file
 │
 ├── test/
 │   ├── unit/                     # Unit tests (standalone, no PG)
@@ -6305,7 +6311,7 @@ pg_sources = (
 )
 
 shared_module(
-  'meerkat',
+  'pg_vectorsearch',
   pg_sources,
   dependencies: [mkt_core_dep, pg_dep],
   install: true,

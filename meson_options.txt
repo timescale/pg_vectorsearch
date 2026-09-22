@@ -1,4 +1,4 @@
-# Meerkat build options
+# pg_vectorsearch build options
 
 option('simd',
   type: 'combo',
@@ -49,7 +49,7 @@ option('hdf5',
 option('postgresql',
   type: 'feature',
   value: 'auto',
-  description: '''Build meerkat PostgreSQL extension.
+  description: '''Build pg_vectorsearch PostgreSQL extension.
   - auto: detect and build if PostgreSQL is available (default)
   - enabled: require PostgreSQL, fail if not found
   - disabled: never build the extension'''

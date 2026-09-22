@@ -504,8 +504,8 @@ benchmark_distance(
  *
  * Note: FAISS assumes random rotation is done externally.
  * "faiss-sign" measures sign bit extraction only (what FAISS does).
- * Meerkat includes rotation in encoding, so compare with batch for full
- * picture.
+ * pg_vectorsearch includes rotation in encoding, so compare with batch
+ * for full picture.
  */
 static void
 benchmark_faiss_encode(
@@ -573,7 +573,7 @@ benchmark_faiss_encode(
 	{
 		uint64_t start = get_time_ns();
 
-		/* Transform: residual then P^T multiply (same as Meerkat) */
+		/* Transform: residual then P^T multiply (same as pg_vectorsearch) */
 		for (uint32_t i = 0; i < count; i++)
 		{
 			float *residual = transformed + i * dim;
@@ -774,7 +774,7 @@ l2_distance_sq(const float *a, const float *b, Dimension dim)
 }
 
 /*
- * Compare Meerkat vs FAISS distance correctness
+ * Compare pg_vectorsearch vs FAISS distance correctness
  *
  * Both implementations approximate L2 distance using different formulas.
  * We compare each against true L2 distance, and check bit pattern match.
@@ -846,7 +846,7 @@ compare_correctness(
 			faiss_rq, &faiss_dc, 0, NULL, 0);
 	faiss_RaBitQDistanceComputer_set_query(faiss_dc, query_transformed);
 
-	/* Encode with Meerkat and compute distances */
+	/* Encode with pg_vectorsearch and compute distances */
 	RaBitQQueryState *mkt_state =
 			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
 
@@ -863,7 +863,7 @@ compare_correctness(
 		/* True L2 squared distance */
 		float true_dist = l2_distance_sq(query, vectors + i * dim, dim);
 
-		/* Meerkat encoding and distance */
+		/* pg_vectorsearch encoding and distance */
 		RaBitQData *mkt_enc	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
 		float		mkt_dist = mkt_rabitq_distance(mkt_state, mkt_enc, dim);
 
@@ -900,10 +900,10 @@ compare_correctness(
 		   count,
 		   100.0f * bits_match / count);
 	printf("\n  Distance error vs True L2:\n");
-	printf("    Meerkat:  max=%.2f%%, mean=%.2f%%\n",
+	printf("    pg_vectorsearch: max=%.2f%%, mean=%.2f%%\n",
 		   mkt_max_err * 100.0f,
 		   (mkt_sum_err / count) * 100.0f);
-	printf("    FAISS:    max=%.2f%%, mean=%.2f%%\n",
+	printf("    FAISS:           max=%.2f%%, mean=%.2f%%\n",
 		   faiss_max_err * 100.0f,
 		   (faiss_sum_err / count) * 100.0f);
 

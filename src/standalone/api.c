@@ -1,5 +1,5 @@
 /*
- * api.c - Public C API for standalone meerkat library
+ * api.c - Public C API for standalone pg_vectorsearch library
  *
  * Thin wrapper around PrismIndex (standalone/index.h) and PrismQueryCtx
  * (standalone/query.h). The handle bundles both so callers get a

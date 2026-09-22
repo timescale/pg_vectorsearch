@@ -19,12 +19,12 @@ make
 ver="$(sed -n "s/^  version: '\([^']*\)',$/\1/p" meson.build)"
 [[ -n "$ver" ]] || { echo "FAIL: cannot read version from meson.build"; exit 1; }
 
-so="$BUILDDIR/src/pg/meerkat-$ver.so"
+so="$BUILDDIR/src/pg/pg_vectorsearch-$ver.so"
 [[ -f "$so" ]] || { echo "FAIL: extension library not built: $so"; exit 1; }
 
 # The wrapper defaults to an extension-only build: no CLI, no
 # standalone library, no unit tests.
-tools="$(find "$BUILDDIR" \( -name 'mkt' -o -name 'run_tests' -o -name 'libmeerkat*' \) -type f | head -1)"
+tools="$(find "$BUILDDIR" \( -name 'mkt' -o -name 'run_tests' -o -name 'libpg_vectorsearch*' \) -type f | head -1)"
 [[ -z "$tools" ]] || { echo "FAIL: developer tools built by default: $tools"; exit 1; }
 
 # Install and verify the artifacts land in the PostgreSQL directories.
@@ -38,10 +38,10 @@ pkglibdir="$("$pg_config_bin" --pkglibdir)"
 sharedir="$("$pg_config_bin" --sharedir)"
 
 for f in \
-    "$pkglibdir/meerkat-$ver.so" \
-    "$sharedir/extension/meerkat.control" \
-    "$sharedir/extension/meerkat--$ver.control" \
-    "$sharedir/extension/meerkat--$ver.sql"; do
+    "$pkglibdir/pg_vectorsearch-$ver.so" \
+    "$sharedir/extension/pg_vectorsearch.control" \
+    "$sharedir/extension/pg_vectorsearch--$ver.control" \
+    "$sharedir/extension/pg_vectorsearch--$ver.sql"; do
     [[ -f "$f" ]] || { echo "FAIL: not installed: $f"; exit 1; }
 done
 
@@ -54,11 +54,11 @@ if [[ "${MAKE_CHECK_SMOKE:-0}" == 1 ]]; then
     # -q suppresses the DROP/CREATE command tags; keep only the last
     # line anyway in case a notice slips through.
     got="$(sudo -u postgres psql -X -q -A -t ${PGPORT:+-p "$PGPORT"} -c \
-        "DROP EXTENSION IF EXISTS meerkat;
-         CREATE EXTENSION meerkat;
+        "DROP EXTENSION IF EXISTS pg_vectorsearch;
+         CREATE EXTENSION pg_vectorsearch;
          SELECT mkt.extension_version();" | tail -1)"
     [[ "$got" == "$ver" ]] ||
         { echo "FAIL: CREATE EXTENSION reports '$got', built '$ver'"; exit 1; }
 fi
 
-echo "makefile-check: OK (built and installed meerkat-$ver)"
+echo "makefile-check: OK (built and installed pg_vectorsearch-$ver)"
