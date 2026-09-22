@@ -2,14 +2,15 @@
 
 [![Coverage](https://img.shields.io/endpoint?url=https://timescale.github.io/meerkat/coverage-badge.json)](https://timescale.github.io/meerkat/coverage/)
 
-A PostgreSQL index access method for Approximate Nearest Neighbor (ANN) vector
-search.
+A PostgreSQL extension for high-performance vector similarity search,
+providing PRISM (Partitioned Routing Index for Similarity Matching), an
+IVF-style (Inverted File) index access method for Approximate Nearest
+Neighbor (ANN) search.
 
 ## Overview
 
-Meerkat is a PostgreSQL extension that provides high-performance vector
-similarity search using an IVF (Inverted File) index structure with
-[RaBitQ][rabitq] quantized vectors.
+PRISM uses [RaBitQ][rabitq] quantization for fast, memory-efficient
+approximate nearest-neighbor search.
 
 Meerkat works with [pgvector][pgvector]'s `vector` and `halfvec` types and
 operators, but does not depend on them. It ships its own `vec32` and `vec16`
@@ -17,7 +18,7 @@ types, binary compatible with their pgvector counterparts but named
 differently so that both extensions can coexist even with their objects in
 the same schema. Binary casts between the two mean an existing pgvector
 column can be indexed as-is, with no rewrite and no copy, and queries
-already written against pgvector's operators use a Meerkat index unchanged.
+already written against pgvector's operators use a PRISM index unchanged.
 
 ## Features
 
@@ -25,11 +26,11 @@ already written against pgvector's operators use a Meerkat index unchanged.
 - **SIMD-optimized distance computation** (AVX2, AVX512, NEON)
 - **RaBitQ quantization** with theoretical error bounds for two-stage search
 - **Dynamic updates** — inserts, updates and deletes, with posting-list
-  splits on demand (see [Index maintenance](#index-maintenance))
+  splits on demand (see [PRISM index maintenance](#prism-index-maintenance))
 
-## Architecture
+## PRISM architecture
 
-Meerkat uses a hierarchical centroid tree to partition vectors into clusters,
+PRISM uses a hierarchical centroid tree to partition vectors into clusters,
 and relies on the PostgreSQL buffer cache to keep that tree warm in memory.
 Vectors are RaBitQ-quantized and stored in posting lists with a page layout
 optimized for SIMD distance computation. The RaBitQ encoding carries error
@@ -155,12 +156,12 @@ See [docs/simd.md][simd-doc] for SIMD build options and implementation details.
 
 ```sql
 -- Enable extension. vec32/vec16/rabitq and everything built on them
--- (operators, casts, the mktann access method) install into whichever
+-- (operators, casts, the prism access method) install into whichever
 -- schema you choose -- add SCHEMA <name>, or omit it to use the first
 -- existing schema on your search_path (typically public). Maintenance,
--- administration, and inspection functions always live in a separate
--- `mkt` schema the extension creates, regardless of where the types end
--- up, so they're reachable the same way from any install.
+-- administration, and inspection for the prism index always live in a
+-- separate `prism` schema the extension creates, regardless of where the
+-- types end up, so they're reachable the same way from any install.
 CREATE EXTENSION meerkat;
 -- or, e.g.: CREATE EXTENSION meerkat SCHEMA myschema;
 
@@ -172,7 +173,7 @@ CREATE TABLE items (
 
 -- Create ANN index; vec32_l2_ops is the default operator class
 -- (vec32_ip_ops and vec32_cosine_ops select other metrics)
-CREATE INDEX ON items USING mktann (embedding vec32_l2_ops);
+CREATE INDEX ON items USING prism (embedding vec32_l2_ops);
 
 -- Query nearest neighbors
 SELECT * FROM items
@@ -182,39 +183,42 @@ LIMIT 10;
 -- Speed/recall dial: probes more clusters for higher recall. The
 -- default (0 = auto) derives it from the index size, targeting
 -- ~0.95 recall; lower is faster, higher is more accurate.
-SET mkt.nprobe = 40;
+SET prism.nprobe = 40;
 
 -- The scan sizes its result set from the query's LIMIT (inflated for a
 -- WHERE clause by its estimated selectivity) and bounds it by work_mem.
 -- Set this only to cap that sizing.
-SET mkt.query_limit = 100;
+SET prism.query_limit = 100;
 ```
 
 Defaults are tuned from large-scale benchmarks; most deployments only
-ever adjust `mkt.nprobe`.
+ever adjust `prism.nprobe`.
 See the [tuning guide][tuning-doc] for every index parameter and GUC,
 their tradeoffs, and when changing them makes sense.
 
-> **Security note on `mkt`.** meerkat always creates its own `mkt` schema
-> for the maintenance/introspection procedures above, regardless of which
-> schema you installed the types into. Calls like `mkt.rebalance(...)` are
-> always written schema-qualified, so `mkt` never needs to be on any role's
-> `search_path` for meerkat to work. Don't let untrusted application roles
-> hold `CREATE` on the database or pre-create `mkt`: an owner of that schema
-> could add lookalike objects to it that a caller who has not double-checked
-> where their tooling actually points might mistake for meerkat's own.
-> `CREATE EXTENSION meerkat` refuses to install if a pre-existing `mkt` is
-> owned by a role other than the installer or a superuser, but its ownership
-> is otherwise the database administrator's responsibility.
+> **Security note on `mkt` and `prism`.** meerkat always creates its own
+> `mkt` schema (extension-wide identity: `git_commit()`,
+> `extension_version()`, `extension_name()`) and its own `prism` schema
+> (the maintenance/introspection procedures above), regardless of which
+> schema you installed the types into. Calls like `prism.rebalance(...)`
+> are always written schema-qualified, so neither `mkt` nor `prism` ever
+> needs to be on any role's `search_path` for meerkat to work. Don't let
+> untrusted application roles hold `CREATE` on the database or pre-create
+> either schema: an owner of one could add lookalike objects to it that a
+> caller who has not double-checked where their tooling actually points
+> might mistake for meerkat's own. `CREATE EXTENSION meerkat` refuses to
+> install if a pre-existing `mkt` or `prism` is owned by a role other than
+> the installer or a superuser, but its ownership is otherwise the database
+> administrator's responsibility.
 >
 > **Changing schemas later.** The schema choice above is made once, at
 > `CREATE EXTENSION` time. meerkat is not relocatable: `ALTER EXTENSION
 > meerkat SET SCHEMA ...` is refused, because that command would try to move
-> the `mkt`-pinned procedures too, defeating the point of pinning them. To
-> move to a different schema, drop and recreate the extension (and its
-> indexes) there instead.
+> the `mkt`- and `prism`-pinned procedures too, defeating the point of
+> pinning them. To move to a different schema, drop and recreate the
+> extension (and its indexes) there instead.
 
-## Index maintenance
+## PRISM index maintenance
 
 An insert appends to whichever posting list its vector routes to, so lists
 grow as rows arrive and never split on their own. Two procedures split them
@@ -222,14 +226,14 @@ on demand.
 
 ```sql
 -- Split every list that has outgrown the trigger. Reports what it did.
-CALL mkt.rebalance('items_embedding_idx');
+CALL prism.rebalance('items_embedding_idx');
 -- NOTICE:  rebalance: split 12 posting list(s), reclaimed 0 retired chain(s)
 
 -- Override the resting list size instead of deriving it from the row count.
-CALL mkt.rebalance('items_embedding_idx', 256);
+CALL prism.rebalance('items_embedding_idx', 256);
 
 -- Split one named list, given the block number of its head page.
-CALL mkt.split_posting_list('items_embedding_idx', 2);
+CALL prism.split_posting_list('items_embedding_idx', 2);
 ```
 
 `target_entries` is the size a list rests at, not a ceiling: a list is left
@@ -249,11 +253,11 @@ value is no longer accurate. Later rebuilds, `REINDEX` included, size the
 index from the current row count instead.
 
 ```sql
-CREATE INDEX items_idx ON items USING mktann (embedding)
+CREATE INDEX items_idx ON items USING prism (embedding)
     WITH (nlist = 100, centroid_fastscan = off);
 -- reloptions: {nlist=100,centroid_fastscan=off}
 
-CALL mkt.rebalance('items_idx');   -- splits lists; list count is now higher
+CALL prism.rebalance('items_idx');   -- splits lists; list count is now higher
 -- reloptions: {centroid_fastscan=off}
 ```
 
@@ -275,10 +279,10 @@ Inspect the result with the introspection functions:
 
 ```sql
 -- Leaf count, tree depth, centroid format, and the rest
-SELECT * FROM mkt.index_settings('items_embedding_idx');
+SELECT * FROM prism.index_settings('items_embedding_idx');
 
 -- One row per posting page; is_first marks a list's head
-SELECT count(*) AS lists FROM mkt.posting_pages('items_embedding_idx')
+SELECT count(*) AS lists FROM prism.posting_pages('items_embedding_idx')
  WHERE is_first;
 ```
 

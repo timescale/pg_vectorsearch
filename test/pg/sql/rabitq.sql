@@ -88,7 +88,7 @@ SELECT rabitq_params_generate(8, 42);
 
 -- Oversized dimensions are refused: the transform matrix is O(dim^3) and the
 -- function is callable by any role, so it is capped at the largest dimension
--- an mktann index can hold.
+-- a prism index can hold.
 SELECT rabitq_params_generate(1969, 42); -- error
 
 -- rabitq_params text input (not supported)

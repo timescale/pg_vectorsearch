@@ -22,15 +22,15 @@ setup
     CREATE TABLE race (id int, v vec32(3));
     INSERT INTO race SELECT g, format('[%s,0,0]', g)::vec32
         FROM generate_series(1, 60) g;
-    CREATE INDEX race_idx ON race USING mktann (v)
+    CREATE INDEX race_idx ON race USING prism (v)
         WITH (nlist = 1, centroid_fastscan = off);
 }
 
 teardown
 {
     DROP TABLE race;
-    SELECT injection_points_detach('mktann-split-locked');
-    SELECT injection_points_detach('mktann-scan-routed');
+    SELECT injection_points_detach('prism-split-locked');
+    SELECT injection_points_detach('prism-scan-routed');
     DROP EXTENSION injection_points;
 }
 
@@ -42,9 +42,9 @@ session m
 setup
 {
     SELECT injection_points_set_local();
-    SELECT injection_points_attach('mktann-split-locked', 'wait');
+    SELECT injection_points_attach('prism-split-locked', 'wait');
 }
-step m_split { CALL mkt.rebalance('race_idx', 10); }
+step m_split { CALL prism.rebalance('race_idx', 10); }
 
 # A split that does not pause, for the scan case: there the reader is what
 # pauses, and the writer has to run to completion underneath it.
@@ -54,8 +54,8 @@ step m_split { CALL mkt.rebalance('race_idx', 10); }
 # retired: a pass can never reclaim its own retirements, because its own
 # transaction id is still running and so can never be below the horizon.
 session w
-step w_split   { CALL mkt.rebalance('race_idx', 10); }
-step w_reclaim { CALL mkt.rebalance('race_idx', 10); }
+step w_split   { CALL prism.rebalance('race_idx', 10); }
+step w_reclaim { CALL prism.rebalance('race_idx', 10); }
 
 # The reader, paused after routing: it holds a posting head and a snapshot,
 # with the centroid page already released. A split can then repoint the leaf
@@ -65,9 +65,9 @@ session r
 setup
 {
     SET enable_seqscan = off;
-    SET mkt.nprobe = 16;
+    SET prism.nprobe = 16;
     SELECT injection_points_set_local();
-    SELECT injection_points_attach('mktann-scan-routed', 'wait');
+    SELECT injection_points_attach('prism-scan-routed', 'wait');
 }
 step r_query { SELECT id FROM race ORDER BY v <-> '[1,0,0]' LIMIT 3; }
 
@@ -90,9 +90,9 @@ step v_del    { DELETE FROM race WHERE id % 10 = 0; }
 step v_vacuum { VACUUM race; }
 
 session obs
-setup { SET enable_seqscan = off; SET mkt.nprobe = 16; }
-step o_wake_split { SELECT injection_points_wakeup('mktann-split-locked'); }
-step o_wake_scan  { SELECT injection_points_wakeup('mktann-scan-routed'); }
+setup { SET enable_seqscan = off; SET prism.nprobe = 16; }
+step o_wake_split { SELECT injection_points_wakeup('prism-split-locked'); }
+step o_wake_scan  { SELECT injection_points_wakeup('prism-scan-routed'); }
 step o_near       { SELECT id FROM race ORDER BY v <-> '[1,0,0]' LIMIT 3; }
 step o_probe
 {

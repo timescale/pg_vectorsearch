@@ -1,5 +1,5 @@
 /*
- * typeinfo.c - type descriptors for mktann-indexed columns
+ * typeinfo.c - type descriptors for prism-indexed columns
  *
  * One descriptor per indexable type, handed to the access method by the
  * opclass. See typeinfo.h for why the opclass is the source.
@@ -67,18 +67,18 @@ static const MktIndexTypeInfo type_info_halfvec = {
  * Opclass support functions (MKT_ANN_TYPE_INFO_PROC)
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mktann_vec32_support);
+PG_FUNCTION_INFO_V1(prism_vec32_support);
 
 Datum
-mktann_vec32_support(PG_FUNCTION_ARGS)
+prism_vec32_support(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_POINTER(&type_info_vector);
 }
 
-PG_FUNCTION_INFO_V1(mktann_vec16_support);
+PG_FUNCTION_INFO_V1(prism_vec16_support);
 
 Datum
-mktann_vec16_support(PG_FUNCTION_ARGS)
+prism_vec16_support(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_POINTER(&type_info_halfvec);
 }

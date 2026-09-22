@@ -1,7 +1,7 @@
 /*
  * index_build.h - Shared index build utilities
  *
- * Generic helpers for building meerkat indexes, usable from both the
+ * Generic helpers for building prism indexes, usable from both the
  * PostgreSQL IAM build and the standalone CLI. All functions operate on the
  * MktStorage abstraction and (where a tree is materialized at all) the
  * HKMeansResult tree.

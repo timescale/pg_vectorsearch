@@ -2,7 +2,7 @@
 #
 # aminsert takes a heavyweight page lock on the cluster's head block for the
 # brief chain-append critical section (released per insert, not at xact end). An
-# injection point ("mktann-insert-locked") pauses an insert while it holds that
+# injection point ("prism-insert-locked") pauses an insert while it holds that
 # lock, so a second insert into the same cluster blocks on the lock until the
 # first is woken. This proves the serialization actually blocks AND does not
 # deadlock/hang: both inserts complete and both rows end up in the index.
@@ -22,14 +22,14 @@ setup
     CREATE TABLE ins (id int, v vec32(3));
     INSERT INTO ins SELECT g, format('[%s,0,0]', g)::vec32
         FROM generate_series(1, 50) g;
-    CREATE INDEX ins_idx ON ins USING mktann (v)
+    CREATE INDEX ins_idx ON ins USING prism (v)
         WITH (nlist = 4, centroid_compression = true);
 }
 
 teardown
 {
     DROP TABLE ins;
-    SELECT injection_points_detach('mktann-insert-locked');
+    SELECT injection_points_detach('prism-insert-locked');
     DROP EXTENSION injection_points;
 }
 
@@ -41,7 +41,7 @@ session s1
 setup
 {
     SELECT injection_points_set_local();
-    SELECT injection_points_attach('mktann-insert-locked', 'wait');
+    SELECT injection_points_attach('prism-insert-locked', 'wait');
 }
 step s1_ins { INSERT INTO ins VALUES (1001, '[100,0,0]'); }
 
@@ -52,8 +52,8 @@ step s2_ins { INSERT INTO ins VALUES (1002, '[99,0,0]'); }
 # Wakes the paused first insert, then checks the result. Returns 2 only if both
 # inserts landed (the top-2 nearest of [100,0,0] are exactly 1001 and 1002).
 session obs
-setup { SET enable_seqscan = off; SET mkt.nprobe = 4; }
-step wake { SELECT injection_points_wakeup('mktann-insert-locked'); }
+setup { SET enable_seqscan = off; SET prism.nprobe = 4; }
+step wake { SELECT injection_points_wakeup('prism-insert-locked'); }
 step chk
 {
     SELECT count(*) AS found FROM (

@@ -25,14 +25,14 @@ setup
     CREATE TABLE ir (id int, v vec32(3));
     INSERT INTO ir SELECT g, format('[%s,0,0]', g)::vec32
         FROM generate_series(1, 60) g;
-    CREATE INDEX ir_idx ON ir USING mktann (v)
+    CREATE INDEX ir_idx ON ir USING prism (v)
         WITH (nlist = 1, centroid_fastscan = off);
 }
 
 teardown
 {
     DROP TABLE ir;
-    SELECT injection_points_detach('mktann-insert-force-reroute');
+    SELECT injection_points_detach('prism-insert-force-reroute');
     DROP EXTENSION injection_points;
 }
 
@@ -42,7 +42,7 @@ session s
 setup
 {
     SELECT injection_points_set_local();
-    SELECT injection_points_attach('mktann-insert-force-reroute', 'notice');
+    SELECT injection_points_attach('prism-insert-force-reroute', 'notice');
 }
 step s_insert { INSERT INTO ir VALUES (1000, '[1,0,0]'); }
 step s_rows   { SELECT count(*) AS rows FROM ir WHERE id = 1000; }

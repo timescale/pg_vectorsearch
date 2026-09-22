@@ -476,7 +476,7 @@ mkt_centroid_page_add(
  * Where the metadata region ends on a page holding `nentries`.
  *
  * Derived from entry_count rather than read from pd_lower, because pd_lower
- * does not survive a page write outside index build: meerkat keeps its data
+ * does not survive a page write outside index build: prism keeps its data
  * in the region PostgreSQL treats as the free hole, and the storage layer
  * covers that hole (pd_lower = pd_upper) so a full-page image preserves it.
  * Every other page kind is indifferent -- centroid pages are the only ones

@@ -19,7 +19,7 @@ ANALYZE embeddings;
 -- Single-level RaBitQ index — summary per level
 -- (Leaf count varies across platforms due to k-means convergence,
 -- so check structure and format without asserting exact counts.)
-CREATE INDEX idx_l2c ON embeddings USING mktann (v)
+CREATE INDEX idx_l2c ON embeddings USING prism (v)
     WITH (centroid_compression = true, centroid_fastscan = off,
           fastscan = off, soar_lambda = 0, boundary_epsilon = 0);
 
@@ -45,12 +45,12 @@ INSERT INTO h_embeddings (v)
          generate_series(0, 9) y,
          generate_series(0, 9) z;
 ANALYZE h_embeddings;
-CREATE INDEX h_idx_fmt ON h_embeddings USING mktann (v)
+CREATE INDEX h_idx_fmt ON h_embeddings USING prism (v)
     WITH (centroid_compression = off, centroid_fastscan = off,
           fastscan = off, soar_lambda = 0, boundary_epsilon = 0);
 SELECT DISTINCT format AS halfvec_centroid_format
     FROM centroid_pages('h_idx_fmt'::regclass);
-CREATE INDEX v_idx_fmt ON embeddings USING mktann (v)
+CREATE INDEX v_idx_fmt ON embeddings USING prism (v)
     WITH (centroid_compression = off, centroid_fastscan = off,
           fastscan = off, soar_lambda = 0, boundary_epsilon = 0);
 SELECT DISTINCT format AS vector_centroid_format
@@ -59,7 +59,7 @@ DROP INDEX v_idx_fmt;
 DROP TABLE h_embeddings;
 
 -- Multi-level tree (fan_out = 4) — internal nodes show tree topology
-CREATE INDEX idx_ml ON embeddings USING mktann (v)
+CREATE INDEX idx_ml ON embeddings USING prism (v)
     WITH (fan_out = 4, centroid_compression = true,
           centroid_fastscan = off);
 
@@ -75,7 +75,7 @@ SELECT level, count(*) AS leaf_entries
     ORDER BY level;
 
 -- Uncompressed float centroids — verify format string
-CREATE INDEX idx_float ON embeddings USING mktann (v)
+CREATE INDEX idx_float ON embeddings USING prism (v)
     WITH (centroid_compression = off);
 
 SELECT level,
@@ -88,11 +88,11 @@ SELECT level,
 
 -- centroid_compression tri-state on L2 (default opclass): the default and
 -- 'auto' compress, 'on' compresses, 'off' is float (idx_float above).
-CREATE INDEX idx_cc_default ON embeddings USING mktann (v)
+CREATE INDEX idx_cc_default ON embeddings USING prism (v)
     WITH (centroid_fastscan = off);
-CREATE INDEX idx_cc_auto ON embeddings USING mktann (v)
+CREATE INDEX idx_cc_auto ON embeddings USING prism (v)
     WITH (centroid_compression = auto, centroid_fastscan = off);
-CREATE INDEX idx_cc_on ON embeddings USING mktann (v)
+CREATE INDEX idx_cc_on ON embeddings USING prism (v)
     WITH (centroid_compression = on, centroid_fastscan = off);
 SELECT
     (SELECT min(format) FROM centroid_pages('idx_cc_default'::regclass))
@@ -115,7 +115,7 @@ INSERT INTO wide (v)
     FROM generate_series(1, 100) i;
 
 ANALYZE wide;
-CREATE INDEX idx_wide ON wide USING mktann (v)
+CREATE INDEX idx_wide ON wide USING prism (v)
     WITH (centroid_compression = off);
 
 -- Entries from chained pages appear naturally in output
@@ -123,7 +123,7 @@ SELECT * FROM centroid_pages('idx_wide'::regclass)
     ORDER BY blkno, entry;
 
 -- =====================================================================
--- mkt.posting_pages inspection function
+-- prism.posting_pages inspection function
 -- =====================================================================
 
 -- Posting pages summary for single-level index
@@ -139,53 +139,53 @@ SELECT count(*) > 0 AS has_pages,
        count(*) FILTER (WHERE is_first) > 0 AS has_first_pages,
        bool_and(NOT tombstoned) AS none_tombstoned,
        bool_and(dead_count = 0) AS none_dead
-    FROM mkt.posting_pages('idx_l2c'::regclass);
+    FROM prism.posting_pages('idx_l2c'::regclass);
 
 -- First page of each cluster has chain_pos=0
 SELECT bool_and(chain_pos = 0) AS first_at_pos_zero
-    FROM mkt.posting_pages('idx_l2c'::regclass)
+    FROM prism.posting_pages('idx_l2c'::regclass)
     WHERE is_first;
 
 -- Total entries across all posting pages should equal table row count
 SELECT sum(entry_count) AS total_entries
-    FROM mkt.posting_pages('idx_l2c'::regclass);
+    FROM prism.posting_pages('idx_l2c'::regclass);
 
 -- Multi-level tree posting pages
 SELECT count(*) > 0 AS has_pages,
        count(DISTINCT cluster_id) AS nclusters
-    FROM mkt.posting_pages('idx_ml'::regclass);
+    FROM prism.posting_pages('idx_ml'::regclass);
 
 -- Posting chains: verify next_blkno links are consistent
 -- (non-first pages should have chain_pos > 0)
 SELECT bool_and(chain_pos > 0) AS continuation_pages_ok
-    FROM mkt.posting_pages('idx_l2c'::regclass)
+    FROM prism.posting_pages('idx_l2c'::regclass)
     WHERE NOT is_first;
 
--- Error case: not an mktann index
+-- Error case: not a prism index
 CREATE INDEX IF NOT EXISTS idx_btree ON embeddings (id);
 SELECT * FROM centroid_pages('idx_btree'::regclass);
-SELECT * FROM mkt.posting_pages('idx_btree'::regclass);
+SELECT * FROM prism.posting_pages('idx_btree'::regclass);
 
 -- =====================================================================
--- mkt.convert_posting_to_fastscan
+-- prism.convert_posting_to_fastscan
 -- =====================================================================
 
 -- Convert cluster 0 from AoS to fastscan
-SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 0) IS NOT NULL
+SELECT prism.convert_posting_to_fastscan('idx_l2c'::regclass, 0) IS NOT NULL
     AS converted;
 
 -- Verify the converted cluster has fastscan format
 SELECT format AS cluster0_format
-    FROM mkt.posting_pages('idx_l2c'::regclass)
+    FROM prism.posting_pages('idx_l2c'::regclass)
     WHERE cluster_id = 0 AND is_first;
 
 -- Non-converted clusters still show 'aos'
 SELECT bool_and(format = 'aos') AS others_aos
-    FROM mkt.posting_pages('idx_l2c'::regclass)
+    FROM prism.posting_pages('idx_l2c'::regclass)
     WHERE cluster_id != 0 AND is_first;
 
 -- Converting again should be a no-op (returns same head)
-SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 0) IS NOT NULL
+SELECT prism.convert_posting_to_fastscan('idx_l2c'::regclass, 0) IS NOT NULL
     AS idempotent;
 
 -- Query still works after partial conversion (mixed AoS + fastscan).
@@ -204,8 +204,8 @@ RESET enable_seqscan;
 
 -- Convert all remaining clusters
 SELECT count(*) AS converted_count FROM (
-    SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, cluster_id)
-    FROM mkt.posting_pages('idx_l2c'::regclass)
+    SELECT prism.convert_posting_to_fastscan('idx_l2c'::regclass, cluster_id)
+    FROM prism.posting_pages('idx_l2c'::regclass)
     WHERE is_first AND cluster_id != 0
 ) t;
 
@@ -226,7 +226,7 @@ RESET enable_seqscan;
 CREATE TABLE conv_dead (id int, v vec32(4));
 INSERT INTO conv_dead
     SELECT g, format('[%s,0,0,0]', g)::vec32(4) FROM generate_series(1, 40) g;
-CREATE INDEX conv_dead_idx ON conv_dead USING mktann (v)
+CREATE INDEX conv_dead_idx ON conv_dead USING prism (v)
     WITH (nlist = 1, fastscan = off, centroid_fastscan = off);
 
 DELETE FROM conv_dead WHERE id % 3 = 0;
@@ -234,14 +234,14 @@ VACUUM conv_dead;
 
 -- 40 entries, 13 of them now dead
 SELECT format, entry_count, dead_count
-    FROM mkt.posting_pages('conv_dead_idx') WHERE is_first;
+    FROM prism.posting_pages('conv_dead_idx') WHERE is_first;
 
-SELECT mkt.convert_posting_to_fastscan('conv_dead_idx', cluster_id) IS NOT NULL
+SELECT prism.convert_posting_to_fastscan('conv_dead_idx', cluster_id) IS NOT NULL
         AS converted
-    FROM mkt.posting_pages('conv_dead_idx') WHERE is_first;
+    FROM prism.posting_pages('conv_dead_idx') WHERE is_first;
 
 -- 27 rows remain, so the fastscan list must hold 27 entries
-SELECT format, entry_count FROM mkt.posting_pages('conv_dead_idx')
+SELECT format, entry_count FROM prism.posting_pages('conv_dead_idx')
     WHERE is_first;
 SELECT count(*) AS live_rows FROM conv_dead;
 
@@ -252,28 +252,28 @@ SELECT count(*) AS live_rows FROM conv_dead;
 -- ones would prove nothing -- their heap rows are gone, so the executor
 -- filters them out whether or not the index still points at them.)
 SET enable_seqscan = off;
-SET mkt.nprobe = 4;
+SET prism.nprobe = 4;
 SELECT count(*) AS rows_for_limit_10 FROM (
     SELECT id FROM conv_dead
     ORDER BY v <-> '[1,0,0,0]'::vec32(4) LIMIT 10) t;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 RESET enable_seqscan;
 DROP TABLE conv_dead;
 
 -- Error: non-existent cluster_id
-SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 99999);
+SELECT prism.convert_posting_to_fastscan('idx_l2c'::regclass, 99999);
 
--- Error: not an mktann index
-SELECT mkt.convert_posting_to_fastscan('idx_btree'::regclass, 0);
+-- Error: not a prism index
+SELECT prism.convert_posting_to_fastscan('idx_btree'::regclass, 0);
 
 -- =====================================================================
--- mkt.tids_clusters
+-- prism.tids_clusters
 -- =====================================================================
 
 -- Fresh index with AoS posting lists for a clean format round-trip.
 -- (Cluster ids are k-means dependent, so assert structure, not the
 -- specific tid -> cluster mapping.)
-CREATE INDEX idx_tc ON embeddings USING mktann (v)
+CREATE INDEX idx_tc ON embeddings USING prism (v)
     WITH (centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 
@@ -282,27 +282,27 @@ CREATE INDEX idx_tc ON embeddings USING mktann (v)
 SELECT count(*) = (SELECT count(*) FROM embeddings) AS all_rows_mapped,
        count(DISTINCT tid) = count(*) AS one_cluster_each,
        bool_and(cluster_id IN (
-           SELECT cluster_id FROM mkt.posting_pages('idx_tc'::regclass)
+           SELECT cluster_id FROM prism.posting_pages('idx_tc'::regclass)
        )) AS clusters_valid
-    FROM mkt.tids_clusters('idx_tc'::regclass,
+    FROM prism.tids_clusters('idx_tc'::regclass,
                            (SELECT array_agg(ctid) FROM embeddings));
 
 -- The mapping must be identical whether posting lists are AoS or fastscan:
 -- capture it, convert every cluster, and diff both directions (0 == equal).
 CREATE TEMP TABLE tc_aos AS
     SELECT tid, cluster_id
-        FROM mkt.tids_clusters('idx_tc'::regclass,
+        FROM prism.tids_clusters('idx_tc'::regclass,
                                (SELECT array_agg(ctid) FROM embeddings));
 
 SELECT count(*) > 0 AS converted_all FROM (
-    SELECT mkt.convert_posting_to_fastscan('idx_tc'::regclass, cluster_id)
-        FROM mkt.posting_pages('idx_tc'::regclass)
+    SELECT prism.convert_posting_to_fastscan('idx_tc'::regclass, cluster_id)
+        FROM prism.posting_pages('idx_tc'::regclass)
         WHERE is_first
 ) t;
 
 CREATE TEMP TABLE tc_fastscan AS
     SELECT tid, cluster_id
-        FROM mkt.tids_clusters('idx_tc'::regclass,
+        FROM prism.tids_clusters('idx_tc'::regclass,
                                (SELECT array_agg(ctid) FROM embeddings));
 
 SELECT
@@ -315,7 +315,7 @@ SELECT
 
 -- A TID that isn't in the index is simply not reported (no error).
 SELECT count(*) AS absent_hits
-    FROM mkt.tids_clusters('idx_tc'::regclass, ARRAY['(99999,1)']::tid[]);
+    FROM prism.tids_clusters('idx_tc'::regclass, ARRAY['(99999,1)']::tid[]);
 
 DROP TABLE tc_aos;
 DROP TABLE tc_fastscan;
@@ -330,20 +330,24 @@ DROP TABLE tc_fastscan;
 -- fastscan mutates the index and needs table ownership.
 
 CREATE ROLE regress_inspect_unpriv NOLOGIN;
--- USAGE on the extension schema is required just to reach the functions;
--- it is orthogonal to the per-table authorization exercised here.
+-- USAGE on prism is required just to reach the functions; it is
+-- orthogonal to the per-table authorization exercised here. USAGE on mkt
+-- is unrelated to those functions, but is needed too: embeddings/idx_l2c
+-- above were created unqualified while mkt led the search_path, so (as a
+-- superuser bypassing schema privilege checks) that is where they landed.
+GRANT USAGE ON SCHEMA prism TO regress_inspect_unpriv;
 GRANT USAGE ON SCHEMA mkt TO regress_inspect_unpriv;
 
 SET ROLE regress_inspect_unpriv;
 
 -- Without SELECT on embeddings, every read-only inspector is denied.
-SELECT * FROM mkt.centroid_pages('idx_l2c'::regclass);
-SELECT * FROM mkt.posting_pages('idx_l2c'::regclass);
-SELECT * FROM mkt.tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
-SELECT * FROM mkt.index_settings('idx_l2c'::regclass);
+SELECT * FROM prism.centroid_pages('idx_l2c'::regclass);
+SELECT * FROM prism.posting_pages('idx_l2c'::regclass);
+SELECT * FROM prism.tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
+SELECT * FROM prism.index_settings('idx_l2c'::regclass);
 
 -- The mutating function requires ownership, not merely SELECT.
-SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 0);
+SELECT prism.convert_posting_to_fastscan('idx_l2c'::regclass, 0);
 
 RESET ROLE;
 
@@ -353,20 +357,21 @@ GRANT SELECT ON embeddings TO regress_inspect_unpriv;
 SET ROLE regress_inspect_unpriv;
 
 SELECT count(*) > 0 AS centroid_ok
-    FROM mkt.centroid_pages('idx_l2c'::regclass);
+    FROM prism.centroid_pages('idx_l2c'::regclass);
 SELECT count(*) > 0 AS posting_ok
-    FROM mkt.posting_pages('idx_l2c'::regclass);
+    FROM prism.posting_pages('idx_l2c'::regclass);
 SELECT count(*) >= 0 AS tids_ok
-    FROM mkt.tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
+    FROM prism.tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
 SELECT count(*) > 0 AS settings_ok
-    FROM mkt.index_settings('idx_l2c'::regclass);
+    FROM prism.index_settings('idx_l2c'::regclass);
 
 -- ...but SELECT is still not enough to mutate the index.
-SELECT mkt.convert_posting_to_fastscan('idx_l2c'::regclass, 0);
+SELECT prism.convert_posting_to_fastscan('idx_l2c'::regclass, 0);
 
 RESET ROLE;
 
 REVOKE SELECT ON embeddings FROM regress_inspect_unpriv;
+REVOKE USAGE ON SCHEMA prism FROM regress_inspect_unpriv;
 REVOKE USAGE ON SCHEMA mkt FROM regress_inspect_unpriv;
 DROP ROLE regress_inspect_unpriv;
 
@@ -378,49 +383,49 @@ DROP ROLE regress_inspect_unpriv;
 -- FASTSCAN centroid and posting layouts, and SOAR + boundary
 -- replication (so posting entries exceed the row count while
 -- tids_clusters still reports every row, deduplicated by TID).
-CREATE INDEX idx_default ON embeddings USING mktann (v);
+CREATE INDEX idx_default ON embeddings USING prism (v);
 
 SELECT (SELECT min(format)
             FROM centroid_pages('idx_default'::regclass)) AS centroid_fmt,
-       (SELECT min(format) FROM mkt.posting_pages('idx_default'::regclass)
+       (SELECT min(format) FROM prism.posting_pages('idx_default'::regclass)
             WHERE is_first) AS posting_fmt;
 
 SELECT sum(entry_count) >= (SELECT count(*) FROM embeddings) AS replicated
-    FROM mkt.posting_pages('idx_default'::regclass);
+    FROM prism.posting_pages('idx_default'::regclass);
 
 SELECT count(DISTINCT tid) = (SELECT count(*) FROM embeddings)
         AS all_rows_mapped
-    FROM mkt.tids_clusters('idx_default'::regclass,
+    FROM prism.tids_clusters('idx_default'::regclass,
                            (SELECT array_agg(ctid) FROM embeddings));
 
 -- Queries are served by the index and return exact top-1 on a
 -- distinct-distance probe (nprobe >= nlist: scan every list, so the
 -- result does not depend on routing).
 SET enable_seqscan = off;
-SET mkt.nprobe = 64;
+SET prism.nprobe = 64;
 SELECT id FROM embeddings ORDER BY v <-> '[0.31,0.32,0.33]' LIMIT 1;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 RESET enable_seqscan;
 
 -- =====================================================================
--- mkt.index_settings
+-- prism.index_settings
 -- =====================================================================
 
 -- Explicit options are reported back as set, with source 'option'.
 -- (nlist and nlevels are asserted by predicate, not value: the built
 -- cluster count can vary with k-means convergence across platforms.)
-CREATE INDEX idx_settings ON embeddings USING mktann (v)
+CREATE INDEX idx_settings ON embeddings USING prism (v)
     WITH (nlist = 20, fan_out = 8, centroid_compression = on,
           centroid_fastscan = off, fastscan = off, soar_lambda = 0.5,
           boundary_epsilon = 0.1, kmeans_nredo = 2,
           distance_mode = symmetric);
 
 SELECT name, setting, source
-    FROM mkt.index_settings('idx_settings'::regclass)
+    FROM prism.index_settings('idx_settings'::regclass)
     WHERE name NOT IN ('nlist', 'nlevels');
 
 SELECT name, setting::int > 0 AS positive, source
-    FROM mkt.index_settings('idx_settings'::regclass)
+    FROM prism.index_settings('idx_settings'::regclass)
     WHERE name IN ('nlist', 'nlevels');
 
 -- The default index resolves its automatic settings: every value is
@@ -430,23 +435,23 @@ SELECT name, setting::int > 0 AS positive, source
 SELECT name,
        setting <> '0' AND setting <> '' AS resolved,
        source
-    FROM mkt.index_settings('idx_default'::regclass);
+    FROM prism.index_settings('idx_default'::regclass);
 
 SELECT name, setting, source
-    FROM mkt.index_settings('idx_default'::regclass)
+    FROM prism.index_settings('idx_default'::regclass)
     WHERE name = 'nprobe';
 
 -- Session GUCs override the index setting and report source 'session'.
-SET mkt.nprobe = 33;
-SET mkt.distance_mode = 'symmetric';
+SET prism.nprobe = 33;
+SET prism.distance_mode = 'symmetric';
 SELECT name, setting, source
-    FROM mkt.index_settings('idx_default'::regclass)
+    FROM prism.index_settings('idx_default'::regclass)
     WHERE name IN ('distance_mode', 'nprobe');
-RESET mkt.nprobe;
-RESET mkt.distance_mode;
+RESET prism.nprobe;
+RESET prism.distance_mode;
 
--- Error: not an mktann index
-SELECT * FROM mkt.index_settings('idx_btree'::regclass);
+-- Error: not a prism index
+SELECT * FROM prism.index_settings('idx_btree'::regclass);
 
 DROP INDEX idx_settings;
 DROP INDEX idx_default;

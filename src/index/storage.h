@@ -9,7 +9,7 @@
  * callers just see read/release/write/commit.
  *
  * Standalone: embed in a struct with an array of malloc'd 8KB buffers
- * PG mode:    embed in MktannStorage with Relation + buffer cache
+ * PG mode:    embed in MktPgStorage with Relation + buffer cache
  * Cloud:      embed with remote block store handle (future)
  *
  * Caller pattern:

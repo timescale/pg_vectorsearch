@@ -270,8 +270,8 @@ MktStorage *
 mkt_pbuild_worker_storage(MktPBuildWorker *w)
 {
 	/* No table relation needed (routing reads index pages only, no rerank). */
-	MktannStorage *s = palloc(sizeof(MktannStorage));
-	mktann_storage_init(s, w->indexRel, NULL, w->shared->metric);
+	MktPgStorage *s = palloc(sizeof(MktPgStorage));
+	mkt_pg_storage_init(s, w->indexRel, NULL, w->shared->metric);
 	s->build_mode = true; /* reads only; matches the leader's build storage */
 	return &s->base;	  /* base is the first member */
 }
@@ -627,7 +627,7 @@ mkt_pbuild_setup_shared(
 	 * in posting_build.h): decouple from the query-tuned GUCs. */
 	shared->centroid_error_scale = MKT_BUILD_CENTROID_ERROR_SCALE;
 	shared->centroid_beam_scale	 = MKT_BUILD_CENTROID_BEAM_SCALE;
-	shared->fastscan_bits		 = mkt_fastscan_bits;
+	shared->fastscan_bits		 = prism_fastscan_bits;
 	SpinLockInit(&pg->mutex);
 	for (int i = 0; i < MKT_REFINE_LOCK_STRIPES; i++)
 		SpinLockInit(&pg->accum_locks[i]);
@@ -783,7 +783,7 @@ mkt_pbuild_samples_attach(shm_toc *toc, MktBuildShared *shared, void **seg_out)
 	if (seg == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("could not attach to mktann sample segment")));
+				 errmsg("could not attach to prism sample segment")));
 	*seg_out = seg;
 	return (MktDsmSamples *)dsm_segment_address(seg);
 }
@@ -829,7 +829,7 @@ mkt_pbuild_subtree_ring_attach(MktBuildShared *shared, void **seg_out)
 	if (seg == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("could not attach to mktann subtree segment")));
+				 errmsg("could not attach to prism subtree segment")));
 	*seg_out = seg;
 	return (char *)dsm_segment_address(seg);
 }
@@ -869,7 +869,7 @@ mkt_pbuild_exact_centroids_attach(MktBuildShared *shared, void **seg_out)
 	if (seg == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("could not attach to mktann exact-centroid "
+				 errmsg("could not attach to prism exact-centroid "
 						"segment")));
 	*seg_out = seg;
 	return (char *)dsm_segment_address(seg);

@@ -1,10 +1,10 @@
--- Standard PostgreSQL instrumentation of mktann scans
+-- Standard PostgreSQL instrumentation of prism scans
 --
 -- A scan must show up in the same places any index scan does: the
 -- cumulative statistics views (pg_statio_*_indexes block hits), and the
 -- per-node "Index Searches" counter EXPLAIN ANALYZE reports since
 -- PostgreSQL 18. Both are easy to lose: index pages re-pinned through the
--- backend-local buffer-id cache (mkt.recent_buffers) bypass ReadBuffer,
+-- backend-local buffer-id cache (prism.recent_buffers) bypass ReadBuffer,
 -- which is where relation-level hit counting normally happens, and the
 -- search counter is the access method's to maintain.
 CREATE TABLE scan_stats_test (id serial, v vec32(16));
@@ -12,10 +12,10 @@ INSERT INTO scan_stats_test (v)
     SELECT (SELECT array_agg(sin(i * 0.3 + j * 0.9)::real)
             FROM generate_series(0, 15) j)::vec32(16)
     FROM generate_series(1, 400) i;
-CREATE INDEX scan_stats_idx ON scan_stats_test USING mktann (v)
+CREATE INDEX scan_stats_idx ON scan_stats_test USING prism (v)
     WITH (nlist = 8);
 SET enable_seqscan = off;
-SET mkt.nprobe = 8;
+SET prism.nprobe = 8;
 -- ============================================================
 -- Block hits are attributed to the index
 -- ============================================================
@@ -25,9 +25,9 @@ SET mkt.nprobe = 8;
 -- queries, or the statistics views under-report a warm index almost
 -- completely. pg_stat_force_next_flush makes the pending counts visible
 -- without waiting for the flush interval.
-SHOW mkt.recent_buffers;
- mkt.recent_buffers 
---------------------
+SHOW prism.recent_buffers;
+ prism.recent_buffers 
+----------------------
  on
 (1 row)
 
@@ -148,6 +148,6 @@ SELECT scan_stats_searches($q$
 (1 row)
 
 DROP FUNCTION scan_stats_searches(text);
-RESET mkt.nprobe;
+RESET prism.nprobe;
 RESET enable_seqscan;
 DROP TABLE scan_stats_test;

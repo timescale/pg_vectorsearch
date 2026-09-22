@@ -22,7 +22,7 @@ SELECT format($f$
 $f$, :'rqv') \gexec
 
 -- L2 distance
-CREATE INDEX idx_rerank_l2 ON rerank_test USING mktann (v)
+CREATE INDEX idx_rerank_l2 ON rerank_test USING prism (v)
     WITH (centroid_compression = true);
 
 -- Compute ground truth via sequential scan
@@ -57,7 +57,7 @@ SELECT bool_and(abs(t.dist - r.dist) < 1e-5) AS distances_match
 
 -- Cosine distance
 CREATE INDEX idx_rerank_cos ON rerank_test
-    USING mktann (v vec32_cosine_ops)
+    USING prism (v vec32_cosine_ops)
     WITH (centroid_compression = true);
 
 SET enable_indexscan = off;

@@ -1,5 +1,5 @@
 /*
- * scan_bound.h - row target for an mktann scan
+ * scan_bound.h - row target for a prism scan
  *
  * A scan asks, at rescan, how many rows the query above it will pull, so
  * its top-k is sized for the query instead of a fixed default. Registers

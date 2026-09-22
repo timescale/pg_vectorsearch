@@ -1,5 +1,5 @@
 /*
- * scan.c - Index scan for mktann
+ * scan.c - Index scan for prism
  *
  * Uses MktQueryState (shared with standalone) for the search hot
  * path. PG-specific concerns: scan iterator protocol, memory
@@ -47,7 +47,7 @@
 /* ----------------------------------------------------------------
  * Process-global per-phase accumulators (diagnostic).
  *
- * Summed across every mktann index scan in this backend so phase timing
+ * Summed across every prism index scan in this backend so phase timing
  * can be measured over a large query set (e.g. a full 10k-query
  * benchmark run in one session) instead of eyeballing EXPLAIN on a
  * single query. Exposed via mkt_phase_stats() / mkt_phase_stats_reset():
@@ -152,27 +152,27 @@ mkt_phase_stats(PG_FUNCTION_ARGS)
  * Scan result entry
  * ---------------------------------------------------------------- */
 
-typedef struct MktannScanResult
+typedef struct PrismScanResult
 {
 	ItemPointerData tid;
 	Distance		distance;
-} MktannScanResult;
+} PrismScanResult;
 
 /* ----------------------------------------------------------------
  * Scan state
  * ---------------------------------------------------------------- */
 
-typedef struct MktannScanState
+typedef struct PrismScanState
 {
 	/* Common index descriptor (first for cast compatibility) */
 	MktIndexBase index_base;
 
 	/* Result iterator */
-	MktannScanResult *results;
-	uint32_t		  results_cap;
-	uint32_t		  nresults;
-	uint32_t		  curr;
-	bool			  first;
+	PrismScanResult *results;
+	uint32_t		 results_cap;
+	uint32_t		 nresults;
+	uint32_t		 curr;
+	bool			 first;
 
 	/* Shared query state. Allocated on the first search rather than at
 	 * beginscan, so it can be sized for the top-k the query actually
@@ -187,13 +187,13 @@ typedef struct MktannScanState
 	uint32_t scan_bound;
 
 	/* PG storage (index page I/O) */
-	MktannStorage storage;
+	MktPgStorage storage;
 
 	/* EXPLAIN ANALYZE stats (accumulated across rescans) */
-	MktannScanStats stats;
+	PrismScanStats stats;
 
 	/* Resource owner the params checkout was registered with (the
-	 * CurrentResourceOwner at the mktann_index_base_init call below);
+	 * CurrentResourceOwner at the prism_index_base_init call below);
 	 * the endscan release must name the same owner. */
 	ResourceOwner params_owner;
 
@@ -207,12 +207,12 @@ typedef struct MktannScanState
 	 * type -- an access, not the vector itself.
 	 */
 	Vec32Access query_vector_access;
-} MktannScanState;
+} PrismScanState;
 
-const MktannScanStats *
-mktann_scan_get_stats(IndexScanDesc scan)
+const PrismScanStats *
+prism_scan_get_stats(IndexScanDesc scan)
 {
-	MktannScanState *ss = (MktannScanState *)scan->opaque;
+	PrismScanState *ss = (PrismScanState *)scan->opaque;
 	return ss ? &ss->stats : NULL;
 }
 
@@ -221,27 +221,27 @@ mktann_scan_get_stats(IndexScanDesc scan)
  * ---------------------------------------------------------------- */
 
 IndexScanDesc
-mktann_beginscan(Relation index, int nkeys, int norderbys)
+prism_beginscan(Relation index, int nkeys, int norderbys)
 {
 	IndexScanDesc scan = RelationGetIndexScan(index, nkeys, norderbys);
 
 	MemoryContext scan_ctx = AllocSetContextCreate(
-			CurrentMemoryContext, "mktann scan", ALLOCSET_DEFAULT_SIZES);
+			CurrentMemoryContext, "prism scan", ALLOCSET_DEFAULT_SIZES);
 	MemoryContext old_ctx = MemoryContextSwitchTo(scan_ctx);
 
-	MktannScanState *ss = palloc0(sizeof(MktannScanState));
-	ss->scan_ctx		= scan_ctx;
-	ss->first			= true;
+	PrismScanState *ss = palloc0(sizeof(PrismScanState));
+	ss->scan_ctx	   = scan_ctx;
+	ss->first		   = true;
 
 	/* Immutable index parameters from the per-backend cache (metapage read at
 	 * most once per backend). */
-	mktann_index_base_init(index, &ss->index_base);
-	ss->params_owner	= CurrentResourceOwner;
-	MktannScanInfo info = mktann_cache_scan_info(index);
+	prism_index_base_init(index, &ss->index_base);
+	ss->params_owner   = CurrentResourceOwner;
+	PrismScanInfo info = prism_cache_scan_info(index);
 
 	/* From the per-backend cache; the buffer must outlive a rescan. */
 	ss->query_vector_access = vec32_access(
-			mktann_cache_type_info(index), ss->index_base.dim, scan_ctx);
+			prism_cache_type_info(index), ss->index_base.dim, scan_ctx);
 
 	/* Size the per-scan query buffers to the nprobe actually requested
 	 * (the GUC is set before the query runs) rather than the worst-case
@@ -251,8 +251,8 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	 * covers routing more leaf candidates than are scanned (bounded
 	 * probe expansion); requests beyond the sizing are clamped by
 	 * mkt_query_execute exactly as they were against the old ceiling. */
-	uint32_t req_nprobe = mkt_nprobe > 0 ? (uint32_t)mkt_nprobe
-										 : mkt_auto_nprobe(info.nlist);
+	uint32_t req_nprobe = prism_nprobe > 0 ? (uint32_t)prism_nprobe
+										   : mkt_auto_nprobe(info.nlist);
 	uint32_t max_nprobe = req_nprobe + Min(req_nprobe, 256) + 16;
 	if (max_nprobe > 4096)
 		max_nprobe = 4096;
@@ -262,7 +262,7 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
 	ss->has_fastscan = ss->index_base.fastscan != 0;
 
 	/* Initialize PG storage */
-	mktann_storage_init(&ss->storage, index, NULL, ss->index_base.metric);
+	mkt_pg_storage_init(&ss->storage, index, NULL, ss->index_base.metric);
 	ss->index_base.centroid_storage = &ss->storage.base;
 	ss->index_base.posting_storage	= &ss->storage.base;
 	ss->index_base.page_base		= NULL;
@@ -288,14 +288,14 @@ mktann_beginscan(Relation index, int nkeys, int norderbys)
  * ---------------------------------------------------------------- */
 
 void
-mktann_rescan(
+prism_rescan(
 		IndexScanDesc scan,
 		ScanKey		  keys,
 		int			  nkeys,
 		ScanKey		  orderbys,
 		int			  norderbys)
 {
-	MktannScanState *ss = (MktannScanState *)scan->opaque;
+	PrismScanState *ss = (PrismScanState *)scan->opaque;
 
 	if (keys && scan->numberOfKeys > 0)
 		memcpy(scan->keyData, keys, scan->numberOfKeys * sizeof(ScanKeyData));
@@ -350,7 +350,7 @@ mktann_rescan(
 	(sizeof(Distance) + sizeof(uint64_t) + 2 * sizeof(MktTopKEntry) +       \
 	 MKT_QUERY_CAND_PER_K *                                                 \
 			 (sizeof(MktTopKEntry) + sizeof(uint32_t) + sizeof(Distance)) + \
-	 sizeof(MktannScanResult))
+	 sizeof(PrismScanResult))
 
 /*
  * Rows the top-k may be sized to, from work_mem.
@@ -359,7 +359,7 @@ mktann_rescan(
  * constant: a session with work_mem raised for a large query should be able
  * to ask for a large LIMIT, and one with it lowered should not be able to
  * commit the backend to more. The LIMIT and the relation's row count are
- * inputs to the sizing rather than limits on it; mkt.query_limit lowers it
+ * inputs to the sizing rather than limits on it; prism.query_limit lowers it
  * when set, and this bounds whatever the rest of the sizing arrives at.
  *
  * Floored at the built-in default so a query always answers something. A
@@ -389,7 +389,7 @@ max_top_k_for_work_mem(void)
  * Sizing for a fixed handful instead would silently answer a complete
  * ordered scan with a fraction of it.
  *
- * mkt.query_limit then lowers the result if it is set below it, and
+ * prism.query_limit then lowers the result if it is set below it, and
  * work_mem bounds it in every case, so a query asking for more rows than
  * the backend may hold returns as many as it can.
  *
@@ -400,9 +400,9 @@ max_top_k_for_work_mem(void)
  * work_mem too small to hold more.
  */
 static uint32_t
-resolve_top_k(const MktannScanState *ss, Relation heap)
+resolve_top_k(const PrismScanState *ss, Relation heap)
 {
-	double rows = heap != NULL ? mktann_estimate_heap_tuples(heap) : -1.0;
+	double rows = heap != NULL ? prism_estimate_heap_tuples(heap) : -1.0;
 
 	return mkt_scan_resolve_top_k(ss->scan_bound, rows);
 }
@@ -423,14 +423,14 @@ mkt_scan_resolve_top_k(uint32_t scan_bound, double heap_rows)
 	}
 
 	/*
-	 * mkt.query_limit only ever lowers the sizing. Raising it above what
+	 * prism.query_limit only ever lowers the sizing. Raising it above what
 	 * the query asked for would have the scan rank rows the LIMIT then
 	 * throws away; the lever exists to cap a query that asks for too much
 	 * -- one with no LIMIT, or with one set far higher than the rows the
 	 * caller will read.
 	 */
-	if (mkt_query_limit > 0 && (uint32_t)mkt_query_limit < k)
-		k = (uint32_t)mkt_query_limit;
+	if (prism_query_limit > 0 && (uint32_t)prism_query_limit < k)
+		k = (uint32_t)prism_query_limit;
 
 	if (k < MKT_DEFAULT_K)
 		k = MKT_DEFAULT_K;
@@ -455,7 +455,7 @@ mkt_scan_resolve_top_k(uint32_t scan_bound, double heap_rows)
  * scan context where repalloc preserves it across a resize.
  */
 static void
-ensure_query_state(MktannScanState *ss, uint32_t k)
+ensure_query_state(PrismScanState *ss, uint32_t k)
 {
 	uint32_t max_k = Max(k, (uint32_t)MKT_DEFAULT_K);
 
@@ -472,14 +472,15 @@ ensure_query_state(MktannScanState *ss, uint32_t k)
 
 	mkt_query_state_init(&ss->qstate, &ss->index_base, max_k, ss->max_nprobe);
 	if (ss->has_fastscan)
-		mkt_posting_scan_enable_fastscan(&ss->qstate.pscan, mkt_fastscan_bits);
+		mkt_posting_scan_enable_fastscan(
+				&ss->qstate.pscan, prism_fastscan_bits);
 	ss->qstate_ready = true;
 
 	/* The error-bound rerank can return more than max_k results, so this
 	 * is a starting size; execute_search grows it as needed. */
 	if (ss->results_cap < max_k)
 	{
-		size_t bytes	= max_k * sizeof(MktannScanResult);
+		size_t bytes	= max_k * sizeof(PrismScanResult);
 		ss->results		= ss->results ? repalloc(ss->results, bytes)
 									  : palloc(bytes);
 		ss->results_cap = max_k;
@@ -495,7 +496,7 @@ ensure_query_state(MktannScanState *ss, uint32_t k)
 static void
 execute_search(IndexScanDesc scan)
 {
-	MktannScanState *ss = (MktannScanState *)scan->opaque;
+	PrismScanState *ss = (PrismScanState *)scan->opaque;
 
 	/*
 	 * Count the search where it runs, as every core AM does at the start of
@@ -514,7 +515,7 @@ execute_search(IndexScanDesc scan)
 	/* Lazily set heap relation for reranking (rel is NULL at
 	 * beginscan time; heapRelation becomes available later) */
 	if (scan->heapRelation != NULL && ss->storage.rel == NULL)
-		mktann_storage_set_rel(&ss->storage, scan->heapRelation);
+		mkt_pg_storage_set_rel(&ss->storage, scan->heapRelation);
 
 	/*
 	 * Extract query vector. The ORDER BY operator belongs to the opclass, so
@@ -534,8 +535,8 @@ execute_search(IndexScanDesc scan)
 						ss->index_base.dim)));
 
 	/* Execute shared search */
-	uint32_t nprobe = mkt_nprobe > 0 ? (uint32_t)mkt_nprobe
-									 : mkt_auto_nprobe(ss->index_base.nlist);
+	uint32_t nprobe = prism_nprobe > 0 ? (uint32_t)prism_nprobe
+									   : mkt_auto_nprobe(ss->index_base.nlist);
 
 	MktQueryStats qstats   = {0};
 	ss->storage.read_count = 0;
@@ -545,8 +546,8 @@ execute_search(IndexScanDesc scan)
 			qref.data,
 			k,
 			nprobe,
-			(MktDistanceMode)mkt_distance_mode,
-			mkt_rerank,
+			(MktDistanceMode)prism_distance_mode,
+			prism_rerank,
 			&qstats);
 
 	ss->stats.clusters_scanned		  = qstats.clusters_scanned;
@@ -599,7 +600,7 @@ execute_search(IndexScanDesc scan)
 	if (nresults > ss->results_cap)
 	{
 		ss->results =
-				repalloc(ss->results, nresults * sizeof(MktannScanResult));
+				repalloc(ss->results, nresults * sizeof(PrismScanResult));
 		ss->results_cap = nresults;
 	}
 	for (uint32_t i = 0; i < nresults; i++)
@@ -618,9 +619,9 @@ execute_search(IndexScanDesc scan)
  * ---------------------------------------------------------------- */
 
 bool
-mktann_gettuple(IndexScanDesc scan, ScanDirection direction)
+prism_gettuple(IndexScanDesc scan, ScanDirection direction)
 {
-	MktannScanState *ss = (MktannScanState *)scan->opaque;
+	PrismScanState *ss = (PrismScanState *)scan->opaque;
 
 	(void)direction;
 
@@ -637,7 +638,7 @@ mktann_gettuple(IndexScanDesc scan, ScanDirection direction)
 	if (ss->curr >= ss->nresults)
 		return false;
 
-	MktannScanResult *entry = &ss->results[ss->curr];
+	PrismScanResult *entry = &ss->results[ss->curr];
 
 	scan->xs_heaptid = entry->tid;
 
@@ -654,18 +655,18 @@ mktann_gettuple(IndexScanDesc scan, ScanDirection direction)
  * ---------------------------------------------------------------- */
 
 void
-mktann_endscan(IndexScanDesc scan)
+prism_endscan(IndexScanDesc scan)
 {
-	MktannScanState *ss = (MktannScanState *)scan->opaque;
+	PrismScanState *ss = (PrismScanState *)scan->opaque;
 
 	if (ss != NULL)
 	{
 		if (ss->qstate_ready)
 			mkt_query_state_cleanup(&ss->qstate);
 		/* Check the RaBitQParams checkout back in before the scan's own
-		 * memory goes away — see mktann_index_base_init / the beginscan
+		 * memory goes away — see prism_index_base_init / the beginscan
 		 * call above. */
-		mktann_release_params(
+		prism_release_params(
 				ss->index_base.dim,
 				ss->index_base.rabitq_seed,
 				ss->params_owner);

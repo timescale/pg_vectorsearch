@@ -19,7 +19,7 @@ else
     pg_test_conf = configure_file(
       output: 'meerkat_test.conf',
       command: ['sh', '-c',
-        'printf "search_path = \'mkt, public\'\\nlogging_collector = on\\n" ' +
+        'printf "search_path = \'mkt, prism, public\'\\nlogging_collector = on\\n" ' +
         '> @OUTPUT@'],
     )
 
@@ -29,7 +29,7 @@ else
       'distance',
       'operators',
       'rabitq',
-      'mktann',
+      'prism',
       'mutations',
       'rerank',
       'inspect',
@@ -237,7 +237,7 @@ else
       iso_conf = configure_file(
         output: 'meerkat_isolation.conf',
         command: ['sh', '-c',
-          'echo "search_path = \'mkt, public\'" > @OUTPUT@'],
+          'echo "search_path = \'mkt, prism, public\'" > @OUTPUT@'],
       )
 
       test('isolation',

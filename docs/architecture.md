@@ -1,11 +1,11 @@
-# Meerkat Architecture
+# PRISM Architecture
 
-High-level architecture for Meerkat, a PostgreSQL index access method for
-approximate nearest neighbor (ANN) vector search.
+High-level architecture for PRISM, the meerkat extension's PostgreSQL index
+access method for approximate nearest neighbor (ANN) vector search.
 
 ## Overview
 
-Meerkat is designed for **billion-scale vector search** within PostgreSQL,
+PRISM is designed for **billion-scale vector search** within PostgreSQL,
 using an inverted index approach inspired by SPANN, ScaNN, and SPFresh. The
 vector space is partitioned into clusters via hierarchical clustering, enabling
 efficient search by narrowing the search space through multiple levels before
@@ -118,7 +118,7 @@ multi-tenant, and optimized for modern hardware (SIMD, NVMe).
 
 ### 1. Hierarchical Centroid Structure
 
-To handle billion-scale datasets, Meerkat uses hierarchical clustering inspired
+To handle billion-scale datasets, PRISM uses hierarchical clustering inspired
 by SPFresh (and similar to approaches in ScaNN and SPANN). Instead of a flat
 list of centroids requiring linear scan, centroids are organized in a tree
 structure that narrows the search space at each level.
@@ -262,7 +262,7 @@ chosen to provide independent "backup" coverage.
   secondary residual (low error)—providing effective redundancy
 - Trade-off: Higher storage overhead, but more systematic recall improvement
 
-**Meerkat approach:**
+**PRISM approach:**
 
 For initial implementation, use SPANN-style boundary-only replication:
 - Lower storage overhead (important for disk-based index)
@@ -276,7 +276,7 @@ workloads where recall is critical.
 #### Assignment methods: tree descent vs. brute-force
 
 Independent of *which* clusters a vector is replicated to, there is the
-question of *how* the assignment is computed. Meerkat deliberately uses two
+question of *how* the assignment is computed. PRISM deliberately uses two
 different methods for the two kinds of assignment, because they are different
 problems:
 
@@ -326,7 +326,7 @@ split; very small clusters may be merged or eliminated.
 
 ### 5. Vector Quantization (RaBitQ)
 
-Meerkat uses **RaBitQ** (Random Bit Quantization) for vector compression, which
+PRISM uses **RaBitQ** (Random Bit Quantization) for vector compression, which
 provides theoretical error bounds enabling efficient two-stage search.
 
 **Why RaBitQ?**
@@ -387,14 +387,14 @@ Index metadata is stored in multiple locations depending on its nature:
 - Build parameters: `nlist` (number of leaf clusters), `fillfactor`
 - Search defaults: `nprobe` (clusters to search), `rerank_k`
 - Distance mode: `distance_mode` (`asymmetric` or `symmetric`, default:
-  `asymmetric`). Can be overridden per-session via `mkt.distance_mode` GUC
+  `asymmetric`). Can be overridden per-session via `prism.distance_mode` GUC
 - Over-allocation: `reserved_pages`
 - Multi-tenant: `tenant_column` (for composite key indexes)
 
 **GUCs** (session/server-level, can override reloptions):
-- `meerkat.nprobe` - clusters to search per query
-- `meerkat.rerank_k` - candidates to re-rank with full precision
-- `mkt.distance_mode` - RaBitQ distance mode (`default`, `asymmetric`, or
+- `prism.nprobe` - clusters to search per query
+- `prism.rerank_k` - candidates to re-rank with full precision
+- `prism.distance_mode` - RaBitQ distance mode (`default`, `asymmetric`, or
   `symmetric`). `default` uses the index's `distance_mode` relopt;
   `asymmetric` or `symmetric` overrides the index setting for the session
 
@@ -412,7 +412,7 @@ Index metadata is stored in multiple locations depending on its nature:
 
 ## Multi-Tenant Support
 
-Meerkat supports multi-tenant deployments through two approaches:
+PRISM supports multi-tenant deployments through two approaches:
 
 ### Option 1: Index-per-Tenant
 
@@ -420,7 +420,7 @@ Create separate tables and indexes for each tenant:
 
 ```sql
 CREATE TABLE tenant_123_vectors (id bigint, embedding vec32(768));
-CREATE INDEX ON tenant_123_vectors USING meerkat (embedding);
+CREATE INDEX ON tenant_123_vectors USING prism (embedding);
 ```
 
 **Pros**:
@@ -446,7 +446,7 @@ CREATE TABLE vectors (
     id bigint,
     embedding vec32(768)
 );
-CREATE INDEX ON vectors USING meerkat ((tenant_id, embedding));
+CREATE INDEX ON vectors USING prism ((tenant_id, embedding));
 ```
 
 **How it works**:
@@ -546,7 +546,7 @@ every query.
 
 ### Dynamic Updates (LIRE Protocol)
 
-Meerkat adopts the **LIRE (Lightweight Incremental RE-balancing)** protocol
+PRISM adopts the **LIRE (Lightweight Incremental RE-balancing)** protocol
 from SPFresh for maintaining index quality under continuous updates without
 full rebuilds.
 
@@ -652,7 +652,7 @@ skipped. This enables lock-free reads—searches never block on updates.
 
 ### Recall Measurement
 
-Meerkat supports measuring recall directly within PostgreSQL via an EXPLAIN
+PRISM supports measuring recall directly within PostgreSQL via an EXPLAIN
 option:
 
 ```sql
@@ -806,7 +806,7 @@ Leaving 10% free allows inserts to append to existing pages before needing new
 ones.
 
 ```sql
-CREATE INDEX ON vectors USING meerkat (embedding)
+CREATE INDEX ON vectors USING prism (embedding)
   WITH (fillfactor = 70);  -- 30% room for growth per page
 ```
 
@@ -815,7 +815,7 @@ posting list during build. These pages are pre-linked but empty, allowing
 growth without allocation at EOF.
 
 ```sql
-CREATE INDEX ON vectors USING meerkat (embedding)
+CREATE INDEX ON vectors USING prism (embedding)
   WITH (reserved_pages = 2);  -- 2 empty pages per posting list
 ```
 
@@ -944,7 +944,7 @@ Critical paths requiring SIMD optimization:
 
 ## Billion-Scale Feasibility Study
 
-This section analyzes Meerkat's feasibility at 1 billion vectors, using SPFresh
+This section analyzes PRISM's feasibility at 1 billion vectors, using SPFresh
 measurements as a baseline and calculating PostgreSQL-specific estimates.
 
 ### SPFresh Reference Numbers (1B vectors, 96 dimensions)
@@ -964,7 +964,7 @@ From the SPFresh paper (SPACEV1B dataset):
 Note: SPACEV1B uses 96-dimensional vectors. Modern embeddings (768-1536 dims)
 require proportionally more storage and compute.
 
-### Meerkat Estimates (1B vectors, 768 dimensions)
+### PRISM Estimates (1B vectors, 768 dimensions)
 
 **Base latency assumptions** (from [napkin-math]):
 
@@ -1296,7 +1296,7 @@ SET maintenance_work_mem = '8GB';          -- Memory per worker
 
 -- Create index with parallel workers
 CREATE INDEX CONCURRENTLY ON documents
-USING meerkat (embedding vec32_cosine_ops)
+USING prism (embedding vec32_cosine_ops)
 WITH (workers = 8);
 ```
 
@@ -1322,7 +1322,7 @@ tenant with 1M vectors has the same cost whether the total index has 1B or
 
 #### Comparison with SPFresh
 
-| Metric | SPFresh | Meerkat (EBS) | Meerkat (i4i) | Meerkat In-Index |
+| Metric | SPFresh | PRISM (EBS) | PRISM (i4i) | PRISM In-Index |
 |--------|---------|---------------|---------------|------------------|
 | Dimensions | 100 | 768 | 768 | 768 |
 | Element type | int8 | float16 | float16 | float16 |
@@ -1342,10 +1342,10 @@ tenant with 1M vectors has the same cost whether the total index has 1B or
 - **SPFresh baseline**: 100d int8 vectors are 15× smaller than 768d float16.
   Both systems are I/O-bound on posting scan; RaBitQ compute is negligible.
 
-- **Meerkat on EBS**: Cost-effective at ~$230/month, but EBS IOPS limits
+- **PRISM on EBS**: Cost-effective at ~$230/month, but EBS IOPS limits
   re-ranking latency to ~15ms. Good for throughput-oriented workloads.
 
-- **Meerkat on i4i NVMe**: Achieves **5ms p50**—matching SPFresh despite 15×
+- **PRISM on i4i NVMe**: Achieves **5ms p50**—matching SPFresh despite 15×
   larger vectors. Proves the architecture scales efficiently with vector size.
 
 - **Vectors in index**: Best latency at **3ms p50** by eliminating heap access.

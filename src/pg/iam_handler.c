@@ -1,7 +1,7 @@
 /*
- * iam_handler.c - meerkat ANN index access method handler
+ * iam_handler.c - prism index access method handler
  *
- * Registers the mktann index access method with PostgreSQL. Build and
+ * Registers the prism index access method with PostgreSQL. Build and
  * scan callbacks delegate to build.c and scan.c; trivial
  * stubs for unimplemented callbacks remain here.
  */
@@ -34,7 +34,7 @@
 #include "typeinfo.h"
 #include "types/vec32.h"
 
-PG_FUNCTION_INFO_V1(mktann_handler);
+PG_FUNCTION_INFO_V1(prism_handler);
 
 /* ----------------------------------------------------------------
  * Trivial stubs (no separate file needed)
@@ -42,7 +42,7 @@ PG_FUNCTION_INFO_V1(mktann_handler);
 
 /*
  * ambuildempty populates the init fork of an unlogged index so that crash
- * recovery has a valid image to copy over the main fork. meerkat has no
+ * recovery has a valid image to copy over the main fork. prism has no
  * notion of a valid "empty" index image -- even a build over zero rows
  * produces a real single-cluster tree -- so a no-op here would leave the
  * init fork at zero blocks and let recovery wipe the whole index, metadata
@@ -50,11 +50,11 @@ PG_FUNCTION_INFO_V1(mktann_handler);
  * else ever exercises, refuse unlogged tables outright at CREATE INDEX time.
  */
 static void
-mktann_buildempty(Relation index)
+prism_buildempty(Relation index)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("mktann indexes do not support unlogged tables"),
+			 errmsg("prism indexes do not support unlogged tables"),
 			 errhint("Use a logged table, or run ALTER TABLE ... SET LOGGED "
 					 "before creating the index.")));
 }
@@ -77,7 +77,7 @@ mktann_buildempty(Relation index)
 #define MKT_INSERT_ROUTE_ATTEMPTS 8
 
 static bool
-mktann_insert(
+prism_insert(
 		Relation		  index,
 		Datum			 *values,
 		bool			 *isnull,
@@ -105,7 +105,7 @@ mktann_insert(
 	/* Per-insert scratch context: beam-search + encode allocations are freed
 	 * in one shot and don't accumulate in the inserting transaction. */
 	MemoryContext insert_ctx = AllocSetContextCreate(
-			CurrentMemoryContext, "mktann insert", ALLOCSET_DEFAULT_SIZES);
+			CurrentMemoryContext, "prism insert", ALLOCSET_DEFAULT_SIZES);
 	MemoryContext old_ctx = MemoryContextSwitchTo(insert_ctx);
 
 	/* Immutable index parameters from the per-backend cache (metapage read at
@@ -115,18 +115,18 @@ mktann_insert(
 	 * through the owner instead). */
 	ResourceOwner params_owner = CurrentResourceOwner;
 	MktIndexBase  base;
-	mktann_index_base_init(index, &base);
+	prism_index_base_init(index, &base);
 	Dimension dim = base.dim;
 
-	MktannStorage storage;
-	mktann_storage_init(&storage, index, NULL, base.metric);
+	MktPgStorage storage;
+	mkt_pg_storage_init(&storage, index, NULL, base.metric);
 	base.centroid_storage = &storage.base;
 	base.posting_storage  = &storage.base;
 	base.page_base		  = NULL;
 
 	/* Inserted vector, converted to float32 when the column type is not. */
 	Vec32Access input = vec32_access(
-			mktann_cache_type_info(index), dim, CurrentMemoryContext);
+			prism_cache_type_info(index), dim, CurrentMemoryContext);
 	Vec32Ref vref = vec32_read(&input, values[0]);
 
 	if (vref.dim != dim)
@@ -200,7 +200,7 @@ mktann_insert(
 		 * that it does not deadlock). No-op unless PG was built with injection
 		 * points and a test attached an action.
 		 */
-		INJECTION_POINT("mktann-insert-locked", NULL);
+		INJECTION_POINT("prism-insert-locked", NULL);
 		/*
 		 * If the head was split away while we waited for the lock it is now
 		 * retired (TOMBSTONED immediate or DELETED XID-gated); insert_one
@@ -216,9 +216,9 @@ mktann_insert(
 		 * unless PostgreSQL was built with injection points, and is only
 		 * true while a test holds the point attached.
 		 */
-		if (IS_INJECTION_POINT_ATTACHED("mktann-insert-force-reroute"))
+		if (IS_INJECTION_POINT_ATTACHED("prism-insert-force-reroute"))
 		{
-			INJECTION_POINT("mktann-insert-force-reroute", NULL);
+			INJECTION_POINT("prism-insert-force-reroute", NULL);
 			head_retired = true;
 		}
 		else
@@ -243,9 +243,9 @@ mktann_insert(
 	MemoryContextSwitchTo(old_ctx);
 	MemoryContextDelete(insert_ctx);
 
-	/* Check the RaBitQParams checkout back in — see mktann_index_base_init
+	/* Check the RaBitQParams checkout back in — see prism_index_base_init
 	 * above. */
-	mktann_release_params(dim, base.rabitq_seed, params_owner);
+	prism_release_params(dim, base.rabitq_seed, params_owner);
 
 	/*
 	 * Every path out of the loop above must have indexed the tuple. Returning
@@ -276,16 +276,16 @@ mktann_insert(
  * Adapt PostgreSQL's IndexBulkDeleteCallback (takes ItemPointer) to the shared
  * tombstone predicate (takes ItemPointerData by value).
  */
-typedef struct MktannBulkDeleteCtx
+typedef struct PrismBulkDeleteCtx
 {
 	IndexBulkDeleteCallback cb;
 	void				   *cb_state;
-} MktannBulkDeleteCtx;
+} PrismBulkDeleteCtx;
 
 static bool
 tid_is_dead(ItemPointerData tid, void *state)
 {
-	MktannBulkDeleteCtx *c = (MktannBulkDeleteCtx *)state;
+	PrismBulkDeleteCtx *c = (PrismBulkDeleteCtx *)state;
 	return c->cb(&tid, c->cb_state);
 }
 
@@ -298,7 +298,7 @@ tid_is_dead(ItemPointerData tid, void *state)
  * and the dead old-version of every vector-column UPDATE.
  */
 static IndexBulkDeleteResult *
-mktann_bulkdelete(
+prism_bulkdelete(
 		IndexVacuumInfo		   *info,
 		IndexBulkDeleteResult  *stats,
 		IndexBulkDeleteCallback callback,
@@ -313,17 +313,17 @@ mktann_bulkdelete(
 		return stats; /* block 0 is the metadata page */
 
 	/* dim + metric + first_posting from the per-backend cache (metapage read
-	 * at most once per backend). mktann_cache_meta skips the rotation-matrix
+	 * at most once per backend). prism_cache_meta skips the rotation-matrix
 	 * work the scan / insert cache path does — VACUUM never needs it. */
 	Dimension	   dim;
 	DistanceMetric metric;
 	BlockNumber	   first_posting;
-	mktann_cache_meta(index, &dim, &metric, &first_posting);
+	prism_cache_meta(index, &dim, &metric, &first_posting);
 
-	MktannStorage storage;
-	mktann_storage_init(&storage, index, NULL, metric);
+	MktPgStorage storage;
+	mkt_pg_storage_init(&storage, index, NULL, metric);
 
-	MktannBulkDeleteCtx ctx = {.cb = callback, .cb_state = cb_state};
+	PrismBulkDeleteCtx ctx = {.cb = callback, .cb_state = cb_state};
 
 	/*
 	 * The index is laid out as: block 0 metadata, then the contiguous centroid
@@ -450,7 +450,7 @@ mktann_bulkdelete(
  * figure (vacuumlazy skips the update when it is set).
  */
 static IndexBulkDeleteResult *
-mktann_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
+prism_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
 	if (info->analyze_only)
 		return stats;
@@ -464,7 +464,7 @@ mktann_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 }
 
 static void
-mktann_costestimate(
+prism_costestimate(
 		PlannerInfo *root,
 		IndexPath	*path,
 		double		 loop_count,
@@ -486,7 +486,7 @@ mktann_costestimate(
 		return;
 	}
 
-	mktann_cost_estimate(
+	prism_cost_estimate(
 			root,
 			path,
 			loop_count,
@@ -498,42 +498,42 @@ mktann_costestimate(
 }
 
 static bytea *
-mktann_options(Datum reloptions, bool validate)
+prism_options(Datum reloptions, bool validate)
 {
 	static const relopt_parse_elt tab[] = {
 			{"distance_mode",
 			 RELOPT_TYPE_ENUM,
-			 offsetof(MktannOptions, distance_mode)},
-			{"fan_out", RELOPT_TYPE_INT, offsetof(MktannOptions, fan_out)},
-			{"nlist", RELOPT_TYPE_INT, offsetof(MktannOptions, nlist)},
+			 offsetof(PrismOptions, distance_mode)},
+			{"fan_out", RELOPT_TYPE_INT, offsetof(PrismOptions, fan_out)},
+			{"nlist", RELOPT_TYPE_INT, offsetof(PrismOptions, nlist)},
 			{"kmeans_nredo",
 			 RELOPT_TYPE_INT,
-			 offsetof(MktannOptions, kmeans_nredo)},
+			 offsetof(PrismOptions, kmeans_nredo)},
 			{"soar_lambda",
 			 RELOPT_TYPE_REAL,
-			 offsetof(MktannOptions, soar_lambda)},
+			 offsetof(PrismOptions, soar_lambda)},
 			{"boundary_epsilon",
 			 RELOPT_TYPE_REAL,
-			 offsetof(MktannOptions, boundary_epsilon)},
+			 offsetof(PrismOptions, boundary_epsilon)},
 			{"centroid_compression",
 			 RELOPT_TYPE_ENUM,
-			 offsetof(MktannOptions, centroid_compression)},
-			{"fastscan", RELOPT_TYPE_ENUM, offsetof(MktannOptions, fastscan)},
+			 offsetof(PrismOptions, centroid_compression)},
+			{"fastscan", RELOPT_TYPE_ENUM, offsetof(PrismOptions, fastscan)},
 			{"centroid_fastscan",
 			 RELOPT_TYPE_ENUM,
-			 offsetof(MktannOptions, centroid_fastscan)},
+			 offsetof(PrismOptions, centroid_fastscan)},
 	};
 	return (bytea *)build_reloptions(
 			reloptions,
 			validate,
-			mktann_relopt_kind,
-			sizeof(MktannOptions),
+			prism_relopt_kind,
+			sizeof(PrismOptions),
 			tab,
 			lengthof(tab));
 }
 
 static bool
-mktann_validate(Oid opclassoid)
+prism_validate(Oid opclassoid)
 {
 	return true;
 }
@@ -543,7 +543,7 @@ mktann_validate(Oid opclassoid)
  * ---------------------------------------------------------------- */
 
 Datum
-mktann_handler(PG_FUNCTION_ARGS)
+prism_handler(PG_FUNCTION_ARGS)
 {
 	IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
 
@@ -574,31 +574,31 @@ mktann_handler(PG_FUNCTION_ARGS)
 	amroutine->amkeytype			   = InvalidOid;
 
 	/* Build callbacks */
-	amroutine->ambuild			= mktann_build;
-	amroutine->ambuildempty		= mktann_buildempty;
-	amroutine->ambuildphasename = mktann_buildphasename;
+	amroutine->ambuild			= prism_build;
+	amroutine->ambuildempty		= prism_buildempty;
+	amroutine->ambuildphasename = prism_buildphasename;
 
 	/* Insert / maintenance */
-	amroutine->aminsert		   = mktann_insert;
+	amroutine->aminsert		   = prism_insert;
 	amroutine->aminsertcleanup = NULL;
-	amroutine->ambulkdelete	   = mktann_bulkdelete;
-	amroutine->amvacuumcleanup = mktann_vacuumcleanup;
+	amroutine->ambulkdelete	   = prism_bulkdelete;
+	amroutine->amvacuumcleanup = prism_vacuumcleanup;
 
 	/* Cost estimation / validation */
 	amroutine->amcanreturn	   = NULL;
-	amroutine->amcostestimate  = mktann_costestimate;
+	amroutine->amcostestimate  = prism_costestimate;
 	amroutine->amgettreeheight = NULL;
-	amroutine->amoptions	   = mktann_options;
+	amroutine->amoptions	   = prism_options;
 	amroutine->amproperty	   = NULL;
-	amroutine->amvalidate	   = mktann_validate;
+	amroutine->amvalidate	   = prism_validate;
 	amroutine->amadjustmembers = NULL;
 
 	/* Scan callbacks */
-	amroutine->ambeginscan = mktann_beginscan;
-	amroutine->amrescan	   = mktann_rescan;
-	amroutine->amgettuple  = mktann_gettuple;
+	amroutine->ambeginscan = prism_beginscan;
+	amroutine->amrescan	   = prism_rescan;
+	amroutine->amgettuple  = prism_gettuple;
 	amroutine->amgetbitmap = NULL;
-	amroutine->amendscan   = mktann_endscan;
+	amroutine->amendscan   = prism_endscan;
 	amroutine->ammarkpos   = NULL;
 	amroutine->amrestrpos  = NULL;
 

@@ -8,7 +8,7 @@ injection_points_attach
 
 step b_parallel: 
     SET max_parallel_maintenance_workers = 2;
-    CREATE INDEX i_par ON emb USING mktann (v);
+    CREATE INDEX i_par ON emb USING prism (v);
  <waiting ...>
 step w_phase: 
     SELECT phase FROM pg_stat_progress_create_index
@@ -19,7 +19,7 @@ phase
 building index: scanning table (parallel)
 (1 row)
 
-step w_wakeup: SELECT injection_points_wakeup('mktann-build-load');
+step w_wakeup: SELECT injection_points_wakeup('prism-build-load');
 injection_points_wakeup
 -----------------------
                        
@@ -36,7 +36,7 @@ injection_points_attach
 
 step b_serial: 
     SET max_parallel_maintenance_workers = 0;
-    CREATE INDEX i_ser ON emb USING mktann (v);
+    CREATE INDEX i_ser ON emb USING prism (v);
  <waiting ...>
 step w_phase: 
     SELECT phase FROM pg_stat_progress_create_index
@@ -47,7 +47,7 @@ phase
 building index: scanning table
 (1 row)
 
-step w_wakeup: SELECT injection_points_wakeup('mktann-build-load');
+step w_wakeup: SELECT injection_points_wakeup('prism-build-load');
 injection_points_wakeup
 -----------------------
                        

@@ -6,14 +6,14 @@ injection_points_attach
                        
 (1 row)
 
-s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
-s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
-s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
-s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
-s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
-s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
-s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
-s: NOTICE:  notice triggered for injection point mktann-insert-force-reroute
+s: NOTICE:  notice triggered for injection point prism-insert-force-reroute
+s: NOTICE:  notice triggered for injection point prism-insert-force-reroute
+s: NOTICE:  notice triggered for injection point prism-insert-force-reroute
+s: NOTICE:  notice triggered for injection point prism-insert-force-reroute
+s: NOTICE:  notice triggered for injection point prism-insert-force-reroute
+s: NOTICE:  notice triggered for injection point prism-insert-force-reroute
+s: NOTICE:  notice triggered for injection point prism-insert-force-reroute
+s: NOTICE:  notice triggered for injection point prism-insert-force-reroute
 step s_insert: INSERT INTO ir VALUES (1000, '[1,0,0]');
 ERROR:  insert into index "ir_idx" gave way to concurrent maintenance 8 times
 step s_rows: SELECT count(*) AS rows FROM ir WHERE id = 1000;

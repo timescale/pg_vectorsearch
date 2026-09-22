@@ -3,7 +3,7 @@ Parsed test spec with 3 sessions
 starting permutation: w_ins b_create w_commit c_chk
 step w_ins: INSERT INTO bld VALUES (1001, '[100,0,0]');
 step b_create: 
-    CREATE INDEX bld_idx ON bld USING mktann (v) WITH (nlist = 4);
+    CREATE INDEX bld_idx ON bld USING prism (v) WITH (nlist = 4);
  <waiting ...>
 step w_commit: COMMIT;
 step b_create: <... completed>
@@ -20,7 +20,7 @@ found
 starting permutation: w_ins b_create w_abort c_chk
 step w_ins: INSERT INTO bld VALUES (1001, '[100,0,0]');
 step b_create: 
-    CREATE INDEX bld_idx ON bld USING mktann (v) WITH (nlist = 4);
+    CREATE INDEX bld_idx ON bld USING prism (v) WITH (nlist = 4);
  <waiting ...>
 step w_abort: ROLLBACK;
 step b_create: <... completed>
@@ -37,7 +37,7 @@ found
 starting permutation: b_begin b_create w_ins b_commit w_commit c_chk
 step b_begin: BEGIN;
 step b_create: 
-    CREATE INDEX bld_idx ON bld USING mktann (v) WITH (nlist = 4);
+    CREATE INDEX bld_idx ON bld USING prism (v) WITH (nlist = 4);
 
 step w_ins: INSERT INTO bld VALUES (1001, '[100,0,0]'); <waiting ...>
 step b_commit: COMMIT;

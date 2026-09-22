@@ -1,5 +1,5 @@
 /*
- * build.c - Index build for mktann
+ * build.c - Index build for prism
  *
  * Serial build phases (do_serial_build; the parallel shape lives in
  * parallel_build_leader.c and falls back here when no workers launch):
@@ -10,7 +10,7 @@
  *   4. Pre-extend the relation for the centroid pages + posting heads
  *   5. Routing-tree WRITE pass: replay the recorded nodes and stream
  *      every centroid page and posting-head page (pt_centroid resident)
- *   6. Optional leaf refinement (mkt.leaf_refine_threshold) re-centers
+ *   6. Optional leaf refinement (prism.leaf_refine_threshold) re-centers
  *      the head encode references from the full table
  *   7. Single heap scan: route each row page-backed (the same
  *      mkt_query_route the query/insert use) into the cluster-keyed sort,
@@ -66,13 +66,13 @@
 #include "types/vec32.h"
 
 /* ----------------------------------------------------------------
- * Build state (MktannBuildParams is in build.h, shared with the
+ * Build state (PrismBuildParams is in build.h, shared with the
  * parallel leader)
  * ---------------------------------------------------------------- */
 
-typedef struct MktannBuildState
+typedef struct PrismBuildState
 {
-	MktannBuildParams params;
+	PrismBuildParams params;
 
 	double indtuples;  /* total count */
 	double soar_dupes; /* replicated SOAR vectors */
@@ -125,7 +125,7 @@ typedef struct MktannBuildState
 	 * that is reset after every tuple.
 	 */
 	Vec32Access input;
-} MktannBuildState;
+} PrismBuildState;
 
 /* ----------------------------------------------------------------
  * Helpers
@@ -144,7 +144,7 @@ sample_callback(
 		bool		tuple_is_alive,
 		void	   *state)
 {
-	MktannBuildState *bs = (MktannBuildState *)state;
+	PrismBuildState *bs = (PrismBuildState *)state;
 
 	(void)index;
 	(void)tid;
@@ -187,7 +187,7 @@ sample_callback(
 }
 
 static void
-sample_rows(MktannBuildState *bs)
+sample_rows(PrismBuildState *bs)
 {
 	BlockNumber		 totalblocks = RelationGetNumberOfBlocks(bs->heap);
 	BlockSamplerData bsampler;
@@ -234,7 +234,7 @@ build_callback(
 		bool		tuple_is_alive,
 		void	   *state)
 {
-	MktannBuildState *bs = (MktannBuildState *)state;
+	PrismBuildState *bs = (PrismBuildState *)state;
 
 	(void)index;
 	(void)tuple_is_alive;
@@ -286,7 +286,7 @@ write_meta_page(
 
 	PageInit(page, BLCKSZ, MKT_META_SIZE(dim));
 
-	MktannMetaPage *meta  = (MktannMetaPage *)PageGetSpecialPointer(page);
+	PrismMetaPage *meta	  = (PrismMetaPage *)PageGetSpecialPointer(page);
 	meta->magic			  = MKT_META_MAGIC;
 	meta->dim			  = dim;
 	meta->nlevels		  = nlevels;
@@ -301,7 +301,7 @@ write_meta_page(
 	meta->reserved		  = 0;
 	meta->rabitq_seed	  = rabitq_seed;
 
-	memcpy(mktann_meta_global_mean(meta), global_mean, dim * sizeof(float));
+	memcpy(prism_meta_global_mean(meta), global_mean, dim * sizeof(float));
 
 	mkt_storage_commit_page(storage, 0);
 }
@@ -311,7 +311,7 @@ write_meta_page(
  * ---------------------------------------------------------------- */
 
 static DistanceMetric
-mktann_get_metric(Relation index)
+prism_get_metric(Relation index)
 {
 	FmgrInfo *procinfo = index_getprocinfo(index, 1, MKT_ANN_METRIC_PROC);
 	return (DistanceMetric)DatumGetInt32(
@@ -319,13 +319,13 @@ mktann_get_metric(Relation index)
 }
 
 static MktCentroidFormat
-mktann_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
+prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 {
-	MktannOptions *opts = (MktannOptions *)index->rd_options;
-	int			   cc	= (opts != NULL) ? opts->centroid_compression
-										 : MKT_CENTROID_COMPRESSION_AUTO;
-	int			   cfs	= (opts != NULL) ? opts->centroid_fastscan
-										 : MKT_FASTSCAN_MODE_AUTO;
+	PrismOptions *opts = (PrismOptions *)index->rd_options;
+	int			  cc   = (opts != NULL) ? opts->centroid_compression
+										: MKT_CENTROID_COMPRESSION_AUTO;
+	int			  cfs  = (opts != NULL) ? opts->centroid_fastscan
+										: MKT_FASTSCAN_MODE_AUTO;
 
 	/*
 	 * RaBitQ centroids estimate L2 distance, which routes correctly for
@@ -400,9 +400,9 @@ mktann_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
  * where a group fits; ON errors where it does not.
  */
 static bool
-mktann_resolve_fastscan(Relation index, Dimension dim)
+prism_resolve_fastscan(Relation index, Dimension dim)
 {
-	MktannOptions *opts = (MktannOptions *)index->rd_options;
+	PrismOptions *opts = (PrismOptions *)index->rd_options;
 	int	 fs	  = (opts != NULL) ? opts->fastscan : MKT_FASTSCAN_MODE_AUTO;
 	bool fits = mkt_fastscan_max_groups(dim, true) > 0;
 
@@ -423,9 +423,9 @@ mktann_resolve_fastscan(Relation index, Dimension dim)
 }
 
 static uint32_t
-mktann_get_fan_out(Relation index)
+prism_get_fan_out(Relation index)
 {
-	MktannOptions *opts = (MktannOptions *)index->rd_options;
+	PrismOptions *opts = (PrismOptions *)index->rd_options;
 	if (opts != NULL && opts->fan_out >= MKT_ANN_MIN_FAN_OUT)
 		return (uint32_t)opts->fan_out;
 	return MKT_ANN_DEFAULT_FAN_OUT;
@@ -433,7 +433,7 @@ mktann_get_fan_out(Relation index)
 
 static void
 resolve_build_params(
-		Relation heap, Relation index, MktannBuildParams *p, double *est_rows)
+		Relation heap, Relation index, PrismBuildParams *p, double *est_rows)
 {
 	Dimension dim = (Dimension)TupleDescAttr(index->rd_att, 0)->atttypmod;
 	if (dim == 0)
@@ -448,23 +448,23 @@ resolve_build_params(
 	if (dim > MKT_INDEX_MAX_DIM)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("mktann indexes support at most %d dimensions",
+				 errmsg("prism indexes support at most %d dimensions",
 						MKT_INDEX_MAX_DIM)));
 
 	p->dim			   = dim;
-	p->metric		   = mktann_get_metric(index);
-	p->centroid_format = mktann_resolve_format(index, p->metric, dim);
-	p->fan_out		   = mktann_get_fan_out(index);
+	p->metric		   = prism_get_metric(index);
+	p->centroid_format = prism_resolve_format(index, p->metric, dim);
+	p->fan_out		   = prism_get_fan_out(index);
 
 	/* nlist: use relopt if set, otherwise auto from sqrt(reltuples).
 	 * The row estimate is computed once and surfaced to the caller (the
 	 * progress-reporting total needs it too): the never-analyzed
 	 * fallback samples heap pages, and sampling twice would double that
 	 * cost and could even disagree with itself on a growing heap. */
-	MktannOptions *opts		 = (MktannOptions *)index->rd_options;
-	uint32_t	   nlist_opt = (opts != NULL) ? (uint32_t)opts->nlist : 0;
+	PrismOptions *opts		= (PrismOptions *)index->rd_options;
+	uint32_t	  nlist_opt = (opts != NULL) ? (uint32_t)opts->nlist : 0;
 
-	*est_rows = mktann_estimate_heap_tuples(heap);
+	*est_rows = prism_estimate_heap_tuples(heap);
 
 	if (nlist_opt > 0)
 	{
@@ -488,7 +488,7 @@ resolve_build_params(
 										 : MKT_ANN_DEFAULT_SOAR_LAMBDA;
 	p->boundary_epsilon = (opts != NULL) ? opts->boundary_epsilon
 										 : MKT_ANN_DEFAULT_BOUNDARY_EPSILON;
-	p->fastscan			= mktann_resolve_fastscan(index, dim);
+	p->fastscan			= prism_resolve_fastscan(index, dim);
 
 	/* The exact-centroid collection size is known from the resolved
 	 * shape alone, so an under-budgeted maintenance_work_mem can be
@@ -534,7 +534,7 @@ resolve_build_params(
  * inherits the error, sharding the index into starved clusters).
  */
 double
-mktann_estimate_heap_tuples(Relation heap)
+prism_estimate_heap_tuples(Relation heap)
 {
 	if (heap->rd_rel->reltuples > 0)
 		return heap->rd_rel->reltuples;
@@ -585,7 +585,7 @@ mktann_estimate_heap_tuples(Relation heap)
  */
 static void
 sample_for_build(
-		MktannBuildState *bs, uint32_t *out_nlist, bool *out_subsampled)
+		PrismBuildState *bs, uint32_t *out_nlist, bool *out_subsampled)
 {
 	Dimension dim	= bs->params.dim;
 	uint32_t  nlist = bs->params.nlist;
@@ -769,11 +769,11 @@ refine_head_cb(
 
 static void
 serial_refine_heads(
-		MktannBuildState *bs,
-		MktHeadWriteCtx	 *headctx,
-		MktQueryState	 *qs,
-		BlockNumber		  first_posting,
-		uint32_t		  nlist)
+		PrismBuildState *bs,
+		MktHeadWriteCtx *headctx,
+		MktQueryState	*qs,
+		BlockNumber		 first_posting,
+		uint32_t		 nlist)
 {
 	Dimension dim = bs->params.dim;
 
@@ -842,18 +842,18 @@ serial_refine_heads(
  */
 static void
 do_serial_build(
-		MktannBuildState *bs,
-		MktStorage		 *storage,
-		uint64_t		  rabitq_seed,
-		uint32_t		 *out_nlist,
-		uint8_t			 *out_tree_nlevels,
-		float			**out_global_mean,
-		double			 *out_heap_tuples,
-		double			 *out_indtuples,
-		double			 *out_soar_dupes)
+		PrismBuildState *bs,
+		MktStorage		*storage,
+		uint64_t		 rabitq_seed,
+		uint32_t		*out_nlist,
+		uint8_t			*out_tree_nlevels,
+		float		   **out_global_mean,
+		double			*out_heap_tuples,
+		double			*out_indtuples,
+		double			*out_soar_dupes)
 {
-	const MktannBuildParams *p	 = &bs->params;
-	Dimension				 dim = p->dim;
+	const PrismBuildParams *p	= &bs->params;
+	Dimension				dim = p->dim;
 
 	*out_nlist		  = 0;
 	*out_tree_nlevels = 0;
@@ -1008,7 +1008,7 @@ do_serial_build(
 			root,
 			p->metric,
 			p->centroid_format,
-			mkt_fastscan_bits,
+			prism_fastscan_bits,
 			MKT_BUILD_CENTROID_ERROR_SCALE,
 			MKT_BUILD_CENTROID_BEAM_SCALE,
 			bs->params.fan_out,
@@ -1029,7 +1029,7 @@ do_serial_build(
 
 	/*
 	 * When the sample was budget-limited AND the leaves are sample-thin
-	 * (below mkt.leaf_refine_threshold samples per leaf -- a leaf's encode
+	 * (below prism.leaf_refine_threshold samples per leaf -- a leaf's encode
 	 * reference is a sample mean whose error shrinks with its count, so
 	 * well-fed leaves gain nothing from the extra scan), refine each leaf's
 	 * encode reference on the full table (page-backed, bounded) before the
@@ -1054,7 +1054,7 @@ do_serial_build(
 		INSTR_TIME_SET_CURRENT(t_ref_end);
 		INSTR_TIME_SUBTRACT(t_ref_end, t_ref_start);
 		elog(LOG,
-			 "mktann: page-backed leaf refinement %.1fms -- structure from a "
+			 "prism: page-backed leaf refinement %.1fms -- structure from a "
 			 "%d-sample subsample, %u leaf encode references refined on the "
 			 "full "
 			 "table",
@@ -1096,7 +1096,7 @@ do_serial_build(
 			p->soar_lambda,
 			p->boundary_epsilon);
 
-	/* Reports the scan phase and fires the "mktann-build-load" test hook (see
+	/* Reports the scan phase and fires the "prism-build-load" test hook (see
 	 * the seam): lets an isolation test observe the in-progress serial build.
 	 */
 	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SCAN);
@@ -1142,7 +1142,7 @@ do_serial_build(
 		mkt_exact_centroid_collector_cleanup(collector);
 
 	elog(LOG,
-		 "mktann: serial build scan %.1fms, "
+		 "prism: serial build scan %.1fms, "
 		 "%.0f tuples, %.0f soar_dupes, %u clusters",
 		 INSTR_TIME_GET_MILLISEC(t_serial_scan),
 		 bs->indtuples,
@@ -1179,7 +1179,7 @@ do_serial_build(
  * ---------------------------------------------------------------- */
 
 IndexBuildResult *
-mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
+prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 {
 	/*
 	 * Refuse expression indexes.
@@ -1200,30 +1200,30 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	if (index->rd_index->indkey.values[0] == InvalidAttrNumber)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("mktann indexes do not support index expressions"),
+				 errmsg("prism indexes do not support index expressions"),
 				 errhint("Index the column directly, or materialize the "
 						 "expression into a column and index that.")));
 
 	MemoryContext caller_ctx = CurrentMemoryContext;
 	MemoryContext build_ctx	 = AllocSetContextCreate(
-			 CurrentMemoryContext, "mktann build", ALLOCSET_DEFAULT_SIZES);
+			 CurrentMemoryContext, "prism build", ALLOCSET_DEFAULT_SIZES);
 	MemoryContextSwitchTo(build_ctx);
 
 	/* 1. Initialize build state and resolve parameters */
-	MktannBuildState bs = {0};
-	bs.heap				= heap;
-	bs.index			= index;
-	bs.index_info		= index_info;
-	bs.build_ctx		= build_ctx;
-	bs.tmp_ctx			= AllocSetContextCreate(
-			 build_ctx, "mktann build tuple", ALLOCSET_DEFAULT_SIZES);
+	PrismBuildState bs = {0};
+	bs.heap			   = heap;
+	bs.index		   = index;
+	bs.index_info	   = index_info;
+	bs.build_ctx	   = build_ctx;
+	bs.tmp_ctx		   = AllocSetContextCreate(
+			build_ctx, "prism build tuple", ALLOCSET_DEFAULT_SIZES);
 
 	double est_rows;
 	resolve_build_params(heap, index, &bs.params, &est_rows);
 
-	const MktannBuildParams *p			 = &bs.params;
-	Dimension				 dim		 = p->dim;
-	uint64_t				 rabitq_seed = MKT_RABITQ_BUILD_SEED;
+	const PrismBuildParams *p			= &bs.params;
+	Dimension				dim			= p->dim;
+	uint64_t				rabitq_seed = MKT_RABITQ_BUILD_SEED;
 
 	/* Resolved once, directly -- no metadata page exists yet for the
 	 * per-backend cache to read. The per-tuple callbacks follow the pointer.
@@ -1233,22 +1233,22 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	/*
 	 * Build introspection: one reporting context the serial and parallel paths
 	 * share, so pg_stat_progress_create_index advances through the same phases
-	 * either way and (when mkt.log_build_stats is on) per-phase stats land in
-	 * the server log.
+	 * either way and (when prism.log_build_stats is on) per-phase stats land
+	 * in the server log.
 	 */
 	MktBuildStats	 stats = {0};
 	MktBuildProgress prog;
 	mkt_build_progress_begin(
 			&prog,
 			index_info->ii_ParallelWorkers > 0,
-			mkt_log_build_stats,
+			prism_log_build_stats,
 			build_ctx,
 			&stats,
 			est_rows);
 	bs.prog = &prog;
 
-	MktannStorage storage;
-	mktann_storage_init(&storage, index, NULL, p->metric);
+	MktPgStorage storage;
+	mkt_pg_storage_init(&storage, index, NULL, p->metric);
 	storage.build_mode = true;
 
 	double heap_tuples = 0;
@@ -1398,7 +1398,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 	if (soar_dupes > 0)
 		elog(LOG,
-			 "mktann: replicated %.0f vectors "
+			 "prism: replicated %.0f vectors "
 			 "(%.1f%% of %.0f, lambda=%.4g)",
 			 soar_dupes,
 			 100.0 * soar_dupes / indtuples,
@@ -1443,11 +1443,11 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 		 * skip this: emitting WAL for them is wasted volume, and doing so
 		 * against a session-local temp relfilenode is something no core AM
 		 * does. (Unlogged tables never reach this path -- their build is
-		 * rejected up front in mktann_buildempty.)
+		 * rejected up front in prism_buildempty.)
 		 *
 		 * page_std = false, and it has to be. The flag promises the standard
 		 * page layout, which lets the full-page image omit everything between
-		 * pd_lower and pd_upper as free space. meerkat keeps its entries there
+		 * pd_lower and pd_upper as free space. prism keeps its entries there
 		 * -- pd_lower stays at SizeOfPageHeaderData and pd_upper at pd_special
 		 * on a posting page -- so a standard image would carry the header and
 		 * the opaque and nothing else. The primary would be fine, since its
@@ -1485,7 +1485,7 @@ mktann_build(Relation heap, Relation index, struct IndexInfo *index_info)
 }
 
 char *
-mktann_buildphasename(int64 phasenum)
+prism_buildphasename(int64 phasenum)
 {
 	/* Single source of truth for the phase names (index/build_progress.c),
 	 * shared with the build logs so the two never drift. */

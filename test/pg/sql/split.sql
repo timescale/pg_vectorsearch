@@ -1,4 +1,4 @@
--- Incremental posting-list split: mkt.rebalance / mkt.split_posting_list
+-- Incremental posting-list split: prism.rebalance / prism.split_posting_list
 --
 -- A single-partition index is split into two lists; index-scan results must
 -- match the sequential-scan ground truth both before and after the split.
@@ -15,10 +15,10 @@ INSERT INTO split_test (v)
 
 -- Single flat partition with RaBitQ centroid pages (no fastscan packing),
 -- which is the shape the phase-1 split supports.
-CREATE INDEX split_idx ON split_test USING mktann (v)
+CREATE INDEX split_idx ON split_test USING prism (v)
     WITH (nlist = 1, centroid_fastscan = off);
 
-SET mkt.nprobe = 10;
+SET prism.nprobe = 10;
 
 -- Ground truth (sequential scan) for a query in the first cluster.
 SET enable_indexscan = off;
@@ -45,7 +45,7 @@ SELECT count(*) AS before_matches FROM truth t JOIN before b USING (id);
 -- which 24 entries clear, and the width at round(24/10) = 2 -- so one bisection
 -- into two ~12-entry lists, each resting near the target with room to grow back
 -- to the trigger. rebalance is a procedure and reports the count via NOTICE.
-CALL mkt.rebalance('split_idx', 10);
+CALL prism.rebalance('split_idx', 10);
 
 -- The metapage's centroid page count is maintained, not derived from the
 -- block layout: a split with no room on a level-0 centroid page chains the
@@ -57,15 +57,15 @@ CALL mkt.rebalance('split_idx', 10);
 --
 -- These lists are far too small to overflow a centroid page, so the count
 -- does not move here; the point is that it still agrees.
-SELECT (SELECT setting::int FROM mkt.index_settings('split_idx')
+SELECT (SELECT setting::int FROM prism.index_settings('split_idx')
           WHERE name = 'centroid_pages')
-     = (SELECT count(DISTINCT blkno) FROM mkt.centroid_pages('split_idx'))
+     = (SELECT count(DISTINCT blkno) FROM prism.centroid_pages('split_idx'))
     AS centroid_pages_matches_the_tree;
 
 -- The new lists are written in the index's posting format (fastscan here), so a
 -- split re-optimizes the data rather than leaving AoS lists behind.
 SELECT bool_and(format = 'fastscan') AS new_lists_fastscan
-    FROM mkt.posting_pages('split_idx') WHERE is_first;
+    FROM prism.posting_pages('split_idx') WHERE is_first;
 
 -- Index results after the split must still match the ground truth.
 SET enable_seqscan = off;
@@ -82,15 +82,15 @@ SELECT count(*) AS after_matches FROM truth t JOIN after a USING (id);
 -- is tombstoned yet. (Physical reclaim happens on a later maintenance pass once
 -- the horizon advances; that timing is snapshot-dependent, so not asserted.)
 SELECT count(*) AS tombstoned_before_reclaim
-    FROM mkt.posting_pages('split_idx') WHERE tombstoned;
+    FROM prism.posting_pages('split_idx') WHERE tombstoned;
 
 -- A second pass splits nothing: both lists sit inside the operating band, well
 -- under the trigger. Pinning the trigger at the target instead would re-split
 -- them here, which is the thrash the band exists to prevent.
-CALL mkt.rebalance('split_idx', 10);
+CALL prism.rebalance('split_idx', 10);
 
 -- split_posting_list rejects a non-index argument.
-CALL mkt.split_posting_list('split_test', 1);
+CALL prism.split_posting_list('split_test', 1);
 
 -- The width is derived from the target, so a list far above it is right-sized
 -- in one pass instead of bisected repeatedly. 60 entries against a target of 10
@@ -99,7 +99,7 @@ CALL mkt.split_posting_list('split_test', 1);
 CREATE TABLE split_wide (id serial, v vec32(4));
 INSERT INTO split_wide (v)
     SELECT ARRAY[i::real, 0, 0, 0]::vec32(4) FROM generate_series(1, 60) i;
-CREATE INDEX split_wide_idx ON split_wide USING mktann (v)
+CREATE INDEX split_wide_idx ON split_wide USING prism (v)
     WITH (nlist = 1, centroid_fastscan = off);
 
 SET enable_indexscan = off;
@@ -107,10 +107,10 @@ CREATE TEMP TABLE wide_truth AS
     SELECT id FROM split_wide ORDER BY v <-> '[1,0,0,0]'::vec32(4) LIMIT 10;
 RESET enable_indexscan;
 
-CALL mkt.rebalance('split_wide_idx', 10);
+CALL prism.rebalance('split_wide_idx', 10);
 SELECT setting AS nlist_after_split
-    FROM mkt.index_settings('split_wide_idx') WHERE name = 'nlist';
-CALL mkt.rebalance('split_wide_idx', 10);
+    FROM prism.index_settings('split_wide_idx') WHERE name = 'nlist';
+CALL prism.rebalance('split_wide_idx', 10);
 
 -- Results still match the sequential-scan ground truth after a 6-way split.
 SET enable_seqscan = off;
@@ -122,28 +122,28 @@ SELECT count(*) AS wide_after_matches
     FROM wide_truth t JOIN wide_after a USING (id);
 
 -- Same invariant after a 6-way split on the wider index.
-SELECT (SELECT setting::int FROM mkt.index_settings('split_wide_idx')
+SELECT (SELECT setting::int FROM prism.index_settings('split_wide_idx')
           WHERE name = 'centroid_pages')
      = (SELECT count(DISTINCT blkno)
-          FROM mkt.centroid_pages('split_wide_idx'))
+          FROM prism.centroid_pages('split_wide_idx'))
     AS wide_centroid_pages_matches_the_tree;
 
 -- With no target the index supplies one: nlist was set explicitly at build
 -- time, so maintenance honours it rather than overriding it with its own
 -- automatic value. 60 rows over nlist = 1 is a target of 60, whose trigger of
 -- 120 no list reaches -- so a bare CALL splits nothing here.
-CALL mkt.rebalance('split_wide_idx');
+CALL prism.rebalance('split_wide_idx');
 
 -- A target must be positive when given at all.
-CALL mkt.rebalance('split_wide_idx', 0);
+CALL prism.rebalance('split_wide_idx', 0);
 
 -- A procedure cannot be STRICT, so null arguments reach the implementation and
 -- have to be rejected by name -- otherwise a null index reads as OID 0 and
 -- reports "could not open relation with OID 0", describing the consequence
 -- rather than the mistake. A null target is the exception: it means "derive it".
-CALL mkt.rebalance(NULL, 10);
-CALL mkt.split_posting_list(NULL, 1);
-CALL mkt.split_posting_list('split_wide_idx', NULL);
+CALL prism.rebalance(NULL, 10);
+CALL prism.split_posting_list(NULL, 1);
+CALL prism.split_posting_list('split_wide_idx', NULL);
 
 -- A split sizes its clustering sample from maintenance_work_mem, so the range
 -- of that setting is part of the interface. A large one must not turn into a
@@ -152,14 +152,14 @@ CALL mkt.split_posting_list('split_wide_idx', NULL);
 -- splitting stops working. Setting it here costs nothing -- the sample is sized
 -- to the list, which is tiny.
 SET maintenance_work_mem = '2GB';
-CALL mkt.rebalance('split_wide_idx');
+CALL prism.rebalance('split_wide_idx');
 
 -- The manual entry point names a head block directly: CALL takes no subquery,
 -- so the block number is a literal -- and the row above it is what proves the
 -- literal still points at a head.
-SELECT blkno AS head_to_split FROM mkt.posting_pages('split_wide_idx')
+SELECT blkno AS head_to_split FROM prism.posting_pages('split_wide_idx')
     WHERE is_first ORDER BY blkno LIMIT 1;
-CALL mkt.split_posting_list('split_wide_idx', 3);
+CALL prism.split_posting_list('split_wide_idx', 3);
 RESET maintenance_work_mem;
 
 -- A split with no room left on the level-0 centroid page extends the
@@ -175,29 +175,29 @@ INSERT INTO split_append (v)
     SELECT ARRAY(SELECT ((i * 7 + g) % 97)::real
                  FROM generate_series(1, 1024) g)::vec32(1024)
     FROM generate_series(1, 600) i;
-CREATE INDEX split_append_idx ON split_append USING mktann (v)
+CREATE INDEX split_append_idx ON split_append USING prism (v)
     WITH (nlist = 2, centroid_fastscan = off, centroid_compression = on);
 
 SELECT setting AS centroid_pages_before
-    FROM mkt.index_settings('split_append_idx') WHERE name = 'centroid_pages';
+    FROM prism.index_settings('split_append_idx') WHERE name = 'centroid_pages';
 
-CALL mkt.rebalance('split_append_idx', 8);
+CALL prism.rebalance('split_append_idx', 8);
 
 SELECT setting AS centroid_pages_after
-    FROM mkt.index_settings('split_append_idx') WHERE name = 'centroid_pages';
+    FROM prism.index_settings('split_append_idx') WHERE name = 'centroid_pages';
 
 -- The recorded count still matches what walking the tree finds, and the
 -- pages are no longer contiguous -- so the count was maintained, not
 -- inferred.
-SELECT (SELECT setting::int FROM mkt.index_settings('split_append_idx')
+SELECT (SELECT setting::int FROM prism.index_settings('split_append_idx')
           WHERE name = 'centroid_pages')
      = (SELECT count(DISTINCT blkno)
-          FROM mkt.centroid_pages('split_append_idx'))
+          FROM prism.centroid_pages('split_append_idx'))
     AS appended_count_matches_the_tree;
 
 SELECT max(blkno) - min(blkno) + 1 > count(DISTINCT blkno)
     AS centroid_pages_are_discontiguous
-    FROM mkt.centroid_pages('split_append_idx');
+    FROM prism.centroid_pages('split_append_idx');
 
 -- The other end: a budget too small to pay for even two partitions' worth of
 -- sample is refused, rather than quietly allocating the minimum anyway. Wide
@@ -208,10 +208,10 @@ CREATE TABLE split_wide_dim (id serial, v vec32(1024));
 INSERT INTO split_wide_dim (v)
     SELECT ARRAY(SELECT (i % 7)::real FROM generate_series(1, 1024))::vec32(1024)
     FROM generate_series(1, 4) i;
-CREATE INDEX split_wide_dim_idx ON split_wide_dim USING mktann (v)
+CREATE INDEX split_wide_dim_idx ON split_wide_dim USING prism (v)
     WITH (nlist = 1, centroid_fastscan = off);
 SET maintenance_work_mem = '1MB';
-CALL mkt.rebalance('split_wide_dim_idx');
+CALL prism.rebalance('split_wide_dim_idx');
 RESET maintenance_work_mem;
 DROP TABLE split_wide_dim;
 
@@ -227,7 +227,7 @@ INSERT INTO split_half (v)
 INSERT INTO split_half (v)
     SELECT ARRAY[10 + (i % 2)::real,10,10,10,10,10,10,10]::vec16(8)
     FROM generate_series(1, 30) i;
-CREATE INDEX split_half_idx ON split_half USING mktann (v vec16_l2_ops)
+CREATE INDEX split_half_idx ON split_half USING prism (v vec16_l2_ops)
     WITH (nlist = 1, centroid_fastscan = off);
 
 SET enable_indexscan = off;
@@ -236,16 +236,16 @@ CREATE TEMP TABLE half_truth AS
     ORDER BY v <-> '[0,0,0,0,0,0,0,0]'::vec16(8) LIMIT 5;
 RESET enable_indexscan;
 
-CALL mkt.rebalance('split_half_idx', 10);
+CALL prism.rebalance('split_half_idx', 10);
 
 SET enable_seqscan = off;
-SET mkt.nprobe = 16;
+SET prism.nprobe = 16;
 SELECT count(*) AS half_matches_after_split
     FROM half_truth t JOIN (
         SELECT id FROM split_half
         ORDER BY v <-> '[0,0,0,0,0,0,0,0]'::vec16(8) LIMIT 5) a USING (id);
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 DROP TABLE split_half;
 
 -- Neither procedure runs inside a caller's transaction. They reorganize the
@@ -254,14 +254,14 @@ DROP TABLE split_half;
 -- per list, which is where this is going, cannot commit at all from inside
 -- someone else's transaction.
 BEGIN;
-CALL mkt.rebalance('split_wide_idx');
+CALL prism.rebalance('split_wide_idx');
 ROLLBACK;
 
 -- A block that opens a subtransaction is a caller's transaction by the same
 -- reasoning, and is refused for the same reason.
 DO $$
 BEGIN
-    CALL mkt.rebalance('split_wide_idx');
+    CALL prism.rebalance('split_wide_idx');
     RAISE NOTICE 'ran inside a subtransaction';
 EXCEPTION WHEN active_sql_transaction THEN
     RAISE NOTICE 'refused inside a subtransaction';
@@ -269,20 +269,25 @@ END $$;
 
 -- A plain top-level DO block is not: it can commit on its own behalf, so a
 -- procedure that manages transactions may run inside one.
-DO $$ BEGIN CALL mkt.rebalance('split_wide_idx'); END $$;
+DO $$ BEGIN CALL prism.rebalance('split_wide_idx'); END $$;
 
 -- Ownership gate: both mutating maintenance procedures require ownership of the
 -- underlying table, not merely SELECT, and the owner check runs before any
--- other validation. EXECUTE is granted to PUBLIC; USAGE on the mkt schema is
--- only needed to reach the procedures.
+-- other validation. EXECUTE is granted to PUBLIC; USAGE on prism is only
+-- needed to reach the procedures. USAGE on mkt is unrelated to those
+-- procedures, but is needed too: split_test/split_idx above were created
+-- unqualified while mkt led the search_path, so (as a superuser bypassing
+-- schema privilege checks) that is where they landed.
 CREATE ROLE regress_split_unpriv NOLOGIN;
+GRANT USAGE ON SCHEMA prism TO regress_split_unpriv;
 GRANT USAGE ON SCHEMA mkt TO regress_split_unpriv;
 GRANT SELECT ON split_test TO regress_split_unpriv;
 SET ROLE regress_split_unpriv;
-CALL mkt.split_posting_list('split_idx', 1);
-CALL mkt.rebalance('split_idx', 10);
+CALL prism.split_posting_list('split_idx', 1);
+CALL prism.rebalance('split_idx', 10);
 RESET ROLE;
 REVOKE SELECT ON split_test FROM regress_split_unpriv;
+REVOKE USAGE ON SCHEMA prism FROM regress_split_unpriv;
 REVOKE USAGE ON SCHEMA mkt FROM regress_split_unpriv;
 DROP ROLE regress_split_unpriv;
 
@@ -299,16 +304,16 @@ INSERT INTO split_shape (v)
                  (i % 79)::real]::vec32(4)
     FROM generate_series(1, 400) i;
 
-CREATE INDEX split_shape_fs ON split_shape USING mktann (v);
+CREATE INDEX split_shape_fs ON split_shape USING prism (v);
 SELECT setting AS centroid_format
-    FROM mkt.index_settings('split_shape_fs') WHERE name = 'centroid_format';
-CALL mkt.rebalance('split_shape_fs', 30);
+    FROM prism.index_settings('split_shape_fs') WHERE name = 'centroid_format';
+CALL prism.rebalance('split_shape_fs', 30);
 
-CREATE INDEX split_shape_deep ON split_shape USING mktann (v)
+CREATE INDEX split_shape_deep ON split_shape USING prism (v)
     WITH (centroid_fastscan = off, nlist = 64);
 SELECT setting AS nlevels
-    FROM mkt.index_settings('split_shape_deep') WHERE name = 'nlevels';
-CALL mkt.rebalance('split_shape_deep', 3);
+    FROM prism.index_settings('split_shape_deep') WHERE name = 'nlevels';
+CALL prism.rebalance('split_shape_deep', 3);
 
 DROP TABLE split_shape;
 
@@ -328,24 +333,24 @@ INSERT INTO split_many (v)
     SELECT ARRAY[(i % 97)::real, (i % 89)::real, (i % 83)::real,
                  (i % 79)::real]::vec32(4)
     FROM generate_series(1, 3000) i;
-CREATE INDEX split_many_idx ON split_many USING mktann (v)
+CREATE INDEX split_many_idx ON split_many USING prism (v)
     WITH (nlist = 1, centroid_fastscan = off);
 
-SET mkt.nprobe = 200;
+SET prism.nprobe = 200;
 SET enable_indexscan = off;
 CREATE TEMP TABLE truth_many AS
     SELECT id FROM split_many
     ORDER BY v <-> '[0,0,0,0]'::vec32(4) LIMIT 10;
 RESET enable_indexscan;
 
-CALL mkt.rebalance('split_many_idx', 500);
-CALL mkt.rebalance('split_many_idx', 100);
-CALL mkt.rebalance('split_many_idx', 30);
+CALL prism.rebalance('split_many_idx', 500);
+CALL prism.rebalance('split_many_idx', 100);
+CALL prism.rebalance('split_many_idx', 30);
 
 -- Every leaf still fits on the one level-0 page it was built on: entries are
 -- small at this dimension, so a page holds hundreds of them.
 SELECT count(*) > 40 AS many_leaves, count(DISTINCT blkno) = 1 AS one_page
-    FROM mkt.centroid_pages('split_many_idx');
+    FROM prism.centroid_pages('split_many_idx');
 
 -- ... and results still match the sequential-scan ground truth.
 SET enable_seqscan = off;
@@ -354,7 +359,7 @@ SELECT count(*) AS matches
           ORDER BY v <-> '[0,0,0,0]'::vec32(4) LIMIT 10) r
     JOIN truth_many USING (id);
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 DROP TABLE split_many;
 
 -- A list whose pages are not all in the same format, and what a split does
@@ -367,34 +372,34 @@ DROP TABLE split_many;
 CREATE TABLE split_drift (id int, v vec32(3));
 INSERT INTO split_drift SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 300) g;
-CREATE INDEX split_drift_idx ON split_drift USING mktann (v)
+CREATE INDEX split_drift_idx ON split_drift USING prism (v)
     WITH (nlist = 1, fastscan = on, centroid_fastscan = off);
 INSERT INTO split_drift SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(301, 600) g;
 
 SELECT string_agg(DISTINCT format, '+' ORDER BY format) AS formats_before
-    FROM mkt.posting_pages('split_drift_idx');
+    FROM prism.posting_pages('split_drift_idx');
 
 SET enable_indexscan = off;
 CREATE TEMP TABLE truth_drift AS
     SELECT id FROM split_drift ORDER BY v <-> '[1,0,0]'::vec32 LIMIT 10;
 RESET enable_indexscan;
 
-CALL mkt.rebalance('split_drift_idx', 60);
+CALL prism.rebalance('split_drift_idx', 60);
 
 -- Every page is fastscan again, and no entry was dropped on the way.
 SELECT string_agg(DISTINCT format, '+' ORDER BY format) AS formats_after,
        sum(entry_count) AS entries_after
-    FROM mkt.posting_pages('split_drift_idx');
+    FROM prism.posting_pages('split_drift_idx');
 
 SET enable_seqscan = off;
-SET mkt.nprobe = 10000;
+SET prism.nprobe = 10000;
 SELECT count(*) AS matches
     FROM (SELECT id FROM split_drift
           ORDER BY v <-> '[1,0,0]'::vec32 LIMIT 10) r
     JOIN truth_drift USING (id);
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 
 -- Reclaim of the chains a split retires. The split that retires a chain does
 -- not free it: a scan that read the old head before the flip may still be
@@ -402,8 +407,8 @@ RESET mkt.nprobe;
 -- and a later pass frees them. The count in the NOTICE is the only handle on
 -- that, so pin the sequence -- the pass that splits reclaims nothing, the
 -- next one reclaims what it retired, and a third finds nothing left.
-CALL mkt.rebalance('split_drift_idx', 60);
-CALL mkt.rebalance('split_drift_idx', 60);
+CALL prism.rebalance('split_drift_idx', 60);
+CALL prism.rebalance('split_drift_idx', 60);
 
 DROP TABLE split_drift;
 

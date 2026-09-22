@@ -40,7 +40,7 @@ if ($node->psql('postgres', 'CREATE EXTENSION injection_points') != 0)
 
 $node->safe_psql('postgres', 'CREATE EXTENSION meerkat');
 $node->safe_psql('postgres',
-	'ALTER DATABASE postgres SET search_path = mkt, public');
+	'ALTER DATABASE postgres SET search_path = mkt, prism, public');
 
 # Points spread along one axis: deterministic, and with enough structure that
 # clustering has something to find.
@@ -48,7 +48,7 @@ $node->safe_psql('postgres', <<"SQL");
 CREATE TABLE c (id int, v vec32(3));
 INSERT INTO c SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, $rows) g;
-CREATE INDEX c_idx ON c USING mktann (v)
+CREATE INDEX c_idx ON c USING prism (v)
     WITH (nlist = 1, centroid_fastscan = off);
 SQL
 
@@ -62,7 +62,7 @@ SQL
 
 my $reader = <<"SQL";
 SET enable_seqscan = off;
-SET mkt.nprobe = 10000;
+SET prism.nprobe = 10000;
 SELECT string_agg(id::text, ',' ORDER BY id) FROM (
     SELECT id FROM c ORDER BY v <-> '[1,0,0]'::vec32 LIMIT $k) s;
 SQL
@@ -82,7 +82,7 @@ is($node->safe_psql('postgres', $reader), $truth,
 # session-local: nothing else in this test splits, so the only session that
 # can reach the point is the one running the split.
 $node->safe_psql('postgres',
-	"SELECT injection_points_attach('mktann-split-before-flip', 'wait')");
+	"SELECT injection_points_attach('prism-split-before-flip', 'wait')");
 
 # Fire the split and do not wait for it -- an empty pattern returns as soon
 # as the query has been sent, leaving it parked on the injection point.
@@ -92,7 +92,7 @@ $bg->query_until(qr//, "CALL rebalance('c_idx', $target);\n");
 my $parked = $node->poll_query_until('postgres', <<'SQL');
 SELECT count(*) > 0 FROM pg_stat_activity
  WHERE wait_event_type = 'InjectionPoint'
-   AND wait_event = 'mktann-split-before-flip'
+   AND wait_event = 'prism-split-before-flip'
 SQL
 if (!$parked)
 {

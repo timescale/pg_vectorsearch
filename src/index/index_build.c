@@ -1,7 +1,7 @@
 /*
  * index_build.c - Shared index build utilities
  *
- * Generic helpers for building meerkat indexes, usable from both
+ * Generic helpers for building prism indexes, usable from both
  * the PostgreSQL IAM build and the standalone CLI.
  */
 

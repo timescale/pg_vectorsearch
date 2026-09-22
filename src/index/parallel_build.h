@@ -839,7 +839,7 @@ extern void mkt_pbuild_blobstore_end(MktBlobStore *bs);
  * Build configuration — back-end-neutral input to the setup seam
  *
  * The fields the setup seam needs to size and populate the shared state. The
- * PG path fills this from its opclass-resolved MktannBuildParams; the
+ * PG path fills this from its opclass-resolved PrismBuildParams; the
  * standalone path fills it from its own config. Keeping it neutral lets one
  * setup-seam signature serve both back-ends.
  * ---------------------------------------------------------------- */
@@ -978,7 +978,7 @@ extern void mkt_posting_build_lists(
  * params; the standalone caller fills it from its index config.
  *
  * prog is the build-progress reporting seam (phases + % to
- * pg_stat_progress_create_index, per-phase stats under mkt.log_build_stats).
+ * pg_stat_progress_create_index, per-phase stats under prism.log_build_stats).
  * The PG caller passes its MktBuildProgress so the parallel phases surface the
  * same way the serial ones do; the standalone caller passes NULL (the seam is
  * a no-op stub there).

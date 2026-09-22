@@ -15,31 +15,31 @@ INSERT INTO query_settings_test (grp, v)
     )::vec32(32)
     FROM generate_series(1, 500) i;
 
-CREATE INDEX idx_query_settings ON query_settings_test USING mktann (v)
+CREATE INDEX idx_query_settings ON query_settings_test USING prism (v)
     WITH (centroid_compression = true);
 
 SET enable_seqscan = off;
 
 -- Probe everything so results are deterministic.
-SET mkt.nprobe = 1000;
+SET prism.nprobe = 1000;
 
--- mkt.query_limit sizes the scan's top-K, so a LIMIT above the
+-- prism.query_limit sizes the scan's top-K, so a LIMIT above the
 -- built-in default k returns the full result count (a regression here
 -- silently truncates results to the default).
-SET mkt.query_limit = 50;
+SET prism.query_limit = 50;
 SELECT count(*) AS rows_k50 FROM (
     SELECT id FROM query_settings_test
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
     LIMIT 50) t;
 
-SET mkt.query_limit = 200;
+SET prism.query_limit = 200;
 SELECT count(*) AS rows_k200 FROM (
     SELECT id FROM query_settings_test
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
     LIMIT 200) t;
 
 -- A LIMIT below query_limit returns the LIMIT, not the GUC value.
-SET mkt.query_limit = 100;
+SET prism.query_limit = 100;
 SELECT count(*) AS rows_limit_below_guc FROM (
     SELECT id FROM query_settings_test
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
@@ -47,7 +47,7 @@ SELECT count(*) AS rows_limit_below_guc FROM (
 
 -- The enlarged top-K must hold the right rows, not merely enough rows:
 -- the index top-50 must match the exact top-50.
-SET mkt.query_limit = 50;
+SET prism.query_limit = 50;
 CREATE TEMP TABLE result_k50 AS
     SELECT id FROM query_settings_test
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
@@ -67,7 +67,7 @@ SELECT count(*) AS matching_top50
 -- Default (query_limit = 0): the scan sizes its top-k from the query's
 -- LIMIT, so a LIMIT above the built-in default k returns the full
 -- count without any GUC.
-RESET mkt.query_limit;
+RESET prism.query_limit;
 SET enable_seqscan = off;
 SELECT count(*) AS rows_limit_bound FROM (
     SELECT id FROM query_settings_test
@@ -142,9 +142,9 @@ BEGIN
     EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, FORMAT JSON) ' || q
     INTO j;
     -- The scan node's position among the Limit's children depends on
-    -- whether an InitPlan precedes it; find it by its Mktann section.
+    -- whether an InitPlan precedes it; find it by its Prism section.
     RETURN (jsonb_path_query_first(j::jsonb,
-        '$.** ? (exists(@."Mktann"))."Mktann"."Top-K"'))::int;
+        '$.** ? (exists(@."Prism"))."Prism"."Top-K"'))::int;
 END $$;
 SELECT query_settings_top_k($q$
     SELECT id FROM query_settings_test
@@ -178,7 +178,7 @@ BEGIN
     INTO j;
     RETURN (SELECT array_agg(DISTINCT k ORDER BY k)
             FROM jsonb_path_query(j::jsonb,
-                '$.** ? (exists(@."Mktann"))."Mktann"."Top-K"') k);
+                '$.** ? (exists(@."Prism"))."Prism"."Top-K"') k);
 END $$;
 SELECT query_settings_top_ks($q$
     SELECT (SELECT count(*) FROM (SELECT id FROM query_settings_test
@@ -229,20 +229,20 @@ SELECT query_settings_top_k($q$
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
     FETCH FIRST 5 ROWS WITH TIES$q$) AS top_k_with_ties;
 
--- mkt.query_limit only lowers the sizing. Above the LIMIT it is ignored
+-- prism.query_limit only lowers the sizing. Above the LIMIT it is ignored
 -- --  raising it would have the scan rank rows the LIMIT then discards;
 -- below the LIMIT it caps, which is the point of the lever.
-SET mkt.query_limit = 200;
+SET prism.query_limit = 200;
 SELECT query_settings_top_k($q$
     SELECT id FROM query_settings_test
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
     LIMIT 50$q$) AS top_k_guc_above_limit;
-SET mkt.query_limit = 20;
+SET prism.query_limit = 20;
 SELECT query_settings_top_k($q$
     SELECT id FROM query_settings_test
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
     LIMIT 50$q$) AS top_k_guc_below_limit;
-RESET mkt.query_limit;
+RESET prism.query_limit;
 
 -- A LIMIT computed by a scalar subquery. The Limit node evaluates its
 -- count before fetching from its child, which runs the InitPlan and
@@ -262,19 +262,19 @@ SELECT count(*) AS rows_no_limit FROM (
     SELECT id FROM query_settings_test
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)) t;
 
--- An explicit mkt.query_limit is the sizing when there is no LIMIT to take
+-- An explicit prism.query_limit is the sizing when there is no LIMIT to take
 -- one from -- a request for that many candidates, not merely a floor under
 -- the automatic sizing. Both values are far below the 500 the automatic
 -- sizing reaches, so one that failed to take effect would show as 500.
-SET mkt.query_limit = 10;
+SET prism.query_limit = 10;
 SELECT count(*) AS rows_no_limit_ql_10 FROM (
     SELECT id FROM query_settings_test
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)) t;
-SET mkt.query_limit = 25;
+SET prism.query_limit = 25;
 SELECT count(*) AS rows_no_limit_ql_25 FROM (
     SELECT id FROM query_settings_test
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)) t;
-RESET mkt.query_limit;
+RESET prism.query_limit;
 
 -- ============================================================
 -- Filtered scans: sized up for the rows the filter will remove
@@ -495,10 +495,10 @@ DROP FUNCTION query_settings_cursor_ids(text);
 DROP FUNCTION query_settings_cursor_pair(text, text);
 DROP FUNCTION query_settings_drain(text);
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 
 -- ============================================================
--- mkt.probe_expand: the routing-depth diagnostic reports scan ranks
+-- prism.probe_expand: the routing-depth diagnostic reports scan ranks
 -- ============================================================
 -- With probe expansion the beam routes extra cluster candidates and
 -- scan_clusters re-ranks them by exact centroid distance before scanning
@@ -514,7 +514,7 @@ DO $$
 DECLARE lib text;
 BEGIN
     SELECT probin INTO STRICT lib
-        FROM pg_proc WHERE proname = 'mktann_handler';
+        FROM pg_proc WHERE proname = 'prism_handler';
     EXECUTE format('CREATE FUNCTION mkt_routing_stats() RETURNS text
         AS %L, ''mkt_routing_stats'' LANGUAGE C', lib);
     EXECUTE format('CREATE FUNCTION mkt_phase_stats_reset() RETURNS void
@@ -533,12 +533,12 @@ INSERT INTO probe_depth_test (v)
                               0.05 * sin((c * 50 + m) * 3.7 + j * 1.3))::real)
             FROM generate_series(0, 31) j)::vec32(32)
     FROM generate_series(0, 39) c, generate_series(1, 50) m;
-CREATE INDEX probe_depth_idx ON probe_depth_test USING mktann (v)
+CREATE INDEX probe_depth_idx ON probe_depth_test USING prism (v)
     WITH (centroid_compression = true, nlist = 40);
 
 SET enable_seqscan = off;
-SET mkt.nprobe = 8;
-SET mkt.probe_expand = 4.0;
+SET prism.nprobe = 8;
+SET prism.probe_expand = 4.0;
 SELECT mkt_phase_stats_reset();
 DO $$
 DECLARE q vec32(32);
@@ -551,15 +551,15 @@ BEGIN
 END $$;
 SELECT mkt_routing_stats() LIKE '%<=8:100.0%%' AS ranks_within_nprobe;
 
-RESET mkt.probe_expand;
-RESET mkt.nprobe;
+RESET prism.probe_expand;
+RESET prism.nprobe;
 RESET enable_seqscan;
 DROP TABLE probe_depth_test;
 DROP FUNCTION mkt_routing_stats();
 DROP FUNCTION mkt_phase_stats_reset();
 
 -- ============================================================
--- mkt.centroid_beam_scale: a narrow beam must keep every leaf reachable
+-- prism.centroid_beam_scale: a narrow beam must keep every leaf reachable
 -- ============================================================
 -- The beam scale narrows the intermediate-level beam to nprobe * scale.
 -- An intermediate keep of W can expose at most W * fan_out leaves, so
@@ -571,16 +571,16 @@ DROP FUNCTION mkt_phase_stats_reset();
 CREATE TABLE beam_floor_test (id int, v vec32(3));
 INSERT INTO beam_floor_test SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 60) g;
-CREATE INDEX beam_floor_idx ON beam_floor_test USING mktann (v)
+CREATE INDEX beam_floor_idx ON beam_floor_test USING prism (v)
     WITH (nlist = 12, fan_out = 3);
 SET enable_seqscan = off;
-SET mkt.nprobe = 10000;
-SET mkt.query_limit = 100;
+SET prism.nprobe = 10000;
+SET prism.query_limit = 100;
 SELECT count(*) = 60 AS all_rows_reachable FROM (
     SELECT id FROM beam_floor_test
     ORDER BY v <-> '[0.5,0,0]' LIMIT 100) t;
-RESET mkt.query_limit;
-RESET mkt.nprobe;
+RESET prism.query_limit;
+RESET prism.nprobe;
 RESET enable_seqscan;
 DROP TABLE beam_floor_test;
 
@@ -594,32 +594,32 @@ DROP TABLE beam_floor_test;
 CREATE TABLE beam_cover_test (id int, v vec32(3));
 INSERT INTO beam_cover_test SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
-CREATE INDEX beam_cover_idx ON beam_cover_test USING mktann (v)
+CREATE INDEX beam_cover_idx ON beam_cover_test USING prism (v)
     WITH (nlist = 12, fan_out = 4);
 SET enable_seqscan = off;
-SET mkt.nprobe = 10000;
-SET mkt.query_limit = 100;
+SET prism.nprobe = 10000;
+SET prism.query_limit = 100;
 SELECT count(*) = 50 AS unbalanced_tree_all_reachable FROM (
     SELECT id FROM beam_cover_test
     ORDER BY v <-> '[0.5,0,0]' LIMIT 100) t;
-RESET mkt.query_limit;
-RESET mkt.nprobe;
+RESET prism.query_limit;
+RESET prism.nprobe;
 RESET enable_seqscan;
 DROP TABLE beam_cover_test;
 
 -- ============================================================
--- Auto nprobe (mkt.nprobe = 0, the default)
+-- Auto nprobe (prism.nprobe = 0, the default)
 -- ============================================================
 -- The default derives nprobe from the index's cluster count
 -- (~0.5*sqrt(nlist), floored at 10). Verify the default is auto and
 -- that a query under it is served by the index and finds an exact
 -- nearest neighbor (50 rows, nlist=12: the floor of 10 probes covers
 -- most lists and the probe vec32 is a distinct-distance match).
-SHOW mkt.nprobe;
+SHOW prism.nprobe;
 CREATE TABLE auto_nprobe_test (id int, v vec32(3));
 INSERT INTO auto_nprobe_test SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
-CREATE INDEX auto_nprobe_idx ON auto_nprobe_test USING mktann (v)
+CREATE INDEX auto_nprobe_idx ON auto_nprobe_test USING prism (v)
     WITH (nlist = 12);
 SET enable_seqscan = off;
 EXPLAIN (COSTS OFF) SELECT id FROM auto_nprobe_test

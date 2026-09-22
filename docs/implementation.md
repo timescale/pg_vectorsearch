@@ -1,12 +1,13 @@
-# Meerkat Implementation Guide
+# PRISM Implementation Guide
 
-Detailed implementation specification for Meerkat, organized for iterative
-development. Each section builds on previous work, with standalone components
-developed and tested before PostgreSQL integration.
+Detailed implementation specification for PRISM, the meerkat extension's
+index access method, organized for iterative development. Each section
+builds on previous work, with standalone components developed and tested
+before PostgreSQL integration.
 
 ## Technical Overview
 
-Meerkat is a PostgreSQL index access method for approximate nearest neighbor
+PRISM is a PostgreSQL index access method for approximate nearest neighbor
 (ANN) vector search. The implementation combines proven techniques from recent
 research with practical considerations for database integration.
 
@@ -1489,7 +1490,7 @@ L2 distance (dim=768, count=10000):
 **Files**: `src/quant/rabitq.h`, `src/quant/rabitq.c`
 
 Quantization compresses vectors for faster approximate distance computation.
-**Meerkat uses RaBitQ as its quantization method.** RaBitQ (Randomized Binary
+**PRISM uses RaBitQ as its quantization method.** RaBitQ (Randomized Binary
 Quantization) compresses vectors to 1 bit per dimension (32x compression) while
 maintaining 95-99% recall through theoretical error bounds.
 
@@ -1500,7 +1501,7 @@ maintaining 95-99% recall through theoretical error bounds.
 2. **High compression**: 32x (1 bit/dimension) enables large in-memory indexes.
 3. **Speed**: Bitwise operations are faster than PQ codebook lookups at same
    accuracy.
-4. **Architecture fit**: Meerkat re-ranks with full precision vectors, so
+4. **Architecture fit**: PRISM re-ranks with full precision vectors, so
    aggressive initial compression is acceptable.
 5. **Industry adoption**: Used by turbopuffer, Elasticsearch, LanceDB.
 
@@ -2270,7 +2271,7 @@ XOR + popcount is extremely fast:
 
 #### Scalar Quantization (SQ8) — Future/Lower Priority
 
-> **Note**: SQ8 is not part of the initial implementation. RaBitQ is Meerkat's
+> **Note**: SQ8 is not part of the initial implementation. RaBitQ is PRISM's
 > quantization method. This section documents SQ8 for potential future use with
 > lower-dimensional vectors or use cases requiring higher recall without
 > reranking.
@@ -4030,7 +4031,7 @@ CREATE TABLE my_centroids (
 COPY my_centroids FROM 'centroids.csv' WITH (FORMAT csv);
 
 -- Build index using external centroids
-CREATE INDEX ON my_table USING mktann (v vec32_cosine_ops)
+CREATE INDEX ON my_table USING prism (v vec32_cosine_ops)
     WITH (external_centroids = 'my_centroids');
 ```
 
@@ -4333,10 +4334,10 @@ void _PG_init(void);
 int mkt_distance_mode;       // MktDistanceMode: default / asymmetric / symmetric
 
 // Index reloptions
-relopt_kind mktann_relopt_kind;
+relopt_kind prism_relopt_kind;
 ```
 
-**GUC**: `mkt.distance_mode` defaults to `'default'` (sentinel value
+**GUC**: `prism.distance_mode` defaults to `'default'` (sentinel value
 `MKT_DISTANCE_MODE_DEFAULT = -1`), meaning "use the index's relopt".
 When set to `'asymmetric'` or `'symmetric'`, it overrides the index setting
 for the current session.
@@ -4346,16 +4347,16 @@ for the current session.
 index via `WITH (distance_mode = ...)`:
 
 ```sql
-CREATE INDEX idx ON items USING mktann (v) WITH (distance_mode = 'symmetric');
+CREATE INDEX idx ON items USING prism (v) WITH (distance_mode = 'symmetric');
 ```
 
-**Resolution order** (at scan time via `MktannGetDistanceMode()`):
+**Resolution order** (at scan time via `PrismGetDistanceMode()`):
 1. If GUC != `default` → use GUC value
 2. Otherwise → use the index's relopt value
 3. If no reloptions set → fall back to `asymmetric`
 
-The `MktannOptions` struct (varlena header + `distance_mode` field) is
-parsed by the `mktann_options()` callback using `build_reloptions()`.
+The `PrismOptions` struct (varlena header + `distance_mode` field) is
+parsed by the `prism_options()` callback using `build_reloptions()`.
 
 ### 6.2 Vector Type and pgvector Compatibility
 
@@ -4466,11 +4467,11 @@ the index's operator family, and pgvector's `<->`, `<#>` and `<=>` belong to
 pgvector's own families. Casting the column is not enough.
 
 `setup_pgvector_compat()` therefore adds pgvector's three distance operators to
-each of meerkat's six `mktann` families as ordering members, in the same step
+each of prism's six operator families as ordering members, in the same step
 that creates the casts:
 
 ```sql
-ALTER OPERATOR FAMILY myschema.vec16_l2_ops USING mktann
+ALTER OPERATOR FAMILY myschema.vec16_l2_ops USING prism
     ADD OPERATOR 1 public.<-> (public.halfvec, public.halfvec)
         FOR ORDER BY pg_catalog.float_ops;
 ```
@@ -4538,12 +4539,12 @@ implementation wraps `ReadBuffer`/`UnlockReleaseBuffer`/`GenericXLog`:
 
 ```c
 // PG storage implementation embeds MktStorage as first member
-typedef struct MktannStorage {
+typedef struct PrismStorage {
     MktStorage  base;       /* must be first (upcast via pointer) */
     Relation    index;
     Buffer      buffers[MAX_PINNED];
     int         nbuffers;
-} MktannStorage;
+} PrismStorage;
 ```
 
 The `read_page` callback calls `ReadBuffer` + `LockBuffer(SHARE)`,
@@ -4907,7 +4908,7 @@ entry_is_visible(const PostingEntry *entry, Snapshot snapshot, Relation heap)
 **Files**: `src/pg/search/stream.h`, `src/pg/search/stream.c`, `src/pg/build/stream.c`
 
 PostgreSQL 18 introduces a powerful async I/O subsystem with the read stream API.
-Meerkat leverages this for efficient prefetching during index scans, posting list
+PRISM leverages this for efficient prefetching during index scans, posting list
 traversal, and reranking operations.
 
 #### I/O Method Support
@@ -4920,7 +4921,7 @@ PostgreSQL 18 supports multiple I/O backends via the `io_method` GUC:
 | `worker`   | Dedicated I/O worker processes (default)       | All platforms      |
 | `io_uring` | Linux kernel async I/O via liburing            | Linux 5.1+ w/liburing |
 
-Meerkat works with all three methods. The `io_uring` method provides lowest latency
+PRISM works with all three methods. The `io_uring` method provides lowest latency
 for high-concurrency workloads. Configuration:
 
 ```sql
@@ -4948,7 +4949,7 @@ For posting list scans reading 275 pages:
 
 The read stream API and `io_uring` enable high queue depth by submitting many
 read requests in a single syscall, then processing completions as they arrive.
-This is why `effective_io_concurrency = 200` is recommended for Meerkat workloads.
+This is why `effective_io_concurrency = 200` is recommended for PRISM workloads.
 
 #### Read Stream API Overview
 
@@ -5304,7 +5305,7 @@ read_stream_begin_relation(READ_STREAM_DEFAULT, ...);
 #### Custom Async I/O Layer (Future)
 
 The PostgreSQL read stream API works well for page-oriented access but may be
-limiting for some Meerkat use cases:
+limiting for some PRISM use cases:
 
 **Potential limitations:**
 - Callback model requires knowing next block before current completes
@@ -5312,7 +5313,7 @@ limiting for some Meerkat use cases:
 - Buffer pool integration assumes PostgreSQL page semantics
 - Limited control over I/O prioritization across multiple streams
 
-**Future consideration:** A Meerkat-specific async I/O layer for cases like:
+**Future consideration:** A PRISM-specific async I/O layer for cases like:
 - Direct file I/O for external vector storage
 - Custom prefetch patterns for centroid search
 - Tiered storage with different I/O characteristics
@@ -5357,7 +5358,7 @@ the kernel entirely. SPFresh uses SPDK to achieve their benchmark results.
 - Significant complexity increase
 - Not integrated with PostgreSQL buffer manager
 
-**Potential use case:** If Meerkat stores posting lists or full-precision vectors
+**Potential use case:** If PRISM stores posting lists or full-precision vectors
 in a separate file (outside PostgreSQL's heap), SPDK could provide a dedicated
 high-performance path:
 
@@ -5383,7 +5384,7 @@ of query latency) and the operational complexity is acceptable.
 
 ## Part 7: Maintenance Operations
 
-Meerkat uses the LIRE protocol (from SPFresh) for dynamic updates. This enables
+PRISM uses the LIRE protocol (from SPFresh) for dynamic updates. This enables
 high insert throughput without degrading query performance.
 
 ### 7.1 Insert
@@ -5760,7 +5761,7 @@ typedef struct MktIndexOptions
 
 ```sql
 -- Create index with label column for fast filtering
-CREATE INDEX ON items USING meerkat (embedding)
+CREATE INDEX ON items USING prism (embedding)
     WITH (labels = 'category_id');
 
 -- Query with label filter (uses fast path)

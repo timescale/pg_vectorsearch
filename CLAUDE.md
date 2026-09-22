@@ -6,9 +6,10 @@ CLAUDE.local.md.
 
 ## Project Overview
 
-Meerkat is a PostgreSQL index access method (IAM) for Approximate Nearest
-Neighbor (ANN) vector search, inspired by Google's ScaNN for AlloyDB and
-Microsoft's SPANN. It uses the vector format from [pgvector].
+Meerkat is a PostgreSQL extension providing PRISM, an index access method
+(IAM) for Approximate Nearest Neighbor (ANN) vector search, inspired by
+Google's ScaNN for AlloyDB and Microsoft's SPANN. It uses the vector format
+from [pgvector].
 
 ### Architecture
 
@@ -45,33 +46,34 @@ a subset of partitions to build the nearest neighbor result set.
 - Fast index builds via linear scans, SIMD, and efficient clustering
 - Support high ingest rates without sacrificing query performance
 
-### Two versions of Meerkat: standalone and PostgreSQL
+### Two versions of PRISM: standalone and PostgreSQL
 
-The main purpose of this project is to build an index for PostgreSQL providing
-first-class vector search performance. Performance is measured by QPS at a
-certain recall.
+The main purpose of this project is to build PRISM, an index for PostgreSQL
+providing first-class vector search performance. Performance is measured by
+QPS at a certain recall.
 
-However, Meerkat can build both as a standalone (in-memory) vector search
-engine and as a PostgreSQL extension providing an Index Access Method (IAM).
+However, PRISM can build both as a standalone (in-memory) vector search
+engine and as the meerkat extension's PostgreSQL Index Access Method (IAM).
 
-#### The role of Meerkat standalone
+#### The role of standalone PRISM
 
 The role of the standalone version is to be able to easily test and benchmark
-parts of Meerkat while isolating it from adverse effects of bottlenecks in
+parts of PRISM while isolating it from adverse effects of bottlenecks in
 PostgreSQL that we cannot affect. For example, with the standalone CLI, it is
 possible to build micro benchmarks for certain SIMD kernels that encode RabitQ
 vectors. These same kernels then run in PostgreSQL.
 
 #### Keep standalone and PostgreSQL versions close
 
-It is critically important that the core Meerkat logic and architecture stay
+It is critically important that the core PRISM logic and architecture stay
 close between the standalone version and the PostgreSQL extension. Minimizing
 code duplication and version-specific paths of core logic is a critical goal of
 the project. If the versions start to diverge in code and their approach,
 standalone benchmarks and tests will no longer be representative for the
 PostgreSQL version, which defeats the purpose of having a standalone version.
 
-Examples of things that can differ between Meerkat and standalone:
+Examples of things that can differ between PRISM's PostgreSQL and standalone
+builds:
 
 - Vector storage: standalone stores vectors in memory. There's a point to this:
 it provides an upper-bound on performance which allows identifying and
@@ -210,7 +212,7 @@ See `docs/development.md` for detailed profiling documentation.
 
 #### Testing and benchmarking the PostgreSQL build
 
-The PostgreSQL build of Meerkat should be benhmarked against a local PostgreSQL
+The PostgreSQL build of PRISM should be benchmarked against a local PostgreSQL
 instance.
 
 Prefer "real" datasets over generated data.
@@ -219,7 +221,7 @@ Prefer "real" datasets over generated data.
 
 - Core algorithms can be benchmarked using the Meerkat client tool's search
 command (`mkt bench search`) as long as that exercises a path that is shared
-between standalone and Meerkat.
+between standalone and PostgreSQL builds of PRISM.
 - Always benchmark and profile a release build with all optimizations turned on.
 Benchmarking a debug build will _not_ give the correct understanding of the
 current performance.
@@ -309,13 +311,13 @@ CREATE CAST (myschema.vec32 AS public.vector)   WITHOUT FUNCTION AS ASSIGNMENT;
 Direction matters: pgvector → meerkat is IMPLICIT so an existing pgvector
 column works transparently, while meerkat → pgvector is ASSIGNMENT to avoid
 operator ambiguity when both extensions are installed. Install order does not
-matter — `setup_pgvector_compat()` runs at `CREATE EXTENSION meerkat` if
+matter — `prism.setup_pgvector_compat()` runs at `CREATE EXTENSION meerkat` if
 pgvector is already there, and an event trigger runs it if pgvector arrives
 later.
 
 The consequence worth remembering: because the casts are `WITHOUT FUNCTION`,
 they satisfy PostgreSQL's binary-coercibility rule for operator classes. That
-is what lets an `mktann` opclass declared `FOR TYPE mkt.vec32` be used on a
+is what lets a `prism` opclass declared `FOR TYPE mkt.vec32` be used on a
 column of pgvector's `public.vector` — the two are the same bytes, so no
 conversion happens and no copy is made. Anything in the access method that
 asks "which type is this column?" must ask it the same way, via
@@ -325,10 +327,11 @@ planner about a column the index was built on.
 Operators need separate handling, because casts do not cover them. An index is
 only considered for an `ORDER BY` when the ordering operator belongs to the
 index's operator family, and pgvector's `<->`, `<#>` and `<=>` belong to
-pgvector's families. So `setup_pgvector_compat()` adds them to meerkat's
-`mktann` families as ordering members (strategy 1, `float_ops`) in the same
-step as the casts — they are a unit, since the operators rely on the casts'
-binary-coercibility. Either spelling of the operator then reaches the index.
+pgvector's families. So `prism.setup_pgvector_compat()` adds them to
+`prism`'s operator families as ordering members (strategy 1, `float_ops`)
+in the same step as the casts — they are a unit, since the operators rely
+on the casts' binary-coercibility. Either spelling of the operator then
+reaches the index.
 
 The failure this avoids is quiet rather than loud: with pgvector's operator and
 no family membership, the planner picks a sequential scan, which returns the

@@ -1,9 +1,9 @@
 /*
- * explain.c - EXPLAIN ANALYZE output for mktann scans
+ * explain.c - EXPLAIN ANALYZE output for prism scans
  *
  * Injects scan stats into EXPLAIN (ANALYZE, VERBOSE) output via
  * PG's explain_per_node_hook. Shows centroid search, posting scan,
- * and rerank statistics for mktann index scans.
+ * and rerank statistics for prism index scans.
  */
 
 #include <postgres.h>
@@ -25,7 +25,7 @@
 static explain_per_node_hook_type prev_hook = NULL;
 
 static void
-mktann_explain_hook(
+prism_explain_hook(
 		PlanState	 *planstate,
 		List		 *ancestors,
 		const char	 *relationship,
@@ -56,11 +56,11 @@ mktann_explain_hook(
 	}
 	pfree(am_name);
 
-	const MktannScanStats *stats = mktann_scan_get_stats(scan);
+	const PrismScanStats *stats = prism_scan_get_stats(scan);
 	if (stats == NULL)
 		return;
 
-	ExplainOpenGroup("Mktann", "Mktann", true, es);
+	ExplainOpenGroup("Prism", "Prism", true, es);
 
 	ExplainPropertyInteger("Top-K", NULL, stats->top_k, es);
 	ExplainPropertyInteger(
@@ -113,12 +113,12 @@ mktann_explain_hook(
 				es);
 	}
 
-	ExplainCloseGroup("Mktann", "Mktann", true, es);
+	ExplainCloseGroup("Prism", "Prism", true, es);
 }
 
 void
-mktann_explain_init(void)
+prism_explain_init(void)
 {
 	prev_hook			  = explain_per_node_hook;
-	explain_per_node_hook = mktann_explain_hook;
+	explain_per_node_hook = prism_explain_hook;
 }

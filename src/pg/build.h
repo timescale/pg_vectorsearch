@@ -1,5 +1,5 @@
 /*
- * build.h - Index build for mktann
+ * build.h - Index build for prism
  *
  * Implements ambuild: heap sampling, k-means clustering, RaBitQ
  * encoding, and centroid page writing.
@@ -23,7 +23,7 @@
 
 /* Build parameters resolved from the index relation/opclass, shared by the
  * serial and parallel build paths. */
-typedef struct MktannBuildParams
+typedef struct PrismBuildParams
 {
 	Dimension		  dim;
 	DistanceMetric	  metric;
@@ -34,12 +34,12 @@ typedef struct MktannBuildParams
 	double			  soar_lambda;
 	double			  boundary_epsilon;
 	bool			  fastscan;
-} MktannBuildParams;
+} PrismBuildParams;
 
 IndexBuildResult *
-mktann_build(Relation heap, Relation index, struct IndexInfo *index_info);
+prism_build(Relation heap, Relation index, struct IndexInfo *index_info);
 
-char *mktann_buildphasename(int64 phasenum);
+char *prism_buildphasename(int64 phasenum);
 
 /*
  * Estimated live tuples in a heap: reltuples when the relation has been
@@ -48,7 +48,7 @@ char *mktann_buildphasename(int64 phasenum);
  * comment on the definition for why the fallback samples rather than deriving
  * rows from the column width.
  */
-double mktann_estimate_heap_tuples(Relation heap);
+double prism_estimate_heap_tuples(Relation heap);
 
 /* do_parallel_build (the shared parallel build entry) is declared in
  * index/parallel_build.h, included above. */

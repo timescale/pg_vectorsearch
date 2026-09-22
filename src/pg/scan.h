@@ -1,5 +1,5 @@
 /*
- * scan.h - Index scan for mktann
+ * scan.h - Index scan for prism
  *
  * Implements ambeginscan, amrescan, amgettuple, amendscan.
  * Reads the centroid tree via beam search and returns medoid TIDs.
@@ -17,7 +17,7 @@
  * Scan statistics (populated by execute_search)
  * ---------------------------------------------------------------- */
 
-typedef struct MktannScanStats
+typedef struct PrismScanStats
 {
 	/* Phase timing, wall-clock nanoseconds (from the last query) */
 	uint64_t centroid_ns;
@@ -42,9 +42,9 @@ typedef struct MktannScanStats
 	uint32_t storage_reads;
 
 	/* Top-k the search was sized for (from the query's LIMIT, seeded by
-	 * filter selectivity, or mkt.query_limit, or the built-in default) */
+	 * filter selectivity, or prism.query_limit, or the built-in default) */
 	uint32_t top_k;
-} MktannScanStats;
+} PrismScanStats;
 
 /*
  * Floor on every scan's top-k. Not a default: it keeps a little slack under
@@ -53,15 +53,15 @@ typedef struct MktannScanStats
  */
 #define MKT_DEFAULT_K 10
 
-const MktannScanStats *mktann_scan_get_stats(IndexScanDesc scan);
+const PrismScanStats *prism_scan_get_stats(IndexScanDesc scan);
 
 /*
  * Resolve the top-k a scan will build, from the rows its LIMIT asks for (0
  * when there is none) and the relation's estimated row count (negative when
- * unknown). Applies mkt.query_limit, the built-in floor, and the work_mem
+ * unknown). Applies prism.query_limit, the built-in floor, and the work_mem
  * ceiling.
  *
- * Called by mktann_beginscan and by the cost model.
+ * Called by prism_beginscan and by the cost model.
  */
 uint32_t mkt_scan_resolve_top_k(uint32_t scan_bound, double heap_rows);
 
@@ -69,12 +69,12 @@ uint32_t mkt_scan_resolve_top_k(uint32_t scan_bound, double heap_rows);
  * Begin an index scan. Matches ambeginscan_function signature.
  * Allocates scan state and reads the metadata page.
  */
-IndexScanDesc mktann_beginscan(Relation index, int nkeys, int norderbys);
+IndexScanDesc prism_beginscan(Relation index, int nkeys, int norderbys);
 
 /*
  * Restart a scan with new keys/orderbys. Matches amrescan_function.
  */
-void mktann_rescan(
+void prism_rescan(
 		IndexScanDesc scan,
 		ScanKey		  keys,
 		int			  nkeys,
@@ -86,11 +86,11 @@ void mktann_rescan(
  * On first call, runs beam search and caches all results.
  * Subsequent calls iterate through cached results.
  */
-bool mktann_gettuple(IndexScanDesc scan, ScanDirection direction);
+bool prism_gettuple(IndexScanDesc scan, ScanDirection direction);
 
 /*
  * End scan and free resources. Matches amendscan_function.
  */
-void mktann_endscan(IndexScanDesc scan);
+void prism_endscan(IndexScanDesc scan);
 
 #endif /* MKT_SCAN_H */

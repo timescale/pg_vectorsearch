@@ -71,29 +71,29 @@ CREATE OR REPLACE FUNCTION casts_are_standalone() RETURNS bool AS $$
 $$ LANGUAGE sql;
 
 -- Helper: pgvector's distance operators registered as ordering members of
--- meerkat's mktann families. meerkat's types now install alongside
+-- meerkat's prism families. meerkat's types now install alongside
 -- pgvector's own (both default to public), so namespace alone no longer
 -- distinguishes the two -- identify pgvector's operators by their left
 -- argument type (vector/halfvec) instead. to_regtype (not ::regtype) so a
 -- literal cast never errors when pgvector has been dropped -- it returns
 -- NULL instead, and the joins simply match nothing, returning 0.
-CREATE OR REPLACE FUNCTION count_pgvector_mktann_ops() RETURNS int AS $$
+CREATE OR REPLACE FUNCTION count_pgvector_prism_ops() RETURNS int AS $$
     SELECT count(*)::int
     FROM pg_amop ao
     JOIN pg_opfamily f ON f.oid = ao.amopfamily
-    JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'mktann'
+    JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'prism'
     JOIN pg_operator op ON op.oid = ao.amopopr
     WHERE ao.amoppurpose = 'o'
       AND op.oprleft = ANY (ARRAY[to_regtype('vector'), to_regtype('halfvec')]);
 $$ LANGUAGE sql;
 
--- Helper: mktann's own ordering operators (on vec32/vec16), so a test can
+-- Helper: prism's own ordering operators (on vec32/vec16), so a test can
 -- assert meerkat's opclasses survive a pgvector drop untouched.
-CREATE OR REPLACE FUNCTION count_mkt_mktann_ops() RETURNS int AS $$
+CREATE OR REPLACE FUNCTION count_mkt_prism_ops() RETURNS int AS $$
     SELECT count(*)::int
     FROM pg_amop ao
     JOIN pg_opfamily f ON f.oid = ao.amopfamily
-    JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'mktann'
+    JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'prism'
     JOIN pg_operator op ON op.oid = ao.amopopr
     WHERE ao.amoppurpose = 'o'
       AND op.oprleft = ANY (ARRAY[to_regtype('vec32'), to_regtype('vec16')]);
@@ -466,7 +466,7 @@ CREATE EXTENSION meerkat;
 -- Both present again: the six pgvector ordering operators are members, and a
 -- bare drop is refused (the casts block it, same as the meerkat side).
 SELECT assert_test('drop-pgv: 6 pgvector ops are members before drop',
-    count_pgvector_mktann_ops() = 6);
+    count_pgvector_prism_ops() = 6);
 SELECT assert_test('drop-pgv: bare DROP is refused (needs CASCADE)',
     stmt_is_refused('DROP EXTENSION vector'));
 
@@ -481,17 +481,17 @@ SELECT assert_test('drop-pgv: public.vec32 still works',
 
 -- The pgvector operator members are removed with pgvector's operators, while
 -- meerkat's own six ordering operators and its opclasses are untouched.
-SELECT assert_test('drop-pgv: pgvector ops removed from mktann families',
-    count_pgvector_mktann_ops() = 0);
+SELECT assert_test('drop-pgv: pgvector ops removed from prism families',
+    count_pgvector_prism_ops() = 0);
 SELECT assert_test('drop-pgv: meerkat native ops intact',
-    count_mkt_mktann_ops() = 6);
-SELECT assert_test('drop-pgv: mktann opclasses intact',
+    count_mkt_prism_ops() = 6);
+SELECT assert_test('drop-pgv: prism opclasses intact',
     (SELECT count(*) FROM pg_opclass oc
-        JOIN pg_am am ON am.oid = oc.opcmethod AND am.amname = 'mktann') = 6);
+        JOIN pg_am am ON am.oid = oc.opcmethod AND am.amname = 'prism') = 6);
 
 SELECT assert_test('drop-pgv: event trigger still exists',
     EXISTS (SELECT 1 FROM pg_event_trigger
-            WHERE evtname = 'mkt_pgvector_cast_trigger'));
+            WHERE evtname = 'prism_pgvector_cast_trigger'));
 
 -- =====================================================================
 -- 17. Re-create pgvector: event trigger re-creates casts
@@ -526,7 +526,7 @@ SELECT assert_test('standalone: public.vec32 works',
 
 SELECT assert_test('standalone: event trigger exists',
     EXISTS (SELECT 1 FROM pg_event_trigger
-            WHERE evtname = 'mkt_pgvector_cast_trigger'));
+            WHERE evtname = 'prism_pgvector_cast_trigger'));
 
 DROP EXTENSION meerkat;
 
@@ -535,9 +535,9 @@ SELECT assert_test('standalone: clean drop',
                 WHERE extname = 'meerkat'));
 
 -- =====================================================================
--- Indexing pgvector-typed columns with mktann
+-- Indexing pgvector-typed columns with prism
 -- =====================================================================
--- Checks that an mktann index over a pgvector-typed column builds, is chosen
+-- Checks that a prism index over a pgvector-typed column builds, is chosen
 -- by the planner, and answers queries correctly.
 --
 -- The binary casts tested above are what make it reachable: PostgreSQL matches
@@ -557,7 +557,7 @@ SELECT assert_test('standalone: clean drop',
 -- assertions would pass on brute force and say nothing about the index.
 --
 -- Both spellings of the operator have to reach the index. meerkat adds
--- pgvector's <->, <#> and <=> to its own mktann families as ordering members
+-- pgvector's <->, <#> and <=> to its own prism families as ordering members
 -- precisely so that a query written against pgvector -- or an unqualified
 -- <-> resolving to pgvector under a pgvector-first search_path -- is not
 -- silently downgraded to a sequential scan.
@@ -586,8 +586,8 @@ CREATE TEMP TABLE idx_truth AS
              ORDER BY v OPERATOR(public.<->) '[0,0,0,0,0,0,0,0]'::public.vec16(8)
              LIMIT 10) t;
 
-CREATE INDEX idx_pgv_h_i ON idx_pgv_h USING mktann (v public.vec16_l2_ops);
-CREATE INDEX idx_mkt_h_i ON idx_mkt_h USING mktann (v public.vec16_l2_ops);
+CREATE INDEX idx_pgv_h_i ON idx_pgv_h USING prism (v public.vec16_l2_ops);
+CREATE INDEX idx_mkt_h_i ON idx_mkt_h USING prism (v public.vec16_l2_ops);
 
 -- The planner must actually choose the index, or the rest proves nothing.
 -- EXPLAIN cannot appear in a subquery, hence the helper.
@@ -615,9 +615,9 @@ SET enable_seqscan = off;
 -- that, so with a capped pool recall measures the size of the pool rather
 -- than whether the column decoded. Uncapped, a misdecoded column still
 -- fails hard, because exact distances over wrong values rank wrongly.
-SET mkt.rerank_pool = -1;
+SET prism.rerank_pool = -1;
 
-SELECT assert_test('mktann index is used on a pgvector halfvec column',
+SELECT assert_test('prism index is used on a pgvector halfvec column',
     public.plan_uses_index_scan($q$SELECT id FROM idx_pgv_h
         ORDER BY v OPERATOR(public.<->) '[0,0,0,0,0,0,0,0]'::public.vec16(8)
         LIMIT 10$q$));
@@ -626,7 +626,7 @@ SELECT assert_test('mktann index is used on a pgvector halfvec column',
 -- 8 of 10 is a generous floor that still fails hard on a decode bug while
 -- tolerating the clusters the scan does not probe.
 SELECT assert_test(
-    'pgvector halfvec column: mktann recall >= 8/10',
+    'pgvector halfvec column: prism recall >= 8/10',
     (SELECT count(*) FROM (
         SELECT id FROM idx_pgv_h
          ORDER BY v OPERATOR(public.<->) '[0,0,0,0,0,0,0,0]'::public.vec16(8)
@@ -635,7 +635,7 @@ SELECT assert_test(
 
 -- Control: meerkat's own halfvec column, same data, same expectation.
 SELECT assert_test(
-    'mkt halfvec column: mktann recall >= 8/10',
+    'mkt halfvec column: prism recall >= 8/10',
     (SELECT count(*) FROM (
         SELECT id FROM idx_mkt_h
          ORDER BY v OPERATOR(public.<->) '[0,0,0,0,0,0,0,0]'::public.vec16(8)
@@ -645,33 +645,33 @@ SELECT assert_test(
 -- Centroids follow the column for a pgvector column too, by the same
 -- binary-coercibility test. Compression off, so the format is decided by the
 -- column type rather than by RaBitQ.
-CREATE INDEX idx_fmt_i ON idx_pgv_h USING mktann (v public.vec16_l2_ops)
+CREATE INDEX idx_fmt_i ON idx_pgv_h USING prism (v public.vec16_l2_ops)
     WITH (centroid_compression = off, centroid_fastscan = off,
           fastscan = off, soar_lambda = 0, boundary_epsilon = 0);
 SELECT assert_test('pgvector halfvec column gets half-precision centroids',
     (SELECT bool_and(format = 'half')
-       FROM mkt.centroid_pages('idx_fmt_i'::regclass)));
+       FROM prism.centroid_pages('idx_fmt_i'::regclass)));
 
 -- pgvector's three distance operators are ordering members of each of
--- meerkat's six mktann families.
-SELECT assert_test('pgvector distance operators joined the mktann families',
-    count_pgvector_mktann_ops() = 6);
+-- meerkat's six prism families.
+SELECT assert_test('pgvector distance operators joined the prism families',
+    count_pgvector_prism_ops() = 6);
 
--- An mktann index is reachable from pgvector's operator, including as a bare
+-- A prism index is reachable from pgvector's operator, including as a bare
 -- <-> under a search_path that resolves to pgvector.
 SELECT assert_test(
-    'mktann index is used via pgvector''s operator on a pgvector column',
+    'prism index is used via pgvector''s operator on a pgvector column',
     public.plan_uses_index_scan($q$SELECT id FROM idx_pgv_h
         ORDER BY v OPERATOR(public.<->) '[0,0,0,0,0,0,0,0]'::halfvec(8)
         LIMIT 10$q$));
 SELECT assert_test(
-    'mktann index is used via an unqualified <-> resolving to pgvector',
+    'prism index is used via an unqualified <-> resolving to pgvector',
     public.plan_uses_index_scan($q$SELECT id FROM idx_pgv_h
         ORDER BY v <-> '[0,0,0,0,0,0,0,0]'::halfvec(8) LIMIT 10$q$));
 
 -- And returns the same neighbours through that operator as brute force does.
 SELECT assert_test(
-    'pgvector operator on mktann index: recall >= 8/10',
+    'pgvector operator on prism index: recall >= 8/10',
     (SELECT count(*) FROM (
         SELECT id FROM idx_pgv_h
          ORDER BY v OPERATOR(public.<->) '[0,0,0,0,0,0,0,0]'::halfvec(8)
@@ -705,7 +705,7 @@ RESET search_path;
 -- 19. Both extensions in NON-default schemas (dynamic discovery)
 -- =====================================================================
 -- pgvector is relocatable, and meerkat's types/operators/AM are
--- install-time relocatable too (mkt.rebalance and friends are the one
+-- install-time relocatable too (prism.rebalance and friends are the one
 -- exception -- see sql/meerkat.sql). setup_pgvector_compat() and the
 -- install DO block/event trigger discover BOTH schemas from
 -- pg_extension.extnamespace rather than assuming either is public. Install
@@ -742,10 +742,10 @@ SELECT assert_test('custom-schema (pgv-first): 4 binary compat casts',
               AND s.typname IN ('vec32', 'vec16')))) = 4);
 
 SELECT assert_test(
-    'custom-schema (pgv-first): 6 pgvector ops are mktann members',
+    'custom-schema (pgv-first): 6 pgvector ops are prism members',
     (SELECT count(*) FROM pg_amop ao
        JOIN pg_opfamily f ON f.oid = ao.amopfamily
-       JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'mktann'
+       JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'prism'
        JOIN pg_operator op ON op.oid = ao.amopopr
       WHERE ao.amoppurpose = 'o'
         AND op.oprnamespace = 'pgv_alt'::regnamespace) = 6);
@@ -781,16 +781,16 @@ INSERT INTO idx_alt
                        FROM generate_series(1, 8) j) || ']')::pgv_alt.vector(8)
     FROM generate_series(1, 2000) g;
 ANALYZE idx_alt;
-CREATE INDEX idx_alt_i ON idx_alt USING mktann (v meerkat_alt.vec32_l2_ops);
+CREATE INDEX idx_alt_i ON idx_alt USING prism (v meerkat_alt.vec32_l2_ops);
 SET enable_seqscan = off;
-SET mkt.rerank_pool = -1;
+SET prism.rerank_pool = -1;
 SELECT assert_test(
-    'custom-schema: mktann index used via pgvector operator on pgv_alt column',
+    'custom-schema: prism index used via pgvector operator on pgv_alt column',
     public.plan_uses_index_scan($q$SELECT id FROM idx_alt
         ORDER BY v OPERATOR(pgv_alt.<->) '[0,0,0,0,0,0,0,0]'::pgv_alt.vector(8)
         LIMIT 10$q$));
 RESET enable_seqscan;
-RESET mkt.rerank_pool;
+RESET prism.rerank_pool;
 DROP TABLE idx_alt;
 DROP FUNCTION public.plan_uses_index_scan(text);
 
@@ -799,7 +799,7 @@ DROP FUNCTION public.plan_uses_index_scan(text);
 DROP EXTENSION meerkat CASCADE;
 DROP EXTENSION vector CASCADE;
 CREATE EXTENSION meerkat SCHEMA meerkat_alt;
-CREATE EXTENSION vector SCHEMA pgv_alt;   -- fires mkt_pgvector_cast_trigger
+CREATE EXTENSION vector SCHEMA pgv_alt;   -- fires prism_pgvector_cast_trigger
 
 SELECT assert_test('custom-schema (mkt-first): event trigger created 4 casts',
     (SELECT count(*) FROM pg_cast c
@@ -816,13 +816,13 @@ SELECT assert_test('custom-schema (mkt-first): event trigger created 4 casts',
               AND s.typname IN ('vec32', 'vec16')))) = 4);
 
 -- Mirror the pgv-first checks: the event-trigger path must also add the six
--- operators to the mktann families and yield a real index scan, or a
+-- operators to the prism families and yield a real index scan, or a
 -- regression there could pass on casts alone while queries silently seq-scan.
 SELECT assert_test(
-    'custom-schema (mkt-first): 6 pgvector ops are mktann members',
+    'custom-schema (mkt-first): 6 pgvector ops are prism members',
     (SELECT count(*) FROM pg_amop ao
        JOIN pg_opfamily f ON f.oid = ao.amopfamily
-       JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'mktann'
+       JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'prism'
        JOIN pg_operator op ON op.oid = ao.amopopr
       WHERE ao.amoppurpose = 'o'
         AND op.oprnamespace = 'pgv_alt'::regnamespace) = 6);
@@ -845,16 +845,16 @@ INSERT INTO idx_altb
                        FROM generate_series(1, 8) j) || ']')::pgv_alt.vector(8)
     FROM generate_series(1, 2000) g;
 ANALYZE idx_altb;
-CREATE INDEX idx_altb_i ON idx_altb USING mktann (v meerkat_alt.vec32_l2_ops);
+CREATE INDEX idx_altb_i ON idx_altb USING prism (v meerkat_alt.vec32_l2_ops);
 SET enable_seqscan = off;
-SET mkt.rerank_pool = -1;
+SET prism.rerank_pool = -1;
 SELECT assert_test(
-    'custom-schema (mkt-first): mktann index used via pgvector operator',
+    'custom-schema (mkt-first): prism index used via pgvector operator',
     public.plan_uses_index_scan($q$SELECT id FROM idx_altb
         ORDER BY v OPERATOR(pgv_alt.<->) '[0,0,0,0,0,0,0,0]'::pgv_alt.vector(8)
         LIMIT 10$q$));
 RESET enable_seqscan;
-RESET mkt.rerank_pool;
+RESET prism.rerank_pool;
 DROP TABLE idx_altb;
 DROP FUNCTION public.plan_uses_index_scan(text);
 

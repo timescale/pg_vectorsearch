@@ -1,8 +1,8 @@
-# Parallel Index Build for Meerkat
+# Parallel Index Build for PRISM
 
 ## Context
 
-Meerkat's index build is single-threaded. For 10M vectors with nlist=16000 +
+PRISM's index build is single-threaded. For 10M vectors with nlist=16000 +
 SOAR, the build takes ~4 hours. The bottleneck is the heap scan phase where
 each vector is: tree-descended to find its cluster, RaBitQ-encoded, optionally
 SOAR-replicated, and streamed to a posting builder. This is embarrassingly

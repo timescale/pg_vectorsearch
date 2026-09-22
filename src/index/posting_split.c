@@ -257,7 +257,7 @@ walk_chain_tids(
 			.tids	   = tids,
 			.cap	   = cap,
 			.entry_ctx = mkt_memctx_create(
-					mkt_memctx_current(), "mktann split entry"),
+					mkt_memctx_current(), "prism split entry"),
 			.prefetch		= (env != NULL) ? env->prefetch_vector : NULL,
 			.prefetch_ctx	= (env != NULL) ? env->ctx : NULL,
 			.cluster_id_out = cluster_id_out,
@@ -991,7 +991,7 @@ mkt_posting_split(
 			(size_t)MKT_SPLIT_MAX_PARTS * dim * sizeof(float));
 
 	MktMemCtx work =
-			mkt_memctx_create(mkt_memctx_current(), "mktann split sample");
+			mkt_memctx_create(mkt_memctx_current(), "prism split sample");
 	MktMemCtx old = mkt_memctx_switch(work);
 
 	uint32_t cluster_id = 0;
@@ -1114,7 +1114,7 @@ mkt_posting_split(
 	 * crash-safety argument rests on. A crash here must leave the old list
 	 * authoritative and leak only the new, unreferenced pages.
 	 */
-	MKT_INJECTION_POINT("mktann-split-before-flip");
+	MKT_INJECTION_POINT("prism-split-before-flip");
 
 	/*
 	 * Flip: repoint the old leaf at new_head[0] and add leaves for the k-1

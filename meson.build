@@ -44,8 +44,12 @@ add_project_arguments(
 # easy as replacing a placeholder would be. Keep these variables in
 # sync with those literals.
 extension_name = meson.project_name()
-am_name = 'mktann'      # index access method name
-extension_schema = 'mkt' # extension schema; doubles as the GUC prefix
+am_name = 'prism'      # index access method name
+# GUC namespace for this index's query/build tunables (nprobe, rerank,
+# distance_mode, ...). These are all prism-specific, not extension-wide
+# (the mkt schema holds extension-wide identity instead), so this tracks
+# am_name rather than extension_name.
+guc_prefix = am_name
 
 # Generate mkt_config.h with SIMD mode configuration
 # Use set() conditionally - undefined macros appear as /* #undef X */ comments
@@ -54,7 +58,7 @@ config_data = configuration_data()
 config_data.set_quoted('MKT_VERSION', meson.project_version())
 config_data.set_quoted('MKT_EXTENSION_NAME', extension_name)
 config_data.set_quoted('MKT_AM_NAME', am_name)
-config_data.set_quoted('MKT_EXTENSION_SCHEMA', extension_schema)
+config_data.set_quoted('MKT_GUC_PREFIX', guc_prefix)
 # The extension shared library is version-named (meerkat-<version>.so)
 # so multiple extension versions can be installed side by side; C code
 # that references the library by name (parallel workers) uses this.

@@ -8,7 +8,7 @@ injection_points_attach
 
 step b_parallel: 
     SET max_parallel_maintenance_workers = 2;
-    CREATE INDEX i_par ON emb USING mktann (v) WITH (fan_out = 4, nlist = 16);
+    CREATE INDEX i_par ON emb USING prism (v) WITH (fan_out = 4, nlist = 16);
  <waiting ...>
 step w_phase: 
     SELECT phase, (tuples_total > 0) AS has_total
@@ -20,7 +20,7 @@ phase                               |has_total
 building index: clustering (k-means)|t        
 (1 row)
 
-step w_kmeans: SELECT injection_points_wakeup('mktann-build-kmeans');
+step w_kmeans: SELECT injection_points_wakeup('prism-build-kmeans');
 injection_points_wakeup
 -----------------------
                        
@@ -36,7 +36,7 @@ phase                                |has_total
 building index: clustering (subtrees)|t        
 (1 row)
 
-step w_subtrees: SELECT injection_points_wakeup('mktann-build-subtrees');
+step w_subtrees: SELECT injection_points_wakeup('prism-build-subtrees');
 injection_points_wakeup
 -----------------------
                        
@@ -52,7 +52,7 @@ phase                                   |has_total
 building index: finalizing posting lists|t        
 (1 row)
 
-step w_posting: SELECT injection_points_wakeup('mktann-build-posting');
+step w_posting: SELECT injection_points_wakeup('prism-build-posting');
 injection_points_wakeup
 -----------------------
                        
@@ -69,7 +69,7 @@ injection_points_attach
 
 step b_serial: 
     SET max_parallel_maintenance_workers = 0;
-    CREATE INDEX i_ser ON emb USING mktann (v) WITH (fan_out = 4, nlist = 16);
+    CREATE INDEX i_ser ON emb USING prism (v) WITH (fan_out = 4, nlist = 16);
  <waiting ...>
 step w_phase: 
     SELECT phase, (tuples_total > 0) AS has_total
@@ -81,7 +81,7 @@ phase                               |has_total
 building index: clustering (k-means)|t        
 (1 row)
 
-step w_kmeans: SELECT injection_points_wakeup('mktann-build-kmeans');
+step w_kmeans: SELECT injection_points_wakeup('prism-build-kmeans');
 injection_points_wakeup
 -----------------------
                        
@@ -97,7 +97,7 @@ phase                                   |has_total
 building index: finalizing posting lists|t        
 (1 row)
 
-step w_posting: SELECT injection_points_wakeup('mktann-build-posting');
+step w_posting: SELECT injection_points_wakeup('prism-build-posting');
 injection_points_wakeup
 -----------------------
                        

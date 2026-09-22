@@ -66,7 +66,7 @@
  */
 #define MKT_ENTRY_REPLICA_FACTOR 1.1
 
-void mktann_cost_estimate(
+void prism_cost_estimate(
 		PlannerInfo *root,
 		IndexPath	*path,
 		double		 loop_count,
