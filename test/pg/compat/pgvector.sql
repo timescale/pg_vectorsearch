@@ -1,17 +1,18 @@
 -- pgvector compatibility tests
 --
--- Verifies that meerkat's vector/halfvec types produce the same results as
--- pgvector's, and that data can be exchanged between the two extensions via
--- binary casts (WITHOUT FUNCTION). Also tests cast lifecycle across all
--- install/drop orderings. This is NOT a hard dependency — meerkat works
--- standalone — but users with existing pgvector workflows should get
--- identical behavior.
+-- Verifies that pg_vectorsearch's vector/halfvec types produce the same
+-- results as pgvector's, and that data can be exchanged between the two
+-- extensions via binary casts (WITHOUT FUNCTION). Also tests cast
+-- lifecycle across all install/drop orderings. This is NOT a hard
+-- dependency — pg_vectorsearch works standalone — but users with existing
+-- pgvector workflows should get identical behavior.
 --
 -- Prerequisites:
---   pgvector and meerkat must be installed in PostgreSQL. This suite installs
---   and drops both extensions (and a scratch schema) as it exercises the
---   install/drop orderings, so run it against a throwaway/clean database, not
---   one holding data you care about. The CI script uses a fresh instance.
+--   pgvector and pg_vectorsearch must be installed in PostgreSQL. This
+--   suite installs and drops both extensions (and a scratch schema) as it
+--   exercises the install/drop orderings, so run it against a
+--   throwaway/clean database, not one holding data you care about. The CI
+--   script uses a fresh instance.
 --
 -- Usage:
 --   psql -f test/pg/compat/pgvector.sql
@@ -22,7 +23,7 @@
 
 -- Ensure both extensions are loaded
 CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS meerkat;
+CREATE EXTENSION IF NOT EXISTS pg_vectorsearch;
 
 -- Track pass/fail counts
 CREATE TEMP TABLE test_results (
@@ -42,11 +43,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Helper: count binary casts between pgvector and meerkat. Compares
+-- Helper: count binary casts between pgvector and pg_vectorsearch. Compares
 -- regtype::text output, which format_type renders unqualified whenever the
 -- type's home schema is on the caller's search_path -- true here for both
--- sides, since meerkat's default (no SCHEMA clause) install and pgvector's
--- both land in public, which is on the default search_path.
+-- sides, since pg_vectorsearch's default (no SCHEMA clause) install and
+-- pgvector's both land in public, which is on the default search_path.
 CREATE OR REPLACE FUNCTION count_pgvector_casts() RETURNS int AS $$
     SELECT count(*)::int FROM pg_cast
     WHERE castmethod = 'b'
@@ -71,12 +72,13 @@ CREATE OR REPLACE FUNCTION casts_are_standalone() RETURNS bool AS $$
 $$ LANGUAGE sql;
 
 -- Helper: pgvector's distance operators registered as ordering members of
--- meerkat's prism families. meerkat's types now install alongside
--- pgvector's own (both default to public), so namespace alone no longer
--- distinguishes the two -- identify pgvector's operators by their left
--- argument type (vector/halfvec) instead. to_regtype (not ::regtype) so a
--- literal cast never errors when pgvector has been dropped -- it returns
--- NULL instead, and the joins simply match nothing, returning 0.
+-- pg_vectorsearch's prism families. pg_vectorsearch's types now install
+-- alongside pgvector's own (both default to public), so namespace alone
+-- no longer distinguishes the two -- identify pgvector's operators by
+-- their left argument type (vector/halfvec) instead. to_regtype (not
+-- ::regtype) so a literal cast never errors when pgvector has been
+-- dropped -- it returns NULL instead, and the joins simply match nothing,
+-- returning 0.
 CREATE OR REPLACE FUNCTION count_pgvector_prism_ops() RETURNS int AS $$
     SELECT count(*)::int
     FROM pg_amop ao
@@ -88,7 +90,7 @@ CREATE OR REPLACE FUNCTION count_pgvector_prism_ops() RETURNS int AS $$
 $$ LANGUAGE sql;
 
 -- Helper: prism's own ordering operators (on vec32/vec16), so a test can
--- assert meerkat's opclasses survive a pgvector drop untouched.
+-- assert pg_vectorsearch's opclasses survive a pgvector drop untouched.
 CREATE OR REPLACE FUNCTION count_mkt_prism_ops() RETURNS int AS $$
     SELECT count(*)::int
     FROM pg_amop ao
@@ -265,7 +267,7 @@ SELECT assert_test('halfvec cosine distance matches',
     < 1e-2);
 
 -- =====================================================================
--- 7. Cross-type: meerkat ops on pgvector data (via implicit cast)
+-- 7. Cross-type: pg_vectorsearch ops on pgvector data (via implicit cast)
 -- =====================================================================
 
 -- Create a table with pgvector's vector type
@@ -277,25 +279,25 @@ INSERT INTO pgv_items (v) VALUES
     ('[1,0,0]'), ('[0,1,0]'), ('[0,0,1]'),
     ('[1,1,0]'), ('[0,1,1]'), ('[1,0,1]');
 
--- Meerkat distance on pgvector column via binary cast
+-- pg_vectorsearch distance on pgvector column via binary cast
 SELECT assert_test('mkt distance on pgvector column via cast',
     (SELECT public.l2_distance(v::public.vec32,
                             '[1,1,1]'::public.vec32)
      FROM pgv_items WHERE id = 1) IS NOT NULL);
 
--- Implicit cast: pgvector column used directly with meerkat operator
+-- Implicit cast: pgvector column used directly with pg_vectorsearch operator
 SELECT assert_test('implicit cast with mkt operator',
     (SELECT v OPERATOR(public.<->) '[1,1,1]'::public.vec32
      FROM pgv_items WHERE id = 1) IS NOT NULL);
 
--- ORDER BY with meerkat operators on pgvector data (implicit cast)
+-- ORDER BY with pg_vectorsearch operators on pgvector data (implicit cast)
 SELECT assert_test('mkt ORDER BY on pgvector data via cast',
     (SELECT array_agg(id ORDER BY
         v OPERATOR(public.<->) '[1,1,1]'::public.vec32)
      FROM pgv_items) IS NOT NULL);
 
 -- =====================================================================
--- 8. Cross-type: pgvector ops on meerkat data (via explicit cast)
+-- 8. Cross-type: pgvector ops on pg_vectorsearch data (via explicit cast)
 -- =====================================================================
 
 CREATE TEMP TABLE mkt_items (
@@ -306,7 +308,7 @@ INSERT INTO mkt_items (v) VALUES
     ('[1,0,0]'), ('[0,1,0]'), ('[0,0,1]'),
     ('[1,1,0]'), ('[0,1,1]'), ('[1,0,1]');
 
--- pgvector distance on meerkat column via explicit cast
+-- pgvector distance on pg_vectorsearch column via explicit cast
 SELECT assert_test('pgvector distance on mkt column via cast',
     (SELECT public.l2_distance(v::public.vector,
                                '[1,1,1]'::public.vector)
@@ -354,7 +356,7 @@ SELECT assert_test('vector_norm matches',
 -- 12. Mixed-type distance via implicit cast
 -- =====================================================================
 
--- pgvector value as LHS with meerkat function (implicit cast)
+-- pgvector value as LHS with pg_vectorsearch function (implicit cast)
 SELECT assert_test('public.l2_distance with pgvector arg (implicit)',
     abs(public.l2_distance('[1,2,3]'::public.vector,
                         '[4,5,6]'::public.vec32)
@@ -377,14 +379,14 @@ SELECT assert_test('public.cosine_distance with pgvector arg (implicit)',
 -- auto-cleaned via type dependencies.
 
 -- =====================================================================
--- 13. Install path: pgvector first, then meerkat (DO block)
+-- 13. Install path: pgvector first, then pg_vectorsearch (DO block)
 -- =====================================================================
 
-DROP EXTENSION IF EXISTS meerkat CASCADE;
+DROP EXTENSION IF EXISTS pg_vectorsearch CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
 
 CREATE EXTENSION vector;
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 
 SELECT assert_test('pgv-first: 4 binary casts',
     count_pgvector_casts() = 4);
@@ -399,13 +401,13 @@ SELECT assert_test('pgv-first: mkt->pgvector cast works',
     '[1,2,3]'::public.vec32::public.vector::text = '[1,2,3]');
 
 -- =====================================================================
--- 14. Install path: meerkat first, then pgvector (event trigger)
+-- 14. Install path: pg_vectorsearch first, then pgvector (event trigger)
 -- =====================================================================
 
-DROP EXTENSION meerkat CASCADE;
+DROP EXTENSION pg_vectorsearch CASCADE;
 DROP EXTENSION vector;
 
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 CREATE EXTENSION vector;
 
 SELECT assert_test('mkt-first: 4 binary casts',
@@ -421,18 +423,20 @@ SELECT assert_test('mkt-first: mkt->pgvector cast works',
     '[1,2,3]'::public.vec32::public.vector::text = '[1,2,3]');
 
 -- =====================================================================
--- 15. DROP meerkat CASCADE: casts dropped, pgvector survives
+-- 15. DROP pg_vectorsearch CASCADE: casts dropped, pgvector survives
 -- =====================================================================
 
--- A bare drop is refused: the binary casts depend on meerkat's types, so
--- removing meerkat needs CASCADE and cannot silently succeed. The subxact
--- rolls back, so meerkat is still installed afterwards.
+-- A bare drop is refused: the binary casts depend on pg_vectorsearch's
+-- types, so removing pg_vectorsearch needs CASCADE and cannot silently
+-- succeed. The subxact rolls back, so pg_vectorsearch is still installed
+-- afterwards.
 SELECT assert_test('drop-mkt: bare DROP is refused (needs CASCADE)',
-    stmt_is_refused('DROP EXTENSION meerkat'));
-SELECT assert_test('drop-mkt: meerkat still installed after refused bare DROP',
-    EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'meerkat'));
+    stmt_is_refused('DROP EXTENSION pg_vectorsearch'));
+SELECT assert_test(
+    'drop-mkt: pg_vectorsearch still installed after refused bare DROP',
+    EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_vectorsearch'));
 
-DROP EXTENSION meerkat CASCADE;
+DROP EXTENSION pg_vectorsearch CASCADE;
 
 SELECT assert_test('drop-mkt: no casts remain',
     count_pgvector_casts() = 0);
@@ -449,22 +453,23 @@ SELECT assert_test('drop-mkt: pgvector still works',
 SELECT assert_test('drop-mkt: pgvector operator still works',
     ('[0,0]'::public.vector OPERATOR(public.<->) '[3,4]'::public.vector) = 5);
 
--- With meerkat (and its casts) gone, pgvector is no longer encumbered: a bare
--- DROP now succeeds without CASCADE -- meerkat only forces CASCADE while it is
--- installed. (This drops pgvector; recreate it for the next section.)
+-- With pg_vectorsearch (and its casts) gone, pgvector is no longer
+-- encumbered: a bare DROP now succeeds without CASCADE -- pg_vectorsearch
+-- only forces CASCADE while it is installed. (This drops pgvector;
+-- recreate it for the next section.)
 SELECT assert_test('drop-mkt: pgvector then drops without CASCADE',
     NOT stmt_is_refused('DROP EXTENSION vector'));
 CREATE EXTENSION vector;
 
 -- =====================================================================
--- 16. DROP pgvector CASCADE: casts dropped, meerkat survives
+-- 16. DROP pgvector CASCADE: casts dropped, pg_vectorsearch survives
 -- =====================================================================
 
 -- Restore both (pgvector-first path)
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 
 -- Both present again: the six pgvector ordering operators are members, and a
--- bare drop is refused (the casts block it, same as the meerkat side).
+-- bare drop is refused (the casts block it, same as the pg_vectorsearch side).
 SELECT assert_test('drop-pgv: 6 pgvector ops are members before drop',
     count_pgvector_prism_ops() = 6);
 SELECT assert_test('drop-pgv: bare DROP is refused (needs CASCADE)',
@@ -472,18 +477,19 @@ SELECT assert_test('drop-pgv: bare DROP is refused (needs CASCADE)',
 
 DROP EXTENSION vector CASCADE;
 
-SELECT assert_test('drop-pgv: meerkat still loaded',
+SELECT assert_test('drop-pgv: pg_vectorsearch still loaded',
     EXISTS (SELECT 1 FROM pg_extension
-            WHERE extname = 'meerkat'));
+            WHERE extname = 'pg_vectorsearch'));
 
 SELECT assert_test('drop-pgv: public.vec32 still works',
     '[1,2,3]'::public.vec32::text = '[1,2,3]');
 
--- The pgvector operator members are removed with pgvector's operators, while
--- meerkat's own six ordering operators and its opclasses are untouched.
+-- The pgvector operator members are removed with pgvector's operators,
+-- while pg_vectorsearch's own six ordering operators and its opclasses
+-- are untouched.
 SELECT assert_test('drop-pgv: pgvector ops removed from prism families',
     count_pgvector_prism_ops() = 0);
-SELECT assert_test('drop-pgv: meerkat native ops intact',
+SELECT assert_test('drop-pgv: pg_vectorsearch native ops intact',
     count_mkt_prism_ops() = 6);
 SELECT assert_test('drop-pgv: prism opclasses intact',
     (SELECT count(*) FROM pg_opclass oc
@@ -509,17 +515,17 @@ SELECT assert_test('recreate-pgv: cast works',
     '[1,2,3]'::public.vector::public.vec32::text = '[1,2,3]');
 
 -- =====================================================================
--- 18. meerkat standalone (no pgvector)
+-- 18. pg_vectorsearch standalone (no pgvector)
 -- =====================================================================
 
-DROP EXTENSION meerkat CASCADE;
+DROP EXTENSION pg_vectorsearch CASCADE;
 DROP EXTENSION vector;
 
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 
-SELECT assert_test('standalone: meerkat loads without pgvector',
+SELECT assert_test('standalone: pg_vectorsearch loads without pgvector',
     EXISTS (SELECT 1 FROM pg_extension
-            WHERE extname = 'meerkat'));
+            WHERE extname = 'pg_vectorsearch'));
 
 SELECT assert_test('standalone: public.vec32 works',
     '[1,2,3]'::public.vec32::text = '[1,2,3]');
@@ -528,11 +534,11 @@ SELECT assert_test('standalone: event trigger exists',
     EXISTS (SELECT 1 FROM pg_event_trigger
             WHERE evtname = 'prism_pgvector_cast_trigger'));
 
-DROP EXTENSION meerkat;
+DROP EXTENSION pg_vectorsearch;
 
 SELECT assert_test('standalone: clean drop',
     NOT EXISTS (SELECT 1 FROM pg_extension
-                WHERE extname = 'meerkat'));
+                WHERE extname = 'pg_vectorsearch'));
 
 -- =====================================================================
 -- Indexing pgvector-typed columns with prism
@@ -545,10 +551,11 @@ SELECT assert_test('standalone: clean drop',
 -- TYPE public.vec16 accepts a public.halfvec column. The access method then has
 -- to read that column as f16, and it gets that from the opclass's own type
 -- descriptor rather than by identifying the column's type itself -- so a
--- pgvector column and a meerkat column are handled identically, with nothing
--- in the access method comparing type OIDs. These tests pin that down: a
--- descriptor keyed on anything narrower would read the f16 pairs as float32
--- and return garbage from an index the planner considers valid.
+-- pgvector column and a pg_vectorsearch column are handled identically,
+-- with nothing in the access method comparing type OIDs. These tests pin
+-- that down: a descriptor keyed on anything narrower would read the f16
+-- pairs as float32 and return garbage from an index the planner
+-- considers valid.
 --
 -- Each recall check is paired with a plan check. An index is only considered
 -- for an ORDER BY when the ordering operator belongs to the index's operator
@@ -556,13 +563,13 @@ SELECT assert_test('standalone: clean drop',
 -- sequential scan that happens to return the same rows; without it the recall
 -- assertions would pass on brute force and say nothing about the index.
 --
--- Both spellings of the operator have to reach the index. meerkat adds
+-- Both spellings of the operator have to reach the index. pg_vectorsearch adds
 -- pgvector's <->, <#> and <=> to its own prism families as ordering members
 -- precisely so that a query written against pgvector -- or an unqualified
 -- <-> resolving to pgvector under a pgvector-first search_path -- is not
 -- silently downgraded to a sequential scan.
 CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS meerkat;
+CREATE EXTENSION IF NOT EXISTS pg_vectorsearch;
 SET search_path = public, mkt;
 
 CREATE TEMP TABLE idx_src (id int, txt text);
@@ -633,7 +640,7 @@ SELECT assert_test(
          LIMIT 10) g
       WHERE g.id = ANY (SELECT unnest(ids) FROM idx_truth)) >= 8);
 
--- Control: meerkat's own halfvec column, same data, same expectation.
+-- Control: pg_vectorsearch's own halfvec column, same data, same expectation.
 SELECT assert_test(
     'mkt halfvec column: prism recall >= 8/10',
     (SELECT count(*) FROM (
@@ -653,7 +660,7 @@ SELECT assert_test('pgvector halfvec column gets half-precision centroids',
        FROM prism.centroid_pages('idx_fmt_i'::regclass)));
 
 -- pgvector's three distance operators are ordering members of each of
--- meerkat's six prism families.
+-- pg_vectorsearch's six prism families.
 SELECT assert_test('pgvector distance operators joined the prism families',
     count_pgvector_prism_ops() = 6);
 
@@ -678,16 +685,18 @@ SELECT assert_test(
          LIMIT 10) g
       WHERE g.id = ANY (SELECT unnest(ids) FROM idx_truth)) >= 8);
 
--- The reverse pairing -- a meerkat-typed column with pgvector's operator --
--- does not resolve, and is not expected to: the meerkat -> pgvector cast is
--- ASSIGNMENT rather than IMPLICIT, deliberately, so that having both
--- extensions installed does not make every operator call ambiguous. Queries
--- over meerkat's own types use meerkat's own operators. meerkat's types now
--- default to the same schema as pgvector's own (public), so namespace can no
--- longer tell the two apart -- identify "pgvector's own <->" by extension
--- membership instead: no <-> operator owned by the vector extension takes a
--- meerkat vec16 as its left argument.
-SELECT assert_test('meerkat column with pgvector operator does not resolve',
+-- The reverse pairing -- a pg_vectorsearch-typed column with pgvector's
+-- operator -- does not resolve, and is not expected to: the
+-- pg_vectorsearch -> pgvector cast is ASSIGNMENT rather than IMPLICIT,
+-- deliberately, so that having both extensions installed does not make
+-- every operator call ambiguous. Queries over pg_vectorsearch's own types
+-- use pg_vectorsearch's own operators. pg_vectorsearch's types now
+-- default to the same schema as pgvector's own (public), so namespace can
+-- no longer tell the two apart -- identify "pgvector's own <->" by
+-- extension membership instead: no <-> operator owned by the vector
+-- extension takes a pg_vectorsearch vec16 as its left argument.
+SELECT assert_test(
+    'pg_vectorsearch column with pgvector operator does not resolve',
     NOT EXISTS (
         SELECT 1 FROM pg_operator op
         JOIN pg_depend d ON d.objid = op.oid AND d.deptype = 'e'
@@ -704,28 +713,30 @@ RESET search_path;
 -- =====================================================================
 -- 19. Both extensions in NON-default schemas (dynamic discovery)
 -- =====================================================================
--- pgvector is relocatable, and meerkat's types/operators/AM are
+-- pgvector is relocatable, and pg_vectorsearch's types/operators/AM are
 -- install-time relocatable too (prism.rebalance and friends are the one
--- exception -- see sql/meerkat.sql). setup_pgvector_compat() and the
+-- exception -- see sql/pg_vectorsearch.sql). setup_pgvector_compat() and the
 -- install DO block/event trigger discover BOTH schemas from
 -- pg_extension.extnamespace rather than assuming either is public. Install
--- pgvector into pgv_alt and meerkat into meerkat_alt, and assert the compat
+-- pgvector into pgv_alt and pg_vectorsearch into pgvs_alt, and assert the
+-- compat
 -- casts, the operator family memberships, and a real index scan all still
 -- come out right -- for both install orderings.
 
-DROP EXTENSION IF EXISTS meerkat CASCADE;
+DROP EXTENSION IF EXISTS pg_vectorsearch CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
 -- No pre-emptive DROP SCHEMA: these are our names, but cascade-dropping
 -- whatever a user might have under them would be too aggressive. A clean DB
 -- is a documented prerequisite, so a bare CREATE fails loudly if a name is
 -- already taken.
 CREATE SCHEMA pgv_alt;
-CREATE SCHEMA meerkat_alt;
+CREATE SCHEMA pgvs_alt;
 
--- Ordering A: pgvector (in pgv_alt) first, meerkat (in meerkat_alt) second
+-- Ordering A: pgvector (in pgv_alt) first, pg_vectorsearch (in
+-- pgvs_alt) second
 -- (install DO block).
 CREATE EXTENSION vector SCHEMA pgv_alt;
-CREATE EXTENSION meerkat SCHEMA meerkat_alt;
+CREATE EXTENSION pg_vectorsearch SCHEMA pgvs_alt;
 
 SELECT assert_test('custom-schema (pgv-first): 4 binary compat casts',
     (SELECT count(*) FROM pg_cast c
@@ -734,11 +745,11 @@ SELECT assert_test('custom-schema (pgv-first): 4 binary compat casts',
       WHERE c.castmethod = 'b'
         AND ((s.typnamespace = 'pgv_alt'::regnamespace
               AND s.typname IN ('vector', 'halfvec')
-              AND t.typnamespace = 'meerkat_alt'::regnamespace
+              AND t.typnamespace = 'pgvs_alt'::regnamespace
               AND t.typname IN ('vec32', 'vec16'))
           OR (t.typnamespace = 'pgv_alt'::regnamespace
               AND t.typname IN ('vector', 'halfvec')
-              AND s.typnamespace = 'meerkat_alt'::regnamespace
+              AND s.typnamespace = 'pgvs_alt'::regnamespace
               AND s.typname IN ('vec32', 'vec16')))) = 4);
 
 SELECT assert_test(
@@ -751,13 +762,13 @@ SELECT assert_test(
         AND op.oprnamespace = 'pgv_alt'::regnamespace) = 6);
 
 SELECT assert_test('custom-schema: pgvector->mkt cast round-trips',
-    '[1,2,3]'::pgv_alt.vector::meerkat_alt.vec32::text = '[1,2,3]');
+    '[1,2,3]'::pgv_alt.vector::pgvs_alt.vec32::text = '[1,2,3]');
 SELECT assert_test('custom-schema: mkt->pgvector cast round-trips',
-    '[1,2,3]'::meerkat_alt.vec32::pgv_alt.vector::text = '[1,2,3]');
+    '[1,2,3]'::pgvs_alt.vec32::pgv_alt.vector::text = '[1,2,3]');
 
 -- mkt itself stays a fixed, separate schema regardless of where the types
--- landed -- confirm it did not end up inside meerkat_alt.
-SELECT assert_test('custom-schema: mkt is separate from meerkat_alt',
+-- landed -- confirm it did not end up inside pgvs_alt.
+SELECT assert_test('custom-schema: mkt is separate from pgvs_alt',
     to_regnamespace('mkt') IS NOT NULL
     AND to_regtype('mkt.vec32') IS NULL);
 
@@ -781,7 +792,7 @@ INSERT INTO idx_alt
                        FROM generate_series(1, 8) j) || ']')::pgv_alt.vector(8)
     FROM generate_series(1, 2000) g;
 ANALYZE idx_alt;
-CREATE INDEX idx_alt_i ON idx_alt USING prism (v meerkat_alt.vec32_l2_ops);
+CREATE INDEX idx_alt_i ON idx_alt USING prism (v pgvs_alt.vec32_l2_ops);
 SET enable_seqscan = off;
 SET prism.rerank_pool = -1;
 SELECT assert_test(
@@ -794,11 +805,12 @@ RESET prism.rerank_pool;
 DROP TABLE idx_alt;
 DROP FUNCTION public.plan_uses_index_scan(text);
 
--- Ordering B: meerkat (in meerkat_alt) first, pgvector (in pgv_alt) second
+-- Ordering B: pg_vectorsearch (in pgvs_alt) first, pgvector (in
+-- pgv_alt) second
 -- (event trigger).
-DROP EXTENSION meerkat CASCADE;
+DROP EXTENSION pg_vectorsearch CASCADE;
 DROP EXTENSION vector CASCADE;
-CREATE EXTENSION meerkat SCHEMA meerkat_alt;
+CREATE EXTENSION pg_vectorsearch SCHEMA pgvs_alt;
 CREATE EXTENSION vector SCHEMA pgv_alt;   -- fires prism_pgvector_cast_trigger
 
 SELECT assert_test('custom-schema (mkt-first): event trigger created 4 casts',
@@ -808,11 +820,11 @@ SELECT assert_test('custom-schema (mkt-first): event trigger created 4 casts',
       WHERE c.castmethod = 'b'
         AND ((s.typnamespace = 'pgv_alt'::regnamespace
               AND s.typname IN ('vector', 'halfvec')
-              AND t.typnamespace = 'meerkat_alt'::regnamespace
+              AND t.typnamespace = 'pgvs_alt'::regnamespace
               AND t.typname IN ('vec32', 'vec16'))
           OR (t.typnamespace = 'pgv_alt'::regnamespace
               AND t.typname IN ('vector', 'halfvec')
-              AND s.typnamespace = 'meerkat_alt'::regnamespace
+              AND s.typnamespace = 'pgvs_alt'::regnamespace
               AND s.typname IN ('vec32', 'vec16')))) = 4);
 
 -- Mirror the pgv-first checks: the event-trigger path must also add the six
@@ -845,7 +857,7 @@ INSERT INTO idx_altb
                        FROM generate_series(1, 8) j) || ']')::pgv_alt.vector(8)
     FROM generate_series(1, 2000) g;
 ANALYZE idx_altb;
-CREATE INDEX idx_altb_i ON idx_altb USING prism (v meerkat_alt.vec32_l2_ops);
+CREATE INDEX idx_altb_i ON idx_altb USING prism (v pgvs_alt.vec32_l2_ops);
 SET enable_seqscan = off;
 SET prism.rerank_pool = -1;
 SELECT assert_test(
@@ -862,12 +874,12 @@ DROP FUNCTION public.plan_uses_index_scan(text);
 -- Both alt schemas are empty once their extension is gone, so a plain DROP
 -- (no CASCADE) suffices and would fail loudly if anything unexpected were
 -- left behind.
-DROP EXTENSION meerkat CASCADE;
+DROP EXTENSION pg_vectorsearch CASCADE;
 DROP EXTENSION vector CASCADE;
 DROP SCHEMA pgv_alt;
-DROP SCHEMA meerkat_alt;
+DROP SCHEMA pgvs_alt;
 CREATE EXTENSION vector;
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 
 -- =====================================================================
 -- Summary

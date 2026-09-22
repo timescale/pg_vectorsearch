@@ -6,10 +6,10 @@ CLAUDE.local.md.
 
 ## Project Overview
 
-Meerkat is a PostgreSQL extension providing PRISM, an index access method
-(IAM) for Approximate Nearest Neighbor (ANN) vector search, inspired by
-Google's ScaNN for AlloyDB and Microsoft's SPANN. It uses the vector format
-from [pgvector].
+pg_vectorsearch is a PostgreSQL extension providing PRISM, an index access
+method (IAM) for Approximate Nearest Neighbor (ANN) vector search, inspired
+by Google's ScaNN for AlloyDB and Microsoft's SPANN. It uses the vector
+format from [pgvector].
 
 ### Architecture
 
@@ -53,7 +53,8 @@ providing first-class vector search performance. Performance is measured by
 QPS at a certain recall.
 
 However, PRISM can build both as a standalone (in-memory) vector search
-engine and as the meerkat extension's PostgreSQL Index Access Method (IAM).
+engine and as the pg_vectorsearch extension's PostgreSQL Index Access
+Method (IAM).
 
 #### The role of standalone PRISM
 
@@ -219,20 +220,20 @@ Prefer "real" datasets over generated data.
 
 #### Critical benchmark instructions
 
-- Core algorithms can be benchmarked using the Meerkat client tool's search
-command (`mkt bench search`) as long as that exercises a path that is shared
-between standalone and PostgreSQL builds of PRISM.
+- Core algorithms can be benchmarked using the pg_vectorsearch client
+tool's search command (`mkt bench search`) as long as that exercises a
+path that is shared between standalone and PostgreSQL builds of PRISM.
 - Always benchmark and profile a release build with all optimizations turned on.
 Benchmarking a debug build will _not_ give the correct understanding of the
 current performance.
 - When running (Claude) in a sandbox, it is not possible for Claude to see the
 real running status of PostgreSQL, so it is best to ask the user to restart
 PostgreSQL.
-- After building and installing a new .so binary of the Meerkat extension, it
-is not necessary to restart PostgreSQL since a new session will load the new
-.so (i.e., creating a new session/backend is enough). Only changes to the SQL
-code and/or metadata in the extension requires recreating the extension in
-PostgreSQL.
+- After building and installing a new .so binary of the pg_vectorsearch
+extension, it is not necessary to restart PostgreSQL since a new session
+will load the new .so (i.e., creating a new session/backend is enough).
+Only changes to the SQL code and/or metadata in the extension requires
+recreating the extension in PostgreSQL.
 
 ### Coding Patterns
 
@@ -288,10 +289,11 @@ vec32_dot_product(const Vec32 *v1, const Vec32 *v2)
 
 ### Dependencies
 
-None at the SQL level. Meerkat defines its own `vec32`, `vec16` and
-`rabitq` types (see `sql/meerkat.sql`), so it installs and runs without
-pgvector. They install into whichever schema `CREATE EXTENSION meerkat`
-targets (a `SCHEMA` clause, or the first existing schema on `search_path`
+None at the SQL level. pg_vectorsearch defines its own `vec32`, `vec16`
+and `rabitq` types (see `sql/pg_vectorsearch.sql`), so it installs and
+runs without pgvector. They install into whichever schema
+`CREATE EXTENSION pg_vectorsearch` targets (a `SCHEMA` clause, or the
+first existing schema on `search_path`
 — typically `public`); maintenance, administration, and inspection
 functions are the one exception, always living in a separate, fixed
 `mkt` schema regardless of that choice. The distinct `vec32`/`vec16`
@@ -308,12 +310,13 @@ CREATE CAST (myschema.vec32 AS public.vector)   WITHOUT FUNCTION AS ASSIGNMENT;
 -- and the same pair for halfvec
 ```
 
-Direction matters: pgvector → meerkat is IMPLICIT so an existing pgvector
-column works transparently, while meerkat → pgvector is ASSIGNMENT to avoid
-operator ambiguity when both extensions are installed. Install order does not
-matter — `prism.setup_pgvector_compat()` runs at `CREATE EXTENSION meerkat` if
-pgvector is already there, and an event trigger runs it if pgvector arrives
-later.
+Direction matters: pgvector → pg_vectorsearch is IMPLICIT so an existing
+pgvector column works transparently, while pg_vectorsearch → pgvector is
+ASSIGNMENT to avoid operator ambiguity when both extensions are
+installed. Install order does not matter —
+`prism.setup_pgvector_compat()` runs at `CREATE EXTENSION pg_vectorsearch`
+if pgvector is already there, and an event trigger runs it if pgvector
+arrives later.
 
 The consequence worth remembering: because the casts are `WITHOUT FUNCTION`,
 they satisfy PostgreSQL's binary-coercibility rule for operator classes. That
@@ -338,10 +341,10 @@ no family membership, the planner picks a sequential scan, which returns the
 right rows. Any test that checks only results will pass while measuring brute
 force — so plan checks, not just recall checks, are what pin this down.
 
-The `mkt.<type>` column with pgvector's operator is the one pairing that does
-not resolve, and deliberately so: the meerkat → pgvector cast is ASSIGNMENT,
-not IMPLICIT, precisely to keep operator calls unambiguous when both
-extensions are installed.
+The `mkt.<type>` column with pgvector's operator is the one pairing that
+does not resolve, and deliberately so: the pg_vectorsearch → pgvector
+cast is ASSIGNMENT, not IMPLICIT, precisely to keep operator calls
+unambiguous when both extensions are installed.
 
 ### Concurrency Safety
 

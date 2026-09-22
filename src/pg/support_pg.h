@@ -1,5 +1,5 @@
 /*
- * mkt_pg.h - PostgreSQL-specific macros and helpers for meerkat
+ * mkt_pg.h - PostgreSQL-specific macros and helpers for pg_vectorsearch
  */
 
 #ifndef MKT_PG_H

@@ -49,7 +49,8 @@ InitCenters(
 	collation = index->rd_indcollation[0];
 
 	/* Choose an initial center uniformly at random */
-	/* [MODIFIED: use uniform*N instead of next()%N to match meerkat RNG] */
+	/* [MODIFIED: use uniform*N instead of next()%N to match
+	 * pg_vectorsearch RNG] */
 	{
 		uint32_t first = (uint32_t)(RandomDouble() * samples->length);
 		if ((int)first >= samples->length)
@@ -87,7 +88,7 @@ InitCenters(
 
 			/*
 			 * Use distance squared for weighted probability distribution.
-			 * [MODIFIED: use L2 squared directly to match meerkat]
+			 * [MODIFIED: use L2 squared directly to match pg_vectorsearch]
 			 */
 			{
 				const Vector *va = (const Vector *)VectorArrayGet(samples, j);

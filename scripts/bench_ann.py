@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benchmark meerkat (prism), pgvector (ivfflat/hnsw) on an
+Benchmark pg_vectorsearch (prism), pgvector (ivfflat/hnsw) on an
 ann-benchmarks HDF5 dataset.
 
 Loads the HDF5 dataset from ann-benchmarks, builds an ANN index, runs
@@ -649,7 +649,7 @@ def main():
     with conn.cursor() as cur:
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
         if args.index_type == "prism":
-            cur.execute("CREATE EXTENSION IF NOT EXISTS meerkat")
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pg_vectorsearch")
     print("Extensions ready")
 
     if not args.skip_load:

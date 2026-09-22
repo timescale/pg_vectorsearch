@@ -107,7 +107,7 @@ explicitly as its own concern:
 - **Public API surface especially.** New SQL functions, views, or GUCs
   deserve more scrutiny than internal code — their names, argument order,
   and return shapes should read as if they belong next to the existing
-  ones in `sql/meerkat.sql`, not as a one-off with its own conventions.
+  ones in `sql/pg_vectorsearch.sql`, not as a one-off with its own conventions.
   Once shipped, renaming a public function is a breaking change for
   whoever depends on it, so an inconsistent name is far cheaper to catch
   now than after a release.
@@ -157,7 +157,7 @@ check specifically for:
   shouldn't see (internal file paths, raw pointers/addresses, other
   tenants' data).
 - Whether the new SQL surface actually matches how equivalent existing
-  functions in `sql/meerkat.sql` restrict access — a good check is
+  functions in `sql/pg_vectorsearch.sql` restrict access — a good check is
   grepping for how a similar existing function handles this rather than
   inventing a new pattern.
 

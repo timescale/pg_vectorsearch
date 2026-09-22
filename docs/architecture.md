@@ -1,7 +1,8 @@
 # PRISM Architecture
 
-High-level architecture for PRISM, the meerkat extension's PostgreSQL index
-access method for approximate nearest neighbor (ANN) vector search.
+High-level architecture for PRISM, the pg_vectorsearch extension's
+PostgreSQL index access method for approximate nearest neighbor (ANN)
+vector search.
 
 ## Overview
 
@@ -19,7 +20,7 @@ Key design elements:
 
 ### Hybrid Search with pg_textsearch
 
-Meerkat is designed as part of a unified search stack alongside
+pg_vectorsearch is designed as part of a unified search stack alongside
 [pg_textsearch](https://github.com/timescale/pg_textsearch), enabling hybrid
 search that combines semantic (vector) and keyword (BM25) retrieval.
 

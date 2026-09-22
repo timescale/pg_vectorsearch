@@ -1,4 +1,4 @@
-# meerkat PostgreSQL extension
+# pg_vectorsearch PostgreSQL extension
 
 extension_sources = files(
   'support_pg.c',
@@ -65,7 +65,7 @@ ext_module_pathname = '$libdir' / ext_module_name
 # Build the extension as a shared library. The vcs_tag-generated
 # git_commit.h is listed as a source so ninja produces it before
 # compiling any TU that #includes it.
-meerkat_ext_so = shared_module(ext_module_name,
+pgvs_ext_so = shared_module(ext_module_name,
   extension_sources,
   git_commit_h,
   c_args: pg_ext_cflags,
@@ -82,15 +82,15 @@ meerkat_ext_so = shared_module(ext_module_name,
 
 # Generate and install the extension control and SQL files. The
 # version comes from meson.build (single source of truth); the SQL
-# install script is a copy of the canonical sql/meerkat.sql under the
-# versioned name. The control template is kept header-free so git
-# displays it as a rename of meerkat.control (the files must stay
-# >50% similar for rename detection).
+# install script is a copy of the canonical sql/pg_vectorsearch.sql
+# under the versioned name. The control template is kept header-free
+# so git displays it as a rename of pg_vectorsearch.control (the files
+# must stay >50% similar for rename detection).
 ext_control_data = configuration_data()
 ext_control_data.set('VERSION', ext_version)
 
 configure_file(
-  input: meson.project_source_root() / 'meerkat.control.in',
+  input: meson.project_source_root() / 'pg_vectorsearch.control.in',
   output: extension_name + '.control',
   configuration: ext_control_data,
   install: true,
@@ -116,8 +116,8 @@ configure_file(
 # The canonical SQL is installed verbatim under the versioned name
 # (pgvector-style): MODULE_PATHNAME and @extschema@ are resolved by
 # PostgreSQL when the script runs, so nothing needs substituting.
-custom_target('meerkat-sql',
-  input: meson.project_source_root() / 'sql' / 'meerkat.sql',
+custom_target('pg_vectorsearch-sql',
+  input: meson.project_source_root() / 'sql' / 'pg_vectorsearch.sql',
   output: extension_name + '--' + ext_version + '.sql',
   command: ['cp', '@INPUT@', '@OUTPUT@'],
   build_by_default: true,
@@ -125,7 +125,7 @@ custom_target('meerkat-sql',
   install_dir: pg_sharedir / 'extension',
 )
 
-# Upgrade scripts (sql/meerkat--A--B.sql) are listed here
+# Upgrade scripts (sql/pg_vectorsearch--A--B.sql) are listed here
 # explicitly as they are added; see sql/README.md.
 ext_update_scripts = []
 if ext_update_scripts.length() > 0

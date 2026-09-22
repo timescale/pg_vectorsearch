@@ -53,9 +53,9 @@
  * single query. Exposed via mkt_phase_stats() / mkt_phase_stats_reset():
  *
  *   CREATE FUNCTION mkt_phase_stats_reset() RETURNS void
- *     AS '$libdir/meerkat','mkt_phase_stats_reset' LANGUAGE C;
+ *     AS '$libdir/pg_vectorsearch','mkt_phase_stats_reset' LANGUAGE C;
  *   CREATE FUNCTION mkt_phase_stats() RETURNS text
- *     AS '$libdir/meerkat','mkt_phase_stats' LANGUAGE C;
+ *     AS '$libdir/pg_vectorsearch','mkt_phase_stats' LANGUAGE C;
  * ---------------------------------------------------------------- */
 static uint64_t g_phase_nqueries	 = 0;
 static uint64_t g_phase_centroid_ns	 = 0;

@@ -3,11 +3,11 @@
  *
  * Provides the minimum types, macros, and function stubs needed to compile
  * pgvector's Elkan k-means implementation standalone (without PostgreSQL)
- * for benchmarking against meerkat's Lloyd+BLAS k-means.
+ * for benchmarking against pg_vectorsearch's Lloyd+BLAS k-means.
  *
- * Memory: Uses meerkat's arena allocator (mkt_alloc/mkt_free).
- * Distance: Dispatches through meerkat's vecops functions.
- * Random: Uses xoshiro256** PRNG (same as meerkat's kmeans.c).
+ * Memory: Uses pg_vectorsearch's arena allocator (mkt_alloc/mkt_free).
+ * Distance: Dispatches through pg_vectorsearch's vecops functions.
+ * Random: Uses xoshiro256** PRNG (same as pg_vectorsearch's kmeans.c).
  */
 
 #ifndef MKT_KMEANS_PGVECTOR_H
@@ -188,7 +188,7 @@ typedef PgvRelationData *Relation;
  * Distance dispatch
  *
  * pgvector calls: FunctionCall2Coll(procinfo, collation, v1, v2)
- * We compute the distance using meerkat's vecops and store the
+ * We compute the distance using pg_vectorsearch's vecops and store the
  * result in a thread-local so DatumGetFloat8() can retrieve it.
  *
  * For Elkan k-means, pgvector uses:
@@ -281,7 +281,7 @@ IvfflatOptionalProcInfo(Relation index, uint16 procnum)
 /* rd_indcollation is a field in PgvRelationData (initialized to {0}) */
 
 /* ----------------------------------------------------------------
- * Xoshiro256** PRNG (identical to meerkat's kmeans.c)
+ * Xoshiro256** PRNG (identical to pg_vectorsearch's kmeans.c)
  * ---------------------------------------------------------------- */
 typedef struct
 {

@@ -1,5 +1,5 @@
 /*
- * mkt_types.h - Core type definitions for Meerkat
+ * mkt_types.h - Core type definitions for pg_vectorsearch
  */
 
 #ifndef MKT_TYPES_H

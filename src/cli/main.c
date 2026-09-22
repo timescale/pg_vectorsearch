@@ -1,8 +1,8 @@
 /*
- * meerkat CLI tool
+ * pg_vectorsearch CLI tool
  *
- * Command-line tool for testing, benchmarking, and debugging meerkat
- * components in standalone mode (without PostgreSQL).
+ * Command-line tool for testing, benchmarking, and debugging
+ * pg_vectorsearch components in standalone mode (without PostgreSQL).
  */
 
 #include "mkt_config.h"

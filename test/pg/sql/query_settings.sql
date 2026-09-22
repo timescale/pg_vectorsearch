@@ -508,8 +508,8 @@ RESET prism.nprobe;
 -- bucket holds 100% of queries. Ranks above nprobe are impossible unless
 -- the diagnostic leaks pre-re-rank beam indexes.
 -- The diagnostic functions live in the version-named extension
--- library (meerkat-<version>.so); resolve its path from an existing
--- extension function instead of hardcoding the version.
+-- library (pg_vectorsearch-<version>.so); resolve its path from an
+-- existing extension function instead of hardcoding the version.
 DO $$
 DECLARE lib text;
 BEGIN

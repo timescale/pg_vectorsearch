@@ -3,9 +3,9 @@
 -- This test manages its own CREATE/DROP EXTENSION cycles (including a
 -- SCHEMA clause and an expected-to-fail ALTER EXTENSION), so it runs
 -- against its own dedicated temp instance (see test/pg/meson.build)
--- instead of the shared --load-extension=meerkat schedule, which installs
--- meerkat once up front and depends on it staying installed for every
--- other regression script that follows.
+-- instead of the shared --load-extension=pg_vectorsearch schedule, which
+-- installs pg_vectorsearch once up front and depends on it staying
+-- installed for every other regression script that follows.
 -- Checked after every (re)install below. Plain views rather than a
 -- literal in each place they're needed, so the list of mkt-fixed and
 -- prism-fixed functions each only needs updating in one spot.
@@ -40,9 +40,9 @@ WHERE to_regprocedure(sig) IS NOT NULL;
 -- the install rather than silently adopt it.
 CREATE ROLE reloc_untrusted NOSUPERUSER;
 CREATE SCHEMA mkt AUTHORIZATION reloc_untrusted;
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 ERROR:  schema "mkt" already exists and is owned by "reloc_untrusted", a role other than the installer or a superuser
-HINT:  meerkat refuses to install into a schema an untrusted role controls; drop or re-own the schema, or install as the role that owns it.
+HINT:  pg_vectorsearch refuses to install into a schema an untrusted role controls; drop or re-own the schema, or install as the role that owns it.
 CONTEXT:  PL/pgSQL function inline_code_block line 21 at RAISE
 SQL statement "DO $$
 DECLARE
@@ -68,24 +68,24 @@ BEGIN
                 'schema "%" already exists and is owned by "%", a role '
                 'other than the installer or a superuser',
                 schema_name, owner_name
-                USING HINT = 'meerkat refuses to install into a schema an '
-                    'untrusted role controls; drop or re-own the schema, or '
-                    'install as the role that owns it.';
+                USING HINT = 'pg_vectorsearch refuses to install into a '
+                    'schema an untrusted role controls; drop or re-own the '
+                    'schema, or install as the role that owns it.';
         END IF;
     END LOOP;
 END;
 $$"
-extension script file "meerkat--0.1.0.sql", near line 56
-SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'meerkat')
-    AS meerkat_installed_after_refusal;
- meerkat_installed_after_refusal 
----------------------------------
+extension script file "pg_vectorsearch--0.1.0.sql", near line 56
+SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_vectorsearch')
+    AS pg_vectorsearch_installed_after_refusal;
+ pg_vectorsearch_installed_after_refusal 
+-----------------------------------------
  f
 (1 row)
 
 DROP SCHEMA mkt;
 -- A fresh mkt (created by this install, owned by the installer) is fine.
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 SELECT (SELECT r.rolname FROM pg_namespace n JOIN pg_roles r
             ON r.oid = n.nspowner WHERE n.nspname = 'mkt') = current_user
     AS mkt_owned_by_installer;
@@ -94,7 +94,7 @@ SELECT (SELECT r.rolname FROM pg_namespace n JOIN pg_roles r
  t
 (1 row)
 
-DROP EXTENSION meerkat CASCADE;
+DROP EXTENSION pg_vectorsearch CASCADE;
 DROP ROLE reloc_untrusted;
 -- =====================================================================
 -- 1b. A trusted pre-existing mkt is used, but not made an extension member
@@ -108,7 +108,7 @@ DROP ROLE reloc_untrusted;
 CREATE SCHEMA mkt;
 CREATE TABLE mkt.unrelated_dba_table (id int);
 INSERT INTO mkt.unrelated_dba_table VALUES (1), (2);
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 SELECT count(*) = 2 AS unrelated_table_survives_install
     FROM mkt.unrelated_dba_table;
  unrelated_table_survives_install 
@@ -116,7 +116,7 @@ SELECT count(*) = 2 AS unrelated_table_survives_install
  t
 (1 row)
 
-DROP EXTENSION meerkat CASCADE;
+DROP EXTENSION pg_vectorsearch CASCADE;
 SELECT to_regnamespace('mkt') IS NOT NULL AS mkt_schema_survives_drop;
  mkt_schema_survives_drop 
 --------------------------
@@ -146,7 +146,7 @@ NOTICE:  drop cascades to table mkt.unrelated_dba_table
 CREATE SCHEMA prism;
 CREATE TABLE prism.unrelated_dba_table (id int);
 INSERT INTO prism.unrelated_dba_table VALUES (1), (2);
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 SELECT count(*) = 2 AS unrelated_prism_table_survives_install
     FROM prism.unrelated_dba_table;
  unrelated_prism_table_survives_install 
@@ -154,7 +154,7 @@ SELECT count(*) = 2 AS unrelated_prism_table_survives_install
  t
 (1 row)
 
-DROP EXTENSION meerkat CASCADE;
+DROP EXTENSION pg_vectorsearch CASCADE;
 SELECT to_regnamespace('prism') IS NOT NULL AS prism_schema_survives_drop;
  prism_schema_survives_drop 
 ----------------------------
@@ -181,7 +181,7 @@ NOTICE:  drop cascades to table prism.unrelated_dba_table
 -- 2. Default install (no SCHEMA clause): types land on search_path,
 --    typically public; mkt and prism are separate.
 -- =====================================================================
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 SELECT to_regtype('public.vec32') IS NOT NULL
    AND to_regtype('public.vec16') IS NOT NULL
    AND to_regtype('public.rabitq') IS NOT NULL AS types_land_in_public;
@@ -254,7 +254,7 @@ SELECT id FROM default_items ORDER BY v <-> '[0,0,0,0]'::vec32(4) LIMIT 3;
 
 RESET enable_seqscan;
 DROP TABLE default_items;
-DROP EXTENSION meerkat CASCADE;
+DROP EXTENSION pg_vectorsearch CASCADE;
 SELECT to_regnamespace('mkt') IS NULL AS mkt_dropped_with_the_extension;
  mkt_dropped_with_the_extension 
 --------------------------------
@@ -278,7 +278,7 @@ SELECT to_regtype('public.vec32') IS NULL
 -- 3. Custom schema at install time
 -- =====================================================================
 CREATE SCHEMA reloc_a;
-CREATE EXTENSION meerkat SCHEMA reloc_a;
+CREATE EXTENSION pg_vectorsearch SCHEMA reloc_a;
 SELECT to_regtype('reloc_a.vec32') IS NOT NULL
    AND to_regtype('reloc_a.vec16') IS NOT NULL
    AND to_regtype('reloc_a.rabitq') IS NOT NULL
@@ -369,12 +369,12 @@ NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
 -- of its member objects) -- deterministic regardless of catalog scan order.
 DROP TABLE reloc_a.maint_items;
 DROP SCHEMA reloc_a CASCADE;
-NOTICE:  drop cascades to extension meerkat
--- Confirm meerkat went with it (it was installed inside reloc_a).
-SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'meerkat')
-    AS meerkat_survived_reloc_a_drop;
- meerkat_survived_reloc_a_drop 
--------------------------------
+NOTICE:  drop cascades to extension pg_vectorsearch
+-- Confirm pg_vectorsearch went with it (it was installed inside reloc_a).
+SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_vectorsearch')
+    AS pg_vectorsearch_survived_reloc_a_drop;
+ pg_vectorsearch_survived_reloc_a_drop 
+---------------------------------------
  f
 (1 row)
 
@@ -388,10 +388,10 @@ SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'meerkat')
 -- documented behaviour -- see the control file. The extension must
 -- remain fully usable afterward.
 CREATE SCHEMA reloc_a;
-CREATE EXTENSION meerkat SCHEMA reloc_a;
+CREATE EXTENSION pg_vectorsearch SCHEMA reloc_a;
 CREATE SCHEMA reloc_target;
-ALTER EXTENSION meerkat SET SCHEMA reloc_target;
-ERROR:  extension "meerkat" does not support SET SCHEMA
+ALTER EXTENSION pg_vectorsearch SET SCHEMA reloc_target;
+ERROR:  extension "pg_vectorsearch" does not support SET SCHEMA
 SELECT to_regtype('reloc_a.vec32') IS NOT NULL
     AS types_still_in_reloc_a_after_refused_alter;
  types_still_in_reloc_a_after_refused_alter 
@@ -400,12 +400,12 @@ SELECT to_regtype('reloc_a.vec32') IS NOT NULL
 (1 row)
 
 SELECT '[1,2,3]'::reloc_a.vec32::text = '[1,2,3]'
-    AS meerkat_still_queryable_after_refused_alter;
- meerkat_still_queryable_after_refused_alter 
----------------------------------------------
+    AS pg_vectorsearch_still_queryable_after_refused_alter;
+ pg_vectorsearch_still_queryable_after_refused_alter 
+-----------------------------------------------------
  t
 (1 row)
 
 DROP SCHEMA reloc_target;
-DROP EXTENSION meerkat CASCADE;
+DROP EXTENSION pg_vectorsearch CASCADE;
 DROP SCHEMA reloc_a CASCADE;

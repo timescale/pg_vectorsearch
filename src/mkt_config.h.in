@@ -28,7 +28,7 @@
 
 /*
  * Name of the version-named extension shared library
- * ("meerkat-<version>"). Used where the library is referenced by name,
+ * ("pg_vectorsearch-<version>"). Used where the library is referenced by name,
  * e.g. when launching parallel workers.
  */
 #mesondefine MKT_MODULE_NAME

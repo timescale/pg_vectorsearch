@@ -1,17 +1,19 @@
 #!/bin/bash
 # pgvector compatibility & install-script security tests
 #
-# Builds meerkat and pgvector against a throwaway PostgreSQL instance and runs
-# two suites against it: the pgvector compatibility/lifecycle tests, and the
-# install-script security (search_path / privilege-escalation) tests. Both need
-# pgvector built and installed, so they share one build and one instance.
+# Builds pg_vectorsearch and pgvector against a throwaway PostgreSQL
+# instance and runs two suites against it: the pgvector
+# compatibility/lifecycle tests, and the install-script security
+# (search_path / privilege-escalation) tests. Both need pgvector built
+# and installed, so they share one build and one instance.
 #
 # Usage:
 #   pgvector-compat.sh [command] [builddir]
 #
 # Commands (default: all):
 #   all       build, start an instance, run both suites, tear down (local run)
-#   setup     build pgvector + meerkat, start a temp instance, create the db
+#   setup     build pgvector + pg_vectorsearch, start a temp instance,
+#             create the db
 #   compat    run the pgvector compatibility suite       (after `setup`)
 #   security  run the install-script security suite       (after `setup`)
 #   teardown  stop the instance and remove its temp dir
@@ -32,7 +34,8 @@ BUILDDIR="${2:-builddir}"
 STATE_FILE="$BUILDDIR/.pgvector-compat-state"
 
 # --------------------------------------------------------------------------
-# setup: build pgvector + meerkat, start a temp instance, create the test db
+# setup: build pgvector + pg_vectorsearch, start a temp instance,
+# create the test db
 # --------------------------------------------------------------------------
 do_setup() {
     PG_CONFIG="${PG_CONFIG:-$(command -v pg_config 2>/dev/null || true)}"
@@ -59,7 +62,7 @@ do_setup() {
         sudo make -C "$PGVECTOR_DIR" PG_CONFIG="$PG_CONFIG" install
     fi
 
-    echo "==> Building meerkat"
+    echo "==> Building pg_vectorsearch"
     ./scripts/ci/build.sh "$BUILDDIR" -Dpostgresql=enabled
 
     # Uppercase names to match what's written to (and later sourced from) the
@@ -135,15 +138,16 @@ do_security() {
 
     # Event-trigger non-superuser guard.
     #
-    # On managed platforms pgvector is marked "trusted", letting a NON-superuser
-    # install it. meerkat's event trigger fires on that CREATE EXTENSION as the
-    # invoking (non-superuser) role; it must NOT attempt its superuser-only
-    # compat DDL there, because that would fail and roll back the whole pgvector
-    # install -- meerkat's presence would break pgvector. The guard warns and
-    # defers instead. This is the one path security.sql can't cover (a plain
-    # psql script can't mark pgvector trusted), so drive it here: flip the
-    # `trusted` flag in this run's pgvector control file (restored below) to
-    # reproduce a trusted-pgvector deployment.
+    # On managed platforms pgvector is marked "trusted", letting a
+    # NON-superuser install it. pg_vectorsearch's event trigger fires on
+    # that CREATE EXTENSION as the invoking (non-superuser) role; it
+    # must NOT attempt its superuser-only compat DDL there, because that
+    # would fail and roll back the whole pgvector install --
+    # pg_vectorsearch's presence would break pgvector. The guard warns
+    # and defers instead. This is the one path security.sql can't cover
+    # (a plain psql script can't mark pgvector trusted), so drive it
+    # here: flip the `trusted` flag in this run's pgvector control file
+    # (restored below) to reproduce a trusted-pgvector deployment.
     echo "==> Running event-trigger non-superuser guard test"
     local vector_control vector_control_bak installed
     vector_control="$("$PG_CONFIG" --sharedir)/extension/vector.control"
@@ -157,11 +161,12 @@ do_security() {
     "$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d postgres \
         -c "CREATE DATABASE evt_test"
 
-    # Superuser installs meerkat; a non-superuser role is set up to install
-    # pgvector (a trusted extension needs only CREATE on the database).
+    # Superuser installs pg_vectorsearch; a non-superuser role is set up
+    # to install pgvector (a trusted extension needs only CREATE on the
+    # database).
     "$PG_BINDIR/psql" -h "$TMPDIR_BASE" -p "$PGPORT" -d evt_test \
         -v ON_ERROR_STOP=1 <<'SQL'
-CREATE EXTENSION meerkat;
+CREATE EXTENSION pg_vectorsearch;
 CREATE ROLE evt_nonsuper NOSUPERUSER;
 GRANT CREATE ON DATABASE evt_test TO evt_nonsuper;
 SQL

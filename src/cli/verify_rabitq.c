@@ -1,8 +1,9 @@
 /*
  * mkt verify rabitq
  *
- * Compare meerkat's RaBitQ encoding and distance computation against FAISS
- * using real datasets in HDF5 format (e.g. ann-benchmarks glove-100-angular).
+ * Compare pg_vectorsearch's RaBitQ encoding and distance computation
+ * against FAISS using real datasets in HDF5 format (e.g. ann-benchmarks
+ * glove-100-angular).
  *
  * Two verification phases:
  *   1. Encoding: bit-for-bit comparison of quantized codes
@@ -191,7 +192,8 @@ compute_centroid(
 /*
  * Phase 1: Encoding verification
  *
- * Encode each vector with both meerkat and FAISS, compare bit patterns.
+ * Encode each vector with both pg_vectorsearch and FAISS, compare bit
+ * patterns.
  * Default: only print mismatches with progress bar.
  * Verbose: print every vector result.
  */
@@ -359,9 +361,10 @@ verify_encoding(
 /*
  * Phase 2: Distance verification
  *
- * For each query, batch-compute meerkat and FAISS estimated distances,
- * then compare. True L2 is only computed for a subsample (summary stats)
- * and on-demand for mismatches (verbose/mismatch output).
+ * For each query, batch-compute pg_vectorsearch and FAISS estimated
+ * distances, then compare. True L2 is only computed for a subsample
+ * (summary stats) and on-demand for mismatches (verbose/mismatch
+ * output).
  *
  * Performance: the inner loop uses mkt_rabitq_distance_batch() (SIMD)
  * instead of per-vector calls, and avoids the O(nqueries*ntrain*dim)
@@ -415,7 +418,7 @@ verify_distances(
 	faiss_RaBitQuantizer_compute_codes(
 			faiss_rq, train_transformed, faiss_codes, ntrain);
 
-	/* Encode all train vectors with meerkat into SoA arrays for
+	/* Encode all train vectors with pg_vectorsearch into SoA arrays for
 	 * batch distance computation */
 	Vec32Ref cent_ref	   = {.data = centroid, .dim = dim};
 	uint32_t pbytes		   = MKT_RABITQ_BYTES(dim);
@@ -501,7 +504,7 @@ verify_distances(
 		const float *query	   = queries + (size_t)q * dim;
 		Vec32Ref	 query_ref = {.data = query, .dim = dim};
 
-		/* Batch meerkat distances (SIMD) */
+		/* Batch pg_vectorsearch distances (SIMD) */
 		RaBitQQueryState *mkt_state =
 				mkt_rabitq_prepare_query(params, query_ref, cent_ref);
 		mkt_rabitq_distance_batch(
@@ -648,7 +651,7 @@ print_usage(const CmdContext *ctx)
 	printf("Usage: %s verify rabitq --dataset <path.hdf5> "
 		   "[options]\n\n",
 		   ctx->prog_name);
-	printf("Compare meerkat RaBitQ against FAISS using "
+	printf("Compare pg_vectorsearch RaBitQ against FAISS using "
 		   "ann-benchmarks HDF5 datasets.\n\n");
 	printf("Options:\n");
 	printf("  --dataset <path>   Path to HDF5 file (required)\n");

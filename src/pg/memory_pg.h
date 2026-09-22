@@ -1,7 +1,8 @@
 /*
  * memory_pg.h - PostgreSQL memory wrappers (header-only)
  *
- * Maps Meerkat memory functions to PostgreSQL's palloc/MemoryContext API.
+ * Maps pg_vectorsearch memory functions to PostgreSQL's
+ * palloc/MemoryContext API.
  * This file is only included when building as a PostgreSQL extension.
  */
 

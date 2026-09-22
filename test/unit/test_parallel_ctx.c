@@ -44,8 +44,8 @@ TEST(spmd_lifecycle_barrier_toc)
 
 	EnterParallelMode();
 
-	ParallelContext *pcxt =
-			CreateParallelContext("meerkat", "pc_sum_worker", PC_WORKERS);
+	ParallelContext *pcxt = CreateParallelContext(
+			"pg_vectorsearch", "pc_sum_worker", PC_WORKERS);
 
 	shm_toc_estimate_chunk(&pcxt->estimator, sizeof(Barrier));
 	shm_toc_estimate_chunk(&pcxt->estimator, sizeof(_Atomic(int)));

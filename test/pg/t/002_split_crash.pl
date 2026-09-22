@@ -38,7 +38,7 @@ if ($node->psql('postgres', 'CREATE EXTENSION injection_points') != 0)
 	plan skip_all => 'injection_points extension not available';
 }
 
-$node->safe_psql('postgres', 'CREATE EXTENSION meerkat');
+$node->safe_psql('postgres', 'CREATE EXTENSION pg_vectorsearch');
 $node->safe_psql('postgres',
 	'ALTER DATABASE postgres SET search_path = mkt, prism, public');
 

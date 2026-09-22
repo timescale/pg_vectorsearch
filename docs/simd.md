@@ -1,7 +1,8 @@
 # SIMD Architecture
 
-This document describes Meerkat's SIMD (Single Instruction, Multiple Data)
-implementation for high-performance vector distance computation.
+This document describes pg_vectorsearch's SIMD (Single Instruction,
+Multiple Data) implementation for high-performance vector distance
+computation.
 
 ## Overview
 
@@ -13,7 +14,7 @@ modern CPU SIMD capabilities:
 - **AVX2**: 8 floats per instruction (256 bits)
 - **NEON**: 4 floats per instruction (128 bits, ARM)
 
-Meerkat provides both hand-optimized SIMD implementations and
+pg_vectorsearch provides both hand-optimized SIMD implementations and
 compiler-vectorized fallbacks, with runtime dispatch to select the best
 available implementation.
 
