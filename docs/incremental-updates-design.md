@@ -29,12 +29,12 @@ Findings from the code:
 - **`ambulkdelete` / `amvacuumcleanup` are no-op stubs.** Dead tuples are never
   removed from the index. The index accumulates dead TIDs over time; PostgreSQL
   filters them by heap visibility, but they still consume top-k slots.
-- **Posting pages are immutable.** AoS entries (`MktPostingEntryHeader`:
+- **Posting pages are immutable.** AoS entries (`PrismPostingEntryHeader`:
   TID + `f_add`/`f_rescale`/`f_error` + RaBitQ bits) or FASTSCAN SoA in
-  32-vector groups, chained by `next_blkno`. `MKT_POSTING_FLAG_DELETED` is
+  32-vector groups, chained by `next_blkno`. `PRISM_POSTING_FLAG_DELETED` is
   defined but **never set or checked**.
 - **Centroid tree is immutable** (hierarchical k-means, in-memory cache). But
-  `mkt_centroid_beam_search()` already routes a vector to its nearest leaf
+  `prism_centroid_beam_search()` already routes a vector to its nearest leaf
   posting(s) — directly reusable for insert routing.
 - **Storage already supports incremental writes.** `new_page()` / `extend()` /
   `commit_page()` exist; runtime (non-build) writes go through `GenericXLog`
@@ -67,7 +67,7 @@ machinery rather than reinvent it:
   pgvector does exactly this.
 - **`kill_prior_tuple` / LP_DEAD-style hints.** When the executor finds a
   returned TID is dead it sets `scan->kill_prior_tuple`; the AM can then mark
-  that entry dead (reuse `MKT_POSTING_FLAG_DELETED`) so future scans skip it.
+  that entry dead (reuse `PRISM_POSTING_FLAG_DELETED`) so future scans skip it.
   Cheap, lazy dead-entry cleanup with no vacuum.
 - **`ambulkdelete` / `amvacuumcleanup`.** `VACUUM` calls `ambulkdelete` with a
   "is this TID dead?" callback; the AM tombstones/removes matching entries.
@@ -142,7 +142,7 @@ Maintenance for Streaming Vector Search," LSM-VEC, DGAI. See references.
 - **FASTSCAN immutability.** FASTSCAN packs codes in 32-vector SIMD groups, so
   appending one vector means a partial group / repack. Inserts cannot cheaply
   append to packed pages. → Need an **append-friendly write region** (unpacked
-  AoS, the existing `MktPostingEntryHeader`) separate from the packed base;
+  AoS, the existing `PrismPostingEntryHeader`) separate from the packed base;
   background compaction repacks it into FASTSCAN groups.
 - **Mutable hierarchical centroid tree.** Routing (beam search) works unchanged
   for inserts, but split/merge must add/remove **leaf centroids** and keep the
@@ -178,16 +178,16 @@ ivfflat/vchordrq plus correct delete behavior.
 - **`aminsert`**:
   1. If `index_unchanged` (vector not changed by an `UPDATE`) → rely on HOT,
      return without work.
-  2. Route via `mkt_centroid_beam_search` to the nearest leaf posting(s)
+  2. Route via `prism_centroid_beam_search` to the nearest leaf posting(s)
      (a small insert-time nprobe; optionally + boundary lists for SOAR).
   3. RaBitQ-encode relative to the chosen centroid(s).
   4. Append to the cluster's **write buffer** — an append-friendly AoS overflow
-     page chain (`MktPostingEntryHeader`), new pages via `new_page` +
+     page chain (`PrismPostingEntryHeader`), new pages via `new_page` +
      `GenericXLog`, linked by `next_blkno`.
 - **Scan**: merge the immutable FASTSCAN/RaBitQ base + the AoS write buffer for
   each probed cluster (score both into the same top-k).
 - **Deletes**:
-  - `kill_prior_tuple` → set `MKT_POSTING_FLAG_DELETED` lazily on entries the
+  - `kill_prior_tuple` → set `PRISM_POSTING_FLAG_DELETED` lazily on entries the
     executor reports dead.
   - `ambulkdelete` → mark dead TIDs deleted across base + buffer during
     `VACUUM`.
@@ -256,12 +256,12 @@ Three sizes, derived from one:
 
 | name | value | role |
 | --- | --- | --- |
-| target `T` | `rows / nlist` — see `mkt_target_entries_per_list` | the size a list rests at |
-| split trigger | `T * MKT_SPLIT_TRIGGER_FACTOR` (2) | grow past this and the list splits |
-| merge threshold | `T / MKT_SPLIT_TRIGGER_FACTOR` | shrink below this and the list merges |
+| target `T` | `rows / nlist` — see `prism_target_entries_per_list` | the size a list rests at |
+| split trigger | `T * PRISM_SPLIT_TRIGGER_FACTOR` (2) | grow past this and the list splits |
+| merge threshold | `T / PRISM_SPLIT_TRIGGER_FACTOR` | shrink below this and the list merges |
 
 The target is **not a free parameter**: it is the size the build chose, since
-`mkt_auto_nlist` targets `MKT_TARGET_ENTRIES_PER_LIST` vectors per list (above
+`prism_auto_nlist` targets `PRISM_TARGET_ENTRIES_PER_LIST` vectors per list (above
 its sqrt-floor crossover; below it, `sqrt(rows)`). Both the automatic probe
 count and the cost model are derived from `nlist`, and the per-list size is its
 inverse — so aiming maintenance at a different size silently decouples the index
@@ -282,7 +282,7 @@ entries justify and land every one of them *below* the target. Rounding gives
 exactly `factor` parts there — a bisection at factor 2, as the paper does — and
 keeps parts within `[0.75, 1.25]` of the target elsewhere. A wider split is
 therefore only what a batch pass does when it meets a list that has been
-neglected; `MKT_SPLIT_MAX_PARTS` bounds that catch-up case.
+neglected; `PRISM_SPLIT_MAX_PARTS` bounds that catch-up case.
 
 The size is re-checked **after** the entries are collected, not just from the
 head's live count: collection drops entries whose vector can no longer be
@@ -325,7 +325,7 @@ So the list is streamed twice:
    the count the post-collection size re-check needs, since the head's
    `live_count` does not know about entries whose vector can no longer be
    fetched — and reservoir-samples them into a buffer whose size comes from
-   `MktSplitConfig.sample_budget_bytes` (the PostgreSQL layer passes
+   `PrismSplitConfig.sample_budget_bytes` (the PostgreSQL layer passes
    `maintenance_work_mem`). A reservoir rather than every n'th entry, because a
    stride needs an estimate of the list's length and an estimate that came out
    low would fill the sample before the chain ended, leaving the tail — the most
@@ -345,7 +345,7 @@ whatever the list holds. What remains proportional to the list is the cost of
 the backend, which no arrangement of the split can avoid.
 
 The sample size comes from a peak model rather than from dividing the budget by
-the vector size (`mkt_split_sample_cap`), because clustering costs more than
+the vector size (`prism_split_sample_cap`), because clustering costs more than
 the sample it clusters: per point, an assignment, an L2 norm, an initialisation
 distance, the result's own copy of the assignments, and Elkan's bounds — one per
 point plus **one per point per centroid**. At a wide dimension that is a few
@@ -355,7 +355,7 @@ known until the list has been counted, along with the centroid sets and
 k-means' blocked scratch.
 
 Two ceilings sit above the budget. The sample's own allocation is capped
-(`MKT_SPLIT_MAX_SAMPLE_BYTES`) below the largest single allocation a backend
+(`PRISM_SPLIT_MAX_SAMPLE_BYTES`) below the largest single allocation a backend
 permits, so a generous `maintenance_work_mem` cannot turn into a failed
 allocation — and the buffer is sized to `min(list, budget)` and grown if
 needed, so a generous budget does not cost generous memory on a list that does
@@ -367,7 +367,7 @@ A list that fits the budget is sampled whole, so the sizes a split normally
 meets behave exactly as clustering the list directly would. Above the budget,
 two things change: cluster sizes come from scaled sample tallies rather than
 exact counts, and the width is capped at what the sample can speak for
-(`MKT_SPLIT_MIN_SAMPLE_PER_PART`) so a list too big for its budget is split
+(`PRISM_SPLIT_MIN_SAMPLE_PER_PART`) so a list too big for its budget is split
 less far per pass rather than split badly.
 
 Note that entries are assigned to the nearest of the centroids actually stored,
@@ -391,7 +391,7 @@ outliers would encode the many worse to encode the few better, and the resulting
 NPA drift is what reassign is for.
 
 If folding cannot leave two partitions standing, the split **widens** by one
-partition and retries (`MKT_SPLIT_WIDEN_ATTEMPTS`) before declining. At the
+partition and retries (`PRISM_SPLIT_WIDEN_ATTEMPTS`) before declining. At the
 bisection width a dense region plus a straggler has no second partition clearing
 the floor; the k-means seed is fixed, so declining there would decline
 identically on every later pass and leave a list above the trigger forever. One
@@ -444,7 +444,7 @@ all snapshots.
 
 1. **Lazy mark** (`kill_prior_tuple` / LP_DEAD-style): when a scan returns a TID
    the executor finds dead-to-everyone, it sets `scan->kill_prior_tuple`; the AM
-   marks that entry (`MKT_POSTING_FLAG_DELETED` for AoS, a per-group deletion
+   marks that entry (`PRISM_POSTING_FLAG_DELETED` for AoS, a per-group deletion
    bit for FASTSCAN) so later scans skip it. No vacuum needed; near-free.
 2. **Bulk mark** (`ambulkdelete`): VACUUM calls it with a "is this TID dead?"
    callback; the AM tombstones all matching entries across base + segments +
@@ -457,12 +457,12 @@ vectors per SIMD group, so an entry can't be removed in place. Mark deletes in a
 **per-group (or per-segment) deletion bitmap** (one bit per entry), consulted at
 scan time to mask dead lanes; physical removal happens at compaction. The AoS
 write tier can use the entry flag directly (the currently-unused
-`MKT_POSTING_FLAG_DELETED` is the starting point).
+`PRISM_POSTING_FLAG_DELETED` is the starting point).
 
 **Page-level tombstones (implemented).** When VACUUM leaves an entire page dead
 — common for bulk/range deletes (`DELETE FROM t`, `DELETE ... WHERE id BETWEEN
 ...`) that wipe whole pages or clusters — the page is flagged
-`MKT_POSTING_PAGE_TOMBSTONED` and the scan skips its scoring kernel entirely
+`PRISM_POSTING_PAGE_TOMBSTONED` and the scan skips its scoring kernel entirely
 (both AoS and FASTSCAN), only following the chain past it. This is also the
 granularity at which FASTSCAN deletes get recorded at all (packed groups can't
 be flagged per entry), detected by testing every group TID with an early exit
