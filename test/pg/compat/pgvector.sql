@@ -91,7 +91,7 @@ $$ LANGUAGE sql;
 
 -- Helper: prism's own ordering operators (on vec32/vec16), so a test can
 -- assert pg_vectorsearch's opclasses survive a pgvector drop untouched.
-CREATE OR REPLACE FUNCTION count_mkt_prism_ops() RETURNS int AS $$
+CREATE OR REPLACE FUNCTION count_pgvs_prism_ops() RETURNS int AS $$
     SELECT count(*)::int
     FROM pg_amop ao
     JOIN pg_opfamily f ON f.oid = ao.amopfamily
@@ -171,10 +171,10 @@ SELECT assert_test('vector binary cast round-trip',
 SELECT assert_test('halfvec binary cast round-trip',
     '[1,2,3]'::public.halfvec::public.vec16::text = '[1,2,3]');
 
-SELECT assert_test('mkt vector -> pgvector cast',
+SELECT assert_test('pgvs vector -> pgvector cast',
     '[4,5,6]'::public.vec32::public.vector::text = '[4,5,6]');
 
-SELECT assert_test('mkt halfvec -> pgvector cast',
+SELECT assert_test('pgvs halfvec -> pgvector cast',
     '[4,5,6]'::public.vec16::public.halfvec::text = '[4,5,6]');
 
 -- =====================================================================
@@ -280,18 +280,18 @@ INSERT INTO pgv_items (v) VALUES
     ('[1,1,0]'), ('[0,1,1]'), ('[1,0,1]');
 
 -- pg_vectorsearch distance on pgvector column via binary cast
-SELECT assert_test('mkt distance on pgvector column via cast',
+SELECT assert_test('pgvs distance on pgvector column via cast',
     (SELECT public.l2_distance(v::public.vec32,
                             '[1,1,1]'::public.vec32)
      FROM pgv_items WHERE id = 1) IS NOT NULL);
 
 -- Implicit cast: pgvector column used directly with pg_vectorsearch operator
-SELECT assert_test('implicit cast with mkt operator',
+SELECT assert_test('implicit cast with pgvs operator',
     (SELECT v OPERATOR(public.<->) '[1,1,1]'::public.vec32
      FROM pgv_items WHERE id = 1) IS NOT NULL);
 
 -- ORDER BY with pg_vectorsearch operators on pgvector data (implicit cast)
-SELECT assert_test('mkt ORDER BY on pgvector data via cast',
+SELECT assert_test('pgvs ORDER BY on pgvector data via cast',
     (SELECT array_agg(id ORDER BY
         v OPERATOR(public.<->) '[1,1,1]'::public.vec32)
      FROM pgv_items) IS NOT NULL);
@@ -300,19 +300,19 @@ SELECT assert_test('mkt ORDER BY on pgvector data via cast',
 -- 8. Cross-type: pgvector ops on pg_vectorsearch data (via explicit cast)
 -- =====================================================================
 
-CREATE TEMP TABLE mkt_items (
+CREATE TEMP TABLE pgvs_items (
     id serial PRIMARY KEY,
     v public.vec32(3)
 );
-INSERT INTO mkt_items (v) VALUES
+INSERT INTO pgvs_items (v) VALUES
     ('[1,0,0]'), ('[0,1,0]'), ('[0,0,1]'),
     ('[1,1,0]'), ('[0,1,1]'), ('[1,0,1]');
 
 -- pgvector distance on pg_vectorsearch column via explicit cast
-SELECT assert_test('pgvector distance on mkt column via cast',
+SELECT assert_test('pgvector distance on pgvs column via cast',
     (SELECT public.l2_distance(v::public.vector,
                                '[1,1,1]'::public.vector)
-     FROM mkt_items WHERE id = 1) IS NOT NULL);
+     FROM pgvs_items WHERE id = 1) IS NOT NULL);
 
 -- =====================================================================
 -- 9. NN ordering matches between implementations
@@ -335,7 +335,7 @@ SELECT assert_test('NN ordering matches (vector)',
 SELECT assert_test('vector -> array -> vector round-trip',
     ('[1,2,3]'::public.vec32)::real[]::public.vec32::text = '[1,2,3]');
 
-SELECT assert_test('pgvector array cast matches mkt array cast',
+SELECT assert_test('pgvector array cast matches pgvs array cast',
     ('[1,2,3]'::public.vec32)::real[]::text
     = ('[1,2,3]'::public.vector)::real[]::text);
 
@@ -394,10 +394,10 @@ SELECT assert_test('pgv-first: 4 binary casts',
 SELECT assert_test('pgv-first: casts are standalone',
     casts_are_standalone());
 
-SELECT assert_test('pgv-first: pgvector->mkt cast works',
+SELECT assert_test('pgv-first: pgvector->pgvs cast works',
     '[1,2,3]'::public.vector::public.vec32::text = '[1,2,3]');
 
-SELECT assert_test('pgv-first: mkt->pgvector cast works',
+SELECT assert_test('pgv-first: pgvs->pgvector cast works',
     '[1,2,3]'::public.vec32::public.vector::text = '[1,2,3]');
 
 -- =====================================================================
@@ -410,16 +410,16 @@ DROP EXTENSION vector;
 CREATE EXTENSION pg_vectorsearch;
 CREATE EXTENSION vector;
 
-SELECT assert_test('mkt-first: 4 binary casts',
+SELECT assert_test('pgvs-first: 4 binary casts',
     count_pgvector_casts() = 4);
 
-SELECT assert_test('mkt-first: casts are standalone',
+SELECT assert_test('pgvs-first: casts are standalone',
     casts_are_standalone());
 
-SELECT assert_test('mkt-first: pgvector->mkt cast works',
+SELECT assert_test('pgvs-first: pgvector->pgvs cast works',
     '[1,2,3]'::public.vector::public.vec32::text = '[1,2,3]');
 
-SELECT assert_test('mkt-first: mkt->pgvector cast works',
+SELECT assert_test('pgvs-first: pgvs->pgvector cast works',
     '[1,2,3]'::public.vec32::public.vector::text = '[1,2,3]');
 
 -- =====================================================================
@@ -430,34 +430,34 @@ SELECT assert_test('mkt-first: mkt->pgvector cast works',
 -- types, so removing pg_vectorsearch needs CASCADE and cannot silently
 -- succeed. The subxact rolls back, so pg_vectorsearch is still installed
 -- afterwards.
-SELECT assert_test('drop-mkt: bare DROP is refused (needs CASCADE)',
+SELECT assert_test('drop-pgvs: bare DROP is refused (needs CASCADE)',
     stmt_is_refused('DROP EXTENSION pg_vectorsearch'));
 SELECT assert_test(
-    'drop-mkt: pg_vectorsearch still installed after refused bare DROP',
+    'drop-pgvs: pg_vectorsearch still installed after refused bare DROP',
     EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_vectorsearch'));
 
 DROP EXTENSION pg_vectorsearch CASCADE;
 
-SELECT assert_test('drop-mkt: no casts remain',
+SELECT assert_test('drop-pgvs: no casts remain',
     count_pgvector_casts() = 0);
 
-SELECT assert_test('drop-mkt: pgvector still loaded',
+SELECT assert_test('drop-pgvs: pgvector still loaded',
     EXISTS (SELECT 1 FROM pg_extension
             WHERE extname = 'vector'));
 
-SELECT assert_test('drop-mkt: pgvector still works',
+SELECT assert_test('drop-pgvs: pgvector still works',
     '[1,2,3]'::public.vector::text = '[1,2,3]');
 
 -- pgvector's own operators are untouched -- CASCADE reached only the compat
 -- objects, never through to pgvector.
-SELECT assert_test('drop-mkt: pgvector operator still works',
+SELECT assert_test('drop-pgvs: pgvector operator still works',
     ('[0,0]'::public.vector OPERATOR(public.<->) '[3,4]'::public.vector) = 5);
 
 -- With pg_vectorsearch (and its casts) gone, pgvector is no longer
 -- encumbered: a bare DROP now succeeds without CASCADE -- pg_vectorsearch
 -- only forces CASCADE while it is installed. (This drops pgvector;
 -- recreate it for the next section.)
-SELECT assert_test('drop-mkt: pgvector then drops without CASCADE',
+SELECT assert_test('drop-pgvs: pgvector then drops without CASCADE',
     NOT stmt_is_refused('DROP EXTENSION vector'));
 CREATE EXTENSION vector;
 
@@ -490,7 +490,7 @@ SELECT assert_test('drop-pgv: public.vec32 still works',
 SELECT assert_test('drop-pgv: pgvector ops removed from prism families',
     count_pgvector_prism_ops() = 0);
 SELECT assert_test('drop-pgv: pg_vectorsearch native ops intact',
-    count_mkt_prism_ops() = 6);
+    count_pgvs_prism_ops() = 6);
 SELECT assert_test('drop-pgv: prism opclasses intact',
     (SELECT count(*) FROM pg_opclass oc
         JOIN pg_am am ON am.oid = oc.opcmethod AND am.amname = 'prism') = 6);
@@ -570,7 +570,7 @@ SELECT assert_test('standalone: clean drop',
 -- silently downgraded to a sequential scan.
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_vectorsearch;
-SET search_path = public, mkt;
+SET search_path = public, vectorsearch;
 
 CREATE TEMP TABLE idx_src (id int, txt text);
 INSERT INTO idx_src
@@ -580,11 +580,11 @@ INSERT INTO idx_src
     FROM generate_series(1, 2000) g;
 
 CREATE TABLE idx_pgv_h (id int, v public.halfvec(8));
-CREATE TABLE idx_mkt_h (id int, v public.vec16(8));
+CREATE TABLE idx_pgvs_h (id int, v public.vec16(8));
 INSERT INTO idx_pgv_h SELECT id, txt::public.halfvec(8) FROM idx_src;
-INSERT INTO idx_mkt_h SELECT id, txt::public.vec16(8) FROM idx_src;
+INSERT INTO idx_pgvs_h SELECT id, txt::public.vec16(8) FROM idx_src;
 ANALYZE idx_pgv_h;
-ANALYZE idx_mkt_h;
+ANALYZE idx_pgvs_h;
 
 -- Brute-force truth, established before any index exists.
 CREATE TEMP TABLE idx_truth AS
@@ -594,7 +594,7 @@ CREATE TEMP TABLE idx_truth AS
              LIMIT 10) t;
 
 CREATE INDEX idx_pgv_h_i ON idx_pgv_h USING prism (v public.vec16_l2_ops);
-CREATE INDEX idx_mkt_h_i ON idx_mkt_h USING prism (v public.vec16_l2_ops);
+CREATE INDEX idx_pgvs_h_i ON idx_pgvs_h USING prism (v public.vec16_l2_ops);
 
 -- The planner must actually choose the index, or the rest proves nothing.
 -- EXPLAIN cannot appear in a subquery, hence the helper.
@@ -642,9 +642,9 @@ SELECT assert_test(
 
 -- Control: pg_vectorsearch's own halfvec column, same data, same expectation.
 SELECT assert_test(
-    'mkt halfvec column: prism recall >= 8/10',
+    'pgvs halfvec column: prism recall >= 8/10',
     (SELECT count(*) FROM (
-        SELECT id FROM idx_mkt_h
+        SELECT id FROM idx_pgvs_h
          ORDER BY v OPERATOR(public.<->) '[0,0,0,0,0,0,0,0]'::public.vec16(8)
          LIMIT 10) g
       WHERE g.id = ANY (SELECT unnest(ids) FROM idx_truth)) >= 8);
@@ -707,7 +707,7 @@ SELECT assert_test(
 RESET enable_seqscan;
 DROP FUNCTION public.plan_uses_index_scan(text);
 DROP TABLE idx_pgv_h;
-DROP TABLE idx_mkt_h;
+DROP TABLE idx_pgvs_h;
 RESET search_path;
 
 -- =====================================================================
@@ -761,16 +761,17 @@ SELECT assert_test(
       WHERE ao.amoppurpose = 'o'
         AND op.oprnamespace = 'pgv_alt'::regnamespace) = 6);
 
-SELECT assert_test('custom-schema: pgvector->mkt cast round-trips',
+SELECT assert_test('custom-schema: pgvector->pgvs cast round-trips',
     '[1,2,3]'::pgv_alt.vector::pgvs_alt.vec32::text = '[1,2,3]');
-SELECT assert_test('custom-schema: mkt->pgvector cast round-trips',
+SELECT assert_test('custom-schema: pgvs->pgvector cast round-trips',
     '[1,2,3]'::pgvs_alt.vec32::pgv_alt.vector::text = '[1,2,3]');
 
--- mkt itself stays a fixed, separate schema regardless of where the types
--- landed -- confirm it did not end up inside pgvs_alt.
-SELECT assert_test('custom-schema: mkt is separate from pgvs_alt',
-    to_regnamespace('mkt') IS NOT NULL
-    AND to_regtype('mkt.vec32') IS NULL);
+-- vectorsearch itself stays a fixed, separate schema regardless of
+-- where the types landed -- confirm it did not end up inside pgvs_alt.
+SELECT assert_test(
+    'custom-schema: vectorsearch is separate from pgvs_alt',
+    to_regnamespace('vectorsearch') IS NOT NULL
+    AND to_regtype('vectorsearch.vec32') IS NULL);
 
 -- A real index scan over a pgv_alt.vector column via pgvector's operator: the
 -- operator only reaches the index because discovery added it to the family.
@@ -813,7 +814,7 @@ DROP EXTENSION vector CASCADE;
 CREATE EXTENSION pg_vectorsearch SCHEMA pgvs_alt;
 CREATE EXTENSION vector SCHEMA pgv_alt;   -- fires prism_pgvector_cast_trigger
 
-SELECT assert_test('custom-schema (mkt-first): event trigger created 4 casts',
+SELECT assert_test('custom-schema (pgvs-first): event trigger created 4 casts',
     (SELECT count(*) FROM pg_cast c
        JOIN pg_type s ON s.oid = c.castsource
        JOIN pg_type t ON t.oid = c.casttarget
@@ -831,7 +832,7 @@ SELECT assert_test('custom-schema (mkt-first): event trigger created 4 casts',
 -- operators to the prism families and yield a real index scan, or a
 -- regression there could pass on casts alone while queries silently seq-scan.
 SELECT assert_test(
-    'custom-schema (mkt-first): 6 pgvector ops are prism members',
+    'custom-schema (pgvs-first): 6 pgvector ops are prism members',
     (SELECT count(*) FROM pg_amop ao
        JOIN pg_opfamily f ON f.oid = ao.amopfamily
        JOIN pg_am am ON am.oid = f.opfmethod AND am.amname = 'prism'
@@ -861,7 +862,7 @@ CREATE INDEX idx_altb_i ON idx_altb USING prism (v pgvs_alt.vec32_l2_ops);
 SET enable_seqscan = off;
 SET prism.rerank_pool = -1;
 SELECT assert_test(
-    'custom-schema (mkt-first): prism index used via pgvector operator',
+    'custom-schema (pgvs-first): prism index used via pgvector operator',
     public.plan_uses_index_scan($q$SELECT id FROM idx_altb
         ORDER BY v OPERATOR(pgv_alt.<->) '[0,0,0,0,0,0,0,0]'::pgv_alt.vector(8)
         LIMIT 10$q$));

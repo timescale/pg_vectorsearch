@@ -296,9 +296,9 @@ runs without pgvector. They install into whichever schema
 first existing schema on `search_path`
 — typically `public`); maintenance, administration, and inspection
 functions are the one exception, always living in a separate, fixed
-`mkt` schema regardless of that choice. The distinct `vec32`/`vec16`
-names do not collide with pgvector's `vector`/`halfvec`, even when both
-extensions' types end up in the same schema.
+`vectorsearch` schema regardless of that choice. The distinct
+`vec32`/`vec16` names do not collide with pgvector's `vector`/`halfvec`,
+even when both extensions' types end up in the same schema.
 
 **pgvector interoperability.** `vec32` is binary-compatible with pgvector's
 `vector`, and `vec16` with pgvector's `halfvec`; the extension creates
@@ -320,12 +320,12 @@ arrives later.
 
 The consequence worth remembering: because the casts are `WITHOUT FUNCTION`,
 they satisfy PostgreSQL's binary-coercibility rule for operator classes. That
-is what lets a `prism` opclass declared `FOR TYPE mkt.vec32` be used on a
-column of pgvector's `public.vector` — the two are the same bytes, so no
-conversion happens and no copy is made. Anything in the access method that
-asks "which type is this column?" must ask it the same way, via
-`IsBinaryCoercible` rather than OID equality, or it will disagree with the
-planner about a column the index was built on.
+is what lets a `prism` opclass declared `FOR TYPE public.vec32` be used
+on a column of pgvector's `public.vector` — the two are the same bytes,
+so no conversion happens and no copy is made. Anything in the
+access method that asks "which type is this column?" must ask it the
+same way, via `IsBinaryCoercible` rather than OID equality, or it will
+disagree with the planner about a column the index was built on.
 
 Operators need separate handling, because casts do not cover them. An index is
 only considered for an `ORDER BY` when the ordering operator belongs to the
@@ -341,10 +341,10 @@ no family membership, the planner picks a sequential scan, which returns the
 right rows. Any test that checks only results will pass while measuring brute
 force — so plan checks, not just recall checks, are what pin this down.
 
-The `mkt.<type>` column with pgvector's operator is the one pairing that
-does not resolve, and deliberately so: the pg_vectorsearch → pgvector
-cast is ASSIGNMENT, not IMPLICIT, precisely to keep operator calls
-unambiguous when both extensions are installed.
+The `public.<type>` column with pgvector's operator is the one pairing
+that does not resolve, and deliberately so: the pg_vectorsearch →
+pgvector cast is ASSIGNMENT, not IMPLICIT, precisely to keep operator
+calls unambiguous when both extensions are installed.
 
 ### Concurrency Safety
 

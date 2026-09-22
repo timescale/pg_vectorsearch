@@ -1,6 +1,6 @@
 -- Query-time GUC behavior
 --
--- Home for tests of the mkt.* GUCs that shape an index scan (query
+-- Home for tests of the prism.* GUCs that shape an index scan (query
 -- limit, probe count, rerank pool, ...): defaults, bounds, and their
 -- interaction with the query.
 -- Tie-free deterministic data (grid data would produce distance ties).

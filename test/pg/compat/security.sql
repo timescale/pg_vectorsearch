@@ -16,10 +16,11 @@
 --
 -- Both functions are fixed in `prism`, a name known ahead of time -- they
 -- are called directly, schema-qualified, below. (The ownership guard that
--- protects `prism` is the same loop that protects `mkt`; exercising it via
--- `prism` below covers `mkt` too.) The vec32/vec16 type schema
--- (@extschema@) is not fixed and is never hard-coded below: it is looked
--- up from the catalog once and interpolated as a psql variable
+-- protects `prism` is the same loop that protects `vectorsearch`;
+-- exercising it via `prism` below covers `vectorsearch` too.) The
+-- vec32/vec16 type schema (@extschema@) is not fixed and is never
+-- hard-coded below: it is looked up from the catalog once and
+-- interpolated as a psql variable
 -- (:extschema) wherever a cast-related fixture needs it. Dollar-quoted
 -- bodies, which psql does not interpolate, look it up again at runtime.
 --
@@ -27,8 +28,9 @@
 --   pgvector and pg_vectorsearch must be installed in PostgreSQL, and the
 --   connected role must be a superuser (to install extensions and
 --   exercise the event-trigger escalation path). This suite drops and
---   recreates both extensions and the `mkt`/`prism` schemas (CASCADE) as
---   it runs, so run it against a throwaway/clean database, not one holding
+--   recreates both extensions and the `vectorsearch`/`prism` schemas
+--   (CASCADE) as it runs, so run it against a throwaway/clean database,
+--   not one holding
 --   data you care about. The CI script uses a fresh instance.
 --
 -- Usage:
@@ -160,8 +162,8 @@ DROP SCHEMA install_probe CASCADE;
 -- pg_vectorsearch's own (prism.rebalance and friends are always called
 -- schema-qualified, never via search_path). The schema ownership guard at
 -- the top of the install script must refuse that install. (The guard is
--- one loop over both `mkt` and `prism`, so exercising it here proves it
--- for `mkt` too.)
+-- one loop over both `vectorsearch` and `prism`, so exercising it here
+-- proves it for `vectorsearch` too.)
 DROP EXTENSION IF EXISTS pg_vectorsearch CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
 DROP SCHEMA IF EXISTS prism CASCADE;
@@ -339,10 +341,11 @@ CREATE CAST (public.vector AS :"extschema".vec32) WITHOUT FUNCTION AS IMPLICIT;
 -- =====================================================================
 -- 3b. A binary cast with the WRONG context is rejected too
 -- =====================================================================
--- The pgv->mkt direction must be IMPLICIT and mkt->pgv ASSIGNMENT. A binary
--- (WITHOUT FUNCTION) cast planted with the wrong context still has method
--- 'b', so a method-only check would adopt it -- changing coercion/operator
--- resolution. setup must reject it on the castcontext mismatch.
+-- The pgv->pgvs direction must be IMPLICIT and pgvs->pgv ASSIGNMENT. A
+-- binary (WITHOUT FUNCTION) cast planted with the wrong context still
+-- has method 'b', so a method-only check would adopt it -- changing
+-- coercion/operator resolution. setup must reject it on the
+-- castcontext mismatch.
 DROP CAST (public.vector AS :"extschema".vec32);
 CREATE CAST (public.vector AS :"extschema".vec32)
     WITHOUT FUNCTION AS ASSIGNMENT;   -- wrong: this direction must be IMPLICIT

@@ -16,8 +16,8 @@
 \echo Use "CREATE EXTENSION pg_vectorsearch" to load this file.\quit
 
 -- =====================================================================
--- mkt / prism: fixed schemas for maintenance, administration, and
--- inspection
+-- vectorsearch / prism: fixed schemas for maintenance, administration,
+-- and inspection
 -- =====================================================================
 -- Everything else in this script installs into @extschema@. Maintenance,
 -- administration, and inspection functions always live in one of two
@@ -25,13 +25,15 @@
 -- fixed, predictable, always-qualified path to them no matter which
 -- schema holds the types:
 --
---   mkt    extension-wide identity (git_commit, extension_version,
---          extension_name), not specific to any one index
---   prism  everything specific to the prism index access method:
---          inspection, maintenance, and its pgvector operator-family
---          wiring. Kept separate from mkt because a second index sharing
---          this extension would need its own equivalent of this schema,
---          not a share of prism's
+--   vectorsearch  extension-wide identity (git_commit,
+--                 extension_version, extension_name), not specific to
+--                 any one index
+--   prism         everything specific to the prism index access
+--                 method: inspection, maintenance, and its pgvector
+--                 operator-family wiring. Kept separate from
+--                 vectorsearch because a second index sharing this
+--                 extension would need its own equivalent of this
+--                 schema, not a share of prism's
 --
 -- This is also why ALTER EXTENSION ... SET SCHEMA is refused (see the
 -- control file): that command moves every member object into one schema,
@@ -42,24 +44,25 @@
 -- EXTENSION, so an untrusted role could otherwise pre-create either one,
 -- keep owning it, and plant lookalike objects there that a caller who has
 -- not double-checked their tooling might mistake for the extension's own
--- (mkt.<function> and prism.<function> calls are always schema-qualified,
--- never resolved via search_path). See the security note above
--- setup_pgvector_compat() for the analogous reasoning about @extschema@
--- when pgvector is involved.
+-- (vectorsearch.<function> and prism.<function> calls are always
+-- schema-qualified, never resolved via search_path). See the security
+-- note above setup_pgvector_compat() for the analogous reasoning about
+-- @extschema@ when pgvector is involved.
 --
--- A pre-existing, trusted-owned mkt or prism is used as-is, not adopted
--- into extension membership (no ALTER EXTENSION ... ADD SCHEMA): matching
--- how PostgreSQL treats a pre-existing @extschema@ for any relocatable
--- extension, only objects this script itself creates become members.
--- Otherwise DROP EXTENSION ... CASCADE could delete a schema -- and
--- anything unrelated already in it -- that this extension never created.
+-- A pre-existing, trusted-owned vectorsearch or prism is used as-is, not
+-- adopted into extension membership (no ALTER EXTENSION ... ADD SCHEMA):
+-- matching how PostgreSQL treats a pre-existing @extschema@ for any
+-- relocatable extension, only objects this script itself creates become
+-- members. Otherwise DROP EXTENSION ... CASCADE could delete a schema --
+-- and anything unrelated already in it -- that this extension never
+-- created.
 DO $$
 DECLARE
     schema_name name;
     owner_name  name;
     owner_super boolean;
 BEGIN
-    FOREACH schema_name IN ARRAY ARRAY['mkt', 'prism']
+    FOREACH schema_name IN ARRAY ARRAY['vectorsearch', 'prism']
     LOOP
         SELECT r.rolname, r.rolsuper INTO owner_name, owner_super
           FROM pg_catalog.pg_namespace n
@@ -86,36 +89,37 @@ END;
 $$;
 
 -- =====================================================================
--- build identity (maintenance/administration/inspection: fixed in mkt
--- because it is extension-wide rather than specific to the prism index,
--- regardless of @extschema@)
+-- build identity (maintenance/administration/inspection: fixed in
+-- vectorsearch because it is extension-wide rather than specific to
+-- the prism index, regardless of @extschema@)
 -- =====================================================================
 
-CREATE FUNCTION mkt.git_commit() RETURNS text
+CREATE FUNCTION vectorsearch.git_commit() RETURNS text
     AS 'MODULE_PATHNAME', 'mkt_git_commit'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION mkt.extension_version() RETURNS text
+CREATE FUNCTION vectorsearch.extension_version() RETURNS text
     AS 'MODULE_PATHNAME', 'mkt_extension_version'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION mkt.extension_name() RETURNS text
+CREATE FUNCTION vectorsearch.extension_name() RETURNS text
     AS 'MODULE_PATHNAME', 'mkt_extension_name'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- Prerelease install notice: warn at CREATE EXTENSION time when this
 -- build is a prerelease (any -suffix version, e.g. -alpha1 or -dev).
--- A runtime check against mkt.extension_version(), so final releases
--- carry nothing to strip and the notice can never ship stale.
+-- A runtime check against vectorsearch.extension_version(), so final
+-- releases carry nothing to strip and the notice can never ship stale.
 DO $$
 BEGIN
-    IF pg_catalog.strpos(mkt.extension_version(), '-')
+    IF pg_catalog.strpos(vectorsearch.extension_version(), '-')
         OPERATOR(pg_catalog.>) 0
     THEN
         RAISE WARNING '% % is a prerelease: upgrading to later '
             'versions might not be possible (reinstall instead) and '
             'its indexes may need rebuilding',
-            mkt.extension_name(), mkt.extension_version();
+            vectorsearch.extension_name(),
+            vectorsearch.extension_version();
     END IF;
 END;
 $$;
@@ -1049,12 +1053,13 @@ COMMENT ON PROCEDURE prism.rebalance(regclass, integer) IS
 --          owned by an untrusted role (the schema ownership guard at the top
 --          of this script). Chosen: version-independent, comprehensive
 --          (nothing hostile can live there at all), ~10 lines. Applied only
---          to `mkt` and `prism`: unlike @extschema@, which the installer
---          explicitly chose (or already had first on their own search_path
---          -- the same standing responsibility as installing any
---          relocatable extension), `mkt` and `prism` must be owned by the
---          extension's installer or a superuser, since the installer has
---          no independent reason to have already vetted their ownership.
+--          to `vectorsearch` and `prism`: unlike @extschema@, which the
+--          installer explicitly chose (or already had first on their own
+--          search_path -- the same standing responsibility as installing
+--          any relocatable extension), `vectorsearch` and `prism` must be
+--          owned by the extension's installer or a superuser, since the
+--          installer has no independent reason to have already vetted
+--          their ownership.
 --
 -- Set up pgvector interoperability in one step: the binary casts between the
 -- two extensions' types, and the membership of pgvector's distance operators

@@ -43,10 +43,10 @@ $primary->safe_psql('postgres', 'CREATE EXTENSION pg_vectorsearch');
 
 # Set the search path once, at database level, so every session on both nodes
 # resolves pg_vectorsearch's types and distance operators the same way.
-# Note this also means new tables land in the mkt schema, since it is
-# first.
+# Note this also means new tables land in the vectorsearch schema,
+# since it is first.
 $primary->safe_psql('postgres',
-	'ALTER DATABASE postgres SET search_path = mkt, prism, public');
+	'ALTER DATABASE postgres SET search_path = vectorsearch, prism, public');
 
 # Two tables so both vec32 types are covered; vec16 drives the
 # half-precision centroid format, which no vec32 column can reach.
@@ -174,7 +174,7 @@ SQL
 	agrees($tbl, "$label, after delete and vacuum");
 
 	# Reset for the next case.
-	$primary->safe_psql('postgres', "DROP INDEX mkt.$idx");
+	$primary->safe_psql('postgres', "DROP INDEX vectorsearch.$idx");
 	$primary->safe_psql('postgres', "DELETE FROM $tbl WHERE id > $rows");
 }
 
@@ -201,7 +201,7 @@ SQL
 	agrees('tv', 'parallel build');
 
 	# Reset for what follows.
-	$primary->safe_psql('postgres', "DROP INDEX mkt.$idx");
+	$primary->safe_psql('postgres', "DROP INDEX vectorsearch.$idx");
 	$primary->safe_psql('postgres', 'ALTER TABLE tv RESET (parallel_workers)');
 	$primary->safe_psql('postgres', "DELETE FROM tv WHERE id > $rows");
 }
@@ -262,7 +262,7 @@ SQL
 
 	# End-to-end: the query still agrees across nodes.
 	agrees('tv', 'convert: after fastscan conversion');
-	$primary->safe_psql('postgres', "DROP INDEX mkt.$idx");
+	$primary->safe_psql('postgres', "DROP INDEX vectorsearch.$idx");
 }
 
 # Incremental split: prism.rebalance rewrites an oversized posting list into
@@ -351,7 +351,7 @@ SQL
 		'split: standby posting layout matches after reclaim');
 	agrees('tv', 'split: after reclaiming retired chains');
 
-	$primary->safe_psql('postgres', "DROP INDEX mkt.$idx");
+	$primary->safe_psql('postgres', "DROP INDEX vectorsearch.$idx");
 }
 
 # A split that has to grow the centroid level, rather than fitting its new
@@ -405,7 +405,7 @@ SQL
 		'split: standby centroid chain matches after it grew');
 	agrees('tw', 'split: after a chain-growing split');
 
-	$primary->safe_psql('postgres', "DROP INDEX mkt.$idx");
+	$primary->safe_psql('postgres', "DROP INDEX vectorsearch.$idx");
 	$primary->safe_psql('postgres', 'DROP TABLE tw');
 }
 
