@@ -15,8 +15,8 @@
  *     the leader merges runs and writes the posting lists.
  */
 
-#ifndef MKT_PARALLEL_BUILD_H
-#define MKT_PARALLEL_BUILD_H
+#ifndef PRISM_PARALLEL_BUILD_H
+#define PRISM_PARALLEL_BUILD_H
 
 /*
  * Back-end primitives the parallel build runs on. The standalone shims live in
@@ -42,13 +42,14 @@
 #include "algo/hkmeans.h"
 #include "core/memory.h"
 #include "core/types.h"
-#include "index/centroid_page.h" /* MktCentroidFormat */
+#include "index/centroid_page.h" /* PrismCentroidFormat */
 #include "index/posting_build.h"
 #include "index/storage.h" /* MktStorage */
 #include "quant/rabitq.h"
 
-/* Forward decl so mkt_build_scan's prototype can reference it without pulling
- * in the executor headers; callers that pass one already have the full type.
+/* Forward decl so prism_build_scan's prototype can reference it without
+ * pulling in the executor headers; callers that pass one already have the full
+ * type.
  */
 struct IndexInfo;
 
@@ -59,7 +60,7 @@ struct IndexInfo;
  * is the real heap TID under PG and a reversibly-synthesized one in
  * standalone.
  */
-typedef void (*MktBuildScanCb)(
+typedef void (*PrismBuildScanCb)(
 		void *state, ItemPointerData tid, const float *vec);
 
 /* ----------------------------------------------------------------
@@ -68,47 +69,47 @@ typedef void (*MktBuildScanCb)(
  * their keys live here with the rest for one contiguous numbering.
  * ---------------------------------------------------------------- */
 
-#define MKT_DSM_KEY_SHARED		 UINT64CONST(0xB000000000000001)
-#define MKT_DSM_KEY_WAL_USAGE	 UINT64CONST(0xB000000000000006)
-#define MKT_DSM_KEY_BUFFER_USAGE UINT64CONST(0xB000000000000007)
-#define MKT_DSM_KEY_QUERY_TEXT	 UINT64CONST(0xB000000000000008)
-#define MKT_DSM_KEY_BARRIER		 UINT64CONST(0xB000000000000009)
-#define MKT_DSM_KEY_SAMPLES		 UINT64CONST(0xB00000000000000A)
-#define MKT_DSM_KEY_CENTROIDS	 UINT64CONST(0xB00000000000000B)
-#define MKT_DSM_KEY_KM_WORKERS	 UINT64CONST(0xB00000000000000C)
-#define MKT_DSM_KEY_ROOT_ASSIGN	 UINT64CONST(0xB00000000000000E)
-#define MKT_DSM_KEY_SORTSHARED	 UINT64CONST(0xB000000000000012)
+#define PRISM_DSM_KEY_SHARED	   UINT64CONST(0xB000000000000001)
+#define PRISM_DSM_KEY_WAL_USAGE	   UINT64CONST(0xB000000000000006)
+#define PRISM_DSM_KEY_BUFFER_USAGE UINT64CONST(0xB000000000000007)
+#define PRISM_DSM_KEY_QUERY_TEXT   UINT64CONST(0xB000000000000008)
+#define PRISM_DSM_KEY_BARRIER	   UINT64CONST(0xB000000000000009)
+#define PRISM_DSM_KEY_SAMPLES	   UINT64CONST(0xB00000000000000A)
+#define PRISM_DSM_KEY_CENTROIDS	   UINT64CONST(0xB00000000000000B)
+#define PRISM_DSM_KEY_KM_WORKERS   UINT64CONST(0xB00000000000000C)
+#define PRISM_DSM_KEY_ROOT_ASSIGN  UINT64CONST(0xB00000000000000E)
+#define PRISM_DSM_KEY_SORTSHARED   UINT64CONST(0xB000000000000012)
 /* Page-backed phase-3 routing: the global mean, published by the leader before
  * the tree-ready barrier so workers route exactly as the query/insert paths
  * do. The posting-head base (leaf c's head = first_posting + c) is a scalar in
- * MktBuildShared, not a shared array. */
-#define MKT_DSM_KEY_GLOBAL_MEAN UINT64CONST(0xB000000000000014)
+ * PrismBuildShared, not a shared array. */
+#define PRISM_DSM_KEY_GLOBAL_MEAN UINT64CONST(0xB000000000000014)
 
 /* ----------------------------------------------------------------
- * MktBuildShared — back-end-neutral shared build state
+ * PrismBuildShared — back-end-neutral shared build state
  *
  * Immutable config set by the leader before the workers start, plus counters
  * the workers update concurrently during the posting scan under a lock the
- * back-end owns (mkt_pbuild_worker_add_counts). Each back-end embeds this as
+ * back-end owns (prism_pbuild_worker_add_counts). Each back-end embeds this as
  * the first member of its own struct carrying the back-end-specific state —
  * for PG, the relation OIDs, query id, the spinlock, and a trailing
- * ParallelTableScanDesc (see MktBuildSharedPg in parallel_backend.c).
+ * ParallelTableScanDesc (see PrismBuildSharedPg in parallel_backend.c).
  * ---------------------------------------------------------------- */
 
-typedef struct MktBuildShared
+typedef struct PrismBuildShared
 {
 	/* Immutable — set by the leader before launch */
-	Dimension		  dim;
-	DistanceMetric	  metric;
-	uint32_t		  nlist;
-	uint32_t		  fan_out;
-	double			  soar_lambda;
-	double			  boundary_epsilon;
-	bool			  fastscan;
-	MktCentroidFormat centroid_format;
-	uint64_t		  rabitq_seed;
+	Dimension			dim;
+	DistanceMetric		metric;
+	uint32_t			nlist;
+	uint32_t			fan_out;
+	double				soar_lambda;
+	double				boundary_epsilon;
+	bool				fastscan;
+	PrismCentroidFormat centroid_format;
+	uint64_t			rabitq_seed;
 	/* Planned as 1 + planned workers (it sizes the per-participant DSM
-	 * regions), then narrowed by mkt_pbuild_launch to 1 + the workers that
+	 * regions), then narrowed by prism_pbuild_launch to 1 + the workers that
 	 * actually started when the launch falls short. Work partitioned by
 	 * participant must use this count; region sizing keeps the planned
 	 * value and leaves the tail slots unused. */
@@ -166,16 +167,17 @@ typedef struct MktBuildShared
 	uint64_t subtree_slot_size;
 
 	/* Page-backed routing knobs (mirror the mkt.centroid_* GUCs), so phase-3
-	 * workers build a MktIndexBase that routes identically to the query path.
-	 * fastscan_bits is the FASTSCAN centroid bit width (base.fastscan when the
-	 * centroid format is FASTSCAN; 0 otherwise). */
+	 * workers build a PrismIndexBase that routes identically to the query
+	 * path. fastscan_bits is the FASTSCAN centroid bit width (base.fastscan
+	 * when the centroid format is FASTSCAN; 0 otherwise). */
 	float centroid_error_scale;
 	float centroid_beam_scale;
 	int	  fastscan_bits;
 
 	/* Published by the leader after the streaming tree write: the
-	 * centroid-tree root block (workers' phase-3 MktIndexBase.first_centroid)
-	 * and the tree depth (base.nlevels). The tree itself lives only on pages.
+	 * centroid-tree root block (workers' phase-3
+	 * PrismIndexBase.first_centroid) and the tree depth (base.nlevels). The
+	 * tree itself lives only on pages.
 	 */
 	BlockNumber first_centroid;
 	uint8_t		nlevels;
@@ -184,7 +186,7 @@ typedef struct MktBuildShared
 	 * Cluster c's head is first_posting + c (formula), so workers map a routed
 	 * head block back to its leaf by subtraction — no O(nlist) head array. */
 	BlockNumber first_posting;
-} MktBuildShared;
+} PrismBuildShared;
 
 /* ----------------------------------------------------------------
  * K-means sampling: per-worker sample slots in DSM
@@ -193,7 +195,7 @@ typedef struct MktBuildShared
  *         [samples[worker_id][max_per_worker * dim]] packed.
  * ---------------------------------------------------------------- */
 
-typedef struct MktDsmSamples
+typedef struct PrismDsmSamples
 {
 	uint32_t  nparticipants;
 	uint32_t  max_per_worker;
@@ -205,32 +207,33 @@ typedef struct MktDsmSamples
 	 * silently flip the refine gate), then the per-worker sample blocks
 	 * (samples[worker][max_per_worker * dim]) packed right after. */
 	uint32_t counts[];
-} MktDsmSamples;
+} PrismDsmSamples;
 
 static inline uint32_t *
-mkt_dsm_sample_counts(MktDsmSamples *s)
+prism_dsm_sample_counts(PrismDsmSamples *s)
 {
 	return s->counts;
 }
 
 static inline uint64_t *
-mkt_dsm_sample_seen(MktDsmSamples *s)
+prism_dsm_sample_seen(PrismDsmSamples *s)
 {
 	return (uint64_t *)MAXALIGN(s->counts + s->nparticipants);
 }
 
 static inline float *
-mkt_dsm_worker_samples(MktDsmSamples *s, int worker_id)
+prism_dsm_worker_samples(PrismDsmSamples *s, int worker_id)
 {
 	/* The sample blocks begin after counts[] and seen[]. */
-	float *samples = (float *)(mkt_dsm_sample_seen(s) + s->nparticipants);
+	float *samples = (float *)(prism_dsm_sample_seen(s) + s->nparticipants);
 	return samples + (size_t)worker_id * s->max_per_worker * s->dim;
 }
 
 static inline Size
-mkt_dsm_samples_size(int nparticipants, uint32_t max_per_worker, Dimension dim)
+prism_dsm_samples_size(
+		int nparticipants, uint32_t max_per_worker, Dimension dim)
 {
-	Size sz = offsetof(MktDsmSamples, counts);
+	Size sz = offsetof(PrismDsmSamples, counts);
 	sz += (Size)nparticipants * sizeof(uint32_t);
 	sz = MAXALIGN(sz);
 	sz += (Size)nparticipants * sizeof(uint64_t);
@@ -245,24 +248,24 @@ mkt_dsm_samples_size(int nparticipants, uint32_t max_per_worker, Dimension dim)
  * assignments here. Used to filter samples during child k-means.
  * ---------------------------------------------------------------- */
 
-typedef struct MktDsmRootAssign
+typedef struct PrismDsmRootAssign
 {
 	uint32_t nparticipants;
 	uint32_t max_per_worker;
 	/* assignments[worker][max_per_worker] packed contiguously. */
 	uint32_t assignments[];
-} MktDsmRootAssign;
+} PrismDsmRootAssign;
 
 static inline uint32_t *
-mkt_dsm_root_assignments(MktDsmRootAssign *ra, int worker_id)
+prism_dsm_root_assignments(PrismDsmRootAssign *ra, int worker_id)
 {
 	return ra->assignments + (size_t)worker_id * ra->max_per_worker;
 }
 
 static inline Size
-mkt_dsm_root_assign_size(int nparticipants, uint32_t max_per_worker)
+prism_dsm_root_assign_size(int nparticipants, uint32_t max_per_worker)
 {
-	Size sz = offsetof(MktDsmRootAssign, assignments);
+	Size sz = offsetof(PrismDsmRootAssign, assignments);
 	sz += (Size)nparticipants * max_per_worker * sizeof(uint32_t);
 	return sz;
 }
@@ -276,13 +279,13 @@ mkt_dsm_root_assign_size(int nparticipants, uint32_t max_per_worker)
  * ---------------------------------------------------------------- */
 
 static inline Size
-mkt_dsm_centroids_size(uint32_t nlist, Dimension dim)
+prism_dsm_centroids_size(uint32_t nlist, Dimension dim)
 {
 	return (Size)nlist * dim * sizeof(float) + (Size)nlist * sizeof(float);
 }
 
 static inline float *
-mkt_dsm_centroids(char *base)
+prism_dsm_centroids(char *base)
 {
 	return (float *)base;
 }
@@ -300,17 +303,17 @@ mkt_dsm_centroids(char *base)
  * assignment -- a subtree can never hold more leaves than its child's
  * samples, which caps the slot far below the analytic worst case -- and
  * creates the ring as its own segment then (the subtree-ring seam below);
- * the slot size travels in MktBuildShared.subtree_slot_size.
+ * the slot size travels in PrismBuildShared.subtree_slot_size.
  * ---------------------------------------------------------------- */
 
 static inline Size
-mkt_dsm_child_subtrees_size(uint32_t nslots, uint64_t slot_size)
+prism_dsm_child_subtrees_size(uint32_t nslots, uint64_t slot_size)
 {
 	return (Size)nslots * (Size)slot_size;
 }
 
 static inline char *
-mkt_dsm_child_subtree(char *base, uint32_t slot, uint64_t slot_size)
+prism_dsm_child_subtree(char *base, uint32_t slot, uint64_t slot_size)
 {
 	return base + (Size)slot * (Size)slot_size;
 }
@@ -322,7 +325,7 @@ mkt_dsm_child_subtree(char *base, uint32_t slot, uint64_t slot_size)
  * up front, then narrows to the real tree->nleaves afterward.
  */
 static inline uint32_t
-mkt_max_nlist(uint32_t nlist, uint32_t fan_out)
+prism_max_nlist(uint32_t nlist, uint32_t fan_out)
 {
 	uint32_t nlevels   = mkt_hkmeans_nlevels(nlist, fan_out);
 	uint32_t max_nlist = 1;
@@ -332,10 +335,10 @@ mkt_max_nlist(uint32_t nlist, uint32_t fan_out)
 }
 
 static inline float *
-mkt_dsm_norms_c(char *base, uint32_t nlist, Dimension dim)
+prism_dsm_norms_c(char *base, uint32_t nlist, Dimension dim)
 {
 	/* norms_c[nlist] sits right after centroids[nlist * dim]. */
-	return mkt_dsm_centroids(base) + (size_t)nlist * dim;
+	return prism_dsm_centroids(base) + (size_t)nlist * dim;
 }
 
 /* ----------------------------------------------------------------
@@ -346,41 +349,41 @@ mkt_dsm_norms_c(char *base, uint32_t nlist, Dimension dim)
  * ---------------------------------------------------------------- */
 
 static inline Size
-mkt_dsm_km_worker_size(uint32_t nlist, Dimension dim)
+prism_dsm_km_worker_size(uint32_t nlist, Dimension dim)
 {
 	return (Size)nlist * dim * sizeof(float) + (Size)nlist * sizeof(uint32_t) +
 		   sizeof(float);
 }
 
 static inline Size
-mkt_dsm_km_workers_size(int nparticipants, uint32_t nlist, Dimension dim)
+prism_dsm_km_workers_size(int nparticipants, uint32_t nlist, Dimension dim)
 {
-	return (Size)nparticipants * mkt_dsm_km_worker_size(nlist, dim);
+	return (Size)nparticipants * prism_dsm_km_worker_size(nlist, dim);
 }
 
 static inline float *
-mkt_dsm_km_worker_sums(
+prism_dsm_km_worker_sums(
 		char *base, uint32_t nlist, Dimension dim, int worker_id)
 {
 	return (float *)(base +
-					 (size_t)worker_id * mkt_dsm_km_worker_size(nlist, dim));
+					 (size_t)worker_id * prism_dsm_km_worker_size(nlist, dim));
 }
 
 static inline uint32_t *
-mkt_dsm_km_worker_cnts(
+prism_dsm_km_worker_cnts(
 		char *base, uint32_t nlist, Dimension dim, int worker_id)
 {
 	/* cnts[nlist] sits right after sums[nlist * dim]. */
-	return (uint32_t *)(mkt_dsm_km_worker_sums(base, nlist, dim, worker_id) +
+	return (uint32_t *)(prism_dsm_km_worker_sums(base, nlist, dim, worker_id) +
 						(size_t)nlist * dim);
 }
 
 static inline float *
-mkt_dsm_km_worker_cost(
+prism_dsm_km_worker_cost(
 		char *base, uint32_t nlist, Dimension dim, int worker_id)
 {
 	/* cost sits right after cnts[nlist]. */
-	return (float *)(mkt_dsm_km_worker_cnts(base, nlist, dim, worker_id) +
+	return (float *)(prism_dsm_km_worker_cnts(base, nlist, dim, worker_id) +
 					 nlist);
 }
 
@@ -392,13 +395,13 @@ mkt_dsm_km_worker_cost(
  * ---------------------------------------------------------------- */
 
 static inline Size
-mkt_dsm_worker_output_size(uint32_t nlist, int nparticipants)
+prism_dsm_worker_output_size(uint32_t nlist, int nparticipants)
 {
 	return (Size)nparticipants * nlist * sizeof(bool);
 }
 
 static inline bool *
-mkt_dsm_worker_active(char *base, uint32_t nlist, int worker_id)
+prism_dsm_worker_active(char *base, uint32_t nlist, int worker_id)
 {
 	return (bool *)(base + (Size)worker_id * nlist * sizeof(bool));
 }
@@ -421,13 +424,14 @@ typedef struct SampleCbState
 
 /*
  * Shared sampling logic, called per live tuple with a raw vector pointer (no
- * Datum) so the same code serves both back-ends. mkt_build_scan feeds it: the
- * PG scan unwraps each heap tuple's Datum, the standalone scan passes its
+ * Datum) so the same code serves both back-ends. prism_build_scan feeds it:
+ * the PG scan unwraps each heap tuple's Datum, the standalone scan passes its
  * in-memory vectors directly.
  */
-extern void mkt_sample_cb(void *state, ItemPointerData tid, const float *vec);
+extern void
+prism_sample_cb(void *state, ItemPointerData tid, const float *vec);
 
-extern void mkt_km_assign_and_accumulate(
+extern void prism_km_assign_and_accumulate(
 		const float	  *samples,
 		uint32_t	   nsamples,
 		const float	  *centroids,
@@ -445,20 +449,20 @@ extern void mkt_km_assign_and_accumulate(
  * indexed by participant (so only nparticipants subtrees are resident) and the
  * leader streams each to pages.
  */
-extern void mkt_build_child_subtree(
-		uint32_t		  child,
-		uint32_t		  child_count,
-		int				  nparticipants,
-		MktDsmSamples	 *dsm_samples,
-		MktDsmRootAssign *dsm_ra,
-		const float		 *root_cents,
-		uint32_t		  nlist,
-		uint32_t		  fan_out,
-		Dimension		  dim,
-		DistanceMetric	  metric,
-		uint32_t		  km_max_iterations,
-		char			 *slot,
-		uint64_t		  slot_size);
+extern void prism_build_child_subtree(
+		uint32_t			child,
+		uint32_t			child_count,
+		int					nparticipants,
+		PrismDsmSamples	   *dsm_samples,
+		PrismDsmRootAssign *dsm_ra,
+		const float		   *root_cents,
+		uint32_t			nlist,
+		uint32_t			fan_out,
+		Dimension			dim,
+		DistanceMetric		metric,
+		uint32_t			km_max_iterations,
+		char			   *slot,
+		uint64_t			slot_size);
 
 /*
  * Per-batch leader callback for the batched subtree stream. Fired only on the
@@ -467,7 +471,7 @@ extern void mkt_build_child_subtree(
  * reused. children[s] is the child id whose subtree sits in slot s (the batch
  * schedule is largest-first, not sequential).
  */
-typedef void (*MktBatchCb)(
+typedef void (*PrismBatchCb)(
 		void		   *arg,
 		const uint32_t *children,
 		uint32_t		batch_size,
@@ -491,57 +495,57 @@ typedef void (*MktBatchCb)(
  * batch_cb = NULL), so the barrier sequence matches by construction; one
  * invocation per build.
  */
-extern void mkt_pbuild_stream_subtrees(
-		int				  participant_id,
-		int				  nparticipants,
-		MktDsmSamples	 *dsm_samples,
-		MktDsmRootAssign *dsm_ra,
-		const float		 *root_cents,
-		uint32_t		  km_k,
-		uint32_t		  nlist,
-		uint32_t		  fan_out,
-		Dimension		  dim,
-		DistanceMetric	  metric,
-		uint32_t		  km_max_iterations,
-		char			 *subtrees_base,
-		uint64_t		  slot_size,
-		Barrier			 *barrier,
-		MktBatchCb		  batch_cb,
-		void			 *cb_arg,
-		uint32_t		 *out_child_order);
+extern void prism_pbuild_stream_subtrees(
+		int					participant_id,
+		int					nparticipants,
+		PrismDsmSamples	   *dsm_samples,
+		PrismDsmRootAssign *dsm_ra,
+		const float		   *root_cents,
+		uint32_t			km_k,
+		uint32_t			nlist,
+		uint32_t			fan_out,
+		Dimension			dim,
+		DistanceMetric		metric,
+		uint32_t			km_max_iterations,
+		char			   *subtrees_base,
+		uint64_t			slot_size,
+		Barrier			   *barrier,
+		PrismBatchCb		batch_cb,
+		void			   *cb_arg,
+		uint32_t		   *out_child_order);
 
 /*
  * Per-participant execution of phases 1, 2, and 2b, shared by the leader
  * (participant 0) and the workers — see the contract on the definitions in
  * parallel_build_worker.c. Each runs its phase's per-participant work and the
  * phase barrier(s); the leader-only seed/reduce in the k-means phase is gated
- * on participant_id == 0. mkt_pbuild_exec_kmeans returns the iteration count
+ * on participant_id == 0. prism_pbuild_exec_kmeans returns the iteration count
  * (for the leader's timing log).
  */
-extern void mkt_pbuild_exec_sampling(
+extern void prism_pbuild_exec_sampling(
 		int				  participant_id,
 		Relation		  heap,
 		Relation		  index,
 		struct IndexInfo *index_info,
-		MktBuildShared	 *shared,
-		MktDsmSamples	 *dsm_samples,
+		PrismBuildShared *shared,
+		PrismDsmSamples	 *dsm_samples,
 		Barrier			 *barrier);
 
-extern uint32_t mkt_pbuild_exec_kmeans(
-		int				participant_id,
-		MktBuildShared *shared,
-		MktDsmSamples  *dsm_samples,
-		char		   *centroids_base,
-		char		   *km_workers_base,
-		Barrier		   *barrier);
-
-extern void mkt_pbuild_exec_root_assign(
+extern uint32_t prism_pbuild_exec_kmeans(
 		int				  participant_id,
-		MktBuildShared	 *shared,
-		MktDsmSamples	 *dsm_samples,
-		MktDsmRootAssign *dsm_ra,
+		PrismBuildShared *shared,
+		PrismDsmSamples	 *dsm_samples,
 		char			 *centroids_base,
+		char			 *km_workers_base,
 		Barrier			 *barrier);
+
+extern void prism_pbuild_exec_root_assign(
+		int					participant_id,
+		PrismBuildShared   *shared,
+		PrismDsmSamples	   *dsm_samples,
+		PrismDsmRootAssign *dsm_ra,
+		char			   *centroids_base,
+		Barrier			   *barrier);
 
 /* ----------------------------------------------------------------
  * Full-table leaf-centroid refinement (parallel)
@@ -550,38 +554,38 @@ extern void mkt_pbuild_exec_root_assign(
  * per-leaf running mean for all participants -- one copy, independent of the
  * worker count, so it scales to fine nlist where per-worker accumulators would
  * not. Concurrent updates are guarded by a striped lock array owned by the
- * back-end (mkt_pbuild_accum_lock/unlock); contention is low because rows
+ * back-end (prism_pbuild_accum_lock/unlock); contention is low because rows
  * spread across nleaves leaves. sums accumulate in double so the refined
  * means match the serial build bit-for-bit at any table size.
  * ---------------------------------------------------------------- */
 
-#define MKT_REFINE_LOCK_STRIPES 256
+#define PRISM_REFINE_LOCK_STRIPES 256
 
-typedef struct MktDsmRefineAccum
+typedef struct PrismDsmRefineAccum
 {
 	uint32_t  nleaves;
 	Dimension dim;
 	/* double sums[nleaves * dim], then uint64 counts[nleaves], packed after.
 	 */
 	double sums[FLEXIBLE_ARRAY_MEMBER];
-} MktDsmRefineAccum;
+} PrismDsmRefineAccum;
 
 static inline double *
-mkt_dsm_refine_sums(MktDsmRefineAccum *a)
+prism_dsm_refine_sums(PrismDsmRefineAccum *a)
 {
 	return a->sums;
 }
 
 static inline uint64_t *
-mkt_dsm_refine_counts(MktDsmRefineAccum *a)
+prism_dsm_refine_counts(PrismDsmRefineAccum *a)
 {
 	return (uint64_t *)(a->sums + (size_t)a->nleaves * a->dim);
 }
 
 static inline Size
-mkt_dsm_refine_accum_size(uint32_t nleaves, Dimension dim)
+prism_dsm_refine_accum_size(uint32_t nleaves, Dimension dim)
 {
-	Size sz = offsetof(MktDsmRefineAccum, sums);
+	Size sz = offsetof(PrismDsmRefineAccum, sums);
 	sz += (Size)nleaves * dim * sizeof(double);
 	sz += (Size)nleaves * sizeof(uint64_t);
 	return sz;
@@ -596,7 +600,7 @@ mkt_dsm_refine_accum_size(uint32_t nleaves, Dimension dim)
  * the tile count from it identically, so they stay in barrier lockstep.
  */
 static inline uint32_t
-mkt_refine_tile_leaves(uint32_t nleaves, Dimension dim, uint64_t cap_bytes)
+prism_refine_tile_leaves(uint32_t nleaves, Dimension dim, uint64_t cap_bytes)
 {
 	uint64_t per_leaf = (uint64_t)dim * sizeof(double) + sizeof(uint64_t);
 	uint64_t t		  = cap_bytes / (per_leaf ? per_leaf : 1);
@@ -608,7 +612,7 @@ mkt_refine_tile_leaves(uint32_t nleaves, Dimension dim, uint64_t cap_bytes)
 }
 
 /*
- * The per-refined-leaf head writer is the shared MktLeafWriteFn from
+ * The per-refined-leaf head writer is the shared PrismLeafWriteFn from
  * posting_build.h: the leader rewrites each leaf's posting-list head with
  * the full-table pt_centroid; workers pass NULL (they never divide/write).
  */
@@ -617,7 +621,7 @@ mkt_refine_tile_leaves(uint32_t nleaves, Dimension dim, uint64_t cap_bytes)
  * Refine the leaf encode references on the whole table, page-backed (one
  * pass; routing reads only the centroid pages, which refine never rewrites,
  * so the assignment is a fixed point): every row is routed exactly as the
- * query/insert do (mkt_query_route k=1 over the centroid pages, head ->
+ * query/insert do (prism_query_route k=1 over the centroid pages, head ->
  * leaf), per-leaf means
  * accumulate into the tiled DSM accumulator, and the leader rewrites each
  * leaf's head-page pt_centroid to the full-table mean. Both leader
@@ -627,22 +631,23 @@ mkt_refine_tile_leaves(uint32_t nleaves, Dimension dim, uint64_t cap_bytes)
  * Leaves are processed in tiles of accum->nleaves, so the accumulator stays
  * bounded regardless of nlist.
  */
-extern void mkt_pbuild_exec_refine_paged(
-		int					  participant_id,
-		Relation			  heap,
-		Relation			  index,
-		struct IndexInfo	 *index_info,
-		MktBuildShared		 *shared,
-		struct MktQueryState *qs,
-		BlockNumber			  first_posting,
-		MktDsmRefineAccum	 *accum,
-		Barrier				 *barrier,
-		MktLeafWriteFn		  write_head,
-		void				 *write_head_ctx);
+extern void prism_pbuild_exec_refine_paged(
+		int						participant_id,
+		Relation				heap,
+		Relation				index,
+		struct IndexInfo	   *index_info,
+		PrismBuildShared	   *shared,
+		struct PrismQueryState *qs,
+		BlockNumber				first_posting,
+		PrismDsmRefineAccum	   *accum,
+		Barrier				   *barrier,
+		PrismLeafWriteFn		write_head,
+		void				   *write_head_ctx);
 
 /* Striped lock seam for the refine accumulator (back-end owns the locks). */
-extern void mkt_pbuild_accum_lock(MktBuildShared *shared, uint32_t stripe);
-extern void mkt_pbuild_accum_unlock(MktBuildShared *shared, uint32_t stripe);
+extern void prism_pbuild_accum_lock(PrismBuildShared *shared, uint32_t stripe);
+extern void
+prism_pbuild_accum_unlock(PrismBuildShared *shared, uint32_t stripe);
 
 /*
  * Scan every vector cooperatively, invoking cb per live tuple. Back-end seam:
@@ -654,56 +659,57 @@ extern void mkt_pbuild_accum_unlock(MktBuildShared *shared, uint32_t stripe);
  * build reports the table's true row count (index_update_stats writes it to
  * pg_class.reltuples).
  */
-extern double mkt_build_scan(
+extern double prism_build_scan(
 		Relation		  heap,
 		Relation		  index,
 		struct IndexInfo *indexInfo,
-		MktBuildShared	 *shared,
+		PrismBuildShared *shared,
 		bool			  allow_sync,
 		bool			  progress,
-		MktBuildScanCb	  cb,
+		PrismBuildScanCb  cb,
 		void			 *state);
 
 /* ----------------------------------------------------------------
  * Worker entry point — registered with CreateParallelContext
  * ---------------------------------------------------------------- */
 
-extern void mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc);
+extern void prism_parallel_build_main(dsm_segment *seg, shm_toc *toc);
 
 /* ----------------------------------------------------------------
  * Worker lifecycle seam — back-end-specific (parallel_backend.c for PG)
  *
- * Runtime handles for one participant. mkt_pbuild_worker_attach fills it when
- * the worker joins the build; mkt_pbuild_worker_detach tears it down. The PG
- * version opens the heap/index relations and reports instrumentation; the
- * standalone version takes the shared state and vectors directly and joins a
- * thread barrier.
+ * Runtime handles for one participant. prism_pbuild_worker_attach fills it
+ * when the worker joins the build; prism_pbuild_worker_detach tears it down.
+ * The PG version opens the heap/index relations and reports instrumentation;
+ * the standalone version takes the shared state and vectors directly and joins
+ * a thread barrier.
  * ---------------------------------------------------------------- */
 
-typedef struct MktPBuildWorker
+typedef struct PrismPBuildWorker
 {
-	MktBuildShared *shared;
-	Barrier		   *barrier;
-	Relation		heapRel;
-	Relation		indexRel;
-	int				worker_id;
-	Dimension		dim;
-} MktPBuildWorker;
+	PrismBuildShared *shared;
+	Barrier			 *barrier;
+	Relation		  heapRel;
+	Relation		  indexRel;
+	int				  worker_id;
+	Dimension		  dim;
+} PrismPBuildWorker;
 
-extern void mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w);
-extern void mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w);
+extern void prism_pbuild_worker_attach(shm_toc *toc, PrismPBuildWorker *w);
+extern void prism_pbuild_worker_detach(shm_toc *toc, PrismPBuildWorker *w);
 
 /*
  * Page-backed phase-3 routing storage seam — back-end-specific. Workers read
  * centroid + posting head pages while routing, so each needs a MktStorage over
  * the index. PG (separate process) opens one on the worker's indexRel;
  * standalone (threads) returns the leader's shared in-memory store published
- * via mkt_pbuild_publish_storage before launch. Release is a no-op for
+ * via prism_pbuild_publish_storage before launch. Release is a no-op for
  * standalone.
  */
-extern void mkt_pbuild_publish_storage(MktBuildShared *shared, MktStorage *s);
-extern MktStorage *mkt_pbuild_worker_storage(MktPBuildWorker *w);
-extern void		   mkt_pbuild_worker_storage_release(MktStorage *s);
+extern void
+prism_pbuild_publish_storage(PrismBuildShared *shared, MktStorage *s);
+extern MktStorage *prism_pbuild_worker_storage(PrismPBuildWorker *w);
+extern void		   prism_pbuild_worker_storage_release(MktStorage *s);
 
 /*
  * Accumulate one worker's tuple counts into the shared state under the
@@ -712,23 +718,23 @@ extern void		   mkt_pbuild_worker_storage_release(MktStorage *s);
  * across participants is the table's row count, returned to PostgreSQL as
  * IndexBuildResult.heap_tuples.
  */
-extern void mkt_pbuild_worker_add_counts(
-		MktBuildShared *shared,
-		double			indtuples,
-		double			soar_dupes,
-		double			heap_tuples);
+extern void prism_pbuild_worker_add_counts(
+		PrismBuildShared *shared,
+		double			  indtuples,
+		double			  soar_dupes,
+		double			  heap_tuples);
 
 /* ----------------------------------------------------------------
  * Leader launch/teardown seam — back-end-specific (parallel_backend.c for PG)
  *
- * mkt_pbuild_launch starts the workers and blocks until the whole party has
+ * prism_pbuild_launch starts the workers and blocks until the whole party has
  * attached to the phase barrier (returning false, after teardown, if none
  * started). Fewer workers can start than were planned (the launch competes
  * for the max_parallel_workers pool), so launch narrows
  * shared->nparticipants to the party that actually attached. Every phase
  * that partitions work by participant reads the count after at least one
  * barrier, which orders the narrowing write ahead of the read.
- * mkt_pbuild_teardown frees the parallel context. The standalone versions
+ * prism_pbuild_teardown frees the parallel context. The standalone versions
  * spawn/join threads and free the shared arena. (struct ParallelContext is
  * PostgreSQL's; standalone provides its own definition.)
  * ---------------------------------------------------------------- */
@@ -737,7 +743,7 @@ struct ParallelContext;
 struct WalUsage;
 struct BufferUsage;
 
-extern void mkt_pbuild_teardown(struct ParallelContext *pcxt);
+extern void prism_pbuild_teardown(struct ParallelContext *pcxt);
 
 /*
  * Sample-region seam. The k-means sample is the build's largest working set
@@ -752,63 +758,63 @@ extern void mkt_pbuild_teardown(struct ParallelContext *pcxt);
  * keeps the samples in its arena (it does not bound memory) and treats
  * release as a no-op.
  */
-extern MktDsmSamples *mkt_pbuild_samples_attach(
-		shm_toc *toc, MktBuildShared *shared, void **seg_out);
-extern void mkt_pbuild_samples_release(MktDsmSamples *samples, void *seg);
+extern PrismDsmSamples *prism_pbuild_samples_attach(
+		shm_toc *toc, PrismBuildShared *shared, void **seg_out);
+extern void prism_pbuild_samples_release(PrismDsmSamples *samples, void *seg);
 
 /* Subtree-ring seam: leader creates the ring (own segment) after root
  * assignment and publishes the slot size; workers attach after the ring
  * barrier; everyone releases when the subtree batches are done. */
-extern char *mkt_pbuild_subtree_ring_create(
-		MktBuildShared *shared,
-		int				nparticipants,
-		uint64_t		slot_size,
-		void		  **seg_out);
+extern char *prism_pbuild_subtree_ring_create(
+		PrismBuildShared *shared,
+		int				  nparticipants,
+		uint64_t		  slot_size,
+		void			**seg_out);
 extern char *
-mkt_pbuild_subtree_ring_attach(MktBuildShared *shared, void **seg_out);
-extern void mkt_pbuild_subtree_ring_release(void *seg);
+prism_pbuild_subtree_ring_attach(PrismBuildShared *shared, void **seg_out);
+extern void prism_pbuild_subtree_ring_release(void *seg);
 
 /* Exact-internal-centroids seam: the leader serializes the exact
- * centroid collection (mkt_exact_centroid_collection_write, a few MB
+ * centroid collection (prism_exact_centroid_collection_write, a few MB
  * even at very large nlist) it gathered while streaming the tree, and
  * publishes it before the tree-ready barrier; workers attach after that
  * barrier and hook it into their phase-2.5/3 routing base
- * (MktIndexBase.exact_internal). PG uses a dedicated DSM segment whose
+ * (PrismIndexBase.exact_internal). PG uses a dedicated DSM segment whose
  * handle travels in the back-end shared struct; standalone shares the
  * leader's allocation. Every participant releases when its routing is
  * done; the segment dies with the last detach. */
-extern char *mkt_pbuild_exact_centroids_create(
-		MktBuildShared *shared, uint64_t nbytes, void **seg_out);
+extern char *prism_pbuild_exact_centroids_create(
+		PrismBuildShared *shared, uint64_t nbytes, void **seg_out);
 extern char *
-mkt_pbuild_exact_centroids_attach(MktBuildShared *shared, void **seg_out);
-extern void mkt_pbuild_exact_centroids_release(void *seg);
+prism_pbuild_exact_centroids_attach(PrismBuildShared *shared, void **seg_out);
+extern void prism_pbuild_exact_centroids_release(void *seg);
 
 /* One histogram over the shared root assignments: out_counts[km_k] = how
  * many samples landed in each root child. Every participant derives the
  * same counts (same shared data); the leader additionally sizes the
  * subtree-ring slot from them. */
-extern void mkt_pbuild_count_children(
-		MktDsmSamples	 *dsm_samples,
-		MktDsmRootAssign *dsm_ra,
-		int				  nparticipants,
-		uint32_t		  km_k,
-		uint32_t		 *out_counts);
+extern void prism_pbuild_count_children(
+		PrismDsmSamples	   *dsm_samples,
+		PrismDsmRootAssign *dsm_ra,
+		int					nparticipants,
+		uint32_t			km_k,
+		uint32_t		   *out_counts);
 
 /*
  * The refine accumulator overlays the (dead) sample region: same base
  * address, initialized by the leader after the last sample use and before
  * the tree-ready barrier that workers pass ahead of the refine phase.
  */
-static inline MktDsmRefineAccum *
-mkt_pbuild_refine_overlay(MktDsmSamples *samples)
+static inline PrismDsmRefineAccum *
+prism_pbuild_refine_overlay(PrismDsmSamples *samples)
 {
-	return (MktDsmRefineAccum *)samples;
+	return (PrismDsmRefineAccum *)samples;
 }
 
-extern bool mkt_pbuild_launch(
+extern bool prism_pbuild_launch(
 		struct ParallelContext *pcxt,
 		Barrier				   *barrier,
-		MktBuildShared		   *shared);
+		PrismBuildShared	   *shared);
 
 /* ----------------------------------------------------------------
  * Leader-only subtree blob store — back-end-specific spillable storage
@@ -824,16 +830,16 @@ extern bool mkt_pbuild_launch(
  * blobs in memory (in-memory engine). Sequential put/rewind/get only.
  * ---------------------------------------------------------------- */
 
-typedef struct MktBlobStore MktBlobStore;
+typedef struct PrismBlobStore PrismBlobStore;
 
-extern MktBlobStore *mkt_pbuild_blobstore_begin(void);
-extern void
-mkt_pbuild_blobstore_put(MktBlobStore *bs, const void *blob, uint64_t size);
-extern void mkt_pbuild_blobstore_rewind(MktBlobStore *bs);
+extern PrismBlobStore *prism_pbuild_blobstore_begin(void);
+extern void			   prism_pbuild_blobstore_put(
+				   PrismBlobStore *bs, const void *blob, uint64_t size);
+extern void prism_pbuild_blobstore_rewind(PrismBlobStore *bs);
 /* Read the next blob into buf (capacity max_size); returns its size. */
 extern uint64_t
-mkt_pbuild_blobstore_get(MktBlobStore *bs, void *buf, uint64_t max_size);
-extern void mkt_pbuild_blobstore_end(MktBlobStore *bs);
+prism_pbuild_blobstore_get(PrismBlobStore *bs, void *buf, uint64_t max_size);
+extern void prism_pbuild_blobstore_end(PrismBlobStore *bs);
 
 /* ----------------------------------------------------------------
  * Build configuration — back-end-neutral input to the setup seam
@@ -844,44 +850,44 @@ extern void mkt_pbuild_blobstore_end(MktBlobStore *bs);
  * setup-seam signature serve both back-ends.
  * ---------------------------------------------------------------- */
 
-typedef struct MktBuildConfig
+typedef struct PrismBuildConfig
 {
-	Dimension		  dim;
-	DistanceMetric	  metric;
-	MktCentroidFormat centroid_format;
-	uint32_t		  nlist;
-	uint32_t		  fan_out;
-	double			  soar_lambda;
-	double			  boundary_epsilon;
-	bool			  fastscan;
+	Dimension			dim;
+	DistanceMetric		metric;
+	PrismCentroidFormat centroid_format;
+	uint32_t			nlist;
+	uint32_t			fan_out;
+	double				soar_lambda;
+	double				boundary_epsilon;
+	bool				fastscan;
 	/* CREATE INDEX CONCURRENTLY: take weak locks + an MVCC scan snapshot. */
 	bool concurrent;
-} MktBuildConfig;
+} PrismBuildConfig;
 
 /* ----------------------------------------------------------------
  * Leader setup seam — back-end-specific (parallel_backend.c for PG)
  *
  * Leader-side runtime state: the parallel context, the shared regions, and the
- * derived sizes. mkt_pbuild_setup_shared allocates and populates them (a DSM
+ * derived sizes. prism_pbuild_setup_shared allocates and populates them (a DSM
  * segment + regions in PG, a heap arena in standalone) and fills this struct;
  * the rest of the driver consumes it. Returns false (after teardown) if the
  * back-end could not start. The WalUsage/BufferUsage fields are PG
  * instrumentation, unused in standalone.
  * ---------------------------------------------------------------- */
 
-typedef struct MktPBuildLeader
+typedef struct PrismPBuildLeader
 {
 	struct ParallelContext *pcxt;
-	MktBuildShared		   *shared;
+	PrismBuildShared	   *shared;
 	Barrier				   *barrier;
-	MktDsmSamples		   *dsm_samples;
+	PrismDsmSamples		   *dsm_samples;
 	/* Back-end token for releasing the sample region early (PG: the DSM
 	 * segment the samples live in; standalone: NULL). */
 	void			   *sample_seg;
 	char			   *centroids_base;
 	float			   *cents;
 	char			   *km_workers_base;
-	MktDsmRootAssign   *dsm_ra;
+	PrismDsmRootAssign *dsm_ra;
 	struct WalUsage	   *walusage;
 	struct BufferUsage *bufferusage;
 	int					nparticipants;
@@ -893,26 +899,26 @@ typedef struct MktPBuildLeader
 	uint32_t			fan_out;
 	Size				dsm_total; /* committed DSM chunk bytes (for the
 									  planned-allocation introspection line) */
-} MktPBuildLeader;
+} PrismPBuildLeader;
 
-extern bool mkt_pbuild_setup_shared(
-		MktPBuildLeader		 *lead,
-		Relation			  heap,
-		Relation			  index,
-		const MktBuildConfig *config,
-		int					  nworkers);
+extern bool prism_pbuild_setup_shared(
+		PrismPBuildLeader	   *lead,
+		Relation				heap,
+		Relation				index,
+		const PrismBuildConfig *config,
+		int						nworkers);
 
 /*
  * Re-initialize the scan for the posting pass (the sampling pass consumed the
  * first). Back-end seam: resets the PG parallel-scan descriptor or, in
  * standalone, the work-stealing cursor.
  */
-extern void mkt_pbuild_rescan(Relation heap, MktBuildShared *shared);
+extern void prism_pbuild_rescan(Relation heap, PrismBuildShared *shared);
 
 /* ----------------------------------------------------------------
  * Posting sort seam — cluster-keyed external sort of encoded entries.
  *
- * Back-end seam (like mkt_build_scan): the PG back-end implements it with a
+ * Back-end seam (like prism_build_scan): the PG back-end implements it with a
  * parallel tuplesort whose shared coordinator (Sharedsort) lives in the build
  * DSM; the standalone back-end with per-participant in-memory arrays merged
  * and sorted by cluster. The shared phase-3 code
@@ -922,20 +928,20 @@ extern void mkt_pbuild_rescan(Relation heap, MktBuildShared *shared);
  *
  * Lifecycle:
  *   leader, in setup_shared before launch:  size the DSM region with
- *       mkt_pbuild_sort_shared_size(); after launch:
- * mkt_pbuild_sort_shared_init(). each worker:  begin(is_leader=false) ->
+ *       prism_pbuild_sort_shared_size(); after launch:
+ * prism_pbuild_sort_shared_init(). each worker:  begin(is_leader=false) ->
  * put... -> performsort -> end. leader:       begin(is_leader=true) ->
  * performsort -> getnext... -> end. Entries are fixed-size opaque blobs sorted
  * by the uint32 cluster key. `seg` and `region` are void* to keep PostgreSQL
  * types out of the shared header (the PG impl casts seg to dsm_segment*);
- * `region` is the MKT_DSM_KEY_SORTSHARED chunk.
+ * `region` is the PRISM_DSM_KEY_SORTSHARED chunk.
  * ---------------------------------------------------------------- */
-typedef struct MktSorter MktSorter;
+typedef struct PrismSorter PrismSorter;
 
-extern Size mkt_pbuild_sort_shared_size(int nparticipants);
+extern Size prism_pbuild_sort_shared_size(int nparticipants);
 extern void
-mkt_pbuild_sort_shared_init(void *region, int nparticipants, void *seg);
-extern MktSorter *mkt_pbuild_sort_begin(
+prism_pbuild_sort_shared_init(void *region, int nparticipants, void *seg);
+extern PrismSorter *prism_pbuild_sort_begin(
 		void	*region,
 		void	*seg,
 		int		 participant,
@@ -943,12 +949,12 @@ extern MktSorter *mkt_pbuild_sort_begin(
 		bool	 is_leader,
 		uint32_t entry_size,
 		int		 work_mem_kb);
-extern void
-mkt_pbuild_sort_put(MktSorter *sorter, uint32_t cluster, const void *entry);
-extern void mkt_pbuild_sort_performsort(MktSorter *sorter);
-extern bool mkt_pbuild_sort_getnext(
-		MktSorter *sorter, uint32_t *cluster, const void **entry);
-extern void mkt_pbuild_sort_end(MktSorter *sorter);
+extern void prism_pbuild_sort_put(
+		PrismSorter *sorter, uint32_t cluster, const void *entry);
+extern void prism_pbuild_sort_performsort(PrismSorter *sorter);
+extern bool prism_pbuild_sort_getnext(
+		PrismSorter *sorter, uint32_t *cluster, const void **entry);
+extern void prism_pbuild_sort_end(PrismSorter *sorter);
 
 /*
  * Build every cluster's posting list from a populated (not yet performsorted)
@@ -959,8 +965,8 @@ extern void mkt_pbuild_sort_end(MktSorter *sorter);
  * of the relation and chained, so no O(nlist) reserve is needed. Ends the
  * sorter.
  */
-extern void mkt_posting_build_lists(
-		MktSorter		   *sorter,
+extern void prism_posting_build_lists(
+		PrismSorter		   *sorter,
 		MktStorage		   *storage,
 		uint32_t			nlist,
 		Dimension			dim,
@@ -979,20 +985,20 @@ extern void mkt_posting_build_lists(
  *
  * prog is the build-progress reporting seam (phases + % to
  * pg_stat_progress_create_index, per-phase stats under prism.log_build_stats).
- * The PG caller passes its MktBuildProgress so the parallel phases surface the
- * same way the serial ones do; the standalone caller passes NULL (the seam is
- * a no-op stub there).
+ * The PG caller passes its PrismBuildProgress so the parallel phases surface
+ * the same way the serial ones do; the standalone caller passes NULL (the seam
+ * is a no-op stub there).
  * ---------------------------------------------------------------- */
 
-struct MktBuildProgress; /* index/build_progress.h */
+struct PrismBuildProgress; /* index/build_progress.h */
 
 extern bool do_parallel_build(
-		Relation				 heap,
-		Relation				 index,
-		struct IndexInfo		*index_info,
-		const MktBuildConfig	*config,
-		MktStorage				*storage,
-		struct MktBuildProgress *prog,
+		Relation				   heap,
+		Relation				   index,
+		struct IndexInfo		  *index_info,
+		const PrismBuildConfig	  *config,
+		MktStorage				  *storage,
+		struct PrismBuildProgress *prog,
 		/* No in-RAM tree is materialized; the streamed tree's shape (leaf
 		 * count + depth) comes back through these for the caller's metadata
 		 * write. *out_nlist == 0 means the heap had no indexable rows. */
@@ -1011,4 +1017,4 @@ extern bool do_parallel_build(
 		 * standalone driver + its tests) capture it; may be NULL. */
 		BlockNumber *out_first_posting);
 
-#endif /* MKT_PARALLEL_BUILD_H */
+#endif /* PRISM_PARALLEL_BUILD_H */

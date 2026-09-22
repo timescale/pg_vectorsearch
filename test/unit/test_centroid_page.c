@@ -36,16 +36,16 @@ TEST(centroid_entry_meta_size)
 {
 	ASSERT_EQ(
 			8,
-			sizeof(MktCentroidEntryMeta),
-			"MktCentroidEntryMeta must be 8 bytes");
+			sizeof(PrismCentroidEntryMeta),
+			"PrismCentroidEntryMeta must be 8 bytes");
 }
 
 TEST(centroid_page_opaque_size)
 {
 	ASSERT_EQ(
 			12,
-			sizeof(MktCentroidPageOpaque),
-			"MktCentroidPageOpaque must be 12 bytes");
+			sizeof(PrismCentroidPageOpaque),
+			"PrismCentroidPageOpaque must be 12 bytes");
 }
 
 /* ----------------------------------------------------------------
@@ -54,7 +54,7 @@ TEST(centroid_page_opaque_size)
 
 TEST(page_capacity_768d)
 {
-	uint32_t max = mkt_centroid_max_entries(768);
+	uint32_t max = prism_centroid_max_entries(768);
 	/* Per entry: 8 (meta) + 104 (RaBitQData: 8 header + 96 bits) = 112
 	 * Usable: 8192 - 24 - 12 = 8156
 	 * 8156 / 112 = 72 */
@@ -63,7 +63,7 @@ TEST(page_capacity_768d)
 
 TEST(page_capacity_128d)
 {
-	uint32_t max = mkt_centroid_max_entries(128);
+	uint32_t max = prism_centroid_max_entries(128);
 	/* Per entry: 8 (meta) + 24 (RaBitQData: 8 header + 16 bits) = 32
 	 * 8156 / 32 = 254 */
 	ASSERT_EQ(254, max, "128d should fit 254 entries per page");
@@ -71,7 +71,7 @@ TEST(page_capacity_128d)
 
 TEST(page_capacity_1536d)
 {
-	uint32_t max = mkt_centroid_max_entries(1536);
+	uint32_t max = prism_centroid_max_entries(1536);
 	/* Per entry: 8 (meta) + 200 (RaBitQData: 8 header + 192 bits) = 208
 	 * 8156 / 208 = 39 */
 	ASSERT_EQ(39, max, "1536d should fit 39 entries per page");
@@ -126,15 +126,15 @@ TEST(item_pointer_max_values)
 TEST(bidir_regions_no_overlap)
 {
 	Dimension dim		= 768;
-	uint32_t  max		= mkt_centroid_max_entries(dim);
+	uint32_t  max		= prism_centroid_max_entries(dim);
 	uint32_t  data_size = MKT_RABITQ_DATA_SIZE(dim);
 
 	/* Forward region: metadata */
 	size_t meta_start = SizeOfPageHeaderData;
-	size_t meta_end	  = meta_start + max * sizeof(MktCentroidEntryMeta);
+	size_t meta_end	  = meta_start + max * sizeof(PrismCentroidEntryMeta);
 
 	/* Backward region: RaBitQData entries */
-	size_t opaque_start = BLCKSZ - sizeof(MktCentroidPageOpaque);
+	size_t opaque_start = BLCKSZ - sizeof(PrismCentroidPageOpaque);
 	size_t data_start	= opaque_start - (size_t)max * data_size;
 
 	ASSERT_TRUE(
@@ -151,9 +151,9 @@ TEST(page_init_basic)
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
 
-	mkt_centroid_page_init(page, 0);
+	prism_centroid_page_init(page, 0);
 
-	MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
+	PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
 	ASSERT_EQ(
 			InvalidBlockNumber,
 			opaque->next_blkno,
@@ -161,9 +161,9 @@ TEST(page_init_basic)
 	ASSERT_EQ(0, opaque->entry_count, "entry_count should be 0");
 	ASSERT_EQ(0, opaque->level, "level should be 0");
 	ASSERT_EQ(
-			MKT_CENTROID_PAGE_ID,
+			PRISM_CENTROID_PAGE_ID,
 			opaque->page_id,
-			"page_id should be MKT_CENTROID_PAGE_ID");
+			"page_id should be PRISM_CENTROID_PAGE_ID");
 }
 
 TEST(page_init_with_level)
@@ -171,9 +171,9 @@ TEST(page_init_with_level)
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
 
-	mkt_centroid_page_init(page, 2);
+	prism_centroid_page_init(page, 2);
 
-	MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
+	PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
 	ASSERT_EQ(2, opaque->level, "level should be 2");
 }
 
@@ -202,24 +202,24 @@ TEST(page_add_single_entry)
 	/* Set up page */
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
-	mkt_centroid_page_init(page, 0);
+	prism_centroid_page_init(page, 0);
 
 	/* Add entry */
-	bool added = mkt_centroid_page_add(
-			page, dim, 42, 8, MKT_CENTROID_FLAG_LEAF, encoded);
+	bool added = prism_centroid_page_add(
+			page, dim, 42, 8, PRISM_CENTROID_FLAG_LEAF, encoded);
 	ASSERT_TRUE(added, "entry should be added");
 
 	/* Verify */
-	MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
+	PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
 	ASSERT_EQ(1, opaque->entry_count, "entry_count should be 1");
 
-	const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, 0);
+	const PrismCentroidEntryMeta *meta = prism_centroid_meta(page, 0);
 	ASSERT_EQ(42, meta->child_blkno, "child_blkno");
 	ASSERT_EQ(8, meta->child_count, "child_count");
-	ASSERT_EQ(MKT_CENTROID_FLAG_LEAF, meta->flags, "flags");
+	ASSERT_EQ(PRISM_CENTROID_FLAG_LEAF, meta->flags, "flags");
 
 	/* Verify RaBitQData round-trip via direct pointer */
-	const RaBitQData *data		   = mkt_centroid_data(page, 0, dim);
+	const RaBitQData *data		   = prism_centroid_data(page, 0, dim);
 	uint32_t		  packed_bytes = MKT_RABITQ_BYTES(dim);
 	ASSERT_FLOAT_EQ(encoded->f_add, data->f_add, 1e-6f, "f_add round-trip");
 	ASSERT_FLOAT_EQ(
@@ -237,14 +237,14 @@ TEST(page_add_single_entry)
 TEST(page_add_fill_to_capacity)
 {
 	Dimension dim = 768;
-	uint32_t  max = mkt_centroid_max_entries(dim);
+	uint32_t  max = prism_centroid_max_entries(dim);
 
 	RaBitQParams *params = mkt_rabitq_create(dim, 42);
 	ASSERT_NOT_NULL(params, "params created");
 
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
-	mkt_centroid_page_init(page, 0);
+	prism_centroid_page_init(page, 0);
 
 	/* Create a test vector */
 	float *vec		= mkt_alloc(dim * sizeof(float));
@@ -263,7 +263,7 @@ TEST(page_add_fill_to_capacity)
 	/* Fill page to capacity */
 	for (uint32_t i = 0; i < max; i++)
 	{
-		bool added = mkt_centroid_page_add(page, dim, i, 1, 0, encoded);
+		bool added = prism_centroid_page_add(page, dim, i, 1, 0, encoded);
 
 		char msg[64];
 		snprintf(msg, sizeof(msg), "entry %u should be added", i);
@@ -271,11 +271,11 @@ TEST(page_add_fill_to_capacity)
 	}
 
 	/* Verify full */
-	MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
+	PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
 	ASSERT_EQ(max, opaque->entry_count, "page should be full");
 
 	/* One more should fail */
-	bool added = mkt_centroid_page_add(page, dim, 999, 1, 0, encoded);
+	bool added = prism_centroid_page_add(page, dim, 999, 1, 0, encoded);
 	ASSERT_FALSE(added, "page should be full");
 
 	mkt_free(encoded);
@@ -287,10 +287,10 @@ TEST(page_has_room)
 	Dimension dim = 128;
 	char	  page_buf[BLCKSZ];
 	Page	  page = page_buf;
-	mkt_centroid_page_init(page, 0);
+	prism_centroid_page_init(page, 0);
 
 	ASSERT_TRUE(
-			mkt_centroid_page_has_room(page, dim, false),
+			prism_centroid_page_has_room(page, dim, false),
 			"empty page should have room");
 
 	/* Fill it */
@@ -307,12 +307,12 @@ TEST(page_has_room)
 	Vec32Ref	cent_ref = {.data = centroid, .dim = dim};
 	RaBitQData *encoded	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
 
-	uint32_t max = mkt_centroid_max_entries(dim);
+	uint32_t max = prism_centroid_max_entries(dim);
 	for (uint32_t i = 0; i < max; i++)
-		mkt_centroid_page_add(page, dim, i, 1, 0, encoded);
+		prism_centroid_page_add(page, dim, i, 1, 0, encoded);
 
 	ASSERT_FALSE(
-			mkt_centroid_page_has_room(page, dim, false),
+			prism_centroid_page_has_room(page, dim, false),
 			"full page should not have room");
 
 	mkt_free(encoded);
@@ -334,7 +334,7 @@ TEST(page_multi_entry_round_trip)
 
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
-	mkt_centroid_page_init(page, 1);
+	prism_centroid_page_init(page, 1);
 
 	float *centroid = mkt_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
@@ -353,7 +353,7 @@ TEST(page_multi_entry_round_trip)
 		encodings[e]	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
 		ASSERT_NOT_NULL(encodings[e], "encoding succeeded");
 
-		bool added = mkt_centroid_page_add(
+		bool added = prism_centroid_page_add(
 				page, dim, 100 + e, e + 1, 0, encodings[e]);
 		ASSERT_TRUE(added, "entry added");
 	}
@@ -361,8 +361,8 @@ TEST(page_multi_entry_round_trip)
 	/* Verify all entries */
 	for (int e = 0; e < count; e++)
 	{
-		const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, e);
-		char						msg[128];
+		const PrismCentroidEntryMeta *meta = prism_centroid_meta(page, e);
+		char						  msg[128];
 
 		snprintf(msg, sizeof(msg), "entry %d child_blkno", e);
 		ASSERT_EQ((BlockNumber)(100 + e), meta->child_blkno, msg);
@@ -371,7 +371,7 @@ TEST(page_multi_entry_round_trip)
 		ASSERT_EQ((uint16_t)(e + 1), meta->child_count, msg);
 
 		/* Verify RaBitQData via direct pointer */
-		const RaBitQData *data = mkt_centroid_data(page, e, dim);
+		const RaBitQData *data = prism_centroid_data(page, e, dim);
 
 		snprintf(msg, sizeof(msg), "entry %d f_add", e);
 		ASSERT_FLOAT_EQ(encodings[e]->f_add, data->f_add, 1e-6f, msg);
@@ -398,7 +398,7 @@ TEST(page_multi_entry_round_trip)
 
 TEST(page_capacity_float_768d)
 {
-	uint32_t max = mkt_centroid_max_entries_fmt(768, MKT_CENTROID_FMT_FLOAT);
+	uint32_t max = prism_centroid_max_entries_fmt(768, MKT_CENTROID_FMT_FLOAT);
 	/* Per entry: 8 (meta) + 3072 (768*4) = 3080
 	 * Usable: 8156
 	 * 8156 / 3080 = 2 */
@@ -407,7 +407,7 @@ TEST(page_capacity_float_768d)
 
 TEST(page_capacity_float_128d)
 {
-	uint32_t max = mkt_centroid_max_entries_fmt(128, MKT_CENTROID_FMT_FLOAT);
+	uint32_t max = prism_centroid_max_entries_fmt(128, MKT_CENTROID_FMT_FLOAT);
 	/* Per entry: 8 + 512 = 520
 	 * 8156 / 520 = 15 */
 	ASSERT_EQ(15, max, "128d float should fit 15 entries per page");
@@ -415,7 +415,7 @@ TEST(page_capacity_float_128d)
 
 TEST(page_capacity_half_768d)
 {
-	uint32_t max = mkt_centroid_max_entries_fmt(768, MKT_CENTROID_FMT_HALF);
+	uint32_t max = prism_centroid_max_entries_fmt(768, MKT_CENTROID_FMT_HALF);
 	/* Per entry: 8 + 1536 = 1544
 	 * 8156 / 1544 = 5 */
 	ASSERT_EQ(5, max, "768d half should fit 5 entries per page");
@@ -423,7 +423,7 @@ TEST(page_capacity_half_768d)
 
 TEST(page_capacity_half_128d)
 {
-	uint32_t max = mkt_centroid_max_entries_fmt(128, MKT_CENTROID_FMT_HALF);
+	uint32_t max = prism_centroid_max_entries_fmt(128, MKT_CENTROID_FMT_HALF);
 	/* Per entry: 8 (meta) + 256 (data) = 264
 	 * 8156 / 264 = 30 */
 	ASSERT_EQ(30, max, "128d half should fit 30 entries per page");
@@ -434,22 +434,22 @@ TEST(page_init_fmt_stores_format)
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
 
-	mkt_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_FLOAT);
+	prism_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_FLOAT);
 	ASSERT_EQ(
 			MKT_CENTROID_FMT_FLOAT,
-			mkt_centroid_page_format(page),
+			prism_centroid_page_format(page),
 			"float format stored in opaque");
 
-	mkt_centroid_page_init_fmt(page, 1, MKT_CENTROID_FMT_HALF);
+	prism_centroid_page_init_fmt(page, 1, MKT_CENTROID_FMT_HALF);
 	ASSERT_EQ(
 			MKT_CENTROID_FMT_HALF,
-			mkt_centroid_page_format(page),
+			prism_centroid_page_format(page),
 			"half format stored in opaque");
 
-	mkt_centroid_page_init_fmt(page, 2, MKT_CENTROID_FMT_RABITQ);
+	prism_centroid_page_init_fmt(page, 2, MKT_CENTROID_FMT_RABITQ);
 	ASSERT_EQ(
 			MKT_CENTROID_FMT_RABITQ,
-			mkt_centroid_page_format(page),
+			prism_centroid_page_format(page),
 			"rabitq format stored in opaque");
 }
 
@@ -458,10 +458,10 @@ TEST(page_init_default_is_rabitq)
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
 
-	mkt_centroid_page_init(page, 0);
+	prism_centroid_page_init(page, 0);
 	ASSERT_EQ(
 			MKT_CENTROID_FMT_RABITQ,
-			mkt_centroid_page_format(page),
+			prism_centroid_page_format(page),
 			"default init should be rabitq format");
 }
 
@@ -471,28 +471,28 @@ TEST(page_float_add_round_trip)
 
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
-	mkt_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_FLOAT);
+	prism_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_FLOAT);
 
 	/* Create test vector */
 	float *vec = mkt_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 		vec[i] = (float)((i * 17 + 3) % 100 - 50) / 10.0f;
 
-	bool added = mkt_centroid_page_add_entry(
-			page, dim, 42, 8, MKT_CENTROID_FLAG_LEAF, vec);
+	bool added = prism_centroid_page_add_entry(
+			page, dim, 42, 8, PRISM_CENTROID_FLAG_LEAF, vec);
 	ASSERT_TRUE(added, "float entry should be added");
 
 	/* Verify metadata */
-	MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
+	PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
 	ASSERT_EQ(1, opaque->entry_count, "entry_count should be 1");
 
-	const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, 0);
+	const PrismCentroidEntryMeta *meta = prism_centroid_meta(page, 0);
 	ASSERT_EQ(42, meta->child_blkno, "child_blkno");
 	ASSERT_EQ(8, meta->child_count, "child_count");
-	ASSERT_EQ(MKT_CENTROID_FLAG_LEAF, meta->flags, "flags");
+	ASSERT_EQ(PRISM_CENTROID_FLAG_LEAF, meta->flags, "flags");
 
 	/* Verify float data round-trip */
-	const float *data = mkt_centroid_float_data(page, 0, dim);
+	const float *data = prism_centroid_float_data(page, 0, dim);
 	for (Dimension i = 0; i < dim; i++)
 	{
 		char msg[64];
@@ -509,26 +509,26 @@ TEST(page_half_add_round_trip)
 
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
-	mkt_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_HALF);
+	prism_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_HALF);
 
 	/* Create test vector as halfs */
 	half *hvec = mkt_alloc(dim * sizeof(half));
 	for (Dimension i = 0; i < dim; i++)
 		hvec[i] = mkt_float_to_half((float)((i * 17 + 3) % 100 - 50) / 10.0f);
 
-	bool added = mkt_centroid_page_add_entry(page, dim, 99, 4, 0, hvec);
+	bool added = prism_centroid_page_add_entry(page, dim, 99, 4, 0, hvec);
 	ASSERT_TRUE(added, "half entry should be added");
 
 	/* Verify metadata */
-	MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
+	PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
 	ASSERT_EQ(1, opaque->entry_count, "entry_count should be 1");
 
-	const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, 0);
+	const PrismCentroidEntryMeta *meta = prism_centroid_meta(page, 0);
 	ASSERT_EQ(99, meta->child_blkno, "child_blkno");
 	ASSERT_EQ(4, meta->child_count, "child_count");
 
 	/* Verify half data round-trip (bit-exact) */
-	const half *data	   = mkt_centroid_half_data(page, 0, dim);
+	const half *data	   = prism_centroid_half_data(page, 0, dim);
 	int			bits_match = memcmp(hvec, data, dim * sizeof(half)) == 0;
 	ASSERT_TRUE(bits_match, "half vector bit-exact round-trip");
 
@@ -538,11 +538,11 @@ TEST(page_half_add_round_trip)
 TEST(page_float_fill_to_capacity)
 {
 	Dimension dim = 768;
-	uint32_t  max = mkt_centroid_max_entries_fmt(dim, MKT_CENTROID_FMT_FLOAT);
+	uint32_t max = prism_centroid_max_entries_fmt(dim, MKT_CENTROID_FMT_FLOAT);
 
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
-	mkt_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_FLOAT);
+	prism_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_FLOAT);
 
 	float *vec = mkt_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
@@ -550,7 +550,7 @@ TEST(page_float_fill_to_capacity)
 
 	for (uint32_t i = 0; i < max; i++)
 	{
-		bool added = mkt_centroid_page_add_entry(page, dim, i, 1, 0, vec);
+		bool added = prism_centroid_page_add_entry(page, dim, i, 1, 0, vec);
 
 		char msg[64];
 		snprintf(msg, sizeof(msg), "float entry %u added", i);
@@ -558,15 +558,15 @@ TEST(page_float_fill_to_capacity)
 	}
 
 	/* Verify full */
-	MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
+	PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
 	ASSERT_EQ(max, opaque->entry_count, "page should be full");
 
 	/* One more should fail */
-	bool added = mkt_centroid_page_add_entry(page, dim, 999, 1, 0, vec);
+	bool added = prism_centroid_page_add_entry(page, dim, 999, 1, 0, vec);
 	ASSERT_FALSE(added, "full float page should reject");
 
 	ASSERT_FALSE(
-			mkt_centroid_page_has_room(page, dim, false),
+			prism_centroid_page_has_room(page, dim, false),
 			"full float page has_room should be false");
 
 	mkt_free(vec);
@@ -579,7 +579,7 @@ TEST(page_half_multi_entry_round_trip)
 
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
-	mkt_centroid_page_init_fmt(page, 1, MKT_CENTROID_FMT_HALF);
+	prism_centroid_page_init_fmt(page, 1, MKT_CENTROID_FMT_HALF);
 
 	half **vectors = mkt_alloc(count * sizeof(void *));
 
@@ -590,7 +590,7 @@ TEST(page_half_multi_entry_round_trip)
 			vectors[e][i] = mkt_float_to_half(
 					(float)((i * 17 + e * 31) % 100 - 50) / 10.0f);
 
-		bool added = mkt_centroid_page_add_entry(
+		bool added = prism_centroid_page_add_entry(
 				page, dim, 100 + e, e + 1, 0, vectors[e]);
 		ASSERT_TRUE(added, "half entry added");
 	}
@@ -598,13 +598,13 @@ TEST(page_half_multi_entry_round_trip)
 	/* Verify all entries */
 	for (int e = 0; e < count; e++)
 	{
-		const MktCentroidEntryMeta *meta = mkt_centroid_meta(page, e);
-		char						msg[128];
+		const PrismCentroidEntryMeta *meta = prism_centroid_meta(page, e);
+		char						  msg[128];
 
 		snprintf(msg, sizeof(msg), "entry %d child_blkno", e);
 		ASSERT_EQ((BlockNumber)(100 + e), meta->child_blkno, msg);
 
-		const half *data = mkt_centroid_half_data(page, e, dim);
+		const half *data = prism_centroid_half_data(page, e, dim);
 		snprintf(msg, sizeof(msg), "entry %d half bits", e);
 		int bits_match = memcmp(vectors[e], data, dim * sizeof(half)) == 0;
 		ASSERT_TRUE(bits_match, msg);
@@ -623,30 +623,30 @@ TEST(page_entry_data_generic_accessor)
 	Page page = page_buf;
 
 	/* Float format: generic and typed return same address */
-	mkt_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_FLOAT);
+	prism_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_FLOAT);
 	float *fvec = mkt_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 		fvec[i] = (float)i;
 
-	mkt_centroid_page_add_entry(page, dim, 0, 1, 0, fvec);
+	prism_centroid_page_add_entry(page, dim, 0, 1, 0, fvec);
 
-	const void	*g1 = mkt_centroid_entry_data(page, 0, dim);
-	const float *t1 = mkt_centroid_float_data(page, 0, dim);
+	const void	*g1 = prism_centroid_entry_data(page, 0, dim);
+	const float *t1 = prism_centroid_float_data(page, 0, dim);
 	ASSERT_EQ(
 			(uintptr_t)g1,
 			(uintptr_t)t1,
 			"generic and typed float same address");
 
 	/* Half format: generic and typed return same address */
-	mkt_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_HALF);
+	prism_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_HALF);
 	half *hvec = mkt_alloc(dim * sizeof(half));
 	for (Dimension i = 0; i < dim; i++)
 		hvec[i] = mkt_float_to_half((float)i);
 
-	mkt_centroid_page_add_entry(page, dim, 0, 1, 0, hvec);
+	prism_centroid_page_add_entry(page, dim, 0, 1, 0, hvec);
 
-	const void *g2 = mkt_centroid_entry_data(page, 0, dim);
-	const half *t2 = mkt_centroid_half_data(page, 0, dim);
+	const void *g2 = prism_centroid_entry_data(page, 0, dim);
+	const half *t2 = prism_centroid_half_data(page, 0, dim);
 	ASSERT_EQ(
 			(uintptr_t)g2,
 			(uintptr_t)t2,

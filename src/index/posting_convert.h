@@ -5,8 +5,8 @@
  * with SoA group sections and VPSHUFB-packed nibble codes.
  */
 
-#ifndef MKT_POSTING_CONVERT_H
-#define MKT_POSTING_CONVERT_H
+#ifndef PRISM_POSTING_CONVERT_H
+#define PRISM_POSTING_CONVERT_H
 
 #include "index/posting_page.h"
 #include "index/storage.h"
@@ -25,7 +25,7 @@
  * The original AoS pages are NOT freed — the caller is
  * responsible for any cleanup.
  */
-BlockNumber mkt_posting_convert_to_fastscan(
+BlockNumber prism_posting_convert_to_fastscan(
 		MktStorage *storage, BlockNumber aos_head, Dimension dim);
 
-#endif /* MKT_POSTING_CONVERT_H */
+#endif /* PRISM_POSTING_CONVERT_H */

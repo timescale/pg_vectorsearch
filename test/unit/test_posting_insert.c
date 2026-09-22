@@ -39,7 +39,7 @@ insert_vec(
 {
 	float *pt = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
 	mkt_rabitq_rotate(params, vec, pt);
-	mkt_posting_insert_one(
+	prism_posting_insert_one(
 			&st->base,
 			params,
 			dim,
@@ -65,24 +65,29 @@ scan_count(
 	RaBitQQueryState qstate;
 	setup_query_state(&qstate, params, centroid, dim);
 
-	MktPostingScan scan;
-	mkt_posting_scan_init(
-			&scan, &st->base, NULL, params, dim, mkt_posting_max_entries(dim));
+	PrismPostingScan scan;
+	prism_posting_scan_init(
+			&scan,
+			&st->base,
+			NULL,
+			params,
+			dim,
+			prism_posting_max_entries(dim));
 	if (fastscan)
-		mkt_posting_scan_enable_fastscan(&scan, 16);
+		prism_posting_scan_enable_fastscan(&scan, 16);
 	MktTopK topk;
 	mkt_topk_init(&topk, k);
 
-	mkt_posting_scan_begin_cluster(&scan, &qstate, head);
+	prism_posting_scan_begin_cluster(&scan, &qstate, head);
 	if (fastscan)
-		mkt_posting_scan_cluster_fastscan(&scan, &topk);
+		prism_posting_scan_cluster_fastscan(&scan, &topk);
 	else
-		mkt_posting_scan_cluster(&scan, &topk);
-	mkt_posting_scan_end_cluster(&scan);
+		prism_posting_scan_cluster(&scan, &topk);
+	prism_posting_scan_end_cluster(&scan);
 
 	uint32_t n = topk.cand_count;
 	mkt_topk_cleanup(&topk);
-	mkt_posting_scan_cleanup(&scan);
+	prism_posting_scan_cleanup(&scan);
 	return n;
 }
 
@@ -100,26 +105,26 @@ typedef struct LiveCtx
 
 /* A fastscan page has no per-entry flag, so all its entries count. */
 static bool
-count_live_page(MktPostingChainPos *pos, void *state)
+count_live_page(PrismPostingChainPos *pos, void *state)
 {
-	LiveCtx					   *ctx = state;
-	const MktPostingPageOpaque *op	= mkt_posting_opaque(pos->page);
-	uint32_t					n	= op->entry_count;
+	LiveCtx						 *ctx = state;
+	const PrismPostingPageOpaque *op  = prism_posting_opaque(pos->page);
+	uint32_t					  n	  = op->entry_count;
 
-	if (op->flags & MKT_POSTING_PAGE_FASTSCAN)
+	if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
 	{
 		ctx->live += n;
 		return true;
 	}
 
-	char *content = mkt_posting_page_content(pos->page, ctx->dim);
+	char *content = prism_posting_page_content(pos->page, ctx->dim);
 
 	for (uint32_t i = 0; i < n; i++)
 	{
-		const MktPostingEntryHeader *h =
-				mkt_posting_entry_at(content, i, ctx->dim);
+		const PrismPostingEntryHeader *h =
+				prism_posting_entry_at(content, i, ctx->dim);
 
-		if (!(h->meta.flags & MKT_POSTING_FLAG_DELETED))
+		if (!(h->meta.flags & PRISM_POSTING_FLAG_DELETED))
 			ctx->live++;
 	}
 	return true;
@@ -130,7 +135,7 @@ chain_live_count(TestPageStorage *st, Dimension dim, BlockNumber head)
 {
 	LiveCtx ctx = {.dim = dim};
 
-	mkt_posting_chain_walk(&st->base, head, count_live_page, &ctx);
+	prism_posting_chain_walk(&st->base, head, count_live_page, &ctx);
 	return ctx.live;
 }
 
@@ -167,11 +172,11 @@ TEST(insert_appends_and_counts)
 	Page hp = mkt_storage_read_page(&storage.base, head);
 	ASSERT_NEQ(
 			InvalidBlockNumber,
-			mkt_posting_head_tail(hp),
+			prism_posting_head_tail(hp),
 			"tail_blkno should be filled after first insert");
 	ASSERT_EQ(
 			8,
-			mkt_posting_head_live_count(hp),
+			prism_posting_head_live_count(hp),
 			"live_count should track built + inserted");
 	mkt_storage_release_page(&storage.base, head);
 
@@ -213,7 +218,7 @@ TEST(insert_then_scan_finds_all)
 TEST(insert_grows_overflow_page)
 {
 	Dimension		dim		  = 768;
-	uint32_t		first_cap = mkt_posting_max_entries_first(dim);
+	uint32_t		first_cap = prism_posting_max_entries_first(dim);
 	uint32_t		ninsert	  = first_cap + 5; /* force a 2nd page */
 	TestPageStorage storage	  = make_test_storage(32);
 	RaBitQParams   *params	  = mkt_rabitq_create(dim, 99);
@@ -238,7 +243,7 @@ TEST(insert_grows_overflow_page)
 	Page hp = mkt_storage_read_page(&storage.base, head);
 	ASSERT_NEQ(
 			InvalidBlockNumber,
-			mkt_posting_opaque(hp)->next_blkno,
+			prism_posting_opaque(hp)->next_blkno,
 			"head should chain to an overflow page");
 	mkt_storage_release_page(&storage.base, head);
 
@@ -296,7 +301,7 @@ static bool
 vid_is_dead(ItemPointerData tid, void *state)
 {
 	const DeadSet *d   = (const DeadSet *)state;
-	uint32_t	   vid = mkt_posting_get_vector_id(&tid);
+	uint32_t	   vid = prism_posting_get_vector_id(&tid);
 	for (uint32_t i = 0; i < d->n; i++)
 		if (d->vids[i] == vid)
 			return true;
@@ -334,7 +339,7 @@ TEST(tombstone_marks_and_scan_skips)
 	/* Tombstone two built ids and one inserted id. */
 	const uint32_t dead_vids[] = {1, 3, 101};
 	DeadSet		   dead		   = {.vids = dead_vids, .n = 3};
-	uint32_t	   marked	   = mkt_posting_tombstone_chain(
+	uint32_t	   marked	   = prism_posting_tombstone_chain(
 			   &storage.base, dim, head, vid_is_dead, &dead);
 
 	ASSERT_EQ(3, marked, "three entries tombstoned");
@@ -345,7 +350,9 @@ TEST(tombstone_marks_and_scan_skips)
 
 	Page hp = mkt_storage_read_page(&storage.base, head);
 	ASSERT_EQ(
-			5, mkt_posting_head_live_count(hp), "head live_count decremented");
+			5,
+			prism_posting_head_live_count(hp),
+			"head live_count decremented");
 	mkt_storage_release_page(&storage.base, head);
 
 	ASSERT_EQ(
@@ -356,7 +363,7 @@ TEST(tombstone_marks_and_scan_skips)
 	/* Re-tombstoning the same ids marks nothing new (idempotent). */
 	ASSERT_EQ(
 			0,
-			mkt_posting_tombstone_chain(
+			prism_posting_tombstone_chain(
 					&storage.base, dim, head, vid_is_dead, &dead),
 			"already-deleted entries are not re-counted");
 
@@ -365,7 +372,7 @@ TEST(tombstone_marks_and_scan_skips)
 }
 
 /* Whole-page tombstone: when every entry on a page is dead, the page gets the
- * MKT_POSTING_PAGE_TOMBSTONED flag and the scan skips it. Covers AoS, where
+ * PRISM_POSTING_PAGE_TOMBSTONED flag and the scan skips it. Covers AoS, where
  * entries are also individually flagged. */
 TEST(tombstone_all_flags_aos_page)
 {
@@ -381,10 +388,10 @@ TEST(tombstone_all_flags_aos_page)
 
 	Page hp_before = mkt_storage_read_page(&storage.base, head);
 	ASSERT_TRUE(
-			(mkt_posting_opaque(hp_before)->flags &
-			 MKT_POSTING_PAGE_TOMBSTONED) == 0,
+			(prism_posting_opaque(hp_before)->flags &
+			 PRISM_POSTING_PAGE_TOMBSTONED) == 0,
 			"the built page starts untombstoned");
-	ASSERT_EQ(8, mkt_posting_head_live_count(hp_before), "with 8 live");
+	ASSERT_EQ(8, prism_posting_head_live_count(hp_before), "with 8 live");
 	mkt_storage_release_page(&storage.base, head);
 	ASSERT_EQ(
 			8,
@@ -395,15 +402,16 @@ TEST(tombstone_all_flags_aos_page)
 	DeadSet		   dead		   = {.vids = dead_vids, .n = 8};
 	ASSERT_EQ(
 			8,
-			mkt_posting_tombstone_chain(
+			prism_posting_tombstone_chain(
 					&storage.base, dim, head, vid_is_dead, &dead),
 			"all 8 entries tombstoned");
 
 	Page hp = mkt_storage_read_page(&storage.base, head);
 	ASSERT_TRUE(
-			(mkt_posting_opaque(hp)->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0,
+			(prism_posting_opaque(hp)->flags &
+			 PRISM_POSTING_PAGE_TOMBSTONED) != 0,
 			"fully-dead AoS page is flagged tombstoned");
-	ASSERT_EQ(0, mkt_posting_head_live_count(hp), "live_count is zero");
+	ASSERT_EQ(0, prism_posting_head_live_count(hp), "live_count is zero");
 	mkt_storage_release_page(&storage.base, head);
 
 	ASSERT_EQ(
@@ -431,12 +439,12 @@ TEST(tombstone_all_flags_fastscan_page)
 
 	Page hp_before = mkt_storage_read_page(&storage.base, head);
 	ASSERT_TRUE(
-			(mkt_posting_opaque(hp_before)->flags &
-			 MKT_POSTING_PAGE_TOMBSTONED) == 0,
+			(prism_posting_opaque(hp_before)->flags &
+			 PRISM_POSTING_PAGE_TOMBSTONED) == 0,
 			"the built fastscan page starts untombstoned");
 	ASSERT_EQ(
 			nbuilt,
-			mkt_posting_head_live_count(hp_before),
+			prism_posting_head_live_count(hp_before),
 			"with every entry live");
 	mkt_storage_release_page(&storage.base, head);
 	ASSERT_EQ(
@@ -451,16 +459,19 @@ TEST(tombstone_all_flags_fastscan_page)
 
 	ASSERT_EQ(
 			nbuilt,
-			mkt_posting_tombstone_chain(
+			prism_posting_tombstone_chain(
 					&storage.base, dim, head, vid_is_dead, &dead),
 			"all fastscan entries accounted as tombstoned");
 
 	Page hp = mkt_storage_read_page(&storage.base, head);
 	ASSERT_TRUE(
-			(mkt_posting_opaque(hp)->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0,
+			(prism_posting_opaque(hp)->flags &
+			 PRISM_POSTING_PAGE_TOMBSTONED) != 0,
 			"fully-dead FASTSCAN page is flagged tombstoned");
 	ASSERT_EQ(
-			0, mkt_posting_head_live_count(hp), "fastscan live_count is zero");
+			0,
+			prism_posting_head_live_count(hp),
+			"fastscan live_count is zero");
 	mkt_storage_release_page(&storage.base, head);
 
 	ASSERT_EQ(

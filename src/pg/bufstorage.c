@@ -262,7 +262,7 @@ pg_commit_page(MktStorage *self, BlockNumber blkno)
 		 * logging so the entire page is preserved; prism never reads
 		 * pd_lower back (scans locate data via PageGetContents /
 		 * pd_special, and centroid pages derive their metadata cursor from
-		 * entry_count -- see mkt_centroid_meta_end, which exists because of
+		 * entry_count -- see prism_centroid_meta_end, which exists because of
 		 * this overwrite).
 		 */
 		PageHeader ph = (PageHeader)BufferGetPage(s->cur_buf);
@@ -404,7 +404,7 @@ pg_rerank(
 		}
 		else
 		{
-			ItemPointerData tid = mkt_posting_decode_tid(candidates[idx].id);
+			ItemPointerData tid = prism_posting_decode_tid(candidates[idx].id);
 			if (table_tuple_fetch_row_version(s->rel, &tid, SnapshotAny, slot))
 			{
 				bool  isnull;
@@ -490,7 +490,7 @@ rerank_stream_cb(
 		}
 
 		*(uint32_t *)per_buffer_data = idx;
-		ItemPointerData tid = mkt_posting_decode_tid(st->candidates[idx].id);
+		ItemPointerData tid = prism_posting_decode_tid(st->candidates[idx].id);
 		return ItemPointerGetBlockNumber(&tid);
 	}
 
@@ -555,7 +555,7 @@ pg_rerank_readstream(
 			buf = read_stream_next_buffer(stream, &per_buffer_data)))
 	{
 		uint32_t		idx = *(uint32_t *)per_buffer_data;
-		ItemPointerData tid = mkt_posting_decode_tid(candidates[idx].id);
+		ItemPointerData tid = prism_posting_decode_tid(candidates[idx].id);
 
 		Page		 page = BufferGetPage(buf);
 		OffsetNumber off  = ItemPointerGetOffsetNumber(&tid);

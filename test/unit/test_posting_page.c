@@ -33,18 +33,18 @@ TEST_MEMCTX_FIXTURE();
  * ---------------------------------------------------------------- */
 
 static void
-mark_page_deleted(MktPostingPageOpaque *op, void *state)
+mark_page_deleted(PrismPostingPageOpaque *op, void *state)
 {
 	(void)state;
-	op->flags |= MKT_POSTING_PAGE_DELETED;
+	op->flags |= PRISM_POSTING_PAGE_DELETED;
 }
 
 TEST(posting_entry_meta_size)
 {
 	ASSERT_EQ(
 			8,
-			sizeof(MktPostingEntryMeta),
-			"MktPostingEntryMeta must be 8 bytes");
+			sizeof(PrismPostingEntryMeta),
+			"PrismPostingEntryMeta must be 8 bytes");
 }
 
 TEST(posting_page_opaque_size)
@@ -53,8 +53,8 @@ TEST(posting_page_opaque_size)
 	 * for runtime inserts / LIRE size tracking. */
 	ASSERT_EQ(
 			24,
-			sizeof(MktPostingPageOpaque),
-			"MktPostingPageOpaque must be 24 bytes");
+			sizeof(PrismPostingPageOpaque),
+			"PrismPostingPageOpaque must be 24 bytes");
 }
 
 /* ----------------------------------------------------------------
@@ -63,7 +63,7 @@ TEST(posting_page_opaque_size)
 
 TEST(page_capacity_768d)
 {
-	uint32_t max = mkt_posting_max_entries(768);
+	uint32_t max = prism_posting_max_entries(768);
 	/* Per entry: 8 (meta) + 12 (3 floats) + 96 (bits) = 116B
 	 * Usable: 8192 - 24 (header) - 16 (opaque) = 8152B
 	 * 8152 / 116 = 70 */
@@ -72,7 +72,7 @@ TEST(page_capacity_768d)
 
 TEST(page_capacity_128d)
 {
-	uint32_t max = mkt_posting_max_entries(128);
+	uint32_t max = prism_posting_max_entries(128);
 	/* Per entry: 8 + 12 + 16 = 36B
 	 * 8152 / 36 = 226 */
 	ASSERT_EQ(226, max, "128d should fit 226 entries per page");
@@ -80,7 +80,7 @@ TEST(page_capacity_128d)
 
 TEST(page_capacity_1536d)
 {
-	uint32_t max = mkt_posting_max_entries(1536);
+	uint32_t max = prism_posting_max_entries(1536);
 	/* Per entry: 8 + 12 + 192 = 212B
 	 * 8152 / 212 = 38 */
 	ASSERT_EQ(38, max, "1536d should fit 38 entries per page");
@@ -93,10 +93,10 @@ TEST(page_capacity_1536d)
 TEST(soa_regions_no_overlap)
 {
 	Dimension dim = 768;
-	uint32_t  max = mkt_posting_max_entries(dim);
+	uint32_t  max = prism_posting_max_entries(dim);
 
 	/* All regions must fit within usable space */
-	size_t meta_size	  = (size_t)max * sizeof(MktPostingEntryMeta);
+	size_t meta_size	  = (size_t)max * sizeof(PrismPostingEntryMeta);
 	size_t f_add_size	  = (size_t)max * sizeof(float);
 	size_t f_rescale_size = (size_t)max * sizeof(float);
 	size_t f_error_size	  = (size_t)max * sizeof(float);
@@ -106,7 +106,7 @@ TEST(soa_regions_no_overlap)
 				   bits_size;
 
 	ASSERT_TRUE(
-			total <= mkt_posting_page_usable(),
+			total <= prism_posting_page_usable(),
 			"SoA arrays must fit in usable space");
 }
 
@@ -117,16 +117,16 @@ TEST(soa_regions_no_overlap)
 TEST(vector_id_round_trip_small)
 {
 	ItemPointerData tid;
-	mkt_posting_set_vector_id(&tid, 42);
-	ASSERT_EQ(42, mkt_posting_get_vector_id(&tid), "small vector_id");
+	prism_posting_set_vector_id(&tid, 42);
+	ASSERT_EQ(42, prism_posting_get_vector_id(&tid), "small vector_id");
 }
 
 TEST(vector_id_round_trip_large)
 {
 	ItemPointerData tid;
 	uint32_t		vid = 1000000;
-	mkt_posting_set_vector_id(&tid, vid);
-	ASSERT_EQ(vid, mkt_posting_get_vector_id(&tid), "large vector_id");
+	prism_posting_set_vector_id(&tid, vid);
+	ASSERT_EQ(vid, prism_posting_get_vector_id(&tid), "large vector_id");
 }
 
 TEST(vector_id_round_trip_max)
@@ -134,8 +134,8 @@ TEST(vector_id_round_trip_max)
 	ItemPointerData tid;
 	/* Max safe value with 32-bit block + 16-bit offset packing */
 	uint32_t vid = 0x00FFFFFF;
-	mkt_posting_set_vector_id(&tid, vid);
-	ASSERT_EQ(vid, mkt_posting_get_vector_id(&tid), "max vector_id");
+	prism_posting_set_vector_id(&tid, vid);
+	ASSERT_EQ(vid, prism_posting_get_vector_id(&tid), "max vector_id");
 }
 
 /* ----------------------------------------------------------------
@@ -146,20 +146,21 @@ TEST(page_init_basic)
 {
 	Page page = mkt_alloc0(BLCKSZ);
 
-	mkt_posting_page_init(page, 0, 128, MKT_POSTING_PAGE_FIRST);
+	prism_posting_page_init(page, 0, 128, PRISM_POSTING_PAGE_FIRST);
 
-	MktPostingPageOpaque *opaque = mkt_posting_opaque(page);
+	PrismPostingPageOpaque *opaque = prism_posting_opaque(page);
 	ASSERT_EQ(
 			InvalidBlockNumber,
 			opaque->next_blkno,
 			"next_blkno should be invalid");
 	ASSERT_EQ(0, opaque->entry_count, "entry_count should be 0");
 	ASSERT_EQ(0, opaque->cluster_id, "cluster_id should be 0");
-	ASSERT_EQ(MKT_POSTING_PAGE_FIRST, opaque->flags, "flags should be FIRST");
 	ASSERT_EQ(
-			MKT_POSTING_PAGE_ID,
+			PRISM_POSTING_PAGE_FIRST, opaque->flags, "flags should be FIRST");
+	ASSERT_EQ(
+			PRISM_POSTING_PAGE_ID,
 			opaque->page_id,
-			"page_id should be MKT_POSTING_PAGE_ID");
+			"page_id should be PRISM_POSTING_PAGE_ID");
 }
 
 TEST(page_add_single_entry)
@@ -168,39 +169,41 @@ TEST(page_add_single_entry)
 	uint32_t  packed = MKT_RABITQ_BYTES(dim);
 
 	Page page = mkt_alloc0(BLCKSZ);
-	mkt_posting_page_init(page, 0, dim, 0);
+	prism_posting_page_init(page, 0, dim, 0);
 
 	/* Create test data */
 	ItemPointerData tid;
-	mkt_posting_set_vector_id(&tid, 42);
+	prism_posting_set_vector_id(&tid, 42);
 	uint8_t *bits = mkt_alloc(packed);
 	memset(bits, 0xAB, packed);
 
-	bool ok = mkt_posting_page_add(page, dim, tid, 1.0f, 2.0f, 0.5f, bits, 0);
+	bool ok =
+			prism_posting_page_add(page, dim, tid, 1.0f, 2.0f, 0.5f, bits, 0);
 	ASSERT_TRUE(ok, "add should succeed");
-	ASSERT_EQ(1, mkt_posting_page_count(page), "count should be 1");
+	ASSERT_EQ(1, prism_posting_page_count(page), "count should be 1");
 
 	/* Verify round-trip via the AoS entry accessor */
-	MktPostingEntryHeader *e0 = mkt_posting_entry(page, 0, dim);
-	ASSERT_EQ(42, mkt_posting_get_vector_id(&e0->meta.tid), "tid round-trip");
+	PrismPostingEntryHeader *e0 = prism_posting_entry(page, 0, dim);
+	ASSERT_EQ(
+			42, prism_posting_get_vector_id(&e0->meta.tid), "tid round-trip");
 	ASSERT_FLOAT_EQ(1.0f, e0->f_add, 1e-6f, "f_add round-trip");
 	ASSERT_FLOAT_EQ(2.0f, e0->f_rescale, 1e-6f, "f_rescale round-trip");
 	ASSERT_FLOAT_EQ(0.5f, e0->f_error, 1e-6f, "f_error round-trip");
 	ASSERT_EQ(
 			0xAB,
-			mkt_posting_entry_bits(
-					page, mkt_posting_max_entries(dim), dim, 0)[0],
+			prism_posting_entry_bits(
+					page, prism_posting_max_entries(dim), dim, 0)[0],
 			"bits round-trip");
 }
 
 TEST(page_fill_to_capacity)
 {
 	Dimension dim	 = 128;
-	uint32_t  max	 = mkt_posting_max_entries(dim);
+	uint32_t  max	 = prism_posting_max_entries(dim);
 	uint32_t  packed = MKT_RABITQ_BYTES(dim);
 
 	Page page = mkt_alloc0(BLCKSZ);
-	mkt_posting_page_init(page, 0, dim, 0);
+	prism_posting_page_init(page, 0, dim, 0);
 
 	uint8_t *bits = mkt_alloc(packed);
 	memset(bits, 0, packed);
@@ -209,18 +212,19 @@ TEST(page_fill_to_capacity)
 	for (uint32_t i = 0; i < max; i++)
 	{
 		ItemPointerData tid;
-		mkt_posting_set_vector_id(&tid, i);
-		bool ok = mkt_posting_page_add(
+		prism_posting_set_vector_id(&tid, i);
+		bool ok = prism_posting_page_add(
 				page, dim, tid, (float)i, 1.0f, 0.1f, bits, 0);
 		ASSERT_TRUE(ok, "add should succeed");
 	}
-	ASSERT_EQ(max, mkt_posting_page_count(page), "page should be full");
-	ASSERT_FALSE(mkt_posting_page_has_room(page), "page should have no room");
+	ASSERT_EQ(max, prism_posting_page_count(page), "page should be full");
+	ASSERT_FALSE(
+			prism_posting_page_has_room(page), "page should have no room");
 
 	/* One more should fail */
 	ItemPointerData tid;
-	mkt_posting_set_vector_id(&tid, max);
-	bool ok = mkt_posting_page_add(page, dim, tid, 0, 0, 0, bits, 0);
+	prism_posting_set_vector_id(&tid, max);
+	bool ok = prism_posting_page_add(page, dim, tid, 0, 0, 0, bits, 0);
 	ASSERT_FALSE(ok, "add to full page should fail");
 }
 
@@ -236,8 +240,8 @@ TEST(builder_single_page)
 	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
 	float		 *centroid = mkt_alloc0(dim * sizeof(float));
 
-	MktPostingBuilder builder;
-	mkt_posting_builder_init(
+	PrismPostingBuilder builder;
+	prism_posting_builder_init(
 			&builder, &storage.base, params, dim, 0, centroid, centroid);
 
 	/* Add a few vectors */
@@ -246,34 +250,34 @@ TEST(builder_single_page)
 	{
 		for (Dimension d = 0; d < dim; d++)
 			vec[d] = (float)((i * 17 + d * 3) % 100 - 50) / 10.0f;
-		mkt_posting_builder_add(&builder, vid_to_tid(i), vec);
+		prism_posting_builder_add(&builder, vid_to_tid(i), vec);
 	}
 
-	BlockNumber head = mkt_posting_builder_finish(&builder);
+	BlockNumber head = prism_posting_builder_finish(&builder);
 	ASSERT_NEQ(InvalidBlockNumber, head, "head should be valid");
 
 	/* Verify page contents */
 	Page page = mkt_storage_read_page(&storage.base, head);
-	ASSERT_EQ(5, mkt_posting_page_count(page), "should have 5 entries");
+	ASSERT_EQ(5, prism_posting_page_count(page), "should have 5 entries");
 
 	/* Verify vector IDs — first page content starts after pt_centroid */
-	char *content = mkt_posting_content_first(page, dim);
+	char *content = prism_posting_content_first(page, dim);
 	for (uint32_t i = 0; i < 5; i++)
 	{
-		MktPostingEntryHeader *e   = mkt_posting_entry_at(content, i, dim);
-		uint32_t			   vid = mkt_posting_get_vector_id(&e->meta.tid);
+		PrismPostingEntryHeader *e = prism_posting_entry_at(content, i, dim);
+		uint32_t vid			   = prism_posting_get_vector_id(&e->meta.tid);
 		ASSERT_EQ(i, vid, "vector_id round-trip through builder");
 	}
 
 	mkt_storage_release_page(&storage.base, head);
-	mkt_posting_builder_cleanup(&builder);
+	prism_posting_builder_cleanup(&builder);
 	mkt_rabitq_destroy(params);
 }
 
 TEST(builder_multi_page_chain)
 {
 	Dimension dim		   = 768;
-	uint32_t  max_per_page = mkt_posting_max_entries(dim);
+	uint32_t  max_per_page = prism_posting_max_entries(dim);
 	/* Add enough vectors to require at least 2 pages */
 	uint32_t nvecs = max_per_page + 10;
 
@@ -281,8 +285,8 @@ TEST(builder_multi_page_chain)
 	RaBitQParams   *params	 = mkt_rabitq_create(dim, 42);
 	float		   *centroid = mkt_alloc0(dim * sizeof(float));
 
-	MktPostingBuilder builder;
-	mkt_posting_builder_init(
+	PrismPostingBuilder builder;
+	prism_posting_builder_init(
 			&builder, &storage.base, params, dim, 0, centroid, centroid);
 
 	float *vec = mkt_alloc(dim * sizeof(float));
@@ -290,10 +294,10 @@ TEST(builder_multi_page_chain)
 	{
 		for (Dimension d = 0; d < dim; d++)
 			vec[d] = (float)((i * 7 + d * 11) % 200 - 100) / 50.0f;
-		mkt_posting_builder_add(&builder, vid_to_tid(i), vec);
+		prism_posting_builder_add(&builder, vid_to_tid(i), vec);
 	}
 
-	BlockNumber head = mkt_posting_builder_finish(&builder);
+	BlockNumber head = prism_posting_builder_finish(&builder);
 	ASSERT_NEQ(InvalidBlockNumber, head, "head should be valid");
 
 	/* Walk the chain and count entries */
@@ -304,17 +308,17 @@ TEST(builder_multi_page_chain)
 	while (blkno != InvalidBlockNumber)
 	{
 		Page	 page  = mkt_storage_read_page(&storage.base, blkno);
-		uint32_t count = mkt_posting_page_count(page);
+		uint32_t count = prism_posting_page_count(page);
 		total_entries += count;
 		pages_seen++;
-		blkno = mkt_posting_opaque(page)->next_blkno;
+		blkno = prism_posting_opaque(page)->next_blkno;
 		mkt_storage_release_page(&storage.base, blkno);
 	}
 
 	ASSERT_EQ(nvecs, total_entries, "total entries across chain");
 	ASSERT_TRUE(pages_seen >= 2, "chain should span multiple pages");
 
-	mkt_posting_builder_cleanup(&builder);
+	prism_posting_builder_cleanup(&builder);
 	mkt_rabitq_destroy(params);
 }
 
@@ -345,27 +349,27 @@ TEST(scan_processes_all_entries)
 	setup_query_state(&qstate, params, centroid, dim);
 
 	/* Scan with large k — all entries should be reranked */
-	MktPostingScan scan;
-	mkt_posting_scan_init(
+	PrismPostingScan scan;
+	prism_posting_scan_init(
 			&scan,
 			&storage.base,
 			NULL,
 			params,
 			dim,
-			mkt_posting_max_entries(dim));
+			prism_posting_max_entries(dim));
 
 	MktTopK topk;
 	mkt_topk_init(&topk, nvecs);
 
-	mkt_posting_scan_begin_cluster(&scan, &qstate, head);
-	mkt_posting_scan_cluster(&scan, &topk);
-	mkt_posting_scan_end_cluster(&scan);
+	prism_posting_scan_begin_cluster(&scan, &qstate, head);
+	prism_posting_scan_cluster(&scan, &topk);
+	prism_posting_scan_end_cluster(&scan);
 
 	ASSERT_EQ(nvecs, scan.entries_scanned, "all entries scanned");
 	ASSERT_EQ(nvecs, topk.cand_count, "all entries in topk");
 
 	mkt_topk_cleanup(&topk);
-	mkt_posting_scan_cleanup(&scan);
+	prism_posting_scan_cleanup(&scan);
 	mkt_rabitq_destroy(params);
 }
 
@@ -399,19 +403,19 @@ TEST(scan_reads_a_retired_chain)
 	 * on every page, contents untouched. Then reclaim it, which is where
 	 * TOMBSTONED joins DELETED.
 	 */
-	mkt_posting_chain_mutate(&storage.base, head, mark_page_deleted, NULL);
+	prism_posting_chain_mutate(&storage.base, head, mark_page_deleted, NULL);
 
 	RaBitQQueryState qstate;
 	setup_query_state(&qstate, params, centroid, dim);
 
-	MktPostingScan scan;
-	mkt_posting_scan_init(
+	PrismPostingScan scan;
+	prism_posting_scan_init(
 			&scan,
 			&storage.base,
 			NULL,
 			params,
 			dim,
-			mkt_posting_max_entries(dim));
+			prism_posting_max_entries(dim));
 
 	/*
 	 * Baseline first: the chain scores every entry while it is still a live
@@ -420,22 +424,22 @@ TEST(scan_reads_a_retired_chain)
 	 */
 	MktTopK live;
 	mkt_topk_init(&live, nvecs);
-	mkt_posting_scan_begin_cluster(&scan, &qstate, head);
-	mkt_posting_scan_cluster(&scan, &live);
-	mkt_posting_scan_end_cluster(&scan);
+	prism_posting_scan_begin_cluster(&scan, &qstate, head);
+	prism_posting_scan_cluster(&scan, &live);
+	prism_posting_scan_end_cluster(&scan);
 	ASSERT_EQ(nvecs, scan.entries_scanned, "live chain scores every entry");
 	mkt_topk_cleanup(&live);
 
 	/* Now reclaim it: TOMBSTONED joins DELETED, which is the state a scan
 	 * holding a stale head meets. */
-	mkt_posting_chain_tombstone(&storage.base, head);
+	prism_posting_chain_tombstone(&storage.base, head);
 
 	MktTopK topk;
 	mkt_topk_init(&topk, nvecs);
 
-	mkt_posting_scan_begin_cluster(&scan, &qstate, head);
-	mkt_posting_scan_cluster(&scan, &topk);
-	mkt_posting_scan_end_cluster(&scan);
+	prism_posting_scan_begin_cluster(&scan, &qstate, head);
+	prism_posting_scan_cluster(&scan, &topk);
+	prism_posting_scan_end_cluster(&scan);
 
 	/* begin_cluster zeroes the per-cluster stats, so this is the retired
 	 * chain's own count, not a running total. */
@@ -443,7 +447,7 @@ TEST(scan_reads_a_retired_chain)
 	ASSERT_EQ(nvecs, topk.cand_count, "its entries still reach the top-k");
 
 	mkt_topk_cleanup(&topk);
-	mkt_posting_scan_cleanup(&scan);
+	prism_posting_scan_cleanup(&scan);
 	mkt_rabitq_destroy(params);
 }
 
@@ -467,14 +471,14 @@ TEST(scan_skips_an_all_dead_page)
 	RaBitQQueryState qstate;
 	setup_query_state(&qstate, params, centroid, dim);
 
-	MktPostingScan scan;
-	mkt_posting_scan_init(
+	PrismPostingScan scan;
+	prism_posting_scan_init(
 			&scan,
 			&storage.base,
 			NULL,
 			params,
 			dim,
-			mkt_posting_max_entries(dim));
+			prism_posting_max_entries(dim));
 
 	/*
 	 * Baseline first, or a zero at the end would be indistinguishable from a
@@ -482,27 +486,27 @@ TEST(scan_skips_an_all_dead_page)
 	 */
 	MktTopK live;
 	mkt_topk_init(&live, nvecs);
-	mkt_posting_scan_begin_cluster(&scan, &qstate, head);
-	mkt_posting_scan_cluster(&scan, &live);
-	mkt_posting_scan_end_cluster(&scan);
+	prism_posting_scan_begin_cluster(&scan, &qstate, head);
+	prism_posting_scan_cluster(&scan, &live);
+	prism_posting_scan_end_cluster(&scan);
 	ASSERT_EQ(nvecs, scan.entries_scanned, "live chain scores every entry");
 	mkt_topk_cleanup(&live);
 
 	/* TOMBSTONED with no DELETED: VACUUM's all-dead page. */
-	mkt_posting_chain_tombstone(&storage.base, head);
+	prism_posting_chain_tombstone(&storage.base, head);
 
 	MktTopK topk;
 	mkt_topk_init(&topk, nvecs);
 
-	mkt_posting_scan_begin_cluster(&scan, &qstate, head);
-	mkt_posting_scan_cluster(&scan, &topk);
-	mkt_posting_scan_end_cluster(&scan);
+	prism_posting_scan_begin_cluster(&scan, &qstate, head);
+	prism_posting_scan_cluster(&scan, &topk);
+	prism_posting_scan_end_cluster(&scan);
 
 	ASSERT_EQ(0u, scan.entries_scanned, "all-dead page is skipped");
 	ASSERT_EQ(0u, topk.cand_count, "and nothing reaches the top-k");
 
 	mkt_topk_cleanup(&topk);
-	mkt_posting_scan_cleanup(&scan);
+	prism_posting_scan_cleanup(&scan);
 	mkt_rabitq_destroy(params);
 }
 
@@ -525,27 +529,27 @@ TEST(scan_prunes_with_tight_topk)
 	setup_query_state(&qstate, params, centroid, dim);
 
 	/* Scan with small k — threshold should prune some entries */
-	MktPostingScan scan;
-	mkt_posting_scan_init(
+	PrismPostingScan scan;
+	prism_posting_scan_init(
 			&scan,
 			&storage.base,
 			NULL,
 			params,
 			dim,
-			mkt_posting_max_entries(dim));
+			prism_posting_max_entries(dim));
 
 	MktTopK topk;
 	mkt_topk_init(&topk, 5);
 
-	mkt_posting_scan_begin_cluster(&scan, &qstate, head);
-	mkt_posting_scan_cluster(&scan, &topk);
-	mkt_posting_scan_end_cluster(&scan);
+	prism_posting_scan_begin_cluster(&scan, &qstate, head);
+	prism_posting_scan_cluster(&scan, &topk);
+	prism_posting_scan_end_cluster(&scan);
 
 	ASSERT_EQ(nvecs, scan.entries_scanned, "all entries scanned");
 	ASSERT_TRUE(scan.entries_pruned > 0, "some entries pruned");
 
 	mkt_topk_cleanup(&topk);
-	mkt_posting_scan_cleanup(&scan);
+	prism_posting_scan_cleanup(&scan);
 	mkt_rabitq_destroy(params);
 }
 
@@ -567,26 +571,26 @@ TEST(scan_stats_tracking)
 	RaBitQQueryState qstate;
 	setup_query_state(&qstate, params, centroid, dim);
 
-	MktPostingScan scan;
-	mkt_posting_scan_init(
+	PrismPostingScan scan;
+	prism_posting_scan_init(
 			&scan,
 			&storage.base,
 			NULL,
 			params,
 			dim,
-			mkt_posting_max_entries(dim));
+			prism_posting_max_entries(dim));
 
 	MktTopK topk;
 	mkt_topk_init(&topk, nvecs);
 
-	mkt_posting_scan_begin_cluster(&scan, &qstate, head);
-	mkt_posting_scan_cluster(&scan, &topk);
-	mkt_posting_scan_end_cluster(&scan);
+	prism_posting_scan_begin_cluster(&scan, &qstate, head);
+	prism_posting_scan_cluster(&scan, &topk);
+	prism_posting_scan_end_cluster(&scan);
 
 	ASSERT_EQ(nvecs, scan.entries_scanned, "entries_scanned");
 	ASSERT_TRUE(scan.pages_read >= 1, "pages_read >= 1");
 
 	mkt_topk_cleanup(&topk);
-	mkt_posting_scan_cleanup(&scan);
+	prism_posting_scan_cleanup(&scan);
 	mkt_rabitq_destroy(params);
 }

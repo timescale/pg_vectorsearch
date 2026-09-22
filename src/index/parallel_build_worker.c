@@ -54,7 +54,7 @@
  * ---------------------------------------------------------------- */
 
 void
-mkt_sample_cb(void *state, ItemPointerData tid, const float *vec)
+prism_sample_cb(void *state, ItemPointerData tid, const float *vec)
 {
 	SampleCbState *sc = (SampleCbState *)state;
 
@@ -65,7 +65,7 @@ mkt_sample_cb(void *state, ItemPointerData tid, const float *vec)
 	 * view in coarse batches (the leader publishes exact counts at phase
 	 * boundaries). */
 	if ((sc->seen & 1023) == 0)
-		mkt_build_progress_incr_tuples(1024);
+		prism_build_progress_incr_tuples(1024);
 
 	/* Stride-based subsampling */
 	if (sc->stride_counter > 0)
@@ -109,7 +109,7 @@ mkt_sample_cb(void *state, ItemPointerData tid, const float *vec)
  * ---------------------------------------------------------------- */
 
 void
-mkt_km_assign_and_accumulate(
+prism_km_assign_and_accumulate(
 		const float	  *samples,
 		uint32_t	   nsamples,
 		const float	  *centroids,
@@ -148,20 +148,20 @@ mkt_km_assign_and_accumulate(
  * root-assigned samples, indexed in place (no contiguous per-child copy).
  */
 void
-mkt_build_child_subtree(
-		uint32_t		  child,
-		uint32_t		  child_count,
-		int				  nparticipants,
-		MktDsmSamples	 *dsm_samples,
-		MktDsmRootAssign *dsm_ra,
-		const float		 *root_cents,
-		uint32_t		  nlist,
-		uint32_t		  fan_out,
-		Dimension		  dim,
-		DistanceMetric	  metric,
-		uint32_t		  km_max_iterations,
-		char			 *slot,
-		uint64_t		  slot_size)
+prism_build_child_subtree(
+		uint32_t			child,
+		uint32_t			child_count,
+		int					nparticipants,
+		PrismDsmSamples	   *dsm_samples,
+		PrismDsmRootAssign *dsm_ra,
+		const float		   *root_cents,
+		uint32_t			nlist,
+		uint32_t			fan_out,
+		Dimension			dim,
+		DistanceMetric		metric,
+		uint32_t			km_max_iterations,
+		char			   *slot,
+		uint64_t			slot_size)
 {
 	uint32_t nlist_c = (nlist + fan_out - 1) / fan_out;
 	/* The caller's histogram already counted this child's samples (one pass
@@ -186,14 +186,14 @@ mkt_build_child_subtree(
 	}
 	else
 	{
-		const float *vbase = mkt_dsm_worker_samples(dsm_samples, 0);
+		const float *vbase = prism_dsm_worker_samples(dsm_samples, 0);
 		uint32_t	 mpw   = dsm_samples->max_per_worker;
 		uint32_t	*idx   = mkt_alloc((size_t)cc * sizeof(uint32_t));
 		uint32_t	 g	   = 0;
 		for (int t = 0; t < nparticipants; t++)
 		{
-			const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
-			uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
+			const uint32_t *ra = prism_dsm_root_assignments(dsm_ra, t);
+			uint32_t		n  = prism_dsm_sample_counts(dsm_samples)[t];
 			for (uint32_t i = 0; i < n; i++)
 				if (ra[i] == child)
 					idx[g++] = (uint32_t)t * mpw + i;
@@ -218,53 +218,53 @@ mkt_build_child_subtree(
 }
 
 void
-mkt_pbuild_count_children(
-		MktDsmSamples	 *dsm_samples,
-		MktDsmRootAssign *dsm_ra,
-		int				  nparticipants,
-		uint32_t		  km_k,
-		uint32_t		 *out_counts)
+prism_pbuild_count_children(
+		PrismDsmSamples	   *dsm_samples,
+		PrismDsmRootAssign *dsm_ra,
+		int					nparticipants,
+		uint32_t			km_k,
+		uint32_t		   *out_counts)
 {
 	memset(out_counts, 0, (size_t)km_k * sizeof(uint32_t));
 	for (int t = 0; t < nparticipants; t++)
 	{
-		const uint32_t *ra = mkt_dsm_root_assignments(dsm_ra, t);
-		uint32_t		n  = mkt_dsm_sample_counts(dsm_samples)[t];
+		const uint32_t *ra = prism_dsm_root_assignments(dsm_ra, t);
+		uint32_t		n  = prism_dsm_sample_counts(dsm_samples)[t];
 		for (uint32_t i = 0; i < n; i++)
 			out_counts[ra[i]]++;
 	}
 }
 
 void
-mkt_pbuild_stream_subtrees(
-		int				  participant_id,
-		int				  nparticipants,
-		MktDsmSamples	 *dsm_samples,
-		MktDsmRootAssign *dsm_ra,
-		const float		 *root_cents,
-		uint32_t		  km_k,
-		uint32_t		  nlist,
-		uint32_t		  fan_out,
-		Dimension		  dim,
-		DistanceMetric	  metric,
-		uint32_t		  km_max_iterations,
-		char			 *subtrees_base,
-		uint64_t		  slot_size,
-		Barrier			 *barrier,
-		MktBatchCb		  batch_cb,
-		void			 *cb_arg,
-		uint32_t		 *out_child_order)
+prism_pbuild_stream_subtrees(
+		int					participant_id,
+		int					nparticipants,
+		PrismDsmSamples	   *dsm_samples,
+		PrismDsmRootAssign *dsm_ra,
+		const float		   *root_cents,
+		uint32_t			km_k,
+		uint32_t			nlist,
+		uint32_t			fan_out,
+		Dimension			dim,
+		DistanceMetric		metric,
+		uint32_t			km_max_iterations,
+		char			   *subtrees_base,
+		uint64_t			slot_size,
+		Barrier			   *barrier,
+		PrismBatchCb		batch_cb,
+		void			   *cb_arg,
+		uint32_t		   *out_child_order)
 {
 	uint32_t np		  = (uint32_t)nparticipants;
 	uint32_t nbatches = (km_k + np - 1) / np;
 	char	*slot =
-			mkt_dsm_child_subtree(subtrees_base, participant_id, slot_size);
+			prism_dsm_child_subtree(subtrees_base, participant_id, slot_size);
 
 	/* One histogram pass over the root assignments feeds every child's
-	 * sample count (mkt_build_child_subtree needs it, and counting per
+	 * sample count (prism_build_child_subtree needs it, and counting per
 	 * child would re-scan the assignments km_k times). */
 	uint32_t *child_count = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
-	mkt_pbuild_count_children(
+	prism_pbuild_count_children(
 			dsm_samples, dsm_ra, nparticipants, km_k, child_count);
 
 	/* Schedule children largest-first (LPT): every batch waits for its
@@ -298,7 +298,7 @@ mkt_pbuild_stream_subtrees(
 		if (my_idx < km_k)
 		{
 			uint32_t my_child = order[my_idx];
-			mkt_build_child_subtree(
+			prism_build_child_subtree(
 					my_child,
 					child_count[my_child],
 					nparticipants,
@@ -348,13 +348,13 @@ mkt_pbuild_stream_subtrees(
  * ---------------------------------------------------------------- */
 
 void
-mkt_pbuild_exec_sampling(
+prism_pbuild_exec_sampling(
 		int				  participant_id,
 		Relation		  heap,
 		Relation		  index,
 		struct IndexInfo *index_info,
-		MktBuildShared	 *shared,
-		MktDsmSamples	 *dsm_samples,
+		PrismBuildShared *shared,
+		PrismDsmSamples	 *dsm_samples,
 		Barrier			 *barrier)
 {
 	Dimension dim = shared->dim;
@@ -371,11 +371,11 @@ mkt_pbuild_exec_sampling(
 		stride = 1;
 
 	SampleCbState sc = {
-			.samples	 = mkt_dsm_worker_samples(dsm_samples, participant_id),
-			.count		 = 0,
-			.seen		 = 0,
-			.max_samples = shared->max_samples_per_worker,
-			.stride		 = stride,
+			.samples = prism_dsm_worker_samples(dsm_samples, participant_id),
+			.count	 = 0,
+			.seen	 = 0,
+			.max_samples	= shared->max_samples_per_worker,
+			.stride			= stride,
 			.stride_counter = 0,
 			.dim			= dim,
 			.metric			= shared->metric,
@@ -384,42 +384,42 @@ mkt_pbuild_exec_sampling(
 	/* progress: only the leader (participant 0) drives the PG progress view.
 	 * The scan count is discarded: the posting pass is the one full scan that
 	 * feeds shared->reltuples, so the extra passes must not double-count. */
-	(void)mkt_build_scan(
+	(void)prism_build_scan(
 			heap,
 			index,
 			index_info,
 			shared,
 			true,
 			participant_id == 0,
-			mkt_sample_cb,
+			prism_sample_cb,
 			&sc);
 
-	mkt_dsm_sample_counts(dsm_samples)[participant_id] = sc.count;
-	mkt_dsm_sample_seen(dsm_samples)[participant_id]   = sc.seen;
+	prism_dsm_sample_counts(dsm_samples)[participant_id] = sc.count;
+	prism_dsm_sample_seen(dsm_samples)[participant_id]	 = sc.seen;
 
 	/* Flush the sub-batch remainder so the participant's contribution to
 	 * the progress view is exact (and so every participant makes at least
 	 * one flush per scan, whatever share the work-stealing gave it). */
-	mkt_build_progress_incr_tuples((int64_t)(sc.seen & 1023));
+	prism_build_progress_incr_tuples((int64_t)(sc.seen & 1023));
 
 	/* Barrier: all participants done sampling. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 }
 
 uint32_t
-mkt_pbuild_exec_kmeans(
-		int				participant_id,
-		MktBuildShared *shared,
-		MktDsmSamples  *dsm_samples,
-		char		   *centroids_base,
-		char		   *km_workers_base,
-		Barrier		   *barrier)
+prism_pbuild_exec_kmeans(
+		int				  participant_id,
+		PrismBuildShared *shared,
+		PrismDsmSamples	 *dsm_samples,
+		char			 *centroids_base,
+		char			 *km_workers_base,
+		Barrier			 *barrier)
 {
 	Dimension dim			= shared->dim;
 	uint32_t  km_k			= shared->km_k;
 	int		  nparticipants = shared->nparticipants;
-	float	 *cents			= mkt_dsm_centroids(centroids_base);
-	float	 *norms_c		= mkt_dsm_norms_c(centroids_base, km_k, dim);
+	float	 *cents			= prism_dsm_centroids(centroids_base);
+	float	 *norms_c		= prism_dsm_norms_c(centroids_base, km_k, dim);
 	/* One seed vector, and the whole km_k-centroid array. */
 	const size_t vec_nbytes	  = (size_t)dim * sizeof(float);
 	const size_t cents_nbytes = (size_t)km_k * vec_nbytes;
@@ -436,7 +436,7 @@ mkt_pbuild_exec_kmeans(
 	{
 		uint32_t total_ns = 0;
 		for (int t = 0; t < nparticipants; t++)
-			total_ns += mkt_dsm_sample_counts(dsm_samples)[t];
+			total_ns += prism_dsm_sample_counts(dsm_samples)[t];
 
 		uint32_t step = (total_ns >= km_k) ? total_ns / km_k : 1;
 		for (uint32_t i = 0; i < km_k; i++)
@@ -446,14 +446,14 @@ mkt_pbuild_exec_kmeans(
 			int		 t	  = 0;
 			uint32_t base = 0;
 			while (t < nparticipants &&
-				   base + mkt_dsm_sample_counts(dsm_samples)[t] <= gidx)
+				   base + prism_dsm_sample_counts(dsm_samples)[t] <= gidx)
 			{
-				base += mkt_dsm_sample_counts(dsm_samples)[t];
+				base += prism_dsm_sample_counts(dsm_samples)[t];
 				t++;
 			}
 			if (t < nparticipants)
 				memcpy(cents + (size_t)i * dim,
-					   mkt_dsm_worker_samples(dsm_samples, t) +
+					   prism_dsm_worker_samples(dsm_samples, t) +
 							   (size_t)(gidx - base) * dim,
 					   vec_nbytes);
 		}
@@ -467,18 +467,18 @@ mkt_pbuild_exec_kmeans(
 	 * the leader's seed write. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-	float	*my_samples = mkt_dsm_worker_samples(dsm_samples, participant_id);
-	uint32_t my_n		= mkt_dsm_sample_counts(dsm_samples)[participant_id];
-	float	*my_sums =
-			mkt_dsm_km_worker_sums(km_workers_base, km_k, dim, participant_id);
-	uint32_t *my_cnts =
-			mkt_dsm_km_worker_cnts(km_workers_base, km_k, dim, participant_id);
-	float *my_cost =
-			mkt_dsm_km_worker_cost(km_workers_base, km_k, dim, participant_id);
+	float *my_samples = prism_dsm_worker_samples(dsm_samples, participant_id);
+	uint32_t my_n	  = prism_dsm_sample_counts(dsm_samples)[participant_id];
+	float	*my_sums  = prism_dsm_km_worker_sums(
+			   km_workers_base, km_k, dim, participant_id);
+	uint32_t *my_cnts = prism_dsm_km_worker_cnts(
+			km_workers_base, km_k, dim, participant_id);
+	float *my_cost = prism_dsm_km_worker_cost(
+			km_workers_base, km_k, dim, participant_id);
 
 	/* Reduce scratch is leader-only. */
 	float *old_cents = participant_id == 0 ? mkt_alloc(cents_nbytes) : NULL;
-	Size   km_sz	 = mkt_dsm_km_workers_size(nparticipants, km_k, dim);
+	Size   km_sz	 = prism_dsm_km_workers_size(nparticipants, km_k, dim);
 
 	uint32_t iters = 0;
 	for (uint32_t iter = 0; iter < shared->km_max_iterations; iter++)
@@ -486,7 +486,7 @@ mkt_pbuild_exec_kmeans(
 		iters++;
 
 		/* Every participant assigns + accumulates over its own samples. */
-		mkt_km_assign_and_accumulate(
+		prism_km_assign_and_accumulate(
 				my_samples,
 				my_n,
 				cents,
@@ -512,12 +512,12 @@ mkt_pbuild_exec_kmeans(
 			float *all_costs = mkt_alloc(nparticipants * sizeof(float));
 			for (int t = 0; t < nparticipants; t++)
 			{
-				all_sums[t] =
-						mkt_dsm_km_worker_sums(km_workers_base, km_k, dim, t);
-				all_cnts[t] =
-						mkt_dsm_km_worker_cnts(km_workers_base, km_k, dim, t);
-				all_costs[t] =
-						*mkt_dsm_km_worker_cost(km_workers_base, km_k, dim, t);
+				all_sums[t] = prism_dsm_km_worker_sums(
+						km_workers_base, km_k, dim, t);
+				all_cnts[t] = prism_dsm_km_worker_cnts(
+						km_workers_base, km_k, dim, t);
+				all_costs[t] = *prism_dsm_km_worker_cost(
+						km_workers_base, km_k, dim, t);
 			}
 
 			float total_cost;
@@ -557,29 +557,29 @@ mkt_pbuild_exec_kmeans(
 }
 
 void
-mkt_pbuild_exec_root_assign(
-		int				  participant_id,
-		MktBuildShared	 *shared,
-		MktDsmSamples	 *dsm_samples,
-		MktDsmRootAssign *dsm_ra,
-		char			 *centroids_base,
-		Barrier			 *barrier)
+prism_pbuild_exec_root_assign(
+		int					participant_id,
+		PrismBuildShared   *shared,
+		PrismDsmSamples	   *dsm_samples,
+		PrismDsmRootAssign *dsm_ra,
+		char			   *centroids_base,
+		Barrier			   *barrier)
 {
 	Dimension dim	  = shared->dim;
 	uint32_t  km_k	  = shared->km_k;
-	float	 *cents	  = mkt_dsm_centroids(centroids_base);
-	float	 *norms_c = mkt_dsm_norms_c(centroids_base, km_k, dim);
+	float	 *cents	  = prism_dsm_centroids(centroids_base);
+	float	 *norms_c = prism_dsm_norms_c(centroids_base, km_k, dim);
 
 	kmeans_assign(
-			mkt_dsm_worker_samples(dsm_samples, participant_id),
+			prism_dsm_worker_samples(dsm_samples, participant_id),
 			0,
-			mkt_dsm_sample_counts(dsm_samples)[participant_id],
+			prism_dsm_sample_counts(dsm_samples)[participant_id],
 			cents,
 			norms_c,
 			km_k,
 			dim,
 			shared->metric,
-			mkt_dsm_root_assignments(dsm_ra, participant_id));
+			prism_dsm_root_assignments(dsm_ra, participant_id));
 
 	/* Barrier: all root assignments written; subtree gather can read them. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
@@ -589,16 +589,16 @@ mkt_pbuild_exec_root_assign(
  * Phase 2.5: parallel full-table leaf-encode-reference refinement
  *
  * Page-backed mirror of the serial serial_refine_heads: route every row
- * exactly as the query/insert do (mkt_query_route k=1 over the centroid pages,
- * then head -> leaf), accumulate per-leaf means into the tiled DSM
+ * exactly as the query/insert do (prism_query_route k=1 over the centroid
+ * pages, then head -> leaf), accumulate per-leaf means into the tiled DSM
  * accumulator, and rewrite each leaf's head-page pt_centroid to the full-table
  * mean. No in-RAM tree.
  * ---------------------------------------------------------------- */
 
 typedef struct RefineCbState
 {
-	MktBuildShared *shared;
-	MktQueryState  *qs;		   /* page-backed router (workers) */
+	PrismBuildShared *shared;
+	PrismQueryState	 *qs;	   /* page-backed router (workers) */
 	BlockNumber first_posting; /* head -> leaf: leaf = head - first_posting */
 	double	   *sums;		   /* shared accumulator, indexed leaf - tile_lo */
 	uint64_t   *counts;		   /* shared accumulator */
@@ -610,7 +610,7 @@ typedef struct RefineCbState
 } RefineCbState;
 
 static void
-mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
+prism_refine_cb(void *state, ItemPointerData tid, const float *vec)
 {
 	RefineCbState *rs  = (RefineCbState *)state;
 	Dimension	   dim = rs->dim;
@@ -618,7 +618,7 @@ mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
 	(void)tid;
 
 	uint32_t	 idx;
-	const float *v = mkt_refine_route_row(
+	const float *v = prism_refine_route_row(
 			rs->qs,
 			rs->first_posting,
 			vec,
@@ -631,34 +631,34 @@ mkt_refine_cb(void *state, ItemPointerData tid, const float *vec)
 	if (v == NULL)
 		return;
 
-	uint32_t stripe = idx % MKT_REFINE_LOCK_STRIPES;
+	uint32_t stripe = idx % PRISM_REFINE_LOCK_STRIPES;
 
-	mkt_pbuild_accum_lock(rs->shared, stripe);
+	prism_pbuild_accum_lock(rs->shared, stripe);
 	double *sum = rs->sums + (size_t)idx * dim;
 	for (Dimension j = 0; j < dim; j++)
 		sum[j] += v[j];
 	rs->counts[idx]++;
-	mkt_pbuild_accum_unlock(rs->shared, stripe);
+	prism_pbuild_accum_unlock(rs->shared, stripe);
 }
 
 void
-mkt_pbuild_exec_refine_paged(
-		int					  participant_id,
-		Relation			  heap,
-		Relation			  index,
-		struct IndexInfo	 *index_info,
-		MktBuildShared		 *shared,
-		struct MktQueryState *qs,
-		BlockNumber			  first_posting,
-		MktDsmRefineAccum	 *accum,
-		Barrier				 *barrier,
-		MktLeafWriteFn		  write_head,
-		void				 *write_head_ctx)
+prism_pbuild_exec_refine_paged(
+		int						participant_id,
+		Relation				heap,
+		Relation				index,
+		struct IndexInfo	   *index_info,
+		PrismBuildShared	   *shared,
+		struct PrismQueryState *qs,
+		BlockNumber				first_posting,
+		PrismDsmRefineAccum	   *accum,
+		Barrier				   *barrier,
+		PrismLeafWriteFn		write_head,
+		void				   *write_head_ctx)
 {
 	Dimension dim	  = shared->dim;
 	uint32_t  nleaves = shared->nlist; /* actual leaf count (published) */
-	double	 *sums	  = mkt_dsm_refine_sums(accum);
-	uint64_t *counts  = mkt_dsm_refine_counts(accum);
+	double	 *sums	  = prism_dsm_refine_sums(accum);
+	uint64_t *counts  = prism_dsm_refine_counts(accum);
 
 	/* The accumulator holds at most accum->nleaves leaves (the bounded tile
 	 * capacity), so leaves are processed in tiles, re-scanning the heap per
@@ -694,7 +694,7 @@ mkt_pbuild_exec_refine_paged(
 			{
 				memset(sums, 0, (size_t)(hi - lo) * dim * sizeof(double));
 				memset(counts, 0, (size_t)(hi - lo) * sizeof(uint64_t));
-				mkt_pbuild_rescan(heap, shared);
+				prism_pbuild_rescan(heap, shared);
 			}
 			/* Barrier: accumulator cleared + scan reset before anyone scans.
 			 */
@@ -705,14 +705,14 @@ mkt_pbuild_exec_refine_paged(
 			 * the leader does not route (it has no qs), it only
 			 * clears/divides, mirroring the phase-3 division of labor. */
 			if (participant_id != 0)
-				(void)mkt_build_scan(
+				(void)prism_build_scan(
 						heap,
 						index,
 						index_info,
 						shared,
 						true,
 						false,
-						mkt_refine_cb,
+						prism_refine_cb,
 						&rs);
 
 			/* Barrier: every row accumulated before the leader divides. */
@@ -721,7 +721,7 @@ mkt_pbuild_exec_refine_paged(
 
 			/* Leader rewrites this tile's leaf head pages = per-leaf means. */
 			if (participant_id == 0)
-				mkt_refine_write_means(
+				prism_refine_write_means(
 						sums,
 						counts,
 						lo,
@@ -742,21 +742,21 @@ mkt_pbuild_exec_refine_paged(
 /* ----------------------------------------------------------------
  * Phase 3: posting scan -> cluster-keyed sort (sort-seam path)
  *
- * Each worker routes every vector page-backed (the same mkt_query_route the
+ * Each worker routes every vector page-backed (the same prism_query_route the
  * query and insert paths use), RaBitQ-encodes against the target list's head
  * pt_centroid, and feeds the compact entry into the shared cluster-keyed
  * sorter (primary + optional SOAR / boundary secondary), via the shared
- * MktBuildRouteCtx helper. The leader merges and builds the pages. Memory is
+ * PrismBuildRouteCtx helper. The leader merges and builds the pages. Memory is
  * bounded by maintenance_work_mem inside the sorter.
  * ---------------------------------------------------------------- */
 static void
 route_scan_cb(void *state, ItemPointerData tid, const float *vec)
 {
-	MktBuildRouteCtx *ctx = (MktBuildRouteCtx *)state;
+	PrismBuildRouteCtx *ctx = (PrismBuildRouteCtx *)state;
 
-	mkt_build_route_emit(ctx, vec, tid);
+	prism_build_route_emit(ctx, vec, tid);
 	if (((uint64_t)ctx->indtuples & 1023) == 0)
-		mkt_build_progress_incr_tuples(1024);
+		prism_build_progress_incr_tuples(1024);
 }
 
 /* ----------------------------------------------------------------
@@ -764,29 +764,30 @@ route_scan_cb(void *state, ItemPointerData tid, const float *vec)
  * ---------------------------------------------------------------- */
 
 void
-mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
+prism_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 {
-	MktPBuildWorker w;
-	mkt_pbuild_worker_attach(toc, &w);
+	PrismPBuildWorker w;
+	prism_pbuild_worker_attach(toc, &w);
 
-	MktBuildShared *shared	  = w.shared;
-	Barrier		   *barrier	  = w.barrier;
-	Relation		heapRel	  = w.heapRel;
-	Relation		indexRel  = w.indexRel;
-	int				worker_id = w.worker_id;
-	Dimension		dim		  = w.dim;
+	PrismBuildShared *shared	= w.shared;
+	Barrier			 *barrier	= w.barrier;
+	Relation		  heapRel	= w.heapRel;
+	Relation		  indexRel	= w.indexRel;
+	int				  worker_id = w.worker_id;
+	Dimension		  dim		= w.dim;
 
 	/* ---- Phases 1, 2, 2b: the shared per-participant bodies (the leader runs
 	 * the very same code as participant 0). Each call includes its phase
 	 * barrier(s). ---- */
-	void		  *sample_seg = NULL;
-	MktDsmSamples *dsm_samples =
-			mkt_pbuild_samples_attach(toc, shared, &sample_seg);
-	char  *centroids_base = shm_toc_lookup(toc, MKT_DSM_KEY_CENTROIDS, false);
-	float *cents		  = mkt_dsm_centroids(centroids_base);
-	char *km_workers_base = shm_toc_lookup(toc, MKT_DSM_KEY_KM_WORKERS, false);
-	MktDsmRootAssign *dsm_ra =
-			shm_toc_lookup(toc, MKT_DSM_KEY_ROOT_ASSIGN, false);
+	void			*sample_seg = NULL;
+	PrismDsmSamples *dsm_samples =
+			prism_pbuild_samples_attach(toc, shared, &sample_seg);
+	char *centroids_base = shm_toc_lookup(toc, PRISM_DSM_KEY_CENTROIDS, false);
+	float *cents		 = prism_dsm_centroids(centroids_base);
+	char  *km_workers_base =
+			shm_toc_lookup(toc, PRISM_DSM_KEY_KM_WORKERS, false);
+	PrismDsmRootAssign *dsm_ra =
+			shm_toc_lookup(toc, PRISM_DSM_KEY_ROOT_ASSIGN, false);
 	IndexInfo *indexInfo = BuildIndexInfo(indexRel);
 #ifndef MKT_STANDALONE
 	/* The leader marked the build concurrent and scans with an MVCC snapshot;
@@ -796,7 +797,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	indexInfo->ii_Concurrent = shared->concurrent;
 #endif
 
-	mkt_pbuild_exec_sampling(
+	prism_pbuild_exec_sampling(
 			worker_id,
 			heapRel,
 			indexRel,
@@ -804,14 +805,14 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			shared,
 			dsm_samples,
 			barrier);
-	mkt_pbuild_exec_kmeans(
+	prism_pbuild_exec_kmeans(
 			worker_id,
 			shared,
 			dsm_samples,
 			centroids_base,
 			km_workers_base,
 			barrier);
-	mkt_pbuild_exec_root_assign(
+	prism_pbuild_exec_root_assign(
 			worker_id, shared, dsm_samples, dsm_ra, centroids_base, barrier);
 
 	/* ---- Phase 2c: batched streaming subtree build (page-backed) ----
@@ -822,7 +823,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * batch, recording layout counts and keeping the blob in a spillable
 	 * store, and later streams every subtree's pages by itself from that
 	 * store. Workers pass no callback (leader-only consumes each batch). The
-	 * barrier sequence is inside mkt_pbuild_stream_subtrees, identical for
+	 * barrier sequence is inside prism_pbuild_stream_subtrees, identical for
 	 * leader and workers. A flat (1-level) build has no subtrees — the leader
 	 * writes the single level directly, and neither side runs the subtree
 	 * barriers. */
@@ -834,8 +835,8 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 		void *ring_seg = NULL;
 		char *subtrees_base =
-				mkt_pbuild_subtree_ring_attach(shared, &ring_seg);
-		mkt_pbuild_stream_subtrees(
+				prism_pbuild_subtree_ring_attach(shared, &ring_seg);
+		prism_pbuild_stream_subtrees(
 				worker_id,
 				shared->nparticipants,
 				dsm_samples,
@@ -853,7 +854,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 				NULL,
 				NULL,
 				NULL);
-		mkt_pbuild_subtree_ring_release(ring_seg);
+		prism_pbuild_subtree_ring_release(ring_seg);
 	}
 
 	/* Barrier: leader finished streaming the centroid tree + published the
@@ -863,34 +864,34 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	/* ---- Phase 3 setup: page-backed router shared by refine + posting scan
 	 * --- */
-	void *sortshared = shm_toc_lookup(toc, MKT_DSM_KEY_SORTSHARED, false);
+	void *sortshared = shm_toc_lookup(toc, PRISM_DSM_KEY_SORTSHARED, false);
 	BlockNumber	 first_posting = shared->first_posting;
 	const float *global_mean =
-			shm_toc_lookup(toc, MKT_DSM_KEY_GLOBAL_MEAN, false);
+			shm_toc_lookup(toc, PRISM_DSM_KEY_GLOBAL_MEAN, false);
 
 	/* Exact internal-node centroids, published by the leader before the
 	 * tree-ready barrier above: the build descent scores the internal
 	 * tree levels exactly (an empty collection leaves the hook inert). */
-	void					 *exact_seg = NULL;
-	MktExactInternalCentroids exact_centroids;
-	mkt_exact_centroid_collection_view(
-			mkt_pbuild_exact_centroids_attach(shared, &exact_seg),
+	void					   *exact_seg = NULL;
+	PrismExactInternalCentroids exact_centroids;
+	prism_exact_centroid_collection_view(
+			prism_pbuild_exact_centroids_attach(shared, &exact_seg),
 			&exact_centroids);
 
-	uint32_t	  entry_size = (uint32_t)mkt_posting_entry_size(dim);
+	uint32_t	  entry_size = (uint32_t)prism_posting_entry_size(dim);
 	RaBitQParams *rq_params	 = mkt_rabitq_create(dim, shared->rabitq_seed);
 
 	/* Per-worker storage over the index for page-backed head/centroid reads
 	 * (PG opens one on the worker's indexRel; standalone shares the leader's).
 	 */
-	MktStorage *storage = mkt_pbuild_worker_storage(&w);
+	MktStorage *storage = prism_pbuild_worker_storage(&w);
 
-	/* Routing base — the same MktIndexBase the query/insert build, so the
+	/* Routing base — the same PrismIndexBase the query/insert build, so the
 	 * worker routes each row identically. nlevels + first_centroid (the
 	 * streamed tree's root block) come from the shared state the leader
 	 * published; the scales + global mean + fastscan bits also from shared. */
-	MktIndexBase base;
-	mkt_build_router_base_init(
+	PrismIndexBase base;
+	prism_build_router_base_init(
 			&base,
 			rq_params,
 			storage,
@@ -911,8 +912,8 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * (the query and insert paths never set this). */
 	base.exact_internal = &exact_centroids;
 
-	MktQueryState qs;
-	mkt_query_state_init(&qs, &base, 1, MKT_SECONDARY_TOPK);
+	PrismQueryState qs;
+	prism_query_state_init(&qs, &base, 1, PRISM_SECONDARY_TOPK);
 
 	/* ---- Phase 2.5: page-backed full-table refine (only when subsampled)
 	 * ---- Workers route + accumulate; the leader clears/divides and rewrites
@@ -923,8 +924,8 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 		/* The accumulator overlays the sample region (dead since the subtree
 		 * phase); the leader initialized its header before the tree-ready
 		 * barrier above. */
-		MktDsmRefineAccum *accum = mkt_pbuild_refine_overlay(dsm_samples);
-		mkt_pbuild_exec_refine_paged(
+		PrismDsmRefineAccum *accum = prism_pbuild_refine_overlay(dsm_samples);
+		prism_pbuild_exec_refine_paged(
 				worker_id,
 				heapRel,
 				indexRel,
@@ -940,7 +941,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	/* The samples (and the refine overlay riding in them) are dead; hand the
 	 * segment back before the posting sort claims its own memory budget. */
-	mkt_pbuild_samples_release(dsm_samples, sample_seg);
+	prism_pbuild_samples_release(dsm_samples, sample_seg);
 	dsm_samples = NULL;
 
 	/* ---- Phase 3: posting scan -> cluster-keyed sort (page-backed) ---- */
@@ -955,11 +956,11 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	int worker_wm = shared->work_mem_kb / nsorters;
 	if (worker_wm < 64)
 		worker_wm = 64;
-	MktSorter *sorter = mkt_pbuild_sort_begin(
+	PrismSorter *sorter = prism_pbuild_sort_begin(
 			sortshared, seg, worker_id - 1, 0, false, entry_size, worker_wm);
 
-	MktBuildRouteCtx route;
-	mkt_build_route_ctx_init(
+	PrismBuildRouteCtx route;
+	prism_build_route_ctx_init(
 			&route,
 			&qs,
 			sorter,
@@ -974,7 +975,7 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * consumed it); workers may now scan. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-	double heap_tuples = mkt_build_scan(
+	double heap_tuples = prism_build_scan(
 			heapRel,
 			indexRel,
 			indexInfo,
@@ -985,24 +986,24 @@ mkt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			&route);
 
 	/* Sub-batch progress remainder, as in the sampling scan. */
-	mkt_build_progress_incr_tuples(
+	prism_build_progress_incr_tuples(
 			(int64_t)((uint64_t)route.indtuples & 1023));
 
-	mkt_pbuild_sort_performsort(sorter);
+	prism_pbuild_sort_performsort(sorter);
 
 	/* Barrier: every worker has finished sorting; the leader merges next. */
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 	BarrierDetach(barrier);
 
-	mkt_pbuild_worker_add_counts(
+	prism_pbuild_worker_add_counts(
 			shared, route.indtuples, route.soar_dupes, heap_tuples);
 
-	mkt_pbuild_sort_end(sorter);
-	mkt_build_route_ctx_cleanup(&route);
-	mkt_query_state_cleanup(&qs);
+	prism_pbuild_sort_end(sorter);
+	prism_build_route_ctx_cleanup(&route);
+	prism_query_state_cleanup(&qs);
 	mkt_free(base.pt_global_mean);
-	mkt_pbuild_exact_centroids_release(exact_seg);
-	mkt_pbuild_worker_storage_release(storage);
+	prism_pbuild_exact_centroids_release(exact_seg);
+	prism_pbuild_worker_storage_release(storage);
 
-	mkt_pbuild_worker_detach(toc, &w);
+	prism_pbuild_worker_detach(toc, &w);
 }

@@ -211,7 +211,7 @@ SELECT (SELECT c FROM pool_wide) - (SELECT c FROM pool_narrow)
 DROP TABLE pool_narrow, pool_wide;
 
 -- Two hundred rows: the model calls for a sequential scan here, and the
--- reason is pages. mkt_auto_nlist floors the list count at sqrt(rows) and
+-- reason is pages. prism_auto_nlist floors the list count at sqrt(rows) and
 -- a posting list takes at least a page, so this index is sixteen pages
 -- against the heap's five, priced at the cost of reads that miss the
 -- cache. The two assertions below pin that cause rather than the outcome.

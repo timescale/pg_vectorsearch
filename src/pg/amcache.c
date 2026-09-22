@@ -7,7 +7,7 @@
  * prism_release_params below. The table and the matrices it owns live in a
  * dedicated child context of CacheMemoryContext, so the cache's footprint is
  * visible as its own line in a memory-context dump. The global mean,
- * P^T·global_mean, and an immutable MktIndexBase template live in rd_amcache
+ * P^T·global_mean, and an immutable PrismIndexBase template live in rd_amcache
  * (allocated in rd_indexcxt) and are cheap to re-populate when invalidated.
  * The metadata page is read at most once per backend, when rd_amcache is first
  * populated.
@@ -350,7 +350,7 @@ prism_rabitq_cache_clear(void)
 /* ----------------------------------------------------------------
  * rd_amcache layout
  *
- * A fully-populated immutable MktIndexBase template (params + storage left
+ * A fully-populated immutable PrismIndexBase template (params + storage left
  * for the per-call rebind), the scan-planning scalars, and the inline
  * global_mean + pt_global_mean vectors appended after the struct.
  *
@@ -370,7 +370,7 @@ prism_rabitq_cache_clear(void)
  * Relcache's own caches (RelationGetIndexList and friends) can be lazy
  * per-allocation because relcache wrote per-field cleanup for each of them; an
  * access method gets one line of cleanup written for it, so it gets one
- * allocation. Nor can the blob be grown and swapped later: MktIndexBase
+ * allocation. Nor can the blob be grown and swapped later: PrismIndexBase
  * .pt_global_mean points into it and a live scan holds that pointer for the
  * duration of the scan.
  *
@@ -387,10 +387,10 @@ prism_rabitq_cache_clear(void)
 
 typedef struct AmCacheData
 {
-	MktIndexBase base; /* immutable template; params / fastscan /
-						* storage left zeroed (rebound per call) */
-	const MktIndexTypeInfo *type_info; /* indexed column's type, from the
-										* opclass */
+	PrismIndexBase base; /* immutable template; params / fastscan /
+						  * storage left zeroed (rebound per call) */
+	const PrismIndexTypeInfo *type_info; /* indexed column's type, from the
+										  * opclass */
 	bool	 has_fastscan; /* index built with FASTSCAN posting pages */
 	bool	 pt_ready;	   /* pt_global_mean computed (rotation done) */
 	uint32_t nlist;
@@ -474,7 +474,7 @@ get_cache_data(Relation index)
 	c->base.first_posting	= meta->first_posting;
 	c->base.ncentroid_pages = meta->ncentroid_pages;
 	c->base.metric			= (DistanceMetric)meta->metric;
-	c->base.centroid_format = (MktCentroidFormat)meta->centroid_format;
+	c->base.centroid_format = (PrismCentroidFormat)meta->centroid_format;
 	c->base.rabitq_seed		= seed;
 	/* base.pt_global_mean stays NULL until prism_index_base_init computes it.
 	 */
@@ -489,7 +489,7 @@ get_cache_data(Relation index)
 
 	/* Opclass-derived, so no metapage needed -- but resolved here so every
 	 * post-build path reads it as a pointer instead of an fmgr call. */
-	c->type_info = mkt_index_type_info(index);
+	c->type_info = prism_index_type_info(index);
 
 	index->rd_amcache = c;
 	return c;
@@ -500,7 +500,7 @@ get_cache_data(Relation index)
  * ---------------------------------------------------------------- */
 
 void
-prism_index_base_init(Relation index, MktIndexBase *base)
+prism_index_base_init(Relation index, PrismIndexBase *base)
 {
 	AmCacheData	 *c = get_cache_data(index);
 	RaBitQParams *params =
@@ -542,7 +542,7 @@ prism_cache_meta(
 	*first_posting = c->base.first_posting;
 }
 
-const MktIndexTypeInfo *
+const PrismIndexTypeInfo *
 prism_cache_type_info(Relation index)
 {
 	return get_cache_data(index)->type_info;

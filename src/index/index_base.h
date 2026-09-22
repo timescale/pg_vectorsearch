@@ -1,13 +1,13 @@
 /*
  * index_base.h - Common index descriptor for search
  *
- * MktIndexBase contains the fields needed by the shared search
- * path. Standalone embeds it in MktIndex; PG populates it from
+ * PrismIndexBase contains the fields needed by the shared search
+ * path. Standalone embeds it in PrismIndex; PG populates it from
  * the meta page and amcache.
  */
 
-#ifndef MKT_INDEX_BASE_H
-#define MKT_INDEX_BASE_H
+#ifndef PRISM_INDEX_BASE_H
+#define PRISM_INDEX_BASE_H
 
 #include "core/types.h"
 #include "index/centroid_page.h"
@@ -18,9 +18,9 @@
  * Block 0 holds the metapage, so the centroid region a build reserves
  * starts here and runs to first_posting.
  */
-#define MKT_FIRST_CENTROID_BLKNO 1
+#define PRISM_FIRST_CENTROID_BLKNO 1
 
-typedef struct MktIndexBase
+typedef struct PrismIndexBase
 {
 	/* RaBitQ (must outlive the search context) */
 	RaBitQParams *params;
@@ -51,7 +51,7 @@ typedef struct MktIndexBase
 	 * sits inside the region depends on the build: a serial build writes the
 	 * centroid pages post-order and the root lands last, a parallel one
 	 * places it first. The region itself is always
-	 * [MKT_FIRST_CENTROID_BLKNO, first_posting).
+	 * [PRISM_FIRST_CENTROID_BLKNO, first_posting).
 	 */
 	BlockNumber first_centroid;
 	/*
@@ -66,22 +66,22 @@ typedef struct MktIndexBase
 	 * relation and chains the new page past first_posting, after which the
 	 * reserved block range no longer measures the count.
 	 */
-	uint32_t		  ncentroid_pages;
-	DistanceMetric	  metric;
-	MktCentroidFormat centroid_format;
-	int				  fastscan; /* 0=off, 8=uint8, 16=uint16 hacc */
+	uint32_t			ncentroid_pages;
+	DistanceMetric		metric;
+	PrismCentroidFormat centroid_format;
+	int					fastscan; /* 0=off, 8=uint8, 16=uint16 hacc */
 	float centroid_error_scale; /* scales centroid pruning error (1=default) */
 	float centroid_beam_scale;	/* intermediate beam width / nprobe
 								   (0.25=default) */
 	/* Build-only: exact internal-node centroids for the build descent
-	 * (see MktExactInternalCentroids in centroid_search.h). NULL — the
+	 * (see PrismExactInternalCentroids in centroid_search.h). NULL — the
 	 * default everywhere the base is zero-initialized — keeps the
 	 * estimated scoring; the query and insert paths never set it. */
-	const struct MktExactInternalCentroids *exact_internal;
-} MktIndexBase;
+	const struct PrismExactInternalCentroids *exact_internal;
+} PrismIndexBase;
 
 static inline RaBitQParams *
-mkt_index_ensure_rabitq(MktIndexBase *idx)
+prism_index_ensure_rabitq(PrismIndexBase *idx)
 {
 	if (idx->params == NULL)
 	{
@@ -93,4 +93,4 @@ mkt_index_ensure_rabitq(MktIndexBase *idx)
 	return idx->params;
 }
 
-#endif /* MKT_INDEX_BASE_H */
+#endif /* PRISM_INDEX_BASE_H */

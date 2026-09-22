@@ -114,7 +114,7 @@ TEST(beam_search_two_levels)
 
 	/* Initialize root page */
 	Page root_page = pages + 0 * BLCKSZ;
-	mkt_centroid_page_init(root_page, 0);
+	prism_centroid_page_init(root_page, 0);
 
 	/* Initialize leaf pages and populate */
 	float **all_leaf_vecs = mkt_alloc(
@@ -125,7 +125,7 @@ TEST(beam_search_two_levels)
 		/* Leaf page for this root centroid */
 		BlockNumber leaf_blkno = (BlockNumber)(1 + r);
 		Page		leaf_page  = pages + (size_t)leaf_blkno * BLCKSZ;
-		mkt_centroid_page_init(leaf_page, 1);
+		prism_centroid_page_init(leaf_page, 1);
 
 		for (int c = 0; c < level1_count; c++)
 		{
@@ -140,12 +140,12 @@ TEST(beam_search_two_levels)
 			ASSERT_NOT_NULL(enc, "leaf encoding succeeded");
 
 			/* Leaf children point to posting lists (fake blknos) */
-			bool added = mkt_centroid_page_add(
+			bool added = prism_centroid_page_add(
 					leaf_page,
 					dim,
 					200 + vec_idx,
 					0,
-					MKT_CENTROID_FLAG_LEAF,
+					PRISM_CENTROID_FLAG_LEAF,
 					enc);
 			ASSERT_TRUE(added, "leaf entry added");
 			mkt_free(enc);
@@ -158,7 +158,7 @@ TEST(beam_search_two_levels)
 		RaBitQData *root_enc = mkt_rabitq_encode(params, root_ref, cent_ref);
 		ASSERT_NOT_NULL(root_enc, "root encoding succeeded");
 
-		bool added = mkt_centroid_page_add(
+		bool added = prism_centroid_page_add(
 				root_page, dim, leaf_blkno, level1_count, 0, root_enc);
 		ASSERT_TRUE(added, "root entry added");
 		mkt_free(root_enc);
@@ -179,7 +179,7 @@ TEST(beam_search_two_levels)
 			.dim	  = dim,
 	};
 
-	MktCentroidSearchState search_state = {
+	PrismCentroidSearchState search_state = {
 			.qstate		= qstate,
 			.query		= query,
 			.storage	= &storage.base,
@@ -189,9 +189,9 @@ TEST(beam_search_two_levels)
 			.dim	= dim,
 	};
 
-	MktCentroidResult results[8];
-	uint32_t		  nresults =
-			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL, NULL);
+	PrismCentroidResult results[8];
+	uint32_t			nresults = prism_centroid_beam_search(
+			   &search_state, 0, 2, results, NULL, NULL);
 
 	ASSERT_TRUE(nresults > 0, "should return at least one result");
 	ASSERT_TRUE(nresults <= 8, "should return at most nprobe results");
@@ -277,7 +277,7 @@ TEST(beam_search_rejects_corrupt_entry_count)
 	char *pages = mkt_alloc(2 * (size_t)BLCKSZ);
 	memset(pages, 0, 2 * (size_t)BLCKSZ);
 	Page root_page = pages;
-	mkt_centroid_page_init(root_page, 0);
+	prism_centroid_page_init(root_page, 0);
 
 	float **vecs = mkt_alloc(4 * sizeof(void *));
 	for (int c = 0; c < 4; c++)
@@ -286,16 +286,16 @@ TEST(beam_search_rejects_corrupt_entry_count)
 		Vec32Ref	v	= {.data = vecs[c], .dim = dim};
 		RaBitQData *enc = mkt_rabitq_encode(params, v, cent_ref);
 		ASSERT_TRUE(
-				mkt_centroid_page_add(root_page, dim, 1, 0, 0, enc),
+				prism_centroid_page_add(root_page, dim, 1, 0, 0, enc),
 				"root entry added");
 		mkt_free(enc);
 	}
 
 	/* Corrupt: claim one more entry than the format can hold. */
-	MktCentroidPageOpaque *op = MKT_CENTROID_OPAQUE(root_page);
-	op->entry_count			  = (uint16_t)(mkt_centroid_max_entries_fmt(
-										   dim, MKT_CENTROID_FMT_RABITQ) +
-								   1);
+	PrismCentroidPageOpaque *op = PRISM_CENTROID_OPAQUE(root_page);
+	op->entry_count				= (uint16_t)(prism_centroid_max_entries_fmt(
+										 dim, MKT_CENTROID_FMT_RABITQ) +
+								 1);
 
 	float			 *query = make_test_vector(dim, 5555);
 	Vec32Ref		  qref	= {.data = query, .dim = dim};
@@ -307,7 +307,7 @@ TEST(beam_search_rejects_corrupt_entry_count)
 			.vecs	  = (const float **)vecs,
 			.dim	  = dim,
 	};
-	MktCentroidSearchState st = {
+	PrismCentroidSearchState st = {
 			.qstate		= qstate,
 			.query		= query,
 			.storage	= &storage.base,
@@ -326,8 +326,8 @@ TEST(beam_search_rejects_corrupt_entry_count)
 		 * diagnostic doesn't clutter the test log. */
 		if (freopen("/dev/null", "w", stderr) == NULL)
 			_exit(2);
-		MktCentroidResult results[4];
-		mkt_centroid_beam_search(&st, 0, 2, results, NULL, NULL);
+		PrismCentroidResult results[4];
+		prism_centroid_beam_search(&st, 0, 2, results, NULL, NULL);
 		_exit(0); /* reached only if the check failed to fire */
 	}
 
@@ -353,8 +353,8 @@ TEST(beam_search_rejects_corrupt_entry_count)
 
 TEST(beam_search_null_state)
 {
-	MktCentroidResult results[1];
-	uint32_t n = mkt_centroid_beam_search(NULL, 0, 1, results, NULL, NULL);
+	PrismCentroidResult results[1];
+	uint32_t n = prism_centroid_beam_search(NULL, 0, 1, results, NULL, NULL);
 	ASSERT_EQ(0, n, "null state should return 0");
 }
 
@@ -364,15 +364,15 @@ TEST(beam_search_null_results)
 			.base.ops = &test_storage_ops,
 			.pages	  = NULL,
 	};
-	RaBitQQueryState	   dummy_qstate = {0};
-	MktCentroidSearchState state		= {
+	RaBitQQueryState		 dummy_qstate = {0};
+	PrismCentroidSearchState state		  = {
 				   .qstate	   = &dummy_qstate,
 				   .storage	   = &storage.base,
 				   .beam_width = 4,
 				   .nprobe	   = 4,
 				   .dim		   = 64,
 	   };
-	uint32_t n = mkt_centroid_beam_search(&state, 0, 1, NULL, NULL, NULL);
+	uint32_t n = prism_centroid_beam_search(&state, 0, 1, NULL, NULL, NULL);
 	ASSERT_EQ(0, n, "null results should return 0");
 }
 
@@ -382,16 +382,16 @@ TEST(beam_search_zero_levels)
 			.base.ops = &test_storage_ops,
 			.pages	  = NULL,
 	};
-	RaBitQQueryState	   dummy_qstate = {0};
-	MktCentroidSearchState state		= {
+	RaBitQQueryState		 dummy_qstate = {0};
+	PrismCentroidSearchState state		  = {
 				   .qstate	   = &dummy_qstate,
 				   .storage	   = &storage.base,
 				   .beam_width = 4,
 				   .nprobe	   = 4,
 				   .dim		   = 64,
 	   };
-	MktCentroidResult results[1];
-	uint32_t n = mkt_centroid_beam_search(&state, 0, 0, results, NULL, NULL);
+	PrismCentroidResult results[1];
+	uint32_t n = prism_centroid_beam_search(&state, 0, 0, results, NULL, NULL);
 	ASSERT_EQ(0, n, "zero levels should return 0");
 }
 
@@ -401,17 +401,17 @@ TEST(beam_search_invalid_blkno)
 			.base.ops = &test_storage_ops,
 			.pages	  = NULL,
 	};
-	RaBitQQueryState	   dummy_qstate = {0};
-	MktCentroidSearchState state		= {
+	RaBitQQueryState		 dummy_qstate = {0};
+	PrismCentroidSearchState state		  = {
 				   .qstate	   = &dummy_qstate,
 				   .storage	   = &storage.base,
 				   .beam_width = 4,
 				   .nprobe	   = 4,
 				   .dim		   = 64,
 	   };
-	MktCentroidResult results[1];
-	uint32_t		  n = mkt_centroid_beam_search(
-			 &state, InvalidBlockNumber, 1, results, NULL, NULL);
+	PrismCentroidResult results[1];
+	uint32_t			n = prism_centroid_beam_search(
+			   &state, InvalidBlockNumber, 1, results, NULL, NULL);
 	ASSERT_EQ(0, n, "invalid blkno should return 0");
 }
 
@@ -435,7 +435,7 @@ TEST(beam_search_float_two_levels)
 	memset(pages, 0, (size_t)total_pages * BLCKSZ);
 
 	Page root_page = pages;
-	mkt_centroid_page_init_fmt(root_page, 0, MKT_CENTROID_FMT_FLOAT);
+	prism_centroid_page_init_fmt(root_page, 0, MKT_CENTROID_FMT_FLOAT);
 
 	float **all_leaf_vecs = mkt_alloc(
 			(size_t)level0_count * level1_count * sizeof(void *));
@@ -444,7 +444,7 @@ TEST(beam_search_float_two_levels)
 	{
 		BlockNumber leaf_blkno = (BlockNumber)(1 + r);
 		Page		leaf_page  = pages + (size_t)leaf_blkno * BLCKSZ;
-		mkt_centroid_page_init_fmt(leaf_page, 1, MKT_CENTROID_FMT_FLOAT);
+		prism_centroid_page_init_fmt(leaf_page, 1, MKT_CENTROID_FMT_FLOAT);
 
 		for (int c = 0; c < level1_count; c++)
 		{
@@ -452,12 +452,12 @@ TEST(beam_search_float_two_levels)
 			float *vec			   = make_test_vector(dim, r * 1000 + c * 37);
 			all_leaf_vecs[vec_idx] = vec;
 
-			bool added = mkt_centroid_page_add_entry(
+			bool added = prism_centroid_page_add_entry(
 					leaf_page,
 					dim,
 					200 + vec_idx,
 					0,
-					MKT_CENTROID_FLAG_LEAF,
+					PRISM_CENTROID_FLAG_LEAF,
 					vec);
 			ASSERT_TRUE(added, "leaf float entry added");
 		}
@@ -465,7 +465,7 @@ TEST(beam_search_float_two_levels)
 		/* Root centroid = first leaf vector */
 		float *root_vec = all_leaf_vecs[r * level1_count];
 
-		bool added = mkt_centroid_page_add_entry(
+		bool added = prism_centroid_page_add_entry(
 				root_page, dim, leaf_blkno, level1_count, 0, root_vec);
 		ASSERT_TRUE(added, "root float entry added");
 	}
@@ -480,7 +480,7 @@ TEST(beam_search_float_two_levels)
 			.dim	  = dim,
 	};
 
-	MktCentroidSearchState search_state = {
+	PrismCentroidSearchState search_state = {
 			.qstate		= NULL, /* not needed for float pages */
 			.query		= query,
 			.storage	= &storage.base,
@@ -489,9 +489,9 @@ TEST(beam_search_float_two_levels)
 			.dim		= dim,
 	};
 
-	MktCentroidResult results[4];
-	uint32_t		  nresults =
-			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL, NULL);
+	PrismCentroidResult results[4];
+	uint32_t			nresults = prism_centroid_beam_search(
+			   &search_state, 0, 2, results, NULL, NULL);
 
 	ASSERT_TRUE(nresults > 0, "float: should return results");
 	ASSERT_TRUE(nresults <= 4, "float: at most nprobe results");
@@ -558,7 +558,7 @@ TEST(beam_search_half_two_levels)
 	memset(pages, 0, (size_t)total_pages * BLCKSZ);
 
 	Page root_page = pages;
-	mkt_centroid_page_init_fmt(root_page, 0, MKT_CENTROID_FMT_HALF);
+	prism_centroid_page_init_fmt(root_page, 0, MKT_CENTROID_FMT_HALF);
 
 	/* Keep float versions for brute-force ground truth */
 	float **all_leaf_f32 = mkt_alloc(
@@ -570,7 +570,7 @@ TEST(beam_search_half_two_levels)
 	{
 		BlockNumber leaf_blkno = (BlockNumber)(1 + r);
 		Page		leaf_page  = pages + (size_t)leaf_blkno * BLCKSZ;
-		mkt_centroid_page_init_fmt(leaf_page, 1, MKT_CENTROID_FMT_HALF);
+		prism_centroid_page_init_fmt(leaf_page, 1, MKT_CENTROID_FMT_HALF);
 
 		for (int c = 0; c < level1_count; c++)
 		{
@@ -583,12 +583,12 @@ TEST(beam_search_half_two_levels)
 			all_leaf_f32[vec_idx]  = fvec;
 			all_leaf_half[vec_idx] = hvec;
 
-			bool added = mkt_centroid_page_add_entry(
+			bool added = prism_centroid_page_add_entry(
 					leaf_page,
 					dim,
 					200 + vec_idx,
 					0,
-					MKT_CENTROID_FLAG_LEAF,
+					PRISM_CENTROID_FLAG_LEAF,
 					hvec);
 			ASSERT_TRUE(added, "leaf half entry added");
 		}
@@ -596,7 +596,7 @@ TEST(beam_search_half_two_levels)
 		/* Root centroid = first leaf vector (half) */
 		half *root_hvec = all_leaf_half[r * level1_count];
 
-		bool added = mkt_centroid_page_add_entry(
+		bool added = prism_centroid_page_add_entry(
 				root_page, dim, leaf_blkno, level1_count, 0, root_hvec);
 		ASSERT_TRUE(added, "root half entry added");
 	}
@@ -611,7 +611,7 @@ TEST(beam_search_half_two_levels)
 			.dim	  = dim,
 	};
 
-	MktCentroidSearchState search_state = {
+	PrismCentroidSearchState search_state = {
 			.qstate		= NULL,
 			.query		= query,
 			.storage	= &storage.base,
@@ -620,9 +620,9 @@ TEST(beam_search_half_two_levels)
 			.dim		= dim,
 	};
 
-	MktCentroidResult results[4];
-	uint32_t		  nresults =
-			mkt_centroid_beam_search(&search_state, 0, 2, results, NULL, NULL);
+	PrismCentroidResult results[4];
+	uint32_t			nresults = prism_centroid_beam_search(
+			   &search_state, 0, 2, results, NULL, NULL);
 
 	ASSERT_TRUE(nresults > 0, "half: should return results");
 	ASSERT_TRUE(nresults <= 4, "half: at most nprobe results");

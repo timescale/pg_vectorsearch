@@ -1,7 +1,7 @@
 /*
  * scan.c - Index scan for prism
  *
- * Uses MktQueryState (shared with standalone) for the search hot
+ * Uses PrismQueryState (shared with standalone) for the search hot
  * path. PG-specific concerns: scan iterator protocol, memory
  * contexts, query vector extraction.
  *
@@ -165,7 +165,7 @@ typedef struct PrismScanResult
 typedef struct PrismScanState
 {
 	/* Common index descriptor (first for cast compatibility) */
-	MktIndexBase index_base;
+	PrismIndexBase index_base;
 
 	/* Result iterator */
 	PrismScanResult *results;
@@ -178,10 +178,10 @@ typedef struct PrismScanState
 	 * beginscan, so it can be sized for the top-k the query actually
 	 * asks for -- the LIMIT hint arrives between the two (see
 	 * scan_bound.c). Rebuilt only if a later search needs a larger k. */
-	MktQueryState qstate;
-	bool		  qstate_ready;
-	uint32_t	  max_nprobe;
-	bool		  has_fastscan;
+	PrismQueryState qstate;
+	bool			qstate_ready;
+	uint32_t		max_nprobe;
+	bool			has_fastscan;
 
 	/* Rows the enclosing LIMIT will pull, 0 when unknown */
 	uint32_t scan_bound;
@@ -250,9 +250,9 @@ prism_beginscan(Relation index, int nkeys, int norderbys)
 	 * at the ceiling but a few hundred KB at typical nprobe. Headroom
 	 * covers routing more leaf candidates than are scanned (bounded
 	 * probe expansion); requests beyond the sizing are clamped by
-	 * mkt_query_execute exactly as they were against the old ceiling. */
+	 * prism_query_execute exactly as they were against the old ceiling. */
 	uint32_t req_nprobe = prism_nprobe > 0 ? (uint32_t)prism_nprobe
-										   : mkt_auto_nprobe(info.nlist);
+										   : prism_auto_nprobe(info.nlist);
 	uint32_t max_nprobe = req_nprobe + Min(req_nprobe, 256) + 16;
 	if (max_nprobe > 4096)
 		max_nprobe = 4096;
@@ -329,16 +329,16 @@ prism_rescan(
  *
  * Every allocation that scales with k, and none scale with the vector
  * dimension. Sizing this from anything less makes the work_mem ceiling
- * below a fiction: the extraction buffer alone is MKT_QUERY_CAND_PER_K
+ * below a fiction: the extraction buffer alone is PRISM_QUERY_CAND_PER_K
  * entries per row, which dominates the rest by an order of magnitude.
  *
  *   mkt_topk_init         one upper bound and one id per row, plus a
  *                         candidate array of two entries per row
- *   mkt_query_state_init  MKT_QUERY_CAND_PER_K candidates per row and an
+ *   prism_query_state_init  PRISM_QUERY_CAND_PER_K candidates per row and an
  *                         index and a distance for each of them
  *   execute_search        one result slot per row
  *
- * Keep in step with those three. MKT_QUERY_CAND_PER_K is the same constant
+ * Keep in step with those three. PRISM_QUERY_CAND_PER_K is the same constant
  * the allocator uses.
  *
  * This prices the state as initialized. extract_candidates doubles the
@@ -348,7 +348,7 @@ prism_rescan(
  */
 #define MKT_TOP_K_BYTES_PER_ROW                                             \
 	(sizeof(Distance) + sizeof(uint64_t) + 2 * sizeof(MktTopKEntry) +       \
-	 MKT_QUERY_CAND_PER_K *                                                 \
+	 PRISM_QUERY_CAND_PER_K *                                               \
 			 (sizeof(MktTopKEntry) + sizeof(uint32_t) + sizeof(Distance)) + \
 	 sizeof(PrismScanResult))
 
@@ -440,14 +440,14 @@ mkt_scan_resolve_top_k(uint32_t scan_bound, double heap_rows)
 
 /*
  * Allocate (or resize) the shared query state and result buffer for a
- * top-k of at least k. mkt_query_execute clamps k to the allocated
+ * top-k of at least k. prism_query_execute clamps k to the allocated
  * max_k, so undersizing here is what silently truncates results.
  *
  * A resize discards the previous state rather than adding to it. Every
  * buffer in it is sized to max_k, and a rescan can resize -- a correlated
  * LIMIT resolves afresh for each outer row -- so keeping the old ones
  * would accumulate a full set per resize for the life of the scan.
- * mkt_query_state_cleanup owns that: the state holds its buffers in a
+ * prism_query_state_cleanup owns that: the state holds its buffers in a
  * context of its own.
  *
  * The result array is deliberately not part of that state. It grows with
@@ -466,13 +466,14 @@ ensure_query_state(PrismScanState *ss, uint32_t k)
 
 	if (ss->qstate_ready)
 	{
-		mkt_query_state_cleanup(&ss->qstate);
+		prism_query_state_cleanup(&ss->qstate);
 		ss->qstate_ready = false;
 	}
 
-	mkt_query_state_init(&ss->qstate, &ss->index_base, max_k, ss->max_nprobe);
+	prism_query_state_init(
+			&ss->qstate, &ss->index_base, max_k, ss->max_nprobe);
 	if (ss->has_fastscan)
-		mkt_posting_scan_enable_fastscan(
+		prism_posting_scan_enable_fastscan(
 				&ss->qstate.pscan, prism_fastscan_bits);
 	ss->qstate_ready = true;
 
@@ -535,13 +536,14 @@ execute_search(IndexScanDesc scan)
 						ss->index_base.dim)));
 
 	/* Execute shared search */
-	uint32_t nprobe = prism_nprobe > 0 ? (uint32_t)prism_nprobe
-									   : mkt_auto_nprobe(ss->index_base.nlist);
+	uint32_t nprobe = prism_nprobe > 0
+							? (uint32_t)prism_nprobe
+							: prism_auto_nprobe(ss->index_base.nlist);
 
-	MktQueryStats qstats   = {0};
+	PrismQueryStats qstats = {0};
 	ss->storage.read_count = 0;
 
-	mkt_query_execute(
+	prism_query_execute(
 			&ss->qstate,
 			qref.data,
 			k,
@@ -606,7 +608,7 @@ execute_search(IndexScanDesc scan)
 	for (uint32_t i = 0; i < nresults; i++)
 	{
 		uint32_t ci		   = ss->qstate.result_order[i];
-		ss->results[i].tid = mkt_posting_decode_tid(
+		ss->results[i].tid = prism_posting_decode_tid(
 				ss->qstate.candidates[ci].id);
 		ss->results[i].distance = ss->qstate.result_dists[i];
 	}
@@ -662,7 +664,7 @@ prism_endscan(IndexScanDesc scan)
 	if (ss != NULL)
 	{
 		if (ss->qstate_ready)
-			mkt_query_state_cleanup(&ss->qstate);
+			prism_query_state_cleanup(&ss->qstate);
 		/* Check the RaBitQParams checkout back in before the scan's own
 		 * memory goes away — see prism_index_base_init / the beginscan
 		 * call above. */

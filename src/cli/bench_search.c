@@ -371,8 +371,8 @@ cmd_bench_search(CmdContext *ctx)
 	uint32_t nqueries	  = 0;
 	uint32_t gt_k		  = 0;
 
-	MktBuildInfo info;
-	MktHandle	*handle = NULL;
+	PrismBuildInfo info;
+	MktHandle	  *handle = NULL;
 
 #ifdef MKT_HAVE_HDF5
 	if (config.hdf5_path != NULL)
@@ -462,7 +462,7 @@ cmd_bench_search(CmdContext *ctx)
 			   build_ms / 1000.0,
 			   info.nlist,
 			   info.nlevels);
-		mkt_build_stats_print(&info.stats);
+		prism_build_stats_print(&info.stats);
 	}
 	else
 #endif
@@ -513,7 +513,7 @@ cmd_bench_search(CmdContext *ctx)
 			   build_ms / 1000.0,
 			   info.nlist,
 			   info.nlevels);
-		mkt_build_stats_print(&info.stats);
+		prism_build_stats_print(&info.stats);
 	}
 
 	uint32_t avg = info.nvecs / info.nlist;
@@ -528,7 +528,7 @@ cmd_bench_search(CmdContext *ctx)
 	/* --nprobe 0: derive from the built cluster count, same rule as the
 	 * extension's prism.nprobe = 0. */
 	if (config.nprobe == 0)
-		config.nprobe = mkt_auto_nprobe(info.nlist);
+		config.nprobe = prism_auto_nprobe(info.nlist);
 
 	/* --------------------------------------------------------
 	 * Run queries via bindings API

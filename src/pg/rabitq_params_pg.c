@@ -18,7 +18,7 @@
 #include "support_pg.h"
 
 /*
- * The generator caps dim at MKT_INDEX_MAX_DIM (see
+ * The generator caps dim at PRISM_INDEX_MAX_DIM (see
  * mkt_pg_check_rabitq_params_dim_valid). Prove at compile time that a
  * matrix that large still fits a single allocation, so raising the cap
  * without revisiting MKT_RABITQ_PARAMS_PG_SIZE breaks the build here
@@ -26,11 +26,11 @@
  * size computation) at run time.
  */
 StaticAssertDecl(
-		offsetof(RaBitQParamsPG, P) + (uint64_t)MKT_INDEX_MAX_DIM *
-											  MKT_INDEX_MAX_DIM *
+		offsetof(RaBitQParamsPG, P) + (uint64_t)PRISM_INDEX_MAX_DIM *
+											  PRISM_INDEX_MAX_DIM *
 											  sizeof(float) <=
 				MaxAllocSize,
-		"rabitq_params matrix at MKT_INDEX_MAX_DIM exceeds MaxAllocSize; "
+		"rabitq_params matrix at PRISM_INDEX_MAX_DIM exceeds MaxAllocSize; "
 		"revisit MKT_RABITQ_PARAMS_PG_SIZE and the dim cap together");
 
 /* ----------------------------------------------------------------

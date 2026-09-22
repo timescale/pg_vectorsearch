@@ -11,8 +11,8 @@
  * lock; single-threaded callers (standalone) need none.
  */
 
-#ifndef MKT_POSTING_INSERT_H
-#define MKT_POSTING_INSERT_H
+#ifndef PRISM_POSTING_INSERT_H
+#define PRISM_POSTING_INSERT_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -45,7 +45,7 @@
  *
  * Returns true on success.
  */
-bool mkt_posting_insert_one(
+bool prism_posting_insert_one(
 		MktStorage		   *storage,
 		const RaBitQParams *params,
 		Dimension			dim,
@@ -58,7 +58,7 @@ bool mkt_posting_insert_one(
 
 /*
  * Tombstone every AoS entry in the cluster chain whose TID is_dead() reports
- * dead by setting MKT_POSTING_FLAG_DELETED, so later scans skip it. FASTSCAN
+ * dead by setting PRISM_POSTING_FLAG_DELETED, so later scans skip it. FASTSCAN
  * base pages are left untouched: their packed groups cannot be edited in
  * place, so their dead entries stay correct via the executor's MVCC visibility
  * recheck and are physically reclaimed only at compaction/rebuild. The head's
@@ -70,11 +70,11 @@ bool mkt_posting_insert_one(
  * serialize against concurrent inserts to the same cluster (the PG glue holds
  * the per-cluster page lock).
  */
-uint32_t mkt_posting_tombstone_chain(
+uint32_t prism_posting_tombstone_chain(
 		MktStorage *storage,
 		Dimension	dim,
 		BlockNumber head_blkno,
 		bool (*is_dead)(ItemPointerData tid, void *state),
 		void *state);
 
-#endif /* MKT_POSTING_INSERT_H */
+#endif /* PRISM_POSTING_INSERT_H */

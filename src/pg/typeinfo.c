@@ -46,7 +46,7 @@ halfvec_unwrap(Datum d, Dimension *dim)
  * bytes and fits 2 to an 8 kB page against vec16's 1544 and 5.
  * ---------------------------------------------------------------- */
 
-static const MktIndexTypeInfo type_info_vector = {
+static const PrismIndexTypeInfo type_info_vector = {
 		.name			 = "vec32",
 		.max_dimensions	 = VEC32_MAX_DIM,
 		.centroid_format = MKT_CENTROID_FMT_FLOAT,
@@ -54,7 +54,7 @@ static const MktIndexTypeInfo type_info_vector = {
 		.unwrap			 = vector_unwrap,
 };
 
-static const MktIndexTypeInfo type_info_halfvec = {
+static const PrismIndexTypeInfo type_info_halfvec = {
 		.name = "vec16",
 		/* vec16_typmod_in enforces the same ceiling as vec32. */
 		.max_dimensions	 = VEC32_MAX_DIM,
@@ -83,8 +83,8 @@ prism_vec16_support(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(&type_info_halfvec);
 }
 
-const MktIndexTypeInfo *
-mkt_index_type_info(Relation index)
+const PrismIndexTypeInfo *
+prism_index_type_info(Relation index)
 {
 	/*
 	 * Optional, pgvector-style: an opclass with no descriptor indexes
@@ -96,6 +96,6 @@ mkt_index_type_info(Relation index)
 
 	FmgrInfo *procinfo = index_getprocinfo(index, 1, MKT_ANN_TYPE_INFO_PROC);
 
-	return (const MktIndexTypeInfo *)DatumGetPointer(
+	return (const PrismIndexTypeInfo *)DatumGetPointer(
 			FunctionCall0Coll(procinfo, InvalidOid));
 }

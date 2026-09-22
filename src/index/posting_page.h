@@ -8,18 +8,18 @@
  *     PageHeader (PG-compatible, 24B)
  *     (pt_centroid — on first page only)
  *     entry[0], entry[1], ...
- *     MktPostingPageOpaque (16B at page end)
+ *     PrismPostingPageOpaque (16B at page end)
  *
  *   Flat mode (one buffer per cluster):
- *     MktFlatPostingHeader (16B)
+ *     PrismFlatPostingHeader (16B)
  *     entry[0], entry[1], ...
  *
- * Per-entry block (size = MKT_POSTING_ENTRY_SIZE(dim) bytes):
- *     MktPostingEntryHeader  20B  (tid + flags + f_add/rescale/error)
+ * Per-entry block (size = PRISM_POSTING_ENTRY_SIZE(dim) bytes):
+ *     PrismPostingEntryHeader  20B  (tid + flags + f_add/rescale/error)
  *     uint8_t bits[packed_bytes]  (dim-dependent, 96B at dim=768)
  *
  * Why AoS: when the SIMD kernel strides through entries at
- * stride=MKT_POSTING_ENTRY_SIZE(dim), consecutive pages' bit
+ * stride=PRISM_POSTING_ENTRY_SIZE(dim), consecutive pages' bit
  * regions are separated by only ~72 bytes of page-boundary overhead
  * (opaque + next PageHeader) instead of the ~1472 bytes that an
  * SoA layout interleaves (metas + f_add + f_rescale + f_error of
@@ -33,8 +33,8 @@
  * (distance conversion + prune) finds them hot.
  */
 
-#ifndef MKT_POSTING_PAGE_H
-#define MKT_POSTING_PAGE_H
+#ifndef PRISM_POSTING_PAGE_H
+#define PRISM_POSTING_PAGE_H
 
 #include <assert.h> /* static_assert pre-C23 (e.g. gcc 11's -std=c2x) */
 #include <stdbool.h>
@@ -49,16 +49,16 @@
  * Constants
  * ---------------------------------------------------------------- */
 
-#define MKT_POSTING_PAGE_ID 0x4D50 /* "MP" */
+#define PRISM_POSTING_PAGE_ID 0x4D50 /* "MP" */
 
 /* Entry flags */
-#define MKT_POSTING_FLAG_DELETED  0x01
-#define MKT_POSTING_FLAG_BOUNDARY 0x02
+#define PRISM_POSTING_FLAG_DELETED	0x01
+#define PRISM_POSTING_FLAG_BOUNDARY 0x02
 
 /* Page flags */
-#define MKT_POSTING_PAGE_FIRST	  0x0001
-#define MKT_POSTING_PAGE_OVERFLOW 0x0002
-#define MKT_POSTING_PAGE_FASTSCAN 0x0004 /* reserved for phase 2 */
+#define PRISM_POSTING_PAGE_FIRST	0x0001
+#define PRISM_POSTING_PAGE_OVERFLOW 0x0002
+#define PRISM_POSTING_PAGE_FASTSCAN 0x0004 /* reserved for phase 2 */
 /*
  * Every entry on the page is dead. Set by the VACUUM tombstone pass when a
  * page's whole contents are deleted (AoS: all entries flagged; FASTSCAN: all
@@ -67,7 +67,7 @@
  * scoring kernel entirely; the page stays linked so compaction can later
  * reclaim it. Cleared if the page is ever reused for new entries.
  */
-#define MKT_POSTING_PAGE_TOMBSTONED 0x0008
+#define PRISM_POSTING_PAGE_TOMBSTONED 0x0008
 /*
  * The page belongs to a chain that has been logically retired — no longer
  * reachable through the centroid tree — and is awaiting physical reclaim. A
@@ -88,7 +88,7 @@
  * Unlike TOMBSTONED, this flag therefore does apply to chain heads: a split
  * retires the whole old chain, head and all.
  */
-#define MKT_POSTING_PAGE_DELETED 0x0010
+#define PRISM_POSTING_PAGE_DELETED 0x0010
 
 /* ----------------------------------------------------------------
  * Structs
@@ -100,56 +100,56 @@
  * In PG: tid is a heap TID for reranking via buffer cache.
  * In standalone: vector_id packed into tid via ItemPointerSet.
  */
-typedef struct MktPostingEntryMeta
+typedef struct PrismPostingEntryMeta
 {
 	ItemPointerData tid; /* 6B */
 	uint8_t			flags;
 	uint8_t			reserved;
-} MktPostingEntryMeta; /* 8B */
+} PrismPostingEntryMeta; /* 8B */
 
 /*
  * Per-entry header in the AoS layout: meta + the three RaBitQ
  * scalar factors, followed by a flexible array of quantized bits
  * (MKT_RABITQ_BYTES(dim) bytes at runtime).
  *
- * sizeof(MktPostingEntryHeader) is 20B — the FAM doesn't contribute
- * to the struct's static size, so MKT_POSTING_ENTRY_HEADER_SIZE
+ * sizeof(PrismPostingEntryHeader) is 20B — the FAM doesn't contribute
+ * to the struct's static size, so PRISM_POSTING_ENTRY_HEADER_SIZE
  * stays a clean compile-time constant. The bits array extends past
  * the struct in memory; callers compute per-entry offsets via
- * MKT_POSTING_ENTRY_SIZE(dim) and access bits as `hdr->bits`.
+ * PRISM_POSTING_ENTRY_SIZE(dim) and access bits as `hdr->bits`.
  */
-typedef struct MktPostingEntryHeader
+typedef struct PrismPostingEntryHeader
 {
-	MktPostingEntryMeta meta;	   /* 8B */
-	float				f_add;	   /* 4B */
-	float				f_rescale; /* 4B */
-	float				f_error;   /* 4B */
-	uint8_t				bits[FLEXIBLE_ARRAY_MEMBER];
-} MktPostingEntryHeader; /* 20B + dim-dependent bits */
+	PrismPostingEntryMeta meta;		 /* 8B */
+	float				  f_add;	 /* 4B */
+	float				  f_rescale; /* 4B */
+	float				  f_error;	 /* 4B */
+	uint8_t				  bits[FLEXIBLE_ARRAY_MEMBER];
+} PrismPostingEntryHeader; /* 20B + dim-dependent bits */
 
 /*
  * Paged-mode opaque (at end of every BLCKSZ posting page).
  */
-typedef struct MktPostingPageOpaque
+typedef struct PrismPostingPageOpaque
 {
 	BlockNumber next_blkno; /* next page in chain */
 	uint32_t	cluster_id;
 	uint16_t	entry_count; /* entries on this page */
 	uint16_t	flags;		 /* FIRST | OVERFLOW | FASTSCAN | TOMBSTONED |
 							  * DELETED */
-	uint16_t page_id;		 /* MKT_POSTING_PAGE_ID */
+	uint16_t page_id;		 /* PRISM_POSTING_PAGE_ID */
 	uint16_t max_entries;	 /* capacity of this page */
 
 	/*
 	 * Overlay (8 bytes). On a live page these are the per-cluster head
-	 * metadata; on a page flagged MKT_POSTING_PAGE_DELETED they instead carry
-	 * the deletion XID for the reclaim gate. The DELETED flag is the sole
-	 * discriminator — always read live_count/tail_blkno only when it is clear
-	 * and delete_xid only when it is set. A posting-list split retires the
-	 * whole old chain, its FIRST head included, so a DELETED head does carry
-	 * delete_xid here rather than head metadata; readers of head metadata
-	 * (insert, split) first check the flag and treat a retired head as gone,
-	 * so the two uses never collide. The anonymous struct/union keeps
+	 * metadata; on a page flagged PRISM_POSTING_PAGE_DELETED they instead
+	 * carry the deletion XID for the reclaim gate. The DELETED flag is the
+	 * sole discriminator — always read live_count/tail_blkno only when it is
+	 * clear and delete_xid only when it is set. A posting-list split retires
+	 * the whole old chain, its FIRST head included, so a DELETED head does
+	 * carry delete_xid here rather than head metadata; readers of head
+	 * metadata (insert, split) first check the flag and treat a retired head
+	 * as gone, so the two uses never collide. The anonymous struct/union keeps
 	 * op->live_count, op->tail_blkno, and op->delete_xid all directly
 	 * accessible. Storing the XID as a backend-neutral uint64_t (not PG's
 	 * FullTransactionId) keeps this header usable by the standalone engine;
@@ -171,11 +171,12 @@ typedef struct MktPostingPageOpaque
 			BlockNumber tail_blkno;
 		};
 
-		/* Valid only when MKT_POSTING_PAGE_DELETED is set (see flag comment).
+		/* Valid only when PRISM_POSTING_PAGE_DELETED is set (see flag
+		 * comment).
 		 */
 		uint64_t delete_xid;
 	};
-} MktPostingPageOpaque; /* 24B */
+} PrismPostingPageOpaque; /* 24B */
 
 /*
  * True when this page's entries are gone for good, as opposed to moved.
@@ -189,51 +190,52 @@ typedef struct MktPostingPageOpaque
  * linked until #224 makes the pages reusable.
  */
 static inline bool
-mkt_posting_page_all_dead(const MktPostingPageOpaque *op)
+prism_posting_page_all_dead(const PrismPostingPageOpaque *op)
 {
-	return (op->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0 &&
-		   (op->flags & MKT_POSTING_PAGE_DELETED) == 0;
+	return (op->flags & PRISM_POSTING_PAGE_TOMBSTONED) != 0 &&
+		   (op->flags & PRISM_POSTING_PAGE_DELETED) == 0;
 }
 
 /*
  * Flat-mode header (at start of flat page buffer).
  * No PG PageHeaderData — avoids the uint16_t page size limit.
  */
-typedef struct MktFlatPostingHeader
+typedef struct PrismFlatPostingHeader
 {
 	uint32_t max_entries; /* == capacity (sized for count) */
 	uint32_t entry_count;
 	uint32_t cluster_id;
 	uint32_t _pad;
-} MktFlatPostingHeader; /* 16B */
+} PrismFlatPostingHeader; /* 16B */
 
 /* ----------------------------------------------------------------
  * Size calculations
  * ---------------------------------------------------------------- */
 
 /* Bytes in the per-entry header (meta + 3 floats) */
-#define MKT_POSTING_ENTRY_HEADER_SIZE sizeof(MktPostingEntryHeader) /* 20B */
+#define PRISM_POSTING_ENTRY_HEADER_SIZE \
+	sizeof(PrismPostingEntryHeader) /* 20B */
 
 /* Byte offset of bits[] within one entry. Equal to the header size
  * because bits[] is the FAM right after the header. */
-#define MKT_POSTING_ENTRY_BITS_OFFSET offsetof(MktPostingEntryHeader, bits)
+#define PRISM_POSTING_ENTRY_BITS_OFFSET offsetof(PrismPostingEntryHeader, bits)
 
 /* Bytes per entry in bits region */
-#define MKT_POSTING_BITS_PER_ENTRY(dim) MKT_RABITQ_BYTES(dim)
+#define PRISM_POSTING_BITS_PER_ENTRY(dim) MKT_RABITQ_BYTES(dim)
 
-/* Entry stride must be a multiple of MktPostingEntryHeader's alignment
+/* Entry stride must be a multiple of PrismPostingEntryHeader's alignment
  * (4 bytes — the float fields) so entry i's float members land on
  * properly aligned addresses regardless of `i`. For dim values where
  * MKT_RABITQ_BYTES(dim) isn't already a multiple of 4 (i.e., dim not
  * a multiple of 32, such as dim=16 or dim=100), we pad up. */
-#define MKT_POSTING_ENTRY_ALIGN 4u
+#define PRISM_POSTING_ENTRY_ALIGN 4u
 
 /* Total bytes per entry: header + bits, padded up to entry alignment
  * (= 116 at dim=768; 24 at dim=16). */
-#define MKT_POSTING_ENTRY_SIZE(dim)                                       \
-	(((MKT_POSTING_ENTRY_HEADER_SIZE + MKT_POSTING_BITS_PER_ENTRY(dim)) + \
-	  MKT_POSTING_ENTRY_ALIGN - 1u) &                                     \
-	 ~(MKT_POSTING_ENTRY_ALIGN - 1u))
+#define PRISM_POSTING_ENTRY_SIZE(dim)                                         \
+	(((PRISM_POSTING_ENTRY_HEADER_SIZE + PRISM_POSTING_BITS_PER_ENTRY(dim)) + \
+	  PRISM_POSTING_ENTRY_ALIGN - 1u) &                                       \
+	 ~(PRISM_POSTING_ENTRY_ALIGN - 1u))
 
 /*
  * Hard dimension ceiling for the index layout. A posting list's first page
@@ -244,135 +246,136 @@ typedef struct MktFlatPostingHeader
  * arithmetic underflows, so index creation must reject the dimension up
  * front. The static assert keeps the number honest against layout changes.
  */
-#define MKT_INDEX_MAX_DIM 1968
+#define PRISM_INDEX_MAX_DIM 1968
 
 static_assert(
 		BLCKSZ - MAXALIGN(SizeOfPageHeaderData) -
-						sizeof(MktPostingPageOpaque) -
-						MAXALIGN(MKT_INDEX_MAX_DIM * sizeof(float)) >=
-				MKT_POSTING_ENTRY_SIZE(MKT_INDEX_MAX_DIM),
+						sizeof(PrismPostingPageOpaque) -
+						MAXALIGN(PRISM_INDEX_MAX_DIM * sizeof(float)) >=
+				PRISM_POSTING_ENTRY_SIZE(PRISM_INDEX_MAX_DIM),
 		"posting first page must fit the encode reference plus one entry");
 static_assert(
 		BLCKSZ - MAXALIGN(SizeOfPageHeaderData) -
-						sizeof(MktPostingPageOpaque) -
-						MAXALIGN((MKT_INDEX_MAX_DIM + 1) * sizeof(float)) <
-				MKT_POSTING_ENTRY_SIZE(MKT_INDEX_MAX_DIM + 1),
+						sizeof(PrismPostingPageOpaque) -
+						MAXALIGN((PRISM_INDEX_MAX_DIM + 1) * sizeof(float)) <
+				PRISM_POSTING_ENTRY_SIZE(PRISM_INDEX_MAX_DIM + 1),
 		"the ceiling is tight: one dimension more must not fit");
 
 /* Usable space on a BLCKSZ page (between content start and opaque) */
 static inline uint32_t
-mkt_posting_page_usable(void)
+prism_posting_page_usable(void)
 {
 	return BLCKSZ - (uint32_t)MAXALIGN(SizeOfPageHeaderData) -
-		   sizeof(MktPostingPageOpaque);
+		   sizeof(PrismPostingPageOpaque);
 }
 
 /* Space occupied by P^T * centroid on first pages (MAXALIGN'd) */
 static inline uint32_t
-mkt_posting_pt_centroid_size(Dimension dim)
+prism_posting_pt_centroid_size(Dimension dim)
 {
 	return (uint32_t)MAXALIGN(dim * sizeof(float));
 }
 
 /* Max entries on an overflow page (no pt_centroid) */
 static inline uint32_t
-mkt_posting_max_entries(Dimension dim)
+prism_posting_max_entries(Dimension dim)
 {
-	return mkt_posting_page_usable() / MKT_POSTING_ENTRY_SIZE(dim);
+	return prism_posting_page_usable() / PRISM_POSTING_ENTRY_SIZE(dim);
 }
 
 /* Max entries on a first page (with pt_centroid) */
 static inline uint32_t
-mkt_posting_max_entries_first(Dimension dim)
+prism_posting_max_entries_first(Dimension dim)
 {
-	uint32_t usable = mkt_posting_page_usable() -
-					  mkt_posting_pt_centroid_size(dim);
-	return usable / MKT_POSTING_ENTRY_SIZE(dim);
+	uint32_t usable = prism_posting_page_usable() -
+					  prism_posting_pt_centroid_size(dim);
+	return usable / PRISM_POSTING_ENTRY_SIZE(dim);
 }
 
 /* Buffer size for a flat page with count entries */
 static inline size_t
-mkt_posting_flat_page_size(Dimension dim, uint32_t count)
+prism_posting_flat_page_size(Dimension dim, uint32_t count)
 {
-	return sizeof(MktFlatPostingHeader) +
-		   (size_t)count * MKT_POSTING_ENTRY_SIZE(dim);
+	return sizeof(PrismFlatPostingHeader) +
+		   (size_t)count * PRISM_POSTING_ENTRY_SIZE(dim);
 }
 
 /* ----------------------------------------------------------------
  * Paged-mode access — opaque via PG PageGetSpecialPointer
  * ---------------------------------------------------------------- */
 
-static inline MktPostingPageOpaque *
-mkt_posting_opaque(Page page)
+static inline PrismPostingPageOpaque *
+prism_posting_opaque(Page page)
 {
-	return (MktPostingPageOpaque *)PageGetSpecialPointer(page);
+	return (PrismPostingPageOpaque *)PageGetSpecialPointer(page);
 }
 
 static inline uint32_t
-mkt_posting_page_count(Page page)
+prism_posting_page_count(Page page)
 {
-	return mkt_posting_opaque(page)->entry_count;
+	return prism_posting_opaque(page)->entry_count;
 }
 
 static inline bool
-mkt_posting_page_has_room(Page page)
+prism_posting_page_has_room(Page page)
 {
-	MktPostingPageOpaque *op = mkt_posting_opaque(page);
+	PrismPostingPageOpaque *op = prism_posting_opaque(page);
 	return op->entry_count < op->max_entries;
 }
 
 /*
  * Per-cluster head metadata (read from the FIRST page). tail_blkno ==
  * InvalidBlockNumber means it has not been computed yet — see
- * mkt_posting_insert_one, which fills it lazily on the first insert.
+ * prism_posting_insert_one, which fills it lazily on the first insert.
  */
 static inline uint32_t
-mkt_posting_head_live_count(Page head)
+prism_posting_head_live_count(Page head)
 {
-	return mkt_posting_opaque(head)->live_count;
+	return prism_posting_opaque(head)->live_count;
 }
 
 static inline BlockNumber
-mkt_posting_head_tail(Page head)
+prism_posting_head_tail(Page head)
 {
-	return mkt_posting_opaque(head)->tail_blkno;
+	return prism_posting_opaque(head)->tail_blkno;
 }
 
 /* ----------------------------------------------------------------
  * Content-based AoS access — header-agnostic
  *
  * Entries are laid out contiguously: entry i starts at
- *   content + i * MKT_POSTING_ENTRY_SIZE(dim)
- * and consists of an MktPostingEntryHeader followed by
+ *   content + i * PRISM_POSTING_ENTRY_SIZE(dim)
+ * and consists of an PrismPostingEntryHeader followed by
  * MKT_RABITQ_BYTES(dim) bytes of bits. The SIMD kernel strides
- * through bits[] at stride = MKT_POSTING_ENTRY_SIZE(dim), starting
- * from mkt_posting_first_bits(content).
+ * through bits[] at stride = PRISM_POSTING_ENTRY_SIZE(dim), starting
+ * from prism_posting_first_bits(content).
  * ---------------------------------------------------------------- */
 
 /* Header for entry i (access fields via the struct: hdr->meta,
  * hdr->f_add, hdr->f_rescale, hdr->f_error). */
-static inline MktPostingEntryHeader *
-mkt_posting_entry_at(char *content, uint32_t i, Dimension dim)
+static inline PrismPostingEntryHeader *
+prism_posting_entry_at(char *content, uint32_t i, Dimension dim)
 {
-	return (MktPostingEntryHeader *)(content +
-									 (size_t)i * MKT_POSTING_ENTRY_SIZE(dim));
+	return (PrismPostingEntryHeader *)(content +
+									   (size_t)i *
+											   PRISM_POSTING_ENTRY_SIZE(dim));
 }
 
 /* Bits pointer for entry i (immediately follows entry i's header). */
 static inline uint8_t *
-mkt_posting_entry_bits_at(
+prism_posting_entry_bits_at(
 		char *content, uint32_t max_entries, Dimension dim, uint32_t i)
 {
 	(void)max_entries;
-	return mkt_posting_entry_at(content, i, dim)->bits;
+	return prism_posting_entry_at(content, i, dim)->bits;
 }
 
 /* Pointer to entry 0's bits — the base the SIMD kernel uses, with
- * stride = MKT_POSTING_ENTRY_SIZE(dim). */
+ * stride = PRISM_POSTING_ENTRY_SIZE(dim). */
 static inline uint8_t *
-mkt_posting_first_bits(char *content)
+prism_posting_first_bits(char *content)
 {
-	return ((MktPostingEntryHeader *)content)->bits;
+	return ((PrismPostingEntryHeader *)content)->bits;
 }
 
 /* ----------------------------------------------------------------
@@ -383,7 +386,7 @@ mkt_posting_first_bits(char *content)
  * ---------------------------------------------------------------- */
 
 static inline char *
-mkt_posting_content(Page page)
+prism_posting_content(Page page)
 {
 	return PageGetContents(page);
 }
@@ -393,21 +396,21 @@ mkt_posting_content(Page page)
  * before the SoA content. Content starts after pt_centroid area.
  */
 static inline const float *
-mkt_posting_pt_centroid(Page page)
+prism_posting_pt_centroid(Page page)
 {
 	return (const float *)PageGetContents(page);
 }
 
 static inline float *
-mkt_posting_pt_centroid_mut(Page page)
+prism_posting_pt_centroid_mut(Page page)
 {
 	return (float *)PageGetContents(page);
 }
 
 static inline char *
-mkt_posting_content_first(Page page, Dimension dim)
+prism_posting_content_first(Page page, Dimension dim)
 {
-	return PageGetContents(page) + mkt_posting_pt_centroid_size(dim);
+	return PageGetContents(page) + prism_posting_pt_centroid_size(dim);
 }
 
 /* ----------------------------------------------------------------
@@ -431,17 +434,17 @@ mkt_posting_content_first(Page page, Dimension dim)
  * fetching heap tuples through the same storage, which holds one page at a
  * time and would take over the slot.
  */
-typedef struct MktPostingChainPos
+typedef struct PrismPostingChainPos
 {
 	MktStorage *storage;
 	BlockNumber blkno;
 	Page		page; /* NULL once released */
 	BlockNumber next; /* read before the callback runs */
 	bool		first;
-} MktPostingChainPos;
+} PrismPostingChainPos;
 
 static inline void
-mkt_posting_chain_release(MktPostingChainPos *pos)
+prism_posting_chain_release(PrismPostingChainPos *pos)
 {
 	if (pos->page != NULL)
 	{
@@ -451,26 +454,27 @@ mkt_posting_chain_release(MktPostingChainPos *pos)
 }
 
 /* Return false to stop the walk. */
-typedef bool (*MktPostingChainCb)(MktPostingChainPos *pos, void *state);
+typedef bool (*PrismPostingChainCb)(PrismPostingChainPos *pos, void *state);
 
-void mkt_posting_chain_walk(
-		MktStorage		 *storage,
-		BlockNumber		  head,
-		MktPostingChainCb cb,
-		void			 *state);
+void prism_posting_chain_walk(
+		MktStorage		   *storage,
+		BlockNumber			head,
+		PrismPostingChainCb cb,
+		void			   *state);
 
 /*
  * Mutating walk: the callback gets the opaque of a page held for write, and
  * every page is committed. For chain-wide flag changes, where the body is a
  * line or two and the walk is all of the code.
  */
-typedef void (*MktPostingChainMutateCb)(MktPostingPageOpaque *op, void *state);
+typedef void (*PrismPostingChainMutateCb)(
+		PrismPostingPageOpaque *op, void *state);
 
-void mkt_posting_chain_mutate(
-		MktStorage			   *storage,
-		BlockNumber				head,
-		MktPostingChainMutateCb cb,
-		void				   *state);
+void prism_posting_chain_mutate(
+		MktStorage				 *storage,
+		BlockNumber				  head,
+		PrismPostingChainMutateCb cb,
+		void					 *state);
 
 /*
  * Content of any posting page, first or not.
@@ -480,27 +484,27 @@ void mkt_posting_chain_mutate(
  * repeating this test. Inline, so the scan pays nothing for it.
  */
 static inline char *
-mkt_posting_page_content(Page page, Dimension dim)
+prism_posting_page_content(Page page, Dimension dim)
 {
-	return (mkt_posting_opaque(page)->flags & MKT_POSTING_PAGE_FIRST)
-				 ? mkt_posting_content_first(page, dim)
-				 : mkt_posting_content(page);
+	return (prism_posting_opaque(page)->flags & PRISM_POSTING_PAGE_FIRST)
+				 ? prism_posting_content_first(page, dim)
+				 : prism_posting_content(page);
 }
 
 /* Paged-mode convenience wrappers — these assume non-first pages
  * (content starts right after PageHeader). For first pages with
- * pt_centroid, go through mkt_posting_content_first. */
-static inline MktPostingEntryHeader *
-mkt_posting_entry(Page page, uint32_t i, Dimension dim)
+ * pt_centroid, go through prism_posting_content_first. */
+static inline PrismPostingEntryHeader *
+prism_posting_entry(Page page, uint32_t i, Dimension dim)
 {
-	return mkt_posting_entry_at(PageGetContents(page), i, dim);
+	return prism_posting_entry_at(PageGetContents(page), i, dim);
 }
 
 static inline uint8_t *
-mkt_posting_entry_bits(
+prism_posting_entry_bits(
 		Page page, uint32_t max_entries, Dimension dim, uint32_t i)
 {
-	return mkt_posting_entry_bits_at(
+	return prism_posting_entry_bits_at(
 			PageGetContents(page), max_entries, dim, i);
 }
 
@@ -508,16 +512,16 @@ mkt_posting_entry_bits(
  * Flat-mode access
  * ---------------------------------------------------------------- */
 
-static inline MktFlatPostingHeader *
-mkt_flat_posting_header(char *buf)
+static inline PrismFlatPostingHeader *
+prism_flat_posting_header(char *buf)
 {
-	return (MktFlatPostingHeader *)buf;
+	return (PrismFlatPostingHeader *)buf;
 }
 
 static inline char *
-mkt_flat_posting_content(char *buf)
+prism_flat_posting_content(char *buf)
 {
-	return buf + sizeof(MktFlatPostingHeader);
+	return buf + sizeof(PrismFlatPostingHeader);
 }
 
 /* ----------------------------------------------------------------
@@ -525,13 +529,13 @@ mkt_flat_posting_content(char *buf)
  * ---------------------------------------------------------------- */
 
 static inline void
-mkt_posting_set_vector_id(ItemPointerData *tid, uint32_t vector_id)
+prism_posting_set_vector_id(ItemPointerData *tid, uint32_t vector_id)
 {
 	ItemPointerSet(tid, (BlockNumber)vector_id, 0);
 }
 
 static inline uint32_t
-mkt_posting_get_vector_id(const ItemPointerData *tid)
+prism_posting_get_vector_id(const ItemPointerData *tid)
 {
 	return (uint32_t)ItemPointerGetBlockNumber(tid);
 }
@@ -547,14 +551,14 @@ mkt_posting_get_vector_id(const ItemPointerData *tid)
  * ---------------------------------------------------------------- */
 
 static inline uint64_t
-mkt_posting_encode_tid(const ItemPointerData *tid)
+prism_posting_encode_tid(const ItemPointerData *tid)
 {
 	return ((uint64_t)ItemPointerGetBlockNumber(tid) << 16) |
 		   (uint64_t)ItemPointerGetOffsetNumber(tid);
 }
 
 static inline ItemPointerData
-mkt_posting_decode_tid(uint64_t id)
+prism_posting_decode_tid(uint64_t id)
 {
 	ItemPointerData tid;
 	ItemPointerSet(&tid, (BlockNumber)(id >> 16), (OffsetNumber)(id & 0xFFFF));
@@ -562,10 +566,10 @@ mkt_posting_decode_tid(uint64_t id)
 }
 
 /* Convenience for standalone: extract vector_id from encoded TID.
- * Works because mkt_posting_set_vector_id stores vid in BlockNumber
+ * Works because prism_posting_set_vector_id stores vid in BlockNumber
  * with offset=0, so (id >> 16) == vid. */
 static inline uint32_t
-mkt_posting_decode_vector_id(uint64_t id)
+prism_posting_decode_vector_id(uint64_t id)
 {
 	return (uint32_t)(id >> 16);
 }
@@ -577,13 +581,13 @@ mkt_posting_decode_vector_id(uint64_t id)
 /*
  * Initialize an empty BLCKSZ posting page.
  */
-void mkt_posting_page_init(
+void prism_posting_page_init(
 		Page page, uint32_t cluster_id, Dimension dim, uint16_t flags);
 
 /*
  * Add one entry to a BLCKSZ page. Returns false if page is full.
  */
-bool mkt_posting_page_add(
+bool prism_posting_page_add(
 		Page			page,
 		Dimension		dim,
 		ItemPointerData tid,
@@ -599,15 +603,15 @@ bool mkt_posting_page_add(
 
 /*
  * Initialize a flat posting page buffer. buf must be at least
- * mkt_posting_flat_page_size(dim, max_entries) bytes.
+ * prism_posting_flat_page_size(dim, max_entries) bytes.
  */
 void
-mkt_posting_flat_init(char *buf, uint32_t max_entries, uint32_t cluster_id);
+prism_posting_flat_init(char *buf, uint32_t max_entries, uint32_t cluster_id);
 
 /*
  * Add one entry to a flat page. Returns false if full.
  */
-bool mkt_posting_flat_add(
+bool prism_posting_flat_add(
 		char		   *buf,
 		Dimension		dim,
 		ItemPointerData tid,
@@ -628,14 +632,14 @@ bool mkt_posting_flat_add(
  *   float f_error[32]                128B
  *   uint8_t codes[nsq_pairs × 32]   variable (3072B at dim=768)
  *
- * Pages are identified by MKT_POSTING_PAGE_FASTSCAN in opaque flags.
+ * Pages are identified by PRISM_POSTING_PAGE_FASTSCAN in opaque flags.
  * ---------------------------------------------------------------- */
 
 #include "quant/fastscan.h"
 
 /* Bytes per 32-vector group section (metadata + packed codes) */
 static inline uint32_t
-mkt_fastscan_group_section_bytes(Dimension dim)
+prism_fastscan_group_section_bytes(Dimension dim)
 {
 	return (uint32_t)(MKT_FASTSCAN_GROUP * sizeof(ItemPointerData) +
 					  MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
@@ -644,21 +648,21 @@ mkt_fastscan_group_section_bytes(Dimension dim)
 
 /* Max entries on a fastscan overflow page */
 static inline uint32_t
-mkt_fastscan_max_entries(Dimension dim)
+prism_fastscan_max_entries(Dimension dim)
 {
-	uint32_t section = mkt_fastscan_group_section_bytes(dim);
-	uint32_t usable	 = mkt_posting_page_usable();
+	uint32_t section = prism_fastscan_group_section_bytes(dim);
+	uint32_t usable	 = prism_posting_page_usable();
 	uint32_t ngroups = usable / section;
 	return ngroups * MKT_FASTSCAN_GROUP;
 }
 
 /* Max entries on a fastscan first page (with pt_centroid) */
 static inline uint32_t
-mkt_fastscan_max_entries_first(Dimension dim)
+prism_fastscan_max_entries_first(Dimension dim)
 {
-	uint32_t section = mkt_fastscan_group_section_bytes(dim);
-	uint32_t usable	 = mkt_posting_page_usable() -
-					  mkt_posting_pt_centroid_size(dim);
+	uint32_t section = prism_fastscan_group_section_bytes(dim);
+	uint32_t usable	 = prism_posting_page_usable() -
+					  prism_posting_pt_centroid_size(dim);
 	uint32_t ngroups = usable / section;
 	return ngroups * MKT_FASTSCAN_GROUP;
 }
@@ -673,21 +677,21 @@ mkt_fastscan_max_entries_first(Dimension dim)
  * this rather than either half.
  */
 static inline uint32_t
-mkt_posting_max_entries_any_format(Dimension dim)
+prism_posting_max_entries_any_format(Dimension dim)
 {
-	uint32_t aos = mkt_posting_max_entries(dim);
-	uint32_t fs	 = mkt_fastscan_max_entries(dim);
+	uint32_t aos = prism_posting_max_entries(dim);
+	uint32_t fs	 = prism_fastscan_max_entries(dim);
 	return aos > fs ? aos : fs;
 }
 
 /* Max groups on a page */
 static inline uint32_t
-mkt_fastscan_max_groups(Dimension dim, bool is_first)
+prism_fastscan_max_groups(Dimension dim, bool is_first)
 {
-	uint32_t section = mkt_fastscan_group_section_bytes(dim);
-	uint32_t usable	 = mkt_posting_page_usable();
+	uint32_t section = prism_fastscan_group_section_bytes(dim);
+	uint32_t usable	 = prism_posting_page_usable();
 	if (is_first)
-		usable -= mkt_posting_pt_centroid_size(dim);
+		usable -= prism_posting_pt_centroid_size(dim);
 	return usable / section;
 }
 
@@ -699,41 +703,42 @@ mkt_fastscan_max_groups(Dimension dim, bool is_first)
  * ---------------------------------------------------------------- */
 
 static inline char *
-mkt_fastscan_group_base(char *content, uint32_t g, Dimension dim)
+prism_fastscan_group_base(char *content, uint32_t g, Dimension dim)
 {
-	return content + (size_t)g * mkt_fastscan_group_section_bytes(dim);
+	return content + (size_t)g * prism_fastscan_group_section_bytes(dim);
 }
 
 static inline ItemPointerData *
-mkt_fastscan_group_tids(char *content, uint32_t g, Dimension dim)
+prism_fastscan_group_tids(char *content, uint32_t g, Dimension dim)
 {
-	return (ItemPointerData *)mkt_fastscan_group_base(content, g, dim);
+	return (ItemPointerData *)prism_fastscan_group_base(content, g, dim);
 }
 
 static inline float *
-mkt_fastscan_group_f_add(char *content, uint32_t g, Dimension dim)
+prism_fastscan_group_f_add(char *content, uint32_t g, Dimension dim)
 {
-	return (float *)(mkt_fastscan_group_base(content, g, dim) +
+	return (float *)(prism_fastscan_group_base(content, g, dim) +
 					 MKT_FASTSCAN_GROUP * sizeof(ItemPointerData));
 }
 
 static inline float *
-mkt_fastscan_group_f_rescale(char *content, uint32_t g, Dimension dim)
+prism_fastscan_group_f_rescale(char *content, uint32_t g, Dimension dim)
 {
-	return mkt_fastscan_group_f_add(content, g, dim) + MKT_FASTSCAN_GROUP;
+	return prism_fastscan_group_f_add(content, g, dim) + MKT_FASTSCAN_GROUP;
 }
 
 static inline float *
-mkt_fastscan_group_f_error(char *content, uint32_t g, Dimension dim)
+prism_fastscan_group_f_error(char *content, uint32_t g, Dimension dim)
 {
-	return mkt_fastscan_group_f_rescale(content, g, dim) + MKT_FASTSCAN_GROUP;
+	return prism_fastscan_group_f_rescale(content, g, dim) +
+		   MKT_FASTSCAN_GROUP;
 }
 
 static inline uint8_t *
-mkt_fastscan_group_codes(char *content, uint32_t g, Dimension dim)
+prism_fastscan_group_codes(char *content, uint32_t g, Dimension dim)
 {
-	return (uint8_t *)(mkt_fastscan_group_f_error(content, g, dim) +
+	return (uint8_t *)(prism_fastscan_group_f_error(content, g, dim) +
 					   MKT_FASTSCAN_GROUP);
 }
 
-#endif /* MKT_POSTING_PAGE_H */
+#endif /* PRISM_POSTING_PAGE_H */

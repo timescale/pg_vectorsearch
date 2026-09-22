@@ -28,27 +28,28 @@
 #include "algo/hkmeans.h"
 #include "core/log.h"
 #include "core/memory.h"
-#include "index/index_build.h" /* mkt_auto_fan_out */
+#include "index/index_build.h" /* prism_auto_fan_out */
 #include "index/parallel_build.h"
 #include "quant/rabitq.h"
 #include "standalone/parallel_ctx.h"
-#include "standalone/parallel_scan.h" /* MktParallelScan */
+#include "standalone/parallel_scan.h" /* PrismParallelScan */
 
 /*
- * Standalone shared build state: the neutral MktBuildShared plus a mutex
+ * Standalone shared build state: the neutral PrismBuildShared plus a mutex
  * guarding its counters, the heap/index relations the workers attach to, and
  * the work-stealing scan cursor (the analog of PG's appended
- * ParallelTableScanDesc). The base is the first member, so the MktBuildShared
+ * ParallelTableScanDesc). The base is the first member, so the
+ * PrismBuildShared
  * * the workers look up out of the toc is recovered here as a
- * MktBuildSharedStandalone *.
+ * PrismBuildSharedStandalone *.
  */
-typedef struct MktBuildSharedStandalone
+typedef struct PrismBuildSharedStandalone
 {
-	MktBuildShared	base;
-	pthread_mutex_t mutex;
-	Relation		heap;
-	Relation		index;
-	MktParallelScan scan;
+	PrismBuildShared  base;
+	pthread_mutex_t	  mutex;
+	Relation		  heap;
+	Relation		  index;
+	PrismParallelScan scan;
 	/* Leader's in-memory page store, published for phase-3 page-backed
 	 * routing; workers are threads so they share the pointer directly. */
 	MktStorage *storage;
@@ -59,7 +60,7 @@ typedef struct MktBuildSharedStandalone
 	 * streaming tree write; workers are threads and read the pointer
 	 * directly. */
 	char *exact_centroids;
-} MktBuildSharedStandalone;
+} PrismBuildSharedStandalone;
 
 /*
  * Scan every vector, invoking cb per vector. The shared work-stealing cursor
@@ -68,17 +69,17 @@ typedef struct MktBuildSharedStandalone
  * (allow_sync/progress) and the relation/index-info handles are unused here.
  */
 double
-mkt_build_scan(
+prism_build_scan(
 		Relation		  heap,
 		Relation		  index,
 		struct IndexInfo *indexInfo,
-		MktBuildShared	 *shared,
+		PrismBuildShared *shared,
 		bool			  allow_sync,
 		bool			  progress,
-		MktBuildScanCb	  cb,
+		PrismBuildScanCb  cb,
 		void			 *state)
 {
-	MktBuildSharedStandalone *sh = (MktBuildSharedStandalone *)shared;
+	PrismBuildSharedStandalone *sh = (PrismBuildSharedStandalone *)shared;
 
 	(void)heap;
 	(void)index;
@@ -86,7 +87,7 @@ mkt_build_scan(
 	(void)allow_sync;
 	(void)progress;
 
-	return mkt_parallel_scan_run(&sh->scan, cb, state);
+	return prism_parallel_scan_run(&sh->scan, cb, state);
 }
 
 /*
@@ -95,11 +96,12 @@ mkt_build_scan(
  * relations to open and no instrumentation to start (single process).
  */
 void
-mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
+prism_pbuild_worker_attach(shm_toc *toc, PrismPBuildWorker *w)
 {
-	MktBuildShared *shared = shm_toc_lookup(toc, MKT_DSM_KEY_SHARED, false);
-	MktBuildSharedStandalone *sh = (MktBuildSharedStandalone *)shared;
-	Barrier *barrier = shm_toc_lookup(toc, MKT_DSM_KEY_BARRIER, false);
+	PrismBuildShared *shared =
+			shm_toc_lookup(toc, PRISM_DSM_KEY_SHARED, false);
+	PrismBuildSharedStandalone *sh = (PrismBuildSharedStandalone *)shared;
+	Barrier *barrier = shm_toc_lookup(toc, PRISM_DSM_KEY_BARRIER, false);
 
 	w->shared	 = shared;
 	w->barrier	 = barrier;
@@ -117,7 +119,7 @@ mkt_pbuild_worker_attach(shm_toc *toc, MktPBuildWorker *w)
  * there is no instrumentation to report, so this is a no-op.
  */
 void
-mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
+prism_pbuild_worker_detach(shm_toc *toc, PrismPBuildWorker *w)
 {
 	(void)toc;
 	(void)w;
@@ -130,19 +132,19 @@ mkt_pbuild_worker_detach(shm_toc *toc, MktPBuildWorker *w)
  * no-op.
  */
 void
-mkt_pbuild_publish_storage(MktBuildShared *shared, MktStorage *s)
+prism_pbuild_publish_storage(PrismBuildShared *shared, MktStorage *s)
 {
-	((MktBuildSharedStandalone *)shared)->storage = s;
+	((PrismBuildSharedStandalone *)shared)->storage = s;
 }
 
 MktStorage *
-mkt_pbuild_worker_storage(MktPBuildWorker *w)
+prism_pbuild_worker_storage(PrismPBuildWorker *w)
 {
-	return ((MktBuildSharedStandalone *)w->shared)->storage;
+	return ((PrismBuildSharedStandalone *)w->shared)->storage;
 }
 
 void
-mkt_pbuild_worker_storage_release(MktStorage *s)
+prism_pbuild_worker_storage_release(MktStorage *s)
 {
 	(void)s; /* shared with the leader; not owned by the worker */
 }
@@ -152,7 +154,7 @@ mkt_pbuild_worker_storage_release(MktStorage *s)
  * arena) and leave parallel mode.
  */
 void
-mkt_pbuild_teardown(ParallelContext *pcxt)
+prism_pbuild_teardown(ParallelContext *pcxt)
 {
 	DestroyParallelContext(pcxt);
 	ExitParallelMode();
@@ -163,7 +165,7 @@ mkt_pbuild_teardown(ParallelContext *pcxt)
  * in-memory engine, so the store is a growing byte buffer with a read
  * cursor; the PG back-end spills through a BufFile temp file instead.
  */
-struct MktBlobStore
+struct PrismBlobStore
 {
 	char	*data;
 	uint64_t size;
@@ -175,16 +177,16 @@ struct MktBlobStore
 	MktMemCtx ctx;
 };
 
-MktBlobStore *
-mkt_pbuild_blobstore_begin(void)
+PrismBlobStore *
+prism_pbuild_blobstore_begin(void)
 {
-	MktBlobStore *bs = mkt_alloc0(sizeof(MktBlobStore));
-	bs->ctx			 = mkt_current_memctx; /* the creating context */
+	PrismBlobStore *bs = mkt_alloc0(sizeof(PrismBlobStore));
+	bs->ctx			   = mkt_current_memctx; /* the creating context */
 	return bs;
 }
 
 void
-mkt_pbuild_blobstore_put(MktBlobStore *bs, const void *blob, uint64_t size)
+prism_pbuild_blobstore_put(PrismBlobStore *bs, const void *blob, uint64_t size)
 {
 	uint64_t need = bs->size + sizeof(size) + size;
 	if (need > bs->cap)
@@ -210,13 +212,13 @@ mkt_pbuild_blobstore_put(MktBlobStore *bs, const void *blob, uint64_t size)
 }
 
 void
-mkt_pbuild_blobstore_rewind(MktBlobStore *bs)
+prism_pbuild_blobstore_rewind(PrismBlobStore *bs)
 {
 	bs->rpos = 0;
 }
 
 uint64_t
-mkt_pbuild_blobstore_get(MktBlobStore *bs, void *buf, uint64_t max_size)
+prism_pbuild_blobstore_get(PrismBlobStore *bs, void *buf, uint64_t max_size)
 {
 	uint64_t size;
 	memcpy(&size, bs->data + bs->rpos, sizeof(size));
@@ -229,7 +231,7 @@ mkt_pbuild_blobstore_get(MktBlobStore *bs, void *buf, uint64_t max_size)
 }
 
 void
-mkt_pbuild_blobstore_end(MktBlobStore *bs)
+prism_pbuild_blobstore_end(PrismBlobStore *bs)
 {
 	mkt_free(bs->data);
 	mkt_free(bs);
@@ -242,15 +244,15 @@ mkt_pbuild_blobstore_end(MktBlobStore *bs)
  * one sets the leader's latch during attach.
  */
 bool
-mkt_pbuild_launch(
-		ParallelContext *pcxt, Barrier *barrier, MktBuildShared *shared)
+prism_pbuild_launch(
+		ParallelContext *pcxt, Barrier *barrier, PrismBuildShared *shared)
 {
 	LaunchParallelWorkers(pcxt);
 
 	if (pcxt->nworkers_launched == 0)
 	{
 		WaitForParallelWorkersToFinish(pcxt);
-		mkt_pbuild_teardown(pcxt);
+		prism_pbuild_teardown(pcxt);
 		return false;
 	}
 
@@ -282,19 +284,19 @@ mkt_pbuild_launch(
  * succeeds (the arena is plain memory), so it returns true.
  */
 bool
-mkt_pbuild_setup_shared(
-		MktPBuildLeader		 *lead,
-		Relation			  heap,
-		Relation			  index,
-		const MktBuildConfig *config,
-		int					  nworkers)
+prism_pbuild_setup_shared(
+		PrismPBuildLeader	   *lead,
+		Relation				heap,
+		Relation				index,
+		const PrismBuildConfig *config,
+		int						nworkers)
 {
 	Dimension  dim			 = config->dim;
 	uint32_t   nlist		 = config->nlist;
 	int		   nparticipants = nworkers + 1;
 	uint64_t   rabitq_seed	 = MKT_RABITQ_BUILD_SEED;
 	uint32_t   fan_out		 = config->fan_out > 0 ? config->fan_out
-												   : mkt_auto_fan_out(0, nlist, 0);
+												   : prism_auto_fan_out(0, nlist, 0);
 	uint32_t   km_k			 = fan_out < nlist ? fan_out : nlist;
 	const Size vec_nbytes	 = (Size)dim * sizeof(float);
 
@@ -309,38 +311,39 @@ mkt_pbuild_setup_shared(
 	if (!registered)
 	{
 		mkt_parallel_register_worker(
-				"mkt_parallel_build_main", mkt_parallel_build_main);
+				"prism_parallel_build_main", prism_parallel_build_main);
 		registered = true;
 	}
 
 	EnterParallelMode();
 	ParallelContext *pcxt = CreateParallelContext(
-			MKT_MODULE_NAME, "mkt_parallel_build_main", nworkers);
+			MKT_MODULE_NAME, "prism_parallel_build_main", nworkers);
 
 	int	 nw_usage	= nworkers > 0 ? nworkers : 1;
 	Size usage_sz	= (Size)nw_usage * sizeof(WalUsage);
 	Size bufuse_sz	= (Size)nw_usage * sizeof(BufferUsage);
-	Size est_shared = BUFFERALIGN(sizeof(MktBuildSharedStandalone));
+	Size est_shared = BUFFERALIGN(sizeof(PrismBuildSharedStandalone));
 
 	shm_toc_estimate_chunk(&pcxt->estimator, est_shared);
 	shm_toc_estimate_chunk(&pcxt->estimator, sizeof(Barrier));
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
-			mkt_dsm_samples_size(nparticipants, max_per_worker, dim));
+			prism_dsm_samples_size(nparticipants, max_per_worker, dim));
 	shm_toc_estimate_chunk(
-			&pcxt->estimator, mkt_dsm_centroids_size(km_k, dim));
-	shm_toc_estimate_chunk(
-			&pcxt->estimator,
-			mkt_dsm_km_workers_size(nparticipants, km_k, dim));
+			&pcxt->estimator, prism_dsm_centroids_size(km_k, dim));
 	shm_toc_estimate_chunk(
 			&pcxt->estimator,
-			mkt_dsm_root_assign_size(nparticipants, max_per_worker));
+			prism_dsm_km_workers_size(nparticipants, km_k, dim));
 	shm_toc_estimate_chunk(
-			&pcxt->estimator, mkt_pbuild_sort_shared_size(nparticipants));
+			&pcxt->estimator,
+			prism_dsm_root_assign_size(nparticipants, max_per_worker));
+	shm_toc_estimate_chunk(
+			&pcxt->estimator, prism_pbuild_sort_shared_size(nparticipants));
 	shm_toc_estimate_chunk(&pcxt->estimator, usage_sz);
 	shm_toc_estimate_chunk(&pcxt->estimator, bufuse_sz);
 	/* Page-backed routing region (leader fills before the tree-ready barrier):
-	 * the global mean. The posting-head base is a scalar in MktBuildShared. */
+	 * the global mean. The posting-head base is a scalar in PrismBuildShared.
+	 */
 	shm_toc_estimate_chunk(&pcxt->estimator, vec_nbytes);
 	/* Keyed regions: shared, barrier, samples, centroids, km_workers,
 	 * root_assign, sortshared, global_mean (the subtree ring is allocated
@@ -350,12 +353,12 @@ mkt_pbuild_setup_shared(
 	InitializeParallelDSM(pcxt);
 
 	/* ---- Populate shared state ---- */
-	MktBuildSharedStandalone *sh	 = shm_toc_allocate(pcxt->toc, est_shared);
-	MktBuildShared			 *shared = &sh->base;
+	PrismBuildSharedStandalone *sh = shm_toc_allocate(pcxt->toc, est_shared);
+	PrismBuildShared		   *shared = &sh->base;
 	pthread_mutex_init(&sh->mutex, NULL);
 	sh->heap  = heap;
 	sh->index = index;
-	mkt_parallel_scan_init(&sh->scan, heap->vectors, heap->nvecs, dim);
+	prism_parallel_scan_init(&sh->scan, heap->vectors, heap->nvecs, dim);
 
 	shared->dim				  = dim;
 	shared->metric			  = config->metric;
@@ -381,57 +384,58 @@ mkt_pbuild_setup_shared(
 	/* Page-backed routing knobs: route the build scan for accuracy, not
 	 * query speed, matching the PG build (see MKT_BUILD_CENTROID_* in
 	 * posting_build.h). */
-	shared->centroid_error_scale = MKT_BUILD_CENTROID_ERROR_SCALE;
-	shared->centroid_beam_scale	 = MKT_BUILD_CENTROID_BEAM_SCALE;
+	shared->centroid_error_scale = PRISM_BUILD_CENTROID_ERROR_SCALE;
+	shared->centroid_beam_scale	 = PRISM_BUILD_CENTROID_BEAM_SCALE;
 	shared->fastscan_bits		 = 16;
 	shared->reltuples			 = 0.0;
 	shared->indtuples			 = 0.0;
 	shared->soar_dupes			 = 0.0;
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SHARED, shared);
+	shm_toc_insert(pcxt->toc, PRISM_DSM_KEY_SHARED, shared);
 
 	/* Dynamic barrier (0 parties): the leader and every worker attach as they
 	 * start, matching the PG back-end (see do_parallel_build). */
 	Barrier *barrier = shm_toc_allocate(pcxt->toc, sizeof(Barrier));
 	BarrierInit(barrier, 0);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_BARRIER, barrier);
+	shm_toc_insert(pcxt->toc, PRISM_DSM_KEY_BARRIER, barrier);
 
-	Size samp_sz = mkt_dsm_samples_size(nparticipants, max_per_worker, dim);
-	MktDsmSamples *dsm_samples = shm_toc_allocate(pcxt->toc, samp_sz);
+	Size samp_sz = prism_dsm_samples_size(nparticipants, max_per_worker, dim);
+	PrismDsmSamples *dsm_samples = shm_toc_allocate(pcxt->toc, samp_sz);
 	memset(dsm_samples, 0, samp_sz);
 	dsm_samples->nparticipants	= nparticipants;
 	dsm_samples->max_per_worker = max_per_worker;
 	dsm_samples->dim			= dim;
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SAMPLES, dsm_samples);
+	shm_toc_insert(pcxt->toc, PRISM_DSM_KEY_SAMPLES, dsm_samples);
 
-	Size  cent_sz		 = mkt_dsm_centroids_size(km_k, dim);
+	Size  cent_sz		 = prism_dsm_centroids_size(km_k, dim);
 	char *centroids_base = shm_toc_allocate(pcxt->toc, cent_sz);
 	memset(centroids_base, 0, cent_sz);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_CENTROIDS, centroids_base);
-	float *cents = mkt_dsm_centroids(centroids_base);
+	shm_toc_insert(pcxt->toc, PRISM_DSM_KEY_CENTROIDS, centroids_base);
+	float *cents = prism_dsm_centroids(centroids_base);
 
-	Size  km_sz			  = mkt_dsm_km_workers_size(nparticipants, km_k, dim);
+	Size  km_sz = prism_dsm_km_workers_size(nparticipants, km_k, dim);
 	char *km_workers_base = shm_toc_allocate(pcxt->toc, km_sz);
 	memset(km_workers_base, 0, km_sz);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_KM_WORKERS, km_workers_base);
+	shm_toc_insert(pcxt->toc, PRISM_DSM_KEY_KM_WORKERS, km_workers_base);
 
-	Size ra_sz = mkt_dsm_root_assign_size(nparticipants, max_per_worker);
-	MktDsmRootAssign *dsm_ra = shm_toc_allocate(pcxt->toc, ra_sz);
+	Size ra_sz = prism_dsm_root_assign_size(nparticipants, max_per_worker);
+	PrismDsmRootAssign *dsm_ra = shm_toc_allocate(pcxt->toc, ra_sz);
 	memset(dsm_ra, 0, ra_sz);
 	dsm_ra->nparticipants  = nparticipants;
 	dsm_ra->max_per_worker = max_per_worker;
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_ROOT_ASSIGN, dsm_ra);
+	shm_toc_insert(pcxt->toc, PRISM_DSM_KEY_ROOT_ASSIGN, dsm_ra);
 
 	/* Shared coordinator for the cluster-keyed posting sort (sort seam). */
-	Size  sort_sz	 = mkt_pbuild_sort_shared_size(nparticipants);
+	Size  sort_sz	 = prism_pbuild_sort_shared_size(nparticipants);
 	void *sortshared = shm_toc_allocate(pcxt->toc, sort_sz);
 	memset(sortshared, 0, sort_sz);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_SORTSHARED, sortshared);
+	shm_toc_insert(pcxt->toc, PRISM_DSM_KEY_SORTSHARED, sortshared);
 
 	/* Page-backed routing region (leader fills before the tree-ready barrier):
-	 * the global mean. The posting-head base is a scalar in MktBuildShared. */
+	 * the global mean. The posting-head base is a scalar in PrismBuildShared.
+	 */
 	float *dsm_gmean = shm_toc_allocate(pcxt->toc, vec_nbytes);
 	memset(dsm_gmean, 0, vec_nbytes);
-	shm_toc_insert(pcxt->toc, MKT_DSM_KEY_GLOBAL_MEAN, dsm_gmean);
+	shm_toc_insert(pcxt->toc, PRISM_DSM_KEY_GLOBAL_MEAN, dsm_gmean);
 
 	/* Dummy usage regions so the leader's instrumentation loop is safe. */
 	WalUsage	*walusage	 = shm_toc_allocate(pcxt->toc, usage_sz);
@@ -467,16 +471,18 @@ mkt_pbuild_setup_shared(
  * the whole build (it does not bound memory), so attach is a plain lookup
  * and release is a no-op.
  */
-MktDsmSamples *
-mkt_pbuild_samples_attach(shm_toc *toc, MktBuildShared *shared, void **seg_out)
+PrismDsmSamples *
+prism_pbuild_samples_attach(
+		shm_toc *toc, PrismBuildShared *shared, void **seg_out)
 {
 	(void)shared;
 	*seg_out = NULL;
-	return (MktDsmSamples *)shm_toc_lookup(toc, MKT_DSM_KEY_SAMPLES, false);
+	return (PrismDsmSamples *)
+			shm_toc_lookup(toc, PRISM_DSM_KEY_SAMPLES, false);
 }
 
 void
-mkt_pbuild_samples_release(MktDsmSamples *samples, void *seg)
+prism_pbuild_samples_release(PrismDsmSamples *samples, void *seg)
 {
 	(void)samples;
 	(void)seg;
@@ -488,32 +494,32 @@ mkt_pbuild_samples_release(MktDsmSamples *samples, void *seg)
  * non-NULL seg to free at release.
  */
 char *
-mkt_pbuild_subtree_ring_create(
-		MktBuildShared *shared,
-		int				nparticipants,
-		uint64_t		slot_size,
-		void		  **seg_out)
+prism_pbuild_subtree_ring_create(
+		PrismBuildShared *shared,
+		int				  nparticipants,
+		uint64_t		  slot_size,
+		void			**seg_out)
 {
-	MktBuildSharedStandalone *sa = (MktBuildSharedStandalone *)shared;
+	PrismBuildSharedStandalone *sa = (PrismBuildSharedStandalone *)shared;
 
 	sa->subtree_ring = mkt_alloc(
-			mkt_dsm_child_subtrees_size(nparticipants, slot_size));
+			prism_dsm_child_subtrees_size(nparticipants, slot_size));
 	shared->subtree_slot_size = slot_size;
 	*seg_out				  = sa->subtree_ring;
 	return sa->subtree_ring;
 }
 
 char *
-mkt_pbuild_subtree_ring_attach(MktBuildShared *shared, void **seg_out)
+prism_pbuild_subtree_ring_attach(PrismBuildShared *shared, void **seg_out)
 {
-	MktBuildSharedStandalone *sa = (MktBuildSharedStandalone *)shared;
+	PrismBuildSharedStandalone *sa = (PrismBuildSharedStandalone *)shared;
 
 	*seg_out = NULL;
 	return sa->subtree_ring;
 }
 
 void
-mkt_pbuild_subtree_ring_release(void *seg)
+prism_pbuild_subtree_ring_release(void *seg)
 {
 	if (seg != NULL)
 		mkt_free(seg);
@@ -526,10 +532,10 @@ mkt_pbuild_subtree_ring_release(void *seg)
  * every worker's routing (the leader releases last, after the merge).
  */
 char *
-mkt_pbuild_exact_centroids_create(
-		MktBuildShared *shared, uint64_t nbytes, void **seg_out)
+prism_pbuild_exact_centroids_create(
+		PrismBuildShared *shared, uint64_t nbytes, void **seg_out)
 {
-	MktBuildSharedStandalone *sa = (MktBuildSharedStandalone *)shared;
+	PrismBuildSharedStandalone *sa = (PrismBuildSharedStandalone *)shared;
 
 	sa->exact_centroids = mkt_alloc(nbytes);
 	*seg_out			= sa->exact_centroids;
@@ -537,9 +543,9 @@ mkt_pbuild_exact_centroids_create(
 }
 
 char *
-mkt_pbuild_exact_centroids_attach(MktBuildShared *shared, void **seg_out)
+prism_pbuild_exact_centroids_attach(PrismBuildShared *shared, void **seg_out)
 {
-	MktBuildSharedStandalone *sa = (MktBuildSharedStandalone *)shared;
+	PrismBuildSharedStandalone *sa = (PrismBuildSharedStandalone *)shared;
 
 	*seg_out = NULL;
 	if (sa->exact_centroids == NULL)
@@ -550,20 +556,20 @@ mkt_pbuild_exact_centroids_attach(MktBuildShared *shared, void **seg_out)
 }
 
 void
-mkt_pbuild_exact_centroids_release(void *seg)
+prism_pbuild_exact_centroids_release(void *seg)
 {
 	if (seg != NULL)
 		mkt_free(seg);
 }
 
 void
-mkt_pbuild_worker_add_counts(
-		MktBuildShared *shared,
-		double			indtuples,
-		double			soar_dupes,
-		double			heap_tuples)
+prism_pbuild_worker_add_counts(
+		PrismBuildShared *shared,
+		double			  indtuples,
+		double			  soar_dupes,
+		double			  heap_tuples)
 {
-	MktBuildSharedStandalone *sh = (MktBuildSharedStandalone *)shared;
+	PrismBuildSharedStandalone *sh = (PrismBuildSharedStandalone *)shared;
 
 	pthread_mutex_lock(&sh->mutex);
 	shared->indtuples += indtuples;
@@ -577,12 +583,12 @@ mkt_pbuild_worker_add_counts(
  * first one. Resets the work-stealing cursor.
  */
 void
-mkt_pbuild_rescan(Relation heap, MktBuildShared *shared)
+prism_pbuild_rescan(Relation heap, PrismBuildShared *shared)
 {
-	MktBuildSharedStandalone *sh = (MktBuildSharedStandalone *)shared;
+	PrismBuildSharedStandalone *sh = (PrismBuildSharedStandalone *)shared;
 
 	(void)heap;
-	mkt_parallel_scan_init(
+	prism_parallel_scan_init(
 			&sh->scan, sh->scan.vectors, sh->scan.nvecs, sh->scan.dim);
 }
 
@@ -591,14 +597,14 @@ mkt_pbuild_rescan(Relation heap, MktBuildShared *shared)
  * (standalone never refines), so these are unused stubs to satisfy the link.
  */
 void
-mkt_pbuild_accum_lock(MktBuildShared *shared, uint32_t stripe)
+prism_pbuild_accum_lock(PrismBuildShared *shared, uint32_t stripe)
 {
 	(void)shared;
 	(void)stripe;
 }
 
 void
-mkt_pbuild_accum_unlock(MktBuildShared *shared, uint32_t stripe)
+prism_pbuild_accum_unlock(PrismBuildShared *shared, uint32_t stripe)
 {
 	(void)shared;
 	(void)stripe;
@@ -614,7 +620,7 @@ mkt_pbuild_accum_unlock(MktBuildShared *shared, uint32_t stripe)
  * streams them back via getnext. Standalone is in-memory by design, so this
  * mirrors the PG parallel-tuplesort seam without bounding memory.
  * ---------------------------------------------------------------- */
-typedef struct MktSortShared
+typedef struct PrismSortShared
 {
 	int nparticipants;
 	/*
@@ -627,49 +633,49 @@ typedef struct MktSortShared
 	 * sorts, and deletes every worker arena (plus its own) in one go at
 	 * sort_end.
 	 */
-} MktSortShared;
+} PrismSortShared;
 
 /*
- * Offset of the per-participant arrays. MktSortShared is only int-sized, so
+ * Offset of the per-participant arrays. PrismSortShared is only int-sized, so
  * its size is not a multiple of the pointer alignment; round up so bufs[] (and
  * the size_t/pointer arrays after it) start 8-byte aligned.
  */
-#define MKT_SORTSHARED_HDR (((sizeof(MktSortShared)) + 7u) & ~(size_t)7u)
+#define PRISM_SORTSHARED_HDR (((sizeof(PrismSortShared)) + 7u) & ~(size_t)7u)
 
 static char **
-ss_bufs(MktSortShared *s)
+ss_bufs(PrismSortShared *s)
 {
-	return (char **)((char *)s + MKT_SORTSHARED_HDR);
+	return (char **)((char *)s + PRISM_SORTSHARED_HDR);
 }
 
 static size_t *
-ss_counts(MktSortShared *s)
+ss_counts(PrismSortShared *s)
 {
 	return (size_t *)(ss_bufs(s) + s->nparticipants);
 }
 
 static MktMemCtx *
-ss_arenas(MktSortShared *s)
+ss_arenas(PrismSortShared *s)
 {
 	return (MktMemCtx *)(ss_counts(s) + s->nparticipants);
 }
 
-struct MktSorter
+struct PrismSorter
 {
-	bool		   is_leader;
-	uint32_t	   entry_size;
-	size_t		   stride; /* align4(4 + entry_size) */
-	char		  *buf;	   /* worker: own records; leader: merged */
-	size_t		   n;	   /* record count */
-	size_t		   cap;	   /* capacity (records) */
-	size_t		   cursor; /* leader getnext position */
-	MktSortShared *sh;
-	int			   participant;
+	bool			 is_leader;
+	uint32_t		 entry_size;
+	size_t			 stride; /* align4(4 + entry_size) */
+	char			*buf;	 /* worker: own records; leader: merged */
+	size_t			 n;		 /* record count */
+	size_t			 cap;	 /* capacity (records) */
+	size_t			 cursor; /* leader getnext position */
+	PrismSortShared *sh;
+	int				 participant;
 	MktMemCtx arena; /* dedicated; holds buf (and merged buf for leader) */
 };
 
 static int
-mkt_sort_cluster_cmp(const void *a, const void *b)
+prism_sort_cluster_cmp(const void *a, const void *b)
 {
 	uint32_t ca = *(const uint32_t *)a;
 	uint32_t cb = *(const uint32_t *)b;
@@ -677,26 +683,26 @@ mkt_sort_cluster_cmp(const void *a, const void *b)
 }
 
 Size
-mkt_pbuild_sort_shared_size(int nparticipants)
+prism_pbuild_sort_shared_size(int nparticipants)
 {
-	return MKT_SORTSHARED_HDR +
+	return PRISM_SORTSHARED_HDR +
 		   (size_t)nparticipants *
 				   (sizeof(char *) + sizeof(size_t) + sizeof(MktMemCtx));
 }
 
 void
-mkt_pbuild_sort_shared_init(void *region, int nparticipants, void *seg)
+prism_pbuild_sort_shared_init(void *region, int nparticipants, void *seg)
 {
 	(void)seg;
-	MktSortShared *s = (MktSortShared *)region;
-	s->nparticipants = nparticipants;
+	PrismSortShared *s = (PrismSortShared *)region;
+	s->nparticipants   = nparticipants;
 	memset(ss_bufs(s), 0, (size_t)nparticipants * sizeof(char *));
 	memset(ss_counts(s), 0, (size_t)nparticipants * sizeof(size_t));
 	memset(ss_arenas(s), 0, (size_t)nparticipants * sizeof(MktMemCtx));
 }
 
-MktSorter *
-mkt_pbuild_sort_begin(
+PrismSorter *
+prism_pbuild_sort_begin(
 		void	*region,
 		void	*seg,
 		int		 participant,
@@ -713,18 +719,18 @@ mkt_pbuild_sort_begin(
 	 * dedicated arena (created here, not the worker's thread-local context,
 	 * which is deleted when the worker returns) whose ownership transfers to
 	 * the leader at performsort. */
-	MktSorter *s   = calloc(1, sizeof(MktSorter));
+	PrismSorter *s = calloc(1, sizeof(PrismSorter));
 	s->is_leader   = is_leader;
 	s->entry_size  = entry_size;
 	s->stride	   = (sizeof(uint32_t) + entry_size + 3u) & ~(size_t)3u;
-	s->sh		   = (MktSortShared *)region;
+	s->sh		   = (PrismSortShared *)region;
 	s->participant = participant;
 	s->arena	   = mkt_memctx_create(NULL, "mkt_sort");
 	return s;
 }
 
 void
-mkt_pbuild_sort_put(MktSorter *s, uint32_t cluster, const void *entry)
+prism_pbuild_sort_put(PrismSorter *s, uint32_t cluster, const void *entry)
 {
 	if (s->n == s->cap)
 	{
@@ -745,7 +751,7 @@ mkt_pbuild_sort_put(MktSorter *s, uint32_t cluster, const void *entry)
 }
 
 void
-mkt_pbuild_sort_performsort(MktSorter *s)
+prism_pbuild_sort_performsort(PrismSorter *s)
 {
 	if (!s->is_leader)
 	{
@@ -761,8 +767,8 @@ mkt_pbuild_sort_performsort(MktSorter *s)
 	}
 
 	/* Leader: gather every worker's records, then sort by cluster. */
-	MktSortShared *sh	 = s->sh;
-	size_t		   total = 0;
+	PrismSortShared *sh	   = s->sh;
+	size_t			 total = 0;
 	for (int i = 0; i < sh->nparticipants; i++)
 		total += ss_counts(sh)[i];
 	s->buf	   = total ? mkt_memctx_alloc(s->arena, total * s->stride) : NULL;
@@ -778,11 +784,12 @@ mkt_pbuild_sort_performsort(MktSorter *s)
 	s->n	  = total;
 	s->cursor = 0;
 	if (total)
-		qsort(s->buf, total, s->stride, mkt_sort_cluster_cmp);
+		qsort(s->buf, total, s->stride, prism_sort_cluster_cmp);
 }
 
 bool
-mkt_pbuild_sort_getnext(MktSorter *s, uint32_t *cluster, const void **entry)
+prism_pbuild_sort_getnext(
+		PrismSorter *s, uint32_t *cluster, const void **entry)
 {
 	if (s->cursor >= s->n)
 		return false;
@@ -794,14 +801,14 @@ mkt_pbuild_sort_getnext(MktSorter *s, uint32_t *cluster, const void **entry)
 }
 
 void
-mkt_pbuild_sort_end(MktSorter *s)
+prism_pbuild_sort_end(PrismSorter *s)
 {
 	if (s->is_leader)
 	{
 		/* Delete the worker arenas handed over at performsort (this frees
 		 * their record buffers); then our own arena frees the merged buffer
 		 * below. */
-		MktSortShared *sh = s->sh;
+		PrismSortShared *sh = s->sh;
 		for (int i = 0; i < sh->nparticipants; i++)
 		{
 			if (ss_arenas(sh)[i])

@@ -23,7 +23,7 @@ static inline ItemPointerData
 vid_to_tid(uint32_t vid)
 {
 	ItemPointerData tid;
-	mkt_posting_set_vector_id(&tid, vid);
+	prism_posting_set_vector_id(&tid, vid);
 	return tid;
 }
 
@@ -75,18 +75,18 @@ build_cluster(
 		uint32_t		 nbuilt,
 		bool			 fastscan)
 {
-	MktPostingBuilder builder;
+	PrismPostingBuilder builder;
 	if (fastscan)
-		mkt_posting_builder_init_fastscan(
+		prism_posting_builder_init_fastscan(
 				&builder, &st->base, params, dim, 0, centroid, centroid);
 	else
-		mkt_posting_builder_init(
+		prism_posting_builder_init(
 				&builder, &st->base, params, dim, 0, centroid, centroid);
 	for (uint32_t i = 0; i < nbuilt; i++)
-		mkt_posting_builder_add(
+		prism_posting_builder_add(
 				&builder, vid_to_tid(i), vecs + (size_t)i * dim);
-	BlockNumber head = mkt_posting_builder_finish(&builder);
-	mkt_posting_builder_cleanup(&builder);
+	BlockNumber head = prism_posting_builder_finish(&builder);
+	prism_posting_builder_cleanup(&builder);
 	return head;
 }
 

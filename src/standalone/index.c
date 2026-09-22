@@ -5,7 +5,7 @@
  * vector array. Used by bindings and CLI benchmark.
  *
  * When RaBitQ encoding is enabled, posting data is written to pages
- * via MktPostingBuilder. The full-precision vectors are stored in a
+ * via PrismPostingBuilder. The full-precision vectors are stored in a
  * flat array for reranking.
  */
 
@@ -162,7 +162,7 @@ aps_rerank(
 		}
 		else
 		{
-			uint32_t vid = mkt_posting_decode_vector_id(candidates[i].id);
+			uint32_t vid = prism_posting_decode_vector_id(candidates[i].id);
 			if (vid < s->nvecs)
 			{
 				const float *vec = s->all_vectors + (size_t)vid * dim;
@@ -206,7 +206,7 @@ static const MktStorageOps array_page_storage_ops = {
  * ---------------------------------------------------------------- */
 
 static void
-cluster_list_init(MktClusterList *cl, uint32_t initial_cap)
+cluster_list_init(PrismClusterList *cl, uint32_t initial_cap)
 {
 	cl->count	 = 0;
 	cl->capacity = initial_cap;
@@ -214,7 +214,7 @@ cluster_list_init(MktClusterList *cl, uint32_t initial_cap)
 }
 
 static void
-cluster_list_append(MktClusterList *cl, uint32_t id)
+cluster_list_append(PrismClusterList *cl, uint32_t id)
 {
 	if (cl->count == cl->capacity)
 	{
@@ -294,26 +294,26 @@ sa_detect_nthreads(void)
 
 static void
 assign_to_cluster_lists(
-		MktIndex			 *idx,
-		const HKMeansResult	 *tree,
-		const MktBuildParams *bp,
-		Dimension			  dim,
-		uint32_t			  nlist)
+		PrismIndex				*idx,
+		const HKMeansResult		*tree,
+		const PrismAssignParams *bp,
+		Dimension				 dim,
+		uint32_t				 nlist)
 {
-	MktBuildWorkerBufs bufs = mkt_build_worker_bufs_create(dim);
+	PrismBuildWorkerBufs bufs = prism_build_worker_bufs_create(dim);
 
 	for (uint32_t i = 0; i < idx->nvecs; i++)
 	{
-		const float		  *vec = idx->all_vectors + (size_t)i * dim;
-		MktBuildAssignment asgn =
-				mkt_build_assign_vector(tree, vec, bp, &bufs);
+		const float			*vec = idx->all_vectors + (size_t)i * dim;
+		PrismBuildAssignment asgn =
+				prism_build_assign_vector(tree, vec, bp, &bufs);
 
 		cluster_list_append(&idx->clusters[asgn.primary], i);
-		if (asgn.secondary != MKT_INVALID_CLUSTER)
+		if (asgn.secondary != PRISM_INVALID_CLUSTER)
 			cluster_list_append(&idx->clusters[asgn.secondary], i);
 	}
 
-	mkt_build_worker_bufs_free(&bufs);
+	prism_build_worker_bufs_free(&bufs);
 
 	idx->max_cluster_size = 0;
 	for (uint32_t c = 0; c < nlist; c++)
@@ -325,18 +325,20 @@ assign_to_cluster_lists(
  * Build
  * ---------------------------------------------------------------- */
 
-MktIndex *
-mkt_index_build(
-		Vec32Source *src, const MktIndexConfig *config, MktBuildStats *stats)
+PrismIndex *
+prism_index_build(
+		Vec32Source			   *src,
+		const PrismIndexConfig *config,
+		PrismBuildStats		   *stats)
 {
 	if (src == NULL || src->nvecs == 0 || src->dim == 0 || config == NULL)
 		return NULL;
-	if (src->dim > MKT_INDEX_MAX_DIM)
+	if (src->dim > PRISM_INDEX_MAX_DIM)
 	{
 		mkt_warn(
 				"index build: %u dimensions exceeds the layout ceiling %u",
 				(unsigned)src->dim,
-				(unsigned)MKT_INDEX_MAX_DIM);
+				(unsigned)PRISM_INDEX_MAX_DIM);
 		return NULL;
 	}
 
@@ -363,7 +365,7 @@ mkt_index_build(
 	MktMemCtx build_ctx = mkt_memctx_create(idx_ctx, "index_build");
 	MktMemCtx old_ctx	= mkt_memctx_switch(idx_ctx);
 
-	MktIndex *idx			  = mkt_alloc0(sizeof(MktIndex));
+	PrismIndex *idx			  = mkt_alloc0(sizeof(PrismIndex));
 	idx->memctx				  = idx_ctx;
 	idx->base.dim			  = dim;
 	idx->base.metric		  = config->metric;
@@ -372,12 +374,12 @@ mkt_index_build(
 	/* Resolve nlist */
 	uint32_t nlist = config->nlist;
 	if (nlist == 0)
-		nlist = mkt_auto_nlist((double)nvecs);
+		nlist = prism_auto_nlist((double)nvecs);
 
 	/* Resolve fan_out */
 	uint32_t fan_out = config->fan_out;
 	if (fan_out == 0)
-		fan_out = mkt_auto_fan_out(0, nlist, 0);
+		fan_out = prism_auto_fan_out(0, nlist, 0);
 	idx->fan_out = fan_out;
 
 	/* --- Phase: load vectors --- */
@@ -415,7 +417,7 @@ mkt_index_build(
 	 * in-memory path below.
 	 */
 	bool use_driver = config->encode_rabitq &&
-					  config->posting_fmt == MKT_POSTING_FMT_PAGES;
+					  config->posting_fmt == PRISM_POSTING_FMT_PAGES;
 
 	HKMeansResult *tree			  = NULL;
 	uint32_t	   drv_nlist	  = 0; /* driver path: streamed tree shape */
@@ -435,7 +437,7 @@ mkt_index_build(
 
 		/* Upper bound on leaves (fan_out^nlevels, matching the tree the driver
 		 * builds). */
-		uint32_t max_nlist = mkt_max_nlist(nlist, fan_out);
+		uint32_t max_nlist = prism_max_nlist(nlist, fan_out);
 
 		/*
 		 * Long-lived posting storage for the driver's streamed pages. The
@@ -460,7 +462,7 @@ mkt_index_build(
 		 */
 		IndexInfo index_info = {
 				.ii_ParallelWorkers = (int)(nworkers > 0 ? nworkers : 1)};
-		MktBuildConfig cfg = {
+		PrismBuildConfig cfg = {
 				.dim			 = dim,
 				.metric			 = config->metric,
 				.centroid_format = idx->base.centroid_format,
@@ -590,7 +592,7 @@ mkt_index_build(
 		/* The paged query needs no per-cluster lists, but the bindings API
 		 * reads idx->clusters[c].count for build stats; give it zeroed entries
 		 * (count 0 -> the API falls back to size estimates). */
-		idx->clusters = mkt_alloc0((size_t)nlist * sizeof(MktClusterList));
+		idx->clusters = mkt_alloc0((size_t)nlist * sizeof(PrismClusterList));
 		idx->base.pt_global_mean = mkt_alloc(dim * sizeof(float));
 		if (sa_global_mean != NULL)
 			mkt_rabitq_rotate(
@@ -678,14 +680,14 @@ mkt_index_build(
 			make_array_page_storage(est_centroid_pages, idx_ctx);
 
 	uint32_t max_ent =
-			mkt_centroid_max_entries_fmt(dim, idx->base.centroid_format);
+			prism_centroid_max_entries_fmt(dim, idx->base.centroid_format);
 
 	/* Temporary arrays for centroid page layout (build context) */
 	mkt_memctx_switch(build_ctx);
 	BlockNumber *node_first_blkno = mkt_alloc(
 			tree->nnodes * sizeof(BlockNumber));
 	idx->base.first_centroid = 0;
-	mkt_compute_centroid_layout(
+	prism_compute_centroid_layout(
 			tree, max_ent, idx->base.first_centroid, node_first_blkno);
 
 	/* Switch back to index context for posting data.
@@ -695,12 +697,12 @@ mkt_index_build(
 
 	/* Initialize per-cluster ID lists */
 	uint32_t est_per_cluster = nvecs / nlist + 1;
-	idx->clusters			 = mkt_alloc0(nlist * sizeof(MktClusterList));
+	idx->clusters			 = mkt_alloc0(nlist * sizeof(PrismClusterList));
 	for (uint32_t c = 0; c < nlist; c++)
 		cluster_list_init(&idx->clusters[c], est_per_cluster);
 
-	double				 ms_setup = (double)(now_ns() - t_phase) / 1e6;
-	const MktBuildParams bp		  = {
+	double					ms_setup = (double)(now_ns() - t_phase) / 1e6;
+	const PrismAssignParams bp		 = {
 				  .dim				= dim,
 				  .metric			= config->metric,
 				  .soar_lambda		= config->soar_lambda,
@@ -725,11 +727,11 @@ mkt_index_build(
 
 		for (uint32_t c = 0; c < nlist; c++)
 		{
-			MktClusterList *cl	 = &idx->clusters[c];
-			const float	   *cent = hk_leaf_centroids(tree) + (size_t)c * dim;
+			PrismClusterList *cl   = &idx->clusters[c];
+			const float		 *cent = hk_leaf_centroids(tree) + (size_t)c * dim;
 
-			MktFlatPostingBuilder builder;
-			mkt_flat_posting_builder_init(
+			PrismFlatPostingBuilder builder;
+			prism_flat_posting_builder_init(
 					&builder, idx->base.params, dim, c, cent, cl->count);
 
 			for (uint32_t i = 0; i < cl->count; i++)
@@ -737,12 +739,12 @@ mkt_index_build(
 				uint32_t		vid = cl->ids[i];
 				const float	   *vec = idx->all_vectors + (size_t)vid * dim;
 				ItemPointerData tid;
-				mkt_posting_set_vector_id(&tid, vid);
-				mkt_flat_posting_builder_add(&builder, tid, vec);
+				prism_posting_set_vector_id(&tid, vid);
+				prism_flat_posting_builder_add(&builder, tid, vec);
 			}
 
-			idx->flat_pages[c] = mkt_flat_posting_builder_finish(&builder);
-			mkt_flat_posting_builder_cleanup(&builder);
+			idx->flat_pages[c] = prism_flat_posting_builder_finish(&builder);
+			prism_flat_posting_builder_cleanup(&builder);
 		}
 
 		idx->has_posting_data = true;
@@ -769,7 +771,7 @@ mkt_index_build(
 		bool needs_rq_params =
 				(idx->base.centroid_format == MKT_CENTROID_FMT_RABITQ ||
 				 idx->base.centroid_format == MKT_CENTROID_FMT_FASTSCAN);
-		mkt_write_centroid_tree(
+		prism_write_centroid_tree(
 				&idx->centroid_storage.base,
 				tree,
 				dim,
@@ -831,7 +833,7 @@ mkt_index_build(
 }
 
 void
-mkt_index_destroy(MktIndex *idx)
+prism_index_destroy(PrismIndex *idx)
 {
 	if (idx == NULL)
 		return;

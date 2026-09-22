@@ -5,14 +5,14 @@
  * standard page layout:
  *
  *   [PageHeaderData (24B)]
- *   [MktCentroidEntryMeta[0]  ]  ← metadata grows forward
- *   [MktCentroidEntryMeta[1]  ]
+ *   [PrismCentroidEntryMeta[0]  ]  ← metadata grows forward
+ *   [PrismCentroidEntryMeta[1]  ]
  *   [       ...               ]
  *   [       free space         ]
  *   [       ...               ]
  *   [   data[1]               ]  ← vector data grows backward
  *   [   data[0]               ]
- *   [MktCentroidPageOpaque(12B)]
+ *   [PrismCentroidPageOpaque(12B)]
  *
  * Metadata grows from the top; vector data grows from the bottom.
  * The page is full when the two regions would overlap. Metadata
@@ -31,8 +31,8 @@
  * entries per page.
  */
 
-#ifndef MKT_CENTROID_PAGE_H
-#define MKT_CENTROID_PAGE_H
+#ifndef PRISM_CENTROID_PAGE_H
+#define PRISM_CENTROID_PAGE_H
 
 #include <stdint.h>
 #include <string.h>
@@ -59,19 +59,19 @@
 /* ----------------------------------------------------------------
  * Page type identifier
  * ---------------------------------------------------------------- */
-#define MKT_CENTROID_PAGE_ID ((uint16_t)0x4D43) /* "MC" */
+#define PRISM_CENTROID_PAGE_ID ((uint16_t)0x4D43) /* "MC" */
 
 /* ----------------------------------------------------------------
  * Centroid entry flags
  * ---------------------------------------------------------------- */
-#define MKT_CENTROID_FLAG_LEAF ((uint16_t)0x0001)
+#define PRISM_CENTROID_FLAG_LEAF ((uint16_t)0x0001)
 
 /* ----------------------------------------------------------------
  * Centroid data format (stored in low 2 bits of opaque->flags)
  * ---------------------------------------------------------------- */
-#define MKT_CENTROID_FMT_MASK ((uint8_t)0x03)
+#define PRISM_CENTROID_FMT_MASK ((uint8_t)0x03)
 
-typedef enum MktCentroidFormat
+typedef enum PrismCentroidFormat
 {
 	MKT_CENTROID_FMT_RABITQ = 0,
 	MKT_CENTROID_FMT_FLOAT	= 1,
@@ -89,7 +89,7 @@ typedef enum MktCentroidFormat
 	 *   float       f_error[32]          128 B
 	 *   uint8_t     codes[nsq_pairs*32]  variable
 	 *
-	 * Per-entry MktCentroidEntryMeta (4 B child_blkno + 4 B
+	 * Per-entry PrismCentroidEntryMeta (4 B child_blkno + 4 B
 	 * child_count/flags) is replaced by the array-of-fields layout
 	 * above; child_count and per-entry flags are dropped because the
 	 * scan already knows from its descent level whether children are
@@ -98,7 +98,7 @@ typedef enum MktCentroidFormat
 	 * have child_blkno = InvalidBlockNumber and zero-padded codes.
 	 */
 	MKT_CENTROID_FMT_FASTSCAN = 3,
-} MktCentroidFormat;
+} PrismCentroidFormat;
 
 /* ----------------------------------------------------------------
  * Per-centroid metadata (grows forward from page header)
@@ -107,46 +107,46 @@ typedef enum MktCentroidFormat
  * child_blkno points to the child centroid page. For leaf nodes,
  * child_blkno points to the posting list head page.
  * ---------------------------------------------------------------- */
-typedef struct MktCentroidEntryMeta
+typedef struct PrismCentroidEntryMeta
 {
 	BlockNumber child_blkno; /* 4B - child page */
 	uint16_t	child_count; /* 2B - children at next level */
-	uint16_t	flags;		 /* 2B - MKT_CENTROID_FLAG_LEAF etc */
-} MktCentroidEntryMeta;
+	uint16_t	flags;		 /* 2B - PRISM_CENTROID_FLAG_LEAF etc */
+} PrismCentroidEntryMeta;
 
 /* ----------------------------------------------------------------
  * Page special area (12 bytes, at page end per PG convention)
  * ---------------------------------------------------------------- */
-typedef struct MktCentroidPageOpaque
+typedef struct PrismCentroidPageOpaque
 {
 	BlockNumber next_blkno;	 /* 4B - next page at same level */
 	uint16_t	entry_count; /* 2B - centroids on this page */
 	uint8_t		level;		 /* 1B - tree level (0 = root) */
 	uint8_t		flags;		 /* 1B - page flags */
-	uint16_t	page_id;	 /* 2B - MKT_CENTROID_PAGE_ID */
+	uint16_t	page_id;	 /* 2B - PRISM_CENTROID_PAGE_ID */
 	uint16_t	padding;	 /* 2B - alignment */
-} MktCentroidPageOpaque;
+} PrismCentroidPageOpaque;
 
 /* ----------------------------------------------------------------
  * Capacity calculation
  * ---------------------------------------------------------------- */
 
 /* Usable bytes on a centroid page (between header and MAXALIGN'd opaque) */
-#define MKT_CENTROID_PAGE_USABLE     \
+#define PRISM_CENTROID_PAGE_USABLE   \
 	(BLCKSZ - SizeOfPageHeaderData - \
-	 (size_t)MAXALIGN(sizeof(MktCentroidPageOpaque)))
+	 (size_t)MAXALIGN(sizeof(PrismCentroidPageOpaque)))
 
 /* Metadata size per entry (uniform across all formats) */
 static inline uint32_t
-mkt_centroid_meta_size(MktCentroidFormat fmt)
+prism_centroid_meta_size(PrismCentroidFormat fmt)
 {
 	(void)fmt;
-	return sizeof(MktCentroidEntryMeta);
+	return sizeof(PrismCentroidEntryMeta);
 }
 
 /* Per-entry data size for routing (centroid vector or RaBitQ) */
 static inline uint32_t
-mkt_centroid_data_size(Dimension dim, MktCentroidFormat fmt)
+prism_centroid_data_size(Dimension dim, PrismCentroidFormat fmt)
 {
 	switch (fmt)
 	{
@@ -157,7 +157,7 @@ mkt_centroid_data_size(Dimension dim, MktCentroidFormat fmt)
 	case MKT_CENTROID_FMT_FASTSCAN:
 		/* Average per-entry overhead inside a fastscan group. Used
 		 * only by the legacy "data_size × N" capacity check; the
-		 * real layout is group-based — see mkt_centroid_fastscan_*. */
+		 * real layout is group-based — see prism_centroid_fastscan_*. */
 		return (uint32_t)(MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
 						  MKT_FASTSCAN_GROUP_BYTES(dim)) /
 			   MKT_FASTSCAN_GROUP;
@@ -168,42 +168,43 @@ mkt_centroid_data_size(Dimension dim, MktCentroidFormat fmt)
 
 /* Per-entry data size for leaf pages (routing + P^T * centroid) */
 static inline uint32_t
-mkt_centroid_leaf_data_size(Dimension dim, MktCentroidFormat fmt)
+prism_centroid_leaf_data_size(Dimension dim, PrismCentroidFormat fmt)
 {
-	return mkt_centroid_data_size(dim, fmt) + dim * sizeof(float);
+	return prism_centroid_data_size(dim, fmt) + dim * sizeof(float);
 }
 
 /* Bytes consumed per entry (metadata + data) for a given format */
 static inline uint32_t
-mkt_centroid_entry_bytes_fmt(Dimension dim, MktCentroidFormat fmt)
+prism_centroid_entry_bytes_fmt(Dimension dim, PrismCentroidFormat fmt)
 {
-	return mkt_centroid_meta_size(fmt) + mkt_centroid_data_size(dim, fmt);
+	return prism_centroid_meta_size(fmt) + prism_centroid_data_size(dim, fmt);
 }
 
 /* Bytes consumed per leaf entry (metadata + routing + pt_centroid) */
 static inline uint32_t
-mkt_centroid_leaf_entry_bytes_fmt(Dimension dim, MktCentroidFormat fmt)
+prism_centroid_leaf_entry_bytes_fmt(Dimension dim, PrismCentroidFormat fmt)
 {
-	return mkt_centroid_meta_size(fmt) + mkt_centroid_leaf_data_size(dim, fmt);
+	return prism_centroid_meta_size(fmt) +
+		   prism_centroid_leaf_data_size(dim, fmt);
 }
 
 /* Maximum entries per page for a given format */
 static inline uint32_t
-mkt_centroid_max_entries_fmt(Dimension dim, MktCentroidFormat fmt)
+prism_centroid_max_entries_fmt(Dimension dim, PrismCentroidFormat fmt)
 {
 	if (fmt == MKT_CENTROID_FMT_FASTSCAN)
 	{
 		/* fastscan stores entries in 32-vector groups; max_entries is
-		 * ngroups * 32. See mkt_centroid_fastscan_group_bytes. */
+		 * ngroups * 32. See prism_centroid_fastscan_group_bytes. */
 		uint32_t group_bytes =
 				(uint32_t)(MKT_FASTSCAN_GROUP * sizeof(BlockNumber) +
 						   MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
 						   MKT_FASTSCAN_GROUP_BYTES(dim));
-		uint32_t ngroups = (uint32_t)MKT_CENTROID_PAGE_USABLE / group_bytes;
+		uint32_t ngroups = (uint32_t)PRISM_CENTROID_PAGE_USABLE / group_bytes;
 		return ngroups * MKT_FASTSCAN_GROUP;
 	}
-	return (uint32_t)(MKT_CENTROID_PAGE_USABLE /
-					  mkt_centroid_entry_bytes_fmt(dim, fmt));
+	return (uint32_t)(PRISM_CENTROID_PAGE_USABLE /
+					  prism_centroid_entry_bytes_fmt(dim, fmt));
 }
 
 /* ----------------------------------------------------------------
@@ -226,13 +227,13 @@ mkt_centroid_max_entries_fmt(Dimension dim, MktCentroidFormat fmt)
  *   uint8_t     codes[nsq_pairs * 32]
  *
  * Centroid pages do NOT need leaf-mode pt_centroid (that lives on
- * the first posting page; see mkt_posting_pt_centroid). The leaf bit
+ * the first posting page; see prism_posting_pt_centroid). The leaf bit
  * in opaque flags determines whether child_blkno[*] points to
  * posting heads or nested centroid pages.
  * ---------------------------------------------------------------- */
 
 static inline uint32_t
-mkt_centroid_fastscan_group_bytes(Dimension dim)
+prism_centroid_fastscan_group_bytes(Dimension dim)
 {
 	return (uint32_t)(MKT_FASTSCAN_GROUP * sizeof(BlockNumber) +
 					  MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
@@ -240,72 +241,73 @@ mkt_centroid_fastscan_group_bytes(Dimension dim)
 }
 
 static inline uint32_t
-mkt_centroid_fastscan_max_groups(Dimension dim)
+prism_centroid_fastscan_max_groups(Dimension dim)
 {
-	return (uint32_t)MKT_CENTROID_PAGE_USABLE /
-		   mkt_centroid_fastscan_group_bytes(dim);
+	return (uint32_t)PRISM_CENTROID_PAGE_USABLE /
+		   prism_centroid_fastscan_group_bytes(dim);
 }
 
 /* Group accessors: each takes the page contents pointer + group index. */
 static inline char *
-mkt_centroid_fastscan_group_base(char *content, uint32_t g, Dimension dim)
+prism_centroid_fastscan_group_base(char *content, uint32_t g, Dimension dim)
 {
-	return content + (size_t)g * mkt_centroid_fastscan_group_bytes(dim);
+	return content + (size_t)g * prism_centroid_fastscan_group_bytes(dim);
 }
 
 static inline BlockNumber *
-mkt_centroid_fastscan_group_child(char *content, uint32_t g, Dimension dim)
+prism_centroid_fastscan_group_child(char *content, uint32_t g, Dimension dim)
 {
-	return (BlockNumber *)mkt_centroid_fastscan_group_base(content, g, dim);
+	return (BlockNumber *)prism_centroid_fastscan_group_base(content, g, dim);
 }
 
 static inline float *
-mkt_centroid_fastscan_group_f_add(char *content, uint32_t g, Dimension dim)
+prism_centroid_fastscan_group_f_add(char *content, uint32_t g, Dimension dim)
 {
-	return (float *)(mkt_centroid_fastscan_group_base(content, g, dim) +
+	return (float *)(prism_centroid_fastscan_group_base(content, g, dim) +
 					 MKT_FASTSCAN_GROUP * sizeof(BlockNumber));
 }
 
 static inline float *
-mkt_centroid_fastscan_group_f_rescale(char *content, uint32_t g, Dimension dim)
+prism_centroid_fastscan_group_f_rescale(
+		char *content, uint32_t g, Dimension dim)
 {
-	return mkt_centroid_fastscan_group_f_add(content, g, dim) +
+	return prism_centroid_fastscan_group_f_add(content, g, dim) +
 		   MKT_FASTSCAN_GROUP;
 }
 
 static inline float *
-mkt_centroid_fastscan_group_f_error(char *content, uint32_t g, Dimension dim)
+prism_centroid_fastscan_group_f_error(char *content, uint32_t g, Dimension dim)
 {
-	return mkt_centroid_fastscan_group_f_rescale(content, g, dim) +
+	return prism_centroid_fastscan_group_f_rescale(content, g, dim) +
 		   MKT_FASTSCAN_GROUP;
 }
 
 static inline uint8_t *
-mkt_centroid_fastscan_group_codes(char *content, uint32_t g, Dimension dim)
+prism_centroid_fastscan_group_codes(char *content, uint32_t g, Dimension dim)
 {
-	return (uint8_t *)(mkt_centroid_fastscan_group_f_error(content, g, dim) +
+	return (uint8_t *)(prism_centroid_fastscan_group_f_error(content, g, dim) +
 					   MKT_FASTSCAN_GROUP);
 }
 
 /* Maximum entries per leaf page (includes pt_centroid per entry) */
 static inline uint32_t
-mkt_centroid_max_leaf_entries_fmt(Dimension dim, MktCentroidFormat fmt)
+prism_centroid_max_leaf_entries_fmt(Dimension dim, PrismCentroidFormat fmt)
 {
-	return (uint32_t)(MKT_CENTROID_PAGE_USABLE /
-					  mkt_centroid_leaf_entry_bytes_fmt(dim, fmt));
+	return (uint32_t)(PRISM_CENTROID_PAGE_USABLE /
+					  prism_centroid_leaf_entry_bytes_fmt(dim, fmt));
 }
 
 /* Backward-compatible wrappers (default to RaBitQ format) */
 static inline uint32_t
-mkt_centroid_entry_bytes(Dimension dim)
+prism_centroid_entry_bytes(Dimension dim)
 {
-	return mkt_centroid_entry_bytes_fmt(dim, MKT_CENTROID_FMT_RABITQ);
+	return prism_centroid_entry_bytes_fmt(dim, MKT_CENTROID_FMT_RABITQ);
 }
 
 static inline uint32_t
-mkt_centroid_max_entries(Dimension dim)
+prism_centroid_max_entries(Dimension dim)
 {
-	return mkt_centroid_max_entries_fmt(dim, MKT_CENTROID_FMT_RABITQ);
+	return prism_centroid_max_entries_fmt(dim, MKT_CENTROID_FMT_RABITQ);
 }
 
 /* ----------------------------------------------------------------
@@ -316,35 +318,35 @@ mkt_centroid_max_entries(Dimension dim)
  * ---------------------------------------------------------------- */
 
 /* Opaque area via PG-standard PageGetSpecialPointer */
-#define MKT_CENTROID_OPAQUE(page) \
-	((MktCentroidPageOpaque *)PageGetSpecialPointer(page))
+#define PRISM_CENTROID_OPAQUE(page) \
+	((PrismCentroidPageOpaque *)PageGetSpecialPointer(page))
 
 /* Data format stored in the page */
-static inline MktCentroidFormat
-mkt_centroid_page_format(Page page)
+static inline PrismCentroidFormat
+prism_centroid_page_format(Page page)
 {
-	return (MktCentroidFormat)(MKT_CENTROID_OPAQUE(page)->flags &
-							   MKT_CENTROID_FMT_MASK);
+	return (PrismCentroidFormat)(PRISM_CENTROID_OPAQUE(page)->flags &
+								 PRISM_CENTROID_FMT_MASK);
 }
 
 /*
  * Get mutable pointer to the i-th metadata entry (write path).
  * Uses byte-offset arithmetic since meta size is format-dependent.
  */
-static inline MktCentroidEntryMeta *
-mkt_centroid_meta_mut(Page page, uint32_t index)
+static inline PrismCentroidEntryMeta *
+prism_centroid_meta_mut(Page page, uint32_t index)
 {
-	uint32_t meta_size = mkt_centroid_meta_size(
-			mkt_centroid_page_format(page));
-	return (MktCentroidEntryMeta *)((char *)PageGetContents(page) +
-									index * meta_size);
+	uint32_t meta_size = prism_centroid_meta_size(
+			prism_centroid_page_format(page));
+	return (PrismCentroidEntryMeta *)((char *)PageGetContents(page) +
+									  index * meta_size);
 }
 
 /* Get pointer to the i-th metadata entry (read-only) */
-static inline const MktCentroidEntryMeta *
-mkt_centroid_meta(const Page page, uint32_t index)
+static inline const PrismCentroidEntryMeta *
+prism_centroid_meta(const Page page, uint32_t index)
 {
-	return mkt_centroid_meta_mut(page, index);
+	return prism_centroid_meta_mut(page, index);
 }
 
 /*
@@ -366,31 +368,31 @@ mkt_centroid_meta(const Page page, uint32_t index)
  * only routing_data is stored.
  */
 static inline const void *
-mkt_centroid_entry_data(const Page page, uint32_t index, Dimension dim)
+prism_centroid_entry_data(const Page page, uint32_t index, Dimension dim)
 {
-	MktCentroidFormat fmt		= mkt_centroid_page_format(page);
-	uint32_t		  data_size = mkt_centroid_data_size(dim, fmt);
+	PrismCentroidFormat fmt		  = prism_centroid_page_format(page);
+	uint32_t			data_size = prism_centroid_data_size(dim, fmt);
 	return (const void *)(PageGetSpecialPointer(page) -
 						  (size_t)(index + 1) * data_size);
 }
 
 /* Typed accessors for routing data (at start of data region) */
 static inline const RaBitQData *
-mkt_centroid_data(const Page page, uint32_t index, Dimension dim)
+prism_centroid_data(const Page page, uint32_t index, Dimension dim)
 {
-	return (const RaBitQData *)mkt_centroid_entry_data(page, index, dim);
+	return (const RaBitQData *)prism_centroid_entry_data(page, index, dim);
 }
 
 static inline const float *
-mkt_centroid_float_data(const Page page, uint32_t index, Dimension dim)
+prism_centroid_float_data(const Page page, uint32_t index, Dimension dim)
 {
-	return (const float *)mkt_centroid_entry_data(page, index, dim);
+	return (const float *)prism_centroid_entry_data(page, index, dim);
 }
 
 static inline const half *
-mkt_centroid_half_data(const Page page, uint32_t index, Dimension dim)
+prism_centroid_half_data(const Page page, uint32_t index, Dimension dim)
 {
-	return (const half *)mkt_centroid_entry_data(page, index, dim);
+	return (const half *)prism_centroid_entry_data(page, index, dim);
 }
 
 /* ----------------------------------------------------------------
@@ -401,14 +403,14 @@ mkt_centroid_half_data(const Page page, uint32_t index, Dimension dim)
  * Initialize a centroid page with explicit data format.
  * Zeroes the page, sets up the opaque area with format flag.
  */
-void
-mkt_centroid_page_init_fmt(Page page, uint8_t level, MktCentroidFormat fmt);
+void prism_centroid_page_init_fmt(
+		Page page, uint8_t level, PrismCentroidFormat fmt);
 
 /* Backward-compatible init (defaults to RaBitQ format) */
 static inline void
-mkt_centroid_page_init(Page page, uint8_t level)
+prism_centroid_page_init(Page page, uint8_t level)
 {
-	mkt_centroid_page_init_fmt(page, level, MKT_CENTROID_FMT_RABITQ);
+	prism_centroid_page_init_fmt(page, level, MKT_CENTROID_FMT_RABITQ);
 }
 
 /*
@@ -419,7 +421,7 @@ mkt_centroid_page_init(Page page, uint8_t level)
  *
  * Returns NULL if the page has no room.
  */
-void *mkt_centroid_page_add_entry_begin(
+void *prism_centroid_page_add_entry_begin(
 		Page		page,
 		Dimension	dim,
 		BlockNumber child_blkno,
@@ -436,7 +438,7 @@ void *mkt_centroid_page_add_entry_begin(
  *   FLOAT  → const float * (dim elements)
  *   HALF   → const half * (dim elements)
  */
-bool mkt_centroid_page_add_entry(
+bool prism_centroid_page_add_entry(
 		Page		page,
 		Dimension	dim,
 		BlockNumber child_blkno,
@@ -451,7 +453,7 @@ bool mkt_centroid_page_add_entry(
  * incremental posting-list split to repoint a leaf entry at its first child
  * list and update its routing centroid.
  */
-void mkt_centroid_page_overwrite_entry(
+void prism_centroid_page_overwrite_entry(
 		Page		page,
 		Dimension	dim,
 		uint32_t	index,
@@ -460,7 +462,7 @@ void mkt_centroid_page_overwrite_entry(
 
 /* Backward-compatible add (RaBitQ-typed parameter) */
 static inline bool
-mkt_centroid_page_add(
+prism_centroid_page_add(
 		Page			  page,
 		Dimension		  dim,
 		BlockNumber		  child_blkno,
@@ -468,7 +470,7 @@ mkt_centroid_page_add(
 		uint16_t		  flags,
 		const RaBitQData *data)
 {
-	return mkt_centroid_page_add_entry(
+	return prism_centroid_page_add_entry(
 			page, dim, child_blkno, child_count, flags, data);
 }
 
@@ -482,15 +484,15 @@ mkt_centroid_page_add(
  * Every other page kind is indifferent -- centroid pages are the only ones
  * that grow a forward region -- so entry_count, which lives in the opaque
  * area and does survive, is the authoritative cursor. It is also what the
- * data-region reader already uses (mkt_centroid_entry_data indexes off
+ * data-region reader already uses (prism_centroid_entry_data indexes off
  * pd_special), so the two regions stay consistent.
  */
 static inline size_t
-mkt_centroid_meta_end(Page page, uint32_t nentries)
+prism_centroid_meta_end(Page page, uint32_t nentries)
 {
-	MktCentroidFormat fmt = mkt_centroid_page_format(page);
+	PrismCentroidFormat fmt = prism_centroid_page_format(page);
 	return (size_t)SizeOfPageHeaderData +
-		   (size_t)nentries * mkt_centroid_meta_size(fmt);
+		   (size_t)nentries * prism_centroid_meta_size(fmt);
 }
 
 /*
@@ -498,17 +500,17 @@ mkt_centroid_meta_end(Page page, uint32_t nentries)
  * Reads data format from the page to determine entry size.
  */
 static inline bool
-mkt_centroid_page_has_room(Page page, Dimension dim, bool is_leaf)
+prism_centroid_page_has_room(Page page, Dimension dim, bool is_leaf)
 {
-	PageHeader		  header   = (PageHeader)page;
-	MktCentroidFormat fmt	   = mkt_centroid_page_format(page);
-	size_t			  need_fwd = mkt_centroid_meta_size(fmt);
-	size_t need_bwd = is_leaf ? mkt_centroid_leaf_data_size(dim, fmt)
-							  : mkt_centroid_data_size(dim, fmt);
-	size_t lower	= mkt_centroid_meta_end(
-			   page, MKT_CENTROID_OPAQUE(page)->entry_count);
+	PageHeader			header	 = (PageHeader)page;
+	PrismCentroidFormat fmt		 = prism_centroid_page_format(page);
+	size_t				need_fwd = prism_centroid_meta_size(fmt);
+	size_t need_bwd = is_leaf ? prism_centroid_leaf_data_size(dim, fmt)
+							  : prism_centroid_data_size(dim, fmt);
+	size_t lower	= prism_centroid_meta_end(
+			   page, PRISM_CENTROID_OPAQUE(page)->entry_count);
 
 	return lower + need_fwd + need_bwd <= header->pd_upper;
 }
 
-#endif /* MKT_CENTROID_PAGE_H */
+#endif /* PRISM_CENTROID_PAGE_H */

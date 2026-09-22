@@ -7,23 +7,23 @@
  * distances is the caller's responsibility.
  *
  * Usage (paged mode):
- *   MktPostingScan scan;
- *   mkt_posting_scan_init(&scan, storage, page_base, params, dim,
- *                         mkt_posting_max_entries(dim));
- *   mkt_posting_scan_begin_cluster(&scan, qstate, posting_head);
- *   mkt_posting_scan_cluster(&scan, &topk);
- *   mkt_posting_scan_end_cluster(&scan);
+ *   PrismPostingScan scan;
+ *   prism_posting_scan_init(&scan, storage, page_base, params, dim,
+ *                         prism_posting_max_entries(dim));
+ *   prism_posting_scan_begin_cluster(&scan, qstate, posting_head);
+ *   prism_posting_scan_cluster(&scan, &topk);
+ *   prism_posting_scan_end_cluster(&scan);
  *
  * Usage (flat mode):
- *   mkt_posting_scan_begin_flat(&scan, qstate, flat_buf);
- *   mkt_posting_scan_cluster(&scan, &topk);
- *   mkt_posting_scan_end_cluster(&scan);
+ *   prism_posting_scan_begin_flat(&scan, qstate, flat_buf);
+ *   prism_posting_scan_cluster(&scan, &topk);
+ *   prism_posting_scan_end_cluster(&scan);
  *
- *   mkt_posting_scan_cleanup(&scan);
+ *   prism_posting_scan_cleanup(&scan);
  */
 
-#ifndef MKT_POSTING_SCAN_H
-#define MKT_POSTING_SCAN_H
+#ifndef PRISM_POSTING_SCAN_H
+#define PRISM_POSTING_SCAN_H
 
 #include "algo/topk.h"
 #include "index/posting_page.h"
@@ -34,7 +34,7 @@
  * Scan state
  * ---------------------------------------------------------------- */
 
-typedef struct MktPostingScan
+typedef struct PrismPostingScan
 {
 	/* Configuration (set at init, constant across clusters) */
 	MktStorage		   *storage;   /* NULL for flat mode */
@@ -84,7 +84,7 @@ typedef struct MktPostingScan
 							 */
 	uint32_t entries_scanned;
 	uint32_t entries_pruned;
-} MktPostingScan;
+} PrismPostingScan;
 
 /* ----------------------------------------------------------------
  * API
@@ -97,8 +97,8 @@ typedef struct MktPostingScan
  * page_base: direct pointer to page array for inline access
  *            (bypasses storage vtable). NULL to use storage vtable.
  */
-void mkt_posting_scan_init(
-		MktPostingScan	   *scan,
+void prism_posting_scan_init(
+		PrismPostingScan   *scan,
 		MktStorage		   *storage,
 		char			   *page_base,
 		const RaBitQParams *params,
@@ -109,47 +109,47 @@ void mkt_posting_scan_init(
  * Begin scanning a cluster's posting list (paged mode).
  * qstate must be valid for the duration of the scan.
  */
-void mkt_posting_scan_begin_cluster(
-		MktPostingScan	 *scan,
+void prism_posting_scan_begin_cluster(
+		PrismPostingScan *scan,
 		RaBitQQueryState *qstate,
 		BlockNumber		  posting_head);
 
 /*
  * Begin scanning a flat posting page.
  */
-void mkt_posting_scan_begin_flat(
-		MktPostingScan *scan, RaBitQQueryState *qstate, char *flat_buf);
+void prism_posting_scan_begin_flat(
+		PrismPostingScan *scan, RaBitQQueryState *qstate, char *flat_buf);
 
 /*
  * End cluster scan. Releases the current page (paged mode).
  */
-void mkt_posting_scan_end_cluster(MktPostingScan *scan);
+void prism_posting_scan_end_cluster(PrismPostingScan *scan);
 
 /*
  * Return P^T * centroid from the first posting page.
  * Call after begin_cluster. Returns NULL if no page loaded.
  */
-const float *mkt_posting_scan_pt_centroid(const MktPostingScan *scan);
+const float *prism_posting_scan_pt_centroid(const PrismPostingScan *scan);
 
 /*
  * Score and prune a full cluster.
  *
  * Processes all pages (or the flat buffer). Survivors are inserted
  * into topk with approximate (estimated) distances and error bounds
- * via mkt_posting_encode_tid(). The caller extracts candidates
+ * via prism_posting_encode_tid(). The caller extracts candidates
  * afterward and reranks with exact distances.
  *
  * The threshold updates progressively as better candidates are
  * found, providing dynamic pruning within the cluster.
  */
-void mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk);
+void prism_posting_scan_cluster(PrismPostingScan *scan, MktTopK *topk);
 
 /*
  * Enable fastscan scratch buffers. Call after init if the index
  * may contain fastscan-format pages.
  * lut_bits: 8 for uint8 LUT, 16 for uint16 high-accuracy LUT.
  */
-void mkt_posting_scan_enable_fastscan(MktPostingScan *scan, int lut_bits);
+void prism_posting_scan_enable_fastscan(PrismPostingScan *scan, int lut_bits);
 
 /*
  * Score and prune a cluster using fastscan kernel.
@@ -157,11 +157,12 @@ void mkt_posting_scan_enable_fastscan(MktPostingScan *scan, int lut_bits);
  * Handles mixed chains: fastscan-format pages use the VPSHUFB
  * kernel, AoS pages fall back to the standard 1-bit kernel.
  */
-void mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk);
+void
+prism_posting_scan_cluster_fastscan(PrismPostingScan *scan, MktTopK *topk);
 
 /*
  * Free scratch buffers.
  */
-void mkt_posting_scan_cleanup(MktPostingScan *scan);
+void prism_posting_scan_cleanup(PrismPostingScan *scan);
 
-#endif /* MKT_POSTING_SCAN_H */
+#endif /* PRISM_POSTING_SCAN_H */

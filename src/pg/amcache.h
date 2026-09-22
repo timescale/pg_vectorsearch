@@ -18,14 +18,14 @@
  *     scan's params pointer is never invalidated out from under it by
  *     another index of a different dim/seed.
  *   - The global mean, P^T·global_mean, the column's type descriptor, and a
- *     fully-populated immutable MktIndexBase template live in rd_amcache.
+ *     fully-populated immutable PrismIndexBase template live in rd_amcache.
  *     These are pure data with nothing to release, which is what rd_amcache
  *     can hold: it is freed with rd_indexcxt and has no teardown hook, so
  *     anything needing an explicit release (the params checkout above) has to
  *     stay out of it.
  *
- * prism_index_base_init fills a caller-owned MktIndexBase from the cache. The
- * only fields it leaves for the caller are the storage pointers
+ * prism_index_base_init fills a caller-owned PrismIndexBase from the cache.
+ * The only fields it leaves for the caller are the storage pointers
  * (centroid_storage / posting_storage / page_base): those reference a per-call
  * MktPgStorage with transient mutable state and must stay per-operation, so
  * they are not cached.
@@ -62,7 +62,7 @@
  * release (aborted scan, failed insert) still returns the refcount when the
  * owner is released.
  */
-void prism_index_base_init(Relation index, MktIndexBase *base);
+void prism_index_base_init(Relation index, PrismIndexBase *base);
 
 /*
  * Release a params checkout obtained via prism_index_base_init. dim and seed
@@ -106,15 +106,15 @@ void prism_cache_meta(
  */
 typedef struct PrismScanInfo
 {
-	uint32_t		  nlist; /* number of leaf centroids */
-	Dimension		  dim;
-	uint8_t			  nlevels;		   /* centroid tree depth */
-	uint8_t			  fan_out;		   /* children per tree node */
-	BlockNumber		  first_centroid;  /* root centroid page */
-	BlockNumber		  first_posting;   /* first posting-head block */
-	uint32_t		  ncentroid_pages; /* centroid pages, maintained */
-	MktCentroidFormat centroid_format;
-	bool			  has_fastscan; /* built with FASTSCAN posting pages */
+	uint32_t			nlist; /* number of leaf centroids */
+	Dimension			dim;
+	uint8_t				nlevels;		 /* centroid tree depth */
+	uint8_t				fan_out;		 /* children per tree node */
+	BlockNumber			first_centroid;	 /* root centroid page */
+	BlockNumber			first_posting;	 /* first posting-head block */
+	uint32_t			ncentroid_pages; /* centroid pages, maintained */
+	PrismCentroidFormat centroid_format;
+	bool				has_fastscan; /* built with FASTSCAN posting pages */
 } PrismScanInfo;
 
 PrismScanInfo prism_cache_scan_info(Relation index);
@@ -126,8 +126,8 @@ PrismScanInfo prism_cache_scan_info(Relation index);
  *
  * Only safe once the index has a metadata page: this goes through the same
  * cache as everything else, and populating that cache reads the metapage. The
- * build paths therefore call mkt_index_type_info() directly.
+ * build paths therefore call prism_index_type_info() directly.
  */
-const struct MktIndexTypeInfo *prism_cache_type_info(Relation index);
+const struct PrismIndexTypeInfo *prism_cache_type_info(Relation index);
 
 #endif /* MKT_AMCACHE_H */

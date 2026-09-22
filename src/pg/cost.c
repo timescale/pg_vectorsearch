@@ -50,7 +50,7 @@ typedef struct CostInputs
 	Dimension dim;
 	uint32_t  nlevels;		/* centroid tree depth */
 	bool	  has_fastscan; /* posting page format the index was built in */
-	MktCentroidFormat centroid_format;
+	PrismCentroidFormat centroid_format;
 
 	/* what this particular query will do */
 	uint32_t nlist;	 /* posting lists in the index */
@@ -317,7 +317,7 @@ gather_cost_inputs(
 	 * lists than exist.
 	 */
 	uint32_t nprobe = prism_nprobe > 0 ? (uint32_t)prism_nprobe
-									   : mkt_auto_nprobe(in->nlist);
+									   : prism_auto_nprobe(in->nlist);
 
 	if (nprobe > in->nlist)
 		nprobe = in->nlist;
@@ -331,13 +331,13 @@ gather_cost_inputs(
 	 * distances before scanning the best nprobe. Each routed cluster costs a
 	 * head page read whether or not its list is then scanned.
 	 */
-	in->n_route = (double)
-			mkt_query_routed_clusters(nprobe, in->nlist, in->centroid_format);
+	in->n_route = (double)prism_query_routed_clusters(
+			nprobe, in->nlist, in->centroid_format);
 
 	/*
 	 * Centroid slots the beam keeps per level, from the scan's own rule.
 	 */
-	in->beam = (double)mkt_query_beam_width(
+	in->beam = (double)prism_query_beam_width(
 			nprobe, in->nlist, si.fan_out, prism_centroid_beam_scale);
 
 	/*
@@ -408,7 +408,8 @@ gather_cost_inputs(
 	 * the dimensions where grouped pages hold more.
 	 */
 	double page_entries = in->probed_pages *
-						  (double)mkt_posting_max_entries_any_format(in->dim);
+						  (double)prism_posting_max_entries_any_format(
+								  in->dim);
 
 	in->scanned_pl_entries = Min(row_entries, page_entries);
 
@@ -468,9 +469,8 @@ centroid_descent_cost(const CostInputs *in)
 	 * The beam scores the children of every slot it keeps, at each level,
 	 * bounded by what the pages it reads can hold.
 	 */
-	double slots =
-			in->descent_pages *
-			(double)mkt_centroid_max_entries_fmt(in->dim, in->centroid_format);
+	double slots = in->descent_pages * (double)prism_centroid_max_entries_fmt(
+											   in->dim, in->centroid_format);
 
 	/*
 	 * Page capacity assumes full pages, which badly over-counts a small
@@ -609,7 +609,7 @@ search_page_cost(const CostInputs *in, PlannerInfo *root, IndexOptInfo *info)
  *
  * The pool has three modes. Reranking off costs nothing. A capped pool
  * uses the estimator's own number. An uncapped pool reranks every survivor
- * of the error-bound gate, and mkt_query_rerank_pool_estimate reports that
+ * of the error-bound gate, and prism_query_rerank_pool_estimate reports that
  * as 0 -- the value the extract step reads as "keep them all", so it must
  * not be taken at face value: here 0 is the widest pool there is. It is
  * charged at every entry the scan scores, an over-estimate, for a setting
@@ -637,7 +637,7 @@ rerank_cost(
 	if (!prism_rerank)
 		return 0.0;
 
-	uint32_t capped = mkt_query_rerank_pool_estimate(in->k_eff, in->nprobe);
+	uint32_t capped = prism_query_rerank_pool_estimate(in->k_eff, in->nprobe);
 	double	 pool	= capped > 0 ? (double)capped : in->scanned_pl_entries;
 
 	bool external = indexed_column_uses_toast(root, baserel, info, in->dim);

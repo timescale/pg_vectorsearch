@@ -15,7 +15,7 @@
 #include "core/memory.h"
 #include "index/centroid_build.h"
 #include "index/index_build.h"
-#include "index/parallel_build.h" /* MktBlobStore seam (plan/write replay) */
+#include "index/parallel_build.h" /* PrismBlobStore seam (plan/write replay) */
 #include "quant/fastscan.h"
 
 /* ----------------------------------------------------------------
@@ -49,7 +49,7 @@
  * ranges of different pages are disjoint, but not ordered: cents[] is
  * appended in tree-write order (post-order serial, per-subtree
  * parallel), not block order. Leaf-level pages — collection skips
- * them — hold MKT_EXACT_INTERNAL_NONE instead.
+ * them — hold PRISM_EXACT_INTERNAL_NONE instead.
  *
  * An empty collection (collecting off or over budget) is just the header
  * with npages = 0 and base = InvalidBlockNumber, which no block can
@@ -59,10 +59,10 @@
  * entry counts.
  *
  * Lifecycle: the LEADER produces it — it alone streams the tree to
- * pages, collecting into MktExactCentroidCollector as it writes —
+ * pages, collecting into PrismExactCentroidCollector as it writes —
  * then sizes and fills the collection from the collector and publishes it
  * before the tree-ready barrier. The WORKERS attach after that
- * barrier and wrap it in a MktExactInternalCentroids view to score
+ * barrier and wrap it in a PrismExactInternalCentroids view to score
  * the internal tree levels while routing rows to their posting lists
  * (and again in the refine pass); they only ever read it. The collection's
  * memory is deliberately not context-managed and not the collector's:
@@ -90,22 +90,22 @@ typedef struct ExactCentroidCollectionHeader
 #define CENTROID_COLLECTOR_INIT_CAPACITY 256
 
 void
-mkt_exact_centroid_collector_init(
-		MktExactCentroidCollector *c,
-		Dimension				   dim,
-		MktCentroidFormat		   fmt,
-		BlockNumber				   base,
-		uint32_t				   npages,
-		uint64_t				   max_bytes,
-		uint64_t				   expected_slots)
+prism_exact_centroid_collector_init(
+		PrismExactCentroidCollector *c,
+		Dimension					 dim,
+		PrismCentroidFormat			 fmt,
+		BlockNumber					 base,
+		uint32_t					 npages,
+		uint64_t					 max_bytes,
+		uint64_t					 expected_slots)
 {
 	memset(c, 0, sizeof(*c));
 	c->dim	  = dim;
 	c->base	  = base;
 	c->npages = npages;
-	c->stride = mkt_centroid_max_entries_fmt(dim, fmt);
+	c->stride = prism_centroid_max_entries_fmt(dim, fmt);
 	/* Every allocation goes to the collector's dedicated child context
-	 * (see the ownership contract on MktExactCentroidCollector). */
+	 * (see the ownership contract on PrismExactCentroidCollector). */
 	c->ctx = mkt_memctx_create(mkt_memctx_current(), "mkt exact centroids");
 	c->page_off = mkt_memctx_alloc(c->ctx, (size_t)npages * sizeof(uint32_t));
 	memset(c->page_off, 0xFF, (size_t)npages * sizeof(uint32_t));
@@ -135,7 +135,8 @@ mkt_exact_centroid_collector_init(
  * (that check guarantees the clamped capacity still fits).
  */
 static void
-exact_centroid_collector_reserve(MktExactCentroidCollector *c, uint32_t total)
+exact_centroid_collector_reserve(
+		PrismExactCentroidCollector *c, uint32_t total)
 {
 	if (total <= c->cap)
 		return;
@@ -163,11 +164,11 @@ exact_centroid_collector_reserve(MktExactCentroidCollector *c, uint32_t total)
 }
 
 void
-mkt_exact_centroid_collector_add_node(
-		MktExactCentroidCollector *c,
-		BlockNumber				   first_blk,
-		const float				  *cents,
-		uint32_t				   n)
+prism_exact_centroid_collector_add_node(
+		PrismExactCentroidCollector *c,
+		BlockNumber					 first_blk,
+		const float					*cents,
+		uint32_t					 n)
 {
 	if (n == 0 || c->overflowed)
 		return;
@@ -188,7 +189,7 @@ mkt_exact_centroid_collector_add_node(
 				need,
 				c->max_bytes);
 		c->overflowed = true;
-		mkt_exact_centroid_collector_cleanup(c);
+		prism_exact_centroid_collector_cleanup(c);
 		return;
 	}
 
@@ -209,7 +210,7 @@ mkt_exact_centroid_collector_add_node(
 			 * page_off out of bounds in release builds. */
 			Assert(false);
 			c->overflowed = true;
-			mkt_exact_centroid_collector_cleanup(c);
+			prism_exact_centroid_collector_cleanup(c);
 			return;
 		}
 
@@ -226,7 +227,7 @@ mkt_exact_centroid_collector_add_node(
 }
 
 void
-mkt_exact_centroid_collector_cleanup(MktExactCentroidCollector *c)
+prism_exact_centroid_collector_cleanup(PrismExactCentroidCollector *c)
 {
 	/* Everything the collector allocated lives in its dedicated
 	 * context: one delete releases it all, exactly once (idempotent —
@@ -240,8 +241,9 @@ mkt_exact_centroid_collector_cleanup(MktExactCentroidCollector *c)
 }
 
 void
-mkt_exact_centroid_view(
-		const MktExactCentroidCollector *c, MktExactInternalCentroids *view)
+prism_exact_centroid_view(
+		const PrismExactCentroidCollector *c,
+		PrismExactInternalCentroids		  *view)
 {
 	if (c->overflowed)
 	{
@@ -259,7 +261,7 @@ mkt_exact_centroid_view(
 }
 
 uint64_t
-mkt_exact_centroid_collection_size(const MktExactCentroidCollector *c)
+prism_exact_centroid_collection_size(const PrismExactCentroidCollector *c)
 {
 	if (c == NULL || c->overflowed)
 		return sizeof(ExactCentroidCollectionHeader);
@@ -269,8 +271,8 @@ mkt_exact_centroid_collection_size(const MktExactCentroidCollector *c)
 }
 
 void
-mkt_exact_centroid_collection_write(
-		const MktExactCentroidCollector *c, void *collection)
+prism_exact_centroid_collection_write(
+		const PrismExactCentroidCollector *c, void *collection)
 {
 	ExactCentroidCollectionHeader *hdr = (ExactCentroidCollectionHeader *)
 			collection;
@@ -298,8 +300,8 @@ mkt_exact_centroid_collection_write(
 }
 
 void
-mkt_exact_centroid_collection_view(
-		const void *collection, MktExactInternalCentroids *view)
+prism_exact_centroid_collection_view(
+		const void *collection, PrismExactInternalCentroids *view)
 {
 	const ExactCentroidCollectionHeader *hdr =
 			(const ExactCentroidCollectionHeader *)collection;
@@ -314,7 +316,7 @@ mkt_exact_centroid_collection_view(
 /* Assign each node of a materialized tree its first block, packing nodes
  * in index order from first_blkno; returns the block after the last. */
 BlockNumber
-mkt_compute_centroid_layout(
+prism_compute_centroid_layout(
 		const HKMeansResult *tree,
 		uint32_t			 max_entries,
 		BlockNumber			 first_blkno,
@@ -339,19 +341,19 @@ mkt_compute_centroid_layout(
  * pages. The streamed builders below replace this for the paged builds;
  * the standalone in-RAM build still writes through it. */
 void
-mkt_write_centroid_tree(
-		MktStorage				  *storage,
-		const HKMeansResult		  *tree,
-		Dimension				   dim,
-		uint32_t				   fan_out,
-		uint8_t					   level_offset,
-		MktCentroidFormat		   centroid_format,
-		const RaBitQParams		  *rq_params,
-		const float				  *global_mean,
-		BlockNumber				   posting_base,
-		const BlockNumber		  *node_first_blkno,
-		const float				  *pt_centroids,
-		MktExactCentroidCollector *collector)
+prism_write_centroid_tree(
+		MktStorage					*storage,
+		const HKMeansResult			*tree,
+		Dimension					 dim,
+		uint32_t					 fan_out,
+		uint8_t						 level_offset,
+		PrismCentroidFormat			 centroid_format,
+		const RaBitQParams			*rq_params,
+		const float					*global_mean,
+		BlockNumber					 posting_base,
+		const BlockNumber			*node_first_blkno,
+		const float					*pt_centroids,
+		PrismExactCentroidCollector *collector)
 {
 	/* Leaf child blocks are formula-derived (posting_base + global leaf
 	 * index), so no O(nlist) posting-head array is needed. Each node has at
@@ -366,7 +368,7 @@ mkt_write_centroid_tree(
 		const HKMeansNode *node	   = &hk_nodes(tree)[i];
 		bool			   is_leaf = (node->level == tree->nlevels - 1);
 
-		uint16_t flags		 = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
+		uint16_t flags		 = is_leaf ? PRISM_CENTROID_FLAG_LEAF : 0;
 		uint16_t child_count = is_leaf ? 0 : (uint16_t)fan_out;
 
 		const BlockNumber *child_blks;
@@ -387,7 +389,7 @@ mkt_write_centroid_tree(
 											   (size_t)node->first_leaf * dim
 									 : NULL;
 
-		mkt_centroid_write_node(
+		prism_centroid_write_node(
 				storage,
 				dim,
 				hk_node_centroids(tree, node),
@@ -424,14 +426,14 @@ typedef struct RoutingTreeCtx
 	KMeansOptions  opts;
 	/* write-phase */
 	MktStorage		   *storage;
-	MktCentroidFormat	format;
+	PrismCentroidFormat format;
 	const RaBitQParams *rq_params;
 	const float		   *global_mean;
 	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
-	MktStreamLeafCb		on_leaf;
+	PrismStreamLeafCb	on_leaf;
 	void			   *on_leaf_arg;
 	/* write-phase: optional exact internal-centroid collection */
-	MktExactCentroidCollector *collector;
+	PrismExactCentroidCollector *collector;
 	/* plan-phase page-count helpers */
 	uint32_t max_ent; /* non-fastscan entries/page */
 	uint32_t fs_gpp;  /* fastscan groups/page */
@@ -439,8 +441,8 @@ typedef struct RoutingTreeCtx
 	 * ({k, centroids, assignments}, recursion order) here, and the write
 	 * pass replays it instead of re-running k-means. Both passes require
 	 * the store. */
-	MktBlobStore *store;
-	float		 *replay_cents; /* write: [fan_out * dim] */
+	PrismBlobStore *store;
+	float		   *replay_cents; /* write: [fan_out * dim] */
 	/* One node's uint16 assignments, shared by both passes (the plan pass
 	 * narrows into it before recording, the replay pass reads records back
 	 * into it). Sized once for the root -- the first and largest node --
@@ -463,31 +465,31 @@ typedef struct RoutingTreeCtx
  * parallel leader's root-page write.
  */
 void
-mkt_centroid_write_node(
-		MktStorage				  *storage,
-		Dimension				   dim,
-		const float				  *cents,
-		uint32_t				   n,
-		MktCentroidFormat		   fmt,
-		uint8_t					   level,
-		uint16_t				   flags,
-		uint16_t				   child_count,
-		const RaBitQParams		  *rq_params,
-		const float				  *global_mean,
-		const BlockNumber		  *child_blks,
-		const float				  *leaf_pt,
-		BlockNumber				   blkno,
-		MktExactCentroidCollector *collector)
+prism_centroid_write_node(
+		MktStorage					*storage,
+		Dimension					 dim,
+		const float					*cents,
+		uint32_t					 n,
+		PrismCentroidFormat			 fmt,
+		uint8_t						 level,
+		uint16_t					 flags,
+		uint16_t					 child_count,
+		const RaBitQParams			*rq_params,
+		const float					*global_mean,
+		const BlockNumber			*child_blks,
+		const float					*leaf_pt,
+		BlockNumber					 blkno,
+		PrismExactCentroidCollector *collector)
 {
 	/* Every internal node of every build shape passes through here; the
 	 * leaf level (LEAF flag) is exact-re-ranked per row instead. */
-	if (collector != NULL && (flags & MKT_CENTROID_FLAG_LEAF) == 0)
-		mkt_exact_centroid_collector_add_node(collector, blkno, cents, n);
+	if (collector != NULL && (flags & PRISM_CENTROID_FLAG_LEAF) == 0)
+		prism_exact_centroid_collector_add_node(collector, blkno, cents, n);
 
 	if (fmt == MKT_CENTROID_FMT_FASTSCAN)
 		/* fastscan carries its own encoder; pt_centroids live on posting
 		 * pages, never inline. */
-		mkt_centroid_write_fastscan_pages(
+		prism_centroid_write_fastscan_pages(
 				storage,
 				dim,
 				n,
@@ -503,7 +505,7 @@ mkt_centroid_write_node(
 		CentroidEncoderState est;
 		CentroidEncoder		*enc = centroid_encoder_init(
 				&est, fmt, cents, dim, rq_params, global_mean);
-		mkt_centroid_write_pages(
+		prism_centroid_write_pages(
 				storage,
 				dim,
 				n,
@@ -548,10 +550,10 @@ write_node_pages(
 		bool			   is_leaf,
 		const BlockNumber *child_blks)
 {
-	uint16_t	flags = is_leaf ? MKT_CENTROID_FLAG_LEAF : 0;
+	uint16_t	flags = is_leaf ? PRISM_CENTROID_FLAG_LEAF : 0;
 	BlockNumber start = c->next_blk;
 
-	mkt_centroid_write_node(
+	prism_centroid_write_node(
 			c->storage,
 			c->dim,
 			cents,
@@ -579,9 +581,9 @@ write_node_pages(
  */
 /* Read exactly nbytes of a node record from the replay store. */
 static bool
-replay_read(struct MktBlobStore *store, void *dst, uint64_t nbytes)
+replay_read(struct PrismBlobStore *store, void *dst, uint64_t nbytes)
 {
-	return mkt_pbuild_blobstore_get(store, dst, nbytes) == nbytes;
+	return prism_pbuild_blobstore_get(store, dst, nbytes) == nbytes;
 }
 
 /*
@@ -632,12 +634,12 @@ record_node_clustering(
 	for (uint32_t v = 0; v < count; v++)
 		a16[v] = (uint16_t)km->assignments[v];
 
-	mkt_pbuild_blobstore_put(c->store, &km->nlist, sizeof(km->nlist));
-	mkt_pbuild_blobstore_put(
+	prism_pbuild_blobstore_put(c->store, &km->nlist, sizeof(km->nlist));
+	prism_pbuild_blobstore_put(
 			c->store,
 			km->centroids,
 			(uint64_t)km->nlist * c->dim * sizeof(float));
-	mkt_pbuild_blobstore_put(c->store, a16, assign_nbytes);
+	prism_pbuild_blobstore_put(c->store, a16, assign_nbytes);
 }
 
 /* Compact the non-empty clusters' centroids to the front, preserving
@@ -909,11 +911,11 @@ replay_node_recurse(RoutingTreeCtx *c, uint32_t count, uint32_t level)
  * tape and replay scratch. */
 static void
 routing_tree_ctx_init(
-		RoutingTreeCtx	 *c,
-		Dimension		  dim,
-		uint32_t		  nlist,
-		uint32_t		  fan_out,
-		MktCentroidFormat format)
+		RoutingTreeCtx	   *c,
+		Dimension			dim,
+		uint32_t			nlist,
+		uint32_t			fan_out,
+		PrismCentroidFormat format)
 {
 	memset(c, 0, sizeof(*c));
 	c->dim	   = dim;
@@ -921,25 +923,25 @@ routing_tree_ctx_init(
 	c->fan_out = fan_out < 2 ? 2 : fan_out;
 	c->nlevels = mkt_hkmeans_nlevels(nlist, c->fan_out);
 	c->format  = format;
-	c->max_ent = mkt_centroid_max_entries_fmt(dim, format);
-	c->fs_gpp  = mkt_centroid_fastscan_max_groups(dim);
+	c->max_ent = prism_centroid_max_entries_fmt(dim, format);
+	c->fs_gpp  = prism_centroid_fastscan_max_groups(dim);
 	c->ok	   = true;
 }
 
 /* Plan-pass entry ("write the tape"): cluster the sample once, record
  * every node, and return the layout totals -- see the header comment. */
 bool
-mkt_routing_tree_plan(
+prism_routing_tree_plan(
 		const float			*vectors,
 		uint32_t			 nvecs,
 		Dimension			 dim,
 		uint32_t			 nlist,
 		uint32_t			 fan_out,
 		DistanceMetric		 metric,
-		MktCentroidFormat	 format,
+		PrismCentroidFormat	 format,
 		const KMeansOptions *opts,
-		MktBlobStore		*store,
-		MktStreamTreePlan	*out)
+		PrismBlobStore		*store,
+		PrismStreamTreePlan *out)
 {
 	RoutingTreeCtx c;
 	routing_tree_ctx_init(&c, dim, nlist, fan_out, format);
@@ -1000,22 +1002,22 @@ mkt_routing_tree_plan(
 /* Replay-pass entry ("read the tape"): stream every centroid + head page
  * from the recorded nodes; returns the root block. */
 BlockNumber
-mkt_routing_tree_write(
-		MktStorage				  *storage,
-		uint32_t				   nvecs,
-		Dimension				   dim,
-		DistanceMetric			   metric,
-		uint32_t				   nlist,
-		uint32_t				   fan_out,
-		MktCentroidFormat		   format,
-		const RaBitQParams		  *rq_params,
-		const float				  *global_mean,
-		MktBlobStore			  *store,
-		BlockNumber				   first_posting,
-		BlockNumber				   first_centroid,
-		MktStreamLeafCb			   on_leaf,
-		void					  *on_leaf_arg,
-		MktExactCentroidCollector *collector)
+prism_routing_tree_write(
+		MktStorage					*storage,
+		uint32_t					 nvecs,
+		Dimension					 dim,
+		DistanceMetric				 metric,
+		uint32_t					 nlist,
+		uint32_t					 fan_out,
+		PrismCentroidFormat			 format,
+		const RaBitQParams			*rq_params,
+		const float					*global_mean,
+		PrismBlobStore				*store,
+		BlockNumber					 first_posting,
+		BlockNumber					 first_centroid,
+		PrismStreamLeafCb			 on_leaf,
+		void						*on_leaf_arg,
+		PrismExactCentroidCollector *collector)
 {
 	/* Replay never clusters: everything it needs is on the tape, so it
 	 * takes no sample vectors, metric or k-means options. */
@@ -1065,30 +1067,30 @@ mkt_routing_tree_write(
  * its reserved block range, mapping its leaves into the global leaf index
  * space -- see the header comment. */
 BlockNumber
-mkt_routing_subtree_write(
-		MktStorage				  *storage,
-		const HKMeansResult		  *subtree,
-		Dimension				   dim,
-		DistanceMetric			   metric,
-		uint32_t				   fan_out,
-		uint8_t					   level_offset,
-		MktCentroidFormat		   format,
-		const RaBitQParams		  *rq_params,
-		const float				  *global_mean,
-		BlockNumber				   first_posting,
-		uint32_t				   leaf_offset,
-		BlockNumber				   first_block,
-		MktStreamLeafCb			   on_leaf,
-		void					  *on_leaf_arg,
-		MktExactCentroidCollector *collector)
+prism_routing_subtree_write(
+		MktStorage					*storage,
+		const HKMeansResult			*subtree,
+		Dimension					 dim,
+		DistanceMetric				 metric,
+		uint32_t					 fan_out,
+		uint8_t						 level_offset,
+		PrismCentroidFormat			 format,
+		const RaBitQParams			*rq_params,
+		const float					*global_mean,
+		BlockNumber					 first_posting,
+		uint32_t					 leaf_offset,
+		BlockNumber					 first_block,
+		PrismStreamLeafCb			 on_leaf,
+		void						*on_leaf_arg,
+		PrismExactCentroidCollector *collector)
 {
-	uint32_t max_ent = mkt_centroid_max_entries_fmt(dim, format);
+	uint32_t max_ent = prism_centroid_max_entries_fmt(dim, format);
 
 	/* Lay the subtree's nodes out at reserved blocks starting at first_block
 	 * (BFS: node 0 = subtree root at first_block). */
 	BlockNumber *nfb = mkt_alloc(
 			(size_t)subtree->nnodes * sizeof(BlockNumber));
-	(void)mkt_compute_centroid_layout(subtree, max_ent, first_block, nfb);
+	(void)prism_compute_centroid_layout(subtree, max_ent, first_block, nfb);
 
 	/* Leaf entries link to formula-derived posting heads (first_posting +
 	 * global leaf index); leaf_offset maps the subtree's local leaf indices to
@@ -1105,7 +1107,7 @@ mkt_routing_subtree_write(
 			mkt_l2_normalize(lv + (size_t)li * dim, dim);
 	}
 
-	mkt_write_centroid_tree(
+	prism_write_centroid_tree(
 			storage,
 			subtree,
 			dim,
@@ -1135,7 +1137,7 @@ mkt_routing_subtree_write(
  * the partition count, falling to cbrt when that exceeds a page's worth of
  * children. */
 uint32_t
-mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out)
+prism_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out)
 {
 	if (fan_out != default_fan_out || nlist <= fan_out)
 		return (nlist <= fan_out) ? nlist : fan_out;
@@ -1148,11 +1150,11 @@ mkt_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out)
 
 /* Automatic partition count from the (estimated) row count. */
 uint32_t
-mkt_auto_nlist(double count)
+prism_auto_nlist(double count)
 {
 	/*
-	 * One list per MKT_TARGET_ENTRIES_PER_LIST vectors -- see the constant for
-	 * why that is the target. The hierarchical centroid tree keeps routing
+	 * One list per PRISM_TARGET_ENTRIES_PER_LIST vectors -- see the constant
+	 * for why that is the target. The hierarchical centroid tree keeps routing
 	 * cheap even at a high list count, so nlist scales linearly with the row
 	 * count.
 	 *
@@ -1163,7 +1165,7 @@ mkt_auto_nlist(double count)
 	 * ceiling.
 	 */
 	double	 c		   = count > 1.0 ? count : 1.0;
-	uint32_t linear	   = (uint32_t)(c / (double)MKT_TARGET_ENTRIES_PER_LIST +
+	uint32_t linear	   = (uint32_t)(c / (double)PRISM_TARGET_ENTRIES_PER_LIST +
 									0.5);
 	uint32_t min_lists = (uint32_t)sqrt(c);
 	uint32_t nlist	   = linear > min_lists ? linear : min_lists;
@@ -1172,17 +1174,17 @@ mkt_auto_nlist(double count)
 
 /*
  * Vectors per posting list at a given row count -- the resting size
- * maintenance aims each list at. Inverts mkt_auto_nlist so the two cannot
+ * maintenance aims each list at. Inverts prism_auto_nlist so the two cannot
  * drift apart; see the header for the sqrt-floor regime and the nlist == 0
  * convention.
  */
 uint32_t
-mkt_target_entries_per_list(double count, uint32_t nlist)
+prism_target_entries_per_list(double count, uint32_t nlist)
 {
 	double c = count > 1.0 ? count : 1.0;
 
 	if (nlist == 0)
-		nlist = mkt_auto_nlist(c);
+		nlist = prism_auto_nlist(c);
 	if (nlist < 1)
 		nlist = 1;
 
@@ -1194,7 +1196,7 @@ mkt_target_entries_per_list(double count, uint32_t nlist)
  * primary_cluster when the runner-up is not within epsilon (no replication
  * warranted) -- see the header comment. */
 uint32_t
-mkt_find_secondary_cluster(
+prism_find_secondary_cluster(
 		const uint32_t *cand_leaves,
 		const Distance *cand_dists,
 		uint32_t		ncand,
@@ -1245,7 +1247,7 @@ mkt_find_secondary_cluster(
  * entire (multi-hundred-MB) leaf-centroid array per replicated vector.
  */
 uint32_t
-mkt_find_soar_secondary(
+prism_find_soar_secondary(
 		const float	   *vec,
 		const float	   *leaf_centroids,
 		const uint32_t *cand_leaves,
@@ -1287,7 +1289,7 @@ mkt_find_soar_secondary(
 
 /* Log the per-phase build time summary. */
 void
-mkt_build_stats_print(const MktBuildStats *s)
+prism_build_stats_print(const PrismBuildStats *s)
 {
 	/* Per-phase breakdown — the single shared build summary, filled by both
 	 * the PostgreSQL build (via the build-progress seam) and the standalone

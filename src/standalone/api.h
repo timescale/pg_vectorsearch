@@ -13,19 +13,19 @@
 #include "index/index_build.h"
 #include "standalone/vec32_source.h"
 
-/* Opaque index handle (wraps MktIndex + MktQueryCtx) */
+/* Opaque index handle (wraps PrismIndex + PrismQueryCtx) */
 typedef struct MktHandle MktHandle;
 
 /* Index build statistics */
-typedef struct MktBuildInfo
+typedef struct PrismBuildInfo
 {
-	uint32_t	  nlist;	   /* actual number of clusters */
-	uint32_t	  nlevels;	   /* tree depth */
-	uint32_t	  nvecs;	   /* total vectors in index */
-	uint32_t	  max_cluster; /* largest cluster size */
-	uint32_t	  min_cluster; /* smallest cluster size */
-	MktBuildStats stats;	   /* phase timings + posting stats */
-} MktBuildInfo;
+	uint32_t		nlist;		 /* actual number of clusters */
+	uint32_t		nlevels;	 /* tree depth */
+	uint32_t		nvecs;		 /* total vectors in index */
+	uint32_t		max_cluster; /* largest cluster size */
+	uint32_t		min_cluster; /* smallest cluster size */
+	PrismBuildStats stats;		 /* phase timings + posting stats */
+} PrismBuildInfo;
 
 /*
  * Build an index by streaming vectors from a source.
@@ -44,19 +44,19 @@ typedef struct MktBuildInfo
  * Returns NULL on failure.
  */
 MktHandle *mkt_handle_create(
-		Vec32Source	 *src,
-		uint32_t	  nlist,
-		uint32_t	  fan_out,
-		const char	 *metric,
-		const char	 *centroid_fmt,
-		const char	 *posting_fmt,
-		uint32_t	  km_nredo,
-		uint32_t	  km_max_iter,
-		double		  soar_lambda,
-		double		  boundary_epsilon,
-		int			  fastscan,
-		int32_t		  nworkers,
-		MktBuildInfo *info);
+		Vec32Source	   *src,
+		uint32_t		nlist,
+		uint32_t		fan_out,
+		const char	   *metric,
+		const char	   *centroid_fmt,
+		const char	   *posting_fmt,
+		uint32_t		km_nredo,
+		uint32_t		km_max_iter,
+		double			soar_lambda,
+		double			boundary_epsilon,
+		int				fastscan,
+		int32_t			nworkers,
+		PrismBuildInfo *info);
 
 /*
  * Convenience: build from a flat float32 array.
@@ -64,21 +64,21 @@ MktHandle *mkt_handle_create(
  * Wraps the array in an MktArraySource and calls mkt_handle_create.
  */
 MktHandle *mkt_handle_create_from_array(
-		const float	 *vectors,
-		uint32_t	  nvecs,
-		uint32_t	  dim,
-		uint32_t	  nlist,
-		uint32_t	  fan_out,
-		const char	 *metric,
-		const char	 *centroid_fmt,
-		const char	 *posting_fmt,
-		uint32_t	  km_nredo,
-		uint32_t	  km_max_iter,
-		double		  soar_lambda,
-		double		  boundary_epsilon,
-		int			  fastscan,
-		int32_t		  nworkers,
-		MktBuildInfo *info);
+		const float	   *vectors,
+		uint32_t		nvecs,
+		uint32_t		dim,
+		uint32_t		nlist,
+		uint32_t		fan_out,
+		const char	   *metric,
+		const char	   *centroid_fmt,
+		const char	   *posting_fmt,
+		uint32_t		km_nredo,
+		uint32_t		km_max_iter,
+		double			soar_lambda,
+		double			boundary_epsilon,
+		int				fastscan,
+		int32_t			nworkers,
+		PrismBuildInfo *info);
 
 /*
  * Query the index for the k nearest neighbors.

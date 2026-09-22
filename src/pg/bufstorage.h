@@ -37,7 +37,7 @@ typedef struct MktPgStorage
 	uint32_t	   read_count; /* debug: total page reads */
 	/* Column type, from the opclass; rerank reads the heap attribute through
 	 * it. Resolved at init. */
-	const struct MktIndexTypeInfo *type_info;
+	const struct PrismIndexTypeInfo *type_info;
 } MktPgStorage;
 
 /*

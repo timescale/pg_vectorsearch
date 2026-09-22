@@ -177,14 +177,14 @@ require_index_owner(Relation index, LOCKMODE lockmode)
 static BlockNumber *
 centroid_child_ptr(Page page, uint16_t entry_idx, Dimension dim)
 {
-	if (mkt_centroid_page_format(page) == MKT_CENTROID_FMT_FASTSCAN)
+	if (prism_centroid_page_format(page) == MKT_CENTROID_FMT_FASTSCAN)
 	{
 		char	*content = (char *)PageGetContents(page);
 		uint32_t g		 = entry_idx / MKT_FASTSCAN_GROUP;
 		uint32_t slot	 = entry_idx % MKT_FASTSCAN_GROUP;
-		return &mkt_centroid_fastscan_group_child(content, g, dim)[slot];
+		return &prism_centroid_fastscan_group_child(content, g, dim)[slot];
 	}
-	return &mkt_centroid_meta_mut(page, entry_idx)->child_blkno;
+	return &prism_centroid_meta_mut(page, entry_idx)->child_blkno;
 }
 
 /*
@@ -327,7 +327,7 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	{
 		Buffer hbuf = ReadBuffer(index, leaves[i].posting_head);
 		LockBuffer(hbuf, BUFFER_LOCK_SHARE);
-		uint32_t cid = mkt_posting_opaque(BufferGetPage(hbuf))->cluster_id;
+		uint32_t cid = prism_posting_opaque(BufferGetPage(hbuf))->cluster_id;
 		UnlockReleaseBuffer(hbuf);
 		if (cid == (uint32_t)cluster_id)
 		{
@@ -355,9 +355,9 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	{
 		Buffer buf = ReadBuffer(index, old_head);
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
-		Page				  page = BufferGetPage(buf);
-		MktPostingPageOpaque *op   = mkt_posting_opaque(page);
-		bool already_fastscan = (op->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
+		Page					page = BufferGetPage(buf);
+		PrismPostingPageOpaque *op	 = prism_posting_opaque(page);
+		bool already_fastscan = (op->flags & PRISM_POSTING_PAGE_FASTSCAN) != 0;
 		UnlockReleaseBuffer(buf);
 
 		if (already_fastscan)
@@ -382,7 +382,7 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	storage.build_mode = false;
 
 	BlockNumber new_head =
-			mkt_posting_convert_to_fastscan(&storage.base, old_head, dim);
+			prism_posting_convert_to_fastscan(&storage.base, old_head, dim);
 
 	/*
 	 * Publish the new head, but only if a concurrent converter has not
@@ -419,7 +419,7 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 }
 
 /* ----------------------------------------------------------------
- * Heap vector fetch for re-clustering (the MktSplitEnv seam)
+ * Heap vector fetch for re-clustering (the PrismSplitEnv seam)
  * ---------------------------------------------------------------- */
 
 typedef struct PgSplitFetchCtx
@@ -485,11 +485,11 @@ pg_split_fetch_vector(
 }
 
 /*
- * Retire the split's old chain (the MktSplitEnv seam). Rather than tombstoning
- * it now — which would make scans skip a head a concurrent query may still be
- * about to read from a stale pre-flip pointer — mark each page DELETED and
- * stamp the head with the current next-XID. The chain stays linked and
- * readable; VACUUM physically retires it once that XID clears the global
+ * Retire the split's old chain (the PrismSplitEnv seam). Rather than
+ * tombstoning it now — which would make scans skip a head a concurrent query
+ * may still be about to read from a stale pre-flip pointer — mark each page
+ * DELETED and stamp the head with the current next-XID. The chain stays linked
+ * and readable; VACUUM physically retires it once that XID clears the global
  * visibility horizon (see mkt_rebalance). Scans read DELETED pages
  * (only TOMBSTONED is skipped), so an in-flight scanner still sees the full
  * old list.
@@ -510,9 +510,9 @@ pg_prefetch_vector(void *ctx, ItemPointerData tid)
 }
 
 static void
-retire_page(MktPostingPageOpaque *op, void *state)
+retire_page(PrismPostingPageOpaque *op, void *state)
 {
-	op->flags |= MKT_POSTING_PAGE_DELETED;
+	op->flags |= PRISM_POSTING_PAGE_DELETED;
 	/* delete_xid overlays live_count/tail_blkno, unused once retired. */
 	op->delete_xid = *(const uint64 *)state;
 }
@@ -531,7 +531,7 @@ pg_retire_chain(void *ctx, MktStorage *posting_storage, BlockNumber head)
 	 */
 	uint64 dxid = U64FromFullTransactionId(GetTopFullTransactionId());
 
-	mkt_posting_chain_mutate(posting_storage, head, retire_page, &dxid);
+	prism_posting_chain_mutate(posting_storage, head, retire_page, &dxid);
 }
 
 /* ----------------------------------------------------------------
@@ -571,7 +571,7 @@ persist_ncentroid_pages(MktStorage *storage, uint32_t ncentroid_pages)
 
 /*
  * Persist the leaf count, so the ids counted from it survive a crash that
- * leaves the new leaves reachable -- see MktSplitEnv.reserve_nlist. The
+ * leaves the new leaves reachable -- see PrismSplitEnv.reserve_nlist. The
  * storage handle is reached through the split's fetch context, which is the
  * only context the seam carries.
  */
@@ -584,7 +584,7 @@ pg_reserve_nlist(void *ctx, uint32_t nlist)
 }
 
 static void
-require_supported_shape(Relation index, MktIndexBase *base)
+require_supported_shape(Relation index, PrismIndexBase *base)
 {
 	if (base->nlevels != 1 || base->centroid_format != MKT_CENTROID_FMT_RABITQ)
 	{
@@ -604,7 +604,7 @@ require_supported_shape(Relation index, MktIndexBase *base)
  * the budget an operator already raises for index work, and the same knob the
  * bulk build sizes its clustering sample from. A split streams the list, so
  * this bounds its memory whatever the list's size -- see
- * mkt_split_sample_cap, which turns the budget into a sample size after
+ * prism_split_sample_cap, which turns the budget into a sample size after
  * reserving what clustering costs alongside it.
  */
 static uint64_t
@@ -621,10 +621,10 @@ maint_memory_budget(void)
 static void
 require_memory_budget(Relation index, Dimension dim)
 {
-	if (mkt_split_sample_cap(maint_memory_budget(), dim) > 0)
+	if (prism_split_sample_cap(maint_memory_budget(), dim) > 0)
 		return;
 
-	uint64 need = mkt_split_min_budget_bytes(dim);
+	uint64 need = prism_split_min_budget_bytes(dim);
 	char  *name = pstrdup(RelationGetRelationName(index));
 
 	ereport(ERROR,
@@ -654,8 +654,8 @@ static bool
 page_is_posting(Page page)
 {
 	return !PageIsNew(page) &&
-		   PageGetSpecialSize(page) == sizeof(MktPostingPageOpaque) &&
-		   mkt_posting_opaque(page)->page_id == MKT_POSTING_PAGE_ID;
+		   PageGetSpecialSize(page) == sizeof(PrismPostingPageOpaque) &&
+		   prism_posting_opaque(page)->page_id == PRISM_POSTING_PAGE_ID;
 }
 
 /*
@@ -665,25 +665,25 @@ page_is_posting(Page page)
  * drift.
  */
 static bool
-posting_head_is_live(const MktPostingPageOpaque *op)
+posting_head_is_live(const PrismPostingPageOpaque *op)
 {
-	return (op->flags & MKT_POSTING_PAGE_FIRST) &&
-		   !(op->flags & MKT_POSTING_PAGE_TOMBSTONED) &&
-		   !(op->flags & MKT_POSTING_PAGE_DELETED);
+	return (op->flags & PRISM_POSTING_PAGE_FIRST) &&
+		   !(op->flags & PRISM_POSTING_PAGE_TOMBSTONED) &&
+		   !(op->flags & PRISM_POSTING_PAGE_DELETED);
 }
 
 /*
  * Split the posting head at `head` if it is a live first page and, when
  * target > 0, holds more entries than the split trigger
- * (mkt_split_trigger). Serialized against inserts to the same
+ * (prism_split_trigger). Serialized against inserts to the same
  * cluster by the head page lock. Returns true and fills *res if a split
  * happened.
  *
  * The live_count test here is only a cheap early-out on a page already read.
- * The authoritative check is inside mkt_posting_split, against the entry count
- * after collection: live_count does not account for entries whose vector can
- * no longer be fetched, so a list can look oversized here and turn out not to
- * be.
+ * The authoritative check is inside prism_posting_split, against the entry
+ * count after collection: live_count does not account for entries whose vector
+ * can no longer be fetched, so a list can look oversized here and turn out not
+ * to be.
  *
  * target also sets the width -- round(count / target) parts, so each new list
  * rests at the target with room to grow back to the trigger. With target == 0
@@ -691,31 +691,31 @@ posting_head_is_live(const MktPostingPageOpaque *op)
  */
 static bool
 split_one_head(
-		Relation		 index,
-		MktIndexBase	*base,
-		PgSplitFetchCtx *fc,
-		BlockNumber		 head,
-		uint32_t		 target,
-		MktSplitResult	*res)
+		Relation		  index,
+		PrismIndexBase	 *base,
+		PgSplitFetchCtx	 *fc,
+		BlockNumber		  head,
+		uint32_t		  target,
+		PrismSplitResult *res)
 {
 	LockPage(index, head, ExclusiveLock);
 
 	Page p		   = mkt_storage_read_page(base->posting_storage, head);
 	bool live_head = page_is_posting(p) &&
-					 posting_head_is_live(mkt_posting_opaque(p));
+					 posting_head_is_live(prism_posting_opaque(p));
 	/* live_count is meaningful only when the head is live: delete_xid overlays
 	 * it once DELETED, which posting_head_is_live excludes. */
-	uint32_t live = live_head ? mkt_posting_opaque(p)->live_count : 0;
+	uint32_t live = live_head ? prism_posting_opaque(p)->live_count : 0;
 	mkt_storage_release_page(base->posting_storage, head);
 
 	if (!live_head ||
-		(target > 0 && (uint64_t)live <= mkt_split_trigger(target)))
+		(target > 0 && (uint64_t)live <= prism_split_trigger(target)))
 	{
 		UnlockPage(index, head, ExclusiveLock);
 		return false;
 	}
 
-	MktSplitEnv env = {
+	PrismSplitEnv env = {
 			.fetch_vector	 = pg_split_fetch_vector,
 			.prefetch_vector = pg_prefetch_vector,
 			.retire_chain	 = pg_retire_chain,
@@ -736,11 +736,11 @@ split_one_head(
 	 */
 	INJECTION_POINT("prism-split-locked", NULL);
 
-	MktSplitConfig cfg = {
+	PrismSplitConfig cfg = {
 			.target_entries		 = target,
 			.sample_budget_bytes = maint_memory_budget(),
 	};
-	int rc = mkt_posting_split(base, head, &cfg, &env, res);
+	int rc = prism_posting_split(base, head, &cfg, &env, res);
 
 	UnlockPage(index, head, ExclusiveLock);
 
@@ -751,8 +751,8 @@ split_one_head(
  * Resolve the resting list size maintenance should aim at.
  *
  * Derived from the row count alone, deliberately ignoring the nlist
- * reloption. Above MKT_TARGET_ENTRIES_PER_LIST^2 rows that is the flat
- * target; below it the sqrt floor in mkt_auto_nlist makes it smaller, which
+ * reloption. Above PRISM_TARGET_ENTRIES_PER_LIST^2 rows that is the flat
+ * target; below it the sqrt floor in prism_auto_nlist makes it smaller, which
  * is the regime where a hardcoded target would fight the build and merge a
  * small index down to too few lists.
  *
@@ -770,19 +770,19 @@ split_one_head(
  * VACUUM-driven, nothing would ever revisit it.
  *
  * A list should rest at the size that keeps a probe's cost flat, which is
- * what MKT_TARGET_ENTRIES_PER_LIST is for. nlist stays what the user asked
+ * what PRISM_TARGET_ENTRIES_PER_LIST is for. nlist stays what the user asked
  * the *build* for; it is not a maintenance policy.
  */
 static uint32_t
 resolve_target_entries(Relation heap)
 {
-	return mkt_target_entries_per_list(prism_estimate_heap_tuples(heap), 0);
+	return prism_target_entries_per_list(prism_estimate_heap_tuples(heap), 0);
 }
 
 /* Common setup: base + storage + heap fetch context. */
 typedef struct MaintCtx
 {
-	MktIndexBase	base;
+	PrismIndexBase	base;
 	MktPgStorage	storage;
 	Relation		heap;
 	PgSplitFetchCtx fetch;
@@ -831,11 +831,11 @@ maint_begin(Relation index, MaintCtx *m)
  */
 static bool
 split_one_head_in_scratch(
-		Relation		index,
-		MaintCtx	   *m,
-		BlockNumber		head,
-		uint32_t		target,
-		MktSplitResult *res)
+		Relation		  index,
+		MaintCtx		 *m,
+		BlockNumber		  head,
+		uint32_t		  target,
+		PrismSplitResult *res)
 {
 	MemoryContext old = MemoryContextSwitchTo(m->split_ctx);
 	bool did = split_one_head(index, &m->base, &m->fetch, head, target, res);
@@ -991,8 +991,8 @@ mkt_split_posting_list(PG_FUNCTION_ARGS)
 	maint_begin(index, &m);
 	require_memory_budget(index, m.base.dim);
 
-	MktSplitResult res;
-	bool		   did =
+	PrismSplitResult res;
+	bool			 did =
 			split_one_head_in_scratch(index, &m, (BlockNumber)blk64, 0, &res);
 
 	maint_end(index, &m, did);
@@ -1037,7 +1037,7 @@ mkt_split_posting_list(PG_FUNCTION_ARGS)
  *
  * target_entries is the size a list *rests* at, not a bound it never crosses.
  * A list is left alone until it reaches target_entries *
- * MKT_SPLIT_TRIGGER_FACTOR, so the operating band is
+ * PRISM_SPLIT_TRIGGER_FACTOR, so the operating band is
  * [target/factor, target*factor] with the target at its centre: room to absorb
  * inserts and deletes, and room for the unevenness of a k-means split.
  * Pinning the trigger at the target instead
@@ -1091,7 +1091,7 @@ mkt_rebalance(PG_FUNCTION_ARGS)
 
 	uint32_t target	 = target_given ? (uint32_t)target_arg
 									: resolve_target_entries(m.heap);
-	uint64_t trigger = mkt_split_trigger(target);
+	uint64_t trigger = prism_split_trigger(target);
 
 	BlockNumber nblocks	   = RelationGetNumberOfBlocks(index);
 	BlockNumber start	   = Max(m.base.first_posting, 1);
@@ -1104,12 +1104,12 @@ mkt_rebalance(PG_FUNCTION_ARGS)
 
 		Page p		 = mkt_storage_read_page(&m.storage.base, blk);
 		bool posting = page_is_posting(p);
-		const MktPostingPageOpaque *op = posting ? mkt_posting_opaque(p)
-												 : NULL;
+		const PrismPostingPageOpaque *op = posting ? prism_posting_opaque(p)
+												   : NULL;
 
-		bool is_head = posting && (op->flags & MKT_POSTING_PAGE_FIRST) &&
-					   !(op->flags & MKT_POSTING_PAGE_TOMBSTONED);
-		bool retired   = is_head && (op->flags & MKT_POSTING_PAGE_DELETED);
+		bool is_head = posting && (op->flags & PRISM_POSTING_PAGE_FIRST) &&
+					   !(op->flags & PRISM_POSTING_PAGE_TOMBSTONED);
+		bool retired   = is_head && (op->flags & PRISM_POSTING_PAGE_DELETED);
 		bool candidate = is_head && !retired &&
 						 (uint64_t)op->live_count > trigger;
 		/* delete_xid overlays live_count and is meaningful only when DELETED.
@@ -1120,10 +1120,10 @@ mkt_rebalance(PG_FUNCTION_ARGS)
 		if (candidate)
 		{
 			/* Pass the target so split_one_head re-checks under the head
-			 * lock and mkt_posting_split re-checks again after collection --
+			 * lock and prism_posting_split re-checks again after collection --
 			 * the list may have shrunk since the unlocked read above, and
 			 * live_count does not see unfetchable entries at all. */
-			MktSplitResult res;
+			PrismSplitResult res;
 			if (split_one_head_in_scratch(index, &m, blk, target, &res))
 				nsplits++;
 		}
@@ -1134,7 +1134,7 @@ mkt_rebalance(PG_FUNCTION_ARGS)
 			/* No snapshot can still hold a stale pointer into this chain, so
 			 * it is safe to physically retire it (its own commits are durable
 			 * independent of maint_end, which only persists nlist). */
-			mkt_posting_chain_tombstone(&m.storage.base, blk);
+			prism_posting_chain_tombstone(&m.storage.base, blk);
 			nreclaimed++;
 		}
 	}

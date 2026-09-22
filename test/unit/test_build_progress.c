@@ -18,9 +18,9 @@ TEST_GROUP(BuildProgress);
 /* Every value in [INITIALIZE, MAX] maps to a non-empty name. */
 TEST(every_phase_has_a_name)
 {
-	for (int p = MKT_BUILD_PHASE_INITIALIZE; p <= MKT_BUILD_PHASE_MAX; p++)
+	for (int p = PRISM_BUILD_PHASE_INITIALIZE; p <= PRISM_BUILD_PHASE_MAX; p++)
 	{
-		const char *name = mkt_build_phase_name(p);
+		const char *name = prism_build_phase_name(p);
 		ASSERT_NOT_NULL(name, "every phase value has a name");
 		ASSERT_TRUE(name[0] != '\0', "phase name is non-empty");
 	}
@@ -29,10 +29,10 @@ TEST(every_phase_has_a_name)
 /* Out-of-range values return NULL rather than crashing / reading garbage. */
 TEST(out_of_range_is_null)
 {
-	ASSERT_NULL(mkt_build_phase_name(0), "value 0 has no name");
-	ASSERT_NULL(mkt_build_phase_name(-1), "negative value has no name");
+	ASSERT_NULL(prism_build_phase_name(0), "value 0 has no name");
+	ASSERT_NULL(prism_build_phase_name(-1), "negative value has no name");
 	ASSERT_NULL(
-			mkt_build_phase_name(MKT_BUILD_PHASE_MAX + 1),
+			prism_build_phase_name(PRISM_BUILD_PHASE_MAX + 1),
 			"value above max has no name");
 }
 
@@ -40,11 +40,11 @@ TEST(out_of_range_is_null)
 TEST(frozen_phase_strings)
 {
 	ASSERT_TRUE(
-			strcmp(mkt_build_phase_name(MKT_BUILD_PHASE_SCAN),
+			strcmp(prism_build_phase_name(PRISM_BUILD_PHASE_SCAN),
 				   "scanning table") == 0,
 			"SCAN string is frozen");
 	ASSERT_TRUE(
-			strcmp(mkt_build_phase_name(MKT_BUILD_PHASE_SCAN_PARALLEL),
+			strcmp(prism_build_phase_name(PRISM_BUILD_PHASE_SCAN_PARALLEL),
 				   "scanning table (parallel)") == 0,
 			"SCAN_PARALLEL string is frozen");
 }

@@ -96,7 +96,7 @@ permutation m1_reb d_drop o_wake o_gone
 # REINDEX likewise waits, and what it rebuilds to is the point. The split
 # cleared the nlist reloption -- the declaration no longer described an index
 # it had just re-partitioned -- so the rebuild sizes from the row count
-# instead: mkt_auto_nlist(60) is max(60/256, sqrt(60)) = 7. Were the
+# instead: prism_auto_nlist(60) is max(60/256, sqrt(60)) = 7. Were the
 # reloption still there, REINDEX would come back to the single list the
 # fixture declared and undo the split entirely, which is the regression this
 # pins. (Ordering is the other half: the two never interleave.)

@@ -51,15 +51,15 @@ ps_cov_cb(void *state, ItemPointerData tid, const float *vec)
 
 typedef struct
 {
-	MktParallelScan *ps;
-	PSCovArg		*arg;
+	PrismParallelScan *ps;
+	PSCovArg		  *arg;
 } PSThreadArg;
 
 static void *
 ps_thread(void *p)
 {
 	PSThreadArg *t = (PSThreadArg *)p;
-	mkt_parallel_scan_run(t->ps, ps_cov_cb, t->arg);
+	prism_parallel_scan_run(t->ps, ps_cov_cb, t->arg);
 	return NULL;
 }
 
@@ -74,8 +74,8 @@ TEST(worksteal_covers_every_vector_once)
 	_Atomic(uint32_t)  tid_errors = 0;
 	_Atomic(uint32_t)  ptr_errors = 0;
 
-	MktParallelScan ps;
-	mkt_parallel_scan_init(&ps, vectors, PS_NVECS, PS_DIM);
+	PrismParallelScan ps;
+	prism_parallel_scan_init(&ps, vectors, PS_NVECS, PS_DIM);
 
 	PSCovArg arg = {
 			.base		= vectors,
@@ -126,8 +126,8 @@ TEST(single_thread_covers_all)
 	float	*vectors = calloc((size_t)nvecs * PS_DIM, sizeof(float));
 	uint32_t visited = 0;
 
-	MktParallelScan ps;
-	mkt_parallel_scan_init(&ps, vectors, nvecs, PS_DIM);
+	PrismParallelScan ps;
+	prism_parallel_scan_init(&ps, vectors, nvecs, PS_DIM);
 
 	/* Reuse the coverage callback machinery via a local counter. */
 	_Atomic(uint32_t) *counts	  = calloc(nvecs, sizeof(_Atomic(uint32_t)));
@@ -143,7 +143,7 @@ TEST(single_thread_covers_all)
 
 	/* counts is sized nvecs, but ps_cov_cb bounds-checks against PS_NVECS;
 	 * 777 < PS_NVECS so the index check passes. */
-	mkt_parallel_scan_run(&ps, ps_cov_cb, &arg);
+	prism_parallel_scan_run(&ps, ps_cov_cb, &arg);
 
 	for (uint32_t i = 0; i < nvecs; i++)
 		if (atomic_load(&counts[i]) == 1)

@@ -36,7 +36,7 @@ typedef struct PrismMetaPage
 	uint32_t	magic;			 /* MKT_META_MAGIC */
 	Dimension	dim;			 /* vector dimension */
 	uint8_t		nlevels;		 /* centroid tree depth */
-	uint8_t		centroid_format; /* MktCentroidFormat */
+	uint8_t		centroid_format; /* PrismCentroidFormat */
 	BlockNumber first_centroid;	 /* root centroid page */
 	BlockNumber first_posting;	 /* first posting page (one past the last
 								  * centroid page); lets VACUUM skip the whole
@@ -44,7 +44,7 @@ typedef struct PrismMetaPage
 	uint32_t nlist;				 /* number of leaf centroids */
 	/*
 	 * Centroid pages reachable from first_centroid. Maintained rather than
-	 * derived: the region a build reserves is [MKT_FIRST_CENTROID_BLKNO,
+	 * derived: the region a build reserves is [PRISM_FIRST_CENTROID_BLKNO,
 	 * first_posting), but a split with no room on a level-0 page extends the
 	 * relation and chains the new page past the posting region, so a block
 	 * range stops measuring it. prism.rebalance folds each split's additions

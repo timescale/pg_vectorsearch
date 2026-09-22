@@ -21,8 +21,8 @@
  *
  *   // Build (write path)
  *   Page page = mkt_storage_new_page(s, &blkno);
- *   mkt_centroid_page_init(page, level);
- *   mkt_centroid_page_add(page, dim, ...);
+ *   prism_centroid_page_init(page, level);
+ *   prism_centroid_page_add(page, dim, ...);
  *   mkt_storage_commit_page(s, blkno);
  */
 

@@ -1,9 +1,9 @@
 /*
  * parallel_scan_standalone.c - Work-stealing vector scan over an array
  *
- * Standalone implementation of the parallel build scan (see mkt_build_scan.h).
- * PG builds scan the heap via table_index_build_scan instead, so this file is
- * compiled only for standalone.
+ * Standalone implementation of the parallel build scan (see
+ * prism_build_scan.h). PG builds scan the heap via table_index_build_scan
+ * instead, so this file is compiled only for standalone.
  */
 
 #ifdef MKT_STANDALONE
@@ -11,11 +11,11 @@
 #include "standalone/parallel_scan.h"
 
 void
-mkt_parallel_scan_init(
-		MktParallelScan *ps,
-		const float		*vectors,
-		uint32_t		 nvecs,
-		Dimension		 dim)
+prism_parallel_scan_init(
+		PrismParallelScan *ps,
+		const float		  *vectors,
+		uint32_t		   nvecs,
+		Dimension		   dim)
 {
 	ps->vectors = vectors;
 	ps->nvecs	= nvecs;
@@ -24,20 +24,21 @@ mkt_parallel_scan_init(
 }
 
 double
-mkt_parallel_scan_run(MktParallelScan *ps, MktBuildScanCb cb, void *state)
+prism_parallel_scan_run(
+		PrismParallelScan *ps, PrismBuildScanCb cb, void *state)
 {
 	Dimension dim	  = ps->dim;
 	double	  scanned = 0;
 
 	for (;;)
 	{
-		uint32_t start = atomic_fetch_add(&ps->cursor, MKT_BUILD_SCAN_CHUNK);
+		uint32_t start = atomic_fetch_add(&ps->cursor, PRISM_BUILD_SCAN_CHUNK);
 		uint32_t end;
 
 		if (start >= ps->nvecs)
 			break;
 
-		end = start + MKT_BUILD_SCAN_CHUNK;
+		end = start + PRISM_BUILD_SCAN_CHUNK;
 		if (end > ps->nvecs)
 			end = ps->nvecs;
 
