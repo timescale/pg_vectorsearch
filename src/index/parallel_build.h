@@ -166,10 +166,10 @@ typedef struct PrismBuildShared
 	 * seam); workers read it after the ring barrier. */
 	uint64_t subtree_slot_size;
 
-	/* Page-backed routing knobs (mirror the mkt.centroid_* GUCs), so phase-3
-	 * workers build a PrismIndexBase that routes identically to the query
-	 * path. fastscan_bits is the FASTSCAN centroid bit width (base.fastscan
-	 * when the centroid format is FASTSCAN; 0 otherwise). */
+	/* Page-backed routing knobs (mirror the prism.centroid_* GUCs), so
+	 * phase-3 workers build a PrismIndexBase that routes identically to
+	 * the query path. fastscan_bits is the FASTSCAN centroid bit width
+	 * (base.fastscan when the centroid format is FASTSCAN; 0 otherwise). */
 	float centroid_error_scale;
 	float centroid_beam_scale;
 	int	  fastscan_bits;

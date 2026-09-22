@@ -40,7 +40,7 @@ if ($node->psql('postgres', 'CREATE EXTENSION injection_points') != 0)
 
 $node->safe_psql('postgres', 'CREATE EXTENSION pg_vectorsearch');
 $node->safe_psql('postgres',
-	'ALTER DATABASE postgres SET search_path = mkt, prism, public');
+	'ALTER DATABASE postgres SET search_path = vectorsearch, prism, public');
 
 # Points spread along one axis: deterministic, and with enough structure that
 # clustering has something to find.

@@ -102,8 +102,8 @@ explicitly as its own concern:
 - **Naming consistency.** Do new function, type, and variable names match
   this codebase's existing conventions — checked against neighboring code,
   not just consistency within the new diff? E.g. the `mkt_` prefix is for
-  C symbols only; SQL-visible names are namespaced by the `mkt` schema
-  and should not repeat that prefix.
+  C symbols only; SQL-visible names are namespaced by the `vectorsearch`
+  schema and should not repeat that prefix.
 - **Public API surface especially.** New SQL functions, views, or GUCs
   deserve more scrutiny than internal code — their names, argument order,
   and return shapes should read as if they belong next to the existing

@@ -332,13 +332,14 @@ NOTICE:  rebalance: split 0 posting list(s), reclaimed 1 retired chain(s)
 -- Ownership gate: both mutating maintenance procedures require ownership of the
 -- underlying table, not merely SELECT, and the owner check runs before any
 -- other validation. EXECUTE is granted to PUBLIC; USAGE on prism is only
--- needed to reach the procedures. USAGE on mkt is unrelated to those
--- procedures, but is needed too: split_test/split_idx above were created
--- unqualified while mkt led the search_path, so (as a superuser bypassing
--- schema privilege checks) that is where they landed.
+-- needed to reach the procedures. USAGE on vectorsearch is unrelated to
+-- those procedures, but is needed too: split_test/split_idx above were
+-- created unqualified while vectorsearch led the search_path, so (as a
+-- superuser bypassing schema privilege checks) that is where they
+-- landed.
 CREATE ROLE regress_split_unpriv NOLOGIN;
 GRANT USAGE ON SCHEMA prism TO regress_split_unpriv;
-GRANT USAGE ON SCHEMA mkt TO regress_split_unpriv;
+GRANT USAGE ON SCHEMA vectorsearch TO regress_split_unpriv;
 GRANT SELECT ON split_test TO regress_split_unpriv;
 SET ROLE regress_split_unpriv;
 CALL prism.split_posting_list('split_idx', 1);
@@ -348,7 +349,7 @@ ERROR:  must be owner of table split_test
 RESET ROLE;
 REVOKE SELECT ON split_test FROM regress_split_unpriv;
 REVOKE USAGE ON SCHEMA prism FROM regress_split_unpriv;
-REVOKE USAGE ON SCHEMA mkt FROM regress_split_unpriv;
+REVOKE USAGE ON SCHEMA vectorsearch FROM regress_split_unpriv;
 DROP ROLE regress_split_unpriv;
 -- The two shapes incremental split declines, which are also the two shapes
 -- CREATE INDEX hands you by default: centroid pages are packed for fastscan

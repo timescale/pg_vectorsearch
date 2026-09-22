@@ -331,12 +331,13 @@ DROP TABLE tc_fastscan;
 
 CREATE ROLE regress_inspect_unpriv NOLOGIN;
 -- USAGE on prism is required just to reach the functions; it is
--- orthogonal to the per-table authorization exercised here. USAGE on mkt
--- is unrelated to those functions, but is needed too: embeddings/idx_l2c
--- above were created unqualified while mkt led the search_path, so (as a
--- superuser bypassing schema privilege checks) that is where they landed.
+-- orthogonal to the per-table authorization exercised here. USAGE on
+-- vectorsearch is unrelated to those functions, but is needed too:
+-- embeddings/idx_l2c above were created unqualified while vectorsearch
+-- led the search_path, so (as a superuser bypassing schema privilege
+-- checks) that is where they landed.
 GRANT USAGE ON SCHEMA prism TO regress_inspect_unpriv;
-GRANT USAGE ON SCHEMA mkt TO regress_inspect_unpriv;
+GRANT USAGE ON SCHEMA vectorsearch TO regress_inspect_unpriv;
 
 SET ROLE regress_inspect_unpriv;
 
@@ -372,7 +373,7 @@ RESET ROLE;
 
 REVOKE SELECT ON embeddings FROM regress_inspect_unpriv;
 REVOKE USAGE ON SCHEMA prism FROM regress_inspect_unpriv;
-REVOKE USAGE ON SCHEMA mkt FROM regress_inspect_unpriv;
+REVOKE USAGE ON SCHEMA vectorsearch FROM regress_inspect_unpriv;
 DROP ROLE regress_inspect_unpriv;
 
 -- Cleanup
@@ -460,20 +461,22 @@ DROP TABLE embeddings;
 DROP TABLE wide;
 
 -- ---------------------------------------------------------------------
--- mkt.git_commit() — exposes the git commit the extension was built
--- from. Verify the contract without printing the actual hash so the
--- expected output stays deterministic across builds. Fixed in mkt: an
--- administration/inspection function, not part of the vec32/vec16 type
--- API, so it does not follow @extschema@.
+-- vectorsearch.git_commit() — exposes the git commit the extension was
+-- built from. Verify the contract without printing the actual hash so
+-- the expected output stays deterministic across builds. Fixed in
+-- vectorsearch: an administration/inspection function, not part of the
+-- vec32/vec16 type API, so it does not follow @extschema@.
 -- ---------------------------------------------------------------------
 
 -- Format: 40-char lowercase hex (git's full SHA-1) or the "unknown"
 -- fallback used when vcs_tag had no git checkout available.
-SELECT mkt.git_commit() ~ '^([0-9a-f]{40}|unknown)$' AS valid_format;
+SELECT vectorsearch.git_commit() ~ '^([0-9a-f]{40}|unknown)$'
+    AS valid_format;
 
 -- Callers (e.g. rekall) use this as a string, so the return type
 -- must be text.
-SELECT pg_typeof(mkt.git_commit())::text = 'text' AS returns_text;
+SELECT pg_typeof(vectorsearch.git_commit())::text = 'text'
+    AS returns_text;
 
 -- The function must be IMMUTABLE STRICT PARALLEL SAFE — the commit
 -- doesn't change within a single backend's lifetime, the input is
@@ -485,28 +488,29 @@ SELECT
     p.proparallel      = 's' AS parallel_safe
 FROM pg_proc p
 JOIN pg_namespace n ON n.oid = p.pronamespace
-WHERE n.nspname = 'mkt' AND p.proname = 'git_commit';
+WHERE n.nspname = 'vectorsearch' AND p.proname = 'git_commit';
 
 -- ---------------------------------------------------------------------
--- mkt.extension_name() / mkt.extension_version() — the extension name
--- and version the loaded library was built as.
+-- vectorsearch.extension_name() / vectorsearch.extension_version() —
+-- the extension name and version the loaded library was built as.
 -- ---------------------------------------------------------------------
 
-SELECT mkt.extension_name();
+SELECT vectorsearch.extension_name();
 
 -- The binary's version must match the installed extension's version;
 -- a mismatch means the library and the SQL scripts come from
 -- different builds (e.g. a stale install).
-SELECT mkt.extension_version() =
+SELECT vectorsearch.extension_version() =
     (SELECT extversion FROM pg_extension
-     WHERE extname = mkt.extension_name())
+     WHERE extname = vectorsearch.extension_name())
     AS version_matches_extension;
 
--- Same contract as mkt.git_commit() above: consumed as strings (e.g.
--- by rekall), so both must return text and be IMMUTABLE STRICT
--- PARALLEL SAFE.
-SELECT pg_typeof(mkt.extension_name())::text = 'text' AND
-       pg_typeof(mkt.extension_version())::text = 'text' AS returns_text;
+-- Same contract as vectorsearch.git_commit() above: consumed as
+-- strings (e.g. by rekall), so both must return text and be IMMUTABLE
+-- STRICT PARALLEL SAFE.
+SELECT pg_typeof(vectorsearch.extension_name())::text = 'text' AND
+       pg_typeof(vectorsearch.extension_version())::text = 'text'
+    AS returns_text;
 
 SELECT
     p.proname,
@@ -515,6 +519,6 @@ SELECT
     p.proparallel      = 's' AS parallel_safe
 FROM pg_proc p
 JOIN pg_namespace n ON n.oid = p.pronamespace
-WHERE n.nspname = 'mkt'
+WHERE n.nspname = 'vectorsearch'
   AND p.proname IN ('extension_name', 'extension_version')
 ORDER BY p.proname;
