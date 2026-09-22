@@ -48,8 +48,8 @@ typedef struct {
     uint32 nworkers;
     const HKMeansResult *tree;       // read-only, shared
     const float *global_mean;        // read-only, shared
-    const MktIndexConfig *config;    // read-only, shared
-    MktPostingBuilder *builders;     // per-cluster builders with interleaved pages
+    const PrismIndexConfig *config;    // read-only, shared
+    PrismPostingBuilder *builders;     // per-cluster builders with interleaved pages
 } MktBuildWorkerState;
 
 void mkt_build_worker_init(MktBuildWorkerState *state, ...);
@@ -225,11 +225,11 @@ new `src/index/build_parallel.h`
 
 4. Shared memory layout:
    ```
-   MktBuildShared:
+   PrismBuildShared:
      - heaprelid, indexrelid
      - HKMeansResult (centroid tree, read-only after k-means)
      - global_mean vector (read-only)
-     - MktIndexConfig (read-only)
+     - PrismIndexConfig (read-only)
      - ParallelTableScanDesc (for coordinated heap scan)
      - per-cluster reserved page ranges (read-only)
      - ConditionVariable workersdonecv

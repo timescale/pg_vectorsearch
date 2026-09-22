@@ -533,7 +533,7 @@ providing both performance isolation and predictable access patterns.
 ```
 
 **Beam search**: Centroid routing uses level-by-level beam search
-(`mkt_centroid_beam_search`) rather than best-first search. This maps well
+(`prism_centroid_beam_search`) rather than best-first search. This maps well
 to PostgreSQL's page-based buffer cache: each level is processed as a batch,
 enabling SIMD distance computation on entries within each page.
 Upper-level pages stay hot in `shared_buffers` since they are accessed on
@@ -557,7 +557,7 @@ full rebuilds.
 > is immutable); the scan merges base + appended pages by per-page format.
 > `DELETE` relies on MVCC for correctness (the executor's heap recheck hides
 > dead/invisible TIDs the index returns) and on `VACUUM` for cleanup:
-> `ambulkdelete` tombstones dead entries (`MKT_POSTING_FLAG_DELETED`, skipped by
+> `ambulkdelete` tombstones dead entries (`PRISM_POSTING_FLAG_DELETED`, skipped by
 > later scans); physical reclaim is deferred to a later compaction/rebuild.
 > `UPDATE` is just insert-new + delete-old — a vector-column update inserts the
 > new version and lets `VACUUM` clean the old one, while an update that leaves

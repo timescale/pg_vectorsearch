@@ -37,7 +37,7 @@ VPSHUFB per sq-pair → 96 VPSHUFB instructions for 32 vectors.
 
 The scan path handles AoS and fastscan pages transparently within
 the same cluster chain. Each page's opaque flags indicate its
-format (`MKT_POSTING_PAGE_FASTSCAN`). This enables:
+format (`PRISM_POSTING_PAGE_FASTSCAN`). This enables:
 
 1. **Bulk build** writes AoS pages (streaming, one entry at a time)
 2. **Inserts** append to AoS pages (same path, no batching needed)
@@ -79,7 +79,7 @@ followed by VPSHUFB-packed codes.
 ├──────────────────────────────────────────┤
 │ (unused gap)                             │
 ├──────────────────────────────────────────┤
-│ MktPostingPageOpaque               24B   │
+│ PrismPostingPageOpaque               24B   │
 └──────────────────────────────────────────┘
 ```
 
@@ -88,7 +88,7 @@ At dim=768 (nsq=192, nsq_pairs=96):
 - Overflow page: 2 groups = 64 vectors (usable 8144B, used 7296B)
 - First page: 1 group = 32 vectors (usable 5072B, used 3648B)
 
-The `MKT_POSTING_PAGE_FASTSCAN` flag (0x0004, already reserved in
+The `PRISM_POSTING_PAGE_FASTSCAN` flag (0x0004, already reserved in
 posting_page.h) distinguishes fastscan pages from AoS pages.
 `max_entries` and `entry_count` in the opaque work as before.
 
@@ -181,12 +181,12 @@ that are later converted during maintenance.
 The posting scan dispatches on the page flag:
 
 ```c
-void mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
+void prism_posting_scan_cluster(PrismPostingScan *scan, MktTopK *topk)
 {
     if (scan->fastscan)
-        mkt_posting_scan_cluster_fastscan(scan, topk);
+        prism_posting_scan_cluster_fastscan(scan, topk);
     else
-        mkt_posting_scan_cluster_aos(scan, topk);
+        prism_posting_scan_cluster_aos(scan, topk);
 }
 ```
 
@@ -215,7 +215,7 @@ processes ~8× more vectors per SIMD instruction.
 
 `PrismMetaPage.flags` gains `MKT_META_FLAG_FASTSCAN` (0x02).
 Old code ignores the flag and reads AoS pages normally (pages
-without `MKT_POSTING_PAGE_FASTSCAN` in their opaque are AoS).
+without `PRISM_POSTING_PAGE_FASTSCAN` in their opaque are AoS).
 
 ### Implementation plan
 

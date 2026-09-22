@@ -3431,16 +3431,16 @@ Two storage modes share the same entry format and the same scan code:
 ├─────────────────────────────────────────────────────────┤
 │ (first page only) pt_centroid[dim]                      │    MAXALIGN(4*dim)
 ├─────────────────────────────────────────────────────────┤
-│ entry[0]   MktPostingEntryHeader + bits  ┐              │
+│ entry[0]   PrismPostingEntryHeader + bits  ┐              │
 │ entry[1]                                 │              │
 │   ...                                    ├─ AoS entries │
 │ entry[max-1]                             ┘              │
 ├─────────────────────────────────────────────────────────┤
-│ MktPostingPageOpaque                         (16 bytes) │
+│ PrismPostingPageOpaque                         (16 bytes) │
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐    Flat mode
-│ MktFlatPostingHeader                         (16 bytes) │
+│ PrismFlatPostingHeader                         (16 bytes) │
 ├─────────────────────────────────────────────────────────┤
 │ entry[0] ... entry[count-1]                             │
 └─────────────────────────────────────────────────────────┘
@@ -3451,33 +3451,33 @@ Two storage modes share the same entry format and the same scan code:
 Each entry is a 116-byte (at dim=768) contiguous block:
 
 ```c
-typedef struct MktPostingEntryMeta
+typedef struct PrismPostingEntryMeta
 {
     ItemPointerData tid;      // 6B — heap TID (PG) or packed vector_id (standalone)
     uint8_t         flags;    // entry flags (DELETED, BOUNDARY)
     uint8_t         reserved;
-} MktPostingEntryMeta;        // 8B total
+} PrismPostingEntryMeta;        // 8B total
 
-typedef struct MktPostingEntryHeader
+typedef struct PrismPostingEntryHeader
 {
-    MktPostingEntryMeta meta;       // 8B
+    PrismPostingEntryMeta meta;       // 8B
     float               f_add;      // 4B — per-entry RaBitQ additive factor
     float               f_rescale;  // 4B — scaling factor
     float               f_error;    // 4B — error-bound factor (pre-stored)
-} MktPostingEntryHeader;            // 20B total
+} PrismPostingEntryHeader;            // 20B total
 
 // Followed in memory by: uint8_t bits[MKT_RABITQ_BYTES(dim)]
 
 // Flags
-#define MKT_POSTING_FLAG_DELETED   0x01  // Soft-deleted, pending vacuum
-#define MKT_POSTING_FLAG_BOUNDARY  0x02  // Replicated to adjacent cluster
+#define PRISM_POSTING_FLAG_DELETED   0x01  // Soft-deleted, pending vacuum
+#define PRISM_POSTING_FLAG_BOUNDARY  0x02  // Replicated to adjacent cluster
 ```
 
 Per-entry size:
 
 ```c
-#define MKT_POSTING_ENTRY_SIZE(dim) \
-    (sizeof(MktPostingEntryHeader) + MKT_RABITQ_BYTES(dim))
+#define PRISM_POSTING_ENTRY_SIZE(dim) \
+    (sizeof(PrismPostingEntryHeader) + MKT_RABITQ_BYTES(dim))
 ```
 
 At dim=768: `20 + 96 = 116` bytes per entry.
@@ -3489,19 +3489,19 @@ at build time from the entry's factors.
 #### Opaque (paged mode)
 
 ```c
-typedef struct MktPostingPageOpaque
+typedef struct PrismPostingPageOpaque
 {
     BlockNumber next_blkno;     // 4B — next page in chain, or InvalidBlockNumber
     uint32_t    cluster_id;     // 4B
     uint16_t    entry_count;    // 2B — live entries on this page
     uint16_t    flags;          // 2B — FIRST, OVERFLOW, FASTSCAN (reserved)
-    uint16_t    page_id;        // 2B — MKT_POSTING_PAGE_ID ("MP")
+    uint16_t    page_id;        // 2B — PRISM_POSTING_PAGE_ID ("MP")
     uint16_t    max_entries;    // 2B — capacity at this page's dim
-} MktPostingPageOpaque;         // 16B total
+} PrismPostingPageOpaque;         // 16B total
 
-#define MKT_POSTING_PAGE_FIRST     0x0001  // First page of posting list
-#define MKT_POSTING_PAGE_OVERFLOW  0x0002  // Overflow page
-#define MKT_POSTING_PAGE_FASTSCAN  0x0004  // Reserved for future fastscan layout
+#define PRISM_POSTING_PAGE_FIRST     0x0001  // First page of posting list
+#define PRISM_POSTING_PAGE_OVERFLOW  0x0002  // Overflow page
+#define PRISM_POSTING_PAGE_FASTSCAN  0x0004  // Reserved for future fastscan layout
 ```
 
 #### pt_centroid on first pages
@@ -3516,13 +3516,13 @@ carry pt_centroid.
 #### Flat mode header
 
 ```c
-typedef struct MktFlatPostingHeader
+typedef struct PrismFlatPostingHeader
 {
     uint32_t max_entries;     // == capacity (buffer is exactly sized)
     uint32_t entry_count;
     uint32_t cluster_id;
     uint32_t _pad;
-} MktFlatPostingHeader;       // 16B total
+} PrismFlatPostingHeader;       // 16B total
 ```
 
 Flat mode doesn't need `pd_lsn`, `pd_checksum`, `next_blkno`, or any of PG's
@@ -3533,8 +3533,8 @@ zero-framing reference point.
 
 The SIMD scan kernel (`mkt_rabitq_inner_product_multi_avx512`) reads bits at
 some stride and does 4-wide masked accumulation across dim per group. The
-stride is programmable. With AoS we pass `stride = MKT_POSTING_ENTRY_SIZE(dim)`
-and `bits_base = mkt_posting_first_bits(content)` — no new kernel code
+stride is programmable. With AoS we pass `stride = PRISM_POSTING_ENTRY_SIZE(dim)`
+and `bits_base = prism_posting_first_bits(content)` — no new kernel code
 required.
 
 Two effects combine:
@@ -3563,39 +3563,39 @@ Two effects combine:
 ```c
 // Usable space between content start and opaque footer
 static inline uint32_t
-mkt_posting_page_usable(void)
+prism_posting_page_usable(void)
 {
     return BLCKSZ - (uint32_t)MAXALIGN(SizeOfPageHeaderData)
-                  - sizeof(MktPostingPageOpaque);
+                  - sizeof(PrismPostingPageOpaque);
 }
 
 // Max entries on an overflow page
 static inline uint32_t
-mkt_posting_max_entries(Dimension dim)
+prism_posting_max_entries(Dimension dim)
 {
-    return mkt_posting_page_usable() / MKT_POSTING_ENTRY_SIZE(dim);
+    return prism_posting_page_usable() / PRISM_POSTING_ENTRY_SIZE(dim);
 }
 
 // Max entries on a first page (reduced by pt_centroid reservation)
 static inline uint32_t
-mkt_posting_max_entries_first(Dimension dim)
+prism_posting_max_entries_first(Dimension dim)
 {
-    return (mkt_posting_page_usable() - MAXALIGN(dim * sizeof(float)))
-           / MKT_POSTING_ENTRY_SIZE(dim);
+    return (prism_posting_page_usable() - MAXALIGN(dim * sizeof(float)))
+           / PRISM_POSTING_ENTRY_SIZE(dim);
 }
 
 // Entry i's header (meta + factors)
-static inline MktPostingEntryHeader *
-mkt_posting_entry_at(char *content, uint32_t i, Dimension dim);
+static inline PrismPostingEntryHeader *
+prism_posting_entry_at(char *content, uint32_t i, Dimension dim);
 
 // Entry i's bits (immediately follows entry i's header)
 static inline uint8_t *
-mkt_posting_entry_bits_at(char *content, uint32_t max_entries,
+prism_posting_entry_bits_at(char *content, uint32_t max_entries,
                           Dimension dim, uint32_t i);
 
 // Pointer to entry 0's bits — the base the SIMD kernel strides from
 static inline uint8_t *
-mkt_posting_first_bits(char *content);
+prism_posting_first_bits(char *content);
 ```
 
 At **dim = 768, BLCKSZ = 8192**:
@@ -3607,18 +3607,18 @@ At **dim = 768, BLCKSZ = 8192**:
 
 ```c
 // Paged mode
-void mkt_posting_page_init(Page page, uint32_t cluster_id,
+void prism_posting_page_init(Page page, uint32_t cluster_id,
                            Dimension dim, uint16_t flags);
-bool mkt_posting_page_add(Page page, Dimension dim,
+bool prism_posting_page_add(Page page, Dimension dim,
                           ItemPointerData tid,
                           float f_add, float f_rescale, float f_error,
                           const uint8_t *bits,
                           uint8_t entry_flags);
 
 // Flat mode
-void mkt_posting_flat_init(char *buf, uint32_t max_entries,
+void prism_posting_flat_init(char *buf, uint32_t max_entries,
                            uint32_t cluster_id);
-bool mkt_posting_flat_add(char *buf, Dimension dim,
+bool prism_posting_flat_add(char *buf, Dimension dim,
                           ItemPointerData tid,
                           float f_add, float f_rescale, float f_error,
                           const uint8_t *bits,
@@ -3626,7 +3626,7 @@ bool mkt_posting_flat_add(char *buf, Dimension dim,
 ```
 
 Entry writes go through these for both modes; the writers place the
-`MktPostingEntryHeader` and `bits` contiguously at `content + i*entry_size`.
+`PrismPostingEntryHeader` and `bits` contiguously at `content + i*entry_size`.
 
 ### 3.5 Why not SoA?
 
@@ -3636,7 +3636,7 @@ An earlier iteration laid out each page as per-array SoA regions:
 ┌────────────────────────────────────────┐
 │ PageHeader                             │
 ├────────────────────────────────────────┤
-│ MktPostingEntryMeta[max]      (8B × N) │
+│ PrismPostingEntryMeta[max]      (8B × N) │
 │ f_add[max]                    (4B × N) │
 │ f_rescale[max]                (4B × N) │
 │ f_error[max]                  (4B × N) │
@@ -3681,17 +3681,17 @@ unchanged — it just strides at `entry_size` instead of `packed_bytes`.
 
 **Files**: `src/index/posting_build.h`, `src/index/posting_build.c`
 
-The `MktPostingBuilder` streams entries into the chosen page format. Build
+The `PrismPostingBuilder` streams entries into the chosen page format. Build
 flow for each cluster:
 
 ```c
-MktPostingBuilder builder;
-mkt_posting_builder_init(&builder, storage, rq_params, dim,
+PrismPostingBuilder builder;
+prism_posting_builder_init(&builder, storage, rq_params, dim,
                          cluster_id, centroid, pt_centroid);
 for each vector in cluster:
-    mkt_posting_builder_add(&builder, tid, vector);  // RaBitQ-encoded internally
-BlockNumber head = mkt_posting_builder_finish(&builder);
-mkt_posting_builder_cleanup(&builder);
+    prism_posting_builder_add(&builder, tid, vector);  // RaBitQ-encoded internally
+BlockNumber head = prism_posting_builder_finish(&builder);
+prism_posting_builder_cleanup(&builder);
 ```
 
 The builder encodes each input vector with RaBitQ (producing `f_add`,
@@ -3700,7 +3700,7 @@ BLCKSZ-page chain internally: opens a new page when the current one fills,
 links pages via `next_blkno`, and writes `pt_centroid` to the first page's
 header area.
 
-Flat mode has an analogous `MktFlatPostingBuilder` that writes into a
+Flat mode has an analogous `PrismFlatPostingBuilder` that writes into a
 caller-provided pre-sized buffer.
 
 ### 3.7 Metapage
@@ -3784,7 +3784,7 @@ typedef struct {
 
     // One posting-list builder per cluster — streams RaBitQ-encoded
     // entries into paged or flat posting storage as vectors arrive.
-    MktPostingBuilder *builders;
+    PrismPostingBuilder *builders;
 
     // Statistics
     uint64_t        total_vectors;
@@ -4072,22 +4072,22 @@ typedef struct {
 } SearchParams;
 
 /* Centroid search: beam search through centroid tree */
-uint32_t mkt_centroid_beam_search(
-    const MktCentroidSearchState *state,
+uint32_t prism_centroid_beam_search(
+    const PrismCentroidSearchState *state,
     BlockNumber                   first_centroid_blkno,
     uint8_t                       nlevels,
-    MktCentroidResult            *results,
-    MktCentroidSearchStats       *stats);
+    PrismCentroidResult            *results,
+    PrismCentroidSearchStats       *stats);
 ```
 
-The `MktCentroidSearchState` bundles a pre-computed `RaBitQQueryState`
+The `PrismCentroidSearchState` bundles a pre-computed `RaBitQQueryState`
 (query transformed against the global mean), the raw query float pointer
 (for float/half centroid pages), an opaque `query_datum` (for storage-level
 reranking), the storage vtable, beam_width, nprobe, and dimension.
 
 Results contain `posting_head` block numbers, `medoid_tid`, estimated
 `distance`, and `error` margin for each selected leaf cluster. An
-`MktCentroidSearchStats` struct tracks distance computations and rerank
+`PrismCentroidSearchStats` struct tracks distance computations and rerank
 counts for diagnostics.
 
 ### 5.2 Centroid Search Implementation
@@ -4101,7 +4101,7 @@ dispatches format-specific distance computation per page.
 **Search state** (`src/index/centroid_search.h`):
 
 ```c
-typedef struct MktCentroidSearchState
+typedef struct PrismCentroidSearchState
 {
     const RaBitQQueryState *qstate;      /* query for RaBitQ pages */
     const float            *query;       /* raw query for float/half pages */
@@ -4110,32 +4110,32 @@ typedef struct MktCentroidSearchState
     uint32_t                beam_width;
     uint32_t                nprobe;
     Dimension               dim;
-} MktCentroidSearchState;
+} PrismCentroidSearchState;
 
-typedef struct MktCentroidResult
+typedef struct PrismCentroidResult
 {
     BlockNumber     posting_head; /* first posting list page */
     ItemPointerData medoid_tid;   /* heap TID of medoid vector */
     Distance        distance;     /* estimated distance to query */
     Distance        error;        /* symmetric error margin */
-} MktCentroidResult;
+} PrismCentroidResult;
 
-typedef struct MktCentroidSearchStats
+typedef struct PrismCentroidSearchStats
 {
     uint64_t dist_calcs; /* approximate distance computations */
     uint64_t reranked;   /* exact distance recomputations */
-} MktCentroidSearchStats;
+} PrismCentroidSearchStats;
 ```
 
 **Beam search** (`src/index/centroid_search.c`):
 
 ```c
-uint32_t mkt_centroid_beam_search(
-    const MktCentroidSearchState *state,
+uint32_t prism_centroid_beam_search(
+    const PrismCentroidSearchState *state,
     BlockNumber                   first_centroid_blkno,
     uint8_t                       nlevels,
-    MktCentroidResult            *results,
-    MktCentroidSearchStats       *stats);
+    PrismCentroidResult            *results,
+    PrismCentroidSearchStats       *stats);
 ```
 
 The algorithm is format-aware — each centroid page declares its format in the
@@ -4156,7 +4156,7 @@ opaque flags, and scoring dispatches accordingly:
 
 **Format dispatch** (`score_page()` in `centroid_search.c`):
 
-Distance computation is per-page, dispatched by `mkt_centroid_page_format()`:
+Distance computation is per-page, dispatched by `prism_centroid_page_format()`:
 
 - **RaBitQ pages**: Batch scoring using `ScorePageScratch` buffers. Gathers
   `f_add`/`f_rescale` arrays and calls
@@ -4167,11 +4167,11 @@ Distance computation is per-page, dispatched by `mkt_centroid_page_format()`:
   data) modes.
 
 - **Float32 pages**: Exact L2 via `mkt_l2_distance_squared()` on in-page
-  float vectors accessed through `mkt_centroid_float_data()`. Returns exact
+  float vectors accessed through `prism_centroid_float_data()`. Returns exact
   distances with error = 0 (no reranking needed).
 
 - **Float16 pages**: Exact L2 via `mkt_f16_l2_squared()` on in-page half
-  vectors accessed through `mkt_centroid_half_data()`. Returns exact
+  vectors accessed through `prism_centroid_half_data()`. Returns exact
   distances with error = 0 (no reranking needed).
 
 **Reranking** (only for RaBitQ candidates):
@@ -4209,19 +4209,19 @@ void mkt_search_posting_lists(
 
         while (block != InvalidBlockNumber) {
             const void *page = read_page(callback_data, block);
-            MktPostingPageOpaque *opaque = mkt_posting_opaque(page);
+            PrismPostingPageOpaque *opaque = prism_posting_opaque(page);
             uint16_t entry_count = opaque->entry_count;
-            char *content = (opaque->flags & MKT_POSTING_PAGE_FIRST)
-                          ? mkt_posting_content_first(page, dim)
-                          : mkt_posting_content(page);
+            char *content = (opaque->flags & PRISM_POSTING_PAGE_FIRST)
+                          ? prism_posting_content_first(page, dim)
+                          : prism_posting_content(page);
 
             // Phase 1: batch IP for all entries on the page. Kernel
             // strides at entry_size through the AoS entries.
             Distance *distances = mkt_alloc(entry_count * sizeof(Distance));
             mkt_rabitq_inner_product_multi(
                     query_state->transformed,
-                    mkt_posting_first_bits(content),
-                    MKT_POSTING_ENTRY_SIZE(dim),
+                    prism_posting_first_bits(content),
+                    PRISM_POSTING_ENTRY_SIZE(dim),
                     dim,
                     entry_count,
                     distances);
@@ -4230,14 +4230,14 @@ void mkt_search_posting_lists(
             // Each entry's header carries meta + f_add/f_rescale/f_error;
             // it's already hot in L1 from the strided bits read.
             for (uint16_t i = 0; i < entry_count; i++) {
-                MktPostingEntryHeader *e = mkt_posting_entry_at(content, i, dim);
-                if (e->meta.flags & MKT_POSTING_FLAG_DELETED) continue;
+                PrismPostingEntryHeader *e = prism_posting_entry_at(content, i, dim);
+                if (e->meta.flags & PRISM_POSTING_FLAG_DELETED) continue;
 
                 Distance est = e->f_add /* + query-side constants and
                                            f_rescale * distances[i] */;
 
                 if (est < mkt_topk_threshold(results)) {
-                    uint64_t tid_encoded = mkt_posting_encode_tid(&e->meta.tid);
+                    uint64_t tid_encoded = prism_posting_encode_tid(&e->meta.tid);
                     mkt_topk_insert(results, est, tid_encoded);
                 }
             }
@@ -4580,9 +4580,9 @@ format-dependent — the format is stored in the low 2 bits of
 
 | Format | Metadata | Data per entry |
 |--------|----------|----------------|
-| RaBitQ | 16B (`MktCentroidEntryMetaRaBitQ`) | 8 + ceil(D/8) bytes |
-| Float32 | 8B (`MktCentroidEntryMeta`) | D × 4 bytes |
-| Float16 | 8B (`MktCentroidEntryMeta`) | D × 2 bytes |
+| RaBitQ | 16B (`PrismCentroidEntryMetaRaBitQ`) | 8 + ceil(D/8) bytes |
+| Float32 | 8B (`PrismCentroidEntryMeta`) | D × 4 bytes |
+| Float16 | 8B (`PrismCentroidEntryMeta`) | D × 2 bytes |
 
 The page is full when the two regions would overlap.
 
@@ -4600,7 +4600,7 @@ The page is full when the two regions would overlap.
 │ data[1]  (RaBitQData / float[] / half[])                 │
 │ data[0]                                ← grows backward  │
 ├──────────────────────────────────────────────────────────┤
-│ MktCentroidPageOpaque                        (12 bytes)  │
+│ PrismCentroidPageOpaque                        (12 bytes)  │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -4616,40 +4616,40 @@ computed on the in-page vectors without reranking.
 
 ```c
 /* Centroid data format (stored in low 2 bits of opaque->flags) */
-typedef enum MktCentroidFormat
+typedef enum PrismCentroidFormat
 {
     MKT_CENTROID_FMT_RABITQ = 0,   /* RaBitQData (default) */
     MKT_CENTROID_FMT_FLOAT  = 1,   /* float32 vectors */
     MKT_CENTROID_FMT_HALF   = 2,   /* float16 vectors */
-} MktCentroidFormat;
+} PrismCentroidFormat;
 
 /* Base per-centroid metadata (8 bytes, all formats) */
-typedef struct MktCentroidEntryMeta
+typedef struct PrismCentroidEntryMeta
 {
     BlockNumber child_blkno;       /* child centroid page (internal)
                                       or posting list head (leaf) */
     uint16_t    child_count;       /* children at next level */
-    uint16_t    flags;             /* MKT_CENTROID_FLAG_LEAF etc. */
-} MktCentroidEntryMeta;            /* 8 bytes */
+    uint16_t    flags;             /* PRISM_CENTROID_FLAG_LEAF etc. */
+} PrismCentroidEntryMeta;            /* 8 bytes */
 
 /* Extended metadata for RaBitQ format (16 bytes) */
-typedef struct MktCentroidEntryMetaRaBitQ
+typedef struct PrismCentroidEntryMetaRaBitQ
 {
-    MktCentroidEntryMeta base;     /* 8B - common fields */
+    PrismCentroidEntryMeta base;     /* 8B - common fields */
     ItemPointerData      medoid_tid; /* 6B - heap TID for rerank */
     uint16_t             reserved; /* 2B - alignment */
-} MktCentroidEntryMetaRaBitQ;     /* 16 bytes */
+} PrismCentroidEntryMetaRaBitQ;     /* 16 bytes */
 
 /* Page special area (12 bytes, at page end per PG convention) */
-typedef struct MktCentroidPageOpaque
+typedef struct PrismCentroidPageOpaque
 {
     BlockNumber next_blkno;        /* next page at same level */
     uint16_t    entry_count;       /* centroids on this page */
     uint8_t     level;             /* tree level (0 = root) */
-    uint8_t     flags;             /* low 2 bits: MktCentroidFormat */
-    uint16_t    page_id;           /* MKT_CENTROID_PAGE_ID (0x4D43) */
+    uint8_t     flags;             /* low 2 bits: PrismCentroidFormat */
+    uint16_t    page_id;           /* PRISM_CENTROID_PAGE_ID (0x4D43) */
     uint16_t    padding;           /* alignment */
-} MktCentroidPageOpaque;           /* 12 bytes */
+} PrismCentroidPageOpaque;           /* 12 bytes */
 ```
 
 **Capacity** (768 dimensions, usable = 8152 bytes per page):
@@ -4668,65 +4668,65 @@ exact routing — useful for small trees or when accuracy is critical.
 
 ```c
 /* Opaque area via PG-standard PageGetSpecialPointer */
-#define MKT_CENTROID_OPAQUE(page) \
-    ((MktCentroidPageOpaque *)PageGetSpecialPointer(page))
+#define PRISM_CENTROID_OPAQUE(page) \
+    ((PrismCentroidPageOpaque *)PageGetSpecialPointer(page))
 
 /* Page format from opaque flags */
-static inline MktCentroidFormat
-mkt_centroid_page_format(Page page) {
-    return (MktCentroidFormat)(MKT_CENTROID_OPAQUE(page)->flags &
-                               MKT_CENTROID_FMT_MASK);
+static inline PrismCentroidFormat
+prism_centroid_page_format(Page page) {
+    return (PrismCentroidFormat)(PRISM_CENTROID_OPAQUE(page)->flags &
+                               PRISM_CENTROID_FMT_MASK);
 }
 
 /* Format-dependent metadata size */
 static inline uint32_t
-mkt_centroid_meta_size(MktCentroidFormat fmt) {
+prism_centroid_meta_size(PrismCentroidFormat fmt) {
     if (fmt == MKT_CENTROID_FMT_RABITQ)
-        return sizeof(MktCentroidEntryMetaRaBitQ);  /* 16B */
-    return sizeof(MktCentroidEntryMeta);             /* 8B */
+        return sizeof(PrismCentroidEntryMetaRaBitQ);  /* 16B */
+    return sizeof(PrismCentroidEntryMeta);             /* 8B */
 }
 
 /* i-th base metadata entry — byte offset arithmetic to handle
  * variable metadata sizes across formats */
-static inline const MktCentroidEntryMeta *
-mkt_centroid_meta(const Page page, uint32_t index) {
-    MktCentroidFormat fmt = mkt_centroid_page_format(page);
-    return (const MktCentroidEntryMeta *)
+static inline const PrismCentroidEntryMeta *
+prism_centroid_meta(const Page page, uint32_t index) {
+    PrismCentroidFormat fmt = prism_centroid_page_format(page);
+    return (const PrismCentroidEntryMeta *)
         ((const char *)page + SizeOfPageHeaderData
-         + (size_t)index * mkt_centroid_meta_size(fmt));
+         + (size_t)index * prism_centroid_meta_size(fmt));
 }
 
 /* i-th RaBitQ extended metadata (only valid on RaBitQ pages) */
-static inline const MktCentroidEntryMetaRaBitQ *
-mkt_centroid_meta_rabitq(const Page page, uint32_t index) {
-    return (const MktCentroidEntryMetaRaBitQ *)
-        mkt_centroid_meta(page, index);
+static inline const PrismCentroidEntryMetaRaBitQ *
+prism_centroid_meta_rabitq(const Page page, uint32_t index) {
+    return (const PrismCentroidEntryMetaRaBitQ *)
+        prism_centroid_meta(page, index);
 }
 
 /* i-th data entry (backward region, format-dependent size) */
 static inline const void *
-mkt_centroid_entry_data(const Page page, uint32_t index,
+prism_centroid_entry_data(const Page page, uint32_t index,
                         Dimension dim) {
-    MktCentroidFormat fmt       = mkt_centroid_page_format(page);
-    uint32_t          data_size = mkt_centroid_data_size(dim, fmt);
+    PrismCentroidFormat fmt       = prism_centroid_page_format(page);
+    uint32_t          data_size = prism_centroid_data_size(dim, fmt);
     return (const void *)(PageGetSpecialPointer(page)
                           - (size_t)(index + 1) * data_size);
 }
 
 /* Typed data accessors */
 static inline const RaBitQData *
-mkt_centroid_data(const Page page, uint32_t index, Dimension dim) {
-    return (const RaBitQData *)mkt_centroid_entry_data(page, index, dim);
+prism_centroid_data(const Page page, uint32_t index, Dimension dim) {
+    return (const RaBitQData *)prism_centroid_entry_data(page, index, dim);
 }
 static inline const float *
-mkt_centroid_float_data(const Page page, uint32_t index,
+prism_centroid_float_data(const Page page, uint32_t index,
                         Dimension dim) {
-    return (const float *)mkt_centroid_entry_data(page, index, dim);
+    return (const float *)prism_centroid_entry_data(page, index, dim);
 }
 static inline const half *
-mkt_centroid_half_data(const Page page, uint32_t index,
+prism_centroid_half_data(const Page page, uint32_t index,
                        Dimension dim) {
-    return (const half *)mkt_centroid_entry_data(page, index, dim);
+    return (const half *)prism_centroid_entry_data(page, index, dim);
 }
 ```
 
@@ -4734,19 +4734,19 @@ mkt_centroid_half_data(const Page page, uint32_t index,
 
 ```c
 /* Format-aware initialization (stores format in opaque flags) */
-void mkt_centroid_page_init_fmt(Page page, uint8_t level,
-                                MktCentroidFormat fmt);
+void prism_centroid_page_init_fmt(Page page, uint8_t level,
+                                PrismCentroidFormat fmt);
 
 /* Backward-compatible wrapper (defaults to RaBitQ) */
 static inline void
-mkt_centroid_page_init(Page page, uint8_t level) {
-    mkt_centroid_page_init_fmt(page, level, MKT_CENTROID_FMT_RABITQ);
+prism_centroid_page_init(Page page, uint8_t level) {
+    prism_centroid_page_init_fmt(page, level, MKT_CENTROID_FMT_RABITQ);
 }
 
 /* Generic add: medoid_tid only used for RaBitQ pages (NULL for
  * float/half); data points to RaBitQData, float[], or half[]
  * depending on page format */
-bool mkt_centroid_page_add_entry(Page page, Dimension dim,
+bool prism_centroid_page_add_entry(Page page, Dimension dim,
                                  BlockNumber child_blkno,
                                  uint16_t child_count,
                                  uint16_t flags,
@@ -4799,7 +4799,7 @@ Static inline wrapper functions hide the vtable dispatch:
 ```c
 // Clean API — no s->ops->fn(s, ...) at call sites
 Page page = mkt_storage_read_page(storage, centroid_blkno);
-MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
+PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
 // ... per-entry distance on in-page RaBitQData ...
 mkt_storage_release_page(storage, centroid_blkno);
 ```
@@ -5574,7 +5574,7 @@ typedef struct MktSearchIterator
 /* Initialize streaming search */
 MktSearchIterator *
 mkt_search_iterator_create(
-    MktIndex *index,
+    PrismIndex *index,
     Vec32Ref query,
     DistanceType distance_type,
     uint32_t nprobe,
