@@ -1,9 +1,9 @@
 /*
- * scan_bound.c - row target for an mktann scan
+ * scan_bound.c - row target for a prism scan
  *
  * The index AM API never tells a scan how many rows the query wants: the
  * executor pulls one tuple at a time until the Limit node above it is
- * satisfied. An mktann scan computes its whole top-k on the first fetch,
+ * satisfied. A prism scan computes its whole top-k on the first fetch,
  * so it has to know k up front or it emits a fixed default and a larger
  * LIMIT silently comes up short.
  *
@@ -210,7 +210,7 @@ find_index_scan_state(PlanState *ps)
  * proximity (a category living in its own region of the space) can still
  * starve the result, and nothing here can know which rows survive, because
  * the pruning gate commits this size before any heap fetch and evaluating a
- * qual needs one. mkt.query_limit is the lever for a caller who knows their
+ * qual needs one. prism.query_limit is the lever for a caller who knows their
  * own selectivity.
  */
 static uint32_t
@@ -402,8 +402,7 @@ mkt_scan_bound(IndexScanDesc scan)
  * the saves in order and the variable always names the innermost query.
  */
 static void
-mktann_executor_run(
-		QueryDesc *queryDesc, ScanDirection direction, uint64 count)
+prism_executor_run(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
 {
 	QueryDesc *save = mkt_active_query_desc;
 
@@ -426,5 +425,5 @@ void
 mkt_scan_bound_init(void)
 {
 	prev_ExecutorRun_hook = ExecutorRun_hook;
-	ExecutorRun_hook	  = mktann_executor_run;
+	ExecutorRun_hook	  = prism_executor_run;
 }

@@ -1,10 +1,10 @@
 /*
- * amcache.c - Per-index cached state for mktann
+ * amcache.c - Per-index cached state for prism
  *
  * The rotation matrix P is O(dim³) to generate, so it lives in a
  * process-local, reference-counted hash table (keyed by dim+seed) that
  * survives relcache invalidation — see get_or_create_params /
- * mktann_release_params below. The table and the matrices it owns live in a
+ * prism_release_params below. The table and the matrices it owns live in a
  * dedicated child context of CacheMemoryContext, so the cache's footprint is
  * visible as its own line in a memory-context dump. The global mean,
  * P^T·global_mean, and an immutable MktIndexBase template live in rd_amcache
@@ -51,7 +51,7 @@
  *     If nothing is currently idle, the table simply grows past the soft
  *     target rather than failing a live caller -- the target is not a
  *     hard cap.
- *   - mktann_release_params() checks an entry back in (refcount--).
+ *   - prism_release_params() checks an entry back in (refcount--).
  *     Checkouts are additionally tracked by the checkout-time resource
  *     owner, so error paths that skip the release still return the
  *     refcount -- see rabitq_params_ref_desc below.
@@ -98,7 +98,7 @@ static MemoryContext rabitq_cache_cxt = NULL;
 static void rabitq_params_ref_release(Datum res);
 
 static const ResourceOwnerDesc rabitq_params_ref_desc = {
-		.name			  = "mktann rabitq params ref",
+		.name			  = "prism rabitq params ref",
 		.release_phase	  = RESOURCE_RELEASE_BEFORE_LOCKS,
 		.release_priority = RELEASE_PRIO_FIRST,
 		.ReleaseResource  = rabitq_params_ref_release,
@@ -121,11 +121,11 @@ rabitq_cache_init(void)
 {
 	HASHCTL ctl;
 
-	/* The context survives mktann_rabitq_cache_clear() resets. */
+	/* The context survives prism_rabitq_cache_clear() resets. */
 	if (rabitq_cache_cxt == NULL)
 		rabitq_cache_cxt = AllocSetContextCreate(
 				CacheMemoryContext,
-				"mktann rabitq params cache",
+				"prism rabitq params cache",
 				ALLOCSET_DEFAULT_SIZES);
 
 	memset(&ctl, 0, sizeof(ctl));
@@ -134,7 +134,7 @@ rabitq_cache_init(void)
 	ctl.hcxt	  = rabitq_cache_cxt;
 
 	rabitq_cache = hash_create(
-			"mktann rabitq params cache",
+			"prism rabitq params cache",
 			MKT_RABITQ_CACHE_TARGET_ENTRIES,
 			&ctl,
 			HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
@@ -244,7 +244,7 @@ get_or_create_params(Dimension dim, uint64_t seed)
  * runtime condition.
  */
 void
-mktann_release_params(Dimension dim, uint64_t seed, ResourceOwner owner)
+prism_release_params(Dimension dim, uint64_t seed, ResourceOwner owner)
 {
 	RaBitQCacheKey	  key = {0};
 	RaBitQCacheEntry *entry;
@@ -286,7 +286,7 @@ mktann_release_params(Dimension dim, uint64_t seed, ResourceOwner owner)
  * observe refcounts, usage decay, and eviction. Inert otherwise.
  */
 int
-mktann_rabitq_cache_stats(MktRabitqCacheStat *stats, int max_stats)
+prism_rabitq_cache_stats(MktRabitqCacheStat *stats, int max_stats)
 {
 	HASH_SEQ_STATUS	  seq;
 	RaBitQCacheEntry *entry;
@@ -318,7 +318,7 @@ mktann_rabitq_cache_stats(MktRabitqCacheStat *stats, int max_stats)
  * for the test-only module test/pg/src/test_helpers.c; inert otherwise.
  */
 int
-mktann_rabitq_cache_clear(void)
+prism_rabitq_cache_clear(void)
 {
 	HASH_SEQ_STATUS	  seq;
 	RaBitQCacheEntry *entry;
@@ -357,7 +357,7 @@ mktann_rabitq_cache_clear(void)
  * The metapage-derived scalars (dim, metric, nlist, ...) are filled eagerly on
  * first access. The rotated pt_global_mean — which needs the O(dim³) rotation
  * matrix — is computed lazily (pt_ready) only when a caller actually needs it
- * (the scan / insert path via mktann_index_base_init), so metadata-only
+ * (the scan / insert path via prism_index_base_init), so metadata-only
  * consumers like VACUUM's ambulkdelete get dim/metric from the cache without
  * paying for rotation setup.
  *
@@ -415,7 +415,7 @@ cache_pt_global_mean(AmCacheData *c)
  * first use. pt_global_mean is stored in the cache; params are NOT frozen
  * here (the process-local params cache is reference-counted per checkout,
  * not per-index) — callers rebind via get_or_create_params /
- * mktann_release_params.
+ * prism_release_params.
  */
 static AmCacheData *
 get_cache_data(Relation index)
@@ -428,7 +428,7 @@ get_cache_data(Relation index)
 	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
 	Page meta_page = BufferGetPage(meta_buf);
 
-	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 	/* Reject an index whose metapage was written by an incompatible format
 	 * (loud in release too, not just a debug Assert) — its layout would
@@ -476,13 +476,13 @@ get_cache_data(Relation index)
 	c->base.metric			= (DistanceMetric)meta->metric;
 	c->base.centroid_format = (MktCentroidFormat)meta->centroid_format;
 	c->base.rabitq_seed		= seed;
-	/* base.pt_global_mean stays NULL until mktann_index_base_init computes it.
+	/* base.pt_global_mean stays NULL until prism_index_base_init computes it.
 	 */
 
 	/* Copy global mean; P^T * global_mean is computed lazily (see
-	 * mktann_index_base_init) so metadata-only callers skip the rotation. */
+	 * prism_index_base_init) so metadata-only callers skip the rotation. */
 	memcpy(cache_global_mean(c),
-		   mktann_meta_global_mean_const(meta),
+		   prism_meta_global_mean_const(meta),
 		   dim * sizeof(float));
 
 	UnlockReleaseBuffer(meta_buf);
@@ -500,7 +500,7 @@ get_cache_data(Relation index)
  * ---------------------------------------------------------------- */
 
 void
-mktann_index_base_init(Relation index, MktIndexBase *base)
+prism_index_base_init(Relation index, MktIndexBase *base)
 {
 	AmCacheData	 *c = get_cache_data(index);
 	RaBitQParams *params =
@@ -519,18 +519,18 @@ mktann_index_base_init(Relation index, MktIndexBase *base)
 	/* Copy the immutable template, then rebind the fields that cannot be
 	 * frozen for the backend's lifetime: params (checked out from the
 	 * refcounted process-local cache; the caller must pair this with a
-	 * matching mktann_release_params(base->dim, base->rabitq_seed) once it's
+	 * matching prism_release_params(base->dim, base->rabitq_seed) once it's
 	 * done with base->params) and fastscan (resolved from the session GUC).
 	 * Storage pointers stay zeroed for the caller. */
 	*base					   = c->base;
 	base->params			   = params;
-	base->fastscan			   = c->has_fastscan ? mkt_fastscan_bits : 0;
-	base->centroid_error_scale = (float)mkt_centroid_error_scale;
-	base->centroid_beam_scale  = (float)mkt_centroid_beam_scale;
+	base->fastscan			   = c->has_fastscan ? prism_fastscan_bits : 0;
+	base->centroid_error_scale = (float)prism_centroid_error_scale;
+	base->centroid_beam_scale  = (float)prism_centroid_beam_scale;
 }
 
 void
-mktann_cache_meta(
+prism_cache_meta(
 		Relation		index,
 		Dimension	   *dim,
 		DistanceMetric *metric,
@@ -543,16 +543,16 @@ mktann_cache_meta(
 }
 
 const MktIndexTypeInfo *
-mktann_cache_type_info(Relation index)
+prism_cache_type_info(Relation index)
 {
 	return get_cache_data(index)->type_info;
 }
 
-MktannScanInfo
-mktann_cache_scan_info(Relation index)
+PrismScanInfo
+prism_cache_scan_info(Relation index)
 {
 	AmCacheData *c = get_cache_data(index);
-	return (MktannScanInfo){
+	return (PrismScanInfo){
 			.nlist			 = c->nlist,
 			.dim			 = c->base.dim,
 			.nlevels		 = c->base.nlevels,

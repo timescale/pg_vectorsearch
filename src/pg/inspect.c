@@ -1,16 +1,16 @@
 /*
  * inspect.c - read-only index inspection functions
  *
- * Set-returning functions that expose the internal structure of mktann
+ * Set-returning functions that expose the internal structure of prism
  * indexes via SQL. All are read-only (AccessShareLock, no WAL); the mutating
  * maintenance operations live in maintenance.c. The centroid-tree leaf walk
  * they share, collect_leaf_entries, is declared in inspect.h.
  *
  * Functions:
- *   mkt.centroid_pages(regclass) -- centroid tree structure
- *   mkt.posting_pages(regclass)  -- posting list page chains
- *   mkt.tids_clusters(regclass, tid[]) -- which cluster(s) hold each TID
- *   mkt.index_settings(regclass) -- effective (resolved) settings
+ *   prism.centroid_pages(regclass) -- centroid tree structure
+ *   prism.posting_pages(regclass)  -- posting list page chains
+ *   prism.tids_clusters(regclass, tid[]) -- which cluster(s) hold each TID
+ *   prism.index_settings(regclass) -- effective (resolved) settings
  */
 
 #include <postgres.h>
@@ -143,10 +143,10 @@ collect_leaf_entries(
 		Dimension	dim,
 		LeafEntry **out)
 {
-	MktannStorage store;
-	MktStorage	 *st = &store.base;
+	MktPgStorage store;
+	MktStorage	*st = &store.base;
 
-	mktann_storage_init_inspect(&store, index);
+	mkt_pg_storage_init_inspect(&store, index);
 
 	int			 wl_cap	 = 64;
 	int			 wl_len	 = 0;
@@ -269,15 +269,15 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 
 	require_index_select(index, AccessShareLock);
 
-	MktannStorage store;
-	MktStorage	 *st = &store.base;
+	MktPgStorage store;
+	MktStorage	*st = &store.base;
 
-	mktann_storage_init_inspect(&store, index);
+	mkt_pg_storage_init_inspect(&store, index);
 
 	/* Read metapage and verify magic */
 	Page meta_page = mkt_storage_read_page(st, 0);
 
-	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
 	if (meta->magic != MKT_META_MAGIC)
@@ -286,7 +286,7 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 		relation_close(index, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not an mktann index",
+				 errmsg("\"%s\" is not a prism index",
 						RelationGetRelationName(index))));
 	}
 
@@ -446,7 +446,7 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 }
 
 /*
- * One mkt.posting_pages() row per page of a chain.
+ * One prism.posting_pages() row per page of a chain.
  *
  * Everything the rows need beyond the page itself -- the tuplestore to emit
  * into, the dimension, the running position in the chain -- rides in the
@@ -518,7 +518,7 @@ emit_posting_row(MktPostingChainPos *pos, void *state)
 }
 
 /* ----------------------------------------------------------------
- * mkt.posting_pages(regclass)
+ * prism.posting_pages(regclass)
  *
  * Returns one row per posting page: blkno, cluster_id, is_first,
  * tombstoned, entry_count, dead_count, max_entries, next_blkno,
@@ -551,14 +551,14 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 
 	require_index_select(index, AccessShareLock);
 
-	MktannStorage store;
-	MktStorage	 *st = &store.base;
+	MktPgStorage store;
+	MktStorage	*st = &store.base;
 
-	mktann_storage_init_inspect(&store, index);
+	mkt_pg_storage_init_inspect(&store, index);
 
 	Page meta_page = mkt_storage_read_page(st, 0);
 
-	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
 	if (meta->magic != MKT_META_MAGIC)
@@ -567,7 +567,7 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 		relation_close(index, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not an mktann index",
+				 errmsg("\"%s\" is not a prism index",
 						RelationGetRelationName(index))));
 	}
 
@@ -602,7 +602,7 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 }
 
 /* ----------------------------------------------------------------
- * mkt.tids_clusters(regclass, tid[])
+ * prism.tids_clusters(regclass, tid[])
  *
  * Diagnostic: for each input heap TID, return which cluster(s) it is
  * stored in (primary + any SOAR/boundary replica). One pass over all
@@ -676,18 +676,18 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 
 	require_index_select(index, AccessShareLock);
 
-	MktannStorage store;
-	MktStorage	 *st = &store.base;
+	MktPgStorage store;
+	MktStorage	*st = &store.base;
 
-	mktann_storage_init_inspect(&store, index);
+	mkt_pg_storage_init_inspect(&store, index);
 
 	/*
 	 * Through a local: PageGetSpecialPointer is a macro that evaluates its
 	 * argument three times, and reading a page is not free of side effects
 	 * -- inlining the read pins the buffer once per evaluation.
 	 */
-	Page				  meta_page = mkt_storage_read_page(st, 0);
-	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+	Page				 meta_page = mkt_storage_read_page(st, 0);
+	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 	Dimension dim = (Dimension)meta->dim;
 	mkt_storage_release_page(st, 0);
@@ -762,7 +762,7 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 }
 
 /* ----------------------------------------------------------------
- * mkt.index_settings(regclass)
+ * prism.index_settings(regclass)
  *
  * Returns one (name, setting, source) row per effective index
  * setting, with automatic values resolved to what the build (or the
@@ -864,18 +864,18 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 
 	require_index_select(index, AccessShareLock);
 
-	MktannStorage store;
-	MktStorage	 *st = &store.base;
+	MktPgStorage store;
+	MktStorage	*st = &store.base;
 
-	mktann_storage_init_inspect(&store, index);
+	mkt_pg_storage_init_inspect(&store, index);
 
 	/*
 	 * Through a local: PageGetSpecialPointer is a macro that evaluates its
 	 * argument three times, and reading a page is not free of side effects
 	 * -- inlining the read pins the buffer once per evaluation.
 	 */
-	Page				  meta_page = mkt_storage_read_page(st, 0);
-	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+	Page				 meta_page = mkt_storage_read_page(st, 0);
+	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
 	if (meta->magic != MKT_META_MAGIC)
@@ -884,7 +884,7 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 		relation_close(index, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not an mktann index",
+				 errmsg("\"%s\" is not a prism index",
 						RelationGetRelationName(index))));
 	}
 
@@ -899,8 +899,8 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 	uint32_t	   ncentroid_pages = meta->ncentroid_pages;
 	mkt_storage_release_page(st, 0);
 
-	const MktannOptions *opts = (const MktannOptions *)index->rd_options;
-	List				*set  = explicit_reloptions(indexoid);
+	const PrismOptions *opts = (const PrismOptions *)index->rd_options;
+	List			   *set	 = explicit_reloptions(indexoid);
 
 	/* Index definition */
 	settings_row(rsinfo, "dim", psprintf("%d", dim), "column");
@@ -965,26 +965,26 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 	/* Query-time settings whose effective value depends on this
 	 * index: the session GUC wins when set, otherwise the index
 	 * option or automatic resolution applies. */
-	if (mkt_distance_mode != MKT_DISTANCE_MODE_DEFAULT)
+	if (prism_distance_mode != MKT_DISTANCE_MODE_DEFAULT)
 		settings_row(
 				rsinfo,
 				"distance_mode",
-				mkt_distance_mode_name((MktDistanceMode)mkt_distance_mode),
+				mkt_distance_mode_name((MktDistanceMode)prism_distance_mode),
 				"session");
 	else
 		settings_row(
 				rsinfo,
 				"distance_mode",
-				mkt_distance_mode_name(MktannGetDistanceMode(index)),
+				mkt_distance_mode_name(PrismGetDistanceMode(index)),
 				reloption_is_set(set, "distance_mode") ? "option" : "default");
 	settings_row(
 			rsinfo,
 			"nprobe",
 			psprintf(
 					"%u",
-					(mkt_nprobe > 0) ? (uint32_t)mkt_nprobe
-									 : mkt_auto_nprobe(nlist)),
-			(mkt_nprobe > 0) ? "session" : "auto");
+					(prism_nprobe > 0) ? (uint32_t)prism_nprobe
+									   : mkt_auto_nprobe(nlist)),
+			(prism_nprobe > 0) ? "session" : "auto");
 
 	list_free_deep(set);
 	relation_close(index, AccessShareLock);

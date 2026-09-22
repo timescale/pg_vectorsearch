@@ -1,4 +1,4 @@
--- mktann index access method
+-- prism index access method
 
 -- Create table with vec32 column
 CREATE TABLE embeddings (id serial, v vec32(3));
@@ -14,7 +14,7 @@ INSERT INTO embeddings (v)
 SELECT count(*) FROM embeddings;
 
 -- L2 with centroid_compression (RaBitQ centroids, supports scan)
-CREATE INDEX idx_l2c ON embeddings USING mktann (v)
+CREATE INDEX idx_l2c ON embeddings USING prism (v)
     WITH (centroid_compression = true);
 
 -- Verify index was built (should have pages)
@@ -35,45 +35,45 @@ SELECT count(*) FROM (
 RESET enable_seqscan;
 
 -- Create index with distance_mode relopt
-CREATE INDEX idx_sym ON embeddings USING mktann (v)
+CREATE INDEX idx_sym ON embeddings USING prism (v)
     WITH (distance_mode = 'symmetric', centroid_compression = true);
-CREATE INDEX idx_asym ON embeddings USING mktann (v)
+CREATE INDEX idx_asym ON embeddings USING prism (v)
     WITH (distance_mode = 'asymmetric', centroid_compression = true);
 
 -- GUC: check default, set, and reset
-SHOW mkt.distance_mode;
-SET mkt.distance_mode = 'symmetric';
-SHOW mkt.distance_mode;
-SET mkt.distance_mode = 'default';
-SHOW mkt.distance_mode;
+SHOW prism.distance_mode;
+SET prism.distance_mode = 'symmetric';
+SHOW prism.distance_mode;
+SET prism.distance_mode = 'default';
+SHOW prism.distance_mode;
 
 -- L2 with uncompressed float centroids — build should work
-CREATE INDEX idx_l2_float ON embeddings USING mktann (v)
+CREATE INDEX idx_l2_float ON embeddings USING prism (v)
     WITH (centroid_compression = off);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_l2_float';
 
 -- IP opclass (centroid_compression=auto falls back to float) — build works
-CREATE INDEX idx_ip ON embeddings USING mktann (v vec32_ip_ops);
+CREATE INDEX idx_ip ON embeddings USING prism (v vec32_ip_ops);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_ip';
 
 -- Cosine opclass with uncompressed float centroids — build should work
-CREATE INDEX idx_cos ON embeddings USING mktann (v vec32_cosine_ops)
+CREATE INDEX idx_cos ON embeddings USING prism (v vec32_cosine_ops)
     WITH (centroid_compression = off);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_cos';
 
 -- Cosine with compression — build should work
 CREATE INDEX idx_cosc ON embeddings
-    USING mktann (v vec32_cosine_ops)
+    USING prism (v vec32_cosine_ops)
     WITH (centroid_compression = true);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_cosc';
 
 -- Validation: compression + IP should ERROR
 CREATE INDEX idx_bad ON embeddings
-    USING mktann (v vec32_ip_ops)
+    USING prism (v vec32_ip_ops)
     WITH (centroid_compression = true);
 
 -- ============================================================
@@ -97,12 +97,12 @@ INSERT INTO h_embeddings (v)
 ANALYZE h_embeddings;
 
 -- All three vec16 opclasses build.
-CREATE INDEX h_idx_l2 ON h_embeddings USING mktann (v)
+CREATE INDEX h_idx_l2 ON h_embeddings USING prism (v)
     WITH (centroid_compression = true);
 SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'h_idx_l2';
-CREATE INDEX h_idx_ip ON h_embeddings USING mktann (v vec16_ip_ops);
+CREATE INDEX h_idx_ip ON h_embeddings USING prism (v vec16_ip_ops);
 SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'h_idx_ip';
-CREATE INDEX h_idx_cos ON h_embeddings USING mktann (v vec16_cosine_ops);
+CREATE INDEX h_idx_cos ON h_embeddings USING prism (v vec16_cosine_ops);
 SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'h_idx_cos';
 
 -- The planner picks the index for an ORDER BY over a vec16 query argument.
@@ -125,11 +125,11 @@ RESET enable_indexscan;
 RESET enable_bitmapscan;
 
 SET enable_seqscan = off;
-SET mkt.nprobe = 1000;
+SET prism.nprobe = 1000;
 CREATE TEMP TABLE h_idx AS
     SELECT round((v <-> '[0.5,0.5,0.5]'::vec16)::numeric, 6) AS d
         FROM h_embeddings ORDER BY v <-> '[0.5,0.5,0.5]'::vec16 LIMIT 5;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 RESET enable_seqscan;
 
 SELECT (SELECT array_agg(d ORDER BY d) FROM h_idx)
@@ -141,10 +141,10 @@ SELECT (SELECT array_agg(d ORDER BY d) FROM h_idx)
 -- widened f16 value and the rerank compared against the same.
 INSERT INTO h_embeddings (v) VALUES ('[0.55,0.55,0.55]');
 SET enable_seqscan = off;
-SET mkt.nprobe = 1000;
+SET prism.nprobe = 1000;
 SELECT round((v <-> '[0.55,0.55,0.55]'::vec16)::numeric, 6) AS inserted_dist
     FROM h_embeddings ORDER BY v <-> '[0.55,0.55,0.55]'::vec16 LIMIT 1;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 RESET enable_seqscan;
 
 DROP TABLE h_embeddings;
@@ -170,16 +170,16 @@ CREATE TABLE expr_t (id serial, v vec32(3));
 INSERT INTO expr_t (v) VALUES ('[0.1,0.2,0.3]'), ('[0.4,0.5,0.6]');
 
 CREATE INDEX expr_idx ON expr_t
-    USING mktann ((array_to_vec32(v::real[], 3, false)::vec32(3)));
+    USING prism ((array_to_vec32(v::real[], 3, false)::vec32(3)));
 
 -- A plain index on the same column is fine: it is the expression, not the
 -- column, that is unsupported.
-CREATE INDEX plain_idx ON expr_t USING mktann (v);
+CREATE INDEX plain_idx ON expr_t USING prism (v);
 SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'plain_idx';
 
 -- A partial index is also fine -- a predicate changes which rows reach the
 -- index, not where the indexed value lives.
-CREATE INDEX part_idx ON expr_t USING mktann (v) WHERE id > 1;
+CREATE INDEX part_idx ON expr_t USING prism (v) WHERE id > 1;
 SELECT relpages > 0 AS has_pages FROM pg_class WHERE relname = 'part_idx';
 
 DROP TABLE expr_t;
@@ -191,7 +191,7 @@ INSERT INTO embeddings (v) VALUES ('[1,1,1]');
 VACUUM embeddings;
 
 -- Multi-level tree with fan_out (nlist=31, fan_out=4 → 3 levels)
-CREATE INDEX idx_ml ON embeddings USING mktann (v)
+CREATE INDEX idx_ml ON embeddings USING prism (v)
     WITH (fan_out = 4, centroid_compression = true);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_ml';
@@ -205,22 +205,22 @@ SELECT count(*) FROM (
 RESET enable_seqscan;
 
 -- Multi-level tree with uncompressed float centroids
-CREATE INDEX idx_ml_float ON embeddings USING mktann (v)
+CREATE INDEX idx_ml_float ON embeddings USING prism (v)
     WITH (fan_out = 4, centroid_compression = off);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_ml_float';
 
 -- fan_out = 2 (deepest tree)
-CREATE INDEX idx_fo2 ON embeddings USING mktann (v)
+CREATE INDEX idx_fo2 ON embeddings USING prism (v)
     WITH (fan_out = 2, centroid_compression = true);
 SELECT relpages > 0 AS has_pages FROM pg_class
     WHERE relname = 'idx_fo2';
 
 -- Validation: fan_out must be >= 2
-CREATE INDEX idx_bad_fo ON embeddings USING mktann (v)
+CREATE INDEX idx_bad_fo ON embeddings USING prism (v)
     WITH (fan_out = 1);
 
--- EXPLAIN ANALYZE: verify mktann stats are present with sensible values
+-- EXPLAIN ANALYZE: verify prism stats are present with sensible values
 SET enable_seqscan = off;
 CREATE FUNCTION test_explain_stats() RETURNS TABLE (
     has_clusters bool,
@@ -239,7 +239,7 @@ BEGIN
         SELECT id, v <-> ''[0.5,0.5,0.5]'' AS dist
         FROM embeddings ORDER BY v <-> ''[0.5,0.5,0.5]'' LIMIT 5'
     INTO explain_json;
-    stats := explain_json->0->'Plan'->'Plans'->0->'Mktann';
+    stats := explain_json->0->'Plan'->'Plans'->0->'Prism';
     RETURN QUERY SELECT
         (stats->>'Posting Lists Scanned')::int > 0,
         (stats->>'Centroid Pages Read')::int > 0,
@@ -274,7 +274,7 @@ INSERT INTO hd
                        ']')
                FROM generate_series(1, 768) j)::vec32(768)
     FROM generate_series(1, 2000) g;
-CREATE INDEX hd_i ON hd USING mktann (v);
+CREATE INDEX hd_i ON hd USING prism (v);
 SELECT count(*) BETWEEN 20 AND 120 AS toast_auto_nlist
   FROM centroid_pages('hd_i') WHERE is_leaf;
 DROP TABLE hd;
@@ -287,14 +287,14 @@ DROP TABLE hd;
 -- ceiling is rejected up front (it would corrupt the first-page capacity
 -- arithmetic); the ceiling itself builds and answers exactly.
 CREATE TABLE dimcap (id int, v vec32(1969));
-CREATE INDEX dimcap_i ON dimcap USING mktann (v);
+CREATE INDEX dimcap_i ON dimcap USING prism (v);
 DROP TABLE dimcap;
 CREATE TABLE dimcap (id int, v vec32(1968));
 INSERT INTO dimcap
     SELECT g, (SELECT ('[' || string_agg((sin(g + j))::text, ',') || ']')
                FROM generate_series(1, 1968) j)::vec32(1968)
     FROM generate_series(1, 20) g;
-CREATE INDEX dimcap_i ON dimcap USING mktann (v) WITH (nlist = 4);
+CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 4);
 SET enable_seqscan = off;
 SELECT id FROM dimcap ORDER BY v <-> (SELECT v FROM dimcap WHERE id = 7)
     LIMIT 1;
@@ -306,7 +306,7 @@ DROP TABLE dimcap;
 -- ============================================================
 -- The per-backend cache that holds the (expensive to build) RaBitQ
 -- rotation matrix is keyed by (dim, seed). A scan checks the matrix out
--- at beginscan and holds a direct reference to it (mktann_rescan never
+-- at beginscan and holds a direct reference to it (prism_rescan never
 -- re-derives it), so the cache must never free an entry that a
 -- still-open scan is holding, no matter how many other dimensions get
 -- checked out and evicted around it.
@@ -329,13 +329,13 @@ CREATE TABLE cache_a (id int, v vec32(8));
 INSERT INTO cache_a
     SELECT g, format('[%s,0,0,0,0,0,0,0]', g)::vec32
     FROM generate_series(1, 2000) g;
-CREATE INDEX idx_a ON cache_a USING mktann (v) WITH (nlist = 64);
+CREATE INDEX idx_a ON cache_a USING prism (v) WITH (nlist = 64);
 
 CREATE TABLE cache_c (id int, v vec32(256));
 INSERT INTO cache_c
     SELECT g, ('[' || g::text || repeat(',0', 255) || ']')::vec32
     FROM generate_series(1, 2000) g;
-CREATE INDEX idx_c ON cache_c USING mktann (v) WITH (nlist = 64);
+CREATE INDEX idx_c ON cache_c USING prism (v) WITH (nlist = 64);
 
 -- Non-integer query points avoid distance ties, so each nearest-1 answer
 -- is unambiguous: row 1 probes near 1500, row 2 probes near 1600.
@@ -395,7 +395,7 @@ BEGIN
             SELECT g, ('[' || g::text || repeat(',0', %s - 1) || ']')::vec32
             FROM generate_series(1, 256) g$i$, d, d);
         EXECUTE format('CREATE INDEX cache_i%s ON cache_t%s '
-                       'USING mktann (v) WITH (nlist = 4)', d, d);
+                       'USING prism (v) WITH (nlist = 4)', d, d);
     END LOOP;
 END $$;
 

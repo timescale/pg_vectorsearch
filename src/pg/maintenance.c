@@ -1,17 +1,17 @@
 /*
  * maintenance.c - mutating index maintenance functions
  *
- * SQL-callable operations that modify mktann index pages, and therefore
+ * SQL-callable operations that modify prism index pages, and therefore
  * WAL-log them. Kept separate from the strictly read-only inspection
  * functions in inspect.c so the write/WAL paths are grouped where they
  * get the scrutiny persistent mutations need.
  *
  * Operations:
- *   mkt.convert_posting_to_fastscan(regclass, int4) -- convert one cluster's
+ *   prism.convert_posting_to_fastscan(regclass, int4) -- convert one cluster's
  *       posting chain from AoS to fastscan format (function)
- *   mkt.split_posting_list(regclass, bigint) -- split one list by head block
+ *   prism.split_posting_list(regclass, bigint) -- split one list by head block
  *       (procedure)
- *   mkt.rebalance(regclass, int4) -- split every list over a given size
+ *   prism.rebalance(regclass, int4) -- split every list over a given size
  *       (procedure)
  *
  * split_posting_list and rebalance are procedures, not functions: they are
@@ -241,9 +241,9 @@ ensure_meta_fastscan_flag(Relation index)
 {
 	Buffer buf = ReadBuffer(index, 0);
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
-	Page			page = BufferGetPage(buf);
-	MktannMetaPage *mp	 = (MktannMetaPage *)PageGetSpecialPointer(page);
-	bool			needs_update = !(mp->flags & MKT_META_FLAG_FASTSCAN);
+	Page		   page			= BufferGetPage(buf);
+	PrismMetaPage *mp			= (PrismMetaPage *)PageGetSpecialPointer(page);
+	bool		   needs_update = !(mp->flags & MKT_META_FLAG_FASTSCAN);
 	UnlockReleaseBuffer(buf);
 
 	if (needs_update)
@@ -252,7 +252,7 @@ ensure_meta_fastscan_flag(Relation index)
 		buf						= ReadBuffer(index, 0);
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
-		mp	 = (MktannMetaPage *)PageGetSpecialPointer(page);
+		mp	 = (PrismMetaPage *)PageGetSpecialPointer(page);
 		mp->flags |= MKT_META_FLAG_FASTSCAN;
 		GenericXLogFinish(state);
 		UnlockReleaseBuffer(buf);
@@ -260,7 +260,7 @@ ensure_meta_fastscan_flag(Relation index)
 }
 
 /* ----------------------------------------------------------------
- * mkt.convert_posting_to_fastscan(regclass, int4)
+ * prism.convert_posting_to_fastscan(regclass, int4)
  *
  * Converts one cluster's posting chain from AoS to fastscan.
  * Updates the centroid leaf entry and sets the metadata flag.
@@ -292,7 +292,7 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	LockBuffer(meta_buf, BUFFER_LOCK_SHARE);
 	Page meta_page = BufferGetPage(meta_buf);
 
-	const MktannMetaPage *meta = (const MktannMetaPage *)PageGetSpecialPointer(
+	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
 	if (meta->magic != MKT_META_MAGIC)
@@ -301,7 +301,7 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 		relation_close(index, MKT_MAINT_LOCK);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not an mktann index",
+				 errmsg("\"%s\" is not a prism index",
 						RelationGetRelationName(index))));
 	}
 
@@ -312,11 +312,11 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 
 	/*
 	 * Find the leaf for this cluster. The argument is the stored cluster_id --
-	 * what mkt.posting_pages reports and what callers pass -- not a positional
-	 * index. collect_leaf_entries returns leaves in tree-traversal order,
-	 * which coincides with cluster_id only for a single-page flat tree; on any
-	 * deeper or multi-page tree the two diverge. Match on each leaf's own head
-	 * cluster_id so the argument means the same thing everywhere.
+	 * what prism.posting_pages reports and what callers pass -- not a
+	 * positional index. collect_leaf_entries returns leaves in tree-traversal
+	 * order, which coincides with cluster_id only for a single-page flat tree;
+	 * on any deeper or multi-page tree the two diverge. Match on each leaf's
+	 * own head cluster_id so the argument means the same thing everywhere.
 	 */
 	LeafEntry *leaves;
 	int		   nleaves =
@@ -368,8 +368,8 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	}
 
 	/* Convert the posting chain */
-	MktannStorage storage;
-	mktann_storage_init(&storage, index, NULL, DISTANCE_L2);
+	MktPgStorage storage;
+	mkt_pg_storage_init(&storage, index, NULL, DISTANCE_L2);
 
 	/*
 	 * Online conversion, unlike a full index build, has no closing
@@ -542,9 +542,9 @@ pg_retire_chain(void *ctx, MktStorage *posting_storage, BlockNumber head)
 static void
 persist_nlist(MktStorage *storage, uint32_t nlist)
 {
-	Page			page = mkt_storage_write_page(storage, 0);
-	MktannMetaPage *meta = (MktannMetaPage *)PageGetSpecialPointer(page);
-	meta->nlist			 = nlist;
+	Page		   page = mkt_storage_write_page(storage, 0);
+	PrismMetaPage *meta = (PrismMetaPage *)PageGetSpecialPointer(page);
+	meta->nlist			= nlist;
 	mkt_storage_commit_page(storage, 0);
 }
 
@@ -553,7 +553,7 @@ persist_nlist(MktStorage *storage, uint32_t nlist)
  *
  * A split that runs out of room on a level-0 centroid page extends the
  * relation, so the count cannot be recovered from the block layout
- * afterwards -- see MktannMetaPage.ncentroid_pages. Written once per
+ * afterwards -- see PrismMetaPage.ncentroid_pages. Written once per
  * maintenance pass rather than per split, alongside the leaf count.
  *
  * Losing this write cannot corrupt anything: nothing reads the count to
@@ -563,8 +563,8 @@ persist_nlist(MktStorage *storage, uint32_t nlist)
 static void
 persist_ncentroid_pages(MktStorage *storage, uint32_t ncentroid_pages)
 {
-	Page			page  = mkt_storage_write_page(storage, 0);
-	MktannMetaPage *meta  = (MktannMetaPage *)PageGetSpecialPointer(page);
+	Page		   page	  = mkt_storage_write_page(storage, 0);
+	PrismMetaPage *meta	  = (PrismMetaPage *)PageGetSpecialPointer(page);
 	meta->ncentroid_pages = ncentroid_pages;
 	mkt_storage_commit_page(storage, 0);
 }
@@ -648,7 +648,7 @@ require_memory_budget(Relation index, Dimension dim)
  * special offset is zero -- is never misread through the posting layout. The
  * scanned range starts past the centroid region, so today nothing else should
  * be in it; the guard costs nothing and does not rely on that staying true.
- * (mktann_bulkdelete guards the same way over the same range.)
+ * (prism_bulkdelete guards the same way over the same range.)
  */
 static bool
 page_is_posting(Page page)
@@ -734,7 +734,7 @@ split_one_head(
 	 * No-op unless PG was built with injection points and a test attached an
 	 * action.
 	 */
-	INJECTION_POINT("mktann-split-locked", NULL);
+	INJECTION_POINT("prism-split-locked", NULL);
 
 	MktSplitConfig cfg = {
 			.target_entries		 = target,
@@ -776,14 +776,14 @@ split_one_head(
 static uint32_t
 resolve_target_entries(Relation heap)
 {
-	return mkt_target_entries_per_list(mktann_estimate_heap_tuples(heap), 0);
+	return mkt_target_entries_per_list(prism_estimate_heap_tuples(heap), 0);
 }
 
 /* Common setup: base + storage + heap fetch context. */
 typedef struct MaintCtx
 {
 	MktIndexBase	base;
-	MktannStorage	storage;
+	MktPgStorage	storage;
 	Relation		heap;
 	PgSplitFetchCtx fetch;
 	ResourceOwner	params_owner;
@@ -800,10 +800,10 @@ static void
 maint_begin(Relation index, MaintCtx *m)
 {
 	m->params_owner = CurrentResourceOwner;
-	mktann_index_base_init(index, &m->base);
+	prism_index_base_init(index, &m->base);
 	require_supported_shape(index, &m->base);
 
-	mktann_storage_init(&m->storage, index, NULL, m->base.metric);
+	mkt_pg_storage_init(&m->storage, index, NULL, m->base.metric);
 	m->base.centroid_storage = &m->storage.base;
 	m->base.posting_storage	 = &m->storage.base;
 	m->base.page_base		 = NULL;
@@ -813,13 +813,13 @@ maint_begin(Relation index, MaintCtx *m)
 	m->fetch.attnum = index->rd_index->indkey.values[0];
 	m->fetch.slot	= table_slot_create(m->heap, NULL);
 	m->fetch.access = vec32_access(
-			mktann_cache_type_info(index), m->base.dim, CurrentMemoryContext);
+			prism_cache_type_info(index), m->base.dim, CurrentMemoryContext);
 	m->fetch.storage = &m->storage.base;
 
 	/* Created here, but not switched into: everything above has to outlive the
 	 * per-list resets. */
 	m->split_ctx = AllocSetContextCreate(
-			CurrentMemoryContext, "mktann split", ALLOCSET_DEFAULT_SIZES);
+			CurrentMemoryContext, "prism split", ALLOCSET_DEFAULT_SIZES);
 }
 
 /*
@@ -877,7 +877,7 @@ split_one_head_in_scratch(
 static void
 clear_nlist_reloption(Relation index)
 {
-	MktannOptions *opts = (MktannOptions *)index->rd_options;
+	PrismOptions *opts = (PrismOptions *)index->rd_options;
 
 	if (opts == NULL || opts->nlist <= 0)
 		return; /* never declared: nothing to clear */
@@ -943,7 +943,7 @@ maint_end(Relation index, MaintCtx *m, bool changed)
 	MemoryContextDelete(m->split_ctx);
 	ExecDropSingleTupleTableSlot(m->fetch.slot);
 	table_close(m->heap, AccessShareLock);
-	mktann_release_params(m->base.dim, m->base.rabitq_seed, m->params_owner);
+	prism_release_params(m->base.dim, m->base.rabitq_seed, m->params_owner);
 }
 
 /* ----------------------------------------------------------------
@@ -951,7 +951,7 @@ maint_end(Relation index, MaintCtx *m, bool changed)
  * ---------------------------------------------------------------- */
 
 /*
- * CALL mkt.split_posting_list(index regclass, head_blkno bigint)
+ * CALL prism.split_posting_list(index regclass, head_blkno bigint)
  *
  * Split the single posting list whose head page is head_blkno. Reports via
  * NOTICE whether a split happened or was declined (not a live head, too few
@@ -960,7 +960,7 @@ maint_end(Relation index, MaintCtx *m, bool changed)
 Datum
 mkt_split_posting_list(PG_FUNCTION_ARGS)
 {
-	require_own_transaction(fcinfo, "mkt.split_posting_list()");
+	require_own_transaction(fcinfo, "prism.split_posting_list()");
 	reject_null_arg(fcinfo, 0, "index_oid");
 	reject_null_arg(fcinfo, 1, "head_blkno");
 
@@ -1026,7 +1026,7 @@ mkt_split_posting_list(PG_FUNCTION_ARGS)
 }
 
 /* ----------------------------------------------------------------
- * CALL mkt.rebalance(index regclass, target_entries int4 DEFAULT NULL)
+ * CALL prism.rebalance(index regclass, target_entries int4 DEFAULT NULL)
  *
  * Manual LIRE rebalancing entry point. Scans the index and splits every live
  * posting-list head that has grown past the split trigger into lists of about
@@ -1058,7 +1058,7 @@ mkt_split_posting_list(PG_FUNCTION_ARGS)
 Datum
 mkt_rebalance(PG_FUNCTION_ARGS)
 {
-	require_own_transaction(fcinfo, "mkt.rebalance()");
+	require_own_transaction(fcinfo, "prism.rebalance()");
 	reject_null_arg(fcinfo, 0, "index_oid");
 
 	Oid indexoid = PG_GETARG_OID(0);

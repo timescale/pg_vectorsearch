@@ -26,23 +26,23 @@
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-int			mkt_distance_mode		  = MKT_DISTANCE_MODE_DEFAULT;
-int			mkt_nprobe				  = 0;
-int			mkt_query_limit			  = 0;
-int			mkt_fastscan_bits		  = 16;
-bool		mkt_rerank				  = true;
-bool		mkt_log_build_stats		  = false;
-double		mkt_centroid_error_scale  = 0.0;
-double		mkt_centroid_beam_scale	  = 0.5;
-int			mkt_leaf_refine_threshold = 0;
-static bool mkt_recent_buffers		  = true;
-double		mkt_probe_expand		  = 2.0;
-static int	mkt_rerank_pool			  = 0;
+int			prism_distance_mode		   = MKT_DISTANCE_MODE_DEFAULT;
+int			prism_nprobe			   = 0;
+int			prism_query_limit		   = 0;
+int			prism_fastscan_bits		   = 16;
+bool		prism_rerank			   = true;
+bool		prism_log_build_stats	   = false;
+double		prism_centroid_error_scale = 0.0;
+double		prism_centroid_beam_scale  = 0.5;
+int			mkt_leaf_refine_threshold  = 0;
+static bool prism_recent_buffers	   = true;
+double		prism_probe_expand		   = 2.0;
+static int	prism_rerank_pool		   = 0;
 
 static void
 mkt_recent_buffers_assign_hook(bool newval, void *extra)
 {
-	mktann_storage_set_recent_buffers(newval);
+	mkt_pg_storage_set_recent_buffers(newval);
 }
 
 static void
@@ -71,7 +71,7 @@ static const struct config_enum_entry mkt_fastscan_bits_options[] = {
 };
 
 /* Index reloptions */
-relopt_kind mktann_relopt_kind;
+relopt_kind prism_relopt_kind;
 
 static relopt_enum_elt_def distance_mode_relopt_members[] = {
 		{"asymmetric", MKT_DISTANCE_MODE_ASYMMETRIC},
@@ -105,10 +105,10 @@ void
 _PG_init(void)
 {
 	DefineCustomEnumVariable(
-			MKT_EXTENSION_SCHEMA ".distance_mode",
+			MKT_GUC_PREFIX ".distance_mode",
 			"RaBitQ distance computation mode.",
 			"default (use index setting), asymmetric, or symmetric",
-			&mkt_distance_mode,
+			&prism_distance_mode,
 			MKT_DISTANCE_MODE_DEFAULT,
 			mkt_distance_mode_options,
 			PGC_USERSET,
@@ -118,12 +118,12 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomIntVariable(
-			MKT_EXTENSION_SCHEMA ".nprobe",
+			MKT_GUC_PREFIX ".nprobe",
 			"Number of clusters to probe per query.",
 			"0 derives it from the index's cluster count "
 			"(~0.5*sqrt(nlist), targeting ~0.95 recall). Lower it for "
 			"speed, raise it for recall.",
-			&mkt_nprobe,
+			&prism_nprobe,
 			0,
 			0,
 			10000,
@@ -134,7 +134,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomIntVariable(
-			MKT_EXTENSION_SCHEMA ".query_limit",
+			MKT_GUC_PREFIX ".query_limit",
 			"Caps the top-k an index scan is sized for (0 = no cap).",
 			"A scan sizes its top-k from the LIMIT above it, inflated by "
 			"the planner's selectivity estimate for any filter the "
@@ -148,7 +148,7 @@ _PG_init(void)
 			"ignored otherwise, which bounds a query that has no LIMIT or "
 			"one set far above the rows actually read. No scan is sized "
 			"below 10 rows.",
-			&mkt_query_limit,
+			&prism_query_limit,
 			0,
 			0,
 			INT_MAX,
@@ -159,7 +159,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomIntVariable(
-			MKT_EXTENSION_SCHEMA ".leaf_refine_threshold",
+			MKT_GUC_PREFIX ".leaf_refine_threshold",
 			"Sample-per-leaf count below which a subsampled build refines "
 			"the leaf centroids on the full table.",
 			"The k-means sample trains each leaf's encode reference; the "
@@ -181,10 +181,10 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomEnumVariable(
-			MKT_EXTENSION_SCHEMA ".fastscan_bits",
+			MKT_GUC_PREFIX ".fastscan_bits",
 			"Fastscan LUT quantization bits.",
 			"8 is faster, 16 is more accurate",
-			&mkt_fastscan_bits,
+			&prism_fastscan_bits,
 			16,
 			mkt_fastscan_bits_options,
 			PGC_USERSET,
@@ -194,10 +194,10 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomBoolVariable(
-			MKT_EXTENSION_SCHEMA ".rerank",
+			MKT_GUC_PREFIX ".rerank",
 			"Enable reranking with exact distances.",
 			NULL,
-			&mkt_rerank,
+			&prism_rerank,
 			true,
 			PGC_USERSET,
 			0,
@@ -206,14 +206,14 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomBoolVariable(
-			MKT_EXTENSION_SCHEMA ".log_build_stats",
+			MKT_GUC_PREFIX ".log_build_stats",
 			"Log per-phase index-build resource statistics.",
 			"When on, each build phase logs its elapsed time, build-heap "
 			"usage, and CPU/maxrss (via the server's ShowUsage), plus a final "
 			"summary, at LOG. Off by default; modeled on the core btree "
 			"log_btree_build_stats developer option. The up-front "
 			"planned-allocation line is logged regardless of this setting.",
-			&mkt_log_build_stats,
+			&prism_log_build_stats,
 			false,
 			PGC_SUSET,
 			GUC_NOT_IN_SAMPLE,
@@ -222,7 +222,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomRealVariable(
-			MKT_EXTENSION_SCHEMA ".centroid_error_scale",
+			MKT_GUC_PREFIX ".centroid_error_scale",
 			"Centroid-search beam width, as a multiple of the RaBitQ "
 			"distance-error margin.",
 			"During centroid routing each candidate centroid has an "
@@ -239,7 +239,7 @@ _PG_init(void)
 			"Applies to both compressed centroid formats (RaBitQ and "
 			"FASTSCAN); float/half centroid pages have exact distances (no "
 			"error margin) and are unaffected.",
-			&mkt_centroid_error_scale,
+			&prism_centroid_error_scale,
 			0.0,
 			0.0,
 			10.0,
@@ -250,7 +250,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomRealVariable(
-			MKT_EXTENSION_SCHEMA ".centroid_beam_scale",
+			MKT_GUC_PREFIX ".centroid_beam_scale",
 			"Intermediate centroid beam width as a fraction of nprobe.",
 			"Sets the beam width at the intermediate tree levels to this "
 			"fraction of nprobe; the leaf level always returns the full "
@@ -263,7 +263,7 @@ _PG_init(void)
 			"setting. Smaller values score fewer centroids and are faster "
 			"at high nprobe, with a small recall risk if a near leaf's "
 			"ancestor falls outside the narrowed beam.",
-			&mkt_centroid_beam_scale,
+			&prism_centroid_beam_scale,
 			0.5,
 			0.01,
 			1.0,
@@ -274,14 +274,14 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomBoolVariable(
-			MKT_EXTENSION_SCHEMA ".recent_buffers",
+			MKT_GUC_PREFIX ".recent_buffers",
 			"Re-pin index pages via a backend-local buffer-id cache.",
 			"Skips the shared buffer-mapping hash lookup (a large share of "
 			"warm scan CPU) by remembering each block's buffer id and "
 			"re-pinning it with ReadRecentBuffer. Stale ids fall back to a "
 			"normal read and self-heal. Costs 4 bytes per index block per "
 			"backend.",
-			&mkt_recent_buffers,
+			&prism_recent_buffers,
 			true,
 			PGC_USERSET,
 			0,
@@ -290,7 +290,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomRealVariable(
-			MKT_EXTENSION_SCHEMA ".probe_expand",
+			MKT_GUC_PREFIX ".probe_expand",
 			"Probe-candidate expansion factor for exact centroid re-rank.",
 			"Routes ceil(nprobe * expand) leaf candidates through the "
 			"centroid beam, re-ranks them by exact query-centroid distance "
@@ -302,7 +302,7 @@ _PG_init(void)
 			"Gains saturate around 2 (the default); the extra routed "
 			"candidates are capped at 256, which bounds the overhead at "
 			"large nprobe while retaining nearly all of the recall gain.",
-			&mkt_probe_expand,
+			&prism_probe_expand,
 			2.0,
 			1.0,
 			16.0,
@@ -313,7 +313,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomIntVariable(
-			MKT_EXTENSION_SCHEMA ".rerank_pool",
+			MKT_GUC_PREFIX ".rerank_pool",
 			"Max candidates to exact-rerank per query (0 = automatic, "
 			"-1 = unlimited).",
 			"Rerank only the most promising candidates by approximate "
@@ -323,7 +323,7 @@ _PG_init(void)
 			"it; -1 reranks every threshold survivor; positive values "
 			"set an absolute cap. The effective cap is never below the "
 			"query's k, so results are never truncated.",
-			&mkt_rerank_pool,
+			&prism_rerank_pool,
 			0,
 			-1,
 			1000000,
@@ -333,13 +333,13 @@ _PG_init(void)
 			mkt_rerank_pool_assign_hook,
 			NULL);
 
-	MarkGUCPrefixReserved(MKT_EXTENSION_SCHEMA);
+	MarkGUCPrefixReserved(MKT_GUC_PREFIX);
 
 	mkt_cblas_pin_single_thread();
 
-	mktann_relopt_kind = add_reloption_kind();
+	prism_relopt_kind = add_reloption_kind();
 	add_enum_reloption(
-			mktann_relopt_kind,
+			prism_relopt_kind,
 			"distance_mode",
 			"RaBitQ distance computation mode",
 			distance_mode_relopt_members,
@@ -347,7 +347,7 @@ _PG_init(void)
 			"symmetric is faster but has larger estimation error",
 			NoLock);
 	add_int_reloption(
-			mktann_relopt_kind,
+			prism_relopt_kind,
 			"fan_out",
 			"Children per tree node (2-255)",
 			MKT_ANN_DEFAULT_FAN_OUT,
@@ -355,7 +355,7 @@ _PG_init(void)
 			MKT_ANN_MAX_FAN_OUT,
 			NoLock);
 	add_int_reloption(
-			mktann_relopt_kind,
+			prism_relopt_kind,
 			"nlist",
 			"Number of IVF clusters (0 = auto from sqrt(rows))",
 			MKT_ANN_DEFAULT_NLIST,
@@ -363,7 +363,7 @@ _PG_init(void)
 			MKT_ANN_MAX_NLIST,
 			NoLock);
 	add_int_reloption(
-			mktann_relopt_kind,
+			prism_relopt_kind,
 			"kmeans_nredo",
 			"K-means restarts for cluster quality (1 = no restart)",
 			1,
@@ -371,7 +371,7 @@ _PG_init(void)
 			20,
 			NoLock);
 	add_real_reloption(
-			mktann_relopt_kind,
+			prism_relopt_kind,
 			"soar_lambda",
 			"SOAR replication lambda (0 = off)",
 			MKT_ANN_DEFAULT_SOAR_LAMBDA,
@@ -379,7 +379,7 @@ _PG_init(void)
 			100.0,
 			NoLock);
 	add_real_reloption(
-			mktann_relopt_kind,
+			prism_relopt_kind,
 			"boundary_epsilon",
 			"Boundary replication gap threshold (0 = off)",
 			MKT_ANN_DEFAULT_BOUNDARY_EPSILON,
@@ -387,7 +387,7 @@ _PG_init(void)
 			100.0,
 			NoLock);
 	add_enum_reloption(
-			mktann_relopt_kind,
+			prism_relopt_kind,
 			"centroid_compression",
 			"RaBitQ compression for centroid pages",
 			centroid_compression_relopt_members,
@@ -395,7 +395,7 @@ _PG_init(void)
 			"auto compresses for L2/cosine and skips inner product",
 			NoLock);
 	add_enum_reloption(
-			mktann_relopt_kind,
+			prism_relopt_kind,
 			"fastscan",
 			"VPSHUFB fastscan posting page format",
 			fastscan_mode_relopt_members,
@@ -403,7 +403,7 @@ _PG_init(void)
 			"auto uses it up to the dimension where a group fits a page",
 			NoLock);
 	add_enum_reloption(
-			mktann_relopt_kind,
+			prism_relopt_kind,
 			"centroid_fastscan",
 			"FASTSCAN-format centroid pages",
 			fastscan_mode_relopt_members,
@@ -414,7 +414,7 @@ _PG_init(void)
 
 	mkt_distance_init();
 	mkt_rabitq_init_simd();
-	mktann_explain_init();
+	prism_explain_init();
 	mkt_scan_bound_init();
 }
 
@@ -441,7 +441,7 @@ mkt_pg_check_dim_valid(int dim)
  * Gram-Schmidt -- O(dim^3) in time, O(dim^2) in memory -- and is callable by
  * any role, so an oversized dim is a CPU/memory denial-of-service vector (at
  * the generic vector cap a single call runs for minutes at 100% CPU). Bound
- * it by MKT_INDEX_MAX_DIM: generating params for a dimension no meerkat index
+ * it by MKT_INDEX_MAX_DIM: generating params for a dimension no prism index
  * can hold is pointless, so the largest indexable dimension is the natural
  * ceiling, and it tracks the index limit automatically.
  */
@@ -456,7 +456,7 @@ mkt_pg_check_rabitq_params_dim_valid(int dim)
 						"dimensions",
 						MKT_INDEX_MAX_DIM),
 				 errhint("Building the transform matrix is O(dim^3); no "
-						 "mktann index supports more dimensions than this.")));
+						 "prism index supports more dimensions than this.")));
 }
 
 void
@@ -540,26 +540,26 @@ mkt_extension_name(PG_FUNCTION_ARGS)
  * Metric identifier support functions (FUNCTION 2 in opclasses)
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mktann_metric_l2);
+PG_FUNCTION_INFO_V1(prism_metric_l2);
 
 Datum
-mktann_metric_l2(PG_FUNCTION_ARGS)
+prism_metric_l2(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(DISTANCE_L2);
 }
 
-PG_FUNCTION_INFO_V1(mktann_metric_ip);
+PG_FUNCTION_INFO_V1(prism_metric_ip);
 
 Datum
-mktann_metric_ip(PG_FUNCTION_ARGS)
+prism_metric_ip(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(DISTANCE_INNER_PRODUCT);
 }
 
-PG_FUNCTION_INFO_V1(mktann_metric_cosine);
+PG_FUNCTION_INFO_V1(prism_metric_cosine);
 
 Datum
-mktann_metric_cosine(PG_FUNCTION_ARGS)
+prism_metric_cosine(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(DISTANCE_COSINE);
 }

@@ -264,7 +264,7 @@ gather_cost_inputs(
 
 	Assert(CheckRelationLockedByMe(index, AccessShareLock, true));
 
-	MktannScanInfo si = mktann_cache_scan_info(index);
+	PrismScanInfo si = prism_cache_scan_info(index);
 
 	index_close(index, NoLock);
 
@@ -303,7 +303,7 @@ gather_cost_inputs(
 
 	/*
 	 * Rows the scan will actually elect. mkt_scan_resolve_top_k applies the
-	 * rules the scan applies: the mkt.query_limit ceiling, a floor so a tiny
+	 * rules the scan applies: the prism.query_limit ceiling, a floor so a tiny
 	 * LIMIT still produces a usable search, and a work_mem-derived cap. With
 	 * no LIMIT to size from it uses the row count instead.
 	 */
@@ -312,12 +312,12 @@ gather_cost_inputs(
 	in->k_eff = mkt_scan_resolve_top_k(k, N);
 
 	/*
-	 * Posting lists this query will scan: pinned by mkt.nprobe when that is
+	 * Posting lists this query will scan: pinned by prism.nprobe when that is
 	 * set, otherwise derived from the index's list count, and never more
 	 * lists than exist.
 	 */
-	uint32_t nprobe = mkt_nprobe > 0 ? (uint32_t)mkt_nprobe
-									 : mkt_auto_nprobe(in->nlist);
+	uint32_t nprobe = prism_nprobe > 0 ? (uint32_t)prism_nprobe
+									   : mkt_auto_nprobe(in->nlist);
 
 	if (nprobe > in->nlist)
 		nprobe = in->nlist;
@@ -338,10 +338,10 @@ gather_cost_inputs(
 	 * Centroid slots the beam keeps per level, from the scan's own rule.
 	 */
 	in->beam = (double)mkt_query_beam_width(
-			nprobe, in->nlist, si.fan_out, mkt_centroid_beam_scale);
+			nprobe, in->nlist, si.fan_out, prism_centroid_beam_scale);
 
 	/*
-	 * Taken from the metapage, which the build sets and mkt.rebalance keeps
+	 * Taken from the metapage, which the build sets and prism.rebalance keeps
 	 * current. It cannot be derived from the block range: a split with no
 	 * room on a level-0 page chains the new centroid page past the posting
 	 * region, so first_posting stops bounding the count.
@@ -634,7 +634,7 @@ rerank_cost(
 		RelOptInfo		 *baserel,
 		IndexOptInfo	 *info)
 {
-	if (!mkt_rerank)
+	if (!prism_rerank)
 		return 0.0;
 
 	uint32_t capped = mkt_query_rerank_pool_estimate(in->k_eff, in->nprobe);
@@ -695,7 +695,7 @@ rerank_cost(
 }
 
 void
-mktann_cost_estimate(
+prism_cost_estimate(
 		PlannerInfo *root,
 		IndexPath	*path,
 		double		 loop_count,

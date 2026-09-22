@@ -70,7 +70,7 @@ typedef struct MktBuildAssignment
  *
  * The build assigns every vector exactly once, so it routes the centroid
  * descent for accuracy, not query speed. It must NOT inherit the
- * query-tuned mkt.centroid_beam_scale, which trades recall for QPS: a
+ * query-tuned prism.centroid_beam_scale, which trades recall for QPS: a
  * small beam_scale makes the beam narrower than the MKT_SECONDARY_TOPK
  * candidates the secondary (boundary/SOAR) search requests, loosening
  * clustering and permanently lowering query recall.

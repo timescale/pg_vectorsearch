@@ -17,7 +17,7 @@
 #
 # The procedures refuse to run inside a caller's transaction, so a session
 # cannot be made to hold the lock by wrapping the call in BEGIN. An injection
-# point ("mktann-split-locked") pauses a split mid-call instead, while it holds
+# point ("prism-split-locked") pauses a split mid-call instead, while it holds
 # the lock, and the other session blocks until it is woken. The last pairing
 # needs the wake-up too: the split blocks on lock acquisition first, then still
 # has to pass the pause point once the DDL session lets go.
@@ -37,14 +37,14 @@ setup
     CREATE TABLE maint (id int, v vec32(3));
     INSERT INTO maint SELECT g, format('[%s,0,0]', g)::vec32
         FROM generate_series(1, 60) g;
-    CREATE INDEX maint_idx ON maint USING mktann (v)
+    CREATE INDEX maint_idx ON maint USING prism (v)
         WITH (nlist = 1, centroid_fastscan = off);
 }
 
 teardown
 {
     DROP TABLE maint;
-    SELECT injection_points_detach('mktann-split-locked');
+    SELECT injection_points_detach('prism-split-locked');
     DROP EXTENSION injection_points;
 }
 
@@ -54,17 +54,17 @@ session m1
 setup
 {
     SELECT injection_points_set_local();
-    SELECT injection_points_attach('mktann-split-locked', 'wait');
+    SELECT injection_points_attach('prism-split-locked', 'wait');
 }
-step m1_head  { SELECT blkno AS head_blkno FROM mkt.posting_pages('maint_idx')
+step m1_head  { SELECT blkno AS head_blkno FROM prism.posting_pages('maint_idx')
                     WHERE is_first ORDER BY blkno LIMIT 1; }
-step m1_reb   { CALL mkt.rebalance('maint_idx', 10); }
-step m1_split { CALL mkt.split_posting_list('maint_idx', 2); }
+step m1_reb   { CALL prism.rebalance('maint_idx', 10); }
+step m1_split { CALL prism.split_posting_list('maint_idx', 2); }
 
 # The second session, through either entry point.
 session m2
-step m2_reb   { CALL mkt.rebalance('maint_idx', 10); }
-step m2_split { CALL mkt.split_posting_list('maint_idx', 2); }
+step m2_reb   { CALL prism.rebalance('maint_idx', 10); }
+step m2_split { CALL prism.split_posting_list('maint_idx', 2); }
 
 session d
 step d_drop     { DROP INDEX maint_idx; }
@@ -74,10 +74,10 @@ step d_alter    { ALTER TABLE maint SET (fillfactor = 90); }
 step d_commit   { COMMIT; }
 
 session obs
-step o_wake  { SELECT injection_points_wakeup('mktann-split-locked'); }
-step o_nlist { SELECT setting::int AS nlist FROM mkt.index_settings('maint_idx')
+step o_wake  { SELECT injection_points_wakeup('prism-split-locked'); }
+step o_nlist { SELECT setting::int AS nlist FROM prism.index_settings('maint_idx')
                    WHERE name = 'nlist'; }
-step o_heads { SELECT count(*) AS heads FROM mkt.posting_pages('maint_idx')
+step o_heads { SELECT count(*) AS heads FROM prism.posting_pages('maint_idx')
                    WHERE is_first; }
 step o_gone  { SELECT count(*) AS still_there FROM pg_class
                    WHERE relname = 'maint_idx'; }

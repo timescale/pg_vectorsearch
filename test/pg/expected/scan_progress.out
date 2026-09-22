@@ -2,7 +2,7 @@ Parsed test spec with 2 sessions
 
 starting permutation: b_build w_poll w_wake b_done
 step b_build: 
-    CREATE INDEX i_prog ON emb USING mktann (v) WITH (nlist = 32);
+    CREATE INDEX i_prog ON emb USING prism (v) WITH (nlist = 32);
  <waiting ...>
 s_watch: NOTICE:  tuples_done advanced mid-scan: t
 step w_poll: 
@@ -22,7 +22,7 @@ step w_poll:
         RAISE NOTICE 'tuples_done advanced mid-scan: %', observed;
     END $$;
 
-step w_wake: SELECT injection_points_wakeup('mktann-scan-progress');
+step w_wake: SELECT injection_points_wakeup('prism-scan-progress');
 injection_points_wakeup
 -----------------------
                        
@@ -30,7 +30,7 @@ injection_points_wakeup
 
 step b_build: <... completed>
 step b_done: 
-    SELECT injection_points_detach('mktann-scan-progress');
+    SELECT injection_points_detach('prism-scan-progress');
 
 injection_points_detach
 -----------------------

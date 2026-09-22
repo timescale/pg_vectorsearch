@@ -8,7 +8,7 @@ injection_points_attach
 
 step s1_ins: INSERT INTO ins VALUES (1001, '[100,0,0]'); <waiting ...>
 step s2_ins: INSERT INTO ins VALUES (1002, '[99,0,0]'); <waiting ...>
-step wake: SELECT injection_points_wakeup('mktann-insert-locked');
+step wake: SELECT injection_points_wakeup('prism-insert-locked');
 injection_points_wakeup
 -----------------------
                        

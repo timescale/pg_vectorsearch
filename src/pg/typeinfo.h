@@ -1,5 +1,5 @@
 /*
- * typeinfo.h - per-type behaviour for an mktann-indexed column
+ * typeinfo.h - per-type behaviour for a prism-indexed column
  *
  * The access method indexes more than one vector type, so every path that
  * reads an indexed value needs to know how to reach the float32 arrays the
@@ -49,7 +49,7 @@
  *
  * A descriptor describes its opclass's own input type. A cross-type ordering
  * operator whose argument had a different layout would break that; every
- * family member meerkat declares or adds shares its opclass's layout.
+ * family member prism declares or adds shares its opclass's layout.
  */
 
 #ifndef MKT_TYPEINFO_H

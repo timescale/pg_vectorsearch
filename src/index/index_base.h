@@ -27,7 +27,7 @@ typedef struct MktIndexBase
 	float		 *pt_global_mean;
 	uint64_t	  rabitq_seed;
 
-	/* PG: both point to the same MktannStorage (one index relation).
+	/* PG: both point to the same MktPgStorage (one index relation).
 	 * Standalone: separate ArrayPageStorage for centroids vs postings. */
 	MktStorage *centroid_storage;
 	MktStorage *posting_storage;

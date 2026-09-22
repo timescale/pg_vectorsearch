@@ -3,25 +3,25 @@
 An index created without options, queried without settings, targets
 roughly 0.95 recall@10 out of the box. Most deployments should only
 ever touch the settings in the first section — usually just
-`mkt.nprobe`.
+`prism.nprobe`.
 
 Index parameters go in `CREATE INDEX ... WITH (...)` and are fixed at
 build time (changing them means rebuilding the index). GUCs are set
 per session or per query:
 
 ```sql
-CREATE INDEX ON items USING mktann (embedding vec32_cosine_ops)
+CREATE INDEX ON items USING prism (embedding vec32_cosine_ops)
     WITH (nlist = 40000);
 
-SET mkt.nprobe = 40;          -- session
+SET prism.nprobe = 40;          -- session
 BEGIN;
-SET LOCAL mkt.nprobe = 400;   -- one transaction
+SET LOCAL prism.nprobe = 400;   -- one transaction
 ...
 ```
 
 ## Settings users should know
 
-### mkt.nprobe (GUC, query time)
+### prism.nprobe (GUC, query time)
 
 **Affects: raising it gives higher recall at the cost of slower
 queries.**
@@ -41,7 +41,7 @@ query scans the `nprobe` clusters nearest the query vector.
   few times the auto value. `SET LOCAL` lets a single transaction pay
   for recall only where it matters.
 
-### mkt.query_limit (GUC, query time)
+### prism.query_limit (GUC, query time)
 
 **Affects: how many rows an index scan is sized to return; normally
 derived from the query, set it only to cap it.**
@@ -70,7 +70,7 @@ many rows as that budget affords, and **raising `work_mem` is how to ask
 for more**.
 
 If none of the above mechanisms for managing the size of the top-k heap
-are sufficient, the `mkt.query_limit` GUC is a manual lever to cap the
+are sufficient, the `prism.query_limit` GUC is a manual lever to cap the
 number of tuples returned when the query lacks a `LIMIT` or it is set
 very high.
 
@@ -132,7 +132,7 @@ noted per row — most shape query behavior, some only the build.
 |---|---|---|---|---|
 | `fastscan` | `auto` (on) | Query speed. | Packed SIMD posting-page layout scanned via VPSHUFB lookup tables. `auto` uses it wherever a 32-vector group fits a page (it always does up to ~1900 dims at 8 KB pages); `on` errors past that, `off` forces the array-of-structs layout. | Only as an experiment control. |
 | `centroid_fastscan` | `auto` (on) | Query speed. | The same packed layout for the centroid routing tree. `auto` additionally requires centroid compression to be in effect. | Only as an experiment control. |
-| `centroid_compression` | `auto` | Query speed and routing memory. | RaBitQ-compress the routing tree's centroids (with exact re-rank of probe order via `mkt.probe_expand`). `auto` compresses for L2/cosine and keeps exact centroids for inner product, whose ordering RaBitQ's estimate cannot recover. | Only as an experiment control. |
+| `centroid_compression` | `auto` | Query speed and routing memory. | RaBitQ-compress the routing tree's centroids (with exact re-rank of probe order via `prism.probe_expand`). `auto` compresses for L2/cosine and keeps exact centroids for inner product, whose ordering RaBitQ's estimate cannot recover. | Only as an experiment control. |
 | `soar_lambda` | `1.0` | Higher recall at a given nprobe; slower build. | SOAR replication: assigns each vector to a second, spill-orthogonal cluster so near-boundary neighbors are found without extra probes. `0` disables. | Disable to trade recall for a faster build. |
 | `boundary_epsilon` | `0.35` | Higher recall at a given nprobe; larger index. | Boundary replication band: additionally replicates vectors whose two nearest centroids are within this relative gap. Wider bands buy recall for a few percent of index size; `0` disables. | Shrink if index size is critical. |
 | `fan_out` | `32` | Routing-tree shape (depth vs width). | Children per routing-tree node. | Never; the auto shape adapts. |
@@ -145,14 +145,14 @@ Take effect per session or per query.
 
 | GUC | Default | Affects | What it does | Why you might touch it |
 |---|---|---|---|---|
-| `mkt.rerank` | `on` | Recall (off = quantized-only accuracy). | Re-rank candidates by exact distance from the heap before returning. | Off only to measure raw quantized accuracy. |
-| `mkt.rerank_pool` | `0` (auto) | Lower caps = faster queries, lower recall ceiling. | Caps the exact-rerank candidate pool. | Controlled experiments. |
-| `mkt.fastscan_bits` | `16` | 8 = faster scans, more estimation error. | Fastscan lookup-table precision. | Controlled experiments. |
-| `mkt.centroid_beam_scale` | `0.5` | Higher = slightly higher recall, slower queries. | Routing beam width as a fraction of nprobe (with a floor of 80 candidates, never more than nprobe). | Raise toward 1.0 to chase the last recall fraction at high nprobe. |
-| `mkt.centroid_error_scale` | `0` | Above 0: much slower routing for negligible recall. | Widens the routing beam by the RaBitQ error margin — keep at 0. | Never. |
-| `mkt.probe_expand` | `2.0` | Slightly higher recall for a little routing work. | Routes extra leaf candidates and re-ranks probe order by exact centroid distance, fixing compressed-routing noise. Gains saturate at 2.0; capped internally. | Never. |
-| `mkt.recent_buffers` | `on` | Warm-query speed; small per-backend memory. | Backend-local buffer-id cache that skips the shared buffer-mapping lookup on warm re-pins. | Never. |
-| `mkt.distance_mode` | `default` | Accuracy vs speed of distance estimates. | Per-session override of the index's `distance_mode`. | Never. |
+| `prism.rerank` | `on` | Recall (off = quantized-only accuracy). | Re-rank candidates by exact distance from the heap before returning. | Off only to measure raw quantized accuracy. |
+| `prism.rerank_pool` | `0` (auto) | Lower caps = faster queries, lower recall ceiling. | Caps the exact-rerank candidate pool. | Controlled experiments. |
+| `prism.fastscan_bits` | `16` | 8 = faster scans, more estimation error. | Fastscan lookup-table precision. | Controlled experiments. |
+| `prism.centroid_beam_scale` | `0.5` | Higher = slightly higher recall, slower queries. | Routing beam width as a fraction of nprobe (with a floor of 80 candidates, never more than nprobe). | Raise toward 1.0 to chase the last recall fraction at high nprobe. |
+| `prism.centroid_error_scale` | `0` | Above 0: much slower routing for negligible recall. | Widens the routing beam by the RaBitQ error margin — keep at 0. | Never. |
+| `prism.probe_expand` | `2.0` | Slightly higher recall for a little routing work. | Routes extra leaf candidates and re-ranks probe order by exact centroid distance, fixing compressed-routing noise. Gains saturate at 2.0; capped internally. | Never. |
+| `prism.recent_buffers` | `on` | Warm-query speed; small per-backend memory. | Backend-local buffer-id cache that skips the shared buffer-mapping lookup on warm re-pins. | Never. |
+| `prism.distance_mode` | `default` | Accuracy vs speed of distance estimates. | Per-session override of the index's `distance_mode`. | Never. |
 
 ### Build-time GUCs
 
@@ -160,25 +160,25 @@ Take effect during `CREATE INDEX` / `REINDEX`.
 
 | GUC | Default | Affects | What it does | Why you might touch it |
 |---|---|---|---|---|
-| `mkt.leaf_refine_threshold` | `0` (off) | Recall of sub-sampled builds; one extra table scan. | Re-center leaf encode references from the full table when the build sample was thin. | Large sub-sampled builds with recall shortfalls. |
-| `mkt.log_build_stats` | `off` | Log volume only. | Per-phase build resource logging (superuser). | Debugging build performance. |
+| `prism.leaf_refine_threshold` | `0` (off) | Recall of sub-sampled builds; one extra table scan. | Re-center leaf encode references from the full table when the build sample was thin. | Large sub-sampled builds with recall shortfalls. |
+| `prism.log_build_stats` | `off` | Log volume only. | Per-phase build resource logging (superuser). | Debugging build performance. |
 
 ## Reading query behavior
 
 `EXPLAIN (ANALYZE)` on an index scan reports clusters scanned, pages
 read, and rerank counts, which is usually enough to see whether a
-recall problem is routing (raise `mkt.nprobe`) or sizing
-(`mkt.query_limit`).
+recall problem is routing (raise `prism.nprobe`) or sizing
+(`prism.query_limit`).
 
 ## Inspecting effective settings
 
 Most settings default to automatic values (`nlist = 0`,
-`mkt.nprobe = 0`, `fastscan = auto`, ...), so neither
+`prism.nprobe = 0`, `fastscan = auto`, ...), so neither
 `pg_class.reloptions` nor `pg_settings` shows what an index actually
-uses. `mkt.index_settings(regclass)` reports the resolved values:
+uses. `prism.index_settings(regclass)` reports the resolved values:
 
 ```sql
-SELECT * FROM mkt.index_settings('my_index');
+SELECT * FROM prism.index_settings('my_index');
        name       | setting | source
 ------------------+---------+---------
  dim              | 768     | column
@@ -199,7 +199,7 @@ The `source` column tells where each value came from: `option`
 (explicit reloption), `auto` (resolved automatic default), `default`
 (reloption default), `column`/`opclass` (index definition), `derived`
 (computed from other settings), or `session` (a GUC overriding the
-index setting, as with `SET mkt.nprobe`). Values the build persists
+index setting, as with `SET prism.nprobe`). Values the build persists
 (`nlist`, `fan_out`, `nlevels`, the page formats) are read from the
 index metadata and are authoritative for the index as built; options
 the build consumes without persisting (`soar_lambda`,

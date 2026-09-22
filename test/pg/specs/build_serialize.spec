@@ -1,4 +1,4 @@
-# Parallel mktann build serialized behind a concurrent writer.
+# Parallel prism build serialized behind a concurrent writer.
 #
 # A from-scratch CREATE INDEX takes a SHARE lock on the table, which conflicts
 # with an open writer's ROW EXCLUSIVE lock, so the build must block until the
@@ -38,7 +38,7 @@ session builder
 setup { SET max_parallel_maintenance_workers = 2; }
 step b_create
 {
-    CREATE INDEX bld_idx ON bld USING mktann (v) WITH (nlist = 4);
+    CREATE INDEX bld_idx ON bld USING prism (v) WITH (nlist = 4);
 }
 # A non-concurrent CREATE INDEX may run inside a transaction block and holds the
 # table SHARE lock until commit. These let the build acquire the lock first and
@@ -49,7 +49,7 @@ step b_commit { COMMIT; }
 # The checker forces an index scan over every list; returns 1 iff the top-1
 # nearest neighbor of [100,0,0] is row 1001.
 session checker
-setup { SET enable_seqscan = off; SET mkt.nprobe = 4; }
+setup { SET enable_seqscan = off; SET prism.nprobe = 4; }
 step c_chk
 {
     SELECT count(*) AS found FROM (

@@ -12,7 +12,7 @@ INSERT INTO cost_test (grp, v)
         FROM generate_series(0, 31) j
     )::vec32(32)
     FROM generate_series(1, 20000) i;
-CREATE INDEX idx_cost ON cost_test USING mktann (v);
+CREATE INDEX idx_cost ON cost_test USING prism (v);
 ANALYZE cost_test;
 -- The query vector, fetched once into a psql variable and wrapped in an
 -- immutable function so the planner folds it to a literal. Reading it with
@@ -78,7 +78,7 @@ INSERT INTO cost_small (v)
     SELECT (SELECT array_agg(sin(i * 0.1 + j * 0.7)::real)
             FROM generate_series(0, 31) j)::vec32(32)
     FROM generate_series(1, 200) i;
-CREATE INDEX idx_cost_small ON cost_small USING mktann (v);
+CREATE INDEX idx_cost_small ON cost_small USING prism (v);
 ANALYZE cost_small;
 -- Every input moves the estimate the way the work moves. Captured rather
 -- than compared inline because each needs its own GUC setting.
@@ -92,25 +92,25 @@ BEGIN
         ORDER BY v <-> qv()
         LIMIT %s$q$, lim));
 END $$;
-SET mkt.nprobe = 1;    SELECT record_cost('nprobe1');
+SET prism.nprobe = 1;    SELECT record_cost('nprobe1');
  record_cost 
 -------------
  
 (1 row)
 
-SET mkt.nprobe = 10;   SELECT record_cost('nprobe10');
+SET prism.nprobe = 10;   SELECT record_cost('nprobe10');
  record_cost 
 -------------
  
 (1 row)
 
-SET mkt.nprobe = 100;  SELECT record_cost('nprobe100');
+SET prism.nprobe = 100;  SELECT record_cost('nprobe100');
  record_cost 
 -------------
  
 (1 row)
 
-RESET mkt.nprobe;
+RESET prism.nprobe;
 -- More probed clusters is more scanning, more I/O and a bigger rerank pool.
 SELECT (SELECT c FROM costs WHERE label = 'nprobe1')
          < (SELECT c FROM costs WHERE label = 'nprobe10')
@@ -144,18 +144,18 @@ SELECT (SELECT c FROM costs WHERE label = 'k10')
  t
 (1 row)
 
--- mkt.query_limit only ever lowers the sizing (it caps a query that asks
+-- prism.query_limit only ever lowers the sizing (it caps a query that asks
 -- for more than the caller will read), so it can only lower the estimate --
 -- and the planner sees the same cap the scan will apply, because both call
 -- one function to resolve it.
-SET mkt.query_limit = 20;
+SET prism.query_limit = 20;
 SELECT record_cost('k1000_capped', 1000);
  record_cost 
 -------------
  
 (1 row)
 
-RESET mkt.query_limit;
+RESET prism.query_limit;
 SELECT (SELECT c FROM costs WHERE label = 'k1000_capped')
          < (SELECT c FROM costs WHERE label = 'k1000')
     AS query_limit_lowers_cost;
@@ -164,19 +164,19 @@ SELECT (SELECT c FROM costs WHERE label = 'k1000_capped')
  t
 (1 row)
 
-SET mkt.rerank_pool = 20;   SELECT record_cost('pool20');
+SET prism.rerank_pool = 20;   SELECT record_cost('pool20');
  record_cost 
 -------------
  
 (1 row)
 
-SET mkt.rerank_pool = 2000; SELECT record_cost('pool2000');
+SET prism.rerank_pool = 2000; SELECT record_cost('pool2000');
  record_cost 
 -------------
  
 (1 row)
 
-RESET mkt.rerank_pool;
+RESET prism.rerank_pool;
 -- Every candidate in the pool is a heap fetch and an exact distance.
 SELECT (SELECT c FROM costs WHERE label = 'pool20')
          < (SELECT c FROM costs WHERE label = 'pool2000')
@@ -218,35 +218,35 @@ SELECT plan_uses($q$
 (1 row)
 
 -- The rerank pool is priced in all three of its modes, and the order between
--- them is the point. mkt.rerank_pool = -1 uncaps the pool, which makes the
+-- them is the point. prism.rerank_pool = -1 uncaps the pool, which makes the
 -- pool-size estimator return 0 -- the value the extract step reads as "keep
 -- every survivor". Read naively that zero prices the widest pool in the
 -- system as no work at all, putting it level with reranking switched off and
 -- making the index look cheapest exactly where it is most expensive.
-SET mkt.rerank = off;
+SET prism.rerank = off;
 SELECT record_cost('rr_off');
  record_cost 
 -------------
  
 (1 row)
 
-SET mkt.rerank = on;
-SET mkt.rerank_pool = 0;
+SET prism.rerank = on;
+SET prism.rerank_pool = 0;
 SELECT record_cost('rr_auto');
  record_cost 
 -------------
  
 (1 row)
 
-SET mkt.rerank_pool = -1;
+SET prism.rerank_pool = -1;
 SELECT record_cost('rr_uncapped');
  record_cost 
 -------------
  
 (1 row)
 
-RESET mkt.rerank_pool;
-RESET mkt.rerank;
+RESET prism.rerank_pool;
+RESET prism.rerank;
 SELECT (SELECT c FROM costs WHERE label = 'rr_off')
          < (SELECT c FROM costs WHERE label = 'rr_auto')
    AND (SELECT c FROM costs WHERE label = 'rr_auto')
@@ -265,17 +265,17 @@ SELECT (SELECT c FROM costs WHERE label = 'rr_off')
 -- Widening the pool from a few candidates to every survivor must therefore
 -- add less than a whole heap's worth of page cost.
 SET enable_seqscan = off;
-SET mkt.rerank_pool = 5;
+SET prism.rerank_pool = 5;
 SELECT cost_startup($q$
     SELECT id FROM cost_small
     ORDER BY v <-> (SELECT v FROM cost_small WHERE id = 1)
     LIMIT 10$q$) AS c INTO TEMP pool_narrow;
-SET mkt.rerank_pool = -1;
+SET prism.rerank_pool = -1;
 SELECT cost_startup($q$
     SELECT id FROM cost_small
     ORDER BY v <-> (SELECT v FROM cost_small WHERE id = 1)
     LIMIT 10$q$) AS c INTO TEMP pool_wide;
-RESET mkt.rerank_pool;
+RESET prism.rerank_pool;
 RESET enable_seqscan;
 SELECT (SELECT c FROM pool_wide) - (SELECT c FROM pool_narrow)
          < pg_relation_size('cost_small')
@@ -315,7 +315,7 @@ RESET random_page_cost;
 -- bigger than the table it indexes, so it wins at default page costs. The
 -- pages were the whole of the difference.
 CREATE INDEX idx_cost_small_packed ON cost_small
-    USING mktann (v) WITH (nlist = 1);
+    USING prism (v) WITH (nlist = 1);
 SELECT plan_uses($q$
     SELECT id FROM cost_small
     ORDER BY v <-> (SELECT v FROM cost_small WHERE id = 1)
@@ -364,9 +364,9 @@ DROP TABLE cpu_cheap, cpu_dear;
 -- a few percent of the estimate, so the constants move the total by around
 -- a percent and the ordering between the two is an accident of page counts
 -- rather than of format. Asserting it would be asserting noise.
-CREATE INDEX idx_cost_aos ON cost_test USING mktann (v) WITH (fastscan = off);
+CREATE INDEX idx_cost_aos ON cost_test USING prism (v) WITH (fastscan = off);
 DROP INDEX idx_cost;
-SELECT (SELECT format FROM mkt.posting_pages('idx_cost_aos') LIMIT 1)
+SELECT (SELECT format FROM prism.posting_pages('idx_cost_aos') LIMIT 1)
     AS aos_index_is_aos;
  aos_index_is_aos 
 ------------------
@@ -394,16 +394,16 @@ SELECT plan_uses($q$
 -- asserted is that the reloption reaches the format, so the branch is
 -- exercised and a costed plan still comes out.
 CREATE INDEX idx_cost_cfs ON cost_test
-    USING mktann (v) WITH (centroid_fastscan = on);
+    USING prism (v) WITH (centroid_fastscan = on);
 CREATE INDEX idx_cost_cnofs ON cost_test
-    USING mktann (v) WITH (centroid_fastscan = off);
+    USING prism (v) WITH (centroid_fastscan = off);
 CREATE INDEX idx_cost_cflt ON cost_test
-    USING mktann (v) WITH (centroid_compression = off);
-SELECT (SELECT setting FROM mkt.index_settings('idx_cost_cfs')
+    USING prism (v) WITH (centroid_compression = off);
+SELECT (SELECT setting FROM prism.index_settings('idx_cost_cfs')
           WHERE name = 'centroid_format') = 'fastscan'
-   AND (SELECT setting FROM mkt.index_settings('idx_cost_cnofs')
+   AND (SELECT setting FROM prism.index_settings('idx_cost_cnofs')
           WHERE name = 'centroid_format') = 'rabitq'
-   AND (SELECT setting FROM mkt.index_settings('idx_cost_cflt')
+   AND (SELECT setting FROM prism.index_settings('idx_cost_cflt')
           WHERE name = 'centroid_format') = 'float'
     AS centroid_formats_are_what_the_reloptions_asked_for;
  centroid_formats_are_what_the_reloptions_asked_for 
@@ -431,7 +431,7 @@ DROP INDEX idx_cost_cfs, idx_cost_cnofs, idx_cost_cflt;
 -- Measured, a third of the pages being AoS makes the scan about 28% slower
 -- than the estimate reflects.
 DROP INDEX idx_cost_aos;
-CREATE INDEX idx_cost ON cost_test USING mktann (v);
+CREATE INDEX idx_cost ON cost_test USING prism (v);
 INSERT INTO cost_test (grp, v)
     SELECT i % 10, (
         SELECT array_agg(sin(i * 0.37 + j * 0.7)::real)
@@ -440,7 +440,7 @@ INSERT INTO cost_test (grp, v)
     FROM generate_series(20001, 30000) i;
 ANALYZE cost_test;
 SELECT count(DISTINCT format) > 1 AS index_holds_both_formats
-    FROM mkt.posting_pages('idx_cost');
+    FROM prism.posting_pages('idx_cost');
  index_holds_both_formats 
 --------------------------
  t
@@ -496,7 +496,7 @@ INSERT INTO wide_vec (v)
     SELECT (SELECT array_agg(sin(i * 0.11 + j * 0.3)::real)
             FROM generate_series(0, 599) j)::vec32(600)
     FROM generate_series(1, 300) i;
-CREATE INDEX wide_vec_mkt ON wide_vec USING mktann (v);
+CREATE INDEX wide_vec_mkt ON wide_vec USING prism (v);
 ANALYZE wide_vec;
 -- 18 bytes stored for a 2408-byte vector: the signal the model reads.
 SELECT avg_width AS stored_width_is_a_toast_pointer
@@ -557,7 +557,7 @@ INSERT INTO cost_mid (v)
     SELECT (SELECT array_agg(sin(i * 0.1 + j * 0.7)::real)
             FROM generate_series(0, 31) j)::vec32(32)
     FROM generate_series(1, 5000) i;
-CREATE INDEX idx_cost_mid ON cost_mid USING mktann (v);
+CREATE INDEX idx_cost_mid ON cost_mid USING prism (v);
 ANALYZE cost_mid;
 SELECT plan_uses($q$
     SELECT id FROM cost_mid
@@ -569,7 +569,7 @@ SELECT plan_uses($q$
 (1 row)
 
 -- The descent cannot read more centroid pages than the index has.
-SELECT (SELECT count(*) FROM mkt.centroid_pages('idx_cost_mid')) > 0
+SELECT (SELECT count(*) FROM prism.centroid_pages('idx_cost_mid')) > 0
     AS centroid_region_is_measurable;
  centroid_region_is_measurable 
 -------------------------------
@@ -632,7 +632,7 @@ RESET enable_seqscan;
 CREATE TABLE wide_plain (id serial, v vec32(600));
 ALTER TABLE wide_plain ALTER COLUMN v SET STORAGE PLAIN;
 INSERT INTO wide_plain (id, v) SELECT id, v FROM wide_vec;
-CREATE INDEX wide_plain_mkt ON wide_plain USING mktann (v);
+CREATE INDEX wide_plain_mkt ON wide_plain USING prism (v);
 ANALYZE wide_plain;
 SELECT (SELECT avg_width FROM pg_stats
           WHERE tablename = 'wide_vec' AND attname = 'v') AS out_of_line_width,
@@ -649,7 +649,7 @@ SELECT (SELECT avg_width FROM pg_stats
 -- which plan wins -- and cost_startup still raises if no index scan
 -- appears, so the reading cannot silently come from the wrong plan.
 SET enable_seqscan = off;
-SET mkt.rerank_pool = 5;
+SET prism.rerank_pool = 5;
 SELECT cost_startup($q$
            SELECT id FROM wide_plain
            ORDER BY v <-> (SELECT v FROM wide_plain WHERE id = 1)
@@ -664,7 +664,7 @@ SELECT cost_startup($q$
  t
 (1 row)
 
-RESET mkt.rerank_pool;
+RESET prism.rerank_pool;
 RESET enable_seqscan;
 -- A LIMIT in an outer query above the subquery that holds the ORDER BY. The
 -- subquery's own PlannerInfo never sees that LIMIT, so limit_tuples is -1
@@ -696,9 +696,9 @@ RESET enable_seqscan;
 -- with a root above the leaves is read one page per kept slot per level,
 -- bounded by the region. Both branches want exercising, and both are --
 -- pinned here so that stays true if the clustering changes.
-SELECT (SELECT count(DISTINCT level) FROM mkt.centroid_pages('idx_cost_small'))
+SELECT (SELECT count(DISTINCT level) FROM prism.centroid_pages('idx_cost_small'))
     AS small_index_levels,
-       (SELECT count(DISTINCT level) FROM mkt.centroid_pages('idx_cost'))
+       (SELECT count(DISTINCT level) FROM prism.centroid_pages('idx_cost'))
     AS default_index_levels;
  small_index_levels | default_index_levels 
 --------------------+----------------------
@@ -708,12 +708,12 @@ SELECT (SELECT count(DISTINCT level) FROM mkt.centroid_pages('idx_cost_small'))
 -- A deliberately wide tree, to cover the nlist reloption and a region large
 -- enough that the bound on the descent is what decides the term rather than
 -- the slot count.
-CREATE INDEX idx_cost_wide ON cost_mid USING mktann (v) WITH (nlist = 500);
+CREATE INDEX idx_cost_wide ON cost_mid USING prism (v) WITH (nlist = 500);
 ANALYZE cost_mid;
 SELECT (SELECT count(DISTINCT blkno)
-          FROM mkt.centroid_pages('idx_cost_wide'))
+          FROM prism.centroid_pages('idx_cost_wide'))
          > (SELECT count(DISTINCT blkno)
-          FROM mkt.centroid_pages('idx_cost_mid'))
+          FROM prism.centroid_pages('idx_cost_mid'))
     AS wide_tree_has_a_larger_centroid_region;
  wide_tree_has_a_larger_centroid_region 
 ----------------------------------------

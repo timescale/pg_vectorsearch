@@ -2,10 +2,10 @@ Parsed test spec with 2 sessions
 
 starting permutation: b_thin w_wakeup b_done
 step b_thin: 
-    SET mkt.leaf_refine_threshold = 100000;
-    CREATE INDEX i_thin ON emb USING mktann (v) WITH (nlist = 64);
+    SET prism.leaf_refine_threshold = 100000;
+    CREATE INDEX i_thin ON emb USING prism (v) WITH (nlist = 64);
  <waiting ...>
-step w_wakeup: SELECT injection_points_wakeup('mktann-build-refine');
+step w_wakeup: SELECT injection_points_wakeup('prism-build-refine');
 injection_points_wakeup
 -----------------------
                        
@@ -13,7 +13,7 @@ injection_points_wakeup
 
 step b_thin: <... completed>
 step b_done: 
-    SELECT injection_points_detach('mktann-build-refine');
+    SELECT injection_points_detach('prism-build-refine');
 
 injection_points_detach
 -----------------------
@@ -23,11 +23,11 @@ injection_points_detach
 
 starting permutation: b_wellfed b_done
 step b_wellfed: 
-    SET mkt.leaf_refine_threshold = 16;
-    CREATE INDEX i_wellfed ON emb USING mktann (v) WITH (nlist = 64);
+    SET prism.leaf_refine_threshold = 16;
+    CREATE INDEX i_wellfed ON emb USING prism (v) WITH (nlist = 64);
 
 step b_done: 
-    SELECT injection_points_detach('mktann-build-refine');
+    SELECT injection_points_detach('prism-build-refine');
 
 injection_points_detach
 -----------------------

@@ -27,9 +27,9 @@ setup
 teardown
 {
     DROP TABLE emb;
-    SELECT injection_points_detach('mktann-build-kmeans');
-    SELECT injection_points_detach('mktann-build-subtrees');
-    SELECT injection_points_detach('mktann-build-posting');
+    SELECT injection_points_detach('prism-build-kmeans');
+    SELECT injection_points_detach('prism-build-subtrees');
+    SELECT injection_points_detach('prism-build-posting');
     DROP EXTENSION injection_points;
 }
 
@@ -40,19 +40,19 @@ session s_build
 setup
 {
     SELECT injection_points_set_local();
-    SELECT injection_points_attach('mktann-build-kmeans', 'wait');
-    SELECT injection_points_attach('mktann-build-subtrees', 'wait');
-    SELECT injection_points_attach('mktann-build-posting', 'wait');
+    SELECT injection_points_attach('prism-build-kmeans', 'wait');
+    SELECT injection_points_attach('prism-build-subtrees', 'wait');
+    SELECT injection_points_attach('prism-build-posting', 'wait');
 }
 step b_parallel
 {
     SET max_parallel_maintenance_workers = 2;
-    CREATE INDEX i_par ON emb USING mktann (v) WITH (fan_out = 4, nlist = 16);
+    CREATE INDEX i_par ON emb USING prism (v) WITH (fan_out = 4, nlist = 16);
 }
 step b_serial
 {
     SET max_parallel_maintenance_workers = 0;
-    CREATE INDEX i_ser ON emb USING mktann (v) WITH (fan_out = 4, nlist = 16);
+    CREATE INDEX i_ser ON emb USING prism (v) WITH (fan_out = 4, nlist = 16);
 }
 step b_done { }
 
@@ -65,9 +65,9 @@ step w_phase
         FROM pg_stat_progress_create_index
         WHERE relid = 'emb'::regclass;
 }
-step w_kmeans	{ SELECT injection_points_wakeup('mktann-build-kmeans'); }
-step w_subtrees { SELECT injection_points_wakeup('mktann-build-subtrees'); }
-step w_posting	{ SELECT injection_points_wakeup('mktann-build-posting'); }
+step w_kmeans	{ SELECT injection_points_wakeup('prism-build-kmeans'); }
+step w_subtrees { SELECT injection_points_wakeup('prism-build-subtrees'); }
+step w_posting	{ SELECT injection_points_wakeup('prism-build-posting'); }
 
 # Parallel build: clustering (k-means) -> clustering (subtrees) ->
 # finalizing posting lists, each observed while paused.

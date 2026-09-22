@@ -8,7 +8,7 @@ injection_points_attach
 
 step b_start: 
     SET max_parallel_maintenance_workers = 2;
-    CREATE INDEX i_cancel ON emb USING mktann (v)
+    CREATE INDEX i_cancel ON emb USING prism (v)
         WITH (nlist = 12, fan_out = 4);
  <waiting ...>
 step w_cancel: 
@@ -26,7 +26,7 @@ t
 step b_start: <... completed>
 ERROR:  canceling statement due to user request
 step b_detach: 
-    SELECT injection_points_detach('mktann-build-subtrees');
+    SELECT injection_points_detach('prism-build-subtrees');
 
 injection_points_detach
 -----------------------
@@ -35,7 +35,7 @@ injection_points_detach
 
 step b_rebuild: 
     SET max_parallel_maintenance_workers = 2;
-    CREATE INDEX i_again ON emb USING mktann (v)
+    CREATE INDEX i_again ON emb USING prism (v)
         WITH (nlist = 12, fan_out = 4);
 
 step b_check: 

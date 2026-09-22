@@ -2,10 +2,11 @@
  * build_progress.c - PostgreSQL body of the build-progress reporting seam.
  *
  * Live phase + % go to pg_stat_progress_create_index (always). Per-phase
- * resource stats + summary go to the server log only when mkt.log_build_stats
- * is on, modeled on core btree's log_btree_build_stats (ResetUsage/ShowUsage).
- * The planned-allocation line is always emitted so an OOM is pre-explained.
- * The standalone no-op bodies live in src/index/build_progress.c.
+ * resource stats + summary go to the server log only when
+ * prism.log_build_stats is on, modeled on core btree's log_btree_build_stats
+ * (ResetUsage/ShowUsage). The planned-allocation line is always emitted so an
+ * OOM is pre-explained. The standalone no-op bodies live in
+ * src/index/build_progress.c.
  */
 
 #include <postgres.h>
@@ -36,7 +37,7 @@ now_ns(void)
 /*
  * Test hook name fired at each phase boundary, so an isolation test can pause
  * a build at any phase and read pg_stat_progress_create_index. SCAN and
- * SCAN_PARALLEL share the long-standing "mktann-build-load" name (the
+ * SCAN_PARALLEL share the long-standing "prism-build-load" name (the
  * build_progress isolation test depends on it); the other phases get their
  * own. Returns NULL for phases without a hook. No-op unless PG was built with
  * injection points and a test attached an action.
@@ -47,18 +48,18 @@ injection_name_for_phase(int phase)
 	switch (phase)
 	{
 	case MKT_BUILD_PHASE_SAMPLE:
-		return "mktann-build-sample";
+		return "prism-build-sample";
 	case MKT_BUILD_PHASE_KMEANS:
-		return "mktann-build-kmeans";
+		return "prism-build-kmeans";
 	case MKT_BUILD_PHASE_SUBTREES:
-		return "mktann-build-subtrees";
+		return "prism-build-subtrees";
 	case MKT_BUILD_PHASE_REFINE:
-		return "mktann-build-refine";
+		return "prism-build-refine";
 	case MKT_BUILD_PHASE_SCAN:
 	case MKT_BUILD_PHASE_SCAN_PARALLEL:
-		return "mktann-build-load";
+		return "prism-build-load";
 	case MKT_BUILD_PHASE_POSTING:
-		return "mktann-build-posting";
+		return "prism-build-posting";
 	default:
 		return NULL;
 	}
@@ -203,7 +204,7 @@ mkt_build_progress_incr_tuples(int64_t n)
 	if (!fired)
 	{
 		fired = true;
-		INJECTION_POINT("mktann-scan-progress", NULL);
+		INJECTION_POINT("prism-scan-progress", NULL);
 	}
 #endif
 }
@@ -239,7 +240,7 @@ mkt_build_report_planned_alloc(
 	/* Always emitted (not gated by the GUC) so an OOM in any of these is
 	 * pre-explained in the log even on a default-configured server. */
 	ereport(LOG,
-			(errmsg("mktann build: planned allocations — samples %.0f MB, "
+			(errmsg("prism build: planned allocations — samples %.0f MB, "
 					"centroid tree ~%.0f MB, DSM %.0f MB "
 					"(maintenance_work_mem %d kB)",
 					(double)sample_bytes / mb,

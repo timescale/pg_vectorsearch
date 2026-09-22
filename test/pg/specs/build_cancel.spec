@@ -34,22 +34,22 @@ session s_build
 setup
 {
     SELECT injection_points_set_local();
-    SELECT injection_points_attach('mktann-build-subtrees', 'wait');
+    SELECT injection_points_attach('prism-build-subtrees', 'wait');
 }
 step b_start
 {
     SET max_parallel_maintenance_workers = 2;
-    CREATE INDEX i_cancel ON emb USING mktann (v)
+    CREATE INDEX i_cancel ON emb USING prism (v)
         WITH (nlist = 12, fan_out = 4);
 }
 step b_detach
 {
-    SELECT injection_points_detach('mktann-build-subtrees');
+    SELECT injection_points_detach('prism-build-subtrees');
 }
 step b_rebuild
 {
     SET max_parallel_maintenance_workers = 2;
-    CREATE INDEX i_again ON emb USING mktann (v)
+    CREATE INDEX i_again ON emb USING prism (v)
         WITH (nlist = 12, fan_out = 4);
 }
 step b_check

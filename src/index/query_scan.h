@@ -105,7 +105,7 @@ typedef struct MktQueryState
 	uint32_t			ncandidates;
 
 	/* Probe-order scratch: exact centroid distance + index per routed
-	 * cluster, used to re-rank the expanded probe set (mkt.probe_expand).
+	 * cluster, used to re-rank the expanded probe set (prism.probe_expand).
 	 * Sized to max_nprobe at init. */
 	float	 *probe_dists;
 	uint32_t *probe_order;
@@ -181,7 +181,7 @@ uint32_t mkt_query_beam_width(
 		uint32_t nprobe, uint32_t nlist, uint32_t fan_out, double beam_scale);
 
 /*
- * Probe-order refinement (mkt.probe_expand).
+ * Probe-order refinement (prism.probe_expand).
  *
  * Routes ceil(nprobe * expand) leaf candidates through the centroid
  * beam, re-ranks them by EXACT query-centroid distance (the

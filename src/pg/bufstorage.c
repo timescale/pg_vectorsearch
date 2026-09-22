@@ -34,10 +34,10 @@
 #include "typeinfo.h"
 
 /* Downcast from base to concrete type */
-#define PG_STORAGE(self) ((MktannStorage *)(self))
+#define PG_STORAGE(self) ((MktPgStorage *)(self))
 
 /* ----------------------------------------------------------------
- * Backend-local buffer-id cache (mkt.recent_buffers)
+ * Backend-local buffer-id cache (prism.recent_buffers)
  *
  * ~22% of warm query CPU is BufTableLookup hash probes inside
  * ReadBuffer, for index pages that essentially never leave
@@ -60,7 +60,7 @@ static BlockNumber	  g_bufcache_len = 0;
 static MemoryContext  g_bufcache_ctx = NULL;
 
 void
-mktann_storage_set_recent_buffers(bool enabled)
+mkt_pg_storage_set_recent_buffers(bool enabled)
 {
 	g_recent_buffers = enabled;
 }
@@ -86,7 +86,7 @@ bufcache_slot(Relation index, BlockNumber blkno)
 		if (g_bufcache_ctx == NULL)
 			g_bufcache_ctx = AllocSetContextCreate(
 					CacheMemoryContext,
-					"mktann recent-buffers cache",
+					"prism recent-buffers cache",
 					ALLOCSET_START_SMALL_SIZES);
 
 		if (g_bufcache != NULL)
@@ -137,8 +137,8 @@ uint64_t mkt_bufcache_stale;
 static Page
 pg_read_page(MktStorage *self, BlockNumber blkno)
 {
-	MktannStorage *s = PG_STORAGE(self);
-	Buffer		   buf;
+	MktPgStorage *s = PG_STORAGE(self);
+	Buffer		  buf;
 
 	if (g_recent_buffers)
 	{
@@ -154,7 +154,7 @@ pg_read_page(MktStorage *self, BlockNumber blkno)
 			 * pgBufferUsage (EXPLAIN BUFFERS) but, taking a locator rather
 			 * than a Relation, cannot attribute it to the index the way
 			 * ReadBuffer does. Do that here, or pg_statio_*_indexes shows a
-			 * warm mktann index with almost no block hits.
+			 * warm prism index with almost no block hits.
 			 */
 			pgstat_count_buffer_hit(s->index);
 		}
@@ -184,7 +184,7 @@ pg_read_page(MktStorage *self, BlockNumber blkno)
 static void
 pg_release_page(MktStorage *self, BlockNumber blkno)
 {
-	MktannStorage *s = PG_STORAGE(self);
+	MktPgStorage *s = PG_STORAGE(self);
 
 	(void)blkno;
 	UnlockReleaseBuffer(s->cur_buf);
@@ -200,7 +200,7 @@ pg_release_page(MktStorage *self, BlockNumber blkno)
 static void
 pg_prefetch_page(MktStorage *self, BlockNumber blkno)
 {
-	MktannStorage *s = PG_STORAGE(self);
+	MktPgStorage *s = PG_STORAGE(self);
 
 	if (effective_io_concurrency == 0)
 		return;
@@ -215,7 +215,7 @@ pg_prefetch_page(MktStorage *self, BlockNumber blkno)
 static Page
 pg_write_page(MktStorage *self, BlockNumber blkno)
 {
-	MktannStorage *s = PG_STORAGE(self);
+	MktPgStorage *s = PG_STORAGE(self);
 
 	Buffer buf = ReadBuffer(s->index, blkno);
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
@@ -227,7 +227,7 @@ pg_write_page(MktStorage *self, BlockNumber blkno)
 static Page
 pg_new_page(MktStorage *self, BlockNumber *blkno_out)
 {
-	MktannStorage *s = PG_STORAGE(self);
+	MktPgStorage *s = PG_STORAGE(self);
 
 	Buffer buf = ReadBufferExtended(
 			s->index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
@@ -242,7 +242,7 @@ pg_new_page(MktStorage *self, BlockNumber *blkno_out)
 static void
 pg_commit_page(MktStorage *self, BlockNumber blkno)
 {
-	MktannStorage *s = PG_STORAGE(self);
+	MktPgStorage *s = PG_STORAGE(self);
 
 	(void)blkno;
 
@@ -255,11 +255,11 @@ pg_commit_page(MktStorage *self, BlockNumber blkno)
 	else
 	{
 		/*
-		 * meerkat pages store their data in the content area between pd_lower
+		 * prism pages store their data in the content area between pd_lower
 		 * and pd_upper — the region PostgreSQL treats as the free "hole" and
 		 * omits from standard-layout full-page images (GenericXLog assumes the
 		 * standard layout). Cover the hole (pd_lower = pd_upper) before
-		 * logging so the entire page is preserved; meerkat never reads
+		 * logging so the entire page is preserved; prism never reads
 		 * pd_lower back (scans locate data via PageGetContents /
 		 * pd_special, and centroid pages derive their metadata cursor from
 		 * entry_count -- see mkt_centroid_meta_end, which exists because of
@@ -284,7 +284,7 @@ pg_commit_page(MktStorage *self, BlockNumber blkno)
 static BlockNumber
 pg_extend(MktStorage *self, uint32_t npages)
 {
-	MktannStorage *s = PG_STORAGE(self);
+	MktPgStorage *s = PG_STORAGE(self);
 
 	BlockNumber start	  = InvalidBlockNumber;
 	uint32_t	remaining = npages;
@@ -367,7 +367,7 @@ pg_rerank(
 		uint32_t		   *out_indices,
 		Distance		   *out_distances)
 {
-	MktannStorage *s = PG_STORAGE(self);
+	MktPgStorage *s = PG_STORAGE(self);
 
 	if (s->rel == NULL || count == 0)
 		return 0;
@@ -463,7 +463,7 @@ typedef struct RerankStreamState
 	const MktTopKEntry *candidates;
 	const uint32_t	   *order;
 	MktTopK			   *topk;
-	MktannStorage	   *storage;
+	MktPgStorage	   *storage;
 	uint32_t			count;
 	uint32_t			pos;
 } RerankStreamState;
@@ -508,7 +508,7 @@ pg_rerank_readstream(
 		uint32_t		   *out_indices,
 		Distance		   *out_distances)
 {
-	MktannStorage *s = PG_STORAGE(self);
+	MktPgStorage *s = PG_STORAGE(self);
 
 	if (s->rel == NULL || count == 0)
 		return 0;
@@ -637,8 +637,8 @@ static const MktStorageOps pg_storage_ops = {
 static Page
 pg_read_page_nocache(MktStorage *self, BlockNumber blkno)
 {
-	MktannStorage *s   = PG_STORAGE(self);
-	Buffer		   buf = ReadBuffer(s->index, blkno);
+	MktPgStorage *s	  = PG_STORAGE(self);
+	Buffer		  buf = ReadBuffer(s->index, blkno);
 
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
 	s->cur_buf = buf;
@@ -671,9 +671,9 @@ static const MktStorageOps pg_storage_inspect_ops = {
 };
 
 void
-mktann_storage_init_inspect(MktannStorage *s, Relation index)
+mkt_pg_storage_init_inspect(MktPgStorage *s, Relation index)
 {
-	mktann_storage_init(s, index, NULL, DISTANCE_L2);
+	mkt_pg_storage_init(s, index, NULL, DISTANCE_L2);
 	s->base.ops = &pg_storage_inspect_ops;
 }
 
@@ -682,8 +682,8 @@ mktann_storage_init_inspect(MktannStorage *s, Relation index)
  * ---------------------------------------------------------------- */
 
 void
-mktann_storage_init(
-		MktannStorage *s, Relation index, Relation rel, DistanceMetric metric)
+mkt_pg_storage_init(
+		MktPgStorage *s, Relation index, Relation rel, DistanceMetric metric)
 {
 	if (rel != NULL && RelationGetForm(rel)->relam == HEAP_TABLE_AM_OID)
 		s->base.ops = &pg_storage_readstream_ops;
@@ -698,14 +698,14 @@ mktann_storage_init(
 	/*
 	 * Left NULL: every caller inits with rel = NULL, and rerank -- the only
 	 * consumer -- returns early without a heap relation. It is resolved in
-	 * mktann_storage_set_rel, which is where the heap arrives and therefore
+	 * mkt_pg_storage_set_rel, which is where the heap arrives and therefore
 	 * where rerank becomes possible.
 	 */
 	s->type_info = NULL;
 }
 
 void
-mktann_storage_set_rel(MktannStorage *s, Relation rel)
+mkt_pg_storage_set_rel(MktPgStorage *s, Relation rel)
 {
 	s->rel = rel;
 	if (rel != NULL && RelationGetForm(rel)->relam == HEAP_TABLE_AM_OID)
@@ -717,5 +717,5 @@ mktann_storage_set_rel(MktannStorage *s, Relation rel)
 	 * has a metadata page and the cache is populated.
 	 */
 	if (rel != NULL)
-		s->type_info = mktann_cache_type_info(s->index);
+		s->type_info = prism_cache_type_info(s->index);
 }

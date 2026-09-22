@@ -271,7 +271,7 @@ build_routing_tree_batched(
 	 * 32-bit interior offsets valid. */
 	if (slot_size > (uint64_t)MaxAllocSize)
 		mkt_error(
-				"mktann: subtree slot %llu MB exceeds the allocation limit "
+				"prism: subtree slot %llu MB exceeds the allocation limit "
 				"(nlist %u, fan_out %u); increase fan_out or decrease nlist",
 				(unsigned long long)(slot_size >> 20),
 				nlist,
@@ -282,7 +282,7 @@ build_routing_tree_batched(
 		(uint64_t)nparticipants * slot_size >
 				(uint64_t)shared->work_mem_kb * 1024)
 		mkt_error(
-				"mktann: subtree ring %llu MB exceeds maintenance_work_mem "
+				"prism: subtree ring %llu MB exceeds maintenance_work_mem "
 				"(nlist %u, fan_out %u); increase maintenance_work_mem or "
 				"fan_out",
 				(unsigned long long)(((uint64_t)nparticipants * slot_size) >>
@@ -296,7 +296,7 @@ build_routing_tree_batched(
 	char *subtrees_base = mkt_pbuild_subtree_ring_create(
 			shared, nparticipants, slot_size, &ring_seg);
 	mkt_debug(
-			"mktann: subtree ring %d x %llu KB (largest child %u samples)",
+			"prism: subtree ring %d x %llu KB (largest child %u samples)",
 			nparticipants,
 			(unsigned long long)(slot_size >> 10),
 			max_cc);
@@ -653,7 +653,7 @@ do_parallel_build(
 	INSTR_TIME_SET_CURRENT(t_sample_end);
 	INSTR_TIME_SUBTRACT(t_sample_end, t_launch_start);
 	mkt_debug(
-			"mktann: phase 1 (sampling) %.1fms",
+			"prism: phase 1 (sampling) %.1fms",
 			INSTR_TIME_GET_MILLISEC(t_sample_end));
 
 	instr_time t_km_start;
@@ -671,7 +671,7 @@ do_parallel_build(
 		INSTR_TIME_SET_CURRENT(t_km_elapsed);
 		INSTR_TIME_SUBTRACT(t_km_elapsed, t_km_start);
 		mkt_debug(
-				"mktann: root kmeans %.1fms (%u iters, k=%u)",
+				"prism: root kmeans %.1fms (%u iters, k=%u)",
 				INSTR_TIME_GET_MILLISEC(t_km_elapsed),
 				km_iters,
 				km_k);
@@ -833,7 +833,7 @@ do_parallel_build(
 						 collected / nlist <
 								 (uint64_t)shared->refine_threshold;
 		mkt_debug(
-				"mktann: refine gate: kept=%" PRIu64 " seen=%" PRIu64
+				"prism: refine gate: kept=%" PRIu64 " seen=%" PRIu64
 				" nlist=%u threshold=%u -> %s",
 				collected,
 				seen,
@@ -900,7 +900,7 @@ do_parallel_build(
 	}
 
 	/* Phase 3: workers scan + route page-backed + encode + sort; the leader
-	 * merges. Reported exactly once -- the seam fires the "mktann-build-load"
+	 * merges. Reported exactly once -- the seam fires the "prism-build-load"
 	 * test hook, and a 'wait' attached there must pause the build a single
 	 * time -- and before the scan-reset barrier below releases the workers,
 	 * so progress reflects the whole (multi-hour at scale) scan. */
@@ -983,7 +983,7 @@ do_parallel_build(
 	INSTR_TIME_SUBTRACT(t_merge_end, t_merge_start);
 
 	mkt_debug(
-			"mktann: parallel streaming build with %d workers, "
+			"prism: parallel streaming build with %d workers, "
 			"%u clusters, %u pages, "
 			"scan+drain %.1fms, finalize %.1fms",
 			pcxt->nworkers_launched,

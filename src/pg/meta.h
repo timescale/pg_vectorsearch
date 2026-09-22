@@ -1,7 +1,7 @@
 /*
- * meta.h - Metadata page layout for mktann index
+ * meta.h - Metadata page layout for prism index
  *
- * Block 0 of every mktann index stores an MktannMetaPage in the
+ * Block 0 of every prism index stores a PrismMetaPage in the
  * page special area. It records index parameters (dimension, tree
  * depth, centroid format, distance metric, RaBitQ seed) and the
  * global mean vector used for RaBitQ query preparation.
@@ -22,7 +22,7 @@
 /*
  * "MKT" + a format-version byte. Bump the low byte on any incompatible
  * metapage/layout change so an index built by an older format is rejected at
- * open rather than silently misread. v2 added MktannMetaPage.first_posting,
+ * open rather than silently misread. v2 added PrismMetaPage.first_posting,
  * which shifted the struct layout; v3 removed the unused indexed-row count,
  * which shifted it again.
  */
@@ -31,7 +31,7 @@
 /* Metadata flags */
 #define MKT_META_FLAG_FASTSCAN 0x01
 
-typedef struct MktannMetaPage
+typedef struct PrismMetaPage
 {
 	uint32_t	magic;			 /* MKT_META_MAGIC */
 	Dimension	dim;			 /* vector dimension */
@@ -47,7 +47,7 @@ typedef struct MktannMetaPage
 	 * derived: the region a build reserves is [MKT_FIRST_CENTROID_BLKNO,
 	 * first_posting), but a split with no room on a level-0 page extends the
 	 * relation and chains the new page past the posting region, so a block
-	 * range stops measuring it. mkt.rebalance folds each split's additions
+	 * range stops measuring it. prism.rebalance folds each split's additions
 	 * back in here.
 	 */
 	uint32_t ncentroid_pages;
@@ -57,27 +57,27 @@ typedef struct MktannMetaPage
 	uint8_t	 reserved;
 	uint64_t rabitq_seed; /* seed for RaBitQ params */
 						  /* Global mean vector stored inline after struct */
-} MktannMetaPage;
+} PrismMetaPage;
 
 /* Total special-area size including inline global mean */
-#define MKT_META_SIZE(dim)                                             \
-	(MAXALIGN(                                                         \
-			offsetof(MktannMetaPage, rabitq_seed) + sizeof(uint64_t) + \
+#define MKT_META_SIZE(dim)                                            \
+	(MAXALIGN(                                                        \
+			offsetof(PrismMetaPage, rabitq_seed) + sizeof(uint64_t) + \
 			(size_t)(dim) * sizeof(float)))
 
 /* Access the inline global mean vector after the struct */
 static inline float *
-mktann_meta_global_mean(MktannMetaPage *meta)
+prism_meta_global_mean(PrismMetaPage *meta)
 {
-	return (float *)((char *)meta + offsetof(MktannMetaPage, rabitq_seed) +
+	return (float *)((char *)meta + offsetof(PrismMetaPage, rabitq_seed) +
 					 sizeof(uint64_t));
 }
 
 static inline const float *
-mktann_meta_global_mean_const(const MktannMetaPage *meta)
+prism_meta_global_mean_const(const PrismMetaPage *meta)
 {
 	return (const float *)((const char *)meta +
-						   offsetof(MktannMetaPage, rabitq_seed) +
+						   offsetof(PrismMetaPage, rabitq_seed) +
 						   sizeof(uint64_t));
 }
 

@@ -29,19 +29,19 @@
  * GUC variables
  * ---------------------------------------------------------------- */
 
-extern int	  mkt_distance_mode;   /* MktDistanceMode */
-extern int	  mkt_nprobe;		   /* clusters to probe per query */
-extern int	  mkt_query_limit;	   /* min top-k per scan (0=from LIMIT) */
-extern int	  mkt_fastscan_bits;   /* fastscan LUT bits (8 or 16) */
-extern bool	  mkt_rerank;		   /* enable reranking (default: true) */
-extern bool	  mkt_log_build_stats; /* log per-phase build stats (def: off) */
-extern int	  mkt_leaf_refine_threshold; /* refine when samples/leaf < this */
-extern double mkt_centroid_error_scale;	 /* scales centroid pruning error bound
-											(1=default, 0=drop) */
-extern double mkt_probe_expand;			 /* routed clusters / nprobe */
-extern double mkt_centroid_beam_scale;	 /* intermediate beam width as fraction
-											of nprobe (0.25=default) */
-extern relopt_kind mktann_relopt_kind;	 /* index reloption kind */
+extern int	  prism_distance_mode;	 /* MktDistanceMode */
+extern int	  prism_nprobe;			 /* clusters to probe per query */
+extern int	  prism_query_limit;	 /* min top-k per scan (0=from LIMIT) */
+extern int	  prism_fastscan_bits;	 /* fastscan LUT bits (8 or 16) */
+extern bool	  prism_rerank;			 /* enable reranking (default: true) */
+extern bool	  prism_log_build_stats; /* log per-phase build stats (def: off) */
+extern int	  mkt_leaf_refine_threshold;  /* refine when samples/leaf < this */
+extern double prism_centroid_error_scale; /* scales centroid pruning error
+									   bound (1=default, 0=drop) */
+extern double prism_probe_expand;		  /* routed clusters / nprobe */
+extern double prism_centroid_beam_scale; /* intermediate beam width as fraction
+									  of nprobe (0.25=default) */
+extern relopt_kind prism_relopt_kind;	 /* index reloption kind */
 
 /* ----------------------------------------------------------------
  * Datum conversion macros
@@ -130,7 +130,7 @@ typedef enum
 	MKT_FASTSCAN_MODE_OFF  = 2,
 } MktFastscanMode;
 
-typedef struct MktannOptions
+typedef struct PrismOptions
 {
 	int32  vl_len_;				 /* varlena header (required by reloptions) */
 	int	   distance_mode;		 /* MktDistanceMode */
@@ -142,7 +142,7 @@ typedef struct MktannOptions
 	int	   centroid_compression; /* MktCentroidCompression */
 	int	   fastscan;			 /* MktFastscanMode, posting pages */
 	int	   centroid_fastscan;	 /* MktFastscanMode, centroid pages */
-} MktannOptions;
+} PrismOptions;
 
 #define MKT_ANN_DEFAULT_FAN_OUT 32
 #define MKT_ANN_MIN_FAN_OUT		2
@@ -163,17 +163,17 @@ typedef struct MktannOptions
 #define MKT_ANN_DEFAULT_BOUNDARY_EPSILON 0.35
 
 /*
- * MktannGetDistanceMode - Resolve effective distance mode for a scan.
+ * PrismGetDistanceMode - Resolve effective distance mode for a scan.
  *
  * GUC overrides index relopt when explicitly set (not 'default').
  */
 static inline MktDistanceMode
-MktannGetDistanceMode(Relation index)
+PrismGetDistanceMode(Relation index)
 {
-	MktannOptions *opts = (MktannOptions *)index->rd_options;
+	PrismOptions *opts = (PrismOptions *)index->rd_options;
 	/* GUC overrides index relopt when explicitly set */
-	if (mkt_distance_mode != MKT_DISTANCE_MODE_DEFAULT)
-		return (MktDistanceMode)mkt_distance_mode;
+	if (prism_distance_mode != MKT_DISTANCE_MODE_DEFAULT)
+		return (MktDistanceMode)prism_distance_mode;
 	/* Use index relopt, or asymmetric if no options set */
 	if (opts != NULL)
 		return (MktDistanceMode)opts->distance_mode;

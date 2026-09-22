@@ -23,7 +23,7 @@ $f$, :'rqv') \gexec
         AS $b$ SELECT '[-0.871576,-0.982453,-0.631267,0.0168139,0.656987,0.988168,0.854599,0.319098,-0.366479,-0.879696,-0.979178,-0.618137,0.033623,0.66957,0.990607,0.845747,0.303118,-0.382071,-0.887567,-0.975626,-0.604833,0.0504227,0.681964,0.992766,0.836656,0.287053,-0.397556,-0.895187,-0.971798,-0.591358,0.0672081,0.694165]'::vec32(32) $b$
 
 -- L2 distance
-CREATE INDEX idx_rerank_l2 ON rerank_test USING mktann (v)
+CREATE INDEX idx_rerank_l2 ON rerank_test USING prism (v)
     WITH (centroid_compression = true);
 -- Compute ground truth via sequential scan
 SET enable_indexscan = off;
@@ -70,7 +70,7 @@ SELECT bool_and(abs(t.dist - r.dist) < 1e-5) AS distances_match
 
 -- Cosine distance
 CREATE INDEX idx_rerank_cos ON rerank_test
-    USING mktann (v vec32_cosine_ops)
+    USING prism (v vec32_cosine_ops)
     WITH (centroid_compression = true);
 SET enable_indexscan = off;
 CREATE TEMP TABLE truth_cos AS

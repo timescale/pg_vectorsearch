@@ -23,7 +23,7 @@ PG_MODULE_MAGIC;
 
 /*
  * One row per cached RaBitQ rotation matrix in this backend's params
- * cache: (dim, refcount, usage). See mktann_rabitq_cache_stats().
+ * cache: (dim, refcount, usage). See prism_rabitq_cache_stats().
  */
 PG_FUNCTION_INFO_V1(mkt_test_rabitq_params_cache);
 
@@ -36,7 +36,7 @@ mkt_test_rabitq_params_cache(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	n = mktann_rabitq_cache_stats(stats, lengthof(stats));
+	n = prism_rabitq_cache_stats(stats, lengthof(stats));
 	for (int i = 0; i < n; i++)
 	{
 		Datum values[3];
@@ -62,5 +62,5 @@ PG_FUNCTION_INFO_V1(mkt_test_rabitq_cache_clear);
 Datum
 mkt_test_rabitq_cache_clear(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT32(mktann_rabitq_cache_clear());
+	PG_RETURN_INT32(prism_rabitq_cache_clear());
 }

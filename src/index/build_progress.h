@@ -50,7 +50,7 @@ const char *mkt_build_phase_name(int phase);
  * only by the leader/serial driver — workers never touch it. The bodies are
  * back-end specific: PostgreSQL (src/pg/build_progress.c) updates
  * pg_stat_progress_create_index and emits ResetUsage/ShowUsage + summary lines
- * under the mkt.log_build_stats GUC; standalone (src/index/build_progress.c)
+ * under the prism.log_build_stats GUC; standalone (src/index/build_progress.c)
  * is a no-op stub for now. Types are back-end-neutral (no PG/standalone
  * headers).
  * ---------------------------------------------------------------- */
@@ -62,7 +62,7 @@ typedef struct MktBuildProgress
 	int		 cur_phase;		 /* phase currently running */
 	int64_t	 phase_start_ns; /* monotonic start of cur_phase */
 	int64_t	 build_start_ns; /* monotonic start of the whole build */
-	bool	 log_stats;		 /* mkt.log_build_stats */
+	bool	 log_stats;		 /* prism.log_build_stats */
 	bool	 is_parallel;	 /* selects SCAN vs SCAN_PARALLEL labeling */
 	bool	 total_set;		 /* TUPLES_TOTAL already published */
 	void	*heap_ctx;	/* PG: MemoryContext for MemoryContextMemAllocated */

@@ -2,7 +2,7 @@
 
 ## 1. Goal and scope
 
-Meerkat is currently **build-only**: the index is created by `ambuild` from a
+PRISM is currently **build-only**: the index is created by `ambuild` from a
 static table snapshot, and the posting lists and centroid tree are immutable
 afterwards. Table mutations are not reflected in the index.
 
@@ -20,7 +20,7 @@ mechanisms, prior art) and proposes a phased design.
 
 Findings from the code:
 
-- **`aminsert` is a stub that silently drops the entry.** `mktann_insert`
+- **`aminsert` is a stub that silently drops the entry.** `prism_insert`
   (`src/pg/iam_handler.c`) just `return false;`. The `bool` result is only
   meaningful for unique indexes, so this is not an error — but it adds **no
   index entry**. Net effect today: rows inserted/updated after build are
@@ -89,21 +89,21 @@ as placing "vectors in lists corresponding to their appropriate leaf nodes"
 and document **no rebalancing** — i.e. the same drift-then-rebuild model.
 
 This is simple and robust but: recall decays between rebuilds, and rebuild is
-`O(N)`. It is the right **starting point** for Meerkat (and matches the
+`O(N)`. It is the right **starting point** for PRISM (and matches the
 extension everyone is comparing against).
 
 ### 4.2 HNSW incremental (pgvector hnsw) — for contrast
 
 HNSW links each new vector into the graph incrementally, so there is no
 centroid drift and no rebuild requirement — but the graph must fit in RAM and
-inserts do random traversal/writes. Not Meerkat's architecture, but it sets the
+inserts do random traversal/writes. Not PRISM's architecture, but it sets the
 bar for "incremental without rebuild."
 
 ### 4.3 SPFresh / LIRE — the target
 
 **SPFresh** (SOSP '23) builds on **SPANN** (an in-memory graph index over
 centroids + on-disk posting lists, with boundary replication — structurally
-very close to Meerkat's hierarchical k-means tree + posting lists + SOAR). It
+very close to PRISM's hierarchical k-means tree + posting lists + SOAR). It
 adds **in-place incremental updates** via **LIRE (Lightweight Incremental
 REbalancing)**:
 
@@ -128,16 +128,16 @@ Reported result: **stable recall under continuous high-rate updates at
 billion scale**, where no-rebalance baselines degrade and global rebuild is far
 too expensive.
 
-**Why this fits Meerkat**: the hierarchical k-means tree + posting lists +
+**Why this fits PRISM**: the hierarchical k-means tree + posting lists +
 SOAR/boundary replication is essentially "SPANN with extras," so LIRE maps
 naturally onto it. SPFresh-style rebalancing is also exactly the lever that
-would differentiate Meerkat from VectorChord, which has no rebalancing.
+would differentiate PRISM from VectorChord, which has no rebalancing.
 
 **Active follow-up work** (further reading): Quake (adaptive indexing),
 "Updatable Balanced Index for stable streaming search," "Incremental IVF Index
 Maintenance for Streaming Vector Search," LSM-VEC, DGAI. See references.
 
-## 5. Meerkat-specific challenges
+## 5. PRISM-specific challenges
 
 - **FASTSCAN immutability.** FASTSCAN packs codes in 32-vector SIMD groups, so
   appending one vector means a partial group / repack. Inserts cannot cheaply
@@ -195,7 +195,7 @@ ivfflat/vchordrq plus correct delete behavior.
 - **Accuracy**: centroids fixed → drift; document `REINDEX CONCURRENTLY`
   guidance, as ivfflat does.
 
-This alone moves Meerkat from "build-only" to "mutable with rebuild."
+This alone moves PRISM from "build-only" to "mutable with rebuild."
 
 ### Phase 1 — Compaction: write-buffer pages → FASTSCAN segments (LSM-ish)
 
@@ -265,7 +265,7 @@ The target is **not a free parameter**: it is the size the build chose, since
 its sqrt-floor crossover; below it, `sqrt(rows)`). Both the automatic probe
 count and the cost model are derived from `nlist`, and the per-list size is its
 inverse — so aiming maintenance at a different size silently decouples the index
-from both. `mkt.rebalance()` therefore derives its target by default, honouring
+from both. `prism.rebalance()` therefore derives its target by default, honouring
 an explicit `nlist` reloption when the index was built with one.
 
 The **trigger is deliberately above the target**, which is the part that is easy
@@ -518,7 +518,7 @@ lists is dead. A pre-sized "over-fetch factor" is the wrong tool.
   **resumable scan** with a live-result counter that **expands nprobe** (descends
   to the next-nearest centroids) when the current lists are exhausted before k
   live results — strictly better than pgvector ivfflat/hnsw, which don't
-  auto-expand. (Meerkat's current scan materializes a fixed top-k up front in
+  auto-expand. (PRISM's current scan materializes a fixed top-k up front in
   `execute_search`; this refinement makes it resumable/expandable.)
 
 Either way, index-level tombstones are an *optimization* — skip known-dead

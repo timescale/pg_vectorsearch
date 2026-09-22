@@ -342,7 +342,7 @@ The project uses GitHub Actions for CI with the following workflows:
 
 ### Config-Based Polymorphism (Vtable Inlining)
 
-Meerkat uses `Vec32TypeOps` vtables for type-generic algorithms (k-means,
+PRISM uses `Vec32TypeOps` vtables for type-generic algorithms (k-means,
 RaBitQ) that work over both float32 and float16 input. Naive vtable dispatch
 through function pointers prevents inlining and auto-vectorization in hot loops,
 causing 10-15% overhead on inner loops like dot product.

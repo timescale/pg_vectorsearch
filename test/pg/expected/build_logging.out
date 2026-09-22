@@ -1,6 +1,6 @@
 -- Build-introspection log output.
 --
--- mkt.log_build_stats gates the per-phase resource lines; the planned-allocation
+-- prism.log_build_stats gates the per-phase resource lines; the planned-allocation
 -- line and the final per-phase summary are always logged. The log content
 -- carries timings/byte counts (non-deterministic), so this asserts only the
 -- presence/absence of each line by pattern, reading the server log via
@@ -27,8 +27,8 @@ DECLARE
     fn		  text := pg_current_logfile();
     pos		  int;
     seg		  text;
-    pat_plan  text := 'mktann build: ' || 'planned allocations';
-    pat_phase text := 'mktann build: ' || 'phase "';
+    pat_plan  text := 'prism build: ' || 'planned allocations';
+    pat_phase text := 'prism build: ' || 'phase "';
     pat_sum	  text := 'build: ' || 'sample ';
     n_planned int;
     n_phase	  int;
@@ -38,10 +38,10 @@ BEGIN
     PERFORM set_config('max_parallel_maintenance_workers', '2', false);
     PERFORM set_config('min_parallel_table_scan_size', '0', false);
 
-    -- ---- Build 1: parallel, mkt.log_build_stats = on ----
+    -- ---- Build 1: parallel, prism.log_build_stats = on ----
     pos := length(pg_read_file(fn));
-    PERFORM set_config('mkt.log_build_stats', 'on', false);
-    EXECUTE 'CREATE INDEX lg_on ON lg USING mktann (v) WITH (nlist = 64)';
+    PERFORM set_config('prism.log_build_stats', 'on', false);
+    EXECUTE 'CREATE INDEX lg_on ON lg USING prism (v) WITH (nlist = 64)';
     tries := 0;
     LOOP
         seg := substr(pg_read_file(fn), pos + 1);
@@ -57,10 +57,10 @@ BEGIN
         ('on_has_phases', n_phase > 0),
         ('on_has_summary', n_summary >= 1);
 
-    -- ---- Build 2: parallel, mkt.log_build_stats = off ----
+    -- ---- Build 2: parallel, prism.log_build_stats = off ----
     pos := length(pg_read_file(fn));
-    PERFORM set_config('mkt.log_build_stats', 'off', false);
-    EXECUTE 'CREATE INDEX lg_off ON lg USING mktann (v) WITH (nlist = 64)';
+    PERFORM set_config('prism.log_build_stats', 'off', false);
+    EXECUTE 'CREATE INDEX lg_off ON lg USING prism (v) WITH (nlist = 64)';
     tries := 0;
     LOOP
         seg := substr(pg_read_file(fn), pos + 1);

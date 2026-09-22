@@ -9,7 +9,7 @@
 /*
  * Phase name table, indexed by phase value. Index 0 is unused (phases start at
  * 1) and any gap stays NULL. These strings are what
- * pg_stat_progress_create_index reports (via mktann_buildphasename) and what
+ * pg_stat_progress_create_index reports (via prism_buildphasename) and what
  * the build logs print, so the two back-ends can never drift.
  */
 static const char *const phase_names[] = {

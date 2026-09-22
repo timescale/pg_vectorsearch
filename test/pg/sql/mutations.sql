@@ -10,11 +10,11 @@
 -- ===== AoS-only index (centroid_compression on, no fastscan) ================
 CREATE TABLE mut (id int, v vec32(3));
 INSERT INTO mut SELECT g, format('[%s,0,0]', g)::vec32 FROM generate_series(1, 50) g;
-CREATE INDEX idx_mut ON mut USING mktann (v)
+CREATE INDEX idx_mut ON mut USING prism (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
-SET mkt.nprobe = 4;             -- = nlist: scan every list, deterministic
+SET prism.nprobe = 4;             -- = nlist: scan every list, deterministic
 
 -- Guard: the ORDER BY probes below must be served by the index, not a seq scan
 -- (enable_seqscan=off only penalizes seqscan, it does not forbid it, so a
@@ -30,28 +30,28 @@ SELECT count(*) AS aos_ins FROM (
 -- for this: these axis-aligned 1-D vectors all quantize to near-identical
 -- RaBitQ codes, so approximate ranking does not surface all 40 even when all
 -- are present. Instead count physical index entries directly via
--- mkt.posting_pages, which is independent of search recall: the index must
+-- prism.posting_pages, which is independent of search recall: the index must
 -- hold all 91 rows (50 initial + the 1001 outlier + 40 bulk).
 INSERT INTO mut SELECT 2000 + g, format('[%s,0,0]', 300 + g)::vec32
     FROM generate_series(1, 40) g;
 SELECT sum(entry_count) AS aos_total
-    FROM mkt.posting_pages('idx_mut'::regclass);
+    FROM prism.posting_pages('idx_mut'::regclass);
 -- Separately, ANN ranking must return the true nearest neighbour: the probe
 -- matches row 2020 exactly (distance 0), so it is the unambiguous top-1.
 SELECT id AS aos_bulk_nn FROM mut ORDER BY v <-> '[320,0,0]' LIMIT 1;
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 DROP TABLE mut;
 
 -- ===== FASTSCAN index: inserts append an AoS overflow page (mixed chain) =====
 CREATE TABLE mutfs (id int, v vec32(3));
 INSERT INTO mutfs SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 60) g;
-CREATE INDEX idx_mutfs ON mutfs USING mktann (v)
+CREATE INDEX idx_mutfs ON mutfs USING prism (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = on,
           soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
-SET mkt.nprobe = 4;
+SET prism.nprobe = 4;
 
 -- Guard: index serves the probe, not a seq scan (see the AoS section).
 EXPLAIN (COSTS OFF) SELECT id FROM mutfs ORDER BY v <-> '[500,0,0]' LIMIT 1;
@@ -66,7 +66,7 @@ SELECT count(*) AS fs_mixed FROM (
     SELECT id FROM mutfs ORDER BY v <-> '[61,0,0]' LIMIT 2) t
     WHERE id IN (60, 61);
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 DROP TABLE mutfs;
 
 -- ===== Empty index: building on a 0-row table succeeds =======================
@@ -74,7 +74,7 @@ DROP TABLE mutfs;
 -- single-cluster index that later inserts route into. Full coverage lives
 -- in the empty_table test; here we just pin that the build no longer errors.
 CREATE TABLE mutempty (id int, v vec32(3));
-CREATE INDEX idx_mutempty ON mutempty USING mktann (v)
+CREATE INDEX idx_mutempty ON mutempty USING prism (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 DROP TABLE mutempty;
@@ -83,11 +83,11 @@ DROP TABLE mutempty;
 CREATE TABLE mutnn (id int, v vec32(3));
 INSERT INTO mutnn SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
-CREATE INDEX idx_mutnn ON mutnn USING mktann (v)
+CREATE INDEX idx_mutnn ON mutnn USING prism (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
-SET mkt.nprobe = 4;
+SET prism.nprobe = 4;
 -- Guard: index serves the probe, not a seq scan (see the AoS section).
 EXPLAIN (COSTS OFF) SELECT id FROM mutnn ORDER BY v <-> '[99,0,0]' LIMIT 1;
 INSERT INTO mutnn VALUES (1001, '[100,0,0]');
@@ -95,7 +95,7 @@ INSERT INTO mutnn VALUES (1001, '[100,0,0]');
 SELECT count(*) AS nn_member FROM (
     SELECT id FROM mutnn ORDER BY v <-> '[99,0,0]' LIMIT 1) t WHERE id = 1001;
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 DROP TABLE mutnn;
 
 -- ===== DELETE: dead rows leave the result; VACUUM tombstones the entries =====
@@ -107,11 +107,11 @@ CREATE TABLE mutdel (id int, v vec32(3));
 INSERT INTO mutdel SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 INSERT INTO mutdel VALUES (1001, '[100,0,0]'), (1002, '[200,0,0]');
-CREATE INDEX idx_mutdel ON mutdel USING mktann (v)
+CREATE INDEX idx_mutdel ON mutdel USING prism (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
-SET mkt.nprobe = 4;
+SET prism.nprobe = 4;
 
 -- Guard: index serves the probe, not a seq scan (see the AoS section).
 EXPLAIN (COSTS OFF) SELECT id FROM mutdel ORDER BY v <-> '[100,0,0]' LIMIT 1;
@@ -125,7 +125,7 @@ SELECT id AS del_after FROM mutdel ORDER BY v <-> '[100,0,0]' LIMIT 1;
 -- and none are marked dead yet — only VACUUM's ambulkdelete marks entries.
 SELECT sum(entry_count) AS del_entries_pre_vacuum,
        sum(dead_count) AS del_dead_pre_vacuum
-    FROM mkt.posting_pages('idx_mutdel'::regclass);
+    FROM prism.posting_pages('idx_mutdel'::regclass);
 VACUUM mutdel;   -- runs ambulkdelete: tombstones the dead 1001 entry
 -- Still correct after VACUUM, and the other outlier is unaffected.
 SELECT id AS del_after_vacuum FROM mutdel ORDER BY v <-> '[100,0,0]' LIMIT 1;
@@ -134,7 +134,7 @@ SELECT id AS del_other FROM mutdel ORDER BY v <-> '[200,0,0]' LIMIT 1;
 -- count is unchanged; exactly the one deleted row is now marked dead.
 SELECT sum(entry_count) AS del_entries_post_vacuum,
        sum(dead_count) AS del_dead_post_vacuum
-    FROM mkt.posting_pages('idx_mutdel'::regclass);
+    FROM prism.posting_pages('idx_mutdel'::regclass);
 -- VACUUM page-tombstones only pages left all-dead. The deleted outlier sat
 -- alone in its own cluster, so exactly its page becomes all-dead and is
 -- flagged (its single entry marked dead); the dense pages keep live entries
@@ -142,10 +142,10 @@ SELECT sum(entry_count) AS del_entries_post_vacuum,
 SELECT count(*) AS del_tombstoned_pages,
        coalesce(bool_and(entry_count = 1), true) AS only_the_dead_entry,
        coalesce(bool_and(dead_count = entry_count), true) AS all_entries_dead
-    FROM mkt.posting_pages('idx_mutdel'::regclass)
+    FROM prism.posting_pages('idx_mutdel'::regclass)
     WHERE tombstoned;
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 DROP TABLE mutdel;
 
 -- ===== UPDATE: insert-new + clean-old, and HOT for non-indexed columns =======
@@ -158,11 +158,11 @@ CREATE TABLE mutupd (id int, payload int, v vec32(3));
 INSERT INTO mutupd SELECT g, 0, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 INSERT INTO mutupd VALUES (1001, 0, '[100,0,0]');
-CREATE INDEX idx_mutupd ON mutupd USING mktann (v)
+CREATE INDEX idx_mutupd ON mutupd USING prism (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
-SET mkt.nprobe = 4;
+SET prism.nprobe = 4;
 
 -- Guard: index serves the probe, not a seq scan (see the AoS section).
 EXPLAIN (COSTS OFF) SELECT id FROM mutupd ORDER BY v <-> '[100,0,0]' LIMIT 1;
@@ -183,7 +183,7 @@ SELECT id AS upd_hot FROM mutupd ORDER BY v <-> '[200,0,0]' LIMIT 1;
 VACUUM mutupd;
 SELECT id AS upd_after_vacuum FROM mutupd ORDER BY v <-> '[200,0,0]' LIMIT 1;
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 DROP TABLE mutupd;
 
 -- ===== Non-HOT UPDATE of a non-indexed column still indexes the new version ==
@@ -197,29 +197,29 @@ DROP TABLE mutupd;
 CREATE TABLE mutnonhot (id int, payload int, v vec32(3));
 INSERT INTO mutnonhot SELECT g, 0, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 1000) g;
-CREATE INDEX idx_mutnonhot ON mutnonhot USING mktann (v)
+CREATE INDEX idx_mutnonhot ON mutnonhot USING prism (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
-SET mkt.nprobe = 4;
+SET prism.nprobe = 4;
 SELECT sum(entry_count) AS entries_before
-    FROM mkt.posting_pages('idx_mutnonhot'::regclass);
+    FROM prism.posting_pages('idx_mutnonhot'::regclass);
 UPDATE mutnonhot SET payload = payload + 1;
 -- The new versions were indexed: more entries than rows ...
 SELECT sum(entry_count) > 1000 AS entries_added
-    FROM mkt.posting_pages('idx_mutnonhot'::regclass);
+    FROM prism.posting_pages('idx_mutnonhot'::regclass);
 -- ... and a row from a full page is found at its unchanged vec32.
 SELECT id AS nonhot_found FROM mutnonhot ORDER BY v <-> '[500,0,0]' LIMIT 1;
 -- Once VACUUM has removed the dead old versions, the whole table is
 -- reachable through the index (before it, the dead entries take half the
 -- top-k and the heap fetch drops them).
 VACUUM mutnonhot;
-SET mkt.query_limit = 1000;
+SET prism.query_limit = 1000;
 SELECT count(*) AS nonhot_reachable FROM (
     SELECT id FROM mutnonhot ORDER BY v <-> '[0,0,0]' LIMIT 1000) t;
-RESET mkt.query_limit;
+RESET prism.query_limit;
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 DROP TABLE mutnonhot;
 
 -- ===== Page-level tombstone is reported by EXPLAIN (ANALYZE, VERBOSE) ========
@@ -232,11 +232,11 @@ DROP TABLE mutnonhot;
 CREATE TABLE muttomb (id int, v vec32(3));
 INSERT INTO muttomb SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 200) g;
-CREATE INDEX idx_muttomb ON muttomb USING mktann (v)
+CREATE INDEX idx_muttomb ON muttomb USING prism (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
-SET mkt.nprobe = 4;
+SET prism.nprobe = 4;
 
 CREATE FUNCTION muttomb_pages()
     RETURNS TABLE (pages_read int, pages_scanned int, pages_skipped int)
@@ -248,7 +248,7 @@ BEGIN
     EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, FORMAT JSON)
         SELECT id FROM muttomb ORDER BY v <-> ''[1,0,0]'' LIMIT 5'
     INTO j;
-    s := j -> 0 -> 'Plan' -> 'Plans' -> 0 -> 'Mktann';
+    s := j -> 0 -> 'Plan' -> 'Plans' -> 0 -> 'Prism';
     RETURN QUERY SELECT
         (s ->> 'Posting Pages Read')::int,
         (s ->> 'Posting Pages Scanned')::int,
@@ -256,28 +256,28 @@ BEGIN
 END $$;
 
 -- No tombstones yet: nothing skipped, every read page is scored, and
--- mkt.posting_pages reports no page as tombstoned.
+-- prism.posting_pages reports no page as tombstoned.
 SELECT pages_skipped = 0 AS none_skipped_before,
        pages_scanned = pages_read AS all_scanned_before
     FROM muttomb_pages();
 SELECT count(*) FILTER (WHERE tombstoned) AS tombstoned_before
-    FROM mkt.posting_pages('idx_muttomb'::regclass);
+    FROM prism.posting_pages('idx_muttomb'::regclass);
 DELETE FROM muttomb;
 VACUUM muttomb;
 -- Every page is now all-dead: all read pages are skipped, none scored.
 SELECT pages_skipped > 0 AS some_skipped_after,
        pages_scanned = 0 AS none_scanned_after
     FROM muttomb_pages();
--- mkt.posting_pages agrees: every posting page is flagged tombstoned, and the
+-- prism.posting_pages agrees: every posting page is flagged tombstoned, and the
 -- pages stay linked in their chains (tombstoning is a scan optimization, not
 -- reclamation).
 SELECT count(*) > 0 AS have_pages,
        bool_and(tombstoned) AS all_tombstoned
-    FROM mkt.posting_pages('idx_muttomb'::regclass);
+    FROM prism.posting_pages('idx_muttomb'::regclass);
 
 DROP FUNCTION muttomb_pages();
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 DROP TABLE muttomb;
 
 -- ===== FASTSCAN pages are page-tombstoned and reported =======================
@@ -287,7 +287,7 @@ DROP TABLE muttomb;
 CREATE TABLE mutfstomb (id int, v vec32(3));
 INSERT INTO mutfstomb SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 200) g;
-CREATE INDEX idx_mutfstomb ON mutfstomb USING mktann (v)
+CREATE INDEX idx_mutfstomb ON mutfstomb USING prism (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = on,
           soar_lambda = 0, boundary_epsilon = 0);
 -- The build produced fastscan pages and none are tombstoned yet. dead_count
@@ -296,17 +296,17 @@ SELECT count(*) FILTER (WHERE format = 'fastscan') > 0 AS has_fastscan_pages,
        count(*) FILTER (WHERE tombstoned) AS tombstoned_before,
        bool_and(dead_count IS NULL)
            FILTER (WHERE format = 'fastscan') AS fastscan_dead_is_null
-    FROM mkt.posting_pages('idx_mutfstomb'::regclass);
+    FROM prism.posting_pages('idx_mutfstomb'::regclass);
 DELETE FROM mutfstomb;
 VACUUM mutfstomb;
 -- Every page — fastscan base included — is all-dead and flagged.
 SELECT count(*) > 0 AS have_pages,
        bool_and(tombstoned) AS all_tombstoned
-    FROM mkt.posting_pages('idx_mutfstomb'::regclass);
+    FROM prism.posting_pages('idx_mutfstomb'::regclass);
 DROP TABLE mutfstomb;
 
 -- ===== Dead-entry accounting across the delete lifecycle =====================
--- The monitoring story for mkt.posting_pages: dead_count accumulates with each
+-- The monitoring story for prism.posting_pages: dead_count accumulates with each
 -- DELETE + VACUUM round while pages holding live entries stay untombstoned;
 -- tombstoned flips only when a page goes all-dead, at which point
 -- dead_count = entry_count. Deletes are spread (every 5th id) so no cluster
@@ -314,7 +314,7 @@ DROP TABLE mutfstomb;
 CREATE TABLE mutlife (id int, v vec32(3));
 INSERT INTO mutlife SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
-CREATE INDEX idx_mutlife ON mutlife USING mktann (v)
+CREATE INDEX idx_mutlife ON mutlife USING prism (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 
@@ -322,12 +322,12 @@ CREATE INDEX idx_mutlife ON mutlife USING mktann (v)
 SELECT sum(entry_count) AS entries,
        sum(dead_count) AS dead,
        count(*) FILTER (WHERE tombstoned) AS tombstoned_pages
-    FROM mkt.posting_pages('idx_mutlife'::regclass);
+    FROM prism.posting_pages('idx_mutlife'::regclass);
 
 -- Round 1: delete every 5th row. Before VACUUM nothing is marked ...
 DELETE FROM mutlife WHERE id % 5 = 0;
 SELECT sum(dead_count) AS dead_marked_pre_vacuum
-    FROM mkt.posting_pages('idx_mutlife'::regclass);
+    FROM prism.posting_pages('idx_mutlife'::regclass);
 -- ... after VACUUM exactly those 10 are marked dead, spread across clusters,
 -- so every page keeps live entries and none is tombstoned.
 VACUUM mutlife;
@@ -335,7 +335,7 @@ SELECT sum(entry_count) AS entries,
        sum(dead_count) AS dead,
        count(*) FILTER (WHERE tombstoned) AS tombstoned_pages,
        bool_and(dead_count < entry_count) AS all_pages_have_live
-    FROM mkt.posting_pages('idx_mutlife'::regclass);
+    FROM prism.posting_pages('idx_mutlife'::regclass);
 
 -- Round 2: delete another slice; dead_count accumulates monotonically.
 DELETE FROM mutlife WHERE id % 5 = 1;
@@ -343,7 +343,7 @@ VACUUM mutlife;
 SELECT sum(entry_count) AS entries,
        sum(dead_count) AS dead,
        count(*) FILTER (WHERE tombstoned) AS tombstoned_pages
-    FROM mkt.posting_pages('idx_mutlife'::regclass);
+    FROM prism.posting_pages('idx_mutlife'::regclass);
 
 -- Round 3: delete everything left; every page goes all-dead, tombstoned flips
 -- everywhere, and dead_count = entry_count on every page.
@@ -353,7 +353,7 @@ SELECT sum(entry_count) AS entries,
        sum(dead_count) AS dead,
        count(*) > 0 AND bool_and(tombstoned) AS all_tombstoned,
        bool_and(dead_count = entry_count) AS all_entries_dead
-    FROM mkt.posting_pages('idx_mutlife'::regclass);
+    FROM prism.posting_pages('idx_mutlife'::regclass);
 DROP TABLE mutlife;
 
 -- ===== Mixed state: dead-region chains tombstone, live regions do not =======
@@ -366,11 +366,11 @@ DROP TABLE mutlife;
 CREATE TABLE mutmix (id int, v vec32(3));
 INSERT INTO mutmix SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
-CREATE INDEX idx_mutmix ON mutmix USING mktann (v)
+CREATE INDEX idx_mutmix ON mutmix USING prism (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 SET enable_seqscan = off;
-SET mkt.nprobe = 4;
+SET prism.nprobe = 4;
 
 -- Guard: index serves the probe, not a seq scan (see the AoS section).
 EXPLAIN (COSTS OFF) SELECT id FROM mutmix ORDER BY v <-> '[1,0,0]' LIMIT 1;
@@ -382,15 +382,15 @@ SELECT count(*) FILTER (WHERE tombstoned) > 0 AS some_tombstoned,
        count(*) FILTER (WHERE NOT tombstoned) > 0 AS some_live,
        sum(entry_count) AS entries,
        sum(dead_count) AS dead
-    FROM mkt.posting_pages('idx_mutmix'::regclass);
+    FROM prism.posting_pages('idx_mutmix'::regclass);
 -- The invariant on every page: tombstoned iff every entry is dead.
 SELECT bool_and((dead_count = entry_count) = tombstoned) AS tombstone_iff_all_dead
-    FROM mkt.posting_pages('idx_mutmix'::regclass);
+    FROM prism.posting_pages('idx_mutmix'::regclass);
 -- Queries keep working across the mix: probing into the dead region returns
 -- the nearest live row (id 26), served by the index.
 SELECT id AS nearest_live FROM mutmix ORDER BY v <-> '[1,0,0]' LIMIT 1;
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 DROP TABLE mutmix;
 
 -- ===== One tombstoned page inside a multi-page chain =========================
@@ -409,21 +409,21 @@ INSERT INTO mutchain SELECT g, format('[%s,0,0]', g * 0.01)::vec32
     FROM generate_series(1, 10) g;
 INSERT INTO mutchain SELECT 10000 + g, format('[%s,0,0]', 1000 + g * 0.01)::vec32
     FROM generate_series(1, 10) g;
-CREATE INDEX idx_mutchain ON mutchain USING mktann (v)
+CREATE INDEX idx_mutchain ON mutchain USING prism (v)
     WITH (nlist = 2, centroid_compression = true, fastscan = off,
           soar_lambda = 0, boundary_epsilon = 0);
 -- Grow the first region's chain: ids 11..1210 all route to its cluster.
 INSERT INTO mutchain SELECT g, format('[%s,0,0]', g * 0.01)::vec32
     FROM generate_series(11, 1210) g;
 SET enable_seqscan = off;
-SET mkt.nprobe = 1;
+SET prism.nprobe = 1;
 
 -- Snapshot the big cluster's chain (the one that grew) before any delete.
 CREATE TEMP TABLE chain_before AS
     SELECT blkno, chain_pos, entry_count
-        FROM mkt.posting_pages('idx_mutchain'::regclass)
+        FROM prism.posting_pages('idx_mutchain'::regclass)
         WHERE cluster_id = (
-            SELECT cluster_id FROM mkt.posting_pages('idx_mutchain'::regclass)
+            SELECT cluster_id FROM prism.posting_pages('idx_mutchain'::regclass)
             GROUP BY cluster_id ORDER BY count(*) DESC LIMIT 1);
 -- The chain is long enough that chain_pos=2 is an interior page (neither the
 -- head nor the tail).
@@ -443,7 +443,7 @@ BEGIN
     EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, FORMAT JSON)
         SELECT id FROM mutchain ORDER BY v <-> ''[0.05,0,0]'' LIMIT 5'
     INTO j;
-    s := j -> 0 -> 'Plan' -> 'Plans' -> 0 -> 'Mktann';
+    s := j -> 0 -> 'Plan' -> 'Plans' -> 0 -> 'Prism';
     RETURN QUERY SELECT
         (s ->> 'Posting Pages Read')::int,
         (s ->> 'Posting Pages Scanned')::int,
@@ -471,16 +471,16 @@ SELECT count(*) FILTER (WHERE tombstoned) = 1 AS one_tombstoned,
            FILTER (WHERE tombstoned) AS interior_all_dead,
        bool_and(dead_count < entry_count)
            FILTER (WHERE NOT tombstoned) AS others_have_live
-    FROM mkt.posting_pages('idx_mutchain'::regclass)
+    FROM prism.posting_pages('idx_mutchain'::regclass)
     WHERE blkno IN (SELECT blkno FROM chain_before);
--- The chain stays complete: mkt.posting_pages walks next_blkno links, so an
+-- The chain stays complete: prism.posting_pages walks next_blkno links, so an
 -- unlinked page would vanish from the walk. Same pages, same order, same
 -- entry counts (tombstoning reclaims nothing).
 SELECT (SELECT array_agg(blkno ORDER BY chain_pos) FROM chain_before) =
        array_agg(blkno ORDER BY chain_pos) AS chain_unchanged,
        (SELECT sum(entry_count) FROM chain_before) =
        sum(entry_count) AS entries_unchanged
-    FROM mkt.posting_pages('idx_mutchain'::regclass)
+    FROM prism.posting_pages('idx_mutchain'::regclass)
     WHERE blkno IN (SELECT blkno FROM chain_before);
 -- The scan follows the chain across the tombstoned page (read count is
 -- unchanged) but skips its scoring: exactly one page skipped, one fewer
@@ -494,5 +494,5 @@ DROP FUNCTION mutchain_pages();
 DROP TABLE chain_before;
 DROP TABLE stats_before;
 RESET enable_seqscan;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 DROP TABLE mutchain;

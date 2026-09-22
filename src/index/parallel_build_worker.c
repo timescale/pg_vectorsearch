@@ -207,7 +207,7 @@ mkt_build_child_subtree(
 	{
 		if ((uint64_t)sub->total_size > slot_size)
 			mkt_error(
-					"mktann: subtree blob %u exceeds slot "
+					"prism: subtree blob %u exceeds slot "
 					"(%u > %" PRIu64 ")",
 					child,
 					sub->total_size,

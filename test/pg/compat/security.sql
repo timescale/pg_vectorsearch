@@ -14,10 +14,12 @@
 -- silently adopted any pre-existing cast. pgvector is a "trusted"
 -- extension, so a non-superuser can own public.vector and reach both.
 --
--- Both functions are fixed in `mkt`, a name known ahead of time -- they
--- are called directly, schema-qualified, below. The vec32/vec16 type
--- schema (@extschema@) is not fixed and is never hard-coded below: it is
--- looked up from the catalog once and interpolated as a psql variable
+-- Both functions are fixed in `prism`, a name known ahead of time -- they
+-- are called directly, schema-qualified, below. (The ownership guard that
+-- protects `prism` is the same loop that protects `mkt`; exercising it via
+-- `prism` below covers `mkt` too.) The vec32/vec16 type schema
+-- (@extschema@) is not fixed and is never hard-coded below: it is looked
+-- up from the catalog once and interpolated as a psql variable
 -- (:extschema) wherever a cast-related fixture needs it. Dollar-quoted
 -- bodies, which psql does not interpolate, look it up again at runtime.
 --
@@ -25,9 +27,9 @@
 --   pgvector and meerkat must be installed in PostgreSQL, and the
 --   connected role must be a superuser (to install extensions and
 --   exercise the event-trigger escalation path). This suite drops and
---   recreates both extensions and the `mkt` schema (CASCADE) as it runs, so
---   run it against a throwaway/clean database, not one holding data you care
---   about. The CI script uses a fresh instance.
+--   recreates both extensions and the `mkt`/`prism` schemas (CASCADE) as
+--   it runs, so run it against a throwaway/clean database, not one holding
+--   data you care about. The CI script uses a fresh instance.
 --
 -- Usage:
 --   psql -f test/pg/compat/security.sql
@@ -102,7 +104,7 @@ $pf$;
 -- 0. Install-time: a format() planted in a pre-created extension schema
 --    is not invoked by CREATE EXTENSION itself
 -- =====================================================================
--- The real install-time attack. `mkt` is a known name ahead of any
+-- The real install-time attack. `prism` is a known name ahead of any
 -- install (no SCHEMA clause reveals it), so an attacker can pre-create it
 -- and plant format() overloads before CREATE EXTENSION meerkat runs.
 -- setup_pgvector_compat() (reached because pgvector is already present)
@@ -115,12 +117,12 @@ $pf$;
 DROP EXTENSION IF EXISTS meerkat CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
 DROP SCHEMA IF EXISTS install_probe CASCADE;
-DROP SCHEMA IF EXISTS mkt CASCADE;
+DROP SCHEMA IF EXISTS prism CASCADE;
 
 CREATE SCHEMA install_probe;
 CREATE TABLE install_probe.hit (seen bool);
-CREATE SCHEMA mkt;   -- literal: the attacker targets the known schema name
-SELECT plant_format_overloads('mkt',
+CREATE SCHEMA prism;   -- literal: the attacker targets the known schema name
+SELECT plant_format_overloads('prism',
     'INSERT INTO install_probe.hit VALUES (true)');
 
 -- pgvector first so the compat path runs inside CREATE EXTENSION meerkat.
@@ -134,7 +136,7 @@ SELECT n.nspname AS extschema
   JOIN pg_namespace n ON n.oid = e.extnamespace
  WHERE e.extname = 'meerkat' \gset
 
-SELECT assert_test('CREATE EXTENSION does not call a planted mkt.format()',
+SELECT assert_test('CREATE EXTENSION does not call a planted prism.format()',
     NOT EXISTS (SELECT 1 FROM install_probe.hit));
 
 -- Prove the compat path actually ran (else "not called" would be vacuous):
@@ -144,25 +146,27 @@ SELECT assert_test('CREATE EXTENSION still created the pgvector compat cast',
              WHERE castsource = 'public.vector'::regtype
                AND casttarget = (:'extschema' || '.vec32')::regtype));
 
-SELECT drop_format_overloads('mkt');
+SELECT drop_format_overloads('prism');
 DROP SCHEMA install_probe CASCADE;
 
 -- =====================================================================
 -- 0b. Install is refused when the extension schema is pre-owned by an
 --     untrusted role
 -- =====================================================================
--- A role with CREATE on the database can pre-create mkt and keep owning it
--- after install, then add lookalike objects there that a caller who has not
--- double-checked where their tooling points might mistake for meerkat's
--- own (mkt.rebalance and friends are always called schema-qualified, never
--- via search_path). The schema ownership guard at the top of the install
--- script must refuse that install.
+-- A role with CREATE on the database can pre-create prism and keep owning
+-- it after install, then add lookalike objects there that a caller who has
+-- not double-checked where their tooling points might mistake for
+-- meerkat's own (prism.rebalance and friends are always called
+-- schema-qualified, never via search_path). The schema ownership guard at
+-- the top of the install script must refuse that install. (The guard is
+-- one loop over both `mkt` and `prism`, so exercising it here proves it
+-- for `mkt` too.)
 DROP EXTENSION IF EXISTS meerkat CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
-DROP SCHEMA IF EXISTS mkt CASCADE;
-DROP ROLE IF EXISTS mkt_squatter;
-CREATE ROLE mkt_squatter NOSUPERUSER;
-CREATE SCHEMA mkt AUTHORIZATION mkt_squatter;   -- untrusted role owns mkt
+DROP SCHEMA IF EXISTS prism CASCADE;
+DROP ROLE IF EXISTS prism_squatter;
+CREATE ROLE prism_squatter NOSUPERUSER;
+CREATE SCHEMA prism AUTHORIZATION prism_squatter;   -- untrusted role owns prism
 
 \set ON_ERROR_STOP off
 CREATE EXTENSION meerkat;   -- must be refused by the ownership guard
@@ -172,9 +176,9 @@ SELECT assert_test(
     'install refused when the extension schema is pre-owned by an untrusted role',
     NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'meerkat'));
 
-DROP SCHEMA mkt CASCADE;
-DROP OWNED BY mkt_squatter;
-DROP ROLE mkt_squatter;
+DROP SCHEMA prism CASCADE;
+DROP OWNED BY prism_squatter;
+DROP ROLE prism_squatter;
 
 -- Deterministic starting state for the remaining checks: drop and reinstall
 -- cleanly (meerkat first so its event trigger is active, then pgvector).
@@ -195,17 +199,17 @@ SELECT assert_test('setup_pgvector_compat pins search_path',
     COALESCE((SELECT proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
        FROM pg_proc
       WHERE proname = 'setup_pgvector_compat'
-        AND pronamespace = 'mkt'::regnamespace), false));
+        AND pronamespace = 'prism'::regnamespace), false));
 
 SELECT assert_test('on_extension_create pins search_path',
     COALESCE((SELECT proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
        FROM pg_proc
       WHERE proname = 'on_extension_create'
-        AND pronamespace = 'mkt'::regnamespace), false));
+        AND pronamespace = 'prism'::regnamespace), false));
 
 -- The dynamic-SQL sink is schema-qualified as pg_catalog.format.
 SELECT assert_test('setup body calls pg_catalog.format, not bare format',
-    pg_get_functiondef('mkt.setup_pgvector_compat'::regproc)
+    pg_get_functiondef('prism.setup_pgvector_compat'::regproc)
         LIKE '%pg_catalog.format(%');
 
 -- =====================================================================
@@ -230,10 +234,11 @@ DECLARE
     invoked bool := false;
 BEGIN
     BEGIN
-        -- Called schema-qualified (mkt is fixed), so this call site cannot
-        -- be hijacked either -- what is under test is whether the function's
-        -- own pinned search_path holds once execution is inside its body.
-        PERFORM mkt.setup_pgvector_compat();
+        -- Called schema-qualified (prism is fixed), so this call site
+        -- cannot be hijacked either -- what is under test is whether the
+        -- function's own pinned search_path holds once execution is inside
+        -- its body.
+        PERFORM prism.setup_pgvector_compat();
     EXCEPTION WHEN OTHERS THEN
         invoked := true;   -- a planted overload raised -> it was called
     END;
@@ -268,7 +273,7 @@ DECLARE
     invoked bool := false;
 BEGIN
     BEGIN
-        PERFORM mkt.setup_pgvector_compat();
+        PERFORM prism.setup_pgvector_compat();
     EXCEPTION WHEN OTHERS THEN
         invoked := true;
     END;
@@ -315,7 +320,7 @@ DECLARE
     raised bool := false;
 BEGIN
     BEGIN
-        PERFORM mkt.setup_pgvector_compat();
+        PERFORM prism.setup_pgvector_compat();
     EXCEPTION WHEN OTHERS THEN
         raised := true;
     END;
@@ -345,7 +350,7 @@ DECLARE
     raised bool := false;
 BEGIN
     BEGIN
-        PERFORM mkt.setup_pgvector_compat();
+        PERFORM prism.setup_pgvector_compat();
     EXCEPTION WHEN OTHERS THEN
         raised := true;
     END;

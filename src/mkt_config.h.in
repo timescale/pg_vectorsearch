@@ -17,13 +17,14 @@
 /*
  * Extension naming (from meson.build, the single source of truth for
  * all user-facing names): the extension name, the index access method
- * name, and the schema/GUC prefix. C string literals that surface any
- * of these to users go through these defines; C-internal identifiers
- * keep literal names.
+ * name, and the GUC prefix (the prism index's tunables, tracks
+ * MKT_AM_NAME rather than MKT_EXTENSION_NAME). C string literals that
+ * surface any of these to users go through these defines; C-internal
+ * identifiers keep literal names.
  */
 #mesondefine MKT_EXTENSION_NAME
 #mesondefine MKT_AM_NAME
-#mesondefine MKT_EXTENSION_SCHEMA
+#mesondefine MKT_GUC_PREFIX
 
 /*
  * Name of the version-named extension shared library

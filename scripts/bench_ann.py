@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benchmark meerkat (mktann), pgvector (ivfflat/hnsw) on an
+Benchmark meerkat (prism), pgvector (ivfflat/hnsw) on an
 ann-benchmarks HDF5 dataset.
 
 Loads the HDF5 dataset from ann-benchmarks, builds an ANN index, runs
@@ -10,9 +10,9 @@ profile mode for perf sampling.
 Requirements: pip install psycopg numpy h5py
 
 Usage:
-    # Full run: load data, build mktann index, measure recall
+    # Full run: load data, build prism index, measure recall
     python3 scripts/bench_ann.py --dsn "host=..." \
-        --dataset glove-100-angular --index-type mktann
+        --dataset glove-100-angular --index-type prism
 
     # Cohere (768-dim, 1M), skip load, sweep nprobe on an existing index
     python3 scripts/bench_ann.py --dsn "..." --skip-load --skip-index \
@@ -104,7 +104,7 @@ def build_index(conn, table: str, index_type: str, nlist: int | None, **kwargs):
         cur.execute(f"""
             SELECT indexname FROM pg_indexes
             WHERE tablename = '{table}'
-              AND (indexdef LIKE '%mktann%'
+              AND (indexdef LIKE '%prism%'
                 OR indexdef LIKE '%ivfflat%'
                 OR indexdef LIKE '%hnsw%'
                 OR indexdef LIKE '%scann%')
@@ -121,7 +121,7 @@ def build_index(conn, table: str, index_type: str, nlist: int | None, **kwargs):
     with conn.cursor() as cur:
         cur.execute("SET maintenance_work_mem = '2GB'")
 
-        if index_type == "mktann":
+        if index_type == "prism":
             idx_name = f"idx_{table}_mkt"
             with_parts = []
             if nlist is not None:
@@ -137,7 +137,7 @@ def build_index(conn, table: str, index_type: str, nlist: int | None, **kwargs):
                 with_clause = f" WITH ({', '.join(with_parts)})"
             sql = (
                 f"CREATE INDEX {idx_name} ON {table} "
-                f"USING mktann (v mkt.vec32_cosine_ops)"
+                f"USING prism (v mkt.vec32_cosine_ops)"
                 f"{with_clause}"
             )
         elif index_type == "hnsw":
@@ -202,12 +202,12 @@ def build_index(conn, table: str, index_type: str, nlist: int | None, **kwargs):
 def query_sql(table: str, index_type: str, k: int) -> str:
     """Return the SELECT used to dispatch to the right operator class.
 
-    mktann uses the mkt.vec32_cosine_ops opclass, which is keyed on
+    prism uses the mkt.vec32_cosine_ops opclass, which is keyed on
     mkt.<=>; the query must cast the literal to mkt.vec32 so the
     planner can match the index. pgvector ivfflat/hnsw use the
     built-in <=> operator.
     """
-    if index_type == "mktann":
+    if index_type == "prism":
         return (
             f"SELECT id FROM {table} "
             f"ORDER BY v OPERATOR(mkt.<=>) %s::vector::mkt.vec32 "
@@ -224,12 +224,12 @@ def set_search_params(
     topk: int | None,
     rerank: bool | None = None,
 ):
-    if index_type == "mktann":
-        cur.execute(f"SET mkt.nprobe = {nprobe}")
+    if index_type == "prism":
+        cur.execute(f"SET prism.nprobe = {nprobe}")
         if topk is not None:
             cur.execute(f"SET mkt.topk = {topk}")
         if rerank is not None:
-            cur.execute(f"SET mkt.rerank = {'on' if rerank else 'off'}")
+            cur.execute(f"SET prism.rerank = {'on' if rerank else 'off'}")
     elif index_type == "hnsw":
         cur.execute(f"SET hnsw.ef_search = {ef_search}")
     elif index_type == "scann":
@@ -485,7 +485,7 @@ def resolve_hdf5_path(dataset: str, override: str | None) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark mktann/ivfflat/hnsw on an ann-benchmarks HDF5 dataset"
+        description="Benchmark prism/ivfflat/hnsw on an ann-benchmarks HDF5 dataset"
     )
     parser.add_argument(
         "-d", "--dsn", type=str, required=True, help="PostgreSQL connection string"
@@ -520,9 +520,9 @@ def main():
     )
     parser.add_argument(
         "--index-type",
-        choices=["mktann", "ivfflat", "hnsw", "scann"],
-        default="mktann",
-        help="Index type to benchmark (default: mktann)",
+        choices=["prism", "ivfflat", "hnsw", "scann"],
+        default="prism",
+        help="Index type to benchmark (default: prism)",
     )
     parser.add_argument(
         "-k", type=int, default=10, help="Top-k neighbors (default: 10)"
@@ -560,7 +560,7 @@ def main():
         "--fan-out",
         type=int,
         default=None,
-        help="mktann tree branching factor (default: auto from nlist)",
+        help="prism tree branching factor (default: auto from nlist)",
     )
     parser.add_argument(
         "--kmeans-nredo",
@@ -577,13 +577,13 @@ def main():
         "--topk",
         type=int,
         default=None,
-        help="mktann rerank candidates (default: server default)",
+        help="prism rerank candidates (default: server default)",
     )
     parser.add_argument(
         "--rerank",
         choices=["on", "off"],
         default=None,
-        help="mktann rerank toggle: sets mkt.rerank (default: server default)",
+        help="prism rerank toggle: sets prism.rerank (default: server default)",
     )
     parser.add_argument(
         "--ef-search",
@@ -648,7 +648,7 @@ def main():
 
     with conn.cursor() as cur:
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        if args.index_type == "mktann":
+        if args.index_type == "prism":
             cur.execute("CREATE EXTENSION IF NOT EXISTS meerkat")
     print("Extensions ready")
 

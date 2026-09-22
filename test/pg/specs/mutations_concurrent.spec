@@ -1,4 +1,4 @@
-# Concurrency / mutability behavior of the mktann index under DML.
+# Concurrency / mutability behavior of the prism index under DML.
 #
 # This spec consolidates the incremental-write isolation scenarios into one
 # shared fixture. Every permutation exercises the same question from a
@@ -23,7 +23,7 @@ setup
     CREATE TABLE iso (id int, v vec32(3));
     INSERT INTO iso SELECT g, format('[%s,0,0]', g)::vec32
         FROM generate_series(1, 50) g;
-    CREATE INDEX iso_idx ON iso USING mktann (v)
+    CREATE INDEX iso_idx ON iso USING prism (v)
         WITH (nlist = 4, centroid_compression = true);
 }
 teardown { DROP TABLE iso; }
@@ -58,7 +58,7 @@ step m_vacfull { VACUUM FULL iso; }
 # visibility, never on which lists happened to be probed. The query returns 1
 # iff the top-1 nearest neighbor of [100,0,0] is row 1001.
 session checker
-setup { SET enable_seqscan = off; SET mkt.nprobe = 4; }
+setup { SET enable_seqscan = off; SET prism.nprobe = 4; }
 step c_chk
 {
     SELECT count(*) AS found FROM (

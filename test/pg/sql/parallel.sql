@@ -1,6 +1,6 @@
 -- Parallel vs serial index build paths
 --
--- Exercises the mktann parallel build (do_parallel_build) and serial build
+-- Exercises the prism parallel build (do_parallel_build) and serial build
 -- (do_serial_build) and asserts both produce a usable index. A small table is
 -- enough: setting the table's parallel_workers storage parameter forces a
 -- parallel build regardless of heap size (it bypasses the size/memory
@@ -9,7 +9,7 @@
 --
 -- The parallel path runs the full option matrix (it is otherwise untested);
 -- the serial path runs the options no other regression test covers serially
--- (fastscan / SOAR / boundary), since mktann.sql already covers serial
+-- (fastscan / SOAR / boundary), since prism.sql already covers serial
 -- L2/cosine/float/multi-level builds.
 
 CREATE TABLE embeddings (id serial, v vec32(3));
@@ -30,7 +30,7 @@ CREATE FUNCTION pbuild_check(idxdef text, op text DEFAULT '<->')
     RETURNS TABLE (has_pages bool, nres bigint)
     LANGUAGE plpgsql AS $$
 BEGIN
-    EXECUTE 'CREATE INDEX tmp_idx ON embeddings USING mktann ' || idxdef;
+    EXECUTE 'CREATE INDEX tmp_idx ON embeddings USING prism ' || idxdef;
     RETURN QUERY EXECUTE format(
         'SELECT (SELECT c.relpages > 0 FROM pg_class c'
         '          WHERE c.relname = ''tmp_idx''),'
@@ -108,7 +108,7 @@ ALTER TABLE wide_emb SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
 SET maintenance_work_mem = '1MB';
 
-CREATE INDEX idx_wide_budget ON wide_emb USING mktann (v)
+CREATE INDEX idx_wide_budget ON wide_emb USING prism (v)
     WITH (centroid_compression = true);
 
 SET enable_seqscan = off;
@@ -132,7 +132,7 @@ DROP TABLE wide_emb;
 CREATE TABLE empty_emb (id serial, v vec32(3));
 ALTER TABLE empty_emb SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
-CREATE INDEX idx_empty ON empty_emb USING mktann (v);
+CREATE INDEX idx_empty ON empty_emb USING prism (v);
 SELECT count(*) FROM empty_emb;
 DROP TABLE empty_emb;
 
@@ -155,14 +155,14 @@ ALTER TABLE relstats SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
 
 -- Never analyzed (reltuples = -1): the build supplies the count.
-CREATE INDEX relstats_idx ON relstats USING mktann (v);
+CREATE INDEX relstats_idx ON relstats USING prism (v);
 SELECT reltuples::bigint AS reltuples_never_analyzed
     FROM pg_class WHERE relname = 'relstats';
 DROP INDEX relstats_idx;
 
 -- Analyzed: a rebuild must not destroy the existing estimate.
 ANALYZE relstats;
-CREATE INDEX relstats_idx ON relstats USING mktann (v);
+CREATE INDEX relstats_idx ON relstats USING prism (v);
 SELECT reltuples::bigint AS reltuples_after_rebuild
     FROM pg_class WHERE relname = 'relstats';
 
@@ -189,9 +189,9 @@ DECLARE
     idx_ids int[];
     seq_ids int[];
 BEGIN
-    EXECUTE format('CREATE INDEX ex_idx ON %I USING mktann %s', tbl, idxdef);
+    EXECUTE format('CREATE INDEX ex_idx ON %I USING prism %s', tbl, idxdef);
     SET LOCAL enable_seqscan = off;
-    SET LOCAL mkt.nprobe = 10000; -- >= nlist for these tables: probe all
+    SET LOCAL prism.nprobe = 10000; -- >= nlist for these tables: probe all
     EXECUTE format(
         'SELECT array_agg(id ORDER BY id) FROM '
         '(SELECT id FROM %I ORDER BY v %s %L LIMIT 10) t', tbl, op, q)
@@ -241,7 +241,7 @@ SET max_parallel_maintenance_workers = 2;
 SET max_parallel_workers = 1;
 SELECT exact_check('line3', '(v) WITH (nlist = 12, fan_out = 4)',
                    '[0.5,0,0]') AS shortfall_exact;
-CREATE INDEX line3_short ON line3 USING mktann (v)
+CREATE INDEX line3_short ON line3 USING prism (v)
     WITH (nlist = 12, fan_out = 4);
 -- Structural check: no two internal entries may point at the same child
 -- page. A participant that never launches must not leave its root children
@@ -253,14 +253,14 @@ SELECT count(*) = count(DISTINCT child_blkno) AS no_duplicate_children
 -- Reachability: probing every list with the result cap lifted must return
 -- every row.
 SET enable_seqscan = off;
-SET mkt.nprobe = 10000;
-SET mkt.query_limit = 100;
+SET prism.nprobe = 10000;
+SET prism.query_limit = 100;
 EXPLAIN (COSTS OFF)
     SELECT id FROM line3 ORDER BY v <-> '[0.5,0,0]' LIMIT 100;
 SELECT count(*) AS shortfall_reachable FROM (
     SELECT id FROM line3 ORDER BY v <-> '[0.5,0,0]' LIMIT 100) t;
-RESET mkt.query_limit;
-RESET mkt.nprobe;
+RESET prism.query_limit;
+RESET prism.nprobe;
 RESET enable_seqscan;
 RESET max_parallel_workers;
 DROP INDEX line3_short;
@@ -294,14 +294,14 @@ SELECT exact_check('line3',
 SET max_parallel_maintenance_workers = 2;
 SELECT exact_check('line3', '(v) WITH (nlist = 40, fan_out = 4)',
                    '[0.5,0,0]') AS parallel_depth3_exact;
-CREATE INDEX line3_d3 ON line3 USING mktann (v)
+CREATE INDEX line3_d3 ON line3 USING prism (v)
     WITH (nlist = 40, fan_out = 4);
 SELECT count(*) = count(DISTINCT child_blkno) AS d3_no_duplicate_children
   FROM centroid_pages('line3_d3') WHERE NOT is_leaf;
 WITH leaves AS (
     SELECT child_blkno FROM centroid_pages('line3_d3') WHERE is_leaf
 ), heads AS (
-    SELECT blkno, cluster_id FROM mkt.posting_pages('line3_d3')
+    SELECT blkno, cluster_id FROM prism.posting_pages('line3_d3')
     WHERE is_first
 )
 SELECT (SELECT count(*) FROM leaves) = (SELECT count(*) FROM heads)
@@ -351,13 +351,13 @@ ALTER TABLE line768 SET (parallel_workers = 2);
 
 SET max_parallel_maintenance_workers = 2;
 SET maintenance_work_mem = '1MB';
-SET mkt.leaf_refine_threshold = 0;
+SET prism.leaf_refine_threshold = 0;
 SELECT exact_check('line768', '(v) WITH (centroid_compression = true)',
                    '[0.5' || repeat(',0', 767) || ']') AS bounded_norefine_exact;
-SET mkt.leaf_refine_threshold = 100000;
+SET prism.leaf_refine_threshold = 100000;
 SELECT exact_check('line768', '(v) WITH (centroid_compression = true)',
                    '[0.5' || repeat(',0', 767) || ']') AS bounded_refine_exact;
-RESET mkt.leaf_refine_threshold;
+RESET prism.leaf_refine_threshold;
 RESET maintenance_work_mem;
 RESET max_parallel_maintenance_workers;
 DROP TABLE line768;
@@ -378,7 +378,7 @@ ALTER TABLE line12k SET (parallel_workers = 2);
 -- gates above are parallel and flat); with fastscan posting heads the
 -- refine rewrites fastscan head pages.
 SET max_parallel_maintenance_workers = 0;
-SET mkt.leaf_refine_threshold = 100000;
+SET prism.leaf_refine_threshold = 100000;
 -- The 1MB budget forces the sample cap to its 10000-vec32 floor, below the
 -- 12000 rows, so the build is genuinely subsampled and refine runs.
 SET maintenance_work_mem = '1MB';
@@ -394,7 +394,7 @@ SELECT exact_check('line12k',
                     FROM generate_series(1, 64) j))
     AS serial_refine_fastscan_exact;
 RESET maintenance_work_mem;
-RESET mkt.leaf_refine_threshold;
+RESET prism.leaf_refine_threshold;
 
 -- Subtree blobs several times the BufFile buffer (nlist 64 / fan_out 8 at
 -- dim 64 gives ~multi-page blobs), so the leader's replay crosses buffer
@@ -414,7 +414,7 @@ DROP TABLE line12k;
 -- smaller than the requested nlist. Serial and parallel.
 CREATE TABLE degen (id int, v vec32(3));
 INSERT INTO degen VALUES (1, '[1,2,3]');
-CREATE INDEX degen_one ON degen USING mktann (v) WITH (nlist = 8);
+CREATE INDEX degen_one ON degen USING prism (v) WITH (nlist = 8);
 SET enable_seqscan = off;
 EXPLAIN (COSTS OFF)
     SELECT id FROM degen ORDER BY v <-> '[0,0,0]' LIMIT 10;
@@ -425,31 +425,31 @@ DROP INDEX degen_one;
 INSERT INTO degen SELECT g, '[1,2,3]' FROM generate_series(2, 100) g;
 ALTER TABLE degen SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
-CREATE INDEX degen_same ON degen USING mktann (v)
+CREATE INDEX degen_same ON degen USING prism (v)
     WITH (nlist = 12, fan_out = 4);
 SET enable_seqscan = off;
-SET mkt.nprobe = 10000;
-SET mkt.query_limit = 150;
+SET prism.nprobe = 10000;
+SET prism.query_limit = 150;
 EXPLAIN (COSTS OFF)
     SELECT id FROM degen ORDER BY v <-> '[1,2,3]' LIMIT 150;
 SELECT count(*) AS identical_rows FROM (
     SELECT id FROM degen ORDER BY v <-> '[1,2,3]' LIMIT 150) t;
-RESET mkt.query_limit;
-RESET mkt.nprobe;
+RESET prism.query_limit;
+RESET prism.nprobe;
 RESET enable_seqscan;
 SET max_parallel_maintenance_workers = 0;
 DROP INDEX degen_same;
-CREATE INDEX degen_serial ON degen USING mktann (v)
+CREATE INDEX degen_serial ON degen USING prism (v)
     WITH (nlist = 12, fan_out = 4);
 SET enable_seqscan = off;
-SET mkt.nprobe = 10000;
-SET mkt.query_limit = 150;
+SET prism.nprobe = 10000;
+SET prism.query_limit = 150;
 EXPLAIN (COSTS OFF)
     SELECT id FROM degen ORDER BY v <-> '[1,2,3]' LIMIT 150;
 SELECT count(*) AS identical_rows_serial FROM (
     SELECT id FROM degen ORDER BY v <-> '[1,2,3]' LIMIT 150) t;
-RESET mkt.query_limit;
-RESET mkt.nprobe;
+RESET prism.query_limit;
+RESET prism.nprobe;
 RESET enable_seqscan;
 RESET max_parallel_maintenance_workers;
 DROP TABLE degen;
@@ -469,17 +469,17 @@ INSERT INTO cic_pts SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 50) g;
 ALTER TABLE cic_pts SET (parallel_workers = 2);
 SET max_parallel_maintenance_workers = 2;
-CREATE INDEX CONCURRENTLY cic_idx ON cic_pts USING mktann (v)
+CREATE INDEX CONCURRENTLY cic_idx ON cic_pts USING prism (v)
     WITH (centroid_compression = true);
 -- CIC must have actually produced a valid index (not errored out).
 SELECT relpages > 0 AS cic_has_pages FROM pg_class WHERE relname = 'cic_idx';
 SET enable_seqscan = off;
-SET mkt.nprobe = 10000;
+SET prism.nprobe = 10000;
 EXPLAIN (COSTS OFF)
     SELECT id FROM cic_pts ORDER BY v <-> '[0.5,0,0]' LIMIT 10;
 SELECT array_agg(id ORDER BY id) = ARRAY[1,2,3,4,5,6,7,8,9,10] AS cic_exact
     FROM (SELECT id FROM cic_pts ORDER BY v <-> '[0.5,0,0]' LIMIT 10) t;
-RESET mkt.nprobe;
+RESET prism.nprobe;
 RESET enable_seqscan;
 RESET max_parallel_maintenance_workers;
 DROP TABLE cic_pts;
@@ -555,12 +555,12 @@ INSERT INTO line12kb
     FROM generate_series(1, 12000) g;
 SET max_parallel_maintenance_workers = 0;
 SET maintenance_work_mem = '1MB';
-SET mkt.leaf_refine_threshold = 100000;
+SET prism.leaf_refine_threshold = 100000;
 SELECT exact_check('line12kb', '(v) WITH (nlist = 4096, fan_out = 8)',
                    (SELECT '[' || string_agg((sin(60 + j))::text, ',') || ']'
                     FROM generate_series(1, 64) j))
     AS multitile_refine_exact;
-RESET mkt.leaf_refine_threshold;
+RESET prism.leaf_refine_threshold;
 RESET maintenance_work_mem;
 RESET max_parallel_maintenance_workers;
 DROP TABLE line12kb;
@@ -573,7 +573,7 @@ DROP TABLE line12kb;
 -- it still returns the exact top-10, because the rerank stage recomputes
 -- distances from the heap and repairs the order that garbage centroids sent
 -- it to. That failure mode is caught by the vec16 correctness check in
--- mktann.sql (which disagrees with brute force) and by the centroid-format
+-- prism.sql (which disagrees with brute force) and by the centroid-format
 -- check in inspect.sql -- keeping this arm honest about what it proves.
 CREATE TABLE hline3 (id int, v vec16(3));
 INSERT INTO hline3 SELECT g, format('[%s,0,0]', g)::vec16

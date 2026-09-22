@@ -13,7 +13,7 @@ INSERT INTO index_stats_test (v)
             FROM generate_series(0, 7) j)::vec32(8)
     FROM generate_series(1, 2000) i;
 -- Replication on, so posting entries outnumber rows.
-CREATE INDEX index_stats_idx ON index_stats_test USING mktann (v)
+CREATE INDEX index_stats_idx ON index_stats_test USING prism (v)
     WITH (nlist = 16, soar_lambda = 1.0, boundary_epsilon = 0.35);
 
 -- The build reports the rows it indexed.

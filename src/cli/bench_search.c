@@ -526,7 +526,7 @@ cmd_bench_search(CmdContext *ctx)
 			   (double)info.max_cluster / avg);
 
 	/* --nprobe 0: derive from the built cluster count, same rule as the
-	 * extension's mkt.nprobe = 0. */
+	 * extension's prism.nprobe = 0. */
 	if (config.nprobe == 0)
 		config.nprobe = mkt_auto_nprobe(info.nlist);
 

@@ -33,16 +33,16 @@ session s_build
 setup
 {
     SELECT injection_points_set_local();
-    SELECT injection_points_attach('mktann-scan-progress', 'wait');
+    SELECT injection_points_attach('prism-scan-progress', 'wait');
     SET max_parallel_maintenance_workers = 2;
 }
 step b_build
 {
-    CREATE INDEX i_prog ON emb USING mktann (v) WITH (nlist = 32);
+    CREATE INDEX i_prog ON emb USING prism (v) WITH (nlist = 32);
 }
 step b_done
 {
-    SELECT injection_points_detach('mktann-scan-progress');
+    SELECT injection_points_detach('prism-scan-progress');
 }
 
 session s_watch
@@ -64,6 +64,6 @@ step w_poll
         RAISE NOTICE 'tuples_done advanced mid-scan: %', observed;
     END $$;
 }
-step w_wake	{ SELECT injection_points_wakeup('mktann-scan-progress'); }
+step w_wake	{ SELECT injection_points_wakeup('prism-scan-progress'); }
 
 permutation b_build w_poll w_wake b_done

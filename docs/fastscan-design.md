@@ -213,7 +213,7 @@ processes ~8× more vectors per SIMD instruction.
 
 ### Metadata
 
-`MktannMetaPage.flags` gains `MKT_META_FLAG_FASTSCAN` (0x02).
+`PrismMetaPage.flags` gains `MKT_META_FLAG_FASTSCAN` (0x02).
 Old code ignores the flag and reads AoS pages normally (pages
 without `MKT_POSTING_PAGE_FASTSCAN` in their opaque are AoS).
 

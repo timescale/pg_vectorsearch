@@ -2,7 +2,7 @@
 # ones.
 #
 # A subsampled build refines its leaf encode references on the full table
-# only when the leaves hold fewer than mkt.leaf_refine_threshold samples
+# only when the leaves hold fewer than prism.leaf_refine_threshold samples
 # each; above that the sample means are already exact for quantization
 # purposes and the extra scan is skipped. Both directions are proven by an
 # injection point on the refine phase: the forced-refine build pauses there
@@ -40,27 +40,27 @@ session s_build
 setup
 {
     SELECT injection_points_set_local();
-    SELECT injection_points_attach('mktann-build-refine', 'wait');
+    SELECT injection_points_attach('prism-build-refine', 'wait');
     SET max_parallel_maintenance_workers = 2;
     SET maintenance_work_mem = '1MB';
 }
 step b_thin
 {
-    SET mkt.leaf_refine_threshold = 100000;
-    CREATE INDEX i_thin ON emb USING mktann (v) WITH (nlist = 64);
+    SET prism.leaf_refine_threshold = 100000;
+    CREATE INDEX i_thin ON emb USING prism (v) WITH (nlist = 64);
 }
 step b_wellfed
 {
-    SET mkt.leaf_refine_threshold = 16;
-    CREATE INDEX i_wellfed ON emb USING mktann (v) WITH (nlist = 64);
+    SET prism.leaf_refine_threshold = 16;
+    CREATE INDEX i_wellfed ON emb USING prism (v) WITH (nlist = 64);
 }
 step b_done
 {
-    SELECT injection_points_detach('mktann-build-refine');
+    SELECT injection_points_detach('prism-build-refine');
 }
 
 session s_watch
-step w_wakeup { SELECT injection_points_wakeup('mktann-build-refine'); }
+step w_wakeup { SELECT injection_points_wakeup('prism-build-refine'); }
 
 # Forced below the threshold: the build pauses at the refine phase (proof it
 # runs); the watcher wakes it.

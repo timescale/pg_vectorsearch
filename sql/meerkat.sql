@@ -16,61 +16,79 @@
 \echo Use "CREATE EXTENSION meerkat" to load this file.\quit
 
 -- =====================================================================
--- mkt: fixed schema for maintenance, administration, and inspection
+-- mkt / prism: fixed schemas for maintenance, administration, and
+-- inspection
 -- =====================================================================
 -- Everything else in this script installs into @extschema@. Maintenance,
--- administration, and inspection functions always live in `mkt` instead,
--- created here regardless of @extschema@ -- one fixed, predictable,
--- always-qualified path to them no matter which schema holds the types.
+-- administration, and inspection functions always live in one of two
+-- fixed schemas instead, created here regardless of @extschema@ -- one
+-- fixed, predictable, always-qualified path to them no matter which
+-- schema holds the types:
+--
+--   mkt    extension-wide identity (git_commit, extension_version,
+--          extension_name), not specific to any one index
+--   prism  everything specific to the prism index access method:
+--          inspection, maintenance, and its pgvector operator-family
+--          wiring. Kept separate from mkt because a second index sharing
+--          this extension would need its own equivalent of this schema,
+--          not a share of prism's
+--
 -- This is also why ALTER EXTENSION ... SET SCHEMA is refused (see the
 -- control file): that command moves every member object into one schema,
 -- and these functions are deliberately not in it.
 --
--- The mkt schema must be owned by the extension's installer or a
+-- Both schemas must be owned by the extension's installer or a
 -- superuser. PostgreSQL does not check target-schema ownership at CREATE
--- EXTENSION, so an untrusted role could otherwise pre-create mkt, keep
--- owning it, and plant lookalike objects there that a caller who has not
--- double-checked their tooling might mistake for the extension's own
--- (mkt.<function> calls are always schema-qualified, never resolved via
--- search_path). See the security note above setup_pgvector_compat() for
--- the analogous reasoning about @extschema@ when pgvector is involved.
+-- EXTENSION, so an untrusted role could otherwise pre-create either one,
+-- keep owning it, and plant lookalike objects there that a caller who has
+-- not double-checked their tooling might mistake for the extension's own
+-- (mkt.<function> and prism.<function> calls are always schema-qualified,
+-- never resolved via search_path). See the security note above
+-- setup_pgvector_compat() for the analogous reasoning about @extschema@
+-- when pgvector is involved.
 --
--- A pre-existing, trusted-owned mkt is used as-is, not adopted into
--- extension membership (no ALTER EXTENSION ... ADD SCHEMA): matching how
--- PostgreSQL treats a pre-existing @extschema@ for any relocatable
+-- A pre-existing, trusted-owned mkt or prism is used as-is, not adopted
+-- into extension membership (no ALTER EXTENSION ... ADD SCHEMA): matching
+-- how PostgreSQL treats a pre-existing @extschema@ for any relocatable
 -- extension, only objects this script itself creates become members.
 -- Otherwise DROP EXTENSION ... CASCADE could delete a schema -- and
 -- anything unrelated already in it -- that this extension never created.
 DO $$
 DECLARE
+    schema_name name;
     owner_name  name;
     owner_super boolean;
 BEGIN
-    SELECT r.rolname, r.rolsuper INTO owner_name, owner_super
-      FROM pg_catalog.pg_namespace n
-      JOIN pg_catalog.pg_roles r
-        ON r.oid OPERATOR(pg_catalog.=) n.nspowner
-     WHERE n.nspname OPERATOR(pg_catalog.=) 'mkt';
+    FOREACH schema_name IN ARRAY ARRAY['mkt', 'prism']
+    LOOP
+        SELECT r.rolname, r.rolsuper INTO owner_name, owner_super
+          FROM pg_catalog.pg_namespace n
+          JOIN pg_catalog.pg_roles r
+            ON r.oid OPERATOR(pg_catalog.=) n.nspowner
+         WHERE n.nspname OPERATOR(pg_catalog.=) schema_name;
 
-    IF NOT FOUND THEN
-        CREATE SCHEMA mkt;
-        RETURN;
-    END IF;
+        IF NOT FOUND THEN
+            EXECUTE pg_catalog.format('CREATE SCHEMA %I', schema_name);
+            CONTINUE;
+        END IF;
 
-    IF NOT (owner_super OR owner_name OPERATOR(pg_catalog.=) current_user) THEN
-        RAISE EXCEPTION
-            'schema "mkt" already exists and is owned by "%", a role '
-            'other than the installer or a superuser', owner_name
-            USING HINT = 'meerkat refuses to install into a schema an '
-                'untrusted role controls; drop or re-own the schema, or '
-                'install as the role that owns it.';
-    END IF;
+        IF NOT (owner_super OR owner_name OPERATOR(pg_catalog.=) current_user) THEN
+            RAISE EXCEPTION
+                'schema "%" already exists and is owned by "%", a role '
+                'other than the installer or a superuser',
+                schema_name, owner_name
+                USING HINT = 'meerkat refuses to install into a schema an '
+                    'untrusted role controls; drop or re-own the schema, or '
+                    'install as the role that owns it.';
+        END IF;
+    END LOOP;
 END;
 $$;
 
 -- =====================================================================
--- build identity (maintenance/administration/inspection: fixed in mkt,
--- like the other procedures in this category, regardless of @extschema@)
+-- build identity (maintenance/administration/inspection: fixed in mkt
+-- because it is extension-wide rather than specific to the prism index,
+-- regardless of @extschema@)
 -- =====================================================================
 
 CREATE FUNCTION mkt.git_commit() RETURNS text
@@ -752,56 +770,59 @@ Returns a rabitq value containing the quantized bits, f_add, and f_rescale.
 The params argument provides the orthogonal transform matrix (see rabitq_params_generate).';
 
 -- =====================================================================
--- mktann index access method
+-- prism index access method
 -- =====================================================================
+-- The SQL-visible names below (prism, prism_handler, prism_metric_*,
+-- prism_vec32_support, prism_vec16_support) name the access method
+-- itself, matching the C symbols they link to -- see src/pg/iam_handler.c.
 
-CREATE FUNCTION mktann_handler(internal) RETURNS index_am_handler
-    AS 'MODULE_PATHNAME' LANGUAGE C;
+CREATE FUNCTION prism_handler(internal) RETURNS index_am_handler
+    AS 'MODULE_PATHNAME', 'prism_handler' LANGUAGE C;
 
-CREATE ACCESS METHOD mktann TYPE INDEX HANDLER mktann_handler;
+CREATE ACCESS METHOD prism TYPE INDEX HANDLER prism_handler;
 
-COMMENT ON ACCESS METHOD mktann IS 'meerkat ANN index';
+COMMENT ON ACCESS METHOD prism IS 'prism ANN index';
 
 -- Metric identifier functions (FUNCTION 2 in opclass)
-CREATE FUNCTION mktann_metric_l2(internal) RETURNS int4
-    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION prism_metric_l2(internal) RETURNS int4
+    AS 'MODULE_PATHNAME', 'prism_metric_l2' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION mktann_metric_ip(internal) RETURNS int4
-    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION prism_metric_ip(internal) RETURNS int4
+    AS 'MODULE_PATHNAME', 'prism_metric_ip' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION mktann_metric_cosine(internal) RETURNS int4
-    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION prism_metric_cosine(internal) RETURNS int4
+    AS 'MODULE_PATHNAME', 'prism_metric_cosine' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- Column type descriptors (support function 3). Optional: an opclass that
 -- declares none indexes `vec32`, which keeps the vec32 opclasses unchanged
 -- and leaves an index built before this existed working. Returning the
 -- descriptor from the opclass is what lets the access method agree with the
 -- planner about a column's type without resolving a name or comparing an OID
--- -- see src/pg/mktann_typeinfo.h.
-CREATE FUNCTION mktann_vec32_support(internal) RETURNS internal
-    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+-- -- see src/pg/typeinfo.h.
+CREATE FUNCTION prism_vec32_support(internal) RETURNS internal
+    AS 'MODULE_PATHNAME', 'prism_vec32_support' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION mktann_vec16_support(internal) RETURNS internal
-    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION prism_vec16_support(internal) RETURNS internal
+    AS 'MODULE_PATHNAME', 'prism_vec16_support' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- Operator classes for vec32 type
 CREATE OPERATOR CLASS vec32_l2_ops
-    DEFAULT FOR TYPE vec32 USING mktann AS
+    DEFAULT FOR TYPE vec32 USING prism AS
     OPERATOR 1 <-> (vec32, vec32) FOR ORDER BY float_ops,
     FUNCTION 1 vec32_l2_squared_distance(vec32, vec32),
-    FUNCTION 2 mktann_metric_l2(internal);
+    FUNCTION 2 prism_metric_l2(internal);
 
 CREATE OPERATOR CLASS vec32_ip_ops
-    FOR TYPE vec32 USING mktann AS
+    FOR TYPE vec32 USING prism AS
     OPERATOR 1 <#> (vec32, vec32) FOR ORDER BY float_ops,
     FUNCTION 1 vec32_negative_inner_product(vec32, vec32),
-    FUNCTION 2 mktann_metric_ip(internal);
+    FUNCTION 2 prism_metric_ip(internal);
 
 CREATE OPERATOR CLASS vec32_cosine_ops
-    FOR TYPE vec32 USING mktann AS
+    FOR TYPE vec32 USING prism AS
     OPERATOR 1 <=> (vec32, vec32) FOR ORDER BY float_ops,
     FUNCTION 1 cosine_distance(vec32, vec32),
-    FUNCTION 2 mktann_metric_cosine(internal);
+    FUNCTION 2 prism_metric_cosine(internal);
 
 -- Operator classes for vec16 type
 --
@@ -812,31 +833,31 @@ CREATE OPERATOR CLASS vec32_cosine_ops
 -- 8 kB page against vec16's 1544 and 5. Centroids follow the column and are
 -- stored half-precision too (MKT_CENTROID_FMT_HALF).
 CREATE OPERATOR CLASS vec16_l2_ops
-    DEFAULT FOR TYPE vec16 USING mktann AS
+    DEFAULT FOR TYPE vec16 USING prism AS
     OPERATOR 1 <-> (vec16, vec16) FOR ORDER BY float_ops,
     FUNCTION 1 vec16_l2_squared_distance(vec16, vec16),
-    FUNCTION 2 mktann_metric_l2(internal),
-    FUNCTION 3 mktann_vec16_support(internal);
+    FUNCTION 2 prism_metric_l2(internal),
+    FUNCTION 3 prism_vec16_support(internal);
 
 CREATE OPERATOR CLASS vec16_ip_ops
-    FOR TYPE vec16 USING mktann AS
+    FOR TYPE vec16 USING prism AS
     OPERATOR 1 <#> (vec16, vec16) FOR ORDER BY float_ops,
     FUNCTION 1 vec16_negative_inner_product(vec16, vec16),
-    FUNCTION 2 mktann_metric_ip(internal),
-    FUNCTION 3 mktann_vec16_support(internal);
+    FUNCTION 2 prism_metric_ip(internal),
+    FUNCTION 3 prism_vec16_support(internal);
 
 CREATE OPERATOR CLASS vec16_cosine_ops
-    FOR TYPE vec16 USING mktann AS
+    FOR TYPE vec16 USING prism AS
     OPERATOR 1 <=> (vec16, vec16) FOR ORDER BY float_ops,
     FUNCTION 1 cosine_distance(vec16, vec16),
-    FUNCTION 2 mktann_metric_cosine(internal),
-    FUNCTION 3 mktann_vec16_support(internal);
+    FUNCTION 2 prism_metric_cosine(internal),
+    FUNCTION 3 prism_vec16_support(internal);
 
 -- =====================================================================
 -- index inspection functions
 -- =====================================================================
 
-CREATE FUNCTION mkt.centroid_pages(regclass)
+CREATE FUNCTION prism.centroid_pages(regclass)
     RETURNS TABLE (
         blkno       integer,
         entry       smallint,
@@ -849,7 +870,7 @@ CREATE FUNCTION mkt.centroid_pages(regclass)
     AS 'MODULE_PATHNAME', 'mkt_centroid_pages'
     LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION mkt.posting_pages(regclass)
+CREATE FUNCTION prism.posting_pages(regclass)
     RETURNS TABLE (
         blkno       integer,
         cluster_id  integer,
@@ -870,7 +891,7 @@ CREATE FUNCTION mkt.posting_pages(regclass)
 -- true nearest neighbors live against which clusters the query scans.
 -- Scans posting pages directly -- each already carries its cluster_id --
 -- so it needs neither the centroid tree nor its format.
-CREATE FUNCTION mkt.tids_clusters(regclass, tid[])
+CREATE FUNCTION prism.tids_clusters(regclass, tid[])
     RETURNS TABLE (
         tid        tid,
         cluster_id integer
@@ -888,7 +909,7 @@ CREATE FUNCTION mkt.tids_clusters(regclass, tid[])
 -- (resolved automatic default), 'default' (reloption default),
 -- 'column'/'opclass' (index definition), 'derived' (computed from
 -- other settings), or 'session' (GUC override).
-CREATE FUNCTION mkt.index_settings(regclass)
+CREATE FUNCTION prism.index_settings(regclass)
     RETURNS TABLE (
         name    text,
         setting text,
@@ -900,7 +921,7 @@ CREATE FUNCTION mkt.index_settings(regclass)
 -- Convert one cluster's posting chain from AoS to fastscan format.
 -- Updates centroid entries and metadata flag atomically.
 -- Returns the new posting head block number.
-CREATE FUNCTION mkt.convert_posting_to_fastscan(
+CREATE FUNCTION prism.convert_posting_to_fastscan(
         index_oid regclass,
         cluster_id integer
     )
@@ -916,17 +937,17 @@ CREATE FUNCTION mkt.convert_posting_to_fastscan(
 -- balanced lists. A maintenance operation that mutates index state, so it is a
 -- procedure (CALL) rather than a function: it returns no value and can manage
 -- its own transactions. Reports the outcome via a NOTICE.
-CREATE PROCEDURE mkt.split_posting_list(
+CREATE PROCEDURE prism.split_posting_list(
         index_oid regclass,
         head_blkno bigint
     )
     AS 'MODULE_PATHNAME', 'mkt_split_posting_list'
     LANGUAGE C;
 
-COMMENT ON PROCEDURE mkt.split_posting_list(regclass, bigint) IS
+COMMENT ON PROCEDURE prism.split_posting_list(regclass, bigint) IS
     'Split one posting list into two or more balanced lists. index_oid is the '
     'index; head_blkno is the block number of the list''s head page. '
-    'Owner-only; reports the outcome via NOTICE. Use mkt.rebalance to split '
+    'Owner-only; reports the outcome via NOTICE. Use prism.rebalance to split '
     'every oversized list in an index.';
 
 -- Rebalance an index by splitting every posting list that has outgrown the
@@ -942,11 +963,11 @@ COMMENT ON PROCEDURE mkt.split_posting_list(regclass, bigint) IS
 -- split_posting_list); reports the number of lists split via a NOTICE.
 -- Splitting is the only rebalancing it performs, and it is driven by the
 -- caller.
-CREATE PROCEDURE mkt.rebalance(index_oid regclass, target_entries integer DEFAULT NULL)
+CREATE PROCEDURE prism.rebalance(index_oid regclass, target_entries integer DEFAULT NULL)
     AS 'MODULE_PATHNAME', 'mkt_rebalance'
     LANGUAGE C;
 
-COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
+COMMENT ON PROCEDURE prism.rebalance(regclass, integer) IS
     'Split every posting list that has grown past twice target_entries into '
     'lists of about target_entries each. index_oid is the index; '
     'target_entries is the size a list rests at (NULL, the default, derives it '
@@ -969,18 +990,18 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 --   meerkat -> pgvector: ASSIGNMENT (avoids operator ambiguity when
 --     both extensions define <->, <#>, <=>)
 --
--- Casts alone are not enough to make an mktann index reachable from a
+-- Casts alone are not enough to make a prism index reachable from a
 -- query written against pgvector. An index is only considered for an
 -- ORDER BY when the ordering operator belongs to the index's operator
 -- family, and pgvector's <->, <#> and <=> belong to pgvector's families.
 -- Without help, `ORDER BY v <-> $1` under a pgvector-first search_path
 -- plans a sequential scan -- which returns correct rows, so it is easy to
 -- mistake for a working index scan. setup_pgvector_compat() therefore adds
--- pgvector's three distance operators to meerkat's mktann families as ordering
--- members alongside the casts, so either spelling of the operator reaches the
--- index. Casts and operators are one function on purpose: they are a unit (the
--- operators rely on the casts' binary-coercibility), so a new install path can
--- never add one and forget the other.
+-- pgvector's three distance operators to prism's operator families as
+-- ordering members alongside the casts, so either spelling of the operator
+-- reaches the index. Casts and operators are one function on purpose: they
+-- are a unit (the operators rely on the casts' binary-coercibility), so a
+-- new install path can never add one and forget the other.
 --
 -- The casts are standalone objects (not owned by either extension).
 -- PostgreSQL auto-drops them via type dependencies when the referenced
@@ -1028,16 +1049,16 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 --          owned by an untrusted role (the schema ownership guard at the top
 --          of this script). Chosen: version-independent, comprehensive
 --          (nothing hostile can live there at all), ~10 lines. Applied only
---          to `mkt`: unlike @extschema@, which the installer explicitly
---          chose (or already had first on their own search_path -- the same
---          standing responsibility as installing any relocatable
---          extension), `mkt` must be owned by the extension's installer or
---          a superuser, since the installer has no independent reason to
---          have already vetted its ownership.
+--          to `mkt` and `prism`: unlike @extschema@, which the installer
+--          explicitly chose (or already had first on their own search_path
+--          -- the same standing responsibility as installing any
+--          relocatable extension), `mkt` and `prism` must be owned by the
+--          extension's installer or a superuser, since the installer has
+--          no independent reason to have already vetted their ownership.
 --
 -- Set up pgvector interoperability in one step: the binary casts between the
 -- two extensions' types, and the membership of pgvector's distance operators
--- in meerkat's mktann operator families. These belong together -- the casts
+-- in prism's operator families. These belong together -- the casts
 -- make pgvector's vector/halfvec binary-coercible to vec32/vec16, which is
 -- exactly what lets pgvector's operators join a family whose opclass is
 -- FOR TYPE <vec32/vec16>. Keeping them in a single function means a caller
@@ -1047,7 +1068,7 @@ COMMENT ON PROCEDURE mkt.rebalance(regclass, integer) IS
 -- Casts first, then operators (the operators depend on the casts' coercibility).
 -- Idempotent throughout via exception handling (neither CREATE CAST nor ALTER
 -- OPERATOR FAMILY has an IF NOT EXISTS form).
-CREATE FUNCTION mkt.setup_pgvector_compat() RETURNS void
+CREATE FUNCTION prism.setup_pgvector_compat() RETURNS void
     LANGUAGE plpgsql
     -- Reached at runtime from the event trigger under the DDL-runner's
     -- search_path, and from the install DO block. Pin the path so every
@@ -1151,10 +1172,11 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- 2. pgvector's distance operators as ordering members of meerkat's mktann
-    -- families. Strategy 1 and float_ops match the opclass declarations above;
-    -- the operator's left type only has to be binary-coercible to the family's
-    -- index type, which the casts above guarantee. Adding an operator family
+    -- 2. pgvector's distance operators as ordering members of prism's
+    -- operator families. Strategy 1 and float_ops match the opclass
+    -- declarations above; the operator's left type only has to be
+    -- binary-coercible to the family's index type, which the casts above
+    -- guarantee. Adding an operator family
     -- member requires superuser, so an attacker cannot pre-plant one; the
     -- duplicate_object catch here is pure idempotency for a legitimate re-run.
     FOR r IN
@@ -1169,7 +1191,7 @@ BEGIN
     LOOP
         BEGIN
             EXECUTE pg_catalog.format(
-                'ALTER OPERATOR FAMILY %I.%I USING mktann '
+                'ALTER OPERATOR FAMILY %I.%I USING prism '
                 'ADD OPERATOR 1 %I.%s (%I.%I, %I.%I) '
                 'FOR ORDER BY pg_catalog.float_ops',
                 ext_ns, r.fam, pgv_ns, r.op, pgv_ns, r.typ, pgv_ns, r.typ);
@@ -1207,7 +1229,7 @@ BEGIN
           ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
         WHERE e.extname OPERATOR(pg_catalog.=) 'meerkat';
 
-        PERFORM mkt.setup_pgvector_compat();
+        PERFORM prism.setup_pgvector_compat();
         EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
             '(%I.vector AS %I.vec32)', pgv_ns, ext_ns);
         EXECUTE pg_catalog.format('ALTER EXTENSION meerkat DROP CAST '
@@ -1221,10 +1243,10 @@ END;
 $$;
 
 -- Event trigger: create casts when pgvector is installed after meerkat.
--- Lives in mkt alongside setup_pgvector_compat() -- it is that function's
--- automatic trigger, not part of the vec32/vec16 type API, and mkt is a
+-- Lives in prism alongside setup_pgvector_compat() -- it is that function's
+-- automatic trigger, not part of the vec32/vec16 type API, and prism is a
 -- fixed name it can reference directly (no schema discovery needed for it).
-CREATE FUNCTION mkt.on_extension_create()
+CREATE FUNCTION prism.on_extension_create()
     RETURNS event_trigger LANGUAGE plpgsql
     -- Runs later as an event trigger under the DDL-runner's own
     -- search_path. Pin it so unqualified names in this body (and the one
@@ -1253,12 +1275,12 @@ BEGIN
              WHERE r.rolname OPERATOR(pg_catalog.=) current_user;
 
             IF is_super THEN
-                PERFORM mkt.setup_pgvector_compat();
+                PERFORM prism.setup_pgvector_compat();
             ELSE
                 RAISE WARNING 'meerkat did not set up pgvector compatibility: '
                     'it requires superuser privileges'
                     USING HINT = 'A superuser should run '
-                        'mkt.setup_pgvector_compat() so pgvector-typed '
+                        'prism.setup_pgvector_compat() so pgvector-typed '
                         'columns can use meerkat indexes.';
             END IF;
         END IF;
@@ -1266,7 +1288,7 @@ BEGIN
 END;
 $$;
 
-CREATE EVENT TRIGGER mkt_pgvector_cast_trigger
+CREATE EVENT TRIGGER prism_pgvector_cast_trigger
     ON ddl_command_end
     WHEN TAG IN ('CREATE EXTENSION')
-    EXECUTE FUNCTION mkt.on_extension_create();
+    EXECUTE FUNCTION prism.on_extension_create();

@@ -1,7 +1,7 @@
-# Streaming replication of mktann indexes, across page formats and the
+# Streaming replication of prism indexes, across page formats and the
 # operations that write them.
 #
-# meerkat pages are not standard-layout: entries live in the content area
+# prism pages are not standard-layout: entries live in the content area
 # between pd_lower and pd_upper, which PostgreSQL otherwise treats as free
 # space and omits from a standard full-page image. Anything that WAL-logs
 # such a page as standard leaves a standby with the content zeroed while the
@@ -45,7 +45,7 @@ $primary->safe_psql('postgres', 'CREATE EXTENSION meerkat');
 # resolves meerkat's types and distance operators the same way. Note this also
 # means new tables land in the mkt schema, since it is first.
 $primary->safe_psql('postgres',
-	'ALTER DATABASE postgres SET search_path = mkt, public');
+	'ALTER DATABASE postgres SET search_path = mkt, prism, public');
 
 # Two tables so both vec32 types are covered; vec16 drives the
 # half-precision centroid format, which no vec32 column can reach.
@@ -78,7 +78,7 @@ sub agrees
 
 	my $sql = <<"SQL";
 SET enable_seqscan = off;
-SET mkt.nprobe = 10000;
+SET prism.nprobe = 10000;
 SELECT string_agg(id::text, ',' ORDER BY id) FROM (
     SELECT id FROM $tbl ORDER BY v <-> $q LIMIT $k) s;
 SQL
@@ -151,7 +151,7 @@ for my $c (@cases)
 
 	# Build: pages reach the standby only through log_newpage_range().
 	$primary->safe_psql('postgres',
-		"CREATE INDEX $idx ON $tbl USING mktann (v) WITH ($c->{opts})");
+		"CREATE INDEX $idx ON $tbl USING prism (v) WITH ($c->{opts})");
 	formats_are($idx, $c->{posting}, $c->{centroid}, $label);
 	agrees($tbl, "$label, after build");
 
@@ -195,7 +195,7 @@ SQL
 	$primary->safe_psql('postgres', <<"SQL");
 SET max_parallel_maintenance_workers = 3;
 SET min_parallel_table_scan_size = 0;
-CREATE INDEX $idx ON tv USING mktann (v);
+CREATE INDEX $idx ON tv USING prism (v);
 SQL
 	agrees('tv', 'parallel build');
 
@@ -222,7 +222,7 @@ SQL
 {
 	my $idx = 'idx_conv';
 	$primary->safe_psql('postgres',
-		"CREATE INDEX $idx ON tv USING mktann (v) "
+		"CREATE INDEX $idx ON tv USING prism (v) "
 	  . "WITH (fastscan = off, centroid_compression = true, "
 	  . "centroid_fastscan = on, fan_out = 4)");
 	formats_are($idx, 'aos', 'fastscan', 'convert: pre-convert formats');
@@ -264,7 +264,7 @@ SQL
 	$primary->safe_psql('postgres', "DROP INDEX mkt.$idx");
 }
 
-# Incremental split: mkt.rebalance rewrites an oversized posting list into
+# Incremental split: prism.rebalance rewrites an oversized posting list into
 # several fresh chains, repoints the centroid leaf at them and raises nlist in
 # the metapage. All of it is runtime work outside build_mode, so every page has
 # to be WAL-logged as it is written -- there is no closing
@@ -281,7 +281,7 @@ SQL
 {
 	my $idx = 'idx_split';
 	$primary->safe_psql('postgres',
-		"CREATE INDEX $idx ON tv USING mktann (v) "
+		"CREATE INDEX $idx ON tv USING prism (v) "
 	  . "WITH (fastscan = off, centroid_compression = true, "
 	  . "centroid_fastscan = off, nlist = 8)");
 	formats_are($idx, 'aos', 'rabitq', 'split: pre-split formats');
@@ -374,7 +374,7 @@ INSERT INTO tw
 ANALYZE tw;
 SQL
 	$primary->safe_psql('postgres',
-		"CREATE INDEX $idx ON tw USING mktann (v) "
+		"CREATE INDEX $idx ON tw USING prism (v) "
 	  . "WITH (fastscan = off, centroid_compression = true, "
 	  . "centroid_fastscan = off, nlist = 32)");
 
@@ -419,7 +419,7 @@ SKIP:
 	skip 'pageinspect not available', 1 unless $has_pageinspect;
 
 	$primary->safe_psql('postgres',
-		'CREATE INDEX idx_hole ON tv USING mktann (v)');
+		'CREATE INDEX idx_hole ON tv USING prism (v)');
 
 	my $all_holed = $primary->safe_psql('postgres', <<'SQL');
 SELECT count(*) = 0

@@ -201,7 +201,7 @@ search_centroids(
 			beam_stats);
 }
 
-/* Probe-order refinement factor (mkt.probe_expand); see query_scan.h.
+/* Probe-order refinement factor (prism.probe_expand); see query_scan.h.
  * Enabled by default: expansion gains saturate around a factor of 2,
  * so 2.0 captures ~all the recall benefit of exact probe ordering.
  * 1.0 means no expansion (identity). */
@@ -493,7 +493,7 @@ mkt_query_route(
 	return search_centroids(qs, qvec, nprobe, mode, bs);
 }
 
-/* Cap on the rerank candidate pool (mkt.rerank_pool). Candidates are
+/* Cap on the rerank candidate pool (prism.rerank_pool). Candidates are
  * sorted by approximate distance, so capping keeps the most promising
  * ones and bounds the exact-distance heap fetches. 0 (default) resolves
  * to an automatic cap of max(3 * k * nprobe^0.15, candidate-buffer count
@@ -608,7 +608,7 @@ mkt_query_execute(
 	 * until no snapshot can reach it; an isolation test pauses here to hold a
 	 * head across exactly that.
 	 */
-	MKT_INJECTION_POINT("mktann-scan-routed");
+	MKT_INJECTION_POINT("prism-scan-routed");
 
 	scan_clusters(
 			qs, qs->beam_results, ncentroids, nprobe, mode, &qs->topk, stats);

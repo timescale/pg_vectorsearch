@@ -26,9 +26,9 @@ FROM generate_series(1, 25) x, generate_series(1, 25) y;
 -- Sprinkle zero vectors through the heap.
 INSERT INTO zv SELECT 10000 + g, '[0,0,0,0,0,0,0,0]'::vec32
 FROM generate_series(1, 20) g;
-CREATE INDEX zv_idx ON zv USING mktann (v vec32_cosine_ops);
+CREATE INDEX zv_idx ON zv USING prism (v vec32_cosine_ops);
 
-SET mkt.nprobe = 64;
+SET prism.nprobe = 64;
 -- Nearest direction to (13.05, 17.02) is (13, 17) -- a direction
 -- with no collinear multiple inside the grid; no zero-vec32 ids,
 -- no NaN fallout.
@@ -48,7 +48,7 @@ SELECT id FROM zv ORDER BY v <=> '[3,500,0,0,0,0,0,0]' LIMIT 1;
 -- The zero rows are still physically indexed (entries counted), just
 -- never returned.
 SELECT sum(entry_count) >= 647 AS all_rows_indexed
-FROM mkt.posting_pages('zv_idx');
+FROM prism.posting_pages('zv_idx');
 
 VACUUM zv;
 -- squawk-ignore require-concurrent-reindex
