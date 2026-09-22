@@ -2,7 +2,7 @@
  * posting_convert.c - Convert AoS posting pages to fastscan format
  *
  * Walks an AoS posting chain, reads pre-encoded entries, and feeds
- * them to MktFsPostingBuilder via _add_encoded(). The builder
+ * them to PrismPostingBuilder via _add_encoded(). The builder
  * handles group packing, page layout, and chain linking.
  */
 
@@ -41,16 +41,16 @@ typedef struct StageCtx
 } StageCtx;
 
 static bool
-stage_page(MktPostingChainPos *pos, void *state)
+stage_page(PrismPostingChainPos *pos, void *state)
 {
-	StageCtx				   *ctx = state;
-	const MktPostingPageOpaque *op	= mkt_posting_opaque(pos->page);
-	char *content = mkt_posting_page_content(pos->page, ctx->dim);
+	StageCtx					 *ctx = state;
+	const PrismPostingPageOpaque *op  = prism_posting_opaque(pos->page);
+	char *content = prism_posting_page_content(pos->page, ctx->dim);
 
 	for (uint32_t i = 0; i < op->entry_count; i++)
 	{
-		MktPostingEntryHeader *src =
-				mkt_posting_entry_at(content, i, ctx->dim);
+		PrismPostingEntryHeader *src =
+				prism_posting_entry_at(content, i, ctx->dim);
 
 		/*
 		 * Leave behind the entries VACUUM has marked dead. A fastscan page
@@ -62,7 +62,7 @@ stage_page(MktPostingChainPos *pos, void *state)
 		 * builder stamps from what it was given, would be wrong by the same
 		 * number.
 		 */
-		if (src->meta.flags & MKT_POSTING_FLAG_DELETED)
+		if (src->meta.flags & PRISM_POSTING_FLAG_DELETED)
 			continue;
 
 		if (ctx->total_entries >= ctx->entries_cap)
@@ -91,7 +91,7 @@ stage_page(MktPostingChainPos *pos, void *state)
 }
 
 BlockNumber
-mkt_posting_convert_to_fastscan(
+prism_posting_convert_to_fastscan(
 		MktStorage *storage, BlockNumber aos_head, Dimension dim)
 {
 	if (aos_head == InvalidBlockNumber)
@@ -103,15 +103,15 @@ mkt_posting_convert_to_fastscan(
 	Page   first_page  = mkt_storage_read_page(storage, aos_head);
 	float *pt_centroid = mkt_alloc(dim * sizeof(float));
 	memcpy(pt_centroid,
-		   mkt_posting_pt_centroid(first_page),
+		   prism_posting_pt_centroid(first_page),
 		   dim * sizeof(float));
 
-	MktPostingPageOpaque *first_op	 = mkt_posting_opaque(first_page);
-	uint32_t			  cluster_id = first_op->cluster_id;
+	PrismPostingPageOpaque *first_op   = prism_posting_opaque(first_page);
+	uint32_t				cluster_id = first_op->cluster_id;
 	mkt_storage_release_page(storage, aos_head);
 
-	MktPostingBuilder builder;
-	mkt_posting_builder_init_fastscan(
+	PrismPostingBuilder builder;
+	prism_posting_builder_init_fastscan(
 			&builder, storage, NULL, dim, cluster_id, NULL, pt_centroid);
 
 	StageCtx ctx = {
@@ -122,12 +122,12 @@ mkt_posting_convert_to_fastscan(
 	ctx.staged	 = mkt_alloc(ctx.entries_cap * sizeof(StagedEntry));
 	ctx.all_bits = mkt_alloc(ctx.entries_cap * (size_t)packed_bytes);
 
-	mkt_posting_chain_walk(storage, aos_head, stage_page, &ctx);
+	prism_posting_chain_walk(storage, aos_head, stage_page, &ctx);
 
 	/* Feed staged entries to the fastscan builder */
 	for (uint32_t i = 0; i < ctx.total_entries; i++)
 	{
-		mkt_posting_builder_add_encoded(
+		prism_posting_builder_add_encoded(
 				&builder,
 				ctx.staged[i].tid,
 				ctx.staged[i].f_add,
@@ -139,8 +139,8 @@ mkt_posting_convert_to_fastscan(
 	mkt_free(ctx.staged);
 	mkt_free(ctx.all_bits);
 
-	BlockNumber result = mkt_posting_builder_finish(&builder);
-	mkt_posting_builder_cleanup(&builder);
+	BlockNumber result = prism_posting_builder_finish(&builder);
+	prism_posting_builder_cleanup(&builder);
 	mkt_free(pt_centroid);
 
 	return result;

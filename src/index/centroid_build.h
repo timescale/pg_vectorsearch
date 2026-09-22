@@ -6,8 +6,8 @@
  * compatible — all dependencies are portable.
  */
 
-#ifndef MKT_CENTROID_BUILD_H
-#define MKT_CENTROID_BUILD_H
+#ifndef PRISM_CENTROID_BUILD_H
+#define PRISM_CENTROID_BUILD_H
 
 #include "index/centroid_page.h"
 #include "index/storage.h"
@@ -128,7 +128,7 @@ typedef union
 static inline CentroidEncoder *
 centroid_encoder_init(
 		CentroidEncoderState *state,
-		MktCentroidFormat	  fmt,
+		PrismCentroidFormat	  fmt,
 		const float			 *vectors,
 		Dimension			  dim,
 		const RaBitQParams	 *params,
@@ -162,7 +162,7 @@ centroid_encoder_init(
 	case MKT_CENTROID_FMT_FASTSCAN:
 		/* fastscan uses a group-packed page layout that doesn't fit
 		 * this per-vector encoder model. The build path emits these
-		 * pages directly (see mkt_centroid_write_fastscan_pages —
+		 * pages directly (see prism_centroid_write_fastscan_pages —
 		 * future work) or they're produced by an in-place conversion. */
 		return NULL;
 	}
@@ -178,23 +178,23 @@ centroid_encoder_init(
  *
  * Returns the BlockNumber of the first centroid page.
  */
-BlockNumber mkt_centroid_write_pages(
-		MktStorage		  *storage,
-		Dimension		   dim,
-		uint32_t		   nlist,
-		MktCentroidFormat  fmt,
-		uint8_t			   level,
-		uint16_t		   flags,
-		uint16_t		   child_count,
-		CentroidEncoder	  *encoder,
-		const BlockNumber *child_blknos,
-		const float		  *pt_centroids,
-		BlockNumber		   start_blkno);
+BlockNumber prism_centroid_write_pages(
+		MktStorage		   *storage,
+		Dimension			dim,
+		uint32_t			nlist,
+		PrismCentroidFormat fmt,
+		uint8_t				level,
+		uint16_t			flags,
+		uint16_t			child_count,
+		CentroidEncoder	   *encoder,
+		const BlockNumber  *child_blknos,
+		const float		   *pt_centroids,
+		BlockNumber			start_blkno);
 
 /*
  * Write centroid entries as FASTSCAN-format pages.
  *
- * Same inputs as mkt_centroid_write_pages but emits 32-vector groups
+ * Same inputs as prism_centroid_write_pages but emits 32-vector groups
  * with kPerm0-packed RaBitQ codes instead of per-entry RaBitQData,
  * so the scan path uses mkt_fastscan_accumulate_hacc rather than
  * mkt_rabitq_inner_product_multi at score time.
@@ -204,7 +204,7 @@ BlockNumber mkt_centroid_write_pages(
  * entry's f_error is computed from f_add / f_rescale at emit time
  * so the score path doesn't need to recompute it.
  */
-BlockNumber mkt_centroid_write_fastscan_pages(
+BlockNumber prism_centroid_write_fastscan_pages(
 		MktStorage		   *storage,
 		Dimension			dim,
 		uint32_t			nlist,
@@ -216,4 +216,4 @@ BlockNumber mkt_centroid_write_fastscan_pages(
 		const BlockNumber  *child_blknos,
 		BlockNumber			start_blkno);
 
-#endif /* MKT_CENTROID_BUILD_H */
+#endif /* PRISM_CENTROID_BUILD_H */

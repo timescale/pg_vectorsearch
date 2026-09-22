@@ -13,21 +13,21 @@
  * the build logs print, so the two back-ends can never drift.
  */
 static const char *const phase_names[] = {
-		[MKT_BUILD_PHASE_INITIALIZE]	= "initializing",
-		[MKT_BUILD_PHASE_SAMPLE]		= "sampling vectors",
-		[MKT_BUILD_PHASE_KMEANS]		= "clustering (k-means)",
-		[MKT_BUILD_PHASE_SETUP]			= "preparing RaBitQ encoding",
-		[MKT_BUILD_PHASE_SCAN]			= "scanning table",
-		[MKT_BUILD_PHASE_POSTING]		= "finalizing posting lists",
-		[MKT_BUILD_PHASE_CENTROID]		= "writing centroid pages",
-		[MKT_BUILD_PHASE_WAL]			= "WAL logging",
-		[MKT_BUILD_PHASE_SCAN_PARALLEL] = "scanning table (parallel)",
-		[MKT_BUILD_PHASE_SUBTREES]		= "clustering (subtrees)",
-		[MKT_BUILD_PHASE_REFINE]		= "refining centroids",
+		[PRISM_BUILD_PHASE_INITIALIZE]	  = "initializing",
+		[PRISM_BUILD_PHASE_SAMPLE]		  = "sampling vectors",
+		[PRISM_BUILD_PHASE_KMEANS]		  = "clustering (k-means)",
+		[PRISM_BUILD_PHASE_SETUP]		  = "preparing RaBitQ encoding",
+		[PRISM_BUILD_PHASE_SCAN]		  = "scanning table",
+		[PRISM_BUILD_PHASE_POSTING]		  = "finalizing posting lists",
+		[PRISM_BUILD_PHASE_CENTROID]	  = "writing centroid pages",
+		[PRISM_BUILD_PHASE_WAL]			  = "WAL logging",
+		[PRISM_BUILD_PHASE_SCAN_PARALLEL] = "scanning table (parallel)",
+		[PRISM_BUILD_PHASE_SUBTREES]	  = "clustering (subtrees)",
+		[PRISM_BUILD_PHASE_REFINE]		  = "refining centroids",
 };
 
 const char *
-mkt_build_phase_name(int phase)
+prism_build_phase_name(int phase)
 {
 	if (phase < 0 ||
 		(size_t)phase >= sizeof(phase_names) / sizeof(phase_names[0]))
@@ -43,13 +43,13 @@ mkt_build_phase_name(int phase)
  * gets the real bodies from src/pg/build_progress.c instead.
  */
 void
-mkt_build_progress_begin(
-		MktBuildProgress	 *p,
-		bool				  is_parallel,
-		bool				  log_stats,
-		void				 *heap_ctx,
-		struct MktBuildStats *stats,
-		double				  tuples_total)
+prism_build_progress_begin(
+		PrismBuildProgress	   *p,
+		bool					is_parallel,
+		bool					log_stats,
+		void				   *heap_ctx,
+		struct PrismBuildStats *stats,
+		double					tuples_total)
 {
 	(void)p;
 	(void)is_parallel;
@@ -60,38 +60,38 @@ mkt_build_progress_begin(
 }
 
 void
-mkt_build_report_phase(MktBuildProgress *p, int phase)
+prism_build_report_phase(PrismBuildProgress *p, int phase)
 {
 	(void)p;
 	(void)phase;
 }
 
 void
-mkt_build_progress_incr_tuples(int64_t n)
+prism_build_progress_incr_tuples(int64_t n)
 {
 	(void)n;
 }
 
 void
-mkt_build_report_progress(MktBuildProgress *p, double done)
+prism_build_report_progress(PrismBuildProgress *p, double done)
 {
 	(void)p;
 	(void)done;
 }
 
 void
-mkt_build_report_dsm_bytes(MktBuildProgress *p, uint64_t dsm_bytes)
+prism_build_report_dsm_bytes(PrismBuildProgress *p, uint64_t dsm_bytes)
 {
 	(void)p;
 	(void)dsm_bytes;
 }
 
 void
-mkt_build_report_planned_alloc(
-		MktBuildProgress *p,
-		uint64_t		  sample_bytes,
-		uint64_t		  centroid_tree_bytes,
-		uint64_t		  dsm_total_bytes)
+prism_build_report_planned_alloc(
+		PrismBuildProgress *p,
+		uint64_t			sample_bytes,
+		uint64_t			centroid_tree_bytes,
+		uint64_t			dsm_total_bytes)
 {
 	(void)p;
 	(void)sample_bytes;
@@ -100,7 +100,7 @@ mkt_build_report_planned_alloc(
 }
 
 void
-mkt_build_progress_end(MktBuildProgress *p)
+prism_build_progress_end(PrismBuildProgress *p)
 {
 	(void)p;
 }

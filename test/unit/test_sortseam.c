@@ -1,14 +1,14 @@
 /*
  * test_sortseam.c - Unit tests for the posting sort seam (standalone impl)
  *
- * The parallel posting build routes per-cluster entries through the MktSorter
- * seam: each worker puts its (cluster, entry) records and performsorts; the
- * leader merges every worker's records and streams them back grouped by
- * cluster, so the build writes one posting list at a time. This drives the
- * standalone implementation directly through the real seam lifecycle
- * (shared_init -> workers put/performsort -> leader performsort/getnext) and
- * checks the merged stream is ordered by cluster with every entry, its
- * cluster, and its payload preserved.
+ * The parallel posting build routes per-cluster entries through the
+ * PrismSorter seam: each worker puts its (cluster, entry) records and
+ * performsorts; the leader merges every worker's records and streams them back
+ * grouped by cluster, so the build writes one posting list at a time. This
+ * drives the standalone implementation directly through the real seam
+ * lifecycle (shared_init -> workers put/performsort -> leader
+ * performsort/getnext) and checks the merged stream is ordered by cluster with
+ * every entry, its cluster, and its payload preserved.
  */
 
 #include <stdbool.h>
@@ -54,8 +54,8 @@ TEST(sort_seam_merges_sorted_by_cluster)
 
 	const uint32_t entry_size = sizeof(uint32_t); /* payload = unique seq id */
 
-	void *region = mkt_alloc(mkt_pbuild_sort_shared_size(W));
-	mkt_pbuild_sort_shared_init(region, W, NULL);
+	void *region = mkt_alloc(prism_pbuild_sort_shared_size(W));
+	prism_pbuild_sort_shared_init(region, W, NULL);
 
 	uint32_t cluster_of[TOTAL];
 	uint32_t expect_per_cluster[NCLUSTERS] = {0};
@@ -64,24 +64,24 @@ TEST(sort_seam_merges_sorted_by_cluster)
 	g_rng = 0x1234567u;
 	for (int w = 0; w < W; w++)
 	{
-		MktSorter *s = mkt_pbuild_sort_begin(
+		PrismSorter *s = prism_pbuild_sort_begin(
 				region, NULL, w, W, false, entry_size, 0);
 		for (uint32_t i = 0; i < PER_WORKER; i++)
 		{
 			uint32_t cluster = rnd() % NCLUSTERS;
 			cluster_of[seq]	 = cluster;
 			expect_per_cluster[cluster]++;
-			mkt_pbuild_sort_put(s, cluster, &seq);
+			prism_pbuild_sort_put(s, cluster, &seq);
 			seq++;
 		}
-		mkt_pbuild_sort_performsort(s);
-		mkt_pbuild_sort_end(s);
+		prism_pbuild_sort_performsort(s);
+		prism_pbuild_sort_end(s);
 	}
 	ASSERT_EQ((uint32_t)TOTAL, seq, "all entries were put");
 
-	MktSorter *lead =
-			mkt_pbuild_sort_begin(region, NULL, 0, W, true, entry_size, 0);
-	mkt_pbuild_sort_performsort(lead);
+	PrismSorter *lead =
+			prism_pbuild_sort_begin(region, NULL, 0, W, true, entry_size, 0);
+	prism_pbuild_sort_performsort(lead);
 
 	bool	 seen[TOTAL];
 	uint32_t got_per_cluster[NCLUSTERS] = {0};
@@ -90,7 +90,7 @@ TEST(sort_seam_merges_sorted_by_cluster)
 	uint32_t	prev = 0;
 	uint32_t	cluster;
 	const void *entry;
-	while (mkt_pbuild_sort_getnext(lead, &cluster, &entry))
+	while (prism_pbuild_sort_getnext(lead, &cluster, &entry))
 	{
 		uint32_t s_id;
 		memcpy(&s_id, entry, sizeof(uint32_t));
@@ -113,7 +113,7 @@ TEST(sort_seam_merges_sorted_by_cluster)
 				got_per_cluster[c],
 				"per-cluster counts preserved");
 
-	mkt_pbuild_sort_end(lead);
+	prism_pbuild_sort_end(lead);
 }
 
 /* Workers that put nothing must merge to an empty stream (no entries, no
@@ -121,24 +121,24 @@ TEST(sort_seam_merges_sorted_by_cluster)
 TEST(sort_seam_empty)
 {
 	const uint32_t entry_size = sizeof(uint32_t);
-	void		  *region	  = mkt_alloc(mkt_pbuild_sort_shared_size(2));
-	mkt_pbuild_sort_shared_init(region, 2, NULL);
+	void		  *region	  = mkt_alloc(prism_pbuild_sort_shared_size(2));
+	prism_pbuild_sort_shared_init(region, 2, NULL);
 
 	for (int w = 0; w < 2; w++)
 	{
-		MktSorter *s = mkt_pbuild_sort_begin(
+		PrismSorter *s = prism_pbuild_sort_begin(
 				region, NULL, w, 2, false, entry_size, 0);
-		mkt_pbuild_sort_performsort(s);
-		mkt_pbuild_sort_end(s);
+		prism_pbuild_sort_performsort(s);
+		prism_pbuild_sort_end(s);
 	}
 
-	MktSorter *lead =
-			mkt_pbuild_sort_begin(region, NULL, 0, 2, true, entry_size, 0);
-	mkt_pbuild_sort_performsort(lead);
+	PrismSorter *lead =
+			prism_pbuild_sort_begin(region, NULL, 0, 2, true, entry_size, 0);
+	prism_pbuild_sort_performsort(lead);
 	uint32_t	cluster;
 	const void *entry;
 	ASSERT_FALSE(
-			mkt_pbuild_sort_getnext(lead, &cluster, &entry),
+			prism_pbuild_sort_getnext(lead, &cluster, &entry),
 			"an empty sort yields no entries");
-	mkt_pbuild_sort_end(lead);
+	prism_pbuild_sort_end(lead);
 }

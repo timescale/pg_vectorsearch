@@ -62,7 +62,7 @@
 #include "core/types.h"
 #include "index/centroid_page.h"
 
-typedef struct MktIndexTypeInfo
+typedef struct PrismIndexTypeInfo
 {
 	/* Type name, for error messages. */
 	const char *name;
@@ -75,7 +75,7 @@ typedef struct MktIndexTypeInfo
 	 * data, so a half-precision column has no use for full-precision
 	 * centroids.
 	 */
-	MktCentroidFormat centroid_format;
+	PrismCentroidFormat centroid_format;
 
 	/*
 	 * Element kernels and float32 conversion, shared with standalone. f32
@@ -90,18 +90,18 @@ typedef struct MktIndexTypeInfo
 	 * than one function assuming a shared header layout.
 	 */
 	const void *(*unwrap)(Datum d, Dimension *dim);
-} MktIndexTypeInfo;
+} PrismIndexTypeInfo;
 
 /*
  * Descriptor for an index's column type. The support function is optional:
  * an opclass that declares none indexes `vec32`, which is both the original
  * behaviour and what an index built before the function existed still needs.
  */
-const MktIndexTypeInfo *mkt_index_type_info(Relation index);
+const PrismIndexTypeInfo *prism_index_type_info(Relation index);
 
 /* Does a float32 view of this type need a caller-provided buffer? */
 static inline bool
-vec32_needs_buffer(const MktIndexTypeInfo *ti)
+vec32_needs_buffer(const PrismIndexTypeInfo *ti)
 {
 	return ti->ops->element_size != sizeof(float);
 }
@@ -109,7 +109,7 @@ vec32_needs_buffer(const MktIndexTypeInfo *ti)
 /*
  * An index's binding of a type descriptor.
  *
- * MktIndexTypeInfo is a shared static -- one instance per type for the whole
+ * PrismIndexTypeInfo is a shared static -- one instance per type for the whole
  * backend -- so it holds nothing specific to an index. This is the per-index
  * half: the dimension its column is pinned to, and the buffer a float32 view
  * needs at that dimension. Binding them together means a read cannot be handed
@@ -119,9 +119,9 @@ vec32_needs_buffer(const MktIndexTypeInfo *ti)
  */
 typedef struct Vec32Access
 {
-	const MktIndexTypeInfo *ti;	 /* shared, per type */
-	Dimension				dim; /* this index's column */
-	float				   *buf; /* NULL when no conversion is needed */
+	const PrismIndexTypeInfo *ti;  /* shared, per type */
+	Dimension				  dim; /* this index's column */
+	float					 *buf; /* NULL when no conversion is needed */
 } Vec32Access;
 
 /*
@@ -134,7 +134,7 @@ typedef struct Vec32Access
  * palloc semantics.
  */
 static inline Vec32Access
-vec32_access(const MktIndexTypeInfo *ti, Dimension dim, MemoryContext ctx)
+vec32_access(const PrismIndexTypeInfo *ti, Dimension dim, MemoryContext ctx)
 {
 	return (Vec32Access){
 			.ti	 = ti,

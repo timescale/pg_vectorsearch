@@ -10,8 +10,8 @@
  * posting list configurations.
  */
 
-#ifndef MKT_STANDALONE_INDEX_H
-#define MKT_STANDALONE_INDEX_H
+#ifndef PRISM_STANDALONE_INDEX_H
+#define PRISM_STANDALONE_INDEX_H
 
 #include <pthread.h>
 #include <stdint.h>
@@ -28,12 +28,12 @@
 /* ----------------------------------------------------------------
  * Per-cluster vector ID list (for brute-force scan fallback)
  * ---------------------------------------------------------------- */
-typedef struct MktClusterList
+typedef struct PrismClusterList
 {
 	uint32_t  count;	/* vectors in this cluster */
 	uint32_t  capacity; /* allocated slots */
 	uint32_t *ids;		/* [count] original vector IDs */
-} MktClusterList;
+} PrismClusterList;
 
 /* ----------------------------------------------------------------
  * Array-backed page storage for centroid pages
@@ -57,38 +57,38 @@ typedef struct ArrayPageStorage
 /* ----------------------------------------------------------------
  * Posting format
  * ---------------------------------------------------------------- */
-typedef enum MktPostingFormat
+typedef enum PrismPostingFormat
 {
-	MKT_POSTING_FMT_FLAT  = 0, /* one contiguous buffer per cluster */
-	MKT_POSTING_FMT_PAGES = 1, /* chain of BLCKSZ pages in storage */
-} MktPostingFormat;
+	PRISM_POSTING_FMT_FLAT	= 0, /* one contiguous buffer per cluster */
+	PRISM_POSTING_FMT_PAGES = 1, /* chain of BLCKSZ pages in storage */
+} PrismPostingFormat;
 
 /* ----------------------------------------------------------------
  * Index configuration
  * ---------------------------------------------------------------- */
-typedef struct MktIndexConfig
+typedef struct PrismIndexConfig
 {
-	uint32_t		  nlist;		/* 0 = auto: sqrt(nvecs) */
-	uint32_t		  fan_out;		/* 0 = auto from nlist */
-	MktCentroidFormat centroid_fmt; /* rabitq, float, half */
-	DistanceMetric	  metric;
-	uint32_t		  km_nredo;			/* k-means restarts (0 = default) */
-	uint32_t		  km_max_iter;		/* k-means iterations (0 = default) */
-	double			  soar_lambda;		/* SOAR replication (0 = off) */
-	double			  boundary_epsilon; /* boundary gate threshold (0 = off) */
-	bool			  encode_rabitq;	/* encode posting lists with RaBitQ */
-	MktPostingFormat  posting_fmt;		/* flat or pages */
-	int				  fastscan;			/* 0=off, 8=uint8 LUT, 16=uint16 LUT */
-	int32_t			  nworkers;			/* -1 = auto, 0 = serial */
-} MktIndexConfig;
+	uint32_t			nlist;		  /* 0 = auto: sqrt(nvecs) */
+	uint32_t			fan_out;	  /* 0 = auto from nlist */
+	PrismCentroidFormat centroid_fmt; /* rabitq, float, half */
+	DistanceMetric		metric;
+	uint32_t			km_nredo;	 /* k-means restarts (0 = default) */
+	uint32_t			km_max_iter; /* k-means iterations (0 = default) */
+	double				soar_lambda; /* SOAR replication (0 = off) */
+	double boundary_epsilon;		 /* boundary gate threshold (0 = off) */
+	bool   encode_rabitq;			 /* encode posting lists with RaBitQ */
+	PrismPostingFormat posting_fmt;	 /* flat or pages */
+	int				   fastscan;	 /* 0=off, 8=uint8 LUT, 16=uint16 LUT */
+	int32_t			   nworkers;	 /* -1 = auto, 0 = serial */
+} PrismIndexConfig;
 
 /* ----------------------------------------------------------------
  * In-memory index
  * ---------------------------------------------------------------- */
-typedef struct MktIndex
+typedef struct PrismIndex
 {
 	/* Common index descriptor (passed to MktSearchCtx) */
-	MktIndexBase base;
+	PrismIndexBase base;
 
 	/* Concrete storage (base.centroid_storage/posting_storage
 	 * point into these) */
@@ -102,7 +102,7 @@ typedef struct MktIndex
 	float *all_vectors; /* [nvecs * dim] */
 
 	/* Posting data for RaBitQ scan (flat or paged) */
-	MktPostingFormat posting_fmt;
+	PrismPostingFormat posting_fmt;
 	BlockNumber first_posting;	  /* paged mode: cluster c's head = this + c */
 	char	  **flat_pages;		  /* flat mode: [nlist] buffers */
 	uint32_t	max_cluster_size; /* largest cluster entry count */
@@ -110,7 +110,7 @@ typedef struct MktIndex
 	bool		has_replication;
 
 	/* Per-cluster ID lists for brute-force fallback */
-	MktClusterList *clusters; /* [nlist] */
+	PrismClusterList *clusters; /* [nlist] */
 
 	float	*leaf_centroids; /* [nlist * dim] for per-cluster qstate */
 	float	*pt_centroids;	 /* [nlist * dim] P^T * leaf_centroids */
@@ -120,7 +120,7 @@ typedef struct MktIndex
 	/* Memory context owning all index allocations.
 	 * Deleting this frees everything at once. */
 	MktMemCtx memctx;
-} MktIndex;
+} PrismIndex;
 
 /* ----------------------------------------------------------------
  * Build + destroy
@@ -139,12 +139,14 @@ typedef struct MktIndex
  *
  * Returns NULL on failure.
  */
-MktIndex *mkt_index_build(
-		Vec32Source *src, const MktIndexConfig *config, MktBuildStats *stats);
+PrismIndex *prism_index_build(
+		Vec32Source			   *src,
+		const PrismIndexConfig *config,
+		PrismBuildStats		   *stats);
 
 /*
  * Free the index and all owned memory.
  */
-void mkt_index_destroy(MktIndex *idx);
+void prism_index_destroy(PrismIndex *idx);
 
-#endif /* MKT_STANDALONE_INDEX_H */
+#endif /* PRISM_STANDALONE_INDEX_H */

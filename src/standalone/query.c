@@ -1,10 +1,10 @@
 /*
  * query.c - Zero-allocation query execution
  *
- * All buffers are pre-allocated in MktQueryCtx. The query hot path
+ * All buffers are pre-allocated in PrismQueryCtx. The query hot path
  * uses only pre-allocated memory and arena reset (no malloc/free).
  *
- * For paged posting lists, delegates to MktQueryState (shared with
+ * For paged posting lists, delegates to PrismQueryState (shared with
  * PG). Flat posting lists and brute-force remain standalone-only.
  *
  * Memory layout:
@@ -29,13 +29,13 @@
  * Query context internals
  * ---------------------------------------------------------------- */
 
-struct MktQueryCtx
+struct PrismQueryCtx
 {
-	MktIndex *idx;
+	PrismIndex *idx;
 
 	/* Shared search context (paged mode) */
-	MktQueryState search;
-	bool		  has_query_state;
+	PrismQueryState search;
+	bool			has_query_state;
 
 	/* Reranking (standalone-specific) */
 	MktTopK		  rerank_topk;
@@ -43,19 +43,19 @@ struct MktQueryCtx
 	uint32_t	  rerank_cap;
 
 	/* Flat/brute-force fallback buffers */
-	float			   *query_buf;
-	MktCentroidResult  *beam_results;
-	MktCentroidScratch *centroid_scratch;
-	MktTopK				topk;
-	MktPostingScan		posting_scan;
-	float			   *pt_query;
-	float			   *pt_cents_buf;
-	RaBitQQueryState	beam_qs;
-	RaBitQQueryState	cluster_qs;
-	float			   *beam_transformed;
-	float			   *cluster_transformed;
-	uint8_t			   *beam_query_bits;
-	uint8_t			   *cluster_query_bits;
+	float				 *query_buf;
+	PrismCentroidResult	 *beam_results;
+	PrismCentroidScratch *centroid_scratch;
+	MktTopK				  topk;
+	PrismPostingScan	  posting_scan;
+	float				 *pt_query;
+	float				 *pt_cents_buf;
+	RaBitQQueryState	  beam_qs;
+	RaBitQQueryState	  cluster_qs;
+	float				 *beam_transformed;
+	float				 *cluster_transformed;
+	uint8_t				 *beam_query_bits;
+	uint8_t				 *cluster_query_bits;
 
 	/* Long-lived memory context for all query context buffers.
 	 * Deleting this frees everything at once (no individual frees). */
@@ -74,8 +74,8 @@ struct MktQueryCtx
  * Create / destroy
  * ---------------------------------------------------------------- */
 
-MktQueryCtx *
-mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
+PrismQueryCtx *
+prism_query_ctx_create(PrismIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 {
 	if (idx == NULL || max_k == 0 || max_nprobe == 0)
 		return NULL;
@@ -83,23 +83,23 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 	MktMemCtx memctx  = mkt_memctx_create(NULL, "query_ctx");
 	MktMemCtx old_ctx = mkt_memctx_switch(memctx);
 
-	MktQueryCtx *ctx = mkt_alloc0(sizeof(MktQueryCtx));
-	ctx->idx		 = idx;
-	ctx->max_k		 = max_k;
-	ctx->max_nprobe	 = max_nprobe;
-	ctx->memctx		 = memctx;
+	PrismQueryCtx *ctx = mkt_alloc0(sizeof(PrismQueryCtx));
+	ctx->idx		   = idx;
+	ctx->max_k		   = max_k;
+	ctx->max_nprobe	   = max_nprobe;
+	ctx->memctx		   = memctx;
 
 	Dimension dim = idx->base.dim;
 
-	/* Paged mode: use shared MktQueryState */
+	/* Paged mode: use shared PrismQueryState */
 	if (idx->has_posting_data && idx->base.params != NULL &&
-		idx->posting_fmt == MKT_POSTING_FMT_PAGES)
+		idx->posting_fmt == PRISM_POSTING_FMT_PAGES)
 	{
-		mkt_query_state_init(&ctx->search, &idx->base, max_k, max_nprobe);
+		prism_query_state_init(&ctx->search, &idx->base, max_k, max_nprobe);
 		ctx->has_query_state = true;
 
 		if (idx->base.fastscan)
-			mkt_posting_scan_enable_fastscan(
+			prism_posting_scan_enable_fastscan(
 					&ctx->search.pscan, idx->base.fastscan);
 	}
 	else
@@ -108,23 +108,25 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 		uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
 
 		ctx->query_buf	  = mkt_alloc(dim * sizeof(float));
-		ctx->beam_results = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
-		ctx->centroid_scratch = mkt_centroid_scratch_create(dim, max_nprobe);
+		ctx->beam_results = mkt_alloc(
+				max_nprobe * sizeof(PrismCentroidResult));
+		ctx->centroid_scratch = prism_centroid_scratch_create(dim, max_nprobe);
 		mkt_topk_init(&ctx->topk, max_k);
 
 		if (idx->has_posting_data)
 		{
-			MktStorage *storage	  = (idx->posting_fmt == MKT_POSTING_FMT_PAGES)
-										  ? &idx->posting_storage.base
-										  : NULL;
-			char	   *page_base = (idx->posting_fmt == MKT_POSTING_FMT_PAGES)
-										  ? idx->posting_storage.pages
-										  : NULL;
-			uint32_t max_per_page = (idx->posting_fmt == MKT_POSTING_FMT_PAGES)
-										  ? mkt_posting_max_entries(dim)
+			MktStorage *storage = (idx->posting_fmt == PRISM_POSTING_FMT_PAGES)
+										? &idx->posting_storage.base
+										: NULL;
+			char	*page_base	= (idx->posting_fmt == PRISM_POSTING_FMT_PAGES)
+										? idx->posting_storage.pages
+										: NULL;
+			uint32_t max_per_page = (idx->posting_fmt ==
+									 PRISM_POSTING_FMT_PAGES)
+										  ? prism_posting_max_entries(dim)
 										  : idx->max_cluster_size;
 
-			mkt_posting_scan_init(
+			prism_posting_scan_init(
 					&ctx->posting_scan,
 					storage,
 					page_base,
@@ -133,7 +135,7 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 					max_per_page);
 
 			if (idx->base.fastscan)
-				mkt_posting_scan_enable_fastscan(
+				prism_posting_scan_enable_fastscan(
 						&ctx->posting_scan, idx->base.fastscan);
 		}
 
@@ -166,19 +168,19 @@ mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 }
 
 void
-mkt_query_ctx_destroy(MktQueryCtx *ctx)
+prism_query_ctx_destroy(PrismQueryCtx *ctx)
 {
 	if (ctx == NULL)
 		return;
 
 	if (ctx->has_query_state)
-		mkt_query_state_cleanup(&ctx->search);
+		prism_query_state_cleanup(&ctx->search);
 	else
 	{
 		if (ctx->idx->has_posting_data)
-			mkt_posting_scan_cleanup(&ctx->posting_scan);
+			prism_posting_scan_cleanup(&ctx->posting_scan);
 		mkt_topk_cleanup(&ctx->topk);
-		mkt_centroid_scratch_free(ctx->centroid_scratch);
+		prism_centroid_scratch_free(ctx->centroid_scratch);
 		ctx->centroid_scratch = NULL;
 	}
 
@@ -189,12 +191,12 @@ mkt_query_ctx_destroy(MktQueryCtx *ctx)
 }
 
 /* ----------------------------------------------------------------
- * Paged query (via shared MktQueryState)
+ * Paged query (via shared PrismQueryState)
  * ---------------------------------------------------------------- */
 
 static uint32_t
 exec_paged(
-		MktQueryCtx	   *ctx,
+		PrismQueryCtx  *ctx,
 		const float	   *query,
 		uint32_t		k,
 		uint32_t		nprobe,
@@ -203,14 +205,14 @@ exec_paged(
 		uint32_t	   *result_ids)
 {
 	MktMemCtx old = mkt_memctx_switch(ctx->memctx);
-	mkt_query_execute(&ctx->search, query, k, nprobe, mode, rerank, NULL);
+	prism_query_execute(&ctx->search, query, k, nprobe, mode, rerank, NULL);
 	mkt_memctx_switch(old);
 
 	uint32_t nresults = ctx->search.nresults;
 	for (uint32_t i = 0; i < nresults; i++)
 	{
 		uint32_t ci	  = ctx->search.result_order[i];
-		result_ids[i] = mkt_posting_decode_vector_id(
+		result_ids[i] = prism_posting_decode_vector_id(
 				ctx->search.candidates[ci].id);
 	}
 
@@ -223,7 +225,7 @@ exec_paged(
 
 static uint32_t
 exec_fallback(
-		MktQueryCtx	   *ctx,
+		PrismQueryCtx  *ctx,
 		const float	   *query,
 		uint32_t		k,
 		uint32_t		nprobe,
@@ -231,8 +233,8 @@ exec_fallback(
 		bool			rerank,
 		uint32_t	   *result_ids)
 {
-	MktIndex *idx = ctx->idx;
-	Dimension dim = idx->base.dim;
+	PrismIndex *idx = ctx->idx;
+	Dimension	dim = idx->base.dim;
 
 	if (k > ctx->max_k)
 		k = ctx->max_k;
@@ -272,7 +274,7 @@ exec_fallback(
 	}
 
 	/* Beam search */
-	MktCentroidSearchState state = {
+	PrismCentroidSearchState state = {
 			.qstate		 = qs,
 			.query		 = qvec,
 			.storage	 = &idx->centroid_storage.base,
@@ -284,14 +286,14 @@ exec_fallback(
 			.scratch	 = ctx->centroid_scratch,
 	};
 
-	MktCentroidSearchStats beam_stats = {0};
-	uint32_t			   n_results  = mkt_centroid_beam_search(
-			   &state,
-			   idx->base.first_centroid,
-			   idx->base.nlevels,
-			   ctx->beam_results,
-			   NULL,
-			   &beam_stats);
+	PrismCentroidSearchStats beam_stats = {0};
+	uint32_t				 n_results	= prism_centroid_beam_search(
+			 &state,
+			 idx->base.first_centroid,
+			 idx->base.nlevels,
+			 ctx->beam_results,
+			 NULL,
+			 &beam_stats);
 
 	mkt_memctx_switch(old_ctx);
 
@@ -311,10 +313,10 @@ exec_fallback(
 			mkt_rabitq_init_query_state(
 					&ctx->cluster_qs, ctx->pt_query, pt_cent, dim, mode);
 
-			mkt_posting_scan_begin_flat(
+			prism_posting_scan_begin_flat(
 					&ctx->posting_scan, &ctx->cluster_qs, idx->flat_pages[li]);
-			mkt_posting_scan_cluster(&ctx->posting_scan, &ctx->topk);
-			mkt_posting_scan_end_cluster(&ctx->posting_scan);
+			prism_posting_scan_cluster(&ctx->posting_scan, &ctx->topk);
+			prism_posting_scan_end_cluster(&ctx->posting_scan);
 		}
 	}
 	else
@@ -325,7 +327,7 @@ exec_fallback(
 			if (li >= idx->nlist)
 				continue;
 
-			MktClusterList *cl = &idx->clusters[li];
+			PrismClusterList *cl = &idx->clusters[li];
 			for (uint32_t vi = 0; vi < cl->count; vi++)
 			{
 				uint32_t	 vid = cl->ids[vi];
@@ -354,7 +356,8 @@ exec_fallback(
 
 		for (uint32_t i = 0; i < n_cands; i++)
 		{
-			uint32_t vid = mkt_posting_decode_vector_id(ctx->rerank_buf[i].id);
+			uint32_t vid = prism_posting_decode_vector_id(
+					ctx->rerank_buf[i].id);
 			const float *vec = idx->all_vectors + (size_t)vid * dim;
 			Distance	 d	 = mkt_l2_distance_squared(qvec, vec, dim);
 			mkt_topk_insert(&ctx->rerank_topk, d, 0.0f, ctx->rerank_buf[i].id);
@@ -376,7 +379,7 @@ exec_fallback(
 
 	uint32_t out = count < k ? count : k;
 	for (uint32_t i = 0; i < out; i++)
-		result_ids[i] = mkt_posting_decode_vector_id(ctx->rerank_buf[i].id);
+		result_ids[i] = prism_posting_decode_vector_id(ctx->rerank_buf[i].id);
 
 	return out;
 }
@@ -386,8 +389,8 @@ exec_fallback(
  * ---------------------------------------------------------------- */
 
 uint32_t
-mkt_query_exec(
-		MktQueryCtx	   *ctx,
+prism_query_exec(
+		PrismQueryCtx  *ctx,
 		const float	   *query,
 		uint32_t		k,
 		uint32_t		nprobe,

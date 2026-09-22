@@ -47,9 +47,9 @@ make_vectors(uint32_t nvecs, uint32_t dim, uint32_t seed)
 
 TEST(blobstore_roundtrip)
 {
-	MktBlobStore  *bs	  = mkt_pbuild_blobstore_begin();
-	const uint32_t nblobs = 50;
-	uint64_t	   sizes[50];
+	PrismBlobStore *bs	   = prism_pbuild_blobstore_begin();
+	const uint32_t	nblobs = 50;
+	uint64_t		sizes[50];
 
 	/* ~4.7 MB total: several doublings past the store's initial buffer. */
 	char *buf = mkt_alloc(200000);
@@ -58,15 +58,15 @@ TEST(blobstore_roundtrip)
 		sizes[i] = (i == 25) ? 0 : 50000 + (i * 7919) % 90000;
 		for (uint64_t j = 0; j < sizes[i]; j++)
 			buf[j] = (char)((i * 131 + j * 17) & 0xFF);
-		mkt_pbuild_blobstore_put(bs, buf, sizes[i]);
+		prism_pbuild_blobstore_put(bs, buf, sizes[i]);
 	}
 
-	mkt_pbuild_blobstore_rewind(bs);
+	prism_pbuild_blobstore_rewind(bs);
 
 	char *got = mkt_alloc(200000);
 	for (uint32_t i = 0; i < nblobs; i++)
 	{
-		uint64_t sz = mkt_pbuild_blobstore_get(bs, got, 200000);
+		uint64_t sz = prism_pbuild_blobstore_get(bs, got, 200000);
 		ASSERT_EQ(sizes[i], sz, "blob size round-trips");
 		for (uint64_t j = 0; j < sz; j++)
 			if (got[j] != (char)((i * 131 + j * 17) & 0xFF))
@@ -75,7 +75,7 @@ TEST(blobstore_roundtrip)
 				break;
 			}
 	}
-	mkt_pbuild_blobstore_end(bs);
+	prism_pbuild_blobstore_end(bs);
 	mkt_free(buf);
 	mkt_free(got);
 }
@@ -119,9 +119,9 @@ verify_leaf_links(
 
 	for (BlockNumber blk = first_centroid; blk < first_posting; blk++)
 	{
-		Page				   page	  = st->pages + (size_t)blk * BLCKSZ;
-		MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
-		MktCentroidFormat	   fmt	  = mkt_centroid_page_format(page);
+		Page					 page	= st->pages + (size_t)blk * BLCKSZ;
+		PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
+		PrismCentroidFormat		 fmt	= prism_centroid_page_format(page);
 		/* FASTSCAN stores no leaf flag at all -- leaf-ness is positional
 		 * (the deepest level); the other formats flag each entry. */
 		bool fs_leaf_page = (opaque->level == nlevels - 1);
@@ -137,14 +137,15 @@ verify_leaf_links(
 				char	*content = (char *)PageGetContents(page);
 				uint32_t g		 = i / MKT_FASTSCAN_GROUP;
 				uint32_t slot	 = i % MKT_FASTSCAN_GROUP;
-				child			 = mkt_centroid_fastscan_group_child(
+				child			 = prism_centroid_fastscan_group_child(
 						   content, g, dim)[slot];
 				is_leaf = true;
 			}
 			else
 			{
-				const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
-				is_leaf = (entry->flags & MKT_CENTROID_FLAG_LEAF) != 0;
+				const PrismCentroidEntryMeta *entry =
+						prism_centroid_meta(page, i);
+				is_leaf = (entry->flags & PRISM_CENTROID_FLAG_LEAF) != 0;
 				child	= entry->child_blkno;
 			}
 			if (!is_leaf)
@@ -165,22 +166,22 @@ verify_leaf_links(
 
 static void
 check_plan_write_roundtrip(
-		MktTestResult	 *result,
-		MktCentroidFormat fmt,
-		uint32_t		  nvecs,
-		Dimension		  dim,
-		uint32_t		  nlist,
-		uint32_t		  fan_out)
+		MktTestResult	   *result,
+		PrismCentroidFormat fmt,
+		uint32_t			nvecs,
+		Dimension			dim,
+		uint32_t			nlist,
+		uint32_t			fan_out)
 {
 	float *vecs = make_vectors(nvecs, dim, 42);
 
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = KMEANS_ALGO_LLOYD;
 
-	MktBlobStore	 *store = mkt_pbuild_blobstore_begin();
-	MktStreamTreePlan plan;
+	PrismBlobStore	   *store = prism_pbuild_blobstore_begin();
+	PrismStreamTreePlan plan;
 	ASSERT_TRUE(
-			mkt_routing_tree_plan(
+			prism_routing_tree_plan(
 					vecs,
 					nvecs,
 					dim,
@@ -204,9 +205,9 @@ check_plan_write_roundtrip(
 	/* Write pass A: replay from the blob store. */
 	TestPageStorage sa;
 	test_storage_init(&sa, page_cap, first_posting + plan.nleaves);
-	mkt_pbuild_blobstore_rewind(store);
+	prism_pbuild_blobstore_rewind(store);
 	LeafProbe	probe = {.count = 0, .ascending = true};
-	BlockNumber root  = mkt_routing_tree_write(
+	BlockNumber root  = prism_routing_tree_write(
 			 &sa.base,
 			 nvecs,
 			 dim,
@@ -222,7 +223,7 @@ check_plan_write_roundtrip(
 			 leaf_probe_cb,
 			 &probe,
 			 NULL);
-	mkt_pbuild_blobstore_end(store);
+	prism_pbuild_blobstore_end(store);
 
 	/* The DFS writes post-order: the root page lands last, inside the
 	 * planned range (the parallel leader pins its root at block 1 instead;
@@ -250,10 +251,10 @@ check_plan_write_roundtrip(
 	/* Write pass B: an independent plan pass re-clusters the same sample
 	 * from scratch (the k-means seed is fixed), so its tape -- and the
 	 * pages replayed from it -- must be byte-identical to pass A's. */
-	MktBlobStore	 *store_b = mkt_pbuild_blobstore_begin();
-	MktStreamTreePlan plan_b;
+	PrismBlobStore	   *store_b = prism_pbuild_blobstore_begin();
+	PrismStreamTreePlan plan_b;
 	ASSERT_TRUE(
-			mkt_routing_tree_plan(
+			prism_routing_tree_plan(
 					vecs,
 					nvecs,
 					dim,
@@ -272,9 +273,9 @@ check_plan_write_roundtrip(
 			"plans agree on pages");
 	TestPageStorage sb;
 	test_storage_init(&sb, page_cap, first_posting + plan.nleaves);
-	mkt_pbuild_blobstore_rewind(store_b);
+	prism_pbuild_blobstore_rewind(store_b);
 	LeafProbe	probe_b = {.count = 0, .ascending = true};
-	BlockNumber root_b	= mkt_routing_tree_write(
+	BlockNumber root_b	= prism_routing_tree_write(
 			 &sb.base,
 			 nvecs,
 			 dim,
@@ -290,7 +291,7 @@ check_plan_write_roundtrip(
 			 leaf_probe_cb,
 			 &probe_b,
 			 NULL);
-	mkt_pbuild_blobstore_end(store_b);
+	prism_pbuild_blobstore_end(store_b);
 	ASSERT_EQ(root, root_b, "replay and re-cluster agree on the root");
 	ASSERT_EQ(probe.count, probe_b.count, "same leaf count");
 	ASSERT_TRUE(
@@ -351,7 +352,9 @@ TEST(plan_write_roundtrip_flat_multipage_fastscan)
  */
 static void
 check_exact_centroid_collection(
-		MktTestResult *result, MktCentroidFormat fmt, uint64_t expected_slots)
+		MktTestResult	   *result,
+		PrismCentroidFormat fmt,
+		uint64_t			expected_slots)
 {
 	uint32_t  nvecs = 600, nlist = 40, fan_out = 4;
 	Dimension dim  = 16;
@@ -360,10 +363,10 @@ check_exact_centroid_collection(
 	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = KMEANS_ALGO_LLOYD;
 
-	MktBlobStore	 *store = mkt_pbuild_blobstore_begin();
-	MktStreamTreePlan plan;
+	PrismBlobStore	   *store = prism_pbuild_blobstore_begin();
+	PrismStreamTreePlan plan;
 	ASSERT_TRUE(
-			mkt_routing_tree_plan(
+			prism_routing_tree_plan(
 					vecs,
 					nvecs,
 					dim,
@@ -382,8 +385,8 @@ check_exact_centroid_collection(
 
 	RaBitQParams *rq = mkt_rabitq_create(dim, 42);
 
-	MktExactCentroidCollector col;
-	mkt_exact_centroid_collector_init(
+	PrismExactCentroidCollector col;
+	prism_exact_centroid_collector_init(
 			&col,
 			dim,
 			fmt,
@@ -397,9 +400,9 @@ check_exact_centroid_collection(
 			&st,
 			first_posting + plan.nleaves + 8,
 			first_posting + plan.nleaves);
-	mkt_pbuild_blobstore_rewind(store);
+	prism_pbuild_blobstore_rewind(store);
 	LeafProbe	probe = {.count = 0, .ascending = true};
-	BlockNumber root  = mkt_routing_tree_write(
+	BlockNumber root  = prism_routing_tree_write(
 			 &st.base,
 			 nvecs,
 			 dim,
@@ -415,13 +418,13 @@ check_exact_centroid_collection(
 			 leaf_probe_cb,
 			 &probe,
 			 &col);
-	mkt_pbuild_blobstore_end(store);
+	prism_pbuild_blobstore_end(store);
 	ASSERT_TRUE(root != InvalidBlockNumber, "write pass succeeds");
 	ASSERT_TRUE(!col.overflowed, "unbounded budget never overflows");
 	ASSERT_TRUE(col.nslots > 0, "internal entries were collected");
 
-	MktExactInternalCentroids view;
-	mkt_exact_centroid_view(&col, &view);
+	PrismExactInternalCentroids view;
+	prism_exact_centroid_view(&col, &view);
 	ASSERT_EQ(first_centroid, view.base, "view covers the centroid region");
 	ASSERT_EQ(plan.centroid_pages, view.npages, "view spans every page");
 
@@ -432,20 +435,20 @@ check_exact_centroid_collection(
 	uint32_t total = 0;
 	for (BlockNumber blk = first_centroid; blk < first_posting; blk++)
 	{
-		Page				   page	  = st.pages + (size_t)blk * BLCKSZ;
-		MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
-		uint32_t			   off	  = view.page_off[blk - view.base];
+		Page					 page	= st.pages + (size_t)blk * BLCKSZ;
+		PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
+		uint32_t				 off	= view.page_off[blk - view.base];
 
 		if (opaque->level == plan.nlevels - 1)
 		{
 			ASSERT_EQ(
-					MKT_EXACT_INTERNAL_NONE,
+					PRISM_EXACT_INTERNAL_NONE,
 					off,
 					"leaf pages are never collected");
 			continue;
 		}
 		ASSERT_TRUE(
-				off != MKT_EXACT_INTERNAL_NONE,
+				off != PRISM_EXACT_INTERNAL_NONE,
 				"every internal page is collected");
 		ASSERT_TRUE(
 				off + opaque->entry_count <= col.nslots,
@@ -461,11 +464,11 @@ check_exact_centroid_collection(
 
 	/* Collection round-trip: the view rebuilt from the serialized
 	 * collection must be identical to the collector's own. */
-	uint64_t coll_size = mkt_exact_centroid_collection_size(&col);
+	uint64_t coll_size = prism_exact_centroid_collection_size(&col);
 	void	*coll	   = mkt_alloc(coll_size);
-	mkt_exact_centroid_collection_write(&col, coll);
-	MktExactInternalCentroids bview;
-	mkt_exact_centroid_collection_view(coll, &bview);
+	prism_exact_centroid_collection_write(&col, coll);
+	PrismExactInternalCentroids bview;
+	prism_exact_centroid_collection_view(coll, &bview);
 	ASSERT_EQ(view.base, bview.base, "collection view base round-trips");
 	ASSERT_EQ(view.npages, bview.npages, "collection view npages round-trips");
 	ASSERT_TRUE(
@@ -481,8 +484,8 @@ check_exact_centroid_collection(
 
 	mkt_free(coll);
 	mkt_free(seen);
-	mkt_exact_centroid_collector_cleanup(&col);
-	mkt_exact_centroid_collector_cleanup(&col); /* idempotent */
+	prism_exact_centroid_collector_cleanup(&col);
+	prism_exact_centroid_collector_cleanup(&col); /* idempotent */
 	mkt_free(st.pages);
 	mkt_rabitq_destroy(rq);
 	mkt_free(vecs);
@@ -503,7 +506,7 @@ TEST(exact_centroid_collection_fastscan)
 	check_exact_centroid_collection(
 			result,
 			MKT_CENTROID_FMT_FASTSCAN,
-			mkt_exact_centroid_expected_slots(40, 4));
+			prism_exact_centroid_expected_slots(40, 4));
 }
 
 /*
@@ -520,8 +523,8 @@ TEST(exact_centroid_collector_overflow)
 		cents[i] = (float)i;
 
 	/* Budget for exactly 3 slots. */
-	MktExactCentroidCollector col;
-	mkt_exact_centroid_collector_init(
+	PrismExactCentroidCollector col;
+	prism_exact_centroid_collector_init(
 			&col,
 			dim,
 			MKT_CENTROID_FMT_RABITQ,
@@ -530,42 +533,42 @@ TEST(exact_centroid_collector_overflow)
 			(uint64_t)3 * dim * sizeof(float),
 			0);
 
-	mkt_exact_centroid_collector_add_node(&col, 1, cents, 2);
+	prism_exact_centroid_collector_add_node(&col, 1, cents, 2);
 	ASSERT_TRUE(!col.overflowed, "within budget: collection proceeds");
 	ASSERT_EQ(2, col.nslots, "two slots collected");
 
-	mkt_exact_centroid_collector_add_node(&col, 2, cents, 2);
+	prism_exact_centroid_collector_add_node(&col, 2, cents, 2);
 	ASSERT_TRUE(col.overflowed, "over budget: the collector latches");
 	ASSERT_EQ(2, col.nslots, "the offending node is not collected");
 	ASSERT_TRUE(
 			col.cents == NULL && col.page_off == NULL,
 			"the dead arrays are released at the overflow point");
 
-	mkt_exact_centroid_collector_add_node(&col, 3, cents, 1);
+	prism_exact_centroid_collector_add_node(&col, 3, cents, 1);
 	ASSERT_EQ(2, col.nslots, "overflow is permanent, later nodes skipped");
 
-	MktExactInternalCentroids view;
-	mkt_exact_centroid_view(&col, &view);
+	PrismExactInternalCentroids view;
+	prism_exact_centroid_view(&col, &view);
 	ASSERT_EQ(0, view.npages, "overflowed view matches no block");
 	ASSERT_TRUE(
 			view.base == InvalidBlockNumber, "overflowed view has no region");
 
 	/* The collection degrades to the same empty shape a NULL collector
 	 * (collecting off) serializes, and its view is equally inert. */
-	uint64_t empty_size = mkt_exact_centroid_collection_size(NULL);
+	uint64_t empty_size = prism_exact_centroid_collection_size(NULL);
 	ASSERT_EQ(
 			empty_size,
-			mkt_exact_centroid_collection_size(&col),
+			prism_exact_centroid_collection_size(&col),
 			"overflowed collection is header-only");
 	void *coll = mkt_alloc(empty_size);
-	mkt_exact_centroid_collection_write(&col, coll);
-	MktExactInternalCentroids bview;
-	mkt_exact_centroid_collection_view(coll, &bview);
+	prism_exact_centroid_collection_write(&col, coll);
+	PrismExactInternalCentroids bview;
+	prism_exact_centroid_collection_view(coll, &bview);
 	ASSERT_EQ(0, bview.npages, "overflowed collection view matches no block");
-	mkt_exact_centroid_collection_write(NULL, coll);
-	mkt_exact_centroid_collection_view(coll, &bview);
+	prism_exact_centroid_collection_write(NULL, coll);
+	prism_exact_centroid_collection_view(coll, &bview);
 	ASSERT_EQ(0, bview.npages, "NULL-collector collection view is inert");
 
 	mkt_free(coll);
-	mkt_exact_centroid_collector_cleanup(&col);
+	prism_exact_centroid_collector_cleanup(&col);
 }

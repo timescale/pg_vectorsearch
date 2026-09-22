@@ -448,7 +448,7 @@ SELECT query_settings_top_k($q$
 -- inflating the sizing well past what a small work_mem affords and well
 -- under what a large one does, so the clamp binds below and lifts above.
 -- A row of top-k costs the sum of everything sized to k -- dominated by
--- the MKT_QUERY_CAND_PER_K extraction slots, not the heap entry itself --
+-- the PRISM_QUERY_CAND_PER_K extraction slots, not the heap entry itself --
 -- so 64kB affords far fewer rows than the heap entry alone would suggest.
 -- Asserted exactly, which pins the arithmetic and the per-row size
 -- together.

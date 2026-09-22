@@ -13,7 +13,7 @@
  *   6. Optional leaf refinement (prism.leaf_refine_threshold) re-centers
  *      the head encode references from the full table
  *   7. Single heap scan: route each row page-backed (the same
- *      mkt_query_route the query/insert use) into the cluster-keyed sort,
+ *      prism_query_route the query/insert use) into the cluster-keyed sort,
  *      then build each posting list
  *   8. Write the metadata page (final tuple count) and WAL-log
  *
@@ -86,11 +86,12 @@ typedef struct PrismBuildState
 	 */
 	/* Posting entries are RaBitQ-encoded during the scan (relative to the
 	 * assigned cluster centroid) and fed to a cluster-keyed sorter — the same
-	 * MktSorter seam the parallel build uses, here in non-parallel mode (no
-	 * coordinate). The shared build loop (mkt_posting_build_lists) reads them
-	 * back grouped by cluster and writes one resident page builder at a time.
+	 * PrismSorter seam the parallel build uses, here in non-parallel mode (no
+	 * coordinate). The shared build loop (prism_posting_build_lists) reads
+	 * them back grouped by cluster and writes one resident page builder at a
+	 * time.
 	 */
-	MktSorter	 *sorter;
+	PrismSorter	 *sorter;
 	RaBitQParams *rq_params;
 
 	/* Sampling */
@@ -108,7 +109,7 @@ typedef struct PrismBuildState
 	MemoryContext	  build_ctx; /* all build allocations */
 	MemoryContext	  tmp_ctx;	 /* per-tuple scratch */
 
-	MktBuildProgress *prog; /* phase/progress reporting seam (serial path) */
+	PrismBuildProgress *prog; /* phase/progress reporting seam (serial path) */
 
 	/*
 	 * Page-backed assignment (routes each row the same way the query/insert
@@ -116,8 +117,8 @@ typedef struct PrismBuildState
 	 * state; route is the shared route+encode+emit context (also used by the
 	 * parallel posting workers), which references qs and the sorter.
 	 */
-	MktQueryState	 qs;
-	MktBuildRouteCtx route;
+	PrismQueryState	   qs;
+	PrismBuildRouteCtx route;
 
 	/*
 	 * Column type bound to this index's dimension, with the conversion buffer
@@ -251,10 +252,10 @@ build_callback(
 	 * tuple, so nothing reachable from this call may allocate memory that
 	 * outlives the callback: the route context's buffers (candidates, batch,
 	 * encode scratch) are all preallocated for exactly this reason. */
-	mkt_build_route_emit(&bs->route, vref.data, *tid);
+	prism_build_route_emit(&bs->route, vref.data, *tid);
 
 	if (((uint64_t)bs->route.indtuples % 10000) == 0)
-		mkt_build_report_progress(bs->prog, bs->route.indtuples);
+		prism_build_report_progress(bs->prog, bs->route.indtuples);
 
 	MemoryContextSwitchTo(old_ctx);
 	MemoryContextReset(bs->tmp_ctx);
@@ -266,19 +267,19 @@ build_callback(
 
 static void
 write_meta_page(
-		MktStorage		 *storage,
-		Dimension		  dim,
-		uint8_t			  nlevels,
-		uint8_t			  fan_out,
-		BlockNumber		  first_centroid,
-		BlockNumber		  first_posting,
-		uint32_t		  ncentroid_pages,
-		uint32_t		  nlist,
-		MktCentroidFormat centroid_format,
-		DistanceMetric	  metric,
-		uint64_t		  rabitq_seed,
-		bool			  fastscan,
-		const float		 *global_mean)
+		MktStorage		   *storage,
+		Dimension			dim,
+		uint8_t				nlevels,
+		uint8_t				fan_out,
+		BlockNumber			first_centroid,
+		BlockNumber			first_posting,
+		uint32_t			ncentroid_pages,
+		uint32_t			nlist,
+		PrismCentroidFormat centroid_format,
+		DistanceMetric		metric,
+		uint64_t			rabitq_seed,
+		bool				fastscan,
+		const float		   *global_mean)
 {
 	/* Block 0 must already exist (extended or new_page'd by caller).
 	 * Use write_page to write in-place. */
@@ -318,7 +319,7 @@ prism_get_metric(Relation index)
 			FunctionCall1Coll(procinfo, InvalidOid, (Datum)0));
 }
 
-static MktCentroidFormat
+static PrismCentroidFormat
 prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 {
 	PrismOptions *opts = (PrismOptions *)index->rd_options;
@@ -360,7 +361,7 @@ prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 	 * longer fits a page it cannot be used at all. AUTO uses it exactly
 	 * where it is available; ON errors where it is not.
 	 */
-	bool cfs_fits = mkt_centroid_fastscan_max_groups(dim) > 0;
+	bool cfs_fits = prism_centroid_fastscan_max_groups(dim) > 0;
 	if (cfs == MKT_FASTSCAN_MODE_ON)
 	{
 		if (metric == DISTANCE_INNER_PRODUCT)
@@ -389,7 +390,7 @@ prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 	/* Uncompressed centroids follow the column type. Resolved directly rather
 	 * than through the per-backend cache: there is no metadata page to
 	 * populate that cache from until this build writes one. */
-	return mkt_index_type_info(index)->centroid_format;
+	return prism_index_type_info(index)->centroid_format;
 }
 
 /*
@@ -404,7 +405,7 @@ prism_resolve_fastscan(Relation index, Dimension dim)
 {
 	PrismOptions *opts = (PrismOptions *)index->rd_options;
 	int	 fs	  = (opts != NULL) ? opts->fastscan : MKT_FASTSCAN_MODE_AUTO;
-	bool fits = mkt_fastscan_max_groups(dim, true) > 0;
+	bool fits = prism_fastscan_max_groups(dim, true) > 0;
 
 	switch (fs)
 	{
@@ -445,11 +446,11 @@ resolve_build_params(
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("column cannot have more than %d dimensions",
 						VEC32_MAX_DIM)));
-	if (dim > MKT_INDEX_MAX_DIM)
+	if (dim > PRISM_INDEX_MAX_DIM)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("prism indexes support at most %d dimensions",
-						MKT_INDEX_MAX_DIM)));
+						PRISM_INDEX_MAX_DIM)));
 
 	p->dim			   = dim;
 	p->metric		   = prism_get_metric(index);
@@ -472,13 +473,13 @@ resolve_build_params(
 	}
 	else
 	{
-		p->nlist = mkt_auto_nlist(*est_rows);
+		p->nlist = prism_auto_nlist(*est_rows);
 		if (p->nlist > MKT_ANN_MAX_NLIST)
 			p->nlist = MKT_ANN_MAX_NLIST;
 	}
 
 	p->fan_out =
-			mkt_auto_fan_out(p->fan_out, p->nlist, MKT_ANN_DEFAULT_FAN_OUT);
+			prism_auto_fan_out(p->fan_out, p->nlist, MKT_ANN_DEFAULT_FAN_OUT);
 
 	p->kmeans_nredo = (opts != NULL && opts->kmeans_nredo > 0)
 							? (uint32_t)opts->kmeans_nredo
@@ -499,8 +500,8 @@ resolve_build_params(
 		p->centroid_format == MKT_CENTROID_FMT_FASTSCAN)
 	{
 		uint64_t expected =
-				mkt_exact_centroid_expected_bytes(p->nlist, p->fan_out, dim);
-		uint64_t budget = mkt_exact_centroid_budget(
+				prism_exact_centroid_expected_bytes(p->nlist, p->fan_out, dim);
+		uint64_t budget = prism_exact_centroid_budget(
 				(uint64_t)maintenance_work_mem);
 		if (expected > budget)
 			mkt_warn(
@@ -710,17 +711,17 @@ sample_for_build(
 
 typedef struct RefineHeadState
 {
-	MktQueryState *qs;
-	BlockNumber	   first_posting; /* leaf c's head = first_posting + c */
-	uint32_t	   nlist;
-	Dimension	   dim;
-	bool		   cosine;
-	MemoryContext  tmp_ctx;
-	double		  *sums;	/* [tile * dim], indexed by leaf - tile_lo */
-	uint64_t	  *cnts;	/* [tile] */
-	float		  *scratch; /* [dim] normalized copy for cosine */
-	uint32_t	   tile_lo;
-	uint32_t	   tile_hi;
+	PrismQueryState *qs;
+	BlockNumber		 first_posting; /* leaf c's head = first_posting + c */
+	uint32_t		 nlist;
+	Dimension		 dim;
+	bool			 cosine;
+	MemoryContext	 tmp_ctx;
+	double			*sums;	  /* [tile * dim], indexed by leaf - tile_lo */
+	uint64_t		*cnts;	  /* [tile] */
+	float			*scratch; /* [dim] normalized copy for cosine */
+	uint32_t		 tile_lo;
+	uint32_t		 tile_hi;
 } RefineHeadState;
 
 static void
@@ -745,7 +746,7 @@ refine_head_cb(
 
 	const float *vin = Vec32ToRef(DatumGetVec32(values[0])).data;
 	uint32_t	 idx;
-	const float *v = mkt_refine_route_row(
+	const float *v = prism_refine_route_row(
 			rs->qs,
 			rs->first_posting,
 			vin,
@@ -769,17 +770,17 @@ refine_head_cb(
 
 static void
 serial_refine_heads(
-		PrismBuildState *bs,
-		MktHeadWriteCtx *headctx,
-		MktQueryState	*qs,
-		BlockNumber		 first_posting,
-		uint32_t		 nlist)
+		PrismBuildState	  *bs,
+		PrismHeadWriteCtx *headctx,
+		PrismQueryState	  *qs,
+		BlockNumber		   first_posting,
+		uint32_t		   nlist)
 {
 	Dimension dim = bs->params.dim;
 
 	uint64_t cap_bytes =
 			Min((uint64_t)maintenance_work_mem * 1024, (uint64_t)MaxAllocSize);
-	uint32_t tile = mkt_refine_tile_leaves(nlist, dim, cap_bytes);
+	uint32_t tile = prism_refine_tile_leaves(nlist, dim, cap_bytes);
 
 	RefineHeadState rs = {
 			.qs			   = qs,
@@ -810,14 +811,14 @@ serial_refine_heads(
 				(void *)&rs,
 				NULL);
 
-		mkt_refine_write_means(
+		prism_refine_write_means(
 				rs.sums,
 				rs.cnts,
 				lo,
 				hi,
 				dim,
 				rs.scratch,
-				mkt_write_leaf_head,
+				prism_write_leaf_head,
 				headctx);
 	}
 
@@ -858,7 +859,7 @@ do_serial_build(
 	*out_nlist		  = 0;
 	*out_tree_nlevels = 0;
 
-	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SAMPLE);
+	prism_build_report_phase(bs->prog, PRISM_BUILD_PHASE_SAMPLE);
 
 	uint32_t target_nlist = 0;
 	bool	 subsampled	  = false;
@@ -877,10 +878,10 @@ do_serial_build(
 	 * single-clustering shape as the parallel build's subtree store.
 	 * target_nlist (not the resolved leaf count) drives both passes.
 	 */
-	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_KMEANS);
-	MktBlobStore	 *node_store = mkt_pbuild_blobstore_begin();
-	MktStreamTreePlan plan;
-	if (!mkt_routing_tree_plan(
+	prism_build_report_phase(bs->prog, PRISM_BUILD_PHASE_KMEANS);
+	PrismBlobStore	   *node_store = prism_pbuild_blobstore_begin();
+	PrismStreamTreePlan plan;
+	if (!prism_routing_tree_plan(
 				bs->samples,
 				(uint32_t)bs->nsamples,
 				dim,
@@ -894,7 +895,7 @@ do_serial_build(
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("hierarchical k-means failed")));
-	mkt_pbuild_blobstore_rewind(node_store);
+	prism_pbuild_blobstore_rewind(node_store);
 
 	uint32_t nlist	 = plan.nleaves;
 	bs->params.nlist = nlist;
@@ -917,12 +918,12 @@ do_serial_build(
 	mkt_free(plan.leaf_mean);
 	plan.leaf_mean = NULL;
 
-	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SETUP);
+	prism_build_report_phase(bs->prog, PRISM_BUILD_PHASE_SETUP);
 	RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
 
 	/* Centroid area is [first_centroid, first_posting); block 0 is metadata.
 	 */
-	BlockNumber first_centroid = MKT_FIRST_CENTROID_BLKNO;
+	BlockNumber first_centroid = PRISM_FIRST_CENTROID_BLKNO;
 	BlockNumber first_posting  = first_centroid + plan.centroid_pages;
 
 	/*
@@ -931,9 +932,10 @@ do_serial_build(
 	 * metadata + centroid + head region so the streaming write can place
 	 * centroids at reserved blocks and each leaf's head page already exists
 	 * when the write pass emits it; continuation pages are appended past the
-	 * head region during mkt_posting_build_lists. No O(nlist) reserve arrays.
+	 * head region during prism_posting_build_lists. No O(nlist) reserve
+	 * arrays.
 	 */
-	mkt_build_reserve_layout(storage, first_posting + nlist);
+	prism_build_reserve_layout(storage, first_posting + nlist);
 
 	/*
 	 * Write pass: stream the centroid pages (reserved blocks, post-order, root
@@ -941,29 +943,29 @@ do_serial_build(
 	 * query then route page-backed over these centroid pages; the metadata
 	 * page is written after the scan, when the tuple count is final.
 	 */
-	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_CENTROID);
+	prism_build_report_phase(bs->prog, PRISM_BUILD_PHASE_CENTROID);
 
 	/* Exact internal-centroid collection for the build descent (see
-	 * MktExactCentroidCollector in index_build.h). */
-	MktExactCentroidCollector  exact_centroids = {0};
-	MktExactCentroidCollector *collector =
-			mkt_exact_centroid_enabled(plan.nlevels, p->centroid_format)
+	 * PrismExactCentroidCollector in index_build.h). */
+	PrismExactCentroidCollector	 exact_centroids = {0};
+	PrismExactCentroidCollector *collector =
+			prism_exact_centroid_enabled(plan.nlevels, p->centroid_format)
 					? &exact_centroids
 					: NULL;
 	if (collector != NULL)
-		mkt_exact_centroid_collector_init(
+		prism_exact_centroid_collector_init(
 				collector,
 				dim,
 				p->centroid_format,
 				first_centroid,
 				plan.centroid_pages,
-				mkt_exact_centroid_budget((uint64_t)maintenance_work_mem),
-				mkt_exact_centroid_expected_slots(p->nlist, p->fan_out));
+				prism_exact_centroid_budget((uint64_t)maintenance_work_mem),
+				prism_exact_centroid_expected_slots(p->nlist, p->fan_out));
 
-	MktHeadWriteCtx headctx;
-	mkt_head_write_ctx_init(
+	PrismHeadWriteCtx headctx;
+	prism_head_write_ctx_init(
 			&headctx, storage, rq_params, dim, p->fastscan, first_posting);
-	BlockNumber root = mkt_routing_tree_write(
+	BlockNumber root = prism_routing_tree_write(
 			storage,
 			(uint32_t)bs->nsamples,
 			dim,
@@ -976,11 +978,11 @@ do_serial_build(
 			node_store,
 			first_posting,
 			first_centroid,
-			mkt_write_leaf_head,
+			prism_write_leaf_head,
 			&headctx,
 			collector);
-	mkt_pbuild_blobstore_end(node_store);
-	mkt_head_write_ctx_cleanup(&headctx);
+	prism_pbuild_blobstore_end(node_store);
+	prism_head_write_ctx_cleanup(&headctx);
 	pfree(bs->samples);
 	bs->samples = NULL;
 	if (root == InvalidBlockNumber)
@@ -989,17 +991,17 @@ do_serial_build(
 				 errmsg("streaming centroid write failed")));
 
 	/*
-	 * Page-backed routing: build a MktIndexBase from the just-written index so
-	 * the scan routes each row exactly as the query/insert do (mkt_query_route
-	 * over the centroid pages). Assignment uses no in-RAM tree. The
-	 * base is stack-local but outlives the scan (all within this function); qs
-	 * holds it by pointer until mkt_query_state_cleanup below.
+	 * Page-backed routing: build a PrismIndexBase from the just-written index
+	 * so the scan routes each row exactly as the query/insert do
+	 * (prism_query_route over the centroid pages). Assignment uses no in-RAM
+	 * tree. The base is stack-local but outlives the scan (all within this
+	 * function); qs holds it by pointer until prism_query_state_cleanup below.
 	 */
-	MktIndexBase idx_base;
+	PrismIndexBase idx_base;
 	/* Route the build for accuracy, not query speed: the build-time routing
 	 * constants rather than the query-tuned GUCs (see MKT_BUILD_CENTROID_*
 	 * in posting_build.h). */
-	mkt_build_router_base_init(
+	prism_build_router_base_init(
 			&idx_base,
 			rq_params,
 			storage,
@@ -1009,8 +1011,8 @@ do_serial_build(
 			p->metric,
 			p->centroid_format,
 			prism_fastscan_bits,
-			MKT_BUILD_CENTROID_ERROR_SCALE,
-			MKT_BUILD_CENTROID_BEAM_SCALE,
+			PRISM_BUILD_CENTROID_ERROR_SCALE,
+			PRISM_BUILD_CENTROID_BEAM_SCALE,
 			bs->params.fan_out,
 			nlist,
 			rabitq_seed,
@@ -1018,14 +1020,14 @@ do_serial_build(
 			palloc(vec_nbytes));
 	/* Build-only accuracy hook: score the internal tree levels against the
 	 * exact centroids collected during the streaming write (the query and
-	 * insert paths never set this; see MktExactInternalCentroids). */
-	MktExactInternalCentroids exact_view;
+	 * insert paths never set this; see PrismExactInternalCentroids). */
+	PrismExactInternalCentroids exact_view;
 	if (collector != NULL)
 	{
-		mkt_exact_centroid_view(collector, &exact_view);
+		prism_exact_centroid_view(collector, &exact_view);
 		idx_base.exact_internal = &exact_view;
 	}
-	mkt_query_state_init(&bs->qs, &idx_base, 1, MKT_SECONDARY_TOPK);
+	prism_query_state_init(&bs->qs, &idx_base, 1, PRISM_SECONDARY_TOPK);
 
 	/*
 	 * When the sample was budget-limited AND the leaves are sample-thin
@@ -1042,13 +1044,13 @@ do_serial_build(
 	{
 		instr_time t_ref_start;
 		INSTR_TIME_SET_CURRENT(t_ref_start);
-		mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_REFINE);
+		prism_build_report_phase(bs->prog, PRISM_BUILD_PHASE_REFINE);
 
-		MktHeadWriteCtx rhead;
-		mkt_head_write_ctx_init(
+		PrismHeadWriteCtx rhead;
+		prism_head_write_ctx_init(
 				&rhead, storage, rq_params, dim, p->fastscan, first_posting);
 		serial_refine_heads(bs, &rhead, &bs->qs, first_posting, nlist);
-		mkt_head_write_ctx_cleanup(&rhead);
+		prism_head_write_ctx_cleanup(&rhead);
 
 		instr_time t_ref_end;
 		INSTR_TIME_SET_CURRENT(t_ref_end);
@@ -1065,7 +1067,7 @@ do_serial_build(
 
 	/*
 	 * Cluster-keyed sorter: the scan streams every posting entry here (keyed
-	 * by cluster); mkt_posting_build_lists then reads them back grouped by
+	 * by cluster); prism_posting_build_lists then reads them back grouped by
 	 * cluster and builds each list with a single resident page builder. Memory
 	 * is bounded by maintenance_work_mem (the sort spills if exceeded),
 	 * so no O(nlist) array of resident builders exists.
@@ -1074,18 +1076,18 @@ do_serial_build(
 	 * parallel leader uses.
 	 */
 	bs->rq_params = rq_params;
-	bs->sorter	  = mkt_pbuild_sort_begin(
+	bs->sorter	  = prism_pbuild_sort_begin(
 			   NULL,
 			   NULL,
 			   0,
 			   0,
 			   true,
-			   (uint32_t)mkt_posting_entry_size(dim),
+			   (uint32_t)prism_posting_entry_size(dim),
 			   maintenance_work_mem);
 
 	/* Shared route+encode+emit context (same helper the parallel workers use).
 	 */
-	mkt_build_route_ctx_init(
+	prism_build_route_ctx_init(
 			&bs->route,
 			&bs->qs,
 			bs->sorter,
@@ -1099,7 +1101,7 @@ do_serial_build(
 	/* Reports the scan phase and fires the "prism-build-load" test hook (see
 	 * the seam): lets an isolation test observe the in-progress serial build.
 	 */
-	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_SCAN);
+	prism_build_report_phase(bs->prog, PRISM_BUILD_PHASE_SCAN);
 
 	instr_time t_serial_start;
 	INSTR_TIME_SET_CURRENT(t_serial_start);
@@ -1123,8 +1125,8 @@ do_serial_build(
 	 * single resident page builder, in cluster order. Empty clusters still get
 	 * an (empty) head page, matching the previous per-cluster behavior.
 	 */
-	mkt_build_report_phase(bs->prog, MKT_BUILD_PHASE_POSTING);
-	mkt_posting_build_lists(
+	prism_build_report_phase(bs->prog, PRISM_BUILD_PHASE_POSTING);
+	prism_posting_build_lists(
 			bs->sorter,
 			storage,
 			nlist,
@@ -1132,14 +1134,14 @@ do_serial_build(
 			p->fastscan,
 			rq_params,
 			first_posting);
-	bs->sorter = NULL; /* ended by mkt_posting_build_lists */
+	bs->sorter = NULL; /* ended by prism_posting_build_lists */
 
 	bs->indtuples  = bs->route.indtuples;
 	bs->soar_dupes = bs->route.soar_dupes;
-	mkt_build_route_ctx_cleanup(&bs->route);
-	mkt_query_state_cleanup(&bs->qs);
+	prism_build_route_ctx_cleanup(&bs->route);
+	prism_query_state_cleanup(&bs->qs);
 	if (collector != NULL)
-		mkt_exact_centroid_collector_cleanup(collector);
+		prism_exact_centroid_collector_cleanup(collector);
 
 	elog(LOG,
 		 "prism: serial build scan %.1fms, "
@@ -1228,7 +1230,7 @@ prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	/* Resolved once, directly -- no metadata page exists yet for the
 	 * per-backend cache to read. The per-tuple callbacks follow the pointer.
 	 */
-	bs.input = vec32_access(mkt_index_type_info(index), dim, build_ctx);
+	bs.input = vec32_access(prism_index_type_info(index), dim, build_ctx);
 
 	/*
 	 * Build introspection: one reporting context the serial and parallel paths
@@ -1236,9 +1238,9 @@ prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 	 * either way and (when prism.log_build_stats is on) per-phase stats land
 	 * in the server log.
 	 */
-	MktBuildStats	 stats = {0};
-	MktBuildProgress prog;
-	mkt_build_progress_begin(
+	PrismBuildStats	   stats = {0};
+	PrismBuildProgress prog;
+	prism_build_progress_begin(
 			&prog,
 			index_info->ii_ParallelWorkers > 0,
 			prism_log_build_stats,
@@ -1288,11 +1290,11 @@ prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 		 * nlist and fan_out are already resolved (resolve_build_params).
 		 */
 		uint32_t requested_nlist = p->nlist;
-		uint32_t max_nlist		 = mkt_max_nlist(p->nlist, p->fan_out);
+		uint32_t max_nlist		 = prism_max_nlist(p->nlist, p->fan_out);
 
 		bs.params.nlist = max_nlist;
 
-		MktBuildConfig cfg = {
+		PrismBuildConfig cfg = {
 				.dim			  = bs.params.dim,
 				.metric			  = bs.params.metric,
 				.centroid_format  = bs.params.centroid_format,
@@ -1427,7 +1429,7 @@ prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 					(uint8_t)p->fan_out,
 					fc,
 					meta_first_posting,
-					meta_first_posting - MKT_FIRST_CENTROID_BLKNO,
+					meta_first_posting - PRISM_FIRST_CENTROID_BLKNO,
 					built_nlist,
 					p->centroid_format,
 					p->metric,
@@ -1435,7 +1437,7 @@ prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 					p->fastscan,
 					global_mean);
 		}
-		mkt_build_report_phase(&prog, MKT_BUILD_PHASE_WAL);
+		prism_build_report_phase(&prog, PRISM_BUILD_PHASE_WAL);
 		/*
 		 * WAL-log the built pages only when the relation is WAL-logged, the
 		 * same guard every core index AM (GiST/GIN/SP-GiST) applies here.
@@ -1471,7 +1473,7 @@ prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 	/* Flush the final phase timing + emit the build summary (heap_ctx is read
 	 * here, so this must run before build_ctx is deleted below). */
-	mkt_build_progress_end(&prog);
+	prism_build_progress_end(&prog);
 
 	/* Cleanup */
 
@@ -1489,5 +1491,5 @@ prism_buildphasename(int64 phasenum)
 {
 	/* Single source of truth for the phase names (index/build_progress.c),
 	 * shared with the build logs so the two never drift. */
-	return unconstify(char *, mkt_build_phase_name((int)phasenum));
+	return unconstify(char *, prism_build_phase_name((int)phasenum));
 }

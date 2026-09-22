@@ -2,7 +2,7 @@
  * test_soar.c - Unit tests for SOAR secondary-cluster selection
  *
  * The build picks a SOAR (orthogonality-amplified) secondary cluster for
- * replicated vectors. mkt_find_soar_secondary searches a candidate set
+ * replicated vectors. prism_find_soar_secondary searches a candidate set
  * (cand_leaves, the beam-descent candidates — O(count)) in production, or
  * every leaf when cand_leaves is NULL (a full scan). These tests pin it down:
  *
@@ -144,9 +144,9 @@ TEST(soar_cand_equals_full_scan_over_all_leaves)
 		uint32_t primary = nearest_leaf(vec, leaves, nleaves, dim);
 		make_residual(r, vec, leaves + (size_t)primary * dim, dim);
 
-		uint32_t full = mkt_find_soar_secondary(
+		uint32_t full = prism_find_soar_secondary(
 				vec, leaves, NULL, nleaves, dim, primary, r, 1.0);
-		uint32_t cand = mkt_find_soar_secondary(
+		uint32_t cand = prism_find_soar_secondary(
 				vec, leaves, all, nleaves, dim, primary, r, 1.0);
 		ASSERT_EQ(
 				full,
@@ -182,7 +182,7 @@ TEST(soar_cand_picks_objective_min)
 			cand[k] = (uint32_t)((g_rng = g_rng * 1103515245u + 12345u) >> 9) %
 					  nleaves;
 
-		uint32_t got = mkt_find_soar_secondary(
+		uint32_t got = prism_find_soar_secondary(
 				vec, leaves, cand, ncand, dim, primary, r, 1.5);
 		uint32_t expect =
 				ref_soar_min(vec, leaves, cand, ncand, dim, primary, r, 1.5f);
@@ -211,7 +211,7 @@ TEST(soar_cand_skips_primary)
 	make_residual(r, vec, leaves + (size_t)primary * dim, dim);
 
 	uint32_t only_primary[1] = {primary};
-	uint32_t got			 = mkt_find_soar_secondary(
+	uint32_t got			 = prism_find_soar_secondary(
 			vec, leaves, only_primary, 1, dim, primary, r, 1.0);
 	ASSERT_EQ(
 			primary,
@@ -221,7 +221,7 @@ TEST(soar_cand_skips_primary)
 	/* primary mixed with one other candidate -> the other one wins. */
 	uint32_t other	  = (primary + 1) % nleaves;
 	uint32_t mixed[2] = {primary, other};
-	uint32_t got2	  = mkt_find_soar_secondary(
+	uint32_t got2	  = prism_find_soar_secondary(
 			vec, leaves, mixed, 2, dim, primary, r, 1.0);
 	ASSERT_EQ(other, got2, "primary in the candidate list must be skipped");
 }

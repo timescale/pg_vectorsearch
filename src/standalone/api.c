@@ -1,7 +1,7 @@
 /*
  * api.c - Public C API for standalone meerkat library
  *
- * Thin wrapper around MktIndex (standalone/index.h) and MktQueryCtx
+ * Thin wrapper around PrismIndex (standalone/index.h) and PrismQueryCtx
  * (standalone/query.h). The handle bundles both so callers get a
  * single opaque pointer.
  *
@@ -18,9 +18,9 @@
 
 struct MktHandle
 {
-	MktMemCtx	 memctx; /* top-level context, owns everything */
-	MktIndex	*idx;
-	MktQueryCtx *qctx;
+	MktMemCtx	   memctx; /* top-level context, owns everything */
+	PrismIndex	  *idx;
+	PrismQueryCtx *qctx;
 };
 
 /* ----------------------------------------------------------------
@@ -37,7 +37,7 @@ parse_metric(const char *s)
 	return DISTANCE_L2;
 }
 
-static MktCentroidFormat
+static PrismCentroidFormat
 parse_centroid_fmt(const char *s)
 {
 	if (s == NULL)
@@ -51,12 +51,12 @@ parse_centroid_fmt(const char *s)
 	return MKT_CENTROID_FMT_RABITQ;
 }
 
-static MktPostingFormat
+static PrismPostingFormat
 parse_posting_fmt(const char *s)
 {
 	if (s != NULL && strcmp(s, "flat") == 0)
-		return MKT_POSTING_FMT_FLAT;
-	return MKT_POSTING_FMT_PAGES; /* default: pages (matches PG on-disk) */
+		return PRISM_POSTING_FMT_FLAT;
+	return PRISM_POSTING_FMT_PAGES; /* default: pages (matches PG on-disk) */
 }
 
 static MktDistanceMode
@@ -73,19 +73,19 @@ parse_distance_mode(const char *s)
 
 MktHandle *
 mkt_handle_create(
-		Vec32Source	 *src,
-		uint32_t	  nlist,
-		uint32_t	  fan_out,
-		const char	 *metric,
-		const char	 *centroid_fmt,
-		const char	 *posting_fmt,
-		uint32_t	  km_nredo,
-		uint32_t	  km_max_iter,
-		double		  soar_lambda,
-		double		  boundary_epsilon,
-		int			  fastscan,
-		int32_t		  nworkers,
-		MktBuildInfo *info)
+		Vec32Source	   *src,
+		uint32_t		nlist,
+		uint32_t		fan_out,
+		const char	   *metric,
+		const char	   *centroid_fmt,
+		const char	   *posting_fmt,
+		uint32_t		km_nredo,
+		uint32_t		km_max_iter,
+		double			soar_lambda,
+		double			boundary_epsilon,
+		int				fastscan,
+		int32_t			nworkers,
+		PrismBuildInfo *info)
 {
 	/* Create context as child of the current context if one exists,
 	 * otherwise as a top-level context. This works both when called
@@ -95,9 +95,9 @@ mkt_handle_create(
 	MktMemCtx memctx  = mkt_memctx_create(parent, "mkt_handle");
 	MktMemCtx old_ctx = mkt_memctx_switch(memctx);
 
-	MktCentroidFormat fmt = parse_centroid_fmt(centroid_fmt);
+	PrismCentroidFormat fmt = parse_centroid_fmt(centroid_fmt);
 
-	MktIndexConfig config = {
+	PrismIndexConfig config = {
 			.nlist			  = nlist,
 			.fan_out		  = fan_out,
 			.centroid_fmt	  = fmt,
@@ -112,8 +112,8 @@ mkt_handle_create(
 			.posting_fmt	  = parse_posting_fmt(posting_fmt),
 	};
 
-	MktBuildStats build_stats;
-	MktIndex	 *idx = mkt_index_build(src, &config, &build_stats);
+	PrismBuildStats build_stats;
+	PrismIndex	   *idx = prism_index_build(src, &config, &build_stats);
 	if (idx == NULL)
 	{
 		mkt_memctx_switch(old_ctx);
@@ -148,10 +148,10 @@ mkt_handle_create(
 	}
 
 	/* Pre-allocate query context: k up to 100, nprobe up to 400 */
-	MktQueryCtx *qctx = mkt_query_ctx_create(idx, 100, 400);
+	PrismQueryCtx *qctx = prism_query_ctx_create(idx, 100, 400);
 	if (qctx == NULL)
 	{
-		mkt_index_destroy(idx);
+		prism_index_destroy(idx);
 		mkt_memctx_switch(old_ctx);
 		mkt_memctx_delete(memctx);
 		return NULL;
@@ -169,21 +169,21 @@ mkt_handle_create(
 
 MktHandle *
 mkt_handle_create_from_array(
-		const float	 *vectors,
-		uint32_t	  nvecs,
-		uint32_t	  dim,
-		uint32_t	  nlist,
-		uint32_t	  fan_out,
-		const char	 *metric,
-		const char	 *centroid_fmt,
-		const char	 *posting_fmt,
-		uint32_t	  km_nredo,
-		uint32_t	  km_max_iter,
-		double		  soar_lambda,
-		double		  boundary_epsilon,
-		int			  fastscan,
-		int32_t		  nworkers,
-		MktBuildInfo *info)
+		const float	   *vectors,
+		uint32_t		nvecs,
+		uint32_t		dim,
+		uint32_t		nlist,
+		uint32_t		fan_out,
+		const char	   *metric,
+		const char	   *centroid_fmt,
+		const char	   *posting_fmt,
+		uint32_t		km_nredo,
+		uint32_t		km_max_iter,
+		double			soar_lambda,
+		double			boundary_epsilon,
+		int				fastscan,
+		int32_t			nworkers,
+		PrismBuildInfo *info)
 {
 	MktArraySource array_src;
 	mkt_array_source_init(&array_src, vectors, nvecs, dim);
@@ -218,7 +218,7 @@ mkt_handle_query(
 
 	MktDistanceMode mode = parse_distance_mode(distance_mode);
 
-	return mkt_query_exec(
+	return prism_query_exec(
 			handle->qctx, query, k, nprobe, mode, rerank, result_ids);
 }
 
@@ -231,8 +231,8 @@ mkt_handle_destroy(MktHandle *handle)
 	/* Destroy query ctx and index first (they manage their own
 	 * child contexts), then delete the top-level context which
 	 * frees the handle itself. */
-	mkt_query_ctx_destroy(handle->qctx);
-	mkt_index_destroy(handle->idx);
+	prism_query_ctx_destroy(handle->qctx);
+	prism_index_destroy(handle->idx);
 
 	MktMemCtx memctx = handle->memctx;
 	mkt_memctx_delete(memctx);

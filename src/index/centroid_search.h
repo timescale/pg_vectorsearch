@@ -18,8 +18,8 @@
  *   5. Return posting list heads + distances for leaf winners
  */
 
-#ifndef MKT_CENTROID_SEARCH_H
-#define MKT_CENTROID_SEARCH_H
+#ifndef PRISM_CENTROID_SEARCH_H
+#define PRISM_CENTROID_SEARCH_H
 
 #include <stdint.h>
 
@@ -36,46 +36,46 @@
  * (everything above the leaf entries — a few thousand nodes even at very
  * large nlist), and the build knows all their float centroids: the writer
  * collects them per page while the tree streams to storage (see
- * MktExactCentroidCollector in index_build.h).
+ * PrismExactCentroidCollector in index_build.h).
  *
  * The view addresses a slot per (page, entry): pages of the centroid
  * region [base, base + npages) map through page_off[] to the first slot
  * of that page's entries (entries are dense per page, in page-entry
  * order). Pages that carry no internal entries — the leaf level — hold
- * MKT_EXACT_INTERNAL_NONE and fall back to the estimated scoring.
+ * PRISM_EXACT_INTERNAL_NONE and fall back to the estimated scoring.
  *
  * Only the build route sets the hook; queries never do. The view is
  * non-owning: the collector arrays or collection it was built over must
- * outlive every consumer (see mkt_exact_centroid_collector_cleanup / the seam
- * release functions).
+ * outlive every consumer (see prism_exact_centroid_collector_cleanup / the
+ * seam release functions).
  * ---------------------------------------------------------------- */
-#define MKT_EXACT_INTERNAL_NONE UINT32_MAX
+#define PRISM_EXACT_INTERNAL_NONE UINT32_MAX
 
-typedef struct MktExactInternalCentroids
+typedef struct PrismExactInternalCentroids
 {
 	const float	   *cents;	  /* original-space centroids, dim floats/slot */
 	const uint32_t *page_off; /* [npages] first slot per page (or NONE) */
 	BlockNumber		base;	  /* first block of the centroid-page region */
 	uint32_t		npages;	  /* region length in pages */
-} MktExactInternalCentroids;
+} PrismExactInternalCentroids;
 
 /* ----------------------------------------------------------------
  * Search result entry
  * ---------------------------------------------------------------- */
-typedef struct MktCentroidResult
+typedef struct PrismCentroidResult
 {
 	BlockNumber posting_head; /* head of posting list */
 	Distance	distance;	  /* estimated distance to query */
 	Distance	error;		  /* symmetric error margin */
-} MktCentroidResult;
+} PrismCentroidResult;
 
 /* ----------------------------------------------------------------
  * Per-scan scratch buffers
  *
  * Bundles the candidate-buffer pair and the score-page scratch that
- * mkt_centroid_beam_search would otherwise palloc on every call. The
- * caller (MktQueryState / MktQueryCtx) allocates this once at scan
- * setup and passes it in through MktCentroidSearchState.
+ * prism_centroid_beam_search would otherwise palloc on every call. The
+ * caller (PrismQueryState / PrismQueryCtx) allocates this once at scan
+ * setup and passes it in through PrismCentroidSearchState.
  *
  * Sizing:
  *   buf_a, buf_b: cand_cap entries each. Caller picks cand_cap so it
@@ -83,22 +83,22 @@ typedef struct MktCentroidResult
  *   f_add..symmetric_scratch: max_per_page entries each (the largest
  *     centroid page entry count for this dim).
  * ---------------------------------------------------------------- */
-struct MktCentroidScratch;
-typedef struct MktCentroidScratch MktCentroidScratch;
+struct PrismCentroidScratch;
+typedef struct PrismCentroidScratch PrismCentroidScratch;
 
 /*
  * Allocate scratch sized for searches up to max_beam_width / nprobe
  * candidates per level. Returns NULL on failure. cleanup releases
  * the underlying buffers.
  */
-MktCentroidScratch		*
-mkt_centroid_scratch_create(Dimension dim, uint32_t max_beam_width);
-void mkt_centroid_scratch_free(MktCentroidScratch *scratch);
+PrismCentroidScratch	  *
+prism_centroid_scratch_create(Dimension dim, uint32_t max_beam_width);
+void prism_centroid_scratch_free(PrismCentroidScratch *scratch);
 
 /* ----------------------------------------------------------------
  * Search state
  * ---------------------------------------------------------------- */
-typedef struct MktCentroidSearchState
+typedef struct PrismCentroidSearchState
 {
 	const RaBitQQueryState *qstate;		/* query for RaBitQ pages */
 	const float			   *query;		/* raw query for float/half pages */
@@ -110,18 +110,18 @@ typedef struct MktCentroidSearchState
 	float error_scale; /* scales pruning error bound (1=default, 0=drop) */
 	/* Pre-allocated scratch. Must be non-NULL and sized for at least
 	 * this state's beam_width / nprobe. */
-	MktCentroidScratch *scratch;
+	PrismCentroidScratch *scratch;
 	/* Optional (NULL for queries): exact internal-node centroids. When a
 	 * RaBitQ/fastscan page has a slot here, its entries are scored by
 	 * exact L2 (error = 0) instead of the 1-bit estimate; leaf-level
 	 * pages have no slot and keep the estimates. */
-	const MktExactInternalCentroids *exact_internal;
-} MktCentroidSearchState;
+	const PrismExactInternalCentroids *exact_internal;
+} PrismCentroidSearchState;
 
 /* ----------------------------------------------------------------
  * Search statistics (optional output)
  * ---------------------------------------------------------------- */
-typedef struct MktCentroidSearchStats
+typedef struct PrismCentroidSearchStats
 {
 	uint64_t dist_calcs; /* approximate distance computations */
 	uint32_t pages_read; /* centroid pages read */
@@ -130,7 +130,7 @@ typedef struct MktCentroidSearchStats
 	uint64_t lut_ns;	  /* per-query fastscan LUT build */
 	uint64_t pageread_ns; /* centroid page read/release */
 	uint64_t score_ns;	  /* score_page total (incl. lut_ns) */
-} MktCentroidSearchStats;
+} PrismCentroidSearchStats;
 
 /* ----------------------------------------------------------------
  * Beam search API
@@ -158,12 +158,12 @@ typedef struct MktCentroidSearchStats
  * path to obtain centroid reference vectors for float/half
  * centroid formats.
  */
-uint32_t mkt_centroid_beam_search(
-		const MktCentroidSearchState *state,
-		BlockNumber					  first_centroid_blkno,
-		uint8_t						  nlevels,
-		MktCentroidResult			 *results,
-		float						 *centroid_vecs,
-		MktCentroidSearchStats		 *stats);
+uint32_t prism_centroid_beam_search(
+		const PrismCentroidSearchState *state,
+		BlockNumber						first_centroid_blkno,
+		uint8_t							nlevels,
+		PrismCentroidResult			   *results,
+		float						   *centroid_vecs,
+		PrismCentroidSearchStats	   *stats);
 
-#endif /* MKT_CENTROID_SEARCH_H */
+#endif /* PRISM_CENTROID_SEARCH_H */

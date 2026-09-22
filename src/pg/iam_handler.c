@@ -113,8 +113,8 @@ prism_insert(
 	 * registered with the current resource owner; capture it for the
 	 * release below (and for the error paths in between, which release
 	 * through the owner instead). */
-	ResourceOwner params_owner = CurrentResourceOwner;
-	MktIndexBase  base;
+	ResourceOwner  params_owner = CurrentResourceOwner;
+	PrismIndexBase base;
 	prism_index_base_init(index, &base);
 	Dimension dim = base.dim;
 
@@ -143,7 +143,7 @@ prism_insert(
 					  mkt_l2_norm_squared(vref.data, dim) == 0.0f;
 
 	/*
-	 * Route to a leaf the same way a query does (mkt_query_route normalizes
+	 * Route to a leaf the same way a query does (prism_query_route normalizes
 	 * for cosine, rotates into qs.pt_query, and runs the beam search;
 	 * qs.pt_query is then exactly the rotated residual the encode needs), lock
 	 * its head, and append. If the head was split away while we waited for the
@@ -153,19 +153,19 @@ prism_insert(
 	 * the tuple.
 	 *
 	 * The query state is initialized once and reused across attempts -- each
-	 * mkt_query_route re-runs the search from scratch on it -- so a retry does
-	 * not re-allocate its beam buffers.
+	 * prism_query_route re-runs the search from scratch on it -- so a retry
+	 * does not re-allocate its beam buffers.
 	 */
-	RaBitQScratch enc;
-	bool		  enc_init = false;
-	MktQueryState qs;
-	mkt_query_state_init(&qs, &base, 1, MKT_INSERT_ROUTE_BEAM);
+	RaBitQScratch	enc;
+	bool			enc_init = false;
+	PrismQueryState qs;
+	prism_query_state_init(&qs, &base, 1, MKT_INSERT_ROUTE_BEAM);
 	bool inserted = false;
 	bool routed	  = true;
 
 	for (int attempt = 0; attempt < MKT_INSERT_ROUTE_ATTEMPTS; attempt++)
 	{
-		uint32_t n = mkt_query_route(
+		uint32_t n = prism_query_route(
 				&qs,
 				vref.data,
 				MKT_INSERT_ROUTE_BEAM,
@@ -222,7 +222,7 @@ prism_insert(
 			head_retired = true;
 		}
 		else
-			mkt_posting_insert_one(
+			prism_posting_insert_one(
 					&storage.base,
 					base.params,
 					dim,
@@ -238,7 +238,7 @@ prism_insert(
 		inserted = true;
 		break;
 	}
-	mkt_query_state_cleanup(&qs);
+	prism_query_state_cleanup(&qs);
 
 	MemoryContextSwitchTo(old_ctx);
 	MemoryContextDelete(insert_ctx);
@@ -291,7 +291,7 @@ tid_is_dead(ItemPointerData tid, void *state)
 
 /*
  * VACUUM's dead-tuple removal. Block-scans the index and tombstones each
- * posting chain from its FIRST (head) page via mkt_posting_tombstone_chain —
+ * posting chain from its FIRST (head) page via prism_posting_tombstone_chain —
  * the head walk covers the chain's overflow pages, so only heads are acted on.
  * Tombstoned entries are skipped by later scans; physical reclaim happens at a
  * later compaction/rebuild. This is the cleanup path for both explicit DELETEs
@@ -357,17 +357,17 @@ prism_bulkdelete(
 		 * of another kind is never misread through the posting layout.
 		 */
 		if (!recognized &&
-			PageGetSpecialSize(page) == sizeof(MktPostingPageOpaque))
+			PageGetSpecialSize(page) == sizeof(PrismPostingPageOpaque))
 		{
-			MktPostingPageOpaque *op = mkt_posting_opaque(page);
-			if (op->page_id == MKT_POSTING_PAGE_ID)
+			PrismPostingPageOpaque *op = prism_posting_opaque(page);
+			if (op->page_id == PRISM_POSTING_PAGE_ID)
 			{
 				recognized = true;
 				/* Skip a retired (DELETED) chain: it is superseded by a split,
 				 * its live_count slot now holds delete_xid, and cleanup
 				 * reclaims it once safe. */
-				is_head = (op->flags & MKT_POSTING_PAGE_FIRST) != 0 &&
-						  !(op->flags & MKT_POSTING_PAGE_DELETED);
+				is_head = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0 &&
+						  !(op->flags & PRISM_POSTING_PAGE_DELETED);
 			}
 		}
 		UnlockReleaseBuffer(buf);
@@ -396,21 +396,21 @@ prism_bulkdelete(
 
 		/* Re-read under the lock: a live head at this point stays live. */
 		Page hp = mkt_storage_read_page(&storage.base, blk);
-		const MktPostingPageOpaque *hop = mkt_posting_opaque(hp);
-		bool still_head = (hop->flags & MKT_POSTING_PAGE_FIRST) != 0 &&
-						  !(hop->flags & MKT_POSTING_PAGE_DELETED) &&
-						  !(hop->flags & MKT_POSTING_PAGE_TOMBSTONED);
+		const PrismPostingPageOpaque *hop = prism_posting_opaque(hp);
+		bool still_head = (hop->flags & PRISM_POSTING_PAGE_FIRST) != 0 &&
+						  !(hop->flags & PRISM_POSTING_PAGE_DELETED) &&
+						  !(hop->flags & PRISM_POSTING_PAGE_TOMBSTONED);
 		mkt_storage_release_page(&storage.base, blk);
 
 		if (still_head)
 		{
-			stats->tuples_removed += mkt_posting_tombstone_chain(
+			stats->tuples_removed += prism_posting_tombstone_chain(
 					&storage.base, dim, blk, tid_is_dead, &ctx);
 
 			/* Live tuples remaining: the head's maintained live_count, which
 			 * the tombstone pass just decremented (O(1), no rescan). */
 			Page lp = mkt_storage_read_page(&storage.base, blk);
-			stats->num_index_tuples += mkt_posting_head_live_count(lp);
+			stats->num_index_tuples += prism_posting_head_live_count(lp);
 			mkt_storage_release_page(&storage.base, blk);
 		}
 

@@ -48,13 +48,13 @@ mkt_recent_buffers_assign_hook(bool newval, void *extra)
 static void
 mkt_probe_expand_assign_hook(double newval, void *extra)
 {
-	mkt_query_set_probe_expand(newval);
+	prism_query_set_probe_expand(newval);
 }
 
 static void
 mkt_rerank_pool_assign_hook(int newval, void *extra)
 {
-	mkt_query_set_rerank_pool((int32_t)newval);
+	prism_query_set_rerank_pool((int32_t)newval);
 }
 
 static const struct config_enum_entry mkt_distance_mode_options[] = {
@@ -441,7 +441,7 @@ mkt_pg_check_dim_valid(int dim)
  * Gram-Schmidt -- O(dim^3) in time, O(dim^2) in memory -- and is callable by
  * any role, so an oversized dim is a CPU/memory denial-of-service vector (at
  * the generic vector cap a single call runs for minutes at 100% CPU). Bound
- * it by MKT_INDEX_MAX_DIM: generating params for a dimension no prism index
+ * it by PRISM_INDEX_MAX_DIM: generating params for a dimension no prism index
  * can hold is pointless, so the largest indexable dimension is the natural
  * ceiling, and it tracks the index limit automatically.
  */
@@ -449,12 +449,12 @@ void
 mkt_pg_check_rabitq_params_dim_valid(int dim)
 {
 	mkt_pg_check_dim_valid(dim);
-	if (dim > MKT_INDEX_MAX_DIM)
+	if (dim > PRISM_INDEX_MAX_DIM)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("cannot generate rabitq_params for more than %d "
 						"dimensions",
-						MKT_INDEX_MAX_DIM),
+						PRISM_INDEX_MAX_DIM),
 				 errhint("Building the transform matrix is O(dim^3); no "
 						 "prism index supports more dimensions than this.")));
 }

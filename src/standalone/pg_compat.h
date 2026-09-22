@@ -231,8 +231,8 @@ RelationGetNumberOfBlocks(Relation rel)
 
 /*
  * The shared build asks for an IndexInfo only to read ii_ParallelWorkers (the
- * leader) and to hand back to mkt_build_scan (ignored in standalone). A small
- * struct covers both; BuildIndexInfo is unused by the standalone scan.
+ * leader) and to hand back to prism_build_scan (ignored in standalone). A
+ * small struct covers both; BuildIndexInfo is unused by the standalone scan.
  */
 typedef struct IndexInfo
 {

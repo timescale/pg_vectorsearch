@@ -49,12 +49,12 @@ PG_FUNCTION_INFO_V1(mkt_index_settings);
  */
 static void
 check_centroid_count(
-		BlockNumber		  blkno,
-		uint32_t		  count,
-		Dimension		  dim,
-		MktCentroidFormat fmt)
+		BlockNumber			blkno,
+		uint32_t			count,
+		Dimension			dim,
+		PrismCentroidFormat fmt)
 {
-	uint32_t max_entries = mkt_centroid_max_entries_fmt(dim, fmt);
+	uint32_t max_entries = prism_centroid_max_entries_fmt(dim, fmt);
 	if (count > max_entries)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
@@ -70,8 +70,8 @@ static void
 check_posting_count(
 		BlockNumber blkno, uint32_t count, Dimension dim, bool is_first)
 {
-	uint32_t max_entries = is_first ? mkt_posting_max_entries_first(dim)
-									: mkt_posting_max_entries(dim);
+	uint32_t max_entries = is_first ? prism_posting_max_entries_first(dim)
+									: prism_posting_max_entries(dim);
 	if (count > max_entries)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
@@ -165,11 +165,11 @@ collect_leaf_entries(
 
 		Page page = mkt_storage_read_page(st, blkno);
 
-		const MktCentroidPageOpaque *opaque	  = MKT_CENTROID_OPAQUE(page);
-		uint16_t					 nentries = opaque->entry_count;
-		MktCentroidFormat			 fmt = (MktCentroidFormat)(opaque->flags &
-													   MKT_CENTROID_FMT_MASK);
-		bool is_leaf_page				 = (opaque->level == nlevels - 1);
+		const PrismCentroidPageOpaque *opaque	= PRISM_CENTROID_OPAQUE(page);
+		uint16_t					   nentries = opaque->entry_count;
+		PrismCentroidFormat			   fmt =
+				(PrismCentroidFormat)(opaque->flags & PRISM_CENTROID_FMT_MASK);
+		bool is_leaf_page = (opaque->level == nlevels - 1);
 
 		check_centroid_count(blkno, nentries, dim, fmt);
 
@@ -192,15 +192,16 @@ collect_leaf_entries(
 				uint32_t	 g		 = i / MKT_FASTSCAN_GROUP;
 				uint32_t	 slot	 = i % MKT_FASTSCAN_GROUP;
 				BlockNumber *grp =
-						mkt_centroid_fastscan_group_child(content, g, dim);
+						prism_centroid_fastscan_group_child(content, g, dim);
 				child	= grp[slot];
 				is_leaf = is_leaf_page;
 			}
 			else
 			{
-				const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
-				child							  = entry->child_blkno;
-				is_leaf = (entry->flags & MKT_CENTROID_FLAG_LEAF) != 0;
+				const PrismCentroidEntryMeta *entry =
+						prism_centroid_meta(page, i);
+				child	= entry->child_blkno;
+				is_leaf = (entry->flags & PRISM_CENTROID_FLAG_LEAF) != 0;
 			}
 
 			if (!BlockNumberIsValid(child))
@@ -231,7 +232,7 @@ collect_leaf_entries(
 	return leaves_len;
 }
 
-/* Format name lookup (indexed by MktCentroidFormat) */
+/* Format name lookup (indexed by PrismCentroidFormat) */
 static const char *centroid_format_names[] = {
 		[MKT_CENTROID_FMT_RABITQ]	= "rabitq",
 		[MKT_CENTROID_FMT_FLOAT]	= "float",
@@ -319,9 +320,9 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 
 		Page page = mkt_storage_read_page(st, blkno);
 
-		const MktCentroidPageOpaque *opaque = MKT_CENTROID_OPAQUE(page);
-		MktCentroidFormat			 fmt = (MktCentroidFormat)(opaque->flags &
-													   MKT_CENTROID_FMT_MASK);
+		const PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
+		PrismCentroidFormat			   fmt =
+				(PrismCentroidFormat)(opaque->flags & PRISM_CENTROID_FMT_MASK);
 		/* FASTSCAN doesn't have per-entry flags, so determine leaf
 		 * status from tree depth: bottom level holds posting heads. */
 		bool is_leaf_page = (opaque->level == nlevels - 1);
@@ -343,7 +344,7 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 				uint32_t	 g	  = i / MKT_FASTSCAN_GROUP;
 				uint32_t	 slot = i % MKT_FASTSCAN_GROUP;
 				BlockNumber *child =
-						mkt_centroid_fastscan_group_child(content, g, dim);
+						prism_centroid_fastscan_group_child(content, g, dim);
 
 				Datum values[7];
 				bool  nulls[7] = {0};
@@ -385,8 +386,9 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 		{
 			for (uint16_t i = 0; i < nentries; i++)
 			{
-				const MktCentroidEntryMeta *entry = mkt_centroid_meta(page, i);
-				bool is_leaf = (entry->flags & MKT_CENTROID_FLAG_LEAF) != 0;
+				const PrismCentroidEntryMeta *entry =
+						prism_centroid_meta(page, i);
+				bool is_leaf = (entry->flags & PRISM_CENTROID_FLAG_LEAF) != 0;
 
 				Datum values[7];
 				bool  nulls[7] = {0};
@@ -461,14 +463,14 @@ typedef struct PostingRowCtx
 } PostingRowCtx;
 
 static bool
-emit_posting_row(MktPostingChainPos *pos, void *state)
+emit_posting_row(PrismPostingChainPos *pos, void *state)
 {
-	PostingRowCtx			   *ctx = state;
-	Dimension					dim = ctx->dim;
-	const MktPostingPageOpaque *op	= mkt_posting_opaque(pos->page);
-	bool is_first	 = (op->flags & MKT_POSTING_PAGE_FIRST) != 0;
-	bool tombstoned	 = (op->flags & MKT_POSTING_PAGE_TOMBSTONED) != 0;
-	bool is_fastscan = (op->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
+	PostingRowCtx				 *ctx = state;
+	Dimension					  dim = ctx->dim;
+	const PrismPostingPageOpaque *op  = prism_posting_opaque(pos->page);
+	bool is_first	 = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0;
+	bool tombstoned	 = (op->flags & PRISM_POSTING_PAGE_TOMBSTONED) != 0;
+	bool is_fastscan = (op->flags & PRISM_POSTING_PAGE_FASTSCAN) != 0;
 
 	Datum values[10];
 	bool  nulls[10] = {0};
@@ -485,16 +487,16 @@ emit_posting_row(MktPostingChainPos *pos, void *state)
 		 * packs entries into SIMD groups with no per-entry state (deletion
 		 * is page-granular there), so dead_count is NULL for fastscan
 		 * pages. */
-		char *content = mkt_posting_page_content(pos->page, dim);
+		char *content = prism_posting_page_content(pos->page, dim);
 		int32 dead	  = 0;
 
 		check_posting_count(pos->blkno, op->entry_count, dim, is_first);
 		for (uint32_t i = 0; i < op->entry_count; i++)
 		{
-			const MktPostingEntryHeader *h =
-					mkt_posting_entry_at(content, i, dim);
+			const PrismPostingEntryHeader *h =
+					prism_posting_entry_at(content, i, dim);
 
-			if (h->meta.flags & MKT_POSTING_FLAG_DELETED)
+			if (h->meta.flags & PRISM_POSTING_FLAG_DELETED)
 				dead++;
 		}
 		values[5] = Int32GetDatum(dead);
@@ -591,7 +593,7 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 	{
 		PostingRowCtx ctx = {.rsinfo = rsinfo, .dim = dim};
 
-		mkt_posting_chain_walk(
+		prism_posting_chain_walk(
 				st, leaves[c].posting_head, emit_posting_row, &ctx);
 	}
 
@@ -626,7 +628,7 @@ emit_tid_cluster(
 		ItemPointer	   tid,
 		uint32_t	   cluster_id)
 {
-	uint64 enc = mkt_posting_encode_tid(tid);
+	uint64 enc = prism_posting_encode_tid(tid);
 	if (bsearch(&enc, keys, nk, sizeof(uint64), cmp_u64) == NULL)
 		return;
 
@@ -667,7 +669,7 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 	{
 		if (elnulls[i])
 			continue;
-		keys[nk++] = mkt_posting_encode_tid(
+		keys[nk++] = prism_posting_encode_tid(
 				(ItemPointer)DatumGetPointer(elems[i]));
 	}
 	qsort(keys, nk, sizeof(uint64), cmp_u64);
@@ -701,22 +703,23 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 	{
 		Page page = mkt_storage_read_page(st, blkno);
 
-		if (PageGetSpecialSize(page) == MAXALIGN(sizeof(MktPostingPageOpaque)))
+		if (PageGetSpecialSize(page) ==
+			MAXALIGN(sizeof(PrismPostingPageOpaque)))
 		{
-			const MktPostingPageOpaque *op = mkt_posting_opaque(page);
+			const PrismPostingPageOpaque *op = prism_posting_opaque(page);
 
-			if (op->page_id == MKT_POSTING_PAGE_ID)
+			if (op->page_id == PRISM_POSTING_PAGE_ID)
 			{
-				char	*content = mkt_posting_page_content(page, dim);
+				char	*content = prism_posting_page_content(page, dim);
 				uint32_t count	 = op->entry_count;
 
 				check_posting_count(
 						blkno,
 						count,
 						dim,
-						(op->flags & MKT_POSTING_PAGE_FIRST) != 0);
+						(op->flags & PRISM_POSTING_PAGE_FIRST) != 0);
 
-				if (op->flags & MKT_POSTING_PAGE_FASTSCAN)
+				if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
 				{
 					/* SoA: TIDs packed per group of MKT_FASTSCAN_GROUP. */
 					uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) /
@@ -724,7 +727,7 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 					for (uint32_t g = 0; g < ngroups; g++)
 					{
 						ItemPointerData *tids =
-								mkt_fastscan_group_tids(content, g, dim);
+								prism_fastscan_group_tids(content, g, dim);
 						uint32_t gc = count - g * MKT_FASTSCAN_GROUP;
 						if (gc > MKT_FASTSCAN_GROUP)
 							gc = MKT_FASTSCAN_GROUP;
@@ -742,8 +745,8 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 					/* AoS: the TID is at the head of each entry. */
 					for (uint32_t i = 0; i < count; i++)
 					{
-						MktPostingEntryHeader *e =
-								mkt_posting_entry_at(content, i, dim);
+						PrismPostingEntryHeader *e =
+								prism_posting_entry_at(content, i, dim);
 						emit_tid_cluster(
 								rsinfo,
 								keys,
@@ -888,10 +891,10 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 						RelationGetRelationName(index))));
 	}
 
-	Dimension		  dim			  = meta->dim;
-	uint8_t			  nlevels		  = meta->nlevels;
-	MktCentroidFormat centroid_format = (MktCentroidFormat)
-												meta->centroid_format;
+	Dimension			dim				= meta->dim;
+	uint8_t				nlevels			= meta->nlevels;
+	PrismCentroidFormat centroid_format = (PrismCentroidFormat)
+												  meta->centroid_format;
 	uint32_t	   nlist	= meta->nlist;
 	DistanceMetric metric	= (DistanceMetric)meta->metric;
 	uint8_t		   fan_out	= meta->fan_out;
@@ -983,7 +986,7 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 			psprintf(
 					"%u",
 					(prism_nprobe > 0) ? (uint32_t)prism_nprobe
-									   : mkt_auto_nprobe(nlist)),
+									   : prism_auto_nprobe(nlist)),
 			(prism_nprobe > 0) ? "session" : "auto");
 
 	list_free_deep(set);

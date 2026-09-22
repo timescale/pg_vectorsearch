@@ -1,22 +1,22 @@
 /*
  * query_scan.h - Shared query execution for ANN search
  *
- * MktQueryState owns all pre-allocated buffers for query execution.
+ * PrismQueryState owns all pre-allocated buffers for query execution.
  * Shared between standalone and PG. The per-query execute path
  * does zero allocations (except rare topk candidate buffer growth).
  *
  * Usage:
- *   MktQueryState qs;
- *   mkt_query_state_init(&qs, &index_base, max_k, max_nprobe);
+ *   PrismQueryState qs;
+ *   prism_query_state_init(&qs, &index_base, max_k, max_nprobe);
  *
- *   uint32_t n = mkt_query_execute(&qs, query, k, nprobe, mode, &stats);
+ *   uint32_t n = prism_query_execute(&qs, query, k, nprobe, mode, &stats);
  *   // Results in qs.candidates[0..n)
  *
- *   mkt_query_state_cleanup(&qs);
+ *   prism_query_state_cleanup(&qs);
  */
 
-#ifndef MKT_QUERY_SCAN_H
-#define MKT_QUERY_SCAN_H
+#ifndef PRISM_QUERY_SCAN_H
+#define PRISM_QUERY_SCAN_H
 
 #include "algo/topk.h"
 #include "index/centroid_search.h"
@@ -27,7 +27,7 @@
  * Query statistics
  * ---------------------------------------------------------------- */
 
-typedef struct MktQueryStats
+typedef struct PrismQueryStats
 {
 	uint32_t centroid_pages_read;
 	uint32_t posting_pages_read;
@@ -46,7 +46,7 @@ typedef struct MktQueryStats
 	/* Routing-quality diagnostic: deepest probe rank (0-based) among the
 	 * final top-k results, i.e. how many probed clusters were needed. */
 	uint32_t max_contrib_rank;
-} MktQueryStats;
+} PrismQueryStats;
 
 /*
  * Candidate slots the extraction buffer holds per row of the top-k.
@@ -59,13 +59,13 @@ typedef struct MktQueryStats
  * The scan's work_mem budget prices a row from this (see
  * MKT_TOP_K_BYTES_PER_ROW in src/pg/scan.c), so the two must agree.
  */
-#define MKT_QUERY_CAND_PER_K 16
+#define PRISM_QUERY_CAND_PER_K 16
 
 /* ----------------------------------------------------------------
  * Query state — pre-allocated, reused across queries
  * ---------------------------------------------------------------- */
 
-typedef struct MktQueryState
+typedef struct PrismQueryState
 {
 	/*
 	 * Owns every buffer below, so that discarding the state is one delete
@@ -75,14 +75,14 @@ typedef struct MktQueryState
 	 * Buffers here are sized to max_k and max_nprobe: resizing means
 	 * building a new state, and the old one has to go somewhere. The
 	 * posting scan's pinned page is the one thing a context teardown
-	 * cannot release, which is why mkt_query_state_cleanup exists rather
+	 * cannot release, which is why prism_query_state_cleanup exists rather
 	 * than callers deleting this directly.
 	 */
 	MktMemCtx memctx;
 
-	MktIndexBase *index;
-	uint32_t	  max_k;
-	uint32_t	  max_nprobe;
+	PrismIndexBase *index;
+	uint32_t		max_k;
+	uint32_t		max_nprobe;
 
 	/* Pre-allocated query buffers */
 	float	*query_buf;
@@ -96,13 +96,13 @@ typedef struct MktQueryState
 	RaBitQQueryState cluster_qs;
 
 	/* Pre-allocated search state (reset per query) */
-	MktCentroidResult  *beam_results;
-	MktCentroidScratch *centroid_scratch;
-	MktTopK				topk;
-	MktPostingScan		pscan;
-	MktTopKEntry	   *candidates;
-	uint32_t			cand_cap;
-	uint32_t			ncandidates;
+	PrismCentroidResult	 *beam_results;
+	PrismCentroidScratch *centroid_scratch;
+	MktTopK				  topk;
+	PrismPostingScan	  pscan;
+	MktTopKEntry		 *candidates;
+	uint32_t			  cand_cap;
+	uint32_t			  ncandidates;
 
 	/* Probe-order scratch: exact centroid distance + index per routed
 	 * cluster, used to re-rank the expanded probe set (prism.probe_expand).
@@ -114,19 +114,19 @@ typedef struct MktQueryState
 	uint32_t *result_order;
 	Distance *result_dists;
 	uint32_t  nresults;
-} MktQueryState;
+} PrismQueryState;
 
 /* ----------------------------------------------------------------
  * API
  * ---------------------------------------------------------------- */
 
-void mkt_query_state_init(
-		MktQueryState *qs,
-		MktIndexBase  *index,
-		uint32_t	   max_k,
-		uint32_t	   max_nprobe);
+void prism_query_state_init(
+		PrismQueryState *qs,
+		PrismIndexBase	*index,
+		uint32_t		 max_k,
+		uint32_t		 max_nprobe);
 
-void mkt_query_state_cleanup(MktQueryState *qs);
+void prism_query_state_cleanup(PrismQueryState *qs);
 
 /*
  * Execute one ANN search query.
@@ -138,19 +138,19 @@ void mkt_query_state_cleanup(MktQueryState *qs);
  * Results are in qs->candidates[0..return_count), sorted by
  * distance ascending. The caller owns reranking (if any).
  */
-uint32_t mkt_query_execute(
-		MktQueryState  *qs,
-		const float	   *query,
-		uint32_t		k,
-		uint32_t		nprobe,
-		MktDistanceMode mode,
-		bool			rerank,
-		MktQueryStats  *stats);
+uint32_t prism_query_execute(
+		PrismQueryState *qs,
+		const float		*query,
+		uint32_t		 k,
+		uint32_t		 nprobe,
+		MktDistanceMode	 mode,
+		bool			 rerank,
+		PrismQueryStats *stats);
 
 /* Cap the exact-rerank candidate pool: 0 = automatic (3 * k *
  * nprobe^0.15, growing further under noisy estimates), -1 = unlimited,
  * positive = absolute cap (never effective below k). */
-void mkt_query_set_rerank_pool(int32_t n);
+void prism_query_set_rerank_pool(int32_t n);
 
 /*
  * Size of the rerank pool -- how many candidates the scan will score
@@ -160,24 +160,24 @@ void mkt_query_set_rerank_pool(int32_t n);
  * Returns 0 when the pool is uncapped, which means every threshold survivor
  * is reranked rather than none of them. Shared with the cost model.
  */
-uint32_t mkt_query_rerank_pool_estimate(uint32_t k, uint32_t nprobe);
+uint32_t prism_query_rerank_pool_estimate(uint32_t k, uint32_t nprobe);
 
 /*
  * Leaf clusters the centroid beam routes to in order to read nprobe of
  * them, capped at cap. More than nprobe for compressed centroid formats,
  * which route wide and let phase A re-rank on exact distances; exactly
- * nprobe for the exact formats. Called by mkt_query_execute and the cost
+ * nprobe for the exact formats. Called by prism_query_execute and the cost
  * model.
  */
-uint32_t mkt_query_routed_clusters(
-		uint32_t nprobe, uint32_t cap, MktCentroidFormat centroid_format);
+uint32_t prism_query_routed_clusters(
+		uint32_t nprobe, uint32_t cap, PrismCentroidFormat centroid_format);
 
 /*
  * Centroid slots the beam keeps per intermediate level for a given nprobe.
  * A fraction of nprobe raised by three floors below which leaves become
- * unreachable outright. Called by mkt_query_execute and the cost model.
+ * unreachable outright. Called by prism_query_execute and the cost model.
  */
-uint32_t mkt_query_beam_width(
+uint32_t prism_query_beam_width(
 		uint32_t nprobe, uint32_t nlist, uint32_t fan_out, double beam_scale);
 
 /*
@@ -191,28 +191,28 @@ uint32_t mkt_query_beam_width(
  *
  * 1.0 means no expansion (identity). Enabled by default (2.0): gains
  * saturate around a factor of 2. The extra routed candidates are
- * capped (MKT_PROBE_EXPAND_MAX_EXTRA) so overhead stays bounded at
+ * capped (PRISM_PROBE_EXPAND_MAX_EXTRA) so overhead stays bounded at
  * large nprobe, and the phase is skipped for indexes whose centroid
  * pages are exact (float/half) — there is no ordering noise to fix.
  */
-void mkt_query_set_probe_expand(double expand);
+void prism_query_set_probe_expand(double expand);
 
 /*
  * Route a vector to its nearest leaf posting list(s) — the centroid-search
- * half of mkt_query_execute, without scanning postings. Normalizes the vector
- * (cosine), rotates it into qs->pt_query, and runs the beam search. Returns
- * the number of leaves found; qs->beam_results[0..return) hold them
+ * half of prism_query_execute, without scanning postings. Normalizes the
+ * vector (cosine), rotates it into qs->pt_query, and runs the beam search.
+ * Returns the number of leaves found; qs->beam_results[0..return) hold them
  * (posting_head), and qs->pt_query holds P^T * (normalized vector) for the
  * caller to reuse (the insert path encodes from it). beam_stats may be NULL.
  *
  * Shared so an inserted vector routes exactly the way a query does.
  */
-uint32_t mkt_query_route(
-		MktQueryState		   *qs,
-		const float			   *query,
-		uint32_t				nprobe,
-		MktDistanceMode			mode,
-		MktCentroidSearchStats *beam_stats);
+uint32_t prism_query_route(
+		PrismQueryState			 *qs,
+		const float				 *query,
+		uint32_t				  nprobe,
+		MktDistanceMode			  mode,
+		PrismCentroidSearchStats *beam_stats);
 
 /*
  * Default nprobe for an index with `nlist` clusters, used when the
@@ -223,7 +223,7 @@ uint32_t mkt_query_route(
  * a meaningful set, capped at 2048 (past the measured range; explicit
  * settings go higher), and never above nlist itself.
  */
-uint32_t mkt_auto_nprobe(uint32_t nlist);
+uint32_t prism_auto_nprobe(uint32_t nlist);
 
 /*
  * Floor for the centroid-search beam width, in tree candidates. The
@@ -233,6 +233,6 @@ uint32_t mkt_auto_nprobe(uint32_t nlist);
  * default, flooring the beam at this many candidates — never more
  * than nprobe — reproduces exactly that two-regime shape.
  */
-#define MKT_CENTROID_BEAM_FLOOR 80
+#define PRISM_CENTROID_BEAM_FLOOR 80
 
-#endif /* MKT_QUERY_SCAN_H */
+#endif /* PRISM_QUERY_SCAN_H */

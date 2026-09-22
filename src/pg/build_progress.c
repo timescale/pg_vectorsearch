@@ -23,7 +23,7 @@
 #include <utils/memutils.h>
 
 #include "index/build_progress.h"
-#include "index/index_build.h" /* MktBuildStats */
+#include "index/index_build.h" /* PrismBuildStats */
 
 static int64
 now_ns(void)
@@ -47,52 +47,53 @@ injection_name_for_phase(int phase)
 {
 	switch (phase)
 	{
-	case MKT_BUILD_PHASE_SAMPLE:
+	case PRISM_BUILD_PHASE_SAMPLE:
 		return "prism-build-sample";
-	case MKT_BUILD_PHASE_KMEANS:
+	case PRISM_BUILD_PHASE_KMEANS:
 		return "prism-build-kmeans";
-	case MKT_BUILD_PHASE_SUBTREES:
+	case PRISM_BUILD_PHASE_SUBTREES:
 		return "prism-build-subtrees";
-	case MKT_BUILD_PHASE_REFINE:
+	case PRISM_BUILD_PHASE_REFINE:
 		return "prism-build-refine";
-	case MKT_BUILD_PHASE_SCAN:
-	case MKT_BUILD_PHASE_SCAN_PARALLEL:
+	case PRISM_BUILD_PHASE_SCAN:
+	case PRISM_BUILD_PHASE_SCAN_PARALLEL:
 		return "prism-build-load";
-	case MKT_BUILD_PHASE_POSTING:
+	case PRISM_BUILD_PHASE_POSTING:
 		return "prism-build-posting";
 	default:
 		return NULL;
 	}
 }
 
-/* Add a finished phase's elapsed time to the matching MktBuildStats field. */
+/* Add a finished phase's elapsed time to the matching PrismBuildStats field.
+ */
 static void
-accumulate_stats(MktBuildStats *s, int phase, double ms)
+accumulate_stats(PrismBuildStats *s, int phase, double ms)
 {
 	if (s == NULL)
 		return;
 
 	switch (phase)
 	{
-	case MKT_BUILD_PHASE_SAMPLE:
+	case PRISM_BUILD_PHASE_SAMPLE:
 		s->ms_sample += ms;
 		break;
-	case MKT_BUILD_PHASE_KMEANS:
-	case MKT_BUILD_PHASE_SUBTREES:
+	case PRISM_BUILD_PHASE_KMEANS:
+	case PRISM_BUILD_PHASE_SUBTREES:
 		s->ms_kmeans += ms;
 		break;
-	case MKT_BUILD_PHASE_REFINE:
+	case PRISM_BUILD_PHASE_REFINE:
 		s->ms_refine += ms;
 		break;
-	case MKT_BUILD_PHASE_SETUP:
+	case PRISM_BUILD_PHASE_SETUP:
 		s->ms_setup += ms;
 		break;
-	case MKT_BUILD_PHASE_SCAN:
-	case MKT_BUILD_PHASE_SCAN_PARALLEL:
-	case MKT_BUILD_PHASE_POSTING:
+	case PRISM_BUILD_PHASE_SCAN:
+	case PRISM_BUILD_PHASE_SCAN_PARALLEL:
+	case PRISM_BUILD_PHASE_POSTING:
 		s->ms_posting += ms;
 		break;
-	case MKT_BUILD_PHASE_CENTROID:
+	case PRISM_BUILD_PHASE_CENTROID:
 		s->ms_centroid += ms;
 		break;
 	default:
@@ -103,7 +104,7 @@ accumulate_stats(MktBuildStats *s, int phase, double ms)
 /* Emit the just-finished phase's resource line(s) and reset the usage window.
  */
 static void
-flush_phase(MktBuildProgress *p)
+flush_phase(PrismBuildProgress *p)
 {
 	double ms = (double)(now_ns() - p->phase_start_ns) / 1e6;
 
@@ -120,7 +121,7 @@ flush_phase(MktBuildProgress *p)
 	ereport(LOG,
 			(errmsg(MKT_AM_NAME " build: phase \"%s\" done in %.0f ms "
 								"(build heap %.1f MB, DSM %.1f MB)",
-					mkt_build_phase_name(p->cur_phase),
+					prism_build_phase_name(p->cur_phase),
 					ms,
 					heap_mb,
 					(double)p->dsm_bytes / (1024.0 * 1024.0)),
@@ -132,13 +133,13 @@ flush_phase(MktBuildProgress *p)
 }
 
 void
-mkt_build_progress_begin(
-		MktBuildProgress	 *p,
-		bool				  is_parallel,
-		bool				  log_stats,
-		void				 *heap_ctx,
-		struct MktBuildStats *stats,
-		double				  tuples_total)
+prism_build_progress_begin(
+		PrismBuildProgress	   *p,
+		bool					is_parallel,
+		bool					log_stats,
+		void				   *heap_ctx,
+		struct PrismBuildStats *stats,
+		double					tuples_total)
 {
 	int64 t = now_ns();
 
@@ -168,7 +169,7 @@ mkt_build_progress_begin(
 }
 
 void
-mkt_build_report_phase(MktBuildProgress *p, int phase)
+prism_build_report_phase(PrismBuildProgress *p, int phase)
 {
 	flush_phase(p);
 	p->cur_phase	  = phase;
@@ -178,8 +179,8 @@ mkt_build_report_phase(MktBuildProgress *p, int phase)
 	/* Each scan-shaped phase walks the heap from the start, so its
 	 * tuples-done count restarts; the phases in between leave the previous
 	 * scan's final count standing. */
-	if (phase == MKT_BUILD_PHASE_SAMPLE || phase == MKT_BUILD_PHASE_SCAN ||
-		phase == MKT_BUILD_PHASE_SCAN_PARALLEL)
+	if (phase == PRISM_BUILD_PHASE_SAMPLE || phase == PRISM_BUILD_PHASE_SCAN ||
+		phase == PRISM_BUILD_PHASE_SCAN_PARALLEL)
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
 
 	const char *ip = injection_name_for_phase(phase);
@@ -188,7 +189,7 @@ mkt_build_report_phase(MktBuildProgress *p, int phase)
 }
 
 void
-mkt_build_progress_incr_tuples(int64_t n)
+prism_build_progress_incr_tuples(int64_t n)
 {
 	/* From a worker this piggybacks over the parallel message queue and the
 	 * leader applies it (also while blocked at a barrier -- interrupt
@@ -210,7 +211,7 @@ mkt_build_progress_incr_tuples(int64_t n)
 }
 
 void
-mkt_build_report_progress(MktBuildProgress *p, double done)
+prism_build_report_progress(PrismBuildProgress *p, double done)
 {
 	if (!p->total_set && p->tuples_total > 0)
 	{
@@ -222,17 +223,17 @@ mkt_build_report_progress(MktBuildProgress *p, double done)
 }
 
 void
-mkt_build_report_dsm_bytes(MktBuildProgress *p, uint64_t dsm_bytes)
+prism_build_report_dsm_bytes(PrismBuildProgress *p, uint64_t dsm_bytes)
 {
 	p->dsm_bytes = dsm_bytes;
 }
 
 void
-mkt_build_report_planned_alloc(
-		MktBuildProgress *p,
-		uint64_t		  sample_bytes,
-		uint64_t		  centroid_tree_bytes,
-		uint64_t		  dsm_total_bytes)
+prism_build_report_planned_alloc(
+		PrismBuildProgress *p,
+		uint64_t			sample_bytes,
+		uint64_t			centroid_tree_bytes,
+		uint64_t			dsm_total_bytes)
 {
 	(void)p;
 	const double mb = 1024.0 * 1024.0;
@@ -251,17 +252,17 @@ mkt_build_report_planned_alloc(
 }
 
 void
-mkt_build_progress_end(MktBuildProgress *p)
+prism_build_progress_end(PrismBuildProgress *p)
 {
 	flush_phase(p);
 	p->cur_phase = 0;
 
 	/* Final per-phase summary, always logged (like the planned-allocation
-	 * line), via the shared mkt_build_stats_print so the PostgreSQL and
+	 * line), via the shared prism_build_stats_print so the PostgreSQL and
 	 * standalone builds report identically. */
 	if (p->stats != NULL)
 	{
 		p->stats->ms_total = (double)(now_ns() - p->build_start_ns) / 1e6;
-		mkt_build_stats_print(p->stats);
+		prism_build_stats_print(p->stats);
 	}
 }

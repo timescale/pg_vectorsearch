@@ -18,22 +18,22 @@
 #include "core/types.h"
 #include "index/build_progress.h" /* canonical MKT_BUILD_PHASE_* */
 #include "index/index_base.h"
-#include "index/parallel_build.h" /* MktBuildConfig */
+#include "index/parallel_build.h" /* PrismBuildConfig */
 #include "pg/bufstorage.h"
 
 /* Build parameters resolved from the index relation/opclass, shared by the
  * serial and parallel build paths. */
 typedef struct PrismBuildParams
 {
-	Dimension		  dim;
-	DistanceMetric	  metric;
-	MktCentroidFormat centroid_format;
-	uint32_t		  nlist;
-	uint32_t		  fan_out;
-	uint32_t		  kmeans_nredo;
-	double			  soar_lambda;
-	double			  boundary_epsilon;
-	bool			  fastscan;
+	Dimension			dim;
+	DistanceMetric		metric;
+	PrismCentroidFormat centroid_format;
+	uint32_t			nlist;
+	uint32_t			fan_out;
+	uint32_t			kmeans_nredo;
+	double				soar_lambda;
+	double				boundary_epsilon;
+	bool				fastscan;
 } PrismBuildParams;
 
 IndexBuildResult *

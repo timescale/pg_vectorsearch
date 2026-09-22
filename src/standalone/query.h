@@ -2,18 +2,18 @@
  * query.h - Zero-allocation query execution
  *
  * Pre-allocated query context for executing queries against an
- * MktIndex. All buffers are allocated once at creation time;
+ * PrismIndex. All buffers are allocated once at creation time;
  * the query hot path does zero allocations.
  */
 
-#ifndef MKT_STANDALONE_QUERY_H
-#define MKT_STANDALONE_QUERY_H
+#ifndef PRISM_STANDALONE_QUERY_H
+#define PRISM_STANDALONE_QUERY_H
 
 #include "index/centroid_search.h"
 #include "standalone/index.h"
 
 /* Opaque query context */
-typedef struct MktQueryCtx MktQueryCtx;
+typedef struct PrismQueryCtx PrismQueryCtx;
 
 /*
  * Create a query context for the given index.
@@ -24,13 +24,13 @@ typedef struct MktQueryCtx MktQueryCtx;
  *
  * Returns NULL on failure.
  */
-MktQueryCtx *
-mkt_query_ctx_create(MktIndex *idx, uint32_t max_k, uint32_t max_nprobe);
+PrismQueryCtx *
+prism_query_ctx_create(PrismIndex *idx, uint32_t max_k, uint32_t max_nprobe);
 
 /*
  * Free query context and all owned buffers.
  */
-void mkt_query_ctx_destroy(MktQueryCtx *ctx);
+void prism_query_ctx_destroy(PrismQueryCtx *ctx);
 
 /*
  * Execute a query. Zero allocations on this path.
@@ -43,8 +43,8 @@ void mkt_query_ctx_destroy(MktQueryCtx *ctx);
  * result_ids must have space for k entries.
  * Returns actual number of results (<= k).
  */
-uint32_t mkt_query_exec(
-		MktQueryCtx	   *ctx,
+uint32_t prism_query_exec(
+		PrismQueryCtx  *ctx,
 		const float	   *query,
 		uint32_t		k,
 		uint32_t		nprobe,
@@ -52,4 +52,4 @@ uint32_t mkt_query_exec(
 		bool			rerank,
 		uint32_t	   *result_ids);
 
-#endif /* MKT_STANDALONE_QUERY_H */
+#endif /* PRISM_STANDALONE_QUERY_H */

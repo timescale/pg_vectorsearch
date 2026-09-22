@@ -34,8 +34,8 @@
  * ---------------------------------------------------------------- */
 
 void
-mkt_posting_scan_init(
-		MktPostingScan	   *scan,
+prism_posting_scan_init(
+		PrismPostingScan   *scan,
 		MktStorage		   *storage,
 		char			   *page_base,
 		const RaBitQParams *params,
@@ -61,7 +61,7 @@ mkt_posting_scan_init(
 }
 
 void
-mkt_posting_scan_cleanup(MktPostingScan *scan)
+prism_posting_scan_cleanup(PrismPostingScan *scan)
 {
 	/* Release pinned page if still held */
 	if (scan->cur_page != NULL && scan->storage != NULL &&
@@ -89,7 +89,7 @@ mkt_posting_scan_cleanup(MktPostingScan *scan)
 }
 
 void
-mkt_posting_scan_enable_fastscan(MktPostingScan *scan, int lut_bits)
+prism_posting_scan_enable_fastscan(PrismPostingScan *scan, int lut_bits)
 {
 	scan->fs_lut_bits = lut_bits;
 	if (lut_bits == 8)
@@ -105,19 +105,19 @@ mkt_posting_scan_enable_fastscan(MktPostingScan *scan, int lut_bits)
 #else
 	scan->fs_has_avx512 = false;
 #endif
-	scan->fs_max_groups_first = mkt_fastscan_max_groups(scan->dim, true);
-	scan->fs_max_groups_over  = mkt_fastscan_max_groups(scan->dim, false);
+	scan->fs_max_groups_first = prism_fastscan_max_groups(scan->dim, true);
+	scan->fs_max_groups_over  = prism_fastscan_max_groups(scan->dim, false);
 }
 
-static bool advance_page(MktPostingScan *scan);
+static bool advance_page(PrismPostingScan *scan);
 
 /* ----------------------------------------------------------------
  * Per-cluster begin / end
  * ---------------------------------------------------------------- */
 
 void
-mkt_posting_scan_begin_cluster(
-		MktPostingScan	 *scan,
+prism_posting_scan_begin_cluster(
+		PrismPostingScan *scan,
 		RaBitQQueryState *qstate,
 		BlockNumber		  posting_head)
 {
@@ -134,7 +134,7 @@ mkt_posting_scan_begin_cluster(
 	scan->entries_pruned  = 0;
 
 	/* Eagerly read the first page so pt_centroid is accessible
-	 * via mkt_posting_pt_centroid(scan->cur_page) before _cluster
+	 * via prism_posting_pt_centroid(scan->cur_page) before _cluster
 	 * is called. */
 	if (posting_head != InvalidBlockNumber)
 		advance_page(scan);
@@ -145,23 +145,23 @@ mkt_posting_scan_begin_cluster(
  * begin_cluster). Returns NULL if no page was loaded.
  */
 const float *
-mkt_posting_scan_pt_centroid(const MktPostingScan *scan)
+prism_posting_scan_pt_centroid(const PrismPostingScan *scan)
 {
 	if (scan->cur_page == NULL)
 		return NULL;
-	return mkt_posting_pt_centroid(scan->cur_page);
+	return prism_posting_pt_centroid(scan->cur_page);
 }
 
 void
-mkt_posting_scan_begin_flat(
-		MktPostingScan *scan, RaBitQQueryState *qstate, char *flat_buf)
+prism_posting_scan_begin_flat(
+		PrismPostingScan *scan, RaBitQQueryState *qstate, char *flat_buf)
 {
-	MktFlatPostingHeader *hdr = mkt_flat_posting_header(flat_buf);
+	PrismFlatPostingHeader *hdr = prism_flat_posting_header(flat_buf);
 
 	scan->qstate		  = qstate;
 	scan->cur_blkno		  = InvalidBlockNumber;
 	scan->cur_page		  = flat_buf;
-	scan->cur_content	  = mkt_flat_posting_content(flat_buf);
+	scan->cur_content	  = prism_flat_posting_content(flat_buf);
 	scan->cur_max_entries = hdr->max_entries;
 	if (hdr->entry_count > scan->max_entries_cap)
 		mkt_error(
@@ -178,7 +178,7 @@ mkt_posting_scan_begin_flat(
 }
 
 void
-mkt_posting_scan_end_cluster(MktPostingScan *scan)
+prism_posting_scan_end_cluster(PrismPostingScan *scan)
 {
 	/* Release current page if held via storage vtable */
 	if (scan->cur_page != NULL && scan->storage != NULL &&
@@ -197,14 +197,14 @@ mkt_posting_scan_end_cluster(MktPostingScan *scan)
  * ---------------------------------------------------------------- */
 
 static bool
-advance_page(MktPostingScan *scan)
+advance_page(PrismPostingScan *scan)
 {
 	/* Follow chain from current page */
 	if (scan->cur_page != NULL)
 	{
 		if (scan->storage != NULL)
 		{
-			scan->cur_blkno = mkt_posting_opaque(scan->cur_page)->next_blkno;
+			scan->cur_blkno = prism_posting_opaque(scan->cur_page)->next_blkno;
 		}
 		else
 		{
@@ -224,10 +224,10 @@ advance_page(MktPostingScan *scan)
 	else
 		scan->cur_page = mkt_storage_read_page(scan->storage, scan->cur_blkno);
 
-	MktPostingPageOpaque *opaque = mkt_posting_opaque(scan->cur_page);
+	PrismPostingPageOpaque *opaque = prism_posting_opaque(scan->cur_page);
 
 	/* Validate page identity — catch corrupted chain pointers early */
-	if (opaque->page_id != MKT_POSTING_PAGE_ID)
+	if (opaque->page_id != PRISM_POSTING_PAGE_ID)
 	{
 		mkt_warn(
 				MKT_EXTENSION_NAME ": posting scan hit non-posting page "
@@ -244,9 +244,9 @@ advance_page(MktPostingScan *scan)
 	}
 
 	scan->cur_content =
-			(opaque->flags & MKT_POSTING_PAGE_FIRST)
-					? mkt_posting_content_first(scan->cur_page, scan->dim)
-					: mkt_posting_content(scan->cur_page);
+			(opaque->flags & PRISM_POSTING_PAGE_FIRST)
+					? prism_posting_content_first(scan->cur_page, scan->dim)
+					: prism_posting_content(scan->cur_page);
 	scan->cur_max_entries = opaque->max_entries;
 	/* Reject an entry_count past what a valid page of this format can
 	 * hold. AoS pages drive the page_distances/page_scratch batch (sized
@@ -255,10 +255,10 @@ advance_page(MktPostingScan *scan)
 	 * entries per page, so bound them by the fastscan capacity instead of
 	 * the smaller AoS one. */
 	uint32_t page_cap;
-	if (opaque->flags & MKT_POSTING_PAGE_FASTSCAN)
-		page_cap = (opaque->flags & MKT_POSTING_PAGE_FIRST)
-						 ? mkt_fastscan_max_entries_first(scan->dim)
-						 : mkt_fastscan_max_entries(scan->dim);
+	if (opaque->flags & PRISM_POSTING_PAGE_FASTSCAN)
+		page_cap = (opaque->flags & PRISM_POSTING_PAGE_FIRST)
+						 ? prism_fastscan_max_entries_first(scan->dim)
+						 : prism_fastscan_max_entries(scan->dim);
 	else
 		page_cap = scan->max_entries_cap;
 	if (opaque->entry_count > page_cap)
@@ -283,10 +283,10 @@ advance_page(MktPostingScan *scan)
  * ---------------------------------------------------------------- */
 
 void
-mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
+prism_posting_scan_cluster(PrismPostingScan *scan, MktTopK *topk)
 {
 	Dimension dim		 = scan->dim;
-	uint32_t  entry_size = MKT_POSTING_ENTRY_SIZE(dim);
+	uint32_t  entry_size = PRISM_POSTING_ENTRY_SIZE(dim);
 
 	float g_add		 = scan->qstate->g_add;
 	float sum_t		 = scan->qstate->sum_transformed;
@@ -311,7 +311,7 @@ mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 		 * scoring kernel; the chain-follow below still advances past it. A
 		 * retired chain also carries TOMBSTONED once reclaimed, but its
 		 * entries moved rather than died, so it is still scored. */
-		if (!mkt_posting_page_all_dead(mkt_posting_opaque(scan->cur_page)))
+		if (!prism_posting_page_all_dead(prism_posting_opaque(scan->cur_page)))
 		{
 			char	*content = scan->cur_content;
 			uint32_t count	 = scan->cur_count;
@@ -319,9 +319,9 @@ mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 			/* --- Score: batch IP over all entries on this page ---
 			 *
 			 * AoS layout: entry i's bits live at content + i * entry_size
-			 * + MKT_POSTING_ENTRY_BITS_OFFSET. The SIMD kernel just needs
+			 * + PRISM_POSTING_ENTRY_BITS_OFFSET. The SIMD kernel just needs
 			 * the first entry's bits pointer and a stride of entry_size. */
-			const uint8_t *bits_base = mkt_posting_first_bits(content);
+			const uint8_t *bits_base = prism_posting_first_bits(content);
 
 			uint32_t padded = (count + 3) & ~3u;
 			mkt_rabitq_inner_product_multi(
@@ -336,8 +336,8 @@ mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 			 * entry via the strided AoS accessor. */
 			for (uint32_t i = 0; i < count; i++)
 			{
-				MktPostingEntryHeader *e =
-						mkt_posting_entry_at(content, i, dim);
+				PrismPostingEntryHeader *e =
+						prism_posting_entry_at(content, i, dim);
 				float final_dot = (2.0f * scratch[i] - sum_t) * inv_sqrt_d;
 				distances[i]	= e->f_add + g_add -
 							   2.0f * e->f_rescale * final_dot;
@@ -348,11 +348,11 @@ mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 
 			for (uint32_t i = 0; i < count; i++)
 			{
-				MktPostingEntryHeader *e =
-						mkt_posting_entry_at(content, i, dim);
+				PrismPostingEntryHeader *e =
+						prism_posting_entry_at(content, i, dim);
 				scan->entries_scanned++;
 
-				if (e->meta.flags & MKT_POSTING_FLAG_DELETED)
+				if (e->meta.flags & PRISM_POSTING_FLAG_DELETED)
 				{
 					scan->entries_pruned++;
 					continue;
@@ -368,7 +368,7 @@ mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 					continue;
 				}
 
-				uint64_t id = mkt_posting_encode_tid(&e->meta.tid);
+				uint64_t id = prism_posting_encode_tid(&e->meta.tid);
 				mkt_topk_insert(topk, est, err, id);
 				threshold = mkt_topk_threshold(topk);
 			}
@@ -380,7 +380,7 @@ mkt_posting_scan_cluster(MktPostingScan *scan, MktTopK *topk)
 		BlockNumber prev_blkno = scan->cur_blkno;
 
 		if (scan->storage != NULL)
-			scan->cur_blkno = mkt_posting_opaque(scan->cur_page)->next_blkno;
+			scan->cur_blkno = prism_posting_opaque(scan->cur_page)->next_blkno;
 		else
 			scan->cur_blkno = InvalidBlockNumber;
 
@@ -465,19 +465,19 @@ fastscan_prune_16(
  */
 MKT_TARGET_AVX512 static void
 fastscan_prune_group_avx512(
-		MktPostingScan	*scan,
-		MktTopK			*topk,
-		ItemPointerData *tids,
-		const float		*f_add,
-		const float		*f_rescale,
-		const float		*f_error,
-		float			 lut_scale,
-		float			 lut_bias,
-		float			 sum_t,
-		float			 inv_sqrt_d,
-		float			 g_add,
-		float			 g_error,
-		Distance		*threshold_p)
+		PrismPostingScan *scan,
+		MktTopK			 *topk,
+		ItemPointerData	 *tids,
+		const float		 *f_add,
+		const float		 *f_rescale,
+		const float		 *f_error,
+		float			  lut_scale,
+		float			  lut_bias,
+		float			  sum_t,
+		float			  inv_sqrt_d,
+		float			  g_add,
+		float			  g_error,
+		Distance		 *threshold_p)
 {
 	Distance threshold = *threshold_p;
 	float	 est_buf[MKT_FASTSCAN_GROUP];
@@ -514,7 +514,7 @@ fastscan_prune_group_avx512(
 			uint32_t v = off + __builtin_ctz(surv);
 			surv &= surv - 1;
 
-			uint64_t id = mkt_posting_encode_tid(&tids[v]);
+			uint64_t id = prism_posting_encode_tid(&tids[v]);
 			mkt_topk_insert(topk, est_buf[v], err_buf[v], id);
 			threshold = mkt_topk_threshold(topk);
 		}
@@ -535,16 +535,16 @@ fastscan_prune_group_avx512(
  * ---------------------------------------------------------------- */
 
 static void
-scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
+scan_fastscan_page(PrismPostingScan *scan, MktTopK *topk)
 {
 	Dimension dim	  = scan->dim;
 	uint32_t  count	  = scan->cur_count;
 	char	 *content = scan->cur_content;
 
-	MktPostingPageOpaque *opaque = mkt_posting_opaque(scan->cur_page);
+	PrismPostingPageOpaque *opaque = prism_posting_opaque(scan->cur_page);
 
 	/* Fall back to AoS kernel for non-fastscan pages */
-	if (!(opaque->flags & MKT_POSTING_PAGE_FASTSCAN))
+	if (!(opaque->flags & PRISM_POSTING_PAGE_FASTSCAN))
 		return; /* caller handles AoS via the standard path */
 
 	/* Build LUT from transformed query (once per cluster) */
@@ -573,7 +573,7 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 	float	 sum_t		= scan->qstate->sum_transformed;
 	float	 inv_sqrt_d = scan->qstate->inv_sqrt_d;
 	float	 g_error	= scan->qstate->g_error;
-	uint32_t max_groups = (opaque->flags & MKT_POSTING_PAGE_FIRST)
+	uint32_t max_groups = (opaque->flags & PRISM_POSTING_PAGE_FIRST)
 								? scan->fs_max_groups_first
 								: scan->fs_max_groups_over;
 	uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) / MKT_FASTSCAN_GROUP;
@@ -590,7 +590,7 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 			g_count = MKT_FASTSCAN_GROUP;
 
 		/* Access group data — compute base once */
-		char *gbase = mkt_fastscan_group_base(content, g, dim);
+		char *gbase = prism_fastscan_group_base(content, g, dim);
 
 		ItemPointerData *tids	   = (ItemPointerData *)gbase;
 		float			*f_add	   = (float *)(gbase +
@@ -616,7 +616,7 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 		if (g + 1 < ngroups)
 		{
 			uint8_t *next_codes =
-					mkt_fastscan_group_codes(content, g + 1, dim);
+					prism_fastscan_group_codes(content, g + 1, dim);
 			uint32_t code_bytes = MKT_FASTSCAN_GROUP_BYTES(dim);
 			for (uint32_t p = 0; p < code_bytes; p += 64)
 				__builtin_prefetch(next_codes + p, 0, 1);
@@ -666,7 +666,7 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 					continue;
 				}
 
-				uint64_t id = mkt_posting_encode_tid(&tids[v]);
+				uint64_t id = prism_posting_encode_tid(&tids[v]);
 				mkt_topk_insert(topk, est, err, id);
 				threshold = mkt_topk_threshold(topk);
 			}
@@ -675,7 +675,7 @@ scan_fastscan_page(MktPostingScan *scan, MktTopK *topk)
 }
 
 void
-mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk)
+prism_posting_scan_cluster_fastscan(PrismPostingScan *scan, MktTopK *topk)
 {
 	/* Process pages until chain is exhausted */
 	for (;;)
@@ -686,9 +686,9 @@ mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk)
 				break;
 		}
 
-		MktPostingPageOpaque *opaque = mkt_posting_opaque(scan->cur_page);
+		PrismPostingPageOpaque *opaque = prism_posting_opaque(scan->cur_page);
 
-		if (mkt_posting_page_all_dead(opaque))
+		if (prism_posting_page_all_dead(opaque))
 		{
 			/* All entries dead — skip scoring; the chain-follow advances.
 			 * A retired chain is not that: it carries TOMBSTONED too once
@@ -697,10 +697,10 @@ mkt_posting_scan_cluster_fastscan(MktPostingScan *scan, MktTopK *topk)
 			 * see them. */
 			scan->pages_skipped++;
 		}
-		else if (opaque->flags & MKT_POSTING_PAGE_FASTSCAN)
+		else if (opaque->flags & PRISM_POSTING_PAGE_FASTSCAN)
 			scan_fastscan_page(scan, topk);
 		else
-			mkt_posting_scan_cluster(scan, topk);
+			prism_posting_scan_cluster(scan, topk);
 
 		/* If AoS fallback consumed the entire chain, we're done */
 		if (scan->cur_page == NULL && scan->cur_blkno == InvalidBlockNumber)

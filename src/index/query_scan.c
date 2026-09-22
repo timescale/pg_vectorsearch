@@ -32,18 +32,18 @@
  * ---------------------------------------------------------------- */
 
 void
-mkt_query_state_init(
-		MktQueryState *qs,
-		MktIndexBase  *index,
-		uint32_t	   max_k,
-		uint32_t	   max_nprobe)
+prism_query_state_init(
+		PrismQueryState *qs,
+		PrismIndexBase	*index,
+		uint32_t		 max_k,
+		uint32_t		 max_nprobe)
 {
 	memset(qs, 0, sizeof(*qs));
 	qs->index	   = index;
 	qs->max_k	   = max_k;
 	qs->max_nprobe = max_nprobe;
 
-	mkt_index_ensure_rabitq(index);
+	prism_index_ensure_rabitq(index);
 
 	/*
 	 * Everything below is allocated here, including the contexts the top-k
@@ -76,16 +76,16 @@ mkt_query_state_init(
 	mkt_rabitq_init_query_constants(&qs->cluster_qs, dim);
 
 	/* Beam search results + per-scan scratch.
-	 * Pre-allocating the scratch here means mkt_centroid_beam_search
+	 * Pre-allocating the scratch here means prism_centroid_beam_search
 	 * skips 8 mkt_alloc calls and 2 memory-context creations on
 	 * every query (the largest remaining source of per-query
 	 * allocator traffic after the dedup-gens fix). Sized to the
 	 * worst case beam_width == max_nprobe. */
-	qs->beam_results	 = mkt_alloc(max_nprobe * sizeof(MktCentroidResult));
-	qs->centroid_scratch = mkt_centroid_scratch_create(dim, max_nprobe);
+	qs->beam_results	 = mkt_alloc(max_nprobe * sizeof(PrismCentroidResult));
+	qs->centroid_scratch = prism_centroid_scratch_create(dim, max_nprobe);
 
 	/* Probe-order scratch (exact centroid re-rank of the expanded
-	 * probe set; see mkt_query_set_probe_expand). */
+	 * probe set; see prism_query_set_probe_expand). */
 	qs->probe_dists = mkt_alloc(max_nprobe * sizeof(float));
 	qs->probe_order = mkt_alloc(max_nprobe * sizeof(uint32_t));
 
@@ -93,7 +93,7 @@ mkt_query_state_init(
 	mkt_topk_init(&qs->topk, max_k);
 
 	/* Candidate extraction buffer */
-	qs->cand_cap   = max_k * MKT_QUERY_CAND_PER_K;
+	qs->cand_cap   = max_k * PRISM_QUERY_CAND_PER_K;
 	qs->candidates = mkt_alloc(qs->cand_cap * sizeof(MktTopKEntry));
 
 	/* Result ordering */
@@ -101,8 +101,8 @@ mkt_query_state_init(
 	qs->result_dists = mkt_alloc(qs->cand_cap * sizeof(Distance));
 
 	/* Posting scan iterator */
-	uint32_t max_entries = mkt_posting_max_entries(dim);
-	mkt_posting_scan_init(
+	uint32_t max_entries = prism_posting_max_entries(dim);
+	prism_posting_scan_init(
 			&qs->pscan,
 			index->posting_storage,
 			index->page_base,
@@ -114,7 +114,7 @@ mkt_query_state_init(
 }
 
 void
-mkt_query_state_cleanup(MktQueryState *qs)
+prism_query_state_cleanup(PrismQueryState *qs)
 {
 	if (qs == NULL)
 		return;
@@ -123,11 +123,11 @@ mkt_query_state_cleanup(MktQueryState *qs)
 	 * The pinned page first: it is the one resource the state holds that is
 	 * not memory, and deleting the context below would strand it.
 	 */
-	mkt_posting_scan_cleanup(&qs->pscan);
+	prism_posting_scan_cleanup(&qs->pscan);
 
 	/* Sub-contexts before the context that parents them. */
 	mkt_topk_cleanup(&qs->topk);
-	mkt_centroid_scratch_free(qs->centroid_scratch);
+	prism_centroid_scratch_free(qs->centroid_scratch);
 	qs->centroid_scratch = NULL;
 
 	if (qs->memctx != NULL)
@@ -142,7 +142,7 @@ mkt_query_state_cleanup(MktQueryState *qs)
  * ---------------------------------------------------------------- */
 
 static const float *
-prepare_query(MktQueryState *qs, const float *query)
+prepare_query(PrismQueryState *qs, const float *query)
 {
 	if (qs->index->metric != DISTANCE_COSINE)
 		return query;
@@ -157,14 +157,14 @@ prepare_query(MktQueryState *qs, const float *query)
 
 static uint32_t
 search_centroids(
-		MktQueryState		   *qs,
-		const float			   *qvec,
-		uint32_t				nprobe,
-		MktDistanceMode			mode,
-		MktCentroidSearchStats *beam_stats)
+		PrismQueryState			 *qs,
+		const float				 *qvec,
+		uint32_t				  nprobe,
+		MktDistanceMode			  mode,
+		PrismCentroidSearchStats *beam_stats)
 {
-	const MktIndexBase *idx = qs->index;
-	Dimension			dim = idx->dim;
+	const PrismIndexBase *idx = qs->index;
+	Dimension			  dim = idx->dim;
 
 	RaBitQQueryState *rqs = NULL;
 	if (idx->centroid_format == MKT_CENTROID_FMT_RABITQ ||
@@ -175,10 +175,10 @@ search_centroids(
 		rqs = &qs->beam_qs;
 	}
 
-	uint32_t beam_w = mkt_query_beam_width(
+	uint32_t beam_w = prism_query_beam_width(
 			nprobe, idx->nlist, idx->fan_out, idx->centroid_beam_scale);
 
-	MktCentroidSearchState search = {
+	PrismCentroidSearchState search = {
 			.qstate		 = rqs,
 			.query		 = qvec,
 			.storage	 = idx->centroid_storage,
@@ -192,7 +192,7 @@ search_centroids(
 			.exact_internal = idx->exact_internal,
 	};
 
-	return mkt_centroid_beam_search(
+	return prism_centroid_beam_search(
 			&search,
 			idx->first_centroid,
 			idx->nlevels,
@@ -212,10 +212,10 @@ static double g_probe_expand = 2.0;
  * the phase-A cost keeps growing linearly; capping the expansion keeps
  * the overhead bounded (measured to retain nearly all of the recall
  * gain at high nprobe). */
-#define MKT_PROBE_EXPAND_MAX_EXTRA 256
+#define PRISM_PROBE_EXPAND_MAX_EXTRA 256
 
 void
-mkt_query_set_probe_expand(double expand)
+prism_query_set_probe_expand(double expand)
 {
 	g_probe_expand = expand;
 }
@@ -227,7 +227,7 @@ mkt_query_set_probe_expand(double expand)
  * of which exists because dropping below it loses leaves outright rather
  * than merely ranking them lower:
  *
- *   - Routing floor. Below MKT_CENTROID_BEAM_FLOOR a scaled-down beam saves
+ *   - Routing floor. Below PRISM_CENTROID_BEAM_FLOOR a scaled-down beam saves
  *     almost nothing and mis-routes, so the beam covers every probed list.
  *
  *   - Coverage floor. A kept set of beam_w parents exposes at most
@@ -238,11 +238,11 @@ mkt_query_set_probe_expand(double expand)
  *     carries fan_out leaves; an unbalanced tree holds fewer, so once
  *     nprobe covers every leaf the beam keeps whole levels.
  *
- * Called by mkt_query_execute and by the cost model, which prices a page
+ * Called by prism_query_execute and by the cost model, which prices a page
  * read per kept slot per level.
  */
 uint32_t
-mkt_query_beam_width(
+prism_query_beam_width(
 		uint32_t nprobe, uint32_t nlist, uint32_t fan_out, double beam_scale)
 {
 	uint32_t beam_w = (uint32_t)((double)nprobe * beam_scale);
@@ -250,9 +250,9 @@ mkt_query_beam_width(
 	if (beam_w < 1)
 		beam_w = 1;
 
-	uint32_t floor_w = nprobe < MKT_CENTROID_BEAM_FLOOR
+	uint32_t floor_w = nprobe < PRISM_CENTROID_BEAM_FLOOR
 							 ? nprobe
-							 : MKT_CENTROID_BEAM_FLOOR;
+							 : PRISM_CENTROID_BEAM_FLOOR;
 
 	if (beam_w < floor_w)
 		beam_w = floor_w;
@@ -280,12 +280,12 @@ mkt_query_beam_width(
  * and let phase A re-rank the wider set on exact distances, keeping the
  * best nprobe of them.
  *
- * Called by mkt_query_execute and by the cost model, which prices one head
+ * Called by prism_query_execute and by the cost model, which prices one head
  * page read per routed cluster.
  */
 uint32_t
-mkt_query_routed_clusters(
-		uint32_t nprobe, uint32_t cap, MktCentroidFormat centroid_format)
+prism_query_routed_clusters(
+		uint32_t nprobe, uint32_t cap, PrismCentroidFormat centroid_format)
 {
 	if (g_probe_expand <= 1.0 || centroid_format == MKT_CENTROID_FMT_FLOAT ||
 		centroid_format == MKT_CENTROID_FMT_HALF)
@@ -294,8 +294,8 @@ mkt_query_routed_clusters(
 	double	 expanded = (double)nprobe * g_probe_expand;
 	uint32_t n_route  = (uint32_t)(expanded + 0.5);
 
-	if (n_route > nprobe + MKT_PROBE_EXPAND_MAX_EXTRA)
-		n_route = nprobe + MKT_PROBE_EXPAND_MAX_EXTRA;
+	if (n_route > nprobe + PRISM_PROBE_EXPAND_MAX_EXTRA)
+		n_route = nprobe + PRISM_PROBE_EXPAND_MAX_EXTRA;
 	if (n_route > cap)
 		n_route = cap;
 	if (n_route < nprobe)
@@ -323,16 +323,16 @@ cmp_probe_order(const void *a, const void *b)
 
 static void
 scan_clusters(
-		MktQueryState			*qs,
-		const MktCentroidResult *beam_results,
-		uint32_t				 n_results,
-		uint32_t				 scan_limit,
-		MktDistanceMode			 mode,
-		MktTopK					*topk,
-		MktQueryStats			*stats)
+		PrismQueryState			  *qs,
+		const PrismCentroidResult *beam_results,
+		uint32_t				   n_results,
+		uint32_t				   scan_limit,
+		MktDistanceMode			   mode,
+		MktTopK					  *topk,
+		PrismQueryStats			  *stats)
 {
-	const MktIndexBase *idx = qs->index;
-	Dimension			dim = idx->dim;
+	const PrismIndexBase *idx = qs->index;
+	Dimension			  dim = idx->dim;
 
 	qs->pscan.storage = idx->posting_storage;
 
@@ -370,12 +370,12 @@ scan_clusters(
 			if (ph == InvalidBlockNumber)
 				continue;
 
-			mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
-			const float *pt_cent = mkt_posting_scan_pt_centroid(&qs->pscan);
+			prism_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
+			const float *pt_cent = prism_posting_scan_pt_centroid(&qs->pscan);
 			if (pt_cent != NULL)
 				qs->probe_dists[j] =
 						mkt_l2_distance_squared(qs->pt_query, pt_cent, dim);
-			mkt_posting_scan_end_cluster(&qs->pscan);
+			prism_posting_scan_end_cluster(&qs->pscan);
 		}
 
 		g_probe_sort_dists = qs->probe_dists;
@@ -403,12 +403,12 @@ scan_clusters(
 		 * measures how many probed clusters the query actually needed. */
 		topk->cur_src = r;
 
-		mkt_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
+		prism_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
 
-		const float *pt_cent = mkt_posting_scan_pt_centroid(&qs->pscan);
+		const float *pt_cent = prism_posting_scan_pt_centroid(&qs->pscan);
 		if (pt_cent == NULL)
 		{
-			mkt_posting_scan_end_cluster(&qs->pscan);
+			prism_posting_scan_end_cluster(&qs->pscan);
 			continue;
 		}
 
@@ -416,13 +416,13 @@ scan_clusters(
 				&qs->cluster_qs, qs->pt_query, pt_cent, dim, mode);
 
 		if (idx->fastscan && qs->pscan.fs_lut != NULL)
-			mkt_posting_scan_cluster_fastscan(&qs->pscan, topk);
+			prism_posting_scan_cluster_fastscan(&qs->pscan, topk);
 		else
-			mkt_posting_scan_cluster(&qs->pscan, topk);
+			prism_posting_scan_cluster(&qs->pscan, topk);
 		total_pages += qs->pscan.pages_read;
 		total_skipped += qs->pscan.pages_skipped;
 		total_entries += qs->pscan.entries_scanned;
-		mkt_posting_scan_end_cluster(&qs->pscan);
+		prism_posting_scan_end_cluster(&qs->pscan);
 		scanned++;
 	}
 
@@ -438,7 +438,7 @@ scan_clusters(
 }
 
 static uint32_t
-extract_candidates(MktQueryState *qs, uint32_t cap)
+extract_candidates(PrismQueryState *qs, uint32_t cap)
 {
 	if (qs->topk.cand_count > qs->cand_cap)
 	{
@@ -464,7 +464,7 @@ extract_candidates(MktQueryState *qs, uint32_t cap)
 
 /* Monotonic nanosecond clock for per-phase query instrumentation. */
 static inline uint64_t
-mkt_query_now_ns(void)
+prism_query_now_ns(void)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -472,23 +472,23 @@ mkt_query_now_ns(void)
 }
 
 uint32_t
-mkt_query_route(
-		MktQueryState		   *qs,
-		const float			   *query,
-		uint32_t				nprobe,
-		MktDistanceMode			mode,
-		MktCentroidSearchStats *beam_stats)
+prism_query_route(
+		PrismQueryState			 *qs,
+		const float				 *query,
+		uint32_t				  nprobe,
+		MktDistanceMode			  mode,
+		PrismCentroidSearchStats *beam_stats)
 {
 	if (nprobe > qs->max_nprobe)
 		nprobe = qs->max_nprobe;
 
-	MktCentroidSearchStats	local = {0};
-	MktCentroidSearchStats *bs	  = beam_stats ? beam_stats : &local;
+	PrismCentroidSearchStats  local = {0};
+	PrismCentroidSearchStats *bs	= beam_stats ? beam_stats : &local;
 
 	const float *qvec  = prepare_query(qs, query);
-	uint64_t	 t_rot = mkt_query_now_ns();
+	uint64_t	 t_rot = prism_query_now_ns();
 	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
-	bs->rotation_ns = mkt_query_now_ns() - t_rot;
+	bs->rotation_ns = prism_query_now_ns() - t_rot;
 
 	return search_centroids(qs, qvec, nprobe, mode, bs);
 }
@@ -510,13 +510,13 @@ mkt_query_route(
  * without buying recall. -1 disables the cap entirely; positive values
  * are absolute. The effective cap is never below k, so a cap can never
  * truncate the result set. */
-#define MKT_RERANK_POOL_AUTO_COEFF 3.0
-#define MKT_RERANK_POOL_AUTO_EXP   0.15
+#define PRISM_RERANK_POOL_AUTO_COEFF 3.0
+#define PRISM_RERANK_POOL_AUTO_EXP	 0.15
 
 static int32_t g_rerank_pool = 0;
 
 void
-mkt_query_set_rerank_pool(int32_t n)
+prism_query_set_rerank_pool(int32_t n)
 {
 	g_rerank_pool = n;
 }
@@ -537,7 +537,7 @@ mkt_query_set_rerank_pool(int32_t n)
  * until the clusters have been scanned.
  */
 uint32_t
-mkt_query_rerank_pool_estimate(uint32_t k, uint32_t nprobe)
+prism_query_rerank_pool_estimate(uint32_t k, uint32_t nprobe)
 {
 	if (g_rerank_pool < 0)
 		return 0; /* uncapped: every survivor is reranked */
@@ -549,22 +549,22 @@ mkt_query_rerank_pool_estimate(uint32_t k, uint32_t nprobe)
 		return pool < k ? k : pool;
 	}
 
-	double auto_floor = MKT_RERANK_POOL_AUTO_COEFF * (double)k *
-						pow((double)nprobe, MKT_RERANK_POOL_AUTO_EXP);
+	double auto_floor = PRISM_RERANK_POOL_AUTO_COEFF * (double)k *
+						pow((double)nprobe, PRISM_RERANK_POOL_AUTO_EXP);
 	uint32_t pool = (uint32_t)(auto_floor + 0.5);
 
 	return pool < k ? k : pool;
 }
 
 uint32_t
-mkt_query_execute(
-		MktQueryState  *qs,
-		const float	   *query,
-		uint32_t		k,
-		uint32_t		nprobe,
-		MktDistanceMode mode,
-		bool			rerank,
-		MktQueryStats  *stats)
+prism_query_execute(
+		PrismQueryState *qs,
+		const float		*query,
+		uint32_t		 k,
+		uint32_t		 nprobe,
+		MktDistanceMode	 mode,
+		bool			 rerank,
+		PrismQueryStats *stats)
 {
 	if (k > qs->max_k)
 		k = qs->max_k;
@@ -582,16 +582,16 @@ mkt_query_execute(
 	 * the classic single-phase behavior. Skipped entirely when the
 	 * centroid pages are exact (float/half): the beam distances are
 	 * already exact, so there is no ordering noise to correct. */
-	uint32_t n_route = mkt_query_routed_clusters(
+	uint32_t n_route = prism_query_routed_clusters(
 			nprobe, qs->max_nprobe, qs->index->centroid_format);
 
-	uint64_t t0 = mkt_query_now_ns();
+	uint64_t t0 = prism_query_now_ns();
 
-	MktCentroidSearchStats beam_stats = {0};
-	uint32_t			   ncentroids =
-			mkt_query_route(qs, query, n_route, mode, &beam_stats);
+	PrismCentroidSearchStats beam_stats = {0};
+	uint32_t				 ncentroids =
+			prism_query_route(qs, query, n_route, mode, &beam_stats);
 
-	/* mkt_query_route already normalized the query into qs->query_buf (for
+	/* prism_query_route already normalized the query into qs->query_buf (for
 	 * cosine) via prepare_query; reuse it for the rerank below instead of
 	 * re-normalizing (a redundant O(dim) memcpy+norm+scale per query). For
 	 * non-cosine metrics prepare_query is a no-op and returns the raw query.
@@ -599,7 +599,7 @@ mkt_query_execute(
 	const float *qvec = (qs->index->metric == DISTANCE_COSINE) ? qs->query_buf
 															   : query;
 
-	uint64_t t1 = mkt_query_now_ns();
+	uint64_t t1 = prism_query_now_ns();
 
 	/*
 	 * The probed heads are chosen and their centroid pages released, but none
@@ -614,7 +614,7 @@ mkt_query_execute(
 			qs, qs->beam_results, ncentroids, nprobe, mode, &qs->topk, stats);
 
 	/* Rerank-pool cap: the first `pool` candidates by approximate
-	 * distance are the most promising; see mkt_query_set_rerank_pool.
+	 * distance are the most promising; see prism_query_set_rerank_pool.
 	 * Resolved before extraction so the extract can select the capped
 	 * prefix instead of fully sorting an unbounded survivor set.
 	 *
@@ -626,7 +626,7 @@ mkt_query_execute(
 	 * meaningless, silently capping recall well below what the probed
 	 * clusters contain. 1/8th of the buffer restores the recall
 	 * ceiling at a rerank cost proportionate to the observed noise. */
-	uint32_t pool = mkt_query_rerank_pool_estimate(k, nprobe);
+	uint32_t pool = prism_query_rerank_pool_estimate(k, nprobe);
 
 	/*
 	 * The noise term needs the candidate population, which exists only now
@@ -640,7 +640,7 @@ mkt_query_execute(
 
 	uint32_t ncands = extract_candidates(qs, pool);
 
-	uint64_t t2 = mkt_query_now_ns();
+	uint64_t t2 = prism_query_now_ns();
 
 	/* Rerank with exact distances if enabled and storage supports it */
 	MktStorage *ps = qs->index->posting_storage;
@@ -680,7 +680,7 @@ mkt_query_execute(
 	}
 #endif
 
-	uint64_t t3 = mkt_query_now_ns();
+	uint64_t t3 = prism_query_now_ns();
 
 	/* Routing-quality diagnostic: deepest probe rank contributing a final
 	 * top-k result. Low values (relative to nprobe) => over-probing; values
@@ -711,7 +711,7 @@ mkt_query_execute(
 }
 
 uint32_t
-mkt_auto_nprobe(uint32_t nlist)
+prism_auto_nprobe(uint32_t nlist)
 {
 	/* See the header: ~0.5 * sqrt(nlist), floored at 10, capped at
 	 * 2048, never above nlist. */

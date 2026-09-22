@@ -1,7 +1,7 @@
 /*
  * test_posting_split.c - Unit tests for incremental posting-list split
  *
- * Builds a single-partition paged index, splits it with mkt_posting_split,
+ * Builds a single-partition paged index, splits it with prism_posting_split,
  * and verifies:
  *   - the split preserves every entry and produces non-empty leaves (2-way and
  *     k-way via nparts)
@@ -75,7 +75,7 @@ make_three_blobs(uint32_t nvecs, uint32_t dim, uint32_t seed)
  * the fastscan width ever vary, so the named wrappers below pass those and
  * share everything else.
  */
-static MktIndex *
+static PrismIndex *
 build_paged_with(
 		const float	  *vecs,
 		uint32_t	   nvecs,
@@ -84,28 +84,28 @@ build_paged_with(
 		DistanceMetric metric,
 		int			   fastscan)
 {
-	MktIndexConfig config = {
+	PrismIndexConfig config = {
 			.nlist		   = nlist,
 			.metric		   = metric,
 			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
 			.encode_rabitq = true,
-			.posting_fmt   = MKT_POSTING_FMT_PAGES,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
 			.fastscan	   = fastscan,
 			.nworkers	   = 0,
 	};
 	MktArraySource src;
 	mkt_array_source_init(&src, vecs, nvecs, dim);
-	return mkt_index_build(&src.base, &config, NULL);
+	return prism_index_build(&src.base, &config, NULL);
 }
 
-static MktIndex *
+static PrismIndex *
 build_paged(const float *vecs, uint32_t nvecs, uint32_t dim, uint32_t nlist)
 {
 	return build_paged_with(vecs, nvecs, dim, nlist, DISTANCE_L2, 0);
 }
 
 /* Build under cosine, where a zero-norm vector has no defined distance. */
-static MktIndex *
+static PrismIndex *
 build_paged_cosine(
 		const float *vecs, uint32_t nvecs, uint32_t dim, uint32_t nlist)
 {
@@ -114,7 +114,7 @@ build_paged_cosine(
 
 /* Build with fastscan-packed posting pages (SoA groups), to exercise the
  * fastscan branch of the split's entry collection. */
-static MktIndex *
+static PrismIndex *
 build_paged_fastscan(
 		const float *vecs, uint32_t nvecs, uint32_t dim, uint32_t nlist)
 {
@@ -127,16 +127,16 @@ build_paged_fastscan(
  * up. Declares dim, n, vecs and idx, so bodies keep referring to them by
  * name.
  */
-#define DECLARE_TWO_BLOB_INDEX(nvecs_, dim_, seed_)   \
-	uint32_t  dim = (dim_), n = (nvecs_);             \
-	float	 *vecs = make_two_blobs(n, dim, (seed_)); \
-	MktIndex *idx  = build_paged(vecs, n, dim, 1)
+#define DECLARE_TWO_BLOB_INDEX(nvecs_, dim_, seed_)     \
+	uint32_t	dim = (dim_), n = (nvecs_);             \
+	float	   *vecs = make_two_blobs(n, dim, (seed_)); \
+	PrismIndex *idx	 = build_paged(vecs, n, dim, 1)
 
 /* The same, with three blobs, for the k-way (nparts > 2) splits. */
-#define DECLARE_THREE_BLOB_INDEX(nvecs_, dim_, seed_)   \
-	uint32_t  dim = (dim_), n = (nvecs_);               \
-	float	 *vecs = make_three_blobs(n, dim, (seed_)); \
-	MktIndex *idx  = build_paged(vecs, n, dim, 1)
+#define DECLARE_THREE_BLOB_INDEX(nvecs_, dim_, seed_)     \
+	uint32_t	dim = (dim_), n = (nvecs_);               \
+	float	   *vecs = make_three_blobs(n, dim, (seed_)); \
+	PrismIndex *idx	 = build_paged(vecs, n, dim, 1)
 
 /* Split env: fetch full-precision vectors from the in-RAM store by id. */
 typedef struct FetchCtx
@@ -148,31 +148,32 @@ static bool
 fetch_vec(void *ctx, ItemPointerData tid, float *out, Dimension dim)
 {
 	const float *all = ((FetchCtx *)ctx)->all;
-	uint32_t	 vid = mkt_posting_get_vector_id(&tid);
+	uint32_t	 vid = prism_posting_get_vector_id(&tid);
 	memcpy(out, all + (size_t)vid * dim, (size_t)dim * sizeof(float));
 	return true;
 }
 
 /* True if the posting head at `blk` is stored in fastscan (SoA) format. */
 static bool
-head_is_fastscan(MktIndexBase *base, BlockNumber blk)
+head_is_fastscan(PrismIndexBase *base, BlockNumber blk)
 {
 	Page p	= mkt_storage_read_page(base->posting_storage, blk);
-	bool fs = (mkt_posting_opaque(p)->flags & MKT_POSTING_PAGE_FASTSCAN) != 0;
+	bool fs = (prism_posting_opaque(p)->flags & PRISM_POSTING_PAGE_FASTSCAN) !=
+			  0;
 	mkt_storage_release_page(base->posting_storage, blk);
 	return fs;
 }
 
 /* Number of centroid pages linked from the (single-level) tree root. */
 static uint32_t
-centroid_page_count(MktIndexBase *base)
+centroid_page_count(PrismIndexBase *base)
 {
 	uint32_t	n	= 0;
 	BlockNumber blk = base->first_centroid;
 	while (blk != InvalidBlockNumber && n <= 1024)
 	{
 		Page		p	 = mkt_storage_read_page(base->centroid_storage, blk);
-		BlockNumber next = MKT_CENTROID_OPAQUE(p)->next_blkno;
+		BlockNumber next = PRISM_CENTROID_OPAQUE(p)->next_blkno;
 		mkt_storage_release_page(base->centroid_storage, blk);
 		blk = next;
 		n++;
@@ -186,7 +187,7 @@ centroid_page_count(MktIndexBase *base)
  * Lets a test say what the flip changed rather than only what it produced.
  */
 static void
-count_leaf_entries(MktIndexBase *base, uint32_t *total, uint32_t *fillers)
+count_leaf_entries(PrismIndexBase *base, uint32_t *total, uint32_t *fillers)
 {
 	*total			= 0;
 	*fillers		= 0;
@@ -195,15 +196,15 @@ count_leaf_entries(MktIndexBase *base, uint32_t *total, uint32_t *fillers)
 	while (blk != InvalidBlockNumber)
 	{
 		Page p = mkt_storage_read_page(base->centroid_storage, blk);
-		MktCentroidPageOpaque *op	= MKT_CENTROID_OPAQUE(p);
-		uint32_t			   n	= op->entry_count;
-		BlockNumber			   next = op->next_blkno;
+		PrismCentroidPageOpaque *op	  = PRISM_CENTROID_OPAQUE(p);
+		uint32_t				 n	  = op->entry_count;
+		BlockNumber				 next = op->next_blkno;
 
 		for (uint32_t i = 0; i < n; i++)
 		{
-			const MktCentroidEntryMeta *m = mkt_centroid_meta(p, i);
+			const PrismCentroidEntryMeta *m = prism_centroid_meta(p, i);
 
-			if ((m->flags & MKT_CENTROID_FLAG_LEAF) == 0)
+			if ((m->flags & PRISM_CENTROID_FLAG_LEAF) == 0)
 				continue;
 			(*total)++;
 			if (m->child_blkno == InvalidBlockNumber)
@@ -248,7 +249,7 @@ brute_force_knn(
 
 static double
 measure_recall(
-		MktIndex	*idx,
+		PrismIndex	*idx,
 		const float *vecs,
 		uint32_t	 nvecs,
 		uint32_t	 dim,
@@ -256,16 +257,16 @@ measure_recall(
 		uint32_t	 nprobe,
 		uint32_t	 nq)
 {
-	MktQueryCtx *q		 = mkt_query_ctx_create(idx, k, nprobe);
-	uint32_t	 hits	 = 0;
-	uint32_t	 res[16] = {0};
-	uint32_t	 gt[16]	 = {0};
-	uint32_t	 stride	 = nvecs / nq;
+	PrismQueryCtx *q	   = prism_query_ctx_create(idx, k, nprobe);
+	uint32_t	   hits	   = 0;
+	uint32_t	   res[16] = {0};
+	uint32_t	   gt[16]  = {0};
+	uint32_t	   stride  = nvecs / nq;
 
 	for (uint32_t i = 0; i < nq; i++)
 	{
 		const float *query = vecs + (size_t)(i * stride) * dim;
-		uint32_t	 c	   = mkt_query_exec(
+		uint32_t	 c	   = prism_query_exec(
 				q, query, k, nprobe, MKT_DISTANCE_MODE_ASYMMETRIC, true, res);
 		brute_force_knn(vecs, nvecs, dim, query, k, gt);
 		for (uint32_t a = 0; a < c; a++)
@@ -273,7 +274,7 @@ measure_recall(
 				if (res[a] == gt[g])
 					hits++;
 	}
-	mkt_query_ctx_destroy(q);
+	prism_query_ctx_destroy(q);
 	return (double)hits / ((double)nq * k);
 }
 
@@ -288,11 +289,11 @@ TEST(split_preserves_entries_and_structure)
 	ASSERT_EQ(idx->base.nlist, 1u, "starts as a single partition");
 	ASSERT_EQ(idx->base.nlevels, 1u, "flat tree");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitResult res;
-	int			   rc = mkt_posting_split(
-			   &idx->base, idx->first_posting, NULL, &env, &res);
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitResult res;
+	int				 rc = prism_posting_split(
+			 &idx->base, idx->first_posting, NULL, &env, &res);
 
 	ASSERT_EQ(rc, 0, "split should succeed");
 	ASSERT_TRUE(res.did_split, "split should happen");
@@ -304,7 +305,7 @@ TEST(split_preserves_entries_and_structure)
 	ASSERT_EQ(res.count[0] + res.count[1], n, "every entry preserved");
 	ASSERT_TRUE(res.count[0] > 0 && res.count[1] > 0, "both leaves non-empty");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 /* Records that the retire hook fired and matches the default behavior (make
@@ -316,7 +317,7 @@ test_retire_chain(void *ctx, MktStorage *storage, BlockNumber head)
 {
 	(void)ctx;
 	split_retire_calls++;
-	mkt_posting_chain_tombstone(storage, head);
+	prism_posting_chain_tombstone(storage, head);
 }
 
 /* A backend with MVCC snapshots supplies env->retire_chain to defer reclaim;
@@ -328,14 +329,14 @@ TEST(split_invokes_retire_chain_hook)
 
 	FetchCtx fc		   = {idx->all_vectors};
 	split_retire_calls = 0;
-	MktSplitEnv env	   = {
-			   .fetch_vector = fetch_vec,
-			   .retire_chain = test_retire_chain,
-			   .ctx			 = &fc,
-	   };
-	MktSplitResult res;
-	int			   rc = mkt_posting_split(
-			   &idx->base, idx->first_posting, NULL, &env, &res);
+	PrismSplitEnv env  = {
+			 .fetch_vector = fetch_vec,
+			 .retire_chain = test_retire_chain,
+			 .ctx		   = &fc,
+	 };
+	PrismSplitResult res;
+	int				 rc = prism_posting_split(
+			 &idx->base, idx->first_posting, NULL, &env, &res);
 
 	ASSERT_EQ(rc, 0, "split should succeed");
 	ASSERT_TRUE(res.did_split, "split should happen");
@@ -344,7 +345,7 @@ TEST(split_invokes_retire_chain_hook)
 			1,
 			"retire_chain invoked once for the old chain");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 /* N-way split: cfg.nparts = 3 turns one oversized list into three right-sized
@@ -358,12 +359,12 @@ TEST(split_three_way)
 	 * wrong post-split count. */
 	ASSERT_EQ(idx->base.nlist, 1u, "fixture builds one list");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitConfig cfg = {.nparts = 3};
-	MktSplitResult res;
-	int			   rc = mkt_posting_split(
-			   &idx->base, idx->first_posting, &cfg, &env, &res);
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitConfig cfg = {.nparts = 3};
+	PrismSplitResult res;
+	int				 rc = prism_posting_split(
+			 &idx->base, idx->first_posting, &cfg, &env, &res);
 
 	ASSERT_EQ(rc, 0, "split should succeed");
 	ASSERT_TRUE(res.did_split, "split should happen");
@@ -378,7 +379,7 @@ TEST(split_three_way)
 			res.count[0] > 0 && res.count[1] > 0 && res.count[2] > 0,
 			"all three leaves non-empty");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 TEST(split_keeps_vectors_retrievable)
@@ -386,11 +387,11 @@ TEST(split_keeps_vectors_retrievable)
 	DECLARE_TWO_BLOB_INDEX(1200, 16, 7);
 	ASSERT_NOT_NULL(idx, "build ok");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitResult res;
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitResult res;
 	ASSERT_EQ(
-			mkt_posting_split(
+			prism_posting_split(
 					&idx->base, idx->first_posting, NULL, &env, &res),
 			0,
 			"split ok");
@@ -398,12 +399,12 @@ TEST(split_keeps_vectors_retrievable)
 
 	/* Self-retrieval: each vector should find itself as the top-1 through the
 	 * mutated tree (rerank makes this exact). Sample every 5th vector. */
-	MktQueryCtx *q		 = mkt_query_ctx_create(idx, 1, 2);
-	uint32_t	 checked = 0, found = 0;
+	PrismQueryCtx *q	   = prism_query_ctx_create(idx, 1, 2);
+	uint32_t	   checked = 0, found = 0;
 	for (uint32_t vid = 0; vid < n; vid += 5)
 	{
 		uint32_t res_id = UINT32_MAX;
-		uint32_t c		= mkt_query_exec(
+		uint32_t c		= prism_query_exec(
 				 q,
 				 vecs + (size_t)vid * dim,
 				 1,
@@ -415,29 +416,29 @@ TEST(split_keeps_vectors_retrievable)
 		if (c == 1 && res_id == vid)
 			found++;
 	}
-	mkt_query_ctx_destroy(q);
+	prism_query_ctx_destroy(q);
 
 	double self_recall = (double)found / (double)checked;
 	ASSERT_TRUE(
 			self_recall > 0.98, "nearly all vectors retrievable post-split");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 TEST(split_fastscan_posting)
 {
 	/* Fastscan posting pages store TIDs in SoA 32-groups; the split must read
 	 * them correctly (the AoS reader would misalign). */
-	uint32_t  dim = 16, n = 1200;
-	float	 *vecs = make_two_blobs(n, dim, 99);
-	MktIndex *idx  = build_paged_fastscan(vecs, n, dim, 1);
+	uint32_t	dim = 16, n = 1200;
+	float	   *vecs = make_two_blobs(n, dim, 99);
+	PrismIndex *idx	 = build_paged_fastscan(vecs, n, dim, 1);
 	ASSERT_NOT_NULL(idx, "fastscan build ok");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitResult res;
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitResult res;
 	ASSERT_EQ(
-			mkt_posting_split(
+			prism_posting_split(
 					&idx->base, idx->first_posting, NULL, &env, &res),
 			0,
 			"split ok");
@@ -445,12 +446,12 @@ TEST(split_fastscan_posting)
 	ASSERT_EQ(
 			res.count[0] + res.count[1], n, "every entry preserved from SoA");
 
-	MktQueryCtx *q		 = mkt_query_ctx_create(idx, 1, 2);
-	uint32_t	 checked = 0, found = 0;
+	PrismQueryCtx *q	   = prism_query_ctx_create(idx, 1, 2);
+	uint32_t	   checked = 0, found = 0;
 	for (uint32_t vid = 0; vid < n; vid += 5)
 	{
 		uint32_t res_id = UINT32_MAX;
-		uint32_t c		= mkt_query_exec(
+		uint32_t c		= prism_query_exec(
 				 q,
 				 vecs + (size_t)vid * dim,
 				 1,
@@ -462,12 +463,12 @@ TEST(split_fastscan_posting)
 		if (c == 1 && res_id == vid)
 			found++;
 	}
-	mkt_query_ctx_destroy(q);
+	prism_query_ctx_destroy(q);
 	ASSERT_TRUE(
 			(double)found / checked > 0.98,
 			"retrievable after fastscan split");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 TEST(split_declines_below_threshold)
@@ -475,18 +476,18 @@ TEST(split_declines_below_threshold)
 	DECLARE_TWO_BLOB_INDEX(1200, 16, 5);
 	ASSERT_NOT_NULL(idx, "build ok");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitConfig cfg = {.min_split_entries = 1000000}; /* never reached */
-	MktSplitResult res;
-	int			   rc = mkt_posting_split(
-			   &idx->base, idx->first_posting, &cfg, &env, &res);
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitConfig cfg = {.min_split_entries = 1000000}; /* never reached */
+	PrismSplitResult res;
+	int				 rc = prism_posting_split(
+			 &idx->base, idx->first_posting, &cfg, &env, &res);
 
 	ASSERT_EQ(rc, 0, "declining is not an error");
 	ASSERT_FALSE(res.did_split, "too few entries -> no split");
 	ASSERT_EQ(idx->base.nlist, 1u, "nlist unchanged");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 TEST(split_handles_degenerate_data)
@@ -500,14 +501,14 @@ TEST(split_handles_degenerate_data)
 		for (uint32_t j = 0; j < dim; j++)
 			vecs[(size_t)i * dim + j] = 1.5f;
 
-	MktIndex *idx = build_paged(vecs, n, dim, 1);
+	PrismIndex *idx = build_paged(vecs, n, dim, 1);
 	ASSERT_NOT_NULL(idx, "build ok");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitResult res;
-	int			   rc = mkt_posting_split(
-			   &idx->base, idx->first_posting, NULL, &env, &res);
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitResult res;
+	int				 rc = prism_posting_split(
+			 &idx->base, idx->first_posting, NULL, &env, &res);
 
 	/* Identical vectors cannot be partitioned into two groups a centroid
 	 * tells apart, and widening cannot change that -- so this is the case
@@ -517,7 +518,7 @@ TEST(split_handles_degenerate_data)
 	ASSERT_FALSE(res.did_split, "identical vectors -> declined");
 	ASSERT_EQ(idx->base.nlist, 1u, "declined -> nlist unchanged");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 TEST(split_recall_matches_rebuild)
@@ -526,13 +527,13 @@ TEST(split_recall_matches_rebuild)
 	float	*vecs = make_two_blobs(n, dim, 123);
 
 	/* Incremental: build one partition, then split it. */
-	MktIndex *idx_a = build_paged(vecs, n, dim, 1);
+	PrismIndex *idx_a = build_paged(vecs, n, dim, 1);
 	ASSERT_NOT_NULL(idx_a, "build A ok");
-	FetchCtx	   fc  = {idx_a->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitResult res;
+	FetchCtx		 fc	 = {idx_a->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitResult res;
 	ASSERT_EQ(
-			mkt_posting_split(
+			prism_posting_split(
 					&idx_a->base, idx_a->first_posting, NULL, &env, &res),
 			0,
 			"split ok");
@@ -540,7 +541,7 @@ TEST(split_recall_matches_rebuild)
 	double recall_a = measure_recall(idx_a, vecs, n, dim, k, nprobe, nq);
 
 	/* From scratch: build two partitions directly. */
-	MktIndex *idx_b = build_paged(vecs, n, dim, 2);
+	PrismIndex *idx_b = build_paged(vecs, n, dim, 2);
 	ASSERT_NOT_NULL(idx_b, "build B ok");
 	double recall_b = measure_recall(idx_b, vecs, n, dim, k, nprobe, nq);
 
@@ -549,8 +550,8 @@ TEST(split_recall_matches_rebuild)
 			fabs(recall_a - recall_b) < 0.15,
 			"incremental split recall tracks a from-scratch build");
 
-	mkt_index_destroy(idx_a);
-	mkt_index_destroy(idx_b);
+	prism_index_destroy(idx_a);
+	prism_index_destroy(idx_b);
 }
 
 /*
@@ -565,24 +566,24 @@ TEST(split_routing_nprobe_below_k)
 	DECLARE_THREE_BLOB_INDEX(1500, 16, 11);
 	ASSERT_NOT_NULL(idx, "build ok");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitConfig cfg = {.nparts = 3};
-	MktSplitResult res;
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitConfig cfg = {.nparts = 3};
+	PrismSplitResult res;
 	ASSERT_EQ(
-			mkt_posting_split(
+			prism_posting_split(
 					&idx->base, idx->first_posting, &cfg, &env, &res),
 			0,
 			"split ok");
 	ASSERT_TRUE(res.did_split && res.nparts == 3u, "3-way split happened");
 
 	/* nprobe = 1: each query reaches a single list. */
-	MktQueryCtx *q		 = mkt_query_ctx_create(idx, 1, 1);
-	uint32_t	 checked = 0, found = 0;
+	PrismQueryCtx *q	   = prism_query_ctx_create(idx, 1, 1);
+	uint32_t	   checked = 0, found = 0;
 	for (uint32_t vid = 0; vid < n; vid += 7)
 	{
 		uint32_t res_id = UINT32_MAX;
-		uint32_t c		= mkt_query_exec(
+		uint32_t c		= prism_query_exec(
 				 q,
 				 vecs + (size_t)vid * dim,
 				 1,
@@ -594,12 +595,12 @@ TEST(split_routing_nprobe_below_k)
 		if (c == 1 && res_id == vid)
 			found++;
 	}
-	mkt_query_ctx_destroy(q);
+	prism_query_ctx_destroy(q);
 	ASSERT_TRUE(
 			(double)found / checked > 0.9,
 			"single-probe self-retrieval works -> new centroids route well");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 /*
@@ -615,7 +616,7 @@ TEST(split_routing_nprobe_below_k)
  * repeated splits accumulate leaves on one level. This constructs that state
  * directly so the split's multi-page fallback flip is exercised. */
 static uint32_t
-fill_centroid_page(MktIndexBase *base, Dimension dim)
+fill_centroid_page(PrismIndexBase *base, Dimension dim)
 {
 	void *rd = mkt_alloc0(MKT_RABITQ_DATA_SIZE(dim));
 	Page  p	 = mkt_storage_write_page(
@@ -624,8 +625,8 @@ fill_centroid_page(MktIndexBase *base, Dimension dim)
 	/* child_blkno is an invalid, never-followed leaf: the split only touches
 	 * the real leaf it is splitting, so these fillers just consume page room.
 	 */
-	while (mkt_centroid_page_add_entry(
-			p, dim, InvalidBlockNumber, 0, MKT_CENTROID_FLAG_LEAF, rd))
+	while (prism_centroid_page_add_entry(
+			p, dim, InvalidBlockNumber, 0, PRISM_CENTROID_FLAG_LEAF, rd))
 		added++;
 	mkt_storage_commit_page(base->centroid_storage, base->first_centroid);
 	mkt_free(rd);
@@ -655,11 +656,11 @@ TEST(split_overflows_centroid_page)
 	ASSERT_EQ(total_before, filled + 1, "the real leaf, plus the fillers");
 	ASSERT_EQ(fillers_before, filled, "and only the fillers are unfollowed");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitResult res;
-	int			   rc = mkt_posting_split(
-			   &idx->base, idx->first_posting, NULL, &env, &res);
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitResult res;
+	int				 rc = prism_posting_split(
+			 &idx->base, idx->first_posting, NULL, &env, &res);
 	ASSERT_EQ(rc, 0, "split ok");
 	ASSERT_TRUE(res.did_split, "split happened");
 	ASSERT_EQ(
@@ -681,7 +682,7 @@ TEST(split_overflows_centroid_page)
 	ASSERT_EQ(total_after, filled + 2, "one leaf became two");
 	ASSERT_EQ(fillers_after, filled, "the flip clobbered no filler");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 /*
@@ -695,15 +696,16 @@ TEST(split_new_heads_keep_format)
 	uint32_t dim = 16, n = 1200;
 	float	*vecs = make_two_blobs(n, dim, 3);
 
-	MktIndex *aos = build_paged(vecs, n, dim, 1);
+	PrismIndex *aos = build_paged(vecs, n, dim, 1);
 	ASSERT_FALSE(
 			head_is_fastscan(&aos->base, aos->first_posting),
 			"AoS build starts AoS");
-	FetchCtx	   fca = {aos->all_vectors};
-	MktSplitEnv	   ea  = {.fetch_vector = fetch_vec, .ctx = &fca};
-	MktSplitResult ra;
+	FetchCtx		 fca = {aos->all_vectors};
+	PrismSplitEnv	 ea	 = {.fetch_vector = fetch_vec, .ctx = &fca};
+	PrismSplitResult ra;
 	ASSERT_EQ(
-			mkt_posting_split(&aos->base, aos->first_posting, NULL, &ea, &ra),
+			prism_posting_split(
+					&aos->base, aos->first_posting, NULL, &ea, &ra),
 			0,
 			"aos split ok");
 	ASSERT_TRUE(ra.did_split, "aos split happened");
@@ -713,17 +715,17 @@ TEST(split_new_heads_keep_format)
 	ASSERT_FALSE(
 			head_is_fastscan(&aos->base, ra.head[1]),
 			"AoS build -> AoS new head");
-	mkt_index_destroy(aos);
+	prism_index_destroy(aos);
 
-	MktIndex *fs = build_paged_fastscan(vecs, n, dim, 1);
+	PrismIndex *fs = build_paged_fastscan(vecs, n, dim, 1);
 	ASSERT_TRUE(
 			head_is_fastscan(&fs->base, fs->first_posting),
 			"fastscan build starts fastscan");
-	FetchCtx	   fcf = {fs->all_vectors};
-	MktSplitEnv	   ef  = {.fetch_vector = fetch_vec, .ctx = &fcf};
-	MktSplitResult rf;
+	FetchCtx		 fcf = {fs->all_vectors};
+	PrismSplitEnv	 ef	 = {.fetch_vector = fetch_vec, .ctx = &fcf};
+	PrismSplitResult rf;
 	ASSERT_EQ(
-			mkt_posting_split(&fs->base, fs->first_posting, NULL, &ef, &rf),
+			prism_posting_split(&fs->base, fs->first_posting, NULL, &ef, &rf),
 			0,
 			"fastscan split ok");
 	ASSERT_TRUE(rf.did_split, "fastscan split happened");
@@ -733,7 +735,7 @@ TEST(split_new_heads_keep_format)
 	ASSERT_TRUE(
 			head_is_fastscan(&fs->base, rf.head[1]),
 			"fastscan build -> fastscan new head");
-	mkt_index_destroy(fs);
+	prism_index_destroy(fs);
 }
 
 /* fetch_vector reporting false (e.g. a dead heap tuple) drops that entry from
@@ -741,7 +743,7 @@ TEST(split_new_heads_keep_format)
 static bool
 fetch_vec_drop_odd(void *ctx, ItemPointerData tid, float *out, Dimension dim)
 {
-	uint32_t vid = mkt_posting_get_vector_id(&tid);
+	uint32_t vid = prism_posting_get_vector_id(&tid);
 	if (vid & 1u)
 		return false; /* simulate an unavailable (dead) tuple */
 	return fetch_vec(ctx, tid, out, dim);
@@ -757,12 +759,12 @@ TEST(split_target_derives_width)
 	DECLARE_TWO_BLOB_INDEX(1200, 16, 31);
 	ASSERT_NOT_NULL(idx, "build ok");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitConfig cfg = {.target_entries = 100};
-	MktSplitResult res;
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitConfig cfg = {.target_entries = 100};
+	PrismSplitResult res;
 	ASSERT_EQ(
-			mkt_posting_split(
+			prism_posting_split(
 					&idx->base, idx->first_posting, &cfg, &env, &res),
 			0,
 			"split ok");
@@ -774,7 +776,7 @@ TEST(split_target_derives_width)
 		total += res.count[j];
 	ASSERT_EQ(total, n, "entries preserved");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 /*
@@ -800,16 +802,16 @@ TEST(split_target_width_rounds_not_ceils)
 
 	for (uint32_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++)
 	{
-		float	 *vecs = make_two_blobs(cases[c].n, dim, 21 + c);
-		MktIndex *idx  = build_paged(vecs, cases[c].n, dim, 1);
+		float	   *vecs = make_two_blobs(cases[c].n, dim, 21 + c);
+		PrismIndex *idx	 = build_paged(vecs, cases[c].n, dim, 1);
 		ASSERT_NOT_NULL(idx, "build ok");
 
-		FetchCtx	   fc  = {idx->all_vectors};
-		MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-		MktSplitConfig cfg = {.target_entries = target};
-		MktSplitResult res;
+		FetchCtx		 fc	 = {idx->all_vectors};
+		PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+		PrismSplitConfig cfg = {.target_entries = target};
+		PrismSplitResult res;
 		ASSERT_EQ(
-				mkt_posting_split(
+				prism_posting_split(
 						&idx->base, idx->first_posting, &cfg, &env, &res),
 				0,
 				"split ok");
@@ -819,7 +821,7 @@ TEST(split_target_width_rounds_not_ceils)
 				cases[c].want_parts,
 				"rounded width, not rounded up");
 
-		mkt_index_destroy(idx);
+		prism_index_destroy(idx);
 	}
 }
 
@@ -833,19 +835,19 @@ TEST(split_target_declines_within_band)
 	DECLARE_TWO_BLOB_INDEX(1200, 16, 31);
 	ASSERT_NOT_NULL(idx, "build ok");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitConfig cfg = {.target_entries = 1000};
-	MktSplitResult res;
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitConfig cfg = {.target_entries = 1000};
+	PrismSplitResult res;
 	ASSERT_EQ(
-			mkt_posting_split(
+			prism_posting_split(
 					&idx->base, idx->first_posting, &cfg, &env, &res),
 			0,
 			"declining is not an error");
 	ASSERT_FALSE(res.did_split, "below the trigger -> no split");
 	ASSERT_EQ(idx->base.nlist, 1u, "declined -> nlist unchanged");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 /*
@@ -860,19 +862,19 @@ TEST(split_target_rechecks_after_collection)
 	DECLARE_TWO_BLOB_INDEX(1200, 16, 31);
 	ASSERT_NOT_NULL(idx, "build ok");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec_drop_odd, .ctx = &fc};
-	MktSplitConfig cfg = {.target_entries = 400};
-	MktSplitResult res;
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec_drop_odd, .ctx = &fc};
+	PrismSplitConfig cfg = {.target_entries = 400};
+	PrismSplitResult res;
 	ASSERT_EQ(
-			mkt_posting_split(
+			prism_posting_split(
 					&idx->base, idx->first_posting, &cfg, &env, &res),
 			0,
 			"declining is not an error");
 	ASSERT_FALSE(
 			res.did_split, "600 fetchable entries is below the 800 trigger");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 /*
@@ -911,18 +913,18 @@ make_blob_with_outliers(
  */
 TEST(split_folds_undersized_clusters)
 {
-	uint32_t  dim = 16, n = 1200, nout = 3;
-	float	 *vecs = make_blob_with_outliers(n, dim, nout, 7);
-	MktIndex *idx  = build_paged(vecs, n, dim, 1);
+	uint32_t	dim = 16, n = 1200, nout = 3;
+	float	   *vecs = make_blob_with_outliers(n, dim, nout, 7);
+	PrismIndex *idx	 = build_paged(vecs, n, dim, 1);
 	ASSERT_NOT_NULL(idx, "build ok");
 
 	/* Target 100 -> trigger 200 (clearing 1200), floor 50. */
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitConfig cfg = {.target_entries = 100};
-	MktSplitResult res;
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitConfig cfg = {.target_entries = 100};
+	PrismSplitResult res;
 	ASSERT_EQ(
-			mkt_posting_split(
+			prism_posting_split(
 					&idx->base, idx->first_posting, &cfg, &env, &res),
 			0,
 			"split ok");
@@ -943,7 +945,7 @@ TEST(split_folds_undersized_clusters)
 	}
 	ASSERT_EQ(total, n, "folding loses no entries");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 /*
@@ -956,20 +958,20 @@ TEST(split_folds_undersized_clusters)
  */
 TEST(split_widens_when_fold_leaves_one)
 {
-	uint32_t  dim = 16, n = 600, nout = 1;
-	float	 *vecs = make_blob_with_outliers(n, dim, nout, 9);
-	MktIndex *idx  = build_paged(vecs, n, dim, 1);
+	uint32_t	dim = 16, n = 600, nout = 1;
+	float	   *vecs = make_blob_with_outliers(n, dim, nout, 9);
+	PrismIndex *idx	 = build_paged(vecs, n, dim, 1);
 	ASSERT_NOT_NULL(idx, "build ok");
 
 	/* Target 250 -> trigger 500 (which 600 clears), floor 125, and width
 	 * round(600/250) = 2. At two partitions the straggler is its own, so the
 	 * fold would leave one -- the split has to widen to get anywhere. */
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitConfig cfg = {.target_entries = 250};
-	MktSplitResult res;
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitConfig cfg = {.target_entries = 250};
+	PrismSplitResult res;
 	ASSERT_EQ(
-			mkt_posting_split(
+			prism_posting_split(
 					&idx->base, idx->first_posting, &cfg, &env, &res),
 			0,
 			"split ok");
@@ -983,7 +985,7 @@ TEST(split_widens_when_fold_leaves_one)
 	}
 	ASSERT_EQ(total, n, "widening loses no entries");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 static bool
@@ -1002,9 +1004,9 @@ fetch_vec_none(void *ctx, ItemPointerData tid, float *out, Dimension dim)
  * distance out of every query's top-k threshold heap.
  */
 static bool
-add_entry_count(MktPostingChainPos *pos, void *state)
+add_entry_count(PrismPostingChainPos *pos, void *state)
 {
-	*(uint32_t *)state += mkt_posting_opaque(pos->page)->entry_count;
+	*(uint32_t *)state += prism_posting_opaque(pos->page)->entry_count;
 	return true;
 }
 
@@ -1016,16 +1018,16 @@ typedef struct UnreachableCtx
 
 /* A reassigned-away entry is stamped f_add = inf with a zero error. */
 static bool
-count_unreachable_page(MktPostingChainPos *pos, void *state)
+count_unreachable_page(PrismPostingChainPos *pos, void *state)
 {
-	UnreachableCtx			   *ctx = state;
-	const MktPostingPageOpaque *op	= mkt_posting_opaque(pos->page);
-	char *content = mkt_posting_page_content(pos->page, ctx->dim);
+	UnreachableCtx				 *ctx = state;
+	const PrismPostingPageOpaque *op  = prism_posting_opaque(pos->page);
+	char *content = prism_posting_page_content(pos->page, ctx->dim);
 
 	for (uint16_t i = 0; i < op->entry_count; i++)
 	{
-		const MktPostingEntryHeader *h =
-				mkt_posting_entry_at(content, i, ctx->dim);
+		const PrismPostingEntryHeader *h =
+				prism_posting_entry_at(content, i, ctx->dim);
 
 		if (isinf(h->f_add) && h->f_error == 0.0f)
 			ctx->n++;
@@ -1034,20 +1036,20 @@ count_unreachable_page(MktPostingChainPos *pos, void *state)
 }
 
 static uint32_t
-chain_entry_count(MktIndexBase *base, BlockNumber head)
+chain_entry_count(PrismIndexBase *base, BlockNumber head)
 {
 	uint32_t n = 0;
 
-	mkt_posting_chain_walk(base->posting_storage, head, add_entry_count, &n);
+	prism_posting_chain_walk(base->posting_storage, head, add_entry_count, &n);
 	return n;
 }
 
 static uint32_t
-count_unreachable(MktIndexBase *base, BlockNumber head, Dimension dim)
+count_unreachable(PrismIndexBase *base, BlockNumber head, Dimension dim)
 {
 	UnreachableCtx ctx = {.dim = dim};
 
-	mkt_posting_chain_walk(
+	prism_posting_chain_walk(
 			base->posting_storage, head, count_unreachable_page, &ctx);
 	return ctx.n;
 }
@@ -1077,7 +1079,7 @@ TEST(split_keeps_zero_vectors_unreachable)
 		for (uint32_t j = 0; j < dim; j++)
 			vecs[(size_t)i * dim + j] = 0.0f;
 
-	MktIndex *idx = build_paged_cosine(vecs, n, dim, 1);
+	PrismIndex *idx = build_paged_cosine(vecs, n, dim, 1);
 	ASSERT_NOT_NULL(idx, "cosine build ok");
 	/* The build's own stamp, so the count after the split is preservation
 	 * and not the split having arrived at it by itself. */
@@ -1086,12 +1088,12 @@ TEST(split_keeps_zero_vectors_unreachable)
 			nzero,
 			"build stamped the zero vectors unreachable");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitConfig cfg = {.target_entries = 100};
-	MktSplitResult res;
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitConfig cfg = {.target_entries = 100};
+	PrismSplitResult res;
 	ASSERT_EQ(
-			mkt_posting_split(
+			prism_posting_split(
 					&idx->base, idx->first_posting, &cfg, &env, &res),
 			0,
 			"split ok");
@@ -1109,7 +1111,7 @@ TEST(split_keeps_zero_vectors_unreachable)
 			nzero,
 			"every zero vector is still stamped unreachable after the split");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 /*
@@ -1130,22 +1132,22 @@ TEST(split_samples_within_a_budget)
 	uint32_t dim = 16, n = 1200;
 	/* A budget that pays for about 400 sampled points -- a third of the
 	 * list -- so every decision below is made from a sample. */
-	uint64_t budget = mkt_split_fixed_bytes(dim) +
+	uint64_t budget = prism_split_fixed_bytes(dim) +
 					  400ull * (dim * sizeof(float) +
-								MKT_SPLIT_SAMPLE_POINT_OVERHEAD);
-	float	 *vecs = make_two_blobs(n, dim, 77);
-	MktIndex *idx  = build_paged(vecs, n, dim, 1);
+								PRISM_SPLIT_SAMPLE_POINT_OVERHEAD);
+	float	   *vecs = make_two_blobs(n, dim, 77);
+	PrismIndex *idx	 = build_paged(vecs, n, dim, 1);
 	ASSERT_NOT_NULL(idx, "build ok");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitConfig cfg = {
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitConfig cfg = {
 			.target_entries		 = 100,
 			.sample_budget_bytes = budget,
 	};
-	MktSplitResult res;
+	PrismSplitResult res;
 	ASSERT_EQ(
-			mkt_posting_split(
+			prism_posting_split(
 					&idx->base, idx->first_posting, &cfg, &env, &res),
 			0,
 			"split ok");
@@ -1171,16 +1173,16 @@ TEST(split_samples_within_a_budget)
 	/* The lists are still usable: probing every leaf, each vector is found by
 	 * querying its own value -- so the streaming pass put entries where their
 	 * centroid says they are. */
-	MktQueryCtx *q		 = mkt_query_ctx_create(idx, 1, MKT_SPLIT_MAX_PARTS);
-	uint32_t	 checked = 0, found = 0;
+	PrismQueryCtx *q = prism_query_ctx_create(idx, 1, PRISM_SPLIT_MAX_PARTS);
+	uint32_t	   checked = 0, found = 0;
 	for (uint32_t vid = 0; vid < n; vid += 13)
 	{
 		uint32_t out[1] = {0};
-		uint32_t c		= mkt_query_exec(
+		uint32_t c		= prism_query_exec(
 				 q,
 				 vecs + (size_t)vid * dim,
 				 1,
-				 MKT_SPLIT_MAX_PARTS,
+				 PRISM_SPLIT_MAX_PARTS,
 				 MKT_DISTANCE_MODE_ASYMMETRIC,
 				 true,
 				 out);
@@ -1188,12 +1190,12 @@ TEST(split_samples_within_a_budget)
 		if (c > 0 && out[0] == vid)
 			found++;
 	}
-	mkt_query_ctx_destroy(q);
+	prism_query_ctx_destroy(q);
 	ASSERT_TRUE(
 			found * 10 >= checked * 9,
 			"a sampled split still routes vectors to their own list");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 /*
@@ -1203,26 +1205,26 @@ TEST(split_samples_within_a_budget)
 static size_t
 measure_split_bytes(uint32_t n, uint32_t dim, uint64_t budget, uint32_t target)
 {
-	float	 *vecs = make_two_blobs(n, dim, 5);
-	MktIndex *idx  = build_paged(vecs, n, dim, 1);
-	FetchCtx  fc   = {idx->all_vectors};
+	float	   *vecs = make_two_blobs(n, dim, 5);
+	PrismIndex *idx	 = build_paged(vecs, n, dim, 1);
+	FetchCtx	fc	 = {idx->all_vectors};
 
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec, .ctx = &fc};
-	MktSplitConfig cfg = {
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitConfig cfg = {
 			.target_entries		 = target,
 			.sample_budget_bytes = budget,
 	};
-	MktSplitResult res;
+	PrismSplitResult res;
 
 	MktMemCtx ctx = mkt_memctx_create(mkt_memctx_current(), "split-measure");
 	MktMemCtx old = mkt_memctx_switch(ctx);
-	int		  rc  = mkt_posting_split(
+	int		  rc  = prism_posting_split(
 			   &idx->base, idx->first_posting, &cfg, &env, &res);
 	mkt_memctx_switch(old);
 
 	size_t bytes = mkt_memctx_total_allocated(ctx);
 	mkt_memctx_delete(ctx);
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 
 	return (rc == 0 && res.did_split) ? bytes : 0;
 }
@@ -1240,9 +1242,9 @@ TEST(split_memory_is_bounded_by_budget)
 	uint32_t small = 1000;
 	uint32_t big   = 10000;
 	/* Enough for about 500 sampled points, so both lists have to sample. */
-	uint64_t budget = mkt_split_fixed_bytes(dim) +
+	uint64_t budget = prism_split_fixed_bytes(dim) +
 					  500ull * (dim * sizeof(float) +
-								MKT_SPLIT_SAMPLE_POINT_OVERHEAD);
+								PRISM_SPLIT_SAMPLE_POINT_OVERHEAD);
 
 	size_t small_bytes = measure_split_bytes(small, dim, budget, 100);
 	size_t big_bytes   = measure_split_bytes(big, dim, budget, 100);
@@ -1276,13 +1278,13 @@ TEST(split_declines_when_nothing_is_fetchable)
 	DECLARE_TWO_BLOB_INDEX(1200, 16, 3);
 	ASSERT_NOT_NULL(idx, "build ok");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec_none, .ctx = &fc};
-	MktSplitConfig cfg = {.target_entries = 100};
-	MktSplitResult res;
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec_none, .ctx = &fc};
+	PrismSplitConfig cfg = {.target_entries = 100};
+	PrismSplitResult res;
 
 	ASSERT_EQ(
-			mkt_posting_split(
+			prism_posting_split(
 					&idx->base, idx->first_posting, &cfg, &env, &res),
 			0,
 			"declining is not an error");
@@ -1290,50 +1292,51 @@ TEST(split_declines_when_nothing_is_fetchable)
 	ASSERT_EQ(res.nparts, 0u, "and no lists were created");
 	ASSERT_EQ(idx->base.nlist, 1u, "declined -> nlist unchanged");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
 
 /*
- * Target list size: the flat constant above MKT_TARGET_ENTRIES_PER_LIST^2
- * rows, and mkt_auto_nlist's sqrt floor below it (where a hardcoded constant
+ * Target list size: the flat constant above PRISM_TARGET_ENTRIES_PER_LIST^2
+ * rows, and prism_auto_nlist's sqrt floor below it (where a hardcoded constant
  * would fight the build). An explicit nlist wins over both.
  */
 TEST(target_entries_per_list_regimes)
 {
-	uint32_t sq = MKT_TARGET_ENTRIES_PER_LIST * MKT_TARGET_ENTRIES_PER_LIST;
+	uint32_t sq = PRISM_TARGET_ENTRIES_PER_LIST *
+				  PRISM_TARGET_ENTRIES_PER_LIST;
 
 	ASSERT_EQ(
-			mkt_target_entries_per_list((double)sq, 0),
-			(uint32_t)MKT_TARGET_ENTRIES_PER_LIST,
+			prism_target_entries_per_list((double)sq, 0),
+			(uint32_t)PRISM_TARGET_ENTRIES_PER_LIST,
 			"at the crossover the two regimes agree");
 	ASSERT_EQ(
-			mkt_target_entries_per_list(1000000.0, 0),
-			(uint32_t)MKT_TARGET_ENTRIES_PER_LIST,
+			prism_target_entries_per_list(1000000.0, 0),
+			(uint32_t)PRISM_TARGET_ENTRIES_PER_LIST,
 			"above the crossover it is the flat target");
 	ASSERT_EQ(
-			mkt_target_entries_per_list(100000000.0, 0),
-			(uint32_t)MKT_TARGET_ENTRIES_PER_LIST,
+			prism_target_entries_per_list(100000000.0, 0),
+			(uint32_t)PRISM_TARGET_ENTRIES_PER_LIST,
 			"and stays flat as the dataset grows");
 
 	/* Below the crossover the sqrt floor gives ~sqrt(count) per list. */
 	ASSERT_EQ(
-			mkt_target_entries_per_list(10000.0, 0),
+			prism_target_entries_per_list(10000.0, 0),
 			100u,
 			"below the crossover it tracks sqrt(count)");
 	ASSERT_TRUE(
-			mkt_target_entries_per_list(10000.0, 0) <
-					(uint32_t)MKT_TARGET_ENTRIES_PER_LIST,
+			prism_target_entries_per_list(10000.0, 0) <
+					(uint32_t)PRISM_TARGET_ENTRIES_PER_LIST,
 			"small tables target smaller lists, not the constant");
 
 	/* An explicit nlist is honoured, so maintenance does not override it. */
 	ASSERT_EQ(
-			mkt_target_entries_per_list(10000.0, 20),
+			prism_target_entries_per_list(10000.0, 20),
 			500u,
 			"explicit nlist wins");
 
 	/* Degenerate inputs stay in range. */
-	ASSERT_EQ(mkt_target_entries_per_list(0.0, 0), 1u, "empty -> 1");
-	ASSERT_EQ(mkt_target_entries_per_list(1.0, 0), 1u, "single row -> 1");
+	ASSERT_EQ(prism_target_entries_per_list(0.0, 0), 1u, "empty -> 1");
+	ASSERT_EQ(prism_target_entries_per_list(1.0, 0), 1u, "single row -> 1");
 }
 
 TEST(split_drops_unfetchable_vectors)
@@ -1347,11 +1350,11 @@ TEST(split_drops_unfetchable_vectors)
 			n,
 			"every entry indexed before the split");
 
-	FetchCtx	   fc  = {idx->all_vectors};
-	MktSplitEnv	   env = {.fetch_vector = fetch_vec_drop_odd, .ctx = &fc};
-	MktSplitResult res;
-	int			   rc = mkt_posting_split(
-			   &idx->base, idx->first_posting, NULL, &env, &res);
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec_drop_odd, .ctx = &fc};
+	PrismSplitResult res;
+	int				 rc = prism_posting_split(
+			 &idx->base, idx->first_posting, NULL, &env, &res);
 
 	ASSERT_EQ(rc, 0, "split tolerates unfetchable entries");
 	/* Half the entries (n/2 = 600) remain fetchable, far above the split
@@ -1363,5 +1366,5 @@ TEST(split_drops_unfetchable_vectors)
 			n / 2,
 			"only the even-id (fetchable) half is kept");
 
-	mkt_index_destroy(idx);
+	prism_index_destroy(idx);
 }
