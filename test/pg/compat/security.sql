@@ -4,9 +4,10 @@
 -- asserts they no longer work. The behaviour is made visible: each check
 -- prints PASS/FAIL, and the script exits non-zero if any check fails.
 --
--- Background. setup_pgvector_compat() and on_extension_create() run at
--- runtime -- from the install DO block and from an event trigger that
--- fires on any later CREATE EXTENSION -- under the DDL-runner's own
+-- Background. pg_vectorsearch_setup_pgvector_compat() and
+-- pg_vectorsearch_on_extension_create() run at runtime -- from the
+-- install DO block and from an event trigger
+-- that fires on any later CREATE EXTENSION -- under the DDL-runner's own
 -- search_path. Before hardening, an unqualified format() call there could
 -- be hijacked by an attacker-planted overload
 -- (format(text,text,text,text,text) beats pg_catalog.format(text,
@@ -14,20 +15,22 @@
 -- silently adopted any pre-existing cast. pgvector is a "trusted"
 -- extension, so a non-superuser can own public.vector and reach both.
 --
--- Both functions are fixed in `prism`, a name known ahead of time -- they
--- are called directly, schema-qualified, below. The vec32/vec16 type
--- schema (@extschema@) is not fixed and is never hard-coded below: it is
--- looked up from the catalog once and interpolated as a psql variable
--- (:extschema) wherever a cast-related fixture needs it. Dollar-quoted
--- bodies, which psql does not interpolate, look it up again at runtime.
+-- Both functions install into @extschema@ alongside everything else --
+-- no separately fixed, known-ahead-of-time schema of their own -- so,
+-- like the vec32/vec16 types, @extschema@ is never hard-coded below: it
+-- is looked up from the catalog once and interpolated as a psql variable
+-- (:extschema) wherever a cast- or function-related fixture needs it.
+-- Dollar-quoted bodies, which psql does not interpolate, look it up
+-- again at runtime, or resolve the bare (unqualified) name via
+-- search_path where that is what is actually under test.
 --
 -- Prerequisites:
 --   pgvector and pg_vectorsearch must be installed in PostgreSQL, and the
 --   connected role must be a superuser (to install extensions and
 --   exercise the event-trigger escalation path). This suite drops and
---   recreates both extensions and the `prism` schema (CASCADE) as it
---   runs, so run it against a throwaway/clean database, not one holding
---   data you care about. The CI script uses a fresh instance.
+--   recreates both extensions (CASCADE) as it runs, so run it against a
+--   throwaway/clean database, not one holding data you care about. The
+--   CI script uses a fresh instance.
 --
 -- Usage:
 --   psql -f test/pg/compat/security.sql
@@ -99,28 +102,25 @@ END;
 $pf$;
 
 -- =====================================================================
--- 0. Install-time: a format() planted in a pre-created extension schema
+-- 0. Install-time: a format() planted in the (default) extension schema
 --    is not invoked by CREATE EXTENSION itself
 -- =====================================================================
--- The real install-time attack. `prism` is a known name ahead of any
--- install (no SCHEMA clause reveals it), so an attacker can pre-create it
--- and plant format() overloads before CREATE EXTENSION pg_vectorsearch runs.
--- setup_pgvector_compat() (reached because pgvector is already present)
--- ends up defined in that very schema; its pinned search_path and
--- pg_catalog-qualified calls must still keep it from ever invoking the
--- planted sibling.
---
--- This is the one place that must name the schema literally: the extension
--- does not exist yet, so its schema cannot be looked up from the catalog.
+-- The real install-time attack. A default install (no SCHEMA clause)
+-- resolves to `public` -- a name known ahead of any install, unlike a
+-- custom schema choice -- so an attacker with CREATE on the database can
+-- plant format() overloads there before CREATE EXTENSION pg_vectorsearch
+-- runs. pg_vectorsearch_setup_pgvector_compat() (reached because
+-- pgvector is already present) ends up defined in that very schema;
+-- its pinned search_path
+-- and pg_catalog-qualified calls must still keep it from ever invoking
+-- the planted sibling.
 DROP EXTENSION IF EXISTS pg_vectorsearch CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
 DROP SCHEMA IF EXISTS install_probe CASCADE;
-DROP SCHEMA IF EXISTS prism CASCADE;
 
 CREATE SCHEMA install_probe;
 CREATE TABLE install_probe.hit (seen bool);
-CREATE SCHEMA prism;   -- literal: the attacker targets the known schema name
-SELECT plant_format_overloads('prism',
+SELECT plant_format_overloads('public',
     'INSERT INTO install_probe.hit VALUES (true)');
 
 -- pgvector first so the compat path runs inside CREATE EXTENSION
@@ -135,55 +135,19 @@ SELECT n.nspname AS extschema
   JOIN pg_namespace n ON n.oid = e.extnamespace
  WHERE e.extname = 'pg_vectorsearch' \gset
 
-SELECT assert_test('CREATE EXTENSION does not call a planted prism.format()',
+SELECT assert_test('CREATE EXTENSION does not call a planted public.format()',
     NOT EXISTS (SELECT 1 FROM install_probe.hit));
 
 -- Prove the compat path actually ran (else "not called" would be vacuous):
--- setup_pgvector_compat() creates the pgvector->pg_vectorsearch cast.
+-- pg_vectorsearch_setup_pgvector_compat() creates the pgvector->
+-- pg_vectorsearch cast.
 SELECT assert_test('CREATE EXTENSION still created the pgvector compat cast',
     EXISTS (SELECT 1 FROM pg_cast
              WHERE castsource = 'public.vector'::regtype
                AND casttarget = (:'extschema' || '.vec32')::regtype));
 
-SELECT drop_format_overloads('prism');
+SELECT drop_format_overloads('public');
 DROP SCHEMA install_probe CASCADE;
-
--- =====================================================================
--- 0b. Install is refused when the extension schema is pre-owned by an
---     untrusted role
--- =====================================================================
--- A role with CREATE on the database can pre-create prism and keep owning
--- it after install, then add lookalike objects there that a caller who has
--- not double-checked where their tooling points might mistake for
--- pg_vectorsearch's own (prism.rebalance and friends are always called
--- schema-qualified, never via search_path). The schema ownership guard at
--- the top of the install script must refuse that install.
-DROP EXTENSION IF EXISTS pg_vectorsearch CASCADE;
-DROP EXTENSION IF EXISTS vector CASCADE;
-DROP SCHEMA IF EXISTS prism CASCADE;
-DROP ROLE IF EXISTS prism_squatter;
-CREATE ROLE prism_squatter NOSUPERUSER;
-CREATE SCHEMA prism AUTHORIZATION prism_squatter;   -- untrusted role owns prism
-
-\set ON_ERROR_STOP off
-CREATE EXTENSION pg_vectorsearch;   -- must be refused by the ownership guard
-\set ON_ERROR_STOP on
-
-SELECT assert_test(
-    'install refused when the extension schema is pre-owned by an untrusted role',
-    NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_vectorsearch'));
-
-DROP SCHEMA prism CASCADE;
-DROP OWNED BY prism_squatter;
-DROP ROLE prism_squatter;
-
--- Deterministic starting state for the remaining checks: drop and reinstall
--- cleanly (pg_vectorsearch first so its event trigger is active, then
--- pgvector).
-DROP EXTENSION IF EXISTS pg_vectorsearch CASCADE;
-DROP EXTENSION IF EXISTS vector CASCADE;
-CREATE EXTENSION pg_vectorsearch;
-CREATE EXTENSION vector;
 
 -- =====================================================================
 -- 1. The interop functions pin their search_path
@@ -193,21 +157,21 @@ CREATE EXTENSION vector;
 
 -- COALESCE so a missing pin (proconfig NULL) is a hard false, not NULL --
 -- otherwise the row escapes the final "WHERE NOT passed" exit check.
-SELECT assert_test('setup_pgvector_compat pins search_path',
+SELECT assert_test('pg_vectorsearch_setup_pgvector_compat pins search_path',
     COALESCE((SELECT proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
        FROM pg_proc
-      WHERE proname = 'setup_pgvector_compat'
-        AND pronamespace = 'prism'::regnamespace), false));
+      WHERE proname = 'pg_vectorsearch_setup_pgvector_compat'
+        AND pronamespace = :'extschema'::regnamespace), false));
 
-SELECT assert_test('on_extension_create pins search_path',
+SELECT assert_test('pg_vectorsearch_on_extension_create pins search_path',
     COALESCE((SELECT proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
        FROM pg_proc
-      WHERE proname = 'on_extension_create'
-        AND pronamespace = 'prism'::regnamespace), false));
+      WHERE proname = 'pg_vectorsearch_on_extension_create'
+        AND pronamespace = :'extschema'::regnamespace), false));
 
 -- The dynamic-SQL sink is schema-qualified as pg_catalog.format.
 SELECT assert_test('setup body calls pg_catalog.format, not bare format',
-    pg_get_functiondef('prism.setup_pgvector_compat'::regproc)
+    pg_get_functiondef('pg_vectorsearch_setup_pgvector_compat'::regproc)
         LIKE '%pg_catalog.format(%');
 
 -- =====================================================================
@@ -232,11 +196,13 @@ DECLARE
     invoked bool := false;
 BEGIN
     BEGIN
-        -- Called schema-qualified (prism is fixed), so this call site
-        -- cannot be hijacked either -- what is under test is whether the
-        -- function's own pinned search_path holds once execution is inside
-        -- its body.
-        PERFORM prism.setup_pgvector_compat();
+        -- Called unqualified: no lookalike
+        -- pg_vectorsearch_setup_pgvector_compat was planted in
+        -- hijack_probe (only format() was), so this resolves to the
+        -- real function via public further down the path -- what is
+        -- under test is whether the function's own pinned search_path
+        -- holds once execution is inside its body.
+        PERFORM pg_vectorsearch_setup_pgvector_compat();
     EXCEPTION WHEN OTHERS THEN
         invoked := true;   -- a planted overload raised -> it was called
     END;
@@ -271,7 +237,7 @@ DECLARE
     invoked bool := false;
 BEGIN
     BEGIN
-        PERFORM prism.setup_pgvector_compat();
+        PERFORM pg_vectorsearch_setup_pgvector_compat();
     EXCEPTION WHEN OTHERS THEN
         invoked := true;
     END;
@@ -288,8 +254,9 @@ SELECT drop_format_overloads(:'extschema');
 -- =====================================================================
 -- Replace the expected binary cast with a WITH FUNCTION cast -- the shape
 -- a public.vector owner could plant, whose function would then run as the
--- querying role. setup_pgvector_compat() must refuse it (RAISE), where the
--- old blind "EXCEPTION WHEN duplicate_object THEN NULL" would have kept it.
+-- querying role. pg_vectorsearch_setup_pgvector_compat() must refuse it
+-- (RAISE), where the old blind "EXCEPTION WHEN duplicate_object THEN
+-- NULL" would have kept it.
 -- Built with dynamic SQL: the cast function's body must name the return
 -- type, so %I keeps the fixture schema-agnostic.
 
@@ -318,7 +285,7 @@ DECLARE
     raised bool := false;
 BEGIN
     BEGIN
-        PERFORM prism.setup_pgvector_compat();
+        PERFORM pg_vectorsearch_setup_pgvector_compat();
     EXCEPTION WHEN OTHERS THEN
         raised := true;
     END;
@@ -349,7 +316,7 @@ DECLARE
     raised bool := false;
 BEGIN
     BEGIN
-        PERFORM prism.setup_pgvector_compat();
+        PERFORM pg_vectorsearch_setup_pgvector_compat();
     EXCEPTION WHEN OTHERS THEN
         raised := true;
     END;
@@ -367,9 +334,10 @@ CREATE CAST (public.vector AS :"extschema".vec32) WITHOUT FUNCTION AS IMPLICIT;
 -- =====================================================================
 -- The headline attack. A NOSUPERUSER plants an escalating format()
 -- overload; a superuser then runs CREATE EXTENSION vector, which fires
--- pg_vectorsearch's event trigger -> setup_pgvector_compat(). If the sink were
--- hijackable, the planted body would run as the superuser and grant the
--- attacker SUPERUSER. It must not.
+-- pg_vectorsearch's event trigger ->
+-- pg_vectorsearch_setup_pgvector_compat(). If the sink were hijackable,
+-- the planted body would run as the superuser and
+-- grant the attacker SUPERUSER. It must not.
 
 DROP ROLE IF EXISTS vs_attacker;
 CREATE ROLE vs_attacker NOSUPERUSER NOLOGIN;   -- SET ROLE needs no LOGIN

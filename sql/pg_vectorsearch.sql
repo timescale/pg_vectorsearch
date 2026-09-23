@@ -16,65 +16,6 @@
 \echo Use "CREATE EXTENSION pg_vectorsearch" to load this file.\quit
 
 -- =====================================================================
--- prism: fixed schema for maintenance, administration, and inspection
--- =====================================================================
--- Everything else in this script installs into @extschema@, including
--- the two build-identity functions right below. Maintenance,
--- administration, and inspection functions specific to the prism index
--- access method live in their own fixed schema instead, created here
--- regardless of @extschema@ -- one fixed, predictable, always-qualified
--- path to them no matter which schema holds the types. A second index
--- sharing this extension would need its own equivalent of this schema,
--- not a share of prism's.
---
--- This is also why ALTER EXTENSION ... SET SCHEMA is refused (see the
--- control file): that command moves every member object into one schema,
--- and these functions are deliberately not in it.
---
--- prism must be owned by the extension's installer or a superuser.
--- PostgreSQL does not check target-schema ownership at CREATE EXTENSION,
--- so an untrusted role could otherwise pre-create it, keep owning it,
--- and plant lookalike objects there that a caller who has not
--- double-checked their tooling might mistake for the extension's own
--- (prism.<function> calls are always schema-qualified, never resolved
--- via search_path). See the security note above
--- setup_pgvector_compat() for the analogous reasoning about
--- @extschema@ when pgvector is involved.
---
--- A pre-existing, trusted-owned prism is used as-is, not adopted into
--- extension membership (no ALTER EXTENSION ... ADD SCHEMA): matching
--- how PostgreSQL treats a pre-existing @extschema@ for any relocatable
--- extension, only objects this script itself creates become members.
--- Otherwise DROP EXTENSION ... CASCADE could delete a schema -- and
--- anything unrelated already in it -- that this extension never
--- created.
-DO $$
-DECLARE
-    owner_name  name;
-    owner_super boolean;
-BEGIN
-    SELECT r.rolname, r.rolsuper INTO owner_name, owner_super
-      FROM pg_catalog.pg_namespace n
-      JOIN pg_catalog.pg_roles r
-        ON r.oid OPERATOR(pg_catalog.=) n.nspowner
-     WHERE n.nspname OPERATOR(pg_catalog.=) 'prism';
-
-    IF NOT FOUND THEN
-        CREATE SCHEMA prism;
-    ELSIF NOT (owner_super OR owner_name OPERATOR(pg_catalog.=) current_user)
-    THEN
-        RAISE EXCEPTION
-            'schema "prism" already exists and is owned by "%", a role '
-            'other than the installer or a superuser',
-            owner_name
-            USING HINT = 'pg_vectorsearch refuses to install into a '
-                'schema an untrusted role controls; drop or re-own the '
-                'schema, or install as the role that owns it.';
-    END IF;
-END;
-$$;
-
--- =====================================================================
 -- build identity (extension-wide, not specific to any one index, so
 -- installs into @extschema@ alongside the vec32/vec16/rabitq types)
 -- =====================================================================
@@ -97,10 +38,11 @@ DECLARE
                     -- relocatable too -- discovered from
                     -- pg_extension.extnamespace rather than baked in via
                     -- @extschema@ substitution, the same reasoning as
-                    -- ext_ns in setup_pgvector_compat() below. Calling
-                    -- pg_vectorsearch_version() unqualified here would
-                    -- also trip pgspot's PS016 (unqualified function
-                    -- call in an unpinned DO block).
+                    -- ext_ns in pg_vectorsearch_setup_pgvector_compat()
+                    -- below. Calling pg_vectorsearch_version()
+                    -- unqualified here would also trip pgspot's PS016
+                    -- (unqualified function call in an unpinned DO
+                    -- block).
     version text;
 BEGIN
     SELECT n.nspname INTO ext_ns
@@ -859,7 +801,7 @@ CREATE OPERATOR CLASS vec16_cosine_ops
 -- index inspection functions
 -- =====================================================================
 
-CREATE FUNCTION prism.centroid_pages(regclass)
+CREATE FUNCTION prism_centroid_pages(regclass)
     RETURNS TABLE (
         blkno       integer,
         entry       smallint,
@@ -872,7 +814,7 @@ CREATE FUNCTION prism.centroid_pages(regclass)
     AS 'MODULE_PATHNAME', 'vs_centroid_pages'
     LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION prism.posting_pages(regclass)
+CREATE FUNCTION prism_posting_pages(regclass)
     RETURNS TABLE (
         blkno       integer,
         cluster_id  integer,
@@ -893,7 +835,7 @@ CREATE FUNCTION prism.posting_pages(regclass)
 -- true nearest neighbors live against which clusters the query scans.
 -- Scans posting pages directly -- each already carries its cluster_id --
 -- so it needs neither the centroid tree nor its format.
-CREATE FUNCTION prism.tids_clusters(regclass, tid[])
+CREATE FUNCTION prism_tids_clusters(regclass, tid[])
     RETURNS TABLE (
         tid        tid,
         cluster_id integer
@@ -911,7 +853,7 @@ CREATE FUNCTION prism.tids_clusters(regclass, tid[])
 -- (resolved automatic default), 'default' (reloption default),
 -- 'column'/'opclass' (index definition), 'derived' (computed from
 -- other settings), or 'session' (GUC override).
-CREATE FUNCTION prism.index_settings(regclass)
+CREATE FUNCTION prism_index_settings(regclass)
     RETURNS TABLE (
         name    text,
         setting text,
@@ -923,7 +865,7 @@ CREATE FUNCTION prism.index_settings(regclass)
 -- Convert one cluster's posting chain from AoS to fastscan format.
 -- Updates centroid entries and metadata flag atomically.
 -- Returns the new posting head block number.
-CREATE FUNCTION prism.convert_posting_to_fastscan(
+CREATE FUNCTION prism_convert_posting_to_fastscan(
         index_oid regclass,
         cluster_id integer
     )
@@ -939,17 +881,17 @@ CREATE FUNCTION prism.convert_posting_to_fastscan(
 -- balanced lists. A maintenance operation that mutates index state, so it is a
 -- procedure (CALL) rather than a function: it returns no value and can manage
 -- its own transactions. Reports the outcome via a NOTICE.
-CREATE PROCEDURE prism.split_posting_list(
+CREATE PROCEDURE prism_split_posting_list(
         index_oid regclass,
         head_blkno bigint
     )
     AS 'MODULE_PATHNAME', 'vs_split_posting_list'
     LANGUAGE C;
 
-COMMENT ON PROCEDURE prism.split_posting_list(regclass, bigint) IS
+COMMENT ON PROCEDURE prism_split_posting_list(regclass, bigint) IS
     'Split one posting list into two or more balanced lists. index_oid is the '
     'index; head_blkno is the block number of the list''s head page. '
-    'Owner-only; reports the outcome via NOTICE. Use prism.rebalance to split '
+    'Owner-only; reports the outcome via NOTICE. Use prism_rebalance to split '
     'every oversized list in an index.';
 
 -- Rebalance an index by splitting every posting list that has outgrown the
@@ -965,11 +907,11 @@ COMMENT ON PROCEDURE prism.split_posting_list(regclass, bigint) IS
 -- split_posting_list); reports the number of lists split via a NOTICE.
 -- Splitting is the only rebalancing it performs, and it is driven by the
 -- caller.
-CREATE PROCEDURE prism.rebalance(index_oid regclass, target_entries integer DEFAULT NULL)
+CREATE PROCEDURE prism_rebalance(index_oid regclass, target_entries integer DEFAULT NULL)
     AS 'MODULE_PATHNAME', 'vs_rebalance'
     LANGUAGE C;
 
-COMMENT ON PROCEDURE prism.rebalance(regclass, integer) IS
+COMMENT ON PROCEDURE prism_rebalance(regclass, integer) IS
     'Split every posting list that has grown past twice target_entries into '
     'lists of about target_entries each. index_oid is the index; '
     'target_entries is the size a list rests at (NULL, the default, derives it '
@@ -998,8 +940,9 @@ COMMENT ON PROCEDURE prism.rebalance(regclass, integer) IS
 -- family, and pgvector's <->, <#> and <=> belong to pgvector's families.
 -- Without help, `ORDER BY v <-> $1` under a pgvector-first search_path
 -- plans a sequential scan -- which returns correct rows, so it is easy to
--- mistake for a working index scan. setup_pgvector_compat() therefore adds
--- pgvector's three distance operators to prism's operator families as
+-- mistake for a working index scan.
+-- pg_vectorsearch_setup_pgvector_compat() therefore adds pgvector's
+-- three distance operators to prism's operator families as
 -- ordering members alongside the casts, so either spelling of the operator
 -- reaches the index. Casts and operators are one function on purpose: they
 -- are a unit (the operators rely on the casts' binary-coercibility), so a
@@ -1047,16 +990,14 @@ COMMENT ON PROCEDURE prism.rebalance(regclass, integer) IS
 --          silently reopens the hole until this extension catches up -- a
 --          maintenance treadmill tied to another project's API, and it
 --          still leaves non-pgvector shadows open.
---      (b) Ensure the schema is trusted-owned -- refuse to install into one
---          owned by an untrusted role (the schema ownership guard at the top
---          of this script). Chosen: version-independent, comprehensive
---          (nothing hostile can live there at all), ~10 lines. Applied only
---          to `prism`: unlike @extschema@, which the installer explicitly
---          chose (or already had first on their own search_path -- the
---          same standing responsibility as installing any relocatable
---          extension), `prism` must be owned by the extension's
---          installer or a superuser, since the installer has no
---          independent reason to have already vetted its ownership.
+--      (b) Ensure @extschema@ is trusted-owned. Chosen, but there is
+--          nothing project-specific left to enforce for it: every member
+--          object this extension creates -- including prism's own
+--          maintenance procedures below -- lives in @extschema@, which the
+--          installer explicitly chose (or already had first on their own
+--          search_path). Vetting its ownership is the same standing
+--          responsibility as installing any relocatable extension, not
+--          something this script needs to additionally guard.
 --
 -- Set up pgvector interoperability in one step: the binary casts between the
 -- two extensions' types, and the membership of pgvector's distance operators
@@ -1070,7 +1011,7 @@ COMMENT ON PROCEDURE prism.rebalance(regclass, integer) IS
 -- Casts first, then operators (the operators depend on the casts' coercibility).
 -- Idempotent throughout via exception handling (neither CREATE CAST nor ALTER
 -- OPERATOR FAMILY has an IF NOT EXISTS form).
-CREATE FUNCTION prism.setup_pgvector_compat() RETURNS void
+CREATE FUNCTION pg_vectorsearch_setup_pgvector_compat() RETURNS void
     LANGUAGE plpgsql
     -- Reached at runtime from the event trigger under the DDL-runner's
     -- search_path, and from the install DO block. Pin the path so every
@@ -1215,7 +1156,7 @@ DECLARE
     pgv_ns text;
     ext_ns text;   -- The extension's own current schema, discovered rather
                    -- than assumed via @extschema@ -- see the note on
-                   -- ext_ns in setup_pgvector_compat() above.
+                   -- ext_ns in pg_vectorsearch_setup_pgvector_compat() above.
 BEGIN
     -- pgvector is relocatable; discover its schema (NULL if not installed).
     SELECT n.nspname INTO pgv_ns
@@ -1231,7 +1172,8 @@ BEGIN
           ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
         WHERE e.extname OPERATOR(pg_catalog.=) 'pg_vectorsearch';
 
-        PERFORM prism.setup_pgvector_compat();
+        EXECUTE pg_catalog.format(
+            'SELECT %I.pg_vectorsearch_setup_pgvector_compat()', ext_ns);
         EXECUTE pg_catalog.format('ALTER EXTENSION pg_vectorsearch DROP CAST '
             '(%I.vector AS %I.vec32)', pgv_ns, ext_ns);
         EXECUTE pg_catalog.format('ALTER EXTENSION pg_vectorsearch DROP CAST '
@@ -1245,11 +1187,13 @@ END;
 $$;
 
 -- Event trigger: create casts when pgvector is installed after
--- pg_vectorsearch. Lives in prism alongside setup_pgvector_compat() -- it
--- is that function's automatic trigger, not part of the vec32/vec16 type
--- API, and prism is a fixed name it can reference directly (no schema
--- discovery needed for it).
-CREATE FUNCTION prism.on_extension_create()
+-- pg_vectorsearch. It is pg_vectorsearch_setup_pgvector_compat()'s
+-- automatic trigger, not part of the vec32/vec16 type API, but installs
+-- into @extschema@ alongside everything else -- so, like
+-- pg_vectorsearch_setup_pgvector_compat() calling itself would need to,
+-- it discovers its own current schema rather than assuming one, before
+-- invoking that function by name.
+CREATE FUNCTION pg_vectorsearch_on_extension_create()
     RETURNS event_trigger LANGUAGE plpgsql
     -- Runs later as an event trigger under the DDL-runner's own
     -- search_path. Pin it so unqualified names in this body (and the one
@@ -1259,33 +1203,46 @@ CREATE FUNCTION prism.on_extension_create()
 DECLARE
     obj record;
     is_super boolean;
+    ext_ns   text;   -- discovered per call, same reasoning as ext_ns in
+                      -- pg_vectorsearch_setup_pgvector_compat().
 BEGIN
     FOR obj IN SELECT * FROM pg_catalog.pg_event_trigger_ddl_commands()
                WHERE object_type OPERATOR(pg_catalog.=) 'extension'
     LOOP
         IF obj.object_identity OPERATOR(pg_catalog.=) 'vector' THEN
-            -- setup_pgvector_compat() does superuser-only DDL (CREATE CAST
-            -- WITHOUT FUNCTION, ALTER OPERATOR FAMILY). An event trigger runs
-            -- as the role that ran CREATE EXTENSION, so if a NON-superuser
-            -- installs pgvector -- possible where it is trusted, as some
-            -- managed platforms allow -- this PERFORM would fail and roll
-            -- back the whole pgvector install, making pg_vectorsearch's
-            -- presence break pgvector. Skip and warn instead; a superuser
-            -- finishes the wiring later. (SECURITY DEFINER was rejected: it
-            -- would run this superuser-only DDL for anyone who can create
-            -- an extension.)
+            -- pg_vectorsearch_setup_pgvector_compat() does superuser-only
+            -- DDL (CREATE CAST WITHOUT FUNCTION, ALTER OPERATOR FAMILY).
+            -- An event trigger runs as the role that ran CREATE
+            -- EXTENSION, so if a NON-superuser installs pgvector --
+            -- possible where it is trusted, as some managed platforms
+            -- allow -- this call would fail and roll back the whole
+            -- pgvector install, making pg_vectorsearch's presence break
+            -- pgvector. Skip and warn instead; a superuser finishes the
+            -- wiring later. (SECURITY DEFINER was rejected: it would run
+            -- this superuser-only DDL for anyone who can create an
+            -- extension.)
             SELECT r.rolsuper INTO is_super
               FROM pg_catalog.pg_roles r
              WHERE r.rolname OPERATOR(pg_catalog.=) current_user;
 
+            SELECT n.nspname INTO ext_ns
+            FROM pg_catalog.pg_extension e
+            JOIN pg_catalog.pg_namespace n
+              ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
+            WHERE e.extname OPERATOR(pg_catalog.=) 'pg_vectorsearch';
+
             IF is_super THEN
-                PERFORM prism.setup_pgvector_compat();
+                EXECUTE pg_catalog.format(
+                    'SELECT %I.pg_vectorsearch_setup_pgvector_compat()',
+                    ext_ns);
             ELSE
                 RAISE WARNING 'pg_vectorsearch did not set up pgvector '
                     'compatibility: it requires superuser privileges'
-                    USING HINT = 'A superuser should run '
-                        'prism.setup_pgvector_compat() so pgvector-typed '
-                        'columns can use prism indexes.';
+                    USING HINT = pg_catalog.format(
+                        'A superuser should run '
+                        '%I.pg_vectorsearch_setup_pgvector_compat() so '
+                        'pgvector-typed columns can use prism indexes.',
+                        ext_ns);
             END IF;
         END IF;
     END LOOP;
@@ -1295,4 +1252,4 @@ $$;
 CREATE EVENT TRIGGER prism_pgvector_cast_trigger
     ON ddl_command_end
     WHEN TAG IN ('CREATE EXTENSION')
-    EXECUTE FUNCTION prism.on_extension_create();
+    EXECUTE FUNCTION pg_vectorsearch_on_extension_create();

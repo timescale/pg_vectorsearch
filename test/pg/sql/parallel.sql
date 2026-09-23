@@ -249,7 +249,7 @@ CREATE INDEX line3_short ON line3 USING prism (v)
 -- the root with aliased duplicate child pointers while the planned
 -- partitions silently never exist).
 SELECT count(*) = count(DISTINCT child_blkno) AS no_duplicate_children
-  FROM centroid_pages('line3_short') WHERE NOT is_leaf;
+  FROM prism_centroid_pages('line3_short') WHERE NOT is_leaf;
 -- Reachability: probing every list with the result cap lifted must return
 -- every row.
 SET enable_seqscan = off;
@@ -297,11 +297,11 @@ SELECT exact_check('line3', '(v) WITH (nlist = 40, fan_out = 4)',
 CREATE INDEX line3_d3 ON line3 USING prism (v)
     WITH (nlist = 40, fan_out = 4);
 SELECT count(*) = count(DISTINCT child_blkno) AS d3_no_duplicate_children
-  FROM centroid_pages('line3_d3') WHERE NOT is_leaf;
+  FROM prism_centroid_pages('line3_d3') WHERE NOT is_leaf;
 WITH leaves AS (
-    SELECT child_blkno FROM centroid_pages('line3_d3') WHERE is_leaf
+    SELECT child_blkno FROM prism_centroid_pages('line3_d3') WHERE is_leaf
 ), heads AS (
-    SELECT blkno, cluster_id FROM prism.posting_pages('line3_d3')
+    SELECT blkno, cluster_id FROM prism_posting_pages('line3_d3')
     WHERE is_first
 )
 SELECT (SELECT count(*) FROM leaves) = (SELECT count(*) FROM heads)

@@ -4473,9 +4473,9 @@ considers an index for an `ORDER BY` only when the ordering operator belongs to
 the index's operator family, and pgvector's `<->`, `<#>` and `<=>` belong to
 pgvector's own families. Casting the column is not enough.
 
-`setup_pgvector_compat()` therefore adds pgvector's three distance operators to
-each of prism's six operator families as ordering members, in the same step
-that creates the casts:
+`pg_vectorsearch_setup_pgvector_compat()` therefore adds pgvector's three
+distance operators to each of prism's six operator families as ordering
+members, in the same step that creates the casts:
 
 ```sql
 ALTER OPERATOR FAMILY myschema.vec16_l2_ops USING prism

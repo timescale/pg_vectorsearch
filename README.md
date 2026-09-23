@@ -158,12 +158,10 @@ See [docs/simd.md][simd-doc] for SIMD build options and implementation details.
 
 ```sql
 -- Enable extension. vec32/vec16/rabitq and everything built on them
--- (operators, casts, the prism access method) install into whichever
--- schema you choose -- add SCHEMA <name>, or omit it to use the first
--- existing schema on your search_path (typically public). Maintenance,
--- administration, and inspection for the prism index always live in a
--- separate `prism` schema the extension creates, regardless of where the
--- types end up, so they're reachable the same way from any install.
+-- (operators, casts, the prism access method, and its maintenance,
+-- administration, and inspection functions like prism_rebalance) install
+-- into whichever schema you choose -- add SCHEMA <name>, or omit it to
+-- use the first existing schema on your search_path (typically public).
 CREATE EXTENSION pg_vectorsearch;
 -- or, e.g.: CREATE EXTENSION pg_vectorsearch SCHEMA myschema;
 
@@ -198,28 +196,20 @@ ever adjust `prism.nprobe`.
 See the [tuning guide][tuning-doc] for every index parameter and GUC,
 their tradeoffs, and when changing them makes sense.
 
-> **Security note on `prism`.** pg_vectorsearch always creates its own
-> `prism` schema (the maintenance/introspection procedures above),
-> regardless of which schema you installed the types into. The
-> extension-wide identity functions (`pg_vectorsearch_git_commit()`,
-> `pg_vectorsearch_version()`) follow the types instead, landing in
-> whichever schema you installed into. Calls like `prism.rebalance(...)`
-> are always written schema-qualified, so `prism` never needs to be on any
-> role's `search_path` for pg_vectorsearch to work. Don't let untrusted
-> application roles hold `CREATE` on the database or pre-create `prism`:
-> an owner of it could add lookalike objects there that a caller who has
-> not double-checked where their tooling actually points might mistake
-> for pg_vectorsearch's own. `CREATE EXTENSION pg_vectorsearch` refuses to
-> install if a pre-existing `prism` is owned by a role other than the
-> installer or a superuser, but its ownership is otherwise the database
-> administrator's responsibility.
+> **Schema.** pg_vectorsearch installs everything -- types, operators, the
+> access method, and the maintenance/introspection procedures above alike
+> -- into whichever schema you choose (a `SCHEMA` clause, or the first
+> existing schema on `search_path`, typically `public`). Nothing is
+> pinned to a separate fixed schema. As with any extension, install into
+> a schema you trust the ownership of: an untrusted owner of that schema
+> could add lookalike objects that a caller who has not double-checked
+> their tooling might mistake for pg_vectorsearch's own.
 >
 > **Changing schemas later.** The schema choice above is made once, at
-> `CREATE EXTENSION` time. pg_vectorsearch is not relocatable:
-> `ALTER EXTENSION pg_vectorsearch SET SCHEMA ...` is refused, because
-> that command would try to move the `prism`-pinned procedures too,
-> defeating the point of pinning them. To move to a different schema,
-> drop and recreate the extension (and its indexes) there instead.
+> `CREATE EXTENSION` time. pg_vectorsearch is not currently relocatable:
+> `ALTER EXTENSION pg_vectorsearch SET SCHEMA ...` is refused. To move to
+> a different schema, drop and recreate the extension (and its indexes)
+> there instead.
 
 ## PRISM index maintenance
 
@@ -229,14 +219,14 @@ on demand.
 
 ```sql
 -- Split every list that has outgrown the trigger. Reports what it did.
-CALL prism.rebalance('items_embedding_idx');
+CALL prism_rebalance('items_embedding_idx');
 -- NOTICE:  rebalance: split 12 posting list(s), reclaimed 0 retired chain(s)
 
 -- Override the resting list size instead of deriving it from the row count.
-CALL prism.rebalance('items_embedding_idx', 256);
+CALL prism_rebalance('items_embedding_idx', 256);
 
 -- Split one named list, given the block number of its head page.
-CALL prism.split_posting_list('items_embedding_idx', 2);
+CALL prism_split_posting_list('items_embedding_idx', 2);
 ```
 
 `target_entries` is the size a list rests at, not a ceiling: a list is left
@@ -260,7 +250,7 @@ CREATE INDEX items_idx ON items USING prism (embedding)
     WITH (nlist = 100, centroid_fastscan = off);
 -- reloptions: {nlist=100,centroid_fastscan=off}
 
-CALL prism.rebalance('items_idx');   -- splits lists; list count is now higher
+CALL prism_rebalance('items_idx');   -- splits lists; list count is now higher
 -- reloptions: {centroid_fastscan=off}
 ```
 
@@ -282,10 +272,10 @@ Inspect the result with the introspection functions:
 
 ```sql
 -- Leaf count, tree depth, centroid format, and the rest
-SELECT * FROM prism.index_settings('items_embedding_idx');
+SELECT * FROM prism_index_settings('items_embedding_idx');
 
 -- One row per posting page; is_first marks a list's head
-SELECT count(*) AS lists FROM prism.posting_pages('items_embedding_idx')
+SELECT count(*) AS lists FROM prism_posting_pages('items_embedding_idx')
  WHERE is_first;
 ```
 

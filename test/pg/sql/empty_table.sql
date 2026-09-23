@@ -65,7 +65,7 @@ FROM generate_series(1, 2000) g;
 SELECT count(DISTINCT cluster_id) AS nclusters,
        sum(entry_count) AS entries,
        bool_or(format = 'aos') AS has_aos_pages
-FROM prism.posting_pages('grow_idx');
+FROM prism_posting_pages('grow_idx');
 SELECT id FROM grow
 ORDER BY v <-> '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
 -- squawk-ignore require-concurrent-reindex
@@ -73,7 +73,7 @@ REINDEX INDEX grow_idx;
 SELECT count(DISTINCT cluster_id) BETWEEN 20 AND 100 AS reclustered,
        bool_and(format = 'fastscan') AS all_fastscan,
        sum(entry_count) >= 2000 AS entries_ok
-FROM prism.posting_pages('grow_idx');
+FROM prism_posting_pages('grow_idx');
 SELECT id FROM grow
 ORDER BY v <-> '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
 
@@ -87,7 +87,7 @@ VACUUM FULL grow2;
 SELECT count(DISTINCT cluster_id) BETWEEN 20 AND 100 AS reclustered,
        bool_and(format = 'fastscan') AS all_fastscan,
        sum(entry_count) >= 2000 AS entries_ok
-FROM prism.posting_pages('grow2_idx');
+FROM prism_posting_pages('grow2_idx');
 SELECT id FROM grow2
 ORDER BY v <-> '[1000.4,1,0,0,0,0,0,0]' LIMIT 3;
 

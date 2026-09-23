@@ -221,7 +221,7 @@ Keep the fast path fast and bound the write buffer.
     Vacuum fires on table *dead-tuple* thresholds, the wrong signal for an
     insert-grown buffer, so this keeps insert-heavy workloads from accumulating
     unpacked data between vacuums (GIN's inline pending-list flush).
-  - **Manual procedure** — a user-callable `prism.compact(index)` to force
+  - **Manual procedure** — a user-callable `prism_compact(index)` to force
     compaction on demand (GIN's `gin_clean_pending_list()`).
 - Search merges base + segments + write tier; fewer packed segments keep scan
   fast.
@@ -265,7 +265,7 @@ The target is **not a free parameter**: it is the size the build chose, since
 its sqrt-floor crossover; below it, `sqrt(rows)`). Both the automatic probe
 count and the cost model are derived from `nlist`, and the per-list size is its
 inverse — so aiming maintenance at a different size silently decouples the index
-from both. `prism.rebalance()` therefore derives its target by default, honouring
+from both. `prism_rebalance()` therefore derives its target by default, honouring
 an explicit `nlist` reloption when the index was built with one.
 
 The **trigger is deliberately above the target**, which is the part that is easy

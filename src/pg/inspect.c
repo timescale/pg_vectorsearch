@@ -7,10 +7,10 @@
  * they share, collect_leaf_entries, is declared in inspect.h.
  *
  * Functions:
- *   prism.centroid_pages(regclass) -- centroid tree structure
- *   prism.posting_pages(regclass)  -- posting list page chains
- *   prism.tids_clusters(regclass, tid[]) -- which cluster(s) hold each TID
- *   prism.index_settings(regclass) -- effective (resolved) settings
+ *   prism_centroid_pages(regclass) -- centroid tree structure
+ *   prism_posting_pages(regclass)  -- posting list page chains
+ *   prism_tids_clusters(regclass, tid[]) -- which cluster(s) hold each TID
+ *   prism_index_settings(regclass) -- effective (resolved) settings
  */
 
 #include <postgres.h>
@@ -448,7 +448,7 @@ vs_centroid_pages(PG_FUNCTION_ARGS)
 }
 
 /*
- * One prism.posting_pages() row per page of a chain.
+ * One prism_posting_pages() row per page of a chain.
  *
  * Everything the rows need beyond the page itself -- the tuplestore to emit
  * into, the dimension, the running position in the chain -- rides in the
@@ -520,7 +520,7 @@ emit_posting_row(PrismPostingChainPos *pos, void *state)
 }
 
 /* ----------------------------------------------------------------
- * prism.posting_pages(regclass)
+ * prism_posting_pages(regclass)
  *
  * Returns one row per posting page: blkno, cluster_id, is_first,
  * tombstoned, entry_count, dead_count, max_entries, next_blkno,
@@ -604,7 +604,7 @@ vs_posting_pages(PG_FUNCTION_ARGS)
 }
 
 /* ----------------------------------------------------------------
- * prism.tids_clusters(regclass, tid[])
+ * prism_tids_clusters(regclass, tid[])
  *
  * Diagnostic: for each input heap TID, return which cluster(s) it is
  * stored in (primary + any SOAR/boundary replica). One pass over all
@@ -765,7 +765,7 @@ vs_tids_clusters(PG_FUNCTION_ARGS)
 }
 
 /* ----------------------------------------------------------------
- * prism.index_settings(regclass)
+ * prism_index_settings(regclass)
  *
  * Returns one (name, setting, source) row per effective index
  * setting, with automatic values resolved to what the build (or the

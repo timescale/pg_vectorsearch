@@ -60,7 +60,7 @@ SELECT id FROM zv ORDER BY v <=> '[3,500,0,0,0,0,0,0]' LIMIT 1;
 -- The zero rows are still physically indexed (entries counted), just
 -- never returned.
 SELECT sum(entry_count) >= 647 AS all_rows_indexed
-FROM prism.posting_pages('zv_idx');
+FROM prism_posting_pages('zv_idx');
  all_rows_indexed 
 ------------------
  t

@@ -40,7 +40,7 @@ if ($node->psql('postgres', 'CREATE EXTENSION injection_points') != 0)
 
 $node->safe_psql('postgres', 'CREATE EXTENSION pg_vectorsearch');
 $node->safe_psql('postgres',
-	'ALTER DATABASE postgres SET search_path = prism, public');
+	'ALTER DATABASE postgres SET search_path = public');
 
 # Points spread along one axis: deterministic, and with enough structure that
 # clustering has something to find.
@@ -67,11 +67,11 @@ SELECT string_agg(id::text, ',' ORDER BY id) FROM (
     SELECT id FROM c ORDER BY v <-> '[1,0,0]'::vec32 LIMIT $k) s;
 SQL
 
-my $heads = "SELECT count(*) FROM posting_pages('c_idx'::regclass) "
+my $heads = "SELECT count(*) FROM prism_posting_pages('c_idx'::regclass) "
           . "WHERE is_first";
 my $ids   = "SELECT count(DISTINCT cluster_id) "
-          . "FROM posting_pages('c_idx'::regclass) WHERE is_first";
-my $nlist = "SELECT setting::int FROM index_settings('c_idx'::regclass) "
+          . "FROM prism_posting_pages('c_idx'::regclass) WHERE is_first";
+my $nlist = "SELECT setting::int FROM prism_index_settings('c_idx'::regclass) "
           . "WHERE name = 'nlist'";
 
 my $heads_before = $node->safe_psql('postgres', $heads);
@@ -87,7 +87,7 @@ $node->safe_psql('postgres',
 # Fire the split and do not wait for it -- an empty pattern returns as soon
 # as the query has been sent, leaving it parked on the injection point.
 my $bg = $node->background_psql('postgres', on_error_stop => 0);
-$bg->query_until(qr//, "CALL rebalance('c_idx', $target);\n");
+$bg->query_until(qr//, "CALL prism_rebalance('c_idx', $target);\n");
 
 my $parked = $node->poll_query_until('postgres', <<'SQL');
 SELECT count(*) > 0 FROM pg_stat_activity
@@ -132,7 +132,7 @@ cmp_ok($nlist_after, '>=', $heads_after,
 # before, and the answer is still right afterwards.
 $node->safe_psql('postgres', <<"SQL");
 SET client_min_messages = warning;
-CALL rebalance('c_idx', $target);
+CALL prism_rebalance('c_idx', $target);
 SQL
 
 my $heads_retry = $node->safe_psql('postgres', $heads);

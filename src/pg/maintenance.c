@@ -7,11 +7,11 @@
  * get the scrutiny persistent mutations need.
  *
  * Operations:
- *   prism.convert_posting_to_fastscan(regclass, int4) -- convert one cluster's
+ *   prism_convert_posting_to_fastscan(regclass, int4) -- convert one cluster's
  *       posting chain from AoS to fastscan format (function)
- *   prism.split_posting_list(regclass, bigint) -- split one list by head block
+ *   prism_split_posting_list(regclass, bigint) -- split one list by head block
  *       (procedure)
- *   prism.rebalance(regclass, int4) -- split every list over a given size
+ *   prism_rebalance(regclass, int4) -- split every list over a given size
  *       (procedure)
  *
  * split_posting_list and rebalance are procedures, not functions: they are
@@ -260,7 +260,7 @@ ensure_meta_fastscan_flag(Relation index)
 }
 
 /* ----------------------------------------------------------------
- * prism.convert_posting_to_fastscan(regclass, int4)
+ * prism_convert_posting_to_fastscan(regclass, int4)
  *
  * Converts one cluster's posting chain from AoS to fastscan.
  * Updates the centroid leaf entry and sets the metadata flag.
@@ -312,7 +312,7 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 
 	/*
 	 * Find the leaf for this cluster. The argument is the stored cluster_id --
-	 * what prism.posting_pages reports and what callers pass -- not a
+	 * what prism_posting_pages reports and what callers pass -- not a
 	 * positional index. collect_leaf_entries returns leaves in tree-traversal
 	 * order, which coincides with cluster_id only for a single-page flat tree;
 	 * on any deeper or multi-page tree the two diverge. Match on each leaf's
@@ -952,7 +952,7 @@ maint_end(Relation index, MaintCtx *m, bool changed)
  * ---------------------------------------------------------------- */
 
 /*
- * CALL prism.split_posting_list(index regclass, head_blkno bigint)
+ * CALL prism_split_posting_list(index regclass, head_blkno bigint)
  *
  * Split the single posting list whose head page is head_blkno. Reports via
  * NOTICE whether a split happened or was declined (not a live head, too few
@@ -961,7 +961,7 @@ maint_end(Relation index, MaintCtx *m, bool changed)
 Datum
 vs_split_posting_list(PG_FUNCTION_ARGS)
 {
-	require_own_transaction(fcinfo, "prism.split_posting_list()");
+	require_own_transaction(fcinfo, "prism_split_posting_list()");
 	reject_null_arg(fcinfo, 0, "index_oid");
 	reject_null_arg(fcinfo, 1, "head_blkno");
 
@@ -1027,7 +1027,7 @@ vs_split_posting_list(PG_FUNCTION_ARGS)
 }
 
 /* ----------------------------------------------------------------
- * CALL prism.rebalance(index regclass, target_entries int4 DEFAULT NULL)
+ * CALL prism_rebalance(index regclass, target_entries int4 DEFAULT NULL)
  *
  * Manual LIRE rebalancing entry point. Scans the index and splits every live
  * posting-list head that has grown past the split trigger into lists of about
@@ -1059,7 +1059,7 @@ vs_split_posting_list(PG_FUNCTION_ARGS)
 Datum
 vs_rebalance(PG_FUNCTION_ARGS)
 {
-	require_own_transaction(fcinfo, "prism.rebalance()");
+	require_own_transaction(fcinfo, "prism_rebalance()");
 	reject_null_arg(fcinfo, 0, "index_oid");
 
 	Oid indexoid = PG_GETARG_OID(0);

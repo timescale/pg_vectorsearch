@@ -341,7 +341,7 @@ gather_cost_inputs(
 			nprobe, in->nlist, si.fan_out, prism_centroid_beam_scale);
 
 	/*
-	 * Taken from the metapage, which the build sets and prism.rebalance keeps
+	 * Taken from the metapage, which the build sets and prism_rebalance keeps
 	 * current. It cannot be derived from the block range: a split with no
 	 * room on a level-0 page chains the new centroid page past the posting
 	 * region, so first_posting stops bounding the count.

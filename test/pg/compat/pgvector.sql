@@ -657,7 +657,7 @@ CREATE INDEX idx_fmt_i ON idx_pgv_h USING prism (v public.vec16_l2_ops)
           fastscan = off, soar_lambda = 0, boundary_epsilon = 0);
 SELECT assert_test('pgvector halfvec column gets half-precision centroids',
     (SELECT bool_and(format = 'half')
-       FROM prism.centroid_pages('idx_fmt_i'::regclass)));
+       FROM prism_centroid_pages('idx_fmt_i'::regclass)));
 
 -- pgvector's three distance operators are ordering members of each of
 -- pg_vectorsearch's six prism families.
@@ -713,15 +713,15 @@ RESET search_path;
 -- =====================================================================
 -- 19. Both extensions in NON-default schemas (dynamic discovery)
 -- =====================================================================
--- pgvector is relocatable, and pg_vectorsearch's types/operators/AM are
--- install-time relocatable too (prism.rebalance and friends are the one
--- exception -- see sql/pg_vectorsearch.sql). setup_pgvector_compat() and the
--- install DO block/event trigger discover BOTH schemas from
+-- pgvector is relocatable, and pg_vectorsearch's types/operators/AM/prism
+-- procedures are install-time relocatable too -- nothing pinned to a
+-- separate fixed schema anymore.
+-- pg_vectorsearch_setup_pgvector_compat() and the install DO
+-- block/event trigger discover BOTH schemas from
 -- pg_extension.extnamespace rather than assuming either is public. Install
 -- pgvector into pgv_alt and pg_vectorsearch into pgvs_alt, and assert the
--- compat
--- casts, the operator family memberships, and a real index scan all still
--- come out right -- for both install orderings.
+-- compat casts, the operator family memberships, and a real index scan all
+-- still come out right -- for both install orderings.
 
 DROP EXTENSION IF EXISTS pg_vectorsearch CASCADE;
 DROP EXTENSION IF EXISTS vector CASCADE;
@@ -766,12 +766,18 @@ SELECT assert_test('custom-schema: pgvector->pgvs cast round-trips',
 SELECT assert_test('custom-schema: pgvs->pgvector cast round-trips',
     '[1,2,3]'::pgvs_alt.vec32::pgv_alt.vector::text = '[1,2,3]');
 
--- The build-identity functions travel with @extschema@, unlike prism's
--- own procedures -- confirm they land inside pgvs_alt alongside the types.
+-- The build-identity functions and prism's own maintenance procedures all
+-- travel with @extschema@ -- confirm they land inside pgvs_alt alongside
+-- the types.
 SELECT assert_test(
     'custom-schema: build identity lands in pgvs_alt',
     to_regprocedure('pgvs_alt.pg_vectorsearch_git_commit()') IS NOT NULL
     AND to_regprocedure('pgvs_alt.pg_vectorsearch_version()') IS NOT NULL);
+SELECT assert_test(
+    'custom-schema: prism procedures land in pgvs_alt',
+    to_regprocedure('pgvs_alt.prism_rebalance(regclass,integer)') IS NOT NULL
+    AND to_regprocedure('pgvs_alt.prism_centroid_pages(regclass)')
+        IS NOT NULL);
 
 -- A real index scan over a pgv_alt.vector column via pgvector's operator: the
 -- operator only reaches the index because discovery added it to the family.
