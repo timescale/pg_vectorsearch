@@ -862,20 +862,31 @@ CREATE FUNCTION prism_index_settings(regclass)
     AS 'MODULE_PATHNAME', 'vs_index_settings'
     LANGUAGE C STRICT PARALLEL SAFE;
 
--- Convert one cluster's posting chain from AoS to fastscan format.
--- Updates centroid entries and metadata flag atomically.
--- Returns the new posting head block number.
-CREATE FUNCTION prism_convert_posting_to_fastscan(
-        index_oid regclass,
-        cluster_id integer
-    )
-    RETURNS integer
-    AS 'MODULE_PATHNAME', 'vs_convert_posting_to_fastscan'
-    LANGUAGE C STRICT;
-
 -- =====================================================================
 -- Incremental maintenance (posting-list split)
 -- =====================================================================
+
+-- Convert one cluster's posting chain from AoS to fastscan format.
+-- Updates centroid entries and metadata flag atomically. A mutating
+-- maintenance operation, so it is a procedure (CALL) like
+-- split_posting_list and rebalance below -- but unlike them, it takes
+-- no require_own_transaction restriction: it performs one atomic write
+-- with no internal commit boundary, so it is meant to be called in a
+-- loop from inside a DO block or function, e.g. to convert every
+-- cluster a query selects. Reports the new posting head block number
+-- via NOTICE.
+CREATE PROCEDURE prism_convert_posting_to_fastscan(
+        index_oid regclass,
+        cluster_id integer
+    )
+    AS 'MODULE_PATHNAME', 'vs_convert_posting_to_fastscan'
+    LANGUAGE C;
+
+COMMENT ON PROCEDURE prism_convert_posting_to_fastscan(regclass, integer) IS
+    'Convert one cluster''s posting chain from AoS to fastscan format. '
+    'index_oid is the index; cluster_id is the cluster (as reported by '
+    'prism_posting_pages). Owner-only; reports the new posting head '
+    'block number via NOTICE.';
 
 -- Split one posting list (given its head block number) into two or more
 -- balanced lists. A maintenance operation that mutates index state, so it is a

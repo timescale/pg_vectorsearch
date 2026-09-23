@@ -229,13 +229,20 @@ SQL
 
 	# Convert every cluster (not just cluster 0 -- that alone would miss the
 	# repoint bug, which only shows up once the packed-array offset is used).
-	my $nconv = $primary->safe_psql('postgres', <<"SQL");
-SELECT count(prism_convert_posting_to_fastscan('$idx'::regclass, cluster_id))
-FROM prism_posting_pages('$idx'::regclass) WHERE is_first;
+	# A procedure cannot appear in a SELECT list, so bulk conversion is an
+	# explicit loop; the resulting state is asserted directly below.
+	$primary->safe_psql('postgres', <<"SQL");
+DO \$\$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT cluster_id FROM prism_posting_pages('$idx'::regclass)
+              WHERE is_first
+    LOOP
+        CALL prism_convert_posting_to_fastscan('$idx'::regclass,
+            r.cluster_id);
+    END LOOP;
+END \$\$;
 SQL
-	my $nclusters = $primary->safe_psql('postgres',
-		"SELECT count(*) FROM prism_posting_pages('$idx'::regclass) WHERE is_first");
-	is($nconv, $nclusters, "convert: converted all $nclusters clusters");
 
 	my $all_fs = $primary->safe_psql('postgres', <<"SQL");
 SELECT bool_and(format = 'fastscan')

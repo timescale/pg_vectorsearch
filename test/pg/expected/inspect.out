@@ -241,13 +241,8 @@ ERROR:  "idx_btree" is not a prism index
 -- prism_convert_posting_to_fastscan
 -- =====================================================================
 -- Convert cluster 0 from AoS to fastscan
-SELECT prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0) IS NOT NULL
-    AS converted;
- converted 
------------
- t
-(1 row)
-
+CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
+NOTICE:  converted cluster 0 to fastscan (new head block 33)
 -- Verify the converted cluster has fastscan format
 SELECT format AS cluster0_format
     FROM prism_posting_pages('idx_l2c'::regclass)
@@ -266,14 +261,9 @@ SELECT bool_and(format = 'aos') AS others_aos
  t
 (1 row)
 
--- Converting again should be a no-op (returns same head)
-SELECT prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0) IS NOT NULL
-    AS idempotent;
- idempotent 
-------------
- t
-(1 row)
-
+-- Converting again should be a no-op (already fastscan)
+CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
+NOTICE:  cluster 0 already fastscan (head block 33)
 -- Query still works after partial conversion (mixed AoS + fastscan).
 --
 -- A small table, so a sequential scan is the plan the cost model correctly
@@ -299,15 +289,28 @@ SELECT count(*) FROM (
 (1 row)
 
 RESET enable_seqscan;
--- Convert all remaining clusters
-SELECT count(*) AS converted_count FROM (
-    SELECT prism_convert_posting_to_fastscan('idx_l2c'::regclass, cluster_id)
-    FROM prism_posting_pages('idx_l2c'::regclass)
-    WHERE is_first AND cluster_id != 0
-) t;
- converted_count 
------------------
-              30
+-- Convert all remaining clusters. A procedure cannot appear in a SELECT
+-- list or a FROM subquery, so bulk conversion is an explicit loop; per-
+-- cluster NOTICEs are suppressed since their exact block numbers depend
+-- on the k-means-derived cluster count, and the resulting state is
+-- asserted directly below instead.
+SET client_min_messages = warning;
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT cluster_id FROM prism_posting_pages('idx_l2c'::regclass)
+              WHERE is_first AND cluster_id != 0
+    LOOP
+        CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass,
+            r.cluster_id);
+    END LOOP;
+END $$;
+RESET client_min_messages;
+SELECT bool_and(format = 'fastscan') AS all_converted
+    FROM prism_posting_pages('idx_l2c'::regclass) WHERE is_first;
+ all_converted 
+---------------
+ t
 (1 row)
 
 -- Query still works after full conversion
@@ -343,14 +346,16 @@ SELECT format, entry_count, dead_count
  aos    |          40 |         13
 (1 row)
 
-SELECT prism_convert_posting_to_fastscan('conv_dead_idx', cluster_id) IS NOT NULL
-        AS converted
-    FROM prism_posting_pages('conv_dead_idx') WHERE is_first;
- converted 
------------
- t
-(1 row)
-
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT cluster_id FROM prism_posting_pages('conv_dead_idx')
+              WHERE is_first
+    LOOP
+        CALL prism_convert_posting_to_fastscan('conv_dead_idx', r.cluster_id);
+    END LOOP;
+END $$;
+NOTICE:  converted cluster 0 to fastscan (new head block 3)
 -- 27 rows remain, so the fastscan list must hold 27 entries
 SELECT format, entry_count FROM prism_posting_pages('conv_dead_idx')
     WHERE is_first;
@@ -385,10 +390,10 @@ RESET prism.nprobe;
 RESET enable_seqscan;
 DROP TABLE conv_dead;
 -- Error: non-existent cluster_id
-SELECT prism_convert_posting_to_fastscan('idx_l2c'::regclass, 99999);
+CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 99999);
 ERROR:  cluster 99999 not found or has no posting list
 -- Error: not a prism index
-SELECT prism_convert_posting_to_fastscan('idx_btree'::regclass, 0);
+CALL prism_convert_posting_to_fastscan('idx_btree'::regclass, 0);
 ERROR:  "idx_btree" is not a prism index
 -- =====================================================================
 -- prism_tids_clusters
@@ -419,12 +424,21 @@ CREATE TEMP TABLE tc_aos AS
     SELECT tid, cluster_id
         FROM prism_tids_clusters('idx_tc'::regclass,
                                (SELECT array_agg(ctid) FROM embeddings));
-SELECT count(*) > 0 AS converted_all FROM (
-    SELECT prism_convert_posting_to_fastscan('idx_tc'::regclass, cluster_id)
-        FROM prism_posting_pages('idx_tc'::regclass)
-        WHERE is_first
-) t;
- converted_all 
+SET client_min_messages = warning;
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT cluster_id FROM prism_posting_pages('idx_tc'::regclass)
+              WHERE is_first
+    LOOP
+        CALL prism_convert_posting_to_fastscan('idx_tc'::regclass,
+            r.cluster_id);
+    END LOOP;
+END $$;
+RESET client_min_messages;
+SELECT bool_and(format = 'fastscan') AS all_converted
+    FROM prism_posting_pages('idx_tc'::regclass) WHERE is_first;
+ all_converted 
 ---------------
  t
 (1 row)
@@ -462,7 +476,8 @@ DROP TABLE tc_fastscan;
 -- are gated on the caller's privileges on the underlying table (the same
 -- model pgrowlocks uses). EXECUTE stays public; the checks are runtime.
 -- Read-only inspectors need SELECT on the table; convert_posting_to_
--- fastscan mutates the index and needs table ownership.
+-- fastscan (a procedure, like the maintenance operations below) mutates
+-- the index and needs table ownership.
 CREATE ROLE regress_inspect_unpriv NOLOGIN;
 -- No schema GRANT is needed: the functions and embeddings/idx_l2c above
 -- all live in public (created unqualified), whose USAGE is granted to
@@ -477,8 +492,8 @@ SELECT * FROM prism_tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
 ERROR:  permission denied for table embeddings
 SELECT * FROM prism_index_settings('idx_l2c'::regclass);
 ERROR:  permission denied for table embeddings
--- The mutating function requires ownership, not merely SELECT.
-SELECT prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
+-- The mutating procedure requires ownership, not merely SELECT.
+CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
 ERROR:  must be owner of table embeddings
 RESET ROLE;
 -- Granting SELECT on the table lets the read-only inspectors run...
@@ -513,7 +528,7 @@ SELECT count(*) > 0 AS settings_ok
 (1 row)
 
 -- ...but SELECT is still not enough to mutate the index.
-SELECT prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
+CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
 ERROR:  must be owner of table embeddings
 RESET ROLE;
 REVOKE SELECT ON embeddings FROM regress_inspect_unpriv;

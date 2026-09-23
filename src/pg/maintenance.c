@@ -8,15 +8,22 @@
  *
  * Operations:
  *   prism_convert_posting_to_fastscan(regclass, int4) -- convert one cluster's
- *       posting chain from AoS to fastscan format (function)
+ *       posting chain from AoS to fastscan format (procedure)
  *   prism_split_posting_list(regclass, bigint) -- split one list by head block
  *       (procedure)
  *   prism_rebalance(regclass, int4) -- split every list over a given size
  *       (procedure)
  *
- * split_posting_list and rebalance are procedures, not functions: they are
- * DDL-like mutating maintenance, take no return value (reporting via NOTICE),
- * and a procedure can manage its own transactions, which a function cannot.
+ * All three are procedures, not functions: they are DDL-like mutating
+ * maintenance and take no return value (reporting via NOTICE). Only
+ * split_posting_list and rebalance additionally require their own
+ * transaction (require_own_transaction): they manage a maintenance pass
+ * across possibly many lists, and letting them run inside a caller's
+ * transaction would offer a rollback that does not roll back the pages
+ * they have already written. convert_posting_to_fastscan performs one
+ * atomic write with no such internal boundary, so it carries no such
+ * restriction -- it is meant to be called in a loop from a DO block or
+ * function, e.g. to convert every cluster a query selects.
  */
 
 #include <postgres.h>
@@ -260,11 +267,11 @@ ensure_meta_fastscan_flag(Relation index)
 }
 
 /* ----------------------------------------------------------------
- * prism_convert_posting_to_fastscan(regclass, int4)
+ * CALL prism_convert_posting_to_fastscan(regclass, int4)
  *
  * Converts one cluster's posting chain from AoS to fastscan.
  * Updates the centroid leaf entry and sets the metadata flag.
- * Returns the new posting head block number.
+ * Reports the new posting head block number via NOTICE.
  * ---------------------------------------------------------------- */
 Datum
 vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
@@ -363,7 +370,11 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 		if (already_fastscan)
 		{
 			relation_close(index, PRISM_MAINT_LOCK);
-			PG_RETURN_INT32((int32)old_head);
+			ereport(NOTICE,
+					(errmsg("cluster %d already fastscan (head block %u)",
+							cluster_id,
+							old_head)));
+			PG_RETURN_VOID();
 		}
 	}
 
@@ -400,7 +411,12 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 				&current_head))
 	{
 		relation_close(index, PRISM_MAINT_LOCK);
-		PG_RETURN_INT32((int32)current_head);
+		ereport(NOTICE,
+				(errmsg("cluster %d already converted by a concurrent "
+						"call (head block %u)",
+						cluster_id,
+						current_head)));
+		PG_RETURN_VOID();
 	}
 
 	ensure_meta_fastscan_flag(index);
@@ -415,7 +431,11 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	 */
 	relation_close(index, NoLock);
 
-	PG_RETURN_INT32((int32)new_head);
+	ereport(NOTICE,
+			(errmsg("converted cluster %d to fastscan (new head block %u)",
+					cluster_id,
+					new_head)));
+	PG_RETURN_VOID();
 }
 
 /* ----------------------------------------------------------------
