@@ -467,6 +467,7 @@ resolve_build_params(
 	 * cost and could even disagree with itself on a growing heap. */
 	PrismOptions *opts		= (PrismOptions *)index->rd_options;
 	uint32_t	  nlist_opt = (opts != NULL) ? (uint32_t)opts->nlist : 0;
+	uint32_t tpages_opt = (opts != NULL) ? (uint32_t)opts->target_pages : 0;
 
 	*est_rows = prism_estimate_heap_tuples(heap);
 
@@ -476,7 +477,7 @@ resolve_build_params(
 	}
 	else
 	{
-		p->nlist = prism_auto_nlist(*est_rows);
+		p->nlist = prism_auto_nlist(*est_rows, p->dim, tpages_opt);
 		if (p->nlist > PRISM_MAX_NLIST)
 			p->nlist = PRISM_MAX_NLIST;
 	}

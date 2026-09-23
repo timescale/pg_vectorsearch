@@ -1299,47 +1299,161 @@ TEST(split_declines_when_nothing_is_fetchable)
 }
 
 /*
- * Target list size: the flat constant above PRISM_TARGET_ENTRIES_PER_LIST^2
- * rows, and prism_auto_nlist's sqrt floor below it (where a hardcoded constant
- * would fight the build). An explicit nlist wins over both.
+ * The per-list target is denominated in pages and floored at the k-means
+ * training minimum: the page term governs where entries are plentiful, the
+ * floor where the dimension makes them scarce.
+ */
+TEST(target_entries_per_dim_regimes)
+{
+	/* Low dimension: entries are small, so three pages hold well over the
+	 * floor and the page term governs. This is the case a flat 256 got
+	 * wrong -- it was barely one page's worth. */
+	uint32_t low_per_page = prism_posting_page_usable() /
+							PRISM_POSTING_ENTRY_SIZE(128);
+
+	ASSERT_EQ(
+			prism_target_entries_per_dim(128, 0),
+			low_per_page * PRISM_DEFAULT_TARGET_PAGES,
+			"low dim: the page term governs");
+	ASSERT_TRUE(
+			prism_target_entries_per_dim(128, 0) >
+					(uint32_t)PRISM_MIN_ENTRIES_PER_LIST,
+			"and lands above the training floor");
+
+	/* The benchmarked shape rests exactly on the floor, which is why the
+	 * page target could be introduced without moving the tuned defaults. */
+	ASSERT_EQ(
+			prism_target_entries_per_dim(768, 0),
+			(uint32_t)PRISM_MIN_ENTRIES_PER_LIST,
+			"768d rests on the floor -- the historical flat target");
+
+	/* High dimension: three pages hold far too few entries to train a
+	 * centroid, so the floor takes over rather than starving it. */
+	ASSERT_TRUE(
+			prism_posting_page_usable() /
+							PRISM_POSTING_ENTRY_SIZE(PRISM_INDEX_MAX_DIM) *
+							PRISM_DEFAULT_TARGET_PAGES <
+					(uint32_t)PRISM_MIN_ENTRIES_PER_LIST,
+			"at the layout ceiling the page term falls below the floor");
+	ASSERT_EQ(
+			prism_target_entries_per_dim(PRISM_INDEX_MAX_DIM, 0),
+			(uint32_t)PRISM_MIN_ENTRIES_PER_LIST,
+			"so the floor governs there");
+
+	/* Never below the floor, and never rising with dimension. */
+	uint32_t prev = UINT32_MAX;
+	for (Dimension d = 8; d <= PRISM_INDEX_MAX_DIM; d += 8)
+	{
+		uint32_t t = prism_target_entries_per_dim(d, 0);
+
+		ASSERT_TRUE(
+				t >= (uint32_t)PRISM_MIN_ENTRIES_PER_LIST,
+				"target never drops below the floor");
+		ASSERT_TRUE(t <= prev, "target never rises with dimension");
+		prev = t;
+	}
+}
+
+/*
+ * target_pages scales the page term, and the training floor bounds what it
+ * can do: lowering it cannot starve a centroid, only raising it coarsens.
+ */
+TEST(target_pages_option_scales_the_target)
+{
+	/* 0 means the compiled default, not zero pages. */
+	ASSERT_EQ(
+			prism_target_entries_per_dim(128, 0),
+			prism_target_entries_per_dim(128, PRISM_DEFAULT_TARGET_PAGES),
+			"0 resolves to the default");
+
+	/* Where the page term governs, the target is linear in target_pages. */
+	ASSERT_EQ(
+			prism_target_entries_per_dim(128, 2 * PRISM_DEFAULT_TARGET_PAGES),
+			2 * prism_target_entries_per_dim(128, PRISM_DEFAULT_TARGET_PAGES),
+			"doubling the pages doubles the target");
+
+	/* 768d sits on the floor at the default, so lowering target_pages cannot
+	 * move it -- the floor, not the option, is binding. */
+	ASSERT_EQ(
+			prism_target_entries_per_dim(768, 1),
+			(uint32_t)PRISM_MIN_ENTRIES_PER_LIST,
+			"one page at 768d still gets the floor");
+	ASSERT_EQ(
+			prism_target_entries_per_dim(768, 1),
+			prism_target_entries_per_dim(768, PRISM_DEFAULT_TARGET_PAGES),
+			"and so matches the default there");
+
+	/* Raising it past the floor does take effect. */
+	uint32_t per_page = prism_posting_page_usable() /
+						PRISM_POSTING_ENTRY_SIZE(768);
+
+	ASSERT_TRUE(
+			prism_target_entries_per_dim(768, 8) >
+					(uint32_t)PRISM_MIN_ENTRIES_PER_LIST,
+			"eight pages at 768d clears the floor");
+	ASSERT_EQ(
+			prism_target_entries_per_dim(768, 8),
+			per_page * 8,
+			"and is then exactly the page term");
+
+	/* A coarser target means proportionally fewer lists. Chosen so both
+	 * targets divide the row count exactly (no rounding) and both clear
+	 * prism_auto_nlist's sqrt floor, which otherwise sets the count. */
+	const double rows = 112000000.0; /* 200000 * 560 == 100000 * 1120 */
+
+	ASSERT_EQ(
+			prism_auto_nlist(rows, 768, 8),
+			2 * prism_auto_nlist(rows, 768, 16),
+			"doubling the pages halves nlist");
+}
+
+/*
+ * Target list size: the dimension's target above that target squared rows,
+ * and prism_auto_nlist's sqrt floor below it (where a hardcoded constant
+ * would fight the build). A non-zero nlist argument is used as given;
+ * the PostgreSQL maintenance path always passes 0.
  */
 TEST(target_entries_per_list_regimes)
 {
-	uint32_t sq = PRISM_TARGET_ENTRIES_PER_LIST *
-				  PRISM_TARGET_ENTRIES_PER_LIST;
+	const Dimension dim	   = 768;
+	uint32_t		target = prism_target_entries_per_dim(dim, 0);
+	uint32_t		sq	   = target * target;
 
 	ASSERT_EQ(
-			prism_target_entries_per_list((double)sq, 0),
-			(uint32_t)PRISM_TARGET_ENTRIES_PER_LIST,
+			prism_target_entries_per_list((double)sq, 0, dim, 0),
+			target,
 			"at the crossover the two regimes agree");
 	ASSERT_EQ(
-			prism_target_entries_per_list(1000000.0, 0),
-			(uint32_t)PRISM_TARGET_ENTRIES_PER_LIST,
+			prism_target_entries_per_list(1000000.0, 0, dim, 0),
+			target,
 			"above the crossover it is the flat target");
 	ASSERT_EQ(
-			prism_target_entries_per_list(100000000.0, 0),
-			(uint32_t)PRISM_TARGET_ENTRIES_PER_LIST,
+			prism_target_entries_per_list(100000000.0, 0, dim, 0),
+			target,
 			"and stays flat as the dataset grows");
 
 	/* Below the crossover the sqrt floor gives ~sqrt(count) per list. */
 	ASSERT_EQ(
-			prism_target_entries_per_list(10000.0, 0),
+			prism_target_entries_per_list(10000.0, 0, dim, 0),
 			100u,
 			"below the crossover it tracks sqrt(count)");
 	ASSERT_TRUE(
-			prism_target_entries_per_list(10000.0, 0) <
-					(uint32_t)PRISM_TARGET_ENTRIES_PER_LIST,
+			prism_target_entries_per_list(10000.0, 0, dim, 0) < target,
 			"small tables target smaller lists, not the constant");
 
-	/* An explicit nlist is honoured, so maintenance does not override it. */
+	/* The function uses a non-zero nlist as given. Maintenance does not
+	 * pass one; see resolve_target_entries(). */
 	ASSERT_EQ(
-			prism_target_entries_per_list(10000.0, 20),
+			prism_target_entries_per_list(10000.0, 20, dim, 0),
 			500u,
-			"explicit nlist wins");
+			"non-zero nlist argument is used as given");
 
 	/* Degenerate inputs stay in range. */
-	ASSERT_EQ(prism_target_entries_per_list(0.0, 0), 1u, "empty -> 1");
-	ASSERT_EQ(prism_target_entries_per_list(1.0, 0), 1u, "single row -> 1");
+	ASSERT_EQ(prism_target_entries_per_list(0.0, 0, dim, 0), 1u, "empty -> 1");
+	ASSERT_EQ(
+			prism_target_entries_per_list(1.0, 0, dim, 0),
+			1u,
+			"single row -> 1");
 }
 
 TEST(split_drops_unfetchable_vectors)

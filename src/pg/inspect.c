@@ -34,6 +34,7 @@
 
 #include "index/centroid_page.h"
 #include "index/index_base.h"
+#include "index/index_build.h"
 #include "index/posting_page.h"
 #include "index/query_scan.h"
 #include "inspect.h"
@@ -914,6 +915,28 @@ vs_index_settings(PG_FUNCTION_ARGS)
 			reloption_is_set(set, "fan_out") ? "option" : "auto");
 	settings_row(
 			rsinfo, "nlevels", psprintf("%u", (uint32_t)nlevels), "derived");
+	/* The resting list size nlist was derived from, and the page target
+	 * behind it -- resolved, so the effective default shows rather than the
+	 * 0 that means "derive". */
+	settings_row(
+			rsinfo,
+			"target_pages",
+			psprintf(
+					"%u",
+					(opts != NULL && opts->target_pages > 0)
+							? (uint32_t)opts->target_pages
+							: (uint32_t)PRISM_DEFAULT_TARGET_PAGES),
+			reloption_is_set(set, "target_pages") ? "option" : "default");
+	settings_row(
+			rsinfo,
+			"target_entries",
+			psprintf(
+					"%u",
+					prism_target_entries_per_dim(
+							dim,
+							(opts != NULL) ? (uint32_t)opts->target_pages
+										   : 0)),
+			"derived");
 	settings_row(
 			rsinfo,
 			"centroid_pages",

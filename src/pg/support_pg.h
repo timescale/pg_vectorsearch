@@ -139,6 +139,7 @@ typedef struct PrismOptions
 	int	   distance_mode;		 /* VsDistanceMode */
 	int	   fan_out;				 /* children per tree node (2-255) */
 	int	   nlist;				 /* number of clusters (0 = auto) */
+	int	   target_pages;		 /* posting pages per list */
 	int	   kmeans_nredo;		 /* k-means restarts (1 = no restart) */
 	double soar_lambda;			 /* SOAR replication lambda (0=off) */
 	double boundary_epsilon;	 /* boundary replication threshold (0=off) */
@@ -154,6 +155,15 @@ typedef struct PrismOptions
 #define PRISM_DEFAULT_NLIST 0
 #define PRISM_MIN_NLIST		0
 #define PRISM_MAX_NLIST		2000000
+
+/*
+ * Range of the target_pages setting -- posting pages each list rests at,
+ * the denominator of the automatic nlist. Its default is
+ * PRISM_DEFAULT_TARGET_PAGES, over in index_build.h with the code that
+ * applies it.
+ */
+#define PRISM_MIN_TARGET_PAGES 1
+#define PRISM_MAX_TARGET_PAGES 64
 
 /*
  * Replication defaults. Both forms of secondary assignment are on by

@@ -95,9 +95,18 @@ at a given recall is surprisingly flat around the optimum, but far-off
 values hurt: too few lists mean each probe scans too many vectors, too
 many mean routing overhead and starved k-means training.
 
-- **Default:** `0` = automatic: `rows / 256`, floored at
-  `sqrt(rows)` — a couple of hundred vectors per list is the sweet
-  spot between per-probe scan cost and routing overhead.
+- **Default:** `0` = automatic, derived in two steps:
+
+    ```
+    target_entries = max(target_pages * entries-per-page(dim), 256)
+    nlist          = max(rows / target_entries, sqrt(rows))
+    ```
+
+    `target_entries` is the size a list should rest at. Only it and
+    `nlist` are derived — `target_pages` (default 3) is a plain
+    setting. A probe's cost is pages read, so the resting size is
+    denominated in pages and follows from the dimension.
+    `prism_index_settings()` reports both derived values.
 - **Change it** only when the table will grow far beyond its size at
   `CREATE INDEX` time (the estimate is taken then): either build with
   the target size's value in mind, or rebuild after loading.
@@ -136,6 +145,7 @@ noted per row — most shape query behavior, some only the build.
 | `soar_lambda` | `1.0` | Higher recall at a given nprobe; slower build. | SOAR replication: assigns each vector to a second, spill-orthogonal cluster so near-boundary neighbors are found without extra probes. `0` disables. | Disable to trade recall for a faster build. |
 | `boundary_epsilon` | `0.35` | Higher recall at a given nprobe; larger index. | Boundary replication band: additionally replicates vectors whose two nearest centroids are within this relative gap. Wider bands buy recall for a few percent of index size; `0` disables. | Shrink if index size is critical. |
 | `fan_out` | `32` | Routing-tree shape (depth vs width). | Children per routing-tree node. | Rarely; the auto shape adapts. Pin it only to reproduce a tree. |
+| `target_pages` | `3` | How many vectors each posting list holds, and through that the automatic `nlist` (see above). | Posting pages a list should hold. Raising it gives fewer, fatter lists; lowering it gives more, thinner ones. The 256-entry k-means training floor bounds it from below, and binds above ~608 dimensions at the default — lowering it there has no effect. Changing it takes effect on `REINDEX`; `ALTER INDEX ... SET` plus `prism_rebalance()` re-partitions in place instead. | Raise it for a large index on storage without much read parallelism, where each probe's per-list seek dominates its transfer. Measure first. |
 | `kmeans_nredo` | `1` | Build time vs marginal cluster quality. | K-means restarts during build. | Rarely. Extra restarts cost build time for little cluster quality. |
 | `distance_mode` | `asymmetric` | Accuracy vs speed of distance estimates. | RaBitQ distance estimator. `symmetric` is faster with a larger estimation error. | Rarely. Symmetric is faster, but rerank depends on asymmetric accuracy. |
 

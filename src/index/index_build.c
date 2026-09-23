@@ -19,6 +19,7 @@
 #include "index/centroid_build.h"
 #include "index/index_build.h"
 #include "index/parallel_build.h" /* PrismBlobStore seam (plan/write replay) */
+#include "index/posting_page.h"
 #include "quant/fastscan.h"
 
 /* ----------------------------------------------------------------
@@ -1148,25 +1149,44 @@ prism_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out)
 	return f;
 }
 
+/* Target entries per posting list at this dimension -- see the header. */
+uint32_t
+prism_target_entries_per_dim(Dimension dim, uint32_t target_pages)
+{
+	if (target_pages == 0)
+		target_pages = PRISM_DEFAULT_TARGET_PAGES;
+
+	uint32_t per_page = prism_posting_page_usable() /
+						PRISM_POSTING_ENTRY_SIZE(dim);
+
+	if (per_page < 1)
+		per_page = 1;
+
+	uint32_t target = per_page * target_pages;
+
+	return target > PRISM_MIN_ENTRIES_PER_LIST ? target
+											   : PRISM_MIN_ENTRIES_PER_LIST;
+}
+
 /* Automatic partition count from the (estimated) row count. */
 uint32_t
-prism_auto_nlist(double count)
+prism_auto_nlist(double count, Dimension dim, uint32_t target_pages)
 {
 	/*
-	 * One list per PRISM_TARGET_ENTRIES_PER_LIST vectors -- see the constant
+	 * One list per prism_target_entries_per_dim(dim) vectors -- see the header
 	 * for why that is the target. The hierarchical centroid tree keeps routing
 	 * cheap even at a high list count, so nlist scales linearly with the row
 	 * count.
 	 *
 	 * Floor it at sqrt(count): for small tables count/target collapses toward
 	 * a single list, which under-partitions and can starve the k-means build.
-	 * The linear target overtakes the sqrt floor at target^2 rows (65536 at
-	 * the current target). Back-ends clamp the result to their own nlist
+	 * The linear target overtakes the sqrt floor at target^2 rows (65536 at a
+	 * 256-entry target). Back-ends clamp the result to their own nlist
 	 * ceiling.
 	 */
 	double	 c		   = count > 1.0 ? count : 1.0;
-	uint32_t linear	   = (uint32_t)(c / (double)PRISM_TARGET_ENTRIES_PER_LIST +
-									0.5);
+	uint32_t target	   = prism_target_entries_per_dim(dim, target_pages);
+	uint32_t linear	   = (uint32_t)(c / (double)target + 0.5);
 	uint32_t min_lists = (uint32_t)sqrt(c);
 	uint32_t nlist	   = linear > min_lists ? linear : min_lists;
 	return nlist < 1 ? 1 : nlist;
@@ -1179,12 +1199,13 @@ prism_auto_nlist(double count)
  * convention.
  */
 uint32_t
-prism_target_entries_per_list(double count, uint32_t nlist)
+prism_target_entries_per_list(
+		double count, uint32_t nlist, Dimension dim, uint32_t target_pages)
 {
 	double c = count > 1.0 ? count : 1.0;
 
 	if (nlist == 0)
-		nlist = prism_auto_nlist(c);
+		nlist = prism_auto_nlist(c, dim, target_pages);
 	if (nlist < 1)
 		nlist = 1;
 

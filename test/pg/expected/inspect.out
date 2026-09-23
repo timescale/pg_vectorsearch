@@ -588,7 +588,8 @@ RESET enable_seqscan;
 -- (nlist and nlevels are asserted by predicate, not value: the built
 -- cluster count can vary with k-means convergence across platforms.
 -- first_posting and posting_pages likewise: both are page counts, so
--- they move with BLCKSZ and with how many pages the build reserved.)
+-- they move with BLCKSZ and with how many pages the build reserved.
+-- target_entries scales with BLCKSZ too.)
 CREATE INDEX idx_settings ON embeddings USING prism (v)
     WITH (nlist = 20, fan_out = 8, centroid_compression = on,
           centroid_fastscan = off, fastscan = off, soar_lambda = 0.5,
@@ -597,12 +598,13 @@ CREATE INDEX idx_settings ON embeddings USING prism (v)
 SELECT name, setting, source
     FROM prism_index_settings('idx_settings'::regclass)
     WHERE name NOT IN ('nlist', 'nlevels', 'first_posting',
-                       'posting_pages');
+                       'posting_pages', 'target_entries');
        name       |  setting  |   source   
 ------------------+-----------+------------
  dim              | 3         | column
  metric           | l2        | opclass
  fan_out          | 8         | option
+ target_pages     | 3         | default
  centroid_pages   | 9         | maintained
  centroid_format  | rabitq    | option
  fastscan         | off       | option
@@ -611,19 +613,20 @@ SELECT name, setting, source
  kmeans_nredo     | 2         | option
  distance_mode    | symmetric | option
  nprobe           | 10        | auto
-(11 rows)
+(12 rows)
 
 SELECT name, setting::int > 0 AS positive, source
     FROM prism_index_settings('idx_settings'::regclass)
     WHERE name IN ('nlist', 'nlevels', 'first_posting',
-                   'posting_pages');
-     name      | positive | source  
----------------+----------+---------
- nlist         | t        | option
- nlevels       | t        | derived
- first_posting | t        | derived
- posting_pages | t        | derived
-(4 rows)
+                   'posting_pages', 'target_entries');
+      name      | positive | source  
+----------------+----------+---------
+ nlist          | t        | option
+ nlevels        | t        | derived
+ target_entries | t        | derived
+ first_posting  | t        | derived
+ posting_pages  | t        | derived
+(5 rows)
 
 -- The default index resolves its automatic settings: every value is
 -- concrete (no 'auto' sentinels like nlist=0) and the sources tell
@@ -640,6 +643,8 @@ SELECT name,
  nlist            | t        | auto
  fan_out          | t        | auto
  nlevels          | t        | derived
+ target_pages     | t        | default
+ target_entries   | t        | derived
  centroid_pages   | t        | maintained
  first_posting    | t        | derived
  posting_pages    | t        | derived
@@ -650,7 +655,7 @@ SELECT name,
  kmeans_nredo     | t        | default
  distance_mode    | t        | default
  nprobe           | t        | auto
-(15 rows)
+(17 rows)
 
 SELECT name, setting, source
     FROM prism_index_settings('idx_default'::regclass)

@@ -73,6 +73,7 @@ typedef struct PrismIndexConfig
 {
 	uint32_t			nlist;		  /* 0 = auto: sqrt(nvecs) */
 	uint32_t			fan_out;	  /* 0 = auto from nlist */
+	uint32_t			target_pages; /* posting pages/list (0 = default) */
 	PrismCentroidFormat centroid_fmt; /* rabitq, float, half */
 	DistanceMetric		metric;
 	uint32_t			km_nredo;	 /* k-means restarts (0 = default) */
