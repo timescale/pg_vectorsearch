@@ -295,11 +295,14 @@ and `rabitq` types (see `sql/pg_vectorsearch.sql`), so it installs and
 runs without pgvector. They install into whichever schema
 `CREATE EXTENSION pg_vectorsearch` targets (a `SCHEMA` clause, or the
 first existing schema on `search_path`
-— typically `public`); maintenance, administration, and inspection
-functions are the one exception, always living in a separate, fixed
-`vectorsearch` schema regardless of that choice. The distinct
-`vec32`/`vec16` names do not collide with pgvector's `vector`/`halfvec`,
-even when both extensions' types end up in the same schema.
+— typically `public`); the build-identity functions
+(`pg_vectorsearch_git_commit()`, `pg_vectorsearch_version()`) install
+there alongside them. Maintenance, administration, and inspection
+functions specific to the `prism` index access method are the one
+exception, always living in a separate, fixed `prism` schema regardless
+of that choice. The distinct `vec32`/`vec16` names do not collide with
+pgvector's `vector`/`halfvec`, even when both extensions' types end up
+in the same schema.
 
 **pgvector interoperability.** `vec32` is binary-compatible with pgvector's
 `vector`, and `vec16` with pgvector's `halfvec`; the extension creates

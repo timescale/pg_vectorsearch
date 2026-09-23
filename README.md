@@ -198,29 +198,28 @@ ever adjust `prism.nprobe`.
 See the [tuning guide][tuning-doc] for every index parameter and GUC,
 their tradeoffs, and when changing them makes sense.
 
-> **Security note on `vectorsearch` and `prism`.** pg_vectorsearch always
-> creates its own `vectorsearch` schema (extension-wide identity:
-> `git_commit()`, `extension_version()`, `extension_name()`) and its own
+> **Security note on `prism`.** pg_vectorsearch always creates its own
 > `prism` schema (the maintenance/introspection procedures above),
-> regardless of which schema you installed the types into. Calls like
-> `prism.rebalance(...)` are always written schema-qualified, so neither
-> `vectorsearch` nor `prism` ever needs to be on any role's `search_path`
-> for pg_vectorsearch to work. Don't let untrusted application roles hold
-> `CREATE` on the database or pre-create either schema: an owner of one
-> could add lookalike objects to it that a caller who has not
-> double-checked where their tooling actually points might mistake for
-> pg_vectorsearch's own. `CREATE EXTENSION pg_vectorsearch` refuses to
-> install if a pre-existing `vectorsearch` or `prism` is owned by a role
-> other than the installer or a superuser, but its ownership is otherwise
-> the database administrator's responsibility.
+> regardless of which schema you installed the types into. The
+> extension-wide identity functions (`pg_vectorsearch_git_commit()`,
+> `pg_vectorsearch_version()`) follow the types instead, landing in
+> whichever schema you installed into. Calls like `prism.rebalance(...)`
+> are always written schema-qualified, so `prism` never needs to be on any
+> role's `search_path` for pg_vectorsearch to work. Don't let untrusted
+> application roles hold `CREATE` on the database or pre-create `prism`:
+> an owner of it could add lookalike objects there that a caller who has
+> not double-checked where their tooling actually points might mistake
+> for pg_vectorsearch's own. `CREATE EXTENSION pg_vectorsearch` refuses to
+> install if a pre-existing `prism` is owned by a role other than the
+> installer or a superuser, but its ownership is otherwise the database
+> administrator's responsibility.
 >
 > **Changing schemas later.** The schema choice above is made once, at
 > `CREATE EXTENSION` time. pg_vectorsearch is not relocatable:
 > `ALTER EXTENSION pg_vectorsearch SET SCHEMA ...` is refused, because
-> that command would try to move the `vectorsearch`- and `prism`-pinned
-> procedures too, defeating the point of pinning them. To move to a
-> different schema, drop and recreate the extension (and its indexes)
-> there instead.
+> that command would try to move the `prism`-pinned procedures too,
+> defeating the point of pinning them. To move to a different schema,
+> drop and recreate the extension (and its indexes) there instead.
 
 ## PRISM index maintenance
 

@@ -330,14 +330,11 @@ DROP TABLE tc_fastscan;
 -- fastscan mutates the index and needs table ownership.
 
 CREATE ROLE regress_inspect_unpriv NOLOGIN;
--- USAGE on prism is required just to reach the functions; it is
--- orthogonal to the per-table authorization exercised here. USAGE on
--- vectorsearch is unrelated to those functions, but is needed too:
--- embeddings/idx_l2c above were created unqualified while vectorsearch
--- led the search_path, so (as a superuser bypassing schema privilege
--- checks) that is where they landed.
+-- USAGE on prism is required to reach the functions; it also happens to
+-- cover embeddings/idx_l2c above, which were created unqualified while
+-- prism led the search_path, so (as a superuser bypassing schema
+-- privilege checks) that is where they landed.
 GRANT USAGE ON SCHEMA prism TO regress_inspect_unpriv;
-GRANT USAGE ON SCHEMA vectorsearch TO regress_inspect_unpriv;
 
 SET ROLE regress_inspect_unpriv;
 
@@ -373,7 +370,6 @@ RESET ROLE;
 
 REVOKE SELECT ON embeddings FROM regress_inspect_unpriv;
 REVOKE USAGE ON SCHEMA prism FROM regress_inspect_unpriv;
-REVOKE USAGE ON SCHEMA vectorsearch FROM regress_inspect_unpriv;
 DROP ROLE regress_inspect_unpriv;
 
 -- Cleanup
@@ -461,21 +457,21 @@ DROP TABLE embeddings;
 DROP TABLE wide;
 
 -- ---------------------------------------------------------------------
--- vectorsearch.git_commit() — exposes the git commit the extension was
--- built from. Verify the contract without printing the actual hash so
--- the expected output stays deterministic across builds. Fixed in
--- vectorsearch: an administration/inspection function, not part of the
--- vec32/vec16 type API, so it does not follow @extschema@.
+-- pg_vectorsearch_git_commit() — exposes the git commit the extension
+-- was built from. Verify the contract without printing the actual hash
+-- so the expected output stays deterministic across builds. Extension-
+-- wide, not index-specific, so it follows @extschema@ like the
+-- vec32/vec16 types rather than living in the fixed prism schema.
 -- ---------------------------------------------------------------------
 
 -- Format: 40-char lowercase hex (git's full SHA-1) or the "unknown"
 -- fallback used when vcs_tag had no git checkout available.
-SELECT vectorsearch.git_commit() ~ '^([0-9a-f]{40}|unknown)$'
+SELECT pg_vectorsearch_git_commit() ~ '^([0-9a-f]{40}|unknown)$'
     AS valid_format;
 
 -- Callers (e.g. rekall) use this as a string, so the return type
 -- must be text.
-SELECT pg_typeof(vectorsearch.git_commit())::text = 'text'
+SELECT pg_typeof(pg_vectorsearch_git_commit())::text = 'text'
     AS returns_text;
 
 -- The function must be IMMUTABLE STRICT PARALLEL SAFE — the commit
@@ -488,28 +484,24 @@ SELECT
     p.proparallel      = 's' AS parallel_safe
 FROM pg_proc p
 JOIN pg_namespace n ON n.oid = p.pronamespace
-WHERE n.nspname = 'vectorsearch' AND p.proname = 'git_commit';
+WHERE n.nspname = 'public' AND p.proname = 'pg_vectorsearch_git_commit';
 
 -- ---------------------------------------------------------------------
--- vectorsearch.extension_name() / vectorsearch.extension_version() —
--- the extension name and version the loaded library was built as.
+-- pg_vectorsearch_version() — the extension version the loaded library
+-- was built as.
 -- ---------------------------------------------------------------------
-
-SELECT vectorsearch.extension_name();
 
 -- The binary's version must match the installed extension's version;
 -- a mismatch means the library and the SQL scripts come from
 -- different builds (e.g. a stale install).
-SELECT vectorsearch.extension_version() =
-    (SELECT extversion FROM pg_extension
-     WHERE extname = vectorsearch.extension_name())
+SELECT pg_vectorsearch_version() =
+    (SELECT extversion FROM pg_extension WHERE extname = 'pg_vectorsearch')
     AS version_matches_extension;
 
--- Same contract as vectorsearch.git_commit() above: consumed as
--- strings (e.g. by rekall), so both must return text and be IMMUTABLE
+-- Same contract as pg_vectorsearch_git_commit() above: consumed as a
+-- string (e.g. by rekall), so it must return text and be IMMUTABLE
 -- STRICT PARALLEL SAFE.
-SELECT pg_typeof(vectorsearch.extension_name())::text = 'text' AND
-       pg_typeof(vectorsearch.extension_version())::text = 'text'
+SELECT pg_typeof(pg_vectorsearch_version())::text = 'text'
     AS returns_text;
 
 SELECT
@@ -519,6 +511,4 @@ SELECT
     p.proparallel      = 's' AS parallel_safe
 FROM pg_proc p
 JOIN pg_namespace n ON n.oid = p.pronamespace
-WHERE n.nspname = 'vectorsearch'
-  AND p.proname IN ('extension_name', 'extension_version')
-ORDER BY p.proname;
+WHERE n.nspname = 'public' AND p.proname = 'pg_vectorsearch_version';

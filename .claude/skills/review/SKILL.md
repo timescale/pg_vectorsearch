@@ -101,9 +101,12 @@ explicitly as its own concern:
   reimplemented separately for each.
 - **Naming consistency.** Do new function, type, and variable names match
   this codebase's existing conventions — checked against neighboring code,
-  not just consistency within the new diff? E.g. the `vs_` prefix is for
-  C symbols only; SQL-visible names are namespaced by the `vectorsearch`
-  schema and should not repeat that prefix.
+  not just consistency within the new diff? E.g. the `vs_`/`prism_`
+  prefixes are for C symbols only; SQL-visible names are namespaced by
+  whichever schema they install into (`@extschema@` for the types and
+  build-identity functions, the fixed `prism` schema for the index's own
+  maintenance/inspection procedures) and should not repeat those
+  prefixes.
 - **Public API surface especially.** New SQL functions, views, or GUCs
   deserve more scrutiny than internal code — their names, argument order,
   and return shapes should read as if they belong next to the existing

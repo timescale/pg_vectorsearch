@@ -19,7 +19,7 @@ else
     pg_test_conf = configure_file(
       output: 'meerkat_test.conf',
       command: ['sh', '-c',
-        'printf "search_path = \'vectorsearch, prism, public\'\\n' +
+        'printf "search_path = \'prism, public\'\\n' +
         'logging_collector = on\\n" > @OUTPUT@'],
     )
 
@@ -237,7 +237,7 @@ else
       iso_conf = configure_file(
         output: 'meerkat_isolation.conf',
         command: ['sh', '-c',
-          'echo "search_path = \'vectorsearch, prism, public\'" > @OUTPUT@'],
+          'echo "search_path = \'prism, public\'" > @OUTPUT@'],
       )
 
       test('isolation',

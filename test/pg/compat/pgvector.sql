@@ -570,7 +570,7 @@ SELECT assert_test('standalone: clean drop',
 -- silently downgraded to a sequential scan.
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_vectorsearch;
-SET search_path = public, vectorsearch;
+SET search_path = public;
 
 CREATE TEMP TABLE idx_src (id int, txt text);
 INSERT INTO idx_src
@@ -766,12 +766,12 @@ SELECT assert_test('custom-schema: pgvector->pgvs cast round-trips',
 SELECT assert_test('custom-schema: pgvs->pgvector cast round-trips',
     '[1,2,3]'::pgvs_alt.vec32::pgv_alt.vector::text = '[1,2,3]');
 
--- vectorsearch itself stays a fixed, separate schema regardless of
--- where the types landed -- confirm it did not end up inside pgvs_alt.
+-- The build-identity functions travel with @extschema@, unlike prism's
+-- own procedures -- confirm they land inside pgvs_alt alongside the types.
 SELECT assert_test(
-    'custom-schema: vectorsearch is separate from pgvs_alt',
-    to_regnamespace('vectorsearch') IS NOT NULL
-    AND to_regtype('vectorsearch.vec32') IS NULL);
+    'custom-schema: build identity lands in pgvs_alt',
+    to_regprocedure('pgvs_alt.pg_vectorsearch_git_commit()') IS NOT NULL
+    AND to_regprocedure('pgvs_alt.pg_vectorsearch_version()') IS NOT NULL);
 
 -- A real index scan over a pgv_alt.vector column via pgvector's operator: the
 -- operator only reaches the index because discovery added it to the family.
