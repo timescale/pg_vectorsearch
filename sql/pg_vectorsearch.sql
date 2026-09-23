@@ -92,14 +92,32 @@ CREATE FUNCTION pg_vectorsearch_version() RETURNS text
 -- A runtime check against pg_vectorsearch_version(), so final releases
 -- carry nothing to strip and the notice can never ship stale.
 DO $$
+DECLARE
+    ext_ns  text;   -- the extension's own current schema, install-time
+                    -- relocatable too -- discovered from
+                    -- pg_extension.extnamespace rather than baked in via
+                    -- @extschema@ substitution, the same reasoning as
+                    -- ext_ns in setup_pgvector_compat() below. Calling
+                    -- pg_vectorsearch_version() unqualified here would
+                    -- also trip pgspot's PS016 (unqualified function
+                    -- call in an unpinned DO block).
+    version text;
 BEGIN
-    IF pg_catalog.strpos(pg_vectorsearch_version(), '-')
-        OPERATOR(pg_catalog.>) 0
+    SELECT n.nspname INTO ext_ns
+    FROM pg_catalog.pg_extension e
+    JOIN pg_catalog.pg_namespace n
+      ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
+    WHERE e.extname OPERATOR(pg_catalog.=) 'pg_vectorsearch';
+
+    EXECUTE pg_catalog.format('SELECT %I.pg_vectorsearch_version()', ext_ns)
+        INTO version;
+
+    IF pg_catalog.strpos(version, '-') OPERATOR(pg_catalog.>) 0
     THEN
         RAISE WARNING 'pg_vectorsearch % is a prerelease: upgrading to '
             'later versions might not be possible (reinstall instead) '
             'and its indexes may need rebuilding',
-            pg_vectorsearch_version();
+            version;
     END IF;
 END;
 $$;
