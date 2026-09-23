@@ -2,7 +2,7 @@
  * centroid_search.h - Beam search over centroid tree
  *
  * Level-by-level descent with beam search, reading centroid pages
- * via MktStorage. The same function works in standalone and
+ * via VsStorage. The same function works in standalone and
  * PG mode — only the storage implementation differs.
  *
  * Supports all centroid page formats (RaBitQ, float32, float16).
@@ -102,7 +102,7 @@ typedef struct PrismCentroidSearchState
 {
 	const RaBitQQueryState *qstate;		/* query for RaBitQ pages */
 	const float			   *query;		/* raw query for float/half pages */
-	MktStorage			   *storage;	/* page and vector I/O */
+	VsStorage			   *storage;	/* page and vector I/O */
 	uint32_t				beam_width; /* candidates per level (>= nprobe) */
 	uint32_t				nprobe;		/* target leaf count */
 	Dimension				dim;

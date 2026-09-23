@@ -1,8 +1,8 @@
 /*
- * test_mkt_fixtures.c - Demonstration of per-group and per-test fixtures
+ * test_vs_fixtures.c - Demonstration of per-group and per-test fixtures
  */
 
-#include "mkt_test.h"
+#include "vs_test.h"
 
 TEST_GROUP(Fixtures);
 

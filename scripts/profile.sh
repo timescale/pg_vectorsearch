@@ -6,8 +6,10 @@
 #   ./scripts/profile.sh [command] [args...]
 #
 # Examples:
-#   ./scripts/profile.sh ./bin/mkt bench distance --dim 768 --count 10000
-#   ./scripts/profile.sh ./bin/mkt bench distance --dim 384 --impls avx512
+#   ./scripts/profile.sh ./bin/vectorsearch bench distance --dim 768 \
+#     --count 10000
+#   ./scripts/profile.sh ./bin/vectorsearch bench distance --dim 384 \
+#     --impls avx512
 #
 # Requirements:
 #   - perf (linux-tools-common, linux-tools-generic)
@@ -76,8 +78,8 @@ Usage: $0 <command> [args...]
 Profile a command with perf and generate a flame graph.
 
 Examples:
-  $0 ./bin/mkt bench distance --dim 768 --count 10000
-  $0 ./bin/mkt bench distance --dim 384 --impls avx512
+  $0 ./bin/vectorsearch bench distance --dim 768 --count 10000
+  $0 ./bin/vectorsearch bench distance --dim 384 --impls avx512
 
 Options:
   --events <events>  Perf events to record (default: cycles)
@@ -139,7 +141,7 @@ info "Output: $OUTPUT.svg"
 
 # Use existing build (dwarf call-graph works without frame pointers)
 BUILDDIR="$PROJECT_ROOT/builddir"
-if [[ ! -f "$BUILDDIR/mkt" ]]; then
+if [[ ! -f "$BUILDDIR/vectorsearch" ]]; then
     die "Build not found. Run: meson compile -C builddir"
 fi
 

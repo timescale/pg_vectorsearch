@@ -5,8 +5,8 @@
  * Used by the CLI benchmark, Python ctypes bindings, and ann-benchmarks.
  */
 
-#ifndef MKT_STANDALONE_API_H
-#define MKT_STANDALONE_API_H
+#ifndef VS_STANDALONE_API_H
+#define VS_STANDALONE_API_H
 
 #include <stdint.h>
 
@@ -14,7 +14,7 @@
 #include "standalone/vec32_source.h"
 
 /* Opaque index handle (wraps PrismIndex + PrismQueryCtx) */
-typedef struct MktHandle MktHandle;
+typedef struct VsHandle VsHandle;
 
 /* Index build statistics */
 typedef struct PrismBuildInfo
@@ -43,7 +43,7 @@ typedef struct PrismBuildInfo
  *
  * Returns NULL on failure.
  */
-MktHandle *mkt_handle_create(
+VsHandle *vs_handle_create(
 		Vec32Source	   *src,
 		uint32_t		nlist,
 		uint32_t		fan_out,
@@ -61,9 +61,9 @@ MktHandle *mkt_handle_create(
 /*
  * Convenience: build from a flat float32 array.
  *
- * Wraps the array in an MktArraySource and calls mkt_handle_create.
+ * Wraps the array in an VsArraySource and calls vs_handle_create.
  */
-MktHandle *mkt_handle_create_from_array(
+VsHandle *vs_handle_create_from_array(
 		const float	   *vectors,
 		uint32_t		nvecs,
 		uint32_t		dim,
@@ -87,8 +87,8 @@ MktHandle *mkt_handle_create_from_array(
  * result_ids must have space for k uint32_t entries.
  * Returns actual number of results (may be < k).
  */
-uint32_t mkt_handle_query(
-		MktHandle	*handle,
+uint32_t vs_handle_query(
+		VsHandle	*handle,
 		const float *query,
 		uint32_t	 k,
 		uint32_t	 nprobe,
@@ -99,6 +99,6 @@ uint32_t mkt_handle_query(
 /*
  * Free the index and all associated memory.
  */
-void mkt_handle_destroy(MktHandle *handle);
+void vs_handle_destroy(VsHandle *handle);
 
-#endif /* MKT_STANDALONE_API_H */
+#endif /* VS_STANDALONE_API_H */

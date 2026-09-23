@@ -1,10 +1,10 @@
 /*
- * mkt bench quantize
+ * vectorsearch bench quantize
  *
  * Benchmark RaBitQ quantization performance across operations and SIMD.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <getopt.h>
 #include <math.h>
@@ -22,7 +22,7 @@
 #include "quant/rabitq.h"
 #include "types/vec16.h"
 
-#ifdef MKT_HAVE_FAISS
+#ifdef VS_HAVE_FAISS
 #include <RaBitQuantizer_c.h>
 #include <error_c.h>
 #endif
@@ -41,11 +41,11 @@ typedef struct
 
 static const ImplSpec impls[] = {
 		{"compiler", SIMD_NONE},
-#if defined(MKT_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
+#if defined(VS_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
 		{"avx2", SIMD_AVX2},
-		{"avx512", MKT_SIMD_AVX512_DQ},
+		{"avx512", VS_SIMD_AVX512_DQ},
 #endif
-#if defined(MKT_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
+#if defined(VS_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
 		{"neon", SIMD_NEON},
 #endif
 		{NULL, 0},
@@ -98,7 +98,7 @@ typedef struct
 static void
 bench_stats_init(BenchStats *stats, uint32_t capacity)
 {
-	stats->samples = mkt_alloc(capacity * sizeof(double));
+	stats->samples = vs_alloc(capacity * sizeof(double));
 	stats->count   = 0;
 	stats->avg	   = 0.0;
 	stats->min	   = 0.0;
@@ -145,7 +145,7 @@ bench_stats_compute(BenchStats *stats)
 static void
 bench_stats_free(BenchStats *stats)
 {
-	mkt_free(stats->samples);
+	vs_free(stats->samples);
 }
 
 /*
@@ -172,7 +172,7 @@ generate_random_halfvecs(half *data, uint32_t count, Dimension dim)
 		for (Dimension j = 0; j < dim; j++)
 		{
 			int val			  = rand() % 200 - 100;
-			data[i * dim + j] = mkt_float_to_half((float)val / 100.0f);
+			data[i * dim + j] = vs_float_to_half((float)val / 100.0f);
 		}
 	}
 }
@@ -220,8 +220,8 @@ benchmark_encode_single(
 	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/* Allocate output buffers */
-	size_t	 data_size = MKT_RABITQ_DATA_SIZE(dim);
-	uint8_t *outputs   = mkt_alloc(count * data_size);
+	size_t	 data_size = VS_RABITQ_DATA_SIZE(dim);
+	uint8_t *outputs   = vs_alloc(count * data_size);
 	if (outputs == NULL)
 	{
 		fprintf(stderr, "Failed to allocate output buffer\n");
@@ -235,7 +235,7 @@ benchmark_encode_single(
 		{
 			Vec32Ref	vec_ref = {.data = vectors + i * dim, .dim = dim};
 			RaBitQData *out		= (RaBitQData *)(outputs + i * data_size);
-			mkt_rabitq_encode_into(params, vec_ref, cent_ref, out);
+			vs_rabitq_encode_into(params, vec_ref, cent_ref, out);
 		}
 	}
 
@@ -250,7 +250,7 @@ benchmark_encode_single(
 		{
 			Vec32Ref	vec_ref = {.data = vectors + i * dim, .dim = dim};
 			RaBitQData *out		= (RaBitQData *)(outputs + i * data_size);
-			mkt_rabitq_encode_into(params, vec_ref, cent_ref, out);
+			vs_rabitq_encode_into(params, vec_ref, cent_ref, out);
 		}
 
 		uint64_t end		 = get_time_ns();
@@ -281,7 +281,7 @@ benchmark_encode_single(
 	}
 
 	bench_stats_free(&stats);
-	mkt_free(outputs);
+	vs_free(outputs);
 }
 
 /*
@@ -298,32 +298,32 @@ benchmark_encode_batch(
 		uint32_t	  runs)
 {
 	printf("Batch encoding [%s] (dim=%u, count=%u):\n",
-		   mkt_vec_type_name(vec_type),
+		   vs_vec_type_name(vec_type),
 		   dim,
 		   count);
 
 	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/* Allocate batch output buffers */
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
-	float	*f_add		  = mkt_alloc(count * sizeof(float));
-	float	*f_rescale	  = mkt_alloc(count * sizeof(float));
-	uint8_t *bits		  = mkt_alloc((size_t)count * packed_bytes);
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
+	float	*f_add		  = vs_alloc(count * sizeof(float));
+	float	*f_rescale	  = vs_alloc(count * sizeof(float));
+	uint8_t *bits		  = vs_alloc((size_t)count * packed_bytes);
 	if (f_add == NULL || f_rescale == NULL || bits == NULL)
 	{
 		fprintf(stderr, "Failed to allocate output buffer\n");
 		if (f_add)
-			mkt_free(f_add);
+			vs_free(f_add);
 		if (f_rescale)
-			mkt_free(f_rescale);
+			vs_free(f_rescale);
 		if (bits)
-			mkt_free(bits);
+			vs_free(bits);
 		return;
 	}
 
 	/* CPU warmup: throwaway passes to stabilize measurements */
 	for (uint32_t warmup = 0; warmup < runs; warmup++)
-		mkt_rabitq_encode_batch(
+		vs_rabitq_encode_batch(
 				params,
 				vectors,
 				vec_type,
@@ -340,7 +340,7 @@ benchmark_encode_batch(
 	{
 		uint64_t start = get_time_ns();
 
-		mkt_rabitq_encode_batch(
+		vs_rabitq_encode_batch(
 				params,
 				vectors,
 				vec_type,
@@ -378,9 +378,9 @@ benchmark_encode_batch(
 	}
 
 	bench_stats_free(&stats);
-	mkt_free(bits);
-	mkt_free(f_rescale);
-	mkt_free(f_add);
+	vs_free(bits);
+	vs_free(f_rescale);
+	vs_free(f_add);
 }
 
 /*
@@ -403,7 +403,7 @@ benchmark_distance(
 	Vec32Ref cent_ref  = {.data = centroid, .dim = dim};
 
 	/* Allocate distances array */
-	Distance *distances = mkt_alloc(count * sizeof(Distance));
+	Distance *distances = vs_alloc(count * sizeof(Distance));
 	if (distances == NULL)
 	{
 		fprintf(stderr, "Failed to allocate distances\n");
@@ -411,9 +411,9 @@ benchmark_distance(
 	}
 
 	/* Get CPU capabilities once before the loop */
-	mkt_simd_set_override(0xFFFFFFFF); /* Ensure auto-detect mode */
-	mkt_simd_reset_cache();
-	uint32_t caps = mkt_detect_simd();
+	vs_simd_set_override(0xFFFFFFFF); /* Ensure auto-detect mode */
+	vs_simd_reset_cache();
+	uint32_t caps = vs_detect_simd();
 
 	/* Test each SIMD implementation */
 	for (const ImplSpec *impl = impls; impl->name; impl++)
@@ -429,13 +429,13 @@ benchmark_distance(
 		}
 
 		/* Set SIMD override */
-		mkt_simd_set_override(impl->mask);
-		mkt_simd_reset_cache();
-		mkt_rabitq_force_reinit();
+		vs_simd_set_override(impl->mask);
+		vs_simd_reset_cache();
+		vs_rabitq_force_reinit();
 
 		/* Prepare query state */
 		RaBitQQueryState *state =
-				mkt_rabitq_prepare_query(params, query_ref, cent_ref);
+				vs_rabitq_prepare_query(params, query_ref, cent_ref);
 		if (state == NULL)
 		{
 			fprintf(stderr, "Failed to prepare query state\n");
@@ -446,7 +446,7 @@ benchmark_distance(
 		for (uint32_t warmup = 0; warmup < runs; warmup++)
 		{
 			for (uint32_t i = 0; i < count; i++)
-				distances[i] = mkt_rabitq_distance(state, encoded[i], dim);
+				distances[i] = vs_rabitq_distance(state, encoded[i], dim);
 		}
 
 		BenchStats stats;
@@ -457,7 +457,7 @@ benchmark_distance(
 			uint64_t start = get_time_ns();
 
 			for (uint32_t i = 0; i < count; i++)
-				distances[i] = mkt_rabitq_distance(state, encoded[i], dim);
+				distances[i] = vs_rabitq_distance(state, encoded[i], dim);
 
 			uint64_t end		 = get_time_ns();
 			double	 elapsed_ms	 = ns_to_ms(end - start);
@@ -487,18 +487,18 @@ benchmark_distance(
 		}
 
 		bench_stats_free(&stats);
-		mkt_rabitq_free_query(state);
+		vs_rabitq_free_query(state);
 	}
 
 	/* Reset to auto-detection */
-	mkt_simd_set_override(0xFFFFFFFF);
-	mkt_simd_reset_cache();
-	mkt_rabitq_force_reinit();
+	vs_simd_set_override(0xFFFFFFFF);
+	vs_simd_reset_cache();
+	vs_rabitq_force_reinit();
 
-	mkt_free(distances);
+	vs_free(distances);
 }
 
-#ifdef MKT_HAVE_FAISS
+#ifdef VS_HAVE_FAISS
 /*
  * Benchmark FAISS encoding
  *
@@ -519,7 +519,7 @@ benchmark_faiss_encode(
 	printf("FAISS encoding (dim=%u, count=%u):\n", dim, count);
 
 	/* Allocate buffer for transformed vectors */
-	float *transformed = mkt_alloc((size_t)count * dim * sizeof(float));
+	float *transformed = vs_alloc((size_t)count * dim * sizeof(float));
 	if (transformed == NULL)
 	{
 		fprintf(stderr, "Failed to allocate transformed buffer\n");
@@ -533,17 +533,17 @@ benchmark_faiss_encode(
 		fprintf(stderr,
 				"Error: Failed to create FAISS RaBitQ: %s\n",
 				faiss_get_last_error());
-		mkt_free(transformed);
+		vs_free(transformed);
 		return;
 	}
 
 	size_t	 code_size = faiss_RaBitQuantizer_code_size(faiss_rq);
-	uint8_t *codes	   = mkt_alloc(count * code_size);
+	uint8_t *codes	   = vs_alloc(count * code_size);
 	if (codes == NULL)
 	{
 		fprintf(stderr, "Failed to allocate FAISS code buffer\n");
 		faiss_RaBitQuantizer_free(faiss_rq);
-		mkt_free(transformed);
+		vs_free(transformed);
 		return;
 	}
 
@@ -558,7 +558,7 @@ benchmark_faiss_encode(
 				residual[j] = vectors[i * dim + j] - centroid[j];
 		}
 		for (uint32_t i = 0; i < count; i++)
-			mkt_rabitq_rotate(
+			vs_rabitq_rotate(
 					params,
 					transformed + (size_t)i * dim,
 					transformed + (size_t)i * dim);
@@ -581,7 +581,7 @@ benchmark_faiss_encode(
 				residual[j] = vectors[i * dim + j] - centroid[j];
 		}
 		for (uint32_t i = 0; i < count; i++)
-			mkt_rabitq_rotate(
+			vs_rabitq_rotate(
 					params,
 					transformed + (size_t)i * dim,
 					transformed + (size_t)i * dim);
@@ -616,8 +616,8 @@ benchmark_faiss_encode(
 	}
 
 	bench_stats_free(&stats);
-	mkt_free(codes);
-	mkt_free(transformed);
+	vs_free(codes);
+	vs_free(transformed);
 	faiss_RaBitQuantizer_free(faiss_rq);
 }
 
@@ -649,7 +649,7 @@ benchmark_faiss_distance(
 
 	/* Encode all vectors */
 	size_t	 code_size = faiss_RaBitQuantizer_code_size(faiss_rq);
-	uint8_t *codes	   = mkt_alloc(count * code_size);
+	uint8_t *codes	   = vs_alloc(count * code_size);
 	if (codes == NULL)
 	{
 		fprintf(stderr, "Failed to allocate FAISS code buffer\n");
@@ -660,11 +660,11 @@ benchmark_faiss_distance(
 	faiss_RaBitQuantizer_compute_codes(faiss_rq, vectors, codes, count);
 
 	/* Allocate distances array */
-	float *distances = mkt_alloc(count * sizeof(float));
+	float *distances = vs_alloc(count * sizeof(float));
 	if (distances == NULL)
 	{
 		fprintf(stderr, "Failed to allocate distances\n");
-		mkt_free(codes);
+		vs_free(codes);
 		faiss_RaBitQuantizer_free(faiss_rq);
 		return;
 	}
@@ -753,8 +753,8 @@ benchmark_faiss_distance(
 		faiss_RaBitQDistanceComputer_free(faiss_dc);
 	}
 
-	mkt_free(distances);
-	mkt_free(codes);
+	vs_free(distances);
+	vs_free(codes);
 	faiss_RaBitQuantizer_free(faiss_rq);
 }
 
@@ -795,13 +795,13 @@ compare_correctness(
 
 	/* Transform vectors with P^T for FAISS (FAISS expects rotation externally)
 	 */
-	float *transformed		 = mkt_alloc(count * dim * sizeof(float));
-	float *query_transformed = mkt_alloc(dim * sizeof(float));
+	float *transformed		 = vs_alloc(count * dim * sizeof(float));
+	float *query_transformed = vs_alloc(dim * sizeof(float));
 	if (transformed == NULL || query_transformed == NULL)
 	{
 		fprintf(stderr, "Failed to allocate transformed vectors\n");
-		mkt_free(transformed);
-		mkt_free(query_transformed);
+		vs_free(transformed);
+		vs_free(query_transformed);
 		return;
 	}
 
@@ -809,34 +809,34 @@ compare_correctness(
 	for (uint32_t i = 0; i < count; i++)
 	{
 		/* Subtract centroid first */
-		float *v_centered = mkt_alloc(dim * sizeof(float));
+		float *v_centered = vs_alloc(dim * sizeof(float));
 		for (Dimension j = 0; j < dim; j++)
 			v_centered[j] = vectors[i * dim + j] - centroid[j];
 
-		mkt_rabitq_rotate(params, v_centered, transformed + i * dim);
-		mkt_free(v_centered);
+		vs_rabitq_rotate(params, v_centered, transformed + i * dim);
+		vs_free(v_centered);
 	}
 
 	/* Transform query */
-	float *q_centered = mkt_alloc(dim * sizeof(float));
+	float *q_centered = vs_alloc(dim * sizeof(float));
 	for (Dimension j = 0; j < dim; j++)
 		q_centered[j] = query[j] - centroid[j];
-	mkt_rabitq_rotate(params, q_centered, query_transformed);
-	mkt_free(q_centered);
+	vs_rabitq_rotate(params, q_centered, query_transformed);
+	vs_free(q_centered);
 
 	/* Create FAISS quantizer */
 	FaissRaBitQuantizer *faiss_rq = NULL;
 	if (faiss_RaBitQuantizer_new_with(&faiss_rq, dim, METRIC_L2, 1) != 0)
 	{
 		fprintf(stderr, "Error: Failed to create FAISS RaBitQ\n");
-		mkt_free(transformed);
-		mkt_free(query_transformed);
+		vs_free(transformed);
+		vs_free(query_transformed);
 		return;
 	}
 
 	/* Encode with FAISS (using transformed vectors) */
 	size_t	 faiss_code_size = faiss_RaBitQuantizer_code_size(faiss_rq);
-	uint8_t *faiss_codes	 = mkt_alloc(count * faiss_code_size);
+	uint8_t *faiss_codes	 = vs_alloc(count * faiss_code_size);
 	faiss_RaBitQuantizer_compute_codes(
 			faiss_rq, transformed, faiss_codes, count);
 
@@ -847,11 +847,11 @@ compare_correctness(
 	faiss_RaBitQDistanceComputer_set_query(faiss_dc, query_transformed);
 
 	/* Encode with pg_vectorsearch and compute distances */
-	RaBitQQueryState *mkt_state =
-			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
+	RaBitQQueryState *vs_state =
+			vs_rabitq_prepare_query(params, query_ref, cent_ref);
 
 	/* Statistics */
-	float  mkt_max_err = 0.0f, mkt_sum_err = 0.0f;
+	float  vs_max_err = 0.0f, vs_sum_err = 0.0f;
 	float  faiss_max_err = 0.0f, faiss_sum_err = 0.0f;
 	int	   bits_match = 0;
 	size_t nbytes	  = (dim + 7) / 8;
@@ -864,8 +864,8 @@ compare_correctness(
 		float true_dist = l2_distance_sq(query, vectors + i * dim, dim);
 
 		/* pg_vectorsearch encoding and distance */
-		RaBitQData *mkt_enc	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
-		float		mkt_dist = mkt_rabitq_distance(mkt_state, mkt_enc, dim);
+		RaBitQData *vs_enc	= vs_rabitq_encode(params, vec_ref, cent_ref);
+		float		vs_dist = vs_rabitq_distance(vs_state, vs_enc, dim);
 
 		/* FAISS distance */
 		float faiss_dist;
@@ -875,23 +875,23 @@ compare_correctness(
 		/* Compute relative errors vs true distance */
 		if (true_dist > 1e-6f)
 		{
-			float mkt_err	= fabsf(mkt_dist - true_dist) / true_dist;
+			float vs_err	= fabsf(vs_dist - true_dist) / true_dist;
 			float faiss_err = fabsf(faiss_dist - true_dist) / true_dist;
 
-			if (mkt_err > mkt_max_err)
-				mkt_max_err = mkt_err;
+			if (vs_err > vs_max_err)
+				vs_max_err = vs_err;
 			if (faiss_err > faiss_max_err)
 				faiss_max_err = faiss_err;
-			mkt_sum_err += mkt_err;
+			vs_sum_err += vs_err;
 			faiss_sum_err += faiss_err;
 		}
 
 		/* Check bit pattern match */
-		if (memcmp(mkt_enc->bits, faiss_codes + i * faiss_code_size, nbytes) ==
+		if (memcmp(vs_enc->bits, faiss_codes + i * faiss_code_size, nbytes) ==
 			0)
 			bits_match++;
 
-		mkt_free(mkt_enc);
+		vs_free(vs_enc);
 	}
 
 	printf("  Vectors compared: %u\n", count);
@@ -901,8 +901,8 @@ compare_correctness(
 		   100.0f * bits_match / count);
 	printf("\n  Distance error vs True L2:\n");
 	printf("    pg_vectorsearch: max=%.2f%%, mean=%.2f%%\n",
-		   mkt_max_err * 100.0f,
-		   (mkt_sum_err / count) * 100.0f);
+		   vs_max_err * 100.0f,
+		   (vs_sum_err / count) * 100.0f);
 	printf("    FAISS:           max=%.2f%%, mean=%.2f%%\n",
 		   faiss_max_err * 100.0f,
 		   (faiss_sum_err / count) * 100.0f);
@@ -916,14 +916,14 @@ compare_correctness(
 			   100.0f * bits_match / count);
 
 	/* Cleanup */
-	mkt_rabitq_free_query(mkt_state);
+	vs_rabitq_free_query(vs_state);
 	faiss_RaBitQDistanceComputer_free(faiss_dc);
-	mkt_free(faiss_codes);
+	vs_free(faiss_codes);
 	faiss_RaBitQuantizer_free(faiss_rq);
-	mkt_free(query_transformed);
-	mkt_free(transformed);
+	vs_free(query_transformed);
+	vs_free(transformed);
 }
-#endif /* MKT_HAVE_FAISS */
+#endif /* VS_HAVE_FAISS */
 
 /*
  * Parse operation filter from comma-separated list
@@ -984,7 +984,7 @@ print_usage(CmdContext *ctx)
 	printf("                     (default: all supported)\n");
 	printf("  --help             Show this help message\n");
 	printf("\n");
-#ifdef MKT_HAVE_FAISS
+#ifdef VS_HAVE_FAISS
 	printf("FAISS comparison: enabled (built with -Dfaiss=true)\n\n");
 #else
 	printf("FAISS comparison: disabled (rebuild with -Dfaiss=true)\n\n");
@@ -1011,16 +1011,16 @@ benchmark_encode_comparison(
 		uint32_t	  runs)
 {
 	printf("Encoding comparison [%s] (dim=%u, count=%u):\n",
-		   mkt_vec_type_name(vec_type),
+		   vs_vec_type_name(vec_type),
 		   dim,
 		   count);
 
 	Vec32Ref cent_ref	  = {.data = centroid, .dim = dim};
-	size_t	 data_size	  = MKT_RABITQ_DATA_SIZE(dim);
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	size_t	 data_size	  = VS_RABITQ_DATA_SIZE(dim);
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
 
 	/* Allocate single-vector output buffer (always f32) */
-	uint8_t *single_outputs = mkt_alloc(count * data_size);
+	uint8_t *single_outputs = vs_alloc(count * data_size);
 	if (single_outputs == NULL)
 	{
 		fprintf(stderr, "Failed to allocate output buffer\n");
@@ -1028,19 +1028,19 @@ benchmark_encode_comparison(
 	}
 
 	/* Allocate batch output buffers */
-	float	*batch_f_add	 = mkt_alloc(count * sizeof(float));
-	float	*batch_f_rescale = mkt_alloc(count * sizeof(float));
-	uint8_t *batch_bits		 = mkt_alloc((size_t)count * packed_bytes);
+	float	*batch_f_add	 = vs_alloc(count * sizeof(float));
+	float	*batch_f_rescale = vs_alloc(count * sizeof(float));
+	uint8_t *batch_bits		 = vs_alloc((size_t)count * packed_bytes);
 	if (batch_f_add == NULL || batch_f_rescale == NULL || batch_bits == NULL)
 	{
 		fprintf(stderr, "Failed to allocate batch output buffers\n");
-		mkt_free(single_outputs);
+		vs_free(single_outputs);
 		if (batch_f_add)
-			mkt_free(batch_f_add);
+			vs_free(batch_f_add);
 		if (batch_f_rescale)
-			mkt_free(batch_f_rescale);
+			vs_free(batch_f_rescale);
 		if (batch_bits)
-			mkt_free(batch_bits);
+			vs_free(batch_bits);
 		return;
 	}
 
@@ -1057,10 +1057,10 @@ benchmark_encode_comparison(
 		{
 			Vec32Ref	vec_ref = {.data = f32_vectors + i * dim, .dim = dim};
 			RaBitQData *out = (RaBitQData *)(single_outputs + i * data_size);
-			mkt_rabitq_encode_into(params, vec_ref, cent_ref, out);
+			vs_rabitq_encode_into(params, vec_ref, cent_ref, out);
 		}
 		/* Throwaway batch pass (typed) */
-		mkt_rabitq_encode_batch(
+		vs_rabitq_encode_batch(
 				params,
 				vectors,
 				vec_type,
@@ -1082,7 +1082,7 @@ benchmark_encode_comparison(
 		{
 			Vec32Ref	vec_ref = {.data = f32_vectors + i * dim, .dim = dim};
 			RaBitQData *out = (RaBitQData *)(single_outputs + i * data_size);
-			mkt_rabitq_encode_into(params, vec_ref, cent_ref, out);
+			vs_rabitq_encode_into(params, vec_ref, cent_ref, out);
 		}
 		uint64_t end		 = get_time_ns();
 		double	 elapsed_ms	 = ns_to_ms(end - start);
@@ -1098,7 +1098,7 @@ benchmark_encode_comparison(
 	for (uint32_t run = 0; run < runs; run++)
 	{
 		uint64_t start = get_time_ns();
-		mkt_rabitq_encode_batch(
+		vs_rabitq_encode_batch(
 				params,
 				vectors,
 				vec_type,
@@ -1114,16 +1114,16 @@ benchmark_encode_comparison(
 	}
 	bench_stats_compute(&batch_stats);
 
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 	/* Benchmark batch encoding with builtin (non-CBLAS) for comparison */
 	BenchStats builtin_stats;
 	bench_stats_init(&builtin_stats, runs);
 
-	mkt_matrix_set_use_cblas(false); /* Switch to builtin */
+	vs_matrix_set_use_cblas(false); /* Switch to builtin */
 	for (uint32_t run = 0; run < runs; run++)
 	{
 		uint64_t start = get_time_ns();
-		mkt_rabitq_encode_batch(
+		vs_rabitq_encode_batch(
 				params,
 				vectors,
 				vec_type,
@@ -1138,7 +1138,7 @@ benchmark_encode_comparison(
 		bench_stats_add(&builtin_stats, vec_per_sec);
 	}
 	bench_stats_compute(&builtin_stats);
-	mkt_matrix_set_use_cblas(true); /* Restore CBLAS */
+	vs_matrix_set_use_cblas(true); /* Restore CBLAS */
 #endif
 
 	/* Print results with comparison */
@@ -1160,9 +1160,9 @@ benchmark_encode_comparison(
 		   batch_stats.avg / 1000.0,
 		   (batch_stats.stddev / batch_stats.avg) * 100.0,
 		   runs,
-		   mkt_matrix_impl_name());
+		   vs_matrix_impl_name());
 
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 	double builtin_ms = (double)count / (builtin_stats.avg / 1000.0);
 	printf("  %-12s %8.1f ms  (%7.1fK vec/s) (±%.1f%%, n=%u) [builtin]\n",
 		   "batch",
@@ -1177,10 +1177,10 @@ benchmark_encode_comparison(
 
 	bench_stats_free(&single_stats);
 	bench_stats_free(&batch_stats);
-	mkt_free(batch_bits);
-	mkt_free(batch_f_rescale);
-	mkt_free(batch_f_add);
-	mkt_free(single_outputs);
+	vs_free(batch_bits);
+	vs_free(batch_f_rescale);
+	vs_free(batch_f_add);
+	vs_free(single_outputs);
 }
 
 /*
@@ -1283,30 +1283,29 @@ cmd_bench_quantize(CmdContext *ctx)
 	VecType vec_type;
 	if (use_f16)
 	{
-#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
-		vec_type = (mkt_detect_simd() & SIMD_AVX2) ? MKT_VEC_F16C
-												   : MKT_VEC_F16;
+#if defined(VS_F16C_SUPPORT) && !defined(VS_SIMD_NONE)
+		vec_type = (vs_detect_simd() & SIMD_AVX2) ? VS_VEC_F16C : VS_VEC_F16;
 #else
-		vec_type = MKT_VEC_F16;
+		vec_type = VS_VEC_F16;
 #endif
 	}
 	else
-		vec_type = MKT_VEC_F32;
-	size_t elem_size = mkt_vec_element_size(vec_type);
+		vec_type = VS_VEC_F32;
+	size_t elem_size = vs_vec_element_size(vec_type);
 
 	/* Memory calculation */
 	size_t vectors_size = (size_t)count * dim * elem_size;
-	size_t encoded_size = (size_t)count * MKT_RABITQ_DATA_SIZE(dim);
+	size_t encoded_size = (size_t)count * VS_RABITQ_DATA_SIZE(dim);
 	size_t total_mb		= (vectors_size + encoded_size) / (1024 * 1024);
 
 	printf("RaBitQ Quantization Benchmark\n");
 	printf("  Dimension: %u\n", dim);
 	printf("  Vectors:   %u\n", count);
-	printf("  Type:      %s\n", mkt_vec_type_name(vec_type));
+	printf("  Type:      %s\n", vs_vec_type_name(vec_type));
 	printf("  Memory:    ~%zu MB\n\n", total_mb);
 
 	/* Create RaBitQ parameters */
-	RaBitQParams *params = mkt_rabitq_create(dim, 42);
+	RaBitQParams *params = vs_rabitq_create(dim, 42);
 	if (params == NULL)
 	{
 		fprintf(stderr, "Error: Failed to create RaBitQ params\n");
@@ -1317,11 +1316,11 @@ cmd_bench_quantize(CmdContext *ctx)
 	srand(42);
 
 	/* Generate typed vectors (native f16 or f32) */
-	void *vectors = mkt_alloc(vectors_size);
+	void *vectors = vs_alloc(vectors_size);
 	if (vectors == NULL)
 	{
 		fprintf(stderr, "Error: Failed to allocate vectors\n");
-		mkt_rabitq_destroy(params);
+		vs_rabitq_destroy(params);
 		return 1;
 	}
 	if (use_f16)
@@ -1333,15 +1332,15 @@ cmd_bench_quantize(CmdContext *ctx)
 	float *f32_vectors = NULL;
 	if (use_f16)
 	{
-		f32_vectors = mkt_alloc((size_t)count * dim * sizeof(float));
+		f32_vectors = vs_alloc((size_t)count * dim * sizeof(float));
 		if (f32_vectors == NULL)
 		{
 			fprintf(stderr, "Error: Failed to allocate f32 vectors\n");
-			mkt_free(vectors);
-			mkt_rabitq_destroy(params);
+			vs_free(vectors);
+			vs_rabitq_destroy(params);
 			return 1;
 		}
-		mkt_half_to_float_array(
+		vs_half_to_float_array(
 				(const half *)vectors, f32_vectors, (uint32_t)count * dim);
 	}
 	else
@@ -1349,27 +1348,27 @@ cmd_bench_quantize(CmdContext *ctx)
 		f32_vectors = (float *)vectors;
 	}
 
-	float *centroid = mkt_alloc(dim * sizeof(float));
+	float *centroid = vs_alloc(dim * sizeof(float));
 	if (centroid == NULL)
 	{
 		fprintf(stderr, "Error: Failed to allocate centroid\n");
 		if (use_f16)
-			mkt_free(f32_vectors);
-		mkt_free(vectors);
-		mkt_rabitq_destroy(params);
+			vs_free(f32_vectors);
+		vs_free(vectors);
+		vs_rabitq_destroy(params);
 		return 1;
 	}
 	generate_random_vectors(centroid, 1, dim);
 
-	float *query = mkt_alloc(dim * sizeof(float));
+	float *query = vs_alloc(dim * sizeof(float));
 	if (query == NULL)
 	{
 		fprintf(stderr, "Error: Failed to allocate query\n");
-		mkt_free(centroid);
+		vs_free(centroid);
 		if (use_f16)
-			mkt_free(f32_vectors);
-		mkt_free(vectors);
-		mkt_rabitq_destroy(params);
+			vs_free(f32_vectors);
+		vs_free(vectors);
+		vs_rabitq_destroy(params);
 		return 1;
 	}
 	generate_random_vectors(query, 1, dim);
@@ -1390,7 +1389,7 @@ cmd_bench_quantize(CmdContext *ctx)
 				count,
 				dim,
 				config.runs);
-#ifdef MKT_HAVE_FAISS
+#ifdef VS_HAVE_FAISS
 		benchmark_faiss_encode(
 				params, f32_vectors, centroid, count, dim, config.runs);
 #endif
@@ -1415,7 +1414,7 @@ cmd_bench_quantize(CmdContext *ctx)
 					count,
 					dim,
 					config.runs);
-#ifdef MKT_HAVE_FAISS
+#ifdef VS_HAVE_FAISS
 			benchmark_faiss_encode(
 					params, f32_vectors, centroid, count, dim, config.runs);
 #endif
@@ -1427,7 +1426,7 @@ cmd_bench_quantize(CmdContext *ctx)
 	if (config.op_filter & OP_DISTANCE)
 	{
 		/* Encode all vectors */
-		RaBitQData **encoded = mkt_alloc(count * sizeof(void *));
+		RaBitQData **encoded = vs_alloc(count * sizeof(void *));
 		if (encoded == NULL)
 		{
 			fprintf(stderr, "Error: Failed to allocate encoded array\n");
@@ -1440,7 +1439,7 @@ cmd_bench_quantize(CmdContext *ctx)
 			for (uint32_t i = 0; i < count && ok; i++)
 			{
 				Vec32Ref vec_ref = {.data = f32_vectors + i * dim, .dim = dim};
-				encoded[i] = mkt_rabitq_encode(params, vec_ref, cent_ref);
+				encoded[i]		 = vs_rabitq_encode(params, vec_ref, cent_ref);
 				if (encoded[i] == NULL)
 				{
 					fprintf(stderr, "Error: Failed to encode vector %u\n", i);
@@ -1459,7 +1458,7 @@ cmd_bench_quantize(CmdContext *ctx)
 						dim,
 						config.runs,
 						config.impl_filter);
-#ifdef MKT_HAVE_FAISS
+#ifdef VS_HAVE_FAISS
 				benchmark_faiss_distance(
 						f32_vectors, query, count, dim, config.runs);
 				compare_correctness(
@@ -1471,19 +1470,19 @@ cmd_bench_quantize(CmdContext *ctx)
 			for (uint32_t i = 0; i < count; i++)
 			{
 				if (encoded[i])
-					mkt_free(encoded[i]);
+					vs_free(encoded[i]);
 			}
-			mkt_free(encoded);
+			vs_free(encoded);
 		}
 	}
 
 	/* Cleanup */
-	mkt_free(query);
-	mkt_free(centroid);
+	vs_free(query);
+	vs_free(centroid);
 	if (use_f16)
-		mkt_free(f32_vectors);
-	mkt_free(vectors);
-	mkt_rabitq_destroy(params);
+		vs_free(f32_vectors);
+	vs_free(vectors);
+	vs_rabitq_destroy(params);
 
 	return 0;
 }

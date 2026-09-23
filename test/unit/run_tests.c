@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "mkt_test.h"
+#include "vs_test.h"
 
 #define MAX_FILTERS 64
 
@@ -128,7 +128,7 @@ main(int argc, char *argv[])
 		}
 	}
 
-	int result = mkt_test_run_all(
+	int result = vs_test_run_all(
 			tap_output,
 			test_filters,
 			test_filter_count,

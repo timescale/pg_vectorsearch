@@ -1,5 +1,5 @@
 /*
- * mkt_latch.h - Wait/wake latch
+ * vs_latch.h - Wait/wake latch
  *
  * The leader's posting drain loop sleeps on its latch when no worker queue has
  * a page ready, and a worker wakes it by setting that latch when it sends or
@@ -10,8 +10,8 @@
  * exercised by standalone tests.
  */
 
-#ifndef MKT_LATCH_H
-#define MKT_LATCH_H
+#ifndef VS_LATCH_H
+#define VS_LATCH_H
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -31,7 +31,7 @@ typedef struct Latch
 
 /*
  * The latch the calling thread waits on. Each participating thread owns a
- * latch and binds it with mkt_latch_attach_self before waiting; senders reach
+ * latch and binds it with vs_latch_attach_self before waiting; senders reach
  * a thread's latch through the queue's stored receiver, mirroring how PG
  * reaches a process's MyLatch.
  */
@@ -53,6 +53,6 @@ extern int WaitLatch(
 		uint32_t wait_event_info);
 
 /* Standalone-only: bind this thread's MyLatch to a latch it owns. */
-extern void mkt_latch_attach_self(Latch *latch);
+extern void vs_latch_attach_self(Latch *latch);
 
-#endif /* MKT_LATCH_H */
+#endif /* VS_LATCH_H */

@@ -68,9 +68,9 @@ stage_page(PrismPostingChainPos *pos, void *state)
 		if (ctx->total_entries >= ctx->entries_cap)
 		{
 			ctx->entries_cap *= 2;
-			ctx->staged = mkt_realloc(
+			ctx->staged = vs_realloc(
 					ctx->staged, ctx->entries_cap * sizeof(StagedEntry));
-			ctx->all_bits = mkt_realloc(
+			ctx->all_bits = vs_realloc(
 					ctx->all_bits,
 					ctx->entries_cap * (size_t)ctx->packed_bytes);
 		}
@@ -92,23 +92,23 @@ stage_page(PrismPostingChainPos *pos, void *state)
 
 BlockNumber
 prism_posting_convert_to_fastscan(
-		MktStorage *storage, BlockNumber aos_head, Dimension dim)
+		VsStorage *storage, BlockNumber aos_head, Dimension dim)
 {
 	if (aos_head == InvalidBlockNumber)
 		return InvalidBlockNumber;
 
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
 
 	/* Read pt_centroid from AoS first page */
-	Page   first_page  = mkt_storage_read_page(storage, aos_head);
-	float *pt_centroid = mkt_alloc(dim * sizeof(float));
+	Page   first_page  = vs_storage_read_page(storage, aos_head);
+	float *pt_centroid = vs_alloc(dim * sizeof(float));
 	memcpy(pt_centroid,
 		   prism_posting_pt_centroid(first_page),
 		   dim * sizeof(float));
 
 	PrismPostingPageOpaque *first_op   = prism_posting_opaque(first_page);
 	uint32_t				cluster_id = first_op->cluster_id;
-	mkt_storage_release_page(storage, aos_head);
+	vs_storage_release_page(storage, aos_head);
 
 	PrismPostingBuilder builder;
 	prism_posting_builder_init_fastscan(
@@ -119,8 +119,8 @@ prism_posting_convert_to_fastscan(
 			.packed_bytes = packed_bytes,
 			.entries_cap  = 256,
 	};
-	ctx.staged	 = mkt_alloc(ctx.entries_cap * sizeof(StagedEntry));
-	ctx.all_bits = mkt_alloc(ctx.entries_cap * (size_t)packed_bytes);
+	ctx.staged	 = vs_alloc(ctx.entries_cap * sizeof(StagedEntry));
+	ctx.all_bits = vs_alloc(ctx.entries_cap * (size_t)packed_bytes);
 
 	prism_posting_chain_walk(storage, aos_head, stage_page, &ctx);
 
@@ -136,12 +136,12 @@ prism_posting_convert_to_fastscan(
 				ctx.all_bits + (size_t)i * packed_bytes);
 	}
 
-	mkt_free(ctx.staged);
-	mkt_free(ctx.all_bits);
+	vs_free(ctx.staged);
+	vs_free(ctx.all_bits);
 
 	BlockNumber result = prism_posting_builder_finish(&builder);
 	prism_posting_builder_cleanup(&builder);
-	mkt_free(pt_centroid);
+	vs_free(pt_centroid);
 
 	return result;
 }

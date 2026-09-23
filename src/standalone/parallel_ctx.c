@@ -2,11 +2,11 @@
  * parallel_ctx.c - Parallel context lifecycle over pthreads
  *
  * Standalone implementation of the ParallelContext lifecycle the build uses
- * (see mkt_parallel_ctx.h). PG builds use PostgreSQL's ParallelContext, so
+ * (see vs_parallel_ctx.h). PG builds use PostgreSQL's ParallelContext, so
  * this file is compiled only for standalone.
  */
 
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 
 #include <stdlib.h>
 #include <string.h>
@@ -15,40 +15,40 @@
 #include "core/memory.h"
 #include "standalone/parallel_ctx.h"
 
-#define MKT_PARALLEL_TOC_MAGIC		 UINT64_C(0x4d4b54504152) /* "MKTPAR" */
-#define MKT_PARALLEL_MAX_WORKERS_REG 8
+#define VS_PARALLEL_TOC_MAGIC		UINT64_C(0x56535f504152) /* "VS_PAR" */
+#define VS_PARALLEL_MAX_WORKERS_REG 8
 
 __thread int ParallelWorkerNumber = -1;
 
 /* Name -> worker-entry registry (populated once at module init). */
 static struct
 {
-	const char		   *name;
-	MktParallelWorkerFn fn;
-} mkt_worker_registry[MKT_PARALLEL_MAX_WORKERS_REG];
+	const char		  *name;
+	VsParallelWorkerFn fn;
+} vs_worker_registry[VS_PARALLEL_MAX_WORKERS_REG];
 
-static int mkt_worker_registry_count = 0;
+static int vs_worker_registry_count = 0;
 
 void
-mkt_parallel_register_worker(const char *name, MktParallelWorkerFn fn)
+vs_parallel_register_worker(const char *name, VsParallelWorkerFn fn)
 {
-	if (mkt_worker_registry_count == MKT_PARALLEL_MAX_WORKERS_REG)
+	if (vs_worker_registry_count == VS_PARALLEL_MAX_WORKERS_REG)
 	{
-		mkt_error("mkt_parallel_register_worker: registry full");
+		vs_error("vs_parallel_register_worker: registry full");
 	}
-	mkt_worker_registry[mkt_worker_registry_count].name = name;
-	mkt_worker_registry[mkt_worker_registry_count].fn	= fn;
-	mkt_worker_registry_count++;
+	vs_worker_registry[vs_worker_registry_count].name = name;
+	vs_worker_registry[vs_worker_registry_count].fn	  = fn;
+	vs_worker_registry_count++;
 }
 
-static MktParallelWorkerFn
-mkt_worker_lookup(const char *name)
+static VsParallelWorkerFn
+vs_worker_lookup(const char *name)
 {
-	for (int i = 0; i < mkt_worker_registry_count; i++)
-		if (strcmp(mkt_worker_registry[i].name, name) == 0)
-			return mkt_worker_registry[i].fn;
+	for (int i = 0; i < vs_worker_registry_count; i++)
+		if (strcmp(vs_worker_registry[i].name, name) == 0)
+			return vs_worker_registry[i].fn;
 
-	mkt_error("mkt_worker_lookup: '%s' not registered", name);
+	vs_error("vs_worker_lookup: '%s' not registered", name);
 }
 
 void
@@ -70,13 +70,13 @@ CreateParallelContext(const char *library, const char *function, int nworkers)
 
 	if (pcxt == NULL)
 	{
-		mkt_error("CreateParallelContext: out of memory");
+		vs_error("CreateParallelContext: out of memory");
 	}
 
 	pcxt->nworkers			= nworkers;
 	pcxt->nworkers_launched = 0;
 	pcxt->function_name		= function;
-	pcxt->pool				= mkt_thread_pool_create((uint32_t)nworkers);
+	pcxt->pool				= vs_thread_pool_create((uint32_t)nworkers);
 	shm_toc_initialize_estimator(&pcxt->estimator);
 
 	/*
@@ -85,7 +85,7 @@ CreateParallelContext(const char *library, const char *function, int nworkers)
 	 * outlive them — the context is freed only after they are all joined.
 	 */
 	InitLatch(&pcxt->leader_latch);
-	mkt_latch_attach_self(&pcxt->leader_latch);
+	vs_latch_attach_self(&pcxt->leader_latch);
 	return pcxt;
 }
 
@@ -96,10 +96,10 @@ InitializeParallelDSM(ParallelContext *pcxt)
 	pcxt->arena		 = malloc(pcxt->arena_size);
 	if (pcxt->arena == NULL)
 	{
-		mkt_error("InitializeParallelDSM: out of memory");
+		vs_error("InitializeParallelDSM: out of memory");
 	}
 	pcxt->toc = shm_toc_create(
-			MKT_PARALLEL_TOC_MAGIC, pcxt->arena, pcxt->arena_size);
+			VS_PARALLEL_TOC_MAGIC, pcxt->arena, pcxt->arena_size);
 
 	/*
 	 * A non-NULL sentinel: PG sets seg to the DSM segment and the driver
@@ -117,13 +117,13 @@ InitializeParallelDSM(ParallelContext *pcxt)
  * for the leader's join (WaitForParallelWorkersToFinish).
  */
 static void
-mkt_pool_worker_trampoline(uint32_t participant_id, void *arg)
+vs_pool_worker_trampoline(uint32_t participant_id, void *arg)
 {
 	ParallelContext *pcxt		   = (ParallelContext *)arg;
 	int				 worker_number = (int)participant_id - 1;
 
 	ParallelWorkerNumber = worker_number;
-	mkt_latch_attach_self(&pcxt->worker_latches[worker_number]);
+	vs_latch_attach_self(&pcxt->worker_latches[worker_number]);
 
 	/*
 	 * Each worker thread needs its own current memory context — the analog of
@@ -131,11 +131,11 @@ mkt_pool_worker_trampoline(uint32_t participant_id, void *arg)
 	 * (the worker's per-phase contexts are created under it). Freed when the
 	 * worker returns.
 	 */
-	MktMemCtx wctx = mkt_memctx_create(NULL, "mkt parallel worker");
-	MktMemCtx prev = mkt_memctx_switch(wctx);
+	VsMemCtx wctx = vs_memctx_create(NULL, "vs parallel worker");
+	VsMemCtx prev = vs_memctx_switch(wctx);
 	pcxt->worker_fn(pcxt->seg, pcxt->toc);
-	mkt_memctx_switch(prev);
-	mkt_memctx_delete(wctx);
+	vs_memctx_switch(prev);
+	vs_memctx_delete(wctx);
 }
 
 void
@@ -147,11 +147,11 @@ LaunchParallelWorkers(ParallelContext *pcxt)
 		return;
 	}
 
-	pcxt->worker_fn		 = mkt_worker_lookup(pcxt->function_name);
+	pcxt->worker_fn		 = vs_worker_lookup(pcxt->function_name);
 	pcxt->worker_latches = calloc(pcxt->nworkers, sizeof(Latch));
 	if (pcxt->worker_latches == NULL)
 	{
-		mkt_error("LaunchParallelWorkers: out of memory");
+		vs_error("LaunchParallelWorkers: out of memory");
 	}
 	for (int i = 0; i < pcxt->nworkers; i++)
 		InitLatch(&pcxt->worker_latches[i]);
@@ -161,7 +161,7 @@ LaunchParallelWorkers(ParallelContext *pcxt)
 	 * then participates in k-means and drains the workers' streamed pages
 	 * concurrently, joining them in WaitForParallelWorkersToFinish.
 	 */
-	mkt_thread_pool_launch(pcxt->pool, mkt_pool_worker_trampoline, pcxt);
+	vs_thread_pool_launch(pcxt->pool, vs_pool_worker_trampoline, pcxt);
 	pcxt->nworkers_launched = pcxt->nworkers;
 }
 
@@ -179,18 +179,18 @@ WaitForParallelWorkersToAttach(ParallelContext *pcxt)
 void
 WaitForParallelWorkersToFinish(ParallelContext *pcxt)
 {
-	mkt_thread_pool_join(pcxt->pool);
+	vs_thread_pool_join(pcxt->pool);
 }
 
 void
 DestroyParallelContext(ParallelContext *pcxt)
 {
 	/* Workers have been joined by now, so their latches are safe to free. */
-	mkt_thread_pool_destroy(pcxt->pool);
+	vs_thread_pool_destroy(pcxt->pool);
 	free(pcxt->worker_latches);
 	free(pcxt->arena);
-	mkt_shm_toc_free(pcxt->toc);
+	vs_shm_toc_free(pcxt->toc);
 	free(pcxt);
 }
 
-#endif /* MKT_STANDALONE */
+#endif /* VS_STANDALONE */

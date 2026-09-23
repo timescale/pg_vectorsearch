@@ -58,14 +58,14 @@ struct Vec32Source
  * The source borrows the data pointer — the caller must keep
  * the array alive until the build completes.
  */
-typedef struct MktArraySource
+typedef struct VsArraySource
 {
 	Vec32Source	 base;
 	const float *data;
 	uint32_t	 pos;
-} MktArraySource;
+} VsArraySource;
 
-void mkt_array_source_init(
-		MktArraySource *src, const float *data, uint32_t nvecs, uint32_t dim);
+void vs_array_source_init(
+		VsArraySource *src, const float *data, uint32_t nvecs, uint32_t dim);
 
 #endif /* VEC32_SOURCE_H */

@@ -10,7 +10,7 @@
  *   loops for large K.
  *
  * Builtin path:
- *   Batch dot-product kernel with MKT_TARGET_CLONES for AVX-512/AVX2
+ *   Batch dot-product kernel with VS_TARGET_CLONES for AVX-512/AVX2
  *   auto-vectorization. FMA generation requires -ffp-contract=fast
  *   (set in meson.build).
  *
@@ -19,14 +19,14 @@
  * The ⟨x,c⟩ term is computed in batch, norms are precomputed.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 /* See matrix.c for the rationale on the Apple branch. */
 #ifdef __APPLE__
 #include <vecLib/cblas_new.h>
@@ -48,7 +48,7 @@ static void
 precompute_norms_c(KMeansState *st)
 {
 	for (uint32_t j = 0; j < st->nlist; j++)
-		st->norms_c[j] = mkt_l2_norm_squared(
+		st->norms_c[j] = vs_l2_norm_squared(
 				st->centroids + (size_t)j * st->dim, st->dim);
 }
 
@@ -62,7 +62,7 @@ precompute_norms_c(KMeansState *st)
  * For IP:  dist[i][j] = -⟨x_i, c_j⟩
  * For cos: dist[i][j] = 1 - ⟨x_i, c_j⟩
  */
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 __attribute__((always_inline)) static inline void
 lloyd_assign_block_cblas_impl(
 		KMeansState		   *st,
@@ -166,7 +166,7 @@ lloyd_assign_block_cblas_f32(
 		KMeansState *st, uint32_t block_start, uint32_t block_count)
 {
 	lloyd_assign_block_cblas_impl(
-			st, block_start, block_count, &mkt_f32_type_ops);
+			st, block_start, block_count, &vs_f32_type_ops);
 }
 
 static void
@@ -174,24 +174,24 @@ lloyd_assign_block_cblas_f16(
 		KMeansState *st, uint32_t block_start, uint32_t block_count)
 {
 	lloyd_assign_block_cblas_impl(
-			st, block_start, block_count, &mkt_f16_type_ops);
+			st, block_start, block_count, &vs_f16_type_ops);
 }
 
-#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
+#if defined(VS_F16C_SUPPORT) && !defined(VS_SIMD_NONE)
 static void
 lloyd_assign_block_cblas_f16c(
 		KMeansState *st, uint32_t block_start, uint32_t block_count)
 {
 	lloyd_assign_block_cblas_impl(
-			st, block_start, block_count, &mkt_f16c_type_ops);
+			st, block_start, block_count, &vs_f16c_type_ops);
 }
 #endif
-#endif /* MKT_HAVE_CBLAS */
+#endif /* VS_HAVE_CBLAS */
 
 /*
  * Batch dot-product matrix: dots[i*nlist + j] = dot(vecs[i], cents[j])
  *
- * MKT_TARGET_CLONES generates AVX-512, AVX2, and default versions.
+ * VS_TARGET_CLONES generates AVX-512, AVX2, and default versions.
  * The innermost loop over dim is auto-vectorized by the compiler,
  * eliminating per-vector function pointer dispatch overhead.
  *
@@ -199,7 +199,7 @@ lloyd_assign_block_cblas_f16c(
  * release builds). Without it, GCC with -std=c2x generates separate
  * vmulps + horizontal scalar adds instead of vfmadd231ps accumulate.
  */
-MKT_TARGET_CLONES static void
+VS_TARGET_CLONES static void
 lloyd_compute_dot_products(
 		const float *vecs,
 		const float *centroids,
@@ -342,14 +342,14 @@ lloyd_assign_block_builtin_f16(
 		{
 			uint32_t	idx = st->indices[block_start + i];
 			const half *src = (const half *)st->vectors + (size_t)idx * dim;
-			mkt_half_to_float_array(src, st->vec_block + (size_t)i * dim, dim);
+			vs_half_to_float_array(src, st->vec_block + (size_t)i * dim, dim);
 		}
 	}
 	else
 	{
 		const half *src = (const half *)st->vectors +
 						  (size_t)block_start * dim;
-		mkt_half_to_float_array(src, st->vec_block, block_count * dim);
+		vs_half_to_float_array(src, st->vec_block, block_count * dim);
 	}
 
 	lloyd_compute_dot_products(
@@ -368,15 +368,15 @@ typedef void (*lloyd_block_fn)(KMeansState *, uint32_t, uint32_t);
 static lloyd_block_fn
 lloyd_select_block_fn(KMeansState *st, bool use_cblas)
 {
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 	if (use_cblas)
 	{
 		switch (st->vec_type)
 		{
-		case MKT_VEC_F32:
+		case VS_VEC_F32:
 			return lloyd_assign_block_cblas_f32;
-#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
-		case MKT_VEC_F16C:
+#if defined(VS_F16C_SUPPORT) && !defined(VS_SIMD_NONE)
+		case VS_VEC_F16C:
 			return lloyd_assign_block_cblas_f16c;
 #endif
 		default:
@@ -387,7 +387,7 @@ lloyd_select_block_fn(KMeansState *st, bool use_cblas)
 	(void)use_cblas;
 	switch (st->vec_type)
 	{
-	case MKT_VEC_F32:
+	case VS_VEC_F32:
 		return lloyd_assign_block_builtin_f32;
 	default:
 		return lloyd_assign_block_builtin_f16;
@@ -630,7 +630,7 @@ lloyd_iter_reduce(void *arg, uint32_t iteration)
 			if (st->cluster_sizes[c] == 0)
 				continue;
 			float *cent = st->new_centroids + (size_t)c * dim;
-			float  norm = mkt_l2_norm(cent, dim);
+			float  norm = vs_l2_norm(cent, dim);
 			if (norm > 1e-10f)
 				vec32_scale(cent, 1.0f / norm, cent, dim);
 		}
@@ -646,10 +646,10 @@ lloyd_iter_reduce(void *arg, uint32_t iteration)
 			st->centroids, ctx->old_centroids, nlist, dim);
 
 	if (ctx->verbose)
-		mkt_log("  iter %u: cost=%.4f, max_shift=%.6f\n",
-				iteration,
-				st->total_cost,
-				sqrtf(shift_sq));
+		vs_log("  iter %u: cost=%.4f, max_shift=%.6f\n",
+			   iteration,
+			   st->total_cost,
+			   sqrtf(shift_sq));
 
 	ctx->completed_iters = iteration + 1;
 
@@ -688,22 +688,20 @@ lloyd_iterate(KMeansState *st, bool use_cblas, const KMeansOptions *opts)
 	if (st->metric == DISTANCE_L2)
 		precompute_norms_c(st);
 
-	MKT_MEMCTX_SCOPE(iter_ctx);
-	MktMemCtx old_ctx = mkt_memctx_switch(iter_ctx);
+	VS_MEMCTX_SCOPE(iter_ctx);
+	VsMemCtx old_ctx = vs_memctx_switch(iter_ctx);
 
-	float *dist_bufs = mkt_alloc((size_t)nt * block * nlist * sizeof(float));
+	float *dist_bufs = vs_alloc((size_t)nt * block * nlist * sizeof(float));
 	float *vec_bufs	 = NULL;
 	if (st->vec_block != NULL)
-		vec_bufs = mkt_alloc((size_t)nt * block * dim * sizeof(float));
+		vec_bufs = vs_alloc((size_t)nt * block * dim * sizeof(float));
 
-	float *centroid_sums = mkt_alloc0(
-			(size_t)nt * nlist * dim * sizeof(float));
-	uint32_t *centroid_cnts = mkt_alloc0(
-			(size_t)nt * nlist * sizeof(uint32_t));
-	float *costs		 = mkt_alloc0(nt * sizeof(float));
-	float *old_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
+	float *centroid_sums = vs_alloc0((size_t)nt * nlist * dim * sizeof(float));
+	uint32_t *centroid_cnts = vs_alloc0((size_t)nt * nlist * sizeof(uint32_t));
+	float	 *costs			= vs_alloc0(nt * sizeof(float));
+	float	 *old_centroids = vs_alloc((size_t)nlist * dim * sizeof(float));
 
-	mkt_memctx_switch(old_ctx);
+	vs_memctx_switch(old_ctx);
 
 	memcpy(old_centroids, st->centroids, (size_t)nlist * dim * sizeof(float));
 

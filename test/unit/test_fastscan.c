@@ -11,9 +11,9 @@
 
 #include "core/memory.h"
 #include "core/platform.h"
-#include "mkt_test.h"
 #include "quant/fastscan.h"
 #include "quant/rabitq.h"
+#include "vs_test.h"
 
 TEST_GROUP(Fastscan);
 TEST_MEMCTX_FIXTURE();
@@ -21,10 +21,10 @@ TEST_MEMCTX_FIXTURE();
 static void
 reinit_fastscan_with_simd(uint32_t simd_mask)
 {
-	mkt_simd_set_override(simd_mask);
-	mkt_simd_reset_cache();
-	mkt_fastscan_reset_simd();
-	mkt_fastscan_init_simd();
+	vs_simd_set_override(simd_mask);
+	vs_simd_reset_cache();
+	vs_fastscan_reset_simd();
+	vs_fastscan_init_simd();
 }
 
 static bool
@@ -38,22 +38,22 @@ get_fastscan_simd_mask(const char *variant, uint32_t *simd_mask)
 #if defined(__x86_64__) || defined(_M_X64)
 	if (strcmp(variant, "avx2") == 0)
 	{
-		if (!(mkt_detect_simd() & SIMD_AVX2))
+		if (!(vs_detect_simd() & SIMD_AVX2))
 			return false;
 		*simd_mask = SIMD_AVX2;
 		return true;
 	}
 	if (strcmp(variant, "avx512") == 0)
 	{
-		if (!mkt_has_all_simd(MKT_SIMD_AVX512_BW))
+		if (!vs_has_all_simd(VS_SIMD_AVX512_BW))
 			return false;
-		*simd_mask = MKT_SIMD_AVX512_BW;
+		*simd_mask = VS_SIMD_AVX512_BW;
 		return true;
 	}
 #elif defined(__aarch64__) || defined(_M_ARM64)
 	if (strcmp(variant, "neon") == 0)
 	{
-		if (!(mkt_detect_simd() & SIMD_NEON))
+		if (!(vs_detect_simd() & SIMD_NEON))
 			return false;
 		*simd_mask = SIMD_NEON;
 		return true;
@@ -171,12 +171,12 @@ TEST(lut_entry_zero_is_bias)
 	float	 transformed[32];
 	fill_random_floats(transformed, dim, 42);
 
-	uint8_t lut[MKT_FASTSCAN_LUT_BYTES(32)];
+	uint8_t lut[VS_FASTSCAN_LUT_BYTES(32)];
 	float	scale, bias;
-	mkt_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
+	vs_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
 
 	/* Every sq's entry 0 should be the same (all encode bias) */
-	uint32_t nsq = MKT_FASTSCAN_NSQ(dim);
+	uint32_t nsq = VS_FASTSCAN_NSQ(dim);
 	for (uint32_t sq = 0; sq < nsq; sq++)
 		ASSERT_EQ(lut[sq * 16], lut[0], "entry 0 same for all sq");
 }
@@ -188,9 +188,9 @@ TEST(lut_entries_ordered)
 	uint32_t dim			= 4; /* single subquantizer */
 	float	 transformed[4] = {1.0f, 2.0f, 3.0f, 4.0f};
 
-	uint8_t lut[MKT_FASTSCAN_LUT_BYTES(4)];
+	uint8_t lut[VS_FASTSCAN_LUT_BYTES(4)];
 	float	scale, bias;
-	mkt_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
+	vs_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
 
 	/* Code 15 (all bits set) should be highest */
 	ASSERT_TRUE(lut[15] >= lut[0], "code 15 >= code 0");
@@ -205,15 +205,15 @@ TEST(lut_roundtrip_accuracy)
 	float	 transformed[32];
 	fill_random_floats(transformed, dim, 99);
 
-	uint8_t lut[MKT_FASTSCAN_LUT_BYTES(32)];
+	uint8_t lut[VS_FASTSCAN_LUT_BYTES(32)];
 	float	scale, bias;
-	mkt_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
+	vs_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
 
-	uint32_t nsq	 = MKT_FASTSCAN_NSQ(dim);
+	uint32_t nsq	 = VS_FASTSCAN_NSQ(dim);
 	float	 max_err = 0;
 	for (uint32_t sq = 0; sq < nsq; sq++)
 	{
-		uint32_t base = sq * MKT_FASTSCAN_SQ_DIM;
+		uint32_t base = sq * VS_FASTSCAN_SQ_DIM;
 
 		/* Build reference float LUT using kPos recurrence */
 		float ref_lut[16];
@@ -258,9 +258,9 @@ TEST(pack_codes_roundtrip)
 	uint8_t bits[8 * 4]; /* 8 vectors x 4 bytes each */
 	fill_random_bits(bits, count * packed_bytes, 77);
 
-	uint32_t codes_size = mkt_fastscan_codes_size(count, dim);
-	uint8_t *codes		= mkt_alloc(codes_size);
-	uint32_t ngroups	= mkt_fastscan_pack_codes(bits, count, dim, codes);
+	uint32_t codes_size = vs_fastscan_codes_size(count, dim);
+	uint8_t *codes		= vs_alloc(codes_size);
+	uint32_t ngroups	= vs_fastscan_pack_codes(bits, count, dim, codes);
 
 	ASSERT_EQ(ngroups, 1, "8 vectors = 1 group");
 
@@ -291,7 +291,7 @@ TEST(pack_codes_roundtrip)
 			/* Find byte position in packed output.
 			 * v < 16: lo nibble of byte inv_kperm0[v]
 			 * v >= 16: hi nibble of byte inv_kperm0[v-16] */
-			uint8_t *out = codes + col * MKT_FASTSCAN_GROUP;
+			uint8_t *out = codes + col * VS_FASTSCAN_GROUP;
 			uint8_t	 packed_byte;
 			uint8_t	 got_lo, got_hi;
 
@@ -333,17 +333,17 @@ TEST(unpack_codes_roundtrip)
 	uint8_t bits[40 * 12];
 	fill_random_bits(bits, count * packed_bytes, 123);
 
-	uint8_t *codes = mkt_alloc(mkt_fastscan_codes_size(count, dim));
-	mkt_fastscan_pack_codes(bits, count, dim, codes);
+	uint8_t *codes = vs_alloc(vs_fastscan_codes_size(count, dim));
+	vs_fastscan_pack_codes(bits, count, dim, codes);
 
-	uint8_t *out = mkt_alloc(count * packed_bytes);
-	mkt_fastscan_unpack_codes(codes, count, dim, out);
+	uint8_t *out = vs_alloc(count * packed_bytes);
+	vs_fastscan_unpack_codes(codes, count, dim, out);
 
 	for (uint32_t i = 0; i < count * packed_bytes; i++)
 		ASSERT_EQ(out[i], bits[i], "unpacked byte matches original");
 
-	mkt_free(codes);
-	mkt_free(out);
+	vs_free(codes);
+	vs_free(out);
 }
 
 TEST(pack_codes_padding)
@@ -357,9 +357,9 @@ TEST(pack_codes_padding)
 	uint8_t bits[5 * 2]; /* 5 vectors x 2 bytes */
 	fill_random_bits(bits, count * ((dim + 7) / 8), 55);
 
-	uint32_t codes_size = mkt_fastscan_codes_size(count, dim);
-	uint8_t *codes		= mkt_alloc(codes_size);
-	uint32_t ngroups	= mkt_fastscan_pack_codes(bits, count, dim, codes);
+	uint32_t codes_size = vs_fastscan_codes_size(count, dim);
+	uint8_t *codes		= vs_alloc(codes_size);
+	uint32_t ngroups	= vs_fastscan_pack_codes(bits, count, dim, codes);
 
 	ASSERT_EQ(ngroups, 1, "5 vectors = 1 group (padded)");
 
@@ -372,8 +372,8 @@ TEST(pack_codes_padding)
 	uint32_t cols = (dim + 7) / 8;
 	for (uint32_t c = 0; c < cols; c++)
 	{
-		uint8_t *out = codes + c * MKT_FASTSCAN_GROUP;
-		for (uint32_t v = count; v < MKT_FASTSCAN_GROUP; v++)
+		uint8_t *out = codes + c * VS_FASTSCAN_GROUP;
+		for (uint32_t v = count; v < VS_FASTSCAN_GROUP; v++)
 		{
 			uint8_t nibble;
 			if (v < 16)
@@ -414,17 +414,17 @@ TEST(accumulate_scalar_basic)
 	fill_random_bits(bits, count * 2, 42);
 
 	/* Build LUT and pack codes */
-	uint8_t lut[MKT_FASTSCAN_LUT_BYTES(16)];
+	uint8_t lut[VS_FASTSCAN_LUT_BYTES(16)];
 	float	scale, bias;
-	mkt_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
+	vs_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
 
-	uint32_t codes_size = mkt_fastscan_codes_size(count, dim);
-	uint8_t *codes		= mkt_alloc(codes_size);
-	mkt_fastscan_pack_codes(bits, count, dim, codes);
+	uint32_t codes_size = vs_fastscan_codes_size(count, dim);
+	uint8_t *codes		= vs_alloc(codes_size);
+	vs_fastscan_pack_codes(bits, count, dim, codes);
 
 	/* Run accumulate */
 	uint16_t accum[32] = {0};
-	mkt_fastscan_accumulate(codes, lut, accum, dim);
+	vs_fastscan_accumulate(codes, lut, accum, dim);
 
 	/* De-quantize and compare to reference.
 	 * bias from build_lut is already vl * nsq. */
@@ -446,23 +446,23 @@ TEST(accumulate_simd_matches_scalar)
 	uint32_t count		  = 64;
 	uint32_t packed_bytes = (dim + 7) / 8;
 
-	float *transformed = mkt_alloc(dim * sizeof(float));
+	float *transformed = vs_alloc(dim * sizeof(float));
 	fill_random_floats(transformed, dim, 42);
 
-	uint8_t *bits = mkt_alloc(count * packed_bytes);
+	uint8_t *bits = vs_alloc(count * packed_bytes);
 	fill_random_bits(bits, count * packed_bytes, 99);
 
 	/* Build LUT and pack codes */
-	uint32_t lut_bytes = MKT_FASTSCAN_LUT_BYTES(dim);
-	uint8_t *lut	   = mkt_alloc_aligned(lut_bytes, 64);
+	uint32_t lut_bytes = VS_FASTSCAN_LUT_BYTES(dim);
+	uint8_t *lut	   = vs_alloc_aligned(lut_bytes, 64);
 	float	 scale, bias;
-	mkt_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
+	vs_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
 
-	uint32_t codes_size = mkt_fastscan_codes_size(count, dim);
-	uint8_t *codes		= mkt_alloc(codes_size);
-	uint32_t ngroups	= mkt_fastscan_pack_codes(bits, count, dim, codes);
+	uint32_t codes_size = vs_fastscan_codes_size(count, dim);
+	uint8_t *codes		= vs_alloc(codes_size);
+	uint32_t ngroups	= vs_fastscan_pack_codes(bits, count, dim, codes);
 
-	uint32_t group_bytes = MKT_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t group_bytes = VS_FASTSCAN_GROUP_BYTES(dim);
 
 	/* Compare each group's results against reference binary IPs.
 	 * bias from build_lut is already vl * nsq. */
@@ -470,7 +470,7 @@ TEST(accumulate_simd_matches_scalar)
 	for (uint32_t g = 0; g < ngroups; g++)
 	{
 		uint16_t accum[32] = {0};
-		mkt_fastscan_accumulate(codes + g * group_bytes, lut, accum, dim);
+		vs_fastscan_accumulate(codes + g * group_bytes, lut, accum, dim);
 
 		uint32_t g_count = (g + 1) * 32 <= count ? 32 : count - g * 32;
 		for (uint32_t v = 0; v < g_count; v++)
@@ -501,10 +501,10 @@ TEST(distance_batch_produces_valid_distances)
 	uint32_t count		  = 32;
 	uint32_t packed_bytes = (dim + 7) / 8;
 
-	float *transformed = mkt_alloc(dim * sizeof(float));
+	float *transformed = vs_alloc(dim * sizeof(float));
 	fill_random_floats(transformed, dim, 42);
 
-	uint8_t *bits = mkt_alloc(count * packed_bytes);
+	uint8_t *bits = vs_alloc(count * packed_bytes);
 	fill_random_bits(bits, count * packed_bytes, 77);
 
 	/* Create a minimal RaBitQQueryState */
@@ -518,8 +518,8 @@ TEST(distance_batch_produces_valid_distances)
 		qstate.sum_transformed += transformed[i];
 
 	/* Build f_add/f_rescale arrays */
-	float *f_add	 = mkt_alloc(count * sizeof(float));
-	float *f_rescale = mkt_alloc(count * sizeof(float));
+	float *f_add	 = vs_alloc(count * sizeof(float));
+	float *f_rescale = vs_alloc(count * sizeof(float));
 	for (uint32_t i = 0; i < count; i++)
 	{
 		f_add[i]	 = 0.5f;
@@ -527,16 +527,16 @@ TEST(distance_batch_produces_valid_distances)
 	}
 
 	/* Pack fastscan codes */
-	uint32_t codes_size = mkt_fastscan_codes_size(count, dim);
-	uint8_t *codes		= mkt_alloc(codes_size);
-	uint32_t ngroups	= mkt_fastscan_pack_codes(bits, count, dim, codes);
+	uint32_t codes_size = vs_fastscan_codes_size(count, dim);
+	uint8_t *codes		= vs_alloc(codes_size);
+	uint32_t ngroups	= vs_fastscan_pack_codes(bits, count, dim, codes);
 
 	/* Allocate scratch */
-	uint8_t	 *lut_buf	= mkt_alloc_aligned(MKT_FASTSCAN_LUT_BYTES(dim), 64);
-	uint16_t *accum_buf = mkt_alloc_aligned(32 * sizeof(uint16_t), 64);
-	float	 *distances = mkt_alloc(count * sizeof(float));
+	uint8_t	 *lut_buf	= vs_alloc_aligned(VS_FASTSCAN_LUT_BYTES(dim), 64);
+	uint16_t *accum_buf = vs_alloc_aligned(32 * sizeof(uint16_t), 64);
+	float	 *distances = vs_alloc(count * sizeof(float));
 
-	mkt_fastscan_distance_batch(
+	vs_fastscan_distance_batch(
 			&qstate,
 			f_add,
 			f_rescale,
@@ -565,9 +565,9 @@ TEST(pack_codes_single_vector)
 	uint8_t	 bits[4];
 	fill_random_bits(bits, packed_bytes, 42);
 
-	uint32_t codes_size = mkt_fastscan_codes_size(1, dim);
-	uint8_t *codes		= mkt_alloc(codes_size);
-	uint32_t ngroups	= mkt_fastscan_pack_codes(bits, 1, dim, codes);
+	uint32_t codes_size = vs_fastscan_codes_size(1, dim);
+	uint8_t *codes		= vs_alloc(codes_size);
+	uint32_t ngroups	= vs_fastscan_pack_codes(bits, 1, dim, codes);
 
 	ASSERT_EQ(ngroups, 1, "1 vector = 1 group");
 }
@@ -579,9 +579,9 @@ TEST(lut_dim_not_multiple_of_4)
 	float	 transformed[7];
 	fill_random_floats(transformed, dim, 42);
 
-	uint8_t lut[MKT_FASTSCAN_LUT_BYTES(7)];
+	uint8_t lut[VS_FASTSCAN_LUT_BYTES(7)];
 	float	scale, bias;
-	mkt_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
+	vs_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
 
 	ASSERT_TRUE(scale > 0, "scale is positive");
 }
@@ -599,28 +599,28 @@ TEST_PARAMETERIZED(
 	uint32_t count		  = 64;
 	uint32_t packed_bytes = (dim + 7) / 8;
 
-	float *transformed = mkt_alloc(dim * sizeof(float));
+	float *transformed = vs_alloc(dim * sizeof(float));
 	fill_random_floats(transformed, dim, 42);
 
-	uint8_t *bits = mkt_alloc(count * packed_bytes);
+	uint8_t *bits = vs_alloc(count * packed_bytes);
 	fill_random_bits(bits, count * packed_bytes, 99);
 
-	uint32_t lut_bytes = MKT_FASTSCAN_LUT_BYTES(dim);
-	uint8_t *lut	   = mkt_alloc_aligned(lut_bytes, 64);
+	uint32_t lut_bytes = VS_FASTSCAN_LUT_BYTES(dim);
+	uint8_t *lut	   = vs_alloc_aligned(lut_bytes, 64);
 	float	 scale, bias;
-	mkt_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
+	vs_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
 
-	uint32_t codes_size = mkt_fastscan_codes_size(count, dim);
-	uint8_t *codes		= mkt_alloc(codes_size);
-	uint32_t ngroups	= mkt_fastscan_pack_codes(bits, count, dim, codes);
+	uint32_t codes_size = vs_fastscan_codes_size(count, dim);
+	uint8_t *codes		= vs_alloc(codes_size);
+	uint32_t ngroups	= vs_fastscan_pack_codes(bits, count, dim, codes);
 
-	uint32_t group_bytes = MKT_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t group_bytes = VS_FASTSCAN_GROUP_BYTES(dim);
 
 	float max_err = 0;
 	for (uint32_t g = 0; g < ngroups; g++)
 	{
 		uint16_t accum[32] = {0};
-		mkt_fastscan_accumulate(codes + g * group_bytes, lut, accum, dim);
+		vs_fastscan_accumulate(codes + g * group_bytes, lut, accum, dim);
 
 		uint32_t g_count = (g + 1) * 32 <= count ? 32 : count - g * 32;
 		for (uint32_t v = 0; v < g_count; v++)
@@ -648,28 +648,28 @@ TEST_PARAMETERIZED(
 	uint32_t count		  = 64;
 	uint32_t packed_bytes = (dim + 7) / 8;
 
-	float *transformed = mkt_alloc(dim * sizeof(float));
+	float *transformed = vs_alloc(dim * sizeof(float));
 	fill_random_floats(transformed, dim, 42);
 
-	uint8_t *bits = mkt_alloc(count * packed_bytes);
+	uint8_t *bits = vs_alloc(count * packed_bytes);
 	fill_random_bits(bits, count * packed_bytes, 99);
 
-	uint32_t lut_bytes = MKT_FASTSCAN_LUT_HACC_BYTES(dim);
-	uint8_t *lut	   = mkt_alloc_aligned(lut_bytes, 64);
+	uint32_t lut_bytes = VS_FASTSCAN_LUT_HACC_BYTES(dim);
+	uint8_t *lut	   = vs_alloc_aligned(lut_bytes, 64);
 	float	 scale, bias;
-	mkt_fastscan_build_lut_hacc(transformed, dim, lut, &scale, &bias);
+	vs_fastscan_build_lut_hacc(transformed, dim, lut, &scale, &bias);
 
-	uint32_t codes_size = mkt_fastscan_codes_size(count, dim);
-	uint8_t *codes		= mkt_alloc(codes_size);
-	uint32_t ngroups	= mkt_fastscan_pack_codes(bits, count, dim, codes);
+	uint32_t codes_size = vs_fastscan_codes_size(count, dim);
+	uint8_t *codes		= vs_alloc(codes_size);
+	uint32_t ngroups	= vs_fastscan_pack_codes(bits, count, dim, codes);
 
-	uint32_t group_bytes = MKT_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t group_bytes = VS_FASTSCAN_GROUP_BYTES(dim);
 
 	float max_err = 0;
 	for (uint32_t g = 0; g < ngroups; g++)
 	{
 		int32_t accum[32] = {0};
-		mkt_fastscan_accumulate_hacc(codes + g * group_bytes, lut, accum, dim);
+		vs_fastscan_accumulate_hacc(codes + g * group_bytes, lut, accum, dim);
 
 		uint32_t g_count = (g + 1) * 32 <= count ? 32 : count - g * 32;
 		for (uint32_t v = 0; v < g_count; v++)
@@ -714,9 +714,8 @@ TEST_PARAMETERIZED(
 	{
 		uint32_t dim		  = dims[di];
 		uint32_t packed_bytes = (dim + 7) / 8;
-		uint32_t group_bytes  = MKT_FASTSCAN_GROUP_BYTES(dim);
-		uint32_t ngroups	  = (count + MKT_FASTSCAN_GROUP - 1) /
-						   MKT_FASTSCAN_GROUP;
+		uint32_t group_bytes  = VS_FASTSCAN_GROUP_BYTES(dim);
+		uint32_t ngroups = (count + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
 
 		float *transformed = malloc(dim * sizeof(float));
 		fill_random_floats(transformed, dim, 42 + di);
@@ -726,31 +725,31 @@ TEST_PARAMETERIZED(
 		/* Exact-size, instrumented buffers: an over-read past group_bytes
 		 * (codes) or the LUT size faults under ASan. */
 		uint8_t *codes = malloc((size_t)ngroups * group_bytes);
-		mkt_fastscan_pack_codes(bits, count, dim, codes);
+		vs_fastscan_pack_codes(bits, count, dim, codes);
 
 		float	 scale, bias;
-		uint8_t *lut8 = malloc(MKT_FASTSCAN_LUT_BYTES(dim));
-		mkt_fastscan_build_lut(transformed, dim, lut8, &scale, &bias);
+		uint8_t *lut8 = malloc(VS_FASTSCAN_LUT_BYTES(dim));
+		vs_fastscan_build_lut(transformed, dim, lut8, &scale, &bias);
 		float	 hscale, hbias;
-		uint8_t *lut16 = malloc(MKT_FASTSCAN_LUT_HACC_BYTES(dim));
-		mkt_fastscan_build_lut_hacc(transformed, dim, lut16, &hscale, &hbias);
+		uint8_t *lut16 = malloc(VS_FASTSCAN_LUT_HACC_BYTES(dim));
+		vs_fastscan_build_lut_hacc(transformed, dim, lut16, &hscale, &hbias);
 
 		for (uint32_t g = 0; g < ngroups; g++)
 		{
-			uint16_t acc8[MKT_FASTSCAN_GROUP];
-			int32_t	 acc16[MKT_FASTSCAN_GROUP];
-			mkt_fastscan_accumulate(
+			uint16_t acc8[VS_FASTSCAN_GROUP];
+			int32_t	 acc16[VS_FASTSCAN_GROUP];
+			vs_fastscan_accumulate(
 					codes + (size_t)g * group_bytes, lut8, acc8, dim);
-			mkt_fastscan_accumulate_hacc(
+			vs_fastscan_accumulate_hacc(
 					codes + (size_t)g * group_bytes, lut16, acc16, dim);
 
-			uint32_t g_count = (g + 1) * MKT_FASTSCAN_GROUP <= count
-									 ? MKT_FASTSCAN_GROUP
-									 : count - g * MKT_FASTSCAN_GROUP;
+			uint32_t g_count = (g + 1) * VS_FASTSCAN_GROUP <= count
+									 ? VS_FASTSCAN_GROUP
+									 : count - g * VS_FASTSCAN_GROUP;
 			for (uint32_t v = 0; v < g_count; v++)
 			{
 				const uint8_t *vb = bits +
-									(size_t)(g * MKT_FASTSCAN_GROUP + v) *
+									(size_t)(g * VS_FASTSCAN_GROUP + v) *
 											packed_bytes;
 				float ref	   = reference_binary_ip(transformed, vb, dim);
 				float approx8  = (float)acc8[v] * scale + bias;

@@ -24,7 +24,10 @@ so="$BUILDDIR/src/pg/pg_vectorsearch-$ver.so"
 
 # The wrapper defaults to an extension-only build: no CLI, no
 # standalone library, no unit tests.
-tools="$(find "$BUILDDIR" \( -name 'mkt' -o -name 'run_tests' -o -name 'libpg_vectorsearch*' \) -type f | head -1)"
+tools="$(find "$BUILDDIR" \
+    \( -name 'vectorsearch' -o -name 'run_tests' \
+       -o -name 'libpg_vectorsearch*' \) \
+    -type f | head -1)"
 [[ -z "$tools" ]] || { echo "FAIL: developer tools built by default: $tools"; exit 1; }
 
 # Install and verify the artifacts land in the PostgreSQL directories.

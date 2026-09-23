@@ -12,7 +12,7 @@
  * - IP count padded to multiple of 4 (avoids tail kernel)
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <string.h>
 
@@ -21,7 +21,7 @@
 #include "index/posting_scan.h"
 #include "quant/fastscan.h"
 
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 
@@ -36,7 +36,7 @@
 void
 prism_posting_scan_init(
 		PrismPostingScan   *scan,
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		char			   *page_base,
 		const RaBitQParams *params,
 		Dimension			dim,
@@ -47,7 +47,7 @@ prism_posting_scan_init(
 	scan->page_base	   = page_base;
 	scan->params	   = params;
 	scan->dim		   = dim;
-	scan->packed_bytes = MKT_RABITQ_BYTES(dim);
+	scan->packed_bytes = VS_RABITQ_BYTES(dim);
 	scan->cur_blkno	   = InvalidBlockNumber;
 
 	/* Pre-allocate batch buffers — pad to multiple of 4 for IP kernel.
@@ -56,8 +56,8 @@ prism_posting_scan_init(
 	 * would overrun page_distances/page_scratch and is rejected on load. */
 	scan->max_entries_cap = max_entries_per_page;
 	uint32_t padded		  = (max_entries_per_page + 3) & ~3u;
-	scan->page_distances  = mkt_alloc(padded * sizeof(Distance));
-	scan->page_scratch	  = mkt_alloc(padded * sizeof(float));
+	scan->page_distances  = vs_alloc(padded * sizeof(Distance));
+	scan->page_scratch	  = vs_alloc(padded * sizeof(float));
 }
 
 void
@@ -67,23 +67,23 @@ prism_posting_scan_cleanup(PrismPostingScan *scan)
 	if (scan->cur_page != NULL && scan->storage != NULL &&
 		scan->page_base == NULL)
 	{
-		mkt_storage_release_page(scan->storage, scan->cur_blkno);
+		vs_storage_release_page(scan->storage, scan->cur_blkno);
 		scan->cur_page = NULL;
 	}
 
-	mkt_free(scan->page_distances);
-	mkt_free(scan->page_scratch);
+	vs_free(scan->page_distances);
+	vs_free(scan->page_scratch);
 	scan->page_distances = NULL;
 	scan->page_scratch	 = NULL;
 
 	if (scan->fs_lut != NULL)
 	{
-		mkt_free(scan->fs_lut);
+		vs_free(scan->fs_lut);
 		scan->fs_lut = NULL;
 	}
 	if (scan->fs_accum != NULL)
 	{
-		mkt_free(scan->fs_accum);
+		vs_free(scan->fs_accum);
 		scan->fs_accum = NULL;
 	}
 }
@@ -93,15 +93,15 @@ prism_posting_scan_enable_fastscan(PrismPostingScan *scan, int lut_bits)
 {
 	scan->fs_lut_bits = lut_bits;
 	if (lut_bits == 8)
-		scan->fs_lut = mkt_alloc0(MKT_FASTSCAN_LUT_BYTES(scan->dim));
+		scan->fs_lut = vs_alloc0(VS_FASTSCAN_LUT_BYTES(scan->dim));
 	else
-		scan->fs_lut = mkt_alloc0(MKT_FASTSCAN_LUT_HACC_BYTES(scan->dim));
-	scan->fs_accum = mkt_alloc(MKT_FASTSCAN_GROUP * sizeof(int32_t));
+		scan->fs_lut = vs_alloc0(VS_FASTSCAN_LUT_HACC_BYTES(scan->dim));
+	scan->fs_accum = vs_alloc(VS_FASTSCAN_GROUP * sizeof(int32_t));
 
 	/* Resolve dispatch once per scan (see posting_scan.h). */
-	scan->fs_accum_hacc = mkt_fastscan_get_accumulate_hacc();
-#if defined(MKT_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
-	scan->fs_has_avx512 = mkt_has_all_simd(MKT_SIMD_AVX512_BW);
+	scan->fs_accum_hacc = vs_fastscan_get_accumulate_hacc();
+#if defined(VS_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
+	scan->fs_has_avx512 = vs_has_all_simd(VS_SIMD_AVX512_BW);
 #else
 	scan->fs_has_avx512 = false;
 #endif
@@ -164,8 +164,8 @@ prism_posting_scan_begin_flat(
 	scan->cur_content	  = prism_flat_posting_content(flat_buf);
 	scan->cur_max_entries = hdr->max_entries;
 	if (hdr->entry_count > scan->max_entries_cap)
-		mkt_error(
-				MKT_EXTENSION_NAME
+		vs_error(
+				VS_EXTENSION_NAME
 				": flat posting page has an invalid entry count (%u > %u); "
 				"the index may be corrupted -- REINDEX it",
 				(unsigned)hdr->entry_count,
@@ -184,7 +184,7 @@ prism_posting_scan_end_cluster(PrismPostingScan *scan)
 	if (scan->cur_page != NULL && scan->storage != NULL &&
 		scan->page_base == NULL)
 	{
-		mkt_storage_release_page(scan->storage, scan->cur_blkno);
+		vs_storage_release_page(scan->storage, scan->cur_blkno);
 	}
 
 	scan->cur_page	  = NULL;
@@ -222,22 +222,21 @@ advance_page(PrismPostingScan *scan)
 	if (scan->page_base != NULL)
 		scan->cur_page = scan->page_base + (size_t)scan->cur_blkno * BLCKSZ;
 	else
-		scan->cur_page = mkt_storage_read_page(scan->storage, scan->cur_blkno);
+		scan->cur_page = vs_storage_read_page(scan->storage, scan->cur_blkno);
 
 	PrismPostingPageOpaque *opaque = prism_posting_opaque(scan->cur_page);
 
 	/* Validate page identity — catch corrupted chain pointers early */
 	if (opaque->page_id != PRISM_POSTING_PAGE_ID)
 	{
-		mkt_warn(
-				MKT_EXTENSION_NAME ": posting scan hit non-posting page "
-								   "(blkno=%u, page_id=0x%04X)",
+		vs_warn(VS_EXTENSION_NAME ": posting scan hit non-posting page "
+								  "(blkno=%u, page_id=0x%04X)",
 				scan->cur_blkno,
 				opaque->page_id);
 		/* Release the pin taken above before bailing (storage-backed only;
 		 * in page_base mode the page is a borrowed pointer, not a pin). */
 		if (scan->storage != NULL && scan->page_base == NULL)
-			mkt_storage_release_page(scan->storage, scan->cur_blkno);
+			vs_storage_release_page(scan->storage, scan->cur_blkno);
 		scan->cur_page	  = NULL;
 		scan->cur_content = NULL;
 		return false;
@@ -262,8 +261,8 @@ advance_page(PrismPostingScan *scan)
 	else
 		page_cap = scan->max_entries_cap;
 	if (opaque->entry_count > page_cap)
-		mkt_error(
-				MKT_EXTENSION_NAME
+		vs_error(
+				VS_EXTENSION_NAME
 				": posting page %u has an invalid entry count (%u > %u); "
 				"the index may be corrupted -- REINDEX it",
 				scan->cur_blkno,
@@ -283,7 +282,7 @@ advance_page(PrismPostingScan *scan)
  * ---------------------------------------------------------------- */
 
 void
-prism_posting_scan_cluster(PrismPostingScan *scan, MktTopK *topk)
+prism_posting_scan_cluster(PrismPostingScan *scan, VsTopK *topk)
 {
 	Dimension dim		 = scan->dim;
 	uint32_t  entry_size = PRISM_POSTING_ENTRY_SIZE(dim);
@@ -324,7 +323,7 @@ prism_posting_scan_cluster(PrismPostingScan *scan, MktTopK *topk)
 			const uint8_t *bits_base = prism_posting_first_bits(content);
 
 			uint32_t padded = (count + 3) & ~3u;
-			mkt_rabitq_inner_product_multi(
+			vs_rabitq_inner_product_multi(
 					scan->qstate->transformed,
 					bits_base,
 					entry_size,
@@ -344,7 +343,7 @@ prism_posting_scan_cluster(PrismPostingScan *scan, MktTopK *topk)
 			}
 
 			/* --- Prune + insert approximate distances --- */
-			Distance threshold = mkt_topk_threshold(topk);
+			Distance threshold = vs_topk_threshold(topk);
 
 			for (uint32_t i = 0; i < count; i++)
 			{
@@ -369,8 +368,8 @@ prism_posting_scan_cluster(PrismPostingScan *scan, MktTopK *topk)
 				}
 
 				uint64_t id = prism_posting_encode_tid(&e->meta.tid);
-				mkt_topk_insert(topk, est, err, id);
-				threshold = mkt_topk_threshold(topk);
+				vs_topk_insert(topk, est, err, id);
+				threshold = vs_topk_threshold(topk);
 			}
 		} /* end: page not tombstoned */
 		else
@@ -385,7 +384,7 @@ prism_posting_scan_cluster(PrismPostingScan *scan, MktTopK *topk)
 			scan->cur_blkno = InvalidBlockNumber;
 
 		if (scan->storage != NULL && scan->page_base == NULL)
-			mkt_storage_release_page(scan->storage, prev_blkno);
+			vs_storage_release_page(scan->storage, prev_blkno);
 
 		scan->cur_page	  = NULL;
 		scan->cur_content = NULL;
@@ -396,14 +395,14 @@ prism_posting_scan_cluster(PrismPostingScan *scan, MktTopK *topk)
  * Fastscan: vectorized distance + prune for 16 entries
  * ---------------------------------------------------------------- */
 
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 #if defined(__x86_64__) || defined(_M_X64)
 
 /*
  * Compute distances and lower bounds for 16 entries using AVX-512.
  * Returns a bitmask of survivors (lb < threshold).
  */
-MKT_TARGET_AVX512 static inline __mmask16
+VS_TARGET_AVX512 static inline __mmask16
 fastscan_prune_16(
 		const int32_t *accum,
 		const float	  *f_add,
@@ -463,10 +462,10 @@ fastscan_prune_16(
  * Must be in a target-attributed function so the compiler only
  * emits AVX-512 instructions here, not in the caller.
  */
-MKT_TARGET_AVX512 static void
+VS_TARGET_AVX512 static void
 fastscan_prune_group_avx512(
 		PrismPostingScan *scan,
-		MktTopK			 *topk,
+		VsTopK			 *topk,
 		ItemPointerData	 *tids,
 		const float		 *f_add,
 		const float		 *f_rescale,
@@ -480,8 +479,8 @@ fastscan_prune_group_avx512(
 		Distance		 *threshold_p)
 {
 	Distance threshold = *threshold_p;
-	float	 est_buf[MKT_FASTSCAN_GROUP];
-	float	 err_buf[MKT_FASTSCAN_GROUP];
+	float	 est_buf[VS_FASTSCAN_GROUP];
+	float	 err_buf[VS_FASTSCAN_GROUP];
 
 	for (uint32_t h = 0; h < 2; h++)
 	{
@@ -515,8 +514,8 @@ fastscan_prune_group_avx512(
 			surv &= surv - 1;
 
 			uint64_t id = prism_posting_encode_tid(&tids[v]);
-			mkt_topk_insert(topk, est_buf[v], err_buf[v], id);
-			threshold = mkt_topk_threshold(topk);
+			vs_topk_insert(topk, est_buf[v], err_buf[v], id);
+			threshold = vs_topk_threshold(topk);
 		}
 	}
 
@@ -535,7 +534,7 @@ fastscan_prune_group_avx512(
  * ---------------------------------------------------------------- */
 
 static void
-scan_fastscan_page(PrismPostingScan *scan, MktTopK *topk)
+scan_fastscan_page(PrismPostingScan *scan, VsTopK *topk)
 {
 	Dimension dim	  = scan->dim;
 	uint32_t  count	  = scan->cur_count;
@@ -551,14 +550,14 @@ scan_fastscan_page(PrismPostingScan *scan, MktTopK *topk)
 	if (!scan->fs_lut_valid)
 	{
 		if (scan->fs_lut_bits == 8)
-			mkt_fastscan_build_lut(
+			vs_fastscan_build_lut(
 					scan->qstate->transformed,
 					dim,
 					scan->fs_lut,
 					&scan->fs_lut_scale,
 					&scan->fs_lut_bias);
 		else
-			mkt_fastscan_build_lut_hacc(
+			vs_fastscan_build_lut_hacc(
 					scan->qstate->transformed,
 					dim,
 					scan->fs_lut,
@@ -576,35 +575,35 @@ scan_fastscan_page(PrismPostingScan *scan, MktTopK *topk)
 	uint32_t max_groups = (opaque->flags & PRISM_POSTING_PAGE_FIRST)
 								? scan->fs_max_groups_first
 								: scan->fs_max_groups_over;
-	uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) / MKT_FASTSCAN_GROUP;
+	uint32_t ngroups	= (count + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
 	if (ngroups > max_groups)
 		ngroups = max_groups;
 
-	Distance threshold = mkt_topk_threshold(topk);
+	Distance threshold = vs_topk_threshold(topk);
 
 	for (uint32_t g = 0; g < ngroups; g++)
 	{
-		uint32_t g_start = g * MKT_FASTSCAN_GROUP;
+		uint32_t g_start = g * VS_FASTSCAN_GROUP;
 		uint32_t g_count = count - g_start;
-		if (g_count > MKT_FASTSCAN_GROUP)
-			g_count = MKT_FASTSCAN_GROUP;
+		if (g_count > VS_FASTSCAN_GROUP)
+			g_count = VS_FASTSCAN_GROUP;
 
 		/* Access group data — compute base once */
 		char *gbase = prism_fastscan_group_base(content, g, dim);
 
 		ItemPointerData *tids	   = (ItemPointerData *)gbase;
 		float			*f_add	   = (float *)(gbase +
-								   MKT_FASTSCAN_GROUP * sizeof(ItemPointerData));
-		float			*f_rescale = f_add + MKT_FASTSCAN_GROUP;
-		float			*f_error   = f_rescale + MKT_FASTSCAN_GROUP;
-		uint8_t			*codes	   = (uint8_t *)(f_error + MKT_FASTSCAN_GROUP);
+								   VS_FASTSCAN_GROUP * sizeof(ItemPointerData));
+		float			*f_rescale = f_add + VS_FASTSCAN_GROUP;
+		float			*f_error   = f_rescale + VS_FASTSCAN_GROUP;
+		uint8_t			*codes	   = (uint8_t *)(f_error + VS_FASTSCAN_GROUP);
 
 		/* Run VPSHUFB accumulate kernel */
 		if (scan->fs_lut_bits == 8)
 		{
-			uint16_t acc16[MKT_FASTSCAN_GROUP];
-			mkt_fastscan_accumulate(codes, scan->fs_lut, acc16, dim);
-			for (uint32_t v2 = 0; v2 < MKT_FASTSCAN_GROUP; v2++)
+			uint16_t acc16[VS_FASTSCAN_GROUP];
+			vs_fastscan_accumulate(codes, scan->fs_lut, acc16, dim);
+			for (uint32_t v2 = 0; v2 < VS_FASTSCAN_GROUP; v2++)
 				scan->fs_accum[v2] = acc16[v2];
 		}
 		else
@@ -617,7 +616,7 @@ scan_fastscan_page(PrismPostingScan *scan, MktTopK *topk)
 		{
 			uint8_t *next_codes =
 					prism_fastscan_group_codes(content, g + 1, dim);
-			uint32_t code_bytes = MKT_FASTSCAN_GROUP_BYTES(dim);
+			uint32_t code_bytes = VS_FASTSCAN_GROUP_BYTES(dim);
 			for (uint32_t p = 0; p < code_bytes; p += 64)
 				__builtin_prefetch(next_codes + p, 0, 1);
 		}
@@ -626,9 +625,9 @@ scan_fastscan_page(PrismPostingScan *scan, MktTopK *topk)
 		 * time, mask survivors, iterate only the few that pass. */
 		scan->entries_scanned += g_count;
 
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 #if defined(__x86_64__) || defined(_M_X64)
-		if (mkt_likely(g_count == MKT_FASTSCAN_GROUP) && scan->fs_has_avx512)
+		if (vs_likely(g_count == VS_FASTSCAN_GROUP) && scan->fs_has_avx512)
 		{
 			fastscan_prune_group_avx512(
 					scan,
@@ -667,15 +666,15 @@ scan_fastscan_page(PrismPostingScan *scan, MktTopK *topk)
 				}
 
 				uint64_t id = prism_posting_encode_tid(&tids[v]);
-				mkt_topk_insert(topk, est, err, id);
-				threshold = mkt_topk_threshold(topk);
+				vs_topk_insert(topk, est, err, id);
+				threshold = vs_topk_threshold(topk);
 			}
 		}
 	}
 }
 
 void
-prism_posting_scan_cluster_fastscan(PrismPostingScan *scan, MktTopK *topk)
+prism_posting_scan_cluster_fastscan(PrismPostingScan *scan, VsTopK *topk)
 {
 	/* Process pages until chain is exhausted */
 	for (;;)
@@ -713,7 +712,7 @@ prism_posting_scan_cluster_fastscan(PrismPostingScan *scan, MktTopK *topk)
 			scan->cur_blkno		   = opaque->next_blkno;
 
 			if (scan->storage != NULL && scan->page_base == NULL)
-				mkt_storage_release_page(scan->storage, prev_blkno);
+				vs_storage_release_page(scan->storage, prev_blkno);
 
 			scan->cur_page	  = NULL;
 			scan->cur_content = NULL;

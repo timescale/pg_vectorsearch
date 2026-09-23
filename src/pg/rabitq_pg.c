@@ -1,5 +1,5 @@
 /*
- * mkt_pg_rabitq.c - PostgreSQL functions for mkt.rabitq type
+ * vs_pg_rabitq.c - PostgreSQL functions for the rabitq type
  *
  * Type I/O, comparison operators, accessor functions, and encoding.
  * Text format: {bits:f_add:f_rescale} where bits are 0/1 characters.
@@ -18,10 +18,10 @@
  * Type I/O
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_in);
+PG_FUNCTION_INFO_V1(vs_rabitq_in);
 
 Datum
-mkt_rabitq_in(PG_FUNCTION_ARGS)
+vs_rabitq_in(PG_FUNCTION_ARGS)
 {
 	char   *str	   = PG_GETARG_CSTRING(0);
 	int32	typmod = PG_GETARG_INT32(2);
@@ -82,7 +82,7 @@ mkt_rabitq_in(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 				 errmsg("invalid f_add value in rabitq: \"%s\"", str)));
-	mkt_pg_check_value_finite(f_add);
+	vs_pg_check_value_finite(f_add);
 	p = end;
 
 	/* Expect ':' separator */
@@ -99,7 +99,7 @@ mkt_rabitq_in(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 				 errmsg("invalid f_rescale value in rabitq: \"%s\"", str)));
-	mkt_pg_check_value_finite(f_rescale);
+	vs_pg_check_value_finite(f_rescale);
 	p = end;
 
 	/* Expect closing '}' */
@@ -118,20 +118,20 @@ mkt_rabitq_in(PG_FUNCTION_ARGS)
 				 errmsg("unexpected characters after \"}\" in "
 						"rabitq")));
 
-	mkt_pg_check_expected_dim(dim, typmod);
+	vs_pg_check_expected_dim(dim, typmod);
 
-	RaBitQVector *result = mkt_pg_rabitq_alloc(dim);
+	RaBitQVector *result = vs_pg_rabitq_alloc(dim);
 	result->f_add		 = f_add;
 	result->f_rescale	 = f_rescale;
-	memcpy(result->bits, bits_buf, MKT_RABITQ_BYTES(dim));
+	memcpy(result->bits, bits_buf, VS_RABITQ_BYTES(dim));
 
 	PG_RETURN_RABITQ_P(result);
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_out);
+PG_FUNCTION_INFO_V1(vs_rabitq_out);
 
 Datum
-mkt_rabitq_out(PG_FUNCTION_ARGS)
+vs_rabitq_out(PG_FUNCTION_ARGS)
 {
 	RaBitQVector  *v = PG_GETARG_RABITQ_P(0);
 	StringInfoData buf;
@@ -148,10 +148,10 @@ mkt_rabitq_out(PG_FUNCTION_ARGS)
 	PG_RETURN_CSTRING(buf.data);
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_typmod_in);
+PG_FUNCTION_INFO_V1(vs_rabitq_typmod_in);
 
 Datum
-mkt_rabitq_typmod_in(PG_FUNCTION_ARGS)
+vs_rabitq_typmod_in(PG_FUNCTION_ARGS)
 {
 	ArrayType *ta = PG_GETARG_ARRAYTYPE_P(0);
 	int		   n;
@@ -164,7 +164,7 @@ mkt_rabitq_typmod_in(PG_FUNCTION_ARGS)
 
 	int dim = tl[0];
 
-	mkt_pg_check_dim_valid(dim);
+	vs_pg_check_dim_valid(dim);
 
 	PG_RETURN_INT32(dim);
 }
@@ -173,28 +173,28 @@ mkt_rabitq_typmod_in(PG_FUNCTION_ARGS)
  * Accessor functions
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_dims);
+PG_FUNCTION_INFO_V1(vs_rabitq_dims);
 
 Datum
-mkt_rabitq_dims(PG_FUNCTION_ARGS)
+vs_rabitq_dims(PG_FUNCTION_ARGS)
 {
 	RaBitQVector *v = PG_GETARG_RABITQ_P(0);
 	PG_RETURN_INT32(v->dim);
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_f_add);
+PG_FUNCTION_INFO_V1(vs_rabitq_f_add);
 
 Datum
-mkt_rabitq_f_add(PG_FUNCTION_ARGS)
+vs_rabitq_f_add(PG_FUNCTION_ARGS)
 {
 	RaBitQVector *v = PG_GETARG_RABITQ_P(0);
 	PG_RETURN_FLOAT8((double)v->f_add);
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_f_rescale);
+PG_FUNCTION_INFO_V1(vs_rabitq_f_rescale);
 
 Datum
-mkt_rabitq_f_rescale(PG_FUNCTION_ARGS)
+vs_rabitq_f_rescale(PG_FUNCTION_ARGS)
 {
 	RaBitQVector *v = PG_GETARG_RABITQ_P(0);
 	PG_RETURN_FLOAT8((double)v->f_rescale);
@@ -208,98 +208,98 @@ mkt_rabitq_f_rescale(PG_FUNCTION_ARGS)
  * ---------------------------------------------------------------- */
 
 static int
-mkt_rabitq_cmp_internal(RaBitQVector *a, RaBitQVector *b)
+vs_rabitq_cmp_internal(RaBitQVector *a, RaBitQVector *b)
 {
 	if (a->dim != b->dim)
 		return (a->dim < b->dim) ? -1 : 1;
 
-	int nbytes = MKT_RABITQ_BYTES(a->dim);
+	int nbytes = VS_RABITQ_BYTES(a->dim);
 	return memcmp(a->bits, b->bits, nbytes);
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_cmp);
+PG_FUNCTION_INFO_V1(vs_rabitq_cmp);
 
 Datum
-mkt_rabitq_cmp(PG_FUNCTION_ARGS)
+vs_rabitq_cmp(PG_FUNCTION_ARGS)
 {
 	RaBitQVector *a = PG_GETARG_RABITQ_P(0);
 	RaBitQVector *b = PG_GETARG_RABITQ_P(1);
-	PG_RETURN_INT32(mkt_rabitq_cmp_internal(a, b));
+	PG_RETURN_INT32(vs_rabitq_cmp_internal(a, b));
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_lt);
+PG_FUNCTION_INFO_V1(vs_rabitq_lt);
 
 Datum
-mkt_rabitq_lt(PG_FUNCTION_ARGS)
+vs_rabitq_lt(PG_FUNCTION_ARGS)
 {
 	RaBitQVector *a = PG_GETARG_RABITQ_P(0);
 	RaBitQVector *b = PG_GETARG_RABITQ_P(1);
-	PG_RETURN_BOOL(mkt_rabitq_cmp_internal(a, b) < 0);
+	PG_RETURN_BOOL(vs_rabitq_cmp_internal(a, b) < 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_le);
+PG_FUNCTION_INFO_V1(vs_rabitq_le);
 
 Datum
-mkt_rabitq_le(PG_FUNCTION_ARGS)
+vs_rabitq_le(PG_FUNCTION_ARGS)
 {
 	RaBitQVector *a = PG_GETARG_RABITQ_P(0);
 	RaBitQVector *b = PG_GETARG_RABITQ_P(1);
-	PG_RETURN_BOOL(mkt_rabitq_cmp_internal(a, b) <= 0);
+	PG_RETURN_BOOL(vs_rabitq_cmp_internal(a, b) <= 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_eq);
+PG_FUNCTION_INFO_V1(vs_rabitq_eq);
 
 Datum
-mkt_rabitq_eq(PG_FUNCTION_ARGS)
+vs_rabitq_eq(PG_FUNCTION_ARGS)
 {
 	RaBitQVector *a = PG_GETARG_RABITQ_P(0);
 	RaBitQVector *b = PG_GETARG_RABITQ_P(1);
-	PG_RETURN_BOOL(mkt_rabitq_cmp_internal(a, b) == 0);
+	PG_RETURN_BOOL(vs_rabitq_cmp_internal(a, b) == 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_ne);
+PG_FUNCTION_INFO_V1(vs_rabitq_ne);
 
 Datum
-mkt_rabitq_ne(PG_FUNCTION_ARGS)
+vs_rabitq_ne(PG_FUNCTION_ARGS)
 {
 	RaBitQVector *a = PG_GETARG_RABITQ_P(0);
 	RaBitQVector *b = PG_GETARG_RABITQ_P(1);
-	PG_RETURN_BOOL(mkt_rabitq_cmp_internal(a, b) != 0);
+	PG_RETURN_BOOL(vs_rabitq_cmp_internal(a, b) != 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_ge);
+PG_FUNCTION_INFO_V1(vs_rabitq_ge);
 
 Datum
-mkt_rabitq_ge(PG_FUNCTION_ARGS)
+vs_rabitq_ge(PG_FUNCTION_ARGS)
 {
 	RaBitQVector *a = PG_GETARG_RABITQ_P(0);
 	RaBitQVector *b = PG_GETARG_RABITQ_P(1);
-	PG_RETURN_BOOL(mkt_rabitq_cmp_internal(a, b) >= 0);
+	PG_RETURN_BOOL(vs_rabitq_cmp_internal(a, b) >= 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_gt);
+PG_FUNCTION_INFO_V1(vs_rabitq_gt);
 
 Datum
-mkt_rabitq_gt(PG_FUNCTION_ARGS)
+vs_rabitq_gt(PG_FUNCTION_ARGS)
 {
 	RaBitQVector *a = PG_GETARG_RABITQ_P(0);
 	RaBitQVector *b = PG_GETARG_RABITQ_P(1);
-	PG_RETURN_BOOL(mkt_rabitq_cmp_internal(a, b) > 0);
+	PG_RETURN_BOOL(vs_rabitq_cmp_internal(a, b) > 0);
 }
 
 /* ----------------------------------------------------------------
  * Cast function (typmod enforcement)
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_rabitq);
+PG_FUNCTION_INFO_V1(vs_rabitq);
 
 Datum
-mkt_rabitq(PG_FUNCTION_ARGS)
+vs_rabitq(PG_FUNCTION_ARGS)
 {
 	RaBitQVector *v		 = PG_GETARG_RABITQ_P(0);
 	int32		  typmod = PG_GETARG_INT32(1);
 
-	mkt_pg_check_expected_dim(v->dim, typmod);
+	vs_pg_check_expected_dim(v->dim, typmod);
 
 	PG_RETURN_RABITQ_P(v);
 }
@@ -308,31 +308,31 @@ mkt_rabitq(PG_FUNCTION_ARGS)
  * Encode function
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_encode_pg);
+PG_FUNCTION_INFO_V1(vs_rabitq_encode_pg);
 
 Datum
-mkt_rabitq_encode_pg(PG_FUNCTION_ARGS)
+vs_rabitq_encode_pg(PG_FUNCTION_ARGS)
 {
 	Vec32		   *input	 = PG_GETARG_VEC32_P(0);
 	Vec32		   *centroid = PG_GETARG_VEC32_P(1);
 	RaBitQParamsPG *params	 = PG_GETARG_RABITQ_PARAMS_P(2);
 
-	mkt_pg_check_dims_match(input->dim, centroid->dim);
-	mkt_pg_check_dims_match(input->dim, params->dim);
+	vs_pg_check_dims_match(input->dim, centroid->dim);
+	vs_pg_check_dims_match(input->dim, params->dim);
 
 	int dim = input->dim;
 
 	/* Build RaBitQParams from the PG varlena's pre-computed matrix */
 	RaBitQParams *rparams =
-			mkt_rabitq_create_from_matrix(dim, params->seed, params->P);
+			vs_rabitq_create_from_matrix(dim, params->seed, params->P);
 
-	RaBitQVector *result = mkt_pg_rabitq_alloc(dim);
+	RaBitQVector *result = vs_pg_rabitq_alloc(dim);
 
 	Vec32Ref	input_ref	 = Vec32ToRef(input);
 	Vec32Ref	centroid_ref = Vec32ToRef(centroid);
-	RaBitQData *data		 = MKT_RABITQ_DATA(result);
+	RaBitQData *data		 = VS_RABITQ_DATA(result);
 
-	int ret = mkt_rabitq_encode_into(rparams, input_ref, centroid_ref, data);
+	int ret = vs_rabitq_encode_into(rparams, input_ref, centroid_ref, data);
 	if (ret != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),

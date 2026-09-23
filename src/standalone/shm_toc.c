@@ -2,11 +2,11 @@
  * shm_toc_standalone.c - Keyed shared-region table over a heap arena
  *
  * Standalone implementation of the shm_toc API the parallel build uses. See
- * mkt_shm_toc.h. PG builds use PostgreSQL's shm_toc (backed by a DSM segment)
+ * vs_shm_toc.h. PG builds use PostgreSQL's shm_toc (backed by a DSM segment)
  * instead, so this file is compiled only for standalone.
  */
 
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,8 +58,8 @@ shm_toc_create(uint64_t magic, void *address, size_t nbytes)
 void *
 shm_toc_allocate(shm_toc *toc, size_t nbytes)
 {
-	size_t offset = MKT_TOC_ALIGN(toc->allocated);
-	size_t end	  = offset + MKT_TOC_ALIGN(nbytes);
+	size_t offset = VS_TOC_ALIGN(toc->allocated);
+	size_t end	  = offset + VS_TOC_ALIGN(nbytes);
 
 	if (end > toc->nbytes)
 	{
@@ -116,7 +116,7 @@ shm_toc_lookup(shm_toc *toc, uint64_t key, bool noError)
 }
 
 void
-mkt_shm_toc_free(shm_toc *toc)
+vs_shm_toc_free(shm_toc *toc)
 {
 	if (toc == NULL)
 		return;
@@ -125,4 +125,4 @@ mkt_shm_toc_free(shm_toc *toc)
 	free(toc);
 }
 
-#endif /* MKT_STANDALONE */
+#endif /* VS_STANDALONE */

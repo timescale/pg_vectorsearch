@@ -1,10 +1,10 @@
 /*
- * mkt_pg.c - pg_vectorsearch PostgreSQL extension entry point
+ * vs_pg.c - pg_vectorsearch PostgreSQL extension entry point
  */
 
 #include <postgres.h>
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <access/reloptions.h>
 #include <catalog/namespace.h>
@@ -26,45 +26,45 @@
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-int			prism_distance_mode		   = MKT_DISTANCE_MODE_DEFAULT;
-int			prism_nprobe			   = 0;
-int			prism_query_limit		   = 0;
-int			prism_fastscan_bits		   = 16;
-bool		prism_rerank			   = true;
-bool		prism_log_build_stats	   = false;
-double		prism_centroid_error_scale = 0.0;
-double		prism_centroid_beam_scale  = 0.5;
-int			mkt_leaf_refine_threshold  = 0;
-static bool prism_recent_buffers	   = true;
-double		prism_probe_expand		   = 2.0;
-static int	prism_rerank_pool		   = 0;
+int			prism_distance_mode			= VS_DISTANCE_MODE_DEFAULT;
+int			prism_nprobe				= 0;
+int			prism_query_limit			= 0;
+int			prism_fastscan_bits			= 16;
+bool		prism_rerank				= true;
+bool		prism_log_build_stats		= false;
+double		prism_centroid_error_scale	= 0.0;
+double		prism_centroid_beam_scale	= 0.5;
+int			prism_leaf_refine_threshold = 0;
+static bool prism_recent_buffers		= true;
+double		prism_probe_expand			= 2.0;
+static int	prism_rerank_pool			= 0;
 
 static void
-mkt_recent_buffers_assign_hook(bool newval, void *extra)
+vs_recent_buffers_assign_hook(bool newval, void *extra)
 {
-	mkt_pg_storage_set_recent_buffers(newval);
+	vs_pg_storage_set_recent_buffers(newval);
 }
 
 static void
-mkt_probe_expand_assign_hook(double newval, void *extra)
+vs_probe_expand_assign_hook(double newval, void *extra)
 {
 	prism_query_set_probe_expand(newval);
 }
 
 static void
-mkt_rerank_pool_assign_hook(int newval, void *extra)
+vs_rerank_pool_assign_hook(int newval, void *extra)
 {
 	prism_query_set_rerank_pool((int32_t)newval);
 }
 
-static const struct config_enum_entry mkt_distance_mode_options[] = {
-		{"default", MKT_DISTANCE_MODE_DEFAULT, false},
-		{"asymmetric", MKT_DISTANCE_MODE_ASYMMETRIC, false},
-		{"symmetric", MKT_DISTANCE_MODE_SYMMETRIC, false},
+static const struct config_enum_entry vs_distance_mode_options[] = {
+		{"default", VS_DISTANCE_MODE_DEFAULT, false},
+		{"asymmetric", VS_DISTANCE_MODE_ASYMMETRIC, false},
+		{"symmetric", VS_DISTANCE_MODE_SYMMETRIC, false},
 		{NULL, 0, false},
 };
 
-static const struct config_enum_entry mkt_fastscan_bits_options[] = {
+static const struct config_enum_entry vs_fastscan_bits_options[] = {
 		{"8", 8, false},
 		{"16", 16, false},
 		{NULL, 0, false},
@@ -74,28 +74,28 @@ static const struct config_enum_entry mkt_fastscan_bits_options[] = {
 relopt_kind prism_relopt_kind;
 
 static relopt_enum_elt_def distance_mode_relopt_members[] = {
-		{"asymmetric", MKT_DISTANCE_MODE_ASYMMETRIC},
-		{"symmetric", MKT_DISTANCE_MODE_SYMMETRIC},
+		{"asymmetric", VS_DISTANCE_MODE_ASYMMETRIC},
+		{"symmetric", VS_DISTANCE_MODE_SYMMETRIC},
 		{NULL, 0},
 };
 
 /* "true"/"false" are accepted aliases for "on"/"off". */
 static relopt_enum_elt_def centroid_compression_relopt_members[] = {
-		{"auto", MKT_CENTROID_COMPRESSION_AUTO},
-		{"on", MKT_CENTROID_COMPRESSION_ON},
-		{"true", MKT_CENTROID_COMPRESSION_ON},
-		{"off", MKT_CENTROID_COMPRESSION_OFF},
-		{"false", MKT_CENTROID_COMPRESSION_OFF},
+		{"auto", PRISM_CENTROID_COMPRESSION_AUTO},
+		{"on", PRISM_CENTROID_COMPRESSION_ON},
+		{"true", PRISM_CENTROID_COMPRESSION_ON},
+		{"off", PRISM_CENTROID_COMPRESSION_OFF},
+		{"false", PRISM_CENTROID_COMPRESSION_OFF},
 		{NULL, 0},
 };
 
 /* Shared by the `fastscan` and `centroid_fastscan` options. */
 static relopt_enum_elt_def fastscan_mode_relopt_members[] = {
-		{"auto", MKT_FASTSCAN_MODE_AUTO},
-		{"on", MKT_FASTSCAN_MODE_ON},
-		{"true", MKT_FASTSCAN_MODE_ON},
-		{"off", MKT_FASTSCAN_MODE_OFF},
-		{"false", MKT_FASTSCAN_MODE_OFF},
+		{"auto", PRISM_FASTSCAN_MODE_AUTO},
+		{"on", PRISM_FASTSCAN_MODE_ON},
+		{"true", PRISM_FASTSCAN_MODE_ON},
+		{"off", PRISM_FASTSCAN_MODE_OFF},
+		{"false", PRISM_FASTSCAN_MODE_OFF},
 		{NULL, 0},
 };
 
@@ -105,12 +105,12 @@ void
 _PG_init(void)
 {
 	DefineCustomEnumVariable(
-			MKT_GUC_PREFIX ".distance_mode",
+			VS_GUC_PREFIX ".distance_mode",
 			"RaBitQ distance computation mode.",
 			"default (use index setting), asymmetric, or symmetric",
 			&prism_distance_mode,
-			MKT_DISTANCE_MODE_DEFAULT,
-			mkt_distance_mode_options,
+			VS_DISTANCE_MODE_DEFAULT,
+			vs_distance_mode_options,
 			PGC_USERSET,
 			0,
 			NULL,
@@ -118,7 +118,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomIntVariable(
-			MKT_GUC_PREFIX ".nprobe",
+			VS_GUC_PREFIX ".nprobe",
 			"Number of clusters to probe per query.",
 			"0 derives it from the index's cluster count "
 			"(~0.5*sqrt(nlist), targeting ~0.95 recall). Lower it for "
@@ -134,7 +134,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomIntVariable(
-			MKT_GUC_PREFIX ".query_limit",
+			VS_GUC_PREFIX ".query_limit",
 			"Caps the top-k an index scan is sized for (0 = no cap).",
 			"A scan sizes its top-k from the LIMIT above it, inflated by "
 			"the planner's selectivity estimate for any filter the "
@@ -159,7 +159,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomIntVariable(
-			MKT_GUC_PREFIX ".leaf_refine_threshold",
+			VS_GUC_PREFIX ".leaf_refine_threshold",
 			"Sample-per-leaf count below which a subsampled build refines "
 			"the leaf centroids on the full table.",
 			"The k-means sample trains each leaf's encode reference; the "
@@ -170,7 +170,7 @@ _PG_init(void)
 			"references from the whole table (one extra scan). 0 (the "
 			"default) disables refinement; a large value refines whenever "
 			"the sample was bounded below the table.",
-			&mkt_leaf_refine_threshold,
+			&prism_leaf_refine_threshold,
 			0,
 			0,
 			INT_MAX,
@@ -181,12 +181,12 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomEnumVariable(
-			MKT_GUC_PREFIX ".fastscan_bits",
+			VS_GUC_PREFIX ".fastscan_bits",
 			"Fastscan LUT quantization bits.",
 			"8 is faster, 16 is more accurate",
 			&prism_fastscan_bits,
 			16,
-			mkt_fastscan_bits_options,
+			vs_fastscan_bits_options,
 			PGC_USERSET,
 			0,
 			NULL,
@@ -194,7 +194,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomBoolVariable(
-			MKT_GUC_PREFIX ".rerank",
+			VS_GUC_PREFIX ".rerank",
 			"Enable reranking with exact distances.",
 			NULL,
 			&prism_rerank,
@@ -206,7 +206,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomBoolVariable(
-			MKT_GUC_PREFIX ".log_build_stats",
+			VS_GUC_PREFIX ".log_build_stats",
 			"Log per-phase index-build resource statistics.",
 			"When on, each build phase logs its elapsed time, build-heap "
 			"usage, and CPU/maxrss (via the server's ShowUsage), plus a final "
@@ -222,7 +222,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomRealVariable(
-			MKT_GUC_PREFIX ".centroid_error_scale",
+			VS_GUC_PREFIX ".centroid_error_scale",
 			"Centroid-search beam width, as a multiple of the RaBitQ "
 			"distance-error margin.",
 			"During centroid routing each candidate centroid has an "
@@ -250,7 +250,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomRealVariable(
-			MKT_GUC_PREFIX ".centroid_beam_scale",
+			VS_GUC_PREFIX ".centroid_beam_scale",
 			"Intermediate centroid beam width as a fraction of nprobe.",
 			"Sets the beam width at the intermediate tree levels to this "
 			"fraction of nprobe; the leaf level always returns the full "
@@ -274,7 +274,7 @@ _PG_init(void)
 			NULL);
 
 	DefineCustomBoolVariable(
-			MKT_GUC_PREFIX ".recent_buffers",
+			VS_GUC_PREFIX ".recent_buffers",
 			"Re-pin index pages via a backend-local buffer-id cache.",
 			"Skips the shared buffer-mapping hash lookup (a large share of "
 			"warm scan CPU) by remembering each block's buffer id and "
@@ -286,11 +286,11 @@ _PG_init(void)
 			PGC_USERSET,
 			0,
 			NULL,
-			mkt_recent_buffers_assign_hook,
+			vs_recent_buffers_assign_hook,
 			NULL);
 
 	DefineCustomRealVariable(
-			MKT_GUC_PREFIX ".probe_expand",
+			VS_GUC_PREFIX ".probe_expand",
 			"Probe-candidate expansion factor for exact centroid re-rank.",
 			"Routes ceil(nprobe * expand) leaf candidates through the "
 			"centroid beam, re-ranks them by exact query-centroid distance "
@@ -309,11 +309,11 @@ _PG_init(void)
 			PGC_USERSET,
 			0,
 			NULL,
-			mkt_probe_expand_assign_hook,
+			vs_probe_expand_assign_hook,
 			NULL);
 
 	DefineCustomIntVariable(
-			MKT_GUC_PREFIX ".rerank_pool",
+			VS_GUC_PREFIX ".rerank_pool",
 			"Max candidates to exact-rerank per query (0 = automatic, "
 			"-1 = unlimited).",
 			"Rerank only the most promising candidates by approximate "
@@ -330,12 +330,12 @@ _PG_init(void)
 			PGC_USERSET,
 			0,
 			NULL,
-			mkt_rerank_pool_assign_hook,
+			vs_rerank_pool_assign_hook,
 			NULL);
 
-	MarkGUCPrefixReserved(MKT_GUC_PREFIX);
+	MarkGUCPrefixReserved(VS_GUC_PREFIX);
 
-	mkt_cblas_pin_single_thread();
+	vs_cblas_pin_single_thread();
 
 	prism_relopt_kind = add_reloption_kind();
 	add_enum_reloption(
@@ -343,24 +343,24 @@ _PG_init(void)
 			"distance_mode",
 			"RaBitQ distance computation mode",
 			distance_mode_relopt_members,
-			MKT_DISTANCE_MODE_ASYMMETRIC,
+			VS_DISTANCE_MODE_ASYMMETRIC,
 			"symmetric is faster but has larger estimation error",
 			NoLock);
 	add_int_reloption(
 			prism_relopt_kind,
 			"fan_out",
 			"Children per tree node (2-255)",
-			MKT_ANN_DEFAULT_FAN_OUT,
-			MKT_ANN_MIN_FAN_OUT,
-			MKT_ANN_MAX_FAN_OUT,
+			PRISM_DEFAULT_FAN_OUT,
+			PRISM_MIN_FAN_OUT,
+			PRISM_MAX_FAN_OUT,
 			NoLock);
 	add_int_reloption(
 			prism_relopt_kind,
 			"nlist",
 			"Number of IVF clusters (0 = auto from sqrt(rows))",
-			MKT_ANN_DEFAULT_NLIST,
-			MKT_ANN_MIN_NLIST,
-			MKT_ANN_MAX_NLIST,
+			PRISM_DEFAULT_NLIST,
+			PRISM_MIN_NLIST,
+			PRISM_MAX_NLIST,
 			NoLock);
 	add_int_reloption(
 			prism_relopt_kind,
@@ -374,7 +374,7 @@ _PG_init(void)
 			prism_relopt_kind,
 			"soar_lambda",
 			"SOAR replication lambda (0 = off)",
-			MKT_ANN_DEFAULT_SOAR_LAMBDA,
+			PRISM_DEFAULT_SOAR_LAMBDA,
 			0.0,
 			100.0,
 			NoLock);
@@ -382,7 +382,7 @@ _PG_init(void)
 			prism_relopt_kind,
 			"boundary_epsilon",
 			"Boundary replication gap threshold (0 = off)",
-			MKT_ANN_DEFAULT_BOUNDARY_EPSILON,
+			PRISM_DEFAULT_BOUNDARY_EPSILON,
 			0.0,
 			100.0,
 			NoLock);
@@ -391,7 +391,7 @@ _PG_init(void)
 			"centroid_compression",
 			"RaBitQ compression for centroid pages",
 			centroid_compression_relopt_members,
-			MKT_CENTROID_COMPRESSION_AUTO,
+			PRISM_CENTROID_COMPRESSION_AUTO,
 			"auto compresses for L2/cosine and skips inner product",
 			NoLock);
 	add_enum_reloption(
@@ -399,7 +399,7 @@ _PG_init(void)
 			"fastscan",
 			"VPSHUFB fastscan posting page format",
 			fastscan_mode_relopt_members,
-			MKT_FASTSCAN_MODE_AUTO,
+			PRISM_FASTSCAN_MODE_AUTO,
 			"auto uses it up to the dimension where a group fits a page",
 			NoLock);
 	add_enum_reloption(
@@ -407,15 +407,15 @@ _PG_init(void)
 			"centroid_fastscan",
 			"FASTSCAN-format centroid pages",
 			fastscan_mode_relopt_members,
-			MKT_FASTSCAN_MODE_AUTO,
+			PRISM_FASTSCAN_MODE_AUTO,
 			"auto follows the resolved centroid compression and the "
 			"dimension limit; on errors where either is unavailable",
 			NoLock);
 
-	mkt_distance_init();
-	mkt_rabitq_init_simd();
+	vs_distance_init();
+	vs_rabitq_init_simd();
 	prism_explain_init();
-	mkt_scan_bound_init();
+	prism_scan_bound_init();
 }
 
 /* ----------------------------------------------------------------
@@ -423,7 +423,7 @@ _PG_init(void)
  * ---------------------------------------------------------------- */
 
 void
-mkt_pg_check_dim_valid(int dim)
+vs_pg_check_dim_valid(int dim)
 {
 	if (dim < 1)
 		ereport(ERROR,
@@ -446,9 +446,9 @@ mkt_pg_check_dim_valid(int dim)
  * ceiling, and it tracks the index limit automatically.
  */
 void
-mkt_pg_check_rabitq_params_dim_valid(int dim)
+vs_pg_check_rabitq_params_dim_valid(int dim)
 {
-	mkt_pg_check_dim_valid(dim);
+	vs_pg_check_dim_valid(dim);
 	if (dim > PRISM_INDEX_MAX_DIM)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
@@ -460,7 +460,7 @@ mkt_pg_check_rabitq_params_dim_valid(int dim)
 }
 
 void
-mkt_pg_check_dims_match(int dim_a, int dim_b)
+vs_pg_check_dims_match(int dim_a, int dim_b)
 {
 	if (dim_a != dim_b)
 		ereport(ERROR,
@@ -471,7 +471,7 @@ mkt_pg_check_dims_match(int dim_a, int dim_b)
 }
 
 void
-mkt_pg_check_expected_dim(int actual, int expected)
+vs_pg_check_expected_dim(int actual, int expected)
 {
 	if (expected != -1 && actual != expected)
 		ereport(ERROR,
@@ -480,7 +480,7 @@ mkt_pg_check_expected_dim(int actual, int expected)
 }
 
 void
-mkt_pg_check_value_finite(float val)
+vs_pg_check_value_finite(float val)
 {
 	if (isinf(val))
 		ereport(ERROR,
@@ -502,38 +502,38 @@ mkt_pg_check_value_finite(float val)
  * Rekall and other tooling use this to identify a build for
  * benchmark reports.
  */
-PG_FUNCTION_INFO_V1(mkt_git_commit);
+PG_FUNCTION_INFO_V1(vs_git_commit);
 
 Datum
-mkt_git_commit(PG_FUNCTION_ARGS)
+vs_git_commit(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_TEXT_P(cstring_to_text(MKT_GIT_COMMIT));
+	PG_RETURN_TEXT_P(cstring_to_text(VS_GIT_COMMIT));
 }
 
 /*
  * Return the extension version the binary was built as. Comes from
- * meson.build via mkt_config.h, the single source of truth for the
+ * meson.build via vs_config.h, the single source of truth for the
  * version string.
  */
-PG_FUNCTION_INFO_V1(mkt_extension_version);
+PG_FUNCTION_INFO_V1(vs_extension_version);
 
 Datum
-mkt_extension_version(PG_FUNCTION_ARGS)
+vs_extension_version(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_TEXT_P(cstring_to_text(MKT_VERSION));
+	PG_RETURN_TEXT_P(cstring_to_text(VS_VERSION));
 }
 
 /*
  * Return the extension name the binary was built as (from meson.build
- * via mkt_config.h). Lets SQL refer to the extension by name without
+ * via vs_config.h). Lets SQL refer to the extension by name without
  * hardcoding it, e.g. in the prerelease install notice.
  */
-PG_FUNCTION_INFO_V1(mkt_extension_name);
+PG_FUNCTION_INFO_V1(vs_extension_name);
 
 Datum
-mkt_extension_name(PG_FUNCTION_ARGS)
+vs_extension_name(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_TEXT_P(cstring_to_text(MKT_EXTENSION_NAME));
+	PG_RETURN_TEXT_P(cstring_to_text(VS_EXTENSION_NAME));
 }
 
 /* ----------------------------------------------------------------

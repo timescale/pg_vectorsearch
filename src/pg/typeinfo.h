@@ -5,7 +5,7 @@
  * reads an indexed value needs to know how to reach the float32 arrays the
  * distance and RaBitQ kernels work on. That knowledge is one descriptor per
  * type, and the descriptor comes from the *opclass* -- support function
- * MKT_ANN_TYPE_INFO_PROC -- not from inspecting the column.
+ * PRISM_TYPE_INFO_PROC -- not from inspecting the column.
  *
  * Asking the opclass matters beyond tidiness. It is the same authority the
  * planner consulted when it decided the index applied, so the access method
@@ -52,8 +52,8 @@
  * family member prism declares or adds shares its opclass's layout.
  */
 
-#ifndef MKT_TYPEINFO_H
-#define MKT_TYPEINFO_H
+#ifndef VS_TYPEINFO_H
+#define VS_TYPEINFO_H
 
 #include <postgres.h>
 
@@ -174,4 +174,4 @@ vec32_read(const Vec32Access *a, Datum d)
 	};
 }
 
-#endif /* MKT_TYPEINFO_H */
+#endif /* VS_TYPEINFO_H */

@@ -6,7 +6,7 @@
  * added in vecops_avx2.c, vecops_avx512.c, vecops_neon.c if needed.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <math.h>
 #include <stdatomic.h>
@@ -24,7 +24,7 @@
  * The dynamic linker selects the best version at load time.
  */
 
-MKT_TARGET_CLONES static float
+VS_TARGET_CLONES static float
 vecops_dot_product_compiler(const float *a, const float *b, Dimension dim)
 {
 	float sum = 0.0f;
@@ -33,7 +33,7 @@ vecops_dot_product_compiler(const float *a, const float *b, Dimension dim)
 	return sum;
 }
 
-MKT_TARGET_CLONES static float
+VS_TARGET_CLONES static float
 vecops_l2_norm_squared_compiler(const float *v, Dimension dim)
 {
 	float sum = 0.0f;
@@ -42,7 +42,7 @@ vecops_l2_norm_squared_compiler(const float *v, Dimension dim)
 	return sum;
 }
 
-MKT_TARGET_CLONES static float
+VS_TARGET_CLONES static float
 vecops_vector_sum_compiler(const float *v, Dimension dim)
 {
 	float sum = 0.0f;
@@ -51,7 +51,7 @@ vecops_vector_sum_compiler(const float *v, Dimension dim)
 	return sum;
 }
 
-MKT_TARGET_CLONES static void
+VS_TARGET_CLONES static void
 vecops_vector_sub_compiler(
 		const float *a, const float *b, float *out, Dimension dim)
 {
@@ -59,7 +59,7 @@ vecops_vector_sub_compiler(
 		out[i] = a[i] - b[i];
 }
 
-MKT_TARGET_CLONES static void
+VS_TARGET_CLONES static void
 vecops_vector_add_compiler(
 		const float *a, const float *b, float *out, Dimension dim)
 {
@@ -67,7 +67,7 @@ vecops_vector_add_compiler(
 		out[i] = a[i] + b[i];
 }
 
-MKT_TARGET_CLONES static void
+VS_TARGET_CLONES static void
 vecops_vector_scale_compiler(
 		const float *v, float scalar, float *out, Dimension dim)
 {
@@ -75,7 +75,7 @@ vecops_vector_scale_compiler(
 		out[i] = v[i] * scalar;
 }
 
-MKT_TARGET_CLONES static float
+VS_TARGET_CLONES static float
 vecops_l2_distance_squared_compiler(
 		const float *a, const float *b, Dimension dim)
 {
@@ -111,7 +111,7 @@ static const char	*g_impl_name   = NULL;
 static _Atomic(bool) g_initialized = false;
 
 void
-mkt_vecops_force_reinit(void)
+vs_vecops_force_reinit(void)
 {
 	g_initialized			 = false;
 	g_dot_product_fn		 = NULL;
@@ -125,7 +125,7 @@ mkt_vecops_force_reinit(void)
 }
 
 int
-mkt_vecops_init(void)
+vs_vecops_init(void)
 {
 	if (g_initialized)
 		return 0;
@@ -151,10 +151,10 @@ mkt_vecops_init(void)
 }
 
 const char *
-mkt_vecops_impl_name(void)
+vs_vecops_impl_name(void)
 {
-	if (mkt_unlikely(!g_initialized))
-		mkt_vecops_init();
+	if (vs_unlikely(!g_initialized))
+		vs_vecops_init();
 	return g_impl_name;
 }
 
@@ -163,56 +163,56 @@ mkt_vecops_impl_name(void)
  */
 
 float
-mkt_dot_product(const float *a, const float *b, Dimension dim)
+vs_dot_product(const float *a, const float *b, Dimension dim)
 {
-	if (mkt_unlikely(!g_initialized))
-		mkt_vecops_init();
+	if (vs_unlikely(!g_initialized))
+		vs_vecops_init();
 	return g_dot_product_fn(a, b, dim);
 }
 
 float
-mkt_l2_norm_squared(const float *v, Dimension dim)
+vs_l2_norm_squared(const float *v, Dimension dim)
 {
-	if (mkt_unlikely(!g_initialized))
-		mkt_vecops_init();
+	if (vs_unlikely(!g_initialized))
+		vs_vecops_init();
 	return g_l2_norm_squared_fn(v, dim);
 }
 
 float
-mkt_l2_norm(const float *v, Dimension dim)
+vs_l2_norm(const float *v, Dimension dim)
 {
-	return sqrtf(mkt_l2_norm_squared(v, dim));
+	return sqrtf(vs_l2_norm_squared(v, dim));
 }
 
 float
 vec32_sum(const float *v, Dimension dim)
 {
-	if (mkt_unlikely(!g_initialized))
-		mkt_vecops_init();
+	if (vs_unlikely(!g_initialized))
+		vs_vecops_init();
 	return g_vector_sum_fn(v, dim);
 }
 
 void
 vec32_sub(const float *a, const float *b, float *out, Dimension dim)
 {
-	if (mkt_unlikely(!g_initialized))
-		mkt_vecops_init();
+	if (vs_unlikely(!g_initialized))
+		vs_vecops_init();
 	g_vector_sub_fn(a, b, out, dim);
 }
 
 void
 vec32_add(const float *a, const float *b, float *out, Dimension dim)
 {
-	if (mkt_unlikely(!g_initialized))
-		mkt_vecops_init();
+	if (vs_unlikely(!g_initialized))
+		vs_vecops_init();
 	g_vector_add_fn(a, b, out, dim);
 }
 
 void
 vec32_scale(const float *v, float scalar, float *out, Dimension dim)
 {
-	if (mkt_unlikely(!g_initialized))
-		mkt_vecops_init();
+	if (vs_unlikely(!g_initialized))
+		vs_vecops_init();
 	g_vector_scale_fn(v, scalar, out, dim);
 }
 
@@ -226,7 +226,7 @@ vec32_mean(const float *vectors, uint32_t nvecs, Dimension dim, float *out)
 }
 
 void
-mkt_global_mean(
+vs_global_mean(
 		const float	  *centroids,
 		uint32_t	   ncentroids,
 		Dimension	   dim,
@@ -235,13 +235,13 @@ mkt_global_mean(
 {
 	vec32_mean(centroids, ncentroids, dim, out);
 	if (metric == DISTANCE_COSINE)
-		mkt_l2_normalize(out, dim);
+		vs_l2_normalize(out, dim);
 }
 
 float
-mkt_l2_distance_squared(const float *a, const float *b, Dimension dim)
+vs_l2_distance_squared(const float *a, const float *b, Dimension dim)
 {
-	if (mkt_unlikely(!g_initialized))
-		mkt_vecops_init();
+	if (vs_unlikely(!g_initialized))
+		vs_vecops_init();
 	return g_l2_distance_squared_fn(a, b, dim);
 }

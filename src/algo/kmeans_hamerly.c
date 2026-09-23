@@ -23,7 +23,7 @@
  * This needs only 1 FMA per dimension (vs 2 for direct L2).
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <math.h>
 #include <string.h>
@@ -45,12 +45,12 @@ struct HamerlyState
 HamerlyState *
 hamerly_create(uint32_t nvecs, uint32_t nlist, uint32_t dim)
 {
-	HamerlyState *hs = mkt_alloc0(sizeof(HamerlyState));
+	HamerlyState *hs = vs_alloc0(sizeof(HamerlyState));
 	hs->nvecs		 = nvecs;
 	hs->nlist		 = nlist;
 	hs->dim			 = dim;
-	hs->upper_bound	 = mkt_alloc(nvecs * sizeof(float));
-	hs->lower_bound	 = mkt_alloc(nvecs * sizeof(float));
+	hs->upper_bound	 = vs_alloc(nvecs * sizeof(float));
+	hs->lower_bound	 = vs_alloc(nvecs * sizeof(float));
 	return hs;
 }
 
@@ -59,9 +59,9 @@ hamerly_destroy(HamerlyState *hs)
 {
 	if (hs == NULL)
 		return;
-	mkt_free(hs->upper_bound);
-	mkt_free(hs->lower_bound);
-	mkt_free(hs);
+	vs_free(hs->upper_bound);
+	vs_free(hs->lower_bound);
+	vs_free(hs);
 }
 
 /*
@@ -124,7 +124,7 @@ static void
 precompute_norms_c(KMeansState *st)
 {
 	for (uint32_t j = 0; j < st->nlist; j++)
-		st->norms_c[j] = mkt_l2_norm_squared(
+		st->norms_c[j] = vs_l2_norm_squared(
 				st->centroids + (size_t)j * st->dim, st->dim);
 }
 
@@ -133,7 +133,7 @@ precompute_norms_c(KMeansState *st)
  *
  * always_inline — the specialized wrappers below pass a static const
  * Vec32TypeOps from the header, so the compiler inlines through
- * every vtable function pointer. MKT_TARGET_CLONES on the wrappers
+ * every vtable function pointer. VS_TARGET_CLONES on the wrappers
  * generates AVX2/AVX-512 variants of the entire inlined body.
  */
 __attribute__((always_inline)) static inline void
@@ -228,14 +228,14 @@ hamerly_assign_preconvert_impl(KMeansState *st, HamerlyState *hs, size_t esz)
 	const float *cents = st->centroids;
 	float		*buf   = st->vec_block;
 
-	const Vec32TypeOps *f32ops = &mkt_f32_type_ops;
+	const Vec32TypeOps *f32ops = &vs_f32_type_ops;
 
 	if (!hs->bounds_valid)
 	{
 		for (uint32_t i = 0; i < nvecs; i++)
 		{
 			const void *raw = km_get_vector(st, i, esz);
-			mkt_half_to_float_array((const half *)raw, buf, dim);
+			vs_half_to_float_array((const half *)raw, buf, dim);
 			float nx = st->norms_x[i];
 
 			uint32_t j1;
@@ -265,7 +265,7 @@ hamerly_assign_preconvert_impl(KMeansState *st, HamerlyState *hs, size_t esz)
 
 		/* Convert once — only for vectors that need distance computation */
 		const void *raw = km_get_vector(st, i, esz);
-		mkt_half_to_float_array((const half *)raw, buf, dim);
+		vs_half_to_float_array((const half *)raw, buf, dim);
 
 		float	 nx	  = st->norms_x[i];
 		uint32_t prev = st->assignments[i];
@@ -293,14 +293,14 @@ hamerly_assign_preconvert_impl(KMeansState *st, HamerlyState *hs, size_t esz)
 	}
 }
 
-/* Specialized wrappers — MKT_TARGET_CLONES generates SIMD variants */
-MKT_TARGET_CLONES static void
+/* Specialized wrappers — VS_TARGET_CLONES generates SIMD variants */
+VS_TARGET_CLONES static void
 hamerly_assign_f32(KMeansState *st, HamerlyState *hs)
 {
-	hamerly_assign_impl(st, hs, &mkt_f32_type_ops);
+	hamerly_assign_impl(st, hs, &vs_f32_type_ops);
 }
 
-MKT_TARGET_CLONES static void
+VS_TARGET_CLONES static void
 hamerly_assign_f16(KMeansState *st, HamerlyState *hs)
 {
 	hamerly_assign_preconvert_impl(st, hs, sizeof(half));
@@ -315,7 +315,7 @@ hamerly_assign(KMeansState *st, HamerlyState *hs)
 
 	switch (st->vec_type)
 	{
-	case MKT_VEC_F32:
+	case VS_VEC_F32:
 		hamerly_assign_f32(st, hs);
 		break;
 	default:
@@ -346,7 +346,7 @@ hamerly_update_bounds(
 
 	for (uint32_t j = 0; j < nlist; j++)
 	{
-		float d_sq = mkt_l2_distance_squared(
+		float d_sq = vs_l2_distance_squared(
 				st->centroids + (size_t)j * dim,
 				old_centroids + (size_t)j * dim,
 				dim);
@@ -373,7 +373,7 @@ hamerly_update_bounds(
 	float *delta = st->norms_c; /* temporary reuse */
 	for (uint32_t j = 0; j < nlist; j++)
 	{
-		float d_sq = mkt_l2_distance_squared(
+		float d_sq = vs_l2_distance_squared(
 				st->centroids + (size_t)j * dim,
 				old_centroids + (size_t)j * dim,
 				dim);

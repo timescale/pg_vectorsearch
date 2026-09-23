@@ -10,7 +10,7 @@
  * serial build.
  */
 
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 #include "standalone/instr_time.h"
 #include "standalone/parallel_ctx.h" /* ParallelContext + lifecycle */
 #include "standalone/pg_compat.h"
@@ -55,7 +55,7 @@
 #include "types/vec16.h"
 #include "types/vec32.h"
 
-#ifndef MKT_STANDALONE
+#ifndef VS_STANDALONE
 #include "build.h"
 #include "meta.h"
 #include "storage.h"
@@ -95,7 +95,7 @@
 void
 prism_posting_build_lists(
 		PrismSorter		   *sorter,
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		uint32_t			nlist,
 		Dimension			dim,
 		bool				fastscan,
@@ -183,8 +183,7 @@ plan_batch_cb(
 		const HKMeansResult *sub = (const HKMeansResult *)
 				prism_dsm_child_subtree(base, s, slot_size);
 		uint32_t	 child = children[s];
-		BlockNumber *nfb   = mkt_alloc(
-				  (size_t)sub->nnodes * sizeof(BlockNumber));
+		BlockNumber *nfb = vs_alloc((size_t)sub->nnodes * sizeof(BlockNumber));
 		/* Subtrees are built to a uniform depth, so any non-empty one gives
 		 * the streamed tree's subtree depth (full depth = this + 1 root
 		 * level). */
@@ -193,7 +192,7 @@ plan_batch_cb(
 		a->nleaves_arr[child] = sub->nleaves;
 		a->pages_arr[child]	  = (uint32_t)
 				prism_compute_centroid_layout(sub, a->max_ent, 0, nfb);
-		mkt_free(nfb);
+		vs_free(nfb);
 
 		if (a->leaf_sum != NULL)
 		{
@@ -228,7 +227,7 @@ typedef struct TreeLayout
 static bool
 build_routing_tree_batched(
 		PrismBuildShared			*shared,
-		MktStorage					*storage,
+		VsStorage					*storage,
 		PrismBuildProgress			*prog,
 		PrismDsmSamples				*dsm_samples,
 		PrismDsmRootAssign			*dsm_ra,
@@ -254,23 +253,23 @@ build_routing_tree_batched(
 	 * the worst-case sizing bound, up to fan_out x the requested count). */
 	uint32_t max_cc = 1;
 	{
-		uint32_t *child_count = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
+		uint32_t *child_count = vs_alloc0((size_t)km_k * sizeof(uint32_t));
 		prism_pbuild_count_children(
 				dsm_samples, dsm_ra, nparticipants, km_k, child_count);
 		for (uint32_t c = 0; c < km_k; c++)
 			if (child_count[c] > max_cc)
 				max_cc = child_count[c];
-		mkt_free(child_count);
+		vs_free(child_count);
 	}
 	uint32_t nlist_c = (nlist + fan_out - 1) / fan_out;
 	uint64_t slot_size =
-			mkt_hkmeans_max_blob_size_capped(nlist_c, fan_out, dim, max_cc);
+			vs_hkmeans_max_blob_size_capped(nlist_c, fan_out, dim, max_cc);
 
 	/* The slot must fit one allocation (the leader reads each spilled blob
 	 * back through a palloc'd buffer), which also keeps the blob format's
 	 * 32-bit interior offsets valid. */
 	if (slot_size > (uint64_t)MaxAllocSize)
-		mkt_error(
+		vs_error(
 				"prism: subtree slot %llu MB exceeds the allocation limit "
 				"(nlist %u, fan_out %u); increase fan_out or decrease nlist",
 				(unsigned long long)(slot_size >> 20),
@@ -281,7 +280,7 @@ build_routing_tree_batched(
 	if (shared->work_mem_kb > 0 &&
 		(uint64_t)nparticipants * slot_size >
 				(uint64_t)shared->work_mem_kb * 1024)
-		mkt_error(
+		vs_error(
 				"prism: subtree ring %llu MB exceeds maintenance_work_mem "
 				"(nlist %u, fan_out %u); increase maintenance_work_mem or "
 				"fan_out",
@@ -295,15 +294,15 @@ build_routing_tree_batched(
 	void *ring_seg		= NULL;
 	char *subtrees_base = prism_pbuild_subtree_ring_create(
 			shared, nparticipants, slot_size, &ring_seg);
-	mkt_debug(
+	vs_debug(
 			"prism: subtree ring %d x %llu KB (largest child %u samples)",
 			nparticipants,
 			(unsigned long long)(slot_size >> 10),
 			max_cc);
 	BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-	uint32_t *nleaves_arr = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
-	uint32_t *pages_arr	  = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
+	uint32_t *nleaves_arr = vs_alloc0((size_t)km_k * sizeof(uint32_t));
+	uint32_t *pages_arr	  = vs_alloc0((size_t)km_k * sizeof(uint32_t));
 
 	/* PLAN pass: build subtrees, discover leaf + page counts (and the
 	 * leaf-centroid sum for global_mean). */
@@ -314,13 +313,13 @@ build_routing_tree_batched(
 			.max_ent		 = max_ent,
 			.subtree_nlevels = 1,
 			.dim			 = dim,
-			.leaf_sum		 = mkt_alloc0((size_t)dim * sizeof(double)),
+			.leaf_sum		 = vs_alloc0((size_t)dim * sizeof(double)),
 			.store			 = prism_pbuild_blobstore_begin(),
 	};
 	/* The batch schedule is largest-first; the blob store receives the
 	 * subtrees in that order, so the replay below needs the same order
 	 * to place each blob at its child's reserved block range. */
-	uint32_t *child_order = mkt_alloc((size_t)km_k * sizeof(uint32_t));
+	uint32_t *child_order = vs_alloc((size_t)km_k * sizeof(uint32_t));
 	prism_pbuild_stream_subtrees(
 			0,
 			nparticipants,
@@ -348,8 +347,8 @@ build_routing_tree_batched(
 	 * subtrees follow, so meta.first_centroid stays 1 (root written last,
 	 * in place). */
 	uint32_t	root_pages = (km_k + max_ent - 1) / max_ent;
-	uint32_t   *leaf_off   = mkt_alloc((size_t)km_k * sizeof(uint32_t));
-	uint32_t   *block_off  = mkt_alloc((size_t)km_k * sizeof(uint32_t));
+	uint32_t   *leaf_off   = vs_alloc((size_t)km_k * sizeof(uint32_t));
+	uint32_t   *block_off  = vs_alloc((size_t)km_k * sizeof(uint32_t));
 	uint32_t	lo		   = 0;
 	BlockNumber bo		   = 0;
 	for (uint32_t c = 0; c < km_k; c++)
@@ -382,8 +381,8 @@ build_routing_tree_batched(
 													(double)actual_nlist)
 										  : 0.0f;
 	if (shared->metric == DISTANCE_COSINE)
-		mkt_l2_normalize(global_mean, dim);
-	mkt_free(planarg.leaf_sum);
+		vs_l2_normalize(global_mean, dim);
+	vs_free(planarg.leaf_sum);
 	planarg.leaf_sum = NULL;
 
 	/* Head blocks are formula-derived: leaf c's head is first_posting + c,
@@ -400,12 +399,12 @@ build_routing_tree_batched(
 	 * the PLAN pass already produced every subtree, so the workers have
 	 * nothing to contribute here and run no barriers for this phase. */
 	prism_build_report_phase(prog, PRISM_BUILD_PHASE_CENTROID);
-	BlockNumber *subtree_root_blk = mkt_alloc(
+	BlockNumber *subtree_root_blk = vs_alloc(
 			(size_t)km_k * sizeof(BlockNumber));
 	PrismHeadWriteCtx head;
 	prism_head_write_ctx_init(
 			&head, storage, rq_params, dim, shared->fastscan, first_posting);
-	HKMeansResult *blob = mkt_alloc(slot_size);
+	HKMeansResult *blob = vs_alloc(slot_size);
 	prism_pbuild_blobstore_rewind(planarg.store);
 	for (uint32_t i = 0; i < km_k; i++)
 	{
@@ -431,8 +430,8 @@ build_routing_tree_batched(
 				 &head,
 				 collector);
 	}
-	mkt_free(blob);
-	mkt_free(child_order);
+	vs_free(blob);
+	vs_free(child_order);
 	prism_pbuild_blobstore_end(planarg.store);
 	planarg.store = NULL;
 
@@ -457,11 +456,11 @@ build_routing_tree_batched(
 			collector);
 
 	prism_head_write_ctx_cleanup(&head);
-	mkt_free(subtree_root_blk);
-	mkt_free(leaf_off);
-	mkt_free(block_off);
-	mkt_free(nleaves_arr);
-	mkt_free(pages_arr);
+	vs_free(subtree_root_blk);
+	vs_free(leaf_off);
+	vs_free(block_off);
+	vs_free(nleaves_arr);
+	vs_free(pages_arr);
 
 	out->first_posting = first_posting;
 	out->root_blk	   = root_blk;
@@ -480,7 +479,7 @@ build_routing_tree_batched(
 static bool
 build_routing_tree_flat(
 		PrismBuildShared   *shared,
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		PrismBuildProgress *prog,
 		float			   *cents,
 		uint32_t			km_k,
@@ -499,23 +498,23 @@ build_routing_tree_flat(
 	 */
 	if (shared->metric == DISTANCE_COSINE)
 		for (uint32_t c = 0; c < km_k; c++)
-			mkt_l2_normalize(cents + (size_t)c * dim, dim);
+			vs_l2_normalize(cents + (size_t)c * dim, dim);
 
-	HKMeansResult *flat = mkt_hkmeans_build_flat(cents, km_k, fan_out, dim);
+	HKMeansResult *flat = vs_hkmeans_build_flat(cents, km_k, fan_out, dim);
 	if (flat == NULL)
 		return false;
 
 	uint32_t	 actual_nlist = flat->nleaves;
-	BlockNumber *nfb = mkt_alloc((size_t)flat->nnodes * sizeof(BlockNumber));
+	BlockNumber *nfb = vs_alloc((size_t)flat->nnodes * sizeof(BlockNumber));
 	uint32_t	 centroid_pages = (uint32_t)
 			prism_compute_centroid_layout(flat, max_ent, 0, nfb);
-	mkt_free(nfb);
+	vs_free(nfb);
 	BlockNumber first_posting = first_centroid + centroid_pages;
 
 	/* Leaf-centroid mean -> the encoder centering (flat tree in hand). */
 	vec32_mean(hk_leaf_centroids(flat), actual_nlist, dim, global_mean);
 	if (shared->metric == DISTANCE_COSINE)
-		mkt_l2_normalize(global_mean, dim);
+		vs_l2_normalize(global_mean, dim);
 
 	/* Head region: actual_nlist pages at first_posting (leaf c -> head
 	 * first_posting + c). Pre-extend to cover centroid + head region;
@@ -550,7 +549,7 @@ build_routing_tree_flat(
 	out->root_blk	   = root_blk;
 	out->nlevels	   = (uint8_t)flat->nlevels;
 	out->nlist		   = actual_nlist;
-	mkt_free(flat);
+	vs_free(flat);
 	return true;
 }
 
@@ -560,7 +559,7 @@ do_parallel_build(
 		Relation				   index,
 		struct IndexInfo		  *index_info,
 		const PrismBuildConfig	  *config,
-		MktStorage				  *storage,
+		VsStorage				  *storage,
 		struct PrismBuildProgress *prog,
 		uint32_t				  *out_nlist,
 		uint8_t					  *out_tree_nlevels,
@@ -652,7 +651,7 @@ do_parallel_build(
 	instr_time t_sample_end;
 	INSTR_TIME_SET_CURRENT(t_sample_end);
 	INSTR_TIME_SUBTRACT(t_sample_end, t_launch_start);
-	mkt_debug(
+	vs_debug(
 			"prism: phase 1 (sampling) %.1fms",
 			INSTR_TIME_GET_MILLISEC(t_sample_end));
 
@@ -670,7 +669,7 @@ do_parallel_build(
 		instr_time t_km_elapsed;
 		INSTR_TIME_SET_CURRENT(t_km_elapsed);
 		INSTR_TIME_SUBTRACT(t_km_elapsed, t_km_start);
-		mkt_debug(
+		vs_debug(
 				"prism: root kmeans %.1fms (%u iters, k=%u)",
 				INSTR_TIME_GET_MILLISEC(t_km_elapsed),
 				km_iters,
@@ -685,7 +684,7 @@ do_parallel_build(
 	 * needs — for the root children it owns, and the leader streams each to
 	 * centroid pages a batch at a time (no in-RAM whole-tree assembly).
 	 */
-	uint32_t nlevels = mkt_hkmeans_nlevels(nlist, fan_out);
+	uint32_t nlevels = vs_hkmeans_nlevels(nlist, fan_out);
 
 	/* ---- Phase 2b: root assignment (leader as participant 0). ---- */
 	prism_pbuild_exec_root_assign(
@@ -698,7 +697,7 @@ do_parallel_build(
 	 * nparticipants slots, independent of nlist.
 	 * ------------------------------ */
 	prism_build_report_phase(prog, PRISM_BUILD_PHASE_SETUP);
-	RaBitQParams	   *rq_params = mkt_rabitq_create(dim, rabitq_seed);
+	RaBitQParams	   *rq_params = vs_rabitq_create(dim, rabitq_seed);
 	PrismCentroidFormat fmt		  = shared->centroid_format;
 	uint32_t			max_ent	  = prism_centroid_max_entries_fmt(dim, fmt);
 
@@ -712,7 +711,7 @@ do_parallel_build(
 	 * is ready before any page is encoded. Filled per branch below.
 	 */
 	const size_t vec_nbytes	 = (size_t)dim * sizeof(float);
-	float		*global_mean = mkt_alloc(vec_nbytes);
+	float		*global_mean = vs_alloc(vec_nbytes);
 
 	BlockNumber first_centroid = PRISM_FIRST_CENTROID_BLKNO;
 	BlockNumber first_posting  = 0;
@@ -763,7 +762,7 @@ do_parallel_build(
 	{
 		if (collector != NULL)
 			prism_exact_centroid_collector_cleanup(collector);
-		mkt_free(global_mean);
+		vs_free(global_mean);
 		prism_pbuild_samples_release(dsm_samples, lead.sample_seg);
 		WaitForParallelWorkersToFinish(pcxt);
 		prism_pbuild_teardown(pcxt);
@@ -806,7 +805,7 @@ do_parallel_build(
 	if (out_global_mean)
 		*out_global_mean = global_mean; /* caller owns it (metadata write) */
 	else
-		mkt_free(global_mean);
+		vs_free(global_mean);
 
 	/* No in-RAM tree exists; the caller's metadata write needs only the
 	 * shape. */
@@ -835,7 +834,7 @@ do_parallel_build(
 						 shared->refine_tile_cap > 0 && nlist > 0 &&
 						 collected / nlist <
 								 (uint64_t)shared->refine_threshold;
-		mkt_debug(
+		vs_debug(
 				"prism: refine gate: kept=%" PRIu64 " seen=%" PRIu64
 				" nlist=%u threshold=%u -> %s",
 				collected,
@@ -985,7 +984,7 @@ do_parallel_build(
 	INSTR_TIME_SET_CURRENT(t_merge_end);
 	INSTR_TIME_SUBTRACT(t_merge_end, t_merge_start);
 
-	mkt_debug(
+	vs_debug(
 			"prism: parallel streaming build with %d workers, "
 			"%u clusters, %u pages, "
 			"scan+drain %.1fms, finalize %.1fms",

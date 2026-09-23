@@ -1,5 +1,5 @@
 /*
- * mkt_shm_toc.h - Keyed shared-region table
+ * vs_shm_toc.h - Keyed shared-region table
  *
  * The parallel build publishes its shared regions (the build header, the
  * sample/centroid/assignment slots, the page queues, ...) into a table of
@@ -11,8 +11,8 @@
  * insert, and look up regions with identical code in both builds.
  */
 
-#ifndef MKT_SHM_TOC_H
-#define MKT_SHM_TOC_H
+#ifndef VS_SHM_TOC_H
+#define VS_SHM_TOC_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -30,12 +30,12 @@ typedef struct shm_toc_estimator
 	size_t number_of_keys;
 } shm_toc_estimator;
 
-#define MKT_TOC_ALIGN(sz) (((size_t)(sz) + 7) & ~(size_t)7)
+#define VS_TOC_ALIGN(sz) (((size_t)(sz) + 7) & ~(size_t)7)
 
 #define shm_toc_initialize_estimator(e) \
 	((e)->space_for_chunks = 0, (e)->number_of_keys = 0)
 #define shm_toc_estimate_chunk(e, sz) \
-	((e)->space_for_chunks += MKT_TOC_ALIGN(sz))
+	((e)->space_for_chunks += VS_TOC_ALIGN(sz))
 #define shm_toc_estimate_keys(e, cnt) ((e)->number_of_keys += (size_t)(cnt))
 
 /* Arena bytes needed for the estimated chunks (keys are tracked separately).
@@ -45,7 +45,7 @@ extern size_t shm_toc_estimate(shm_toc_estimator *e);
 /*
  * Create a table over the caller-provided arena [address, address+nbytes).
  * The arena holds the inserted regions; the key map is kept separately on the
- * heap. Free with mkt_shm_toc_free. The magic is retained for parity and
+ * heap. Free with vs_shm_toc_free. The magic is retained for parity and
  * otherwise unused.
  */
 extern shm_toc *shm_toc_create(uint64_t magic, void *address, size_t nbytes);
@@ -63,6 +63,6 @@ extern void shm_toc_insert(shm_toc *toc, uint64_t key, void *address);
 extern void *shm_toc_lookup(shm_toc *toc, uint64_t key, bool noError);
 
 /* Standalone-only: release the table's heap bookkeeping (not the arena). */
-extern void mkt_shm_toc_free(shm_toc *toc);
+extern void vs_shm_toc_free(shm_toc *toc);
 
-#endif /* MKT_SHM_TOC_H */
+#endif /* VS_SHM_TOC_H */

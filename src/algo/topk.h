@@ -18,20 +18,20 @@
  * reranks, and takes the true top-K.
  *
  * Usage:
- *   MktTopK topk;
- *   mkt_topk_init(&topk, k);
+ *   VsTopK topk;
+ *   vs_topk_init(&topk, k);
  *
- *   mkt_topk_insert(&topk, distance, error, id);
+ *   vs_topk_insert(&topk, distance, error, id);
  *   // ... more inserts ...
  *
- *   MktTopKEntry *results = mkt_alloc(topk.cand_count * sizeof(...));
+ *   VsTopKEntry *results = vs_alloc(topk.cand_count * sizeof(...));
  *   uint32_t count;
- *   mkt_topk_extract_sorted(&topk, results, &count);
- *   mkt_topk_cleanup(&topk);
+ *   vs_topk_extract_sorted(&topk, results, &count);
+ *   vs_topk_cleanup(&topk);
  */
 
-#ifndef MKT_TOPK_H
-#define MKT_TOPK_H
+#ifndef VS_TOPK_H
+#define VS_TOPK_H
 
 #include <math.h>
 #include <stdint.h>
@@ -42,13 +42,13 @@
 /* ----------------------------------------------------------------
  * Top-K entry
  * ---------------------------------------------------------------- */
-typedef struct MktTopKEntry
+typedef struct VsTopKEntry
 {
 	Distance distance; /* estimated distance */
 	Distance error;	   /* symmetric error margin (>= 0) */
 	uint64_t id;	   /* encoded TID or generic identifier */
 	uint32_t src;	   /* diagnostic: source rank stamped at insert */
-} MktTopKEntry;
+} VsTopKEntry;
 
 /* ----------------------------------------------------------------
  * Top-K collection
@@ -56,19 +56,19 @@ typedef struct MktTopKEntry
  * Standalone: binary max-heap array for threshold tracking.
  * PG: pairing heap via opaque pointer (defined in src/pg/topk.c).
  * ---------------------------------------------------------------- */
-typedef struct MktTopK
+typedef struct VsTopK
 {
-	Distance	 *ub_heap;		 /* binary max-heap of K upper bounds */
-	uint64_t	 *ub_ids;		 /* parallel array: ID for each heap entry */
-	uint32_t	  ub_count;		 /* entries in threshold heap (<= k) */
-	uint32_t	  k;			 /* target K */
-	uint32_t	  k_capacity;	 /* allocated ub_heap/ub_ids capacity */
-	MktTopKEntry *candidates;	 /* growable candidate buffer */
-	uint32_t	  cand_count;	 /* buffered candidates */
-	uint32_t	  cand_capacity; /* allocated capacity */
-	uint32_t	  cur_src;		 /* diagnostic: rank stamped onto inserts */
-	MktMemCtx	  memctx;		 /* owning context for all allocations */
-} MktTopK;
+	Distance	*ub_heap;		/* binary max-heap of K upper bounds */
+	uint64_t	*ub_ids;		/* parallel array: ID for each heap entry */
+	uint32_t	 ub_count;		/* entries in threshold heap (<= k) */
+	uint32_t	 k;				/* target K */
+	uint32_t	 k_capacity;	/* allocated ub_heap/ub_ids capacity */
+	VsTopKEntry *candidates;	/* growable candidate buffer */
+	uint32_t	 cand_count;	/* buffered candidates */
+	uint32_t	 cand_capacity; /* allocated capacity */
+	uint32_t	 cur_src;		/* diagnostic: rank stamped onto inserts */
+	VsMemCtx	 memctx;		/* owning context for all allocations */
+} VsTopK;
 
 /* ----------------------------------------------------------------
  * API
@@ -78,24 +78,24 @@ typedef struct MktTopK
  * Initialize a top-K collection. Creates a child memory context
  * under the current context for internal buffers. Caller must be
  * in a context with the desired lifetime.
- * Use mkt_topk_cleanup() to free.
+ * Use vs_topk_cleanup() to free.
  */
-void mkt_topk_init(MktTopK *topk, uint32_t k);
+void vs_topk_init(VsTopK *topk, uint32_t k);
 
-/* Free internal buffers (does not free the MktTopK struct itself). */
-void mkt_topk_cleanup(MktTopK *topk);
+/* Free internal buffers (does not free the VsTopK struct itself). */
+void vs_topk_cleanup(VsTopK *topk);
 
 /*
  * Create a heap-allocated top-K collection.
  * Returns NULL on allocation failure.
  */
-MktTopK *mkt_topk_create(uint32_t k);
+VsTopK *vs_topk_create(uint32_t k);
 
 /* Free a heap-allocated top-K collection. */
-void mkt_topk_destroy(MktTopK *topk);
+void vs_topk_destroy(VsTopK *topk);
 
 /* Reset to empty state (reuses existing storage). */
-void mkt_topk_reset(MktTopK *topk);
+void vs_topk_reset(VsTopK *topk);
 
 /*
  * Reset to empty state AND change k. Reuses the existing memory
@@ -103,21 +103,21 @@ void mkt_topk_reset(MktTopK *topk);
  * ub_ids / candidates within it. Cheap compared to a full init +
  * cleanup pair, because the memctx itself isn't created or destroyed.
  *
- * Use this when the same MktTopK is reused across calls that may
+ * Use this when the same VsTopK is reused across calls that may
  * want different k values (e.g. beam-search keeps beam_width
  * candidates at intermediate levels, nprobe at the last).
  */
-void mkt_topk_reset_to_k(MktTopK *topk, uint32_t k);
+void vs_topk_reset_to_k(VsTopK *topk, uint32_t k);
 
 /*
- * Same as mkt_topk_insert but skips the O(k) per-insert dedup scan.
+ * Same as vs_topk_insert but skips the O(k) per-insert dedup scan.
  * Use ONLY when the caller guarantees all ids are unique. The cluster
  * scan (where SOAR / boundary replicas can collide) must keep using
- * mkt_topk_insert; centroid beam search and similar code that
+ * vs_topk_insert; centroid beam search and similar code that
  * inserts each candidate exactly once should use this fast path.
  */
-void mkt_topk_insert_unique(
-		MktTopK *topk, Distance distance, Distance error, uint64_t id);
+void vs_topk_insert_unique(
+		VsTopK *topk, Distance distance, Distance error, uint64_t id);
 
 /*
  * Insert a candidate. Pruned if lower_bound >= threshold.
@@ -125,7 +125,7 @@ void mkt_topk_insert_unique(
  * candidate buffer.
  */
 void
-mkt_topk_insert(MktTopK *topk, Distance distance, Distance error, uint64_t id);
+vs_topk_insert(VsTopK *topk, Distance distance, Distance error, uint64_t id);
 
 /*
  * Current pruning threshold: the Kth-smallest upper bound
@@ -133,7 +133,7 @@ mkt_topk_insert(MktTopK *topk, Distance distance, Distance error, uint64_t id);
  * than K upper bounds have been recorded.
  */
 static inline Distance
-mkt_topk_threshold(const MktTopK *topk)
+vs_topk_threshold(const VsTopK *topk)
 {
 	if (topk->ub_count < topk->k)
 		return INFINITY;
@@ -147,19 +147,16 @@ mkt_topk_threshold(const MktTopK *topk)
  * results[] must have space for topk->cand_count entries (upper
  * bound; actual count returned via *count_out may be smaller).
  *
- * Does not reset the collection — call mkt_topk_reset() or
- * mkt_topk_cleanup() when done with the results.
+ * Does not reset the collection — call vs_topk_reset() or
+ * vs_topk_cleanup() when done with the results.
  */
-void mkt_topk_extract_sorted_capped(
-		MktTopK		 *topk,
-		MktTopKEntry *results,
-		uint32_t	 *count_out,
-		uint32_t	  cap);
-void mkt_topk_extract_sorted(
-		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out);
+void vs_topk_extract_sorted_capped(
+		VsTopK *topk, VsTopKEntry *results, uint32_t *count_out, uint32_t cap);
+void vs_topk_extract_sorted(
+		VsTopK *topk, VsTopKEntry *results, uint32_t *count_out);
 
 /* As above, but skips the duplicate-id pass; ids must be unique. */
-void mkt_topk_extract_sorted_unique(
-		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out);
+void vs_topk_extract_sorted_unique(
+		VsTopK *topk, VsTopKEntry *results, uint32_t *count_out);
 
-#endif /* MKT_TOPK_H */
+#endif /* VS_TOPK_H */

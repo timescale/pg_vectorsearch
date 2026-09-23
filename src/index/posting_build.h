@@ -138,7 +138,7 @@ typedef struct PrismBuildRouteCtx
 	PrismQueryState	   *qs;			   /* routing state (not owned) */
 	PrismSorter		   *sorter;		   /* cluster-keyed output (not owned) */
 	const RaBitQParams *rq_params;	   /* not owned */
-	MktStorage		   *storage;	   /* head-page reads (not owned) */
+	VsStorage		   *storage;	   /* head-page reads (not owned) */
 	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
 	Dimension			dim;
 	double				soar_lambda;
@@ -163,7 +163,7 @@ void prism_build_route_ctx_init(
 		PrismQueryState	   *qs,
 		PrismSorter		   *sorter,
 		const RaBitQParams *rq_params,
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		BlockNumber			first_posting,
 		Dimension			dim,
 		double				soar_lambda,
@@ -225,7 +225,7 @@ typedef void (*PrismLeafWriteFn)(void *ctx, uint32_t leaf, const float *vec);
  */
 typedef struct PrismHeadWriteCtx
 {
-	MktStorage		   *storage;
+	VsStorage		   *storage;
 	const RaBitQParams *rq_params;
 	Dimension			dim;
 	bool				fastscan;
@@ -237,7 +237,7 @@ typedef struct PrismHeadWriteCtx
 static inline void
 prism_head_write_ctx_init(
 		PrismHeadWriteCtx  *h,
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		const RaBitQParams *rq_params,
 		Dimension			dim,
 		bool				fastscan,
@@ -248,13 +248,13 @@ prism_head_write_ctx_init(
 	h->dim			 = dim;
 	h->fastscan		 = fastscan;
 	h->first_posting = first_posting;
-	h->pt			 = mkt_alloc((size_t)dim * sizeof(float));
+	h->pt			 = vs_alloc((size_t)dim * sizeof(float));
 }
 
 static inline void
 prism_head_write_ctx_cleanup(PrismHeadWriteCtx *h)
 {
-	mkt_free(h->pt);
+	vs_free(h->pt);
 }
 
 void prism_write_leaf_head(void *arg, uint32_t leaf, const float *centroid);
@@ -270,7 +270,7 @@ static inline void
 prism_build_router_base_init(
 		PrismIndexBase	   *base,
 		RaBitQParams	   *params,
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		Dimension			dim,
 		uint8_t				nlevels,
 		BlockNumber			first_centroid,
@@ -288,19 +288,19 @@ prism_build_router_base_init(
 	memset(base, 0, sizeof(*base));
 	base->params		 = params;
 	base->pt_global_mean = pt_global_mean;
-	mkt_rabitq_rotate(params, global_mean, base->pt_global_mean);
-	base->rabitq_seed		   = rabitq_seed;
-	base->centroid_storage	   = storage;
-	base->posting_storage	   = storage;
-	base->page_base			   = NULL;
-	base->dim				   = dim;
-	base->nlevels			   = nlevels;
-	base->first_centroid	   = first_centroid;
-	base->metric			   = metric;
-	base->centroid_format	   = centroid_format;
-	base->fastscan			   = (centroid_format == MKT_CENTROID_FMT_FASTSCAN)
-									   ? fastscan_bits
-									   : 0;
+	vs_rabitq_rotate(params, global_mean, base->pt_global_mean);
+	base->rabitq_seed	   = rabitq_seed;
+	base->centroid_storage = storage;
+	base->posting_storage  = storage;
+	base->page_base		   = NULL;
+	base->dim			   = dim;
+	base->nlevels		   = nlevels;
+	base->first_centroid   = first_centroid;
+	base->metric		   = metric;
+	base->centroid_format  = centroid_format;
+	base->fastscan		   = (centroid_format == PRISM_CENTROID_FMT_FASTSCAN)
+								   ? fastscan_bits
+								   : 0;
 	base->centroid_error_scale = error_scale;
 	base->centroid_beam_scale  = beam_scale;
 	base->fan_out = (uint8_t)(fan_out <= UINT8_MAX ? fan_out : UINT8_MAX);
@@ -347,10 +347,10 @@ typedef struct PrismPostingPageOps
 /* Fastscan group staging buffer */
 typedef struct FsGroupStage
 {
-	ItemPointerData tids[MKT_FASTSCAN_GROUP];
-	float			f_add[MKT_FASTSCAN_GROUP];
-	float			f_rescale[MKT_FASTSCAN_GROUP];
-	float			f_error[MKT_FASTSCAN_GROUP];
+	ItemPointerData tids[VS_FASTSCAN_GROUP];
+	float			f_add[VS_FASTSCAN_GROUP];
+	float			f_rescale[VS_FASTSCAN_GROUP];
+	float			f_error[VS_FASTSCAN_GROUP];
 	uint32_t		count;
 } FsGroupStage;
 
@@ -361,7 +361,7 @@ typedef struct FsGroupStage
 typedef struct PrismPostingBuilder
 {
 	/* Common fields */
-	MktStorage		   *storage;
+	VsStorage		   *storage;
 	const RaBitQParams *params;
 	Dimension			dim;
 	uint32_t			cluster_id;
@@ -414,7 +414,7 @@ typedef struct PrismPostingBuilder
  */
 void prism_posting_builder_init(
 		PrismPostingBuilder *builder,
-		MktStorage			*storage,
+		VsStorage			*storage,
 		const RaBitQParams	*params,
 		Dimension			 dim,
 		uint32_t			 cluster_id,
@@ -428,7 +428,7 @@ void prism_posting_builder_init(
  */
 void prism_posting_builder_init_fastscan(
 		PrismPostingBuilder *builder,
-		MktStorage			*storage,
+		VsStorage			*storage,
 		const RaBitQParams	*params,
 		Dimension			 dim,
 		uint32_t			 cluster_id,
@@ -441,7 +441,7 @@ void prism_posting_builder_init_fastscan(
  */
 void prism_posting_builder_init_fmt(
 		PrismPostingBuilder *builder,
-		MktStorage			*storage,
+		VsStorage			*storage,
 		const RaBitQParams	*params,
 		Dimension			 dim,
 		uint32_t			 cluster_id,
@@ -459,7 +459,7 @@ void prism_posting_builder_init_fmt(
  */
 void prism_posting_builder_adopt_head(
 		PrismPostingBuilder *builder,
-		MktStorage			*storage,
+		VsStorage			*storage,
 		const RaBitQParams	*params,
 		Dimension			 dim,
 		uint32_t			 cluster_id,
@@ -534,7 +534,7 @@ void prism_posting_entry_encode(
 		const float		   *vec,
 		const float		   *centroid,
 		Dimension			dim,
-		RaBitQData		   *enc_buf, /* scratch, MKT_RABITQ_DATA_SIZE(dim) */
+		RaBitQData		   *enc_buf, /* scratch, VS_RABITQ_DATA_SIZE(dim) */
 		RaBitQScratch	   *scratch, /* scratch, scratch_init(dim) */
 		ItemPointerData		tid,
 		void *out_entry); /* prism_posting_entry_size(dim) bytes */

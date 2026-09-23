@@ -65,7 +65,7 @@ prism_buildempty(Relation index)
  * insert into a single list (results[0]). Phase 0 does no SOAR replication on
  * insert — that's restored in bulk at rebuild / compaction.
  */
-#define MKT_INSERT_ROUTE_BEAM 8
+#define PRISM_INSERT_ROUTE_BEAM 8
 
 /*
  * How many times an insert re-routes when the head it locked turns out to have
@@ -74,7 +74,7 @@ prism_buildempty(Relation index)
  * spin forever, and reaching the bound fails the insert rather than dropping
  * the tuple.
  */
-#define MKT_INSERT_ROUTE_ATTEMPTS 8
+#define PRISM_INSERT_ROUTE_ATTEMPTS 8
 
 static bool
 prism_insert(
@@ -118,8 +118,8 @@ prism_insert(
 	prism_index_base_init(index, &base);
 	Dimension dim = base.dim;
 
-	MktPgStorage storage;
-	mkt_pg_storage_init(&storage, index, NULL, base.metric);
+	VsPgStorage storage;
+	vs_pg_storage_init(&storage, index, NULL, base.metric);
 	base.centroid_storage = &storage.base;
 	base.posting_storage  = &storage.base;
 	base.page_base		  = NULL;
@@ -140,7 +140,7 @@ prism_insert(
 	/* No defined distance under cosine: encoded as unreachable below.
 	 * Squared norm -- zero iff the norm is zero, without the sqrt. */
 	bool degenerate = base.metric == DISTANCE_COSINE &&
-					  mkt_l2_norm_squared(vref.data, dim) == 0.0f;
+					  vs_l2_norm_squared(vref.data, dim) == 0.0f;
 
 	/*
 	 * Route to a leaf the same way a query does (prism_query_route normalizes
@@ -159,17 +159,17 @@ prism_insert(
 	RaBitQScratch	enc;
 	bool			enc_init = false;
 	PrismQueryState qs;
-	prism_query_state_init(&qs, &base, 1, MKT_INSERT_ROUTE_BEAM);
+	prism_query_state_init(&qs, &base, 1, PRISM_INSERT_ROUTE_BEAM);
 	bool inserted = false;
 	bool routed	  = true;
 
-	for (int attempt = 0; attempt < MKT_INSERT_ROUTE_ATTEMPTS; attempt++)
+	for (int attempt = 0; attempt < PRISM_INSERT_ROUTE_ATTEMPTS; attempt++)
 	{
 		uint32_t n = prism_query_route(
 				&qs,
 				vref.data,
-				MKT_INSERT_ROUTE_BEAM,
-				MKT_DISTANCE_MODE_ASYMMETRIC,
+				PRISM_INSERT_ROUTE_BEAM,
+				VS_DISTANCE_MODE_ASYMMETRIC,
 				NULL);
 
 		BlockNumber head = (n > 0) ? qs.beam_results[0].posting_head
@@ -190,7 +190,7 @@ prism_insert(
 
 		if (!enc_init)
 		{
-			mkt_rabitq_scratch_init(&enc, dim);
+			vs_rabitq_scratch_init(&enc, dim);
 			enc_init = true;
 		}
 		/*
@@ -265,7 +265,7 @@ prism_insert(
 				 errmsg("insert into index \"%s\" gave way to concurrent "
 						"maintenance %d times",
 						RelationGetRelationName(index),
-						MKT_INSERT_ROUTE_ATTEMPTS),
+						PRISM_INSERT_ROUTE_ATTEMPTS),
 				 errhint("Retry the transaction.")));
 
 	/* bool result is only meaningful for unique indexes. */
@@ -320,8 +320,8 @@ prism_bulkdelete(
 	BlockNumber	   first_posting;
 	prism_cache_meta(index, &dim, &metric, &first_posting);
 
-	MktPgStorage storage;
-	mkt_pg_storage_init(&storage, index, NULL, metric);
+	VsPgStorage storage;
+	vs_pg_storage_init(&storage, index, NULL, metric);
 
 	PrismBulkDeleteCtx ctx = {.cb = callback, .cb_state = cb_state};
 
@@ -395,12 +395,12 @@ prism_bulkdelete(
 		LockPage(index, blk, ExclusiveLock);
 
 		/* Re-read under the lock: a live head at this point stays live. */
-		Page hp = mkt_storage_read_page(&storage.base, blk);
+		Page hp = vs_storage_read_page(&storage.base, blk);
 		const PrismPostingPageOpaque *hop = prism_posting_opaque(hp);
 		bool still_head = (hop->flags & PRISM_POSTING_PAGE_FIRST) != 0 &&
 						  !(hop->flags & PRISM_POSTING_PAGE_DELETED) &&
 						  !(hop->flags & PRISM_POSTING_PAGE_TOMBSTONED);
-		mkt_storage_release_page(&storage.base, blk);
+		vs_storage_release_page(&storage.base, blk);
 
 		if (still_head)
 		{
@@ -409,9 +409,9 @@ prism_bulkdelete(
 
 			/* Live tuples remaining: the head's maintained live_count, which
 			 * the tombstone pass just decremented (O(1), no rescan). */
-			Page lp = mkt_storage_read_page(&storage.base, blk);
+			Page lp = vs_storage_read_page(&storage.base, blk);
 			stats->num_index_tuples += prism_posting_head_live_count(lp);
-			mkt_storage_release_page(&storage.base, blk);
+			vs_storage_release_page(&storage.base, blk);
 		}
 
 		UnlockPage(index, blk, ExclusiveLock);

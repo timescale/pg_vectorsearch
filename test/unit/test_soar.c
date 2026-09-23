@@ -21,7 +21,7 @@
 #include "algo/vecops.h"
 #include "core/memory.h"
 #include "index/index_build.h"
-#include "mkt_test.h"
+#include "vs_test.h"
 
 TEST_GROUP(SoarSecondary);
 TEST_MEMCTX_FIXTURE();
@@ -57,7 +57,7 @@ nearest_leaf(
 	float	 bd	  = INFINITY;
 	for (uint32_t i = 0; i < nleaves; i++)
 	{
-		float d = mkt_l2_distance_squared(vec, leaves + (size_t)i * dim, dim);
+		float d = vs_l2_distance_squared(vec, leaves + (size_t)i * dim, dim);
 		if (d < bd)
 		{
 			bd	 = d;
@@ -98,7 +98,7 @@ ref_soar_min(
 		const float	   *r,
 		float			lambda)
 {
-	float	 qrv	= mkt_dot_product(r, vec, dim);
+	float	 qrv	= vs_dot_product(r, vec, dim);
 	float	 best	= INFINITY;
 	uint32_t best_c = primary;
 	for (uint32_t k = 0; k < ncand; k++)
@@ -107,8 +107,8 @@ ref_soar_min(
 		if (i == primary)
 			continue;
 		const float *c	 = leaves + (size_t)i * dim;
-		float		 l2	 = mkt_l2_distance_squared(vec, c, dim);
-		float		 gap = qrv - mkt_dot_product(r, c, dim);
+		float		 l2	 = vs_l2_distance_squared(vec, c, dim);
+		float		 gap = qrv - vs_dot_product(r, c, dim);
 		float		 oa	 = l2 + lambda * gap * gap;
 		if (oa < best)
 		{
@@ -129,10 +129,10 @@ TEST(soar_cand_equals_full_scan_over_all_leaves)
 {
 	const uint32_t nleaves = 200;
 	const uint32_t dim	   = 32;
-	float		  *leaves  = mkt_alloc((size_t)nleaves * dim * sizeof(float));
-	float		  *vec	   = mkt_alloc((size_t)dim * sizeof(float));
-	float		  *r	   = mkt_alloc((size_t)dim * sizeof(float));
-	uint32_t	  *all	   = mkt_alloc((size_t)nleaves * sizeof(uint32_t));
+	float		  *leaves  = vs_alloc((size_t)nleaves * dim * sizeof(float));
+	float		  *vec	   = vs_alloc((size_t)dim * sizeof(float));
+	float		  *r	   = vs_alloc((size_t)dim * sizeof(float));
+	uint32_t	  *all	   = vs_alloc((size_t)nleaves * sizeof(uint32_t));
 	for (uint32_t i = 0; i < nleaves; i++)
 		all[i] = i;
 
@@ -164,10 +164,10 @@ TEST(soar_cand_picks_objective_min)
 	const uint32_t nleaves = 128;
 	const uint32_t dim	   = 16;
 	const uint32_t ncand   = 8;
-	float		  *leaves  = mkt_alloc((size_t)nleaves * dim * sizeof(float));
-	float		  *vec	   = mkt_alloc((size_t)dim * sizeof(float));
-	float		  *r	   = mkt_alloc((size_t)dim * sizeof(float));
-	uint32_t	  *cand	   = mkt_alloc((size_t)ncand * sizeof(uint32_t));
+	float		  *leaves  = vs_alloc((size_t)nleaves * dim * sizeof(float));
+	float		  *vec	   = vs_alloc((size_t)dim * sizeof(float));
+	float		  *r	   = vs_alloc((size_t)dim * sizeof(float));
+	uint32_t	  *cand	   = vs_alloc((size_t)ncand * sizeof(uint32_t));
 
 	rng_seed(0x1234u);
 	for (int trial = 0; trial < 300; trial++)
@@ -200,9 +200,9 @@ TEST(soar_cand_skips_primary)
 {
 	const uint32_t nleaves = 32;
 	const uint32_t dim	   = 8;
-	float		  *leaves  = mkt_alloc((size_t)nleaves * dim * sizeof(float));
-	float		  *vec	   = mkt_alloc((size_t)dim * sizeof(float));
-	float		  *r	   = mkt_alloc((size_t)dim * sizeof(float));
+	float		  *leaves  = vs_alloc((size_t)nleaves * dim * sizeof(float));
+	float		  *vec	   = vs_alloc((size_t)dim * sizeof(float));
+	float		  *r	   = vs_alloc((size_t)dim * sizeof(float));
 
 	rng_seed(0x55u);
 	fill_random(leaves, (size_t)nleaves * dim);

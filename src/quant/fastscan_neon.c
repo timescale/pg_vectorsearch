@@ -19,9 +19,9 @@
  *   byte[2i+1] of res_hi is for vector kPerm0[2i+1]+16 = i + 24
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 
@@ -42,13 +42,13 @@
 	} while (0)
 
 void
-mkt_fastscan_accumulate_neon(
+vs_fastscan_accumulate_neon(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		uint16_t	  *accum,
 		Dimension	   dim)
 {
-	uint32_t code_length = MKT_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t code_length = VS_FASTSCAN_GROUP_BYTES(dim);
 
 	const uint8x16_t lo_mask = vdupq_n_u8(0x0F);
 
@@ -120,13 +120,13 @@ mkt_fastscan_accumulate_neon(
 	} while (0)
 
 void
-mkt_fastscan_accumulate_hacc_neon(
+vs_fastscan_accumulate_hacc_neon(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		int32_t		  *accum,
 		Dimension	   dim)
 {
-	uint32_t		 nsq	 = MKT_FASTSCAN_NSQ(dim);
+	uint32_t		 nsq	 = VS_FASTSCAN_NSQ(dim);
 	const uint8x16_t lo_mask = vdupq_n_u8(0x0F);
 
 	/* Dual accumulator banks (A, B) for unrolled iterations.
@@ -239,4 +239,4 @@ mkt_fastscan_accumulate_hacc_neon(
 
 #endif /* aarch64 */
 
-#endif /* MKT_SIMD_FULL */
+#endif /* VS_SIMD_FULL */

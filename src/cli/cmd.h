@@ -5,8 +5,8 @@
  * Allows shared argument parsing in main and per-command specialization.
  */
 
-#ifndef MKT_CLI_CMD_H
-#define MKT_CLI_CMD_H
+#ifndef VS_CLI_CMD_H
+#define VS_CLI_CMD_H
 
 #include <stdbool.h>
 
@@ -30,13 +30,13 @@ typedef struct CmdContext
 	const char *prog_name;
 
 	/* Memory context for command allocations */
-	MktMemCtx memctx;
+	VsMemCtx memctx;
 
 	/* Global flags (parsed by main before dispatch) */
 	bool verbose;
 	bool quiet;
 
-	/* Subcommand name (e.g., "distance" for "mkt bench distance") */
+	/* Subcommand name (e.g., "distance" for "vectorsearch bench distance") */
 	const char *subcmd_name;
 } CmdContext;
 
@@ -58,4 +58,4 @@ typedef int (*CmdHandler)(CmdContext *ctx);
 #define CMD_USAGE_EXAMPLE(ctx, subcmd, args) \
 	printf("  %s %s %s\n", (ctx)->prog_name, subcmd, args)
 
-#endif /* MKT_CLI_CMD_H */
+#endif /* VS_CLI_CMD_H */

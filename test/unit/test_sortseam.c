@@ -17,7 +17,7 @@
 
 #include "core/memory.h"
 #include "index/parallel_build.h"
-#include "mkt_test.h"
+#include "vs_test.h"
 
 TEST_GROUP(SortSeam);
 
@@ -54,7 +54,7 @@ TEST(sort_seam_merges_sorted_by_cluster)
 
 	const uint32_t entry_size = sizeof(uint32_t); /* payload = unique seq id */
 
-	void *region = mkt_alloc(prism_pbuild_sort_shared_size(W));
+	void *region = vs_alloc(prism_pbuild_sort_shared_size(W));
 	prism_pbuild_sort_shared_init(region, W, NULL);
 
 	uint32_t cluster_of[TOTAL];
@@ -121,7 +121,7 @@ TEST(sort_seam_merges_sorted_by_cluster)
 TEST(sort_seam_empty)
 {
 	const uint32_t entry_size = sizeof(uint32_t);
-	void		  *region	  = mkt_alloc(prism_pbuild_sort_shared_size(2));
+	void		  *region	  = vs_alloc(prism_pbuild_sort_shared_size(2));
 	prism_pbuild_sort_shared_init(region, 2, NULL);
 
 	for (int w = 0; w < 2; w++)

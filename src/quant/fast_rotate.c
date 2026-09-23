@@ -31,13 +31,13 @@
 #endif
 
 bool
-mkt_fast_rotate_supported(Dimension dim)
+vs_fast_rotate_supported(Dimension dim)
 {
 	if (dim < 4)
 		return false;
 
 	/* Factor dim = N * K with N the largest power-of-two divisor.
-	 * K must be ≤ MKT_FAST_ROTATE_K_MAX, and N ≥ 4 so the inner
+	 * K must be ≤ VS_FAST_ROTATE_K_MAX, and N ≥ 4 so the inner
 	 * FWHT has at least two butterfly stages. */
 	uint32_t n = dim;
 	uint32_t k = 1;
@@ -50,7 +50,7 @@ mkt_fast_rotate_supported(Dimension dim)
 	k				= n;
 	if (fwht_n < 4)
 		return false;
-	if (k > MKT_FAST_ROTATE_K_MAX)
+	if (k > VS_FAST_ROTATE_K_MAX)
 		return false;
 	return true;
 }
@@ -72,7 +72,7 @@ splitmix64(uint64_t *state)
 static void
 init_mixer(float *m, uint32_t k, uint64_t *prng_state)
 {
-	float v[MKT_FAST_ROTATE_K_MAX][MKT_FAST_ROTATE_K_MAX];
+	float v[VS_FAST_ROTATE_K_MAX][VS_FAST_ROTATE_K_MAX];
 
 	/* Random vectors */
 	for (uint32_t i = 0; i < k; i++)
@@ -121,7 +121,7 @@ init_mixer(float *m, uint32_t k, uint64_t *prng_state)
 }
 
 void
-mkt_fast_rotate_init(MktFastRotateParams *p, Dimension dim, uint64_t seed)
+vs_fast_rotate_init(VsFastRotateParams *p, Dimension dim, uint64_t seed)
 {
 	p->dim	= dim;
 	p->seed = seed;
@@ -182,7 +182,7 @@ static inline void
 apply_mixer_column(
 		float *out, const float *m, uint32_t k, Dimension n, Dimension col)
 {
-	float tmp[MKT_FAST_ROTATE_K_MAX];
+	float tmp[VS_FAST_ROTATE_K_MAX];
 	for (uint32_t i = 0; i < k; i++)
 		tmp[i] = out[i * n + col];
 
@@ -198,7 +198,7 @@ apply_mixer_column(
 /* Reference scalar implementation. */
 static void
 fast_rotate_apply_scalar(
-		const MktFastRotateParams *p, const float *in, float *out)
+		const VsFastRotateParams *p, const float *in, float *out)
 {
 	Dimension dim = p->dim;
 	Dimension n	  = p->fwht_n;
@@ -253,7 +253,7 @@ fast_rotate_apply_scalar(
  */
 __attribute__((target("avx2,fma"))) static void
 fast_rotate_apply_avx2(
-		const MktFastRotateParams *p, const float *in, float *out)
+		const VsFastRotateParams *p, const float *in, float *out)
 {
 	Dimension	  dim	   = p->dim;
 	Dimension	  n		   = p->fwht_n;
@@ -321,7 +321,7 @@ fast_rotate_apply_avx2(
 		Dimension col = 0;
 		for (; col + 8 <= n; col += 8)
 		{
-			__m256 blkv[MKT_FAST_ROTATE_K_MAX];
+			__m256 blkv[VS_FAST_ROTATE_K_MAX];
 			for (uint32_t j = 0; j < k; j++)
 				blkv[j] = _mm256_loadu_ps(out + (size_t)j * n + col);
 			for (uint32_t r = 0; r < k; r++)
@@ -336,7 +336,7 @@ fast_rotate_apply_avx2(
 		}
 		for (; col < n; col++)
 		{
-			float tmp[MKT_FAST_ROTATE_K_MAX];
+			float tmp[VS_FAST_ROTATE_K_MAX];
 			for (uint32_t j = 0; j < k; j++)
 				tmp[j] = out[(size_t)j * n + col];
 			for (uint32_t r = 0; r < k; r++)
@@ -378,7 +378,7 @@ fast_rotate_apply_avx2(
  */
 __attribute__((target("avx512f"))) static void
 fast_rotate_apply_avx512(
-		const MktFastRotateParams *p, const float *in, float *out)
+		const VsFastRotateParams *p, const float *in, float *out)
 {
 	Dimension	 dim	= p->dim;
 	Dimension	 n		= p->fwht_n;
@@ -451,7 +451,7 @@ fast_rotate_apply_avx512(
 		Dimension col = 0;
 		for (; col + 16 <= n; col += 16)
 		{
-			__m512 blkv[MKT_FAST_ROTATE_K_MAX];
+			__m512 blkv[VS_FAST_ROTATE_K_MAX];
 			for (uint32_t j = 0; j < k; j++)
 				blkv[j] = _mm512_loadu_ps(out + (size_t)j * n + col);
 			for (uint32_t r = 0; r < k; r++)
@@ -466,7 +466,7 @@ fast_rotate_apply_avx512(
 		}
 		for (; col < n; col++)
 		{
-			float tmp[MKT_FAST_ROTATE_K_MAX];
+			float tmp[VS_FAST_ROTATE_K_MAX];
 			for (uint32_t j = 0; j < k; j++)
 				tmp[j] = out[(size_t)j * n + col];
 			for (uint32_t r = 0; r < k; r++)
@@ -505,7 +505,7 @@ fast_rotate_apply_avx512(
  */
 static void
 fast_rotate_apply_neon(
-		const MktFastRotateParams *p, const float *in, float *out)
+		const VsFastRotateParams *p, const float *in, float *out)
 {
 	Dimension		  dim			  = p->dim;
 	Dimension		  n				  = p->fwht_n;
@@ -570,7 +570,7 @@ fast_rotate_apply_neon(
 		Dimension col = 0;
 		for (; col + 4 <= n; col += 4)
 		{
-			float32x4_t blkv[MKT_FAST_ROTATE_K_MAX];
+			float32x4_t blkv[VS_FAST_ROTATE_K_MAX];
 			for (uint32_t j = 0; j < k; j++)
 				blkv[j] = vld1q_f32(out + (size_t)j * n + col);
 			for (uint32_t r = 0; r < k; r++)
@@ -585,7 +585,7 @@ fast_rotate_apply_neon(
 		}
 		for (; col < n; col++)
 		{
-			float tmp[MKT_FAST_ROTATE_K_MAX];
+			float tmp[VS_FAST_ROTATE_K_MAX];
 			for (uint32_t j = 0; j < k; j++)
 				tmp[j] = out[(size_t)j * n + col];
 			for (uint32_t r = 0; r < k; r++)
@@ -621,32 +621,31 @@ fast_rotate_apply_neon(
  * so the hot path -- which runs per encoded vector at build and once per
  * query -- pays no per-call capability check.
  */
-typedef void (*mkt_fast_rotate_fn)(
-		const MktFastRotateParams *, const float *, float *);
+typedef void (*vs_fast_rotate_fn)(
+		const VsFastRotateParams *, const float *, float *);
 
-static mkt_fast_rotate_fn
+static vs_fast_rotate_fn
 resolve_fast_rotate(void)
 {
 #if defined(__x86_64__) || defined(_M_X64)
-	if (mkt_has_simd(SIMD_AVX512F))
+	if (vs_has_simd(SIMD_AVX512F))
 		return fast_rotate_apply_avx512;
-	if (mkt_has_simd(SIMD_AVX2))
+	if (vs_has_simd(SIMD_AVX2))
 		return fast_rotate_apply_avx2;
 #elif defined(__aarch64__) || defined(_M_ARM64)
-	if (mkt_has_simd(SIMD_NEON))
+	if (vs_has_simd(SIMD_NEON))
 		return fast_rotate_apply_neon;
 #endif
 	return fast_rotate_apply_scalar;
 }
 
 void
-mkt_fast_rotate_apply(
-		const MktFastRotateParams *p, const float *in, float *out)
+vs_fast_rotate_apply(const VsFastRotateParams *p, const float *in, float *out)
 {
 	/* Benign race: concurrent resolvers all compute the same pointer, and a
 	 * pointer store is atomic on supported platforms. */
-	static mkt_fast_rotate_fn fn = NULL;
-	if (mkt_unlikely(fn == NULL))
+	static vs_fast_rotate_fn fn = NULL;
+	if (vs_unlikely(fn == NULL))
 		fn = resolve_fast_rotate();
 	fn(p, in, out);
 }

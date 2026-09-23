@@ -3,7 +3,7 @@
  *
  * Generic helpers for building prism indexes, usable from both the
  * PostgreSQL IAM build and the standalone CLI. All functions operate on the
- * MktStorage abstraction and (where a tree is materialized at all) the
+ * VsStorage abstraction and (where a tree is materialized at all) the
  * HKMeansResult tree.
  *
  * The routing tree is the centroid tree: the hierarchy of centroid pages
@@ -108,7 +108,7 @@ typedef struct PrismExactCentroidCollector
 	 * consumers (the build's encode scan and refine pass), so every
 	 * collector allocation goes to this context — and cleanup is a
 	 * single context delete, so nothing can dangle or double-free. */
-	MktMemCtx ctx;
+	VsMemCtx ctx;
 } PrismExactCentroidCollector;
 
 /*
@@ -120,8 +120,8 @@ typedef struct PrismExactCentroidCollector
 static inline bool
 prism_exact_centroid_enabled(uint32_t nlevels, PrismCentroidFormat fmt)
 {
-	return nlevels >= 2 && (fmt == MKT_CENTROID_FMT_RABITQ ||
-							fmt == MKT_CENTROID_FMT_FASTSCAN);
+	return nlevels >= 2 && (fmt == PRISM_CENTROID_FMT_RABITQ ||
+							fmt == PRISM_CENTROID_FMT_FASTSCAN);
 }
 
 /*
@@ -266,7 +266,7 @@ BlockNumber prism_compute_centroid_layout(
  * collector: optional exact internal-centroid collection (NULL to skip).
  */
 void prism_write_centroid_tree(
-		MktStorage					*storage,
+		VsStorage					*storage,
 		const HKMeansResult			*tree,
 		Dimension					 dim,
 		uint32_t					 fan_out,
@@ -315,7 +315,7 @@ void prism_write_centroid_tree(
  * PRISM_CENTROID_FLAG_LEAF in flags).
  */
 void prism_centroid_write_node(
-		MktStorage					*storage,
+		VsStorage					*storage,
 		Dimension					 dim,
 		const float					*cents,
 		uint32_t					 n,
@@ -336,7 +336,7 @@ typedef struct PrismStreamTreePlan
 	uint32_t nlevels;
 	uint32_t centroid_pages; /* pages the write pass will emit */
 	float	*leaf_mean;		 /* [dim] unweighted mean of the leaf centroids
-							  * (mkt_alloc; caller frees with mkt_free) */
+							  * (vs_alloc; caller frees with vs_free) */
 } PrismStreamTreePlan;
 
 /*
@@ -346,16 +346,16 @@ typedef struct PrismStreamTreePlan
  */
 /*
  * Reserve the fixed page layout: extend the relation so blocks
- * [0, end_blkno) exist before any is written. mkt_storage_extend extends BY
+ * [0, end_blkno) exist before any is written. vs_storage_extend extends BY
  * npages; the count doubles as the absolute layout end only because the
  * relation holds nothing but the meta-page slot yet -- the reserved layout
  * (heads at first_posting + leaf) silently shifts if a page ever sneaks in
  * before this point, so the invariant is pinned here.
  */
 static inline void
-prism_build_reserve_layout(MktStorage *storage, BlockNumber end_blkno)
+prism_build_reserve_layout(VsStorage *storage, BlockNumber end_blkno)
 {
-	BlockNumber ext_base = mkt_storage_extend(storage, end_blkno);
+	BlockNumber ext_base = vs_storage_extend(storage, end_blkno);
 	Assert(ext_base == 0 || ext_base == InvalidBlockNumber);
 	(void)ext_base;
 }
@@ -395,7 +395,7 @@ typedef void (*PrismStreamLeafCb)(
  * failure.
  */
 BlockNumber prism_routing_tree_write(
-		MktStorage					*storage,
+		VsStorage					*storage,
 		uint32_t					 nvecs,
 		Dimension					 dim,
 		DistanceMetric				 metric,
@@ -431,7 +431,7 @@ BlockNumber prism_routing_tree_write(
  * the head page. Returns the subtree root block (== first_block).
  */
 BlockNumber prism_routing_subtree_write(
-		MktStorage					*storage,
+		VsStorage					*storage,
 		const HKMeansResult			*subtree,
 		Dimension					 dim,
 		DistanceMetric				 metric,

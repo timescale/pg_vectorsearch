@@ -5,8 +5,8 @@
  * Reads the centroid tree via beam search and returns medoid TIDs.
  */
 
-#ifndef MKT_SCAN_H
-#define MKT_SCAN_H
+#ifndef PRISM_SCAN_H
+#define PRISM_SCAN_H
 
 #include <postgres.h>
 
@@ -51,7 +51,7 @@ typedef struct PrismScanStats
  * a small LIMIT for rows the heap fetch discards as dead, and leaves a query
  * something to answer with when work_mem affords less.
  */
-#define MKT_DEFAULT_K 10
+#define PRISM_DEFAULT_K 10
 
 const PrismScanStats *prism_scan_get_stats(IndexScanDesc scan);
 
@@ -63,7 +63,7 @@ const PrismScanStats *prism_scan_get_stats(IndexScanDesc scan);
  *
  * Called by prism_beginscan and by the cost model.
  */
-uint32_t mkt_scan_resolve_top_k(uint32_t scan_bound, double heap_rows);
+uint32_t prism_scan_resolve_top_k(uint32_t scan_bound, double heap_rows);
 
 /*
  * Begin an index scan. Matches ambeginscan_function signature.
@@ -93,4 +93,4 @@ bool prism_gettuple(IndexScanDesc scan, ScanDirection direction);
  */
 void prism_endscan(IndexScanDesc scan);
 
-#endif /* MKT_SCAN_H */
+#endif /* PRISM_SCAN_H */

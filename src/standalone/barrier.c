@@ -2,11 +2,11 @@
  * barrier_standalone.c - Dynamic phase barrier over pthreads
  *
  * Standalone implementation of the PostgreSQL Barrier API used by the
- * parallel build. See mkt_barrier.h. PG builds use PostgreSQL's Barrier
+ * parallel build. See vs_barrier.h. PG builds use PostgreSQL's Barrier
  * instead, so this file is compiled only for standalone.
  */
 
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 
 #include "standalone/barrier.h"
 
@@ -110,4 +110,4 @@ BarrierParticipants(Barrier *barrier)
 	return n;
 }
 
-#endif /* MKT_STANDALONE */
+#endif /* VS_STANDALONE */

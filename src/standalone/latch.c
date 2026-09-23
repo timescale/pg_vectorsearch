@@ -2,11 +2,11 @@
  * latch_standalone.c - Wait/wake latch over a condition variable
  *
  * Standalone implementation of the Latch API the posting drain loop uses (see
- * mkt_latch.h). PG builds use PostgreSQL's Latch instead, so this file is
+ * vs_latch.h). PG builds use PostgreSQL's Latch instead, so this file is
  * compiled only for standalone.
  */
 
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 
 #include <errno.h>
 #include <time.h>
@@ -24,7 +24,7 @@ InitLatch(Latch *latch)
 }
 
 void
-mkt_latch_attach_self(Latch *latch)
+vs_latch_attach_self(Latch *latch)
 {
 	MyLatch = latch;
 }
@@ -95,4 +95,4 @@ WaitLatch(
 	return result;
 }
 
-#endif /* MKT_STANDALONE */
+#endif /* VS_STANDALONE */

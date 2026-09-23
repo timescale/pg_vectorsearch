@@ -72,8 +72,8 @@ void  vec32_normalize(Vec32 *v);
  * other hot loops that dispatch once at the entry point.
  * ---------------------------------------------------------------- */
 
-MKT_VTABLE_INLINE float
-mkt_f32_dot_product(const void *vec, const float *centroid, Dimension dim)
+VS_VTABLE_INLINE float
+vs_f32_dot_product(const void *vec, const float *centroid, Dimension dim)
 {
 	const float *v	 = (const float *)vec;
 	float		 sum = 0.0f;
@@ -82,8 +82,8 @@ mkt_f32_dot_product(const void *vec, const float *centroid, Dimension dim)
 	return sum;
 }
 
-MKT_VTABLE_INLINE float
-mkt_f32_l2_squared(const void *vec, const float *centroid, Dimension dim)
+VS_VTABLE_INLINE float
+vs_f32_l2_squared(const void *vec, const float *centroid, Dimension dim)
 {
 	const float *v	 = (const float *)vec;
 	float		 sum = 0.0f;
@@ -95,8 +95,8 @@ mkt_f32_l2_squared(const void *vec, const float *centroid, Dimension dim)
 	return sum;
 }
 
-MKT_VTABLE_INLINE float
-mkt_f32_norm_sq(const void *vec, Dimension dim)
+VS_VTABLE_INLINE float
+vs_f32_norm_sq(const void *vec, Dimension dim)
 {
 	const float *v	 = (const float *)vec;
 	float		 sum = 0.0f;
@@ -105,22 +105,22 @@ mkt_f32_norm_sq(const void *vec, Dimension dim)
 	return sum;
 }
 
-MKT_VTABLE_INLINE void
-mkt_f32_sum_to_float(const void *vec, float *accum, Dimension dim)
+VS_VTABLE_INLINE void
+vs_f32_sum_to_float(const void *vec, float *accum, Dimension dim)
 {
 	const float *v = (const float *)vec;
 	for (Dimension d = 0; d < dim; d++)
 		accum[d] += v[d];
 }
 
-MKT_VTABLE_INLINE void
-mkt_f32_to_float_one(const void *src, float *dst, Dimension dim)
+VS_VTABLE_INLINE void
+vs_f32_to_float_one(const void *src, float *dst, Dimension dim)
 {
 	memcpy(dst, src, (size_t)dim * sizeof(float));
 }
 
-MKT_VTABLE_INLINE const float *
-mkt_f32_to_float_block(
+VS_VTABLE_INLINE const float *
+vs_f32_to_float_block(
 		const void *src, float *dst, uint32_t count, Dimension dim)
 {
 	(void)dst;
@@ -129,15 +129,15 @@ mkt_f32_to_float_block(
 	return (const float *)src;
 }
 
-static const Vec32TypeOps mkt_f32_type_ops = {
+static const Vec32TypeOps vs_f32_type_ops = {
 		.name			= "float32",
 		.element_size	= sizeof(float),
-		.dot_product	= mkt_f32_dot_product,
-		.l2_squared		= mkt_f32_l2_squared,
-		.norm_sq		= mkt_f32_norm_sq,
-		.sum_to_float	= mkt_f32_sum_to_float,
-		.to_float_one	= mkt_f32_to_float_one,
-		.to_float_block = mkt_f32_to_float_block,
+		.dot_product	= vs_f32_dot_product,
+		.l2_squared		= vs_f32_l2_squared,
+		.norm_sq		= vs_f32_norm_sq,
+		.sum_to_float	= vs_f32_sum_to_float,
+		.to_float_one	= vs_f32_to_float_one,
+		.to_float_block = vs_f32_to_float_block,
 };
 
 #endif /* VEC32_H */

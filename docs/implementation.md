@@ -143,14 +143,14 @@ standalone C libraries testable without PostgreSQL.
 
 ## Command-Line Interface
 
-pg_vectorsearch provides a single unified CLI binary (`mkt`) with
+pg_vectorsearch provides a single unified CLI binary (`vectorsearch`) with
 subcommands for development, testing, and benchmarking. This replaces
 multiple standalone tools.
 
 ### Usage
 
 ```
-mkt <command> [options]
+vectorsearch <command> [options]
 
 Commands:
   distance, d     Compute distance between vectors
@@ -162,7 +162,7 @@ Commands:
   info            Show index metadata
   version         Show version information
 
-Run 'mkt <command> --help' for command-specific options.
+Run 'vectorsearch <command> --help' for command-specific options.
 ```
 
 ### Subcommand Examples
@@ -170,41 +170,42 @@ Run 'mkt <command> --help' for command-specific options.
 **Distance computation:**
 
 ```
-$ mkt distance --metric l2 --file vectors.fvecs --i 0 --j 1
+$ vectorsearch distance --metric l2 --file vectors.fvecs --i 0 --j 1
 Distance(L2): 42.315
 
-$ mkt d -m ip -a "[1.0, 2.0, 3.0]" -b "[4.0, 5.0, 6.0]"
+$ vectorsearch d -m ip -a "[1.0, 2.0, 3.0]" -b "[4.0, 5.0, 6.0]"
 Distance(IP): 32.000
 ```
 
 **Quantization:**
 
 ```
-$ mkt quantize --input vectors.fvecs --output quantized.rq --dim 768
+$ vectorsearch quantize --input vectors.fvecs --output quantized.rq --dim 768
 Quantized 100000 vectors (768-dim) using RaBitQ
   Input:  292.97 MB (3072 bytes/vec)
   Output:  11.04 MB (116 bytes/vec)
   Ratio:  26.5x compression
 
-$ mkt q --decode quantized.rq --index 42
+$ vectorsearch q --decode quantized.rq --index 42
 Vector 42 (reconstructed): [0.123, -0.456, ...]
 ```
 
 **Benchmarks:**
 
 ```bash
-mkt bench distance --dim 768 --count 10000 --metric l2
-mkt bench quantize --dataset sift1m --k 10
-mkt bench cluster --dim 128 --nvecs 100000 --nlist 1000
-mkt bench search --index index.mkt --queries queries.fvecs --k 10
+vectorsearch bench distance --dim 768 --count 10000 --metric l2
+vectorsearch bench quantize --dataset sift1m --k 10
+vectorsearch bench cluster --dim 128 --nvecs 100000 --nlist 1000
+vectorsearch bench search --index index.vs --queries queries.fvecs --k 10
 ```
 
 **Index operations:**
 
 ```bash
-mkt build --input vectors.fvecs --dim 768 --nlist 1000 --output index.mkt
-mkt search --index index.mkt --query query.fvecs --k 10 --nprobe 20
-mkt info --index index.mkt
+vectorsearch build --input vectors.fvecs --dim 768 --nlist 1000 \
+    --output index.vs
+vectorsearch search --index index.vs --query query.fvecs --k 10 --nprobe 20
+vectorsearch info --index index.vs
 ```
 
 ### Implementation
@@ -219,9 +220,9 @@ typedef struct {
     const char *alias;
     const char *description;
     int (*handler)(int argc, char **argv);
-} MktCommand;
+} VsCommand;
 
-static const MktCommand commands[] = {
+static const VsCommand commands[] = {
     {"distance", "d", "Compute distance between vectors", cmd_distance},
     {"quantize", "q", "Quantize vectors using RaBitQ",    cmd_quantize},
     {"cluster",  "c", "Run clustering algorithms",        cmd_cluster},
@@ -240,7 +241,7 @@ int main(int argc, char **argv) {
     }
 
     const char *cmd_name = argv[1];
-    for (const MktCommand *cmd = commands; cmd->name; cmd++) {
+    for (const VsCommand *cmd = commands; cmd->name; cmd++) {
         if (strcmp(cmd_name, cmd->name) == 0 ||
             (cmd->alias && strcmp(cmd_name, cmd->alias) == 0)) {
             return cmd->handler(argc - 1, argv + 1);
@@ -252,8 +253,8 @@ int main(int argc, char **argv) {
 }
 ```
 
-Each subcommand is implemented in a separate file (`mkt_cmd_distance.c`,
-`mkt_cmd_quantize.c`, etc.) for maintainability. The `bench` subcommand has
+Each subcommand is implemented in a separate file (`vs_cmd_distance.c`,
+`vs_cmd_quantize.c`, etc.) for maintainability. The `bench` subcommand has
 its own sub-subcommands for different benchmark types.
 
 ### Meson Build
@@ -280,15 +281,15 @@ A simple unit test framework enables testing core algorithms independently of
 PostgreSQL. Tests use constructor-based auto-registration for minimal
 boilerplate.
 
-**Files**: `test/unit/mkt_test.h`, `test/unit/mkt_test.c`, `test/unit/run_tests.c`
+**Files**: `test/unit/vs_test.h`, `test/unit/vs_test.c`, `test/unit/run_tests.c`
 
 ### Test Framework Interface
 
 ```c
-/* mkt_test.h - Simple C test framework with automatic test registration */
+/* vs_test.h - Simple C test framework with automatic test registration */
 
-#ifndef MKT_TEST_H
-#define MKT_TEST_H
+#ifndef VS_TEST_H
+#define VS_TEST_H
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -309,38 +310,38 @@ typedef struct {
     char        failure_msg[512];
     const char *file;
     int         line;
-} MktTestResult;
+} VsTestResult;
 
 /* Test function signature */
-typedef void (*MktTestFunc)(MktTestResult *result);
+typedef void (*VsTestFunc)(VsTestResult *result);
 
 /* Test registry entry */
 typedef struct {
     const char *name;
     const char *group;
-    MktTestFunc func;
-} MktTestEntry;
+    VsTestFunc func;
+} VsTestEntry;
 
 /* Register a test (called automatically by TEST macro) */
-void mkt_test_register(const char *name, const char *group, MktTestFunc func);
+void vs_test_register(const char *name, const char *group, VsTestFunc func);
 
 /* Run all registered tests, returns 0 on success, 1 on failure */
-int mkt_test_run_all(void);
+int vs_test_run_all(void);
 
 /* Internal: mark current test as failed */
-void mkt_test_fail(const char *file, int line, const char *msg);
+void vs_test_fail(const char *file, int line, const char *msg);
 
 /* TEST_GROUP macro - sets the group for subsequent tests in this file */
-#define TEST_GROUP(group_name) static const char *_MKT_TEST_GROUP = #group_name;
+#define TEST_GROUP(group_name) static const char *_VS_TEST_GROUP = #group_name;
 
 /* TEST macro - defines and auto-registers a test */
 #define TEST(name)                                                  \
-    static void test_##name(MktTestResult *result);                 \
+    static void test_##name(VsTestResult *result);                 \
     __attribute__((constructor)) static void register_##name(void)  \
     {                                                               \
-        mkt_test_register(#name, _MKT_TEST_GROUP, test_##name);     \
+        vs_test_register(#name, _VS_TEST_GROUP, test_##name);     \
     }                                                               \
-    static void test_##name(MktTestResult *result)
+    static void test_##name(VsTestResult *result)
 
 /* Assertion macros */
 #define ASSERT_TRUE(cond, msg)                                      \
@@ -349,7 +350,7 @@ void mkt_test_fail(const char *file, int line, const char *msg);
             char buf[256];                                          \
             snprintf(buf, sizeof(buf), "%s (condition: %s)",        \
                      msg, #cond);                                   \
-            mkt_test_fail(__FILE__, __LINE__, buf);                 \
+            vs_test_fail(__FILE__, __LINE__, buf);                 \
             return;                                                 \
         }                                                           \
     } while (0)
@@ -362,7 +363,7 @@ void mkt_test_fail(const char *file, int line, const char *msg);
                      "%s (expected: %lld, actual: %lld)",           \
                      msg, (long long)(expected),                    \
                      (long long)(actual));                          \
-            mkt_test_fail(__FILE__, __LINE__, buf);                 \
+            vs_test_fail(__FILE__, __LINE__, buf);                 \
             return;                                                 \
         }                                                           \
     } while (0)
@@ -377,7 +378,7 @@ void mkt_test_fail(const char *file, int line, const char *msg);
                      "%s (expected: %f, actual: %f, diff: %f)",     \
                      msg, (double)(expected), (double)(actual),     \
                      _diff);                                        \
-            mkt_test_fail(__FILE__, __LINE__, buf);                 \
+            vs_test_fail(__FILE__, __LINE__, buf);                 \
             return;                                                 \
         }                                                           \
     } while (0)
@@ -385,7 +386,7 @@ void mkt_test_fail(const char *file, int line, const char *msg);
 #define ASSERT_NOT_NULL(ptr, msg)                                   \
     do {                                                            \
         if ((ptr) == NULL) {                                        \
-            mkt_test_fail(__FILE__, __LINE__, msg);                 \
+            vs_test_fail(__FILE__, __LINE__, msg);                 \
             return;                                                 \
         }                                                           \
     } while (0)
@@ -393,12 +394,12 @@ void mkt_test_fail(const char *file, int line, const char *msg);
 #define ASSERT_MEM_EQ(expected, actual, len, msg)                   \
     do {                                                            \
         if (memcmp((expected), (actual), (len)) != 0) {             \
-            mkt_test_fail(__FILE__, __LINE__, msg);                 \
+            vs_test_fail(__FILE__, __LINE__, msg);                 \
             return;                                                 \
         }                                                           \
     } while (0)
 
-#endif /* MKT_TEST_H */
+#endif /* VS_TEST_H */
 ```
 
 ### Test Runner
@@ -406,12 +407,12 @@ void mkt_test_fail(const char *file, int line, const char *msg);
 ```c
 /* run_tests.c - Main test runner entry point */
 
-#include "mkt_test.h"
+#include "vs_test.h"
 
 int
 main(void)
 {
-    return mkt_test_run_all();
+    return vs_test_run_all();
 }
 ```
 
@@ -420,7 +421,7 @@ main(void)
 ```c
 /* test_vec32.c - Vector type and operations tests */
 
-#include "mkt_test.h"
+#include "vs_test.h"
 #include "vec32.h"
 
 TEST_GROUP(Vector)
@@ -463,7 +464,7 @@ TEST(vector_l2_distance)
     Vec32Ref va = Vec32ToRef(a);
     Vec32Ref vb = Vec32ToRef(b);
 
-    Distance d = mkt_distance_l2(va, vb);
+    Distance d = vs_distance_l2(va, vb);
     ASSERT_FLOAT_EQ(1.0f, d, 1e-6, "L2 squared distance should be 1.0");
 
     vec32_free(a);
@@ -477,17 +478,17 @@ TEST(vector_l2_distance)
 # test/unit/meson.build
 
 unit_test_sources = files(
-  'mkt_test.c',
+  'vs_test.c',
   'run_tests.c',
   'test_vec32.c',
-  'test_mkt_distance.c',
-  'test_mkt_quantize.c',
-  'test_mkt_topk.c',
+  'test_vs_distance.c',
+  'test_vs_quantize.c',
+  'test_vs_topk.c',
 )
 
 test_runner = executable('run_tests',
   unit_test_sources,
-  dependencies: [mkt_core_dep],
+  dependencies: [vs_core_dep],
   include_directories: [
     include_directories('.'),
     include_directories('../../src'),
@@ -555,7 +556,7 @@ pg_vectorsearch's binary-compatible definition:
 
 #include <stdint.h>
 #include <stdlib.h>
-#include "mkt_types.h"
+#include "vs_types.h"
 
 #define VEC32_MAX_DIM 16000
 
@@ -609,7 +610,7 @@ void        vec32_normalize(Vec32 *v);
 /* vec32.c - Vector operations */
 
 #include "vec32.h"
-#include "mkt_memory.h"
+#include "vs_memory.h"
 #include <string.h>
 #include <math.h>
 
@@ -620,11 +621,11 @@ vec32_create(Dimension dim)
         return NULL;
 
     size_t size = VEC32_SIZE(dim);
-    Vec32 *v = mkt_alloc(size);
+    Vec32 *v = vs_alloc(size);
     if (v == NULL)
         return NULL;
 
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
     v->vl_len_ = (int32) size;  /* Store size directly */
 #else
     SET_VARSIZE(v, size);       /* PostgreSQL varlena header */
@@ -638,7 +639,7 @@ vec32_create(Dimension dim)
 void
 vec32_free(Vec32 *v)
 {
-    mkt_free(v);
+    vs_free(v);
 }
 
 Vec32 *
@@ -709,7 +710,7 @@ The key design points:
 // Quantized representations
 typedef uint8_t  ScalarQ8;   // 8-bit scalar quantized
 typedef uint8_t  BinaryQ;    // Binary quantized byte (for packed bit arrays)
-                             // Full vectors use MktBitVector (VarBit-compatible)
+                             // Full vectors use VsBitVector (VarBit-compatible)
 
 // Dimension type (max 65535 dimensions)
 typedef uint16_t Dimension;
@@ -759,52 +760,52 @@ semantics of PostgreSQL memory contexts.
 
 **Build configuration**:
 
-- Standalone: define `MKT_STANDALONE`, compile `mkt_memory_standalone.c`
+- Standalone: define `VS_STANDALONE`, compile `vs_memory_standalone.c`
 - PostgreSQL: no define needed, header-only (no `.c` file to compile)
 
 #### Common Interface
 
 ```c
-/* mkt_memory.h - Memory abstraction interface */
+/* vs_memory.h - Memory abstraction interface */
 
-#ifndef MKT_MEMORY_H
-#define MKT_MEMORY_H
+#ifndef VS_MEMORY_H
+#define VS_MEMORY_H
 
-#ifdef MKT_STANDALONE
-#include "mkt_memory_standalone.h"
+#ifdef VS_STANDALONE
+#include "vs_memory_standalone.h"
 #else
-#include "mkt_memory_pg.h"
+#include "vs_memory_pg.h"
 #endif
 
 /* Helper for cleanup attribute (works in both modes) */
 static inline void
-mkt_memctx_delete_ptr(MktMemCtx *ctx)
+vs_memctx_delete_ptr(VsMemCtx *ctx)
 {
     if (*ctx)
-        mkt_memctx_delete(*ctx);
+        vs_memctx_delete(*ctx);
 }
 
 /* Scoped context (RAII-style via cleanup attribute) */
-#ifdef MKT_STANDALONE
-#define MKT_MEMCTX_SCOPE(name) \
-    MktMemCtx name __attribute__((cleanup(mkt_memctx_delete_ptr))) = \
-        mkt_memctx_create(mkt_current_memctx, #name)
+#ifdef VS_STANDALONE
+#define VS_MEMCTX_SCOPE(name) \
+    VsMemCtx name __attribute__((cleanup(vs_memctx_delete_ptr))) = \
+        vs_memctx_create(vs_current_memctx, #name)
 #else
-#define MKT_MEMCTX_SCOPE(name) \
-    MktMemCtx name __attribute__((cleanup(mkt_memctx_delete_ptr))) = \
-        mkt_memctx_create(CurrentMemoryContext, #name)
+#define VS_MEMCTX_SCOPE(name) \
+    VsMemCtx name __attribute__((cleanup(vs_memctx_delete_ptr))) = \
+        vs_memctx_create(CurrentMemoryContext, #name)
 #endif
 
-#endif /* MKT_MEMORY_H */
+#endif /* VS_MEMORY_H */
 ```
 
 #### Standalone Header
 
 ```c
-/* mkt_memory_standalone.h - Standalone arena allocator types and declarations */
+/* vs_memory_standalone.h - Standalone arena allocator types and declarations */
 
-#ifndef MKT_MEMORY_STANDALONE_H
-#define MKT_MEMORY_STANDALONE_H
+#ifndef VS_MEMORY_STANDALONE_H
+#define VS_MEMORY_STANDALONE_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -819,88 +820,88 @@ mkt_memctx_delete_ptr(MktMemCtx *ctx)
  * context semantics and provides excellent cache locality.
  */
 
-#define MKT_ARENA_BLOCK_SIZE (64 * 1024)  /* 64 KB default block size */
-#define MKT_ARENA_ALIGNMENT  16           /* Default alignment */
+#define VS_ARENA_BLOCK_SIZE (64 * 1024)  /* 64 KB default block size */
+#define VS_ARENA_ALIGNMENT  16           /* Default alignment */
 
 /* Block header for arena memory blocks */
-typedef struct MktArenaBlock
+typedef struct VsArenaBlock
 {
-    struct MktArenaBlock *next;   /* Next block in chain */
+    struct VsArenaBlock *next;   /* Next block in chain */
     size_t                size;   /* Total size of this block */
     size_t                used;   /* Bytes used in this block */
     /* Data follows immediately after header, aligned */
-} MktArenaBlock;
+} VsArenaBlock;
 
 /* Arena memory context */
-typedef struct MktArena
+typedef struct VsArena
 {
     const char     *name;         /* Context name for debugging */
-    struct MktArena *parent;      /* Parent context (for hierarchy) */
-    struct MktArena *first_child; /* First child context */
-    struct MktArena *next_sibling;/* Next sibling in parent's child list */
-    MktArenaBlock  *current;      /* Current block for allocations */
-    MktArenaBlock  *blocks;       /* All blocks (for freeing) */
+    struct VsArena *parent;      /* Parent context (for hierarchy) */
+    struct VsArena *first_child; /* First child context */
+    struct VsArena *next_sibling;/* Next sibling in parent's child list */
+    VsArenaBlock  *current;      /* Current block for allocations */
+    VsArenaBlock  *blocks;       /* All blocks (for freeing) */
     size_t          block_size;   /* Size for new blocks */
     size_t          total_allocated; /* Stats: total bytes allocated */
-} MktArena;
+} VsArena;
 
-typedef MktArena *MktMemCtx;
+typedef VsArena *VsMemCtx;
 
 /* Current memory context (thread-local) */
-extern MktMemCtx mkt_current_memctx;
+extern VsMemCtx vs_current_memctx;
 
 /* Allocation functions */
-void *mkt_alloc(size_t size);
-void *mkt_alloc0(size_t size);
-void *mkt_realloc(void *ptr, size_t size);
-void  mkt_free(void *ptr);
-void *mkt_memctx_alloc(MktMemCtx ctx, size_t size);
-void *mkt_memctx_alloc0(MktMemCtx ctx, size_t size);
-void *mkt_alloc_aligned(size_t size, size_t alignment);
-void  mkt_free_aligned(void *ptr);
+void *vs_alloc(size_t size);
+void *vs_alloc0(size_t size);
+void *vs_realloc(void *ptr, size_t size);
+void  vs_free(void *ptr);
+void *vs_memctx_alloc(VsMemCtx ctx, size_t size);
+void *vs_memctx_alloc0(VsMemCtx ctx, size_t size);
+void *vs_alloc_aligned(size_t size, size_t alignment);
+void  vs_free_aligned(void *ptr);
 
 /* Context management */
-MktMemCtx mkt_memctx_create(MktMemCtx parent, const char *name);
-void      mkt_memctx_delete(MktMemCtx ctx);
-void      mkt_memctx_reset(MktMemCtx ctx);
-MktMemCtx mkt_memctx_switch(MktMemCtx ctx);
-size_t    mkt_memctx_total_allocated(MktMemCtx ctx);
+VsMemCtx vs_memctx_create(VsMemCtx parent, const char *name);
+void      vs_memctx_delete(VsMemCtx ctx);
+void      vs_memctx_reset(VsMemCtx ctx);
+VsMemCtx vs_memctx_switch(VsMemCtx ctx);
+size_t    vs_memctx_total_allocated(VsMemCtx ctx);
 
-#endif /* MKT_MEMORY_STANDALONE_H */
+#endif /* VS_MEMORY_STANDALONE_H */
 ```
 
 #### PostgreSQL Header
 
 ```c
-/* mkt_memory_pg.h - PostgreSQL memory wrappers (header-only) */
-#ifndef MKT_MEMORY_PG_H
-#define MKT_MEMORY_PG_H
+/* vs_memory_pg.h - PostgreSQL memory wrappers (header-only) */
+#ifndef VS_MEMORY_PG_H
+#define VS_MEMORY_PG_H
 
 #include "postgres.h"
 #include "utils/memutils.h"
 
-typedef MemoryContext MktMemCtx;
+typedef MemoryContext VsMemCtx;
 
 /* Direct mappings to palloc family */
-#define mkt_alloc(size)              palloc(size)
-#define mkt_alloc0(size)             palloc0(size)
-#define mkt_realloc(ptr, size)       repalloc(ptr, size)
-#define mkt_free(ptr)                pfree(ptr)
-#define mkt_memctx_alloc(ctx, size)  MemoryContextAlloc(ctx, size)
-#define mkt_memctx_alloc0(ctx, size) MemoryContextAllocZero(ctx, size)
-#define mkt_alloc_aligned(sz, al)    palloc_aligned(sz, al, 0)
-#define mkt_free_aligned(ptr)        pfree(ptr)
+#define vs_alloc(size)              palloc(size)
+#define vs_alloc0(size)             palloc0(size)
+#define vs_realloc(ptr, size)       repalloc(ptr, size)
+#define vs_free(ptr)                pfree(ptr)
+#define vs_memctx_alloc(ctx, size)  MemoryContextAlloc(ctx, size)
+#define vs_memctx_alloc0(ctx, size) MemoryContextAllocZero(ctx, size)
+#define vs_alloc_aligned(sz, al)    palloc_aligned(sz, al, 0)
+#define vs_free_aligned(ptr)        pfree(ptr)
 
 /* Context management */
-#define mkt_memctx_create(parent, name) \
+#define vs_memctx_create(parent, name) \
     AllocSetContextCreate((parent) ? (parent) : CurrentMemoryContext, \
                           (name), ALLOCSET_DEFAULT_SIZES)
-#define mkt_memctx_delete(ctx)       MemoryContextDelete(ctx)
-#define mkt_memctx_reset(ctx)        MemoryContextReset(ctx)
-#define mkt_memctx_switch(ctx)       MemoryContextSwitchTo(ctx)
-#define mkt_memctx_total_allocated(ctx) ((size_t)0)
+#define vs_memctx_delete(ctx)       MemoryContextDelete(ctx)
+#define vs_memctx_reset(ctx)        MemoryContextReset(ctx)
+#define vs_memctx_switch(ctx)       MemoryContextSwitchTo(ctx)
+#define vs_memctx_total_allocated(ctx) ((size_t)0)
 
-#endif /* MKT_MEMORY_PG_H */
+#endif /* VS_MEMORY_PG_H */
 ```
 
 Note: `palloc_aligned()` requires PostgreSQL 16+. For older versions, add a
@@ -909,9 +910,9 @@ compatibility wrapper.
 #### Standalone Implementation
 
 ```c
-/* mkt_memory_standalone.c - Arena allocator implementation */
+/* vs_memory_standalone.c - Arena allocator implementation */
 
-#include "mkt_memory_standalone.h"
+#include "vs_memory_standalone.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -919,9 +920,9 @@ compatibility wrapper.
 
 /* Thread-local current context (or global if no thread support) */
 #ifdef _Thread_local
-_Thread_local MktMemCtx mkt_current_memctx = NULL;
+_Thread_local VsMemCtx vs_current_memctx = NULL;
 #else
-MktMemCtx mkt_current_memctx = NULL;
+VsMemCtx vs_current_memctx = NULL;
 #endif
 
 /* Align size up to alignment boundary */
@@ -932,16 +933,16 @@ align_up(size_t size, size_t alignment)
 }
 
 /* Allocate a new block */
-static MktArenaBlock *
+static VsArenaBlock *
 arena_block_create(size_t min_size)
 {
-    size_t block_size = min_size > MKT_ARENA_BLOCK_SIZE
-                        ? min_size : MKT_ARENA_BLOCK_SIZE;
+    size_t block_size = min_size > VS_ARENA_BLOCK_SIZE
+                        ? min_size : VS_ARENA_BLOCK_SIZE;
     /* Include space for header, aligned */
-    size_t header_size = align_up(sizeof(MktArenaBlock), MKT_ARENA_ALIGNMENT);
+    size_t header_size = align_up(sizeof(VsArenaBlock), VS_ARENA_ALIGNMENT);
     size_t total_size = header_size + block_size;
 
-    MktArenaBlock *block = aligned_alloc(MKT_ARENA_ALIGNMENT, total_size);
+    VsArenaBlock *block = aligned_alloc(VS_ARENA_ALIGNMENT, total_size);
     if (!block)
         return NULL;
 
@@ -953,22 +954,22 @@ arena_block_create(size_t min_size)
 
 /* Free a block */
 static void
-arena_block_free(MktArenaBlock *block)
+arena_block_free(VsArenaBlock *block)
 {
     free(block);
 }
 
 /* Get data pointer for block */
 static inline void *
-arena_block_data(MktArenaBlock *block)
+arena_block_data(VsArenaBlock *block)
 {
-    size_t header_size = align_up(sizeof(MktArenaBlock), MKT_ARENA_ALIGNMENT);
+    size_t header_size = align_up(sizeof(VsArenaBlock), VS_ARENA_ALIGNMENT);
     return (char *)block + header_size;
 }
 
 /* Allocate from arena */
 static void *
-arena_alloc(MktArena *arena, size_t size, size_t alignment)
+arena_alloc(VsArena *arena, size_t size, size_t alignment)
 {
     if (size == 0)
         return NULL;
@@ -991,7 +992,7 @@ arena_alloc(MktArena *arena, size_t size, size_t alignment)
     }
 
     /* Need a new block */
-    MktArenaBlock *block = arena_block_create(aligned_size);
+    VsArenaBlock *block = arena_block_create(aligned_size);
     if (!block)
         return NULL;
 
@@ -1008,23 +1009,23 @@ arena_alloc(MktArena *arena, size_t size, size_t alignment)
 }
 
 /* Create a new arena context */
-MktMemCtx
-mkt_memctx_create(MktMemCtx parent, const char *name)
+VsMemCtx
+vs_memctx_create(VsMemCtx parent, const char *name)
 {
     /* Allocate arena struct from parent or malloc */
-    MktArena *arena;
+    VsArena *arena;
     if (parent)
-        arena = arena_alloc(parent, sizeof(MktArena), MKT_ARENA_ALIGNMENT);
+        arena = arena_alloc(parent, sizeof(VsArena), VS_ARENA_ALIGNMENT);
     else
-        arena = aligned_alloc(MKT_ARENA_ALIGNMENT, sizeof(MktArena));
+        arena = aligned_alloc(VS_ARENA_ALIGNMENT, sizeof(VsArena));
 
     if (!arena)
         return NULL;
 
-    memset(arena, 0, sizeof(MktArena));
+    memset(arena, 0, sizeof(VsArena));
     arena->name = name;
     arena->parent = parent;
-    arena->block_size = MKT_ARENA_BLOCK_SIZE;
+    arena->block_size = VS_ARENA_BLOCK_SIZE;
 
     /* Link into parent's child list */
     if (parent)
@@ -1038,26 +1039,26 @@ mkt_memctx_create(MktMemCtx parent, const char *name)
 
 /* Delete arena and all children */
 void
-mkt_memctx_delete(MktMemCtx ctx)
+vs_memctx_delete(VsMemCtx ctx)
 {
     if (!ctx)
         return;
 
-    MktArena *arena = ctx;
+    VsArena *arena = ctx;
 
     /* Recursively delete children first */
-    MktArena *child = arena->first_child;
+    VsArena *child = arena->first_child;
     while (child)
     {
-        MktArena *next = child->next_sibling;
-        mkt_memctx_delete(child);
+        VsArena *next = child->next_sibling;
+        vs_memctx_delete(child);
         child = next;
     }
 
     /* Unlink from parent */
     if (arena->parent)
     {
-        MktArena **pp = &arena->parent->first_child;
+        VsArena **pp = &arena->parent->first_child;
         while (*pp && *pp != arena)
             pp = &(*pp)->next_sibling;
         if (*pp)
@@ -1065,10 +1066,10 @@ mkt_memctx_delete(MktMemCtx ctx)
     }
 
     /* Free all blocks */
-    MktArenaBlock *block = arena->blocks;
+    VsArenaBlock *block = arena->blocks;
     while (block)
     {
-        MktArenaBlock *next = block->next;
+        VsArenaBlock *next = block->next;
         arena_block_free(block);
         block = next;
     }
@@ -1080,19 +1081,19 @@ mkt_memctx_delete(MktMemCtx ctx)
 
 /* Reset arena - free all allocations but keep arena */
 void
-mkt_memctx_reset(MktMemCtx ctx)
+vs_memctx_reset(VsMemCtx ctx)
 {
     if (!ctx)
         return;
 
-    MktArena *arena = ctx;
+    VsArena *arena = ctx;
 
     /* Recursively delete children */
-    MktArena *child = arena->first_child;
+    VsArena *child = arena->first_child;
     while (child)
     {
-        MktArena *next = child->next_sibling;
-        mkt_memctx_delete(child);
+        VsArena *next = child->next_sibling;
+        vs_memctx_delete(child);
         child = next;
     }
     arena->first_child = NULL;
@@ -1100,11 +1101,11 @@ mkt_memctx_reset(MktMemCtx ctx)
     /* Free all blocks except first (if any) */
     if (arena->blocks)
     {
-        MktArenaBlock *keep = arena->blocks;
-        MktArenaBlock *block = keep->next;
+        VsArenaBlock *keep = arena->blocks;
+        VsArenaBlock *block = keep->next;
         while (block)
         {
-            MktArenaBlock *next = block->next;
+            VsArenaBlock *next = block->next;
             arena_block_free(block);
             block = next;
         }
@@ -1122,31 +1123,31 @@ mkt_memctx_reset(MktMemCtx ctx)
 
 /* Allocate from current context */
 void *
-mkt_alloc(size_t size)
+vs_alloc(size_t size)
 {
-    assert(mkt_current_memctx != NULL);
-    return arena_alloc(mkt_current_memctx, size, MKT_ARENA_ALIGNMENT);
+    assert(vs_current_memctx != NULL);
+    return arena_alloc(vs_current_memctx, size, VS_ARENA_ALIGNMENT);
 }
 
 void *
-mkt_alloc0(size_t size)
+vs_alloc0(size_t size)
 {
-    void *ptr = mkt_alloc(size);
+    void *ptr = vs_alloc(size);
     if (ptr)
         memset(ptr, 0, size);
     return ptr;
 }
 
 void *
-mkt_memctx_alloc(MktMemCtx ctx, size_t size)
+vs_memctx_alloc(VsMemCtx ctx, size_t size)
 {
-    return arena_alloc(ctx, size, MKT_ARENA_ALIGNMENT);
+    return arena_alloc(ctx, size, VS_ARENA_ALIGNMENT);
 }
 
 void *
-mkt_memctx_alloc0(MktMemCtx ctx, size_t size)
+vs_memctx_alloc0(VsMemCtx ctx, size_t size)
 {
-    void *ptr = mkt_memctx_alloc(ctx, size);
+    void *ptr = vs_memctx_alloc(ctx, size);
     if (ptr)
         memset(ptr, 0, size);
     return ptr;
@@ -1157,51 +1158,51 @@ mkt_memctx_alloc0(MktMemCtx ctx, size_t size)
  * This just allocates new space and copies. Use sparingly.
  */
 void *
-mkt_realloc(void *ptr, size_t size)
+vs_realloc(void *ptr, size_t size)
 {
     if (!ptr)
-        return mkt_alloc(size);
+        return vs_alloc(size);
     if (size == 0)
         return NULL;
 
     /* We don't know the old size, so caller must handle copying */
     /* This is a limitation of arena allocators */
-    return mkt_alloc(size);
+    return vs_alloc(size);
 }
 
 /* Free is a no-op in arena mode */
 void
-mkt_free(void *ptr)
+vs_free(void *ptr)
 {
     (void)ptr;  /* Intentionally empty - memory freed on context reset/delete */
 }
 
 /* Aligned allocation */
 void *
-mkt_alloc_aligned(size_t size, size_t alignment)
+vs_alloc_aligned(size_t size, size_t alignment)
 {
-    assert(mkt_current_memctx != NULL);
-    return arena_alloc(mkt_current_memctx, size, alignment);
+    assert(vs_current_memctx != NULL);
+    return arena_alloc(vs_current_memctx, size, alignment);
 }
 
 void
-mkt_free_aligned(void *ptr)
+vs_free_aligned(void *ptr)
 {
     (void)ptr;  /* No-op in arena mode */
 }
 
 /* Switch context */
-MktMemCtx
-mkt_memctx_switch(MktMemCtx ctx)
+VsMemCtx
+vs_memctx_switch(VsMemCtx ctx)
 {
-    MktMemCtx old = mkt_current_memctx;
-    mkt_current_memctx = ctx;
+    VsMemCtx old = vs_current_memctx;
+    vs_current_memctx = ctx;
     return old;
 }
 
 /* Stats */
 size_t
-mkt_memctx_total_allocated(MktMemCtx ctx)
+vs_memctx_total_allocated(VsMemCtx ctx)
 {
     return ctx ? ctx->total_allocated : 0;
 }
@@ -1214,15 +1215,15 @@ PostgreSQL:
 
 | pg_vectorsearch Function | PostgreSQL Equivalent              |
 |--------------------------|------------------------------------|
-| `mkt_alloc()`            | `palloc()`                         |
-| `mkt_alloc0()`           | `palloc0()`                        |
-| `mkt_realloc()`          | `repalloc()`                       |
-| `mkt_free()`             | `pfree()`                          |
-| `mkt_memctx_alloc()`     | `MemoryContextAlloc()`             |
-| `mkt_memctx_create()`    | `AllocSetContextCreate()`          |
-| `mkt_memctx_delete()`    | `MemoryContextDelete()`            |
-| `mkt_memctx_reset()`     | `MemoryContextReset()`             |
-| `mkt_memctx_switch()`    | `MemoryContextSwitchTo()` (inline) |
+| `vs_alloc()`            | `palloc()`                         |
+| `vs_alloc0()`           | `palloc0()`                        |
+| `vs_realloc()`          | `repalloc()`                       |
+| `vs_free()`             | `pfree()`                          |
+| `vs_memctx_alloc()`     | `MemoryContextAlloc()`             |
+| `vs_memctx_create()`    | `AllocSetContextCreate()`          |
+| `vs_memctx_delete()`    | `MemoryContextDelete()`            |
+| `vs_memctx_reset()`     | `MemoryContextReset()`             |
+| `vs_memctx_switch()`    | `MemoryContextSwitchTo()` (inline) |
 
 For aligned allocation, PostgreSQL 16+ provides `palloc_aligned()`. On older
 versions, a manual alignment wrapper is used.
@@ -1235,32 +1236,32 @@ void
 compute_distances(const Vec32 *query, const Vec32 *vectors, int n)
 {
     /* Create scoped arena for temporary allocations */
-    MKT_MEMCTX_SCOPE(work_ctx);
-    MktMemCtx old = mkt_memctx_switch(work_ctx);
+    VS_MEMCTX_SCOPE(work_ctx);
+    VsMemCtx old = vs_memctx_switch(work_ctx);
 
     /* Allocate temporary buffer - freed automatically when scope exits */
-    float *distances = mkt_alloc(n * sizeof(float));
+    float *distances = vs_alloc(n * sizeof(float));
 
     /* ... compute distances ... */
 
     /* Restore previous context */
-    mkt_memctx_switch(old);
+    vs_memctx_switch(old);
     /* work_ctx automatically deleted via cleanup attribute */
 }
 
 /* Example: persistent arena for index build */
-MktMemCtx build_ctx = mkt_memctx_create(NULL, "IndexBuild");
-MktMemCtx old = mkt_memctx_switch(build_ctx);
+VsMemCtx build_ctx = vs_memctx_create(NULL, "IndexBuild");
+VsMemCtx old = vs_memctx_switch(build_ctx);
 
 /* All allocations go to build_ctx */
-Vec32 *centroids = mkt_alloc(k * sizeof(Vec32));
+Vec32 *centroids = vs_alloc(k * sizeof(Vec32));
 
 /* Reset to reuse memory for next phase */
-mkt_memctx_reset(build_ctx);
+vs_memctx_reset(build_ctx);
 
 /* Clean up when done */
-mkt_memctx_switch(old);
-mkt_memctx_delete(build_ctx);
+vs_memctx_switch(old);
+vs_memctx_delete(build_ctx);
 ```
 
 #### Design Notes
@@ -1285,9 +1286,9 @@ mkt_memctx_delete(build_ctx);
 
 **Limitations**:
 
-- `mkt_free()` is a no-op; memory is only released via `mkt_memctx_reset()`
-  or `mkt_memctx_delete()`
-- `mkt_realloc()` cannot reclaim old space; avoid in hot paths
+- `vs_free()` is a no-op; memory is only released via `vs_memctx_reset()`
+  or `vs_memctx_delete()`
+- `vs_realloc()` cannot reclaim old space; avoid in hot paths
 - Not suitable for long-lived allocations with varying lifetimes
 
 **Tests**: Unit tests verify:
@@ -1315,21 +1316,21 @@ typedef enum {
 } SimdCapability;
 
 // Detect CPU capabilities at runtime
-SimdCapability mkt_detect_simd(void);
+SimdCapability vs_detect_simd(void);
 
 // Cache line size (typically 64 bytes)
-#define MKT_CACHE_LINE 64
+#define VS_CACHE_LINE 64
 
 // Prefetch hints
-#define mkt_prefetch_read(addr)  __builtin_prefetch((addr), 0, 3)
-#define mkt_prefetch_write(addr) __builtin_prefetch((addr), 1, 3)
+#define vs_prefetch_read(addr)  __builtin_prefetch((addr), 0, 3)
+#define vs_prefetch_write(addr) __builtin_prefetch((addr), 1, 3)
 
 // Likely/unlikely branch hints
-#define mkt_likely(x)   __builtin_expect(!!(x), 1)
-#define mkt_unlikely(x) __builtin_expect(!!(x), 0)
+#define vs_likely(x)   __builtin_expect(!!(x), 1)
+#define vs_unlikely(x) __builtin_expect(!!(x), 0)
 
 // Compiler barriers
-#define mkt_compiler_barrier() __asm__ __volatile__("" ::: "memory")
+#define vs_compiler_barrier() __asm__ __volatile__("" ::: "memory")
 ```
 
 **Tests**: Verify SIMD detection matches actual CPU capabilities.
@@ -1350,16 +1351,16 @@ implementations selected at runtime based on CPU capabilities.
 
 ```c
 // Single vector pair distance
-Distance mkt_distance_l2(Vec32Ref a, Vec32Ref b);
-Distance mkt_distance_ip(Vec32Ref a, Vec32Ref b);  // Inner product
-Distance mkt_distance_cosine(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_l2(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_ip(Vec32Ref a, Vec32Ref b);  // Inner product
+Distance vs_distance_cosine(Vec32Ref a, Vec32Ref b);
 
 // Generic dispatch
-Distance mkt_distance(Vec32Ref a, Vec32Ref b, DistanceMetric metric);
+Distance vs_distance(Vec32Ref a, Vec32Ref b, DistanceMetric metric);
 
 // Batch: distances from one query to multiple vectors
 // Results written to `distances` array (must be pre-allocated)
-void mkt_distance_batch(
+void vs_distance_batch(
     Vec32Ref query,
     const float *vectors,  // Contiguous array of vectors
     uint32_t count,
@@ -1370,7 +1371,7 @@ void mkt_distance_batch(
 
 // Batch with early termination: stop when found k vectors below threshold
 // Returns number of vectors actually processed
-uint32_t mkt_distance_batch_threshold(
+uint32_t vs_distance_batch_threshold(
     Vec32Ref query,
     const float *vectors,
     uint32_t count,
@@ -1387,7 +1388,7 @@ uint32_t mkt_distance_batch_threshold(
 
 ```c
 // Process 16 floats per iteration
-Distance mkt_distance_l2_avx512(Vec32Ref a, Vec32Ref b) {
+Distance vs_distance_l2_avx512(Vec32Ref a, Vec32Ref b) {
     const float *pa = a.data;
     const float *pb = b.data;
     Dimension dim = a.dim;
@@ -1419,7 +1420,7 @@ Distance mkt_distance_l2_avx512(Vec32Ref a, Vec32Ref b) {
 #### Batch Distance with Prefetching
 
 ```c
-void mkt_distance_batch_l2_avx512(
+void vs_distance_batch_l2_avx512(
     Vec32Ref query,
     const float *vectors,
     uint32_t count,
@@ -1432,11 +1433,11 @@ void mkt_distance_batch_l2_avx512(
     for (uint32_t i = 0; i < count; i++) {
         // Prefetch future vectors
         if (i + prefetch_ahead < count) {
-            mkt_prefetch_read(vectors + (i + prefetch_ahead) * dim);
+            vs_prefetch_read(vectors + (i + prefetch_ahead) * dim);
         }
 
         Vec32Ref v = { .data = vectors + i * dim, .dim = dim };
-        distances[i] = mkt_distance_l2_avx512(query, v);
+        distances[i] = vs_distance_l2_avx512(query, v);
     }
 }
 ```
@@ -1453,21 +1454,21 @@ typedef void (*DistanceBatchFn)(Vec32Ref, const float*, uint32_t,
 static DistanceFn      g_distance_l2_fn;
 static DistanceBatchFn g_distance_batch_l2_fn;
 
-void mkt_distance_init(void) {
-    SimdCapability caps = mkt_detect_simd();
+void vs_distance_init(void) {
+    SimdCapability caps = vs_detect_simd();
 
     if (caps & SIMD_AVX512F) {
-        g_distance_l2_fn = mkt_distance_l2_avx512;
-        g_distance_batch_l2_fn = mkt_distance_batch_l2_avx512;
+        g_distance_l2_fn = vs_distance_l2_avx512;
+        g_distance_batch_l2_fn = vs_distance_batch_l2_avx512;
     } else if (caps & SIMD_AVX2) {
-        g_distance_l2_fn = mkt_distance_l2_avx2;
-        g_distance_batch_l2_fn = mkt_distance_batch_l2_avx2;
+        g_distance_l2_fn = vs_distance_l2_avx2;
+        g_distance_batch_l2_fn = vs_distance_batch_l2_avx2;
     } else if (caps & SIMD_NEON) {
-        g_distance_l2_fn = mkt_distance_l2_neon;
-        g_distance_batch_l2_fn = mkt_distance_batch_l2_neon;
+        g_distance_l2_fn = vs_distance_l2_neon;
+        g_distance_batch_l2_fn = vs_distance_batch_l2_neon;
     } else {
-        g_distance_l2_fn = mkt_distance_l2_scalar;
-        g_distance_batch_l2_fn = mkt_distance_batch_l2_scalar;
+        g_distance_l2_fn = vs_distance_l2_scalar;
+        g_distance_batch_l2_fn = vs_distance_batch_l2_scalar;
     }
 }
 ```
@@ -1478,10 +1479,10 @@ void mkt_distance_init(void) {
 - Performance: Benchmark each implementation, verify SIMD speedup
 - Edge cases: Zero-length vectors, single element, non-aligned pointers
 
-**CLI**: `mkt bench distance` - benchmark distance computations
+**CLI**: `vectorsearch bench distance` - benchmark distance computations
 
 ```
-$ mkt bench distance --dim 768 --count 10000 --metric l2
+$ vectorsearch bench distance --dim 768 --count 10000 --metric l2
 L2 distance (dim=768, count=10000):
   scalar:  45.2 ms (221k vec/s)
   avx2:    8.1 ms (1.23M vec/s)
@@ -1568,19 +1569,19 @@ pgvector's Hamming/Jaccard distance functions.
 typedef uint8_t BinaryQ;
 
 // In PostgreSQL mode, use VarBit directly or ensure layout matches
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 typedef struct {
     uint32_t bit_len;           // Number of bits
     uint8_t  bit_dat[];         // Packed bits, MSB first
-} MktBitVector;
-#define MKT_BITVEC_BYTES(dim) (((dim) + 7) / 8)
-#define MKT_BITVEC_SIZE(dim)  (sizeof(MktBitVector) + MKT_BITVEC_BYTES(dim))
+} VsBitVector;
+#define VS_BITVEC_BYTES(dim) (((dim) + 7) / 8)
+#define VS_BITVEC_SIZE(dim)  (sizeof(VsBitVector) + VS_BITVEC_BYTES(dim))
 #else
 // Use PostgreSQL's VarBit type directly
 #include "utils/varbit.h"
-typedef VarBit MktBitVector;
-#define MKT_BITVEC_BYTES(dim) VARBITBYTES(dim)
-#define MKT_BITVEC_SIZE(dim)  VARBITTOTALLEN(dim)
+typedef VarBit VsBitVector;
+#define VS_BITVEC_BYTES(dim) VARBITBYTES(dim)
+#define VS_BITVEC_SIZE(dim)  VARBITTOTALLEN(dim)
 #endif
 ```
 
@@ -1614,7 +1615,7 @@ removes bias toward any particular vector direction.
  * Reserved for the future PostgreSQL SQL type. Encoding functions produce
  * RaBitQData (compact form) instead. The data portion (f_add, f_rescale,
  * bits[]) is layout-compatible with RaBitQData for zero-copy access via
- * MKT_RABITQ_DATA().
+ * VS_RABITQ_DATA().
  */
 typedef struct RaBitQVector
 {
@@ -1643,12 +1644,12 @@ typedef struct RaBitQData
     uint8_t bits[];    /* D/8 bytes, LSB-first bit packing */
 } RaBitQData;
 
-#define MKT_RABITQ_BYTES(dim)      (((dim) + 7) / 8)
-#define MKT_RABITQ_DATA_SIZE(dim)  (offsetof(RaBitQData, bits) + \
-                                    MKT_RABITQ_BYTES(dim))
+#define VS_RABITQ_BYTES(dim)      (((dim) + 7) / 8)
+#define VS_RABITQ_DATA_SIZE(dim)  (offsetof(RaBitQData, bits) + \
+                                    VS_RABITQ_BYTES(dim))
 
 /* Access compact data portion of a presentation vector (zero-copy cast) */
-#define MKT_RABITQ_DATA(v)         ((RaBitQData *)&(v)->f_add)
+#define VS_RABITQ_DATA(v)         ((RaBitQData *)&(v)->f_add)
 
 /*
  * RaBitQBatch: Batch of encoded vectors in separate arrays
@@ -1674,29 +1675,29 @@ typedef struct {
 } RaBitQParams;
 
 // Initialize with random orthogonal matrix
-RaBitQParams *mkt_rabitq_create(Dimension dim, uint64_t seed);
-int           mkt_rabitq_init(RaBitQParams *params, Dimension dim,
+RaBitQParams *vs_rabitq_create(Dimension dim, uint64_t seed);
+int           vs_rabitq_init(RaBitQParams *params, Dimension dim,
                               uint64_t seed);
-void          mkt_rabitq_destroy(RaBitQParams *params);
-void          mkt_rabitq_cleanup(RaBitQParams *params);
+void          vs_rabitq_destroy(RaBitQParams *params);
+void          vs_rabitq_cleanup(RaBitQParams *params);
 
 // Encode vector to compact RaBitQ format
-RaBitQData *mkt_rabitq_encode(
+RaBitQData *vs_rabitq_encode(
     const RaBitQParams *params,
     Vec32Ref input,
     Vec32Ref centroid
 );
 
 // Encode into pre-allocated buffer
-int mkt_rabitq_encode_into(
+int vs_rabitq_encode_into(
     const RaBitQParams *params,
     Vec32Ref input,
     Vec32Ref centroid,
-    RaBitQData *output   // Must be MKT_RABITQ_DATA_SIZE(dim) bytes
+    RaBitQData *output   // Must be VS_RABITQ_DATA_SIZE(dim) bytes
 );
 
 // Batch encode to separate output arrays
-int mkt_rabitq_encode_batch(
+int vs_rabitq_encode_batch(
     const RaBitQParams *params,
     const float *vectors, Vec32Ref centroid,
     float *f_add, float *f_rescale, uint8_t *bits,
@@ -1704,21 +1705,21 @@ int mkt_rabitq_encode_batch(
 );
 
 // Batch encode with heap-allocated RaBitQBatch output
-RaBitQBatch *mkt_rabitq_encode_batch_alloc(
+RaBitQBatch *vs_rabitq_encode_batch_alloc(
     const RaBitQParams *params,
     const float *vectors, Vec32Ref centroid,
     uint16_t count
 );
 
 // Compute estimated L2² distance from compact data
-Distance mkt_rabitq_distance(
+Distance vs_rabitq_distance(
     const RaBitQQueryState *query_state,
     const RaBitQData *data,
     Dimension dim
 );
 
 // Compute estimated distance with derived error bound
-void mkt_rabitq_distance_with_bound(
+void vs_rabitq_distance_with_bound(
     const RaBitQQueryState *query_state,
     const RaBitQData *data,
     Dimension dim,
@@ -1731,14 +1732,14 @@ void mkt_rabitq_distance_with_bound(
 
 ```c
 // Error bound constant from RaBitQ-Library (empirically tuned)
-#define MKT_RABITQ_EPSILON 1.9f
+#define VS_RABITQ_EPSILON 1.9f
 
 int
-mkt_rabitq_encode_into(const RaBitQParams *params, Vec32Ref input,
+vs_rabitq_encode_into(const RaBitQParams *params, Vec32Ref input,
                        Vec32Ref centroid, RaBitQData *output)
 {
     Dimension dim = params->dim;
-    float *trans = mkt_alloc(dim * sizeof(float));
+    float *trans = vs_alloc(dim * sizeof(float));
 
     // Step 1: Compute residual = input - centroid, track norms
     float l2_sqr = 0.0f, l1_norm = 0.0f;
@@ -1762,7 +1763,7 @@ mkt_rabitq_encode_into(const RaBitQParams *params, Vec32Ref input,
     output->f_rescale = l2_sqr * sqrt_d / l1_norm;
     // f_error derived at query time: C_error * sqrt(f_rescale² - f_add)
 
-    mkt_free(trans);
+    vs_free(trans);
     return 0;
 }
 ```
@@ -1805,7 +1806,7 @@ typedef struct {
 } RaBitQQueryState;
 
 RaBitQQueryState *
-mkt_rabitq_prepare_query(const RaBitQParams *params, Vec32Ref query,
+vs_rabitq_prepare_query(const RaBitQParams *params, Vec32Ref query,
                          Vec32Ref centroid)
 {
     // ... transforms query through P^T, precomputes factors ...
@@ -1815,7 +1816,7 @@ mkt_rabitq_prepare_query(const RaBitQParams *params, Vec32Ref query,
 //   est_dist = g_add + f_add - 2 * f_rescale * final_dot
 // where final_dot = (2 * binary_ip - sum_transformed) * inv_sqrt_d
 Distance
-mkt_rabitq_distance(const RaBitQQueryState *query_state,
+vs_rabitq_distance(const RaBitQQueryState *query_state,
                     const RaBitQData *data, Dimension dim)
 {
     float binary_ip = simd_inner_product(query_state->transformed,
@@ -1830,22 +1831,22 @@ mkt_rabitq_distance(const RaBitQQueryState *query_state,
 // Distance with lower bound for two-stage filtering
 // f_error derived: c_error * sqrt(f_rescale² - f_add)
 void
-mkt_rabitq_distance_with_bound(const RaBitQQueryState *query_state,
+vs_rabitq_distance_with_bound(const RaBitQQueryState *query_state,
                                const RaBitQData *data, Dimension dim,
                                Distance *est_dist,
                                Distance *lower_bound)
 {
-    *est_dist = mkt_rabitq_distance(query_state, data, dim);
+    *est_dist = vs_rabitq_distance(query_state, data, dim);
     float f_error = query_state->c_error
                     * sqrtf(data->f_rescale * data->f_rescale - data->f_add);
     *lower_bound = fmaxf(0.0f, *est_dist - f_error * query_state->g_error);
 }
 
 void
-mkt_rabitq_free_query(RaBitQQueryState *state)
+vs_rabitq_free_query(RaBitQQueryState *state)
 {
-    mkt_free(state->transformed);
-    mkt_free(state);
+    vs_free(state->transformed);
+    vs_free(state);
 }
 ```
 
@@ -1860,7 +1861,7 @@ The most expensive operation at O(D²). SIMD parallelizes the dot products:
 ```c
 // AVX2: Process 8 floats per iteration
 void
-mkt_matvec_avx2(const float *P_inv, const float *input, float *output,
+vs_matvec_avx2(const float *P_inv, const float *input, float *output,
                 Dimension dim)
 {
     for (Dimension i = 0; i < dim; i++) {
@@ -1897,7 +1898,7 @@ Extract sign bits from 8 floats simultaneously:
 ```c
 // AVX2: Extract 8 sign bits at once
 void
-mkt_extract_signs_avx2(const float *transformed, uint8_t *bits, Dimension dim)
+vs_extract_signs_avx2(const float *transformed, uint8_t *bits, Dimension dim)
 {
     __m256 zero = _mm256_setzero_ps();
 
@@ -1928,7 +1929,7 @@ This is the hot path for queries. Use masked blending:
 ```c
 // AVX2: Compute ⟨q_transformed, ō⟩ where ō is binary
 float
-mkt_rabitq_inner_avx2(const float *q_transformed, const uint8_t *bits,
+vs_rabitq_inner_avx2(const float *q_transformed, const uint8_t *bits,
                       Dimension dim)
 {
     float scale = 1.0f / sqrtf((float)dim);
@@ -1988,7 +1989,7 @@ XOR + popcount is extremely fast with SIMD:
 ```c
 // AVX2 with POPCNT
 uint32_t
-mkt_hamming_avx2(const uint8_t *a, const uint8_t *b, uint32_t bytes)
+vs_hamming_avx2(const uint8_t *a, const uint8_t *b, uint32_t bytes)
 {
     uint64_t total = 0;
     uint32_t i = 0;
@@ -2017,7 +2018,7 @@ mkt_hamming_avx2(const uint8_t *a, const uint8_t *b, uint32_t bytes)
 
 // AVX512-VPOPCNTDQ: Native vector popcount (much faster)
 uint32_t
-mkt_hamming_avx512(const uint8_t *a, const uint8_t *b, uint32_t bytes)
+vs_hamming_avx512(const uint8_t *a, const uint8_t *b, uint32_t bytes)
 {
     __m512i total = _mm512_setzero_si512();
     uint32_t i = 0;
@@ -2038,7 +2039,7 @@ mkt_hamming_avx512(const uint8_t *a, const uint8_t *b, uint32_t bytes)
 
 ```c
 float
-mkt_norm_sq_avx2(const float *v, Dimension dim)
+vs_norm_sq_avx2(const float *v, Dimension dim)
 {
     __m256 sum = _mm256_setzero_ps();
     Dimension i = 0;
@@ -2104,7 +2105,7 @@ estimates to filter candidates, then rerank survivors with full precision.
 
 ```c
 // kConstEpsilon = 1.9 (from RaBitQ-Library, empirically tuned)
-#define MKT_RABITQ_ERROR_EPSILON 1.9f
+#define VS_RABITQ_ERROR_EPSILON 1.9f
 
 typedef struct {
     float g_add;    // ||query - centroid||²
@@ -2112,7 +2113,7 @@ typedef struct {
 } RaBitQQueryFactors;
 
 // Two-stage search pseudocode:
-void mkt_rabitq_search_two_stage(
+void vs_rabitq_search_two_stage(
     const RaBitQQueryFactors *query_factors,
     const RaBitQFactors *vec_factors,
     const uint8_t *binary_codes,
@@ -2156,7 +2157,7 @@ Both faiss and RaBitQ-Library process vectors in batches of 32 using lookup
 tables (LUT) for SIMD-friendly accumulation:
 
 ```c
-#define MKT_RABITQ_BATCH_SIZE 32
+#define VS_RABITQ_BATCH_SIZE 32
 
 // Data layout for batch processing (from RaBitQ-Library):
 // [Binary codes: padded_dim * 32 / 8 bytes]
@@ -2183,7 +2184,7 @@ For efficient SIMD processing, dimensions must be padded:
 
 ```c
 // Pad dimension to multiple of 64 for binary code alignment
-#define MKT_RABITQ_PAD_DIM(dim) (((dim) + 63) & ~63)
+#define VS_RABITQ_PAD_DIM(dim) (((dim) + 63) & ~63)
 
 // Example: 768-dim needs no padding (768 % 64 == 0)
 // Example: 384-dim needs no padding (384 % 64 == 0)
@@ -2206,13 +2207,13 @@ typedef struct {
     float delta;         // LUT quantization step
 } RaBitQQuery;
 
-RaBitQQuery *mkt_rabitq_prepare_query(
+RaBitQQuery *vs_rabitq_prepare_query(
     const RaBitQParams *params,
     Vec32Ref query,
     Vec32Ref centroid
 );
 
-void mkt_rabitq_free_query(RaBitQQuery *q);
+void vs_rabitq_free_query(RaBitQQuery *q);
 ```
 
 **Multi-bit support (future consideration):**
@@ -2235,7 +2236,7 @@ lower bounds, then refines with additional bits only for promising candidates.
 
 ```c
 // Error bound multiplier (RaBitQ-Library)
-#define MKT_RABITQ_EPSILON 1.9f
+#define VS_RABITQ_EPSILON 1.9f
 
 // Tight start values for multi-bit optimization (RaBitQ-Library)
 // Used to accelerate finding optimal quantization scaling
@@ -2291,21 +2292,21 @@ typedef struct {
 } SQ8Params;
 
 // Learn quantization parameters from a sample of vectors
-SQ8Params *mkt_sq8_learn(
+SQ8Params *vs_sq8_learn(
     const float *vectors,
     uint32_t count,
     Dimension dim
 );
 
 // Quantize a single vector
-void mkt_sq8_encode(
+void vs_sq8_encode(
     const SQ8Params *params,
     Vec32Ref input,
     ScalarQ8 *output          // dim bytes
 );
 
 // Quantize multiple vectors (batch)
-void mkt_sq8_encode_batch(
+void vs_sq8_encode_batch(
     const SQ8Params *params,
     const float *inputs,
     uint32_t count,
@@ -2315,7 +2316,7 @@ void mkt_sq8_encode_batch(
 
 // Approximate L2 distance between quantized vectors
 // Uses lookup table for speed
-Distance mkt_sq8_distance_l2(
+Distance vs_sq8_distance_l2(
     const ScalarQ8 *a,
     const ScalarQ8 *b,
     const SQ8Params *params
@@ -2323,7 +2324,7 @@ Distance mkt_sq8_distance_l2(
 
 // Asymmetric distance: float query vs quantized vector
 // More accurate than symmetric (both quantized)
-Distance mkt_sq8_distance_asymmetric_l2(
+Distance vs_sq8_distance_asymmetric_l2(
     Vec32Ref query,          // Full precision
     const ScalarQ8 *quantized,
     const SQ8Params *params
@@ -2333,7 +2334,7 @@ Distance mkt_sq8_distance_asymmetric_l2(
 #### SQ8 Encoding (AVX-512)
 
 ```c
-void mkt_sq8_encode_avx512(
+void vs_sq8_encode_avx512(
     const SQ8Params *params,
     Vec32Ref input,
     ScalarQ8 *output
@@ -2383,7 +2384,7 @@ typedef struct {
 } SQ8LUT;
 
 // Build lookup table for one dimension
-void mkt_sq8_build_lut(
+void vs_sq8_build_lut(
     float query_val,
     float min,
     float scale,
@@ -2397,7 +2398,7 @@ void mkt_sq8_build_lut(
 }
 
 // Distance using precomputed LUTs
-Distance mkt_sq8_distance_lut(
+Distance vs_sq8_distance_lut(
     const SQ8LUT *luts,       // dim LUTs
     const ScalarQ8 *quantized,
     Dimension dim
@@ -2423,10 +2424,10 @@ typedef struct {
     uint32_t  packed_bytes; // ceil(dim / 8)
 } BQParams;
 
-void mkt_bq_encode(const BQParams *params, Vec32Ref input, BinaryQ *output);
+void vs_bq_encode(const BQParams *params, Vec32Ref input, BinaryQ *output);
 
 // Hamming distance between binary vectors
-uint32_t mkt_bq_distance_hamming(
+uint32_t vs_bq_distance_hamming(
     const BinaryQ *a,
     const BinaryQ *b,
     uint32_t packed_bytes
@@ -2454,12 +2455,12 @@ typedef struct {
 } SBQParams;
 
 // Online training (Welford's algorithm for numerical stability)
-void mkt_sbq_start_training(SBQParams *params, Dimension dim, uint8_t bits);
-void mkt_sbq_add_sample(SBQParams *params, Vec32Ref sample);
-void mkt_sbq_finish_training(SBQParams *params);
+void vs_sbq_start_training(SBQParams *params, Dimension dim, uint8_t bits);
+void vs_sbq_add_sample(SBQParams *params, Vec32Ref sample);
+void vs_sbq_finish_training(SBQParams *params);
 
 // Quantize vector
-void mkt_sbq_encode(const SBQParams *params, Vec32Ref input, BinaryQ *output);
+void vs_sbq_encode(const SBQParams *params, Vec32Ref input, BinaryQ *output);
 
 // For 1-bit: use Hamming distance (same as BQ)
 // For multi-bit: use popcount on thermometer codes
@@ -2524,22 +2525,22 @@ typedef struct {
 } TopKHeap;
 
 // Create heap with capacity K
-TopKHeap *mkt_topk_create(uint32_t k);
-void      mkt_topk_destroy(TopKHeap *heap);
-void      mkt_topk_reset(TopKHeap *heap);
+TopKHeap *vs_topk_create(uint32_t k);
+void      vs_topk_destroy(TopKHeap *heap);
+void      vs_topk_reset(TopKHeap *heap);
 
 // Insert candidate (O(log K) if heap full, O(1) if distance > max)
-void mkt_topk_insert(TopKHeap *heap, Distance distance, uint32_t id);
+void vs_topk_insert(TopKHeap *heap, Distance distance, uint32_t id);
 
 // Get current threshold (max distance in heap, or INFINITY if not full)
-Distance mkt_topk_threshold(const TopKHeap *heap);
+Distance vs_topk_threshold(const TopKHeap *heap);
 
 // Extract results sorted by distance (ascending)
-void mkt_topk_extract_sorted(TopKHeap *heap, TopKEntry *results);
+void vs_topk_extract_sorted(TopKHeap *heap, TopKEntry *results);
 
 // Batch insert with threshold check
 // Only inserts candidates with distance < current threshold
-void mkt_topk_insert_batch(
+void vs_topk_insert_batch(
     TopKHeap *heap,
     const Distance *distances,
     uint32_t count,
@@ -2584,7 +2585,7 @@ static void sift_down(TopKHeap *heap, uint32_t i) {
     }
 }
 
-void mkt_topk_insert(TopKHeap *heap, Distance distance, uint32_t id) {
+void vs_topk_insert(TopKHeap *heap, Distance distance, uint32_t id) {
     if (heap->count < heap->capacity) {
         // Heap not full: insert and sift up
         uint32_t i = heap->count++;
@@ -2603,7 +2604,7 @@ void mkt_topk_insert(TopKHeap *heap, Distance distance, uint32_t id) {
     // Otherwise: distance >= threshold, ignore
 }
 
-Distance mkt_topk_threshold(const TopKHeap *heap) {
+Distance vs_topk_threshold(const TopKHeap *heap) {
     if (heap->count < heap->capacity) return INFINITY;
     return heap->entries[0].distance;
 }
@@ -2612,18 +2613,18 @@ Distance mkt_topk_threshold(const TopKHeap *heap) {
 #### Batch Insert Optimization
 
 ```c
-void mkt_topk_insert_batch(
+void vs_topk_insert_batch(
     TopKHeap *heap,
     const Distance *distances,
     uint32_t count,
     uint32_t id_offset
 ) {
-    Distance threshold = mkt_topk_threshold(heap);
+    Distance threshold = vs_topk_threshold(heap);
 
     for (uint32_t i = 0; i < count; i++) {
         if (distances[i] < threshold) {
-            mkt_topk_insert(heap, distances[i], id_offset + i);
-            threshold = mkt_topk_threshold(heap);
+            vs_topk_insert(heap, distances[i], id_offset + i);
+            threshold = vs_topk_threshold(heap);
         }
     }
 }
@@ -2661,7 +2662,7 @@ typedef struct {
 } KMeansOptions;
 
 // Standard k-means
-KMeansResult *mkt_kmeans(
+KMeansResult *vs_kmeans(
     const float *vectors,
     uint32_t nvecs,
     Dimension dim,
@@ -2672,33 +2673,33 @@ KMeansResult *mkt_kmeans(
 
 // Streaming k-means for large datasets
 // Processes vectors in chunks, maintains running centroids
-typedef struct MktKMeansStream MktKMeansStream;
+typedef struct VsKMeansStream VsKMeansStream;
 
-MktKMeansStream *mkt_kmeans_stream_create(
+VsKMeansStream *vs_kmeans_stream_create(
     uint32_t nlist,
     Dimension dim,
     DistanceMetric metric,
     const KMeansOptions *options
 );
 
-void mkt_kmeans_stream_add(
-    MktKMeansStream *stream,
+void vs_kmeans_stream_add(
+    VsKMeansStream *stream,
     const float *vectors,
     uint32_t count
 );
 
-KMeansResult *mkt_kmeans_stream_finish(MktKMeansStream *stream);
-void mkt_kmeans_stream_destroy(MktKMeansStream *stream);
+KMeansResult *vs_kmeans_stream_finish(VsKMeansStream *stream);
+void vs_kmeans_stream_destroy(VsKMeansStream *stream);
 
 // Find medoid for each cluster (actual vector closest to centroid)
-void mkt_kmeans_compute_medoids(
+void vs_kmeans_compute_medoids(
     KMeansResult *result,
     const float *vectors,
     uint32_t nvecs
 );
 
 // Free result
-void mkt_kmeans_result_destroy(KMeansResult *result);
+void vs_kmeans_result_destroy(KMeansResult *result);
 ```
 
 #### K-Means++ Initialization
@@ -2722,7 +2723,7 @@ static void kmeans_plusplus_init(
     memcpy(centroids, vectors + first * dim, dim * sizeof(float));
 
     // Distance to nearest centroid for each vector
-    Distance *min_distances = mkt_alloc(nvecs * sizeof(Distance));
+    Distance *min_distances = vs_alloc(nvecs * sizeof(Distance));
     for (uint32_t i = 0; i < nvecs; i++) {
         min_distances[i] = INFINITY;
     }
@@ -2732,7 +2733,7 @@ static void kmeans_plusplus_init(
         Vec32Ref centroid = { .data = centroids + (c - 1) * dim, .dim = dim };
         for (uint32_t i = 0; i < nvecs; i++) {
             Vec32Ref v = { .data = vectors + i * dim, .dim = dim };
-            Distance d = mkt_distance_l2(centroid, v);
+            Distance d = vs_distance_l2(centroid, v);
             if (d < min_distances[i]) {
                 min_distances[i] = d;
             }
@@ -2758,14 +2759,14 @@ static void kmeans_plusplus_init(
         memcpy(centroids + c * dim, vectors + next * dim, dim * sizeof(float));
     }
 
-    mkt_free(min_distances);
+    vs_free(min_distances);
 }
 ```
 
 #### Lloyd's Algorithm
 
 ```c
-KMeansResult *mkt_kmeans(
+KMeansResult *vs_kmeans(
     const float *vectors,
     uint32_t nvecs,
     Dimension dim,
@@ -2773,19 +2774,19 @@ KMeansResult *mkt_kmeans(
     DistanceMetric metric,
     const KMeansOptions *opts
 ) {
-    KMeansResult *result = mkt_alloc0(sizeof(KMeansResult));
+    KMeansResult *result = vs_alloc0(sizeof(KMeansResult));
     result->nlist = nlist;
     result->dim = dim;
-    result->centroids = mkt_alloc_aligned(nlist * dim * sizeof(float), 64);
-    result->assignments = mkt_alloc(nvecs * sizeof(ClusterId));
-    result->cluster_sizes = mkt_alloc0(nlist * sizeof(uint32_t));
+    result->centroids = vs_alloc_aligned(nlist * dim * sizeof(float), 64);
+    result->assignments = vs_alloc(nvecs * sizeof(ClusterId));
+    result->cluster_sizes = vs_alloc0(nlist * sizeof(uint32_t));
 
     // Initialize centroids
     kmeans_plusplus_init(vectors, nvecs, dim, nlist, result->centroids, opts->seed);
 
     // Temporary storage for centroid updates
-    float *new_centroids = mkt_alloc0(nlist * dim * sizeof(float));
-    uint32_t *counts = mkt_alloc0(nlist * sizeof(uint32_t));
+    float *new_centroids = vs_alloc0(nlist * dim * sizeof(float));
+    uint32_t *counts = vs_alloc0(nlist * sizeof(uint32_t));
 
     for (uint32_t iter = 0; iter < opts->max_iterations; iter++) {
         // Reset accumulators
@@ -2804,7 +2805,7 @@ KMeansResult *mkt_kmeans(
                     .data = result->centroids + c * dim,
                     .dim = dim
                 };
-                Distance d = mkt_distance(v, centroid, metric);
+                Distance d = vs_distance(v, centroid, metric);
                 if (d < best_dist) {
                     best_dist = d;
                     best_cluster = c;
@@ -2851,8 +2852,8 @@ KMeansResult *mkt_kmeans(
     // Copy final cluster sizes
     memcpy(result->cluster_sizes, counts, nlist * sizeof(uint32_t));
 
-    mkt_free(new_centroids);
-    mkt_free(counts);
+    vs_free(new_centroids);
+    vs_free(counts);
 
     return result;
 }
@@ -2861,7 +2862,7 @@ KMeansResult *mkt_kmeans(
 #### Medoid Computation
 
 ```c
-void mkt_kmeans_compute_medoids(
+void vs_kmeans_compute_medoids(
     KMeansResult *result,
     const float *vectors,
     uint32_t nvecs
@@ -2882,7 +2883,7 @@ void mkt_kmeans_compute_medoids(
             if (result->assignments[i] != c) continue;
 
             Vec32Ref v = { .data = vectors + i * dim, .dim = dim };
-            Distance d = mkt_distance_l2(centroid, v);
+            Distance d = vs_distance_l2(centroid, v);
             if (d < best_dist) {
                 best_dist = d;
                 best_idx = i;
@@ -2904,10 +2905,10 @@ void mkt_kmeans_compute_medoids(
 - Determinism: same seed produces same result
 - Performance: benchmark on various sizes
 
-**CLI**: `mkt bench cluster`
+**CLI**: `vectorsearch bench cluster`
 
 ```
-$ mkt bench cluster --dim 128 --nvecs 100000 --nlist 1000
+$ vectorsearch bench cluster --dim 128 --nvecs 100000 --nlist 1000
 K-means clustering (dim=128, nvecs=100000, nlist=1000):
   Initialization: 1.2s
   Lloyd iterations: 8
@@ -2962,10 +2963,10 @@ typedef struct {
     uint32_t  k;            // Ground truth k
 } BenchDataset;
 
-BenchDataset *mkt_bench_load_fvecs(const char *base_path,
+BenchDataset *vs_bench_load_fvecs(const char *base_path,
                                     const char *query_path,
                                     const char *gt_path);
-void          mkt_bench_dataset_free(BenchDataset *ds);
+void          vs_bench_dataset_free(BenchDataset *ds);
 ```
 
 #### Metrics
@@ -2984,7 +2985,7 @@ typedef struct {
 
 // Compute recall: what fraction of true k-NN are in the result set
 float
-mkt_bench_recall(const uint32_t *true_nn, const uint32_t *result_nn,
+vs_bench_recall(const uint32_t *true_nn, const uint32_t *result_nn,
                  uint32_t k_true, uint32_t k_result)
 {
     uint32_t found = 0;
@@ -3043,16 +3044,16 @@ typedef struct {
 
 // Run benchmark for a single quantization method
 BenchResult
-mkt_bench_run_method(const BenchDataset *ds, const QuantConfig *config,
+vs_bench_run_method(const BenchDataset *ds, const QuantConfig *config,
                      uint32_t k)
 {
     BenchResult result = { .method = config->method };
     uint64_t start, end;
 
     // 1. Encode all base vectors
-    start = mkt_time_ns();
+    start = vs_time_ns();
     void *quantized = encode_vectors(ds->vectors, ds->nvecs, ds->dim, config);
-    end = mkt_time_ns();
+    end = vs_time_ns();
     result.perf.encode_time_ms = (double)(end - start) / 1e6;
     result.perf.memory_bytes = get_quantized_size(ds->nvecs, ds->dim, config);
     result.perf.compression_ratio =
@@ -3060,11 +3061,11 @@ mkt_bench_run_method(const BenchDataset *ds, const QuantConfig *config,
         (float)result.perf.memory_bytes;
 
     // 2. Run queries and measure accuracy
-    uint32_t *results = mkt_alloc(ds->nqueries * k * sizeof(uint32_t));
+    uint32_t *results = vs_alloc(ds->nqueries * k * sizeof(uint32_t));
     float total_recall = 0.0f;
     float total_dist_ratio = 0.0f;
 
-    start = mkt_time_ns();
+    start = vs_time_ns();
     for (uint32_t q = 0; q < ds->nqueries; q++) {
         Vec32Ref query = {
             .data = ds->queries + q * ds->dim,
@@ -3075,7 +3076,7 @@ mkt_bench_run_method(const BenchDataset *ds, const QuantConfig *config,
         find_knn_quantized(quantized, ds->nvecs, query, config,
                            k, results + q * k);
     }
-    end = mkt_time_ns();
+    end = vs_time_ns();
 
     result.perf.query_time_us =
         (double)(end - start) / (double)ds->nqueries / 1000.0;
@@ -3084,7 +3085,7 @@ mkt_bench_run_method(const BenchDataset *ds, const QuantConfig *config,
 
     // 3. Compute accuracy metrics
     for (uint32_t q = 0; q < ds->nqueries; q++) {
-        total_recall += mkt_bench_recall(
+        total_recall += vs_bench_recall(
             ds->groundtruth + q * ds->k,
             results + q * k,
             MIN(ds->k, k), k);
@@ -3099,8 +3100,8 @@ mkt_bench_run_method(const BenchDataset *ds, const QuantConfig *config,
             .data = ds->vectors + results[q * k] * ds->dim,
             .dim = ds->dim
         };
-        float true_dist = mkt_distance_l2(query, true_nn);
-        float found_dist = mkt_distance_l2(query, found_nn);
+        float true_dist = vs_distance_l2(query, true_nn);
+        float found_dist = vs_distance_l2(query, found_nn);
         if (true_dist > 1e-10f) {
             total_dist_ratio += found_dist / true_dist;
         }
@@ -3109,14 +3110,14 @@ mkt_bench_run_method(const BenchDataset *ds, const QuantConfig *config,
     result.accuracy.recall_at_10 = total_recall / (float)ds->nqueries;
     result.accuracy.distance_ratio = total_dist_ratio / (float)ds->nqueries;
 
-    mkt_free(results);
+    vs_free(results);
     free_quantized(quantized, config);
     return result;
 }
 
 // Run all methods and compare
 void
-mkt_bench_run_all(const BenchDataset *ds, uint32_t k)
+vs_bench_run_all(const BenchDataset *ds, uint32_t k)
 {
     QuantMethod methods[] = {
         QUANT_METHOD_NONE,
@@ -3138,7 +3139,7 @@ mkt_bench_run_all(const BenchDataset *ds, uint32_t k)
 
     for (size_t i = 0; i < nmethods; i++) {
         QuantConfig config = create_config(methods[i], ds->dim);
-        BenchResult r = mkt_bench_run_method(ds, &config, k);
+        BenchResult r = vs_bench_run_method(ds, &config, k);
 
         printf("%-10s %8.4f %8.4f %10.1f %10.1f %7.1fx\n",
                quant_method_name(r.method),
@@ -3155,10 +3156,10 @@ mkt_bench_run_all(const BenchDataset *ds, uint32_t k)
 
 #### CLI
 
-**Command**: `mkt bench quantize`
+**Command**: `vectorsearch bench quantize`
 
 ```
-$ mkt bench quantize --dataset sift1m --k 10
+$ vectorsearch bench quantize --dataset sift1m --k 10
 
 Quantization Benchmark: 1000000 vectors, 128 dims, 10000 queries, k=10
 
@@ -3170,7 +3171,7 @@ sq8          0.9912    1.0008       102.3       18.7     4.0x
 sbq          0.9756    1.0045       312.5       10.2    32.0x
 bq           0.8234    1.0312        45.1        5.3    32.0x
 
-$ mkt bench quantize --dataset gist1m --k 100 --methods rabitq,sq8
+$ vectorsearch bench quantize --dataset gist1m --k 100 --methods rabitq,sq8
 
 Quantization Benchmark: 1000000 vectors, 960 dims, 1000 queries, k=100
 
@@ -3184,9 +3185,9 @@ sq8           0.9801    1.0034       567.2      134.5     4.0x
 **Options:**
 
 ```
-mkt bench quantize - Quantization method benchmark
+vectorsearch bench quantize - Quantization method benchmark
 
-Usage: mkt bench quantize [OPTIONS]
+Usage: vectorsearch bench quantize [OPTIONS]
 
 Options:
   --dataset <name>     Dataset name (sift1m, gist1m, glove, deep1m, spacev)
@@ -3243,7 +3244,7 @@ typedef struct {
 } DistRatioStats;
 
 DistRatioStats
-mkt_bench_distance_ratio_stats(const float *ratios, uint32_t n);
+vs_bench_distance_ratio_stats(const float *ratios, uint32_t n);
 ```
 
 **3. Recall vs Query Time (QPS)**
@@ -3252,7 +3253,7 @@ Measure queries-per-second at various recall targets. Methods that achieve
 higher recall at the same QPS are superior:
 
 ```
-$ mkt bench quantize --dataset sift1m --sweep-recall 0.90,0.95,0.99
+$ vectorsearch bench quantize --dataset sift1m --sweep-recall 0.90,0.95,0.99
 
 Target    Method      Actual     QPS
 ------    ------      ------     ------
@@ -3271,15 +3272,15 @@ Run benchmarks across dataset sizes to understand scaling behavior:
 ```c
 // Measure how metrics scale with dataset size
 void
-mkt_bench_scalability(const char *dataset_path, QuantMethod method,
+vs_bench_scalability(const char *dataset_path, QuantMethod method,
                       uint32_t sizes[], size_t nsizes)
 {
     for (size_t i = 0; i < nsizes; i++) {
         BenchDataset *ds = load_subset(dataset_path, sizes[i]);
-        BenchResult r = mkt_bench_run_method(ds, method, 10);
+        BenchResult r = vs_bench_run_method(ds, method, 10);
         printf("%8u vectors: recall=%.4f, query=%.1fus\n",
                sizes[i], r.accuracy.recall_at_10, r.perf.query_time_us);
-        mkt_bench_dataset_free(ds);
+        vs_bench_dataset_free(ds);
     }
 }
 ```
@@ -3310,7 +3311,7 @@ typedef struct {
 
 // Measure recall vs nprobe trade-off
 void
-mkt_bench_ivf_nprobe(const BenchDataset *ds, const IVFConfig *config,
+vs_bench_ivf_nprobe(const BenchDataset *ds, const IVFConfig *config,
                      uint32_t nprobes[], size_t n)
 {
     // Build IVF index with clustering
@@ -3342,7 +3343,7 @@ TEST(recall_computation)
 {
     uint32_t true_nn[] = {1, 5, 3, 8, 2};
     uint32_t result[]  = {1, 3, 7, 2, 9};
-    float recall = mkt_bench_recall(true_nn, result, 5, 5);
+    float recall = vs_bench_recall(true_nn, result, 5, 5);
     // Found: 1, 3, 2 = 3/5
     ASSERT_FLOAT_EQ(0.6f, recall, 0.001f, "recall should be 0.6");
 }
@@ -3350,7 +3351,7 @@ TEST(recall_computation)
 TEST(fvecs_loader)
 {
     // Test with small embedded dataset
-    BenchDataset *ds = mkt_bench_load_fvecs(
+    BenchDataset *ds = vs_bench_load_fvecs(
         "testdata/small_base.fvecs",
         "testdata/small_query.fvecs",
         "testdata/small_gt.ivecs"
@@ -3358,7 +3359,7 @@ TEST(fvecs_loader)
     ASSERT_NOT_NULL(ds, "dataset should load");
     ASSERT_EQ(1000, ds->nvecs, "should have 1000 vectors");
     ASSERT_EQ(128, ds->dim, "should be 128-dim");
-    mkt_bench_dataset_free(ds);
+    vs_bench_dataset_free(ds);
 }
 
 TEST(baseline_perfect_recall)
@@ -3366,10 +3367,10 @@ TEST(baseline_perfect_recall)
     // Full precision should achieve perfect recall
     BenchDataset *ds = load_test_dataset();
     QuantConfig config = { .method = QUANT_METHOD_NONE };
-    BenchResult r = mkt_bench_run_method(ds, &config, 10);
+    BenchResult r = vs_bench_run_method(ds, &config, 10);
     ASSERT_FLOAT_EQ(1.0f, r.accuracy.recall_at_10, 0.001f,
                     "full precision should have perfect recall");
-    mkt_bench_dataset_free(ds);
+    vs_bench_dataset_free(ds);
 }
 ```
 
@@ -3393,7 +3394,7 @@ benchmark:
         tar xzf sift10k.tar.gz -C testdata/
     - name: Run benchmark
       run: |
-        ./builddir/mkt bench quantize \
+        ./builddir/vectorsearch bench quantize \
           --base testdata/sift10k/base.fvecs \
           --query testdata/sift10k/query.fvecs \
           --gt testdata/sift10k/gt.ivecs \
@@ -3469,7 +3470,7 @@ typedef struct PrismPostingEntryHeader
     float               f_error;    // 4B — error-bound factor (pre-stored)
 } PrismPostingEntryHeader;            // 20B total
 
-// Followed in memory by: uint8_t bits[MKT_RABITQ_BYTES(dim)]
+// Followed in memory by: uint8_t bits[VS_RABITQ_BYTES(dim)]
 
 // Flags
 #define PRISM_POSTING_FLAG_DELETED   0x01  // Soft-deleted, pending vacuum
@@ -3480,7 +3481,7 @@ Per-entry size:
 
 ```c
 #define PRISM_POSTING_ENTRY_SIZE(dim) \
-    (sizeof(PrismPostingEntryHeader) + MKT_RABITQ_BYTES(dim))
+    (sizeof(PrismPostingEntryHeader) + VS_RABITQ_BYTES(dim))
 ```
 
 At dim=768: `20 + 96 = 116` bytes per entry.
@@ -3534,7 +3535,7 @@ zero-framing reference point.
 
 ### 3.2 Why AoS
 
-The SIMD scan kernel (`mkt_rabitq_inner_product_multi_avx512`) reads bits at
+The SIMD scan kernel (`vs_rabitq_inner_product_multi_avx512`) reads bits at
 some stride and does 4-wide masked accumulation across dim per group. The
 stride is programmable. With AoS we pass `stride = PRISM_POSTING_ENTRY_SIZE(dim)`
 and `bits_base = prism_posting_first_bits(content)` — no new kernel code
@@ -3719,16 +3720,16 @@ typedef struct {
     BlockNumber next_meta_blkno; // Next metapage (if directory overflows)
     // RaBitQ parameters follow (orthogonal matrix seed, etc.)
     // Then: posting_list_heads[nlist] (BlockNumber per cluster)
-} MktMetapage;
+} VsMetapage;
 
-#define MKT_MAGIC 0x4D4B4154  // "MKAT"
-#define MKT_VERSION 1
+#define VS_MAGIC 0x4D4B4154  // "MKAT"
+#define VS_VERSION 1
 
 // Directory entries per metapage (after fixed header + RaBitQ params)
-size_t mkt_meta_directory_capacity(Dimension dim);
+size_t vs_meta_directory_capacity(Dimension dim);
 
 // Initialize metapage
-void mkt_meta_init(
+void vs_meta_init(
     void *page,
     Dimension dim,
     DistanceMetric metric,
@@ -3737,8 +3738,8 @@ void mkt_meta_init(
 );
 
 // Get/set posting list head for cluster
-BlockNumber mkt_meta_get_head(const void *page, ClusterId cluster);
-void mkt_meta_set_head(void *page, ClusterId cluster, BlockNumber block);
+BlockNumber vs_meta_get_head(const void *page, ClusterId cluster);
+void vs_meta_set_head(void *page, ClusterId cluster, BlockNumber block);
 ```
 
 **Tests**:
@@ -3805,17 +3806,17 @@ typedef struct {
 } BuildOptions;
 
 // Create build context
-BuildContext *mkt_build_create(
+BuildContext *vs_build_create(
     Dimension dim,
     DistanceMetric metric,
     const BuildOptions *options
 );
 
-void mkt_build_destroy(BuildContext *ctx);
+void vs_build_destroy(BuildContext *ctx);
 
 // Phase 1: Add vectors for sampling
 // Call repeatedly with batches of vectors
-void mkt_build_add_sample(
+void vs_build_add_sample(
     BuildContext *ctx,
     const float *vectors,
     const ItemPointer *tids,  // Can be NULL for standalone testing
@@ -3823,11 +3824,11 @@ void mkt_build_add_sample(
 );
 
 // Phase 2: Perform clustering on sample
-void mkt_build_cluster(BuildContext *ctx);
+void vs_build_cluster(BuildContext *ctx);
 
 // Phase 3: Assign vectors to clusters and build posting lists
 // Call repeatedly with batches (can be same vectors as sampling, or full scan)
-void mkt_build_assign(
+void vs_build_assign(
     BuildContext *ctx,
     const float *vectors,
     const ItemPointer *tids,
@@ -3842,7 +3843,7 @@ typedef void (*PageWriteCallback)(
     const void *page_data
 );
 
-void mkt_build_write_pages(
+void vs_build_write_pages(
     BuildContext *ctx,
     PageWriteCallback callback,
     void *callback_data
@@ -3859,7 +3860,7 @@ typedef struct {
     uint32_t min_cluster_size;
 } BuildStats;
 
-BuildStats mkt_build_stats(const BuildContext *ctx);
+BuildStats vs_build_stats(const BuildContext *ctx);
 ```
 
 ### 4.2 Streaming Build
@@ -3871,29 +3872,29 @@ For datasets larger than memory:
 // Pass 1: Sample vectors, cluster, learn quantization
 // Pass 2: Assign all vectors, write pages incrementally
 
-typedef struct MktStreamBuild MktStreamBuild;
+typedef struct VsStreamBuild VsStreamBuild;
 
 // Create streaming builder
-MktStreamBuild *mkt_stream_build_create(
+VsStreamBuild *vs_stream_build_create(
     Dimension dim,
     DistanceMetric metric,
     const BuildOptions *options
 );
 
 // Pass 1: Sampling (call multiple times)
-void mkt_stream_build_sample(
-    MktStreamBuild *builder,
+void vs_stream_build_sample(
+    VsStreamBuild *builder,
     const float *vectors,
     uint32_t count
 );
 
 // Finish pass 1: perform clustering
-void mkt_stream_build_finish_sampling(MktStreamBuild *builder);
+void vs_stream_build_finish_sampling(VsStreamBuild *builder);
 
 // Pass 2: Assignment (call multiple times)
 // Returns pages to write via callback
-void mkt_stream_build_assign(
-    MktStreamBuild *builder,
+void vs_stream_build_assign(
+    VsStreamBuild *builder,
     const float *vectors,
     const ItemPointer *tids,
     uint32_t count,
@@ -3902,13 +3903,13 @@ void mkt_stream_build_assign(
 );
 
 // Finish pass 2: write final pages, metapage
-void mkt_stream_build_finish(
-    MktStreamBuild *builder,
+void vs_stream_build_finish(
+    VsStreamBuild *builder,
     PageWriteCallback callback,
     void *callback_data
 );
 
-void mkt_stream_build_destroy(MktStreamBuild *builder);
+void vs_stream_build_destroy(VsStreamBuild *builder);
 ```
 
 **Tests**:
@@ -3917,10 +3918,11 @@ void mkt_stream_build_destroy(MktStreamBuild *builder);
 - Empty clusters: verify handling of empty clusters
 - Page boundaries: verify entries split correctly across pages
 
-**CLI**: `mkt build`
+**CLI**: `vectorsearch build`
 
 ```
-$ mkt build --input vectors.bin --dim 768 --nlist 1000 --output index.mkt
+$ vectorsearch build --input vectors.bin --dim 768 --nlist 1000 \
+    --output index.vs
 Sampling: 10000 / 100000 vectors
 Clustering: 1000 clusters, 15 iterations
 Assigning: 100000 vectors
@@ -4060,7 +4062,7 @@ This enables:
 Search is split into two phases: centroid routing (beam search through the
 centroid tree) and posting list scan (RaBitQ distance on data vectors).
 
-The centroid search phase uses `MktStorage` callbacks so the same code
+The centroid search phase uses `VsStorage` callbacks so the same code
 runs in both standalone and PostgreSQL mode. There is **no separate in-memory
 centroid cache** — search reads centroid pages directly via the storage
 vtable, which in PG mode wraps the standard shared buffer cache.
@@ -4095,7 +4097,7 @@ counts for diagnostics.
 
 ### 5.2 Centroid Search Implementation
 
-Centroid search uses level-by-level beam search via `MktStorage`
+Centroid search uses level-by-level beam search via `VsStorage`
 callbacks, reading centroid pages directly from the buffer cache (or from a
 flat array in standalone mode). Centroid pages declare their data format
 (RaBitQ, float32, or float16) in the opaque flags, and the search algorithm
@@ -4109,7 +4111,7 @@ typedef struct PrismCentroidSearchState
     const RaBitQQueryState *qstate;      /* query for RaBitQ pages */
     const float            *query;       /* raw query for float/half pages */
     Datum                   query_datum; /* opaque query for reranking */
-    MktStorage             *storage;     /* page and vector I/O */
+    VsStorage             *storage;     /* page and vector I/O */
     uint32_t                beam_width;
     uint32_t                nprobe;
     Dimension               dim;
@@ -4163,17 +4165,17 @@ Distance computation is per-page, dispatched by `prism_centroid_page_format()`:
 
 - **RaBitQ pages**: Batch scoring using `ScorePageScratch` buffers. Gathers
   `f_add`/`f_rescale` arrays and calls
-  `mkt_rabitq_distance_batch_multi_with_bound()` (asymmetric) or
-  `mkt_rabitq_distance_batch_symmetric_with_bound()` (symmetric). Returns
+  `vs_rabitq_distance_batch_multi_with_bound()` (asymmetric) or
+  `vs_rabitq_distance_batch_symmetric_with_bound()` (symmetric). Returns
   approximate distances with error bounds. Supports both asymmetric
   (full-precision query × 1-bit data) and symmetric (1-bit query × 1-bit
   data) modes.
 
-- **Float32 pages**: Exact L2 via `mkt_l2_distance_squared()` on in-page
+- **Float32 pages**: Exact L2 via `vs_l2_distance_squared()` on in-page
   float vectors accessed through `prism_centroid_float_data()`. Returns exact
   distances with error = 0 (no reranking needed).
 
-- **Float16 pages**: Exact L2 via `mkt_f16_l2_squared()` on in-page half
+- **Float16 pages**: Exact L2 via `vs_f16_l2_squared()` on in-page half
   vectors accessed through `prism_centroid_half_data()`. Returns exact
   distances with error = 0 (no reranking needed).
 
@@ -4188,7 +4190,7 @@ skip reranking entirely.
 ### 5.3 Posting List Scan
 
 ```c
-void mkt_search_posting_lists(
+void vs_search_posting_lists(
     const ClusterId *clusters,
     uint32_t nprobe,
     Vec32Ref query,
@@ -4201,9 +4203,9 @@ void mkt_search_posting_lists(
     TopKHeap *results
 ) {
     // Precompute query-dependent values for RaBitQ asymmetric distance
-    float query_norm = mkt_vec_norm(query);
-    float *query_normalized = mkt_alloc(query.dim * sizeof(float));
-    mkt_vec_normalize(query, query_normalized);
+    float query_norm = vs_vec_norm(query);
+    float *query_normalized = vs_alloc(query.dim * sizeof(float));
+    vs_vec_normalize(query, query_normalized);
 
     // Scan each cluster's posting list
     for (uint32_t p = 0; p < nprobe; p++) {
@@ -4220,8 +4222,8 @@ void mkt_search_posting_lists(
 
             // Phase 1: batch IP for all entries on the page. Kernel
             // strides at entry_size through the AoS entries.
-            Distance *distances = mkt_alloc(entry_count * sizeof(Distance));
-            mkt_rabitq_inner_product_multi(
+            Distance *distances = vs_alloc(entry_count * sizeof(Distance));
+            vs_rabitq_inner_product_multi(
                     query_state->transformed,
                     prism_posting_first_bits(content),
                     PRISM_POSTING_ENTRY_SIZE(dim),
@@ -4239,20 +4241,20 @@ void mkt_search_posting_lists(
                 Distance est = e->f_add /* + query-side constants and
                                            f_rescale * distances[i] */;
 
-                if (est < mkt_topk_threshold(results)) {
+                if (est < vs_topk_threshold(results)) {
                     uint64_t tid_encoded = prism_posting_encode_tid(&e->meta.tid);
-                    mkt_topk_insert(results, est, tid_encoded);
+                    vs_topk_insert(results, est, tid_encoded);
                 }
             }
 
-            mkt_free(distances);
+            vs_free(distances);
             BlockNumber next = opaque->next_blkno;
             release_page(callback_data, block);
             block = next;
         }
     }
 
-    mkt_free(query_normalized);
+    vs_free(query_normalized);
 }
 ```
 
@@ -4269,7 +4271,7 @@ typedef void (*VectorFetchCallback)(
     float *output  // Pre-allocated buffer
 );
 
-void mkt_search_rerank(
+void vs_search_rerank(
     TopKHeap *candidates,      // Input: approximate results
     uint32_t rerank_k,         // How many to re-rank
     Vec32Ref query,
@@ -4280,10 +4282,10 @@ void mkt_search_rerank(
     TopKHeap *final_results    // Output: precise results
 ) {
     // Extract top rerank_k candidates
-    TopKEntry *entries = mkt_alloc(rerank_k * sizeof(TopKEntry));
+    TopKEntry *entries = vs_alloc(rerank_k * sizeof(TopKEntry));
     // ... extract from candidates heap ...
 
-    float *vec_buffer = mkt_alloc_aligned(dim * sizeof(float), 64);
+    float *vec_buffer = vs_alloc_aligned(dim * sizeof(float), 64);
 
     for (uint32_t i = 0; i < rerank_k; i++) {
         // Decode TID
@@ -4295,13 +4297,13 @@ void mkt_search_rerank(
 
         // Compute precise distance
         Vec32Ref v = { .data = vec_buffer, .dim = dim };
-        Distance precise_dist = mkt_distance(query, v, metric);
+        Distance precise_dist = vs_distance(query, v, metric);
 
-        mkt_topk_insert(final_results, precise_dist, tid_encoded);
+        vs_topk_insert(final_results, precise_dist, tid_encoded);
     }
 
-    mkt_free(vec_buffer);
-    mkt_free(entries);
+    vs_free(vec_buffer);
+    vs_free(entries);
 }
 ```
 
@@ -4310,10 +4312,10 @@ void mkt_search_rerank(
 - Performance: benchmark QPS at various nprobe values
 - Correctness: verify re-ranking improves result quality
 
-**CLI**: `mkt search`
+**CLI**: `vectorsearch search`
 
 ```
-$ mkt search --index index.mkt --query query.bin --k 10 --nprobe 20
+$ vectorsearch search --index index.vs --query query.bin --k 10 --nprobe 20
 Results (10 of 100000 vectors):
   1. tid=(42,15)  distance=0.0234
   2. tid=(108,3)  distance=0.0456
@@ -4327,21 +4329,21 @@ Search time: 2.3ms
 
 ### 6.1 Extension Setup
 
-**Files**: `src/pg/mkt_pg.c`, `src/pg/mkt_pg.h`
+**Files**: `src/pg/vs_pg.c`, `src/pg/vs_pg.h`
 
 ```c
 // Extension initialization
 void _PG_init(void);
 
 // GUC variables
-int mkt_distance_mode;       // MktDistanceMode: default / asymmetric / symmetric
+int vs_distance_mode;       // VsDistanceMode: default / asymmetric / symmetric
 
 // Index reloptions
 relopt_kind prism_relopt_kind;
 ```
 
 **GUC**: `prism.distance_mode` defaults to `'default'` (sentinel value
-`MKT_DISTANCE_MODE_DEFAULT = -1`), meaning "use the index's relopt".
+`VS_DISTANCE_MODE_DEFAULT = -1`), meaning "use the index's relopt".
 When set to `'asymmetric'` or `'symmetric'`, it overrides the index setting
 for the current session.
 
@@ -4455,7 +4457,7 @@ vec32_init(void)
 
 // Check if a type OID is a supported vector type
 static inline bool
-mkt_is_vector_type(Oid typoid)
+vs_is_vector_type(Oid typoid)
 {
     return typoid == vec32_oid ||
            (OidIsValid(pgvector_oid) && typoid == pgvector_oid);
@@ -4510,29 +4512,29 @@ varlena header, or define a minimal mock. The core algorithms operate on
 
 ```c
 // Index handler function (registered with CREATE ACCESS METHOD)
-Datum mkt_handler(PG_FUNCTION_ARGS);
+Datum vs_handler(PG_FUNCTION_ARGS);
 
 // Required IAM callbacks
-static IndexBuildResult *mkt_ambuild(Relation heap, Relation index,
+static IndexBuildResult *vs_ambuild(Relation heap, Relation index,
                                         IndexInfo *indexInfo);
-static void mkt_ambuildempty(Relation index);
-static bool mkt_aminsert(Relation index, Datum *values, bool *isnull,
+static void vs_ambuildempty(Relation index);
+static bool vs_aminsert(Relation index, Datum *values, bool *isnull,
                            ItemPointer heap_tid, Relation heap,
                            IndexUniqueCheck checkUnique,
                            bool indexUnchanged, IndexInfo *indexInfo);
-static IndexScanDesc mkt_ambeginscan(Relation index, int nkeys, int norderbys);
-static void mkt_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
+static IndexScanDesc vs_ambeginscan(Relation index, int nkeys, int norderbys);
+static void vs_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
                            ScanKey orderbys, int norderbys);
-static bool mkt_amgettuple(IndexScanDesc scan, ScanDirection direction);
-static int64 mkt_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm);
-static void mkt_amendscan(IndexScanDesc scan);
-static IndexBulkDeleteResult *mkt_ambulkdelete(IndexVacuumInfo *info,
+static bool vs_amgettuple(IndexScanDesc scan, ScanDirection direction);
+static int64 vs_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm);
+static void vs_amendscan(IndexScanDesc scan);
+static IndexBulkDeleteResult *vs_ambulkdelete(IndexVacuumInfo *info,
                                                   IndexBulkDeleteResult *stats,
                                                   IndexBulkDeleteCallback callback,
                                                   void *callback_state);
-static IndexBulkDeleteResult *mkt_amvacuumcleanup(IndexVacuumInfo *info,
+static IndexBulkDeleteResult *vs_amvacuumcleanup(IndexVacuumInfo *info,
                                                      IndexBulkDeleteResult *stats);
-static void mkt_amcostestimate(PlannerInfo *root, IndexPath *path,
+static void vs_amcostestimate(PlannerInfo *root, IndexPath *path,
                                   double loop_count, Cost *indexStartupCost,
                                   Cost *indexTotalCost, Selectivity *indexSelectivity,
                                   double *indexCorrelation, double *indexPages);
@@ -4540,13 +4542,13 @@ static void mkt_amcostestimate(PlannerInfo *root, IndexPath *path,
 
 ### 6.4 Buffer Cache Integration
 
-Page I/O uses the `MktStorage` vtable (see §6.5). In PG mode, the
+Page I/O uses the `VsStorage` vtable (see §6.5). In PG mode, the
 implementation wraps `ReadBuffer`/`UnlockReleaseBuffer`/`GenericXLog`:
 
 ```c
-// PG storage implementation embeds MktStorage as first member
+// PG storage implementation embeds VsStorage as first member
 typedef struct PrismStorage {
-    MktStorage  base;       /* must be first (upcast via pointer) */
+    VsStorage  base;       /* must be first (upcast via pointer) */
     Relation    index;
     Buffer      buffers[MAX_PINNED];
     int         nbuffers;
@@ -4624,9 +4626,9 @@ computed on the in-page vectors without reranking.
 /* Centroid data format (stored in low 2 bits of opaque->flags) */
 typedef enum PrismCentroidFormat
 {
-    MKT_CENTROID_FMT_RABITQ = 0,   /* RaBitQData (default) */
-    MKT_CENTROID_FMT_FLOAT  = 1,   /* float32 vectors */
-    MKT_CENTROID_FMT_HALF   = 2,   /* float16 vectors */
+    PRISM_CENTROID_FMT_RABITQ = 0,   /* RaBitQData (default) */
+    PRISM_CENTROID_FMT_FLOAT  = 1,   /* float32 vectors */
+    PRISM_CENTROID_FMT_HALF   = 2,   /* float16 vectors */
 } PrismCentroidFormat;
 
 /* Base per-centroid metadata (8 bytes, all formats) */
@@ -4687,7 +4689,7 @@ prism_centroid_page_format(Page page) {
 /* Format-dependent metadata size */
 static inline uint32_t
 prism_centroid_meta_size(PrismCentroidFormat fmt) {
-    if (fmt == MKT_CENTROID_FMT_RABITQ)
+    if (fmt == PRISM_CENTROID_FMT_RABITQ)
         return sizeof(PrismCentroidEntryMetaRaBitQ);  /* 16B */
     return sizeof(PrismCentroidEntryMeta);             /* 8B */
 }
@@ -4746,7 +4748,7 @@ void prism_centroid_page_init_fmt(Page page, uint8_t level,
 /* Backward-compatible wrapper (defaults to RaBitQ) */
 static inline void
 prism_centroid_page_init(Page page, uint8_t level) {
-    prism_centroid_page_init_fmt(page, level, MKT_CENTROID_FMT_RABITQ);
+    prism_centroid_page_init_fmt(page, level, PRISM_CENTROID_FMT_RABITQ);
 }
 
 /* Generic add: medoid_tid only used for RaBitQ pages (NULL for
@@ -4760,43 +4762,43 @@ bool prism_centroid_page_add_entry(Page page, Dimension dim,
                                  const void *data);
 ```
 
-**I/O abstraction** (`MktStorage`):
+**I/O abstraction** (`VsStorage`):
 
-All page and vector I/O is abstracted behind a `MktStorageOps` vtable
-(`src/index/storage.h`). `MktStorage` is a base struct containing an `ops`
+All page and vector I/O is abstracted behind a `VsStorageOps` vtable
+(`src/index/storage.h`). `VsStorage` is a base struct containing an `ops`
 pointer; implementations embed it as their first member and add
 implementation-specific fields. WAL logging and durability are internal
 to each implementation — callers just see read/release/write/commit:
 
 ```c
-typedef struct MktStorageOps
+typedef struct VsStorageOps
 {
-    Page (*read_page)(MktStorage *self, BlockNumber blkno);
-    void (*release_page)(MktStorage *self, BlockNumber blkno);
-    Page (*write_page)(MktStorage *self, BlockNumber blkno);
-    Page (*new_page)(MktStorage *self, BlockNumber *blkno_out);
-    void (*commit_page)(MktStorage *self, BlockNumber blkno);
-    Vec32Ref (*fetch_vec)(MktStorage *self, ItemPointerData tid);
+    Page (*read_page)(VsStorage *self, BlockNumber blkno);
+    void (*release_page)(VsStorage *self, BlockNumber blkno);
+    Page (*write_page)(VsStorage *self, BlockNumber blkno);
+    Page (*new_page)(VsStorage *self, BlockNumber *blkno_out);
+    void (*commit_page)(VsStorage *self, BlockNumber blkno);
+    Vec32Ref (*fetch_vec)(VsStorage *self, ItemPointerData tid);
 
     /* Rerank candidates with exact distances (NULL = not supported).
      * Fetches full-precision vectors for candidates whose error > 0,
      * computes exact L2, returns sorted top-keep results. Used by
      * centroid beam search to replace approximate RaBitQ estimates. */
-    uint32_t (*rerank)(MktStorage *self, Datum query, Dimension dim,
+    uint32_t (*rerank)(VsStorage *self, Datum query, Dimension dim,
                        const ItemPointerData *tids, uint32_t count,
                        const Distance *distances,
                        const Distance *errors, uint32_t keep,
                        uint32_t *out_indices,
                        Distance *out_distances);
-} MktStorageOps;
+} VsStorageOps;
 
-struct MktStorage
+struct VsStorage
 {
-    const MktStorageOps *ops;
+    const VsStorageOps *ops;
 };
 ```
 
-Implementations embed `MktStorage` as first member (C inheritance via
+Implementations embed `VsStorage` as first member (C inheritance via
 upcast). In standalone mode, the struct wraps an array of `malloc`'d 8KB
 buffers. In PG mode, it wraps a `Relation` with buffer cache calls.
 
@@ -4804,10 +4806,10 @@ Static inline wrapper functions hide the vtable dispatch:
 
 ```c
 // Clean API — no s->ops->fn(s, ...) at call sites
-Page page = mkt_storage_read_page(storage, centroid_blkno);
+Page page = vs_storage_read_page(storage, centroid_blkno);
 PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
 // ... per-entry distance on in-page RaBitQData ...
-mkt_storage_release_page(storage, centroid_blkno);
+vs_storage_release_page(storage, centroid_blkno);
 ```
 
 Hot centroid pages stay cached in shared_buffers. For billion-scale indexes,
@@ -4817,7 +4819,7 @@ the ~96MB centroid tree fits comfortably in a typical shared_buffers setting.
 
 ```c
 // Scan state (stored in IndexScanDesc->opaque)
-typedef struct MktScanOpaque {
+typedef struct VsScanOpaque {
     // Centroid search state (backend-local, populated from centroid pages)
     CentroidSearchState *centroid_state;
     RaBitQParams        *rabitq_params;
@@ -4834,13 +4836,13 @@ typedef struct MktScanOpaque {
 
     // Buffer management for posting list scan
     BufferReadState buffer_state;
-} MktScanOpaque;
+} VsScanOpaque;
 ```
 
 ### 6.7 Cost Estimation
 
 ```c
-static void mkt_amcostestimate(
+static void vs_amcostestimate(
     PlannerInfo *root,
     IndexPath *path,
     double loop_count,
@@ -4852,7 +4854,7 @@ static void mkt_amcostestimate(
 ) {
     // Get index statistics from metapage
     Relation index = index_open(path->indexinfo->indexoid, AccessShareLock);
-    MktMetapage *meta = /* read metapage */;
+    VsMetapage *meta = /* read metapage */;
 
     uint32_t nlist = meta->nlist;
     uint64_t nvecs = meta->nvecs;
@@ -4864,7 +4866,7 @@ static void mkt_amcostestimate(
 
     // Per-tuple cost: posting list scan
     double avg_list_size = (double)nvecs / nlist;
-    double pages_per_list = avg_list_size / mkt_entries_per_page(meta->dim);
+    double pages_per_list = avg_list_size / vs_entries_per_page(meta->dim);
     double pages_scanned = nprobe * pages_per_list;
 
     *indexTotalCost = *indexStartupCost +
@@ -5035,13 +5037,13 @@ posting_list_stream_next(ReadStream *stream, void *callback_private,
 
 // Initialize stream for posting list scan
 ReadStream *
-mkt_posting_list_stream_begin(Relation index, ClusterId cluster,
+vs_posting_list_stream_begin(Relation index, ClusterId cluster,
                               BufferAccessStrategy strategy)
 {
     PostingListStreamState *state = palloc(sizeof(PostingListStreamState));
 
     // Get head block from metapage (already cached in centroid cache)
-    state->next_block = mkt_meta_get_head(index, cluster);
+    state->next_block = vs_meta_get_head(index, cluster);
     state->cluster_id = cluster;
     state->pages_read = 0;
 
@@ -5196,18 +5198,18 @@ tid_block_offset_cmp(const void *a, const void *b)
 ```c
 // Prepare TIDs for sequential heap access
 static void
-mkt_rerank_sort_tids(ItemPointer tids, int ntids)
+vs_rerank_sort_tids(ItemPointer tids, int ntids)
 {
     qsort(tids, ntids, sizeof(ItemPointerData), tid_block_offset_cmp);
 }
 
 // Create read stream for reranking
 ReadStream *
-mkt_rerank_stream_begin(Relation heap, ItemPointer tids, int ntids,
+vs_rerank_stream_begin(Relation heap, ItemPointer tids, int ntids,
                        BufferAccessStrategy strategy)
 {
     // Sort TIDs by block for sequential I/O
-    mkt_rerank_sort_tids(tids, ntids);
+    vs_rerank_sort_tids(tids, ntids);
 
     RerankStreamState *state = palloc(sizeof(RerankStreamState));
     state->tids = tids;
@@ -5228,7 +5230,7 @@ mkt_rerank_stream_begin(Relation heap, ItemPointer tids, int ntids,
 
 // Process reranking
 void
-mkt_rerank_execute(ReadStream *stream, RerankStreamState *state,
+vs_rerank_execute(ReadStream *stream, RerankStreamState *state,
                   Relation heap, TopKCollector *results)
 {
     Buffer buf;
@@ -5264,7 +5266,7 @@ During index build, scan heap pages with prefetching:
 
 ```c
 ReadStream *
-mkt_build_heap_stream(Relation heap, Snapshot snapshot,
+vs_build_heap_stream(Relation heap, Snapshot snapshot,
                      BufferAccessStrategy strategy)
 {
     BlockRangeReadStreamPrivate *state = palloc(sizeof(*state));
@@ -5332,14 +5334,14 @@ If needed, this layer would:
 
 ```c
 // Hypothetical custom async I/O interface
-typedef struct MktAsyncIO MktAsyncIO;
+typedef struct VsAsyncIO VsAsyncIO;
 
-MktAsyncIO *mkt_aio_create(int max_concurrent);
-void        mkt_aio_submit_read(MktAsyncIO *aio, int fd, off_t offset,
+VsAsyncIO *vs_aio_create(int max_concurrent);
+void        vs_aio_submit_read(VsAsyncIO *aio, int fd, off_t offset,
                                 void *buf, size_t len, void *user_data);
-int         mkt_aio_poll(MktAsyncIO *aio, MktAIOCompletion *completions,
+int         vs_aio_poll(VsAsyncIO *aio, VsAIOCompletion *completions,
                          int max_completions, int timeout_ms);
-void        mkt_aio_destroy(MktAsyncIO *aio);
+void        vs_aio_destroy(VsAsyncIO *aio);
 ```
 
 This would live in `src/core/` (standalone) with platform-specific implementations,
@@ -5398,7 +5400,7 @@ high insert throughput without degrading query performance.
 **Basic insert flow:**
 
 ```c
-static bool mkt_aminsert(
+static bool vs_aminsert(
     Relation index,
     Datum *values,
     bool *isnull,
@@ -5415,20 +5417,20 @@ static bool mkt_aminsert(
     // 1. Find nearest centroid by traversing centroid pages
     ClusterId cluster;
     Vec32Ref centroid;
-    mkt_find_nearest_centroid(index, VectorToRef(vec), &cluster, &centroid);
+    vs_find_nearest_centroid(index, VectorToRef(vec), &cluster, &centroid);
 
     // 2. Quantize vector using RaBitQ (relative to centroid)
-    RaBitQData *quantized = palloc(MKT_RABITQ_DATA_SIZE(vec->dim));
-    RaBitQParams *params = mkt_get_rabitq_params(index);
-    mkt_rabitq_encode_into(params, VectorToRef(vec), centroid, quantized);
+    RaBitQData *quantized = palloc(VS_RABITQ_DATA_SIZE(vec->dim));
+    RaBitQParams *params = vs_get_rabitq_params(index);
+    vs_rabitq_encode_into(params, VectorToRef(vec), centroid, quantized);
 
     // 3. Insert into posting list (may trigger split)
-    BlockNumber head = mkt_meta_get_head(index, cluster);
-    InsertResult result = mkt_posting_insert(index, head, heap_tid, quantized);
+    BlockNumber head = vs_meta_get_head(index, cluster);
+    InsertResult result = vs_posting_insert(index, head, heap_tid, quantized);
 
     // 4. Handle LIRE operations if needed
     if (result.needs_split) {
-        mkt_lire_split(index, cluster);
+        vs_lire_split(index, cluster);
     }
 
     pfree(quantized);
@@ -5476,7 +5478,7 @@ The LIRE protocol maintains index quality during updates:
 Vacuum performs deletion cleanup and LIRE maintenance:
 
 ```c
-static IndexBulkDeleteResult *mkt_ambulkdelete(
+static IndexBulkDeleteResult *vs_ambulkdelete(
     IndexVacuumInfo *info,
     IndexBulkDeleteResult *stats,
     IndexBulkDeleteCallback callback,
@@ -5488,7 +5490,7 @@ static IndexBulkDeleteResult *mkt_ambulkdelete(
     return stats;
 }
 
-static IndexBulkDeleteResult *mkt_amvacuumcleanup(
+static IndexBulkDeleteResult *vs_amvacuumcleanup(
     IndexVacuumInfo *info,
     IndexBulkDeleteResult *stats
 ) {
@@ -5540,12 +5542,12 @@ The search must support iterative result retrieval. This is essential for:
 
 ```c
 /*
- * MktSearchIterator: Streaming search state
+ * VsSearchIterator: Streaming search state
  *
  * Allows fetching results incrementally. The iterator maintains state
  * between calls, enabling "get 10 more" semantics.
  */
-typedef struct MktSearchIterator
+typedef struct VsSearchIterator
 {
     /* Search parameters (immutable after init) */
     Vec32Ref           query;
@@ -5553,7 +5555,7 @@ typedef struct MktSearchIterator
     uint32_t            nprobe;         /* clusters to search */
 
     /* Filter state */
-    MktFilterContext   *filter;         /* NULL if no filter */
+    VsFilterContext   *filter;         /* NULL if no filter */
 
     /* Cluster iteration state */
     ClusterId          *probe_clusters; /* clusters ordered by distance */
@@ -5561,78 +5563,78 @@ typedef struct MktSearchIterator
     uint32_t            current_cluster;
 
     /* Within-cluster state */
-    MktPostingIterator *posting_iter;   /* current cluster's posting list */
+    VsPostingIterator *posting_iter;   /* current cluster's posting list */
 
     /* Result buffer (min-heap by distance) */
-    MktResultHeap      *candidates;     /* candidates not yet returned */
+    VsResultHeap      *candidates;     /* candidates not yet returned */
     uint32_t            returned_count; /* results already returned */
 
     /* Reranking buffer */
-    MktResultHeap      *rerank_buffer;  /* for full-precision reranking */
+    VsResultHeap      *rerank_buffer;  /* for full-precision reranking */
     uint32_t            rerank_size;    /* how many to collect before rerank */
 
     /* Statistics */
     uint64_t            vectors_scanned;
     uint64_t            vectors_filtered;
     uint64_t            clusters_visited;
-} MktSearchIterator;
+} VsSearchIterator;
 
 /* Initialize streaming search */
-MktSearchIterator *
-mkt_search_iterator_create(
+VsSearchIterator *
+vs_search_iterator_create(
     PrismIndex *index,
     Vec32Ref query,
     DistanceType distance_type,
     uint32_t nprobe,
-    MktFilterContext *filter    /* NULL for unfiltered */
+    VsFilterContext *filter    /* NULL for unfiltered */
 );
 
 /* Fetch next batch of results */
 uint32_t
-mkt_search_iterator_next(
-    MktSearchIterator *iter,
+vs_search_iterator_next(
+    VsSearchIterator *iter,
     uint32_t max_results,       /* how many to fetch */
-    MktSearchResult *results    /* output buffer */
+    VsSearchResult *results    /* output buffer */
 );
 
 /* Check if more results available */
 bool
-mkt_search_iterator_has_more(const MktSearchIterator *iter);
+vs_search_iterator_has_more(const VsSearchIterator *iter);
 
 /* Get statistics */
 void
-mkt_search_iterator_stats(
-    const MktSearchIterator *iter,
+vs_search_iterator_stats(
+    const VsSearchIterator *iter,
     uint64_t *vectors_scanned,
     uint64_t *vectors_filtered
 );
 
 /* Cleanup */
 void
-mkt_search_iterator_destroy(MktSearchIterator *iter);
+vs_search_iterator_destroy(VsSearchIterator *iter);
 ```
 
 **Usage pattern:**
 
 ```c
-MktSearchIterator *iter = mkt_search_iterator_create(
+VsSearchIterator *iter = vs_search_iterator_create(
     index, query, DISTANCE_L2, nprobe, filter
 );
 
-MktSearchResult results[10];
+VsSearchResult results[10];
 uint32_t n;
 
 /* Fetch first 10 */
-n = mkt_search_iterator_next(iter, 10, results);
+n = vs_search_iterator_next(iter, 10, results);
 process_results(results, n);
 
 /* Need more? Fetch next 10 */
-if (mkt_search_iterator_has_more(iter)) {
-    n = mkt_search_iterator_next(iter, 10, results);
+if (vs_search_iterator_has_more(iter)) {
+    n = vs_search_iterator_next(iter, 10, results);
     process_results(results, n);
 }
 
-mkt_search_iterator_destroy(iter);
+vs_search_iterator_destroy(iter);
 ```
 
 ### 8.3 Filter Predicate Interface
@@ -5642,33 +5644,33 @@ abstracts the predicate evaluation.
 
 ```c
 /*
- * MktFilterContext: Predicate evaluation context
+ * VsFilterContext: Predicate evaluation context
  *
  * Abstracts filter evaluation so the core search doesn't depend on
  * PostgreSQL expression evaluation machinery.
  */
-typedef struct MktFilterContext
+typedef struct VsFilterContext
 {
     /* PostgreSQL-specific (set by PG integration layer) */
     void               *pg_state;       /* ExprState, ScanKey, etc. */
 
     /* Callback to evaluate predicate for a TID */
-    bool              (*check_tid)(struct MktFilterContext *ctx,
+    bool              (*check_tid)(struct VsFilterContext *ctx,
                                    ItemPointer tid);
 
     /* Optional: callback for label-based filtering (fast path) */
-    bool              (*check_labels)(struct MktFilterContext *ctx,
+    bool              (*check_labels)(struct VsFilterContext *ctx,
                                       const int16 *labels,
                                       uint32_t nlabels);
 
     /* Statistics */
     uint64_t            checked_count;
     uint64_t            passed_count;
-} MktFilterContext;
+} VsFilterContext;
 
 /* Check if a posting entry passes the filter */
 static inline bool
-mkt_filter_check(MktFilterContext *filter, const MktPostingEntry *entry)
+vs_filter_check(VsFilterContext *filter, const VsPostingEntry *entry)
 {
     if (filter == NULL) {
         return true;  /* no filter, always pass */
@@ -5708,11 +5710,11 @@ typedef enum {
     FILTER_STRATEGY_PRE,        /* filter before distance computation */
     FILTER_STRATEGY_POST,       /* compute distance, then filter */
     FILTER_STRATEGY_HYBRID,     /* pre-filter + rerank */
-} MktFilterStrategy;
+} VsFilterStrategy;
 
 /* Estimate selectivity from table statistics */
 float
-mkt_estimate_filter_selectivity(
+vs_estimate_filter_selectivity(
     Relation heap,
     List *predicates,
     PlannerInfo *root
@@ -5745,22 +5747,22 @@ in the posting list entry for fast filtering without heap access.
  * Labels are small integers (int16) stored inline. This enables
  * filtering without fetching the heap tuple.
  */
-typedef struct MktPostingEntryWithLabels
+typedef struct VsPostingEntryWithLabels
 {
-    MktPostingEntry     base;
+    VsPostingEntry     base;
     uint8_t             nlabels;        /* number of labels */
     int16               labels[];       /* inline label array */
-} MktPostingEntryWithLabels;
+} VsPostingEntryWithLabels;
 
 /* Index creation option */
-typedef struct MktIndexOptions
+typedef struct VsIndexOptions
 {
     /* ... existing options ... */
 
     /* Label column for fast filtering */
     AttrNumber          label_attr;     /* 0 if not specified */
     bool                labels_indexed; /* true if labels stored in posting */
-} MktIndexOptions;
+} VsIndexOptions;
 ```
 
 **SQL interface:**
@@ -5791,19 +5793,19 @@ The streaming iterator integrates with PostgreSQL's IndexScan via the
  * PostgreSQL's executor (LIMIT, cursor, etc.).
  */
 static bool
-mkt_amgettuple(IndexScanDesc scan, ScanDirection direction)
+vs_amgettuple(IndexScanDesc scan, ScanDirection direction)
 {
-    MktScanState *state = (MktScanState *)scan->opaque;
+    VsScanState *state = (VsScanState *)scan->opaque;
 
     /* Lazy initialization on first call */
     if (!state->initialized) {
-        mkt_scan_initialize(scan, state);
+        vs_scan_initialize(scan, state);
         state->initialized = true;
     }
 
     /* Get next result from streaming iterator */
-    MktSearchResult result;
-    uint32_t n = mkt_search_iterator_next(state->iterator, 1, &result);
+    VsSearchResult result;
+    uint32_t n = vs_search_iterator_next(state->iterator, 1, &result);
 
     if (n == 0) {
         return false;  /* no more results */
@@ -5823,21 +5825,21 @@ mkt_amgettuple(IndexScanDesc scan, ScanDirection direction)
  * combine multiple index scans (BitmapAnd, BitmapOr).
  */
 static int64
-mkt_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
+vs_amgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 {
-    MktScanState *state = (MktScanState *)scan->opaque;
+    VsScanState *state = (VsScanState *)scan->opaque;
     int64 count = 0;
 
     if (!state->initialized) {
-        mkt_scan_initialize(scan, state);
+        vs_scan_initialize(scan, state);
         state->initialized = true;
     }
 
     /* Fetch all results into bitmap */
-    MktSearchResult results[100];
+    VsSearchResult results[100];
     uint32_t n;
 
-    while ((n = mkt_search_iterator_next(state->iterator, 100, results)) > 0) {
+    while ((n = vs_search_iterator_next(state->iterator, 100, results)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             tbm_add_tuples(tbm, &results[i].tid, 1, false);
             count++;
@@ -5854,7 +5856,7 @@ For filtered search, we don't know upfront how many candidates we need to
 scan. Adaptive termination uses statistics to decide when to stop.
 
 ```c
-typedef struct MktAdaptiveState
+typedef struct VsAdaptiveState
 {
     /* Running statistics */
     uint32_t    scanned;        /* entries scanned */
@@ -5867,7 +5869,7 @@ typedef struct MktAdaptiveState
     /* Termination criteria */
     uint32_t    target_k;       /* how many results needed */
     float       confidence;     /* confidence we have enough */
-} MktAdaptiveState;
+} VsAdaptiveState;
 
 /*
  * Should we continue scanning more clusters?
@@ -5875,8 +5877,8 @@ typedef struct MktAdaptiveState
  * Uses statistics to estimate probability of finding better results.
  */
 bool
-mkt_should_continue_search(
-    const MktAdaptiveState *state,
+vs_should_continue_search(
+    const VsAdaptiveState *state,
     Distance worst_result_dist,
     Distance next_cluster_dist
 )
@@ -5910,12 +5912,12 @@ The streaming/filtered search design affects earlier components:
 The posting list must support efficient iteration with filtering:
 ```c
 /* Posting list must support filtered iteration */
-typedef struct MktPostingIterator
+typedef struct VsPostingIterator
 {
     /* ... */
-    MktFilterContext *filter;   /* optional filter */
+    VsFilterContext *filter;   /* optional filter */
     /* ... */
-} MktPostingIterator;
+} VsPostingIterator;
 ```
 
 **2. Result heap**
@@ -5923,9 +5925,9 @@ typedef struct MktPostingIterator
 Need a min-heap that supports incremental insertion and extraction:
 ```c
 /* Result heap for streaming results */
-MktResultHeap *mkt_result_heap_create(uint32_t capacity);
-void mkt_result_heap_push(MktResultHeap *heap, MktSearchResult *result);
-bool mkt_result_heap_pop(MktResultHeap *heap, MktSearchResult *result);
+VsResultHeap *vs_result_heap_create(uint32_t capacity);
+void vs_result_heap_push(VsResultHeap *heap, VsSearchResult *result);
+bool vs_result_heap_pop(VsResultHeap *heap, VsSearchResult *result);
 ```
 
 **3. Centroid search**
@@ -5933,8 +5935,8 @@ bool mkt_result_heap_pop(MktResultHeap *heap, MktSearchResult *result);
 Centroid search should return an iterator, not a fixed array:
 ```c
 /* Return clusters lazily, not all at once */
-MktClusterIterator *
-mkt_centroid_search_iterator(CentroidSearchState *cache, Vec32Ref query);
+VsClusterIterator *
+vs_centroid_search_iterator(CentroidSearchState *cache, Vec32Ref query);
 ```
 
 **4. Statistics collection**
@@ -5942,13 +5944,13 @@ mkt_centroid_search_iterator(CentroidSearchState *cache, Vec32Ref query);
 Track filter statistics for cost estimation:
 ```c
 /* Per-index statistics for cost estimation */
-typedef struct MktIndexStats
+typedef struct VsIndexStats
 {
     /* ... */
     float   avg_filter_selectivity; /* historical average */
     float   avg_recheck_cost;       /* cost of heap fetch */
     /* ... */
-} MktIndexStats;
+} VsIndexStats;
 ```
 
 ---
@@ -5964,7 +5966,7 @@ typedef struct MktIndexStats
 4. Unit tests and benchmark CLI
 
 **Test artifacts**:
-- `mkt bench distance`: Distance computation benchmark
+- `vectorsearch bench distance`: Distance computation benchmark
 - Unit test suite for distance functions
 
 ### Phase 2: Core Algorithms
@@ -5976,8 +5978,8 @@ typedef struct MktIndexStats
 4. Unit tests and CLI tools
 
 **Test artifacts**:
-- `mkt_rabitq_test`: RaBitQ encoding/distance accuracy tests
-- `mkt bench cluster`: Clustering benchmark
+- `vs_rabitq_test`: RaBitQ encoding/distance accuracy tests
+- `vectorsearch bench cluster`: Clustering benchmark
 - Unit test suite
 
 ### Phase 3: Data Structures
@@ -6000,7 +6002,7 @@ typedef struct MktIndexStats
 3. Write to file (standalone index format)
 
 **Test artifacts**:
-- `mkt build`: Build index from vector file
+- `vectorsearch build`: Build index from vector file
 - Build correctness tests
 
 ### Phase 5: Search (Standalone)
@@ -6012,7 +6014,7 @@ typedef struct MktIndexStats
 4. Full search pipeline
 
 **Test artifacts**:
-- `mkt search`: Search standalone index
+- `vectorsearch search`: Search standalone index
 - Recall benchmarks against brute force
 
 ### Phase 6: PostgreSQL Integration
@@ -6097,18 +6099,18 @@ meerkat/
 │   │   └── rabitq_neon.c
 │   │
 │   ├── index/                    # Index structures (standalone, no PG)
-│   │   ├── storage.h             # MktStorage I/O vtable + wrappers
+│   │   ├── storage.h             # VsStorage I/O vtable + wrappers
 │   │   ├── centroid_page.h       # Centroid page layout, bidirectional AoS
 │   │   ├── centroid_page.c       # Page init, add entry
 │   │   ├── centroid_search.h     # Beam search API, search state
 │   │   └── centroid_search.c     # Level-by-level beam search
 │   │
-│   ├── cli/                      # Command-line tool ('mkt' binary)
+│   ├── cli/                      # Command-line tool ('vectorsearch' binary)
 │   │   ├── main.c                # Entry point, subcommand dispatch
-│   │   ├── cmd_distance.c        # mkt distance - test/benchmark
-│   │   ├── cmd_quantize.c        # mkt quantize - test RaBitQ
-│   │   ├── cmd_cluster.c         # mkt cluster - test k-means
-│   │   └── cmd_bench.c           # mkt bench - full algorithm benchmarks
+│   │   ├── cmd_distance.c        # vectorsearch distance - test/benchmark
+│   │   ├── cmd_quantize.c        # vectorsearch quantize - test RaBitQ
+│   │   ├── cmd_cluster.c         # vectorsearch cluster - test k-means
+│   │   └── cmd_bench.c           # vectorsearch bench - algorithm benchmarks
 │   │
 │   │ # ════════════════════════════════════════════════════════════
 │   │ # POSTGRESQL (requires PostgreSQL headers and libraries)
@@ -6205,7 +6207,7 @@ meerkat/
     ▼                  ▼                  ▼                ▼
 ┌────────┐      ┌───────────┐     ┌───────────┐    ┌───────────┐
 │  cli/  │      │  index/   │     │   quant/  │    │   algo/   │
-│ (mkt)  │─────►│ centroid  │────►│  rabitq   │───►│ distance  │
+│ (cli)  │─────►│ centroid  │────►│  rabitq   │───►│ distance  │
 └────────┘      │  page +   │     └───────────┘    │   topk    │
                 │  search   │                      │  kmeans   │
                 └───────────┘                      └─────┬─────┘
@@ -6267,22 +6269,22 @@ subdir('quant')
 subdir('cli')
 
 # Core library (standalone, no PostgreSQL)
-mkt_core_lib = static_library(
-  'mkt_core',
+vs_core_lib = static_library(
+  'vs_core',
   core_sources + algo_sources + quant_sources,
   include_directories: src_inc,
 )
 
-mkt_core_dep = declare_dependency(
-  link_with: mkt_core_lib,
+vs_core_dep = declare_dependency(
+  link_with: vs_core_lib,
   include_directories: src_inc,
 )
 
 # CLI binary (standalone)
-mkt_exe = executable(
-  'mkt',
+vs_exe = executable(
+  'vectorsearch',
   cli_sources,
-  dependencies: mkt_core_dep,
+  dependencies: vs_core_dep,
   install: true,
 )
 
@@ -6313,7 +6315,7 @@ pg_sources = (
 shared_module(
   'pg_vectorsearch',
   pg_sources,
-  dependencies: [mkt_core_dep, pg_dep],
+  dependencies: [vs_core_dep, pg_dep],
   install: true,
   install_dir: pg_pkglibdir,
 )

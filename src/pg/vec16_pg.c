@@ -1,5 +1,5 @@
 /*
- * vec16_pg.c - PostgreSQL functions for mkt.vec16 type
+ * vec16_pg.c - PostgreSQL functions for the vec16 type
  *
  * Type I/O, distance functions, comparison operators, casts.
  * Distance functions convert to float32 then delegate to SIMD core.
@@ -30,7 +30,7 @@
 	float *buf_name = ((hv)->dim <= VEC16_STACK_DIM)                      \
 							? buf_name##_stack                            \
 							: (float *)palloc((hv)->dim * sizeof(float)); \
-	mkt_half_to_float_array((hv)->x, buf_name, (hv)->dim);                \
+	vs_half_to_float_array((hv)->x, buf_name, (hv)->dim);                 \
 	Vec32Ref ref_name = {.data = buf_name, .dim = (Dimension)(hv)->dim}
 
 #define HALFVEC_FREE_BUF(hv, buf_name)   \
@@ -44,10 +44,10 @@
  * Type I/O
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_vec16_in);
+PG_FUNCTION_INFO_V1(vs_vec16_in);
 
 Datum
-mkt_vec16_in(PG_FUNCTION_ARGS)
+vs_vec16_in(PG_FUNCTION_ARGS)
 {
 	char *str	 = PG_GETARG_CSTRING(0);
 	int32 typmod = PG_GETARG_INT32(2);
@@ -96,7 +96,7 @@ mkt_vec16_in(PG_FUNCTION_ARGS)
 					 errmsg("invalid input syntax for type vec16: \"%s\"",
 							str)));
 
-		mkt_pg_check_value_finite(val);
+		vs_pg_check_value_finite(val);
 		values[dim++] = val;
 		p			  = end;
 	}
@@ -119,18 +119,18 @@ mkt_vec16_in(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("vec16 must have at least 1 dimension")));
 
-	mkt_pg_check_expected_dim(dim, typmod);
+	vs_pg_check_expected_dim(dim, typmod);
 
-	Vec16 *result = mkt_pg_vec16_alloc(dim);
-	mkt_float_to_half_array(values, result->x, dim);
+	Vec16 *result = vs_pg_vec16_alloc(dim);
+	vs_float_to_half_array(values, result->x, dim);
 
 	PG_RETURN_VEC16_P(result);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_out);
+PG_FUNCTION_INFO_V1(vs_vec16_out);
 
 Datum
-mkt_vec16_out(PG_FUNCTION_ARGS)
+vs_vec16_out(PG_FUNCTION_ARGS)
 {
 	Vec16		  *v = PG_GETARG_VEC16_P(0);
 	StringInfoData buf;
@@ -142,7 +142,7 @@ mkt_vec16_out(PG_FUNCTION_ARGS)
 	{
 		if (i > 0)
 			appendStringInfoChar(&buf, ',');
-		appendStringInfo(&buf, "%g", mkt_half_to_float(v->x[i]));
+		appendStringInfo(&buf, "%g", vs_half_to_float(v->x[i]));
 	}
 
 	appendStringInfoChar(&buf, ']');
@@ -150,10 +150,10 @@ mkt_vec16_out(PG_FUNCTION_ARGS)
 	PG_RETURN_CSTRING(buf.data);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_typmod_in);
+PG_FUNCTION_INFO_V1(vs_vec16_typmod_in);
 
 Datum
-mkt_vec16_typmod_in(PG_FUNCTION_ARGS)
+vs_vec16_typmod_in(PG_FUNCTION_ARGS)
 {
 	ArrayType *ta = PG_GETARG_ARRAYTYPE_P(0);
 	int		   n;
@@ -166,7 +166,7 @@ mkt_vec16_typmod_in(PG_FUNCTION_ARGS)
 
 	int dim = tl[0];
 
-	mkt_pg_check_dim_valid(dim);
+	vs_pg_check_dim_valid(dim);
 
 	PG_RETURN_INT32(dim);
 }
@@ -175,20 +175,20 @@ mkt_vec16_typmod_in(PG_FUNCTION_ARGS)
  * Distance functions
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_vec16_l2_distance);
+PG_FUNCTION_INFO_V1(vs_vec16_l2_distance);
 
 Datum
-mkt_vec16_l2_distance(PG_FUNCTION_ARGS)
+vs_vec16_l2_distance(PG_FUNCTION_ARGS)
 {
 	Vec16 *a = PG_GETARG_VEC16_P(0);
 	Vec16 *b = PG_GETARG_VEC16_P(1);
 
-	mkt_pg_check_dims_match(a->dim, b->dim);
+	vs_pg_check_dims_match(a->dim, b->dim);
 
 	HALFVEC_TO_FLOAT(a, buf_a, ra);
 	HALFVEC_TO_FLOAT(b, buf_b, rb);
 
-	double res = sqrt((double)mkt_distance_l2(ra, rb));
+	double res = sqrt((double)vs_distance_l2(ra, rb));
 
 	HALFVEC_FREE_BUF(a, buf_a);
 	HALFVEC_FREE_BUF(b, buf_b);
@@ -196,20 +196,20 @@ mkt_vec16_l2_distance(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(res);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_inner_product);
+PG_FUNCTION_INFO_V1(vs_vec16_inner_product);
 
 Datum
-mkt_vec16_inner_product(PG_FUNCTION_ARGS)
+vs_vec16_inner_product(PG_FUNCTION_ARGS)
 {
 	Vec16 *a = PG_GETARG_VEC16_P(0);
 	Vec16 *b = PG_GETARG_VEC16_P(1);
 
-	mkt_pg_check_dims_match(a->dim, b->dim);
+	vs_pg_check_dims_match(a->dim, b->dim);
 
 	HALFVEC_TO_FLOAT(a, buf_a, ra);
 	HALFVEC_TO_FLOAT(b, buf_b, rb);
 
-	double res = (double)(-mkt_distance_ip(ra, rb));
+	double res = (double)(-vs_distance_ip(ra, rb));
 
 	HALFVEC_FREE_BUF(a, buf_a);
 	HALFVEC_FREE_BUF(b, buf_b);
@@ -217,20 +217,20 @@ mkt_vec16_inner_product(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(res);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_cosine_distance);
+PG_FUNCTION_INFO_V1(vs_vec16_cosine_distance);
 
 Datum
-mkt_vec16_cosine_distance(PG_FUNCTION_ARGS)
+vs_vec16_cosine_distance(PG_FUNCTION_ARGS)
 {
 	Vec16 *a = PG_GETARG_VEC16_P(0);
 	Vec16 *b = PG_GETARG_VEC16_P(1);
 
-	mkt_pg_check_dims_match(a->dim, b->dim);
+	vs_pg_check_dims_match(a->dim, b->dim);
 
 	HALFVEC_TO_FLOAT(a, buf_a, ra);
 	HALFVEC_TO_FLOAT(b, buf_b, rb);
 
-	double res = (double)mkt_distance_cosine(ra, rb);
+	double res = (double)vs_distance_cosine(ra, rb);
 
 	HALFVEC_FREE_BUF(a, buf_a);
 	HALFVEC_FREE_BUF(b, buf_b);
@@ -240,20 +240,20 @@ mkt_vec16_cosine_distance(PG_FUNCTION_ARGS)
 
 /* Private distance functions for operators */
 
-PG_FUNCTION_INFO_V1(mkt_vec16_l2_squared_distance);
+PG_FUNCTION_INFO_V1(vs_vec16_l2_squared_distance);
 
 Datum
-mkt_vec16_l2_squared_distance(PG_FUNCTION_ARGS)
+vs_vec16_l2_squared_distance(PG_FUNCTION_ARGS)
 {
 	Vec16 *a = PG_GETARG_VEC16_P(0);
 	Vec16 *b = PG_GETARG_VEC16_P(1);
 
-	mkt_pg_check_dims_match(a->dim, b->dim);
+	vs_pg_check_dims_match(a->dim, b->dim);
 
 	HALFVEC_TO_FLOAT(a, buf_a, ra);
 	HALFVEC_TO_FLOAT(b, buf_b, rb);
 
-	double res = (double)mkt_distance_l2(ra, rb);
+	double res = (double)vs_distance_l2(ra, rb);
 
 	HALFVEC_FREE_BUF(a, buf_a);
 	HALFVEC_FREE_BUF(b, buf_b);
@@ -261,20 +261,20 @@ mkt_vec16_l2_squared_distance(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(res);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_negative_inner_product);
+PG_FUNCTION_INFO_V1(vs_vec16_negative_inner_product);
 
 Datum
-mkt_vec16_negative_inner_product(PG_FUNCTION_ARGS)
+vs_vec16_negative_inner_product(PG_FUNCTION_ARGS)
 {
 	Vec16 *a = PG_GETARG_VEC16_P(0);
 	Vec16 *b = PG_GETARG_VEC16_P(1);
 
-	mkt_pg_check_dims_match(a->dim, b->dim);
+	vs_pg_check_dims_match(a->dim, b->dim);
 
 	HALFVEC_TO_FLOAT(a, buf_a, ra);
 	HALFVEC_TO_FLOAT(b, buf_b, rb);
 
-	double res = (double)mkt_distance_ip(ra, rb);
+	double res = (double)vs_distance_ip(ra, rb);
 
 	HALFVEC_FREE_BUF(a, buf_a);
 	HALFVEC_FREE_BUF(b, buf_b);
@@ -293,8 +293,8 @@ vec16_cmp_internal(Vec16 *a, Vec16 *b)
 
 	for (int i = 0; i < min_dim; i++)
 	{
-		float fa = mkt_half_to_float(a->x[i]);
-		float fb = mkt_half_to_float(b->x[i]);
+		float fa = vs_half_to_float(a->x[i]);
+		float fb = vs_half_to_float(b->x[i]);
 		if (fa < fb)
 			return -1;
 		if (fa > fb)
@@ -309,70 +309,70 @@ vec16_cmp_internal(Vec16 *a, Vec16 *b)
 	return 0;
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_cmp);
+PG_FUNCTION_INFO_V1(vs_vec16_cmp);
 
 Datum
-mkt_vec16_cmp(PG_FUNCTION_ARGS)
+vs_vec16_cmp(PG_FUNCTION_ARGS)
 {
 	Vec16 *a = PG_GETARG_VEC16_P(0);
 	Vec16 *b = PG_GETARG_VEC16_P(1);
 	PG_RETURN_INT32(vec16_cmp_internal(a, b));
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_lt);
+PG_FUNCTION_INFO_V1(vs_vec16_lt);
 
 Datum
-mkt_vec16_lt(PG_FUNCTION_ARGS)
+vs_vec16_lt(PG_FUNCTION_ARGS)
 {
 	Vec16 *a = PG_GETARG_VEC16_P(0);
 	Vec16 *b = PG_GETARG_VEC16_P(1);
 	PG_RETURN_BOOL(vec16_cmp_internal(a, b) < 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_le);
+PG_FUNCTION_INFO_V1(vs_vec16_le);
 
 Datum
-mkt_vec16_le(PG_FUNCTION_ARGS)
+vs_vec16_le(PG_FUNCTION_ARGS)
 {
 	Vec16 *a = PG_GETARG_VEC16_P(0);
 	Vec16 *b = PG_GETARG_VEC16_P(1);
 	PG_RETURN_BOOL(vec16_cmp_internal(a, b) <= 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_eq);
+PG_FUNCTION_INFO_V1(vs_vec16_eq);
 
 Datum
-mkt_vec16_eq(PG_FUNCTION_ARGS)
+vs_vec16_eq(PG_FUNCTION_ARGS)
 {
 	Vec16 *a = PG_GETARG_VEC16_P(0);
 	Vec16 *b = PG_GETARG_VEC16_P(1);
 	PG_RETURN_BOOL(vec16_cmp_internal(a, b) == 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_ne);
+PG_FUNCTION_INFO_V1(vs_vec16_ne);
 
 Datum
-mkt_vec16_ne(PG_FUNCTION_ARGS)
+vs_vec16_ne(PG_FUNCTION_ARGS)
 {
 	Vec16 *a = PG_GETARG_VEC16_P(0);
 	Vec16 *b = PG_GETARG_VEC16_P(1);
 	PG_RETURN_BOOL(vec16_cmp_internal(a, b) != 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_ge);
+PG_FUNCTION_INFO_V1(vs_vec16_ge);
 
 Datum
-mkt_vec16_ge(PG_FUNCTION_ARGS)
+vs_vec16_ge(PG_FUNCTION_ARGS)
 {
 	Vec16 *a = PG_GETARG_VEC16_P(0);
 	Vec16 *b = PG_GETARG_VEC16_P(1);
 	PG_RETURN_BOOL(vec16_cmp_internal(a, b) >= 0);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_gt);
+PG_FUNCTION_INFO_V1(vs_vec16_gt);
 
 Datum
-mkt_vec16_gt(PG_FUNCTION_ARGS)
+vs_vec16_gt(PG_FUNCTION_ARGS)
 {
 	Vec16 *a = PG_GETARG_VEC16_P(0);
 	Vec16 *b = PG_GETARG_VEC16_P(1);
@@ -383,26 +383,26 @@ mkt_vec16_gt(PG_FUNCTION_ARGS)
  * Utility functions
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_vec16_dims);
+PG_FUNCTION_INFO_V1(vs_vec16_dims);
 
 Datum
-mkt_vec16_dims(PG_FUNCTION_ARGS)
+vs_vec16_dims(PG_FUNCTION_ARGS)
 {
 	Vec16 *v = PG_GETARG_VEC16_P(0);
 	PG_RETURN_INT32(v->dim);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_norm);
+PG_FUNCTION_INFO_V1(vs_vec16_norm);
 
 Datum
-mkt_vec16_norm(PG_FUNCTION_ARGS)
+vs_vec16_norm(PG_FUNCTION_ARGS)
 {
 	Vec16 *v   = PG_GETARG_VEC16_P(0);
 	double res = 0.0;
 
 	for (int i = 0; i < v->dim; i++)
 	{
-		double val = (double)mkt_half_to_float(v->x[i]);
+		double val = (double)vs_half_to_float(v->x[i]);
 		res += val * val;
 	}
 
@@ -413,55 +413,55 @@ mkt_vec16_norm(PG_FUNCTION_ARGS)
  * Cast functions
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_vec16);
+PG_FUNCTION_INFO_V1(vs_vec16);
 
 Datum
-mkt_vec16(PG_FUNCTION_ARGS)
+vs_vec16(PG_FUNCTION_ARGS)
 {
 	Vec16 *v	  = PG_GETARG_VEC16_P(0);
 	int32  typmod = PG_GETARG_INT32(1);
 
-	mkt_pg_check_expected_dim(v->dim, typmod);
+	vs_pg_check_expected_dim(v->dim, typmod);
 
 	PG_RETURN_VEC16_P(v);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec16_to_vec32);
+PG_FUNCTION_INFO_V1(vs_vec16_to_vec32);
 
 Datum
-mkt_vec16_to_vec32(PG_FUNCTION_ARGS)
+vs_vec16_to_vec32(PG_FUNCTION_ARGS)
 {
 	Vec16 *hv	  = PG_GETARG_VEC16_P(0);
 	int32  typmod = PG_GETARG_INT32(1);
 
-	mkt_pg_check_expected_dim(hv->dim, typmod);
+	vs_pg_check_expected_dim(hv->dim, typmod);
 
-	Vec32 *result = mkt_pg_vec32_alloc(hv->dim);
-	mkt_half_to_float_array(hv->x, result->x, hv->dim);
+	Vec32 *result = vs_pg_vec32_alloc(hv->dim);
+	vs_half_to_float_array(hv->x, result->x, hv->dim);
 
 	PG_RETURN_VEC32_P(result);
 }
 
-PG_FUNCTION_INFO_V1(mkt_vec32_to_vec16);
+PG_FUNCTION_INFO_V1(vs_vec32_to_vec16);
 
 Datum
-mkt_vec32_to_vec16(PG_FUNCTION_ARGS)
+vs_vec32_to_vec16(PG_FUNCTION_ARGS)
 {
 	Vec32 *v	  = PG_GETARG_VEC32_P(0);
 	int32  typmod = PG_GETARG_INT32(1);
 
-	mkt_pg_check_expected_dim(v->dim, typmod);
+	vs_pg_check_expected_dim(v->dim, typmod);
 
-	Vec16 *result = mkt_pg_vec16_alloc(v->dim);
-	mkt_float_to_half_array(v->x, result->x, v->dim);
+	Vec16 *result = vs_pg_vec16_alloc(v->dim);
+	vs_float_to_half_array(v->x, result->x, v->dim);
 
 	PG_RETURN_VEC16_P(result);
 }
 
-PG_FUNCTION_INFO_V1(mkt_array_to_vec16);
+PG_FUNCTION_INFO_V1(vs_array_to_vec16);
 
 Datum
-mkt_array_to_vec16(PG_FUNCTION_ARGS)
+vs_array_to_vec16(PG_FUNCTION_ARGS)
 {
 	ArrayType *arr	  = PG_GETARG_ARRAYTYPE_P(0);
 	int32	   typmod = PG_GETARG_INT32(1);
@@ -489,8 +489,8 @@ mkt_array_to_vec16(PG_FUNCTION_ARGS)
 	dims = ARR_DIMS(arr);
 	dim	 = dims[0];
 
-	mkt_pg_check_dim_valid(dim);
-	mkt_pg_check_expected_dim(dim, typmod);
+	vs_pg_check_dim_valid(dim);
+	vs_pg_check_expected_dim(dim, typmod);
 
 	deconstruct_array(
 			arr,
@@ -516,11 +516,11 @@ mkt_array_to_vec16(PG_FUNCTION_ARGS)
 		else
 			floats[i] = (float)DatumGetFloat8(elems[i]);
 
-		mkt_pg_check_value_finite(floats[i]);
+		vs_pg_check_value_finite(floats[i]);
 	}
 
-	Vec16 *result = mkt_pg_vec16_alloc(dim);
-	mkt_float_to_half_array(floats, result->x, dim);
+	Vec16 *result = vs_pg_vec16_alloc(dim);
+	vs_float_to_half_array(floats, result->x, dim);
 
 	pfree(floats);
 

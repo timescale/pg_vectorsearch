@@ -9,7 +9,7 @@
 
 bool
 prism_posting_insert_one(
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		const RaBitQParams *params,
 		Dimension			dim,
 		BlockNumber			head_blkno,
@@ -31,7 +31,7 @@ prism_posting_insert_one(
 	 * pt_centroid and snapshot the head metadata, then release it (the PG
 	 * backing holds only one buffer at a time).
 	 */
-	Page head = mkt_storage_read_page(storage, head_blkno);
+	Page head = vs_storage_read_page(storage, head_blkno);
 	const PrismPostingPageOpaque *hop = prism_posting_opaque(head);
 
 	/*
@@ -43,7 +43,7 @@ prism_posting_insert_one(
 	if (hop->flags &
 		(PRISM_POSTING_PAGE_TOMBSTONED | PRISM_POSTING_PAGE_DELETED))
 	{
-		mkt_storage_release_page(storage, head_blkno);
+		vs_storage_release_page(storage, head_blkno);
 		if (head_retired != NULL)
 			*head_retired = true;
 		return false;
@@ -60,13 +60,13 @@ prism_posting_insert_one(
 	for (Dimension i = 0; i < dim; i++)
 		pt_residual[i] = pt_input[i] - pt_cent[i];
 
-	mkt_storage_release_page(storage, head_blkno);
+	vs_storage_release_page(storage, head_blkno);
 
 	/* Encode relative to the leaf centroid. */
-	RaBitQData *rdata = mkt_alloc(MKT_RABITQ_DATA_SIZE(dim));
-	mkt_rabitq_encode_from_pt(params, pt_residual, rdata, scratch);
+	RaBitQData *rdata = vs_alloc(VS_RABITQ_DATA_SIZE(dim));
+	vs_rabitq_encode_from_pt(params, pt_residual, rdata, scratch);
 	float f_error =
-			mkt_rabitq_derive_f_error(rdata->f_add, rdata->f_rescale, dim);
+			vs_rabitq_derive_f_error(rdata->f_add, rdata->f_rescale, dim);
 
 	/* No defined distance under the index metric: estimated distance
 	 * +inf with zero error, so scans prune the entry before it can
@@ -90,7 +90,7 @@ prism_posting_insert_one(
 	 * before any write); the caller's per-cluster lock prevents a concurrent
 	 * fill in between.
 	 */
-	Page tcheck = mkt_storage_read_page(storage, tail_blkno);
+	Page tcheck = vs_storage_read_page(storage, tail_blkno);
 	/*
 	 * Only append into an AoS tail that has room. A FASTSCAN page packs codes
 	 * in immutable 32-vector groups, so an insert can never append to it — it
@@ -100,14 +100,14 @@ prism_posting_insert_one(
 	bool tail_is_aos = (prism_posting_opaque(tcheck)->flags &
 						PRISM_POSTING_PAGE_FASTSCAN) == 0;
 	bool has_room	 = tail_is_aos && prism_posting_page_has_room(tcheck);
-	mkt_storage_release_page(storage, tail_blkno);
+	vs_storage_release_page(storage, tail_blkno);
 
 	BlockNumber new_tail	 = tail_blkno;
 	bool		head_updated = false;
 
 	if (has_room)
 	{
-		Page wp = mkt_storage_write_page(storage, tail_blkno);
+		Page wp = vs_storage_write_page(storage, tail_blkno);
 		prism_posting_page_add(
 				wp,
 				dim,
@@ -126,7 +126,7 @@ prism_posting_insert_one(
 			op->live_count			   = live + 1;
 			head_updated			   = true;
 		}
-		mkt_storage_commit_page(storage, tail_blkno);
+		vs_storage_commit_page(storage, tail_blkno);
 	}
 	else
 	{
@@ -134,7 +134,7 @@ prism_posting_insert_one(
 		 * linking, so a crash never points the chain at an uninitialized
 		 * page (it leaves at worst an unreferenced page). */
 		BlockNumber t2;
-		Page		np = mkt_storage_new_page(storage, &t2);
+		Page		np = vs_storage_new_page(storage, &t2);
 		prism_posting_page_init(
 				np, cluster_id, dim, PRISM_POSTING_PAGE_OVERFLOW);
 		prism_posting_page_add(
@@ -146,9 +146,9 @@ prism_posting_insert_one(
 				f_error,
 				rdata->bits,
 				0);
-		mkt_storage_commit_page(storage, t2);
+		vs_storage_commit_page(storage, t2);
 
-		Page lp = mkt_storage_write_page(storage, tail_blkno);
+		Page lp = vs_storage_write_page(storage, tail_blkno);
 		prism_posting_opaque(lp)->next_blkno = t2;
 		if (tail_blkno == head_blkno)
 		{
@@ -157,18 +157,18 @@ prism_posting_insert_one(
 			op->live_count			   = live + 1;
 			head_updated			   = true;
 		}
-		mkt_storage_commit_page(storage, tail_blkno);
+		vs_storage_commit_page(storage, tail_blkno);
 		new_tail = t2;
 	}
 
 	/* Phase C: update the head metadata when it wasn't folded above. */
 	if (!head_updated)
 	{
-		Page hw = mkt_storage_write_page(storage, head_blkno);
+		Page hw = vs_storage_write_page(storage, head_blkno);
 		PrismPostingPageOpaque *op = prism_posting_opaque(hw);
 		op->tail_blkno			   = new_tail;
 		op->live_count			   = live + 1;
-		mkt_storage_commit_page(storage, head_blkno);
+		vs_storage_commit_page(storage, head_blkno);
 	}
 
 	return true;
@@ -183,7 +183,7 @@ prism_posting_insert_one(
  */
 uint32_t
 prism_posting_tombstone_chain(
-		MktStorage *storage,
+		VsStorage  *storage,
 		Dimension	dim,
 		BlockNumber head_blkno,
 		bool (*is_dead)(ItemPointerData tid, void *state),
@@ -206,7 +206,7 @@ prism_posting_tombstone_chain(
 		 * instead checks whether the whole page is dead, since packed entries
 		 * can't be flagged individually.
 		 */
-		Page						  p	 = mkt_storage_read_page(storage, blk);
+		Page						  p	 = vs_storage_read_page(storage, blk);
 		const PrismPostingPageOpaque *op = prism_posting_opaque(p);
 		BlockNumber					  next	= op->next_blkno;
 		uint16_t					  flags = op->flags;
@@ -216,7 +216,7 @@ prism_posting_tombstone_chain(
 		 * aren't counted into the live_count decrement twice. */
 		if (flags & PRISM_POSTING_PAGE_TOMBSTONED)
 		{
-			mkt_storage_release_page(storage, blk);
+			vs_storage_release_page(storage, blk);
 			blk = next;
 			continue;
 		}
@@ -246,13 +246,12 @@ prism_posting_tombstone_chain(
 			 * dead page can be tombstoned at page granularity. Early-exit on
 			 * the first live TID, so live pages cost little. */
 			fs_all_dead		 = true;
-			uint32_t ngroups = (n + MKT_FASTSCAN_GROUP - 1) /
-							   MKT_FASTSCAN_GROUP;
+			uint32_t ngroups = (n + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
 			for (uint32_t g = 0; g < ngroups && fs_all_dead; g++)
 			{
-				uint32_t g_count = n - g * MKT_FASTSCAN_GROUP;
-				if (g_count > MKT_FASTSCAN_GROUP)
-					g_count = MKT_FASTSCAN_GROUP;
+				uint32_t g_count = n - g * VS_FASTSCAN_GROUP;
+				if (g_count > VS_FASTSCAN_GROUP)
+					g_count = VS_FASTSCAN_GROUP;
 				ItemPointerData *tids =
 						prism_fastscan_group_tids(content, g, dim);
 				for (uint32_t v = 0; v < g_count; v++)
@@ -263,7 +262,7 @@ prism_posting_tombstone_chain(
 					}
 			}
 		}
-		mkt_storage_release_page(storage, blk);
+		vs_storage_release_page(storage, blk);
 
 		/*
 		 * Phase 2: only if phase 1 found work, take the EXCLUSIVE write lock
@@ -275,7 +274,7 @@ prism_posting_tombstone_chain(
 		 */
 		if (needs_mark)
 		{
-			Page					wp	= mkt_storage_write_page(storage, blk);
+			Page					wp	= vs_storage_write_page(storage, blk);
 			PrismPostingPageOpaque *wop = prism_posting_opaque(wp);
 			char				   *c	= prism_posting_page_content(wp, dim);
 			uint32_t				deleted_on_page = 0;
@@ -297,15 +296,15 @@ prism_posting_tombstone_chain(
 			/* Whole page now dead: flag it so the scan skips its scoring. */
 			if (wop->entry_count > 0 && deleted_on_page == wop->entry_count)
 				wop->flags |= PRISM_POSTING_PAGE_TOMBSTONED;
-			mkt_storage_commit_page(storage, blk);
+			vs_storage_commit_page(storage, blk);
 		}
 		else if (fs_all_dead)
 		{
-			Page					wp	= mkt_storage_write_page(storage, blk);
+			Page					wp	= vs_storage_write_page(storage, blk);
 			PrismPostingPageOpaque *wop = prism_posting_opaque(wp);
 			wop->flags |= PRISM_POSTING_PAGE_TOMBSTONED;
 			total_marked += n; /* FASTSCAN entries weren't otherwise counted */
-			mkt_storage_commit_page(storage, blk);
+			vs_storage_commit_page(storage, blk);
 		}
 
 		blk = next;
@@ -316,12 +315,12 @@ prism_posting_tombstone_chain(
 	 * here; clamp defensively. */
 	if (total_marked > 0)
 	{
-		Page hw = mkt_storage_write_page(storage, head_blkno);
+		Page hw = vs_storage_write_page(storage, head_blkno);
 		PrismPostingPageOpaque *op = prism_posting_opaque(hw);
 		op->live_count			   = (op->live_count >= total_marked)
 										   ? op->live_count - total_marked
 										   : 0;
-		mkt_storage_commit_page(storage, head_blkno);
+		vs_storage_commit_page(storage, head_blkno);
 	}
 
 	return total_marked;

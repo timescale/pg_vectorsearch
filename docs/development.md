@@ -185,16 +185,16 @@ sudo apt-get install linux-tools-common linux-tools-generic
 
 ```bash
 # Profile any command
-./scripts/profile.sh ./bin/mkt bench distance --dim 768 --count 10000
+./scripts/profile.sh ./bin/vectorsearch bench distance --dim 768 --count 10000
 
 # Convenience script for benchmarks
 ./scripts/profile-bench.sh 768 10000 avx512
 
 # Profile with custom events
-./scripts/profile.sh --events cache-misses ./bin/mkt bench distance
+./scripts/profile.sh --events cache-misses ./bin/vectorsearch bench distance
 
 # Keep perf.data for manual analysis
-./scripts/profile.sh --keep-perf-data ./bin/mkt bench distance
+./scripts/profile.sh --keep-perf-data ./bin/vectorsearch bench distance
 ```
 
 #### Output
@@ -224,17 +224,18 @@ This ensures accurate stack traces while maintaining realistic performance.
 ```bash
 # Profile cache misses instead of CPU cycles
 ./scripts/profile.sh --events cache-misses --output cache-profile \
-  ./bin/mkt bench distance --dim 768 --count 100000
+  ./bin/vectorsearch bench distance --dim 768 --count 100000
 
 # Profile branch mispredictions
 ./scripts/profile.sh --events branch-misses --output branch-profile \
-  ./bin/mkt bench distance --dim 384 --count 50000
+  ./bin/vectorsearch bench distance --dim 384 --count 50000
 
 # Profile at higher frequency (more samples, more overhead)
-./scripts/profile.sh --freq 4999 ./bin/mkt bench distance
+./scripts/profile.sh --freq 4999 ./bin/vectorsearch bench distance
 
 # Profile multiple events
-./scripts/profile.sh --events cycles,cache-misses ./bin/mkt bench distance
+./scripts/profile.sh --events cycles,cache-misses \
+  ./bin/vectorsearch bench distance
 ```
 
 #### Interpreting Flame Graphs
@@ -254,7 +255,7 @@ Look for:
 For detailed analysis, use `perf report` directly:
 ```bash
 # Generate profile with --keep-perf-data
-./scripts/profile.sh --keep-perf-data ./bin/mkt bench distance
+./scripts/profile.sh --keep-perf-data ./bin/vectorsearch bench distance
 
 # Interactive report
 perf report
@@ -263,7 +264,7 @@ perf report
 perf report --stdio
 
 # Show annotated source code
-perf annotate mkt_distance_l2_avx512
+perf annotate vs_distance_l2_avx512
 ```
 
 ## Formatting
@@ -395,7 +396,7 @@ for (uint32_t i = 0; i < count; i++) {
 For float32 input, `to_float_block` returns the source pointer directly
 (zero-copy). For float16 input, it converts into a scratch buffer. Either way,
 the inner loop operates on `float *` with a direct function call that the
-compiler can inline and auto-vectorize with `MKT_TARGET_CLONES`.
+compiler can inline and auto-vectorize with `VS_TARGET_CLONES`.
 
 #### Why This Works
 

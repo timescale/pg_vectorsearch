@@ -6,9 +6,9 @@
  * 16-bit mask directly.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 
 #if defined(__x86_64__) || defined(_M_X64)
 
@@ -25,8 +25,8 @@
  * The mask register directly controls which elements participate
  * in the addition, making this very efficient.
  */
-MKT_TARGET_AVX512 float
-mkt_rabitq_inner_product_avx512(
+VS_TARGET_AVX512 float
+vs_rabitq_inner_product_avx512(
 		const float *transformed, const uint8_t *bits, Dimension dim)
 {
 	__m512 sum = _mm512_setzero_ps();
@@ -53,7 +53,7 @@ mkt_rabitq_inner_product_avx512(
 	}
 
 	/* Horizontal sum */
-	float result = mkt_horizontal_sum_avx512(sum);
+	float result = vs_horizontal_sum_avx512(sum);
 
 	/* Scalar tail for remaining elements */
 
@@ -76,8 +76,8 @@ mkt_rabitq_inner_product_avx512(
  * Extracts sign bits from transformed floats into packed bytes.
  * Uses AVX-512 compare to generate a 16-bit mask directly.
  */
-MKT_TARGET_AVX512 void
-mkt_rabitq_extract_signs_avx512(
+VS_TARGET_AVX512 void
+vs_rabitq_extract_signs_avx512(
 		const float *transformed, uint8_t *bits, Dimension dim)
 {
 	__m512 zero = _mm512_setzero_ps();
@@ -116,8 +116,8 @@ mkt_rabitq_extract_signs_avx512(
  * VPOPCNTDQ computes popcount of each 64-bit element in a ZMM register.
  * Requires Ice Lake (2019+) or later.
  */
-MKT_TARGET_AVX512_VPOPCNTDQ uint32_t
-mkt_rabitq_hamming_avx512(
+VS_TARGET_AVX512_VPOPCNTDQ uint32_t
+vs_rabitq_hamming_avx512(
 		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes)
 {
 	__m512i total = _mm512_setzero_si512();
@@ -131,7 +131,7 @@ mkt_rabitq_hamming_avx512(
 		total	   = _mm512_add_epi64(total, _mm512_popcnt_epi64(x));
 	}
 
-	uint64_t result = mkt_horizontal_sum_epi64_avx512(total);
+	uint64_t result = vs_horizontal_sum_epi64_avx512(total);
 
 	/* Scalar tail */
 	for (; i < packed_bytes; i++)
@@ -143,8 +143,8 @@ mkt_rabitq_hamming_avx512(
 /*
  * Multi-candidate AVX-512 VPOPCNTDQ Hamming distance.
  */
-MKT_TARGET_AVX512_VPOPCNTDQ void
-mkt_rabitq_hamming_multi_avx512(
+VS_TARGET_AVX512_VPOPCNTDQ void
+vs_rabitq_hamming_multi_avx512(
 		const uint8_t *query_bits,
 		const uint8_t *data_bits,
 		uint32_t	   stride,
@@ -154,7 +154,7 @@ mkt_rabitq_hamming_multi_avx512(
 {
 	for (uint32_t c = 0; c < count; c++)
 	{
-		results[c] = mkt_rabitq_hamming_avx512(
+		results[c] = vs_rabitq_hamming_avx512(
 				query_bits, data_bits + c * stride, packed_bytes);
 	}
 }
@@ -170,8 +170,8 @@ mkt_rabitq_hamming_multi_avx512(
  *
  * Tail candidates (count % 4) use the single-candidate kernel.
  */
-MKT_TARGET_AVX512 void
-mkt_rabitq_inner_product_multi_avx512(
+VS_TARGET_AVX512 void
+vs_rabitq_inner_product_multi_avx512(
 		const float	  *transformed,
 		const uint8_t *bits,
 		uint32_t	   stride,
@@ -216,10 +216,10 @@ mkt_rabitq_inner_product_multi_avx512(
 			sum3 = _mm512_mask_add_ps(sum3, k3, sum3, t);
 		}
 
-		results[base + 0] = mkt_horizontal_sum_avx512(sum0);
-		results[base + 1] = mkt_horizontal_sum_avx512(sum1);
-		results[base + 2] = mkt_horizontal_sum_avx512(sum2);
-		results[base + 3] = mkt_horizontal_sum_avx512(sum3);
+		results[base + 0] = vs_horizontal_sum_avx512(sum0);
+		results[base + 1] = vs_horizontal_sum_avx512(sum1);
+		results[base + 2] = vs_horizontal_sum_avx512(sum2);
+		results[base + 3] = vs_horizontal_sum_avx512(sum3);
 
 		/* Scalar tail for remaining dimensions */
 		for (; i < dim; i++)
@@ -241,11 +241,11 @@ mkt_rabitq_inner_product_multi_avx512(
 	/* Handle remaining candidates with single-candidate kernel */
 	for (uint32_t i = groups * 4; i < groups * 4 + tail; i++)
 	{
-		results[i] = mkt_rabitq_inner_product_avx512(
+		results[i] = vs_rabitq_inner_product_avx512(
 				transformed, bits + (size_t)i * stride, dim);
 	}
 }
 
 #endif /* x86_64 */
 
-#endif /* MKT_SIMD_FULL */
+#endif /* VS_SIMD_FULL */

@@ -1,9 +1,9 @@
 /*
- * mkt_pg.h - PostgreSQL-specific macros and helpers for pg_vectorsearch
+ * vs_pg.h - PostgreSQL-specific macros and helpers for pg_vectorsearch
  */
 
-#ifndef MKT_PG_H
-#define MKT_PG_H
+#ifndef VS_PG_H
+#define VS_PG_H
 
 #include <postgres.h>
 
@@ -21,21 +21,21 @@
  * Support function numbers
  * ---------------------------------------------------------------- */
 
-#define MKT_ANN_DISTANCE_PROC  1 /* distance operator function */
-#define MKT_ANN_METRIC_PROC	   2 /* metric identifier function */
-#define MKT_ANN_TYPE_INFO_PROC 3 /* column type descriptor (optional) */
+#define PRISM_DISTANCE_PROC	 1 /* distance operator function */
+#define PRISM_METRIC_PROC	 2 /* metric identifier function */
+#define PRISM_TYPE_INFO_PROC 3 /* column type descriptor (optional) */
 
 /* ----------------------------------------------------------------
  * GUC variables
  * ---------------------------------------------------------------- */
 
-extern int	  prism_distance_mode;	 /* MktDistanceMode */
-extern int	  prism_nprobe;			 /* clusters to probe per query */
-extern int	  prism_query_limit;	 /* min top-k per scan (0=from LIMIT) */
-extern int	  prism_fastscan_bits;	 /* fastscan LUT bits (8 or 16) */
-extern bool	  prism_rerank;			 /* enable reranking (default: true) */
-extern bool	  prism_log_build_stats; /* log per-phase build stats (def: off) */
-extern int	  mkt_leaf_refine_threshold;  /* refine when samples/leaf < this */
+extern int	prism_distance_mode;   /* VsDistanceMode */
+extern int	prism_nprobe;		   /* clusters to probe per query */
+extern int	prism_query_limit;	   /* min top-k per scan (0=from LIMIT) */
+extern int	prism_fastscan_bits;   /* fastscan LUT bits (8 or 16) */
+extern bool prism_rerank;		   /* enable reranking (default: true) */
+extern bool prism_log_build_stats; /* log per-phase build stats (def: off) */
+extern int	prism_leaf_refine_threshold;  /* refine when samples/leaf < this */
 extern double prism_centroid_error_scale; /* scales centroid pruning error
 									   bound (1=default, 0=drop) */
 extern double prism_probe_expand;		  /* routed clusters / nprobe */
@@ -83,9 +83,9 @@ typedef struct RaBitQParamsPG
  * int32 overflows once dim exceeds ~46340, and size_t would still be 32-bit
  * on ILP32 targets. Unreachable at today's dimension caps, but keeps the
  * arithmetic robust if a cap is ever raised, matching the sibling
- * MKT_RABITQ_PARAMS_SIZE macro in rabitq.h.
+ * VS_RABITQ_PARAMS_SIZE macro in rabitq.h.
  */
-#define MKT_RABITQ_PARAMS_PG_SIZE(dim) \
+#define VS_RABITQ_PARAMS_PG_SIZE(dim) \
 	(offsetof(RaBitQParamsPG, P) + (uint64_t)(dim) * (dim) * sizeof(float))
 
 #define DatumGetRaBitQParamsPG(x)	 ((RaBitQParamsPG *)PG_DETOAST_DATUM(x))
@@ -96,7 +96,7 @@ typedef struct RaBitQParamsPG
  * ---------------------------------------------------------------- */
 
 /*
- * MktCentroidCompression - tri-state control for RaBitQ centroid pages.
+ * PrismCentroidCompression - tri-state control for RaBitQ centroid pages.
  *
  * AUTO compresses where RaBitQ routing is correct (L2, cosine) and falls
  * back to float for inner product, whose ordering cannot be recovered from
@@ -105,13 +105,13 @@ typedef struct RaBitQParamsPG
  */
 typedef enum
 {
-	MKT_CENTROID_COMPRESSION_AUTO = 0,
-	MKT_CENTROID_COMPRESSION_ON	  = 1,
-	MKT_CENTROID_COMPRESSION_OFF  = 2,
-} MktCentroidCompression;
+	PRISM_CENTROID_COMPRESSION_AUTO = 0,
+	PRISM_CENTROID_COMPRESSION_ON	= 1,
+	PRISM_CENTROID_COMPRESSION_OFF	= 2,
+} PrismCentroidCompression;
 
 /*
- * MktFastscanMode - tri-state control for the packed FASTSCAN page
+ * PrismFastscanMode - tri-state control for the packed FASTSCAN page
  * layouts (posting pages via `fastscan`, centroid pages via
  * `centroid_fastscan`).
  *
@@ -125,32 +125,32 @@ typedef enum
  */
 typedef enum
 {
-	MKT_FASTSCAN_MODE_AUTO = 0,
-	MKT_FASTSCAN_MODE_ON   = 1,
-	MKT_FASTSCAN_MODE_OFF  = 2,
-} MktFastscanMode;
+	PRISM_FASTSCAN_MODE_AUTO = 0,
+	PRISM_FASTSCAN_MODE_ON	 = 1,
+	PRISM_FASTSCAN_MODE_OFF	 = 2,
+} PrismFastscanMode;
 
 typedef struct PrismOptions
 {
 	int32  vl_len_;				 /* varlena header (required by reloptions) */
-	int	   distance_mode;		 /* MktDistanceMode */
+	int	   distance_mode;		 /* VsDistanceMode */
 	int	   fan_out;				 /* children per tree node (2-255) */
 	int	   nlist;				 /* number of clusters (0 = auto) */
 	int	   kmeans_nredo;		 /* k-means restarts (1 = no restart) */
 	double soar_lambda;			 /* SOAR replication lambda (0=off) */
 	double boundary_epsilon;	 /* boundary replication threshold (0=off) */
-	int	   centroid_compression; /* MktCentroidCompression */
-	int	   fastscan;			 /* MktFastscanMode, posting pages */
-	int	   centroid_fastscan;	 /* MktFastscanMode, centroid pages */
+	int	   centroid_compression; /* PrismCentroidCompression */
+	int	   fastscan;			 /* PrismFastscanMode, posting pages */
+	int	   centroid_fastscan;	 /* PrismFastscanMode, centroid pages */
 } PrismOptions;
 
-#define MKT_ANN_DEFAULT_FAN_OUT 32
-#define MKT_ANN_MIN_FAN_OUT		2
-#define MKT_ANN_MAX_FAN_OUT		255
+#define PRISM_DEFAULT_FAN_OUT 32
+#define PRISM_MIN_FAN_OUT	  2
+#define PRISM_MAX_FAN_OUT	  255
 
-#define MKT_ANN_DEFAULT_NLIST 0
-#define MKT_ANN_MIN_NLIST	  0
-#define MKT_ANN_MAX_NLIST	  2000000
+#define PRISM_DEFAULT_NLIST 0
+#define PRISM_MIN_NLIST		0
+#define PRISM_MAX_NLIST		2000000
 
 /*
  * Replication defaults. Both forms of secondary assignment are on by
@@ -159,25 +159,25 @@ typedef struct PrismOptions
  * (10M-100M vectors), at a few percent of index size for the boundary
  * band and a modest build-time cost for SOAR.
  */
-#define MKT_ANN_DEFAULT_SOAR_LAMBDA		 1.0
-#define MKT_ANN_DEFAULT_BOUNDARY_EPSILON 0.35
+#define PRISM_DEFAULT_SOAR_LAMBDA	   1.0
+#define PRISM_DEFAULT_BOUNDARY_EPSILON 0.35
 
 /*
  * PrismGetDistanceMode - Resolve effective distance mode for a scan.
  *
  * GUC overrides index relopt when explicitly set (not 'default').
  */
-static inline MktDistanceMode
+static inline VsDistanceMode
 PrismGetDistanceMode(Relation index)
 {
 	PrismOptions *opts = (PrismOptions *)index->rd_options;
 	/* GUC overrides index relopt when explicitly set */
-	if (prism_distance_mode != MKT_DISTANCE_MODE_DEFAULT)
-		return (MktDistanceMode)prism_distance_mode;
+	if (prism_distance_mode != VS_DISTANCE_MODE_DEFAULT)
+		return (VsDistanceMode)prism_distance_mode;
 	/* Use index relopt, or asymmetric if no options set */
 	if (opts != NULL)
-		return (MktDistanceMode)opts->distance_mode;
-	return MKT_DISTANCE_MODE_ASYMMETRIC;
+		return (VsDistanceMode)opts->distance_mode;
+	return VS_DISTANCE_MODE_ASYMMETRIC;
 }
 
 /* ----------------------------------------------------------------
@@ -185,7 +185,7 @@ PrismGetDistanceMode(Relation index)
  * ---------------------------------------------------------------- */
 
 static inline Vec32 *
-mkt_pg_vec32_alloc(int dim)
+vs_pg_vec32_alloc(int dim)
 {
 	int	   size = VEC32_SIZE(dim);
 	Vec32 *v	= (Vec32 *)palloc0(size);
@@ -196,7 +196,7 @@ mkt_pg_vec32_alloc(int dim)
 }
 
 static inline Vec16 *
-mkt_pg_vec16_alloc(int dim)
+vs_pg_vec16_alloc(int dim)
 {
 	int	   size = VEC16_SIZE(dim);
 	Vec16 *v	= (Vec16 *)palloc0(size);
@@ -207,9 +207,9 @@ mkt_pg_vec16_alloc(int dim)
 }
 
 static inline RaBitQVector *
-mkt_pg_rabitq_alloc(int dim)
+vs_pg_rabitq_alloc(int dim)
 {
-	int			  size = MKT_RABITQ_VECTOR_SIZE(dim);
+	int			  size = VS_RABITQ_VECTOR_SIZE(dim);
 	RaBitQVector *v	   = (RaBitQVector *)palloc0(size);
 	SET_VARSIZE(v, size);
 	v->dim	 = (int16_t)dim;
@@ -218,13 +218,13 @@ mkt_pg_rabitq_alloc(int dim)
 }
 
 /* ----------------------------------------------------------------
- * Validation helpers (implemented in mkt_pg.c)
+ * Validation helpers (implemented in vs_pg.c)
  * ---------------------------------------------------------------- */
 
-void mkt_pg_check_dim_valid(int dim);
-void mkt_pg_check_rabitq_params_dim_valid(int dim);
-void mkt_pg_check_dims_match(int dim_a, int dim_b);
-void mkt_pg_check_expected_dim(int actual, int expected);
-void mkt_pg_check_value_finite(float val);
+void vs_pg_check_dim_valid(int dim);
+void vs_pg_check_rabitq_params_dim_valid(int dim);
+void vs_pg_check_dims_match(int dim_a, int dim_b);
+void vs_pg_check_expected_dim(int actual, int expected);
+void vs_pg_check_value_finite(float val);
 
-#endif /* MKT_PG_H */
+#endif /* VS_PG_H */

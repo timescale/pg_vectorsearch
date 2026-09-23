@@ -26,6 +26,6 @@
  * responsible for any cleanup.
  */
 BlockNumber prism_posting_convert_to_fastscan(
-		MktStorage *storage, BlockNumber aos_head, Dimension dim);
+		VsStorage *storage, BlockNumber aos_head, Dimension dim);
 
 #endif /* PRISM_POSTING_CONVERT_H */

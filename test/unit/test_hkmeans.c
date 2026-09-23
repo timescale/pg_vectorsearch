@@ -8,7 +8,7 @@
 #include "algo/hkmeans.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
-#include "mkt_test.h"
+#include "vs_test.h"
 
 TEST_GROUP(HKMeans);
 TEST_MEMCTX_FIXTURE();
@@ -24,7 +24,7 @@ make_clustered_data(
 		uint32_t nclusters, uint32_t per_cluster, Dimension dim, uint64_t seed)
 {
 	uint32_t nvecs = nclusters * per_cluster;
-	float	*data  = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float	*data  = vs_alloc((size_t)nvecs * dim * sizeof(float));
 
 	uint32_t rng = (uint32_t)seed;
 	for (uint32_t c = 0; c < nclusters; c++)
@@ -56,9 +56,9 @@ TEST(flat_single_level)
 	Dimension dim	  = 16;
 	float	 *data	  = make_clustered_data(4, 50, dim, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 
-	HKMeansResult *tree = mkt_hkmeans_f32(
+	HKMeansResult *tree = vs_hkmeans_f32(
 			data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(tree, "should return result");
@@ -80,8 +80,8 @@ TEST(flat_single_level)
 				isfinite(hk_leaf_centroids(tree)[i]),
 				"centroids should be finite");
 
-	mkt_free(tree);
-	mkt_free(data);
+	vs_free(tree);
+	vs_free(data);
 }
 
 /*
@@ -95,9 +95,9 @@ TEST(two_level_tree)
 	Dimension dim	  = 16;
 	float	 *data	  = make_clustered_data(16, 62, dim, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 
-	HKMeansResult *tree = mkt_hkmeans_f32(
+	HKMeansResult *tree = vs_hkmeans_f32(
 			data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(tree, "should return result");
@@ -137,8 +137,8 @@ TEST(two_level_tree)
 		ASSERT_TRUE(
 				isfinite(hk_leaf_centroids(tree)[i]), "leaf centroids finite");
 
-	mkt_free(tree);
-	mkt_free(data);
+	vs_free(tree);
+	vs_free(data);
 }
 
 /*
@@ -152,9 +152,9 @@ TEST(three_level_tree)
 	uint32_t  nvecs	  = 8 * 80;
 	float	 *data	  = make_clustered_data(8, 80, dim, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 
-	HKMeansResult *tree = mkt_hkmeans_f32(
+	HKMeansResult *tree = vs_hkmeans_f32(
 			data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(tree, "should return result");
@@ -187,13 +187,13 @@ TEST(three_level_tree)
 
 	ASSERT_TRUE(tree->nleaves > 0, "has leaf centroids");
 
-	mkt_free(tree);
-	mkt_free(data);
+	vs_free(tree);
+	vs_free(data);
 }
 
 /*
  * build_flat assembles a one-level tree directly from leaf centroids, matching
- * the shape mkt_hkmeans_f32 produces for a flat (nlist <= fan_out) build.
+ * the shape vs_hkmeans_f32 produces for a flat (nlist <= fan_out) build.
  */
 TEST(build_flat_from_centroids)
 {
@@ -202,12 +202,12 @@ TEST(build_flat_from_centroids)
 	uint32_t  fan_out = 16;
 
 	/* Distinct centroids: row i has value (i+1) in dim 0. */
-	float *cents = mkt_alloc((size_t)nleaves * dim * sizeof(float));
+	float *cents = vs_alloc((size_t)nleaves * dim * sizeof(float));
 	memset(cents, 0, (size_t)nleaves * dim * sizeof(float));
 	for (uint32_t i = 0; i < nleaves; i++)
 		cents[(size_t)i * dim] = (float)(i + 1);
 
-	HKMeansResult *tree = mkt_hkmeans_build_flat(cents, nleaves, fan_out, dim);
+	HKMeansResult *tree = vs_hkmeans_build_flat(cents, nleaves, fan_out, dim);
 
 	ASSERT_NOT_NULL(tree, "build_flat returns a tree");
 	ASSERT_EQ(1, tree->nlevels, "flat: 1 level");
@@ -228,18 +228,18 @@ TEST(build_flat_from_centroids)
 		ASSERT_TRUE(lc[i] == cents[i], "leaf centroids match input");
 
 	/* A query nearest to centroid i routes to leaf i. */
-	float *q = mkt_alloc((size_t)dim * sizeof(float));
+	float *q = vs_alloc((size_t)dim * sizeof(float));
 	for (uint32_t i = 0; i < nleaves; i++)
 	{
 		memset(q, 0, (size_t)dim * sizeof(float));
 		q[0]		  = (float)(i + 1);
-		uint32_t leaf = mkt_hkmeans_assign(tree, q, DISTANCE_L2, NULL);
+		uint32_t leaf = vs_hkmeans_assign(tree, q, DISTANCE_L2, NULL);
 		ASSERT_EQ(i, leaf, "query routes to its nearest leaf");
 	}
 
-	mkt_free(q);
-	mkt_free(tree);
-	mkt_free(cents);
+	vs_free(q);
+	vs_free(tree);
+	vs_free(cents);
 }
 
 /*
@@ -253,9 +253,9 @@ TEST(structural_invariants)
 	Dimension dim	  = 8;
 	float	 *data	  = make_clustered_data(8, 50, dim, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 
-	HKMeansResult *tree = mkt_hkmeans_f32(
+	HKMeansResult *tree = vs_hkmeans_f32(
 			data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(tree, "should return result");
@@ -282,8 +282,8 @@ TEST(structural_invariants)
 		ASSERT_TRUE(
 				isfinite(hk_leaf_centroids(tree)[i]), "leaf centroids finite");
 
-	mkt_free(tree);
-	mkt_free(data);
+	vs_free(tree);
+	vs_free(data);
 }
 
 /*
@@ -292,22 +292,22 @@ TEST(structural_invariants)
 TEST(null_inputs)
 {
 	float		  data[] = {1.0f, 2.0f, 3.0f, 4.0f};
-	KMeansOptions opts	 = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts	 = VS_KMEANS_OPTIONS_DEFAULT;
 
 	ASSERT_NULL(
-			mkt_hkmeans_f32(NULL, 2, NULL, 2, 1, 4, DISTANCE_L2, &opts),
+			vs_hkmeans_f32(NULL, 2, NULL, 2, 1, 4, DISTANCE_L2, &opts),
 			"NULL vectors");
 	ASSERT_NULL(
-			mkt_hkmeans_f32(data, 0, NULL, 2, 1, 4, DISTANCE_L2, &opts),
+			vs_hkmeans_f32(data, 0, NULL, 2, 1, 4, DISTANCE_L2, &opts),
 			"nvecs=0");
 	ASSERT_NULL(
-			mkt_hkmeans_f32(data, 2, NULL, 0, 1, 4, DISTANCE_L2, &opts),
+			vs_hkmeans_f32(data, 2, NULL, 0, 1, 4, DISTANCE_L2, &opts),
 			"dim=0");
 	ASSERT_NULL(
-			mkt_hkmeans_f32(data, 2, NULL, 2, 0, 4, DISTANCE_L2, &opts),
+			vs_hkmeans_f32(data, 2, NULL, 2, 0, 4, DISTANCE_L2, &opts),
 			"nlist=0");
 	ASSERT_NULL(
-			mkt_hkmeans_f32(data, 2, NULL, 2, 1, 1, DISTANCE_L2, &opts),
+			vs_hkmeans_f32(data, 2, NULL, 2, 1, 1, DISTANCE_L2, &opts),
 			"fan_out=1");
 }
 
@@ -316,7 +316,7 @@ TEST(null_inputs)
  */
 TEST(destroy_null)
 {
-	mkt_free(NULL);
+	vs_free(NULL);
 	ASSERT_TRUE(true, "no crash");
 }
 
@@ -329,13 +329,13 @@ TEST(deterministic)
 	Dimension dim	= 8;
 	float	 *data	= make_clustered_data(4, 50, dim, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.seed		   = 42;
 
 	HKMeansResult *t1 =
-			mkt_hkmeans_f32(data, nvecs, NULL, dim, 4, 4, DISTANCE_L2, &opts);
+			vs_hkmeans_f32(data, nvecs, NULL, dim, 4, 4, DISTANCE_L2, &opts);
 	HKMeansResult *t2 =
-			mkt_hkmeans_f32(data, nvecs, NULL, dim, 4, 4, DISTANCE_L2, &opts);
+			vs_hkmeans_f32(data, nvecs, NULL, dim, 4, 4, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(t1, "first run");
 	ASSERT_NOT_NULL(t2, "second run");
@@ -350,9 +350,9 @@ TEST(deterministic)
 				"same nchildren");
 	}
 
-	mkt_free(t1);
-	mkt_free(t2);
-	mkt_free(data);
+	vs_free(t1);
+	vs_free(t2);
+	vs_free(data);
 }
 
 /*
@@ -371,16 +371,16 @@ TEST(few_vectors)
 			-1.0f,
 	};
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 
 	HKMeansResult *tree =
-			mkt_hkmeans_f32(data, 4, NULL, 2, 2, 32, DISTANCE_L2, &opts);
+			vs_hkmeans_f32(data, 4, NULL, 2, 2, 32, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(tree, "should succeed with few vectors");
 	ASSERT_EQ(1, tree->nlevels, "flat when nlist <= fan_out");
 	ASSERT_EQ(2, tree->nleaves, "2 leaf centroids");
 
-	mkt_free(tree);
+	vs_free(tree);
 }
 
 /*
@@ -390,10 +390,10 @@ TEST(single_cluster)
 {
 	float data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 
 	HKMeansResult *tree =
-			mkt_hkmeans_f32(data, 3, NULL, 2, 1, 4, DISTANCE_L2, &opts);
+			vs_hkmeans_f32(data, 3, NULL, 2, 1, 4, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(tree, "should succeed");
 	ASSERT_EQ(1, tree->nlevels, "1 level");
@@ -402,7 +402,7 @@ TEST(single_cluster)
 	ASSERT_FLOAT_EQ(3.0f, hk_leaf_centroids(tree)[0], 1e-3f, "mean x");
 	ASSERT_FLOAT_EQ(4.0f, hk_leaf_centroids(tree)[1], 1e-3f, "mean y");
 
-	mkt_free(tree);
+	vs_free(tree);
 }
 
 /* Brute-force nearest leaf (squared L2) for comparison. */
@@ -448,8 +448,8 @@ TEST(assign_topk_wide_beam_is_exact)
 	uint32_t  nvecs	  = 16 * 62;
 	float	 *data	  = make_clustered_data(16, 62, dim, 7);
 
-	KMeansOptions  opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	HKMeansResult *tree = mkt_hkmeans_f32(
+	KMeansOptions  opts = VS_KMEANS_OPTIONS_DEFAULT;
+	HKMeansResult *tree = vs_hkmeans_f32(
 			data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
 	ASSERT_NOT_NULL(tree, "tree built");
 	ASSERT_EQ(2, tree->nlevels, "2-level tree");
@@ -467,12 +467,12 @@ TEST(assign_topk_wide_beam_is_exact)
 
 		uint32_t out_leaves[8];
 		Distance out_dists[8];
-		uint32_t n = mkt_hkmeans_assign_topk(
+		uint32_t n = vs_hkmeans_assign_topk(
 				tree,
 				vec,
 				DISTANCE_L2,
 				4,
-				MKT_HK_MAX_TOPK,
+				VS_HK_MAX_TOPK,
 				out_leaves,
 				out_dists);
 
@@ -488,13 +488,13 @@ TEST(assign_topk_wide_beam_is_exact)
 				ASSERT_TRUE(out_leaves[i] != out_leaves[j], "leaves distinct");
 	}
 
-	mkt_free(tree);
-	mkt_free(data);
+	vs_free(tree);
+	vs_free(data);
 }
 
 /*
  * beam_width = 1 follows the single greedy path, so its nearest leaf
- * must match mkt_hkmeans_assign().
+ * must match vs_hkmeans_assign().
  */
 TEST(assign_topk_beam1_equals_greedy)
 {
@@ -504,8 +504,8 @@ TEST(assign_topk_beam1_equals_greedy)
 	uint32_t  nvecs	  = 16 * 62;
 	float	 *data	  = make_clustered_data(16, 62, dim, 11);
 
-	KMeansOptions  opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	HKMeansResult *tree = mkt_hkmeans_f32(
+	KMeansOptions  opts = VS_KMEANS_OPTIONS_DEFAULT;
+	HKMeansResult *tree = vs_hkmeans_f32(
 			data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
 	ASSERT_NOT_NULL(tree, "tree built");
 
@@ -515,11 +515,11 @@ TEST(assign_topk_beam1_equals_greedy)
 
 		Distance greedy_dist;
 		uint32_t greedy =
-				mkt_hkmeans_assign(tree, vec, DISTANCE_L2, &greedy_dist);
+				vs_hkmeans_assign(tree, vec, DISTANCE_L2, &greedy_dist);
 
 		uint32_t out_leaves[4];
 		Distance out_dists[4];
-		uint32_t n = mkt_hkmeans_assign_topk(
+		uint32_t n = vs_hkmeans_assign_topk(
 				tree, vec, DISTANCE_L2, 2, 1, out_leaves, out_dists);
 
 		ASSERT_TRUE(n >= 1, "returns at least one leaf");
@@ -531,8 +531,8 @@ TEST(assign_topk_beam1_equals_greedy)
 				"beam-1 distance == greedy distance");
 	}
 
-	mkt_free(tree);
-	mkt_free(data);
+	vs_free(tree);
+	vs_free(data);
 }
 
 /*
@@ -566,21 +566,21 @@ TEST(max_blob_size_capped_bounds_actual)
 		float	*data =
 				make_clustered_data(4, (nvecs + 3) / 4, dim, 42 + (unsigned)i);
 
-		KMeansOptions  opts = MKT_KMEANS_OPTIONS_DEFAULT;
-		HKMeansResult *tree = mkt_hkmeans_f32(
+		KMeansOptions  opts = VS_KMEANS_OPTIONS_DEFAULT;
+		HKMeansResult *tree = vs_hkmeans_f32(
 				data, nvecs, NULL, dim, nlist, fan_out, DISTANCE_L2, &opts);
 		ASSERT_NOT_NULL(tree, "tree builds");
 
 		size_t capped =
-				mkt_hkmeans_max_blob_size_capped(nlist, fan_out, dim, nvecs);
-		size_t uncapped = mkt_hkmeans_max_blob_size(nlist, fan_out, dim);
+				vs_hkmeans_max_blob_size_capped(nlist, fan_out, dim, nvecs);
+		size_t uncapped = vs_hkmeans_max_blob_size(nlist, fan_out, dim);
 
 		ASSERT_TRUE(
 				(size_t)tree->total_size <= capped,
 				"actual blob within the capped bound");
 		ASSERT_TRUE(capped <= uncapped, "cap never exceeds the worst case");
 
-		mkt_free(tree);
-		mkt_free(data);
+		vs_free(tree);
+		vs_free(data);
 	}
 }

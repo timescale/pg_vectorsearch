@@ -1,7 +1,8 @@
 # What the maintenance lock excludes: other maintenance, and DDL.
 #
-# Both entry points take ShareUpdateExclusiveLock on the index (MKT_MAINT_LOCK)
-# and hold it for the call. RowExclusiveLock, which they used to take, does not
+# Both entry points take ShareUpdateExclusiveLock on the index
+# (PRISM_MAINT_LOCK) and hold it for the call. RowExclusiveLock, which
+# they used to take, does not
 # conflict with itself, and a split mints ids for its new clusters from the leaf
 # count it read and writes the updated count back -- so two overlapping passes
 # would hand the same ids to different lists and persist a count short by one

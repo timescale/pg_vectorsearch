@@ -11,8 +11,8 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#include "mkt_test.h"
 #include "standalone/latch.h"
+#include "vs_test.h"
 
 TEST_GROUP(Latch);
 
@@ -62,7 +62,7 @@ waiter_thread(void *arg)
 	WakeArg *a = (WakeArg *)arg;
 
 	/* Bind MyLatch the way a participating thread would, then block on it. */
-	mkt_latch_attach_self(a->latch);
+	vs_latch_attach_self(a->latch);
 	WaitLatch(MyLatch, WL_LATCH_SET, -1, 0);
 	atomic_store(a->woke, 1);
 	return NULL;

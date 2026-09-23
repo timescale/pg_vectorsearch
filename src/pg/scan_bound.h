@@ -13,20 +13,20 @@
 #include <access/genam.h>
 
 /* Install the ExecutorRun hook. Called once, from _PG_init. */
-void mkt_scan_bound_init(void);
+void prism_scan_bound_init(void);
 
 /*
  * Rows this scan should size its top-k for, already seeded for any filter
  * the executor applies above it. 0 when the scan does not run under a
  * usable LIMIT, in which case the caller keeps its default sizing.
  */
-uint32_t mkt_scan_bound(IndexScanDesc scan);
+uint32_t prism_scan_bound(IndexScanDesc scan);
 
 /*
  * Inflate a row target for a filter applied above the scan, from the
  * estimated surviving fraction. Shared by the executor's sizing and the
  * cost model so both price the same pool.
  */
-uint32_t mkt_scan_inflate_for_filter(uint32_t k, double selectivity);
+uint32_t prism_scan_inflate_for_filter(uint32_t k, double selectivity);
 
 #endif /* SCAN_BOUND_H */

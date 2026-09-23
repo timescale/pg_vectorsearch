@@ -17,12 +17,12 @@
 #include "index/posting_scan.h"
 #include "index/query_scan.h"
 #include "index/storage.h"
-#include "mkt_test.h"
 #include "quant/fastscan.h"
 #include "quant/rabitq.h"
 #include "standalone/api.h"
 #include "standalone/index.h"
 #include "standalone/query.h"
+#include "vs_test.h"
 
 TEST_GROUP(Standalone);
 TEST_MEMCTX_FIXTURE();
@@ -36,7 +36,7 @@ static float *
 make_vectors(uint32_t nvecs, uint32_t dim, uint32_t seed)
 {
 	srand(seed);
-	float *data = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float *data = vs_alloc((size_t)nvecs * dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs * dim; i++)
 		data[i] = (float)(rand() % 10000 - 5000) / 5000.0f;
 	return data;
@@ -50,8 +50,8 @@ build_from_array(
 		uint32_t				dim,
 		const PrismIndexConfig *config)
 {
-	MktArraySource src;
-	mkt_array_source_init(&src, vecs, nvecs, dim);
+	VsArraySource src;
+	vs_array_source_init(&src, vecs, nvecs, dim);
 	return prism_index_build(&src.base, config, NULL);
 }
 
@@ -66,7 +66,7 @@ brute_force_knn(
 		uint32_t	*ids)
 {
 	/* Simple O(n*k) selection */
-	float *dists = mkt_alloc(nvecs * sizeof(float));
+	float *dists = vs_alloc(nvecs * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
 		float d = 0;
@@ -87,7 +87,7 @@ brute_force_knn(
 		ids[i]		= best;
 		dists[best] = INFINITY;
 	}
-	mkt_free(dists);
+	vs_free(dists);
 }
 
 /* ----------------------------------------------------------------
@@ -101,7 +101,7 @@ TEST(index_build_basic)
 	PrismIndexConfig config = {
 			.nlist		   = 10,
 			.metric		   = DISTANCE_L2,
-			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
 			.encode_rabitq = true,
 	};
 
@@ -122,7 +122,7 @@ TEST(index_build_cosine)
 	PrismIndexConfig config = {
 			.nlist		   = 5,
 			.metric		   = DISTANCE_COSINE,
-			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
 			.encode_rabitq = true,
 	};
 
@@ -140,20 +140,20 @@ TEST(index_build_null_fails)
 	ASSERT_NULL(
 			prism_index_build(NULL, &config, NULL), "null src should fail");
 
-	float		   dummy = 1.0f;
-	MktArraySource src;
+	float		  dummy = 1.0f;
+	VsArraySource src;
 
-	mkt_array_source_init(&src, &dummy, 0, 32);
+	vs_array_source_init(&src, &dummy, 0, 32);
 	ASSERT_NULL(
 			prism_index_build(&src.base, &config, NULL),
 			"zero nvecs should fail");
 
-	mkt_array_source_init(&src, &dummy, 100, 0);
+	vs_array_source_init(&src, &dummy, 100, 0);
 	ASSERT_NULL(
 			prism_index_build(&src.base, &config, NULL),
 			"zero dim should fail");
 
-	mkt_array_source_init(&src, &dummy, 100, 32);
+	vs_array_source_init(&src, &dummy, 100, 32);
 	ASSERT_NULL(
 			prism_index_build(&src.base, NULL, NULL),
 			"null config should fail");
@@ -166,7 +166,7 @@ TEST(index_build_float32_centroids)
 	PrismIndexConfig config = {
 			.nlist		  = 5,
 			.metric		  = DISTANCE_L2,
-			.centroid_fmt = MKT_CENTROID_FMT_FLOAT,
+			.centroid_fmt = PRISM_CENTROID_FMT_FLOAT,
 	};
 
 	PrismIndex *idx = build_from_array(vecs, 500, 16, &config);
@@ -207,7 +207,7 @@ TEST(query_ctx_create_destroy)
 	PrismIndexConfig config = {
 			.nlist		   = 5,
 			.metric		   = DISTANCE_L2,
-			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
 			.encode_rabitq = true,
 	};
 
@@ -232,7 +232,7 @@ TEST(query_exec_returns_results)
 	PrismIndexConfig config = {
 			.nlist		   = 10,
 			.metric		   = DISTANCE_L2,
-			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
 			.encode_rabitq = true,
 	};
 
@@ -246,7 +246,7 @@ TEST(query_exec_returns_results)
 			vecs,
 			k,
 			nprobe,
-			MKT_DISTANCE_MODE_ASYMMETRIC,
+			VS_DISTANCE_MODE_ASYMMETRIC,
 			true,
 			result_ids);
 
@@ -269,7 +269,7 @@ TEST(query_exec_recall)
 	PrismIndexConfig config = {
 			.nlist		   = 20,
 			.metric		   = DISTANCE_L2,
-			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
 			.encode_rabitq = true,
 	};
 
@@ -290,7 +290,7 @@ TEST(query_exec_recall)
 				query,
 				k,
 				10,
-				MKT_DISTANCE_MODE_ASYMMETRIC,
+				VS_DISTANCE_MODE_ASYMMETRIC,
 				true,
 				result_ids);
 
@@ -345,9 +345,9 @@ tally_page(PrismPostingChainPos *pos, void *state)
 }
 
 static void
-verify_head_meta(MktTestResult *result, PrismIndex *idx)
+verify_head_meta(VsTestResult *result, PrismIndex *idx)
 {
-	MktStorage *st = idx->base.posting_storage;
+	VsStorage *st = idx->base.posting_storage;
 	for (uint32_t c = 0; c < idx->nlist; c++)
 	{
 		BlockNumber head = idx->first_posting + c;
@@ -361,7 +361,7 @@ verify_head_meta(MktTestResult *result, PrismIndex *idx)
 		BlockNumber tail  = tally.tail;
 		uint32_t	count = tally.count;
 
-		Page hp = mkt_storage_read_page(st, head);
+		Page hp = vs_storage_read_page(st, head);
 		ASSERT_EQ(
 				count,
 				prism_posting_head_live_count(hp),
@@ -370,7 +370,7 @@ verify_head_meta(MktTestResult *result, PrismIndex *idx)
 				tail,
 				prism_posting_head_tail(hp),
 				"stamped tail_blkno must match the actual chain tail");
-		mkt_storage_release_page(st, head);
+		vs_storage_release_page(st, head);
 	}
 }
 
@@ -387,7 +387,7 @@ TEST(query_exec_recall_pages_parallel)
 	PrismIndexConfig config = {
 			.nlist		   = 20,
 			.metric		   = DISTANCE_L2,
-			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
 			.encode_rabitq = true,
 			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
 			.nworkers	   = 4, /* force the parallel driver */
@@ -412,7 +412,7 @@ TEST(query_exec_recall_pages_parallel)
 				query,
 				k,
 				20,
-				MKT_DISTANCE_MODE_ASYMMETRIC,
+				VS_DISTANCE_MODE_ASYMMETRIC,
 				true,
 				result_ids);
 
@@ -444,7 +444,7 @@ TEST(query_exec_recall_pages_parallel_depth3)
 			.nlist		   = 40,
 			.fan_out	   = 4,
 			.metric		   = DISTANCE_L2,
-			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
 			.encode_rabitq = true,
 			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
 			.nworkers	   = 2,
@@ -469,7 +469,7 @@ TEST(query_exec_recall_pages_parallel_depth3)
 				query,
 				k,
 				40,
-				MKT_DISTANCE_MODE_ASYMMETRIC,
+				VS_DISTANCE_MODE_ASYMMETRIC,
 				true,
 				result_ids);
 
@@ -505,7 +505,7 @@ TEST(query_exec_null_fails)
 					query,
 					10,
 					5,
-					MKT_DISTANCE_MODE_ASYMMETRIC,
+					VS_DISTANCE_MODE_ASYMMETRIC,
 					true,
 					ids),
 			0,
@@ -521,7 +521,7 @@ TEST(query_exec_brute_force_path)
 	PrismIndexConfig config = {
 			.nlist		  = 5,
 			.metric		  = DISTANCE_L2,
-			.centroid_fmt = MKT_CENTROID_FMT_FLOAT,
+			.centroid_fmt = PRISM_CENTROID_FMT_FLOAT,
 	};
 
 	PrismIndex	  *idx	= build_from_array(vecs, nvecs, dim, &config);
@@ -529,7 +529,7 @@ TEST(query_exec_brute_force_path)
 
 	uint32_t result_ids[5];
 	uint32_t count = prism_query_exec(
-			qctx, vecs, k, 5, MKT_DISTANCE_MODE_ASYMMETRIC, true, result_ids);
+			qctx, vecs, k, 5, VS_DISTANCE_MODE_ASYMMETRIC, true, result_ids);
 
 	ASSERT_EQ(count, k, "should return k results");
 	for (uint32_t i = 0; i < count; i++)
@@ -548,22 +548,22 @@ TEST(bindings_create_destroy)
 	float *vecs = make_vectors(500, 16, 42);
 
 	PrismBuildInfo info;
-	MktHandle	  *handle = mkt_handle_create_from_array(
-			vecs,
-			500,
-			16,
-			5,
-			0,
-			"euclidean",
-			"rabitq",
-			NULL,
-			0,
-			0,
-			0.0,
-			0.0,
-			false,
-			0,
-			&info);
+	VsHandle	  *handle = vs_handle_create_from_array(
+			 vecs,
+			 500,
+			 16,
+			 5,
+			 0,
+			 "euclidean",
+			 "rabitq",
+			 NULL,
+			 0,
+			 0,
+			 0.0,
+			 0.0,
+			 false,
+			 0,
+			 &info);
 
 	ASSERT_NOT_NULL(handle, "create should succeed");
 	ASSERT_TRUE(info.nlist > 0, "should have clusters");
@@ -571,7 +571,7 @@ TEST(bindings_create_destroy)
 	ASSERT_TRUE(info.min_cluster > 0, "min cluster > 0");
 	ASSERT_TRUE(info.max_cluster >= info.min_cluster, "max >= min");
 
-	mkt_handle_destroy(handle);
+	vs_handle_destroy(handle);
 }
 
 TEST(bindings_query)
@@ -579,7 +579,7 @@ TEST(bindings_query)
 	uint32_t dim = 32, nvecs = 1000;
 	float	*vecs = make_vectors(nvecs, dim, 42);
 
-	MktHandle *handle = mkt_handle_create_from_array(
+	VsHandle *handle = vs_handle_create_from_array(
 			vecs,
 			nvecs,
 			dim,
@@ -598,13 +598,13 @@ TEST(bindings_query)
 	ASSERT_NOT_NULL(handle, "create should succeed");
 
 	uint32_t result_ids[10];
-	uint32_t count = mkt_handle_query(
+	uint32_t count = vs_handle_query(
 			handle, vecs, 10, 5, "asymmetric", true, result_ids);
 
 	ASSERT_EQ(count, 10, "should return 10 results");
 	ASSERT_TRUE(result_ids[0] < nvecs, "result ID in range");
 
-	mkt_handle_destroy(handle);
+	vs_handle_destroy(handle);
 }
 
 TEST(posting_convert_aos_to_fastscan)
@@ -612,15 +612,15 @@ TEST(posting_convert_aos_to_fastscan)
 	uint32_t dim   = 32;
 	uint32_t nvecs = 200;
 
-	mkt_distance_init();
-	mkt_rabitq_init_simd();
-	mkt_fastscan_init_simd();
+	vs_distance_init();
+	vs_rabitq_init_simd();
+	vs_fastscan_init_simd();
 
 	/* Build an AoS index (fastscan=false) */
 	float *cvecs = make_vectors(nvecs, dim, 42);
 
-	MktArraySource array_src;
-	mkt_array_source_init(&array_src, cvecs, nvecs, dim);
+	VsArraySource array_src;
+	vs_array_source_init(&array_src, cvecs, nvecs, dim);
 
 	PrismIndexConfig cfg = {
 			.nlist		   = 5,
@@ -675,7 +675,7 @@ TEST(bindings_query_fastscan)
 	uint32_t dim = 32, nvecs = 1000;
 	float	*vecs = make_vectors(nvecs, dim, 42);
 
-	MktHandle *handle = mkt_handle_create_from_array(
+	VsHandle *handle = vs_handle_create_from_array(
 			vecs,
 			nvecs,
 			dim,
@@ -694,13 +694,13 @@ TEST(bindings_query_fastscan)
 	ASSERT_NOT_NULL(handle, "fastscan create should succeed");
 
 	uint32_t result_ids[10];
-	uint32_t count = mkt_handle_query(
+	uint32_t count = vs_handle_query(
 			handle, vecs, 10, 5, "asymmetric", true, result_ids);
 
 	ASSERT_EQ(count, 10, "should return 10 results");
 	ASSERT_TRUE(result_ids[0] < nvecs, "result ID in range");
 
-	mkt_handle_destroy(handle);
+	vs_handle_destroy(handle);
 }
 
 TEST(bindings_angular_metric)
@@ -708,7 +708,7 @@ TEST(bindings_angular_metric)
 	uint32_t dim = 16, nvecs = 500;
 	float	*vecs = make_vectors(nvecs, dim, 77);
 
-	MktHandle *handle = mkt_handle_create_from_array(
+	VsHandle *handle = vs_handle_create_from_array(
 			vecs,
 			nvecs,
 			dim,
@@ -727,18 +727,18 @@ TEST(bindings_angular_metric)
 	ASSERT_NOT_NULL(handle, "angular create should succeed");
 
 	uint32_t result_ids[5];
-	uint32_t count = mkt_handle_query(
+	uint32_t count = vs_handle_query(
 			handle, vecs, 5, 5, "asymmetric", true, result_ids);
 
 	ASSERT_TRUE(count > 0, "should return results");
 
-	mkt_handle_destroy(handle);
+	vs_handle_destroy(handle);
 }
 
 TEST(bindings_null_destroy)
 {
 	/* Should not crash */
-	mkt_handle_destroy(NULL);
+	vs_handle_destroy(NULL);
 	ASSERT_TRUE(true, "null destroy should not crash");
 }
 
@@ -747,7 +747,7 @@ TEST(bindings_null_query)
 	uint32_t ids[10];
 	float	 query[32] = {0};
 	ASSERT_EQ(
-			mkt_handle_query(NULL, query, 10, 5, "asymmetric", true, ids),
+			vs_handle_query(NULL, query, 10, 5, "asymmetric", true, ids),
 			0,
 			"null handle should return 0");
 }
@@ -757,7 +757,7 @@ TEST(bindings_symmetric_mode)
 	uint32_t dim = 32, nvecs = 500;
 	float	*vecs = make_vectors(nvecs, dim, 42);
 
-	MktHandle *handle = mkt_handle_create_from_array(
+	VsHandle *handle = vs_handle_create_from_array(
 			vecs,
 			nvecs,
 			dim,
@@ -775,12 +775,12 @@ TEST(bindings_symmetric_mode)
 			NULL);
 
 	uint32_t result_ids[5];
-	uint32_t count = mkt_handle_query(
-			handle, vecs, 5, 5, "symmetric", true, result_ids);
+	uint32_t count =
+			vs_handle_query(handle, vecs, 5, 5, "symmetric", true, result_ids);
 
 	ASSERT_TRUE(count > 0, "symmetric query should return results");
 
-	mkt_handle_destroy(handle);
+	vs_handle_destroy(handle);
 }
 
 TEST(bindings_kmeans_params)
@@ -788,27 +788,27 @@ TEST(bindings_kmeans_params)
 	float *vecs = make_vectors(500, 16, 42);
 
 	PrismBuildInfo info;
-	MktHandle	  *handle = mkt_handle_create_from_array(
-			vecs,
-			500,
-			16,
-			5,
-			0,
-			"euclidean",
-			"rabitq",
-			NULL,
-			2,
-			20,
-			0.0,
-			0.0,
-			false,
-			0,
-			&info);
+	VsHandle	  *handle = vs_handle_create_from_array(
+			 vecs,
+			 500,
+			 16,
+			 5,
+			 0,
+			 "euclidean",
+			 "rabitq",
+			 NULL,
+			 2,
+			 20,
+			 0.0,
+			 0.0,
+			 false,
+			 0,
+			 &info);
 
 	ASSERT_NOT_NULL(handle, "create with kmeans params should succeed");
 	ASSERT_TRUE(info.nlist > 0, "should have clusters");
 
-	mkt_handle_destroy(handle);
+	vs_handle_destroy(handle);
 }
 
 /* ----------------------------------------------------------------
@@ -819,8 +819,8 @@ TEST(bindings_kmeans_params)
 static uint32_t
 count_posting_entries(PrismIndex *idx)
 {
-	MktStorage *st	  = idx->base.posting_storage;
-	uint32_t	total = 0;
+	VsStorage *st	 = idx->base.posting_storage;
+	uint32_t   total = 0;
 
 	for (uint32_t c = 0; c < idx->nlist; c++)
 	{
@@ -847,7 +847,7 @@ TEST(parallel_fastscan_no_lost_partials)
 	PrismIndexConfig config = {
 			.nlist		   = 8,
 			.metric		   = DISTANCE_L2,
-			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
 			.encode_rabitq = true,
 			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
 			.fastscan	   = 8,
@@ -887,7 +887,7 @@ TEST(paged_build_self_reachability)
 	PrismIndexConfig config = {
 			.nlist		   = 256,
 			.metric		   = DISTANCE_L2,
-			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
 			.encode_rabitq = true,
 			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
 			.nworkers	   = 2,
@@ -908,12 +908,12 @@ TEST(paged_build_self_reachability)
 		uint32_t	 got;
 
 		got = prism_query_exec(
-				qctx, self, 1, 4, MKT_DISTANCE_MODE_ASYMMETRIC, true, &id);
+				qctx, self, 1, 4, VS_DISTANCE_MODE_ASYMMETRIC, true, &id);
 		if (got == 1 && id == q * (nvecs / nq))
 			hits_4++;
 
 		got = prism_query_exec(
-				qctx, self, 1, 16, MKT_DISTANCE_MODE_ASYMMETRIC, true, &id);
+				qctx, self, 1, 16, VS_DISTANCE_MODE_ASYMMETRIC, true, &id);
 		if (got == 1 && id == q * (nvecs / nq))
 			hits_16++;
 	}
@@ -942,7 +942,7 @@ TEST(paged_build_self_reachability)
 
 	prism_query_ctx_destroy(qctx);
 	prism_index_destroy(idx);
-	mkt_free(vecs);
+	vs_free(vecs);
 }
 
 /*
@@ -962,7 +962,7 @@ TEST(paged_build_self_reachability)
  */
 static void
 check_paged_assignment_parity(
-		MktTestResult *result, PrismCentroidFormat fmt, DistanceMetric metric)
+		VsTestResult *result, PrismCentroidFormat fmt, DistanceMetric metric)
 {
 	uint32_t dim = 24, nvecs = 3000;
 	float	*vecs = make_vectors(nvecs, dim, 11);
@@ -988,12 +988,12 @@ check_paged_assignment_parity(
 			idx->nlist <= PRISM_SECONDARY_TOPK,
 			"candidate pool must cover every leaf for exact parity");
 
-	MktStorage *st = idx->base.posting_storage;
+	VsStorage *st = idx->base.posting_storage;
 
 	/* Gather each cluster's encode reference (P^T * centroid) and each
 	 * vector's assigned cluster from the posting pages. */
-	float	 *pt_cents = mkt_alloc((size_t)idx->nlist * dim * sizeof(float));
-	uint32_t *assigned = mkt_alloc(nvecs * sizeof(uint32_t));
+	float	 *pt_cents = vs_alloc((size_t)idx->nlist * dim * sizeof(float));
+	uint32_t *assigned = vs_alloc(nvecs * sizeof(uint32_t));
 	for (uint32_t i = 0; i < nvecs; i++)
 		assigned[i] = UINT32_MAX;
 
@@ -1001,15 +1001,15 @@ check_paged_assignment_parity(
 	{
 		BlockNumber blk = idx->first_posting + c;
 
-		Page head = mkt_storage_read_page(st, blk);
+		Page head = vs_storage_read_page(st, blk);
 		memcpy(pt_cents + (size_t)c * dim,
 			   prism_posting_pt_centroid(head),
 			   (size_t)dim * sizeof(float));
-		mkt_storage_release_page(st, blk);
+		vs_storage_release_page(st, blk);
 
 		while (blk != InvalidBlockNumber)
 		{
-			Page	 pg		 = mkt_storage_read_page(st, blk);
+			Page	 pg		 = vs_storage_read_page(st, blk);
 			bool	 first	 = (prism_posting_opaque(pg)->flags &
 							PRISM_POSTING_PAGE_FIRST) != 0;
 			char	*content = first ? prism_posting_content_first(pg, dim)
@@ -1029,7 +1029,7 @@ check_paged_assignment_parity(
 				assigned[vid] = c;
 			}
 			BlockNumber next = prism_posting_opaque(pg)->next_blkno;
-			mkt_storage_release_page(st, blk);
+			vs_storage_release_page(st, blk);
 			blk = next;
 		}
 	}
@@ -1039,18 +1039,18 @@ check_paged_assignment_parity(
 	 * parity must be exact, not approximate. Inner product ranks by
 	 * -dot, matching the query descent; the others by squared L2. */
 	bool   rank_by_dot = (metric == DISTANCE_INNER_PRODUCT);
-	float *pt_vec	   = mkt_alloc((size_t)dim * sizeof(float));
+	float *pt_vec	   = vs_alloc((size_t)dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
-		mkt_rabitq_rotate(idx->base.params, vecs + (size_t)i * dim, pt_vec);
+		vs_rabitq_rotate(idx->base.params, vecs + (size_t)i * dim, pt_vec);
 
 		uint32_t best	   = 0;
 		float	 best_dist = 0.0f;
 		for (uint32_t c = 0; c < idx->nlist; c++)
 		{
 			const float *cand = pt_cents + (size_t)c * dim;
-			float		 d = rank_by_dot ? -mkt_dot_product(pt_vec, cand, dim)
-										 : mkt_l2_distance_squared(pt_vec, cand, dim);
+			float		 d = rank_by_dot ? -vs_dot_product(pt_vec, cand, dim)
+										 : vs_l2_distance_squared(pt_vec, cand, dim);
 			if (c == 0 || d < best_dist)
 			{
 				best_dist = d;
@@ -1063,28 +1063,29 @@ check_paged_assignment_parity(
 				"row must be filed in its exact nearest cluster");
 	}
 
-	mkt_free(pt_vec);
-	mkt_free(pt_cents);
-	mkt_free(assigned);
+	vs_free(pt_vec);
+	vs_free(pt_cents);
+	vs_free(assigned);
 	prism_index_destroy(idx);
-	mkt_free(vecs);
+	vs_free(vecs);
 }
 
 TEST(paged_build_assignment_parity)
 {
 	check_paged_assignment_parity(
-			result, MKT_CENTROID_FMT_RABITQ, DISTANCE_L2);
+			result, PRISM_CENTROID_FMT_RABITQ, DISTANCE_L2);
 }
 
 TEST(paged_build_assignment_parity_float)
 {
-	check_paged_assignment_parity(result, MKT_CENTROID_FMT_FLOAT, DISTANCE_L2);
+	check_paged_assignment_parity(
+			result, PRISM_CENTROID_FMT_FLOAT, DISTANCE_L2);
 }
 
 TEST(paged_build_assignment_parity_fastscan)
 {
 	check_paged_assignment_parity(
-			result, MKT_CENTROID_FMT_FASTSCAN, DISTANCE_L2);
+			result, PRISM_CENTROID_FMT_FASTSCAN, DISTANCE_L2);
 }
 
 TEST(paged_build_assignment_parity_ip)
@@ -1093,5 +1094,5 @@ TEST(paged_build_assignment_parity_ip)
 	 * inner-product queries route by -dot, and a build/query metric
 	 * mismatch misfiles every row whose two orders disagree. */
 	check_paged_assignment_parity(
-			result, MKT_CENTROID_FMT_FLOAT, DISTANCE_INNER_PRODUCT);
+			result, PRISM_CENTROID_FMT_FLOAT, DISTANCE_INNER_PRODUCT);
 }

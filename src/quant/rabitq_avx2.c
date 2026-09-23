@@ -12,9 +12,9 @@
  * into 8 float masks.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 
 #if defined(__x86_64__) || defined(_M_X64)
 
@@ -32,7 +32,7 @@
  *
  * The bit order is LSB-first (bit 0 -> float 0, bit 7 -> float 7).
  */
-MKT_TARGET_AVX2 static inline __m256
+VS_TARGET_AVX2 static inline __m256
 expand_byte_to_mask_avx2(uint8_t byte)
 {
 	/* Broadcast byte to all positions */
@@ -59,8 +59,8 @@ expand_byte_to_mask_avx2(uint8_t byte)
  *
  * Processes 8 floats at a time using masked addition.
  */
-MKT_TARGET_AVX2 float
-mkt_rabitq_inner_product_avx2(
+VS_TARGET_AVX2 float
+vs_rabitq_inner_product_avx2(
 		const float *transformed, const uint8_t *bits, Dimension dim)
 {
 	__m256 sum = _mm256_setzero_ps();
@@ -84,7 +84,7 @@ mkt_rabitq_inner_product_avx2(
 	}
 
 	/* Horizontal sum */
-	float result = mkt_horizontal_sum_avx2(sum);
+	float result = vs_horizontal_sum_avx2(sum);
 
 	/* Handle tail elements (LSB-first) */
 	for (; i < dim; i++)
@@ -105,8 +105,8 @@ mkt_rabitq_inner_product_avx2(
  * Extracts sign bits from transformed floats into packed bytes.
  * Uses AVX2 compare and movemask to generate 8 bits at a time.
  */
-MKT_TARGET_AVX2 void
-mkt_rabitq_extract_signs_avx2(
+VS_TARGET_AVX2 void
+vs_rabitq_extract_signs_avx2(
 		const float *transformed, uint8_t *bits, Dimension dim)
 {
 	__m256 zero = _mm256_setzero_ps();
@@ -148,7 +148,7 @@ mkt_rabitq_extract_signs_avx2(
  * Uses _mm256_shuffle_epi8 as a parallel 4-bit lookup table to count
  * bits in each byte.
  */
-MKT_TARGET_AVX2 static inline __m256i
+VS_TARGET_AVX2 static inline __m256i
 popcount_avx2(__m256i v)
 {
 	const __m256i lut = _mm256_setr_epi8(
@@ -199,8 +199,8 @@ popcount_avx2(__m256i v)
  * Processes 32 bytes per iteration. Uses _mm256_sad_epu8 to
  * horizontally sum byte-level popcounts into 64-bit accumulators.
  */
-MKT_TARGET_AVX2 uint32_t
-mkt_rabitq_hamming_avx2(
+VS_TARGET_AVX2 uint32_t
+vs_rabitq_hamming_avx2(
 		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes)
 {
 	__m256i total = _mm256_setzero_si256();
@@ -219,7 +219,7 @@ mkt_rabitq_hamming_avx2(
 				total, _mm256_sad_epu8(pc, _mm256_setzero_si256()));
 	}
 
-	uint64_t result = mkt_horizontal_sum_epi64_avx2(total);
+	uint64_t result = vs_horizontal_sum_epi64_avx2(total);
 
 	/* Scalar tail */
 	for (; i < packed_bytes; i++)
@@ -231,8 +231,8 @@ mkt_rabitq_hamming_avx2(
 /*
  * Multi-candidate AVX2 Hamming distance.
  */
-MKT_TARGET_AVX2 void
-mkt_rabitq_hamming_multi_avx2(
+VS_TARGET_AVX2 void
+vs_rabitq_hamming_multi_avx2(
 		const uint8_t *query_bits,
 		const uint8_t *data_bits,
 		uint32_t	   stride,
@@ -242,7 +242,7 @@ mkt_rabitq_hamming_multi_avx2(
 {
 	for (uint32_t c = 0; c < count; c++)
 	{
-		results[c] = mkt_rabitq_hamming_avx2(
+		results[c] = vs_rabitq_hamming_avx2(
 				query_bits, data_bits + c * stride, packed_bytes);
 	}
 }
@@ -257,8 +257,8 @@ mkt_rabitq_hamming_multi_avx2(
  *
  * Tail candidates (count % 4) use the single-candidate kernel.
  */
-MKT_TARGET_AVX2 void
-mkt_rabitq_inner_product_multi_avx2(
+VS_TARGET_AVX2 void
+vs_rabitq_inner_product_multi_avx2(
 		const float	  *transformed,
 		const uint8_t *bits,
 		uint32_t	   stride,
@@ -302,10 +302,10 @@ mkt_rabitq_inner_product_multi_avx2(
 			sum3 = _mm256_add_ps(sum3, _mm256_and_ps(t, mask3));
 		}
 
-		results[base + 0] = mkt_horizontal_sum_avx2(sum0);
-		results[base + 1] = mkt_horizontal_sum_avx2(sum1);
-		results[base + 2] = mkt_horizontal_sum_avx2(sum2);
-		results[base + 3] = mkt_horizontal_sum_avx2(sum3);
+		results[base + 0] = vs_horizontal_sum_avx2(sum0);
+		results[base + 1] = vs_horizontal_sum_avx2(sum1);
+		results[base + 2] = vs_horizontal_sum_avx2(sum2);
+		results[base + 3] = vs_horizontal_sum_avx2(sum3);
 
 		/* Scalar tail for remaining dimensions */
 		for (; i < dim; i++)
@@ -327,11 +327,11 @@ mkt_rabitq_inner_product_multi_avx2(
 	/* Handle remaining candidates with single-candidate kernel */
 	for (uint32_t i = groups * 4; i < groups * 4 + tail; i++)
 	{
-		results[i] = mkt_rabitq_inner_product_avx2(
+		results[i] = vs_rabitq_inner_product_avx2(
 				transformed, bits + (size_t)i * stride, dim);
 	}
 }
 
 #endif /* x86_64 */
 
-#endif /* MKT_SIMD_FULL */
+#endif /* VS_SIMD_FULL */

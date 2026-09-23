@@ -54,7 +54,7 @@ number; it has moved before, so read it there rather than assuming a
 figure. Its comment explains why it's below 100%: set for cross-platform
 SIMD code, since foreign-architecture SIMD variants can't execute in CI
 and are excluded, while same-architecture variants are exercised via
-`mkt_simd_set_override()`. If coverage drops, look for genuinely untested
+`vs_simd_set_override()`. If coverage drops, look for genuinely untested
 logic before assuming the threshold is miscalibrated.
 
 ## Gotcha: PG suites load the installed .so, not the build dir

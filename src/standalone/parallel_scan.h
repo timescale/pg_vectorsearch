@@ -8,8 +8,8 @@
  * scan is table_index_build_scan instead, so this header is standalone-only.)
  */
 
-#ifndef MKT_PARALLEL_SCAN_H
-#define MKT_PARALLEL_SCAN_H
+#ifndef VS_PARALLEL_SCAN_H
+#define VS_PARALLEL_SCAN_H
 
 #include <stdatomic.h>
 #include <stdint.h>
@@ -48,4 +48,4 @@ extern void prism_parallel_scan_init(
 extern double prism_parallel_scan_run(
 		PrismParallelScan *ps, PrismBuildScanCb cb, void *state);
 
-#endif /* MKT_PARALLEL_SCAN_H */
+#endif /* VS_PARALLEL_SCAN_H */

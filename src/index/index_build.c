@@ -106,8 +106,8 @@ prism_exact_centroid_collector_init(
 	c->stride = prism_centroid_max_entries_fmt(dim, fmt);
 	/* Every allocation goes to the collector's dedicated child context
 	 * (see the ownership contract on PrismExactCentroidCollector). */
-	c->ctx = mkt_memctx_create(mkt_memctx_current(), "mkt exact centroids");
-	c->page_off = mkt_memctx_alloc(c->ctx, (size_t)npages * sizeof(uint32_t));
+	c->ctx		= vs_memctx_create(vs_memctx_current(), "vs exact centroids");
+	c->page_off = vs_memctx_alloc(c->ctx, (size_t)npages * sizeof(uint32_t));
 	memset(c->page_off, 0xFF, (size_t)npages * sizeof(uint32_t));
 	c->max_bytes = max_bytes;
 	/* Pre-size to the caller's estimate so growth is a rounding case,
@@ -122,7 +122,7 @@ prism_exact_centroid_collector_init(
 	if (cap == 0)
 		cap = 1;
 	c->cap	 = (uint32_t)cap;
-	c->cents = mkt_memctx_alloc(c->ctx, (size_t)c->cap * dim * sizeof(float));
+	c->cents = vs_memctx_alloc(c->ctx, (size_t)c->cap * dim * sizeof(float));
 }
 
 /*
@@ -156,9 +156,9 @@ exact_centroid_collector_reserve(
 	 * array is freed eagerly (a no-op on the standalone arena) so
 	 * both generations are never held at once. */
 	float *grown =
-			mkt_memctx_alloc(c->ctx, (size_t)new_cap * c->dim * sizeof(float));
+			vs_memctx_alloc(c->ctx, (size_t)new_cap * c->dim * sizeof(float));
 	memcpy(grown, c->cents, (size_t)c->nslots * c->dim * sizeof(float));
-	mkt_free(c->cents);
+	vs_free(c->cents);
 	c->cents = grown;
 	c->cap	 = (uint32_t)new_cap;
 }
@@ -181,8 +181,7 @@ prism_exact_centroid_collector_add_node(
 	uint64_t need = ((uint64_t)c->nslots + n) * c->dim * sizeof(float);
 	if (need > c->max_bytes)
 	{
-		mkt_warn(
-				"exact centroid collection over budget (needs more "
+		vs_warn("exact centroid collection over budget (needs more "
 				"than %" PRIu64 " of %" PRIu64 " bytes); build descent "
 				"falls back to estimated internal scoring — consider "
 				"raising the build memory budget",
@@ -234,7 +233,7 @@ prism_exact_centroid_collector_cleanup(PrismExactCentroidCollector *c)
 	 * a second call is a no-op). Callers must not run this until the
 	 * last view consumer is done. */
 	if (c->ctx != NULL)
-		mkt_memctx_delete(c->ctx);
+		vs_memctx_delete(c->ctx);
 	c->ctx		= NULL;
 	c->page_off = NULL;
 	c->cents	= NULL;
@@ -342,7 +341,7 @@ prism_compute_centroid_layout(
  * the standalone in-RAM build still writes through it. */
 void
 prism_write_centroid_tree(
-		MktStorage					*storage,
+		VsStorage					*storage,
 		const HKMeansResult			*tree,
 		Dimension					 dim,
 		uint32_t					 fan_out,
@@ -360,7 +359,7 @@ prism_write_centroid_tree(
 	 * most fan_out leaf entries, so this scratch is O(fan_out). */
 	BlockNumber *leaf_blks =
 			(posting_base != InvalidBlockNumber)
-					? mkt_alloc((size_t)fan_out * sizeof(BlockNumber))
+					? vs_alloc((size_t)fan_out * sizeof(BlockNumber))
 					: NULL;
 
 	for (uint32_t i = 0; i < tree->nnodes; i++)
@@ -407,7 +406,7 @@ prism_write_centroid_tree(
 	}
 
 	if (leaf_blks != NULL)
-		mkt_free(leaf_blks);
+		vs_free(leaf_blks);
 }
 
 /* ----------------------------------------------------------------
@@ -425,7 +424,7 @@ typedef struct RoutingTreeCtx
 	DistanceMetric metric;
 	KMeansOptions  opts;
 	/* write-phase */
-	MktStorage		   *storage;
+	VsStorage		   *storage;
 	PrismCentroidFormat format;
 	const RaBitQParams *rq_params;
 	const float		   *global_mean;
@@ -466,7 +465,7 @@ typedef struct RoutingTreeCtx
  */
 void
 prism_centroid_write_node(
-		MktStorage					*storage,
+		VsStorage					*storage,
 		Dimension					 dim,
 		const float					*cents,
 		uint32_t					 n,
@@ -486,7 +485,7 @@ prism_centroid_write_node(
 	if (collector != NULL && (flags & PRISM_CENTROID_FLAG_LEAF) == 0)
 		prism_exact_centroid_collector_add_node(collector, blkno, cents, n);
 
-	if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+	if (fmt == PRISM_CENTROID_FMT_FASTSCAN)
 		/* fastscan carries its own encoder; pt_centroids live on posting
 		 * pages, never inline. */
 		prism_centroid_write_fastscan_pages(
@@ -524,9 +523,9 @@ prism_centroid_write_node(
 static uint32_t
 node_npages(const RoutingTreeCtx *c, uint32_t n)
 {
-	if (c->format == MKT_CENTROID_FMT_FASTSCAN)
+	if (c->format == PRISM_CENTROID_FMT_FASTSCAN)
 	{
-		uint32_t ngroups = (n + MKT_FASTSCAN_GROUP - 1) / MKT_FASTSCAN_GROUP;
+		uint32_t ngroups = (n + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
 		uint32_t gpp	 = c->fs_gpp ? c->fs_gpp : 1;
 		return (ngroups + gpp - 1) / gpp;
 	}
@@ -716,13 +715,13 @@ plan_internal_node(
 			continue;
 
 		uint32_t  sub_n = counts[cl];
-		uint32_t *sub	= mkt_alloc((size_t)sub_n * sizeof(uint32_t));
+		uint32_t *sub	= vs_alloc((size_t)sub_n * sizeof(uint32_t));
 		uint32_t  idx	= 0;
 		for (uint32_t v = 0; v < count; v++)
 			if (km->assignments[v] == cl)
 				sub[idx++] = slice ? slice[v] : v;
 		plan_node_recurse(c, sub, sub_n, level + 1);
-		mkt_free(sub);
+		vs_free(sub);
 		kept++;
 	}
 	c->centroid_pages += node_npages(c, kept);
@@ -751,10 +750,10 @@ plan_node_recurse(
 	if (k > count)
 		k = count;
 
-	KMeansResult *km = mkt_kmeans(
+	KMeansResult *km = vs_kmeans(
 			c->vectors,
 			slice,
-			MKT_VEC_F32,
+			VS_VEC_F32,
 			count,
 			c->dim,
 			k,
@@ -765,13 +764,13 @@ plan_node_recurse(
 		c->ok = false;
 		return;
 	}
-	c->opts.initial_centroids = NULL; /* root only (matches mkt_hkmeans_f32) */
+	c->opts.initial_centroids = NULL; /* root only (matches vs_hkmeans_f32) */
 
 	if (c->store != NULL)
 		record_node_clustering(c, km, count);
 
 	/* Count assignments per cluster (km->cluster_sizes may be stale). */
-	uint32_t *counts = mkt_alloc0((size_t)km->nlist * sizeof(uint32_t));
+	uint32_t *counts = vs_alloc0((size_t)km->nlist * sizeof(uint32_t));
 	for (uint32_t v = 0; v < count; v++)
 		counts[km->assignments[v]]++;
 
@@ -780,8 +779,8 @@ plan_node_recurse(
 	else
 		plan_internal_node(c, km, counts, slice, count, level);
 
-	mkt_free(counts);
-	mkt_kmeans_result_destroy(km);
+	vs_free(counts);
+	vs_kmeans_result_destroy(km);
 }
 
 /* Leaf parent, replay side: compact the non-empty clusters into leaves,
@@ -804,7 +803,7 @@ replay_leaf_parent(
 	 * them (the flat-tree path already does). */
 	if (c->metric == DISTANCE_COSINE)
 		for (uint32_t kk = 0; kk < kept; kk++)
-			mkt_l2_normalize(cents + (size_t)kk * c->dim, c->dim);
+			vs_l2_normalize(cents + (size_t)kk * c->dim, c->dim);
 
 	/* Leaf heads are formula-derived (first_posting + global leaf index);
 	 * kept <= fan_out, so the pass-lifetime scratch covers every node. */
@@ -842,10 +841,10 @@ replay_internal_node(
 	const size_t vec_nbytes	  = (size_t)c->dim * sizeof(float);
 	const size_t cents_nbytes = (size_t)nclusters * vec_nbytes;
 
-	float *my_cents = mkt_alloc(cents_nbytes);
+	float *my_cents = vs_alloc(cents_nbytes);
 	memcpy(my_cents, c->replay_cents, cents_nbytes);
 
-	BlockNumber *child_blocks = mkt_alloc(
+	BlockNumber *child_blocks = vs_alloc(
 			(size_t)nclusters * sizeof(BlockNumber));
 	uint32_t kept = 0;
 	for (uint32_t cl = 0; cl < nclusters && c->ok; cl++)
@@ -863,8 +862,8 @@ replay_internal_node(
 	BlockNumber blk = InvalidBlockNumber;
 	if (c->ok)
 		blk = write_node_pages(c, my_cents, kept, level, false, child_blocks);
-	mkt_free(child_blocks);
-	mkt_free(my_cents);
+	vs_free(child_blocks);
+	vs_free(my_cents);
 	return blk;
 }
 
@@ -892,7 +891,7 @@ replay_node_recurse(RoutingTreeCtx *c, uint32_t count, uint32_t level)
 	}
 
 	/* Count assignments per cluster. */
-	uint32_t *counts = mkt_alloc0((size_t)nclusters * sizeof(uint32_t));
+	uint32_t *counts = vs_alloc0((size_t)nclusters * sizeof(uint32_t));
 	for (uint32_t v = 0; v < count; v++)
 		counts[c->assign_scratch[v]]++;
 
@@ -902,7 +901,7 @@ replay_node_recurse(RoutingTreeCtx *c, uint32_t count, uint32_t level)
 	else
 		blk = replay_internal_node(c, nclusters, counts, level);
 
-	mkt_free(counts);
+	vs_free(counts);
 	return blk;
 }
 
@@ -921,7 +920,7 @@ routing_tree_ctx_init(
 	c->dim	   = dim;
 	c->nlist   = nlist;
 	c->fan_out = fan_out < 2 ? 2 : fan_out;
-	c->nlevels = mkt_hkmeans_nlevels(nlist, c->fan_out);
+	c->nlevels = vs_hkmeans_nlevels(nlist, c->fan_out);
 	c->format  = format;
 	c->max_ent = prism_centroid_max_entries_fmt(dim, format);
 	c->fs_gpp  = prism_centroid_fastscan_max_groups(dim);
@@ -949,14 +948,14 @@ prism_routing_tree_plan(
 	 * metric and the k-means options. */
 	c.vectors  = vectors;
 	c.metric   = metric;
-	c.opts	   = opts ? *opts : (KMeansOptions)MKT_KMEANS_OPTIONS_DEFAULT;
+	c.opts	   = opts ? *opts : (KMeansOptions)VS_KMEANS_OPTIONS_DEFAULT;
 	c.store	   = store;
-	c.leaf_sum = mkt_alloc0((size_t)dim * sizeof(double));
+	c.leaf_sum = vs_alloc0((size_t)dim * sizeof(double));
 	if (store != NULL)
 	{
 		/* Recording narrows each node's assignments into this scratch; the
 		 * root -- first and largest -- sizes it for the whole pass. */
-		c.assign_scratch = mkt_alloc((size_t)nvecs * sizeof(uint16_t));
+		c.assign_scratch = vs_alloc((size_t)nvecs * sizeof(uint16_t));
 	}
 
 	/*
@@ -973,29 +972,29 @@ prism_routing_tree_plan(
 	 * their blast radius at one pass. The output (leaf_mean) is allocated
 	 * in the caller's context outside the switch.
 	 */
-	MktMemCtx scratch = mkt_memctx_create(NULL, "mkt stream plan");
-	MktMemCtx old_ctx = mkt_memctx_switch(scratch);
+	VsMemCtx scratch = vs_memctx_create(NULL, "vs stream plan");
+	VsMemCtx old_ctx = vs_memctx_switch(scratch);
 	plan_node_recurse(&c, NULL, nvecs, 0);
-	mkt_memctx_switch(old_ctx);
-	mkt_memctx_delete(scratch);
+	vs_memctx_switch(old_ctx);
+	vs_memctx_delete(scratch);
 
 	if (c.assign_scratch != NULL)
-		mkt_free(c.assign_scratch);
+		vs_free(c.assign_scratch);
 	if (!c.ok)
 	{
-		mkt_free(c.leaf_sum);
+		vs_free(c.leaf_sum);
 		return false;
 	}
 
 	out->nleaves		= c.nleaves;
 	out->nlevels		= c.nlevels;
 	out->centroid_pages = c.centroid_pages;
-	out->leaf_mean		= mkt_alloc((size_t)dim * sizeof(float));
+	out->leaf_mean		= vs_alloc((size_t)dim * sizeof(float));
 	for (Dimension d = 0; d < dim; d++)
 		out->leaf_mean[d] = c.nleaves > 0
 								  ? (float)(c.leaf_sum[d] / (double)c.nleaves)
 								  : 0.0f;
-	mkt_free(c.leaf_sum);
+	vs_free(c.leaf_sum);
 	return true;
 }
 
@@ -1003,7 +1002,7 @@ prism_routing_tree_plan(
  * from the recorded nodes; returns the root block. */
 BlockNumber
 prism_routing_tree_write(
-		MktStorage					*storage,
+		VsStorage					*storage,
 		uint32_t					 nvecs,
 		Dimension					 dim,
 		DistanceMetric				 metric,
@@ -1033,10 +1032,9 @@ prism_routing_tree_write(
 		/* A node clusters into at most fan_out groups (the flat root's k =
 		 * nlist <= fan_out). The assignment scratch covers the root's full
 		 * sample; deeper slices are strictly smaller. */
-		c.replay_cents	 = mkt_alloc((size_t)c.fan_out * dim * sizeof(float));
-		c.assign_scratch = mkt_alloc((size_t)nvecs * sizeof(uint16_t));
-		c.leaf_blk_scratch = mkt_alloc(
-				(size_t)c.fan_out * sizeof(BlockNumber));
+		c.replay_cents	   = vs_alloc((size_t)c.fan_out * dim * sizeof(float));
+		c.assign_scratch   = vs_alloc((size_t)nvecs * sizeof(uint16_t));
+		c.leaf_blk_scratch = vs_alloc((size_t)c.fan_out * sizeof(BlockNumber));
 	}
 	c.rq_params		= rq_params;
 	c.global_mean	= global_mean;
@@ -1049,17 +1047,17 @@ prism_routing_tree_write(
 	/* Same pass-scoped scratch as the PLAN pass -- the leak-containment
 	 * boundary (see the note there). on_leaf runs under it too; its
 	 * allocations must not outlive the call. */
-	MktMemCtx	scratch = mkt_memctx_create(NULL, "mkt stream write");
-	MktMemCtx	old_ctx = mkt_memctx_switch(scratch);
+	VsMemCtx	scratch = vs_memctx_create(NULL, "vs stream write");
+	VsMemCtx	old_ctx = vs_memctx_switch(scratch);
 	BlockNumber root	= replay_node_recurse(&c, nvecs, 0);
-	mkt_memctx_switch(old_ctx);
-	mkt_memctx_delete(scratch);
+	vs_memctx_switch(old_ctx);
+	vs_memctx_delete(scratch);
 	if (c.replay_cents != NULL)
-		mkt_free(c.replay_cents);
+		vs_free(c.replay_cents);
 	if (c.assign_scratch != NULL)
-		mkt_free(c.assign_scratch);
+		vs_free(c.assign_scratch);
 	if (c.leaf_blk_scratch != NULL)
-		mkt_free(c.leaf_blk_scratch);
+		vs_free(c.leaf_blk_scratch);
 	return c.ok ? root : InvalidBlockNumber;
 }
 
@@ -1068,7 +1066,7 @@ prism_routing_tree_write(
  * space -- see the header comment. */
 BlockNumber
 prism_routing_subtree_write(
-		MktStorage					*storage,
+		VsStorage					*storage,
 		const HKMeansResult			*subtree,
 		Dimension					 dim,
 		DistanceMetric				 metric,
@@ -1088,8 +1086,7 @@ prism_routing_subtree_write(
 
 	/* Lay the subtree's nodes out at reserved blocks starting at first_block
 	 * (BFS: node 0 = subtree root at first_block). */
-	BlockNumber *nfb = mkt_alloc(
-			(size_t)subtree->nnodes * sizeof(BlockNumber));
+	BlockNumber *nfb = vs_alloc((size_t)subtree->nnodes * sizeof(BlockNumber));
 	(void)prism_compute_centroid_layout(subtree, max_ent, first_block, nfb);
 
 	/* Leaf entries link to formula-derived posting heads (first_posting +
@@ -1104,7 +1101,7 @@ prism_routing_subtree_write(
 	{
 		float *lv = hk_leaf_centroids(subtree);
 		for (uint32_t li = 0; li < subtree->nleaves; li++)
-			mkt_l2_normalize(lv + (size_t)li * dim, dim);
+			vs_l2_normalize(lv + (size_t)li * dim, dim);
 	}
 
 	prism_write_centroid_tree(
@@ -1120,7 +1117,7 @@ prism_routing_subtree_write(
 			nfb,
 			NULL,
 			collector);
-	mkt_free(nfb);
+	vs_free(nfb);
 
 	/* Head pages carry pt_centroid from the resident float leaf centroids. */
 	if (on_leaf != NULL)
@@ -1257,7 +1254,7 @@ prism_find_soar_secondary(
 		const float	   *normalized_residual,
 		double			lambda)
 {
-	float	 qrv	 = mkt_dot_product(normalized_residual, vec, dim);
+	float	 qrv	 = vs_dot_product(normalized_residual, vec, dim);
 	float	 lam	 = (float)lambda;
 	float	 best_oa = INFINITY;
 	uint32_t best_c	 = primary_cluster;
@@ -1270,11 +1267,11 @@ prism_find_soar_secondary(
 
 		const float *cent = leaf_centroids + (size_t)i * dim;
 
-		float l2 = mkt_l2_distance_squared(vec, cent, dim);
+		float l2 = vs_l2_distance_squared(vec, cent, dim);
 		if (l2 >= best_oa)
 			continue; /* oa >= l2 >= best_oa: cannot improve */
 
-		float rc  = mkt_dot_product(normalized_residual, cent, dim);
+		float rc  = vs_dot_product(normalized_residual, cent, dim);
 		float gap = qrv - rc;
 		float oa  = l2 + lam * gap * gap;
 		if (oa < best_oa)
@@ -1294,28 +1291,28 @@ prism_build_stats_print(const PrismBuildStats *s)
 	/* Per-phase breakdown — the single shared build summary, filled by both
 	 * the PostgreSQL build (via the build-progress seam) and the standalone
 	 * build. */
-	mkt_log("build: sample %.1fms, kmeans %.1fms, refine %.1fms, setup "
-			"%.1fms, "
-			"posting %.1fms, centroid %.1fms, total %.1fms\n",
-			s->ms_sample,
-			s->ms_kmeans,
-			s->ms_refine,
-			s->ms_setup,
-			s->ms_posting,
-			s->ms_centroid,
-			s->ms_total);
+	vs_log("build: sample %.1fms, kmeans %.1fms, refine %.1fms, setup "
+		   "%.1fms, "
+		   "posting %.1fms, centroid %.1fms, total %.1fms\n",
+		   s->ms_sample,
+		   s->ms_kmeans,
+		   s->ms_refine,
+		   s->ms_setup,
+		   s->ms_posting,
+		   s->ms_centroid,
+		   s->ms_total);
 
 	/* Posting-merge sub-detail: only the standalone parallel path populates
 	 * these. Skip the line (and its zeros) when unset — e.g. the PostgreSQL
 	 * build, which tracks posting as one phase. */
 	if (s->ms_parallel > 0.0 || s->ms_merge > 0.0 || s->total_pages > 0)
-		mkt_log("build: posting detail — parallel %.1fms + merge %.1fms, "
-				"%u workers + leader, %u pages, "
-				"%u partial pages merged into %u\n",
-				s->ms_parallel,
-				s->ms_merge,
-				s->nworkers,
-				s->total_pages,
-				s->merge_input,
-				s->merge_output);
+		vs_log("build: posting detail — parallel %.1fms + merge %.1fms, "
+			   "%u workers + leader, %u pages, "
+			   "%u partial pages merged into %u\n",
+			   s->ms_parallel,
+			   s->ms_merge,
+			   s->nworkers,
+			   s->total_pages,
+			   s->merge_input,
+			   s->merge_output);
 }

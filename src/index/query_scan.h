@@ -57,7 +57,7 @@ typedef struct PrismQueryStats
  * turns out to admit more.
  *
  * The scan's work_mem budget prices a row from this (see
- * MKT_TOP_K_BYTES_PER_ROW in src/pg/scan.c), so the two must agree.
+ * PRISM_TOP_K_BYTES_PER_ROW in src/pg/scan.c), so the two must agree.
  */
 #define PRISM_QUERY_CAND_PER_K 16
 
@@ -78,7 +78,7 @@ typedef struct PrismQueryState
 	 * cannot release, which is why prism_query_state_cleanup exists rather
 	 * than callers deleting this directly.
 	 */
-	MktMemCtx memctx;
+	VsMemCtx memctx;
 
 	PrismIndexBase *index;
 	uint32_t		max_k;
@@ -98,9 +98,9 @@ typedef struct PrismQueryState
 	/* Pre-allocated search state (reset per query) */
 	PrismCentroidResult	 *beam_results;
 	PrismCentroidScratch *centroid_scratch;
-	MktTopK				  topk;
+	VsTopK				  topk;
 	PrismPostingScan	  pscan;
-	MktTopKEntry		 *candidates;
+	VsTopKEntry			 *candidates;
 	uint32_t			  cand_cap;
 	uint32_t			  ncandidates;
 
@@ -143,7 +143,7 @@ uint32_t prism_query_execute(
 		const float		*query,
 		uint32_t		 k,
 		uint32_t		 nprobe,
-		MktDistanceMode	 mode,
+		VsDistanceMode	 mode,
 		bool			 rerank,
 		PrismQueryStats *stats);
 
@@ -211,7 +211,7 @@ uint32_t prism_query_route(
 		PrismQueryState			 *qs,
 		const float				 *query,
 		uint32_t				  nprobe,
-		MktDistanceMode			  mode,
+		VsDistanceMode			  mode,
 		PrismCentroidSearchStats *beam_stats);
 
 /*

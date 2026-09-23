@@ -491,7 +491,7 @@ DECLARE cur_resize CURSOR FOR
         LIMIT k.n) x;
 MOVE FORWARD 200 FROM cur_resize;
 SELECT count(*) AS live_query_states
-    FROM pg_backend_memory_contexts WHERE name = 'mkt query state';
+    FROM pg_backend_memory_contexts WHERE name = 'vs query state';
  live_query_states 
 -------------------
                  1
@@ -685,7 +685,7 @@ RESET prism.nprobe;
 -- With probe expansion the beam routes extra cluster candidates and
 -- scan_clusters re-ranks them by exact centroid distance before scanning
 -- the best nprobe. The deepest-contributing-rank diagnostic
--- (mkt_routing_stats) must report positions in that final scan order, so
+-- (vs_routing_stats) must report positions in that final scan order, so
 -- with nprobe = 8 every reported rank is below 8 -- the histogram's <=8
 -- bucket holds 100% of queries. Ranks above nprobe are impossible unless
 -- the diagnostic leaks pre-re-rank beam indexes.
@@ -697,10 +697,10 @@ DECLARE lib text;
 BEGIN
     SELECT probin INTO STRICT lib
         FROM pg_proc WHERE proname = 'prism_handler';
-    EXECUTE format('CREATE FUNCTION mkt_routing_stats() RETURNS text
-        AS %L, ''mkt_routing_stats'' LANGUAGE C', lib);
-    EXECUTE format('CREATE FUNCTION mkt_phase_stats_reset() RETURNS void
-        AS %L, ''mkt_phase_stats_reset'' LANGUAGE C', lib);
+    EXECUTE format('CREATE FUNCTION vs_routing_stats() RETURNS text
+        AS %L, ''vs_routing_stats'' LANGUAGE C', lib);
+    EXECUTE format('CREATE FUNCTION vs_phase_stats_reset() RETURNS void
+        AS %L, ''vs_phase_stats_reset'' LANGUAGE C', lib);
 END $$;
 -- 40 clusters of 50 points: each cluster sits on a pseudo-random direction
 -- at radius ~1 from the origin, members add small deterministic noise. A
@@ -719,9 +719,9 @@ CREATE INDEX probe_depth_idx ON probe_depth_test USING prism (v)
 SET enable_seqscan = off;
 SET prism.nprobe = 8;
 SET prism.probe_expand = 4.0;
-SELECT mkt_phase_stats_reset();
- mkt_phase_stats_reset 
------------------------
+SELECT vs_phase_stats_reset();
+ vs_phase_stats_reset 
+----------------------
  
 (1 row)
 
@@ -734,7 +734,7 @@ BEGIN
         PERFORM id FROM probe_depth_test ORDER BY v <-> q LIMIT 10;
     END LOOP;
 END $$;
-SELECT mkt_routing_stats() LIKE '%<=8:100.0%%' AS ranks_within_nprobe;
+SELECT vs_routing_stats() LIKE '%<=8:100.0%%' AS ranks_within_nprobe;
  ranks_within_nprobe 
 ---------------------
  t
@@ -744,8 +744,8 @@ RESET prism.probe_expand;
 RESET prism.nprobe;
 RESET enable_seqscan;
 DROP TABLE probe_depth_test;
-DROP FUNCTION mkt_routing_stats();
-DROP FUNCTION mkt_phase_stats_reset();
+DROP FUNCTION vs_routing_stats();
+DROP FUNCTION vs_phase_stats_reset();
 -- ============================================================
 -- prism.centroid_beam_scale: a narrow beam must keep every leaf reachable
 -- ============================================================

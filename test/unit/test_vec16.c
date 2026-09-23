@@ -7,9 +7,9 @@
 #include <stdlib.h>
 
 #include "core/memory.h"
-#include "mkt_test.h"
 #include "types/vec16.h"
 #include "types/vec32.h"
+#include "vs_test.h"
 
 TEST_GROUP(HalfVec);
 
@@ -21,44 +21,44 @@ TEST_MEMCTX_FIXTURE();
 
 TEST(half_convert_one)
 {
-	half  h = mkt_float_to_half(1.0f);
-	float f = mkt_half_to_float(h);
+	half  h = vs_float_to_half(1.0f);
+	float f = vs_half_to_float(h);
 	ASSERT_FLOAT_EQ(1.0f, f, 1e-6f, "1.0 roundtrip");
 }
 
 TEST(half_convert_neg_one)
 {
-	half  h = mkt_float_to_half(-1.0f);
-	float f = mkt_half_to_float(h);
+	half  h = vs_float_to_half(-1.0f);
+	float f = vs_half_to_float(h);
 	ASSERT_FLOAT_EQ(-1.0f, f, 1e-6f, "-1.0 roundtrip");
 }
 
 TEST(half_convert_two)
 {
-	half  h = mkt_float_to_half(2.0f);
-	float f = mkt_half_to_float(h);
+	half  h = vs_float_to_half(2.0f);
+	float f = vs_half_to_float(h);
 	ASSERT_FLOAT_EQ(2.0f, f, 1e-6f, "2.0 roundtrip");
 }
 
 TEST(half_convert_zero)
 {
-	half  h = mkt_float_to_half(0.0f);
-	float f = mkt_half_to_float(h);
+	half  h = vs_float_to_half(0.0f);
+	float f = vs_half_to_float(h);
 	ASSERT_FLOAT_EQ(0.0f, f, 1e-6f, "0.0 roundtrip");
 }
 
 TEST(half_convert_neg_zero)
 {
-	half  h = mkt_float_to_half(-0.0f);
-	float f = mkt_half_to_float(h);
+	half  h = vs_float_to_half(-0.0f);
+	float f = vs_half_to_float(h);
 	/* -0.0 == 0.0 in IEEE 754 */
 	ASSERT_FLOAT_EQ(0.0f, f, 0.0f, "-0.0 roundtrip");
 }
 
 TEST(half_convert_half_max)
 {
-	half  h = mkt_float_to_half(65504.0f);
-	float f = mkt_half_to_float(h);
+	half  h = vs_float_to_half(65504.0f);
+	float f = vs_half_to_float(h);
 	ASSERT_FLOAT_EQ(65504.0f, f, 1.0f, "half max roundtrip");
 }
 
@@ -66,29 +66,29 @@ TEST(half_convert_small)
 {
 	/* Smallest normal half: 2^-14 ≈ 6.1035e-5 */
 	float small = 6.103515625e-5f;
-	half  h		= mkt_float_to_half(small);
-	float f		= mkt_half_to_float(h);
+	half  h		= vs_float_to_half(small);
+	float f		= vs_half_to_float(h);
 	ASSERT_FLOAT_EQ(small, f, 1e-8f, "small normal roundtrip");
 }
 
 TEST(half_convert_inf)
 {
-	half  h = mkt_float_to_half(INFINITY);
-	float f = mkt_half_to_float(h);
+	half  h = vs_float_to_half(INFINITY);
+	float f = vs_half_to_float(h);
 	ASSERT_TRUE(isinf(f) && f > 0, "positive infinity");
 }
 
 TEST(half_convert_neg_inf)
 {
-	half  h = mkt_float_to_half(-INFINITY);
-	float f = mkt_half_to_float(h);
+	half  h = vs_float_to_half(-INFINITY);
+	float f = vs_half_to_float(h);
 	ASSERT_TRUE(isinf(f) && f < 0, "negative infinity");
 }
 
 TEST(half_convert_nan)
 {
-	half  h = mkt_float_to_half(NAN);
-	float f = mkt_half_to_float(h);
+	half  h = vs_float_to_half(NAN);
+	float f = vs_half_to_float(h);
 	ASSERT_TRUE(isnan(f), "NaN roundtrip");
 }
 
@@ -96,8 +96,8 @@ TEST(half_convert_subnormal)
 {
 	/* Smallest subnormal half: 2^-24 ≈ 5.96e-8 */
 	float subnormal = 5.960464477539063e-8f;
-	half  h			= mkt_float_to_half(subnormal);
-	float f			= mkt_half_to_float(h);
+	half  h			= vs_float_to_half(subnormal);
+	float f			= vs_half_to_float(h);
 	/* Subnormal values may lose precision */
 	ASSERT_TRUE(f >= 0.0f && f < 1e-4f, "subnormal is small positive");
 }
@@ -108,46 +108,46 @@ TEST(half_convert_subnormal)
 
 TEST(half_is_nan)
 {
-	half h = mkt_float_to_half(NAN);
-	ASSERT_TRUE(mkt_half_is_nan(h), "NaN detected");
-	ASSERT_FALSE(mkt_half_is_inf(h), "NaN is not Inf");
-	ASSERT_FALSE(mkt_half_is_zero(h), "NaN is not zero");
+	half h = vs_float_to_half(NAN);
+	ASSERT_TRUE(vs_half_is_nan(h), "NaN detected");
+	ASSERT_FALSE(vs_half_is_inf(h), "NaN is not Inf");
+	ASSERT_FALSE(vs_half_is_zero(h), "NaN is not zero");
 }
 
 TEST(half_is_inf)
 {
-	half h = mkt_float_to_half(INFINITY);
-	ASSERT_TRUE(mkt_half_is_inf(h), "Inf detected");
-	ASSERT_FALSE(mkt_half_is_nan(h), "Inf is not NaN");
-	ASSERT_FALSE(mkt_half_is_zero(h), "Inf is not zero");
+	half h = vs_float_to_half(INFINITY);
+	ASSERT_TRUE(vs_half_is_inf(h), "Inf detected");
+	ASSERT_FALSE(vs_half_is_nan(h), "Inf is not NaN");
+	ASSERT_FALSE(vs_half_is_zero(h), "Inf is not zero");
 }
 
 TEST(half_is_neg_inf)
 {
-	half h = mkt_float_to_half(-INFINITY);
-	ASSERT_TRUE(mkt_half_is_inf(h), "-Inf detected");
+	half h = vs_float_to_half(-INFINITY);
+	ASSERT_TRUE(vs_half_is_inf(h), "-Inf detected");
 }
 
 TEST(half_is_zero)
 {
-	half h = mkt_float_to_half(0.0f);
-	ASSERT_TRUE(mkt_half_is_zero(h), "zero detected");
-	ASSERT_FALSE(mkt_half_is_nan(h), "zero is not NaN");
-	ASSERT_FALSE(mkt_half_is_inf(h), "zero is not Inf");
+	half h = vs_float_to_half(0.0f);
+	ASSERT_TRUE(vs_half_is_zero(h), "zero detected");
+	ASSERT_FALSE(vs_half_is_nan(h), "zero is not NaN");
+	ASSERT_FALSE(vs_half_is_inf(h), "zero is not Inf");
 }
 
 TEST(half_is_neg_zero)
 {
-	half h = mkt_float_to_half(-0.0f);
-	ASSERT_TRUE(mkt_half_is_zero(h), "-zero detected");
+	half h = vs_float_to_half(-0.0f);
+	ASSERT_TRUE(vs_half_is_zero(h), "-zero detected");
 }
 
 TEST(half_normal_not_special)
 {
-	half h = mkt_float_to_half(1.0f);
-	ASSERT_FALSE(mkt_half_is_nan(h), "1.0 is not NaN");
-	ASSERT_FALSE(mkt_half_is_inf(h), "1.0 is not Inf");
-	ASSERT_FALSE(mkt_half_is_zero(h), "1.0 is not zero");
+	half h = vs_float_to_half(1.0f);
+	ASSERT_FALSE(vs_half_is_nan(h), "1.0 is not NaN");
+	ASSERT_FALSE(vs_half_is_inf(h), "1.0 is not Inf");
+	ASSERT_FALSE(vs_half_is_zero(h), "1.0 is not zero");
 }
 
 /* ----------------------------------------------------------------
@@ -160,8 +160,8 @@ TEST(half_array_roundtrip_dim1)
 	half  tmp[1];
 	float dst[1];
 
-	mkt_float_to_half_array(src, tmp, 1);
-	mkt_half_to_float_array(tmp, dst, 1);
+	vs_float_to_half_array(src, tmp, 1);
+	vs_half_to_float_array(tmp, dst, 1);
 	ASSERT_FLOAT_EQ(src[0], dst[0], 0.002f, "dim=1 roundtrip");
 }
 
@@ -173,8 +173,8 @@ TEST(half_array_roundtrip_dim7)
 	for (int i = 0; i < 7; i++)
 		src[i] = (float)(i + 1) * 0.25f;
 
-	mkt_float_to_half_array(src, tmp, 7);
-	mkt_half_to_float_array(tmp, dst, 7);
+	vs_float_to_half_array(src, tmp, 7);
+	vs_half_to_float_array(tmp, dst, 7);
 
 	for (int i = 0; i < 7; i++)
 		ASSERT_FLOAT_EQ(src[i], dst[i], 0.002f, "dim=7 element");
@@ -188,8 +188,8 @@ TEST(half_array_roundtrip_dim8)
 	for (int i = 0; i < 8; i++)
 		src[i] = (float)(i - 4) * 1.5f;
 
-	mkt_float_to_half_array(src, tmp, 8);
-	mkt_half_to_float_array(tmp, dst, 8);
+	vs_float_to_half_array(src, tmp, 8);
+	vs_half_to_float_array(tmp, dst, 8);
 
 	for (int i = 0; i < 8; i++)
 		ASSERT_FLOAT_EQ(src[i], dst[i], 0.01f, "dim=8 element");
@@ -203,8 +203,8 @@ TEST(half_array_roundtrip_dim15)
 	for (int i = 0; i < 15; i++)
 		src[i] = (float)(i) * 0.1f;
 
-	mkt_float_to_half_array(src, tmp, 15);
-	mkt_half_to_float_array(tmp, dst, 15);
+	vs_float_to_half_array(src, tmp, 15);
+	vs_half_to_float_array(tmp, dst, 15);
 
 	for (int i = 0; i < 15; i++)
 		ASSERT_FLOAT_EQ(src[i], dst[i], 0.002f, "dim=15 element");
@@ -218,8 +218,8 @@ TEST(half_array_roundtrip_dim16)
 	for (int i = 0; i < 16; i++)
 		src[i] = (float)(i - 8) * 2.0f;
 
-	mkt_float_to_half_array(src, tmp, 16);
-	mkt_half_to_float_array(tmp, dst, 16);
+	vs_float_to_half_array(src, tmp, 16);
+	vs_half_to_float_array(tmp, dst, 16);
 
 	for (int i = 0; i < 16; i++)
 		ASSERT_FLOAT_EQ(src[i], dst[i], 0.01f, "dim=16 element");
@@ -227,42 +227,42 @@ TEST(half_array_roundtrip_dim16)
 
 TEST(half_array_roundtrip_dim128)
 {
-	float *src = mkt_alloc(128 * sizeof(float));
-	float *dst = mkt_alloc(128 * sizeof(float));
-	half  *tmp = mkt_alloc(128 * sizeof(half));
+	float *src = vs_alloc(128 * sizeof(float));
+	float *dst = vs_alloc(128 * sizeof(float));
+	half  *tmp = vs_alloc(128 * sizeof(half));
 
 	for (int i = 0; i < 128; i++)
 		src[i] = (float)(i - 64) * 0.5f;
 
-	mkt_float_to_half_array(src, tmp, 128);
-	mkt_half_to_float_array(tmp, dst, 128);
+	vs_float_to_half_array(src, tmp, 128);
+	vs_half_to_float_array(tmp, dst, 128);
 
 	for (int i = 0; i < 128; i++)
 		ASSERT_FLOAT_EQ(src[i], dst[i], 0.5f, "dim=128 element");
 
-	mkt_free(src);
-	mkt_free(dst);
-	mkt_free(tmp);
+	vs_free(src);
+	vs_free(dst);
+	vs_free(tmp);
 }
 
 TEST(half_array_roundtrip_dim768)
 {
-	float *src = mkt_alloc(768 * sizeof(float));
-	float *dst = mkt_alloc(768 * sizeof(float));
-	half  *tmp = mkt_alloc(768 * sizeof(half));
+	float *src = vs_alloc(768 * sizeof(float));
+	float *dst = vs_alloc(768 * sizeof(float));
+	half  *tmp = vs_alloc(768 * sizeof(half));
 
 	for (int i = 0; i < 768; i++)
 		src[i] = ((float)(i % 100) - 50.0f) * 0.01f;
 
-	mkt_float_to_half_array(src, tmp, 768);
-	mkt_half_to_float_array(tmp, dst, 768);
+	vs_float_to_half_array(src, tmp, 768);
+	vs_half_to_float_array(tmp, dst, 768);
 
 	for (int i = 0; i < 768; i++)
 		ASSERT_FLOAT_EQ(src[i], dst[i], 0.002f, "dim=768 element");
 
-	mkt_free(src);
-	mkt_free(dst);
-	mkt_free(tmp);
+	vs_free(src);
+	vs_free(dst);
+	vs_free(tmp);
 }
 
 /* ----------------------------------------------------------------
@@ -288,19 +288,19 @@ TEST(f32_ops_to_float_block_zero_copy)
 	float data[] = {1.0f, 2.0f, 3.0f, 4.0f};
 	float buf[4];
 
-	const float *out = mkt_f32_type_ops.to_float_block(data, buf, 1, 4);
+	const float *out = vs_f32_type_ops.to_float_block(data, buf, 1, 4);
 	ASSERT_TRUE(
 			out == data, "f32 to_float_block should return src (zero copy)");
 }
 
 TEST(f32_ops_name)
 {
-	ASSERT_STR_EQ("float32", mkt_f32_type_ops.name, "f32 ops name");
+	ASSERT_STR_EQ("float32", vs_f32_type_ops.name, "f32 ops name");
 }
 
 TEST(f32_ops_element_size)
 {
-	ASSERT_EQ(4, mkt_f32_type_ops.element_size, "f32 element size");
+	ASSERT_EQ(4, vs_f32_type_ops.element_size, "f32 element size");
 }
 
 /* ----------------------------------------------------------------
@@ -309,12 +309,12 @@ TEST(f32_ops_element_size)
 
 TEST(f16_ops_name)
 {
-	ASSERT_STR_EQ("float16", mkt_f16_type_ops.name, "f16 ops name");
+	ASSERT_STR_EQ("float16", vs_f16_type_ops.name, "f16 ops name");
 }
 
 TEST(f16_ops_element_size)
 {
-	ASSERT_EQ(2, mkt_f16_type_ops.element_size, "f16 element size");
+	ASSERT_EQ(2, vs_f16_type_ops.element_size, "f16 element size");
 }
 
 TEST(f16_ops_dot_product)
@@ -322,12 +322,12 @@ TEST(f16_ops_dot_product)
 	/* Create half vector and float centroid */
 	float values[] = {1.0f, 2.0f, 3.0f, 4.0f};
 	half  hv[4];
-	mkt_float_to_half_array(values, hv, 4);
+	vs_float_to_half_array(values, hv, 4);
 
 	float centroid[] = {0.5f, 1.0f, 1.5f, 2.0f};
 
 	/* Expected: 1*0.5 + 2*1 + 3*1.5 + 4*2 = 0.5+2+4.5+8 = 15.0 */
-	float dot = mkt_f16_type_ops.dot_product(hv, centroid, 4);
+	float dot = vs_f16_type_ops.dot_product(hv, centroid, 4);
 	ASSERT_FLOAT_EQ(15.0f, dot, 0.1f, "f16 dot product");
 }
 
@@ -335,12 +335,12 @@ TEST(f16_ops_l2_squared)
 {
 	float values[] = {1.0f, 2.0f, 3.0f, 4.0f};
 	half  hv[4];
-	mkt_float_to_half_array(values, hv, 4);
+	vs_float_to_half_array(values, hv, 4);
 
 	float centroid[] = {0.5f, 1.0f, 1.5f, 2.0f};
 
 	/* Expected: 0.25 + 1.0 + 2.25 + 4.0 = 7.5 */
-	float l2 = mkt_f16_type_ops.l2_squared(hv, centroid, 4);
+	float l2 = vs_f16_type_ops.l2_squared(hv, centroid, 4);
 	ASSERT_FLOAT_EQ(7.5f, l2, 0.1f, "f16 l2 squared");
 }
 
@@ -348,10 +348,10 @@ TEST(f16_ops_norm_sq)
 {
 	float values[] = {3.0f, 4.0f};
 	half  hv[2];
-	mkt_float_to_half_array(values, hv, 2);
+	vs_float_to_half_array(values, hv, 2);
 
 	/* Expected: 9 + 16 = 25 */
-	float nsq = mkt_f16_type_ops.norm_sq(hv, 2);
+	float nsq = vs_f16_type_ops.norm_sq(hv, 2);
 	ASSERT_FLOAT_EQ(25.0f, nsq, 0.1f, "f16 norm squared");
 }
 
@@ -359,10 +359,10 @@ TEST(f16_ops_sum_to_float)
 {
 	float values[] = {1.0f, 2.0f, 3.0f};
 	half  hv[3];
-	mkt_float_to_half_array(values, hv, 3);
+	vs_float_to_half_array(values, hv, 3);
 
 	float accum[] = {10.0f, 20.0f, 30.0f};
-	mkt_f16_type_ops.sum_to_float(hv, accum, 3);
+	vs_f16_type_ops.sum_to_float(hv, accum, 3);
 
 	ASSERT_FLOAT_EQ(11.0f, accum[0], 0.01f, "accum[0]");
 	ASSERT_FLOAT_EQ(22.0f, accum[1], 0.01f, "accum[1]");
@@ -373,10 +373,10 @@ TEST(f16_ops_to_float_one)
 {
 	float values[] = {1.5f, -2.5f, 3.5f};
 	half  hv[3];
-	mkt_float_to_half_array(values, hv, 3);
+	vs_float_to_half_array(values, hv, 3);
 
 	float dst[3] = {0};
-	mkt_f16_type_ops.to_float_one(hv, dst, 3);
+	vs_f16_type_ops.to_float_one(hv, dst, 3);
 
 	ASSERT_FLOAT_EQ(1.5f, dst[0], 0.01f, "to_float_one[0]");
 	ASSERT_FLOAT_EQ(-2.5f, dst[1], 0.01f, "to_float_one[1]");
@@ -387,11 +387,11 @@ TEST(f16_ops_to_float_block)
 {
 	float values[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
 	half  hv[6];
-	mkt_float_to_half_array(values, hv, 6);
+	vs_float_to_half_array(values, hv, 6);
 
 	float dst[6] = {0};
 
-	const float *out = mkt_f16_type_ops.to_float_block(hv, dst, 2, 3);
+	const float *out = vs_f16_type_ops.to_float_block(hv, dst, 2, 3);
 	ASSERT_TRUE(out == dst, "f16 to_float_block returns dst");
 
 	for (int i = 0; i < 6; i++)
@@ -402,18 +402,18 @@ TEST(f16_ops_to_float_block)
  * f16c_ops: F16C SIMD vtable correctness
  * ---------------------------------------------------------------- */
 
-#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
+#if defined(VS_F16C_SUPPORT) && !defined(VS_SIMD_NONE)
 
 /*
  * Volatile pointer prevents the compiler from resolving vtable function
  * pointers at -O3, which would trigger "always_inline + target mismatch"
- * errors against the MKT_TARGET_F16C_AVX2 inline functions.
+ * errors against the VS_TARGET_F16C_AVX2 inline functions.
  */
-static const Vec32TypeOps *volatile f16c_ops = &mkt_f16c_type_ops;
+static const Vec32TypeOps *volatile f16c_ops = &vs_f16c_type_ops;
 
 TEST(f16c_ops_name)
 {
-	ASSERT_STR_EQ("float16-f16c", mkt_f16c_type_ops.name, "f16c ops name");
+	ASSERT_STR_EQ("float16-f16c", vs_f16c_type_ops.name, "f16c ops name");
 }
 
 TEST(f16c_ops_dot_product_small)
@@ -421,7 +421,7 @@ TEST(f16c_ops_dot_product_small)
 	float values[]	 = {1.0f, 2.0f, 3.0f, 4.0f};
 	float centroid[] = {0.5f, 1.0f, 1.5f, 2.0f};
 	half  hv[4];
-	mkt_float_to_half_array(values, hv, 4);
+	vs_float_to_half_array(values, hv, 4);
 
 	float dot = f16c_ops->dot_product(hv, centroid, 4);
 	ASSERT_FLOAT_EQ(15.0f, dot, 0.1f, "f16c dot product (scalar tail)");
@@ -430,9 +430,9 @@ TEST(f16c_ops_dot_product_small)
 TEST(f16c_ops_dot_product_simd)
 {
 	Dimension dim = 128;
-	float	 *fv  = mkt_alloc(dim * sizeof(float));
-	float	 *fc  = mkt_alloc(dim * sizeof(float));
-	half	 *hv  = mkt_alloc(dim * sizeof(half));
+	float	 *fv  = vs_alloc(dim * sizeof(float));
+	float	 *fc  = vs_alloc(dim * sizeof(float));
+	half	 *hv  = vs_alloc(dim * sizeof(half));
 
 	uint32_t rng = 42;
 	for (Dimension i = 0; i < dim; i++)
@@ -442,15 +442,15 @@ TEST(f16c_ops_dot_product_simd)
 		rng	  = rng * 1103515245 + 12345;
 		fc[i] = ((float)(rng >> 16) / 32768.0f) - 1.0f;
 	}
-	mkt_float_to_half_array(fv, hv, dim);
+	vs_float_to_half_array(fv, hv, dim);
 
-	float ref = mkt_f16_type_ops.dot_product(hv, fc, dim);
+	float ref = vs_f16_type_ops.dot_product(hv, fc, dim);
 	float got = f16c_ops->dot_product(hv, fc, dim);
 	ASSERT_FLOAT_EQ(ref, got, 0.01f, "f16c dot matches f16 scalar");
 
-	mkt_free(fv);
-	mkt_free(fc);
-	mkt_free(hv);
+	vs_free(fv);
+	vs_free(fc);
+	vs_free(hv);
 }
 
 TEST(f16c_ops_l2_squared)
@@ -458,7 +458,7 @@ TEST(f16c_ops_l2_squared)
 	float values[]	 = {1.0f, 2.0f, 3.0f, 4.0f};
 	float centroid[] = {0.5f, 1.0f, 1.5f, 2.0f};
 	half  hv[4];
-	mkt_float_to_half_array(values, hv, 4);
+	vs_float_to_half_array(values, hv, 4);
 
 	float l2 = f16c_ops->l2_squared(hv, centroid, 4);
 	ASSERT_FLOAT_EQ(7.5f, l2, 0.1f, "f16c l2 squared");
@@ -467,9 +467,9 @@ TEST(f16c_ops_l2_squared)
 TEST(f16c_ops_l2_squared_simd)
 {
 	Dimension dim = 128;
-	float	 *fv  = mkt_alloc(dim * sizeof(float));
-	float	 *fc  = mkt_alloc(dim * sizeof(float));
-	half	 *hv  = mkt_alloc(dim * sizeof(half));
+	float	 *fv  = vs_alloc(dim * sizeof(float));
+	float	 *fc  = vs_alloc(dim * sizeof(float));
+	half	 *hv  = vs_alloc(dim * sizeof(half));
 
 	uint32_t rng = 42;
 	for (Dimension i = 0; i < dim; i++)
@@ -479,22 +479,22 @@ TEST(f16c_ops_l2_squared_simd)
 		rng	  = rng * 1103515245 + 12345;
 		fc[i] = ((float)(rng >> 16) / 32768.0f) - 1.0f;
 	}
-	mkt_float_to_half_array(fv, hv, dim);
+	vs_float_to_half_array(fv, hv, dim);
 
-	float ref = mkt_f16_type_ops.l2_squared(hv, fc, dim);
+	float ref = vs_f16_type_ops.l2_squared(hv, fc, dim);
 	float got = f16c_ops->l2_squared(hv, fc, dim);
 	ASSERT_FLOAT_EQ(ref, got, 0.01f, "f16c l2 matches f16 scalar");
 
-	mkt_free(fv);
-	mkt_free(fc);
-	mkt_free(hv);
+	vs_free(fv);
+	vs_free(fc);
+	vs_free(hv);
 }
 
 TEST(f16c_ops_norm_sq)
 {
 	float values[] = {3.0f, 4.0f};
 	half  hv[2];
-	mkt_float_to_half_array(values, hv, 2);
+	vs_float_to_half_array(values, hv, 2);
 
 	float nsq = f16c_ops->norm_sq(hv, 2);
 	ASSERT_FLOAT_EQ(25.0f, nsq, 0.1f, "f16c norm squared");
@@ -503,8 +503,8 @@ TEST(f16c_ops_norm_sq)
 TEST(f16c_ops_norm_sq_simd)
 {
 	Dimension dim = 128;
-	float	 *fv  = mkt_alloc(dim * sizeof(float));
-	half	 *hv  = mkt_alloc(dim * sizeof(half));
+	float	 *fv  = vs_alloc(dim * sizeof(float));
+	half	 *hv  = vs_alloc(dim * sizeof(half));
 
 	uint32_t rng = 42;
 	for (Dimension i = 0; i < dim; i++)
@@ -512,21 +512,21 @@ TEST(f16c_ops_norm_sq_simd)
 		rng	  = rng * 1103515245 + 12345;
 		fv[i] = ((float)(rng >> 16) / 32768.0f) - 1.0f;
 	}
-	mkt_float_to_half_array(fv, hv, dim);
+	vs_float_to_half_array(fv, hv, dim);
 
-	float ref = mkt_f16_type_ops.norm_sq(hv, dim);
+	float ref = vs_f16_type_ops.norm_sq(hv, dim);
 	float got = f16c_ops->norm_sq(hv, dim);
 	ASSERT_FLOAT_EQ(ref, got, 0.01f, "f16c norm_sq matches f16 scalar");
 
-	mkt_free(fv);
-	mkt_free(hv);
+	vs_free(fv);
+	vs_free(hv);
 }
 
 TEST(f16c_ops_sum_to_float)
 {
 	float values[] = {1.0f, 2.0f, 3.0f};
 	half  hv[3];
-	mkt_float_to_half_array(values, hv, 3);
+	vs_float_to_half_array(values, hv, 3);
 
 	float accum[] = {10.0f, 20.0f, 30.0f};
 	f16c_ops->sum_to_float(hv, accum, 3);
@@ -539,10 +539,10 @@ TEST(f16c_ops_sum_to_float)
 TEST(f16c_ops_sum_to_float_simd)
 {
 	Dimension dim = 128;
-	float	 *fv  = mkt_alloc(dim * sizeof(float));
-	half	 *hv  = mkt_alloc(dim * sizeof(half));
-	float	 *ref = mkt_alloc(dim * sizeof(float));
-	float	 *got = mkt_alloc(dim * sizeof(float));
+	float	 *fv  = vs_alloc(dim * sizeof(float));
+	half	 *hv  = vs_alloc(dim * sizeof(half));
+	float	 *ref = vs_alloc(dim * sizeof(float));
+	float	 *got = vs_alloc(dim * sizeof(float));
 
 	uint32_t rng = 42;
 	for (Dimension i = 0; i < dim; i++)
@@ -552,29 +552,29 @@ TEST(f16c_ops_sum_to_float_simd)
 		ref[i] = 100.0f;
 		got[i] = 100.0f;
 	}
-	mkt_float_to_half_array(fv, hv, dim);
+	vs_float_to_half_array(fv, hv, dim);
 
-	mkt_f16_type_ops.sum_to_float(hv, ref, dim);
+	vs_f16_type_ops.sum_to_float(hv, ref, dim);
 	f16c_ops->sum_to_float(hv, got, dim);
 
 	for (Dimension i = 0; i < dim; i++)
 		ASSERT_FLOAT_EQ(ref[i], got[i], 0.001f, "f16c sum matches f16");
 
-	mkt_free(fv);
-	mkt_free(hv);
-	mkt_free(ref);
-	mkt_free(got);
+	vs_free(fv);
+	vs_free(hv);
+	vs_free(ref);
+	vs_free(got);
 }
 
-#endif /* MKT_F16C_SUPPORT && !MKT_SIMD_NONE */
+#endif /* VS_F16C_SUPPORT && !VS_SIMD_NONE */
 
 /* Match f16 distance against f32 reference for larger vectors */
 TEST(f16_ops_distance_matches_f32_reference)
 {
 	Dimension dim = 128;
-	float	 *fv  = mkt_alloc(dim * sizeof(float));
-	float	 *fc  = mkt_alloc(dim * sizeof(float));
-	half	 *hv  = mkt_alloc(dim * sizeof(half));
+	float	 *fv  = vs_alloc(dim * sizeof(float));
+	float	 *fc  = vs_alloc(dim * sizeof(float));
+	half	 *hv  = vs_alloc(dim * sizeof(half));
 
 	/* Fill with deterministic values */
 	uint32_t rng = 12345;
@@ -586,15 +586,15 @@ TEST(f16_ops_distance_matches_f32_reference)
 		fc[i] = ((float)(rng >> 16) / 32768.0f) - 1.0f;
 	}
 
-	mkt_float_to_half_array(fv, hv, dim);
+	vs_float_to_half_array(fv, hv, dim);
 
 	/* f32 reference */
-	float ref_dot = mkt_f32_type_ops.dot_product(fv, fc, dim);
-	float ref_l2  = mkt_f32_type_ops.l2_squared(fv, fc, dim);
+	float ref_dot = vs_f32_type_ops.dot_product(fv, fc, dim);
+	float ref_l2  = vs_f32_type_ops.l2_squared(fv, fc, dim);
 
 	/* f16 result (using halfvec data) */
-	float f16_dot = mkt_f16_type_ops.dot_product(hv, fc, dim);
-	float f16_l2  = mkt_f16_type_ops.l2_squared(hv, fc, dim);
+	float f16_dot = vs_f16_type_ops.dot_product(hv, fc, dim);
+	float f16_l2  = vs_f16_type_ops.l2_squared(hv, fc, dim);
 
 	/* Half-precision has ~3 decimal digits of precision.
 	 * Allow relative error up to 1% for accumulated results. */
@@ -606,9 +606,9 @@ TEST(f16_ops_distance_matches_f32_reference)
 	ASSERT_TRUE(dot_err < 0.02f, "f16 dot product relative error < 2%");
 	ASSERT_TRUE(l2_err < 0.02f, "f16 L2 squared relative error < 2%");
 
-	mkt_free(fv);
-	mkt_free(fc);
-	mkt_free(hv);
+	vs_free(fv);
+	vs_free(fc);
+	vs_free(hv);
 }
 
 /* ----------------------------------------------------------------
@@ -639,7 +639,7 @@ TEST(halfvec_from_floats)
 
 	/* Verify values via to_float */
 	float out[3];
-	mkt_half_to_float_array(v->x, out, 3);
+	vs_half_to_float_array(v->x, out, 3);
 	ASSERT_FLOAT_EQ(1.0f, out[0], 0.01f, "element 0");
 	ASSERT_FLOAT_EQ(2.0f, out[1], 0.01f, "element 1");
 	ASSERT_FLOAT_EQ(3.0f, out[2], 0.01f, "element 2");
@@ -662,7 +662,7 @@ TEST(halfvec_set)
 	vec16_set(v, values);
 
 	float out[3];
-	mkt_half_to_float_array(v->x, out, 3);
+	vs_half_to_float_array(v->x, out, 3);
 	ASSERT_FLOAT_EQ(4.0f, out[0], 0.01f, "set element 0");
 	ASSERT_FLOAT_EQ(5.0f, out[1], 0.01f, "set element 1");
 	ASSERT_FLOAT_EQ(6.0f, out[2], 0.01f, "set element 2");

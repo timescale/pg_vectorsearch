@@ -1,5 +1,5 @@
 /*
- * bufstorage.c - PG buffer cache MktStorage implementation
+ * bufstorage.c - PG buffer cache VsStorage implementation
  *
  * Read path:  ReadBuffer + LockBuffer(SHARE) -> return page
  *             UnlockReleaseBuffer on release
@@ -34,7 +34,7 @@
 #include "typeinfo.h"
 
 /* Downcast from base to concrete type */
-#define PG_STORAGE(self) ((MktPgStorage *)(self))
+#define PG_STORAGE(self) ((VsPgStorage *)(self))
 
 /* ----------------------------------------------------------------
  * Backend-local buffer-id cache (prism.recent_buffers)
@@ -60,7 +60,7 @@ static BlockNumber	  g_bufcache_len = 0;
 static MemoryContext  g_bufcache_ctx = NULL;
 
 void
-mkt_pg_storage_set_recent_buffers(bool enabled)
+vs_pg_storage_set_recent_buffers(bool enabled)
 {
 	g_recent_buffers = enabled;
 }
@@ -129,16 +129,16 @@ bufcache_slot(Relation index, BlockNumber blkno)
  * ---------------------------------------------------------------- */
 
 /* Buffer-id cache effectiveness counters (diagnostic; exposed via
- * mkt_routing_stats). */
-uint64_t mkt_bufcache_hits;
-uint64_t mkt_bufcache_cold;
-uint64_t mkt_bufcache_stale;
+ * vs_routing_stats). */
+uint64_t vs_bufcache_hits;
+uint64_t vs_bufcache_cold;
+uint64_t vs_bufcache_stale;
 
 static Page
-pg_read_page(MktStorage *self, BlockNumber blkno)
+pg_read_page(VsStorage *self, BlockNumber blkno)
 {
-	MktPgStorage *s = PG_STORAGE(self);
-	Buffer		  buf;
+	VsPgStorage *s = PG_STORAGE(self);
+	Buffer		 buf;
 
 	if (g_recent_buffers)
 	{
@@ -148,7 +148,7 @@ pg_read_page(MktStorage *self, BlockNumber blkno)
 			ReadRecentBuffer(s->index->rd_locator, MAIN_FORKNUM, blkno, *slot))
 		{
 			buf = *slot;
-			mkt_bufcache_hits++;
+			vs_bufcache_hits++;
 			/*
 			 * ReadRecentBuffer counts the hit in the backend-wide
 			 * pgBufferUsage (EXPLAIN BUFFERS) but, taking a locator rather
@@ -163,9 +163,9 @@ pg_read_page(MktStorage *self, BlockNumber blkno)
 			/* Diagnostic: distinguish never-populated slots (first
 			 * touch) from stale ids (eviction churn). */
 			if (slot == NULL || *slot == InvalidBuffer)
-				mkt_bufcache_cold++;
+				vs_bufcache_cold++;
 			else
-				mkt_bufcache_stale++;
+				vs_bufcache_stale++;
 			buf = ReadBuffer(s->index, blkno);
 			if (slot != NULL)
 				*slot = buf;
@@ -182,9 +182,9 @@ pg_read_page(MktStorage *self, BlockNumber blkno)
 }
 
 static void
-pg_release_page(MktStorage *self, BlockNumber blkno)
+pg_release_page(VsStorage *self, BlockNumber blkno)
 {
-	MktPgStorage *s = PG_STORAGE(self);
+	VsPgStorage *s = PG_STORAGE(self);
 
 	(void)blkno;
 	UnlockReleaseBuffer(s->cur_buf);
@@ -198,9 +198,9 @@ pg_release_page(MktStorage *self, BlockNumber blkno)
  * effective_io_concurrency so an operator can disable prefetching (0).
  */
 static void
-pg_prefetch_page(MktStorage *self, BlockNumber blkno)
+pg_prefetch_page(VsStorage *self, BlockNumber blkno)
 {
-	MktPgStorage *s = PG_STORAGE(self);
+	VsPgStorage *s = PG_STORAGE(self);
 
 	if (effective_io_concurrency == 0)
 		return;
@@ -213,9 +213,9 @@ pg_prefetch_page(MktStorage *self, BlockNumber blkno)
  * ---------------------------------------------------------------- */
 
 static Page
-pg_write_page(MktStorage *self, BlockNumber blkno)
+pg_write_page(VsStorage *self, BlockNumber blkno)
 {
-	MktPgStorage *s = PG_STORAGE(self);
+	VsPgStorage *s = PG_STORAGE(self);
 
 	Buffer buf = ReadBuffer(s->index, blkno);
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
@@ -225,9 +225,9 @@ pg_write_page(MktStorage *self, BlockNumber blkno)
 }
 
 static Page
-pg_new_page(MktStorage *self, BlockNumber *blkno_out)
+pg_new_page(VsStorage *self, BlockNumber *blkno_out)
 {
-	MktPgStorage *s = PG_STORAGE(self);
+	VsPgStorage *s = PG_STORAGE(self);
 
 	Buffer buf = ReadBufferExtended(
 			s->index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
@@ -240,9 +240,9 @@ pg_new_page(MktStorage *self, BlockNumber *blkno_out)
 }
 
 static void
-pg_commit_page(MktStorage *self, BlockNumber blkno)
+pg_commit_page(VsStorage *self, BlockNumber blkno)
 {
-	MktPgStorage *s = PG_STORAGE(self);
+	VsPgStorage *s = PG_STORAGE(self);
 
 	(void)blkno;
 
@@ -282,9 +282,9 @@ pg_commit_page(MktStorage *self, BlockNumber blkno)
  * ---------------------------------------------------------------- */
 
 static BlockNumber
-pg_extend(MktStorage *self, uint32_t npages)
+pg_extend(VsStorage *self, uint32_t npages)
 {
-	MktPgStorage *s = PG_STORAGE(self);
+	VsPgStorage *s = PG_STORAGE(self);
 
 	BlockNumber start	  = InvalidBlockNumber;
 	uint32_t	remaining = npages;
@@ -325,7 +325,7 @@ pg_extend(MktStorage *self, uint32_t npages)
 static int
 cmp_tid_order(const void *a, const void *b, void *arg)
 {
-	const MktTopKEntry *cands = arg;
+	const VsTopKEntry *cands = arg;
 
 	/* Encoded ids are (block << 16) | offset — strictly monotonic in
 	 * (block, offset), so raw id comparison IS TID order; no need to
@@ -358,16 +358,16 @@ cmp_tid_order(const void *a, const void *b, void *arg)
  */
 static uint32_t
 pg_rerank(
-		MktStorage		   *self,
-		const float		   *query,
-		Dimension			dim,
-		const MktTopKEntry *candidates,
-		uint32_t			count,
-		uint32_t			keep,
-		uint32_t		   *out_indices,
-		Distance		   *out_distances)
+		VsStorage		  *self,
+		const float		  *query,
+		Dimension		   dim,
+		const VsTopKEntry *candidates,
+		uint32_t		   count,
+		uint32_t		   keep,
+		uint32_t		  *out_indices,
+		Distance		  *out_distances)
 {
-	MktPgStorage *s = PG_STORAGE(self);
+	VsPgStorage *s = PG_STORAGE(self);
 
 	if (s->rel == NULL || count == 0)
 		return 0;
@@ -388,8 +388,8 @@ pg_rerank(
 	qsort_arg(
 			order, count, sizeof(uint32_t), cmp_tid_order, (void *)candidates);
 
-	MktTopK topk;
-	mkt_topk_init(&topk, keep);
+	VsTopK topk;
+	vs_topk_init(&topk, keep);
 
 	TupleTableSlot *slot = table_slot_create(s->rel, NULL);
 
@@ -413,7 +413,7 @@ pg_rerank(
 				{
 					Vec32Ref qref = {.data = query, .dim = dim};
 					Vec32Ref vref = vec32_read(&input, val);
-					d			  = mkt_distance(qref, vref, s->metric);
+					d			  = vs_distance(qref, vref, s->metric);
 				}
 				else
 				{
@@ -427,14 +427,14 @@ pg_rerank(
 			}
 		}
 
-		mkt_topk_insert_unique(&topk, d, 0.0f, (uint64_t)idx);
+		vs_topk_insert_unique(&topk, d, 0.0f, (uint64_t)idx);
 	}
 
 	ExecDropSingleTupleTableSlot(slot);
 
-	MktTopKEntry *entries = palloc(topk.cand_count * sizeof(MktTopKEntry));
-	uint32_t	  nresults;
-	mkt_topk_extract_sorted_unique(&topk, entries, &nresults);
+	VsTopKEntry *entries = palloc(topk.cand_count * sizeof(VsTopKEntry));
+	uint32_t	 nresults;
+	vs_topk_extract_sorted_unique(&topk, entries, &nresults);
 
 	for (uint32_t i = 0; i < nresults; i++)
 	{
@@ -443,7 +443,7 @@ pg_rerank(
 	}
 
 	pfree(entries);
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 	pfree(order);
 
 	return nresults;
@@ -460,12 +460,12 @@ pg_rerank(
 
 typedef struct RerankStreamState
 {
-	const MktTopKEntry *candidates;
-	const uint32_t	   *order;
-	MktTopK			   *topk;
-	MktPgStorage	   *storage;
-	uint32_t			count;
-	uint32_t			pos;
+	const VsTopKEntry *candidates;
+	const uint32_t	  *order;
+	VsTopK			  *topk;
+	VsPgStorage		  *storage;
+	uint32_t		   count;
+	uint32_t		   pos;
 } RerankStreamState;
 
 static BlockNumber
@@ -481,7 +481,7 @@ rerank_stream_cb(
 		/* Already exact — insert directly, no heap fetch */
 		if (st->candidates[idx].error == 0.0f)
 		{
-			mkt_topk_insert_unique(
+			vs_topk_insert_unique(
 					st->topk,
 					st->candidates[idx].distance,
 					0.0f,
@@ -499,16 +499,16 @@ rerank_stream_cb(
 
 static uint32_t
 pg_rerank_readstream(
-		MktStorage		   *self,
-		const float		   *query,
-		Dimension			dim,
-		const MktTopKEntry *candidates,
-		uint32_t			count,
-		uint32_t			keep,
-		uint32_t		   *out_indices,
-		Distance		   *out_distances)
+		VsStorage		  *self,
+		const float		  *query,
+		Dimension		   dim,
+		const VsTopKEntry *candidates,
+		uint32_t		   count,
+		uint32_t		   keep,
+		uint32_t		  *out_indices,
+		Distance		  *out_distances)
 {
-	MktPgStorage *s = PG_STORAGE(self);
+	VsPgStorage *s = PG_STORAGE(self);
 
 	if (s->rel == NULL || count == 0)
 		return 0;
@@ -524,8 +524,8 @@ pg_rerank_readstream(
 	qsort_arg(
 			order, count, sizeof(uint32_t), cmp_tid_order, (void *)candidates);
 
-	MktTopK topk;
-	mkt_topk_init(&topk, keep);
+	VsTopK topk;
+	vs_topk_init(&topk, keep);
 
 	RerankStreamState state = {
 			.candidates = candidates,
@@ -578,21 +578,21 @@ pg_rerank_readstream(
 			{
 				Vec32Ref qref = {.data = query, .dim = dim};
 				Vec32Ref vref = vec32_read(&input, val);
-				d			  = mkt_distance(qref, vref, s->metric);
+				d			  = vs_distance(qref, vref, s->metric);
 			}
 			ExecClearTuple(slot);
 		}
 
-		mkt_topk_insert_unique(&topk, d, 0.0f, (uint64_t)idx);
+		vs_topk_insert_unique(&topk, d, 0.0f, (uint64_t)idx);
 		ReleaseBuffer(buf);
 	}
 
 	read_stream_end(stream);
 	ExecDropSingleTupleTableSlot(slot);
 
-	MktTopKEntry *entries = palloc(topk.cand_count * sizeof(MktTopKEntry));
-	uint32_t	  nresults;
-	mkt_topk_extract_sorted_unique(&topk, entries, &nresults);
+	VsTopKEntry *entries = palloc(topk.cand_count * sizeof(VsTopKEntry));
+	uint32_t	 nresults;
+	vs_topk_extract_sorted_unique(&topk, entries, &nresults);
 
 	for (uint32_t i = 0; i < nresults; i++)
 	{
@@ -601,7 +601,7 @@ pg_rerank_readstream(
 	}
 
 	pfree(entries);
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 	pfree(order);
 
 	return nresults;
@@ -611,7 +611,7 @@ pg_rerank_readstream(
  * Static vtables
  * ---------------------------------------------------------------- */
 
-static const MktStorageOps pg_storage_ops = {
+static const VsStorageOps pg_storage_ops = {
 		.read_page	  = pg_read_page,
 		.release_page = pg_release_page,
 		.prefetch	  = pg_prefetch_page,
@@ -635,10 +635,10 @@ static const MktStorageOps pg_storage_ops = {
  * not test a condition that only inspection can change.
  */
 static Page
-pg_read_page_nocache(MktStorage *self, BlockNumber blkno)
+pg_read_page_nocache(VsStorage *self, BlockNumber blkno)
 {
-	MktPgStorage *s	  = PG_STORAGE(self);
-	Buffer		  buf = ReadBuffer(s->index, blkno);
+	VsPgStorage *s	 = PG_STORAGE(self);
+	Buffer		 buf = ReadBuffer(s->index, blkno);
 
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
 	s->cur_buf = buf;
@@ -647,7 +647,7 @@ pg_read_page_nocache(MktStorage *self, BlockNumber blkno)
 	return BufferGetPage(buf);
 }
 
-static const MktStorageOps pg_storage_readstream_ops = {
+static const VsStorageOps pg_storage_readstream_ops = {
 		.read_page	  = pg_read_page,
 		.release_page = pg_release_page,
 		.prefetch	  = pg_prefetch_page,
@@ -659,7 +659,7 @@ static const MktStorageOps pg_storage_readstream_ops = {
 };
 
 /* Inspection: the standard ops with the cache-bypassing read. */
-static const MktStorageOps pg_storage_inspect_ops = {
+static const VsStorageOps pg_storage_inspect_ops = {
 		.read_page	  = pg_read_page_nocache,
 		.release_page = pg_release_page,
 		.prefetch	  = pg_prefetch_page,
@@ -671,9 +671,9 @@ static const MktStorageOps pg_storage_inspect_ops = {
 };
 
 void
-mkt_pg_storage_init_inspect(MktPgStorage *s, Relation index)
+vs_pg_storage_init_inspect(VsPgStorage *s, Relation index)
 {
-	mkt_pg_storage_init(s, index, NULL, DISTANCE_L2);
+	vs_pg_storage_init(s, index, NULL, DISTANCE_L2);
 	s->base.ops = &pg_storage_inspect_ops;
 }
 
@@ -682,8 +682,8 @@ mkt_pg_storage_init_inspect(MktPgStorage *s, Relation index)
  * ---------------------------------------------------------------- */
 
 void
-mkt_pg_storage_init(
-		MktPgStorage *s, Relation index, Relation rel, DistanceMetric metric)
+vs_pg_storage_init(
+		VsPgStorage *s, Relation index, Relation rel, DistanceMetric metric)
 {
 	if (rel != NULL && RelationGetForm(rel)->relam == HEAP_TABLE_AM_OID)
 		s->base.ops = &pg_storage_readstream_ops;
@@ -698,14 +698,14 @@ mkt_pg_storage_init(
 	/*
 	 * Left NULL: every caller inits with rel = NULL, and rerank -- the only
 	 * consumer -- returns early without a heap relation. It is resolved in
-	 * mkt_pg_storage_set_rel, which is where the heap arrives and therefore
+	 * vs_pg_storage_set_rel, which is where the heap arrives and therefore
 	 * where rerank becomes possible.
 	 */
 	s->type_info = NULL;
 }
 
 void
-mkt_pg_storage_set_rel(MktPgStorage *s, Relation rel)
+vs_pg_storage_set_rel(VsPgStorage *s, Relation rel)
 {
 	s->rel = rel;
 	if (rel != NULL && RelationGetForm(rel)->relam == HEAP_TABLE_AM_OID)

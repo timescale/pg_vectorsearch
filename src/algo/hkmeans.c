@@ -1,7 +1,7 @@
 /*
  * hkmeans.c - Hierarchical k-means tree builder
  *
- * BFS tree construction using mkt_kmeans() with indexed access
+ * BFS tree construction using vs_kmeans() with indexed access
  * at each node — avoids copying sub-vector arrays.
  *
  * The result is packed into a single contiguous allocation so it
@@ -42,7 +42,7 @@ compute_nlevels(uint32_t nlist, uint32_t fan_out)
 }
 
 uint32_t
-mkt_hkmeans_nlevels(uint32_t nlist, uint32_t fan_out)
+vs_hkmeans_nlevels(uint32_t nlist, uint32_t fan_out)
 {
 	if (fan_out < 2)
 		fan_out = 2;
@@ -90,7 +90,7 @@ typedef struct TmpNode
 } TmpNode;
 
 HKMeansResult *
-mkt_hkmeans_f32(
+vs_hkmeans_f32(
 		const float			*vectors,
 		uint32_t			 nvecs,
 		const uint32_t		*indices,
@@ -107,26 +107,26 @@ mkt_hkmeans_f32(
 	uint32_t max_nodes = max_total_nodes(fan_out, nlevels);
 
 	/* Work context for BFS temporaries */
-	MktMemCtx work_ctx	 = mkt_memctx_create(NULL, "hkmeans_work");
-	MktMemCtx caller_ctx = mkt_memctx_switch(work_ctx);
+	VsMemCtx work_ctx	= vs_memctx_create(NULL, "hkmeans_work");
+	VsMemCtx caller_ctx = vs_memctx_switch(work_ctx);
 
 	/* Temporary nodes (pointers, packed later) */
-	TmpNode *tmp_nodes = mkt_alloc(max_nodes * sizeof(TmpNode));
+	TmpNode *tmp_nodes = vs_alloc(max_nodes * sizeof(TmpNode));
 	memset(tmp_nodes, 0, max_nodes * sizeof(TmpNode));
 	uint32_t nnodes	 = 0;
 	uint32_t nleaves = 0;
 
 	/* If caller provided indices, copy them as the root's
-	 * vec_indices so mkt_kmeans uses indirect access. */
+	 * vec_indices so vs_kmeans uses indirect access. */
 	uint32_t *root_indices = NULL;
 	if (indices != NULL)
 	{
-		root_indices = mkt_alloc(nvecs * sizeof(uint32_t));
+		root_indices = vs_alloc(nvecs * sizeof(uint32_t));
 		memcpy(root_indices, indices, nvecs * sizeof(uint32_t));
 	}
 
 	/* BFS work queue */
-	HKWorkItem *queue  = mkt_alloc(max_nodes * sizeof(HKWorkItem));
+	HKWorkItem *queue  = vs_alloc(max_nodes * sizeof(HKWorkItem));
 	uint32_t	q_tail = 0;
 
 	queue[q_tail++] = (HKWorkItem){
@@ -137,10 +137,10 @@ mkt_hkmeans_f32(
 	};
 
 	bool	  ok	 = true;
-	uint32_t *counts = mkt_alloc(fan_out * sizeof(uint32_t));
+	uint32_t *counts = vs_alloc(fan_out * sizeof(uint32_t));
 
 	/* Mutable copy: initial_centroids applies only to root */
-	KMeansOptions local_opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions local_opts = VS_KMEANS_OPTIONS_DEFAULT;
 	if (options != NULL)
 		local_opts = *options;
 
@@ -162,10 +162,10 @@ mkt_hkmeans_f32(
 			k = fan_out < item.count ? fan_out : item.count;
 
 		/* Use indexed k-means — no vector copy needed */
-		KMeansResult *km = mkt_kmeans(
+		KMeansResult *km = vs_kmeans(
 				vectors,
 				item.vec_indices,
-				MKT_VEC_F32,
+				VS_VEC_F32,
 				item.count,
 				dim,
 				k,
@@ -185,7 +185,7 @@ mkt_hkmeans_f32(
 		TmpNode *tn		  = &tmp_nodes[node_idx];
 
 		size_t cent_sz = (size_t)km->nlist * dim * sizeof(float);
-		tn->centroids  = mkt_alloc(cent_sz);
+		tn->centroids  = vs_alloc(cent_sz);
 		tn->cent_bytes = cent_sz;
 		memcpy(tn->centroids, km->centroids, cent_sz);
 		tn->nchildren	   = km->nlist;
@@ -233,7 +233,7 @@ mkt_hkmeans_f32(
 						   km->centroids + (size_t)c * dim,
 						   (size_t)dim * sizeof(float));
 
-				uint32_t *sub_indices = mkt_alloc(sub_n * sizeof(uint32_t));
+				uint32_t *sub_indices = vs_alloc(sub_n * sizeof(uint32_t));
 				uint32_t  idx		  = 0;
 				for (uint32_t v = 0; v < item.count; v++)
 				{
@@ -257,13 +257,13 @@ mkt_hkmeans_f32(
 			tn->cent_bytes = (size_t)kept * dim * sizeof(float);
 		}
 
-		mkt_kmeans_result_destroy(km);
+		vs_kmeans_result_destroy(km);
 	}
 
 	if (!ok)
 	{
-		mkt_memctx_switch(caller_ctx);
-		mkt_memctx_delete(work_ctx);
+		vs_memctx_switch(caller_ctx);
+		vs_memctx_delete(work_ctx);
 		return NULL;
 	}
 
@@ -295,8 +295,8 @@ mkt_hkmeans_f32(
 	}
 	size_t total = hdr_sz + nodes_sz + leaf_sz + intern_sz;
 
-	mkt_memctx_switch(caller_ctx);
-	HKMeansResult *result = mkt_alloc(total);
+	vs_memctx_switch(caller_ctx);
+	HKMeansResult *result = vs_alloc(total);
 	memset(result, 0, total);
 
 	result->nodes_offset = (uint32_t)hdr_sz;
@@ -351,13 +351,13 @@ mkt_hkmeans_f32(
 	}
 
 	/* Bulk-free all BFS temporaries */
-	mkt_memctx_delete(work_ctx);
+	vs_memctx_delete(work_ctx);
 
 	return result;
 }
 
 size_t
-mkt_hkmeans_max_blob_size_capped(
+vs_hkmeans_max_blob_size_capped(
 		uint32_t nlist, uint32_t fan_out, Dimension dim, uint64_t max_leaves)
 {
 	if (fan_out < 2)
@@ -400,13 +400,13 @@ mkt_hkmeans_max_blob_size_capped(
 }
 
 size_t
-mkt_hkmeans_max_blob_size(uint32_t nlist, uint32_t fan_out, Dimension dim)
+vs_hkmeans_max_blob_size(uint32_t nlist, uint32_t fan_out, Dimension dim)
 {
-	return mkt_hkmeans_max_blob_size_capped(nlist, fan_out, dim, UINT64_MAX);
+	return vs_hkmeans_max_blob_size_capped(nlist, fan_out, dim, UINT64_MAX);
 }
 
 HKMeansResult *
-mkt_hkmeans_build_flat(
+vs_hkmeans_build_flat(
 		const float *centroids,
 		uint32_t	 nleaves,
 		uint32_t	 fan_out,
@@ -420,7 +420,7 @@ mkt_hkmeans_build_flat(
 	size_t leaf_sz	= (size_t)nleaves * dim * sizeof(float);
 	size_t total	= hdr_sz + nodes_sz + leaf_sz;
 
-	HKMeansResult *result = mkt_alloc(total);
+	HKMeansResult *result = vs_alloc(total);
 	memset(result, 0, total);
 
 	result->nodes_offset = (uint32_t)hdr_sz;
@@ -444,7 +444,7 @@ mkt_hkmeans_build_flat(
 }
 
 uint32_t
-mkt_hkmeans_assign(
+vs_hkmeans_assign(
 		const HKMeansResult *tree,
 		const float			*vec,
 		DistanceMetric		 metric,
@@ -466,7 +466,7 @@ mkt_hkmeans_assign(
 			const float *centroid = cents + (size_t)c * dim;
 			Vec32Ref	 qref	  = {.data = vec, .dim = dim};
 			Vec32Ref	 cref	  = {.data = centroid, .dim = dim};
-			Distance	 d		  = mkt_distance(qref, cref, metric);
+			Distance	 d		  = vs_distance(qref, cref, metric);
 			if (d < best_dist)
 			{
 				best_dist = d;
@@ -534,7 +534,7 @@ topk_insert(
 	}
 }
 
-/* Insertion sort by ascending distance (n is small, <= MKT_HK_MAX_TOPK). */
+/* Insertion sort by ascending distance (n is small, <= VS_HK_MAX_TOPK). */
 static inline void
 topk_sort(uint32_t *ids, Distance *dists, uint32_t n)
 {
@@ -555,7 +555,7 @@ topk_sort(uint32_t *ids, Distance *dists, uint32_t n)
 }
 
 uint32_t
-mkt_hkmeans_assign_topk(
+vs_hkmeans_assign_topk(
 		const HKMeansResult *tree,
 		const float			*vec,
 		DistanceMetric		 metric,
@@ -566,18 +566,18 @@ mkt_hkmeans_assign_topk(
 {
 	if (k == 0)
 		return 0;
-	if (k > MKT_HK_MAX_TOPK)
-		k = MKT_HK_MAX_TOPK;
+	if (k > VS_HK_MAX_TOPK)
+		k = VS_HK_MAX_TOPK;
 	if (beam_width < 1)
 		beam_width = 1;
-	if (beam_width > MKT_HK_MAX_TOPK)
-		beam_width = MKT_HK_MAX_TOPK;
+	if (beam_width > VS_HK_MAX_TOPK)
+		beam_width = VS_HK_MAX_TOPK;
 
 	const Dimension	   dim	 = tree->dim;
 	const HKMeansNode *nodes = hk_nodes(tree);
 
 	/* Current beam: indices into nodes[] for the next level to expand. */
-	uint32_t beam[MKT_HK_MAX_TOPK];
+	uint32_t beam[VS_HK_MAX_TOPK];
 	uint32_t beam_n = 1;
 	beam[0]			= 0; /* root */
 
@@ -587,15 +587,15 @@ mkt_hkmeans_assign_topk(
 	 * children are collected here directly rather than assumed to all sit at
 	 * nlevels - 1.
 	 */
-	uint32_t res_id[MKT_HK_MAX_TOPK];
-	Distance res_d[MKT_HK_MAX_TOPK];
+	uint32_t res_id[VS_HK_MAX_TOPK];
+	Distance res_d[VS_HK_MAX_TOPK];
 	uint32_t res_n = 0;
 
 	for (uint32_t level = 0; level < tree->nlevels && beam_n > 0; level++)
 	{
 		/* Internal child nodes to expand at the next level. */
-		uint32_t next[MKT_HK_MAX_TOPK];
-		Distance next_d[MKT_HK_MAX_TOPK];
+		uint32_t next[VS_HK_MAX_TOPK];
+		Distance next_d[VS_HK_MAX_TOPK];
 		uint32_t next_n = 0;
 
 		for (uint32_t b = 0; b < beam_n; b++)
@@ -607,7 +607,7 @@ mkt_hkmeans_assign_topk(
 			{
 				Vec32Ref qref = {.data = vec, .dim = dim};
 				Vec32Ref cref = {.data = cents + (size_t)c * dim, .dim = dim};
-				Distance d	  = mkt_distance(qref, cref, metric);
+				Distance d	  = vs_distance(qref, cref, metric);
 				if (node_leaf)
 					topk_insert(
 							res_id, res_d, &res_n, k, node->first_leaf + c, d);

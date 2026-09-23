@@ -44,7 +44,7 @@
 #include "types/vec16.h"
 
 /* Include PG compat for standalone, real PG headers for extension */
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 #include "standalone/pg_compat.h"
 #else
 #include <postgres.h>
@@ -73,14 +73,14 @@
 
 typedef enum PrismCentroidFormat
 {
-	MKT_CENTROID_FMT_RABITQ = 0,
-	MKT_CENTROID_FMT_FLOAT	= 1,
-	MKT_CENTROID_FMT_HALF	= 2,
+	PRISM_CENTROID_FMT_RABITQ = 0,
+	PRISM_CENTROID_FMT_FLOAT  = 1,
+	PRISM_CENTROID_FMT_HALF	  = 2,
 	/*
 	 * FASTSCAN: same RaBitQ codes as the RABITQ format, but rearranged
 	 * into 32-vector groups with kPerm0 interleaving so the centroid
-	 * scoring path can use mkt_fastscan_accumulate instead of the
-	 * per-vector mkt_rabitq_inner_product_multi kernel.
+	 * scoring path can use vs_fastscan_accumulate instead of the
+	 * per-vector vs_rabitq_inner_product_multi kernel.
 	 *
 	 * Group section layout (per 32 entries):
 	 *   BlockNumber child_blkno[32]      128 B
@@ -97,7 +97,7 @@ typedef enum PrismCentroidFormat
 	 * used at build time. Final group may be partial; unused slots
 	 * have child_blkno = InvalidBlockNumber and zero-padded codes.
 	 */
-	MKT_CENTROID_FMT_FASTSCAN = 3,
+	PRISM_CENTROID_FMT_FASTSCAN = 3,
 } PrismCentroidFormat;
 
 /* ----------------------------------------------------------------
@@ -150,19 +150,19 @@ prism_centroid_data_size(Dimension dim, PrismCentroidFormat fmt)
 {
 	switch (fmt)
 	{
-	case MKT_CENTROID_FMT_FLOAT:
+	case PRISM_CENTROID_FMT_FLOAT:
 		return dim * sizeof(float);
-	case MKT_CENTROID_FMT_HALF:
+	case PRISM_CENTROID_FMT_HALF:
 		return dim * sizeof(half);
-	case MKT_CENTROID_FMT_FASTSCAN:
+	case PRISM_CENTROID_FMT_FASTSCAN:
 		/* Average per-entry overhead inside a fastscan group. Used
 		 * only by the legacy "data_size × N" capacity check; the
 		 * real layout is group-based — see prism_centroid_fastscan_*. */
-		return (uint32_t)(MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
-						  MKT_FASTSCAN_GROUP_BYTES(dim)) /
-			   MKT_FASTSCAN_GROUP;
+		return (uint32_t)(VS_FASTSCAN_GROUP * 3 * sizeof(float) +
+						  VS_FASTSCAN_GROUP_BYTES(dim)) /
+			   VS_FASTSCAN_GROUP;
 	default:
-		return MKT_RABITQ_DATA_SIZE(dim);
+		return VS_RABITQ_DATA_SIZE(dim);
 	}
 }
 
@@ -192,16 +192,16 @@ prism_centroid_leaf_entry_bytes_fmt(Dimension dim, PrismCentroidFormat fmt)
 static inline uint32_t
 prism_centroid_max_entries_fmt(Dimension dim, PrismCentroidFormat fmt)
 {
-	if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+	if (fmt == PRISM_CENTROID_FMT_FASTSCAN)
 	{
 		/* fastscan stores entries in 32-vector groups; max_entries is
 		 * ngroups * 32. See prism_centroid_fastscan_group_bytes. */
 		uint32_t group_bytes =
-				(uint32_t)(MKT_FASTSCAN_GROUP * sizeof(BlockNumber) +
-						   MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
-						   MKT_FASTSCAN_GROUP_BYTES(dim));
+				(uint32_t)(VS_FASTSCAN_GROUP * sizeof(BlockNumber) +
+						   VS_FASTSCAN_GROUP * 3 * sizeof(float) +
+						   VS_FASTSCAN_GROUP_BYTES(dim));
 		uint32_t ngroups = (uint32_t)PRISM_CENTROID_PAGE_USABLE / group_bytes;
-		return ngroups * MKT_FASTSCAN_GROUP;
+		return ngroups * VS_FASTSCAN_GROUP;
 	}
 	return (uint32_t)(PRISM_CENTROID_PAGE_USABLE /
 					  prism_centroid_entry_bytes_fmt(dim, fmt));
@@ -235,9 +235,9 @@ prism_centroid_max_entries_fmt(Dimension dim, PrismCentroidFormat fmt)
 static inline uint32_t
 prism_centroid_fastscan_group_bytes(Dimension dim)
 {
-	return (uint32_t)(MKT_FASTSCAN_GROUP * sizeof(BlockNumber) +
-					  MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
-					  MKT_FASTSCAN_GROUP_BYTES(dim));
+	return (uint32_t)(VS_FASTSCAN_GROUP * sizeof(BlockNumber) +
+					  VS_FASTSCAN_GROUP * 3 * sizeof(float) +
+					  VS_FASTSCAN_GROUP_BYTES(dim));
 }
 
 static inline uint32_t
@@ -264,7 +264,7 @@ static inline float *
 prism_centroid_fastscan_group_f_add(char *content, uint32_t g, Dimension dim)
 {
 	return (float *)(prism_centroid_fastscan_group_base(content, g, dim) +
-					 MKT_FASTSCAN_GROUP * sizeof(BlockNumber));
+					 VS_FASTSCAN_GROUP * sizeof(BlockNumber));
 }
 
 static inline float *
@@ -272,21 +272,21 @@ prism_centroid_fastscan_group_f_rescale(
 		char *content, uint32_t g, Dimension dim)
 {
 	return prism_centroid_fastscan_group_f_add(content, g, dim) +
-		   MKT_FASTSCAN_GROUP;
+		   VS_FASTSCAN_GROUP;
 }
 
 static inline float *
 prism_centroid_fastscan_group_f_error(char *content, uint32_t g, Dimension dim)
 {
 	return prism_centroid_fastscan_group_f_rescale(content, g, dim) +
-		   MKT_FASTSCAN_GROUP;
+		   VS_FASTSCAN_GROUP;
 }
 
 static inline uint8_t *
 prism_centroid_fastscan_group_codes(char *content, uint32_t g, Dimension dim)
 {
 	return (uint8_t *)(prism_centroid_fastscan_group_f_error(content, g, dim) +
-					   MKT_FASTSCAN_GROUP);
+					   VS_FASTSCAN_GROUP);
 }
 
 /* Maximum entries per leaf page (includes pt_centroid per entry) */
@@ -301,13 +301,13 @@ prism_centroid_max_leaf_entries_fmt(Dimension dim, PrismCentroidFormat fmt)
 static inline uint32_t
 prism_centroid_entry_bytes(Dimension dim)
 {
-	return prism_centroid_entry_bytes_fmt(dim, MKT_CENTROID_FMT_RABITQ);
+	return prism_centroid_entry_bytes_fmt(dim, PRISM_CENTROID_FMT_RABITQ);
 }
 
 static inline uint32_t
 prism_centroid_max_entries(Dimension dim)
 {
-	return prism_centroid_max_entries_fmt(dim, MKT_CENTROID_FMT_RABITQ);
+	return prism_centroid_max_entries_fmt(dim, PRISM_CENTROID_FMT_RABITQ);
 }
 
 /* ----------------------------------------------------------------
@@ -410,7 +410,7 @@ void prism_centroid_page_init_fmt(
 static inline void
 prism_centroid_page_init(Page page, uint8_t level)
 {
-	prism_centroid_page_init_fmt(page, level, MKT_CENTROID_FMT_RABITQ);
+	prism_centroid_page_init_fmt(page, level, PRISM_CENTROID_FMT_RABITQ);
 }
 
 /*

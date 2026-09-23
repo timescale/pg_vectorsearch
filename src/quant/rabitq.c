@@ -12,7 +12,7 @@
  * This is optimized with AVX2/AVX-512/NEON intrinsics.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <math.h>
 #include <stdatomic.h>
@@ -37,7 +37,7 @@
  * explicit mask expansion that compilers can optimize.
  */
 
-MKT_TARGET_CLONES static float
+VS_TARGET_CLONES static float
 rabitq_inner_product_compiler(
 		const float *transformed, const uint8_t *bits, Dimension dim)
 {
@@ -83,7 +83,7 @@ rabitq_inner_product_compiler(
  * Simple loop calling the single-candidate function. This is the
  * baseline that hand-optimized vertical SIMD kernels must beat.
  */
-MKT_TARGET_CLONES static void
+VS_TARGET_CLONES static void
 rabitq_inner_product_multi_compiler(
 		const float	  *transformed,
 		const uint8_t *bits,
@@ -122,13 +122,13 @@ static HammingMultiFn g_hamming_multi_fn  = NULL;
 static const char	 *g_hamming_impl_name = NULL;
 
 /* Forward declaration for compiler-vectorized fallback */
-MKT_TARGET_CLONES static void rabitq_extract_signs_compiler(
+VS_TARGET_CLONES static void rabitq_extract_signs_compiler(
 		const float *transformed, uint8_t *bits, Dimension dim);
 
 /* Forward declarations for compiler-vectorized hamming */
-MKT_TARGET_CLONES static uint32_t rabitq_hamming_compiler(
+VS_TARGET_CLONES static uint32_t rabitq_hamming_compiler(
 		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes);
-MKT_TARGET_CLONES static void rabitq_hamming_multi_compiler(
+VS_TARGET_CLONES static void rabitq_hamming_multi_compiler(
 		const uint8_t *query_bits,
 		const uint8_t *data_bits,
 		uint32_t	   stride,
@@ -137,7 +137,7 @@ MKT_TARGET_CLONES static void rabitq_hamming_multi_compiler(
 		uint32_t	  *results);
 
 void
-mkt_rabitq_force_reinit(void)
+vs_rabitq_force_reinit(void)
 {
 	g_rabitq_initialized	 = false;
 	g_inner_product_fn		 = NULL;
@@ -150,27 +150,27 @@ mkt_rabitq_force_reinit(void)
 }
 
 int
-mkt_rabitq_init_simd(void)
+vs_rabitq_init_simd(void)
 {
 	if (g_rabitq_initialized)
 		return 0;
 
-#ifdef MKT_SIMD_FULL
-	SimdCapability caps = mkt_detect_simd();
+#ifdef VS_SIMD_FULL
+	SimdCapability caps = vs_detect_simd();
 
 #if defined(__x86_64__) || defined(_M_X64)
-	if ((caps & MKT_SIMD_AVX512_DQ) == MKT_SIMD_AVX512_DQ)
+	if ((caps & VS_SIMD_AVX512_DQ) == VS_SIMD_AVX512_DQ)
 	{
-		g_inner_product_fn		 = mkt_rabitq_inner_product_avx512;
-		g_inner_product_multi_fn = mkt_rabitq_inner_product_multi_avx512;
-		g_extract_signs_fn		 = mkt_rabitq_extract_signs_avx512;
+		g_inner_product_fn		 = vs_rabitq_inner_product_avx512;
+		g_inner_product_multi_fn = vs_rabitq_inner_product_multi_avx512;
+		g_extract_signs_fn		 = vs_rabitq_extract_signs_avx512;
 		g_impl_name				 = "avx512";
 	}
 	else if (caps & SIMD_AVX2)
 	{
-		g_inner_product_fn		 = mkt_rabitq_inner_product_avx2;
-		g_inner_product_multi_fn = mkt_rabitq_inner_product_multi_avx2;
-		g_extract_signs_fn		 = mkt_rabitq_extract_signs_avx2;
+		g_inner_product_fn		 = vs_rabitq_inner_product_avx2;
+		g_inner_product_multi_fn = vs_rabitq_inner_product_multi_avx2;
+		g_extract_signs_fn		 = vs_rabitq_extract_signs_avx2;
 		g_impl_name				 = "avx2";
 	}
 	else
@@ -183,9 +183,9 @@ mkt_rabitq_init_simd(void)
 #elif defined(__aarch64__) || defined(_M_ARM64)
 	if (caps & SIMD_NEON)
 	{
-		g_inner_product_fn		 = mkt_rabitq_inner_product_neon;
-		g_inner_product_multi_fn = mkt_rabitq_inner_product_multi_neon;
-		g_extract_signs_fn		 = mkt_rabitq_extract_signs_neon;
+		g_inner_product_fn		 = vs_rabitq_inner_product_neon;
+		g_inner_product_multi_fn = vs_rabitq_inner_product_multi_neon;
+		g_extract_signs_fn		 = vs_rabitq_extract_signs_neon;
 		g_impl_name				 = "neon";
 	}
 	else
@@ -206,14 +206,14 @@ mkt_rabitq_init_simd(void)
 #if defined(__x86_64__) || defined(_M_X64)
 	if (caps & SIMD_AVX512_VPOPCNTDQ)
 	{
-		g_hamming_fn		= mkt_rabitq_hamming_avx512;
-		g_hamming_multi_fn	= mkt_rabitq_hamming_multi_avx512;
+		g_hamming_fn		= vs_rabitq_hamming_avx512;
+		g_hamming_multi_fn	= vs_rabitq_hamming_multi_avx512;
 		g_hamming_impl_name = "avx512-vpopcntdq";
 	}
 	else if (caps & SIMD_AVX2)
 	{
-		g_hamming_fn		= mkt_rabitq_hamming_avx2;
-		g_hamming_multi_fn	= mkt_rabitq_hamming_multi_avx2;
+		g_hamming_fn		= vs_rabitq_hamming_avx2;
+		g_hamming_multi_fn	= vs_rabitq_hamming_multi_avx2;
 		g_hamming_impl_name = "avx2";
 	}
 	else
@@ -248,18 +248,18 @@ mkt_rabitq_init_simd(void)
 }
 
 const char *
-mkt_rabitq_impl_name(void)
+vs_rabitq_impl_name(void)
 {
-	if (mkt_unlikely(!g_rabitq_initialized))
-		mkt_rabitq_init_simd();
+	if (vs_unlikely(!g_rabitq_initialized))
+		vs_rabitq_init_simd();
 	return g_impl_name;
 }
 
 const char *
-mkt_rabitq_hamming_impl_name(void)
+vs_rabitq_hamming_impl_name(void)
 {
-	if (mkt_unlikely(!g_rabitq_initialized))
-		mkt_rabitq_init_simd();
+	if (vs_unlikely(!g_rabitq_initialized))
+		vs_rabitq_init_simd();
 	return g_hamming_impl_name;
 }
 
@@ -270,8 +270,8 @@ static inline float
 rabitq_inner_product(
 		const float *transformed, const uint8_t *bits, Dimension dim)
 {
-	if (mkt_unlikely(!g_rabitq_initialized))
-		mkt_rabitq_init_simd();
+	if (vs_unlikely(!g_rabitq_initialized))
+		vs_rabitq_init_simd();
 	return g_inner_product_fn(transformed, bits, dim);
 }
 
@@ -282,7 +282,7 @@ rabitq_inner_product(
  * auto-vectorization by processing 8 floats at a time with explicit comparison
  * and bit packing.
  */
-MKT_TARGET_CLONES static void
+VS_TARGET_CLONES static void
 rabitq_extract_signs_compiler(
 		const float *transformed, uint8_t *bits, Dimension dim)
 {
@@ -322,8 +322,8 @@ rabitq_extract_signs_compiler(
 static inline void
 rabitq_extract_signs(const float *transformed, uint8_t *bits, Dimension dim)
 {
-	if (mkt_unlikely(!g_rabitq_initialized))
-		mkt_rabitq_init_simd();
+	if (vs_unlikely(!g_rabitq_initialized))
+		vs_rabitq_init_simd();
 	g_extract_signs_fn(transformed, bits, dim);
 }
 
@@ -347,10 +347,10 @@ rabitq_derive_f_error(
 }
 
 float
-mkt_rabitq_derive_f_error(float f_add, float f_rescale, Dimension dim)
+vs_rabitq_derive_f_error(float f_add, float f_rescale, Dimension dim)
 {
 	float c_error = (dim > 1)
-						  ? 2.0f * MKT_RABITQ_EPSILON / sqrtf((float)(dim - 1))
+						  ? 2.0f * VS_RABITQ_EPSILON / sqrtf((float)(dim - 1))
 						  : 0.0f;
 	return rabitq_derive_f_error(f_add, f_rescale, c_error, dim);
 }
@@ -370,7 +370,7 @@ rabitq_lower_bound(
  * Computes XOR + popcount between two packed bit vectors.
  * Uses target_clones to generate multiple versions for different ISAs.
  */
-MKT_TARGET_CLONES static uint32_t
+VS_TARGET_CLONES static uint32_t
 rabitq_hamming_compiler(
 		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes)
 {
@@ -396,7 +396,7 @@ rabitq_hamming_compiler(
 /*
  * Compiler-Vectorized Multi-Candidate Hamming Distance
  */
-MKT_TARGET_CLONES static void
+VS_TARGET_CLONES static void
 rabitq_hamming_multi_compiler(
 		const uint8_t *query_bits,
 		const uint8_t *data_bits,
@@ -424,22 +424,22 @@ static inline void
 rabitq_rotate(const RaBitQParams *p, const float *in, float *out)
 {
 	if (p->use_fast_rotate)
-		mkt_fast_rotate_apply(&p->fr, in, out);
+		vs_fast_rotate_apply(&p->fr, in, out);
 	else
-		mkt_matrix_transpose_vector_mul(p->P, in, out, p->dim);
+		vs_matrix_transpose_vector_mul(p->P, in, out, p->dim);
 }
 
 RaBitQParams *
-mkt_rabitq_create(Dimension dim, uint64_t seed)
+vs_rabitq_create(Dimension dim, uint64_t seed)
 {
-	size_t		  size	 = MKT_RABITQ_PARAMS_SIZE(dim);
-	RaBitQParams *params = mkt_alloc(size);
+	size_t		  size	 = VS_RABITQ_PARAMS_SIZE(dim);
+	RaBitQParams *params = vs_alloc(size);
 	if (params == NULL)
 		return NULL;
 
-	if (mkt_rabitq_init(params, dim, seed) != 0)
+	if (vs_rabitq_init(params, dim, seed) != 0)
 	{
-		mkt_free(params);
+		vs_free(params);
 		return NULL;
 	}
 
@@ -447,17 +447,17 @@ mkt_rabitq_create(Dimension dim, uint64_t seed)
 }
 
 RaBitQParams *
-mkt_rabitq_create_from_matrix(Dimension dim, uint64_t seed, const float *P)
+vs_rabitq_create_from_matrix(Dimension dim, uint64_t seed, const float *P)
 {
 	/* Stores an explicit dense matrix, so always allocate the full layout. */
-	size_t		  size	 = MKT_RABITQ_PARAMS_DENSE_SIZE(dim);
-	RaBitQParams *params = mkt_alloc(size);
+	size_t		  size	 = VS_RABITQ_PARAMS_DENSE_SIZE(dim);
+	RaBitQParams *params = vs_alloc(size);
 	if (params == NULL)
 		return NULL;
 
 	params->dim				= dim;
 	params->seed			= seed;
-	params->packed_bytes	= MKT_RABITQ_BYTES(dim);
+	params->packed_bytes	= VS_RABITQ_BYTES(dim);
 	params->use_fast_rotate = false;
 	memcpy(params->P, P, (size_t)dim * dim * sizeof(float));
 
@@ -465,14 +465,14 @@ mkt_rabitq_create_from_matrix(Dimension dim, uint64_t seed, const float *P)
 }
 
 int
-mkt_rabitq_init(RaBitQParams *params, Dimension dim, uint64_t seed)
+vs_rabitq_init(RaBitQParams *params, Dimension dim, uint64_t seed)
 {
 	if (params == NULL || dim == 0)
 		return -1;
 
 	params->dim			 = dim;
 	params->seed		 = seed;
-	params->packed_bytes = MKT_RABITQ_BYTES(dim);
+	params->packed_bytes = VS_RABITQ_BYTES(dim);
 
 	/*
 	 * Prefer the O(d log d) Randomized Hadamard rotation where the dim
@@ -481,29 +481,29 @@ mkt_rabitq_init(RaBitQParams *params, Dimension dim, uint64_t seed)
 	 * query-rotate stay consistent. Unsupported dims fall back to the
 	 * dense random orthogonal matrix in P[].
 	 */
-	params->use_fast_rotate = mkt_fast_rotate_supported(dim);
+	params->use_fast_rotate = vs_fast_rotate_supported(dim);
 	if (params->use_fast_rotate)
-		mkt_fast_rotate_init(&params->fr, dim, seed);
-	else if (mkt_random_orthogonal_matrix(params->P, dim, seed) != 0)
+		vs_fast_rotate_init(&params->fr, dim, seed);
+	else if (vs_random_orthogonal_matrix(params->P, dim, seed) != 0)
 		return -1;
 
 	return 0;
 }
 
 void
-mkt_rabitq_cleanup(RaBitQParams *params)
+vs_rabitq_cleanup(RaBitQParams *params)
 {
 	(void)params;
 	/* P is now inline — nothing to free */
 }
 
 void
-mkt_rabitq_destroy(RaBitQParams *params)
+vs_rabitq_destroy(RaBitQParams *params)
 {
 	if (params == NULL)
 		return;
 
-	mkt_free(params);
+	vs_free(params);
 }
 
 /*
@@ -511,8 +511,7 @@ mkt_rabitq_destroy(RaBitQParams *params)
  */
 
 RaBitQData *
-mkt_rabitq_encode(
-		const RaBitQParams *params, Vec32Ref input, Vec32Ref centroid)
+vs_rabitq_encode(const RaBitQParams *params, Vec32Ref input, Vec32Ref centroid)
 {
 	if (params == NULL || input.data == NULL || centroid.data == NULL)
 		return NULL;
@@ -520,14 +519,14 @@ mkt_rabitq_encode(
 	if (input.dim != params->dim || centroid.dim != params->dim)
 		return NULL;
 
-	size_t		size   = MKT_RABITQ_DATA_SIZE(params->dim);
-	RaBitQData *output = mkt_alloc(size);
+	size_t		size   = VS_RABITQ_DATA_SIZE(params->dim);
+	RaBitQData *output = vs_alloc(size);
 	if (output == NULL)
 		return NULL;
 
-	if (mkt_rabitq_encode_into(params, input, centroid, output) != 0)
+	if (vs_rabitq_encode_into(params, input, centroid, output) != 0)
 	{
-		mkt_free(output);
+		vs_free(output);
 		return NULL;
 	}
 
@@ -535,26 +534,26 @@ mkt_rabitq_encode(
 }
 
 void
-mkt_rabitq_scratch_init(RaBitQScratch *scratch, Dimension dim)
+vs_rabitq_scratch_init(RaBitQScratch *scratch, Dimension dim)
 {
-	scratch->residual	 = mkt_alloc_aligned(dim * sizeof(float), 64);
-	scratch->transformed = mkt_alloc_aligned(dim * sizeof(float), 64);
-	scratch->xu_cb		 = mkt_alloc_aligned(dim * sizeof(float), 64);
+	scratch->residual	 = vs_alloc_aligned(dim * sizeof(float), 64);
+	scratch->transformed = vs_alloc_aligned(dim * sizeof(float), 64);
+	scratch->xu_cb		 = vs_alloc_aligned(dim * sizeof(float), 64);
 }
 
 void
-mkt_rabitq_scratch_cleanup(RaBitQScratch *scratch)
+vs_rabitq_scratch_cleanup(RaBitQScratch *scratch)
 {
-	mkt_free_aligned(scratch->residual);
-	mkt_free_aligned(scratch->transformed);
-	mkt_free_aligned(scratch->xu_cb);
+	vs_free_aligned(scratch->residual);
+	vs_free_aligned(scratch->transformed);
+	vs_free_aligned(scratch->xu_cb);
 	scratch->residual	 = NULL;
 	scratch->transformed = NULL;
 	scratch->xu_cb		 = NULL;
 }
 
 int
-mkt_rabitq_encode_into_ex(
+vs_rabitq_encode_into_ex(
 		const RaBitQParams *params,
 		Vec32Ref			input,
 		Vec32Ref			centroid,
@@ -579,11 +578,11 @@ mkt_rabitq_encode_into_ex(
 	vec32_sub(input.data, centroid.data, residual, dim);
 	rabitq_rotate(params, residual, transformed);
 
-	return mkt_rabitq_encode_from_pt(params, transformed, output, scratch);
+	return vs_rabitq_encode_from_pt(params, transformed, output, scratch);
 }
 
 int
-mkt_rabitq_encode_from_pt(
+vs_rabitq_encode_from_pt(
 		const RaBitQParams *params,
 		const float		   *pt_residual,
 		RaBitQData		   *output,
@@ -609,8 +608,8 @@ mkt_rabitq_encode_from_pt(
 		xu_cb[i]	 = (float)bit + cb;
 	}
 
-	float l2_sqr	   = mkt_l2_norm_squared(pt_residual, dim);
-	float ip_resi_xucb = mkt_dot_product(pt_residual, xu_cb, dim);
+	float l2_sqr	   = vs_l2_norm_squared(pt_residual, dim);
+	float ip_resi_xucb = vs_dot_product(pt_residual, xu_cb, dim);
 
 	if (fabsf(ip_resi_xucb) < 1e-10f)
 		ip_resi_xucb = 1e-10f;
@@ -624,7 +623,7 @@ mkt_rabitq_encode_from_pt(
 }
 
 int
-mkt_rabitq_encode_into(
+vs_rabitq_encode_into(
 		const RaBitQParams *params,
 		Vec32Ref			input,
 		Vec32Ref			centroid,
@@ -640,18 +639,18 @@ mkt_rabitq_encode_into(
 	Dimension dim = params->dim;
 
 	/* Allocate temporary buffers */
-	float *residual	   = mkt_alloc_aligned(dim * sizeof(float), 64);
-	float *transformed = mkt_alloc_aligned(dim * sizeof(float), 64);
-	float *xu_cb	   = mkt_alloc_aligned(dim * sizeof(float), 64);
+	float *residual	   = vs_alloc_aligned(dim * sizeof(float), 64);
+	float *transformed = vs_alloc_aligned(dim * sizeof(float), 64);
+	float *xu_cb	   = vs_alloc_aligned(dim * sizeof(float), 64);
 
 	if (residual == NULL || transformed == NULL || xu_cb == NULL)
 	{
 		if (residual)
-			mkt_free_aligned(residual);
+			vs_free_aligned(residual);
 		if (transformed)
-			mkt_free_aligned(transformed);
+			vs_free_aligned(transformed);
 		if (xu_cb)
-			mkt_free_aligned(xu_cb);
+			vs_free_aligned(xu_cb);
 		return -1;
 	}
 
@@ -682,9 +681,9 @@ mkt_rabitq_encode_into(
 	}
 
 	/* Step 5: Compute factors for distance estimation */
-	float l2_sqr = mkt_l2_norm_squared(transformed, dim);
+	float l2_sqr = vs_l2_norm_squared(transformed, dim);
 
-	float ip_resi_xucb = mkt_dot_product(transformed, xu_cb, dim);
+	float ip_resi_xucb = vs_dot_product(transformed, xu_cb, dim);
 
 	/* Handle corner case: avoid division by near-zero in f_rescale */
 	if (fabsf(ip_resi_xucb) < 1e-10f)
@@ -711,9 +710,9 @@ mkt_rabitq_encode_into(
 	output->f_rescale = l2_sqr * sqrt_d / l1_norm; /* dp_multiplier */
 
 	/* Cleanup */
-	mkt_free_aligned(residual);
-	mkt_free_aligned(transformed);
-	mkt_free_aligned(xu_cb);
+	vs_free_aligned(residual);
+	vs_free_aligned(transformed);
+	vs_free_aligned(xu_cb);
 
 	return 0;
 }
@@ -722,7 +721,7 @@ mkt_rabitq_encode_into(
  * Batch encode implementation — always_inline so that the specialized
  * wrappers below pass a static const Vec32TypeOps from the header,
  * enabling the compiler to inline through every vtable function pointer.
- * MKT_TARGET_CLONES on the wrappers generates AVX2/AVX-512 variants.
+ * VS_TARGET_CLONES on the wrappers generates AVX2/AVX-512 variants.
  *
  * For f32 input, to_float_block returns the input pointer (zero-copy).
  * For f16, it bulk-converts all vectors in one SIMD-dispatched call.
@@ -746,25 +745,25 @@ rabitq_encode_batch_impl(
 	/* Bulk-convert to f32 if needed. For f32, returns input pointer
 	 * (zero-copy). For f16, converts into conv_buf via SIMD. */
 	float *conv_buf =
-			mkt_alloc_aligned((size_t)count * dim * sizeof(float), 64);
+			vs_alloc_aligned((size_t)count * dim * sizeof(float), 64);
 	const float *fvecs = ops->to_float_block(vectors, conv_buf, count, dim);
 
 	/* Allocate batch buffers */
 	float *residuals =
-			mkt_alloc_aligned((size_t)count * dim * sizeof(float), 64);
+			vs_alloc_aligned((size_t)count * dim * sizeof(float), 64);
 	float *transformed =
-			mkt_alloc_aligned((size_t)count * dim * sizeof(float), 64);
-	float *cent_rotated = mkt_alloc_aligned(dim * sizeof(float), 64);
+			vs_alloc_aligned((size_t)count * dim * sizeof(float), 64);
+	float *cent_rotated = vs_alloc_aligned(dim * sizeof(float), 64);
 
 	if (residuals == NULL || transformed == NULL || cent_rotated == NULL)
 	{
 		if (residuals)
-			mkt_free_aligned(residuals);
+			vs_free_aligned(residuals);
 		if (transformed)
-			mkt_free_aligned(transformed);
+			vs_free_aligned(transformed);
 		if (cent_rotated)
-			mkt_free_aligned(cent_rotated);
-		mkt_free_aligned(conv_buf);
+			vs_free_aligned(cent_rotated);
+		vs_free_aligned(conv_buf);
 		return -1;
 	}
 
@@ -782,12 +781,12 @@ rabitq_encode_batch_impl(
 	 */
 	if (params->use_fast_rotate)
 		for (uint16_t i = 0; i < count; i++)
-			mkt_fast_rotate_apply(
+			vs_fast_rotate_apply(
 					&params->fr,
 					residuals + (size_t)i * dim,
 					transformed + (size_t)i * dim);
 	else
-		mkt_matrix_transpose_vector_mul_batch(
+		vs_matrix_transpose_vector_mul_batch(
 				params->P, residuals, transformed, count, dim);
 
 	/* Step 3: Rotate centroid once (shared across all vectors) */
@@ -838,17 +837,17 @@ rabitq_encode_batch_impl(
 	}
 
 	/* Cleanup */
-	mkt_free_aligned(residuals);
-	mkt_free_aligned(transformed);
-	mkt_free_aligned(cent_rotated);
-	mkt_free_aligned(conv_buf);
+	vs_free_aligned(residuals);
+	vs_free_aligned(transformed);
+	vs_free_aligned(cent_rotated);
+	vs_free_aligned(conv_buf);
 
 	return 0;
 }
 
-/* Specialized wrappers — MKT_TARGET_CLONES generates SIMD variants */
+/* Specialized wrappers — VS_TARGET_CLONES generates SIMD variants */
 
-MKT_TARGET_CLONES static int
+VS_TARGET_CLONES static int
 rabitq_encode_batch_f32(
 		const RaBitQParams *params,
 		const void		   *vectors,
@@ -866,10 +865,10 @@ rabitq_encode_batch_f32(
 			f_rescale,
 			bits,
 			count,
-			&mkt_f32_type_ops);
+			&vs_f32_type_ops);
 }
 
-MKT_TARGET_CLONES static int
+VS_TARGET_CLONES static int
 rabitq_encode_batch_f16(
 		const RaBitQParams *params,
 		const void		   *vectors,
@@ -887,11 +886,11 @@ rabitq_encode_batch_f16(
 			f_rescale,
 			bits,
 			count,
-			&mkt_f16_type_ops);
+			&vs_f16_type_ops);
 }
 
-#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
-MKT_TARGET_F16C_AVX2 static int
+#if defined(VS_F16C_SUPPORT) && !defined(VS_SIMD_NONE)
+VS_TARGET_F16C_AVX2 static int
 rabitq_encode_batch_f16c(
 		const RaBitQParams *params,
 		const void		   *vectors,
@@ -909,12 +908,12 @@ rabitq_encode_batch_f16c(
 			f_rescale,
 			bits,
 			count,
-			&mkt_f16c_type_ops);
+			&vs_f16c_type_ops);
 }
 #endif
 
 int
-mkt_rabitq_encode_batch(
+vs_rabitq_encode_batch(
 		const RaBitQParams *params,
 		const void		   *vectors,
 		VecType				vec_type,
@@ -934,11 +933,11 @@ mkt_rabitq_encode_batch(
 	/* Single dispatch point — selects the inline vtable once */
 	switch (vec_type)
 	{
-	case MKT_VEC_F32:
+	case VS_VEC_F32:
 		return rabitq_encode_batch_f32(
 				params, vectors, centroid, f_add, f_rescale, bits, count);
-#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
-	case MKT_VEC_F16C:
+#if defined(VS_F16C_SUPPORT) && !defined(VS_SIMD_NONE)
+	case VS_VEC_F16C:
 		return rabitq_encode_batch_f16c(
 				params, vectors, centroid, f_add, f_rescale, bits, count);
 #endif
@@ -953,27 +952,27 @@ mkt_rabitq_encode_batch(
  */
 
 RaBitQBatch *
-mkt_rabitq_batch_create(uint16_t count, Dimension dim)
+vs_rabitq_batch_create(uint16_t count, Dimension dim)
 {
 	if (count == 0 || dim == 0)
 		return NULL;
 
-	RaBitQBatch *batch = mkt_alloc(sizeof(RaBitQBatch));
+	RaBitQBatch *batch = vs_alloc(sizeof(RaBitQBatch));
 	if (batch == NULL)
 		return NULL;
 
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
 
 	batch->count		= count;
 	batch->packed_bytes = (uint16_t)packed_bytes;
-	batch->f_add		= mkt_alloc(count * sizeof(float));
-	batch->f_rescale	= mkt_alloc(count * sizeof(float));
-	batch->bits			= mkt_alloc((size_t)count * packed_bytes);
+	batch->f_add		= vs_alloc(count * sizeof(float));
+	batch->f_rescale	= vs_alloc(count * sizeof(float));
+	batch->bits			= vs_alloc((size_t)count * packed_bytes);
 
 	if (batch->f_add == NULL || batch->f_rescale == NULL ||
 		batch->bits == NULL)
 	{
-		mkt_rabitq_batch_destroy(batch);
+		vs_rabitq_batch_destroy(batch);
 		return NULL;
 	}
 
@@ -981,22 +980,22 @@ mkt_rabitq_batch_create(uint16_t count, Dimension dim)
 }
 
 void
-mkt_rabitq_batch_destroy(RaBitQBatch *batch)
+vs_rabitq_batch_destroy(RaBitQBatch *batch)
 {
 	if (batch == NULL)
 		return;
 
 	if (batch->f_add)
-		mkt_free(batch->f_add);
+		vs_free(batch->f_add);
 	if (batch->f_rescale)
-		mkt_free(batch->f_rescale);
+		vs_free(batch->f_rescale);
 	if (batch->bits)
-		mkt_free(batch->bits);
-	mkt_free(batch);
+		vs_free(batch->bits);
+	vs_free(batch);
 }
 
 RaBitQBatch *
-mkt_rabitq_encode_batch_alloc(
+vs_rabitq_encode_batch_alloc(
 		const RaBitQParams *params,
 		const void		   *vectors,
 		VecType				vec_type,
@@ -1007,11 +1006,11 @@ mkt_rabitq_encode_batch_alloc(
 		count == 0)
 		return NULL;
 
-	RaBitQBatch *batch = mkt_rabitq_batch_create(count, params->dim);
+	RaBitQBatch *batch = vs_rabitq_batch_create(count, params->dim);
 	if (batch == NULL)
 		return NULL;
 
-	if (mkt_rabitq_encode_batch(
+	if (vs_rabitq_encode_batch(
 				params,
 				vectors,
 				vec_type,
@@ -1021,7 +1020,7 @@ mkt_rabitq_encode_batch_alloc(
 				batch->bits,
 				count) != 0)
 	{
-		mkt_rabitq_batch_destroy(batch);
+		vs_rabitq_batch_destroy(batch);
 		return NULL;
 	}
 
@@ -1033,11 +1032,11 @@ mkt_rabitq_encode_batch_alloc(
  */
 
 RaBitQQueryState *
-mkt_rabitq_prepare_query_ex(
+vs_rabitq_prepare_query_ex(
 		const RaBitQParams *params,
 		Vec32Ref			query,
 		Vec32Ref			centroid,
-		MktDistanceMode		mode)
+		VsDistanceMode		mode)
 {
 	if (params == NULL || query.data == NULL || centroid.data == NULL)
 		return NULL;
@@ -1047,25 +1046,25 @@ mkt_rabitq_prepare_query_ex(
 
 	Dimension dim = params->dim;
 
-	RaBitQQueryState *state = mkt_alloc(sizeof(RaBitQQueryState));
+	RaBitQQueryState *state = vs_alloc(sizeof(RaBitQQueryState));
 	if (state == NULL)
 		return NULL;
 
-	state->transformed = mkt_alloc_aligned(dim * sizeof(float), 64);
+	state->transformed = vs_alloc_aligned(dim * sizeof(float), 64);
 	if (state->transformed == NULL)
 	{
-		mkt_free(state);
+		vs_free(state);
 		return NULL;
 	}
 
 	state->dim = dim;
 
 	/* Compute residual = query - centroid */
-	float *residual = mkt_alloc_aligned(dim * sizeof(float), 64);
+	float *residual = vs_alloc_aligned(dim * sizeof(float), 64);
 	if (residual == NULL)
 	{
-		mkt_free_aligned(state->transformed);
-		mkt_free(state);
+		vs_free_aligned(state->transformed);
+		vs_free(state);
 		return NULL;
 	}
 
@@ -1075,7 +1074,7 @@ mkt_rabitq_prepare_query_ex(
 	rabitq_rotate(params, residual, state->transformed);
 
 	/* Compute g_add = ||query - centroid||^2 */
-	state->g_add = mkt_l2_norm_squared(state->transformed, dim);
+	state->g_add = vs_l2_norm_squared(state->transformed, dim);
 
 	/* Compute g_error = sqrt(g_add) for error bound */
 	state->g_error = sqrtf(state->g_add);
@@ -1089,18 +1088,18 @@ mkt_rabitq_prepare_query_ex(
 	/* Precompute C_error = 2*ε/√(d-1) for deriving f_error from compact
 	 * data */
 	if (dim > 1)
-		state->c_error = 2.0f * MKT_RABITQ_EPSILON / sqrtf((float)(dim - 1));
+		state->c_error = 2.0f * VS_RABITQ_EPSILON / sqrtf((float)(dim - 1));
 	else
 		state->c_error = 0.0f;
 
 	/* Compute symmetric search fields: query sign bits and g_scale */
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
-	state->query_bits	  = mkt_alloc_aligned(packed_bytes, 64);
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
+	state->query_bits	  = vs_alloc_aligned(packed_bytes, 64);
 	if (state->query_bits == NULL)
 	{
-		mkt_free_aligned(state->transformed);
-		mkt_free_aligned(residual);
-		mkt_free(state);
+		vs_free_aligned(state->transformed);
+		vs_free_aligned(residual);
+		vs_free(state);
 		return NULL;
 	}
 	rabitq_extract_signs(state->transformed, state->query_bits, dim);
@@ -1113,72 +1112,71 @@ mkt_rabitq_prepare_query_ex(
 
 	/* Set dispatch function pointers and error multiplier based on mode */
 	state->mode = mode;
-	if (mode == MKT_DISTANCE_MODE_SYMMETRIC)
+	if (mode == VS_DISTANCE_MODE_SYMMETRIC)
 	{
-		state->distance_fn = mkt_rabitq_distance_symmetric;
+		state->distance_fn = vs_rabitq_distance_symmetric;
 		state->distance_with_bound_fn =
-				mkt_rabitq_distance_symmetric_with_bound;
+				vs_rabitq_distance_symmetric_with_bound;
 		state->error_multiplier = 3.0f;
 	}
 	else
 	{
-		state->distance_fn			  = mkt_rabitq_distance;
-		state->distance_with_bound_fn = mkt_rabitq_distance_with_bound;
+		state->distance_fn			  = vs_rabitq_distance;
+		state->distance_with_bound_fn = vs_rabitq_distance_with_bound;
 		state->error_multiplier		  = 1.0f;
 	}
 
-	mkt_free_aligned(residual);
+	vs_free_aligned(residual);
 
 	return state;
 }
 
 RaBitQQueryState *
-mkt_rabitq_prepare_query(
+vs_rabitq_prepare_query(
 		const RaBitQParams *params, Vec32Ref query, Vec32Ref centroid)
 {
-	return mkt_rabitq_prepare_query_ex(
-			params, query, centroid, MKT_DISTANCE_MODE_ASYMMETRIC);
+	return vs_rabitq_prepare_query_ex(
+			params, query, centroid, VS_DISTANCE_MODE_ASYMMETRIC);
 }
 
 void
-mkt_rabitq_rotate(
-		const RaBitQParams *params, const float *input, float *output)
+vs_rabitq_rotate(const RaBitQParams *params, const float *input, float *output)
 {
 	rabitq_rotate(params, input, output);
 }
 
 void
-mkt_rabitq_init_query_constants(RaBitQQueryState *state, Dimension dim)
+vs_rabitq_init_query_constants(RaBitQQueryState *state, Dimension dim)
 {
 	state->dim		  = dim;
 	state->inv_sqrt_d = 1.0f / sqrtf((float)dim);
 	if (dim > 1)
-		state->c_error = 2.0f * MKT_RABITQ_EPSILON / sqrtf((float)(dim - 1));
+		state->c_error = 2.0f * VS_RABITQ_EPSILON / sqrtf((float)(dim - 1));
 	else
 		state->c_error = 0.0f;
 }
 
 void
-mkt_rabitq_init_query_state(
+vs_rabitq_init_query_state(
 		RaBitQQueryState *state,
 		const float		 *pt_query,
 		const float		 *pt_centroid,
 		Dimension		  dim,
-		MktDistanceMode	  mode)
+		VsDistanceMode	  mode)
 {
 	/* transformed = pt_query - pt_centroid (O(dim) vector subtraction) */
 	vec32_sub(pt_query, pt_centroid, state->transformed, dim);
 
 	/* Compute per-centroid scalar fields from transformed.
 	 * inv_sqrt_d and c_error are dim-dependent constants set once
-	 * via mkt_rabitq_init_query_constants(). */
-	state->g_add		   = mkt_l2_norm_squared(state->transformed, dim);
+	 * via vs_rabitq_init_query_constants(). */
+	state->g_add		   = vs_l2_norm_squared(state->transformed, dim);
 	state->g_error		   = sqrtf(state->g_add);
 	state->sum_transformed = vec32_sum(state->transformed, dim);
 
 	/* Dispatch pointers */
 	state->mode = mode;
-	if (mode == MKT_DISTANCE_MODE_SYMMETRIC)
+	if (mode == VS_DISTANCE_MODE_SYMMETRIC)
 	{
 		/* Symmetric mode needs sign bits and L1 norm */
 		rabitq_extract_signs(state->transformed, state->query_bits, dim);
@@ -1188,31 +1186,31 @@ mkt_rabitq_init_query_state(
 			l1_sum += fabsf(state->transformed[i]);
 		state->g_scale = l1_sum / (float)dim;
 
-		state->distance_fn = mkt_rabitq_distance_symmetric;
+		state->distance_fn = vs_rabitq_distance_symmetric;
 		state->distance_with_bound_fn =
-				mkt_rabitq_distance_symmetric_with_bound;
+				vs_rabitq_distance_symmetric_with_bound;
 		state->error_multiplier = 3.0f;
 	}
 	else
 	{
-		state->distance_fn			  = mkt_rabitq_distance;
-		state->distance_with_bound_fn = mkt_rabitq_distance_with_bound;
+		state->distance_fn			  = vs_rabitq_distance;
+		state->distance_with_bound_fn = vs_rabitq_distance_with_bound;
 		state->error_multiplier		  = 1.0f;
 	}
 }
 
 void
-mkt_rabitq_free_query(RaBitQQueryState *state)
+vs_rabitq_free_query(RaBitQQueryState *state)
 {
 	if (state == NULL)
 		return;
 
 	if (state->transformed != NULL)
-		mkt_free_aligned(state->transformed);
+		vs_free_aligned(state->transformed);
 	if (state->query_bits != NULL)
-		mkt_free_aligned(state->query_bits);
+		vs_free_aligned(state->query_bits);
 
-	mkt_free(state);
+	vs_free(state);
 }
 
 /*
@@ -1220,7 +1218,7 @@ mkt_rabitq_free_query(RaBitQQueryState *state)
  */
 
 Distance
-mkt_rabitq_distance(
+vs_rabitq_distance(
 		const RaBitQQueryState *query_state,
 		const RaBitQData	   *data,
 		Dimension				dim)
@@ -1301,7 +1299,7 @@ rabitq_apply_distances(
 }
 
 void
-mkt_rabitq_distance_batch(
+vs_rabitq_distance_batch(
 		const RaBitQQueryState *qstate,
 		const float			   *f_add,
 		const float			   *f_rescale,
@@ -1314,7 +1312,7 @@ mkt_rabitq_distance_batch(
 		distances == NULL || count == 0)
 		return;
 
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
 	float	 g_add		  = qstate->g_add;
 	float	 sum_t		  = qstate->sum_transformed;
 	float	 inv_sqrt_d	  = qstate->inv_sqrt_d;
@@ -1329,7 +1327,7 @@ mkt_rabitq_distance_batch(
 }
 
 void
-mkt_rabitq_inner_product_multi(
+vs_rabitq_inner_product_multi(
 		const float	  *transformed,
 		const uint8_t *bits,
 		uint32_t	   stride,
@@ -1337,13 +1335,13 @@ mkt_rabitq_inner_product_multi(
 		uint32_t	   count,
 		float		  *results)
 {
-	if (mkt_unlikely(!g_rabitq_initialized))
-		mkt_rabitq_init_simd();
+	if (vs_unlikely(!g_rabitq_initialized))
+		vs_rabitq_init_simd();
 	g_inner_product_multi_fn(transformed, bits, stride, dim, count, results);
 }
 
 void
-mkt_rabitq_distance_batch_multi(
+vs_rabitq_distance_batch_multi(
 		const RaBitQQueryState *qstate,
 		const float			   *f_add,
 		const float			   *f_rescale,
@@ -1352,23 +1350,23 @@ mkt_rabitq_distance_batch_multi(
 		Dimension				dim,
 		Distance			   *distances)
 {
-	float *scratch = mkt_alloc(count * sizeof(float));
-	mkt_rabitq_distance_batch_multi_with_bound(
+	float *scratch = vs_alloc(count * sizeof(float));
+	vs_rabitq_distance_batch_multi_with_bound(
 			qstate,
 			f_add,
 			f_rescale,
 			bits,
-			MKT_RABITQ_BYTES(dim),
+			VS_RABITQ_BYTES(dim),
 			count,
 			dim,
 			distances,
 			NULL,
 			scratch);
-	mkt_free(scratch);
+	vs_free(scratch);
 }
 
 void
-mkt_rabitq_distance_batch_multi_with_bound(
+vs_rabitq_distance_batch_multi_with_bound(
 		const RaBitQQueryState *qstate,
 		const float			   *f_add,
 		const float			   *f_rescale,
@@ -1385,7 +1383,7 @@ mkt_rabitq_distance_batch_multi_with_bound(
 		return;
 
 	/* Compute all inner products in a single multi-candidate pass */
-	mkt_rabitq_inner_product_multi(
+	vs_rabitq_inner_product_multi(
 			qstate->transformed, bits, stride, dim, count, scratch);
 
 	/* Convert IPs to final_dots in-place */
@@ -1406,7 +1404,7 @@ mkt_rabitq_distance_batch_multi_with_bound(
 }
 
 void
-mkt_rabitq_distance_batch_symmetric_with_bound(
+vs_rabitq_distance_batch_symmetric_with_bound(
 		const RaBitQQueryState *qstate,
 		const float			   *f_add,
 		const float			   *f_rescale,
@@ -1422,10 +1420,10 @@ mkt_rabitq_distance_batch_symmetric_with_bound(
 		distances == NULL || count == 0)
 		return;
 
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
 
 	/* Compute all Hamming distances in a single multi-candidate pass */
-	mkt_rabitq_hamming_distance_multi(
+	vs_rabitq_hamming_distance_multi(
 			qstate->query_bits, bits, stride, packed_bytes, count, scratch);
 
 	/* Apply symmetric distance formula (+ optional error bounds) */
@@ -1487,7 +1485,7 @@ rabitq_distance_with_bound_common(
 }
 
 void
-mkt_rabitq_distance_with_bound(
+vs_rabitq_distance_with_bound(
 		const RaBitQQueryState *query_state,
 		const RaBitQData	   *data,
 		Dimension				dim,
@@ -1503,16 +1501,16 @@ mkt_rabitq_distance_with_bound(
  */
 
 uint32_t
-mkt_rabitq_hamming_distance(
+vs_rabitq_hamming_distance(
 		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes)
 {
-	if (mkt_unlikely(!g_rabitq_initialized))
-		mkt_rabitq_init_simd();
+	if (vs_unlikely(!g_rabitq_initialized))
+		vs_rabitq_init_simd();
 	return g_hamming_fn(a, b, packed_bytes);
 }
 
 void
-mkt_rabitq_hamming_distance_multi(
+vs_rabitq_hamming_distance_multi(
 		const uint8_t *query_bits,
 		const uint8_t *data_bits,
 		uint32_t	   stride,
@@ -1520,8 +1518,8 @@ mkt_rabitq_hamming_distance_multi(
 		uint32_t	   count,
 		uint32_t	  *results)
 {
-	if (mkt_unlikely(!g_rabitq_initialized))
-		mkt_rabitq_init_simd();
+	if (vs_unlikely(!g_rabitq_initialized))
+		vs_rabitq_init_simd();
 	g_hamming_multi_fn(
 			query_bits, data_bits, stride, packed_bytes, count, results);
 }
@@ -1536,7 +1534,7 @@ mkt_rabitq_hamming_distance_multi(
  */
 
 Distance
-mkt_rabitq_distance_symmetric(
+vs_rabitq_distance_symmetric(
 		const RaBitQQueryState *qstate, const RaBitQData *data, Dimension dim)
 {
 	if (qstate == NULL || data == NULL)
@@ -1545,8 +1543,8 @@ mkt_rabitq_distance_symmetric(
 	if (qstate->dim != dim)
 		return -1.0f;
 
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
-	uint32_t hamming	  = mkt_rabitq_hamming_distance(
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
+	uint32_t hamming	  = vs_rabitq_hamming_distance(
 			 qstate->query_bits, data->bits, packed_bytes);
 
 	/* sym_dot = dim - 2 * hamming (range: [-dim, dim]) */
@@ -1559,7 +1557,7 @@ mkt_rabitq_distance_symmetric(
 }
 
 void
-mkt_rabitq_distance_symmetric_with_bound(
+vs_rabitq_distance_symmetric_with_bound(
 		const RaBitQQueryState *qstate,
 		const RaBitQData	   *data,
 		Dimension				dim,
@@ -1571,7 +1569,7 @@ mkt_rabitq_distance_symmetric_with_bound(
 }
 
 void
-mkt_rabitq_distance_batch_symmetric(
+vs_rabitq_distance_batch_symmetric(
 		const RaBitQQueryState *qstate,
 		const float			   *f_add,
 		const float			   *f_rescale,
@@ -1580,17 +1578,17 @@ mkt_rabitq_distance_batch_symmetric(
 		Dimension				dim,
 		Distance			   *distances)
 {
-	uint32_t *scratch = mkt_alloc(count * sizeof(uint32_t));
-	mkt_rabitq_distance_batch_symmetric_with_bound(
+	uint32_t *scratch = vs_alloc(count * sizeof(uint32_t));
+	vs_rabitq_distance_batch_symmetric_with_bound(
 			qstate,
 			f_add,
 			f_rescale,
 			bits,
-			MKT_RABITQ_BYTES(dim),
+			VS_RABITQ_BYTES(dim),
 			count,
 			dim,
 			distances,
 			NULL,
 			scratch);
-	mkt_free(scratch);
+	vs_free(scratch);
 }

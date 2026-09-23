@@ -30,14 +30,14 @@ else
   message('Developer tools (CLI, standalone library, unit tests): disabled')
 endif
 
-# Common flags (MKT_STANDALONE added per-target, not globally)
+# Common flags (VS_STANDALONE added per-target, not globally)
 add_project_arguments(
   '-D_GNU_SOURCE',
   language: 'c',
 )
 
 # Extension naming. These feed generated file names and the
-# mkt_config.h defines that C string literals use — places where
+# vs_config.h defines that C string literals use — places where
 # generation exists anyway, so single-sourcing is free. Plain files
 # (sql/pg_vectorsearch.sql, the control template) keep literal names instead:
 # a rename is a once-ever event and replacing the literal there is as
@@ -51,42 +51,42 @@ am_name = 'prism'      # index access method name
 # this tracks am_name rather than extension_name.
 guc_prefix = am_name
 
-# Generate mkt_config.h with SIMD mode configuration
+# Generate vs_config.h with SIMD mode configuration
 # Use set() conditionally - undefined macros appear as /* #undef X */ comments
 # Source code uses #ifdef checks (standard autoconf-style pattern)
 config_data = configuration_data()
-config_data.set_quoted('MKT_VERSION', meson.project_version())
-config_data.set_quoted('MKT_EXTENSION_NAME', extension_name)
-config_data.set_quoted('MKT_AM_NAME', am_name)
-config_data.set_quoted('MKT_GUC_PREFIX', guc_prefix)
+config_data.set_quoted('VS_VERSION', meson.project_version())
+config_data.set_quoted('VS_EXTENSION_NAME', extension_name)
+config_data.set_quoted('VS_AM_NAME', am_name)
+config_data.set_quoted('VS_GUC_PREFIX', guc_prefix)
 # The extension shared library is version-named (pg_vectorsearch-<version>.so)
 # so multiple extension versions can be installed side by side; C code
 # that references the library by name (parallel workers) uses this.
-config_data.set_quoted('MKT_MODULE_NAME',
+config_data.set_quoted('VS_MODULE_NAME',
   extension_name + '-' + meson.project_version())
 if simd_mode == 'full'
-  config_data.set('MKT_SIMD_FULL', 1)
+  config_data.set('VS_SIMD_FULL', 1)
 endif
 if simd_mode == 'none'
-  config_data.set('MKT_SIMD_NONE', 1)
+  config_data.set('VS_SIMD_NONE', 1)
 endif
-config_data.set_quoted('MKT_SIMD_MODE', simd_mode)
+config_data.set_quoted('VS_SIMD_MODE', simd_mode)
 
 # Disable target_clones in coverage builds - each clone is a separate function
 # and only the one matching the CPU gets called, leaving others uncovered
 if get_option('b_coverage')
-  config_data.set('MKT_COVERAGE', 1)
+  config_data.set('VS_COVERAGE', 1)
 endif
 
 # Disable ifuncs in sanitizer builds - the ifunc resolver runs before the
 # sanitizer runtime is initialized, causing crashes on instrumented globals
 sanitize_opt = get_option('b_sanitize')
 if sanitize_opt != 'none'
-  config_data.set('MKT_SANITIZER', 1)
+  config_data.set('VS_SANITIZER', 1)
 endif
 
 # CBLAS library (optional, for optimized matrix operations)
-# Detected early so MKT_HAVE_CBLAS can be set in config header
+# Detected early so VS_HAVE_CBLAS can be set in config header
 # Detection order: vendor-specific -> OpenBLAS -> generic CBLAS
 blas_opt = get_option('blas')
 cblas_dep = []
@@ -179,9 +179,9 @@ if blas_opt != 'disabled'
 
   # Summary message
   if have_cblas
-    config_data.set('MKT_HAVE_CBLAS', 1)
+    config_data.set('VS_HAVE_CBLAS', 1)
     # Vendor-specific define so the runtime thread-pinning code in
-    # mkt_cblas_pin_single_thread() only references symbols that the
+    # vs_cblas_pin_single_thread() only references symbols that the
     # detected BLAS actually exports. Referencing an undefined extern
     # in that function (e.g. openblas_set_num_threads when linked
     # against Accelerate) breaks the link on macOS — Mach-O's weak
@@ -189,7 +189,7 @@ if blas_opt != 'disabled'
     # singled out; other vendors fall through to a no-op (threading
     # must be set via env vars like VECLIB_MAXIMUM_THREADS / MKL_NUM_THREADS).
     if blas_name == 'OpenBLAS'
-      config_data.set('MKT_BLAS_OPENBLAS', 1)
+      config_data.set('VS_BLAS_OPENBLAS', 1)
     endif
     # BLIS threading control (bli_thread_set_num_threads) lives in
     # libblis / libblis-mt, which the generic CBLAS path may not link
@@ -208,7 +208,7 @@ if blas_opt != 'disabled'
       endif
     endif
     if cc.has_function('bli_thread_set_num_threads', dependencies: cblas_dep)
-      config_data.set('MKT_BLAS_BLIS', 1)
+      config_data.set('VS_BLAS_BLIS', 1)
       if blas_name == 'CBLAS'
         blas_name = 'BLIS'
       endif
@@ -258,7 +258,7 @@ if use_faiss
     ],
     dependencies: [omp_dep] + (have_cblas ? [cblas_dep] : []),
   )
-  config_data.set('MKT_HAVE_FAISS', 1)
+  config_data.set('VS_HAVE_FAISS', 1)
   message('FAISS integration enabled (using ' + faiss_root + ')')
 endif
 
@@ -268,7 +268,7 @@ hdf5_dep = dependency('hdf5', language: 'c', required: hdf5_opt)
 use_hdf5 = hdf5_dep.found()
 
 if use_hdf5
-  config_data.set('MKT_HAVE_HDF5', 1)
+  config_data.set('VS_HAVE_HDF5', 1)
   message('HDF5 integration enabled')
 else
   message('HDF5 not found: bench search --hdf5 and verify rabitq disabled')
@@ -285,12 +285,12 @@ if simd_mode != 'none' and cc.compiles(
   name: 'F16C half-precision conversion',
 )
   add_project_arguments('-mf16c', language: 'c')
-  config_data.set('MKT_HAVE_F16C', 1)
+  config_data.set('VS_HAVE_F16C', 1)
 endif
 
-mkt_config_h = configure_file(
-  input: 'src/mkt_config.h.in',
-  output: 'mkt_config.h',
+vs_config_h = configure_file(
+  input: 'src/vs_config.h.in',
+  output: 'vs_config.h',
   configuration: config_data,
 )
 
@@ -342,7 +342,7 @@ endif
 m_dep = cc.find_library('m', required: true)
 
 # Source files for core library (standalone, no PostgreSQL)
-mkt_core_sources = files(
+vs_core_sources = files(
   'src/standalone/memory_sa.c',
   'src/core/platform.c',
   'src/standalone/barrier.c',
@@ -387,7 +387,7 @@ mkt_core_sources = files(
 )
 
 # Include directories
-# Include build directory for generated mkt_config.h
+# Include build directory for generated vs_config.h
 src_inc = include_directories('src', '.')
 
 # SIMD source files and libraries
@@ -417,7 +417,7 @@ if simd_mode == 'full'
     )
   elif host_machine.cpu_family() == 'arm'
     # 32-bit ARM: needs -mfpu=neon flag, keep as separate library
-    mkt_neon_lib = static_library('mkt_neon',
+    vs_neon_lib = static_library('vs_neon',
       [
         'src/algo/distance_neon.c',
         'src/quant/rabitq_neon.c',
@@ -426,20 +426,20 @@ if simd_mode == 'full'
       c_args: ['-mfpu=neon'],
       include_directories: src_inc,
     )
-    simd_libs += mkt_neon_lib
+    simd_libs += vs_neon_lib
   endif
 endif
 
 # Combine all sources
-mkt_all_sources = mkt_core_sources + simd_sources
+vs_all_sources = vs_core_sources + simd_sources
 
 thread_dep = dependency('threads')
 
 # Core dependency: compile sources directly instead of static library
 # This avoids the 5-10% overhead from static library compilation
-mkt_core_dep = declare_dependency(
-  sources: mkt_all_sources,
-  compile_args: ['-DMKT_STANDALONE'],
+vs_core_dep = declare_dependency(
+  sources: vs_all_sources,
+  compile_args: ['-DVS_STANDALONE'],
   link_with: simd_libs,
   include_directories: src_inc,
   dependencies: [m_dep, thread_dep] + (have_cblas ? [cblas_dep] : []),
@@ -447,7 +447,7 @@ mkt_core_dep = declare_dependency(
 
 if build_tools
 # CLI tool
-mkt_cli_sources = files(
+vs_cli_sources = files(
   'src/cli/main.c',
   'src/cli/bench_distance.c',
   'src/cli/bench_quantize.c',
@@ -461,16 +461,16 @@ mkt_cli_sources = files(
 )
 
 if use_hdf5
-  mkt_cli_sources += files('src/standalone/hdf5_source.c')
+  vs_cli_sources += files('src/standalone/hdf5_source.c')
 endif
 
 if use_faiss and use_hdf5
-  mkt_cli_sources += files('src/cli/verify_rabitq.c')
+  vs_cli_sources += files('src/cli/verify_rabitq.c')
 endif
 
-mkt_exe = executable('mkt',
-  mkt_cli_sources,
-  dependencies: [mkt_core_dep]
+vs_exe = executable('vectorsearch',
+  vs_cli_sources,
+  dependencies: [vs_core_dep]
     + (use_faiss ? [faiss_dep] : [])
     + (use_hdf5 ? [hdf5_dep] : []),
   include_directories: src_inc,
@@ -481,9 +481,9 @@ mkt_exe = executable('mkt',
 # Skip in sanitizer builds — the shared library can't link the
 # sanitizer runtime (only executables get it automatically).
 if sanitize_opt == 'none'
-  mkt_bindings_lib = shared_library('mkt',
+  vs_bindings_lib = shared_library('vectorsearch',
     files('src/standalone/api.c'),
-    dependencies: [mkt_core_dep],
+    dependencies: [vs_core_dep],
     include_directories: src_inc,
     install: false,
   )
@@ -491,18 +491,18 @@ endif
 
 # Create symlink in ./bin for easy local execution
 bin_dir = meson.project_source_root() / 'bin'
-mkt_symlink = custom_target('mkt-symlink',
-  output: 'mkt-link-stamp',
+vs_symlink = custom_target('vectorsearch-symlink',
+  output: 'vectorsearch-link-stamp',
   command: [
     'sh', '-c',
     'mkdir -p @0@ && ln -sf @1@ @2@ && touch @OUTPUT@'.format(
       bin_dir,
-      meson.project_build_root() / 'mkt',
-      bin_dir / 'mkt'
+      meson.project_build_root() / 'vectorsearch',
+      bin_dir / 'vectorsearch'
     )
   ],
   build_by_default: true,
-  depends: mkt_exe,
+  depends: vs_exe,
 )
 
 # Unit tests
@@ -643,9 +643,9 @@ if build_pg_extension
     pg_ldflags += ['-Wl,-bundle_loader,' + pg_bindir / 'postgres']
   endif
 
-  # Core sources compiled for PG (without MKT_STANDALONE, without
+  # Core sources compiled for PG (without VS_STANDALONE, without
   # memory_standalone.c)
-  mkt_pg_core_sources = files(
+  vs_pg_core_sources = files(
     'src/core/platform.c',
     'src/types/vec32.c',
     'src/types/vec16.c',
@@ -676,10 +676,10 @@ if build_pg_extension
   )
 
   # SIMD sources for PG build (same as standalone)
-  mkt_pg_simd_sources = []
+  vs_pg_simd_sources = []
   if simd_mode == 'full'
     if host_machine.cpu_family() in ['x86', 'x86_64']
-      mkt_pg_simd_sources += files(
+      vs_pg_simd_sources += files(
         'src/algo/distance_avx2.c',
         'src/algo/distance_avx512.c',
         'src/quant/rabitq_avx2.c',
@@ -688,7 +688,7 @@ if build_pg_extension
         'src/quant/fastscan_avx512.c',
       )
     elif host_machine.cpu_family() == 'aarch64'
-      mkt_pg_simd_sources += files(
+      vs_pg_simd_sources += files(
         'src/algo/distance_neon.c',
         'src/quant/rabitq_neon.c',
         'src/quant/fastscan_neon.c',
@@ -698,19 +698,19 @@ if build_pg_extension
 
   # Disable the manual IFUNC distance dispatch in the PostgreSQL build.
   # PostgreSQL dlopens extensions with RTLD_NOW, so IFUNC resolvers run during
-  # ELF relocation; resolve_distance_*() calls mkt_detect_simd() in another TU
+  # ELF relocation; resolve_distance_*() calls vs_detect_simd() in another TU
   # through a GOT entry that is not yet relocated, crashing the backend on
   # CREATE EXTENSION (glibc-relocation-order dependent). The function-pointer
   # fallback dispatches lazily on first call instead, with equivalent cost.
   # -isystem: PostgreSQL headers are third-party — their warnings (e.g.
   # -Wunused-parameter on inline ilist.h helpers with newer GCC) are not
   # ours to fix and must not gate our werror builds.
-  mkt_pg_cflags = ['-isystem' + pg_includedir_server, '-DMKT_DISABLE_IFUNC'] \
+  vs_pg_cflags = ['-isystem' + pg_includedir_server, '-DVS_DISABLE_IFUNC'] \
     + pg_cflags
 
-  mkt_pg_lib = static_library('mkt_pg',
-    mkt_pg_core_sources + mkt_pg_simd_sources,
-    c_args: mkt_pg_cflags,
+  vs_pg_lib = static_library('vs_pg',
+    vs_pg_core_sources + vs_pg_simd_sources,
+    c_args: vs_pg_cflags,
     include_directories: src_inc,
     dependencies: [m_dep] + (have_cblas ? [cblas_dep] : []),
     override_options: ['werror=false'],
@@ -721,7 +721,7 @@ if build_pg_extension
 endif
 
 # Header files
-mkt_core_headers = files(
+vs_core_headers = files(
   'src/core/memory.h',
   'src/standalone/memory_sa.h',
   'src/pg/memory_pg.h',
@@ -755,7 +755,7 @@ if clang_tidy.found()
     command: [
       clang_tidy,
       '-p', meson.project_build_root(),
-      mkt_core_sources,
+      vs_core_sources,
     ],
   )
 endif

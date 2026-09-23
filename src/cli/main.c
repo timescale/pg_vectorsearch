@@ -5,7 +5,7 @@
  * pg_vectorsearch components in standalone mode (without PostgreSQL).
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -25,7 +25,7 @@ int cmd_bench_rabitq_kernel(CmdContext *ctx);
 int cmd_bench_page_score(CmdContext *ctx);
 int cmd_bench_fastscan_kernel(CmdContext *ctx);
 
-#if defined(MKT_HAVE_FAISS) && defined(MKT_HAVE_HDF5)
+#if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
 int cmd_verify_rabitq(CmdContext *ctx);
 #endif
 
@@ -55,7 +55,7 @@ static const Command bench_commands[] = {
 		{NULL, NULL, NULL},
 };
 
-#if defined(MKT_HAVE_FAISS) && defined(MKT_HAVE_HDF5)
+#if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
 static const Command verify_commands[] = {
 		{"rabitq", cmd_verify_rabitq, "Compare RaBitQ encoding against FAISS"},
 		{NULL, NULL, NULL},
@@ -75,7 +75,7 @@ print_usage(const char *prog)
 	{
 		printf("    bench %-12s %s\n", cmd->name, cmd->description);
 	}
-#if defined(MKT_HAVE_FAISS) && defined(MKT_HAVE_HDF5)
+#if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
 	printf("  Verification:\n");
 	for (const Command *cmd = verify_commands; cmd->name; cmd++)
 	{
@@ -102,7 +102,7 @@ print_usage(const char *prog)
 static void
 print_version(void)
 {
-	printf("%s %s\n", MKT_EXTENSION_NAME, MKT_VERSION);
+	printf("%s %s\n", VS_EXTENSION_NAME, VS_VERSION);
 	printf("PostgreSQL index access method for ANN vector search\n");
 }
 
@@ -157,7 +157,7 @@ dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 	return cmd->handler(&cmd_ctx);
 }
 
-#if defined(MKT_HAVE_FAISS) && defined(MKT_HAVE_HDF5)
+#if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
 /*
  * dispatch_verify_command - Dispatch to verification subcommand
  */
@@ -208,7 +208,7 @@ dispatch_verify_command(CmdContext *parent_ctx, int argc, char **argv)
 	/* Dispatch to handler */
 	return cmd->handler(&cmd_ctx);
 }
-#endif /* MKT_HAVE_FAISS && MKT_HAVE_HDF5 */
+#endif /* VS_HAVE_FAISS && VS_HAVE_HDF5 */
 
 /*
  * main - Entry point
@@ -224,18 +224,18 @@ main(int argc, char **argv)
 	setenv("OMP_NUM_THREADS", "1", 0);
 	setenv("OPENBLAS_NUM_THREADS", "1", 0);
 	setenv("BLIS_NUM_THREADS", "1", 0);
-	mkt_cblas_pin_single_thread();
+	vs_cblas_pin_single_thread();
 
 	/* Initialize memory context for CLI */
-	MktMemCtx cli_memctx = mkt_memctx_create(NULL, "cli");
-	mkt_memctx_switch(cli_memctx);
+	VsMemCtx cli_memctx = vs_memctx_create(NULL, "cli");
+	vs_memctx_switch(cli_memctx);
 
 	/* Need at least one argument (command) */
 	if (argc < 2)
 	{
 		print_usage(argv[0]);
-		mkt_memctx_switch(NULL);
-		mkt_memctx_delete(cli_memctx);
+		vs_memctx_switch(NULL);
+		vs_memctx_delete(cli_memctx);
 		return 1;
 	}
 
@@ -256,16 +256,16 @@ main(int argc, char **argv)
 	if (strcmp(cmd, "-h") == 0 || strcmp(cmd, "--help") == 0)
 	{
 		print_usage(argv[0]);
-		mkt_memctx_switch(NULL);
-		mkt_memctx_delete(cli_memctx);
+		vs_memctx_switch(NULL);
+		vs_memctx_delete(cli_memctx);
 		return 0;
 	}
 
 	if (strcmp(cmd, "-v") == 0 || strcmp(cmd, "--version") == 0)
 	{
 		print_version();
-		mkt_memctx_switch(NULL);
-		mkt_memctx_delete(cli_memctx);
+		vs_memctx_switch(NULL);
+		vs_memctx_delete(cli_memctx);
 		return 0;
 	}
 
@@ -275,7 +275,7 @@ main(int argc, char **argv)
 	{
 		ret = dispatch_bench_command(&main_ctx, argc - 2, argv + 2);
 	}
-#if defined(MKT_HAVE_FAISS) && defined(MKT_HAVE_HDF5)
+#if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
 	else if (strcmp(cmd, "verify") == 0)
 	{
 		ret = dispatch_verify_command(&main_ctx, argc - 2, argv + 2);
@@ -289,7 +289,7 @@ main(int argc, char **argv)
 	}
 
 	/* Clean up memory context */
-	mkt_memctx_switch(NULL);
-	mkt_memctx_delete(cli_memctx);
+	vs_memctx_switch(NULL);
+	vs_memctx_delete(cli_memctx);
 	return ret;
 }

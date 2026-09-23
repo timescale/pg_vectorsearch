@@ -1,7 +1,7 @@
 /*
  * centroid_build.c - Generic centroid page writer
  *
- * Writes centroid entries to linked pages via MktStorage. Format-
+ * Writes centroid entries to linked pages via VsStorage. Format-
  * agnostic: page format determines metadata and data sizes.
  */
 
@@ -16,7 +16,7 @@
 
 BlockNumber
 prism_centroid_write_pages(
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		Dimension			dim,
 		uint32_t			nlist,
 		PrismCentroidFormat fmt,
@@ -45,16 +45,16 @@ prism_centroid_write_pages(
 		{
 			/* Commit the previous page if any */
 			if (cur_page != NULL)
-				mkt_storage_commit_page(storage, cur_blkno);
+				vs_storage_commit_page(storage, cur_blkno);
 
 			if (reserved)
 			{
 				cur_blkno = next_blkno++;
-				cur_page  = mkt_storage_write_page(storage, cur_blkno);
+				cur_page  = vs_storage_write_page(storage, cur_blkno);
 			}
 			else
 			{
-				cur_page = mkt_storage_new_page(storage, &cur_blkno);
+				cur_page = vs_storage_new_page(storage, &cur_blkno);
 			}
 			prism_centroid_page_init_fmt(cur_page, level, fmt);
 
@@ -67,13 +67,13 @@ prism_centroid_write_pages(
 			 * then reopen the new page. */
 			if (prev_blkno != InvalidBlockNumber)
 			{
-				mkt_storage_commit_page(storage, cur_blkno);
+				vs_storage_commit_page(storage, cur_blkno);
 
-				Page prev_page = mkt_storage_write_page(storage, prev_blkno);
+				Page prev_page = vs_storage_write_page(storage, prev_blkno);
 				PRISM_CENTROID_OPAQUE(prev_page)->next_blkno = cur_blkno;
-				mkt_storage_commit_page(storage, prev_blkno);
+				vs_storage_commit_page(storage, prev_blkno);
 
-				cur_page = mkt_storage_write_page(storage, cur_blkno);
+				cur_page = vs_storage_write_page(storage, cur_blkno);
 			}
 
 			prev_blkno = cur_blkno;
@@ -90,7 +90,7 @@ prism_centroid_write_pages(
 
 	/* Commit last page */
 	if (cur_page != NULL)
-		mkt_storage_commit_page(storage, cur_blkno);
+		vs_storage_commit_page(storage, cur_blkno);
 
 	return first_blkno;
 }
@@ -99,11 +99,11 @@ prism_centroid_write_pages(
  * FASTSCAN centroid writer
  *
  * Walks the input centroid list in 32-vector groups. For each group:
- *   1. Encode each centroid with mkt_rabitq_encode_into to get
+ *   1. Encode each centroid with vs_rabitq_encode_into to get
  *      f_add, f_rescale, and 1-bit packed code bytes.
  *   2. Derive f_error from (f_add, f_rescale).
  *   3. Repack the bits into the kPerm0 layout that
- *      mkt_fastscan_accumulate_hacc expects, and place the per-
+ *      vs_fastscan_accumulate_hacc expects, and place the per-
  *      group f_add / f_rescale / f_error / child_blkno arrays in
  *      the group section.
  *
@@ -115,7 +115,7 @@ prism_centroid_write_pages(
 
 BlockNumber
 prism_centroid_write_fastscan_pages(
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		Dimension			dim,
 		uint32_t			nlist,
 		uint8_t				level,
@@ -133,12 +133,12 @@ prism_centroid_write_fastscan_pages(
 	if (groups_per_page == 0)
 		groups_per_page = 1; /* defensive — bigger dims may need split */
 
-	uint32_t ngroups = (nlist + MKT_FASTSCAN_GROUP - 1) / MKT_FASTSCAN_GROUP;
+	uint32_t ngroups = (nlist + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
 
 	/* Scratch for one group's RaBitQ data (32 entries). */
-	size_t	 rdata_size = MKT_RABITQ_DATA_SIZE(dim);
-	uint8_t *rdata_buf	= mkt_alloc((size_t)MKT_FASTSCAN_GROUP * rdata_size);
-	uint8_t *bits_buf	= mkt_alloc((size_t)MKT_FASTSCAN_GROUP * packed_bytes);
+	size_t	 rdata_size = VS_RABITQ_DATA_SIZE(dim);
+	uint8_t *rdata_buf	= vs_alloc((size_t)VS_FASTSCAN_GROUP * rdata_size);
+	uint8_t *bits_buf	= vs_alloc((size_t)VS_FASTSCAN_GROUP * packed_bytes);
 
 	Vec32Ref mref = {.data = global_mean, .dim = dim};
 
@@ -156,29 +156,29 @@ prism_centroid_write_fastscan_pages(
 		if (cur_page == NULL || cur_ngroups == groups_per_page)
 		{
 			if (cur_page != NULL)
-				mkt_storage_commit_page(storage, cur_blkno);
+				vs_storage_commit_page(storage, cur_blkno);
 
 			if (reserved)
 			{
 				cur_blkno = next_blkno++;
-				cur_page  = mkt_storage_write_page(storage, cur_blkno);
+				cur_page  = vs_storage_write_page(storage, cur_blkno);
 			}
 			else
-				cur_page = mkt_storage_new_page(storage, &cur_blkno);
+				cur_page = vs_storage_new_page(storage, &cur_blkno);
 
 			prism_centroid_page_init_fmt(
-					cur_page, level, MKT_CENTROID_FMT_FASTSCAN);
+					cur_page, level, PRISM_CENTROID_FMT_FASTSCAN);
 
 			if (first_blkno == InvalidBlockNumber)
 				first_blkno = cur_blkno;
 
 			if (prev_blkno != InvalidBlockNumber)
 			{
-				mkt_storage_commit_page(storage, cur_blkno);
-				Page prev = mkt_storage_write_page(storage, prev_blkno);
+				vs_storage_commit_page(storage, cur_blkno);
+				Page prev = vs_storage_write_page(storage, prev_blkno);
 				PRISM_CENTROID_OPAQUE(prev)->next_blkno = cur_blkno;
-				mkt_storage_commit_page(storage, prev_blkno);
-				cur_page = mkt_storage_write_page(storage, cur_blkno);
+				vs_storage_commit_page(storage, prev_blkno);
+				cur_page = vs_storage_write_page(storage, cur_blkno);
 			}
 
 			prev_blkno	= cur_blkno;
@@ -186,10 +186,10 @@ prism_centroid_write_fastscan_pages(
 		}
 
 		/* Encode this group's 32 entries (or fewer for the last). */
-		uint32_t g_start = g * MKT_FASTSCAN_GROUP;
+		uint32_t g_start = g * VS_FASTSCAN_GROUP;
 		uint32_t g_count = nlist - g_start;
-		if (g_count > MKT_FASTSCAN_GROUP)
-			g_count = MKT_FASTSCAN_GROUP;
+		if (g_count > VS_FASTSCAN_GROUP)
+			g_count = VS_FASTSCAN_GROUP;
 
 		/* Get per-entry RaBitQ encoding into rdata_buf, copy bits
 		 * out into a flat packed_bytes-stride array for the packer. */
@@ -200,7 +200,7 @@ prism_centroid_write_fastscan_pages(
 					.dim  = dim,
 			};
 			RaBitQData *d = (RaBitQData *)(rdata_buf + (size_t)v * rdata_size);
-			mkt_rabitq_encode_into(params, vref, mref, d);
+			vs_rabitq_encode_into(params, vref, mref, d);
 			memcpy(bits_buf + (size_t)v * packed_bytes, d->bits, packed_bytes);
 		}
 
@@ -220,7 +220,7 @@ prism_centroid_write_fastscan_pages(
 		uint8_t *codes = prism_centroid_fastscan_group_codes(
 				content, cur_group_idx, dim);
 
-		for (uint32_t v = 0; v < MKT_FASTSCAN_GROUP; v++)
+		for (uint32_t v = 0; v < VS_FASTSCAN_GROUP; v++)
 		{
 			if (v < g_count)
 			{
@@ -232,7 +232,7 @@ prism_centroid_write_fastscan_pages(
 				f_add_arr[v] = d->f_add;
 				f_rescale_arr[v] = d->f_rescale;
 				f_error_arr[v] =
-						mkt_rabitq_derive_f_error(d->f_add, d->f_rescale, dim);
+						vs_rabitq_derive_f_error(d->f_add, d->f_rescale, dim);
 			}
 			else
 			{
@@ -243,7 +243,7 @@ prism_centroid_write_fastscan_pages(
 			}
 		}
 
-		mkt_fastscan_pack_codes(bits_buf, g_count, dim, codes);
+		vs_fastscan_pack_codes(bits_buf, g_count, dim, codes);
 
 		PrismCentroidPageOpaque *op = PRISM_CENTROID_OPAQUE(cur_page);
 		op->entry_count += (uint16_t)g_count;
@@ -257,10 +257,10 @@ prism_centroid_write_fastscan_pages(
 	}
 
 	if (cur_page != NULL)
-		mkt_storage_commit_page(storage, cur_blkno);
+		vs_storage_commit_page(storage, cur_blkno);
 
-	mkt_free(rdata_buf);
-	mkt_free(bits_buf);
+	vs_free(rdata_buf);
+	vs_free(bits_buf);
 
 	return first_blkno;
 }

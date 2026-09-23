@@ -18,10 +18,10 @@
 #include "index/posting_page.h"
 #include "index/posting_scan.h"
 #include "index/storage.h"
-#include "mkt_test.h"
 #include "posting_fixtures.h"
 #include "quant/rabitq.h"
 #include "standalone/pg_compat.h"
+#include "vs_test.h"
 
 TEST_GROUP(PostingInsert);
 TEST_MEMCTX_FIXTURE();
@@ -37,8 +37,8 @@ insert_vec(
 		const float		*vec,
 		RaBitQScratch	*scratch)
 {
-	float *pt = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
-	mkt_rabitq_rotate(params, vec, pt);
+	float *pt = vs_alloc_aligned((size_t)dim * sizeof(float), 64);
+	vs_rabitq_rotate(params, vec, pt);
 	prism_posting_insert_one(
 			&st->base,
 			params,
@@ -75,8 +75,8 @@ scan_count(
 			prism_posting_max_entries(dim));
 	if (fastscan)
 		prism_posting_scan_enable_fastscan(&scan, 16);
-	MktTopK topk;
-	mkt_topk_init(&topk, k);
+	VsTopK topk;
+	vs_topk_init(&topk, k);
 
 	prism_posting_scan_begin_cluster(&scan, &qstate, head);
 	if (fastscan)
@@ -86,7 +86,7 @@ scan_count(
 	prism_posting_scan_end_cluster(&scan);
 
 	uint32_t n = topk.cand_count;
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 	prism_posting_scan_cleanup(&scan);
 	return n;
 }
@@ -145,15 +145,15 @@ TEST(insert_appends_and_counts)
 {
 	Dimension		dim		 = 128;
 	TestPageStorage storage	 = make_test_storage(32);
-	RaBitQParams   *params	 = mkt_rabitq_create(dim, 42);
-	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
 	float		   *vecs	 = make_test_vectors(8, dim);
 
 	BlockNumber head =
 			build_cluster(&storage, params, dim, centroid, vecs, 5, false);
 
 	RaBitQScratch scratch;
-	mkt_rabitq_scratch_init(&scratch, dim);
+	vs_rabitq_scratch_init(&scratch, dim);
 	for (uint32_t i = 0; i < 3; i++)
 		insert_vec(
 				&storage,
@@ -169,7 +169,7 @@ TEST(insert_appends_and_counts)
 			chain_live_count(&storage, dim, head),
 			"chain should hold built + inserted");
 
-	Page hp = mkt_storage_read_page(&storage.base, head);
+	Page hp = vs_storage_read_page(&storage.base, head);
 	ASSERT_NEQ(
 			InvalidBlockNumber,
 			prism_posting_head_tail(hp),
@@ -178,24 +178,24 @@ TEST(insert_appends_and_counts)
 			8,
 			prism_posting_head_live_count(hp),
 			"live_count should track built + inserted");
-	mkt_storage_release_page(&storage.base, head);
+	vs_storage_release_page(&storage.base, head);
 
-	mkt_rabitq_scratch_cleanup(&scratch);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_scratch_cleanup(&scratch);
+	vs_rabitq_destroy(params);
 }
 
 TEST(insert_then_scan_finds_all)
 {
 	Dimension		dim		 = 128;
 	TestPageStorage storage	 = make_test_storage(32);
-	RaBitQParams   *params	 = mkt_rabitq_create(dim, 7);
-	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 7);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
 	float		   *vecs	 = make_test_vectors(8, dim);
 
 	BlockNumber head =
 			build_cluster(&storage, params, dim, centroid, vecs, 5, false);
 	RaBitQScratch scratch;
-	mkt_rabitq_scratch_init(&scratch, dim);
+	vs_rabitq_scratch_init(&scratch, dim);
 	for (uint32_t i = 0; i < 3; i++)
 		insert_vec(
 				&storage,
@@ -211,8 +211,8 @@ TEST(insert_then_scan_finds_all)
 			scan_count(&storage, params, dim, centroid, head, 64, false),
 			"scan should surface built + inserted entries");
 
-	mkt_rabitq_scratch_cleanup(&scratch);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_scratch_cleanup(&scratch);
+	vs_rabitq_destroy(params);
 }
 
 TEST(insert_grows_overflow_page)
@@ -221,15 +221,15 @@ TEST(insert_grows_overflow_page)
 	uint32_t		first_cap = prism_posting_max_entries_first(dim);
 	uint32_t		ninsert	  = first_cap + 5; /* force a 2nd page */
 	TestPageStorage storage	  = make_test_storage(32);
-	RaBitQParams   *params	  = mkt_rabitq_create(dim, 99);
-	float		   *centroid  = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	  = vs_rabitq_create(dim, 99);
+	float		   *centroid  = vs_alloc0(dim * sizeof(float));
 	float		   *vecs	  = make_test_vectors(ninsert + 1, dim);
 
 	/* Start from a 1-entry cluster, then insert past the first page's cap. */
 	BlockNumber head =
 			build_cluster(&storage, params, dim, centroid, vecs, 1, false);
 	RaBitQScratch scratch;
-	mkt_rabitq_scratch_init(&scratch, dim);
+	vs_rabitq_scratch_init(&scratch, dim);
 	for (uint32_t i = 0; i < ninsert; i++)
 		insert_vec(
 				&storage,
@@ -240,28 +240,28 @@ TEST(insert_grows_overflow_page)
 				vecs + (size_t)(1 + i) * dim,
 				&scratch);
 
-	Page hp = mkt_storage_read_page(&storage.base, head);
+	Page hp = vs_storage_read_page(&storage.base, head);
 	ASSERT_NEQ(
 			InvalidBlockNumber,
 			prism_posting_opaque(hp)->next_blkno,
 			"head should chain to an overflow page");
-	mkt_storage_release_page(&storage.base, head);
+	vs_storage_release_page(&storage.base, head);
 
 	ASSERT_EQ(
 			1 + ninsert,
 			chain_live_count(&storage, dim, head),
 			"all entries reachable across the chain");
 
-	mkt_rabitq_scratch_cleanup(&scratch);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_scratch_cleanup(&scratch);
+	vs_rabitq_destroy(params);
 }
 
 TEST(insert_into_fastscan_cluster_mixed_chain)
 {
 	Dimension		dim		 = 128;
 	TestPageStorage storage	 = make_test_storage(32);
-	RaBitQParams   *params	 = mkt_rabitq_create(dim, 3);
-	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 3);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
 	uint32_t		nbuilt	 = 40; /* > 1 fastscan group */
 	float		   *vecs	 = make_test_vectors(nbuilt + 3, dim);
 
@@ -269,7 +269,7 @@ TEST(insert_into_fastscan_cluster_mixed_chain)
 	BlockNumber head =
 			build_cluster(&storage, params, dim, centroid, vecs, nbuilt, true);
 	RaBitQScratch scratch;
-	mkt_rabitq_scratch_init(&scratch, dim);
+	vs_rabitq_scratch_init(&scratch, dim);
 	for (uint32_t i = 0; i < 3; i++)
 		insert_vec(
 				&storage,
@@ -285,8 +285,8 @@ TEST(insert_into_fastscan_cluster_mixed_chain)
 			scan_count(&storage, params, dim, centroid, head, 128, true),
 			"fastscan scan merges packed base + AoS overflow inserts");
 
-	mkt_rabitq_scratch_cleanup(&scratch);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_scratch_cleanup(&scratch);
+	vs_rabitq_destroy(params);
 }
 
 /* Dead-TID predicate for the tombstone test: a TID is dead if its vector id
@@ -312,15 +312,15 @@ TEST(tombstone_marks_and_scan_skips)
 {
 	Dimension		dim		 = 128;
 	TestPageStorage storage	 = make_test_storage(32);
-	RaBitQParams   *params	 = mkt_rabitq_create(dim, 11);
-	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 11);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
 	float		   *vecs	 = make_test_vectors(8, dim);
 
 	/* 5 built + 3 inserted = 8 live AoS entries. */
 	BlockNumber head =
 			build_cluster(&storage, params, dim, centroid, vecs, 5, false);
 	RaBitQScratch scratch;
-	mkt_rabitq_scratch_init(&scratch, dim);
+	vs_rabitq_scratch_init(&scratch, dim);
 	for (uint32_t i = 0; i < 3; i++)
 		insert_vec(
 				&storage,
@@ -348,12 +348,12 @@ TEST(tombstone_marks_and_scan_skips)
 			chain_live_count(&storage, dim, head),
 			"live count drops by the tombstoned entries");
 
-	Page hp = mkt_storage_read_page(&storage.base, head);
+	Page hp = vs_storage_read_page(&storage.base, head);
 	ASSERT_EQ(
 			5,
 			prism_posting_head_live_count(hp),
 			"head live_count decremented");
-	mkt_storage_release_page(&storage.base, head);
+	vs_storage_release_page(&storage.base, head);
 
 	ASSERT_EQ(
 			5,
@@ -367,8 +367,8 @@ TEST(tombstone_marks_and_scan_skips)
 					&storage.base, dim, head, vid_is_dead, &dead),
 			"already-deleted entries are not re-counted");
 
-	mkt_rabitq_scratch_cleanup(&scratch);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_scratch_cleanup(&scratch);
+	vs_rabitq_destroy(params);
 }
 
 /* Whole-page tombstone: when every entry on a page is dead, the page gets the
@@ -378,21 +378,21 @@ TEST(tombstone_all_flags_aos_page)
 {
 	Dimension		dim		 = 128;
 	TestPageStorage storage	 = make_test_storage(32);
-	RaBitQParams   *params	 = mkt_rabitq_create(dim, 5);
-	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 5);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
 	float		   *vecs	 = make_test_vectors(8, dim);
 
 	/* 8 entries on a single AoS head page. */
 	BlockNumber head =
 			build_cluster(&storage, params, dim, centroid, vecs, 8, false);
 
-	Page hp_before = mkt_storage_read_page(&storage.base, head);
+	Page hp_before = vs_storage_read_page(&storage.base, head);
 	ASSERT_TRUE(
 			(prism_posting_opaque(hp_before)->flags &
 			 PRISM_POSTING_PAGE_TOMBSTONED) == 0,
 			"the built page starts untombstoned");
 	ASSERT_EQ(8, prism_posting_head_live_count(hp_before), "with 8 live");
-	mkt_storage_release_page(&storage.base, head);
+	vs_storage_release_page(&storage.base, head);
 	ASSERT_EQ(
 			8,
 			scan_count(&storage, params, dim, centroid, head, 64, false),
@@ -406,20 +406,20 @@ TEST(tombstone_all_flags_aos_page)
 					&storage.base, dim, head, vid_is_dead, &dead),
 			"all 8 entries tombstoned");
 
-	Page hp = mkt_storage_read_page(&storage.base, head);
+	Page hp = vs_storage_read_page(&storage.base, head);
 	ASSERT_TRUE(
 			(prism_posting_opaque(hp)->flags &
 			 PRISM_POSTING_PAGE_TOMBSTONED) != 0,
 			"fully-dead AoS page is flagged tombstoned");
 	ASSERT_EQ(0, prism_posting_head_live_count(hp), "live_count is zero");
-	mkt_storage_release_page(&storage.base, head);
+	vs_storage_release_page(&storage.base, head);
 
 	ASSERT_EQ(
 			0,
 			scan_count(&storage, params, dim, centroid, head, 64, false),
 			"scan skips the tombstoned page");
 
-	mkt_rabitq_destroy(params);
+	vs_rabitq_destroy(params);
 }
 
 /* FASTSCAN entries can't be flagged individually, but a wholly-dead FASTSCAN
@@ -429,15 +429,15 @@ TEST(tombstone_all_flags_fastscan_page)
 {
 	Dimension		dim		 = 128;
 	TestPageStorage storage	 = make_test_storage(32);
-	RaBitQParams   *params	 = mkt_rabitq_create(dim, 9);
-	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 9);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
 	uint32_t		nbuilt	 = 40; /* > 1 fastscan group */
 	float		   *vecs	 = make_test_vectors(nbuilt, dim);
 
 	BlockNumber head =
 			build_cluster(&storage, params, dim, centroid, vecs, nbuilt, true);
 
-	Page hp_before = mkt_storage_read_page(&storage.base, head);
+	Page hp_before = vs_storage_read_page(&storage.base, head);
 	ASSERT_TRUE(
 			(prism_posting_opaque(hp_before)->flags &
 			 PRISM_POSTING_PAGE_TOMBSTONED) == 0,
@@ -446,13 +446,13 @@ TEST(tombstone_all_flags_fastscan_page)
 			nbuilt,
 			prism_posting_head_live_count(hp_before),
 			"with every entry live");
-	mkt_storage_release_page(&storage.base, head);
+	vs_storage_release_page(&storage.base, head);
 	ASSERT_EQ(
 			nbuilt,
 			scan_count(&storage, params, dim, centroid, head, 128, true),
 			"and the scan reads them all");
 
-	uint32_t *dead_vids = mkt_alloc(nbuilt * sizeof(uint32_t));
+	uint32_t *dead_vids = vs_alloc(nbuilt * sizeof(uint32_t));
 	for (uint32_t i = 0; i < nbuilt; i++)
 		dead_vids[i] = i;
 	DeadSet dead = {.vids = dead_vids, .n = nbuilt};
@@ -463,7 +463,7 @@ TEST(tombstone_all_flags_fastscan_page)
 					&storage.base, dim, head, vid_is_dead, &dead),
 			"all fastscan entries accounted as tombstoned");
 
-	Page hp = mkt_storage_read_page(&storage.base, head);
+	Page hp = vs_storage_read_page(&storage.base, head);
 	ASSERT_TRUE(
 			(prism_posting_opaque(hp)->flags &
 			 PRISM_POSTING_PAGE_TOMBSTONED) != 0,
@@ -472,12 +472,12 @@ TEST(tombstone_all_flags_fastscan_page)
 			0,
 			prism_posting_head_live_count(hp),
 			"fastscan live_count is zero");
-	mkt_storage_release_page(&storage.base, head);
+	vs_storage_release_page(&storage.base, head);
 
 	ASSERT_EQ(
 			0,
 			scan_count(&storage, params, dim, centroid, head, 128, true),
 			"fastscan scan skips the tombstoned page(s)");
 
-	mkt_rabitq_destroy(params);
+	vs_rabitq_destroy(params);
 }

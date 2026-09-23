@@ -1,15 +1,15 @@
 /*
- * mkt_test.c - Test framework implementation
+ * vs_test.c - Test framework implementation
  */
 
 #include <stdarg.h>
 
-#include "mkt_test.h"
+#include "vs_test.h"
 
 /* Test registry */
-static MktTestEntry *test_registry = NULL;
-static int			 test_count	   = 0;
-static int			 test_capacity = 0;
+static VsTestEntry *test_registry = NULL;
+static int			test_count	  = 0;
+static int			test_capacity = 0;
 
 /* TAP mode flag (set by test runner) */
 static bool running_in_tap_mode = false;
@@ -17,28 +17,28 @@ static bool running_in_tap_mode = false;
 /* Group fixture registry */
 typedef struct
 {
-	const char	  *group;
-	MktFixtureFunc setup;
-	MktFixtureFunc teardown;
+	const char	 *group;
+	VsFixtureFunc setup;
+	VsFixtureFunc teardown;
 } GroupFixtureEntry;
 
 static GroupFixtureEntry *group_fixture_registry = NULL;
 static int				  group_fixture_count	 = 0;
 static int				  group_fixture_capacity = 0;
 
-/* Current test result (set by runner, used by mkt_test_fail) */
-static MktTestResult *current_result = NULL;
+/* Current test result (set by runner, used by vs_test_fail) */
+static VsTestResult *current_result = NULL;
 
 void
-mkt_test_register(const char *name, const char *group, MktTestFunc func)
+vs_test_register(const char *name, const char *group, VsTestFunc func)
 {
 	/* Grow registry if needed */
 	if (test_count >= test_capacity)
 	{
 		int new_capacity = test_capacity == 0 ? 64 : test_capacity * 2;
-		MktTestEntry *new_registry =
+		VsTestEntry *new_registry =
 				realloc(test_registry,
-						(size_t)new_capacity * sizeof(MktTestEntry));
+						(size_t)new_capacity * sizeof(VsTestEntry));
 		if (new_registry == NULL)
 		{
 			fprintf(stderr, "Failed to allocate test registry\n");
@@ -55,8 +55,8 @@ mkt_test_register(const char *name, const char *group, MktTestFunc func)
 }
 
 void
-mkt_test_register_group_fixture(
-		const char *group, MktFixtureFunc setup, MktFixtureFunc teardown)
+vs_test_register_group_fixture(
+		const char *group, VsFixtureFunc setup, VsFixtureFunc teardown)
 {
 	/* Grow registry if needed */
 	if (group_fixture_count >= group_fixture_capacity)
@@ -98,8 +98,8 @@ find_group_fixture(const char *group)
 static int
 compare_tests(const void *a, const void *b)
 {
-	const MktTestEntry *ta = a;
-	const MktTestEntry *tb = b;
+	const VsTestEntry *ta = a;
+	const VsTestEntry *tb = b;
 
 	int group_cmp = strcmp(ta->group, tb->group);
 	if (group_cmp != 0)
@@ -140,7 +140,7 @@ should_run_test(
 }
 
 void
-mkt_test_fail(const char *file, int line, const char *msg)
+vs_test_fail(const char *file, int line, const char *msg)
 {
 	if (current_result != NULL)
 	{
@@ -156,13 +156,13 @@ mkt_test_fail(const char *file, int line, const char *msg)
 }
 
 bool
-mkt_test_is_tap_mode(void)
+vs_test_is_tap_mode(void)
 {
 	return running_in_tap_mode;
 }
 
 void
-mkt_test_printf(const char *fmt, ...)
+vs_test_printf(const char *fmt, ...)
 {
 	va_list args;
 	va_start(args, fmt);
@@ -184,7 +184,7 @@ mkt_test_printf(const char *fmt, ...)
 }
 
 int
-mkt_test_run_all(
+vs_test_run_all(
 		bool		 tap_output,
 		const char **test_filters,
 		int			 test_filter_count,
@@ -198,7 +198,7 @@ mkt_test_run_all(
 	int				   group_failed	   = 0;
 	const char		  *current_group   = NULL;
 	GroupFixtureEntry *current_fixture = NULL;
-	MktTestResult	   result;
+	VsTestResult	   result;
 
 	/* Set TAP mode flag for TEST_PRINT macro */
 	running_in_tap_mode = tap_output;
@@ -206,7 +206,7 @@ mkt_test_run_all(
 	/* Sort tests by group, then by name for consistent output */
 	qsort(test_registry,
 		  (size_t)test_count,
-		  sizeof(MktTestEntry),
+		  sizeof(VsTestEntry),
 		  compare_tests);
 
 	/* Count tests that will run (for TAP plan) */
@@ -252,7 +252,7 @@ mkt_test_run_all(
 
 	for (int i = 0; i < test_count; i++)
 	{
-		MktTestEntry *entry = &test_registry[i];
+		VsTestEntry *entry = &test_registry[i];
 
 		/* Skip tests that don't match filters */
 		if (!should_run_test(
@@ -283,26 +283,26 @@ mkt_test_run_all(
 			{
 				if (group_failed == 0)
 					printf("  %s%s: %d passed%s\n\n",
-						   MKT_COLOR_GREEN,
+						   VS_COLOR_GREEN,
 						   current_group,
 						   group_passed,
-						   MKT_COLOR_RESET);
+						   VS_COLOR_RESET);
 				else
 					printf("  %s%s: %d passed, %d failed%s\n\n",
-						   MKT_COLOR_RED,
+						   VS_COLOR_RED,
 						   current_group,
 						   group_passed,
 						   group_failed,
-						   MKT_COLOR_RESET);
+						   VS_COLOR_RESET);
 			}
 
 			/* Print group header (human-readable only) */
 			if (!tap_output)
 			{
 				printf("%s=== %s ===%s\n",
-					   MKT_COLOR_CYAN,
+					   VS_COLOR_CYAN,
 					   entry->group,
-					   MKT_COLOR_RESET);
+					   VS_COLOR_RESET);
 			}
 
 			current_group	= entry->group;
@@ -324,7 +324,7 @@ mkt_test_run_all(
 		result.file			  = NULL;
 		result.line			  = 0;
 
-		/* Set current result for mkt_test_fail */
+		/* Set current result for vs_test_fail */
 		current_result = &result;
 
 		/* Run test */
@@ -346,8 +346,8 @@ mkt_test_run_all(
 			else
 			{
 				printf("  %s[PASS]%s %s\n",
-					   MKT_COLOR_GREEN,
-					   MKT_COLOR_RESET,
+					   VS_COLOR_GREEN,
+					   VS_COLOR_RESET,
 					   entry->name);
 			}
 			total_passed++;
@@ -367,8 +367,8 @@ mkt_test_run_all(
 			else
 			{
 				printf("  %s[FAIL]%s %s\n",
-					   MKT_COLOR_RED,
-					   MKT_COLOR_RESET,
+					   VS_COLOR_RED,
+					   VS_COLOR_RESET,
 					   entry->name);
 				printf("         %s:%d: %s\n",
 					   result.file,
@@ -395,41 +395,41 @@ mkt_test_run_all(
 		{
 			if (group_failed == 0)
 				printf("  %s%s: %d passed%s\n",
-					   MKT_COLOR_GREEN,
+					   VS_COLOR_GREEN,
 					   current_group,
 					   group_passed,
-					   MKT_COLOR_RESET);
+					   VS_COLOR_RESET);
 			else
 				printf("  %s%s: %d passed, %d failed%s\n",
-					   MKT_COLOR_RED,
+					   VS_COLOR_RED,
 					   current_group,
 					   group_passed,
 					   group_failed,
-					   MKT_COLOR_RESET);
+					   VS_COLOR_RESET);
 		}
 
 		/* Print total summary */
 		printf("\n%s========================================%s\n",
-			   MKT_COLOR_CYAN,
-			   MKT_COLOR_RESET);
+			   VS_COLOR_CYAN,
+			   VS_COLOR_RESET);
 		if (total_failed == 0)
 		{
 			printf("%sTotal: %d passed, 0 failed%s\n",
-				   MKT_COLOR_GREEN,
+				   VS_COLOR_GREEN,
 				   total_passed,
-				   MKT_COLOR_RESET);
+				   VS_COLOR_RESET);
 		}
 		else
 		{
 			printf("%sTotal: %d passed, %d failed%s\n",
-				   MKT_COLOR_RED,
+				   VS_COLOR_RED,
 				   total_passed,
 				   total_failed,
-				   MKT_COLOR_RESET);
+				   VS_COLOR_RESET);
 		}
 		printf("%s========================================%s\n\n",
-			   MKT_COLOR_CYAN,
-			   MKT_COLOR_RESET);
+			   VS_COLOR_CYAN,
+			   VS_COLOR_RESET);
 	}
 
 	return total_failed > 0 ? 1 : 0;

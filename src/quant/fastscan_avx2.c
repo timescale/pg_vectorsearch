@@ -6,9 +6,9 @@
  * Each iteration handles 4 subquantizers.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 
 #if defined(__x86_64__) || defined(_M_X64)
 
@@ -34,7 +34,7 @@
 	} while (0)
 
 /* Reduce even/odd accumulators to 16 uint16 results */
-static inline MKT_TARGET_AVX2 __m256i
+static inline VS_TARGET_AVX2 __m256i
 reduce_accu_pair(__m256i even, __m256i odd)
 {
 	even = _mm256_sub_epi16(even, _mm256_slli_epi16(odd, 8));
@@ -43,14 +43,14 @@ reduce_accu_pair(__m256i even, __m256i odd)
 			_mm256_blend_epi32(even, odd, 0xF0));
 }
 
-MKT_TARGET_AVX2 void
-mkt_fastscan_accumulate_avx2(
+VS_TARGET_AVX2 void
+vs_fastscan_accumulate_avx2(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		uint16_t	  *accum,
 		Dimension	   dim)
 {
-	uint32_t code_length = MKT_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t code_length = VS_FASTSCAN_GROUP_BYTES(dim);
 
 	__m256i low_mask = _mm256_set1_epi8(0x0F);
 	__m256i accu0	 = _mm256_setzero_si256();
@@ -93,7 +93,7 @@ mkt_fastscan_accumulate_avx2(
 
 /* Reduce even/odd accumulators to 16 uint16, then widen to int32.
  * Returns two __m256i: lo 8 int32, hi 8 int32 via output pointers. */
-static inline MKT_TARGET_AVX2 void
+static inline VS_TARGET_AVX2 void
 hacc_reduce_avx2(__m256i even, __m256i odd, __m256i *out_lo8, __m256i *out_hi8)
 {
 	__m256i r16 = reduce_accu_pair(even, odd);
@@ -101,8 +101,8 @@ hacc_reduce_avx2(__m256i even, __m256i odd, __m256i *out_lo8, __m256i *out_hi8)
 	*out_hi8	= _mm256_cvtepu16_epi32(_mm256_extracti128_si256(r16, 1));
 }
 
-MKT_TARGET_AVX2 void
-mkt_fastscan_accumulate_hacc_avx2(
+VS_TARGET_AVX2 void
+vs_fastscan_accumulate_hacc_avx2(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		int32_t		  *accum,
@@ -123,7 +123,7 @@ mkt_fastscan_accumulate_hacc_avx2(
 	 * read a phantom column past the code region when ceil(dim/8) is
 	 * odd. Trailing phantom subquantizers (nsq not a multiple of 2) have
 	 * a zeroed LUT, so they contribute nothing. */
-	uint32_t ncols = MKT_FASTSCAN_GROUP_BYTES(dim) / MKT_FASTSCAN_GROUP;
+	uint32_t ncols = VS_FASTSCAN_GROUP_BYTES(dim) / VS_FASTSCAN_GROUP;
 	for (uint32_t c = 0; c < ncols; c++)
 	{
 		__m256i cc = _mm256_loadu_si256((const __m256i *)(codes + c * 32));
@@ -160,4 +160,4 @@ mkt_fastscan_accumulate_hacc_avx2(
 
 #endif /* x86_64 */
 
-#endif /* MKT_SIMD_FULL */
+#endif /* VS_SIMD_FULL */

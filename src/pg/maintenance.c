@@ -84,7 +84,7 @@
  * leaf count reaches other backends as a relcache invalidation, which is only
  * delivered at commit.
  */
-#define MKT_MAINT_LOCK ShareUpdateExclusiveLock
+#define PRISM_MAINT_LOCK ShareUpdateExclusiveLock
 
 /*
  * Refuse to run inside a caller's transaction.
@@ -142,9 +142,9 @@ reject_null_arg(FunctionCallInfo fcinfo, int argno, const char *argname)
 				 errmsg("%s must not be null", argname)));
 }
 
-PG_FUNCTION_INFO_V1(mkt_convert_posting_to_fastscan);
-PG_FUNCTION_INFO_V1(mkt_split_posting_list);
-PG_FUNCTION_INFO_V1(mkt_rebalance);
+PG_FUNCTION_INFO_V1(vs_convert_posting_to_fastscan);
+PG_FUNCTION_INFO_V1(vs_split_posting_list);
+PG_FUNCTION_INFO_V1(vs_rebalance);
 
 /*
  * Authorization. convert_posting_to_fastscan mutates the index, so it requires
@@ -177,11 +177,11 @@ require_index_owner(Relation index, LOCKMODE lockmode)
 static BlockNumber *
 centroid_child_ptr(Page page, uint16_t entry_idx, Dimension dim)
 {
-	if (prism_centroid_page_format(page) == MKT_CENTROID_FMT_FASTSCAN)
+	if (prism_centroid_page_format(page) == PRISM_CENTROID_FMT_FASTSCAN)
 	{
 		char	*content = (char *)PageGetContents(page);
-		uint32_t g		 = entry_idx / MKT_FASTSCAN_GROUP;
-		uint32_t slot	 = entry_idx % MKT_FASTSCAN_GROUP;
+		uint32_t g		 = entry_idx / VS_FASTSCAN_GROUP;
+		uint32_t slot	 = entry_idx % VS_FASTSCAN_GROUP;
 		return &prism_centroid_fastscan_group_child(content, g, dim)[slot];
 	}
 	return &prism_centroid_meta_mut(page, entry_idx)->child_blkno;
@@ -191,7 +191,7 @@ centroid_child_ptr(Page page, uint16_t entry_idx, Dimension dim)
  * Point a centroid leaf entry at new_head via WAL, but only if it still
  * points at expected_old_head. The compare-and-set runs under the same
  * exclusive lock as the write, with no gap. The maintenance entry points hold
- * a self-conflicting lock on the index (MKT_MAINT_LOCK), so two
+ * a self-conflicting lock on the index (PRISM_MAINT_LOCK), so two
  * of them cannot race on one cluster in the first place -- but the
  * compare-and-set stays as a gate that does not depend on callers agreeing
  * about lock modes. The head pointer -- not the posting page's fastscan flag
@@ -234,7 +234,7 @@ update_centroid_posting_head(
 }
 
 /*
- * Set MKT_META_FLAG_FASTSCAN on the metadata page if not already set.
+ * Set PRISM_META_FLAG_FASTSCAN on the metadata page if not already set.
  */
 static void
 ensure_meta_fastscan_flag(Relation index)
@@ -243,7 +243,7 @@ ensure_meta_fastscan_flag(Relation index)
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
 	Page		   page			= BufferGetPage(buf);
 	PrismMetaPage *mp			= (PrismMetaPage *)PageGetSpecialPointer(page);
-	bool		   needs_update = !(mp->flags & MKT_META_FLAG_FASTSCAN);
+	bool		   needs_update = !(mp->flags & PRISM_META_FLAG_FASTSCAN);
 	UnlockReleaseBuffer(buf);
 
 	if (needs_update)
@@ -253,7 +253,7 @@ ensure_meta_fastscan_flag(Relation index)
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
 		mp	 = (PrismMetaPage *)PageGetSpecialPointer(page);
-		mp->flags |= MKT_META_FLAG_FASTSCAN;
+		mp->flags |= PRISM_META_FLAG_FASTSCAN;
 		GenericXLogFinish(state);
 		UnlockReleaseBuffer(buf);
 	}
@@ -267,25 +267,25 @@ ensure_meta_fastscan_flag(Relation index)
  * Returns the new posting head block number.
  * ---------------------------------------------------------------- */
 Datum
-mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
+vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 {
 	reject_null_arg(fcinfo, 0, "index_oid");
 	reject_null_arg(fcinfo, 1, "cluster_id");
 
 	Oid		 indexoid	= PG_GETARG_OID(0);
 	int32	 cluster_id = PG_GETARG_INT32(1);
-	Relation index		= relation_open(indexoid, MKT_MAINT_LOCK);
+	Relation index		= relation_open(indexoid, PRISM_MAINT_LOCK);
 
 	if (index->rd_rel->relkind != RELKIND_INDEX)
 	{
-		relation_close(index, MKT_MAINT_LOCK);
+		relation_close(index, PRISM_MAINT_LOCK);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not an index",
 						RelationGetRelationName(index))));
 	}
 
-	require_index_owner(index, MKT_MAINT_LOCK);
+	require_index_owner(index, PRISM_MAINT_LOCK);
 
 	/* Read metadata */
 	Buffer meta_buf = ReadBuffer(index, 0);
@@ -295,10 +295,10 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (meta->magic != MKT_META_MAGIC)
+	if (meta->magic != PRISM_META_MAGIC)
 	{
 		UnlockReleaseBuffer(meta_buf);
-		relation_close(index, MKT_MAINT_LOCK);
+		relation_close(index, PRISM_MAINT_LOCK);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a prism index",
@@ -339,7 +339,7 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	if (leaf == NULL)
 	{
 		pfree(leaves);
-		relation_close(index, MKT_MAINT_LOCK);
+		relation_close(index, PRISM_MAINT_LOCK);
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("cluster %d not found or has no posting list",
@@ -362,14 +362,14 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 
 		if (already_fastscan)
 		{
-			relation_close(index, MKT_MAINT_LOCK);
+			relation_close(index, PRISM_MAINT_LOCK);
 			PG_RETURN_INT32((int32)old_head);
 		}
 	}
 
 	/* Convert the posting chain */
-	MktPgStorage storage;
-	mkt_pg_storage_init(&storage, index, NULL, DISTANCE_L2);
+	VsPgStorage storage;
+	vs_pg_storage_init(&storage, index, NULL, DISTANCE_L2);
 
 	/*
 	 * Online conversion, unlike a full index build, has no closing
@@ -399,14 +399,14 @@ mkt_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 				dim,
 				&current_head))
 	{
-		relation_close(index, MKT_MAINT_LOCK);
+		relation_close(index, PRISM_MAINT_LOCK);
 		PG_RETURN_INT32((int32)current_head);
 	}
 
 	ensure_meta_fastscan_flag(index);
 
 	/*
-	 * Keep MKT_MAINT_LOCK until end of transaction (NoLock here releases the
+	 * Keep PRISM_MAINT_LOCK until end of transaction (NoLock here releases the
 	 * reference, not the lock). maint_end queues a relcache invalidation for
 	 * the new leaf count, and that is only delivered at commit -- release the
 	 * lock now and the next maintenance call could take it, still holding a
@@ -432,7 +432,7 @@ typedef struct PgSplitFetchCtx
 	 */
 	Vec32Access access;
 	/* For the reserve-nlist seam, which has only this context to work from. */
-	MktStorage *storage;
+	VsStorage *storage;
 } PgSplitFetchCtx;
 
 static bool
@@ -490,7 +490,7 @@ pg_split_fetch_vector(
  * may still be about to read from a stale pre-flip pointer — mark each page
  * DELETED and stamp the head with the current next-XID. The chain stays linked
  * and readable; VACUUM physically retires it once that XID clears the global
- * visibility horizon (see mkt_rebalance). Scans read DELETED pages
+ * visibility horizon (see vs_rebalance). Scans read DELETED pages
  * (only TOMBSTONED is skipped), so an in-flight scanner still sees the full
  * old list.
  */
@@ -518,7 +518,7 @@ retire_page(PrismPostingPageOpaque *op, void *state)
 }
 
 static void
-pg_retire_chain(void *ctx, MktStorage *posting_storage, BlockNumber head)
+pg_retire_chain(void *ctx, VsStorage *posting_storage, BlockNumber head)
 {
 	(void)ctx;
 	/*
@@ -540,12 +540,12 @@ pg_retire_chain(void *ctx, MktStorage *posting_storage, BlockNumber head)
 
 /* Persist an updated leaf count into the metapage (block 0), in place. */
 static void
-persist_nlist(MktStorage *storage, uint32_t nlist)
+persist_nlist(VsStorage *storage, uint32_t nlist)
 {
-	Page		   page = mkt_storage_write_page(storage, 0);
+	Page		   page = vs_storage_write_page(storage, 0);
 	PrismMetaPage *meta = (PrismMetaPage *)PageGetSpecialPointer(page);
 	meta->nlist			= nlist;
-	mkt_storage_commit_page(storage, 0);
+	vs_storage_commit_page(storage, 0);
 }
 
 /*
@@ -561,12 +561,12 @@ persist_nlist(MktStorage *storage, uint32_t nlist)
  * pass.
  */
 static void
-persist_ncentroid_pages(MktStorage *storage, uint32_t ncentroid_pages)
+persist_ncentroid_pages(VsStorage *storage, uint32_t ncentroid_pages)
 {
-	Page		   page	  = mkt_storage_write_page(storage, 0);
+	Page		   page	  = vs_storage_write_page(storage, 0);
 	PrismMetaPage *meta	  = (PrismMetaPage *)PageGetSpecialPointer(page);
 	meta->ncentroid_pages = ncentroid_pages;
-	mkt_storage_commit_page(storage, 0);
+	vs_storage_commit_page(storage, 0);
 }
 
 /*
@@ -586,7 +586,8 @@ pg_reserve_nlist(void *ctx, uint32_t nlist)
 static void
 require_supported_shape(Relation index, PrismIndexBase *base)
 {
-	if (base->nlevels != 1 || base->centroid_format != MKT_CENTROID_FMT_RABITQ)
+	if (base->nlevels != 1 ||
+		base->centroid_format != PRISM_CENTROID_FMT_RABITQ)
 	{
 		char *name = pstrdup(RelationGetRelationName(index));
 		ereport(ERROR,
@@ -700,13 +701,13 @@ split_one_head(
 {
 	LockPage(index, head, ExclusiveLock);
 
-	Page p		   = mkt_storage_read_page(base->posting_storage, head);
+	Page p		   = vs_storage_read_page(base->posting_storage, head);
 	bool live_head = page_is_posting(p) &&
 					 posting_head_is_live(prism_posting_opaque(p));
 	/* live_count is meaningful only when the head is live: delete_xid overlays
 	 * it once DELETED, which posting_head_is_live excludes. */
 	uint32_t live = live_head ? prism_posting_opaque(p)->live_count : 0;
-	mkt_storage_release_page(base->posting_storage, head);
+	vs_storage_release_page(base->posting_storage, head);
 
 	if (!live_head ||
 		(target > 0 && (uint64_t)live <= prism_split_trigger(target)))
@@ -783,7 +784,7 @@ resolve_target_entries(Relation heap)
 typedef struct MaintCtx
 {
 	PrismIndexBase	base;
-	MktPgStorage	storage;
+	VsPgStorage		storage;
 	Relation		heap;
 	PgSplitFetchCtx fetch;
 	ResourceOwner	params_owner;
@@ -803,7 +804,7 @@ maint_begin(Relation index, MaintCtx *m)
 	prism_index_base_init(index, &m->base);
 	require_supported_shape(index, &m->base);
 
-	mkt_pg_storage_init(&m->storage, index, NULL, m->base.metric);
+	vs_pg_storage_init(&m->storage, index, NULL, m->base.metric);
 	m->base.centroid_storage = &m->storage.base;
 	m->base.posting_storage	 = &m->storage.base;
 	m->base.page_base		 = NULL;
@@ -871,7 +872,7 @@ split_one_head_in_scratch(
  * about exactly that -- "missing lock for relation ... @ TID" -- and holding
  * AccessExclusiveLock on the index does not satisfy it, because the lock it
  * wants is on the catalog row. The index-level lock the pass already holds
- * (MKT_MAINT_LOCK, ShareUpdateExclusiveLock) is what ALTER INDEX ... SET
+ * (PRISM_MAINT_LOCK, ShareUpdateExclusiveLock) is what ALTER INDEX ... SET
  * takes, so no escalation is needed for the index itself.
  */
 static void
@@ -958,7 +959,7 @@ maint_end(Relation index, MaintCtx *m, bool changed)
  * entries, or degenerate data).
  */
 Datum
-mkt_split_posting_list(PG_FUNCTION_ARGS)
+vs_split_posting_list(PG_FUNCTION_ARGS)
 {
 	require_own_transaction(fcinfo, "prism.split_posting_list()");
 	reject_null_arg(fcinfo, 0, "index_oid");
@@ -966,22 +967,22 @@ mkt_split_posting_list(PG_FUNCTION_ARGS)
 
 	Oid		 indexoid = PG_GETARG_OID(0);
 	int64	 blk64	  = PG_GETARG_INT64(1);
-	Relation index	  = relation_open(indexoid, MKT_MAINT_LOCK);
+	Relation index	  = relation_open(indexoid, PRISM_MAINT_LOCK);
 
 	if (index->rd_rel->relkind != RELKIND_INDEX)
 	{
-		relation_close(index, MKT_MAINT_LOCK);
+		relation_close(index, PRISM_MAINT_LOCK);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not an index",
 						RelationGetRelationName(index))));
 	}
-	require_index_owner(index, MKT_MAINT_LOCK);
+	require_index_owner(index, PRISM_MAINT_LOCK);
 
 	BlockNumber nblocks = RelationGetNumberOfBlocks(index);
 	if (blk64 < 1 || blk64 >= (int64)nblocks)
 	{
-		relation_close(index, MKT_MAINT_LOCK);
+		relation_close(index, PRISM_MAINT_LOCK);
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("block number " INT64_FORMAT " out of range", blk64)));
@@ -997,7 +998,7 @@ mkt_split_posting_list(PG_FUNCTION_ARGS)
 
 	maint_end(index, &m, did);
 	/*
-	 * Keep MKT_MAINT_LOCK until end of transaction (NoLock here releases the
+	 * Keep PRISM_MAINT_LOCK until end of transaction (NoLock here releases the
 	 * reference, not the lock). maint_end queues a relcache invalidation for
 	 * the new leaf count, and that is only delivered at commit -- release the
 	 * lock now and the next maintenance call could take it, still holding a
@@ -1056,7 +1057,7 @@ mkt_split_posting_list(PG_FUNCTION_ARGS)
  * caller -- nothing schedules it.
  * ---------------------------------------------------------------- */
 Datum
-mkt_rebalance(PG_FUNCTION_ARGS)
+vs_rebalance(PG_FUNCTION_ARGS)
 {
 	require_own_transaction(fcinfo, "prism.rebalance()");
 	reject_null_arg(fcinfo, 0, "index_oid");
@@ -1066,20 +1067,20 @@ mkt_rebalance(PG_FUNCTION_ARGS)
 	 * meaningful: it asks for the size to be derived from the index. */
 	bool	 target_given = !PG_ARGISNULL(1);
 	int32	 target_arg	  = target_given ? PG_GETARG_INT32(1) : 0;
-	Relation index		  = relation_open(indexoid, MKT_MAINT_LOCK);
+	Relation index		  = relation_open(indexoid, PRISM_MAINT_LOCK);
 
 	if (index->rd_rel->relkind != RELKIND_INDEX)
 	{
-		relation_close(index, MKT_MAINT_LOCK);
+		relation_close(index, PRISM_MAINT_LOCK);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not an index",
 						RelationGetRelationName(index))));
 	}
-	require_index_owner(index, MKT_MAINT_LOCK);
+	require_index_owner(index, PRISM_MAINT_LOCK);
 	if (target_given && target_arg < 1)
 	{
-		relation_close(index, MKT_MAINT_LOCK);
+		relation_close(index, PRISM_MAINT_LOCK);
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("target_entries must be positive")));
@@ -1102,7 +1103,7 @@ mkt_rebalance(PG_FUNCTION_ARGS)
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		Page p		 = mkt_storage_read_page(&m.storage.base, blk);
+		Page p		 = vs_storage_read_page(&m.storage.base, blk);
 		bool posting = page_is_posting(p);
 		const PrismPostingPageOpaque *op = posting ? prism_posting_opaque(p)
 												   : NULL;
@@ -1115,7 +1116,7 @@ mkt_rebalance(PG_FUNCTION_ARGS)
 		/* delete_xid overlays live_count and is meaningful only when DELETED.
 		 */
 		uint64 dxid = retired ? op->delete_xid : 0;
-		mkt_storage_release_page(&m.storage.base, blk);
+		vs_storage_release_page(&m.storage.base, blk);
 
 		if (candidate)
 		{
@@ -1141,7 +1142,7 @@ mkt_rebalance(PG_FUNCTION_ARGS)
 
 	maint_end(index, &m, nsplits > 0);
 	/*
-	 * Keep MKT_MAINT_LOCK until end of transaction (NoLock here releases the
+	 * Keep PRISM_MAINT_LOCK until end of transaction (NoLock here releases the
 	 * reference, not the lock). maint_end queues a relcache invalidation for
 	 * the new leaf count, and that is only delivered at commit -- release the
 	 * lock now and the next maintenance call could take it, still holding a

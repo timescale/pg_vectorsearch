@@ -6,7 +6,7 @@
  * instead, so this file is compiled only for standalone.
  */
 
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 
 #include "standalone/parallel_scan.h"
 
@@ -55,4 +55,4 @@ prism_parallel_scan_run(
 	return scanned;
 }
 
-#endif /* MKT_STANDALONE */
+#endif /* VS_STANDALONE */

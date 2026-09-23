@@ -96,9 +96,9 @@ pgvector_cosine_similarity(int dim, const float *ax, const float *bx)
  */
 
 Distance
-mkt_distance_l2_pgvector(Vec32Ref a, Vec32Ref b)
+vs_distance_l2_pgvector(Vec32Ref a, Vec32Ref b)
 {
-	if (mkt_unlikely(
+	if (vs_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
 				b.data == NULL))
 		return -1.0f;
@@ -107,9 +107,9 @@ mkt_distance_l2_pgvector(Vec32Ref a, Vec32Ref b)
 }
 
 Distance
-mkt_distance_ip_pgvector(Vec32Ref a, Vec32Ref b)
+vs_distance_ip_pgvector(Vec32Ref a, Vec32Ref b)
 {
-	if (mkt_unlikely(
+	if (vs_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
 				b.data == NULL))
 		return -1.0f;
@@ -118,9 +118,9 @@ mkt_distance_ip_pgvector(Vec32Ref a, Vec32Ref b)
 }
 
 Distance
-mkt_distance_cosine_pgvector(Vec32Ref a, Vec32Ref b)
+vs_distance_cosine_pgvector(Vec32Ref a, Vec32Ref b)
 {
-	if (mkt_unlikely(
+	if (vs_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
 				b.data == NULL))
 		return -1.0f;
@@ -141,14 +141,14 @@ mkt_distance_cosine_pgvector(Vec32Ref a, Vec32Ref b)
  */
 
 int
-mkt_distance_batch_l2_pgvector(
+vs_distance_batch_l2_pgvector(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances)
 {
-	if (mkt_unlikely(
+	if (vs_unlikely(
 				query.dim != dim || query.data == NULL || vectors == NULL ||
 				distances == NULL))
 		return -1;
@@ -164,14 +164,14 @@ mkt_distance_batch_l2_pgvector(
 }
 
 int
-mkt_distance_batch_ip_pgvector(
+vs_distance_batch_ip_pgvector(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances)
 {
-	if (mkt_unlikely(
+	if (vs_unlikely(
 				query.dim != dim || query.data == NULL || vectors == NULL ||
 				distances == NULL))
 		return -1;
@@ -187,14 +187,14 @@ mkt_distance_batch_ip_pgvector(
 }
 
 int
-mkt_distance_batch_cosine_pgvector(
+vs_distance_batch_cosine_pgvector(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances)
 {
-	if (mkt_unlikely(
+	if (vs_unlikely(
 				query.dim != dim || query.data == NULL || vectors == NULL ||
 				distances == NULL))
 		return -1;

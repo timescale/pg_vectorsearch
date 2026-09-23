@@ -6,12 +6,12 @@
  * fastscan) is selected at init time via page_ops callbacks.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <math.h>
 #include <string.h>
 
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 /* See matrix.c for the rationale on the Apple branch. */
 #ifdef __APPLE__
 #include <vecLib/cblas_new.h>
@@ -37,7 +37,7 @@
  * two use deliberately different methods, because they are different
  * problems:
  *
- *   PRIMARY  -> tree descent (mkt_hkmeans_assign).
+ *   PRIMARY  -> tree descent (vs_hkmeans_assign).
  *     The nearest centroid via a greedy descent of the k-means tree:
  *     O(fan_out * nlevels) distance evaluations, a single root-to-leaf
  *     path. Two reasons it is the right tool here:
@@ -56,7 +56,7 @@
  *
  *   SECONDARY (SOAR + boundary) -> per-vector path in
  *     prism_build_assign_vector: boundary via a wider tree beam
- *     (mkt_hkmeans_assign_topk), SOAR via a per-vector SIMD scan
+ *     (vs_hkmeans_assign_topk), SOAR via a per-vector SIMD scan
  *     (prism_find_soar_secondary).
  * ================================================================ */
 
@@ -83,20 +83,20 @@ PrismBuildWorkerBufs
 prism_build_worker_bufs_create(Dimension dim)
 {
 	return (PrismBuildWorkerBufs){
-			.norm_buf	  = mkt_alloc(dim * sizeof(float)),
-			.residual_buf = mkt_alloc(dim * sizeof(float)),
-			.cand_leaves  = mkt_alloc(PRISM_SECONDARY_TOPK * sizeof(uint32_t)),
-			.cand_dists	  = mkt_alloc(PRISM_SECONDARY_TOPK * sizeof(Distance)),
+			.norm_buf	  = vs_alloc(dim * sizeof(float)),
+			.residual_buf = vs_alloc(dim * sizeof(float)),
+			.cand_leaves  = vs_alloc(PRISM_SECONDARY_TOPK * sizeof(uint32_t)),
+			.cand_dists	  = vs_alloc(PRISM_SECONDARY_TOPK * sizeof(Distance)),
 	};
 }
 
 void
 prism_build_worker_bufs_free(PrismBuildWorkerBufs *bufs)
 {
-	mkt_free(bufs->norm_buf);
-	mkt_free(bufs->residual_buf);
-	mkt_free(bufs->cand_leaves);
-	mkt_free(bufs->cand_dists);
+	vs_free(bufs->norm_buf);
+	vs_free(bufs->residual_buf);
+	vs_free(bufs->cand_leaves);
+	vs_free(bufs->cand_dists);
 	bufs->norm_buf	   = NULL;
 	bufs->residual_buf = NULL;
 	bufs->cand_leaves  = NULL;
@@ -113,7 +113,7 @@ prism_build_assign_vector(
 	const Dimension dim = params->dim;
 
 	Distance min_dist;
-	uint32_t best_c = mkt_hkmeans_assign(tree, vec, params->metric, &min_dist);
+	uint32_t best_c = vs_hkmeans_assign(tree, vec, params->metric, &min_dist);
 
 	const float *enc_vec = vec;
 	if (params->metric == DISTANCE_COSINE)
@@ -136,7 +136,7 @@ prism_build_assign_vector(
 		 * objective is minimized by a near leaf, so the secondary is always
 		 * among them — avoiding an O(nleaves) full scan per vector, which does
 		 * not scale to large nlist. */
-		uint32_t ncand = mkt_hkmeans_assign_topk(
+		uint32_t ncand = vs_hkmeans_assign_topk(
 				tree,
 				enc_vec,
 				params->metric,
@@ -225,9 +225,9 @@ prism_posting_entry_encode(
 {
 	Vec32Ref vref = {.data = vec, .dim = dim};
 	Vec32Ref cref = {.data = centroid, .dim = dim};
-	mkt_rabitq_encode_into_ex(params, vref, cref, enc_buf, scratch);
+	vs_rabitq_encode_into_ex(params, vref, cref, enc_buf, scratch);
 	float f_error =
-			mkt_rabitq_derive_f_error(enc_buf->f_add, enc_buf->f_rescale, dim);
+			vs_rabitq_derive_f_error(enc_buf->f_add, enc_buf->f_rescale, dim);
 
 	char *p = (char *)out_entry;
 	memcpy(p, &tid, sizeof(ItemPointerData));
@@ -254,9 +254,9 @@ prism_posting_entry_encode_from_pt(
 	/* Page-backed twin of prism_posting_entry_encode: the caller already has
 	 * the rotated residual (pt_query - pt_centroid), e.g. from routing + the
 	 * head page's pt_centroid, so no float centroid is needed. */
-	mkt_rabitq_encode_from_pt(params, pt_residual, enc_buf, scratch);
+	vs_rabitq_encode_from_pt(params, pt_residual, enc_buf, scratch);
 	float f_error =
-			mkt_rabitq_derive_f_error(enc_buf->f_add, enc_buf->f_rescale, dim);
+			vs_rabitq_derive_f_error(enc_buf->f_add, enc_buf->f_rescale, dim);
 
 	char *p = (char *)out_entry;
 	memcpy(p, &tid, sizeof(ItemPointerData));
@@ -276,7 +276,7 @@ prism_build_route_ctx_init(
 		PrismQueryState	   *qs,
 		PrismSorter		   *sorter,
 		const RaBitQParams *rq_params,
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		BlockNumber			first_posting,
 		Dimension			dim,
 		double				soar_lambda,
@@ -291,14 +291,14 @@ prism_build_route_ctx_init(
 	ctx->soar_lambda	  = soar_lambda;
 	ctx->boundary_epsilon = boundary_epsilon;
 
-	ctx->cand_pt = mkt_alloc(
+	ctx->cand_pt = vs_alloc(
 			(size_t)PRISM_SECONDARY_TOPK * dim * sizeof(float));
-	ctx->cand_leaf = mkt_alloc(PRISM_SECONDARY_TOPK * sizeof(uint32_t));
-	ctx->cand_dist = mkt_alloc(PRISM_SECONDARY_TOPK * sizeof(Distance));
-	ctx->pt_r	   = mkt_alloc((size_t)dim * sizeof(float));
-	ctx->enc_buf   = mkt_alloc(MKT_RABITQ_DATA_SIZE(dim));
-	mkt_rabitq_scratch_init(&ctx->enc_scratch, dim);
-	ctx->entry = mkt_alloc(prism_posting_entry_size(dim));
+	ctx->cand_leaf = vs_alloc(PRISM_SECONDARY_TOPK * sizeof(uint32_t));
+	ctx->cand_dist = vs_alloc(PRISM_SECONDARY_TOPK * sizeof(Distance));
+	ctx->pt_r	   = vs_alloc((size_t)dim * sizeof(float));
+	ctx->enc_buf   = vs_alloc(VS_RABITQ_DATA_SIZE(dim));
+	vs_rabitq_scratch_init(&ctx->enc_scratch, dim);
+	ctx->entry = vs_alloc(prism_posting_entry_size(dim));
 
 	ctx->indtuples	= 0;
 	ctx->soar_dupes = 0;
@@ -307,13 +307,13 @@ prism_build_route_ctx_init(
 void
 prism_build_route_ctx_cleanup(PrismBuildRouteCtx *ctx)
 {
-	mkt_free(ctx->cand_pt);
-	mkt_free(ctx->cand_leaf);
-	mkt_free(ctx->cand_dist);
-	mkt_free(ctx->pt_r);
-	mkt_free(ctx->enc_buf);
-	mkt_rabitq_scratch_cleanup(&ctx->enc_scratch);
-	mkt_free(ctx->entry);
+	vs_free(ctx->cand_pt);
+	vs_free(ctx->cand_leaf);
+	vs_free(ctx->cand_dist);
+	vs_free(ctx->pt_r);
+	vs_free(ctx->enc_buf);
+	vs_rabitq_scratch_cleanup(&ctx->enc_scratch);
+	vs_free(ctx->entry);
 }
 
 /* Swap two gathered route candidates (leaf, exact distance, and the
@@ -374,7 +374,7 @@ prism_build_route_emit(
 	 * Squared norm -- zero iff the norm is zero -- skips the sqrt on
 	 * this per-tuple build path. */
 	bool degenerate = ctx->qs->index->metric == DISTANCE_COSINE &&
-					  mkt_l2_norm_squared(vec, dim) == 0.0f;
+					  vs_l2_norm_squared(vec, dim) == 0.0f;
 
 	/*
 	 * Route page-backed, exactly as the query/insert do: descend the centroid
@@ -385,7 +385,7 @@ prism_build_route_emit(
 			ctx->qs,
 			vec,
 			PRISM_SECONDARY_TOPK,
-			MKT_DISTANCE_MODE_ASYMMETRIC,
+			VS_DISTANCE_MODE_ASYMMETRIC,
 			NULL);
 	if (n == 0)
 		return false;
@@ -401,11 +401,11 @@ prism_build_route_emit(
 	{
 		BlockNumber h	  = ctx->qs->beam_results[i].posting_head;
 		ctx->cand_leaf[i] = prism_route_head_to_leaf(ctx->first_posting, h);
-		Page hp			  = mkt_storage_read_page(ctx->storage, h);
+		Page hp			  = vs_storage_read_page(ctx->storage, h);
 		memcpy(ctx->cand_pt + (size_t)i * dim,
 			   prism_posting_pt_centroid(hp),
 			   (size_t)dim * sizeof(float));
-		mkt_storage_release_page(ctx->storage, h);
+		vs_storage_release_page(ctx->storage, h);
 	}
 
 	/*
@@ -426,9 +426,9 @@ prism_build_route_emit(
 	{
 		const float *cand = ctx->cand_pt + (size_t)i * dim;
 		ctx->cand_dist[i] =
-				rank_by_dot ? -mkt_dot_product(ctx->qs->pt_query, cand, dim)
-							: mkt_l2_distance_squared(
-									  ctx->qs->pt_query, cand, dim);
+				rank_by_dot
+						? -vs_dot_product(ctx->qs->pt_query, cand, dim)
+						: vs_l2_distance_squared(ctx->qs->pt_query, cand, dim);
 	}
 
 	uint32_t top = (n < 2) ? n : 2;
@@ -574,15 +574,15 @@ flush_page(PrismPostingBuilder *builder)
 	if (builder->is_first && builder->fixed_first_blkno != InvalidBlockNumber)
 	{
 		blkno = builder->fixed_first_blkno;
-		spage = mkt_storage_write_page(builder->storage, blkno);
+		spage = vs_storage_write_page(builder->storage, blkno);
 	}
 	else
 	{
-		spage = mkt_storage_new_page(builder->storage, &blkno);
+		spage = vs_storage_new_page(builder->storage, &blkno);
 	}
 
 	memcpy(spage, builder->mem_page, BLCKSZ);
-	mkt_storage_commit_page(builder->storage, blkno);
+	vs_storage_commit_page(builder->storage, blkno);
 
 	if (builder->is_first)
 	{
@@ -593,9 +593,9 @@ flush_page(PrismPostingBuilder *builder)
 	if (builder->prev_blkno != InvalidBlockNumber)
 	{
 		Page prev =
-				mkt_storage_write_page(builder->storage, builder->prev_blkno);
+				vs_storage_write_page(builder->storage, builder->prev_blkno);
 		prism_posting_opaque(prev)->next_blkno = blkno;
-		mkt_storage_commit_page(builder->storage, builder->prev_blkno);
+		vs_storage_commit_page(builder->storage, builder->prev_blkno);
 	}
 	builder->prev_blkno = blkno;
 
@@ -610,7 +610,7 @@ flush_page(PrismPostingBuilder *builder)
 static void
 builder_init_common(
 		PrismPostingBuilder		  *builder,
-		MktStorage				  *storage,
+		VsStorage				  *storage,
 		const RaBitQParams		  *params,
 		Dimension				   dim,
 		uint32_t				   cluster_id,
@@ -641,9 +641,9 @@ builder_init_common(
 			   pt_centroid,
 			   dim * sizeof(float));
 
-	builder->enc_buf = params ? mkt_alloc(MKT_RABITQ_DATA_SIZE(dim)) : NULL;
+	builder->enc_buf = params ? vs_alloc(VS_RABITQ_DATA_SIZE(dim)) : NULL;
 	if (params)
-		mkt_rabitq_scratch_init(&builder->enc_scratch, dim);
+		vs_rabitq_scratch_init(&builder->enc_scratch, dim);
 }
 
 /* ----------------------------------------------------------------
@@ -727,22 +727,22 @@ fs_write_group(PrismPostingBuilder *builder)
 
 	memcpy(prism_fastscan_group_tids(content, g, dim),
 		   grp->tids,
-		   MKT_FASTSCAN_GROUP * sizeof(ItemPointerData));
+		   VS_FASTSCAN_GROUP * sizeof(ItemPointerData));
 	memcpy(prism_fastscan_group_f_add(content, g, dim),
 		   grp->f_add,
-		   MKT_FASTSCAN_GROUP * sizeof(float));
+		   VS_FASTSCAN_GROUP * sizeof(float));
 	memcpy(prism_fastscan_group_f_rescale(content, g, dim),
 		   grp->f_rescale,
-		   MKT_FASTSCAN_GROUP * sizeof(float));
+		   VS_FASTSCAN_GROUP * sizeof(float));
 	memcpy(prism_fastscan_group_f_error(content, g, dim),
 		   grp->f_error,
-		   MKT_FASTSCAN_GROUP * sizeof(float));
+		   VS_FASTSCAN_GROUP * sizeof(float));
 
-	mkt_fastscan_pack_codes(
+	vs_fastscan_pack_codes(
 			builder->fs.bits_buf, grp->count, dim, builder->fs.codes_buf);
 	memcpy(prism_fastscan_group_codes(content, g, dim),
 		   builder->fs.codes_buf,
-		   MKT_FASTSCAN_GROUP_BYTES(dim));
+		   VS_FASTSCAN_GROUP_BYTES(dim));
 
 	op->entry_count += (uint16_t)grp->count;
 	builder->fs.groups_on_page++;
@@ -751,7 +751,7 @@ fs_write_group(PrismPostingBuilder *builder)
 	memset(grp, 0, sizeof(*grp));
 	memset(builder->fs.bits_buf,
 		   0,
-		   (size_t)MKT_FASTSCAN_GROUP * MKT_RABITQ_BYTES(dim));
+		   (size_t)VS_FASTSCAN_GROUP * VS_RABITQ_BYTES(dim));
 }
 
 static bool
@@ -765,7 +765,7 @@ fs_write_entry(
 {
 	FsGroupStage *grp		   = &builder->fs.grp;
 	uint32_t	  idx		   = grp->count;
-	uint32_t	  packed_bytes = MKT_RABITQ_BYTES(builder->dim);
+	uint32_t	  packed_bytes = VS_RABITQ_BYTES(builder->dim);
 
 	grp->tids[idx]		= tid;
 	grp->f_add[idx]		= f_add;
@@ -776,7 +776,7 @@ fs_write_entry(
 		   packed_bytes);
 	grp->count++;
 
-	if (grp->count == MKT_FASTSCAN_GROUP)
+	if (grp->count == VS_FASTSCAN_GROUP)
 	{
 		if (builder->fs.groups_on_page >= builder->fs.max_groups)
 			flush_page(builder);
@@ -809,9 +809,9 @@ fs_finalize(PrismPostingBuilder *builder)
 static void
 fs_cleanup(PrismPostingBuilder *builder)
 {
-	mkt_free(builder->fs.bits_buf);
+	vs_free(builder->fs.bits_buf);
 	builder->fs.bits_buf = NULL;
-	mkt_free(builder->fs.codes_buf);
+	vs_free(builder->fs.codes_buf);
 	builder->fs.codes_buf = NULL;
 }
 
@@ -829,7 +829,7 @@ static const PrismPostingPageOps fs_page_ops = {
 void
 prism_posting_builder_init(
 		PrismPostingBuilder *builder,
-		MktStorage			*storage,
+		VsStorage			*storage,
 		const RaBitQParams	*params,
 		Dimension			 dim,
 		uint32_t			 cluster_id,
@@ -851,7 +851,7 @@ prism_posting_builder_init(
 void
 prism_posting_builder_init_fastscan(
 		PrismPostingBuilder *builder,
-		MktStorage			*storage,
+		VsStorage			*storage,
 		const RaBitQParams	*params,
 		Dimension			 dim,
 		uint32_t			 cluster_id,
@@ -869,17 +869,16 @@ prism_posting_builder_init_fastscan(
 			&fs_page_ops,
 			PRISM_POSTING_PAGE_FIRST | PRISM_POSTING_PAGE_FASTSCAN);
 
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
-	builder->fs.bits_buf  = mkt_alloc(
-			 (size_t)MKT_FASTSCAN_GROUP * packed_bytes);
-	builder->fs.codes_buf  = mkt_alloc(MKT_FASTSCAN_GROUP_BYTES(dim));
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
+	builder->fs.bits_buf  = vs_alloc((size_t)VS_FASTSCAN_GROUP * packed_bytes);
+	builder->fs.codes_buf = vs_alloc(VS_FASTSCAN_GROUP_BYTES(dim));
 	builder->fs.max_groups = prism_fastscan_max_groups(dim, true);
 }
 
 void
 prism_posting_builder_init_fmt(
 		PrismPostingBuilder *builder,
-		MktStorage			*storage,
+		VsStorage			*storage,
 		const RaBitQParams	*params,
 		Dimension			 dim,
 		uint32_t			 cluster_id,
@@ -910,7 +909,7 @@ prism_posting_builder_init_fmt(
 void
 prism_posting_builder_adopt_head(
 		PrismPostingBuilder *builder,
-		MktStorage			*storage,
+		VsStorage			*storage,
 		const RaBitQParams	*params,
 		Dimension			 dim,
 		uint32_t			 cluster_id,
@@ -935,10 +934,10 @@ prism_posting_builder_adopt_head(
 	/* Start from the pre-written head itself: it already carries the
 	 * cluster's header and pt_centroid. It must be empty — the pre-scan
 	 * writer never adds entries. */
-	Page hp = mkt_storage_read_page(storage, head_blk);
+	Page hp = vs_storage_read_page(storage, head_blk);
 	Assert(prism_posting_opaque(hp)->live_count == 0);
 	memcpy(builder->mem_page, hp, BLCKSZ);
-	mkt_storage_release_page(storage, head_blk);
+	vs_storage_release_page(storage, head_blk);
 
 	/* No encoder scratch: an adopted head only ever receives pre-encoded
 	 * entries (prism_posting_entry_add from the cluster-keyed sort), and this
@@ -948,10 +947,10 @@ prism_posting_builder_adopt_head(
 
 	if (fastscan)
 	{
-		uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
-		builder->fs.bits_buf  = mkt_alloc(
-				 (size_t)MKT_FASTSCAN_GROUP * packed_bytes);
-		builder->fs.codes_buf  = mkt_alloc(MKT_FASTSCAN_GROUP_BYTES(dim));
+		uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
+		builder->fs.bits_buf  = vs_alloc(
+				 (size_t)VS_FASTSCAN_GROUP * packed_bytes);
+		builder->fs.codes_buf  = vs_alloc(VS_FASTSCAN_GROUP_BYTES(dim));
 		builder->fs.max_groups = prism_fastscan_max_groups(dim, true);
 	}
 }
@@ -1002,7 +1001,7 @@ prism_posting_builder_add_ex(
 
 	Vec32Ref vref = {.data = vector, .dim = builder->dim};
 	Vec32Ref cref = {.data = builder->centroid, .dim = builder->dim};
-	mkt_rabitq_encode_into_ex(
+	vs_rabitq_encode_into_ex(
 			builder->params,
 			vref,
 			cref,
@@ -1010,7 +1009,7 @@ prism_posting_builder_add_ex(
 			&builder->enc_scratch);
 
 	float f_add	  = builder->enc_buf->f_add;
-	float f_error = mkt_rabitq_derive_f_error(
+	float f_error = vs_rabitq_derive_f_error(
 			f_add, builder->enc_buf->f_rescale, builder->dim);
 
 	/* Same stamp the build and insert paths apply -- see the header. */
@@ -1055,12 +1054,11 @@ prism_posting_builder_finish(PrismPostingBuilder *builder)
 	 */
 	if (builder->owns_head && builder->head_blkno != InvalidBlockNumber)
 	{
-		Page hp =
-				mkt_storage_write_page(builder->storage, builder->head_blkno);
+		Page hp = vs_storage_write_page(builder->storage, builder->head_blkno);
 		PrismPostingPageOpaque *op = prism_posting_opaque(hp);
 		op->tail_blkno			   = builder->prev_blkno;
 		op->live_count			   = builder->n_entries;
-		mkt_storage_commit_page(builder->storage, builder->head_blkno);
+		vs_storage_commit_page(builder->storage, builder->head_blkno);
 	}
 
 	return builder->head_blkno;
@@ -1072,8 +1070,8 @@ prism_posting_builder_cleanup(PrismPostingBuilder *builder)
 	builder->page_ops->cleanup(builder);
 	if (builder->enc_buf != NULL)
 	{
-		mkt_rabitq_scratch_cleanup(&builder->enc_scratch);
-		mkt_free(builder->enc_buf);
+		vs_rabitq_scratch_cleanup(&builder->enc_scratch);
+		vs_free(builder->enc_buf);
 		builder->enc_buf = NULL;
 	}
 }
@@ -1098,11 +1096,11 @@ prism_flat_posting_builder_init(
 	builder->max_entries = count;
 
 	size_t buf_size = prism_posting_flat_page_size(dim, count);
-	builder->buf	= mkt_alloc(buf_size);
+	builder->buf	= vs_alloc(buf_size);
 	memset(builder->buf, 0, buf_size);
 	prism_posting_flat_init(builder->buf, count, cluster_id);
 
-	builder->enc_buf = mkt_alloc(MKT_RABITQ_DATA_SIZE(dim));
+	builder->enc_buf = vs_alloc(VS_RABITQ_DATA_SIZE(dim));
 }
 
 void
@@ -1115,9 +1113,9 @@ prism_flat_posting_builder_add(
 
 	Vec32Ref vref = {.data = vector, .dim = dim};
 	Vec32Ref cref = {.data = builder->centroid, .dim = dim};
-	mkt_rabitq_encode_into(builder->params, vref, cref, builder->enc_buf);
+	vs_rabitq_encode_into(builder->params, vref, cref, builder->enc_buf);
 
-	float f_error = mkt_rabitq_derive_f_error(
+	float f_error = vs_rabitq_derive_f_error(
 			builder->enc_buf->f_add, builder->enc_buf->f_rescale, dim);
 
 	prism_posting_flat_add(
@@ -1142,7 +1140,7 @@ prism_flat_posting_builder_cleanup(PrismFlatPostingBuilder *builder)
 {
 	if (builder->enc_buf != NULL)
 	{
-		mkt_free(builder->enc_buf);
+		vs_free(builder->enc_buf);
 		builder->enc_buf = NULL;
 	}
 }
@@ -1162,7 +1160,7 @@ prism_refine_route_row(
 		uint32_t			   *out_idx)
 {
 	uint32_t n =
-			prism_query_route(qs, vec, 1, MKT_DISTANCE_MODE_ASYMMETRIC, NULL);
+			prism_query_route(qs, vec, 1, VS_DISTANCE_MODE_ASYMMETRIC, NULL);
 	if (n == 0)
 		return NULL;
 
@@ -1177,7 +1175,7 @@ prism_refine_route_row(
 	if (cosine)
 	{
 		memcpy(scratch, vec, (size_t)dim * sizeof(float));
-		mkt_l2_normalize(scratch, dim);
+		vs_l2_normalize(scratch, dim);
 		return scratch;
 	}
 	return vec;
@@ -1211,7 +1209,7 @@ void
 prism_write_leaf_head(void *arg, uint32_t leaf, const float *centroid)
 {
 	PrismHeadWriteCtx *h = (PrismHeadWriteCtx *)arg;
-	mkt_rabitq_rotate(h->rq_params, centroid, h->pt);
+	vs_rabitq_rotate(h->rq_params, centroid, h->pt);
 
 	PrismPostingBuilder hb;
 	prism_posting_builder_init_fmt(

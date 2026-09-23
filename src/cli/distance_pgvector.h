@@ -13,26 +13,26 @@
 #include "core/types.h"
 
 /* Single-pair distance functions */
-Distance mkt_distance_l2_pgvector(Vec32Ref a, Vec32Ref b);
-Distance mkt_distance_ip_pgvector(Vec32Ref a, Vec32Ref b);
-Distance mkt_distance_cosine_pgvector(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_l2_pgvector(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_ip_pgvector(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_cosine_pgvector(Vec32Ref a, Vec32Ref b);
 
 /* Batch operations */
-int mkt_distance_batch_l2_pgvector(
+int vs_distance_batch_l2_pgvector(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 
-int mkt_distance_batch_ip_pgvector(
+int vs_distance_batch_ip_pgvector(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 
-int mkt_distance_batch_cosine_pgvector(
+int vs_distance_batch_cosine_pgvector(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,

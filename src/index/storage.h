@@ -1,7 +1,7 @@
 /*
  * storage.h - Unified I/O abstraction for index page access
  *
- * MktStorageOps is a vtable for page and vector I/O. MktStorage is a
+ * VsStorageOps is a vtable for page and vector I/O. VsStorage is a
  * base struct containing an ops pointer that implementations embed as
  * their first member, adding implementation-specific context fields.
  *
@@ -9,30 +9,30 @@
  * callers just see read/release/write/commit.
  *
  * Standalone: embed in a struct with an array of malloc'd 8KB buffers
- * PG mode:    embed in MktPgStorage with Relation + buffer cache
+ * PG mode:    embed in VsPgStorage with Relation + buffer cache
  * Cloud:      embed with remote block store handle (future)
  *
  * Caller pattern:
  *
  *   // Search (read-only hot path)
- *   Page page = mkt_storage_read_page(s, blkno);
+ *   Page page = vs_storage_read_page(s, blkno);
  *   // ... scan page entries ...
- *   mkt_storage_release_page(s, blkno);
+ *   vs_storage_release_page(s, blkno);
  *
  *   // Build (write path)
- *   Page page = mkt_storage_new_page(s, &blkno);
+ *   Page page = vs_storage_new_page(s, &blkno);
  *   prism_centroid_page_init(page, level);
  *   prism_centroid_page_add(page, dim, ...);
- *   mkt_storage_commit_page(s, blkno);
+ *   vs_storage_commit_page(s, blkno);
  */
 
-#ifndef MKT_STORAGE_H
-#define MKT_STORAGE_H
+#ifndef VS_STORAGE_H
+#define VS_STORAGE_H
 
 #include "algo/topk.h"
 #include "core/types.h"
 
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 #include "standalone/pg_compat.h"
 #else
 #include <postgres.h>
@@ -44,33 +44,33 @@
 #include <storage/itemptr.h>
 #endif
 
-typedef struct MktStorage MktStorage;
+typedef struct VsStorage VsStorage;
 
-typedef struct MktStorageOps
+typedef struct VsStorageOps
 {
 	/* Read path */
-	Page (*read_page)(MktStorage *self, BlockNumber blkno);
-	void (*release_page)(MktStorage *self, BlockNumber blkno);
+	Page (*read_page)(VsStorage *self, BlockNumber blkno);
+	void (*release_page)(VsStorage *self, BlockNumber blkno);
 
 	/*
 	 * Advisory async prefetch: hint that blkno will be read soon so the
 	 * implementation can start the I/O (e.g. posix_fadvise via
 	 * PrefetchBuffer). Best-effort -- a later read_page still performs the
 	 * actual read. NULL = unsupported; callers reach it through
-	 * mkt_storage_prefetch(), which tolerates a NULL op and an invalid block.
+	 * vs_storage_prefetch(), which tolerates a NULL op and an invalid block.
 	 */
-	void (*prefetch)(MktStorage *self, BlockNumber blkno);
+	void (*prefetch)(VsStorage *self, BlockNumber blkno);
 
 	/* Write path (durability/WAL is internal to implementation) */
-	Page (*write_page)(MktStorage *self, BlockNumber blkno);
-	Page (*new_page)(MktStorage *self, BlockNumber *blkno_out);
-	void (*commit_page)(MktStorage *self, BlockNumber blkno);
+	Page (*write_page)(VsStorage *self, BlockNumber blkno);
+	Page (*new_page)(VsStorage *self, BlockNumber *blkno_out);
+	void (*commit_page)(VsStorage *self, BlockNumber blkno);
 
 	/*
 	 * Bulk extend: pre-allocate npages contiguous pages.
 	 * Returns the first block number. NULL = not supported.
 	 */
-	BlockNumber (*extend)(MktStorage *self, uint32_t npages);
+	BlockNumber (*extend)(VsStorage *self, uint32_t npages);
 
 	/*
 	 * Rerank candidates with exact distances.
@@ -96,19 +96,19 @@ typedef struct MktStorageOps
 	 * NULL pointer means reranking is not supported.
 	 */
 	uint32_t (*rerank)(
-			MktStorage		   *self,
-			const float		   *query,
-			Dimension			dim,
-			const MktTopKEntry *candidates,
-			uint32_t			count,
-			uint32_t			keep,
-			uint32_t		   *out_indices,
-			Distance		   *out_distances);
-} MktStorageOps;
+			VsStorage		  *self,
+			const float		  *query,
+			Dimension		   dim,
+			const VsTopKEntry *candidates,
+			uint32_t		   count,
+			uint32_t		   keep,
+			uint32_t		  *out_indices,
+			Distance		  *out_distances);
+} VsStorageOps;
 
-struct MktStorage
+struct VsStorage
 {
-	const MktStorageOps *ops;
+	const VsStorageOps *ops;
 };
 
 /* ----------------------------------------------------------------
@@ -116,44 +116,44 @@ struct MktStorage
  * ---------------------------------------------------------------- */
 
 static inline Page
-mkt_storage_read_page(MktStorage *s, BlockNumber blkno)
+vs_storage_read_page(VsStorage *s, BlockNumber blkno)
 {
 	return s->ops->read_page(s, blkno);
 }
 
 static inline void
-mkt_storage_release_page(MktStorage *s, BlockNumber blkno)
+vs_storage_release_page(VsStorage *s, BlockNumber blkno)
 {
 	s->ops->release_page(s, blkno);
 }
 
 static inline void
-mkt_storage_prefetch(MktStorage *s, BlockNumber blkno)
+vs_storage_prefetch(VsStorage *s, BlockNumber blkno)
 {
 	if (s != NULL && s->ops->prefetch != NULL && blkno != InvalidBlockNumber)
 		s->ops->prefetch(s, blkno);
 }
 
 static inline Page
-mkt_storage_write_page(MktStorage *s, BlockNumber blkno)
+vs_storage_write_page(VsStorage *s, BlockNumber blkno)
 {
 	return s->ops->write_page(s, blkno);
 }
 
 static inline Page
-mkt_storage_new_page(MktStorage *s, BlockNumber *blkno_out)
+vs_storage_new_page(VsStorage *s, BlockNumber *blkno_out)
 {
 	return s->ops->new_page(s, blkno_out);
 }
 
 static inline void
-mkt_storage_commit_page(MktStorage *s, BlockNumber blkno)
+vs_storage_commit_page(VsStorage *s, BlockNumber blkno)
 {
 	s->ops->commit_page(s, blkno);
 }
 
 static inline BlockNumber
-mkt_storage_extend(MktStorage *s, uint32_t npages)
+vs_storage_extend(VsStorage *s, uint32_t npages)
 {
 	if (s->ops->extend != NULL)
 		return s->ops->extend(s, npages);
@@ -161,15 +161,15 @@ mkt_storage_extend(MktStorage *s, uint32_t npages)
 }
 
 static inline uint32_t
-mkt_storage_rerank(
-		MktStorage		   *s,
-		const float		   *query,
-		Dimension			dim,
-		const MktTopKEntry *candidates,
-		uint32_t			count,
-		uint32_t			keep,
-		uint32_t		   *out_indices,
-		Distance		   *out_distances)
+vs_storage_rerank(
+		VsStorage		  *s,
+		const float		  *query,
+		Dimension		   dim,
+		const VsTopKEntry *candidates,
+		uint32_t		   count,
+		uint32_t		   keep,
+		uint32_t		  *out_indices,
+		Distance		  *out_distances)
 {
 	return s->ops->rerank(
 			s,
@@ -182,4 +182,4 @@ mkt_storage_rerank(
 			out_distances);
 }
 
-#endif /* MKT_STORAGE_H */
+#endif /* VS_STORAGE_H */

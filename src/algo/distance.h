@@ -20,17 +20,17 @@
  *   Vec32Ref a = {.data = vec1, .dim = 128};
  *   Vec32Ref b = {.data = vec2, .dim = 128};
  *
- *   Distance d = mkt_distance_l2(a, b);
+ *   Distance d = vs_distance_l2(a, b);
  *
  * For batch operations (one query against many database vectors):
  *   Distance *dists = malloc(count * sizeof(Distance));
- *   mkt_distance_batch_l2(query, db_vectors, count, dim, dists);
+ *   vs_distance_batch_l2(query, db_vectors, count, dim, dists);
  */
 
-#ifndef MKT_DISTANCE_H
-#define MKT_DISTANCE_H
+#ifndef VS_DISTANCE_H
+#define VS_DISTANCE_H
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include "core/types.h"
 
@@ -46,10 +46,10 @@
  *
  * Thread-safe: uses atomic flag to ensure single initialization.
  *
- * Note: To test different SIMD implementations, use mkt_simd_set_override()
+ * Note: To test different SIMD implementations, use vs_simd_set_override()
  * from platform.h before calling this function.
  */
-int mkt_distance_init(void);
+int vs_distance_init(void);
 
 /*
  * Single-Pair Distance Functions
@@ -67,7 +67,7 @@ int mkt_distance_init(void);
  * sufficient and avoids a sqrt operation. If you need true L2 distance,
  * apply sqrtf() to the result.
  */
-Distance mkt_distance_l2(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_l2(Vec32Ref a, Vec32Ref b);
 
 /*
  * Negative inner product (for maximum similarity search).
@@ -78,7 +78,7 @@ Distance mkt_distance_l2(Vec32Ref a, Vec32Ref b);
  * consistent with distance metrics. To get the actual inner product,
  * negate the result.
  */
-Distance mkt_distance_ip(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_ip(Vec32Ref a, Vec32Ref b);
 
 /*
  * Cosine distance (1 - cosine similarity).
@@ -88,7 +88,7 @@ Distance mkt_distance_ip(Vec32Ref a, Vec32Ref b);
  * Returns 1.0 for zero vectors (maximum distance). Range is [0, 2] for
  * arbitrary vectors, [0, 1] for normalized vectors.
  */
-Distance mkt_distance_cosine(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_cosine(Vec32Ref a, Vec32Ref b);
 
 /*
  * Generic distance function with runtime metric selection.
@@ -97,7 +97,7 @@ Distance mkt_distance_cosine(Vec32Ref a, Vec32Ref b);
  * less efficient than calling the specific function directly (extra
  * branch), but useful for generic code.
  */
-Distance mkt_distance(Vec32Ref a, Vec32Ref b, DistanceMetric metric);
+Distance vs_distance(Vec32Ref a, Vec32Ref b, DistanceMetric metric);
 
 /*
  * Batch Distance Functions
@@ -117,21 +117,21 @@ Distance mkt_distance(Vec32Ref a, Vec32Ref b, DistanceMetric metric);
  *
  * Returns: 0 on success, -1 on error (dimension mismatch, null pointers)
  */
-int mkt_distance_batch_l2(
+int vs_distance_batch_l2(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 
-int mkt_distance_batch_ip(
+int vs_distance_batch_ip(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
 
-int mkt_distance_batch_cosine(
+int vs_distance_batch_cosine(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
@@ -146,19 +146,19 @@ int mkt_distance_batch_cosine(
  * Useful for debugging and performance validation. The returned string
  * is valid for the lifetime of the program (static storage).
  */
-const char *mkt_distance_impl_name(void);
+const char *vs_distance_impl_name(void);
 
 /*
  * Reset distance system to uninitialized state (TEST ONLY).
  *
- * Used in conjunction with mkt_simd_set_override() to test different
+ * Used in conjunction with vs_simd_set_override() to test different
  * SIMD implementations.
  *
  * Example:
- *   mkt_simd_set_override(SIMD_AVX2);
- *   mkt_distance_force_reinit();  // Will now use AVX2
+ *   vs_simd_set_override(SIMD_AVX2);
+ *   vs_distance_force_reinit();  // Will now use AVX2
  */
-void mkt_distance_force_reinit(void);
+void vs_distance_force_reinit(void);
 
 /*
  * Implementation-specific functions for benchmarking and testing.
@@ -172,24 +172,24 @@ void mkt_distance_force_reinit(void);
  */
 
 /* Compiler-vectorized single-pair functions */
-Distance mkt_distance_l2_compiler(Vec32Ref a, Vec32Ref b);
-Distance mkt_distance_ip_compiler(Vec32Ref a, Vec32Ref b);
-Distance mkt_distance_cosine_compiler(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_l2_compiler(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_ip_compiler(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_cosine_compiler(Vec32Ref a, Vec32Ref b);
 
 /* Compiler-vectorized batch functions */
-int mkt_distance_batch_l2_compiler(
+int vs_distance_batch_l2_compiler(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
-int mkt_distance_batch_ip_compiler(
+int vs_distance_batch_ip_compiler(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
-int mkt_distance_batch_cosine_compiler(
+int vs_distance_batch_cosine_compiler(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
@@ -203,27 +203,27 @@ int mkt_distance_batch_cosine_compiler(
  * They provide the best performance on supported hardware.
  */
 
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 
 #if defined(__x86_64__) || defined(_M_X64)
 /* AVX2 implementations */
-Distance mkt_distance_l2_avx2(Vec32Ref a, Vec32Ref b);
-Distance mkt_distance_ip_avx2(Vec32Ref a, Vec32Ref b);
-Distance mkt_distance_cosine_avx2(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_l2_avx2(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_ip_avx2(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_cosine_avx2(Vec32Ref a, Vec32Ref b);
 
-int mkt_distance_batch_l2_avx2(
+int vs_distance_batch_l2_avx2(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
-int mkt_distance_batch_ip_avx2(
+int vs_distance_batch_ip_avx2(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
-int mkt_distance_batch_cosine_avx2(
+int vs_distance_batch_cosine_avx2(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
@@ -231,23 +231,23 @@ int mkt_distance_batch_cosine_avx2(
 		Distance	*distances);
 
 /* AVX-512 implementations */
-Distance mkt_distance_l2_avx512(Vec32Ref a, Vec32Ref b);
-Distance mkt_distance_ip_avx512(Vec32Ref a, Vec32Ref b);
-Distance mkt_distance_cosine_avx512(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_l2_avx512(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_ip_avx512(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_cosine_avx512(Vec32Ref a, Vec32Ref b);
 
-int mkt_distance_batch_l2_avx512(
+int vs_distance_batch_l2_avx512(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
-int mkt_distance_batch_ip_avx512(
+int vs_distance_batch_ip_avx512(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
-int mkt_distance_batch_cosine_avx512(
+int vs_distance_batch_cosine_avx512(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
@@ -257,23 +257,23 @@ int mkt_distance_batch_cosine_avx512(
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 /* NEON implementations */
-Distance mkt_distance_l2_neon(Vec32Ref a, Vec32Ref b);
-Distance mkt_distance_ip_neon(Vec32Ref a, Vec32Ref b);
-Distance mkt_distance_cosine_neon(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_l2_neon(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_ip_neon(Vec32Ref a, Vec32Ref b);
+Distance vs_distance_cosine_neon(Vec32Ref a, Vec32Ref b);
 
-int mkt_distance_batch_l2_neon(
+int vs_distance_batch_l2_neon(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
-int mkt_distance_batch_ip_neon(
+int vs_distance_batch_ip_neon(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances);
-int mkt_distance_batch_cosine_neon(
+int vs_distance_batch_cosine_neon(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
@@ -281,6 +281,6 @@ int mkt_distance_batch_cosine_neon(
 		Distance	*distances);
 #endif
 
-#endif /* MKT_SIMD_FULL */
+#endif /* VS_SIMD_FULL */
 
-#endif /* MKT_DISTANCE_H */
+#endif /* VS_DISTANCE_H */

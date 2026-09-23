@@ -267,7 +267,7 @@ build_callback(
 
 static void
 write_meta_page(
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		Dimension			dim,
 		uint8_t				nlevels,
 		uint8_t				fan_out,
@@ -283,12 +283,12 @@ write_meta_page(
 {
 	/* Block 0 must already exist (extended or new_page'd by caller).
 	 * Use write_page to write in-place. */
-	Page page = mkt_storage_write_page(storage, 0);
+	Page page = vs_storage_write_page(storage, 0);
 
-	PageInit(page, BLCKSZ, MKT_META_SIZE(dim));
+	PageInit(page, BLCKSZ, PRISM_META_SIZE(dim));
 
 	PrismMetaPage *meta	  = (PrismMetaPage *)PageGetSpecialPointer(page);
-	meta->magic			  = MKT_META_MAGIC;
+	meta->magic			  = PRISM_META_MAGIC;
 	meta->dim			  = dim;
 	meta->nlevels		  = nlevels;
 	meta->centroid_format = (uint8_t)centroid_format;
@@ -298,13 +298,13 @@ write_meta_page(
 	meta->nlist			  = nlist;
 	meta->metric		  = (uint8_t)metric;
 	meta->fan_out		  = (uint8_t)fan_out;
-	meta->flags			  = fastscan ? MKT_META_FLAG_FASTSCAN : 0;
+	meta->flags			  = fastscan ? PRISM_META_FLAG_FASTSCAN : 0;
 	meta->reserved		  = 0;
 	meta->rabitq_seed	  = rabitq_seed;
 
 	memcpy(prism_meta_global_mean(meta), global_mean, dim * sizeof(float));
 
-	mkt_storage_commit_page(storage, 0);
+	vs_storage_commit_page(storage, 0);
 }
 
 /* ----------------------------------------------------------------
@@ -314,7 +314,7 @@ write_meta_page(
 static DistanceMetric
 prism_get_metric(Relation index)
 {
-	FmgrInfo *procinfo = index_getprocinfo(index, 1, MKT_ANN_METRIC_PROC);
+	FmgrInfo *procinfo = index_getprocinfo(index, 1, PRISM_METRIC_PROC);
 	return (DistanceMetric)DatumGetInt32(
 			FunctionCall1Coll(procinfo, InvalidOid, (Datum)0));
 }
@@ -324,9 +324,9 @@ prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 {
 	PrismOptions *opts = (PrismOptions *)index->rd_options;
 	int			  cc   = (opts != NULL) ? opts->centroid_compression
-										: MKT_CENTROID_COMPRESSION_AUTO;
+										: PRISM_CENTROID_COMPRESSION_AUTO;
 	int			  cfs  = (opts != NULL) ? opts->centroid_fastscan
-										: MKT_FASTSCAN_MODE_AUTO;
+										: PRISM_FASTSCAN_MODE_AUTO;
 
 	/*
 	 * RaBitQ centroids estimate L2 distance, which routes correctly for
@@ -337,7 +337,7 @@ prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 	bool compressed;
 	switch (cc)
 	{
-	case MKT_CENTROID_COMPRESSION_ON:
+	case PRISM_CENTROID_COMPRESSION_ON:
 		if (metric == DISTANCE_INNER_PRODUCT)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -345,7 +345,7 @@ prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 							"with vec32_ip_ops")));
 		compressed = true;
 		break;
-	case MKT_CENTROID_COMPRESSION_OFF:
+	case PRISM_CENTROID_COMPRESSION_OFF:
 		compressed = false;
 		break;
 	default: /* AUTO */
@@ -362,7 +362,7 @@ prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 	 * where it is available; ON errors where it is not.
 	 */
 	bool cfs_fits = prism_centroid_fastscan_max_groups(dim) > 0;
-	if (cfs == MKT_FASTSCAN_MODE_ON)
+	if (cfs == PRISM_FASTSCAN_MODE_ON)
 	{
 		if (metric == DISTANCE_INNER_PRODUCT)
 			ereport(ERROR,
@@ -381,11 +381,11 @@ prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 							"%d dimensions",
 							dim)));
 	}
-	if (compressed && cfs != MKT_FASTSCAN_MODE_OFF && cfs_fits)
-		return MKT_CENTROID_FMT_FASTSCAN;
+	if (compressed && cfs != PRISM_FASTSCAN_MODE_OFF && cfs_fits)
+		return PRISM_CENTROID_FMT_FASTSCAN;
 
 	if (compressed)
-		return MKT_CENTROID_FMT_RABITQ;
+		return PRISM_CENTROID_FMT_RABITQ;
 
 	/* Uncompressed centroids follow the column type. Resolved directly rather
 	 * than through the per-backend cache: there is no metadata page to
@@ -404,19 +404,19 @@ static bool
 prism_resolve_fastscan(Relation index, Dimension dim)
 {
 	PrismOptions *opts = (PrismOptions *)index->rd_options;
-	int	 fs	  = (opts != NULL) ? opts->fastscan : MKT_FASTSCAN_MODE_AUTO;
+	int	 fs	  = (opts != NULL) ? opts->fastscan : PRISM_FASTSCAN_MODE_AUTO;
 	bool fits = prism_fastscan_max_groups(dim, true) > 0;
 
 	switch (fs)
 	{
-	case MKT_FASTSCAN_MODE_ON:
+	case PRISM_FASTSCAN_MODE_ON:
 		if (!fits)
 			ereport(ERROR,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 					 errmsg("fastscan=on does not support %d dimensions",
 							dim)));
 		return true;
-	case MKT_FASTSCAN_MODE_OFF:
+	case PRISM_FASTSCAN_MODE_OFF:
 		return false;
 	default: /* AUTO */
 		return fits;
@@ -427,9 +427,9 @@ static uint32_t
 prism_get_fan_out(Relation index)
 {
 	PrismOptions *opts = (PrismOptions *)index->rd_options;
-	if (opts != NULL && opts->fan_out >= MKT_ANN_MIN_FAN_OUT)
+	if (opts != NULL && opts->fan_out >= PRISM_MIN_FAN_OUT)
 		return (uint32_t)opts->fan_out;
-	return MKT_ANN_DEFAULT_FAN_OUT;
+	return PRISM_DEFAULT_FAN_OUT;
 }
 
 static void
@@ -474,21 +474,21 @@ resolve_build_params(
 	else
 	{
 		p->nlist = prism_auto_nlist(*est_rows);
-		if (p->nlist > MKT_ANN_MAX_NLIST)
-			p->nlist = MKT_ANN_MAX_NLIST;
+		if (p->nlist > PRISM_MAX_NLIST)
+			p->nlist = PRISM_MAX_NLIST;
 	}
 
 	p->fan_out =
-			prism_auto_fan_out(p->fan_out, p->nlist, MKT_ANN_DEFAULT_FAN_OUT);
+			prism_auto_fan_out(p->fan_out, p->nlist, PRISM_DEFAULT_FAN_OUT);
 
 	p->kmeans_nredo = (opts != NULL && opts->kmeans_nredo > 0)
 							? (uint32_t)opts->kmeans_nredo
 							: 1;
 
 	p->soar_lambda		= (opts != NULL) ? opts->soar_lambda
-										 : MKT_ANN_DEFAULT_SOAR_LAMBDA;
+										 : PRISM_DEFAULT_SOAR_LAMBDA;
 	p->boundary_epsilon = (opts != NULL) ? opts->boundary_epsilon
-										 : MKT_ANN_DEFAULT_BOUNDARY_EPSILON;
+										 : PRISM_DEFAULT_BOUNDARY_EPSILON;
 	p->fastscan			= prism_resolve_fastscan(index, dim);
 
 	/* The exact-centroid collection size is known from the resolved
@@ -496,16 +496,15 @@ resolve_build_params(
 	 * reported now — at build start, before the expensive phases —
 	 * with the setting that would fit. The collector still enforces
 	 * the budget against the real size at collection time. */
-	if (p->centroid_format == MKT_CENTROID_FMT_RABITQ ||
-		p->centroid_format == MKT_CENTROID_FMT_FASTSCAN)
+	if (p->centroid_format == PRISM_CENTROID_FMT_RABITQ ||
+		p->centroid_format == PRISM_CENTROID_FMT_FASTSCAN)
 	{
 		uint64_t expected =
 				prism_exact_centroid_expected_bytes(p->nlist, p->fan_out, dim);
 		uint64_t budget = prism_exact_centroid_budget(
 				(uint64_t)maintenance_work_mem);
 		if (expected > budget)
-			mkt_warn(
-					"maintenance_work_mem is likely too small for exact "
+			vs_warn("maintenance_work_mem is likely too small for exact "
 					"centroid collection (about " UINT64_FORMAT
 					" kB needed for nlist=%u, fan_out=%u; the budget is "
 					"one eighth of maintenance_work_mem): the build will "
@@ -643,7 +642,7 @@ sample_for_build(
 		for (int i = 0; i < bs->nsamples; i++)
 		{
 			float *v	   = bs->samples + (size_t)i * dim;
-			float  norm_sq = mkt_l2_norm_squared(v, dim);
+			float  norm_sq = vs_l2_norm_squared(v, dim);
 
 			if (norm_sq == 0.0f)
 				continue;
@@ -844,7 +843,7 @@ serial_refine_heads(
 static void
 do_serial_build(
 		PrismBuildState *bs,
-		MktStorage		*storage,
+		VsStorage		*storage,
 		uint64_t		 rabitq_seed,
 		uint32_t		*out_nlist,
 		uint8_t			*out_tree_nlevels,
@@ -865,7 +864,7 @@ do_serial_build(
 	bool	 subsampled	  = false;
 	sample_for_build(bs, &target_nlist, &subsampled);
 
-	KMeansOptions km_opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions km_opts = VS_KMEANS_OPTIONS_DEFAULT;
 	km_opts.algorithm	  = KMEANS_ALGO_LLOYD;
 	km_opts.nredo		  = p->kmeans_nredo;
 
@@ -914,12 +913,12 @@ do_serial_build(
 	float *global_mean = palloc(vec_nbytes);
 	memcpy(global_mean, plan.leaf_mean, vec_nbytes);
 	if (p->metric == DISTANCE_COSINE)
-		mkt_l2_normalize(global_mean, dim);
-	mkt_free(plan.leaf_mean);
+		vs_l2_normalize(global_mean, dim);
+	vs_free(plan.leaf_mean);
 	plan.leaf_mean = NULL;
 
 	prism_build_report_phase(bs->prog, PRISM_BUILD_PHASE_SETUP);
-	RaBitQParams *rq_params = mkt_rabitq_create(dim, rabitq_seed);
+	RaBitQParams *rq_params = vs_rabitq_create(dim, rabitq_seed);
 
 	/* Centroid area is [first_centroid, first_posting); block 0 is metadata.
 	 */
@@ -999,7 +998,7 @@ do_serial_build(
 	 */
 	PrismIndexBase idx_base;
 	/* Route the build for accuracy, not query speed: the build-time routing
-	 * constants rather than the query-tuned GUCs (see MKT_BUILD_CENTROID_*
+	 * constants rather than the query-tuned GUCs (see PRISM_BUILD_CENTROID_*
 	 * in posting_build.h). */
 	prism_build_router_base_init(
 			&idx_base,
@@ -1038,9 +1037,9 @@ do_serial_build(
 	 * encode scan.
 	 */
 	if (subsampled && bs->nsamples >= bs->max_samples &&
-		mkt_leaf_refine_threshold > 0 &&
+		prism_leaf_refine_threshold > 0 &&
 		(uint32_t)bs->nsamples / Max(nlist, 1) <
-				(uint32_t)mkt_leaf_refine_threshold)
+				(uint32_t)prism_leaf_refine_threshold)
 	{
 		instr_time t_ref_start;
 		INSTR_TIME_SET_CURRENT(t_ref_start);
@@ -1225,7 +1224,7 @@ prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 
 	const PrismBuildParams *p			= &bs.params;
 	Dimension				dim			= p->dim;
-	uint64_t				rabitq_seed = MKT_RABITQ_BUILD_SEED;
+	uint64_t				rabitq_seed = VS_RABITQ_BUILD_SEED;
 
 	/* Resolved once, directly -- no metadata page exists yet for the
 	 * per-backend cache to read. The per-tuple callbacks follow the pointer.
@@ -1249,8 +1248,8 @@ prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			est_rows);
 	bs.prog = &prog;
 
-	MktPgStorage storage;
-	mkt_pg_storage_init(&storage, index, NULL, p->metric);
+	VsPgStorage storage;
+	vs_pg_storage_init(&storage, index, NULL, p->metric);
 	storage.build_mode = true;
 
 	double heap_tuples = 0;

@@ -6,9 +6,9 @@
  * dataspace reused for each read.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
-#ifdef MKT_HAVE_HDF5
+#ifdef VS_HAVE_HDF5
 
 #include <stdlib.h>
 
@@ -21,7 +21,7 @@ hdf5_source_next(
 		const float **vec_out,
 		uint32_t	 *id_out)
 {
-	MktHdf5Source *hs = (MktHdf5Source *)src;
+	VsHdf5Source *hs = (VsHdf5Source *)src;
 	if (hs->pos >= src->nvecs)
 		return false;
 
@@ -47,16 +47,16 @@ hdf5_source_next(
 static void
 hdf5_source_reset(Vec32Source *src)
 {
-	MktHdf5Source *hs = (MktHdf5Source *)src;
-	hs->pos			  = 0;
+	VsHdf5Source *hs = (VsHdf5Source *)src;
+	hs->pos			 = 0;
 }
 
 static bool
 hdf5_source_read_all(Vec32Source *src, float *dest)
 {
-	MktHdf5Source *hs	   = (MktHdf5Source *)src;
-	hsize_t		   dims[2] = {src->nvecs, src->dim};
-	hid_t		   mspace  = H5Screate_simple(2, dims, NULL);
+	VsHdf5Source *hs	  = (VsHdf5Source *)src;
+	hsize_t		  dims[2] = {src->nvecs, src->dim};
+	hid_t		  mspace  = H5Screate_simple(2, dims, NULL);
 	if (mspace < 0)
 		return false;
 
@@ -68,7 +68,7 @@ hdf5_source_read_all(Vec32Source *src, float *dest)
 }
 
 int
-mkt_hdf5_source_open(MktHdf5Source *src, const char *path, const char *dataset)
+vs_hdf5_source_open(VsHdf5Source *src, const char *path, const char *dataset)
 {
 	src->file = H5Fopen(path, H5F_ACC_RDONLY, H5P_DEFAULT);
 	if (src->file < 0)
@@ -104,7 +104,7 @@ mkt_hdf5_source_open(MktHdf5Source *src, const char *path, const char *dataset)
 }
 
 void
-mkt_hdf5_source_close(MktHdf5Source *src)
+vs_hdf5_source_close(VsHdf5Source *src)
 {
 	if (src == NULL)
 		return;
@@ -122,4 +122,4 @@ mkt_hdf5_source_close(MktHdf5Source *src)
 		H5Fclose(src->file);
 }
 
-#endif /* MKT_HAVE_HDF5 */
+#endif /* VS_HAVE_HDF5 */

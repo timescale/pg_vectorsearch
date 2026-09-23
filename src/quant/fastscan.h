@@ -20,48 +20,48 @@
  *   - De-quantized after accumulation: ip = accum * delta + bias
  */
 
-#ifndef MKT_FASTSCAN_H
-#define MKT_FASTSCAN_H
+#ifndef VS_FASTSCAN_H
+#define VS_FASTSCAN_H
 
 #include <stdint.h>
 
 #include "core/types.h"
 
 /* Minimum LUT range to avoid division by near-zero */
-#define MKT_FASTSCAN_MIN_RANGE 1e-10f
+#define VS_FASTSCAN_MIN_RANGE 1e-10f
 
 /* Dimensions per subquantizer */
-#define MKT_FASTSCAN_SQ_DIM 4
+#define VS_FASTSCAN_SQ_DIM 4
 
 /* Vectors per VPSHUFB batch */
-#define MKT_FASTSCAN_GROUP 32
+#define VS_FASTSCAN_GROUP 32
 
 /* Number of subquantizers for a given dimension */
-#define MKT_FASTSCAN_NSQ(dim) \
-	(((dim) + MKT_FASTSCAN_SQ_DIM - 1) / MKT_FASTSCAN_SQ_DIM)
+#define VS_FASTSCAN_NSQ(dim) \
+	(((dim) + VS_FASTSCAN_SQ_DIM - 1) / VS_FASTSCAN_SQ_DIM)
 
 /* Number of subquantizer pairs (two nibbles per byte) */
-#define MKT_FASTSCAN_NSQ_PAIRS(dim) ((MKT_FASTSCAN_NSQ(dim) + 1) / 2)
+#define VS_FASTSCAN_NSQ_PAIRS(dim) ((VS_FASTSCAN_NSQ(dim) + 1) / 2)
 
 /* Bytes per 32-vector group in packed fastscan layout.
  * Each column (8 dims = 2 sq) uses 32 bytes. */
-#define MKT_FASTSCAN_GROUP_BYTES(dim) \
-	((uint32_t)(((dim) + 7) / 8) * MKT_FASTSCAN_GROUP)
+#define VS_FASTSCAN_GROUP_BYTES(dim) \
+	((uint32_t)(((dim) + 7) / 8) * VS_FASTSCAN_GROUP)
 
 /* Bytes for the query lookup table.
  * nsq_pairs * 2 to include phantom sq when nsq is odd. */
-#define MKT_FASTSCAN_LUT_BYTES(dim) \
-	((uint32_t)MKT_FASTSCAN_NSQ_PAIRS(dim) * 2 * 16)
+#define VS_FASTSCAN_LUT_BYTES(dim) \
+	((uint32_t)VS_FASTSCAN_NSQ_PAIRS(dim) * 2 * 16)
 
 /*
  * Build a uint8 lookup table per subquantizer from the
  * transformed query vector.
  *
- * lut_out:    output buffer, MKT_FASTSCAN_LUT_BYTES(dim) bytes
+ * lut_out:    output buffer, VS_FASTSCAN_LUT_BYTES(dim) bytes
  * delta_out:  quantization step size for de-quantization
  * bias_out:   LUT min value (sum_vl = vl * nsq)
  */
-void mkt_fastscan_build_lut(
+void vs_fastscan_build_lut(
 		const float *transformed,
 		Dimension	 dim,
 		uint8_t		*lut_out,
@@ -77,17 +77,17 @@ void mkt_fastscan_build_lut(
  *
  * Returns the number of 32-vector groups.
  */
-uint32_t mkt_fastscan_pack_codes(
+uint32_t vs_fastscan_pack_codes(
 		const uint8_t *bits_1bit,
 		uint32_t	   count,
 		Dimension	   dim,
 		uint8_t		  *codes_out);
 
 /*
- * Inverse of mkt_fastscan_pack_codes: reconstruct per-vector 1-bit codes
+ * Inverse of vs_fastscan_pack_codes: reconstruct per-vector 1-bit codes
  * from the packed fastscan layout. bits_out[count * packed_bytes].
  */
-void mkt_fastscan_unpack_codes(
+void vs_fastscan_unpack_codes(
 		const uint8_t *codes,
 		uint32_t	   count,
 		Dimension	   dim,
@@ -97,10 +97,10 @@ void mkt_fastscan_unpack_codes(
  * Required output buffer size for packed fastscan codes.
  */
 static inline uint32_t
-mkt_fastscan_codes_size(uint32_t count, Dimension dim)
+vs_fastscan_codes_size(uint32_t count, Dimension dim)
 {
-	uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) / MKT_FASTSCAN_GROUP;
-	uint32_t group_bytes = MKT_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t ngroups	 = (count + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
+	uint32_t group_bytes = VS_FASTSCAN_GROUP_BYTES(dim);
 	return ngroups * group_bytes;
 }
 
@@ -117,7 +117,7 @@ mkt_fastscan_codes_size(uint32_t count, Dimension dim)
  * accum:  output, 32 uint16 accumulated distances
  * dim:    vector dimension (determines loop count)
  */
-void mkt_fastscan_accumulate(
+void vs_fastscan_accumulate(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		uint16_t	  *accum,
@@ -145,15 +145,15 @@ void mkt_fastscan_accumulate(
  * 1 or 2 (e.g. dim ≤ 4 → nsq = 1), letting the hi-half store run 64 bytes past
  * the end and corrupt the following allocation.
  */
-#define MKT_FASTSCAN_LUT_HACC_BYTES(dim) \
-	((uint32_t)(((MKT_FASTSCAN_NSQ(dim) + 3) / 4) * 128))
+#define VS_FASTSCAN_LUT_HACC_BYTES(dim) \
+	((uint32_t)(((VS_FASTSCAN_NSQ(dim) + 3) / 4) * 128))
 
 /*
  * Build a uint16-precision LUT, split into lo/hi byte tables.
  * Same interface as build_lut but lut_out must be
- * MKT_FASTSCAN_LUT_HACC_BYTES(dim) bytes.
+ * VS_FASTSCAN_LUT_HACC_BYTES(dim) bytes.
  */
-void mkt_fastscan_build_lut_hacc(
+void vs_fastscan_build_lut_hacc(
 		const float *transformed,
 		Dimension	 dim,
 		uint8_t		*lut_out,
@@ -171,15 +171,15 @@ void mkt_fastscan_build_lut_hacc(
  * pointer per scan instead of paying the guarded wrapper's atomic load
  * and double indirection on every group.
  */
-typedef void (*MktFastscanAccumulateHaccFn)(
+typedef void (*VsFastscanAccumulateHaccFn)(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		int32_t		  *accum,
 		Dimension	   dim);
 
-MktFastscanAccumulateHaccFn mkt_fastscan_get_accumulate_hacc(void);
+VsFastscanAccumulateHaccFn vs_fastscan_get_accumulate_hacc(void);
 
-void mkt_fastscan_accumulate_hacc(
+void vs_fastscan_accumulate_hacc(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		int32_t		  *accum,
@@ -190,7 +190,7 @@ void mkt_fastscan_accumulate_hacc(
  */
 struct RaBitQQueryState;
 
-void mkt_fastscan_distance_batch(
+void vs_fastscan_distance_batch(
 		const struct RaBitQQueryState *qstate,
 		const float					  *f_add,
 		const float					  *f_rescale,
@@ -202,46 +202,46 @@ void mkt_fastscan_distance_batch(
 		uint8_t						  *lut_buf,
 		uint16_t					  *accum_buf);
 
-void		mkt_fastscan_init_simd(void);
-void		mkt_fastscan_reset_simd(void);
-const char *mkt_fastscan_impl_name(void);
+void		vs_fastscan_init_simd(void);
+void		vs_fastscan_reset_simd(void);
+const char *vs_fastscan_impl_name(void);
 
 /* SIMD implementations */
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 #if defined(__x86_64__) || defined(_M_X64)
 
-void mkt_fastscan_accumulate_avx2(
+void vs_fastscan_accumulate_avx2(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		uint16_t	  *accum,
 		Dimension	   dim);
 
-void mkt_fastscan_accumulate_hacc_avx2(
+void vs_fastscan_accumulate_hacc_avx2(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		int32_t		  *accum,
 		Dimension	   dim);
 
-void mkt_fastscan_accumulate_avx512(
+void vs_fastscan_accumulate_avx512(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		uint16_t	  *accum,
 		Dimension	   dim);
 
-void mkt_fastscan_build_lut_avx512(
+void vs_fastscan_build_lut_avx512(
 		const float *transformed,
 		Dimension	 dim,
 		uint8_t		*lut_out,
 		float		*delta_out,
 		float		*bias_out);
 
-void mkt_fastscan_accumulate_hacc_avx512(
+void vs_fastscan_accumulate_hacc_avx512(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		int32_t		  *accum,
 		Dimension	   dim);
 
-void mkt_fastscan_build_lut_hacc_avx512(
+void vs_fastscan_build_lut_hacc_avx512(
 		const float *transformed,
 		Dimension	 dim,
 		uint8_t		*lut_out,
@@ -250,13 +250,13 @@ void mkt_fastscan_build_lut_hacc_avx512(
 
 #elif defined(__aarch64__) || defined(_M_ARM64)
 
-void mkt_fastscan_accumulate_neon(
+void vs_fastscan_accumulate_neon(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		uint16_t	  *accum,
 		Dimension	   dim);
 
-void mkt_fastscan_accumulate_hacc_neon(
+void vs_fastscan_accumulate_hacc_neon(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		int32_t		  *accum,
@@ -265,4 +265,4 @@ void mkt_fastscan_accumulate_hacc_neon(
 #endif
 #endif
 
-#endif /* MKT_FASTSCAN_H */
+#endif /* VS_FASTSCAN_H */

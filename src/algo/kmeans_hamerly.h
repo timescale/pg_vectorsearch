@@ -17,8 +17,8 @@
  * Reference: G. Hamerly, "Making k-means even faster", SDM 2010.
  */
 
-#ifndef MKT_KMEANS_HAMERLY_H
-#define MKT_KMEANS_HAMERLY_H
+#ifndef VS_KMEANS_HAMERLY_H
+#define VS_KMEANS_HAMERLY_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -62,4 +62,4 @@ void hamerly_assign(KMeansState *st, HamerlyState *hs);
 void hamerly_update_bounds(
 		KMeansState *st, HamerlyState *hs, const float *old_centroids);
 
-#endif /* MKT_KMEANS_HAMERLY_H */
+#endif /* VS_KMEANS_HAMERLY_H */

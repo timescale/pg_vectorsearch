@@ -44,12 +44,12 @@ void prism_query_ctx_destroy(PrismQueryCtx *ctx);
  * Returns actual number of results (<= k).
  */
 uint32_t prism_query_exec(
-		PrismQueryCtx  *ctx,
-		const float	   *query,
-		uint32_t		k,
-		uint32_t		nprobe,
-		MktDistanceMode mode,
-		bool			rerank,
-		uint32_t	   *result_ids);
+		PrismQueryCtx *ctx,
+		const float	  *query,
+		uint32_t	   k,
+		uint32_t	   nprobe,
+		VsDistanceMode mode,
+		bool		   rerank,
+		uint32_t	  *result_ids);
 
 #endif /* PRISM_STANDALONE_QUERY_H */

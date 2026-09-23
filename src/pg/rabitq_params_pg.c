@@ -1,5 +1,5 @@
 /*
- * mkt_pg_rabitq_params.c - PostgreSQL functions for mkt.rabitq_params type
+ * vs_pg_rabitq_params.c - PostgreSQL functions for the rabitq_params type
  *
  * Stores the orthogonal transform matrix P for RaBitQ encoding.
  * Generated via rabitq_params_generate(dim, seed); text I/O outputs
@@ -19,9 +19,9 @@
 
 /*
  * The generator caps dim at PRISM_INDEX_MAX_DIM (see
- * mkt_pg_check_rabitq_params_dim_valid). Prove at compile time that a
+ * vs_pg_check_rabitq_params_dim_valid). Prove at compile time that a
  * matrix that large still fits a single allocation, so raising the cap
- * without revisiting MKT_RABITQ_PARAMS_PG_SIZE breaks the build here
+ * without revisiting VS_RABITQ_PARAMS_PG_SIZE breaks the build here
  * rather than silently over-allocating (or, on 32-bit, overflowing the
  * size computation) at run time.
  */
@@ -31,16 +31,16 @@ StaticAssertDecl(
 											  sizeof(float) <=
 				MaxAllocSize,
 		"rabitq_params matrix at PRISM_INDEX_MAX_DIM exceeds MaxAllocSize; "
-		"revisit MKT_RABITQ_PARAMS_PG_SIZE and the dim cap together");
+		"revisit VS_RABITQ_PARAMS_PG_SIZE and the dim cap together");
 
 /* ----------------------------------------------------------------
  * Type I/O
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_params_in);
+PG_FUNCTION_INFO_V1(vs_rabitq_params_in);
 
 Datum
-mkt_rabitq_params_in(PG_FUNCTION_ARGS)
+vs_rabitq_params_in(PG_FUNCTION_ARGS)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -50,10 +50,10 @@ mkt_rabitq_params_in(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_params_out);
+PG_FUNCTION_INFO_V1(vs_rabitq_params_out);
 
 Datum
-mkt_rabitq_params_out(PG_FUNCTION_ARGS)
+vs_rabitq_params_out(PG_FUNCTION_ARGS)
 {
 	RaBitQParamsPG *p = PG_GETARG_RABITQ_PARAMS_P(0);
 	StringInfoData	buf;
@@ -69,24 +69,24 @@ mkt_rabitq_params_out(PG_FUNCTION_ARGS)
  * Generate function
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_params_generate_pg);
+PG_FUNCTION_INFO_V1(vs_rabitq_params_generate_pg);
 
 Datum
-mkt_rabitq_params_generate_pg(PG_FUNCTION_ARGS)
+vs_rabitq_params_generate_pg(PG_FUNCTION_ARGS)
 {
 	int32 dim  = PG_GETARG_INT32(0);
 	int64 seed = PG_GETARG_INT64(1);
 
-	mkt_pg_check_rabitq_params_dim_valid(dim);
+	vs_pg_check_rabitq_params_dim_valid(dim);
 
-	Size			size   = MKT_RABITQ_PARAMS_PG_SIZE(dim);
+	Size			size   = VS_RABITQ_PARAMS_PG_SIZE(dim);
 	RaBitQParamsPG *result = (RaBitQParamsPG *)palloc0(size);
 	SET_VARSIZE(result, size);
 	result->dim	   = (int16_t)dim;
 	result->unused = 0;
 	result->seed   = (uint64_t)seed;
 
-	int ret = mkt_random_orthogonal_matrix(
+	int ret = vs_random_orthogonal_matrix(
 			result->P, (Dimension)dim, (uint64_t)seed);
 	if (ret != 0)
 		ereport(ERROR,
@@ -101,19 +101,19 @@ mkt_rabitq_params_generate_pg(PG_FUNCTION_ARGS)
  * Accessor functions
  * ---------------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_params_dim);
+PG_FUNCTION_INFO_V1(vs_rabitq_params_dim);
 
 Datum
-mkt_rabitq_params_dim(PG_FUNCTION_ARGS)
+vs_rabitq_params_dim(PG_FUNCTION_ARGS)
 {
 	RaBitQParamsPG *p = PG_GETARG_RABITQ_PARAMS_P(0);
 	PG_RETURN_INT32((int32)p->dim);
 }
 
-PG_FUNCTION_INFO_V1(mkt_rabitq_params_seed);
+PG_FUNCTION_INFO_V1(vs_rabitq_params_seed);
 
 Datum
-mkt_rabitq_params_seed(PG_FUNCTION_ARGS)
+vs_rabitq_params_seed(PG_FUNCTION_ARGS)
 {
 	RaBitQParamsPG *p = PG_GETARG_RABITQ_PARAMS_P(0);
 	PG_RETURN_INT64((int64)p->seed);

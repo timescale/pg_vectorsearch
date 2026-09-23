@@ -11,8 +11,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include "mkt_test.h"
 #include "standalone/parallel_scan.h"
+#include "vs_test.h"
 
 TEST_GROUP(ParallelScan);
 

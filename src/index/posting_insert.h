@@ -5,7 +5,7 @@
  * so the route/encode/append logic is exercised by unit tests without
  * PostgreSQL.
  *
- * All operations go through the MktStorage vtable one page at a time (the PG
+ * All operations go through the VsStorage vtable one page at a time (the PG
  * backing holds a single buffer), so a caller MUST serialize concurrent
  * inserts to the SAME cluster externally — the PG glue takes a per-cluster
  * lock; single-threaded callers (standalone) need none.
@@ -26,7 +26,7 @@
  *
  * pt_input is P^T * v — the inserted vector already rotated by the caller (the
  * same rotation build/scan apply). The vector is encoded relative to the
- * cluster head's stored pt_centroid via mkt_rabitq_encode_from_pt (so no raw
+ * cluster head's stored pt_centroid via vs_rabitq_encode_from_pt (so no raw
  * centroid is needed) and appended as an AoS entry to the chain tail, growing
  * a new overflow page when the tail is full. On FASTSCAN indexes the appended
  * page is still plain AoS (packed groups can't take an in-place append); the
@@ -46,7 +46,7 @@
  * Returns true on success.
  */
 bool prism_posting_insert_one(
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		const RaBitQParams *params,
 		Dimension			dim,
 		BlockNumber			head_blkno,
@@ -71,7 +71,7 @@ bool prism_posting_insert_one(
  * the per-cluster page lock).
  */
 uint32_t prism_posting_tombstone_chain(
-		MktStorage *storage,
+		VsStorage  *storage,
 		Dimension	dim,
 		BlockNumber head_blkno,
 		bool (*is_dead)(ItemPointerData tid, void *state),

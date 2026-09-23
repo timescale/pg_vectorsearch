@@ -16,7 +16,7 @@ static uint32_t g_simd_override = 0xFFFFFFFF;
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || \
 		defined(_M_IX86)
 
-#define MKT_X86 1
+#define VS_X86 1
 
 /*
  * CPUID wrapper for x86/x64.
@@ -162,7 +162,7 @@ detect_simd_x86(void)
 
 #elif defined(__aarch64__) || defined(_M_ARM64)
 
-#define MKT_ARM64 1
+#define VS_ARM64 1
 
 static SimdCapability
 detect_simd_arm64(void)
@@ -173,7 +173,7 @@ detect_simd_arm64(void)
 
 #elif defined(__arm__) || defined(_M_ARM)
 
-#define MKT_ARM32 1
+#define VS_ARM32 1
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 static SimdCapability
@@ -192,18 +192,18 @@ detect_simd_arm32(void)
 #endif /* architecture detection */
 
 SimdCapability
-mkt_detect_simd(void)
+vs_detect_simd(void)
 {
 	if (g_simd_detected)
 		return g_simd_caps;
 
 	SimdCapability detected;
 
-#if defined(MKT_X86)
+#if defined(VS_X86)
 	detected = detect_simd_x86();
-#elif defined(MKT_ARM64)
+#elif defined(VS_ARM64)
 	detected = detect_simd_arm64();
-#elif defined(MKT_ARM32)
+#elif defined(VS_ARM32)
 	detected = detect_simd_arm32();
 #else
 	detected = SIMD_NONE;
@@ -220,14 +220,14 @@ mkt_detect_simd(void)
 }
 
 void
-mkt_simd_set_override(uint32_t mask)
+vs_simd_set_override(uint32_t mask)
 {
 	g_simd_override = mask;
 	g_simd_detected = false; /* Force re-detection */
 }
 
 void
-mkt_simd_reset_cache(void)
+vs_simd_reset_cache(void)
 {
 	g_simd_detected = false;
 	g_simd_caps		= SIMD_NONE;

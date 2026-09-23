@@ -6,9 +6,9 @@
  * Falls back to "unknown" when not built from a git checkout.
  */
 
-#ifndef MKT_GIT_COMMIT_H
-#define MKT_GIT_COMMIT_H
+#ifndef VS_GIT_COMMIT_H
+#define VS_GIT_COMMIT_H
 
-#define MKT_GIT_COMMIT "@VCS_TAG@"
+#define VS_GIT_COMMIT "@VCS_TAG@"
 
-#endif /* MKT_GIT_COMMIT_H */
+#endif /* VS_GIT_COMMIT_H */

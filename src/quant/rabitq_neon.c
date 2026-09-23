@@ -5,9 +5,9 @@
  * into 4 float masks for selective addition.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 
@@ -63,7 +63,7 @@ expand_nibble_to_mask_neon(uint8_t nibble)
  * to produce one byte.
  */
 void
-mkt_rabitq_extract_signs_neon(
+vs_rabitq_extract_signs_neon(
 		const float *transformed, uint8_t *bits, Dimension dim)
 {
 	float32x4_t zero = vdupq_n_f32(0.0f);
@@ -122,7 +122,7 @@ mkt_rabitq_extract_signs_neon(
  * Processes 4 floats at a time using masked addition.
  */
 float
-mkt_rabitq_inner_product_neon(
+vs_rabitq_inner_product_neon(
 		const float *transformed, const uint8_t *bits, Dimension dim)
 {
 	float32x4_t sum = vdupq_n_f32(0.0f);
@@ -164,7 +164,7 @@ mkt_rabitq_inner_product_neon(
 	}
 
 	/* Horizontal sum */
-	float result = mkt_horizontal_sum_neon(sum);
+	float result = vs_horizontal_sum_neon(sum);
 
 	/* Scalar tail (LSB-first) */
 	for (; i < dim; i++)
@@ -189,7 +189,7 @@ mkt_rabitq_inner_product_neon(
  * Tail candidates (count % 4) use the single-candidate kernel.
  */
 void
-mkt_rabitq_inner_product_multi_neon(
+vs_rabitq_inner_product_multi_neon(
 		const float	  *transformed,
 		const uint8_t *bits,
 		uint32_t	   stride,
@@ -305,10 +305,10 @@ mkt_rabitq_inner_product_multi_neon(
 			i += 4;
 		}
 
-		results[base + 0] = mkt_horizontal_sum_neon(sum0);
-		results[base + 1] = mkt_horizontal_sum_neon(sum1);
-		results[base + 2] = mkt_horizontal_sum_neon(sum2);
-		results[base + 3] = mkt_horizontal_sum_neon(sum3);
+		results[base + 0] = vs_horizontal_sum_neon(sum0);
+		results[base + 1] = vs_horizontal_sum_neon(sum1);
+		results[base + 2] = vs_horizontal_sum_neon(sum2);
+		results[base + 3] = vs_horizontal_sum_neon(sum3);
 
 		/* Scalar tail for remaining dimensions */
 		for (; i < dim; i++)
@@ -330,11 +330,11 @@ mkt_rabitq_inner_product_multi_neon(
 	/* Handle remaining candidates with single-candidate kernel */
 	for (uint32_t i = groups * 4; i < groups * 4 + tail; i++)
 	{
-		results[i] = mkt_rabitq_inner_product_neon(
+		results[i] = vs_rabitq_inner_product_neon(
 				transformed, bits + (size_t)i * stride, dim);
 	}
 }
 
 #endif /* aarch64 */
 
-#endif /* MKT_SIMD_FULL */
+#endif /* VS_SIMD_FULL */

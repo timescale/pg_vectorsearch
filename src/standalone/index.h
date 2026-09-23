@@ -40,17 +40,17 @@ typedef struct PrismClusterList
  * ---------------------------------------------------------------- */
 typedef struct ArrayPageStorage
 {
-	MktStorage		base; /* must be first */
+	VsStorage		base; /* must be first */
 	char		   *pages;
 	uint32_t		next_blkno;
 	uint32_t		page_cap;
-	MktMemCtx		memctx;		 /* owning context for page growth */
+	VsMemCtx		memctx;		 /* owning context for page growth */
 	pthread_mutex_t alloc_mutex; /* protects next_blkno + page growth */
 	const float	   *all_vectors; /* for reranking (NULL if not set) */
 	uint32_t		nvecs;
 	DistanceMetric	metric;
-	MktTopK			rerank_topk;	/* pre-allocated, reset per query */
-	MktTopKEntry   *rerank_entries; /* pre-allocated extraction buffer */
+	VsTopK			rerank_topk;	/* pre-allocated, reset per query */
+	VsTopKEntry	   *rerank_entries; /* pre-allocated extraction buffer */
 	uint32_t		rerank_cap;		/* entries buffer capacity */
 } ArrayPageStorage;
 
@@ -87,7 +87,7 @@ typedef struct PrismIndexConfig
  * ---------------------------------------------------------------- */
 typedef struct PrismIndex
 {
-	/* Common index descriptor (passed to MktSearchCtx) */
+	/* Common index descriptor (passed to VsSearchCtx) */
 	PrismIndexBase base;
 
 	/* Concrete storage (base.centroid_storage/posting_storage
@@ -119,7 +119,7 @@ typedef struct PrismIndex
 
 	/* Memory context owning all index allocations.
 	 * Deleting this frees everything at once. */
-	MktMemCtx memctx;
+	VsMemCtx memctx;
 } PrismIndex;
 
 /* ----------------------------------------------------------------

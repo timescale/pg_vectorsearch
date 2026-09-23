@@ -38,15 +38,15 @@ struct PrismQueryCtx
 	bool			has_query_state;
 
 	/* Reranking (standalone-specific) */
-	MktTopK		  rerank_topk;
-	MktTopKEntry *rerank_buf;
-	uint32_t	  rerank_cap;
+	VsTopK		 rerank_topk;
+	VsTopKEntry *rerank_buf;
+	uint32_t	 rerank_cap;
 
 	/* Flat/brute-force fallback buffers */
 	float				 *query_buf;
 	PrismCentroidResult	 *beam_results;
 	PrismCentroidScratch *centroid_scratch;
-	MktTopK				  topk;
+	VsTopK				  topk;
 	PrismPostingScan	  posting_scan;
 	float				 *pt_query;
 	float				 *pt_cents_buf;
@@ -59,11 +59,11 @@ struct PrismQueryCtx
 
 	/* Long-lived memory context for all query context buffers.
 	 * Deleting this frees everything at once (no individual frees). */
-	MktMemCtx memctx;
+	VsMemCtx memctx;
 
 	/* Child arena for transient per-query allocations (beam search
 	 * internals). Reset per query — no create/delete overhead. */
-	MktMemCtx arena;
+	VsMemCtx arena;
 
 	/* Limits */
 	uint32_t max_k;
@@ -80,10 +80,10 @@ prism_query_ctx_create(PrismIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 	if (idx == NULL || max_k == 0 || max_nprobe == 0)
 		return NULL;
 
-	MktMemCtx memctx  = mkt_memctx_create(NULL, "query_ctx");
-	MktMemCtx old_ctx = mkt_memctx_switch(memctx);
+	VsMemCtx memctx	 = vs_memctx_create(NULL, "query_ctx");
+	VsMemCtx old_ctx = vs_memctx_switch(memctx);
 
-	PrismQueryCtx *ctx = mkt_alloc0(sizeof(PrismQueryCtx));
+	PrismQueryCtx *ctx = vs_alloc0(sizeof(PrismQueryCtx));
 	ctx->idx		   = idx;
 	ctx->max_k		   = max_k;
 	ctx->max_nprobe	   = max_nprobe;
@@ -105,22 +105,21 @@ prism_query_ctx_create(PrismIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 	else
 	{
 		/* Flat/brute-force: allocate standalone buffers */
-		uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+		uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
 
-		ctx->query_buf	  = mkt_alloc(dim * sizeof(float));
-		ctx->beam_results = mkt_alloc(
-				max_nprobe * sizeof(PrismCentroidResult));
+		ctx->query_buf	  = vs_alloc(dim * sizeof(float));
+		ctx->beam_results = vs_alloc(max_nprobe * sizeof(PrismCentroidResult));
 		ctx->centroid_scratch = prism_centroid_scratch_create(dim, max_nprobe);
-		mkt_topk_init(&ctx->topk, max_k);
+		vs_topk_init(&ctx->topk, max_k);
 
 		if (idx->has_posting_data)
 		{
-			MktStorage *storage = (idx->posting_fmt == PRISM_POSTING_FMT_PAGES)
-										? &idx->posting_storage.base
-										: NULL;
-			char	*page_base	= (idx->posting_fmt == PRISM_POSTING_FMT_PAGES)
-										? idx->posting_storage.pages
-										: NULL;
+			VsStorage *storage = (idx->posting_fmt == PRISM_POSTING_FMT_PAGES)
+									   ? &idx->posting_storage.base
+									   : NULL;
+			char	*page_base = (idx->posting_fmt == PRISM_POSTING_FMT_PAGES)
+									   ? idx->posting_storage.pages
+									   : NULL;
 			uint32_t max_per_page = (idx->posting_fmt ==
 									 PRISM_POSTING_FMT_PAGES)
 										  ? prism_posting_max_entries(dim)
@@ -139,31 +138,31 @@ prism_query_ctx_create(PrismIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 						&ctx->posting_scan, idx->base.fastscan);
 		}
 
-		ctx->pt_cents_buf		 = mkt_alloc(max_nprobe * dim * sizeof(float));
-		ctx->pt_query			 = mkt_alloc_aligned(dim * sizeof(float), 64);
-		ctx->beam_transformed	 = mkt_alloc_aligned(dim * sizeof(float), 64);
-		ctx->cluster_transformed = mkt_alloc_aligned(dim * sizeof(float), 64);
-		ctx->beam_query_bits	 = mkt_alloc_aligned(packed_bytes, 64);
-		ctx->cluster_query_bits	 = mkt_alloc_aligned(packed_bytes, 64);
+		ctx->pt_cents_buf		 = vs_alloc(max_nprobe * dim * sizeof(float));
+		ctx->pt_query			 = vs_alloc_aligned(dim * sizeof(float), 64);
+		ctx->beam_transformed	 = vs_alloc_aligned(dim * sizeof(float), 64);
+		ctx->cluster_transformed = vs_alloc_aligned(dim * sizeof(float), 64);
+		ctx->beam_query_bits	 = vs_alloc_aligned(packed_bytes, 64);
+		ctx->cluster_query_bits	 = vs_alloc_aligned(packed_bytes, 64);
 
 		ctx->beam_qs.transformed	= ctx->beam_transformed;
 		ctx->beam_qs.query_bits		= ctx->beam_query_bits;
 		ctx->cluster_qs.transformed = ctx->cluster_transformed;
 		ctx->cluster_qs.query_bits	= ctx->cluster_query_bits;
 
-		mkt_rabitq_init_query_constants(&ctx->beam_qs, dim);
-		mkt_rabitq_init_query_constants(&ctx->cluster_qs, dim);
+		vs_rabitq_init_query_constants(&ctx->beam_qs, dim);
+		vs_rabitq_init_query_constants(&ctx->cluster_qs, dim);
 	}
 
 	/* Reranking buffers (used for both paged and flat) */
-	mkt_topk_init(&ctx->rerank_topk, max_k);
+	vs_topk_init(&ctx->rerank_topk, max_k);
 	ctx->rerank_cap = max_k * 16;
-	ctx->rerank_buf = mkt_alloc(ctx->rerank_cap * sizeof(MktTopKEntry));
+	ctx->rerank_buf = vs_alloc(ctx->rerank_cap * sizeof(VsTopKEntry));
 
 	/* Child arena for transient per-query allocations */
-	ctx->arena = mkt_memctx_create(memctx, "query_arena");
+	ctx->arena = vs_memctx_create(memctx, "query_arena");
 
-	mkt_memctx_switch(old_ctx);
+	vs_memctx_switch(old_ctx);
 	return ctx;
 }
 
@@ -179,15 +178,15 @@ prism_query_ctx_destroy(PrismQueryCtx *ctx)
 	{
 		if (ctx->idx->has_posting_data)
 			prism_posting_scan_cleanup(&ctx->posting_scan);
-		mkt_topk_cleanup(&ctx->topk);
+		vs_topk_cleanup(&ctx->topk);
 		prism_centroid_scratch_free(ctx->centroid_scratch);
 		ctx->centroid_scratch = NULL;
 	}
 
-	mkt_topk_cleanup(&ctx->rerank_topk);
+	vs_topk_cleanup(&ctx->rerank_topk);
 
 	/* Deleting memctx frees ctx itself, all buffers, and the arena */
-	mkt_memctx_delete(ctx->memctx);
+	vs_memctx_delete(ctx->memctx);
 }
 
 /* ----------------------------------------------------------------
@@ -196,17 +195,17 @@ prism_query_ctx_destroy(PrismQueryCtx *ctx)
 
 static uint32_t
 exec_paged(
-		PrismQueryCtx  *ctx,
-		const float	   *query,
-		uint32_t		k,
-		uint32_t		nprobe,
-		MktDistanceMode mode,
-		bool			rerank,
-		uint32_t	   *result_ids)
+		PrismQueryCtx *ctx,
+		const float	  *query,
+		uint32_t	   k,
+		uint32_t	   nprobe,
+		VsDistanceMode mode,
+		bool		   rerank,
+		uint32_t	  *result_ids)
 {
-	MktMemCtx old = mkt_memctx_switch(ctx->memctx);
+	VsMemCtx old = vs_memctx_switch(ctx->memctx);
 	prism_query_execute(&ctx->search, query, k, nprobe, mode, rerank, NULL);
-	mkt_memctx_switch(old);
+	vs_memctx_switch(old);
 
 	uint32_t nresults = ctx->search.nresults;
 	for (uint32_t i = 0; i < nresults; i++)
@@ -225,13 +224,13 @@ exec_paged(
 
 static uint32_t
 exec_fallback(
-		PrismQueryCtx  *ctx,
-		const float	   *query,
-		uint32_t		k,
-		uint32_t		nprobe,
-		MktDistanceMode mode,
-		bool			rerank,
-		uint32_t	   *result_ids)
+		PrismQueryCtx *ctx,
+		const float	  *query,
+		uint32_t	   k,
+		uint32_t	   nprobe,
+		VsDistanceMode mode,
+		bool		   rerank,
+		uint32_t	  *result_ids)
 {
 	PrismIndex *idx = ctx->idx;
 	Dimension	dim = idx->base.dim;
@@ -241,15 +240,15 @@ exec_fallback(
 	if (nprobe > ctx->max_nprobe)
 		nprobe = ctx->max_nprobe;
 
-	MktMemCtx old_ctx = mkt_memctx_switch(ctx->arena);
-	mkt_memctx_reset(ctx->arena);
+	VsMemCtx old_ctx = vs_memctx_switch(ctx->arena);
+	vs_memctx_reset(ctx->arena);
 
 	/* Normalize query */
 	const float *qvec = query;
 	if (idx->base.metric == DISTANCE_COSINE)
 	{
 		memcpy(ctx->query_buf, query, dim * sizeof(float));
-		float norm = mkt_l2_norm(ctx->query_buf, dim);
+		float norm = vs_l2_norm(ctx->query_buf, dim);
 		if (norm > 0.0f)
 			vec32_scale(ctx->query_buf, 1.0f / norm, ctx->query_buf, dim);
 		qvec = ctx->query_buf;
@@ -259,11 +258,11 @@ exec_fallback(
 	RaBitQQueryState *qs = NULL;
 	if (idx->base.params != NULL)
 	{
-		mkt_rabitq_rotate(idx->base.params, qvec, ctx->pt_query);
+		vs_rabitq_rotate(idx->base.params, qvec, ctx->pt_query);
 
-		if (idx->base.centroid_format == MKT_CENTROID_FMT_RABITQ)
+		if (idx->base.centroid_format == PRISM_CENTROID_FMT_RABITQ)
 		{
-			mkt_rabitq_init_query_state(
+			vs_rabitq_init_query_state(
 					&ctx->beam_qs,
 					ctx->pt_query,
 					idx->base.pt_global_mean,
@@ -295,10 +294,10 @@ exec_fallback(
 			 NULL,
 			 &beam_stats);
 
-	mkt_memctx_switch(old_ctx);
+	vs_memctx_switch(old_ctx);
 
 	/* Reset top-K */
-	mkt_topk_reset_to_k(&ctx->topk, k);
+	vs_topk_reset_to_k(&ctx->topk, k);
 
 	/* Flat mode or brute-force */
 	if (idx->has_posting_data && idx->base.params != NULL)
@@ -310,7 +309,7 @@ exec_fallback(
 				continue;
 
 			const float *pt_cent = idx->pt_centroids + (size_t)li * dim;
-			mkt_rabitq_init_query_state(
+			vs_rabitq_init_query_state(
 					&ctx->cluster_qs, ctx->pt_query, pt_cent, dim, mode);
 
 			prism_posting_scan_begin_flat(
@@ -332,8 +331,8 @@ exec_fallback(
 			{
 				uint32_t	 vid = cl->ids[vi];
 				const float *vec = idx->all_vectors + (size_t)vid * dim;
-				Distance	 d	 = mkt_l2_distance_squared(qvec, vec, dim);
-				mkt_topk_insert(&ctx->topk, d, 0.0f, vid);
+				Distance	 d	 = vs_l2_distance_squared(qvec, vec, dim);
+				vs_topk_insert(&ctx->topk, d, 0.0f, vid);
 			}
 		}
 	}
@@ -345,36 +344,36 @@ exec_fallback(
 		if (ctx->topk.cand_count > ctx->rerank_cap)
 		{
 			ctx->rerank_cap = ctx->topk.cand_count;
-			ctx->rerank_buf = mkt_realloc(
-					ctx->rerank_buf, ctx->rerank_cap * sizeof(MktTopKEntry));
+			ctx->rerank_buf = vs_realloc(
+					ctx->rerank_buf, ctx->rerank_cap * sizeof(VsTopKEntry));
 		}
 
 		uint32_t n_cands;
-		mkt_topk_extract_sorted(&ctx->topk, ctx->rerank_buf, &n_cands);
+		vs_topk_extract_sorted(&ctx->topk, ctx->rerank_buf, &n_cands);
 
-		mkt_topk_reset_to_k(&ctx->rerank_topk, k);
+		vs_topk_reset_to_k(&ctx->rerank_topk, k);
 
 		for (uint32_t i = 0; i < n_cands; i++)
 		{
 			uint32_t vid = prism_posting_decode_vector_id(
 					ctx->rerank_buf[i].id);
 			const float *vec = idx->all_vectors + (size_t)vid * dim;
-			Distance	 d	 = mkt_l2_distance_squared(qvec, vec, dim);
-			mkt_topk_insert(&ctx->rerank_topk, d, 0.0f, ctx->rerank_buf[i].id);
+			Distance	 d	 = vs_l2_distance_squared(qvec, vec, dim);
+			vs_topk_insert(&ctx->rerank_topk, d, 0.0f, ctx->rerank_buf[i].id);
 		}
 
-		mkt_topk_extract_sorted(&ctx->rerank_topk, ctx->rerank_buf, &count);
+		vs_topk_extract_sorted(&ctx->rerank_topk, ctx->rerank_buf, &count);
 	}
 	else
 	{
 		if (ctx->topk.cand_count > ctx->rerank_cap)
 		{
 			ctx->rerank_cap = ctx->topk.cand_count;
-			ctx->rerank_buf = mkt_realloc(
-					ctx->rerank_buf, ctx->rerank_cap * sizeof(MktTopKEntry));
+			ctx->rerank_buf = vs_realloc(
+					ctx->rerank_buf, ctx->rerank_cap * sizeof(VsTopKEntry));
 		}
 
-		mkt_topk_extract_sorted(&ctx->topk, ctx->rerank_buf, &count);
+		vs_topk_extract_sorted(&ctx->topk, ctx->rerank_buf, &count);
 	}
 
 	uint32_t out = count < k ? count : k;
@@ -390,13 +389,13 @@ exec_fallback(
 
 uint32_t
 prism_query_exec(
-		PrismQueryCtx  *ctx,
-		const float	   *query,
-		uint32_t		k,
-		uint32_t		nprobe,
-		MktDistanceMode mode,
-		bool			rerank,
-		uint32_t	   *result_ids)
+		PrismQueryCtx *ctx,
+		const float	  *query,
+		uint32_t	   k,
+		uint32_t	   nprobe,
+		VsDistanceMode mode,
+		bool		   rerank,
+		uint32_t	  *result_ids)
 {
 	if (ctx == NULL || query == NULL || result_ids == NULL || k == 0)
 		return 0;

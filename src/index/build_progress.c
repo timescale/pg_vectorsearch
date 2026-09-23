@@ -35,7 +35,7 @@ prism_build_phase_name(int phase)
 	return phase_names[phase];
 }
 
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 
 /*
  * Standalone build-progress seam: no-op stubs. Standalone introspection is
@@ -105,4 +105,4 @@ prism_build_progress_end(PrismBuildProgress *p)
 	(void)p;
 }
 
-#endif /* MKT_STANDALONE */
+#endif /* VS_STANDALONE */

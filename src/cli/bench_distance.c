@@ -1,11 +1,11 @@
 /*
- * mkt bench distance
+ * vectorsearch bench distance
  *
  * Benchmark distance computations across SIMD implementations.
  */
 
-/* Must be first - defines MKT_SIMD_FULL used by distance.h */
-#include "mkt_config.h"
+/* Must be first - defines VS_SIMD_FULL used by distance.h */
+#include "vs_config.h"
 
 #include <getopt.h>
 #include <math.h>
@@ -41,11 +41,11 @@ typedef struct
  */
 static const ImplSpec impls[] = {
 		{"compiler", SIMD_NONE},
-#if defined(MKT_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
+#if defined(VS_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
 		{"avx2", SIMD_AVX2},
-		{"avx512", MKT_SIMD_AVX512_DQ},
+		{"avx512", VS_SIMD_AVX512_DQ},
 #endif
-#if defined(MKT_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
+#if defined(VS_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
 		{"neon", SIMD_NEON},
 #endif
 		{NULL, 0},
@@ -97,7 +97,7 @@ typedef struct
 static void
 bench_stats_init(BenchStats *stats, uint32_t capacity)
 {
-	stats->samples = mkt_alloc(capacity * sizeof(double));
+	stats->samples = vs_alloc(capacity * sizeof(double));
 	stats->count   = 0;
 	stats->avg	   = 0.0;
 	stats->min	   = 0.0;
@@ -147,7 +147,7 @@ bench_stats_compute(BenchStats *stats)
 static void
 bench_stats_free(BenchStats *stats)
 {
-	mkt_free(stats->samples);
+	vs_free(stats->samples);
 }
 
 /*
@@ -261,19 +261,19 @@ benchmark_impl_loop(
 	Vec32Ref query = {.data = query_data, .dim = dim};
 
 	/* Force re-initialization with this SIMD implementation */
-	mkt_simd_set_override(impl->mask);
-	mkt_simd_reset_cache();
-	mkt_distance_force_reinit();
+	vs_simd_set_override(impl->mask);
+	vs_simd_reset_cache();
+	vs_distance_force_reinit();
 
 	/* Warm up (ensure code is in cache) */
 	for (int i = 0; i < 10; i++)
 	{
 		Vec32Ref vec = {.data = db_data, .dim = dim};
-		(void)mkt_distance(query, vec, metric);
+		(void)vs_distance(query, vec, metric);
 	}
 
 	/* Benchmark: loop over single-pair calls (pgvector approach) */
-	Distance *distances = mkt_alloc(count * sizeof(Distance));
+	Distance *distances = vs_alloc(count * sizeof(Distance));
 
 	BenchStats stats;
 	bench_stats_init(&stats, runs);
@@ -285,7 +285,7 @@ benchmark_impl_loop(
 		for (uint32_t i = 0; i < count; i++)
 		{
 			Vec32Ref vec = {.data = db_data + i * dim, .dim = dim};
-			distances[i] = mkt_distance(query, vec, metric);
+			distances[i] = vs_distance(query, vec, metric);
 		}
 
 		uint64_t end		 = get_time_ns();
@@ -295,7 +295,7 @@ benchmark_impl_loop(
 		bench_stats_add(&stats, vec_per_sec);
 	}
 
-	mkt_free(distances);
+	vs_free(distances);
 
 	/* Compute statistics */
 	bench_stats_compute(&stats);
@@ -347,8 +347,8 @@ benchmark_impl_loop(
 	bench_stats_free(&stats);
 
 	/* Reset to auto-detection */
-	mkt_simd_set_override(0xFFFFFFFF);
-	mkt_simd_reset_cache();
+	vs_simd_set_override(0xFFFFFFFF);
+	vs_simd_reset_cache();
 }
 
 /*
@@ -370,7 +370,7 @@ benchmark_impl_batch(
 	/* No reinitialization needed - we call implementations directly */
 
 	/* Allocate distances array */
-	Distance *distances = mkt_alloc(count * sizeof(Distance));
+	Distance *distances = vs_alloc(count * sizeof(Distance));
 
 	/* Warm up with actual batch function (5 iterations) */
 	for (int warmup = 0; warmup < 5; warmup++)
@@ -380,52 +380,52 @@ benchmark_impl_batch(
 			switch (metric)
 			{
 			case DISTANCE_L2:
-				mkt_distance_batch_l2_compiler(
+				vs_distance_batch_l2_compiler(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_INNER_PRODUCT:
-				mkt_distance_batch_ip_compiler(
+				vs_distance_batch_ip_compiler(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_COSINE:
-				mkt_distance_batch_cosine_compiler(
+				vs_distance_batch_cosine_compiler(
 						query, db_data, count, dim, distances);
 				break;
 			}
 		}
-#if defined(MKT_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
+#if defined(VS_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
 		else if (impl->mask == SIMD_AVX2)
 		{
 			switch (metric)
 			{
 			case DISTANCE_L2:
-				mkt_distance_batch_l2_avx2(
+				vs_distance_batch_l2_avx2(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_INNER_PRODUCT:
-				mkt_distance_batch_ip_avx2(
+				vs_distance_batch_ip_avx2(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_COSINE:
-				mkt_distance_batch_cosine_avx2(
+				vs_distance_batch_cosine_avx2(
 						query, db_data, count, dim, distances);
 				break;
 			}
 		}
-		else if (impl->mask == MKT_SIMD_AVX512_DQ)
+		else if (impl->mask == VS_SIMD_AVX512_DQ)
 		{
 			switch (metric)
 			{
 			case DISTANCE_L2:
-				mkt_distance_batch_l2_avx512(
+				vs_distance_batch_l2_avx512(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_INNER_PRODUCT:
-				mkt_distance_batch_ip_avx512(
+				vs_distance_batch_ip_avx512(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_COSINE:
-				mkt_distance_batch_cosine_avx512(
+				vs_distance_batch_cosine_avx512(
 						query, db_data, count, dim, distances);
 				break;
 			}
@@ -448,72 +448,72 @@ benchmark_impl_batch(
 			switch (metric)
 			{
 			case DISTANCE_L2:
-				ret = mkt_distance_batch_l2_compiler(
+				ret = vs_distance_batch_l2_compiler(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_INNER_PRODUCT:
-				ret = mkt_distance_batch_ip_compiler(
+				ret = vs_distance_batch_ip_compiler(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_COSINE:
-				ret = mkt_distance_batch_cosine_compiler(
+				ret = vs_distance_batch_cosine_compiler(
 						query, db_data, count, dim, distances);
 				break;
 			}
 		}
-#if defined(MKT_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
+#if defined(VS_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
 		else if (impl->mask == SIMD_AVX2)
 		{
 			switch (metric)
 			{
 			case DISTANCE_L2:
-				ret = mkt_distance_batch_l2_avx2(
+				ret = vs_distance_batch_l2_avx2(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_INNER_PRODUCT:
-				ret = mkt_distance_batch_ip_avx2(
+				ret = vs_distance_batch_ip_avx2(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_COSINE:
-				ret = mkt_distance_batch_cosine_avx2(
+				ret = vs_distance_batch_cosine_avx2(
 						query, db_data, count, dim, distances);
 				break;
 			}
 		}
-		else if (impl->mask == MKT_SIMD_AVX512_DQ)
+		else if (impl->mask == VS_SIMD_AVX512_DQ)
 		{
 			switch (metric)
 			{
 			case DISTANCE_L2:
-				ret = mkt_distance_batch_l2_avx512(
+				ret = vs_distance_batch_l2_avx512(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_INNER_PRODUCT:
-				ret = mkt_distance_batch_ip_avx512(
+				ret = vs_distance_batch_ip_avx512(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_COSINE:
-				ret = mkt_distance_batch_cosine_avx512(
+				ret = vs_distance_batch_cosine_avx512(
 						query, db_data, count, dim, distances);
 				break;
 			}
 		}
 #endif
-#if defined(MKT_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
+#if defined(VS_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
 		else if (impl->mask == SIMD_NEON)
 		{
 			switch (metric)
 			{
 			case DISTANCE_L2:
-				ret = mkt_distance_batch_l2_neon(
+				ret = vs_distance_batch_l2_neon(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_INNER_PRODUCT:
-				ret = mkt_distance_batch_ip_neon(
+				ret = vs_distance_batch_ip_neon(
 						query, db_data, count, dim, distances);
 				break;
 			case DISTANCE_COSINE:
-				ret = mkt_distance_batch_cosine_neon(
+				ret = vs_distance_batch_cosine_neon(
 						query, db_data, count, dim, distances);
 				break;
 			}
@@ -523,7 +523,7 @@ benchmark_impl_batch(
 		if (ret != 0)
 		{
 			fprintf(stderr, "Distance computation failed\n");
-			mkt_free(distances);
+			vs_free(distances);
 			return;
 		}
 
@@ -534,7 +534,7 @@ benchmark_impl_batch(
 		bench_stats_add(&stats, vec_per_sec);
 	}
 
-	mkt_free(distances);
+	vs_free(distances);
 
 	/* Compute statistics */
 	bench_stats_compute(&stats);
@@ -586,8 +586,8 @@ benchmark_impl_batch(
 	bench_stats_free(&stats);
 
 	/* Reset to auto-detection */
-	mkt_simd_set_override(0xFFFFFFFF);
-	mkt_simd_reset_cache();
+	vs_simd_set_override(0xFFFFFFFF);
+	vs_simd_reset_cache();
 }
 
 /*
@@ -605,7 +605,7 @@ benchmark_pgvector(
 	Vec32Ref query = {.data = query_data, .dim = dim};
 
 	/* Allocate distances array */
-	Distance *distances = mkt_alloc(count * sizeof(Distance));
+	Distance *distances = vs_alloc(count * sizeof(Distance));
 
 	/* Warm up with actual batch function (5 iterations) */
 	for (int warmup = 0; warmup < 5; warmup++)
@@ -613,15 +613,15 @@ benchmark_pgvector(
 		switch (metric)
 		{
 		case DISTANCE_L2:
-			mkt_distance_batch_l2_pgvector(
+			vs_distance_batch_l2_pgvector(
 					query, db_data, count, dim, distances);
 			break;
 		case DISTANCE_INNER_PRODUCT:
-			mkt_distance_batch_ip_pgvector(
+			vs_distance_batch_ip_pgvector(
 					query, db_data, count, dim, distances);
 			break;
 		case DISTANCE_COSINE:
-			mkt_distance_batch_cosine_pgvector(
+			vs_distance_batch_cosine_pgvector(
 					query, db_data, count, dim, distances);
 			break;
 		}
@@ -637,15 +637,15 @@ benchmark_pgvector(
 		switch (metric)
 		{
 		case DISTANCE_L2:
-			mkt_distance_batch_l2_pgvector(
+			vs_distance_batch_l2_pgvector(
 					query, db_data, count, dim, distances);
 			break;
 		case DISTANCE_INNER_PRODUCT:
-			mkt_distance_batch_ip_pgvector(
+			vs_distance_batch_ip_pgvector(
 					query, db_data, count, dim, distances);
 			break;
 		case DISTANCE_COSINE:
-			mkt_distance_batch_cosine_pgvector(
+			vs_distance_batch_cosine_pgvector(
 					query, db_data, count, dim, distances);
 			break;
 		}
@@ -657,7 +657,7 @@ benchmark_pgvector(
 		bench_stats_add(&stats, vec_per_sec);
 	}
 
-	mkt_free(distances);
+	vs_free(distances);
 
 	/* Compute statistics */
 	bench_stats_compute(&stats);
@@ -780,20 +780,20 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 		   size_unit);
 
 	/* Generate random test vectors */
-	float *query_data = mkt_alloc(dim * sizeof(float));
+	float *query_data = vs_alloc(dim * sizeof(float));
 	if (query_data == NULL)
 	{
 		fprintf(stderr, "Error: Failed to allocate query vector\n");
 		return 1;
 	}
 
-	float *db_data = mkt_alloc(count * dim * sizeof(float));
+	float *db_data = vs_alloc(count * dim * sizeof(float));
 	if (db_data == NULL)
 	{
 		fprintf(stderr,
 				"Error: Failed to allocate database vectors (%.1f GB)\n",
 				(double)db_bytes / (1024.0 * 1024.0 * 1024.0));
-		mkt_free(query_data);
+		vs_free(query_data);
 		return 1;
 	}
 
@@ -811,7 +811,7 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 	 * benchmark pass (not just a few iterations) as throwaway fixes this.
 	 */
 	{
-		Distance *throwaway = mkt_alloc(count * sizeof(Distance));
+		Distance *throwaway = vs_alloc(count * sizeof(Distance));
 		if (throwaway != NULL)
 		{
 			Vec32Ref q = {.data = query_data, .dim = dim};
@@ -822,20 +822,20 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 				switch (metric)
 				{
 				case DISTANCE_L2:
-					mkt_distance_batch_l2_compiler(
+					vs_distance_batch_l2_compiler(
 							q, db_data, count, dim, throwaway);
 					break;
 				case DISTANCE_INNER_PRODUCT:
-					mkt_distance_batch_ip_compiler(
+					vs_distance_batch_ip_compiler(
 							q, db_data, count, dim, throwaway);
 					break;
 				case DISTANCE_COSINE:
-					mkt_distance_batch_cosine_compiler(
+					vs_distance_batch_cosine_compiler(
 							q, db_data, count, dim, throwaway);
 					break;
 				}
 			}
-			mkt_free(throwaway);
+			vs_free(throwaway);
 		}
 	}
 
@@ -847,7 +847,7 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 			continue;
 
 		/* Skip if not supported by current CPU */
-		uint32_t caps = mkt_detect_simd();
+		uint32_t caps = vs_detect_simd();
 		if (impl->mask != SIMD_NONE && (caps & impl->mask) == 0)
 		{
 			printf("  %-10s (not supported on this CPU)\n", impl->name);
@@ -868,8 +868,8 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 				dim, count, config->runs, metric, query_data, db_data);
 	}
 
-	mkt_free(query_data);
-	mkt_free(db_data);
+	vs_free(query_data);
+	vs_free(db_data);
 
 	return 0;
 }

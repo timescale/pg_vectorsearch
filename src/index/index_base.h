@@ -27,10 +27,10 @@ typedef struct PrismIndexBase
 	float		 *pt_global_mean;
 	uint64_t	  rabitq_seed;
 
-	/* PG: both point to the same MktPgStorage (one index relation).
+	/* PG: both point to the same VsPgStorage (one index relation).
 	 * Standalone: separate ArrayPageStorage for centroids vs postings. */
-	MktStorage *centroid_storage;
-	MktStorage *posting_storage;
+	VsStorage *centroid_storage;
+	VsStorage *posting_storage;
 
 	/* Non-NULL for inline page access (standalone postings) */
 	char *page_base;
@@ -85,9 +85,9 @@ prism_index_ensure_rabitq(PrismIndexBase *idx)
 {
 	if (idx->params == NULL)
 	{
-		idx->params = mkt_rabitq_create(idx->dim, idx->rabitq_seed);
+		idx->params = vs_rabitq_create(idx->dim, idx->rabitq_seed);
 		if (idx->pt_global_mean != NULL)
-			mkt_rabitq_rotate(
+			vs_rabitq_rotate(
 					idx->params, idx->pt_global_mean, idx->pt_global_mean);
 	}
 	return idx->params;

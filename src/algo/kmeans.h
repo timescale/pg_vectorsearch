@@ -9,8 +9,8 @@
  * For cosine: input vectors must be pre-normalized (unit length).
  */
 
-#ifndef MKT_KMEANS_H
-#define MKT_KMEANS_H
+#ifndef VS_KMEANS_H
+#define VS_KMEANS_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -21,7 +21,7 @@
  * KMeansResult - Output of k-means clustering
  *
  * All arrays are heap-allocated and owned by the result. Call
- * mkt_kmeans_result_destroy() to free.
+ * vs_kmeans_result_destroy() to free.
  */
 typedef struct KMeansResult
 {
@@ -60,12 +60,12 @@ typedef struct KMeansOptions
 	const float	   *initial_centroids; /* skip init, use these */
 } KMeansOptions;
 
-#define MKT_KMEANS_OPTIONS_DEFAULT \
-	{.max_iterations = 20,         \
-	 .tolerance		 = 1e-4f,      \
-	 .seed			 = 42,         \
-	 .nredo			 = 1,          \
-	 .verbose		 = false,      \
+#define VS_KMEANS_OPTIONS_DEFAULT \
+	{.max_iterations = 20,        \
+	 .tolerance		 = 1e-4f,     \
+	 .seed			 = 42,        \
+	 .nredo			 = 1,         \
+	 .verbose		 = false,     \
 	 .algorithm		 = KMEANS_ALGO_AUTO}
 
 /*
@@ -87,7 +87,7 @@ typedef struct KMeansOptions
  *             when indices is non-NULL)
  *   indices:  optional index array [nvecs] mapping logical positions
  *             to rows in vectors. NULL = contiguous [0..nvecs).
- *   vec_type: element type (MKT_VEC_F32, MKT_VEC_F16, MKT_VEC_F16C)
+ *   vec_type: element type (VS_VEC_F32, VS_VEC_F16, VS_VEC_F16C)
  *   nvecs:    number of vectors (or indices) to cluster
  *   dim:      vector dimension
  *   nlist:    number of clusters (K)
@@ -96,7 +96,7 @@ typedef struct KMeansOptions
  *
  * Returns allocated result on success, NULL on failure.
  */
-KMeansResult *mkt_kmeans(
+KMeansResult *vs_kmeans(
 		const void			*vectors,
 		const uint32_t		*indices,
 		VecType				 vec_type,
@@ -110,7 +110,7 @@ KMeansResult *mkt_kmeans(
  * Convenience wrapper for float32 vectors.
  */
 static inline KMeansResult *
-mkt_kmeans_f32(
+vs_kmeans_f32(
 		const float			*vectors,
 		uint32_t			 nvecs,
 		Dimension			 dim,
@@ -118,27 +118,27 @@ mkt_kmeans_f32(
 		DistanceMetric		 metric,
 		const KMeansOptions *options)
 {
-	return mkt_kmeans(
-			vectors, NULL, MKT_VEC_F32, nvecs, dim, nlist, metric, options);
+	return vs_kmeans(
+			vectors, NULL, VS_VEC_F32, nvecs, dim, nlist, metric, options);
 }
 
 /*
  * Free a k-means result and all owned arrays.
  */
-void mkt_kmeans_result_destroy(KMeansResult *result);
+void vs_kmeans_result_destroy(KMeansResult *result);
 
 /*
  * Get human-readable algorithm name.
  */
-const char *mkt_kmeans_algo_name(KMeansAlgorithm algo);
+const char *vs_kmeans_algo_name(KMeansAlgorithm algo);
 
 /*
  * CBLAS runtime control (legacy, used by PostgreSQL extension).
  * For benchmarks, prefer KMeansOptions.algorithm instead.
  */
-void		mkt_kmeans_set_use_cblas(bool use_cblas);
-bool		mkt_kmeans_get_use_cblas(void);
-const char *mkt_kmeans_impl_name(void);
+void		vs_kmeans_set_use_cblas(bool use_cblas);
+bool		vs_kmeans_get_use_cblas(void);
+const char *vs_kmeans_impl_name(void);
 
 /*
  * Check if BLAS is configured for single-threaded operation.
@@ -150,13 +150,13 @@ const char *mkt_kmeans_impl_name(void);
  * PostgreSQL: set in systemd unit or pg_ctl environment.
  * CLI: prefix command with OMP_NUM_THREADS=1.
  */
-bool mkt_cblas_is_single_threaded(void);
+bool vs_cblas_is_single_threaded(void);
 
 /*
  * Pin BLAS to single-threaded via runtime APIs (BLIS, OpenBLAS).
  * Call once at startup. Uses weak symbols — safe when the linked
  * BLAS doesn't provide the function.
  */
-void mkt_cblas_pin_single_thread(void);
+void vs_cblas_pin_single_thread(void);
 
-#endif /* MKT_KMEANS_H */
+#endif /* VS_KMEANS_H */

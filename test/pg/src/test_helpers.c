@@ -25,14 +25,14 @@ PG_MODULE_MAGIC;
  * One row per cached RaBitQ rotation matrix in this backend's params
  * cache: (dim, refcount, usage). See prism_rabitq_cache_stats().
  */
-PG_FUNCTION_INFO_V1(mkt_test_rabitq_params_cache);
+PG_FUNCTION_INFO_V1(vs_test_rabitq_params_cache);
 
 Datum
-mkt_test_rabitq_params_cache(PG_FUNCTION_ARGS)
+vs_test_rabitq_params_cache(PG_FUNCTION_ARGS)
 {
-	ReturnSetInfo	  *rsinfo = (ReturnSetInfo *)fcinfo->resultinfo;
-	MktRabitqCacheStat stats[64];
-	int				   n;
+	ReturnSetInfo		*rsinfo = (ReturnSetInfo *)fcinfo->resultinfo;
+	PrismRabitqCacheStat stats[64];
+	int					 n;
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -57,10 +57,10 @@ mkt_test_rabitq_params_cache(PG_FUNCTION_ARGS)
  * number of entries dropped. Errors if any entry is checked out. Lets
  * a test section start from an empty cache without reconnecting.
  */
-PG_FUNCTION_INFO_V1(mkt_test_rabitq_cache_clear);
+PG_FUNCTION_INFO_V1(vs_test_rabitq_cache_clear);
 
 Datum
-mkt_test_rabitq_cache_clear(PG_FUNCTION_ARGS)
+vs_test_rabitq_cache_clear(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(prism_rabitq_cache_clear());
 }
