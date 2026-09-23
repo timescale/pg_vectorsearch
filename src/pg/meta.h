@@ -47,7 +47,7 @@ typedef struct PrismMetaPage
 	 * derived: the region a build reserves is [PRISM_FIRST_CENTROID_BLKNO,
 	 * first_posting), but a split with no room on a level-0 page extends the
 	 * relation and chains the new page past the posting region, so a block
-	 * range stops measuring it. prism.rebalance folds each split's additions
+	 * range stops measuring it. prism_rebalance folds each split's additions
 	 * back in here.
 	 */
 	uint32_t ncentroid_pages;

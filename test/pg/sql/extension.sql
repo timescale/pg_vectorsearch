@@ -7,62 +7,34 @@
 -- installs pg_vectorsearch once up front and depends on it staying
 -- installed for every other regression script that follows.
 
--- Checked after every (re)install below. A plain view rather than a
--- literal in each place it's needed, so the list of prism-fixed
--- functions only needs updating in one spot.
--- Independent of any particular install (to_regprocedure just returns
--- NULL for a signature that isn't there), so it can be created once,
--- up front, and survive every CREATE/DROP EXTENSION cycle in this file.
-CREATE VIEW prism_procs_present AS
-SELECT count(*) = 9 AS present FROM (VALUES
-    ('prism.rebalance(regclass,integer)'),
-    ('prism.split_posting_list(regclass,bigint)'),
-    ('prism.posting_pages(regclass)'),
-    ('prism.tids_clusters(regclass,tid[])'),
-    ('prism.index_settings(regclass)'),
-    ('prism.convert_posting_to_fastscan(regclass,integer)'),
-    ('prism.centroid_pages(regclass)'),
-    ('prism.setup_pgvector_compat()'),
-    ('prism.on_extension_create()')
-) AS t(sig)
-WHERE to_regprocedure(sig) IS NOT NULL;
+-- Checked after every (re)install below, parameterized by the schema the
+-- functions landed in (varies: public for a default install, a custom
+-- schema when one was given). A function rather than a literal in each
+-- place it's needed, so the list of prism's own procedures only needs
+-- updating in one spot. Independent of any particular install
+-- (to_regprocedure just returns NULL for a signature that isn't there),
+-- so it can be created once, up front, and survive every CREATE/DROP
+-- EXTENSION cycle in this file.
+CREATE FUNCTION prism_procs_present(schema_ text) RETURNS boolean AS $$
+    SELECT count(*) = 9 FROM (VALUES
+        ('prism_rebalance(regclass,integer)'),
+        ('prism_split_posting_list(regclass,bigint)'),
+        ('prism_posting_pages(regclass)'),
+        ('prism_tids_clusters(regclass,tid[])'),
+        ('prism_index_settings(regclass)'),
+        ('prism_convert_posting_to_fastscan(regclass,integer)'),
+        ('prism_centroid_pages(regclass)'),
+        ('pg_vectorsearch_setup_pgvector_compat()'),
+        ('pg_vectorsearch_on_extension_create()')
+    ) AS t(sig)
+    WHERE to_regprocedure(schema_ || '.' || sig) IS NOT NULL;
+$$ LANGUAGE sql;
 
 -- =====================================================================
--- 1. A trusted pre-existing prism is used, but not made an extension
---    member
--- =====================================================================
--- prism is verified and installed into, but ALTER EXTENSION ... ADD
--- SCHEMA is never run on it -- matching how PostgreSQL itself treats a
--- pre-existing @extschema@ for any ordinary relocatable extension (only
--- objects the install script itself creates become members). So
--- anything already in a pre-existing prism that this install did not
--- create must survive both install and DROP EXTENSION CASCADE. (The
--- ownership-guard refusal itself is exercised directly against prism in
--- test/pg/compat/security.sql.)
-
-CREATE SCHEMA prism;
-CREATE TABLE prism.unrelated_dba_table (id int);
-INSERT INTO prism.unrelated_dba_table VALUES (1), (2);
-
-CREATE EXTENSION pg_vectorsearch;
-
-SELECT count(*) = 2 AS unrelated_prism_table_survives_install
-    FROM prism.unrelated_dba_table;
-
-DROP EXTENSION pg_vectorsearch CASCADE;
-
-SELECT to_regnamespace('prism') IS NOT NULL AS prism_schema_survives_drop;
-SELECT count(*) = 2 AS unrelated_prism_table_survives_drop
-    FROM prism.unrelated_dba_table;
-SELECT to_regprocedure('prism.rebalance(regclass,integer)') IS NULL
-    AS prism_functions_removed;
-
-DROP SCHEMA prism CASCADE;
-
--- =====================================================================
--- 2. Default install (no SCHEMA clause): types land on search_path,
---    typically public; the build-identity functions land there with
---    them, while prism stays separate.
+-- 1. Default install (no SCHEMA clause): types land on search_path,
+--    typically public; the build-identity functions and prism's own
+--    maintenance procedures land there with them -- nothing about this
+--    extension is pinned to a separate schema anymore.
 -- =====================================================================
 
 CREATE EXTENSION pg_vectorsearch;
@@ -74,10 +46,8 @@ SELECT to_regtype('public.vec32') IS NOT NULL
 SELECT to_regprocedure('public.pg_vectorsearch_git_commit()') IS NOT NULL
    AND to_regprocedure('public.pg_vectorsearch_version()') IS NOT NULL
     AS build_identity_lands_in_public;
-SELECT to_regnamespace('prism') IS NOT NULL
-   AND to_regtype('prism.vec32') IS NULL AS prism_is_a_separate_schema;
 
-SELECT present AS all_prism_procedures_present FROM prism_procs_present;
+SELECT prism_procs_present('public') AS prism_procs_land_in_public;
 
 SELECT to_regprocedure('public.prism_handler(internal)') IS NOT NULL
     AS prism_handler_lives_in_public;
@@ -102,14 +72,15 @@ DROP TABLE default_items;
 
 DROP EXTENSION pg_vectorsearch CASCADE;
 
-SELECT to_regnamespace('prism') IS NULL AS prism_dropped_with_the_extension;
 SELECT to_regtype('public.vec32') IS NULL
     AS public_vec32_dropped_with_the_extension;
 SELECT to_regprocedure('public.pg_vectorsearch_git_commit()') IS NULL
     AS build_identity_dropped_with_the_extension;
+SELECT to_regprocedure('public.prism_rebalance(regclass,integer)') IS NULL
+    AS prism_procs_dropped_with_the_extension;
 
 -- =====================================================================
--- 3. Custom schema at install time
+-- 2. Custom schema at install time
 -- =====================================================================
 
 CREATE SCHEMA reloc_a;
@@ -136,13 +107,11 @@ SELECT count(*) = 3 AS distance_operators_land_in_reloc_a
 SELECT to_regprocedure('reloc_a.pg_vectorsearch_git_commit()') IS NOT NULL
    AND to_regprocedure('reloc_a.pg_vectorsearch_version()') IS NOT NULL
     AS build_identity_lands_in_reloc_a;
-SELECT to_regnamespace('prism') IS NOT NULL
-   AND to_regtype('prism.vec32') IS NULL AS prism_is_still_separate;
 
-SELECT present AS all_prism_procedures_present FROM prism_procs_present;
+SELECT prism_procs_present('reloc_a') AS prism_procs_land_in_reloc_a;
 
--- The fixed prism procedures must operate correctly on an index whose
--- column type lives in a non-default schema -- they take a plain
+-- prism's own maintenance procedures must operate correctly on an index
+-- whose column type lives in a non-default schema -- they take a plain
 -- regclass, so nothing about them should care where the type ended up.
 CREATE TABLE reloc_a.maint_items (id serial, v reloc_a.vec32(4));
 INSERT INTO reloc_a.maint_items (v)
@@ -156,10 +125,10 @@ CREATE INDEX maint_items_i ON reloc_a.maint_items
     WITH (nlist = 1, centroid_fastscan = off);
 
 SELECT count(*) > 0 AS index_settings_works_on_a_reloc_a_index
-    FROM prism.index_settings('reloc_a.maint_items_i');
+    FROM reloc_a.prism_index_settings('reloc_a.maint_items_i');
 SELECT count(*) > 0 AS centroid_pages_works_on_a_reloc_a_index
-    FROM prism.centroid_pages('reloc_a.maint_items_i');
-CALL prism.rebalance('reloc_a.maint_items_i'::regclass);
+    FROM reloc_a.prism_centroid_pages('reloc_a.maint_items_i');
+CALL reloc_a.prism_rebalance('reloc_a.maint_items_i'::regclass);
 
 -- Drop the table first so the schema drop below cascades to exactly one
 -- thing (the extension itself, reported as a single unit rather than each
@@ -172,13 +141,13 @@ SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_vectorsearch')
     AS pg_vectorsearch_survived_reloc_a_drop;
 
 -- =====================================================================
--- 4. ALTER EXTENSION ... SET SCHEMA is refused (relocatable = false)
+-- 3. ALTER EXTENSION ... SET SCHEMA is refused (relocatable = false)
 -- =====================================================================
--- Not an oversight: ALTER EXTENSION SET SCHEMA moves every member object
--- together into one schema, which would strand the prism-pinned
--- procedures away from their fixed schema. Refusing it outright,
--- cleanly, up front is the documented behaviour -- see the control
--- file. The extension must remain fully usable afterward.
+-- Nothing is pinned to a separate fixed schema anymore -- every member
+-- object now travels together in @extschema@ -- but this extension still
+-- declares itself non-relocatable, so ALTER EXTENSION SET SCHEMA continues
+-- to be refused outright, cleanly, up front; see the control file. The
+-- extension must remain fully usable afterward.
 
 CREATE SCHEMA reloc_a;
 CREATE EXTENSION pg_vectorsearch SCHEMA reloc_a;

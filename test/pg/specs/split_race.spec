@@ -44,7 +44,7 @@ setup
     SELECT injection_points_set_local();
     SELECT injection_points_attach('prism-split-locked', 'wait');
 }
-step m_split { CALL prism.rebalance('race_idx', 10); }
+step m_split { CALL prism_rebalance('race_idx', 10); }
 
 # A split that does not pause, for the scan case: there the reader is what
 # pauses, and the writer has to run to completion underneath it.
@@ -54,8 +54,8 @@ step m_split { CALL prism.rebalance('race_idx', 10); }
 # retired: a pass can never reclaim its own retirements, because its own
 # transaction id is still running and so can never be below the horizon.
 session w
-step w_split   { CALL prism.rebalance('race_idx', 10); }
-step w_reclaim { CALL prism.rebalance('race_idx', 10); }
+step w_split   { CALL prism_rebalance('race_idx', 10); }
+step w_reclaim { CALL prism_rebalance('race_idx', 10); }
 
 # The reader, paused after routing: it holds a posting head and a snapshot,
 # with the centroid page already released. A split can then repoint the leaf

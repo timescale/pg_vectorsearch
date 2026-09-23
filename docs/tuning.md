@@ -175,10 +175,10 @@ recall problem is routing (raise `prism.nprobe`) or sizing
 Most settings default to automatic values (`nlist = 0`,
 `prism.nprobe = 0`, `fastscan = auto`, ...), so neither
 `pg_class.reloptions` nor `pg_settings` shows what an index actually
-uses. `prism.index_settings(regclass)` reports the resolved values:
+uses. `prism_index_settings(regclass)` reports the resolved values:
 
 ```sql
-SELECT * FROM prism.index_settings('my_index');
+SELECT * FROM prism_index_settings('my_index');
        name       | setting | source
 ------------------+---------+---------
  dim              | 768     | column

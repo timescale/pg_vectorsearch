@@ -57,15 +57,15 @@ setup
     SELECT injection_points_set_local();
     SELECT injection_points_attach('prism-split-locked', 'wait');
 }
-step m1_head  { SELECT blkno AS head_blkno FROM prism.posting_pages('maint_idx')
+step m1_head  { SELECT blkno AS head_blkno FROM prism_posting_pages('maint_idx')
                     WHERE is_first ORDER BY blkno LIMIT 1; }
-step m1_reb   { CALL prism.rebalance('maint_idx', 10); }
-step m1_split { CALL prism.split_posting_list('maint_idx', 2); }
+step m1_reb   { CALL prism_rebalance('maint_idx', 10); }
+step m1_split { CALL prism_split_posting_list('maint_idx', 2); }
 
 # The second session, through either entry point.
 session m2
-step m2_reb   { CALL prism.rebalance('maint_idx', 10); }
-step m2_split { CALL prism.split_posting_list('maint_idx', 2); }
+step m2_reb   { CALL prism_rebalance('maint_idx', 10); }
+step m2_split { CALL prism_split_posting_list('maint_idx', 2); }
 
 session d
 step d_drop     { DROP INDEX maint_idx; }
@@ -76,9 +76,9 @@ step d_commit   { COMMIT; }
 
 session obs
 step o_wake  { SELECT injection_points_wakeup('prism-split-locked'); }
-step o_nlist { SELECT setting::int AS nlist FROM prism.index_settings('maint_idx')
+step o_nlist { SELECT setting::int AS nlist FROM prism_index_settings('maint_idx')
                    WHERE name = 'nlist'; }
-step o_heads { SELECT count(*) AS heads FROM prism.posting_pages('maint_idx')
+step o_heads { SELECT count(*) AS heads FROM prism_posting_pages('maint_idx')
                    WHERE is_first; }
 step o_gone  { SELECT count(*) AS still_there FROM pg_class
                    WHERE relname = 'maint_idx'; }

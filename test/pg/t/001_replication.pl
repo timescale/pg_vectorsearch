@@ -43,10 +43,8 @@ $primary->safe_psql('postgres', 'CREATE EXTENSION pg_vectorsearch');
 
 # Set the search path once, at database level, so every session on both nodes
 # resolves pg_vectorsearch's types and distance operators the same way.
-# Note this also means new tables land in the prism schema, since it is
-# first.
 $primary->safe_psql('postgres',
-	'ALTER DATABASE postgres SET search_path = prism, public');
+	'ALTER DATABASE postgres SET search_path = public');
 
 # Two tables so both vec32 types are covered; vec16 drives the
 # half-precision centroid format, which no vec32 column can reach.
@@ -100,10 +98,10 @@ sub formats_are
 
 	my $got = $primary->safe_psql('postgres', <<"SQL");
 SELECT (SELECT string_agg(DISTINCT format, '+' ORDER BY format)
-          FROM posting_pages('$idx'::regclass) WHERE entry_count > 0)
+          FROM prism_posting_pages('$idx'::regclass) WHERE entry_count > 0)
     || ' / ' ||
        (SELECT string_agg(DISTINCT format, '+' ORDER BY format)
-          FROM centroid_pages('$idx'::regclass));
+          FROM prism_centroid_pages('$idx'::regclass));
 SQL
 	is($got, "$posting / $centroid", "$label: page formats as expected");
 }
@@ -174,7 +172,7 @@ SQL
 	agrees($tbl, "$label, after delete and vacuum");
 
 	# Reset for the next case.
-	$primary->safe_psql('postgres', "DROP INDEX prism.$idx");
+	$primary->safe_psql('postgres', "DROP INDEX $idx");
 	$primary->safe_psql('postgres', "DELETE FROM $tbl WHERE id > $rows");
 }
 
@@ -201,15 +199,16 @@ SQL
 	agrees('tv', 'parallel build');
 
 	# Reset for what follows.
-	$primary->safe_psql('postgres', "DROP INDEX prism.$idx");
+	$primary->safe_psql('postgres', "DROP INDEX $idx");
 	$primary->safe_psql('postgres', 'ALTER TABLE tv RESET (parallel_workers)');
 	$primary->safe_psql('postgres', "DELETE FROM tv WHERE id > $rows");
 }
 
-# convert_posting_to_fastscan: a runtime AoS -> fastscan rewrite. It writes NEW
-# posting pages by extending the relation and must WAL-log them itself -- there
-# is no closing log_newpage_range() for a runtime operation, so it must not run
-# in build_mode. The index is built to exercise all three failure modes at once:
+# prism_convert_posting_to_fastscan: a runtime AoS -> fastscan rewrite. It
+# writes NEW posting pages by extending the relation and must WAL-log them
+# itself -- there is no closing log_newpage_range() for a runtime operation,
+# so it must not run in build_mode. The index is built to exercise all
+# three failure modes at once:
 #
 #   - centroid_fastscan = on: the leaf's child block lives in the packed
 #     per-group array, at a different offset than the AoS meta array, so the
@@ -231,27 +230,27 @@ SQL
 	# Convert every cluster (not just cluster 0 -- that alone would miss the
 	# repoint bug, which only shows up once the packed-array offset is used).
 	my $nconv = $primary->safe_psql('postgres', <<"SQL");
-SELECT count(convert_posting_to_fastscan('$idx'::regclass, cluster_id))
-FROM posting_pages('$idx'::regclass) WHERE is_first;
+SELECT count(prism_convert_posting_to_fastscan('$idx'::regclass, cluster_id))
+FROM prism_posting_pages('$idx'::regclass) WHERE is_first;
 SQL
 	my $nclusters = $primary->safe_psql('postgres',
-		"SELECT count(*) FROM posting_pages('$idx'::regclass) WHERE is_first");
+		"SELECT count(*) FROM prism_posting_pages('$idx'::regclass) WHERE is_first");
 	is($nconv, $nclusters, "convert: converted all $nclusters clusters");
 
 	my $all_fs = $primary->safe_psql('postgres', <<"SQL");
 SELECT bool_and(format = 'fastscan')
-FROM posting_pages('$idx'::regclass) WHERE is_first;
+FROM prism_posting_pages('$idx'::regclass) WHERE is_first;
 SQL
 	is($all_fs, 't', 'convert: every posting head is now fastscan');
 
-	# The new pages must have reached the standby: posting_pages walks the
+	# The new pages must have reached the standby: prism_posting_pages walks the
 	# centroid-reachable chains, so it follows each repointed head into the new
 	# fastscan pages -- absent on the standby without the WAL fix. Compare the
 	# full layout across all clusters, not just one.
 	my $layout = <<"SQL";
 SELECT string_agg(cluster_id || ':' || format || ':' || entry_count,
                   ',' ORDER BY blkno)
-FROM posting_pages('$idx'::regclass)
+FROM prism_posting_pages('$idx'::regclass)
 SQL
 	$primary->wait_for_catchup($standby);
 	my $on_primary = $primary->safe_psql('postgres', $layout);
@@ -262,10 +261,10 @@ SQL
 
 	# End-to-end: the query still agrees across nodes.
 	agrees('tv', 'convert: after fastscan conversion');
-	$primary->safe_psql('postgres', "DROP INDEX prism.$idx");
+	$primary->safe_psql('postgres', "DROP INDEX $idx");
 }
 
-# Incremental split: prism.rebalance rewrites an oversized posting list into
+# Incremental split: prism_rebalance rewrites an oversized posting list into
 # several fresh chains, repoints the centroid leaf at them and raises nlist in
 # the metapage. All of it is runtime work outside build_mode, so every page has
 # to be WAL-logged as it is written -- there is no closing
@@ -287,15 +286,15 @@ SQL
 	  . "centroid_fastscan = off, nlist = 8)");
 	formats_are($idx, 'aos', 'rabitq', 'split: pre-split formats');
 
-	my $heads = "SELECT count(*) FROM posting_pages('$idx'::regclass) "
+	my $heads = "SELECT count(*) FROM prism_posting_pages('$idx'::regclass) "
 	          . "WHERE is_first";
 	my $before = $primary->safe_psql('postgres', $heads);
 
-	# rebalance commits on its own behalf, so it cannot run inside a
+	# prism_rebalance commits on its own behalf, so it cannot run inside a
 	# caller's transaction; sent this way each statement is its own.
 	$primary->safe_psql('postgres', <<"SQL");
 SET client_min_messages = warning;
-CALL rebalance('$idx', 60);
+CALL prism_rebalance('$idx', 60);
 SQL
 
 	my $after = $primary->safe_psql('postgres', $heads);
@@ -304,7 +303,7 @@ SQL
 
 	# The metapage write: nlist is raised past the built-in count, and the
 	# standby has to see the same number or its scans probe the wrong range.
-	my $nlist = "SELECT setting FROM index_settings('$idx'::regclass) "
+	my $nlist = "SELECT setting FROM prism_index_settings('$idx'::regclass) "
 	          . "WHERE name = 'nlist'";
 	$primary->wait_for_catchup($standby);
 	my $nlist_p = $primary->safe_psql('postgres', $nlist);
@@ -312,19 +311,19 @@ SQL
 	ok($nlist_p > 8, "split: nlist raised past the built count ($nlist_p)");
 	is($nlist_s, $nlist_p, 'split: standby metapage agrees on nlist');
 
-	# The pages themselves. posting_pages walks the centroid-reachable
+	# The pages themselves. prism_posting_pages walks the centroid-reachable
 	# chains, so it only reaches the new heads if both the flip and the
-	# chains replicated; centroid_pages pins the leaf entries that do the
+	# chains replicated; prism_centroid_pages pins the leaf entries that do the
 	# pointing.
 	my $players = <<"SQL";
 SELECT string_agg(cluster_id || ':' || format || ':' || entry_count,
                   ',' ORDER BY blkno)
-FROM posting_pages('$idx'::regclass)
+FROM prism_posting_pages('$idx'::regclass)
 SQL
 	my $clayout = <<"SQL";
 SELECT string_agg(blkno || '/' || entry || ':' || child_blkno || ':'
                   || is_leaf, ',' ORDER BY blkno, entry)
-FROM centroid_pages('$idx'::regclass)
+FROM prism_centroid_pages('$idx'::regclass)
 SQL
 	for my $probe (['posting', $players], ['centroid', $clayout])
 	{
@@ -343,7 +342,7 @@ SQL
 	# runtime page writes, and the layouts have to stay in step across it.
 	$primary->safe_psql('postgres', <<"SQL");
 SET client_min_messages = warning;
-CALL rebalance('$idx', 60);
+CALL prism_rebalance('$idx', 60);
 SQL
 	$primary->wait_for_catchup($standby);
 	is($standby->safe_psql('postgres', $players),
@@ -351,7 +350,7 @@ SQL
 		'split: standby posting layout matches after reclaim');
 	agrees('tv', 'split: after reclaiming retired chains');
 
-	$primary->safe_psql('postgres', "DROP INDEX prism.$idx");
+	$primary->safe_psql('postgres', "DROP INDEX $idx");
 }
 
 # A split that has to grow the centroid level, rather than fitting its new
@@ -380,12 +379,12 @@ SQL
 	  . "centroid_fastscan = off, nlist = 32)");
 
 	my $cpages = "SELECT count(DISTINCT blkno) "
-	           . "FROM centroid_pages('$idx'::regclass)";
+	           . "FROM prism_centroid_pages('$idx'::regclass)";
 	my $before = $primary->safe_psql('postgres', $cpages);
 
 	$primary->safe_psql('postgres', <<"SQL");
 SET client_min_messages = warning;
-CALL rebalance('$idx', 4);
+CALL prism_rebalance('$idx', 4);
 SQL
 
 	my $after = $primary->safe_psql('postgres', $cpages);
@@ -397,7 +396,7 @@ SQL
 	my $clayout = <<"SQL";
 SELECT count(DISTINCT blkno) || '/' || count(*) || ' ' ||
        string_agg(child_blkno::text, ',' ORDER BY blkno, entry)
-FROM centroid_pages('$idx'::regclass)
+FROM prism_centroid_pages('$idx'::regclass)
 SQL
 	$primary->wait_for_catchup($standby);
 	is($standby->safe_psql('postgres', $clayout),
@@ -405,7 +404,7 @@ SQL
 		'split: standby centroid chain matches after it grew');
 	agrees('tw', 'split: after a chain-growing split');
 
-	$primary->safe_psql('postgres', "DROP INDEX prism.$idx");
+	$primary->safe_psql('postgres', "DROP INDEX $idx");
 	$primary->safe_psql('postgres', 'DROP TABLE tw');
 }
 
@@ -424,7 +423,7 @@ SKIP:
 
 	my $all_holed = $primary->safe_psql('postgres', <<'SQL');
 SELECT count(*) = 0
-  FROM posting_pages('idx_hole'::regclass) p,
+  FROM prism_posting_pages('idx_hole'::regclass) p,
        LATERAL page_header(get_raw_page('idx_hole', p.blkno)) h
  WHERE p.entry_count > 0
    AND NOT (h.lower = 24 AND h.upper = h.special);

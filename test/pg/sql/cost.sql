@@ -283,7 +283,7 @@ DROP TABLE cpu_cheap, cpu_dear;
 CREATE INDEX idx_cost_aos ON cost_test USING prism (v) WITH (fastscan = off);
 DROP INDEX idx_cost;
 
-SELECT (SELECT format FROM prism.posting_pages('idx_cost_aos') LIMIT 1)
+SELECT (SELECT format FROM prism_posting_pages('idx_cost_aos') LIMIT 1)
     AS aos_index_is_aos;
 
 SELECT plan_uses($q$
@@ -309,11 +309,11 @@ CREATE INDEX idx_cost_cnofs ON cost_test
 CREATE INDEX idx_cost_cflt ON cost_test
     USING prism (v) WITH (centroid_compression = off);
 
-SELECT (SELECT setting FROM prism.index_settings('idx_cost_cfs')
+SELECT (SELECT setting FROM prism_index_settings('idx_cost_cfs')
           WHERE name = 'centroid_format') = 'fastscan'
-   AND (SELECT setting FROM prism.index_settings('idx_cost_cnofs')
+   AND (SELECT setting FROM prism_index_settings('idx_cost_cnofs')
           WHERE name = 'centroid_format') = 'rabitq'
-   AND (SELECT setting FROM prism.index_settings('idx_cost_cflt')
+   AND (SELECT setting FROM prism_index_settings('idx_cost_cflt')
           WHERE name = 'centroid_format') = 'float'
     AS centroid_formats_are_what_the_reloptions_asked_for;
 
@@ -346,7 +346,7 @@ INSERT INTO cost_test (grp, v)
 ANALYZE cost_test;
 
 SELECT count(DISTINCT format) > 1 AS index_holds_both_formats
-    FROM prism.posting_pages('idx_cost');
+    FROM prism_posting_pages('idx_cost');
 
 SELECT plan_uses($q$
     SELECT id FROM cost_test
@@ -443,7 +443,7 @@ SELECT plan_uses($q$
     LIMIT 10$q$, 'idx_cost_mid') AS index_chosen_at_5k;
 
 -- The descent cannot read more centroid pages than the index has.
-SELECT (SELECT count(*) FROM prism.centroid_pages('idx_cost_mid')) > 0
+SELECT (SELECT count(*) FROM prism_centroid_pages('idx_cost_mid')) > 0
     AS centroid_region_is_measurable;
 
 -- A LIMIT the planner cannot fold. Under a generic plan limit_tuples is -1,
@@ -565,9 +565,9 @@ RESET enable_seqscan;
 -- with a root above the leaves is read one page per kept slot per level,
 -- bounded by the region. Both branches want exercising, and both are --
 -- pinned here so that stays true if the clustering changes.
-SELECT (SELECT count(DISTINCT level) FROM prism.centroid_pages('idx_cost_small'))
+SELECT (SELECT count(DISTINCT level) FROM prism_centroid_pages('idx_cost_small'))
     AS small_index_levels,
-       (SELECT count(DISTINCT level) FROM prism.centroid_pages('idx_cost'))
+       (SELECT count(DISTINCT level) FROM prism_centroid_pages('idx_cost'))
     AS default_index_levels;
 
 -- A deliberately wide tree, to cover the nlist reloption and a region large
@@ -577,9 +577,9 @@ CREATE INDEX idx_cost_wide ON cost_mid USING prism (v) WITH (nlist = 500);
 ANALYZE cost_mid;
 
 SELECT (SELECT count(DISTINCT blkno)
-          FROM prism.centroid_pages('idx_cost_wide'))
+          FROM prism_centroid_pages('idx_cost_wide'))
          > (SELECT count(DISTINCT blkno)
-          FROM prism.centroid_pages('idx_cost_mid'))
+          FROM prism_centroid_pages('idx_cost_mid'))
     AS wide_tree_has_a_larger_centroid_region;
 
 -- With both indexes present the planner prefers the narrower one, and it is

@@ -101,12 +101,17 @@ explicitly as its own concern:
   reimplemented separately for each.
 - **Naming consistency.** Do new function, type, and variable names match
   this codebase's existing conventions — checked against neighboring code,
-  not just consistency within the new diff? E.g. the `vs_`/`prism_`
-  prefixes are for C symbols only; SQL-visible names are namespaced by
-  whichever schema they install into (`@extschema@` for the types and
-  build-identity functions, the fixed `prism` schema for the index's own
-  maintenance/inspection procedures) and should not repeat those
-  prefixes.
+  not just consistency within the new diff? E.g. `vs_`/`Vs`/`VS_` is for
+  C symbols that are generic/reusable infrastructure, `prism_`/`Prism`/
+  `PRISM_` for C symbols specific to the prism index access method. Every
+  SQL-visible object -- the vec32/vec16 types, the build-identity
+  functions, and prism's own maintenance/inspection procedures alike --
+  installs into `@extschema@`, with no fixed schema of its own; the
+  `prism_` prefix on the maintenance/inspection functions
+  (`prism_rebalance` and friends) is what keeps them distinguishable from
+  the generic type API in that shared namespace, so a new SQL function
+  should follow the same rule: prefix with `prism_` only if it is
+  specific to the prism access method, not for anything reusable.
 - **Public API surface especially.** New SQL functions, views, or GUCs
   deserve more scrutiny than internal code — their names, argument order,
   and return shapes should read as if they belong next to the existing

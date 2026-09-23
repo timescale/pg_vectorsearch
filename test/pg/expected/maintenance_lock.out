@@ -6,15 +6,15 @@ injection_points_attach
                        
 (1 row)
 
-step m1_head: SELECT blkno AS head_blkno FROM prism.posting_pages('maint_idx')
+step m1_head: SELECT blkno AS head_blkno FROM prism_posting_pages('maint_idx')
                     WHERE is_first ORDER BY blkno LIMIT 1;
 head_blkno
 ----------
          2
 (1 row)
 
-step m1_reb: CALL prism.rebalance('maint_idx', 10); <waiting ...>
-step m2_reb: CALL prism.rebalance('maint_idx', 10); <waiting ...>
+step m1_reb: CALL prism_rebalance('maint_idx', 10); <waiting ...>
+step m2_reb: CALL prism_rebalance('maint_idx', 10); <waiting ...>
 step o_wake: SELECT injection_points_wakeup('prism-split-locked');
 injection_points_wakeup
 -----------------------
@@ -25,7 +25,7 @@ m1: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
 step m1_reb: <... completed>
 m2: NOTICE:  rebalance: split 0 posting list(s), reclaimed 0 retired chain(s)
 step m2_reb: <... completed>
-step o_nlist: SELECT setting::int AS nlist FROM prism.index_settings('maint_idx')
+step o_nlist: SELECT setting::int AS nlist FROM prism_index_settings('maint_idx')
                    WHERE name = 'nlist';
 nlist
 -----
@@ -39,15 +39,15 @@ injection_points_attach
                        
 (1 row)
 
-step m1_head: SELECT blkno AS head_blkno FROM prism.posting_pages('maint_idx')
+step m1_head: SELECT blkno AS head_blkno FROM prism_posting_pages('maint_idx')
                     WHERE is_first ORDER BY blkno LIMIT 1;
 head_blkno
 ----------
          2
 (1 row)
 
-step m1_reb: CALL prism.rebalance('maint_idx', 10); <waiting ...>
-step m2_split: CALL prism.split_posting_list('maint_idx', 2); <waiting ...>
+step m1_reb: CALL prism_rebalance('maint_idx', 10); <waiting ...>
+step m2_split: CALL prism_split_posting_list('maint_idx', 2); <waiting ...>
 step o_wake: SELECT injection_points_wakeup('prism-split-locked');
 injection_points_wakeup
 -----------------------
@@ -58,7 +58,7 @@ m1: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
 step m1_reb: <... completed>
 m2: NOTICE:  posting list at block 2 not split
 step m2_split: <... completed>
-step o_nlist: SELECT setting::int AS nlist FROM prism.index_settings('maint_idx')
+step o_nlist: SELECT setting::int AS nlist FROM prism_index_settings('maint_idx')
                    WHERE name = 'nlist';
 nlist
 -----
@@ -72,15 +72,15 @@ injection_points_attach
                        
 (1 row)
 
-step m1_head: SELECT blkno AS head_blkno FROM prism.posting_pages('maint_idx')
+step m1_head: SELECT blkno AS head_blkno FROM prism_posting_pages('maint_idx')
                     WHERE is_first ORDER BY blkno LIMIT 1;
 head_blkno
 ----------
          2
 (1 row)
 
-step m1_split: CALL prism.split_posting_list('maint_idx', 2); <waiting ...>
-step m2_reb: CALL prism.rebalance('maint_idx', 10); <waiting ...>
+step m1_split: CALL prism_split_posting_list('maint_idx', 2); <waiting ...>
+step m2_reb: CALL prism_rebalance('maint_idx', 10); <waiting ...>
 step o_wake: SELECT injection_points_wakeup('prism-split-locked');
 injection_points_wakeup
 -----------------------
@@ -91,7 +91,7 @@ m1: NOTICE:  split posting list at block 2 into 2 lists
 step m1_split: <... completed>
 m2: NOTICE:  rebalance: split 2 posting list(s), reclaimed 0 retired chain(s)
 step m2_reb: <... completed>
-step o_nlist: SELECT setting::int AS nlist FROM prism.index_settings('maint_idx')
+step o_nlist: SELECT setting::int AS nlist FROM prism_index_settings('maint_idx')
                    WHERE name = 'nlist';
 nlist
 -----
@@ -105,15 +105,15 @@ injection_points_attach
                        
 (1 row)
 
-step m1_head: SELECT blkno AS head_blkno FROM prism.posting_pages('maint_idx')
+step m1_head: SELECT blkno AS head_blkno FROM prism_posting_pages('maint_idx')
                     WHERE is_first ORDER BY blkno LIMIT 1;
 head_blkno
 ----------
          2
 (1 row)
 
-step m1_split: CALL prism.split_posting_list('maint_idx', 2); <waiting ...>
-step m2_split: CALL prism.split_posting_list('maint_idx', 2); <waiting ...>
+step m1_split: CALL prism_split_posting_list('maint_idx', 2); <waiting ...>
+step m2_split: CALL prism_split_posting_list('maint_idx', 2); <waiting ...>
 step o_wake: SELECT injection_points_wakeup('prism-split-locked');
 injection_points_wakeup
 -----------------------
@@ -124,7 +124,7 @@ m1: NOTICE:  split posting list at block 2 into 2 lists
 step m1_split: <... completed>
 m2: NOTICE:  posting list at block 2 not split
 step m2_split: <... completed>
-step o_nlist: SELECT setting::int AS nlist FROM prism.index_settings('maint_idx')
+step o_nlist: SELECT setting::int AS nlist FROM prism_index_settings('maint_idx')
                    WHERE name = 'nlist';
 nlist
 -----
@@ -138,7 +138,7 @@ injection_points_attach
                        
 (1 row)
 
-step m1_reb: CALL prism.rebalance('maint_idx', 10); <waiting ...>
+step m1_reb: CALL prism_rebalance('maint_idx', 10); <waiting ...>
 step d_drop: DROP INDEX maint_idx; <waiting ...>
 step o_wake: SELECT injection_points_wakeup('prism-split-locked');
 injection_points_wakeup
@@ -163,7 +163,7 @@ injection_points_attach
                        
 (1 row)
 
-step m1_reb: CALL prism.rebalance('maint_idx', 10); <waiting ...>
+step m1_reb: CALL prism_rebalance('maint_idx', 10); <waiting ...>
 step d_reindex: REINDEX INDEX maint_idx; <waiting ...>
 step o_wake: SELECT injection_points_wakeup('prism-split-locked');
 injection_points_wakeup
@@ -174,7 +174,7 @@ injection_points_wakeup
 m1: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
 step m1_reb: <... completed>
 step d_reindex: <... completed>
-step o_heads: SELECT count(*) AS heads FROM prism.posting_pages('maint_idx')
+step o_heads: SELECT count(*) AS heads FROM prism_posting_pages('maint_idx')
                    WHERE is_first;
 heads
 -----
@@ -190,7 +190,7 @@ injection_points_attach
 
 step d_begin: BEGIN;
 step d_alter: ALTER TABLE maint SET (fillfactor = 90);
-step m1_reb: CALL prism.rebalance('maint_idx', 10); <waiting ...>
+step m1_reb: CALL prism_rebalance('maint_idx', 10); <waiting ...>
 step d_commit: COMMIT;
 step o_wake: SELECT injection_points_wakeup('prism-split-locked');
 injection_points_wakeup
@@ -200,7 +200,7 @@ injection_points_wakeup
 
 m1: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
 step m1_reb: <... completed>
-step o_heads: SELECT count(*) AS heads FROM prism.posting_pages('maint_idx')
+step o_heads: SELECT count(*) AS heads FROM prism_posting_pages('maint_idx')
                    WHERE is_first;
 heads
 -----

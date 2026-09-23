@@ -30,12 +30,12 @@ SELECT count(*) AS aos_ins FROM (
 -- for this: these axis-aligned 1-D vectors all quantize to near-identical
 -- RaBitQ codes, so approximate ranking does not surface all 40 even when all
 -- are present. Instead count physical index entries directly via
--- prism.posting_pages, which is independent of search recall: the index must
+-- prism_posting_pages, which is independent of search recall: the index must
 -- hold all 91 rows (50 initial + the 1001 outlier + 40 bulk).
 INSERT INTO mut SELECT 2000 + g, format('[%s,0,0]', 300 + g)::vec32
     FROM generate_series(1, 40) g;
 SELECT sum(entry_count) AS aos_total
-    FROM prism.posting_pages('idx_mut'::regclass);
+    FROM prism_posting_pages('idx_mut'::regclass);
 -- Separately, ANN ranking must return the true nearest neighbour: the probe
 -- matches row 2020 exactly (distance 0), so it is the unambiguous top-1.
 SELECT id AS aos_bulk_nn FROM mut ORDER BY v <-> '[320,0,0]' LIMIT 1;
@@ -125,7 +125,7 @@ SELECT id AS del_after FROM mutdel ORDER BY v <-> '[100,0,0]' LIMIT 1;
 -- and none are marked dead yet — only VACUUM's ambulkdelete marks entries.
 SELECT sum(entry_count) AS del_entries_pre_vacuum,
        sum(dead_count) AS del_dead_pre_vacuum
-    FROM prism.posting_pages('idx_mutdel'::regclass);
+    FROM prism_posting_pages('idx_mutdel'::regclass);
 VACUUM mutdel;   -- runs ambulkdelete: tombstones the dead 1001 entry
 -- Still correct after VACUUM, and the other outlier is unaffected.
 SELECT id AS del_after_vacuum FROM mutdel ORDER BY v <-> '[100,0,0]' LIMIT 1;
@@ -134,7 +134,7 @@ SELECT id AS del_other FROM mutdel ORDER BY v <-> '[200,0,0]' LIMIT 1;
 -- count is unchanged; exactly the one deleted row is now marked dead.
 SELECT sum(entry_count) AS del_entries_post_vacuum,
        sum(dead_count) AS del_dead_post_vacuum
-    FROM prism.posting_pages('idx_mutdel'::regclass);
+    FROM prism_posting_pages('idx_mutdel'::regclass);
 -- VACUUM page-tombstones only pages left all-dead. The deleted outlier sat
 -- alone in its own cluster, so exactly its page becomes all-dead and is
 -- flagged (its single entry marked dead); the dense pages keep live entries
@@ -142,7 +142,7 @@ SELECT sum(entry_count) AS del_entries_post_vacuum,
 SELECT count(*) AS del_tombstoned_pages,
        coalesce(bool_and(entry_count = 1), true) AS only_the_dead_entry,
        coalesce(bool_and(dead_count = entry_count), true) AS all_entries_dead
-    FROM prism.posting_pages('idx_mutdel'::regclass)
+    FROM prism_posting_pages('idx_mutdel'::regclass)
     WHERE tombstoned;
 RESET enable_seqscan;
 RESET prism.nprobe;
@@ -203,11 +203,11 @@ CREATE INDEX idx_mutnonhot ON mutnonhot USING prism (v)
 SET enable_seqscan = off;
 SET prism.nprobe = 4;
 SELECT sum(entry_count) AS entries_before
-    FROM prism.posting_pages('idx_mutnonhot'::regclass);
+    FROM prism_posting_pages('idx_mutnonhot'::regclass);
 UPDATE mutnonhot SET payload = payload + 1;
 -- The new versions were indexed: more entries than rows ...
 SELECT sum(entry_count) > 1000 AS entries_added
-    FROM prism.posting_pages('idx_mutnonhot'::regclass);
+    FROM prism_posting_pages('idx_mutnonhot'::regclass);
 -- ... and a row from a full page is found at its unchanged vec32.
 SELECT id AS nonhot_found FROM mutnonhot ORDER BY v <-> '[500,0,0]' LIMIT 1;
 -- Once VACUUM has removed the dead old versions, the whole table is
@@ -256,24 +256,24 @@ BEGIN
 END $$;
 
 -- No tombstones yet: nothing skipped, every read page is scored, and
--- prism.posting_pages reports no page as tombstoned.
+-- prism_posting_pages reports no page as tombstoned.
 SELECT pages_skipped = 0 AS none_skipped_before,
        pages_scanned = pages_read AS all_scanned_before
     FROM muttomb_pages();
 SELECT count(*) FILTER (WHERE tombstoned) AS tombstoned_before
-    FROM prism.posting_pages('idx_muttomb'::regclass);
+    FROM prism_posting_pages('idx_muttomb'::regclass);
 DELETE FROM muttomb;
 VACUUM muttomb;
 -- Every page is now all-dead: all read pages are skipped, none scored.
 SELECT pages_skipped > 0 AS some_skipped_after,
        pages_scanned = 0 AS none_scanned_after
     FROM muttomb_pages();
--- prism.posting_pages agrees: every posting page is flagged tombstoned, and the
+-- prism_posting_pages agrees: every posting page is flagged tombstoned, and the
 -- pages stay linked in their chains (tombstoning is a scan optimization, not
 -- reclamation).
 SELECT count(*) > 0 AS have_pages,
        bool_and(tombstoned) AS all_tombstoned
-    FROM prism.posting_pages('idx_muttomb'::regclass);
+    FROM prism_posting_pages('idx_muttomb'::regclass);
 
 DROP FUNCTION muttomb_pages();
 RESET enable_seqscan;
@@ -296,17 +296,17 @@ SELECT count(*) FILTER (WHERE format = 'fastscan') > 0 AS has_fastscan_pages,
        count(*) FILTER (WHERE tombstoned) AS tombstoned_before,
        bool_and(dead_count IS NULL)
            FILTER (WHERE format = 'fastscan') AS fastscan_dead_is_null
-    FROM prism.posting_pages('idx_mutfstomb'::regclass);
+    FROM prism_posting_pages('idx_mutfstomb'::regclass);
 DELETE FROM mutfstomb;
 VACUUM mutfstomb;
 -- Every page — fastscan base included — is all-dead and flagged.
 SELECT count(*) > 0 AS have_pages,
        bool_and(tombstoned) AS all_tombstoned
-    FROM prism.posting_pages('idx_mutfstomb'::regclass);
+    FROM prism_posting_pages('idx_mutfstomb'::regclass);
 DROP TABLE mutfstomb;
 
 -- ===== Dead-entry accounting across the delete lifecycle =====================
--- The monitoring story for prism.posting_pages: dead_count accumulates with each
+-- The monitoring story for prism_posting_pages: dead_count accumulates with each
 -- DELETE + VACUUM round while pages holding live entries stay untombstoned;
 -- tombstoned flips only when a page goes all-dead, at which point
 -- dead_count = entry_count. Deletes are spread (every 5th id) so no cluster
@@ -322,12 +322,12 @@ CREATE INDEX idx_mutlife ON mutlife USING prism (v)
 SELECT sum(entry_count) AS entries,
        sum(dead_count) AS dead,
        count(*) FILTER (WHERE tombstoned) AS tombstoned_pages
-    FROM prism.posting_pages('idx_mutlife'::regclass);
+    FROM prism_posting_pages('idx_mutlife'::regclass);
 
 -- Round 1: delete every 5th row. Before VACUUM nothing is marked ...
 DELETE FROM mutlife WHERE id % 5 = 0;
 SELECT sum(dead_count) AS dead_marked_pre_vacuum
-    FROM prism.posting_pages('idx_mutlife'::regclass);
+    FROM prism_posting_pages('idx_mutlife'::regclass);
 -- ... after VACUUM exactly those 10 are marked dead, spread across clusters,
 -- so every page keeps live entries and none is tombstoned.
 VACUUM mutlife;
@@ -335,7 +335,7 @@ SELECT sum(entry_count) AS entries,
        sum(dead_count) AS dead,
        count(*) FILTER (WHERE tombstoned) AS tombstoned_pages,
        bool_and(dead_count < entry_count) AS all_pages_have_live
-    FROM prism.posting_pages('idx_mutlife'::regclass);
+    FROM prism_posting_pages('idx_mutlife'::regclass);
 
 -- Round 2: delete another slice; dead_count accumulates monotonically.
 DELETE FROM mutlife WHERE id % 5 = 1;
@@ -343,7 +343,7 @@ VACUUM mutlife;
 SELECT sum(entry_count) AS entries,
        sum(dead_count) AS dead,
        count(*) FILTER (WHERE tombstoned) AS tombstoned_pages
-    FROM prism.posting_pages('idx_mutlife'::regclass);
+    FROM prism_posting_pages('idx_mutlife'::regclass);
 
 -- Round 3: delete everything left; every page goes all-dead, tombstoned flips
 -- everywhere, and dead_count = entry_count on every page.
@@ -353,7 +353,7 @@ SELECT sum(entry_count) AS entries,
        sum(dead_count) AS dead,
        count(*) > 0 AND bool_and(tombstoned) AS all_tombstoned,
        bool_and(dead_count = entry_count) AS all_entries_dead
-    FROM prism.posting_pages('idx_mutlife'::regclass);
+    FROM prism_posting_pages('idx_mutlife'::regclass);
 DROP TABLE mutlife;
 
 -- ===== Mixed state: dead-region chains tombstone, live regions do not =======
@@ -382,10 +382,10 @@ SELECT count(*) FILTER (WHERE tombstoned) > 0 AS some_tombstoned,
        count(*) FILTER (WHERE NOT tombstoned) > 0 AS some_live,
        sum(entry_count) AS entries,
        sum(dead_count) AS dead
-    FROM prism.posting_pages('idx_mutmix'::regclass);
+    FROM prism_posting_pages('idx_mutmix'::regclass);
 -- The invariant on every page: tombstoned iff every entry is dead.
 SELECT bool_and((dead_count = entry_count) = tombstoned) AS tombstone_iff_all_dead
-    FROM prism.posting_pages('idx_mutmix'::regclass);
+    FROM prism_posting_pages('idx_mutmix'::regclass);
 -- Queries keep working across the mix: probing into the dead region returns
 -- the nearest live row (id 26), served by the index.
 SELECT id AS nearest_live FROM mutmix ORDER BY v <-> '[1,0,0]' LIMIT 1;
@@ -421,9 +421,9 @@ SET prism.nprobe = 1;
 -- Snapshot the big cluster's chain (the one that grew) before any delete.
 CREATE TEMP TABLE chain_before AS
     SELECT blkno, chain_pos, entry_count
-        FROM prism.posting_pages('idx_mutchain'::regclass)
+        FROM prism_posting_pages('idx_mutchain'::regclass)
         WHERE cluster_id = (
-            SELECT cluster_id FROM prism.posting_pages('idx_mutchain'::regclass)
+            SELECT cluster_id FROM prism_posting_pages('idx_mutchain'::regclass)
             GROUP BY cluster_id ORDER BY count(*) DESC LIMIT 1);
 -- The chain is long enough that chain_pos=2 is an interior page (neither the
 -- head nor the tail).
@@ -471,16 +471,16 @@ SELECT count(*) FILTER (WHERE tombstoned) = 1 AS one_tombstoned,
            FILTER (WHERE tombstoned) AS interior_all_dead,
        bool_and(dead_count < entry_count)
            FILTER (WHERE NOT tombstoned) AS others_have_live
-    FROM prism.posting_pages('idx_mutchain'::regclass)
+    FROM prism_posting_pages('idx_mutchain'::regclass)
     WHERE blkno IN (SELECT blkno FROM chain_before);
--- The chain stays complete: prism.posting_pages walks next_blkno links, so an
+-- The chain stays complete: prism_posting_pages walks next_blkno links, so an
 -- unlinked page would vanish from the walk. Same pages, same order, same
 -- entry counts (tombstoning reclaims nothing).
 SELECT (SELECT array_agg(blkno ORDER BY chain_pos) FROM chain_before) =
        array_agg(blkno ORDER BY chain_pos) AS chain_unchanged,
        (SELECT sum(entry_count) FROM chain_before) =
        sum(entry_count) AS entries_unchanged
-    FROM prism.posting_pages('idx_mutchain'::regclass)
+    FROM prism_posting_pages('idx_mutchain'::regclass)
     WHERE blkno IN (SELECT blkno FROM chain_before);
 -- The scan follows the chain across the tombstoned page (read count is
 -- unchanged) but skips its scoring: exactly one page skipped, one fewer

@@ -44,10 +44,10 @@ CREATE INDEX est_plain_idx ON est_plain USING prism (v vec32_l2_ops);
 CREATE INDEX est_toast_idx ON est_toast USING prism (v vec32_l2_ops);
 INSERT INTO cluster_counts
 SELECT 'plain_est', count(DISTINCT cluster_id)
-FROM prism.posting_pages('est_plain_idx');
+FROM prism_posting_pages('est_plain_idx');
 INSERT INTO cluster_counts
 SELECT 'toast_est', count(DISTINCT cluster_id)
-FROM prism.posting_pages('est_toast_idx');
+FROM prism_posting_pages('est_toast_idx');
 
 -- Stats-driven rebuilds.
 ANALYZE est_plain;
@@ -58,10 +58,10 @@ REINDEX INDEX est_plain_idx;
 REINDEX INDEX est_toast_idx;
 INSERT INTO cluster_counts
 SELECT 'plain_true', count(DISTINCT cluster_id)
-FROM prism.posting_pages('est_plain_idx');
+FROM prism_posting_pages('est_plain_idx');
 INSERT INTO cluster_counts
 SELECT 'toast_true', count(DISTINCT cluster_id)
-FROM prism.posting_pages('est_toast_idx');
+FROM prism_posting_pages('est_toast_idx');
 
 SELECT (SELECT n FROM cluster_counts WHERE which = 'plain_est')::float
        / (SELECT n FROM cluster_counts WHERE which = 'plain_true')

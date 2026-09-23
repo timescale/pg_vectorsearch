@@ -298,11 +298,12 @@ first existing schema on `search_path`
 — typically `public`); the build-identity functions
 (`pg_vectorsearch_git_commit()`, `pg_vectorsearch_version()`) install
 there alongside them. Maintenance, administration, and inspection
-functions specific to the `prism` index access method are the one
-exception, always living in a separate, fixed `prism` schema regardless
-of that choice. The distinct `vec32`/`vec16` names do not collide with
-pgvector's `vector`/`halfvec`, even when both extensions' types end up
-in the same schema.
+functions specific to the `prism` index access method (`prism_rebalance`
+and friends) install there too, prefixed to stay distinguishable from
+the generic type API rather than living in a separate fixed schema. The
+distinct `vec32`/`vec16` names do not collide with pgvector's
+`vector`/`halfvec`, even when both extensions' types end up in the same
+schema.
 
 **pgvector interoperability.** `vec32` is binary-compatible with pgvector's
 `vector`, and `vec16` with pgvector's `halfvec`; the extension creates
@@ -318,9 +319,9 @@ Direction matters: pgvector → pg_vectorsearch is IMPLICIT so an existing
 pgvector column works transparently, while pg_vectorsearch → pgvector is
 ASSIGNMENT to avoid operator ambiguity when both extensions are
 installed. Install order does not matter —
-`prism.setup_pgvector_compat()` runs at `CREATE EXTENSION pg_vectorsearch`
-if pgvector is already there, and an event trigger runs it if pgvector
-arrives later.
+`pg_vectorsearch_setup_pgvector_compat()` runs at
+`CREATE EXTENSION pg_vectorsearch` if pgvector is already there, and an
+event trigger runs it if pgvector arrives later.
 
 The consequence worth remembering: because the casts are `WITHOUT FUNCTION`,
 they satisfy PostgreSQL's binary-coercibility rule for operator classes. That
@@ -334,7 +335,7 @@ disagree with the planner about a column the index was built on.
 Operators need separate handling, because casts do not cover them. An index is
 only considered for an `ORDER BY` when the ordering operator belongs to the
 index's operator family, and pgvector's `<->`, `<#>` and `<=>` belong to
-pgvector's families. So `prism.setup_pgvector_compat()` adds them to
+pgvector's families. So `pg_vectorsearch_setup_pgvector_compat()` adds them to
 `prism`'s operator families as ordering members (strategy 1, `float_ops`)
 in the same step as the casts — they are a unit, since the operators rely
 on the casts' binary-coercibility. Either spelling of the operator then

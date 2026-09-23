@@ -11,7 +11,7 @@ injection_points_attach
                        
 (1 row)
 
-step m_split: CALL prism.rebalance('race_idx', 10); <waiting ...>
+step m_split: CALL prism_rebalance('race_idx', 10); <waiting ...>
 step i_ins: INSERT INTO race VALUES (1001, '[61,0,0]'); <waiting ...>
 step o_wake_split: SELECT injection_points_wakeup('prism-split-locked');
 injection_points_wakeup
@@ -46,9 +46,9 @@ injection_points_attach
 
 step r_query: SELECT id FROM race ORDER BY v <-> '[1,0,0]' LIMIT 3; <waiting ...>
 w: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
-step w_split: CALL prism.rebalance('race_idx', 10);
+step w_split: CALL prism_rebalance('race_idx', 10);
 w: NOTICE:  rebalance: split 0 posting list(s), reclaimed 0 retired chain(s)
-step w_reclaim: CALL prism.rebalance('race_idx', 10);
+step w_reclaim: CALL prism_rebalance('race_idx', 10);
 step o_wake_scan: SELECT injection_points_wakeup('prism-scan-routed');
 injection_points_wakeup
 -----------------------
@@ -76,9 +76,9 @@ injection_points_attach
 (1 row)
 
 w: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
-step w_split: CALL prism.rebalance('race_idx', 10);
+step w_split: CALL prism_rebalance('race_idx', 10);
 w: NOTICE:  rebalance: split 0 posting list(s), reclaimed 1 retired chain(s)
-step w_reclaim: CALL prism.rebalance('race_idx', 10);
+step w_reclaim: CALL prism_rebalance('race_idx', 10);
 
 starting permutation: v_del m_split v_vacuum o_wake_split o_near
 injection_points_attach
@@ -92,7 +92,7 @@ injection_points_attach
 (1 row)
 
 step v_del: DELETE FROM race WHERE id % 10 = 0;
-step m_split: CALL prism.rebalance('race_idx', 10); <waiting ...>
+step m_split: CALL prism_rebalance('race_idx', 10); <waiting ...>
 step v_vacuum: VACUUM race; <waiting ...>
 step o_wake_split: SELECT injection_points_wakeup('prism-split-locked');
 injection_points_wakeup

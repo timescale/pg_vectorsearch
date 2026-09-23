@@ -368,7 +368,7 @@ INSERT INTO hd
     FROM generate_series(1, 2000) g;
 CREATE INDEX hd_i ON hd USING prism (v);
 SELECT count(*) BETWEEN 20 AND 120 AS toast_auto_nlist
-  FROM centroid_pages('hd_i') WHERE is_leaf;
+  FROM prism_centroid_pages('hd_i') WHERE is_leaf;
  toast_auto_nlist 
 ------------------
  t
