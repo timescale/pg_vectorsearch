@@ -171,8 +171,7 @@ SELECT * FROM prism_posting_pages('idx_btree'::regclass);
 -- =====================================================================
 
 -- Convert cluster 0 from AoS to fastscan
-SELECT prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0) IS NOT NULL
-    AS converted;
+CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
 
 -- Verify the converted cluster has fastscan format
 SELECT format AS cluster0_format
@@ -184,9 +183,8 @@ SELECT bool_and(format = 'aos') AS others_aos
     FROM prism_posting_pages('idx_l2c'::regclass)
     WHERE cluster_id != 0 AND is_first;
 
--- Converting again should be a no-op (returns same head)
-SELECT prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0) IS NOT NULL
-    AS idempotent;
+-- Converting again should be a no-op (already fastscan)
+CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
 
 -- Query still works after partial conversion (mixed AoS + fastscan).
 --
@@ -202,12 +200,26 @@ SELECT count(*) FROM (
 ) t;
 RESET enable_seqscan;
 
--- Convert all remaining clusters
-SELECT count(*) AS converted_count FROM (
-    SELECT prism_convert_posting_to_fastscan('idx_l2c'::regclass, cluster_id)
-    FROM prism_posting_pages('idx_l2c'::regclass)
-    WHERE is_first AND cluster_id != 0
-) t;
+-- Convert all remaining clusters. A procedure cannot appear in a SELECT
+-- list or a FROM subquery, so bulk conversion is an explicit loop; per-
+-- cluster NOTICEs are suppressed since their exact block numbers depend
+-- on the k-means-derived cluster count, and the resulting state is
+-- asserted directly below instead.
+SET client_min_messages = warning;
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT cluster_id FROM prism_posting_pages('idx_l2c'::regclass)
+              WHERE is_first AND cluster_id != 0
+    LOOP
+        CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass,
+            r.cluster_id);
+    END LOOP;
+END $$;
+RESET client_min_messages;
+
+SELECT bool_and(format = 'fastscan') AS all_converted
+    FROM prism_posting_pages('idx_l2c'::regclass) WHERE is_first;
 
 -- Query still works after full conversion
 SET enable_seqscan = off;
@@ -236,9 +248,15 @@ VACUUM conv_dead;
 SELECT format, entry_count, dead_count
     FROM prism_posting_pages('conv_dead_idx') WHERE is_first;
 
-SELECT prism_convert_posting_to_fastscan('conv_dead_idx', cluster_id) IS NOT NULL
-        AS converted
-    FROM prism_posting_pages('conv_dead_idx') WHERE is_first;
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT cluster_id FROM prism_posting_pages('conv_dead_idx')
+              WHERE is_first
+    LOOP
+        CALL prism_convert_posting_to_fastscan('conv_dead_idx', r.cluster_id);
+    END LOOP;
+END $$;
 
 -- 27 rows remain, so the fastscan list must hold 27 entries
 SELECT format, entry_count FROM prism_posting_pages('conv_dead_idx')
@@ -261,10 +279,10 @@ RESET enable_seqscan;
 DROP TABLE conv_dead;
 
 -- Error: non-existent cluster_id
-SELECT prism_convert_posting_to_fastscan('idx_l2c'::regclass, 99999);
+CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 99999);
 
 -- Error: not a prism index
-SELECT prism_convert_posting_to_fastscan('idx_btree'::regclass, 0);
+CALL prism_convert_posting_to_fastscan('idx_btree'::regclass, 0);
 
 -- =====================================================================
 -- prism_tids_clusters
@@ -294,11 +312,21 @@ CREATE TEMP TABLE tc_aos AS
         FROM prism_tids_clusters('idx_tc'::regclass,
                                (SELECT array_agg(ctid) FROM embeddings));
 
-SELECT count(*) > 0 AS converted_all FROM (
-    SELECT prism_convert_posting_to_fastscan('idx_tc'::regclass, cluster_id)
-        FROM prism_posting_pages('idx_tc'::regclass)
-        WHERE is_first
-) t;
+SET client_min_messages = warning;
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT cluster_id FROM prism_posting_pages('idx_tc'::regclass)
+              WHERE is_first
+    LOOP
+        CALL prism_convert_posting_to_fastscan('idx_tc'::regclass,
+            r.cluster_id);
+    END LOOP;
+END $$;
+RESET client_min_messages;
+
+SELECT bool_and(format = 'fastscan') AS all_converted
+    FROM prism_posting_pages('idx_tc'::regclass) WHERE is_first;
 
 CREATE TEMP TABLE tc_fastscan AS
     SELECT tid, cluster_id
@@ -327,7 +355,8 @@ DROP TABLE tc_fastscan;
 -- are gated on the caller's privileges on the underlying table (the same
 -- model pgrowlocks uses). EXECUTE stays public; the checks are runtime.
 -- Read-only inspectors need SELECT on the table; convert_posting_to_
--- fastscan mutates the index and needs table ownership.
+-- fastscan (a procedure, like the maintenance operations below) mutates
+-- the index and needs table ownership.
 
 CREATE ROLE regress_inspect_unpriv NOLOGIN;
 -- No schema GRANT is needed: the functions and embeddings/idx_l2c above
@@ -342,8 +371,8 @@ SELECT * FROM prism_posting_pages('idx_l2c'::regclass);
 SELECT * FROM prism_tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
 SELECT * FROM prism_index_settings('idx_l2c'::regclass);
 
--- The mutating function requires ownership, not merely SELECT.
-SELECT prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
+-- The mutating procedure requires ownership, not merely SELECT.
+CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
 
 RESET ROLE;
 
@@ -362,7 +391,7 @@ SELECT count(*) > 0 AS settings_ok
     FROM prism_index_settings('idx_l2c'::regclass);
 
 -- ...but SELECT is still not enough to mutate the index.
-SELECT prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
+CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
 
 RESET ROLE;
 
