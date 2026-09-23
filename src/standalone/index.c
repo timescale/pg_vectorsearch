@@ -376,7 +376,7 @@ prism_index_build(
 	/* Resolve nlist */
 	uint32_t nlist = config->nlist;
 	if (nlist == 0)
-		nlist = prism_auto_nlist((double)nvecs);
+		nlist = prism_auto_nlist((double)nvecs, dim, config->target_pages);
 
 	/* Resolve fan_out */
 	uint32_t fan_out = config->fan_out;

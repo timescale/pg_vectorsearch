@@ -19,6 +19,7 @@
 #include "algo/kmeans.h"
 #include "explain.h"
 #include "git_commit.h"
+#include "index/index_build.h"
 #include "index/posting_page.h"
 #include "index/query_scan.h"
 #include "pg/bufstorage.h"
@@ -364,6 +365,14 @@ _PG_init(void)
 			PRISM_DEFAULT_NLIST,
 			PRISM_MIN_NLIST,
 			PRISM_MAX_NLIST,
+			NoLock);
+	add_int_reloption(
+			prism_relopt_kind,
+			"target_pages",
+			"Posting pages each list rests at (1-64)",
+			PRISM_DEFAULT_TARGET_PAGES,
+			PRISM_MIN_TARGET_PAGES,
+			PRISM_MAX_TARGET_PAGES,
 			NoLock);
 	add_int_reloption(
 			prism_relopt_kind,

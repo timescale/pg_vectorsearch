@@ -224,18 +224,18 @@ Three sizes, derived from one:
 | split trigger | `T * PRISM_SPLIT_TRIGGER_FACTOR` (2) | grow past this and the list splits |
 | merge threshold | `T / PRISM_SPLIT_TRIGGER_FACTOR` | shrink below this and the list merges |
 
-The target is derived from the row count alone, via
-`prism_target_entries_per_list`, and **ignores an explicit `nlist`**. It is the
-resting size the automatic list count implies: a fixed target per list once the
-table is large enough for that, and smaller below the sqrt floor in
-`prism_auto_nlist`. The constant itself is a tuning choice, not part of this
-design. Honouring
-`nlist` was considered and rejected: `target = rows / nlist` scales with the
-table, so a list grown in proportion never reaches the trigger, and a number
-typed once at `CREATE INDEX` would switch maintenance off for the life of the
-index. `nlist` is what the build was asked for. It is not a maintenance policy.
-A rebalance that splits therefore drops `nlist` from the reloptions, so a later
-`REINDEX` sizes from the current row count.
+The target is a page count, `target_pages`, times how many entries fit on a
+posting page at this dimension, with a training floor so a high-dimension page
+does not starve the centroid. `prism_target_entries_per_dim` is that size;
+`prism_target_entries_per_list` uses it, and is smaller below the sqrt floor in
+`prism_auto_nlist`. It **ignores an explicit `nlist`**. Honouring `nlist` was
+rejected: `target = rows / nlist` scales with the table, so a list grown in
+proportion never reaches the trigger, and a number typed once at `CREATE INDEX`
+would switch maintenance off for the life of the index. `nlist` is what the
+build was asked for. It is not a maintenance policy. A rebalance that splits
+therefore drops `nlist` from the reloptions. `target_pages` is read from the
+index's current reloptions, so changing it and rebalancing re-partitions
+without a rebuild.
 
 The **trigger is deliberately above the target**, which is the part that is easy
 to get wrong. Pin the trigger at the target and every freshly split list starts

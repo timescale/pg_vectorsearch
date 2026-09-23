@@ -759,8 +759,8 @@ split_one_head(
  * Resolve the resting list size maintenance should aim at.
  *
  * Derived from the row count alone, deliberately ignoring the nlist
- * reloption. Above PRISM_TARGET_ENTRIES_PER_LIST^2 rows that is the flat
- * target; below it the sqrt floor in prism_auto_nlist makes it smaller, which
+ * reloption. Above the dimension's per-list target squared that is the target
+ * itself; below it the sqrt floor in prism_auto_nlist makes it smaller, which
  * is the regime where a hardcoded target would fight the build and merge a
  * small index down to too few lists.
  *
@@ -778,13 +778,24 @@ split_one_head(
  * VACUUM-driven, nothing would ever revisit it.
  *
  * A list should rest at the size that keeps a probe's cost flat, which is
- * what PRISM_TARGET_ENTRIES_PER_LIST is for. nlist stays what the user asked
+ * what prism_target_entries_per_dim is for. nlist stays what the user asked
  * the *build* for; it is not a maintenance policy.
+ *
+ * target_pages, by contrast, IS read here, from the index's current
+ * reloptions rather than from whatever the build saw. It names the resting
+ * shape directly, so ALTER INDEX ... SET (target_pages = ...) followed by
+ * rebalance() is the supported way to re-partition an index without
+ * rebuilding it -- deliberate, unlike the nlist case above, where honouring
+ * the option silently switched maintenance off.
  */
 static uint32_t
-resolve_target_entries(Relation heap)
+resolve_target_entries(Relation heap, Relation index, Dimension dim)
 {
-	return prism_target_entries_per_list(prism_estimate_heap_tuples(heap), 0);
+	const PrismOptions *opts = (const PrismOptions *)index->rd_options;
+	uint32_t tpages = (opts != NULL) ? (uint32_t)opts->target_pages : 0;
+
+	return prism_target_entries_per_list(
+			prism_estimate_heap_tuples(heap), 0, dim, tpages);
 }
 
 /* Common setup: base + storage + heap fetch context. */
@@ -1097,8 +1108,9 @@ vs_rebalance(PG_FUNCTION_ARGS)
 	maint_begin(index, &m);
 	require_memory_budget(index, m.base.dim);
 
-	uint32_t target	 = target_given ? (uint32_t)target_arg
-									: resolve_target_entries(m.heap);
+	uint32_t target =
+			target_given ? (uint32_t)target_arg
+						 : resolve_target_entries(m.heap, index, m.base.dim);
 	uint64_t trigger = prism_split_trigger(target);
 
 	BlockNumber nblocks	   = RelationGetNumberOfBlocks(index);

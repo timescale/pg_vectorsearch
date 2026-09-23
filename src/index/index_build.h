@@ -463,45 +463,69 @@ uint32_t
 prism_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out);
 
 /*
- * Target vectors per posting list -- the k-means convergence floor (the
- * densest partitioning that still gives each centroid enough training data)
- * and the measured recall/QPS sweet spot. The single source of truth for the
- * index's intended list size: prism_auto_nlist derives nlist from it, and
- * prism_target_entries_per_list inverts that to recover the size itself.
- * Named, so there is one place to change it.
+ * Default value of the target_pages index setting: posting pages a list
+ * should rest at. The target is in pages because a probe's cost is pages
+ * read -- a list thinner than a page still costs the page.
  *
- * Not the same quantity as the build's ~256 k-means training samples per list
- * (build.c, parallel_backend.c), which happens to share the value for a
- * related reason but sizes the sample region -- the build's dominant memory
- * cost -- so the two must stay independently tunable.
+ * Lives here, not with the other reloption bounds, so the value the option
+ * registers as its default and the value used for an index that sets no
+ * options cannot drift apart.
  */
-#define PRISM_TARGET_ENTRIES_PER_LIST 256
+#define PRISM_DEFAULT_TARGET_PAGES 3
+
+/*
+ * Floor on the per-list target, in entries: a centroid is only as good as
+ * the number of points it was fit from, which is independent of how those
+ * points pack into pages. Binds at high dimension, where a page holds few
+ * entries.
+ *
+ * Distinct from the build's k-means training samples per list (build.c,
+ * parallel_backend.c), which sizes the sample region; they share a value
+ * but must stay independently tunable.
+ */
+#define PRISM_MIN_ENTRIES_PER_LIST 256
+
+/*
+ * Target vectors per posting list at a given dimension:
+ *
+ *   max(target_pages * entries_per_page(dim), PRISM_MIN_ENTRIES_PER_LIST)
+ *
+ * target_pages is the index's setting, or 0 to use its default.
+ * Entries per page is the continuation-page capacity; a list's first page
+ * holds fewer, carrying the float encode reference.
+ *
+ * The single source of truth for the intended list size: prism_auto_nlist
+ * derives nlist from it, prism_target_entries_per_list inverts that.
+ */
+uint32_t prism_target_entries_per_dim(Dimension dim, uint32_t target_pages);
 
 /*
  * Auto-tune nlist from a (possibly estimated) vector count: ~one list per
- * PRISM_TARGET_ENTRIES_PER_LIST vectors, floored at sqrt(count) so small
- * tables still get enough lists to build. Used by every build path when nlist
- * is not set explicitly. The count source differs by back-end (reltuples /
- * heap-block estimate in PostgreSQL, the in-memory vector count standalone).
- * Back-ends clamp the result to their own nlist ceiling.
+ * prism_target_entries_per_dim(dim, target_pages) vectors, floored at
+ * sqrt(count) so small tables still get enough lists to build. Used by every
+ * build path when nlist is not set explicitly. The count source differs by
+ * back-end (reltuples / heap-block estimate in PostgreSQL, the in-memory
+ * vector count standalone). Back-ends clamp the result to their own nlist
+ * ceiling.
  */
-uint32_t prism_auto_nlist(double count);
+uint32_t prism_auto_nlist(double count, Dimension dim, uint32_t target_pages);
 
 /*
  * Vectors per posting list at a given row count -- the resting size that
- * maintenance should aim each list at, so a rebalanced index keeps the shape
- * the build chose.
+ * maintenance should aim each list at.
  *
- * Only partly constant. Above PRISM_TARGET_ENTRIES_PER_LIST^2 rows it is the
- * constant itself; below that prism_auto_nlist's sqrt floor takes over and the
- * per-list size is ~sqrt(count) instead, growing with the dataset. Hence a
- * function rather than a bare constant at the call site.
+ * Above the dimension's target squared it is that target; below, the sqrt
+ * floor in prism_auto_nlist takes over and the size is ~sqrt(count),
+ * growing with the dataset. Hence a function, not a bare constant.
  *
- * Pass the index's explicit nlist reloption when it has one, or 0 to derive it
- * from count via prism_auto_nlist -- so an explicit nlist is respected by
- * maintenance rather than silently overridden.
+ * Pass nlist 0 to derive the count from prism_auto_nlist. A non-zero nlist
+ * is used as given -- a direct caller can ask "entries per list if there
+ * were this many lists." PostgreSQL maintenance does not pass the reloption:
+ * honouring it would make a grown index never reach the split trigger, so
+ * resolve_target_entries() always passes 0.
  */
-uint32_t prism_target_entries_per_list(double count, uint32_t nlist);
+uint32_t prism_target_entries_per_list(
+		double count, uint32_t nlist, Dimension dim, uint32_t target_pages);
 
 /*
  * Find secondary cluster by plain distance (2nd-nearest centroid),
