@@ -523,19 +523,6 @@ vs_extension_version(PG_FUNCTION_ARGS)
 	PG_RETURN_TEXT_P(cstring_to_text(VS_VERSION));
 }
 
-/*
- * Return the extension name the binary was built as (from meson.build
- * via vs_config.h). Lets SQL refer to the extension by name without
- * hardcoding it, e.g. in the prerelease install notice.
- */
-PG_FUNCTION_INFO_V1(vs_extension_name);
-
-Datum
-vs_extension_name(PG_FUNCTION_ARGS)
-{
-	PG_RETURN_TEXT_P(cstring_to_text(VS_EXTENSION_NAME));
-}
-
 /* ----------------------------------------------------------------
  * Metric identifier support functions (FUNCTION 2 in opclasses)
  * ---------------------------------------------------------------- */

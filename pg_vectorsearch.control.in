@@ -2,16 +2,17 @@
 comment = 'pg_vectorsearch: ANN vector search for PostgreSQL'
 default_version = '@VERSION@'
 # No fixed `schema`: CREATE EXTENSION pg_vectorsearch installs
-# vec32/vec16/rabitq and their operators/casts/AM into whatever schema the
-# installer chooses (SCHEMA clause, or the first existing schema on
-# search_path -- typically public). The install script separately creates
-# its own `vectorsearch` schema for maintenance, administration, and
-# inspection functions, which always live there regardless of the chosen
-# schema.
-# relocatable stays false: ALTER EXTENSION ... SET SCHEMA would try to move
-# every member object, including the ones deliberately pinned in
-# vectorsearch, into one schema -- Postgres has no notion of relocating
-# part of an extension.
+# vec32/vec16/rabitq, their operators/casts/AM, and the build-identity
+# functions (pg_vectorsearch_git_commit, pg_vectorsearch_version) into
+# whatever schema the installer chooses (SCHEMA clause, or the first
+# existing schema on search_path -- typically public). The install
+# script separately creates its own `prism` schema for the prism index
+# access method's own maintenance, administration, and inspection
+# functions, which always live there regardless of the chosen schema.
+# relocatable stays false: ALTER EXTENSION ... SET SCHEMA would try to
+# move every member object, including the ones deliberately pinned in
+# prism, into one schema -- Postgres has no notion of relocating part
+# of an extension.
 # To install into a different schema, drop and recreate the extension
 # there instead.
 relocatable = false

@@ -16,110 +16,90 @@
 \echo Use "CREATE EXTENSION pg_vectorsearch" to load this file.\quit
 
 -- =====================================================================
--- vectorsearch / prism: fixed schemas for maintenance, administration,
--- and inspection
+-- prism: fixed schema for maintenance, administration, and inspection
 -- =====================================================================
--- Everything else in this script installs into @extschema@. Maintenance,
--- administration, and inspection functions always live in one of two
--- fixed schemas instead, created here regardless of @extschema@ -- one
--- fixed, predictable, always-qualified path to them no matter which
--- schema holds the types:
---
---   vectorsearch  extension-wide identity (git_commit,
---                 extension_version, extension_name), not specific to
---                 any one index
---   prism         everything specific to the prism index access
---                 method: inspection, maintenance, and its pgvector
---                 operator-family wiring. Kept separate from
---                 vectorsearch because a second index sharing this
---                 extension would need its own equivalent of this
---                 schema, not a share of prism's
+-- Everything else in this script installs into @extschema@, including
+-- the two build-identity functions right below. Maintenance,
+-- administration, and inspection functions specific to the prism index
+-- access method live in their own fixed schema instead, created here
+-- regardless of @extschema@ -- one fixed, predictable, always-qualified
+-- path to them no matter which schema holds the types. A second index
+-- sharing this extension would need its own equivalent of this schema,
+-- not a share of prism's.
 --
 -- This is also why ALTER EXTENSION ... SET SCHEMA is refused (see the
 -- control file): that command moves every member object into one schema,
 -- and these functions are deliberately not in it.
 --
--- Both schemas must be owned by the extension's installer or a
--- superuser. PostgreSQL does not check target-schema ownership at CREATE
--- EXTENSION, so an untrusted role could otherwise pre-create either one,
--- keep owning it, and plant lookalike objects there that a caller who has
--- not double-checked their tooling might mistake for the extension's own
--- (vectorsearch.<function> and prism.<function> calls are always
--- schema-qualified, never resolved via search_path). See the security
--- note above setup_pgvector_compat() for the analogous reasoning about
+-- prism must be owned by the extension's installer or a superuser.
+-- PostgreSQL does not check target-schema ownership at CREATE EXTENSION,
+-- so an untrusted role could otherwise pre-create it, keep owning it,
+-- and plant lookalike objects there that a caller who has not
+-- double-checked their tooling might mistake for the extension's own
+-- (prism.<function> calls are always schema-qualified, never resolved
+-- via search_path). See the security note above
+-- setup_pgvector_compat() for the analogous reasoning about
 -- @extschema@ when pgvector is involved.
 --
--- A pre-existing, trusted-owned vectorsearch or prism is used as-is, not
--- adopted into extension membership (no ALTER EXTENSION ... ADD SCHEMA):
--- matching how PostgreSQL treats a pre-existing @extschema@ for any
--- relocatable extension, only objects this script itself creates become
--- members. Otherwise DROP EXTENSION ... CASCADE could delete a schema --
--- and anything unrelated already in it -- that this extension never
+-- A pre-existing, trusted-owned prism is used as-is, not adopted into
+-- extension membership (no ALTER EXTENSION ... ADD SCHEMA): matching
+-- how PostgreSQL treats a pre-existing @extschema@ for any relocatable
+-- extension, only objects this script itself creates become members.
+-- Otherwise DROP EXTENSION ... CASCADE could delete a schema -- and
+-- anything unrelated already in it -- that this extension never
 -- created.
 DO $$
 DECLARE
-    schema_name name;
     owner_name  name;
     owner_super boolean;
 BEGIN
-    FOREACH schema_name IN ARRAY ARRAY['vectorsearch', 'prism']
-    LOOP
-        SELECT r.rolname, r.rolsuper INTO owner_name, owner_super
-          FROM pg_catalog.pg_namespace n
-          JOIN pg_catalog.pg_roles r
-            ON r.oid OPERATOR(pg_catalog.=) n.nspowner
-         WHERE n.nspname OPERATOR(pg_catalog.=) schema_name;
+    SELECT r.rolname, r.rolsuper INTO owner_name, owner_super
+      FROM pg_catalog.pg_namespace n
+      JOIN pg_catalog.pg_roles r
+        ON r.oid OPERATOR(pg_catalog.=) n.nspowner
+     WHERE n.nspname OPERATOR(pg_catalog.=) 'prism';
 
-        IF NOT FOUND THEN
-            EXECUTE pg_catalog.format('CREATE SCHEMA %I', schema_name);
-            CONTINUE;
-        END IF;
-
-        IF NOT (owner_super OR owner_name OPERATOR(pg_catalog.=) current_user) THEN
-            RAISE EXCEPTION
-                'schema "%" already exists and is owned by "%", a role '
-                'other than the installer or a superuser',
-                schema_name, owner_name
-                USING HINT = 'pg_vectorsearch refuses to install into a '
-                    'schema an untrusted role controls; drop or re-own the '
-                    'schema, or install as the role that owns it.';
-        END IF;
-    END LOOP;
+    IF NOT FOUND THEN
+        CREATE SCHEMA prism;
+    ELSIF NOT (owner_super OR owner_name OPERATOR(pg_catalog.=) current_user)
+    THEN
+        RAISE EXCEPTION
+            'schema "prism" already exists and is owned by "%", a role '
+            'other than the installer or a superuser',
+            owner_name
+            USING HINT = 'pg_vectorsearch refuses to install into a '
+                'schema an untrusted role controls; drop or re-own the '
+                'schema, or install as the role that owns it.';
+    END IF;
 END;
 $$;
 
 -- =====================================================================
--- build identity (maintenance/administration/inspection: fixed in
--- vectorsearch because it is extension-wide rather than specific to
--- the prism index, regardless of @extschema@)
+-- build identity (extension-wide, not specific to any one index, so
+-- installs into @extschema@ alongside the vec32/vec16/rabitq types)
 -- =====================================================================
 
-CREATE FUNCTION vectorsearch.git_commit() RETURNS text
+CREATE FUNCTION pg_vectorsearch_git_commit() RETURNS text
     AS 'MODULE_PATHNAME', 'vs_git_commit'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION vectorsearch.extension_version() RETURNS text
+CREATE FUNCTION pg_vectorsearch_version() RETURNS text
     AS 'MODULE_PATHNAME', 'vs_extension_version'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION vectorsearch.extension_name() RETURNS text
-    AS 'MODULE_PATHNAME', 'vs_extension_name'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- Prerelease install notice: warn at CREATE EXTENSION time when this
 -- build is a prerelease (any -suffix version, e.g. -alpha1 or -dev).
--- A runtime check against vectorsearch.extension_version(), so final
--- releases carry nothing to strip and the notice can never ship stale.
+-- A runtime check against pg_vectorsearch_version(), so final releases
+-- carry nothing to strip and the notice can never ship stale.
 DO $$
 BEGIN
-    IF pg_catalog.strpos(vectorsearch.extension_version(), '-')
+    IF pg_catalog.strpos(pg_vectorsearch_version(), '-')
         OPERATOR(pg_catalog.>) 0
     THEN
-        RAISE WARNING '% % is a prerelease: upgrading to later '
-            'versions might not be possible (reinstall instead) and '
-            'its indexes may need rebuilding',
-            vectorsearch.extension_name(),
-            vectorsearch.extension_version();
+        RAISE WARNING 'pg_vectorsearch % is a prerelease: upgrading to '
+            'later versions might not be possible (reinstall instead) '
+            'and its indexes may need rebuilding',
+            pg_vectorsearch_version();
     END IF;
 END;
 $$;
@@ -1053,13 +1033,12 @@ COMMENT ON PROCEDURE prism.rebalance(regclass, integer) IS
 --          owned by an untrusted role (the schema ownership guard at the top
 --          of this script). Chosen: version-independent, comprehensive
 --          (nothing hostile can live there at all), ~10 lines. Applied only
---          to `vectorsearch` and `prism`: unlike @extschema@, which the
---          installer explicitly chose (or already had first on their own
---          search_path -- the same standing responsibility as installing
---          any relocatable extension), `vectorsearch` and `prism` must be
---          owned by the extension's installer or a superuser, since the
---          installer has no independent reason to have already vetted
---          their ownership.
+--          to `prism`: unlike @extschema@, which the installer explicitly
+--          chose (or already had first on their own search_path -- the
+--          same standing responsibility as installing any relocatable
+--          extension), `prism` must be owned by the extension's
+--          installer or a superuser, since the installer has no
+--          independent reason to have already vetted its ownership.
 --
 -- Set up pgvector interoperability in one step: the binary casts between the
 -- two extensions' types, and the membership of pgvector's distance operators

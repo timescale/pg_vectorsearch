@@ -59,7 +59,7 @@ if [[ "${MAKE_CHECK_SMOKE:-0}" == 1 ]]; then
     got="$(sudo -u postgres psql -X -q -A -t ${PGPORT:+-p "$PGPORT"} -c \
         "DROP EXTENSION IF EXISTS pg_vectorsearch;
          CREATE EXTENSION pg_vectorsearch;
-         SELECT vectorsearch.extension_version();" | tail -1)"
+         SELECT pg_vectorsearch_version();" | tail -1)"
     [[ "$got" == "$ver" ]] ||
         { echo "FAIL: CREATE EXTENSION reports '$got', built '$ver'"; exit 1; }
 fi

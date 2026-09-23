@@ -47,8 +47,8 @@ extension_name = meson.project_name()
 am_name = 'prism'      # index access method name
 # GUC namespace for this index's query/build tunables (nprobe, rerank,
 # distance_mode, ...). These are all prism-specific, not extension-wide
-# (the vectorsearch schema holds extension-wide identity instead), so
-# this tracks am_name rather than extension_name.
+# (the build-identity functions live in @extschema@ instead), so this
+# tracks am_name rather than extension_name.
 guc_prefix = am_name
 
 # Generate vs_config.h with SIMD mode configuration
