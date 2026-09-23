@@ -3,8 +3,8 @@
  */
 
 #include "core/memory.h"
-#include "mkt_test.h"
 #include "types/vec32.h"
+#include "vs_test.h"
 
 TEST_GROUP(Vector);
 

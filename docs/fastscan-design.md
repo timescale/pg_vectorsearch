@@ -12,7 +12,7 @@ three scalar factors (f_add, f_rescale, f_error). The inner product
 between a transformed query and the binary codes is the core
 operation in the posting scan hot loop.
 
-**Current 1-bit kernel:** `mkt_rabitq_inner_product_multi` processes
+**Current 1-bit kernel:** `vs_rabitq_inner_product_multi` processes
 vectors one at a time (or 4 at a time with SIMD), computing
 `binary_ip = Σ transformed[d] where bit[d]=1` via masked float
 adds. At dim=768, each vector requires 96 bytes of bit data and
@@ -181,7 +181,7 @@ that are later converted during maintenance.
 The posting scan dispatches on the page flag:
 
 ```c
-void prism_posting_scan_cluster(PrismPostingScan *scan, MktTopK *topk)
+void prism_posting_scan_cluster(PrismPostingScan *scan, VsTopK *topk)
 {
     if (scan->fastscan)
         prism_posting_scan_cluster_fastscan(scan, topk);
@@ -193,7 +193,7 @@ void prism_posting_scan_cluster(PrismPostingScan *scan, MktTopK *topk)
 The fastscan scan function:
 1. Build LUT once per cluster from `qstate->transformed`
 2. For each page, for each group on the page:
-   a. Call `mkt_fastscan_accumulate()` on the group's codes
+   a. Call `vs_fastscan_accumulate()` on the group's codes
    b. De-quantize: `binary_ip = accum * scale + nsq * bias`
    c. Convert to distance: `dist = f_add + g_add - 2 * f_rescale * final_dot`
    d. Prune via f_error lower bounds
@@ -213,7 +213,7 @@ processes ~8× more vectors per SIMD instruction.
 
 ### Metadata
 
-`PrismMetaPage.flags` gains `MKT_META_FLAG_FASTSCAN` (0x02).
+`PrismMetaPage.flags` gains `PRISM_META_FLAG_FASTSCAN` (0x02).
 Old code ignores the flag and reads AoS pages normally (pages
 without `PRISM_POSTING_PAGE_FASTSCAN` in their opaque are AoS).
 

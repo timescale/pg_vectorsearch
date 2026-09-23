@@ -21,10 +21,10 @@
 #include "index/centroid_search.h"
 #include "index/index_build.h"
 #include "index/parallel_build.h"
-#include "mkt_test.h"
 #include "page_storage.h"
 #include "quant/rabitq.h"
 #include "standalone/pg_compat.h"
+#include "vs_test.h"
 
 TEST_GROUP(RoutingTree);
 TEST_MEMCTX_FIXTURE();
@@ -35,7 +35,7 @@ static float *
 make_vectors(uint32_t nvecs, uint32_t dim, uint32_t seed)
 {
 	srand(seed);
-	float *data = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float *data = vs_alloc((size_t)nvecs * dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs * dim; i++)
 		data[i] = (float)(rand() % 10000 - 5000) / 5000.0f;
 	return data;
@@ -52,7 +52,7 @@ TEST(blobstore_roundtrip)
 	uint64_t		sizes[50];
 
 	/* ~4.7 MB total: several doublings past the store's initial buffer. */
-	char *buf = mkt_alloc(200000);
+	char *buf = vs_alloc(200000);
 	for (uint32_t i = 0; i < nblobs; i++)
 	{
 		sizes[i] = (i == 25) ? 0 : 50000 + (i * 7919) % 90000;
@@ -63,7 +63,7 @@ TEST(blobstore_roundtrip)
 
 	prism_pbuild_blobstore_rewind(bs);
 
-	char *got = mkt_alloc(200000);
+	char *got = vs_alloc(200000);
 	for (uint32_t i = 0; i < nblobs; i++)
 	{
 		uint64_t sz = prism_pbuild_blobstore_get(bs, got, 200000);
@@ -76,8 +76,8 @@ TEST(blobstore_roundtrip)
 			}
 	}
 	prism_pbuild_blobstore_end(bs);
-	mkt_free(buf);
-	mkt_free(got);
+	vs_free(buf);
+	vs_free(got);
 }
 
 /* ----------------------------------------------------------------
@@ -107,7 +107,7 @@ leaf_probe_cb(void *arg, uint32_t leaf, const float *centroid)
  */
 static void
 verify_leaf_links(
-		MktTestResult	*result,
+		VsTestResult	*result,
 		TestPageStorage *st,
 		Dimension		 dim,
 		BlockNumber		 first_centroid,
@@ -115,7 +115,7 @@ verify_leaf_links(
 		uint32_t		 nleaves,
 		uint32_t		 nlevels)
 {
-	bool *seen = mkt_alloc0((size_t)nleaves * sizeof(bool));
+	bool *seen = vs_alloc0((size_t)nleaves * sizeof(bool));
 
 	for (BlockNumber blk = first_centroid; blk < first_posting; blk++)
 	{
@@ -130,13 +130,13 @@ verify_leaf_links(
 		{
 			BlockNumber child;
 			bool		is_leaf;
-			if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+			if (fmt == PRISM_CENTROID_FMT_FASTSCAN)
 			{
 				if (!fs_leaf_page)
 					continue;
 				char	*content = (char *)PageGetContents(page);
-				uint32_t g		 = i / MKT_FASTSCAN_GROUP;
-				uint32_t slot	 = i % MKT_FASTSCAN_GROUP;
+				uint32_t g		 = i / VS_FASTSCAN_GROUP;
+				uint32_t slot	 = i % VS_FASTSCAN_GROUP;
 				child			 = prism_centroid_fastscan_group_child(
 						   content, g, dim)[slot];
 				is_leaf = true;
@@ -161,12 +161,12 @@ verify_leaf_links(
 	}
 	for (uint32_t l = 0; l < nleaves; l++)
 		ASSERT_TRUE(seen[l], "every head linked from a leaf entry");
-	mkt_free(seen);
+	vs_free(seen);
 }
 
 static void
 check_plan_write_roundtrip(
-		MktTestResult	   *result,
+		VsTestResult	   *result,
 		PrismCentroidFormat fmt,
 		uint32_t			nvecs,
 		Dimension			dim,
@@ -175,7 +175,7 @@ check_plan_write_roundtrip(
 {
 	float *vecs = make_vectors(nvecs, dim, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = KMEANS_ALGO_LLOYD;
 
 	PrismBlobStore	   *store = prism_pbuild_blobstore_begin();
@@ -200,7 +200,7 @@ check_plan_write_roundtrip(
 	BlockNumber first_posting  = 1 + (BlockNumber)plan.centroid_pages;
 	uint32_t	page_cap	   = first_posting + plan.nleaves + 8;
 
-	RaBitQParams *rq = mkt_rabitq_create(dim, 42);
+	RaBitQParams *rq = vs_rabitq_create(dim, 42);
 
 	/* Write pass A: replay from the blob store. */
 	TestPageStorage sa;
@@ -300,21 +300,22 @@ check_plan_write_roundtrip(
 				   (size_t)plan.centroid_pages * BLCKSZ) == 0,
 			"replayed pages byte-identical to re-clustered pages");
 
-	mkt_free(sa.pages);
-	mkt_free(sb.pages);
-	mkt_rabitq_destroy(rq);
-	mkt_free(vecs);
+	vs_free(sa.pages);
+	vs_free(sb.pages);
+	vs_rabitq_destroy(rq);
+	vs_free(vecs);
 }
 
 TEST(plan_write_roundtrip_rabitq_depth3)
 {
 	check_plan_write_roundtrip(
-			result, MKT_CENTROID_FMT_RABITQ, 600, 16, 40, 4);
+			result, PRISM_CENTROID_FMT_RABITQ, 600, 16, 40, 4);
 }
 
 TEST(plan_write_roundtrip_float_depth3)
 {
-	check_plan_write_roundtrip(result, MKT_CENTROID_FMT_FLOAT, 600, 16, 40, 4);
+	check_plan_write_roundtrip(
+			result, PRISM_CENTROID_FMT_FLOAT, 600, 16, 40, 4);
 }
 
 TEST(plan_write_roundtrip_fastscan_group_boundary)
@@ -322,20 +323,20 @@ TEST(plan_write_roundtrip_fastscan_group_boundary)
 	/* 33 leaves requested: one past the fastscan group size, the layout
 	 * math's sharpest edge. */
 	check_plan_write_roundtrip(
-			result, MKT_CENTROID_FMT_FASTSCAN, 600, 16, 33, 8);
+			result, PRISM_CENTROID_FMT_FASTSCAN, 600, 16, 33, 8);
 }
 
 TEST(plan_write_roundtrip_flat_multipage_float)
 {
 	/* Flat tree whose single level spans several pages. */
 	check_plan_write_roundtrip(
-			result, MKT_CENTROID_FMT_FLOAT, 600, 64, 200, 255);
+			result, PRISM_CENTROID_FMT_FLOAT, 600, 64, 200, 255);
 }
 
 TEST(plan_write_roundtrip_flat_multipage_fastscan)
 {
 	check_plan_write_roundtrip(
-			result, MKT_CENTROID_FMT_FASTSCAN, 600, 64, 200, 255);
+			result, PRISM_CENTROID_FMT_FASTSCAN, 600, 64, 200, 255);
 }
 
 /* ----------------------------------------------------------------
@@ -352,15 +353,13 @@ TEST(plan_write_roundtrip_flat_multipage_fastscan)
  */
 static void
 check_exact_centroid_collection(
-		MktTestResult	   *result,
-		PrismCentroidFormat fmt,
-		uint64_t			expected_slots)
+		VsTestResult *result, PrismCentroidFormat fmt, uint64_t expected_slots)
 {
 	uint32_t  nvecs = 600, nlist = 40, fan_out = 4;
 	Dimension dim  = 16;
 	float	 *vecs = make_vectors(nvecs, dim, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = KMEANS_ALGO_LLOYD;
 
 	PrismBlobStore	   *store = prism_pbuild_blobstore_begin();
@@ -383,7 +382,7 @@ check_exact_centroid_collection(
 	BlockNumber first_centroid = 1;
 	BlockNumber first_posting  = 1 + (BlockNumber)plan.centroid_pages;
 
-	RaBitQParams *rq = mkt_rabitq_create(dim, 42);
+	RaBitQParams *rq = vs_rabitq_create(dim, 42);
 
 	PrismExactCentroidCollector col;
 	prism_exact_centroid_collector_init(
@@ -431,7 +430,7 @@ check_exact_centroid_collection(
 	/* Walk the written pages: internal pages (every level above the
 	 * deepest) claim disjoint slot ranges in page-entry order; leaf
 	 * pages map to NONE; together the claims cover the collection. */
-	bool	*seen  = mkt_alloc0((size_t)col.nslots * sizeof(bool));
+	bool	*seen  = vs_alloc0((size_t)col.nslots * sizeof(bool));
 	uint32_t total = 0;
 	for (BlockNumber blk = first_centroid; blk < first_posting; blk++)
 	{
@@ -465,7 +464,7 @@ check_exact_centroid_collection(
 	/* Collection round-trip: the view rebuilt from the serialized
 	 * collection must be identical to the collector's own. */
 	uint64_t coll_size = prism_exact_centroid_collection_size(&col);
-	void	*coll	   = mkt_alloc(coll_size);
+	void	*coll	   = vs_alloc(coll_size);
 	prism_exact_centroid_collection_write(&col, coll);
 	PrismExactInternalCentroids bview;
 	prism_exact_centroid_collection_view(coll, &bview);
@@ -482,13 +481,13 @@ check_exact_centroid_collection(
 				   (size_t)col.nslots * dim * sizeof(float)) == 0,
 			"collection centroid bytes round-trip");
 
-	mkt_free(coll);
-	mkt_free(seen);
+	vs_free(coll);
+	vs_free(seen);
 	prism_exact_centroid_collector_cleanup(&col);
 	prism_exact_centroid_collector_cleanup(&col); /* idempotent */
-	mkt_free(st.pages);
-	mkt_rabitq_destroy(rq);
-	mkt_free(vecs);
+	vs_free(st.pages);
+	vs_rabitq_destroy(rq);
+	vs_free(vecs);
 }
 
 TEST(exact_centroid_collection_rabitq)
@@ -496,7 +495,7 @@ TEST(exact_centroid_collection_rabitq)
 	/* Deliberately under-sized (1 slot) so the geometric growth path
 	 * runs against the real tree write; an accurate pre-size would
 	 * never regrow. */
-	check_exact_centroid_collection(result, MKT_CENTROID_FMT_RABITQ, 1);
+	check_exact_centroid_collection(result, PRISM_CENTROID_FMT_RABITQ, 1);
 }
 
 TEST(exact_centroid_collection_fastscan)
@@ -505,7 +504,7 @@ TEST(exact_centroid_collection_fastscan)
 	 * where growth is at most a rounding case. */
 	check_exact_centroid_collection(
 			result,
-			MKT_CENTROID_FMT_FASTSCAN,
+			PRISM_CENTROID_FMT_FASTSCAN,
 			prism_exact_centroid_expected_slots(40, 4));
 }
 
@@ -527,7 +526,7 @@ TEST(exact_centroid_collector_overflow)
 	prism_exact_centroid_collector_init(
 			&col,
 			dim,
-			MKT_CENTROID_FMT_RABITQ,
+			PRISM_CENTROID_FMT_RABITQ,
 			1,
 			4,
 			(uint64_t)3 * dim * sizeof(float),
@@ -560,7 +559,7 @@ TEST(exact_centroid_collector_overflow)
 			empty_size,
 			prism_exact_centroid_collection_size(&col),
 			"overflowed collection is header-only");
-	void *coll = mkt_alloc(empty_size);
+	void *coll = vs_alloc(empty_size);
 	prism_exact_centroid_collection_write(&col, coll);
 	PrismExactInternalCentroids bview;
 	prism_exact_centroid_collection_view(coll, &bview);
@@ -569,6 +568,6 @@ TEST(exact_centroid_collector_overflow)
 	prism_exact_centroid_collection_view(coll, &bview);
 	ASSERT_EQ(0, bview.npages, "NULL-collector collection view is inert");
 
-	mkt_free(coll);
+	vs_free(coll);
 	prism_exact_centroid_collector_cleanup(&col);
 }

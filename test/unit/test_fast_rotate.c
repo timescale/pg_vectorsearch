@@ -11,8 +11,8 @@
 #include <string.h>
 
 #include "core/memory.h"
-#include "mkt_test.h"
 #include "quant/fast_rotate.h"
+#include "vs_test.h"
 
 TEST_GROUP(FastRotate);
 TEST_MEMCTX_FIXTURE();
@@ -20,16 +20,16 @@ TEST_MEMCTX_FIXTURE();
 /* dim must factor as fwht_n * k with fwht_n ≥ 4 power-of-2 and k small. */
 TEST(supported_dims)
 {
-	ASSERT_FALSE(mkt_fast_rotate_supported(0), "0 not supported");
-	ASSERT_FALSE(mkt_fast_rotate_supported(1), "1 not supported");
-	ASSERT_FALSE(mkt_fast_rotate_supported(3), "3: fwht_n=1 too small");
-	ASSERT_FALSE(mkt_fast_rotate_supported(72), "72=8*9: k=9 > K_MAX");
-	ASSERT_TRUE(mkt_fast_rotate_supported(4), "4: pure FWHT");
-	ASSERT_TRUE(mkt_fast_rotate_supported(8), "8: pure FWHT");
-	ASSERT_TRUE(mkt_fast_rotate_supported(1024), "1024: pure FWHT");
-	ASSERT_TRUE(mkt_fast_rotate_supported(768), "768 = 256*3");
-	ASSERT_TRUE(mkt_fast_rotate_supported(384), "384 = 128*3");
-	ASSERT_TRUE(mkt_fast_rotate_supported(1536), "1536 = 512*3");
+	ASSERT_FALSE(vs_fast_rotate_supported(0), "0 not supported");
+	ASSERT_FALSE(vs_fast_rotate_supported(1), "1 not supported");
+	ASSERT_FALSE(vs_fast_rotate_supported(3), "3: fwht_n=1 too small");
+	ASSERT_FALSE(vs_fast_rotate_supported(72), "72=8*9: k=9 > K_MAX");
+	ASSERT_TRUE(vs_fast_rotate_supported(4), "4: pure FWHT");
+	ASSERT_TRUE(vs_fast_rotate_supported(8), "8: pure FWHT");
+	ASSERT_TRUE(vs_fast_rotate_supported(1024), "1024: pure FWHT");
+	ASSERT_TRUE(vs_fast_rotate_supported(768), "768 = 256*3");
+	ASSERT_TRUE(vs_fast_rotate_supported(384), "384 = 128*3");
+	ASSERT_TRUE(vs_fast_rotate_supported(1536), "1536 = 512*3");
 }
 
 static double
@@ -65,23 +65,23 @@ TEST(preserves_norm)
 	const uint64_t	seeds[] = {0x123, 0x456, 0xC0FFEE, 0xDEAD, 0xABCD};
 	for (size_t t = 0; t < sizeof(dims) / sizeof(dims[0]); t++)
 	{
-		Dimension			dim = dims[t];
-		MktFastRotateParams p;
-		mkt_fast_rotate_init(&p, dim, seeds[t]);
+		Dimension		   dim = dims[t];
+		VsFastRotateParams p;
+		vs_fast_rotate_init(&p, dim, seeds[t]);
 
-		float *x   = mkt_alloc(dim * sizeof(float));
-		float *out = mkt_alloc(dim * sizeof(float));
+		float *x   = vs_alloc(dim * sizeof(float));
+		float *out = vs_alloc(dim * sizeof(float));
 		fill_random(x, dim, (unsigned)(7 + t));
 
-		mkt_fast_rotate_apply(&p, x, out);
+		vs_fast_rotate_apply(&p, x, out);
 
 		double nx = sum_sq(x, dim);
 		double ny = sum_sq(out, dim);
 		ASSERT_FLOAT_EQ(
 				(float)nx, (float)ny, 5e-3f, "rotation preserves norm");
 
-		mkt_free(x);
-		mkt_free(out);
+		vs_free(x);
+		vs_free(out);
 	}
 }
 
@@ -91,39 +91,39 @@ TEST(preserves_inner_product)
 	const Dimension dims[] = {64, 256, 768, 1024};
 	for (size_t t = 0; t < sizeof(dims) / sizeof(dims[0]); t++)
 	{
-		Dimension			dim = dims[t];
-		MktFastRotateParams p;
-		mkt_fast_rotate_init(&p, dim, 0x1234 + t);
+		Dimension		   dim = dims[t];
+		VsFastRotateParams p;
+		vs_fast_rotate_init(&p, dim, 0x1234 + t);
 
-		float *x  = mkt_alloc(dim * sizeof(float));
-		float *y  = mkt_alloc(dim * sizeof(float));
-		float *fx = mkt_alloc(dim * sizeof(float));
-		float *fy = mkt_alloc(dim * sizeof(float));
+		float *x  = vs_alloc(dim * sizeof(float));
+		float *y  = vs_alloc(dim * sizeof(float));
+		float *fx = vs_alloc(dim * sizeof(float));
+		float *fy = vs_alloc(dim * sizeof(float));
 		fill_random(x, dim, (unsigned)(11 + t));
 		fill_random(y, dim, (unsigned)(13 + t));
 
-		mkt_fast_rotate_apply(&p, x, fx);
-		mkt_fast_rotate_apply(&p, y, fy);
+		vs_fast_rotate_apply(&p, x, fx);
+		vs_fast_rotate_apply(&p, y, fy);
 
 		double a = dot(x, y, dim);
 		double b = dot(fx, fy, dim);
 		ASSERT_FLOAT_EQ(
 				(float)a, (float)b, 5e-3f, "rotation preserves inner product");
 
-		mkt_free(x);
-		mkt_free(y);
-		mkt_free(fx);
-		mkt_free(fy);
+		vs_free(x);
+		vs_free(y);
+		vs_free(fx);
+		vs_free(fy);
 	}
 }
 
 /* Deterministic from seed: same seed → same sign vector → same output. */
 TEST(deterministic_from_seed)
 {
-	const Dimension		dim = 64;
-	MktFastRotateParams p1, p2;
-	mkt_fast_rotate_init(&p1, dim, 0xCAFEULL);
-	mkt_fast_rotate_init(&p2, dim, 0xCAFEULL);
+	const Dimension	   dim = 64;
+	VsFastRotateParams p1, p2;
+	vs_fast_rotate_init(&p1, dim, 0xCAFEULL);
+	vs_fast_rotate_init(&p2, dim, 0xCAFEULL);
 
 	ASSERT_MEM_EQ(
 			p1.signs1,
@@ -136,37 +136,37 @@ TEST(deterministic_from_seed)
 			(size_t)((dim + 7) / 8),
 			"same seed produces same sign2 vector");
 
-	float *x	= mkt_alloc(dim * sizeof(float));
-	float *out1 = mkt_alloc(dim * sizeof(float));
-	float *out2 = mkt_alloc(dim * sizeof(float));
+	float *x	= vs_alloc(dim * sizeof(float));
+	float *out1 = vs_alloc(dim * sizeof(float));
+	float *out2 = vs_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 		x[i] = (float)i - 32.0f;
-	mkt_fast_rotate_apply(&p1, x, out1);
-	mkt_fast_rotate_apply(&p2, x, out2);
+	vs_fast_rotate_apply(&p1, x, out1);
+	vs_fast_rotate_apply(&p2, x, out2);
 	ASSERT_MEM_EQ(
 			out1,
 			out2,
 			dim * sizeof(float),
 			"same seed produces identical rotation");
 
-	mkt_free(x);
-	mkt_free(out1);
-	mkt_free(out2);
+	vs_free(x);
+	vs_free(out1);
+	vs_free(out2);
 }
 
 /* In-place aliasing: out == in must work. */
 TEST(in_place)
 {
-	const Dimension		dim = 32;
-	MktFastRotateParams p;
-	mkt_fast_rotate_init(&p, dim, 99);
+	const Dimension	   dim = 32;
+	VsFastRotateParams p;
+	vs_fast_rotate_init(&p, dim, 99);
 
 	float x[32], copy[32], copy_out[32];
 	for (Dimension i = 0; i < dim; i++)
 		copy[i] = x[i] = (float)(i * 0.3f - 5.0f);
 
-	mkt_fast_rotate_apply(&p, x, x);
-	mkt_fast_rotate_apply(&p, copy, copy_out);
+	vs_fast_rotate_apply(&p, x, x);
+	vs_fast_rotate_apply(&p, copy, copy_out);
 
 	for (Dimension i = 0; i < dim; i++)
 		ASSERT_FLOAT_EQ(

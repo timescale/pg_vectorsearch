@@ -24,7 +24,7 @@
  * the single place that switch is made — the standalone headers carry no PG
  * branch of their own.
  */
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 #include "standalone/barrier.h"
 #include "standalone/pg_compat.h" /* Size, BlockNumber, ItemPointerData, Relation */
 #include "standalone/shm_toc.h"
@@ -44,7 +44,7 @@
 #include "core/types.h"
 #include "index/centroid_page.h" /* PrismCentroidFormat */
 #include "index/posting_build.h"
-#include "index/storage.h" /* MktStorage */
+#include "index/storage.h" /* VsStorage */
 #include "quant/rabitq.h"
 
 /* Forward decl so prism_build_scan's prototype can reference it without
@@ -327,7 +327,7 @@ prism_dsm_child_subtree(char *base, uint32_t slot, uint64_t slot_size)
 static inline uint32_t
 prism_max_nlist(uint32_t nlist, uint32_t fan_out)
 {
-	uint32_t nlevels   = mkt_hkmeans_nlevels(nlist, fan_out);
+	uint32_t nlevels   = vs_hkmeans_nlevels(nlist, fan_out);
 	uint32_t max_nlist = 1;
 	for (uint32_t l = 0; l < nlevels; l++)
 		max_nlist *= fan_out;
@@ -700,16 +700,16 @@ extern void prism_pbuild_worker_detach(shm_toc *toc, PrismPBuildWorker *w);
 
 /*
  * Page-backed phase-3 routing storage seam — back-end-specific. Workers read
- * centroid + posting head pages while routing, so each needs a MktStorage over
+ * centroid + posting head pages while routing, so each needs a VsStorage over
  * the index. PG (separate process) opens one on the worker's indexRel;
  * standalone (threads) returns the leader's shared in-memory store published
  * via prism_pbuild_publish_storage before launch. Release is a no-op for
  * standalone.
  */
 extern void
-prism_pbuild_publish_storage(PrismBuildShared *shared, MktStorage *s);
-extern MktStorage *prism_pbuild_worker_storage(PrismPBuildWorker *w);
-extern void		   prism_pbuild_worker_storage_release(MktStorage *s);
+prism_pbuild_publish_storage(PrismBuildShared *shared, VsStorage *s);
+extern VsStorage *prism_pbuild_worker_storage(PrismPBuildWorker *w);
+extern void		  prism_pbuild_worker_storage_release(VsStorage *s);
 
 /*
  * Accumulate one worker's tuple counts into the shared state under the
@@ -967,7 +967,7 @@ extern void prism_pbuild_sort_end(PrismSorter *sorter);
  */
 extern void prism_posting_build_lists(
 		PrismSorter		   *sorter,
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		uint32_t			nlist,
 		Dimension			dim,
 		bool				fastscan,
@@ -997,7 +997,7 @@ extern bool do_parallel_build(
 		Relation				   index,
 		struct IndexInfo		  *index_info,
 		const PrismBuildConfig	  *config,
-		MktStorage				  *storage,
+		VsStorage				  *storage,
 		struct PrismBuildProgress *prog,
 		/* No in-RAM tree is materialized; the streamed tree's shape (leaf
 		 * count + depth) comes back through these for the caller's metadata

@@ -49,8 +49,8 @@ halfvec_unwrap(Datum d, Dimension *dim)
 static const PrismIndexTypeInfo type_info_vector = {
 		.name			 = "vec32",
 		.max_dimensions	 = VEC32_MAX_DIM,
-		.centroid_format = MKT_CENTROID_FMT_FLOAT,
-		.ops			 = &mkt_f32_type_ops,
+		.centroid_format = PRISM_CENTROID_FMT_FLOAT,
+		.ops			 = &vs_f32_type_ops,
 		.unwrap			 = vector_unwrap,
 };
 
@@ -58,13 +58,13 @@ static const PrismIndexTypeInfo type_info_halfvec = {
 		.name = "vec16",
 		/* vec16_typmod_in enforces the same ceiling as vec32. */
 		.max_dimensions	 = VEC32_MAX_DIM,
-		.centroid_format = MKT_CENTROID_FMT_HALF,
-		.ops			 = &mkt_f16_type_ops,
+		.centroid_format = PRISM_CENTROID_FMT_HALF,
+		.ops			 = &vs_f16_type_ops,
 		.unwrap			 = halfvec_unwrap,
 };
 
 /* ----------------------------------------------------------------
- * Opclass support functions (MKT_ANN_TYPE_INFO_PROC)
+ * Opclass support functions (PRISM_TYPE_INFO_PROC)
  * ---------------------------------------------------------------- */
 
 PG_FUNCTION_INFO_V1(prism_vec32_support);
@@ -91,10 +91,10 @@ prism_index_type_info(Relation index)
 	 * `vec32`. That leaves the vec32 opclasses' SQL untouched, and an index
 	 * built before this support function existed keeps working.
 	 */
-	if (!OidIsValid(index_getprocid(index, 1, MKT_ANN_TYPE_INFO_PROC)))
+	if (!OidIsValid(index_getprocid(index, 1, PRISM_TYPE_INFO_PROC)))
 		return &type_info_vector;
 
-	FmgrInfo *procinfo = index_getprocinfo(index, 1, MKT_ANN_TYPE_INFO_PROC);
+	FmgrInfo *procinfo = index_getprocinfo(index, 1, PRISM_TYPE_INFO_PROC);
 
 	return (const PrismIndexTypeInfo *)DatumGetPointer(
 			FunctionCall0Coll(procinfo, InvalidOid));

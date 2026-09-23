@@ -4,11 +4,11 @@
  * Implements level-by-level descent through centroid pages using
  * format-aware distance computation. RaBitQ pages use approximate
  * distance with error bounds; float and half pages use exact L2
- * distance (error = 0). Candidate selection uses MktTopK for
+ * distance (error = 0). Candidate selection uses VsTopK for
  * error-bound-aware pruning.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <math.h>
 #include <string.h>
@@ -48,7 +48,7 @@ struct PrismCentroidScratch
 	 * per-row scratch context reset after every tuple — so any lazy
 	 * (re)allocation of a scratch buffer must go to this context, never
 	 * to the current one. */
-	MktMemCtx  memctx;
+	VsMemCtx   memctx;
 	uint32_t   cand_cap;	 /* size of buf_a / buf_b */
 	uint32_t   max_per_page; /* size of the f_add..symmetric_scratch arrays */
 	Candidate *buf_a;
@@ -62,12 +62,12 @@ struct PrismCentroidScratch
 	/* Reusable top-K + extraction buffer for select_topk_bounded.
 	 * Avoids creating a fresh memctx + ub_heap + ub_ids + candidates
 	 * + entries-buf on every beam-search level (was 2 sets of 4 allocs
-	 * + 2 memctx creates per query). The MktTopK is initialised once
+	 * + 2 memctx creates per query). The VsTopK is initialised once
 	 * at scratch_create with the worst-case k; select_topk_bounded
-	 * calls mkt_topk_reset_to_k() to adjust between levels. */
-	MktTopK		  level_topk;
-	MktTopKEntry *entries_buf;
-	uint32_t	  entries_cap;
+	 * calls vs_topk_reset_to_k() to adjust between levels. */
+	VsTopK		 level_topk;
+	VsTopKEntry *entries_buf;
+	uint32_t	 entries_cap;
 	/* Fastscan LUT used by the FASTSCAN centroid format. The LUT only
 	 * depends on the query (qstate->transformed), which is constant
 	 * for the entire centroid descent — so we build it once per query
@@ -90,7 +90,7 @@ cs_now_ns(void)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * MKT_NS_PER_SEC + (uint64_t)ts.tv_nsec;
+	return (uint64_t)ts.tv_sec * VS_NS_PER_SEC + (uint64_t)ts.tv_nsec;
 }
 
 PrismCentroidScratch *
@@ -112,46 +112,46 @@ prism_centroid_scratch_create(Dimension dim, uint32_t max_beam_width)
 	 * including later growth, which can run under a caller's per-row
 	 * reset context — lives and dies with it, and cleanup is a single
 	 * context delete. */
-	MktMemCtx ctx =
-			mkt_memctx_create(mkt_memctx_current(), "mkt centroid scratch");
-	MktMemCtx			  old_ctx = mkt_memctx_switch(ctx);
-	PrismCentroidScratch *s		  = mkt_alloc(sizeof(PrismCentroidScratch));
+	VsMemCtx ctx =
+			vs_memctx_create(vs_memctx_current(), "vs centroid scratch");
+	VsMemCtx			  old_ctx = vs_memctx_switch(ctx);
+	PrismCentroidScratch *s		  = vs_alloc(sizeof(PrismCentroidScratch));
 	if (s == NULL)
 	{
-		mkt_memctx_switch(old_ctx);
-		mkt_memctx_delete(ctx);
+		vs_memctx_switch(old_ctx);
+		vs_memctx_delete(ctx);
 		return NULL;
 	}
 
-	s->memctx			 = mkt_memctx_current();
+	s->memctx			 = vs_memctx_current();
 	s->cand_cap			 = cand_cap;
 	s->max_per_page		 = max_per_page;
-	s->buf_a			 = mkt_alloc(cand_cap * sizeof(Candidate));
-	s->buf_b			 = mkt_alloc(cand_cap * sizeof(Candidate));
-	s->f_add			 = mkt_alloc(max_per_page * sizeof(float));
-	s->f_rescale		 = mkt_alloc(max_per_page * sizeof(float));
-	s->distances		 = mkt_alloc(max_per_page * sizeof(Distance));
-	s->lower_bounds		 = mkt_alloc(max_per_page * sizeof(Distance));
-	s->multi_scratch	 = mkt_alloc(max_per_page * sizeof(float));
-	s->symmetric_scratch = mkt_alloc(max_per_page * sizeof(uint32_t));
+	s->buf_a			 = vs_alloc(cand_cap * sizeof(Candidate));
+	s->buf_b			 = vs_alloc(cand_cap * sizeof(Candidate));
+	s->f_add			 = vs_alloc(max_per_page * sizeof(float));
+	s->f_rescale		 = vs_alloc(max_per_page * sizeof(float));
+	s->distances		 = vs_alloc(max_per_page * sizeof(Distance));
+	s->lower_bounds		 = vs_alloc(max_per_page * sizeof(Distance));
+	s->multi_scratch	 = vs_alloc(max_per_page * sizeof(float));
+	s->symmetric_scratch = vs_alloc(max_per_page * sizeof(uint32_t));
 
 	/* Reusable top-K and extract buffer (resized to actual k per
 	 * select_topk_bounded call). Initial k=max_beam_width is just
 	 * a starting size — the reset path repalloc's within the
 	 * topk's memctx for different k. */
-	mkt_topk_init(&s->level_topk, max_beam_width);
+	vs_topk_init(&s->level_topk, max_beam_width);
 	s->entries_cap = max_beam_width * 4;
 	if (s->entries_cap < 64)
 		s->entries_cap = 64;
-	s->entries_buf = mkt_alloc(s->entries_cap * sizeof(MktTopKEntry));
+	s->entries_buf = vs_alloc(s->entries_cap * sizeof(VsTopKEntry));
 
 	/* Fastscan LUT (worst-case hacc size for this dim). Allocated
 	 * once and reused for every centroid page scored in the
 	 * FASTSCAN format. The LUT depends on the query so it's rebuilt
 	 * per page; the buffer is reusable. */
-	s->fs_lut_bytes = MKT_FASTSCAN_LUT_HACC_BYTES(dim);
-	s->fs_lut		= mkt_alloc(s->fs_lut_bytes);
-	mkt_memctx_switch(old_ctx);
+	s->fs_lut_bytes = VS_FASTSCAN_LUT_HACC_BYTES(dim);
+	s->fs_lut		= vs_alloc(s->fs_lut_bytes);
+	vs_memctx_switch(old_ctx);
 	return s;
 }
 
@@ -160,10 +160,10 @@ prism_centroid_scratch_free(PrismCentroidScratch *s)
 {
 	if (s == NULL)
 		return;
-	mkt_topk_cleanup(&s->level_topk);
+	vs_topk_cleanup(&s->level_topk);
 	/* Everything the scratch owns — struct included — lives in its
 	 * context; one delete frees it all. */
-	mkt_memctx_delete(s->memctx);
+	vs_memctx_delete(s->memctx);
 }
 
 /*
@@ -195,8 +195,8 @@ exact_internal_slots(
  *
  * Dispatches based on page data format:
  *   RABITQ → batch multi-candidate scoring via cs
- *   FLOAT  → mkt_l2_distance_squared (exact, error=0)
- *   HALF   → mkt_f16_l2_squared (exact, error=0)
+ *   FLOAT  → vs_l2_distance_squared (exact, error=0)
+ *   HALF   → vs_f16_l2_squared (exact, error=0)
  */
 static uint32_t
 score_page(
@@ -222,8 +222,8 @@ score_page(
 	 * scratch size the state was built with (prism_centroid_max_entries). */
 	uint32_t max_entries = prism_centroid_max_entries_fmt(dim, fmt);
 	if (count > max_entries)
-		mkt_error(
-				MKT_EXTENSION_NAME
+		vs_error(
+				VS_EXTENSION_NAME
 				": centroid page %u has an invalid entry count (%u > %u); "
 				"the index may be corrupted -- REINDEX it",
 				page_blkno,
@@ -241,7 +241,7 @@ score_page(
 	 * noise removed (error = 0). Exact formats (FLOAT/HALF) never take
 	 * this path — they are exact already, including their metric
 	 * handling. */
-	if (fmt == MKT_CENTROID_FMT_RABITQ || fmt == MKT_CENTROID_FMT_FASTSCAN)
+	if (fmt == PRISM_CENTROID_FMT_RABITQ || fmt == PRISM_CENTROID_FMT_FASTSCAN)
 	{
 		const float *exact = exact_internal_slots(state, page_blkno, dim);
 
@@ -253,17 +253,17 @@ score_page(
 			{
 				BlockNumber child;
 
-				if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+				if (fmt == PRISM_CENTROID_FMT_FASTSCAN)
 					child = prism_centroid_fastscan_group_child(
 							content,
-							i / MKT_FASTSCAN_GROUP,
-							dim)[i % MKT_FASTSCAN_GROUP];
+							i / VS_FASTSCAN_GROUP,
+							dim)[i % VS_FASTSCAN_GROUP];
 				else
 					child = prism_centroid_meta(page, i)->child_blkno;
 
 				cands[cand_count].child_blkno = child;
 				ItemPointerSet(&cands[cand_count].origin, page_blkno, i);
-				cands[cand_count].distance = mkt_l2_distance_squared(
+				cands[cand_count].distance = vs_l2_distance_squared(
 						state->query, exact + (size_t)i * dim, dim);
 				cands[cand_count].error = 0.0f;
 				cand_count++;
@@ -274,9 +274,9 @@ score_page(
 
 	switch (fmt)
 	{
-	case MKT_CENTROID_FMT_RABITQ:
+	case PRISM_CENTROID_FMT_RABITQ:
 	{
-		uint32_t data_size = MKT_RABITQ_DATA_SIZE(dim);
+		uint32_t data_size = VS_RABITQ_DATA_SIZE(dim);
 
 		/* Gather f_add/f_rescale in reverse order
 		 * (page data grows backward: entry 0 at highest address) */
@@ -301,8 +301,8 @@ score_page(
 		bool	  want_bounds = (state->error_scale != 0.0f);
 		Distance *lb		  = want_bounds ? cs->lower_bounds : NULL;
 
-		if (state->qstate->mode == MKT_DISTANCE_MODE_SYMMETRIC)
-			mkt_rabitq_distance_batch_symmetric_with_bound(
+		if (state->qstate->mode == VS_DISTANCE_MODE_SYMMETRIC)
+			vs_rabitq_distance_batch_symmetric_with_bound(
 					state->qstate,
 					cs->f_add,
 					cs->f_rescale,
@@ -314,7 +314,7 @@ score_page(
 					lb,
 					cs->symmetric_scratch);
 		else
-			mkt_rabitq_distance_batch_multi_with_bound(
+			vs_rabitq_distance_batch_multi_with_bound(
 					state->qstate,
 					cs->f_add,
 					cs->f_rescale,
@@ -345,13 +345,13 @@ score_page(
 		}
 		break;
 	}
-	case MKT_CENTROID_FMT_FLOAT:
+	case PRISM_CENTROID_FMT_FLOAT:
 	{
 		/* Hoist query norm out of the inner loop: it depends only on
 		 * the query, not the centroid, but was previously recomputed
 		 * for every entry (one full norm² per centroid scored). */
 		float norm_q = (state->metric == DISTANCE_COSINE)
-							 ? mkt_l2_norm_squared(state->query, dim)
+							 ? vs_l2_norm_squared(state->query, dim)
 							 : 0.0f;
 
 		for (uint16_t i = 0; i < count && cand_count < cand_cap; i++)
@@ -363,18 +363,18 @@ score_page(
 			switch (state->metric)
 			{
 			case DISTANCE_INNER_PRODUCT:
-				dist = -mkt_dot_product(state->query, fvec, dim);
+				dist = -vs_dot_product(state->query, fvec, dim);
 				break;
 			case DISTANCE_COSINE:
 			{
-				float dot	 = mkt_dot_product(state->query, fvec, dim);
-				float norm_v = mkt_l2_norm_squared(fvec, dim);
+				float dot	 = vs_dot_product(state->query, fvec, dim);
+				float norm_v = vs_l2_norm_squared(fvec, dim);
 				float denom	 = sqrtf(norm_q * norm_v);
 				dist		 = (denom > 0.0f) ? 1.0f - dot / denom : 1.0f;
 				break;
 			}
 			default: /* L2 */
-				dist = mkt_l2_distance_squared(state->query, fvec, dim);
+				dist = vs_l2_distance_squared(state->query, fvec, dim);
 				break;
 			}
 
@@ -386,11 +386,11 @@ score_page(
 		}
 		break;
 	}
-	case MKT_CENTROID_FMT_FASTSCAN:
+	case PRISM_CENTROID_FMT_FASTSCAN:
 	{
 		/* Fastscan centroid pages: same RaBitQ codes as the RABITQ
 		 * format but rearranged into 32-vector groups so we can
-		 * score them with mkt_fastscan_accumulate (~150 M vec/s on
+		 * score them with vs_fastscan_accumulate (~150 M vec/s on
 		 * Graviton 4) instead of the per-vector kernel used by the
 		 * RABITQ branch above.
 		 *
@@ -417,7 +417,7 @@ score_page(
 		if (!cs->fs_lut_valid)
 		{
 			uint64_t t_lut = cs_now_ns();
-			mkt_fastscan_build_lut_hacc(
+			vs_fastscan_build_lut_hacc(
 					state->qstate->transformed,
 					dim,
 					cs->fs_lut,
@@ -437,17 +437,17 @@ score_page(
 
 		char	*content	 = (char *)PageGetContents(page);
 		uint32_t entry_count = count;
-		uint32_t ngroups	 = (entry_count + MKT_FASTSCAN_GROUP - 1) /
-						   MKT_FASTSCAN_GROUP;
+		uint32_t ngroups	 = (entry_count + VS_FASTSCAN_GROUP - 1) /
+						   VS_FASTSCAN_GROUP;
 
-		int32_t accum[MKT_FASTSCAN_GROUP];
+		int32_t accum[VS_FASTSCAN_GROUP];
 
 		for (uint32_t g = 0; g < ngroups; g++)
 		{
-			uint32_t g_start = g * MKT_FASTSCAN_GROUP;
+			uint32_t g_start = g * VS_FASTSCAN_GROUP;
 			uint32_t g_count = entry_count - g_start;
-			if (g_count > MKT_FASTSCAN_GROUP)
-				g_count = MKT_FASTSCAN_GROUP;
+			if (g_count > VS_FASTSCAN_GROUP)
+				g_count = VS_FASTSCAN_GROUP;
 
 			const BlockNumber *child = (const BlockNumber *)
 					prism_centroid_fastscan_group_child(content, g, dim);
@@ -460,7 +460,7 @@ score_page(
 			const uint8_t *codes =
 					prism_centroid_fastscan_group_codes(content, g, dim);
 
-			mkt_fastscan_accumulate_hacc(codes, cs->fs_lut, accum, dim);
+			vs_fastscan_accumulate_hacc(codes, cs->fs_lut, accum, dim);
 
 			for (uint32_t v = 0; v < g_count && cand_count < cand_cap; v++)
 			{
@@ -494,10 +494,10 @@ score_page(
 		}
 		break;
 	}
-	case MKT_CENTROID_FMT_HALF:
+	case PRISM_CENTROID_FMT_HALF:
 	{
 		float norm_q = (state->metric == DISTANCE_COSINE)
-							 ? mkt_l2_norm_squared(state->query, dim)
+							 ? vs_l2_norm_squared(state->query, dim)
 							 : 0.0f;
 
 		for (uint16_t i = 0; i < count && cand_count < cand_cap; i++)
@@ -509,18 +509,18 @@ score_page(
 			switch (state->metric)
 			{
 			case DISTANCE_INNER_PRODUCT:
-				dist = -mkt_f16_dot_product(hvec, state->query, dim);
+				dist = -vs_f16_dot_product(hvec, state->query, dim);
 				break;
 			case DISTANCE_COSINE:
 			{
-				float dot	 = mkt_f16_dot_product(hvec, state->query, dim);
-				float norm_v = mkt_f16_norm_sq(hvec, dim);
+				float dot	 = vs_f16_dot_product(hvec, state->query, dim);
+				float norm_v = vs_f16_norm_sq(hvec, dim);
 				float denom	 = sqrtf(norm_q * norm_v);
 				dist		 = (denom > 0.0f) ? 1.0f - dot / denom : 1.0f;
 				break;
 			}
 			default: /* L2 */
-				dist = mkt_f16_l2_squared(hvec, state->query, dim);
+				dist = vs_f16_l2_squared(hvec, state->query, dim);
 				break;
 			}
 
@@ -538,9 +538,9 @@ score_page(
 }
 
 /* ----------------------------------------------------------------
- * Top-K selection via MktTopK (error-bound-aware)
+ * Top-K selection via VsTopK (error-bound-aware)
  *
- * Selects the best candidates using MktTopK pruning. Candidates
+ * Selects the best candidates using VsTopK pruning. Candidates
  * with lower_bound >= threshold are pruned. With overlapping
  * error intervals, may return more than k entries.
  *
@@ -560,15 +560,15 @@ select_topk_bounded(
 		return 0;
 
 	/* Reuse the per-scan topk and extract buffer instead of allocating
-	 * new ones every level; mkt_topk_reset_to_k is O(1) unless k grows
+	 * new ones every level; vs_topk_reset_to_k is O(1) unless k grows
 	 * past the allocated capacity. */
-	MktTopK *topk = &scratch->level_topk;
-	mkt_topk_reset_to_k(topk, k);
+	VsTopK *topk = &scratch->level_topk;
+	vs_topk_reset_to_k(topk, k);
 
 	/* Centroid candidates have unique ids (the buf index), so we can
 	 * skip the O(k) per-insert dedup scan. */
 	for (uint32_t i = 0; i < count; i++)
-		mkt_topk_insert_unique(topk, cands[i].distance, cands[i].error, i);
+		vs_topk_insert_unique(topk, cands[i].distance, cands[i].error, i);
 
 	/* entries_buf must hold topk->cand_count survivors; grow if needed.
 	 * Grow in the scratch's owning context: this runs under whatever
@@ -580,14 +580,14 @@ select_topk_bounded(
 		uint32_t new_cap = scratch->entries_cap * 2;
 		while (new_cap < topk->cand_count)
 			new_cap *= 2;
-		mkt_free(scratch->entries_buf);
-		scratch->entries_buf = mkt_memctx_alloc(
-				scratch->memctx, new_cap * sizeof(MktTopKEntry));
+		vs_free(scratch->entries_buf);
+		scratch->entries_buf = vs_memctx_alloc(
+				scratch->memctx, new_cap * sizeof(VsTopKEntry));
 		scratch->entries_cap = new_cap;
 	}
 
 	uint32_t nresults;
-	mkt_topk_extract_sorted_unique(topk, scratch->entries_buf, &nresults);
+	vs_topk_extract_sorted_unique(topk, scratch->entries_buf, &nresults);
 
 	if (nresults > out_cap)
 		nresults = out_cap;
@@ -625,18 +625,17 @@ emit_page_children(
 	uint16_t				 count	= opaque->entry_count;
 	PrismCentroidFormat		 fmt	= prism_centroid_page_format(page);
 
-	if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+	if (fmt == PRISM_CENTROID_FMT_FASTSCAN)
 	{
 		char	*content = (char *)PageGetContents(page);
-		uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) /
-						   MKT_FASTSCAN_GROUP;
+		uint32_t ngroups = (count + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
 
 		for (uint32_t g = 0; g < ngroups; g++)
 		{
-			uint32_t g_start = g * MKT_FASTSCAN_GROUP;
+			uint32_t g_start = g * VS_FASTSCAN_GROUP;
 			uint32_t g_count = count - g_start;
-			if (g_count > MKT_FASTSCAN_GROUP)
-				g_count = MKT_FASTSCAN_GROUP;
+			if (g_count > VS_FASTSCAN_GROUP)
+				g_count = VS_FASTSCAN_GROUP;
 
 			const BlockNumber *child = (const BlockNumber *)
 					prism_centroid_fastscan_group_child(content, g, dim);
@@ -749,7 +748,7 @@ prism_centroid_beam_search(
 	while (blkno != InvalidBlockNumber)
 	{
 		uint64_t t_r  = cs_now_ns();
-		Page	 page = mkt_storage_read_page(state->storage, blkno);
+		Page	 page = vs_storage_read_page(state->storage, blkno);
 		scratch->t_pageread_ns += cs_now_ns() - t_r;
 		PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
 		centroid_pages_read++;
@@ -778,7 +777,7 @@ prism_centroid_beam_search(
 
 		BlockNumber next_blkno = opaque->next_blkno;
 		t_r					   = cs_now_ns();
-		mkt_storage_release_page(state->storage, blkno);
+		vs_storage_release_page(state->storage, blkno);
 		scratch->t_pageread_ns += cs_now_ns() - t_r;
 		blkno = next_blkno;
 	}
@@ -788,7 +787,7 @@ prism_centroid_beam_search(
 	/* Select top-K from level 0 into buf_b (skipped when the fast path
 	 * already kept everything).
 	 *
-	 * Error-bound-aware selection via MktTopK: keeps the beam_width
+	 * Error-bound-aware selection via VsTopK: keeps the beam_width
 	 * candidates with smallest upper bounds, plus any additional
 	 * candidates whose lower bound overlaps the threshold. For
 	 * exact formats (error=0) this returns exactly beam_width. */
@@ -825,7 +824,7 @@ prism_centroid_beam_search(
 			while (cb != InvalidBlockNumber)
 			{
 				uint64_t t_r  = cs_now_ns();
-				Page	 page = mkt_storage_read_page(state->storage, cb);
+				Page	 page = vs_storage_read_page(state->storage, cb);
 				scratch->t_pageread_ns += cs_now_ns() - t_r;
 				centroid_pages_read++;
 				uint64_t t_s = cs_now_ns();
@@ -842,7 +841,7 @@ prism_centroid_beam_search(
 				PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
 				BlockNumber				 nb		= opaque->next_blkno;
 				t_r								= cs_now_ns();
-				mkt_storage_release_page(state->storage, cb);
+				vs_storage_release_page(state->storage, cb);
 				scratch->t_pageread_ns += cs_now_ns() - t_r;
 				cb = nb;
 			}
@@ -889,8 +888,8 @@ prism_centroid_beam_search(
 			else
 			{
 				if (prev_page != NULL)
-					mkt_storage_release_page(state->storage, prev_blk);
-				page = mkt_storage_read_page(state->storage, blk);
+					vs_storage_release_page(state->storage, prev_blk);
+				page = vs_storage_read_page(state->storage, blk);
 				centroid_pages_read++;
 				prev_blk  = blk;
 				prev_page = page;
@@ -901,21 +900,21 @@ prism_centroid_beam_search(
 
 			switch (fmt)
 			{
-			case MKT_CENTROID_FMT_FLOAT:
+			case PRISM_CENTROID_FMT_FLOAT:
 			{
 				const float *src = prism_centroid_float_data(page, idx, dim);
 				memcpy(dst, src, dim * sizeof(float));
 				break;
 			}
-			case MKT_CENTROID_FMT_HALF:
+			case PRISM_CENTROID_FMT_HALF:
 			{
 				const half *src = prism_centroid_half_data(page, idx, dim);
 				for (Dimension d = 0; d < dim; d++)
-					dst[d] = mkt_half_to_float(src[d]);
+					dst[d] = vs_half_to_float(src[d]);
 				break;
 			}
-			case MKT_CENTROID_FMT_RABITQ:
-			case MKT_CENTROID_FMT_FASTSCAN:
+			case PRISM_CENTROID_FMT_RABITQ:
+			case PRISM_CENTROID_FMT_FASTSCAN:
 				/* Unreachable — both are lossy binary encodings and
 				 * the outer guard skips this branch when the page
 				 * format isn't FLOAT/HALF. */
@@ -924,7 +923,7 @@ prism_centroid_beam_search(
 		}
 
 		if (prev_page != NULL)
-			mkt_storage_release_page(state->storage, prev_blk);
+			vs_storage_release_page(state->storage, prev_blk);
 	}
 
 	if (stats)

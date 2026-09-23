@@ -20,7 +20,7 @@ COUNT="${2:-10000}"
 IMPL="${3:-}"
 
 # Build command
-CMD="./bin/mkt bench distance --dim $DIM --count $COUNT --metric l2"
+CMD="./bin/vectorsearch bench distance --dim $DIM --count $COUNT --metric l2"
 if [[ -n "$IMPL" ]]; then
     CMD="$CMD --impls $IMPL"
 fi

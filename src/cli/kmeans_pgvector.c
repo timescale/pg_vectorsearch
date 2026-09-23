@@ -4,8 +4,8 @@
  * This is a minimally modified copy of pgvector/src/ivfkmeans.c.
  * Changes from the original:
  * - All PostgreSQL includes replaced with kmeans_pgvector.h shim
- * - NormCenters: uses mkt_l2_norm instead of PG function call
- * - CheckNorms: uses mkt_l2_norm inline
+ * - NormCenters: uses vs_l2_norm instead of PG function call
+ * - CheckNorms: uses vs_l2_norm inline
  * - IvfflatKmeans renamed, memory context replaced with direct alloc
  * - pgvector_kmeans() entry point packs flat floats into VectorArray
  *
@@ -93,7 +93,7 @@ InitCenters(
 			{
 				const Vector *va = (const Vector *)VectorArrayGet(samples, j);
 				const Vector *vb = (const Vector *)VectorArrayGet(centers, i);
-				float		  d2 = mkt_l2_distance_squared(
+				float		  d2 = vs_l2_distance_squared(
 						va->x, vb->x, (Dimension)va->dim);
 
 				if (d2 < weight[j])
@@ -124,7 +124,7 @@ InitCenters(
 }
 
 /*
- * Norm centers [MODIFIED: standalone normalization using mkt_l2_norm]
+ * Norm centers [MODIFIED: standalone normalization using vs_l2_norm]
  */
 static void
 NormCenters(
@@ -136,7 +136,7 @@ NormCenters(
 	for (int j = 0; j < centers->length; j++)
 	{
 		Vector *vec	 = (Vector *)VectorArrayGet(centers, j);
-		float	norm = mkt_l2_norm(vec->x, (Dimension)vec->dim);
+		float	norm = vs_l2_norm(vec->x, (Dimension)vec->dim);
 		if (norm > 1e-30f)
 		{
 			float inv = 1.0f / norm;
@@ -571,7 +571,7 @@ CheckElements(VectorArray centers, const IvfflatTypeInfo *typeInfo)
 
 /*
  * Ensure no zero vectors for cosine distance
- * [MODIFIED: standalone norm check using mkt_l2_norm]
+ * [MODIFIED: standalone norm check using vs_l2_norm]
  */
 static void
 CheckNorms(VectorArray centers)
@@ -583,7 +583,7 @@ CheckNorms(VectorArray centers)
 	for (int i = 0; i < centers->length; i++)
 	{
 		Vector *vec	 = (Vector *)VectorArrayGet(centers, i);
-		float	norm = mkt_l2_norm(vec->x, (Dimension)vec->dim);
+		float	norm = vs_l2_norm(vec->x, (Dimension)vec->dim);
 
 		if (norm == 0)
 			elog(ERROR, "Zero norm detected.");
@@ -642,12 +642,12 @@ pgv_extract_result(
 		DistanceMetric metric,
 		const float	  *centroids)
 {
-	KMeansResult *result  = mkt_alloc0(sizeof(KMeansResult));
+	KMeansResult *result  = vs_alloc0(sizeof(KMeansResult));
 	result->nlist		  = nlist;
 	result->dim			  = dim;
-	result->centroids	  = mkt_alloc((size_t)nlist * dim * sizeof(float));
-	result->assignments	  = mkt_alloc(nvecs * sizeof(ClusterId));
-	result->cluster_sizes = mkt_alloc0(nlist * sizeof(uint32_t));
+	result->centroids	  = vs_alloc((size_t)nlist * dim * sizeof(float));
+	result->assignments	  = vs_alloc(nvecs * sizeof(ClusterId));
+	result->cluster_sizes = vs_alloc0(nlist * sizeof(uint32_t));
 	result->total_cost	  = 0.0f;
 
 	memcpy(result->centroids, centroids, (size_t)nlist * dim * sizeof(float));
@@ -664,15 +664,15 @@ pgv_extract_result(
 			switch (metric)
 			{
 			case DISTANCE_L2:
-				d = mkt_l2_distance_squared(
+				d = vs_l2_distance_squared(
 						vec, centroids + (size_t)j * dim, dim);
 				break;
 			case DISTANCE_INNER_PRODUCT:
-				d = -mkt_dot_product(vec, centroids + (size_t)j * dim, dim);
+				d = -vs_dot_product(vec, centroids + (size_t)j * dim, dim);
 				break;
 			case DISTANCE_COSINE:
 				d = 1.0f -
-					mkt_dot_product(vec, centroids + (size_t)j * dim, dim);
+					vs_dot_product(vec, centroids + (size_t)j * dim, dim);
 				break;
 			default:
 				d = FLT_MAX;
@@ -707,7 +707,7 @@ pgvector_kmeans(
 	if (nlist > nvecs)
 		nlist = nvecs;
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	if (options != NULL)
 		opts = *options;
 	if (opts.nredo == 0)
@@ -761,7 +761,7 @@ pgvector_kmeans(
 		RunElkanKmeans(index, samples, centers, &typeInfo);
 
 		/* Extract centroids into flat array for cost computation */
-		float *centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
+		float *centroids = vs_alloc((size_t)nlist * dim * sizeof(float));
 		for (uint32_t j = 0; j < nlist; j++)
 		{
 			Vector *vec = (Vector *)VectorArrayGet(centers, (int)j);
@@ -774,16 +774,16 @@ pgvector_kmeans(
 		if (result->total_cost < best_cost)
 		{
 			if (best != NULL)
-				mkt_kmeans_result_destroy(best);
+				vs_kmeans_result_destroy(best);
 			best	  = result;
 			best_cost = result->total_cost;
 		}
 		else
 		{
-			mkt_kmeans_result_destroy(result);
+			vs_kmeans_result_destroy(result);
 		}
 
-		mkt_free(centroids);
+		vs_free(centroids);
 		VectorArrayFree(centers);
 	}
 

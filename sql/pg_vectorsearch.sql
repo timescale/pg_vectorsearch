@@ -95,15 +95,15 @@ $$;
 -- =====================================================================
 
 CREATE FUNCTION vectorsearch.git_commit() RETURNS text
-    AS 'MODULE_PATHNAME', 'mkt_git_commit'
+    AS 'MODULE_PATHNAME', 'vs_git_commit'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vectorsearch.extension_version() RETURNS text
-    AS 'MODULE_PATHNAME', 'mkt_extension_version'
+    AS 'MODULE_PATHNAME', 'vs_extension_version'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vectorsearch.extension_name() RETURNS text
-    AS 'MODULE_PATHNAME', 'mkt_extension_name'
+    AS 'MODULE_PATHNAME', 'vs_extension_name'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- Prerelease install notice: warn at CREATE EXTENSION time when this
@@ -129,15 +129,15 @@ $$;
 -- =====================================================================
 
 CREATE FUNCTION vec32_in(cstring, oid, integer) RETURNS vec32
-    AS 'MODULE_PATHNAME', 'mkt_vec32_in'
+    AS 'MODULE_PATHNAME', 'vs_vec32_in'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_out(vec32) RETURNS cstring
-    AS 'MODULE_PATHNAME', 'mkt_vec32_out'
+    AS 'MODULE_PATHNAME', 'vs_vec32_out'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_typmod_in(cstring[]) RETURNS integer
-    AS 'MODULE_PATHNAME', 'mkt_vec32_typmod_in'
+    AS 'MODULE_PATHNAME', 'vs_vec32_typmod_in'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE TYPE vec32 (
@@ -155,15 +155,15 @@ CREATE TYPE vec32 (
 -- =====================================================================
 
 CREATE FUNCTION l2_distance(vec32, vec32) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_l2_distance'
+    AS 'MODULE_PATHNAME', 'vs_l2_distance'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION inner_product(vec32, vec32) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_inner_product'
+    AS 'MODULE_PATHNAME', 'vs_inner_product'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION cosine_distance(vec32, vec32) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_cosine_distance'
+    AS 'MODULE_PATHNAME', 'vs_cosine_distance'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
@@ -171,11 +171,11 @@ CREATE FUNCTION cosine_distance(vec32, vec32) RETURNS float8
 -- =====================================================================
 
 CREATE FUNCTION vec32_dims(vec32) RETURNS integer
-    AS 'MODULE_PATHNAME', 'mkt_vec32_dims'
+    AS 'MODULE_PATHNAME', 'vs_vec32_dims'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_norm(vec32) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_pg_vec32_norm'
+    AS 'MODULE_PATHNAME', 'vs_pg_vec32_norm'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
@@ -183,39 +183,39 @@ CREATE FUNCTION vec32_norm(vec32) RETURNS float8
 -- =====================================================================
 
 CREATE FUNCTION vec32_l2_squared_distance(vec32, vec32) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_vec32_l2_squared_distance'
+    AS 'MODULE_PATHNAME', 'vs_vec32_l2_squared_distance'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_negative_inner_product(vec32, vec32) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_vec32_negative_inner_product'
+    AS 'MODULE_PATHNAME', 'vs_vec32_negative_inner_product'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_cmp(vec32, vec32) RETURNS int4
-    AS 'MODULE_PATHNAME', 'mkt_vec32_cmp'
+    AS 'MODULE_PATHNAME', 'vs_vec32_cmp'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_lt(vec32, vec32) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vec32_lt'
+    AS 'MODULE_PATHNAME', 'vs_vec32_lt'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_le(vec32, vec32) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vec32_le'
+    AS 'MODULE_PATHNAME', 'vs_vec32_le'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_eq(vec32, vec32) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vec32_eq'
+    AS 'MODULE_PATHNAME', 'vs_vec32_eq'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_ne(vec32, vec32) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vec32_ne'
+    AS 'MODULE_PATHNAME', 'vs_vec32_ne'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_ge(vec32, vec32) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vec32_ge'
+    AS 'MODULE_PATHNAME', 'vs_vec32_ge'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_gt(vec32, vec32) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vec32_gt'
+    AS 'MODULE_PATHNAME', 'vs_vec32_gt'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
@@ -223,19 +223,19 @@ CREATE FUNCTION vec32_gt(vec32, vec32) RETURNS bool
 -- =====================================================================
 
 CREATE FUNCTION vec32(@extschema@.vec32, integer, boolean) RETURNS vec32
-    AS 'MODULE_PATHNAME', 'mkt_vec32'
+    AS 'MODULE_PATHNAME', 'vs_vec32'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION array_to_vec32(real[], integer, boolean) RETURNS vec32
-    AS 'MODULE_PATHNAME', 'mkt_array_to_vec32'
+    AS 'MODULE_PATHNAME', 'vs_array_to_vec32'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION array_to_vec32(float8[], integer, boolean) RETURNS vec32
-    AS 'MODULE_PATHNAME', 'mkt_array_to_vec32'
+    AS 'MODULE_PATHNAME', 'vs_array_to_vec32'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_to_float4(@extschema@.vec32) RETURNS real[]
-    AS 'MODULE_PATHNAME', 'mkt_vec32_to_float4'
+    AS 'MODULE_PATHNAME', 'vs_vec32_to_float4'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
@@ -343,15 +343,15 @@ CREATE OPERATOR CLASS vec32_ops DEFAULT FOR TYPE vec32 USING btree
 -- =====================================================================
 
 CREATE FUNCTION vec16_in(cstring, oid, integer) RETURNS vec16
-    AS 'MODULE_PATHNAME', 'mkt_vec16_in'
+    AS 'MODULE_PATHNAME', 'vs_vec16_in'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec16_out(vec16) RETURNS cstring
-    AS 'MODULE_PATHNAME', 'mkt_vec16_out'
+    AS 'MODULE_PATHNAME', 'vs_vec16_out'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec16_typmod_in(cstring[]) RETURNS integer
-    AS 'MODULE_PATHNAME', 'mkt_vec16_typmod_in'
+    AS 'MODULE_PATHNAME', 'vs_vec16_typmod_in'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE TYPE vec16 (
@@ -369,15 +369,15 @@ CREATE TYPE vec16 (
 -- =====================================================================
 
 CREATE FUNCTION l2_distance(vec16, vec16) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_vec16_l2_distance'
+    AS 'MODULE_PATHNAME', 'vs_vec16_l2_distance'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION inner_product(vec16, vec16) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_vec16_inner_product'
+    AS 'MODULE_PATHNAME', 'vs_vec16_inner_product'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION cosine_distance(vec16, vec16) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_vec16_cosine_distance'
+    AS 'MODULE_PATHNAME', 'vs_vec16_cosine_distance'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
@@ -385,11 +385,11 @@ CREATE FUNCTION cosine_distance(vec16, vec16) RETURNS float8
 -- =====================================================================
 
 CREATE FUNCTION vec32_dims(vec16) RETURNS integer
-    AS 'MODULE_PATHNAME', 'mkt_vec16_dims'
+    AS 'MODULE_PATHNAME', 'vs_vec16_dims'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_norm(vec16) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_vec16_norm'
+    AS 'MODULE_PATHNAME', 'vs_vec16_norm'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
@@ -397,39 +397,39 @@ CREATE FUNCTION vec32_norm(vec16) RETURNS float8
 -- =====================================================================
 
 CREATE FUNCTION vec16_l2_squared_distance(vec16, vec16) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_vec16_l2_squared_distance'
+    AS 'MODULE_PATHNAME', 'vs_vec16_l2_squared_distance'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec16_negative_inner_product(vec16, vec16) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_vec16_negative_inner_product'
+    AS 'MODULE_PATHNAME', 'vs_vec16_negative_inner_product'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec16_cmp(vec16, vec16) RETURNS int4
-    AS 'MODULE_PATHNAME', 'mkt_vec16_cmp'
+    AS 'MODULE_PATHNAME', 'vs_vec16_cmp'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec16_lt(vec16, vec16) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vec16_lt'
+    AS 'MODULE_PATHNAME', 'vs_vec16_lt'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec16_le(vec16, vec16) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vec16_le'
+    AS 'MODULE_PATHNAME', 'vs_vec16_le'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec16_eq(vec16, vec16) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vec16_eq'
+    AS 'MODULE_PATHNAME', 'vs_vec16_eq'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec16_ne(vec16, vec16) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vec16_ne'
+    AS 'MODULE_PATHNAME', 'vs_vec16_ne'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec16_ge(vec16, vec16) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vec16_ge'
+    AS 'MODULE_PATHNAME', 'vs_vec16_ge'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec16_gt(vec16, vec16) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_vec16_gt'
+    AS 'MODULE_PATHNAME', 'vs_vec16_gt'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
@@ -437,25 +437,25 @@ CREATE FUNCTION vec16_gt(vec16, vec16) RETURNS bool
 -- =====================================================================
 
 CREATE FUNCTION vec16(@extschema@.vec16, integer, boolean) RETURNS vec16
-    AS 'MODULE_PATHNAME', 'mkt_vec16'
+    AS 'MODULE_PATHNAME', 'vs_vec16'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec16_to_vec32(@extschema@.vec16, integer, boolean)
     RETURNS vec32
-    AS 'MODULE_PATHNAME', 'mkt_vec16_to_vec32'
+    AS 'MODULE_PATHNAME', 'vs_vec16_to_vec32'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vec32_to_vec16(@extschema@.vec32, integer, boolean)
     RETURNS vec16
-    AS 'MODULE_PATHNAME', 'mkt_vec32_to_vec16'
+    AS 'MODULE_PATHNAME', 'vs_vec32_to_vec16'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION array_to_vec16(real[], integer, boolean) RETURNS vec16
-    AS 'MODULE_PATHNAME', 'mkt_array_to_vec16'
+    AS 'MODULE_PATHNAME', 'vs_array_to_vec16'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION array_to_vec16(float8[], integer, boolean) RETURNS vec16
-    AS 'MODULE_PATHNAME', 'mkt_array_to_vec16'
+    AS 'MODULE_PATHNAME', 'vs_array_to_vec16'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
@@ -568,15 +568,15 @@ CREATE OPERATOR CLASS vec16_ops DEFAULT FOR TYPE vec16 USING btree
 -- =====================================================================
 
 CREATE FUNCTION rabitq_in(cstring, oid, integer) RETURNS rabitq
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_in'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_in'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION rabitq_out(rabitq) RETURNS cstring
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_out'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_out'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION rabitq_typmod_in(cstring[]) RETURNS integer
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_typmod_in'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_typmod_in'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE TYPE rabitq (
@@ -594,15 +594,15 @@ CREATE TYPE rabitq (
 -- =====================================================================
 
 CREATE FUNCTION rabitq_dims(rabitq) RETURNS integer
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_dims'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_dims'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION rabitq_f_add(rabitq) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_f_add'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_f_add'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION rabitq_f_rescale(rabitq) RETURNS float8
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_f_rescale'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_f_rescale'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
@@ -610,31 +610,31 @@ CREATE FUNCTION rabitq_f_rescale(rabitq) RETURNS float8
 -- =====================================================================
 
 CREATE FUNCTION rabitq_cmp(rabitq, rabitq) RETURNS int4
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_cmp'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_cmp'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION rabitq_lt(rabitq, rabitq) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_lt'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_lt'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION rabitq_le(rabitq, rabitq) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_le'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_le'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION rabitq_eq(rabitq, rabitq) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_eq'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_eq'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION rabitq_ne(rabitq, rabitq) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_ne'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_ne'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION rabitq_ge(rabitq, rabitq) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_ge'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_ge'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION rabitq_gt(rabitq, rabitq) RETURNS bool
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_gt'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_gt'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
@@ -642,7 +642,7 @@ CREATE FUNCTION rabitq_gt(rabitq, rabitq) RETURNS bool
 -- =====================================================================
 
 CREATE FUNCTION rabitq(@extschema@.rabitq, integer, boolean) RETURNS rabitq
-    AS 'MODULE_PATHNAME', 'mkt_rabitq'
+    AS 'MODULE_PATHNAME', 'vs_rabitq'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
@@ -720,11 +720,11 @@ CREATE OPERATOR CLASS rabitq_ops DEFAULT FOR TYPE rabitq USING btree
 
 CREATE FUNCTION rabitq_params_in(cstring, oid, integer)
     RETURNS rabitq_params
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_params_in'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_params_in'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION rabitq_params_out(rabitq_params) RETURNS cstring
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_params_out'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_params_out'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE TYPE rabitq_params (
@@ -741,7 +741,7 @@ CREATE TYPE rabitq_params (
 
 CREATE FUNCTION rabitq_params_generate(dim integer, seed bigint)
     RETURNS rabitq_params
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_params_generate_pg'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_params_generate_pg'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 COMMENT ON FUNCTION rabitq_params_generate(integer, bigint) IS
@@ -749,11 +749,11 @@ COMMENT ON FUNCTION rabitq_params_generate(integer, bigint) IS
 The same dim+seed always produces the same matrix. Store the result for reuse across encode calls.';
 
 CREATE FUNCTION rabitq_params_dim(rabitq_params) RETURNS integer
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_params_dim'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_params_dim'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION rabitq_params_seed(rabitq_params) RETURNS bigint
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_params_seed'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_params_seed'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- =====================================================================
@@ -765,7 +765,7 @@ CREATE FUNCTION rabitq_encode(
     centroid vec32,
     params rabitq_params
 ) RETURNS rabitq
-    AS 'MODULE_PATHNAME', 'mkt_rabitq_encode_pg'
+    AS 'MODULE_PATHNAME', 'vs_rabitq_encode_pg'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 COMMENT ON FUNCTION rabitq_encode(vec32, vec32, rabitq_params) IS
@@ -835,7 +835,7 @@ CREATE OPERATOR CLASS vec32_cosine_ops
 -- kernels are float32-only). What vec16 buys is the heap, which is what an
 -- exact rerank reads -- at 768d a vec32 row is 3080 bytes and fits 2 to an
 -- 8 kB page against vec16's 1544 and 5. Centroids follow the column and are
--- stored half-precision too (MKT_CENTROID_FMT_HALF).
+-- stored half-precision too (PRISM_CENTROID_FMT_HALF).
 CREATE OPERATOR CLASS vec16_l2_ops
     DEFAULT FOR TYPE vec16 USING prism AS
     OPERATOR 1 <-> (vec16, vec16) FOR ORDER BY float_ops,
@@ -871,7 +871,7 @@ CREATE FUNCTION prism.centroid_pages(regclass)
         child_count smallint,
         is_leaf     boolean
     )
-    AS 'MODULE_PATHNAME', 'mkt_centroid_pages'
+    AS 'MODULE_PATHNAME', 'vs_centroid_pages'
     LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION prism.posting_pages(regclass)
@@ -887,7 +887,7 @@ CREATE FUNCTION prism.posting_pages(regclass)
         chain_pos   integer,
         format      text
     )
-    AS 'MODULE_PATHNAME', 'mkt_posting_pages'
+    AS 'MODULE_PATHNAME', 'vs_posting_pages'
     LANGUAGE C STRICT PARALLEL SAFE;
 
 -- Map heap TIDs to the index cluster(s) that hold them (primary plus any
@@ -900,7 +900,7 @@ CREATE FUNCTION prism.tids_clusters(regclass, tid[])
         tid        tid,
         cluster_id integer
     )
-    AS 'MODULE_PATHNAME', 'mkt_tids_clusters'
+    AS 'MODULE_PATHNAME', 'vs_tids_clusters'
     LANGUAGE C STRICT PARALLEL SAFE;
 
 -- Effective index settings, one (name, setting, source) row per
@@ -919,7 +919,7 @@ CREATE FUNCTION prism.index_settings(regclass)
         setting text,
         source  text
     )
-    AS 'MODULE_PATHNAME', 'mkt_index_settings'
+    AS 'MODULE_PATHNAME', 'vs_index_settings'
     LANGUAGE C STRICT PARALLEL SAFE;
 
 -- Convert one cluster's posting chain from AoS to fastscan format.
@@ -930,7 +930,7 @@ CREATE FUNCTION prism.convert_posting_to_fastscan(
         cluster_id integer
     )
     RETURNS integer
-    AS 'MODULE_PATHNAME', 'mkt_convert_posting_to_fastscan'
+    AS 'MODULE_PATHNAME', 'vs_convert_posting_to_fastscan'
     LANGUAGE C STRICT;
 
 -- =====================================================================
@@ -945,7 +945,7 @@ CREATE PROCEDURE prism.split_posting_list(
         index_oid regclass,
         head_blkno bigint
     )
-    AS 'MODULE_PATHNAME', 'mkt_split_posting_list'
+    AS 'MODULE_PATHNAME', 'vs_split_posting_list'
     LANGUAGE C;
 
 COMMENT ON PROCEDURE prism.split_posting_list(regclass, bigint) IS
@@ -968,7 +968,7 @@ COMMENT ON PROCEDURE prism.split_posting_list(regclass, bigint) IS
 -- Splitting is the only rebalancing it performs, and it is driven by the
 -- caller.
 CREATE PROCEDURE prism.rebalance(index_oid regclass, target_entries integer DEFAULT NULL)
-    AS 'MODULE_PATHNAME', 'mkt_rebalance'
+    AS 'MODULE_PATHNAME', 'vs_rebalance'
     LANGUAGE C;
 
 COMMENT ON PROCEDURE prism.rebalance(regclass, integer) IS

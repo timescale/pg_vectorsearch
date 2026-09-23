@@ -1,10 +1,10 @@
 /*
- * mkt bench cluster
+ * vectorsearch bench cluster
  *
  * Benchmark K-means clustering algorithms.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <getopt.h>
 #include <math.h>
@@ -103,7 +103,7 @@ normalize_vectors(float *data, uint32_t nvecs, Dimension dim)
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
 		float *v	= data + (size_t)i * dim;
-		float  norm = mkt_l2_norm(v, dim);
+		float  norm = vs_l2_norm(v, dim);
 		if (norm > 1e-10f)
 			vec32_scale(v, 1.0f / norm, v, dim);
 	}
@@ -193,7 +193,7 @@ load_vectors_from_file(
 
 	/* Allocate output float array */
 	size_t float_bytes = (size_t)nvecs * dim * sizeof(float);
-	float *data		   = mkt_alloc(float_bytes);
+	float *data		   = vs_alloc(float_bytes);
 	if (data == NULL)
 	{
 		fprintf(stderr,
@@ -206,11 +206,11 @@ load_vectors_from_file(
 	/* Read int8 data in chunks and convert to float32 */
 	size_t	total_bytes = (size_t)nvecs * dim;
 	size_t	bytes_read	= 0;
-	int8_t *buf			= mkt_alloc(1024 * 1024); /* 1MB read buffer */
+	int8_t *buf			= vs_alloc(1024 * 1024); /* 1MB read buffer */
 	if (buf == NULL)
 	{
 		fprintf(stderr, "Error: failed to allocate read buffer\n");
-		mkt_free(data);
+		vs_free(data);
 		fclose(fp);
 		return NULL;
 	}
@@ -252,7 +252,7 @@ load_vectors_from_file(
 		bytes_read += got;
 	}
 
-	mkt_free(buf);
+	vs_free(buf);
 	if (fp != NULL)
 		fclose(fp);
 
@@ -291,13 +291,13 @@ recompute_exact_cost(
 		switch (metric)
 		{
 		case DISTANCE_L2:
-			cost += (double)mkt_l2_distance_squared(v, c, dim);
+			cost += (double)vs_l2_distance_squared(v, c, dim);
 			break;
 		case DISTANCE_INNER_PRODUCT:
-			cost += (double)(-mkt_dot_product(v, c, dim));
+			cost += (double)(-vs_dot_product(v, c, dim));
 			break;
 		case DISTANCE_COSINE:
-			cost += (double)(1.0f - mkt_dot_product(v, c, dim));
+			cost += (double)(1.0f - vs_dot_product(v, c, dim));
 			break;
 		}
 	}
@@ -334,7 +334,7 @@ verify_against_ref(
 	double sum_cdist = 0.0;
 	for (uint32_t j = 0; j < nlist; j++)
 	{
-		float d = mkt_l2_distance_squared(
+		float d = vs_l2_distance_squared(
 				ref->centroids + (size_t)j * dim,
 				res->centroids + (size_t)j * dim,
 				dim);
@@ -369,15 +369,15 @@ run_bench(
 		VecType					  vec_type,
 		KMeansAlgorithm			  algo)
 {
-	const char	 *name	= mkt_kmeans_algo_name(algo);
-	KMeansOptions opts	= MKT_KMEANS_OPTIONS_DEFAULT;
+	const char	 *name	= vs_kmeans_algo_name(algo);
+	KMeansOptions opts	= VS_KMEANS_OPTIONS_DEFAULT;
 	opts.max_iterations = cfg->iters;
 	opts.seed			= cfg->seed;
 	opts.nredo			= cfg->nredo;
 	opts.algorithm		= algo;
 
 	uint64_t	  start = get_time_ns();
-	KMeansResult *res	= mkt_kmeans(
+	KMeansResult *res	= vs_kmeans(
 			  data,
 			  NULL,
 			  vec_type,
@@ -431,7 +431,7 @@ run_bench(
 static KMeansResult *
 run_bench_pgvector(const ClusterBenchConfig *cfg, const float *data)
 {
-	KMeansOptions opts	= MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts	= VS_KMEANS_OPTIONS_DEFAULT;
 	opts.max_iterations = cfg->iters;
 	opts.seed			= cfg->seed;
 	opts.nredo			= cfg->nredo;
@@ -640,7 +640,7 @@ cmd_bench_cluster(CmdContext *ctx)
 			return 1;
 		}
 
-		data = mkt_alloc(data_bytes);
+		data = vs_alloc(data_bytes);
 		if (data == NULL)
 		{
 			fprintf(stderr, "Error: failed to allocate data\n");
@@ -658,35 +658,34 @@ cmd_bench_cluster(CmdContext *ctx)
 	if (cfg.type != NULL && strcmp(cfg.type, "f32") != 0 && !use_f16)
 	{
 		fprintf(stderr, "Error: --type must be f32 or f16\n");
-		mkt_free(data);
+		vs_free(data);
 		return 1;
 	}
 
-	VecType		vec_type   = MKT_VEC_F32;
+	VecType		vec_type   = VS_VEC_F32;
 	const void *bench_data = data;
 	half	   *data_f16   = NULL;
 
 	if (use_f16)
 	{
 		size_t n_elems = (size_t)cfg.nvecs * cfg.dim;
-		data_f16	   = mkt_alloc(n_elems * sizeof(half));
-		mkt_float_to_half_array(data, data_f16, (uint32_t)n_elems);
+		data_f16	   = vs_alloc(n_elems * sizeof(half));
+		vs_float_to_half_array(data, data_f16, (uint32_t)n_elems);
 		bench_data = data_f16;
-#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
-		vec_type = (mkt_detect_simd() & SIMD_AVX2) ? MKT_VEC_F16C
-												   : MKT_VEC_F16;
+#if defined(VS_F16C_SUPPORT) && !defined(VS_SIMD_NONE)
+		vec_type = (vs_detect_simd() & SIMD_AVX2) ? VS_VEC_F16C : VS_VEC_F16;
 #else
-		vec_type = MKT_VEC_F16;
+		vec_type = VS_VEC_F16;
 #endif
 	}
 
-	size_t elem_size = mkt_vec_element_size(vec_type);
+	size_t elem_size = vs_vec_element_size(vec_type);
 	double size_mb	 = (double)cfg.nvecs * cfg.dim * elem_size /
 					 (1024.0 * 1024.0);
 	printf("K-means clustering (%s, %s, dim=%u, nvecs=%u, nlist=%u, "
 		   "%.1f MB):\n",
 		   metric_name(cfg.metric),
-		   mkt_vec_type_name(vec_type),
+		   vs_vec_type_name(vec_type),
 		   cfg.dim,
 		   cfg.nvecs,
 		   cfg.nlist,
@@ -711,7 +710,7 @@ cmd_bench_cluster(CmdContext *ctx)
 		if (cfg.verify && r != NULL)
 			results[nresults++] = (typeof(results[0])){r, "lloyd(cblas)"};
 		else
-			mkt_kmeans_result_destroy(r);
+			vs_kmeans_result_destroy(r);
 	}
 
 	/* Lloyd's: always run in verify mode (reference), else on demand */
@@ -726,7 +725,7 @@ cmd_bench_cluster(CmdContext *ctx)
 					data, ref, cfg.nvecs, cfg.dim, cfg.metric);
 		else if (!cfg.verify)
 		{
-			mkt_kmeans_result_destroy(ref);
+			vs_kmeans_result_destroy(ref);
 			ref = NULL;
 		}
 	}
@@ -738,7 +737,7 @@ cmd_bench_cluster(CmdContext *ctx)
 		if (cfg.verify && r != NULL)
 			results[nresults++] = (typeof(results[0])){r, "hamerly"};
 		else
-			mkt_kmeans_result_destroy(r);
+			vs_kmeans_result_destroy(r);
 	}
 
 	if (run_all || (cfg.impl != NULL && strcmp(cfg.impl, "elkan") == 0))
@@ -748,7 +747,7 @@ cmd_bench_cluster(CmdContext *ctx)
 		if (cfg.verify && r != NULL)
 			results[nresults++] = (typeof(results[0])){r, "elkan"};
 		else
-			mkt_kmeans_result_destroy(r);
+			vs_kmeans_result_destroy(r);
 	}
 
 	if (run_all || (cfg.impl != NULL && strcmp(cfg.impl, "pgvector") == 0))
@@ -757,7 +756,7 @@ cmd_bench_cluster(CmdContext *ctx)
 		if (cfg.verify && r != NULL)
 			results[nresults++] = (typeof(results[0])){r, "elkan(pgvec)"};
 		else
-			mkt_kmeans_result_destroy(r);
+			vs_kmeans_result_destroy(r);
 	}
 
 	/* Verification: compare each result against Lloyd's */
@@ -777,13 +776,13 @@ cmd_bench_cluster(CmdContext *ctx)
 					cost,
 					results[i].name,
 					cfg.nvecs);
-			mkt_kmeans_result_destroy(results[i].res);
+			vs_kmeans_result_destroy(results[i].res);
 		}
 
-		mkt_kmeans_result_destroy(ref);
+		vs_kmeans_result_destroy(ref);
 	}
 
-	mkt_free(data_f16);
-	mkt_free(data);
+	vs_free(data_f16);
+	vs_free(data);
 	return 0;
 }

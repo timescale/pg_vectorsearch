@@ -1,5 +1,5 @@
 /*
- * mkt_parallel_ctx.h - Parallel context lifecycle
+ * vs_parallel_ctx.h - Parallel context lifecycle
  *
  * The build's leader sets up a parallel context, launches workers, waits for
  * them, and tears it down. In a PostgreSQL build this is PostgreSQL's
@@ -12,15 +12,15 @@
  *
  * Workers are resolved by name the way PostgreSQL resolves a background-worker
  * entry point: the worker module registers its function with
- * mkt_parallel_register_worker, and CreateParallelContext records the name.
+ * vs_parallel_register_worker, and CreateParallelContext records the name.
  *
  * Each launched thread gets a stable latch (owned by the context, freed only
  * at DestroyParallelContext after every worker has been joined) so the leader
  * can safely set it while a worker may still be blocked on it.
  */
 
-#ifndef MKT_PARALLEL_CTX_H
-#define MKT_PARALLEL_CTX_H
+#ifndef VS_PARALLEL_CTX_H
+#define VS_PARALLEL_CTX_H
 
 #include <stddef.h>
 
@@ -36,7 +36,7 @@
  */
 extern __thread int ParallelWorkerNumber;
 
-typedef void (*MktParallelWorkerFn)(dsm_segment *seg, shm_toc *toc);
+typedef void (*VsParallelWorkerFn)(dsm_segment *seg, shm_toc *toc);
 
 typedef struct ParallelContext
 {
@@ -47,11 +47,11 @@ typedef struct ParallelContext
 	shm_toc_estimator estimator;
 
 	/* standalone internals */
-	const char		   *function_name;
-	MktParallelWorkerFn worker_fn; /* resolved at launch */
-	void			   *arena;
-	size_t				arena_size;
-	MktThreadPool	   *pool; /* persistent worker threads */
+	const char		  *function_name;
+	VsParallelWorkerFn worker_fn; /* resolved at launch */
+	void			  *arena;
+	size_t			   arena_size;
+	VsThreadPool	  *pool; /* persistent worker threads */
 	Latch *worker_latches; /* stable [nworkers]; bound as each thread's MyLatch
 							*/
 	Latch leader_latch;	   /* stable; the leader's MyLatch */
@@ -60,7 +60,7 @@ typedef struct ParallelContext
 /* Register a worker entry under a name, resolved later by
  * CreateParallelContext. */
 extern void
-mkt_parallel_register_worker(const char *name, MktParallelWorkerFn fn);
+vs_parallel_register_worker(const char *name, VsParallelWorkerFn fn);
 
 extern void EnterParallelMode(void);
 extern void ExitParallelMode(void);
@@ -73,4 +73,4 @@ extern void WaitForParallelWorkersToAttach(ParallelContext *pcxt);
 extern void WaitForParallelWorkersToFinish(ParallelContext *pcxt);
 extern void DestroyParallelContext(ParallelContext *pcxt);
 
-#endif /* MKT_PARALLEL_CTX_H */
+#endif /* VS_PARALLEL_CTX_H */

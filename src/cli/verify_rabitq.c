@@ -1,5 +1,5 @@
 /*
- * mkt verify rabitq
+ * vectorsearch verify rabitq
  *
  * Compare pg_vectorsearch's RaBitQ encoding and distance computation
  * against FAISS using real datasets in HDF5 format (e.g. ann-benchmarks
@@ -12,9 +12,9 @@
  * Requires both FAISS and HDF5 dependencies (-Dfaiss=true -Dhdf5=true).
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
-#if defined(MKT_HAVE_FAISS) && defined(MKT_HAVE_HDF5)
+#if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
 
 #include <RaBitQuantizer_c.h>
 #include <error_c.h>
@@ -210,7 +210,7 @@ verify_encoding(
 {
 	printf("=== Phase 1: Encoding Verification ===\n\n");
 
-	size_t nbytes = MKT_RABITQ_BYTES(dim);
+	size_t nbytes = VS_RABITQ_BYTES(dim);
 
 	/* Pre-transform all vectors for FAISS: P^T * (v - centroid) */
 	float *transformed = malloc((size_t)count * dim * sizeof(float));
@@ -228,7 +228,7 @@ verify_encoding(
 		const float *v = vectors + (size_t)i * dim;
 		for (Dimension j = 0; j < dim; j++)
 			residual[j] = v[j] - centroid[j];
-		mkt_rabitq_rotate(params, residual, transformed + (size_t)i * dim);
+		vs_rabitq_rotate(params, residual, transformed + (size_t)i * dim);
 	}
 	free(residual);
 
@@ -258,11 +258,11 @@ verify_encoding(
 
 	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
-	/* Allocate buffer for mkt codes (for dump and comparison) */
-	uint8_t *mkt_codes = dump_dir ? malloc((size_t)count * nbytes) : NULL;
-	if (dump_dir && mkt_codes == NULL)
+	/* Allocate buffer for our own codes (for dump and comparison) */
+	uint8_t *vs_codes = dump_dir ? malloc((size_t)count * nbytes) : NULL;
+	if (dump_dir && vs_codes == NULL)
 	{
-		fprintf(stderr, "Error: allocation failed for mkt codes\n");
+		fprintf(stderr, "Error: allocation failed for our own codes\n");
 		faiss_RaBitQuantizer_free(faiss_rq);
 		free(faiss_codes);
 		free(transformed);
@@ -277,12 +277,12 @@ verify_encoding(
 			print_progress("Encoding", i, count, &last_pct);
 
 		Vec32Ref	vec_ref = {.data = vectors + (size_t)i * dim, .dim = dim};
-		RaBitQData *mkt_enc = mkt_rabitq_encode(params, vec_ref, cent_ref);
+		RaBitQData *vs_enc	= vs_rabitq_encode(params, vec_ref, cent_ref);
 
-		if (mkt_codes)
-			memcpy(mkt_codes + (size_t)i * nbytes, mkt_enc->bits, nbytes);
+		if (vs_codes)
+			memcpy(vs_codes + (size_t)i * nbytes, vs_enc->bits, nbytes);
 
-		if (memcmp(mkt_enc->bits, faiss_codes + i * faiss_code_size, nbytes) ==
+		if (memcmp(vs_enc->bits, faiss_codes + i * faiss_code_size, nbytes) ==
 			0)
 		{
 			if (verbose)
@@ -294,21 +294,21 @@ verify_encoding(
 			/* Find first mismatching byte */
 			for (size_t b = 0; b < nbytes; b++)
 			{
-				if (mkt_enc->bits[b] != faiss_codes[i * faiss_code_size + b])
+				if (vs_enc->bits[b] != faiss_codes[i * faiss_code_size + b])
 				{
 					if (use_progress && !verbose)
 						clear_progress();
 					printf("ENC  v=%-8u MISMATCH  byte=%zu "
-						   "mkt=0x%02X faiss=0x%02X\n",
+						   "us=0x%02X  faiss=0x%02X\n",
 						   i,
 						   b,
-						   mkt_enc->bits[b],
+						   vs_enc->bits[b],
 						   faiss_codes[i * faiss_code_size + b]);
 					break;
 				}
 			}
 		}
-		mkt_free(mkt_enc);
+		vs_free(vs_enc);
 	}
 
 	if (use_progress && !verbose)
@@ -324,11 +324,11 @@ verify_encoding(
 	{
 		char path[512];
 
-		snprintf(path, sizeof(path), "%s/mkt_codes.bin", dump_dir);
+		snprintf(path, sizeof(path), "%s/vs_codes.bin", dump_dir);
 		FILE *f = fopen(path, "wb");
 		if (f)
 		{
-			fwrite(mkt_codes, nbytes, count, f);
+			fwrite(vs_codes, nbytes, count, f);
 			fclose(f);
 		}
 		else
@@ -345,7 +345,7 @@ verify_encoding(
 		else
 			fprintf(stderr, "Error: cannot write %s\n", path);
 
-		printf("Wrote mkt_codes.bin and faiss_codes.bin to %s "
+		printf("Wrote vs_codes.bin and faiss_codes.bin to %s "
 			   "(%u vectors, %zu bytes each)\n\n",
 			   dump_dir,
 			   count,
@@ -354,7 +354,7 @@ verify_encoding(
 
 	faiss_RaBitQuantizer_free(faiss_rq);
 	free(faiss_codes);
-	free(mkt_codes);
+	free(vs_codes);
 	free(transformed);
 }
 
@@ -366,7 +366,7 @@ verify_encoding(
  * (summary stats) and on-demand for mismatches (verbose/mismatch
  * output).
  *
- * Performance: the inner loop uses mkt_rabitq_distance_batch() (SIMD)
+ * Performance: the inner loop uses vs_rabitq_distance_batch() (SIMD)
  * instead of per-vector calls, and avoids the O(nqueries*ntrain*dim)
  * true L2 computation by sampling.
  */
@@ -404,7 +404,7 @@ verify_distances(
 		const float *v = train + (size_t)i * dim;
 		for (Dimension j = 0; j < dim; j++)
 			residual[j] = v[j] - centroid[j];
-		mkt_rabitq_rotate(
+		vs_rabitq_rotate(
 				params, residual, train_transformed + (size_t)i * dim);
 	}
 	free(residual);
@@ -421,13 +421,13 @@ verify_distances(
 	/* Encode all train vectors with pg_vectorsearch into SoA arrays for
 	 * batch distance computation */
 	Vec32Ref cent_ref	   = {.data = centroid, .dim = dim};
-	uint32_t pbytes		   = MKT_RABITQ_BYTES(dim);
+	uint32_t pbytes		   = VS_RABITQ_BYTES(dim);
 	float	*enc_f_add	   = malloc(ntrain * sizeof(float));
 	float	*enc_f_rescale = malloc(ntrain * sizeof(float));
 	uint8_t *enc_bits	   = malloc((size_t)ntrain * pbytes);
 	if (!enc_f_add || !enc_f_rescale || !enc_bits)
 	{
-		fprintf(stderr, "Error: allocation failed for mkt codes\n");
+		fprintf(stderr, "Error: allocation failed for our own codes\n");
 		faiss_RaBitQuantizer_free(faiss_rq);
 		free(faiss_codes);
 		free(train_transformed);
@@ -437,10 +437,10 @@ verify_distances(
 		return;
 	}
 
-	mkt_rabitq_encode_batch(
+	vs_rabitq_encode_batch(
 			params,
 			train,
-			MKT_VEC_F32,
+			VS_VEC_F32,
 			cent_ref,
 			enc_f_add,
 			enc_f_rescale,
@@ -454,10 +454,10 @@ verify_distances(
 		uint16_t chunk		= remaining < UINT16_MAX ? (uint16_t)remaining
 													 : UINT16_MAX;
 		Vec32Ref chunk_cent = {.data = centroid, .dim = dim};
-		mkt_rabitq_encode_batch(
+		vs_rabitq_encode_batch(
 				params,
 				train + (size_t)offset * dim,
-				MKT_VEC_F32,
+				VS_VEC_F32,
 				chunk_cent,
 				enc_f_add + offset,
 				enc_f_rescale + offset,
@@ -467,18 +467,18 @@ verify_distances(
 	}
 
 	/* Pre-allocate per-query distance buffers */
-	float *mkt_dists   = malloc(ntrain * sizeof(float));
+	float *vs_dists	   = malloc(ntrain * sizeof(float));
 	float *faiss_dists = malloc(ntrain * sizeof(float));
 	float *q_buf	   = malloc(dim * sizeof(float));
 	float *qt_buf	   = malloc(dim * sizeof(float));
-	if (!mkt_dists || !faiss_dists || !q_buf || !qt_buf)
+	if (!vs_dists || !faiss_dists || !q_buf || !qt_buf)
 	{
 		fprintf(stderr, "Error: allocation failed for buffers\n");
 		goto dist_cleanup;
 	}
 
 	/* Statistics accumulators */
-	float	 mkt_faiss_max_abs = 0.0f, mkt_faiss_sum_abs = 0.0f;
+	float	 vs_faiss_max_abs = 0.0f, vs_faiss_sum_abs = 0.0f;
 	uint64_t total_pairs	 = 0;
 	uint32_t dist_mismatches = 0;
 	uint32_t last_pct		 = UINT32_MAX;
@@ -486,7 +486,7 @@ verify_distances(
 	/* True L2 error stats via inline sampling.
 	 * Sample vectors per query using a stride so the sample spans
 	 * all queries and naturally includes mismatched vectors. */
-	float	 mkt_true_max_rel = 0.0f, mkt_true_sum_rel = 0.0f;
+	float	 vs_true_max_rel = 0.0f, vs_true_sum_rel = 0.0f;
 	float	 faiss_true_max_rel = 0.0f, faiss_true_sum_rel = 0.0f;
 	uint32_t n_sampled		   = 0;
 	uint32_t samples_per_query = TRUE_L2_SAMPLE_SIZE /
@@ -505,22 +505,22 @@ verify_distances(
 		Vec32Ref	 query_ref = {.data = query, .dim = dim};
 
 		/* Batch pg_vectorsearch distances (SIMD) */
-		RaBitQQueryState *mkt_state =
-				mkt_rabitq_prepare_query(params, query_ref, cent_ref);
-		mkt_rabitq_distance_batch(
-				mkt_state,
+		RaBitQQueryState *vs_state =
+				vs_rabitq_prepare_query(params, query_ref, cent_ref);
+		vs_rabitq_distance_batch(
+				vs_state,
 				enc_f_add,
 				enc_f_rescale,
 				enc_bits,
 				ntrain,
 				dim,
-				mkt_dists);
-		mkt_rabitq_free_query(mkt_state);
+				vs_dists);
+		vs_rabitq_free_query(vs_state);
 
 		/* FAISS distances */
 		for (Dimension j = 0; j < dim; j++)
 			q_buf[j] = query[j] - centroid[j];
-		mkt_rabitq_rotate(params, q_buf, qt_buf);
+		vs_rabitq_rotate(params, q_buf, qt_buf);
 
 		FaissRaBitQDistanceComputer *faiss_dc = NULL;
 		faiss_RaBitQuantizer_get_distance_computer(
@@ -536,12 +536,12 @@ verify_distances(
 		}
 		faiss_RaBitQDistanceComputer_free(faiss_dc);
 
-		/* Compare mkt vs faiss distances and sample true L2 */
+		/* Compare our own vs faiss distances and sample true L2 */
 		for (uint32_t v = 0; v < ntrain; v++)
 		{
-			float abs_diff	  = fabsf(mkt_dists[v] - faiss_dists[v]);
-			float max_est	  = mkt_dists[v] > faiss_dists[v] ? mkt_dists[v]
-															  : faiss_dists[v];
+			float abs_diff	  = fabsf(vs_dists[v] - faiss_dists[v]);
+			float max_est	  = vs_dists[v] > faiss_dists[v] ? vs_dists[v]
+															 : faiss_dists[v];
 			float rel_diff	  = max_est > 1e-6f ? abs_diff / max_est : 0.0f;
 			bool  is_mismatch = rel_diff > DIST_MISMATCH_REL_THRESHOLD;
 
@@ -550,34 +550,34 @@ verify_distances(
 				/* Compute true L2 on-demand for output */
 				float true_dist =
 						l2_distance_sq(query, train + (size_t)v * dim, dim);
-				float mkt_err	= 0.0f;
+				float vs_err	= 0.0f;
 				float faiss_err = 0.0f;
 				if (true_dist > 1e-6f)
 				{
-					mkt_err	  = fabsf(mkt_dists[v] - true_dist) / true_dist;
+					vs_err	  = fabsf(vs_dists[v] - true_dist) / true_dist;
 					faiss_err = fabsf(faiss_dists[v] - true_dist) / true_dist;
 				}
 
 				if (use_progress && !verbose)
 					clear_progress();
-				printf("DIST q=%-4u v=%-8u mkt=%-10.4f "
+				printf("DIST q=%-4u v=%-8u us=%-10.4f "
 					   "faiss=%-10.4f true=%-10.4f "
-					   "mkt_err=%.2f%%  faiss_err=%.2f%%\n",
+					   "vs_err=%.2f%%  faiss_err=%.2f%%\n",
 					   q,
 					   v,
-					   mkt_dists[v],
+					   vs_dists[v],
 					   faiss_dists[v],
 					   true_dist,
-					   mkt_err * 100.0f,
+					   vs_err * 100.0f,
 					   faiss_err * 100.0f);
 			}
 
 			if (is_mismatch)
 				dist_mismatches++;
 
-			if (abs_diff > mkt_faiss_max_abs)
-				mkt_faiss_max_abs = abs_diff;
-			mkt_faiss_sum_abs += abs_diff;
+			if (abs_diff > vs_faiss_max_abs)
+				vs_faiss_max_abs = abs_diff;
+			vs_faiss_sum_abs += abs_diff;
 
 			/* Inline true L2 sampling: stride-based per query */
 			if (v % sample_stride == 0)
@@ -585,11 +585,11 @@ verify_distances(
 				float td = l2_distance_sq(query, train + (size_t)v * dim, dim);
 				if (td > 1e-6f)
 				{
-					float me = fabsf(mkt_dists[v] - td) / td;
+					float me = fabsf(vs_dists[v] - td) / td;
 					float fe = fabsf(faiss_dists[v] - td) / td;
-					if (me > mkt_true_max_rel)
-						mkt_true_max_rel = me;
-					mkt_true_sum_rel += me;
+					if (me > vs_true_max_rel)
+						vs_true_max_rel = me;
+					vs_true_sum_rel += me;
 					if (fe > faiss_true_max_rel)
 						faiss_true_max_rel = fe;
 					faiss_true_sum_rel += fe;
@@ -614,14 +614,14 @@ verify_distances(
 	}
 
 	printf("\nDISTANCE SUMMARY:\n");
-	printf("  mkt  vs faiss: max_abs_diff=%.4f  "
+	printf("  us vs faiss: max_abs_diff=%.4f  "
 		   "mean_abs_diff=%.4f\n",
-		   mkt_faiss_max_abs,
-		   total_pairs ? (double)mkt_faiss_sum_abs / total_pairs : 0.0);
-	printf("  mkt  vs true:  max_rel_err=%.1f%%  "
+		   vs_faiss_max_abs,
+		   total_pairs ? (double)vs_faiss_sum_abs / total_pairs : 0.0);
+	printf("  us vs true:  max_rel_err=%.1f%%  "
 		   "mean_rel_err=%.1f%%  (sampled %u pairs)\n",
-		   mkt_true_max_rel * 100.0f,
-		   n_sampled ? (mkt_true_sum_rel / n_sampled) * 100.0f : 0.0f,
+		   vs_true_max_rel * 100.0f,
+		   n_sampled ? (vs_true_sum_rel / n_sampled) * 100.0f : 0.0f,
 		   n_sampled);
 	printf("  faiss vs true: max_rel_err=%.1f%%  "
 		   "mean_rel_err=%.1f%%  (sampled %u pairs)\n\n",
@@ -636,7 +636,7 @@ dist_cleanup:
 	free(enc_f_rescale);
 	free(enc_bits);
 	free(train_transformed);
-	free(mkt_dists);
+	free(vs_dists);
 	free(faiss_dists);
 	free(q_buf);
 	free(qt_buf);
@@ -676,7 +676,7 @@ print_usage(const CmdContext *ctx)
 }
 
 /*
- * cmd_verify_rabitq - Entry point for "mkt verify rabitq"
+ * cmd_verify_rabitq - Entry point for "vectorsearch verify rabitq"
  */
 int
 cmd_verify_rabitq(CmdContext *ctx)
@@ -806,7 +806,7 @@ cmd_verify_rabitq(CmdContext *ctx)
 
 	/* Initialize RaBitQ parameters */
 	printf("Initializing RaBitQ (dim=%u, seed=%" PRIu64 ")...\n\n", dim, seed);
-	RaBitQParams *params = mkt_rabitq_create(dim, seed);
+	RaBitQParams *params = vs_rabitq_create(dim, seed);
 	if (params == NULL)
 	{
 		fprintf(stderr, "Error: RaBitQ parameter creation failed\n");
@@ -841,7 +841,7 @@ cmd_verify_rabitq(CmdContext *ctx)
 			verbose,
 			use_progress);
 	/* Cleanup */
-	mkt_rabitq_destroy(params);
+	vs_rabitq_destroy(params);
 	free(centroid);
 	free(train);
 	free(test);
@@ -849,4 +849,4 @@ cmd_verify_rabitq(CmdContext *ctx)
 	return 0;
 }
 
-#endif /* MKT_HAVE_FAISS && MKT_HAVE_HDF5 */
+#endif /* VS_HAVE_FAISS && VS_HAVE_HDF5 */

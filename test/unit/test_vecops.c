@@ -14,7 +14,7 @@
 
 #include "algo/vecops.h"
 #include "core/memory.h"
-#include "mkt_test.h"
+#include "vs_test.h"
 
 TEST_GROUP(VecOps);
 TEST_MEMCTX_FIXTURE();
@@ -25,7 +25,7 @@ TEST_MEMCTX_FIXTURE();
 
 TEST(impl_name_is_valid)
 {
-	const char *name = mkt_vecops_impl_name();
+	const char *name = vs_vecops_impl_name();
 	ASSERT_NOT_NULL(name, "implementation name should not be null");
 
 	int valid =
@@ -40,8 +40,8 @@ TEST(impl_name_is_valid)
 TEST(init_idempotent)
 {
 	/* Calling init multiple times should be harmless */
-	int ret1 = mkt_vecops_init();
-	int ret2 = mkt_vecops_init();
+	int ret1 = vs_vecops_init();
+	int ret2 = vs_vecops_init();
 	ASSERT_EQ(0, ret1, "first init should succeed");
 	ASSERT_EQ(0, ret2, "second init should succeed");
 }
@@ -49,18 +49,18 @@ TEST(init_idempotent)
 TEST(force_reinit)
 {
 	/* Reinit should reset state, next call auto-inits */
-	mkt_vecops_force_reinit();
+	vs_vecops_force_reinit();
 
 	/* After reinit, impl_name triggers auto-init */
-	const char *name = mkt_vecops_impl_name();
+	const char *name = vs_vecops_impl_name();
 	ASSERT_NOT_NULL(name, "impl_name should work after reinit");
 
 	/* Reinit again, then call a vecops function */
-	mkt_vecops_force_reinit();
+	vs_vecops_force_reinit();
 
 	float a[] = {1.0f, 2.0f, 3.0f};
 	float b[] = {4.0f, 5.0f, 6.0f};
-	float dot = mkt_dot_product(a, b, 3);
+	float dot = vs_dot_product(a, b, 3);
 	ASSERT_FLOAT_EQ(32.0f, dot, 1e-5f, "dot product after reinit");
 }
 
@@ -74,7 +74,7 @@ TEST(dot_product_basic)
 	float b[] = {5.0f, 6.0f, 7.0f, 8.0f};
 
 	/* 1*5 + 2*6 + 3*7 + 4*8 = 5 + 12 + 21 + 32 = 70 */
-	float dot = mkt_dot_product(a, b, 4);
+	float dot = vs_dot_product(a, b, 4);
 	ASSERT_FLOAT_EQ(70.0f, dot, 1e-5f, "dot product should be 70");
 }
 
@@ -83,7 +83,7 @@ TEST(dot_product_orthogonal)
 	float a[] = {1.0f, 0.0f};
 	float b[] = {0.0f, 1.0f};
 
-	float dot = mkt_dot_product(a, b, 2);
+	float dot = vs_dot_product(a, b, 2);
 	ASSERT_FLOAT_EQ(0.0f, dot, 1e-5f, "orthogonal dot product");
 }
 
@@ -95,7 +95,7 @@ TEST(l2_norm_squared_basic)
 {
 	float v[] = {3.0f, 4.0f};
 	/* 3^2 + 4^2 = 25 */
-	float nsq = mkt_l2_norm_squared(v, 2);
+	float nsq = vs_l2_norm_squared(v, 2);
 	ASSERT_FLOAT_EQ(25.0f, nsq, 1e-5f, "norm squared of [3,4]");
 }
 
@@ -103,21 +103,21 @@ TEST(l2_norm_basic)
 {
 	float v[] = {3.0f, 4.0f};
 	/* sqrt(9 + 16) = 5 */
-	float norm = mkt_l2_norm(v, 2);
+	float norm = vs_l2_norm(v, 2);
 	ASSERT_FLOAT_EQ(5.0f, norm, 1e-5f, "norm of [3,4]");
 }
 
 TEST(l2_norm_unit_vector)
 {
 	float v[]  = {1.0f, 0.0f, 0.0f};
-	float norm = mkt_l2_norm(v, 3);
+	float norm = vs_l2_norm(v, 3);
 	ASSERT_FLOAT_EQ(1.0f, norm, 1e-5f, "norm of unit vector");
 }
 
 TEST(l2_norm_zero_vector)
 {
 	float v[]  = {0.0f, 0.0f, 0.0f};
-	float norm = mkt_l2_norm(v, 3);
+	float norm = vs_l2_norm(v, 3);
 	ASSERT_FLOAT_EQ(0.0f, norm, 1e-5f, "norm of zero vector");
 }
 
@@ -263,7 +263,7 @@ TEST(l2_distance_squared_basic)
 	float b[] = {0.0f, 1.0f};
 
 	/* (1-0)^2 + (0-1)^2 = 2 */
-	float dist = mkt_l2_distance_squared(a, b, 2);
+	float dist = vs_l2_distance_squared(a, b, 2);
 	ASSERT_FLOAT_EQ(2.0f, dist, 1e-5f, "distance squared");
 }
 
@@ -271,7 +271,7 @@ TEST(l2_distance_squared_same)
 {
 	float a[] = {3.0f, 4.0f, 5.0f};
 
-	float dist = mkt_l2_distance_squared(a, a, 3);
+	float dist = vs_l2_distance_squared(a, a, 3);
 	ASSERT_FLOAT_EQ(0.0f, dist, 1e-5f, "self-distance should be 0");
 }
 
@@ -281,7 +281,7 @@ TEST(l2_distance_squared_known)
 	float b[] = {4.0f, 6.0f, 8.0f};
 
 	/* (1-4)^2 + (2-6)^2 + (3-8)^2 = 9 + 16 + 25 = 50 */
-	float dist = mkt_l2_distance_squared(a, b, 3);
+	float dist = vs_l2_distance_squared(a, b, 3);
 	ASSERT_FLOAT_EQ(50.0f, dist, 1e-5f, "known distance squared");
 }
 
@@ -298,30 +298,30 @@ TEST(lazy_init_all_functions)
 	float b[]	= {3.0f, 4.0f};
 	float out[] = {0.0f, 0.0f};
 
-	mkt_vecops_force_reinit();
-	float nsq = mkt_l2_norm_squared(a, 2);
+	vs_vecops_force_reinit();
+	float nsq = vs_l2_norm_squared(a, 2);
 	ASSERT_TRUE(nsq > 0, "l2_norm_squared lazy init");
 
-	mkt_vecops_force_reinit();
+	vs_vecops_force_reinit();
 	float sum = vec32_sum(a, 2);
 	ASSERT_FLOAT_EQ(3.0f, sum, 1e-5f, "vector_sum lazy init");
 
-	mkt_vecops_force_reinit();
+	vs_vecops_force_reinit();
 	vec32_sub(a, b, out, 2);
 	ASSERT_FLOAT_EQ(-2.0f, out[0], 1e-5f, "vector_sub lazy init");
 
-	mkt_vecops_force_reinit();
+	vs_vecops_force_reinit();
 	vec32_add(a, b, out, 2);
 	ASSERT_FLOAT_EQ(4.0f, out[0], 1e-5f, "vector_add lazy init");
 
-	mkt_vecops_force_reinit();
+	vs_vecops_force_reinit();
 	vec32_scale(a, 2.0f, out, 2);
 	ASSERT_FLOAT_EQ(2.0f, out[0], 1e-5f, "vector_scale lazy init");
 
-	mkt_vecops_force_reinit();
-	float dist = mkt_l2_distance_squared(a, b, 2);
+	vs_vecops_force_reinit();
+	float dist = vs_l2_distance_squared(a, b, 2);
 	ASSERT_TRUE(dist > 0, "l2_distance_squared lazy init");
 
 	/* Restore */
-	mkt_vecops_init();
+	vs_vecops_init();
 }

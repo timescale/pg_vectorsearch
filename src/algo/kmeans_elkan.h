@@ -14,8 +14,8 @@
  * k-Means", ICML 2003.
  */
 
-#ifndef MKT_KMEANS_ELKAN_H
-#define MKT_KMEANS_ELKAN_H
+#ifndef VS_KMEANS_ELKAN_H
+#define VS_KMEANS_ELKAN_H
 
 #include <stdint.h>
 
@@ -59,4 +59,4 @@ void elkan_assign(KMeansState *st, ElkanState *es);
 void elkan_update_bounds(
 		KMeansState *st, ElkanState *es, const float *old_centroids);
 
-#endif /* MKT_KMEANS_ELKAN_H */
+#endif /* VS_KMEANS_ELKAN_H */

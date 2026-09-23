@@ -19,10 +19,10 @@
 #include "index/index_build.h"
 #include "index/posting_page.h"
 #include "index/posting_split.h"
-#include "mkt_test.h"
 #include "quant/rabitq.h"
 #include "standalone/index.h"
 #include "standalone/query.h"
+#include "vs_test.h"
 
 TEST_GROUP(PostingSplit);
 TEST_MEMCTX_FIXTURE();
@@ -39,7 +39,7 @@ static float *
 make_two_blobs(uint32_t nvecs, uint32_t dim, uint32_t seed)
 {
 	srand(seed);
-	float *data = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float *data = vs_alloc((size_t)nvecs * dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
 		float center = (i < nvecs / 2) ? 0.0f : 8.0f;
@@ -57,7 +57,7 @@ static float *
 make_three_blobs(uint32_t nvecs, uint32_t dim, uint32_t seed)
 {
 	srand(seed);
-	float *data = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float *data = vs_alloc((size_t)nvecs * dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
 		float center = (float)((i / (nvecs / 3 + 1)) * 8);
@@ -87,14 +87,14 @@ build_paged_with(
 	PrismIndexConfig config = {
 			.nlist		   = nlist,
 			.metric		   = metric,
-			.centroid_fmt  = MKT_CENTROID_FMT_RABITQ,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
 			.encode_rabitq = true,
 			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
 			.fastscan	   = fastscan,
 			.nworkers	   = 0,
 	};
-	MktArraySource src;
-	mkt_array_source_init(&src, vecs, nvecs, dim);
+	VsArraySource src;
+	vs_array_source_init(&src, vecs, nvecs, dim);
 	return prism_index_build(&src.base, &config, NULL);
 }
 
@@ -157,10 +157,10 @@ fetch_vec(void *ctx, ItemPointerData tid, float *out, Dimension dim)
 static bool
 head_is_fastscan(PrismIndexBase *base, BlockNumber blk)
 {
-	Page p	= mkt_storage_read_page(base->posting_storage, blk);
+	Page p	= vs_storage_read_page(base->posting_storage, blk);
 	bool fs = (prism_posting_opaque(p)->flags & PRISM_POSTING_PAGE_FASTSCAN) !=
 			  0;
-	mkt_storage_release_page(base->posting_storage, blk);
+	vs_storage_release_page(base->posting_storage, blk);
 	return fs;
 }
 
@@ -172,9 +172,9 @@ centroid_page_count(PrismIndexBase *base)
 	BlockNumber blk = base->first_centroid;
 	while (blk != InvalidBlockNumber && n <= 1024)
 	{
-		Page		p	 = mkt_storage_read_page(base->centroid_storage, blk);
+		Page		p	 = vs_storage_read_page(base->centroid_storage, blk);
 		BlockNumber next = PRISM_CENTROID_OPAQUE(p)->next_blkno;
-		mkt_storage_release_page(base->centroid_storage, blk);
+		vs_storage_release_page(base->centroid_storage, blk);
 		blk = next;
 		n++;
 	}
@@ -195,7 +195,7 @@ count_leaf_entries(PrismIndexBase *base, uint32_t *total, uint32_t *fillers)
 
 	while (blk != InvalidBlockNumber)
 	{
-		Page p = mkt_storage_read_page(base->centroid_storage, blk);
+		Page p = vs_storage_read_page(base->centroid_storage, blk);
 		PrismCentroidPageOpaque *op	  = PRISM_CENTROID_OPAQUE(p);
 		uint32_t				 n	  = op->entry_count;
 		BlockNumber				 next = op->next_blkno;
@@ -210,7 +210,7 @@ count_leaf_entries(PrismIndexBase *base, uint32_t *total, uint32_t *fillers)
 			if (m->child_blkno == InvalidBlockNumber)
 				(*fillers)++;
 		}
-		mkt_storage_release_page(base->centroid_storage, blk);
+		vs_storage_release_page(base->centroid_storage, blk);
 		blk = next;
 	}
 }
@@ -224,7 +224,7 @@ brute_force_knn(
 		uint32_t	 k,
 		uint32_t	*ids)
 {
-	float *dists = mkt_alloc(nvecs * sizeof(float));
+	float *dists = vs_alloc(nvecs * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
 		float d = 0;
@@ -244,7 +244,7 @@ brute_force_knn(
 		ids[i]		= best;
 		dists[best] = INFINITY;
 	}
-	mkt_free(dists);
+	vs_free(dists);
 }
 
 static double
@@ -267,7 +267,7 @@ measure_recall(
 	{
 		const float *query = vecs + (size_t)(i * stride) * dim;
 		uint32_t	 c	   = prism_query_exec(
-				q, query, k, nprobe, MKT_DISTANCE_MODE_ASYMMETRIC, true, res);
+				q, query, k, nprobe, VS_DISTANCE_MODE_ASYMMETRIC, true, res);
 		brute_force_knn(vecs, nvecs, dim, query, k, gt);
 		for (uint32_t a = 0; a < c; a++)
 			for (uint32_t g = 0; g < k; g++)
@@ -313,7 +313,7 @@ TEST(split_preserves_entries_and_structure)
 static int split_retire_calls = 0;
 
 static void
-test_retire_chain(void *ctx, MktStorage *storage, BlockNumber head)
+test_retire_chain(void *ctx, VsStorage *storage, BlockNumber head)
 {
 	(void)ctx;
 	split_retire_calls++;
@@ -409,7 +409,7 @@ TEST(split_keeps_vectors_retrievable)
 				 vecs + (size_t)vid * dim,
 				 1,
 				 2,
-				 MKT_DISTANCE_MODE_ASYMMETRIC,
+				 VS_DISTANCE_MODE_ASYMMETRIC,
 				 true,
 				 &res_id);
 		checked++;
@@ -456,7 +456,7 @@ TEST(split_fastscan_posting)
 				 vecs + (size_t)vid * dim,
 				 1,
 				 2,
-				 MKT_DISTANCE_MODE_ASYMMETRIC,
+				 VS_DISTANCE_MODE_ASYMMETRIC,
 				 true,
 				 &res_id);
 		checked++;
@@ -496,7 +496,7 @@ TEST(split_handles_degenerate_data)
 	 * crash and must preserve every entry regardless of how 2-means breaks the
 	 * tie. */
 	uint32_t dim = 16, n = 300;
-	float	*vecs = mkt_alloc((size_t)n * dim * sizeof(float));
+	float	*vecs = vs_alloc((size_t)n * dim * sizeof(float));
 	for (uint32_t i = 0; i < n; i++)
 		for (uint32_t j = 0; j < dim; j++)
 			vecs[(size_t)i * dim + j] = 1.5f;
@@ -588,7 +588,7 @@ TEST(split_routing_nprobe_below_k)
 				 vecs + (size_t)vid * dim,
 				 1,
 				 1,
-				 MKT_DISTANCE_MODE_ASYMMETRIC,
+				 VS_DISTANCE_MODE_ASYMMETRIC,
 				 true,
 				 &res_id);
 		checked++;
@@ -618,8 +618,8 @@ TEST(split_routing_nprobe_below_k)
 static uint32_t
 fill_centroid_page(PrismIndexBase *base, Dimension dim)
 {
-	void *rd = mkt_alloc0(MKT_RABITQ_DATA_SIZE(dim));
-	Page  p	 = mkt_storage_write_page(
+	void *rd = vs_alloc0(VS_RABITQ_DATA_SIZE(dim));
+	Page  p	 = vs_storage_write_page(
 			  base->centroid_storage, base->first_centroid);
 	uint32_t added = 0;
 	/* child_blkno is an invalid, never-followed leaf: the split only touches
@@ -628,8 +628,8 @@ fill_centroid_page(PrismIndexBase *base, Dimension dim)
 	while (prism_centroid_page_add_entry(
 			p, dim, InvalidBlockNumber, 0, PRISM_CENTROID_FLAG_LEAF, rd))
 		added++;
-	mkt_storage_commit_page(base->centroid_storage, base->first_centroid);
-	mkt_free(rd);
+	vs_storage_commit_page(base->centroid_storage, base->first_centroid);
+	vs_free(rd);
 	return added;
 }
 
@@ -887,7 +887,7 @@ make_blob_with_outliers(
 		uint32_t nvecs, uint32_t dim, uint32_t nout, uint32_t seed)
 {
 	srand(seed);
-	float *data = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float *data = vs_alloc((size_t)nvecs * dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
 		for (uint32_t j = 0; j < dim; j++)
 			data[(size_t)i * dim + j] = (float)(rand() % 2000 - 1000) /
@@ -1066,7 +1066,7 @@ count_unreachable(PrismIndexBase *base, BlockNumber head, Dimension dim)
 TEST(split_keeps_zero_vectors_unreachable)
 {
 	uint32_t dim = 8, nreal = 400, nzero = 40, n = nreal + nzero;
-	float	*vecs = mkt_alloc((size_t)n * dim * sizeof(float));
+	float	*vecs = vs_alloc((size_t)n * dim * sizeof(float));
 
 	/* Distinct directions, so cosine distances are well separated. */
 	srand(5);
@@ -1183,7 +1183,7 @@ TEST(split_samples_within_a_budget)
 				 vecs + (size_t)vid * dim,
 				 1,
 				 PRISM_SPLIT_MAX_PARTS,
-				 MKT_DISTANCE_MODE_ASYMMETRIC,
+				 VS_DISTANCE_MODE_ASYMMETRIC,
 				 true,
 				 out);
 		checked++;
@@ -1216,14 +1216,14 @@ measure_split_bytes(uint32_t n, uint32_t dim, uint64_t budget, uint32_t target)
 	};
 	PrismSplitResult res;
 
-	MktMemCtx ctx = mkt_memctx_create(mkt_memctx_current(), "split-measure");
-	MktMemCtx old = mkt_memctx_switch(ctx);
-	int		  rc  = prism_posting_split(
-			   &idx->base, idx->first_posting, &cfg, &env, &res);
-	mkt_memctx_switch(old);
+	VsMemCtx ctx = vs_memctx_create(vs_memctx_current(), "split-measure");
+	VsMemCtx old = vs_memctx_switch(ctx);
+	int		 rc	 = prism_posting_split(
+			  &idx->base, idx->first_posting, &cfg, &env, &res);
+	vs_memctx_switch(old);
 
-	size_t bytes = mkt_memctx_total_allocated(ctx);
-	mkt_memctx_delete(ctx);
+	size_t bytes = vs_memctx_total_allocated(ctx);
+	vs_memctx_delete(ctx);
 	prism_index_destroy(idx);
 
 	return (rc == 0 && res.did_split) ? bytes : 0;
@@ -1263,7 +1263,7 @@ TEST(split_memory_is_bounded_by_budget)
 			big_bytes < small_bytes + held / 2,
 			"a ten-times longer list does not cost the list's vectors");
 
-	mkt_free(NULL);
+	vs_free(NULL);
 }
 
 /*

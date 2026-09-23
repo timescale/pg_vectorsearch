@@ -8,7 +8,7 @@
  * - SIMD dispatch (AVX-512 > AVX2 > scalar)
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <limits.h>
 #include <math.h>
@@ -78,8 +78,8 @@ fastscan_build_lut_scalar(
 		float		*delta_out,
 		float		*bias_out)
 {
-	uint32_t nsq	   = MKT_FASTSCAN_NSQ(dim);
-	uint32_t nsq_pairs = MKT_FASTSCAN_NSQ_PAIRS(dim);
+	uint32_t nsq	   = VS_FASTSCAN_NSQ(dim);
+	uint32_t nsq_pairs = VS_FASTSCAN_NSQ_PAIRS(dim);
 
 	/* Compute global min/max analytically from transformed values.
 	 * Min LUT entry per sq = min(0, sum of negative values).
@@ -96,8 +96,8 @@ fastscan_build_lut_scalar(
 	}
 
 	float range = global_max - global_min;
-	if (range < MKT_FASTSCAN_MIN_RANGE)
-		range = MKT_FASTSCAN_MIN_RANGE;
+	if (range < VS_FASTSCAN_MIN_RANGE)
+		range = VS_FASTSCAN_MIN_RANGE;
 
 	float delta		= range / (float)UINT8_MAX;
 	float inv_delta = 1.0f / delta;
@@ -169,7 +169,7 @@ fastscan_build_lut_hacc_scalar(
 		float		*delta_out,
 		float		*bias_out)
 {
-	uint32_t nsq = MKT_FASTSCAN_NSQ(dim);
+	uint32_t nsq = VS_FASTSCAN_NSQ(dim);
 
 	/* Same min/max as uint8 version */
 	float global_min = 0.0f;
@@ -183,8 +183,8 @@ fastscan_build_lut_hacc_scalar(
 	}
 
 	float range = global_max - global_min;
-	if (range < MKT_FASTSCAN_MIN_RANGE)
-		range = MKT_FASTSCAN_MIN_RANGE;
+	if (range < VS_FASTSCAN_MIN_RANGE)
+		range = VS_FASTSCAN_MIN_RANGE;
 
 	float delta		= range / (float)UINT16_MAX;
 	float inv_delta = 1.0f / delta;
@@ -196,7 +196,7 @@ fastscan_build_lut_hacc_scalar(
 	/* Build uint16 LUT entries, then split into lo/hi byte tables.
 	 * Layout: for each group of 4 sq (matching 64B code blocks),
 	 * [lo_table_64B, hi_table_64B]. */
-	uint32_t lut_bytes = MKT_FASTSCAN_LUT_HACC_BYTES(dim);
+	uint32_t lut_bytes = VS_FASTSCAN_LUT_HACC_BYTES(dim);
 	memset(lut_out, 0, lut_bytes);
 
 	const float *q = transformed;
@@ -270,10 +270,10 @@ fastscan_accumulate_hacc_scalar(
 		int32_t		  *accum,
 		Dimension	   dim)
 {
-	uint32_t code_length = MKT_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t code_length = VS_FASTSCAN_GROUP_BYTES(dim);
 
-	int32_t lo_accum[MKT_FASTSCAN_GROUP] = {0};
-	int32_t hi_accum[MKT_FASTSCAN_GROUP] = {0};
+	int32_t lo_accum[VS_FASTSCAN_GROUP] = {0};
+	int32_t hi_accum[VS_FASTSCAN_GROUP] = {0};
 
 	for (uint32_t i = 0; i < code_length; i += 16)
 	{
@@ -300,7 +300,7 @@ fastscan_accumulate_hacc_scalar(
 		}
 	}
 
-	for (uint32_t v = 0; v < MKT_FASTSCAN_GROUP; v++)
+	for (uint32_t v = 0; v < VS_FASTSCAN_GROUP; v++)
 		accum[v] = lo_accum[v] + (hi_accum[v] << 8);
 }
 
@@ -322,26 +322,26 @@ fastscan_accumulate_hacc_scalar(
  * ---------------------------------------------------------------- */
 
 uint32_t
-mkt_fastscan_pack_codes(
+vs_fastscan_pack_codes(
 		const uint8_t *bits_1bit,
 		uint32_t	   count,
 		Dimension	   dim,
 		uint8_t		  *codes_out)
 {
 	uint32_t packed_bytes = (dim + 7) / 8;
-	uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) / MKT_FASTSCAN_GROUP;
+	uint32_t ngroups = (count + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
 
-	memset(codes_out, 0, (size_t)ngroups * MKT_FASTSCAN_GROUP_BYTES(dim));
+	memset(codes_out, 0, (size_t)ngroups * VS_FASTSCAN_GROUP_BYTES(dim));
 
 	for (uint32_t g = 0; g < ngroups; g++)
 	{
-		uint32_t g_start = g * MKT_FASTSCAN_GROUP;
+		uint32_t g_start = g * VS_FASTSCAN_GROUP;
 
 		for (uint32_t col = 0; col < packed_bytes; col++)
 		{
 			/* Collect one byte (8 dims) from each of 32 vectors */
-			uint8_t raw[MKT_FASTSCAN_GROUP];
-			for (uint32_t v = 0; v < MKT_FASTSCAN_GROUP; v++)
+			uint8_t raw[VS_FASTSCAN_GROUP];
+			for (uint32_t v = 0; v < VS_FASTSCAN_GROUP; v++)
 			{
 				uint32_t vi = g_start + v;
 				raw[v]		= (vi < count)
@@ -350,9 +350,9 @@ mkt_fastscan_pack_codes(
 			}
 
 			/* Split into upper and lower nibbles */
-			uint8_t upper[MKT_FASTSCAN_GROUP]; /* dims 4-7 = sq1 */
-			uint8_t lower[MKT_FASTSCAN_GROUP]; /* dims 0-3 = sq0 */
-			for (uint32_t v = 0; v < MKT_FASTSCAN_GROUP; v++)
+			uint8_t upper[VS_FASTSCAN_GROUP]; /* dims 4-7 = sq1 */
+			uint8_t lower[VS_FASTSCAN_GROUP]; /* dims 0-3 = sq0 */
+			for (uint32_t v = 0; v < VS_FASTSCAN_GROUP; v++)
 			{
 				upper[v] = raw[v] >> 4;
 				lower[v] = raw[v] & 0x0F;
@@ -361,8 +361,8 @@ mkt_fastscan_pack_codes(
 			/* Pack with kPerm0 interleaving.
 			 * Lower nibble sq first (to match sequential LUT). */
 			uint8_t *out = codes_out +
-						   (size_t)g * MKT_FASTSCAN_GROUP_BYTES(dim) +
-						   (size_t)col * MKT_FASTSCAN_GROUP;
+						   (size_t)g * VS_FASTSCAN_GROUP_BYTES(dim) +
+						   (size_t)col * VS_FASTSCAN_GROUP;
 
 			for (uint32_t j = 0; j < 16; j++)
 			{
@@ -376,32 +376,32 @@ mkt_fastscan_pack_codes(
 }
 
 /*
- * Inverse of mkt_fastscan_pack_codes: reconstruct the per-vector 1-bit
+ * Inverse of vs_fastscan_pack_codes: reconstruct the per-vector 1-bit
  * RaBitQ codes from the packed fastscan layout. Used when merging a
  * fastscan posting page back into a builder (the parallel build folds
  * workers' trailing partial pages into the head). bits_out must hold
  * count * packed_bytes bytes.
  */
 void
-mkt_fastscan_unpack_codes(
+vs_fastscan_unpack_codes(
 		const uint8_t *codes, uint32_t count, Dimension dim, uint8_t *bits_out)
 {
 	uint32_t packed_bytes = (dim + 7) / 8;
-	uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) / MKT_FASTSCAN_GROUP;
+	uint32_t ngroups = (count + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
 
 	for (uint32_t g = 0; g < ngroups; g++)
 	{
-		uint32_t g_start = g * MKT_FASTSCAN_GROUP;
+		uint32_t g_start = g * VS_FASTSCAN_GROUP;
 
 		for (uint32_t col = 0; col < packed_bytes; col++)
 		{
 			const uint8_t *in = codes +
-								(size_t)g * MKT_FASTSCAN_GROUP_BYTES(dim) +
-								(size_t)col * MKT_FASTSCAN_GROUP;
+								(size_t)g * VS_FASTSCAN_GROUP_BYTES(dim) +
+								(size_t)col * VS_FASTSCAN_GROUP;
 
 			/* Undo the kPerm0 nibble interleaving (inverse of the pack). */
-			uint8_t lower[MKT_FASTSCAN_GROUP];
-			uint8_t upper[MKT_FASTSCAN_GROUP];
+			uint8_t lower[VS_FASTSCAN_GROUP];
+			uint8_t upper[VS_FASTSCAN_GROUP];
 			for (uint32_t j = 0; j < 16; j++)
 			{
 				lower[kPerm0[j]]	  = in[j] & 0x0F;
@@ -410,7 +410,7 @@ mkt_fastscan_unpack_codes(
 				upper[kPerm0[j] + 16] = in[j + 16] >> 4;
 			}
 
-			for (uint32_t v = 0; v < MKT_FASTSCAN_GROUP; v++)
+			for (uint32_t v = 0; v < VS_FASTSCAN_GROUP; v++)
 			{
 				uint32_t vi = g_start + v;
 				if (vi < count)
@@ -435,9 +435,9 @@ fastscan_accumulate_scalar(
 		uint16_t	  *accum,
 		Dimension	   dim)
 {
-	uint32_t code_length = MKT_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t code_length = VS_FASTSCAN_GROUP_BYTES(dim);
 
-	memset(accum, 0, MKT_FASTSCAN_GROUP * sizeof(uint16_t));
+	memset(accum, 0, VS_FASTSCAN_GROUP * sizeof(uint16_t));
 
 	/* Process 64 bytes per iteration: 4 sq blocks of 16 bytes each.
 	 * Each 16-byte block has codes for one sq, with kPerm0
@@ -465,57 +465,57 @@ fastscan_accumulate_scalar(
  * SIMD dispatch
  * ---------------------------------------------------------------- */
 
-typedef void (*MktFastscanAccumulateFn)(
+typedef void (*VsFastscanAccumulateFn)(
 		const uint8_t *, const uint8_t *, uint16_t *, Dimension);
 
-typedef void (*MktFastscanBuildLutFn)(
+typedef void (*VsFastscanBuildLutFn)(
 		const float *, Dimension, uint8_t *, float *, float *);
 
-static MktFastscanAccumulateFn	   g_fastscan_accumulate_fn		 = NULL;
-static MktFastscanAccumulateHaccFn g_fastscan_accumulate_hacc_fn = NULL;
-static MktFastscanBuildLutFn	   g_fastscan_build_lut_fn		 = NULL;
-static MktFastscanBuildLutFn	   g_fastscan_build_lut_hacc_fn	 = NULL;
-static atomic_bool				   g_fastscan_initialized		 = false;
+static VsFastscanAccumulateFn	  g_fastscan_accumulate_fn		= NULL;
+static VsFastscanAccumulateHaccFn g_fastscan_accumulate_hacc_fn = NULL;
+static VsFastscanBuildLutFn		  g_fastscan_build_lut_fn		= NULL;
+static VsFastscanBuildLutFn		  g_fastscan_build_lut_hacc_fn	= NULL;
+static atomic_bool				  g_fastscan_initialized		= false;
 
 void
-mkt_fastscan_reset_simd(void)
+vs_fastscan_reset_simd(void)
 {
 	atomic_store(&g_fastscan_initialized, false);
 }
 
 void
-mkt_fastscan_init_simd(void)
+vs_fastscan_init_simd(void)
 {
 	if (atomic_load(&g_fastscan_initialized))
 		return;
 
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 #if defined(__x86_64__) || defined(_M_X64)
-	SimdCapability caps = mkt_detect_simd();
-	if ((caps & MKT_SIMD_AVX512_BW) == MKT_SIMD_AVX512_BW)
+	SimdCapability caps = vs_detect_simd();
+	if ((caps & VS_SIMD_AVX512_BW) == VS_SIMD_AVX512_BW)
 	{
-		g_fastscan_accumulate_fn	  = mkt_fastscan_accumulate_avx512;
-		g_fastscan_accumulate_hacc_fn = mkt_fastscan_accumulate_hacc_avx512;
-		g_fastscan_build_lut_fn		  = mkt_fastscan_build_lut_avx512;
-		g_fastscan_build_lut_hacc_fn  = mkt_fastscan_build_lut_hacc_avx512;
+		g_fastscan_accumulate_fn	  = vs_fastscan_accumulate_avx512;
+		g_fastscan_accumulate_hacc_fn = vs_fastscan_accumulate_hacc_avx512;
+		g_fastscan_build_lut_fn		  = vs_fastscan_build_lut_avx512;
+		g_fastscan_build_lut_hacc_fn  = vs_fastscan_build_lut_hacc_avx512;
 		atomic_store(&g_fastscan_initialized, true);
 		return;
 	}
 	if (caps & SIMD_AVX2)
 	{
-		g_fastscan_accumulate_fn	  = mkt_fastscan_accumulate_avx2;
-		g_fastscan_accumulate_hacc_fn = mkt_fastscan_accumulate_hacc_avx2;
+		g_fastscan_accumulate_fn	  = vs_fastscan_accumulate_avx2;
+		g_fastscan_accumulate_hacc_fn = vs_fastscan_accumulate_hacc_avx2;
 		g_fastscan_build_lut_fn		  = fastscan_build_lut_scalar;
 		g_fastscan_build_lut_hacc_fn  = fastscan_build_lut_hacc_scalar;
 		atomic_store(&g_fastscan_initialized, true);
 		return;
 	}
 #elif defined(__aarch64__) || defined(_M_ARM64)
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 	if (caps & SIMD_NEON)
 	{
-		g_fastscan_accumulate_fn	  = mkt_fastscan_accumulate_neon;
-		g_fastscan_accumulate_hacc_fn = mkt_fastscan_accumulate_hacc_neon;
+		g_fastscan_accumulate_fn	  = vs_fastscan_accumulate_neon;
+		g_fastscan_accumulate_hacc_fn = vs_fastscan_accumulate_hacc_neon;
 		g_fastscan_build_lut_fn		  = fastscan_build_lut_scalar;
 		g_fastscan_build_lut_hacc_fn  = fastscan_build_lut_hacc_scalar;
 		atomic_store(&g_fastscan_initialized, true);
@@ -532,78 +532,78 @@ mkt_fastscan_init_simd(void)
 }
 
 void
-mkt_fastscan_build_lut(
+vs_fastscan_build_lut(
 		const float *transformed,
 		Dimension	 dim,
 		uint8_t		*lut_out,
 		float		*delta_out,
 		float		*bias_out)
 {
-	if (mkt_unlikely(!atomic_load(&g_fastscan_initialized)))
-		mkt_fastscan_init_simd();
+	if (vs_unlikely(!atomic_load(&g_fastscan_initialized)))
+		vs_fastscan_init_simd();
 	g_fastscan_build_lut_fn(transformed, dim, lut_out, delta_out, bias_out);
 }
 
 void
-mkt_fastscan_build_lut_hacc(
+vs_fastscan_build_lut_hacc(
 		const float *transformed,
 		Dimension	 dim,
 		uint8_t		*lut_out,
 		float		*delta_out,
 		float		*bias_out)
 {
-	if (mkt_unlikely(!atomic_load(&g_fastscan_initialized)))
-		mkt_fastscan_init_simd();
+	if (vs_unlikely(!atomic_load(&g_fastscan_initialized)))
+		vs_fastscan_init_simd();
 	g_fastscan_build_lut_hacc_fn(
 			transformed, dim, lut_out, delta_out, bias_out);
 }
 
 void
-mkt_fastscan_accumulate(
+vs_fastscan_accumulate(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		uint16_t	  *accum,
 		Dimension	   dim)
 {
-	if (mkt_unlikely(!atomic_load(&g_fastscan_initialized)))
-		mkt_fastscan_init_simd();
+	if (vs_unlikely(!atomic_load(&g_fastscan_initialized)))
+		vs_fastscan_init_simd();
 	g_fastscan_accumulate_fn(codes, lut, accum, dim);
 }
 
-MktFastscanAccumulateHaccFn
-mkt_fastscan_get_accumulate_hacc(void)
+VsFastscanAccumulateHaccFn
+vs_fastscan_get_accumulate_hacc(void)
 {
-	if (mkt_unlikely(!atomic_load(&g_fastscan_initialized)))
-		mkt_fastscan_init_simd();
+	if (vs_unlikely(!atomic_load(&g_fastscan_initialized)))
+		vs_fastscan_init_simd();
 	return g_fastscan_accumulate_hacc_fn;
 }
 
 void
-mkt_fastscan_accumulate_hacc(
+vs_fastscan_accumulate_hacc(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		int32_t		  *accum,
 		Dimension	   dim)
 {
-	if (mkt_unlikely(!atomic_load(&g_fastscan_initialized)))
-		mkt_fastscan_init_simd();
+	if (vs_unlikely(!atomic_load(&g_fastscan_initialized)))
+		vs_fastscan_init_simd();
 	g_fastscan_accumulate_hacc_fn(codes, lut, accum, dim);
 }
 
 const char *
-mkt_fastscan_impl_name(void)
+vs_fastscan_impl_name(void)
 {
 	if (!atomic_load(&g_fastscan_initialized))
-		mkt_fastscan_init_simd();
+		vs_fastscan_init_simd();
 
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 #if defined(__x86_64__) || defined(_M_X64)
-	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_avx512)
+	if (g_fastscan_accumulate_fn == vs_fastscan_accumulate_avx512)
 		return "avx512";
-	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_avx2)
+	if (g_fastscan_accumulate_fn == vs_fastscan_accumulate_avx2)
 		return "avx2";
 #elif defined(__aarch64__) || defined(_M_ARM64)
-	if (g_fastscan_accumulate_fn == mkt_fastscan_accumulate_neon)
+	if (g_fastscan_accumulate_fn == vs_fastscan_accumulate_neon)
 		return "neon";
 #endif
 #endif
@@ -616,7 +616,7 @@ mkt_fastscan_impl_name(void)
  * ---------------------------------------------------------------- */
 
 void
-mkt_fastscan_distance_batch(
+vs_fastscan_distance_batch(
 		const RaBitQQueryState *qstate,
 		const float			   *f_add,
 		const float			   *f_rescale,
@@ -633,10 +633,10 @@ mkt_fastscan_distance_batch(
 
 	/* Build LUT from transformed query */
 	float lut_delta, lut_bias;
-	mkt_fastscan_build_lut(
+	vs_fastscan_build_lut(
 			qstate->transformed, dim, lut_buf, &lut_delta, &lut_bias);
 
-	uint32_t group_bytes = MKT_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t group_bytes = VS_FASTSCAN_GROUP_BYTES(dim);
 	float	 g_add		 = qstate->g_add;
 	float	 sum_t		 = qstate->sum_transformed;
 	float	 inv_sqrt_d	 = qstate->inv_sqrt_d;
@@ -644,12 +644,12 @@ mkt_fastscan_distance_batch(
 	for (uint32_t g = 0; g < ngroups; g++)
 	{
 		const uint8_t *group_codes = codes + (size_t)g * group_bytes;
-		uint32_t	   g_start	   = g * MKT_FASTSCAN_GROUP;
-		uint32_t	   g_count	   = (g_start + MKT_FASTSCAN_GROUP <= count)
-										   ? MKT_FASTSCAN_GROUP
+		uint32_t	   g_start	   = g * VS_FASTSCAN_GROUP;
+		uint32_t	   g_count	   = (g_start + VS_FASTSCAN_GROUP <= count)
+										   ? VS_FASTSCAN_GROUP
 										   : count - g_start;
 
-		mkt_fastscan_accumulate(group_codes, lut_buf, accum_buf, dim);
+		vs_fastscan_accumulate(group_codes, lut_buf, accum_buf, dim);
 
 		for (uint32_t v = 0; v < g_count; v++)
 		{

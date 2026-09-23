@@ -1,5 +1,5 @@
 /*
- * page_storage.h - Array-backed MktStorage for unit tests
+ * page_storage.h - Array-backed VsStorage for unit tests
  *
  * What lets the paged code be exercised without PostgreSQL: pages are plain
  * memory, and commit/release are no-ops because nothing here is logged or
@@ -7,8 +7,8 @@
  * instead of being copied per file.
  */
 
-#ifndef MKT_TEST_PAGE_STORAGE_H
-#define MKT_TEST_PAGE_STORAGE_H
+#ifndef VS_TEST_PAGE_STORAGE_H
+#define VS_TEST_PAGE_STORAGE_H
 
 #include "core/memory.h"
 #include "index/storage.h"
@@ -16,35 +16,35 @@
 
 typedef struct TestPageStorage
 {
-	MktStorage base;
-	char	  *pages;
-	uint32_t   next_blkno;
-	uint32_t   page_cap;
+	VsStorage base;
+	char	 *pages;
+	uint32_t  next_blkno;
+	uint32_t  page_cap;
 } TestPageStorage;
 
 static inline Page
-test_read_page(MktStorage *self, BlockNumber blkno)
+test_read_page(VsStorage *self, BlockNumber blkno)
 {
 	TestPageStorage *s = (TestPageStorage *)self;
 	return s->pages + (size_t)blkno * BLCKSZ;
 }
 
 static inline void
-test_release_page(MktStorage *self, BlockNumber blkno)
+test_release_page(VsStorage *self, BlockNumber blkno)
 {
 	(void)self;
 	(void)blkno;
 }
 
 static inline Page
-test_write_page(MktStorage *self, BlockNumber blkno)
+test_write_page(VsStorage *self, BlockNumber blkno)
 {
 	TestPageStorage *s = (TestPageStorage *)self;
 	return s->pages + (size_t)blkno * BLCKSZ;
 }
 
 static inline Page
-test_new_page(MktStorage *self, BlockNumber *blkno_out)
+test_new_page(VsStorage *self, BlockNumber *blkno_out)
 {
 	TestPageStorage *s = (TestPageStorage *)self;
 	*blkno_out		   = s->next_blkno++;
@@ -52,13 +52,13 @@ test_new_page(MktStorage *self, BlockNumber *blkno_out)
 }
 
 static inline void
-test_commit_page(MktStorage *self, BlockNumber blkno)
+test_commit_page(VsStorage *self, BlockNumber blkno)
 {
 	(void)self;
 	(void)blkno;
 }
 
-static const MktStorageOps test_storage_ops = {
+static const VsStorageOps test_storage_ops = {
 		.read_page	  = test_read_page,
 		.release_page = test_release_page,
 		.write_page	  = test_write_page,
@@ -73,7 +73,7 @@ test_storage_init(TestPageStorage *s, uint32_t page_cap, uint32_t next_blkno)
 {
 	*s = (TestPageStorage){
 			.base		= {.ops = &test_storage_ops},
-			.pages		= mkt_alloc0((size_t)page_cap * BLCKSZ),
+			.pages		= vs_alloc0((size_t)page_cap * BLCKSZ),
 			.next_blkno = next_blkno,
 			.page_cap	= page_cap,
 	};
@@ -87,4 +87,4 @@ make_test_storage(uint32_t num_pages)
 	return s;
 }
 
-#endif /* MKT_TEST_PAGE_STORAGE_H */
+#endif /* VS_TEST_PAGE_STORAGE_H */

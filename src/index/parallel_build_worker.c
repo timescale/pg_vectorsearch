@@ -15,7 +15,7 @@
  *     into the cluster-keyed shared sort.
  */
 
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 #include "standalone/parallel_ctx.h" /* ParallelWorkerNumber */
 #include "standalone/pg_compat.h"
 #else
@@ -92,7 +92,7 @@ prism_sample_cb(void *state, ItemPointerData tid, const float *vec)
 	 * into the sample slot, normalizing and copying in one pass. */
 	if (sc->metric == DISTANCE_COSINE)
 	{
-		float norm_sq = mkt_l2_norm_squared(vec, dim);
+		float norm_sq = vs_l2_norm_squared(vec, dim);
 
 		if (norm_sq == 0.0f)
 			return;
@@ -168,7 +168,7 @@ prism_build_child_subtree(
 	 * over the assignments instead of one per child). */
 	uint32_t cc = child_count;
 
-	KMeansOptions opts	   = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts	   = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.max_iterations	   = km_max_iterations;
 	opts.algorithm		   = KMEANS_ALGO_LLOYD;
 	opts.initial_centroids = NULL;
@@ -178,17 +178,17 @@ prism_build_child_subtree(
 	HKMeansResult *sub = NULL;
 	if (cc == 0)
 	{
-		float *seed = mkt_alloc(vec_nbytes);
+		float *seed = vs_alloc(vec_nbytes);
 		memcpy(seed, root_cents + (size_t)child * dim, vec_nbytes);
-		sub = mkt_hkmeans_f32(
+		sub = vs_hkmeans_f32(
 				seed, 1, NULL, dim, nlist_c, fan_out, metric, &opts);
-		mkt_free(seed);
+		vs_free(seed);
 	}
 	else
 	{
 		const float *vbase = prism_dsm_worker_samples(dsm_samples, 0);
 		uint32_t	 mpw   = dsm_samples->max_per_worker;
-		uint32_t	*idx   = mkt_alloc((size_t)cc * sizeof(uint32_t));
+		uint32_t	*idx   = vs_alloc((size_t)cc * sizeof(uint32_t));
 		uint32_t	 g	   = 0;
 		for (int t = 0; t < nparticipants; t++)
 		{
@@ -198,22 +198,22 @@ prism_build_child_subtree(
 				if (ra[i] == child)
 					idx[g++] = (uint32_t)t * mpw + i;
 		}
-		sub = mkt_hkmeans_f32(
+		sub = vs_hkmeans_f32(
 				vbase, cc, idx, dim, nlist_c, fan_out, metric, &opts);
-		mkt_free(idx);
+		vs_free(idx);
 	}
 
 	if (sub != NULL)
 	{
 		if ((uint64_t)sub->total_size > slot_size)
-			mkt_error(
+			vs_error(
 					"prism: subtree blob %u exceeds slot "
 					"(%u > %" PRIu64 ")",
 					child,
 					sub->total_size,
 					slot_size);
 		memcpy(slot, sub, sub->total_size);
-		mkt_free(sub);
+		vs_free(sub);
 	}
 }
 
@@ -263,7 +263,7 @@ prism_pbuild_stream_subtrees(
 	/* One histogram pass over the root assignments feeds every child's
 	 * sample count (prism_build_child_subtree needs it, and counting per
 	 * child would re-scan the assignments km_k times). */
-	uint32_t *child_count = mkt_alloc0((size_t)km_k * sizeof(uint32_t));
+	uint32_t *child_count = vs_alloc0((size_t)km_k * sizeof(uint32_t));
 	prism_pbuild_count_children(
 			dsm_samples, dsm_ra, nparticipants, km_k, child_count);
 
@@ -273,7 +273,7 @@ prism_pbuild_stream_subtrees(
 	 * identical for every participant (same shared assignments) and ties
 	 * break on the child id, so all participants and the leader's blob
 	 * replay derive the same order with no coordination. */
-	uint32_t *order = mkt_alloc((size_t)km_k * sizeof(uint32_t));
+	uint32_t *order = vs_alloc((size_t)km_k * sizeof(uint32_t));
 	for (uint32_t i = 0; i < km_k; i++)
 		order[i] = i;
 	for (uint32_t i = 1; i < km_k; i++)
@@ -332,8 +332,8 @@ prism_pbuild_stream_subtrees(
 		BarrierArriveAndWait(barrier, WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 	}
 
-	mkt_free(order);
-	mkt_free(child_count);
+	vs_free(order);
+	vs_free(child_count);
 }
 
 /* ----------------------------------------------------------------
@@ -460,7 +460,7 @@ prism_pbuild_exec_kmeans(
 
 		if (shared->metric == DISTANCE_L2)
 			for (uint32_t j = 0; j < km_k; j++)
-				norms_c[j] = mkt_l2_norm_squared(cents + (size_t)j * dim, dim);
+				norms_c[j] = vs_l2_norm_squared(cents + (size_t)j * dim, dim);
 	}
 
 	/* Barrier: initial centroids + norms ready; guards the reads below against
@@ -477,7 +477,7 @@ prism_pbuild_exec_kmeans(
 			km_workers_base, km_k, dim, participant_id);
 
 	/* Reduce scratch is leader-only. */
-	float *old_cents = participant_id == 0 ? mkt_alloc(cents_nbytes) : NULL;
+	float *old_cents = participant_id == 0 ? vs_alloc(cents_nbytes) : NULL;
 	Size   km_sz	 = prism_dsm_km_workers_size(nparticipants, km_k, dim);
 
 	uint32_t iters = 0;
@@ -505,11 +505,10 @@ prism_pbuild_exec_kmeans(
 		{
 			memcpy(old_cents, cents, cents_nbytes);
 
-			const float **all_sums = mkt_alloc(
-					nparticipants * sizeof(float *));
-			const uint32_t **all_cnts = mkt_alloc(
+			const float **all_sums = vs_alloc(nparticipants * sizeof(float *));
+			const uint32_t **all_cnts = vs_alloc(
 					nparticipants * sizeof(uint32_t *));
-			float *all_costs = mkt_alloc(nparticipants * sizeof(float));
+			float *all_costs = vs_alloc(nparticipants * sizeof(float));
 			for (int t = 0; t < nparticipants; t++)
 			{
 				all_sums[t] = prism_dsm_km_worker_sums(
@@ -538,9 +537,9 @@ prism_pbuild_exec_kmeans(
 			shared->km_converged = (shift_sq < tol_sq);
 			memset(km_workers_base, 0, km_sz);
 
-			mkt_free(all_sums);
-			mkt_free(all_cnts);
-			mkt_free(all_costs);
+			vs_free(all_sums);
+			vs_free(all_cnts);
+			vs_free(all_costs);
 		}
 
 		/* Barrier: updated centroids + convergence flag visible to all. */
@@ -551,7 +550,7 @@ prism_pbuild_exec_kmeans(
 	}
 
 	if (old_cents != NULL)
-		mkt_free(old_cents);
+		vs_free(old_cents);
 
 	return iters;
 }
@@ -675,7 +674,7 @@ prism_pbuild_exec_refine_paged(
 			.counts		   = counts,
 			.dim		   = dim,
 			.cosine		   = (shared->metric == DISTANCE_COSINE),
-			.scratch	   = mkt_alloc((size_t)dim * sizeof(float)),
+			.scratch	   = vs_alloc((size_t)dim * sizeof(float)),
 	};
 
 	/* Single pass: routing reads only the centroid pages, which refine
@@ -736,7 +735,7 @@ prism_pbuild_exec_refine_paged(
 		}
 	}
 
-	mkt_free(rs.scratch);
+	vs_free(rs.scratch);
 }
 
 /* ----------------------------------------------------------------
@@ -789,7 +788,7 @@ prism_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	PrismDsmRootAssign *dsm_ra =
 			shm_toc_lookup(toc, PRISM_DSM_KEY_ROOT_ASSIGN, false);
 	IndexInfo *indexInfo = BuildIndexInfo(indexRel);
-#ifndef MKT_STANDALONE
+#ifndef VS_STANDALONE
 	/* The leader marked the build concurrent and scans with an MVCC snapshot;
 	 * the worker's freshly built IndexInfo defaults to non-concurrent, so it
 	 * must be aligned or heapam's snapshot/OldestXmin assert trips in the scan
@@ -827,7 +826,7 @@ prism_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 * leader and workers. A flat (1-level) build has no subtrees — the leader
 	 * writes the single level directly, and neither side runs the subtree
 	 * barriers. */
-	if (mkt_hkmeans_nlevels(shared->nlist, shared->fan_out) >= 2)
+	if (vs_hkmeans_nlevels(shared->nlist, shared->fan_out) >= 2)
 	{
 		/* Ring barrier: the leader creates the subtree ring (sized from the
 		 * per-child sample counts) and publishes its handle + slot size
@@ -879,12 +878,12 @@ prism_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			&exact_centroids);
 
 	uint32_t	  entry_size = (uint32_t)prism_posting_entry_size(dim);
-	RaBitQParams *rq_params	 = mkt_rabitq_create(dim, shared->rabitq_seed);
+	RaBitQParams *rq_params	 = vs_rabitq_create(dim, shared->rabitq_seed);
 
 	/* Per-worker storage over the index for page-backed head/centroid reads
 	 * (PG opens one on the worker's indexRel; standalone shares the leader's).
 	 */
-	MktStorage *storage = prism_pbuild_worker_storage(&w);
+	VsStorage *storage = prism_pbuild_worker_storage(&w);
 
 	/* Routing base — the same PrismIndexBase the query/insert build, so the
 	 * worker routes each row identically. nlevels + first_centroid (the
@@ -907,7 +906,7 @@ prism_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			shared->nlist,
 			shared->rabitq_seed,
 			global_mean,
-			mkt_alloc((size_t)dim * sizeof(float)));
+			vs_alloc((size_t)dim * sizeof(float)));
 	/* Build-only accuracy hook: exact scoring of the internal tree levels
 	 * (the query and insert paths never set this). */
 	base.exact_internal = &exact_centroids;
@@ -1001,7 +1000,7 @@ prism_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	prism_pbuild_sort_end(sorter);
 	prism_build_route_ctx_cleanup(&route);
 	prism_query_state_cleanup(&qs);
-	mkt_free(base.pt_global_mean);
+	vs_free(base.pt_global_mean);
 	prism_pbuild_exact_centroids_release(exact_seg);
 	prism_pbuild_worker_storage_release(storage);
 

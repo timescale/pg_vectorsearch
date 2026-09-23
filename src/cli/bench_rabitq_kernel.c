@@ -1,5 +1,5 @@
 /*
- * mkt bench rabitq-kernel
+ * vectorsearch bench rabitq-kernel
  *
  * Benchmark asymmetric vs symmetric RaBitQ distance kernels.
  * Compares:
@@ -8,7 +8,7 @@
  * - Accuracy against ground truth L2 distance
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <getopt.h>
 #include <math.h>
@@ -86,18 +86,18 @@ benchmark_hamming_throughput(const BenchConfig *config)
 {
 	Dimension dim		   = config->dim;
 	uint32_t  count		   = config->count;
-	uint32_t  packed_bytes = MKT_RABITQ_BYTES(dim);
+	uint32_t  packed_bytes = VS_RABITQ_BYTES(dim);
 
 	printf("Hamming kernel (dim=%u, %u bytes, count=%u):\n",
 		   dim,
 		   packed_bytes,
 		   count);
-	printf("  implementation: %s\n", mkt_rabitq_hamming_impl_name());
+	printf("  implementation: %s\n", vs_rabitq_hamming_impl_name());
 
 	/* Allocate bit vectors */
-	uint8_t	 *query_bits = mkt_alloc_aligned(packed_bytes, 64);
-	uint8_t	 *data_bits	 = mkt_alloc_aligned((size_t)count * packed_bytes, 64);
-	uint32_t *results	 = mkt_alloc(count * sizeof(uint32_t));
+	uint8_t	 *query_bits = vs_alloc_aligned(packed_bytes, 64);
+	uint8_t	 *data_bits	 = vs_alloc_aligned((size_t)count * packed_bytes, 64);
+	uint32_t *results	 = vs_alloc(count * sizeof(uint32_t));
 
 	/* Fill with deterministic patterns */
 	for (uint32_t i = 0; i < packed_bytes; i++)
@@ -111,7 +111,7 @@ benchmark_hamming_throughput(const BenchConfig *config)
 	/* Warmup */
 	for (int w = 0; w < 5; w++)
 		for (uint32_t i = 0; i < count; i++)
-			results[i] = mkt_rabitq_hamming_distance(
+			results[i] = vs_rabitq_hamming_distance(
 					query_bits, data_bits + i * packed_bytes, packed_bytes);
 
 	/* Benchmark */
@@ -121,7 +121,7 @@ benchmark_hamming_throughput(const BenchConfig *config)
 		uint64_t start = get_time_ns();
 
 		for (uint32_t i = 0; i < count; i++)
-			results[i] = mkt_rabitq_hamming_distance(
+			results[i] = vs_rabitq_hamming_distance(
 					query_bits, data_bits + i * packed_bytes, packed_bytes);
 
 		uint64_t end = get_time_ns();
@@ -137,9 +137,9 @@ benchmark_hamming_throughput(const BenchConfig *config)
 		   (double)count / (best_vps / 1000.0),
 		   count / 1000);
 
-	mkt_free(results);
-	mkt_free_aligned(data_bits);
-	mkt_free_aligned(query_bits);
+	vs_free(results);
+	vs_free_aligned(data_bits);
+	vs_free_aligned(query_bits);
 }
 
 /*
@@ -152,12 +152,12 @@ benchmark_distance_throughput(const BenchConfig *config)
 	uint32_t  count = config->count;
 
 	printf("\nDistance throughput (dim=%u, count=%u):\n", dim, count);
-	printf("  inner product impl: %s\n", mkt_rabitq_impl_name());
-	printf("  hamming impl:       %s\n", mkt_rabitq_hamming_impl_name());
+	printf("  inner product impl: %s\n", vs_rabitq_impl_name());
+	printf("  hamming impl:       %s\n", vs_rabitq_hamming_impl_name());
 
 	/* Create RaBitQ params and test data */
-	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
-	float		 *centroid = mkt_alloc(dim * sizeof(float));
+	RaBitQParams *params   = vs_rabitq_create(dim, 42);
+	float		 *centroid = vs_alloc(dim * sizeof(float));
 
 	for (Dimension i = 0; i < dim; i++)
 		centroid[i] = 0.0f;
@@ -165,19 +165,19 @@ benchmark_distance_throughput(const BenchConfig *config)
 	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/* Generate and encode vectors */
-	float	*vectors	  = mkt_alloc((size_t)count * dim * sizeof(float));
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
-	float	*f_add		  = mkt_alloc(count * sizeof(float));
-	float	*f_rescale	  = mkt_alloc(count * sizeof(float));
-	uint8_t *bits		  = mkt_alloc((size_t)count * packed_bytes);
+	float	*vectors	  = vs_alloc((size_t)count * dim * sizeof(float));
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
+	float	*f_add		  = vs_alloc(count * sizeof(float));
+	float	*f_rescale	  = vs_alloc(count * sizeof(float));
+	uint8_t *bits		  = vs_alloc((size_t)count * packed_bytes);
 
 	for (uint32_t i = 0; i < count; i++)
 		generate_vector(vectors + i * dim, dim, (int)i);
 
-	mkt_rabitq_encode_batch(
+	vs_rabitq_encode_batch(
 			params,
 			vectors,
-			MKT_VEC_F32,
+			VS_VEC_F32,
 			cent_ref,
 			f_add,
 			f_rescale,
@@ -185,18 +185,18 @@ benchmark_distance_throughput(const BenchConfig *config)
 			(uint16_t)(count > 65535 ? 65535 : count));
 
 	/* Prepare query */
-	float *query = mkt_alloc(dim * sizeof(float));
+	float *query = vs_alloc(dim * sizeof(float));
 	generate_vector(query, dim, 99999);
 	Vec32Ref query_ref = {.data = query, .dim = dim};
 
 	RaBitQQueryState *state =
-			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
+			vs_rabitq_prepare_query(params, query_ref, cent_ref);
 
-	Distance *distances = mkt_alloc(count * sizeof(Distance));
+	Distance *distances = vs_alloc(count * sizeof(Distance));
 
 	/* Pre-build RaBitQData structs to avoid alloc overhead in loop */
-	size_t		data_size = MKT_RABITQ_DATA_SIZE(dim);
-	uint8_t	   *data_buf  = mkt_alloc(data_size);
+	size_t		data_size = VS_RABITQ_DATA_SIZE(dim);
+	uint8_t	   *data_buf  = vs_alloc(data_size);
 	RaBitQData *temp_data = (RaBitQData *)data_buf;
 
 	/* Benchmark asymmetric distance */
@@ -212,7 +212,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 			memcpy(temp_data->bits,
 				   bits + (size_t)i * packed_bytes,
 				   packed_bytes);
-			distances[i] = mkt_rabitq_distance(state, temp_data, dim);
+			distances[i] = vs_rabitq_distance(state, temp_data, dim);
 		}
 
 		uint64_t end = get_time_ns();
@@ -229,7 +229,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 	{
 		uint64_t start = get_time_ns();
 
-		mkt_rabitq_distance_batch_symmetric(
+		vs_rabitq_distance_batch_symmetric(
 				state, f_add, f_rescale, bits, count, dim, distances);
 
 		uint64_t end = get_time_ns();
@@ -250,16 +250,16 @@ benchmark_distance_throughput(const BenchConfig *config)
 		   count / 1000);
 	printf("  speedup:     %.1fx\n", best_sym_vps / best_asym_vps);
 
-	mkt_free(data_buf);
-	mkt_free(distances);
-	mkt_rabitq_free_query(state);
-	mkt_free(query);
-	mkt_free(bits);
-	mkt_free(f_rescale);
-	mkt_free(f_add);
-	mkt_free(vectors);
-	mkt_free(centroid);
-	mkt_rabitq_destroy(params);
+	vs_free(data_buf);
+	vs_free(distances);
+	vs_rabitq_free_query(state);
+	vs_free(query);
+	vs_free(bits);
+	vs_free(f_rescale);
+	vs_free(f_add);
+	vs_free(vectors);
+	vs_free(centroid);
+	vs_rabitq_destroy(params);
 }
 
 /*
@@ -273,27 +273,27 @@ benchmark_accuracy(const BenchConfig *config)
 
 	printf("\nAccuracy (dim=%u, count=%u):\n", dim, count);
 
-	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
-	float		 *centroid = mkt_alloc(dim * sizeof(float));
+	RaBitQParams *params   = vs_rabitq_create(dim, 42);
+	float		 *centroid = vs_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 		centroid[i] = 0.0f;
 	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/* Generate vectors */
-	float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
+	float *vectors = vs_alloc((size_t)count * dim * sizeof(float));
 	for (uint32_t i = 0; i < count; i++)
 		generate_vector(vectors + i * dim, dim, (int)i);
 
 	/* Encode */
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
-	float	*f_add		  = mkt_alloc(count * sizeof(float));
-	float	*f_rescale	  = mkt_alloc(count * sizeof(float));
-	uint8_t *bits		  = mkt_alloc((size_t)count * packed_bytes);
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
+	float	*f_add		  = vs_alloc(count * sizeof(float));
+	float	*f_rescale	  = vs_alloc(count * sizeof(float));
+	uint8_t *bits		  = vs_alloc((size_t)count * packed_bytes);
 
-	mkt_rabitq_encode_batch(
+	vs_rabitq_encode_batch(
 			params,
 			vectors,
-			MKT_VEC_F32,
+			VS_VEC_F32,
 			cent_ref,
 			f_add,
 			f_rescale,
@@ -301,12 +301,12 @@ benchmark_accuracy(const BenchConfig *config)
 			(uint16_t)(count > 65535 ? 65535 : count));
 
 	/* Prepare query */
-	float *query = mkt_alloc(dim * sizeof(float));
+	float *query = vs_alloc(dim * sizeof(float));
 	generate_vector(query, dim, 99999);
 	Vec32Ref query_ref = {.data = query, .dim = dim};
 
 	RaBitQQueryState *state =
-			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
+			vs_rabitq_prepare_query(params, query_ref, cent_ref);
 
 	/* Compute distances and compare */
 	double asym_abs_err_sum = 0.0;
@@ -321,15 +321,15 @@ benchmark_accuracy(const BenchConfig *config)
 		float true_dist = true_l2_sq(query, vectors + i * dim, dim);
 
 		/* Build RaBitQData on stack */
-		size_t		data_size = MKT_RABITQ_DATA_SIZE(dim);
-		uint8_t	   *buf		  = mkt_alloc(data_size);
+		size_t		data_size = VS_RABITQ_DATA_SIZE(dim);
+		uint8_t	   *buf		  = vs_alloc(data_size);
 		RaBitQData *data	  = (RaBitQData *)buf;
 		data->f_add			  = f_add[i];
 		data->f_rescale		  = f_rescale[i];
 		memcpy(data->bits, bits + (size_t)i * packed_bytes, packed_bytes);
 
-		float asym_dist = mkt_rabitq_distance(state, data, dim);
-		float sym_dist	= mkt_rabitq_distance_symmetric(state, data, dim);
+		float asym_dist = vs_rabitq_distance(state, data, dim);
+		float sym_dist	= vs_rabitq_distance_symmetric(state, data, dim);
 
 		float asym_err = fabsf(asym_dist - true_dist);
 		float sym_err  = fabsf(sym_dist - true_dist);
@@ -350,7 +350,7 @@ benchmark_accuracy(const BenchConfig *config)
 				sym_max_rel_err = sym_rel;
 		}
 
-		mkt_free(buf);
+		vs_free(buf);
 	}
 
 	printf("  %-14s %12s %12s\n", "", "asymmetric", "symmetric");
@@ -372,8 +372,8 @@ benchmark_accuracy(const BenchConfig *config)
 	if ((int)count >= K)
 	{
 		/* Find true top-K indices */
-		float *true_dists = mkt_alloc(count * sizeof(float));
-		int	  *true_idx	  = mkt_alloc(count * sizeof(int));
+		float *true_dists = vs_alloc(count * sizeof(float));
+		int	  *true_idx	  = vs_alloc(count * sizeof(int));
 		for (uint32_t i = 0; i < count; i++)
 		{
 			true_dists[i] = true_l2_sq(query, vectors + i * dim, dim);
@@ -398,19 +398,19 @@ benchmark_accuracy(const BenchConfig *config)
 		}
 
 		/* Compute asymmetric distances and find top-K */
-		float *asym_dists = mkt_alloc(count * sizeof(float));
-		int	  *asym_idx	  = mkt_alloc(count * sizeof(int));
+		float *asym_dists = vs_alloc(count * sizeof(float));
+		int	  *asym_idx	  = vs_alloc(count * sizeof(int));
 		for (uint32_t i = 0; i < count; i++)
 		{
-			size_t		data_size = MKT_RABITQ_DATA_SIZE(dim);
-			uint8_t	   *buf		  = mkt_alloc(data_size);
+			size_t		data_size = VS_RABITQ_DATA_SIZE(dim);
+			uint8_t	   *buf		  = vs_alloc(data_size);
 			RaBitQData *data	  = (RaBitQData *)buf;
 			data->f_add			  = f_add[i];
 			data->f_rescale		  = f_rescale[i];
 			memcpy(data->bits, bits + (size_t)i * packed_bytes, packed_bytes);
-			asym_dists[i] = mkt_rabitq_distance(state, data, dim);
+			asym_dists[i] = vs_rabitq_distance(state, data, dim);
 			asym_idx[i]	  = (int)i;
-			mkt_free(buf);
+			vs_free(buf);
 		}
 
 		for (int k = 0; k < K; k++)
@@ -426,19 +426,19 @@ benchmark_accuracy(const BenchConfig *config)
 				}
 
 		/* Compute symmetric distances and find top-K */
-		float *sym_dists = mkt_alloc(count * sizeof(float));
-		int	  *sym_idx	 = mkt_alloc(count * sizeof(int));
+		float *sym_dists = vs_alloc(count * sizeof(float));
+		int	  *sym_idx	 = vs_alloc(count * sizeof(int));
 		for (uint32_t i = 0; i < count; i++)
 		{
-			size_t		data_size = MKT_RABITQ_DATA_SIZE(dim);
-			uint8_t	   *buf		  = mkt_alloc(data_size);
+			size_t		data_size = VS_RABITQ_DATA_SIZE(dim);
+			uint8_t	   *buf		  = vs_alloc(data_size);
 			RaBitQData *data	  = (RaBitQData *)buf;
 			data->f_add			  = f_add[i];
 			data->f_rescale		  = f_rescale[i];
 			memcpy(data->bits, bits + (size_t)i * packed_bytes, packed_bytes);
-			sym_dists[i] = mkt_rabitq_distance_symmetric(state, data, dim);
+			sym_dists[i] = vs_rabitq_distance_symmetric(state, data, dim);
 			sym_idx[i]	 = (int)i;
-			mkt_free(buf);
+			vs_free(buf);
 		}
 
 		for (int k = 0; k < K; k++)
@@ -470,22 +470,22 @@ benchmark_accuracy(const BenchConfig *config)
 			   asym_recall * 100 / K,
 			   sym_recall * 100 / K);
 
-		mkt_free(sym_idx);
-		mkt_free(sym_dists);
-		mkt_free(asym_idx);
-		mkt_free(asym_dists);
-		mkt_free(true_idx);
-		mkt_free(true_dists);
+		vs_free(sym_idx);
+		vs_free(sym_dists);
+		vs_free(asym_idx);
+		vs_free(asym_dists);
+		vs_free(true_idx);
+		vs_free(true_dists);
 	}
 
-	mkt_rabitq_free_query(state);
-	mkt_free(query);
-	mkt_free(bits);
-	mkt_free(f_rescale);
-	mkt_free(f_add);
-	mkt_free(vectors);
-	mkt_free(centroid);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_free_query(state);
+	vs_free(query);
+	vs_free(bits);
+	vs_free(f_rescale);
+	vs_free(f_add);
+	vs_free(vectors);
+	vs_free(centroid);
+	vs_rabitq_destroy(params);
 }
 
 /*
@@ -576,7 +576,7 @@ cmd_bench_rabitq_kernel(CmdContext *ctx)
 		return 0;
 	}
 
-	mkt_rabitq_init_simd();
+	vs_rabitq_init_simd();
 
 	benchmark_hamming_throughput(&config);
 	benchmark_distance_throughput(&config);

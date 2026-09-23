@@ -58,7 +58,7 @@ prism_posting_page_add(
 	hdr->f_add					 = f_add;
 	hdr->f_rescale				 = f_rescale;
 	hdr->f_error				 = f_error;
-	memcpy(hdr->bits, bits, MKT_RABITQ_BYTES(dim));
+	memcpy(hdr->bits, bits, VS_RABITQ_BYTES(dim));
 
 	opaque->entry_count = i + 1;
 	return true;
@@ -70,7 +70,7 @@ prism_posting_page_add(
 
 void
 prism_posting_chain_walk(
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		BlockNumber			head,
 		PrismPostingChainCb cb,
 		void			   *state)
@@ -81,7 +81,7 @@ prism_posting_chain_walk(
 	while (blk != InvalidBlockNumber)
 	{
 		pos.blkno = blk;
-		pos.page  = mkt_storage_read_page(storage, blk);
+		pos.page  = vs_storage_read_page(storage, blk);
 		pos.next  = prism_posting_opaque(pos.page)->next_blkno;
 
 		bool keep_going = cb(&pos, state);
@@ -99,7 +99,7 @@ prism_posting_chain_walk(
 
 void
 prism_posting_chain_mutate(
-		MktStorage				 *storage,
+		VsStorage				 *storage,
 		BlockNumber				  head,
 		PrismPostingChainMutateCb cb,
 		void					 *state)
@@ -108,13 +108,13 @@ prism_posting_chain_mutate(
 
 	while (blk != InvalidBlockNumber)
 	{
-		Page					page = mkt_storage_write_page(storage, blk);
+		Page					page = vs_storage_write_page(storage, blk);
 		PrismPostingPageOpaque *op	 = prism_posting_opaque(page);
 		BlockNumber				next = op->next_blkno;
 
 		cb(op, state);
 
-		mkt_storage_commit_page(storage, blk);
+		vs_storage_commit_page(storage, blk);
 		blk = next;
 	}
 }
@@ -158,7 +158,7 @@ prism_posting_flat_add(
 	hdr->f_add					 = f_add;
 	hdr->f_rescale				 = f_rescale;
 	hdr->f_error				 = f_error;
-	memcpy(hdr->bits, bits, MKT_RABITQ_BYTES(dim));
+	memcpy(hdr->bits, bits, VS_RABITQ_BYTES(dim));
 
 	flat_hdr->entry_count = i + 1;
 	return true;

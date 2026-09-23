@@ -22,10 +22,10 @@
  * Processes 16 floats per iteration using FMA (fused multiply-add).
  * Remaining elements handled with scalar tail loop.
  */
-MKT_TARGET_AVX512 Distance
-mkt_distance_l2_avx512(Vec32Ref a, Vec32Ref b)
+VS_TARGET_AVX512 Distance
+vs_distance_l2_avx512(Vec32Ref a, Vec32Ref b)
 {
-	if (mkt_unlikely(
+	if (vs_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
 				b.data == NULL))
 		return -1.0f;
@@ -47,7 +47,7 @@ mkt_distance_l2_avx512(Vec32Ref a, Vec32Ref b)
 	}
 
 	/* Horizontal reduction */
-	float sum = mkt_horizontal_sum_avx512(sum_vec);
+	float sum = vs_horizontal_sum_avx512(sum_vec);
 
 	/* Scalar tail for remaining elements */
 	for (; i < dim; i++)
@@ -62,10 +62,10 @@ mkt_distance_l2_avx512(Vec32Ref a, Vec32Ref b)
 /*
  * Negative inner product using AVX-512.
  */
-MKT_TARGET_AVX512 Distance
-mkt_distance_ip_avx512(Vec32Ref a, Vec32Ref b)
+VS_TARGET_AVX512 Distance
+vs_distance_ip_avx512(Vec32Ref a, Vec32Ref b)
 {
-	if (mkt_unlikely(
+	if (vs_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
 				b.data == NULL))
 		return -1.0f;
@@ -84,7 +84,7 @@ mkt_distance_ip_avx512(Vec32Ref a, Vec32Ref b)
 		dot_vec	  = _mm512_fmadd_ps(va, vb, dot_vec);
 	}
 
-	float dot = mkt_horizontal_sum_avx512(dot_vec);
+	float dot = vs_horizontal_sum_avx512(dot_vec);
 
 	for (; i < dim; i++)
 		dot += pa[i] * pb[i];
@@ -97,10 +97,10 @@ mkt_distance_ip_avx512(Vec32Ref a, Vec32Ref b)
  *
  * Computes three parallel reductions: dot product, norm_a, norm_b.
  */
-MKT_TARGET_AVX512 Distance
-mkt_distance_cosine_avx512(Vec32Ref a, Vec32Ref b)
+VS_TARGET_AVX512 Distance
+vs_distance_cosine_avx512(Vec32Ref a, Vec32Ref b)
 {
-	if (mkt_unlikely(
+	if (vs_unlikely(
 				a.dim != b.dim || a.dim == 0 || a.data == NULL ||
 				b.data == NULL))
 		return -1.0f;
@@ -123,9 +123,9 @@ mkt_distance_cosine_avx512(Vec32Ref a, Vec32Ref b)
 		norm_b_vec = _mm512_fmadd_ps(vb, vb, norm_b_vec);
 	}
 
-	float dot	 = mkt_horizontal_sum_avx512(dot_vec);
-	float norm_a = mkt_horizontal_sum_avx512(norm_a_vec);
-	float norm_b = mkt_horizontal_sum_avx512(norm_b_vec);
+	float dot	 = vs_horizontal_sum_avx512(dot_vec);
+	float norm_a = vs_horizontal_sum_avx512(norm_a_vec);
+	float norm_b = vs_horizontal_sum_avx512(norm_b_vec);
 
 	/* Scalar tail */
 	for (; i < dim; i++)
@@ -147,15 +147,15 @@ mkt_distance_cosine_avx512(Vec32Ref a, Vec32Ref b)
 /*
  * Batch L2 distance - simple single-accumulator loop.
  */
-MKT_TARGET_AVX512 int
-mkt_distance_batch_l2_avx512(
+VS_TARGET_AVX512 int
+vs_distance_batch_l2_avx512(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances)
 {
-	if (mkt_unlikely(
+	if (vs_unlikely(
 				query.dim != dim || query.data == NULL || vectors == NULL ||
 				distances == NULL))
 		return -1;
@@ -210,7 +210,7 @@ mkt_distance_batch_l2_avx512(
 			sum_vec		= _mm512_fmadd_ps(diff, diff, sum_vec);
 		}
 
-		float sum = mkt_horizontal_sum_avx512(sum_vec);
+		float sum = vs_horizontal_sum_avx512(sum_vec);
 
 		/* Scalar tail */
 		uint32_t tail_start = (dim32 / 16) * 16;
@@ -229,15 +229,15 @@ mkt_distance_batch_l2_avx512(
 /*
  * Batch inner product - 2x unrolled loop.
  */
-MKT_TARGET_AVX512 int
-mkt_distance_batch_ip_avx512(
+VS_TARGET_AVX512 int
+vs_distance_batch_ip_avx512(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances)
 {
-	if (mkt_unlikely(
+	if (vs_unlikely(
 				query.dim != dim || query.data == NULL || vectors == NULL ||
 				distances == NULL))
 		return -1;
@@ -289,7 +289,7 @@ mkt_distance_batch_ip_avx512(
 			dot_vec = _mm512_fmadd_ps(vq, vv, dot_vec);
 		}
 
-		float dot = mkt_horizontal_sum_avx512(dot_vec);
+		float dot = vs_horizontal_sum_avx512(dot_vec);
 
 		/* Scalar tail */
 		uint32_t tail_start = (dim32 / 16) * 16;
@@ -305,15 +305,15 @@ mkt_distance_batch_ip_avx512(
 /*
  * Batch cosine distance with 4 accumulators.
  */
-MKT_TARGET_AVX512 int
-mkt_distance_batch_cosine_avx512(
+VS_TARGET_AVX512 int
+vs_distance_batch_cosine_avx512(
 		Vec32Ref	 query,
 		const float *vectors,
 		uint32_t	 count,
 		Dimension	 dim,
 		Distance	*distances)
 {
-	if (mkt_unlikely(
+	if (vs_unlikely(
 				query.dim != dim || query.data == NULL || vectors == NULL ||
 				distances == NULL))
 		return -1;
@@ -329,7 +329,7 @@ mkt_distance_batch_cosine_avx512(
 		__m512 vq  = _mm512_loadu_ps(q + i);
 		norm_q_vec = _mm512_fmadd_ps(vq, vq, norm_q_vec);
 	}
-	float norm_q = mkt_horizontal_sum_avx512(norm_q_vec);
+	float norm_q = vs_horizontal_sum_avx512(norm_q_vec);
 	for (; i < dim32; i++)
 		norm_q += q[i] * q[i];
 
@@ -339,8 +339,8 @@ mkt_distance_batch_cosine_avx512(
 	{
 		const float *vec = vectors + v * dim32;
 
-		if (v + MKT_PREFETCH_DISTANCE < count)
-			mkt_prefetch_read(vectors + (v + MKT_PREFETCH_DISTANCE) * dim32);
+		if (v + VS_PREFETCH_DISTANCE < count)
+			vs_prefetch_read(vectors + (v + VS_PREFETCH_DISTANCE) * dim32);
 
 		/* Use 4 accumulators to hide FMA latency */
 		__m512 dot0	   = _mm512_setzero_ps();
@@ -394,8 +394,8 @@ mkt_distance_batch_cosine_avx512(
 			norm_v_vec = _mm512_fmadd_ps(vv, vv, norm_v_vec);
 		}
 
-		float dot	 = mkt_horizontal_sum_avx512(dot_vec);
-		float norm_v = mkt_horizontal_sum_avx512(norm_v_vec);
+		float dot	 = vs_horizontal_sum_avx512(dot_vec);
+		float norm_v = vs_horizontal_sum_avx512(norm_v_vec);
 
 		/* Scalar tail */
 		for (; i < dim32; i++)

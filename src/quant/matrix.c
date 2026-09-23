@@ -8,13 +8,13 @@
  * distribution, which is essential for RaBitQ's theoretical error bounds.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
 
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 /*
  * macOS: cblas lives inside Accelerate's vecLib sub-framework. We
  * include it directly rather than via the `Accelerate/Accelerate.h`
@@ -212,7 +212,7 @@ gram_schmidt_qr(float *A, Dimension dim)
  * Returns 0 on success, -1 on failure.
  */
 int
-mkt_random_orthogonal_matrix(float *matrix, Dimension dim, uint64_t seed)
+vs_random_orthogonal_matrix(float *matrix, Dimension dim, uint64_t seed)
 {
 	if (matrix == NULL || dim == 0)
 		return -1;
@@ -234,7 +234,7 @@ mkt_random_orthogonal_matrix(float *matrix, Dimension dim, uint64_t seed)
  * Returns 1 if orthogonal, 0 if not.
  */
 int
-mkt_matrix_is_orthogonal(const float *matrix, Dimension dim, float tolerance)
+vs_matrix_is_orthogonal(const float *matrix, Dimension dim, float tolerance)
 {
 	if (matrix == NULL || dim == 0)
 		return 0;
@@ -246,7 +246,7 @@ mkt_matrix_is_orthogonal(const float *matrix, Dimension dim, float tolerance)
 		{
 			/* Compute (i,j) element of M * M^T = dot(row_i, row_j) */
 			float dot =
-					mkt_dot_product(matrix + i * dim, matrix + j * dim, dim);
+					vs_dot_product(matrix + i * dim, matrix + j * dim, dim);
 
 			/* Expected value: 1 on diagonal, 0 elsewhere */
 			float expected = (i == j) ? 1.0f : 0.0f;
@@ -276,7 +276,7 @@ mkt_matrix_is_orthogonal(const float *matrix, Dimension dim, float tolerance)
  *   dim:    Dimension
  */
 void
-mkt_matrix_transpose_vector_mul(
+vs_matrix_transpose_vector_mul(
 		const float *M, const float *v, float *result, Dimension dim)
 {
 	/* Zero result */
@@ -307,18 +307,18 @@ mkt_matrix_transpose_vector_mul(
  *   dim:    Dimension
  */
 void
-mkt_matrix_vector_mul(
+vs_matrix_vector_mul(
 		const float *M, const float *v, float *result, Dimension dim)
 {
 	for (Dimension i = 0; i < dim; i++)
-		result[i] = mkt_dot_product(M + i * dim, v, dim);
+		result[i] = vs_dot_product(M + i * dim, v, dim);
 }
 
 /*
  * Batched matrix-vector multiplication: results = M^T * vectors
  *
  * Computes M^T * v for multiple vectors at once. This is more efficient
- * than calling mkt_matrix_transpose_vector_mul() repeatedly because:
+ * than calling vs_matrix_transpose_vector_mul() repeatedly because:
  * 1. Matrix M is loaded into cache once and reused for all vectors
  * 2. Inner loop processes contiguous memory (good for SIMD)
  *
@@ -333,7 +333,7 @@ mkt_matrix_vector_mul(
  *   count:   Number of vectors to process
  *   dim:     Vector/matrix dimension
  */
-MKT_TARGET_CLONES static void
+VS_TARGET_CLONES static void
 matrix_transpose_mul_batch_inner(
 		const float *M_row,
 		const float *vectors,
@@ -375,7 +375,7 @@ matrix_transpose_mul_batch_builtin(
 	}
 }
 
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 static void
 matrix_transpose_mul_batch_cblas(
 		const float *M,
@@ -410,7 +410,7 @@ matrix_transpose_mul_batch_cblas(
 			(int)dim	/* ldc */
 	);
 }
-#endif /* MKT_HAVE_CBLAS */
+#endif /* VS_HAVE_CBLAS */
 
 /*
  * Runtime selection of matrix multiplication implementation.
@@ -419,15 +419,15 @@ matrix_transpose_mul_batch_cblas(
 static bool g_use_cblas = true;
 
 void
-mkt_matrix_set_use_cblas(bool use_cblas)
+vs_matrix_set_use_cblas(bool use_cblas)
 {
 	g_use_cblas = use_cblas;
 }
 
 bool
-mkt_matrix_get_use_cblas(void)
+vs_matrix_get_use_cblas(void)
 {
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 	return g_use_cblas;
 #else
 	return false;
@@ -435,9 +435,9 @@ mkt_matrix_get_use_cblas(void)
 }
 
 const char *
-mkt_matrix_impl_name(void)
+vs_matrix_impl_name(void)
 {
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 	return g_use_cblas ? "cblas" : "builtin";
 #else
 	return "builtin";
@@ -445,14 +445,14 @@ mkt_matrix_impl_name(void)
 }
 
 void
-mkt_matrix_transpose_vector_mul_batch(
+vs_matrix_transpose_vector_mul_batch(
 		const float *M,
 		const float *vectors,
 		float		*results,
 		uint32_t	 count,
 		Dimension	 dim)
 {
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 	if (g_use_cblas)
 	{
 		matrix_transpose_mul_batch_cblas(M, vectors, results, count, dim);

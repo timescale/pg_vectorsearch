@@ -14,7 +14,7 @@
  * - kmeans_elkan.c:   Elkan's per-centroid bounds
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <float.h>
 #include <math.h>
@@ -87,15 +87,15 @@ xo_uniform(Xoshiro256State *state)
 static bool g_use_cblas = true;
 
 void
-mkt_kmeans_set_use_cblas(bool use_cblas)
+vs_kmeans_set_use_cblas(bool use_cblas)
 {
 	g_use_cblas = use_cblas;
 }
 
 bool
-mkt_kmeans_get_use_cblas(void)
+vs_kmeans_get_use_cblas(void)
 {
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 	return g_use_cblas;
 #else
 	return false;
@@ -103,9 +103,9 @@ mkt_kmeans_get_use_cblas(void)
 }
 
 const char *
-mkt_kmeans_impl_name(void)
+vs_kmeans_impl_name(void)
 {
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 	return g_use_cblas ? "cblas" : "builtin";
 #else
 	return "builtin";
@@ -121,7 +121,7 @@ static const char *algo_names[] = {
 };
 
 const char *
-mkt_kmeans_algo_name(KMeansAlgorithm algo)
+vs_kmeans_algo_name(KMeansAlgorithm algo)
 {
 	if ((unsigned)algo <= KMEANS_ALGO_CBLAS)
 		return algo_names[algo];
@@ -129,7 +129,7 @@ mkt_kmeans_algo_name(KMeansAlgorithm algo)
 }
 
 bool
-mkt_cblas_is_single_threaded(void)
+vs_cblas_is_single_threaded(void)
 {
 	const char *v = getenv("OMP_NUM_THREADS");
 	return v != NULL && v[0] == '1' && v[1] == '\0';
@@ -148,20 +148,20 @@ mkt_cblas_is_single_threaded(void)
  * BLIS/AOCL (bli_thread_set_num_threads). Others (Accelerate,
  * MKL, ARM PL) must be pinned via env vars.
  */
-#ifdef MKT_BLAS_OPENBLAS
+#ifdef VS_BLAS_OPENBLAS
 extern void openblas_set_num_threads(int);
 #endif
-#ifdef MKT_BLAS_BLIS
+#ifdef VS_BLAS_BLIS
 extern void bli_thread_set_num_threads(long);
 #endif
 
 void
-mkt_cblas_pin_single_thread(void)
+vs_cblas_pin_single_thread(void)
 {
-#ifdef MKT_BLAS_OPENBLAS
+#ifdef VS_BLAS_OPENBLAS
 	openblas_set_num_threads(1);
 #endif
-#ifdef MKT_BLAS_BLIS
+#ifdef VS_BLAS_BLIS
 	bli_thread_set_num_threads(1);
 #endif
 }
@@ -214,7 +214,7 @@ kmeans_init_plusplus_impl(
 	uint32_t  nvecs = st->nvecs;
 	uint32_t  nlist = st->nlist;
 	size_t	  esz	= ops->element_size;
-	float	 *dists = mkt_alloc(nvecs * sizeof(float));
+	float	 *dists = vs_alloc(nvecs * sizeof(float));
 
 	/* 1. First centroid: random vector */
 	uint32_t idx = (uint32_t)(xo_uniform(&rng) * nvecs);
@@ -273,7 +273,7 @@ kmeans_init_plusplus_impl(
 		}
 	}
 
-	mkt_free(dists);
+	vs_free(dists);
 }
 
 /*
@@ -322,7 +322,7 @@ kmeans_update_centroids_impl(KMeansState *st, const Vec32TypeOps *ops)
 			if (st->cluster_sizes[j] == 0)
 				continue;
 			float *cent = st->new_centroids + (size_t)j * dim;
-			float  norm = mkt_l2_norm(cent, dim);
+			float  norm = vs_l2_norm(cent, dim);
 			if (norm > 1e-10f)
 				vec32_scale(cent, 1.0f / norm, cent, dim);
 		}
@@ -396,7 +396,7 @@ kmeans_max_centroid_shift_between(
 
 	for (uint32_t j = 0; j < nlist; j++)
 	{
-		float shift = mkt_l2_distance_squared(
+		float shift = vs_l2_distance_squared(
 				a + (size_t)j * dim, b + (size_t)j * dim, dim);
 		if (shift > max_shift)
 			max_shift = shift;
@@ -405,7 +405,7 @@ kmeans_max_centroid_shift_between(
 	return max_shift;
 }
 
-MKT_TARGET_CLONES void
+VS_TARGET_CLONES void
 kmeans_assign_accumulate(
 		const float	   *vectors,
 		const uint32_t *indices,
@@ -443,18 +443,18 @@ kmeans_assign_accumulate(
 			{
 			default: /* L2 */
 			{
-				float nx  = mkt_l2_norm_squared(vec, dim);
-				float dot = mkt_dot_product(vec, cent, dim);
+				float nx  = vs_l2_norm_squared(vec, dim);
+				float dot = vs_dot_product(vec, cent, dim);
 				d		  = nx + norms_c[c] - 2.0f * dot;
 				if (d < 0.0f)
 					d = 0.0f;
 				break;
 			}
 			case DISTANCE_INNER_PRODUCT:
-				d = -mkt_dot_product(vec, cent, dim);
+				d = -vs_dot_product(vec, cent, dim);
 				break;
 			case DISTANCE_COSINE:
-				d = 1.0f - mkt_dot_product(vec, cent, dim);
+				d = 1.0f - vs_dot_product(vec, cent, dim);
 				break;
 			}
 
@@ -475,7 +475,7 @@ kmeans_assign_accumulate(
 	*out_cost += cost;
 }
 
-MKT_TARGET_CLONES void
+VS_TARGET_CLONES void
 kmeans_assign(
 		const float	  *vectors,
 		uint32_t	   start,
@@ -502,18 +502,18 @@ kmeans_assign(
 			{
 			default: /* L2 */
 			{
-				float nx  = mkt_l2_norm_squared(vec, dim);
-				float dot = mkt_dot_product(vec, cent, dim);
+				float nx  = vs_l2_norm_squared(vec, dim);
+				float dot = vs_dot_product(vec, cent, dim);
 				d		  = nx + norms_c[c] - 2.0f * dot;
 				if (d < 0.0f)
 					d = 0.0f;
 				break;
 			}
 			case DISTANCE_INNER_PRODUCT:
-				d = -mkt_dot_product(vec, cent, dim);
+				d = -vs_dot_product(vec, cent, dim);
 				break;
 			case DISTANCE_COSINE:
-				d = 1.0f - mkt_dot_product(vec, cent, dim);
+				d = 1.0f - vs_dot_product(vec, cent, dim);
 				break;
 			}
 
@@ -589,7 +589,7 @@ kmeans_merge_centroids(
 			if (sizes[c] == 0)
 				continue;
 			float *cent = new_cents + (size_t)c * dim;
-			float  norm = mkt_l2_norm(cent, dim);
+			float  norm = vs_l2_norm(cent, dim);
 			if (norm > 1e-10f)
 				vec32_scale(cent, 1.0f / norm, cent, dim);
 		}
@@ -603,7 +603,7 @@ kmeans_merge_centroids(
 	if (norms_c != NULL && metric == DISTANCE_L2)
 	{
 		for (uint32_t j = 0; j < nlist; j++)
-			norms_c[j] = mkt_l2_norm_squared(centroids + (size_t)j * dim, dim);
+			norms_c[j] = vs_l2_norm_squared(centroids + (size_t)j * dim, dim);
 	}
 
 	return shift_sq;
@@ -626,10 +626,10 @@ kmeans_state_create(
 		uint32_t		nlist,
 		DistanceMetric	metric)
 {
-	MktMemCtx ctx	  = mkt_memctx_create(NULL, "kmeans_state");
-	MktMemCtx old_ctx = mkt_memctx_switch(ctx);
+	VsMemCtx ctx	 = vs_memctx_create(NULL, "kmeans_state");
+	VsMemCtx old_ctx = vs_memctx_switch(ctx);
 
-	KMeansState *st = mkt_alloc0(sizeof(KMeansState));
+	KMeansState *st = vs_alloc0(sizeof(KMeansState));
 
 	st->memctx	 = ctx;
 	st->vectors	 = vectors;
@@ -640,30 +640,30 @@ kmeans_state_create(
 	st->dim		 = dim;
 	st->metric	 = metric;
 
-	st->centroids	  = mkt_alloc((size_t)nlist * dim * sizeof(float));
-	st->assignments	  = mkt_alloc(nvecs * sizeof(ClusterId));
-	st->cluster_sizes = mkt_alloc(nlist * sizeof(uint32_t));
-	st->new_centroids = mkt_alloc((size_t)nlist * dim * sizeof(float));
+	st->centroids	  = vs_alloc((size_t)nlist * dim * sizeof(float));
+	st->assignments	  = vs_alloc(nvecs * sizeof(ClusterId));
+	st->cluster_sizes = vs_alloc(nlist * sizeof(uint32_t));
+	st->new_centroids = vs_alloc((size_t)nlist * dim * sizeof(float));
 
 	uint32_t block = KMEANS_BLOCK_SIZE;
 	if (block > nvecs)
 		block = nvecs;
-	st->dist_block = mkt_alloc((size_t)block * nlist * sizeof(float));
+	st->dist_block = vs_alloc((size_t)block * nlist * sizeof(float));
 
 	/*
 	 * Allocate conversion buffer for non-f32 types, or for f32 with
 	 * indices (Lloyd gather needs a contiguous block).
 	 */
-	if (mkt_vec_element_size(vec_type) != sizeof(float) || indices != NULL)
-		st->vec_block = mkt_alloc((size_t)block * dim * sizeof(float));
+	if (vs_vec_element_size(vec_type) != sizeof(float) || indices != NULL)
+		st->vec_block = vs_alloc((size_t)block * dim * sizeof(float));
 
 	if (metric == DISTANCE_L2)
 	{
-		st->norms_x = mkt_alloc(nvecs * sizeof(float));
-		st->norms_c = mkt_alloc(nlist * sizeof(float));
+		st->norms_x = vs_alloc(nvecs * sizeof(float));
+		st->norms_c = vs_alloc(nlist * sizeof(float));
 	}
 
-	mkt_memctx_switch(old_ctx);
+	vs_memctx_switch(old_ctx);
 	return st;
 }
 
@@ -672,8 +672,8 @@ kmeans_state_destroy(KMeansState *st)
 {
 	if (st == NULL)
 		return;
-	MktMemCtx ctx = (MktMemCtx)st->memctx;
-	mkt_memctx_delete(ctx); /* st is now invalid */
+	VsMemCtx ctx = (VsMemCtx)st->memctx;
+	vs_memctx_delete(ctx); /* st is now invalid */
 }
 
 /*
@@ -787,7 +787,7 @@ static const KMeansAlgoOps elkan_ops = {
  *
  * always_inline — the specialized wrappers below pass a static const
  * Vec32TypeOps from the header, so the compiler inlines through
- * every vtable function pointer. MKT_TARGET_CLONES on the wrappers
+ * every vtable function pointer. VS_TARGET_CLONES on the wrappers
  * generates AVX2/AVX-512 variants of the entire inlined body.
  */
 __attribute__((always_inline)) static inline void
@@ -804,7 +804,7 @@ kmeans_run_one_impl(
 
 	size_t cent_bytes = (size_t)st->nlist * st->dim * sizeof(float);
 	void  *algo_state = algo->create ? algo->create(st) : NULL;
-	float *old_cents  = algo->update_bounds ? mkt_alloc(cent_bytes) : NULL;
+	float *old_cents  = algo->update_bounds ? vs_alloc(cent_bytes) : NULL;
 
 	if (opts->initial_centroids != NULL)
 	{
@@ -821,7 +821,7 @@ kmeans_run_one_impl(
 	 * Works with or without a thread pool — serial fallback
 	 * calls work+reduce in a plain loop.
 	 * Hamerly/Elkan use the generic loop below (needs bounds). */
-	bool use_iterate = st->vec_type == MKT_VEC_F32 &&
+	bool use_iterate = st->vec_type == VS_VEC_F32 &&
 					   algo->update_bounds == NULL;
 
 	if (use_iterate)
@@ -832,7 +832,7 @@ kmeans_run_one_impl(
 		if (algo->destroy)
 			algo->destroy(algo_state);
 		if (old_cents)
-			mkt_free(old_cents);
+			vs_free(old_cents);
 		return;
 	}
 
@@ -856,10 +856,10 @@ kmeans_run_one_impl(
 				st->centroids, st->new_centroids, st->nlist, st->dim);
 
 		if (opts->verbose)
-			mkt_log("  iter %u: cost=%.4f, max_shift=%.6f\n",
-					iter,
-					st->total_cost,
-					sqrtf(shift_sq));
+			vs_log("  iter %u: cost=%.4f, max_shift=%.6f\n",
+				   iter,
+				   st->total_cost,
+				   sqrtf(shift_sq));
 
 		st->total_cost = 0.0f;
 
@@ -870,7 +870,7 @@ kmeans_run_one_impl(
 			if (algo->destroy)
 				algo->destroy(algo_state);
 			if (old_cents)
-				mkt_free(old_cents);
+				vs_free(old_cents);
 			return;
 		}
 	}
@@ -880,40 +880,40 @@ kmeans_run_one_impl(
 	if (algo->destroy)
 		algo->destroy(algo_state);
 	if (old_cents)
-		mkt_free(old_cents);
+		vs_free(old_cents);
 }
 
-/* Specialized wrappers — MKT_TARGET_CLONES generates SIMD variants */
+/* Specialized wrappers — VS_TARGET_CLONES generates SIMD variants */
 
-MKT_TARGET_CLONES static void
+VS_TARGET_CLONES static void
 kmeans_run_one_f32(
 		KMeansState			*st,
 		const KMeansOptions *opts,
 		uint64_t			 seed,
 		const KMeansAlgoOps *algo)
 {
-	kmeans_run_one_impl(st, opts, seed, algo, &mkt_f32_type_ops);
+	kmeans_run_one_impl(st, opts, seed, algo, &vs_f32_type_ops);
 }
 
-MKT_TARGET_CLONES static void
+VS_TARGET_CLONES static void
 kmeans_run_one_f16(
 		KMeansState			*st,
 		const KMeansOptions *opts,
 		uint64_t			 seed,
 		const KMeansAlgoOps *algo)
 {
-	kmeans_run_one_impl(st, opts, seed, algo, &mkt_f16_type_ops);
+	kmeans_run_one_impl(st, opts, seed, algo, &vs_f16_type_ops);
 }
 
-#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
-MKT_TARGET_F16C_AVX2 static void
+#if defined(VS_F16C_SUPPORT) && !defined(VS_SIMD_NONE)
+VS_TARGET_F16C_AVX2 static void
 kmeans_run_one_f16c(
 		KMeansState			*st,
 		const KMeansOptions *opts,
 		uint64_t			 seed,
 		const KMeansAlgoOps *algo)
 {
-	kmeans_run_one_impl(st, opts, seed, algo, &mkt_f16c_type_ops);
+	kmeans_run_one_impl(st, opts, seed, algo, &vs_f16c_type_ops);
 }
 #endif
 
@@ -927,11 +927,11 @@ kmeans_run_one(
 {
 	switch (st->vec_type)
 	{
-	case MKT_VEC_F32:
+	case VS_VEC_F32:
 		kmeans_run_one_f32(st, opts, seed, algo);
 		break;
-#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
-	case MKT_VEC_F16C:
+#if defined(VS_F16C_SUPPORT) && !defined(VS_SIMD_NONE)
+	case VS_VEC_F16C:
 		kmeans_run_one_f16c(st, opts, seed, algo);
 		break;
 #endif
@@ -946,7 +946,7 @@ kmeans_run_one(
  */
 
 KMeansResult *
-mkt_kmeans(
+vs_kmeans(
 		const void			*vectors,
 		const uint32_t		*indices,
 		VecType				 vec_type,
@@ -963,7 +963,7 @@ mkt_kmeans(
 	if (nlist > nvecs)
 		nlist = nvecs;
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	if (options != NULL)
 		opts = *options;
 	if (opts.nredo == 0)
@@ -976,7 +976,7 @@ mkt_kmeans(
 	KMeansAlgorithm algo = opts.algorithm;
 	if (algo == KMEANS_ALGO_AUTO)
 	{
-#ifdef MKT_HAVE_CBLAS
+#ifdef VS_HAVE_CBLAS
 		algo = g_use_cblas ? KMEANS_ALGO_CBLAS : KMEANS_ALGO_LLOYD;
 #else
 		algo = KMEANS_ALGO_LLOYD;
@@ -1019,35 +1019,35 @@ mkt_kmeans(
 		uint64_t seed = opts.seed + redo;
 
 		/* Run in arena context so per-iteration temps land there */
-		MktMemCtx run_ctx = mkt_memctx_switch((MktMemCtx)st->memctx);
+		VsMemCtx run_ctx = vs_memctx_switch((VsMemCtx)st->memctx);
 		kmeans_run_one(st, &opts, seed, algo_ops);
-		mkt_memctx_switch(run_ctx);
+		vs_memctx_switch(run_ctx);
 
 		if (opts.verbose && opts.nredo > 1)
-			mkt_log("redo %u/%u: cost=%.4f%s\n",
-					redo + 1,
-					opts.nredo,
-					st->total_cost,
-					st->total_cost < best_cost ? " (best)" : "");
+			vs_log("redo %u/%u: cost=%.4f%s\n",
+				   redo + 1,
+				   opts.nredo,
+				   st->total_cost,
+				   st->total_cost < best_cost ? " (best)" : "");
 
 		if (st->total_cost < best_cost)
 		{
 			/* Save as best — copy out of arena into caller ctx */
 			if (best != NULL)
-				mkt_kmeans_result_destroy(best);
+				vs_kmeans_result_destroy(best);
 
-			best			 = mkt_alloc0(sizeof(KMeansResult));
+			best			 = vs_alloc0(sizeof(KMeansResult));
 			best->nlist		 = nlist;
 			best->dim		 = dim;
 			best->total_cost = st->total_cost;
 
-			best->centroids = mkt_alloc(cent_sz);
+			best->centroids = vs_alloc(cent_sz);
 			memcpy(best->centroids, st->centroids, cent_sz);
 
-			best->assignments = mkt_alloc(assign_sz);
+			best->assignments = vs_alloc(assign_sz);
 			memcpy(best->assignments, st->assignments, assign_sz);
 
-			best->cluster_sizes = mkt_alloc(clsize_sz);
+			best->cluster_sizes = vs_alloc(clsize_sz);
 			memcpy(best->cluster_sizes, st->cluster_sizes, clsize_sz);
 
 			best_cost = st->total_cost;
@@ -1060,12 +1060,12 @@ mkt_kmeans(
 }
 
 void
-mkt_kmeans_result_destroy(KMeansResult *result)
+vs_kmeans_result_destroy(KMeansResult *result)
 {
 	if (result == NULL)
 		return;
-	mkt_free(result->centroids);
-	mkt_free(result->assignments);
-	mkt_free(result->cluster_sizes);
-	mkt_free(result);
+	vs_free(result->centroids);
+	vs_free(result->assignments);
+	vs_free(result->cluster_sizes);
+	vs_free(result);
 }

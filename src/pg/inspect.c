@@ -37,10 +37,10 @@
 #include "pg/bufstorage.h"
 #include "support_pg.h"
 
-PG_FUNCTION_INFO_V1(mkt_centroid_pages);
-PG_FUNCTION_INFO_V1(mkt_posting_pages);
-PG_FUNCTION_INFO_V1(mkt_tids_clusters);
-PG_FUNCTION_INFO_V1(mkt_index_settings);
+PG_FUNCTION_INFO_V1(vs_centroid_pages);
+PG_FUNCTION_INFO_V1(vs_posting_pages);
+PG_FUNCTION_INFO_V1(vs_tids_clusters);
+PG_FUNCTION_INFO_V1(vs_index_settings);
 
 /*
  * The functions below iterate an on-disk entry_count read straight from a
@@ -143,10 +143,10 @@ collect_leaf_entries(
 		Dimension	dim,
 		LeafEntry **out)
 {
-	MktPgStorage store;
-	MktStorage	*st = &store.base;
+	VsPgStorage store;
+	VsStorage  *st = &store.base;
 
-	mkt_pg_storage_init_inspect(&store, index);
+	vs_pg_storage_init_inspect(&store, index);
 
 	int			 wl_cap	 = 64;
 	int			 wl_len	 = 0;
@@ -163,7 +163,7 @@ collect_leaf_entries(
 	{
 		BlockNumber blkno = wl[wl_head++];
 
-		Page page = mkt_storage_read_page(st, blkno);
+		Page page = vs_storage_read_page(st, blkno);
 
 		const PrismCentroidPageOpaque *opaque	= PRISM_CENTROID_OPAQUE(page);
 		uint16_t					   nentries = opaque->entry_count;
@@ -184,13 +184,13 @@ collect_leaf_entries(
 			BlockNumber child;
 			bool		is_leaf;
 
-			if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+			if (fmt == PRISM_CENTROID_FMT_FASTSCAN)
 			{
 				/* No per-entry meta: read the child from the packed
 				 * group array and take leaf status from the page level. */
 				char		*content = (char *)PageGetContents(page);
-				uint32_t	 g		 = i / MKT_FASTSCAN_GROUP;
-				uint32_t	 slot	 = i % MKT_FASTSCAN_GROUP;
+				uint32_t	 g		 = i / VS_FASTSCAN_GROUP;
+				uint32_t	 slot	 = i % VS_FASTSCAN_GROUP;
 				BlockNumber *grp =
 						prism_centroid_fastscan_group_child(content, g, dim);
 				child	= grp[slot];
@@ -224,7 +224,7 @@ collect_leaf_entries(
 			}
 		}
 
-		mkt_storage_release_page(st, blkno);
+		vs_storage_release_page(st, blkno);
 	}
 
 	pfree(wl);
@@ -234,14 +234,14 @@ collect_leaf_entries(
 
 /* Format name lookup (indexed by PrismCentroidFormat) */
 static const char *centroid_format_names[] = {
-		[MKT_CENTROID_FMT_RABITQ]	= "rabitq",
-		[MKT_CENTROID_FMT_FLOAT]	= "float",
-		[MKT_CENTROID_FMT_HALF]		= "half",
-		[MKT_CENTROID_FMT_FASTSCAN] = "fastscan",
+		[PRISM_CENTROID_FMT_RABITQ]	  = "rabitq",
+		[PRISM_CENTROID_FMT_FLOAT]	  = "float",
+		[PRISM_CENTROID_FMT_HALF]	  = "half",
+		[PRISM_CENTROID_FMT_FASTSCAN] = "fastscan",
 };
 
 /*
- * mkt_centroid_pages(regclass)
+ * vs_centroid_pages(regclass)
  *
  * Returns one row per centroid entry: blkno, entry, level, format,
  * child_blkno, child_count, is_leaf. Traverses the tree via BFS
@@ -249,7 +249,7 @@ static const char *centroid_format_names[] = {
  * chains and child_blkno links.
  */
 Datum
-mkt_centroid_pages(PG_FUNCTION_ARGS)
+vs_centroid_pages(PG_FUNCTION_ARGS)
 {
 	Oid			   indexoid = PG_GETARG_OID(0);
 	ReturnSetInfo *rsinfo	= (ReturnSetInfo *)fcinfo->resultinfo;
@@ -270,20 +270,20 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 
 	require_index_select(index, AccessShareLock);
 
-	MktPgStorage store;
-	MktStorage	*st = &store.base;
+	VsPgStorage store;
+	VsStorage  *st = &store.base;
 
-	mkt_pg_storage_init_inspect(&store, index);
+	vs_pg_storage_init_inspect(&store, index);
 
 	/* Read metapage and verify magic */
-	Page meta_page = mkt_storage_read_page(st, 0);
+	Page meta_page = vs_storage_read_page(st, 0);
 
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (meta->magic != MKT_META_MAGIC)
+	if (meta->magic != PRISM_META_MAGIC)
 	{
-		mkt_storage_release_page(st, 0);
+		vs_storage_release_page(st, 0);
 		relation_close(index, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -295,7 +295,7 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 	Dimension	dim			   = (Dimension)meta->dim;
 	uint8_t		nlevels		   = meta->nlevels;
 
-	mkt_storage_release_page(st, 0);
+	vs_storage_release_page(st, 0);
 
 	if (!BlockNumberIsValid(first_centroid))
 	{
@@ -318,7 +318,7 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 	{
 		BlockNumber blkno = worklist[worklist_head++];
 
-		Page page = mkt_storage_read_page(st, blkno);
+		Page page = vs_storage_read_page(st, blkno);
 
 		const PrismCentroidPageOpaque *opaque = PRISM_CENTROID_OPAQUE(page);
 		PrismCentroidFormat			   fmt =
@@ -335,14 +335,14 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 
 		check_centroid_count(blkno, nentries, dim, fmt);
 
-		if (fmt == MKT_CENTROID_FMT_FASTSCAN)
+		if (fmt == PRISM_CENTROID_FMT_FASTSCAN)
 		{
 			char *content = (char *)PageGetContents(page);
 
 			for (uint16_t i = 0; i < nentries; i++)
 			{
-				uint32_t	 g	  = i / MKT_FASTSCAN_GROUP;
-				uint32_t	 slot = i % MKT_FASTSCAN_GROUP;
+				uint32_t	 g	  = i / VS_FASTSCAN_GROUP;
+				uint32_t	 slot = i % VS_FASTSCAN_GROUP;
 				BlockNumber *child =
 						prism_centroid_fastscan_group_child(content, g, dim);
 
@@ -438,7 +438,7 @@ mkt_centroid_pages(PG_FUNCTION_ARGS)
 			worklist[worklist_len++] = opaque->next_blkno;
 		}
 
-		mkt_storage_release_page(st, blkno);
+		vs_storage_release_page(st, blkno);
 	}
 
 	pfree(worklist);
@@ -533,7 +533,7 @@ emit_posting_row(PrismPostingChainPos *pos, void *state)
  * posting_head block numbers) and following next_blkno links.
  * ---------------------------------------------------------------- */
 Datum
-mkt_posting_pages(PG_FUNCTION_ARGS)
+vs_posting_pages(PG_FUNCTION_ARGS)
 {
 	Oid			   indexoid = PG_GETARG_OID(0);
 	ReturnSetInfo *rsinfo	= (ReturnSetInfo *)fcinfo->resultinfo;
@@ -553,19 +553,19 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 
 	require_index_select(index, AccessShareLock);
 
-	MktPgStorage store;
-	MktStorage	*st = &store.base;
+	VsPgStorage store;
+	VsStorage  *st = &store.base;
 
-	mkt_pg_storage_init_inspect(&store, index);
+	vs_pg_storage_init_inspect(&store, index);
 
-	Page meta_page = mkt_storage_read_page(st, 0);
+	Page meta_page = vs_storage_read_page(st, 0);
 
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (meta->magic != MKT_META_MAGIC)
+	if (meta->magic != PRISM_META_MAGIC)
 	{
-		mkt_storage_release_page(st, 0);
+		vs_storage_release_page(st, 0);
 		relation_close(index, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -576,7 +576,7 @@ mkt_posting_pages(PG_FUNCTION_ARGS)
 	BlockNumber first_centroid = meta->first_centroid;
 	Dimension	dim			   = meta->dim;
 	uint8_t		nlevels		   = meta->nlevels;
-	mkt_storage_release_page(st, 0);
+	vs_storage_release_page(st, 0);
 
 	if (!BlockNumberIsValid(first_centroid))
 	{
@@ -642,7 +642,7 @@ emit_tid_cluster(
 }
 
 Datum
-mkt_tids_clusters(PG_FUNCTION_ARGS)
+vs_tids_clusters(PG_FUNCTION_ARGS)
 {
 	Oid			   indexoid = PG_GETARG_OID(0);
 	ArrayType	  *arr		= PG_GETARG_ARRAYTYPE_P(1);
@@ -678,21 +678,21 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 
 	require_index_select(index, AccessShareLock);
 
-	MktPgStorage store;
-	MktStorage	*st = &store.base;
+	VsPgStorage store;
+	VsStorage  *st = &store.base;
 
-	mkt_pg_storage_init_inspect(&store, index);
+	vs_pg_storage_init_inspect(&store, index);
 
 	/*
 	 * Through a local: PageGetSpecialPointer is a macro that evaluates its
 	 * argument three times, and reading a page is not free of side effects
 	 * -- inlining the read pins the buffer once per evaluation.
 	 */
-	Page				 meta_page = mkt_storage_read_page(st, 0);
+	Page				 meta_page = vs_storage_read_page(st, 0);
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 	Dimension dim = (Dimension)meta->dim;
-	mkt_storage_release_page(st, 0);
+	vs_storage_release_page(st, 0);
 
 	/* Scan every block and pick out posting pages directly (identified by
 	 * page_id), rather than walking the centroid tree to find posting
@@ -701,7 +701,7 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 	BlockNumber nblocks = RelationGetNumberOfBlocks(index);
 	for (BlockNumber blkno = 1; nk > 0 && blkno < nblocks; blkno++)
 	{
-		Page page = mkt_storage_read_page(st, blkno);
+		Page page = vs_storage_read_page(st, blkno);
 
 		if (PageGetSpecialSize(page) ==
 			MAXALIGN(sizeof(PrismPostingPageOpaque)))
@@ -721,16 +721,16 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 
 				if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
 				{
-					/* SoA: TIDs packed per group of MKT_FASTSCAN_GROUP. */
-					uint32_t ngroups = (count + MKT_FASTSCAN_GROUP - 1) /
-									   MKT_FASTSCAN_GROUP;
+					/* SoA: TIDs packed per group of VS_FASTSCAN_GROUP. */
+					uint32_t ngroups = (count + VS_FASTSCAN_GROUP - 1) /
+									   VS_FASTSCAN_GROUP;
 					for (uint32_t g = 0; g < ngroups; g++)
 					{
 						ItemPointerData *tids =
 								prism_fastscan_group_tids(content, g, dim);
-						uint32_t gc = count - g * MKT_FASTSCAN_GROUP;
-						if (gc > MKT_FASTSCAN_GROUP)
-							gc = MKT_FASTSCAN_GROUP;
+						uint32_t gc = count - g * VS_FASTSCAN_GROUP;
+						if (gc > VS_FASTSCAN_GROUP)
+							gc = VS_FASTSCAN_GROUP;
 						for (uint32_t v = 0; v < gc; v++)
 							emit_tid_cluster(
 									rsinfo,
@@ -757,7 +757,7 @@ mkt_tids_clusters(PG_FUNCTION_ARGS)
 				}
 			}
 		}
-		mkt_storage_release_page(st, blkno);
+		vs_storage_release_page(st, blkno);
 	}
 
 	relation_close(index, AccessShareLock);
@@ -847,7 +847,7 @@ settings_row(
 }
 
 Datum
-mkt_index_settings(PG_FUNCTION_ARGS)
+vs_index_settings(PG_FUNCTION_ARGS)
 {
 	Oid			   indexoid = PG_GETARG_OID(0);
 	ReturnSetInfo *rsinfo	= (ReturnSetInfo *)fcinfo->resultinfo;
@@ -867,23 +867,23 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 
 	require_index_select(index, AccessShareLock);
 
-	MktPgStorage store;
-	MktStorage	*st = &store.base;
+	VsPgStorage store;
+	VsStorage  *st = &store.base;
 
-	mkt_pg_storage_init_inspect(&store, index);
+	vs_pg_storage_init_inspect(&store, index);
 
 	/*
 	 * Through a local: PageGetSpecialPointer is a macro that evaluates its
 	 * argument three times, and reading a page is not free of side effects
 	 * -- inlining the read pins the buffer once per evaluation.
 	 */
-	Page				 meta_page = mkt_storage_read_page(st, 0);
+	Page				 meta_page = vs_storage_read_page(st, 0);
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (meta->magic != MKT_META_MAGIC)
+	if (meta->magic != PRISM_META_MAGIC)
 	{
-		mkt_storage_release_page(st, 0);
+		vs_storage_release_page(st, 0);
 		relation_close(index, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -898,9 +898,9 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 	uint32_t	   nlist	= meta->nlist;
 	DistanceMetric metric	= (DistanceMetric)meta->metric;
 	uint8_t		   fan_out	= meta->fan_out;
-	bool		   fastscan = (meta->flags & MKT_META_FLAG_FASTSCAN) != 0;
+	bool		   fastscan = (meta->flags & PRISM_META_FLAG_FASTSCAN) != 0;
 	uint32_t	   ncentroid_pages = meta->ncentroid_pages;
-	mkt_storage_release_page(st, 0);
+	vs_storage_release_page(st, 0);
 
 	const PrismOptions *opts = (const PrismOptions *)index->rd_options;
 	List			   *set	 = explicit_reloptions(indexoid);
@@ -949,7 +949,7 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 			psprintf(
 					"%g",
 					(opts != NULL) ? opts->soar_lambda
-								   : MKT_ANN_DEFAULT_SOAR_LAMBDA),
+								   : PRISM_DEFAULT_SOAR_LAMBDA),
 			reloption_is_set(set, "soar_lambda") ? "option" : "default");
 	settings_row(
 			rsinfo,
@@ -957,7 +957,7 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 			psprintf(
 					"%g",
 					(opts != NULL) ? opts->boundary_epsilon
-								   : MKT_ANN_DEFAULT_BOUNDARY_EPSILON),
+								   : PRISM_DEFAULT_BOUNDARY_EPSILON),
 			reloption_is_set(set, "boundary_epsilon") ? "option" : "default");
 	settings_row(
 			rsinfo,
@@ -968,17 +968,17 @@ mkt_index_settings(PG_FUNCTION_ARGS)
 	/* Query-time settings whose effective value depends on this
 	 * index: the session GUC wins when set, otherwise the index
 	 * option or automatic resolution applies. */
-	if (prism_distance_mode != MKT_DISTANCE_MODE_DEFAULT)
+	if (prism_distance_mode != VS_DISTANCE_MODE_DEFAULT)
 		settings_row(
 				rsinfo,
 				"distance_mode",
-				mkt_distance_mode_name((MktDistanceMode)prism_distance_mode),
+				vs_distance_mode_name((VsDistanceMode)prism_distance_mode),
 				"session");
 	else
 		settings_row(
 				rsinfo,
 				"distance_mode",
-				mkt_distance_mode_name(PrismGetDistanceMode(index)),
+				vs_distance_mode_name(PrismGetDistanceMode(index)),
 				reloption_is_set(set, "distance_mode") ? "option" : "default");
 	settings_row(
 			rsinfo,

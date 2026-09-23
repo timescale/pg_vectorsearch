@@ -142,14 +142,14 @@ vector search engine outside PostgreSQL. This makes it possible to unit
 test the code, as well as run micro-benchmarks to optimize particularly
 hot query paths.
 
-The `mkt` CLI tool includes benchmarks for distance computation:
+The `vectorsearch` CLI tool includes benchmarks for distance computation:
 
 ```bash
 # Run distance benchmark (default: dim=768, count=10000)
-./bin/mkt bench distance
+./bin/vectorsearch bench distance
 
 # Compare implementations
-./bin/mkt bench distance --dim 1536 --count 50000
+./bin/vectorsearch bench distance --dim 1536 --count 50000
 ```
 
 See [docs/simd.md][simd-doc] for SIMD build options and implementation details.

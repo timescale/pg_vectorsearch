@@ -8,7 +8,7 @@
 
 #include <postgres.h>
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <commands/defrem.h>
 #include <commands/explain.h>
@@ -48,7 +48,7 @@ prism_explain_hook(
 
 	Relation rel	 = scan->indexRelation;
 	char	*am_name = get_am_name(rel->rd_rel->relam);
-	if (am_name == NULL || strcmp(am_name, MKT_AM_NAME) != 0)
+	if (am_name == NULL || strcmp(am_name, VS_AM_NAME) != 0)
 	{
 		if (am_name != NULL)
 			pfree(am_name);
@@ -96,19 +96,19 @@ prism_explain_hook(
 		ExplainPropertyFloat(
 				"Centroid Search Time",
 				"ms",
-				(double)stats->centroid_ns / MKT_NS_PER_MS,
+				(double)stats->centroid_ns / VS_NS_PER_MS,
 				3,
 				es);
 		ExplainPropertyFloat(
 				"Posting Scan Time",
 				"ms",
-				(double)stats->posting_ns / MKT_NS_PER_MS,
+				(double)stats->posting_ns / VS_NS_PER_MS,
 				3,
 				es);
 		ExplainPropertyFloat(
 				"Rerank Time",
 				"ms",
-				(double)stats->rerank_ns / MKT_NS_PER_MS,
+				(double)stats->rerank_ns / VS_NS_PER_MS,
 				3,
 				es);
 	}

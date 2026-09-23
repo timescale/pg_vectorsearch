@@ -38,32 +38,32 @@
 
 #if defined(__FLT16_MAX__) && !defined(__FreeBSD__) && \
 		(!defined(__i386__) || defined(__SSE2__))
-#define MKT_FLT16_SUPPORT
+#define VS_FLT16_SUPPORT
 #endif
 
 #if defined(__F16C__)
 #include <immintrin.h>
-#define MKT_F16C_SUPPORT
+#define VS_F16C_SUPPORT
 #endif
 
-#ifdef MKT_FLT16_SUPPORT
+#ifdef VS_FLT16_SUPPORT
 typedef _Float16 half;
-#define MKT_HALF_MAX FLT16_MAX
+#define VS_HALF_MAX FLT16_MAX
 #else
 typedef uint16_t half;
-#define MKT_HALF_MAX 65504
+#define VS_HALF_MAX 65504
 #endif
 
 /* ----------------------------------------------------------------
  * Scalar conversion (inline, 3-tier)
  * ---------------------------------------------------------------- */
 
-MKT_VTABLE_INLINE float
-mkt_half_to_float(half h)
+VS_VTABLE_INLINE float
+vs_half_to_float(half h)
 {
-#if defined(MKT_FLT16_SUPPORT)
+#if defined(VS_FLT16_SUPPORT)
 	return (float)h;
-#elif defined(MKT_F16C_SUPPORT)
+#elif defined(VS_F16C_SUPPORT)
 	return _cvtsh_ss(h);
 #else
 	/* IEEE 754 bit manipulation fallback */
@@ -113,11 +113,11 @@ mkt_half_to_float(half h)
 }
 
 static inline half
-mkt_float_to_half(float f)
+vs_float_to_half(float f)
 {
-#if defined(MKT_FLT16_SUPPORT)
+#if defined(VS_FLT16_SUPPORT)
 	return (_Float16)f;
-#elif defined(MKT_F16C_SUPPORT)
+#elif defined(VS_F16C_SUPPORT)
 	return _cvtss_sh(f, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
 #else
 	/* IEEE 754 bit manipulation fallback */
@@ -175,9 +175,9 @@ mkt_float_to_half(float f)
  * ---------------------------------------------------------------- */
 
 static inline bool
-mkt_half_is_nan(half h)
+vs_half_is_nan(half h)
 {
-#ifdef MKT_FLT16_SUPPORT
+#ifdef VS_FLT16_SUPPORT
 	return isnan(h);
 #else
 	uint16_t bits = h;
@@ -186,9 +186,9 @@ mkt_half_is_nan(half h)
 }
 
 static inline bool
-mkt_half_is_inf(half h)
+vs_half_is_inf(half h)
 {
-#ifdef MKT_FLT16_SUPPORT
+#ifdef VS_FLT16_SUPPORT
 	return isinf(h);
 #else
 	uint16_t bits = h;
@@ -197,9 +197,9 @@ mkt_half_is_inf(half h)
 }
 
 static inline bool
-mkt_half_is_zero(half h)
+vs_half_is_zero(half h)
 {
-#ifdef MKT_FLT16_SUPPORT
+#ifdef VS_FLT16_SUPPORT
 	return h == (_Float16)0;
 #else
 	return (h & 0x7FFF) == 0;
@@ -226,8 +226,8 @@ typedef struct Vec16
  * Bulk conversion (SIMD-dispatched in vec16.c)
  * ---------------------------------------------------------------- */
 
-void mkt_half_to_float_array(const half *src, float *dst, uint32_t n);
-void mkt_float_to_half_array(const float *src, half *dst, uint32_t n);
+void vs_half_to_float_array(const half *src, float *dst, uint32_t n);
+void vs_float_to_half_array(const float *src, half *dst, uint32_t n);
 
 /* ----------------------------------------------------------------
  * Vec16 lifecycle
@@ -242,7 +242,7 @@ void   vec16_set(Vec16 *v, const float *values);
 static inline Vec32Ref
 Vec16ToRef(const Vec16 *hv, float *buffer)
 {
-	mkt_half_to_float_array(hv->x, buffer, hv->dim);
+	vs_half_to_float_array(hv->x, buffer, hv->dim);
 	return (Vec32Ref){.data = buffer, .dim = (Dimension)hv->dim};
 }
 
@@ -255,73 +255,73 @@ Vec16ToRef(const Vec16 *hv, float *buffer)
  * other hot loops that dispatch once at the entry point.
  * ---------------------------------------------------------------- */
 
-MKT_VTABLE_INLINE float
-mkt_f16_dot_product(const void *vec, const float *centroid, Dimension dim)
+VS_VTABLE_INLINE float
+vs_f16_dot_product(const void *vec, const float *centroid, Dimension dim)
 {
 	const half *v	= (const half *)vec;
 	float		sum = 0.0f;
 	for (Dimension d = 0; d < dim; d++)
-		sum += mkt_half_to_float(v[d]) * centroid[d];
+		sum += vs_half_to_float(v[d]) * centroid[d];
 	return sum;
 }
 
-MKT_VTABLE_INLINE float
-mkt_f16_l2_squared(const void *vec, const float *centroid, Dimension dim)
+VS_VTABLE_INLINE float
+vs_f16_l2_squared(const void *vec, const float *centroid, Dimension dim)
 {
 	const half *v	= (const half *)vec;
 	float		sum = 0.0f;
 	for (Dimension d = 0; d < dim; d++)
 	{
-		float diff = mkt_half_to_float(v[d]) - centroid[d];
+		float diff = vs_half_to_float(v[d]) - centroid[d];
 		sum += diff * diff;
 	}
 	return sum;
 }
 
-MKT_VTABLE_INLINE float
-mkt_f16_norm_sq(const void *vec, Dimension dim)
+VS_VTABLE_INLINE float
+vs_f16_norm_sq(const void *vec, Dimension dim)
 {
 	const half *v	= (const half *)vec;
 	float		sum = 0.0f;
 	for (Dimension d = 0; d < dim; d++)
 	{
-		float val = mkt_half_to_float(v[d]);
+		float val = vs_half_to_float(v[d]);
 		sum += val * val;
 	}
 	return sum;
 }
 
-MKT_VTABLE_INLINE void
-mkt_f16_sum_to_float(const void *vec, float *accum, Dimension dim)
+VS_VTABLE_INLINE void
+vs_f16_sum_to_float(const void *vec, float *accum, Dimension dim)
 {
 	const half *v = (const half *)vec;
 	for (Dimension d = 0; d < dim; d++)
-		accum[d] += mkt_half_to_float(v[d]);
+		accum[d] += vs_half_to_float(v[d]);
 }
 
-MKT_VTABLE_INLINE void
-mkt_f16_to_float_one(const void *src, float *dst, Dimension dim)
+VS_VTABLE_INLINE void
+vs_f16_to_float_one(const void *src, float *dst, Dimension dim)
 {
-	mkt_half_to_float_array((const half *)src, dst, dim);
+	vs_half_to_float_array((const half *)src, dst, dim);
 }
 
-MKT_VTABLE_INLINE const float *
-mkt_f16_to_float_block(
+VS_VTABLE_INLINE const float *
+vs_f16_to_float_block(
 		const void *src, float *dst, uint32_t count, Dimension dim)
 {
-	mkt_half_to_float_array((const half *)src, dst, (uint32_t)count * dim);
+	vs_half_to_float_array((const half *)src, dst, (uint32_t)count * dim);
 	return dst;
 }
 
-static const Vec32TypeOps mkt_f16_type_ops = {
+static const Vec32TypeOps vs_f16_type_ops = {
 		.name			= "float16",
 		.element_size	= sizeof(half),
-		.dot_product	= mkt_f16_dot_product,
-		.l2_squared		= mkt_f16_l2_squared,
-		.norm_sq		= mkt_f16_norm_sq,
-		.sum_to_float	= mkt_f16_sum_to_float,
-		.to_float_one	= mkt_f16_to_float_one,
-		.to_float_block = mkt_f16_to_float_block,
+		.dot_product	= vs_f16_dot_product,
+		.l2_squared		= vs_f16_l2_squared,
+		.norm_sq		= vs_f16_norm_sq,
+		.sum_to_float	= vs_f16_sum_to_float,
+		.to_float_one	= vs_f16_to_float_one,
+		.to_float_block = vs_f16_to_float_block,
 };
 
 /* ----------------------------------------------------------------
@@ -334,12 +334,12 @@ static const Vec32TypeOps mkt_f16_type_ops = {
  * auto-vectorization.
  * ---------------------------------------------------------------- */
 
-#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
+#if defined(VS_F16C_SUPPORT) && !defined(VS_SIMD_NONE)
 
 #include "algo/simd_utils.h"
 
-MKT_TARGET_F16C_AVX2 MKT_VTABLE_INLINE float
-mkt_f16c_dot_product(const void *vec, const float *centroid, Dimension dim)
+VS_TARGET_F16C_AVX2 VS_VTABLE_INLINE float
+vs_f16c_dot_product(const void *vec, const float *centroid, Dimension dim)
 {
 	const half *v	 = (const half *)vec;
 	__m256		sum8 = _mm256_setzero_ps();
@@ -353,16 +353,16 @@ mkt_f16c_dot_product(const void *vec, const float *centroid, Dimension dim)
 		sum8	   = _mm256_fmadd_ps(fv, fc, sum8);
 	}
 
-	float sum = mkt_horizontal_sum_avx2(sum8);
+	float sum = vs_horizontal_sum_avx2(sum8);
 
 	for (; d < dim; d++)
-		sum += mkt_half_to_float(v[d]) * centroid[d];
+		sum += vs_half_to_float(v[d]) * centroid[d];
 
 	return sum;
 }
 
-MKT_TARGET_F16C_AVX2 MKT_VTABLE_INLINE float
-mkt_f16c_l2_squared(const void *vec, const float *centroid, Dimension dim)
+VS_TARGET_F16C_AVX2 VS_VTABLE_INLINE float
+vs_f16c_l2_squared(const void *vec, const float *centroid, Dimension dim)
 {
 	const half *v	 = (const half *)vec;
 	__m256		sum8 = _mm256_setzero_ps();
@@ -377,19 +377,19 @@ mkt_f16c_l2_squared(const void *vec, const float *centroid, Dimension dim)
 		sum8		 = _mm256_fmadd_ps(diff, diff, sum8);
 	}
 
-	float sum = mkt_horizontal_sum_avx2(sum8);
+	float sum = vs_horizontal_sum_avx2(sum8);
 
 	for (; d < dim; d++)
 	{
-		float diff = mkt_half_to_float(v[d]) - centroid[d];
+		float diff = vs_half_to_float(v[d]) - centroid[d];
 		sum += diff * diff;
 	}
 
 	return sum;
 }
 
-MKT_TARGET_F16C_AVX2 MKT_VTABLE_INLINE float
-mkt_f16c_norm_sq(const void *vec, Dimension dim)
+VS_TARGET_F16C_AVX2 VS_VTABLE_INLINE float
+vs_f16c_norm_sq(const void *vec, Dimension dim)
 {
 	const half *v	 = (const half *)vec;
 	__m256		sum8 = _mm256_setzero_ps();
@@ -402,19 +402,19 @@ mkt_f16c_norm_sq(const void *vec, Dimension dim)
 		sum8	   = _mm256_fmadd_ps(fv, fv, sum8);
 	}
 
-	float sum = mkt_horizontal_sum_avx2(sum8);
+	float sum = vs_horizontal_sum_avx2(sum8);
 
 	for (; d < dim; d++)
 	{
-		float val = mkt_half_to_float(v[d]);
+		float val = vs_half_to_float(v[d]);
 		sum += val * val;
 	}
 
 	return sum;
 }
 
-MKT_TARGET_F16C_AVX2 MKT_VTABLE_INLINE void
-mkt_f16c_sum_to_float(const void *vec, float *accum, Dimension dim)
+VS_TARGET_F16C_AVX2 VS_VTABLE_INLINE void
+vs_f16c_sum_to_float(const void *vec, float *accum, Dimension dim)
 {
 	const half *v = (const half *)vec;
 	Dimension	d = 0;
@@ -428,20 +428,20 @@ mkt_f16c_sum_to_float(const void *vec, float *accum, Dimension dim)
 	}
 
 	for (; d < dim; d++)
-		accum[d] += mkt_half_to_float(v[d]);
+		accum[d] += vs_half_to_float(v[d]);
 }
 
-static const Vec32TypeOps mkt_f16c_type_ops = {
+static const Vec32TypeOps vs_f16c_type_ops = {
 		.name			= "float16-f16c",
 		.element_size	= sizeof(half),
-		.dot_product	= mkt_f16c_dot_product,
-		.l2_squared		= mkt_f16c_l2_squared,
-		.norm_sq		= mkt_f16c_norm_sq,
-		.sum_to_float	= mkt_f16c_sum_to_float,
-		.to_float_one	= mkt_f16_to_float_one,
-		.to_float_block = mkt_f16_to_float_block,
+		.dot_product	= vs_f16c_dot_product,
+		.l2_squared		= vs_f16c_l2_squared,
+		.norm_sq		= vs_f16c_norm_sq,
+		.sum_to_float	= vs_f16c_sum_to_float,
+		.to_float_one	= vs_f16_to_float_one,
+		.to_float_block = vs_f16_to_float_block,
 };
 
-#endif /* MKT_F16C_SUPPORT && !MKT_SIMD_NONE */
+#endif /* VS_F16C_SUPPORT && !VS_SIMD_NONE */
 
 #endif /* VEC16_H */

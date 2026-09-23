@@ -16,9 +16,9 @@
  * order, store 32 uint16 results.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 
 #if defined(__x86_64__) || defined(_M_X64)
 
@@ -29,13 +29,13 @@
 #include "quant/fastscan.h"
 
 __attribute__((target("avx512f,avx512bw"))) void
-mkt_fastscan_accumulate_avx512(
+vs_fastscan_accumulate_avx512(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		uint16_t	  *accum,
 		Dimension	   dim)
 {
-	uint32_t code_length = MKT_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t code_length = VS_FASTSCAN_GROUP_BYTES(dim);
 
 	const __m512i lo_mask = _mm512_set1_epi8(0x0F);
 	__m512i		  accu0	  = _mm512_setzero_si512();
@@ -142,13 +142,13 @@ hacc_reduce_16(__m512i even, __m512i odd)
 }
 
 __attribute__((target("avx512f,avx512bw"))) void
-mkt_fastscan_accumulate_hacc_avx512(
+vs_fastscan_accumulate_hacc_avx512(
 		const uint8_t *codes,
 		const uint8_t *lut,
 		int32_t		  *accum,
 		Dimension	   dim)
 {
-	uint32_t	  code_length = MKT_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t	  code_length = VS_FASTSCAN_GROUP_BYTES(dim);
 	const __m512i lo_mask	  = _mm512_set1_epi8(0x0F);
 
 	__m512i accu[2][4];
@@ -211,14 +211,14 @@ mkt_fastscan_accumulate_hacc_avx512(
  * ---------------------------------------------------------------- */
 
 __attribute__((target("avx512f,avx512bw,avx512vl"))) void
-mkt_fastscan_build_lut_hacc_avx512(
+vs_fastscan_build_lut_hacc_avx512(
 		const float *transformed,
 		Dimension	 dim,
 		uint8_t		*lut_out,
 		float		*delta_out,
 		float		*bias_out)
 {
-	uint32_t nsq = MKT_FASTSCAN_NSQ(dim);
+	uint32_t nsq = VS_FASTSCAN_NSQ(dim);
 
 	/* Vectorized min/max */
 	__m512 pos_sum = _mm512_setzero_ps();
@@ -243,8 +243,8 @@ mkt_fastscan_build_lut_hacc_avx512(
 	}
 
 	float range = global_max - global_min;
-	if (range < MKT_FASTSCAN_MIN_RANGE)
-		range = MKT_FASTSCAN_MIN_RANGE;
+	if (range < VS_FASTSCAN_MIN_RANGE)
+		range = VS_FASTSCAN_MIN_RANGE;
 
 	float delta		= range / (float)UINT16_MAX;
 	float inv_delta = 1.0f / delta;
@@ -253,7 +253,7 @@ mkt_fastscan_build_lut_hacc_avx512(
 
 	float bias_scaled = -global_min * inv_delta + 0.5f;
 
-	uint32_t lut_bytes = MKT_FASTSCAN_LUT_HACC_BYTES(dim);
+	uint32_t lut_bytes = VS_FASTSCAN_LUT_HACC_BYTES(dim);
 	memset(lut_out, 0, lut_bytes);
 
 	__m512	lo_v  = _mm512_setzero_ps();
@@ -333,15 +333,15 @@ mkt_fastscan_build_lut_hacc_avx512(
  * ---------------------------------------------------------------- */
 
 __attribute__((target("avx512f,avx512bw,avx512vl"))) void
-mkt_fastscan_build_lut_avx512(
+vs_fastscan_build_lut_avx512(
 		const float *transformed,
 		Dimension	 dim,
 		uint8_t		*lut_out,
 		float		*delta_out,
 		float		*bias_out)
 {
-	uint32_t nsq	   = MKT_FASTSCAN_NSQ(dim);
-	uint32_t nsq_pairs = MKT_FASTSCAN_NSQ_PAIRS(dim);
+	uint32_t nsq	   = VS_FASTSCAN_NSQ(dim);
+	uint32_t nsq_pairs = VS_FASTSCAN_NSQ_PAIRS(dim);
 
 	/* Vectorized min/max: split positive/negative and sum */
 	__m512 pos_sum = _mm512_setzero_ps();
@@ -366,8 +366,8 @@ mkt_fastscan_build_lut_avx512(
 	}
 
 	float range = global_max - global_min;
-	if (range < MKT_FASTSCAN_MIN_RANGE)
-		range = MKT_FASTSCAN_MIN_RANGE;
+	if (range < VS_FASTSCAN_MIN_RANGE)
+		range = VS_FASTSCAN_MIN_RANGE;
 
 	float delta		= range / (float)UINT8_MAX;
 	float inv_delta = 1.0f / delta;
@@ -440,4 +440,4 @@ mkt_fastscan_build_lut_avx512(
 
 #endif /* x86_64 */
 
-#endif /* MKT_SIMD_FULL */
+#endif /* VS_SIMD_FULL */

@@ -13,7 +13,7 @@ array_source_next(
 		const float **vec_out,
 		uint32_t	 *id_out)
 {
-	MktArraySource *as = (MktArraySource *)src;
+	VsArraySource *as = (VsArraySource *)src;
 	if (as->pos >= src->nvecs)
 		return false;
 	*id_out	 = as->pos;
@@ -25,13 +25,13 @@ array_source_next(
 static void
 array_source_reset(Vec32Source *src)
 {
-	MktArraySource *as = (MktArraySource *)src;
-	as->pos			   = 0;
+	VsArraySource *as = (VsArraySource *)src;
+	as->pos			  = 0;
 }
 
 void
-mkt_array_source_init(
-		MktArraySource *src, const float *data, uint32_t nvecs, uint32_t dim)
+vs_array_source_init(
+		VsArraySource *src, const float *data, uint32_t nvecs, uint32_t dim)
 {
 	src->base.next	   = array_source_next;
 	src->base.reset	   = array_source_reset;

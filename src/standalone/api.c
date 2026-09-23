@@ -16,9 +16,9 @@
 #include "standalone/index.h"
 #include "standalone/query.h"
 
-struct MktHandle
+struct VsHandle
 {
-	MktMemCtx	   memctx; /* top-level context, owns everything */
+	VsMemCtx	   memctx; /* top-level context, owns everything */
 	PrismIndex	  *idx;
 	PrismQueryCtx *qctx;
 };
@@ -41,14 +41,14 @@ static PrismCentroidFormat
 parse_centroid_fmt(const char *s)
 {
 	if (s == NULL)
-		return MKT_CENTROID_FMT_RABITQ;
+		return PRISM_CENTROID_FMT_RABITQ;
 	if (strcmp(s, "float32") == 0)
-		return MKT_CENTROID_FMT_FLOAT;
+		return PRISM_CENTROID_FMT_FLOAT;
 	if (strcmp(s, "float16") == 0)
-		return MKT_CENTROID_FMT_HALF;
+		return PRISM_CENTROID_FMT_HALF;
 	if (strcmp(s, "fastscan") == 0)
-		return MKT_CENTROID_FMT_FASTSCAN;
-	return MKT_CENTROID_FMT_RABITQ;
+		return PRISM_CENTROID_FMT_FASTSCAN;
+	return PRISM_CENTROID_FMT_RABITQ;
 }
 
 static PrismPostingFormat
@@ -59,20 +59,20 @@ parse_posting_fmt(const char *s)
 	return PRISM_POSTING_FMT_PAGES; /* default: pages (matches PG on-disk) */
 }
 
-static MktDistanceMode
+static VsDistanceMode
 parse_distance_mode(const char *s)
 {
 	if (s != NULL && strcmp(s, "symmetric") == 0)
-		return MKT_DISTANCE_MODE_SYMMETRIC;
-	return MKT_DISTANCE_MODE_ASYMMETRIC;
+		return VS_DISTANCE_MODE_SYMMETRIC;
+	return VS_DISTANCE_MODE_ASYMMETRIC;
 }
 
 /* ----------------------------------------------------------------
  * API
  * ---------------------------------------------------------------- */
 
-MktHandle *
-mkt_handle_create(
+VsHandle *
+vs_handle_create(
 		Vec32Source	   *src,
 		uint32_t		nlist,
 		uint32_t		fan_out,
@@ -91,9 +91,9 @@ mkt_handle_create(
 	 * otherwise as a top-level context. This works both when called
 	 * from the CLI (which sets up a cli_memctx) and from Python
 	 * ctypes (where no context is set). */
-	MktMemCtx parent  = mkt_current_memctx;
-	MktMemCtx memctx  = mkt_memctx_create(parent, "mkt_handle");
-	MktMemCtx old_ctx = mkt_memctx_switch(memctx);
+	VsMemCtx parent	 = vs_current_memctx;
+	VsMemCtx memctx	 = vs_memctx_create(parent, "vs_handle");
+	VsMemCtx old_ctx = vs_memctx_switch(memctx);
 
 	PrismCentroidFormat fmt = parse_centroid_fmt(centroid_fmt);
 
@@ -116,8 +116,8 @@ mkt_handle_create(
 	PrismIndex	   *idx = prism_index_build(src, &config, &build_stats);
 	if (idx == NULL)
 	{
-		mkt_memctx_switch(old_ctx);
-		mkt_memctx_delete(memctx);
+		vs_memctx_switch(old_ctx);
+		vs_memctx_delete(memctx);
 		return NULL;
 	}
 
@@ -152,23 +152,23 @@ mkt_handle_create(
 	if (qctx == NULL)
 	{
 		prism_index_destroy(idx);
-		mkt_memctx_switch(old_ctx);
-		mkt_memctx_delete(memctx);
+		vs_memctx_switch(old_ctx);
+		vs_memctx_delete(memctx);
 		return NULL;
 	}
 
-	MktHandle *handle = mkt_alloc(sizeof(MktHandle));
-	handle->memctx	  = memctx;
-	handle->idx		  = idx;
-	handle->qctx	  = qctx;
+	VsHandle *handle = vs_alloc(sizeof(VsHandle));
+	handle->memctx	 = memctx;
+	handle->idx		 = idx;
+	handle->qctx	 = qctx;
 
-	mkt_memctx_switch(old_ctx);
+	vs_memctx_switch(old_ctx);
 
 	return handle;
 }
 
-MktHandle *
-mkt_handle_create_from_array(
+VsHandle *
+vs_handle_create_from_array(
 		const float	   *vectors,
 		uint32_t		nvecs,
 		uint32_t		dim,
@@ -185,9 +185,9 @@ mkt_handle_create_from_array(
 		int32_t			nworkers,
 		PrismBuildInfo *info)
 {
-	MktArraySource array_src;
-	mkt_array_source_init(&array_src, vectors, nvecs, dim);
-	return mkt_handle_create(
+	VsArraySource array_src;
+	vs_array_source_init(&array_src, vectors, nvecs, dim);
+	return vs_handle_create(
 			&array_src.base,
 			nlist,
 			fan_out,
@@ -204,8 +204,8 @@ mkt_handle_create_from_array(
 }
 
 uint32_t
-mkt_handle_query(
-		MktHandle	*handle,
+vs_handle_query(
+		VsHandle	*handle,
 		const float *query,
 		uint32_t	 k,
 		uint32_t	 nprobe,
@@ -216,14 +216,14 @@ mkt_handle_query(
 	if (handle == NULL)
 		return 0;
 
-	MktDistanceMode mode = parse_distance_mode(distance_mode);
+	VsDistanceMode mode = parse_distance_mode(distance_mode);
 
 	return prism_query_exec(
 			handle->qctx, query, k, nprobe, mode, rerank, result_ids);
 }
 
 void
-mkt_handle_destroy(MktHandle *handle)
+vs_handle_destroy(VsHandle *handle)
 {
 	if (handle == NULL)
 		return;
@@ -234,6 +234,6 @@ mkt_handle_destroy(MktHandle *handle)
 	prism_query_ctx_destroy(handle->qctx);
 	prism_index_destroy(handle->idx);
 
-	MktMemCtx memctx = handle->memctx;
-	mkt_memctx_delete(memctx);
+	VsMemCtx memctx = handle->memctx;
+	vs_memctx_delete(memctx);
 }

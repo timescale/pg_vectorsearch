@@ -377,17 +377,17 @@ CREATE CAST (public.vector AS :"extschema".vec32) WITHOUT FUNCTION AS IMPLICIT;
 -- hijackable, the planted body would run as the superuser and grant the
 -- attacker SUPERUSER. It must not.
 
-DROP ROLE IF EXISTS mkt_attacker;
-CREATE ROLE mkt_attacker NOSUPERUSER NOLOGIN;   -- SET ROLE needs no LOGIN
+DROP ROLE IF EXISTS vs_attacker;
+CREATE ROLE vs_attacker NOSUPERUSER NOLOGIN;   -- SET ROLE needs no LOGIN
 -- Simulate a deployment where the role can create in a schema on the
 -- admin's search_path (public); the attack does not depend on which
 -- schema, only that the overload is visible.
-GRANT CREATE ON SCHEMA public TO mkt_attacker;
+GRANT CREATE ON SCHEMA public TO vs_attacker;
 
-SET ROLE mkt_attacker;
+SET ROLE vs_attacker;
 SELECT plant_format_overloads('public',
-    'IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = ''mkt_attacker'')'
-    ' THEN EXECUTE ''ALTER ROLE mkt_attacker SUPERUSER''; END IF');
+    'IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = ''vs_attacker'')'
+    ' THEN EXECUTE ''ALTER ROLE vs_attacker SUPERUSER''; END IF');
 RESET ROLE;
 
 -- Superuser re-installs pgvector, firing the event trigger.
@@ -395,13 +395,13 @@ DROP EXTENSION vector CASCADE;
 CREATE EXTENSION vector;
 
 SELECT assert_test('non-superuser did NOT escalate via event trigger',
-    NOT (SELECT rolsuper FROM pg_roles WHERE rolname = 'mkt_attacker'));
+    NOT (SELECT rolsuper FROM pg_roles WHERE rolname = 'vs_attacker'));
 
 -- Cleanup. DROP OWNED clears the schema grant (and anything else the role
 -- holds) so DROP ROLE does not fail on dependent privileges.
 SELECT drop_format_overloads('public');
-DROP OWNED BY mkt_attacker;
-DROP ROLE mkt_attacker;
+DROP OWNED BY vs_attacker;
+DROP ROLE vs_attacker;
 
 -- =====================================================================
 -- Summary

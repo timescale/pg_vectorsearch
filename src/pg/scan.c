@@ -35,7 +35,7 @@
 #include "types/vec32.h"
 
 /* Default nprobe — will become a GUC later */
-#define MKT_DEFAULT_NPROBE 10
+#define PRISM_DEFAULT_NPROBE 10
 /*
  * Smallest top-k any scan is sized for. Not a default in the sense of "what
  * you get when you ask for nothing" -- a query with no LIMIT is sized from
@@ -50,12 +50,12 @@
  * Summed across every prism index scan in this backend so phase timing
  * can be measured over a large query set (e.g. a full 10k-query
  * benchmark run in one session) instead of eyeballing EXPLAIN on a
- * single query. Exposed via mkt_phase_stats() / mkt_phase_stats_reset():
+ * single query. Exposed via vs_phase_stats() / vs_phase_stats_reset():
  *
- *   CREATE FUNCTION mkt_phase_stats_reset() RETURNS void
- *     AS '$libdir/pg_vectorsearch','mkt_phase_stats_reset' LANGUAGE C;
- *   CREATE FUNCTION mkt_phase_stats() RETURNS text
- *     AS '$libdir/pg_vectorsearch','mkt_phase_stats' LANGUAGE C;
+ *   CREATE FUNCTION vs_phase_stats_reset() RETURNS void
+ *     AS '$libdir/pg_vectorsearch','vs_phase_stats_reset' LANGUAGE C;
+ *   CREATE FUNCTION vs_phase_stats() RETURNS text
+ *     AS '$libdir/pg_vectorsearch','vs_phase_stats' LANGUAGE C;
  * ---------------------------------------------------------------- */
 static uint64_t g_phase_nqueries	 = 0;
 static uint64_t g_phase_centroid_ns	 = 0;
@@ -70,10 +70,10 @@ static uint64_t g_phase_cscore_ns	 = 0;
 static uint64_t g_route_sum	  = 0;
 static uint64_t g_route_le[7] = {0}; /* <=8,16,32,64,128,256,>256 */
 
-PG_FUNCTION_INFO_V1(mkt_phase_stats_reset);
+PG_FUNCTION_INFO_V1(vs_phase_stats_reset);
 
 Datum
-mkt_phase_stats_reset(PG_FUNCTION_ARGS)
+vs_phase_stats_reset(PG_FUNCTION_ARGS)
 {
 	g_phase_nqueries	 = 0;
 	g_phase_centroid_ns	 = 0;
@@ -85,18 +85,18 @@ mkt_phase_stats_reset(PG_FUNCTION_ARGS)
 	g_phase_cpageread_ns = 0;
 	g_phase_cscore_ns	 = 0;
 	g_route_sum			 = 0;
-	mkt_bufcache_hits	 = 0;
-	mkt_bufcache_cold	 = 0;
-	mkt_bufcache_stale	 = 0;
+	vs_bufcache_hits	 = 0;
+	vs_bufcache_cold	 = 0;
+	vs_bufcache_stale	 = 0;
 	for (int i = 0; i < 7; i++)
 		g_route_le[i] = 0;
 	PG_RETURN_VOID();
 }
 
-PG_FUNCTION_INFO_V1(mkt_routing_stats);
+PG_FUNCTION_INFO_V1(vs_routing_stats);
 
 Datum
-mkt_routing_stats(PG_FUNCTION_ARGS)
+vs_routing_stats(PG_FUNCTION_ARGS)
 {
 	char	 buf[448];
 	uint64_t n = g_phase_nqueries ? g_phase_nqueries : 1;
@@ -108,9 +108,9 @@ mkt_routing_stats(PG_FUNCTION_ARGS)
 			"queries=" UINT64_FORMAT " avg_deepest_contrib_rank=%.1f | "
 			"deepest-rank histogram: <=8:%.1f%% <=16:%.1f%% <=32:%.1f%% "
 			"<=64:%.1f%% <=128:%.1f%% <=256:%.1f%% >256:%.1f%%",
-			mkt_bufcache_hits,
-			mkt_bufcache_cold,
-			mkt_bufcache_stale,
+			vs_bufcache_hits,
+			vs_bufcache_cold,
+			vs_bufcache_stale,
 			g_phase_nqueries,
 			(double)g_route_sum / n,
 			100.0 * g_route_le[0] / n,
@@ -123,10 +123,10 @@ mkt_routing_stats(PG_FUNCTION_ARGS)
 	PG_RETURN_TEXT_P(cstring_to_text(buf));
 }
 
-PG_FUNCTION_INFO_V1(mkt_phase_stats);
+PG_FUNCTION_INFO_V1(vs_phase_stats);
 
 Datum
-mkt_phase_stats(PG_FUNCTION_ARGS)
+vs_phase_stats(PG_FUNCTION_ARGS)
 {
 	char	 buf[256];
 	uint64_t n = g_phase_nqueries ? g_phase_nqueries : 1;
@@ -137,13 +137,13 @@ mkt_phase_stats(PG_FUNCTION_ARGS)
 			"[rot=%.1f lut=%.1f pageread=%.1f score=%.1f] "
 			"posting=%.1f rerank=%.1f | entries/q=" UINT64_FORMAT,
 			g_phase_nqueries,
-			(double)g_phase_centroid_ns / n / MKT_NS_PER_US,
-			(double)g_phase_rotation_ns / n / MKT_NS_PER_US,
-			(double)g_phase_clut_ns / n / MKT_NS_PER_US,
-			(double)g_phase_cpageread_ns / n / MKT_NS_PER_US,
-			(double)g_phase_cscore_ns / n / MKT_NS_PER_US,
-			(double)g_phase_posting_ns / n / MKT_NS_PER_US,
-			(double)g_phase_rerank_ns / n / MKT_NS_PER_US,
+			(double)g_phase_centroid_ns / n / VS_NS_PER_US,
+			(double)g_phase_rotation_ns / n / VS_NS_PER_US,
+			(double)g_phase_clut_ns / n / VS_NS_PER_US,
+			(double)g_phase_cpageread_ns / n / VS_NS_PER_US,
+			(double)g_phase_cscore_ns / n / VS_NS_PER_US,
+			(double)g_phase_posting_ns / n / VS_NS_PER_US,
+			(double)g_phase_rerank_ns / n / VS_NS_PER_US,
 			g_phase_entries / n);
 	PG_RETURN_TEXT_P(cstring_to_text(buf));
 }
@@ -187,7 +187,7 @@ typedef struct PrismScanState
 	uint32_t scan_bound;
 
 	/* PG storage (index page I/O) */
-	MktPgStorage storage;
+	VsPgStorage storage;
 
 	/* EXPLAIN ANALYZE stats (accumulated across rescans) */
 	PrismScanStats stats;
@@ -262,7 +262,7 @@ prism_beginscan(Relation index, int nkeys, int norderbys)
 	ss->has_fastscan = ss->index_base.fastscan != 0;
 
 	/* Initialize PG storage */
-	mkt_pg_storage_init(&ss->storage, index, NULL, ss->index_base.metric);
+	vs_pg_storage_init(&ss->storage, index, NULL, ss->index_base.metric);
 	ss->index_base.centroid_storage = &ss->storage.base;
 	ss->index_base.posting_storage	= &ss->storage.base;
 	ss->index_base.page_base		= NULL;
@@ -321,7 +321,7 @@ prism_rescan(
 	 * re-derives its own bound per rescan for the same reason ("in case
 	 * this is a rescan and the previous time we got a different result").
 	 */
-	ss->scan_bound = mkt_scan_bound(scan);
+	ss->scan_bound = prism_scan_bound(scan);
 }
 
 /*
@@ -332,7 +332,7 @@ prism_rescan(
  * below a fiction: the extraction buffer alone is PRISM_QUERY_CAND_PER_K
  * entries per row, which dominates the rest by an order of magnitude.
  *
- *   mkt_topk_init         one upper bound and one id per row, plus a
+ *   vs_topk_init         one upper bound and one id per row, plus a
  *                         candidate array of two entries per row
  *   prism_query_state_init  PRISM_QUERY_CAND_PER_K candidates per row and an
  *                         index and a distance for each of them
@@ -346,10 +346,10 @@ prism_rescan(
  * allowed for, so a scan can exceed this budget; work_mem bounds what the
  * scan asks for, not the high-water mark of a pathological query.
  */
-#define MKT_TOP_K_BYTES_PER_ROW                                             \
-	(sizeof(Distance) + sizeof(uint64_t) + 2 * sizeof(MktTopKEntry) +       \
-	 PRISM_QUERY_CAND_PER_K *                                               \
-			 (sizeof(MktTopKEntry) + sizeof(uint32_t) + sizeof(Distance)) + \
+#define PRISM_TOP_K_BYTES_PER_ROW                                          \
+	(sizeof(Distance) + sizeof(uint64_t) + 2 * sizeof(VsTopKEntry) +       \
+	 PRISM_QUERY_CAND_PER_K *                                              \
+			 (sizeof(VsTopKEntry) + sizeof(uint32_t) + sizeof(Distance)) + \
 	 sizeof(PrismScanResult))
 
 /*
@@ -369,10 +369,10 @@ prism_rescan(
 static uint32_t
 max_top_k_for_work_mem(void)
 {
-	uint64 rows = ((uint64)work_mem * 1024) / MKT_TOP_K_BYTES_PER_ROW;
+	uint64 rows = ((uint64)work_mem * 1024) / PRISM_TOP_K_BYTES_PER_ROW;
 
-	if (rows < MKT_DEFAULT_K)
-		return MKT_DEFAULT_K;
+	if (rows < PRISM_DEFAULT_K)
+		return PRISM_DEFAULT_K;
 	if (rows > PG_UINT32_MAX)
 		return PG_UINT32_MAX;
 	return (uint32_t)rows;
@@ -404,11 +404,11 @@ resolve_top_k(const PrismScanState *ss, Relation heap)
 {
 	double rows = heap != NULL ? prism_estimate_heap_tuples(heap) : -1.0;
 
-	return mkt_scan_resolve_top_k(ss->scan_bound, rows);
+	return prism_scan_resolve_top_k(ss->scan_bound, rows);
 }
 
 uint32_t
-mkt_scan_resolve_top_k(uint32_t scan_bound, double heap_rows)
+prism_scan_resolve_top_k(uint32_t scan_bound, double heap_rows)
 {
 	uint32_t cap = max_top_k_for_work_mem();
 	uint32_t k	 = scan_bound;
@@ -432,8 +432,8 @@ mkt_scan_resolve_top_k(uint32_t scan_bound, double heap_rows)
 	if (prism_query_limit > 0 && (uint32_t)prism_query_limit < k)
 		k = (uint32_t)prism_query_limit;
 
-	if (k < MKT_DEFAULT_K)
-		k = MKT_DEFAULT_K;
+	if (k < PRISM_DEFAULT_K)
+		k = PRISM_DEFAULT_K;
 
 	return k > cap ? cap : k;
 }
@@ -457,7 +457,7 @@ mkt_scan_resolve_top_k(uint32_t scan_bound, double heap_rows)
 static void
 ensure_query_state(PrismScanState *ss, uint32_t k)
 {
-	uint32_t max_k = Max(k, (uint32_t)MKT_DEFAULT_K);
+	uint32_t max_k = Max(k, (uint32_t)PRISM_DEFAULT_K);
 
 	if (ss->qstate_ready && max_k <= ss->qstate.max_k)
 		return;
@@ -516,7 +516,7 @@ execute_search(IndexScanDesc scan)
 	/* Lazily set heap relation for reranking (rel is NULL at
 	 * beginscan time; heapRelation becomes available later) */
 	if (scan->heapRelation != NULL && ss->storage.rel == NULL)
-		mkt_pg_storage_set_rel(&ss->storage, scan->heapRelation);
+		vs_pg_storage_set_rel(&ss->storage, scan->heapRelation);
 
 	/*
 	 * Extract query vector. The ORDER BY operator belongs to the opclass, so
@@ -548,7 +548,7 @@ execute_search(IndexScanDesc scan)
 			qref.data,
 			k,
 			nprobe,
-			(MktDistanceMode)prism_distance_mode,
+			(VsDistanceMode)prism_distance_mode,
 			prism_rerank,
 			&qstats);
 

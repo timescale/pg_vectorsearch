@@ -18,8 +18,8 @@
  * Reference: RaBitQ-Library (https://github.com/nmslib/RaBitQ-Library)
  */
 
-#ifndef MKT_RABITQ_H
-#define MKT_RABITQ_H
+#ifndef VS_RABITQ_H
+#define VS_RABITQ_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -31,7 +31,7 @@
  * Error constant from RaBitQ paper (empirically tuned by authors).
  * Controls the tightness of error bounds.
  */
-#define MKT_RABITQ_EPSILON 1.9f
+#define VS_RABITQ_EPSILON 1.9f
 
 /*
  * Rotation seed for every index build. The rotation matrix is derived from
@@ -39,7 +39,7 @@
  * params MUST use this seed: an index encoded under one seed and read under
  * another decodes garbage with no error.
  */
-#define MKT_RABITQ_BUILD_SEED UINT64_C(42)
+#define VS_RABITQ_BUILD_SEED UINT64_C(42)
 
 /*
  * RaBitQVector - Quantized vector (PostgreSQL varlena-compatible)
@@ -47,7 +47,7 @@
  * Stores D bits packed into ceil(D/8) bytes, plus two float factors
  * for distance estimation. The data portion (f_add, f_rescale, bits[])
  * is layout-compatible with RaBitQData for zero-copy access via
- * MKT_RABITQ_DATA().
+ * VS_RABITQ_DATA().
  *
  * This struct is reserved for the future PostgreSQL SQL type. Encoding
  * functions produce RaBitQData (compact form) instead.
@@ -65,18 +65,18 @@ typedef struct RaBitQVector
 } RaBitQVector;
 
 /* Calculate size of presentation vector structure (for future PG type) */
-#define MKT_RABITQ_VECTOR_SIZE(dim) \
+#define VS_RABITQ_VECTOR_SIZE(dim) \
 	(offsetof(RaBitQVector, bits) + (((dim) + 7) / 8))
 
 /* Number of bytes needed to store dim bits */
-#define MKT_RABITQ_BYTES(dim) (((dim) + 7) / 8)
+#define VS_RABITQ_BYTES(dim) (((dim) + 7) / 8)
 
 /*
  * RaBitQData - Compact quantized vector (primary encoding form)
  *
  * Stores only f_add and f_rescale. f_error is derived at query time:
  *   f_error = C_error * sqrt(f_rescale² - f_add)
- * where C_error = 2 * MKT_RABITQ_EPSILON / sqrt(dim - 1).
+ * where C_error = 2 * VS_RABITQ_EPSILON / sqrt(dim - 1).
  *
  * Total size: 8 bytes header + ceil(dim/8) bytes data
  */
@@ -89,11 +89,11 @@ typedef struct RaBitQData
 
 /* Calculate size of compact quantized vector (4-byte aligned for
  * safe struct access when stored in posting pages) */
-#define MKT_RABITQ_DATA_SIZE(dim) \
-	(((offsetof(RaBitQData, bits) + MKT_RABITQ_BYTES(dim)) + 3) & ~3u)
+#define VS_RABITQ_DATA_SIZE(dim) \
+	(((offsetof(RaBitQData, bits) + VS_RABITQ_BYTES(dim)) + 3) & ~3u)
 
 /* Access compact data portion of a presentation vector (zero-copy cast) */
-#define MKT_RABITQ_DATA(v) ((RaBitQData *)&(v)->f_add)
+#define VS_RABITQ_DATA(v) ((RaBitQData *)&(v)->f_add)
 
 /*
  * RaBitQBatch - Batch of encoded vectors in separate arrays
@@ -130,9 +130,9 @@ typedef struct RaBitQParams
 	 * neither built nor stored (the trailing P[] is allocated only for
 	 * unsupported dims, which fall back to the dense O(d^2) multiply).
 	 */
-	bool				use_fast_rotate;
-	MktFastRotateParams fr;
-	float				P[FLEXIBLE_ARRAY_MEMBER]; /* dense P^T (dense path) */
+	bool			   use_fast_rotate;
+	VsFastRotateParams fr;
+	float			   P[FLEXIBLE_ARRAY_MEMBER]; /* dense P^T (dense path) */
 } RaBitQParams;
 
 /*
@@ -140,9 +140,9 @@ typedef struct RaBitQParams
  * 64-bit type before the multiply so the product is computed in 64 bits on
  * every platform (plain int32 overflows past dim ~46340, and size_t is still
  * 32-bit on ILP32). Used when an explicit dense matrix is stored
- * (mkt_rabitq_create_from_matrix) or when the fast rotation is unavailable.
+ * (vs_rabitq_create_from_matrix) or when the fast rotation is unavailable.
  */
-#define MKT_RABITQ_PARAMS_DENSE_SIZE(dim) \
+#define VS_RABITQ_PARAMS_DENSE_SIZE(dim) \
 	(offsetof(RaBitQParams, P) + (uint64_t)(dim) * (dim) * sizeof(float))
 
 /*
@@ -153,18 +153,18 @@ typedef struct RaBitQParams
  * dense layout is allocated.
  */
 static inline uint64_t
-mkt_rabitq_params_size(Dimension dim)
+vs_rabitq_params_size(Dimension dim)
 {
-	return mkt_fast_rotate_supported(dim) ? (uint64_t)offsetof(RaBitQParams, P)
-										  : MKT_RABITQ_PARAMS_DENSE_SIZE(dim);
+	return vs_fast_rotate_supported(dim) ? (uint64_t)offsetof(RaBitQParams, P)
+										 : VS_RABITQ_PARAMS_DENSE_SIZE(dim);
 }
 
-#define MKT_RABITQ_PARAMS_SIZE(dim) mkt_rabitq_params_size(dim)
+#define VS_RABITQ_PARAMS_SIZE(dim) vs_rabitq_params_size(dim)
 
 /*
  * RaBitQScratch - Pre-allocated scratch buffers for encoding
  *
- * Avoids per-vector allocation in mkt_rabitq_encode_into. Create once
+ * Avoids per-vector allocation in vs_rabitq_encode_into. Create once
  * per builder/thread, reuse across all encode calls.
  */
 typedef struct RaBitQScratch
@@ -174,8 +174,8 @@ typedef struct RaBitQScratch
 	float *xu_cb;		/* [dim], 64-byte aligned */
 } RaBitQScratch;
 
-void mkt_rabitq_scratch_init(RaBitQScratch *scratch, Dimension dim);
-void mkt_rabitq_scratch_cleanup(RaBitQScratch *scratch);
+void vs_rabitq_scratch_init(RaBitQScratch *scratch, Dimension dim);
+void vs_rabitq_scratch_cleanup(RaBitQScratch *scratch);
 
 /*
  * RaBitQQueryState - Query state (amortizes work across vectors)
@@ -191,7 +191,7 @@ void mkt_rabitq_scratch_cleanup(RaBitQScratch *scratch);
  *   binary_ip = sum of transformed[i] where bit[i] = 1
  *
  * The distance_fn and distance_with_bound_fn pointers are set at
- * query preparation time based on the selected MktDistanceMode,
+ * query preparation time based on the selected VsDistanceMode,
  * enabling zero-branch dispatch in the hot loop.
  */
 
@@ -223,7 +223,7 @@ typedef struct RaBitQQueryState
 	Dimension dim;
 
 	/* Runtime dispatch (set by prepare_query_ex) */
-	MktDistanceMode			  mode;
+	VsDistanceMode			  mode;
 	RaBitQDistanceFn		  distance_fn;
 	RaBitQDistanceWithBoundFn distance_with_bound_fn;
 } RaBitQQueryState;
@@ -246,38 +246,38 @@ typedef struct RaBitQQueryState
  * f_rescale (see the RaBitQData comment for the formula). Shared by the
  * posting and centroid build paths so the formula lives in one place.
  */
-float mkt_rabitq_derive_f_error(float f_add, float f_rescale, Dimension dim);
+float vs_rabitq_derive_f_error(float f_add, float f_rescale, Dimension dim);
 
-RaBitQParams *mkt_rabitq_create(Dimension dim, uint64_t seed);
+RaBitQParams *vs_rabitq_create(Dimension dim, uint64_t seed);
 
 /*
  * Create RaBitQ parameters from an existing rotation matrix.
  * Copies the matrix into the new allocation.
  */
 RaBitQParams *
-mkt_rabitq_create_from_matrix(Dimension dim, uint64_t seed, const float *P);
+vs_rabitq_create_from_matrix(Dimension dim, uint64_t seed, const float *P);
 
 /*
  * Initialize RaBitQ parameters in pre-allocated memory.
  *
- * Same as mkt_rabitq_create but uses caller-provided buffer.
- * Buffer must be at least MKT_RABITQ_PARAMS_SIZE(dim) bytes.
+ * Same as vs_rabitq_create but uses caller-provided buffer.
+ * Buffer must be at least VS_RABITQ_PARAMS_SIZE(dim) bytes.
  * Generates the rotation matrix P in-place.
  *
  * Returns 0 on success, -1 on failure.
  */
-int mkt_rabitq_init(RaBitQParams *params, Dimension dim, uint64_t seed);
+int vs_rabitq_init(RaBitQParams *params, Dimension dim, uint64_t seed);
 
 /*
  * Free heap-allocated RaBitQ parameters.
  */
-void mkt_rabitq_destroy(RaBitQParams *params);
+void vs_rabitq_destroy(RaBitQParams *params);
 
 /*
  * Cleanup internal resources (no-op since P is now inline).
  * Kept for API compatibility with stack-allocated usage.
  */
-void mkt_rabitq_cleanup(RaBitQParams *params);
+void vs_rabitq_cleanup(RaBitQParams *params);
 
 /*
  * Encoding - convert full-precision vectors to binary codes
@@ -291,17 +291,17 @@ void mkt_rabitq_cleanup(RaBitQParams *params);
  *
  * Returns NULL on failure.
  */
-RaBitQData *mkt_rabitq_encode(
+RaBitQData *vs_rabitq_encode(
 		const RaBitQParams *params, Vec32Ref input, Vec32Ref centroid);
 
 /*
  * Encode a vector into pre-allocated output buffer.
  *
- * Output buffer must be at least MKT_RABITQ_DATA_SIZE(dim) bytes.
+ * Output buffer must be at least VS_RABITQ_DATA_SIZE(dim) bytes.
  *
  * Returns 0 on success, -1 on failure.
  */
-int mkt_rabitq_encode_into(
+int vs_rabitq_encode_into(
 		const RaBitQParams *params,
 		Vec32Ref			input,
 		Vec32Ref			centroid,
@@ -310,7 +310,7 @@ int mkt_rabitq_encode_into(
 /*
  * Encode with pre-allocated scratch buffers (zero per-call allocation).
  */
-int mkt_rabitq_encode_into_ex(
+int vs_rabitq_encode_into_ex(
 		const RaBitQParams *params,
 		Vec32Ref			input,
 		Vec32Ref			centroid,
@@ -330,7 +330,7 @@ int mkt_rabitq_encode_into_ex(
  * pt_residual must be [params->dim] floats. Returns 0 on success, -1 on
  * failure.
  */
-int mkt_rabitq_encode_from_pt(
+int vs_rabitq_encode_from_pt(
 		const RaBitQParams *params,
 		const float		   *pt_residual,
 		RaBitQData		   *output,
@@ -339,14 +339,14 @@ int mkt_rabitq_encode_from_pt(
 /*
  * Batch encode multiple vectors into separate output arrays.
  *
- * More efficient than calling mkt_rabitq_encode_into() repeatedly because:
+ * More efficient than calling vs_rabitq_encode_into() repeatedly because:
  * 1. Matrix P is loaded into cache once and reused for all vectors
  * 2. Centroid rotation is computed once and reused
  * 3. Batched matrix-vector multiplication enables better SIMD utilization
  *
  * Memory layout:
  *   vectors:   count vectors, each dim elements, contiguous
- *   vec_type:  element type (MKT_VEC_F32, MKT_VEC_F16, MKT_VEC_F16C)
+ *   vec_type:  element type (VS_VEC_F32, VS_VEC_F16, VS_VEC_F16C)
  *   f_add:     count floats (output)
  *   f_rescale: count floats (output)
  *   bits:      count * packed_bytes bytes (output)
@@ -356,7 +356,7 @@ int mkt_rabitq_encode_from_pt(
  *
  * Returns 0 on success, -1 on failure.
  */
-int mkt_rabitq_encode_batch(
+int vs_rabitq_encode_batch(
 		const RaBitQParams *params,
 		const void		   *vectors,
 		VecType				vec_type,
@@ -370,11 +370,11 @@ int mkt_rabitq_encode_batch(
  * Batch encode with heap-allocated RaBitQBatch output.
  *
  * Convenience wrapper that allocates a RaBitQBatch and calls
- * mkt_rabitq_encode_batch() with the batch's arrays.
+ * vs_rabitq_encode_batch() with the batch's arrays.
  *
  * Returns NULL on failure.
  */
-RaBitQBatch *mkt_rabitq_encode_batch_alloc(
+RaBitQBatch *vs_rabitq_encode_batch_alloc(
 		const RaBitQParams *params,
 		const void		   *vectors,
 		VecType				vec_type,
@@ -386,12 +386,12 @@ RaBitQBatch *mkt_rabitq_encode_batch_alloc(
  *
  * Returns NULL on allocation failure.
  */
-RaBitQBatch *mkt_rabitq_batch_create(uint16_t count, Dimension dim);
+RaBitQBatch *vs_rabitq_batch_create(uint16_t count, Dimension dim);
 
 /*
  * Free a RaBitQBatch and its arrays.
  */
-void mkt_rabitq_batch_destroy(RaBitQBatch *batch);
+void vs_rabitq_batch_destroy(RaBitQBatch *batch);
 
 /*
  * Query preparation - precompute query-specific factors
@@ -405,33 +405,33 @@ void mkt_rabitq_batch_destroy(RaBitQBatch *batch);
  *
  * Returns NULL on failure.
  */
-RaBitQQueryState *mkt_rabitq_prepare_query(
+RaBitQQueryState *vs_rabitq_prepare_query(
 		const RaBitQParams *params, Vec32Ref query, Vec32Ref centroid);
 
 /*
  * Free query state.
  */
-void mkt_rabitq_free_query(RaBitQQueryState *state);
+void vs_rabitq_free_query(RaBitQQueryState *state);
 
 /*
  * Prepare query state with explicit distance mode.
  *
- * Like mkt_rabitq_prepare_query() but additionally sets function pointers
+ * Like vs_rabitq_prepare_query() but additionally sets function pointers
  * for the selected mode, enabling zero-branch dispatch via the inline
  * helpers below.
  *
  * Returns NULL on failure.
  */
-RaBitQQueryState *mkt_rabitq_prepare_query_ex(
+RaBitQQueryState *vs_rabitq_prepare_query_ex(
 		const RaBitQParams *params,
 		Vec32Ref			query,
 		Vec32Ref			centroid,
-		MktDistanceMode		mode);
+		VsDistanceMode		mode);
 
 /*
  * Pre-rotation API — eliminates per-cluster matrix multiply
  *
- * Instead of calling mkt_rabitq_prepare_query_ex() per cluster
+ * Instead of calling vs_rabitq_prepare_query_ex() per cluster
  * (which does O(dim²) matrix multiply each time), precompute:
  *   - P^T * centroid at index build time (once per cluster)
  *   - P^T * query at query time (once per query)
@@ -445,7 +445,7 @@ RaBitQQueryState *mkt_rabitq_prepare_query_ex(
  * Rotate a vector through P^T into pre-allocated output buffer.
  * Output must have space for dim floats, 64-byte aligned preferred.
  */
-void mkt_rabitq_rotate(
+void vs_rabitq_rotate(
 		const RaBitQParams *params, const float *input, float *output);
 
 /*
@@ -458,32 +458,32 @@ void mkt_rabitq_rotate(
  * state->transformed and state->query_bits must be pre-allocated by
  * the caller (dim floats and packed_bytes bytes respectively).
  *
- * Call mkt_rabitq_init_query_constants() once at context creation to
+ * Call vs_rabitq_init_query_constants() once at context creation to
  * set dim-dependent constants (inv_sqrt_d, c_error) that don't change
  * per cluster.
  */
-void mkt_rabitq_init_query_constants(RaBitQQueryState *state, Dimension dim);
+void vs_rabitq_init_query_constants(RaBitQQueryState *state, Dimension dim);
 
-void mkt_rabitq_init_query_state(
+void vs_rabitq_init_query_state(
 		RaBitQQueryState *state,
 		const float		 *pt_query,
 		const float		 *pt_centroid,
 		Dimension		  dim,
-		MktDistanceMode	  mode);
+		VsDistanceMode	  mode);
 
 /*
  * Dispatch helpers - call through function pointers set at prepare time
  */
 
 static inline Distance
-mkt_rabitq_distance_dispatch(
+vs_rabitq_distance_dispatch(
 		const RaBitQQueryState *qstate, const RaBitQData *data, Dimension dim)
 {
 	return qstate->distance_fn(qstate, data, dim);
 }
 
 static inline void
-mkt_rabitq_distance_dispatch_with_bound(
+vs_rabitq_distance_dispatch_with_bound(
 		const RaBitQQueryState *qstate,
 		const RaBitQData	   *data,
 		Dimension				dim,
@@ -503,7 +503,7 @@ mkt_rabitq_distance_dispatch_with_bound(
  * Uses the precomputed query state and compact vector factors:
  *   est_dist = g_add + f_add - 2 * f_rescale * final_dot
  */
-Distance mkt_rabitq_distance(
+Distance vs_rabitq_distance(
 		const RaBitQQueryState *query_state,
 		const RaBitQData	   *data,
 		Dimension				dim);
@@ -515,7 +515,7 @@ Distance mkt_rabitq_distance(
  * state. Returns both estimated distance and lower bound guaranteed
  * to be <= true distance.
  */
-void mkt_rabitq_distance_with_bound(
+void vs_rabitq_distance_with_bound(
 		const RaBitQQueryState *query_state,
 		const RaBitQData	   *data,
 		Dimension				dim,
@@ -532,7 +532,7 @@ void mkt_rabitq_distance_with_bound(
  * The scalar arithmetic on contiguous f_add[]/f_rescale[] arrays
  * auto-vectorizes with the compiler.
  */
-void mkt_rabitq_distance_batch(
+void vs_rabitq_distance_batch(
 		const RaBitQQueryState *qstate,
 		const float			   *f_add,
 		const float			   *f_rescale,
@@ -552,18 +552,18 @@ void mkt_rabitq_distance_batch(
  *
  * Returns 0 on success.
  */
-int mkt_rabitq_init_simd(void);
+int vs_rabitq_init_simd(void);
 
 /*
  * Get name of the active SIMD implementation.
  * Returns one of: "avx512", "avx2", "neon", "compiler"
  */
-const char *mkt_rabitq_impl_name(void);
+const char *vs_rabitq_impl_name(void);
 
 /*
  * Force re-initialization of SIMD dispatch (for testing).
  */
-void mkt_rabitq_force_reinit(void);
+void vs_rabitq_force_reinit(void);
 
 /*
  * Hamming distance - XOR + popcount between two bit vectors
@@ -574,7 +574,7 @@ void mkt_rabitq_force_reinit(void);
  *
  * Returns the number of bit positions where a and b differ.
  */
-uint32_t mkt_rabitq_hamming_distance(
+uint32_t vs_rabitq_hamming_distance(
 		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes);
 
 /*
@@ -583,7 +583,7 @@ uint32_t mkt_rabitq_hamming_distance(
  * Computes Hamming distances from query_bits to count data vectors.
  * Candidate i's bits start at data_bits + i * stride.
  */
-void mkt_rabitq_hamming_distance_multi(
+void vs_rabitq_hamming_distance_multi(
 		const uint8_t *query_bits,
 		const uint8_t *data_bits,
 		uint32_t	   stride,
@@ -604,17 +604,17 @@ void mkt_rabitq_hamming_distance_multi(
  *   est_dist  = f_add + g_add - 2 * f_rescale * g_scale * final_dot
  */
 
-Distance mkt_rabitq_distance_symmetric(
+Distance vs_rabitq_distance_symmetric(
 		const RaBitQQueryState *qstate, const RaBitQData *data, Dimension dim);
 
-void mkt_rabitq_distance_symmetric_with_bound(
+void vs_rabitq_distance_symmetric_with_bound(
 		const RaBitQQueryState *qstate,
 		const RaBitQData	   *data,
 		Dimension				dim,
 		Distance			   *est_dist,
 		Distance			   *lower_bound);
 
-void mkt_rabitq_distance_batch_symmetric(
+void vs_rabitq_distance_batch_symmetric(
 		const RaBitQQueryState *qstate,
 		const float			   *f_add,
 		const float			   *f_rescale,
@@ -640,7 +640,7 @@ typedef void (*InnerProductMultiFn)(
 		uint32_t	   count,
 		float		  *results);
 
-void mkt_rabitq_inner_product_multi(
+void vs_rabitq_inner_product_multi(
 		const float	  *transformed,
 		const uint8_t *bits,
 		uint32_t	   stride,
@@ -651,11 +651,11 @@ void mkt_rabitq_inner_product_multi(
 /*
  * Batch distance using multi-candidate inner product
  *
- * Same interface as mkt_rabitq_distance_batch() but uses the
+ * Same interface as vs_rabitq_distance_batch() but uses the
  * vertical SIMD inner product to process multiple candidates per
  * pass over transformed[].
  */
-void mkt_rabitq_distance_batch_multi(
+void vs_rabitq_distance_batch_multi(
 		const RaBitQQueryState *qstate,
 		const float			   *f_add,
 		const float			   *f_rescale,
@@ -667,14 +667,14 @@ void mkt_rabitq_distance_batch_multi(
 /*
  * Batch distance with error bounds (multi-candidate inner product)
  *
- * Combines mkt_rabitq_inner_product_multi with per-entry error bound
+ * Combines vs_rabitq_inner_product_multi with per-entry error bound
  * derivation. Bits are accessed via stride (not packed_bytes), allowing
  * direct use on interleaved page data where stride = data_size.
  *
  * scratch: caller-provided buffer of at least count floats, reusable
  * across calls to avoid per-call allocation.
  */
-void mkt_rabitq_distance_batch_multi_with_bound(
+void vs_rabitq_distance_batch_multi_with_bound(
 		const RaBitQQueryState *qstate,
 		const float			   *f_add,
 		const float			   *f_rescale,
@@ -689,14 +689,14 @@ void mkt_rabitq_distance_batch_multi_with_bound(
 /*
  * Batch symmetric distance with error bounds
  *
- * Combines mkt_rabitq_hamming_distance_multi with per-entry error
+ * Combines vs_rabitq_hamming_distance_multi with per-entry error
  * bound derivation. Like the asymmetric variant, bits are accessed
  * via stride for direct use on interleaved page data.
  *
  * scratch: caller-provided buffer of at least count uint32_t's,
  * reusable across calls to avoid per-call allocation.
  */
-void mkt_rabitq_distance_batch_symmetric_with_bound(
+void vs_rabitq_distance_batch_symmetric_with_bound(
 		const RaBitQQueryState *qstate,
 		const float			   *f_add,
 		const float			   *f_rescale,
@@ -712,22 +712,22 @@ void mkt_rabitq_distance_batch_symmetric_with_bound(
  * Get name of the active Hamming SIMD implementation.
  * Returns one of: "avx512-vpopcntdq", "avx2", "compiler"
  */
-const char *mkt_rabitq_hamming_impl_name(void);
+const char *vs_rabitq_hamming_impl_name(void);
 
 /*
  * Hand-optimized SIMD implementations (simd=full only)
  *
- * These are resolved via function pointers in mkt_rabitq_init_simd().
+ * These are resolved via function pointers in vs_rabitq_init_simd().
  */
-#ifdef MKT_SIMD_FULL
+#ifdef VS_SIMD_FULL
 
 #if defined(__x86_64__) || defined(_M_X64)
 /* AVX-512 implementations */
-float mkt_rabitq_inner_product_avx512(
+float vs_rabitq_inner_product_avx512(
 		const float *transformed, const uint8_t *bits, Dimension dim);
-void mkt_rabitq_extract_signs_avx512(
+void vs_rabitq_extract_signs_avx512(
 		const float *transformed, uint8_t *bits, Dimension dim);
-void mkt_rabitq_inner_product_multi_avx512(
+void vs_rabitq_inner_product_multi_avx512(
 		const float	  *transformed,
 		const uint8_t *bits,
 		uint32_t	   stride,
@@ -736,9 +736,9 @@ void mkt_rabitq_inner_product_multi_avx512(
 		float		  *results);
 
 /* AVX-512 VPOPCNTDQ Hamming implementations */
-uint32_t mkt_rabitq_hamming_avx512(
+uint32_t vs_rabitq_hamming_avx512(
 		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes);
-void mkt_rabitq_hamming_multi_avx512(
+void vs_rabitq_hamming_multi_avx512(
 		const uint8_t *query_bits,
 		const uint8_t *data_bits,
 		uint32_t	   stride,
@@ -747,11 +747,11 @@ void mkt_rabitq_hamming_multi_avx512(
 		uint32_t	  *results);
 
 /* AVX2 implementations */
-float mkt_rabitq_inner_product_avx2(
+float vs_rabitq_inner_product_avx2(
 		const float *transformed, const uint8_t *bits, Dimension dim);
-void mkt_rabitq_extract_signs_avx2(
+void vs_rabitq_extract_signs_avx2(
 		const float *transformed, uint8_t *bits, Dimension dim);
-void mkt_rabitq_inner_product_multi_avx2(
+void vs_rabitq_inner_product_multi_avx2(
 		const float	  *transformed,
 		const uint8_t *bits,
 		uint32_t	   stride,
@@ -760,9 +760,9 @@ void mkt_rabitq_inner_product_multi_avx2(
 		float		  *results);
 
 /* AVX2 lookup-table Hamming implementations */
-uint32_t mkt_rabitq_hamming_avx2(
+uint32_t vs_rabitq_hamming_avx2(
 		const uint8_t *a, const uint8_t *b, uint32_t packed_bytes);
-void mkt_rabitq_hamming_multi_avx2(
+void vs_rabitq_hamming_multi_avx2(
 		const uint8_t *query_bits,
 		const uint8_t *data_bits,
 		uint32_t	   stride,
@@ -773,11 +773,11 @@ void mkt_rabitq_hamming_multi_avx2(
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 /* NEON implementations */
-float mkt_rabitq_inner_product_neon(
+float vs_rabitq_inner_product_neon(
 		const float *transformed, const uint8_t *bits, Dimension dim);
-void mkt_rabitq_extract_signs_neon(
+void vs_rabitq_extract_signs_neon(
 		const float *transformed, uint8_t *bits, Dimension dim);
-void mkt_rabitq_inner_product_multi_neon(
+void vs_rabitq_inner_product_multi_neon(
 		const float	  *transformed,
 		const uint8_t *bits,
 		uint32_t	   stride,
@@ -786,6 +786,6 @@ void mkt_rabitq_inner_product_multi_neon(
 		float		  *results);
 #endif
 
-#endif /* MKT_SIMD_FULL */
+#endif /* VS_SIMD_FULL */
 
-#endif /* MKT_RABITQ_H */
+#endif /* VS_RABITQ_H */

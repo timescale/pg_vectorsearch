@@ -99,7 +99,7 @@ typedef struct CostInputs
  * cases, so treating them as unbounded would size the scan for a full
  * ranking. tuple_fraction covers them.
  *
- * Zero means genuinely unbounded, and mkt_scan_resolve_top_k sizes for
+ * Zero means genuinely unbounded, and prism_scan_resolve_top_k sizes for
  * every row the scan could return.
  *
  * Three cases resolve in the planner's favour, since the plan has to be
@@ -302,14 +302,14 @@ gather_cost_inputs(
 				root, info->indrestrictinfo, baserel->relid, JOIN_INNER, NULL);
 
 	/*
-	 * Rows the scan will actually elect. mkt_scan_resolve_top_k applies the
+	 * Rows the scan will actually elect. prism_scan_resolve_top_k applies the
 	 * rules the scan applies: the prism.query_limit ceiling, a floor so a tiny
 	 * LIMIT still produces a usable search, and a work_mem-derived cap. With
 	 * no LIMIT to size from it uses the row count instead.
 	 */
-	uint32_t k = mkt_scan_inflate_for_filter(row_target(root, N), sel);
+	uint32_t k = prism_scan_inflate_for_filter(row_target(root, N), sel);
 
-	in->k_eff = mkt_scan_resolve_top_k(k, N);
+	in->k_eff = prism_scan_resolve_top_k(k, N);
 
 	/*
 	 * Posting lists this query will scan: pinned by prism.nprobe when that is
@@ -400,7 +400,7 @@ gather_cost_inputs(
 	 * the smaller is taken.
 	 */
 	double row_entries = (double)nprobe / (double)in->nlist * N *
-						 MKT_ENTRY_REPLICA_FACTOR;
+						 PRISM_ENTRY_REPLICA_FACTOR;
 	/*
 	 * Whichever layout packs more entries into a page, since this is an
 	 * upper bound and an index built in one format can hold pages of the
@@ -452,13 +452,14 @@ centroid_score_cost(const CostInputs *in)
 {
 	switch (in->centroid_format)
 	{
-	case MKT_CENTROID_FMT_FLOAT:
-	case MKT_CENTROID_FMT_HALF:
-		return MKT_COST_EXACT_DISTANCE(in->dim);
-	case MKT_CENTROID_FMT_FASTSCAN:
-		return MKT_COST_QUANT_DISTANCE(in->dim);
+	case PRISM_CENTROID_FMT_FLOAT:
+	case PRISM_CENTROID_FMT_HALF:
+		return PRISM_COST_EXACT_DISTANCE(in->dim);
+	case PRISM_CENTROID_FMT_FASTSCAN:
+		return PRISM_COST_QUANT_DISTANCE(in->dim);
 	default:
-		return MKT_COST_QUANT_DISTANCE(in->dim) * MKT_COST_UNGROUPED_PENALTY;
+		return PRISM_COST_QUANT_DISTANCE(in->dim) *
+			   PRISM_COST_UNGROUPED_PENALTY;
 	}
 }
 
@@ -492,7 +493,7 @@ centroid_descent_cost(const CostInputs *in)
 	 * Phase A then scores one exact distance per routed cluster, against
 	 * the full-precision pt_centroid on its head page.
 	 */
-	double head_work = in->n_route * MKT_COST_EXACT_DISTANCE(in->dim);
+	double head_work = in->n_route * PRISM_COST_EXACT_DISTANCE(in->dim);
 
 	return beam_work + head_work;
 }
@@ -510,13 +511,13 @@ posting_cpu_cost(const CostInputs *in)
 	 * exact distance for the same shape. The head page it reads is counted
 	 * with the pages, not here.
 	 */
-	double list_open = MKT_COST_EXACT_DISTANCE(in->dim);
+	double list_open = PRISM_COST_EXACT_DISTANCE(in->dim);
 
 	/* One quantized distance per entry; AoS pages are not grouped. */
-	double per_entry = MKT_COST_QUANT_DISTANCE(in->dim);
+	double per_entry = PRISM_COST_QUANT_DISTANCE(in->dim);
 
 	if (!in->has_fastscan)
-		per_entry *= MKT_COST_UNGROUPED_PENALTY;
+		per_entry *= PRISM_COST_UNGROUPED_PENALTY;
 
 	/*
 	 * Every scored entry is offered to the top-k heap, and a bigger heap
@@ -524,9 +525,9 @@ posting_cpu_cost(const CostInputs *in)
 	 */
 	double topk_factor = 1.0;
 
-	if (in->k_eff > MKT_DEFAULT_K)
-		topk_factor += MKT_COST_TOPK_LOG_COEFF *
-					   log2((double)in->k_eff / (double)MKT_DEFAULT_K);
+	if (in->k_eff > PRISM_DEFAULT_K)
+		topk_factor += PRISM_COST_TOPK_LOG_COEFF *
+					   log2((double)in->k_eff / (double)PRISM_DEFAULT_K);
 
 	return (double)in->nprobe * list_open +
 		   in->scanned_pl_entries * per_entry * topk_factor;
@@ -645,10 +646,10 @@ rerank_cost(
 	 * Reaching one tuple is what cpu_tuple_cost prices; scoring it is one
 	 * exact distance over the vector it holds.
 	 */
-	double per_fetch = cpu_tuple_cost + MKT_COST_EXACT_DISTANCE(in->dim);
+	double per_fetch = cpu_tuple_cost + PRISM_COST_EXACT_DISTANCE(in->dim);
 
 	if (external)
-		per_fetch *= MKT_COST_FETCH_DETOAST;
+		per_fetch *= PRISM_COST_FETCH_DETOAST;
 
 	/*
 	 * Every pool candidate is scored exactly, and where the vectors are out
@@ -712,7 +713,7 @@ prism_cost_estimate(
 
 	gather_cost_inputs(root, path, loop_count, &in, &sel);
 
-	double per_scan_cost = MKT_COST_SCAN_SETUP + centroid_descent_cost(&in) +
+	double per_scan_cost = PRISM_COST_SCAN_SETUP + centroid_descent_cost(&in) +
 						   posting_cpu_cost(&in) +
 						   search_page_cost(&in, root, info) +
 						   rerank_cost(&in, root, baserel, info);

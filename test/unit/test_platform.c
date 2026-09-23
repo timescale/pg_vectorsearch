@@ -1,18 +1,18 @@
 /*
- * test_mkt_platform.c - Platform abstraction tests
+ * test_vs_platform.c - Platform abstraction tests
  */
 
 #include <stdint.h>
 #include <stdio.h>
 
 #include "core/platform.h"
-#include "mkt_test.h"
+#include "vs_test.h"
 
 TEST_GROUP(Platform);
 
 TEST(simd_detect_returns_valid)
 {
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 
 	/* Result should be one of the valid combinations */
 	/* On x86, we should have at least SSE2 on any modern CPU */
@@ -25,9 +25,9 @@ TEST(simd_detect_returns_valid)
 TEST(simd_detect_is_cached)
 {
 	/* Calling multiple times should return same result */
-	SimdCapability caps1 = mkt_detect_simd();
-	SimdCapability caps2 = mkt_detect_simd();
-	SimdCapability caps3 = mkt_detect_simd();
+	SimdCapability caps1 = vs_detect_simd();
+	SimdCapability caps2 = vs_detect_simd();
+	SimdCapability caps3 = vs_detect_simd();
 
 	ASSERT_EQ(caps1, caps2, "cached result should be consistent");
 	ASSERT_EQ(caps2, caps3, "cached result should be consistent");
@@ -35,7 +35,7 @@ TEST(simd_detect_is_cached)
 
 TEST(simd_hierarchy_x86)
 {
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 
 	/* On x86, capabilities form a hierarchy */
 	/* AVX512F implies AVX2 which implies SSE4.1 which implies SSE2 */
@@ -56,51 +56,51 @@ TEST(simd_hierarchy_x86)
 	}
 }
 
-TEST(mkt_has_simd_helper)
+TEST(vs_has_simd_helper)
 {
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 
-	/* mkt_has_simd should match direct flag check */
+	/* vs_has_simd should match direct flag check */
 	ASSERT_EQ(
 			(caps & SIMD_SSE2) != 0,
-			mkt_has_simd(SIMD_SSE2),
-			"mkt_has_simd should match direct check");
+			vs_has_simd(SIMD_SSE2),
+			"vs_has_simd should match direct check");
 	ASSERT_EQ(
 			(caps & SIMD_AVX2) != 0,
-			mkt_has_simd(SIMD_AVX2),
-			"mkt_has_simd should match direct check");
+			vs_has_simd(SIMD_AVX2),
+			"vs_has_simd should match direct check");
 	ASSERT_EQ(
 			(caps & SIMD_NEON) != 0,
-			mkt_has_simd(SIMD_NEON),
-			"mkt_has_simd should match direct check");
+			vs_has_simd(SIMD_NEON),
+			"vs_has_simd should match direct check");
 }
 
 TEST(alignment_macro_power_of_two)
 {
-	/* Test MKT_ALIGN with various inputs */
-	ASSERT_EQ(0, MKT_ALIGN(0, 16), "align 0 to 16");
-	ASSERT_EQ(16, MKT_ALIGN(1, 16), "align 1 to 16");
-	ASSERT_EQ(16, MKT_ALIGN(15, 16), "align 15 to 16");
-	ASSERT_EQ(16, MKT_ALIGN(16, 16), "align 16 to 16");
-	ASSERT_EQ(32, MKT_ALIGN(17, 16), "align 17 to 16");
+	/* Test VS_ALIGN with various inputs */
+	ASSERT_EQ(0, VS_ALIGN(0, 16), "align 0 to 16");
+	ASSERT_EQ(16, VS_ALIGN(1, 16), "align 1 to 16");
+	ASSERT_EQ(16, VS_ALIGN(15, 16), "align 15 to 16");
+	ASSERT_EQ(16, VS_ALIGN(16, 16), "align 16 to 16");
+	ASSERT_EQ(32, VS_ALIGN(17, 16), "align 17 to 16");
 
-	ASSERT_EQ(64, MKT_ALIGN(33, 64), "align 33 to 64");
-	ASSERT_EQ(64, MKT_ALIGN(64, 64), "align 64 to 64");
-	ASSERT_EQ(128, MKT_ALIGN(65, 64), "align 65 to 64");
+	ASSERT_EQ(64, VS_ALIGN(33, 64), "align 33 to 64");
+	ASSERT_EQ(64, VS_ALIGN(64, 64), "align 64 to 64");
+	ASSERT_EQ(128, VS_ALIGN(65, 64), "align 65 to 64");
 }
 
 TEST(is_aligned_macro)
 {
 	uintptr_t addr = 0x1000; /* 4096, aligned to many powers of 2 */
 
-	ASSERT_TRUE(MKT_IS_ALIGNED(addr, 16), "0x1000 aligned to 16");
-	ASSERT_TRUE(MKT_IS_ALIGNED(addr, 64), "0x1000 aligned to 64");
-	ASSERT_TRUE(MKT_IS_ALIGNED(addr, 256), "0x1000 aligned to 256");
-	ASSERT_TRUE(MKT_IS_ALIGNED(addr, 4096), "0x1000 aligned to 4096");
+	ASSERT_TRUE(VS_IS_ALIGNED(addr, 16), "0x1000 aligned to 16");
+	ASSERT_TRUE(VS_IS_ALIGNED(addr, 64), "0x1000 aligned to 64");
+	ASSERT_TRUE(VS_IS_ALIGNED(addr, 256), "0x1000 aligned to 256");
+	ASSERT_TRUE(VS_IS_ALIGNED(addr, 4096), "0x1000 aligned to 4096");
 
-	ASSERT_TRUE(!MKT_IS_ALIGNED(addr + 1, 16), "0x1001 not aligned to 16");
-	ASSERT_TRUE(!MKT_IS_ALIGNED(addr + 8, 16), "0x1008 not aligned to 16");
-	ASSERT_TRUE(MKT_IS_ALIGNED(addr + 16, 16), "0x1010 aligned to 16");
+	ASSERT_TRUE(!VS_IS_ALIGNED(addr + 1, 16), "0x1001 not aligned to 16");
+	ASSERT_TRUE(!VS_IS_ALIGNED(addr + 8, 16), "0x1008 not aligned to 16");
+	ASSERT_TRUE(VS_IS_ALIGNED(addr + 16, 16), "0x1010 aligned to 16");
 }
 
 TEST(prefetch_compiles)
@@ -110,8 +110,8 @@ TEST(prefetch_compiles)
 	 * Actual prefetch effect is not testable.
 	 */
 	int data[64];
-	mkt_prefetch_read(&data[0]);
-	mkt_prefetch_write(&data[32]);
+	vs_prefetch_read(&data[0]);
+	vs_prefetch_write(&data[32]);
 
 	/* Prevent optimizer from removing the array */
 	data[0] = 1;
@@ -128,12 +128,12 @@ TEST(branch_hints_compile)
 	 */
 	int x = 42;
 
-	if (mkt_likely(x > 0))
+	if (vs_likely(x > 0))
 	{
 		x++;
 	}
 
-	if (mkt_unlikely(x < 0))
+	if (vs_unlikely(x < 0))
 	{
 		x--;
 	}
@@ -148,9 +148,9 @@ TEST(compiler_barrier_compiles)
 	 * Effect is not directly testable without inspecting assembly.
 	 */
 	volatile int x = 1;
-	mkt_compiler_barrier();
+	vs_compiler_barrier();
 	x = 2;
-	mkt_compiler_barrier();
+	vs_compiler_barrier();
 
 	ASSERT_EQ(2, x, "compiler barrier should not change values");
 }
@@ -161,7 +161,7 @@ TEST(print_detected_capabilities)
 	 * Not a real test - just prints detected capabilities for debugging.
 	 * Always passes.
 	 */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 
 	TEST_PRINT("Detected SIMD capabilities: 0x%x\n", caps);
 	TEST_PRINT("  SSE2:    %s\n", (caps & SIMD_SSE2) ? "yes" : "no");
@@ -190,14 +190,14 @@ TEST(x86_has_sse2)
 	 * All x86-64 CPUs support SSE2 (it's part of the x86-64 spec).
 	 * 32-bit x86 may not, but any CPU from ~2003 onward has it.
 	 */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 	ASSERT_TRUE(caps & SIMD_SSE2, "x86 should have SSE2");
 }
 
 TEST(x86_no_neon)
 {
 	/* NEON is ARM-only, should never be detected on x86 */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 	ASSERT_TRUE(!(caps & SIMD_NEON), "x86 should not have NEON");
 }
 
@@ -207,7 +207,7 @@ TEST(x86_avx2_implies_sse)
 	 * If AVX2 is present, all lower capabilities must also be present.
 	 * This validates the detection logic sets all implied flags.
 	 */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 
 	if (caps & SIMD_AVX2)
 	{
@@ -226,7 +226,7 @@ TEST(x86_avx512_implies_avx2)
 	/*
 	 * If AVX-512 is present, AVX2 must also be present.
 	 */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 
 	if (caps & SIMD_AVX512F)
 	{
@@ -250,14 +250,14 @@ TEST(arm64_has_neon)
 	 * NEON is mandatory on AArch64 - all ARM64 CPUs have it.
 	 * This test will fail if detection is broken on ARM.
 	 */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 	ASSERT_TRUE(caps & SIMD_NEON, "ARM64 must have NEON");
 }
 
 TEST(arm64_no_x86_features)
 {
 	/* x86 features should never be detected on ARM */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 	ASSERT_TRUE(!(caps & SIMD_SSE2), "ARM64 should not have SSE2");
 	ASSERT_TRUE(!(caps & SIMD_SSE4_1), "ARM64 should not have SSE4.1");
 	ASSERT_TRUE(!(caps & SIMD_AVX2), "ARM64 should not have AVX2");
@@ -271,7 +271,7 @@ TEST(arm64_no_x86_features)
 TEST(arm32_no_x86_features)
 {
 	/* x86 features should never be detected on ARM */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 	ASSERT_TRUE(!(caps & SIMD_SSE2), "ARM32 should not have SSE2");
 	ASSERT_TRUE(!(caps & SIMD_AVX2), "ARM32 should not have AVX2");
 }
@@ -280,7 +280,7 @@ TEST(arm32_no_x86_features)
 TEST(arm32_has_neon_when_compiled_with_neon)
 {
 	/* If compiled with NEON support, detection should find it */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 	ASSERT_TRUE(caps & SIMD_NEON, "ARM32 with NEON should detect NEON");
 }
 #endif
@@ -348,7 +348,7 @@ TEST(x86_detection_matches_procfs)
 	 * Verify our CPUID-based detection matches /proc/cpuinfo.
 	 * This catches bugs in CPUID interpretation.
 	 */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 
 	int os_sse2	   = cpuinfo_has_flag("sse2");
 	int os_sse4_1  = cpuinfo_has_flag("sse4_1");
@@ -370,7 +370,7 @@ TEST(x86_detection_matches_procfs)
 			os_avx2,
 			os_avx512f);
 	TEST_PRINT(
-			"mkt_detect:    sse2=%d sse4_1=%d avx2=%d avx512f=%d\n",
+			"vs_detect:    sse2=%d sse4_1=%d avx2=%d avx512f=%d\n",
 			!!(caps & SIMD_SSE2),
 			!!(caps & SIMD_SSE4_1),
 			!!(caps & SIMD_AVX2),
@@ -412,14 +412,14 @@ TEST(arm64_detection_matches_auxval)
 	 * Verify our detection matches getauxval(AT_HWCAP).
 	 * On ARM64, ASIMD (NEON) is indicated by HWCAP_ASIMD.
 	 */
-	SimdCapability caps	 = mkt_detect_simd();
+	SimdCapability caps	 = vs_detect_simd();
 	unsigned long  hwcap = getauxval(AT_HWCAP);
 
 	TEST_PRINT(
 			"getauxval(AT_HWCAP): 0x%lx, HWCAP_ASIMD=%d\n",
 			hwcap,
 			!!(hwcap & HWCAP_ASIMD));
-	TEST_PRINT("mkt_detect: NEON=%d\n", !!(caps & SIMD_NEON));
+	TEST_PRINT("vs_detect: NEON=%d\n", !!(caps & SIMD_NEON));
 
 	if (hwcap & HWCAP_ASIMD)
 		ASSERT_TRUE(caps & SIMD_NEON, "ASIMD in hwcap but NEON not detected");
@@ -433,7 +433,7 @@ TEST(arm64_detection_matches_procfs)
 	/*
 	 * Also verify against /proc/cpuinfo Features line.
 	 */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 
 	int os_asimd = cpuinfo_has_flag("asimd");
 
@@ -445,7 +445,7 @@ TEST(arm64_detection_matches_procfs)
 	}
 
 	TEST_PRINT("/proc/cpuinfo: asimd=%d\n", os_asimd);
-	TEST_PRINT("mkt_detect:    NEON=%d\n", !!(caps & SIMD_NEON));
+	TEST_PRINT("vs_detect:    NEON=%d\n", !!(caps & SIMD_NEON));
 
 	if (os_asimd)
 		ASSERT_TRUE(
@@ -481,7 +481,7 @@ TEST(x86_macos_detection_matches_sysctl)
 	/*
 	 * Verify our detection matches macOS sysctl hw.optional.* values.
 	 */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 
 	int os_sse2	   = 1; /* Always present on x86_64 macOS */
 	int os_sse4_1  = sysctl_has_feature("hw.optional.sse4_1");
@@ -494,7 +494,7 @@ TEST(x86_macos_detection_matches_sysctl)
 			os_avx2,
 			os_avx512f);
 	TEST_PRINT(
-			"mkt_detect: sse2=%d sse4_1=%d avx2=%d avx512f=%d\n",
+			"vs_detect: sse2=%d sse4_1=%d avx2=%d avx512f=%d\n",
 			!!(caps & SIMD_SSE2),
 			!!(caps & SIMD_SSE4_1),
 			!!(caps & SIMD_AVX2),
@@ -520,7 +520,7 @@ TEST(arm64_macos_detection_matches_sysctl)
 	 * Verify NEON detection on Apple Silicon.
 	 * NEON (ASIMD) is mandatory on ARM64, so this should always pass.
 	 */
-	SimdCapability caps = mkt_detect_simd();
+	SimdCapability caps = vs_detect_simd();
 
 	/* hw.optional.neon exists on Apple Silicon */
 	int os_neon = sysctl_has_feature("hw.optional.neon");
@@ -529,7 +529,7 @@ TEST(arm64_macos_detection_matches_sysctl)
 	int os_advsimd = sysctl_has_feature("hw.optional.AdvSIMD");
 
 	TEST_PRINT("sysctl:     neon=%d advsimd=%d\n", os_neon, os_advsimd);
-	TEST_PRINT("mkt_detect: NEON=%d\n", !!(caps & SIMD_NEON));
+	TEST_PRINT("vs_detect: NEON=%d\n", !!(caps & SIMD_NEON));
 
 	/* Apple Silicon always has NEON */
 	ASSERT_TRUE(caps & SIMD_NEON, "ARM64 macOS must have NEON");

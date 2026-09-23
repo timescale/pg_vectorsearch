@@ -11,7 +11,7 @@
 
 #include <postgres.h>
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <commands/progress.h>
 #include <miscadmin.h>
@@ -119,8 +119,8 @@ flush_phase(PrismBuildProgress *p)
 								 : 0.0;
 
 	ereport(LOG,
-			(errmsg(MKT_AM_NAME " build: phase \"%s\" done in %.0f ms "
-								"(build heap %.1f MB, DSM %.1f MB)",
+			(errmsg(VS_AM_NAME " build: phase \"%s\" done in %.0f ms "
+							   "(build heap %.1f MB, DSM %.1f MB)",
 					prism_build_phase_name(p->cur_phase),
 					ms,
 					heap_mb,
@@ -128,7 +128,7 @@ flush_phase(PrismBuildProgress *p)
 			 errhidestmt(true)));
 
 	/* btree-style CPU + maxrss for the phase, then reset for the next one. */
-	ShowUsage(MKT_AM_NAME " build phase resource usage");
+	ShowUsage(VS_AM_NAME " build phase resource usage");
 	ResetUsage();
 }
 

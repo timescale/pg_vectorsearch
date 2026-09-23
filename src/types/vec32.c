@@ -22,11 +22,11 @@ vec32_create(Dimension dim)
 		return NULL;
 
 	size_t size = VEC32_SIZE(dim);
-	Vec32 *v	= mkt_alloc(size);
+	Vec32 *v	= vs_alloc(size);
 	if (v == NULL)
 		return NULL;
 
-	MKT_SET_VARSIZE(v, size);
+	VS_SET_VARSIZE(v, size);
 	v->dim	  = (int16_t)dim;
 	v->unused = 0;
 
@@ -50,7 +50,7 @@ vec32_copy(const Vec32 *src)
 void
 vec32_free(Vec32 *v)
 {
-	mkt_free(v);
+	vs_free(v);
 }
 
 void

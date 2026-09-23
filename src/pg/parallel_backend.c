@@ -12,7 +12,7 @@
 
 #include <postgres.h>
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <access/parallel.h>
 #include <access/table.h>
@@ -72,7 +72,7 @@ typedef struct PrismBuildSharedPg
 	slock_t accum_locks[PRISM_REFINE_LOCK_STRIPES];
 } PrismBuildSharedPg;
 
-#define ParallelTableScanFromMktShared(shared)  \
+#define ParallelTableScanFromVsShared(shared)   \
 	((ParallelTableScanDesc)((char *)(shared) + \
 							 BUFFERALIGN(sizeof(PrismBuildSharedPg))))
 
@@ -86,15 +86,15 @@ typedef struct PrismBuildSharedPg
  * consumes the pointer before returning, so one buffer per participant is
  * enough.
  */
-typedef struct MktPgScanAdapter
+typedef struct PrismPgScanAdapter
 {
 	PrismBuildScanCb cb;
 	void			*state;
 	Vec32Access		 input;
-} MktPgScanAdapter;
+} PrismPgScanAdapter;
 
 static void
-mkt_pg_scan_adapter(
+prism_pg_scan_adapter(
 		Relation	index,
 		ItemPointer tid,
 		Datum	   *values,
@@ -102,7 +102,7 @@ mkt_pg_scan_adapter(
 		bool		tuple_is_alive,
 		void	   *adapter_state)
 {
-	MktPgScanAdapter *a = (MktPgScanAdapter *)adapter_state;
+	PrismPgScanAdapter *a = (PrismPgScanAdapter *)adapter_state;
 
 	(void)index;
 	(void)tuple_is_alive;
@@ -136,7 +136,7 @@ prism_build_scan(
 	Dimension dim = (Dimension)TupleDescAttr(index->rd_att, 0)->atttypmod;
 	/* Build-time path: resolved directly, since the per-backend cache reads a
 	 * metadata page this build has not written yet. */
-	MktPgScanAdapter actx = {
+	PrismPgScanAdapter actx = {
 			.cb	   = cb,
 			.state = state,
 			.input = vec32_access(
@@ -144,7 +144,7 @@ prism_build_scan(
 	};
 
 	TableScanDesc scan = table_beginscan_parallel(
-			heap, ParallelTableScanFromMktShared(shared));
+			heap, ParallelTableScanFromVsShared(shared));
 
 	return table_index_build_scan(
 			heap,
@@ -152,7 +152,7 @@ prism_build_scan(
 			indexInfo,
 			allow_sync,
 			progress,
-			mkt_pg_scan_adapter,
+			prism_pg_scan_adapter,
 			&actx,
 			scan);
 }
@@ -174,8 +174,8 @@ worker_lockmodes(bool concurrent, LOCKMODE *heapmode, LOCKMODE *indexmode)
 }
 
 /* Per-worker build memory context (see prism_pbuild_worker_attach). */
-static MemoryContext mkt_pbuild_worker_ctx	  = NULL;
-static MemoryContext mkt_pbuild_worker_oldctx = NULL;
+static MemoryContext vs_pbuild_worker_ctx	 = NULL;
+static MemoryContext vs_pbuild_worker_oldctx = NULL;
 
 /*
  * Join the parallel build: look up the shared state, open the heap and index,
@@ -211,11 +211,11 @@ prism_pbuild_worker_attach(shm_toc *toc, PrismPBuildWorker *w)
 	 * subtree blobs, batch buffers) go into a named context so
 	 * pg_backend_memory_contexts attributes them to the build and they are
 	 * reclaimed together at detach. A file-static is safe for the same
-	 * reason as mkt_pbuild_snapshot: one build per worker, non-reentrant.
+	 * reason as vs_pbuild_snapshot: one build per worker, non-reentrant.
 	 */
-	mkt_pbuild_worker_ctx = AllocSetContextCreate(
-			CurrentMemoryContext, "mkt worker build", ALLOCSET_DEFAULT_SIZES);
-	mkt_pbuild_worker_oldctx = MemoryContextSwitchTo(mkt_pbuild_worker_ctx);
+	vs_pbuild_worker_ctx = AllocSetContextCreate(
+			CurrentMemoryContext, "vs worker build", ALLOCSET_DEFAULT_SIZES);
+	vs_pbuild_worker_oldctx = MemoryContextSwitchTo(vs_pbuild_worker_ctx);
 
 	InstrStartParallelQuery();
 
@@ -236,10 +236,10 @@ prism_pbuild_worker_attach(shm_toc *toc, PrismPBuildWorker *w)
 void
 prism_pbuild_worker_detach(shm_toc *toc, PrismPBuildWorker *w)
 {
-	MemoryContextSwitchTo(mkt_pbuild_worker_oldctx);
-	MemoryContextDelete(mkt_pbuild_worker_ctx);
-	mkt_pbuild_worker_ctx	 = NULL;
-	mkt_pbuild_worker_oldctx = NULL;
+	MemoryContextSwitchTo(vs_pbuild_worker_oldctx);
+	MemoryContextDelete(vs_pbuild_worker_ctx);
+	vs_pbuild_worker_ctx	= NULL;
+	vs_pbuild_worker_oldctx = NULL;
 
 	BufferUsage *bufferusage =
 			shm_toc_lookup(toc, PRISM_DSM_KEY_BUFFER_USAGE, false);
@@ -256,29 +256,29 @@ prism_pbuild_worker_detach(shm_toc *toc, PrismPBuildWorker *w)
 
 /*
  * Page-backed routing storage seam (see parallel_build.h). PG workers are
- * separate processes, so each opens its own MktStorage on the worker's index
+ * separate processes, so each opens its own VsStorage on the worker's index
  * relation; the leader's storage pointer cannot cross the process boundary, so
  * publish is a no-op here.
  */
 void
-prism_pbuild_publish_storage(PrismBuildShared *shared, MktStorage *s)
+prism_pbuild_publish_storage(PrismBuildShared *shared, VsStorage *s)
 {
 	(void)shared;
 	(void)s;
 }
 
-MktStorage *
+VsStorage *
 prism_pbuild_worker_storage(PrismPBuildWorker *w)
 {
 	/* No table relation needed (routing reads index pages only, no rerank). */
-	MktPgStorage *s = palloc(sizeof(MktPgStorage));
-	mkt_pg_storage_init(s, w->indexRel, NULL, w->shared->metric);
+	VsPgStorage *s = palloc(sizeof(VsPgStorage));
+	vs_pg_storage_init(s, w->indexRel, NULL, w->shared->metric);
 	s->build_mode = true; /* reads only; matches the leader's build storage */
 	return &s->base;	  /* base is the first member */
 }
 
 void
-prism_pbuild_worker_storage_release(MktStorage *s)
+prism_pbuild_worker_storage_release(VsStorage *s)
 {
 	/* The route helper releases every page it reads, so no buffer stays
 	 * pinned; just free the wrapper (allocated in the worker's memory
@@ -294,7 +294,7 @@ prism_pbuild_worker_storage_release(MktStorage *s)
  * non-reentrant in the leader backend, and every parallel-build exit path runs
  * prism_pbuild_teardown.
  */
-static Snapshot mkt_pbuild_snapshot = NULL;
+static Snapshot vs_pbuild_snapshot = NULL;
 
 /*
  * Tear the parallel context down and leave parallel mode. The standalone
@@ -304,10 +304,10 @@ static Snapshot mkt_pbuild_snapshot = NULL;
 void
 prism_pbuild_teardown(ParallelContext *pcxt)
 {
-	if (mkt_pbuild_snapshot != NULL)
+	if (vs_pbuild_snapshot != NULL)
 	{
-		UnregisterSnapshot(mkt_pbuild_snapshot);
-		mkt_pbuild_snapshot = NULL;
+		UnregisterSnapshot(vs_pbuild_snapshot);
+		vs_pbuild_snapshot = NULL;
 	}
 	DestroyParallelContext(pcxt);
 	ExitParallelMode();
@@ -438,7 +438,7 @@ prism_pbuild_setup_shared(
 	Dimension dim			= config->dim;
 	uint32_t  nlist			= config->nlist;
 	int		  nparticipants = nworkers + 1;
-	uint64_t  rabitq_seed	= MKT_RABITQ_BUILD_SEED;
+	uint64_t  rabitq_seed	= VS_RABITQ_BUILD_SEED;
 	uint32_t  fan_out		= config->fan_out > 0 ? config->fan_out
 												  : prism_auto_fan_out(0, nlist, 0);
 	uint32_t  km_k			= fan_out < nlist ? fan_out : nlist;
@@ -483,7 +483,7 @@ prism_pbuild_setup_shared(
 
 	if (want_samples > budget && est_tuples > (double)budget)
 		elog(LOG,
-			 MKT_EXTENSION_NAME
+			 VS_EXTENSION_NAME
 			 ": k-means sample set limited to %u of the "
 			 "ideal " UINT64_FORMAT " vectors by maintenance_work_mem "
 			 "(%d kB); raise maintenance_work_mem for finer centroid "
@@ -508,7 +508,7 @@ prism_pbuild_setup_shared(
 	EnterParallelMode();
 
 	ParallelContext *pcxt = CreateParallelContext(
-			MKT_MODULE_NAME, "prism_parallel_build_main", nworkers);
+			VS_MODULE_NAME, "prism_parallel_build_main", nworkers);
 
 	/*
 	 * The heap scan's snapshot. A normal build sees all tuples (SnapshotAny);
@@ -518,13 +518,13 @@ prism_pbuild_setup_shared(
 	 * duration — its serialized size also affects the DSM estimate below — and
 	 * release it in prism_pbuild_teardown. Mirrors PostgreSQL's nbtsort.c.
 	 */
-	Snapshot snapshot	= config->concurrent
-								? RegisterSnapshot(GetTransactionSnapshot())
-								: SnapshotAny;
-	mkt_pbuild_snapshot = (snapshot != SnapshotAny) ? snapshot : NULL;
-	Size est_shared		= add_size(
-			BUFFERALIGN(sizeof(PrismBuildSharedPg)),
-			table_parallelscan_estimate(heap, snapshot));
+	Snapshot snapshot  = config->concurrent
+							   ? RegisterSnapshot(GetTransactionSnapshot())
+							   : SnapshotAny;
+	vs_pbuild_snapshot = (snapshot != SnapshotAny) ? snapshot : NULL;
+	Size est_shared	   = add_size(
+			   BUFFERALIGN(sizeof(PrismBuildSharedPg)),
+			   table_parallelscan_estimate(heap, snapshot));
 
 	shm_toc_estimate_chunk(&pcxt->estimator, est_shared);
 	shm_toc_estimate_chunk(&pcxt->estimator, sizeof(Barrier));
@@ -622,10 +622,10 @@ prism_pbuild_setup_shared(
 	shared->km_tolerance		   = 1e-4f;
 	shared->km_k				   = km_k;
 	shared->km_converged		   = false;
-	shared->refine_threshold	   = (uint32_t)mkt_leaf_refine_threshold;
+	shared->refine_threshold	   = (uint32_t)prism_leaf_refine_threshold;
 	shared->refine			= false; /* leader decides post-clustering */
 	shared->refine_tile_cap = refine_tile_cap;
-	/* Build routes for accuracy, not query speed (see MKT_BUILD_CENTROID_*
+	/* Build routes for accuracy, not query speed (see PRISM_BUILD_CENTROID_*
 	 * in posting_build.h): decouple from the query-tuned GUCs. */
 	shared->centroid_error_scale = PRISM_BUILD_CENTROID_ERROR_SCALE;
 	shared->centroid_beam_scale	 = PRISM_BUILD_CENTROID_BEAM_SCALE;
@@ -637,7 +637,7 @@ prism_pbuild_setup_shared(
 	shared->indtuples  = 0.0;
 	shared->soar_dupes = 0.0;
 	table_parallelscan_initialize(
-			heap, ParallelTableScanFromMktShared(shared), snapshot);
+			heap, ParallelTableScanFromVsShared(shared), snapshot);
 	shm_toc_insert(pcxt->toc, PRISM_DSM_KEY_SHARED, shared);
 
 	/*
@@ -895,7 +895,7 @@ void
 prism_pbuild_rescan(Relation heap, PrismBuildShared *shared)
 {
 	table_parallelscan_reinitialize(
-			heap, ParallelTableScanFromMktShared(shared));
+			heap, ParallelTableScanFromVsShared(shared));
 }
 
 /*

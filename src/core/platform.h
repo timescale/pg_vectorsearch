@@ -5,8 +5,8 @@
  * for portable SIMD code.
  */
 
-#ifndef MKT_PLATFORM_H
-#define MKT_PLATFORM_H
+#ifndef VS_PLATFORM_H
+#define VS_PLATFORM_H
 
 #include <stdint.h>
 
@@ -29,16 +29,17 @@ typedef enum
 
 /*
  * The AVX-512 kernels are compiled for specific sub-extensions (see the
- * MKT_TARGET_AVX512* attributes in simd_utils.h and the target attributes in
+ * VS_TARGET_AVX512* attributes in simd_utils.h and the target attributes in
  * the *_avx512.c files), not plain AVX512F. Dispatch -- and the test/bench
  * overrides that force a path -- must require every bit the kernels use: a
  * CPU can implement F without BW or DQ (e.g. Knights Landing), and running
  * the compiled kernels there faults with SIGILL. VPOPCNTDQ kernels are gated
  * separately on SIMD_AVX512_VPOPCNTDQ (which already implies F).
  */
-#define MKT_SIMD_AVX512_DQ \
-	(SIMD_AVX512F | SIMD_AVX512DQ) /* distance, rabitq */
-#define MKT_SIMD_AVX512_BW (SIMD_AVX512F | SIMD_AVX512BW) /* fastscan */
+#define VS_SIMD_AVX512_DQ                                                    \
+	(SIMD_AVX512F | SIMD_AVX512DQ)						 /* distance, rabitq \
+														  */
+#define VS_SIMD_AVX512_BW (SIMD_AVX512F | SIMD_AVX512BW) /* fastscan */
 
 /*
  * Detect CPU SIMD capabilities at runtime.
@@ -48,25 +49,25 @@ typedef enum
  *
  * Result is cached after first call.
  */
-SimdCapability mkt_detect_simd(void);
+SimdCapability vs_detect_simd(void);
 
 /*
  * Check if specific SIMD capability is available.
  */
 static inline int
-mkt_has_simd(SimdCapability cap)
+vs_has_simd(SimdCapability cap)
 {
-	return (mkt_detect_simd() & cap) != 0;
+	return (vs_detect_simd() & cap) != 0;
 }
 
 /*
- * Check that ALL bits in mask are available. Use with the MKT_SIMD_AVX512_*
+ * Check that ALL bits in mask are available. Use with the VS_SIMD_AVX512_*
  * masks so a multi-bit requirement (F + BW, F + DQ) is tested as a unit.
  */
 static inline int
-mkt_has_all_simd(SimdCapability mask)
+vs_has_all_simd(SimdCapability mask)
 {
-	return (mkt_detect_simd() & mask) == (SimdCapability)mask;
+	return (vs_detect_simd() & mask) == (SimdCapability)mask;
 }
 
 /*
@@ -91,31 +92,31 @@ mkt_has_all_simd(SimdCapability mask)
  *
  * Example usage:
  *   // Test AVX2 code path even on AVX-512 CPU
- *   mkt_simd_set_override(SIMD_AVX2);
+ *   vs_simd_set_override(SIMD_AVX2);
  *   // ... run tests or benchmarks ...
- *   mkt_simd_set_override(0xFFFFFFFF);  // Reset to auto-detect
+ *   vs_simd_set_override(0xFFFFFFFF);  // Reset to auto-detect
  */
-void mkt_simd_set_override(uint32_t mask);
+void vs_simd_set_override(uint32_t mask);
 
 /*
  * Clear SIMD detection cache, forcing re-detection.
  *
  * Useful when testing different SIMD overrides. Call this after
- * mkt_simd_set_override() to ensure the new mask takes effect.
+ * vs_simd_set_override() to ensure the new mask takes effect.
  */
-void mkt_simd_reset_cache(void);
+void vs_simd_reset_cache(void);
 
 /* Cache line size (typical for modern CPUs) */
-#define MKT_CACHE_LINE 64
+#define VS_CACHE_LINE 64
 
 /*
  * Prefetch hints for memory access optimization.
  *
- * mkt_prefetch_read:  Prefetch for reading (non-temporal, keep in all caches)
- * mkt_prefetch_write: Prefetch for writing (exclusive access)
+ * vs_prefetch_read:  Prefetch for reading (non-temporal, keep in all caches)
+ * vs_prefetch_write: Prefetch for writing (exclusive access)
  */
-#define mkt_prefetch_read(addr)	 __builtin_prefetch((addr), 0, 3)
-#define mkt_prefetch_write(addr) __builtin_prefetch((addr), 1, 3)
+#define vs_prefetch_read(addr)	__builtin_prefetch((addr), 0, 3)
+#define vs_prefetch_write(addr) __builtin_prefetch((addr), 1, 3)
 
 /*
  * Branch prediction hints.
@@ -126,12 +127,12 @@ void mkt_simd_reset_cache(void);
 /* Time-unit conversion factors for nanosecond-based instrumentation
  * (cf. PostgreSQL's NS_PER_S family in portability/instr_time.h; defined
  * here so shared, non-PG code can use them too). */
-#define MKT_NS_PER_SEC 1000000000ULL
-#define MKT_NS_PER_MS  1000000ULL
-#define MKT_NS_PER_US  1000ULL
+#define VS_NS_PER_SEC 1000000000ULL
+#define VS_NS_PER_MS  1000000ULL
+#define VS_NS_PER_US  1000ULL
 
-#define mkt_likely(x)	__builtin_expect(!!(x), 1)
-#define mkt_unlikely(x) __builtin_expect(!!(x), 0)
+#define vs_likely(x)   __builtin_expect(!!(x), 1)
+#define vs_unlikely(x) __builtin_expect(!!(x), 0)
 
 /*
  * Compiler memory barrier.
@@ -139,17 +140,17 @@ void mkt_simd_reset_cache(void);
  * Prevents compiler from reordering memory accesses across this point.
  * Does NOT generate CPU fence instructions (use atomics for that).
  */
-#define mkt_compiler_barrier() __asm__ __volatile__("" ::: "memory")
+#define vs_compiler_barrier() __asm__ __volatile__("" ::: "memory")
 
 /*
  * Alignment helpers.
  */
-#define MKT_ALIGN(x, a)		 (((x) + ((a) - 1)) & ~((a) - 1))
-#define MKT_IS_ALIGNED(x, a) (((uintptr_t)(x) & ((a) - 1)) == 0)
+#define VS_ALIGN(x, a)		(((x) + ((a) - 1)) & ~((a) - 1))
+#define VS_IS_ALIGNED(x, a) (((uintptr_t)(x) & ((a) - 1)) == 0)
 
 /*
  * SIMD vector alignment (64 bytes for AVX-512).
  */
-#define MKT_SIMD_ALIGN 64
+#define VS_SIMD_ALIGN 64
 
-#endif /* MKT_PLATFORM_H */
+#endif /* VS_PLATFORM_H */

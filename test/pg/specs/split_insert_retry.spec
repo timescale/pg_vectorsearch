@@ -3,7 +3,7 @@
 # An insert routes to a cluster, then takes a heavyweight lock on that
 # cluster's head. Between those two steps a split can retire the head, so the
 # insert re-routes and tries again. The loop is bounded
-# (MKT_INSERT_ROUTE_ATTEMPTS): running out has to fail the insert, because
+# (PRISM_INSERT_ROUTE_ATTEMPTS): running out has to fail the insert, because
 # returning normally would leave a committed row that no scan of this index
 # can find.
 #

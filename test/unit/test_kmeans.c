@@ -8,8 +8,8 @@
 #include "algo/kmeans.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
-#include "mkt_test.h"
 #include "types/vec16.h"
+#include "vs_test.h"
 
 TEST_GROUP(KMeans);
 TEST_MEMCTX_FIXTURE();
@@ -108,9 +108,8 @@ TEST(basic_l2)
 
 	make_3_clusters(data, per_cluster, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
+	KMeansResult *res = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "k-means should return a result");
 	ASSERT_EQ(3, res->nlist, "nlist should be 3");
@@ -134,7 +133,7 @@ TEST(basic_l2)
 			correct >= nvecs * 9 / 10,
 			"at least 90% correct for separated clusters");
 
-	mkt_kmeans_result_destroy(res);
+	vs_kmeans_result_destroy(res);
 }
 
 /*
@@ -149,9 +148,9 @@ TEST(basic_ip)
 
 	make_3_clusters(data, per_cluster, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_INNER_PRODUCT, &opts);
+			vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_INNER_PRODUCT, &opts);
 
 	ASSERT_NOT_NULL(res, "k-means should return a result");
 	ASSERT_EQ(3, res->nlist, "nlist should be 3");
@@ -161,7 +160,7 @@ TEST(basic_ip)
 		total += res->cluster_sizes[j];
 	ASSERT_EQ(nvecs, total, "total assignments should equal nvecs");
 
-	mkt_kmeans_result_destroy(res);
+	vs_kmeans_result_destroy(res);
 }
 
 /*
@@ -200,9 +199,9 @@ TEST(basic_cosine)
 		data[(2 * per_cluster + i) * 2 + 1] = sinf(a2);
 	}
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_COSINE, &opts);
+			vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_COSINE, &opts);
 
 	ASSERT_NOT_NULL(res, "k-means should return a result");
 
@@ -214,12 +213,12 @@ TEST(basic_cosine)
 	/* Centroids should be approximately unit length */
 	for (uint32_t j = 0; j < 3; j++)
 	{
-		float norm = mkt_l2_norm(res->centroids + j * dim, dim);
+		float norm = vs_l2_norm(res->centroids + j * dim, dim);
 		ASSERT_FLOAT_EQ(
 				1.0f, norm, 0.01f, "cosine centroids should be unit length");
 	}
 
-	mkt_kmeans_result_destroy(res);
+	vs_kmeans_result_destroy(res);
 }
 
 /*
@@ -255,9 +254,8 @@ TEST(well_separated_clusters)
 		}
 	}
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, 4, DISTANCE_L2, &opts);
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
+	KMeansResult *res = vs_kmeans_f32(data, nvecs, dim, 4, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "k-means should return a result");
 
@@ -265,7 +263,7 @@ TEST(well_separated_clusters)
 			count_correct_assignments(res->assignments, per_cluster, 4);
 	ASSERT_EQ(nvecs, correct, "100% accuracy for well-separated");
 
-	mkt_kmeans_result_destroy(res);
+	vs_kmeans_result_destroy(res);
 }
 
 /*
@@ -279,11 +277,11 @@ TEST(deterministic_with_seed)
 
 	make_3_clusters(data, 50, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.seed		   = 99;
 
-	KMeansResult *r1 = mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
-	KMeansResult *r2 = mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r1 = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r2 = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(r1, "first run should succeed");
 	ASSERT_NOT_NULL(r2, "second run should succeed");
@@ -302,8 +300,8 @@ TEST(deterministic_with_seed)
 				"same seed should give same assignments");
 	}
 
-	mkt_kmeans_result_destroy(r1);
-	mkt_kmeans_result_destroy(r2);
+	vs_kmeans_result_destroy(r1);
+	vs_kmeans_result_destroy(r2);
 }
 
 /*
@@ -315,8 +313,8 @@ TEST(single_cluster)
 	/* 3 vectors of dim 2: (1,2), (3,4), (5,6) */
 	/* Mean: (3, 4) */
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	KMeansResult *res  = mkt_kmeans_f32(data, 3, 2, 1, DISTANCE_L2, &opts);
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
+	KMeansResult *res  = vs_kmeans_f32(data, 3, 2, 1, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "should succeed");
 	ASSERT_EQ(1, res->nlist, "nlist=1");
@@ -325,7 +323,7 @@ TEST(single_cluster)
 	ASSERT_FLOAT_EQ(3.0f, res->centroids[0], 1e-4f, "mean x");
 	ASSERT_FLOAT_EQ(4.0f, res->centroids[1], 1e-4f, "mean y");
 
-	mkt_kmeans_result_destroy(res);
+	vs_kmeans_result_destroy(res);
 }
 
 /*
@@ -335,8 +333,8 @@ TEST(nlist_equals_nvecs)
 {
 	float data[] = {1.0f, 0.0f, 0.0f, 1.0f, -1.0f, 0.0f};
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	KMeansResult *res  = mkt_kmeans_f32(data, 3, 2, 3, DISTANCE_L2, &opts);
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
+	KMeansResult *res  = vs_kmeans_f32(data, 3, 2, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "should succeed");
 
@@ -354,7 +352,7 @@ TEST(nlist_equals_nvecs)
 			1e-3f,
 			"cost should be ~0 when nlist==nvecs");
 
-	mkt_kmeans_result_destroy(res);
+	vs_kmeans_result_destroy(res);
 }
 
 /*
@@ -386,9 +384,8 @@ TEST(empty_cluster_handling)
 										  (float)(rng % 100) / 1000.0f;
 	}
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
-	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, 4, DISTANCE_L2, &opts);
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
+	KMeansResult *res = vs_kmeans_f32(data, nvecs, dim, 4, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "should handle empty clusters");
 
@@ -397,7 +394,7 @@ TEST(empty_cluster_handling)
 		total += res->cluster_sizes[j];
 	ASSERT_EQ(nvecs, total, "all vectors assigned");
 
-	mkt_kmeans_result_destroy(res);
+	vs_kmeans_result_destroy(res);
 }
 
 /*
@@ -411,17 +408,15 @@ TEST(nredo_improves_cost)
 
 	make_3_clusters(data, 50, 42);
 
-	KMeansOptions opts1 = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts1 = VS_KMEANS_OPTIONS_DEFAULT;
 	opts1.seed			= 42;
 	opts1.nredo			= 1;
-	KMeansResult *r1 =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts1);
+	KMeansResult *r1 = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts1);
 
-	KMeansOptions opts3 = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts3 = VS_KMEANS_OPTIONS_DEFAULT;
 	opts3.seed			= 42;
 	opts3.nredo			= 3;
-	KMeansResult *r3 =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts3);
+	KMeansResult *r3 = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts3);
 
 	ASSERT_NOT_NULL(r1, "nredo=1 should succeed");
 	ASSERT_NOT_NULL(r3, "nredo=3 should succeed");
@@ -431,8 +426,8 @@ TEST(nredo_improves_cost)
 			r3->total_cost <= r1->total_cost + 1e-3f,
 			"more restarts should not increase cost");
 
-	mkt_kmeans_result_destroy(r1);
-	mkt_kmeans_result_destroy(r3);
+	vs_kmeans_result_destroy(r1);
+	vs_kmeans_result_destroy(r3);
 }
 
 /*
@@ -446,24 +441,24 @@ TEST(cblas_builtin_match)
 
 	make_3_clusters(data, 50, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.seed		   = 42;
 
 	/* Run with whatever the current default is */
-	bool original = mkt_kmeans_get_use_cblas();
+	bool original = vs_kmeans_get_use_cblas();
 
 	/* Force builtin */
-	mkt_kmeans_set_use_cblas(false);
+	vs_kmeans_set_use_cblas(false);
 	KMeansResult *r_builtin =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+			vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	/* Force cblas (if available, otherwise same as builtin) */
-	mkt_kmeans_set_use_cblas(true);
+	vs_kmeans_set_use_cblas(true);
 	KMeansResult *r_cblas =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+			vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	/* Restore */
-	mkt_kmeans_set_use_cblas(original);
+	vs_kmeans_set_use_cblas(original);
 
 	ASSERT_NOT_NULL(r_builtin, "builtin should succeed");
 	ASSERT_NOT_NULL(r_cblas, "cblas should succeed");
@@ -483,8 +478,8 @@ TEST(cblas_builtin_match)
 			1e-2f,
 			"costs should be close");
 
-	mkt_kmeans_result_destroy(r_builtin);
-	mkt_kmeans_result_destroy(r_cblas);
+	vs_kmeans_result_destroy(r_builtin);
+	vs_kmeans_result_destroy(r_cblas);
 }
 
 /*
@@ -493,28 +488,28 @@ TEST(cblas_builtin_match)
 TEST(null_inputs)
 {
 	float		  data[] = {1.0f, 2.0f};
-	KMeansOptions opts	 = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts	 = VS_KMEANS_OPTIONS_DEFAULT;
 
 	ASSERT_NULL(
-			mkt_kmeans_f32(NULL, 10, 2, 3, DISTANCE_L2, &opts),
+			vs_kmeans_f32(NULL, 10, 2, 3, DISTANCE_L2, &opts),
 			"NULL vectors should return NULL");
 
 	ASSERT_NULL(
-			mkt_kmeans_f32(data, 0, 2, 3, DISTANCE_L2, &opts),
+			vs_kmeans_f32(data, 0, 2, 3, DISTANCE_L2, &opts),
 			"nvecs=0 should return NULL");
 
 	ASSERT_NULL(
-			mkt_kmeans_f32(data, 1, 0, 3, DISTANCE_L2, &opts),
+			vs_kmeans_f32(data, 1, 0, 3, DISTANCE_L2, &opts),
 			"dim=0 should return NULL");
 
 	ASSERT_NULL(
-			mkt_kmeans_f32(data, 1, 2, 0, DISTANCE_L2, &opts),
+			vs_kmeans_f32(data, 1, 2, 0, DISTANCE_L2, &opts),
 			"nlist=0 should return NULL");
 
 	/* NULL options should use defaults (not crash) */
-	KMeansResult *r = mkt_kmeans_f32(data, 1, 2, 1, DISTANCE_L2, NULL);
+	KMeansResult *r = vs_kmeans_f32(data, 1, 2, 1, DISTANCE_L2, NULL);
 	ASSERT_NOT_NULL(r, "NULL options should use defaults");
-	mkt_kmeans_result_destroy(r);
+	vs_kmeans_result_destroy(r);
 }
 
 /*
@@ -527,7 +522,7 @@ TEST_PARAMETERIZED(dims, "4", "16", "64", "128")
 	uint32_t  per_cluster  = 30;
 	uint32_t  nlist		   = 3;
 	uint32_t  nvecs		   = per_cluster * nlist;
-	float	 *data		   = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float	 *data		   = vs_alloc((size_t)nvecs * dim * sizeof(float));
 
 	/* Generate clusters spread along each axis */
 	uint32_t rng = 42;
@@ -547,9 +542,9 @@ TEST_PARAMETERIZED(dims, "4", "16", "64", "128")
 		}
 	}
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			vs_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "should succeed");
 	ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
@@ -559,8 +554,8 @@ TEST_PARAMETERIZED(dims, "4", "16", "64", "128")
 		total += res->cluster_sizes[j];
 	ASSERT_EQ(nvecs, total, "all vectors assigned");
 
-	mkt_kmeans_result_destroy(res);
-	mkt_free(data);
+	vs_kmeans_result_destroy(res);
+	vs_free(data);
 }
 
 /*
@@ -574,17 +569,16 @@ TEST(max_iterations_respected)
 
 	make_3_clusters(data, 50, 42);
 
-	KMeansOptions opts	= MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts	= VS_KMEANS_OPTIONS_DEFAULT;
 	opts.max_iterations = 1;
 	opts.tolerance		= 0.0f; /* never converge early */
 
-	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *res = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "should succeed with 1 iteration");
 	/* Just verify it completed without crash */
 
-	mkt_kmeans_result_destroy(res);
+	vs_kmeans_result_destroy(res);
 }
 
 /*
@@ -592,7 +586,7 @@ TEST(max_iterations_respected)
  */
 TEST(impl_name_valid)
 {
-	const char *name = mkt_kmeans_impl_name();
+	const char *name = vs_kmeans_impl_name();
 	ASSERT_NOT_NULL(name, "impl_name should not be null");
 
 	int valid = (strcmp(name, "cblas") == 0 || strcmp(name, "builtin") == 0);
@@ -619,12 +613,11 @@ TEST_PARAMETERIZED(algo_l2, "lloyd", "hamerly", "elkan")
 
 	make_3_clusters(data, per_cluster, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = algos[iteration];
 	opts.seed		   = 42;
 
-	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *res = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "algorithm should return result");
 	ASSERT_EQ(3, res->nlist, "nlist should be 3");
@@ -645,7 +638,7 @@ TEST_PARAMETERIZED(algo_l2, "lloyd", "hamerly", "elkan")
 			correct >= nvecs * 9 / 10,
 			"at least 90% correct for separated clusters");
 
-	mkt_kmeans_result_destroy(res);
+	vs_kmeans_result_destroy(res);
 }
 
 /*
@@ -673,12 +666,12 @@ TEST(algo_all_valid)
 
 	for (int a = 0; a < 3; a++)
 	{
-		KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+		KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 		opts.seed		   = 42;
 		opts.algorithm	   = algos[a];
 
 		KMeansResult *res =
-				mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+				vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 		ASSERT_NOT_NULL(res, "algorithm should succeed");
 		ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
@@ -689,7 +682,7 @@ TEST(algo_all_valid)
 			total += res->cluster_sizes[j];
 		ASSERT_EQ(nvecs, total, "all vectors assigned");
 
-		mkt_kmeans_result_destroy(res);
+		vs_kmeans_result_destroy(res);
 	}
 }
 
@@ -707,11 +700,11 @@ TEST(lloyd_ip)
 
 	make_3_clusters(data, per_cluster, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = KMEANS_ALGO_LLOYD;
 
 	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_INNER_PRODUCT, &opts);
+			vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_INNER_PRODUCT, &opts);
 
 	ASSERT_NOT_NULL(res, "lloyd IP should succeed");
 
@@ -720,7 +713,7 @@ TEST(lloyd_ip)
 		total += res->cluster_sizes[j];
 	ASSERT_EQ(nvecs, total, "all vectors assigned");
 
-	mkt_kmeans_result_destroy(res);
+	vs_kmeans_result_destroy(res);
 }
 
 /*
@@ -755,11 +748,11 @@ TEST(lloyd_cosine)
 		data[(2 * per_cluster + i) * 2 + 1] = sinf(a2);
 	}
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = KMEANS_ALGO_LLOYD;
 
 	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_COSINE, &opts);
+			vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_COSINE, &opts);
 
 	ASSERT_NOT_NULL(res, "lloyd cosine should succeed");
 
@@ -771,18 +764,18 @@ TEST(lloyd_cosine)
 	/* Centroids should be approximately unit length */
 	for (uint32_t j = 0; j < 3; j++)
 	{
-		float norm = mkt_l2_norm(res->centroids + j * dim, dim);
+		float norm = vs_l2_norm(res->centroids + j * dim, dim);
 		ASSERT_FLOAT_EQ(
 				1.0f, norm, 0.01f, "cosine centroids should be unit length");
 	}
 
-	mkt_kmeans_result_destroy(res);
+	vs_kmeans_result_destroy(res);
 }
 
 /*
  * Hamerly/Elkan with non-L2 metrics should fall back to Lloyd.
  *
- * Covers the fallback path in mkt_kmeans (lines 637-639).
+ * Covers the fallback path in vs_kmeans (lines 637-639).
  */
 TEST_PARAMETERIZED(algo_non_l2_fallback, "hamerly_ip", "elkan_ip")
 {
@@ -798,12 +791,12 @@ TEST_PARAMETERIZED(algo_non_l2_fallback, "hamerly_ip", "elkan_ip")
 
 	make_3_clusters(data, per_cluster, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = algos[iteration];
 
 	/* Should fall back to Lloyd for IP metric, not crash */
 	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_INNER_PRODUCT, &opts);
+			vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_INNER_PRODUCT, &opts);
 
 	ASSERT_NOT_NULL(res, "fallback should succeed");
 
@@ -812,7 +805,7 @@ TEST_PARAMETERIZED(algo_non_l2_fallback, "hamerly_ip", "elkan_ip")
 		total += res->cluster_sizes[j];
 	ASSERT_EQ(nvecs, total, "all vectors assigned");
 
-	mkt_kmeans_result_destroy(res);
+	vs_kmeans_result_destroy(res);
 }
 
 /*
@@ -820,20 +813,20 @@ TEST_PARAMETERIZED(algo_non_l2_fallback, "hamerly_ip", "elkan_ip")
  */
 TEST(algo_name)
 {
-	ASSERT_STR_EQ("auto", mkt_kmeans_algo_name(KMEANS_ALGO_AUTO), "AUTO name");
+	ASSERT_STR_EQ("auto", vs_kmeans_algo_name(KMEANS_ALGO_AUTO), "AUTO name");
 	ASSERT_STR_EQ(
-			"lloyd", mkt_kmeans_algo_name(KMEANS_ALGO_LLOYD), "LLOYD name");
+			"lloyd", vs_kmeans_algo_name(KMEANS_ALGO_LLOYD), "LLOYD name");
 	ASSERT_STR_EQ(
 			"hamerly",
-			mkt_kmeans_algo_name(KMEANS_ALGO_HAMERLY),
+			vs_kmeans_algo_name(KMEANS_ALGO_HAMERLY),
 			"HAMERLY name");
 	ASSERT_STR_EQ(
-			"elkan", mkt_kmeans_algo_name(KMEANS_ALGO_ELKAN), "ELKAN name");
+			"elkan", vs_kmeans_algo_name(KMEANS_ALGO_ELKAN), "ELKAN name");
 	ASSERT_STR_EQ(
 			"lloyd(cblas)",
-			mkt_kmeans_algo_name(KMEANS_ALGO_CBLAS),
+			vs_kmeans_algo_name(KMEANS_ALGO_CBLAS),
 			"CBLAS name");
-	ASSERT_STR_EQ("unknown", mkt_kmeans_algo_name(99), "invalid algo name");
+	ASSERT_STR_EQ("unknown", vs_kmeans_algo_name(99), "invalid algo name");
 }
 
 /*
@@ -850,7 +843,7 @@ TEST(verbose_mode)
 
 	make_3_clusters(data, per_cluster, 42);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.verbose	   = true;
 	opts.nredo		   = 2; /* covers verbose nredo path */
 
@@ -860,13 +853,13 @@ TEST(verbose_mode)
 
 	/* Test verbose for each algorithm */
 	opts.algorithm	 = KMEANS_ALGO_LLOYD;
-	KMeansResult *r1 = mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r1 = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	opts.algorithm	 = KMEANS_ALGO_HAMERLY;
-	KMeansResult *r2 = mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r2 = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	opts.algorithm	 = KMEANS_ALGO_ELKAN;
-	KMeansResult *r3 = mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r3 = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	fclose(stderr);
 	stderr = saved;
@@ -875,9 +868,9 @@ TEST(verbose_mode)
 	ASSERT_NOT_NULL(r2, "verbose hamerly should succeed");
 	ASSERT_NOT_NULL(r3, "verbose elkan should succeed");
 
-	mkt_kmeans_result_destroy(r1);
-	mkt_kmeans_result_destroy(r2);
-	mkt_kmeans_result_destroy(r3);
+	vs_kmeans_result_destroy(r1);
+	vs_kmeans_result_destroy(r2);
+	vs_kmeans_result_destroy(r3);
 }
 
 /*
@@ -891,7 +884,7 @@ TEST(hamerly_higher_dim)
 	uint32_t  nlist		  = 3;
 	uint32_t  nvecs		  = per_cluster * nlist;
 	Dimension dim		  = 32;
-	float	 *data		  = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float	 *data		  = vs_alloc((size_t)nvecs * dim * sizeof(float));
 
 	/* Generate clusters spread along axes */
 	uint32_t rng = 42;
@@ -910,11 +903,11 @@ TEST(hamerly_higher_dim)
 		}
 	}
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = KMEANS_ALGO_HAMERLY;
 
 	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			vs_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "hamerly higher dim should succeed");
 	ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
@@ -924,8 +917,8 @@ TEST(hamerly_higher_dim)
 		total += res->cluster_sizes[j];
 	ASSERT_EQ(nvecs, total, "all vectors assigned");
 
-	mkt_kmeans_result_destroy(res);
-	mkt_free(data);
+	vs_kmeans_result_destroy(res);
+	vs_free(data);
 }
 
 /*
@@ -939,7 +932,7 @@ TEST(elkan_higher_dim)
 	uint32_t  nlist		  = 3;
 	uint32_t  nvecs		  = per_cluster * nlist;
 	Dimension dim		  = 32;
-	float	 *data		  = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float	 *data		  = vs_alloc((size_t)nvecs * dim * sizeof(float));
 
 	uint32_t rng = 42;
 	for (uint32_t c = 0; c < nlist; c++)
@@ -957,11 +950,11 @@ TEST(elkan_higher_dim)
 		}
 	}
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = KMEANS_ALGO_ELKAN;
 
 	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			vs_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "elkan higher dim should succeed");
 	ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
@@ -971,8 +964,8 @@ TEST(elkan_higher_dim)
 		total += res->cluster_sizes[j];
 	ASSERT_EQ(nvecs, total, "all vectors assigned");
 
-	mkt_kmeans_result_destroy(res);
-	mkt_free(data);
+	vs_kmeans_result_destroy(res);
+	vs_free(data);
 }
 
 /*
@@ -981,7 +974,7 @@ TEST(elkan_higher_dim)
 TEST(cblas_single_threaded)
 {
 	/* We can't set env vars safely in tests, but we can call it */
-	bool result_val = mkt_cblas_is_single_threaded();
+	bool result_val = vs_cblas_is_single_threaded();
 	/* Just verify it returns a bool without crashing */
 	ASSERT_TRUE(
 			result_val == true || result_val == false,
@@ -1008,20 +1001,18 @@ TEST_PARAMETERIZED(algo_nredo, "hamerly", "elkan")
 
 	make_3_clusters(data, per_cluster, 42);
 
-	KMeansOptions opts1 = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts1 = VS_KMEANS_OPTIONS_DEFAULT;
 	opts1.algorithm		= algos[iteration];
 	opts1.seed			= 42;
 	opts1.nredo			= 1;
 
-	KMeansOptions opts3 = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts3 = VS_KMEANS_OPTIONS_DEFAULT;
 	opts3.algorithm		= algos[iteration];
 	opts3.seed			= 42;
 	opts3.nredo			= 3;
 
-	KMeansResult *r1 =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts1);
-	KMeansResult *r3 =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts3);
+	KMeansResult *r1 = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts1);
+	KMeansResult *r3 = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts3);
 
 	ASSERT_NOT_NULL(r1, "nredo=1 should succeed");
 	ASSERT_NOT_NULL(r3, "nredo=3 should succeed");
@@ -1030,8 +1021,8 @@ TEST_PARAMETERIZED(algo_nredo, "hamerly", "elkan")
 			r3->total_cost <= r1->total_cost + 1e-3f,
 			"more restarts should not increase cost");
 
-	mkt_kmeans_result_destroy(r1);
-	mkt_kmeans_result_destroy(r3);
+	vs_kmeans_result_destroy(r1);
+	vs_kmeans_result_destroy(r3);
 }
 
 /*
@@ -1046,7 +1037,7 @@ TEST(hamerly_many_clusters)
 	uint32_t  nlist		  = 8;
 	uint32_t  nvecs		  = per_cluster * nlist;
 	Dimension dim		  = 4;
-	float	 *data		  = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float	 *data		  = vs_alloc((size_t)nvecs * dim * sizeof(float));
 
 	/* 8 clusters at corners of a 4D hypercube */
 	uint32_t rng = 42;
@@ -1065,11 +1056,11 @@ TEST(hamerly_many_clusters)
 		}
 	}
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = KMEANS_ALGO_HAMERLY;
 
 	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			vs_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "hamerly many clusters should succeed");
 
@@ -1085,8 +1076,8 @@ TEST(hamerly_many_clusters)
 			correct >= nvecs * 9 / 10,
 			"at least 90% correct for hypercube corners");
 
-	mkt_kmeans_result_destroy(res);
-	mkt_free(data);
+	vs_kmeans_result_destroy(res);
+	vs_free(data);
 }
 
 /*
@@ -1107,7 +1098,7 @@ TEST_PARAMETERIZED(algo_overlapping, "hamerly", "elkan")
 	uint32_t  nvecs = 200;
 	uint32_t  nlist = 5;
 	Dimension dim	= 8;
-	float	 *data	= mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float	 *data	= vs_alloc((size_t)nvecs * dim * sizeof(float));
 
 	/*
 	 * Generate data with overlapping clusters: centers are close
@@ -1127,13 +1118,13 @@ TEST_PARAMETERIZED(algo_overlapping, "hamerly", "elkan")
 		}
 	}
 
-	KMeansOptions opts	= MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts	= VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm		= algos[iteration];
 	opts.seed			= 42;
 	opts.max_iterations = 20;
 
 	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			vs_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "overlapping should succeed");
 	ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
@@ -1143,8 +1134,8 @@ TEST_PARAMETERIZED(algo_overlapping, "hamerly", "elkan")
 		total += res->cluster_sizes[j];
 	ASSERT_EQ(nvecs, total, "all vectors assigned");
 
-	mkt_kmeans_result_destroy(res);
-	mkt_free(data);
+	vs_kmeans_result_destroy(res);
+	vs_free(data);
 }
 
 /*
@@ -1158,7 +1149,7 @@ TEST(elkan_many_clusters)
 	uint32_t  nlist		  = 8;
 	uint32_t  nvecs		  = per_cluster * nlist;
 	Dimension dim		  = 4;
-	float	 *data		  = mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float	 *data		  = vs_alloc((size_t)nvecs * dim * sizeof(float));
 
 	uint32_t rng = 42;
 	for (uint32_t c = 0; c < nlist; c++)
@@ -1176,11 +1167,11 @@ TEST(elkan_many_clusters)
 		}
 	}
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = KMEANS_ALGO_ELKAN;
 
 	KMeansResult *res =
-			mkt_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
+			vs_kmeans_f32(data, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "elkan many clusters should succeed");
 
@@ -1195,8 +1186,8 @@ TEST(elkan_many_clusters)
 			correct >= nvecs * 9 / 10,
 			"at least 90% correct for hypercube corners");
 
-	mkt_kmeans_result_destroy(res);
-	mkt_free(data);
+	vs_kmeans_result_destroy(res);
+	vs_free(data);
 }
 
 /*
@@ -1206,8 +1197,8 @@ static half *
 make_f16_data(const float *f32, uint32_t count, Dimension dim)
 {
 	size_t n   = (size_t)count * dim;
-	half  *f16 = mkt_alloc(n * sizeof(half));
-	mkt_float_to_half_array(f32, f16, (uint32_t)n);
+	half  *f16 = vs_alloc(n * sizeof(half));
+	vs_float_to_half_array(f32, f16, (uint32_t)n);
 	return f16;
 }
 
@@ -1232,12 +1223,12 @@ TEST_PARAMETERIZED(f16_algo_l2, "lloyd", "hamerly", "elkan")
 	make_3_clusters(data, per_cluster, 42);
 	half *f16 = make_f16_data(data, nvecs, dim);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm	   = algos[iteration];
 	opts.seed		   = 42;
 
-	KMeansResult *res = mkt_kmeans(
-			f16, NULL, MKT_VEC_F16, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *res = vs_kmeans(
+			f16, NULL, VS_VEC_F16, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "f16 algorithm should return result");
 	ASSERT_EQ(3, res->nlist, "nlist should be 3");
@@ -1258,8 +1249,8 @@ TEST_PARAMETERIZED(f16_algo_l2, "lloyd", "hamerly", "elkan")
 			correct_f16 >= nvecs * 9 / 10,
 			"at least 90% correct for separated clusters");
 
-	mkt_kmeans_result_destroy(res);
-	mkt_free(f16);
+	vs_kmeans_result_destroy(res);
+	vs_free(f16);
 }
 
 /*
@@ -1278,13 +1269,12 @@ TEST(f16_matches_f32)
 	make_3_clusters(data, per_cluster, 42);
 	half *f16 = make_f16_data(data, nvecs, dim);
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.seed		   = 42;
 
-	KMeansResult *r32 =
-			mkt_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
-	KMeansResult *r16 = mkt_kmeans(
-			f16, NULL, MKT_VEC_F16, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r32 = vs_kmeans_f32(data, nvecs, dim, 3, DISTANCE_L2, &opts);
+	KMeansResult *r16 = vs_kmeans(
+			f16, NULL, VS_VEC_F16, nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(r32, "f32 should succeed");
 	ASSERT_NOT_NULL(r16, "f16 should succeed");
@@ -1305,9 +1295,9 @@ TEST(f16_matches_f32)
 			r32->total_cost * 0.01f,
 			"f16 cost should be within 1% of f32");
 
-	mkt_kmeans_result_destroy(r32);
-	mkt_kmeans_result_destroy(r16);
-	mkt_free(f16);
+	vs_kmeans_result_destroy(r32);
+	vs_kmeans_result_destroy(r16);
+	vs_free(f16);
 }
 
 /*
@@ -1326,7 +1316,7 @@ TEST_PARAMETERIZED(f16_algo_overlapping, "hamerly", "elkan")
 	uint32_t  nvecs = 200;
 	uint32_t  nlist = 5;
 	Dimension dim	= 8;
-	float	 *data	= mkt_alloc((size_t)nvecs * dim * sizeof(float));
+	float	 *data	= vs_alloc((size_t)nvecs * dim * sizeof(float));
 
 	uint32_t rng = 12345;
 	for (uint32_t i = 0; i < nvecs; i++)
@@ -1343,13 +1333,13 @@ TEST_PARAMETERIZED(f16_algo_overlapping, "hamerly", "elkan")
 
 	half *f16 = make_f16_data(data, nvecs, dim);
 
-	KMeansOptions opts	= MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts	= VS_KMEANS_OPTIONS_DEFAULT;
 	opts.algorithm		= algos[iteration];
 	opts.seed			= 42;
 	opts.max_iterations = 20;
 
-	KMeansResult *res = mkt_kmeans(
-			f16, NULL, MKT_VEC_F16, nvecs, dim, nlist, DISTANCE_L2, &opts);
+	KMeansResult *res = vs_kmeans(
+			f16, NULL, VS_VEC_F16, nvecs, dim, nlist, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(res, "f16 overlapping should succeed");
 	ASSERT_TRUE(res->total_cost > 0, "cost should be positive");
@@ -1359,9 +1349,9 @@ TEST_PARAMETERIZED(f16_algo_overlapping, "hamerly", "elkan")
 		total_f16 += res->cluster_sizes[j];
 	ASSERT_EQ(nvecs, total_f16, "all vectors assigned");
 
-	mkt_kmeans_result_destroy(res);
-	mkt_free(f16);
-	mkt_free(data);
+	vs_kmeans_result_destroy(res);
+	vs_free(f16);
+	vs_free(data);
 }
 
 /*
@@ -1377,7 +1367,7 @@ TEST(indexed_kmeans)
 	uint32_t  per_cluster = 25;
 	uint32_t  total_vecs  = per_cluster * 4;
 	Dimension dim		  = 2;
-	float	 *all_vecs = mkt_alloc((size_t)total_vecs * dim * sizeof(float));
+	float	 *all_vecs	  = vs_alloc((size_t)total_vecs * dim * sizeof(float));
 
 	float centers[][2] = {
 			{50.0f, 50.0f},
@@ -1403,8 +1393,8 @@ TEST(indexed_kmeans)
 
 	/* Select clusters 0, 2, 3 (skip cluster 1) via indices */
 	uint32_t  sub_nvecs = per_cluster * 3;
-	uint32_t *indices	= mkt_alloc(sub_nvecs * sizeof(uint32_t));
-	float	 *gathered	= mkt_alloc((size_t)sub_nvecs * dim * sizeof(float));
+	uint32_t *indices	= vs_alloc(sub_nvecs * sizeof(uint32_t));
+	float	 *gathered	= vs_alloc((size_t)sub_nvecs * dim * sizeof(float));
 
 	uint32_t idx		= 0;
 	uint32_t selected[] = {0, 2, 3};
@@ -1422,14 +1412,14 @@ TEST(indexed_kmeans)
 		}
 	}
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	opts.seed		   = 42;
 
 	/* Run indexed k-means on full array with subset indices */
-	KMeansResult *r_idx = mkt_kmeans(
+	KMeansResult *r_idx = vs_kmeans(
 			all_vecs,
 			indices,
-			MKT_VEC_F32,
+			VS_VEC_F32,
 			sub_nvecs,
 			dim,
 			3,
@@ -1438,7 +1428,7 @@ TEST(indexed_kmeans)
 
 	/* Run standard k-means on gathered copy */
 	KMeansResult *r_std =
-			mkt_kmeans_f32(gathered, sub_nvecs, dim, 3, DISTANCE_L2, &opts);
+			vs_kmeans_f32(gathered, sub_nvecs, dim, 3, DISTANCE_L2, &opts);
 
 	ASSERT_NOT_NULL(r_idx, "indexed k-means should succeed");
 	ASSERT_NOT_NULL(r_std, "standard k-means should succeed");
@@ -1455,9 +1445,9 @@ TEST(indexed_kmeans)
 	ASSERT_FLOAT_EQ(
 			r_std->total_cost, r_idx->total_cost, 1e-3f, "costs should match");
 
-	mkt_kmeans_result_destroy(r_idx);
-	mkt_kmeans_result_destroy(r_std);
-	mkt_free(all_vecs);
-	mkt_free(indices);
-	mkt_free(gathered);
+	vs_kmeans_result_destroy(r_idx);
+	vs_kmeans_result_destroy(r_std);
+	vs_free(all_vecs);
+	vs_free(indices);
+	vs_free(gathered);
 }

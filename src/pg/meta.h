@@ -7,8 +7,8 @@
  * global mean vector used for RaBitQ query preparation.
  */
 
-#ifndef MKT_META_H
-#define MKT_META_H
+#ifndef PRISM_META_H
+#define PRISM_META_H
 
 #include <postgres.h>
 
@@ -20,20 +20,20 @@
 #include "core/types.h"
 
 /*
- * "MKT" + a format-version byte. Bump the low byte on any incompatible
+ * "PRI" + a format-version byte. Bump the low byte on any incompatible
  * metapage/layout change so an index built by an older format is rejected at
  * open rather than silently misread. v2 added PrismMetaPage.first_posting,
  * which shifted the struct layout; v3 removed the unused indexed-row count,
  * which shifted it again.
  */
-#define MKT_META_MAGIC ((uint32_t)0x4D4B5404) /* "MKT\x04" */
+#define PRISM_META_MAGIC ((uint32_t)0x50524905) /* "PRI\x05" */
 
 /* Metadata flags */
-#define MKT_META_FLAG_FASTSCAN 0x01
+#define PRISM_META_FLAG_FASTSCAN 0x01
 
 typedef struct PrismMetaPage
 {
-	uint32_t	magic;			 /* MKT_META_MAGIC */
+	uint32_t	magic;			 /* PRISM_META_MAGIC */
 	Dimension	dim;			 /* vector dimension */
 	uint8_t		nlevels;		 /* centroid tree depth */
 	uint8_t		centroid_format; /* PrismCentroidFormat */
@@ -53,14 +53,14 @@ typedef struct PrismMetaPage
 	uint32_t ncentroid_pages;
 	uint8_t	 metric;  /* DistanceMetric */
 	uint8_t	 fan_out; /* children per tree node */
-	uint8_t	 flags;	  /* MKT_META_FLAG_* */
+	uint8_t	 flags;	  /* PRISM_META_FLAG_* */
 	uint8_t	 reserved;
 	uint64_t rabitq_seed; /* seed for RaBitQ params */
 						  /* Global mean vector stored inline after struct */
 } PrismMetaPage;
 
 /* Total special-area size including inline global mean */
-#define MKT_META_SIZE(dim)                                            \
+#define PRISM_META_SIZE(dim)                                          \
 	(MAXALIGN(                                                        \
 			offsetof(PrismMetaPage, rabitq_seed) + sizeof(uint64_t) + \
 			(size_t)(dim) * sizeof(float)))
@@ -81,4 +81,4 @@ prism_meta_global_mean_const(const PrismMetaPage *meta)
 						   sizeof(uint64_t));
 }
 
-#endif /* MKT_META_H */
+#endif /* PRISM_META_H */

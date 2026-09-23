@@ -7,8 +7,8 @@
  * Not part of the public API — do not include from outside src/algo/.
  */
 
-#ifndef MKT_KMEANS_INTERNAL_H
-#define MKT_KMEANS_INTERNAL_H
+#ifndef VS_KMEANS_INTERNAL_H
+#define VS_KMEANS_INTERNAL_H
 
 #include <float.h>
 #include <stdint.h>
@@ -21,18 +21,18 @@
 #define KMEANS_BLOCK_SIZE 4096
 
 /*
- * Redefine MKT_TARGET_CLONES locally to avoid pulling in <immintrin.h>
+ * Redefine VS_TARGET_CLONES locally to avoid pulling in <immintrin.h>
  * from simd_utils.h, which can affect codegen for the CBLAS path.
  */
-#ifndef MKT_TARGET_CLONES
-#if !defined(MKT_SIMD_NONE) && !defined(MKT_COVERAGE) && \
-		__has_attribute(target_clones) &&                \
+#ifndef VS_TARGET_CLONES
+#if !defined(VS_SIMD_NONE) && !defined(VS_COVERAGE) && \
+		__has_attribute(target_clones) &&              \
 		(defined(__x86_64__) || defined(__i386__))
-#define MKT_TARGET_CLONES \
-	__attribute__((       \
+#define VS_TARGET_CLONES \
+	__attribute__((      \
 			target_clones("default", "arch=x86-64-v3", "arch=x86-64-v4")))
 #else
-#define MKT_TARGET_CLONES
+#define VS_TARGET_CLONES
 #endif
 #endif
 
@@ -45,7 +45,7 @@
  */
 typedef struct KMeansState
 {
-	void *memctx; /* Arena context (MktMemCtx) — used by kmeans.c */
+	void *memctx; /* Arena context (VsMemCtx) — used by kmeans.c */
 
 	/* Input (not owned) */
 	const void	   *vectors;
@@ -166,4 +166,4 @@ void kmeans_assign(
 		DistanceMetric metric,
 		uint32_t	  *out_assignments);
 
-#endif /* MKT_KMEANS_INTERNAL_H */
+#endif /* VS_KMEANS_INTERNAL_H */

@@ -7,7 +7,7 @@
  * topk candidate buffer growth).
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <float.h>
 #include <math.h>
@@ -52,19 +52,19 @@ prism_query_state_init(
 	 * context, so a caller that never calls cleanup still loses it with
 	 * whatever scope it allocated the state in.
 	 */
-	qs->memctx			 = mkt_memctx_create(NULL, "mkt query state");
-	MktMemCtx caller_ctx = mkt_memctx_switch(qs->memctx);
+	qs->memctx			= vs_memctx_create(NULL, "vs query state");
+	VsMemCtx caller_ctx = vs_memctx_switch(qs->memctx);
 
 	Dimension dim		   = index->dim;
-	uint32_t  packed_bytes = MKT_RABITQ_BYTES(dim);
+	uint32_t  packed_bytes = VS_RABITQ_BYTES(dim);
 
 	/* Query buffers */
-	qs->query_buf			= mkt_alloc(dim * sizeof(float));
-	qs->pt_query			= mkt_alloc_aligned(dim * sizeof(float), 64);
-	qs->beam_transformed	= mkt_alloc_aligned(dim * sizeof(float), 64);
-	qs->cluster_transformed = mkt_alloc_aligned(dim * sizeof(float), 64);
-	qs->beam_query_bits		= mkt_alloc_aligned(packed_bytes, 64);
-	qs->cluster_query_bits	= mkt_alloc_aligned(packed_bytes, 64);
+	qs->query_buf			= vs_alloc(dim * sizeof(float));
+	qs->pt_query			= vs_alloc_aligned(dim * sizeof(float), 64);
+	qs->beam_transformed	= vs_alloc_aligned(dim * sizeof(float), 64);
+	qs->cluster_transformed = vs_alloc_aligned(dim * sizeof(float), 64);
+	qs->beam_query_bits		= vs_alloc_aligned(packed_bytes, 64);
+	qs->cluster_query_bits	= vs_alloc_aligned(packed_bytes, 64);
 
 	/* Wire up query state buffers */
 	qs->beam_qs.transformed	   = qs->beam_transformed;
@@ -72,33 +72,33 @@ prism_query_state_init(
 	qs->cluster_qs.transformed = qs->cluster_transformed;
 	qs->cluster_qs.query_bits  = qs->cluster_query_bits;
 
-	mkt_rabitq_init_query_constants(&qs->beam_qs, dim);
-	mkt_rabitq_init_query_constants(&qs->cluster_qs, dim);
+	vs_rabitq_init_query_constants(&qs->beam_qs, dim);
+	vs_rabitq_init_query_constants(&qs->cluster_qs, dim);
 
 	/* Beam search results + per-scan scratch.
 	 * Pre-allocating the scratch here means prism_centroid_beam_search
-	 * skips 8 mkt_alloc calls and 2 memory-context creations on
+	 * skips 8 vs_alloc calls and 2 memory-context creations on
 	 * every query (the largest remaining source of per-query
 	 * allocator traffic after the dedup-gens fix). Sized to the
 	 * worst case beam_width == max_nprobe. */
-	qs->beam_results	 = mkt_alloc(max_nprobe * sizeof(PrismCentroidResult));
+	qs->beam_results	 = vs_alloc(max_nprobe * sizeof(PrismCentroidResult));
 	qs->centroid_scratch = prism_centroid_scratch_create(dim, max_nprobe);
 
 	/* Probe-order scratch (exact centroid re-rank of the expanded
 	 * probe set; see prism_query_set_probe_expand). */
-	qs->probe_dists = mkt_alloc(max_nprobe * sizeof(float));
-	qs->probe_order = mkt_alloc(max_nprobe * sizeof(uint32_t));
+	qs->probe_dists = vs_alloc(max_nprobe * sizeof(float));
+	qs->probe_order = vs_alloc(max_nprobe * sizeof(uint32_t));
 
 	/* Top-K */
-	mkt_topk_init(&qs->topk, max_k);
+	vs_topk_init(&qs->topk, max_k);
 
 	/* Candidate extraction buffer */
 	qs->cand_cap   = max_k * PRISM_QUERY_CAND_PER_K;
-	qs->candidates = mkt_alloc(qs->cand_cap * sizeof(MktTopKEntry));
+	qs->candidates = vs_alloc(qs->cand_cap * sizeof(VsTopKEntry));
 
 	/* Result ordering */
-	qs->result_order = mkt_alloc(qs->cand_cap * sizeof(uint32_t));
-	qs->result_dists = mkt_alloc(qs->cand_cap * sizeof(Distance));
+	qs->result_order = vs_alloc(qs->cand_cap * sizeof(uint32_t));
+	qs->result_dists = vs_alloc(qs->cand_cap * sizeof(Distance));
 
 	/* Posting scan iterator */
 	uint32_t max_entries = prism_posting_max_entries(dim);
@@ -110,7 +110,7 @@ prism_query_state_init(
 			dim,
 			max_entries);
 
-	mkt_memctx_switch(caller_ctx);
+	vs_memctx_switch(caller_ctx);
 }
 
 void
@@ -126,13 +126,13 @@ prism_query_state_cleanup(PrismQueryState *qs)
 	prism_posting_scan_cleanup(&qs->pscan);
 
 	/* Sub-contexts before the context that parents them. */
-	mkt_topk_cleanup(&qs->topk);
+	vs_topk_cleanup(&qs->topk);
 	prism_centroid_scratch_free(qs->centroid_scratch);
 	qs->centroid_scratch = NULL;
 
 	if (qs->memctx != NULL)
 	{
-		mkt_memctx_delete(qs->memctx);
+		vs_memctx_delete(qs->memctx);
 		qs->memctx = NULL;
 	}
 }
@@ -149,7 +149,7 @@ prepare_query(PrismQueryState *qs, const float *query)
 
 	Dimension dim = qs->index->dim;
 	memcpy(qs->query_buf, query, dim * sizeof(float));
-	float norm = mkt_l2_norm(qs->query_buf, dim);
+	float norm = vs_l2_norm(qs->query_buf, dim);
 	if (norm > 0.0f)
 		vec32_scale(qs->query_buf, 1.0f / norm, qs->query_buf, dim);
 	return qs->query_buf;
@@ -160,17 +160,17 @@ search_centroids(
 		PrismQueryState			 *qs,
 		const float				 *qvec,
 		uint32_t				  nprobe,
-		MktDistanceMode			  mode,
+		VsDistanceMode			  mode,
 		PrismCentroidSearchStats *beam_stats)
 {
 	const PrismIndexBase *idx = qs->index;
 	Dimension			  dim = idx->dim;
 
 	RaBitQQueryState *rqs = NULL;
-	if (idx->centroid_format == MKT_CENTROID_FMT_RABITQ ||
-		idx->centroid_format == MKT_CENTROID_FMT_FASTSCAN)
+	if (idx->centroid_format == PRISM_CENTROID_FMT_RABITQ ||
+		idx->centroid_format == PRISM_CENTROID_FMT_FASTSCAN)
 	{
-		mkt_rabitq_init_query_state(
+		vs_rabitq_init_query_state(
 				&qs->beam_qs, qs->pt_query, idx->pt_global_mean, dim, mode);
 		rqs = &qs->beam_qs;
 	}
@@ -287,8 +287,8 @@ uint32_t
 prism_query_routed_clusters(
 		uint32_t nprobe, uint32_t cap, PrismCentroidFormat centroid_format)
 {
-	if (g_probe_expand <= 1.0 || centroid_format == MKT_CENTROID_FMT_FLOAT ||
-		centroid_format == MKT_CENTROID_FMT_HALF)
+	if (g_probe_expand <= 1.0 || centroid_format == PRISM_CENTROID_FMT_FLOAT ||
+		centroid_format == PRISM_CENTROID_FMT_HALF)
 		return nprobe;
 
 	double	 expanded = (double)nprobe * g_probe_expand;
@@ -327,8 +327,8 @@ scan_clusters(
 		const PrismCentroidResult *beam_results,
 		uint32_t				   n_results,
 		uint32_t				   scan_limit,
-		MktDistanceMode			   mode,
-		MktTopK					  *topk,
+		VsDistanceMode			   mode,
+		VsTopK					  *topk,
 		PrismQueryStats			  *stats)
 {
 	const PrismIndexBase *idx = qs->index;
@@ -345,7 +345,7 @@ scan_clusters(
 	 * has no prefetch (standalone) or the page is already resident.
 	 */
 	for (uint32_t j = 0; j < n_results; j++)
-		mkt_storage_prefetch(qs->pscan.storage, beam_results[j].posting_head);
+		vs_storage_prefetch(qs->pscan.storage, beam_results[j].posting_head);
 
 	/*
 	 * Phase A (only when the probe set was expanded): re-rank the routed
@@ -374,7 +374,7 @@ scan_clusters(
 			const float *pt_cent = prism_posting_scan_pt_centroid(&qs->pscan);
 			if (pt_cent != NULL)
 				qs->probe_dists[j] =
-						mkt_l2_distance_squared(qs->pt_query, pt_cent, dim);
+						vs_l2_distance_squared(qs->pt_query, pt_cent, dim);
 			prism_posting_scan_end_cluster(&qs->pscan);
 		}
 
@@ -412,7 +412,7 @@ scan_clusters(
 			continue;
 		}
 
-		mkt_rabitq_init_query_state(
+		vs_rabitq_init_query_state(
 				&qs->cluster_qs, qs->pt_query, pt_cent, dim, mode);
 
 		if (idx->fastscan && qs->pscan.fs_lut != NULL)
@@ -447,17 +447,17 @@ extract_candidates(PrismQueryState *qs, uint32_t cap)
 		uint32_t want = qs->cand_cap * 2;
 		if (want < qs->topk.cand_count)
 			want = qs->topk.cand_count;
-		qs->cand_cap   = want;
-		qs->candidates = mkt_realloc(
-				qs->candidates, qs->cand_cap * sizeof(MktTopKEntry));
+		qs->cand_cap = want;
+		qs->candidates =
+				vs_realloc(qs->candidates, qs->cand_cap * sizeof(VsTopKEntry));
 		qs->result_order =
-				mkt_realloc(qs->result_order, qs->cand_cap * sizeof(uint32_t));
+				vs_realloc(qs->result_order, qs->cand_cap * sizeof(uint32_t));
 		qs->result_dists =
-				mkt_realloc(qs->result_dists, qs->cand_cap * sizeof(Distance));
+				vs_realloc(qs->result_dists, qs->cand_cap * sizeof(Distance));
 	}
 
 	uint32_t ncands;
-	mkt_topk_extract_sorted_capped(&qs->topk, qs->candidates, &ncands, cap);
+	vs_topk_extract_sorted_capped(&qs->topk, qs->candidates, &ncands, cap);
 	qs->ncandidates = ncands;
 	return ncands;
 }
@@ -468,7 +468,7 @@ prism_query_now_ns(void)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * MKT_NS_PER_SEC + (uint64_t)ts.tv_nsec;
+	return (uint64_t)ts.tv_sec * VS_NS_PER_SEC + (uint64_t)ts.tv_nsec;
 }
 
 uint32_t
@@ -476,7 +476,7 @@ prism_query_route(
 		PrismQueryState			 *qs,
 		const float				 *query,
 		uint32_t				  nprobe,
-		MktDistanceMode			  mode,
+		VsDistanceMode			  mode,
 		PrismCentroidSearchStats *beam_stats)
 {
 	if (nprobe > qs->max_nprobe)
@@ -487,7 +487,7 @@ prism_query_route(
 
 	const float *qvec  = prepare_query(qs, query);
 	uint64_t	 t_rot = prism_query_now_ns();
-	mkt_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
+	vs_rabitq_rotate(qs->index->params, qvec, qs->pt_query);
 	bs->rotation_ns = prism_query_now_ns() - t_rot;
 
 	return search_centroids(qs, qvec, nprobe, mode, bs);
@@ -527,7 +527,7 @@ prism_query_set_rerank_pool(int32_t n)
  * scan -- as far as that can be known without running the scan.
  *
  * A return of 0 means the pool is uncapped: it is the value
- * mkt_topk_extract_sorted_capped reads as "keep every survivor", so 0 is
+ * vs_topk_extract_sorted_capped reads as "keep every survivor", so 0 is
  * the widest possible pool and not the narrowest. Callers that price the
  * pool have to special-case it.
  *
@@ -562,7 +562,7 @@ prism_query_execute(
 		const float		*query,
 		uint32_t		 k,
 		uint32_t		 nprobe,
-		MktDistanceMode	 mode,
+		VsDistanceMode	 mode,
 		bool			 rerank,
 		PrismQueryStats *stats)
 {
@@ -574,7 +574,7 @@ prism_query_execute(
 	/* reset_to_k also (re)sizes the heap when k grows between queries —
 	 * resetting first and assigning k afterwards left the heap sized for
 	 * the previous k. */
-	mkt_topk_reset_to_k(&qs->topk, k);
+	vs_topk_reset_to_k(&qs->topk, k);
 
 	/* Probe expansion: route extra leaf candidates so phase A of
 	 * scan_clusters can pick the best `nprobe` by exact centroid
@@ -608,7 +608,7 @@ prism_query_execute(
 	 * until no snapshot can reach it; an isolation test pauses here to hold a
 	 * head across exactly that.
 	 */
-	MKT_INJECTION_POINT("prism-scan-routed");
+	VS_INJECTION_POINT("prism-scan-routed");
 
 	scan_clusters(
 			qs, qs->beam_results, ncentroids, nprobe, mode, &qs->topk, stats);
@@ -643,10 +643,10 @@ prism_query_execute(
 	uint64_t t2 = prism_query_now_ns();
 
 	/* Rerank with exact distances if enabled and storage supports it */
-	MktStorage *ps = qs->index->posting_storage;
+	VsStorage *ps = qs->index->posting_storage;
 	if (rerank && ncands > 0 && ps != NULL && ps->ops->rerank != NULL)
 	{
-		qs->nresults = mkt_storage_rerank(
+		qs->nresults = vs_storage_rerank(
 				ps,
 				qvec,
 				qs->index->dim,
@@ -672,9 +672,8 @@ prism_query_execute(
 		uint64_t id_i = qs->candidates[qs->result_order[i]].id;
 		for (uint32_t j = i + 1; j < qs->nresults; j++)
 			if (id_i == qs->candidates[qs->result_order[j]].id)
-				mkt_warn(
-						MKT_EXTENSION_NAME ": duplicate result at positions "
-										   "%u and %u",
+				vs_warn(VS_EXTENSION_NAME ": duplicate result at positions "
+										  "%u and %u",
 						i,
 						j);
 	}

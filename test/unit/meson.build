@@ -19,7 +19,7 @@ test_config_h = configure_file(
 )
 
 unit_test_sources = files(
-  'mkt_test.c',
+  'vs_test.c',
   'run_tests.c',
   'test_barrier.c',
   'test_build_progress.c',
@@ -53,7 +53,7 @@ unit_test_sources = files(
   'test_vec32.c',
 )
 
-test_dependencies = [mkt_core_dep]
+test_dependencies = [vs_core_dep]
 if gsl_dep.found()
   test_dependencies += gsl_dep
 endif

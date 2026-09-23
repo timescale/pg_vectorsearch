@@ -110,7 +110,7 @@ typedef struct PrismPostingEntryMeta
 /*
  * Per-entry header in the AoS layout: meta + the three RaBitQ
  * scalar factors, followed by a flexible array of quantized bits
- * (MKT_RABITQ_BYTES(dim) bytes at runtime).
+ * (VS_RABITQ_BYTES(dim) bytes at runtime).
  *
  * sizeof(PrismPostingEntryHeader) is 20B — the FAM doesn't contribute
  * to the struct's static size, so PRISM_POSTING_ENTRY_HEADER_SIZE
@@ -221,12 +221,12 @@ typedef struct PrismFlatPostingHeader
 #define PRISM_POSTING_ENTRY_BITS_OFFSET offsetof(PrismPostingEntryHeader, bits)
 
 /* Bytes per entry in bits region */
-#define PRISM_POSTING_BITS_PER_ENTRY(dim) MKT_RABITQ_BYTES(dim)
+#define PRISM_POSTING_BITS_PER_ENTRY(dim) VS_RABITQ_BYTES(dim)
 
 /* Entry stride must be a multiple of PrismPostingEntryHeader's alignment
  * (4 bytes — the float fields) so entry i's float members land on
  * properly aligned addresses regardless of `i`. For dim values where
- * MKT_RABITQ_BYTES(dim) isn't already a multiple of 4 (i.e., dim not
+ * VS_RABITQ_BYTES(dim) isn't already a multiple of 4 (i.e., dim not
  * a multiple of 32, such as dim=16 or dim=100), we pad up. */
 #define PRISM_POSTING_ENTRY_ALIGN 4u
 
@@ -346,7 +346,7 @@ prism_posting_head_tail(Page head)
  * Entries are laid out contiguously: entry i starts at
  *   content + i * PRISM_POSTING_ENTRY_SIZE(dim)
  * and consists of an PrismPostingEntryHeader followed by
- * MKT_RABITQ_BYTES(dim) bytes of bits. The SIMD kernel strides
+ * VS_RABITQ_BYTES(dim) bytes of bits. The SIMD kernel strides
  * through bits[] at stride = PRISM_POSTING_ENTRY_SIZE(dim), starting
  * from prism_posting_first_bits(content).
  * ---------------------------------------------------------------- */
@@ -436,7 +436,7 @@ prism_posting_content_first(Page page, Dimension dim)
  */
 typedef struct PrismPostingChainPos
 {
-	MktStorage *storage;
+	VsStorage  *storage;
 	BlockNumber blkno;
 	Page		page; /* NULL once released */
 	BlockNumber next; /* read before the callback runs */
@@ -448,7 +448,7 @@ prism_posting_chain_release(PrismPostingChainPos *pos)
 {
 	if (pos->page != NULL)
 	{
-		mkt_storage_release_page(pos->storage, pos->blkno);
+		vs_storage_release_page(pos->storage, pos->blkno);
 		pos->page = NULL;
 	}
 }
@@ -457,7 +457,7 @@ prism_posting_chain_release(PrismPostingChainPos *pos)
 typedef bool (*PrismPostingChainCb)(PrismPostingChainPos *pos, void *state);
 
 void prism_posting_chain_walk(
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		BlockNumber			head,
 		PrismPostingChainCb cb,
 		void			   *state);
@@ -471,7 +471,7 @@ typedef void (*PrismPostingChainMutateCb)(
 		PrismPostingPageOpaque *op, void *state);
 
 void prism_posting_chain_mutate(
-		MktStorage				 *storage,
+		VsStorage				 *storage,
 		BlockNumber				  head,
 		PrismPostingChainMutateCb cb,
 		void					 *state);
@@ -541,9 +541,9 @@ prism_posting_get_vector_id(const ItemPointerData *tid)
 }
 
 /* ----------------------------------------------------------------
- * TID ↔ uint64_t encoding for MktTopK
+ * TID ↔ uint64_t encoding for VsTopK
  *
- * Both standalone and PG store TIDs in MktTopK's uint64_t id field.
+ * Both standalone and PG store TIDs in VsTopK's uint64_t id field.
  * For standalone: vector_id is packed in BlockNumber with offset=0,
  * so encode yields (vector_id << 16) and decode_vector_id shifts
  * back. For PG: full ItemPointerData (block + offset) fits in 48
@@ -641,9 +641,9 @@ bool prism_posting_flat_add(
 static inline uint32_t
 prism_fastscan_group_section_bytes(Dimension dim)
 {
-	return (uint32_t)(MKT_FASTSCAN_GROUP * sizeof(ItemPointerData) +
-					  MKT_FASTSCAN_GROUP * 3 * sizeof(float) +
-					  MKT_FASTSCAN_GROUP_BYTES(dim));
+	return (uint32_t)(VS_FASTSCAN_GROUP * sizeof(ItemPointerData) +
+					  VS_FASTSCAN_GROUP * 3 * sizeof(float) +
+					  VS_FASTSCAN_GROUP_BYTES(dim));
 }
 
 /* Max entries on a fastscan overflow page */
@@ -653,7 +653,7 @@ prism_fastscan_max_entries(Dimension dim)
 	uint32_t section = prism_fastscan_group_section_bytes(dim);
 	uint32_t usable	 = prism_posting_page_usable();
 	uint32_t ngroups = usable / section;
-	return ngroups * MKT_FASTSCAN_GROUP;
+	return ngroups * VS_FASTSCAN_GROUP;
 }
 
 /* Max entries on a fastscan first page (with pt_centroid) */
@@ -664,7 +664,7 @@ prism_fastscan_max_entries_first(Dimension dim)
 	uint32_t usable	 = prism_posting_page_usable() -
 					  prism_posting_pt_centroid_size(dim);
 	uint32_t ngroups = usable / section;
-	return ngroups * MKT_FASTSCAN_GROUP;
+	return ngroups * VS_FASTSCAN_GROUP;
 }
 
 /*
@@ -718,27 +718,26 @@ static inline float *
 prism_fastscan_group_f_add(char *content, uint32_t g, Dimension dim)
 {
 	return (float *)(prism_fastscan_group_base(content, g, dim) +
-					 MKT_FASTSCAN_GROUP * sizeof(ItemPointerData));
+					 VS_FASTSCAN_GROUP * sizeof(ItemPointerData));
 }
 
 static inline float *
 prism_fastscan_group_f_rescale(char *content, uint32_t g, Dimension dim)
 {
-	return prism_fastscan_group_f_add(content, g, dim) + MKT_FASTSCAN_GROUP;
+	return prism_fastscan_group_f_add(content, g, dim) + VS_FASTSCAN_GROUP;
 }
 
 static inline float *
 prism_fastscan_group_f_error(char *content, uint32_t g, Dimension dim)
 {
-	return prism_fastscan_group_f_rescale(content, g, dim) +
-		   MKT_FASTSCAN_GROUP;
+	return prism_fastscan_group_f_rescale(content, g, dim) + VS_FASTSCAN_GROUP;
 }
 
 static inline uint8_t *
 prism_fastscan_group_codes(char *content, uint32_t g, Dimension dim)
 {
 	return (uint8_t *)(prism_fastscan_group_f_error(content, g, dim) +
-					   MKT_FASTSCAN_GROUP);
+					   VS_FASTSCAN_GROUP);
 }
 
 #endif /* PRISM_POSTING_PAGE_H */

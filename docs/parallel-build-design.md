@@ -50,12 +50,12 @@ typedef struct {
     const float *global_mean;        // read-only, shared
     const PrismIndexConfig *config;    // read-only, shared
     PrismPostingBuilder *builders;     // per-cluster builders with interleaved pages
-} MktBuildWorkerState;
+} VsBuildWorkerState;
 
-void mkt_build_worker_init(MktBuildWorkerState *state, ...);
-void mkt_build_worker_process_vector(MktBuildWorkerState *state,
+void vs_build_worker_init(VsBuildWorkerState *state, ...);
+void vs_build_worker_process_vector(VsBuildWorkerState *state,
                                      const float *vec, int64 tid);
-void mkt_build_worker_finish(MktBuildWorkerState *state);
+void vs_build_worker_finish(VsBuildWorkerState *state);
 ```
 
 ### Layer 2: Dispatch (platform-specific)
@@ -65,12 +65,12 @@ void mkt_build_worker_finish(MktBuildWorkerState *state);
 typedef struct {
     pthread_t *threads;
     uint32 nthreads;
-} MktThreadPool;
+} VsThreadPool;
 ```
 
 **PostgreSQL (parallel workers)** — `src/pg/`:
 Each PG parallel worker runs a heap scan portion via `ParallelTableScanDesc`,
-calling the same shared `mkt_build_worker_process_vector()` function.
+calling the same shared `vs_build_worker_process_vector()` function.
 
 ## Key Design: Interleaved Page Claiming
 
@@ -149,7 +149,7 @@ typedef struct {
         uint8 *mem_page;              // single in-memory page buffer
         uint32 entries_in_page;       // current page fill level
     } *clusters;
-} MktParallelPostingBuilder;
+} VsParallelPostingBuilder;
 ```
 
 The interleaving is computed at init time:
@@ -171,20 +171,20 @@ for (uint32 c = 0; c < nlist; c++) {
 new `src/index/build_parallel.h`
 
 1. Extract per-vector work from `build_callback()` into standalone
-   `mkt_build_encode_and_assign()` — takes vector + tree + config,
+   `vs_build_encode_and_assign()` — takes vector + tree + config,
    returns cluster ID + encoded RaBitQData + optional SOAR secondary.
 
-2. Create `MktParallelPostingBuilder` with interleaved page claiming.
+2. Create `VsParallelPostingBuilder` with interleaved page claiming.
    Init function takes (worker_id, nworkers, reserved_pages_per_cluster).
 
-3. Create `mkt_parallel_builder_add()` — encodes vector and writes to
+3. Create `vs_parallel_builder_add()` — encodes vector and writes to
    the worker's claimed page for that cluster. When page is full, flush
    to storage and advance to next claimed page.
 
-4. Create `mkt_parallel_builder_finish()` — returns partial pages for
+4. Create `vs_parallel_builder_finish()` — returns partial pages for
    coordinator merge.
 
-5. Create `mkt_parallel_merge_tails()` — coordinator consolidates
+5. Create `vs_parallel_merge_tails()` — coordinator consolidates
    partial pages across all workers.
 
 ### Phase 2: Standalone threadpool
@@ -196,7 +196,7 @@ new `src/index/build_parallel.h`
 
 2. In standalone build path: after k-means, create N worker states,
    partition the vector source into N ranges, each thread processes its
-   range using `mkt_build_encode_and_assign()` + parallel builder.
+   range using `vs_build_encode_and_assign()` + parallel builder.
 
 3. After all threads join, coordinator merges tail pages.
 
@@ -212,15 +212,15 @@ new `src/index/build_parallel.h`
 2. Each PG worker:
    - Attaches to shared memory (tree, config, global mean — read-only)
    - Gets assigned worker_id from shared counter
-   - Creates local MktParallelPostingBuilder with interleaved pages
-   - Runs parallel heap scan, calling `mkt_build_encode_and_assign()`
+   - Creates local VsParallelPostingBuilder with interleaved pages
+   - Runs parallel heap scan, calling `vs_build_encode_and_assign()`
      for each tuple, writing to its claimed pages
    - On completion, returns partial page info to shared memory
 
 3. Leader:
    - Launches workers via `CreateParallelContext()`
    - Also participates in scanning (worker_id = 0)
-   - After all workers complete, runs `mkt_parallel_merge_tails()`
+   - After all workers complete, runs `vs_parallel_merge_tails()`
    - Writes centroid pages and updates metadata
 
 4. Shared memory layout:
@@ -317,7 +317,7 @@ and unbiased, and the work-stealing scan is kept for load balancing.
      interleaved page claiming handles cross-worker cluster writes
 
 4. **Tests**: Unit tests for:
-   - `mkt_build_encode_and_assign()` (shared code)
-   - `MktParallelPostingBuilder` init/add/finish/merge
+   - `vs_build_encode_and_assign()` (shared code)
+   - `VsParallelPostingBuilder` init/add/finish/merge
    - Page chain correctness after merge
    - On-demand allocation chain correctness

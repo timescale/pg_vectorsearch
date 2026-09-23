@@ -9,11 +9,11 @@
  * while producing pages with identical binary layout.
  */
 
-#ifndef MKT_PG_COMPAT_H
-#define MKT_PG_COMPAT_H
+#ifndef VS_PG_COMPAT_H
+#define VS_PG_COMPAT_H
 
 /* Only for standalone builds — PG builds use real headers */
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 
 #include <assert.h>
 #include <stdint.h>
@@ -49,7 +49,7 @@ typedef char	*Page;
 /* Alignment macros matching PostgreSQL (8-byte on 64-bit) */
 #define MAXALIGN(len) (((uintptr_t)(len) + 7) & ~(uintptr_t)7)
 
-/* Single-palloc ceiling, as in PG's memutils.h (mkt_alloc maps to malloc in
+/* Single-palloc ceiling, as in PG's memutils.h (vs_alloc maps to malloc in
  * standalone, but the shared build code sizes against one limit). */
 #define MaxAllocSize ((size_t)0x3fffffff)
 
@@ -259,5 +259,5 @@ typedef struct BufferUsage
 
 #define InstrAccumParallelQuery(buf, wal) ((void)(buf), (void)(wal))
 
-#endif /* MKT_STANDALONE */
-#endif /* MKT_PG_COMPAT_H */
+#endif /* VS_STANDALONE */
+#endif /* VS_PG_COMPAT_H */

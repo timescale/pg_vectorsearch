@@ -25,7 +25,7 @@
  *   d(x, c) = sqrt(||x||^2 + ||c||^2 - 2 * dot(x, c))
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <math.h>
 #include <string.h>
@@ -50,15 +50,15 @@ struct ElkanState
 ElkanState *
 elkan_create(uint32_t nvecs, uint32_t nlist, uint32_t dim)
 {
-	ElkanState *es = mkt_alloc0(sizeof(ElkanState));
+	ElkanState *es = vs_alloc0(sizeof(ElkanState));
 	es->nvecs	   = nvecs;
 	es->nlist	   = nlist;
 	es->dim		   = dim;
-	es->lower	   = mkt_alloc0((size_t)nvecs * nlist * sizeof(float));
-	es->upper	   = mkt_alloc(nvecs * sizeof(float));
-	es->halfcdist  = mkt_alloc((size_t)nlist * nlist * sizeof(float));
-	es->s		   = mkt_alloc(nlist * sizeof(float));
-	es->cdist	   = mkt_alloc(nlist * sizeof(float));
+	es->lower	   = vs_alloc0((size_t)nvecs * nlist * sizeof(float));
+	es->upper	   = vs_alloc(nvecs * sizeof(float));
+	es->halfcdist  = vs_alloc((size_t)nlist * nlist * sizeof(float));
+	es->s		   = vs_alloc(nlist * sizeof(float));
+	es->cdist	   = vs_alloc(nlist * sizeof(float));
 	return es;
 }
 
@@ -67,19 +67,19 @@ elkan_destroy(ElkanState *es)
 {
 	if (es == NULL)
 		return;
-	mkt_free(es->lower);
-	mkt_free(es->upper);
-	mkt_free(es->halfcdist);
-	mkt_free(es->s);
-	mkt_free(es->cdist);
-	mkt_free(es);
+	vs_free(es->lower);
+	vs_free(es->upper);
+	vs_free(es->halfcdist);
+	vs_free(es->s);
+	vs_free(es->cdist);
+	vs_free(es);
 }
 
 /*
  * Compute dot product between two float32 vectors.
  * Used for centroid-centroid distances (always float32).
  */
-MKT_TARGET_CLONES static float
+VS_TARGET_CLONES static float
 dot_product(const float *a, const float *b, uint32_t dim)
 {
 	float dot = 0.0f;
@@ -156,7 +156,7 @@ static void
 precompute_norms_c(KMeansState *st)
 {
 	for (uint32_t j = 0; j < st->nlist; j++)
-		st->norms_c[j] = mkt_l2_norm_squared(
+		st->norms_c[j] = vs_l2_norm_squared(
 				st->centroids + (size_t)j * st->dim, st->dim);
 }
 
@@ -318,12 +318,12 @@ elkan_initial_assign_preconvert_impl(
 	const float *cents = st->centroids;
 	float		*buf   = st->vec_block;
 
-	const Vec32TypeOps *f32ops = &mkt_f32_type_ops;
+	const Vec32TypeOps *f32ops = &vs_f32_type_ops;
 
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
 		const void *raw = km_get_vector(st, i, esz);
-		mkt_half_to_float_array((const half *)raw, buf, dim);
+		vs_half_to_float_array((const half *)raw, buf, dim);
 		float  nx = st->norms_x[i];
 		float *lb = es->lower + (size_t)i * nlist;
 
@@ -361,7 +361,7 @@ elkan_assign_preconvert_impl(KMeansState *st, ElkanState *es, size_t esz)
 	const float *cents = st->centroids;
 	float		*buf   = st->vec_block;
 
-	const Vec32TypeOps *f32ops = &mkt_f32_type_ops;
+	const Vec32TypeOps *f32ops = &vs_f32_type_ops;
 
 	if (!es->bounds_valid)
 	{
@@ -387,7 +387,7 @@ elkan_assign_preconvert_impl(KMeansState *st, ElkanState *es, size_t esz)
 
 		/* Convert once — only for vectors that pass the s-bound */
 		const void *raw = km_get_vector(st, i, esz);
-		mkt_half_to_float_array((const half *)raw, buf, dim);
+		vs_half_to_float_array((const half *)raw, buf, dim);
 
 		float nx		= st->norms_x[i];
 		float ub_sq		= ub * ub;
@@ -443,14 +443,14 @@ elkan_assign_preconvert_impl(KMeansState *st, ElkanState *es, size_t esz)
 	}
 }
 
-/* Specialized wrappers — MKT_TARGET_CLONES generates SIMD variants */
-MKT_TARGET_CLONES static void
+/* Specialized wrappers — VS_TARGET_CLONES generates SIMD variants */
+VS_TARGET_CLONES static void
 elkan_assign_f32(KMeansState *st, ElkanState *es)
 {
-	elkan_assign_impl(st, es, &mkt_f32_type_ops);
+	elkan_assign_impl(st, es, &vs_f32_type_ops);
 }
 
-MKT_TARGET_CLONES static void
+VS_TARGET_CLONES static void
 elkan_assign_f16(KMeansState *st, ElkanState *es)
 {
 	elkan_assign_preconvert_impl(st, es, sizeof(half));
@@ -465,7 +465,7 @@ elkan_assign(KMeansState *st, ElkanState *es)
 
 	switch (st->vec_type)
 	{
-	case MKT_VEC_F32:
+	case VS_VEC_F32:
 		elkan_assign_f32(st, es);
 		break;
 	default:
@@ -485,7 +485,7 @@ elkan_update_bounds(
 	/* Compute per-centroid movement distances */
 	for (uint32_t j = 0; j < nlist; j++)
 	{
-		float d_sq = mkt_l2_distance_squared(
+		float d_sq = vs_l2_distance_squared(
 				st->centroids + (size_t)j * dim,
 				old_centroids + (size_t)j * dim,
 				dim);

@@ -16,7 +16,7 @@
 #include "core/memory.h"
 #include "core/platform.h"
 
-#define MKT_TOPK_INITIAL_CAP_MIN 32
+#define VS_TOPK_INITIAL_CAP_MIN 32
 
 /* ----------------------------------------------------------------
  * Threshold heap (max-heap of Distance values)
@@ -102,8 +102,8 @@ ub_sift_down_from(Distance *heap, uint64_t *ids, uint32_t count, uint32_t i)
 static int
 cmp_by_distance(const void *a, const void *b)
 {
-	const MktTopKEntry *ea = (const MktTopKEntry *)a;
-	const MktTopKEntry *eb = (const MktTopKEntry *)b;
+	const VsTopKEntry *ea = (const VsTopKEntry *)a;
+	const VsTopKEntry *eb = (const VsTopKEntry *)b;
 	if (ea->distance < eb->distance)
 		return -1;
 	if (ea->distance > eb->distance)
@@ -116,32 +116,32 @@ cmp_by_distance(const void *a, const void *b)
  * ---------------------------------------------------------------- */
 
 void
-mkt_topk_init(MktTopK *topk, uint32_t k)
+vs_topk_init(VsTopK *topk, uint32_t k)
 {
-	topk->memctx	 = mkt_memctx_create(NULL, "topk");
+	topk->memctx	 = vs_memctx_create(NULL, "topk");
 	topk->k			 = k;
 	topk->k_capacity = k;
-	topk->ub_heap	 = mkt_memctx_alloc(topk->memctx, k * sizeof(Distance));
-	topk->ub_ids	 = mkt_memctx_alloc(topk->memctx, k * sizeof(uint64_t));
+	topk->ub_heap	 = vs_memctx_alloc(topk->memctx, k * sizeof(Distance));
+	topk->ub_ids	 = vs_memctx_alloc(topk->memctx, k * sizeof(uint64_t));
 	topk->ub_count	 = 0;
 
 	uint32_t cap = k * 2;
-	if (cap < MKT_TOPK_INITIAL_CAP_MIN)
-		cap = MKT_TOPK_INITIAL_CAP_MIN;
+	if (cap < VS_TOPK_INITIAL_CAP_MIN)
+		cap = VS_TOPK_INITIAL_CAP_MIN;
 	topk->candidates =
-			mkt_memctx_alloc(topk->memctx, cap * sizeof(MktTopKEntry));
+			vs_memctx_alloc(topk->memctx, cap * sizeof(VsTopKEntry));
 	topk->cand_count	= 0;
 	topk->cand_capacity = cap;
 }
 
 void
-mkt_topk_cleanup(MktTopK *topk)
+vs_topk_cleanup(VsTopK *topk)
 {
 	if (topk == NULL)
 		return;
 	if (topk->memctx != NULL)
 	{
-		mkt_memctx_delete(topk->memctx);
+		vs_memctx_delete(topk->memctx);
 		topk->memctx = NULL;
 	}
 	topk->ub_heap	 = NULL;
@@ -149,42 +149,42 @@ mkt_topk_cleanup(MktTopK *topk)
 	topk->candidates = NULL;
 }
 
-MktTopK *
-mkt_topk_create(uint32_t k)
+VsTopK *
+vs_topk_create(uint32_t k)
 {
-	MktMemCtx ctx  = mkt_memctx_create(NULL, "topk");
-	MktTopK	 *topk = mkt_memctx_alloc(ctx, sizeof(MktTopK));
+	VsMemCtx ctx   = vs_memctx_create(NULL, "topk");
+	VsTopK	*topk  = vs_memctx_alloc(ctx, sizeof(VsTopK));
 	topk->memctx   = ctx;
 	topk->k		   = k;
-	topk->ub_heap  = mkt_memctx_alloc(ctx, k * sizeof(Distance));
-	topk->ub_ids   = mkt_memctx_alloc(ctx, k * sizeof(uint64_t));
+	topk->ub_heap  = vs_memctx_alloc(ctx, k * sizeof(Distance));
+	topk->ub_ids   = vs_memctx_alloc(ctx, k * sizeof(uint64_t));
 	topk->ub_count = 0;
 
 	uint32_t cap = k * 2;
-	if (cap < MKT_TOPK_INITIAL_CAP_MIN)
-		cap = MKT_TOPK_INITIAL_CAP_MIN;
-	topk->candidates	= mkt_memctx_alloc(ctx, cap * sizeof(MktTopKEntry));
+	if (cap < VS_TOPK_INITIAL_CAP_MIN)
+		cap = VS_TOPK_INITIAL_CAP_MIN;
+	topk->candidates	= vs_memctx_alloc(ctx, cap * sizeof(VsTopKEntry));
 	topk->cand_count	= 0;
 	topk->cand_capacity = cap;
 	return topk;
 }
 
 void
-mkt_topk_destroy(MktTopK *topk)
+vs_topk_destroy(VsTopK *topk)
 {
 	if (topk == NULL)
 		return;
-	mkt_memctx_delete(topk->memctx);
+	vs_memctx_delete(topk->memctx);
 }
 
 void
-mkt_topk_reset(MktTopK *topk)
+vs_topk_reset(VsTopK *topk)
 {
-	mkt_topk_reset_to_k(topk, topk->k);
+	vs_topk_reset_to_k(topk, topk->k);
 }
 
 void
-mkt_topk_reset_to_k(MktTopK *topk, uint32_t k)
+vs_topk_reset_to_k(VsTopK *topk, uint32_t k)
 {
 	/* O(1) reset: buffers are retained across resets (grow-only), so a
 	 * reused top-K reaches a steady state with zero allocator traffic.
@@ -193,21 +193,21 @@ mkt_topk_reset_to_k(MktTopK *topk, uint32_t k)
 	 * leaked into the context. The candidate buffer keeps its
 	 * high-water capacity, avoiding the doubling-regrowth copies that
 	 * a fresh buffer paid on every use. */
-	if (mkt_unlikely(k > topk->k_capacity))
+	if (vs_unlikely(k > topk->k_capacity))
 	{
 		uint32_t cand_cap = topk->cand_capacity;
 		uint32_t min_cap  = k * 2;
 
 		if (cand_cap < min_cap)
 			cand_cap = min_cap;
-		if (cand_cap < MKT_TOPK_INITIAL_CAP_MIN)
-			cand_cap = MKT_TOPK_INITIAL_CAP_MIN;
+		if (cand_cap < VS_TOPK_INITIAL_CAP_MIN)
+			cand_cap = VS_TOPK_INITIAL_CAP_MIN;
 
-		mkt_memctx_reset(topk->memctx);
-		topk->ub_heap = mkt_memctx_alloc(topk->memctx, k * sizeof(Distance));
-		topk->ub_ids  = mkt_memctx_alloc(topk->memctx, k * sizeof(uint64_t));
-		topk->candidates = mkt_memctx_alloc(
-				topk->memctx, cand_cap * sizeof(MktTopKEntry));
+		vs_memctx_reset(topk->memctx);
+		topk->ub_heap = vs_memctx_alloc(topk->memctx, k * sizeof(Distance));
+		topk->ub_ids  = vs_memctx_alloc(topk->memctx, k * sizeof(uint64_t));
+		topk->candidates =
+				vs_memctx_alloc(topk->memctx, cand_cap * sizeof(VsTopKEntry));
 		topk->cand_capacity = cand_cap;
 		topk->k_capacity	= k;
 	}
@@ -218,8 +218,8 @@ mkt_topk_reset_to_k(MktTopK *topk, uint32_t k)
 }
 
 void
-mkt_topk_insert_unique(
-		MktTopK *topk, Distance distance, Distance error, uint64_t id)
+vs_topk_insert_unique(
+		VsTopK *topk, Distance distance, Distance error, uint64_t id)
 {
 	Distance lb = distance - error;
 	Distance ub = distance + error;
@@ -229,7 +229,7 @@ mkt_topk_insert_unique(
 	 * comparison, so the naive lb >= threshold guard would admit it --
 	 * and one NaN upper bound in the heap corrupts the threshold for
 	 * the rest of the scan. */
-	if (!(lb < mkt_topk_threshold(topk)))
+	if (!(lb < vs_topk_threshold(topk)))
 		return;
 
 	/* No dedup scan: caller guarantees ids are unique. */
@@ -250,17 +250,17 @@ mkt_topk_insert_unique(
 	/* Grow candidate buffer if needed (old buffer freed with memctx) */
 	if (topk->cand_count == topk->cand_capacity)
 	{
-		uint32_t	  new_cap = topk->cand_capacity * 2;
-		MktTopKEntry *new_buf =
-				mkt_memctx_alloc(topk->memctx, new_cap * sizeof(MktTopKEntry));
+		uint32_t	 new_cap = topk->cand_capacity * 2;
+		VsTopKEntry *new_buf =
+				vs_memctx_alloc(topk->memctx, new_cap * sizeof(VsTopKEntry));
 		memcpy(new_buf,
 			   topk->candidates,
-			   topk->cand_count * sizeof(MktTopKEntry));
+			   topk->cand_count * sizeof(VsTopKEntry));
 		topk->candidates	= new_buf;
 		topk->cand_capacity = new_cap;
 	}
 
-	topk->candidates[topk->cand_count++] = (MktTopKEntry){
+	topk->candidates[topk->cand_count++] = (VsTopKEntry){
 			.distance = distance,
 			.error	  = error,
 			.id		  = id,
@@ -273,7 +273,7 @@ mkt_topk_insert_unique(
  * ---------------------------------------------------------------- */
 
 void
-mkt_topk_insert(MktTopK *topk, Distance distance, Distance error, uint64_t id)
+vs_topk_insert(VsTopK *topk, Distance distance, Distance error, uint64_t id)
 {
 	Distance lb = distance - error;
 	Distance ub = distance + error;
@@ -283,7 +283,7 @@ mkt_topk_insert(MktTopK *topk, Distance distance, Distance error, uint64_t id)
 	 * comparison, so the naive lb >= threshold guard would admit it --
 	 * and one NaN upper bound in the heap corrupts the threshold for
 	 * the rest of the scan. */
-	if (!(lb < mkt_topk_threshold(topk)))
+	if (!(lb < vs_topk_threshold(topk)))
 		return;
 
 	/* Dedup: check if this ID is already in the heap. If so,
@@ -323,18 +323,18 @@ append:
 	/* Grow candidate buffer if needed (old buffer freed with memctx) */
 	if (topk->cand_count == topk->cand_capacity)
 	{
-		uint32_t	  new_cap = topk->cand_capacity * 2;
-		MktTopKEntry *new_buf =
-				mkt_memctx_alloc(topk->memctx, new_cap * sizeof(MktTopKEntry));
+		uint32_t	 new_cap = topk->cand_capacity * 2;
+		VsTopKEntry *new_buf =
+				vs_memctx_alloc(topk->memctx, new_cap * sizeof(VsTopKEntry));
 		memcpy(new_buf,
 			   topk->candidates,
-			   topk->cand_count * sizeof(MktTopKEntry));
+			   topk->cand_count * sizeof(VsTopKEntry));
 		topk->candidates	= new_buf;
 		topk->cand_capacity = new_cap;
 	}
 
 	/* Append to candidate buffer */
-	topk->candidates[topk->cand_count++] = (MktTopKEntry){
+	topk->candidates[topk->cand_count++] = (VsTopKEntry){
 			.distance = distance,
 			.error	  = error,
 			.id		  = id,
@@ -350,24 +350,24 @@ append:
  * count, additionally truncated to `cap` unique entries when cap > 0.
  */
 static uint32_t
-dedup_sorted_prefix(MktTopKEntry *results, uint32_t n, uint32_t cap)
+dedup_sorted_prefix(VsTopKEntry *results, uint32_t n, uint32_t cap)
 {
 	if (n <= 1)
 		return n;
 
-	MktIdSet seen;
-	mkt_idset_init(&seen, n);
+	VsIdSet seen;
+	vs_idset_init(&seen, n);
 
 	uint32_t w = 0;
 	for (uint32_t r = 0; r < n; r++)
 	{
-		if (!mkt_idset_test_add(&seen, results[r].id))
+		if (!vs_idset_test_add(&seen, results[r].id))
 			continue;
 		results[w++] = results[r];
 		if (cap > 0 && w == cap)
 			break;
 	}
-	mkt_idset_cleanup(&seen);
+	vs_idset_cleanup(&seen);
 	return w;
 }
 
@@ -378,7 +378,7 @@ dedup_sorted_prefix(MktTopKEntry *results, uint32_t n, uint32_t cap)
  * recursion, no external randomness.
  */
 static void
-quickselect_by_distance(MktTopKEntry *results, uint32_t n, uint32_t want)
+quickselect_by_distance(VsTopKEntry *results, uint32_t n, uint32_t want)
 {
 	uint32_t lo = 0, hi = n;
 
@@ -409,9 +409,9 @@ quickselect_by_distance(MktTopKEntry *results, uint32_t n, uint32_t want)
 				j--;
 			if (i <= j)
 			{
-				MktTopKEntry tmp = results[i];
-				results[i]		 = results[j];
-				results[j]		 = tmp;
+				VsTopKEntry tmp = results[i];
+				results[i]		= results[j];
+				results[j]		= tmp;
 				i++;
 				if (j == 0)
 					break;
@@ -433,12 +433,11 @@ quickselect_by_distance(MktTopKEntry *results, uint32_t n, uint32_t want)
  * Extract sorted
  * ---------------------------------------------------------------- */
 
-/* The uncapped form of mkt_topk_extract_sorted_capped. */
+/* The uncapped form of vs_topk_extract_sorted_capped. */
 void
-mkt_topk_extract_sorted(
-		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out)
+vs_topk_extract_sorted(VsTopK *topk, VsTopKEntry *results, uint32_t *count_out)
 {
-	mkt_topk_extract_sorted_capped(topk, results, count_out, 0);
+	vs_topk_extract_sorted_capped(topk, results, count_out, 0);
 }
 
 /*
@@ -455,13 +454,10 @@ mkt_topk_extract_sorted(
  * margin.
  */
 void
-mkt_topk_extract_sorted_capped(
-		MktTopK		 *topk,
-		MktTopKEntry *results,
-		uint32_t	 *count_out,
-		uint32_t	  cap)
+vs_topk_extract_sorted_capped(
+		VsTopK *topk, VsTopKEntry *results, uint32_t *count_out, uint32_t cap)
 {
-	Distance threshold = mkt_topk_threshold(topk);
+	Distance threshold = vs_topk_threshold(topk);
 
 	uint32_t out = 0;
 	for (uint32_t i = 0; i < topk->cand_count; i++)
@@ -479,22 +475,22 @@ mkt_topk_extract_sorted_capped(
 	}
 
 	if (sel > 1)
-		qsort(results, sel, sizeof(MktTopKEntry), cmp_by_distance);
+		qsort(results, sel, sizeof(VsTopKEntry), cmp_by_distance);
 
 	*count_out = dedup_sorted_prefix(results, sel, cap);
 }
 
 /*
- * Same as mkt_topk_extract_sorted but skips the duplicate-id pass.
+ * Same as vs_topk_extract_sorted but skips the duplicate-id pass.
  * For callers whose ids are unique by construction (array indices,
  * beam-search buffer positions), the dedup scan can never remove
  * anything and is quadratic in the survivor count.
  */
 void
-mkt_topk_extract_sorted_unique(
-		MktTopK *topk, MktTopKEntry *results, uint32_t *count_out)
+vs_topk_extract_sorted_unique(
+		VsTopK *topk, VsTopKEntry *results, uint32_t *count_out)
 {
-	Distance threshold = mkt_topk_threshold(topk);
+	Distance threshold = vs_topk_threshold(topk);
 
 	/* Filter stale candidates and copy survivors to results */
 	uint32_t out = 0;
@@ -507,7 +503,7 @@ mkt_topk_extract_sorted_unique(
 
 	/* Sort by distance ascending */
 	if (out > 1)
-		qsort(results, out, sizeof(MktTopKEntry), cmp_by_distance);
+		qsort(results, out, sizeof(VsTopKEntry), cmp_by_distance);
 
 	*count_out = out;
 }

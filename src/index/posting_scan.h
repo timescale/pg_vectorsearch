@@ -3,7 +3,7 @@
  *
  * Scans posting data (paged or flat), computes batch RaBitQ
  * distances, prunes via error bounds, and inserts survivors into
- * a MktTopK with approximate distances. Reranking with exact
+ * a VsTopK with approximate distances. Reranking with exact
  * distances is the caller's responsibility.
  *
  * Usage (paged mode):
@@ -37,11 +37,11 @@
 typedef struct PrismPostingScan
 {
 	/* Configuration (set at init, constant across clusters) */
-	MktStorage		   *storage;   /* NULL for flat mode */
+	VsStorage		   *storage;   /* NULL for flat mode */
 	char			   *page_base; /* direct page pointer (bypass vtable) */
 	const RaBitQParams *params;
 	Dimension			dim;
-	uint32_t			packed_bytes; /* MKT_RABITQ_BYTES(dim) */
+	uint32_t			packed_bytes; /* VS_RABITQ_BYTES(dim) */
 	uint32_t max_entries_cap;		  /* page_distances/page_scratch capacity;
 									   * trusted bound for on-disk entry_count */
 
@@ -73,10 +73,10 @@ typedef struct PrismPostingScan
 	 * kernel, the AVX-512 capability, and the per-page group capacities
 	 * (first vs overflow page). Avoids an atomic load + double
 	 * indirection per 32-vector group and an integer division per page. */
-	MktFastscanAccumulateHaccFn fs_accum_hacc;
-	bool						fs_has_avx512;
-	uint32_t					fs_max_groups_first;
-	uint32_t					fs_max_groups_over;
+	VsFastscanAccumulateHaccFn fs_accum_hacc;
+	bool					   fs_has_avx512;
+	uint32_t				   fs_max_groups_first;
+	uint32_t				   fs_max_groups_over;
 
 	/* Stats */
 	uint32_t pages_read;	/* posting pages fetched (incl. skipped) */
@@ -99,7 +99,7 @@ typedef struct PrismPostingScan
  */
 void prism_posting_scan_init(
 		PrismPostingScan   *scan,
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		char			   *page_base,
 		const RaBitQParams *params,
 		Dimension			dim,
@@ -142,7 +142,7 @@ const float *prism_posting_scan_pt_centroid(const PrismPostingScan *scan);
  * The threshold updates progressively as better candidates are
  * found, providing dynamic pruning within the cluster.
  */
-void prism_posting_scan_cluster(PrismPostingScan *scan, MktTopK *topk);
+void prism_posting_scan_cluster(PrismPostingScan *scan, VsTopK *topk);
 
 /*
  * Enable fastscan scratch buffers. Call after init if the index
@@ -157,8 +157,7 @@ void prism_posting_scan_enable_fastscan(PrismPostingScan *scan, int lut_bits);
  * Handles mixed chains: fastscan-format pages use the VPSHUFB
  * kernel, AoS pages fall back to the standard 1-bit kernel.
  */
-void
-prism_posting_scan_cluster_fastscan(PrismPostingScan *scan, MktTopK *topk);
+void prism_posting_scan_cluster_fastscan(PrismPostingScan *scan, VsTopK *topk);
 
 /*
  * Free scratch buffers.

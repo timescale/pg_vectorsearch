@@ -13,8 +13,8 @@
  *
  * Used by both standalone and PG builds.
  */
-#ifndef MKT_CORE_IDSET_H
-#define MKT_CORE_IDSET_H
+#ifndef VS_CORE_IDSET_H
+#define VS_CORE_IDSET_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -28,14 +28,14 @@
  * ids across the high bits, which the mask then folds onto the slot
  * range (Fibonacci hashing).
  */
-#define MKT_HASH_GOLDEN_GAMMA 0x9E3779B97F4A7C15ULL
+#define VS_HASH_GOLDEN_GAMMA 0x9E3779B97F4A7C15ULL
 
-typedef struct MktIdSet
+typedef struct VsIdSet
 {
 	uint64_t *slots;
 	uint32_t  mask; /* nslots - 1; nslots is a power of two */
 	bool	  has_zero;
-} MktIdSet;
+} VsIdSet;
 
 /*
  * Size for up to `expected` distinct ids at a load factor of at most
@@ -46,17 +46,17 @@ typedef struct MktIdSet
  * rejected outright rather than proceeding undersized.
  */
 static inline void
-mkt_idset_init(MktIdSet *set, uint32_t expected)
+vs_idset_init(VsIdSet *set, uint32_t expected)
 {
 	uint64_t want	= (uint64_t)expected * 2;
 	uint32_t nslots = 2;
 
 	if (expected > (1u << 30))
-		mkt_error("id set population %u exceeds the slot ceiling", expected);
+		vs_error("id set population %u exceeds the slot ceiling", expected);
 
 	while ((uint64_t)nslots < want)
 		nslots <<= 1;
-	set->slots	  = mkt_alloc0(nslots * sizeof(uint64_t));
+	set->slots	  = vs_alloc0(nslots * sizeof(uint64_t));
 	set->mask	  = nslots - 1;
 	set->has_zero = false;
 }
@@ -66,7 +66,7 @@ mkt_idset_init(MktIdSet *set, uint32_t expected)
  * false when it was already a member.
  */
 static inline bool
-mkt_idset_test_add(MktIdSet *set, uint64_t id)
+vs_idset_test_add(VsIdSet *set, uint64_t id)
 {
 	if (id == 0)
 	{
@@ -76,7 +76,7 @@ mkt_idset_test_add(MktIdSet *set, uint64_t id)
 		return true;
 	}
 
-	uint32_t slot = (uint32_t)(id * MKT_HASH_GOLDEN_GAMMA) & set->mask;
+	uint32_t slot = (uint32_t)(id * VS_HASH_GOLDEN_GAMMA) & set->mask;
 	while (set->slots[slot] != 0 && set->slots[slot] != id)
 		slot = (slot + 1) & set->mask;
 	if (set->slots[slot] == id)
@@ -86,13 +86,13 @@ mkt_idset_test_add(MktIdSet *set, uint64_t id)
 }
 
 static inline void
-mkt_idset_cleanup(MktIdSet *set)
+vs_idset_cleanup(VsIdSet *set)
 {
 	if (set->slots != NULL)
 	{
-		mkt_free(set->slots);
+		vs_free(set->slots);
 		set->slots = NULL;
 	}
 }
 
-#endif /* MKT_CORE_IDSET_H */
+#endif /* VS_CORE_IDSET_H */

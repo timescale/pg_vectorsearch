@@ -59,7 +59,7 @@ mkdir -p "$LOGDIR/coveragereport"
 
 # Minimum line coverage threshold (percentage)
 #
-# Set to 85% for cross-platform SIMD code. We use mkt_simd_set_override()
+# Set to 85% for cross-platform SIMD code. We use vs_simd_set_override()
 # to test all same-architecture SIMD implementations (scalar, AVX2, AVX-512
 # on x86-64; scalar, NEON on ARM), achieving 88%+ coverage of testable code.
 # The remaining code is mostly unsupported SIMD variants for the CPU.
@@ -77,7 +77,7 @@ MIN_COVERAGE=85
 
 # Build base exclusion patterns
 #
-# Note: We use mkt_simd_set_override() to test all same-architecture SIMD
+# Note: We use vs_simd_set_override() to test all same-architecture SIMD
 # variants (scalar, AVX2, AVX-512 on x86; scalar, NEON on ARM), achieving
 # full coverage of testable code paths. We only exclude code for foreign
 # architectures that cannot execute at all.

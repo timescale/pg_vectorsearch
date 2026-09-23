@@ -13,8 +13,8 @@
  * parallel worker infrastructure.
  */
 
-#ifndef MKT_THREAD_POOL_H
-#define MKT_THREAD_POOL_H
+#ifndef VS_THREAD_POOL_H
+#define VS_THREAD_POOL_H
 
 #include <pthread.h>
 #include <stdint.h>
@@ -82,18 +82,18 @@ pthread_barrier_destroy(pthread_barrier_t *b)
 
 #endif /* __APPLE__ */
 
-typedef void (*MktParallelForFn)(
+typedef void (*VsParallelForFn)(
 		uint32_t thread_id, uint32_t start, uint32_t end, void *arg);
 
-typedef bool (*MktReduceFn)(void *arg, uint32_t iteration);
+typedef bool (*VsReduceFn)(void *arg, uint32_t iteration);
 
-typedef struct MktThreadPool MktThreadPool;
+typedef struct VsThreadPool VsThreadPool;
 
 /*
  * Create a pool with nthreads background worker threads.
  * Thread IDs are 0..nthreads-1; the leader gets ID nthreads.
  */
-MktThreadPool *mkt_thread_pool_create(uint32_t nthreads);
+VsThreadPool *vs_thread_pool_create(uint32_t nthreads);
 
 /*
  * Iterative parallel-for with barrier synchronization.
@@ -114,24 +114,24 @@ MktThreadPool *mkt_thread_pool_create(uint32_t nthreads);
  *
  * Maps to PG's Barrier (BarrierArriveAndWait) for PG builds.
  */
-void mkt_thread_pool_iterate(
-		MktThreadPool	*pool,
-		uint32_t		 total,
-		MktParallelForFn work_fn,
-		MktReduceFn		 reduce_fn,
-		void			*arg,
-		uint32_t		 max_iterations);
+void vs_thread_pool_iterate(
+		VsThreadPool   *pool,
+		uint32_t		total,
+		VsParallelForFn work_fn,
+		VsReduceFn		reduce_fn,
+		void		   *arg,
+		uint32_t		max_iterations);
 
 /*
  * Single-iteration parallel-for. Equivalent to iterate with
  * reduce_fn=NULL and max_iterations=1.
  */
-void mkt_thread_pool_parallel_for(
-		MktThreadPool *pool, uint32_t total, MktParallelForFn fn, void *arg);
+void vs_thread_pool_parallel_for(
+		VsThreadPool *pool, uint32_t total, VsParallelForFn fn, void *arg);
 
-uint32_t mkt_thread_pool_nthreads(const MktThreadPool *pool);
+uint32_t vs_thread_pool_nthreads(const VsThreadPool *pool);
 
-void mkt_thread_pool_destroy(MktThreadPool *pool);
+void vs_thread_pool_destroy(VsThreadPool *pool);
 
 /*
  * SPMD dispatch over the persistent pool.
@@ -155,9 +155,9 @@ void mkt_thread_pool_destroy(MktThreadPool *pool);
  * the calling thread, then join — i.e. every participant runs fn. With
  * nthreads=0 it runs fn(0, arg) inline.
  */
-typedef void (*MktSpmdFn)(uint32_t participant_id, void *arg);
-void mkt_thread_pool_launch(MktThreadPool *pool, MktSpmdFn fn, void *arg);
-void mkt_thread_pool_join(MktThreadPool *pool);
-void mkt_thread_pool_run_spmd(MktThreadPool *pool, MktSpmdFn fn, void *arg);
+typedef void (*VsSpmdFn)(uint32_t participant_id, void *arg);
+void vs_thread_pool_launch(VsThreadPool *pool, VsSpmdFn fn, void *arg);
+void vs_thread_pool_join(VsThreadPool *pool);
+void vs_thread_pool_run_spmd(VsThreadPool *pool, VsSpmdFn fn, void *arg);
 
-#endif /* MKT_THREAD_POOL_H */
+#endif /* VS_THREAD_POOL_H */

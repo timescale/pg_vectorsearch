@@ -1,9 +1,9 @@
 /*
- * mkt_types.h - Core type definitions for pg_vectorsearch
+ * vs_types.h - Core type definitions for pg_vectorsearch
  */
 
-#ifndef MKT_TYPES_H
-#define MKT_TYPES_H
+#ifndef VS_TYPES_H
+#define VS_TYPES_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -19,16 +19,16 @@
 #endif
 
 /*
- * MKT_VTABLE_INLINE — hint for vtable functions.
+ * VS_VTABLE_INLINE — hint for vtable functions.
  *
  * Clang inlines always_inline functions through static-const vtable
  * pointers even across target_clones boundaries. GCC errors on
  * target mismatch, so we omit the attribute there.
  */
 #ifdef __clang__
-#define MKT_VTABLE_INLINE __attribute__((always_inline)) static inline
+#define VS_VTABLE_INLINE __attribute__((always_inline)) static inline
 #else
-#define MKT_VTABLE_INLINE static inline
+#define VS_VTABLE_INLINE static inline
 #endif
 
 /* Quantized representations */
@@ -76,7 +76,7 @@ typedef enum
 } DistanceMetric;
 
 /*
- * MktDistanceMode - RaBitQ distance computation mode
+ * VsDistanceMode - RaBitQ distance computation mode
  *
  * Controls whether search uses asymmetric (full-precision query × 1-bit data)
  * or symmetric (1-bit query × 1-bit data) distance. Symmetric is ~4x faster
@@ -84,17 +84,17 @@ typedef enum
  */
 typedef enum
 {
-	MKT_DISTANCE_MODE_DEFAULT	 = -1, /* GUC sentinel: use index relopt */
-	MKT_DISTANCE_MODE_ASYMMETRIC = 0,
-	MKT_DISTANCE_MODE_SYMMETRIC	 = 1,
-} MktDistanceMode;
+	VS_DISTANCE_MODE_DEFAULT	= -1, /* GUC sentinel: use index relopt */
+	VS_DISTANCE_MODE_ASYMMETRIC = 0,
+	VS_DISTANCE_MODE_SYMMETRIC	= 1,
+} VsDistanceMode;
 
 static inline const char *
-mkt_distance_mode_name(MktDistanceMode mode)
+vs_distance_mode_name(VsDistanceMode mode)
 {
 	static const char *names[] = {
-			[MKT_DISTANCE_MODE_ASYMMETRIC] = "asymmetric",
-			[MKT_DISTANCE_MODE_SYMMETRIC]  = "symmetric",
+			[VS_DISTANCE_MODE_ASYMMETRIC] = "asymmetric",
+			[VS_DISTANCE_MODE_SYMMETRIC]  = "symmetric",
 	};
 	return names[mode];
 }
@@ -108,26 +108,26 @@ mkt_distance_mode_name(MktDistanceMode mode)
  */
 typedef enum
 {
-	MKT_VEC_F32	 = 0, /* float32 */
-	MKT_VEC_F16	 = 1, /* float16 (scalar / auto-vectorized) */
-	MKT_VEC_F16C = 2, /* float16 (hand-written F16C SIMD) */
+	VS_VEC_F32	= 0, /* float32 */
+	VS_VEC_F16	= 1, /* float16 (scalar / auto-vectorized) */
+	VS_VEC_F16C = 2, /* float16 (hand-written F16C SIMD) */
 } VecType;
 
 static inline size_t
-mkt_vec_element_size(VecType type)
+vs_vec_element_size(VecType type)
 {
 	static const size_t sizes[] =
-			{[MKT_VEC_F32] = 4, [MKT_VEC_F16] = 2, [MKT_VEC_F16C] = 2};
+			{[VS_VEC_F32] = 4, [VS_VEC_F16] = 2, [VS_VEC_F16C] = 2};
 	return sizes[type];
 }
 
 static inline const char *
-mkt_vec_type_name(VecType type)
+vs_vec_type_name(VecType type)
 {
 	static const char *names[] = {
-			[MKT_VEC_F32]  = "float32",
-			[MKT_VEC_F16]  = "float16",
-			[MKT_VEC_F16C] = "float16-f16c",
+			[VS_VEC_F32]  = "float32",
+			[VS_VEC_F16]  = "float16",
+			[VS_VEC_F16C] = "float16-f16c",
 	};
 	return names[type];
 }
@@ -158,4 +158,4 @@ typedef struct Vec32TypeOps
 			const void *src, float *dst, uint32_t count, Dimension dim);
 } Vec32TypeOps;
 
-#endif /* MKT_TYPES_H */
+#endif /* VS_TYPES_H */

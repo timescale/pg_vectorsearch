@@ -8,7 +8,7 @@
  * - Vec16 lifecycle
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <string.h>
 
@@ -21,13 +21,13 @@
  *
  * On x86 with F16C: _mm256_cvtph_ps / _mm256_cvtps_ph (8 at a time)
  * On ARM with FP16: vcvt_f32_f16 / vcvt_f16_f32 (4 at a time)
- * Fallback: scalar loop via mkt_half_to_float / mkt_float_to_half
+ * Fallback: scalar loop via vs_half_to_float / vs_float_to_half
  * ---------------------------------------------------------------- */
 
-#if defined(MKT_F16C_SUPPORT) && !defined(MKT_SIMD_NONE)
+#if defined(VS_F16C_SUPPORT) && !defined(VS_SIMD_NONE)
 
 __attribute__((target("avx,f16c"))) void
-mkt_half_to_float_array(const half *src, float *dst, uint32_t n)
+vs_half_to_float_array(const half *src, float *dst, uint32_t n)
 {
 	uint32_t i = 0;
 	for (; i + 8 <= n; i += 8)
@@ -37,11 +37,11 @@ mkt_half_to_float_array(const half *src, float *dst, uint32_t n)
 		_mm256_storeu_ps(dst + i, f8);
 	}
 	for (; i < n; i++)
-		dst[i] = mkt_half_to_float(src[i]);
+		dst[i] = vs_half_to_float(src[i]);
 }
 
 __attribute__((target("avx,f16c"))) void
-mkt_float_to_half_array(const float *src, half *dst, uint32_t n)
+vs_float_to_half_array(const float *src, half *dst, uint32_t n)
 {
 	uint32_t i = 0;
 	for (; i + 8 <= n; i += 8)
@@ -52,16 +52,16 @@ mkt_float_to_half_array(const float *src, half *dst, uint32_t n)
 		_mm_storeu_si128((__m128i *)(dst + i), h8);
 	}
 	for (; i < n; i++)
-		dst[i] = mkt_float_to_half(src[i]);
+		dst[i] = vs_float_to_half(src[i]);
 }
 
 #elif defined(__aarch64__) && defined(__ARM_FP16_FORMAT_IEEE) && \
-		!defined(MKT_SIMD_NONE)
+		!defined(VS_SIMD_NONE)
 
 #include <arm_neon.h>
 
 void
-mkt_half_to_float_array(const half *src, float *dst, uint32_t n)
+vs_half_to_float_array(const half *src, float *dst, uint32_t n)
 {
 	uint32_t i = 0;
 	for (; i + 4 <= n; i += 4)
@@ -71,11 +71,11 @@ mkt_half_to_float_array(const half *src, float *dst, uint32_t n)
 		vst1q_f32(dst + i, f4);
 	}
 	for (; i < n; i++)
-		dst[i] = mkt_half_to_float(src[i]);
+		dst[i] = vs_half_to_float(src[i]);
 }
 
 void
-mkt_float_to_half_array(const float *src, half *dst, uint32_t n)
+vs_float_to_half_array(const float *src, half *dst, uint32_t n)
 {
 	uint32_t i = 0;
 	for (; i + 4 <= n; i += 4)
@@ -85,24 +85,24 @@ mkt_float_to_half_array(const float *src, half *dst, uint32_t n)
 		vst1_f16((float16_t *)(dst + i), h4);
 	}
 	for (; i < n; i++)
-		dst[i] = mkt_float_to_half(src[i]);
+		dst[i] = vs_float_to_half(src[i]);
 }
 
 #else
 
 /* Scalar fallback */
 void
-mkt_half_to_float_array(const half *src, float *dst, uint32_t n)
+vs_half_to_float_array(const half *src, float *dst, uint32_t n)
 {
 	for (uint32_t i = 0; i < n; i++)
-		dst[i] = mkt_half_to_float(src[i]);
+		dst[i] = vs_half_to_float(src[i]);
 }
 
 void
-mkt_float_to_half_array(const float *src, half *dst, uint32_t n)
+vs_float_to_half_array(const float *src, half *dst, uint32_t n)
 {
 	for (uint32_t i = 0; i < n; i++)
-		dst[i] = mkt_float_to_half(src[i]);
+		dst[i] = vs_float_to_half(src[i]);
 }
 
 #endif
@@ -118,11 +118,11 @@ vec16_create(Dimension dim)
 		return NULL;
 
 	size_t size = VEC16_SIZE(dim);
-	Vec16 *v	= mkt_alloc0(size);
+	Vec16 *v	= vs_alloc0(size);
 	if (v == NULL)
 		return NULL;
 
-	MKT_SET_VARSIZE(v, size);
+	VS_SET_VARSIZE(v, size);
 	v->dim = (int16_t)dim;
 	return v;
 }
@@ -137,14 +137,14 @@ vec16_from_floats(const float *values, Dimension dim)
 	if (v == NULL)
 		return NULL;
 
-	mkt_float_to_half_array(values, v->x, dim);
+	vs_float_to_half_array(values, v->x, dim);
 	return v;
 }
 
 void
 vec16_free(Vec16 *v)
 {
-	mkt_free(v);
+	vs_free(v);
 }
 
 void
@@ -152,5 +152,5 @@ vec16_set(Vec16 *v, const float *values)
 {
 	if (v == NULL || values == NULL)
 		return;
-	mkt_float_to_half_array(values, v->x, v->dim);
+	vs_float_to_half_array(values, v->x, v->dim);
 }

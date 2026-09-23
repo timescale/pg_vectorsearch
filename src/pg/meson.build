@@ -39,7 +39,7 @@ if cc.get_id() == 'clang'
   ]
 endif
 
-# -isystem: see mkt_pg_cflags in the top-level meson.build.
+# -isystem: see vs_pg_cflags in the top-level meson.build.
 pg_ext_cflags += ['-isystem' + pg_includedir_server]
 pg_ext_cflags += pg_cflags
 
@@ -70,7 +70,7 @@ pgvs_ext_so = shared_module(ext_module_name,
   git_commit_h,
   c_args: pg_ext_cflags,
   link_args: pg_ldflags,
-  link_with: mkt_pg_lib,
+  link_with: vs_pg_lib,
   include_directories: src_inc,
   name_prefix: '',
   build_rpath: pg_rpath.length() > 0 ? pg_rpath[0] : '',

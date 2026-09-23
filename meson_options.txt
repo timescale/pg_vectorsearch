@@ -70,8 +70,8 @@ option('pg_srcdir',
 option('tools',
   type: 'feature',
   value: 'auto',
-  description: '''Build the developer tools: the mkt CLI, the standalone
-  shared library (Python bindings), and the unit tests.
+  description: '''Build the developer tools: the vectorsearch CLI, the
+  standalone shared library (Python bindings), and the unit tests.
   - auto: enabled in a git checkout, disabled when building from a release
     tarball (no .git directory) — release-artifact consumers build only the
     PostgreSQL extension unless they opt in

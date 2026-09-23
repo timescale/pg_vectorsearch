@@ -76,11 +76,11 @@ splitmix64_next(uint64_t *state)
  * sizing the sample: it does not know about entries whose vector can no longer
  * be fetched. */
 static uint32_t
-head_live_count(MktStorage *storage, BlockNumber head)
+head_live_count(VsStorage *storage, BlockNumber head)
 {
-	Page	 p = mkt_storage_read_page(storage, head);
+	Page	 p = vs_storage_read_page(storage, head);
 	uint32_t n = prism_posting_head_live_count(p);
-	mkt_storage_release_page(storage, head);
+	vs_storage_release_page(storage, head);
 	return n;
 }
 
@@ -92,7 +92,7 @@ static bool
 vector_is_degenerate(const float *vec, Dimension dim, DistanceMetric metric)
 {
 	/* Squared norm -- zero iff the norm is zero, without the sqrt. */
-	return metric == DISTANCE_COSINE && mkt_l2_norm_squared(vec, dim) == 0.0f;
+	return metric == DISTANCE_COSINE && vs_l2_norm_squared(vec, dim) == 0.0f;
 }
 
 /* ----------------------------------------------------------------
@@ -131,7 +131,7 @@ typedef struct ChainTidsCtx
 	void			*state;
 	ItemPointerData *tids; /* one page's worth, caller-owned */
 	uint32_t		 cap;
-	MktMemCtx		 entry_ctx;
+	VsMemCtx		 entry_ctx;
 	void (*prefetch)(void *, ItemPointerData);
 	void	 *prefetch_ctx;
 	uint32_t *cluster_id_out;
@@ -162,16 +162,16 @@ walk_one_page_tids(PrismPostingChainPos *pos, void *state)
 			 * group may be partial; entry_count bounds the valid slots.
 			 * Live pages have no per-entry delete flag (deletes tombstone
 			 * the whole page, handled above). */
-			uint32_t ngroups = (cnt + MKT_FASTSCAN_GROUP - 1) /
-							   MKT_FASTSCAN_GROUP;
+			uint32_t ngroups = (cnt + VS_FASTSCAN_GROUP - 1) /
+							   VS_FASTSCAN_GROUP;
 			for (uint32_t g = 0; g < ngroups; g++)
 			{
 				ItemPointerData *gt =
 						prism_fastscan_group_tids(content, g, dim);
-				uint32_t base_i = g * MKT_FASTSCAN_GROUP;
-				uint32_t valid	= (cnt - base_i) < MKT_FASTSCAN_GROUP
+				uint32_t base_i = g * VS_FASTSCAN_GROUP;
+				uint32_t valid	= (cnt - base_i) < VS_FASTSCAN_GROUP
 										? (cnt - base_i)
-										: MKT_FASTSCAN_GROUP;
+										: VS_FASTSCAN_GROUP;
 				for (uint32_t v = 0; v < valid; v++)
 					ctx->tids[ntids++] = gt[v];
 			}
@@ -205,7 +205,7 @@ walk_one_page_tids(PrismPostingChainPos *pos, void *state)
 	 * page), and re-requesting a block already in flight buys nothing.
 	 */
 	BlockNumber prefetched = InvalidBlockNumber;
-	MktMemCtx	outer	   = mkt_memctx_switch(ctx->entry_ctx);
+	VsMemCtx	outer	   = vs_memctx_switch(ctx->entry_ctx);
 
 	for (uint32_t i = 0; i < ntids; i++)
 	{
@@ -219,16 +219,16 @@ walk_one_page_tids(PrismPostingChainPos *pos, void *state)
 			}
 		}
 		ctx->cb(ctx->state, ctx->tids[i]);
-		mkt_memctx_reset(ctx->entry_ctx);
+		vs_memctx_reset(ctx->entry_ctx);
 	}
 
-	mkt_memctx_switch(outer);
+	vs_memctx_switch(outer);
 	return true;
 }
 
 static void
 walk_chain_tids(
-		MktStorage			*storage,
+		VsStorage			*storage,
 		Dimension			 dim,
 		BlockNumber			 head,
 		ChainTidCb			 cb,
@@ -242,7 +242,7 @@ walk_chain_tids(
 	 * the cap cannot disagree with what a page reports.
 	 */
 	uint32_t		 cap  = prism_posting_max_entries_any_format(dim);
-	ItemPointerData *tids = mkt_alloc((size_t)cap * sizeof(ItemPointerData));
+	ItemPointerData *tids = vs_alloc((size_t)cap * sizeof(ItemPointerData));
 
 	/*
 	 * Reset between entries, so per-entry allocations cannot accumulate over
@@ -252,13 +252,13 @@ walk_chain_tids(
 	 * after the tids buffer above, which has to outlive the resets.
 	 */
 	ChainTidsCtx ctx = {
-			.dim	   = dim,
-			.cb		   = cb,
-			.state	   = state,
-			.tids	   = tids,
-			.cap	   = cap,
-			.entry_ctx = mkt_memctx_create(
-					mkt_memctx_current(), "prism split entry"),
+			.dim   = dim,
+			.cb	   = cb,
+			.state = state,
+			.tids  = tids,
+			.cap   = cap,
+			.entry_ctx =
+					vs_memctx_create(vs_memctx_current(), "prism split entry"),
 			.prefetch		= (env != NULL) ? env->prefetch_vector : NULL,
 			.prefetch_ctx	= (env != NULL) ? env->ctx : NULL,
 			.cluster_id_out = cluster_id_out,
@@ -266,8 +266,8 @@ walk_chain_tids(
 
 	prism_posting_chain_walk(storage, head, walk_one_page_tids, &ctx);
 
-	mkt_memctx_delete(ctx.entry_ctx);
-	mkt_free(tids);
+	vs_memctx_delete(ctx.entry_ctx);
+	vs_free(tids);
 }
 
 /* ----------------------------------------------------------------
@@ -304,7 +304,7 @@ sample_one_vector(void *state, ItemPointerData tid)
 	 * unaffected: normalizing again changes nothing.
 	 */
 	if (s->metric == DISTANCE_COSINE)
-		mkt_l2_normalize(s->one, dim);
+		vs_l2_normalize(s->one, dim);
 
 	if (s->count < s->cap)
 	{
@@ -313,7 +313,7 @@ sample_one_vector(void *state, ItemPointerData tid)
 		if (s->count == s->alloc)
 		{
 			uint32_t want = (s->alloc < s->cap / 2) ? s->alloc * 2 : s->cap;
-			s->vecs = mkt_realloc(s->vecs, (size_t)want * dim * sizeof(float));
+			s->vecs	 = vs_realloc(s->vecs, (size_t)want * dim * sizeof(float));
 			s->alloc = want;
 		}
 		memcpy(s->vecs + (size_t)s->count * dim,
@@ -367,8 +367,8 @@ sample_chain_vectors(
 	if (want < 64)
 		want = 64;
 	out->alloc = want;
-	out->vecs  = mkt_alloc((size_t)want * dim * sizeof(float));
-	out->one   = mkt_alloc((size_t)dim * sizeof(float));
+	out->vecs  = vs_alloc((size_t)want * dim * sizeof(float));
+	out->one   = vs_alloc((size_t)dim * sizeof(float));
 
 	walk_chain_tids(
 			base->posting_storage,
@@ -437,7 +437,7 @@ drop_undersized_clusters(
 	bool	 live[PRISM_SPLIT_MAX_PARTS];
 	/* The sample's assignments, rewritten as centroids are dropped so the
 	 * tallies keep describing what the writing pass will do. */
-	ClusterId *owner = mkt_alloc((size_t)sampled * sizeof(ClusterId));
+	ClusterId *owner = vs_alloc((size_t)sampled * sizeof(ClusterId));
 
 	for (uint32_t i = 0; i < sampled; i++)
 	{
@@ -498,7 +498,7 @@ drop_undersized_clusters(
 				if (!live[j] || j == victim)
 					continue;
 				Vec32Ref c = {centroid_at(km->centroids, j, dim), dim};
-				Distance d = mkt_distance(v, c, metric);
+				Distance d = vs_distance(v, c, metric);
 				if (best == UINT32_MAX || d < best_d)
 				{
 					best   = j;
@@ -570,7 +570,7 @@ write_one_vector(void *state, ItemPointerData tid)
 	 * reasons: the centroids were elected in that space, and the builder
 	 * encodes against them. */
 	if (!degenerate && w->metric == DISTANCE_COSINE)
-		mkt_l2_normalize(w->one, dim);
+		vs_l2_normalize(w->one, dim);
 
 	if (degenerate)
 	{
@@ -592,7 +592,7 @@ write_one_vector(void *state, ItemPointerData tid)
 		for (uint32_t j = 0; j < w->k; j++)
 		{
 			Vec32Ref c = {centroid_at(w->centroids, j, dim), dim};
-			Distance d = mkt_distance(v, c, w->metric);
+			Distance d = vs_distance(v, c, w->metric);
 			if (j == 0 || d < best)
 			{
 				best   = d;
@@ -614,7 +614,7 @@ tombstone_page(PrismPostingPageOpaque *op, void *state)
 }
 
 void
-prism_posting_chain_tombstone(MktStorage *storage, BlockNumber head)
+prism_posting_chain_tombstone(VsStorage *storage, BlockNumber head)
 {
 	prism_posting_chain_mutate(storage, head, tombstone_page, NULL);
 }
@@ -630,7 +630,7 @@ prism_posting_chain_tombstone(MktStorage *storage, BlockNumber head)
  */
 static int
 find_leaf_and_tail(
-		MktStorage	*storage,
+		VsStorage	*storage,
 		BlockNumber	 first_centroid,
 		BlockNumber	 head,
 		BlockNumber *found_page,
@@ -654,8 +654,8 @@ find_leaf_and_tail(
 	BlockNumber blk = first_centroid;
 	while (blk != InvalidBlockNumber)
 	{
-		Page page = mkt_storage_read_page(storage, blk);
-		const PrismCentroidPageOpaque *op	= PRISM_CENTROID_OPAQUE(page);
+		Page page						  = vs_storage_read_page(storage, blk);
+		const PrismCentroidPageOpaque *op = PRISM_CENTROID_OPAQUE(page);
 		uint16_t					   cnt	= op->entry_count;
 		BlockNumber					   next = op->next_blkno;
 		*level								= op->level;
@@ -671,7 +671,7 @@ find_leaf_and_tail(
 		if (next == InvalidBlockNumber)
 			*tail_page = blk;
 
-		mkt_storage_release_page(storage, blk);
+		vs_storage_release_page(storage, blk);
 		blk = next;
 	}
 
@@ -711,7 +711,7 @@ centroid_page_has_room_for(Page page, Dimension dim, uint32_t n)
  * buffer is the split's largest allocation -- the whole budget -- and the
  * k-means workspace sits beside it, so both have to be gone before the
  * writing pass allocates. Nothing here frees anything by hand, deliberately.
- * mkt_free does nothing on the standalone allocator, where memory returns
+ * vs_free does nothing on the standalone allocator, where memory returns
  * only when a context is reset, so hand-freeing would bound the peak on
  * PostgreSQL and silently not bound it standalone. A context boundary means
  * the same thing on both.
@@ -808,7 +808,7 @@ sample_and_cluster(
 		return 0;
 	}
 
-	KMeansOptions opts = MKT_KMEANS_OPTIONS_DEFAULT;
+	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
 	if (cfg != NULL)
 	{
 		if (cfg->km_max_iter)
@@ -872,7 +872,7 @@ sample_and_cluster(
 	for (uint32_t attempt = 0; attempt <= PRISM_SPLIT_WIDEN_ATTEMPTS;
 		 attempt++)
 	{
-		KMeansResult *km = mkt_kmeans_f32(
+		KMeansResult *km = vs_kmeans_f32(
 				smp.vecs, smp.count, dim, k, base->metric, &opts);
 		if (km == NULL)
 			return -1;
@@ -887,7 +887,7 @@ sample_and_cluster(
 				smp.n_live - smp.n_degenerate,
 				floor_entries,
 				centroids);
-		mkt_kmeans_result_destroy(km);
+		vs_kmeans_result_destroy(km);
 
 		if (nparts >= 2)
 			break;
@@ -920,12 +920,12 @@ write_phase_cleanup(
 		float		  *pt_c,
 		float		  *centroids)
 {
-	mkt_rabitq_scratch_cleanup(scratch);
+	vs_rabitq_scratch_cleanup(scratch);
 	for (uint32_t j = 0; j < k; j++)
-		mkt_free(rd[j]);
-	mkt_free_aligned(pt_res);
-	mkt_free_aligned(pt_c);
-	mkt_free(centroids);
+		vs_free(rd[j]);
+	vs_free_aligned(pt_res);
+	vs_free_aligned(pt_c);
+	vs_free(centroids);
 }
 
 /*
@@ -975,7 +975,8 @@ prism_posting_split(
 		return -1;
 
 	/* Phase-1 scope: flat tree + RaBitQ centroid format only. */
-	if (base->nlevels != 1 || base->centroid_format != MKT_CENTROID_FMT_RABITQ)
+	if (base->nlevels != 1 ||
+		base->centroid_format != PRISM_CENTROID_FMT_RABITQ)
 		return -1;
 
 	RaBitQParams *params = prism_index_ensure_rabitq(base);
@@ -990,14 +991,14 @@ prism_posting_split(
 	 * 1-2. Sample, count and cluster, in a context that goes away with the
 	 * sample buffer inside it. See sample_and_cluster: the phase boundary is
 	 * a context boundary so that it bounds the peak on both allocators, not
-	 * just on the one where mkt_free frees.
+	 * just on the one where vs_free frees.
 	 */
-	float *centroids = mkt_alloc(
+	float *centroids = vs_alloc(
 			(size_t)PRISM_SPLIT_MAX_PARTS * dim * sizeof(float));
 
-	MktMemCtx work =
-			mkt_memctx_create(mkt_memctx_current(), "prism split sample");
-	MktMemCtx old = mkt_memctx_switch(work);
+	VsMemCtx work =
+			vs_memctx_create(vs_memctx_current(), "prism split sample");
+	VsMemCtx old = vs_memctx_switch(work);
 
 	uint32_t cluster_id = 0;
 	int		 nparts		= sample_and_cluster(
@@ -1010,8 +1011,8 @@ prism_posting_split(
 			 centroids,
 			 &cluster_id);
 
-	mkt_memctx_switch(old);
-	mkt_memctx_delete(work);
+	vs_memctx_switch(old);
+	vs_memctx_delete(work);
 
 	if (nparts < 2)
 	{
@@ -1043,17 +1044,17 @@ prism_posting_split(
 	BlockNumber	  new_head[PRISM_SPLIT_MAX_PARTS];
 	RaBitQData	 *rd[PRISM_SPLIT_MAX_PARTS];
 	uint32_t	  counts[PRISM_SPLIT_MAX_PARTS] = {0};
-	float		 *pt_c	 = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
-	float		 *pt_res = mkt_alloc_aligned((size_t)dim * sizeof(float), 64);
+	float		 *pt_c	 = vs_alloc_aligned((size_t)dim * sizeof(float), 64);
+	float		 *pt_res = vs_alloc_aligned((size_t)dim * sizeof(float), 64);
 	RaBitQScratch scratch;
-	mkt_rabitq_scratch_init(&scratch, dim);
+	vs_rabitq_scratch_init(&scratch, dim);
 
-	PrismPostingBuilder *builders = mkt_alloc(
+	PrismPostingBuilder *builders = vs_alloc(
 			(size_t)k * sizeof(PrismPostingBuilder));
 	for (uint32_t j = 0; j < k; j++)
 	{
 		const float *centroid = centroid_at(centroids, j, dim);
-		mkt_rabitq_rotate(params, centroid, pt_c);
+		vs_rabitq_rotate(params, centroid, pt_c);
 
 		/* Not `cid`: that is a command id in PostgreSQL. */
 		uint32_t new_cluster = (j == 0) ? cluster_id : first_new_id + (j - 1);
@@ -1069,10 +1070,10 @@ prism_posting_split(
 
 		/* Routing centroid for the leaf entry: encode (pt_c - pt_mean), which
 		 * matches encode_into(c, mean) used at build. */
-		rd[j] = mkt_alloc(MKT_RABITQ_DATA_SIZE(dim));
+		rd[j] = vs_alloc(VS_RABITQ_DATA_SIZE(dim));
 		for (Dimension d = 0; d < dim; d++)
 			pt_res[d] = pt_c[d] - base->pt_global_mean[d];
-		mkt_rabitq_encode_from_pt(params, pt_res, rd[j], &scratch);
+		vs_rabitq_encode_from_pt(params, pt_res, rd[j], &scratch);
 	}
 
 	SplitWriter w = {
@@ -1083,17 +1084,17 @@ prism_posting_split(
 			.dim	   = dim,
 			.metric	   = base->metric,
 			.env	   = env,
-			.one	   = mkt_alloc((size_t)dim * sizeof(float)),
+			.one	   = vs_alloc((size_t)dim * sizeof(float)),
 	};
 	walk_chain_tids(
 			base->posting_storage, dim, head, write_one_vector, &w, env, NULL);
-	mkt_free(w.one);
+	vs_free(w.one);
 
 	for (uint32_t j = 0; j < k; j++)
 		new_head[j] = prism_posting_builder_finish(&builders[j]);
 	for (uint32_t j = 0; j < k; j++)
 		prism_posting_builder_cleanup(&builders[j]);
-	mkt_free(builders);
+	vs_free(builders);
 	/* 4. Flip the centroid tree: locate the old leaf entry + chain tail. */
 	BlockNumber found_page, tail_page;
 	uint32_t	found_idx;
@@ -1119,7 +1120,7 @@ prism_posting_split(
 	 * crash-safety argument rests on. A crash here must leave the old list
 	 * authoritative and leak only the new, unreferenced pages.
 	 */
-	MKT_INJECTION_POINT("prism-split-before-flip");
+	VS_INJECTION_POINT("prism-split-before-flip");
 
 	/*
 	 * Flip: repoint the old leaf at new_head[0] and add leaves for the k-1
@@ -1137,20 +1138,20 @@ prism_posting_split(
 	bool	 single_page			 = false;
 	if (found_page == tail_page)
 	{
-		Page cp = mkt_storage_read_page(base->centroid_storage, found_page);
+		Page cp		= vs_storage_read_page(base->centroid_storage, found_page);
 		single_page = centroid_page_has_room_for(cp, dim, k - 1);
-		mkt_storage_release_page(base->centroid_storage, found_page);
+		vs_storage_release_page(base->centroid_storage, found_page);
 	}
 
 	if (single_page)
 	{
-		Page fp = mkt_storage_write_page(base->centroid_storage, found_page);
+		Page fp = vs_storage_write_page(base->centroid_storage, found_page);
 		prism_centroid_page_overwrite_entry(
 				fp, dim, found_idx, new_head[0], rd[0]);
 		for (uint32_t j = 1; j < k; j++)
 			prism_centroid_page_add_entry(
 					fp, dim, new_head[j], 0, PRISM_CENTROID_FLAG_LEAF, rd[j]);
-		mkt_storage_commit_page(base->centroid_storage, found_page);
+		vs_storage_commit_page(base->centroid_storage, found_page);
 	}
 	else
 	{
@@ -1167,16 +1168,15 @@ prism_posting_split(
 		 */
 		for (uint32_t j = 1; j < k; j++)
 		{
-			Page tp =
-					mkt_storage_write_page(base->centroid_storage, tail_page);
+			Page tp = vs_storage_write_page(base->centroid_storage, tail_page);
 			bool appended = prism_centroid_page_add_entry(
 					tp, dim, new_head[j], 0, PRISM_CENTROID_FLAG_LEAF, rd[j]);
-			mkt_storage_commit_page(base->centroid_storage, tail_page);
+			vs_storage_commit_page(base->centroid_storage, tail_page);
 
 			if (!appended)
 			{
 				BlockNumber np;
-				Page npg = mkt_storage_new_page(base->centroid_storage, &np);
+				Page npg = vs_storage_new_page(base->centroid_storage, &np);
 				prism_centroid_page_init_fmt(
 						npg, level, base->centroid_format);
 				prism_centroid_page_add_entry(
@@ -1186,22 +1186,22 @@ prism_posting_split(
 						0,
 						PRISM_CENTROID_FLAG_LEAF,
 						rd[j]);
-				mkt_storage_commit_page(base->centroid_storage, np);
+				vs_storage_commit_page(base->centroid_storage, np);
 
-				Page link = mkt_storage_write_page(
+				Page link = vs_storage_write_page(
 						base->centroid_storage, tail_page);
 				PRISM_CENTROID_OPAQUE(link)->next_blkno = np;
-				mkt_storage_commit_page(base->centroid_storage, tail_page);
+				vs_storage_commit_page(base->centroid_storage, tail_page);
 
 				tail_page = np;
 				appended_centroid_pages++;
 			}
 		}
 
-		Page fp = mkt_storage_write_page(base->centroid_storage, found_page);
+		Page fp = vs_storage_write_page(base->centroid_storage, found_page);
 		prism_centroid_page_overwrite_entry(
 				fp, dim, found_idx, new_head[0], rd[0]);
-		mkt_storage_commit_page(base->centroid_storage, found_page);
+		vs_storage_commit_page(base->centroid_storage, found_page);
 	}
 
 	/*

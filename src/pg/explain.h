@@ -6,9 +6,9 @@
  * (ANALYZE, VERBOSE) is used on a query with a prism index scan.
  */
 
-#ifndef MKT_EXPLAIN_H
-#define MKT_EXPLAIN_H
+#ifndef PRISM_EXPLAIN_H
+#define PRISM_EXPLAIN_H
 
 void prism_explain_init(void);
 
-#endif /* MKT_EXPLAIN_H */
+#endif /* PRISM_EXPLAIN_H */

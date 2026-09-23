@@ -11,8 +11,8 @@
 #include <stdint.h>
 #include <unistd.h>
 
-#include "mkt_test.h"
 #include "standalone/barrier.h"
+#include "vs_test.h"
 
 TEST_GROUP(Barrier);
 

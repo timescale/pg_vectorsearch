@@ -10,12 +10,12 @@
  * (USE_INJECTION_POINTS) and a test attached an action to that name.
  */
 
-#ifndef MKT_INJECTION_H
-#define MKT_INJECTION_H
+#ifndef VS_INJECTION_H
+#define VS_INJECTION_H
 
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 
-#define MKT_INJECTION_POINT(name) ((void)0)
+#define VS_INJECTION_POINT(name) ((void)0)
 
 #else
 
@@ -23,8 +23,8 @@
 
 #include <utils/injection_point.h>
 
-#define MKT_INJECTION_POINT(name) INJECTION_POINT(name, NULL)
+#define VS_INJECTION_POINT(name) INJECTION_POINT(name, NULL)
 
 #endif
 
-#endif /* MKT_INJECTION_H */
+#endif /* VS_INJECTION_H */

@@ -15,7 +15,7 @@
 
 #include "algo/topk.h"
 #include "core/memory.h"
-#include "mkt_test.h"
+#include "vs_test.h"
 
 TEST_GROUP(TopK);
 TEST_MEMCTX_FIXTURE();
@@ -26,32 +26,32 @@ TEST_MEMCTX_FIXTURE();
 
 TEST(topk_create_destroy)
 {
-	MktTopK *topk = mkt_topk_create(10);
+	VsTopK *topk = vs_topk_create(10);
 	ASSERT_NOT_NULL(topk, "create should succeed");
 	ASSERT_EQ(0, topk->cand_count, "cand_count should be 0");
 	ASSERT_EQ(10, topk->k, "k should be 10");
-	mkt_topk_destroy(topk);
+	vs_topk_destroy(topk);
 }
 
 TEST(topk_init_cleanup)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 5);
+	VsTopK topk;
+	vs_topk_init(&topk, 5);
 
 	ASSERT_EQ(0, topk.cand_count, "cand_count should be 0");
 	ASSERT_EQ(5, topk.k, "k should be 5");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 TEST(topk_threshold_empty)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 3);
+	VsTopK topk;
+	vs_topk_init(&topk, 3);
 
 	ASSERT_TRUE(
-			isinf(mkt_topk_threshold(&topk)),
+			isinf(vs_topk_threshold(&topk)),
 			"threshold should be INFINITY when not full");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 /* ----------------------------------------------------------------
@@ -60,59 +60,59 @@ TEST(topk_threshold_empty)
 
 TEST(topk_insert_under_capacity)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 3);
+	VsTopK topk;
+	vs_topk_init(&topk, 3);
 
-	mkt_topk_insert(&topk, 5.0f, 0.0f, 1);
+	vs_topk_insert(&topk, 5.0f, 0.0f, 1);
 	ASSERT_TRUE(
-			isinf(mkt_topk_threshold(&topk)),
+			isinf(vs_topk_threshold(&topk)),
 			"threshold still INFINITY (< k upper bounds)");
 
-	mkt_topk_insert(&topk, 3.0f, 0.0f, 2);
-	mkt_topk_insert(&topk, 7.0f, 0.0f, 3);
+	vs_topk_insert(&topk, 3.0f, 0.0f, 2);
+	vs_topk_insert(&topk, 7.0f, 0.0f, 3);
 
-	Distance thresh = mkt_topk_threshold(&topk);
+	Distance thresh = vs_topk_threshold(&topk);
 	ASSERT_FLOAT_EQ(
 			7.0f, thresh, 1e-6f, "threshold should be max upper_bound (7.0)");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 TEST(topk_insert_tightens_threshold)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 3);
+	VsTopK topk;
+	vs_topk_init(&topk, 3);
 
-	mkt_topk_insert(&topk, 5.0f, 0.0f, 1);
-	mkt_topk_insert(&topk, 3.0f, 0.0f, 2);
-	mkt_topk_insert(&topk, 7.0f, 0.0f, 3);
+	vs_topk_insert(&topk, 5.0f, 0.0f, 1);
+	vs_topk_insert(&topk, 3.0f, 0.0f, 2);
+	vs_topk_insert(&topk, 7.0f, 0.0f, 3);
 
 	/* Insert better upper bound → tightens threshold */
-	mkt_topk_insert(&topk, 4.0f, 0.0f, 4);
+	vs_topk_insert(&topk, 4.0f, 0.0f, 4);
 
-	Distance thresh = mkt_topk_threshold(&topk);
+	Distance thresh = vs_topk_threshold(&topk);
 	ASSERT_FLOAT_EQ(5.0f, thresh, 1e-6f, "threshold should tighten to 5.0");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 TEST(topk_insert_prunes_bad_candidates)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 3);
+	VsTopK topk;
+	vs_topk_init(&topk, 3);
 
-	mkt_topk_insert(&topk, 1.0f, 0.0f, 1);
-	mkt_topk_insert(&topk, 2.0f, 0.0f, 2);
-	mkt_topk_insert(&topk, 3.0f, 0.0f, 3);
+	vs_topk_insert(&topk, 1.0f, 0.0f, 1);
+	vs_topk_insert(&topk, 2.0f, 0.0f, 2);
+	vs_topk_insert(&topk, 3.0f, 0.0f, 3);
 
 	/* lower_bound=10 >= threshold=3 → pruned */
-	mkt_topk_insert(&topk, 10.0f, 0.0f, 99);
+	vs_topk_insert(&topk, 10.0f, 0.0f, 99);
 
-	MktTopKEntry results[32];
-	uint32_t	 count;
-	mkt_topk_extract_sorted(&topk, results, &count);
+	VsTopKEntry results[32];
+	uint32_t	count;
+	vs_topk_extract_sorted(&topk, results, &count);
 
 	/* Should only have the first 3 entries */
 	ASSERT_EQ(3, count, "pruned entry should not appear");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 /* ----------------------------------------------------------------
@@ -121,18 +121,18 @@ TEST(topk_insert_prunes_bad_candidates)
 
 TEST(topk_extract_sorted_ascending)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 5);
+	VsTopK topk;
+	vs_topk_init(&topk, 5);
 
-	mkt_topk_insert(&topk, 9.0f, 0.0f, 9);
-	mkt_topk_insert(&topk, 1.0f, 0.0f, 1);
-	mkt_topk_insert(&topk, 5.0f, 0.0f, 5);
-	mkt_topk_insert(&topk, 3.0f, 0.0f, 3);
-	mkt_topk_insert(&topk, 7.0f, 0.0f, 7);
+	vs_topk_insert(&topk, 9.0f, 0.0f, 9);
+	vs_topk_insert(&topk, 1.0f, 0.0f, 1);
+	vs_topk_insert(&topk, 5.0f, 0.0f, 5);
+	vs_topk_insert(&topk, 3.0f, 0.0f, 3);
+	vs_topk_insert(&topk, 7.0f, 0.0f, 7);
 
-	MktTopKEntry results[32];
-	uint32_t	 count;
-	mkt_topk_extract_sorted(&topk, results, &count);
+	VsTopKEntry results[32];
+	uint32_t	count;
+	vs_topk_extract_sorted(&topk, results, &count);
 
 	ASSERT_EQ(5, count, "should extract 5 entries");
 
@@ -156,25 +156,25 @@ TEST(topk_extract_sorted_ascending)
 	ASSERT_EQ(5, results[2].id, "third should be id=5 (dist 5.0)");
 	ASSERT_EQ(7, results[3].id, "fourth should be id=7 (dist 7.0)");
 	ASSERT_EQ(9, results[4].id, "fifth should be id=9 (dist 9.0)");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 TEST(topk_extract_resets)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 3);
+	VsTopK topk;
+	vs_topk_init(&topk, 3);
 
-	mkt_topk_insert(&topk, 1.0f, 0.0f, 1);
-	mkt_topk_insert(&topk, 2.0f, 0.0f, 2);
+	vs_topk_insert(&topk, 1.0f, 0.0f, 1);
+	vs_topk_insert(&topk, 2.0f, 0.0f, 2);
 
-	MktTopKEntry results[32];
-	uint32_t	 count;
-	mkt_topk_extract_sorted(&topk, results, &count);
+	VsTopKEntry results[32];
+	uint32_t	count;
+	vs_topk_extract_sorted(&topk, results, &count);
 	ASSERT_EQ(2, count, "should extract 2");
 
-	mkt_topk_reset(&topk);
+	vs_topk_reset(&topk);
 	ASSERT_EQ(0, topk.cand_count, "cand_count should be 0 after reset");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 /* ----------------------------------------------------------------
@@ -186,20 +186,20 @@ TEST(topk_brute_force_validation)
 	const uint32_t k = 10;
 	const uint32_t n = 100;
 
-	MktTopK topk;
-	mkt_topk_init(&topk, k);
+	VsTopK topk;
+	vs_topk_init(&topk, k);
 
 	/* Insert n candidates with pseudo-random distances, zero error */
-	float *all_dists = mkt_alloc(n * sizeof(float));
+	float *all_dists = vs_alloc(n * sizeof(float));
 	for (uint32_t i = 0; i < n; i++)
 	{
 		all_dists[i] = (float)((i * 97 + 13) % 1000) / 10.0f;
-		mkt_topk_insert(&topk, all_dists[i], 0.0f, i);
+		vs_topk_insert(&topk, all_dists[i], 0.0f, i);
 	}
 
-	MktTopKEntry *results = mkt_alloc(topk.cand_count * sizeof(*results));
-	uint32_t	  count;
-	mkt_topk_extract_sorted(&topk, results, &count);
+	VsTopKEntry *results = vs_alloc(topk.cand_count * sizeof(*results));
+	uint32_t	 count;
+	vs_topk_extract_sorted(&topk, results, &count);
 
 	/* With zero error, threshold pruning eliminates candidates
 	 * whose distance >= Kth-smallest, so count should be <= k+1
@@ -234,9 +234,9 @@ TEST(topk_brute_force_validation)
 		ASSERT_FLOAT_EQ(all_dists[i], results[i].distance, 1e-6f, msg);
 	}
 
-	mkt_free(results);
-	mkt_free(all_dists);
-	mkt_topk_cleanup(&topk);
+	vs_free(results);
+	vs_free(all_dists);
+	vs_topk_cleanup(&topk);
 }
 
 /* ----------------------------------------------------------------
@@ -245,42 +245,42 @@ TEST(topk_brute_force_validation)
 
 TEST(topk_error_affects_threshold)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 2);
+	VsTopK topk;
+	vs_topk_init(&topk, 2);
 
 	/* dist=3, error=1 → upper_bound=4 */
-	mkt_topk_insert(&topk, 3.0f, 1.0f, 1);
+	vs_topk_insert(&topk, 3.0f, 1.0f, 1);
 	/* dist=2, error=0.5 → upper_bound=2.5 */
-	mkt_topk_insert(&topk, 2.0f, 0.5f, 2);
+	vs_topk_insert(&topk, 2.0f, 0.5f, 2);
 
 	/* Threshold = max of {4.0, 2.5} = 4.0 (Kth-smallest ub) */
 	ASSERT_FLOAT_EQ(
 			4.0f,
-			mkt_topk_threshold(&topk),
+			vs_topk_threshold(&topk),
 			1e-6f,
 			"threshold should be worst upper_bound");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 TEST(topk_keeps_high_error_candidates)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 2);
+	VsTopK topk;
+	vs_topk_init(&topk, 2);
 
 	/* dist=2, error=0 → ub=2 */
-	mkt_topk_insert(&topk, 2.0f, 0.0f, 1);
+	vs_topk_insert(&topk, 2.0f, 0.0f, 1);
 	/* dist=3, error=0 → ub=3 */
-	mkt_topk_insert(&topk, 3.0f, 0.0f, 2);
+	vs_topk_insert(&topk, 3.0f, 0.0f, 2);
 	/* Threshold = 3.0 */
 
 	/* dist=10, error=9 → lb=1, ub=19
 	 * lower_bound=1 < threshold=3 → NOT pruned.
 	 * This candidate might be the closest! */
-	mkt_topk_insert(&topk, 10.0f, 9.0f, 3);
+	vs_topk_insert(&topk, 10.0f, 9.0f, 3);
 
-	MktTopKEntry results[32];
-	uint32_t	 count;
-	mkt_topk_extract_sorted(&topk, results, &count);
+	VsTopKEntry results[32];
+	uint32_t	count;
+	vs_topk_extract_sorted(&topk, results, &count);
 
 	/* All three should be kept (high-error entry not evicted) */
 	ASSERT_EQ(3, count, "high-error candidate should be kept");
@@ -292,43 +292,43 @@ TEST(topk_keeps_high_error_candidates)
 			has_3 = true;
 	}
 	ASSERT_TRUE(has_3, "high-error entry (id=3) must be in results");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 TEST(topk_buffers_more_than_k)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 2);
+	VsTopK topk;
+	vs_topk_init(&topk, 2);
 
 	/* All with overlapping error bounds — none can be pruned */
-	mkt_topk_insert(&topk, 5.0f, 3.0f, 1); /* lb=2, ub=8 */
-	mkt_topk_insert(&topk, 6.0f, 3.0f, 2); /* lb=3, ub=9 */
-	mkt_topk_insert(&topk, 7.0f, 3.0f, 3); /* lb=4, ub=10 */
+	vs_topk_insert(&topk, 5.0f, 3.0f, 1); /* lb=2, ub=8 */
+	vs_topk_insert(&topk, 6.0f, 3.0f, 2); /* lb=3, ub=9 */
+	vs_topk_insert(&topk, 7.0f, 3.0f, 3); /* lb=4, ub=10 */
 
 	/* threshold = 9.0 (Kth-smallest ub from {8,9})
 	 * Entry 3: lb=4 < 9 → kept */
-	MktTopKEntry results[32];
-	uint32_t	 count;
-	mkt_topk_extract_sorted(&topk, results, &count);
+	VsTopKEntry results[32];
+	uint32_t	count;
+	vs_topk_extract_sorted(&topk, results, &count);
 
 	ASSERT_TRUE(
 			count > 2, "should buffer more than K with overlapping bounds");
 	ASSERT_EQ(3, count, "all 3 entries should be in buffer");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 TEST(topk_error_preserved_in_extract)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 5);
+	VsTopK topk;
+	vs_topk_init(&topk, 5);
 
-	mkt_topk_insert(&topk, 2.0f, 0.5f, 1);
-	mkt_topk_insert(&topk, 4.0f, 1.0f, 2);
-	mkt_topk_insert(&topk, 6.0f, 0.1f, 3);
+	vs_topk_insert(&topk, 2.0f, 0.5f, 1);
+	vs_topk_insert(&topk, 4.0f, 1.0f, 2);
+	vs_topk_insert(&topk, 6.0f, 0.1f, 3);
 
-	MktTopKEntry results[32];
-	uint32_t	 count;
-	mkt_topk_extract_sorted(&topk, results, &count);
+	VsTopKEntry results[32];
+	uint32_t	count;
+	vs_topk_extract_sorted(&topk, results, &count);
 	ASSERT_EQ(3, count, "should extract 3");
 
 	/* Results sorted by distance ascending, error preserved */
@@ -338,27 +338,27 @@ TEST(topk_error_preserved_in_extract)
 	ASSERT_FLOAT_EQ(1.0f, results[1].error, 1e-6f, "second error=1.0");
 	ASSERT_FLOAT_EQ(6.0f, results[2].distance, 1e-6f, "third dist=6.0");
 	ASSERT_FLOAT_EQ(0.1f, results[2].error, 1e-6f, "third error=0.1");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 TEST(topk_filters_stale_candidates)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 2);
+	VsTopK topk;
+	vs_topk_init(&topk, 2);
 
 	/* First two: threshold starts at INFINITY, so accepted */
-	mkt_topk_insert(&topk, 1.0f, 0.0f, 1); /* lb=1, ub=1 */
-	mkt_topk_insert(&topk, 2.0f, 0.0f, 2); /* lb=2, ub=2 */
+	vs_topk_insert(&topk, 1.0f, 0.0f, 1); /* lb=1, ub=1 */
+	vs_topk_insert(&topk, 2.0f, 0.0f, 2); /* lb=2, ub=2 */
 	/* threshold = 2.0 */
 
 	/* This tightens the threshold heap */
-	mkt_topk_insert(&topk, 0.5f, 0.0f, 3); /* lb=0.5, ub=0.5 */
+	vs_topk_insert(&topk, 0.5f, 0.0f, 3); /* lb=0.5, ub=0.5 */
 	/* threshold ub_heap now {1.0, 0.5} → root=1.0 */
 
 	/* Entry id=2 (lb=2) >= final threshold=1.0 → stale, filtered */
-	MktTopKEntry results[32];
-	uint32_t	 count;
-	mkt_topk_extract_sorted(&topk, results, &count);
+	VsTopKEntry results[32];
+	uint32_t	count;
+	vs_topk_extract_sorted(&topk, results, &count);
 
 	ASSERT_EQ(2, count, "stale entry should be filtered");
 
@@ -369,7 +369,7 @@ TEST(topk_filters_stale_candidates)
 			has_2 = true;
 	}
 	ASSERT_FALSE(has_2, "id=2 (lb=2 >= threshold=1) should be filtered");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 /* ----------------------------------------------------------------
@@ -378,48 +378,48 @@ TEST(topk_filters_stale_candidates)
 
 TEST(topk_k_equals_one)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 1);
+	VsTopK topk;
+	vs_topk_init(&topk, 1);
 
-	mkt_topk_insert(&topk, 10.0f, 0.0f, 10);
+	vs_topk_insert(&topk, 10.0f, 0.0f, 10);
 	ASSERT_FLOAT_EQ(
 			10.0f,
-			mkt_topk_threshold(&topk),
+			vs_topk_threshold(&topk),
 			1e-6f,
 			"threshold with one entry");
 
-	mkt_topk_insert(&topk, 5.0f, 0.0f, 5);
+	vs_topk_insert(&topk, 5.0f, 0.0f, 5);
 	ASSERT_FLOAT_EQ(
 			5.0f,
-			mkt_topk_threshold(&topk),
+			vs_topk_threshold(&topk),
 			1e-6f,
 			"threshold after better insert");
 
-	mkt_topk_insert(&topk, 20.0f, 0.0f, 20);
+	vs_topk_insert(&topk, 20.0f, 0.0f, 20);
 
-	MktTopKEntry results[32];
-	uint32_t	 count;
-	mkt_topk_extract_sorted(&topk, results, &count);
+	VsTopKEntry results[32];
+	uint32_t	count;
+	vs_topk_extract_sorted(&topk, results, &count);
 
 	/* id=10 (lb=10 >= threshold=5) should be filtered.
 	 * id=20 (lb=20 >= threshold=5) should be pruned.
 	 * Only id=5 remains. */
 	ASSERT_EQ(1, count, "should extract 1");
 	ASSERT_EQ(5, results[0].id, "should be the best");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 TEST(topk_all_equal_distances)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 5);
+	VsTopK topk;
+	vs_topk_init(&topk, 5);
 
 	for (uint32_t i = 0; i < 10; i++)
-		mkt_topk_insert(&topk, 42.0f, 0.0f, i);
+		vs_topk_insert(&topk, 42.0f, 0.0f, i);
 
-	MktTopKEntry results[32];
-	uint32_t	 count;
-	mkt_topk_extract_sorted(&topk, results, &count);
+	VsTopKEntry results[32];
+	uint32_t	count;
+	vs_topk_extract_sorted(&topk, results, &count);
 
 	/* With zero error: ub=42 for all. threshold=42.
 	 * lb=42 >= threshold=42 → later entries pruned.
@@ -434,40 +434,40 @@ TEST(topk_all_equal_distances)
 				1e-6f,
 				"all distances should be equal");
 	}
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 TEST(topk_extract_empty)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 3);
+	VsTopK topk;
+	vs_topk_init(&topk, 3);
 
-	MktTopKEntry results[1];
-	uint32_t	 count;
-	mkt_topk_extract_sorted(&topk, results, &count);
+	VsTopKEntry results[1];
+	uint32_t	count;
+	vs_topk_extract_sorted(&topk, results, &count);
 	ASSERT_EQ(0, count, "empty extraction should return 0");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 TEST(topk_reset)
 {
-	MktTopK topk;
-	mkt_topk_init(&topk, 3);
+	VsTopK topk;
+	vs_topk_init(&topk, 3);
 
-	mkt_topk_insert(&topk, 1.0f, 0.0f, 1);
-	mkt_topk_insert(&topk, 2.0f, 0.0f, 2);
+	vs_topk_insert(&topk, 1.0f, 0.0f, 1);
+	vs_topk_insert(&topk, 2.0f, 0.0f, 2);
 	ASSERT_TRUE(topk.cand_count > 0, "has candidates before reset");
 
-	mkt_topk_reset(&topk);
+	vs_topk_reset(&topk);
 	ASSERT_EQ(0, topk.cand_count, "cand_count after reset");
 	ASSERT_TRUE(
-			isinf(mkt_topk_threshold(&topk)),
+			isinf(vs_topk_threshold(&topk)),
 			"threshold after reset should be INFINITY");
 
 	/* Should work again after reset */
-	mkt_topk_insert(&topk, 5.0f, 0.0f, 5);
+	vs_topk_insert(&topk, 5.0f, 0.0f, 5);
 	ASSERT_EQ(1, topk.cand_count, "cand_count after re-insert");
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 }
 
 /* ----------------------------------------------------------------
@@ -489,8 +489,8 @@ TEST(topk_extract_capped_adversarial)
 	{
 		for (size_t c = 0; c < sizeof(caps) / sizeof(caps[0]); c++)
 		{
-			MktTopK topk;
-			mkt_topk_init(&topk, k);
+			VsTopK topk;
+			vs_topk_init(&topk, k);
 			/* Every id twice (replica), error large enough that no
 			 * candidate is threshold-pruned: the buffer holds all. */
 			for (uint32_t i = 0; i < n; i++)
@@ -514,13 +514,12 @@ TEST(topk_extract_capped_adversarial)
 					d = (float)((i * 7919u) % 257u);
 					break;
 				}
-				mkt_topk_insert(&topk, d, 1000.0f, (uint64_t)(i % 250) + 1);
+				vs_topk_insert(&topk, d, 1000.0f, (uint64_t)(i % 250) + 1);
 			}
 
-			MktTopKEntry *res = mkt_alloc(
-					topk.cand_count * sizeof(MktTopKEntry));
-			uint32_t out;
-			mkt_topk_extract_sorted_capped(&topk, res, &out, caps[c]);
+			VsTopKEntry *res = vs_alloc(topk.cand_count * sizeof(VsTopKEntry));
+			uint32_t	 out;
+			vs_topk_extract_sorted_capped(&topk, res, &out, caps[c]);
 
 			uint32_t expect = caps[c] < 250 ? caps[c] : 250;
 			ASSERT_EQ(expect, out, "capped extract returns cap uniques");
@@ -532,8 +531,8 @@ TEST(topk_extract_capped_adversarial)
 				for (uint32_t j = i + 1; j < out; j++)
 					ASSERT_TRUE(res[i].id != res[j].id, "no duplicate ids");
 
-			mkt_free(res);
-			mkt_topk_cleanup(&topk);
+			vs_free(res);
+			vs_topk_cleanup(&topk);
 		}
 	}
 }

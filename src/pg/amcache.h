@@ -27,12 +27,12 @@
  * prism_index_base_init fills a caller-owned PrismIndexBase from the cache.
  * The only fields it leaves for the caller are the storage pointers
  * (centroid_storage / posting_storage / page_base): those reference a per-call
- * MktPgStorage with transient mutable state and must stay per-operation, so
+ * VsPgStorage with transient mutable state and must stay per-operation, so
  * they are not cached.
  */
 
-#ifndef MKT_AMCACHE_H
-#define MKT_AMCACHE_H
+#ifndef PRISM_AMCACHE_H
+#define PRISM_AMCACHE_H
 
 #include <postgres.h>
 
@@ -49,7 +49,7 @@
  * prism.fastscan_bits GUC against the index's stored FASTSCAN flag (so a
  * session SET still takes effect); params is resolved from the process-local
  * rotation cache. The storage pointers (centroid_storage / posting_storage /
- * page_base) are left zeroed for the caller to wire to its own MktPgStorage.
+ * page_base) are left zeroed for the caller to wire to its own VsPgStorage.
  *
  * Pointers placed into *base stay valid until the next relcache invalidation;
  * do not retain them across yield points.
@@ -77,14 +77,14 @@ void prism_release_params(Dimension dim, uint64_t seed, ResourceOwner owner);
  * this backend's params cache. Consumed by the test-only module
  * test/pg/src/test_helpers.c; no SQL surface in the extension.
  */
-typedef struct MktRabitqCacheStat
+typedef struct PrismRabitqCacheStat
 {
 	int32_t dim;
 	int32_t refcount;
 	double	usage;
-} MktRabitqCacheStat;
+} PrismRabitqCacheStat;
 
-int prism_rabitq_cache_stats(MktRabitqCacheStat *stats, int max_stats);
+int prism_rabitq_cache_stats(PrismRabitqCacheStat *stats, int max_stats);
 int prism_rabitq_cache_clear(void);
 
 /*
@@ -130,4 +130,4 @@ PrismScanInfo prism_cache_scan_info(Relation index);
  */
 const struct PrismIndexTypeInfo *prism_cache_type_info(Relation index);
 
-#endif /* MKT_AMCACHE_H */
+#endif /* PRISM_AMCACHE_H */

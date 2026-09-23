@@ -13,8 +13,8 @@
  * and process vectors in blocks of KMEANS_BLOCK_SIZE for cache efficiency.
  */
 
-#ifndef MKT_KMEANS_LLOYD_H
-#define MKT_KMEANS_LLOYD_H
+#ifndef VS_KMEANS_LLOYD_H
+#define VS_KMEANS_LLOYD_H
 
 #include <stdbool.h>
 
@@ -43,4 +43,4 @@ void lloyd_assign(KMeansState *st, bool use_cblas);
 uint32_t
 lloyd_iterate(KMeansState *st, bool use_cblas, const KMeansOptions *opts);
 
-#endif /* MKT_KMEANS_LLOYD_H */
+#endif /* VS_KMEANS_LLOYD_H */

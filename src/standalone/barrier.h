@@ -1,5 +1,5 @@
 /*
- * mkt_barrier.h - Dynamic phase barrier
+ * vs_barrier.h - Dynamic phase barrier
  *
  * The parallel build synchronizes its phases (sampling, k-means iterations,
  * posting) with a barrier whose party size changes at run time: participants
@@ -12,8 +12,8 @@
  * cannot serve here: its party size is fixed at init, with no attach/detach.
  */
 
-#ifndef MKT_BARRIER_H
-#define MKT_BARRIER_H
+#ifndef VS_BARRIER_H
+#define VS_BARRIER_H
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -59,4 +59,4 @@ extern bool BarrierDetach(Barrier *barrier);
 extern int BarrierPhase(Barrier *barrier);
 extern int BarrierParticipants(Barrier *barrier);
 
-#endif /* MKT_BARRIER_H */
+#endif /* VS_BARRIER_H */

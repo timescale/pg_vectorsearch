@@ -6,8 +6,8 @@
  * storage these build on is in page_storage.h.
  */
 
-#ifndef MKT_TEST_POSTING_FIXTURES_H
-#define MKT_TEST_POSTING_FIXTURES_H
+#ifndef VS_TEST_POSTING_FIXTURES_H
+#define VS_TEST_POSTING_FIXTURES_H
 
 #include "core/memory.h"
 #include "index/posting_build.h"
@@ -32,7 +32,7 @@ vid_to_tid(uint32_t vid)
 static inline float *
 make_test_vectors(uint32_t nvecs, Dimension dim)
 {
-	float *vecs = mkt_alloc(nvecs * dim * sizeof(float));
+	float *vecs = vs_alloc(nvecs * dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
 		for (Dimension d = 0; d < dim; d++)
 			vecs[(size_t)i * dim + d] = (float)((i * 13 + d * 7) % 100 - 50) /
@@ -52,16 +52,16 @@ setup_query_state(
 		const float		 *centroid,
 		Dimension		  dim)
 {
-	float *query	= mkt_alloc(dim * sizeof(float));
-	float *pt_query = mkt_alloc(dim * sizeof(float));
+	float *query	= vs_alloc(dim * sizeof(float));
+	float *pt_query = vs_alloc(dim * sizeof(float));
 	for (Dimension d = 0; d < dim; d++)
 		query[d] = (float)(d % 10) / 5.0f;
-	qstate->transformed = mkt_alloc_aligned(dim * sizeof(float), 64);
-	qstate->query_bits	= mkt_alloc_aligned(MKT_RABITQ_BYTES(dim), 64);
-	mkt_rabitq_init_query_constants(qstate, dim);
-	mkt_rabitq_rotate(params, query, pt_query);
-	mkt_rabitq_init_query_state(
-			qstate, pt_query, centroid, dim, MKT_DISTANCE_MODE_ASYMMETRIC);
+	qstate->transformed = vs_alloc_aligned(dim * sizeof(float), 64);
+	qstate->query_bits	= vs_alloc_aligned(VS_RABITQ_BYTES(dim), 64);
+	vs_rabitq_init_query_constants(qstate, dim);
+	vs_rabitq_rotate(params, query, pt_query);
+	vs_rabitq_init_query_state(
+			qstate, pt_query, centroid, dim, VS_DISTANCE_MODE_ASYMMETRIC);
 }
 
 /* Build a single-cluster posting list of nbuilt vectors (AoS or fastscan). */
@@ -90,4 +90,4 @@ build_cluster(
 	return head;
 }
 
-#endif /* MKT_TEST_POSTING_FIXTURES_H */
+#endif /* VS_TEST_POSTING_FIXTURES_H */

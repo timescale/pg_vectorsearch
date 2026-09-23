@@ -11,7 +11,7 @@
 #include <string.h>
 
 #include "index/build_progress.h"
-#include "mkt_test.h"
+#include "vs_test.h"
 
 TEST_GROUP(BuildProgress);
 

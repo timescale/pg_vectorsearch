@@ -20,10 +20,10 @@
 #include "index/posting_scan.h"
 #include "index/posting_split.h"
 #include "index/storage.h"
-#include "mkt_test.h"
 #include "posting_fixtures.h"
 #include "quant/rabitq.h"
 #include "standalone/pg_compat.h"
+#include "vs_test.h"
 
 TEST_GROUP(PostingPage);
 TEST_MEMCTX_FIXTURE();
@@ -100,7 +100,7 @@ TEST(soa_regions_no_overlap)
 	size_t f_add_size	  = (size_t)max * sizeof(float);
 	size_t f_rescale_size = (size_t)max * sizeof(float);
 	size_t f_error_size	  = (size_t)max * sizeof(float);
-	size_t bits_size	  = (size_t)max * MKT_RABITQ_BYTES(dim);
+	size_t bits_size	  = (size_t)max * VS_RABITQ_BYTES(dim);
 
 	size_t total = meta_size + f_add_size + f_rescale_size + f_error_size +
 				   bits_size;
@@ -144,7 +144,7 @@ TEST(vector_id_round_trip_max)
 
 TEST(page_init_basic)
 {
-	Page page = mkt_alloc0(BLCKSZ);
+	Page page = vs_alloc0(BLCKSZ);
 
 	prism_posting_page_init(page, 0, 128, PRISM_POSTING_PAGE_FIRST);
 
@@ -166,15 +166,15 @@ TEST(page_init_basic)
 TEST(page_add_single_entry)
 {
 	Dimension dim	 = 128;
-	uint32_t  packed = MKT_RABITQ_BYTES(dim);
+	uint32_t  packed = VS_RABITQ_BYTES(dim);
 
-	Page page = mkt_alloc0(BLCKSZ);
+	Page page = vs_alloc0(BLCKSZ);
 	prism_posting_page_init(page, 0, dim, 0);
 
 	/* Create test data */
 	ItemPointerData tid;
 	prism_posting_set_vector_id(&tid, 42);
-	uint8_t *bits = mkt_alloc(packed);
+	uint8_t *bits = vs_alloc(packed);
 	memset(bits, 0xAB, packed);
 
 	bool ok =
@@ -200,12 +200,12 @@ TEST(page_fill_to_capacity)
 {
 	Dimension dim	 = 128;
 	uint32_t  max	 = prism_posting_max_entries(dim);
-	uint32_t  packed = MKT_RABITQ_BYTES(dim);
+	uint32_t  packed = VS_RABITQ_BYTES(dim);
 
-	Page page = mkt_alloc0(BLCKSZ);
+	Page page = vs_alloc0(BLCKSZ);
 	prism_posting_page_init(page, 0, dim, 0);
 
-	uint8_t *bits = mkt_alloc(packed);
+	uint8_t *bits = vs_alloc(packed);
 	memset(bits, 0, packed);
 
 	/* Fill page */
@@ -237,15 +237,15 @@ TEST(builder_single_page)
 	Dimension		dim		= 128;
 	TestPageStorage storage = make_test_storage(16);
 
-	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
-	float		 *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams *params   = vs_rabitq_create(dim, 42);
+	float		 *centroid = vs_alloc0(dim * sizeof(float));
 
 	PrismPostingBuilder builder;
 	prism_posting_builder_init(
 			&builder, &storage.base, params, dim, 0, centroid, centroid);
 
 	/* Add a few vectors */
-	float *vec = mkt_alloc(dim * sizeof(float));
+	float *vec = vs_alloc(dim * sizeof(float));
 	for (uint32_t i = 0; i < 5; i++)
 	{
 		for (Dimension d = 0; d < dim; d++)
@@ -257,7 +257,7 @@ TEST(builder_single_page)
 	ASSERT_NEQ(InvalidBlockNumber, head, "head should be valid");
 
 	/* Verify page contents */
-	Page page = mkt_storage_read_page(&storage.base, head);
+	Page page = vs_storage_read_page(&storage.base, head);
 	ASSERT_EQ(5, prism_posting_page_count(page), "should have 5 entries");
 
 	/* Verify vector IDs — first page content starts after pt_centroid */
@@ -269,9 +269,9 @@ TEST(builder_single_page)
 		ASSERT_EQ(i, vid, "vector_id round-trip through builder");
 	}
 
-	mkt_storage_release_page(&storage.base, head);
+	vs_storage_release_page(&storage.base, head);
 	prism_posting_builder_cleanup(&builder);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_destroy(params);
 }
 
 TEST(builder_multi_page_chain)
@@ -282,14 +282,14 @@ TEST(builder_multi_page_chain)
 	uint32_t nvecs = max_per_page + 10;
 
 	TestPageStorage storage	 = make_test_storage(64);
-	RaBitQParams   *params	 = mkt_rabitq_create(dim, 42);
-	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
 
 	PrismPostingBuilder builder;
 	prism_posting_builder_init(
 			&builder, &storage.base, params, dim, 0, centroid, centroid);
 
-	float *vec = mkt_alloc(dim * sizeof(float));
+	float *vec = vs_alloc(dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
 		for (Dimension d = 0; d < dim; d++)
@@ -307,19 +307,19 @@ TEST(builder_multi_page_chain)
 
 	while (blkno != InvalidBlockNumber)
 	{
-		Page	 page  = mkt_storage_read_page(&storage.base, blkno);
+		Page	 page  = vs_storage_read_page(&storage.base, blkno);
 		uint32_t count = prism_posting_page_count(page);
 		total_entries += count;
 		pages_seen++;
 		blkno = prism_posting_opaque(page)->next_blkno;
-		mkt_storage_release_page(&storage.base, blkno);
+		vs_storage_release_page(&storage.base, blkno);
 	}
 
 	ASSERT_EQ(nvecs, total_entries, "total entries across chain");
 	ASSERT_TRUE(pages_seen >= 2, "chain should span multiple pages");
 
 	prism_posting_builder_cleanup(&builder);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_destroy(params);
 }
 
 /* ----------------------------------------------------------------
@@ -334,8 +334,8 @@ TEST(scan_processes_all_entries)
 {
 	Dimension		dim		 = 128;
 	TestPageStorage storage	 = make_test_storage(16);
-	RaBitQParams   *params	 = mkt_rabitq_create(dim, 42);
-	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
 
 	/* Build vectors and posting list */
 	uint32_t nvecs = 20;
@@ -358,8 +358,8 @@ TEST(scan_processes_all_entries)
 			dim,
 			prism_posting_max_entries(dim));
 
-	MktTopK topk;
-	mkt_topk_init(&topk, nvecs);
+	VsTopK topk;
+	vs_topk_init(&topk, nvecs);
 
 	prism_posting_scan_begin_cluster(&scan, &qstate, head);
 	prism_posting_scan_cluster(&scan, &topk);
@@ -368,9 +368,9 @@ TEST(scan_processes_all_entries)
 	ASSERT_EQ(nvecs, scan.entries_scanned, "all entries scanned");
 	ASSERT_EQ(nvecs, topk.cand_count, "all entries in topk");
 
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 	prism_posting_scan_cleanup(&scan);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_destroy(params);
 }
 
 /*
@@ -389,8 +389,8 @@ TEST(scan_reads_a_retired_chain)
 {
 	Dimension		dim		 = 128;
 	TestPageStorage storage	 = make_test_storage(16);
-	RaBitQParams   *params	 = mkt_rabitq_create(dim, 42);
-	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
 
 	uint32_t nvecs = 20;
 	float	*vecs  = make_test_vectors(nvecs, dim);
@@ -422,20 +422,20 @@ TEST(scan_reads_a_retired_chain)
 	 * one. Without it the count after reclaim could be a state the chain was
 	 * in all along rather than one the flags left untouched.
 	 */
-	MktTopK live;
-	mkt_topk_init(&live, nvecs);
+	VsTopK live;
+	vs_topk_init(&live, nvecs);
 	prism_posting_scan_begin_cluster(&scan, &qstate, head);
 	prism_posting_scan_cluster(&scan, &live);
 	prism_posting_scan_end_cluster(&scan);
 	ASSERT_EQ(nvecs, scan.entries_scanned, "live chain scores every entry");
-	mkt_topk_cleanup(&live);
+	vs_topk_cleanup(&live);
 
 	/* Now reclaim it: TOMBSTONED joins DELETED, which is the state a scan
 	 * holding a stale head meets. */
 	prism_posting_chain_tombstone(&storage.base, head);
 
-	MktTopK topk;
-	mkt_topk_init(&topk, nvecs);
+	VsTopK topk;
+	vs_topk_init(&topk, nvecs);
 
 	prism_posting_scan_begin_cluster(&scan, &qstate, head);
 	prism_posting_scan_cluster(&scan, &topk);
@@ -446,9 +446,9 @@ TEST(scan_reads_a_retired_chain)
 	ASSERT_EQ(nvecs, scan.entries_scanned, "retired chain is still scanned");
 	ASSERT_EQ(nvecs, topk.cand_count, "its entries still reach the top-k");
 
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 	prism_posting_scan_cleanup(&scan);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_destroy(params);
 }
 
 /*
@@ -459,8 +459,8 @@ TEST(scan_skips_an_all_dead_page)
 {
 	Dimension		dim		 = 128;
 	TestPageStorage storage	 = make_test_storage(16);
-	RaBitQParams   *params	 = mkt_rabitq_create(dim, 42);
-	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
 
 	uint32_t nvecs = 20;
 	float	*vecs  = make_test_vectors(nvecs, dim);
@@ -484,19 +484,19 @@ TEST(scan_skips_an_all_dead_page)
 	 * Baseline first, or a zero at the end would be indistinguishable from a
 	 * chain that had nothing scannable on it to begin with.
 	 */
-	MktTopK live;
-	mkt_topk_init(&live, nvecs);
+	VsTopK live;
+	vs_topk_init(&live, nvecs);
 	prism_posting_scan_begin_cluster(&scan, &qstate, head);
 	prism_posting_scan_cluster(&scan, &live);
 	prism_posting_scan_end_cluster(&scan);
 	ASSERT_EQ(nvecs, scan.entries_scanned, "live chain scores every entry");
-	mkt_topk_cleanup(&live);
+	vs_topk_cleanup(&live);
 
 	/* TOMBSTONED with no DELETED: VACUUM's all-dead page. */
 	prism_posting_chain_tombstone(&storage.base, head);
 
-	MktTopK topk;
-	mkt_topk_init(&topk, nvecs);
+	VsTopK topk;
+	vs_topk_init(&topk, nvecs);
 
 	prism_posting_scan_begin_cluster(&scan, &qstate, head);
 	prism_posting_scan_cluster(&scan, &topk);
@@ -505,17 +505,17 @@ TEST(scan_skips_an_all_dead_page)
 	ASSERT_EQ(0u, scan.entries_scanned, "all-dead page is skipped");
 	ASSERT_EQ(0u, topk.cand_count, "and nothing reaches the top-k");
 
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 	prism_posting_scan_cleanup(&scan);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_destroy(params);
 }
 
 TEST(scan_prunes_with_tight_topk)
 {
 	Dimension		dim		 = 128;
 	TestPageStorage storage	 = make_test_storage(16);
-	RaBitQParams   *params	 = mkt_rabitq_create(dim, 42);
-	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
 
 	/* Build vectors and posting list */
 	uint32_t nvecs = 50;
@@ -538,8 +538,8 @@ TEST(scan_prunes_with_tight_topk)
 			dim,
 			prism_posting_max_entries(dim));
 
-	MktTopK topk;
-	mkt_topk_init(&topk, 5);
+	VsTopK topk;
+	vs_topk_init(&topk, 5);
 
 	prism_posting_scan_begin_cluster(&scan, &qstate, head);
 	prism_posting_scan_cluster(&scan, &topk);
@@ -548,17 +548,17 @@ TEST(scan_prunes_with_tight_topk)
 	ASSERT_EQ(nvecs, scan.entries_scanned, "all entries scanned");
 	ASSERT_TRUE(scan.entries_pruned > 0, "some entries pruned");
 
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 	prism_posting_scan_cleanup(&scan);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_destroy(params);
 }
 
 TEST(scan_stats_tracking)
 {
 	Dimension		dim		 = 128;
 	TestPageStorage storage	 = make_test_storage(16);
-	RaBitQParams   *params	 = mkt_rabitq_create(dim, 42);
-	float		   *centroid = mkt_alloc0(dim * sizeof(float));
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
 
 	/* Build vectors and posting list */
 	uint32_t nvecs = 30;
@@ -580,8 +580,8 @@ TEST(scan_stats_tracking)
 			dim,
 			prism_posting_max_entries(dim));
 
-	MktTopK topk;
-	mkt_topk_init(&topk, nvecs);
+	VsTopK topk;
+	vs_topk_init(&topk, nvecs);
 
 	prism_posting_scan_begin_cluster(&scan, &qstate, head);
 	prism_posting_scan_cluster(&scan, &topk);
@@ -590,7 +590,7 @@ TEST(scan_stats_tracking)
 	ASSERT_EQ(nvecs, scan.entries_scanned, "entries_scanned");
 	ASSERT_TRUE(scan.pages_read >= 1, "pages_read >= 1");
 
-	mkt_topk_cleanup(&topk);
+	vs_topk_cleanup(&topk);
 	prism_posting_scan_cleanup(&scan);
-	mkt_rabitq_destroy(params);
+	vs_rabitq_destroy(params);
 }

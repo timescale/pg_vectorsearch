@@ -11,9 +11,9 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#include "mkt_test.h"
 #include "standalone/barrier.h"
 #include "standalone/parallel_ctx.h"
+#include "vs_test.h"
 
 TEST_GROUP(ParallelCtx);
 
@@ -40,7 +40,7 @@ pc_sum_worker(dsm_segment *seg, shm_toc *toc)
 
 TEST(spmd_lifecycle_barrier_toc)
 {
-	mkt_parallel_register_worker("pc_sum_worker", pc_sum_worker);
+	vs_parallel_register_worker("pc_sum_worker", pc_sum_worker);
 
 	EnterParallelMode();
 

@@ -1,5 +1,5 @@
 /*
- * mkt bench search
+ * vectorsearch bench search
  *
  * Benchmark index build and query through the bindings API — the
  * same code path used by Python ctypes and ann-benchmarks.
@@ -7,7 +7,7 @@
  * Supports both HDF5 datasets and synthetic random vectors.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <getopt.h>
 #include <math.h>
@@ -18,7 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#ifdef MKT_HAVE_HDF5
+#ifdef VS_HAVE_HDF5
 #include <hdf5.h>
 
 #include "standalone/hdf5_source.h"
@@ -88,7 +88,7 @@ get_time_ns(void)
  * HDF5 loading
  * ---------------------------------------------------------------- */
 
-#ifdef MKT_HAVE_HDF5
+#ifdef VS_HAVE_HDF5
 static float *
 load_hdf5_float(
 		const char *path, const char *dataset, hsize_t *rows, hsize_t *cols)
@@ -146,7 +146,7 @@ load_hdf5_int64(
 	H5Eset_auto(H5E_DEFAULT, (H5E_auto_t)H5Eprint, stderr);
 	return data;
 }
-#endif /* MKT_HAVE_HDF5 */
+#endif /* VS_HAVE_HDF5 */
 
 /* ----------------------------------------------------------------
  * Synthetic vector generation
@@ -212,7 +212,7 @@ print_usage(CmdContext *ctx)
 		   "(-1=auto, 0=serial)\n");
 	printf("  --wait-profile     Pause before queries (print PID for perf "
 		   "attach)\n");
-#ifdef MKT_HAVE_HDF5
+#ifdef VS_HAVE_HDF5
 	printf("  --hdf5 <path>      HDF5 dataset\n");
 	printf("  --metric <str>     angular, euclidean\n");
 #endif
@@ -372,14 +372,14 @@ cmd_bench_search(CmdContext *ctx)
 	uint32_t gt_k		  = 0;
 
 	PrismBuildInfo info;
-	MktHandle	  *handle = NULL;
+	VsHandle	  *handle = NULL;
 
-#ifdef MKT_HAVE_HDF5
+#ifdef VS_HAVE_HDF5
 	if (config.hdf5_path != NULL)
 	{
 		/* Open train dataset as streaming source */
-		MktHdf5Source train_src;
-		if (mkt_hdf5_source_open(&train_src, config.hdf5_path, "train") != 0)
+		VsHdf5Source train_src;
+		if (vs_hdf5_source_open(&train_src, config.hdf5_path, "train") != 0)
 		{
 			fprintf(stderr, "Error: cannot open HDF5 train dataset\n");
 			return 1;
@@ -393,7 +393,7 @@ cmd_bench_search(CmdContext *ctx)
 				load_hdf5_float(config.hdf5_path, "test", &n_test, &dim_test);
 		if (query_vecs == NULL)
 		{
-			mkt_hdf5_source_close(&train_src);
+			vs_hdf5_source_close(&train_src);
 			return 1;
 		}
 		nqueries = (uint32_t)n_test;
@@ -432,7 +432,7 @@ cmd_bench_search(CmdContext *ctx)
 			   config.nworkers);
 
 		uint64_t t0 = get_time_ns();
-		handle		= mkt_handle_create(
+		handle		= vs_handle_create(
 				 &train_src.base,
 				 config.nlist,
 				 config.fan_out,
@@ -448,7 +448,7 @@ cmd_bench_search(CmdContext *ctx)
 				 &info);
 		double build_ms = (double)(get_time_ns() - t0) / 1e6;
 
-		mkt_hdf5_source_close(&train_src);
+		vs_hdf5_source_close(&train_src);
 
 		if (handle == NULL)
 		{
@@ -483,7 +483,7 @@ cmd_bench_search(CmdContext *ctx)
 			   config.posting_layout);
 
 		uint64_t t0 = get_time_ns();
-		handle		= mkt_handle_create_from_array(
+		handle		= vs_handle_create_from_array(
 				 train_vecs,
 				 nvecs,
 				 config.dim,
@@ -563,7 +563,7 @@ cmd_bench_search(CmdContext *ctx)
 		snprintf(
 				sig_path,
 				sizeof(sig_path),
-				"%s/mkt-bench-ready",
+				"%s/vectorsearch-bench-ready",
 				tmpdir ? tmpdir : "/tmp");
 		const char *sig_file = sig_path;
 		FILE	   *f		 = fopen(sig_file, "w");
@@ -586,7 +586,7 @@ cmd_bench_search(CmdContext *ctx)
 	for (uint32_t w = 0; w < config.warmup; w++)
 	{
 		uint32_t qi = w % nqueries;
-		mkt_handle_query(
+		vs_handle_query(
 				handle,
 				query_vecs + (size_t)qi * config.dim,
 				config.k,
@@ -605,7 +605,7 @@ cmd_bench_search(CmdContext *ctx)
 			const float *qvec = query_vecs + (size_t)q * config.dim;
 
 			uint64_t t_start = get_time_ns();
-			uint32_t count	 = mkt_handle_query(
+			uint32_t count	 = vs_handle_query(
 					  handle,
 					  qvec,
 					  config.k,
@@ -672,7 +672,7 @@ cmd_bench_search(CmdContext *ctx)
 
 	/* Cleanup */
 	free(result_ids);
-	mkt_handle_destroy(handle);
+	vs_handle_destroy(handle);
 	free(query_vecs);
 	free(gt_neighbors);
 

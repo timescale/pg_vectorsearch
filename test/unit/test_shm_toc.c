@@ -8,8 +8,8 @@
 
 #include <stdint.h>
 
-#include "mkt_test.h"
 #include "standalone/shm_toc.h"
+#include "vs_test.h"
 
 TEST_GROUP(ShmToc);
 
@@ -44,7 +44,7 @@ TEST(allocate_is_aligned_and_distinct)
 	ASSERT_EQ(8, (int)(b - a), "5-byte chunk consumes an aligned 8 bytes");
 	ASSERT_EQ(24, (int)(c - a), "16-byte chunk consumes 16 bytes");
 
-	mkt_shm_toc_free(toc);
+	vs_shm_toc_free(toc);
 }
 
 TEST(insert_lookup_roundtrip)
@@ -65,7 +65,7 @@ TEST(insert_lookup_roundtrip)
 	ASSERT_EQ(42, *(int *)shm_toc_lookup(toc, 1000, false), "x survives");
 	ASSERT_EQ(99, *(int *)shm_toc_lookup(toc, 2000, false), "y survives");
 
-	mkt_shm_toc_free(toc);
+	vs_shm_toc_free(toc);
 }
 
 TEST(lookup_missing_noerror_returns_null)
@@ -79,7 +79,7 @@ TEST(lookup_missing_noerror_returns_null)
 			shm_toc_lookup(toc, 12345, true),
 			"missing key is NULL w/ noError");
 
-	mkt_shm_toc_free(toc);
+	vs_shm_toc_free(toc);
 }
 
 /* Force several growths of the key map to exercise the realloc path. */
@@ -105,5 +105,5 @@ TEST(many_keys_grow_map)
 		}
 	}
 
-	mkt_shm_toc_free(toc);
+	vs_shm_toc_free(toc);
 }

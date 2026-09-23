@@ -5,13 +5,13 @@
  * pgvector's Elkan k-means implementation standalone (without PostgreSQL)
  * for benchmarking against pg_vectorsearch's Lloyd+BLAS k-means.
  *
- * Memory: Uses pg_vectorsearch's arena allocator (mkt_alloc/mkt_free).
+ * Memory: Uses pg_vectorsearch's arena allocator (vs_alloc/vs_free).
  * Distance: Dispatches through pg_vectorsearch's vecops functions.
  * Random: Uses xoshiro256** PRNG (same as pg_vectorsearch's kmeans.c).
  */
 
-#ifndef MKT_KMEANS_PGVECTOR_H
-#define MKT_KMEANS_PGVECTOR_H
+#ifndef VS_KMEANS_PGVECTOR_H
+#define VS_KMEANS_PGVECTOR_H
 
 #include <float.h>
 #include <limits.h>
@@ -105,21 +105,21 @@ VectorArraySet(VectorArray arr, int offset, Pointer val)
 static inline VectorArray
 VectorArrayInit(int maxlen, int dimensions, Size itemsize)
 {
-	VectorArray res = mkt_alloc(sizeof(VectorArrayData));
+	VectorArray res = vs_alloc(sizeof(VectorArrayData));
 	itemsize		= MAXALIGN(itemsize);
 	res->length		= 0;
 	res->maxlen		= maxlen;
 	res->dim		= dimensions;
 	res->itemsize	= itemsize;
-	res->items		= mkt_alloc0((size_t)maxlen * itemsize);
+	res->items		= vs_alloc0((size_t)maxlen * itemsize);
 	return res;
 }
 
 static inline void
 VectorArrayFree(VectorArray arr)
 {
-	mkt_free(arr->items);
-	mkt_free(arr);
+	vs_free(arr->items);
+	vs_free(arr);
 }
 
 /* ----------------------------------------------------------------
@@ -213,16 +213,16 @@ pgv_compute_distance(const Vector *a, const Vector *b, DistanceMetric metric)
 	case DISTANCE_L2:
 	{
 		/* Elkan needs true L2 (not squared) for triangle inequality */
-		float d2 = mkt_l2_distance_squared(a->x, b->x, (Dimension)dim);
+		float d2 = vs_l2_distance_squared(a->x, b->x, (Dimension)dim);
 		return (double)sqrtf(d2);
 	}
 	case DISTANCE_INNER_PRODUCT:
 	case DISTANCE_COSINE:
 	{
 		/* Angular distance: acos(dot / (norm_a * norm_b)) / pi */
-		float dot	 = mkt_dot_product(a->x, b->x, (Dimension)dim);
-		float norm_a = mkt_l2_norm(a->x, (Dimension)dim);
-		float norm_b = mkt_l2_norm(b->x, (Dimension)dim);
+		float dot	 = vs_dot_product(a->x, b->x, (Dimension)dim);
+		float norm_a = vs_l2_norm(a->x, (Dimension)dim);
+		float norm_b = vs_l2_norm(b->x, (Dimension)dim);
 		float denom	 = norm_a * norm_b;
 		if (denom < 1e-30f)
 			return 0.0;
@@ -251,7 +251,7 @@ pgv_compute_distance(const Vector *a, const Vector *b, DistanceMetric metric)
 #define FunctionCall1Coll(procinfo, collation, d1)                   \
 	((void)(procinfo),                                               \
 	 (void)(collation),                                              \
-	 pgv_distance_result = (double)mkt_l2_norm(                      \
+	 pgv_distance_result = (double)vs_l2_norm(                       \
 			 ((const Vector *)DatumGetPointer(d1))->x,               \
 			 (Dimension)((const Vector *)DatumGetPointer(d1))->dim), \
 	 (Datum)0)
@@ -341,10 +341,10 @@ pgv_xo_uniform(PgvXoshiro256State *state)
 /* ----------------------------------------------------------------
  * Memory stubs
  * ---------------------------------------------------------------- */
-#define palloc(sz)				   mkt_alloc(sz)
-#define palloc0(sz)				   mkt_alloc0(sz)
-#define palloc_extended(sz, flags) mkt_alloc0(sz)
-#define pfree(p)				   mkt_free(p)
+#define palloc(sz)				   vs_alloc(sz)
+#define palloc0(sz)				   vs_alloc0(sz)
+#define palloc_extended(sz, flags) vs_alloc0(sz)
+#define pfree(p)				   vs_free(p)
 
 /* Memory context stubs (Elkan uses a temp context; we just use
  * direct alloc/free since we clean up explicitly) */
@@ -394,7 +394,7 @@ IvfflatNormValue(const IvfflatTypeInfo *typeInfo, Oid collation, Datum value)
 	(void)typeInfo;
 	(void)collation;
 	Vector *vec	 = (Vector *)DatumGetPointer(value);
-	float	norm = mkt_l2_norm(vec->x, (Dimension)vec->dim);
+	float	norm = vs_l2_norm(vec->x, (Dimension)vec->dim);
 	if (norm > 1e-30f)
 	{
 		float inv = 1.0f / norm;
@@ -421,4 +421,4 @@ KMeansResult *pgvector_kmeans(
 		DistanceMetric		 metric,
 		const KMeansOptions *options);
 
-#endif /* MKT_KMEANS_PGVECTOR_H */
+#endif /* VS_KMEANS_PGVECTOR_H */

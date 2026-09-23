@@ -5,8 +5,8 @@
  * encoding, and centroid page writing.
  */
 
-#ifndef MKT_BUILD_H
-#define MKT_BUILD_H
+#ifndef PRISM_BUILD_H
+#define PRISM_BUILD_H
 
 #include <postgres.h>
 
@@ -16,7 +16,7 @@
 
 #include "algo/hkmeans.h"
 #include "core/types.h"
-#include "index/build_progress.h" /* canonical MKT_BUILD_PHASE_* */
+#include "index/build_progress.h" /* canonical PRISM_BUILD_PHASE_* */
 #include "index/index_base.h"
 #include "index/parallel_build.h" /* PrismBuildConfig */
 #include "pg/bufstorage.h"
@@ -53,4 +53,4 @@ double prism_estimate_heap_tuples(Relation heap);
 /* do_parallel_build (the shared parallel build entry) is declared in
  * index/parallel_build.h, included above. */
 
-#endif /* MKT_BUILD_H */
+#endif /* PRISM_BUILD_H */

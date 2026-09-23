@@ -194,13 +194,13 @@ echo "kernel.perf_event_paranoid = 1" | sudo tee -a /etc/sysctl.conf
 
 ```bash
 # Profile any command
-./scripts/profile.sh ./bin/mkt bench distance --dim 768 --count 10000
+./scripts/profile.sh ./bin/vectorsearch bench distance --dim 768 --count 10000
 
 # Quick benchmark profiling
 ./scripts/profile-bench.sh 768 10000 avx512
 
 # Profile cache misses
-./scripts/profile.sh --events cache-misses ./bin/mkt bench distance
+./scripts/profile.sh --events cache-misses ./bin/vectorsearch bench distance
 ```
 
 Output: `profiles/flamegraph.svg` (open in browser)
@@ -221,8 +221,9 @@ Prefer "real" datasets over generated data.
 #### Critical benchmark instructions
 
 - Core algorithms can be benchmarked using the pg_vectorsearch client
-tool's search command (`mkt bench search`) as long as that exercises a
-path that is shared between standalone and PostgreSQL builds of PRISM.
+tool's search command (`vectorsearch bench search`) as long as that
+exercises a path that is shared between standalone and PostgreSQL
+builds of PRISM.
 - Always benchmark and profile a release build with all optimizations turned on.
 Benchmarking a debug build will _not_ give the correct understanding of the
 current performance.
@@ -391,7 +392,7 @@ is separated by a newline.
 1. Top-level PostgreSQL include file (if applicable) `#include <postgres.h>`
 1. Other PostgreSQL includes (if applicable) `#include <access/rel.h>`
 1. System category: system includes in style `#include <stdio.h>`
-1. Local includes `#include "mkt_types.h`
+1. Local includes `#include "vs_types.h`
 
 Exception: the top-level `postgres.h` needs no newline against the rest of the
 PostgreSQL include files.

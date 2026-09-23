@@ -3,7 +3,7 @@
  *
  * Splits one oversized posting list into two or more balanced lists, keeping
  * partition quality close to a from-scratch build without a global rebuild.
- * The core is backend-neutral (operates on PrismIndexBase + MktStorage), so
+ * The core is backend-neutral (operates on PrismIndexBase + VsStorage), so
  * the standalone engine and the PostgreSQL extension share it.
  *
  * Splits into k >= 2 partitions. With PrismSplitConfig.target_entries the
@@ -62,7 +62,7 @@
 #include "core/types.h"
 #include "index/index_base.h"
 
-#ifdef MKT_STANDALONE
+#ifdef VS_STANDALONE
 #include "standalone/pg_compat.h"
 #else
 #include <postgres.h>
@@ -91,7 +91,7 @@ typedef struct PrismSplitEnv
 	 * XID gate, keeping the chain readable for in-flight scanners meanwhile.
 	 */
 	void (*retire_chain)(
-			void *ctx, MktStorage *posting_storage, BlockNumber head);
+			void *ctx, VsStorage *posting_storage, BlockNumber head);
 	/*
 	 * Persist the leaf count before the ids counted from it are used, if the
 	 * backend keeps one durably. New cluster ids are counted from nlist and
@@ -343,6 +343,6 @@ int prism_posting_split(
  * once no scanner can still reach it: the immediate standalone path, and the
  * PG XID-gated reclaim once the deletion horizon has passed.
  */
-void prism_posting_chain_tombstone(MktStorage *storage, BlockNumber head);
+void prism_posting_chain_tombstone(VsStorage *storage, BlockNumber head);
 
 #endif /* PRISM_POSTING_SPLIT_H */

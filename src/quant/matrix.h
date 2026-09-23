@@ -5,8 +5,8 @@
  * generation for RaBitQ and other quantization methods.
  */
 
-#ifndef MKT_MATRIX_H
-#define MKT_MATRIX_H
+#ifndef VS_MATRIX_H
+#define VS_MATRIX_H
 
 #include <stdint.h>
 
@@ -25,7 +25,7 @@
  *
  * Returns 0 on success, -1 on failure.
  */
-int mkt_random_orthogonal_matrix(float *matrix, Dimension dim, uint64_t seed);
+int vs_random_orthogonal_matrix(float *matrix, Dimension dim, uint64_t seed);
 
 /*
  * Verify matrix is approximately orthogonal (for testing).
@@ -35,7 +35,7 @@ int mkt_random_orthogonal_matrix(float *matrix, Dimension dim, uint64_t seed);
  * Returns 1 if orthogonal, 0 if not.
  */
 int
-mkt_matrix_is_orthogonal(const float *matrix, Dimension dim, float tolerance);
+vs_matrix_is_orthogonal(const float *matrix, Dimension dim, float tolerance);
 
 /*
  * Matrix-vector multiplication: result = M * v
@@ -46,7 +46,7 @@ mkt_matrix_is_orthogonal(const float *matrix, Dimension dim, float tolerance);
  *   result: Output vector (dim elements)
  *   dim:    Dimension
  */
-void mkt_matrix_vector_mul(
+void vs_matrix_vector_mul(
 		const float *M, const float *v, float *result, Dimension dim);
 
 /*
@@ -60,14 +60,14 @@ void mkt_matrix_vector_mul(
  *   result: Output vector (dim elements)
  *   dim:    Dimension
  */
-void mkt_matrix_transpose_vector_mul(
+void vs_matrix_transpose_vector_mul(
 		const float *M, const float *v, float *result, Dimension dim);
 
 /*
  * Batched matrix-vector multiplication: results = M^T * vectors
  *
  * Computes M^T * v for multiple vectors at once. More efficient than
- * calling mkt_matrix_transpose_vector_mul() repeatedly because:
+ * calling vs_matrix_transpose_vector_mul() repeatedly because:
  * 1. Matrix M is loaded into cache once and reused for all vectors
  * 2. Inner loop processes contiguous memory (good for SIMD)
  *
@@ -82,7 +82,7 @@ void mkt_matrix_transpose_vector_mul(
  *   count:   Number of vectors to process
  *   dim:     Vector/matrix dimension
  */
-void mkt_matrix_transpose_vector_mul_batch(
+void vs_matrix_transpose_vector_mul_batch(
 		const float *M,
 		const float *vectors,
 		float		*results,
@@ -98,12 +98,12 @@ void mkt_matrix_transpose_vector_mul_batch(
  */
 
 /* Set whether to use CBLAS for batch matrix operations (default: true) */
-void mkt_matrix_set_use_cblas(bool use_cblas);
+void vs_matrix_set_use_cblas(bool use_cblas);
 
 /* Get current CBLAS usage setting (false if CBLAS not available) */
-bool mkt_matrix_get_use_cblas(void);
+bool vs_matrix_get_use_cblas(void);
 
 /* Get name of current implementation ("cblas" or "builtin") */
-const char *mkt_matrix_impl_name(void);
+const char *vs_matrix_impl_name(void);
 
-#endif /* MKT_MATRIX_H */
+#endif /* VS_MATRIX_H */

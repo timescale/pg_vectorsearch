@@ -5,7 +5,7 @@ Patches for external dependencies used by pg_vectorsearch.
 ## faiss-rabitq-c-api.patch
 
 Adds C API bindings for FAISS RaBitQuantizer. Required for the benchmark
-comparison in `mkt bench quantize`.
+comparison in `vectorsearch bench quantize`.
 
 **Apply to FAISS:**
 

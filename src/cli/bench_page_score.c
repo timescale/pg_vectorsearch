@@ -1,12 +1,12 @@
 /*
- * mkt bench page-score
+ * vectorsearch bench page-score
  *
  * Benchmark page-level RaBitQ scoring: sequential vs vertical
  * (multi-candidate) inner product. Compares batch (separate arrays)
  * and AoS (contiguous RaBitQData) distance computation layouts.
  */
 
-#include "mkt_config.h"
+#include "vs_config.h"
 
 #include <getopt.h>
 #include <math.h>
@@ -37,11 +37,11 @@ typedef struct
 
 static const ImplSpec impls[] = {
 		{"compiler", SIMD_NONE},
-#if defined(MKT_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
+#if defined(VS_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
 		{"avx2", SIMD_AVX2},
-		{"avx512", MKT_SIMD_AVX512_DQ},
+		{"avx512", VS_SIMD_AVX512_DQ},
 #endif
-#if defined(MKT_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
+#if defined(VS_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
 		{"neon", SIMD_NEON},
 #endif
 		{NULL, 0},
@@ -80,7 +80,7 @@ typedef struct
 static void
 bench_stats_init(BenchStats *stats, uint32_t capacity)
 {
-	stats->samples = mkt_alloc(capacity * sizeof(double));
+	stats->samples = vs_alloc(capacity * sizeof(double));
 	stats->count   = 0;
 	stats->avg	   = 0.0;
 	stats->min	   = 0.0;
@@ -127,7 +127,7 @@ bench_stats_compute(BenchStats *stats)
 static void
 bench_stats_free(BenchStats *stats)
 {
-	mkt_free(stats->samples);
+	vs_free(stats->samples);
 }
 
 /*
@@ -175,10 +175,10 @@ generate_random_vector(float *data, Dimension dim)
 static void
 reinit_rabitq_with_simd(uint32_t simd_mask)
 {
-	mkt_simd_set_override(simd_mask);
-	mkt_simd_reset_cache();
-	mkt_rabitq_force_reinit();
-	mkt_rabitq_init_simd();
+	vs_simd_set_override(simd_mask);
+	vs_simd_reset_cache();
+	vs_rabitq_force_reinit();
+	vs_rabitq_init_simd();
 }
 
 /*
@@ -217,7 +217,7 @@ static void
 bench_batch_sequential(void *arg)
 {
 	BatchBenchCtx *c = arg;
-	mkt_rabitq_distance_batch(
+	vs_rabitq_distance_batch(
 			c->qstate,
 			c->f_add,
 			c->f_rescale,
@@ -231,7 +231,7 @@ static void
 bench_batch_vertical(void *arg)
 {
 	BatchBenchCtx *c = arg;
-	mkt_rabitq_distance_batch_multi(
+	vs_rabitq_distance_batch_multi(
 			c->qstate,
 			c->f_add,
 			c->f_rescale,
@@ -260,7 +260,7 @@ bench_aos_sequential(void *arg)
 	{
 		RaBitQData *d	= (RaBitQData *)(c->aos_data +
 										 (size_t)i * c->entry_size);
-		c->distances[i] = mkt_rabitq_distance(c->qstate, d, c->dim);
+		c->distances[i] = vs_rabitq_distance(c->qstate, d, c->dim);
 	}
 }
 
@@ -268,13 +268,13 @@ static void
 bench_aos_vertical(void *arg)
 {
 	AoSBenchCtx	  *c			= arg;
-	uint32_t	   packed_bytes = MKT_RABITQ_BYTES(c->dim);
+	uint32_t	   packed_bytes = VS_RABITQ_BYTES(c->dim);
 	uint32_t	   bits_offset	= offsetof(RaBitQData, bits);
 	const uint8_t *bits_base	= c->aos_data + bits_offset;
 
 	/* Vertical inner product with AoS stride */
-	float *ips = mkt_alloc_aligned(c->count * sizeof(float), 64);
-	mkt_rabitq_inner_product_multi(
+	float *ips = vs_alloc_aligned(c->count * sizeof(float), 64);
+	vs_rabitq_inner_product_multi(
 			c->qstate->transformed,
 			bits_base,
 			c->entry_size,
@@ -295,7 +295,7 @@ bench_aos_vertical(void *arg)
 		c->distances[i] = d->f_add + g_add - 2.0f * d->f_rescale * final_dot;
 	}
 
-	mkt_free_aligned(ips);
+	vs_free_aligned(ips);
 	(void)packed_bytes;
 }
 
@@ -322,7 +322,7 @@ run_benchmark(
 	/* Select SIMD implementation */
 	reinit_rabitq_with_simd(impl->mask);
 
-	Distance *distances = mkt_alloc_aligned(count * sizeof(Distance), 64);
+	Distance *distances = vs_alloc_aligned(count * sizeof(Distance), 64);
 
 	/* Batch (separate arrays) benchmark contexts */
 	BatchBenchCtx batch_ctx = {
@@ -378,7 +378,7 @@ run_benchmark(
 	bench_stats_free(&aos_seq);
 	bench_stats_free(&batch_vert);
 	bench_stats_free(&batch_seq);
-	mkt_free_aligned(distances);
+	vs_free_aligned(distances);
 }
 
 /*
@@ -487,14 +487,14 @@ cmd_bench_page_score(CmdContext *ctx)
 	Dimension dim	= config.dim;
 	uint32_t  count = config.count;
 
-	uint32_t packed_bytes = MKT_RABITQ_BYTES(dim);
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
 	double	 bits_kb	  = (double)count * packed_bytes / 1024.0;
 
 	/* Generate random test data */
 	srand(42);
 
 	/* Create RaBitQ params and encode vectors into separate arrays */
-	RaBitQParams *params = mkt_rabitq_create(dim, 42);
+	RaBitQParams *params = vs_rabitq_create(dim, 42);
 	if (params == NULL)
 	{
 		fprintf(stderr, "Error: Failed to create RaBitQ params\n");
@@ -502,23 +502,23 @@ cmd_bench_page_score(CmdContext *ctx)
 	}
 
 	/* Generate random centroid and vectors */
-	float *centroid = mkt_alloc(dim * sizeof(float));
+	float *centroid = vs_alloc(dim * sizeof(float));
 	generate_random_vector(centroid, dim);
 	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
-	float *vectors = mkt_alloc((size_t)count * dim * sizeof(float));
+	float *vectors = vs_alloc((size_t)count * dim * sizeof(float));
 	for (uint32_t i = 0; i < count; i++)
 		generate_random_vector(vectors + i * dim, dim);
 
 	/* Encode into separate arrays */
-	float	*f_add	   = mkt_alloc_aligned(count * sizeof(float), 64);
-	float	*f_rescale = mkt_alloc_aligned(count * sizeof(float), 64);
-	uint8_t *bits	   = mkt_alloc_aligned((size_t)count * packed_bytes, 64);
+	float	*f_add	   = vs_alloc_aligned(count * sizeof(float), 64);
+	float	*f_rescale = vs_alloc_aligned(count * sizeof(float), 64);
+	uint8_t *bits	   = vs_alloc_aligned((size_t)count * packed_bytes, 64);
 
-	int ret = mkt_rabitq_encode_batch(
+	int ret = vs_rabitq_encode_batch(
 			params,
 			vectors,
-			MKT_VEC_F32,
+			VS_VEC_F32,
 			cent_ref,
 			f_add,
 			f_rescale,
@@ -528,35 +528,35 @@ cmd_bench_page_score(CmdContext *ctx)
 	if (ret != 0)
 	{
 		fprintf(stderr, "Error: Batch encoding failed\n");
-		mkt_free(vectors);
-		mkt_free(centroid);
-		mkt_rabitq_destroy(params);
+		vs_free(vectors);
+		vs_free(centroid);
+		vs_rabitq_destroy(params);
 		return 1;
 	}
 
 	/* Generate random query and prepare query state */
-	float *query = mkt_alloc(dim * sizeof(float));
+	float *query = vs_alloc(dim * sizeof(float));
 	generate_random_vector(query, dim);
 	Vec32Ref query_ref = {.data = query, .dim = dim};
 
 	RaBitQQueryState *qstate =
-			mkt_rabitq_prepare_query(params, query_ref, cent_ref);
+			vs_rabitq_prepare_query(params, query_ref, cent_ref);
 	if (qstate == NULL)
 	{
 		fprintf(stderr, "Error: Failed to prepare query state\n");
-		mkt_free_aligned(bits);
-		mkt_free_aligned(f_rescale);
-		mkt_free_aligned(f_add);
-		mkt_free(vectors);
-		mkt_free(query);
-		mkt_free(centroid);
-		mkt_rabitq_destroy(params);
+		vs_free_aligned(bits);
+		vs_free_aligned(f_rescale);
+		vs_free_aligned(f_add);
+		vs_free(vectors);
+		vs_free(query);
+		vs_free(centroid);
+		vs_rabitq_destroy(params);
 		return 1;
 	}
 
 	/* Build AoS array from separate arrays */
-	uint32_t aos_entry_size = MKT_RABITQ_DATA_SIZE(dim);
-	uint8_t *aos_data = mkt_alloc_aligned((size_t)count * aos_entry_size, 64);
+	uint32_t aos_entry_size = VS_RABITQ_DATA_SIZE(dim);
+	uint8_t *aos_data = vs_alloc_aligned((size_t)count * aos_entry_size, 64);
 	for (uint32_t i = 0; i < count; i++)
 	{
 		RaBitQData *entry = (RaBitQData *)(aos_data +
@@ -576,8 +576,8 @@ cmd_bench_page_score(CmdContext *ctx)
 		   packed_bytes);
 
 	/* Compute reference distances for correctness checks */
-	Distance *ref_distances = mkt_alloc_aligned(count * sizeof(Distance), 64);
-	mkt_rabitq_distance_batch(
+	Distance *ref_distances = vs_alloc_aligned(count * sizeof(Distance), 64);
+	vs_rabitq_distance_batch(
 			qstate, f_add, f_rescale, bits, count, dim, ref_distances);
 
 	/*
@@ -585,21 +585,21 @@ cmd_bench_page_score(CmdContext *ctx)
 	 * CPU frequency and fill branch predictor / µop cache.
 	 */
 	{
-		Distance *throwaway = mkt_alloc_aligned(count * sizeof(Distance), 64);
+		Distance *throwaway = vs_alloc_aligned(count * sizeof(Distance), 64);
 		if (throwaway != NULL)
 		{
 			for (uint32_t w = 0; w < config.runs; w++)
 			{
-				mkt_rabitq_distance_batch(
+				vs_rabitq_distance_batch(
 						qstate, f_add, f_rescale, bits, count, dim, throwaway);
 			}
-			mkt_free_aligned(throwaway);
+			vs_free_aligned(throwaway);
 		}
 	}
 
 	/* Detect actual CPU capabilities before benchmarking */
 	reinit_rabitq_with_simd(0xFFFFFFFF);
-	uint32_t cpu_caps = mkt_detect_simd();
+	uint32_t cpu_caps = vs_detect_simd();
 
 	/* Benchmark each SIMD implementation */
 	for (const ImplSpec *impl = impls; impl->name; impl++)
@@ -626,16 +626,16 @@ cmd_bench_page_score(CmdContext *ctx)
 	}
 
 	/* Cleanup */
-	mkt_free_aligned(aos_data);
-	mkt_free_aligned(ref_distances);
-	mkt_rabitq_free_query(qstate);
-	mkt_free_aligned(bits);
-	mkt_free_aligned(f_rescale);
-	mkt_free_aligned(f_add);
-	mkt_free(vectors);
-	mkt_free(query);
-	mkt_free(centroid);
-	mkt_rabitq_destroy(params);
+	vs_free_aligned(aos_data);
+	vs_free_aligned(ref_distances);
+	vs_rabitq_free_query(qstate);
+	vs_free_aligned(bits);
+	vs_free_aligned(f_rescale);
+	vs_free_aligned(f_add);
+	vs_free(vectors);
+	vs_free(query);
+	vs_free(centroid);
+	vs_rabitq_destroy(params);
 
 	/* Reset SIMD to auto-detection */
 	reinit_rabitq_with_simd(0xFFFFFFFF);

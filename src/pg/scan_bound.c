@@ -48,7 +48,7 @@ static ExecutorRun_hook_type prev_ExecutorRun_hook = NULL;
  * follows the C stack and names the innermost query, and an error unwinds
  * this along with the executor.
  */
-static QueryDesc *mkt_active_query_desc = NULL;
+static QueryDesc *vs_active_query_desc = NULL;
 
 /*
  * True if the expression reads an executor parameter that has no value yet.
@@ -162,7 +162,7 @@ find_index_scan_state(PlanState *ps)
  * so the sum cannot overflow. Purely an arithmetic guard: what limits a
  * scan is work_mem, applied where the top-k is allocated.
  */
-#define MKT_LIMIT_SUM_MAX (PG_INT64_MAX / 4)
+#define PRISM_LIMIT_SUM_MAX (PG_INT64_MAX / 4)
 
 /*
  * Standard deviations of headroom over the rows a filter is expected to
@@ -182,7 +182,7 @@ find_index_scan_state(PlanState *ps)
  * anticipate -- raising work_mem, or a partial index on the filter, is the
  * answer to that.
  */
-#define MKT_FILTER_NOISE_SIGMAS 3.0
+#define PRISM_FILTER_NOISE_SIGMAS 3.0
 
 /*
  * Smallest estimated selectivity the sizing will divide by.
@@ -193,7 +193,7 @@ find_index_scan_state(PlanState *ps)
  * statistic, or a conjunction of independent guesses -- and dividing by it
  * produces a number, not an estimate.
  */
-#define MKT_FILTER_MIN_SELECTIVITY 1e-4
+#define PRISM_FILTER_MIN_SELECTIVITY 1e-4
 
 /*
  * Size the scan's top-k for the rows the LIMIT will pull.
@@ -231,13 +231,13 @@ size_top_k(IndexScanState *iss, int64 limit)
 	 * fraction strictly inside (0, 1) says anything about filtering; take
 	 * the LIMIT unchanged for the rest rather than dividing by them.
 	 *
-	 * MKT_FILTER_MIN_SELECTIVITY floors the divisor. Without it a plan_rows
+	 * PRISM_FILTER_MIN_SELECTIVITY floors the divisor. Without it a plan_rows
 	 * of a millionth of a row asks for a top-k a million times the LIMIT,
 	 * and while work_mem would refuse to allocate it, the sizing has no
 	 * business proposing it: below this the estimate is noise, not a
 	 * measurement.
 	 */
-	return mkt_scan_inflate_for_filter(
+	return prism_scan_inflate_for_filter(
 			k, plan->plan_rows / heap->rd_rel->reltuples);
 }
 
@@ -249,7 +249,7 @@ size_top_k(IndexScanState *iss, int64 limit)
  * the planner passes clauselist_selectivity's fraction for the same thing.
  */
 uint32_t
-mkt_scan_inflate_for_filter(uint32_t k, double selectivity)
+prism_scan_inflate_for_filter(uint32_t k, double selectivity)
 {
 	if (k == 0)
 		return 0;
@@ -262,7 +262,7 @@ mkt_scan_inflate_for_filter(uint32_t k, double selectivity)
 	 * fraction strictly inside (0, 1) says anything about filtering; take
 	 * the target unchanged for the rest rather than dividing by them.
 	 *
-	 * MKT_FILTER_MIN_SELECTIVITY floors the divisor. Without it a plan_rows
+	 * PRISM_FILTER_MIN_SELECTIVITY floors the divisor. Without it a plan_rows
 	 * of a millionth of a row asks for a top-k a million times the target,
 	 * and while work_mem would refuse to allocate it, the sizing has no
 	 * business proposing it: below this the estimate is noise, not a
@@ -270,15 +270,15 @@ mkt_scan_inflate_for_filter(uint32_t k, double selectivity)
 	 */
 	if (!isfinite(selectivity) || selectivity >= 1.0 || selectivity <= 0.0)
 		return k;
-	if (selectivity < MKT_FILTER_MIN_SELECTIVITY)
-		selectivity = MKT_FILTER_MIN_SELECTIVITY;
+	if (selectivity < PRISM_FILTER_MIN_SELECTIVITY)
+		selectivity = PRISM_FILTER_MIN_SELECTIVITY;
 
-	double margin = 1.0 + MKT_FILTER_NOISE_SIGMAS / sqrt((double)k);
+	double margin = 1.0 + PRISM_FILTER_NOISE_SIGMAS / sqrt((double)k);
 	double sized  = ceil(margin * (double)k / selectivity);
 
 	/*
 	 * Clamped only to keep the cast well defined. The ceiling that matters
-	 * is work_mem, applied by mkt_scan_resolve_top_k.
+	 * is work_mem, applied by prism_scan_resolve_top_k.
 	 */
 	return (uint32_t)Min(Max(sized, (double)k), (double)PG_UINT32_MAX);
 }
@@ -316,7 +316,8 @@ limit_total_rows(LimitState *ls, int64 *total)
 				plan->limitOffset, ls->limitOffset, econtext, &offset))
 		return false;
 
-	*total = Min(count, MKT_LIMIT_SUM_MAX) + Min(offset, MKT_LIMIT_SUM_MAX);
+	*total = Min(count, PRISM_LIMIT_SUM_MAX) +
+			 Min(offset, PRISM_LIMIT_SUM_MAX);
 	return true;
 }
 
@@ -359,9 +360,9 @@ limit_walker(PlanState *ps, void *context)
 }
 
 uint32_t
-mkt_scan_bound(IndexScanDesc scan)
+prism_scan_bound(IndexScanDesc scan)
 {
-	QueryDesc *qd = mkt_active_query_desc;
+	QueryDesc *qd = vs_active_query_desc;
 
 	if (qd == NULL || qd->planstate == NULL || qd->estate == NULL)
 		return 0; /* no executor above us: keep the default sizing */
@@ -391,7 +392,7 @@ mkt_scan_bound(IndexScanDesc scan)
  *
  * An index AM's callbacks are handed a Relation and an IndexScanDesc and
  * nothing else -- there is no path from a scan back to the executor state
- * it runs under. Noting the running query here is what lets mkt_scan_bound
+ * it runs under. Noting the running query here is what lets prism_scan_bound
  * find the plan tree at rescan and, in it, the Limit above this scan.
  *
  * Save, set, restore, exactly as the executor does for ActivePortal.
@@ -404,9 +405,9 @@ mkt_scan_bound(IndexScanDesc scan)
 static void
 prism_executor_run(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
 {
-	QueryDesc *save = mkt_active_query_desc;
+	QueryDesc *save = vs_active_query_desc;
 
-	mkt_active_query_desc = queryDesc;
+	vs_active_query_desc = queryDesc;
 	PG_TRY();
 	{
 		if (prev_ExecutorRun_hook)
@@ -416,13 +417,13 @@ prism_executor_run(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
 	}
 	PG_FINALLY();
 	{
-		mkt_active_query_desc = save;
+		vs_active_query_desc = save;
 	}
 	PG_END_TRY();
 }
 
 void
-mkt_scan_bound_init(void)
+prism_scan_bound_init(void)
 {
 	prev_ExecutorRun_hook = ExecutorRun_hook;
 	ExecutorRun_hook	  = prism_executor_run;

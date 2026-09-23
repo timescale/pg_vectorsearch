@@ -55,7 +55,7 @@ meson setup builddir-bench -Dnative=true
 
 ```
                     Public API (distance.h)
-              mkt_distance_l2(), mkt_distance_ip()
+              vs_distance_l2(), vs_distance_ip()
                               │
                         IFUNC resolver
                               │
@@ -99,7 +99,7 @@ These files use per-function target attributes:
 ```c
 /* distance_avx512.c */
 __attribute__((target("avx512f,avx512dq")))
-Distance mkt_distance_l2_avx512(Vec32Ref a, Vec32Ref b)
+Distance vs_distance_l2_avx512(Vec32Ref a, Vec32Ref b)
 {
     /* AVX-512 intrinsics */
 }
@@ -114,10 +114,10 @@ over file-level pragmas for better IDE/clangd compatibility.
 Located in `src/algo/distance.c`, uses `target_clones` for multi-versioning:
 
 ```c
-#define MKT_TARGET_CLONES \
+#define VS_TARGET_CLONES \
     __attribute__((target_clones("default", "arch=x86-64-v3", "arch=x86-64-v4")))
 
-MKT_TARGET_CLONES static float
+VS_TARGET_CLONES static float
 compiler_l2_loop(int dim, const float *pa, const float *pb)
 {
     float sum = 0.0f;
@@ -215,7 +215,7 @@ compiled as a separate library with `-mfpu=neon` to handle this case.
 On GNU systems, IFUNC provides zero-overhead dispatch:
 
 ```c
-Distance mkt_distance_l2(Vec32Ref a, Vec32Ref b)
+Distance vs_distance_l2(Vec32Ref a, Vec32Ref b)
     __attribute__((ifunc("resolve_distance_l2")));
 ```
 
@@ -230,10 +230,10 @@ functionality with minimal overhead (~1 indirect call):
 ```c
 static DistanceFn g_distance_l2_fn = NULL;
 
-Distance mkt_distance_l2(Vec32Ref a, Vec32Ref b)
+Distance vs_distance_l2(Vec32Ref a, Vec32Ref b)
 {
-    if (mkt_unlikely(!g_initialized))
-        mkt_distance_init();
+    if (vs_unlikely(!g_initialized))
+        vs_distance_init();
     return g_distance_l2_fn(a, b);
 }
 ```
@@ -279,12 +279,12 @@ For accurate benchmarking, call implementations directly:
 
 ```c
 // Compiler-vectorized (always available)
-mkt_distance_batch_l2_compiler(query, vectors, count, dim, distances);
+vs_distance_batch_l2_compiler(query, vectors, count, dim, distances);
 
 // Hand-optimized (simd=full only)
-mkt_distance_batch_l2_avx512(query, vectors, count, dim, distances);
-mkt_distance_batch_l2_avx2(query, vectors, count, dim, distances);
-mkt_distance_batch_l2_neon(query, vectors, count, dim, distances);
+vs_distance_batch_l2_avx512(query, vectors, count, dim, distances);
+vs_distance_batch_l2_avx2(query, vectors, count, dim, distances);
+vs_distance_batch_l2_neon(query, vectors, count, dim, distances);
 ```
 
 ### CLI Benchmarks
@@ -295,9 +295,12 @@ meson setup builddir-bench -Dsimd=full -Dnative=true
 meson compile -C builddir-bench
 
 # Compare implementations
-./builddir-bench/mkt bench distance --dim 768 --count 10000 --impls compiler
-./builddir-bench/mkt bench distance --dim 768 --count 10000 --impls avx2
-./builddir-bench/mkt bench distance --dim 768 --count 10000 --impls avx512
+./builddir-bench/vectorsearch bench distance --dim 768 --count 10000 \
+    --impls compiler
+./builddir-bench/vectorsearch bench distance --dim 768 --count 10000 \
+    --impls avx2
+./builddir-bench/vectorsearch bench distance --dim 768 --count 10000 \
+    --impls avx512
 ```
 
 ### Comparing Build Modes
@@ -310,8 +313,8 @@ meson compile -C builddir-full
 meson compile -C builddir-compiler
 
 # Compare hand-optimized vs compiler
-./builddir-full/mkt bench distance --dim 768 --count 10000
-./builddir-compiler/mkt bench distance --dim 768 --count 10000
+./builddir-full/vectorsearch bench distance --dim 768 --count 10000
+./builddir-compiler/vectorsearch bench distance --dim 768 --count 10000
 ```
 
 ## Verification
@@ -319,13 +322,13 @@ meson compile -C builddir-compiler
 Check active implementation:
 
 ```bash
-./builddir-full/mkt info
+./builddir-full/vectorsearch info
 # Output: "avx512" or "avx2" (depending on CPU)
 
-./builddir-compiler/mkt info
+./builddir-compiler/vectorsearch info
 # Output: "compiler"
 
-./builddir-none/mkt info
+./builddir-none/vectorsearch info
 # Output: "none"
 ```
 

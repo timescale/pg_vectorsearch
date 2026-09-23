@@ -59,10 +59,10 @@
 
 /* Above this many live entries, try to reclaim an idle one before growing
  * further. Not a hard cap -- see above. */
-#define MKT_RABITQ_CACHE_TARGET_ENTRIES 8
+#define PRISM_RABITQ_CACHE_TARGET_ENTRIES 8
 
-#define MKT_RABITQ_USAGE_INCREMENT 1.0
-#define MKT_RABITQ_USAGE_DECAY	   0.99
+#define PRISM_RABITQ_USAGE_INCREMENT 1.0
+#define PRISM_RABITQ_USAGE_DECAY	 0.99
 
 typedef struct RaBitQCacheKey
 {
@@ -135,7 +135,7 @@ rabitq_cache_init(void)
 
 	rabitq_cache = hash_create(
 			"prism rabitq params cache",
-			MKT_RABITQ_CACHE_TARGET_ENTRIES,
+			PRISM_RABITQ_CACHE_TARGET_ENTRIES,
 			&ctl,
 			HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 }
@@ -155,7 +155,7 @@ rabitq_cache_evict_one(void)
 	hash_seq_init(&seq, rabitq_cache);
 	while ((entry = hash_seq_search(&seq)) != NULL)
 	{
-		entry->usage *= MKT_RABITQ_USAGE_DECAY;
+		entry->usage *= PRISM_RABITQ_USAGE_DECAY;
 		if (entry->refcount == 0 &&
 			(victim == NULL || entry->usage < victim->usage))
 			victim = entry;
@@ -192,7 +192,7 @@ get_or_create_params(Dimension dim, uint64_t seed)
 		/* Enlarge first: it can allocate, and nothing may fail between
 		 * the refcount bump and the (no-fail) Remember. */
 		ResourceOwnerEnlarge(CurrentResourceOwner);
-		entry->usage += MKT_RABITQ_USAGE_INCREMENT;
+		entry->usage += PRISM_RABITQ_USAGE_INCREMENT;
 		entry->refcount++;
 		ResourceOwnerRemember(
 				CurrentResourceOwner,
@@ -204,8 +204,8 @@ get_or_create_params(Dimension dim, uint64_t seed)
 	/* Miss (or a dead entry left by a failed init below -- params == NULL,
 	 * refcount == 0, safe to recreate): try to make room first, but only
 	 * when this is about to grow the table with a genuinely new key. */
-	if (!found &&
-		hash_get_num_entries(rabitq_cache) >= MKT_RABITQ_CACHE_TARGET_ENTRIES)
+	if (!found && hash_get_num_entries(rabitq_cache) >=
+						  PRISM_RABITQ_CACHE_TARGET_ENTRIES)
 		rabitq_cache_evict_one();
 
 	entry = hash_search(rabitq_cache, &key, HASH_ENTER, &found);
@@ -214,7 +214,7 @@ get_or_create_params(Dimension dim, uint64_t seed)
 	 * failure below then leaves a well-defined, idle, re-creatable entry
 	 * instead of one that looks live with garbage params. The matrix is
 	 * generated into a local pointer and only published once fully
-	 * initialized, for the same reason (an error out of mkt_rabitq_init
+	 * initialized, for the same reason (an error out of vs_rabitq_init
 	 * must not leave a live-looking entry holding a garbage matrix). */
 	entry->params	= NULL;
 	entry->refcount = 0;
@@ -223,12 +223,12 @@ get_or_create_params(Dimension dim, uint64_t seed)
 	ResourceOwnerEnlarge(CurrentResourceOwner);
 
 	RaBitQParams *params =
-			MemoryContextAlloc(rabitq_cache_cxt, MKT_RABITQ_PARAMS_SIZE(dim));
-	mkt_rabitq_init(params, dim, seed);
+			MemoryContextAlloc(rabitq_cache_cxt, VS_RABITQ_PARAMS_SIZE(dim));
+	vs_rabitq_init(params, dim, seed);
 
 	entry->params	= params;
 	entry->refcount = 1;
-	entry->usage	= MKT_RABITQ_USAGE_INCREMENT;
+	entry->usage	= PRISM_RABITQ_USAGE_INCREMENT;
 	ResourceOwnerRemember(
 			CurrentResourceOwner,
 			PointerGetDatum(entry),
@@ -286,7 +286,7 @@ prism_release_params(Dimension dim, uint64_t seed, ResourceOwner owner)
  * observe refcounts, usage decay, and eviction. Inert otherwise.
  */
 int
-prism_rabitq_cache_stats(MktRabitqCacheStat *stats, int max_stats)
+prism_rabitq_cache_stats(PrismRabitqCacheStat *stats, int max_stats)
 {
 	HASH_SEQ_STATUS	  seq;
 	RaBitQCacheEntry *entry;
@@ -333,7 +333,7 @@ prism_rabitq_cache_clear(void)
 		if (entry->refcount > 0)
 		{
 			hash_seq_term(&seq);
-			mkt_error(
+			vs_error(
 					"cannot clear the RaBitQ params cache: entry for "
 					"dimension %u has %d live checkout(s)",
 					(unsigned)entry->key.dim,
@@ -433,7 +433,7 @@ get_cache_data(Relation index)
 	/* Reject an index whose metapage was written by an incompatible format
 	 * (loud in release too, not just a debug Assert) — its layout would
 	 * otherwise be misread. */
-	if (meta->magic != MKT_META_MAGIC)
+	if (meta->magic != PRISM_META_MAGIC)
 	{
 		uint32_t got = meta->magic;
 		UnlockReleaseBuffer(meta_buf);
@@ -443,7 +443,7 @@ get_cache_data(Relation index)
 						"(metapage magic 0x%08X, expected 0x%08X)",
 						RelationGetRelationName(index),
 						got,
-						(uint32_t)MKT_META_MAGIC),
+						(uint32_t)PRISM_META_MAGIC),
 				 errhint("REINDEX the index to rebuild it in the current "
 						 "format.")));
 	}
@@ -461,7 +461,7 @@ get_cache_data(Relation index)
 
 	c->global_mean_off	  = gm_off;
 	c->pt_global_mean_off = pt_gm_off;
-	c->has_fastscan		  = (meta->flags & MKT_META_FLAG_FASTSCAN) != 0;
+	c->has_fastscan		  = (meta->flags & PRISM_META_FLAG_FASTSCAN) != 0;
 	c->nlist			  = meta->nlist;
 
 	/* Immutable base template (storage / params / fastscan rebound per call).
@@ -510,7 +510,7 @@ prism_index_base_init(Relation index, PrismIndexBase *base)
 	 * matrix); cached thereafter for the backend. */
 	if (!c->pt_ready)
 	{
-		mkt_rabitq_rotate(
+		vs_rabitq_rotate(
 				params, cache_global_mean(c), cache_pt_global_mean(c));
 		c->base.pt_global_mean = cache_pt_global_mean(c);
 		c->pt_ready			   = true;

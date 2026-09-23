@@ -11,24 +11,24 @@
 
 #include "standalone/thread_pool.h"
 
-typedef struct MktWorker
+typedef struct VsWorker
 {
 	pthread_t thread;
 	uint32_t  id;
 	uint32_t  start;
 	uint32_t  end;
-} MktWorker;
+} VsWorker;
 
-struct MktThreadPool
+struct VsThreadPool
 {
-	MktWorker *workers;
-	uint32_t   nthreads;
+	VsWorker *workers;
+	uint32_t  nthreads;
 
 	/* Current iterate parameters (set by leader before waking) */
-	MktParallelForFn work_fn;
-	void			*arg;
-	uint32_t		 max_iterations;
-	volatile bool	 keep_going;
+	VsParallelForFn work_fn;
+	void		   *arg;
+	uint32_t		max_iterations;
+	volatile bool	keep_going;
 
 	/*
 	 * SPMD dispatch: when spmd_fn is non-NULL, woken workers run it once (as
@@ -36,7 +36,7 @@ struct MktThreadPool
 	 * rendezvous at the barrier. The leader runs it as participant 0. Set
 	 * before each wake; iterate clears it so workers take the chunked path.
 	 */
-	MktSpmdFn spmd_fn;
+	VsSpmdFn spmd_fn;
 
 	/* Inter-iteration barrier (nthreads + 1 participants) */
 	pthread_barrier_t barrier;
@@ -50,16 +50,16 @@ struct MktThreadPool
 
 typedef struct WorkerArg
 {
-	MktThreadPool *pool;
-	uint32_t	   id;
+	VsThreadPool *pool;
+	uint32_t	  id;
 } WorkerArg;
 
 static void *
 pool_worker_fn(void *raw)
 {
-	WorkerArg	  *wa	= (WorkerArg *)raw;
-	MktThreadPool *pool = wa->pool;
-	uint32_t	   id	= wa->id;
+	WorkerArg	 *wa   = (WorkerArg *)raw;
+	VsThreadPool *pool = wa->pool;
+	uint32_t	  id   = wa->id;
 	free(wa);
 
 	uint32_t my_gen = 0;
@@ -114,12 +114,12 @@ pool_worker_fn(void *raw)
 	return NULL;
 }
 
-MktThreadPool *
-mkt_thread_pool_create(uint32_t nthreads)
+VsThreadPool *
+vs_thread_pool_create(uint32_t nthreads)
 {
-	MktThreadPool *pool = calloc(1, sizeof(MktThreadPool));
-	pool->nthreads		= nthreads;
-	pool->workers		= calloc(nthreads, sizeof(MktWorker));
+	VsThreadPool *pool = calloc(1, sizeof(VsThreadPool));
+	pool->nthreads	   = nthreads;
+	pool->workers	   = calloc(nthreads, sizeof(VsWorker));
 
 	pthread_mutex_init(&pool->mutex, NULL);
 	pthread_cond_init(&pool->wake_cv, NULL);
@@ -140,13 +140,13 @@ mkt_thread_pool_create(uint32_t nthreads)
 }
 
 void
-mkt_thread_pool_iterate(
-		MktThreadPool	*pool,
-		uint32_t		 total,
-		MktParallelForFn work_fn,
-		MktReduceFn		 reduce_fn,
-		void			*arg,
-		uint32_t		 max_iterations)
+vs_thread_pool_iterate(
+		VsThreadPool   *pool,
+		uint32_t		total,
+		VsParallelForFn work_fn,
+		VsReduceFn		reduce_fn,
+		void		   *arg,
+		uint32_t		max_iterations)
 {
 	if (total == 0 || max_iterations == 0)
 		return;
@@ -215,14 +215,14 @@ mkt_thread_pool_iterate(
 }
 
 void
-mkt_thread_pool_parallel_for(
-		MktThreadPool *pool, uint32_t total, MktParallelForFn fn, void *arg)
+vs_thread_pool_parallel_for(
+		VsThreadPool *pool, uint32_t total, VsParallelForFn fn, void *arg)
 {
-	mkt_thread_pool_iterate(pool, total, fn, NULL, arg, 1);
+	vs_thread_pool_iterate(pool, total, fn, NULL, arg, 1);
 }
 
 void
-mkt_thread_pool_launch(MktThreadPool *pool, MktSpmdFn fn, void *arg)
+vs_thread_pool_launch(VsThreadPool *pool, VsSpmdFn fn, void *arg)
 {
 	if (pool->nthreads == 0)
 		return; /* no workers to wake */
@@ -239,7 +239,7 @@ mkt_thread_pool_launch(MktThreadPool *pool, MktSpmdFn fn, void *arg)
 }
 
 void
-mkt_thread_pool_join(MktThreadPool *pool)
+vs_thread_pool_join(VsThreadPool *pool)
 {
 	if (pool->nthreads == 0)
 		return;
@@ -251,7 +251,7 @@ mkt_thread_pool_join(MktThreadPool *pool)
 }
 
 void
-mkt_thread_pool_run_spmd(MktThreadPool *pool, MktSpmdFn fn, void *arg)
+vs_thread_pool_run_spmd(VsThreadPool *pool, VsSpmdFn fn, void *arg)
 {
 	if (pool->nthreads == 0)
 	{
@@ -260,19 +260,19 @@ mkt_thread_pool_run_spmd(MktThreadPool *pool, MktSpmdFn fn, void *arg)
 		return;
 	}
 
-	mkt_thread_pool_launch(pool, fn, arg);
+	vs_thread_pool_launch(pool, fn, arg);
 	fn(0, arg); /* leader runs as participant 0 */
-	mkt_thread_pool_join(pool);
+	vs_thread_pool_join(pool);
 }
 
 uint32_t
-mkt_thread_pool_nthreads(const MktThreadPool *pool)
+vs_thread_pool_nthreads(const VsThreadPool *pool)
 {
 	return pool->nthreads;
 }
 
 void
-mkt_thread_pool_destroy(MktThreadPool *pool)
+vs_thread_pool_destroy(VsThreadPool *pool)
 {
 	if (pool == NULL)
 		return;

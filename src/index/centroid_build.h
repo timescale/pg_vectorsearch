@@ -1,7 +1,7 @@
 /*
  * centroid_build.h - Generic centroid page writer
  *
- * Writes centroid entries to linked pages via MktStorage. Supports
+ * Writes centroid entries to linked pages via VsStorage. Supports
  * all centroid formats (RaBitQ, float32, float16). Standalone-
  * compatible — all dependencies are portable.
  */
@@ -38,7 +38,7 @@ struct CentroidEncoder
  *
  * Float:  memcpy from input array into dest
  * Half:   float→half conversion directly into dest
- * RaBitQ: mkt_rabitq_encode_into directly into dest
+ * RaBitQ: vs_rabitq_encode_into directly into dest
  * ---------------------------------------------------------------- */
 
 /* Float encoder */
@@ -75,7 +75,7 @@ centroid_encode_half(CentroidEncoder *enc, uint32_t index, void *dest)
 {
 	CentroidEncoderHalf *he	 = (CentroidEncoderHalf *)enc;
 	const float			*src = he->vectors + (size_t)index * he->dim;
-	mkt_float_to_half_array(src, (half *)dest, he->dim);
+	vs_float_to_half_array(src, (half *)dest, he->dim);
 }
 
 static const CentroidEncoderOps centroid_encoder_half_ops = {
@@ -101,7 +101,7 @@ centroid_encode_rabitq(CentroidEncoder *enc, uint32_t index, void *dest)
 						  .dim	= re->dim,
 	  };
 	Vec32Ref mref = {.data = re->global_mean, .dim = re->dim};
-	mkt_rabitq_encode_into(re->params, vref, mref, (RaBitQData *)dest);
+	vs_rabitq_encode_into(re->params, vref, mref, (RaBitQData *)dest);
 }
 
 static const CentroidEncoderOps centroid_encoder_rabitq_ops = {
@@ -136,21 +136,21 @@ centroid_encoder_init(
 {
 	switch (fmt)
 	{
-	case MKT_CENTROID_FMT_FLOAT:
+	case PRISM_CENTROID_FMT_FLOAT:
 		state->f = (CentroidEncoderFloat){
 				.base.ops = &centroid_encoder_float_ops,
 				.vectors  = vectors,
 				.dim	  = dim,
 		};
 		return &state->f.base;
-	case MKT_CENTROID_FMT_HALF:
+	case PRISM_CENTROID_FMT_HALF:
 		state->h = (CentroidEncoderHalf){
 				.base.ops = &centroid_encoder_half_ops,
 				.vectors  = vectors,
 				.dim	  = dim,
 		};
 		return &state->h.base;
-	case MKT_CENTROID_FMT_RABITQ:
+	case PRISM_CENTROID_FMT_RABITQ:
 		state->r = (CentroidEncoderRaBitQ){
 				.base.ops	 = &centroid_encoder_rabitq_ops,
 				.vectors	 = vectors,
@@ -159,7 +159,7 @@ centroid_encoder_init(
 				.global_mean = global_mean,
 		};
 		return &state->r.base;
-	case MKT_CENTROID_FMT_FASTSCAN:
+	case PRISM_CENTROID_FMT_FASTSCAN:
 		/* fastscan uses a group-packed page layout that doesn't fit
 		 * this per-vector encoder model. The build path emits these
 		 * pages directly (see prism_centroid_write_fastscan_pages —
@@ -179,7 +179,7 @@ centroid_encoder_init(
  * Returns the BlockNumber of the first centroid page.
  */
 BlockNumber prism_centroid_write_pages(
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		Dimension			dim,
 		uint32_t			nlist,
 		PrismCentroidFormat fmt,
@@ -196,8 +196,8 @@ BlockNumber prism_centroid_write_pages(
  *
  * Same inputs as prism_centroid_write_pages but emits 32-vector groups
  * with kPerm0-packed RaBitQ codes instead of per-entry RaBitQData,
- * so the scan path uses mkt_fastscan_accumulate_hacc rather than
- * mkt_rabitq_inner_product_multi at score time.
+ * so the scan path uses vs_fastscan_accumulate_hacc rather than
+ * vs_rabitq_inner_product_multi at score time.
  *
  * Requires `params` and `global_mean` (the RaBitQ encoding inputs);
  * the float `vectors` array provides the centroids to encode. Each
@@ -205,7 +205,7 @@ BlockNumber prism_centroid_write_pages(
  * so the score path doesn't need to recompute it.
  */
 BlockNumber prism_centroid_write_fastscan_pages(
-		MktStorage		   *storage,
+		VsStorage		   *storage,
 		Dimension			dim,
 		uint32_t			nlist,
 		uint8_t				level,

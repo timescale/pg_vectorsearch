@@ -13,9 +13,9 @@
 
 #include "core/memory.h"
 #include "index/centroid_page.h"
-#include "mkt_test.h"
 #include "quant/rabitq.h"
 #include "standalone/pg_compat.h"
+#include "vs_test.h"
 
 TEST_GROUP(CentroidPage);
 TEST_MEMCTX_FIXTURE();
@@ -127,7 +127,7 @@ TEST(bidir_regions_no_overlap)
 {
 	Dimension dim		= 768;
 	uint32_t  max		= prism_centroid_max_entries(dim);
-	uint32_t  data_size = MKT_RABITQ_DATA_SIZE(dim);
+	uint32_t  data_size = VS_RABITQ_DATA_SIZE(dim);
 
 	/* Forward region: metadata */
 	size_t meta_start = SizeOfPageHeaderData;
@@ -182,12 +182,12 @@ TEST(page_add_single_entry)
 	Dimension dim = 128;
 
 	/* Create RaBitQ params for encoding */
-	RaBitQParams *params = mkt_rabitq_create(dim, 42);
+	RaBitQParams *params = vs_rabitq_create(dim, 42);
 	ASSERT_NOT_NULL(params, "params created");
 
 	/* Create a test vector and encode */
-	float *vec		= mkt_alloc(dim * sizeof(float));
-	float *centroid = mkt_alloc(dim * sizeof(float));
+	float *vec		= vs_alloc(dim * sizeof(float));
+	float *centroid = vs_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 	{
 		vec[i]		= (float)((i * 17 + 3) % 100 - 50) / 10.0f;
@@ -196,7 +196,7 @@ TEST(page_add_single_entry)
 
 	Vec32Ref	vec_ref	 = {.data = vec, .dim = dim};
 	Vec32Ref	cent_ref = {.data = centroid, .dim = dim};
-	RaBitQData *encoded	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
+	RaBitQData *encoded	 = vs_rabitq_encode(params, vec_ref, cent_ref);
 	ASSERT_NOT_NULL(encoded, "encoding succeeded");
 
 	/* Set up page */
@@ -220,7 +220,7 @@ TEST(page_add_single_entry)
 
 	/* Verify RaBitQData round-trip via direct pointer */
 	const RaBitQData *data		   = prism_centroid_data(page, 0, dim);
-	uint32_t		  packed_bytes = MKT_RABITQ_BYTES(dim);
+	uint32_t		  packed_bytes = VS_RABITQ_BYTES(dim);
 	ASSERT_FLOAT_EQ(encoded->f_add, data->f_add, 1e-6f, "f_add round-trip");
 	ASSERT_FLOAT_EQ(
 			encoded->f_rescale,
@@ -230,8 +230,8 @@ TEST(page_add_single_entry)
 	int bits_match = memcmp(encoded->bits, data->bits, packed_bytes) == 0;
 	ASSERT_TRUE(bits_match, "bits round-trip");
 
-	mkt_free(encoded);
-	mkt_rabitq_destroy(params);
+	vs_free(encoded);
+	vs_rabitq_destroy(params);
 }
 
 TEST(page_add_fill_to_capacity)
@@ -239,7 +239,7 @@ TEST(page_add_fill_to_capacity)
 	Dimension dim = 768;
 	uint32_t  max = prism_centroid_max_entries(dim);
 
-	RaBitQParams *params = mkt_rabitq_create(dim, 42);
+	RaBitQParams *params = vs_rabitq_create(dim, 42);
 	ASSERT_NOT_NULL(params, "params created");
 
 	char page_buf[BLCKSZ];
@@ -247,8 +247,8 @@ TEST(page_add_fill_to_capacity)
 	prism_centroid_page_init(page, 0);
 
 	/* Create a test vector */
-	float *vec		= mkt_alloc(dim * sizeof(float));
-	float *centroid = mkt_alloc(dim * sizeof(float));
+	float *vec		= vs_alloc(dim * sizeof(float));
+	float *centroid = vs_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 	{
 		vec[i]		= (float)((i * 7 + 1) % 100 - 50) / 10.0f;
@@ -257,7 +257,7 @@ TEST(page_add_fill_to_capacity)
 
 	Vec32Ref	vec_ref	 = {.data = vec, .dim = dim};
 	Vec32Ref	cent_ref = {.data = centroid, .dim = dim};
-	RaBitQData *encoded	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
+	RaBitQData *encoded	 = vs_rabitq_encode(params, vec_ref, cent_ref);
 	ASSERT_NOT_NULL(encoded, "encoding succeeded");
 
 	/* Fill page to capacity */
@@ -278,8 +278,8 @@ TEST(page_add_fill_to_capacity)
 	bool added = prism_centroid_page_add(page, dim, 999, 1, 0, encoded);
 	ASSERT_FALSE(added, "page should be full");
 
-	mkt_free(encoded);
-	mkt_rabitq_destroy(params);
+	vs_free(encoded);
+	vs_rabitq_destroy(params);
 }
 
 TEST(page_has_room)
@@ -294,9 +294,9 @@ TEST(page_has_room)
 			"empty page should have room");
 
 	/* Fill it */
-	RaBitQParams *params   = mkt_rabitq_create(dim, 42);
-	float		 *vec	   = mkt_alloc(dim * sizeof(float));
-	float		 *centroid = mkt_alloc(dim * sizeof(float));
+	RaBitQParams *params   = vs_rabitq_create(dim, 42);
+	float		 *vec	   = vs_alloc(dim * sizeof(float));
+	float		 *centroid = vs_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 	{
 		vec[i]		= (float)i / 10.0f;
@@ -305,7 +305,7 @@ TEST(page_has_room)
 
 	Vec32Ref	vec_ref	 = {.data = vec, .dim = dim};
 	Vec32Ref	cent_ref = {.data = centroid, .dim = dim};
-	RaBitQData *encoded	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
+	RaBitQData *encoded	 = vs_rabitq_encode(params, vec_ref, cent_ref);
 
 	uint32_t max = prism_centroid_max_entries(dim);
 	for (uint32_t i = 0; i < max; i++)
@@ -315,8 +315,8 @@ TEST(page_has_room)
 			prism_centroid_page_has_room(page, dim, false),
 			"full page should not have room");
 
-	mkt_free(encoded);
-	mkt_rabitq_destroy(params);
+	vs_free(encoded);
+	vs_rabitq_destroy(params);
 }
 
 /* ----------------------------------------------------------------
@@ -326,31 +326,31 @@ TEST(page_has_room)
 TEST(page_multi_entry_round_trip)
 {
 	Dimension dim		   = 64;
-	uint32_t  packed_bytes = MKT_RABITQ_BYTES(dim);
+	uint32_t  packed_bytes = VS_RABITQ_BYTES(dim);
 	const int count		   = 10;
 
-	RaBitQParams *params = mkt_rabitq_create(dim, 42);
+	RaBitQParams *params = vs_rabitq_create(dim, 42);
 	ASSERT_NOT_NULL(params, "params created");
 
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
 	prism_centroid_page_init(page, 1);
 
-	float *centroid = mkt_alloc(dim * sizeof(float));
+	float *centroid = vs_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 		centroid[i] = 0.0f;
 	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	/* Add entries with distinct vectors */
-	RaBitQData **encodings = mkt_alloc(count * sizeof(void *));
+	RaBitQData **encodings = vs_alloc(count * sizeof(void *));
 	for (int e = 0; e < count; e++)
 	{
-		float *vec = mkt_alloc(dim * sizeof(float));
+		float *vec = vs_alloc(dim * sizeof(float));
 		for (Dimension i = 0; i < dim; i++)
 			vec[i] = (float)((i * 17 + e * 31) % 100 - 50) / 10.0f;
 
 		Vec32Ref vec_ref = {.data = vec, .dim = dim};
-		encodings[e]	 = mkt_rabitq_encode(params, vec_ref, cent_ref);
+		encodings[e]	 = vs_rabitq_encode(params, vec_ref, cent_ref);
 		ASSERT_NOT_NULL(encodings[e], "encoding succeeded");
 
 		bool added = prism_centroid_page_add(
@@ -385,11 +385,11 @@ TEST(page_multi_entry_round_trip)
 								packed_bytes) == 0;
 		ASSERT_TRUE(bits_match, msg);
 
-		mkt_free(encodings[e]);
+		vs_free(encodings[e]);
 	}
 
-	mkt_free(encodings);
-	mkt_rabitq_destroy(params);
+	vs_free(encodings);
+	vs_rabitq_destroy(params);
 }
 
 /* ----------------------------------------------------------------
@@ -398,7 +398,8 @@ TEST(page_multi_entry_round_trip)
 
 TEST(page_capacity_float_768d)
 {
-	uint32_t max = prism_centroid_max_entries_fmt(768, MKT_CENTROID_FMT_FLOAT);
+	uint32_t max =
+			prism_centroid_max_entries_fmt(768, PRISM_CENTROID_FMT_FLOAT);
 	/* Per entry: 8 (meta) + 3072 (768*4) = 3080
 	 * Usable: 8156
 	 * 8156 / 3080 = 2 */
@@ -407,7 +408,8 @@ TEST(page_capacity_float_768d)
 
 TEST(page_capacity_float_128d)
 {
-	uint32_t max = prism_centroid_max_entries_fmt(128, MKT_CENTROID_FMT_FLOAT);
+	uint32_t max =
+			prism_centroid_max_entries_fmt(128, PRISM_CENTROID_FMT_FLOAT);
 	/* Per entry: 8 + 512 = 520
 	 * 8156 / 520 = 15 */
 	ASSERT_EQ(15, max, "128d float should fit 15 entries per page");
@@ -415,7 +417,8 @@ TEST(page_capacity_float_128d)
 
 TEST(page_capacity_half_768d)
 {
-	uint32_t max = prism_centroid_max_entries_fmt(768, MKT_CENTROID_FMT_HALF);
+	uint32_t max =
+			prism_centroid_max_entries_fmt(768, PRISM_CENTROID_FMT_HALF);
 	/* Per entry: 8 + 1536 = 1544
 	 * 8156 / 1544 = 5 */
 	ASSERT_EQ(5, max, "768d half should fit 5 entries per page");
@@ -423,7 +426,8 @@ TEST(page_capacity_half_768d)
 
 TEST(page_capacity_half_128d)
 {
-	uint32_t max = prism_centroid_max_entries_fmt(128, MKT_CENTROID_FMT_HALF);
+	uint32_t max =
+			prism_centroid_max_entries_fmt(128, PRISM_CENTROID_FMT_HALF);
 	/* Per entry: 8 (meta) + 256 (data) = 264
 	 * 8156 / 264 = 30 */
 	ASSERT_EQ(30, max, "128d half should fit 30 entries per page");
@@ -434,21 +438,21 @@ TEST(page_init_fmt_stores_format)
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
 
-	prism_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_FLOAT);
+	prism_centroid_page_init_fmt(page, 0, PRISM_CENTROID_FMT_FLOAT);
 	ASSERT_EQ(
-			MKT_CENTROID_FMT_FLOAT,
+			PRISM_CENTROID_FMT_FLOAT,
 			prism_centroid_page_format(page),
 			"float format stored in opaque");
 
-	prism_centroid_page_init_fmt(page, 1, MKT_CENTROID_FMT_HALF);
+	prism_centroid_page_init_fmt(page, 1, PRISM_CENTROID_FMT_HALF);
 	ASSERT_EQ(
-			MKT_CENTROID_FMT_HALF,
+			PRISM_CENTROID_FMT_HALF,
 			prism_centroid_page_format(page),
 			"half format stored in opaque");
 
-	prism_centroid_page_init_fmt(page, 2, MKT_CENTROID_FMT_RABITQ);
+	prism_centroid_page_init_fmt(page, 2, PRISM_CENTROID_FMT_RABITQ);
 	ASSERT_EQ(
-			MKT_CENTROID_FMT_RABITQ,
+			PRISM_CENTROID_FMT_RABITQ,
 			prism_centroid_page_format(page),
 			"rabitq format stored in opaque");
 }
@@ -460,7 +464,7 @@ TEST(page_init_default_is_rabitq)
 
 	prism_centroid_page_init(page, 0);
 	ASSERT_EQ(
-			MKT_CENTROID_FMT_RABITQ,
+			PRISM_CENTROID_FMT_RABITQ,
 			prism_centroid_page_format(page),
 			"default init should be rabitq format");
 }
@@ -471,10 +475,10 @@ TEST(page_float_add_round_trip)
 
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
-	prism_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_FLOAT);
+	prism_centroid_page_init_fmt(page, 0, PRISM_CENTROID_FMT_FLOAT);
 
 	/* Create test vector */
-	float *vec = mkt_alloc(dim * sizeof(float));
+	float *vec = vs_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 		vec[i] = (float)((i * 17 + 3) % 100 - 50) / 10.0f;
 
@@ -500,7 +504,7 @@ TEST(page_float_add_round_trip)
 		ASSERT_FLOAT_EQ(vec[i], data[i], 1e-6f, msg);
 	}
 
-	mkt_free(vec);
+	vs_free(vec);
 }
 
 TEST(page_half_add_round_trip)
@@ -509,12 +513,12 @@ TEST(page_half_add_round_trip)
 
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
-	prism_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_HALF);
+	prism_centroid_page_init_fmt(page, 0, PRISM_CENTROID_FMT_HALF);
 
 	/* Create test vector as halfs */
-	half *hvec = mkt_alloc(dim * sizeof(half));
+	half *hvec = vs_alloc(dim * sizeof(half));
 	for (Dimension i = 0; i < dim; i++)
-		hvec[i] = mkt_float_to_half((float)((i * 17 + 3) % 100 - 50) / 10.0f);
+		hvec[i] = vs_float_to_half((float)((i * 17 + 3) % 100 - 50) / 10.0f);
 
 	bool added = prism_centroid_page_add_entry(page, dim, 99, 4, 0, hvec);
 	ASSERT_TRUE(added, "half entry should be added");
@@ -532,19 +536,20 @@ TEST(page_half_add_round_trip)
 	int			bits_match = memcmp(hvec, data, dim * sizeof(half)) == 0;
 	ASSERT_TRUE(bits_match, "half vector bit-exact round-trip");
 
-	mkt_free(hvec);
+	vs_free(hvec);
 }
 
 TEST(page_float_fill_to_capacity)
 {
 	Dimension dim = 768;
-	uint32_t max = prism_centroid_max_entries_fmt(dim, MKT_CENTROID_FMT_FLOAT);
+	uint32_t  max =
+			prism_centroid_max_entries_fmt(dim, PRISM_CENTROID_FMT_FLOAT);
 
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
-	prism_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_FLOAT);
+	prism_centroid_page_init_fmt(page, 0, PRISM_CENTROID_FMT_FLOAT);
 
-	float *vec = mkt_alloc(dim * sizeof(float));
+	float *vec = vs_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 		vec[i] = (float)i / 100.0f;
 
@@ -569,7 +574,7 @@ TEST(page_float_fill_to_capacity)
 			prism_centroid_page_has_room(page, dim, false),
 			"full float page has_room should be false");
 
-	mkt_free(vec);
+	vs_free(vec);
 }
 
 TEST(page_half_multi_entry_round_trip)
@@ -579,15 +584,15 @@ TEST(page_half_multi_entry_round_trip)
 
 	char page_buf[BLCKSZ];
 	Page page = page_buf;
-	prism_centroid_page_init_fmt(page, 1, MKT_CENTROID_FMT_HALF);
+	prism_centroid_page_init_fmt(page, 1, PRISM_CENTROID_FMT_HALF);
 
-	half **vectors = mkt_alloc(count * sizeof(void *));
+	half **vectors = vs_alloc(count * sizeof(void *));
 
 	for (int e = 0; e < count; e++)
 	{
-		vectors[e] = mkt_alloc(dim * sizeof(half));
+		vectors[e] = vs_alloc(dim * sizeof(half));
 		for (Dimension i = 0; i < dim; i++)
-			vectors[e][i] = mkt_float_to_half(
+			vectors[e][i] = vs_float_to_half(
 					(float)((i * 17 + e * 31) % 100 - 50) / 10.0f);
 
 		bool added = prism_centroid_page_add_entry(
@@ -609,10 +614,10 @@ TEST(page_half_multi_entry_round_trip)
 		int bits_match = memcmp(vectors[e], data, dim * sizeof(half)) == 0;
 		ASSERT_TRUE(bits_match, msg);
 
-		mkt_free(vectors[e]);
+		vs_free(vectors[e]);
 	}
 
-	mkt_free(vectors);
+	vs_free(vectors);
 }
 
 TEST(page_entry_data_generic_accessor)
@@ -623,8 +628,8 @@ TEST(page_entry_data_generic_accessor)
 	Page page = page_buf;
 
 	/* Float format: generic and typed return same address */
-	prism_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_FLOAT);
-	float *fvec = mkt_alloc(dim * sizeof(float));
+	prism_centroid_page_init_fmt(page, 0, PRISM_CENTROID_FMT_FLOAT);
+	float *fvec = vs_alloc(dim * sizeof(float));
 	for (Dimension i = 0; i < dim; i++)
 		fvec[i] = (float)i;
 
@@ -638,10 +643,10 @@ TEST(page_entry_data_generic_accessor)
 			"generic and typed float same address");
 
 	/* Half format: generic and typed return same address */
-	prism_centroid_page_init_fmt(page, 0, MKT_CENTROID_FMT_HALF);
-	half *hvec = mkt_alloc(dim * sizeof(half));
+	prism_centroid_page_init_fmt(page, 0, PRISM_CENTROID_FMT_HALF);
+	half *hvec = vs_alloc(dim * sizeof(half));
 	for (Dimension i = 0; i < dim; i++)
-		hvec[i] = mkt_float_to_half((float)i);
+		hvec[i] = vs_float_to_half((float)i);
 
 	prism_centroid_page_add_entry(page, dim, 0, 1, 0, hvec);
 
@@ -652,6 +657,6 @@ TEST(page_entry_data_generic_accessor)
 			(uintptr_t)t2,
 			"generic and typed half same address");
 
-	mkt_free(fvec);
-	mkt_free(hvec);
+	vs_free(fvec);
+	vs_free(hvec);
 }

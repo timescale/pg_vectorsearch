@@ -1,5 +1,5 @@
 /*
- * mkt_test.h - Simple C test framework with automatic test registration
+ * vs_test.h - Simple C test framework with automatic test registration
  *
  * Basic Usage:
  *   TEST_GROUP(MyTests)
@@ -39,8 +39,8 @@
  *   //   group_teardown()
  */
 
-#ifndef MKT_TEST_H
-#define MKT_TEST_H
+#ifndef VS_TEST_H
+#define VS_TEST_H
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -48,11 +48,11 @@
 #include <string.h>
 
 /* ANSI color codes */
-#define MKT_COLOR_RESET	 "\033[0m"
-#define MKT_COLOR_RED	 "\033[31m"
-#define MKT_COLOR_GREEN	 "\033[32m"
-#define MKT_COLOR_YELLOW "\033[33m"
-#define MKT_COLOR_CYAN	 "\033[36m"
+#define VS_COLOR_RESET	"\033[0m"
+#define VS_COLOR_RED	"\033[31m"
+#define VS_COLOR_GREEN	"\033[32m"
+#define VS_COLOR_YELLOW "\033[33m"
+#define VS_COLOR_CYAN	"\033[36m"
 
 /* Test result structure */
 typedef struct
@@ -62,31 +62,31 @@ typedef struct
 	char		failure_msg[512];
 	const char *file;
 	int			line;
-} MktTestResult;
+} VsTestResult;
 
 /* Test function signature */
-typedef void (*MktTestFunc)(MktTestResult *result);
+typedef void (*VsTestFunc)(VsTestResult *result);
 
 /* Fixture function signature */
-typedef void (*MktFixtureFunc)(void);
+typedef void (*VsFixtureFunc)(void);
 
 /* Test registry entry */
 typedef struct
 {
 	const char *name;
 	const char *group;
-	MktTestFunc func;
-} MktTestEntry;
+	VsTestFunc	func;
+} VsTestEntry;
 
 /* Register a test (called automatically by TEST macro) */
-void mkt_test_register(const char *name, const char *group, MktTestFunc func);
+void vs_test_register(const char *name, const char *group, VsTestFunc func);
 
 /* Register group fixtures (called automatically by GROUP_FIXTURE macro) */
-void mkt_test_register_group_fixture(
-		const char *group, MktFixtureFunc setup, MktFixtureFunc teardown);
+void vs_test_register_group_fixture(
+		const char *group, VsFixtureFunc setup, VsFixtureFunc teardown);
 
 /* Run all registered tests, returns 0 on success, 1 on failure */
-int mkt_test_run_all(
+int vs_test_run_all(
 		bool		 tap_output,
 		const char **test_filters,
 		int			 test_filter_count,
@@ -94,20 +94,20 @@ int mkt_test_run_all(
 		int			 group_filter_count);
 
 /* Internal: mark current test as failed */
-void mkt_test_fail(const char *file, int line, const char *msg);
+void vs_test_fail(const char *file, int line, const char *msg);
 
 /* Internal: check if running in TAP mode */
-bool mkt_test_is_tap_mode(void);
+bool vs_test_is_tap_mode(void);
 
 /* Internal: printf wrapper for tests */
-void mkt_test_printf(const char *fmt, ...)
+void vs_test_printf(const char *fmt, ...)
 		__attribute__((format(printf, 1, 2)));
 
 /* TEST_GROUP macro - sets the group for subsequent tests in this file */
-#define TEST_GROUP(group_name)                             \
-	static const char *_MKT_TEST_GROUP		= #group_name; \
-	static void (*_mkt_test_setup)(void)	= NULL;        \
-	static void (*_mkt_test_teardown)(void) = NULL
+#define TEST_GROUP(group_name)                            \
+	static const char *_VS_TEST_GROUP	   = #group_name; \
+	static void (*_vs_test_setup)(void)	   = NULL;        \
+	static void (*_vs_test_teardown)(void) = NULL
 
 /*
  * GROUP_FIXTURE - register per-group setup/teardown functions
@@ -124,12 +124,11 @@ void mkt_test_printf(const char *fmt, ...)
  *   // group_setup() runs before test1
  *   // group_teardown() runs after test2
  */
-#define GROUP_FIXTURE(setup_fn, teardown_fn)                              \
-	__attribute__((constructor)) static void _mkt_register_group_fixture( \
-			void)                                                         \
-	{                                                                     \
-		mkt_test_register_group_fixture(                                  \
-				_MKT_TEST_GROUP, setup_fn, teardown_fn);                  \
+#define GROUP_FIXTURE(setup_fn, teardown_fn)                                  \
+	__attribute__((constructor)) static void _vs_register_group_fixture(void) \
+	{                                                                         \
+		vs_test_register_group_fixture(                                       \
+				_VS_TEST_GROUP, setup_fn, teardown_fn);                       \
 	}
 
 /*
@@ -145,11 +144,11 @@ void mkt_test_printf(const char *fmt, ...)
  *       // my_setup() called before, my_teardown() called after
  *   }
  */
-#define TEST_FIXTURE(setup_fn, teardown_fn)                              \
-	__attribute__((constructor)) static void _mkt_register_fixture(void) \
-	{                                                                    \
-		_mkt_test_setup	   = setup_fn;                                   \
-		_mkt_test_teardown = teardown_fn;                                \
+#define TEST_FIXTURE(setup_fn, teardown_fn)                             \
+	__attribute__((constructor)) static void _vs_register_fixture(void) \
+	{                                                                   \
+		_vs_test_setup	  = setup_fn;                                   \
+		_vs_test_teardown = teardown_fn;                                \
 	}
 
 /* Deprecated alias for TEST_FIXTURE (for backward compatibility) */
@@ -170,20 +169,20 @@ void mkt_test_printf(const char *fmt, ...)
  *       // Memory context active, allocations are isolated
  *   }
  */
-#define TEST_MEMCTX_FIXTURE()                                        \
-	static MktMemCtx _mkt_test_memctx = NULL;                        \
-	static void		 _mkt_memctx_setup(void)                         \
-	{                                                                \
-		_mkt_test_memctx = mkt_memctx_create(NULL, _MKT_TEST_GROUP); \
-		mkt_memctx_switch(_mkt_test_memctx);                         \
-	}                                                                \
-	static void _mkt_memctx_teardown(void)                           \
-	{                                                                \
-		mkt_memctx_switch(NULL);                                     \
-		mkt_memctx_delete(_mkt_test_memctx);                         \
-		_mkt_test_memctx = NULL;                                     \
-	}                                                                \
-	TEST_FIXTURE(_mkt_memctx_setup, _mkt_memctx_teardown)
+#define TEST_MEMCTX_FIXTURE()                                     \
+	static VsMemCtx _vs_test_memctx = NULL;                       \
+	static void		_vs_memctx_setup(void)                        \
+	{                                                             \
+		_vs_test_memctx = vs_memctx_create(NULL, _VS_TEST_GROUP); \
+		vs_memctx_switch(_vs_test_memctx);                        \
+	}                                                             \
+	static void _vs_memctx_teardown(void)                         \
+	{                                                             \
+		vs_memctx_switch(NULL);                                   \
+		vs_memctx_delete(_vs_test_memctx);                        \
+		_vs_test_memctx = NULL;                                   \
+	}                                                             \
+	TEST_FIXTURE(_vs_memctx_setup, _vs_memctx_teardown)
 
 /*
  * TEST_PRINT - printf for tests that respects TAP format
@@ -195,24 +194,24 @@ void mkt_test_printf(const char *fmt, ...)
  * Usage:
  *   TEST_PRINT("Detected value: %d\n", value);
  */
-#define TEST_PRINT(...) mkt_test_printf(__VA_ARGS__)
+#define TEST_PRINT(...) vs_test_printf(__VA_ARGS__)
 
 /* TEST macro - defines and auto-registers a test */
 #define TEST(name)                                                 \
-	static void test_##name##_impl(MktTestResult *result);         \
-	static void test_##name(MktTestResult *result)                 \
+	static void test_##name##_impl(VsTestResult *result);          \
+	static void test_##name(VsTestResult *result)                  \
 	{                                                              \
-		if (_mkt_test_setup)                                       \
-			_mkt_test_setup();                                     \
+		if (_vs_test_setup)                                        \
+			_vs_test_setup();                                      \
 		test_##name##_impl(result);                                \
-		if (_mkt_test_teardown)                                    \
-			_mkt_test_teardown();                                  \
+		if (_vs_test_teardown)                                     \
+			_vs_test_teardown();                                   \
 	}                                                              \
 	__attribute__((constructor)) static void register_##name(void) \
 	{                                                              \
-		mkt_test_register(#name, _MKT_TEST_GROUP, test_##name);    \
+		vs_test_register(#name, _VS_TEST_GROUP, test_##name);      \
 	}                                                              \
-	static void test_##name##_impl(MktTestResult *result)
+	static void test_##name##_impl(VsTestResult *result)
 
 /*
  * TEST_WITH_FIXTURE - define a test with its own specific setup/teardown
@@ -233,22 +232,22 @@ void mkt_test_printf(const char *fmt, ...)
  *   }
  */
 #define TEST_WITH_FIXTURE(name, setup_fn, teardown_fn)             \
-	static void test_##name##_impl(MktTestResult *result);         \
-	static void test_##name(MktTestResult *result)                 \
+	static void test_##name##_impl(VsTestResult *result);          \
+	static void test_##name(VsTestResult *result)                  \
 	{                                                              \
-		if (_mkt_test_setup)                                       \
-			_mkt_test_setup();                                     \
+		if (_vs_test_setup)                                        \
+			_vs_test_setup();                                      \
 		setup_fn();                                                \
 		test_##name##_impl(result);                                \
 		teardown_fn();                                             \
-		if (_mkt_test_teardown)                                    \
-			_mkt_test_teardown();                                  \
+		if (_vs_test_teardown)                                     \
+			_vs_test_teardown();                                   \
 	}                                                              \
 	__attribute__((constructor)) static void register_##name(void) \
 	{                                                              \
-		mkt_test_register(#name, _MKT_TEST_GROUP, test_##name);    \
+		vs_test_register(#name, _VS_TEST_GROUP, test_##name);      \
 	}                                                              \
-	static void test_##name##_impl(MktTestResult *result)
+	static void test_##name##_impl(VsTestResult *result)
 
 /*
  * TEST_PARAMETERIZED - run a test multiple times with different parameters
@@ -286,13 +285,13 @@ void mkt_test_printf(const char *fmt, ...)
 
 /* Helper macros to generate test wrappers for each iteration */
 #define _TEST_PARAM_WRAPPER(name, iter)                                       \
-	static void test_##name##_##iter(MktTestResult *result)                   \
+	static void test_##name##_##iter(VsTestResult *result)                    \
 	{                                                                         \
-		if (_mkt_test_setup)                                                  \
-			_mkt_test_setup();                                                \
+		if (_vs_test_setup)                                                   \
+			_vs_test_setup();                                                 \
 		test_##name##_impl(result, iter, _##name##_param_names[iter]);        \
-		if (_mkt_test_teardown)                                               \
-			_mkt_test_teardown();                                             \
+		if (_vs_test_teardown)                                                \
+			_vs_test_teardown();                                              \
 	}                                                                         \
 	__attribute__((constructor)) static void register_##name##_##iter(void)   \
 	{                                                                         \
@@ -303,7 +302,7 @@ void mkt_test_printf(const char *fmt, ...)
 				"%s_%s",                                                      \
 				#name,                                                        \
 				_##name##_param_names[iter]);                                 \
-		mkt_test_register(test_name, _MKT_TEST_GROUP, test_##name##_##iter);  \
+		vs_test_register(test_name, _VS_TEST_GROUP, test_##name##_##iter);    \
 	}
 
 /* Generate wrappers for supported iteration counts (2-10) */
@@ -348,14 +347,14 @@ void mkt_test_printf(const char *fmt, ...)
 	_CONCAT(_TEST_PARAM_WRAPPERS_, count)(name)
 
 /* Main TEST_PARAMETERIZED macro */
-#define TEST_PARAMETERIZED(name, ...)                                        \
-	static const char *_##name##_param_names[] = {__VA_ARGS__};              \
-	static void		   test_##name##_impl(                                   \
-			   MktTestResult *result, int iteration, const char *param); \
-	_TEST_PARAM_DISPATCH(name, _COUNT_ARGS(__VA_ARGS__))                     \
-	static void test_##name##_impl(                                          \
-			MktTestResult			   *result,                              \
-			int __attribute__((unused)) iteration,                           \
+#define TEST_PARAMETERIZED(name, ...)                                       \
+	static const char *_##name##_param_names[] = {__VA_ARGS__};             \
+	static void		   test_##name##_impl(                                  \
+			   VsTestResult *result, int iteration, const char *param); \
+	_TEST_PARAM_DISPATCH(name, _COUNT_ARGS(__VA_ARGS__))                    \
+	static void test_##name##_impl(                                         \
+			VsTestResult			   *result,                             \
+			int __attribute__((unused)) iteration,                          \
 			const char __attribute__((unused)) * param)
 
 /* Assertion macros */
@@ -367,7 +366,7 @@ void mkt_test_printf(const char *fmt, ...)
 		{                                                                 \
 			char buf[256];                                                \
 			snprintf(buf, sizeof(buf), "%s (condition: %s)", msg, #cond); \
-			mkt_test_fail(__FILE__, __LINE__, buf);                       \
+			vs_test_fail(__FILE__, __LINE__, buf);                        \
 			return;                                                       \
 		}                                                                 \
 	} while (0)
@@ -380,7 +379,7 @@ void mkt_test_printf(const char *fmt, ...)
 		{                                                                 \
 			char buf[256];                                                \
 			snprintf(buf, sizeof(buf), "%s (condition: %s)", msg, #cond); \
-			mkt_test_fail(__FILE__, __LINE__, buf);                       \
+			vs_test_fail(__FILE__, __LINE__, buf);                        \
 			return;                                                       \
 		}                                                                 \
 	} while (0)
@@ -399,27 +398,27 @@ void mkt_test_printf(const char *fmt, ...)
 					msg,                                 \
 					(long long)(expected),               \
 					(long long)(actual));                \
-			mkt_test_fail(__FILE__, __LINE__, buf);      \
+			vs_test_fail(__FILE__, __LINE__, buf);       \
 			return;                                      \
 		}                                                \
 	} while (0)
 
-#define ASSERT_NEQ(val1, val2, msg)                 \
-	do                                              \
-	{                                               \
-		(void)result;                               \
-		if ((val1) == (val2))                       \
-		{                                           \
-			char buf[256];                          \
-			snprintf(                               \
-					buf,                            \
-					sizeof(buf),                    \
-					"%s (both values: %lld)",       \
-					msg,                            \
-					(long long)(val1));             \
-			mkt_test_fail(__FILE__, __LINE__, buf); \
-			return;                                 \
-		}                                           \
+#define ASSERT_NEQ(val1, val2, msg)                \
+	do                                             \
+	{                                              \
+		(void)result;                              \
+		if ((val1) == (val2))                      \
+		{                                          \
+			char buf[256];                         \
+			snprintf(                              \
+					buf,                           \
+					sizeof(buf),                   \
+					"%s (both values: %lld)",      \
+					msg,                           \
+					(long long)(val1));            \
+			vs_test_fail(__FILE__, __LINE__, buf); \
+			return;                                \
+		}                                          \
 	} while (0)
 
 #define ASSERT_FLOAT_EQ(expected, actual, epsilon, msg)        \
@@ -440,38 +439,38 @@ void mkt_test_printf(const char *fmt, ...)
 					(double)(expected),                        \
 					(double)(actual),                          \
 					_diff);                                    \
-			mkt_test_fail(__FILE__, __LINE__, buf);            \
+			vs_test_fail(__FILE__, __LINE__, buf);             \
 			return;                                            \
 		}                                                      \
 	} while (0)
 
-#define ASSERT_NULL(ptr, msg)                       \
-	do                                              \
-	{                                               \
-		(void)result;                               \
-		if ((ptr) != NULL)                          \
-		{                                           \
-			char buf[256];                          \
-			snprintf(                               \
-					buf,                            \
-					sizeof(buf),                    \
-					"%s (pointer: %p)",             \
-					msg,                            \
-					(void *)(ptr));                 \
-			mkt_test_fail(__FILE__, __LINE__, buf); \
-			return;                                 \
-		}                                           \
+#define ASSERT_NULL(ptr, msg)                      \
+	do                                             \
+	{                                              \
+		(void)result;                              \
+		if ((ptr) != NULL)                         \
+		{                                          \
+			char buf[256];                         \
+			snprintf(                              \
+					buf,                           \
+					sizeof(buf),                   \
+					"%s (pointer: %p)",            \
+					msg,                           \
+					(void *)(ptr));                \
+			vs_test_fail(__FILE__, __LINE__, buf); \
+			return;                                \
+		}                                          \
 	} while (0)
 
-#define ASSERT_NOT_NULL(ptr, msg)                   \
-	do                                              \
-	{                                               \
-		(void)result;                               \
-		if ((ptr) == NULL)                          \
-		{                                           \
-			mkt_test_fail(__FILE__, __LINE__, msg); \
-			return;                                 \
-		}                                           \
+#define ASSERT_NOT_NULL(ptr, msg)                  \
+	do                                             \
+	{                                              \
+		(void)result;                              \
+		if ((ptr) == NULL)                         \
+		{                                          \
+			vs_test_fail(__FILE__, __LINE__, msg); \
+			return;                                \
+		}                                          \
 	} while (0)
 
 #define ASSERT_STR_EQ(expected, actual, msg)                 \
@@ -488,7 +487,7 @@ void mkt_test_printf(const char *fmt, ...)
 					msg,                                     \
 					(expected),                              \
 					(actual));                               \
-			mkt_test_fail(__FILE__, __LINE__, buf);          \
+			vs_test_fail(__FILE__, __LINE__, buf);           \
 			return;                                          \
 		}                                                    \
 	} while (0)
@@ -499,9 +498,9 @@ void mkt_test_printf(const char *fmt, ...)
 		(void)result;                                 \
 		if (memcmp((expected), (actual), (len)) != 0) \
 		{                                             \
-			mkt_test_fail(__FILE__, __LINE__, msg);   \
+			vs_test_fail(__FILE__, __LINE__, msg);    \
 			return;                                   \
 		}                                             \
 	} while (0)
 
-#endif /* MKT_TEST_H */
+#endif /* VS_TEST_H */
