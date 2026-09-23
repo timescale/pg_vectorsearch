@@ -37,7 +37,14 @@ $$ LANGUAGE sql;
 --    extension is pinned to a separate schema anymore.
 -- =====================================================================
 
+-- The prerelease notice is a WARNING naming the version, so it is
+-- suppressed around every CREATE EXTENSION below. Asserting it would pin
+-- the version string in the expected output, and the line appears only
+-- while the version carries a prerelease suffix -- so the expected file
+-- would have to change on every release and every dev-cycle bump.
+SET client_min_messages = error;  -- prerelease notice
 CREATE EXTENSION pg_vectorsearch;
+RESET client_min_messages;
 
 SELECT to_regtype('public.vec32') IS NOT NULL
    AND to_regtype('public.vec16') IS NOT NULL
@@ -84,7 +91,9 @@ SELECT to_regprocedure('public.prism_rebalance(regclass,integer)') IS NULL
 -- =====================================================================
 
 CREATE SCHEMA reloc_a;
+SET client_min_messages = error;  -- prerelease notice
 CREATE EXTENSION pg_vectorsearch SCHEMA reloc_a;
+RESET client_min_messages;
 
 SELECT to_regtype('reloc_a.vec32') IS NOT NULL
    AND to_regtype('reloc_a.vec16') IS NOT NULL
@@ -150,7 +159,9 @@ SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_vectorsearch')
 -- extension must remain fully usable afterward.
 
 CREATE SCHEMA reloc_a;
+SET client_min_messages = error;  -- prerelease notice
 CREATE EXTENSION pg_vectorsearch SCHEMA reloc_a;
+RESET client_min_messages;
 CREATE SCHEMA reloc_target;
 
 ALTER EXTENSION pg_vectorsearch SET SCHEMA reloc_target;

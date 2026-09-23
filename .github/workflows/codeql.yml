@@ -9,12 +9,14 @@ on:
       - 'src/**'
       - 'include/**'
       - 'meson.build'
+      - 'VERSION'
   pull_request:
     branches: [main]
     paths:
       - 'src/**'
       - 'include/**'
       - 'meson.build'
+      - 'VERSION'
   schedule:
     - cron: '0 6 * * 1'  # Weekly on Monday at 6am (always runs)
 
