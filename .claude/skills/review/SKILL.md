@@ -181,10 +181,11 @@ or pruning weakened in a way that lets more candidates through to the
 expensive rerank step.
 
 Code inspection alone can miss a regression a benchmark would catch
-immediately. When the plan claimed a specific performance goal (or the
-change is anywhere near the hot query path), get an actual before/after
-benchmark run — release build, per this repo's profiling docs
-(`scripts/profile.sh`, `scripts/profile-bench.sh`) — rather than accepting
+immediately. When the plan claimed a specific performance goal, or the
+change touches a hot path — quantization, distance measures, or the
+search path — invoke the `profiling` skill. Profile the same workload on
+a release build before the change and after it, and compare the two.
+A profile of only the new code is not a comparison. Do not accept
 "looks fine" from a read-through alone.
 
 Take extra note of memory usage patterns. There **MUST** be no memory

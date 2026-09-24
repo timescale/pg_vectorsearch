@@ -138,26 +138,8 @@ subset of the code.
 
 ## Local Development
 
-### Claude Code Environment
-
-Claude Code runs in a sandboxed environment with restricted `/tmp` access. Use
-`/tmp/claude/` for temporary files instead of `/tmp/` directly. Some tools
-(like `lcov`) have `/tmp` hardcoded - use `lcov --tempdir` to specify an
-alternative, or use `gcovr` for coverage instead.
-
-### Related Project Checkouts
-
-**PostgreSQL extensions:**
-
-- `../pgvector/` — Vector type and operators (dependency)
-- `../pgvectorscale/` — DiskANN-based vector index
-- `../pg_textsearch/` — BM25 full-text search
-
-**ANN/quantization reference implementations:**
-
-- `../faiss/` — Facebook AI Similarity Search (IVF, RaBitQ)
-- `../RaBitQ-Library/` — Official RaBitQ implementation from paper authors
-- `../google-research/scann/` — Google ScaNN (in-memory ANN)
+Machine-specific paths (sibling checkouts, sandbox temp dirs, local PostgreSQL
+layout) live in `CLAUDE.local.md`, not here.
 
 ### Debugging
 
@@ -170,44 +152,11 @@ For crashes:
 - On Linux, use `coredumpctl debug` to debug the latest crash
 - Always check the stacktrace first before adding debug statements
 
-The `pgm` tool can help with attaching to managed PostgreSQL instances on the
-system, if present.
-
 ### Profiling
 
-Profile frequently to validate performance decisions and catch regressions.
-Maintain a performance log over time to track trends.
-
-**Prerequisites:**
-
-Profiling requires lowering `perf_event_paranoid` to allow non-root profiling:
-
-```bash
-# Temporary (until reboot)
-sudo sysctl -w kernel.perf_event_paranoid=1
-
-# Permanent (add to /etc/sysctl.conf)
-echo "kernel.perf_event_paranoid = 1" | sudo tee -a /etc/sysctl.conf
-```
-
-**Usage:**
-
-```bash
-# Profile any command
-./scripts/profile.sh ./bin/vectorsearch bench distance --dim 768 --count 10000
-
-# Quick benchmark profiling
-./scripts/profile-bench.sh 768 10000 avx512
-
-# Profile cache misses
-./scripts/profile.sh --events cache-misses ./bin/vectorsearch bench distance
-```
-
-Output: `profiles/flamegraph.svg` (open in browser)
-
-All profiling outputs are saved to the `profiles/` directory (gitignored).
-
-See `docs/development.md` for detailed profiling documentation.
+Profile to validate a performance decision or catch a regression. The
+workflow (release build, `scripts/profile.sh`, how to read the flame graph)
+lives in the `profiling` skill rather than here.
 
 ### Benchmarking
 
@@ -285,6 +234,26 @@ vec32_dot_product(const Vec32 *v1, const Vec32 *v2)
   ...
 }
 ```
+
+### Code comments
+
+Keep comments short, lean, and to the point. First describe in one sentence what
+a function or variable is for, then focus on describing any non-obvious
+behavior. Write for humans. Avoid a lot of ';' and ':'-style writing, and
+generally obtuse language.
+
+Prefer self-documenting code using aptly-named functions and variables over
+expansive comments.
+
+A self-check is to see if the ratio between code and comments in a change leans
+towards comments. Err on the side of too short rather than too long comments.
+
+Never explain what something did in the past or before a change (unless
+motivated by a serious bug that we should avoid regressing back to). Never
+explain the history of changes. Instead, focus on what the code does NOW, not
+what it did in the past. We don't care about past behavior and neither does the
+humans reading the code and comments--- they care about understanding the code
+as is in the current state.
 
 ## Important Notes
 
@@ -423,6 +392,7 @@ post-merge cleanup) lives in two Claude Code skills rather than here:
   addressing review feedback, cleaning up after merge.
 - `create-pr` — pre-commit checks, committing, rebasing, pushing, and
   opening the PR.
+- `profiling` — perf and flame graphs for a performance change.
 
 <!-- Links -->
 [pgvector]: https://github.com/pgvector/pgvector
