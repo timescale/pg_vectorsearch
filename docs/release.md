@@ -142,6 +142,14 @@ Then either run the script or drop the branch.
 The script refuses to run once its branch is gone, rather than failing
 inside `git push`, so a stale one left in `/tmp` cannot surprise you.
 
+A release can only be cut once: if `chore/release-<version>` already
+exists, locally or on the remote, the run stops before touching anything
+rather than failing inside `git checkout -b`. Which of the two it found
+decides the advice, because the situations differ — a branch on the
+remote means the release is already in flight and has a PR to look at,
+while a purely local one is usually an abandoned attempt to delete and
+redo.
+
 The PR gets the `release` label and the matching `Release <version>`
 milestone (warning and continuing if none matches), and its body records
 the next development version, where a reviewer can change it to request

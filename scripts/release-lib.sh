@@ -158,6 +158,31 @@ require_tag_absent() {
     return 0
 }
 
+# The release branch must not exist yet, locally or on the release remote.
+#
+# Without this, a second run of prepare-release.sh fails inside
+# `git checkout -b` with git's own "a branch named ... already exists",
+# after the version prompts and with no hint about which of the two
+# situations it is: a release already in flight, or a branch left behind
+# by a run that was abandoned. Both have an obvious next step, but only
+# once you know which one you are in.
+require_branch_absent() {
+    local branch="$1" remote
+    remote="$(release_remote)"
+    git rev-parse -q --verify "refs/heads/$branch" >/dev/null &&
+        die "branch $branch already exists locally -- this release may" \
+            "already be in flight (check for an open PR on" \
+            "$(repo_slug)); if it was an abandoned attempt, delete it" \
+            "with 'git branch -D $branch' and run again"
+    git ls-remote --exit-code --heads "$remote" "refs/heads/$branch" \
+        >/dev/null 2>&1 &&
+        die "branch $branch already exists on $remote -- the release is" \
+            "already in flight (look for its PR on $(repo_slug)); to" \
+            "start over, close that PR and delete the branch with" \
+            "'git push $remote --delete $branch'"
+    return 0
+}
+
 # The release branch must be cut from an up-to-date base, or the
 # generated changelog delta and the tagged commit disagree with what
 # everyone else sees.

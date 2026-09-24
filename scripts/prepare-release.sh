@@ -340,6 +340,7 @@ RELEASE_LABEL="release"
 # ----------------------------------------------------------------
 
 require_tag_absent "$VERSION"
+require_branch_absent "$BRANCH"
 require_changelog_tool
 
 # An incompatible format change cannot ship in a patch release; catching
