@@ -137,10 +137,14 @@ from the PR body instead, so the copy in step 5 still has to match.
 Any later commit on this branch has to carry the trailer too, or it
 becomes the tip and the same read fails.
 
-```
-docs: fill in the X.Y.Z release notes
+The trailer is the next cycle, not the version just released.
+Releasing `0.2.0` from `main` records `0.3.0-dev`. A patch release
+from an `X.Y.x` branch records the next patch, such as `0.2.1-dev`.
 
-Next-Version: X.Y.Z-dev
+```
+docs: fill in the 0.2.0 release notes
+
+Next-Version: 0.3.0-dev
 ```
 
 Stage `CHANGELOG.md` by name. Run `./scripts/ci/release-check.sh`
@@ -155,17 +159,18 @@ the highlights section, without its heading, and keep the trailer as
 the last paragraph:
 
 ```markdown
-Releases `X.Y.Z`.
+Releases `0.2.0`.
 
 ## Highlights
 
 <highlights, as written in CHANGELOG.md>
 
-Next-Version: X.Y.Z-dev
+Next-Version: 0.3.0-dev
 ```
 
-`Next-Version` must be the value passed to the script, and it must
-end the file. A squash merge uses this body as the commit message,
+`Next-Version` must be the value passed to the script, not the
+version being released, and it must end the file. A squash merge
+uses this body as the commit message,
 and git only reads a trailer in the last paragraph. No `FILL-IN` in
 the body. That string would land on `main`.
 
