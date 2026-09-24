@@ -262,17 +262,24 @@ A trailer rather than prose because the release pipeline reads it back:
 value off the commit that landed on `main` with no API call and no
 parsing of human text.
 
-It is written in two places, because which one survives depends on how
-the PR is merged. A **rebase** merge keeps the release commit and its
-trailer. A **squash** merge builds a new commit message from the PR body
-(the repository's `squash_merge_commit_message` is `PR_BODY`), so the
-body's copy becomes the trailer on `main`. Either way `main`'s commit
-carries it, and both copies are generated from the same value, so they
-cannot disagree.
+The script writes it in two places: the release commit, and the PR
+body. Which one survives depends on the merge. A **rebase** merge
+keeps the branch commits, and the post-merge step reads the trailer
+with `git log -1`, so the tip commit is the one that counts. A
+**squash** merge builds a new commit message from the PR body
+(`squash_merge_commit_message` is `PR_BODY`), so the body's copy is
+the one that lands.
+
+The `release` skill adds a third copy, by hand, on the notes commit.
+That commit is the tip, so a rebase merge reads it rather than the
+release commit. The three copies are not generated together and can
+drift. They must be the same value. A later commit on the release
+branch has to carry the trailer too, or it becomes the tip and the
+rebase read misses it.
 
 Editing it is how a different bump gets requested — a major one, say.
-Edit the trailer in whichever of the two the merge will use, and keep it
-as the last paragraph: git only parses a trailer block that ends the
+Change every copy the merge might consume, and keep each one the
+last paragraph: git only parses a trailer block that ends the
 message.
 
 **On the interactive path, the notes are finished in the PR, not before it.**
