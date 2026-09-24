@@ -1,0 +1,56 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: release-check
+
+# Checks release PRs. A release PR is an ordinary PR, so build.yml
+# already builds and tests it; what this adds is the release-specific
+# assertions nothing else makes -- that the version is sane and untagged,
+# that CHANGELOG.md has a *finished* entry for it, and that an
+# incompatible on-disk format change is not shipping as a patch release.
+#
+# The changelog assertion is what holds an unfinished release: the PR is
+# opened with the notes template's FILL-IN placeholders still in it, and
+# this fails until they are gone.
+#
+# "Release PR" is decided by what the PR does, not by what its branch is
+# called: it sets VERSION to a version with no -dev suffix. Keying
+# on a branch name would mean a release PR cut from a differently-named
+# branch silently skipped its checks.
+#
+# The job always runs and decides internally, rather than being skipped by
+# an `if:`, so this reports a definite result on every PR -- which is what
+# a required status check needs.
+# Maintenance branches are included because patch releases are cut
+# there, and their release PR needs this gate as much as main's does.
+# Glob, not regex: filter patterns take [0-9] and *, not +.
+on:
+  pull_request:
+    branches:
+      - main
+      - '[0-9]*.[0-9]*.x'
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Release check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full depth: the check asserts no v<version> tag exists, and
+          # detecting a release PR needs the base branch to diff against.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check release PRs
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: ./scripts/ci/release-check.sh "origin/$BASE_REF"

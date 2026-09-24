@@ -1,5 +1,9 @@
 project('pg_vectorsearch', 'c',
-  version: '0.1.0',
+  # The version lives in ./VERSION -- one line, the single source of
+  # truth. Everything else derives from meson.project_version(): the
+  # control files, the version-named library, the versioned install
+  # SQL, VS_VERSION (pg_vectorsearch_version()) and the dist tarball.
+  version: files('VERSION'),
   default_options: [
     'c_std=c2x',  # C23 (use c2x for older meson/gcc compatibility)
     'warning_level=2',
