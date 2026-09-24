@@ -148,11 +148,13 @@ review_untracked() {
 }
 
 require_tag_absent() {
-    local tag="v$1"
+    local tag="v$1" remote
+    remote="$(release_remote)"
     git rev-parse -q --verify "refs/tags/$tag" >/dev/null &&
-        die "tag $tag already exists"
-    git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 &&
-        die "tag $tag already exists on origin"
+        die "tag $tag already exists locally"
+    git ls-remote --exit-code --tags "$remote" "refs/tags/$tag" \
+        >/dev/null 2>&1 &&
+        die "tag $tag already exists on $remote"
     return 0
 }
 
@@ -160,14 +162,15 @@ require_tag_absent() {
 # generated changelog delta and the tagged commit disagree with what
 # everyone else sees.
 require_branch_up_to_date() {
-    local branch="${1:-$(git branch --show-current)}"
-    git fetch -q origin "$branch" ||
-        die "cannot fetch origin/$branch"
+    local branch="${1:-$(git branch --show-current)}" remote
+    remote="$(release_remote)"
+    git fetch -q "$remote" "$branch" ||
+        die "cannot fetch $remote/$branch"
     local local_sha remote_sha
     local_sha="$(git rev-parse HEAD)"
     remote_sha="$(git rev-parse FETCH_HEAD)"
     [[ "$local_sha" == "$remote_sha" ]] ||
-        die "$branch is not in sync with origin/$branch" \
+        die "$branch is not in sync with $remote/$branch" \
             "(local $local_sha, remote $remote_sha)"
 }
 
@@ -175,26 +178,63 @@ require_branch_up_to_date() {
 # GitHub
 # ----------------------------------------------------------------
 
-# The GitHub repo slug (owner/name), from gh when available, else from
-# the origin remote URL.
+# The repository releases are published to, stated rather than guessed.
+#
+# Not from `gh repo view` or a remote: gh has no default repository when a
+# checkout has more than one GitHub remote, and `gh pr create` then fails
+# with "No default remote repository has been set" -- while deriving it
+# from a remote would let a misnamed origin aim a release at a fork. Which
+# repository this project releases to is a fact about the project, so it
+# is written down. RELEASE_REPO overrides it for testing against a fork.
+: "${RELEASE_REPO:=timescale/pg_vectorsearch}"
+
 repo_slug() {
-    if command -v gh >/dev/null 2>&1; then
-        gh repo view --json nameWithOwner --jq .nameWithOwner \
-            2>/dev/null && return
-    fi
-    git remote get-url origin |
-        sed -e 's#^git@github.com:##' -e 's#^https://github.com/##' \
-            -e 's#\.git$##'
+    printf '%s\n' "$RELEASE_REPO"
+}
+
+# The slug a remote URL points at, for all three spellings:
+# git@host:owner/repo, https://host/owner/repo and
+# ssh://git@host/owner/repo, with or without a .git suffix.
+remote_slug() {
+    sed -E -e 's#\.git$##' -e 's#^.*github\.com[:/]##' <<<"$1"
+}
+
+# The remote that points at RELEASE_REPO.
+#
+# Not assumed to be "origin": a fork workflow commonly has origin as the
+# fork and the canonical repository under another name, and pushing the
+# release branch to a fork while opening the PR against the canonical
+# repository would fail with the branch missing. Found by URL, so the
+# remote's name does not matter.
+VS_RELEASE_REMOTE=""
+release_remote() {
+    [[ -z "$VS_RELEASE_REMOTE" ]] || {
+        printf '%s\n' "$VS_RELEASE_REMOTE"
+        return 0
+    }
+    local name url
+    while read -r name url; do
+        if [[ "$(remote_slug "$url")" == "$RELEASE_REPO" ]]; then
+            VS_RELEASE_REMOTE="$name"
+            printf '%s\n' "$name"
+            return 0
+        fi
+    done < <(git remote -v | awk '$3 == "(push)" { print $1, $2 }')
+
+    die "no remote points at $RELEASE_REPO (have:" \
+        "$(git remote | tr '\n' ' ')) -- add one, or pick another" \
+        "repository with --repo"
 }
 
 # Create a label if it does not exist. Idempotent; never fatal, because a
 # missing label must not stop a release.
 ensure_label() {
-    local name="$1" color="$2" description="$3"
-    gh label create "$name" --color "$color" --description "$description" \
-        >/dev/null 2>&1 ||
-        gh label list --json name --jq '.[].name' 2>/dev/null |
-        grep -qxF "$name" ||
+    local name="$1" color="$2" description="$3" slug
+    slug="$(repo_slug)"
+    gh label create "$name" --repo "$slug" --color "$color" \
+        --description "$description" >/dev/null 2>&1 ||
+        gh label list --repo "$slug" --json name --jq '.[].name' \
+            2>/dev/null | grep -qxF "$name" ||
         warn "could not create or find the '$name' label"
     return 0
 }

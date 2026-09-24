@@ -7,10 +7,18 @@
 #   --next-version X.Y.Z-s    the next development version
 #   --create-pr               push and open the PR without asking
 #   --ignore-untracked-files  do not ask about untracked files
+#   --repo owner/name         release to this repository instead
 #
-# Passing all four makes the run fully non-interactive, which is what
-# automation wants: it then never consults a terminal, so it cannot stall
-# on a runner that happens to allocate one.
+# Passing the first four makes the run fully non-interactive, which is
+# what automation wants: it then never consults a terminal, so it cannot
+# stall on a runner that happens to allocate one.
+#
+# --repo is for rehearsing the flow somewhere harmless -- a fork, say.
+# Releases go to timescale/pg_vectorsearch by default, stated rather than
+# read off a remote so that a differently-named origin cannot aim one at
+# the wrong place. Whichever repository is chosen, the branch is pushed to
+# the remote pointing at it, found by URL rather than by being called
+# "origin".
 #
 # Both versions are optional and are proposed from ./VERSION: the release
 # is that version with its prerelease suffix removed, and the next cycle
@@ -51,6 +59,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --create-pr) CREATE_PR=1; shift ;;
         --ignore-untracked-files) IGNORE_UNTRACKED_FILES=1; shift ;;
+        --repo)
+            [[ $# -ge 2 ]] || die "--repo needs an owner/name"
+            [[ "$2" == */* ]] || die "--repo wants owner/name, got '$2'"
+            RELEASE_REPO="$2"
+            VS_RELEASE_REMOTE=""  # drop any remote cached for the old one
+            shift 2 ;;
         --version)
             [[ $# -ge 2 ]] || die "--version needs a value"
             VERSION="$2"; shift 2 ;;
@@ -58,7 +72,7 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || die "--next-version needs a value"
             NEXT_VERSION="$2"; shift 2 ;;
         -h | --help)
-            sed -n '2,35p' "$0" | sed 's/^# \?//'; exit 0 ;;
+            sed -n '2,42p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) die "unexpected argument '$1' (see --help)" ;;
     esac
 done
@@ -231,7 +245,10 @@ write_pr_script() {
     PR_DIR="$(mktemp -d \
         "${TMPDIR:-/tmp}/pg_vectorsearch-release-$VERSION.XXXXXX")"
 
-    args=(--base "$BASE_BRANCH" --head "$BRANCH"
+    # --repo explicitly: with more than one GitHub remote gh has no
+    # default repository and `gh pr create` fails rather than guessing.
+    args=(--repo "$(repo_slug)"
+        --base "$BASE_BRANCH" --head "$BRANCH"
         --title "chore: release $VERSION"
         --label "$RELEASE_LABEL")
 
@@ -266,7 +283,7 @@ write_pr_script() {
             "branch $BRANCH does not exist -- run scripts/prepare-release.sh first"
         printf 'ensure_label %q %q %q\n' "$RELEASE_LABEL" 'bfd4f2' \
             'Release PR: merging it publishes a release'
-        printf 'git push -u origin %q\n' "$BRANCH"
+        printf 'git push -u %q %q\n' "$(release_remote)" "$BRANCH"
         printf 'gh pr create'
         printf ' %q' "${args[@]}"
         printf ' --body-file %q\n' "$PR_DIR/body.md"
