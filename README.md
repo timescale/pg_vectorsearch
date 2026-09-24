@@ -1,6 +1,6 @@
 # pg_vectorsearch
 
-[![Coverage](https://img.shields.io/endpoint?url=https://timescale.github.io/meerkat/coverage-badge.json)](https://timescale.github.io/meerkat/coverage/)
+[![Coverage](https://img.shields.io/endpoint?url=https://timescale.github.io/pg_vectorsearch/coverage-badge.json)](https://timescale.github.io/pg_vectorsearch/coverage/)
 
 A PostgreSQL extension for high-performance vector similarity search,
 providing PRISM (Partitioned Routing Index for Similarity Matching), an

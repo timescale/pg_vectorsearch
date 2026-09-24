@@ -1,5 +1,5 @@
 ---
-# Clang-tidy configuration for Meerkat
+# Clang-tidy configuration for pg_vectorsearch
 #
 # Disable checks that don't apply to portable C code or PostgreSQL extensions.
 

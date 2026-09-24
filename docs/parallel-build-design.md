@@ -13,7 +13,7 @@ both standalone (threadpool) and PostgreSQL (PG parallel workers) contexts.
 The core parallel logic lives in shared code (`src/index/`) with no PG
 dependencies — only the dispatch layer differs between standalone and PG.
 
-## Target: meerkat repo at ~/ClaudeWorkspace/meerkat/
+## Target: pg_vectorsearch repo at ~/ClaudeWorkspace/pg_vectorsearch/
 
 ## What to Parallelize
 

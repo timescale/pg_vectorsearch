@@ -29,12 +29,12 @@ CREATE OR REPLACE FUNCTION rabitq_params_cache(
     OUT refcount integer,
     OUT usage float8)
 RETURNS SETOF record
-AS '$libdir/meerkat_test_helpers', 'vs_test_rabitq_params_cache'
+AS '$libdir/pgvs_test_helpers', 'vs_test_rabitq_params_cache'
 LANGUAGE C PARALLEL RESTRICTED;
 
 CREATE OR REPLACE FUNCTION rabitq_cache_clear()
 RETURNS integer
-AS '$libdir/meerkat_test_helpers', 'vs_test_rabitq_cache_clear'
+AS '$libdir/pgvs_test_helpers', 'vs_test_rabitq_cache_clear'
 LANGUAGE C PARALLEL RESTRICTED;
 
 -- Restore the caller's echo setting captured above.
