@@ -142,13 +142,46 @@ Then either run the script or drop the branch.
 The script refuses to run once its branch is gone, rather than failing
 inside `git push`, so a stale one left in `/tmp` cannot surprise you.
 
-A release can only be cut once: if `chore/release-<version>` already
-exists, locally or on the remote, the run stops before touching anything
-rather than failing inside `git checkout -b`. Which of the two it found
-decides the advice, because the situations differ — a branch on the
-remote means the release is already in flight and has a PR to look at,
-while a purely local one is usually an abandoned attempt to delete and
-redo.
+### Re-cutting a version
+
+Cutting the same version twice is supported, because rehearsing the flow
+means doing it repeatedly and a cut that went wrong is easiest to redo
+from scratch. If `chore/release-<version>` already exists — locally, on
+the remote, or both — the run says so and asks:
+
+```
+WARNING: chore/release-0.1.0 already exists locally and on origin
+WARNING: it has an open PR: https://github.com/timescale/pg_vectorsearch/pull/278
+         -- overwriting force-pushes over the commit that PR is reviewing
+Overwrite chore/release-0.1.0 and force-push over it? [y/N]
+```
+
+`--force` answers it up front, for automation. With no terminal and no
+flag the answer is **no**: unlike untracked files, carrying on here would
+destroy work.
+
+The branch is then recreated with `git checkout -B`, and the push carries
+`--force-with-lease` pinned to the commit the check looked at — so it
+refuses if the branch moved in between, which is exactly when somebody
+else is working on it:
+
+```
+ ! [rejected]  chore/release-0.1.0 -> chore/release-0.1.0 (stale info)
+```
+
+What makes overwriting safe to offer at all is that the tag check runs
+first. A version that has shipped has a `v<version>` tag, so it is
+refused whatever the flags:
+
+```
+ERROR: tag v0.1.0 already exists locally
+```
+
+Re-running with a PR already open updates that PR rather than opening a
+second one, and **leaves its body alone** — an open PR has probably had
+its release notes edited, and replacing them with a freshly generated
+template would throw that away. The newly generated body is written to
+the temporary directory if you want to diff against it.
 
 The PR gets the `release` label and the matching `Release <version>`
 milestone, warning and continuing if none matches.

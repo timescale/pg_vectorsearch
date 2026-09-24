@@ -158,29 +158,35 @@ require_tag_absent() {
     return 0
 }
 
-# The release branch must not exist yet, locally or on the release remote.
-#
-# Without this, a second run of prepare-release.sh fails inside
-# `git checkout -b` with git's own "a branch named ... already exists",
-# after the version prompts and with no hint about which of the two
-# situations it is: a release already in flight, or a branch left behind
-# by a run that was abandoned. Both have an obvious next step, but only
-# once you know which one you are in.
-require_branch_absent() {
-    local branch="$1" remote
-    remote="$(release_remote)"
-    git rev-parse -q --verify "refs/heads/$branch" >/dev/null &&
-        die "branch $branch already exists locally -- this release may" \
-            "already be in flight (check for an open PR on" \
-            "$(repo_slug)); if it was an abandoned attempt, delete it" \
-            "with 'git branch -D $branch' and run again"
-    git ls-remote --exit-code --heads "$remote" "refs/heads/$branch" \
-        >/dev/null 2>&1 &&
-        die "branch $branch already exists on $remote -- the release is" \
-            "already in flight (look for its PR on $(repo_slug)); to" \
-            "start over, close that PR and delete the branch with" \
-            "'git push $remote --delete $branch'"
-    return 0
+# Does the release branch already exist? Asked rather than asserted,
+# because a second run of prepare-release.sh for the same version is a
+# normal thing to want -- rehearsing the flow, or redoing a cut that went
+# wrong -- and the caller decides whether to overwrite. What must not
+# happen is the raw `git checkout -b` failure with git's own "a branch
+# named ... already exists", after the version prompts and with no hint
+# about which situation it is.
+branch_exists_local() {
+    git rev-parse -q --verify "refs/heads/$1" >/dev/null
+}
+
+branch_exists_remote() {
+    git ls-remote --exit-code --heads "$(release_remote)" \
+        "refs/heads/$1" >/dev/null 2>&1
+}
+
+# The commit the release remote currently has for a branch, or nothing.
+# Read once and reused as a --force-with-lease value, so an overwrite
+# refuses if the branch moved between the check and the push.
+remote_branch_sha() {
+    git ls-remote --heads "$(release_remote)" "refs/heads/$1" |
+        cut -f1
+}
+
+# The URL of an open PR for a head branch, or nothing. Metadata, so a
+# failure to look it up is never fatal.
+open_pr_url() {
+    gh pr list --repo "$(repo_slug)" --head "$1" --state open \
+        --json url --jq '.[0].url // empty' 2>/dev/null || true
 }
 
 # The release branch must be cut from an up-to-date base, or the

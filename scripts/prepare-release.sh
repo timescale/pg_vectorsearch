@@ -7,9 +7,10 @@
 #   --next-version X.Y.Z-s    the next development version
 #   --create-pr               push and open the PR without asking
 #   --ignore-untracked-files  do not ask about untracked files
+#   --force                   overwrite an existing release branch
 #   --repo owner/name         release to this repository instead
 #
-# Passing the first four makes the run fully non-interactive, which is
+# Passing the first five makes the run fully non-interactive, which is
 # what automation wants: it then never consults a terminal, so it cannot
 # stall on a runner that happens to allocate one.
 #
@@ -36,6 +37,13 @@
 # the real changelog entry and a working PR script to read, and prints the
 # two commands that undo it.
 #
+# Re-cutting the same version is supported, since rehearsing the flow
+# means doing it repeatedly. An existing release branch is overwritten
+# only after asking, or up front with --force, and the push then carries
+# --force-with-lease so it refuses if the branch moved since the check.
+# A tagged version is refused outright, whatever the flags: that release
+# has shipped.
+#
 # The release notes are *not* completed here. The PR is opened with the
 # template's FILL-IN placeholders still in it, to be finished in the PR
 # where they get reviewed -- and .github/workflows/release-check.yml
@@ -52,6 +60,7 @@ require_repo_root
 
 CREATE_PR=0
 IGNORE_UNTRACKED_FILES=0
+FORCE=0
 VERSION=""
 NEXT_VERSION=""
 
@@ -59,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --create-pr) CREATE_PR=1; shift ;;
         --ignore-untracked-files) IGNORE_UNTRACKED_FILES=1; shift ;;
+        --force) FORCE=1; shift ;;
         --repo)
             [[ $# -ge 2 ]] || die "--repo needs an owner/name"
             [[ "$2" == */* ]] || die "--repo wants owner/name, got '$2'"
@@ -72,7 +82,7 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || die "--next-version needs a value"
             NEXT_VERSION="$2"; shift 2 ;;
         -h | --help)
-            sed -n '2,42p' "$0" | sed 's/^# \?//'; exit 0 ;;
+            sed -n '2,52p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) die "unexpected argument '$1' (see --help)" ;;
     esac
 done
@@ -185,6 +195,57 @@ note_format_change() {
         { print }
     ' CHANGELOG.md >CHANGELOG.md.new
     mv CHANGELOG.md.new CHANGELOG.md
+}
+
+# ----------------------------------------------------------------
+# An existing release branch
+# ----------------------------------------------------------------
+
+# Re-cutting a version whose branch already exists is a normal thing to
+# want: rehearsing the flow means doing it repeatedly, and a cut that
+# went wrong is easiest to redo from scratch. So this asks rather than
+# refuses -- but it asks, because the branch may be somebody's release in
+# flight with reviewed notes on it.
+#
+# What makes overwriting safe to offer at all is require_tag_absent
+# having already run: a version that shipped has a tag, and this is never
+# reached for one.
+#
+# REUSE_BRANCH then selects `git checkout -B` over `-b`, and
+# REMOTE_BRANCH_SHA becomes the --force-with-lease value, so the push
+# refuses if the remote branch moved between that check and the push.
+REUSE_BRANCH=0
+REMOTE_BRANCH_SHA=""
+
+resolve_branch_reuse() {
+    local where="" pr=""
+
+    branch_exists_local "$BRANCH" && where="locally"
+    if branch_exists_remote "$BRANCH"; then
+        where="${where:+$where and }on $(release_remote)"
+        REMOTE_BRANCH_SHA="$(remote_branch_sha "$BRANCH")"
+    fi
+    [[ -n "$where" ]] || return 0
+
+    warn "$BRANCH already exists $where"
+
+    pr="$(open_pr_url "$BRANCH")"
+    [[ -z "$pr" ]] ||
+        warn "it has an open PR: $pr -- overwriting force-pushes over" \
+            "the commit that PR is reviewing"
+
+    if [[ "$FORCE" == 1 ]]; then
+        warn "overwriting it as asked (--force)"
+    elif confirm "Overwrite $BRANCH and force-push over it?"; then
+        :
+    else
+        # Unlike untracked files, defaulting to "carry on" here would
+        # destroy work, so no terminal means no.
+        die "aborted -- delete $BRANCH to start over, or pass --force" \
+            "to overwrite it"
+    fi
+
+    REUSE_BRANCH=1
 }
 
 # ----------------------------------------------------------------
@@ -310,10 +371,37 @@ write_pr_script() {
             "branch $BRANCH does not exist -- run scripts/prepare-release.sh first"
         printf 'ensure_label %q %q %q\n' "$RELEASE_LABEL" 'bfd4f2' \
             'Release PR: merging it publishes a release'
-        printf 'git push -u %q %q\n' "$(release_remote)" "$BRANCH"
-        printf 'gh pr create'
+        # Overwriting a remote branch needs a force, but a lease
+        # rather than a bare --force: the sha is the one resolve_branch_
+        # reuse looked at, so the push refuses if the branch moved since
+        # -- which is precisely when somebody else is working on it.
+        if [[ -n "$REMOTE_BRANCH_SHA" ]]; then
+            printf 'git push --force-with-lease=%q -u %q %q\n' \
+                "$BRANCH:$REMOTE_BRANCH_SHA" "$(release_remote)" "$BRANCH"
+        else
+            printf 'git push -u %q %q\n' "$(release_remote)" "$BRANCH"
+        fi
+
+        # A force-push updates the existing PR instead of needing a new
+        # one, and `gh pr create` fails outright when one is open. So the
+        # create is conditional, which is what makes re-running this
+        # script safe. The body is deliberately left alone: a PR that has
+        # been open has probably had its release notes edited, and
+        # replacing them with a freshly generated template would throw
+        # that away.
+        # $pr belongs to the generated script, so it must reach the
+        # file unexpanded.
+        # shellcheck disable=SC2016
+        printf 'if pr=$(open_pr_url %q) && [[ -n "$pr" ]]; then\n' "$BRANCH"
+        # shellcheck disable=SC2016
+        printf '    log "PR already open, updated by the push: $pr"\n'
+        printf '    log "its body was left as-is; this run generated %s"\n' \
+            "$PR_DIR/body.md"
+        printf 'else\n'
+        printf '    gh pr create'
         printf ' %q' "${args[@]}"
         printf ' --body-file %q\n' "$PR_DIR/body.md"
+        printf 'fi\n'
     } >"$PR_DIR/open-pr.sh"
     chmod +x "$PR_DIR/open-pr.sh"
 
@@ -378,7 +466,7 @@ RELEASE_LABEL="release"
 # ----------------------------------------------------------------
 
 require_tag_absent "$VERSION"
-require_branch_absent "$BRANCH"
+resolve_branch_reuse
 require_changelog_tool
 
 # An incompatible format change cannot ship in a patch release; catching
@@ -393,8 +481,13 @@ log "branch      $BRANCH"
 # Go
 # ----------------------------------------------------------------
 
-log "creating $BRANCH"
-git checkout -b "$BRANCH"
+if [[ "$REUSE_BRANCH" == 1 ]]; then
+    log "recreating $BRANCH"
+    git checkout -B "$BRANCH"
+else
+    log "creating $BRANCH"
+    git checkout -b "$BRANCH"
+fi
 
 log "setting VERSION to $VERSION"
 set_version "$VERSION"
