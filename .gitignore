@@ -60,3 +60,6 @@ regression.out
 
 # Agent files
 CLAUDE.local.md
+
+# Written into release tarballs by meson dist; never committed.
+.commit-sha
