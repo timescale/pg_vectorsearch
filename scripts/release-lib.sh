@@ -120,11 +120,13 @@ require_clean_tree() {
 # and shipping without it is worse than a prompt. So they are listed and
 # confirmed rather than passed over silently.
 #
-# $1 is a callback that asks a yes/no question and returns non-zero for
-# no or for "no terminal"; with nobody to ask, stray files in a checkout
+# $1 is 1 to skip the question and proceed; $2 is a callback that asks a
+# yes/no question and returns non-zero for no. They are always listed
+# either way -- knowing what was passed over costs a line and is worth
+# having in a release log. With nobody to ask, stray files in a checkout
 # must not fail a release, so it warns and continues.
 review_untracked() {
-    local confirm_fn="$1" untracked
+    local ignore="$1" confirm_fn="$2" untracked f
     untracked="$(git status --porcelain --untracked-files=normal |
         sed -n 's/^?? //p')"
     [[ -n "$untracked" ]] || return 0
@@ -134,10 +136,12 @@ review_untracked() {
         [[ -n "$f" ]] && echo "    $f" >&2
     done <<<"$untracked"
 
-    if [[ -t 0 ]]; then
+    if [[ "$ignore" == 1 ]]; then
+        warn "ignoring them as asked (--ignore-untracked-files)"
+    elif [[ -t 0 ]]; then
         "$confirm_fn" "Release anyway?" ||
-            die "aborted -- commit what belongs in the release, or move" \
-                "the rest aside"
+            die "aborted -- commit what belongs in the release, move the" \
+                "rest aside, or pass --ignore-untracked-files"
     else
         warn "no terminal to ask on; continuing"
     fi

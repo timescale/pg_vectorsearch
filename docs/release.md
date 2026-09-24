@@ -84,12 +84,24 @@ Release anyway? [y/N]
 
 With no terminal there is nobody to ask, and stray files in a checkout
 must not fail a release, so it warns and continues.
+`--ignore-untracked-files` skips the question outright; they are still
+listed, since knowing what was passed over costs one line.
 
 Then it proposes both versions from `VERSION` — the release is that
 version with its suffix removed, the next cycle a minor bump (a patch
 bump on an `X.Y.x` maintenance branch) — and asks you to confirm or edit
 them. With no terminal it takes the defaults, so automation needs no
 flags, and `--version` and `--next-version` override either.
+
+For automation, pass all four flags:
+
+```bash
+./scripts/prepare-release.sh --version 0.2.0 --next-version 0.3.0-dev \
+    --ignore-untracked-files --create-pr
+```
+
+That run never consults a terminal, so it cannot stall on a runner that
+happens to allocate one — relying on terminal detection alone would.
 
 It then creates `chore/release-<version>`, sets `VERSION`, writes the
 changelog entry and commits. None of that is asked about, because all of

@@ -3,9 +3,14 @@
 #
 # Usage: ./scripts/prepare-release.sh [options]
 #
-#   --version X.Y.Z         the version to release
-#   --next-version X.Y.Z-s  the development version the cycle reopens at
-#   --create-pr             push and open the PR without asking
+#   --version X.Y.Z           the version to release
+#   --next-version X.Y.Z-s    the next development version
+#   --create-pr               push and open the PR without asking
+#   --ignore-untracked-files  do not ask about untracked files
+#
+# Passing all four makes the run fully non-interactive, which is what
+# automation wants: it then never consults a terminal, so it cannot stall
+# on a runner that happens to allocate one.
 #
 # Both versions are optional and are proposed from ./VERSION: the release
 # is that version with its prerelease suffix removed, and the next cycle
@@ -38,12 +43,14 @@ source "$(dirname "$0")/release-lib.sh"
 require_repo_root
 
 CREATE_PR=0
+IGNORE_UNTRACKED_FILES=0
 VERSION=""
 NEXT_VERSION=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --create-pr) CREATE_PR=1; shift ;;
+        --ignore-untracked-files) IGNORE_UNTRACKED_FILES=1; shift ;;
         --version)
             [[ $# -ge 2 ]] || die "--version needs a value"
             VERSION="$2"; shift 2 ;;
@@ -51,7 +58,7 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || die "--next-version needs a value"
             NEXT_VERSION="$2"; shift 2 ;;
         -h | --help)
-            sed -n '2,30p' "$0" | sed 's/^# \?//'; exit 0 ;;
+            sed -n '2,35p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) die "unexpected argument '$1' (see --help)" ;;
     esac
 done
@@ -282,7 +289,7 @@ BASE_BRANCH="$(git branch --show-current)"
 CURRENT="$(project_version)"
 
 require_clean_tree
-review_untracked confirm
+review_untracked "$IGNORE_UNTRACKED_FILES" confirm
 require_branch_up_to_date "$BASE_BRANCH"
 
 # ----------------------------------------------------------------
