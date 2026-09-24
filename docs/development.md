@@ -1,5 +1,8 @@
 # Development Guide
 
+For the release process (versioning, upgrade policy, cutting a
+release PR), see [release.md](release.md).
+
 ## Building
 
 For the common build-and-install flow there is a thin Makefile wrapper

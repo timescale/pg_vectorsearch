@@ -2,14 +2,14 @@
 # CHANGELOG.md release entry from the (pre-commit-enforced) conventional
 # commit history since the previous release tag. The hand-written parts
 # of a release entry (blurb, breaking changes, thanks, ...) come from
-# .release-notes-template.md and are inserted by scripts/release.sh;
-# git-cliff never touches them.
+# .release-notes-template.md and are inserted by
+# scripts/prepare-release.sh; git-cliff never touches them.
 #
 # The changelog holds only per-release deltas (pgvector/TimescaleDB
-# style): the initial release carries no generated commit list — there
-# is no previous release to delta against, and the full pre-release
-# history would drown readers — so scripts/release.sh skips git-cliff
-# when no earlier release tag exists.
+# style). The first release is no exception: --unreleased means "not
+# reachable from any tag", so with no tags yet it covers the whole
+# history, which is exactly what that release's notes delta against.
+# The generated list is raw material to trim in the release PR.
 #
 # Pinned version: git-cliff 2.13.1.
 #
@@ -25,8 +25,8 @@ header = """
 
 # The version header and generated commit list. The hand-written
 # template sections are inserted after the version header by
-# scripts/release.sh, so this body must keep the `## [version]` line
-# recognizable and emit only the "### Changes" block after it.
+# scripts/prepare-release.sh, so this body must keep the `## [version]`
+# line recognizable and emit only the "### Changes" block after it.
 #
 # The generated list is a complete delta and serves as raw material:
 # it is generated once when the release PR is prepared, and trimming

@@ -16,8 +16,8 @@ export BUILDDIR
 
 make
 
-ver="$(sed -n "s/^  version: '\([^']*\)',$/\1/p" meson.build)"
-[[ -n "$ver" ]] || { echo "FAIL: cannot read version from meson.build"; exit 1; }
+ver="$(tr -d '[:space:]' < VERSION)"
+[[ -n "$ver" ]] || { echo "FAIL: cannot read version from VERSION"; exit 1; }
 
 so="$BUILDDIR/src/pg/pg_vectorsearch-$ver.so"
 [[ -f "$so" ]] || { echo "FAIL: extension library not built: $so"; exit 1; }
