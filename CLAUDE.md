@@ -155,7 +155,6 @@ alternative, or use `gcovr` for coverage instead.
 
 **ANN/quantization reference implementations:**
 
-- `../faiss/` — Facebook AI Similarity Search (IVF, RaBitQ)
 - `../RaBitQ-Library/` — Official RaBitQ implementation from paper authors
 - `../google-research/scann/` — Google ScaNN (in-memory ANN)
 

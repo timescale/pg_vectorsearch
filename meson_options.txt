@@ -30,18 +30,10 @@ option('blas',
   Install CBLAS library for better performance: OpenBLAS, AOCL-BLIS, Intel MKL.'''
 )
 
-option('faiss',
-  type: 'boolean',
-  value: false,
-  description: '''Enable FAISS RaBitQ comparison in benchmarks.
-  Requires FAISS built with the C API patch from third-party/faiss-rabitq-c-api.patch.
-  See third-party/README.md for build instructions.'''
-)
-
 option('hdf5',
   type: 'feature',
   value: 'auto',
-  description: '''Enable HDF5 dataset loading for benchmarks and verification.
+  description: '''Enable HDF5 dataset loading for benchmarks.
   Auto-detected when libhdf5 is installed.
   Install: libhdf5-dev (Debian/Ubuntu), hdf5 (Arch).'''
 )

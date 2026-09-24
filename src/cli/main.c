@@ -25,10 +25,6 @@ int cmd_bench_rabitq_kernel(CmdContext *ctx);
 int cmd_bench_page_score(CmdContext *ctx);
 int cmd_bench_fastscan_kernel(CmdContext *ctx);
 
-#if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
-int cmd_verify_rabitq(CmdContext *ctx);
-#endif
-
 /* Subcommand structure */
 typedef struct
 {
@@ -55,13 +51,6 @@ static const Command bench_commands[] = {
 		{NULL, NULL, NULL},
 };
 
-#if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
-static const Command verify_commands[] = {
-		{"rabitq", cmd_verify_rabitq, "Compare RaBitQ encoding against FAISS"},
-		{NULL, NULL, NULL},
-};
-#endif
-
 /*
  * print_usage - Display usage information
  */
@@ -75,13 +64,6 @@ print_usage(const char *prog)
 	{
 		printf("    bench %-12s %s\n", cmd->name, cmd->description);
 	}
-#if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
-	printf("  Verification:\n");
-	for (const Command *cmd = verify_commands; cmd->name; cmd++)
-	{
-		printf("    verify %-11s %s\n", cmd->name, cmd->description);
-	}
-#endif
 	printf("\n");
 	printf("Options:\n");
 	printf("  -h, --help       Show this help message\n");
@@ -157,59 +139,6 @@ dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 	return cmd->handler(&cmd_ctx);
 }
 
-#if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
-/*
- * dispatch_verify_command - Dispatch to verification subcommand
- */
-static int
-dispatch_verify_command(CmdContext *parent_ctx, int argc, char **argv)
-{
-	if (argc < 1)
-	{
-		fprintf(stderr, "Error: 'verify' requires a subcommand\n\n");
-		printf("Available subcommands:\n");
-		for (const Command *cmd = verify_commands; cmd->name; cmd++)
-		{
-			printf("  %-12s %s\n", cmd->name, cmd->description);
-		}
-		return 1;
-	}
-
-	const char *subcmd = argv[0];
-
-	/* Find handler */
-	const Command *cmd = NULL;
-	for (const Command *c = verify_commands; c->name; c++)
-	{
-		if (strcmp(subcmd, c->name) == 0)
-		{
-			cmd = c;
-			break;
-		}
-	}
-
-	if (cmd == NULL)
-	{
-		fprintf(stderr, "Error: unknown verify subcommand '%s'\n", subcmd);
-		return 1;
-	}
-
-	/* Create command context */
-	CmdContext cmd_ctx = {
-			.argc		 = argc,
-			.argv		 = argv,
-			.prog_name	 = parent_ctx->prog_name,
-			.memctx		 = parent_ctx->memctx,
-			.verbose	 = parent_ctx->verbose,
-			.quiet		 = parent_ctx->quiet,
-			.subcmd_name = subcmd,
-	};
-
-	/* Dispatch to handler */
-	return cmd->handler(&cmd_ctx);
-}
-#endif /* VS_HAVE_FAISS && VS_HAVE_HDF5 */
-
 /*
  * main - Entry point
  */
@@ -275,12 +204,6 @@ main(int argc, char **argv)
 	{
 		ret = dispatch_bench_command(&main_ctx, argc - 2, argv + 2);
 	}
-#if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
-	else if (strcmp(cmd, "verify") == 0)
-	{
-		ret = dispatch_verify_command(&main_ctx, argc - 2, argv + 2);
-	}
-#endif
 	else
 	{
 		fprintf(stderr, "Error: unknown command '%s'\n\n", cmd);

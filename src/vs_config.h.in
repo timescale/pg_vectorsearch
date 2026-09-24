@@ -81,15 +81,9 @@
 #mesondefine VS_BLAS_BLIS
 
 /*
- * FAISS support: enables benchmark comparison against FAISS RaBitQuantizer.
- * Requires FAISS built with the C API patch from third-party/.
- */
-#mesondefine VS_HAVE_FAISS
-
-/*
- * HDF5 support: enables loading ann-benchmarks datasets for verification.
- * Used by vectorsearch verify rabitq to load train/test/neighbors/distances
- * datasets.
+ * HDF5 support: enables loading ann-benchmarks datasets. Used by
+ * vectorsearch bench search --hdf5 to load train/test/neighbors/
+ * distances datasets.
  */
 #mesondefine VS_HAVE_HDF5
 

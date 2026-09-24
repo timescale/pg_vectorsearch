@@ -231,37 +231,6 @@ else
   message('BLAS: disabled by configuration')
 endif
 
-
-# FAISS library (optional, for benchmark comparison)
-# Expects FAISS built in ../faiss with the C API patch from third-party/
-use_faiss = get_option('faiss')
-faiss_dep = []
-
-if use_faiss
-  faiss_root = meson.project_source_root() / '..' / 'faiss'
-  faiss_build = faiss_root / 'build'
-  faiss_lib_dir = faiss_build / 'faiss'
-  faiss_capi_dir = faiss_build / 'c_api'
-  omp_dep = dependency('openmp', required: false)
-
-  faiss_dep = declare_dependency(
-    compile_args: [
-      '-I' + faiss_root / 'c_api',
-      '-I' + faiss_root,
-    ],
-    link_args: [
-      '-L' + faiss_capi_dir,
-      '-L' + faiss_lib_dir,
-      '-lfaiss_c',
-      '-lfaiss',
-      '-lstdc++',
-    ],
-    dependencies: [omp_dep] + (have_cblas ? [cblas_dep] : []),
-  )
-  config_data.set('VS_HAVE_FAISS', 1)
-  message('FAISS integration enabled (using ' + faiss_root + ')')
-endif
-
 # HDF5 library (optional, for loading ann-benchmarks datasets)
 hdf5_opt = get_option('hdf5')
 hdf5_dep = dependency('hdf5', language: 'c', required: hdf5_opt)
@@ -271,7 +240,7 @@ if use_hdf5
   config_data.set('VS_HAVE_HDF5', 1)
   message('HDF5 integration enabled')
 else
-  message('HDF5 not found: bench search --hdf5 and verify rabitq disabled')
+  message('HDF5 not found: bench search --hdf5 disabled')
   hdf5_dep = []
 endif
 
@@ -464,14 +433,9 @@ if use_hdf5
   vs_cli_sources += files('src/standalone/hdf5_source.c')
 endif
 
-if use_faiss and use_hdf5
-  vs_cli_sources += files('src/cli/verify_rabitq.c')
-endif
-
 vs_exe = executable('vectorsearch',
   vs_cli_sources,
   dependencies: [vs_core_dep]
-    + (use_faiss ? [faiss_dep] : [])
     + (use_hdf5 ? [hdf5_dep] : []),
   include_directories: src_inc,
   install: false,

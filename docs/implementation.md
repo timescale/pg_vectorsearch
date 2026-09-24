@@ -1532,7 +1532,7 @@ requiring higher recall without reranking.
 | Project | Index + RaBitQ | Language | Local |
 |---------|----------------|----------|-------|
 | [Milvus](https://github.com/milvus-io/milvus) | IVF + RaBitQ | C++ | — |
-| [Faiss](https://github.com/facebookresearch/faiss) | IVF + RaBitQ | C++ | `../faiss/` |
+| [Faiss](https://github.com/facebookresearch/faiss) | IVF + RaBitQ | C++ | — |
 | [VSAG](https://github.com/antgroup/vsag) | HGraph + RaBitQ | C++ | — |
 | [VectorChord](https://github.com/tensorchord/VectorChord) | IVF + RaBitQ | Rust | — |
 | [CockroachDB](https://github.com/cockroachdb/cockroach) | C-SPANN + RaBitQ | Go | — |
