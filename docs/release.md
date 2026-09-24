@@ -74,12 +74,40 @@ no terminal it takes the defaults, so automation needs no flags;
 `--version` and `--next-version` override either, and `--dry-run` shows
 what would happen.
 
-One run does the rest: it creates `chore/release-<version>`, sets
-`VERSION`, writes the changelog entry, commits, pushes, and opens the PR
-with the `release` label and the matching `Release <version>` milestone
-(warning and continuing if none matches). The PR body records the next
-development version, where a reviewer can change it to request something
-else such as a major bump.
+It then creates `chore/release-<version>`, sets `VERSION`, writes the
+changelog entry and commits — all local, all reversible, so it does not
+ask first. Pushing and opening the PR is neither, so that is a separate
+question:
+
+```
+==> chore/release-0.2.0 is ready: VERSION is 0.2.0 and CHANGELOG.md has its
+==> entry (notes still unfinished).
+Push chore/release-0.2.0 and open the release PR? [y/N]
+```
+
+Answer it up front with `--create-pr`, which is what automation wants.
+
+Either way the `gh` invocation is written to a temporary script first,
+and *that* is what runs — so declining leaves something runnable rather
+than instructions to retype:
+
+```
+==> PR command written to /tmp/pg_vectorsearch-release-0.2.0.XXXXXX/open-pr.sh
+==> Branch prepared, PR not opened. To open it, run:
+
+      /tmp/pg_vectorsearch-release-0.2.0.XXXXXX/open-pr.sh
+```
+
+It pushes the branch and opens the PR with the title, label, milestone
+and body that run worked out, and it is safe to re-run. Because it is
+the same file the script executes itself, it cannot drift from what
+would have happened. `--dry-run` still writes it, so you can read the
+exact command before committing to it.
+
+The PR gets the `release` label and the matching `Release <version>`
+milestone (warning and continuing if none matches), and its body records
+the next development version, where a reviewer can change it to request
+something else such as a major bump.
 
 **The release notes are finished in the PR, not before it.** The entry is
 written with `.release-notes-template.md`'s `FILL-IN` placeholders still
