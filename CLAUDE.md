@@ -393,6 +393,7 @@ post-merge cleanup) lives in two Claude Code skills rather than here:
 - `create-pr` — pre-commit checks, committing, rebasing, pushing, and
   opening the PR.
 - `profiling` — perf and flame graphs for a performance change.
+- `release` — cut a release PR and write its notes.
 
 <!-- Links -->
 [pgvector]: https://github.com/pgvector/pgvector
