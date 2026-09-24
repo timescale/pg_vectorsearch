@@ -32,13 +32,13 @@ is already on it, skip section 2. Check that branch out and continue
 at section 3. Do not pass `--force` to get a fresh `open-pr.sh`.
 That recreates the branch from the base and discards the notes.
 
-If the PR is already open, amend the release commit and force-push
-with `--force-with-lease`. A second commit fails the release check.
-Do not call `gh pr create`. If `open-pr.sh` from the cut is still
-around, make its push a `--force-with-lease` and run it, so the body
-picks up the highlights. If it is gone, force-push and stop. The
-changelog is the notes. Do not rebuild the `gh` invocation to refresh
-the body.
+If the PR is already open, amend the release commit. A second commit
+fails the release check. Do not call `gh pr create`. If `open-pr.sh`
+from the cut is still around, run it: it force-pushes by itself once
+the branch is on the remote, and refreshes the body so it picks up the
+highlights. If it is gone, push the amend with `--force-with-lease`
+and stop. The changelog is the notes. Do not rebuild the `gh`
+invocation to refresh the body.
 
 If the PR was never opened and `open-pr.sh` is gone, stop and say so.
 Recutting would throw the notes away.
@@ -161,10 +161,17 @@ push is rejected, and a second commit is what the check rejects.
 git push --force-with-lease
 ```
 
-Never a bare `--force`. Stage `CHANGELOG.md` by name. Run
-`./scripts/ci/release-check.sh` before going on. It must pass. A
-remaining `FILL-IN`, or a second commit, means the release is not
-done.
+Never a bare `--force`. Stage `CHANGELOG.md` by name. Run the release
+check against the base branch before going on:
+
+```bash
+./scripts/ci/release-check.sh main     # or the X.Y.x branch
+```
+
+It must pass. A remaining `FILL-IN`, or a second commit, means the
+release is not done. Pass the base: counting commits needs something to
+count from, so without it the single-commit assertion does not run and
+the check reports success on a two-commit branch.
 
 ## 5. Fix the PR body, then open the PR
 
@@ -197,13 +204,11 @@ Then run the generated script, not `gh pr create` and not
 ```
 
 It pushes `chore/release-<version>` and opens the PR with the title,
-label, milestone, and the body file you just edited. The first push,
-before the branch exists on the remote, can be a normal push. Once
-the commit has been pushed, an amend has to go up with
-`--force-with-lease`. If the generated script still has a plain
-`git push`, change that line before re-running it. Re-running it
-refreshes the body instead of creating a second PR. It does not add
-a second commit.
+label, milestone, and the body file you just edited. Do not edit the
+script: it asks the remote whether the branch is already there and
+force-pushes with a lease only then, so a first push and a re-push
+after an amend both work. Re-running it refreshes the body instead of
+creating a second PR. It does not add a second commit.
 
 If the notes are uncertain, stop before this step and ask.
 

@@ -1,11 +1,13 @@
 # Releasing pg_vectorsearch
 
-How a release is versioned and how a release PR is cut.
+How a release is versioned, how a release PR is cut, and what merging
+one creates.
 
-> Publishing is not wired up yet. Merging a release PR currently does
-> nothing automatic: no tag, no GitHub release, no artifacts. That
-> pipeline is the next step; until it lands, a merged release PR just
-> means `main` carries a release version.
+> Merging a release PR creates the `v<version>` tag and a GitHub
+> Releases entry with the notes. It attaches no files: the only
+> downloads are GitHub's own auto-generated source archives. Building a
+> named source tarball, announcing, and reopening the development cycle
+> are all still to come — see [After a release](#after-a-release).
 
 ## Versioning
 
@@ -30,7 +32,7 @@ these from it:
 at the following `-dev`.
 
 `-dev` is the only suffix that means "not a release". `-rc1` and
-`-alpha1` are versions that *get* released — tagged, published and gated
+`-alpha1` are versions that *get* released — tagged, entered in Releases and gated
 like any other — so the release check keys on `-dev` specifically rather
 than on any prerelease suffix.
 
@@ -144,6 +146,12 @@ It pushes the branch and opens the PR with the title, label, milestone
 and body that run worked out, and it is safe to re-run. Because it is
 the same file the script executes itself, it cannot drift from what
 would have happened.
+
+Re-running it after amending the notes in works: the push uses
+`--force-with-lease` once the branch is on the remote, and the lease is
+git's default — the remote-tracking ref. Your own push updates that, so
+an amend goes through; someone else moving the branch does not, so that
+is refused with `stale info`.
 
 To preview a release, run it and answer no. That leaves the real branch,
 the real changelog entry — generated commit list included — and a PR
@@ -301,6 +309,7 @@ on every PR. It asserts:
   a malformed `VERSION` cannot read as a development version and skip
   everything below;
 - no `v<version>` tag exists yet, locally or on `origin`;
+- the PR is a single commit;
 - `CHANGELOG.md` has an entry for it with no `FILL-IN` left;
 - `README.md` and `docs/` carry no stale version references;
 - an incompatible on-disk format change is not shipping as a patch.
@@ -318,6 +327,79 @@ It runs locally too, against the current checkout:
 ```bash
 ./scripts/ci/release-check.sh
 ```
+
+## What merging a release PR creates
+
+Merging a release PR pushes `VERSION` to `main`, and that is what
+`.github/workflows/release.yml` triggers on. Nothing else touches that
+file, and there are exactly two things that can happen to it — a release
+(`0.2.0-dev` → `0.2.0`) or reopening the cycle (`0.2.0` → `0.3.0-dev`) —
+so the suffix test is a precise partition rather than a guess.
+
+`CHANGELOG.md` is deliberately not a trigger. It would work under the
+current convention, where entries are generated at release time, but
+that is a convention rather than a property: if PRs ever append to it
+during a cycle, it becomes a noisy path firing the pipeline on every
+merge. `VERSION` cannot degrade that way.
+
+Three jobs run in order.
+
+**Gate** (`scripts/ci/release-gate.sh`) first checks the commit is one
+`prepare-release.sh` made, by requiring its `Next-Version` trailer.
+Everything else it asks is a property of the tree — no `-dev` suffix, a
+finished changelog entry, no tag yet — and all of those stay true for
+any commit merged between a release and the dev-cycle bump. The trailer
+is what identifies the commit rather than the state.
+
+It then answers two separate questions.
+*Eligibility* — is this a release at all? A `-dev` version, or one whose
+tag already exists, is not, and the run ends quietly with
+`release=false`. *Readiness* — is it fit to release? A missing or unfinished
+changelog entry fails loudly, because that means this **is** a release
+and it is broken.
+
+Keeping them apart is what lets the gate be cheap on ordinary pushes and
+strict on real ones. It also means releasing does not depend on
+`release-check` having blocked the PR: an unfinished release that reached
+`main` anyway stops here rather than shipping.
+
+**Build** builds and tests at the exact commit the gate approved, not at
+whatever `main` has moved to since.
+
+**Tag and create the Releases entry** (`scripts/ci/release-create.sh`)
+makes exactly two things: the git ref `refs/tags/v<version>` in this
+repository, and one GitHub Releases entry against it whose body is the
+`CHANGELOG.md` section for that version. It uploads no files. A
+prerelease is flagged as one so it does not become the "latest release".
+It refuses unless `HEAD` is the sha the build job tested — a release may
+only ever tag a verified commit — and it does nothing else, so a later
+failure attaching artifacts cannot damage an entry that already
+exists.
+
+It reports the release milestone's remaining open issues but never closes
+it: closing a milestone that still has open work is a judgement call.
+
+A release that failed after its push event was consumed can be re-run
+from the Actions tab (`workflow_dispatch`), giving the version. The gate
+asserts that the input matches `VERSION`, so this cannot release a
+version the ref does not carry.
+
+## After a release
+
+`main` now sits at a released version, and two things are still manual.
+
+**Reopen the development cycle.** Bump `VERSION` to the next `-dev` —
+the release commit says which in its `Next-Version` trailer:
+
+```bash
+git log -1 --format='%(trailers:key=Next-Version,valueonly)' origin/main
+```
+
+Until that lands, `main` carries a version that has already shipped, so
+anything merged in between is built and tested as a released version.
+
+**Nothing is attached to the release.** No source tarball, no checksum.
+Installing means building from the tag.
 
 ## Branches
 

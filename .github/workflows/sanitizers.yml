@@ -12,6 +12,7 @@ on:
       - 'sql/**'
       - '*.control'
       - 'meson.build'
+      - 'VERSION'
       - 'meson_options.txt'
       - 'scripts/ci/sanitizers.sh'
   pull_request:
@@ -23,6 +24,7 @@ on:
       - 'sql/**'
       - '*.control'
       - 'meson.build'
+      - 'VERSION'
       - 'meson_options.txt'
       - 'scripts/ci/sanitizers.sh'
 
