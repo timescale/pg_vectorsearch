@@ -72,6 +72,12 @@ never *changed*.
 ./scripts/prepare-release.sh
 ```
 
+An agent cutting a release follows the `release` skill, which drives
+this script. The skill fills the notes before the PR is opened. The
+interactive path below still opens with placeholders and finishes the
+notes in the PR. Either way the release check refuses a merge while
+a `FILL-IN` remains.
+
 It checks the repository first, before asking anything. Uncommitted
 changes to tracked files are refused — they would ride onto the release
 branch, so anything you built or tested there would not be what the PR
@@ -269,7 +275,9 @@ Edit the trailer in whichever of the two the merge will use, and keep it
 as the last paragraph: git only parses a trailer block that ends the
 message.
 
-**The release notes are finished in the PR, not before it.** The entry is
+**On the interactive path, the notes are finished in the PR, not before it.**
+The `release` skill is the exception: it fills them before opening, so
+the PR does not open already failing the check. The entry is
 written with `.release-notes-template.md`'s `FILL-IN` placeholders still
 in it, and the release check fails while any remain — so an unfinished
 release cannot merge. `git-cliff` generates the entry's `### Changes`
