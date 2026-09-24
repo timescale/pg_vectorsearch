@@ -77,6 +77,10 @@ pgvs_ext_so = shared_module(ext_module_name,
   install_rpath: pg_libdir,
   install: true,
   install_dir: pg_pkglibdir,
+  # dlopen()'d, never exec'd -- match every other installed PostgreSQL
+  # extension .so (packaged ones ship non-executable), rather than
+  # meson's default of preserving the linker's executable bit.
+  install_mode: 'rw-r--r--',
   override_options: ['b_lundef=false', 'warning_level=1', 'werror=false'],
 )
 
