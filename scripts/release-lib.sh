@@ -141,22 +141,43 @@ review_untracked() {
     fi
 }
 
+# Does v$1 exist in this repository?
+#
+# What CI should ask: a checkout that fetched tags has the answer, and
+# asking a remote instead would tie every check to one repository slug
+# and fail on a fork.
+tag_exists_local() {
+    git rev-parse -q --verify "refs/tags/v$1" >/dev/null
+}
+
+# Does v$1 exist here or on the release remote? For the operator path,
+# where a tag pushed by someone else is not local yet.
+#
 # Fails closed: `git ls-remote --exit-code` returns 2 for "no such ref",
 # but any other non-zero is a transport or auth failure. Reading that as
-# "tag absent" would let a release proceed without ever establishing it.
-require_tag_absent() {
-    local tag="v$1" remote rc=0
-    remote="$(release_remote)"
-    git rev-parse -q --verify "refs/tags/$tag" >/dev/null &&
-        die "tag $tag already exists locally"
-    git ls-remote --exit-code --tags "$remote" "refs/tags/$tag" \
+# "absent" would let a release proceed without ever establishing it.
+#
+# release_remote dies, and a die inside $( ) only kills the subshell --
+# which `set -e` will not catch here, because callers test this in an
+# `if`. Hence the explicit exit.
+tag_exists() {
+    local remote rc=0
+    tag_exists_local "$1" && return 0
+    remote="$(release_remote)" || exit 1
+    git ls-remote --exit-code --tags "$remote" "refs/tags/v$1" \
         >/dev/null 2>&1 || rc=$?
     case "$rc" in
-        0) die "tag $tag already exists on $remote" ;;
-        2) return 0 ;;
-        *) die "cannot check for tag $tag on $remote (git ls-remote" \
+        0) return 0 ;;
+        2) return 1 ;;
+        *) die "cannot check for tag v$1 on $remote (git ls-remote" \
             "exited $rc) -- refusing to assume it is absent" ;;
     esac
+}
+
+require_tag_absent() {
+    if tag_exists "$1"; then
+        die "tag v$1 already exists"
+    fi
 }
 
 # Asked, not asserted: re-cutting a version is legitimate, so the caller
@@ -227,10 +248,13 @@ require_branch_up_to_date() {
 # GitHub
 # ----------------------------------------------------------------
 
-# Stated, not guessed: gh has no default repository with two GitHub
-# remotes, and deriving it from one would let a misnamed origin aim a
-# release at a fork. Override for testing against a fork.
-: "${RELEASE_REPO:=timescale/pg_vectorsearch}"
+# The repository to release to.
+#
+# In CI it is the repository the workflow runs in, which is where the
+# workflow file came from. Locally it is stated rather than derived from
+# a remote, so a misnamed origin cannot aim a release at a fork; --repo
+# overrides it for a rehearsal.
+: "${RELEASE_REPO:=${GITHUB_REPOSITORY:-timescale/pg_vectorsearch}}"
 
 repo_slug() {
     printf '%s\n' "$RELEASE_REPO"

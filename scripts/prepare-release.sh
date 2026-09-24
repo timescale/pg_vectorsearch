@@ -321,6 +321,11 @@ write_pr_script() {
         echo '# the push is idempotent and gh refuses a duplicate PR.'
         echo 'set -euo pipefail'
         printf 'cd %q\n' "$PWD"
+        # Set before sourcing, so the library's default does not win.
+        # Without it every helper here -- the open-PR lookup, the body
+        # refresh, the label -- would act on the default repository
+        # while gh pr create acted on --repo's.
+        printf 'RELEASE_REPO=%q\n' "$(repo_slug)"
         echo '# shellcheck source=scripts/release-lib.sh'
         echo 'source scripts/release-lib.sh'
         # Say so, rather than failing inside git push, if the branch is
@@ -331,8 +336,21 @@ write_pr_script() {
             "branch $BRANCH does not exist -- run scripts/prepare-release.sh first"
         printf 'ensure_label %q %q %q\n' "$RELEASE_LABEL" 'bfd4f2' \
             'Release PR: merging it publishes a release'
-        # A lease, not a bare --force: the sha is the one checked
-        # earlier, so the push refuses if the branch moved since.
+        # A force is needed whenever the branch is already on the
+        # remote -- this cut overwrote one, or an earlier run pushed it
+        # and the notes have since been amended in.
+        #
+        # A force is needed only when the branch was already on the
+        # remote when this run looked, and the lease value is the sha it
+        # saw then -- so the push refuses if the branch moved in the
+        # meantime.
+        #
+        # Not git's default lease: that reads the remote-tracking ref,
+        # which is absent when someone else pushed the branch, and an
+        # absent expected value makes `--force-with-lease` reject a
+        # perfectly good push as "stale info". Not the sha read at push
+        # time either, which would always match and be a bare --force
+        # wearing a lease.
         if [[ -n "$REMOTE_BRANCH_SHA" ]]; then
             printf 'git push --force-with-lease=%q -u %q %q\n' \
                 "$BRANCH:$REMOTE_BRANCH_SHA" "$(release_remote)" "$BRANCH"

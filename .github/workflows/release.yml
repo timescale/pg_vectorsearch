@@ -1,0 +1,136 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: Release
+
+# Publishes a release when a release PR lands.
+#
+# Triggered by VERSION changing, gated on what it changed to. Nothing
+# touches that file except a version bump, and there are exactly two
+# kinds: a release (0.2.0-dev -> 0.2.0, proceed) and reopening the
+# development cycle (0.2.0 -> 0.3.0-dev, stop). The suffix test is
+# therefore a precise partition of the only two things that can happen
+# to it, rather than a heuristic over a noisy path.
+#
+# CHANGELOG.md is deliberately not a trigger. It would work today, but
+# only by convention -- if PRs ever append to it during a cycle it
+# becomes a high-noise path firing this workflow on every merge.
+# VERSION cannot degrade that way.
+on:
+  push:
+    branches:
+      - main
+      - '[0-9]*.[0-9]*.x'
+    paths:
+      - 'VERSION'
+  # For re-running a release that failed after the push event was
+  # consumed. Both inputs are required: the commit is named rather than
+  # taken from whichever ref the operator happened to select, since that
+  # ref's tip may have moved -- or be an unmerged release branch.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to tag and release (must match VERSION)'
+        required: true
+        type: string
+      sha:
+        description: 'Commit to release (must be on main or an X.Y.x branch)'
+        required: true
+        type: string
+
+# Not cancel-in-progress: cancelling between the tag and the Releases
+# entry is exactly what should not happen.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Decide whether VERSION should be released
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.gate.outputs.release }}
+      version: ${{ steps.gate.outputs.version }}
+      sha: ${{ inputs.sha || github.sha }}
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The named commit on a dispatched run, the pushed one
+          # otherwise.
+          ref: ${{ inputs.sha || github.sha }}
+          # Full depth and tags: the gate asks whether this version is
+          # already tagged, compares the on-disk format against the
+          # previous release tag, and checks the commit is on a release
+          # branch.
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Check it is untagged and its CHANGELOG entry is finished
+        id: gate
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          DISPATCHED: ${{ github.event_name == 'workflow_dispatch' }}
+        run: ./scripts/ci/release-gate.sh "$INPUT_VERSION"
+
+  build:
+    name: Build and test the commit that will be tagged
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The exact commit the gate approved, so the tag lands on what
+          # this job tested -- not whatever main moved to since.
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build gcc gdb make bison flex libgsl-dev \
+            libipc-run-perl libopenblas-dev
+
+      - name: Setup debug PostgreSQL
+        id: pg
+        uses: ./.github/actions/setup-pg-debug
+        with:
+          pg-version: '18.4'
+
+      - name: Build and test
+        env:
+          PG_CONFIG: ${{ steps.pg.outputs.pg-config }}
+        run: |
+          ./scripts/ci/build.sh builddir \
+            -Dpostgresql=enabled -Dtools=enabled \
+            "-Dpg_config=$PG_CONFIG"
+
+  release:
+    name: Tag the commit and create its GitHub Releases entry
+    needs: [gate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      # The only job that writes anything. gh release create makes the
+      # tag as well as the release, so no push permission is needed.
+      contents: write # create the tag and the GitHub release
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Create tag v<version> and a Releases entry with its notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          TARGET_SHA: ${{ needs.gate.outputs.sha }}
+        run: ./scripts/ci/release-create.sh "$VERSION" "$TARGET_SHA"

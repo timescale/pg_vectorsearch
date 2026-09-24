@@ -76,8 +76,30 @@ fi
 # Assertions
 # ----------------------------------------------------------------
 
+# Local only: the checkout fetched tags, and asking a remote would tie
+# this check to one repository slug and fail on a fork.
 log "check: tag absent"
-require_tag_absent "$VERSION"
+if tag_exists_local "$VERSION"; then
+    die "tag v$VERSION already exists"
+fi
+
+# A release PR is one commit. The notes are written before the branch is
+# pushed and amended in, so the trailer stays the message's last
+# paragraph -- which is the only place git parses one. A second commit
+# pushes it into the middle under a squash merge that concatenates
+# messages, and the next development version is then silently lost.
+if [[ -n "$BASE" ]]; then
+    log "check: single commit"
+    # --no-merges: on a pull_request event the checkout is a synthetic
+    # merge of the branch into its base, which would otherwise count as
+    # a commit of its own. A release branch has no merges of its own --
+    # main requires linear history.
+    commits="$(git rev-list --count --no-merges "$BASE..HEAD")"
+    [[ "$commits" == 1 ]] ||
+        die "a release PR is one commit, this has $commits --" \
+            "amend the release notes into the release commit rather" \
+            "than adding a commit for them"
+fi
 
 log "check: changelog entry"
 changelog_has_section "$VERSION" ||
