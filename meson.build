@@ -301,13 +301,25 @@ vs_config_h = configure_file(
 # Embed the git commit hash at build time. vcs_tag re-runs when HEAD
 # moves, so a plain `ninja` picks up a fresh commit without a full
 # reconfigure. Falls back to "unknown" outside of a git checkout.
+# A tarball has no .git for vcs_tag to query, so `meson dist` writes the
+# packaged commit to .commit-sha and that becomes the fallback. In a
+# checkout the file is absent and vcs_tag queries git as usual, which is
+# what keeps a plain `ninja` picking up a new HEAD.
+git_commit_fallback = 'unknown'
+if fs.exists('.commit-sha')
+  git_commit_fallback = fs.read('.commit-sha').strip()
+endif
+
 git_commit_h = vcs_tag(
   input: 'src/git_commit.h.in',
   output: 'git_commit.h',
-  fallback: 'unknown',
+  fallback: git_commit_fallback,
   command: ['git', 'rev-parse', 'HEAD'],
   replace_string: '@VCS_TAG@',
 )
+
+meson.add_dist_script('sh', '-c',
+  'git -C "$MESON_SOURCE_ROOT" rev-parse HEAD > "$MESON_DIST_ROOT/.commit-sha"')
 
 # Generate .clang-format-ignore to exclude build directory from formatting
 configure_file(
@@ -768,9 +780,13 @@ endif
 # Usage: scan-build meson compile -C builddir
 # Or with report: scan-build -o reports meson compile -C builddir
 
-# Pre-commit hooks
+# Pre-commit hooks. Only in a git checkout: with no .git of its own,
+# `pre-commit install` walks up to an enclosing repository and replaces
+# its hooks with a config path relative to the wrong root. Configuring an
+# extracted tarball inside the repo -- which is exactly what `meson dist`
+# does to check its output -- would otherwise clobber the repo's hooks.
 pre_commit = find_program('pre-commit', required: false)
-if pre_commit.found()
+if pre_commit.found() and fs.exists(meson.project_source_root() / '.git')
   # Install hooks automatically during setup (may fail in sandbox, that's OK)
   install_result = run_command(pre_commit, 'install', '--install-hooks',
     check: false, capture: true)
