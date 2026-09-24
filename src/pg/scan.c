@@ -644,6 +644,9 @@ prism_gettuple(IndexScanDesc scan, ScanDirection direction)
 
 	scan->xs_heaptid = entry->tid;
 
+	/* prism never returns a lossy match: the heap tuple always satisfies
+	 * the original qual, so no recheck is ever needed. */
+	scan->xs_recheck		 = false;
 	scan->xs_recheckorderby	 = false;
 	scan->xs_orderbyvals[0]	 = Float8GetDatum((double)entry->distance);
 	scan->xs_orderbynulls[0] = false;
