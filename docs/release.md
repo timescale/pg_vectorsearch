@@ -70,14 +70,15 @@ never *changed*.
 It proposes both versions from `VERSION` — the release is that version
 with its suffix removed, the next cycle a minor bump (a patch bump on an
 `X.Y.x` maintenance branch) — and asks you to confirm or edit them. With
-no terminal it takes the defaults, so automation needs no flags;
-`--version` and `--next-version` override either, and `--dry-run` shows
-what would happen.
+no terminal it takes the defaults, so automation needs no flags, and
+`--version` and `--next-version` override either.
 
 It then creates `chore/release-<version>`, sets `VERSION`, writes the
-changelog entry and commits — all local, all reversible, so it does not
-ask first. Pushing and opening the PR is neither, so that is a separate
-question:
+changelog entry and commits. None of that is asked about, because all of
+it happens *on the branch* — deleting the branch reverses every bit of
+it, and nothing has left the machine. Opening the PR is the step that
+cannot be taken back quietly: it makes the release public. So that is the
+one question:
 
 ```
 ==> chore/release-0.2.0 is ready: VERSION is 0.2.0 and CHANGELOG.md has its
@@ -103,12 +104,13 @@ and body that run worked out, and it is safe to re-run. Because it is
 the same file the script executes itself, it cannot drift from what
 would have happened.
 
-`--dry-run` is not the same as declining. Declining leaves a real
-branch, version bump and commit — work to finish or undo. `--dry-run`
-changes nothing at all; it only echoes what it would do. It does still
-write the PR script, so the exact command can be read, and that script
-refuses to run when its branch does not exist rather than failing inside
-`git push`.
+To preview a release, run it and answer no. That leaves the real branch,
+the real changelog entry — generated commit list included — and a PR
+script you can read, which is strictly more than a rehearsal could show.
+Then either run the script or drop the branch.
+
+The script refuses to run once its branch is gone, rather than failing
+inside `git push`, so a stale one left in `/tmp` cannot surprise you.
 
 The PR gets the `release` label and the matching `Release <version>`
 milestone (warning and continuing if none matches), and its body records
