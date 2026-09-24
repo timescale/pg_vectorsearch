@@ -99,11 +99,10 @@ changelog_has_section() {
 # Git state
 # ----------------------------------------------------------------
 
-# Uncommitted changes to *tracked* files. Untracked files are ignored on
-# purpose: they are the developer's scratch space, they cannot reach the
-# release commit (only VERSION and CHANGELOG.md get staged) and they are
-# not in the tagged commit, so refusing over them would block a release
-# for no reason.
+# Uncommitted changes to *tracked* files. These are refused: they ride
+# along onto the release branch, so building or testing there to check
+# the release would be testing them rather than what the PR contains.
+# Untracked files are handled separately -- see review_untracked.
 require_clean_tree() {
     local dirty
     dirty="$(git status --porcelain --untracked-files=no)"
@@ -112,6 +111,36 @@ require_clean_tree() {
         die "uncommitted changes to tracked files -- commit or stash" \
             "them first"
     }
+}
+
+# Untracked files do not block a release: having them is normal, and they
+# cannot reach the release commit (only VERSION and CHANGELOG.md are
+# staged) or the tagged commit. But one of them might be a file that
+# should have been committed -- a new source file, a new upgrade script --
+# and shipping without it is worse than a prompt. So they are listed and
+# confirmed rather than passed over silently.
+#
+# $1 is a callback that asks a yes/no question and returns non-zero for
+# no or for "no terminal"; with nobody to ask, stray files in a checkout
+# must not fail a release, so it warns and continues.
+review_untracked() {
+    local confirm_fn="$1" untracked
+    untracked="$(git status --porcelain --untracked-files=normal |
+        sed -n 's/^?? //p')"
+    [[ -n "$untracked" ]] || return 0
+
+    warn "untracked files present -- check none belong in the release:"
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && echo "    $f" >&2
+    done <<<"$untracked"
+
+    if [[ -t 0 ]]; then
+        "$confirm_fn" "Release anyway?" ||
+            die "aborted -- commit what belongs in the release, or move" \
+                "the rest aside"
+    else
+        warn "no terminal to ask on; continuing"
+    fi
 }
 
 require_tag_absent() {

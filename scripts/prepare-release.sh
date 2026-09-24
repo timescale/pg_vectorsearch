@@ -274,11 +274,20 @@ open_pr() {
 }
 
 # ----------------------------------------------------------------
-# Resolve the versions
+# Repository state -- checked before anything is asked, so a dirty tree
+# or a surprising untracked file surfaces before you pick versions
 # ----------------------------------------------------------------
 
 BASE_BRANCH="$(git branch --show-current)"
 CURRENT="$(project_version)"
+
+require_clean_tree
+review_untracked confirm
+require_branch_up_to_date "$BASE_BRANCH"
+
+# ----------------------------------------------------------------
+# Resolve the versions
+# ----------------------------------------------------------------
 
 is_prerelease "$CURRENT" ||
     die "VERSION is '$CURRENT', which is not a development version;" \
@@ -303,11 +312,9 @@ TAG="v$VERSION"
 RELEASE_LABEL="release"
 
 # ----------------------------------------------------------------
-# Preconditions -- all of them before anything is mutated
+# Version-dependent preconditions -- still all before anything is mutated
 # ----------------------------------------------------------------
 
-require_clean_tree
-require_branch_up_to_date "$BASE_BRANCH"
 require_tag_absent "$VERSION"
 require_changelog_tool
 

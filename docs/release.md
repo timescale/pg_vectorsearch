@@ -67,11 +67,29 @@ never *changed*.
 ./scripts/prepare-release.sh
 ```
 
-It proposes both versions from `VERSION` — the release is that version
-with its suffix removed, the next cycle a minor bump (a patch bump on an
-`X.Y.x` maintenance branch) — and asks you to confirm or edit them. With
-no terminal it takes the defaults, so automation needs no flags, and
-`--version` and `--next-version` override either.
+It checks the repository first, before asking anything. Uncommitted
+changes to tracked files are refused — they would ride onto the release
+branch, so anything you built or tested there would not be what the PR
+contains. Untracked files do not block it: having them is normal, and
+they can reach neither the release commit nor the tag. But one of them
+might be a file that *should* have been committed, so they are listed
+and confirmed rather than passed over:
+
+```
+WARNING: untracked files present -- check none belong in the release:
+    massif.out.36
+    results/
+Release anyway? [y/N]
+```
+
+With no terminal there is nobody to ask, and stray files in a checkout
+must not fail a release, so it warns and continues.
+
+Then it proposes both versions from `VERSION` — the release is that
+version with its suffix removed, the next cycle a minor bump (a patch
+bump on an `X.Y.x` maintenance branch) — and asks you to confirm or edit
+them. With no terminal it takes the defaults, so automation needs no
+flags, and `--version` and `--next-version` override either.
 
 It then creates `chore/release-<version>`, sets `VERSION`, writes the
 changelog entry and commits. None of that is asked about, because all of
