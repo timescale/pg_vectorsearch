@@ -305,10 +305,9 @@ meta_format_version() {
         <<<"$src" | head -1
 }
 
-# The newest release tag reachable from a ref (default HEAD), or nothing.
+# The newest release tag reachable from HEAD, or nothing.
 previous_release_tag() {
-    git tag --list 'v[0-9]*' --merged "${1:-HEAD}" --sort=-v:refname |
-        head -1
+    git tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname | head -1
 }
 
 # True when $2 is only a patch bump away from $1 (same major.minor).

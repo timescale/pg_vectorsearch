@@ -51,7 +51,14 @@ if [[ -n "$BASE" ]]; then
         exit 0
     fi
 
-    base_version="$(git show "$BASE:VERSION" | tr -d '[:space:]')"
+    # The base may not have a VERSION file at all -- the PR that
+    # introduces it is itself a VERSION change against a base without
+    # one, and `git show` on a missing path exits 128, which would fail
+    # this check for a reason that has nothing to do with the release.
+    base_version="$(git show "$BASE:VERSION" 2>/dev/null |
+        tr -d '[:space:]')" || base_version=""
+    : "${base_version:=(absent)}"
+
     if is_prerelease "$VERSION"; then
         log "VERSION moves $base_version -> $VERSION, a prerelease:" \
             "not a release PR"
