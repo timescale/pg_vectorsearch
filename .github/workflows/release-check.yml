@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: release-check
+
+# Runs the release guards on release PRs. A release PR is an ordinary PR,
+# so build.yml already builds and tests it; what this adds is the
+# release-specific checks nothing else looks at -- that the version is
+# sane, untagged, and that CHANGELOG.md has a finished entry for it.
+#
+# "Release PR" is decided by what the PR does, not by what its branch is
+# called: it sets VERSION to a version with no prerelease suffix. Keying
+# on a branch name would mean a release PR cut from a differently-named
+# branch silently skipped its guards.
+#
+# The job always runs and decides internally, rather than being skipped by
+# an `if:`, so this reports a definite result on every PR -- which is what
+# a required status check needs.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  guards:
+    name: Release guards
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full depth: the guards assert no v<version> tag exists, and
+          # detecting a release PR needs the base branch to diff against.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run release guards on release PRs
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: ./scripts/ci/release-check.sh "origin/$BASE_REF"
