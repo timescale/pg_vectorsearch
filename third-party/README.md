@@ -11,7 +11,7 @@ comparison in `vectorsearch bench quantize`.
 
 ```bash
 cd /path/to/faiss
-git apply /path/to/meerkat/third-party/faiss-rabitq-c-api.patch
+git apply /path/to/pg_vectorsearch/third-party/faiss-rabitq-c-api.patch
 ```
 
 **Files added:**

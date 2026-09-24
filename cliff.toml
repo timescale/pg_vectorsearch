@@ -43,11 +43,11 @@ body = """
 #### {{ group | striptags | trim | upper_first }}
 {% for commit in commits %}
 - {% if commit.scope %}*{{ commit.scope }}*: {% endif %}{{ commit.message | upper_first }} \
-([{{ commit.id | truncate(length=7, end="") }}](https://github.com/timescale/meerkat/commit/{{ commit.id }}))\
+([{{ commit.id | truncate(length=7, end="") }}](https://github.com/timescale/pg_vectorsearch/commit/{{ commit.id }}))\
 {% endfor %}
 {% endfor %}
 {%- if version and previous.version %}
-[Full changelog](https://github.com/timescale/meerkat/compare/{{ previous.version }}...{{ version }})
+[Full changelog](https://github.com/timescale/pg_vectorsearch/compare/{{ previous.version }}...{{ version }})
 {% endif %}
 """
 

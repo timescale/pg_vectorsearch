@@ -17,7 +17,7 @@ else
     # (it asserts the build-introspection log output); harmless for the other
     # tests, which do not read the log.
     pg_test_conf = configure_file(
-      output: 'meerkat_test.conf',
+      output: 'pgvs_test.conf',
       command: ['sh', '-c',
         'printf "search_path = \'public\'\\n' +
         'logging_collector = on\\n" > @OUTPUT@'],
@@ -48,8 +48,8 @@ else
     # Test-only SQL entry points (extra introspection the extension
     # itself must not ship). Always built; a test CREATEs its functions
     # against this library explicitly. Installed next to the extension
-    # so tests can reference it as $libdir/meerkat_test_helpers.
-    meerkat_test_helpers_so = shared_module('meerkat_test_helpers',
+    # so tests can reference it as $libdir/pgvs_test_helpers.
+    pgvs_test_helpers_so = shared_module('pgvs_test_helpers',
       'src/test_helpers.c',
       c_args: pg_ext_cflags,
       link_args: pg_ldflags,
@@ -67,10 +67,10 @@ else
         '--outputdir=' + meson.current_build_dir(),
         '--bindir=' + pg_bindir,
         '--temp-instance=' + meson.project_build_root() / 'testdb',
-        '--temp-config=' + meson.current_build_dir() / 'meerkat_test.conf',
+        '--temp-config=' + meson.current_build_dir() / 'pgvs_test.conf',
         '--load-extension=pg_vectorsearch',
       ] + test_names,
-      depends: [pgvs_ext_so, meerkat_test_helpers_so],
+      depends: [pgvs_ext_so, pgvs_test_helpers_so],
       timeout: 300,
       is_parallel: false,
       protocol: 'tap',
@@ -112,7 +112,7 @@ else
           '--outputdir=' + meson.current_build_dir(),
           '--bindir=' + pg_bindir,
           '--temp-instance=' + meson.project_build_root() / 'mut_isolation_testdb',
-          '--temp-config=' + meson.current_build_dir() / 'meerkat_test.conf',
+          '--temp-config=' + meson.current_build_dir() / 'pgvs_test.conf',
           '--load-extension=pg_vectorsearch',
           'mutations_concurrent',
           'build_serialize',
@@ -235,7 +235,7 @@ else
       # The injection_points extension is installed in the standard location,
       # so the temp instance only needs the search_path (same as regress).
       iso_conf = configure_file(
-        output: 'meerkat_isolation.conf',
+        output: 'pgvs_isolation.conf',
         command: ['sh', '-c',
           'echo "search_path = \'public\'" > @OUTPUT@'],
       )
@@ -247,7 +247,7 @@ else
           '--outputdir=' + meson.current_build_dir(),
           '--bindir=' + pg_bindir,
           '--temp-instance=' + meson.project_build_root() / 'isolation_testdb',
-          '--temp-config=' + meson.current_build_dir() / 'meerkat_isolation.conf',
+          '--temp-config=' + meson.current_build_dir() / 'pgvs_isolation.conf',
           '--load-extension=pg_vectorsearch',
           'build_progress',
           'build_progress_phases',

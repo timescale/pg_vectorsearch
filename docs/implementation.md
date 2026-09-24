@@ -6063,7 +6063,7 @@ Code is split into **standalone** modules (no PostgreSQL dependency) and
 benchmarking of core algorithms without PostgreSQL.
 
 ```
-meerkat/
+pg_vectorsearch/
 ├── src/
 │   │
 │   │ # ════════════════════════════════════════════════════════════
