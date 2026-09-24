@@ -179,3 +179,77 @@ resolve_milestone() {
     done
     return 1
 }
+
+# ----------------------------------------------------------------
+# On-disk format
+# ----------------------------------------------------------------
+
+# The index format version: the low byte of PRISM_META_MAGIC, bumped on
+# any incompatible metapage or layout change so an older index is
+# rejected at open. $1 is a git ref, or empty for the working tree.
+# Prints nothing if it cannot be read -- callers must treat that as
+# "unknown", never as "changed".
+meta_format_version() {
+    local ref="${1:-}" src
+    if [[ -n "$ref" ]]; then
+        src="$(git show "$ref:src/pg/meta.h" 2>/dev/null)" || return 0
+    else
+        src="$(cat src/pg/meta.h 2>/dev/null)" || return 0
+    fi
+    sed -n \
+        's/^#define PRISM_META_MAGIC.*0x[0-9A-Fa-f]\{6\}\([0-9A-Fa-f]\{2\}\).*/\1/p' \
+        <<<"$src" | head -1
+}
+
+# The newest release tag reachable from a ref (default HEAD), or nothing.
+previous_release_tag() {
+    git tag --list 'v[0-9]*' --merged "${1:-HEAD}" --sort=-v:refname |
+        head -1
+}
+
+# True when $2 is only a patch bump away from $1 (same major.minor).
+is_patch_bump() {
+    local from to
+    from="$(strip_prerelease "$1")"
+    to="$(strip_prerelease "$2")"
+    [[ "${from%.*}" == "${to%.*}" && "$from" != "$to" ]]
+}
+
+# An incompatible on-disk format change makes every existing index
+# unreadable, so it cannot ship in a patch release: users upgrading a
+# patch expect not to reindex. Comparing against the previous release is
+# only possible once there is one, and only when the magic can be read at
+# both ends -- an unreadable end is "unknown", not "changed".
+check_on_disk_format() {
+    local version="$1" prev now was
+    prev="$(previous_release_tag)"
+    if [[ -z "$prev" ]]; then
+        log "on-disk format: no previous release to compare against"
+        return 0
+    fi
+
+    now="$(meta_format_version)"
+    was="$(meta_format_version "$prev")"
+    if [[ -z "$now" || -z "$was" ]]; then
+        local where=""
+        [[ -n "$now" ]] || where="HEAD"
+        [[ -n "$was" ]] || where="${where:+$where and }$prev"
+        warn "cannot read the index format version at $where --" \
+            "skipping the on-disk format check"
+        return 0
+    fi
+
+    if [[ "$now" == "$was" ]]; then
+        log "on-disk format: unchanged since $prev (0x$now)"
+        return 0
+    fi
+
+    log "on-disk format: changed since $prev (0x$was -> 0x$now)"
+    if is_patch_bump "${prev#v}" "$version"; then
+        die "$version is a patch release, but the index format changed" \
+            "since $prev (0x$was -> 0x$now): existing indexes cannot be" \
+            "read, so this needs a minor or major release"
+    fi
+    log "on-disk format: $version is not a patch release, so the" \
+        "format change is allowed"
+}

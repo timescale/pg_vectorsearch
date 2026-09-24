@@ -1,24 +1,24 @@
 #!/bin/bash
-# Cut a release PR. Merging that PR is what publishes the release, so this
-# script stops at opening it -- a human reviews the notes and merges.
+# Cut a release PR.
 #
-# Usage: ./scripts/prepare-release.sh [--dry-run] [--next <version>] <version>
+# Usage: ./scripts/prepare-release.sh [options]
 #
-# Run it twice. The first run creates the release branch, sets VERSION,
-# and writes the CHANGELOG entry with the notes template spliced in. Fill
-# in the FILL-IN sections, then run it again on that branch: it checks the
-# entry, commits, and opens the PR.
+#   --version X.Y.Z         the version to release
+#   --next-version X.Y.Z-s  the development version the cycle reopens at
+#   --dry-run               show what would happen, change nothing
 #
-#   ./scripts/prepare-release.sh 0.2.0     # branch + changelog scaffold
-#   $EDITOR CHANGELOG.md                   # fill in the FILL-IN sections
-#   ./scripts/prepare-release.sh 0.2.0     # checks, commit, open the PR
+# Both versions are optional and are proposed from ./VERSION: the release
+# is that version with its prerelease suffix removed, and the next cycle
+# is a minor bump (a patch bump on an X.Y.x maintenance branch). On a
+# terminal you are asked to confirm or edit them; without one the
+# defaults are taken, so automation needs no flags.
 #
-# --next sets the development version the cycle reopens at after the
-# release lands. It defaults to a minor bump (a patch bump on an X.Y.x
-# maintenance branch) and is recorded in the PR body, where a reviewer can
-# still change it -- that is how a major bump gets requested.
+# The release notes are *not* completed here. The PR is opened with the
+# template's FILL-IN placeholders still in it, to be finished in the PR
+# where they get reviewed -- and .github/workflows/release-check.yml
+# fails while any remain, so an unfinished release cannot merge.
 #
-# The full process is documented in docs/release.md.
+# See docs/release.md.
 
 set -euo pipefail
 
@@ -34,26 +34,17 @@ NEXT_VERSION=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) DRY_RUN=1; shift ;;
-        --next)
-            [[ $# -ge 2 ]] || die "--next needs a version"
+        --version)
+            [[ $# -ge 2 ]] || die "--version needs a value"
+            VERSION="$2"; shift 2 ;;
+        --next-version)
+            [[ $# -ge 2 ]] || die "--next-version needs a value"
             NEXT_VERSION="$2"; shift 2 ;;
-        -*) die "unknown option '$1'" ;;
-        *)
-            [[ -z "$VERSION" ]] || die "unexpected argument '$1'"
-            VERSION="$1"; shift ;;
+        -h | --help)
+            sed -n '2,21p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) die "unexpected argument '$1' (see --help)" ;;
     esac
 done
-
-[[ -n "$VERSION" ]] ||
-    die "usage: $0 [--dry-run] [--next <version>] <version>"
-
-validate_version "$VERSION"
-! is_prerelease "$VERSION" ||
-    log "note: $VERSION is a prerelease; it will be marked as one"
-
-BRANCH="chore/release-$VERSION"
-TAG="v$VERSION"
-RELEASE_LABEL="release"
 
 run() {
     if [[ "$DRY_RUN" == 1 ]]; then
@@ -63,20 +54,34 @@ run() {
     fi
 }
 
-# ----------------------------------------------------------------
-# Changelog
-# ----------------------------------------------------------------
-
-# git-cliff is only needed when there is a previous release to delta
-# against. The first release has none -- and its whole pre-release history
-# would drown the entry -- so that one gets the heading alone, written by
-# add_changelog_entry itself.
-needs_git_cliff() {
-    [[ -n "$(git tag --list 'v[0-9]*')" ]]
+# Ask for a value, offering a default. Without a terminal the default is
+# taken silently, which is what makes this usable from automation. The
+# prompt goes to stderr, so the answer can be captured from stdout.
+ask() {
+    local prompt="$1" default="$2" reply
+    if [[ ! -t 0 ]]; then
+        echo "$default"
+        return 0
+    fi
+    read -r -p "$prompt [$default]: " reply </dev/tty
+    echo "${reply:-$default}"
 }
 
-# The version cliff.toml's template was written against, so the error
-# below and the mismatch warning cannot drift from the config.
+confirm() {
+    [[ -t 0 ]] || return 0
+    local reply
+    read -r -p "$1 [y/N] " reply </dev/tty
+    [[ "$reply" == [yY]* ]] || die "aborted"
+}
+
+# git-cliff is only needed when there is a previous release to delta
+# against; the first release's entry is written below instead.
+needs_git_cliff() {
+    [[ -n "$(previous_release_tag)" ]]
+}
+
+# The version cliff.toml's template targets, so the messages below cannot
+# drift from the config.
 cliff_pinned_version() {
     sed -n 's/^# Pinned version: git-cliff \([0-9][0-9.]*[0-9]\).*$/\1/p' \
         cliff.toml | head -1
@@ -105,9 +110,6 @@ EOF
         exit 1
     fi
 
-    # A different version is usually fine, but the template is written
-    # against the pin -- worth saying so rather than silently rendering
-    # something else.
     local have
     have="$(git-cliff --version 2>/dev/null | awk '{print $2}')"
     if [[ -n "$pin" && -n "$have" && "$have" != "$pin" ]]; then
@@ -116,7 +118,10 @@ EOF
     fi
 }
 
-# Add the "## [<version>]" heading and the commit delta below it.
+# ----------------------------------------------------------------
+# Changelog
+# ----------------------------------------------------------------
+
 add_changelog_entry() {
     if needs_git_cliff; then
         run git-cliff --unreleased --tag "$TAG" --prepend CHANGELOG.md
@@ -138,8 +143,9 @@ add_changelog_entry() {
     mv CHANGELOG.md.new CHANGELOG.md
 }
 
-# Splice the notes template in directly under the version heading,
-# stripping its guidance comments.
+# Splice the notes template in under the version heading, stripping its
+# guidance comments. The FILL-IN placeholders stay: they are completed in
+# the PR, and release-check.yml fails while any remain.
 insert_notes_template() {
     if [[ "$DRY_RUN" == 1 ]]; then
         echo "would insert .release-notes-template.md under the heading"
@@ -159,42 +165,60 @@ insert_notes_template() {
     rm -f "$tmpl"
 }
 
-# ----------------------------------------------------------------
-# Second run: check, commit, open the PR
-# ----------------------------------------------------------------
+# A format bump means every existing index is rejected at open, which the
+# notes have to say. Written here rather than left to the author: the
+# script can see it, and it is the one upgrade note that is never
+# optional.
+note_format_change() {
+    local prev now was note
+    prev="$(previous_release_tag)"
+    [[ -n "$prev" ]] || return 0
+    now="$(meta_format_version)"
+    was="$(meta_format_version "$prev")"
+    [[ -n "$now" && -n "$was" && "$now" != "$was" ]] || return 0
 
-# On the release branch, VERSION and CHANGELOG.md are expected to be
-# modified; nothing else is.
-require_only_release_changes() {
-    local dirty
-    dirty="$(git status --porcelain |
-        grep -vE ' (VERSION|CHANGELOG\.md)$' || true)"
-    [[ -z "$dirty" ]] || {
-        echo "$dirty" >&2
-        die "unexpected uncommitted changes on the release branch"
-    }
+    log "on-disk format changed since $prev: adding a reindex note"
+    if [[ "$DRY_RUN" == 1 ]]; then
+        return 0
+    fi
+    note="- **Indexes must be rebuilt.** The on-disk index format changed"
+    note="$note (0x$was -> 0x$now), so indexes built by earlier versions"
+    note="$note are rejected at open and have to be recreated."
+    awk -v note="$note" '
+        /^FILL-IN: breaking changes/ { print note; print "" }
+        { print }
+    ' CHANGELOG.md >CHANGELOG.md.new
+    mv CHANGELOG.md.new CHANGELOG.md
 }
 
+# ----------------------------------------------------------------
+# The PR
+# ----------------------------------------------------------------
+
 pr_body() {
-    local next="$1"
     cat <<EOF
-Releases \`$VERSION\`. Merging this PR publishes it: the version landing
-on \`$(git rev-parse --abbrev-ref "$BASE_BRANCH")\` without a prerelease
-suffix is what triggers the release pipeline.
+Releases \`$VERSION\`.
 
-The release notes are the \`## [$VERSION]\` entry in \`CHANGELOG.md\` --
-review them there, since they are published verbatim to the GitHub
-release page.
+**The release notes are unfinished.** Complete the \`## [$VERSION]\` entry
+in \`CHANGELOG.md\` in this PR: every \`FILL-IN\` placeholder has to go,
+and the generated \`### Changes\` list is raw material -- trim it to the
+notable items. The \`release-check\` job fails while any placeholder
+remains, so this cannot merge until the notes are done. What lands here
+is published verbatim as the release notes.
 
-<!-- next-version: the development version the cycle reopens at once
-     this merges. Change it to request a different bump, for example a
-     major one. Keep the backticks. -->
-Next version: \`$next\`
+Merging this PR publishes \`$VERSION\`: \`VERSION\` landing on
+\`$BASE_BRANCH\` without a prerelease suffix is what triggers the release
+pipeline.
+
+<!-- next-version: the development version the cycle reopens at once this
+     merges. Change it to request a different bump, for example a major
+     one. Keep the backticks. -->
+Next version: \`$NEXT_VERSION\`
 EOF
 }
 
 open_pr() {
-    local next="$1" milestone args=()
+    local milestone args=()
 
     ensure_label "$RELEASE_LABEL" 'bfd4f2' \
         'Release PR: merging it publishes a release'
@@ -217,77 +241,78 @@ open_pr() {
         echo "would run: gh pr create ${args[*]} --body <body>"
         return 0
     fi
-    gh pr create "${args[@]}" --body "$(pr_body "$next")"
+    gh pr create "${args[@]}" --body "$(pr_body)"
 }
 
 # ----------------------------------------------------------------
-# Main
+# Resolve the versions
 # ----------------------------------------------------------------
 
 BASE_BRANCH="$(git branch --show-current)"
+CURRENT="$(project_version)"
 
-if [[ "$BASE_BRANCH" == "$BRANCH" ]]; then
-    # Second run: the branch exists and the notes should be filled in.
-    BASE_BRANCH="$(git config "branch.$BRANCH.release-base" ||
-        echo main)"
-    require_only_release_changes
+is_prerelease "$CURRENT" ||
+    die "VERSION is '$CURRENT', which is not a development version;" \
+        "expected a prerelease suffix to release from"
 
-    if changelog_section "$VERSION" | grep -q 'FILL-IN'; then
-        die "CHANGELOG.md entry for $VERSION still has FILL-IN" \
-            "placeholders -- fill them in, then re-run"
-    fi
+[[ -n "$VERSION" ]] ||
+    VERSION="$(ask "Release version" "$(strip_prerelease "$CURRENT")")"
+validate_version "$VERSION"
+[[ "$VERSION" != "$CURRENT" ]] ||
+    die "VERSION is already $VERSION -- nothing to release"
 
-    [[ -n "$NEXT_VERSION" ]] ||
-        NEXT_VERSION="$(next_dev_version "$VERSION" "$BASE_BRANCH")"
-    validate_version "$NEXT_VERSION"
-    is_prerelease "$NEXT_VERSION" ||
-        die "next version '$NEXT_VERSION' must carry a prerelease" \
-            "suffix (e.g. ${NEXT_VERSION}-dev)"
-    log "next development version: $NEXT_VERSION (recorded in the PR" \
-        "body; edit it there to change the bump)"
+[[ -n "$NEXT_VERSION" ]] ||
+    NEXT_VERSION="$(ask "Next development version" \
+        "$(next_dev_version "$VERSION" "$BASE_BRANCH")")"
+validate_version "$NEXT_VERSION"
+is_prerelease "$NEXT_VERSION" ||
+    die "next version '$NEXT_VERSION' must carry a prerelease suffix" \
+        "(e.g. ${NEXT_VERSION}-dev)"
 
-    # Guards are read-only, so they run even under --dry-run: that is
-    # what makes a dry run a real preflight rather than an echo.
-    log "running the release guards"
-    ./scripts/ci/release-guards.sh "$VERSION"
+BRANCH="chore/release-$VERSION"
+TAG="v$VERSION"
+RELEASE_LABEL="release"
 
-    run git add VERSION CHANGELOG.md
-    run git commit -m "chore: release $VERSION"
-    open_pr "$NEXT_VERSION"
-    log "release PR opened. Merging it publishes $VERSION."
-    exit 0
-fi
+# ----------------------------------------------------------------
+# Preconditions -- all of them before anything is mutated
+# ----------------------------------------------------------------
 
-# First run: set the branch up.
 require_clean_tree
 require_branch_up_to_date "$BASE_BRANCH"
 require_tag_absent "$VERSION"
-# Before creating the branch or touching VERSION: a missing tool here
-# would otherwise leave a half-made release branch to clean up by hand.
 require_changelog_tool
 
-current="$(project_version)"
-[[ "$current" != "$VERSION" ]] ||
-    die "VERSION is already $VERSION -- nothing to bump"
-is_prerelease "$current" ||
-    die "VERSION is '$current', which is not a development version;" \
-        "expected a prerelease suffix to release from"
+# An incompatible format change cannot ship in a patch release; catching
+# it here rather than in CI saves cutting a PR that cannot merge.
+check_on_disk_format "$VERSION"
 
-log "creating $BRANCH from $BASE_BRANCH"
+log "releasing   $CURRENT -> $VERSION on $BASE_BRANCH"
+log "next cycle  $NEXT_VERSION"
+log "branch      $BRANCH"
+confirm "Create the release branch and open its PR?"
+
+# ----------------------------------------------------------------
+# Go
+# ----------------------------------------------------------------
+
+log "creating $BRANCH"
 run git checkout -b "$BRANCH"
-run git config "branch.$BRANCH.release-base" "$BASE_BRANCH"
 
-log "setting VERSION to $VERSION (was $current)"
+log "setting VERSION to $VERSION"
 if [[ "$DRY_RUN" == 1 ]]; then
     echo "would write VERSION=$VERSION"
 else
     set_version "$VERSION"
 fi
 
-log "adding the CHANGELOG.md entry for $VERSION"
+log "writing the CHANGELOG.md entry"
 add_changelog_entry
 insert_notes_template
+note_format_change
 
-log "next: fill in the FILL-IN sections of the new CHANGELOG.md entry,"
-log "then re-run to check, commit and open the PR:"
-log "  $0 $VERSION"
+run git add VERSION CHANGELOG.md
+run git commit -m "chore: release $VERSION"
+open_pr
+
+log "done. Complete the release notes in the PR; it cannot merge while"
+log "any FILL-IN placeholder remains."
