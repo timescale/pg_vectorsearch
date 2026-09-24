@@ -101,8 +101,14 @@ than instructions to retype:
 It pushes the branch and opens the PR with the title, label, milestone
 and body that run worked out, and it is safe to re-run. Because it is
 the same file the script executes itself, it cannot drift from what
-would have happened. `--dry-run` still writes it, so you can read the
-exact command before committing to it.
+would have happened.
+
+`--dry-run` is not the same as declining. Declining leaves a real
+branch, version bump and commit — work to finish or undo. `--dry-run`
+changes nothing at all; it only echoes what it would do. It does still
+write the PR script, so the exact command can be read, and that script
+refuses to run when its branch does not exist rather than failing inside
+`git push`.
 
 The PR gets the `release` label and the matching `Release <version>`
 milestone (warning and continuing if none matches), and its body records
