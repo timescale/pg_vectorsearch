@@ -99,12 +99,18 @@ changelog_has_section() {
 # Git state
 # ----------------------------------------------------------------
 
+# Uncommitted changes to *tracked* files. Untracked files are ignored on
+# purpose: they are the developer's scratch space, they cannot reach the
+# release commit (only VERSION and CHANGELOG.md get staged) and they are
+# not in the tagged commit, so refusing over them would block a release
+# for no reason.
 require_clean_tree() {
     local dirty
-    dirty="$(git status --porcelain)"
+    dirty="$(git status --porcelain --untracked-files=no)"
     [[ -z "$dirty" ]] || {
         echo "$dirty" >&2
-        die "working tree is not clean"
+        die "uncommitted changes to tracked files -- commit or stash" \
+            "them first"
     }
 }
 
