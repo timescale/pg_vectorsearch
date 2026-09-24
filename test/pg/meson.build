@@ -57,6 +57,7 @@ else
       name_prefix: '',
       install: true,
       install_dir: pg_pkglibdir,
+      install_mode: 'rw-r--r--',
       override_options: ['b_lundef=false', 'warning_level=1', 'werror=false'],
     )
 
