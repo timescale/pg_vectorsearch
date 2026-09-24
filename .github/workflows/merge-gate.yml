@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: Merge gate
+
+# One required check standing in for every other one, so the ruleset
+# does not have to name each job in each workflow -- and so a job
+# skipped by path filtering does not block a pull request it never
+# applied to.
+#
+# Runs on the pull request like any other check, with a read-only token.
+# It waits for the other checks and judges them; see
+# scripts/ci/merge-gate.sh for what counts as a pass.
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Merge gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read # read the other workflows' results
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Wait for the other checks, then require them to have passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The head commit, not the synthetic merge commit: check runs
+          # attach to the branch tip.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: ./scripts/ci/merge-gate.sh "$HEAD_SHA"
