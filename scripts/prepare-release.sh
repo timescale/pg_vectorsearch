@@ -99,12 +99,6 @@ confirm() {
     [[ "$reply" == [yY]* ]]
 }
 
-# git-cliff is only needed when there is a previous release to delta
-# against; the first release's entry is written below instead.
-needs_git_cliff() {
-    [[ -n "$(previous_release_tag)" ]]
-}
-
 # The version cliff.toml's template targets, so the messages below cannot
 # drift from the config.
 cliff_pinned_version() {
@@ -113,8 +107,6 @@ cliff_pinned_version() {
 }
 
 require_changelog_tool() {
-    needs_git_cliff || return 0
-
     local pin
     pin="$(cliff_pinned_version)"
 
@@ -122,15 +114,12 @@ require_changelog_tool() {
         cat >&2 <<EOF
 ERROR: git-cliff not found.
 
-Releasing $VERSION needs it: every release after the first generates its
-CHANGELOG.md commit list from the conventional commit history, and
-cliff.toml holds the template that does it.
+Releasing $VERSION needs it: the CHANGELOG.md commit list is generated
+from the conventional commit history, and cliff.toml holds the template
+that does it.
 
   Install:  https://git-cliff.org/docs/installation
   Version:  ${pin:-see cliff.toml} (what cliff.toml targets)
-
-The first release needs no generated list, so this is only required once
-a v<version> tag exists.
 EOF
         exit 1
     fi
@@ -147,22 +136,14 @@ EOF
 # Changelog
 # ----------------------------------------------------------------
 
+# git-cliff generates the entry, including its ### Changes commit list.
+#
+# This runs for the first release too. --unreleased means "not reachable
+# from any tag", so with no tags yet it covers the whole history rather
+# than nothing -- which is exactly what a first release's notes should
+# delta against.
 add_changelog_entry() {
-    if needs_git_cliff; then
-        git-cliff --unreleased --tag "$TAG" --prepend CHANGELOG.md
-        return
-    fi
-
-    log "first release: no previous tag to delta against, so no" \
-        "generated commit list"
-    awk -v ver="$VERSION" -v date="$(date +%Y-%m-%d)" '
-        { print }
-        NR == 1 && /^# Changelog$/ {
-            print ""
-            print "## [" ver "] - " date
-        }
-    ' CHANGELOG.md >CHANGELOG.md.new
-    mv CHANGELOG.md.new CHANGELOG.md
+    git-cliff --unreleased --tag "$TAG" --prepend CHANGELOG.md
 }
 
 # Splice the notes template in under the version heading, stripping its
@@ -210,26 +191,72 @@ note_format_change() {
 # The PR
 # ----------------------------------------------------------------
 
+# The PR body says what this PR does and carries the one machine-read
+# field; it does not explain the release process. A reviewer opening it
+# wants to know which version is being released and what is in it, and
+# the procedure belongs in docs/release.md where it stays current, not
+# copied into every release PR.
+#
+# Highlights come from the CHANGELOG entry the run just wrote, so the
+# summary cannot contradict the notes. At cut time that section still
+# holds its FILL-IN line, which is the honest state -- and finishing the
+# notes is what the release check enforces anyway.
 pr_body() {
-    cat <<EOF
-Releases \`$VERSION\`.
+    # Backticks here are markdown, not command substitution.
+    # shellcheck disable=SC2016
+    printf 'Releases `%s`.\n\n' "$VERSION"
 
-**The release notes are unfinished.** Complete the \`## [$VERSION]\` entry
-in \`CHANGELOG.md\` in this PR: every \`FILL-IN\` placeholder has to go,
-and the generated \`### Changes\` list is raw material -- trim it to the
-notable items. The \`release-check\` job fails while any placeholder
-remains, so this cannot merge until the notes are done. What lands here
-is published verbatim as the release notes.
+    printf '## Highlights\n\n'
+    highlights_section
+    printf '\n'
+    next_version_trailer
+}
 
-Merging this PR publishes \`$VERSION\`: \`VERSION\` landing on
-\`$BASE_BRANCH\` without a prerelease suffix is what triggers the release
-pipeline.
+# The development version the cycle reopens at, as a git trailer.
+#
+# A git trailer -- a key-value line in RFC 822 header style in the
+# message's last paragraph -- rather than prose, because the release
+# pipeline reads it back: `git interpret-trailers --parse` on the commit
+# that landed on main gets it with no API call and no parsing of human
+# text.
+#
+# It goes in two places on purpose, because which one survives the merge
+# depends on how the PR is merged. A rebase merge keeps the release
+# commit and its trailer; a squash merge builds a new commit message
+# from the PR body (the repository's squash_merge_commit_message is
+# PR_BODY), so the body's copy becomes the trailer on main. Either way
+# main's commit carries it, and both copies are generated from the same
+# value so they cannot disagree.
+#
+# Last paragraph, no backticks: git only parses a trailer block that
+# ends the message, and the value is taken literally.
+next_version_trailer() {
+    printf 'Next-Version: %s\n' "$NEXT_VERSION"
+}
 
-<!-- next-version: the development version the cycle reopens at once this
-     merges. Change it to request a different bump, for example a major
-     one. Keep the backticks. -->
-Next version: \`$NEXT_VERSION\`
-EOF
+# The Highlights subsection of this version's changelog entry, with
+# leading blank lines dropped (trailing ones go with command
+# substitution). Falls back to a pointer when the section is missing, so
+# the body does not depend on the notes template's exact shape.
+#
+# The awk deliberately stops printing rather than exiting: exiting would
+# close the pipe early, and under `set -o pipefail` the SIGPIPE from
+# changelog_section upstream would fail the whole assignment.
+highlights_section() {
+    local out
+    out="$(changelog_section "$VERSION" | awk '
+        /^### Highlights$/ { on = 1; next }
+        on && /^#/         { on = 0; next }
+        on {
+            if (!seen && $0 ~ /^[[:space:]]*$/) next
+            seen = 1
+            print
+        }')"
+    if [[ -n "$out" ]]; then
+        printf '%s\n' "$out"
+    else
+        printf '%s\n' "See the \`$VERSION\` entry in \`CHANGELOG.md\`."
+    fi
 }
 
 # Write the commands that open the PR to a script, and run *that* rather
@@ -309,6 +336,17 @@ require_clean_tree
 review_untracked "$IGNORE_UNTRACKED_FILES" confirm
 require_branch_up_to_date "$BASE_BRANCH"
 
+# Releases happen on main, or on an X.Y.x maintenance branch. Cutting
+# from anywhere else is legitimate for a rehearsal, but the resulting PR
+# is based there too -- and every CI workflow filters on
+# `branches: [main]`, so it gets almost no checks, including the release
+# check. That is easy to read as a green release.
+if [[ "$BASE_BRANCH" != main && ! "$BASE_BRANCH" =~ ^[0-9]+\.[0-9]+\.x$ ]]; then
+    warn "releasing from '$BASE_BRANCH', not main or an X.Y.x branch:" \
+        "the PR will be based there, and CI workflows only run on PRs" \
+        "against main -- expect the release check not to run"
+fi
+
 # ----------------------------------------------------------------
 # Resolve the versions
 # ----------------------------------------------------------------
@@ -367,7 +405,7 @@ insert_notes_template
 note_format_change
 
 git add VERSION CHANGELOG.md
-git commit -m "chore: release $VERSION"
+git commit -m "chore: release $VERSION" -m "$(next_version_trailer)"
 
 log "$BRANCH is ready: VERSION is $VERSION and CHANGELOG.md has its"
 log "entry (notes still unfinished)."

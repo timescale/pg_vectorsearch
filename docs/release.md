@@ -151,19 +151,51 @@ while a purely local one is usually an abandoned attempt to delete and
 redo.
 
 The PR gets the `release` label and the matching `Release <version>`
-milestone (warning and continuing if none matches), and its body records
-the next development version, where a reviewer can change it to request
-something else such as a major bump.
+milestone, warning and continuing if none matches.
+
+**The PR body says what the PR does, not how releasing works.** It
+states the version being released and summarises the highlights — taken
+from the changelog entry the run just wrote, so the summary cannot
+contradict the notes. The procedure lives here in this document, where
+it stays current, instead of being copied into every release PR.
+
+### The next development version
+
+The version the cycle reopens at is declared as a **git trailer** — a
+key-value line in RFC 822 header style, in the last paragraph of the
+commit message:
+
+```
+Next-Version: 0.3.0-dev
+```
+
+A trailer rather than prose because the release pipeline reads it back:
+`git interpret-trailers --parse`, or
+`git log -1 --format='%(trailers:key=Next-Version,valueonly)'`, gets the
+value off the commit that landed on `main` with no API call and no
+parsing of human text.
+
+It is written in two places, because which one survives depends on how
+the PR is merged. A **rebase** merge keeps the release commit and its
+trailer. A **squash** merge builds a new commit message from the PR body
+(the repository's `squash_merge_commit_message` is `PR_BODY`), so the
+body's copy becomes the trailer on `main`. Either way `main`'s commit
+carries it, and both copies are generated from the same value, so they
+cannot disagree.
+
+Editing it is how a different bump gets requested — a major one, say.
+Edit the trailer in whichever of the two the merge will use, and keep it
+as the last paragraph: git only parses a trailer block that ends the
+message.
 
 **The release notes are finished in the PR, not before it.** The entry is
 written with `.release-notes-template.md`'s `FILL-IN` placeholders still
 in it, and the release check fails while any remain — so an unfinished
 release cannot merge. `git-cliff` generates the entry's `### Changes`
-list from the conventional commits since the previous release tag; that
-list is raw material, so trimming it to the notable items is part of
-editing the PR. The compare link still covers the full delta. The first
-release has no previous tag to delta against, so it gets the heading
-alone and no generated list.
+list from the conventional commit history; that list is raw material, so
+trimming it to the notable items is part of editing the PR. This applies
+to the first release too: `--unreleased` means "not reachable from any
+tag", which with no tags yet is the whole history rather than nothing.
 
 ## The release check
 
