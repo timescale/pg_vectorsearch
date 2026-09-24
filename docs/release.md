@@ -270,17 +270,16 @@ with `git log -1`, so the tip commit is the one that counts. A
 (`squash_merge_commit_message` is `PR_BODY`), so the body's copy is
 the one that lands.
 
-The `release` skill adds a third copy, by hand, on the notes commit.
-That commit is the tip, so a rebase merge reads it rather than the
-release commit. The three copies are not generated together and can
-drift. They must be the same value. A later commit on the release
-branch has to carry the trailer too, or it becomes the tip and the
-rebase read misses it.
+The release PR is one commit. The release check rejects a second.
+Filling the notes amends that commit rather than adding another, and
+a branch that was already pushed is force-pushed with
+`--force-with-lease`. The trailer on that commit and the copy in the
+PR body must be the same value. A rebase merge reads the commit. A
+squash merge reads the body.
 
 Editing it is how a different bump gets requested — a major one, say.
-Change every copy the merge might consume, and keep each one the
-last paragraph: git only parses a trailer block that ends the
-message.
+Change both copies, and keep each one the last paragraph: git only
+parses a trailer block that ends the message.
 
 **On the interactive path, the notes are finished in the PR, not before it.**
 The `release` skill is the exception: it fills them before opening, so

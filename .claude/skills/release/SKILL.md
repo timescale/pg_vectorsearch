@@ -32,11 +32,13 @@ is already on it, skip section 2. Check that branch out and continue
 at section 3. Do not pass `--force` to get a fresh `open-pr.sh`.
 That recreates the branch from the base and discards the notes.
 
-If the PR is already open, commit the notes and push the branch.
-That updates the PR. Do not call `gh pr create`. If `open-pr.sh` from
-the cut is still around, run it so the body picks up the highlights.
-If it is gone, push and stop. The changelog is the notes. Do not
-rebuild the `gh` invocation to refresh the body.
+If the PR is already open, amend the release commit and force-push
+with `--force-with-lease`. A second commit fails the release check.
+Do not call `gh pr create`. If `open-pr.sh` from the cut is still
+around, make its push a `--force-with-lease` and run it, so the body
+picks up the highlights. If it is gone, force-push and stop. The
+changelog is the notes. Do not rebuild the `gh` invocation to refresh
+the body.
 
 If the PR was never opened and `open-pr.sh` is gone, stop and say so.
 Recutting would throw the notes away.
@@ -93,7 +95,8 @@ Do not run `prepare-release.sh` again after this. From the release
 branch it refuses: `VERSION` is no longer a `-dev` version, so there
 is nothing to release. `--force` from the base branch is the real
 risk. It recreates the branch from that base and discards the notes
-just written. Later edits are ordinary commits on the release branch.
+just written. Later edits amend the release commit. They are not new
+commits.
 
 ## 3. Write the notes
 
@@ -123,33 +126,45 @@ no "delivers", no semicolon-heavy sentences. Plain words. If a
 sentence could be shorter, shorten it. Do not narrate how the
 release was cut.
 
-## 4. Commit the notes
+## 4. Amend the release commit
 
-A second commit on the release branch. Do not amend the release
-commit.
+The release PR must be one commit. The release check fails if it is
+not. Do not add a notes commit.
 
-The notes commit must repeat the `Next-Version` trailer, as the last
-paragraph. A rebase merge lands the tip commit, and the step that
-reopens the development cycle reads that trailer with `git log -1`.
-A notes commit without it makes the read empty, and the next cycle
-silently takes the default bump. A squash merge reads the trailer
-from the PR body instead, so the copy in step 5 still has to match.
-Any later commit on this branch has to carry the trailer too, or it
-becomes the tip and the same read fails.
-
-The trailer is the next cycle, not the version just released.
-Releasing `0.2.0` from `main` records `0.3.0-dev`. A patch release
-from an `X.Y.x` branch records the next patch, such as `0.2.1-dev`.
+Amend the commit `prepare-release.sh` just made. Keep its subject,
+`chore: release 0.2.0`, and keep `Next-Version` as the last
+paragraph. The trailer is the next cycle, not the version just
+released. Releasing `0.2.0` from `main` records `0.3.0-dev`. A patch
+release from an `X.Y.x` branch records the next patch, such as
+`0.2.1-dev`.
 
 ```
-docs: fill in the 0.2.0 release notes
+chore: release 0.2.0
 
 Next-Version: 0.3.0-dev
 ```
 
-Stage `CHANGELOG.md` by name. Run `./scripts/ci/release-check.sh`
-before going on. It must pass. A remaining `FILL-IN` means the notes
-are not done.
+```bash
+git add CHANGELOG.md
+git commit --amend --no-edit
+```
+
+`--no-edit` keeps the trailer the script already wrote. If the
+trailer itself must change, amend with a message that still ends
+with it. A squash merge reads the trailer from the PR body instead,
+so the copy in step 5 still has to match.
+
+If that commit is already on the remote, force-push it. A normal
+push is rejected, and a second commit is what the check rejects.
+
+```bash
+git push --force-with-lease
+```
+
+Never a bare `--force`. Stage `CHANGELOG.md` by name. Run
+`./scripts/ci/release-check.sh` before going on. It must pass. A
+remaining `FILL-IN`, or a second commit, means the release is not
+done.
 
 ## 5. Fix the PR body, then open the PR
 
@@ -182,9 +197,13 @@ Then run the generated script, not `gh pr create` and not
 ```
 
 It pushes `chore/release-<version>` and opens the PR with the title,
-label, milestone, and the body file you just edited. Re-running it
-is safe: a push updates an open PR, and the script refreshes the
-body instead of creating a second one.
+label, milestone, and the body file you just edited. The first push,
+before the branch exists on the remote, can be a normal push. Once
+the commit has been pushed, an amend has to go up with
+`--force-with-lease`. If the generated script still has a plain
+`git push`, change that line before re-running it. Re-running it
+refreshes the body instead of creating a second PR. It does not add
+a second commit.
 
 If the notes are uncertain, stop before this step and ask.
 
