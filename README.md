@@ -65,8 +65,7 @@ a PRISM index.
 
 **Alpha-level.**
 
-See [docs/implementation.md][impl-doc] for the implementation roadmap and
-detailed specifications.
+See [docs/architecture.md][arch-doc] for the design.
 
 ## Building
 
@@ -205,7 +204,6 @@ SELECT count(*) AS lists FROM prism_posting_pages('items_idx')
 
 - [Tuning][tuning-doc] - Index parameters, GUCs, tradeoffs, defaults
 - [Architecture][arch-doc] - High-level design and data structures
-- [Implementation][impl-doc] - Detailed specifications and development phases
 - [SIMD][simd-doc] - SIMD build options and distance computation
 
 ## References
@@ -236,6 +234,5 @@ TBD
 [spann-paper]: https://www.microsoft.com/en-us/research/wp-content/uploads/2021/11/SPANN_finalversion1.pdf
 [scann-alloydb]: https://services.google.com/fh/files/misc/scann_for_alloydb_whitepaper.pdf
 [arch-doc]: docs/architecture.md
-[impl-doc]: docs/implementation.md
 [tuning-doc]: docs/tuning.md
 [simd-doc]: docs/simd.md
