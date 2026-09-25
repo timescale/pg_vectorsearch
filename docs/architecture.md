@@ -138,12 +138,10 @@ structure that narrows the search space at each level.
 the best branch(es) at each level. This reduces centroid comparisons from O(N)
 to O(log N) while maintaining high recall through multi-path exploration.
 
-**Centroid representation**: Centroids are **medoids** — actual data vectors
-from the dataset, referenced by heap TID (`ItemPointerData`). Each centroid
-entry stores the TID of the medoid vector rather than a full-precision copy.
-This eliminates dedicated centroid vector storage in the index. Medoids are
-selected during hierarchical k-means as the cluster member closest to the
-mean.
+**Centroid representation**: Centroids are stored in the index, not as heap
+TIDs. Each entry is an 8-byte header (`child_blkno`, `child_count`, `flags`)
+plus a format-dependent payload. An internal node points at a child centroid
+page; a leaf points at a posting-list head. There is no medoid TID.
 
 ### 2. Centroid Pages in Shared Buffers
 
@@ -162,24 +160,29 @@ metadata growing forward and vector data growing backward. Each page stores
 centroids in one of three data formats, selected at page initialization and
 recorded in the opaque flags:
 
-| Format | Data encoding | Metadata | Use case |
-|--------|---------------|----------|----------|
-| **RaBitQ** | Quantized bits + f_add/f_rescale | 16B (includes medoid TID) | Compact, approximate with error bounds |
-| **Float32** | Full-precision float vectors | 8B (no medoid TID) | Exact routing, highest accuracy |
-| **Float16** | Half-precision float vectors | 8B (no medoid TID) | Near-exact routing, good capacity |
+| Format | Data encoding | Use case |
+|--------|---------------|----------|
+| **RaBitQ** | Quantized bits + f_add/f_rescale | Compact, approximate, with error bounds |
+| **Fastscan** | The same RaBitQ codes, packed for SIMD lookup | Default when a group fits on a page |
+| **Float32** | Full-precision float vectors | Exact routing |
+| **Float16** | Half-precision float vectors | Near-exact routing, more entries per page |
 
-RaBitQ pages encode medoid vectors relative to the global data mean. The
-query is transformed once and reused at every tree level. Float and half
-pages store full-precision vectors and compute exact L2 distances—no
-reranking is needed at centroid routing time.
+Metadata is 8 bytes in every format. RaBitQ pages encode centroids relative
+to the global data mean. The query is transformed once and reused at every
+tree level. Float and half pages store the centroid itself and compute exact
+distances, so routing does not rerank them. Fastscan is a layout of the
+RaBitQ codes, not a different quantizer.
 
-**Sizing** (768 dimensions, 8KB pages):
+**Sizing** (768 dimensions, 8KB pages, 8-byte metadata):
 
 | Format | Entry size | Entries per page |
 |--------|-----------|-----------------|
-| RaBitQ | 120B (16B meta + 104B data) | 67 |
+| RaBitQ | 112B (8B meta + 104B data) | ~72 |
 | Float16 | 1544B (8B meta + 1536B data) | 5 |
 | Float32 | 3080B (8B meta + 3072B data) | 2 |
+
+Fastscan stores centroids in 32-wide groups, so its capacity is a group
+count rather than an entry size.
 
 For billion-scale indexes (RaBitQ format):
 - Root level: ~256-1024 centroids (4-16 pages)
@@ -265,14 +268,15 @@ chosen to provide independent "backup" coverage.
 
 **PRISM approach:**
 
-For initial implementation, use SPANN-style boundary-only replication:
-- Lower storage overhead (important for disk-based index)
-- Simpler to implement and tune
-- Replication factor controlled by reloption `max_replicas` (default: 1, meaning
-  no replication; set higher for better recall)
+Both are build options, not a single `max_replicas` knob (that reloption
+does not exist):
 
-Future versions may explore SOAR-style orthogonal secondary assignments for
-workloads where recall is critical.
+- `boundary_epsilon` (default 0.35) is the SPANN-style band. `0` disables it.
+- `soar_lambda` (default 1.0) is the SOAR secondary assignment. `0` disables it.
+
+Foreground inserts assign a new row to one list. Replication is applied at
+build time. A later compaction or `REINDEX` is what would repay that for rows
+inserted since the build; that compaction is not implemented.
 
 #### Assignment methods: tree descent vs. brute-force
 
@@ -361,9 +365,12 @@ stage 2.
 
 ### 6. Vector Storage
 
-Full-precision vectors are stored in the heap of the indexed table—no separate
-vector storage. For typical embedding dimensions (768-1536), vectors exceed
-PostgreSQL's inline storage threshold and are TOASTed automatically.
+Full-precision vectors are stored in the heap of the indexed table. There is
+no separate vector heap in the index. `vec32` and `vec16` default to
+`STORAGE EXTERNAL`: a value over the ~2 kB toast threshold is stored out of
+line and not compressed. `STORAGE PLAIN` keeps it inline when the row fits on
+a page, which is what a rerank wants. Compression does not help dense
+embeddings, so `MAIN` is not a substitute.
 
 **TOAST access overhead**: Reading a TOASTed vector requires multiple I/O steps:
 1. TID lookup to find the heap tuple
@@ -385,35 +392,39 @@ access method optimized for vector retrieval).
 Index metadata is stored in multiple locations depending on its nature:
 
 **Reloptions** (pg_class.reloptions, specified at CREATE INDEX):
-- Build parameters: `nlist` (number of leaf clusters), `fillfactor`
-- Search defaults: `nprobe` (clusters to search), `rerank_k`
-- Distance mode: `distance_mode` (`asymmetric` or `symmetric`, default:
-  `asymmetric`). Can be overridden per-session via `prism.distance_mode` GUC
-- Over-allocation: `reserved_pages`
-- Multi-tenant: `tenant_column` (for composite key indexes)
+- `nlist`, `fan_out`, `kmeans_nredo`
+- `distance_mode` (`asymmetric` or `symmetric`, default `asymmetric`)
+- `soar_lambda`, `boundary_epsilon`
+- `centroid_compression`, `fastscan`, `centroid_fastscan`
 
-**GUCs** (session/server-level, can override reloptions):
-- `prism.nprobe` - clusters to search per query
-- `prism.rerank_k` - candidates to re-rank with full precision
-- `prism.distance_mode` - RaBitQ distance mode (`default`, `asymmetric`, or
-  `symmetric`). `default` uses the index's `distance_mode` relopt;
-  `asymmetric` or `symmetric` overrides the index setting for the session
+`nprobe` is not a reloption. There is no `fillfactor`, `reserved_pages`,
+`rerank_k`, or `tenant_column`.
+
+**GUCs** (session-level):
+- `prism.nprobe` — clusters to search. `0` derives it from the index.
+- `prism.query_limit` — cap on the top-k the scan sizes from `LIMIT`.
+- `prism.rerank`, `prism.rerank_pool` — exact heap rerank, and its pool cap.
+- `prism.distance_mode` — `default` uses the index setting; `asymmetric` or
+  `symmetric` overrides it for the session.
+- `prism.fastscan_bits`, `prism.centroid_beam_scale`,
+  `prism.centroid_error_scale`, `prism.probe_expand`, `prism.recent_buffers`
+- `prism.leaf_refine_threshold`, `prism.log_build_stats` — build time only.
 
 **Catalog tables** (managed by PostgreSQL):
 - Structural info in pg_class, pg_index, pg_am, pg_opclass
 
 **Metapage** (stored in index file, persists with the index):
-- Hierarchical centroid tree structure (root page, level info)
-- Posting list directory (head block per leaf cluster)
-- RaBitQ normalization factors
-- Index version, dimension, distance metric
+- Root centroid page, first posting page, `nlist`, `nlevels`, `fan_out`
+- Centroid format, distance metric, RaBitQ seed, global mean
+- No per-leaf posting directory. A leaf centroid entry holds its list head.
 - Statistics: per-cluster live counts live on each posting list's head page,
   not here -- inserts already hold that page, so they can maintain them, while
   a metapage counter would serialize every insert on block 0
 
 ## Multi-Tenant Support
 
-PRISM supports multi-tenant deployments through two approaches:
+The access method is single-column (`amcanmulticol` is false), so a composite
+key index is not implemented. Two deployment shapes are still the design:
 
 ### Option 1: Index-per-Tenant
 
@@ -450,7 +461,7 @@ CREATE TABLE vectors (
 CREATE INDEX ON vectors USING prism ((tenant_id, embedding));
 ```
 
-**How it works**:
+**Not implemented.** The intended shape is:
 - The hierarchical centroid tree is segmented by `tenant_id` at the root level
 - Each tenant has its own subtree of centroids and posting lists
 - Queries specify `tenant_id` and route directly to that tenant's subtree
@@ -541,9 +552,11 @@ Upper-level pages stay hot in `shared_buffers` since they are accessed on
 every query.
 
 **Parameters**:
-- `nprobe`: Number of leaf posting lists to scan (recall/speed tradeoff)
-- `beam_width`: Candidates to keep at each tree level (default: 1)
-- `rerank_k`: Number of candidates for full-precision re-ranking
+- `prism.nprobe`: leaf posting lists to scan. `0` derives it from the index.
+- `prism.centroid_beam_scale`: routing beam as a fraction of nprobe, not a
+  fixed `beam_width`.
+- `prism.rerank` / `prism.rerank_pool`: exact heap rerank and its pool cap.
+  There is no `rerank_k` reloption.
 
 ### Dynamic Updates (LIRE Protocol)
 
@@ -551,25 +564,19 @@ PRISM adopts the **LIRE (Lightweight Incremental RE-balancing)** protocol
 from SPFresh for maintaining index quality under continuous updates without
 full rebuilds.
 
-> **Implementation status — Phase 0 (correctness).** The index now supports
-> incremental `INSERT`, `DELETE`, and `UPDATE`. `aminsert` routes each new
-> vector to its nearest leaf and appends it to that cluster's posting list (an
-> append-friendly AoS overflow page — even on FASTSCAN indexes, whose packed base
-> is immutable); the scan merges base + appended pages by per-page format.
-> `DELETE` relies on MVCC for correctness (the executor's heap recheck hides
-> dead/invisible TIDs the index returns) and on `VACUUM` for cleanup:
-> `ambulkdelete` tombstones dead entries (`PRISM_POSTING_FLAG_DELETED`, skipped by
-> later scans); physical reclaim is deferred to a later compaction/rebuild.
-> `UPDATE` is just insert-new + delete-old — a vector-column update inserts the
-> new version and lets `VACUUM` clean the old one, while an update that leaves
-> the vector unchanged is HOT (no index work). Centroids are **fixed** in this
-> phase, so heavy churn drifts the partitioning and degrades recall over time —
-> run `REINDEX [CONCURRENTLY]` to refresh it (the same posture as `ivfflat`).
-> **SOAR / boundary replication is applied in bulk**, at build and at
-> compaction, not on the foreground insert (which assigns to a single list); new
-> rows therefore carry a small recall debt that a rebuild or compaction repays.
-> The split / merge / reassign and background-worker pieces below are the later
-> phases.
+> **What is implemented.** Incremental `INSERT`, `DELETE`, and `UPDATE` work.
+> `aminsert` routes a new vector to one leaf and appends it (an AoS overflow
+> page, including on fastscan indexes, whose packed base is immutable). The
+> scan reads each page in that page's own format. `DELETE` is correct because
+> the executor rechecks heap visibility; `VACUUM` tombstones dead entries
+> (`PRISM_POSTING_FLAG_DELETED`). An update of the vector column is insert-new
+> plus delete-old; an update that leaves the vector unchanged is HOT.
+> Centroids do not move with inserts, so churn drifts the partitioning.
+> `REINDEX` rebuilds it. `prism_rebalance` and `prism_split_posting_list` split
+> oversized lists on demand, and only for a flat index with RaBitQ centroid
+> pages. Merge, reassign, a version byte, and a background worker are not
+> implemented. The subsections below describe that protocol; only split exists,
+> and only in the limited form just stated.
 
 #### Foreground/Background Architecture
 
@@ -653,8 +660,7 @@ skipped. This enables lock-free reads—searches never block on updates.
 
 ### Recall Measurement
 
-PRISM supports measuring recall directly within PostgreSQL via an EXPLAIN
-option:
+Not implemented. The intended interface is an EXPLAIN option:
 
 ```sql
 EXPLAIN (ANALYZE, RECALL)
@@ -711,7 +717,7 @@ Pages are organized in three regions:
 │ Block 0: Metapage                                               │
 │   - Index metadata, parameters, dimension, distance metric      │
 │   - Root centroid page pointer                                  │
-│   - Tenant directory (for composite key indexes)                │
+│   - No posting-list directory and no tenant directory           │
 ├─────────────────────────────────────────────────────────────────┤
 │ Blocks 1..C: Centroid Pages (hierarchical tree)                 │
 │   - Level 0 (root): few hundred centroids                       │
@@ -737,8 +743,8 @@ Centroid pages are stored in PostgreSQL's standard shared buffer cache. Because
 they are accessed on every query, they naturally remain cached (hot pages).
 There is no separate dedicated cache structure—just standard buffer management.
 
-**Multi-tenant layout**: For composite key indexes, the root level contains a
-tenant directory. Each tenant's subtree is stored contiguously:
+**Multi-tenant layout** is not implemented. The intended root would be a
+tenant directory, with each tenant's subtree stored contiguously:
 
 ```
 [Meta][TenantDir][Tenant1-L0][Tenant1-L1...][Tenant2-L0][Tenant2-L1...]...
@@ -799,29 +805,10 @@ rebalancing), so they remain contiguous.
 
 ### Over-Allocation for Growth
 
-To reduce fragmentation, the index supports pre-allocating extra space at build
-time, controlled by reloptions:
-
-**`fillfactor`** (default: 90): Percentage of each page to fill during build.
-Leaving 10% free allows inserts to append to existing pages before needing new
-ones.
-
-```sql
-CREATE INDEX ON vectors USING prism (embedding)
-  WITH (fillfactor = 70);  -- 30% room for growth per page
-```
-
-**`reserved_pages`** (default: 0): Number of empty pages to reserve after each
-posting list during build. These pages are pre-linked but empty, allowing
-growth without allocation at EOF.
-
-```sql
-CREATE INDEX ON vectors USING prism (embedding)
-  WITH (reserved_pages = 2);  -- 2 empty pages per posting list
-```
-
-Trade-off: Higher over-allocation wastes space but delays fragmentation.
-Setting to 0 disables pre-allocation (suitable for static datasets).
+Not implemented. `fillfactor` and `reserved_pages` are not reloptions. Inserts
+that do not fit the current posting page allocate a new page at the end of the
+index. A future build could leave free space or pre-link empty pages per list
+to delay that. The tradeoff is wasted space against later random I/O.
 
 ### Restoring Clustered Layout
 
@@ -891,12 +878,12 @@ expectations, so it's deferred for later exploration.
 
 ### Index Access Method API
 
-Implement required callbacks:
-- `ambuild`: Build index from heap scan
-- `aminsert`: Insert new vector
-- `ambulkdelete` / `amvacuumcleanup`: Handle deletions
-- `amgettuple` / `amgetbitmap`: Return search results
-- `amcostestimate`: Query planner cost estimation
+Registered callbacks:
+- `ambuild` / `ambuildparallel`: build from a heap scan, serially or in parallel
+- `aminsert`: append a vector to one posting list
+- `ambulkdelete` / `amvacuumcleanup`: tombstone dead entries
+- `amgettuple`: return search results. `amgetbitmap` is not implemented.
+- `amcostestimate`: planner cost
 
 ### Buffer Cache Usage
 
@@ -915,9 +902,10 @@ Both centroid pages and posting list pages use the standard shared buffer cache:
 
 ### MVCC Support
 
-- Store XID/CID with each posting list entry
-- Check visibility during scan using standard HeapTupleSatisfiesVisibility
-- Vacuum removes dead entries from posting lists
+- The index does not store an XID per posting entry. The executor rechecks
+  heap visibility, which is what makes a delete correct immediately.
+- `VACUUM` sets `PRISM_POSTING_FLAG_DELETED` on dead entries. Scans skip that
+  flag. Physical reclaim of the bytes is not done yet.
 
 ## Performance Considerations
 
@@ -943,428 +931,6 @@ Critical paths requiring SIMD optimization:
 2. RaBitQ binary distance and error bound computation
 3. Top-k selection during centroid routing
 
-## Billion-Scale Feasibility Study
-
-This section analyzes PRISM's feasibility at 1 billion vectors, using SPFresh
-measurements as a baseline and calculating PostgreSQL-specific estimates.
-
-### SPFresh Reference Numbers (1B vectors, 96 dimensions)
-
-From the SPFresh paper (SPACEV1B dataset):
-
-| Metric | SPFresh Result |
-|--------|----------------|
-| Recall@10 | 90-97% (tunable) |
-| Query latency (p50) | 2-4ms |
-| Query latency (p99) | 8-12ms |
-| Update throughput | 1,000-5,000 vectors/sec |
-| Memory usage | 10GB (vs 1000GB for DiskANN) |
-| Index size | ~100GB |
-| Rebalancing overhead | 0.4% of inserts trigger split |
-
-Note: SPACEV1B uses 96-dimensional vectors. Modern embeddings (768-1536 dims)
-require proportionally more storage and compute.
-
-### PRISM Estimates (1B vectors, 768 dimensions)
-
-**Base latency assumptions** (from [napkin-math]):
-
-| Operation | Latency | Throughput |
-|-----------|---------|------------|
-| Sequential memory (SIMD) | 0.5 ns | 20 GB/s |
-| Random memory (64 bytes) | 50 ns | 1 GB/s |
-| Sequential SSD read (8KB) | 1 μs | 4 GB/s |
-| Random SSD read (8KB) | 100 μs | 70 MB/s |
-| Same-zone network | 100 μs | 10 GB/s |
-
-**AWS storage options** (from [AWS i4i]/[AWS i3en] specs):
-
-| Storage | Random IOPS (4KB) | Seq throughput | Latency | Cost |
-|---------|-------------------|----------------|---------|------|
-| i4i.4xlarge NVMe | 400K read | ~3 GB/s | ~100 μs | ~$1/hr |
-| i4i.16xlarge NVMe | 1.6M read | ~7 GB/s | ~100 μs | ~$4/hr |
-| EBS gp3 (baseline) | 3K | 125 MB/s | ~200 μs | $0.08/GB |
-| EBS gp3 (max) | 16K | 1 GB/s | ~200 μs | +$0.005/IOPS |
-| EBS io2 Block Express | 256K | 4 GB/s | ~200 μs | $0.065/GB |
-
-**Platform assumptions:**
-- 1 billion vectors, 768 dimensions (OpenAI ada-002 scale)
-- **float16 (2 bytes)** per dimension for full-precision vectors
-- **Index on local NVMe** (i4i): 400K IOPS, ~3 GB/s, ~100 μs latency
-- **Heap on EBS gp3**: 16K IOPS provisioned, 1 GB/s, ~200 μs latency
-- 8KB PostgreSQL pages
-- 1 million leaf clusters (1,000 vectors per cluster average)
-- Boundary replication factor: 2× average
-
-[AWS i4i]: https://aws.amazon.com/ec2/instance-types/i4i/
-[AWS i3en]: https://aws.amazon.com/ec2/instance-types/i3en/
-
-**Vector element size comparison:**
-
-| Type | Bytes | 768d vector | 100d vector (SPACEV1B) |
-|------|-------|-------------|------------------------|
-| int8 | 1 | 768 B | 100 B (SPFresh) |
-| float16 | 2 | 1,536 B | 200 B |
-| float32 | 4 | 3,072 B | 400 B |
-
-We use **float16** as a practical middle ground: sufficient precision for most
-embedding models, avoids TOAST overhead for 768d, and halves storage vs float32.
-
-[napkin-math]: https://github.com/sirupsen/napkin-math
-
-#### Storage Requirements
-
-**Full-precision vectors (heap on EBS):**
-
-PostgreSQL TOASTs values exceeding ~2KB. With float16:
-
-| Dimensions | Vector size (float16) | TOAST? | Notes |
-|------------|----------------------|--------|-------|
-| 768 | 1,536 bytes | No | Inline in heap tuple |
-| 1024 | 2,048 bytes | Borderline | May be compressed inline |
-| 1536 | 3,072 bytes | Yes | Stored in TOAST table |
-| 3072 | 6,144 bytes | Yes | Stored in TOAST table |
-
-**Scenario A: Inline vectors (768d, float16) — recommended**
-
-| Component | Calculation | Size |
-|-----------|-------------|------|
-| Heap tuples | 1B × (1,536 + 24 header) bytes | 1.46 TB |
-| Page overhead | ~10% | 146 GB |
-| **Total heap** | | **~1.6 TB** |
-
-**Scenario B: TOASTed vectors (1536d float16 or 768d float32)**
-
-| Component | Calculation | Size |
-|-----------|-------------|------|
-| TOAST chunks | 1B × 3,072 bytes | 2.9 TB |
-| TOAST overhead | chunk headers + index | ~50 GB |
-| Main heap tuples | 1B × ~40 bytes (TOAST pointer) | 40 GB |
-| **Total heap + TOAST** | | **~3.0 TB** |
-
-**Scenario C: Vectors stored in index (no heap access)**
-
-| Component | Calculation | Size |
-|-----------|-------------|------|
-| Full vectors in index | 1B × 1,536 bytes × 2 (replication) | 2.9 TB |
-| RaBitQ + metadata | (as below) | 260 GB |
-| **Total index** | | **~3.2 TB** |
-
-Trade-off: 13× larger index but eliminates heap access entirely.
-
-**Index storage (NVMe) - quantized only:**
-
-| Component | Calculation | Size |
-|-----------|-------------|------|
-| RaBitQ bits | 768 bits / 8 = 96 bytes/vector | 96 GB |
-| f_add | 4 bytes/entry | 4 GB |
-| f_rescale | 4 bytes/entry | 4 GB |
-| TID | 6 bytes/entry | 6 GB |
-| Flags + reserved | 2 bytes/entry | 2 GB |
-| **Per-entry total** | **112 bytes** | **112 GB** |
-| Boundary replication (2×) | 112 GB × 2 | 224 GB |
-| Centroids (quantized) | 1M × 96 bytes | 96 MB |
-| Centroid tree overhead | ~3 levels | 10 MB |
-| Page headers/fragmentation | ~15% | 34 GB |
-| **Total index** | | **~260 GB** |
-
-**Storage summary:**
-
-| Configuration | Vector size | Heap | Index | Total |
-|---------------|-------------|------|-------|-------|
-| Inline (768d, float16) | 1,536 B | 1.6 TB | 260 GB | **1.9 TB** |
-| TOASTed (1536d, float16) | 3,072 B | 3.0 TB | 260 GB | **3.3 TB** |
-| Vectors in index | 1,536 B | 0 | 3.2 TB | **3.2 TB** |
-| SPFresh (100d, int8) | 100 B | ~100 GB | ~100 GB | **~200 GB** |
-
-#### Query Performance Analysis
-
-All calculations use [napkin-math] reference latencies.
-
-**Centroid routing (hierarchical tree traversal):**
-
-| Level | Centroids | Data | Location | Latency |
-|-------|-----------|------|----------|---------|
-| Root | 256 | 24 KB | L3 cache (hot) | 256 × 50ns = **13 μs** |
-| Level 1 | 4,000 | 384 KB | Shared buffers | 4K × 50ns = **200 μs** |
-| Level 2 (leaves) | 1M | 96 MB | Shared buffers/NVMe | **0.1-1 ms** |
-| **Total routing** | | | | **0.3-1.2 ms** |
-
-Note: Hot paths stay in shared_buffers. Cold tenant routing may hit NVMe
-(100 μs per random 8KB page).
-
-**Posting list scan (nprobe=20) on i4i NVMe:**
-
-| Step | Calculation | Latency |
-|------|-------------|---------|
-| Vectors to scan | 20 clusters × 1,000 vectors | 20,000 vectors |
-| Index data to read | 20,000 × 112 bytes | 2.2 MB |
-| Pages to read | 2.2 MB / 8 KB | 275 pages |
-| RaBitQ compute (SIMD) | 20K × ~10 cycles / 3 GHz | **0.07 ms** |
-
-I/O latency depends critically on access pattern and async I/O:
-
-| Scenario | Access pattern | Calculation | Latency |
-|----------|----------------|-------------|---------|
-| Fresh index (contiguous) | Sequential read | 2.2 MB / 3 GB/s | **0.7 ms** |
-| Fragmented, serial I/O | Random QD=1 | 275 × 100 μs | **28 ms** |
-| Fragmented, async I/O | Random QD=275 | 275 / 400K + overhead | **1-2 ms** |
-
-*QD (queue depth) = I/O requests in flight simultaneously. NVMe achieves 400K
-IOPS only at QD≥32. Serial reads (QD=1) pay full 100μs latency per page.*
-
-**Key insight**: The 400K IOPS figure requires **queue depth saturation**. Serial
-random reads are 100 μs each. To achieve low latency on fragmented posting lists:
-
-1. **Prefetching**: PostgreSQL's `effective_io_concurrency` enables async prefetch
-2. **io_uring**: Submit all page reads in parallel, wait for completion
-3. **Keep lists contiguous**: Fresh builds are sequential; REINDEX restores this
-
-For fresh/defragmented indexes, posting scan is ~1ms. For fragmented indexes
-without async I/O, it degrades to ~27ms. Async I/O (io_uring) recovers to ~2ms.
-
-**Re-ranking (top candidates survive RaBitQ filtering):**
-
-| Step | Calculation | Latency |
-|------|-------------|---------|
-| Candidates after filter | 20,000 × 5% | 1,000 vectors |
-| Distance compute (SIMD) | 1K × 768 × 2B / 20 GB/s | **0.08 ms** |
-
-Heap access latency depends on storage configuration:
-
-**Scenario A: Inline vectors (768d, float16) — heap on EBS gp3**
-
-| Step | I/O ops | Calculation | Latency |
-|------|---------|-------------|---------|
-| Heap page reads | 1,000 | 1,000 / 16K IOPS | **62 ms** |
-| With prefetch batching | | 4× improvement | **15-20 ms** |
-
-**Scenario A': Inline vectors — heap on local NVMe (i4i)**
-
-| Step | I/O ops | Calculation | Latency |
-|------|---------|-------------|---------|
-| Heap page reads | 1,000 | 1,000 / 400K IOPS | **2.5 ms** |
-
-**Scenario B: TOASTed vectors (1536d) — heap on EBS gp3**
-
-| Step | I/O ops | Calculation | Latency |
-|------|---------|-------------|---------|
-| Heap + TOAST reads | 4,000 | 4,000 / 16K IOPS | **250 ms** |
-| With prefetch batching | | 4× improvement | **60-80 ms** |
-
-**Scenario C: Vectors stored in index (NVMe only)**
-
-| Step | I/O ops | Calculation | Latency |
-|------|---------|-------------|---------|
-| Already in posting list | 0 | 0 | **0 ms** |
-| (Larger posting scan) | +190 pages | +190 / 400K IOPS | **+0.5 ms** |
-
-**Query latency summary by configuration:**
-
-Assumes contiguous posting lists (fresh index) or async I/O for fragmented lists.
-
-| Configuration | Heap storage | Routing | Posting | Re-rank | **p50** | **p99** |
-|---------------|--------------|---------|---------|---------|---------|---------|
-| Inline (768d) | EBS gp3 16K | <1ms | 1-2ms | 15ms | **~17ms** | **~40ms** |
-| Inline (768d) | i4i NVMe | <1ms | 1-2ms | 2.5ms | **~5ms** | **~12ms** |
-| TOASTed (1536d) | EBS gp3 16K | <1ms | 1-2ms | 60ms | **~62ms** | **~110ms** |
-| Vectors in index | N/A | <1ms | 2-3ms | <1ms | **~4ms** | **~10ms** |
-| SPFresh (100d) | local NVMe | <1ms | 2ms | 2ms | **~4ms** | **~10ms** |
-
-**Fragmentation impact**: Without async I/O, fragmented posting lists degrade
-posting scan from ~1ms to ~27ms. Mitigation: use io_uring, maintain contiguity
-via REINDEX, or set `effective_io_concurrency` appropriately.
-
-**Key insights**:
-
-1. **Posting scan is I/O-bound**: RaBitQ binary distance with AVX-512 is ~0.1ms
-   for 20K vectors. NVMe read latency dominates, consistent with SPFresh.
-
-2. **Async I/O is critical**: Serial random reads are 100μs each. Without async
-   I/O (io_uring or prefetch), fragmented posting lists degrade to ~27ms.
-   PostgreSQL 16+ supports io_uring; earlier versions use `effective_io_concurrency`.
-
-3. **Heap access dominates total latency**: With EBS, re-ranking is 15-60ms.
-   With local NVMe (i4i), re-ranking drops to 2.5ms.
-
-4. **i4i NVMe matches SPFresh latency**: 5ms p50 vs SPFresh's 4ms despite
-   15× larger vectors. The architecture is equally efficient per-byte.
-
-5. **Vectors-in-index achieves 4ms p50** at ~2× storage cost. Consider for
-   latency-critical workloads.
-
-**Storage cost vs latency tradeoff:**
-
-| Configuration | Storage | p50 latency | Monthly cost (1B vectors) |
-|---------------|---------|-------------|---------------------------|
-| Inline + EBS gp3 | 1.9 TB | 17ms | ~$150 storage + $80 IOPS |
-| Inline + i4i NVMe | 1.9 TB | 5ms | ~$1,000 (i4i.4xlarge) |
-| Vectors in index | 3.2 TB | 4ms | ~$1,500 (larger i4i) |
-
-*Requires async I/O or contiguous posting lists. See fragmentation discussion above.*
-
-#### Index Build Performance
-
-Using [napkin-math] reference throughputs. Assumes 768d float16 vectors.
-
-**Phase 1: Sampling and clustering (leader only)**
-
-| Step | Calculation | Time |
-|------|-------------|------|
-| Sample 1% of vectors | 10M vectors × 1.5 KB = 15 GB | |
-| Sequential heap read | 15 GB / 1 GB/s (EBS) | 15 sec |
-| Load to memory | 15 GB / 20 GB/s (SIMD) | 0.75 sec |
-| Hierarchical k-means | 10M × 768d × 20 iterations | ~30 min |
-| **Phase 1 total** | | **~32 min** |
-
-Clustering runs on the leader process only (shared centroid state). Could be
-parallelized with parallel k-means, but 30 min is acceptable for 1B vectors.
-
-**Phase 2: Full scan, assignment, quantization (parallel workers)**
-
-PostgreSQL's parallel index build infrastructure partitions the heap scan across
-workers. Each worker independently:
-1. Scans assigned heap pages
-2. Finds nearest centroid for each vector
-3. Computes RaBitQ encoding
-4. Writes to worker-local buffer
-
-| Step | Serial | Parallelizable? |
-|------|--------|-----------------|
-| Heap scan | 27 min | Yes (I/O bandwidth limited) |
-| Centroid search | 25 min | Yes (CPU, scales linearly) |
-| RaBitQ encoding | 5 min | Yes (CPU, scales linearly) |
-| **Serial total** | **57 min** | |
-
-**Parallel scaling analysis:**
-
-| Workers | Heap scan | Centroid | RaBitQ | Merge | **Total** | Speedup |
-|---------|-----------|----------|--------|-------|-----------|---------|
-| 1 | 27 min | 25 min | 5 min | 0 | **57 min** | 1.0× |
-| 2 | 27 min | 12.5 min | 2.5 min | 1 min | **43 min** | 1.3× |
-| 4 | 27 min | 6.3 min | 1.3 min | 2 min | **37 min** | 1.5× |
-| 8 | 27 min | 3.1 min | 0.6 min | 3 min | **34 min** | 1.7× |
-| 16 | 27 min | 1.6 min | 0.3 min | 4 min | **33 min** | 1.7× |
-
-*Heap scan is I/O-bound at 1 GB/s (EBS). CPU work scales but I/O doesn't.*
-
-**With local NVMe (i4i: 3 GB/s read):**
-
-| Workers | Heap scan | Centroid | RaBitQ | Merge | **Total** | Speedup |
-|---------|-----------|----------|--------|-------|-----------|---------|
-| 1 | 9 min | 25 min | 5 min | 0 | **39 min** | 1.0× |
-| 4 | 9 min | 6.3 min | 1.3 min | 2 min | **19 min** | 2.1× |
-| 8 | 9 min | 3.1 min | 0.6 min | 3 min | **16 min** | 2.4× |
-| 16 | 9 min | 1.6 min | 0.3 min | 4 min | **15 min** | 2.6× |
-
-*Local NVMe removes I/O bottleneck; build becomes CPU-bound and scales better.*
-
-**Amdahl's Law analysis:**
-
-```
-Serial fraction (EBS):  ~50% (heap scan I/O)
-Serial fraction (NVMe): ~25% (heap scan I/O)
-
-Max speedup (EBS):  1 / 0.50 = 2×    → diminishing returns after 4 workers
-Max speedup (NVMe): 1 / 0.25 = 4×    → scales to 8-16 workers
-```
-
-**Phase 3: Merge and write (leader + I/O)**
-
-| Step | Calculation | Time |
-|------|-------------|------|
-| Merge worker buffers | Combine posting lists | 2-4 min |
-| Write posting lists | 260 GB / 4 GB/s (NVMe seq) | 65 sec |
-| Fsync overhead | ~10% | 6 sec |
-| Write centroid pages | 100 MB / 4 GB/s | <1 sec |
-| **Phase 3 total** | | **~3-5 min** |
-
-**Build time summary:**
-
-| Configuration | Phase 1 | Phase 2 | Phase 3 | **Total** |
-|---------------|---------|---------|---------|-----------|
-| EBS, 1 worker | 32 min | 57 min | 2 min | **91 min** |
-| EBS, 8 workers | 32 min | 34 min | 5 min | **71 min** |
-| i4i NVMe, 8 workers | 32 min | 16 min | 5 min | **53 min** |
-| i4i NVMe, 16 workers | 32 min | 15 min | 5 min | **52 min** |
-
-**PostgreSQL parallel build configuration:**
-
-```sql
--- Enable parallel index build
-SET max_parallel_maintenance_workers = 8;  -- Workers for CREATE INDEX
-SET maintenance_work_mem = '8GB';          -- Memory per worker
-
--- Create index with parallel workers
-CREATE INDEX CONCURRENTLY ON documents
-USING prism (embedding vec32_cosine_ops)
-WITH (workers = 8);
-```
-
-**Recommendation:** Use 8 workers on i4i NVMe for ~50 min builds. Beyond 8
-workers, I/O becomes the bottleneck and additional CPU provides diminishing
-returns. For faster builds, the clustering phase (32 min) becomes dominant—
-consider pre-computed centroids or incremental builds for frequent rebuilds.
-
-#### Multi-Tenant Scaling
-
-For composite key indexes with N tenants:
-
-| Tenants | Vectors/tenant | Cluster overhead | Query isolation |
-|---------|----------------|------------------|-----------------|
-| 10 | 100M | Minimal | Full |
-| 100 | 10M | ~10% | Full |
-| 1,000 | 1M | ~15% | Full |
-| 10,000 | 100K | ~25% | Full |
-
-Per-tenant query cost is independent of total dataset size—a query for a
-tenant with 1M vectors has the same cost whether the total index has 1B or
-10B vectors.
-
-#### Comparison with SPFresh
-
-| Metric | SPFresh | PRISM (EBS) | PRISM (i4i) | PRISM In-Index |
-|--------|---------|---------------|---------------|------------------|
-| Dimensions | 100 | 768 | 768 | 768 |
-| Element type | int8 | float16 | float16 | float16 |
-| Vector size | 100 B | 1,536 B | 1,536 B | 1,536 B |
-| Heap storage | NVMe | EBS gp3 | i4i NVMe | N/A |
-| Query p50 | 2-4ms | ~17ms | **~5ms** | **~4ms** |
-| Query p99 | 8-12ms | ~40ms | **~12ms** | **~10ms** |
-| Index size | ~100 GB | 260 GB | 260 GB | 3.2 TB |
-| Heap size | ~100 GB | 1.6 TB | 1.6 TB | 0 |
-| Total storage | ~200 GB | 1.9 TB | 1.9 TB | 3.2 TB |
-| Build time | N/A | ~1 hour | ~30 min | ~1 hour |
-| Memory | 10 GB | 32-64 GB | 32-64 GB | 64-128 GB |
-| Instance cost | N/A | ~$230/mo | ~$730/mo | ~$1,100/mo |
-
-**Analysis:**
-
-- **SPFresh baseline**: 100d int8 vectors are 15× smaller than 768d float16.
-  Both systems are I/O-bound on posting scan; RaBitQ compute is negligible.
-
-- **PRISM on EBS**: Cost-effective at ~$230/month, but EBS IOPS limits
-  re-ranking latency to ~15ms. Good for throughput-oriented workloads.
-
-- **PRISM on i4i NVMe**: Achieves **5ms p50**—matching SPFresh despite 15×
-  larger vectors. Proves the architecture scales efficiently with vector size.
-
-- **Vectors in index**: Best latency at **3ms p50** by eliminating heap access.
-  ~2× storage cost. Competitive with SPFresh at any vector size.
-
-**Recommendations by workload:**
-
-| Workload | Configuration | Instance | p50 | Cost/month |
-|----------|---------------|----------|-----|------------|
-| Cost-sensitive | Inline + EBS | r6i.4xlarge | 17ms | ~$500 |
-| Balanced | Inline + i4i | i4i.4xlarge | 5ms | ~$1,000 |
-| Latency-critical | In-index | i4i.8xlarge | 4ms | ~$2,000 |
-
-*Latencies assume async I/O (io_uring) or contiguous posting lists. Fragmented
-indexes without async I/O add ~25ms to posting scan.*
-| Latency-critical (<30ms p99) | Vectors in index | No heap access |
-| Cost-sensitive | Inline (768d, float16) | Smallest total storage |
-
 ## Future Extensions
 
 1. **Product quantization**: Even better compression for very high dimensions
@@ -1384,16 +950,8 @@ indexes without async I/O add ~25ms to posting scan.*
 
 **Implementation references:**
 
-- [turbopuffer ANN v3][turbopuffer] - Production IVF lessons
-- [napkin-math][napkin] - Systems performance reference numbers
-- [AWS i4i instances][aws-i4i] - Local NVMe storage specs
-- [AWS i3en instances][aws-i3en] - High-density NVMe storage
 
 [spann]: https://www.microsoft.com/en-us/research/wp-content/uploads/2021/11/SPANN_finalversion1.pdf
 [spfresh]: https://arxiv.org/pdf/2410.14452
 [scann-alloydb]: https://services.google.com/fh/files/misc/scann_for_alloydb_whitepaper.pdf
 [rabitq]: https://arxiv.org/abs/2405.12497
-[turbopuffer]: https://turbopuffer.com/blog/ann-v3
-[napkin]: https://github.com/sirupsen/napkin-math
-[aws-i4i]: https://aws.amazon.com/ec2/instance-types/i4i/
-[aws-i3en]: https://aws.amazon.com/ec2/instance-types/i3en/
