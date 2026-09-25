@@ -72,6 +72,12 @@ never *changed*.
 ./scripts/prepare-release.sh
 ```
 
+An agent cutting a release follows the `release` skill, which drives
+this script. The skill fills the notes before the PR is opened. The
+interactive path below still opens with placeholders and finishes the
+notes in the PR. Either way the release check refuses a merge while
+a `FILL-IN` remains.
+
 It checks the repository first, before asking anything. Uncommitted
 changes to tracked files are refused — they would ride onto the release
 branch, so anything you built or tested there would not be what the PR
@@ -256,20 +262,28 @@ A trailer rather than prose because the release pipeline reads it back:
 value off the commit that landed on `main` with no API call and no
 parsing of human text.
 
-It is written in two places, because which one survives depends on how
-the PR is merged. A **rebase** merge keeps the release commit and its
-trailer. A **squash** merge builds a new commit message from the PR body
-(the repository's `squash_merge_commit_message` is `PR_BODY`), so the
-body's copy becomes the trailer on `main`. Either way `main`'s commit
-carries it, and both copies are generated from the same value, so they
-cannot disagree.
+The script writes it in two places: the release commit, and the PR
+body. Which one survives depends on the merge. A **rebase** merge
+keeps the branch commits, and the post-merge step reads the trailer
+with `git log -1`, so the tip commit is the one that counts. A
+**squash** merge builds a new commit message from the PR body
+(`squash_merge_commit_message` is `PR_BODY`), so the body's copy is
+the one that lands.
+
+The release PR is one commit. The release check rejects a second.
+Filling the notes amends that commit rather than adding another, and
+a branch that was already pushed is force-pushed with
+`--force-with-lease`. The trailer on that commit and the copy in the
+PR body must be the same value. A rebase merge reads the commit. A
+squash merge reads the body.
 
 Editing it is how a different bump gets requested — a major one, say.
-Edit the trailer in whichever of the two the merge will use, and keep it
-as the last paragraph: git only parses a trailer block that ends the
-message.
+Change both copies, and keep each one the last paragraph: git only
+parses a trailer block that ends the message.
 
-**The release notes are finished in the PR, not before it.** The entry is
+**On the interactive path, the notes are finished in the PR, not before it.**
+The `release` skill is the exception: it fills them before opening, so
+the PR does not open already failing the check. The entry is
 written with `.release-notes-template.md`'s `FILL-IN` placeholders still
 in it, and the release check fails while any remain — so an unfinished
 release cannot merge. `git-cliff` generates the entry's `### Changes`
