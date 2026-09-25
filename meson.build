@@ -301,22 +301,37 @@ vs_config_h = configure_file(
 # Embed the git commit hash at build time. vcs_tag re-runs when HEAD
 # moves, so a plain `ninja` picks up a fresh commit without a full
 # reconfigure. Falls back to "unknown" outside of a git checkout.
-# A tarball has no .git for vcs_tag to query, so `meson dist` writes the
-# packaged commit to .commit-sha and that becomes the fallback. In a
-# checkout the file is absent and vcs_tag queries git as usual, which is
-# what keeps a plain `ninja` picking up a new HEAD.
-git_commit_fallback = 'unknown'
-if fs.exists('.commit-sha')
-  git_commit_fallback = fs.read('.commit-sha').strip()
+# Which generator runs depends on whether this tree is a git checkout,
+# not on whether git happens to answer. `git rev-parse HEAD` walks up to
+# an enclosing repository, so a tarball extracted inside one would report
+# that unrelated commit -- worse than reporting nothing, because it looks
+# right. vcs_tag's fallback cannot help: it only applies when the command
+# fails, and there it succeeds.
+if fs.exists(meson.project_source_root() / '.git')
+  # A checkout: vcs_tag re-runs when HEAD moves, so a plain `ninja` picks
+  # up a new commit without reconfiguring.
+  git_commit_h = vcs_tag(
+    input: 'src/git_commit.h.in',
+    output: 'git_commit.h',
+    fallback: 'unknown',
+    command: ['git', 'rev-parse', 'HEAD'],
+    replace_string: '@VCS_TAG@',
+  )
+else
+  # A tarball: the commit cannot change, so substitute the one `meson
+  # dist` recorded and never consult git.
+  git_commit = 'unknown'
+  if fs.exists('.commit-sha')
+    git_commit = fs.read('.commit-sha').strip()
+  endif
+  git_commit_data = configuration_data()
+  git_commit_data.set('VCS_TAG', git_commit)
+  git_commit_h = configure_file(
+    input: 'src/git_commit.h.in',
+    output: 'git_commit.h',
+    configuration: git_commit_data,
+  )
 endif
-
-git_commit_h = vcs_tag(
-  input: 'src/git_commit.h.in',
-  output: 'git_commit.h',
-  fallback: git_commit_fallback,
-  command: ['git', 'rev-parse', 'HEAD'],
-  replace_string: '@VCS_TAG@',
-)
 
 meson.add_dist_script('sh', '-c',
   'git -C "$MESON_SOURCE_ROOT" rev-parse HEAD > "$MESON_DIST_ROOT/.commit-sha"')
@@ -786,7 +801,9 @@ endif
 # extracted tarball inside the repo -- which is exactly what `meson dist`
 # does to check its output -- would otherwise clobber the repo's hooks.
 pre_commit = find_program('pre-commit', required: false)
-if pre_commit.found() and fs.exists(meson.project_source_root() / '.git')
+if not pre_commit.found()
+  warning('pre-commit not found. Install with: pip install pre-commit')
+elif fs.exists(meson.project_source_root() / '.git')
   # Install hooks automatically during setup (may fail in sandbox, that's OK)
   install_result = run_command(pre_commit, 'install', '--install-hooks',
     check: false, capture: true)
@@ -805,6 +822,4 @@ if pre_commit.found() and fs.exists(meson.project_source_root() / '.git')
   run_target('pre-commit-install',
     command: [pre_commit, 'install', '--install-hooks'],
   )
-else
-  warning('pre-commit not found. Install with: pip install pre-commit')
 endif
