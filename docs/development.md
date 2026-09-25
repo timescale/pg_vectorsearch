@@ -31,6 +31,55 @@ meson test -C builddir
 meson compile -C builddir format
 ```
 
+### Build options
+
+| Option | Values | Default | Description |
+|--------|--------|---------|-------------|
+| `postgresql` | `auto`, `enabled`, `disabled` | `auto` | Build PostgreSQL extension |
+| `pg_config` | path | (auto-detect) | Path to `pg_config` |
+| `simd` | `full`, `compiler`, `none` | `full` | SIMD implementation mode |
+| `native` | `true`, `false` | `false` | Use `-march=native` for local builds |
+| `blas` | `auto`, `enabled`, `disabled` | `auto` | CBLAS for matrix operations |
+| `tools` | `auto`, `enabled`, `disabled` | `auto` | Developer tools (CLI, standalone library, unit tests) |
+
+Use `-Dpostgresql=enabled` to require the extension build (fails if PostgreSQL
+is not found). Use `-Dpostgresql=disabled` to build only the standalone library
+and CLI tools.
+
+The `tools` default (`auto`) builds the developer tools in a git checkout but
+skips them when building from a release tarball, so packagers get an
+extension-only build unless they pass `-Dtools=enabled`. PostgreSQL regression
+tests are unaffected.
+
+`simd` and `native` are covered in [simd.md](simd.md).
+
+### BLAS
+
+A CPU-optimized BLAS library speeds up RaBitQ encoding by about 4x for
+batch operations. `meson setup` looks for CBLAS when `-Dblas=auto` (the
+default) and uses it if found. `-Dblas=enabled` fails setup if none is
+found; `-Dblas=disabled` skips detection.
+
+| CPU | Library | Link |
+|-----|---------|------|
+| Intel | Intel oneMKL | [intel.com/oneapi/onemkl](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html) |
+| AMD | AOCL-BLIS | [amd.com/aocl/blis](https://www.amd.com/en/developer/aocl/blis.html) |
+| ARM | ARM Performance Libraries | [developer.arm.com](https://developer.arm.com/Tools%20and%20Software/Arm%20Performance%20Libraries) |
+| Any | OpenBLAS | [openblas.net](https://www.openblas.net/) |
+
+```bash
+# Arch Linux (AUR packages require yay or similar)
+pacman -S blas-openblas      # Generic (official repo)
+yay -S blas-mkl              # Intel (AUR)
+yay -S blas-aocl-gcc         # AMD (AUR)
+
+# Debian/Ubuntu
+apt install libopenblas-dev
+
+# Fedora
+dnf install openblas-devel
+```
+
 ## Code Coverage
 
 Meson has built-in coverage support that auto-detects the compiler and tools.
@@ -166,6 +215,21 @@ meson setup builddir-debug --buildtype=debug
 # Setup release build
 meson setup builddir-release --buildtype=release
 ```
+
+## Micro-benchmarking
+
+The core engine builds outside PostgreSQL, which is what the unit tests and
+the micro-benchmarks use. The `vectorsearch` CLI benchmarks distance
+computation:
+
+```bash
+# default: dim=768, count=10000
+./bin/vectorsearch bench distance
+
+./bin/vectorsearch bench distance --dim 1536 --count 50000
+```
+
+Comparing SIMD implementations is covered in [simd.md](simd.md#cli-benchmarks).
 
 ## Profiling
 
