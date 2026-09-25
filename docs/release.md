@@ -3,11 +3,10 @@
 How a release is versioned, how a release PR is cut, and what merging
 one creates.
 
-> Merging a release PR creates the `v<version>` tag and a GitHub
-> Releases entry with the notes. It attaches no files: the only
-> downloads are GitHub's own auto-generated source archives. Building a
-> named source tarball, announcing, and reopening the development cycle
-> are all still to come — see [After a release](#after-a-release).
+> Merging a release PR creates the `v<version>` tag, a GitHub Releases
+> entry with the notes, and a source tarball with its `.sha256sum`
+> attached to it. Announcing and reopening the development cycle are
+> still to come — see [After a release](#after-a-release).
 
 ## Versioning
 
@@ -364,7 +363,16 @@ strict on real ones. It also means releasing does not depend on
 `main` anyway stops here rather than shipping.
 
 **Build** builds and tests at the exact commit the gate approved, not at
-whatever `main` has moved to since.
+whatever `main` has moved to since. It then packages the tarball with
+`meson dist`, which unpacks what it archived and runs setup, compile,
+test and install over it, reusing this build's own options — so the
+extension is proven to build from the tarball, not just the core
+library. `meson dist` writes the `.sha256sum` beside it.
+
+Packaging therefore gates tagging: a tarball that would not build fails
+the build job, and nothing downstream runs. The assets travel to the
+next job as an artifact, since that job has neither the toolchain nor a
+build directory.
 
 **Tag and create the Releases entry** (`scripts/ci/release-create.sh`)
 makes exactly two things: the git ref `refs/tags/v<version>` in this
@@ -376,6 +384,11 @@ only ever tag a verified commit — and it does nothing else, so a later
 failure attaching artifacts cannot damage an entry that already
 exists.
 
+The tarball and its checksum are attached in a following step, once the
+entry exists. That order is deliberate: a failed upload leaves a release
+missing its files, which re-running the job fixes, rather than a tag
+with nothing behind it.
+
 It reports the release milestone's remaining open issues but never closes
 it: closing a milestone that still has open work is a judgement call.
 
@@ -386,7 +399,8 @@ version the ref does not carry.
 
 ## After a release
 
-`main` now sits at a released version, and two things are still manual.
+`main` now sits at a released version, and reopening the development
+cycle is still manual.
 
 **Reopen the development cycle.** Bump `VERSION` to the next `-dev` —
 the release commit says which in its `Next-Version` trailer:
@@ -397,9 +411,6 @@ git log -1 --format='%(trailers:key=Next-Version,valueonly)' origin/main
 
 Until that lands, `main` carries a version that has already shipped, so
 anything merged in between is built and tested as a released version.
-
-**Nothing is attached to the release.** No source tarball, no checksum.
-Installing means building from the tag.
 
 ## Branches
 
