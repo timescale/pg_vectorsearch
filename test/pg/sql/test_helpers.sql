@@ -37,5 +37,12 @@ RETURNS integer
 AS '$libdir/pgvs_test_helpers', 'vs_test_rabitq_cache_clear'
 LANGUAGE C PARALLEL RESTRICTED;
 
+-- Mutates the index (extends the relation), so no PARALLEL clause: this
+-- keeps the safe-by-default PARALLEL UNSAFE.
+CREATE OR REPLACE FUNCTION append_centroid_page(regclass)
+RETURNS integer
+AS '$libdir/pgvs_test_helpers', 'vs_test_append_centroid_page'
+LANGUAGE C;
+
 -- Restore the caller's echo setting captured above.
 \set ECHO :saved_echo

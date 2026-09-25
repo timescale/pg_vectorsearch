@@ -321,6 +321,22 @@ prism_centroid_max_entries(Dimension dim)
 #define PRISM_CENTROID_OPAQUE(page) \
 	((PrismCentroidPageOpaque *)PageGetSpecialPointer(page))
 
+/*
+ * Is this page a centroid page at all? Same guard shape as
+ * prism_page_is_posting (see posting_page.h) -- MAXALIGN, not a bare sizeof,
+ * since PrismCentroidPageOpaque's 12 bytes are not themselves a multiple of
+ * MAXIMUM_ALIGNOF. The two opaque structs are a different size, so a page of
+ * one kind is never mistaken for the other.
+ */
+static inline bool
+prism_page_is_centroid(Page page)
+{
+	return !PageIsNew(page) &&
+		   PageGetSpecialSize(page) ==
+				   MAXALIGN(sizeof(PrismCentroidPageOpaque)) &&
+		   PRISM_CENTROID_OPAQUE(page)->page_id == PRISM_CENTROID_PAGE_ID;
+}
+
 /* Data format stored in the page */
 static inline PrismCentroidFormat
 prism_centroid_page_format(Page page)

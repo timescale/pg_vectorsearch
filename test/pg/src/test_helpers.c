@@ -14,10 +14,14 @@
 
 #include <postgres.h>
 
+#include <access/relation.h>
+#include <commands/defrem.h>
 #include <fmgr.h>
 #include <funcapi.h>
 
+#include "index/centroid_page.h"
 #include "pg/amcache.h"
+#include "pg/bufstorage.h"
 
 PG_MODULE_MAGIC;
 
@@ -63,4 +67,48 @@ Datum
 vs_test_rabitq_cache_clear(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(prism_rabitq_cache_clear());
+}
+
+/*
+ * Append an empty, level-0 centroid page to the end of the given index
+ * relation, mirroring the on-disk shape a posting-list split leaves when it
+ * has to grow the centroid tree but finds no room on the level-0 page: it
+ * extends the relation for the new centroid page, landing it past every
+ * existing posting page (see posting_split.c's `!appended` branch). Lets a
+ * regression test exercise that shape -- and what reads the index afterward
+ * -- directly, without forcing enough real splits to overflow a page for
+ * real. Returns the new page's block number.
+ */
+PG_FUNCTION_INFO_V1(vs_test_append_centroid_page);
+
+Datum
+vs_test_append_centroid_page(PG_FUNCTION_ARGS)
+{
+	Oid		 indexoid = PG_GETARG_OID(0);
+	Relation index	  = relation_open(indexoid, ShareUpdateExclusiveLock);
+
+	/* This extends whatever relation it's handed -- passing a heap table by
+	 * mistake would silently append a garbage page to it instead of erroring
+	 * out, since neither relation_open nor vs_pg_storage_init care what kind
+	 * of relation they're given. */
+	if (index->rd_rel->relam != get_am_oid("prism", false))
+	{
+		relation_close(index, ShareUpdateExclusiveLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a prism index",
+						RelationGetRelationName(index))));
+	}
+
+	VsPgStorage storage;
+	vs_pg_storage_init(&storage, index, NULL, DISTANCE_L2);
+
+	BlockNumber blkno;
+	Page		page = vs_storage_new_page(&storage.base, &blkno);
+	prism_centroid_page_init_fmt(page, 0, PRISM_CENTROID_FMT_RABITQ);
+	vs_storage_commit_page(&storage.base, blkno);
+
+	relation_close(index, ShareUpdateExclusiveLock);
+
+	PG_RETURN_INT32((int32)blkno);
 }

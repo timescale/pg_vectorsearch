@@ -88,9 +88,9 @@ int prism_rabitq_cache_stats(PrismRabitqCacheStat *stats, int max_stats);
 int prism_rabitq_cache_clear(void);
 
 /*
- * Immutable dim + distance metric + first posting page from the cache, without
- * forcing the lazy rotation-matrix work that prism_index_base_init does. For
- * metadata-only callers such as VACUUM's ambulkdelete (which uses
+ * Immutable dim + distance metric + first posting page from the cache,
+ * without forcing the lazy rotation-matrix work that prism_index_base_init
+ * does. For metadata-only callers such as VACUUM's ambulkdelete (which uses
  * first_posting to skip straight past the centroid region).
  */
 void prism_cache_meta(

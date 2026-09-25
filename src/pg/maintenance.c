@@ -664,22 +664,6 @@ require_memory_budget(Relation index, Dimension dim)
 }
 
 /*
- * Is this page a posting page at all? Guard on the special-area size before
- * reading the opaque, so a page of another kind -- or one only extended, whose
- * special offset is zero -- is never misread through the posting layout. The
- * scanned range starts past the centroid region, so today nothing else should
- * be in it; the guard costs nothing and does not rely on that staying true.
- * (prism_bulkdelete guards the same way over the same range.)
- */
-static bool
-page_is_posting(Page page)
-{
-	return !PageIsNew(page) &&
-		   PageGetSpecialSize(page) == sizeof(PrismPostingPageOpaque) &&
-		   prism_posting_opaque(page)->page_id == PRISM_POSTING_PAGE_ID;
-}
-
-/*
  * Is this posting page a live chain head -- reachable, not retired, not all
  * dead? Written the same way wherever it is asked (the maintenance scan, the
  * re-read under the head lock, vacuum's head recognition), so the three cannot
@@ -722,7 +706,7 @@ split_one_head(
 	LockPage(index, head, ExclusiveLock);
 
 	Page p		   = vs_storage_read_page(base->posting_storage, head);
-	bool live_head = page_is_posting(p) &&
+	bool live_head = prism_page_is_posting(p) &&
 					 posting_head_is_live(prism_posting_opaque(p));
 	/* live_count is meaningful only when the head is live: delete_xid overlays
 	 * it once DELETED, which posting_head_is_live excludes. */
@@ -1124,7 +1108,7 @@ vs_rebalance(PG_FUNCTION_ARGS)
 		CHECK_FOR_INTERRUPTS();
 
 		Page p		 = vs_storage_read_page(&m.storage.base, blk);
-		bool posting = page_is_posting(p);
+		bool posting = prism_page_is_posting(p);
 		const PrismPostingPageOpaque *op = posting ? prism_posting_opaque(p)
 												   : NULL;
 

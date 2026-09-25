@@ -112,6 +112,17 @@ PageGetPageSize(const Page page)
 }
 
 /*
+ * PageGetSpecialSize — size of the special (opaque) area, as PageInit
+ * reserved it (MAXALIGN'd). Matches PostgreSQL's PageGetSpecialSize.
+ */
+static inline uint16_t
+PageGetSpecialSize(const Page page)
+{
+	return (uint16_t)(PageGetPageSize(page) -
+					  ((const PageHeaderData *)page)->pd_special);
+}
+
+/*
  * PageInit — initialize a page with standard PG header layout.
  *
  * Matches PostgreSQL's PageInit: zeroes the page, sets pd_lower to

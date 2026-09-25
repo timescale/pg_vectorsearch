@@ -59,17 +59,17 @@ repos:
         files: ^(sql|test/(.+/)?(sql|compat))/.*\.sql$
         # The extension install script and upgrade scripts are DDL, not
         # migrations — squawk's migration rules don't apply (they get a
-        # pgspot audit in CI instead). prism.sql uses psql
-        # metacommands (\c, \i), which squawk's server-grammar parser
-        # cannot represent — and an unparseable file gets no rule
+        # pgspot audit in CI instead). prism.sql and mutations.sql use
+        # psql metacommands (\c, \i), which squawk's server-grammar
+        # parser cannot represent — and an unparseable file gets no rule
         # coverage anyway; pg_regress executes every statement, which
-        # subsumes the syntax check. test_helpers.sql (included by
-        # prism.sql) is excluded for the same reason, and so are cost.sql
-        # and rerank.sql: both build an immutable function around a query
+        # subsumes the syntax check. test_helpers.sql (included by both)
+        # is excluded for the same reason, and so are cost.sql and
+        # rerank.sql: both build an immutable function around a query
         # vector with \gset and \gexec, which is what keeps an InitPlan
         # out of the plans they compare.
         exclude: >-
-          ^(sql/|test/pg/(compat/|sql/(prism|test_helpers|cost|rerank)\.sql$))
+          ^(sql/|test/pg/(compat/|sql/(prism|mutations|test_helpers|cost|rerank)\.sql$))
 
   # Markdown linting
   - repo: https://github.com/DavidAnson/markdownlint-cli2
