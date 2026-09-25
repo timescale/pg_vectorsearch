@@ -20,8 +20,8 @@
 # naming them in a ruleset, so advisory ones are listed here or a flaky
 # one blocks every merge.
 #
-# --no-wait judges the current state, for testing against a commit whose
-# checks have long finished.
+# --no-wait judges immediately, whatever is still running, for inspecting
+# a commit rather than gating on it.
 
 set -euo pipefail
 
@@ -54,15 +54,32 @@ checks() {
               \"\(.name)\t\(.status)\t\(.conclusion // \"\")\""
 }
 
+# Checks still running, ignoring the ones the gate never judges: waiting
+# on an advisory check would let a stuck one time the gate out, which is
+# the opposite of ignoring it.
+pending_lines() {
+    local name status rest
+    while IFS=$'\t' read -r name status rest; do
+        [[ -n "$name" ]] || continue
+        [[ "$status" != completed ]] || continue
+        is_ignored "$name" && continue
+        printf '%s\t%s\n' "$name" "$status"
+    done <<<"$1"
+}
+
 deadline=$((SECONDS + TIMEOUT_S))
 settled=0
 
 while :; do
     all="$(checks)"
-    pending="$(awk -F'\t' '$2 != "completed"' <<<"$all" | grep -c . || true)"
+    waiting="$(pending_lines "$all")"
+    pending="$(grep -c . <<<"$waiting" || true)"
+
+    # --no-wait judges whatever is there, however much is still running.
+    [[ "$WAIT" == 1 ]] || break
 
     if [[ "$pending" == 0 ]]; then
-        [[ "$WAIT" == 1 && "$settled" == 0 ]] || break
+        [[ "$settled" == 0 ]] || break
         echo "==> nothing pending; settling for ${SETTLE_S}s in case a" \
             "workflow has yet to register"
         sleep "$SETTLE_S"
@@ -72,8 +89,7 @@ while :; do
 
     settled=0
     echo "==> waiting ${POLL_S}s for $pending check(s):"
-    awk -F'\t' '$2 != "completed" { printf "      %s (%s)\n", $1, $2 }' \
-        <<<"$all"
+    awk -F'\t' '{ printf "      %s (%s)\n", $1, $2 }' <<<"$waiting"
     [[ $SECONDS -lt $deadline ]] ||
         { echo "ERROR: timed out after ${TIMEOUT_S}s with $pending" \
             "check(s) still running" >&2; exit 1; }
