@@ -310,6 +310,24 @@ prism_posting_opaque(Page page)
 	return (PrismPostingPageOpaque *)PageGetSpecialPointer(page);
 }
 
+/*
+ * Is this page a posting page at all (not a wrong-kind page, and not one
+ * only extended but never initialized)? Guard on the special-area size
+ * before reading the opaque, so a page of another kind is never misread
+ * through the posting layout. MAXALIGN, not a bare sizeof: PageGetSpecialSize
+ * reports the on-disk (MAXALIGN'd) special-area size PageInit reserved, and a
+ * struct whose size isn't already a multiple of MAXIMUM_ALIGNOF would
+ * otherwise silently stop matching the moment a field is added.
+ */
+static inline bool
+prism_page_is_posting(Page page)
+{
+	return !PageIsNew(page) &&
+		   PageGetSpecialSize(page) ==
+				   MAXALIGN(sizeof(PrismPostingPageOpaque)) &&
+		   prism_posting_opaque(page)->page_id == PRISM_POSTING_PAGE_ID;
+}
+
 static inline uint32_t
 prism_posting_page_count(Page page)
 {

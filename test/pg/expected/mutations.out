@@ -712,3 +712,67 @@ DROP TABLE stats_before;
 RESET enable_seqscan;
 RESET prism.nprobe;
 DROP TABLE mutchain;
+-- ===== A split-appended centroid page must not look like corruption (#262) ===
+-- A posting-list split that needs to grow the centroid tree but finds no room
+-- on the level-0 page appends a new centroid page by extending the relation
+-- (see posting_split.c's `!appended` branch), landing it past every existing
+-- posting page. ambulkdelete classifies each page it scans by its own
+-- page_id rather than by block position specifically to handle this: VACUUM
+-- must not warn the index may be corrupt over a page that carries no heap
+-- TIDs and was never misread or modified. append_centroid_page reproduces
+-- the exact shape without needing enough real splits to overflow a page for
+-- real.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set helper_sql :abs_srcdir '/sql/test_helpers.sql'
+\i :helper_sql
+-- Silence this file's own definitions and documentation so they stay
+-- out of the expected output of any test that includes it. Capture the
+-- caller's current ECHO into a variable and restore it at the end
+-- (below) rather than assuming a value, so whatever the including test
+-- was using keeps working. Everything past \set ECHO none -- these
+-- comments included -- is read with echo off.
+\set saved_echo :ECHO
+\set ECHO none
+CREATE TABLE mutcentroid (id int, v vec32(3));
+INSERT INTO mutcentroid SELECT g, format('[%s,0,0]', g)::vec32
+    FROM generate_series(1, 20) g;
+CREATE INDEX idx_mutcentroid ON mutcentroid USING prism (v)
+    WITH (nlist = 2, centroid_compression = true, fastscan = off,
+          soar_lambda = 0, boundary_epsilon = 0);
+-- Snapshot the posting pages the centroid tree actually reaches, before
+-- appending the orphan centroid page.
+CREATE TEMP TABLE mutcentroid_before AS
+    SELECT blkno FROM prism_posting_pages('idx_mutcentroid'::regclass);
+-- The new page must land past every existing posting page -- the same
+-- position a real overflowing split would leave it in.
+SELECT append_centroid_page('idx_mutcentroid'::regclass) >
+       (SELECT max(blkno) FROM mutcentroid_before) AS appended_past_posting;
+ appended_past_posting 
+-----------------------
+ t
+(1 row)
+
+DELETE FROM mutcentroid WHERE id = 1;
+VACUUM mutcentroid; -- runs ambulkdelete; must not warn the index may be corrupt
+-- The orphan page is not linked from the tree, so a tree walk (what
+-- prism_posting_pages and an ordinary scan both do) never reaches it: same
+-- posting pages as before, and the index is still correct and usable.
+SELECT (SELECT array_agg(blkno ORDER BY blkno) FROM mutcentroid_before) =
+       array_agg(blkno ORDER BY blkno) AS tree_walk_unaffected
+    FROM prism_posting_pages('idx_mutcentroid'::regclass);
+ tree_walk_unaffected 
+----------------------
+ t
+(1 row)
+
+SELECT id FROM mutcentroid ORDER BY v <-> '[2,0,0]' LIMIT 1;
+ id 
+----
+  2
+(1 row)
+
+DROP FUNCTION rabitq_params_cache();
+DROP FUNCTION rabitq_cache_clear();
+DROP FUNCTION append_centroid_page(regclass);
+DROP TABLE mutcentroid_before;
+DROP TABLE mutcentroid;

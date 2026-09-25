@@ -703,57 +703,44 @@ vs_tids_clusters(PG_FUNCTION_ARGS)
 	{
 		Page page = vs_storage_read_page(st, blkno);
 
-		if (PageGetSpecialSize(page) ==
-			MAXALIGN(sizeof(PrismPostingPageOpaque)))
+		if (prism_page_is_posting(page))
 		{
 			const PrismPostingPageOpaque *op = prism_posting_opaque(page);
+			char	*content = prism_posting_page_content(page, dim);
+			uint32_t count	 = op->entry_count;
 
-			if (op->page_id == PRISM_POSTING_PAGE_ID)
+			check_posting_count(
+					blkno,
+					count,
+					dim,
+					(op->flags & PRISM_POSTING_PAGE_FIRST) != 0);
+
+			if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
 			{
-				char	*content = prism_posting_page_content(page, dim);
-				uint32_t count	 = op->entry_count;
-
-				check_posting_count(
-						blkno,
-						count,
-						dim,
-						(op->flags & PRISM_POSTING_PAGE_FIRST) != 0);
-
-				if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
+				/* SoA: TIDs packed per group of VS_FASTSCAN_GROUP. */
+				uint32_t ngroups = (count + VS_FASTSCAN_GROUP - 1) /
+								   VS_FASTSCAN_GROUP;
+				for (uint32_t g = 0; g < ngroups; g++)
 				{
-					/* SoA: TIDs packed per group of VS_FASTSCAN_GROUP. */
-					uint32_t ngroups = (count + VS_FASTSCAN_GROUP - 1) /
-									   VS_FASTSCAN_GROUP;
-					for (uint32_t g = 0; g < ngroups; g++)
-					{
-						ItemPointerData *tids =
-								prism_fastscan_group_tids(content, g, dim);
-						uint32_t gc = count - g * VS_FASTSCAN_GROUP;
-						if (gc > VS_FASTSCAN_GROUP)
-							gc = VS_FASTSCAN_GROUP;
-						for (uint32_t v = 0; v < gc; v++)
-							emit_tid_cluster(
-									rsinfo,
-									keys,
-									nk,
-									&tids[v],
-									op->cluster_id);
-					}
-				}
-				else
-				{
-					/* AoS: the TID is at the head of each entry. */
-					for (uint32_t i = 0; i < count; i++)
-					{
-						PrismPostingEntryHeader *e =
-								prism_posting_entry_at(content, i, dim);
+					ItemPointerData *tids =
+							prism_fastscan_group_tids(content, g, dim);
+					uint32_t gc = count - g * VS_FASTSCAN_GROUP;
+					if (gc > VS_FASTSCAN_GROUP)
+						gc = VS_FASTSCAN_GROUP;
+					for (uint32_t v = 0; v < gc; v++)
 						emit_tid_cluster(
-								rsinfo,
-								keys,
-								nk,
-								&e->meta.tid,
-								op->cluster_id);
-					}
+								rsinfo, keys, nk, &tids[v], op->cluster_id);
+				}
+			}
+			else
+			{
+				/* AoS: the TID is at the head of each entry. */
+				for (uint32_t i = 0; i < count; i++)
+				{
+					PrismPostingEntryHeader *e =
+							prism_posting_entry_at(content, i, dim);
+					emit_tid_cluster(
+							rsinfo, keys, nk, &e->meta.tid, op->cluster_id);
 				}
 			}
 		}

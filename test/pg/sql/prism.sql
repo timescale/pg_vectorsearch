@@ -535,4 +535,5 @@ END $$;
 
 DROP FUNCTION rabitq_params_cache();
 DROP FUNCTION rabitq_cache_clear();
+DROP FUNCTION append_centroid_page(regclass);
 RESET enable_seqscan;

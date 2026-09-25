@@ -326,18 +326,30 @@ prism_bulkdelete(
 	PrismBulkDeleteCtx ctx = {.cb = callback, .cb_state = cb_state};
 
 	/*
-	 * The index is laid out as: block 0 metadata, then the contiguous centroid
-	 * region, then the posting pages. first_posting (from the metapage) is one
-	 * past the last centroid page, so start there and skip the whole centroid
-	 * region without scanning it.
+	 * The index is laid out as: block 0 metadata, then the contiguous
+	 * centroid region [1, first_posting), then the posting pages.
+	 * first_posting is fixed at build time and the relation only grows from
+	 * there, so nothing below it is ever a posting page or a split-appended
+	 * centroid page -- start there, as before, to skip that region without
+	 * scanning it.
 	 *
-	 * Within the posting region we act only on chain heads; overflow pages are
-	 * reached via the chain from their head, and new/empty pages are expected
-	 * (extension slack). A page that is neither a posting page nor empty is
-	 * the only anomaly worth surfacing (corruption or a format bug); count
-	 * those and emit a single WARNING after the walk rather than one per page,
-	 * so a badly corrupt index can't flood the log (bulkdelete also runs once
-	 * per dead-tuple batch, i.e. potentially many times per VACUUM).
+	 * A split that needs to grow the centroid tree but finds no room on the
+	 * level-0 page appends a new centroid page by extending the relation
+	 * (see posting_split.c), which lands past every existing posting page --
+	 * i.e. still >= first_posting, just no longer separable from the
+	 * posting region by block number alone. Classify each page in the
+	 * scanned range by its own page_id instead of relying on position: a
+	 * posting page is acted on, a centroid page and an empty
+	 * (not-yet-initialized) page are both expected and skipped, and
+	 * anything else is the only real anomaly.
+	 *
+	 * Within the posting region we act only on chain heads; overflow pages
+	 * are reached via the chain from their head. A page that is none of the
+	 * above is the only anomaly worth surfacing (corruption or a format
+	 * bug); count those and emit a single WARNING after the walk rather
+	 * than one per page, so a badly corrupt index can't flood the log
+	 * (bulkdelete also runs once per dead-tuple batch, i.e. potentially
+	 * many times per VACUUM).
 	 */
 	uint32_t	unrecognized = 0;
 	BlockNumber first_bad	 = InvalidBlockNumber;
@@ -352,24 +364,21 @@ prism_bulkdelete(
 		Page page		= BufferGetPage(buf);
 		bool is_head	= false;
 		bool recognized = PageIsNew(page); /* an empty page is expected */
-		/*
-		 * Guard on the special-area size before reading the opaque so a page
-		 * of another kind is never misread through the posting layout.
-		 */
-		if (!recognized &&
-			PageGetSpecialSize(page) == sizeof(PrismPostingPageOpaque))
+
+		if (!recognized && prism_page_is_posting(page))
 		{
 			PrismPostingPageOpaque *op = prism_posting_opaque(page);
-			if (op->page_id == PRISM_POSTING_PAGE_ID)
-			{
-				recognized = true;
-				/* Skip a retired (DELETED) chain: it is superseded by a split,
-				 * its live_count slot now holds delete_xid, and cleanup
-				 * reclaims it once safe. */
-				is_head = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0 &&
-						  !(op->flags & PRISM_POSTING_PAGE_DELETED);
-			}
+			recognized				   = true;
+			/* Skip a retired (DELETED) chain: it is superseded by a split,
+			 * its live_count slot now holds delete_xid, and cleanup
+			 * reclaims it once safe. */
+			is_head = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0 &&
+					  !(op->flags & PRISM_POSTING_PAGE_DELETED);
 		}
+		/* Centroid pages carry no heap TIDs — there is nothing for
+		 * bulkdelete to do with one, only to not mistake it for corruption. */
+		if (!recognized && prism_page_is_centroid(page))
+			recognized = true;
 		UnlockReleaseBuffer(buf);
 
 		if (!recognized)
