@@ -52,13 +52,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Standard jobs: source-built debug PostgreSQL with assertions,
-          # randomized allocations, and injection points (the isolation tests
-          # run only here). The build is cached by the setup-pg action.
-          - runner: ubuntu-latest
-            os: Linux
-            arch: x64
-            pg: debug
+          # Standard job: source-built debug PostgreSQL with assertions,
+          # randomized allocations, and injection points (the isolation
+          # tests run only here). The build is cached by the setup-pg
+          # action. arm64 only: the sanitizers workflow already runs this
+          # same suite on x64 (plus ASan/UBSan instrumentation), so an
+          # x64 debug job here would just repeat it without adding
+          # coverage; arm64 exercises the NEON SIMD path the sanitizer
+          # jobs (x64-only) can't reach.
           - runner: ubuntu-24.04-arm
             os: Linux
             arch: arm64
