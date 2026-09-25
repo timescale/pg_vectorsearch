@@ -1,5 +1,6 @@
 # pg_vectorsearch
 
+[![Build](https://github.com/timescale/pg_vectorsearch/actions/workflows/build.yml/badge.svg)](https://github.com/timescale/pg_vectorsearch/actions/workflows/build.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https://timescale.github.io/pg_vectorsearch/coverage-badge.json)](https://timescale.github.io/pg_vectorsearch/coverage/)
 
 A PostgreSQL extension for high-performance approximate nearest neighbor (ANN)

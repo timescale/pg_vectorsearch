@@ -29,6 +29,13 @@ repos:
         args: [-x]
         require_serial: false
 
+      - id: readme-badges
+        name: readme badges
+        entry: ./scripts/ci/check-readme-badges.sh
+        language: system
+        files: ^(README\.md|\.github/workflows/.*\.yml)$
+        pass_filenames: false
+
   # General file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
