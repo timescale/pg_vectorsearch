@@ -19,6 +19,7 @@ on:
       - 'scripts/ci/makefile-check.sh'
       - 'Makefile'
       - '.github/actions/setup-pg/**'
+      - '.github/workflows/build.yml'
   pull_request:
     branches: [main]
     paths:
@@ -35,6 +36,7 @@ on:
       - 'scripts/ci/makefile-check.sh'
       - 'Makefile'
       - '.github/actions/setup-pg/**'
+      - '.github/workflows/build.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
