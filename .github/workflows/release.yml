@@ -111,6 +111,35 @@ jobs:
             -Dpostgresql=enabled -Dtools=enabled \
             "-Dpg_config=$PG_CONFIG"
 
+      # Before anything is tagged, so a tarball that will not build
+      # cannot become a published release. `meson dist` unpacks what it
+      # archived and runs setup, compile, test and install over it,
+      # reusing this builddir's options -- so the PG extension is
+      # exercised too, not just the core build. It writes a .sha256sum
+      # beside the tarball, so there is nothing to add around it.
+      #
+      # The tarball is asserted rather than assumed: `meson dist`
+      # reports success when it declines to run at all -- in a tree with
+      # no VCS it prints "Dist currently only works with Git or
+      # Mercurial repos" and exits 0.
+      - name: Package the source tarball
+        run: |
+          meson dist -C builddir --formats gztar
+          ls -l builddir/meson-dist/
+          test -n "$(find builddir/meson-dist -name '*.tar.gz' -size +1k \
+            -print -quit)" ||
+            { echo "::error::meson dist produced no tarball"; exit 1; }
+
+      # The publishing job has neither the toolchain nor a builddir, so
+      # the assets travel as an artifact rather than being rebuilt.
+      - name: Hand the assets to the publishing job
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
+        with:
+          name: release-assets
+          path: builddir/meson-dist/
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: Tag the commit and create its GitHub Releases entry
     needs: [gate, build]
@@ -128,9 +157,26 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
+      - name: Collect the assets the build job packaged
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: dist/
+
       - name: Create tag v<version> and a Releases entry with its notes
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.gate.outputs.version }}
           TARGET_SHA: ${{ needs.gate.outputs.sha }}
         run: ./scripts/ci/release-create.sh "$VERSION" "$TARGET_SHA"
+
+      # After the entry exists, so a failed upload leaves a release
+      # missing its files rather than a tag with no release at all.
+      # --clobber lets a re-run replace them instead of failing on a
+      # name clash.
+      - name: Attach the tarball and its checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: gh release upload "v$VERSION" dist/* --clobber --repo "$REPO"
