@@ -58,7 +58,7 @@ jobs:
 
       - name: Setup debug PostgreSQL
         id: pg
-        uses: ./.github/actions/setup-pg-debug
+        uses: ./.github/actions/setup-pg
         with:
           pg-version: '18.4'
 
