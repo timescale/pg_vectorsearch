@@ -15,10 +15,10 @@ on:
       - 'VERSION'
       - 'meson_options.txt'
       - 'scripts/ci/build.sh'
-      - 'scripts/ci/build-pg-debug.sh'
+      - 'scripts/ci/build-pg.sh'
       - 'scripts/ci/makefile-check.sh'
       - 'Makefile'
-      - '.github/actions/setup-pg-debug/**'
+      - '.github/actions/setup-pg/**'
   pull_request:
     branches: [main]
     paths:
@@ -31,10 +31,10 @@ on:
       - 'VERSION'
       - 'meson_options.txt'
       - 'scripts/ci/build.sh'
-      - 'scripts/ci/build-pg-debug.sh'
+      - 'scripts/ci/build-pg.sh'
       - 'scripts/ci/makefile-check.sh'
       - 'Makefile'
-      - '.github/actions/setup-pg-debug/**'
+      - '.github/actions/setup-pg/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -54,7 +54,7 @@ jobs:
         include:
           # Standard jobs: source-built debug PostgreSQL with assertions,
           # randomized allocations, and injection points (the isolation tests
-          # run only here). The build is cached by the setup-pg-debug action.
+          # run only here). The build is cached by the setup-pg action.
           - runner: ubuntu-latest
             os: Linux
             arch: x64
@@ -106,7 +106,7 @@ jobs:
       - name: Setup debug PostgreSQL
         id: pg
         if: matrix.pg == 'debug'
-        uses: ./.github/actions/setup-pg-debug
+        uses: ./.github/actions/setup-pg
         with:
           pg-version: '18.4'
 
@@ -150,7 +150,7 @@ jobs:
           # force-enable, the ext-only job force-disables.
           args="$args -Dtools=$TOOLS"
           # Likewise for TAP. Required on the source-built PostgreSQL, which
-          # build-pg-debug.sh configures with --enable-tap-tests and installs
+          # build-pg.sh configures with --enable-tap-tests and installs
           # PostgreSQL::Test from (into its pgxs tree); IPC::Run comes from
           # libipc-run-perl above. Requiring it there means a missing
           # prerequisite fails the build instead of quietly dropping the
