@@ -135,9 +135,9 @@ noted per row — most shape query behavior, some only the build.
 | `centroid_compression` | `auto` | Query speed and routing memory. | RaBitQ-compress the routing tree's centroids (with exact re-rank of probe order via `prism.probe_expand`). `auto` compresses for L2/cosine and keeps exact centroids for inner product, whose ordering RaBitQ's estimate cannot recover. | Only as an experiment control. |
 | `soar_lambda` | `1.0` | Higher recall at a given nprobe; slower build. | SOAR replication: assigns each vector to a second, spill-orthogonal cluster so near-boundary neighbors are found without extra probes. `0` disables. | Disable to trade recall for a faster build. |
 | `boundary_epsilon` | `0.35` | Higher recall at a given nprobe; larger index. | Boundary replication band: additionally replicates vectors whose two nearest centroids are within this relative gap. Wider bands buy recall for a few percent of index size; `0` disables. | Shrink if index size is critical. |
-| `fan_out` | `32` | Routing-tree shape (depth vs width). | Children per routing-tree node. | Never; the auto shape adapts. |
-| `kmeans_nredo` | `1` | Build time vs marginal cluster quality. | K-means restarts during build. | Never. |
-| `distance_mode` | `asymmetric` | Accuracy vs speed of distance estimates. | RaBitQ distance estimator. `symmetric` is faster with a larger estimation error. | Never; the rerank stage depends on asymmetric accuracy. |
+| `fan_out` | `32` | Routing-tree shape (depth vs width). | Children per routing-tree node. | Rarely; the auto shape adapts. Pin it only to reproduce a tree. |
+| `kmeans_nredo` | `1` | Build time vs marginal cluster quality. | K-means restarts during build. | Rarely. Extra restarts cost build time for little cluster quality. |
+| `distance_mode` | `asymmetric` | Accuracy vs speed of distance estimates. | RaBitQ distance estimator. `symmetric` is faster with a larger estimation error. | Rarely. Symmetric is faster, but rerank depends on asymmetric accuracy. |
 
 ### Query-time GUCs
 
@@ -149,10 +149,10 @@ Take effect per session or per query.
 | `prism.rerank_pool` | `0` (auto) | Lower caps = faster queries, lower recall ceiling. | Caps the exact-rerank candidate pool. | Controlled experiments. |
 | `prism.fastscan_bits` | `16` | 8 = faster scans, more estimation error. | Fastscan lookup-table precision. | Controlled experiments. |
 | `prism.centroid_beam_scale` | `0.5` | Higher = slightly higher recall, slower queries. | Routing beam width as a fraction of nprobe (with a floor of 80 candidates, never more than nprobe). | Raise toward 1.0 to chase the last recall fraction at high nprobe. |
-| `prism.centroid_error_scale` | `0` | Above 0: much slower routing for negligible recall. | Widens the routing beam by the RaBitQ error margin — keep at 0. | Never. |
-| `prism.probe_expand` | `2.0` | Slightly higher recall for a little routing work. | Routes extra leaf candidates and re-ranks probe order by exact centroid distance, fixing compressed-routing noise. Gains saturate at 2.0; capped internally. | Never. |
-| `prism.recent_buffers` | `on` | Warm-query speed; small per-backend memory. | Backend-local buffer-id cache that skips the shared buffer-mapping lookup on warm re-pins. | Never. |
-| `prism.distance_mode` | `default` | Accuracy vs speed of distance estimates. | Per-session override of the index's `distance_mode`. | Never. |
+| `prism.centroid_error_scale` | `0` | Above 0: much slower routing for negligible recall. | Widens the routing beam by the RaBitQ error margin. | Rarely. Above 0, routing gets much slower for negligible recall. |
+| `prism.probe_expand` | `2.0` | Slightly higher recall for a little routing work. | Routes extra leaf candidates and re-ranks probe order by exact centroid distance, fixing compressed-routing noise. Gains saturate at 2.0; capped internally. | Rarely. The default is already where the gains saturate. |
+| `prism.recent_buffers` | `on` | Warm-query speed; small per-backend memory. | Backend-local buffer-id cache that skips the shared buffer-mapping lookup on warm re-pins. | Rarely. Off only to measure the cache. |
+| `prism.distance_mode` | `default` | Accuracy vs speed of distance estimates. | Per-session override of the index's `distance_mode`. | Rarely. Same caveat as the index `distance_mode`. |
 
 ### Build-time GUCs
 

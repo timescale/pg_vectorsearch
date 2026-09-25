@@ -30,8 +30,10 @@ a subset of partitions to build the nearest neighbor result set.
 ### Documentation
 
 - `docs/architecture.md` - High-level architecture
-- `docs/implementation.md` - Detailed implementation specifications
 - `docs/development.md` - Build instructions, testing, CI scripts
+- `docs/fastscan-design.md`, `docs/incremental-updates-design.md`,
+  `docs/parallel-build-design.md` - design notes for work not yet in the
+  code. The code is the specification for what is implemented.
 
 
 ### Performance Goals
@@ -379,7 +381,6 @@ Keep documentation up-to-date with code changes:
 
 - `README.md`: Update with new features, changed requirements, or usage examples
 - `docs/architecture.md`: Update when design or structure changes
-- `docs/implementation.md`: Update when implementation details change
 
 ## Development Workflow
 
