@@ -122,6 +122,54 @@ ever adjust `prism.nprobe`.
 See the [tuning guide][tuning-doc] for every index parameter and GUC,
 their tradeoffs, and when changing them makes sense.
 
+### Migrating a pgvector table to PRISM
+
+If you already have a table with pgvector's `vector` or `halfvec`
+columns, you can build a PRISM index on it directly. Nothing about the
+table or your queries needs to change.
+
+```sql
+-- The table you already have, included so the example runs on its own.
+CREATE EXTENSION vector;
+
+CREATE TABLE documents (
+    id        bigserial PRIMARY KEY,
+    body      text,
+    embedding vector(384)
+);
+CREATE INDEX documents_embedding_hnsw
+    ON documents USING hnsw (embedding vector_l2_ops);
+
+-- Install pg_vectorsearch next to pgvector and build the index on the
+-- existing column. The column is not rewritten or copied.
+CREATE EXTENSION pg_vectorsearch;
+
+CREATE INDEX documents_embedding_prism
+    ON documents USING prism (embedding vec32_l2_ops);
+
+-- Your queries keep working as before. PRISM is normally faster, so
+-- the planner should prefer it over the HNSW index while both exist.
+-- Verify with an EXPLAIN:
+EXPLAIN (COSTS OFF)
+SELECT id, body
+FROM documents
+ORDER BY embedding <-> (SELECT embedding FROM documents WHERE id = 42)
+LIMIT 10;
+--  Limit
+--    InitPlan 1
+--      ->  Index Scan using documents_pkey on documents documents_1
+--            Index Cond: (id = 42)
+--    ->  Index Scan using documents_embedding_prism on documents
+--          Order By: (embedding <-> (InitPlan 1).col1)
+
+-- Once you are happy with it, drop the HNSW index.
+DROP INDEX documents_embedding_hnsw;
+```
+
+Use `vec32_ip_ops` or `vec32_cosine_ops` for an HNSW index built with
+`vector_ip_ops` or `vector_cosine_ops`, and the `vec16_*` classes for a
+`halfvec` column.
+
 ## PRISM index maintenance
 
 **Experimental**, and still missing functionality.
