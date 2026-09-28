@@ -137,7 +137,7 @@ def build_index(conn, table: str, index_type: str, nlist: int | None, **kwargs):
                 with_clause = f" WITH ({', '.join(with_parts)})"
             sql = (
                 f"CREATE INDEX {idx_name} ON {table} "
-                f"USING prism (v mkt.vec32_cosine_ops)"
+                f"USING prism (v vec32_cosine_ops)"
                 f"{with_clause}"
             )
         elif index_type == "hnsw":
@@ -199,20 +199,14 @@ def build_index(conn, table: str, index_type: str, nlist: int | None, **kwargs):
     conn.commit()
 
 
-def query_sql(table: str, index_type: str, k: int) -> str:
-    """Return the SELECT used to dispatch to the right operator class.
+def query_sql(table: str, k: int) -> str:
+    """Return the SELECT for a k-nearest-neighbour query on the table.
 
-    prism uses the mkt.vec32_cosine_ops opclass, which is keyed on
-    mkt.<=>; the query must cast the literal to mkt.vec32 so the
-    planner can match the index. pgvector ivfflat/hnsw use the
-    built-in <=> operator.
+    One query serves every index type. pgvector's <=> operator is a
+    member of the prism operator families, so the planner matches a
+    prism index on a vector column through it just as it matches
+    ivfflat or hnsw.
     """
-    if index_type == "prism":
-        return (
-            f"SELECT id FROM {table} "
-            f"ORDER BY v OPERATOR(mkt.<=>) %s::vector::mkt.vec32 "
-            f"LIMIT {k}"
-        )
     return f"SELECT id FROM {table} ORDER BY v <=> %s LIMIT {k}"
 
 
@@ -227,7 +221,7 @@ def set_search_params(
     if index_type == "prism":
         cur.execute(f"SET prism.nprobe = {nprobe}")
         if topk is not None:
-            cur.execute(f"SET mkt.topk = {topk}")
+            cur.execute(f"SET prism.query_limit = {topk}")
         if rerank is not None:
             cur.execute(f"SET prism.rerank = {'on' if rerank else 'off'}")
     elif index_type == "hnsw":
@@ -257,7 +251,7 @@ def run_recall(
         test = f["test"][:].astype(np.float32)
         neighbors = f["neighbors"][:]  # 0-indexed ground truth
 
-    sql = query_sql(table, index_type, k)
+    sql = query_sql(table, k)
 
     with conn.cursor() as cur:
         set_search_params(cur, index_type, nprobe, ef_search, topk, rerank)
@@ -368,7 +362,7 @@ def run_profile(
         test = f["test"][:].astype(np.float32)
 
     n_test = min(num_queries, len(test))
-    sql = query_sql(table, index_type, k)
+    sql = query_sql(table, k)
 
     with conn.cursor() as cur:
         cur.execute("SELECT pg_backend_pid()")
