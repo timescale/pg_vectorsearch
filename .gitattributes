@@ -1,0 +1,2 @@
+# PostgreSQL isolation-tester specs, not Ruby (linguist maps .spec to Ruby).
+test/pg/specs/*.spec linguist-language=Text
