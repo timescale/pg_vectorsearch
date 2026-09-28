@@ -59,6 +59,10 @@ Whatever the branch's history looked like during development (see
 branch or two, is fine and encouraged there), the history a PR is opened
 from should be either a single commit, or a small number of commits that
 each stand on their own.
+CI enforces the single commit: the Commit count check fails a pull
+request with more than one unless its description carries the trailer
+`Disable-check: commit-count`, which says each commit stands on its own.
+Six or more fail regardless.
 
 Each commit should already be the final code it's introducing, not an
 intermediate state that a later commit reworks. Concretely: avoid a commit

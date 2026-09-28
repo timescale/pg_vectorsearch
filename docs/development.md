@@ -358,6 +358,7 @@ debugging. These are the same scripts used by GitHub Actions.
 | `sanitizers.sh` | Build and test with sanitizers |
 | `lint.sh` | Check formatting and run clang-tidy |
 | `check-commit-messages.sh` | Reject commit messages that credit an AI agent |
+| `check-commit-count.sh` | Require one commit per pull request unless its description disables the check |
 | `pgspot.sh` | Static security lint of the install-time SQL (pgspot) |
 
 ### Usage
@@ -384,6 +385,10 @@ debugging. These are the same scripts used by GitHub Actions.
 # Check the branch's commit messages for AI agent attribution
 ./scripts/ci/check-commit-messages.sh              # origin/main..HEAD
 ./scripts/ci/check-commit-messages.sh .git/COMMIT_EDITMSG
+
+# Check that a pull request has one commit (or disables the check)
+./scripts/ci/check-commit-count.sh                  # origin/main..HEAD
+BASE_SHA=main HEAD_SHA=my-branch ./scripts/ci/check-commit-count.sh
 
 # Security-lint the install-time SQL (needs: pip install pgspot)
 ./scripts/ci/pgspot.sh
