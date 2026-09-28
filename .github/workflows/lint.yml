@@ -57,5 +57,10 @@ jobs:
           pip install pre-commit
           npm install -g markdownlint-cli2
 
+      # On a pull request, lint only the files it changes. On a push to
+      # main the two variables are empty and every file is linted.
       - name: Run lint checks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: ./scripts/ci/lint.sh
