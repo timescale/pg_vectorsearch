@@ -219,6 +219,14 @@ vs_pg_vec16_alloc(int dim)
 	return v;
 }
 
+/*
+ * Allocates from dim, which is then the only record of how many bit bytes
+ * follow: readers derive lengths from v->dim via VS_RABITQ_BYTES without
+ * re-checking VARSIZE. That holds because every datum comes from here or
+ * from the text parser, which allocates the dim it just parsed -- the type
+ * has no receive function. A binary input path must validate dim against
+ * VARSIZE before the datum reaches those readers.
+ */
 static inline RaBitQVector *
 vs_pg_rabitq_alloc(int dim)
 {
