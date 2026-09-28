@@ -495,11 +495,21 @@ vs_array_to_vec16(PG_FUNCTION_ARGS)
 	vs_pg_check_dim_valid(dim);
 	vs_pg_check_expected_dim(dim, typmod);
 
+	/*
+	 * Only the two element types the SQL overloads declare. Deriving the
+	 * element shape from "not float4" would hand deconstruct_array the
+	 * wrong length for any other type.
+	 */
+	if (elemtype != FLOAT4OID && elemtype != FLOAT8OID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("unsupported array element type")));
+
 	deconstruct_array(
 			arr,
 			elemtype,
-			(elemtype == FLOAT4OID) ? 4 : 8,
-			(elemtype == FLOAT4OID) ? true : true,
+			(elemtype == FLOAT4OID) ? sizeof(float4) : sizeof(float8),
+			(elemtype == FLOAT4OID) ? true : FLOAT8PASSBYVAL,
 			(elemtype == FLOAT4OID) ? TYPALIGN_INT : TYPALIGN_DOUBLE,
 			&elems,
 			&nulls,

@@ -28,7 +28,7 @@ vs_rabitq_in(PG_FUNCTION_ARGS)
 {
 	char   *str	   = PG_GETARG_CSTRING(0);
 	int32	typmod = PG_GETARG_INT32(2);
-	uint8_t bits_buf[VEC32_MAX_DIM / 8];
+	uint8_t bits_buf[VS_RABITQ_BYTES(VEC32_MAX_DIM)];
 	int		dim = 0;
 	char   *p	= str;
 
