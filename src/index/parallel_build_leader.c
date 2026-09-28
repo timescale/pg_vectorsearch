@@ -719,7 +719,6 @@ do_parallel_build(
 	BlockNumber first_centroid = PRISM_FIRST_CENTROID_BLKNO;
 	BlockNumber first_posting  = 0;
 	BlockNumber root_blk	   = InvalidBlockNumber;
-	uint8_t		out_nlevels	   = (uint8_t)nlevels;
 
 	/* Exact internal-centroid collection for the phase-2.5/3 build
 	 * descent (see PrismExactCentroidCollector in index_build.h). */
@@ -771,10 +770,10 @@ do_parallel_build(
 		prism_pbuild_teardown(pcxt);
 		return false;
 	}
-	nlist		  = layout.nlist;
-	first_posting = layout.first_posting;
-	root_blk	  = layout.root_blk;
-	out_nlevels	  = layout.nlevels;
+	nlist					  = layout.nlist;
+	first_posting			  = layout.first_posting;
+	root_blk				  = layout.root_blk;
+	const uint8_t out_nlevels = layout.nlevels;
 
 	/* Publish the exact internal-node centroids the tree write collected,
 	 * for the workers' phase-2.5/3 build descent (exact-centroid seam; must

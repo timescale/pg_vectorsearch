@@ -38,11 +38,24 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build clang clang-format clang-tidy shellcheck libgsl-dev
+          sudo apt-get install -y meson ninja-build gcc clang-format clang-tidy shellcheck libgsl-dev curl ca-certificates
+          # PostgreSQL headers, so `meson setup` configures the extension and
+          # src/pg lands in compile_commands.json -- without them clang-tidy has
+          # no compile command for those files. From pgdg because the distro
+          # ships PG 16 and meson requires 18+. gcc rather than clang because
+          # meson.build requires the compiler family to match `pg_config --cc`
+          # and pgdg's PostgreSQL is built with gcc; clang-tidy reads the
+          # resulting gcc compile commands without complaint.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-server-dev-18
+          echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
           pip install pre-commit
           npm install -g markdownlint-cli2
 
       - name: Run lint checks
-        env:
-          CC: clang
         run: ./scripts/ci/lint.sh

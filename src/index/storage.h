@@ -121,6 +121,10 @@ struct VsStorage
 static inline Page
 vs_storage_read_page(VsStorage *s, BlockNumber blkno)
 {
+	/* Every caller
+	 * holds an initialized storage; the analyzer cannot see that across
+	 * the ops table. */
+	/* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
 	return s->ops->read_page(s, blkno);
 }
 

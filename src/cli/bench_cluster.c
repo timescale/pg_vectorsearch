@@ -224,7 +224,18 @@ load_vectors_from_file(
 	{
 		size_t remaining = total_bytes - bytes_read;
 		size_t to_read	 = remaining < 1024 * 1024 ? remaining : 1024 * 1024;
-		size_t got		 = fread(buf, 1, to_read, fp);
+		/* A short read leaves one zero-byte read behind, which is how
+		 * the loop below detects the end of a chunk. */
+		/* NOLINTNEXTLINE(clang-analyzer-unix.Stream) */
+		size_t got = fread(buf, 1, to_read, fp);
+
+		if (got < to_read && ferror(fp))
+		{
+			fprintf(stderr, "Error: read failed on %s\n", path);
+			fclose(fp);
+			fp = NULL;
+			break;
+		}
 
 		if (got == 0)
 		{

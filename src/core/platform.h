@@ -68,9 +68,9 @@ vs_has_simd(SimdCapability cap)
  * masks so a multi-bit requirement (F + BW, F + DQ) is tested as a unit.
  */
 static inline int
-vs_has_all_simd(SimdCapability mask)
+vs_has_all_simd(uint32_t mask)
 {
-	return (vs_detect_simd() & mask) == (SimdCapability)mask;
+	return ((uint32_t)vs_detect_simd() & mask) == mask;
 }
 
 /*
