@@ -2,61 +2,50 @@
 
 ## 1. Goal and scope
 
-PRISM is currently **build-only**: the index is created by `ambuild` from a
-static table snapshot, and the posting lists and centroid tree are immutable
-afterwards. Table mutations are not reflected in the index.
+The index has to track table `INSERT` / `UPDATE` / `DELETE` and stay correct,
+and reasonably accurate, without a full rebuild. The design starts by appending
+to the nearest list, with centroids fixed and `REINDEX` when the partitioning
+has drifted, and builds toward incremental rebalancing that keeps recall stable
+under heavy mutation.
 
-The goal of this work is to let the index track table `INSERT` / `UPDATE` /
-`DELETE` so it stays correct and reasonably accurate **without a full
-rebuild**. We will start simple (parity with pgvector `ivfflat` / VectorChord
-`vchordrq`, plus correct delete handling) and build toward the state of the
-art for IVF mutability — **SPFresh-style incremental rebalancing** — which
-keeps recall stable under heavy mutation.
+## 2. Mutation path
 
-This document reports the research findings (current state, PostgreSQL
-mechanisms, prior art) and proposes a phased design.
+An insert routes the same way a query does, RaBitQ-encodes against that leaf,
+and appends to an on-disk AoS overflow chain. A fastscan base stays immutable;
+the scan reads each page in that page's own format. NULL vectors get no entry.
 
-## 2. Current state (build-only)
+An update that does not change the vector and can stay on the same heap page
+is HOT: PostgreSQL never calls `aminsert`, and the existing index entry still
+covers the new tuple through the HOT chain. That is the free path.
 
-Findings from the code:
+`index_unchanged` is the other case. It is an `aminsert` argument, set when
+the indexed value did not change but the new tuple version still landed at a
+new TID, so the old index entry does not cover it. The hint exists for access
+methods that can notice the new key is a duplicate of the old one and skip
+some work. It is not a signal to skip the insert. Doing that left the new
+tuple unreachable through the index, so the argument is ignored.
 
-- **`aminsert` is a stub that silently drops the entry.** `prism_insert`
-  (`src/pg/iam_handler.c`) just `return false;`. The `bool` result is only
-  meaningful for unique indexes, so this is not an error — but it adds **no
-  index entry**. Net effect today: rows inserted/updated after build are
-  **silently missing from the index** (index scans won't return them). This is
-  the first thing to fix.
-- **`ambulkdelete` / `amvacuumcleanup` are no-op stubs.** Dead tuples are never
-  removed from the index. The index accumulates dead TIDs over time; PostgreSQL
-  filters them by heap visibility, but they still consume top-k slots.
-- **Posting pages are immutable.** AoS entries (`PrismPostingEntryHeader`:
-  TID + `f_add`/`f_rescale`/`f_error` + RaBitQ bits) or FASTSCAN SoA in
-  32-vector groups, chained by `next_blkno`. `PRISM_POSTING_FLAG_DELETED` is
-  defined but **never set or checked**.
-- **Centroid tree is immutable** (hierarchical k-means, in-memory cache). But
-  `prism_centroid_beam_search()` already routes a vector to its nearest leaf
-  posting(s) — directly reusable for insert routing.
-- **Storage already supports incremental writes.** `new_page()` / `extend()` /
-  `commit_page()` exist; runtime (non-build) writes go through `GenericXLog`
-  with full-page images, while build batches WAL via `log_newpage_range()`.
+Deletes are correct because the executor rechecks heap visibility. `VACUUM`
+sets `PRISM_POSTING_FLAG_DELETED` so later scans skip the entry. Centroids do
+not move with inserts. Replication (`soar_lambda`, `boundary_epsilon`) is a
+build-time assignment; a foreground insert lands in one list.
 
-So the routing, encoding, page-write, and TID machinery all exist; what is
-missing is the write path (`aminsert`), delete handling, and any notion of
-mutable storage or rebalancing.
+Runtime writes go through `GenericXLog` full-page images. A build batches WAL
+with `log_newpage_range()`.
 
 ## 3. PostgreSQL mechanisms to leverage
 
 A correct, efficient mutable index should ride PostgreSQL's existing
 machinery rather than reinvent it:
 
-- **`aminsert`** is called per inserted/updated heap tuple. It must route +
-  encode + append the vector and record the heap TID. (Replace the stub.)
-- **HOT (Heap-Only Tuples).** An `UPDATE` that changes only *non-indexed*
-  columns produces a HOT chain and **no new index entry** — the index keeps
-  pointing at the chain head. So updates that don't touch the **vector column
-  are free** (zero index work). PostgreSQL passes the `index_unchanged` hint
-  (PG14+) to `aminsert` so the AM can also short-circuit when the indexed
-  value is unchanged.
+- **`aminsert`** is called per inserted heap tuple, and per non-HOT update.
+  It routes, encodes, appends, and records the heap TID.
+- **HOT updates never call `aminsert`.** The new tuple stays on the same
+  page, the indexed value is unchanged, and the old index entry still applies.
+- **`index_unchanged` is not that case.** PostgreSQL passes it to `aminsert`
+  when the indexed value is unchanged but the new tuple is at a new TID. The
+  old entry does not cover it. The argument is a deduplication hint, and this
+  index ignores it and inserts.
 - **Vector-column `UPDATE` is non-HOT**: old tuple dies, new tuple is inserted
   → one `aminsert` for the new version, and the old index entry must be cleaned
   by vacuum. So "update" largely reduces to "insert new + delete old."
@@ -64,7 +53,6 @@ machinery rather than reinvent it:
   executor rechecks visibility against the heap. Dead/invisible tuples are
   filtered *after* the index returns them, so for top-k ANN the index must
   **over-fetch** (return more than k candidates) to still yield k live results.
-  pgvector does exactly this.
 - **`kill_prior_tuple` / LP_DEAD-style hints.** When the executor finds a
   returned TID is dead it sets `scan->kill_prior_tuple`; the AM can then mark
   that entry dead (reuse `PRISM_POSTING_FLAG_DELETED`) so future scans skip it.
@@ -76,30 +64,8 @@ machinery rather than reinvent it:
 - **`REINDEX CONCURRENTLY`** is the escape hatch for centroid drift in the
   simple phases — rebuild without blocking writers.
 
-## 4. State of the art
+## 4. Incremental rebalancing
 
-### 4.1 Baseline: append-to-nearest + periodic rebuild (ivfflat, vchordrq)
-
-pgvector `ivfflat` and **VectorChord `vchordrq`** both support inserts by
-routing the new vector to its nearest list(s) and appending. The IVF
-**centroids are fixed at build time**. As data grows or drifts, the fixed
-partitioning becomes suboptimal and **recall degrades**, so they rely on a
-periodic `REINDEX` (ideally `CONCURRENTLY`). VectorChord's docs describe insert
-as placing "vectors in lists corresponding to their appropriate leaf nodes"
-and document **no rebalancing** — i.e. the same drift-then-rebuild model.
-
-This is simple and robust but: recall decays between rebuilds, and rebuild is
-`O(N)`. It is the right **starting point** for PRISM (and matches the
-extension everyone is comparing against).
-
-### 4.2 HNSW incremental (pgvector hnsw) — for contrast
-
-HNSW links each new vector into the graph incrementally, so there is no
-centroid drift and no rebuild requirement — but the graph must fit in RAM and
-inserts do random traversal/writes. Not PRISM's architecture, but it sets the
-bar for "incremental without rebuild."
-
-### 4.3 SPFresh / LIRE — the target
 
 **SPFresh** (SOSP '23) builds on **SPANN** (an in-memory graph index over
 centroids + on-disk posting lists, with boundary replication — structurally
@@ -129,9 +95,8 @@ billion scale**, where no-rebalance baselines degrade and global rebuild is far
 too expensive.
 
 **Why this fits PRISM**: the hierarchical k-means tree + posting lists +
-SOAR/boundary replication is essentially "SPANN with extras," so LIRE maps
-naturally onto it. SPFresh-style rebalancing is also exactly the lever that
-would differentiate PRISM from VectorChord, which has no rebalancing.
+SOAR/boundary replication is the same shape LIRE updates, so the protocol maps
+onto it. Rebalancing is what keeps recall from depending on a full rebuild.
 
 **Active follow-up work** (further reading): Quake (adaptive indexing),
 "Updatable Balanced Index for stable streaming search," "Incremental IVF Index
@@ -172,18 +137,18 @@ Maintenance for Streaming Vector Search," LSM-VEC, DGAI. See references.
 
 ### Phase 0 — Correctness: index inserts + handle deletes (no rebalancing)
 
-Stop silently dropping inserts; handle deletes via MVCC. Parity with
-ivfflat/vchordrq plus correct delete behavior.
+Append to the nearest list and handle deletes via MVCC, with a tombstone so
+scans skip known-dead entries.
 
 - **`aminsert`**:
-  1. If `index_unchanged` (vector not changed by an `UPDATE`) → rely on HOT,
-     return without work.
-  2. Route via `prism_centroid_beam_search` to the nearest leaf posting(s)
-     (a small insert-time nprobe; optionally + boundary lists for SOAR).
-  3. RaBitQ-encode relative to the chosen centroid(s).
-  4. Append to the cluster's **write buffer** — an append-friendly AoS overflow
-     page chain (`PrismPostingEntryHeader`), new pages via `new_page` +
-     `GenericXLog`, linked by `next_blkno`.
+  1. NULL → no entry. `index_unchanged` is not a skip; see §3.
+  2. Route the same way a query does, to one leaf. No SOAR or boundary
+     replica on the insert path.
+  3. RaBitQ-encode relative to that centroid.
+  4. Append to the cluster's write buffer — an AoS overflow chain
+     (`PrismPostingEntryHeader`), new pages via `new_page` + `GenericXLog`,
+     linked by `next_blkno`. If the head was split away while the insert
+     waited for its lock, route again, bounded by `PRISM_INSERT_ROUTE_ATTEMPTS`.
 - **Scan**: merge the immutable FASTSCAN/RaBitQ base + the AoS write buffer for
   each probed cluster (score both into the same top-k).
 - **Deletes**:
@@ -192,10 +157,10 @@ ivfflat/vchordrq plus correct delete behavior.
   - `ambulkdelete` → mark dead TIDs deleted across base + buffer during
     `VACUUM`.
   - Scan skips `DELETED` entries and over-fetches to refill k.
-- **Accuracy**: centroids fixed → drift; document `REINDEX CONCURRENTLY`
-  guidance, as ivfflat does.
+- **Accuracy**: centroids fixed → drift; `REINDEX CONCURRENTLY` is the
+  rebuild when that drift is no longer acceptable.
 
-This alone moves PRISM from "build-only" to "mutable with rebuild."
+That is a mutable index whose centroids stay where the build put them.
 
 ### Phase 1 — Compaction: write-buffer pages → FASTSCAN segments (LSM-ish)
 
@@ -211,25 +176,24 @@ Keep the fast path fast and bound the write buffer.
   crash-safe**: build the new segment fully, flip the posting-chain pointer in
   one WAL-logged step, then free the old pages — never expose a half-converted
   chain. **No dedicated background worker is needed at this phase**; three
-  complementary triggers (mirroring GIN's pending list) drive it:
+  complementary triggers drive it:
   - **Vacuum hooks** (`ambulkdelete` / `amvacuumcleanup`) — the steady-state +
-    GC path, auto-scheduled by autovacuum on table churn. Idiomatic: GIN flushes
-    its pending list into the main index during vacuum, and these hooks can read
+    GC path, auto-scheduled by autovacuum on table churn. These hooks can read
     AoS write-tier pages and write FASTSCAN segments directly.
   - **Inline overflow** — when a cluster's write buffer crosses a size
     threshold, the inserting backend (or next scan) repacks it then and there.
     Vacuum fires on table *dead-tuple* thresholds, the wrong signal for an
     insert-grown buffer, so this keeps insert-heavy workloads from accumulating
-    unpacked data between vacuums (GIN's inline pending-list flush).
-  - **Manual procedure** — a user-callable `prism_compact(index)` to force
-    compaction on demand (GIN's `gin_clean_pending_list()`).
+    unpacked data between vacuums.
+  - **Manual procedure** — `prism_convert_posting_to_fastscan(index, cluster_id)`
+    converts one cluster's AoS chain. It is meant to be called in a loop.
+    A whole-index `prism_compact` is not a separate entry point.
 - Search merges base + segments + write tier; fewer packed segments keep scan
   fast.
 - Still fixed centroids (drift), but no unbounded write-tier growth.
 
-The write-tier + immutable-segment + background-compaction structure is just
-standard **LSM / Lucene-segment tiering** — nothing novel. The one real choice
-is the write tier's substrate:
+The write tier plus immutable segments plus compaction is ordinary tiering.
+The one real choice is the write tier's substrate:
 
 - **On-disk write-buffer pages (recommended)**: durability, MVCC, and
   cross-backend visibility come for free from the buffer manager + WAL; no
@@ -256,17 +220,22 @@ Three sizes, derived from one:
 
 | name | value | role |
 | --- | --- | --- |
-| target `T` | `rows / nlist` — see `prism_target_entries_per_list` | the size a list rests at |
+| target `T` | `prism_target_entries_per_list` | the size a list rests at |
 | split trigger | `T * PRISM_SPLIT_TRIGGER_FACTOR` (2) | grow past this and the list splits |
 | merge threshold | `T / PRISM_SPLIT_TRIGGER_FACTOR` | shrink below this and the list merges |
 
-The target is **not a free parameter**: it is the size the build chose, since
-`prism_auto_nlist` targets `PRISM_TARGET_ENTRIES_PER_LIST` vectors per list (above
-its sqrt-floor crossover; below it, `sqrt(rows)`). Both the automatic probe
-count and the cost model are derived from `nlist`, and the per-list size is its
-inverse — so aiming maintenance at a different size silently decouples the index
-from both. `prism_rebalance()` therefore derives its target by default, honouring
-an explicit `nlist` reloption when the index was built with one.
+The target is derived from the row count alone, via
+`prism_target_entries_per_list`, and **ignores an explicit `nlist`**. It is the
+resting size the automatic list count implies: a fixed target per list once the
+table is large enough for that, and smaller below the sqrt floor in
+`prism_auto_nlist`. The constant itself is a tuning choice, not part of this
+design. Honouring
+`nlist` was considered and rejected: `target = rows / nlist` scales with the
+table, so a list grown in proportion never reaches the trigger, and a number
+typed once at `CREATE INDEX` would switch maintenance off for the life of the
+index. `nlist` is what the build was asked for. It is not a maintenance policy.
+A rebalance that splits therefore drops `nlist` from the reloptions, so a later
+`REINDEX` sizes from the current row count.
 
 The **trigger is deliberately above the target**, which is the part that is easy
 to get wrong. Pin the trigger at the target and every freshly split list starts
@@ -415,12 +384,14 @@ say — is declined, which is the right answer.
   monotonically growing the centroid set, which merge breaks.
 - **Bounded local reassign** to maintain NPA — re-check only affected +
   neighboring postings.
-- **Async execution** — a **dedicated background worker** (a PG dynamic
-  bgworker consuming a shared job queue) runs the size-triggered **split**:
-  vacuum's dead-tuple trigger is the wrong signal for an insert-grown posting,
-  and split is too heavy for foreground `aminsert`. **Merge and tombstone-GC can
-  stay on the vacuum hooks** (delete-driven shrink fits the dead-tuple model).
-  Jobs are crash-consistent and idempotent.
+- **Caller-driven split.** Vacuum's dead-tuple trigger is the wrong signal
+  for an insert-grown posting, and a split is too heavy for `aminsert`.
+  `prism_rebalance` splits every list past the trigger;
+  `prism_split_posting_list` splits one, given the head block from
+  `prism_posting_pages`. Both require a flat index with RaBitQ centroid
+  pages — a fastscan centroid tree, or a second level, is outside this
+  split. Merge, if added, fits the vacuum hooks better: shrink is
+  delete-driven. A background worker is not part of this design.
 - Hard parts: mutable hierarchical centroid tree (split a leaf, possible parent
   cascade), in-memory cache coherence across backends, RaBitQ re-encode, SOAR
   re-replication, WAL.
@@ -509,16 +480,15 @@ lists is dead. A pre-sized "over-fetch factor" is the wrong tool.
   extreme local dead ratio can transiently return fewer/worse results, and rely
   on GC — compaction (Phase 1), LIRE merge (Phase 2), or a rebuild — to keep the
   dead ratio low and the degradation self-healing. This is approximate search,
-  so a slightly-short top-k between GC passes is acceptable (and matches how
-  ivfflat behaves with stale data). The trade-off is a *silent* quality dip, not
+  so a slightly-short top-k between GC passes is acceptable. The trade-off
+  is a *silent* quality dip, not
   slower-but-correct, so document it; GC cadence (autovacuum + compaction) is the
   lever that bounds it. The pathological case is a burst of deletes on a hot
   cluster between vacuums, which self-heals.
 - **Optional refinement:** for workloads that can't tolerate the transient dip, a
   **resumable scan** with a live-result counter that **expands nprobe** (descends
   to the next-nearest centroids) when the current lists are exhausted before k
-  live results — strictly better than pgvector ivfflat/hnsw, which don't
-  auto-expand. (PRISM's current scan materializes a fixed top-k up front in
+  live results. (The scan materializes a fixed top-k up front in
   `execute_search`; this refinement makes it resumable/expandable.)
 
 Either way, index-level tombstones are an *optimization* — skip known-dead
@@ -563,8 +533,8 @@ one genuinely new piece.
 Phase 0 and most of Phase 1's machinery regardless, so jumping ahead does not
 skip building them — it only skips *shipping* them as milestones. The only
 throwaway is the fixed-centroid + `REINDEX` accuracy posture, which is
-documentation, not code. Shipping 0/1 first delivers immediate value (parity
-with ivfflat/vchordrq, closing the build-only gap) and de-risks the concurrency
+documentation, not code. The append-and-tombstone path is also the machinery
+LIRE reuses. It de-risks the concurrency
 foundation before the centroid-mutability work.
 
 **Build Phase 0/1 "LIRE-aware"** so they are stepping stones, not side quests:
@@ -579,13 +549,14 @@ foundation before the centroid-mutability work.
 
 ## 7. Key decisions and open questions
 
-- **Write-buffer location/format**: per-cluster on-disk AoS overflow chain
-  (durable, MVCC-natural, reuses the storage API — recommended) vs a shared
-  in-memory/shmem memtable (faster, needs flush + crash handling).
-- **Insert routing fan-out**: insert-time nprobe, and whether to SOAR-replicate
-  inserts in Phase 0 (recall vs write amplification).
+- **Write buffer**: per-cluster on-disk AoS overflow chain. A shared-memory
+  memtable is not the design.
+- **Insert routing**: one leaf, the same route a query takes. No SOAR or
+  boundary replica on insert; that assignment stays at build time.
+- **`index_unchanged`**: not a skip. See §3.
 - **Over-fetch factor** for dead-tuple filtering in top-k.
-- **Tombstone GC cadence**: lazy `kill_prior_tuple` + `VACUUM` + compaction.
+- **Tombstone GC cadence**: `VACUUM` sets the deleted flag. Lazy
+  `kill_prior_tuple` marking is still the design for the gap between vacuums.
 - **Centroid-tree mutability representation** (Phase 2): how to add/remove
   leaves in the on-page tree and the cache without a rebuild; cascade handling.
 - **Concurrency model**: per-cluster locks; background-job vs foreground
@@ -594,12 +565,12 @@ foundation before the centroid-mutability work.
 
 ## 8. Recommended path
 
-1. **Ship Phase 0 first** — correctness. Inserts get indexed, deletes are
-   handled, drift is documented with `REINDEX` guidance. This alone closes the
-   "build-only" gap and reaches parity with ivfflat/vchordrq.
-2. **Phase 1 (compaction)** to stay performant under sustained inserts.
-3. **Phase 2 (LIRE)** is the differentiator: stable recall without rebuild, the
-   SPFresh end goal, and the capability VectorChord lacks.
+1. Append to the nearest list, tombstone on vacuum, and `REINDEX` when the
+   fixed centroids have drifted.
+2. Compact the AoS write tier back into fastscan segments so inserts do not
+   leave the scan on unpacked pages forever.
+3. Split, and later merge and reassign, so recall does not depend on that
+   rebuild.
 
 ## 9. References
 
@@ -620,5 +591,3 @@ foundation before the centroid-mutability work.
 - PostgreSQL: HOT updates, Index Access Method interface (`aminsert`,
   `ambulkdelete`, `amvacuumcleanup`), `kill_prior_tuple` / LP_DEAD hints,
   `REINDEX CONCURRENTLY`.
-- pgvector `ivfflat` / `hnsw` insert behavior; VectorChord `vchordrq` insert
-  (append-to-nearest-leaf, fixed centroids).
