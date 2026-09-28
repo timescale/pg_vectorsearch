@@ -43,6 +43,12 @@ repos:
         files: \.(c|h)$
         pass_filenames: true
 
+      - id: commit-message-attribution
+        name: commit message AI attribution
+        entry: ./scripts/ci/check-commit-messages.sh
+        language: system
+        stages: [commit-msg]
+
   # General file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0

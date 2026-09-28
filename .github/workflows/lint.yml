@@ -24,6 +24,16 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+          # Full history: the commit-message check below walks the PR's
+          # commit range, which a shallow checkout cannot resolve.
+          fetch-depth: 0
+
+      - name: Check commit messages
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: ./scripts/ci/check-commit-messages.sh "$BASE_SHA..$HEAD_SHA"
 
       - name: Install dependencies
         run: |
