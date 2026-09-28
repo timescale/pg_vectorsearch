@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_posting_insert.c - Unit tests for runtime insert primitives
  *
  * Exercises src/index/posting_insert.c against the array-backed test storage:

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vs_pg_rabitq.c - PostgreSQL functions for the rabitq type
  *
  * Type I/O, comparison operators, accessor functions, and encoding.

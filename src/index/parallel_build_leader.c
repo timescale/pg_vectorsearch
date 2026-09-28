@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * parallel_build_leader.c - PG parallel index build, leader side
  *
  * The leader sets up the DSM, launches workers, participates in the

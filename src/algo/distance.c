@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * distance.c - Distance computation with SIMD dispatch
  *
  * Implements runtime CPU detection and function pointer dispatch for

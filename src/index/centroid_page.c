@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * centroid_page.c - Centroid tree page operations
  *
  * Implements page initialization and entry insertion for centroid pages

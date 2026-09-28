@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * typeinfo.h - per-type behaviour for a prism-indexed column
  *
  * The access method indexes more than one vector type, so every path that

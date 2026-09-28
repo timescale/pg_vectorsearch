@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_fastscan.c - Unit tests for VPSHUFB fastscan kernel
  *
  * Tests LUT construction, code packing, scalar/AVX2 kernel

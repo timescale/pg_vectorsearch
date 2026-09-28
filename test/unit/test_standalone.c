@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_standalone.c - Unit tests for standalone index, query, and API
  *
  * Tests the full pipeline: build index → create query context → query

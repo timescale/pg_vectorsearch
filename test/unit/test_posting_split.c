@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_posting_split.c - Unit tests for incremental posting-list split
  *
  * Builds a single-partition paged index, splits it with prism_posting_split,

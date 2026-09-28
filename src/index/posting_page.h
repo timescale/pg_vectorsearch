@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * posting_page.h - Posting list page format
  *
  * Stores per-cluster posting data using an AoS layout: each entry

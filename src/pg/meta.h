@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * meta.h - Metadata page layout for prism index
  *
  * Block 0 of every prism index stores a PrismMetaPage in the

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * index.h - Standalone in-memory index
  *
  * Holds centroid tree (for beam search routing) and per-cluster

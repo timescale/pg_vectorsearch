@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * distance_avx2.c - AVX2 SIMD distance implementations
  *
  * Explicit SIMD implementations using AVX2 intrinsics for x86-64 CPUs.

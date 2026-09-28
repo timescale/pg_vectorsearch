@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * cmd.h - Command context and shared CLI infrastructure
  *
  * Provides a structured context for CLI commands instead of raw argc/argv.

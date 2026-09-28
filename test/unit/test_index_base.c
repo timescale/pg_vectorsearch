@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_index_base.c - Unit tests for the shared index descriptor's helpers
  *
  * Tests cover:

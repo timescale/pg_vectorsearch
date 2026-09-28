@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * distance.h - High-performance distance computation for vectors
  *
  * Provides SIMD-accelerated distance metrics (L2, inner product, cosine)

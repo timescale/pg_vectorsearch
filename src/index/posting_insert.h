@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * posting_insert.h - Runtime (post-build) insert primitives
  *
  * Shared between the PostgreSQL index AM (aminsert) and the standalone build

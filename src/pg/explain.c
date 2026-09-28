@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * explain.c - EXPLAIN ANALYZE output for prism scans
  *
  * Injects scan stats into EXPLAIN (ANALYZE, VERBOSE) output via

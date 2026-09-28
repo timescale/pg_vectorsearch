@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * hdf5_source.h - HDF5 streaming vector source
  *
  * Reads vectors one at a time from an HDF5 dataset using hyperslab

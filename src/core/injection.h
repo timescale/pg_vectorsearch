@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * injection.h - Test injection points, compiled out of the standalone build
  *
  * Wraps PostgreSQL's INJECTION_POINT so backend-neutral code can carry a

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * rabitq.c - RaBitQ (Randomized Binary Quantization) implementation
  *
  * Core implementation with SIMD dispatch for the binary inner product

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * kmeans_lloyd.c - Lloyd's k-means assignment step
  *
  * Brute-force assignment: compute the full N×K distance matrix each

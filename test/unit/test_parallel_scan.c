@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_parallel_scan.c - Work-stealing vector scan (standalone) tests
  *
  * Verifies that concurrent participants cover every vector exactly once, that

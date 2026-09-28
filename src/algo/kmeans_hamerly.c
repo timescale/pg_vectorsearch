@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * kmeans_hamerly.c - Hamerly's accelerated k-means assignment
  *
  * Hamerly's algorithm maintains two bounds per vector:

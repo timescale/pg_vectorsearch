@@ -36,6 +36,13 @@ repos:
         files: ^(README\.md|\.github/workflows/.*\.yml)$
         pass_filenames: false
 
+      - id: license-headers
+        name: license headers
+        entry: ./scripts/ci/check-license-headers.sh
+        language: system
+        files: \.(c|h)$
+        pass_filenames: true
+
   # General file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * explain.h - EXPLAIN ANALYZE hook for prism
  *
  * Registers an explain_per_node_hook that emits prism scan stats

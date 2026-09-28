@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * barrier_standalone.c - Dynamic phase barrier over pthreads
  *
  * Standalone implementation of the PostgreSQL Barrier API used by the

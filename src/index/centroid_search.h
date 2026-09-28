@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * centroid_search.h - Beam search over centroid tree
  *
  * Level-by-level descent with beam search, reading centroid pages

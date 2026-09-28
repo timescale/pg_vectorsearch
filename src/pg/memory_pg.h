@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * memory_pg.h - PostgreSQL memory wrappers (header-only)
  *
  * Maps pg_vectorsearch memory functions to PostgreSQL's

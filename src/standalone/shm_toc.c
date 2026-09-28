@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * shm_toc_standalone.c - Keyed shared-region table over a heap arena
  *
  * Standalone implementation of the shm_toc API the parallel build uses. See

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * maintenance.c - mutating index maintenance functions
  *
  * SQL-callable operations that modify prism index pages, and therefore

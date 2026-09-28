@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vec32_source.h - Iterator interface for streaming vector data
  *
  * Abstracts the data source so index builds can stream vectors from

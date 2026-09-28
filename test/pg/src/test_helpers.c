@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_helpers.c - test-only SQL entry points
  *
  * Built as its own always-built module, never part of the extension:

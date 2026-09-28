@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * query.c - Zero-allocation query execution
  *
  * All buffers are pre-allocated in PrismQueryCtx. The query hot path

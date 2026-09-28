@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * build.c - Index build for prism
  *
  * Serial build phases (do_serial_build; the parallel shape lives in

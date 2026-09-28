@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * iam_handler.c - prism index access method handler
  *
  * Registers the prism index access method with PostgreSQL. Build and

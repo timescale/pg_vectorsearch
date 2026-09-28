@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * rabitq_avx512.c - AVX-512 optimized binary inner product for RaBitQ
  *
  * AVX-512 provides native masking support which makes this operation

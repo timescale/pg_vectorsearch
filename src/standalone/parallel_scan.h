@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * parallel_scan.h - Standalone work-stealing vector scan for the index build
  *
  * The standalone analog of PostgreSQL's table_index_build_scan: a shared

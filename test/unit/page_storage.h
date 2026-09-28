@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * page_storage.h - Array-backed VsStorage for unit tests
  *
  * What lets the paged code be exercised without PostgreSQL: pages are plain

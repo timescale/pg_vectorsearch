@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vectorsearch verify rabitq
  *
  * Compare pg_vectorsearch's RaBitQ encoding and distance computation

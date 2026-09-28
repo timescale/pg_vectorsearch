@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * api.h - Public C API for standalone pg_vectorsearch library
  *
  * Single entry point for building and querying in-memory ANN indexes.

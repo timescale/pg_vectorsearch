@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vectorsearch bench rabitq-kernel
  *
  * Benchmark asymmetric vs symmetric RaBitQ distance kernels.

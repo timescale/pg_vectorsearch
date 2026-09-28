@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * index_build.c - Shared index build utilities
  *
  * Generic helpers for building prism indexes, usable from both

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * kmeans_hamerly.h - Hamerly's accelerated k-means assignment
  *
  * Hamerly's algorithm (ICML 2010) maintains per-vector upper and lower

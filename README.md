@@ -225,7 +225,7 @@ SELECT count(*) AS lists FROM prism_posting_pages('items_idx')
 
 ## License
 
-TBD
+[The PostgreSQL License](LICENSE)
 
 <!-- Links -->
 [pgvector]: https://github.com/pgvector/pgvector

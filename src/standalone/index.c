@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * index.c - Standalone in-memory index build
  *
  * Builds centroid tree and per-cluster posting lists from a flat

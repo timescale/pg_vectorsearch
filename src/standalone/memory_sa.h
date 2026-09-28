@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * memory_standalone.h - Standalone arena allocator types and declarations
  *
  * An arena allocates memory from large blocks using bump-pointer allocation.

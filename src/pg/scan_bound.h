@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * scan_bound.h - row target for a prism scan
  *
  * A scan asks, at rescan, how many rows the query above it will pull, so

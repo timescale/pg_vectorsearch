@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_soar.c - Unit tests for SOAR secondary-cluster selection
  *
  * The build picks a SOAR (orthogonality-amplified) secondary cluster for

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vs_barrier.h - Dynamic phase barrier
  *
  * The parallel build synchronizes its phases (sampling, k-means iterations,

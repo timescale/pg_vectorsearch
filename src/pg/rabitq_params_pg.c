@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vs_pg_rabitq_params.c - PostgreSQL functions for the rabitq_params type
  *
  * Stores the orthogonal transform matrix P for RaBitQ encoding.

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * platform.h - Platform abstraction and SIMD capability detection
  *
  * Provides runtime CPU feature detection and compiler intrinsics wrappers

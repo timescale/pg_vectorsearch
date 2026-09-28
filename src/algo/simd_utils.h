@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * simd_utils.h - Shared SIMD utilities and patterns
  *
  * Provides reusable SIMD infrastructure for distance computations,

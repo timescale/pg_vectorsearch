@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vs_shm_toc.h - Keyed shared-region table
  *
  * The parallel build publishes its shared regions (the build header, the

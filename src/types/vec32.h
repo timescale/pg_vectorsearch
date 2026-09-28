@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vec32.h - Vector type compatible with pgvector
  *
  * The struct layout is identical to pgvector's Vector type, enabling

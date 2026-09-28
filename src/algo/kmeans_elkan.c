@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * kmeans_elkan.c - Elkan's accelerated k-means assignment
  *
  * Elkan's algorithm maintains K lower bounds per vector (one per

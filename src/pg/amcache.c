@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * amcache.c - Per-index cached state for prism
  *
  * The rotation matrix P is O(dim³) to generate, so it lives in a

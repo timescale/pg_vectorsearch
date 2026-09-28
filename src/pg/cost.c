@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * cost.c - Cost model for vector index scans
  *
  * Prices the work a scan actually does: descending the centroid tree,

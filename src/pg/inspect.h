@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * inspect.h - shared centroid-tree walk
  *
  * The read-only inspection functions (inspect.c) and the mutating

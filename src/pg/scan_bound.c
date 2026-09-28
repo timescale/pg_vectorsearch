@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * scan_bound.c - row target for a prism scan
  *
  * The index AM API never tells a scan how many rows the query wants: the

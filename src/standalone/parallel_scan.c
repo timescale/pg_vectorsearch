@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * parallel_scan_standalone.c - Work-stealing vector scan over an array
  *
  * Standalone implementation of the parallel build scan (see

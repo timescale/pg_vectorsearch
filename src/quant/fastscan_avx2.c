@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * fastscan_avx2.c - AVX2 VPSHUFB accumulate kernel
  *
  * AVX2 version of the even/odd byte accumulation. Processes 64B

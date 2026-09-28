@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vs_latch.h - Wait/wake latch
  *
  * The leader's posting drain loop sleeps on its latch when no worker queue has

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * query_scan.c - Shared query execution for ANN search
  *
  * Beam search over centroids, posting list scan with RaBitQ

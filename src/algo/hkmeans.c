@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * hkmeans.c - Hierarchical k-means tree builder
  *
  * BFS tree construction using vs_kmeans() with indexed access

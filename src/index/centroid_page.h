@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * centroid_page.h - Centroid tree page layout
  *
  * Centroid pages use bidirectional growth, inspired by PostgreSQL's

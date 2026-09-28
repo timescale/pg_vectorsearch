@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * build_progress.c - PostgreSQL body of the build-progress reporting seam.
  *
  * Live phase + % go to pg_stat_progress_create_index (always). Per-phase

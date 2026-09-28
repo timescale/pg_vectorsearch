@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vs_parallel_ctx.h - Parallel context lifecycle
  *
  * The build's leader sets up a parallel context, launches workers, waits for

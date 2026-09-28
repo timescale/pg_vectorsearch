@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * idset.h - Minimal open-addressing set of uint64 ids
  *
  * Membership tracking for per-query scratch use: linear probing over a

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vec16_pg.c - PostgreSQL functions for the vec16 type
  *
  * Type I/O, distance functions, comparison operators, casts.
