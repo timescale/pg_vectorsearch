@@ -495,6 +495,70 @@ NOTICE:  rebalance: split 0 posting list(s), reclaimed 1 retired chain(s)
 CALL prism_rebalance('split_drift_idx', 60);
 NOTICE:  rebalance: split 0 posting list(s), reclaimed 0 retired chain(s)
 DROP TABLE split_drift;
+-- Posting page accounting after an overflowing split
+--
+-- A split with no room on the level-0 centroid page extends the relation and
+-- chains the new centroid page past the posting region, so the centroid pages
+-- stop being a block prefix. Measuring the posting pages as
+-- `num_pages - first_posting` then counts that page twice -- once as a centroid
+-- page, once as a posting page -- and the descent and chain terms are priced
+-- differently, so it is mispriced as well as miscounted.
+-- prism_index_settings reports posting_pages from the maintained centroid
+-- count instead, which no layout can invalidate, and the planner reads it
+-- through the same helper.
+--
+-- The index maximum dimension is what makes this cheap: a 1968-dimension
+-- centroid entry leaves room for about thirty per page, so one rebalance to
+-- 32 leaves overflows it. That capacity scales with BLCKSZ, so the overflow
+-- itself is asserted rather than assumed.
+SET maintenance_work_mem = '64MB';
+CREATE TABLE split_overflow (id serial, v vec32(1968));
+INSERT INTO split_overflow (v)
+    SELECT (SELECT array_agg(sin(i * 0.11 + j * 0.3)::real)
+            FROM generate_series(0, 1967) j)::vec32(1968)
+    FROM generate_series(1, 700) i;
+CREATE INDEX split_overflow_idx ON split_overflow USING prism (v)
+    WITH (nlist = 1, centroid_fastscan = off);
+CALL prism_rebalance('split_overflow_idx', 15);
+NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
+CREATE TEMP VIEW overflow_acct AS
+SELECT (SELECT setting::int FROM prism_index_settings('split_overflow_idx')
+          WHERE name = 'centroid_pages')        AS centroid_pages,
+       (SELECT setting::int FROM prism_index_settings('split_overflow_idx')
+          WHERE name = 'first_posting')         AS first_posting,
+       (SELECT setting::int FROM prism_index_settings('split_overflow_idx')
+          WHERE name = 'posting_pages')         AS posting_pages,
+       (pg_relation_size('split_overflow_idx')
+          / current_setting('block_size')::int) AS num_pages,
+       (SELECT max(blkno) FROM prism_centroid_pages('split_overflow_idx'))
+                                                AS max_centroid_blkno;
+-- The shape under test: a centroid page was appended and landed past the
+-- posting region, so the maintained count now exceeds the reserved prefix.
+SELECT max_centroid_blkno >= first_posting AS centroid_page_past_first_posting,
+       centroid_pages > first_posting - 1  AS count_exceeds_reserved_prefix
+    FROM overflow_acct;
+ centroid_page_past_first_posting | count_exceeds_reserved_prefix 
+----------------------------------+-------------------------------
+ t                                | t
+(1 row)
+
+-- And what that buys: the appended page is in one term only, a block range
+-- would have counted it twice, and the two counts fit in the relation.
+SELECT posting_pages = num_pages - 1 - centroid_pages
+           AS posting_pages_counted_from_the_metapage,
+       posting_pages < num_pages - first_posting
+           AS range_form_would_have_overcounted,
+       centroid_pages + posting_pages <= num_pages - 1
+           AS no_page_counted_in_both_terms
+    FROM overflow_acct;
+ posting_pages_counted_from_the_metapage | range_form_would_have_overcounted | no_page_counted_in_both_terms 
+-----------------------------------------+-----------------------------------+-------------------------------
+ t                                       | t                                 | t
+(1 row)
+
+DROP VIEW overflow_acct;
+DROP TABLE split_overflow;
+RESET maintenance_work_mem;
 -- Cleanup
 DROP TABLE split_test;
 DROP TABLE split_wide;

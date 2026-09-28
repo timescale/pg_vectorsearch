@@ -437,7 +437,9 @@ RESET enable_seqscan;
 
 -- Explicit options are reported back as set, with source 'option'.
 -- (nlist and nlevels are asserted by predicate, not value: the built
--- cluster count can vary with k-means convergence across platforms.)
+-- cluster count can vary with k-means convergence across platforms.
+-- first_posting and posting_pages likewise: both are page counts, so
+-- they move with BLCKSZ and with how many pages the build reserved.)
 CREATE INDEX idx_settings ON embeddings USING prism (v)
     WITH (nlist = 20, fan_out = 8, centroid_compression = on,
           centroid_fastscan = off, fastscan = off, soar_lambda = 0.5,
@@ -446,11 +448,13 @@ CREATE INDEX idx_settings ON embeddings USING prism (v)
 
 SELECT name, setting, source
     FROM prism_index_settings('idx_settings'::regclass)
-    WHERE name NOT IN ('nlist', 'nlevels');
+    WHERE name NOT IN ('nlist', 'nlevels', 'first_posting',
+                       'posting_pages');
 
 SELECT name, setting::int > 0 AS positive, source
     FROM prism_index_settings('idx_settings'::regclass)
-    WHERE name IN ('nlist', 'nlevels');
+    WHERE name IN ('nlist', 'nlevels', 'first_posting',
+                   'posting_pages');
 
 -- The default index resolves its automatic settings: every value is
 -- concrete (no 'auto' sentinels like nlist=0) and the sources tell

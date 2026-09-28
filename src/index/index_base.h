@@ -20,6 +20,36 @@
  */
 #define PRISM_FIRST_CENTROID_BLKNO 1
 
+/*
+ * Posting pages the scan cost estimate prices, and what prism_index_settings
+ * reports as posting_pages.
+ *
+ * Block 0 is the metapage and the centroid region a build reserves starts at
+ * PRISM_FIRST_CENTROID_BLKNO, so on a freshly built index the posting pages
+ * are everything from first_posting onward. That range stops measuring them
+ * once a split overflows a level-0 centroid page: the split extends the
+ * relation and chains the new centroid page past the posting region, so the
+ * page is both counted by ncentroid_pages and, to a range measurement, a
+ * posting page. Taking the maintained count out of the relation's size
+ * instead is layout-independent and leaves it in one term only.
+ *
+ * num_pages is the relation's current size, not pg_class.relpages: both
+ * callers read it straight from the relation, the planner included, so the
+ * count never lags a statistics update.
+ *
+ * An upper bound rather than an exact count: free and new pages from
+ * extension slack are included, the same over-count the estimate already
+ * documents for a bloated index.
+ */
+static inline double
+prism_index_posting_pages(double num_pages, double ncentroid_pages)
+{
+	double n = num_pages - (double)PRISM_FIRST_CENTROID_BLKNO -
+			   ncentroid_pages;
+
+	return n < 1.0 ? 1.0 : n;
+}
+
 typedef struct PrismIndexBase
 {
 	/* RaBitQ (must outlive the search context) */
