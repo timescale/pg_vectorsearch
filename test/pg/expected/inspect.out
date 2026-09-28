@@ -475,21 +475,23 @@ DROP TABLE tc_fastscan;
 -- The inspection functions expose an index's internal layout, so they
 -- are gated on the caller's privileges on the underlying table (the same
 -- model pgrowlocks uses). EXECUTE stays public; the checks are runtime.
--- Read-only inspectors need SELECT on the table; convert_posting_to_
--- fastscan (a procedure, like the maintenance operations below) mutates
--- the index and needs table ownership.
+-- Read-only inspectors need SELECT on the table, except
+-- prism_tids_clusters, which confirms which TIDs the index holds and
+-- so needs table ownership. convert_posting_to_fastscan mutates the
+-- index and needs table ownership too.
 CREATE ROLE regress_inspect_unpriv NOLOGIN;
 -- No schema GRANT is needed: the functions and embeddings/idx_l2c above
 -- all live in public (created unqualified), whose USAGE is granted to
 -- PUBLIC by default.
 SET ROLE regress_inspect_unpriv;
--- Without SELECT on embeddings, every read-only inspector is denied.
+-- Without SELECT on embeddings, the shape inspectors are denied.
+-- tids_clusters requires ownership, not SELECT.
 SELECT * FROM prism_centroid_pages('idx_l2c'::regclass);
 ERROR:  permission denied for table embeddings
 SELECT * FROM prism_posting_pages('idx_l2c'::regclass);
 ERROR:  permission denied for table embeddings
 SELECT * FROM prism_tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
-ERROR:  permission denied for table embeddings
+ERROR:  must be owner of table embeddings
 SELECT * FROM prism_index_settings('idx_l2c'::regclass);
 ERROR:  permission denied for table embeddings
 -- The mutating procedure requires ownership, not merely SELECT.
@@ -513,13 +515,6 @@ SELECT count(*) > 0 AS posting_ok
  t
 (1 row)
 
-SELECT count(*) >= 0 AS tids_ok
-    FROM prism_tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
- tids_ok 
----------
- t
-(1 row)
-
 SELECT count(*) > 0 AS settings_ok
     FROM prism_index_settings('idx_l2c'::regclass);
  settings_ok 
@@ -527,13 +522,14 @@ SELECT count(*) > 0 AS settings_ok
  t
 (1 row)
 
--- ...but SELECT is still not enough to mutate the index.
+-- SELECT is not enough to map TIDs, or to mutate the index.
+SELECT * FROM prism_tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
+ERROR:  must be owner of table embeddings
 CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
 ERROR:  must be owner of table embeddings
 RESET ROLE;
 REVOKE SELECT ON embeddings FROM regress_inspect_unpriv;
 DROP ROLE regress_inspect_unpriv;
--- Cleanup
 -- =====================================================================
 -- Default index shape
 -- =====================================================================
