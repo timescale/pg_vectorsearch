@@ -51,6 +51,7 @@ PG_FUNCTION_INFO_V1(vs_index_settings);
  * The functions below iterate an on-disk entry_count read straight from a
  * page. Reject a count past the format's real per-page capacity before
  * looping so a corrupt or truncated page can't drive a read past the page.
+ * Posting pages get the same treatment from prism_posting_check_count.
  */
 static void
 check_centroid_count(
@@ -64,23 +65,6 @@ check_centroid_count(
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("centroid page %u has an invalid entry count "
-						"(%u > %u)",
-						blkno,
-						count,
-						max_entries),
-				 errhint("The index may be corrupted; REINDEX it.")));
-}
-
-static void
-check_posting_count(
-		BlockNumber blkno, uint32_t count, Dimension dim, bool is_first)
-{
-	uint32_t max_entries = is_first ? prism_posting_max_entries_first(dim)
-									: prism_posting_max_entries(dim);
-	if (count > max_entries)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("posting page %u has an invalid entry count "
 						"(%u > %u)",
 						blkno,
 						count,
@@ -495,7 +479,7 @@ emit_posting_row(PrismPostingChainPos *pos, void *state)
 		char *content = prism_posting_page_content(pos->page, dim);
 		int32 dead	  = 0;
 
-		check_posting_count(pos->blkno, op->entry_count, dim, is_first);
+		prism_posting_check_count(pos->blkno, op, dim);
 		for (uint32_t i = 0; i < op->entry_count; i++)
 		{
 			const PrismPostingEntryHeader *h =
@@ -714,11 +698,7 @@ vs_tids_clusters(PG_FUNCTION_ARGS)
 			char	*content = prism_posting_page_content(page, dim);
 			uint32_t count	 = op->entry_count;
 
-			check_posting_count(
-					blkno,
-					count,
-					dim,
-					(op->flags & PRISM_POSTING_PAGE_FIRST) != 0);
+			prism_posting_check_count(blkno, op, dim);
 
 			if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
 			{

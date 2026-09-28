@@ -152,8 +152,12 @@ walk_one_page_tids(PrismPostingChainPos *pos, void *state)
 	if (pos->first && ctx->cluster_id_out != NULL)
 		*ctx->cluster_id_out = op->cluster_id;
 
-	if (cnt > ctx->cap)
-		cnt = ctx->cap; /* not reachable for a well-formed page */
+	/*
+	 * ctx->cap sizes the tids buffer for the larger of the two formats, so
+	 * clamping to it would still let an AoS page's entry loop run past the
+	 * page. Reject against this page's own ceiling instead.
+	 */
+	prism_posting_check_count(pos->blkno, op, dim);
 
 	if (!(op->flags & PRISM_POSTING_PAGE_TOMBSTONED))
 	{
