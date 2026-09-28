@@ -16,6 +16,8 @@
 
 #include <math.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "core/memory.h"
 #include "index/posting_build.h"
@@ -595,5 +597,169 @@ TEST(scan_stats_tracking)
 
 	vs_topk_cleanup(&topk);
 	prism_posting_scan_cleanup(&scan);
+	vs_rabitq_destroy(params);
+}
+
+/* Counts the pages a chain walk visits, for the corrupt-chain test below. */
+static bool
+count_pages_cb(PrismPostingChainPos *pos, void *state)
+{
+	(void)pos;
+	(*(uint32_t *)state)++;
+	return true;
+}
+
+/*
+ * A posting page's entry_count is read straight off disk and drives the entry
+ * loops in the chain-walk callbacks, which stride by the AoS entry size. A
+ * count past what this page's format can hold must be rejected before it
+ * reads past the page. Note the ceiling is per format: a fastscan page packs
+ * more entries than an AoS one, so bounding an AoS page by the larger figure
+ * would not help. Runs in a forked child because vs_error aborts.
+ */
+TEST(chain_walk_rejects_corrupt_entry_count)
+{
+	Dimension	  dim	 = 64;
+	RaBitQParams *params = vs_rabitq_create(dim, 7);
+	ASSERT_NOT_NULL(params, "params created");
+
+	TestPageStorage st = make_test_storage(32);
+
+	float *centroid = make_test_vectors(1, dim);
+	float *vecs		= make_test_vectors(8, dim);
+
+	BlockNumber head =
+			build_cluster(&st, params, dim, centroid, vecs, 8, false);
+	Page p = test_read_page(&st.base, head);
+
+	PrismPostingPageOpaque *op	= prism_posting_opaque(p);
+	uint32_t				cap = prism_posting_page_cap(op, dim);
+
+	/* Sanity: the fixture built a well-formed page. */
+	ASSERT_TRUE(op->entry_count <= cap, "built page is within its ceiling");
+
+	op->entry_count = (uint16_t)(cap + 1);
+
+	fflush(NULL);
+	pid_t pid = fork();
+	ASSERT_TRUE(pid >= 0, "fork succeeded");
+	if (pid == 0)
+	{
+		if (freopen("/dev/null", "w", stderr) == NULL)
+			_exit(2);
+		prism_posting_check_count(head, op, dim);
+		_exit(0); /* reached only if the check failed to fire */
+	}
+
+	int status = 0;
+	waitpid(pid, &status, 0);
+	ASSERT_TRUE(
+			WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
+			"a count past the page ceiling aborts");
+
+	vs_free(st.pages);
+	vs_free(vecs);
+	vs_free(centroid);
+	vs_rabitq_destroy(params);
+}
+
+/*
+ * Neither format's ceiling bounds the other: fastscan packs more at dim 256
+ * and fewer at dim 768. So a single AoS-derived bound is too strict at one
+ * dimension and too lax at the other, which is why the count check has to
+ * pick the ceiling per format.
+ */
+TEST(neither_format_cap_bounds_the_other)
+{
+	ASSERT_TRUE(
+			prism_fastscan_max_entries(256) > prism_posting_max_entries(256),
+			"fastscan holds more than AoS at dim 256");
+	ASSERT_TRUE(
+			prism_posting_max_entries(768) > prism_fastscan_max_entries(768),
+			"AoS holds more than fastscan at dim 768");
+}
+
+/*
+ * A first page gives up room to the encode reference, and past
+ * PRISM_INDEX_MAX_DIM the reference alone fills the page. The subtraction is
+ * unsigned, so without a guard it reports a capacity of millions -- and the
+ * count checks take that as their bound.
+ */
+TEST(first_page_cap_does_not_underflow)
+{
+	uint32_t cap_at_limit = prism_posting_max_entries_first(
+			PRISM_INDEX_MAX_DIM);
+
+	ASSERT_TRUE(
+			cap_at_limit >= 1,
+			"a first page still holds an entry at the dim limit");
+
+	for (Dimension dim = PRISM_INDEX_MAX_DIM + 1; dim <= 8192; dim += 37)
+	{
+		ASSERT_TRUE(
+				prism_posting_max_entries_first(dim) <=
+						prism_posting_max_entries(dim),
+				"no first page holds more than an overflow page");
+		ASSERT_TRUE(
+				prism_fastscan_max_entries_first(dim) <=
+						prism_fastscan_max_entries(dim),
+				"same for fastscan");
+	}
+}
+
+/*
+ * A chain whose next_blkno leaves the posting pages is corrupt. The walk must
+ * stop rather than cast a foreign page's bytes as a posting opaque and follow
+ * whatever they happen to contain.
+ */
+TEST(chain_walk_stops_leaving_posting_pages)
+{
+	Dimension	  dim	 = 64;
+	RaBitQParams *params = vs_rabitq_create(dim, 11);
+	ASSERT_NOT_NULL(params, "params created");
+
+	TestPageStorage st = make_test_storage(32);
+
+	float *centroid = make_test_vectors(1, dim);
+	float *vecs		= make_test_vectors(4, dim);
+
+	BlockNumber head =
+			build_cluster(&st, params, dim, centroid, vecs, 4, false);
+
+	/* Point the head at a page that was never initialized as a posting
+	 * page, as a truncated or half-written extend would leave it. */
+	BlockNumber stray = 20;
+	memset(test_read_page(&st.base, stray), 0, BLCKSZ);
+	prism_posting_opaque(test_read_page(&st.base, head))->next_blkno = stray;
+
+	/*
+	 * In a child under an alarm: without the guard the walk reads the stray
+	 * page's zeroed bytes as next_blkno and cycles forever, so a regression
+	 * has to fail rather than hang the suite.
+	 */
+	fflush(NULL);
+	pid_t pid = fork();
+	ASSERT_TRUE(pid >= 0, "fork succeeded");
+	if (pid == 0)
+	{
+		alarm(5);
+		uint32_t visited = 0;
+		prism_posting_chain_walk(&st.base, head, count_pages_cb, &visited);
+		_exit((int)visited);
+	}
+
+	int status = 0;
+	waitpid(pid, &status, 0);
+	ASSERT_TRUE(
+			WIFEXITED(status),
+			"the walk terminated instead of following the stray page");
+	ASSERT_EQ(
+			1,
+			WEXITSTATUS(status),
+			"the walk stopped at the non-posting page");
+
+	vs_free(st.pages);
+	vs_free(vecs);
+	vs_free(centroid);
 	vs_rabitq_destroy(params);
 }

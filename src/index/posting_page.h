@@ -290,9 +290,16 @@ prism_posting_max_entries(Dimension dim)
 static inline uint32_t
 prism_posting_max_entries_first(Dimension dim)
 {
-	uint32_t usable = prism_posting_page_usable() -
-					  prism_posting_pt_centroid_size(dim);
-	return usable / PRISM_POSTING_ENTRY_SIZE(dim);
+	uint32_t usable = prism_posting_page_usable();
+	uint32_t pt		= prism_posting_pt_centroid_size(dim);
+
+	/* Past PRISM_INDEX_MAX_DIM the reference alone overruns the page, and an
+	 * unsigned subtraction would report a capacity of millions -- which the
+	 * count checks use as their bound. */
+	if (pt >= usable)
+		return 0;
+
+	return (usable - pt) / PRISM_POSTING_ENTRY_SIZE(dim);
 }
 
 /* Buffer size for a flat page with count entries */
@@ -682,9 +689,13 @@ static inline uint32_t
 prism_fastscan_max_entries_first(Dimension dim)
 {
 	uint32_t section = prism_fastscan_group_section_bytes(dim);
-	uint32_t usable	 = prism_posting_page_usable() -
-					  prism_posting_pt_centroid_size(dim);
-	uint32_t ngroups = usable / section;
+	uint32_t usable	 = prism_posting_page_usable();
+	uint32_t pt		 = prism_posting_pt_centroid_size(dim);
+
+	if (pt >= usable)
+		return 0; /* see prism_posting_max_entries_first */
+
+	uint32_t ngroups = (usable - pt) / section;
 	return ngroups * VS_FASTSCAN_GROUP;
 }
 
@@ -704,6 +715,35 @@ prism_posting_max_entries_any_format(Dimension dim)
 	uint32_t fs	 = prism_fastscan_max_entries(dim);
 	return aos > fs ? aos : fs;
 }
+
+/*
+ * The entry ceiling a page of this format and position really has. All four
+ * combinations differ: a fastscan page packs more entries than an AoS one,
+ * and a first page gives up room to the encode reference. Bounding an AoS
+ * page by the fastscan figure (or by the larger of the two) would still let
+ * prism_posting_entry_at walk off the page.
+ */
+static inline uint32_t
+prism_posting_page_cap(const PrismPostingPageOpaque *op, Dimension dim)
+{
+	bool first = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0;
+
+	if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
+		return first ? prism_fastscan_max_entries_first(dim)
+					 : prism_fastscan_max_entries(dim);
+
+	return first ? prism_posting_max_entries_first(dim)
+				 : prism_posting_max_entries(dim);
+}
+
+/*
+ * Reject an on-disk entry_count past that ceiling before it drives a loop, so
+ * a corrupt or truncated page cannot read past the page end. The bound the
+ * scan path already applies (posting_scan.c), in the form the shared read
+ * paths need.
+ */
+void prism_posting_check_count(
+		BlockNumber blkno, const PrismPostingPageOpaque *op, Dimension dim);
 
 /* Max groups on a page */
 static inline uint32_t

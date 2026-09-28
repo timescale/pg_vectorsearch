@@ -5,7 +5,30 @@
  * posting_page.c - Posting list page operations
  */
 
+#include "vs_config.h"
+
+#include "core/log.h"
 #include "index/posting_page.h"
+
+#ifndef VS_STANDALONE
+#include <miscadmin.h> /* CHECK_FOR_INTERRUPTS */
+#endif
+
+void
+prism_posting_check_count(
+		BlockNumber blkno, const PrismPostingPageOpaque *op, Dimension dim)
+{
+	uint32_t cap = prism_posting_page_cap(op, dim);
+
+	if (op->entry_count > cap)
+		vs_error(
+				VS_EXTENSION_NAME
+				": posting page %u has an invalid entry count (%u > %u); "
+				"the index may be corrupted -- REINDEX it",
+				blkno,
+				(unsigned)op->entry_count,
+				cap);
+}
 
 /* ----------------------------------------------------------------
  * Paged mode (BLCKSZ pages with PG header + opaque)
@@ -83,9 +106,24 @@ prism_posting_chain_walk(
 
 	while (blk != InvalidBlockNumber)
 	{
+		CHECK_FOR_INTERRUPTS();
+
 		pos.blkno = blk;
 		pos.page  = vs_storage_read_page(storage, blk);
-		pos.next  = prism_posting_opaque(pos.page)->next_blkno;
+
+		/*
+		 * Reading next_blkno means casting the special area, so establish
+		 * that it is a posting page first -- the same guard every other
+		 * page read applies. A chain that leaves posting pages is a
+		 * corrupt chain, and ends the walk rather than being followed.
+		 */
+		if (!prism_page_is_posting(pos.page))
+		{
+			prism_posting_chain_release(&pos);
+			return;
+		}
+
+		pos.next = prism_posting_opaque(pos.page)->next_blkno;
 
 		bool keep_going = cb(&pos, state);
 
