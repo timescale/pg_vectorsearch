@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: Commit count
+
+# A pull request merges as one commit. A "Disable-check: commit-count"
+# trailer in the description lifts that for a pull request whose commits
+# each stand on their own, and squash auto-merge makes the count moot.
+# Editing the description re-runs the check, so the status follows the
+# trailer without a new push.
+#
+# The job always runs and decides internally, rather than being skipped by
+# an `if:`, so it reports a definite result on every pull request, which
+# is what a required status check needs.
+
+on:
+  pull_request:
+    branches:
+      - main
+      - '[0-9]*.[0-9]*.x'
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+      - auto_merge_enabled
+      - auto_merge_disabled
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  count:
+    name: Commit count
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          # Full history: counting the pull request's commits needs the
+          # range from its base to its head.
+          fetch-depth: 0
+
+      - name: Count commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BODY: ${{ github.event.pull_request.body }}
+          AUTO_MERGE_METHOD: ${{ github.event.pull_request.auto_merge.merge_method }}
+        run: ./scripts/ci/check-commit-count.sh
