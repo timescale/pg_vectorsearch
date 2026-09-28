@@ -82,8 +82,9 @@ check_centroid_count(
  * express for a regclass argument. Superusers pass automatically.
  *
  * Read-only inspectors require SELECT on the table (its owner has that, so an
- * owner can always inspect their own index). Ownership -- required by the
- * mutating maintenance functions -- is checked separately in maintenance.c.
+ * owner can always inspect their own index). prism_tids_clusters is the
+ * exception: it answers which rows live where, so it requires ownership.
+ * The mutating maintenance functions check ownership separately.
  */
 static void
 require_index_select(Relation index, LOCKMODE lockmode)
@@ -97,6 +98,21 @@ require_index_select(Relation index, LOCKMODE lockmode)
 		ObjectType objtype = get_relkind_objtype(get_rel_relkind(heaprelid));
 		relation_close(index, lockmode);
 		aclcheck_error(aclresult, objtype, relname);
+	}
+}
+
+/* Same ownership gate as the maintenance procedures. A SELECT grant is not
+ * enough: the function confirms which TIDs the index holds. */
+static void
+require_index_owner(Relation index, LOCKMODE lockmode)
+{
+	Oid heaprelid = IndexGetRelation(RelationGetRelid(index), false);
+	if (!object_ownercheck(RelationRelationId, heaprelid, GetUserId()))
+	{
+		char	  *relname = get_rel_name(heaprelid);
+		ObjectType objtype = get_relkind_objtype(get_rel_relkind(heaprelid));
+		relation_close(index, lockmode);
+		aclcheck_error(ACLCHECK_NOT_OWNER, objtype, relname);
 	}
 }
 
@@ -599,7 +615,8 @@ vs_posting_pages(PG_FUNCTION_ARGS)
  * stored in (primary + any SOAR/boundary replica). One pass over all
  * leaf posting lists; emits (tid, cluster_id) for matched TIDs only.
  * Lets a caller compare "where the true nearest neighbors live" against
- * "which clusters a query scans".
+ * "which clusters a query scans". Owner-only: a SELECT grant must not be
+ * enough to confirm which TIDs the index holds.
  * ---------------------------------------------------------------- */
 static int
 cmp_u64(const void *a, const void *b)
@@ -665,7 +682,7 @@ vs_tids_clusters(PG_FUNCTION_ARGS)
 
 	Relation index = relation_open(indexoid, AccessShareLock);
 
-	require_index_select(index, AccessShareLock);
+	require_index_owner(index, AccessShareLock);
 
 	VsPgStorage store;
 	VsStorage  *st = &store.base;

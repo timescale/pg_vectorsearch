@@ -834,7 +834,8 @@ CREATE FUNCTION prism_posting_pages(regclass)
 -- SOAR/boundary replica). For routing analysis: compare where a query's
 -- true nearest neighbors live against which clusters the query scans.
 -- Scans posting pages directly -- each already carries its cluster_id --
--- so it needs neither the centroid tree nor its format.
+-- so it needs neither the centroid tree nor its format. Owner-only: it
+-- confirms which heap TIDs the index holds, which SELECT must not reveal.
 CREATE FUNCTION prism_tids_clusters(regclass, tid[])
     RETURNS TABLE (
         tid        tid,

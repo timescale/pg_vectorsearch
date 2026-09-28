@@ -354,9 +354,10 @@ DROP TABLE tc_fastscan;
 -- The inspection functions expose an index's internal layout, so they
 -- are gated on the caller's privileges on the underlying table (the same
 -- model pgrowlocks uses). EXECUTE stays public; the checks are runtime.
--- Read-only inspectors need SELECT on the table; convert_posting_to_
--- fastscan (a procedure, like the maintenance operations below) mutates
--- the index and needs table ownership.
+-- Read-only inspectors need SELECT on the table, except
+-- prism_tids_clusters, which confirms which TIDs the index holds and
+-- so needs table ownership. convert_posting_to_fastscan mutates the
+-- index and needs table ownership too.
 
 CREATE ROLE regress_inspect_unpriv NOLOGIN;
 -- No schema GRANT is needed: the functions and embeddings/idx_l2c above
@@ -365,7 +366,8 @@ CREATE ROLE regress_inspect_unpriv NOLOGIN;
 
 SET ROLE regress_inspect_unpriv;
 
--- Without SELECT on embeddings, every read-only inspector is denied.
+-- Without SELECT on embeddings, the shape inspectors are denied.
+-- tids_clusters requires ownership, not SELECT.
 SELECT * FROM prism_centroid_pages('idx_l2c'::regclass);
 SELECT * FROM prism_posting_pages('idx_l2c'::regclass);
 SELECT * FROM prism_tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
@@ -385,12 +387,11 @@ SELECT count(*) > 0 AS centroid_ok
     FROM prism_centroid_pages('idx_l2c'::regclass);
 SELECT count(*) > 0 AS posting_ok
     FROM prism_posting_pages('idx_l2c'::regclass);
-SELECT count(*) >= 0 AS tids_ok
-    FROM prism_tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
 SELECT count(*) > 0 AS settings_ok
     FROM prism_index_settings('idx_l2c'::regclass);
 
--- ...but SELECT is still not enough to mutate the index.
+-- SELECT is not enough to map TIDs, or to mutate the index.
+SELECT * FROM prism_tids_clusters('idx_l2c'::regclass, ARRAY['(0,1)']::tid[]);
 CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
 
 RESET ROLE;
@@ -398,7 +399,6 @@ RESET ROLE;
 REVOKE SELECT ON embeddings FROM regress_inspect_unpriv;
 DROP ROLE regress_inspect_unpriv;
 
--- Cleanup
 -- =====================================================================
 -- Default index shape
 -- =====================================================================
