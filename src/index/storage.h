@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * storage.h - Unified I/O abstraction for index page access
  *
  * VsStorageOps is a vtable for page and vector I/O. VsStorage is a

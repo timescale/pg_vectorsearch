@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * posting_convert.c - Convert AoS posting pages to fastscan format
  *
  * Walks an AoS posting chain, reads pre-encoded entries, and feeds

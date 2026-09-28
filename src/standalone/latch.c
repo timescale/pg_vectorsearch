@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * latch_standalone.c - Wait/wake latch over a condition variable
  *
  * Standalone implementation of the Latch API the posting drain loop uses (see

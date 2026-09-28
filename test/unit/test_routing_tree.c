@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_routing_tree.c - Routing-tree build invariants
  *
  * The streaming build's contract: the PLAN pass clusters the sample once,

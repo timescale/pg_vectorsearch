@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * centroid_build.h - Generic centroid page writer
  *
  * Writes centroid entries to linked pages via VsStorage. Supports

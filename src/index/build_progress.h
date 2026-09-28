@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * build_progress.h - Canonical index-build phase model
  *
  * One ordered set of build phases shared by the serial and parallel builds

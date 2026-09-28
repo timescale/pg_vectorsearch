@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * inspect.c - read-only index inspection functions
  *
  * Set-returning functions that expose the internal structure of prism

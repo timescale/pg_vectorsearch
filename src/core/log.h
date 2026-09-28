@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * log.h - Platform-independent logging
  *
  * Maps to elog() in PostgreSQL, fprintf(stderr) in standalone.

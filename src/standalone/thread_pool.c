@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * thread_pool.c - Reusable thread pool with barrier-based iteration
  *
  * All parallelism funnels through iterate: workers wake from a

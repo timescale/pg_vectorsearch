@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * fast_rotate.h - O(d log d) orthonormal rotation
  *
  * Replaces the dense `dim x dim` random orthonormal matrix multiply

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * atomics.h - Cross-platform atomic operations
  *
  * Standalone builds use C11 stdatomic.h.

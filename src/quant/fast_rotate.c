@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * fast_rotate.c - O(d log d) orthonormal rotation
  *
  * Generalised Walsh-Hadamard transform with random sign-flip prefix

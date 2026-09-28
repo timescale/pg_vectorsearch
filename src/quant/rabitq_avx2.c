@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * rabitq_avx2.c - AVX2 optimized binary inner product for RaBitQ
  *
  * The hot path in RaBitQ distance computation is:

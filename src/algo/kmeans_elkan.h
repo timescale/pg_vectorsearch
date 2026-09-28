@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * kmeans_elkan.h - Elkan's accelerated k-means assignment
  *
  * Elkan's algorithm (ICML 2003) maintains per-vector per-centroid

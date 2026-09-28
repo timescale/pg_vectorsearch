@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * distance_neon.c - ARM NEON SIMD distance implementations
  *
  * Explicit SIMD implementations using ARM NEON intrinsics.

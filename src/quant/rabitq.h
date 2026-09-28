@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * rabitq.h - RaBitQ (Randomized Binary Quantization) for ANN search
  *
  * RaBitQ compresses D-dimensional vectors to D bits (32x compression) while

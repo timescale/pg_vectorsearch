@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * fastscan_neon.c - ARM NEON table-lookup accumulate kernel
  *
  * NEON has 128-bit vectors and VQTBL1Q for 16-byte table lookups.

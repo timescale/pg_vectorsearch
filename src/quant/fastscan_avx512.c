@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * fastscan_avx512.c - AVX-512 VPSHUFB accumulate kernel
  *
  * Matches the RaBitQ Library's approach: loads 64B codes + 64B LUT

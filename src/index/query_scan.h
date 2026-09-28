@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * query_scan.h - Shared query execution for ANN search
  *
  * PrismQueryState owns all pre-allocated buffers for query execution.

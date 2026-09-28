@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_fast_rotate.c - Unit tests for the randomized Hadamard rotation
  *
  * Covers the orthonormality property the RaBitQ math depends on

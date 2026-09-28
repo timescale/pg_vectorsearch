@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * typeinfo.c - type descriptors for prism-indexed columns
  *
  * One descriptor per indexable type, handed to the access method by the

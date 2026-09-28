@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * amcache.h - Per-index cached state for prism
  *
  * Holds the index's build-time-immutable parameters so the hot paths

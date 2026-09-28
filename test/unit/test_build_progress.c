@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_build_progress.c - the canonical index-build phase name table
  *
  * Guards that every build phase has a human-readable name (a phase added

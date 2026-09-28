@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_rabitq.c - Comprehensive tests for RaBitQ quantization
  *
  * Tests cover:

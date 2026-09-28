@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vs_instr_time.h - Monotonic timing for build phase measurements
  *
  * The build logs phase durations using PostgreSQL's instr_time. In a PG build

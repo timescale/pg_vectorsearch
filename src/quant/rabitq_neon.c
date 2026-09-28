@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * rabitq_neon.c - ARM NEON optimized binary inner product for RaBitQ
  *
  * NEON processes 4 floats at a time. We expand each nibble (4 bits)

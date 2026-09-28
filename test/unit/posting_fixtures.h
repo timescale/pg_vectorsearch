@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * posting_fixtures.h - Shared fixtures for the posting-list unit tests
  *
  * Building a posting list and scoring a query against it takes the same

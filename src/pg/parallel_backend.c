@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * parallel_backend.c - PostgreSQL implementations of the build's back-end
  * seams.
  *

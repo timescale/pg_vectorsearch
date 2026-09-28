@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * fastscan.h - VPSHUFB-based fast scan for RaBitQ
  *
  * Repacks 1-bit RaBitQ sign codes into 4-bit nibble layout for

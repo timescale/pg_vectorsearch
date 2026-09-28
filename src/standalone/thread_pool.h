@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * thread_pool.h - Reusable thread pool for parallel build phases
  *
  * Creates N background worker threads that persist for the pool's

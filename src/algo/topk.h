@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * topk.h - Bounded top-K collection for nearest neighbor results
  *
  * Collects candidates that could be in the true top-K based on

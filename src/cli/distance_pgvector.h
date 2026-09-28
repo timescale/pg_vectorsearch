@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * distance_pgvector.h - pgvector-style auto-vectorized distance
  *
  * Simple loop implementations with GCC's target_clones for compiler

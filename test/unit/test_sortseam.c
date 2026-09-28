@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_sortseam.c - Unit tests for the posting sort seam (standalone impl)
  *
  * The parallel posting build routes per-cluster entries through the

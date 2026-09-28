@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * api.c - Public C API for standalone pg_vectorsearch library
  *
  * Thin wrapper around PrismIndex (standalone/index.h) and PrismQueryCtx

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * index_base.h - Common index descriptor for search
  *
  * PrismIndexBase contains the fields needed by the shared search

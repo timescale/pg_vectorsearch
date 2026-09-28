@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * posting_scan.h - Posting list scan with RaBitQ scoring and pruning
  *
  * Scans posting data (paged or flat), computes batch RaBitQ

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * hdf5_source.c - HDF5 streaming vector source
  *
  * Reads one row at a time via H5Sselect_hyperslab. The file and

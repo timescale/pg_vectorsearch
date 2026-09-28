@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_shm_toc.c - Keyed shared-region table (standalone shim) tests
  *
  * Covers the shm_toc API the parallel build relies on: estimator sizing,

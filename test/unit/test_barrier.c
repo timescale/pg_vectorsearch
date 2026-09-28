@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * test_barrier.c - Dynamic phase barrier (standalone shim) tests
  *
  * Exercises the pthread-backed Barrier that mirrors PostgreSQL's

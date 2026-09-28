@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * kmeans.c - K-means clustering orchestration
  *
  * Common infrastructure shared by all k-means variants:

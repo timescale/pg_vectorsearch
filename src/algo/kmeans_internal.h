@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * kmeans_internal.h - Shared internal types for k-means implementations
  *
  * This header is shared between kmeans.c (Lloyd's / CBLAS), and variant

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * vecops.c - General vector operations with SIMD dispatch
  *
  * Provides compiler-vectorized implementations with target_clones for

@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2026 Tiger Data, Inc.
+ * Licensed under the PostgreSQL License. See LICENSE for details.
+ *
  * matrix.c - Random orthogonal matrix generation for RaBitQ
  *
  * Generates random orthogonal matrices via QR decomposition of Gaussian
