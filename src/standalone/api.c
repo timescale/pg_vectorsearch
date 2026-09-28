@@ -141,10 +141,15 @@ vs_handle_create(
 			if (sz < info->min_cluster)
 				info->min_cluster = sz;
 		}
-		/* Pages mode skips cluster list construction —
-		 * fall back to estimates */
-		if (info->max_cluster == 0)
+		if (idx->nlist == 0)
 		{
+			/* No centroids, so there is nothing to estimate from. */
+			info->min_cluster = 0;
+		}
+		else if (info->max_cluster == 0)
+		{
+			/* Pages mode skips cluster list construction —
+			 * fall back to estimates */
 			info->max_cluster = (idx->nvecs + idx->nlist - 1) / idx->nlist;
 			info->min_cluster = idx->nvecs / idx->nlist;
 		}

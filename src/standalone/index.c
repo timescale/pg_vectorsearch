@@ -520,7 +520,7 @@ prism_index_build(
 		/* Subsample by stride into a contiguous buffer for cache-friendly
 		 * k-means iteration. */
 		uint32_t max_samples = idx->nvecs < 256000 ? idx->nvecs : 256000;
-		uint32_t stride		 = idx->nvecs / max_samples;
+		uint32_t stride		 = max_samples > 0 ? idx->nvecs / max_samples : 1;
 		if (stride < 1)
 			stride = 1;
 		km_nvecs = (stride > 1) ? max_samples : idx->nvecs;
@@ -698,7 +698,7 @@ prism_index_build(
 	vs_memctx_switch(idx_ctx);
 
 	/* Initialize per-cluster ID lists */
-	uint32_t est_per_cluster = nvecs / nlist + 1;
+	uint32_t est_per_cluster = nlist > 0 ? nvecs / nlist + 1 : 1;
 	idx->clusters			 = vs_alloc0(nlist * sizeof(PrismClusterList));
 	for (uint32_t c = 0; c < nlist; c++)
 		cluster_list_init(&idx->clusters[c], est_per_cluster);

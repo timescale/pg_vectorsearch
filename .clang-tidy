@@ -3,6 +3,11 @@
 #
 # Disable checks that don't apply to portable C code or PostgreSQL extensions.
 
+# Analyzer findings fail the run. Without this clang-tidy exits 0 on
+# warnings and pre-commit, which prints hook output only on failure,
+# discards them -- so a finding would be reported and CI would stay green.
+WarningsAsErrors: 'clang-analyzer-*'
+
 Checks: >
   -*,
   clang-analyzer-*,

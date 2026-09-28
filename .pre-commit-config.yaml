@@ -16,7 +16,11 @@ repos:
         entry: clang-tidy
         language: system
         files: ^src/.*\.c$
-        exclude: ^(src/algo/distance_(avx2|avx512|neon)\.c|src/pg/.*)$
+        # distance_neon.c is ARM-only, so an x86 build has no compile command
+        # for it. clang-tidy does not skip such a file -- it infers flags from
+        # a sibling entry and then fails to parse the NEON intrinsics -- so it
+        # stays excluded until lint runs somewhere those flags are real.
+        exclude: ^src/algo/distance_neon\.c$
         args: [-p=builddir, --config-file=.clang-tidy]
         pass_filenames: true
         require_serial: true

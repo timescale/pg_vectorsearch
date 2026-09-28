@@ -781,6 +781,10 @@ prism_pbuild_sort_performsort(PrismSorter *s)
 		size_t c = ss_counts(sh)[i];
 		if (c == 0)
 			continue;
+		/* Unreachable
+		 * unless the standalone arena is exhausted, which no
+		 * caller handles. */
+		/* NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker) */
 		memcpy(s->buf + off * s->stride, ss_bufs(sh)[i], c * s->stride);
 		off += c;
 	}

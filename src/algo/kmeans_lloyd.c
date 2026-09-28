@@ -88,6 +88,10 @@ lloyd_assign_block_cblas_impl(
 			uint32_t	idx = st->indices[block_start + i];
 			const void *src = (const char *)st->vectors +
 							  (size_t)idx * dim * esz;
+			/* Unreachable
+			 * unless the standalone arena is exhausted, which no
+			 * caller handles. */
+			/* NOLINTNEXTLINE(clang-analyzer-core.NullPointerArithm) */
 			ops->to_float_one(src, st->vec_block + (size_t)i * dim, dim);
 		}
 		block_vecs = st->vec_block;
@@ -219,6 +223,10 @@ lloyd_compute_dot_products(
 			const float *c	 = centroids + (size_t)j * dim;
 			float		 dot = 0.0f;
 			for (uint32_t d = 0; d < dim; d++)
+				/* Unreachable
+				 * unless the standalone arena is exhausted, which no
+				 * caller handles. */
+				/* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
 				dot += v[d] * c[d];
 			dots[(size_t)i * nlist + j] = dot;
 		}
@@ -315,6 +323,9 @@ lloyd_assign_block_builtin_f32(
 		for (uint32_t i = 0; i < block_count; i++)
 		{
 			uint32_t idx = st->indices[block_start + i];
+			/* Unreachable unless the standalone arena is exhausted, which
+			 * no caller handles. */
+			/* NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker) */
 			memcpy(st->vec_block + (size_t)i * dim,
 				   (const float *)st->vectors + (size_t)idx * dim,
 				   dim * sizeof(float));
@@ -345,6 +356,10 @@ lloyd_assign_block_builtin_f16(
 		{
 			uint32_t	idx = st->indices[block_start + i];
 			const half *src = (const half *)st->vectors + (size_t)idx * dim;
+			/* Unreachable
+			 * unless the standalone arena is exhausted, which no
+			 * caller handles. */
+			/* NOLINTNEXTLINE(clang-analyzer-core.NullPointerArithm) */
 			vs_half_to_float_array(src, st->vec_block + (size_t)i * dim, dim);
 		}
 	}

@@ -540,6 +540,13 @@ cmd_bench_search(CmdContext *ctx)
 	if (config.queries > 0 && config.queries < nqueries)
 		nqueries = config.queries;
 
+	if (nqueries == 0)
+	{
+		fprintf(stderr, "Error: no queries to run\n");
+		free(query_vecs);
+		return 1;
+	}
+
 	uint32_t *result_ids = malloc(config.k * sizeof(uint32_t));
 	double	  recall_sum = 0.0;
 	double	  lat_sum	 = 0.0;

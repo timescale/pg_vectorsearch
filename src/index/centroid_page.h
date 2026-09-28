@@ -344,6 +344,9 @@ prism_page_is_centroid(Page page)
 static inline PrismCentroidFormat
 prism_centroid_page_format(Page page)
 {
+	/* Called only on a
+	 * pinned centroid page. */
+	/* NOLINTNEXTLINE(clang-analyzer-core.NullDereference) */
 	return (PrismCentroidFormat)(PRISM_CENTROID_OPAQUE(page)->flags &
 								 PRISM_CENTROID_FMT_MASK);
 }

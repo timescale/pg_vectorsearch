@@ -441,7 +441,7 @@ prism_pbuild_exec_kmeans(
 		for (int t = 0; t < nparticipants; t++)
 			total_ns += prism_dsm_sample_counts(dsm_samples)[t];
 
-		uint32_t step = (total_ns >= km_k) ? total_ns / km_k : 1;
+		uint32_t step = (km_k > 0 && total_ns >= km_k) ? total_ns / km_k : 1;
 		for (uint32_t i = 0; i < km_k; i++)
 		{
 			uint32_t gidx = (total_ns > 0) ? (i * step) % total_ns : 0;
