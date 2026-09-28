@@ -34,6 +34,7 @@
 #include "amcache.h"
 #include "cost.h"
 #include "index/centroid_page.h"
+#include "index/index_base.h"
 #include "index/posting_page.h"
 #include "index/query_scan.h"
 #include "scan.h"
@@ -370,10 +371,11 @@ gather_cost_inputs(
 				Min(centroid_pages, (double)in->nlevels * in->beam);
 
 	/*
-	 * The posting region is every page past the centroid region, with the
-	 * lists taken as evenly sized -- the metapage records where the region
-	 * starts, not which pages inside it are reachable rather than free or
-	 * retired.
+	 * Every page the centroid pages do not account for, with the lists taken
+	 * as evenly sized. Taken from the maintained count rather than from
+	 * first_posting: a split that appends a centroid page past the posting
+	 * region would otherwise put that page in this term as well as the
+	 * centroid one.
 	 *
 	 * This errs both ways. Dead entries on live pages are read and scored
 	 * like any other, so counting their pages is right; free and retired
@@ -381,10 +383,8 @@ gather_cost_inputs(
 	 * Uneven lists cut both ways too, the probe set being chosen by the
 	 * query rather than uniformly.
 	 */
-	double posting_pages = (double)info->pages - (double)si.first_posting;
-
-	if (posting_pages < 1.0)
-		posting_pages = 1.0;
+	double posting_pages = prism_index_posting_pages(
+			(double)info->pages, (double)si.ncentroid_pages);
 
 	in->pages_per_list = posting_pages / (double)in->nlist;
 

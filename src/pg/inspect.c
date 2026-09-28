@@ -30,6 +30,7 @@
 #include <utils/syscache.h>
 
 #include "index/centroid_page.h"
+#include "index/index_base.h"
 #include "index/posting_page.h"
 #include "index/query_scan.h"
 #include "inspect.h"
@@ -887,6 +888,7 @@ vs_index_settings(PG_FUNCTION_ARGS)
 	uint8_t		   fan_out	= meta->fan_out;
 	bool		   fastscan = (meta->flags & PRISM_META_FLAG_FASTSCAN) != 0;
 	uint32_t	   ncentroid_pages = meta->ncentroid_pages;
+	BlockNumber	   first_posting   = meta->first_posting;
 	vs_storage_release_page(st, 0);
 
 	const PrismOptions *opts = (const PrismOptions *)index->rd_options;
@@ -914,6 +916,23 @@ vs_index_settings(PG_FUNCTION_ARGS)
 			"centroid_pages",
 			psprintf("%u", ncentroid_pages),
 			"maintained");
+	settings_row(
+			rsinfo, "first_posting", psprintf("%u", first_posting), "derived");
+	/*
+	 * The posting page count the scan cost estimate prices, from the same
+	 * helper it calls and the same page count: get_relation_info fills
+	 * IndexOptInfo.pages from RelationGetNumberOfBlocks too, so this and the
+	 * planner's figure agree without waiting on ANALYZE.
+	 */
+	settings_row(
+			rsinfo,
+			"posting_pages",
+			psprintf(
+					"%.0f",
+					prism_index_posting_pages(
+							(double)RelationGetNumberOfBlocks(index),
+							(double)ncentroid_pages)),
+			"derived");
 	settings_row(
 			rsinfo,
 			"centroid_format",

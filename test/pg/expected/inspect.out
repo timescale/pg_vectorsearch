@@ -586,7 +586,9 @@ RESET enable_seqscan;
 -- =====================================================================
 -- Explicit options are reported back as set, with source 'option'.
 -- (nlist and nlevels are asserted by predicate, not value: the built
--- cluster count can vary with k-means convergence across platforms.)
+-- cluster count can vary with k-means convergence across platforms.
+-- first_posting and posting_pages likewise: both are page counts, so
+-- they move with BLCKSZ and with how many pages the build reserved.)
 CREATE INDEX idx_settings ON embeddings USING prism (v)
     WITH (nlist = 20, fan_out = 8, centroid_compression = on,
           centroid_fastscan = off, fastscan = off, soar_lambda = 0.5,
@@ -594,7 +596,8 @@ CREATE INDEX idx_settings ON embeddings USING prism (v)
           distance_mode = symmetric);
 SELECT name, setting, source
     FROM prism_index_settings('idx_settings'::regclass)
-    WHERE name NOT IN ('nlist', 'nlevels');
+    WHERE name NOT IN ('nlist', 'nlevels', 'first_posting',
+                       'posting_pages');
        name       |  setting  |   source   
 ------------------+-----------+------------
  dim              | 3         | column
@@ -612,12 +615,15 @@ SELECT name, setting, source
 
 SELECT name, setting::int > 0 AS positive, source
     FROM prism_index_settings('idx_settings'::regclass)
-    WHERE name IN ('nlist', 'nlevels');
-  name   | positive | source  
----------+----------+---------
- nlist   | t        | option
- nlevels | t        | derived
-(2 rows)
+    WHERE name IN ('nlist', 'nlevels', 'first_posting',
+                   'posting_pages');
+     name      | positive | source  
+---------------+----------+---------
+ nlist         | t        | option
+ nlevels       | t        | derived
+ first_posting | t        | derived
+ posting_pages | t        | derived
+(4 rows)
 
 -- The default index resolves its automatic settings: every value is
 -- concrete (no 'auto' sentinels like nlist=0) and the sources tell
@@ -635,6 +641,8 @@ SELECT name,
  fan_out          | t        | auto
  nlevels          | t        | derived
  centroid_pages   | t        | maintained
+ first_posting    | t        | derived
+ posting_pages    | t        | derived
  centroid_format  | t        | auto
  fastscan         | t        | auto
  soar_lambda      | t        | default
@@ -642,7 +650,7 @@ SELECT name,
  kmeans_nredo     | t        | default
  distance_mode    | t        | default
  nprobe           | t        | auto
-(13 rows)
+(15 rows)
 
 SELECT name, setting, source
     FROM prism_index_settings('idx_default'::regclass)
