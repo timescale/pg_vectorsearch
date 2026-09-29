@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+# Assert that a development-cycle pull request only reopens the cycle:
+# one file changed, a -dev value, and the right bump of what shipped.
+#
+# This is the enforcement a ruleset bypass could not express. Rulesets
+# inspect refs, metadata and paths, never file contents, so the only
+# way to require that a bot's commit changes VERSION and nothing else
+# is to read the diff from a required check.
+name: Release dev bump check
+
+on:
+  pull_request:
+    branches: [main, '[0-9]+.[0-9]+.x']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Dev bump check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The merge commit's parents are what the diff is taken
+          # between, so both sides have to be present.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the bump
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: ./scripts/ci/release-dev-bump-check.sh "$BASE_SHA" "$HEAD_SHA"

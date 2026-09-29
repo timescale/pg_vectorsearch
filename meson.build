@@ -544,6 +544,9 @@ vs_symlink = custom_target('vectorsearch-symlink',
 subdir('test/unit')
 endif # build_tools
 
+# Tests for the release scripts: shell only, so outside build_tools.
+subdir('test/scripts')
+
 # ============================================================================
 # PostgreSQL extension
 # ============================================================================

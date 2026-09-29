@@ -399,18 +399,36 @@ version the ref does not carry.
 
 ## After a release
 
-`main` now sits at a released version, and reopening the development
-cycle is still manual.
+`main` now sits at a released version. Until the bump lands, anything
+merged is built and tested as a version that has already shipped, so
+reopening the cycle is the one thing still outstanding.
 
-**Reopen the development cycle.** Bump `VERSION` to the next `-dev` —
-the release commit says which in its `Next-Version` trailer:
+The release workflow opens that pull request itself. Its `dev-cycle`
+job bumps `VERSION` to the `Next-Version` the release commit declared,
+pushes `chore/dev-<version>`, opens the pull request and arms
+auto-merge, so it lands as soon as the checks pass and someone
+approves. `release-dev-bump-check` asserts that it changes nothing but
+`VERSION`, that the value carries a `-dev` suffix, and that the branch
+name agrees with the file.
+
+It needs a credential that is not `GITHUB_TOKEN`, because GitHub
+starts no workflow runs from events that token creates: the required
+checks would never report and the pull request could not be merged at
+all. The job reads `RELEASE_APP_CLIENT_ID` (a repository variable — the
+App's client id, which `actions/create-github-app-token` now prefers
+over the numeric app id) and `RELEASE_APP_PRIVATE_KEY` (a secret), and
+is skipped when the variable is unset -- so a repository without the
+App still publishes releases, and the bump falls back to the manual
+path below.
+
+**Reopening it by hand.** Bump `VERSION` to the next `-dev` — the
+release commit says which in its `Next-Version` trailer:
 
 ```bash
 git log -1 --format='%(trailers:key=Next-Version,valueonly)' origin/main
 ```
 
-Until that lands, `main` carries a version that has already shipped, so
-anything merged in between is built and tested as a released version.
+Then open a `chore/dev-<version>` pull request with that one change.
 
 ## Branches
 
