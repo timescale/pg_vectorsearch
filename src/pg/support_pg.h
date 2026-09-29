@@ -44,7 +44,10 @@ extern double prism_centroid_error_scale; /* scales centroid pruning error
 extern double prism_probe_expand;		  /* routed clusters / nprobe */
 extern double prism_centroid_beam_scale; /* intermediate beam width as fraction
 									  of nprobe (0.25=default) */
-extern relopt_kind prism_relopt_kind;	 /* index reloption kind */
+extern double prism_rerank_pool_cost_scale; /* rerank candidate cost scale
+											  (0=auto-detect from relation
+											  size vs effective_cache_size) */
+extern relopt_kind prism_relopt_kind;		/* index reloption kind */
 
 /* ----------------------------------------------------------------
  * Datum conversion macros
