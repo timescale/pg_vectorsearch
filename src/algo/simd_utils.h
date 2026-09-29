@@ -68,8 +68,7 @@
  * - non-x86 architecture (ARM target_clones generates single clone anyway)
  */
 #if !defined(VS_SIMD_NONE) && !defined(VS_COVERAGE) && \
-		__has_attribute(target_clones) &&              \
-		(defined(__x86_64__) || defined(__i386__))
+		__has_attribute(target_clones) && defined(__x86_64__)
 #define VS_TARGET_CLONES \
 	__attribute__((      \
 			target_clones("default", "arch=x86-64-v3", "arch=x86-64-v4")))

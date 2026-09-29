@@ -406,6 +406,29 @@ void vs_test_printf(const char *fmt, ...)
 		}                                                \
 	} while (0)
 
+/* Pointer equality: ASSERT_EQ formats through long long, which a pointer
+ * cannot be converted to on a 32-bit target. */
+#define ASSERT_PTR_EQ(expected, actual, msg)         \
+	do                                               \
+	{                                                \
+		(void)result;                                \
+		const void *_vs_exp = (expected);            \
+		const void *_vs_act = (actual);              \
+		if (_vs_exp != _vs_act)                      \
+		{                                            \
+			char buf[256];                           \
+			snprintf(                                \
+					buf,                             \
+					sizeof(buf),                     \
+					"%s (expected: %p, actual: %p)", \
+					msg,                             \
+					_vs_exp,                         \
+					_vs_act);                        \
+			vs_test_fail(__FILE__, __LINE__, buf);   \
+			return;                                  \
+		}                                            \
+	} while (0)
+
 #define ASSERT_NEQ(val1, val2, msg)                \
 	do                                             \
 	{                                              \

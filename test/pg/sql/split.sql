@@ -151,8 +151,9 @@ CALL prism_split_posting_list('split_wide_idx', NULL);
 -- failed allocation: a backend refuses a single allocation near a gigabyte, and
 -- an operator who has raised the setting for index builds should not find that
 -- splitting stops working. Setting it here costs nothing -- the sample is sized
--- to the list, which is tiny.
-SET maintenance_work_mem = '2GB';
+-- to the list, which is tiny. 2047MB is the top of the setting's range on a
+-- 32-bit server.
+SET maintenance_work_mem = '2047MB';
 CALL prism_rebalance('split_wide_idx');
 
 -- The manual entry point names a head block directly: CALL takes no subquery,

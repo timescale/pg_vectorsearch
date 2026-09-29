@@ -167,10 +167,10 @@ TEST(context_switch)
 	ASSERT_NULL(old, "context should be NULL after explicit switch");
 
 	old = vs_memctx_switch(ctx2);
-	ASSERT_EQ(ctx1, old, "previous context should be ctx1");
+	ASSERT_PTR_EQ(ctx1, old, "previous context should be ctx1");
 
 	old = vs_memctx_switch(NULL);
-	ASSERT_EQ(ctx2, old, "previous context should be ctx2");
+	ASSERT_PTR_EQ(ctx2, old, "previous context should be ctx2");
 
 	vs_memctx_delete(ctx1);
 	vs_memctx_delete(ctx2);

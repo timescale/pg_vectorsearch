@@ -241,6 +241,25 @@ else
           'echo "search_path = \'public\'" > @OUTPUT@'],
       )
 
+      # PostgreSQL 18 and older read the phase number handed to
+      # ambuildphasename as a by-value int32, which on a 32-bit server is
+      # the address of the int8 argument instead. pg_stat_progress_create_index
+      # then shows every phase of every access method as plain "building
+      # index", so the specs that read our phase names cannot pass there.
+      isolation_specs = []
+      if cc.sizeof('void *') > 4 or pg_version_num >= 19
+        isolation_specs += ['build_progress', 'build_progress_phases']
+      endif
+      isolation_specs += [
+        'build_cancel',
+        'refine_gate',
+        'scan_progress',
+        'insert_serialize',
+        'split_race',
+        'maintenance_lock',
+        'split_insert_retry',
+      ]
+
       test('isolation',
         pg_isolation_regress,
         args: [
@@ -250,16 +269,7 @@ else
           '--temp-instance=' + meson.project_build_root() / 'isolation_testdb',
           '--temp-config=' + meson.current_build_dir() / 'pgvs_isolation.conf',
           '--load-extension=pg_vectorsearch',
-          'build_progress',
-          'build_progress_phases',
-          'build_cancel',
-          'refine_gate',
-          'scan_progress',
-          'insert_serialize',
-          'split_race',
-          'maintenance_lock',
-          'split_insert_retry',
-        ],
+        ] + isolation_specs,
         depends: [pgvs_ext_so],
         timeout: 120,
         is_parallel: false,

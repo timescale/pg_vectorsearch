@@ -199,6 +199,8 @@ vs_rabitq_init_simd(void)
 		g_impl_name				 = "compiler";
 	}
 #else
+	/* No hand-optimized kernels for this architecture. */
+	(void)caps;
 	g_inner_product_fn		 = rabitq_inner_product_compiler;
 	g_inner_product_multi_fn = rabitq_inner_product_multi_compiler;
 	g_extract_signs_fn		 = rabitq_extract_signs_compiler;

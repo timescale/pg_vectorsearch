@@ -374,7 +374,9 @@ vs_distance_init(void)
 		g_impl_name			 = "compiler";
 	}
 #else
-	/* Unknown architecture: use compiler-vectorized */
+	/* No hand-optimized kernels for this architecture: use the
+	 * compiler-vectorized ones regardless of what the CPU offers. */
+	(void)caps;
 	g_distance_l2_fn	 = vs_distance_l2_compiler;
 	g_distance_ip_fn	 = vs_distance_ip_compiler;
 	g_distance_cosine_fn = vs_distance_cosine_compiler;
