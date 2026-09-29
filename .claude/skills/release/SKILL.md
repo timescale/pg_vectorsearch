@@ -1,23 +1,35 @@
 ---
 name: release
 description: >
-  Cut a release PR with scripts/prepare-release.sh, then fill the
-  changelog and open the PR with the script that run wrote. Also
-  resume notes on an existing release branch without recutting.
-  Trigger when asked to cut a release, prepare a release PR, or fill
-  release notes.
+  Drive a release from cut to finished: cut the PR with
+  scripts/prepare-release.sh, fill the changelog, open the PR with the
+  script that run wrote, then after a human merges it, watch
+  release.yml publish, check the tag and assets, and see the
+  development-cycle PR through to a -dev VERSION. Also resumes notes
+  on an existing release branch without recutting. Trigger when asked
+  to cut a release, prepare a release PR, fill release notes, check on
+  or monitor a release in progress, or find out whether a release
+  finished.
 ---
 
-# Cutting a release
+# Releasing
+
+Sections 1 to 5 cut the release PR. The user merges it — that is the
+irreversible step, and it is theirs. Sections 6 to 8 follow what the
+merge sets off: the publish, then the development-cycle PR that puts
+`VERSION` back on a `-dev` value. A release is not finished until that
+lands.
 
 `scripts/prepare-release.sh` cuts the branch, writes the changelog
 entry, and leaves a script that opens the PR. This skill drives that
 script. It does not reimplement it. The human procedure is
 `docs/release.md`.
 
-The agent's job is the notes: a short, human summary, and a changes
-list trimmed to what a user would care about. Then commit that, fix
-the generated PR body, and open the PR with the generated script.
+The agent's job in the first half is the notes: a short, human
+summary, and a changes list trimmed to what a user would care about.
+Then commit that, fix the generated PR body, and open the PR with the
+generated script. In the second half it is reporting: which job ran,
+what it produced, and what is still outstanding.
 
 The interactive path in `docs/release.md` opens the PR with `FILL-IN`
 still in the notes and finishes them there. This skill fills them
@@ -212,8 +224,94 @@ creating a second PR. It does not add a second commit.
 
 If the notes are uncertain, stop before this step and ask.
 
-Opening the PR is the last thing this skill does. Merging it is what
-publishes the release. Reopening the development cycle — bumping
-`VERSION` back to a `-dev` — is a separate step, in `docs/release.md`.
-Do not do it from here, and do not treat an open PR as a finished
-release.
+Merging the PR is what publishes the release, and it is the user's to
+do. Do not merge it, do not approve it, and do not treat an open PR as
+a finished release. Once it is merged, continue at section 6.
+
+## What this skill never does
+
+Four things belong to the user, whatever they seem to have asked for:
+
+- **merging** the release PR, which is the irreversible step;
+- **approving** any PR, including the development-cycle one this
+  process opens — approving your own automation is not review;
+- **dispatching** `release.yml`, **creating or deleting a tag**, and
+  **editing or deleting a Releases entry**;
+- **changing rulesets, secrets or variables.**
+
+Reporting what a step did, and what it would take to fix a failure, is
+the job. Doing the irreversible part is not.
+
+## 6. Watch the release publish
+
+Merging pushes `VERSION` to `main`, which triggers `release.yml`. Four
+jobs run in order: `gate`, `build`, `release`, `dev-cycle`.
+
+```bash
+gh run list --workflow=release.yml -L 1
+gh run watch <run-id>
+```
+
+Report each job's outcome rather than only the final one, because
+where it stopped determines what state the repository is in:
+
+- **gate** refuses: nothing happened. `main` carries the released
+  `VERSION` with no tag, which is the broken state the `-dev`
+  invariant watches for. The fix goes through a PR like anything else.
+- **build** fails: still nothing published. The tarball failing to
+  build is the intended reason tagging is downstream of packaging.
+- **release** fails: check whether the tag exists. `release-create.sh`
+  makes the tag and the entry together, and uploads nothing; if the
+  tag is there and the assets are not, re-running the job attaches
+  them. Do not create or move a tag by hand.
+- **dev-cycle** fails: the release is complete and correct. Only the
+  bump is missing, and `docs/release.md` has the manual path.
+
+Then confirm what shipped, rather than assuming the green run means it:
+
+```bash
+gh release view "v$VERSION"
+gh release view "v$VERSION" --json assets \
+  --jq '.assets[].name'
+```
+
+There should be a tarball and its `.sha256sum`. `scripts/verify-published.sh`,
+when it exists, downloads and rebuilds from them.
+
+## 7. The development-cycle PR
+
+The `dev-cycle` job opens it: `chore/dev-<next>`, one commit, `VERSION`
+and nothing else. It is not optional — until it lands, `main` carries a
+version that has already shipped, and anything merged meanwhile is
+built and tested as that release.
+
+```bash
+gh pr list --head "chore/dev-$NEXT" --state open
+gh pr checks <number>
+```
+
+`Dev bump check` is the one to read: it asserts the diff is `VERSION`
+alone, that the new value carries `-dev`, and that the branch name
+agrees with the file. Auto-merge is already armed, so the PR lands on
+its own once the checks pass **and** someone approves — the ruleset
+requires one approval, and an App cannot approve its own pull request.
+
+Review it if asked: the diff should be one line. Then say it is waiting
+for an approval. Do not approve it.
+
+If the job did not run at all, `RELEASE_APP_CLIENT_ID` is unset, and
+the bump is the manual path in `docs/release.md`. Say so rather than
+doing it silently.
+
+## 8. Confirm the release is finished
+
+Two things, both after the development-cycle PR merges:
+
+```bash
+git fetch origin && git show origin/main:VERSION   # a -dev version
+git ls-remote --tags origin | grep "v$VERSION"     # the release tag
+```
+
+`VERSION` back on a `-dev` value and the tag present is the finished
+state. Until both hold, say which one is outstanding rather than
+calling the release done.

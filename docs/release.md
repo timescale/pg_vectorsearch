@@ -311,7 +311,19 @@ on every PR. It asserts:
 - the PR is a single commit;
 - `CHANGELOG.md` has an entry for it with no `FILL-IN` left;
 - `README.md` and `docs/` carry no stale version references;
-- an incompatible on-disk format change is not shipping as a patch.
+- an incompatible on-disk format change is not shipping as a patch;
+- an upgrade script exists for the step from the previous release, and
+  `src/pg/meson.build` lists it in `ext_update_scripts`.
+
+The upgrade script is the one thing a release cannot generate for
+itself. The install script is `sql/pg_vectorsearch.sql` copied under the
+versioned name at build time, so a new release always installs; moving
+an existing installation needs
+`sql/pg_vectorsearch--<prev>--<new>.sql`, and without it
+`ALTER EXTENSION UPDATE` fails and the only way forward is dropping the
+extension, which takes the indexes with it. A file that exists but is
+not listed is never installed, so it fails the same way, later. A first
+release has nothing to upgrade from and is not asked for one.
 
 Which PRs get checked is decided by what the PR *does*, not by what its
 branch is called: a release PR is one that changes `VERSION` to a value
@@ -341,7 +353,7 @@ that is a convention rather than a property: if PRs ever append to it
 during a cycle, it becomes a noisy path firing the pipeline on every
 merge. `VERSION` cannot degrade that way.
 
-Three jobs run in order.
+Four jobs run in order.
 
 **Gate** (`scripts/ci/release-gate.sh`) first checks the commit is one
 `prepare-release.sh` made, by requiring its `Next-Version` trailer.
@@ -391,6 +403,13 @@ with nothing behind it.
 
 It reports the release milestone's remaining open issues but never closes
 it: closing a milestone that still has open work is a judgement call.
+
+**Reopen the development cycle** (`scripts/ci/release-open-dev-cycle.sh`)
+runs last, after the release exists, so a failure here cannot damage a
+published release. It bumps `VERSION` to the `Next-Version` the release
+commit declared and opens that pull request. See
+[After a release](#after-a-release) for what it needs and what happens
+without it.
 
 A release that failed after its push event was consumed can be re-run
 from the Actions tab (`workflow_dispatch`), giving the version. The gate
