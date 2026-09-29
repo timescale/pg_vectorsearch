@@ -2,6 +2,7 @@
 
 [![Build](https://github.com/timescale/pg_vectorsearch/actions/workflows/build.yml/badge.svg?branch=main&event=push)](https://github.com/timescale/pg_vectorsearch/actions/workflows/build.yml?query=branch%3Amain+event%3Apush)
 [![Coverage](https://img.shields.io/endpoint?url=https://timescale.github.io/pg_vectorsearch/coverage-badge.json)](https://timescale.github.io/pg_vectorsearch/coverage/)
+[![Coverity](https://scan.coverity.com/projects/timescale-pg_vectorsearch/badge.svg)](https://scan.coverity.com/projects/timescale-pg_vectorsearch)
 
 A PostgreSQL extension for high-performance approximate nearest neighbor (ANN)
 search.
