@@ -20,6 +20,7 @@
 #define VS_THREAD_POOL_H
 
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 /* macOS lacks pthread_barrier_t (optional POSIX extension). */
