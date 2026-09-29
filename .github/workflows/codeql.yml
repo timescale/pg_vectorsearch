@@ -2,14 +2,20 @@
 ---
 name: CodeQL
 
+# Besides pushes to main and pull requests, a push to trigger/codeql
+# analyzes an arbitrary commit without a pull request, and the workflow
+# can be dispatched by hand from any branch that carries this file. The
+# paths filter below applies to every push, the trigger branch included.
 on:
   push:
-    branches: [main]
+    branches: [main, trigger/codeql]
     paths:
       - 'src/**'
       - 'include/**'
       - 'meson.build'
       - 'VERSION'
+      - '.github/**'
+      - '**/*.py'
   pull_request:
     branches: [main]
     paths:
@@ -17,8 +23,11 @@ on:
       - 'include/**'
       - 'meson.build'
       - 'VERSION'
+      - '.github/**'
+      - '**/*.py'
   schedule:
     - cron: '0 6 * * 1'  # Weekly on Monday at 6am (always runs)
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -29,10 +38,24 @@ permissions:
 
 jobs:
   analyze:
-    name: CodeQL Analysis
+    name: CodeQL (${{ matrix.language }})
     # Set repository variable CODE_SCANNING_ENABLED=true to enable
     if: vars.CODE_SCANNING_ENABLED == 'true'
     runs-on: ubuntu-latest
+
+    # C is analyzed from a real build so the extension, the generated
+    # headers and the PostgreSQL macros are all resolved. Workflows and
+    # Python need no build.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: c-cpp
+            build-mode: manual
+          - language: actions
+            build-mode: none
+          - language: python
+            build-mode: none
 
     permissions:
       security-events: write  # Required to upload CodeQL results
@@ -47,9 +70,11 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@2b983b380ce715a6c836c917154509c332c19b3a # v3
         with:
-          languages: c-cpp
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
 
       - name: Install dependencies
+        if: matrix.build-mode == 'manual'
         run: |
           sudo apt-get update
           sudo apt-get install -y meson ninja-build gcc curl ca-certificates
@@ -68,9 +93,12 @@ jobs:
       # failure instead. CodeQL databases only what it watches compile, so
       # what this step builds is exactly what gets analysed.
       - name: Build
+        if: matrix.build-mode == 'manual'
         run: |
           meson setup builddir -Dpostgresql=enabled
           meson compile -C builddir
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@2b983b380ce715a6c836c917154509c332c19b3a # v3
+        with:
+          category: /language:${{ matrix.language }}
