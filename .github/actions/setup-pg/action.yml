@@ -29,6 +29,20 @@ inputs:
       builds can all be cached side by side without colliding.
     required: false
     default: ''
+  cc:
+    description: >-
+      Compiler command to build PostgreSQL with, e.g. "gcc -m32" for a
+      32-bit build on a 64-bit runner. Omit to let configure pick the
+      default compiler.
+    required: false
+    default: ''
+  variant:
+    description: >-
+      Short label for a build that differs from the default in a way the
+      other inputs do not capture (e.g. x86 for a 32-bit build). Keeps its
+      cache entry and default prefix apart from the plain debug build's.
+    required: false
+    default: ''
 
 outputs:
   pg-config:
@@ -44,6 +58,7 @@ runs:
       env:
         SANITIZER: ${{ inputs.sanitizer }}
         PREFIX_INPUT: ${{ inputs.prefix }}
+        VARIANT: ${{ inputs.variant }}
       run: |
         if [[ -n "$PREFIX_INPUT" ]]; then
           prefix="$PREFIX_INPUT"
@@ -52,18 +67,19 @@ runs:
         else
           prefix="$GITHUB_WORKSPACE/pg-debug"
         fi
+        [[ -n "$VARIANT" ]] && prefix="$prefix-$VARIANT"
         echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
 
-    # The build only changes when the version, sanitizer, or build script
-    # changes, so key the cache on all three. Built once, then restored
-    # across every workflow that uses this action.
+    # The build only changes when the version, sanitizer, variant, or
+    # build script changes, so key the cache on all of them. Built once,
+    # then restored across every workflow that uses this action.
     - name: Cache PostgreSQL
       id: cache
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ${{ steps.resolve-prefix.outputs.prefix }}
         key: >-
-          pg-${{ runner.os }}-${{ runner.arch }}-${{ inputs.pg-version }}-${{ inputs.sanitizer || 'debug' }}-${{ hashFiles('scripts/ci/build-pg.sh') }}
+          pg-${{ runner.os }}-${{ runner.arch }}-${{ inputs.variant || 'default' }}-${{ inputs.pg-version }}-${{ inputs.sanitizer || 'debug' }}-${{ hashFiles('scripts/ci/build-pg.sh') }}
 
     # build-pg.sh configures with --enable-tap-tests, whose configure check
     # requires IPC::Run, and running the TAP tests later needs it too.
@@ -84,7 +100,10 @@ runs:
         PG_VERSION: ${{ inputs.pg-version }}
         PG_PREFIX: ${{ steps.resolve-prefix.outputs.prefix }}
         SANITIZER: ${{ inputs.sanitizer }}
-      run: scripts/ci/build-pg.sh "$PG_VERSION" "$PG_PREFIX" "$SANITIZER"
+        PG_CC: ${{ inputs.cc }}
+      run: |
+        [[ -n "$PG_CC" ]] && export CC="$PG_CC"
+        scripts/ci/build-pg.sh "$PG_VERSION" "$PG_PREFIX" "$SANITIZER"
 
     - name: Add PostgreSQL to PATH
       shell: bash

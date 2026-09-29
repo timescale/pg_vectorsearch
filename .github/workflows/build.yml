@@ -71,11 +71,22 @@ jobs:
             os: Linux
             arch: x64
             standalone: true
-          # Compatibility: stock release packages (no asserts/injection).
+          # 32-bit x86. GitHub has no 32-bit runners, so PostgreSQL and the
+          # extension are both compiled with gcc -m32 on the x64 runner and
+          # the whole suite -- unit, regress, isolation and TAP -- runs as
+          # native 32-bit code with a 32-bit size_t, off_t and pointer.
+          # Ubuntu's i386 archive is a small multilib allow-list: it has
+          # gsl but no OpenBLAS, so this job builds without BLAS. pgdg
+          # ships no i386 PostgreSQL, so it is built from source like the
+          # arm64 job's, cached under its own variant.
           - runner: ubuntu-latest
             os: Linux
-            arch: x64
-            pg: packaged
+            arch: x86-32
+            pg: debug
+            cc: gcc -m32
+            pkg_suffix: ':i386'
+            pkg_config_libdir: /usr/lib/i386-linux-gnu/pkgconfig
+          # Compatibility: stock release packages (no asserts/injection).
           - runner: macos-latest
             os: macOS
             arch: arm64
@@ -94,12 +105,25 @@ jobs:
         with:
           persist-credentials: false
 
+      # The 32-bit job needs the i386 package architecture enabled before
+      # any :i386 library can be installed, and a multilib gcc.
+      - name: Enable 32-bit packages (Linux x86-32)
+        if: runner.os == 'Linux' && matrix.arch == 'x86-32'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
+
+      # Libraries carry the job's package suffix (:i386 on the 32-bit job),
+      # so each job links against libraries of its own word size.
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
+        env:
+          PKG_SUFFIX: ${{ matrix.pkg_suffix }}
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            meson ninja-build gcc gdb make bison flex libgsl-dev \
+            meson ninja-build gcc gdb make bison flex "libgsl-dev$PKG_SUFFIX" \
             libipc-run-perl
 
       - name: Install OpenBLAS (Linux x64 only)
@@ -112,6 +136,8 @@ jobs:
         uses: ./.github/actions/setup-pg
         with:
           pg-version: '18.4'
+          cc: ${{ matrix.cc }}
+          variant: ${{ matrix.arch == 'x86-32' && 'x86-32' || '' }}
 
       - name: Install PostgreSQL 18 (Linux, packaged)
         if: matrix.pg == 'packaged' && runner.os == 'Linux'
@@ -142,7 +168,13 @@ jobs:
           PG_CONFIG: ${{ steps.pg.outputs.pg-config }}
           STANDALONE: ${{ matrix.standalone }}
           TOOLS: ${{ matrix.tools || 'enabled' }}
+          MATRIX_CC: ${{ matrix.cc }}
+          MATRIX_PKG_CONFIG_LIBDIR: ${{ matrix.pkg_config_libdir }}
         run: |
+          # The 32-bit job compiles with the same CC PostgreSQL was built
+          # with and resolves pkg-config against the i386 libraries.
+          [ -n "$MATRIX_CC" ] && export CC="$MATRIX_CC"
+          [ -n "$MATRIX_PKG_CONFIG_LIBDIR" ] && export PKG_CONFIG_LIBDIR="$MATRIX_PKG_CONFIG_LIBDIR"
           if [ -n "$STANDALONE" ]; then
             args="-Dpostgresql=disabled"
           else
