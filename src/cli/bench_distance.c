@@ -755,7 +755,8 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 	}
 
 	/* Calculate and display dataset size */
-	double size_mb = (double)(count * dim * sizeof(float)) / (1024.0 * 1024.0);
+	double size_mb = (double)((size_t)count * dim * sizeof(float)) / 1024.0 /
+					 1024.0;
 	const char *size_unit;
 	double		size_value;
 
@@ -790,7 +791,7 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 		return 1;
 	}
 
-	float *db_data = vs_alloc(count * dim * sizeof(float));
+	float *db_data = vs_alloc((size_t)count * dim * sizeof(float));
 	if (db_data == NULL)
 	{
 		fprintf(stderr,

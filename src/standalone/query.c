@@ -141,8 +141,8 @@ prism_query_ctx_create(PrismIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 						&ctx->posting_scan, idx->base.fastscan);
 		}
 
-		ctx->pt_cents_buf		 = vs_alloc(max_nprobe * dim * sizeof(float));
-		ctx->pt_query			 = vs_alloc_aligned(dim * sizeof(float), 64);
+		ctx->pt_cents_buf = vs_alloc((size_t)max_nprobe * dim * sizeof(float));
+		ctx->pt_query	  = vs_alloc_aligned(dim * sizeof(float), 64);
 		ctx->beam_transformed	 = vs_alloc_aligned(dim * sizeof(float), 64);
 		ctx->cluster_transformed = vs_alloc_aligned(dim * sizeof(float), 64);
 		ctx->beam_query_bits	 = vs_alloc_aligned(packed_bytes, 64);
