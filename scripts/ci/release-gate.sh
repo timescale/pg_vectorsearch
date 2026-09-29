@@ -15,7 +15,8 @@
 #
 # expected-version guards a dispatched run against the wrong commit,
 # and DISPATCHED=true adds the check that the commit is merged.
-# Writes release= and version= to $GITHUB_OUTPUT when set.
+# Writes release=, version= and next_version= to $GITHUB_OUTPUT when
+# set. next_version is empty unless this is a release.
 
 set -euo pipefail
 
@@ -26,11 +27,15 @@ require_repo_root
 
 EXPECTED="${1:-}"
 VERSION="$(project_version)"
+# The cycle to reopen once this release is published. Set only on the
+# release path, where the trailer has been read and checked.
+NEXT_VERSION=""
 
 emit() {
-    log "verdict: release=$1 version=$VERSION"
+    log "verdict: release=$1 version=$VERSION next=${NEXT_VERSION:-none}"
     [[ -z "${GITHUB_OUTPUT:-}" ]] ||
-        printf 'release=%s\nversion=%s\n' "$1" "$VERSION" >>"$GITHUB_OUTPUT"
+        printf 'release=%s\nversion=%s\nnext_version=%s\n' \
+            "$1" "$VERSION" "$NEXT_VERSION" >>"$GITHUB_OUTPUT"
 }
 
 validate_version "$VERSION"
@@ -95,6 +100,7 @@ next_version="$(git log -1 --format='%(trailers:key=Next-Version,valueonly)' \
     die "$(git rev-parse --short HEAD) has no Next-Version trailer, so it" \
         "is not a release commit -- VERSION says $VERSION, but only the" \
         "commit prepare-release.sh writes declares the next cycle"
+NEXT_VERSION="$next_version"
 log "release commit confirmed; next cycle is $next_version"
 
 log "checking CHANGELOG.md has a finished entry for $VERSION"

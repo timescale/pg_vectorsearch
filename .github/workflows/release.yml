@@ -53,6 +53,7 @@ jobs:
     outputs:
       release: ${{ steps.gate.outputs.release }}
       version: ${{ steps.gate.outputs.version }}
+      next_version: ${{ steps.gate.outputs.next_version }}
       sha: ${{ inputs.sha || github.sha }}
 
     steps:
@@ -180,3 +181,64 @@ jobs:
           VERSION: ${{ needs.gate.outputs.version }}
           REPO: ${{ github.repository }}
         run: gh release upload "v$VERSION" dist/* --clobber --repo "$REPO"
+
+  # Reopening the cycle needs an identity that is not GITHUB_TOKEN:
+  # GitHub starts no workflow runs from events that token creates, so
+  # main's required checks would never report on the pull request and
+  # nothing could merge it. Skipped when the App is not configured, so
+  # the release still publishes and the bump stays the manual step
+  # docs/release.md describes.
+  dev-cycle:
+    name: Reopen the development cycle
+    needs: [gate, release]
+    if: vars.RELEASE_APP_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Mint a token for the release App
+        id: app-token
+        # v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          # The client id, not the numeric app id: the action
+          # deprecates app-id in favour of it.
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # No owner or repositories input: that scopes the token to
+          # this repository alone, whatever else the App is installed
+          # on. The permissions narrow it further to what this job
+          # does, so an App shared with other release automation
+          # hands this job no more than it needs.
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          fetch-depth: 0
+          # The App's token is used explicitly below rather than left
+          # in the checkout, so no credential outlives this job's
+          # push.
+          persist-credentials: false
+
+      - name: Open the pull request that bumps VERSION
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          RELEASED: ${{ needs.gate.outputs.version }}
+          NEXT: ${{ needs.gate.outputs.next_version }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.ref_name }}
+        run: |
+          # Attribute the commit to the App's own bot account. An
+          # unattributed commit can draw the ruleset's extra-approval
+          # requirement, which would stall the bump.
+          bot_id="$(gh api "/users/$APP_SLUG%5Bbot%5D" --jq .id)"
+          git config user.name "$APP_SLUG[bot]"
+          git config user.email \
+            "$bot_id+$APP_SLUG[bot]@users.noreply.github.com"
+          git remote set-url origin \
+            "https://x-access-token:$GH_TOKEN@github.com/$REPO"
+          ./scripts/ci/release-open-dev-cycle.sh \
+            "$RELEASED" "$NEXT" "$BASE"
