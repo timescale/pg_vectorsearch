@@ -164,11 +164,11 @@ vs_fast_rotate_init(VsFastRotateParams *p, Dimension dim, uint64_t seed)
 static inline void
 fwht_inplace(float *a, Dimension n)
 {
-	for (Dimension h = 1; h < n; h <<= 1)
+	for (uint32_t h = 1; h < n; h <<= 1)
 	{
-		for (Dimension i = 0; i < n; i += (h << 1))
+		for (uint32_t i = 0; i < n; i += (h << 1))
 		{
-			for (Dimension j = i; j < i + h; j++)
+			for (uint32_t j = i; j < i + h; j++)
 			{
 				float x	 = a[j];
 				float y	 = a[j + h];
@@ -291,12 +291,12 @@ fast_rotate_apply_avx2(
 	for (uint32_t blk = 0; blk < k; blk++)
 	{
 		float *a = out + (size_t)blk * n;
-		for (Dimension h = 1; h < n; h <<= 1)
+		for (uint32_t h = 1; h < n; h <<= 1)
 		{
 			if (h >= 8)
 			{
-				for (Dimension s = 0; s < n; s += (h << 1))
-					for (Dimension j = s; j < s + h; j += 8)
+				for (uint32_t s = 0; s < n; s += (h << 1))
+					for (uint32_t j = s; j < s + h; j += 8)
 					{
 						__m256 x = _mm256_loadu_ps(a + j);
 						__m256 y = _mm256_loadu_ps(a + j + h);
@@ -306,8 +306,8 @@ fast_rotate_apply_avx2(
 			}
 			else
 			{
-				for (Dimension s = 0; s < n; s += (h << 1))
-					for (Dimension j = s; j < s + h; j++)
+				for (uint32_t s = 0; s < n; s += (h << 1))
+					for (uint32_t j = s; j < s + h; j++)
 					{
 						float x	 = a[j];
 						float y	 = a[j + h];
@@ -411,12 +411,12 @@ fast_rotate_apply_avx512(
 	for (uint32_t blk = 0; blk < k; blk++)
 	{
 		float *a = out + (size_t)blk * n;
-		for (Dimension h = 1; h < n; h <<= 1)
+		for (uint32_t h = 1; h < n; h <<= 1)
 		{
 			if (h >= 16)
 			{
-				for (Dimension s = 0; s < n; s += (h << 1))
-					for (Dimension j = s; j < s + h; j += 16)
+				for (uint32_t s = 0; s < n; s += (h << 1))
+					for (uint32_t j = s; j < s + h; j += 16)
 					{
 						__m512 x = _mm512_loadu_ps(a + j);
 						__m512 y = _mm512_loadu_ps(a + j + h);
@@ -426,7 +426,7 @@ fast_rotate_apply_avx512(
 			}
 			else if (h == 8)
 			{
-				for (Dimension s = 0; s < n; s += 16)
+				for (uint32_t s = 0; s < n; s += 16)
 				{
 					__m256 x = _mm256_loadu_ps(a + s);
 					__m256 y = _mm256_loadu_ps(a + s + 8);
@@ -436,8 +436,8 @@ fast_rotate_apply_avx512(
 			}
 			else
 			{
-				for (Dimension s = 0; s < n; s += (h << 1))
-					for (Dimension j = s; j < s + h; j++)
+				for (uint32_t s = 0; s < n; s += (h << 1))
+					for (uint32_t j = s; j < s + h; j++)
 					{
 						float x	 = a[j];
 						float y	 = a[j + h];
@@ -540,11 +540,11 @@ fast_rotate_apply_neon(
 	for (uint32_t blk = 0; blk < k; blk++)
 	{
 		float *a = out + (size_t)blk * n;
-		for (Dimension h = 1; h < n; h <<= 1)
+		for (uint32_t h = 1; h < n; h <<= 1)
 		{
 			if (h >= 4)
 			{
-				for (Dimension s = 0; s < n; s += (h << 1))
+				for (uint32_t s = 0; s < n; s += (h << 1))
 					for (Dimension j = s; j < s + h; j += 4)
 					{
 						float32x4_t x = vld1q_f32(a + j);
@@ -555,8 +555,8 @@ fast_rotate_apply_neon(
 			}
 			else
 			{
-				for (Dimension s = 0; s < n; s += (h << 1))
-					for (Dimension j = s; j < s + h; j++)
+				for (uint32_t s = 0; s < n; s += (h << 1))
+					for (uint32_t j = s; j < s + h; j++)
 					{
 						float x	 = a[j];
 						float y	 = a[j + h];

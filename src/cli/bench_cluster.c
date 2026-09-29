@@ -9,6 +9,7 @@
 
 #include "vs_config.h"
 
+#include <fcntl.h>
 #include <getopt.h>
 #include <math.h>
 #include <stdio.h>
@@ -16,6 +17,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "algo/kmeans.h"
 #include "algo/vecops.h"
@@ -134,11 +136,20 @@ load_vectors_from_file(
 		uint32_t   *out_nvecs,
 		Dimension  *out_dim)
 {
-	/* Determine if path is a directory or single file */
-	struct stat st;
-	if (stat(path, &st) != 0)
+	/* Open first and inspect the descriptor, so the file that is read is
+	 * the one that was inspected. */
+	int fd = open(path, O_RDONLY);
+	if (fd < 0)
 	{
 		fprintf(stderr, "Error: cannot access '%s'\n", path);
+		return NULL;
+	}
+
+	struct stat st;
+	if (fstat(fd, &st) != 0)
+	{
+		fprintf(stderr, "Error: cannot access '%s'\n", path);
+		close(fd);
 		return NULL;
 	}
 
@@ -147,6 +158,7 @@ load_vectors_from_file(
 
 	if (is_dir)
 	{
+		close(fd);
 		char first_chunk[4096];
 		snprintf(first_chunk, sizeof(first_chunk), "%s/vectors_1.bin", path);
 		fp = fopen(first_chunk, "rb");
@@ -161,10 +173,11 @@ load_vectors_from_file(
 	}
 	else
 	{
-		fp = fopen(path, "rb");
+		fp = fdopen(fd, "rb");
 		if (fp == NULL)
 		{
 			fprintf(stderr, "Error: cannot open '%s'\n", path);
+			close(fd);
 			return NULL;
 		}
 	}

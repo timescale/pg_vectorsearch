@@ -380,7 +380,7 @@ ElkanKmeans(
 
 		for (int64 k = 0; k < numCenters; k++)
 		{
-			float distance = lowerBound[j * numCenters + k];
+			float distance = lowerBound[(size_t)j * numCenters + k];
 
 			if (distance < minDistance)
 			{
@@ -463,11 +463,11 @@ ElkanKmeans(
 				if (k == closestCenters[j])
 					continue;
 
-				if (upperBound[j] <= lowerBound[j * numCenters + k])
+				if (upperBound[j] <= lowerBound[(size_t)j * numCenters + k])
 					continue;
 
 				if (upperBound[j] <=
-					halfcdist[closestCenters[j] * numCenters + k])
+					halfcdist[(size_t)closestCenters[j] * numCenters + k])
 					continue;
 
 				vec = PointerGetDatum(VectorArrayGet(samples, j));
@@ -491,8 +491,10 @@ ElkanKmeans(
 					dxcx = upperBound[j];
 
 				/* Step 3b */
-				if (dxcx > lowerBound[j * numCenters + k] ||
-					dxcx > halfcdist[closestCenters[j] * numCenters + k])
+				if (dxcx > lowerBound[(size_t)j * numCenters + k] ||
+					dxcx > halfcdist
+									[(size_t)closestCenters[j] * numCenters +
+									 k])
 				{
 					float dxc = (float)DatumGetFloat8(FunctionCall2Coll(
 							procinfo,
@@ -500,7 +502,7 @@ ElkanKmeans(
 							vec,
 							PointerGetDatum(VectorArrayGet(centers, k))));
 
-					lowerBound[j * numCenters + k] = dxc;
+					lowerBound[(size_t)j * numCenters + k] = dxc;
 
 					if (dxc < dxcx)
 					{
@@ -535,12 +537,13 @@ ElkanKmeans(
 		{
 			for (int64 k = 0; k < numCenters; k++)
 			{
-				float distance = lowerBound[j * numCenters + k] - newcdist[k];
+				float distance = lowerBound[(size_t)j * numCenters + k] -
+								 newcdist[k];
 
 				if (distance < 0)
 					distance = 0;
 
-				lowerBound[j * numCenters + k] = distance;
+				lowerBound[(size_t)j * numCenters + k] = distance;
 			}
 		}
 

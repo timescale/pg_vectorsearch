@@ -35,7 +35,7 @@ vid_to_tid(uint32_t vid)
 static inline float *
 make_test_vectors(uint32_t nvecs, Dimension dim)
 {
-	float *vecs = vs_alloc(nvecs * dim * sizeof(float));
+	float *vecs = vs_alloc((size_t)nvecs * dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
 		for (Dimension d = 0; d < dim; d++)
 			vecs[(size_t)i * dim + d] = (float)((i * 13 + d * 7) % 100 - 50) /

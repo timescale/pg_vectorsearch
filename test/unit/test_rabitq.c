@@ -379,7 +379,7 @@ TEST(encode_from_pt_matches_encode_into_ex)
 
 	/* Codes near-identical; allow a couple of near-zero sign flips. */
 	int hamming = 0;
-	for (Dimension i = 0; i < VS_RABITQ_BYTES(dim); i++)
+	for (int i = 0; i < VS_RABITQ_BYTES(dim); i++)
 		hamming += __builtin_popcount((unsigned)(ref->bits[i] ^ pt->bits[i]));
 	ASSERT_TRUE(
 			hamming <= 2, "codes should be near-identical (<=2 bit flips)");
