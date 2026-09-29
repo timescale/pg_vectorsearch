@@ -40,7 +40,9 @@ njobs="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 # empty CFLAGS="" suppresses that default (verified against this PG
 # version), so the two extra variables are appended to the configure
 # invocation only when a sanitizer is actually requested.
-cc_label="default"
+# A caller-provided CC (for example "gcc -m32" for a 32-bit build) is part
+# of what the prefix was built as, so it goes into the stamp below.
+cc_label="${CC:-default}"
 configure_env=()
 configure_extra_vars=()
 if [[ -n "$SANITIZER" ]]; then
