@@ -1,0 +1,170 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+# Cut a release pull request from the Actions tab, with no checkout.
+#
+# The work is the release notes, which is why this runs an agent rather
+# than a script: scripts/prepare-release.sh generates the changelog's
+# commit list and leaves FILL-IN for the parts a person has to write.
+# The agent writes those by following .claude/skills/release/SKILL.md,
+# the same procedure a local cut follows, and stops at the open pull
+# request. Merging it is what publishes, and that stays a human act.
+#
+# It runs as the release App rather than GITHUB_TOKEN because GitHub
+# starts no workflow runs from events that token creates: the pull
+# request would carry none of main's required checks and could not be
+# merged by anyone.
+#
+# What the App can do here is bounded by more than this file. It is not
+# a ruleset bypass actor, so it cannot push to main -- only propose a
+# pull request that must pass the required checks and be approved. It
+# holds no Workflows permission, so a push touching .github/workflows
+# is refused. It cannot tag, publish or merge.
+name: Cut a release PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 0.2.0'
+        required: true
+        type: string
+      next_version:
+        description: 'Next dev version, e.g. 0.3.0-dev (blank: default bump)'
+        required: false
+        type: string
+
+# A second run must not interrupt one that is pushing a branch or
+# opening a pull request.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  prepare:
+    name: Cut a release PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read   # checkout
+      id-token: write  # the action's API authentication
+
+    steps:
+      - name: Mint a token for the release App
+        id: app-token
+        # v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Scoped to this repository, and to what cutting a release
+          # needs: a branch, a pull request, and the label and
+          # milestone prepare-release.sh attaches.
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Checkout repository
+        # v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          # Full history and tags: git-cliff reads the commits since the
+          # previous release, and the check that a tag is absent asks
+          # the local repository.
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Read the git-cliff version cliff.toml targets
+        id: cliff
+        run: |
+          # From cliff.toml, so the binary cannot drift from the config
+          # it is run with -- prepare-release.sh warns on a mismatch.
+          version="$(sed -n \
+            's/^# Pinned version: git-cliff \([0-9][0-9.]*[0-9]\).*$/\1/p' \
+            cliff.toml | head -1)"
+          if [ -z "$version" ]; then
+            echo "::error::cliff.toml pins no git-cliff version"
+            exit 1
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "cliff.toml targets git-cliff $version"
+
+      - name: Install git-cliff
+        # v2.87.22. Installs into $CARGO_HOME/bin, which is on PATH, so
+        # prepare-release.sh finds it with command -v.
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0
+        with:
+          tool: git-cliff@${{ steps.cliff.outputs.version }}
+
+      - name: Check the installed git-cliff is the pinned one
+        env:
+          WANT: ${{ steps.cliff.outputs.version }}
+        run: |
+          have="$(git-cliff --version | awk '{print $2}')"
+          echo "git-cliff $have (cliff.toml targets $WANT)"
+          [ "$have" = "$WANT" ] || {
+            echo "::error::installed git-cliff $have, expected $WANT"
+            exit 1
+          }
+
+      - name: Identify the release App to git
+        id: bot
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          REPO: ${{ github.repository }}
+        run: |
+          # The commit is attributed to the App's own account: an
+          # unattributed one can draw the ruleset's extra-approval
+          # requirement.
+          bot_id="$(gh api "/users/$APP_SLUG%5Bbot%5D" --jq .id)"
+          git config user.name "$APP_SLUG[bot]"
+          git config user.email \
+            "$bot_id+$APP_SLUG[bot]@users.noreply.github.com"
+          # The checkout persists no credentials, and open-pr.sh pushes.
+          git remote set-url origin \
+            "https://x-access-token:$GH_TOKEN@github.com/$REPO"
+
+      - name: Cut the release PR
+        # v1
+        uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790
+        env:
+          # prepare-release.sh and open-pr.sh call gh.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          claude_args: >-
+            --allowedTools Bash,Read,Edit,Write,Glob,Grep
+          prompt: |
+            Cut a release pull request by following the release skill at
+            .claude/skills/release/SKILL.md, sections 1 to 5, and then
+            stop.
+
+            Release version: ${{ inputs.version }}
+            Next development version: ${{ inputs.next_version }}
+
+            If the next development version above is blank, use the
+            skill's default bump and say which pair you cut.
+
+            This is a clean CI checkout, so pass
+            --ignore-untracked-files. git-cliff is on PATH at the
+            version cliff.toml targets.
+
+            Writing the notes is the work. The brief is
+            .claude/skills/release/reference/release-notes.md, and
+            reference/thanks.md if anyone outside the team was
+            involved. Read them before writing, and read the diff of
+            the range git-cliff summarised rather than only its
+            bullet list.
+
+            There is nobody to ask here, so do not stop for
+            confirmation. Write the best version you can and name in
+            the pull request body anything you were unsure about, so
+            the reviewer looks there first. Never leave FILL-IN
+            anywhere -- a squash merge would put it on main.
+
+            Do not merge, approve, tag, or dispatch anything. Opening
+            the pull request is the last thing you do. Report its URL
+            and what you left for the reviewer.

@@ -69,6 +69,17 @@ never *changed*.
 
 ## Cutting a release PR
 
+There are two ways in, running the same procedure. From the Actions
+tab, **Cut a release PR** takes the version and optionally the next
+development version, and runs
+[the release skill](../.claude/skills/release/SKILL.md) as the release
+App — no checkout needed, and the pull request it opens carries main's
+required checks precisely because the App is not `GITHUB_TOKEN`.
+Locally, the steps below do the same thing by hand.
+
+Either way the notes are the work, and either way a human reviews and
+merges the result. The workflow cannot merge, tag or publish.
+
 ```bash
 ./scripts/prepare-release.sh
 ```
