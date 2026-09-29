@@ -359,6 +359,7 @@ debugging. These are the same scripts used by GitHub Actions.
 | `lint.sh` | Check formatting and run clang-tidy |
 | `check-commit-messages.sh` | Reject commit messages that credit an AI agent |
 | `check-commit-count.sh` | Require one commit per pull request unless its description disables the check |
+| `coverity-upload.sh` | Submit a cov-build capture to Coverity Scan; fails unless Scan accepts it |
 | `pgspot.sh` | Static security lint of the install-time SQL (pgspot) |
 
 ### Usage
@@ -415,6 +416,7 @@ The project uses GitHub Actions for CI with the following workflows:
 | `lint.yml` | Push, PR | Format check and clang-tidy |
 | `pgspot.yml` | Push, PR (SQL) | pgspot security lint of install-time SQL |
 | `codeql.yml` | Push, PR, Weekly | GitHub CodeQL static analysis |
+| `coverity.yml` | Weekly, push to `trigger/coverity`, manual | Coverity Scan static analysis; Scan caps submissions, so it never runs on PRs |
 
 ## Design Patterns
 

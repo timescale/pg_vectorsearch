@@ -1,0 +1,118 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: Coverity
+
+# Submits a full build to Coverity Scan for static analysis. Scan limits
+# how many builds a project may submit (a few per day, a few dozen per
+# week, less for larger code bases), so this runs on a weekly schedule,
+# on a push to the trigger/coverity branch for an on-demand run, and by
+# hand -- never on pull requests, which would also lack the token.
+#
+# The analysis tool is about a gigabyte; the action caches it keyed on
+# the checksum Scan publishes, so a run downloads it only when Scan
+# ships a new version. The token travels in the POST body, not the URL.
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'  # Mondays 04:00 UTC
+  push:
+    branches: [trigger/coverity]
+  workflow_dispatch:
+
+# Never cancel a run that may be mid-upload; a second one queues.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  coverity:
+    name: Coverity Scan
+    # Forks have neither the token nor a quota to spend.
+    if: github.repository == 'timescale/pg_vectorsearch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check the notification address is configured
+        env:
+          COVERITY_EMAIL: ${{ vars.COVERITY_EMAIL }}
+        run: |
+          if [ -z "$COVERITY_EMAIL" ]; then
+            echo "::error::Set the COVERITY_EMAIL repository variable to a Scan project member's address." >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build gcc make libgsl-dev libopenblas-dev \
+            curl ca-certificates
+          # PostgreSQL headers, so the extension is part of the build
+          # that Coverity captures. From pgdg because meson requires 18+.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-server-dev-18
+          echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
+
+      # Configure outside the capture; only the compile needs to run
+      # under cov-build. enabled rather than auto for both features, so a
+      # missing dependency fails here instead of silently shrinking what
+      # Coverity sees: the extension, the CLI and the unit tests.
+      #
+      # gnu17 rather than the project's C23: Coverity's front end rejects
+      # -std=c2x and emits nothing for such a compile. The sources build
+      # as C17 too, so the analysis covers the same code.
+      - name: Configure
+        run: >-
+          meson setup builddir -Dpostgresql=enabled -Dtools=enabled
+          -Dc_std=gnu17
+
+      # The action downloads and caches the analysis tool and runs the
+      # build under cov-build. It does not submit: its upload treats any
+      # answer from Scan as success, and Scan answers a rejected build
+      # (one already queued, a quota exhausted) with HTTP 200 and a
+      # sentence. The submission is a separate step below that reads the
+      # sentence, after the capture has been checked.
+      - name: Build under Coverity
+        uses: vapier/coverity-scan-action@1b6fd4eaba6651aa354c9ea7f48caa1710b4e12e # v1.9.0
+        with:
+          project: ${{ github.repository }}
+          token: ${{ secrets.COVERITY_TOKEN }}
+          email: ${{ vars.COVERITY_EMAIL }}
+          command: ninja -C builddir
+          dry_run: 'true'
+
+      # cov-build reports how many compilation units it intercepted. A
+      # partial capture analyzes less than it appears to and is easy to
+      # miss on Scan's side, so surface the summary here and stop short of
+      # 100% before anything is uploaded.
+      - name: Check the capture was complete
+        run: |
+          grep -E 'compilation units|recoverable errors|\[ERROR\]|error #[0-9]+' \
+              cov-int/build-log.txt | sort | uniq -c | sort -rn | head -n 40
+          pct=$(grep -oE 'compilation units \(([0-9]+)%\)' cov-int/build-log.txt \
+                | grep -oE '[0-9]+' | tail -n 1)
+          if [ "${pct:-0}" -ne 100 ]; then
+            echo "::error::cov-build captured ${pct:-0}% of compilation units; see the log above" >&2
+            exit 1
+          fi
+
+      - name: Submit to Coverity Scan
+        env:
+          COVERITY_TOKEN: ${{ secrets.COVERITY_TOKEN }}
+          COVERITY_EMAIL: ${{ vars.COVERITY_EMAIL }}
+          COVERITY_PROJECT: ${{ github.repository }}
+          COVERITY_VERSION: ${{ github.sha }}
+          COVERITY_DESC: ${{ github.ref_name }} (${{ github.event_name }})
+        run: ./scripts/ci/coverity-upload.sh cov-int.tgz
