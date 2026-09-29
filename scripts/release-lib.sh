@@ -385,6 +385,40 @@ is_patch_bump() {
 }
 
 # A format change makes every existing index unreadable, so it cannot
+# An existing installation moves between versions with an upgrade script:
+# without sql/<name>--<prev>--<new>.sql, ALTER EXTENSION UPDATE fails and
+# the only way to the new version is dropping the extension, which takes
+# the indexes with it. The install script itself needs nothing -- it is
+# sql/<name>.sql copied under the versioned name at build time.
+#
+# Skipped for a first release, which has nothing to upgrade from.
+check_upgrade_path() {
+    local version="$1" prev from name script
+    prev="$(previous_release_tag)"
+    if [[ -z "$prev" ]]; then
+        log "upgrade path: no previous release to upgrade from"
+        return 0
+    fi
+
+    from="${prev#v}"
+    name="$(meson_project_name)"
+    script="sql/$name--$from--$version.sql"
+
+    [[ -f "$script" ]] ||
+        die "releasing $version after $from, but $script does not" \
+            "exist -- an installation on $from could only reach" \
+            "$version by dropping the extension"
+
+    # Listed or not, the file has to be installed; an unlisted one fails
+    # at ALTER EXTENSION UPDATE exactly as a missing one does, only
+    # later and less obviously.
+    grep -q "$name--$from--$version.sql" src/pg/meson.build ||
+        die "$script exists but src/pg/meson.build does not list it in" \
+            "ext_update_scripts, so it would never be installed"
+
+    log "upgrade path: $script"
+}
+
 # ship in a patch release -- a patch upgrade must not require reindexing.
 # Skipped without a previous release, or when either end is unreadable.
 check_on_disk_format() {

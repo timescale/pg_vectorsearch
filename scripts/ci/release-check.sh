@@ -133,4 +133,7 @@ fi
 log "check: on-disk format"
 check_on_disk_format "$VERSION"
 
+log "check: upgrade path"
+check_upgrade_path "$VERSION"
+
 log "check: $VERSION looks releasable"
