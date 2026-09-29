@@ -283,6 +283,14 @@ else
   hdf5_dep = []
 endif
 
+# 32-bit x86 computes floating point in SSE2 registers, as x86-64 does by
+# definition, so single-precision results do not depend on the word size.
+# The x87 default would keep excess precision in intermediates and make
+# 32-bit results diverge from every other platform's in the last bits.
+if host_machine.cpu_family() == 'x86'
+  add_project_arguments('-msse2', '-mfpmath=sse', language: 'c')
+endif
+
 # F16C: hardware half-precision ↔ float conversion (available on all AVX2
 # CPUs, i.e. Haswell 2013+). Enables _cvtsh_ss / _cvtss_sh scalar intrinsics
 # globally so that inline half↔float conversion in types/vec16.h compiles to
@@ -432,8 +440,10 @@ simd_sources = []
 simd_libs = []
 
 if simd_mode == 'full'
-  # Hand-optimized SIMD implementations (simd=full only)
-  if host_machine.cpu_family() in ['x86', 'x86_64']
+  # Hand-optimized SIMD implementations (simd=full only). 64-bit x86 only:
+  # the AVX2 and AVX-512 kernels are written for x86-64, and 32-bit x86
+  # builds the portable kernels like any other architecture.
+  if host_machine.cpu_family() == 'x86_64'
     # AVX2 and AVX-512 use file-level target pragmas, compile as regular sources
     simd_sources += files(
       'src/algo/distance_avx2.c',
@@ -716,7 +726,7 @@ if build_pg_extension
   # SIMD sources for PG build (same as standalone)
   vs_pg_simd_sources = []
   if simd_mode == 'full'
-    if host_machine.cpu_family() in ['x86', 'x86_64']
+    if host_machine.cpu_family() == 'x86_64'
       vs_pg_simd_sources += files(
         'src/algo/distance_avx2.c',
         'src/algo/distance_avx512.c',

@@ -44,7 +44,10 @@
 #define VS_FLT16_SUPPORT
 #endif
 
-#if defined(__F16C__)
+/* The F16C vtable below is built on the x86-64 AVX2 helpers in
+ * algo/simd_utils.h; 32-bit x86 converts halves through the portable
+ * paths instead. */
+#if defined(__F16C__) && (defined(__x86_64__) || defined(_M_X64))
 #include <immintrin.h>
 #define VS_F16C_SUPPORT
 #endif

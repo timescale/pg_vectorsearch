@@ -49,7 +49,8 @@ extern size_t shm_toc_estimate(shm_toc_estimator *e);
  * Create a table over the caller-provided arena [address, address+nbytes).
  * The arena holds the inserted regions; the key map is kept separately on the
  * heap. Free with vs_shm_toc_free. The magic is retained for parity and
- * otherwise unused.
+ * otherwise unused. As with PostgreSQL's shm_toc, address must itself be
+ * 8-byte aligned: allocations are aligned relative to it.
  */
 extern shm_toc *shm_toc_create(uint64_t magic, void *address, size_t nbytes);
 

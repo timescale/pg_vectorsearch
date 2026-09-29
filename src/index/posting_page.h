@@ -247,20 +247,30 @@ typedef struct PrismFlatPostingHeader
  * the float-format centroid page (one dim * sizeof(float) entry, ~2036) and
  * the metadata page's inline mean. Past the ceiling the first-page capacity
  * arithmetic underflows, so index creation must reject the dimension up
- * front. The static assert keeps the number honest against layout changes.
+ * front.
+ *
+ * The number is derived at 8-byte alignment, the largest MAXALIGN
+ * PostgreSQL uses, so it is one constant on every platform. Where MAXALIGN
+ * is smaller (32-bit x86) the first page has a few bytes of slack and the
+ * ceiling is merely conservative. The static asserts keep the number honest
+ * against layout changes, at that same fixed alignment.
  */
 #define PRISM_INDEX_MAX_DIM 1968
 
+#define PRISM_CEILING_ALIGN(len) (((size_t)(len) + 7) & ~(size_t)7)
+
 static_assert(
-		BLCKSZ - MAXALIGN(SizeOfPageHeaderData) -
+		BLCKSZ - PRISM_CEILING_ALIGN(SizeOfPageHeaderData) -
 						sizeof(PrismPostingPageOpaque) -
-						MAXALIGN(PRISM_INDEX_MAX_DIM * sizeof(float)) >=
+						PRISM_CEILING_ALIGN(
+								PRISM_INDEX_MAX_DIM * sizeof(float)) >=
 				PRISM_POSTING_ENTRY_SIZE(PRISM_INDEX_MAX_DIM),
 		"posting first page must fit the encode reference plus one entry");
 static_assert(
-		BLCKSZ - MAXALIGN(SizeOfPageHeaderData) -
+		BLCKSZ - PRISM_CEILING_ALIGN(SizeOfPageHeaderData) -
 						sizeof(PrismPostingPageOpaque) -
-						MAXALIGN((PRISM_INDEX_MAX_DIM + 1) * sizeof(float)) <
+						PRISM_CEILING_ALIGN(
+								(PRISM_INDEX_MAX_DIM + 1) * sizeof(float)) <
 				PRISM_POSTING_ENTRY_SIZE(PRISM_INDEX_MAX_DIM + 1),
 		"the ceiling is tight: one dimension more must not fit");
 

@@ -310,13 +310,14 @@ SELECT query_settings_top_k($q$
 -- A row of top-k costs the sum of everything sized to k -- dominated by
 -- the PRISM_QUERY_CAND_PER_K extraction slots, not the heap entry itself --
 -- so 64kB affords far fewer rows than the heap entry alone would suggest.
--- Asserted exactly, which pins the arithmetic and the per-row size
--- together.
+-- The exact count follows the layout of the top-k entry, which is smaller
+-- on a 32-bit target, so it is asserted as a band around the per-row cost
+-- rather than as one number.
 SET work_mem = '64kB';
 SELECT query_settings_top_k($q$
     SELECT id FROM query_settings_test WHERE grp = 3 AND id < 20
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
-    LIMIT 20$q$) AS top_k_clamped_by_work_mem;
+    LIMIT 20$q$) BETWEEN 100 AND 140 AS top_k_clamped_by_work_mem;
 
 -- Raising work_mem lifts the clamp: the same query gets its full sizing.
 -- This is the answer to a filtered query returning too few rows.

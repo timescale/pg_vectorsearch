@@ -283,14 +283,18 @@ TEST(gsl_reference_random_vectors)
 		Distance d_ip	  = vs_distance_ip(a, b);
 		Distance d_cosine = vs_distance_cosine(a, b);
 
-		/* Use looser tolerance for higher dimensions due to floating point
-		 * accumulation */
-		float tolerance = (dim >= 128) ? 2e-4f : (dim >= 64) ? 1e-4f : 1e-5f;
+		/* Looser tolerance for higher dimensions due to floating point
+		 * accumulation, and never tighter than a few ulps of the value
+		 * itself: a different summation order (SIMD width, or none at all)
+		 * legitimately moves the last bit. */
+		float abs_tol	= (dim >= 128) ? 2e-4f : (dim >= 64) ? 1e-4f : 1e-5f;
+		float tolerance = fmaxf(abs_tol, fabsf(ref_l2) * 1e-6f);
 
 		char msg[64];
 		snprintf(msg, sizeof(msg), "dim=%u L2", dim);
 		ASSERT_FLOAT_EQ(ref_l2, d_l2, tolerance, msg);
 
+		tolerance = fmaxf(abs_tol, fabsf(ref_ip) * 1e-6f);
 		snprintf(msg, sizeof(msg), "dim=%u IP", dim);
 		ASSERT_FLOAT_EQ(ref_ip, d_ip, tolerance, msg);
 
@@ -324,6 +328,9 @@ get_simd_mask_for_variant(
 	}
 	else if (strcmp(variant, "avx2") == 0)
 	{
+#if !(defined(__x86_64__) || defined(_M_X64))
+		return false; /* The AVX2 kernels are built for x86-64 only */
+#endif
 		SimdCapability caps = vs_detect_simd();
 		if (!(caps & SIMD_AVX2))
 			return false; /* Not available */
@@ -334,6 +341,9 @@ get_simd_mask_for_variant(
 	}
 	else if (strcmp(variant, "avx512") == 0)
 	{
+#if !(defined(__x86_64__) || defined(_M_X64))
+		return false; /* The AVX-512 kernels are built for x86-64 only */
+#endif
 		SimdCapability caps = vs_detect_simd();
 		if ((caps & VS_SIMD_AVX512_DQ) != VS_SIMD_AVX512_DQ)
 			return false; /* Not available */

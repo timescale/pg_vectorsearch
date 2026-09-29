@@ -31,8 +31,10 @@ TEST(estimator_sums_chunks)
 
 TEST(allocate_is_aligned_and_distinct)
 {
-	char	 arena[512];
-	shm_toc *toc = shm_toc_create(0xABCD, arena, sizeof(arena));
+	/* The arena's own alignment is the caller's business, as with
+	 * PostgreSQL's shm_toc; the allocator aligns offsets within it. */
+	_Alignas(8) char arena[512];
+	shm_toc			*toc = shm_toc_create(0xABCD, arena, sizeof(arena));
 
 	char *a = (char *)shm_toc_allocate(toc, 5);
 	char *b = (char *)shm_toc_allocate(toc, 16);
@@ -63,8 +65,10 @@ TEST(insert_lookup_roundtrip)
 	shm_toc_insert(toc, 1000, x);
 	shm_toc_insert(toc, 2000, y);
 
-	ASSERT_EQ(x, shm_toc_lookup(toc, 1000, false), "key 1000 resolves to x");
-	ASSERT_EQ(y, shm_toc_lookup(toc, 2000, false), "key 2000 resolves to y");
+	ASSERT_PTR_EQ(
+			x, shm_toc_lookup(toc, 1000, false), "key 1000 resolves to x");
+	ASSERT_PTR_EQ(
+			y, shm_toc_lookup(toc, 2000, false), "key 2000 resolves to y");
 	ASSERT_EQ(42, *(int *)shm_toc_lookup(toc, 1000, false), "x survives");
 	ASSERT_EQ(99, *(int *)shm_toc_lookup(toc, 2000, false), "y survives");
 
