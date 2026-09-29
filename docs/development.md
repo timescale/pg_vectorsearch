@@ -414,7 +414,7 @@ The project uses GitHub Actions for CI with the following workflows:
 | `coverage.yml` | Push, PR | Coverage report, upload to Codecov |
 | `lint.yml` | Push, PR | Format check and clang-tidy |
 | `pgspot.yml` | Push, PR (SQL) | pgspot security lint of install-time SQL |
-| `codeql.yml` | Push, PR, Weekly | GitHub CodeQL static analysis |
+| `codeql.yml` | Push, PR, Weekly, push to `trigger/codeql`, manual | GitHub CodeQL static analysis of C, workflows and Python |
 
 ## Design Patterns
 
