@@ -440,6 +440,41 @@ scan_clusters(
 	}
 }
 
+/* Resize the three parallel per-candidate arrays together. */
+static void
+resize_candidate_arrays(PrismQueryState *qs, uint32_t cap)
+{
+	qs->cand_cap = cap;
+	qs->candidates =
+			vs_realloc(qs->candidates, qs->cand_cap * sizeof(VsTopKEntry));
+	qs->result_order =
+			vs_realloc(qs->result_order, qs->cand_cap * sizeof(uint32_t));
+	qs->result_dists =
+			vs_realloc(qs->result_dists, qs->cand_cap * sizeof(Distance));
+}
+
+/*
+ * Size the candidate arrays to a known bound on this query's survivor
+ * count, shrinking as well as growing so that a bounded query does not
+ * keep whatever an earlier unbounded query needed. Hysteresis matches
+ * VS_TOPK_SHRINK_FACTOR: memory is proportional to the bound up to that
+ * constant, without an alternating workload reallocating every query.
+ */
+#define PRISM_QS_CAND_SHRINK_FACTOR 4
+
+static void
+bound_candidate_arrays(PrismQueryState *qs, uint32_t bound)
+{
+	/* The result arrays are indexed by rank, so they can never be
+	 * smaller than the largest k this state can be asked for. */
+	if (bound < qs->max_k)
+		bound = qs->max_k;
+
+	if (bound > qs->cand_cap ||
+		qs->cand_cap / PRISM_QS_CAND_SHRINK_FACTOR > bound)
+		resize_candidate_arrays(qs, bound);
+}
+
 static uint32_t
 extract_candidates(PrismQueryState *qs, uint32_t cap)
 {
@@ -450,13 +485,7 @@ extract_candidates(PrismQueryState *qs, uint32_t cap)
 		uint32_t want = qs->cand_cap * 2;
 		if (want < qs->topk.cand_count)
 			want = qs->topk.cand_count;
-		qs->cand_cap = want;
-		qs->candidates =
-				vs_realloc(qs->candidates, qs->cand_cap * sizeof(VsTopKEntry));
-		qs->result_order =
-				vs_realloc(qs->result_order, qs->cand_cap * sizeof(uint32_t));
-		qs->result_dists =
-				vs_realloc(qs->result_dists, qs->cand_cap * sizeof(Distance));
+		resize_candidate_arrays(qs, want);
 	}
 
 	uint32_t ncands;
@@ -578,6 +607,30 @@ prism_query_execute(
 	 * resetting first and assigning k afterwards left the heap sized for
 	 * the previous k. */
 	vs_topk_reset_to_k(&qs->topk, k);
+
+	/* Bound the candidate buffer for an explicit rerank_pool: cap survivors
+	 * during the scan instead of collecting them unbounded and truncating
+	 * afterward -- past the cap they would never be reranked. 3x the pool
+	 * preserves the extract's dedup margin (an id can appear twice: primary
+	 * plus a SOAR replica). Auto (0) and disabled (-1) keep the unbounded
+	 * buffer, because auto sizes the pool from the full survivor count as a
+	 * measure of estimate noise.
+	 *
+	 * The bound also sizes the extract's arrays, so an explicit pool holds
+	 * memory proportional to the pool rather than to the largest query the
+	 * backend has ever run -- a session that probed widely under the auto
+	 * pool would otherwise keep that buffer resident for every bounded
+	 * query after it. */
+	if (g_rerank_pool > 0)
+	{
+		uint32_t xpool = (uint32_t)g_rerank_pool;
+		if (xpool < k)
+			xpool = k;
+		vs_topk_set_cand_limit(&qs->topk, xpool * 3);
+		bound_candidate_arrays(qs, xpool * 3);
+	}
+	else
+		vs_topk_set_cand_limit(&qs->topk, 0);
 
 	/* Probe expansion: route extra leaf candidates so phase A of
 	 * scan_clusters can pick the best `nprobe` by exact centroid
