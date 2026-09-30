@@ -23,6 +23,12 @@ require_repo_root
 
 BASE="${1:-}"
 
+# The branch being released from decides the default next version. On a
+# pull request that is the base branch, not the release branch the
+# checkout sits on.
+RELEASE_BRANCH="${GITHUB_BASE_REF:-${BASE#origin/}}"
+: "${RELEASE_BRANCH:=$(git branch --show-current)}"
+
 # Version-shaped strings in docs allowed to differ from the release
 # version. One extended regex per line.
 DOCS_VERSION_ALLOWLIST=(
@@ -100,6 +106,11 @@ if [[ -n "$BASE" ]]; then
             "amend the release notes into the release commit rather" \
             "than adding a commit for them"
 fi
+
+# After the single-commit check: a second commit moves the trailer out of
+# the message's last paragraph, which is the only place git parses one.
+log "check: Next-Version trailer"
+check_next_version_trailer "$VERSION" "$RELEASE_BRANCH"
 
 log "check: changelog entry"
 changelog_has_section "$VERSION" ||

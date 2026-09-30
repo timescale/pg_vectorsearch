@@ -68,7 +68,25 @@ next_dev_version() {
     local released="$1"
     local branch="${2:-$(git branch --show-current)}"
     local base major minor patch
+
+    # Without this a malformed argument produces a malformed answer
+    # rather than an error: 1.2 became 1.3.0-dev, inventing a patch
+    # component, and 1.2.3.4 became 1.3.0-dev, dropping one.
+    validate_version "$released"
+
     base="$(strip_prerelease "$released")"
+
+    # A release candidate is a step toward its own version rather than
+    # past it, so the cycle reopens at that version: 0.2.0-rc1 is
+    # followed by 0.2.0-dev, from which the next release can be
+    # 0.2.0-rc2 or 0.2.0. Bumping instead would skip the version the
+    # candidate was a candidate for. -dev is excluded because it is the
+    # development state, never something that was released.
+    if is_prerelease "$released" && ! is_dev_version "$released"; then
+        echo "$base-dev"
+        return 0
+    fi
+
     IFS=. read -r major minor patch <<<"$base"
 
     if [[ "$branch" =~ ^[0-9]+\.[0-9]+\.x$ ]]; then
@@ -385,6 +403,60 @@ is_patch_bump() {
 }
 
 # A format change makes every existing index unreadable, so it cannot
+# The next development version travels as a Next-Version trailer on the
+# release commit, and everything downstream trusts it: the gate reads it
+# to confirm the commit is a release, and the dev-cycle job bumps VERSION
+# to it. A reviewer may edit it to ask for a major bump, so it is checked
+# on the pull request, where a mistake costs nothing. After publishing,
+# the tag exists and a wrong trailer has already stranded main.
+#
+# $2 is the branch being released from, which decides the default bump.
+check_next_version_trailer() {
+    local version="$1" branch="$2" next want next_base version_base
+    next="$(git log -1 --format='%(trailers:key=Next-Version,valueonly)' |
+        tr -d '[:space:]')"
+
+    [[ -n "$next" ]] ||
+        die "the release commit has no Next-Version trailer --" \
+            "prepare-release.sh writes one, and the gate refuses to" \
+            "release a commit without it"
+
+    validate_version "$next"
+
+    is_dev_version "$next" ||
+        die "Next-Version is $next, which has no -dev suffix -- the" \
+            "gate would read the bump that lands it as another release"
+
+    next_base="$(strip_prerelease "$next")"
+    version_base="$(strip_prerelease "$version")"
+
+    # A candidate reopens at its own version, so an equal base is right
+    # there and wrong anywhere else.
+    if [[ "$next_base" == "$version_base" ]]; then
+        is_prerelease "$version" ||
+            die "releasing $version and reopening at $next, which is" \
+                "the same version -- the cycle has to move on"
+    else
+        local highest
+        highest="$(printf '%s\n%s\n' "$version_base" "$next_base" |
+            sort -V | tail -1)"
+        [[ "$highest" == "$next_base" ]] ||
+            die "releasing $version but reopening at $next, which is" \
+                "behind it -- the next release would collide with an" \
+                "existing tag"
+    fi
+
+    # Anything other than the default is a deliberate choice, usually a
+    # major bump, so say so rather than refuse it.
+    want="$(next_dev_version "$version" "$branch")"
+    if [[ "$next" != "$want" ]]; then
+        warn "Next-Version is $next where the default for $branch is" \
+            "$want -- intended for a major bump, wrong otherwise"
+    fi
+
+    log "next cycle: $next"
+}
+
 # An existing installation moves between versions with an upgrade script:
 # without sql/<name>--<prev>--<new>.sql, ALTER EXTENSION UPDATE fails and
 # the only way to the new version is dropping the extension, which takes

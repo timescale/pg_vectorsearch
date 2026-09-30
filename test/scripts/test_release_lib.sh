@@ -93,4 +93,108 @@ list_upgrade_script "$patch" 0.1.0 0.1.1
 expect_lib "upgrade: a patch release upgrades from its minor" 0 \
     "$patch" check_upgrade_path 0.1.1
 
+# ----------------------------------------------------------------
+# next_dev_version
+# ----------------------------------------------------------------
+
+next_dev_case() {
+    local desc="$1" released="$2" branch="$3" want="$4"
+    expect_eq "next_dev_version: $desc" "$want" \
+        "$(lib_call "$first" next_dev_version "$released" "$branch")"
+}
+
+next_dev_case "a minor bump on main" 0.1.0 main 0.2.0-dev
+next_dev_case "a patch bump on a maintenance branch" 0.1.0 0.1.x 0.1.1-dev
+next_dev_case "a later patch on a maintenance branch" 0.1.1 0.1.x 0.1.2-dev
+
+# A candidate is a step toward its own version, not past it, so the
+# cycle reopens at that version rather than skipping it.
+next_dev_case "a release candidate reopens at its own version" \
+    0.2.0-rc1 main 0.2.0-dev
+next_dev_case "a candidate on a maintenance branch does the same" \
+    0.2.0-rc1 0.2.x 0.2.0-dev
+next_dev_case "an alpha behaves like a candidate" \
+    0.3.0-alpha1 main 0.3.0-dev
+
+# A malformed argument has to fail rather than produce a malformed
+# answer. Before validation, 1.2 became 1.3.0-dev and 1.2.3.4 became
+# 1.3.0-dev, inventing and dropping a component respectively.
+bad_version_case() {
+    expect_status "next_dev_version: $1 is refused" 1 \
+        env -C "$first" ./scripts/ci/next-dev-probe.sh "$2" main
+}
+
+# shellcheck disable=SC2016  # $1/$2 must reach the probe unexpanded
+printf '%s\n' '#!/bin/bash
+set -uo pipefail
+source scripts/release-lib.sh
+next_dev_version "$1" "$2"' > "$first/scripts/ci/next-dev-probe.sh"
+chmod +x "$first/scripts/ci/next-dev-probe.sh"
+
+bad_version_case "a non-version"          not-a-version
+bad_version_case "a two-component version" 1.2
+bad_version_case "a four-component version" 1.2.3.4
+bad_version_case "an empty string"        ""
+bad_version_case "an uppercase suffix"    0.2.0-DEV
+bad_version_case "a doubled dash"         0.2.0--dev
+
+# ----------------------------------------------------------------
+# check_next_version_trailer
+# ----------------------------------------------------------------
+
+# Rewrites the fixture's tip message so the trailer is what $2 says, or
+# removes it when $2 is empty.
+set_trailer() {
+    local dir="$1" next="${2:-}" msg
+    msg="chore: release ${3:-0.2.0}"
+    if [[ -n "$next" ]]; then
+        msg="$msg"$'\n\n'"Next-Version: $next"
+    fi
+    git -C "$dir" -c user.email=t@e -c user.name=T \
+        commit -q --amend -m "$msg" --allow-empty
+}
+
+# A tiny probe, because the helper is a shell function rather than a
+# script: sourcing release-lib.sh and calling it is what CI does too.
+# shellcheck disable=SC2016  # $1/$2 must reach the probes unexpanded
+probe_body='#!/bin/bash
+set -uo pipefail
+source scripts/release-lib.sh
+check_next_version_trailer "$1" "$2"'
+
+make_probe() { printf '%s\n' "$probe_body" > "$1/scripts/ci/release-check-trailer-probe.sh"; chmod +x "$1/scripts/ci/release-check-trailer-probe.sh"; }
+
+trailer_probe() {
+    local desc="$1" released="$2" next="$3" branch="$4" want="$5"
+    local dir
+    dir="$(new_fixture "$released")"
+    make_probe "$dir"
+    set_trailer "$dir" "$next" "$released"
+    expect_status "trailer: $desc" "$want" \
+        env -C "$dir" ./scripts/ci/release-check-trailer-probe.sh \
+        "$released" "$branch"
+}
+
+trailer_probe "the default bump passes" 0.2.0 0.3.0-dev main 0
+trailer_probe "a missing trailer is refused" 0.2.0 "" main 1
+trailer_probe "a value without -dev is refused" 0.2.0 0.3.0 main 1
+trailer_probe "an invalid version is refused" 0.2.0 not-a-version main 1
+trailer_probe "reopening at the released version is refused" \
+    0.2.0 0.2.0-dev main 1
+trailer_probe "reopening behind the release is refused" \
+    0.2.0 0.1.0-dev main 1
+# A candidate is the one case where an equal base is correct.
+trailer_probe "a candidate may reopen at its own version" \
+    0.2.0-rc1 0.2.0-dev main 0
+# A major bump differs from the default, so it warns rather than fails.
+trailer_probe "a major bump is allowed with a warning" \
+    0.2.0 1.0.0-dev main 0
+
+# A malformed trailer is the likeliest way a hand edit goes wrong, and
+# it reaches validate_version from the other side.
+trailer_probe "a two-component trailer is refused" 0.2.0 0.3 main 1
+trailer_probe "a four-component trailer is refused" 0.2.0 0.3.0.1 main 1
+trailer_probe "an uppercase suffix is refused" 0.2.0 0.3.0-DEV main 1
+trailer_probe "a bare suffix is refused" 0.2.0 -dev main 1
+
 tap_finish
