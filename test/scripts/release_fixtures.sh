@@ -10,9 +10,10 @@
 # at it, and `gh` is a stub earlier on PATH that records its invocations
 # in $GH_LOG and answers from the environment:
 #
-#   STUB_OPEN_PR   what `gh pr list` reports, empty for none
-#   STUB_PR_URL    what `gh pr create` echoes
-#   STUB_MERGE_RC  what `gh pr merge` exits with
+#   STUB_OPEN_PR     what `gh pr list` reports, empty for none
+#   STUB_PR_URL      what `gh pr create` echoes
+#   STUB_MERGE_RC    what `gh pr merge` exits with
+#   STUB_COMMENT_ID  what a `gh api` read reports, empty for none
 #
 # So the git work stays real -- branches, file writes, commits, pushes
 # -- while the GitHub calls become observable. What that cannot cover
@@ -83,6 +84,15 @@ install_stub_gh() {
     cat >"$VS_WORKSPACE/bin/gh" <<'STUB'
 #!/bin/bash
 printf 'gh %s\n' "$*" >>"$GH_LOG"
+# A read of the API answers, a write records and says nothing. Matched
+# before the pairwise cases below, since `gh api` takes its flags in
+# whatever order the caller wrote them.
+if [[ "$1" == api ]]; then
+    case "$*" in
+        *--method*) exit 0 ;;
+        *) printf '%s\n' "${STUB_COMMENT_ID:-}"; exit 0 ;;
+    esac
+fi
 case "$1 $2" in
     "pr list")
         [[ -z "${STUB_OPEN_PR:-}" ]] || printf '%s\n' "$STUB_OPEN_PR" ;;
