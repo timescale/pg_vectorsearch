@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "algo/kmeans.h"
+#include "algo/kmeans_internal.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
 #include "types/vec16.h"
@@ -1453,4 +1454,65 @@ TEST(indexed_kmeans)
 	vs_free(all_vecs);
 	vs_free(indices);
 	vs_free(gathered);
+}
+
+/*
+ * Merging with a cluster count large enough that a stack-allocated
+ * per-cluster array would not fit.
+ *
+ * The merge needs one counter per cluster, and the cluster count comes
+ * from index reloptions by way of prism_max_nlist, which returns the
+ * worst-case leaf count fan_out^nlevels -- 16.5 million for an nlist
+ * of 65536 at fan_out 255, and 244 million for an nlist of 2000000 at
+ * fan_out 125. Held on the stack that is 63 MB, or 931 MB, past the
+ * guard page, so the write that follows lands wherever the stack
+ * pointer ended up rather than tripping the guard.
+ *
+ * dim is 1 so the counter array dominates: what is under test is the
+ * per-cluster allocation, not the per-coordinate work.
+ */
+TEST(merge_many_clusters)
+{
+	const uint32_t	nlist = 3000000;
+	const Dimension dim	  = 1;
+
+	float	 *centroids = vs_alloc0((size_t)nlist * dim * sizeof(float));
+	float	 *norms_c	= vs_alloc0((size_t)nlist * sizeof(float));
+	float	 *old_cents = vs_alloc0((size_t)nlist * dim * sizeof(float));
+	float	 *sums		= vs_alloc0((size_t)nlist * dim * sizeof(float));
+	uint32_t *cnts		= vs_alloc0((size_t)nlist * sizeof(uint32_t));
+	float	  cost		= 0.0f;
+
+	/* One vector at 1.0 in every cluster, so each mean is 1.0. */
+	for (uint32_t c = 0; c < nlist; c++)
+	{
+		sums[c] = 1.0f;
+		cnts[c] = 1;
+	}
+
+	const float *const	  sums_v[1] = {sums};
+	const uint32_t *const cnts_v[1] = {cnts};
+
+	float total_cost = 0.0f;
+	kmeans_merge_centroids(
+			centroids,
+			norms_c,
+			old_cents,
+			sums_v,
+			cnts_v,
+			&cost,
+			1,
+			nlist,
+			dim,
+			DISTANCE_L2,
+			&total_cost);
+
+	ASSERT_FLOAT_EQ(centroids[0], 1.0f, 1e-6f, "first cluster mean");
+	ASSERT_FLOAT_EQ(centroids[nlist - 1], 1.0f, 1e-6f, "last cluster mean");
+
+	vs_free(cnts);
+	vs_free(sums);
+	vs_free(old_cents);
+	vs_free(norms_c);
+	vs_free(centroids);
 }

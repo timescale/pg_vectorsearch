@@ -555,8 +555,12 @@ kmeans_merge_centroids(
 	float *new_cents = centroids;
 	memset(new_cents, 0, (size_t)nlist * dim * sizeof(float));
 
-	uint32_t *sizes = (uint32_t *)alloca(nlist * sizeof(uint32_t));
-	memset(sizes, 0, nlist * sizeof(uint32_t));
+	/* On the heap, not the stack: nlist is the worst-case leaf count
+	 * derived from the nlist and fan_out reloptions, which reaches tens
+	 * of millions. An alloca that large moves the stack pointer past
+	 * the guard page instead of into it, so the zeroing below lands
+	 * wherever it ended up. vs_alloc0 either succeeds or raises. */
+	uint32_t *sizes = (uint32_t *)vs_alloc0((size_t)nlist * sizeof(uint32_t));
 
 	for (uint32_t t = 0; t < nworkers; t++)
 	{
@@ -608,6 +612,8 @@ kmeans_merge_centroids(
 		for (uint32_t j = 0; j < nlist; j++)
 			norms_c[j] = vs_l2_norm_squared(centroids + (size_t)j * dim, dim);
 	}
+
+	vs_free(sizes);
 
 	return shift_sq;
 }
