@@ -2,8 +2,10 @@
 #
 # Shell rather than C, and outside build_tools: what needs proving is
 # the git and gh behaviour of scripts CI runs, which no build artifact
-# is involved in. The framework and fixtures are in lib.sh; see its
-# header for how a fixture stands in for a remote.
+# is involved in. The framework is vs_test.sh and the fixtures are in
+# release_fixtures.sh, neither named test_* so that the discovery
+# below skips them; see release_fixtures.sh's header for how a fixture
+# stands in for a remote.
 #
 # One test per test_*.sh, discovered rather than listed, so adding a
 # file needs no edit here -- the same approach test/unit takes for its

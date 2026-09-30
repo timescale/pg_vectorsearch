@@ -18,6 +18,15 @@
 [[ "${BASH_SOURCE[0]}" != "${0}" ]] ||
     { echo "vs_test.sh is sourced, not run" >&2; exit 2; }
 
+# GIT_DIR and GIT_INDEX_FILE take precedence over `git -C <dir>`, so
+# while they are set, a test that builds its own repository reads and
+# writes the repository they point at instead. git sets them for hooks
+# and for `git rebase --exec`, and the damage is silent: `git add -A`
+# inside a fixture stages every file of that other repository as
+# deleted.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE
+
 # A temporary directory for whatever the cases build, removed on exit.
 VS_WORKSPACE="$(mktemp -d)"
 trap 'rm -rf "$VS_WORKSPACE"' EXIT
