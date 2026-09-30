@@ -47,7 +47,7 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.os }} ${{ matrix.arch }} ${{ matrix.standalone && 'standalone' || matrix.pg }}${{ matrix.tools == 'disabled' && ' ext-only' || '' }}
+    name: ${{ matrix.os }} ${{ matrix.arch }} ${{ matrix.standalone && 'standalone' || matrix.pg }}${{ matrix.pg_version && format(' PG{0}', matrix.pg_version) || '' }}${{ matrix.tools == 'disabled' && ' ext-only' || '' }}
     runs-on: ${{ matrix.runner }}
 
     strategy:
@@ -86,6 +86,15 @@ jobs:
             cc: gcc -m32
             pkg_suffix: ':i386'
             pkg_config_libdir: /usr/lib/i386-linux-gnu/pkgconfig
+          # The next PostgreSQL major, built from source like the other
+          # debug jobs, so the extension is known to build and pass on it
+          # before it releases. Bump the version as betas and release
+          # candidates come out.
+          - runner: ubuntu-latest
+            os: Linux
+            arch: x64
+            pg: debug
+            pg_version: 19beta4
           # Compatibility: stock release packages (no asserts/injection).
           - runner: macos-latest
             os: macOS
@@ -135,7 +144,7 @@ jobs:
         if: matrix.pg == 'debug'
         uses: ./.github/actions/setup-pg
         with:
-          pg-version: '18.4'
+          pg-version: ${{ matrix.pg_version || '18.4' }}
           cc: ${{ matrix.cc }}
           variant: ${{ matrix.arch == 'x86-32' && 'x86-32' || '' }}
 
@@ -231,7 +240,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg-version: ['18']
+        pg-version: ['18', '19']
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -244,13 +253,15 @@ jobs:
             meson ninja-build gcc make bison flex libgsl-dev curl \
             ca-certificates
 
+      # pgdg publishes a major's beta and release-candidate packages in
+      # a component named after it, next to main, until it releases.
       - name: Install PostgreSQL (packaged)
         env:
           PG_VERSION: ${{ matrix.pg-version }}
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
           sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main $PG_VERSION" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
           sudo apt-get install -y \
             "postgresql-$PG_VERSION" "postgresql-server-dev-$PG_VERSION"

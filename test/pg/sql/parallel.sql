@@ -111,19 +111,24 @@ SET maintenance_work_mem = '1MB';
 CREATE INDEX idx_wide_budget ON wide_emb USING prism (v)
     WITH (centroid_compression = true);
 
+-- The query vector behind a function, so the plan shows the index scan
+-- alone rather than an InitPlan for the subquery.
+CREATE FUNCTION wide_qv() RETURNS vec32(768)
+    LANGUAGE sql STABLE AS $$ SELECT v FROM wide_emb WHERE id = 1 $$;
 SET enable_seqscan = off;
 EXPLAIN (COSTS OFF)
     SELECT id FROM wide_emb
-    ORDER BY v <-> (SELECT v FROM wide_emb WHERE id = 1) LIMIT 5;
+    ORDER BY v <-> wide_qv() LIMIT 5;
 SELECT (SELECT relpages > 0 FROM pg_class WHERE relname = 'idx_wide_budget')
            AS has_pages,
        (SELECT count(*) FROM (
             SELECT id FROM wide_emb
-            ORDER BY v <-> (SELECT v FROM wide_emb WHERE id = 1) LIMIT 5) t)
+            ORDER BY v <-> wide_qv() LIMIT 5) t)
            AS nres;
 RESET enable_seqscan;
 
 RESET maintenance_work_mem;
+DROP FUNCTION wide_qv();
 DROP TABLE wide_emb;
 
 -- ============================================================

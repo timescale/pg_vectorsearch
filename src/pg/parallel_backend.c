@@ -23,6 +23,7 @@
 #include <catalog/index.h>
 #include <catalog/pg_operator_d.h>
 #include <catalog/pg_type_d.h>
+#include <executor/instrument.h>
 #include <executor/tuptable.h>
 #include <miscadmin.h>
 #include <optimizer/plancat.h>
@@ -146,8 +147,13 @@ prism_build_scan(
 					prism_index_type_info(index), dim, CurrentMemoryContext),
 	};
 
+#if PG_VERSION_NUM >= 190000
+	TableScanDesc scan = table_beginscan_parallel(
+			heap, ParallelTableScanFromVsShared(shared), SO_NONE);
+#else
 	TableScanDesc scan = table_beginscan_parallel(
 			heap, ParallelTableScanFromVsShared(shared));
+#endif
 
 	return table_index_build_scan(
 			heap,
@@ -972,6 +978,9 @@ prism_pbuild_sort_begin(
 	s->tupdesc = CreateTemplateTupleDesc(2);
 	TupleDescInitEntry(s->tupdesc, 1, "cluster", INT4OID, -1, 0);
 	TupleDescInitEntry(s->tupdesc, 2, "payload", BYTEAOID, -1, 0);
+#if PG_VERSION_NUM >= 190000
+	TupleDescFinalize(s->tupdesc);
+#endif
 
 	/* region == NULL: a plain, non-parallel sort (the serial build) — no
 	 * coordinate, no attach. Otherwise a parallel participant: a leader

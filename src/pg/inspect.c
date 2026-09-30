@@ -21,6 +21,7 @@
 #include <access/relation.h>
 #include <catalog/index.h>
 #include <catalog/pg_class.h>
+#include <catalog/pg_type.h>
 #include <funcapi.h>
 #include <miscadmin.h>
 #include <nodes/parsenodes.h>
@@ -31,6 +32,7 @@
 #include <utils/lsyscache.h>
 #include <utils/rel.h>
 #include <utils/syscache.h>
+#include <utils/tuplestore.h>
 
 #include "index/centroid_page.h"
 #include "index/index_base.h"

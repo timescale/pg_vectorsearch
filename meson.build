@@ -648,8 +648,9 @@ if build_pg_extension
   # Require PostgreSQL 18+
   if build_pg_extension
     pg_version = run_command(pg_config, '--version', check: true).stdout().strip()
-    # pg_config --version returns e.g. "PostgreSQL 18.1" or "PostgreSQL 18devel"
-    pg_version_num = pg_version.split(' ')[1].split('.')[0].split('d')[0].split('r')[0].to_int()
+    pg_version_num = cc.get_define('PG_MAJORVERSION_NUM',
+      prefix: '#include <pg_config.h>',
+      args: ['-I' + pg_includedir_server] + pg_cflags).to_int()
     if pg_version_num < 18
       if pg_required or pg_config_path != ''
         error('pg_vectorsearch requires PostgreSQL 18+, found: ' + pg_version)

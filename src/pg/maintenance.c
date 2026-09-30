@@ -921,7 +921,7 @@ clear_nlist_reloption(Relation index)
 	bool  repl_null[Natts_pg_class] = {false};
 	bool  repl_repl[Natts_pg_class] = {false};
 
-	if (PointerIsValid(DatumGetPointer(newopts)))
+	if (DatumGetPointer(newopts) != NULL)
 		repl_val[Anum_pg_class_reloptions - 1] = newopts;
 	else
 		repl_null[Anum_pg_class_reloptions - 1] = true;

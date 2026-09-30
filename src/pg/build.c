@@ -42,6 +42,7 @@
 #include <common/pg_prng.h>
 #include <math.h>
 #include <miscadmin.h>
+#include <portability/instr_time.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
 #include <utils/sampling.h>
