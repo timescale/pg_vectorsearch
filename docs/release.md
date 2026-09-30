@@ -350,6 +350,37 @@ It runs locally too, against the current checkout:
 ./scripts/ci/release-check.sh
 ```
 
+## Building from the tarball before merging
+
+When the check says a PR is a release, a second job in the same workflow
+packages the source tarball and attaches it to the run, then comments on
+the PR with the link. Reviewing a release PR includes downloading that
+archive and building the extension from it.
+
+The tarball is what ships, and it is not the branch: `meson dist`
+decides what goes in, and it carries no `.git`. It proves a lot on its
+own — it unpacks the archive and runs setup, compile, test and install
+over it, so a tarball that would not build fails the PR. What it cannot
+prove is that the extension installs against a PostgreSQL someone
+actually has, which is the last thing nobody checks until after
+publishing.
+
+`release.yml` builds the same tarball, but it runs on the merge — before
+tagging, so a broken archive still cannot be published, yet too late for
+anyone to try it while the release can still be changed. Packaging on
+the PR is what makes it reviewable.
+
+The job packages the PR's head commit rather than the event's synthetic
+merge of it into the base, since `meson dist` bakes the packaged commit
+in for `pg_vectorsearch_git_commit()` and a merge ref's sha resolves
+nowhere once the run is over. The comment names that commit, so a
+reviewer can tell whether the archive is the one their latest push
+produced. It is updated in place rather than added to, because a release
+PR is re-pushed whenever the notes are amended.
+
+The job is skipped on a PR from a fork: a fork's token cannot comment,
+and a release is never cut from one.
+
 ## What merging a release PR creates
 
 Merging a release PR pushes `VERSION` to `main`, and that is what

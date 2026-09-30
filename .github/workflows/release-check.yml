@@ -41,6 +41,9 @@ jobs:
   check:
     name: Release check
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      version: ${{ steps.check.outputs.version }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -51,6 +54,95 @@ jobs:
           persist-credentials: false
 
       - name: Check release PRs
+        id: check
         env:
           BASE_REF: ${{ github.base_ref }}
         run: ./scripts/ci/release-check.sh "origin/$BASE_REF"
+
+  # The tarball is what ships, and until now nobody built from it before
+  # it was published: meson dist runs in release.yml, which fires on the
+  # merge. Packaging it here puts it on the pull request, so a reviewer
+  # can compile the extension from the archive that will become the
+  # release asset rather than from the branch.
+  #
+  # Only on a release PR, and only when the head branch is in this
+  # repository -- a fork's token cannot comment, and a release is never
+  # cut from a fork.
+  package:
+    name: Package the source tarball
+    needs: check
+    if: >-
+      needs.check.outputs.release == 'true' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write  # the comment pointing at the tarball
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The release commit, not the event's synthetic merge of it
+          # into the base. meson dist bakes the packaged commit into the
+          # tarball for pg_vectorsearch_git_commit(), and a merge ref's
+          # sha resolves nowhere once the run is over.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      # The same set release.yml's build job installs: meson dist
+      # builds and tests the unpacked tree, so it needs everything a
+      # normal build does.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build gcc gdb make bison flex libgsl-dev \
+            libipc-run-perl libopenblas-dev
+
+      - name: Setup debug PostgreSQL
+        id: pg
+        uses: ./.github/actions/setup-pg
+        with:
+          pg-version: '18.4'
+
+      - name: Package the source tarball
+        env:
+          PG_CONFIG: ${{ steps.pg.outputs.pg-config }}
+        run: |
+          # meson dist unpacks what it archived and runs setup, compile,
+          # test and install over it, so a tarball that does not build
+          # fails here rather than after the release is published.
+          meson setup builddir -Dpostgresql=enabled \
+            "-Dpg_config=$PG_CONFIG"
+          meson dist -C builddir --formats gztar
+          mkdir -p dist
+          cp builddir/meson-dist/* dist/
+          ls -l dist/
+          # meson dist reports success when it declines to run at all,
+          # so the archive is asserted rather than assumed.
+          test -n "$(find dist -name '*.tar.gz' -size +1k -print -quit)" ||
+            { echo "::error::meson dist produced no tarball"; exit 1; }
+
+      - name: Upload the tarball
+        id: upload
+        # v4
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b
+        with:
+          name: release-tarball-${{ needs.check.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+          # Long enough to outlast a review, short of the 90-day
+          # default: this archive is superseded by the release asset.
+          retention-days: 14
+
+      - name: Ask the reviewer to build from it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          VERSION: ${{ needs.check.outputs.version }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: ./scripts/ci/release-tarball-comment.sh

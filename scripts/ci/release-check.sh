@@ -12,6 +12,9 @@
 # Anything else reports success without checking further -- a definite
 # result either way is what lets this be a required status check.
 #
+# Writes release= and version= to $GITHUB_OUTPUT when set, so a job can
+# act on the classification rather than repeating it.
+#
 # Without a base-ref it checks the current checkout instead of a PR.
 
 set -euo pipefail
@@ -28,6 +31,11 @@ BASE="${1:-}"
 # checkout sits on.
 RELEASE_BRANCH="${GITHUB_BASE_REF:-${BASE#origin/}}"
 : "${RELEASE_BRANCH:=$(git branch --show-current)}"
+
+emit() {
+    [[ -z "${GITHUB_OUTPUT:-}" ]] ||
+        printf 'release=%s\nversion=%s\n' "$1" "$2" >>"$GITHUB_OUTPUT"
+}
 
 # Version-shaped strings in docs allowed to differ from the release
 # version. One extended regex per line.
@@ -53,6 +61,7 @@ if [[ -n "$BASE" ]]; then
 
     if git diff --quiet "$BASE"...HEAD -- VERSION; then
         log "VERSION unchanged: not a release PR"
+        emit false ""
         exit 0
     fi
 
@@ -66,6 +75,7 @@ if [[ -n "$BASE" ]]; then
     if is_dev_version "$VERSION"; then
         log "VERSION moves $base_version -> $VERSION, a development" \
             "version: not a release PR"
+        emit false ""
         exit 0
     fi
     log "VERSION moves $base_version -> $VERSION: checking the release"
@@ -73,6 +83,7 @@ elif is_dev_version "$VERSION"; then
     # "Not a release" is success here too; a development checkout is the
     # expected case.
     log "VERSION is $VERSION, a development version: nothing to check"
+    emit false ""
     exit 0
 else
     log "checking release $VERSION in the current checkout"
@@ -147,4 +158,5 @@ check_on_disk_format "$VERSION"
 log "check: upgrade path"
 check_upgrade_path "$VERSION"
 
+emit true "$VERSION"
 log "check: $VERSION looks releasable"

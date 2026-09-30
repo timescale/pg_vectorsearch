@@ -2,8 +2,9 @@
 # Copyright (c) 2026 Tiger Data, Inc.
 # Licensed under the PostgreSQL License. See LICENSE for details.
 #
-# TAP tests for scripts/ci/release-open-dev-cycle.sh and
-# scripts/ci/release-dev-bump-check.sh.
+# TAP tests for scripts/ci/release-open-dev-cycle.sh,
+# scripts/ci/release-dev-bump-check.sh, scripts/ci/release-check.sh's
+# classification and scripts/ci/release-tarball-comment.sh.
 #
 # Usage: ./test/scripts/test_release_scripts.sh
 #
@@ -127,5 +128,132 @@ armless="$(new_fixture 0.1.0)"
 expect_status "open-cycle: auto-merge refusing does not fail the job" 0 \
     in_fixture "$armless" env STUB_MERGE_RC=1 \
     ./scripts/ci/release-open-dev-cycle.sh 0.1.0 0.2.0-dev main
+
+# ----------------------------------------------------------------
+# release-check.sh: the verdict it hands the packaging job
+# ----------------------------------------------------------------
+#
+# The job packages a tarball only when this says the PR is a release, so
+# a wrong verdict either ships nothing or builds on every pull request.
+
+release_verdict() {
+    local desc="$1" version="$2" want_release="$3" want_version="$4"
+    local dir out
+    dir="$(new_fixture "$version")"
+    if [[ "$want_release" == true ]]; then
+        printf '# Changelog\n\n## [%s] - 2026-01-01\n\n- it works\n' \
+            "$version" >"$dir/CHANGELOG.md"
+        git -C "$dir" add CHANGELOG.md >/dev/null 2>&1
+        # The trailer naming the next cycle, which a release commit
+        # carries and the check refuses to release without.
+        git -C "$dir" commit -q -m "release notes" \
+            -m "Next-Version: 0.2.0-dev" >/dev/null 2>&1
+    fi
+    out="$dir.output"
+    : >"$out"
+    expect_status "release-check: $desc exits zero" 0 \
+        in_fixture "$dir" env GITHUB_OUTPUT="$out" \
+        ./scripts/ci/release-check.sh
+    expect_eq "release-check: $desc reports release=$want_release" \
+        "release=$want_release" "$(grep '^release=' "$out")"
+    expect_eq "release-check: $desc reports the version" \
+        "version=$want_version" "$(grep '^version=' "$out")"
+}
+
+release_verdict "a release checkout" 0.1.0 true 0.1.0
+release_verdict "a development checkout" 0.2.0-dev false ""
+
+# A malformed VERSION must fail rather than be classified. The suffix
+# test alone would read "not-a-version" as neither a release nor a
+# development version, and "1.2-dev" as a development version -- so the
+# packaging job would be handed a verdict derived from a typo. Nothing
+# may be emitted either: a job reading release= from a half-written
+# output would act on it.
+release_verdict_refused() {
+    local desc="$1" version="$2" dir out
+    dir="$(new_fixture 0.1.0)"
+    printf '%s\n' "$version" >"$dir/VERSION"
+    out="$dir.output"
+    : >"$out"
+    expect_status "release-check: $desc is refused" 1 \
+        in_fixture "$dir" env GITHUB_OUTPUT="$out" \
+        ./scripts/ci/release-check.sh
+    expect_eq "release-check: $desc emits no verdict" "" "$(cat "$out")"
+}
+
+release_verdict_refused "a version that is not one" not-a-version
+release_verdict_refused "a two-component version" 1.2
+release_verdict_refused "a two-component development version" 1.2-dev
+release_verdict_refused "a v-prefixed version" v0.1.0
+release_verdict_refused "a four-component version" 0.1.0.1
+release_verdict_refused "a doubled suffix separator" 0.1.0--dev
+release_verdict_refused "an empty VERSION" ""
+
+# ----------------------------------------------------------------
+# release-tarball-comment.sh
+# ----------------------------------------------------------------
+
+comment() {
+    local dir="$1"
+    shift
+    in_fixture "$dir" env GH_TOKEN=x REPO=owner/repo PR=7 \
+        VERSION=0.1.0 ARTIFACT_URL=https://example.invalid/a/1 \
+        HEAD_SHA=abc123def4567890 "$@" \
+        ./scripts/ci/release-tarball-comment.sh
+}
+
+fresh="$(new_fixture 0.1.0)"
+expect_status "tarball-comment: comments on a pull request" 0 \
+    comment "$fresh" env STUB_COMMENT_ID=
+expect_eq "tarball-comment: the comment is created" \
+    1 "$(gh_calls "$fresh" 'api --method POST')"
+expect_eq "tarball-comment: nothing is patched" \
+    0 "$(gh_calls "$fresh" 'api --method PATCH')"
+# The packaged commit, so a reviewer can tell whether the archive is the
+# one their latest push produced.
+expect_status "tarball-comment: the body names the packaged commit" 0 \
+    grep -qE 'Packaged from .abc123def456.' "$fresh.gh.log"
+expect_status "tarball-comment: the body links the artifact" 0 \
+    grep -q 'https://example.invalid/a/1' "$fresh.gh.log"
+
+# A release PR is re-pushed whenever the notes are amended, and a second
+# comment each time would bury the rest of the review.
+again="$(new_fixture 0.1.0)"
+expect_status "tarball-comment: a re-push updates in place" 0 \
+    comment "$again" env STUB_COMMENT_ID=4242
+patched='api --method PATCH repos/owner/repo/issues/comments/4242'
+expect_eq "tarball-comment: the existing comment is patched" \
+    1 "$(gh_calls "$again" "$patched")"
+expect_eq "tarball-comment: no second comment is created" \
+    0 "$(gh_calls "$again" 'api --method POST')"
+
+# Every input is load-bearing: the link is the whole point of the
+# comment, and the rest decide which pull request it reaches. Missing or
+# empty, each must fail rather than post a review request naming the
+# wrong PR or pointing nowhere. Empty matters as much as unset -- these
+# arrive from workflow expressions, which render an absent field as "".
+comment_refused() {
+    local desc="$1"
+    shift
+    local dir
+    dir="$(new_fixture 0.1.0)"
+    expect_status "tarball-comment: $desc is refused" 1 \
+        in_fixture "$dir" env GH_TOKEN=x "$@" \
+        ./scripts/ci/release-tarball-comment.sh
+    expect_eq "tarball-comment: $desc posts nothing" \
+        0 "$(gh_calls "$dir" 'api --method')"
+}
+
+full=(REPO=owner/repo PR=7 VERSION=0.1.0
+      ARTIFACT_URL=https://example.invalid/a/1 HEAD_SHA=abc123def456)
+
+for missing in REPO PR VERSION ARTIFACT_URL HEAD_SHA; do
+    without=()
+    for kv in "${full[@]}"; do
+        [[ "$kv" == "$missing="* ]] || without+=("$kv")
+    done
+    comment_refused "an unset $missing" "${without[@]}"
+    comment_refused "an empty $missing" "${without[@]}" "$missing="
+done
 
 tap_finish
