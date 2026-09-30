@@ -27,6 +27,7 @@
 #include <catalog/index.h>
 #include <commands/progress.h>
 #include <common/pg_prng.h>
+#include <executor/instrument.h>
 #include <miscadmin.h>
 #include <pgstat.h>
 #include <portability/instr_time.h>
@@ -35,6 +36,7 @@
 #include <utils/memutils.h>
 #include <utils/rel.h>
 #include <utils/sampling.h>
+#include <utils/wait_event.h>
 #endif
 
 #include <inttypes.h>

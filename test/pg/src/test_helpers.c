@@ -21,6 +21,7 @@
 #include <commands/defrem.h>
 #include <fmgr.h>
 #include <funcapi.h>
+#include <utils/tuplestore.h>
 
 #include "index/centroid_page.h"
 #include "pg/amcache.h"
