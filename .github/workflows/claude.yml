@@ -16,7 +16,15 @@ on:
     types: [submitted]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Scoped to the issue or PR the comment/review belongs to, not to
+  # github.ref: for issue_comment (and issues) events that ref is always
+  # the repository's default branch, with nothing issue- or PR-specific in
+  # it, so every such event repo-wide shares one slot. That includes the
+  # tracking comment this job itself posts on start ("Reviewing PR #N..."),
+  # which is itself a new issue_comment and so re-enters this same group --
+  # scoped to github.ref, that self-triggered run cancels the review that
+  # is still in flight and posted it, every time, regardless of which PR.
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:
