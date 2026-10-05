@@ -15,18 +15,6 @@ on:
   pull_request_review:
     types: [submitted]
 
-concurrency:
-  # Scoped to the issue or PR the comment/review belongs to, not to
-  # github.ref: for issue_comment (and issues) events that ref is always
-  # the repository's default branch, with nothing issue- or PR-specific in
-  # it, so every such event repo-wide shares one slot. That includes the
-  # tracking comment this job itself posts on start ("Reviewing PR #N..."),
-  # which is itself a new issue_comment and so re-enters this same group --
-  # scoped to github.ref, that self-triggered run cancels the review that
-  # is still in flight and posted it, every time, regardless of which PR.
-  group: ${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number }}
-  cancel-in-progress: true
-
 permissions:
   contents: read  # Check out repository
 
@@ -39,6 +27,18 @@ jobs:
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
+    # Job-level, not workflow-level: a workflow-level group is entered by
+    # every triggering event regardless of this job's own `if`, including
+    # the tracking comment this job posts on start ("Reviewing PR #N..."),
+    # which is itself a new issue_comment on the same issue/PR -- so it
+    # would resolve to the same group key below and cancel the review that
+    # posted it, every time, on every thread. A skipped job (this `if`
+    # false) never enters a job-level group at all, so only a second
+    # genuine @claude invocation on the same thread can still supersede
+    # the one in flight.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: true
     # The write scopes are what let the assistant answer at all: it posts a
     # tracking comment and its reply, and commits to a branch when asked. They
     # grant nothing the caller lacks -- the action requires the invoking actor
