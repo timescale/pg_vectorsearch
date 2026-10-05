@@ -63,12 +63,11 @@
 #define PRISM_POSTING_PAGE_OVERFLOW 0x0002
 #define PRISM_POSTING_PAGE_FASTSCAN 0x0004 /* reserved for phase 2 */
 /*
- * Every entry on the page is dead. Set by the VACUUM tombstone pass when a
- * page's whole contents are deleted (AoS: all entries flagged; FASTSCAN: all
- * group TIDs dead — the only way a packed page's deletes are recorded, since
- * its entries can't be flagged individually). The scan skips the page's
- * scoring kernel entirely; the page stays linked so compaction can later
- * reclaim it. Cleared if the page is ever reused for new entries.
+ * Every entry on the page is dead (AoS: all entries flagged; FASTSCAN: every
+ * lane of every group's tombstone_mask set). Both formats mark entries
+ * individually; this flag is the scan-side shortcut that lets a fully dead
+ * page skip its scoring kernel outright. The page stays linked so compaction
+ * can later reclaim it. Cleared if the page is ever reused for new entries.
  */
 #define PRISM_POSTING_PAGE_TOMBSTONED 0x0008
 /*
@@ -669,19 +668,31 @@ bool prism_posting_flat_add(
  *   float f_rescale[32]              128B
  *   float f_error[32]                128B
  *   uint8_t codes[nsq_pairs × 32]   variable (3072B at dim=768)
+ *   uint32_t tombstone_mask            4B   (bit v set => lane v is dead)
+ *
+ * tombstone_mask is the per-lane analog of an AoS entry's
+ * PRISM_POSTING_FLAG_DELETED (see fastscan-design.md for why the codes
+ * themselves can't be marked in place). A page starts with every mask word
+ * zero (PageInit zeroes the page; a fresh group's tail is never written
+ * otherwise), so an unmarked lane reads as live.
  *
  * Pages are identified by PRISM_POSTING_PAGE_FASTSCAN in opaque flags.
  * ---------------------------------------------------------------- */
 
 #include "quant/fastscan.h"
 
-/* Bytes per 32-vector group section (metadata + packed codes) */
+static_assert(
+		VS_FASTSCAN_GROUP == 32,
+		"tombstone_mask packs one bit per lane into a uint32_t");
+
+/* Bytes per 32-vector group section (metadata + packed codes + tombstone
+ * mask) */
 static inline uint32_t
 prism_fastscan_group_section_bytes(Dimension dim)
 {
 	return (uint32_t)(VS_FASTSCAN_GROUP * sizeof(ItemPointerData) +
 					  VS_FASTSCAN_GROUP * 3 * sizeof(float) +
-					  VS_FASTSCAN_GROUP_BYTES(dim));
+					  VS_FASTSCAN_GROUP_BYTES(dim) + sizeof(uint32_t));
 }
 
 /* Max entries on a fastscan overflow page */
@@ -809,6 +820,40 @@ prism_fastscan_group_codes(char *content, uint32_t g, Dimension dim)
 {
 	return (uint8_t *)(prism_fastscan_group_f_error(content, g, dim) +
 					   VS_FASTSCAN_GROUP);
+}
+
+/*
+ * Per-group dead-lane bitmap: bit v set means lane v's TID is dead. Read and
+ * write through this pointer directly (it aliases the live page); there is no
+ * copy to write back. Only valid lanes (v < the group's entry count) are ever
+ * set -- PageInit zeroes a fresh page and nothing else touches this word, so
+ * an unmarked lane, including every lane past entry_count on a partial final
+ * group, reads as live.
+ */
+static inline uint32_t *
+prism_fastscan_group_tombstone_mask(char *content, uint32_t g, Dimension dim)
+{
+	return (uint32_t *)(prism_fastscan_group_codes(content, g, dim) +
+						VS_FASTSCAN_GROUP_BYTES(dim));
+}
+
+/*
+ * Bit test and set for one lane of a tombstone_mask word already read out
+ * of (or about to be written back into) a page via the accessor above.
+ * Every reader and writer of the mask goes through these two rather than
+ * writing out the bit math itself, so there is exactly one place that
+ * says "lane v is bit 1u << v".
+ */
+static inline bool
+prism_fastscan_lane_is_tombstoned(uint32_t mask, uint32_t lane)
+{
+	return (mask & (1u << lane)) != 0;
+}
+
+static inline uint32_t
+prism_fastscan_lane_set_tombstone(uint32_t mask, uint32_t lane)
+{
+	return mask | (1u << lane);
 }
 
 #endif /* PRISM_POSTING_PAGE_H */

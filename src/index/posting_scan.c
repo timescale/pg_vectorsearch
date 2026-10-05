@@ -419,7 +419,8 @@ fastscan_prune_16(
 		float		   inv_sqrt_d,
 		float		   g_add,
 		float		   g_error,
-		float		   threshold)
+		float		   threshold,
+		__mmask16	   live)
 {
 	/* Convert 16 int32 accumulators to float */
 	__m512i acc32 = _mm512_loadu_si512((const __m512i *)accum);
@@ -449,10 +450,12 @@ fastscan_prune_16(
 	__m512 gerr_v = _mm512_set1_ps(g_error);
 	__m512 err_v  = _mm512_mul_ps(fe, gerr_v);
 
-	/* lb = est - err; survivors = lb < threshold */
+	/* lb = est - err; survivors = lb < threshold, restricted to live lanes --
+	 * the masked compare clears a dead lane's result bit regardless of score.
+	 */
 	__m512	  lb_v	= _mm512_sub_ps(est_v, err_v);
 	__m512	  thr_v = _mm512_set1_ps(threshold);
-	__mmask16 surv	= _mm512_cmp_ps_mask(lb_v, thr_v, _CMP_LT_OS);
+	__mmask16 surv	= _mm512_mask_cmp_ps_mask(live, lb_v, thr_v, _CMP_LT_OS);
 
 	_mm512_storeu_ps(est_out, est_v);
 	_mm512_storeu_ps(err_out, err_v);
@@ -479,15 +482,18 @@ fastscan_prune_group_avx512(
 		float			  inv_sqrt_d,
 		float			  g_add,
 		float			  g_error,
+		uint32_t		  tombstone_mask,
 		Distance		 *threshold_p)
 {
 	Distance threshold = *threshold_p;
 	float	 est_buf[VS_FASTSCAN_GROUP];
 	float	 err_buf[VS_FASTSCAN_GROUP];
+	uint32_t live_mask = ~tombstone_mask;
 
 	for (uint32_t h = 0; h < 2; h++)
 	{
 		uint32_t  off  = h * 16;
+		__mmask16 live = (__mmask16)((live_mask >> off) & 0xFFFFu);
 		__mmask16 surv = fastscan_prune_16(
 				scan->fs_accum + off,
 				f_add + off,
@@ -501,7 +507,8 @@ fastscan_prune_group_avx512(
 				inv_sqrt_d,
 				g_add,
 				g_error,
-				threshold);
+				threshold,
+				live);
 
 		if (surv == 0)
 		{
@@ -600,6 +607,8 @@ scan_fastscan_page(PrismPostingScan *scan, VsTopK *topk)
 		float			*f_rescale = f_add + VS_FASTSCAN_GROUP;
 		float			*f_error   = f_rescale + VS_FASTSCAN_GROUP;
 		uint8_t			*codes	   = (uint8_t *)(f_error + VS_FASTSCAN_GROUP);
+		uint32_t		 tombstone_mask = *(uint32_t *)(codes +
+												VS_FASTSCAN_GROUP_BYTES(dim));
 
 		/* Run VPSHUFB accumulate kernel */
 		if (scan->fs_lut_bits == 8)
@@ -645,15 +654,25 @@ scan_fastscan_page(PrismPostingScan *scan, VsTopK *topk)
 					inv_sqrt_d,
 					g_add,
 					g_error,
+					tombstone_mask,
 					&threshold);
 		}
 		else
 #endif
 #endif
 		{
-			/* Scalar fallback for partial groups */
+			/* Scalar fallback for partial groups (and non-AVX512 CPUs,
+			 * NEON included): no masked-compare primitive to fold the
+			 * exclusion into, so a dead lane is skipped explicitly, the
+			 * same as a DELETED AoS entry below. */
 			for (uint32_t v = 0; v < g_count; v++)
 			{
+				if (prism_fastscan_lane_is_tombstoned(tombstone_mask, v))
+				{
+					scan->entries_pruned++;
+					continue;
+				}
+
 				float binary_ip = (float)scan->fs_accum[v] * lut_scale +
 								  lut_bias;
 				float	 final_dot = (2.0f * binary_ip - sum_t) * inv_sqrt_d;

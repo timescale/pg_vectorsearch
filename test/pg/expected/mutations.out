@@ -427,37 +427,55 @@ DROP FUNCTION muttomb_pages();
 RESET enable_seqscan;
 RESET prism.nprobe;
 DROP TABLE muttomb;
--- ===== FASTSCAN pages are page-tombstoned and reported =======================
--- Page-level tombstoning is the only delete granularity for FASTSCAN postings
--- (packed 32-vec32 groups cannot be flagged per entry), so the tombstoned
--- column must work on fastscan-format pages, not just AoS.
+-- ===== FASTSCAN pages mark dead lanes individually, same as AoS ==============
+-- A FASTSCAN entry is marked by setting its lane's bit in its group's
+-- tombstone_mask, not by waiting for the whole page to die, so dead_count on
+-- a fastscan page behaves exactly like it does on an AoS one: it rises as
+-- individual rows are deleted and vacuumed, while tombstoned stays false
+-- until every entry on the page is dead. Deletes are spread (every 10th id)
+-- so no page goes all-dead on the first round, keeping that state visible.
 CREATE TABLE mutfstomb (id int, v vec32(3));
 INSERT INTO mutfstomb SELECT g, format('[%s,0,0]', g)::vec32
     FROM generate_series(1, 200) g;
 CREATE INDEX idx_mutfstomb ON mutfstomb USING prism (v)
     WITH (nlist = 4, centroid_compression = true, fastscan = on,
           soar_lambda = 0, boundary_epsilon = 0);
--- The build produced fastscan pages and none are tombstoned yet. dead_count
--- is NULL for fastscan pages: packed groups have no per-entry DELETED state.
+-- The build produced fastscan pages, nothing dead or tombstoned yet.
 SELECT count(*) FILTER (WHERE format = 'fastscan') > 0 AS has_fastscan_pages,
        count(*) FILTER (WHERE tombstoned) AS tombstoned_before,
-       bool_and(dead_count IS NULL)
-           FILTER (WHERE format = 'fastscan') AS fastscan_dead_is_null
+       bool_and(dead_count = 0)
+           FILTER (WHERE format = 'fastscan') AS fastscan_dead_is_zero
     FROM prism_posting_pages('idx_mutfstomb'::regclass);
- has_fastscan_pages | tombstoned_before | fastscan_dead_is_null 
+ has_fastscan_pages | tombstoned_before | fastscan_dead_is_zero 
 --------------------+-------------------+-----------------------
  t                  |                 0 | t
 (1 row)
 
+DELETE FROM mutfstomb WHERE id % 10 = 0;
+VACUUM mutfstomb;
+-- Exactly the 20 deleted rows are marked dead, spread across fastscan pages
+-- that each keep live entries -- the per-lane mark, not the page-level
+-- shortcut, is what accounts for them.
+SELECT sum(dead_count) FILTER (WHERE format = 'fastscan') AS fastscan_dead,
+       bool_and(dead_count < entry_count)
+           FILTER (WHERE format = 'fastscan') AS fastscan_pages_stay_live,
+       count(*) FILTER (WHERE tombstoned) AS tombstoned_after_partial
+    FROM prism_posting_pages('idx_mutfstomb'::regclass);
+ fastscan_dead | fastscan_pages_stay_live | tombstoned_after_partial 
+---------------+--------------------------+--------------------------
+            20 | t                        |                        0
+(1 row)
+
 DELETE FROM mutfstomb;
 VACUUM mutfstomb;
--- Every page — fastscan base included — is all-dead and flagged.
+-- Every page — fastscan base included — is now all-dead and flagged.
 SELECT count(*) > 0 AS have_pages,
-       bool_and(tombstoned) AS all_tombstoned
+       bool_and(tombstoned) AS all_tombstoned,
+       bool_and(dead_count = entry_count) AS all_entries_dead
     FROM prism_posting_pages('idx_mutfstomb'::regclass);
- have_pages | all_tombstoned 
-------------+----------------
- t          | t
+ have_pages | all_tombstoned | all_entries_dead 
+------------+----------------+------------------
+ t          | t              | t
 (1 row)
 
 DROP TABLE mutfstomb;

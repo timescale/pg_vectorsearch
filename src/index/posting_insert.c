@@ -204,10 +204,8 @@ prism_posting_tombstone_chain(
 		 * Phase 1: under a SHARE lock, scan the page's entries to find whether
 		 * it has any dead entry that still needs marking. This is only a probe
 		 * — nothing is mutated — so a page with no dead tuples is never
-		 * dirtied or WAL-logged. The AoS scan early-breaks at the first such
-		 * entry (it only needs to know "is there work?"); the FASTSCAN scan
-		 * instead checks whether the whole page is dead, since packed entries
-		 * can't be flagged individually.
+		 * dirtied or WAL-logged. Both formats early-break at the first entry
+		 * that needs marking; they only need to know "is there work?" here.
 		 */
 		Page						  p	 = vs_storage_read_page(storage, blk);
 		const PrismPostingPageOpaque *op = prism_posting_opaque(p);
@@ -228,8 +226,7 @@ prism_posting_tombstone_chain(
 
 		bool  is_fastscan = (flags & PRISM_POSTING_PAGE_FASTSCAN) != 0;
 		char *content	  = prism_posting_page_content(p, dim);
-		bool  needs_mark  = false; /* AoS: has a not-yet-deleted dead entry */
-		bool  fs_all_dead = false; /* FASTSCAN: every entry is dead */
+		bool  needs_mark  = false; /* has a not-yet-marked dead entry */
 
 		if (!is_fastscan)
 		{
@@ -245,24 +242,23 @@ prism_posting_tombstone_chain(
 				}
 			}
 		}
-		else if (n > 0)
+		else
 		{
-			/* FASTSCAN entries can't be flagged individually, but a wholly
-			 * dead page can be tombstoned at page granularity. Early-exit on
-			 * the first live TID, so live pages cost little. */
-			fs_all_dead		 = true;
 			uint32_t ngroups = (n + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
-			for (uint32_t g = 0; g < ngroups && fs_all_dead; g++)
+			for (uint32_t g = 0; g < ngroups && !needs_mark; g++)
 			{
 				uint32_t g_count = n - g * VS_FASTSCAN_GROUP;
 				if (g_count > VS_FASTSCAN_GROUP)
 					g_count = VS_FASTSCAN_GROUP;
+				uint32_t mask =
+						*prism_fastscan_group_tombstone_mask(content, g, dim);
 				ItemPointerData *tids =
 						prism_fastscan_group_tids(content, g, dim);
 				for (uint32_t v = 0; v < g_count; v++)
-					if (!is_dead(tids[v], state))
+					if (!prism_fastscan_lane_is_tombstoned(mask, v) &&
+						is_dead(tids[v], state))
 					{
-						fs_all_dead = false;
+						needs_mark = true;
 						break;
 					}
 			}
@@ -274,7 +270,7 @@ prism_posting_tombstone_chain(
 		 * (which WAL-logs the page on commit) and mark the dead entries. The
 		 * share lock was dropped above and PG has no atomic lock upgrade, so
 		 * the page may have changed; re-derive everything from scratch here
-		 * (re-read entry_count, re-test is_dead and the DELETED flag) rather
+		 * (re-read entry_count, re-test is_dead and the dead marker) rather
 		 * than trusting phase 1's findings. This makes marking idempotent.
 		 */
 		if (needs_mark)
@@ -283,32 +279,65 @@ prism_posting_tombstone_chain(
 			PrismPostingPageOpaque *wop = prism_posting_opaque(wp);
 			char				   *c	= prism_posting_page_content(wp, dim);
 			uint32_t				deleted_on_page = 0;
-			for (uint32_t i = 0; i < wop->entry_count; i++)
+
+			/* Read the format fresh rather than trust phase 1's is_fastscan,
+			 * matching the "re-derive everything from scratch" rule above --
+			 * a page's format never actually changes today, but this way the
+			 * code doesn't quietly rely on that to stay correct. */
+			if (!(wop->flags & PRISM_POSTING_PAGE_FASTSCAN))
 			{
-				PrismPostingEntryHeader *h = prism_posting_entry_at(c, i, dim);
-				if (h->meta.flags & PRISM_POSTING_FLAG_DELETED)
+				for (uint32_t i = 0; i < wop->entry_count; i++)
 				{
-					deleted_on_page++;
-					continue;
+					PrismPostingEntryHeader *h =
+							prism_posting_entry_at(c, i, dim);
+					if (h->meta.flags & PRISM_POSTING_FLAG_DELETED)
+					{
+						deleted_on_page++;
+						continue;
+					}
+					if (is_dead(h->meta.tid, state))
+					{
+						h->meta.flags |= PRISM_POSTING_FLAG_DELETED;
+						total_marked++;
+						deleted_on_page++;
+					}
 				}
-				if (is_dead(h->meta.tid, state))
+			}
+			else
+			{
+				uint32_t wn		 = wop->entry_count;
+				uint32_t ngroups = (wn + VS_FASTSCAN_GROUP - 1) /
+								   VS_FASTSCAN_GROUP;
+				for (uint32_t g = 0; g < ngroups; g++)
 				{
-					h->meta.flags |= PRISM_POSTING_FLAG_DELETED;
-					total_marked++;
-					deleted_on_page++;
+					uint32_t g_count = wn - g * VS_FASTSCAN_GROUP;
+					if (g_count > VS_FASTSCAN_GROUP)
+						g_count = VS_FASTSCAN_GROUP;
+					uint32_t *mask_p =
+							prism_fastscan_group_tombstone_mask(c, g, dim);
+					uint32_t		 mask = *mask_p;
+					ItemPointerData *tids =
+							prism_fastscan_group_tids(c, g, dim);
+					for (uint32_t v = 0; v < g_count; v++)
+					{
+						if (prism_fastscan_lane_is_tombstoned(mask, v))
+						{
+							deleted_on_page++;
+							continue;
+						}
+						if (is_dead(tids[v], state))
+						{
+							mask = prism_fastscan_lane_set_tombstone(mask, v);
+							total_marked++;
+							deleted_on_page++;
+						}
+					}
+					*mask_p = mask;
 				}
 			}
 			/* Whole page now dead: flag it so the scan skips its scoring. */
 			if (wop->entry_count > 0 && deleted_on_page == wop->entry_count)
 				wop->flags |= PRISM_POSTING_PAGE_TOMBSTONED;
-			vs_storage_commit_page(storage, blk);
-		}
-		else if (fs_all_dead)
-		{
-			Page					wp	= vs_storage_write_page(storage, blk);
-			PrismPostingPageOpaque *wop = prism_posting_opaque(wp);
-			wop->flags |= PRISM_POSTING_PAGE_TOMBSTONED;
-			total_marked += n; /* FASTSCAN entries weren't otherwise counted */
 			vs_storage_commit_page(storage, blk);
 		}
 

@@ -167,20 +167,28 @@ walk_one_page_tids(PrismPostingChainPos *pos, void *state)
 		{
 			/* SoA: tids live in fixed 32-entry group sections. The last
 			 * group may be partial; entry_count bounds the valid slots.
-			 * Live pages have no per-entry delete flag (deletes tombstone
-			 * the whole page, handled above). */
+			 * A lane VACUUM has tombstoned is dropped here the same way an
+			 * AoS DELETED entry is below -- carrying it into the new list
+			 * would resurrect it (see posting_convert.c for the same
+			 * hazard on the conversion path). */
 			uint32_t ngroups = (cnt + VS_FASTSCAN_GROUP - 1) /
 							   VS_FASTSCAN_GROUP;
 			for (uint32_t g = 0; g < ngroups; g++)
 			{
 				ItemPointerData *gt =
 						prism_fastscan_group_tids(content, g, dim);
+				uint32_t mask =
+						*prism_fastscan_group_tombstone_mask(content, g, dim);
 				uint32_t base_i = g * VS_FASTSCAN_GROUP;
 				uint32_t valid	= (cnt - base_i) < VS_FASTSCAN_GROUP
 										? (cnt - base_i)
 										: VS_FASTSCAN_GROUP;
 				for (uint32_t v = 0; v < valid; v++)
+				{
+					if (prism_fastscan_lane_is_tombstoned(mask, v))
+						continue;
 					ctx->tids[ntids++] = gt[v];
+				}
 			}
 		}
 		else

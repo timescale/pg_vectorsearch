@@ -569,7 +569,9 @@ full rebuilds.
 > page, including on fastscan indexes, whose packed base is immutable). The
 > scan reads each page in that page's own format. `DELETE` is correct because
 > the executor rechecks heap visibility; `VACUUM` tombstones dead entries
-> (`PRISM_POSTING_FLAG_DELETED`). An update of the vector column is insert-new
+> (`PRISM_POSTING_FLAG_DELETED` for AoS, a per-group `tombstone_mask` bit for
+> FASTSCAN lanes) before the heap can recycle their line pointers. An update
+> of the vector column is insert-new
 > plus delete-old; an update that leaves the vector unchanged is HOT.
 > Centroids do not move with inserts, so churn drifts the partitioning.
 > `REINDEX` rebuilds it. `prism_rebalance` and `prism_split_posting_list` split

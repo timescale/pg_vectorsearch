@@ -229,12 +229,12 @@ SELECT count(*) FROM (
 ) t;
 RESET enable_seqscan;
 
--- Entries VACUUM has marked dead must not survive the conversion. A fastscan
--- page deletes at page granularity -- there is no per-entry flag -- so a dead
--- entry copied into one comes back as live and can never be marked again: a
--- later VACUUM can only tombstone a page once every entry on it is dead, which
--- a page holding live entries never is. The count after converting is the
--- assertion: it has to be the live rows, not the rows the list was built with.
+-- Entries VACUUM has marked dead must not survive the conversion. The
+-- destination is a fresh fastscan chain built from scratch, so nothing
+-- carries a source AoS entry's dead state over on its own -- copying a
+-- DELETED entry would resurrect it as live, with no way to re-mark it (its
+-- row is long gone). The count after converting is the assertion: it has to
+-- be the live rows, not the rows the list was built with.
 CREATE TABLE conv_dead (id int, v vec32(4));
 INSERT INTO conv_dead
     SELECT g, format('[%s,0,0,0]', g)::vec32(4) FROM generate_series(1, 40) g;

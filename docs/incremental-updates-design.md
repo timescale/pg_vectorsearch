@@ -423,22 +423,30 @@ all snapshots.
 3. **Physical reclaim**: tombstoned entries are dropped only when the
    page/segment is rewritten — during Phase 1 compaction or Phase 2 split/merge.
 
-**Tombstoning inside immutable FASTSCAN groups.** A FASTSCAN posting packs 32
-vectors per SIMD group, so an entry can't be removed in place. Mark deletes in a
-**per-group (or per-segment) deletion bitmap** (one bit per entry), consulted at
-scan time to mask dead lanes; physical removal happens at compaction. The AoS
-write tier can use the entry flag directly (the currently-unused
-`PRISM_POSTING_FLAG_DELETED` is the starting point).
+**Tombstoning inside immutable FASTSCAN groups (implemented).** A FASTSCAN
+posting packs 32 vectors per SIMD group, and the group's own codes can't be
+rewritten in place for one lane without disturbing its neighbors in the same
+VPSHUFB tile. Each group instead carries a `tombstone_mask` word (one bit per
+lane) right after its codes; VACUUM sets a lane's bit without touching the
+packed bits around it, and the scan folds the mask into its prune compare (an
+AVX-512 masked compare on that path, an explicit skip in the scalar/NEON
+fallback) at no cost beyond the compare itself. The VPSHUFB accumulate step
+still scores every lane in the group regardless — it processes the whole
+32-lane block as one unit — so a masked lane is excluded from the result, not
+from the scoring work; only a rewrite (split, conversion, `REINDEX`) stops
+paying for that. The AoS write tier uses the entry flag directly
+(`PRISM_POSTING_FLAG_DELETED`).
 
 **Page-level tombstones (implemented).** When VACUUM leaves an entire page dead
 — common for bulk/range deletes (`DELETE FROM t`, `DELETE ... WHERE id BETWEEN
-...`) that wipe whole pages or clusters — the page is flagged
+...`) that wipe whole pages or clusters — the page is additionally flagged
 `PRISM_POSTING_PAGE_TOMBSTONED` and the scan skips its scoring kernel entirely
-(both AoS and FASTSCAN), only following the chain past it. This is also the
-granularity at which FASTSCAN deletes get recorded at all (packed groups can't
-be flagged per entry), detected by testing every group TID with an early exit
-on the first live one. The page stays linked in the chain — this is a scan
-optimization, not reclamation.
+(both AoS and FASTSCAN), only following the chain past it. This is a shortcut
+layered on top of the per-entry/per-lane marking above, not a separate
+granularity: a page goes all-dead exactly when every entry (AoS) or every
+lane of every group (FASTSCAN) on it is individually marked, and the flag just
+lets a fully dead page skip running its scoring kernel at all. The page stays
+linked in the chain — this is a scan optimization, not reclamation.
 
 **Page reclamation (future).** The page tombstone is the prerequisite for
 reusing the space; two options, in increasing cost/power:
@@ -491,9 +499,18 @@ lists is dead. A pre-sized "over-fetch factor" is the wrong tool.
   live results. (The scan materializes a fixed top-k up front in
   `execute_search`; this refinement makes it resumable/expandable.)
 
-Either way, index-level tombstones are an *optimization* — skip known-dead
-entries before the exact-distance rerank and heap fetch — not a correctness
-mechanism; MVCC's visibility recheck is the backstop.
+Either way, this is about *recall* while an entry is still merely dead.
+Tombstoning it is a separate, correctness-level requirement once
+`ambulkdelete` returns: PostgreSQL may then recycle the row's heap line
+pointer for an unrelated insert, which passes the executor's own visibility
+check under the reused TID. The scan sets `xs_recheck` and
+`xs_recheckorderby` to false (`scan.c`), so nothing downstream re-derives
+the ordering from that heap row — an unmarked stale entry would surface the
+new row under a distance that belongs to the vector it used to encode.
+MVCC's recheck guards against a dead TID returning a dead row; it does
+nothing for a live TID returning the wrong score. Marking every dead entry
+before `ambulkdelete` returns, which `prism_posting_tombstone_chain` does
+for both AoS and FASTSCAN, is what closes that gap.
 
 **GC cadence and recall.** Accumulated tombstones inflate scan work (more
 candidates scanned per live result) and degrade effective QPS, so reclamation

@@ -27,9 +27,12 @@
  * metapage/layout change so an index built by an older format is rejected at
  * open rather than silently misread. v2 added PrismMetaPage.first_posting,
  * which shifted the struct layout; v3 removed the unused indexed-row count,
- * which shifted it again.
+ * which shifted it again; v4 grew the fastscan group section by one
+ * tombstone_mask word, which moves every group after the first on a page --
+ * a posting page format change, not a metapage one, but this is the only
+ * version gate the index has.
  */
-#define PRISM_META_MAGIC ((uint32_t)0x50524905) /* "PRI\x05" */
+#define PRISM_META_MAGIC ((uint32_t)0x50524906) /* "PRI\x06" */
 
 /* Metadata flags */
 #define PRISM_META_FLAG_FASTSCAN 0x01

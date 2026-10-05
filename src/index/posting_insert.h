@@ -60,13 +60,13 @@ bool prism_posting_insert_one(
 		bool			   *head_retired);
 
 /*
- * Tombstone every AoS entry in the cluster chain whose TID is_dead() reports
- * dead by setting PRISM_POSTING_FLAG_DELETED, so later scans skip it. FASTSCAN
- * base pages are left untouched: their packed groups cannot be edited in
- * place, so their dead entries stay correct via the executor's MVCC visibility
- * recheck and are physically reclaimed only at compaction/rebuild. The head's
- * live_count (stamped at build, maintained by inserts) is decremented by the
- * number newly marked. Returns the count marked.
+ * Tombstone every entry in the cluster chain whose TID is_dead() reports dead,
+ * so later scans skip it: an AoS entry via PRISM_POSTING_FLAG_DELETED, a
+ * FASTSCAN entry via its lane's bit in the group's tombstone_mask (see
+ * posting_page.h). A page whose entries are now all dead additionally gets
+ * PRISM_POSTING_PAGE_TOMBSTONED. The head's live_count (stamped at build,
+ * maintained by inserts) is decremented by the number newly marked. Returns
+ * the count marked.
  *
  * Shared between the PG ambulkdelete (VACUUM) path and the standalone build so
  * the tombstone logic is unit-tested without PostgreSQL. The caller must
