@@ -58,14 +58,12 @@ stage_page(PrismPostingChainPos *pos, void *state)
 				prism_posting_entry_at(content, i, ctx->dim);
 
 		/*
-		 * Leave behind the entries VACUUM has marked dead. A fastscan page
-		 * packs codes with no per-entry flag -- deletion there is
-		 * page-granular -- so a dead entry copied into one comes back as
-		 * live and can never be marked again: a later VACUUM can only
-		 * tombstone the page once *every* entry on it is dead, which a page
-		 * holding live entries never is. The head's live_count, which the
-		 * builder stamps from what it was given, would be wrong by the same
-		 * number.
+		 * Leave behind the entries VACUUM has marked dead. Nothing here
+		 * carries a dead AoS entry's state into the fresh fastscan chain --
+		 * the destination's tombstone_mask words start at zero, same as any
+		 * freshly built page -- so copying the entry would resurrect it as
+		 * live. The head's live_count, which the builder stamps from what it
+		 * was given, would be wrong by the same number.
 		 */
 		if (src->meta.flags & PRISM_POSTING_FLAG_DELETED)
 			continue;

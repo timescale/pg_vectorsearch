@@ -488,28 +488,45 @@ emit_posting_row(PrismPostingChainPos *pos, void *state)
 	values[3] = BoolGetDatum(tombstoned);
 	values[4] = Int32GetDatum((int32)op->entry_count);
 
-	if (!is_fastscan)
 	{
-		/* AoS entries carry a per-entry DELETED flag; count them. FASTSCAN
-		 * packs entries into SIMD groups with no per-entry state (deletion
-		 * is page-granular there), so dead_count is NULL for fastscan
-		 * pages. */
+		/* AoS entries carry a per-entry DELETED flag; count them directly.
+		 * FASTSCAN entries carry a per-group tombstone_mask instead, one bit
+		 * per lane; popcount every group's mask and sum. Either way this is
+		 * the exact dead count, not an estimate. */
 		char *content = prism_posting_page_content(pos->page, dim);
 		int32 dead	  = 0;
 
 		prism_posting_check_count(pos->blkno, op, dim);
-		for (uint32_t i = 0; i < op->entry_count; i++)
-		{
-			const PrismPostingEntryHeader *h =
-					prism_posting_entry_at(content, i, dim);
 
-			if (h->meta.flags & PRISM_POSTING_FLAG_DELETED)
-				dead++;
+		if (!is_fastscan)
+		{
+			for (uint32_t i = 0; i < op->entry_count; i++)
+			{
+				const PrismPostingEntryHeader *h =
+						prism_posting_entry_at(content, i, dim);
+
+				if (h->meta.flags & PRISM_POSTING_FLAG_DELETED)
+					dead++;
+			}
+		}
+		else
+		{
+			uint32_t n		 = op->entry_count;
+			uint32_t ngroups = (n + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
+
+			for (uint32_t g = 0; g < ngroups; g++)
+			{
+				uint32_t mask =
+						*prism_fastscan_group_tombstone_mask(content, g, dim);
+				/* GCC/Clang builtin, not pg_popcount32: this file already
+				 * relies on compiler builtins elsewhere, and a per-page,
+				 * per-call count is far from hot enough to need a
+				 * runtime-dispatched popcount. */
+				dead += __builtin_popcount(mask);
+			}
 		}
 		values[5] = Int32GetDatum(dead);
 	}
-	else
-		nulls[5] = true;
 
 	values[6] = Int32GetDatum((int32)op->max_entries);
 
@@ -533,8 +550,9 @@ emit_posting_row(PrismPostingChainPos *pos, void *state)
  * tombstoned, entry_count, dead_count, max_entries, next_blkno,
  * chain_pos, format. Tombstoned (all-dead, but still linked) pages stay
  * in the output so bloat is visible; filter with WHERE NOT tombstoned
- * for live pages. dead_count is the per-entry DELETED tally for AoS
- * pages and NULL for fastscan pages (no per-entry state).
+ * for live pages. dead_count is the per-entry DELETED tally for AoS pages
+ * and the summed tombstone_mask popcount across groups for fastscan
+ * pages -- exact either way, never NULL.
  *
  * Walks all posting chains by finding leaf centroids (which store
  * posting_head block numbers) and following next_blkno links.

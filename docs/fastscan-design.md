@@ -72,9 +72,10 @@ followed by VPSHUFB-packed codes.
 │   float f_rescale[32]            128B    │
 │   float f_error[32]              128B    │
 │   uint8_t codes[96 × 32]       3072B    │
-│                            total 3648B   │
+│   uint32_t tombstone_mask          4B    │
+│                            total 3652B   │
 ├──────────────────────────────────────────┤
-│ Group 1 section:                 3648B   │
+│ Group 1 section:                 3652B   │
 │   (same layout as Group 0)               │
 ├──────────────────────────────────────────┤
 │ (unused gap)                             │
@@ -83,10 +84,16 @@ followed by VPSHUFB-packed codes.
 └──────────────────────────────────────────┘
 ```
 
+`tombstone_mask` is one bit per lane: VACUUM sets a lane's bit to tombstone
+that entry without touching its neighbors' packed codes (`posting_page.h`'s
+`prism_fastscan_group_tombstone_mask`). The accumulate step still scores every
+lane in the group either way -- it has no way to skip one -- but a masked
+lane is excluded from the result regardless of its score.
+
 At dim=768 (nsq=192, nsq_pairs=96):
-- Group section: 32×6 + 32×4×3 + 96×32 = 192+384+3072 = 3648B
-- Overflow page: 2 groups = 64 vectors (usable 8144B, used 7296B)
-- First page: 1 group = 32 vectors (usable 5072B, used 3648B)
+- Group section: 32×6 + 32×4×3 + 96×32 + 4 = 192+384+3072+4 = 3652B
+- Overflow page: 2 groups = 64 vectors (usable 8144B, used 7304B)
+- First page: 1 group = 32 vectors (usable 5072B, used 3652B)
 
 The `PRISM_POSTING_PAGE_FASTSCAN` flag (0x0004, already reserved in
 posting_page.h) distinguishes fastscan pages from AoS pages.

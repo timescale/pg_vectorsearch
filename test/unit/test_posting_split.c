@@ -20,6 +20,7 @@
 #include "core/memory.h"
 #include "index/centroid_page.h"
 #include "index/index_build.h"
+#include "index/posting_insert.h"
 #include "index/posting_page.h"
 #include "index/posting_split.h"
 #include "quant/rabitq.h"
@@ -470,6 +471,67 @@ TEST(split_fastscan_posting)
 	ASSERT_TRUE(
 			(double)found / checked > 0.98,
 			"retrievable after fastscan split");
+
+	prism_index_destroy(idx);
+}
+
+/* A simple dead-row check for this test: a TID counts as dead if its
+ * vector id is one of the three ids tombstoned below. */
+static bool
+fastscan_dead_lane(ItemPointerData tid, void *state)
+{
+	const uint32_t *dead_vids = (const uint32_t *)state;
+	uint32_t		vid		  = prism_posting_get_vector_id(&tid);
+	return vid == dead_vids[0] || vid == dead_vids[1] || vid == dead_vids[2];
+}
+
+/*
+ * A posting-list split rebuilds a cluster's vectors into new lists by
+ * reading every entry out of the old one first. If a vector was already
+ * marked dead ("tombstoned") by VACUUM, the split must skip it instead of
+ * copying it into the new lists as if it were still live -- otherwise a
+ * deleted row would effectively come back from the dead every time its
+ * cluster gets split. A similar bug was once found and fixed in the
+ * AoS-to-fastscan conversion code, for the same underlying reason, so
+ * this test checks that the split's own copy of that logic -- the
+ * fastscan branch of its entry-collection walk -- gets it right too.
+ */
+TEST(split_fastscan_posting_skips_tombstoned_lanes)
+{
+	uint32_t	dim = 16, n = 1200;
+	float	   *vecs = make_two_blobs(n, dim, 99);
+	PrismIndex *idx	 = build_paged_fastscan(vecs, n, dim, 1);
+	ASSERT_NOT_NULL(idx, "fastscan build ok");
+
+	/* The fastscan format packs vectors into groups of 32. Delete one
+	 * vector from the first group and two from a later one: none of the
+	 * three deletions empties an entire group, so this can only pass if
+	 * the split checks each vector's own dead-or-not bit individually --
+	 * the page-level "everything here is dead" shortcut never applies
+	 * and so can't accidentally make this test pass for the wrong
+	 * reason. */
+	const uint32_t dead_vids[] = {3, 500, 1199};
+	uint32_t	   marked	   = prism_posting_tombstone_chain(
+			   idx->base.posting_storage,
+			   dim,
+			   idx->first_posting,
+			   fastscan_dead_lane,
+			   (void *)dead_vids);
+	ASSERT_EQ(3, marked, "three fastscan lanes tombstoned before the split");
+
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitResult res;
+	ASSERT_EQ(
+			prism_posting_split(
+					&idx->base, idx->first_posting, NULL, &env, &res),
+			0,
+			"split ok");
+	ASSERT_TRUE(res.did_split, "split happened");
+	ASSERT_EQ(
+			res.count[0] + res.count[1],
+			n - 3,
+			"tombstoned lanes dropped, not resurrected into the new lists");
 
 	prism_index_destroy(idx);
 }
