@@ -479,9 +479,50 @@ prism_pbuild_exec_kmeans(
 	float *my_cost = prism_dsm_km_worker_cost(
 			km_workers_base, km_k, dim, participant_id);
 
-	/* Reduce scratch is leader-only. */
-	float *old_cents = participant_id == 0 ? vs_alloc(cents_nbytes) : NULL;
-	Size   km_sz	 = prism_dsm_km_workers_size(nparticipants, km_k, dim);
+	/*
+	 * Working set for the reduce. Leader-only, and every field is the
+	 * same size on every iteration, so it is allocated once here rather
+	 * than inside the loop. KMeansReduce documents what each field
+	 * holds; the locals are kept writable for the fills and the frees,
+	 * while the struct exposes to the merge only what it may read.
+	 */
+	float			*prev_centroids		   = NULL;
+	const float	   **worker_vector_sums	   = NULL;
+	const uint32_t **worker_vector_counts  = NULL;
+	float			*worker_costs		   = NULL;
+	uint32_t		*cluster_vector_counts = NULL;
+	KMeansReduce	 reduce				   = {0};
+
+	if (participant_id == 0)
+	{
+		prev_centroids	   = vs_alloc(cents_nbytes);
+		worker_vector_sums = vs_alloc((size_t)nparticipants * sizeof(float *));
+		worker_vector_counts = vs_alloc(
+				(size_t)nparticipants * sizeof(uint32_t *));
+		worker_costs = vs_alloc((size_t)nparticipants * sizeof(float));
+		cluster_vector_counts = vs_alloc((size_t)km_k * sizeof(uint32_t));
+
+		/* The accumulators live in shared memory at addresses that do not
+		 * change between iterations, so they are resolved once here. Only
+		 * the costs are re-read each round, inside the loop. */
+		for (int t = 0; t < nparticipants; t++)
+		{
+			worker_vector_sums[t] =
+					prism_dsm_km_worker_sums(km_workers_base, km_k, dim, t);
+			worker_vector_counts[t] =
+					prism_dsm_km_worker_cnts(km_workers_base, km_k, dim, t);
+		}
+
+		reduce = (KMeansReduce){
+				.worker_vector_sums	   = worker_vector_sums,
+				.worker_vector_counts  = worker_vector_counts,
+				.worker_costs		   = worker_costs,
+				.nworkers			   = (uint32_t)nparticipants,
+				.prev_centroids		   = prev_centroids,
+				.cluster_vector_counts = cluster_vector_counts,
+		};
+	}
+	Size km_sz = prism_dsm_km_workers_size(nparticipants, km_k, dim);
 
 	uint32_t iters = 0;
 	for (uint32_t iter = 0; iter < shared->km_max_iterations; iter++)
@@ -506,43 +547,27 @@ prism_pbuild_exec_kmeans(
 
 		if (participant_id == 0)
 		{
-			memcpy(old_cents, cents, cents_nbytes);
+			memcpy(prev_centroids, cents, cents_nbytes);
 
-			const float **all_sums = vs_alloc(nparticipants * sizeof(float *));
-			const uint32_t **all_cnts = vs_alloc(
-					nparticipants * sizeof(uint32_t *));
-			float *all_costs = vs_alloc(nparticipants * sizeof(float));
+			/* Only the costs change between iterations; the accumulator
+			 * addresses were resolved once above. */
 			for (int t = 0; t < nparticipants; t++)
-			{
-				all_sums[t] = prism_dsm_km_worker_sums(
+				worker_costs[t] = *prism_dsm_km_worker_cost(
 						km_workers_base, km_k, dim, t);
-				all_cnts[t] = prism_dsm_km_worker_cnts(
-						km_workers_base, km_k, dim, t);
-				all_costs[t] = *prism_dsm_km_worker_cost(
-						km_workers_base, km_k, dim, t);
-			}
 
 			float total_cost;
 			float shift_sq = kmeans_merge_centroids(
 					cents,
 					norms_c,
-					old_cents,
-					all_sums,
-					all_cnts,
-					all_costs,
-					nparticipants,
 					km_k,
 					dim,
 					shared->metric,
+					&reduce,
 					&total_cost);
 
 			float tol_sq		 = shared->km_tolerance * shared->km_tolerance;
 			shared->km_converged = (shift_sq < tol_sq);
 			memset(km_workers_base, 0, km_sz);
-
-			vs_free(all_sums);
-			vs_free(all_cnts);
-			vs_free(all_costs);
 		}
 
 		/* Barrier: updated centroids + convergence flag visible to all. */
@@ -552,8 +577,14 @@ prism_pbuild_exec_kmeans(
 			break;
 	}
 
-	if (old_cents != NULL)
-		vs_free(old_cents);
+	if (participant_id == 0)
+	{
+		vs_free(cluster_vector_counts);
+		vs_free(worker_costs);
+		vs_free(worker_vector_counts);
+		vs_free(worker_vector_sums);
+		vs_free(prev_centroids);
+	}
 
 	return iters;
 }

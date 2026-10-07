@@ -533,41 +533,38 @@ kmeans_assign(
 
 float
 kmeans_merge_centroids(
-		float				  *centroids,
-		float				  *norms_c,
-		const float			  *old_cents,
-		const float *const	  *worker_sums,
-		const uint32_t *const *worker_cnts,
-		const float			  *worker_costs,
-		uint32_t			   nworkers,
-		uint32_t			   nlist,
-		Dimension			   dim,
-		DistanceMetric		   metric,
-		float				  *out_total_cost)
+		float			   *centroids,
+		float			   *norms_c,
+		uint32_t			nlist,
+		Dimension			dim,
+		DistanceMetric		metric,
+		const KMeansReduce *reduce,
+		float			   *out_total_cost)
 {
+	const uint32_t nworkers				 = reduce->nworkers;
+	uint32_t	  *cluster_vector_counts = reduce->cluster_vector_counts;
+
 	/* Sum costs */
 	float total_cost = 0.0f;
 	for (uint32_t t = 0; t < nworkers; t++)
-		total_cost += worker_costs[t];
+		total_cost += reduce->worker_costs[t];
 	*out_total_cost = total_cost;
 
 	/* Merge per-worker accumulators */
 	float *new_cents = centroids;
 	memset(new_cents, 0, (size_t)nlist * dim * sizeof(float));
-
-	uint32_t *sizes = (uint32_t *)alloca(nlist * sizeof(uint32_t));
-	memset(sizes, 0, nlist * sizeof(uint32_t));
+	memset(cluster_vector_counts, 0, (size_t)nlist * sizeof(uint32_t));
 
 	for (uint32_t t = 0; t < nworkers; t++)
 	{
-		const float	   *sums = worker_sums[t];
-		const uint32_t *cnts = worker_cnts[t];
+		const float	   *vector_sums	  = reduce->worker_vector_sums[t];
+		const uint32_t *vector_counts = reduce->worker_vector_counts[t];
 
 		for (uint32_t c = 0; c < nlist; c++)
 		{
-			sizes[c] += cnts[c];
+			cluster_vector_counts[c] += vector_counts[c];
 			float		*dst = new_cents + (size_t)c * dim;
-			const float *src = sums + (size_t)c * dim;
+			const float *src = vector_sums + (size_t)c * dim;
 			for (uint32_t d = 0; d < dim; d++)
 				dst[d] += src[d];
 		}
@@ -576,9 +573,9 @@ kmeans_merge_centroids(
 	/* Divide by cluster size to get mean */
 	for (uint32_t c = 0; c < nlist; c++)
 	{
-		if (sizes[c] == 0)
+		if (cluster_vector_counts[c] == 0)
 			continue;
-		float  inv	= 1.0f / (float)sizes[c];
+		float  inv	= 1.0f / (float)cluster_vector_counts[c];
 		float *cent = new_cents + (size_t)c * dim;
 		for (uint32_t d = 0; d < dim; d++)
 			cent[d] *= inv;
@@ -589,7 +586,7 @@ kmeans_merge_centroids(
 	{
 		for (uint32_t c = 0; c < nlist; c++)
 		{
-			if (sizes[c] == 0)
+			if (cluster_vector_counts[c] == 0)
 				continue;
 			float *cent = new_cents + (size_t)c * dim;
 			float  norm = vs_l2_norm(cent, dim);
@@ -600,7 +597,7 @@ kmeans_merge_centroids(
 
 	/* Convergence: max centroid shift (squared) */
 	float shift_sq = kmeans_max_centroid_shift_between(
-			centroids, old_cents, nlist, dim);
+			centroids, reduce->prev_centroids, nlist, dim);
 
 	/* Precompute centroid norms for next iteration */
 	if (norms_c != NULL && metric == DISTANCE_L2)
