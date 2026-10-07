@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "algo/kmeans.h"
+#include "algo/kmeans_internal.h"
 #include "algo/vecops.h"
 #include "core/memory.h"
 #include "types/vec16.h"
@@ -1453,4 +1454,77 @@ TEST(indexed_kmeans)
 	vs_free(all_vecs);
 	vs_free(indices);
 	vs_free(gathered);
+}
+
+/*
+ * The reduce step: two workers' partial tallies combine into the means.
+ *
+ * Worker 0 put one vector in cluster 0 and one in cluster 1; worker 1
+ * put three more in cluster 0. Cluster 2 gets nothing, which exercises
+ * the empty-cluster path. Sums and counts are what the workers hand
+ * over, so the expected centroid is each cluster's summed vector
+ * divided by the number of vectors that reached it.
+ *
+ * The count scratch arrives dirty on purpose: the caller hands the same
+ * buffer to every iteration, so the merge has to clear it rather than
+ * accumulate onto whatever the previous iteration left.
+ */
+TEST(merge_combines_worker_tallies)
+{
+	enum
+	{
+		NLIST = 3,
+		DIM	  = 2,
+		NW	  = 2
+	};
+
+	/* [cluster][component], laid out flat as the merge expects. */
+	float	 w0_sums[NLIST * DIM] = {1.0f, 2.0f, 10.0f, 10.0f, 0.0f, 0.0f};
+	float	 w1_sums[NLIST * DIM] = {11.0f, 14.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+	uint32_t w0_counts[NLIST]	  = {1, 1, 0};
+	uint32_t w1_counts[NLIST]	  = {3, 0, 0};
+
+	const float *const	  sums[NW]	 = {w0_sums, w1_sums};
+	const uint32_t *const counts[NW] = {w0_counts, w1_counts};
+	const float			  costs[NW]	 = {1.5f, 2.5f};
+
+	float	 centroids[NLIST * DIM] = {0};
+	float	 prev[NLIST * DIM]		= {0};
+	uint32_t scratch[NLIST]			= {7, 11, 13};
+	float	 total_cost				= 0.0f;
+
+	const KMeansReduce reduce = {
+			.worker_vector_sums	   = sums,
+			.worker_vector_counts  = counts,
+			.worker_costs		   = costs,
+			.nworkers			   = NW,
+			.prev_centroids		   = prev,
+			.cluster_vector_counts = scratch,
+	};
+
+	float shift_sq = kmeans_merge_centroids(
+			centroids, NULL, NLIST, DIM, DISTANCE_L2, &reduce, &total_cost);
+
+	/* Cluster 0: (1,2) + (11,14) over 1 + 3 vectors. */
+	ASSERT_FLOAT_EQ(3.0f, centroids[0], 1e-6f, "cluster 0 mean x");
+	ASSERT_FLOAT_EQ(4.0f, centroids[1], 1e-6f, "cluster 0 mean y");
+
+	/* Cluster 1: a single vector, so the mean is that vector. */
+	ASSERT_FLOAT_EQ(10.0f, centroids[2], 1e-6f, "cluster 1 mean x");
+	ASSERT_FLOAT_EQ(10.0f, centroids[3], 1e-6f, "cluster 1 mean y");
+
+	/* Cluster 2 drew no vectors: left at the origin, not divided by
+	 * zero. */
+	ASSERT_FLOAT_EQ(0.0f, centroids[4], 1e-6f, "empty cluster x");
+	ASSERT_FLOAT_EQ(0.0f, centroids[5], 1e-6f, "empty cluster y");
+
+	/* The counts the merge summed, which the caller reuses. */
+	ASSERT_EQ(4u, scratch[0], "cluster 0 vector count");
+	ASSERT_EQ(1u, scratch[1], "cluster 1 vector count");
+	ASSERT_EQ(0u, scratch[2], "cluster 2 vector count");
+
+	ASSERT_FLOAT_EQ(4.0f, total_cost, 1e-6f, "costs sum across workers");
+
+	/* Furthest move from the origin is cluster 1: 10^2 + 10^2. */
+	ASSERT_FLOAT_EQ(200.0f, shift_sq, 1e-3f, "max squared shift");
 }

@@ -94,36 +94,75 @@ float kmeans_max_centroid_shift_between(
 		const float *a, const float *b, uint32_t nlist, Dimension dim);
 
 /*
- * Merge per-worker centroid accumulators and update centroids.
+ * The per-worker accumulators the reduce combines, plus the scratch it
+ * needs to do so.
+ *
+ * Each worker assigned its own slice of the vectors to the nearest
+ * centroid and accumulated, per cluster, the component-wise sum of the
+ * vectors that landed there and how many there were. Summing those is
+ * what produces the new centroids: sums and counts add across workers,
+ * whereas per-worker means could not be combined without re-weighting
+ * them by their counts.
+ */
+typedef struct KMeansReduce
+{
+	/* [nworkers][nlist * dim] component-wise sum of the vectors each
+	 * worker assigned to each cluster. */
+	const float *const *worker_vector_sums;
+
+	/* [nworkers][nlist] how many vectors each worker assigned to each
+	 * cluster. Dividing a cluster's summed vector by the total is what
+	 * yields its mean. */
+	const uint32_t *const *worker_vector_counts;
+
+	/* [nworkers] each worker's summed distance from its vectors to the
+	 * centroids they were assigned to -- the k-means objective. The
+	 * reduce sums these into out_total_cost; the parallel build
+	 * discards the result, so nothing reads it on this path yet. */
+	const float *worker_costs;
+
+	uint32_t nworkers;
+
+	/* [nlist * dim] centroids as they stood before this iteration.
+	 * Caller-owned: the reduce reads it to report how far the furthest
+	 * centroid moved, which is the convergence test. */
+	const float *prev_centroids;
+
+	/* [nlist] vectors per cluster once the workers are summed. Zeroed
+	 * on entry. Caller-owned so one allocation serves every iteration,
+	 * and so the bound on nlist sits with the caller that knows it --
+	 * this layer accepts any nlist. */
+	uint32_t *cluster_vector_counts;
+} KMeansReduce;
+
+/*
+ * Merge the per-worker accumulators and update the centroids in place.
  *
  * This is the reduce step of parallel k-means (BSP pattern).
  * Called by the leader between barrier-synchronized iterations.
  *
- * Inputs:
- *   worker_sums:  [nworkers][nlist * dim] per-worker centroid sums
- *   worker_cnts:  [nworkers][nlist] per-worker cluster counts
- *   worker_costs: [nworkers] per-worker total costs
- *   nworkers:     number of workers
- *   old_cents:    [nlist * dim] centroids from before this iteration
+ * Only the root level of the tree reaches here. The root is one
+ * clustering over the whole sample, so it can only be split by data,
+ * which is what makes a reduce necessary. Below the root the samples
+ * are already partitioned, so each participant builds a whole child
+ * subtree alone through the serial path and nothing needs merging.
+ * In practice that means nlist is the tree's fan-out -- a few hundred,
+ * not the leaf count -- though nothing here depends on that.
  *
  * Outputs:
- *   centroids:    [nlist * dim] updated centroid positions (in-place)
- *   norms_c:      [nlist] updated centroid norms (for L2, may be NULL)
+ *   centroids: [nlist * dim] updated positions (in-place)
+ *   norms_c:   [nlist] updated centroid norms (L2, may be NULL)
  *
  * Returns the maximum squared centroid shift (for convergence check).
  */
 float kmeans_merge_centroids(
-		float				  *centroids,
-		float				  *norms_c,
-		const float			  *old_cents,
-		const float *const	  *worker_sums,
-		const uint32_t *const *worker_cnts,
-		const float			  *worker_costs,
-		uint32_t			   nworkers,
-		uint32_t			   nlist,
-		Dimension			   dim,
-		DistanceMetric		   metric,
-		float				  *out_total_cost);
+		float			   *centroids,
+		float			   *norms_c,
+		uint32_t			nlist,
+		Dimension			dim,
+		DistanceMetric		metric,
+		const KMeansReduce *reduce,
+		float			   *out_total_cost);
 
 /*
  * Scalar assign+accumulate kernel for a range of vectors.
