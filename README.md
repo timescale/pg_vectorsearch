@@ -73,7 +73,7 @@ See [docs/architecture.md][arch-doc] for the design.
 
 **Requirements:**
 - PostgreSQL 18+ (with development headers)
-- C23 compiler (GCC 13+ or Clang 16+)
+- GNU C11 compiler (GCC 11+ or Clang 14+)
 - Meson build system
 - Optional: CBLAS, for faster RaBitQ encoding. See
   [Development](docs/development.md#blas).

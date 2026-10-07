@@ -47,7 +47,7 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.os }} ${{ matrix.arch }} ${{ matrix.standalone && 'standalone' || matrix.pg }}${{ matrix.pg_version && format(' PG{0}', matrix.pg_version) || '' }}${{ matrix.tools == 'disabled' && ' ext-only' || '' }}
+    name: ${{ matrix.os }} ${{ matrix.arch }} ${{ matrix.standalone && 'standalone' || matrix.pg }}${{ matrix.pg_version && format(' PG{0}', matrix.pg_version) || '' }}${{ matrix.tools == 'disabled' && ' ext-only' || '' }}${{ matrix.label && format(' {0}', matrix.label) || '' }}
     runs-on: ${{ matrix.runner }}
 
     strategy:
@@ -100,6 +100,15 @@ jobs:
             os: macOS
             arch: arm64
             pg: packaged
+          # Ubuntu 22.04's default compiler is GCC 11, which does not
+          # implement C23. This is the floor for -std=gnu11: a newer
+          # runner's GCC will still accept a C23 feature that jammy
+          # rejects.
+          - runner: ubuntu-22.04
+            os: Linux
+            arch: x64
+            pg: packaged
+            label: gcc11
           # Extension-only: -Dtools=disabled skips the CLI, standalone
           # library, and unit tests — the default when building from a
           # release tarball. Keeps that build shape working on every PR.
@@ -227,7 +236,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
         with:
-          name: test-logs-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.standalone && 'standalone' || matrix.pg }}
+          name: test-logs-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.standalone && 'standalone' || matrix.pg }}${{ matrix.label && format('-{0}', matrix.label) || '' }}
           path: |
             builddir/meson-logs/
             builddir/testdb/log/
