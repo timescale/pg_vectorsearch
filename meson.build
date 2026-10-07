@@ -9,7 +9,10 @@ project('pg_vectorsearch', 'c',
   # problem, so make the requirement explicit.
   meson_version: '>= 0.61',
   default_options: [
-    'c_std=c2x',  # C23 (use c2x for older meson/gcc compatibility)
+    # GNU C11, not C23. Ubuntu 22.04's GCC 11 implements -std=gnu11
+    # fully and only a subset of C2x. typeof in the CLI is a GNU
+    # extension, so this is gnu11 rather than ISO c11.
+    'c_std=gnu11',
     'warning_level=2',
     'werror=true',
     'b_ndebug=if-release',
@@ -368,12 +371,12 @@ if simd_mode != 'none'
     '-fassociative-math',      # Allow reassociation for better vectorization
     '-fno-signed-zeros',       # IEEE 754 relaxation for performance
     '-fno-trapping-math',      # No FP exceptions for performance
-    # GCC defaults to -ffp-contract=off in ISO C modes (-std=c23, -std=c2x)
-    # because the C standard leaves FP contraction implementation-defined.
-    # GNU modes (-std=gnu23) default to -ffp-contract=fast. Without this,
-    # GCC generates separate vmulps + vaddps instead of vfmadd231ps, which
-    # is ~3x slower for dot-product loops (no FMA, plus horizontal reduction
-    # per vector chunk instead of accumulate-and-reduce-once).
+    # ISO C modes default -ffp-contract to off (contraction is
+    # implementation-defined and changes rounding). GNU modes default
+    # to fast, but set it explicitly so an ISO -std override does not
+    # drop FMA: without it GCC emits vmulps + vaddps instead of
+    # vfmadd231ps, and nested dot-product loops reduce horizontally
+    # per chunk instead of once.
     # See: https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html
     '-ffp-contract=fast',
     language: 'c',

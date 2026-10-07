@@ -69,9 +69,21 @@
  */
 #if !defined(VS_SIMD_NONE) && !defined(VS_COVERAGE) && \
 		__has_attribute(target_clones) && defined(__x86_64__)
+/*
+ * v3 is 256-bit AVX2+FMA, v4 is 512-bit AVX-512+FMA. GCC 11's
+ * target_clones dispatcher rejects those names. haswell and
+ * skylake-avx512 compile there, but GCC tunes the latter to 256-bit
+ * and vectorizes the former less, so they are only the GCC 11 fallback.
+ */
+#if defined(__clang__) || __GNUC__ >= 12
 #define VS_TARGET_CLONES \
 	__attribute__((      \
 			target_clones("default", "arch=x86-64-v3", "arch=x86-64-v4")))
+#else
+#define VS_TARGET_CLONES \
+	__attribute__((      \
+			target_clones("default", "arch=haswell", "arch=skylake-avx512")))
+#endif
 #else
 #define VS_TARGET_CLONES
 #endif

@@ -69,14 +69,8 @@ jobs:
       # under cov-build. enabled rather than auto for both features, so a
       # missing dependency fails here instead of silently shrinking what
       # Coverity sees: the extension, the CLI and the unit tests.
-      #
-      # gnu17 rather than the project's C23: Coverity's front end rejects
-      # -std=c2x and emits nothing for such a compile. The sources build
-      # as C17 too, so the analysis covers the same code.
       - name: Configure
-        run: >-
-          meson setup builddir -Dpostgresql=enabled -Dtools=enabled
-          -Dc_std=gnu17
+        run: meson setup builddir -Dpostgresql=enabled -Dtools=enabled
 
       # The action downloads and caches the analysis tool and runs the
       # build under cov-build. It does not submit: its upload treats any

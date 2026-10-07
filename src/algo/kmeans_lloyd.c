@@ -202,9 +202,9 @@ lloyd_assign_block_cblas_f16c(
  * The innermost loop over dim is auto-vectorized by the compiler,
  * eliminating per-vector function pointer dispatch overhead.
  *
- * FMA generation requires -ffp-contract=fast (set in meson.build for
- * release builds). Without it, GCC with -std=c2x generates separate
- * vmulps + horizontal scalar adds instead of vfmadd231ps accumulate.
+ * FMA generation requires -ffp-contract=fast (set in meson.build).
+ * Without it, GCC in an ISO C mode generates separate vmulps +
+ * horizontal scalar adds instead of vfmadd231ps accumulate.
  */
 VS_TARGET_CLONES static void
 lloyd_compute_dot_products(

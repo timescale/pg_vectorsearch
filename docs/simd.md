@@ -115,7 +115,8 @@ Located in `src/algo/distance.c`, uses `target_clones` for multi-versioning:
 
 ```c
 #define VS_TARGET_CLONES \
-    __attribute__((target_clones("default", "arch=x86-64-v3", "arch=x86-64-v4")))
+    __attribute__((target_clones("default", "arch=x86-64-v3", \
+                                 "arch=x86-64-v4")))
 
 VS_TARGET_CLONES static float
 compiler_l2_loop(int dim, const float *pa, const float *pb)
@@ -132,18 +133,22 @@ compiler_l2_loop(int dim, const float *pa, const float *pb)
 The compiler generates multiple function versions, and the dynamic linker
 selects the best one at load time.
 
-**Why `arch=x86-64-v3/v4` instead of `avx2/avx512f`:**
+**Why `arch=x86-64-v3/v4` instead of `avx2` / `avx512f`:**
 
-The `arch=` specifiers bundle all features for a microarchitecture level:
+The `arch=` levels bundle a whole microarchitecture, including FMA, and GCC
+vectorizes them at 256 and 512 bits. `avx512f` alone does not imply FMA, so
+GCC emits `vmulps` + `vaddps` instead of `vfmadd231ps`.
 
 | Clone | Equivalent features |
 |-------|-------------------|
 | `arch=x86-64-v3` | AVX2, FMA, BMI1/2, F16C, ... |
-| `arch=x86-64-v4` | AVX-512F, AVX-512BW/DQ/VL, FMA, ... |
+| `arch=x86-64-v4` | AVX-512F/BW/DQ/VL, FMA, ... |
 | `avx512f` (old) | AVX-512F only — **no FMA implied** |
 
-Using `avx512f` alone generates separate `vmulps` + `vaddps` instead of fused
-`vfmadd231ps`, roughly halving throughput for dot-product loops.
+GCC 11's `target_clones` dispatcher rejects the `x86-64-vN` names. That
+compiler falls back to `arch=haswell` / `arch=skylake-avx512`, which include
+FMA but are not the same code: GCC tunes Skylake-AVX512 to 256-bit vectors,
+and the Haswell clone vectorizes less than v3. GCC 12+ and Clang keep v3/v4.
 
 ## Compiler Support
 
@@ -169,8 +174,8 @@ language standard mode:
 
 | Flag | Default `-ffp-contract` | FMA generated? |
 |------|------------------------|----------------|
-| `-std=c23` / `-std=c2x` | `off` | No |
-| `-std=gnu23` / `-std=gnu2x` | `fast` | Yes |
+| `-std=c11` / `-std=c17` / `-std=c23` / `-std=c2x` | `off` | No |
+| `-std=gnu11` / `-std=gnu17` / `-std=gnu23` / `-std=gnu2x` | `fast` | Yes |
 | (no `-std`) | `fast` | Yes |
 
 ISO C modes default to `off` because the C standard leaves FP contraction
@@ -178,9 +183,10 @@ implementation-defined, and contraction changes rounding behavior (FMA rounds
 once instead of twice). This matters for strict numerical reproducibility but
 not for approximate algorithms like k-means clustering or ANN search.
 
-The project uses `-std=c2x` for C23 features, so we explicitly pass
-`-ffp-contract=fast` in `meson.build` to restore FMA generation. Without it,
-GCC generates separate multiply + add instructions, and for nested loops
+The project uses `-std=gnu11`, whose default is already fast. We still
+pass `-ffp-contract=fast` in `meson.build` so an ISO `-std` override does
+not drop FMA. Without it, GCC generates separate multiply + add
+instructions, and for nested loops
 (like batch dot products), also fails to vectorize the reduction properly —
 producing horizontal scalar adds per vector chunk instead of accumulating in
 a wide register and reducing once.
@@ -250,7 +256,8 @@ pgvector's actual code. Interestingly, `compiler` is often faster than
 | Implementation | target_clones | Result |
 |----------------|---------------|--------|
 | pgvector | `"default", "fma"` | FMA only, may use 128-bit SSE |
-| compiler | `"default", "arch=x86-64-v3", "arch=x86-64-v4"` | Full 256/512-bit + FMA |
+| compiler (GCC 12+, Clang) | `"default", "arch=x86-64-v3", "arch=x86-64-v4"` | 256-bit AVX2+FMA and 512-bit AVX-512+FMA |
+| compiler (GCC 11) | `"default", "arch=haswell", "arch=skylake-avx512"` | FMA, but not the v3/v4 code: Skylake-AVX512 stays 256-bit, Haswell vectorizes less |
 
 **Why pgvector uses conservative settings:**
 
@@ -259,15 +266,18 @@ pgvector uses `target_clones("default", "fma")` which only enables FMA
 but doesn't imply full AVX2 vectorization. The compiler may still use 128-bit
 SSE registers.
 
-Our `compiler` implementation uses
-`target_clones("default", "arch=x86-64-v3", "arch=x86-64-v4")` which generates
-versions using 256-bit (AVX2+FMA) and 512-bit (AVX-512+FMA) registers, enabling
-both wider vectorization and fused multiply-add.
+On GCC 12+ and Clang, `compiler` uses
+`target_clones("default", "arch=x86-64-v3", "arch=x86-64-v4")`, which generates
+256-bit (AVX2+FMA) and 512-bit (AVX-512+FMA) versions. GCC 11 cannot dispatch
+those names, so it uses `arch=haswell` / `arch=skylake-avx512` instead. That
+still enables FMA, but GCC does not emit the same 512-bit v4 clone, so a GCC 11
+`compiler` number is not comparable to the GCC 12+ / Clang one.
 
 **Benchmark interpretation:**
 
 - **pgvector**: What pgvector actually does (conservative)
-- **compiler**: What auto-vectorization *could* achieve with better settings
+- **compiler**: What auto-vectorization can achieve with the v3/v4
+  clones. A GCC 11 result is the narrower fallback, not that number
 - **avx2/avx512**: Hand-optimized SIMD (best performance)
 
 The gap between `pgvector` and `compiler` shows performance left on the table
