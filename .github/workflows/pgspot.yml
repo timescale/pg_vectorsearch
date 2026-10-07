@@ -2,19 +2,15 @@
 ---
 name: pgspot
 
+# Neither trigger carries a paths filter: a workflow a filter skips
+# creates no check run at all, so a ruleset requiring this context
+# would wait on it forever. The job decides for itself below, where
+# skipping the work still leaves a check that reports.
 on:
   push:
     branches: [main]
-    paths:
-      - 'sql/**'
-      - 'scripts/ci/pgspot.sh'
-      - '.github/workflows/pgspot.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'sql/**'
-      - 'scripts/ci/pgspot.sh'
-      - '.github/workflows/pgspot.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -31,10 +27,26 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          # Full history: the change check below diffs against the
+          # base of the pull request, or the previous tip on a push.
+          fetch-depth: 0
           persist-credentials: false
 
+      - name: Does this change affect the SQL install script?
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          ./scripts/ci/paths-changed.sh \
+            'sql/**' \
+            'scripts/ci/pgspot.sh' \
+            '.github/workflows/pgspot.yml'
+
       - name: Install pgspot
+        if: steps.changed.outputs.changed == 'true'
         run: pip install pgspot
 
       - name: Run pgspot
+        if: steps.changed.outputs.changed == 'true'
         run: ./scripts/ci/pgspot.sh

@@ -1,15 +1,15 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow
 name: Zizmor
 
+# Neither trigger carries a paths filter: a workflow a filter skips
+# creates no check run at all, so a ruleset requiring this context
+# would wait on it forever. The job decides for itself below, where
+# skipping the work still leaves a check that reports.
 on:
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/**'
   pull_request:
     branches: [main]
-    paths:
-      - '.github/workflows/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -30,9 +30,20 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          # Full history: the change check below diffs against the
+          # base of the pull request, or the previous tip on a push.
+          fetch-depth: 0
           persist-credentials: false
 
+      - name: Does this change affect the workflows?
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: ./scripts/ci/paths-changed.sh '.github/workflows/**'
+
       - name: Run zizmor
+        if: steps.changed.outputs.changed == 'true'
         uses: zizmorcore/zizmor-action@135698455da5c3b3e55f73f4419e481ab68cdd95 # v0.4.1
         # yamllint disable-line rule:comments-indentation
         # Inputs defined in action.yml, IDE schema may not recognize them
