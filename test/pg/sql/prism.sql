@@ -220,6 +220,12 @@ SELECT relpages > 0 AS has_pages FROM pg_class
 CREATE INDEX idx_bad_fo ON embeddings USING prism (v)
     WITH (fan_out = 1);
 
+-- Validation: nlist is bounded at parse time. resolve_build_params clamps
+-- an explicit nlist to the same ceiling, so this bound is what keeps the
+-- two in agreement rather than the clamp being the only guard.
+CREATE INDEX idx_bad_nlist ON embeddings USING prism (v)
+    WITH (nlist = 2000001);
+
 -- EXPLAIN ANALYZE: verify prism stats are present with sensible values
 SET enable_seqscan = off;
 CREATE FUNCTION test_explain_stats() RETURNS TABLE (
