@@ -390,7 +390,18 @@ meta_format_version() {
 # turns into a failure of this function.
 previous_release_tag() {
     local tags
-    tags="$(git tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname)"
+    # Naming the prerelease suffixes is what puts a release above its own
+    # candidates: git's version sort otherwise ranks v0.1.0-rc1 over
+    # v0.1.0, and the upgrade script and format check anchor on whatever
+    # this returns. Listed from least mature, so -dev sorts lowest; the
+    # pipeline never tags one, since the gate refuses to release a -dev
+    # version at all.
+    tags="$(git \
+        -c versionsort.suffix=-dev \
+        -c versionsort.suffix=-alpha \
+        -c versionsort.suffix=-beta \
+        -c versionsort.suffix=-rc \
+        tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname)"
     [[ -z "$tags" ]] || head -1 <<<"$tags"
 }
 

@@ -220,4 +220,34 @@ trailer_probe "a four-component trailer is refused" 0.2.0 0.3.0.1 main 1
 trailer_probe "an uppercase suffix is refused" 0.2.0 0.3.0-DEV main 1
 trailer_probe "a bare suffix is refused" 0.2.0 -dev main 1
 
+
+# ----------------------------------------------------------------
+# previous_release_tag
+# ----------------------------------------------------------------
+
+# A final release outranks its own candidates. Git's version sort puts
+# v0.1.0-rc1 above v0.1.0 unless told which suffixes are prereleases,
+# which would make the next release's upgrade script and format check
+# anchor on the candidate instead of the release that replaced it.
+tagged="$(new_fixture 0.2.0-dev)"
+git -C "$tagged" tag v0.1.0-rc1
+git -C "$tagged" tag v0.1.0-rc2
+git -C "$tagged" tag v0.1.0
+expect_eq "previous tag: a final release outranks its candidates" \
+    v0.1.0 "$(lib_call "$tagged" previous_release_tag)"
+
+git -C "$tagged" tag v0.2.0
+expect_eq "previous tag: the newest release wins" \
+    v0.2.0 "$(lib_call "$tagged" previous_release_tag)"
+
+# Before any final ships, the newest candidate is what came before.
+rc_only="$(new_fixture 0.1.0-dev)"
+git -C "$rc_only" tag v0.1.0-rc1
+git -C "$rc_only" tag v0.1.0-rc2
+expect_eq "previous tag: the newest candidate when no final exists" \
+    v0.1.0-rc2 "$(lib_call "$rc_only" previous_release_tag)"
+
+expect_eq "previous tag: nothing before the first release" \
+    "" "$(lib_call "$(new_fixture 0.1.0-dev)" previous_release_tag)"
+
 tap_finish
