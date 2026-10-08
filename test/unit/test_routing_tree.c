@@ -17,6 +17,8 @@
  */
 
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "algo/kmeans.h"
 #include "core/memory.h"
@@ -573,4 +575,45 @@ TEST(exact_centroid_collector_overflow)
 
 	vs_free(coll);
 	prism_exact_centroid_collector_cleanup(&col);
+}
+
+/*
+ * The parallel build sizes its DSM regions from prism_max_nlist, so a
+ * worst-case leaf count that does not fit a uint32 has to be refused. A
+ * wrapped count describes a smaller tree than the one being built, and
+ * every region derived from it is then under-allocated.
+ */
+TEST(max_nlist_never_wraps)
+{
+	/* Shapes the reloptions permit, at their extremes. */
+	ASSERT_EQ(244140625u, prism_max_nlist(2000000, 125), "125^4");
+	ASSERT_EQ(16581375u, prism_max_nlist(65536, 255), "255^3");
+	ASSERT_EQ(2097152u, prism_max_nlist(2000000, 2), "2^21");
+
+	/* A tree that needs one level keeps fan_out; nlist is only a floor. */
+	ASSERT_EQ(255u, prism_max_nlist(100, 255), "flat tree is fan_out wide");
+	ASSERT_EQ(1000u, prism_max_nlist(1000, 10), "10^3 meets nlist exactly");
+
+	/*
+	 * 100000^2 is 10^10, which a uint32 accumulator truncates to
+	 * 1410065408 -- a plausible-looking count an eighth of the real one.
+	 */
+	fflush(NULL);
+	pid_t pid = fork();
+	ASSERT_TRUE(pid >= 0, "fork succeeded");
+	if (pid == 0)
+	{
+		if (!vs_test_expect_abort())
+			_exit(2);
+		uint32_t wrapped = prism_max_nlist(5000000, 100000);
+		/* Reached only if the ceiling failed to fire. The result is used
+		 * so the call cannot be optimized away as having no effect. */
+		_exit(wrapped == 0 ? 3 : 0);
+	}
+
+	int status = 0;
+	waitpid(pid, &status, 0);
+	ASSERT_TRUE(
+			WIFEXITED(status) && WEXITSTATUS(status) == VS_TEST_ABORTED,
+			"a leaf count past UINT32_MAX aborts");
 }

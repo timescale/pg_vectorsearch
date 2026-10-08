@@ -473,15 +473,15 @@ resolve_build_params(
 	*est_rows = prism_estimate_heap_tuples(heap);
 
 	if (nlist_opt > 0)
-	{
 		p->nlist = nlist_opt;
-	}
 	else
-	{
 		p->nlist = prism_auto_nlist(*est_rows, p->dim, tpages_opt);
-		if (p->nlist > PRISM_MAX_NLIST)
-			p->nlist = PRISM_MAX_NLIST;
-	}
+
+	/* Clamped on both paths: the parallel build sizes its DSM regions from
+	 * this, and the bound an explicit nlist passes through is applied by
+	 * the reloption parser in another file. */
+	if (p->nlist > PRISM_MAX_NLIST)
+		p->nlist = PRISM_MAX_NLIST;
 
 	p->fan_out =
 			prism_auto_fan_out(p->fan_out, p->nlist, PRISM_DEFAULT_FAN_OUT);

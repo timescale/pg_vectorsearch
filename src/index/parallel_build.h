@@ -42,7 +42,10 @@
 #include <utils/rel.h>
 #endif
 
+#include <inttypes.h>
+
 #include "algo/hkmeans.h"
+#include "core/log.h"
 #include "core/memory.h"
 #include "core/types.h"
 #include "index/centroid_page.h" /* PrismCentroidFormat */
@@ -326,15 +329,32 @@ prism_dsm_child_subtree(char *base, uint32_t slot, uint64_t slot_size)
  * fan_out^nlevels (clamped to >= nlist). The exact leaf count isn't known
  * until k-means runs, so the parallel build uses this to size its DSM regions
  * up front, then narrows to the real tree->nleaves afterward.
+ *
+ * Accumulating in 64 bits keeps a product past UINT32_MAX an error rather
+ * than a truncation: every DSM region is sized from this, so a wrapped count
+ * describes a smaller tree than the one being built. The reloption bounds
+ * keep the product under 2^32 today, which is what makes the ceiling a
+ * guard on those bounds rather than a limit callers meet.
  */
 static inline uint32_t
 prism_max_nlist(uint32_t nlist, uint32_t fan_out)
 {
 	uint32_t nlevels   = vs_hkmeans_nlevels(nlist, fan_out);
-	uint32_t max_nlist = 1;
+	uint64_t max_nlist = 1;
 	for (uint32_t l = 0; l < nlevels; l++)
+	{
 		max_nlist *= fan_out;
-	return max_nlist < nlist ? nlist : max_nlist;
+		if (max_nlist > UINT32_MAX)
+			vs_error(
+					"prism: %u levels at fan_out %u reach %" PRIu64
+					" leaves, past the largest addressable count "
+					"(nlist %u); decrease fan_out or nlist",
+					nlevels,
+					fan_out,
+					max_nlist,
+					nlist);
+	}
+	return max_nlist < nlist ? nlist : (uint32_t)max_nlist;
 }
 
 static inline float *
