@@ -359,12 +359,12 @@ the PR with the link. Reviewing a release PR includes downloading that
 archive and building the extension from it.
 
 The tarball is what ships, and it is not the branch: `meson dist`
-decides what goes in, and it carries no `.git`. It proves a lot on its
-own — it unpacks the archive and runs setup, compile, test and install
-over it, so a tarball that would not build fails the PR. What it cannot
-prove is that the extension installs against a PostgreSQL someone
-actually has, which is the last thing nobody checks until after
-publishing.
+decides what goes in, and it carries no `.git`. CI unpacks it and puts
+it through the same configure, compile, install and test sequence as
+any build, against a real PostgreSQL — so a tarball that would not
+build, or whose extension would not install, fails the PR. What that
+cannot cover is the PostgreSQL *you* have, which is why reviewing a
+release PR includes building the archive yourself.
 
 `release.yml` builds the same tarball, but it runs on the merge — before
 tagging, so a broken archive still cannot be published, yet too late for
@@ -419,10 +419,15 @@ strict on real ones. It also means releasing does not depend on
 
 **Build** builds and tests at the exact commit the gate approved, not at
 whatever `main` has moved to since. It then packages the tarball with
-`meson dist`, which unpacks what it archived and runs setup, compile,
-test and install over it, reusing this build's own options — so the
-extension is proven to build from the tarball, not just the core
-library. `meson dist` writes the `.sha256sum` beside it.
+`scripts/ci/release-package.sh`, which unpacks the archive and builds,
+installs and tests it with this build's own options — so the extension
+is proven to install and pass its suite from the tarball, not just to
+compile. `meson dist` writes the `.sha256sum` beside it.
+
+The install is what makes that real: `pg_regress` loads the extension
+PostgreSQL has installed, not the one in a build tree, so an archive
+whose tests run before an install is reporting on whatever was already
+there.
 
 Packaging therefore gates tagging: a tarball that would not build fails
 the build job, and nothing downstream runs. The assets travel to the

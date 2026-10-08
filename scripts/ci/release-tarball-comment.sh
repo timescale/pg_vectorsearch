@@ -35,8 +35,8 @@ $MARKER
 ### Build from the tarball before merging
 
 Here's the source archive that will become the \`v$VERSION\` release
-asset. It was produced by \`meson dist\`, which proves it configures,
-compiles and passes its tests unpacked.
+asset. CI unpacked it and put it through a full build: it configures,
+compiles, installs and passes its own test suite from the archive.
 
 As an extra check, download the tarball and compile it against a local
 PostgreSQL:
