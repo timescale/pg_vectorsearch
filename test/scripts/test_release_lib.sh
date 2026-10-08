@@ -139,6 +139,29 @@ bad_version_case "an uppercase suffix"    0.2.0-DEV
 bad_version_case "a doubled dash"         0.2.0--dev
 
 # ----------------------------------------------------------------
+# check_next_version_order
+# ----------------------------------------------------------------
+
+order_case() {
+    expect_lib "order: $1" "$2" "$first" \
+        check_next_version_order "$3" "$4"
+}
+
+order_case "a minor bump reopens ahead of the release" 0 0.2.0 0.3.0-dev
+order_case "reopening behind what shipped is refused" 1 0.2.0 0.1.0-dev
+
+# The one case where the cycle reopens at the version just released.
+order_case "a candidate reopens at its own version" 0 0.2.0-rc1 0.2.0-dev
+order_case "an alpha does the same" 0 0.2.0-alpha1 0.2.0-dev
+order_case "a final release may not reopen at its own" 1 0.2.0 0.2.0-dev
+
+# -dev is the state the branch sits in between releases, never something
+# that was released, so the candidate exception must not reach it.
+# next_dev_version excludes it for the same reason, and a shared rule
+# that disagrees with the value generated from it is a trap.
+order_case "a -dev version is not a candidate" 1 0.2.0-dev 0.2.0-dev
+
+# ----------------------------------------------------------------
 # check_next_version_trailer
 # ----------------------------------------------------------------
 

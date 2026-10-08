@@ -402,7 +402,38 @@ is_patch_bump() {
     [[ "${from%.*}" == "${to%.*}" && "$from" != "$to" ]]
 }
 
-# A format change makes every existing index unreadable, so it cannot
+# Where the reopened cycle has to sit relative to what shipped. Both the
+# trailer check on the release PR and the bump after it is published ask
+# this, so it lives here rather than once per caller.
+#
+# A candidate is a step toward its own version rather than past it, so it
+# reopens at that version: 0.2.0-rc1 is followed by 0.2.0-dev, from which
+# 0.2.0-rc2 or 0.2.0 can still be cut. An equal base is wrong anywhere
+# else, where it would leave the cycle on a version already tagged. -dev
+# is excluded from the exception on the same grounds next_dev_version
+# excludes it: it is the state between releases, never one of them.
+check_next_version_order() {
+    local released="$1" next="$2" released_base next_base highest
+
+    released_base="$(strip_prerelease "$released")"
+    next_base="$(strip_prerelease "$next")"
+
+    if [[ "$next_base" == "$released_base" ]]; then
+        if is_prerelease "$released" && ! is_dev_version "$released"; then
+            return 0
+        fi
+        die "releasing $released and reopening at $next, which is the" \
+            "same version -- the cycle has to move on"
+    fi
+
+    highest="$(printf '%s\n%s\n' "$released_base" "$next_base" |
+        sort -V | tail -1)"
+    [[ "$highest" == "$next_base" ]] ||
+        die "releasing $released but reopening at $next, which is" \
+            "behind it -- the next release would collide with an" \
+            "existing tag"
+}
+
 # The next development version travels as a Next-Version trailer on the
 # release commit, and everything downstream trusts it: the gate reads it
 # to confirm the commit is a release, and the dev-cycle job bumps VERSION
@@ -412,7 +443,7 @@ is_patch_bump() {
 #
 # $2 is the branch being released from, which decides the default bump.
 check_next_version_trailer() {
-    local version="$1" branch="$2" next want next_base version_base
+    local version="$1" branch="$2" next want
     next="$(git log -1 --format='%(trailers:key=Next-Version,valueonly)' |
         tr -d '[:space:]')"
 
@@ -427,24 +458,7 @@ check_next_version_trailer() {
         die "Next-Version is $next, which has no -dev suffix -- the" \
             "gate would read the bump that lands it as another release"
 
-    next_base="$(strip_prerelease "$next")"
-    version_base="$(strip_prerelease "$version")"
-
-    # A candidate reopens at its own version, so an equal base is right
-    # there and wrong anywhere else.
-    if [[ "$next_base" == "$version_base" ]]; then
-        is_prerelease "$version" ||
-            die "releasing $version and reopening at $next, which is" \
-                "the same version -- the cycle has to move on"
-    else
-        local highest
-        highest="$(printf '%s\n%s\n' "$version_base" "$next_base" |
-            sort -V | tail -1)"
-        [[ "$highest" == "$next_base" ]] ||
-            die "releasing $version but reopening at $next, which is" \
-                "behind it -- the next release would collide with an" \
-                "existing tag"
-    fi
+    check_next_version_order "$version" "$next"
 
     # Anything other than the default is a deliberate choice, usually a
     # major bump, so say so rather than refuse it.
