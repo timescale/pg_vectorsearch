@@ -2,41 +2,15 @@
 ---
 name: Build
 
+# Neither trigger carries a paths filter: a workflow a filter skips
+# creates no check run at all, so a ruleset requiring this context
+# would wait on it forever. The changes job below decides instead,
+# where skipping the work still leaves checks that report.
 on:
   push:
     branches: [main]
-    paths:
-      - 'src/**'
-      - 'include/**'
-      - 'test/**'
-      - 'sql/**'
-      - '*.control'
-      - 'meson.build'
-      - 'VERSION'
-      - 'meson_options.txt'
-      - 'scripts/ci/build.sh'
-      - 'scripts/ci/build-pg.sh'
-      - 'scripts/ci/makefile-check.sh'
-      - 'Makefile'
-      - '.github/actions/setup-pg/**'
-      - '.github/workflows/build.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'src/**'
-      - 'include/**'
-      - 'test/**'
-      - 'sql/**'
-      - '*.control'
-      - 'meson.build'
-      - 'VERSION'
-      - 'meson_options.txt'
-      - 'scripts/ci/build.sh'
-      - 'scripts/ci/build-pg.sh'
-      - 'scripts/ci/makefile-check.sh'
-      - 'Makefile'
-      - '.github/actions/setup-pg/**'
-      - '.github/workflows/build.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -46,8 +20,49 @@ permissions:
   contents: read
 
 jobs:
+  # One cheap job answers the question for the whole matrix. Letting each
+  # matrix job decide for itself would mean starting the runner this is
+  # meant to save -- ten of them, counting the Makefile jobs.
+  changes:
+    name: Does this change affect the build?
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.changed.outputs.changed }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full history: the check below diffs against the base of the
+          # pull request, or the previous tip on a push.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          ./scripts/ci/paths-changed.sh \
+            'src/**' \
+            'include/**' \
+            'test/**' \
+            'sql/**' \
+            '*.control' \
+            'meson.build' \
+            'VERSION' \
+            'meson_options.txt' \
+            'scripts/ci/build.sh' \
+            'scripts/ci/build-pg.sh' \
+            'scripts/ci/makefile-check.sh' \
+            'scripts/ci/paths-changed.sh' \
+            'Makefile' \
+            '.github/actions/setup-pg/**' \
+            '.github/actions/coredumps/**' \
+            '.github/workflows/build.yml'
+
   build:
     name: ${{ matrix.os }} ${{ matrix.arch }} ${{ matrix.standalone && 'standalone' || matrix.pg }}${{ matrix.pg_version && format(' PG{0}', matrix.pg_version) || '' }}${{ matrix.tools == 'disabled' && ' ext-only' || '' }}${{ matrix.label && format(' {0}', matrix.label) || '' }}
+    needs: changes
+    if: needs.changes.outputs.changed == 'true'
     runs-on: ${{ matrix.runner }}
 
     strategy:
@@ -245,6 +260,8 @@ jobs:
 
   makefile:
     name: Makefile wrapper PG${{ matrix.pg-version }}
+    needs: changes
+    if: needs.changes.outputs.changed == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -291,3 +308,46 @@ jobs:
         env:
           MAKE_CHECK_SMOKE: '1'
         run: ./scripts/ci/makefile-check.sh
+
+  # The requirable context. A matrix leg's name is derived from its own
+  # parameters, so requiring ten of them directly would mean a ruleset
+  # that silently stops enforcing anything the day a leg is renamed, and
+  # that deadlocks on a name no run ever produces. This job collapses
+  # them into one name that does not move.
+  summary:
+    name: Build and test summary
+    needs: [changes, build, makefile]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Did the build and its tests pass?
+        # One line per job this gates on, so the verdict can be read
+        # without opening the run. GitHub reports a matrix job as a
+        # single result, so `build` covers all of its legs at once.
+        env:
+          RESULTS: |
+            changes ${{ needs.changes.result }}
+            build ${{ needs.build.result }}
+            makefile ${{ needs.makefile.result }}
+        run: |
+          status=0
+          while read -r job result; do
+            [ -n "$job" ] || continue
+            printf '%-9s %s\n' "$job" "$result"
+            case "$job:$result" in
+              # The changes job gates the other two, so anything but
+              # success from it leaves them skipped with no verdict
+              # rather than skipped because there was nothing to build.
+              changes:success) ;;
+              # Skipped is a pass: the only thing that skips the work is
+              # the changes job finding nothing these jobs build.
+              build:success | build:skipped) ;;
+              makefile:success | makefile:skipped) ;;
+              *)
+                echo "::error::$job reported $result"
+                status=1
+                ;;
+            esac
+          done <<<"$RESULTS"
+          exit "$status"
