@@ -117,11 +117,20 @@ jobs:
         run: |
           # The commit is attributed to the App's own account: an
           # unattributed one can draw the ruleset's extra-approval
-          # requirement.
+          # requirement, and the CLA check resolves the author email to
+          # an account that has to be one the allow list names.
+          #
+          # Written to the config for anything that commits outside the
+          # next step, and emitted as outputs because that step rewrites
+          # the config from its own inputs -- see the comment there.
           bot_id="$(gh api "/users/$APP_SLUG%5Bbot%5D" --jq .id)"
           git config user.name "$APP_SLUG[bot]"
           git config user.email \
             "$bot_id+$APP_SLUG[bot]@users.noreply.github.com"
+          {
+            echo "name=$APP_SLUG[bot]"
+            echo "id=$bot_id"
+          } >>"$GITHUB_OUTPUT"
           # The checkout persists no credentials, and open-pr.sh pushes.
           git remote set-url origin \
             "https://x-access-token:$GH_TOKEN@github.com/$REPO"
@@ -135,6 +144,15 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
+          # The release commit is made in here, so these two decide
+          # its author: the action configures user.name and user.email
+          # from them, overwriting what the step above set. They name
+          # the release App -- the account that cut the pull request,
+          # and the one the CLA allow list knows. Left out, the
+          # action's own defaults apply instead, and those resolve to
+          # github-actions[bot].
+          bot_name: ${{ steps.bot.outputs.name }}
+          bot_id: ${{ steps.bot.outputs.id }}
           claude_args: >-
             --allowedTools Bash,Read,Edit,Write,Glob,Grep
           prompt: |
