@@ -413,7 +413,7 @@ The project uses GitHub Actions for CI with the following workflows:
 | `sanitizers.yml` | Push, PR | ASan and UBSan tests |
 | `coverage.yml` | Push, PR | Coverage report, upload to Codecov |
 | `lint.yml` | Push, PR | Format check and clang-tidy |
-| `pgspot.yml` | Push, PR (SQL) | pgspot security lint of install-time SQL |
+| `pgspot.yml` | Push, PR | pgspot security lint of install-time SQL |
 | `codeql.yml` | Push, PR, Weekly, push to `trigger/codeql`, manual | GitHub CodeQL static analysis of C, workflows and Python |
 | `coverity.yml` | Weekly, push to `trigger/coverity`, manual | Coverity Scan static analysis; Scan caps submissions, so it never runs on PRs |
 
