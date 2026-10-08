@@ -4,9 +4,10 @@ How a release is versioned, how a release PR is cut, and what merging
 one creates.
 
 > Merging a release PR creates the `v<version>` tag, a GitHub Releases
-> entry with the notes, and a source tarball with its `.sha256sum`
-> attached to it. Announcing and reopening the development cycle are
-> still to come — see [After a release](#after-a-release).
+> entry with the notes, a source tarball with its `.sha256sum` attached
+> to it, and the pull request that reopens the development cycle.
+> Announcing a release is still to come — see
+> [After a release](#after-a-release).
 
 ## Versioning
 
