@@ -412,22 +412,26 @@ lloyd_select_block_fn(KMeansState *st, bool use_cblas)
 	}
 }
 
+/* Cap on the distance buffer each thread touches per block. */
+#define LLOYD_DIST_BUF_MAX (8 * 1024 * 1024)
+
 /*
  * Adaptive block size for the parallel builtin path.
  *
  * The distance buffer is [block × nlist] floats per thread. With
  * fixed block=4096, large nlist blows past L3 (e.g., 4096×8000×4
- * = 128MB per thread). Cap the buffer at ~2MB so the distance
- * matrix, vector block, and centroid tile all fit in L3.
+ * = 128MB per thread). Capping it at LLOYD_DIST_BUF_MAX keeps the
+ * distance matrix, vector block, and centroid tile near L3 instead
+ * of growing with nlist.
  */
 static uint32_t
 lloyd_parallel_block_size(uint32_t nlist, uint32_t nvecs)
 {
 	uint32_t block	= KMEANS_BLOCK_SIZE;
 	uint32_t buf_sz = block * nlist * (uint32_t)sizeof(float);
-	if (buf_sz > 8 * 1024 * 1024)
+	if (buf_sz > LLOYD_DIST_BUF_MAX)
 	{
-		block = 8 * 1024 * 1024 / (nlist * (uint32_t)sizeof(float));
+		block = LLOYD_DIST_BUF_MAX / (nlist * (uint32_t)sizeof(float));
 		if (block < 64)
 			block = 64;
 	}
