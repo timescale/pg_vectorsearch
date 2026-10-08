@@ -10,7 +10,6 @@
  * - Edge cases (null inputs, zero levels, invalid block number)
  */
 
-#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -265,7 +264,7 @@ TEST(beam_search_two_levels)
  * scratch. Build a valid root page, corrupt its entry_count beyond the
  * RABITQ capacity, and confirm the scan aborts (vs_error) rather than
  * writing out of bounds. Runs in a forked child so the abort doesn't take
- * the test process down; the parent asserts the child died by SIGABRT. */
+ * the test process down; the parent asserts the child reported it. */
 TEST(beam_search_rejects_corrupt_entry_count)
 {
 	Dimension	  dim	 = 64;
@@ -324,9 +323,8 @@ TEST(beam_search_rejects_corrupt_entry_count)
 	if (pid == 0)
 	{
 		/* Child: the corrupt count must trip vs_error -> abort() before
-		 * any out-of-bounds scratch write. Silence stderr so the expected
-		 * diagnostic doesn't clutter the test log. */
-		if (freopen("/dev/null", "w", stderr) == NULL)
+		 * any out-of-bounds scratch write. */
+		if (!vs_test_expect_abort())
 			_exit(2);
 		PrismCentroidResult results[4];
 		prism_centroid_beam_search(&st, 0, 2, results, NULL, NULL);
@@ -336,7 +334,7 @@ TEST(beam_search_rejects_corrupt_entry_count)
 	int status = 0;
 	waitpid(pid, &status, 0);
 	ASSERT_TRUE(
-			WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
+			WIFEXITED(status) && WEXITSTATUS(status) == VS_TEST_ABORTED,
 			"corrupt entry_count aborts instead of overflowing the scratch");
 
 	vs_rabitq_free_query(qstate);

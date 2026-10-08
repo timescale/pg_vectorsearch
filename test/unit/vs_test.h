@@ -45,10 +45,12 @@
 #ifndef VS_TEST_H
 #define VS_TEST_H
 
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ANSI color codes */
 #define VS_COLOR_RESET	"\033[0m"
@@ -528,5 +530,36 @@ void vs_test_printf(const char *fmt, ...)
 			return;                                   \
 		}                                             \
 	} while (0)
+
+/*
+ * Proving that a fatal check fires means running it in a forked child,
+ * because vs_error aborts. The child exits with VS_TEST_ABORTED instead of
+ * dumping core on that expected abort, so a passing run leaves nothing
+ * behind for a crash analyzer to report. Any other fatal signal still
+ * dumps a core, which is the case worth a backtrace: it means the check
+ * did not fire and the code went on to do what the test guards against.
+ */
+#define VS_TEST_ABORTED 86
+
+static inline void
+vs_test_abort_handler(int sig)
+{
+	(void)sig;
+	_exit(VS_TEST_ABORTED);
+}
+
+/*
+ * Call first thing in the child. False means the child could not be set
+ * up, which the caller should report with a distinct exit status rather
+ * than go on to run the check.
+ */
+static inline bool
+vs_test_expect_abort(void)
+{
+	/* The diagnostic is expected, so keep it out of the test log. */
+	if (freopen("/dev/null", "w", stderr) == NULL)
+		return false;
+	return signal(SIGABRT, vs_test_abort_handler) != SIG_ERR;
+}
 
 #endif /* VS_TEST_H */
