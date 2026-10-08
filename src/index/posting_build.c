@@ -1162,6 +1162,11 @@ prism_refine_route_row(
 		uint32_t				tile_hi,
 		uint32_t			   *out_idx)
 {
+	/* A zero vector has no cosine direction. The sample path drops it;
+	 * averaging it in would drag the leaf mean off the sphere. */
+	if (cosine && vs_l2_norm_squared(vec, dim) == 0.0f)
+		return NULL;
+
 	uint32_t n =
 			prism_query_route(qs, vec, 1, VS_DISTANCE_MODE_ASYMMETRIC, NULL);
 	if (n == 0)
@@ -1227,4 +1232,233 @@ prism_write_leaf_head(void *arg, uint32_t leaf, const float *centroid)
 	prism_posting_builder_set_first_blkno(&hb, h->first_posting + leaf);
 	prism_posting_builder_finish(&hb);
 	prism_posting_builder_cleanup(&hb);
+}
+
+void
+prism_refine_publish_init(
+		PrismRefinePublish *p,
+		PrismHeadWriteCtx  *heads,
+		VsStorage		   *centroid_storage,
+		BlockNumber			first_centroid,
+		PrismCentroidFormat format,
+		const RaBitQParams *rq_params,
+		const float		   *global_mean,
+		DistanceMetric		metric)
+{
+	Dimension dim		= heads->dim;
+	uint32_t  enc_bytes = VS_RABITQ_DATA_SIZE(dim);
+	uint32_t  data_bytes;
+
+	memset(p, 0, sizeof(*p));
+	p->heads			= heads;
+	p->centroid_storage = centroid_storage;
+	p->first_centroid	= first_centroid;
+	p->format			= format;
+	p->rq_params		= rq_params;
+	p->global_mean		= global_mean;
+	p->metric			= metric;
+	p->scratch			= vs_alloc((size_t)dim * sizeof(float));
+	/* Float and half entries are larger than a RaBitQ blob at high dim. */
+	data_bytes = prism_centroid_data_size(dim, format);
+	if (data_bytes > enc_bytes)
+		enc_bytes = data_bytes;
+	p->enc = vs_alloc(enc_bytes);
+	if (format == PRISM_CENTROID_FMT_FASTSCAN)
+		p->bits = vs_alloc((size_t)VS_FASTSCAN_GROUP * VS_RABITQ_BYTES(dim));
+}
+
+void
+prism_refine_publish_cleanup(PrismRefinePublish *p)
+{
+	vs_free(p->scratch);
+	vs_free(p->enc);
+	/* bits is only allocated for a fastscan tree. pfree(NULL) crashes. */
+	if (p->bits != NULL)
+		vs_free(p->bits);
+	p->scratch = NULL;
+	p->enc	   = NULL;
+	p->bits	   = NULL;
+}
+
+/* Replace one fastscan centroid lane. The group was packed with g_count
+ * codes; the other lanes stay as the tree write left them. */
+static void
+sync_fastscan_lane(
+		Page			  page,
+		Dimension		  dim,
+		uint32_t		  g,
+		uint32_t		  lane,
+		uint32_t		  g_count,
+		const RaBitQData *enc,
+		uint8_t			 *bits)
+{
+	char	*content = (char *)PageGetContents(page);
+	uint8_t *codes	 = prism_centroid_fastscan_group_codes(content, g, dim);
+	uint32_t packed	 = VS_RABITQ_BYTES(dim);
+	float	*f_add;
+	float	*f_rescale;
+	float	*f_error;
+
+	vs_fastscan_unpack_codes(codes, g_count, dim, bits);
+	memcpy(bits + (size_t)lane * packed, enc->bits, packed);
+	vs_fastscan_pack_codes(bits, g_count, dim, codes);
+
+	f_add			= prism_centroid_fastscan_group_f_add(content, g, dim);
+	f_rescale		= prism_centroid_fastscan_group_f_rescale(content, g, dim);
+	f_error			= prism_centroid_fastscan_group_f_error(content, g, dim);
+	f_add[lane]		= enc->f_add;
+	f_rescale[lane] = enc->f_rescale;
+	f_error[lane] = vs_rabitq_derive_f_error(enc->f_add, enc->f_rescale, dim);
+}
+
+/* Encode centroid the way the tree writer did, and overwrite the leaf
+ * entry whose child is this posting head. */
+static void
+sync_tree_leaf(PrismRefinePublish *p, uint32_t leaf, const float *centroid)
+{
+	Dimension	dim	 = p->heads->dim;
+	BlockNumber head = p->heads->first_posting + leaf;
+	BlockNumber blk	 = p->first_centroid;
+	RaBitQData *enc	 = (RaBitQData *)p->enc;
+
+	if (p->format == PRISM_CENTROID_FMT_FASTSCAN ||
+		p->format == PRISM_CENTROID_FMT_RABITQ)
+	{
+		Vec32Ref vref = {.data = centroid, .dim = dim};
+		Vec32Ref mref = {.data = p->global_mean, .dim = dim};
+
+		vs_rabitq_encode_into(p->rq_params, vref, mref, enc);
+	}
+
+	while (blk != InvalidBlockNumber)
+	{
+		Page page = vs_storage_read_page(p->centroid_storage, blk);
+		const PrismCentroidPageOpaque *op	 = PRISM_CENTROID_OPAQUE(page);
+		BlockNumber					   next	 = op->next_blkno;
+		bool						   found = false;
+
+		if (prism_centroid_page_format(page) == PRISM_CENTROID_FMT_FASTSCAN)
+		{
+			uint16_t nent	 = op->entry_count;
+			uint32_t ngroups = (nent + VS_FASTSCAN_GROUP - 1) /
+							   VS_FASTSCAN_GROUP;
+			char *content = (char *)PageGetContents(page);
+
+			for (uint32_t g = 0; g < ngroups && !found; g++)
+			{
+				uint32_t	 g_count = nent - g * VS_FASTSCAN_GROUP;
+				BlockNumber *child;
+
+				if (g_count > VS_FASTSCAN_GROUP)
+					g_count = VS_FASTSCAN_GROUP;
+				child = prism_centroid_fastscan_group_child(content, g, dim);
+				for (uint32_t v = 0; v < g_count; v++)
+				{
+					if (child[v] == head)
+					{
+						found = true;
+						break;
+					}
+				}
+			}
+			vs_storage_release_page(p->centroid_storage, blk);
+			if (!found)
+			{
+				blk = next;
+				continue;
+			}
+
+			page = vs_storage_write_page(p->centroid_storage, blk);
+			op	 = PRISM_CENTROID_OPAQUE(page);
+			{
+				uint16_t nent	 = op->entry_count;
+				uint32_t ngroups = (nent + VS_FASTSCAN_GROUP - 1) /
+								   VS_FASTSCAN_GROUP;
+				content = (char *)PageGetContents(page);
+				for (uint32_t g = 0; g < ngroups; g++)
+				{
+					uint32_t	 g_count = nent - g * VS_FASTSCAN_GROUP;
+					BlockNumber *child;
+
+					if (g_count > VS_FASTSCAN_GROUP)
+						g_count = VS_FASTSCAN_GROUP;
+					child = prism_centroid_fastscan_group_child(
+							content, g, dim);
+					for (uint32_t v = 0; v < g_count; v++)
+					{
+						if (child[v] != head)
+							continue;
+						sync_fastscan_lane(
+								page, dim, g, v, g_count, enc, p->bits);
+						vs_storage_commit_page(p->centroid_storage, blk);
+						return;
+					}
+				}
+			}
+			vs_storage_commit_page(p->centroid_storage, blk);
+			return;
+		}
+
+		for (uint16_t i = 0; i < op->entry_count; i++)
+		{
+			const PrismCentroidEntryMeta *meta = prism_centroid_meta(page, i);
+
+			if ((meta->flags & PRISM_CENTROID_FLAG_LEAF) == 0 ||
+				meta->child_blkno != head)
+				continue;
+			found = true;
+			break;
+		}
+		vs_storage_release_page(p->centroid_storage, blk);
+		if (!found)
+		{
+			blk = next;
+			continue;
+		}
+
+		page = vs_storage_write_page(p->centroid_storage, blk);
+		op	 = PRISM_CENTROID_OPAQUE(page);
+		for (uint16_t i = 0; i < op->entry_count; i++)
+		{
+			const PrismCentroidEntryMeta *meta = prism_centroid_meta(page, i);
+			CentroidEncoderState		  est;
+			CentroidEncoder				 *encoder;
+			PrismCentroidFormat			  fmt;
+
+			if ((meta->flags & PRISM_CENTROID_FLAG_LEAF) == 0 ||
+				meta->child_blkno != head)
+				continue;
+
+			fmt		= prism_centroid_page_format(page);
+			encoder = centroid_encoder_init(
+					&est, fmt, centroid, dim, p->rq_params, p->global_mean);
+			encoder->ops->encode_into(encoder, 0, p->enc);
+			prism_centroid_page_overwrite_entry(page, dim, i, head, p->enc);
+			vs_storage_commit_page(p->centroid_storage, blk);
+			return;
+		}
+		vs_storage_commit_page(p->centroid_storage, blk);
+		return;
+	}
+}
+
+void
+prism_refine_publish_leaf(void *arg, uint32_t leaf, const float *mean)
+{
+	PrismRefinePublish *p	= (PrismRefinePublish *)arg;
+	Dimension			dim = p->heads->dim;
+
+	memcpy(p->scratch, mean, (size_t)dim * sizeof(float));
+	/* Sample leaves are unit-normalized under cosine before either copy
+	 * is written. A raw mean of unit vectors is not, and both the
+	 * assignment re-rank and the distance estimate assume it is. */
+	if (p->metric == DISTANCE_COSINE)
+	{
+		vs_l2_normalize(p->scratch, dim);
+		if (vs_l2_norm_squared(p->scratch, dim) == 0.0f)
+			return;
+	}
+
+	prism_write_leaf_head(p->heads, leaf, p->scratch);
+	sync_tree_leaf(p, leaf, p->scratch);
 }

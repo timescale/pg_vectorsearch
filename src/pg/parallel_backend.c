@@ -456,9 +456,10 @@ prism_pbuild_setup_shared(
 	 * Size the k-means sample set. The samples live in one shared-memory
 	 * region (total_samples * dim floats) that must stay resident for the
 	 * whole tree build -- root k-means and every subtree -- so its size is the
-	 * build's dominant memory cost. The ideal is ~256 samples per list, but at
-	 * fine nlist that can dwarf available RAM (nlist=480k -> 123M samples ->
-	 * ~360 GB), far beyond what a DSM segment can hold.
+	 * build's dominant memory cost. The ideal is PRISM_KMEANS_SAMPLES_PER_LEAF
+	 * samples per list, but at fine nlist that can dwarf available RAM
+	 * (nlist=480k -> 123M samples -> ~360 GB), far beyond what a DSM segment
+	 * can hold.
 	 *
 	 * Bound it by maintenance_work_mem: that is the build's memory budget and
 	 * the knob operators already raise for large index builds. When the budget
@@ -468,7 +469,7 @@ prism_pbuild_setup_shared(
 	 * hint -- the budget is the hard bound, so an inaccurate estimate cannot
 	 * over-commit shared memory.
 	 */
-	uint64_t want_samples = (uint64_t)nlist * 256;
+	uint64_t want_samples = (uint64_t)nlist * PRISM_KMEANS_SAMPLES_PER_LEAF;
 
 	/* maintenance_work_mem is in kB; reserve it for the sample region. */
 	uint64_t mem_bytes	= (uint64_t)maintenance_work_mem * UINT64CONST(1024);
