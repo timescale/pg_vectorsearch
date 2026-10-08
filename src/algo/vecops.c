@@ -102,16 +102,25 @@ typedef void (*BinaryOpFn)(const float *, const float *, float *, Dimension);
 typedef void (*ScaleFn)(const float *, float, float *, Dimension);
 typedef float (*DistanceFn)(const float *, const float *, Dimension);
 
-static DotProductFn g_dot_product_fn		 = NULL;
-static NormFn		g_l2_norm_squared_fn	 = NULL;
-static SumFn		g_vector_sum_fn			 = NULL;
-static BinaryOpFn	g_vector_sub_fn			 = NULL;
-static BinaryOpFn	g_vector_add_fn			 = NULL;
-static ScaleFn		g_vector_scale_fn		 = NULL;
-static DistanceFn	g_l2_distance_squared_fn = NULL;
+/*
+ * Selected implementations, published on first use.
+ *
+ * Atomic because two threads racing the first call can both pass the
+ * g_initialized check and both store here. The stores pick the same
+ * implementation, but concurrent non-atomic stores to one object are
+ * a data race whatever they write. Only standalone runs threads; a
+ * PostgreSQL backend is a process with its own copy.
+ */
+static _Atomic(DotProductFn) g_dot_product_fn		  = NULL;
+static _Atomic(NormFn)		 g_l2_norm_squared_fn	  = NULL;
+static _Atomic(SumFn)		 g_vector_sum_fn		  = NULL;
+static _Atomic(BinaryOpFn)	 g_vector_sub_fn		  = NULL;
+static _Atomic(BinaryOpFn)	 g_vector_add_fn		  = NULL;
+static _Atomic(ScaleFn)		 g_vector_scale_fn		  = NULL;
+static _Atomic(DistanceFn)	 g_l2_distance_squared_fn = NULL;
 
-static const char	*g_impl_name   = NULL;
-static _Atomic(bool) g_initialized = false;
+static _Atomic(const char *) g_impl_name   = NULL;
+static _Atomic(bool)		 g_initialized = false;
 
 void
 vs_vecops_force_reinit(void)
