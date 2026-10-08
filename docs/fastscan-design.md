@@ -220,7 +220,7 @@ processes ~8× more vectors per SIMD instruction.
 
 ### Metadata
 
-`PrismMetaPage.flags` gains `PRISM_META_FLAG_FASTSCAN` (0x02).
+`PrismMetaPage.flags` gains `PRISM_META_FLAG_FASTSCAN` (0x01).
 Old code ignores the flag and reads AoS pages normally (pages
 without `PRISM_POSTING_PAGE_FASTSCAN` in their opaque are AoS).
 
