@@ -21,6 +21,13 @@
 
 #define VS_TOPK_INITIAL_CAP_MIN 32
 
+/* Resize the candidate buffer down only once it exceeds the requested
+ * bound by this factor. An explicit rerank_pool should hold memory
+ * proportional to the pool, but a session alternating pool sizes would
+ * otherwise pay an arena reset on every query, so the proportionality
+ * holds up to this constant. */
+#define VS_TOPK_SHRINK_FACTOR 4
+
 /* ----------------------------------------------------------------
  * Threshold heap (max-heap of Distance values)
  * ---------------------------------------------------------------- */
@@ -135,6 +142,7 @@ vs_topk_init(VsTopK *topk, uint32_t k)
 			vs_memctx_alloc(topk->memctx, cap * sizeof(VsTopKEntry));
 	topk->cand_count	= 0;
 	topk->cand_capacity = cap;
+	topk->cand_limit	= 0;
 }
 
 void
@@ -169,6 +177,7 @@ vs_topk_create(uint32_t k)
 	topk->candidates	= vs_memctx_alloc(ctx, cap * sizeof(VsTopKEntry));
 	topk->cand_count	= 0;
 	topk->cand_capacity = cap;
+	topk->cand_limit	= 0;
 	return topk;
 }
 
@@ -218,6 +227,154 @@ vs_topk_reset_to_k(VsTopK *topk, uint32_t k)
 	topk->k			 = k;
 	topk->ub_count	 = 0;
 	topk->cand_count = 0;
+	topk->cand_limit = 0;
+}
+
+/* ----------------------------------------------------------------
+ * Bounded candidate buffer (explicit rerank_pool)
+ *
+ * In bounded mode the candidate buffer is a max-heap keyed by distance
+ * (the estimate), so it retains the cand_limit smallest-distance
+ * survivors and drops the rest as they arrive -- no unbounded growth and
+ * no end-of-scan sort over a large buffer. NaN estimates never reach here
+ * (the scan's lb < threshold gate rejects them), so the comparisons are
+ * well-defined. Correctness note: the caller sizes cand_limit at 3x the
+ * rerank pool so the extract's dedup (an id can appear twice: primary +
+ * SOAR replica) still yields the full pool of unique candidates.
+ * ---------------------------------------------------------------- */
+static void
+cand_sift_up(VsTopKEntry *c, uint32_t i)
+{
+	while (i > 0)
+	{
+		uint32_t parent = (i - 1) / 2;
+		if (!(c[i].distance > c[parent].distance))
+			break;
+		VsTopKEntry tmp = c[i];
+		c[i]			= c[parent];
+		c[parent]		= tmp;
+		i				= parent;
+	}
+}
+
+static void
+cand_sift_down(VsTopKEntry *c, uint32_t count, uint32_t i)
+{
+	for (;;)
+	{
+		uint32_t left	 = 2 * i + 1;
+		uint32_t right	 = 2 * i + 2;
+		uint32_t largest = i;
+
+		if (left < count && c[left].distance > c[largest].distance)
+			largest = left;
+		if (right < count && c[right].distance > c[largest].distance)
+			largest = right;
+		if (largest == i)
+			break;
+
+		VsTopKEntry tmp = c[i];
+		c[i]			= c[largest];
+		c[largest]		= tmp;
+		i				= largest;
+	}
+}
+
+/* Retain one admitted survivor: unbounded append, or bounded max-heap
+ * insert when cand_limit > 0. Shared by both insert entry points. */
+static void
+cand_retain(VsTopK *topk, Distance distance, Distance error, uint64_t id)
+{
+	VsTopKEntry entry = {
+			.distance = distance,
+			.error	  = error,
+			.id		  = id,
+			.src	  = topk->cur_src,
+	};
+
+	if (topk->cand_limit == 0)
+	{
+		/* Unbounded (auto pool / disabled cap): grow + append. */
+		if (topk->cand_count == topk->cand_capacity)
+		{
+			uint32_t	 new_cap = topk->cand_capacity * 2;
+			VsTopKEntry *new_buf = vs_memctx_alloc(
+					topk->memctx, new_cap * sizeof(VsTopKEntry));
+			memcpy(new_buf,
+				   topk->candidates,
+				   topk->cand_count * sizeof(VsTopKEntry));
+			topk->candidates	= new_buf;
+			topk->cand_capacity = new_cap;
+		}
+		topk->candidates[topk->cand_count++] = entry;
+		return;
+	}
+
+	/* Bounded: keep the cand_limit smallest-distance survivors. */
+	if (topk->cand_count < topk->cand_limit)
+	{
+		topk->candidates[topk->cand_count] = entry;
+		cand_sift_up(topk->candidates, topk->cand_count);
+		topk->cand_count++;
+	}
+	else if (entry.distance < topk->candidates[0].distance)
+	{
+		topk->candidates[0] = entry;
+		cand_sift_down(topk->candidates, topk->cand_count, 0);
+	}
+	/* else: worse than every retained candidate -- drop it. */
+}
+
+void
+vs_topk_set_cand_limit(VsTopK *topk, uint32_t limit)
+{
+	topk->cand_limit = limit;
+
+	/* A bound below the initial capacity is not worth holding a smaller
+	 * buffer for, and keeping this floor means an unbounded query that
+	 * follows starts doubling from the same place a fresh top-K would. */
+	uint32_t target = limit;
+	if (target != 0 && target < VS_TOPK_INITIAL_CAP_MIN)
+		target = VS_TOPK_INITIAL_CAP_MIN;
+
+	bool grow = target > topk->cand_capacity;
+	/* Divide rather than multiply: the factor cannot overflow a capacity
+	 * that a previous unbounded query grew arbitrarily large. */
+	bool shrink = target != 0 &&
+				  topk->cand_capacity / VS_TOPK_SHRINK_FACTOR > target;
+
+	if (!grow && !shrink)
+		return;
+
+	/* Reclaiming the outgrown blocks means resetting the arena, which
+	 * invalidates every allocation in it -- only sound on a fully reset
+	 * top-K, which is this function's documented call site. A caller that
+	 * resizes mid-collection instead retires the old buffer into the
+	 * arena, as the growth path always did; a shrink is pointless there,
+	 * since the entries to preserve are what makes the buffer large. */
+	if (topk->cand_count > 0 || topk->ub_count > 0)
+	{
+		if (grow)
+		{
+			VsTopKEntry *new_buf = vs_memctx_alloc(
+					topk->memctx, target * sizeof(VsTopKEntry));
+			memcpy(new_buf,
+				   topk->candidates,
+				   topk->cand_count * sizeof(VsTopKEntry));
+			topk->candidates	= new_buf;
+			topk->cand_capacity = target;
+		}
+		return;
+	}
+
+	vs_memctx_reset(topk->memctx);
+	topk->ub_heap =
+			vs_memctx_alloc(topk->memctx, topk->k_capacity * sizeof(Distance));
+	topk->ub_ids =
+			vs_memctx_alloc(topk->memctx, topk->k_capacity * sizeof(uint64_t));
+	topk->candidates =
+			vs_memctx_alloc(topk->memctx, target * sizeof(VsTopKEntry));
+	topk->cand_capacity = target;
 }
 
 void
@@ -250,25 +407,7 @@ vs_topk_insert_unique(
 		ub_sift_down(topk->ub_heap, topk->ub_ids, topk->ub_count);
 	}
 
-	/* Grow candidate buffer if needed (old buffer freed with memctx) */
-	if (topk->cand_count == topk->cand_capacity)
-	{
-		uint32_t	 new_cap = topk->cand_capacity * 2;
-		VsTopKEntry *new_buf =
-				vs_memctx_alloc(topk->memctx, new_cap * sizeof(VsTopKEntry));
-		memcpy(new_buf,
-			   topk->candidates,
-			   topk->cand_count * sizeof(VsTopKEntry));
-		topk->candidates	= new_buf;
-		topk->cand_capacity = new_cap;
-	}
-
-	topk->candidates[topk->cand_count++] = (VsTopKEntry){
-			.distance = distance,
-			.error	  = error,
-			.id		  = id,
-			.src	  = topk->cur_src,
-	};
+	cand_retain(topk, distance, error, id);
 }
 
 /* ----------------------------------------------------------------
@@ -323,26 +462,7 @@ vs_topk_insert(VsTopK *topk, Distance distance, Distance error, uint64_t id)
 	}
 
 append:
-	/* Grow candidate buffer if needed (old buffer freed with memctx) */
-	if (topk->cand_count == topk->cand_capacity)
-	{
-		uint32_t	 new_cap = topk->cand_capacity * 2;
-		VsTopKEntry *new_buf =
-				vs_memctx_alloc(topk->memctx, new_cap * sizeof(VsTopKEntry));
-		memcpy(new_buf,
-			   topk->candidates,
-			   topk->cand_count * sizeof(VsTopKEntry));
-		topk->candidates	= new_buf;
-		topk->cand_capacity = new_cap;
-	}
-
-	/* Append to candidate buffer */
-	topk->candidates[topk->cand_count++] = (VsTopKEntry){
-			.distance = distance,
-			.error	  = error,
-			.id		  = id,
-			.src	  = topk->cur_src,
-	};
+	cand_retain(topk, distance, error, id);
 }
 
 /*
