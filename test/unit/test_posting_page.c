@@ -645,7 +645,7 @@ TEST(chain_walk_rejects_corrupt_entry_count)
 	ASSERT_TRUE(pid >= 0, "fork succeeded");
 	if (pid == 0)
 	{
-		if (freopen("/dev/null", "w", stderr) == NULL)
+		if (!vs_test_expect_abort())
 			_exit(2);
 		prism_posting_check_count(head, op, dim);
 		_exit(0); /* reached only if the check failed to fire */
@@ -654,7 +654,7 @@ TEST(chain_walk_rejects_corrupt_entry_count)
 	int status = 0;
 	waitpid(pid, &status, 0);
 	ASSERT_TRUE(
-			WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
+			WIFEXITED(status) && WEXITSTATUS(status) == VS_TEST_ABORTED,
 			"a count past the page ceiling aborts");
 
 	vs_free(st.pages);
