@@ -48,15 +48,9 @@ is_dev_version "$NEXT" ||
     die "next version $NEXT carries no -dev suffix, so the gate would" \
         "read the bump as another release"
 
-# Strictly greater than what shipped, or the cycle reopens behind
-# itself and the next release would collide with an existing tag.
-released_base="$(strip_prerelease "$RELEASED")"
-next_base="$(strip_prerelease "$NEXT")"
-highest="$(printf '%s\n%s\n' "$released_base" "$next_base" |
-    sort -V | tail -1)"
-[[ "$highest" == "$next_base" && "$next_base" != "$released_base" ]] ||
-    die "next version $NEXT is not greater than the released" \
-        "$RELEASED -- the Next-Version trailer names the wrong cycle"
+# Where the cycle may reopen, by the same rule the release PR's trailer
+# check applied before this ran.
+check_next_version_order "$RELEASED" "$NEXT"
 
 [[ "$(project_version)" == "$RELEASED" ]] ||
     die "VERSION says $(project_version) but this run released" \

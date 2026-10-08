@@ -129,6 +129,21 @@ expect_status "open-cycle: auto-merge refusing does not fail the job" 0 \
     in_fixture "$armless" env STUB_MERGE_RC=1 \
     ./scripts/ci/release-open-dev-cycle.sh 0.1.0 0.2.0-dev main
 
+# A candidate is a step toward its own version, so it reopens at that
+# version rather than past it. release-lib.sh's trailer check already
+# treats an equal base as correct for a candidate; this is the same rule
+# on the other side of the publish.
+rc="$(new_fixture 0.1.0-rc1)"
+expect_status "open-cycle: a candidate reopens at its own version" 0 \
+    open_cycle "$rc" 0.1.0-rc1 0.1.0-dev main
+expect_eq "open-cycle: the candidate's cycle reopens at its version" \
+    0.1.0-dev "$(tr -d '[:space:]' <"$rc/VERSION")"
+
+# An equal base is correct only for a candidate: a final release
+# reopening at its own version would leave the cycle where it was.
+expect_status "open-cycle: a final release may not reopen at its own" 1 \
+    open_cycle "$dir" 0.1.0 0.1.0-dev
+
 # ----------------------------------------------------------------
 # release-check.sh: the verdict it hands the packaging job
 # ----------------------------------------------------------------
