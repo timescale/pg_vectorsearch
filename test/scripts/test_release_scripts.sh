@@ -178,6 +178,59 @@ release_verdict() {
 release_verdict "a release checkout" 0.1.0 true 0.1.0
 release_verdict "a development checkout" 0.2.0-dev false ""
 
+# On a pull_request event actions/checkout hands the job a synthetic
+# merge of the release branch into its base, not the release commit:
+# refs/pull/N/merge, whose message is "Merge <head> into <base>" and
+# carries no trailers. Every assertion reading commit metadata has to
+# name the release commit instead, and only this mode exercises that --
+# the checkouts above are standalone, where HEAD is the commit itself.
+# $2, when given, adds a second commit to the branch.
+pr_mode_fixture() {
+    local version="$1" extra="${2:-}" dir
+    dir="$(new_fixture 0.1.0-dev)"
+    (
+        cd "$dir" || exit 1
+        git switch -qc "chore/release-$version"
+        printf '%s\n' "$version" >VERSION
+        printf '# Changelog\n\n## [%s] - 2026-01-01\n\n- it works\n' \
+            "$version" >CHANGELOG.md
+        git add VERSION CHANGELOG.md
+        git commit -qm "chore: release $version" \
+            -m "Next-Version: 0.2.0-dev"
+        if [[ -n "$extra" ]]; then
+            printf -- '- and again\n' >>CHANGELOG.md
+            git add CHANGELOG.md
+            git commit -qm "chore: more notes"
+        fi
+        # Detached at the base, as the job's checkout is.
+        git switch -q --detach main
+        git merge -q --no-ff -m "Merge the release into main" \
+            "chore/release-$version"
+    ) >/dev/null 2>&1
+    printf '%s\n' "$dir"
+}
+
+pr_dir="$(pr_mode_fixture 0.1.0-rc1)"
+pr_out="$pr_dir.output"
+: >"$pr_out"
+expect_status "release-check: a release pull request passes" 0 \
+    in_fixture "$pr_dir" env GITHUB_OUTPUT="$pr_out" \
+    ./scripts/ci/release-check.sh origin/main
+expect_eq "release-check: a release pull request reports release=true" \
+    "release=true" "$(grep '^release=' "$pr_out")"
+expect_eq "release-check: a release pull request reports the version" \
+    "version=0.1.0-rc1" "$(grep '^version=' "$pr_out")"
+
+# The trailer is only parsed as the message's last paragraph, so a
+# second commit would strand it mid-message under a squash merge that
+# concatenates the two. Rejecting it is what keeps the one-commit shape
+# the trailer read depends on -- and the merge the event adds must not
+# be what trips it.
+two_dir="$(pr_mode_fixture 0.1.0-rc1 extra)"
+expect_status "release-check: a two-commit release pull request is refused" \
+    1 in_fixture "$two_dir" env GITHUB_OUTPUT=/dev/null \
+    ./scripts/ci/release-check.sh origin/main
+
 # A malformed VERSION must fail rather than be classified. The suffix
 # test alone would read "not-a-version" as neither a release nor a
 # development version, and "1.2-dev" as a development version -- so the

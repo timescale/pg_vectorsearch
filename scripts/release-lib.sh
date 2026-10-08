@@ -453,10 +453,14 @@ check_next_version_order() {
 # the tag exists and a wrong trailer has already stranded main.
 #
 # $2 is the branch being released from, which decides the default bump.
+# $3 is the commit carrying the trailer, HEAD by default. It has to be
+# nameable because a pull_request checkout is a synthetic merge of the
+# release branch into its base, and trailers are read from one commit's
+# message -- the merge's, which has none.
 check_next_version_trailer() {
-    local version="$1" branch="$2" next want
-    next="$(git log -1 --format='%(trailers:key=Next-Version,valueonly)' |
-        tr -d '[:space:]')"
+    local version="$1" branch="$2" commit="${3:-HEAD}" next want
+    next="$(git log -1 --format='%(trailers:key=Next-Version,valueonly)' \
+        "$commit" | tr -d '[:space:]')"
 
     [[ -n "$next" ]] ||
         die "the release commit has no Next-Version trailer --" \
