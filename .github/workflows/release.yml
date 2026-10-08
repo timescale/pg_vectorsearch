@@ -113,23 +113,19 @@ jobs:
             "-Dpg_config=$PG_CONFIG"
 
       # Before anything is tagged, so a tarball that will not build
-      # cannot become a published release. `meson dist` unpacks what it
-      # archived and runs setup, compile, test and install over it,
-      # reusing this builddir's options -- so the PG extension is
-      # exercised too, not just the core build. It writes a .sha256sum
-      # beside the tarball, so there is nothing to add around it.
-      #
-      # The tarball is asserted rather than assumed: `meson dist`
-      # reports success when it declines to run at all -- in a tree with
-      # no VCS it prints "Dist currently only works with Git or
-      # Mercurial repos" and exits 0.
+      # cannot become a published release. The archive is unpacked and
+      # put through the same configure, compile, install and test
+      # sequence as any build, so the PG extension inside it is
+      # exercised too and not just the core build. `meson dist` writes
+      # a .sha256sum beside the tarball, so there is nothing to add
+      # around it.
       - name: Package the source tarball
+        env:
+          PG_CONFIG: ${{ steps.pg.outputs.pg-config }}
         run: |
-          meson dist -C builddir --formats gztar
-          ls -l builddir/meson-dist/
-          test -n "$(find builddir/meson-dist -name '*.tar.gz' -size +1k \
-            -print -quit)" ||
-            { echo "::error::meson dist produced no tarball"; exit 1; }
+          ./scripts/ci/release-package.sh builddir \
+            -Dpostgresql=enabled -Dtools=enabled \
+            "-Dpg_config=$PG_CONFIG"
 
       # The publishing job has neither the toolchain nor a builddir, so
       # the assets travel as an artifact rather than being rebuilt.

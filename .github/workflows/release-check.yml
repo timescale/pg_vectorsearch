@@ -91,9 +91,9 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      # The same set release.yml's build job installs: meson dist
-      # builds and tests the unpacked tree, so it needs everything a
-      # normal build does.
+      # The same set release.yml's build job installs: the unpacked
+      # archive is configured, built and tested here, so this needs
+      # everything a normal build does.
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -111,19 +111,16 @@ jobs:
         env:
           PG_CONFIG: ${{ steps.pg.outputs.pg-config }}
         run: |
-          # meson dist unpacks what it archived and runs setup, compile,
-          # test and install over it, so a tarball that does not build
+          # Builds the archive, then builds, installs and tests the
+          # unpacked copy of it -- so a tarball that does not work
           # fails here rather than after the release is published.
           meson setup builddir -Dpostgresql=enabled \
             "-Dpg_config=$PG_CONFIG"
-          meson dist -C builddir --formats gztar
+          ./scripts/ci/release-package.sh builddir \
+            -Dpostgresql=enabled "-Dpg_config=$PG_CONFIG"
           mkdir -p dist
           cp builddir/meson-dist/* dist/
           ls -l dist/
-          # meson dist reports success when it declines to run at all,
-          # so the archive is asserted rather than assumed.
-          test -n "$(find dist -name '*.tar.gz' -size +1k -print -quit)" ||
-            { echo "::error::meson dist produced no tarball"; exit 1; }
 
       - name: Upload the tarball
         id: upload
