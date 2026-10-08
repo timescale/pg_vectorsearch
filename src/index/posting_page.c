@@ -87,6 +87,12 @@ prism_posting_page_add(
 	memcpy(hdr->bits, bits, VS_RABITQ_BYTES(dim));
 
 	opaque->entry_count = i + 1;
+
+	/* A live entry means the page is no longer wholly dead, so drop the
+	 * scan-side shortcut -- see PRISM_POSTING_PAGE_TOMBSTONED. */
+	if ((entry_flags & PRISM_POSTING_FLAG_DELETED) == 0)
+		opaque->flags &= (uint16_t)~PRISM_POSTING_PAGE_TOMBSTONED;
+
 	return true;
 }
 

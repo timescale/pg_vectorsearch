@@ -43,8 +43,7 @@ prism_posting_insert_one(
 	 * caller re-routes. Checked here, on the read we already do, so the caller
 	 * needn't re-read the head just to test these flags.
 	 */
-	if (hop->flags &
-		(PRISM_POSTING_PAGE_TOMBSTONED | PRISM_POSTING_PAGE_DELETED))
+	if (hop->flags & PRISM_POSTING_PAGE_DELETED)
 	{
 		vs_storage_release_page(storage, head_blkno);
 		if (head_retired != NULL)
