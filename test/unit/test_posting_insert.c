@@ -539,6 +539,50 @@ TEST(tombstone_all_flags_aos_page)
 	vs_rabitq_destroy(params);
 }
 
+TEST(tombstone_all_then_insert_unflags_aos_and_scans_new_entry)
+{
+	Dimension		dim		 = 128;
+	TestPageStorage storage	 = make_test_storage(32);
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 5);
+	RaBitQScratch	scratch	 = {0};
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(8, dim);
+	float		   *new_vec	 = vecs + (size_t) 0 * dim;
+
+	BlockNumber head =
+			build_cluster(&storage, params, dim, centroid, vecs, 8, false);
+
+	const uint32_t dead_vids[] = {0, 1, 2, 3, 4, 5, 6, 7};
+	DeadSet		   dead		   = {.vids = dead_vids, .n = 8};
+	ASSERT_EQ(
+			8,
+			prism_posting_tombstone_chain(
+					&storage.base, dim, head, vid_is_dead, &dead),
+			"all AoS entries tombstoned");
+	ASSERT_EQ(
+			0,
+			scan_count(&storage, params, dim, centroid, head, 64, false),
+			"scan sees no live entries after full tombstone");
+
+	insert_vec(&storage, params, dim, head, 1000, new_vec, &scratch);
+
+	Page hp = vs_storage_read_page(&storage.base, head);
+	ASSERT_TRUE(
+			(prism_posting_opaque(hp)->flags &
+			 PRISM_POSTING_PAGE_TOMBSTONED) == 0,
+			"reinsertion clears tombstone state on AoS page");
+	ASSERT_EQ(1, prism_posting_head_live_count(hp), "live_count reflects new row");
+	vs_storage_release_page(&storage.base, head);
+
+	ASSERT_EQ(
+			1,
+			scan_count(&storage, params, dim, centroid, head, 64, false),
+			"scan returns the newly inserted entry");
+
+	vs_rabitq_scratch_cleanup(&scratch);
+	vs_rabitq_destroy(params);
+}
+
 /* A wholly-dead FASTSCAN page still gets PRISM_POSTING_PAGE_TOMBSTONED --
  * every lane of every group ends up marked, so the page-level shortcut
  * applies the same as it would with any subset of lanes dead -- it is not a
