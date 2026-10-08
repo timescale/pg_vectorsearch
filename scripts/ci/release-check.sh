@@ -105,23 +105,31 @@ fi
 # paragraph -- which is the only place git parses one. A second commit
 # pushes it into the middle under a squash merge that concatenates
 # messages, and the next development version is then silently lost.
+#
+# Standalone, HEAD is the release commit. On a pull_request event it is
+# not: actions/checkout hands the job refs/pull/N/merge, a synthetic
+# merge of the branch into its base whose own message carries no
+# trailers. --no-merges skips it here, and the commit it leaves is the
+# one the trailer check has to read.
+RELEASE_COMMIT=HEAD
 if [[ -n "$BASE" ]]; then
     log "check: single commit"
-    # --no-merges: on a pull_request event the checkout is a synthetic
-    # merge of the branch into its base, which would otherwise count as
-    # a commit of its own. A release branch has no merges of its own --
-    # main requires linear history.
+    # A release branch has no merges of its own -- main requires linear
+    # history -- so the only merge in the range is the event's.
     commits="$(git rev-list --count --no-merges "$BASE..HEAD")"
     [[ "$commits" == 1 ]] ||
         die "a release PR is one commit, this has $commits --" \
             "amend the release notes into the release commit rather" \
             "than adding a commit for them"
+    # Asserted to be one line by the count above, so this is the
+    # release commit itself rather than a list.
+    RELEASE_COMMIT="$(git rev-list --no-merges "$BASE..HEAD")"
 fi
 
 # After the single-commit check: a second commit moves the trailer out of
 # the message's last paragraph, which is the only place git parses one.
 log "check: Next-Version trailer"
-check_next_version_trailer "$VERSION" "$RELEASE_BRANCH"
+check_next_version_trailer "$VERSION" "$RELEASE_BRANCH" "$RELEASE_COMMIT"
 
 log "check: changelog entry"
 changelog_has_section "$VERSION" ||
