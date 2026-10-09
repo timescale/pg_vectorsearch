@@ -42,6 +42,7 @@ int			prism_leaf_refine_threshold = 0;
 static bool prism_recent_buffers		= true;
 double		prism_probe_expand			= 2.0;
 static int	prism_rerank_pool			= 0;
+double prism_rerank_pool_cost_scale = 0.0; /* prism.rerank_pool_cost_scale */
 
 static void
 vs_recent_buffers_assign_hook(bool newval, void *extra)
@@ -335,6 +336,30 @@ _PG_init(void)
 			0,
 			NULL,
 			vs_rerank_pool_assign_hook,
+			NULL);
+
+	DefineCustomRealVariable(
+			VS_GUC_PREFIX ".rerank_pool_cost_scale",
+			"Shrinks the automatic rerank pool when rerank candidates "
+			"are expensive (0 = auto-detect).",
+			"Only applies to the automatic rerank_pool (rerank_pool = 0). "
+			"The auto pool is sized for cache-resident reranking. When the "
+			"table and index do not fit in cache, each rerank candidate is "
+			"a disk read instead, and this scale divides the pool to "
+			"account for that. 0 (the default) computes the scale per scan "
+			"as (table + index size) / effective_cache_size, floored at "
+			"1.0, so nothing changes when the working set fits in cache. "
+			"Set a positive value to override; 1.0 always gives the "
+			"unscaled pool. The pool never drops below the built-in "
+			"recall floor.",
+			&prism_rerank_pool_cost_scale,
+			0.0,
+			0.0,
+			1000.0,
+			PGC_USERSET,
+			0,
+			NULL,
+			NULL,
 			NULL);
 
 	MarkGUCPrefixReserved(VS_GUC_PREFIX);
