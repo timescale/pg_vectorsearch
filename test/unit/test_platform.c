@@ -155,7 +155,10 @@ TEST(compiler_barrier_compiles)
 	x = 2;
 	vs_compiler_barrier();
 
-	ASSERT_EQ(2, x, "compiler barrier should not change values");
+	/* Read once, here: ASSERT_EQ names its operands twice, and a
+	 * volatile read is a side effect to repeat. */
+	int observed = x;
+	ASSERT_EQ(2, observed, "compiler barrier should not change values");
 }
 
 TEST(print_detected_capabilities)
