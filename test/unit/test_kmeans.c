@@ -43,11 +43,11 @@ make_3_clusters(float *out, uint32_t per_cluster, uint64_t seed)
 	{
 		for (uint32_t i = 0; i < per_cluster; i++)
 		{
-			uint32_t idx	 = (uint32_t)c * per_cluster + i;
-			rng				 = rng * 1103515245 + 12345;
-			float dx		 = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.5f;
-			rng				 = rng * 1103515245 + 12345;
-			float dy		 = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.5f;
+			uint32_t idx = (uint32_t)c * per_cluster + i;
+			float dx = ((float)(vs_test_rand(&rng) % 1000) / 500.0f - 1.0f) *
+					   0.5f;
+			float dy = ((float)(vs_test_rand(&rng) % 1000) / 500.0f - 1.0f) *
+					   0.5f;
 			out[idx * 2 + 0] = centers[c][0] + dx;
 			out[idx * 2 + 1] = centers[c][1] + dy;
 		}
@@ -185,20 +185,19 @@ TEST(basic_cosine)
 	for (uint32_t i = 0; i < per_cluster; i++)
 	{
 		/* Cluster 0: angle near 0 */
-		rng				= rng * 1103515245 + 12345;
-		float a0		= ((float)(rng % 1000) / 5000.0f) - 0.1f;
+		float a0 = ((float)(vs_test_rand(&rng) % 1000) / 5000.0f) - 0.1f;
 		data[i * 2 + 0] = cosf(a0);
 		data[i * 2 + 1] = sinf(a0);
 
 		/* Cluster 1: angle near pi/2 */
-		rng		 = rng * 1103515245 + 12345;
-		float a1 = 1.5708f + ((float)(rng % 1000) / 5000.0f) - 0.1f;
+		float a1 = 1.5708f + ((float)(vs_test_rand(&rng) % 1000) / 5000.0f) -
+				   0.1f;
 		data[(per_cluster + i) * 2 + 0] = cosf(a1);
 		data[(per_cluster + i) * 2 + 1] = sinf(a1);
 
 		/* Cluster 2: angle near pi */
-		rng		 = rng * 1103515245 + 12345;
-		float a2 = 3.14159f + ((float)(rng % 1000) / 5000.0f) - 0.1f;
+		float a2 = 3.14159f + ((float)(vs_test_rand(&rng) % 1000) / 5000.0f) -
+				   0.1f;
 		data[(2 * per_cluster + i) * 2 + 0] = cosf(a2);
 		data[(2 * per_cluster + i) * 2 + 1] = sinf(a2);
 	}
@@ -248,11 +247,11 @@ TEST(well_separated_clusters)
 	{
 		for (uint32_t i = 0; i < per_cluster; i++)
 		{
-			uint32_t idx	  = (uint32_t)c * per_cluster + i;
-			rng				  = rng * 1103515245 + 12345;
-			float dx		  = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.01f;
-			rng				  = rng * 1103515245 + 12345;
-			float dy		  = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.01f;
+			uint32_t idx = (uint32_t)c * per_cluster + i;
+			float dx = ((float)(vs_test_rand(&rng) % 1000) / 500.0f - 1.0f) *
+					   0.01f;
+			float dy = ((float)(vs_test_rand(&rng) % 1000) / 500.0f - 1.0f) *
+					   0.01f;
 			data[idx * 2 + 0] = centers[c][0] + dx;
 			data[idx * 2 + 1] = centers[c][1] + dy;
 		}
@@ -373,19 +372,17 @@ TEST(empty_cluster_handling)
 	uint32_t rng = 77;
 	for (uint32_t i = 0; i < per_cluster; i++)
 	{
-		rng				= rng * 1103515245 + 12345;
-		data[i * 2 + 0] = 10.0f + (float)(rng % 100) / 1000.0f;
-		rng				= rng * 1103515245 + 12345;
-		data[i * 2 + 1] = 10.0f + (float)(rng % 100) / 1000.0f;
+		data[i * 2 + 0] = 10.0f + (float)(vs_test_rand(&rng) % 100) / 1000.0f;
+		data[i * 2 + 1] = 10.0f + (float)(vs_test_rand(&rng) % 100) / 1000.0f;
 	}
 	for (uint32_t i = 0; i < per_cluster; i++)
 	{
-		rng								= rng * 1103515245 + 12345;
 		data[(per_cluster + i) * 2 + 0] = -10.0f +
-										  (float)(rng % 100) / 1000.0f;
-		rng								= rng * 1103515245 + 12345;
+										  (float)(vs_test_rand(&rng) % 100) /
+												  1000.0f;
 		data[(per_cluster + i) * 2 + 1] = -10.0f +
-										  (float)(rng % 100) / 1000.0f;
+										  (float)(vs_test_rand(&rng) % 100) /
+												  1000.0f;
 	}
 
 	KMeansOptions opts = VS_KMEANS_OPTIONS_DEFAULT;
@@ -537,8 +534,9 @@ TEST_PARAMETERIZED(dims, "4", "16", "64", "128")
 			uint32_t idx = c * per_cluster + i;
 			for (uint32_t d = 0; d < dim; d++)
 			{
-				rng			= rng * 1103515245 + 12345;
-				float noise = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.1f;
+				float noise = ((float)(vs_test_rand(&rng) % 1000) / 500.0f -
+							   1.0f) *
+							  0.1f;
 				/* Cluster c has large value in dimension c % dim */
 				float center				= (d == c % dim) ? 10.0f : 0.0f;
 				data[(size_t)idx * dim + d] = center + noise;
@@ -736,18 +734,17 @@ TEST(lloyd_cosine)
 	uint32_t rng = 42;
 	for (uint32_t i = 0; i < per_cluster; i++)
 	{
-		rng				= rng * 1103515245 + 12345;
-		float a0		= ((float)(rng % 1000) / 5000.0f) - 0.1f;
+		float a0 = ((float)(vs_test_rand(&rng) % 1000) / 5000.0f) - 0.1f;
 		data[i * 2 + 0] = cosf(a0);
 		data[i * 2 + 1] = sinf(a0);
 
-		rng		 = rng * 1103515245 + 12345;
-		float a1 = 1.5708f + ((float)(rng % 1000) / 5000.0f) - 0.1f;
+		float a1 = 1.5708f + ((float)(vs_test_rand(&rng) % 1000) / 5000.0f) -
+				   0.1f;
 		data[(per_cluster + i) * 2 + 0] = cosf(a1);
 		data[(per_cluster + i) * 2 + 1] = sinf(a1);
 
-		rng		 = rng * 1103515245 + 12345;
-		float a2 = 3.14159f + ((float)(rng % 1000) / 5000.0f) - 0.1f;
+		float a2 = 3.14159f + ((float)(vs_test_rand(&rng) % 1000) / 5000.0f) -
+				   0.1f;
 		data[(2 * per_cluster + i) * 2 + 0] = cosf(a2);
 		data[(2 * per_cluster + i) * 2 + 1] = sinf(a2);
 	}
@@ -899,9 +896,10 @@ TEST(hamerly_higher_dim)
 			uint32_t idx = c * per_cluster + i;
 			for (uint32_t d = 0; d < dim; d++)
 			{
-				rng			 = rng * 1103515245 + 12345;
-				float noise	 = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.1f;
-				float center = (d == c % dim) ? 10.0f : 0.0f;
+				float noise = ((float)(vs_test_rand(&rng) % 1000) / 500.0f -
+							   1.0f) *
+							  0.1f;
+				float center				= (d == c % dim) ? 10.0f : 0.0f;
 				data[(size_t)idx * dim + d] = center + noise;
 			}
 		}
@@ -946,9 +944,10 @@ TEST(elkan_higher_dim)
 			uint32_t idx = c * per_cluster + i;
 			for (uint32_t d = 0; d < dim; d++)
 			{
-				rng			 = rng * 1103515245 + 12345;
-				float noise	 = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.1f;
-				float center = (d == c % dim) ? 10.0f : 0.0f;
+				float noise = ((float)(vs_test_rand(&rng) % 1000) / 500.0f -
+							   1.0f) *
+							  0.1f;
+				float center				= (d == c % dim) ? 10.0f : 0.0f;
 				data[(size_t)idx * dim + d] = center + noise;
 			}
 		}
@@ -1052,9 +1051,10 @@ TEST(hamerly_many_clusters)
 			uint32_t idx = c * per_cluster + i;
 			for (uint32_t d = 0; d < dim; d++)
 			{
-				rng			 = rng * 1103515245 + 12345;
-				float noise	 = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.1f;
-				float center = (c & (1u << d)) ? 10.0f : -10.0f;
+				float noise = ((float)(vs_test_rand(&rng) % 1000) / 500.0f -
+							   1.0f) *
+							  0.1f;
+				float center				= (c & (1u << d)) ? 10.0f : -10.0f;
 				data[(size_t)idx * dim + d] = center + noise;
 			}
 		}
@@ -1115,9 +1115,10 @@ TEST_PARAMETERIZED(algo_overlapping, "hamerly", "elkan")
 		uint32_t c = i % nlist;
 		for (uint32_t d = 0; d < dim; d++)
 		{
-			rng			 = rng * 1103515245 + 12345;
-			float noise	 = ((float)(rng % 10000) / 5000.0f - 1.0f) * 2.0f;
-			float center = (d == c) ? 3.0f : 0.0f;
+			float noise = ((float)(vs_test_rand(&rng) % 10000) / 5000.0f -
+						   1.0f) *
+						  2.0f;
+			float center			  = (d == c) ? 3.0f : 0.0f;
 			data[(size_t)i * dim + d] = center + noise;
 		}
 	}
@@ -1163,9 +1164,10 @@ TEST(elkan_many_clusters)
 			uint32_t idx = c * per_cluster + i;
 			for (uint32_t d = 0; d < dim; d++)
 			{
-				rng			 = rng * 1103515245 + 12345;
-				float noise	 = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.1f;
-				float center = (c & (1u << d)) ? 10.0f : -10.0f;
+				float noise = ((float)(vs_test_rand(&rng) % 1000) / 500.0f -
+							   1.0f) *
+							  0.1f;
+				float center				= (c & (1u << d)) ? 10.0f : -10.0f;
 				data[(size_t)idx * dim + d] = center + noise;
 			}
 		}
@@ -1328,9 +1330,10 @@ TEST_PARAMETERIZED(f16_algo_overlapping, "hamerly", "elkan")
 		uint32_t c = i % nlist;
 		for (uint32_t d = 0; d < dim; d++)
 		{
-			rng			 = rng * 1103515245 + 12345;
-			float noise	 = ((float)(rng % 10000) / 5000.0f - 1.0f) * 2.0f;
-			float center = (d == c) ? 3.0f : 0.0f;
+			float noise = ((float)(vs_test_rand(&rng) % 10000) / 5000.0f -
+						   1.0f) *
+						  2.0f;
+			float center			  = (d == c) ? 3.0f : 0.0f;
 			data[(size_t)i * dim + d] = center + noise;
 		}
 	}
@@ -1386,10 +1389,10 @@ TEST(indexed_kmeans)
 		for (uint32_t i = 0; i < per_cluster; i++)
 		{
 			uint32_t idx = c * per_cluster + i;
-			rng			 = rng * 1103515245 + 12345;
-			float dx	 = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.1f;
-			rng			 = rng * 1103515245 + 12345;
-			float dy	 = ((float)(rng % 1000) / 500.0f - 1.0f) * 0.1f;
+			float dx = ((float)(vs_test_rand(&rng) % 1000) / 500.0f - 1.0f) *
+					   0.1f;
+			float dy = ((float)(vs_test_rand(&rng) % 1000) / 500.0f - 1.0f) *
+					   0.1f;
 			all_vecs[idx * 2 + 0] = centers[c][0] + dx;
 			all_vecs[idx * 2 + 1] = centers[c][1] + dy;
 		}

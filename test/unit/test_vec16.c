@@ -440,10 +440,8 @@ TEST(f16c_ops_dot_product_simd)
 	uint32_t rng = 42;
 	for (Dimension i = 0; i < dim; i++)
 	{
-		rng	  = rng * 1103515245 + 12345;
-		fv[i] = ((float)(rng >> 16) / 32768.0f) - 1.0f;
-		rng	  = rng * 1103515245 + 12345;
-		fc[i] = ((float)(rng >> 16) / 32768.0f) - 1.0f;
+		fv[i] = ((float)(vs_test_rand(&rng) >> 16) / 32768.0f) - 1.0f;
+		fc[i] = ((float)(vs_test_rand(&rng) >> 16) / 32768.0f) - 1.0f;
 	}
 	vs_float_to_half_array(fv, hv, dim);
 
@@ -477,10 +475,8 @@ TEST(f16c_ops_l2_squared_simd)
 	uint32_t rng = 42;
 	for (Dimension i = 0; i < dim; i++)
 	{
-		rng	  = rng * 1103515245 + 12345;
-		fv[i] = ((float)(rng >> 16) / 32768.0f) - 1.0f;
-		rng	  = rng * 1103515245 + 12345;
-		fc[i] = ((float)(rng >> 16) / 32768.0f) - 1.0f;
+		fv[i] = ((float)(vs_test_rand(&rng) >> 16) / 32768.0f) - 1.0f;
+		fc[i] = ((float)(vs_test_rand(&rng) >> 16) / 32768.0f) - 1.0f;
 	}
 	vs_float_to_half_array(fv, hv, dim);
 
@@ -512,8 +508,7 @@ TEST(f16c_ops_norm_sq_simd)
 	uint32_t rng = 42;
 	for (Dimension i = 0; i < dim; i++)
 	{
-		rng	  = rng * 1103515245 + 12345;
-		fv[i] = ((float)(rng >> 16) / 32768.0f) - 1.0f;
+		fv[i] = ((float)(vs_test_rand(&rng) >> 16) / 32768.0f) - 1.0f;
 	}
 	vs_float_to_half_array(fv, hv, dim);
 
@@ -550,8 +545,7 @@ TEST(f16c_ops_sum_to_float_simd)
 	uint32_t rng = 42;
 	for (Dimension i = 0; i < dim; i++)
 	{
-		rng	   = rng * 1103515245 + 12345;
-		fv[i]  = ((float)(rng >> 16) / 32768.0f) - 1.0f;
+		fv[i]  = ((float)(vs_test_rand(&rng) >> 16) / 32768.0f) - 1.0f;
 		ref[i] = 100.0f;
 		got[i] = 100.0f;
 	}
@@ -583,10 +577,8 @@ TEST(f16_ops_distance_matches_f32_reference)
 	uint32_t rng = 12345;
 	for (Dimension i = 0; i < dim; i++)
 	{
-		rng	  = rng * 1103515245 + 12345;
-		fv[i] = ((float)(rng >> 16) / 32768.0f) - 1.0f;
-		rng	  = rng * 1103515245 + 12345;
-		fc[i] = ((float)(rng >> 16) / 32768.0f) - 1.0f;
+		fv[i] = ((float)(vs_test_rand(&rng) >> 16) / 32768.0f) - 1.0f;
+		fc[i] = ((float)(vs_test_rand(&rng) >> 16) / 32768.0f) - 1.0f;
 	}
 
 	vs_float_to_half_array(fv, hv, dim);
