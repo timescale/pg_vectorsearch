@@ -645,6 +645,11 @@ prism_pbuild_setup_shared(
 	shared->reltuples  = 0.0;
 	shared->indtuples  = 0.0;
 	shared->soar_dupes = 0.0;
+	/* The scan descriptor sits in the same chunk, right after the struct;
+	 * est_shared sized it for both. The address is therefore inside the
+	 * allocation while being past the end of pg->base, which is what the
+	 * checker measures against. Mirrors nbtsort.c. */
+	/* coverity[OVERRUN] */
 	table_parallelscan_initialize(
 			heap, ParallelTableScanFromVsShared(shared), snapshot);
 	shm_toc_insert(pcxt->toc, PRISM_DSM_KEY_SHARED, shared);
