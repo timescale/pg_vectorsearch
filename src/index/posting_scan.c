@@ -221,11 +221,16 @@ advance_page(PrismPostingScan *scan)
 	if (scan->cur_blkno == InvalidBlockNumber)
 		return false;
 
-	/* Read next page — inline for ArrayPageStorage */
+	/* Read next page — inline for ArrayPageStorage. A scan over a
+	 * non-paged posting format carries neither a page base nor a storage
+	 * (see the flat branch of the standalone query context); it reaches
+	 * its single page through begin_flat and has no chain to follow. */
 	if (scan->page_base != NULL)
 		scan->cur_page = scan->page_base + (size_t)scan->cur_blkno * BLCKSZ;
-	else
+	else if (scan->storage != NULL)
 		scan->cur_page = vs_storage_read_page(scan->storage, scan->cur_blkno);
+	else
+		return false;
 
 	PrismPostingPageOpaque *opaque = prism_posting_opaque(scan->cur_page);
 
