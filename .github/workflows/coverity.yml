@@ -53,7 +53,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             meson ninja-build gcc make libgsl-dev libopenblas-dev \
-            curl ca-certificates
+            libhdf5-dev curl ca-certificates
           # PostgreSQL headers, so the extension is part of the build
           # that Coverity captures. From pgdg because meson requires 18+.
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -66,11 +66,15 @@ jobs:
           echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
 
       # Configure outside the capture; only the compile needs to run
-      # under cov-build. enabled rather than auto for both features, so a
+      # under cov-build. enabled rather than auto for every feature, so a
       # missing dependency fails here instead of silently shrinking what
-      # Coverity sees: the extension, the CLI and the unit tests.
+      # Coverity sees: the extension, the CLI and the unit tests. Left on
+      # auto, an absent libhdf5 drops the dataset paths from the capture
+      # and leaves the code that feeds them reading as dead.
       - name: Configure
-        run: meson setup builddir -Dpostgresql=enabled -Dtools=enabled
+        run: |
+          meson setup builddir \
+            -Dpostgresql=enabled -Dtools=enabled -Dhdf5=enabled
 
       # The action downloads and caches the analysis tool and runs the
       # build under cov-build. It does not submit: its upload treats any
