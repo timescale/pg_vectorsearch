@@ -47,6 +47,7 @@
 
 #include <signal.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -363,6 +364,28 @@ void vs_test_printf(const char *fmt, ...)
 			const char __attribute__((unused)) * param)
 
 /* Assertion macros */
+/* ----------------------------------------------------------------
+ * Deterministic test data
+ * ---------------------------------------------------------------- */
+
+/*
+ * Advance a linear congruential generator and return the new state. The
+ * same seed gives the same sequence everywhere, which rand() does not
+ * promise -- its sequence belongs to the C library, so vectors drawn
+ * from it differ between a glibc and a macOS runner.
+ *
+ * The multiply is widened to 64 bits and masked back to 32. The low 32
+ * bits are what a wrapping 32-bit multiply would leave, so the sequence
+ * is unchanged, but nothing overflows on the way there.
+ */
+static inline uint32_t
+vs_test_rand(uint32_t *state)
+{
+	*state = (uint32_t)(((uint64_t)*state * 1103515245u + 12345u) &
+						0xFFFFFFFFu);
+	return *state;
+}
+
 #define ASSERT_TRUE(cond, msg)                                            \
 	do                                                                    \
 	{                                                                     \

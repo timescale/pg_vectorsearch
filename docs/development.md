@@ -417,6 +417,15 @@ The project uses GitHub Actions for CI with the following workflows:
 | `codeql.yml` | Push, PR, Weekly, push to `trigger/codeql`, manual | GitHub CodeQL static analysis of C, workflows and Python |
 | `coverity.yml` | Weekly, push to `trigger/coverity`, manual | Coverity Scan static analysis; Scan caps submissions, so it never runs on PRs |
 
+Coverity reads an analysis model from
+[the project's settings][coverity-project] rather than from the uploaded
+build, so `test/unit/coverity-model.c` takes effect only once a project
+admin uploads it there, and a change to it needs a re-upload. The model
+describes what the analysis cannot work out for itself -- currently that
+a failed assertion ends the test body it is in.
+
+[coverity-project]: https://scan.coverity.com/projects/timescale-pg_vectorsearch
+
 ## Design Patterns
 
 ### Config-Based Polymorphism (Vtable Inlining)

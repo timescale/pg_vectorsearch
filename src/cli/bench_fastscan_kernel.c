@@ -58,18 +58,18 @@ typedef struct
 static void
 fill_random(void *buf, size_t bytes, uint32_t seed)
 {
-	srand(seed);
-	uint8_t *p = buf;
+	uint32_t rng = seed;
+	uint8_t *p	 = buf;
 	for (size_t i = 0; i < bytes; i++)
-		p[i] = (uint8_t)(rand() & 0xFF);
+		p[i] = (uint8_t)(cmd_rand(&rng) & 0xFF);
 }
 
 static void
 fill_random_floats(float *buf, uint32_t n, uint32_t seed)
 {
-	srand(seed);
+	uint32_t rng = seed;
 	for (uint32_t i = 0; i < n; i++)
-		buf[i] = (float)(rand() % 10000 - 5000) / 5000.0f;
+		buf[i] = (float)((int)(cmd_rand(&rng) % 10000) - 5000) / 5000.0f;
 }
 
 /* ----------------------------------------------------------------
@@ -104,7 +104,8 @@ benchmark_lut_build(const BenchConfig *config)
 			vs_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
 		}
 		uint64_t end = get_time_ns();
-		double	 vps = (double)queries / (ns_to_ms(end - start) / 1000.0);
+		double	 vps =
+				cmd_ratio((double)queries, ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
 			best_vps = vps;
 	}
@@ -125,7 +126,8 @@ benchmark_lut_build(const BenchConfig *config)
 					transformed, dim, lut_hacc, &scale, &bias);
 		}
 		uint64_t end = get_time_ns();
-		double	 vps = (double)queries / (ns_to_ms(end - start) / 1000.0);
+		double	 vps =
+				cmd_ratio((double)queries, ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
 			best_vps = vps;
 	}
@@ -189,13 +191,13 @@ benchmark_accumulate(const BenchConfig *config)
 		for (uint32_t g = 0; g < ngroups; g++)
 			vs_fastscan_accumulate(codes + g * group_bytes, lut, accum, dim);
 		uint64_t end = get_time_ns();
-		double	 vps = (double)count / (ns_to_ms(end - start) / 1000.0);
+		double vps = cmd_ratio((double)count, ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
 			best_vps = vps;
 	}
 	printf("  uint8:   %7.1fM vec/s  (%5.2f ms/%uk)\n",
 		   best_vps / 1e6,
-		   (double)count / best_vps * 1000.0,
+		   cmd_ratio((double)count, best_vps) * 1000.0,
 		   count / 1000);
 
 	/* Benchmark uint16 hacc accumulate */
@@ -212,13 +214,13 @@ benchmark_accumulate(const BenchConfig *config)
 			vs_fastscan_accumulate_hacc(
 					codes + g * group_bytes, lut_hacc, accum_hacc, dim);
 		uint64_t end = get_time_ns();
-		double	 vps = (double)count / (ns_to_ms(end - start) / 1000.0);
+		double vps = cmd_ratio((double)count, ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
 			best_vps = vps;
 	}
 	printf("  uint16:  %7.1fM vec/s  (%5.2f ms/%uk)\n",
 		   best_vps / 1e6,
-		   (double)count / best_vps * 1000.0,
+		   cmd_ratio((double)count, best_vps) * 1000.0,
 		   count / 1000);
 
 	vs_free_aligned(lut_hacc);
@@ -307,7 +309,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 			distances[i] = vs_rabitq_distance(state, temp_data, dim);
 		}
 		uint64_t end = get_time_ns();
-		double	 vps = (double)count / (ns_to_ms(end - start) / 1000.0);
+		double vps = cmd_ratio((double)count, ns_to_ms(end - start) / 1000.0);
 		if (vps > rabitq_best)
 			rabitq_best = vps;
 	}
@@ -350,20 +352,20 @@ benchmark_distance_throughput(const BenchConfig *config)
 				lut_buf,
 				accum_buf);
 		uint64_t end = get_time_ns();
-		double	 vps = (double)count / (ns_to_ms(end - start) / 1000.0);
+		double vps = cmd_ratio((double)count, ns_to_ms(end - start) / 1000.0);
 		if (vps > fs8_best)
 			fs8_best = vps;
 	}
 
 	printf("  asymmetric: %7.1fK vec/s  (%5.2f ms/%uk)\n",
 		   rabitq_best / 1000.0,
-		   (double)count / (rabitq_best / 1000.0),
+		   cmd_ratio((double)count, rabitq_best / 1000.0),
 		   count / 1000);
 	printf("  fastscan:   %7.1fK vec/s  (%5.2f ms/%uk)\n",
 		   fs8_best / 1000.0,
-		   (double)count / (fs8_best / 1000.0),
+		   cmd_ratio((double)count, fs8_best / 1000.0),
 		   count / 1000);
-	printf("  speedup:    %5.1fx\n", fs8_best / rabitq_best);
+	printf("  speedup:    %5.1fx\n", cmd_ratio(fs8_best, rabitq_best));
 
 	vs_free_aligned(accum_buf);
 	vs_free_aligned(lut_buf);

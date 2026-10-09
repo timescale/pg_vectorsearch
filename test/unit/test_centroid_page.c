@@ -311,8 +311,9 @@ TEST(page_has_room)
 	RaBitQData *encoded	 = vs_rabitq_encode(params, vec_ref, cent_ref);
 
 	uint32_t max = prism_centroid_max_entries(dim);
+	/* Filling to capacity: has_room below is what reads the outcome. */
 	for (uint32_t i = 0; i < max; i++)
-		prism_centroid_page_add(page, dim, i, 1, 0, encoded);
+		(void)prism_centroid_page_add(page, dim, i, 1, 0, encoded);
 
 	ASSERT_FALSE(
 			prism_centroid_page_has_room(page, dim, false),

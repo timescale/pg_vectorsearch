@@ -162,12 +162,15 @@ should_test_impl(const char *impl_name, const char *filter)
 /*
  * generate_random_vector - Fill vector with random floats in [-1, 1]
  */
+/* Seeded once per command, below. */
+static uint32_t g_rng;
+
 static void
 generate_random_vector(float *data, Dimension dim)
 {
 	for (Dimension i = 0; i < dim; i++)
 	{
-		int val = rand() % 200 - 100;
+		int val = (int)(cmd_rand(&g_rng) % 200) - 100;
 		data[i] = (float)val / 100.0f;
 	}
 }
@@ -494,7 +497,7 @@ cmd_bench_page_score(CmdContext *ctx)
 	double	 bits_kb	  = (double)count * packed_bytes / 1024.0;
 
 	/* Generate random test data */
-	srand(42);
+	g_rng = 42;
 
 	/* Create RaBitQ params and encode vectors into separate arrays */
 	RaBitQParams *params = vs_rabitq_create(dim, 42);

@@ -126,22 +126,25 @@ TEST(prefetch_compiles)
 TEST(branch_hints_compile)
 {
 	/*
-	 * Verify branch hint macros compile and work correctly.
-	 * The hints don't change semantics, just compiler optimization.
+	 * A hint tells the compiler which way to expect, never which way to
+	 * go, so each macro has to decide both ways. The input is volatile
+	 * because a value the compiler can fold leaves one side of each
+	 * branch unreachable, which proves nothing about the macro.
 	 */
-	int x = 42;
+	volatile int input = 42;
+	int			 taken = 0;
 
-	if (vs_likely(x > 0))
+	for (int sign = 1; sign >= -1; sign -= 2)
 	{
-		x++;
+		int x = input * sign;
+
+		if (vs_likely(x > 0))
+			taken += 1;
+		if (vs_unlikely(x < 0))
+			taken += 10;
 	}
 
-	if (vs_unlikely(x < 0))
-	{
-		x--;
-	}
-
-	ASSERT_EQ(43, x, "branch hints should not change logic");
+	ASSERT_EQ(11, taken, "each hint took its branch exactly once");
 }
 
 TEST(compiler_barrier_compiles)
@@ -155,7 +158,10 @@ TEST(compiler_barrier_compiles)
 	x = 2;
 	vs_compiler_barrier();
 
-	ASSERT_EQ(2, x, "compiler barrier should not change values");
+	/* Read once, here: ASSERT_EQ names its operands twice, and a
+	 * volatile read is a side effect to repeat. */
+	int observed = x;
+	ASSERT_EQ(2, observed, "compiler barrier should not change values");
 }
 
 TEST(print_detected_capabilities)

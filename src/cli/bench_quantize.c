@@ -154,6 +154,9 @@ bench_stats_free(BenchStats *stats)
 /*
  * Generate random test vectors
  */
+/* Seeded once per command, below. */
+static uint32_t g_rng;
+
 static void
 generate_random_vectors(float *data, uint32_t count, Dimension dim)
 {
@@ -161,7 +164,7 @@ generate_random_vectors(float *data, uint32_t count, Dimension dim)
 	{
 		for (Dimension j = 0; j < dim; j++)
 		{
-			int val			  = rand() % 200 - 100;
+			int val			  = (int)(cmd_rand(&g_rng) % 200) - 100;
 			data[i * dim + j] = (float)val / 100.0f;
 		}
 	}
@@ -174,7 +177,7 @@ generate_random_halfvecs(half *data, uint32_t count, Dimension dim)
 	{
 		for (Dimension j = 0; j < dim; j++)
 		{
-			int val			  = rand() % 200 - 100;
+			int val			  = (int)(cmd_rand(&g_rng) % 200) - 100;
 			data[i * dim + j] = vs_float_to_half((float)val / 100.0f);
 		}
 	}
@@ -1316,7 +1319,7 @@ cmd_bench_quantize(CmdContext *ctx)
 	}
 
 	/* Generate test data */
-	srand(42);
+	g_rng = 42;
 
 	/* Generate typed vectors (native f16 or f32) */
 	void *vectors = vs_alloc(vectors_size);

@@ -1411,9 +1411,12 @@ bound_violations(
 			if (lb > true_dist + 1e-3f)
 			{
 				viol++;
-				float over = (true_dist > 1.0f)
-								   ? (float)((lb - true_dist) / true_dist)
-								   : (float)(lb - true_dist);
+				/* Relative excess once the true distance is large
+				 * enough to divide by, absolute below that. */
+				float over = (float)(lb - true_dist);
+				/* coverity[DIVIDE_BY_ZERO] the guard is on this line */
+				if (true_dist > 1.0f)
+					over /= (float)true_dist;
 				if (over > worst)
 					worst = over;
 			}
