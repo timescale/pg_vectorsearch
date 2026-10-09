@@ -659,8 +659,8 @@ cmd_bench_search(CmdContext *ctx)
 	 * Report
 	 * -------------------------------------------------------- */
 
-	double avg_lat = lat_sum / total_queries;
-	double qps	   = 1e6 / avg_lat;
+	double avg_lat = cmd_ratio(lat_sum, (double)total_queries);
+	double qps	   = cmd_ratio(1e6, avg_lat);
 	double recall  = nqueries > 0 ? recall_sum / nqueries : 0.0;
 
 	printf("\nResults:\n");

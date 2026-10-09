@@ -104,7 +104,8 @@ benchmark_lut_build(const BenchConfig *config)
 			vs_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
 		}
 		uint64_t end = get_time_ns();
-		double	 vps = (double)queries / (ns_to_ms(end - start) / 1000.0);
+		double	 vps =
+				cmd_ratio((double)queries, ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
 			best_vps = vps;
 	}
@@ -125,7 +126,8 @@ benchmark_lut_build(const BenchConfig *config)
 					transformed, dim, lut_hacc, &scale, &bias);
 		}
 		uint64_t end = get_time_ns();
-		double	 vps = (double)queries / (ns_to_ms(end - start) / 1000.0);
+		double	 vps =
+				cmd_ratio((double)queries, ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
 			best_vps = vps;
 	}

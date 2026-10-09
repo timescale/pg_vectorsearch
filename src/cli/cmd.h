@@ -23,6 +23,18 @@
  * - Command-specific arguments parsing
  * - Extensible via inheritance (embed in larger structs)
  */
+/*
+ * x / y for reported figures, or 0 when y is 0. A benchmark can measure
+ * an interval the clock cannot resolve, or be asked for no runs at all,
+ * and a rate of infinity reads as a result rather than as the absence of
+ * one.
+ */
+static inline double
+cmd_ratio(double x, double y)
+{
+	return y > 0.0 ? x / y : 0.0;
+}
+
 typedef struct CmdContext
 {
 	/* Command-line arguments (after command name) */
