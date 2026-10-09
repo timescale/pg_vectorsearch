@@ -191,13 +191,13 @@ benchmark_accumulate(const BenchConfig *config)
 		for (uint32_t g = 0; g < ngroups; g++)
 			vs_fastscan_accumulate(codes + g * group_bytes, lut, accum, dim);
 		uint64_t end = get_time_ns();
-		double	 vps = (double)count / (ns_to_ms(end - start) / 1000.0);
+		double vps = cmd_ratio((double)count, ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
 			best_vps = vps;
 	}
 	printf("  uint8:   %7.1fM vec/s  (%5.2f ms/%uk)\n",
 		   best_vps / 1e6,
-		   (double)count / best_vps * 1000.0,
+		   cmd_ratio((double)count, best_vps) * 1000.0,
 		   count / 1000);
 
 	/* Benchmark uint16 hacc accumulate */
@@ -214,13 +214,13 @@ benchmark_accumulate(const BenchConfig *config)
 			vs_fastscan_accumulate_hacc(
 					codes + g * group_bytes, lut_hacc, accum_hacc, dim);
 		uint64_t end = get_time_ns();
-		double	 vps = (double)count / (ns_to_ms(end - start) / 1000.0);
+		double vps = cmd_ratio((double)count, ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
 			best_vps = vps;
 	}
 	printf("  uint16:  %7.1fM vec/s  (%5.2f ms/%uk)\n",
 		   best_vps / 1e6,
-		   (double)count / best_vps * 1000.0,
+		   cmd_ratio((double)count, best_vps) * 1000.0,
 		   count / 1000);
 
 	vs_free_aligned(lut_hacc);
@@ -309,7 +309,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 			distances[i] = vs_rabitq_distance(state, temp_data, dim);
 		}
 		uint64_t end = get_time_ns();
-		double	 vps = (double)count / (ns_to_ms(end - start) / 1000.0);
+		double vps = cmd_ratio((double)count, ns_to_ms(end - start) / 1000.0);
 		if (vps > rabitq_best)
 			rabitq_best = vps;
 	}
@@ -352,20 +352,20 @@ benchmark_distance_throughput(const BenchConfig *config)
 				lut_buf,
 				accum_buf);
 		uint64_t end = get_time_ns();
-		double	 vps = (double)count / (ns_to_ms(end - start) / 1000.0);
+		double vps = cmd_ratio((double)count, ns_to_ms(end - start) / 1000.0);
 		if (vps > fs8_best)
 			fs8_best = vps;
 	}
 
 	printf("  asymmetric: %7.1fK vec/s  (%5.2f ms/%uk)\n",
 		   rabitq_best / 1000.0,
-		   (double)count / (rabitq_best / 1000.0),
+		   cmd_ratio((double)count, rabitq_best / 1000.0),
 		   count / 1000);
 	printf("  fastscan:   %7.1fK vec/s  (%5.2f ms/%uk)\n",
 		   fs8_best / 1000.0,
-		   (double)count / (fs8_best / 1000.0),
+		   cmd_ratio((double)count, fs8_best / 1000.0),
 		   count / 1000);
-	printf("  speedup:    %5.1fx\n", fs8_best / rabitq_best);
+	printf("  speedup:    %5.1fx\n", cmd_ratio(fs8_best, rabitq_best));
 
 	vs_free_aligned(accum_buf);
 	vs_free_aligned(lut_buf);

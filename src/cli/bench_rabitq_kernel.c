@@ -137,7 +137,7 @@ benchmark_hamming_throughput(const BenchConfig *config)
 
 	printf("  hamming:     %7.1fK vec/s  (%5.2f ms/%uk)\n",
 		   best_vps / 1000.0,
-		   (double)count / (best_vps / 1000.0),
+		   cmd_ratio((double)count, best_vps / 1000.0),
 		   count / 1000);
 
 	vs_free(results);
