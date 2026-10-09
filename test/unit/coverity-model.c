@@ -35,3 +35,25 @@ vs_test_fail(const char *file, int line, const char *msg)
 	(void)msg;
 	__coverity_panic__();
 }
+
+/*
+ * A context created with a parent is owned by that parent: deleting or
+ * resetting the parent takes the child with it, which is what
+ * test_memory's reset-with-children case asserts. The analysis cannot
+ * see that ownership and reports each child as leaked, so the model
+ * hands the pointer away rather than returning it as a fresh
+ * allocation.
+ */
+typedef void *VsMemCtx;
+
+VsMemCtx
+vs_memctx_create(VsMemCtx parent, const char *name)
+{
+	VsMemCtx ctx;
+	(void)name;
+	/* Not NULL: a model file includes no headers, so the macro has no
+	 * definition here. */
+	if (parent)
+		__coverity_escape__(ctx);
+	return ctx;
+}
