@@ -379,8 +379,9 @@ reviewer can tell whether the archive is the one their latest push
 produced. It is updated in place rather than added to, because a release
 PR is re-pushed whenever the notes are amended.
 
-The job is skipped on a PR from a fork: a fork's token cannot comment,
-and a release is never cut from one.
+The job is skipped on a PR from a fork: a fork does not have the release
+App's key, and a release is never cut from one. The comment is posted by
+that App, the same account that cuts the pull request.
 
 ## What merging a release PR creates
 
