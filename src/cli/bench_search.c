@@ -664,7 +664,8 @@ cmd_bench_search(CmdContext *ctx)
 
 	double avg_lat = cmd_ratio(lat_sum, (double)total_queries);
 	double qps	   = cmd_ratio(1e6, avg_lat);
-	double recall  = nqueries > 0 ? recall_sum / nqueries : 0.0;
+	/* nqueries is non-zero: the run bails above when it is not. */
+	double recall = recall_sum / nqueries;
 
 	printf("\nResults:\n");
 	printf("  centroid=%-8s posting=%-8s layout=%-6s mode=%-12s "
