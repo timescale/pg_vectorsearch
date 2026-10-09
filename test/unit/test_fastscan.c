@@ -131,18 +131,18 @@ static const int kPerm0[16] = {
 static void
 fill_random_floats(float *buf, uint32_t n, uint32_t seed)
 {
-	srand(seed);
+	uint32_t rng = seed;
 	for (uint32_t i = 0; i < n; i++)
-		buf[i] = (float)(rand() % 10000 - 5000) / 5000.0f;
+		buf[i] = (float)((int)(vs_test_rand(&rng) % 10000) - 5000) / 5000.0f;
 }
 
 /* Fill buffer with random bits */
 static void
 fill_random_bits(uint8_t *buf, uint32_t n, uint32_t seed)
 {
-	srand(seed);
+	uint32_t rng = seed;
 	for (uint32_t i = 0; i < n; i++)
-		buf[i] = (uint8_t)(rand() & 0xFF);
+		buf[i] = (uint8_t)(vs_test_rand(&rng) & 0xFF);
 }
 
 /* Compute reference binary IP: sum(transformed[i] where bit[i]=1) */
@@ -254,18 +254,20 @@ TEST(pack_codes_roundtrip)
 {
 	/* Pack 1-bit codes and verify nibbles match original bits,
 	 * accounting for kPerm0 vector interleaving. */
-	uint32_t dim		  = 32;
-	uint32_t count		  = 8;
+	uint32_t dim = 32;
+	/* A full group, so the v >= 16 half of the layout below -- the high
+	 * nibble of each byte -- is covered as well as the low one. */
+	uint32_t count		  = VS_FASTSCAN_GROUP;
 	uint32_t packed_bytes = (dim + 7) / 8;
 
-	uint8_t bits[8 * 4]; /* 8 vectors x 4 bytes each */
+	uint8_t bits[VS_FASTSCAN_GROUP * 4]; /* 4 bytes per vector */
 	fill_random_bits(bits, count * packed_bytes, 77);
 
 	uint32_t codes_size = vs_fastscan_codes_size(count, dim);
 	uint8_t *codes		= vs_alloc(codes_size);
 	uint32_t ngroups	= vs_fastscan_pack_codes(bits, count, dim, codes);
 
-	ASSERT_EQ(ngroups, 1, "8 vectors = 1 group");
+	ASSERT_EQ(ngroups, 1, "a full group packs as one group");
 
 	/* Build inverse kPerm0: inv[kPerm0[j]] = j */
 	int inv_kperm0[16];

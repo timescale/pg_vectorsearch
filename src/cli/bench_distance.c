@@ -235,6 +235,10 @@ should_test_impl(const char *impl_name, const char *filter)
 /*
  * generate_random_vector - Fill vector with random floats in [-1, 1]
  */
+
+/* Seeded once per command, below. */
+static uint32_t g_rng;
+
 static void
 generate_random_vector(float *data, Dimension dim)
 {
@@ -242,7 +246,7 @@ generate_random_vector(float *data, Dimension dim)
 	{
 		/* Use random integers to ensure consistent floating-point
 		 * representation */
-		int val = rand() % 200 - 100; /* -100 to +99 */
+		int val = (int)(cmd_rand(&g_rng) % 200) - 100; /* -100 to +99 */
 		data[i] = (float)val / 100.0f;
 	}
 }
@@ -801,7 +805,7 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 		return 1;
 	}
 
-	srand(42); /* Deterministic */
+	g_rng = 42; /* Deterministic */
 	generate_random_vector(query_data, dim);
 	for (uint32_t i = 0; i < count; i++)
 	{

@@ -55,7 +55,9 @@ TEST(idset_full_population)
 	{
 		/* Posting-encoded shape: (block << 16) | offset */
 		uint64_t id = ((uint64_t)(i / 3) << 16) | ((i % 3) + 1);
-		vs_idset_test_add(&set, id);
+		/* Populating: every id here is new, and the second pass below
+		 * is what reads the result. */
+		(void)vs_idset_test_add(&set, id);
 	}
 	uint32_t dups = 0;
 	for (uint32_t i = 0; i < n; i++)

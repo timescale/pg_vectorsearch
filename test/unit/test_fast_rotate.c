@@ -56,9 +56,9 @@ dot(const float *a, const float *b, Dimension d)
 static void
 fill_random(float *v, Dimension d, unsigned seed)
 {
-	srand(seed);
+	uint32_t rng = seed;
 	for (Dimension i = 0; i < d; i++)
-		v[i] = (float)((rand() / (double)RAND_MAX) * 2.0 - 1.0);
+		v[i] = (float)((vs_test_rand(&rng) / (double)UINT32_MAX) * 2.0 - 1.0);
 }
 
 /* Norm preservation across dims: pure-FWHT path and mixed-radix path. */

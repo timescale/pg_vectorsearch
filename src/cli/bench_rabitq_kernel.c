@@ -129,7 +129,7 @@ benchmark_hamming_throughput(const BenchConfig *config)
 
 		uint64_t end = get_time_ns();
 		double	 ms	 = ns_to_ms(end - start);
-		double	 vps = (double)count / (ms / 1000.0);
+		double	 vps = cmd_ratio((double)count, ms / 1000.0);
 
 		if (vps > best_vps)
 			best_vps = vps;
@@ -137,7 +137,7 @@ benchmark_hamming_throughput(const BenchConfig *config)
 
 	printf("  hamming:     %7.1fK vec/s  (%5.2f ms/%uk)\n",
 		   best_vps / 1000.0,
-		   (double)count / (best_vps / 1000.0),
+		   cmd_ratio((double)count, best_vps / 1000.0),
 		   count / 1000);
 
 	vs_free(results);
@@ -220,7 +220,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 
 		uint64_t end = get_time_ns();
 		double	 ms	 = ns_to_ms(end - start);
-		double	 vps = (double)count / (ms / 1000.0);
+		double	 vps = cmd_ratio((double)count, ms / 1000.0);
 
 		if (vps > best_asym_vps)
 			best_asym_vps = vps;
@@ -237,7 +237,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 
 		uint64_t end = get_time_ns();
 		double	 ms	 = ns_to_ms(end - start);
-		double	 vps = (double)count / (ms / 1000.0);
+		double	 vps = cmd_ratio((double)count, ms / 1000.0);
 
 		if (vps > best_sym_vps)
 			best_sym_vps = vps;
@@ -245,13 +245,13 @@ benchmark_distance_throughput(const BenchConfig *config)
 
 	printf("  asymmetric:  %7.1fK vec/s  (%5.2f ms/%uk)\n",
 		   best_asym_vps / 1000.0,
-		   (double)count / (best_asym_vps / 1000.0),
+		   cmd_ratio((double)count, best_asym_vps / 1000.0),
 		   count / 1000);
 	printf("  symmetric:   %7.1fK vec/s  (%5.2f ms/%uk)\n",
 		   best_sym_vps / 1000.0,
-		   (double)count / (best_sym_vps / 1000.0),
+		   cmd_ratio((double)count, best_sym_vps / 1000.0),
 		   count / 1000);
-	printf("  speedup:     %.1fx\n", best_sym_vps / best_asym_vps);
+	printf("  speedup:     %.1fx\n", cmd_ratio(best_sym_vps, best_asym_vps));
 
 	vs_free(data_buf);
 	vs_free(distances);
