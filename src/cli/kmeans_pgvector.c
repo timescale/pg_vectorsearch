@@ -346,8 +346,10 @@ ElkanKmeans(
 
 	/* [MODIFIED: removed maintenance_work_mem check] */
 
-	/* Ensure indexing does not overflow */
-	if (numCenters * numCenters > INT_MAX)
+	/* Ensure indexing does not overflow. Widened first: the product of
+	 * two ints cannot exceed INT_MAX in any defined way, so the check
+	 * never fires when computed in int. */
+	if ((int64)numCenters * numCenters > INT_MAX)
 		elog(ERROR, "Indexing overflow detected.");
 
 	/* Set support functions */
