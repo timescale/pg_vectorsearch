@@ -254,18 +254,20 @@ TEST(pack_codes_roundtrip)
 {
 	/* Pack 1-bit codes and verify nibbles match original bits,
 	 * accounting for kPerm0 vector interleaving. */
-	uint32_t dim		  = 32;
-	uint32_t count		  = 8;
+	uint32_t dim = 32;
+	/* A full group, so the v >= 16 half of the layout below -- the high
+	 * nibble of each byte -- is covered as well as the low one. */
+	uint32_t count		  = VS_FASTSCAN_GROUP;
 	uint32_t packed_bytes = (dim + 7) / 8;
 
-	uint8_t bits[8 * 4]; /* 8 vectors x 4 bytes each */
+	uint8_t bits[VS_FASTSCAN_GROUP * 4]; /* 4 bytes per vector */
 	fill_random_bits(bits, count * packed_bytes, 77);
 
 	uint32_t codes_size = vs_fastscan_codes_size(count, dim);
 	uint8_t *codes		= vs_alloc(codes_size);
 	uint32_t ngroups	= vs_fastscan_pack_codes(bits, count, dim, codes);
 
-	ASSERT_EQ(ngroups, 1, "8 vectors = 1 group");
+	ASSERT_EQ(ngroups, 1, "a full group packs as one group");
 
 	/* Build inverse kPerm0: inv[kPerm0[j]] = j */
 	int inv_kperm0[16];
