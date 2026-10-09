@@ -6,8 +6,8 @@
 # each; above that the sample means are already exact for quantization
 # purposes and the extra scan is skipped. Both directions are proven by an
 # injection point on the refine phase: the forced-refine build pauses there
-# (the watcher observes and wakes it); the default-threshold build on the
-# same well-fed table completes without ever reaching the point.
+# (the watcher observes and wakes it); the build whose threshold sits above
+# the samples per leaf completes without ever reaching the point.
 #
 # The table holds 12000 64-dim rows against the 10000-slot sample floor at
 # a 1MB budget, so both builds keep fewer rows than their scans see

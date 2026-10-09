@@ -263,6 +263,42 @@ prism_head_write_ctx_cleanup(PrismHeadWriteCtx *h)
 void prism_write_leaf_head(void *arg, uint32_t leaf, const float *centroid);
 
 /*
+ * Refine publishes one leaf mean to both copies a later scan reads: the
+ * posting-list head (encode reference) and the centroid-tree leaf (routing).
+ * Writing only the head files rows by the new reference while queries still
+ * route on the sample centroid.
+ *
+ * heads is the posting-head writer. centroid_storage is the same relation
+ * the tree was streamed to. global_mean is the encoder centering the tree
+ * was built with; NULL is only valid for a float or half tree.
+ */
+typedef struct PrismRefinePublish
+{
+	PrismHeadWriteCtx  *heads;
+	VsStorage		   *centroid_storage;
+	BlockNumber			first_centroid;
+	PrismCentroidFormat format;
+	const RaBitQParams *rq_params;
+	const float		   *global_mean;
+	DistanceMetric		metric;
+	float			   *scratch; /* [dim] normalized mean */
+	void			   *enc;	 /* one encoded centroid */
+	uint8_t			   *bits;	 /* fastscan unpack, or NULL */
+} PrismRefinePublish;
+
+void prism_refine_publish_init(
+		PrismRefinePublish *p,
+		PrismHeadWriteCtx  *heads,
+		VsStorage		   *centroid_storage,
+		BlockNumber			first_centroid,
+		PrismCentroidFormat format,
+		const RaBitQParams *rq_params,
+		const float		   *global_mean,
+		DistanceMetric		metric);
+void prism_refine_publish_cleanup(PrismRefinePublish *p);
+void prism_refine_publish_leaf(void *arg, uint32_t leaf, const float *mean);
+
+/*
  * Build-time page-backed router base: the same PrismIndexBase the query and
  * insert paths build, so the build scan routes each row identically. Both
  * back-ends must construct it the same way -- this is the one place. The
