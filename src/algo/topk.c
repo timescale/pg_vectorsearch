@@ -135,6 +135,8 @@ vs_topk_init(VsTopK *topk, uint32_t k)
 			vs_memctx_alloc(topk->memctx, cap * sizeof(VsTopKEntry));
 	topk->cand_count	= 0;
 	topk->cand_capacity = cap;
+	/* Stamped onto every insert; only the query scan ever sets it. */
+	topk->cur_src = 0;
 }
 
 void
@@ -155,20 +157,11 @@ vs_topk_cleanup(VsTopK *topk)
 VsTopK *
 vs_topk_create(uint32_t k)
 {
-	VsMemCtx ctx   = vs_memctx_create(NULL, "topk");
-	VsTopK	*topk  = vs_memctx_alloc(ctx, sizeof(VsTopK));
-	topk->memctx   = ctx;
-	topk->k		   = k;
-	topk->ub_heap  = vs_memctx_alloc(ctx, k * sizeof(Distance));
-	topk->ub_ids   = vs_memctx_alloc(ctx, k * sizeof(uint64_t));
-	topk->ub_count = 0;
-
-	uint32_t cap = k * 2;
-	if (cap < VS_TOPK_INITIAL_CAP_MIN)
-		cap = VS_TOPK_INITIAL_CAP_MIN;
-	topk->candidates	= vs_memctx_alloc(ctx, cap * sizeof(VsTopKEntry));
-	topk->cand_count	= 0;
-	topk->cand_capacity = cap;
+	/* The handle comes from the caller's context rather than from the arena
+	 * it owns. vs_topk_reset_to_k resets that arena when k outgrows it,
+	 * which would reclaim the object being reset through. */
+	VsTopK *topk = vs_alloc(sizeof(VsTopK));
+	vs_topk_init(topk, k);
 	return topk;
 }
 
@@ -177,7 +170,8 @@ vs_topk_destroy(VsTopK *topk)
 {
 	if (topk == NULL)
 		return;
-	vs_memctx_delete(topk->memctx);
+	vs_topk_cleanup(topk);
+	vs_free(topk);
 }
 
 void

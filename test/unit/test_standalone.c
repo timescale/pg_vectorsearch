@@ -118,6 +118,39 @@ TEST(index_build_basic)
 	prism_index_destroy(idx);
 }
 
+TEST(index_build_stats_fully_written)
+{
+	/* Callers read the stats struct whole -- api.c copies it into
+	 * PrismBuildInfo and prism_build_stats_print reports every field -- but
+	 * each build path writes only the phases it ran, and ms_refine has no
+	 * standalone producer at all. The poison catches any field left over
+	 * from the caller's stack. */
+	float *vecs = make_vectors(500, 16, 7);
+
+	PrismIndexConfig config = {
+			.nlist		   = 8,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+	};
+
+	PrismBuildStats stats;
+	memset(&stats, 0xAB, sizeof(stats));
+
+	VsArraySource src;
+	vs_array_source_init(&src, vecs, 500, 16);
+	PrismIndex *idx = prism_index_build(&src.base, &config, &stats);
+	ASSERT_NOT_NULL(idx, "build should succeed");
+
+	ASSERT_TRUE(stats.ms_refine == 0.0, "ms_refine is written");
+	ASSERT_TRUE(stats.ms_total >= 0.0, "ms_total is written");
+	ASSERT_TRUE(stats.total_pages != 0xABABABABu, "total_pages is written");
+	ASSERT_TRUE(stats.merge_input != 0xABABABABu, "merge_input is written");
+	ASSERT_TRUE(stats.merge_output != 0xABABABABu, "merge_output is written");
+
+	prism_index_destroy(idx);
+}
+
 TEST(index_build_cosine)
 {
 	float *vecs = make_vectors(500, 16, 99);
