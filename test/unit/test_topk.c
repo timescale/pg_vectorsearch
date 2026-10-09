@@ -46,6 +46,39 @@ TEST(topk_init_cleanup)
 	vs_topk_cleanup(&topk);
 }
 
+TEST(topk_init_defines_src_stamp)
+{
+	/* Every insert stamps cur_src onto the entry, and only the query scan
+	 * ever sets it, so init has to leave it defined. The poison makes a
+	 * missing initialization show up as the poison rather than as a
+	 * chance zero. */
+	VsTopK topk;
+	memset(&topk, 0xAB, sizeof(topk));
+	vs_topk_init(&topk, 3);
+	vs_topk_insert(&topk, 1.0f, 0.0f, 7);
+
+	ASSERT_EQ(1, topk.cand_count, "insert buffered the candidate");
+	ASSERT_EQ(0, topk.candidates[0].src, "init defines the src stamp");
+	vs_topk_cleanup(&topk);
+}
+
+TEST(topk_create_reports_heap_capacity)
+{
+	/* k_capacity is what a reset compares a new k against; read wrong, the
+	 * reset skips its reallocation and leaves ub_heap sized for the
+	 * original k while k says otherwise -- inserts then run past it. */
+	VsTopK *topk = vs_topk_create(2);
+	ASSERT_EQ(2, topk->k_capacity, "create reports its heap capacity");
+	ASSERT_EQ(0, topk->cur_src, "create defines the src stamp");
+
+	vs_topk_reset_to_k(topk, 64);
+	for (uint32_t i = 0; i < 64; i++)
+		vs_topk_insert(topk, (float)(64 - i), 0.0f, i + 1);
+	ASSERT_EQ(64, topk->ub_count, "the threshold heap grew with k");
+
+	vs_topk_destroy(topk);
+}
+
 TEST(topk_threshold_empty)
 {
 	VsTopK topk;

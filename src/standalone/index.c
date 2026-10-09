@@ -334,6 +334,11 @@ prism_index_build(
 		const PrismIndexConfig *config,
 		PrismBuildStats		   *stats)
 {
+	/* Each path below writes only the phases it ran, and ms_refine has no
+	 * standalone producer at all, while callers read the struct whole. */
+	if (stats != NULL)
+		memset(stats, 0, sizeof(*stats));
+
 	if (src == NULL || src->nvecs == 0 || src->dim == 0 || config == NULL)
 		return NULL;
 	if (src->dim > PRISM_INDEX_MAX_DIM)
