@@ -590,15 +590,17 @@ vs_hkmeans_assign_topk(
 	 * children are collected here directly rather than assumed to all sit at
 	 * nlevels - 1.
 	 */
-	uint32_t res_id[VS_HK_MAX_TOPK];
-	Distance res_d[VS_HK_MAX_TOPK];
-	uint32_t res_n = 0;
+	uint32_t res_id[VS_HK_MAX_TOPK] = {0};
+	Distance res_d[VS_HK_MAX_TOPK]	= {0};
+	uint32_t res_n					= 0;
+
+	/* Internal child nodes to expand at the next level. next_n is what
+	 * resets them per level, so one initialization covers the descent. */
+	uint32_t next[VS_HK_MAX_TOPK]	= {0};
+	Distance next_d[VS_HK_MAX_TOPK] = {0};
 
 	for (uint32_t level = 0; level < tree->nlevels && beam_n > 0; level++)
 	{
-		/* Internal child nodes to expand at the next level. */
-		uint32_t next[VS_HK_MAX_TOPK];
-		Distance next_d[VS_HK_MAX_TOPK];
 		uint32_t next_n = 0;
 
 		for (uint32_t b = 0; b < beam_n; b++)
@@ -628,6 +630,11 @@ vs_hkmeans_assign_topk(
 		memcpy(beam, next, next_n * sizeof(uint32_t));
 		beam_n = next_n;
 	}
+
+	/* A tree whose every node is internal collects nothing, so the sort
+	 * and the copy below have nothing to work on. */
+	if (res_n == 0)
+		return 0;
 
 	topk_sort(res_id, res_d, res_n);
 	for (uint32_t i = 0; i < res_n; i++)
