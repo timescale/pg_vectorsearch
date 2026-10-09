@@ -35,14 +35,15 @@ TEST_GROUP(RoutingTree);
 TEST_MEMCTX_FIXTURE();
 
 /* Deterministic pseudo-random vectors (local copy of the standalone test
- * helper; rand() keeps runs reproducible under the fixed seed). */
+ * helper). The generator is the shared one, so a seed gives the same
+ * vectors on every platform. */
 static float *
 make_vectors(uint32_t nvecs, uint32_t dim, uint32_t seed)
 {
-	srand(seed);
-	float *data = vs_alloc((size_t)nvecs * dim * sizeof(float));
+	uint32_t rng  = seed;
+	float	*data = vs_alloc((size_t)nvecs * dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs * dim; i++)
-		data[i] = (float)(rand() % 10000 - 5000) / 5000.0f;
+		data[i] = (float)((int)(vs_test_rand(&rng) % 10000) - 5000) / 5000.0f;
 	return data;
 }
 

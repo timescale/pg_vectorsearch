@@ -42,15 +42,15 @@ TEST_MEMCTX_FIXTURE();
 static float *
 make_two_blobs(uint32_t nvecs, uint32_t dim, uint32_t seed)
 {
-	srand(seed);
-	float *data = vs_alloc((size_t)nvecs * dim * sizeof(float));
+	uint32_t rng  = seed;
+	float	*data = vs_alloc((size_t)nvecs * dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
 		float center = (i < nvecs / 2) ? 0.0f : 8.0f;
 		for (uint32_t j = 0; j < dim; j++)
-			data[(size_t)i * dim + j] = center +
-										(float)(rand() % 2000 - 1000) /
-												1000.0f;
+			data[(size_t)i * dim + j] =
+					center +
+					(float)((int)(vs_test_rand(&rng) % 2000) - 1000) / 1000.0f;
 	}
 	return data;
 }
@@ -60,15 +60,15 @@ make_two_blobs(uint32_t nvecs, uint32_t dim, uint32_t seed)
 static float *
 make_three_blobs(uint32_t nvecs, uint32_t dim, uint32_t seed)
 {
-	srand(seed);
-	float *data = vs_alloc((size_t)nvecs * dim * sizeof(float));
+	uint32_t rng  = seed;
+	float	*data = vs_alloc((size_t)nvecs * dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
 	{
 		float center = (float)((i / (nvecs / 3 + 1)) * 8);
 		for (uint32_t j = 0; j < dim; j++)
-			data[(size_t)i * dim + j] = center +
-										(float)(rand() % 2000 - 1000) /
-												1000.0f;
+			data[(size_t)i * dim + j] =
+					center +
+					(float)((int)(vs_test_rand(&rng) % 2000) - 1000) / 1000.0f;
 	}
 	return data;
 }
@@ -951,12 +951,12 @@ static float *
 make_blob_with_outliers(
 		uint32_t nvecs, uint32_t dim, uint32_t nout, uint32_t seed)
 {
-	srand(seed);
-	float *data = vs_alloc((size_t)nvecs * dim * sizeof(float));
+	uint32_t rng  = seed;
+	float	*data = vs_alloc((size_t)nvecs * dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
 		for (uint32_t j = 0; j < dim; j++)
-			data[(size_t)i * dim + j] = (float)(rand() % 2000 - 1000) /
-										1000.0f;
+			data[(size_t)i * dim + j] =
+					(float)((int)(vs_test_rand(&rng) % 2000) - 1000) / 1000.0f;
 
 	/* Push the last nout vectors far out, along distinct axes. */
 	for (uint32_t o = 0; o < nout; o++)
@@ -1134,11 +1134,12 @@ TEST(split_keeps_zero_vectors_unreachable)
 	float	*vecs = vs_alloc((size_t)n * dim * sizeof(float));
 
 	/* Distinct directions, so cosine distances are well separated. */
-	srand(5);
+	uint32_t rng = 5;
 	for (uint32_t i = 0; i < nreal; i++)
 		for (uint32_t j = 0; j < dim; j++)
 			vecs[(size_t)i * dim + j] = 1.0f +
-										(float)(rand() % 1000) / 1000.0f;
+										(float)(vs_test_rand(&rng) % 1000) /
+												1000.0f;
 	/* Zero vectors in the tail. */
 	for (uint32_t i = nreal; i < n; i++)
 		for (uint32_t j = 0; j < dim; j++)

@@ -131,18 +131,18 @@ static const int kPerm0[16] = {
 static void
 fill_random_floats(float *buf, uint32_t n, uint32_t seed)
 {
-	srand(seed);
+	uint32_t rng = seed;
 	for (uint32_t i = 0; i < n; i++)
-		buf[i] = (float)(rand() % 10000 - 5000) / 5000.0f;
+		buf[i] = (float)((int)(vs_test_rand(&rng) % 10000) - 5000) / 5000.0f;
 }
 
 /* Fill buffer with random bits */
 static void
 fill_random_bits(uint8_t *buf, uint32_t n, uint32_t seed)
 {
-	srand(seed);
+	uint32_t rng = seed;
 	for (uint32_t i = 0; i < n; i++)
-		buf[i] = (uint8_t)(rand() & 0xFF);
+		buf[i] = (uint8_t)(vs_test_rand(&rng) & 0xFF);
 }
 
 /* Compute reference binary IP: sum(transformed[i] where bit[i]=1) */
