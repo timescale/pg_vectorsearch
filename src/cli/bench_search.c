@@ -155,11 +155,14 @@ load_hdf5_int64(
  * Synthetic vector generation
  * ---------------------------------------------------------------- */
 
+/* Seeded once per command, below. */
+static uint32_t g_rng;
+
 static float
 rand_normal(void)
 {
-	float u1 = ((float)(rand() % 10000) + 1.0f) / 10001.0f;
-	float u2 = ((float)(rand() % 10000)) / 10000.0f;
+	float u1 = ((float)(cmd_rand(&g_rng) % 10000) + 1.0f) / 10001.0f;
+	float u2 = ((float)(cmd_rand(&g_rng) % 10000)) / 10000.0f;
 	return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
 }
 
@@ -471,7 +474,7 @@ cmd_bench_search(CmdContext *ctx)
 #endif
 	{
 		/* Synthetic vectors */
-		srand(42);
+		g_rng			  = 42;
 		uint32_t nvecs	  = 10000;
 		nqueries		  = config.queries;
 		float *train_vecs = generate_random_vectors(nvecs, config.dim);

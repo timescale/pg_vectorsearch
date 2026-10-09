@@ -58,18 +58,18 @@ typedef struct
 static void
 fill_random(void *buf, size_t bytes, uint32_t seed)
 {
-	srand(seed);
-	uint8_t *p = buf;
+	uint32_t rng = seed;
+	uint8_t *p	 = buf;
 	for (size_t i = 0; i < bytes; i++)
-		p[i] = (uint8_t)(rand() & 0xFF);
+		p[i] = (uint8_t)(cmd_rand(&rng) & 0xFF);
 }
 
 static void
 fill_random_floats(float *buf, uint32_t n, uint32_t seed)
 {
-	srand(seed);
+	uint32_t rng = seed;
 	for (uint32_t i = 0; i < n; i++)
-		buf[i] = (float)(rand() % 10000 - 5000) / 5000.0f;
+		buf[i] = (float)((int)(cmd_rand(&rng) % 10000) - 5000) / 5000.0f;
 }
 
 /* ----------------------------------------------------------------
