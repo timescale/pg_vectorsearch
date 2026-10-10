@@ -3,9 +3,10 @@
 # Licensed under the PostgreSQL License. See LICENSE for details.
 #
 # TAP tests for scripts/ci/release-open-dev-cycle.sh,
-# scripts/ci/release-dev-bump-check.sh, scripts/ci/release-check.sh's
-# classification, scripts/ci/release-tarball-comment.sh and
-# scripts/ci/release-publish.sh.
+# scripts/ci/release-dev-bump-check.sh, scripts/ci/release-window.sh,
+# scripts/ci/release-check.sh's classification,
+# scripts/ci/release-tarball-comment.sh, scripts/ci/release-create.sh
+# and scripts/ci/release-publish.sh.
 #
 # Usage: ./test/scripts/test_release_scripts.sh
 #
@@ -543,5 +544,42 @@ expect_status "publish: a trailer overrides the variable" 0 \
     publish "$beats_var" STUB_DRAFT=true KEEP_DRAFT_DEFAULT=true
 expect_eq "publish: the trailer publishes" \
     1 "$(gh_calls "$beats_var" 'release edit')"
+
+# ----------------------------------------------------------------
+# release-window.sh
+# ----------------------------------------------------------------
+
+# The fixture's only commit is the base, so HEAD names it. The script
+# refuses to guess this, which is the point of passing it.
+window_case() {
+    local desc="$1" base_version="$2" head_ref="$3" want="$4"
+    local dir
+    dir="$(new_fixture "$base_version")"
+    expect_status "window: $desc" "$want" env -C "$dir" \
+        HEAD_REF="$head_ref" ./scripts/ci/release-window.sh HEAD
+}
+
+window_case "a base in the development cycle is open" \
+    0.1.0-dev feat/whatever 0
+window_case "a base on a released version is closed" \
+    0.1.0 feat/whatever 1
+window_case "the dev-cycle branch is let through" \
+    0.1.0 chore/dev-0.2.0-dev 0
+window_case "a candidate counts as released" \
+    0.1.0-rc1 feat/whatever 1
+window_case "the dev-cycle branch is unremarkable outside the window" \
+    0.1.0-dev chore/dev-0.2.0-dev 0
+
+# A branch merely starting with the prefix is not a free pass on its
+# own: release-dev-bump-check.sh is what constrains its contents, and
+# both run on every pull request.
+window_case "a branch named like the bump still needs that check" \
+    0.1.0 chore/dev-anything 0
+
+dir="$(new_fixture 0.1.0)"
+expect_status "window: the base is required" 1 env -C "$dir" \
+    HEAD_REF=feat/whatever ./scripts/ci/release-window.sh
+expect_status "window: an unreadable base is refused" 1 env -C "$dir" \
+    HEAD_REF=feat/whatever ./scripts/ci/release-window.sh nope
 
 tap_finish
