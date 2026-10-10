@@ -245,7 +245,7 @@ pr_body() {
     if [[ -n "$highlights" ]] && ! grep -q 'FILL-IN' <<<"$highlights"; then
         printf '## Highlights\n\n%s\n\n' "$highlights"
     fi
-    next_version_trailer
+    create_next_version_trailer
 }
 
 # The next development version, as a git trailer the release pipeline
@@ -257,7 +257,7 @@ pr_body() {
 #
 # Must stay the last paragraph and unquoted -- git parses a trailer block
 # only at the end of a message, and takes the value literally.
-next_version_trailer() {
+create_next_version_trailer() {
     printf 'Next-Version: %s\n' "$NEXT_VERSION"
 }
 
@@ -470,7 +470,7 @@ insert_notes_template
 note_format_change
 
 git add VERSION CHANGELOG.md
-git commit -m "chore: release $VERSION" -m "$(next_version_trailer)"
+git commit -m "chore: release $VERSION" -m "$(create_next_version_trailer)"
 
 log "$BRANCH is ready: VERSION is $VERSION and CHANGELOG.md has its"
 log "entry (notes still unfinished)."

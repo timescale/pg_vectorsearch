@@ -2,6 +2,12 @@
 # Decide whether the checked-out VERSION should be tagged and released,
 # and if so assert that it is fit to be.
 #
+# Eligibility only. Whether a previous run already did some or all of
+# this is not asked here: each step checks its own work against the
+# live repository at the moment it acts, so a run that died partway
+# through resumes instead of being skipped by a verdict taken before
+# any of it ran.
+#
 # Usage: ./scripts/ci/release-gate.sh [expected-version]
 #
 # Eligibility and readiness are separate questions. Not being a release
@@ -78,12 +84,6 @@ if is_dev_version "$VERSION"; then
     exit 0
 fi
 
-if tag_exists_local "$VERSION"; then
-    log "v$VERSION already exists: $VERSION has already been released"
-    emit false
-    exit 0
-fi
-
 # ----------------------------------------------------------------
 # Readiness -- a broken release fails loudly
 # ----------------------------------------------------------------
@@ -94,8 +94,7 @@ fi
 # looks like a release to every other check here. The Next-Version
 # trailer is what only a release commit has.
 log "checking this is a release commit"
-next_version="$(git log -1 --format='%(trailers:key=Next-Version,valueonly)' \
-    | tr -d '[:space:]')"
+next_version="$(read_next_version_trailer HEAD)"
 [[ -n "$next_version" ]] ||
     die "$(git rev-parse --short HEAD) has no Next-Version trailer, so it" \
         "is not a release commit -- VERSION says $VERSION, but only the" \

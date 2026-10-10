@@ -397,7 +397,7 @@ that is a convention rather than a property: if PRs ever append to it
 during a cycle, it becomes a noisy path firing the pipeline on every
 merge. `VERSION` cannot degrade that way.
 
-Four jobs run in order.
+Five jobs run in order.
 
 **Gate** (`scripts/ci/release-gate.sh`) first checks the commit is one
 `prepare-release.sh` made, by requiring its `Next-Version` trailer.
@@ -435,35 +435,127 @@ the build job, and nothing downstream runs. The assets travel to the
 next job as an artifact, since that job has neither the toolchain nor a
 build directory.
 
-**Tag and create the Releases entry** (`scripts/ci/release-create.sh`)
+**Tag and create the draft entry** (`scripts/ci/release-create.sh`)
 makes exactly two things: the git ref `refs/tags/v<version>` in this
-repository, and one GitHub Releases entry against it whose body is the
-`CHANGELOG.md` section for that version. It uploads no files. A
-prerelease is flagged as one so it does not become the "latest release".
-It refuses unless `HEAD` is the sha the build job tested — a release may
-only ever tag a verified commit — and it does nothing else, so a later
-failure attaching artifacts cannot damage an entry that already
-exists.
+repository, and one **draft** GitHub Releases entry against it whose
+body is the `CHANGELOG.md` section for that version. It uploads no
+files. A prerelease is flagged as one so it does not become the "latest
+release". It refuses unless `HEAD` is the sha the build job tested — a
+release may only ever tag a verified commit.
 
-The tarball and its checksum are attached in a following step, once the
-entry exists. That order is deliberate: a failed upload leaves a release
-missing its files, which re-running the job fixes, rather than a tag
-with nothing behind it.
+**Attach the assets** (`scripts/ci/release-publish.sh --keep-draft`)
+uploads the tarball and its checksum to that draft and reads the upload
+back from the API to confirm every file arrived. It stops there.
 
-It reports the release milestone's remaining open issues but never closes
-it: closing a milestone that still has open work is a judgement call.
+This repository has [immutable releases][immutable] on. GitHub freezes
+a release's assets and its tag at the moment it is published and
+rejects every later upload with `Cannot upload assets to an immutable
+release`. A release published before its files are attached can
+therefore never acquire them, and deleting it does not help — a tag
+that has carried an immutable release can never be reused, so the
+version has to be abandoned and the next one released instead.
 
-**Reopen the development cycle** (`scripts/ci/release-open-dev-cycle.sh`)
-runs last, after the release exists, so a failure here cannot damage a
-published release. It bumps `VERSION` to the `Next-Version` the release
-commit declared and opens that pull request. See
+A draft, by contrast, is mutable and invisible, so every failure before
+the publish is re-runnable and leaves nothing public behind.
+
+**Reopen the development cycle** (`release-dev-cycle.yml`, which runs
+`scripts/ci/release-open-dev-cycle.sh`) bumps `VERSION` to the
+`Next-Version` the release commit declared and opens that pull request.
+It runs while the release is still a draft: the tag is already pushed,
+so the version is cut whether or not the Releases entry is visible, and
+a bump that cannot be opened should not leave behind a published
+release that nothing can bump past. See
 [After a release](#after-a-release) for what it needs and what happens
 without it.
+
+It is a workflow of its own, called by this one, so that it can also be
+run alone. Re-dispatching `release.yml` would reach it as well, but only
+after rebuilding and retesting a commit whose release is otherwise
+finished — so when the bump is all that is outstanding, running it alone
+is the cheaper route. Dispatch **Release dev cycle** with the
+released version; the script reads the next one off the tag's own
+commit, the same trailer the gate read, so nothing else has to be
+supplied.
+
+It could trigger on the tag instead, now that the App creates it, and
+deliberately does not: the bump is called from the pipeline so the
+publish can be ordered after it. A tag-triggered run is a separate
+workflow run, which nothing in the release run can wait on.
+
+**Publish** (`scripts/ci/release-publish.sh`, with no flag) runs last.
+It re-attaches the assets, re-reads the list, and flips the draft.
+
+Last because it is the only step with no undo: publishing signs a
+release attestation over the tag, the commit and the asset digests, and
+from that moment the assets are frozen and the tag name is spent.
+Everything reversible — building, testing, packaging, tagging,
+attaching, reopening the cycle — has already succeeded by the time it
+runs. Anything that fails earlier leaves a draft, which can be
+published by hand, re-run, or deleted without spending the version.
+
+The verification runs again in this job rather than being trusted from
+the previous one, so what is sealed is checked by the job that seals
+it.
+
+It reports the release milestone's remaining open issues but never
+closes it: closing a milestone that still has open work is a judgement
+call.
+
+The release can be held back as a draft instead of published. The tag
+is still pushed, the assets still attached and verified, the cycle
+still reopened — only the Releases entry stays unpublished, for someone
+to read before it goes public. Finishing it afterwards is one click in
+the Releases UI, or a re-run of the workflow, since nothing downstream
+is waiting on it.
+
+Three things can ask for that, and the most specific one that has an
+opinion wins:
+
+| source | scope |
+|---|---|
+| `keep_draft` dispatch input (`yes`/`no`) | this run |
+| `Keep-Draft:` trailer on the release commit | this release |
+| `RELEASE_KEEP_DRAFT` repository variable | every release |
+
+The dispatch input defaults to `default`, meaning "no opinion" rather
+than "publish", so a dispatched re-run does not silently overrule a
+trailer or the variable. Choosing `yes` or `no` is the operator
+overruling both.
+
+The trailer is how the decision gets made where it is reviewable —
+written into the release pull request and visible in its diff, like
+`Next-Version`. Add it to the commit message, or to the last paragraph
+of the pull request body, for the same reason `Next-Version` appears in
+both: a rebase merge keeps the commit, a squash merge builds the
+message from the body.
+
+```text
+chore: release 0.2.0
+
+Next-Version: 0.3.0-dev
+Keep-Draft: true
+```
+
+Silence everywhere publishes. Holding a release back is the deliberate
+act, so it is the one that has to be said.
+
+[immutable]: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases
 
 A release that failed after its push event was consumed can be re-run
 from the Actions tab (`workflow_dispatch`), giving the version. The gate
 asserts that the input matches `VERSION`, so this cannot release a
 version the ref does not carry.
+
+Re-running is safe at any stage, because no step trusts a verdict taken
+before it ran. The gate decides only whether the commit is a release
+worth making, never whether one has already been made; each step then
+checks its own work against the repository at the moment it acts. A tag
+that already points at the tested commit is reused, and one pointing
+anywhere else is fatal. A draft is resumed. Assets are re-uploaded and
+read back. An open bump pull request is left alone, and so is a release
+already published with its assets. The one state no re-run can repair is
+a release published *without* them — which is the whole reason
+publishing comes last.
 
 ## After a release
 
@@ -482,12 +574,24 @@ name agrees with the file.
 It needs a credential that is not `GITHUB_TOKEN`, because GitHub
 starts no workflow runs from events that token creates: the required
 checks would never report and the pull request could not be merged at
-all. The job reads `RELEASE_APP_CLIENT_ID` (a repository variable — the
-App's client id, which `actions/create-github-app-token` now prefers
-over the numeric app id) and `RELEASE_APP_PRIVATE_KEY` (a secret), and
-is skipped when the variable is unset -- so a repository without the
-App still publishes releases, and the bump falls back to the manual
-path below.
+all.
+
+That is true of everything the pipeline writes, not just this pull
+request, so the whole pipeline writes as the App — the tag, the
+Releases entry and this bump alike. Each job mints its own token from
+`RELEASE_APP_CLIENT_ID` (a repository variable — the App's client id,
+which `actions/create-github-app-token` now prefers over the numeric
+app id) and `RELEASE_APP_PRIVATE_KEY` (a secret), scoped to what that
+job does: tagging and publishing take `contents` alone, and only the
+bump asks for `pull-requests`. The gate refuses a release when the
+variable is unset, so the run stops before the build rather than at the
+first write.
+
+Using the App for some writes and not others is what made the
+distinction bite: a tag created by `GITHUB_TOKEN` triggers nothing, so
+no workflow can ever be driven by one. Nothing in this repository
+listens for tag or release events today, but the pipeline no longer
+forecloses it.
 
 **Reopening it by hand.** Bump `VERSION` to the next `-dev` — the
 release commit says which in its `Next-Version` trailer:

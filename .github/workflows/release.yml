@@ -36,6 +36,23 @@ on:
         description: 'Commit to release (must be on main or an X.Y.x branch)'
         required: true
         type: string
+      # Whether the Releases entry goes public at the end of this run
+      # or waits for someone to read it. The tag is pushed and the
+      # assets attached either way, and the development-cycle bump
+      # still lands, so this decides publication and nothing else.
+      #
+      # Three values because this input is the most specific of three
+      # sources. `default` hands the decision on to the release
+      # commit's Keep-Draft trailer and then to the RELEASE_KEEP_DRAFT
+      # variable; `yes` and `no` are whoever started this run
+      # overruling both -- `no` included, since asking for publication
+      # is a different thing from having no opinion.
+      keep_draft:
+        description: 'Leave the release unpublished'
+        required: false
+        default: default
+        type: choice
+        options: [default, 'yes', 'no']
 
 # Not cancel-in-progress: cancelling between the tag and the Releases
 # entry is exactly what should not happen.
@@ -70,12 +87,26 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - name: Check it is untagged and its CHANGELOG entry is finished
+      - name: Decide whether this commit is a finished release
         id: gate
         env:
           INPUT_VERSION: ${{ inputs.version }}
           DISPATCHED: ${{ github.event_name == 'workflow_dispatch' }}
         run: ./scripts/ci/release-gate.sh "$INPUT_VERSION"
+
+      # Everything downstream writes as the release App, so a release
+      # that cannot mint its token is already lost -- better to say so
+      # here than after the build job has spent ten minutes.
+      - name: Check the release App is configured
+        if: >-
+          ${{ steps.gate.outputs.release == 'true'
+          && vars.RELEASE_APP_CLIENT_ID == '' }}
+        run: |
+          echo "::error::RELEASE_APP_CLIENT_ID is unset. The release" \
+            "pipeline writes as the release App: GitHub raises no" \
+            "events for what GITHUB_TOKEN creates, so a tag or pull" \
+            "request it made could drive nothing." >&2
+          exit 1
 
   build:
     name: Build and test the commit that will be tagged
@@ -138,15 +169,32 @@ jobs:
           retention-days: 7
 
   release:
-    name: Tag the commit and create its GitHub Releases entry
+    name: Tag the commit and stage its GitHub Releases entry
     needs: [gate, build]
     runs-on: ubuntu-latest
     permissions:
-      # The only job that writes anything. gh release create makes the
-      # tag as well as the release, so no push permission is needed.
-      contents: write # create the tag and the GitHub release
+      # Only what checkout needs. Every write goes through the App
+      # token, so the tag this job creates is one GitHub will raise
+      # events for -- which GITHUB_TOKEN's would not be.
+      contents: read
 
     steps:
+      - name: Mint a token for the release App
+        id: token
+        # v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          # The client id, not the numeric app id: the action
+          # deprecates app-id in favour of it.
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Scoped to this repository and to the one thing this job
+          # does: create a tag and a draft release. It writes as the
+          # App rather than GITHUB_TOKEN because GitHub raises no
+          # events for what that token creates, so a tag it pushed
+          # could never drive anything.
+          permission-contents: write
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.gate.outputs.sha }}
@@ -160,40 +208,69 @@ jobs:
           name: release-assets
           path: dist/
 
-      - name: Create tag v<version> and a Releases entry with its notes
+      - name: Create tag v<version> and a draft entry with its notes
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
           VERSION: ${{ needs.gate.outputs.version }}
           TARGET_SHA: ${{ needs.gate.outputs.sha }}
         run: ./scripts/ci/release-create.sh "$VERSION" "$TARGET_SHA"
 
-      # After the entry exists, so a failed upload leaves a release
-      # missing its files rather than a tag with no release at all.
-      # --clobber lets a re-run replace them instead of failing on a
-      # name clash.
-      - name: Attach the tarball and its checksum
+      # Publishing freezes the assets, so the files go on while the
+      # entry is still a draft. Attaching them afterwards is what an
+      # immutable release refuses, and no re-run can repair it: the tag
+      # is spent even if the empty release is deleted. The publish
+      # itself is the last job of all.
+      - name: Attach the tarball and its checksum to the draft
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
           VERSION: ${{ needs.gate.outputs.version }}
-          REPO: ${{ github.repository }}
-        run: gh release upload "v$VERSION" dist/* --clobber --repo "$REPO"
+        run: ./scripts/ci/release-publish.sh "$VERSION" dist --keep-draft
 
-  # Reopening the cycle needs an identity that is not GITHUB_TOKEN:
-  # GitHub starts no workflow runs from events that token creates, so
-  # main's required checks would never report on the pull request and
-  # nothing could merge it. Skipped when the App is not configured, so
-  # the release still publishes and the bump stays the manual step
-  # docs/release.md describes.
+  # Ahead of the publish, so a bump that cannot be opened leaves a
+  # draft rather than a released version nothing can bump past.
+  #
+  # Its own workflow, so it can also be dispatched alone when the bump
+  # is the only thing left outstanding -- re-dispatching the pipeline
+  # would reach it too, but only after a build that finds nothing to
+  # do.
   dev-cycle:
     name: Reopen the development cycle
     needs: [gate, release]
-    if: vars.RELEASE_APP_CLIENT_ID != ''
+    uses: ./.github/workflows/release-dev-cycle.yml
+    permissions:
+      contents: read
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+    with:
+      released: ${{ needs.gate.outputs.version }}
+      next: ${{ needs.gate.outputs.next_version }}
+      base: ${{ github.ref_name }}
+      sha: ${{ needs.gate.outputs.sha }}
+
+  # Last, and deliberately so: publishing is the one step with no undo,
+  # because it signs an attestation over the tag, the commit and the
+  # asset digests, and from then on the assets are frozen and the tag
+  # name can never be reused. Every reversible thing -- building,
+  # testing, packaging, tagging, attaching, and reopening the
+  # development cycle -- has therefore already succeeded by the time
+  # this runs. Anything that fails before it leaves a draft, which can
+  # be published by hand, re-run, or deleted without spending the
+  # version.
+  publish:
+    name: Publish the release
+    needs: [gate, build, release, dev-cycle]
+    # Unconditional: the job runs and decides for itself, which is
+    # what lets a re-run finish a draft an earlier run left behind. A
+    # job that skipped instead would be unreachable -- a skipped job is
+    # not a failed one, and nothing re-runs it. Running either way also
+    # puts the decision, and the reason for it, in the log.
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      contents: read # only what checkout needs; the App does the write
 
     steps:
       - name: Mint a token for the release App
-        id: app-token
+        id: token
         # v3.2.0
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
@@ -201,40 +278,32 @@ jobs:
           # deprecates app-id in favour of it.
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          # No owner or repositories input: that scopes the token to
-          # this repository alone, whatever else the App is installed
-          # on. The permissions narrow it further to what this job
-          # does, so an App shared with other release automation
-          # hands this job no more than it needs.
+          # Contents alone: this job publishes the draft and
+          # attaches nothing else.
           permission-contents: write
-          permission-pull-requests: write
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.gate.outputs.sha }}
-          fetch-depth: 0
-          # The App's token is used explicitly below rather than left
-          # in the checkout, so no credential outlives this job's
-          # push.
           persist-credentials: false
 
-      - name: Open the pull request that bumps VERSION
+      - name: Collect the assets the build job packaged
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: dist/
+
+      # The same script, without --keep-draft, so it decides for
+      # itself. It re-attaches and re-reads the asset list before
+      # flipping the draft, so what is sealed is verified in the same
+      # job that seals it rather than trusted from an earlier one.
+      - name: Verify the assets once more, then publish
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-          RELEASED: ${{ needs.gate.outputs.version }}
-          NEXT: ${{ needs.gate.outputs.next_version }}
-          REPO: ${{ github.repository }}
-          BASE: ${{ github.ref_name }}
-        run: |
-          # Attribute the commit to the App's own bot account. An
-          # unattributed commit can draw the ruleset's extra-approval
-          # requirement, which would stall the bump.
-          bot_id="$(gh api "/users/$APP_SLUG%5Bbot%5D" --jq .id)"
-          git config user.name "$APP_SLUG[bot]"
-          git config user.email \
-            "$bot_id+$APP_SLUG[bot]@users.noreply.github.com"
-          git remote set-url origin \
-            "https://x-access-token:$GH_TOKEN@github.com/$REPO"
-          ./scripts/ci/release-open-dev-cycle.sh \
-            "$RELEASED" "$NEXT" "$BASE"
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          # Empty on a push, which is how the trailer and the variable
+          # get their turn. Through the environment rather than
+          # interpolated into the shell.
+          KEEP_DRAFT_INPUT: ${{ inputs.keep_draft }}
+          KEEP_DRAFT_DEFAULT: ${{ vars.RELEASE_KEEP_DRAFT }}
+        run: ./scripts/ci/release-publish.sh "$VERSION" dist

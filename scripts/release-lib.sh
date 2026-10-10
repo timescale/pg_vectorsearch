@@ -445,6 +445,51 @@ check_next_version_order() {
             "existing tag"
 }
 
+# The Next-Version trailer on the commit $1, whitespace stripped.
+# Prints nothing when there is none, which callers must decide about:
+# only a commit prepare-release.sh wrote carries one, so its absence is
+# how a release commit is told from any other commit sitting where one
+# did.
+#
+# The commit is required rather than defaulting to HEAD. Which commit is
+# read is the one thing that goes wrong here -- a pull_request checkout
+# is a synthetic merge whose message has no trailers -- so every caller
+# states it and none inherits it by omission.
+#
+# Named for the direction it runs in: prepare-release.sh's
+# create_next_version_trailer() is the counterpart that builds the
+# trailer the release commit carries.
+read_next_version_trailer() {
+    local commit="${1:-}"
+    [[ -n "$commit" ]] ||
+        die "read_next_version_trailer needs the commit to read"
+    commit_trailer Next-Version "$commit"
+}
+
+# Trailer $1 on commit $2, whitespace stripped, empty when absent.
+#
+# Trailers are how a decision made in the release pull request reaches
+# the pipeline: they survive both merge styles this repository allows,
+# since a rebase keeps the commit and a squash builds its message from
+# the pull request body.
+commit_trailer() {
+    git log -1 --format="%(trailers:key=$1,valueonly)" "$2" |
+        tr -d '[:space:]'
+}
+
+# Does $1 read as a yes? Written for values a person types into a
+# repository variable or a commit trailer, where "true" and "yes" are
+# equally likely. Anything else, empty included, is no.
+#
+# Lowercased through tr rather than ${1,,}, which bash learned in 4.0:
+# macOS ships 3.2, and the test suite runs there.
+is_truthy() {
+    case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+        true | yes | on | 1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # The next development version travels as a Next-Version trailer on the
 # release commit, and everything downstream trusts it: the gate reads it
 # to confirm the commit is a release, and the dev-cycle job bumps VERSION
@@ -453,14 +498,15 @@ check_next_version_order() {
 # the tag exists and a wrong trailer has already stranded main.
 #
 # $2 is the branch being released from, which decides the default bump.
-# $3 is the commit carrying the trailer, HEAD by default. It has to be
-# nameable because a pull_request checkout is a synthetic merge of the
-# release branch into its base, and trailers are read from one commit's
-# message -- the merge's, which has none.
+# $3 is the commit carrying the trailer, named rather than defaulted: a
+# pull_request checkout is a synthetic merge of the release branch into
+# its base, and trailers are read from one commit's message -- the
+# merge's, which has none.
 check_next_version_trailer() {
-    local version="$1" branch="$2" commit="${3:-HEAD}" next want
-    next="$(git log -1 --format='%(trailers:key=Next-Version,valueonly)' \
-        "$commit" | tr -d '[:space:]')"
+    local version="$1" branch="$2" commit="${3:-}" next want
+    [[ -n "$commit" ]] ||
+        die "check_next_version_trailer needs the commit to read"
+    next="$(read_next_version_trailer "$commit")"
 
     [[ -n "$next" ]] ||
         die "the release commit has no Next-Version trailer --" \

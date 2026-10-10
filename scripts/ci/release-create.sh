@@ -1,13 +1,20 @@
 #!/bin/bash
-# Create the git tag v<version> in this repository, and a GitHub
+# Create the git tag v<version> in this repository, and a draft GitHub
 # Releases entry for it carrying the CHANGELOG.md notes.
 #
 # Usage: ./scripts/ci/release-create.sh <version> <sha>
 #
 # Creates exactly two things and uploads no files: one git ref
-# (refs/tags/v<version>) and one GitHub Releases entry. Attaching
-# artifacts is a separate step, so a failure there cannot damage a
-# release that already exists.
+# (refs/tags/v<version>) and one draft GitHub Releases entry. The files
+# go on in release-publish.sh, which attaches them and only then
+# publishes.
+#
+# The entry is a draft because publishing is irreversible: GitHub
+# freezes an immutable release's assets the moment it is published and
+# refuses every later upload, so a release published before its files
+# are attached can never acquire them. A draft stays mutable, which
+# makes this step re-runnable and leaves nothing public behind if the
+# upload fails.
 #
 # <sha> is the commit the build job tested, and must be what is checked
 # out: a release may only tag a verified commit, and passing the sha in
@@ -35,6 +42,41 @@ HEAD_SHA="$(git rev-parse HEAD)"
 [[ "$HEAD_SHA" == "$TARGET_SHA" ]] ||
     die "HEAD is $HEAD_SHA but the tested commit was $TARGET_SHA --" \
         "refusing to tag a commit that was not built and tested"
+
+# Asked before anything is done, not after: a step whose work is
+# already finished should not create a tag, a temporary file or a set
+# of release notes on its way to finding that out.
+#
+# A run that created the draft and then failed must be able to finish,
+# so a draft is resumed. A published entry is read for what it has:
+# complete means this step is done, incomplete means it never can be.
+if existing_draft="$(gh release view "$TAG" --repo "$(repo_slug)" \
+    --json isDraft --jq .isDraft 2>/dev/null)"; then
+    if [[ "$existing_draft" != "true" ]]; then
+        # Published is not the same as finished. One that carries its
+        # source tarball and checksum is this step's work already done,
+        # so the run goes on to whatever else is outstanding rather
+        # than failing on work nobody still has to do. One published
+        # without them is the rc1 failure: publication froze the assets
+        # and spent the tag, and no re-run can repair either.
+        published_assets="$(gh release view "$TAG" --repo "$(repo_slug)" \
+            --json assets --jq '.assets[].name')"
+        if grep -q '\.tar\.gz$' <<<"$published_assets" &&
+            grep -q '\.sha256sum$' <<<"$published_assets"; then
+            log "release $TAG is published with its assets: nothing" \
+                "left to do here"
+            exit 0
+        fi
+        die "release $TAG is published without its source tarball --" \
+            "an immutable release freezes its assets at publication" \
+            "and spends the tag, so $VERSION can never be completed" \
+            "-- release the next version instead"
+    fi
+    warn "draft release $TAG already exists: resuming"
+    log "draft: $(gh release view "$TAG" --repo "$(repo_slug)" \
+        --json url --jq .url)"
+    exit 0
+fi
 
 # The tag is created as its own step, and its sha verified, before the
 # release is made. `gh release create --target` only places the tag when
@@ -78,6 +120,7 @@ log "notes: $(wc -l <"$NOTES") lines from the CHANGELOG.md entry"
 # against TARGET_SHA, so the release must attach to it or fail rather
 # than create one of its own.
 args=(--repo "$(repo_slug)"
+    --draft
     --verify-tag
     --title "$(meson_project_name) $VERSION"
     --notes-file "$NOTES")
@@ -89,23 +132,8 @@ if is_prerelease "$VERSION"; then
     args+=(--prerelease)
 fi
 
-log "creating the GitHub Releases entry for $TAG"
+log "creating the draft GitHub Releases entry for $TAG"
 gh release create "$TAG" "${args[@]}"
 
-log "created: $(gh release view "$TAG" --repo "$(repo_slug)" \
+log "draft: $(gh release view "$TAG" --repo "$(repo_slug)" \
     --json url --jq .url)"
-
-# Reported, never acted on: closing a milestone that still has open work
-# is a judgement call, not something a release script should make.
-if milestone="$(resolve_milestone "$VERSION")"; then
-    open_issues="$(gh api --paginate \
-        "repos/$(repo_slug)/milestones" \
-        --jq ".[] | select(.title == \"$milestone\") | .open_issues" \
-        2>/dev/null | head -1)"
-    if [[ -n "$open_issues" && "$open_issues" != 0 ]]; then
-        warn "milestone \"$milestone\" still has $open_issues open" \
-            "issue(s) -- closing it is a human decision"
-    else
-        log "milestone \"$milestone\" has no open issues left"
-    fi
-fi

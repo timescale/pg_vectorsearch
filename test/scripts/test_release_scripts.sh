@@ -4,7 +4,8 @@
 #
 # TAP tests for scripts/ci/release-open-dev-cycle.sh,
 # scripts/ci/release-dev-bump-check.sh, scripts/ci/release-check.sh's
-# classification and scripts/ci/release-tarball-comment.sh.
+# classification, scripts/ci/release-tarball-comment.sh and
+# scripts/ci/release-publish.sh.
 #
 # Usage: ./test/scripts/test_release_scripts.sh
 #
@@ -80,7 +81,11 @@ open_cycle() {
 }
 
 dir="$(new_fixture 0.1.0)"
-expect_status "open-cycle: too few arguments" 1 open_cycle "$dir" 0.1.0
+expect_status "open-cycle: no arguments at all" 1 open_cycle "$dir"
+# The fixture's commit is not one prepare-release.sh wrote, so there is
+# no trailer to fall back on and nothing says which cycle to open.
+expect_status "open-cycle: no next version and no trailer" 1 \
+    open_cycle "$dir" 0.1.0
 expect_status "open-cycle: a next version without -dev" 1 \
     open_cycle "$dir" 0.1.0 0.2.0
 expect_status "open-cycle: a next version not greater than released" 1 \
@@ -143,6 +148,41 @@ expect_eq "open-cycle: the candidate's cycle reopens at its version" \
 # reopening at its own version would leave the cycle where it was.
 expect_status "open-cycle: a final release may not reopen at its own" 1 \
     open_cycle "$dir" 0.1.0 0.1.0-dev
+
+
+# The next version comes from the release commit when it is not given,
+# which is what lets a standalone re-run be told only what was
+# released.
+trailered="$(new_fixture 0.1.0)"
+git -C "$trailered" commit -q --allow-empty \
+    -m "chore: release 0.1.0" -m "Next-Version: 0.2.0-dev"
+expect_status "open-cycle: the trailer supplies the next version" 0 \
+    open_cycle "$trailered" 0.1.0 "" main
+expect_eq "open-cycle: it reopens at the declared cycle" \
+    0.2.0-dev "$(tr -d '[:space:]' <"$trailered/VERSION")"
+
+# Attribution and the authenticated remote are the script's, not the
+# workflow's, and must not touch a tree someone is running this in by
+# hand.
+plain="$(new_fixture 0.1.0)"
+expect_status "open-cycle: no APP_SLUG opens the cycle anyway" 0 \
+    open_cycle "$plain" 0.1.0 0.2.0-dev main
+expect_eq "open-cycle: it leaves the committer alone" \
+    "Release Test" "$(git -C "$plain" config user.name)"
+expect_eq "open-cycle: it leaves the remote alone" \
+    "$plain.git" "$(git -C "$plain" remote get-url origin)"
+
+botted="$(new_fixture 0.1.0)"
+expect_status "open-cycle: APP_SLUG commits as the bot" 0 \
+    in_fixture "$botted" env GH_TOKEN=t APP_SLUG=vectorsearch-bot \
+    STUB_COMMENT_ID=4242 \
+    ./scripts/ci/release-open-dev-cycle.sh 0.1.0 0.2.0-dev main
+expect_eq "open-cycle: the commit carries the bot identity" \
+    "vectorsearch-bot[bot]" \
+    "$(git -C "$botted" log -1 --format=%an chore/dev-0.2.0-dev)"
+expect_status "open-cycle: APP_SLUG without a token is refused" 1 \
+    in_fixture "$botted" env APP_SLUG=vectorsearch-bot \
+    ./scripts/ci/release-open-dev-cycle.sh 0.1.0 0.3.0-dev main
 
 # ----------------------------------------------------------------
 # release-check.sh: the verdict it hands the packaging job
@@ -323,5 +363,185 @@ for missing in REPO PR VERSION ARTIFACT_URL HEAD_SHA; do
     comment_refused "an unset $missing" "${without[@]}"
     comment_refused "an empty $missing" "${without[@]}" "$missing="
 done
+
+# ----------------------------------------------------------------
+# release-publish.sh
+# ----------------------------------------------------------------
+#
+# What these are really about is the one ordering that cannot be
+# repaired. Publishing freezes a release's assets, and the tag is burned
+# even if the empty release is deleted, so a publish that happens before
+# every file is attached loses the version. The draft is what makes that
+# recoverable, and nothing may seal it early.
+
+# A fixture with a dist directory holding what the build job packages.
+with_dist() {
+    local dir
+    dir="$(new_fixture "$1")"
+    mkdir -p "$dir/dist"
+    printf 'tarball\n' >"$dir/dist/pg_vectorsearch-$1.tar.gz"
+    printf 'checksum\n' >"$dir/dist/pg_vectorsearch-$1.tar.gz.sha256sum"
+    printf '%s\n' "$dir"
+}
+
+publish() {
+    local dir="$1"
+    shift
+    in_fixture "$dir" env GH_TOKEN=x "$@" \
+        ./scripts/ci/release-publish.sh 0.1.0 dist
+}
+
+# The same against a draft, with the script's own flags after the
+# positionals rather than the stub's environment before them.
+publish_opts() {
+    local dir="$1"
+    shift
+    in_fixture "$dir" env GH_TOKEN=x STUB_DRAFT=true \
+        ./scripts/ci/release-publish.sh 0.1.0 dist "$@"
+}
+
+draft="$(with_dist 0.1.0)"
+expect_status "publish: a draft is filled and then published" 0 \
+    publish "$draft" STUB_DRAFT=true
+expect_eq "publish: the assets are uploaded" \
+    1 "$(gh_calls "$draft" 'release upload')"
+expect_eq "publish: the draft is published once they are there" \
+    1 "$(gh_calls "$draft" 'release edit')"
+
+# The upload is read back rather than trusted: a file that silently did
+# not arrive must stop the publish, because afterwards it cannot be
+# added.
+lost="$(with_dist 0.1.0)"
+expect_status "publish: an asset that did not arrive is refused" 1 \
+    publish "$lost" STUB_DRAFT=true STUB_UPLOAD_LOSES=1
+expect_eq "publish: nothing is published when one is missing" \
+    0 "$(gh_calls "$lost" 'release edit')"
+
+# Re-running after a failure downstream of the publish must succeed
+# rather than report a release that is already correct as broken.
+done_="$(with_dist 0.1.0)"
+expect_status "publish: an already published release is accepted" 0 \
+    publish "$done_" STUB_DRAFT=false \
+    "STUB_ASSETS=pg_vectorsearch-0.1.0.tar.gz pg_vectorsearch-0.1.0.tar.gz.sha256sum"
+expect_eq "publish: it is not published a second time" \
+    0 "$(gh_calls "$done_" 'release edit')"
+expect_eq "publish: nothing is uploaded to it" \
+    0 "$(gh_calls "$done_" 'release upload')"
+
+# The unrecoverable state, which must be reported as the failure it is
+# rather than quietly passing.
+partial="$(with_dist 0.1.0)"
+expect_status "publish: a published release missing a file fails" 1 \
+    publish "$partial" STUB_DRAFT=false \
+    STUB_ASSETS=pg_vectorsearch-0.1.0.tar.gz
+
+absent="$(with_dist 0.1.0)"
+expect_status "publish: no release entry at all is refused" 1 \
+    publish "$absent" STUB_DRAFT=
+
+mismatch="$(with_dist 0.1.0)"
+expect_status "publish: a version VERSION disagrees with is refused" 1 \
+    in_fixture "$mismatch" env GH_TOKEN=x STUB_DRAFT=true \
+    ./scripts/ci/release-publish.sh 0.2.0 dist
+
+# --keep-draft holds back the publish and nothing else, so the files
+# still have to be there and still have to be checked -- the hold is a
+# decision about visibility, not a way to skip the verification.
+held="$(with_dist 0.1.0)"
+expect_status "publish: --keep-draft attaches the assets" 0 \
+    publish_opts "$held" --keep-draft
+expect_eq "publish: --keep-draft uploads them" \
+    1 "$(gh_calls "$held" 'release upload')"
+expect_eq "publish: --keep-draft leaves it unpublished" \
+    0 "$(gh_calls "$held" 'release edit')"
+
+held_lost="$(with_dist 0.1.0)"
+expect_status "publish: --keep-draft still refuses a lost asset" 1 \
+    in_fixture "$held_lost" env GH_TOKEN=x STUB_DRAFT=true \
+    STUB_UPLOAD_LOSES=1 \
+    ./scripts/ci/release-publish.sh 0.1.0 dist --keep-draft
+
+bad_opt="$(with_dist 0.1.0)"
+expect_status "publish: an unknown option is refused" 1 \
+    in_fixture "$bad_opt" env GH_TOKEN=x STUB_DRAFT=true \
+    ./scripts/ci/release-publish.sh 0.1.0 dist --publish-anyway
+
+empty="$(new_fixture 0.1.0)"
+mkdir -p "$empty/dist"
+expect_status "publish: an empty dist directory is refused" 1 \
+    publish "$empty" STUB_DRAFT=true
+expect_eq "publish: an empty dist publishes nothing" \
+    0 "$(gh_calls "$empty" 'release edit')"
+
+# ----------------------------------------------------------------
+# release-create.sh
+# ----------------------------------------------------------------
+
+# Reaching the draft decision needs the tag already placed at the
+# tested commit, which is what the resumable path looks like.
+# STUB_COMMENT_ID is what a `gh api` read answers -- here, that sha.
+create_at_head() {
+    local dir="$1" sha
+    shift
+    sha="$(git -C "$dir" rev-parse HEAD)"
+    in_fixture "$dir" env GH_TOKEN=x STUB_COMMENT_ID="$sha" "$@" \
+        ./scripts/ci/release-create.sh 0.1.0 "$sha"
+}
+
+# Published is not the same as finished: one that has its tarball and
+# checksum is this step's work already done, so the run carries on.
+finished="$(new_fixture 0.1.0)"
+expect_status "create: a published release with its assets is done" 0 \
+    create_at_head "$finished" STUB_DRAFT=false \
+    STUB_ASSETS="pg_vectorsearch-0.1.0.tar.gz \
+pg_vectorsearch-0.1.0.tar.gz.sha256sum"
+expect_eq "create: a finished release is not created again" \
+    0 "$(gh_calls "$finished" 'release create')"
+
+# Published without them is the rc1 failure, which no re-run repairs.
+stranded="$(new_fixture 0.1.0)"
+expect_status "create: a published release missing its assets is fatal" \
+    1 create_at_head "$stranded" STUB_DRAFT=false STUB_ASSETS=
+
+# Where the draft decision comes from when the caller passes no flag:
+# the dispatched run's own choice, then the release commit's trailer,
+# then the repository variable.
+
+# A fixture whose release commit carries Keep-Draft: $2.
+with_trailer() {
+    local dir="$1"
+    git -C "$dir" -c user.email=t@e -c user.name=T commit -q --amend \
+        --allow-empty -m "chore: release 0.1.0" -m "Keep-Draft: $2"
+    printf '%s\n' "$dir"
+}
+
+by_trailer="$(with_trailer "$(with_dist 0.1.0)" true)"
+expect_status "publish: a Keep-Draft trailer is honoured" 0 \
+    publish "$by_trailer" STUB_DRAFT=true
+expect_eq "publish: the trailer leaves it unpublished" \
+    0 "$(gh_calls "$by_trailer" 'release edit')"
+
+by_var="$(with_dist 0.1.0)"
+expect_status "publish: RELEASE_KEEP_DRAFT is honoured" 0 \
+    publish "$by_var" STUB_DRAFT=true KEEP_DRAFT_DEFAULT=true
+expect_eq "publish: the variable leaves it unpublished" \
+    0 "$(gh_calls "$by_var" 'release edit')"
+
+# The operator who started the run outranks both of the standing
+# sources, in either direction.
+override="$(with_trailer "$(with_dist 0.1.0)" true)"
+expect_status "publish: a dispatched no overrides the trailer" 0 \
+    publish "$override" STUB_DRAFT=true KEEP_DRAFT_INPUT=no \
+    KEEP_DRAFT_DEFAULT=true
+expect_eq "publish: the dispatched no publishes" \
+    1 "$(gh_calls "$override" 'release edit')"
+
+# A trailer that says no beats a variable that says yes: the release
+# in hand outranks the standing policy.
+beats_var="$(with_trailer "$(with_dist 0.1.0)" false)"
+expect_status "publish: a trailer overrides the variable" 0 \
+    publish "$beats_var" STUB_DRAFT=true KEEP_DRAFT_DEFAULT=true
+expect_eq "publish: the trailer publishes" \
+    1 "$(gh_calls "$beats_var" 'release edit')"
 
 tap_finish
