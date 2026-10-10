@@ -1,0 +1,123 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: Release dev cycle
+
+# Bumps VERSION to the next development version and opens that pull
+# request.
+#
+# Callable two ways on purpose. release.yml calls it so the bump keeps
+# its place in the pipeline, ahead of the publish -- a bump that cannot
+# be opened should not leave behind a released version nothing can bump
+# past. And it dispatches on its own, so a bump that failed, or that
+# was never reached, can be run again later without re-entering the
+# release workflow. That matters because release.yml cannot be
+# re-dispatched once the tag exists: its gate reports the version as
+# already released and skips.
+#
+# It could trigger on the tag instead, now that the App creates it, and
+# deliberately does not: being called is what lets the publish be
+# ordered after it, and a tag-triggered run is a separate run that
+# nothing in the release run can wait on.
+on:
+  workflow_call:
+    inputs:
+      released:
+        description: 'The version just tagged'
+        required: true
+        type: string
+      next:
+        description: 'The development version to bump to'
+        required: true
+        type: string
+      base:
+        description: 'Branch to open the pull request against'
+        required: true
+        type: string
+      sha:
+        description: 'The release commit'
+        required: true
+        type: string
+    secrets:
+      # Named rather than inherited: this workflow needs one secret, and
+      # `secrets: inherit` would hand it every secret the caller holds.
+      RELEASE_APP_PRIVATE_KEY:
+        required: true
+  workflow_dispatch:
+    inputs:
+      released:
+        description: 'The released version, e.g. 0.1.0-rc1'
+        required: true
+        type: string
+      base:
+        description: 'Branch to open the pull request against'
+        required: false
+        default: main
+        type: string
+      next:
+        description: 'Development version (default: the tag declares it)'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.released }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: Open the development-cycle pull request
+    runs-on: ubuntu-latest
+    permissions:
+      # Only what checkout needs to fetch: every write below goes
+      # through the App token, not this one.
+      contents: read
+
+    steps:
+      - name: Mint a token for the release App
+        id: app-token
+        # v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          # The client id, not the numeric app id: the action
+          # deprecates app-id in favour of it.
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Scoped to this repository, and to what reopening the cycle
+          # needs: a branch and the pull request on it.
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The release commit when the pipeline calls in, the tag when
+          # someone runs this on its own. Both name the same commit;
+          # the tag is simply what a person has to hand afterwards.
+          ref: ${{ inputs.sha || format('refs/tags/v{0}', inputs.released) }}
+          # Full depth: the bump reads the Next-Version trailer off the
+          # release commit and checks the ordering against earlier tags.
+          fetch-depth: 0
+          fetch-tags: true
+          # The App's token is used explicitly below rather than left
+          # in the checkout, so no credential outlives this job's push.
+          persist-credentials: false
+
+      # Every decision is the script's: it derives the next version
+      # from the release commit when none is given, attributes the
+      # commit to the App's bot user, and points the remote at an
+      # authenticated URL. Keeping that here would put shell logic
+      # somewhere the test suite and shellcheck cannot reach it.
+      - name: Open the pull request that bumps VERSION
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          # Through the environment, never interpolated into the shell:
+          # a dispatched run takes these from whoever started it.
+          RELEASED: ${{ inputs.released }}
+          NEXT: ${{ inputs.next }}
+          BASE: ${{ inputs.base }}
+        run: |
+          ./scripts/ci/release-open-dev-cycle.sh \
+            "$RELEASED" "$NEXT" "$BASE"

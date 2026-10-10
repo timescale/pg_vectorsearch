@@ -14,6 +14,12 @@
 #   STUB_PR_URL      what `gh pr create` echoes
 #   STUB_MERGE_RC    what `gh pr merge` exits with
 #   STUB_COMMENT_ID  what a `gh api` read reports, empty for none
+#   STUB_DRAFT       what `gh release view --json isDraft` reports;
+#                    empty makes the release absent and the view fail
+#   STUB_ASSETS      asset names already on the release, space
+#                    separated; an upload adds to them
+#   STUB_UPLOAD_LOSES  an upload that records nothing, standing in for
+#                    a file that did not reach the release
 #
 # So the git work stays real -- branches, file writes, commits, pushes
 # -- while the GitHub calls become observable. What that cannot cover
@@ -93,7 +99,27 @@ if [[ "$1" == api ]]; then
         *) printf '%s\n' "${STUB_COMMENT_ID:-}"; exit 0 ;;
     esac
 fi
+# A release the stub keeps state for: an upload adds to its assets, so
+# a later view reports what an earlier upload put there.
 case "$1 $2" in
+    "release view")
+        [[ -n "${STUB_DRAFT:-}" ]] || exit 1
+        case "$*" in
+            *isDraft*) printf '%s\n' "$STUB_DRAFT" ;;
+            *assets*)
+                [[ -z "${STUB_ASSETS:-}" ]] ||
+                    tr ' ' '\n' <<<"$STUB_ASSETS"
+                [[ ! -f "$GH_LOG.assets" ]] || cat "$GH_LOG.assets" ;;
+            *) printf 'https://example.invalid/releases/tag/v1\n' ;;
+        esac ;;
+    "release upload")
+        if [[ -z "${STUB_UPLOAD_LOSES:-}" ]]; then
+            for arg in "$@"; do
+                [[ ! -f "$arg" ]] ||
+                    basename "$arg" >>"$GH_LOG.assets"
+            done
+        fi ;;
+    "release create" | "release edit") : ;;
     "pr list")
         [[ -z "${STUB_OPEN_PR:-}" ]] || printf '%s\n' "$STUB_OPEN_PR" ;;
     "pr create")

@@ -183,7 +183,7 @@ set_trailer() {
 probe_body='#!/bin/bash
 set -uo pipefail
 source scripts/release-lib.sh
-check_next_version_trailer "$1" "$2"'
+check_next_version_trailer "$1" "$2" HEAD'
 
 make_probe() { printf '%s\n' "$probe_body" > "$1/scripts/ci/release-check-trailer-probe.sh"; chmod +x "$1/scripts/ci/release-check-trailer-probe.sh"; }
 
