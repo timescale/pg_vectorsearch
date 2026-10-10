@@ -306,11 +306,11 @@ gh pr list --head "chore/dev-$NEXT" --state open
 gh pr checks <number>
 ```
 
-`Dev bump check` is the one to read: it asserts the diff is `VERSION`
-alone, that the new value carries `-dev`, and that the branch name
-agrees with the file. Auto-merge is already armed, so the PR lands on
-its own once the checks pass **and** someone approves — the ruleset
-requires one approval, and an App cannot approve its own pull request.
+`Release cycle` is the one to read: it asserts the diff is `VERSION`
+alone and that the new value carries `-dev`. Auto-merge is already
+armed, so the PR lands on its own once the checks pass **and** someone
+approves — the ruleset requires one approval, and an App cannot
+approve its own pull request.
 
 Review it if asked: the diff should be one line. Then say it is waiting
 for an approval. Do not approve it.

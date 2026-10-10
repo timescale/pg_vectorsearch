@@ -125,7 +125,7 @@ git commit -m "chore: open the $NEXT development cycle" \
 already been cut. Until this lands, anything merged is built and
 tested as $RELEASED.
 
-Only VERSION changes; release-dev-bump-check asserts that."
+Only VERSION changes; the release-cycle check asserts that."
 
 git push "$(release_remote)" "HEAD:refs/heads/$BRANCH"
 
@@ -139,9 +139,8 @@ version that has already been cut. This bumps \`VERSION\` to
 \`$NEXT\` so anything merged from here is built and tested as the next
 development version.
 
-Only \`VERSION\` changes. The \`release-dev-bump-check\` job asserts
-that, that the new value carries a \`-dev\` suffix, and that it is the
-correct bump of \`$RELEASED\`.
+Only \`VERSION\` changes. The \`Release cycle\` check asserts that
+and that the new value carries a \`-dev\` suffix.
 
 Opened by the release workflow after tagging \`v$RELEASED\`. The
 Releases entry is published once this and every other step has

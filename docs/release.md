@@ -563,13 +563,55 @@ publishing comes last.
 merged is built and tested as a version that has already shipped, so
 reopening the cycle is the one thing still outstanding.
 
+### The release cycle
+
+`VERSION` is either a development version or one that has been
+released, and which one it is decides what may merge. The `Release
+cycle` check enforces it on every pull request to `main` and to the
+release branches:
+
+| base `VERSION` | what the PR does to `VERSION` | verdict |
+| -------------- | ----------------------------- | ------- |
+| `0.2.0-dev`    | nothing                       | pass    |
+| `0.2.0-dev`    | sets `0.2.0`                  | pass — a release starts |
+| `0.2.0-dev`    | sets `0.3.0-dev`              | fail — no cycle to reopen |
+| `0.2.0`        | sets `0.3.0-dev`, alone       | pass — the bump |
+| `0.2.0`        | sets `0.3.0`                  | fail — 0.2.0 still in flight |
+| `0.2.0`        | nothing                       | fail — release in flight |
+
+The bottom three rows are the release window. A candidate opens one
+too: `0.1.0-rc1` is a version people can download.
+
+Whether a pull request is a release or a bump is decided by what it
+does to `VERSION`, not by what its branch is called. No branch name
+is read at all: a bump is a bump whether the pipeline opened it as
+`chore/dev-0.3.0-dev` or somebody cut it by hand as `foo/bar`. The
+diff is
+taken from the fork point, so it is what the pull request carries. Read
+against the base tip instead, a branch that predates the release would
+show `VERSION` as changed because the base moved it — and a stale
+branch carrying nothing of its own would read as the bump.
+
+Only the transition is checked here. Whether a release pull request is
+*sound* — changelog filled in, no tag yet, no stale version references
+— is `release-check.sh`'s job.
+
+The base is read live, so re-running the check can change its answer:
+red once the release lands, green again once the cycle reopens.
+Nothing re-runs it when the base moves, and the ruleset does not
+require branches to be up to date, so a pull request opened before the
+release keeps its last answer until it is pushed to or re-run. Treat
+it as a prompt, not a proof.
+
 The release workflow opens that pull request itself. Its `dev-cycle`
 job bumps `VERSION` to the `Next-Version` the release commit declared,
 pushes `chore/dev-<version>`, opens the pull request and arms
 auto-merge, so it lands as soon as the checks pass and someone
-approves. `release-dev-bump-check` asserts that it changes nothing but
-`VERSION`, that the value carries a `-dev` suffix, and that the branch
-name agrees with the file.
+approves. `Release cycle` asserts that it changes nothing but
+`VERSION` and that the value carries a `-dev` suffix. The branch name
+is the pipeline's own convention for finding the branch again; nothing
+checks it, and a bump opened by hand under any name is admitted on the
+same terms.
 
 It needs a credential that is not `GITHUB_TOKEN`, because GitHub
 starts no workflow runs from events that token creates: the required

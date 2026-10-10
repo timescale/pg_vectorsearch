@@ -2,10 +2,10 @@
 # Copyright (c) 2026 Tiger Data, Inc.
 # Licensed under the PostgreSQL License. See LICENSE for details.
 #
-# TAP tests for scripts/ci/release-open-dev-cycle.sh,
-# scripts/ci/release-dev-bump-check.sh, scripts/ci/release-check.sh's
-# classification, scripts/ci/release-tarball-comment.sh and
-# scripts/ci/release-publish.sh.
+# TAP tests for scripts/ci/release-cycle-check.sh,
+# scripts/ci/release-open-dev-cycle.sh, scripts/ci/release-check.sh's
+# classification, scripts/ci/release-tarball-comment.sh,
+# scripts/ci/release-create.sh and scripts/ci/release-publish.sh.
 #
 # Usage: ./test/scripts/test_release_scripts.sh
 #
@@ -23,12 +23,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/release_fixtures.sh"
 install_stub_gh
 
 # ----------------------------------------------------------------
-# release-dev-bump-check.sh
+# release-cycle-check.sh
 # ----------------------------------------------------------------
 
-check_case() {
-    local desc="$1" base_version="$2" head_ref="$3" want="$4"
-    shift 4
+# A base commit and a pull request on top of it. $@ makes the change
+# the pull request carries.
+cycle_case() {
+    local desc="$1" base_version="$2" want="$3"
+    shift 3
     local dir base head
     dir="$(new_fixture "$base_version")"
     base="$(git -C "$dir" rev-parse HEAD)"
@@ -36,39 +38,47 @@ check_case() {
         cd "$dir" || exit 1
         "$@" >/dev/null 2>&1
         git add -A >/dev/null 2>&1
-        git commit -qm "bump" >/dev/null 2>&1 || true
+        git commit -qm "pull request" >/dev/null 2>&1 || true
     )
     head="$(git -C "$dir" rev-parse HEAD)"
-    expect_status "dev-bump: $desc" "$want" env -C "$dir" \
-        HEAD_REF="$head_ref" ./scripts/ci/release-dev-bump-check.sh \
-        "$base" "$head"
+    expect_status "cycle: $desc" "$want" env -C "$dir" \
+        ./scripts/ci/release-cycle-check.sh "$base" "$head"
 }
 
-check_case "a branch that is not a dev cycle is not checked" \
-    0.1.0 feat/whatever 0 true
+touch_file() { bash -c 'printf x >>meson.build'; }
+set_version() { bash -c "printf '%s\\n' '$1' >VERSION"; }
 
-check_case "VERSION only, correct -dev bump" \
-    0.1.0 chore/dev-0.2.0-dev 0 \
-    bash -c 'printf "0.2.0-dev\n" >VERSION'
+# The development cycle: ordinary work merges, and a release may start.
+cycle_case "ordinary work during the cycle" 0.1.0-dev 0 touch_file
+cycle_case "a release may start from the cycle" 0.1.0-dev 0 \
+    set_version 0.1.0
+cycle_case "a bump with no cycle to reopen is refused" 0.1.0-dev 1 \
+    set_version 0.2.0-dev
 
-check_case "a second changed file is refused" \
-    0.1.0 chore/dev-0.2.0-dev 1 \
-    bash -c 'printf "0.2.0-dev\n" >VERSION; printf x >>meson.build'
+# The release window: only the bump gets through.
+cycle_case "ordinary work in the window is refused" 0.1.0 1 touch_file
+cycle_case "a second release in the window is refused" 0.1.0 1 \
+    set_version 0.2.0
+cycle_case "the bump reopens the cycle" 0.1.0 0 set_version 0.2.0-dev
+cycle_case "a candidate opens a window too" 0.1.0-rc1 1 touch_file
+cycle_case "a candidate's cycle reopens" 0.1.0-rc1 0 \
+    set_version 0.1.0-dev
 
-check_case "a value without a -dev suffix is refused" \
-    0.1.0 chore/dev-0.2.0 1 \
-    bash -c 'printf "0.2.0\n" >VERSION'
+# Nothing here reads a branch name, so a bump cut by hand under any
+# name is admitted, and a bump carrying anything else is not.
+cycle_case "a bump carrying a second file is refused" 0.1.0 1 \
+    bash -c 'printf "0.2.0-dev\\n" >VERSION; printf x >>meson.build'
 
-check_case "a branch name disagreeing with VERSION is refused" \
-    0.1.0 chore/dev-0.2.0-dev 1 \
-    bash -c 'printf "0.3.0-dev\n" >VERSION'
+cycle_case "an unparseable version is refused" 0.1.0 1 \
+    set_version not-a-version
+cycle_case "a pull request changing nothing is passed over" 0.1.0-dev \
+    0 true
 
-check_case "a base already on a -dev version is refused" \
-    0.1.0-dev chore/dev-0.2.0-dev 1 \
-    bash -c 'printf "0.2.0-dev\n" >VERSION'
-
-check_case "a pull request changing nothing is refused" \
-    0.1.0 chore/dev-0.2.0-dev 1 true
+dir="$(new_fixture 0.1.0)"
+expect_status "cycle: both refs are required" 1 env -C "$dir" \
+    ./scripts/ci/release-cycle-check.sh HEAD
+expect_status "cycle: an unreadable base is refused" 1 env -C "$dir" \
+    ./scripts/ci/release-cycle-check.sh nope HEAD
 
 # ----------------------------------------------------------------
 # release-open-dev-cycle.sh

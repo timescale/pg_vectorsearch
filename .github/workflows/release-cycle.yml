@@ -1,0 +1,57 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+# Keep pull requests consistent with where the release cycle is.
+#
+# VERSION is either a development version or one that has been
+# released. While it is a released one -- between the release PR
+# merging and the bump PR reopening the cycle -- only the bump PR may
+# merge. The rest of the time ordinary work merges and a release PR
+# may start a release.
+#
+# The base is read from origin/<base-ref> rather than from the event
+# payload's base.sha, which is a snapshot from when the event fired.
+# A re-run has to be able to change its answer: red once the release
+# lands, green again once the cycle reopens.
+#
+# Nothing re-runs it when the base moves, though, so a pull request
+# opened before the release keeps its last answer until it is pushed
+# to or re-run.
+name: Release cycle
+
+# Glob, not regex: filter patterns take [0-9] and *, not +. A `+` is
+# matched literally, so the maintenance branches this is meant to cover
+# went ungated -- the check never ran on a pull request against one.
+on:
+  pull_request:
+    branches:
+      - main
+      - '[0-9]*.[0-9]*.x'
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Release cycle
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full depth: both sides of the diff have to be present, and
+          # the base branch has to be a remote-tracking ref.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the release cycle
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          ./scripts/ci/release-cycle-check.sh \
+            "origin/$BASE_BRANCH" "$PR_HEAD"
