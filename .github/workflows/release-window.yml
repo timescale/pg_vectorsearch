@@ -1,0 +1,58 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+# Hold ordinary pull requests while a release is in flight.
+#
+# A release lands in two commits: the one that drops the -dev suffix and
+# publishes, and the one that reopens the next development cycle.
+# Between them the base branch carries a released version number, and
+# anything merged there is built and tested as a version that already
+# exists -- with a tag pointing at a commit that does not contain it.
+#
+# The window is read from the base branch's live VERSION rather than
+# from the pull request payload's base.sha, which is a snapshot taken
+# when the event fired. A re-run has to be able to change the verdict,
+# both ways: red once the release lands, green again once the cycle
+# reopens. A verdict taken from a stale payload could do neither.
+#
+# The wart that remains: nothing re-runs this when the base moves, so a
+# pull request opened before the release keeps whatever it last
+# reported until something pushes to it or someone re-runs it. The
+# ruleset does not require branches to be up to date, so this is a
+# prompt rather than a proof.
+name: Release window
+
+# Glob, not regex: filter patterns take [0-9] and *, not +.
+# Maintenance branches have the same window -- a patch release opens one
+# on its X.Y.x branch exactly as a minor release does on main.
+on:
+  pull_request:
+    branches:
+      - main
+      - '[0-9]*.[0-9]*.x'
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Release window
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full depth: the base branch has to be present as a
+          # remote-tracking ref for its VERSION to be read.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the release window
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: ./scripts/ci/release-window.sh "origin/$BASE_REF"

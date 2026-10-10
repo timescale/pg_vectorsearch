@@ -563,6 +563,35 @@ publishing comes last.
 merged is built and tested as a version that has already shipped, so
 reopening the cycle is the one thing still outstanding.
 
+### The release window
+
+That stretch — from the release merging to the bump merging — is the
+release window, and the `Release window` check holds ordinary pull
+requests out of it:
+
+| the base's `VERSION`      | the head branch | verdict |
+| ------------------------- | --------------- | ------- |
+| carries a `-dev` suffix   | anything        | pass    |
+| a released version        | `chore/dev-*`   | pass    |
+| a released version        | anything else   | fail    |
+
+A release candidate counts as released: `0.1.0-rc1` is a version
+someone can download, so its window is the same as `0.1.0`'s.
+
+The check reads the base branch's current `VERSION`, not the one the
+pull request event recorded when it fired, so re-running it is
+meaningful in both directions — it turns red when the release lands and
+green again when the cycle reopens. Nothing re-runs it on its own
+when the base moves, though, and the ruleset does not require branches
+to be up to date, so a pull request opened before the release keeps
+whatever it last reported until it is pushed to or re-run. Treat it as
+a prompt rather than a proof.
+
+Letting `chore/dev-*` through is not a hole: `release-dev-bump-check`
+runs on the same pull request and asserts that it changes `VERSION`
+and nothing else, so a branch named that way cannot carry anything
+else in with it.
+
 The release workflow opens that pull request itself. Its `dev-cycle`
 job bumps `VERSION` to the `Next-Version` the release commit declared,
 pushes `chore/dev-<version>`, opens the pull request and arms
