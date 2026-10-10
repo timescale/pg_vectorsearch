@@ -184,6 +184,22 @@ uint32_t prism_query_beam_width(
 		uint32_t nprobe, uint32_t nlist, uint32_t fan_out, double beam_scale);
 
 /*
+ * Relative cost of one rerank candidate, applied to the automatic pool
+ * (prism_query_set_rerank_pool(0)) only -- an explicit positive pool is an
+ * absolute cap and ignores this.
+ *
+ * The automatic formula was fit assuming a cache-resident rerank (each
+ * candidate is a cheap in-memory fetch); this scale lets the caller
+ * correct that assumption. 1.0 (default) reproduces the original fit
+ * exactly. Values above 1.0 shrink the auto pool proportionally, for
+ * deployments where the indexed table does not fit in available
+ * cache and a rerank candidate is a real disk read instead. Clamped
+ * to a small positive floor so a near-zero scale cannot blow the pool
+ * up toward unbounded.
+ */
+void prism_query_set_rerank_cost_scale(double scale);
+
+/*
  * Probe-order refinement (prism.probe_expand).
  *
  * Routes ceil(nprobe * expand) leaf candidates through the centroid

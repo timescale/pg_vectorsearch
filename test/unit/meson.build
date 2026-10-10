@@ -49,6 +49,7 @@ unit_test_sources = files(
   'test_standalone.c',
   'test_routing_tree.c',
   'test_thread_pool.c',
+  'test_rerank_pool.c',
   'test_topk.c',
   'test_vecops.c',
   'test_vec32.c',

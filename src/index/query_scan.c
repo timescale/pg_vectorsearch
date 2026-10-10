@@ -500,23 +500,65 @@ prism_query_route(
  * sorted by approximate distance, so capping keeps the most promising
  * ones and bounds the exact-distance heap fetches. 0 (default) resolves
  * to an automatic cap of max(3 * k * nprobe^0.15, candidate-buffer count
- * / 8): the buffer population directly measures estimate noise, so the
- * nprobe-scaled floor (fit against rekall's cohere-1m recall-vs-pool
- * sweep: the pool needed to keep the rerank-induced recall deficit under
- * 0.1% relative to an unbounded pool, at nprobe in {10,20,40,80,160},
- * power-law-fits to 30 * nprobe^0.15 for k=10) grows further when noisy
- * estimates flood the buffer and ranking into just that floor would
- * silently cap recall far below what the probed clusters contain. A
- * flat 16 * k floor (this formula's predecessor) was measured
- * recall-neutral, but oversized at every nprobe on that sweep -- e.g.
- * 2-4x more pool than needed below nprobe=80, wasting rerank work
- * without buying recall. -1 disables the cap entirely; positive values
- * are absolute. The effective cap is never below k, so a cap can never
- * truncate the result set. */
+ * / 8) / rerank_cost_scale: the buffer population directly measures
+ * estimate noise, so the nprobe-scaled floor (fit against rekall's
+ * cohere-1m recall-vs-pool sweep: the pool needed to keep the
+ * rerank-induced recall deficit under 0.1% relative to an unbounded
+ * pool, at nprobe in {10,20,40,80,160}, power-law-fits to
+ * 30 * nprobe^0.15 for k=10) grows further when noisy estimates flood
+ * the buffer and ranking into just that floor would silently cap
+ * recall far below what the probed clusters contain. A flat 16 * k
+ * floor (this formula's predecessor) was measured recall-neutral, but
+ * oversized at every nprobe on that sweep -- e.g. 2-4x more pool than
+ * needed below nprobe=80, wasting rerank work without buying recall.
+ * -1 disables the cap entirely; positive values are absolute. The
+ * effective cap is never below k, so a cap can never truncate the
+ * result set.
+ *
+ * The fit above was measured on a host where the working set (heap +
+ * index) fits comfortably in cache, so every rerank candidate is a
+ * cheap in-memory fetch -- the formula has no notion of a candidate
+ * ever costing more than that. On a host where the working set exceeds
+ * available cache, each rerank is a real disk read instead, and the
+ * same pool that was "free" on the reference host becomes the
+ * dominant query cost for a shrinking marginal recall gain (measured
+ * on a 1.8GB/1-vCPU host against a 4.1GB cohere-1m table+index: the
+ * auto pool bought 0.0025 recall over a fixed pool of 40 for ~30% more
+ * heap I/O and 18% less QPS). rerank_cost_scale (mkt.rerank_cost_scale,
+ * see prism_query_set_rerank_cost_scale) lets the caller fold in a
+ * relative rerank-cost signal -- 1.0 (default) reproduces the original
+ * fit exactly; values above 1.0 shrink the auto pool for hosts where a
+ * candidate costs more than the reference assumed. */
 #define PRISM_RERANK_POOL_AUTO_COEFF 3.0
 #define PRISM_RERANK_POOL_AUTO_EXP	 0.15
 
-static int32_t g_rerank_pool = 0;
+/* Recall floor for the cost-scaled auto pool: cost scaling may shrink
+ * the pool, but not below 1.2 * k * nprobe^0.3, and never past the
+ * unscaled fit. A uniform divisor of the nprobe^0.15 fit cannot work:
+ * the pool the recall ceiling needs grows with nprobe (measured on
+ * cohere-1m 768d: ~42 at nprobe=10 to ~79 at nprobe=640, i.e.
+ * nprobe^0.15), so any scale large enough to help at low nprobe closes
+ * the >= 0.995 recall region at high nprobe -- and probes cannot
+ * substitute, since the true neighbours a small pool drops rank too
+ * poorly by approximate distance to survive truncation no matter how
+ * many lists are scanned. The 0.3 exponent grows faster than the need,
+ * so the floor stays out of the way at low nprobe (where wider probing
+ * is the cheaper recall currency and scaling wins) and only binds in
+ * the high-recall regime, where the scan already dominates query cost
+ * and a truncated pool throws away recall the scan paid for. The 1.2
+ * coefficient puts the floor above the fit from nprobe ~450 up, i.e.
+ * deep probes always rerank the full fit. At scale=1 the floor never
+ * exceeds the base fit, reproducing the original formula exactly. */
+#define PRISM_RERANK_POOL_RECALL_COEFF 1.2
+#define PRISM_RERANK_POOL_RECALL_EXP   0.3
+
+/* Floor for prism_query_set_rerank_cost_scale: guards against a
+ * misconfigured near-zero scale blowing the auto pool up toward
+ * "unbounded" through the division below. */
+#define PRISM_RERANK_COST_SCALE_MIN 0.01
+
+static int32_t g_rerank_pool	   = 0;
+static double  g_rerank_cost_scale = 1.0;
 
 void
 prism_query_set_rerank_pool(int32_t n)
@@ -552,11 +594,33 @@ prism_query_rerank_pool_estimate(uint32_t k, uint32_t nprobe)
 		return pool < k ? k : pool;
 	}
 
-	double auto_floor = PRISM_RERANK_POOL_AUTO_COEFF * (double)k *
-						pow((double)nprobe, PRISM_RERANK_POOL_AUTO_EXP);
-	uint32_t pool = (uint32_t)(auto_floor + 0.5);
+	double base = PRISM_RERANK_POOL_AUTO_COEFF * (double)k *
+				  pow((double)nprobe, PRISM_RERANK_POOL_AUTO_EXP);
 
-	return pool < k ? k : pool;
+	/* Cost scaling may shrink the base, but not below the recall floor;
+	 * the floor in turn never exceeds the unscaled fit (see
+	 * PRISM_RERANK_POOL_RECALL_COEFF), so scale=1 is exactly the
+	 * original formula. */
+	double pool			= base / g_rerank_cost_scale;
+	double recall_floor = PRISM_RERANK_POOL_RECALL_COEFF * (double)k *
+						  pow((double)nprobe, PRISM_RERANK_POOL_RECALL_EXP);
+
+	if (recall_floor > base)
+		recall_floor = base;
+	if (pool < recall_floor)
+		pool = recall_floor;
+
+	uint32_t capped = (uint32_t)(pool + 0.5);
+
+	return capped < k ? k : capped;
+}
+
+void
+prism_query_set_rerank_cost_scale(double scale)
+{
+	g_rerank_cost_scale = scale < PRISM_RERANK_COST_SCALE_MIN
+								? PRISM_RERANK_COST_SCALE_MIN
+								: scale;
 }
 
 uint32_t
@@ -634,10 +698,21 @@ prism_query_execute(
 	/*
 	 * The noise term needs the candidate population, which exists only now
 	 * that the clusters have been scanned -- so it cannot be part of the
-	 * shared estimate the planner uses.
+	 * shared estimate the planner uses. It is scaled down like the base
+	 * fit when candidates cost more than cache-resident (see
+	 * prism_query_set_rerank_cost_scale); the estimate's recall floor is
+	 * unaffected by the noise term either way, since the max() here can
+	 * only raise the pool.
 	 */
-	if (g_rerank_pool == 0 && pool < qs->topk.cand_count / 8)
-		pool = qs->topk.cand_count / 8;
+	if (g_rerank_pool == 0)
+	{
+		uint32_t noise = (uint32_t)((double)(qs->topk.cand_count / 8) /
+											g_rerank_cost_scale +
+									0.5);
+
+		if (pool < noise)
+			pool = noise;
+	}
 	if (pool > 0 && pool < k)
 		pool = k;
 
