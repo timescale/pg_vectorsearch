@@ -93,6 +93,72 @@ list_upgrade_script "$patch" 0.1.0 0.1.1
 expect_lib "upgrade: a patch release upgrades from its minor" 0 \
     "$patch" check_upgrade_path 0.1.1
 
+# A candidate is not a version anything upgrades to, so none is asked
+# for on the way in or on the way out: 0.1.0 -> 0.2.0-rc1 -> 0.2.0
+# needs one script, from 0.1.0 to 0.2.0.
+rc="$(new_fixture 0.2.0-rc1)"
+git -C "$rc" tag v0.1.0 "$(git -C "$rc" rev-parse HEAD)"
+expect_lib "upgrade: a candidate needs no script of its own" 0 \
+    "$rc" check_upgrade_path 0.2.0-rc1
+
+final="$(new_fixture 0.2.0)"
+git -C "$final" tag v0.1.0 "$(git -C "$final" rev-parse HEAD)"
+git -C "$final" tag v0.2.0-rc1 "$(git -C "$final" rev-parse HEAD)"
+expect_lib "upgrade: a final release steps over its own candidates" 1 \
+    "$final" check_upgrade_path 0.2.0
+
+add_upgrade_script "$final" 0.1.0 0.2.0
+list_upgrade_script "$final" 0.1.0 0.2.0
+expect_lib "upgrade: the step is measured between final releases" 0 \
+    "$final" check_upgrade_path 0.2.0
+
+# The first release line is all candidates, so there is still nothing
+# to upgrade from.
+rc_first="$(new_fixture 0.1.0)"
+git -C "$rc_first" tag v0.1.0-rc1 "$(git -C "$rc_first" rev-parse HEAD)"
+expect_lib "upgrade: candidates alone are not a previous release" 0 \
+    "$rc_first" check_upgrade_path 0.1.0
+
+# A candidate may still carry an upgrade script, and an unlisted one
+# would be built and never installed, so that stays checked.
+rc_script="$(new_fixture 0.2.0-rc1)"
+git -C "$rc_script" tag v0.1.0 "$(git -C "$rc_script" rev-parse HEAD)"
+add_upgrade_script "$rc_script" 0.1.0 0.2.0-rc1
+expect_lib "upgrade: a candidate's unlisted script is refused" 1 \
+    "$rc_script" check_upgrade_path 0.2.0-rc1
+
+list_upgrade_script "$rc_script" 0.1.0 0.2.0-rc1
+expect_lib "upgrade: a candidate may carry a listed script" 0 \
+    "$rc_script" check_upgrade_path 0.2.0-rc1
+
+# A release that deliberately ships without a path says so in the pull
+# request description.
+disable_case() {
+    local desc="$1" body="$2" want="$3"
+    local out got
+    out="$(BODY="$body" lib_call "$second" check_upgrade_path 0.3.0)"
+    got=$?
+    if [[ "$got" -eq "$want" ]]; then
+        ok "$desc"
+    else
+        nok "$desc" "expected exit $want, got $got: $(head -1 <<<"$out")"
+    fi
+}
+
+disable_case "upgrade: no trailer leaves the check on" "" 1
+disable_case "upgrade: the trailer disables it" \
+    "Some prose.
+
+Disable-check: upgrade-path" 0
+disable_case "upgrade: the trailer is case-insensitive" \
+    "disable-check: Upgrade-Path" 0
+disable_case "upgrade: one trailer can name several checks" \
+    "Disable-check: commit-count, upgrade-path" 0
+disable_case "upgrade: another check's trailer does not disable it" \
+    "Disable-check: commit-count" 1
+disable_case "upgrade: the trailer has to start the line" \
+    "see Disable-check: upgrade-path above" 1
+
 # ----------------------------------------------------------------
 # next_dev_version
 # ----------------------------------------------------------------
@@ -249,5 +315,21 @@ expect_eq "previous tag: the newest candidate when no final exists" \
 
 expect_eq "previous tag: nothing before the first release" \
     "" "$(lib_call "$(new_fixture 0.1.0-dev)" previous_release_tag)"
+
+# ----------------------------------------------------------------
+# previous_final_release_tag
+# ----------------------------------------------------------------
+
+# The candidates for the release being cut sit above the release it
+# upgrades from, which is the one the upgrade script has to start at.
+mixed="$(new_fixture 0.2.0-dev)"
+git -C "$mixed" tag v0.1.0
+git -C "$mixed" tag v0.2.0-rc1
+git -C "$mixed" tag v0.2.0-rc2
+expect_eq "previous final: candidates above a release are skipped" \
+    v0.1.0 "$(lib_call "$mixed" previous_final_release_tag)"
+
+expect_eq "previous final: nothing when only candidates are tagged" \
+    "" "$(lib_call "$rc_only" previous_final_release_tag)"
 
 tap_finish

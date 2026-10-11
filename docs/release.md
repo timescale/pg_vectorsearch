@@ -337,6 +337,30 @@ extension, which takes the indexes with it. A file that exists but is
 not listed is never installed, so it fails the same way, later. A first
 release has nothing to upgrade from and is not asked for one.
 
+**Only final releases are steps in that chain.** A release candidate is
+not a version anything upgrades to, and `CREATE EXTENSION` on one
+already warns that upgrading away from it may not be possible, so
+candidates are asked for no script and skipped over when the step is
+measured. `0.1.0` → `0.2.0-rc1` → `0.2.0` needs one script, from
+`0.1.0` to `0.2.0`.
+
+A candidate may still carry one if its PR adds it — none is required,
+but every file in `sql/` named `<name>--<from>--<to>.sql` has to appear
+in `ext_update_scripts`, or it is built and never installed.
+
+**A release can ship without a path, deliberately.** Put
+
+```text
+Disable-check: upgrade-path
+```
+
+in the release PR's description and the check reports the override
+instead of failing. It is the same trailer the commit-count check
+takes, so one line can name both. Reach for it when an upgrade is
+genuinely impossible — say the on-disk format changed in a way no
+script can migrate — and say so in the release notes, because users
+will have to drop the extension.
+
 Which PRs get checked is decided by what the PR *does*, not by what its
 branch is called: a release PR is one that changes `VERSION` to a value
 with no `-dev` suffix. Anything else — an ordinary PR, or one

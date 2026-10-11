@@ -57,6 +57,9 @@ jobs:
         id: check
         env:
           BASE_REF: ${{ github.base_ref }}
+          # Read for a `Disable-check:` trailer, the same one
+          # commit-count.yml passes along.
+          BODY: ${{ github.event.pull_request.body }}
         run: ./scripts/ci/release-check.sh "origin/$BASE_REF"
 
   # The tarball is what ships, and until now nobody built from it before

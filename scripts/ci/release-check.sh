@@ -4,6 +4,10 @@
 #
 # Usage: ./scripts/ci/release-check.sh [base-ref]
 #
+# Environment:
+#   BODY    The pull request description, read for a Disable-check
+#           trailer.
+#
 # A release PR is defined by what it does: it moves VERSION to a value
 # with no prerelease suffix. Keying on the branch name would let a release
 # cut from a differently-named branch skip its checks silently, on the one

@@ -16,6 +16,30 @@ require_repo_root() {
         die "run from the repository root"
 }
 
+# True when the pull request description turns a check off with
+#
+#     Disable-check: <name>
+#
+# in $BODY, the trailer check-commit-count.sh takes. Matched at the
+# start of a line, case-insensitively, and the rest of the line is
+# ignored, so several checks can be named on one.
+check_disabled() {
+    local line name
+    [[ -n "${BODY:-}" ]] || return 1
+    while IFS= read -r line; do
+        line="$(printf '%s' "${line//,/ }" | tr '[:upper:]' '[:lower:]')"
+        [[ "$line" == disable-check:* ]] || continue
+        # shellcheck disable=SC2086 # split on purpose: one trailer may
+        # name several checks.
+        for name in ${line#*:}; do
+            if [[ "$name" == "$1" ]]; then
+                return 0
+            fi
+        done
+    done <<<"$BODY"
+    return 1
+}
+
 # ----------------------------------------------------------------
 # Version
 # ----------------------------------------------------------------
@@ -385,24 +409,41 @@ meta_format_version() {
         <<<"$src" | head -1
 }
 
+# Release tags reachable from HEAD, newest first, or nothing.
+#
+# Naming the prerelease suffixes is what puts a release above its own
+# candidates: git's version sort otherwise ranks v0.1.0-rc1 over
+# v0.1.0, and the format check anchors on the first line of this.
+# Listed from least mature, so -dev sorts lowest; the pipeline never
+# tags one, since the gate refuses to release a -dev version at all.
+release_tags() {
+    git \
+        -c versionsort.suffix=-dev \
+        -c versionsort.suffix=-alpha \
+        -c versionsort.suffix=-beta \
+        -c versionsort.suffix=-rc \
+        tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname
+}
+
 # The newest release tag reachable from HEAD, or nothing. Captured before
 # slicing: piping many tags into `head -1` SIGPIPEs git, which pipefail
 # turns into a failure of this function.
 previous_release_tag() {
     local tags
-    # Naming the prerelease suffixes is what puts a release above its own
-    # candidates: git's version sort otherwise ranks v0.1.0-rc1 over
-    # v0.1.0, and the upgrade script and format check anchor on whatever
-    # this returns. Listed from least mature, so -dev sorts lowest; the
-    # pipeline never tags one, since the gate refuses to release a -dev
-    # version at all.
-    tags="$(git \
-        -c versionsort.suffix=-dev \
-        -c versionsort.suffix=-alpha \
-        -c versionsort.suffix=-beta \
-        -c versionsort.suffix=-rc \
-        tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname)"
+    tags="$(release_tags)"
     [[ -z "$tags" ]] || head -1 <<<"$tags"
+}
+
+# The newest final release reachable from HEAD, or nothing -- the same
+# list with the candidates passed over.
+previous_final_release_tag() {
+    local tag
+    while IFS= read -r tag; do
+        if ! is_prerelease "$tag"; then
+            echo "$tag"
+            return 0
+        fi
+    done < <(release_tags)
 }
 
 # True when $2 is only a patch bump away from $1 (same major.minor).
@@ -532,16 +573,52 @@ check_next_version_trailer() {
     log "next cycle: $next"
 }
 
+# Every upgrade script in sql/ has to be named in ext_update_scripts,
+# or it is never installed and ALTER EXTENSION UPDATE fails exactly as
+# it does for a missing one, only later and less obviously. Checked for
+# whatever is in the tree rather than only for the step being released,
+# so a script a release candidate adds is covered too.
+check_upgrade_scripts_listed() {
+    local script
+    for script in sql/*--*--*.sql; do
+        [[ -f "$script" ]] || continue
+        grep -q "$(basename "$script")" src/pg/meson.build ||
+            die "$script is not listed in ext_update_scripts in" \
+                "src/pg/meson.build, so it would never be installed"
+    done
+}
+
 # An existing installation moves between versions with an upgrade script:
 # without sql/<name>--<prev>--<new>.sql, ALTER EXTENSION UPDATE fails and
 # the only way to the new version is dropping the extension, which takes
 # the indexes with it. The install script itself needs nothing -- it is
 # sql/<name>.sql copied under the versioned name at build time.
 #
-# Skipped for a first release, which has nothing to upgrade from.
+# Only final releases are steps in that chain. A candidate is not a
+# version anything upgrades to, and CREATE EXTENSION on one already
+# warns that upgrading away from it may not be possible, so the step is
+# measured between finals however many candidates each of them took.
+#
+# Skipped for a first release, which has nothing to upgrade from, and
+# for a release whose description says it ships without a path.
 check_upgrade_path() {
     local version="$1" prev from name script
-    prev="$(previous_release_tag)"
+
+    if check_disabled upgrade-path; then
+        log "upgrade path: the pull request description disables" \
+            "this check"
+        return 0
+    fi
+
+    check_upgrade_scripts_listed
+
+    if is_prerelease "$version"; then
+        log "upgrade path: $version is a prerelease, which nothing" \
+            "is expected to upgrade to"
+        return 0
+    fi
+
+    prev="$(previous_final_release_tag)"
     if [[ -z "$prev" ]]; then
         log "upgrade path: no previous release to upgrade from"
         return 0
@@ -554,14 +631,10 @@ check_upgrade_path() {
     [[ -f "$script" ]] ||
         die "releasing $version after $from, but $script does not" \
             "exist -- an installation on $from could only reach" \
-            "$version by dropping the extension"
-
-    # Listed or not, the file has to be installed; an unlisted one fails
-    # at ALTER EXTENSION UPDATE exactly as a missing one does, only
-    # later and less obviously.
-    grep -q "$name--$from--$version.sql" src/pg/meson.build ||
-        die "$script exists but src/pg/meson.build does not list it in" \
-            "ext_update_scripts, so it would never be installed"
+            "$version by dropping the extension. Write the script, or" \
+            "add 'Disable-check: upgrade-path' to the pull request" \
+            "description if this release deliberately ships without" \
+            "one."
 
     log "upgrade path: $script"
 }
