@@ -1,18 +1,4 @@
 # module_pathname goes into pg_vectorsearch--<version>.control
-comment = 'pg_vectorsearch: ANN vector search for PostgreSQL'
+comment = 'ANN vector search with PRISM index'
 default_version = '@VERSION@'
-# No fixed `schema`: CREATE EXTENSION pg_vectorsearch installs
-# everything -- vec32/vec16/rabitq, their operators/casts/AM, the
-# build-identity functions (pg_vectorsearch_git_commit,
-# pg_vectorsearch_version), and the prism index access method's own
-# maintenance, administration, and inspection functions
-# (prism_rebalance and friends) -- into whatever schema the installer
-# chooses (SCHEMA clause, or the first existing schema on search_path
-# -- typically public). Nothing is pinned to a separate fixed schema.
-# relocatable stays false for now: ALTER EXTENSION ... SET SCHEMA is
-# refused, matching this extension's established behaviour, pending a
-# decision on whether it is safe to lift now that nothing is pinned
-# outside the chosen schema.
-# To install into a different schema, drop and recreate the extension
-# there instead.
 relocatable = false
