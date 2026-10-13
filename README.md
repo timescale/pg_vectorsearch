@@ -7,12 +7,18 @@
 A PostgreSQL extension for high-performance approximate nearest neighbor (ANN)
 search.
 
+> **Status: alpha.** Meant for testing, not production. Upgrading
+> between prereleases may not be possible; plan to drop and recreate the
+> extension and its indexes. See the [changelog](CHANGELOG.md) for
+> known issues.
+
 - **PRISM index** (100M+ vectors) — IVF-style, with hierarchical routing
 - **RaBitQ quantization** with theoretical error bounds for two-stage search
 - **SIMD-optimized distance computation** (AVX2, AVX512, NEON)
 - **Dynamic updates** — inserts, updates and deletes, with posting-list
-  splits on demand (see [PRISM index maintenance](#prism-index-maintenance))
-- **Vector types** compatible with [pgvector][pgvector]'s types
+  splits via `prism_rebalance` (see [Maintenance](#maintenance))
+- **pgvector compatible** — index existing `vector` and `halfvec` columns
+  as-is (see [Existing pgvector tables](#existing-pgvector-tables))
 
 ## PRISM Index
 
@@ -52,44 +58,25 @@ Query Flow:
 
 For detailed architecture, see [docs/architecture.md][arch-doc].
 
-## pgvector compatibility
-
-PRISM indexes work with [pgvector][pgvector]'s `vector` and `halfvec` types and
-operators, but do not depend on them. The `pg_vectorsearch` extension ships
-its own `vec32` and `vec16` types, binary compatible with their pgvector
-counterparts but named differently so that both extensions can coexist even
-with their objects in the same schema. Binary casts between each pair mean an
-existing pgvector column can be indexed as-is, with no rewrite and no copy,
-and queries already written against pgvector's operators work unchanged with
-a PRISM index.
-
-## Status
-
-**Alpha-level.**
-
-See [docs/architecture.md][arch-doc] for the design.
-
-## Building
-
-**Requirements:**
-- PostgreSQL 18+ (with development headers)
-- GNU C11 compiler (GCC 11+ or Clang 14+)
-- Meson build system
-- Optional: CBLAS, for faster RaBitQ encoding. See
-  [Development](docs/development.md#blas).
-
-```bash
-# Release build
-meson setup builddir --buildtype=release
-
-# Build and install to PostgreSQL
-meson install -C builddir
-```
-
-See the [development guide](docs/development.md#build-options) for build
-options.
-
 ## Usage
+
+Install the extension first; see [Building](#building).
+
+There are two ways to use a PRISM index. Pick the one that matches where
+your vectors live:
+
+- **[Native types](#native-types).** Starting fresh, or not using
+  pgvector? Store vectors in `pg_vectorsearch`'s own `vec32` (float32) or
+  `vec16` (float16) columns. No other extension is needed.
+- **[Existing pgvector tables](#existing-pgvector-tables).** Already have
+  `vector` or `halfvec` columns? Install `pg_vectorsearch` next to
+  pgvector and build a PRISM index on those columns as they are. Your
+  table and queries stay unchanged.
+
+Both paths build the same index and use the same operators (`<->`,
+`<#>`, `<=>`) and [tuning](#tuning) knobs.
+
+### Native types
 
 ```sql
 CREATE EXTENSION pg_vectorsearch;
@@ -107,7 +94,7 @@ INSERT INTO items (embedding)
 SELECT ARRAY[i::real, (i % 7)::real, (i % 5)::real]::vec32
 FROM generate_series(1, 1000) i;
 
--- Or vec32_ip_ops / vec32_cosine_ops.
+-- For inner product or cosine, see Operator classes below.
 CREATE INDEX ON items USING prism (embedding vec32_l2_ops);
 
 -- 0 = auto (~0.95 recall). Raise for recall, lower for speed.
@@ -118,16 +105,17 @@ ORDER BY embedding <-> '[3,1,2]'
 LIMIT 5;
 ```
 
-Defaults are tuned from large-scale benchmarks; most deployments only
-ever adjust `prism.nprobe`.
-See the [tuning guide][tuning-doc] for every index parameter and GUC,
-their tradeoffs, and when changing them makes sense.
+Use `vec16` instead of `vec32` to halve the space vectors take in the
+table, with the matching `vec16_*` [operator classes](#operator-classes).
 
-### Migrating a pgvector table to PRISM
+### Existing pgvector tables
 
 If you already have a table with pgvector's `vector` or `halfvec`
 columns, you can build a PRISM index on it directly. Nothing about the
 table or your queries needs to change.
+`vec32` and `vec16` are binary-compatible with pgvector's `vector` and
+`halfvec` but have different names, so the two extensions can be
+installed side by side, even in the same schema.
 
 ```sql
 -- The table you already have, included so the example runs on its own.
@@ -167,11 +155,31 @@ LIMIT 10;
 DROP INDEX documents_embedding_hnsw;
 ```
 
-Use `vec32_ip_ops` or `vec32_cosine_ops` for an HNSW index built with
-`vector_ip_ops` or `vector_cosine_ops`, and the `vec16_*` classes for a
-`halfvec` column.
+Use the PRISM [operator class](#operator-classes) for the same distance
+metric as your HNSW index.
 
-## PRISM index maintenance
+### Operator classes
+
+Pick the operator class for your distance metric and column type. L2 is
+the default.
+
+| Distance       | Operator | `vec32` / `vector` | `vec16` / `halfvec` |
+|----------------|----------|--------------------|---------------------|
+| L2             | `<->`    | `vec32_l2_ops`     | `vec16_l2_ops`      |
+| Inner product  | `<#>`    | `vec32_ip_ops`     | `vec16_ip_ops`      |
+| Cosine         | `<=>`    | `vec32_cosine_ops` | `vec16_cosine_ops`  |
+
+When replacing an HNSW index, pgvector's `vector_<metric>_ops` maps to
+`vec32_<metric>_ops` and `halfvec_<metric>_ops` to `vec16_<metric>_ops`.
+
+### Tuning
+
+Defaults are tuned from large-scale benchmarks; most deployments only
+ever adjust `prism.nprobe`.
+See the [tuning guide][tuning-doc] for every index parameter and GUC,
+their tradeoffs, and when changing them makes sense.
+
+### Maintenance
 
 An insert appends to whichever posting list its vector routes to, so lists
 grow as rows arrive and never split on their own. Besides `REINDEX`, the
@@ -179,12 +187,34 @@ grow as rows arrive and never split on their own. Besides `REINDEX`, the
 See the [maintenance guide][maint-doc] for how it works and its current
 limitations.
 
+## Building
+
+**Requirements:**
+
+- PostgreSQL 18+ (with development headers)
+- GNU C11 compiler (GCC 11+ or Clang 14+)
+- Meson build system
+- Optional: CBLAS, for faster RaBitQ encoding. See
+  [Development](docs/development.md#blas).
+
+```bash
+# Release build
+meson setup builddir --buildtype=release
+
+# Build and install to PostgreSQL
+meson install -C builddir
+```
+
+See the [development guide](docs/development.md#build-options) for build
+options.
+
 ## Documentation
 
 - [Tuning][tuning-doc] - Index parameters, GUCs, tradeoffs, defaults
 - [Maintenance][maint-doc] - Rebalancing and splitting posting lists
 - [Architecture][arch-doc] - High-level design and data structures
 - [SIMD][simd-doc] - SIMD build options and distance computation
+- [Development][dev-doc] - Build options, testing, CI scripts
 
 ## References
 
@@ -217,3 +247,4 @@ limitations.
 [tuning-doc]: docs/tuning.md
 [maint-doc]: docs/maintenance.md
 [simd-doc]: docs/simd.md
+[dev-doc]: docs/development.md
