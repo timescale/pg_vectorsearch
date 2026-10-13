@@ -34,7 +34,7 @@ IVFFlat, but it is built around state-of-the-art quantization, routing, and
 partitioning techniques. It is implemented in C for high performance and
 seamless integration with PostgreSQL.
 
-The result: an index that is significantly faster than pgvector's IVFFlat and
+The result: an [index that is significantly faster](https://www.tigerdata.com/blog/announcing-pg_vectorsearch-scalable-open-source-vector-search-postgresql) than pgvector's IVFFlat and
 HNSW, for both querying and index building. In fact, compared to graph-based
 HNSW, PRISM is faster at equivalent recall on a 100-million-vector dataset,
 on an instance with a quarter of the memory.
