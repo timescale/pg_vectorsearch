@@ -396,8 +396,9 @@ prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 									 ? "Inner product routes on uncompressed "
 									   "centroids, which fit up to 2036 "
 									   "dimensions as float32 (vec32) and "
-									   "4072 as float16 (vec16). Use the L2 "
-									   "or cosine operator class."
+									   "4072 as float16 (vec16). Normalized "
+									   "embeddings rank the same under the "
+									   "cosine operator class; use that."
 									 : "Leave centroid_compression at its "
 									   "default.")));
 	}

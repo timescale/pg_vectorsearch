@@ -112,13 +112,15 @@ typedef struct PrismQueryState
 	 * Sized to max_nprobe at init. */
 	float	 *probe_dists;
 	uint32_t *probe_order;
-	/* Spilled layout only, allocated on the first expanded probe set: the
-	 * references the probe re-rank gathered, kept for the scan pass so a
-	 * reference chain is read once per query ([max_nprobe * dim] floats and
-	 * the block each list's entries begin on). NULL for an inline layout,
-	 * which reads the reference off the pinned head. */
+	/* Spilled layout only: the references the probe re-rank gathered, kept
+	 * for the scan pass so a reference chain is read once per query, and
+	 * the block each list's entries begin on. Sized to the routed set the
+	 * first time it is expanded and grown when a later query routes more
+	 * (bounded by max_nprobe); NULL for an inline layout, which reads the
+	 * reference off the pinned head. */
 	float		*probe_refs;
 	BlockNumber *probe_entries;
+	uint32_t	 probe_refs_cap; /* clusters the two buffers hold */
 
 	/* Result ordering (indices into candidates + final distances) */
 	uint32_t *result_order;

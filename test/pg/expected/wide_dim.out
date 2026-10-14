@@ -223,13 +223,13 @@ RESET enable_seqscan;
 -- fit one, which is what inner product routes on (float16 fits up to 4072).
 CREATE INDEX wd_ip ON wd USING prism (v vec32_ip_ops);
 ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
-HINT:  Inner product routes on uncompressed centroids, which fit up to 2036 dimensions as float32 (vec32) and 4072 as float16 (vec16). Use the L2 or cosine operator class.
+HINT:  Inner product routes on uncompressed centroids, which fit up to 2036 dimensions as float32 (vec32) and 4072 as float16 (vec16). Normalized embeddings rank the same under the cosine operator class; use that.
 CREATE INDEX wd_off ON wd USING prism (v) WITH (centroid_compression = off);
 ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
 HINT:  Leave centroid_compression at its default.
 CREATE INDEX wh_ip ON wh USING prism (v vec16_ip_ops);
 ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
-HINT:  Inner product routes on uncompressed centroids, which fit up to 2036 dimensions as float32 (vec32) and 4072 as float16 (vec16). Use the L2 or cosine operator class.
+HINT:  Inner product routes on uncompressed centroids, which fit up to 2036 dimensions as float32 (vec32) and 4072 as float16 (vec16). Normalized embeddings rank the same under the cosine operator class; use that.
 -- No fastscan group fits a page either, at build or by conversion later.
 CREATE INDEX wd_fs ON wd USING prism (v) WITH (fastscan = on);
 ERROR:  fastscan=on does not support 4096 dimensions

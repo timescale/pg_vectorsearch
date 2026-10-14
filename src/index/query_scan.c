@@ -91,10 +91,10 @@ prism_query_state_init(
 	 * probe set; see prism_query_set_probe_expand). */
 	qs->probe_dists = vs_alloc(max_nprobe * sizeof(float));
 	qs->probe_order = vs_alloc(max_nprobe * sizeof(uint32_t));
-	/* probe_refs / probe_entries (spilled layout only) are allocated on the
-	 * first expanded probe set: max_nprobe * dim floats is the largest
-	 * buffer a scan state owns, and a query whose probe set is never
-	 * expanded has no use for it. */
+	/* probe_refs / probe_entries (spilled layout only) are sized on the
+	 * first expanded probe set, to the clusters it routed: dim floats per
+	 * cluster is the largest buffer a scan state owns, and a query whose
+	 * probe set is never expanded has no use for it. */
 
 	/* Top-K */
 	vs_topk_init(&qs->topk, max_k);
@@ -351,8 +351,18 @@ scan_clusters(
 	 * front so the reads overlap. Best-effort and a no-op where the storage
 	 * has no prefetch (standalone) or the page is already resident.
 	 */
+	uint32_t ref_pages = prism_posting_ref_pages(dim);
 	for (uint32_t j = 0; j < n_results; j++)
-		vs_storage_prefetch(qs->pscan.storage, beam_results[j].posting_head);
+	{
+		BlockNumber head = beam_results[j].posting_head;
+
+		vs_storage_prefetch(qs->pscan.storage, head);
+		/* A spilled list's reference pages follow its head in the bulk-built
+		 * region; a split-created list has them wherever the split appended,
+		 * so for it this warms a page the gather may not read. */
+		for (uint32_t r = 1; r < ref_pages; r++)
+			vs_storage_prefetch(qs->pscan.storage, head + r);
+	}
 
 	/*
 	 * Phase A (only when the probe set was expanded): re-rank the routed
@@ -368,13 +378,18 @@ scan_clusters(
 
 	if (n_results > scan_limit)
 	{
-		if (qs->pscan.spilled && qs->probe_refs == NULL)
+		if (qs->pscan.spilled && qs->probe_refs_cap < n_results)
 		{
 			VsMemCtx caller_ctx = vs_memctx_switch(qs->memctx);
 
-			qs->probe_refs = vs_alloc(
-					(size_t)qs->max_nprobe * dim * sizeof(float));
-			qs->probe_entries = vs_alloc(qs->max_nprobe * sizeof(BlockNumber));
+			if (qs->probe_refs != NULL)
+			{
+				vs_free(qs->probe_refs);
+				vs_free(qs->probe_entries);
+			}
+			qs->probe_refs = vs_alloc((size_t)n_results * dim * sizeof(float));
+			qs->probe_entries  = vs_alloc(n_results * sizeof(BlockNumber));
+			qs->probe_refs_cap = n_results;
 			vs_memctx_switch(caller_ctx);
 		}
 

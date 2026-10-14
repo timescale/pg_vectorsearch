@@ -12,7 +12,6 @@
  * - Inline page access via stored base pointer (no vtable dispatch)
  * - Score + prune + rerank fused into one function (no iterator
  *   overhead, compiler can optimize across all phases)
- * - IP count padded to multiple of 4 (avoids tail kernel)
  */
 
 #include "vs_config.h"
@@ -363,13 +362,15 @@ prism_posting_scan_aos_page(PrismPostingScan *scan, VsTopK *topk)
 	 * the first entry's bits pointer and a stride of entry_size. */
 	const uint8_t *bits_base = prism_posting_first_bits(content);
 
-	uint32_t padded = (count + 3) & ~3u;
+	/* The exact count: every kernel scores the count % 4 tail itself, and
+	 * padding it would read entries past the last one, which at a wide
+	 * dimension is past the page. */
 	vs_rabitq_inner_product_multi(
 			scan->qstate->transformed,
 			bits_base,
 			entry_size,
 			dim,
-			padded,
+			count,
 			scratch);
 
 	/* Convert raw IPs to distances, reading f_add/f_rescale per

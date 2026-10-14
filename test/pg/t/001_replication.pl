@@ -52,9 +52,9 @@ $primary->safe_psql('postgres',
 # reference and the metapage's mean spill into reference pages that must
 # reach the standby like any other. Few rows at 4096: the layout is what is
 # under test, not the data.
-my %vtype = (tv => "vec32($dim)", th => "vec16($dim)", tw => 'vec32(4096)');
-my %vdim  = (tv => $dim, th => $dim, tw => 4096);
-my %vrows = (tv => $rows, th => $rows, tw => 400);
+my %vtype = (tv => "vec32($dim)", th => "vec16($dim)", twide => 'vec32(4096)');
+my %vdim  = (tv => $dim, th => $dim, twide => 4096);
+my %vrows = (tv => $rows, th => $rows, twide => 400);
 
 for my $name (sort keys %vtype)
 {
@@ -149,7 +149,7 @@ my @cases = (
 	},
 	{
 		label    => 'wide dimension, spilled references',
-		table    => 'tw',
+		table    => 'twide',
 		opts     => 'fastscan = off, centroid_compression = true, '
 		          . 'centroid_fastscan = off',
 		posting  => 'aos',
