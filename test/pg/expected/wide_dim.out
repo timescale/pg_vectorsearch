@@ -1,0 +1,256 @@
+-- ============================================================
+-- Wide dimensions: the spilled reference layout
+-- ============================================================
+-- Past 1968 dimensions a posting list's float encode reference no longer
+-- fits beside an entry on its head page, so the head carries only the first
+-- chunk of it, further REFERENCE pages carry the rest (three in all at 4096),
+-- and the entries start after them. The metapage's global mean spills the
+-- same way into the blocks right after block 0. Everything below is the same
+-- index behaviour as at a narrow dimension, exercised at 4096 so the gather
+-- paths, not the inline ones, answer.
+SET maintenance_work_mem = '512MB';
+CREATE TABLE wd (id int, v vec32(4096));
+INSERT INTO wd
+    SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
+               FROM generate_series(0, 4095) j)::vec32(4096)
+    FROM generate_series(1, 600) g;
+-- Serial build; fastscan resolves to off on its own (no group fits a page).
+CREATE INDEX wd_idx ON wd USING prism (v) WITH (nlist = 4);
+SELECT name, setting FROM prism_index_settings('wd_idx')
+    WHERE name IN ('dim', 'nlist', 'fastscan', 'centroid_format',
+                   'first_posting', 'posting_pages')
+    ORDER BY name;
+      name       | setting 
+-----------------+---------
+ centroid_format | rabitq
+ dim             | 4096
+ fastscan        | off
+ first_posting   | 5
+ nlist           | 4
+ posting_pages   | 56
+(6 rows)
+
+-- Block 0 is the metapage, blocks 1..3 the mean's reference pages, so the
+-- centroid region starts at block 4 and runs to first_posting.
+SELECT (SELECT setting::int FROM prism_index_settings('wd_idx')
+         WHERE name = 'first_posting') -
+       (SELECT setting::int FROM prism_index_settings('wd_idx')
+         WHERE name = 'centroid_pages') = 4 AS centroids_start_at_block_4;
+ centroids_start_at_block_4 
+----------------------------
+ t
+(1 row)
+
+-- Every list opens with three reference pages: no entries, no capacity,
+-- chain positions 0..2, and nothing else is a reference page.
+SELECT count(*) = 3 * (SELECT setting::int FROM prism_index_settings('wd_idx')
+                        WHERE name = 'nlist')       AS three_per_list,
+       bool_and(entry_count = 0 AND max_entries = 0) AS empty,
+       bool_and(chain_pos < 3)                       AS lead_the_chain,
+       bool_and(is_first = (chain_pos = 0))          AS head_first
+    FROM prism_posting_pages('wd_idx') WHERE format = 'reference';
+ three_per_list | empty | lead_the_chain | head_first 
+----------------+-------+----------------+------------
+ t              | t     | t              | t
+(1 row)
+
+SELECT bool_and(chain_pos >= 3) AS entries_follow
+    FROM prism_posting_pages('wd_idx') WHERE format <> 'reference';
+ entries_follow 
+----------------
+ t
+(1 row)
+
+-- The planner uses the index, and a row's own vector finds the row.
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 7) LIMIT 5;
+                 QUERY PLAN                  
+---------------------------------------------
+ Limit
+   InitPlan 1
+     ->  Seq Scan on wd wd_1
+           Disabled: true
+           Filter: (id = 7)
+   ->  Index Scan using wd_idx on wd
+         Order By: (v <-> (InitPlan 1).col1)
+(7 rows)
+
+SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 7) LIMIT 1;
+ id 
+----
+  7
+(1 row)
+
+SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 599) LIMIT 1;
+ id  
+-----
+ 599
+(1 row)
+
+-- Insert: the reference is gathered from the chain and the entry appended
+-- after it.
+INSERT INTO wd
+    SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
+               FROM generate_series(0, 4095) j)::vec32(4096)
+    FROM generate_series(601, 640) g;
+SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 640) LIMIT 1;
+ id  
+-----
+ 640
+(1 row)
+
+-- Delete most of the rows and vacuum: tombstoning never touches a reference
+-- page, and the survivors still answer.
+DELETE FROM wd WHERE id <= 500;
+VACUUM wd;
+SELECT count(*) AS tombstoned_reference_pages
+    FROM prism_posting_pages('wd_idx') WHERE format = 'reference' AND tombstoned;
+ tombstoned_reference_pages 
+----------------------------
+                          0
+(1 row)
+
+SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 520) LIMIT 1;
+ id  
+-----
+ 520
+(1 row)
+
+-- Split and rebalance: new lists get spilled heads of their own. The split's
+-- k-means scratch is sized from maintenance_work_mem, which at this width
+-- needs well over the 64 MB default.
+DROP INDEX wd_idx;
+DELETE FROM wd;
+INSERT INTO wd
+    SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
+               FROM generate_series(0, 4095) j)::vec32(4096)
+    FROM generate_series(1, 600) g;
+CREATE INDEX wd_idx ON wd USING prism (v) WITH (nlist = 1);
+CALL prism_rebalance('wd_idx', 100);
+NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
+SELECT setting::int > 1 AS split_into_several_lists
+    FROM prism_index_settings('wd_idx') WHERE name = 'nlist';
+ split_into_several_lists 
+--------------------------
+ t
+(1 row)
+
+SELECT bool_and(entry_count = 0 AND max_entries = 0) AS new_heads_are_references
+    FROM prism_posting_pages('wd_idx') WHERE is_first AND NOT tombstoned;
+ new_heads_are_references 
+--------------------------
+ t
+(1 row)
+
+SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 300) LIMIT 1;
+ id  
+-----
+ 300
+(1 row)
+
+-- REINDEX and a parallel build both lay the strided head region out again.
+-- squawk-ignore require-concurrent-reindex
+REINDEX INDEX wd_idx;
+SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 42) LIMIT 1;
+ id 
+----
+ 42
+(1 row)
+
+DROP INDEX wd_idx;
+ALTER TABLE wd SET (parallel_workers = 2);
+SET max_parallel_maintenance_workers = 2;
+SET min_parallel_table_scan_size = 0;
+CREATE INDEX wd_idx ON wd USING prism (v) WITH (nlist = 4);
+SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 42) LIMIT 1;
+ id 
+----
+ 42
+(1 row)
+
+RESET max_parallel_maintenance_workers;
+RESET min_parallel_table_scan_size;
+ALTER TABLE wd RESET (parallel_workers);
+-- Cosine routes on compressed centroids as well, and a vec16 column halves
+-- the heap the rerank reads.
+CREATE INDEX wd_cos ON wd USING prism (v vec32_cosine_ops) WITH (nlist = 4);
+EXPLAIN (COSTS OFF)
+SELECT id FROM wd ORDER BY v <=> (SELECT v FROM wd WHERE id = 7) LIMIT 1;
+                 QUERY PLAN                  
+---------------------------------------------
+ Limit
+   InitPlan 1
+     ->  Seq Scan on wd wd_1
+           Disabled: true
+           Filter: (id = 7)
+   ->  Index Scan using wd_cos on wd
+         Order By: (v <=> (InitPlan 1).col1)
+(7 rows)
+
+SELECT id FROM wd ORDER BY v <=> (SELECT v FROM wd WHERE id = 7) LIMIT 1;
+ id 
+----
+  7
+(1 row)
+
+DROP INDEX wd_cos;
+CREATE TABLE wh (id int, v vec16(4096));
+INSERT INTO wh SELECT id, v::vec16(4096) FROM wd WHERE id <= 200;
+CREATE INDEX wh_idx ON wh USING prism (v) WITH (nlist = 2);
+EXPLAIN (COSTS OFF)
+SELECT id FROM wh ORDER BY v <-> (SELECT v FROM wh WHERE id = 150) LIMIT 1;
+                 QUERY PLAN                  
+---------------------------------------------
+ Limit
+   InitPlan 1
+     ->  Seq Scan on wh wh_1
+           Disabled: true
+           Filter: (id = 150)
+   ->  Index Scan using wh_idx on wh
+         Order By: (v <-> (InitPlan 1).col1)
+(7 rows)
+
+SELECT id FROM wh ORDER BY v <-> (SELECT v FROM wh WHERE id = 150) LIMIT 1;
+ id  
+-----
+ 150
+(1 row)
+
+RESET enable_seqscan;
+-- What does not work at this width, each refused up front with the reason.
+-- Uncompressed centroids are whole vectors on a centroid page and no longer
+-- fit one, which is what inner product routes on (float16 fits up to 4072).
+CREATE INDEX wd_ip ON wd USING prism (v vec32_ip_ops);
+ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
+HINT:  Inner product routes on uncompressed centroids, which fit up to 2036 dimensions as float32 (vec32) and 4072 as float16 (vec16). Use the L2 or cosine operator class.
+CREATE INDEX wd_off ON wd USING prism (v) WITH (centroid_compression = off);
+ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
+HINT:  Leave centroid_compression at its default.
+CREATE INDEX wh_ip ON wh USING prism (v vec16_ip_ops);
+ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
+HINT:  Inner product routes on uncompressed centroids, which fit up to 2036 dimensions as float32 (vec32) and 4072 as float16 (vec16). Use the L2 or cosine operator class.
+-- No fastscan group fits a page either, at build or by conversion later.
+CREATE INDEX wd_fs ON wd USING prism (v) WITH (fastscan = on);
+ERROR:  fastscan=on does not support 4096 dimensions
+CALL prism_convert_posting_to_fastscan('wd_idx', 0);
+ERROR:  fastscan does not support 4096 dimensions
+-- Past the inline threshold the dimension must suit the fast rotation, and
+-- 8192 is the ceiling.
+CREATE TABLE wbad (v vec32(3000));
+CREATE INDEX wbad_idx ON wbad USING prism (v);
+ERROR:  prism indexes do not support 3000 dimensions
+DETAIL:  Any dimension up to 1968 is supported. Above it the dimension must be a power of two times an odd factor of at most 8, such as 2048, 3072, 4096, 6144 or 8192, and 8192 is the ceiling.
+DROP TABLE wbad;
+CREATE TABLE wbad (v vec32(8193));
+CREATE INDEX wbad_idx ON wbad USING prism (v);
+ERROR:  prism indexes do not support 8193 dimensions
+DETAIL:  Any dimension up to 1968 is supported. Above it the dimension must be a power of two times an odd factor of at most 8, such as 2048, 3072, 4096, 6144 or 8192, and 8192 is the ceiling.
+DROP TABLE wbad;
+-- The dense params generator keeps its own, narrower cap.
+SELECT rabitq_params_generate(4096, 42);
+ERROR:  cannot generate rabitq_params for more than 1968 dimensions
+HINT:  Building the transform matrix is O(dim^3).
+DROP TABLE wh;
+DROP TABLE wd;
+RESET maintenance_work_mem;

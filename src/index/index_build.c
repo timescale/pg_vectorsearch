@@ -354,13 +354,14 @@ prism_write_centroid_tree(
 		const RaBitQParams			*rq_params,
 		const float					*global_mean,
 		BlockNumber					 posting_base,
+		uint32_t					 head_stride,
 		const BlockNumber			*node_first_blkno,
 		const float					*pt_centroids,
 		PrismExactCentroidCollector *collector)
 {
 	/* Leaf child blocks are formula-derived (posting_base + global leaf
-	 * index), so no O(nlist) posting-head array is needed. Each node has at
-	 * most fan_out leaf entries, so this scratch is O(fan_out). */
+	 * index * head_stride), so no O(nlist) posting-head array is needed. Each
+	 * node has at most fan_out leaf entries, so this scratch is O(fan_out). */
 	BlockNumber *leaf_blks =
 			(posting_base != InvalidBlockNumber)
 					? vs_alloc((size_t)fan_out * sizeof(BlockNumber))
@@ -378,7 +379,8 @@ prism_write_centroid_tree(
 		if (is_leaf && leaf_blks != NULL)
 		{
 			for (uint32_t j = 0; j < node->nchildren; j++)
-				leaf_blks[j] = posting_base + node->first_leaf + j;
+				leaf_blks[j] = prism_leaf_head_blkno(
+						posting_base, node->first_leaf + j, head_stride);
 			child_blks = leaf_blks;
 		}
 		else if (!is_leaf)
@@ -432,9 +434,11 @@ typedef struct RoutingTreeCtx
 	PrismCentroidFormat format;
 	const RaBitQParams *rq_params;
 	const float		   *global_mean;
-	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
-	PrismStreamLeafCb	on_leaf;
-	void			   *on_leaf_arg;
+	BlockNumber			first_posting; /* leaf c's head = first_posting + c *
+										* head_stride */
+	uint32_t		  head_stride;	   /* prism_posting_ref_pages(dim) */
+	PrismStreamLeafCb on_leaf;
+	void			 *on_leaf_arg;
 	/* write-phase: optional exact internal-centroid collection */
 	PrismExactCentroidCollector *collector;
 	/* plan-phase page-count helpers */
@@ -816,7 +820,8 @@ replay_leaf_parent(
 	{
 		leaf_blks = c->leaf_blk_scratch;
 		for (uint32_t kk = 0; kk < kept; kk++)
-			leaf_blks[kk] = c->first_posting + c->nleaves + kk;
+			leaf_blks[kk] = prism_leaf_head_blkno(
+					c->first_posting, c->nleaves + kk, c->head_stride);
 	}
 	BlockNumber blk = write_node_pages(c, cents, kept, level, true, leaf_blks);
 
@@ -921,14 +926,15 @@ routing_tree_ctx_init(
 		PrismCentroidFormat format)
 {
 	memset(c, 0, sizeof(*c));
-	c->dim	   = dim;
-	c->nlist   = nlist;
-	c->fan_out = fan_out < 2 ? 2 : fan_out;
-	c->nlevels = vs_hkmeans_nlevels(nlist, c->fan_out);
-	c->format  = format;
-	c->max_ent = prism_centroid_max_entries_fmt(dim, format);
-	c->fs_gpp  = prism_centroid_fastscan_max_groups(dim);
-	c->ok	   = true;
+	c->dim		   = dim;
+	c->head_stride = prism_posting_ref_pages(dim);
+	c->nlist	   = nlist;
+	c->fan_out	   = fan_out < 2 ? 2 : fan_out;
+	c->nlevels	   = vs_hkmeans_nlevels(nlist, c->fan_out);
+	c->format	   = format;
+	c->max_ent	   = prism_centroid_max_entries_fmt(dim, format);
+	c->fs_gpp	   = prism_centroid_fastscan_max_groups(dim);
+	c->ok		   = true;
 }
 
 /* Plan-pass entry ("write the tape"): cluster the sample once, record
@@ -1117,7 +1123,9 @@ prism_routing_subtree_write(
 			format,
 			rq_params,
 			global_mean,
-			first_posting + leaf_offset,
+			prism_leaf_head_blkno(
+					first_posting, leaf_offset, prism_posting_ref_pages(dim)),
+			prism_posting_ref_pages(dim),
 			nfb,
 			NULL,
 			collector);

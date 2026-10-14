@@ -292,7 +292,7 @@ write_meta_page(
 	PageInit(page, BLCKSZ, PRISM_META_SIZE(dim));
 
 	PrismMetaPage *meta	  = (PrismMetaPage *)PageGetSpecialPointer(page);
-	meta->magic			  = PRISM_META_MAGIC;
+	meta->magic			  = prism_meta_magic_for(dim);
 	meta->dim			  = dim;
 	meta->nlevels		  = nlevels;
 	meta->centroid_format = (uint8_t)centroid_format;
@@ -306,9 +306,26 @@ write_meta_page(
 	meta->reserved		  = 0;
 	meta->rabitq_seed	  = rabitq_seed;
 
-	memcpy(prism_meta_global_mean(meta), global_mean, dim * sizeof(float));
+	if (prism_meta_mean_inline(dim))
+		memcpy(prism_meta_global_mean(meta), global_mean, dim * sizeof(float));
 
 	vs_storage_commit_page(storage, 0);
+
+	/* A mean too wide for the metapage spills into the reference pages
+	 * right after it, reserved by the layout and chained like a posting
+	 * list's reference; amcache gathers them once per backend. */
+	uint32_t npages = prism_meta_mean_pages(dim);
+	for (uint32_t chunk = 0; chunk < npages; chunk++)
+	{
+		BlockNumber blk = PRISM_META_MEAN_BLKNO + chunk;
+		Page		p	= vs_storage_write_page(storage, blk);
+
+		prism_posting_reference_page_fill(
+				p, PRISM_META_MEAN_CLUSTER, dim, chunk, global_mean, 0);
+		if (chunk + 1 < npages)
+			prism_posting_opaque(p)->next_blkno = blk + 1;
+		vs_storage_commit_page(storage, blk);
+	}
 }
 
 /* ----------------------------------------------------------------
@@ -355,6 +372,34 @@ prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 	default: /* AUTO */
 		compressed = (metric != DISTANCE_INNER_PRODUCT);
 		break;
+	}
+
+	/*
+	 * Uncompressed centroids are full vectors on a centroid page; past the
+	 * dimension where one fits (2036 float32, 4072 float16) there is no
+	 * such page. Inner product has no compressed alternative (RaBitQ
+	 * centroids estimate L2), so it ends here; L2 and cosine only reach
+	 * this with centroid_compression=off.
+	 */
+	if (!compressed)
+	{
+		PrismCentroidFormat fmt =
+				prism_index_type_info(index)->centroid_format;
+
+		if (prism_centroid_max_entries_fmt(dim, fmt) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("uncompressed centroids do not fit a page at %d "
+							"dimensions",
+							dim),
+					 errhint(metric == DISTANCE_INNER_PRODUCT
+									 ? "Inner product routes on uncompressed "
+									   "centroids, which fit up to 2036 "
+									   "dimensions as float32 (vec32) and "
+									   "4072 as float16 (vec16). Use the L2 "
+									   "or cosine operator class."
+									 : "Leave centroid_compression at its "
+									   "default.")));
 	}
 
 	/*
@@ -450,11 +495,18 @@ resolve_build_params(
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("column cannot have more than %d dimensions",
 						VEC32_MAX_DIM)));
-	if (dim > PRISM_INDEX_MAX_DIM)
+	if (!prism_index_dim_supported(dim))
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("prism indexes support at most %d dimensions",
-						PRISM_INDEX_MAX_DIM)));
+				 errmsg("prism indexes do not support %d dimensions", dim),
+				 errdetail(
+						 "Any dimension up to %d is supported. Above it "
+						 "the dimension must be a power of two times an "
+						 "odd factor of at most %d, such as 2048, 3072, "
+						 "4096, 6144 or 8192, and %d is the ceiling.",
+						 PRISM_INDEX_NARROW_MAX_DIM,
+						 VS_FAST_ROTATE_K_MAX,
+						 PRISM_INDEX_MAX_DIM)));
 
 	p->dim			   = dim;
 	p->metric		   = prism_get_metric(index);
@@ -925,9 +977,9 @@ do_serial_build(
 	prism_build_report_phase(bs->prog, PRISM_BUILD_PHASE_SETUP);
 	RaBitQParams *rq_params = vs_rabitq_create(dim, rabitq_seed);
 
-	/* Centroid area is [first_centroid, first_posting); block 0 is metadata.
-	 */
-	BlockNumber first_centroid = PRISM_FIRST_CENTROID_BLKNO;
+	/* Centroid area is [first_centroid, first_posting); block 0 is metadata,
+	 * followed by the mean's reference pages when it does not fit there. */
+	BlockNumber first_centroid = prism_first_centroid_blkno(dim);
 	BlockNumber first_posting  = first_centroid + plan.centroid_pages;
 
 	/*
@@ -939,7 +991,10 @@ do_serial_build(
 	 * head region during prism_posting_build_lists. No O(nlist) reserve
 	 * arrays.
 	 */
-	prism_build_reserve_layout(storage, first_posting + nlist);
+	prism_build_reserve_layout(
+			storage,
+			prism_leaf_head_blkno(
+					first_posting, nlist, prism_posting_ref_pages(dim)));
 
 	/*
 	 * Write pass: stream the centroid pages (reserved blocks, post-order, root
@@ -1422,7 +1477,7 @@ prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 			 * tuple count); the serial path wrote its own. first_posting
 			 * comes from the build and lets vacuum skip the centroid region
 			 * without scanning it. */
-			BlockNumber fc = 1;
+			BlockNumber fc = prism_first_centroid_blkno(dim);
 
 			Assert(global_mean != NULL);
 
@@ -1433,7 +1488,7 @@ prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 					(uint8_t)p->fan_out,
 					fc,
 					meta_first_posting,
-					meta_first_posting - PRISM_FIRST_CENTROID_BLKNO,
+					meta_first_posting - prism_first_centroid_blkno(dim),
 					built_nlist,
 					p->centroid_format,
 					p->metric,

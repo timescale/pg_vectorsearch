@@ -128,7 +128,8 @@ prism_posting_build_lists(
 		 * reserve), so no O(nlist) reserve arrays are needed. Adopt the
 		 * pre-written head and append in place: no second head construction,
 		 * and a cluster with no entries keeps its on-disk head untouched. */
-		BlockNumber			head_blk = first_posting + c;
+		BlockNumber head_blk = prism_leaf_head_blkno(
+				first_posting, c, prism_posting_ref_pages(dim));
 		PrismPostingBuilder hb;
 		prism_posting_builder_adopt_head(
 				&hb, storage, rq_params, dim, c, head_blk, fastscan);
@@ -396,7 +397,12 @@ build_routing_tree_batched(
 	 * pass can write both at reserved blocks; continuation pages are
 	 * appended past it during prism_posting_build_lists. No O(nlist) reserve
 	 * arrays. */
-	prism_build_reserve_layout(storage, first_posting + actual_nlist);
+	prism_build_reserve_layout(
+			storage,
+			prism_leaf_head_blkno(
+					first_posting,
+					actual_nlist,
+					prism_posting_ref_pages(dim)));
 
 	/* Streaming pass: read each subtree blob back from the store (child
 	 * order matches the append order) and stream its centroid + head
@@ -521,10 +527,16 @@ build_routing_tree_flat(
 	if (shared->metric == DISTANCE_COSINE)
 		vs_l2_normalize(global_mean, dim);
 
-	/* Head region: actual_nlist pages at first_posting (leaf c -> head
-	 * first_posting + c). Pre-extend to cover centroid + head region;
-	 * continuations append past it. No O(nlist) reserve. */
-	prism_build_reserve_layout(storage, first_posting + actual_nlist);
+	/* Head region: actual_nlist strided slots at first_posting (leaf c ->
+	 * head first_posting + c * stride, the stride being the reference page
+	 * count). Pre-extend to cover centroid + head region; continuations
+	 * append past it. No O(nlist) reserve. */
+	prism_build_reserve_layout(
+			storage,
+			prism_leaf_head_blkno(
+					first_posting,
+					actual_nlist,
+					prism_posting_ref_pages(dim)));
 
 	prism_build_report_phase(prog, PRISM_BUILD_PHASE_CENTROID);
 	PrismHeadWriteCtx head;
@@ -718,7 +730,7 @@ do_parallel_build(
 	const size_t vec_nbytes	 = (size_t)dim * sizeof(float);
 	float		*global_mean = vs_alloc(vec_nbytes);
 
-	BlockNumber first_centroid = PRISM_FIRST_CENTROID_BLKNO;
+	BlockNumber first_centroid = prism_first_centroid_blkno(dim);
 	BlockNumber first_posting  = 0;
 	BlockNumber root_blk	   = InvalidBlockNumber;
 

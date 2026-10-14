@@ -632,7 +632,7 @@ typedef struct RefineCbState
 {
 	PrismBuildShared *shared;
 	PrismQueryState	 *qs;	   /* page-backed router (workers) */
-	BlockNumber first_posting; /* head -> leaf: leaf = head - first_posting */
+	BlockNumber first_posting; /* head -> leaf via prism_route_head_to_leaf */
 	double	   *sums;		   /* shared accumulator, indexed leaf - tile_lo */
 	uint64_t   *counts;		   /* shared accumulator */
 	Dimension	dim;

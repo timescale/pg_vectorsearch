@@ -396,19 +396,18 @@ prism_build_route_emit(
 	bool has_soar	  = ctx->soar_lambda > 0.0;
 	bool has_boundary = ctx->boundary_epsilon > 0.0;
 
-	/* Gather the beam candidates: leaf index and pt_centroid (read from each
-	 * head page -- the full-precision float encode reference). The gather is
-	 * unconditional: the exact primary re-rank below needs every finalist's
-	 * pt_centroid, secondary selection or not. */
+	/* Gather the beam candidates: leaf index and pt_centroid (the
+	 * full-precision float encode reference, read from the head page or,
+	 * spilled, its reference chain). The gather is unconditional: the exact
+	 * primary re-rank below needs every finalist's pt_centroid, secondary
+	 * selection or not. */
 	for (uint32_t i = 0; i < n; i++)
 	{
 		BlockNumber h	  = ctx->qs->beam_results[i].posting_head;
-		ctx->cand_leaf[i] = prism_route_head_to_leaf(ctx->first_posting, h);
-		Page hp			  = vs_storage_read_page(ctx->storage, h);
-		memcpy(ctx->cand_pt + (size_t)i * dim,
-			   prism_posting_pt_centroid(hp),
-			   (size_t)dim * sizeof(float));
-		vs_storage_release_page(ctx->storage, h);
+		ctx->cand_leaf[i] = prism_route_head_to_leaf(
+				ctx->first_posting, h, prism_posting_ref_pages(dim));
+		prism_posting_reference_read(
+				ctx->storage, h, dim, ctx->cand_pt + (size_t)i * dim);
 	}
 
 	/*
@@ -557,6 +556,37 @@ prism_posting_entry_add(
  * Flush the in-memory page: write to storage and link
  * into the chain. Prefers reserved contiguous blocks.
  */
+/* Write reference page `chunk` (> 0) of a spilled list and link it in. */
+static void
+flush_reference_page(PrismPostingBuilder *builder, uint32_t chunk)
+{
+	BlockNumber blkno;
+	Page		page;
+
+	if (builder->fixed_first_blkno != InvalidBlockNumber)
+	{
+		blkno = builder->fixed_first_blkno + chunk;
+		page  = vs_storage_write_page(builder->storage, blkno);
+	}
+	else
+	{
+		page = vs_storage_new_page(builder->storage, &blkno);
+	}
+	prism_posting_reference_page_fill(
+			page,
+			builder->cluster_id,
+			builder->dim,
+			chunk,
+			builder->ref_copy,
+			0);
+	vs_storage_commit_page(builder->storage, blkno);
+
+	Page prev = vs_storage_write_page(builder->storage, builder->prev_blkno);
+	prism_posting_opaque(prev)->next_blkno = blkno;
+	vs_storage_commit_page(builder->storage, builder->prev_blkno);
+	builder->prev_blkno = blkno;
+}
+
 static void
 flush_page(PrismPostingBuilder *builder)
 {
@@ -587,6 +617,7 @@ flush_page(PrismPostingBuilder *builder)
 	memcpy(spage, builder->mem_page, BLCKSZ);
 	vs_storage_commit_page(builder->storage, blkno);
 
+	bool was_first = builder->is_first;
 	if (builder->is_first)
 	{
 		builder->head_blkno = blkno;
@@ -601,6 +632,13 @@ flush_page(PrismPostingBuilder *builder)
 		vs_storage_commit_page(builder->storage, builder->prev_blkno);
 	}
 	builder->prev_blkno = blkno;
+
+	/* A spilled head is followed by the rest of its reference before any
+	 * entry page: at the reserved blocks after a fixed head (the bulk-built
+	 * head region strides by ref_pages), else at fresh pages. */
+	if (was_first && builder->spilled)
+		for (uint32_t chunk = 1; chunk < builder->ref_pages; chunk++)
+			flush_reference_page(builder, chunk);
 
 	builder->page_ops->reinit_page(builder);
 	builder->page_dirty = false;
@@ -637,12 +675,33 @@ builder_init_common(
 
 	builder->fixed_first_blkno = InvalidBlockNumber;
 
-	prism_posting_page_init(
-			builder->mem_page, cluster_id, dim, first_page_flags);
-	if (pt_centroid != NULL)
-		memcpy(prism_posting_pt_centroid_mut(builder->mem_page),
-			   pt_centroid,
-			   dim * sizeof(float));
+	builder->spilled   = prism_posting_spilled(dim);
+	builder->ref_pages = prism_posting_ref_pages(dim);
+	if (builder->spilled && (first_page_flags & PRISM_POSTING_PAGE_FIRST))
+	{
+		/* No fastscan page can hold a group at a spilled dimension; the
+		 * format resolution and the conversion refuse it first, and a
+		 * release build must not write a group past its page buffer. */
+		if (first_page_flags & PRISM_POSTING_PAGE_FASTSCAN)
+			vs_error(
+					VS_EXTENSION_NAME
+					": fastscan does not support %u dimensions",
+					(unsigned)dim);
+		Assert(pt_centroid != NULL);
+		builder->ref_copy = vs_alloc((size_t)dim * sizeof(float));
+		memcpy(builder->ref_copy, pt_centroid, (size_t)dim * sizeof(float));
+		prism_posting_reference_page_fill(
+				builder->mem_page, cluster_id, dim, 0, builder->ref_copy, 0);
+	}
+	else
+	{
+		prism_posting_page_init(
+				builder->mem_page, cluster_id, dim, first_page_flags);
+		if (pt_centroid != NULL)
+			memcpy(prism_posting_pt_centroid_mut(builder->mem_page),
+				   pt_centroid,
+				   dim * sizeof(float));
+	}
 
 	builder->enc_buf = params ? vs_alloc(VS_RABITQ_DATA_SIZE(dim)) : NULL;
 	if (params)
@@ -933,14 +992,47 @@ prism_posting_builder_adopt_head(
 
 	builder->fixed_first_blkno = head_blk;
 	builder->adopted_head	   = true;
+	builder->spilled		   = prism_posting_spilled(dim);
+	builder->ref_pages		   = prism_posting_ref_pages(dim);
 
-	/* Start from the pre-written head itself: it already carries the
-	 * cluster's header and pt_centroid. It must be empty — the pre-scan
-	 * writer never adds entries. */
-	Page hp = vs_storage_read_page(storage, head_blk);
-	Assert(prism_posting_opaque(hp)->live_count == 0);
-	memcpy(builder->mem_page, hp, BLCKSZ);
-	vs_storage_release_page(storage, head_blk);
+	if (!builder->spilled)
+	{
+		/* Start from the pre-written head itself: it already carries the
+		 * cluster's header and pt_centroid. It must be empty — the pre-scan
+		 * writer never adds entries. */
+		Page hp = vs_storage_read_page(storage, head_blk);
+		Assert(prism_posting_opaque(hp)->live_count == 0);
+		memcpy(builder->mem_page, hp, BLCKSZ);
+		vs_storage_release_page(storage, head_blk);
+	}
+	else
+	{
+		/* The pre-written head and its reference pages hold no entries and
+		 * stay as they are; entries go on fresh pages chained after the last
+		 * reference page, so the builder starts past it. */
+		Assert(!fastscan);
+		BlockNumber blk = head_blk;
+		for (uint32_t chunk = 0; chunk < builder->ref_pages; chunk++)
+		{
+			Page p = vs_storage_read_page(storage, blk);
+			const PrismPostingPageOpaque *op   = prism_posting_opaque(p);
+			BlockNumber					  next = op->next_blkno;
+
+			Assert(op->flags & PRISM_POSTING_PAGE_REFERENCE);
+			Assert(chunk > 0 || op->live_count == 0);
+			vs_storage_release_page(storage, blk);
+			if (chunk + 1 < builder->ref_pages)
+				blk = next;
+		}
+		builder->head_blkno = head_blk;
+		builder->prev_blkno = blk;
+		builder->is_first	= false;
+		prism_posting_page_init(
+				builder->mem_page,
+				cluster_id,
+				dim,
+				PRISM_POSTING_PAGE_OVERFLOW);
+	}
 
 	/* No encoder scratch: an adopted head only ever receives pre-encoded
 	 * entries (prism_posting_entry_add from the cluster-keyed sort), and this
@@ -1039,8 +1131,9 @@ prism_posting_builder_finish(PrismPostingBuilder *builder)
 	/* An adopted head that received no entries is already final on disk
 	 * (the pre-scan writer stamped it empty): skip the rewrite and the
 	 * restamp below, which would clobber its tail_blkno with an invalid
-	 * chain tail. */
-	if (builder->adopted_head && builder->is_first && !builder->page_dirty)
+	 * chain tail. Keyed on the entry count, since a spilled adoption starts
+	 * past the head rather than on it. */
+	if (builder->adopted_head && builder->n_entries == 0)
 	{
 		builder->head_blkno = builder->fixed_first_blkno;
 		return builder->head_blkno;
@@ -1076,6 +1169,11 @@ prism_posting_builder_cleanup(PrismPostingBuilder *builder)
 		vs_rabitq_scratch_cleanup(&builder->enc_scratch);
 		vs_free(builder->enc_buf);
 		builder->enc_buf = NULL;
+	}
+	if (builder->ref_copy != NULL)
+	{
+		vs_free(builder->ref_copy);
+		builder->ref_copy = NULL;
 	}
 }
 
@@ -1168,7 +1266,9 @@ prism_refine_route_row(
 		return NULL;
 
 	uint32_t leaf = prism_route_head_to_leaf(
-			first_posting, qs->beam_results[0].posting_head);
+			first_posting,
+			qs->beam_results[0].posting_head,
+			prism_posting_ref_pages(dim));
 	if (leaf < tile_lo || leaf >= tile_hi)
 		return NULL;
 	*out_idx = leaf - tile_lo;
@@ -1224,7 +1324,8 @@ prism_write_leaf_head(void *arg, uint32_t leaf, const float *centroid)
 			centroid,
 			h->pt,
 			h->fastscan);
-	prism_posting_builder_set_first_blkno(&hb, h->first_posting + leaf);
+	prism_posting_builder_set_first_blkno(
+			&hb, prism_leaf_head_blkno(h->first_posting, leaf, h->stride));
 	prism_posting_builder_finish(&hb);
 	prism_posting_builder_cleanup(&hb);
 }

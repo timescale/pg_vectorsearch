@@ -288,10 +288,12 @@ DROP TABLE hd;
 -- ============================================================
 -- Index layout dimension ceiling
 -- ============================================================
--- A posting list's first page carries the float encode reference and must
--- still fit one entry, which caps the indexable dimension. One past the
--- ceiling is rejected up front (it would corrupt the first-page capacity
--- arithmetic); the ceiling itself builds and answers exactly.
+-- Up to 1968 dimensions a posting list's first page carries the float encode
+-- reference beside its entries and any dimension builds. Past that the
+-- reference spills onto its own pages and the dimension must suit the fast
+-- rotation (a power of two times an odd factor of at most 8), so 1969 is
+-- rejected up front while 1968 builds and answers exactly. The spilled
+-- layouts themselves are covered in wide_dim.sql.
 CREATE TABLE dimcap (id int, v vec32(1969));
 CREATE INDEX dimcap_i ON dimcap USING prism (v);
 DROP TABLE dimcap;

@@ -46,19 +46,25 @@ $primary->safe_psql('postgres', 'CREATE EXTENSION pg_vectorsearch');
 $primary->safe_psql('postgres',
 	'ALTER DATABASE postgres SET search_path = public');
 
-# Two tables so both vec32 types are covered; vec16 drives the
-# half-precision centroid format, which no vec32 column can reach.
-my %vtype = (tv => "vec32($dim)", th => "vec16($dim)");
+# Three tables: both vector types at the narrow width (vec16 drives the
+# half-precision centroid format, which no vec32 column can reach), and a
+# vec32 column past the inline threshold, where every posting list's
+# reference and the metapage's mean spill into reference pages that must
+# reach the standby like any other. Few rows at 4096: the layout is what is
+# under test, not the data.
+my %vtype = (tv => "vec32($dim)", th => "vec16($dim)", tw => 'vec32(4096)');
+my %vdim  = (tv => $dim, th => $dim, tw => 4096);
+my %vrows = (tv => $rows, th => $rows, tw => 400);
 
 for my $name (sort keys %vtype)
 {
-	my $type = $vtype{$name};
+	my ($type, $d, $n) = ($vtype{$name}, $vdim{$name}, $vrows{$name});
 	$primary->safe_psql('postgres', <<"SQL");
 CREATE TABLE $name (id int, v $type);
 INSERT INTO $name
     SELECT g, ('[' || (SELECT string_agg((sin(g * 0.7 + j))::text, ',')
-                       FROM generate_series(1, $dim) j) || ']')::$type
-    FROM generate_series(1, $rows) g;
+                       FROM generate_series(1, $d) j) || ']')::$type
+    FROM generate_series(1, $n) g;
 ANALYZE $name;
 SQL
 }
@@ -141,6 +147,14 @@ my @cases = (
 		posting  => 'aos',
 		centroid => 'half',
 	},
+	{
+		label    => 'wide dimension, spilled references',
+		table    => 'tw',
+		opts     => 'fastscan = off, centroid_compression = true, '
+		          . 'centroid_fastscan = off',
+		posting  => 'aos',
+		centroid => 'rabitq',
+	},
 );
 
 for my $c (@cases)
@@ -156,12 +170,12 @@ for my $c (@cases)
 
 	# Insert: pages reach the standby through the aminsert GenericXLog path,
 	# which covers the hole itself rather than relying on page_std.
-	my $type = $vtype{$tbl};
+	my ($type, $d, $n) = ($vtype{$tbl}, $vdim{$tbl}, $vrows{$tbl});
 	$primary->safe_psql('postgres', <<"SQL");
 INSERT INTO $tbl
     SELECT g, ('[' || (SELECT string_agg((sin(g * 0.31 + j))::text, ',')
-                       FROM generate_series(1, $dim) j) || ']')::$type
-    FROM generate_series($rows + 1, $rows + 200) g;
+                       FROM generate_series(1, $d) j) || ']')::$type
+    FROM generate_series($n + 1, $n + 200) g;
 SQL
 	agrees($tbl, "$label, after insert");
 
@@ -173,7 +187,7 @@ SQL
 
 	# Reset for the next case.
 	$primary->safe_psql('postgres', "DROP INDEX $idx");
-	$primary->safe_psql('postgres', "DELETE FROM $tbl WHERE id > $rows");
+	$primary->safe_psql('postgres', "DELETE FROM $tbl WHERE id > $n");
 }
 
 # Parallel build. The workers write centroid and posting pages but WAL-log

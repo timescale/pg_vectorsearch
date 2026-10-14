@@ -14,21 +14,45 @@
 
 #include "core/types.h"
 #include "index/centroid_page.h"
+#include "index/posting_page.h"
 #include "index/storage.h"
 #include "quant/rabitq.h"
 
 /*
- * Block 0 holds the metapage, so the centroid region a build reserves
- * starts here and runs to first_posting.
+ * Block 0 holds the metapage. Up to this dimension the global mean sits
+ * inline in its special area; past it the mean spills into reference pages
+ * (posting-kind pages flagged REFERENCE, cluster PRISM_META_MEAN_CLUSTER,
+ * chained) at the blocks right after it, and the centroid region a build
+ * reserves starts after those and runs to first_posting. The threshold is
+ * the metapage's inline capacity at 8 KB pages; meta.h asserts the two
+ * agree. Shared here so the standalone build reserves the same blocks and
+ * the two layouts stay identical.
  */
-#define PRISM_FIRST_CENTROID_BLKNO 1
+#define PRISM_META_INLINE_MEAN_MAX_DIM 2032
+#define PRISM_META_MEAN_CLUSTER		   UINT32_MAX
+#define PRISM_META_MEAN_BLKNO		   1
+
+static inline uint32_t
+prism_meta_mean_pages(Dimension dim)
+{
+	if (dim <= PRISM_META_INLINE_MEAN_MAX_DIM)
+		return 0;
+	return ((uint32_t)dim + PRISM_POSTING_REF_CHUNK_FLOATS - 1) /
+		   PRISM_POSTING_REF_CHUNK_FLOATS;
+}
+
+static inline BlockNumber
+prism_first_centroid_blkno(Dimension dim)
+{
+	return PRISM_META_MEAN_BLKNO + prism_meta_mean_pages(dim);
+}
 
 /*
  * Posting pages the scan cost estimate prices, and what prism_index_settings
  * reports as posting_pages.
  *
  * Block 0 is the metapage and the centroid region a build reserves starts at
- * PRISM_FIRST_CENTROID_BLKNO, so on a freshly built index the posting pages
+ * prism_first_centroid_blkno, so on a freshly built index the posting pages
  * are everything from first_posting onward. That range stops measuring them
  * once a split overflows a level-0 centroid page: the split extends the
  * relation and chains the new centroid page past the posting region, so the
@@ -45,9 +69,10 @@
  * documents for a bloated index.
  */
 static inline double
-prism_index_posting_pages(double num_pages, double ncentroid_pages)
+prism_index_posting_pages(
+		double num_pages, Dimension dim, double ncentroid_pages)
 {
-	double n = num_pages - (double)PRISM_FIRST_CENTROID_BLKNO -
+	double n = num_pages - (double)prism_first_centroid_blkno(dim) -
 			   ncentroid_pages;
 
 	return n < 1.0 ? 1.0 : n;
@@ -84,7 +109,7 @@ typedef struct PrismIndexBase
 	 * sits inside the region depends on the build: a serial build writes the
 	 * centroid pages post-order and the root lands last, a parallel one
 	 * places it first. The region itself is always
-	 * [PRISM_FIRST_CENTROID_BLKNO, first_posting).
+	 * [prism_first_centroid_blkno(dim), first_posting).
 	 */
 	BlockNumber first_centroid;
 	/*
