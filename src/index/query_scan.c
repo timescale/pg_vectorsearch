@@ -356,6 +356,8 @@ scan_clusters(
 	{
 		BlockNumber head = beam_results[j].posting_head;
 
+		if (head == InvalidBlockNumber)
+			continue;
 		vs_storage_prefetch(qs->pscan.storage, head);
 		/* A spilled list's reference pages follow its head in the bulk-built
 		 * region; a split-created list has them wherever the split appended,

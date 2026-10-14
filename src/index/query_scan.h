@@ -75,8 +75,9 @@ typedef struct PrismQueryState
 	 * and cannot miss an allocation. The top-k's and the centroid
 	 * scratch's own contexts are created under it and go with it.
 	 *
-	 * Buffers here are sized to max_k and max_nprobe: resizing means
-	 * building a new state, and the old one has to go somewhere. The
+	 * Buffers here are sized to max_k and max_nprobe (the few that grow,
+	 * grow within those bounds): resizing means building a new state, and
+	 * the old one has to go somewhere. The
 	 * posting scan's pinned page is the one thing a context teardown
 	 * cannot release, which is why prism_query_state_cleanup exists rather
 	 * than callers deleting this directly.

@@ -552,10 +552,6 @@ prism_posting_entry_add(
  * Shared helpers
  * ---------------------------------------------------------------- */
 
-/*
- * Flush the in-memory page: write to storage and link
- * into the chain. Prefers reserved contiguous blocks.
- */
 /* Write reference page `chunk` (> 0) of a spilled list and link it in. */
 static void
 flush_reference_page(PrismPostingBuilder *builder, uint32_t chunk)
@@ -587,6 +583,10 @@ flush_reference_page(PrismPostingBuilder *builder, uint32_t chunk)
 	builder->prev_blkno = blkno;
 }
 
+/*
+ * Flush the in-memory page: write to storage and link
+ * into the chain. Prefers reserved contiguous blocks.
+ */
 static void
 flush_page(PrismPostingBuilder *builder)
 {

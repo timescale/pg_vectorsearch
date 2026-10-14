@@ -88,6 +88,16 @@ SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 599) LIMIT 1;
  599
 (1 row)
 
+-- With nprobe below the routed set the probe re-rank runs: each routed
+-- list's reference is gathered once and reused by the scan pass.
+SET prism.nprobe = 2;
+SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 7) LIMIT 1;
+ id 
+----
+  7
+(1 row)
+
+RESET prism.nprobe;
 -- Insert: the reference is gathered from the chain and the entry appended
 -- after it.
 INSERT INTO wd
@@ -223,13 +233,13 @@ RESET enable_seqscan;
 -- fit one, which is what inner product routes on (float16 fits up to 4072).
 CREATE INDEX wd_ip ON wd USING prism (v vec32_ip_ops);
 ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
-HINT:  Inner product routes on uncompressed centroids, which fit up to 2036 dimensions as float32 (vec32) and 4072 as float16 (vec16). Normalized embeddings rank the same under the cosine operator class; use that.
+HINT:  Inner product routes on uncompressed centroids, which fit up to 2036 dimensions as float32 (vec32) and 4072 as float16 (vec16). Use the L2 or cosine operator class; normalized embeddings rank the same under cosine.
 CREATE INDEX wd_off ON wd USING prism (v) WITH (centroid_compression = off);
 ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
 HINT:  Leave centroid_compression at its default.
 CREATE INDEX wh_ip ON wh USING prism (v vec16_ip_ops);
 ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
-HINT:  Inner product routes on uncompressed centroids, which fit up to 2036 dimensions as float32 (vec32) and 4072 as float16 (vec16). Normalized embeddings rank the same under the cosine operator class; use that.
+HINT:  Inner product routes on uncompressed centroids, which fit up to 2036 dimensions as float32 (vec32) and 4072 as float16 (vec16). Use the L2 or cosine operator class; normalized embeddings rank the same under cosine.
 -- No fastscan group fits a page either, at build or by conversion later.
 CREATE INDEX wd_fs ON wd USING prism (v) WITH (fastscan = on);
 ERROR:  fastscan=on does not support 4096 dimensions

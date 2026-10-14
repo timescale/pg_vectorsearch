@@ -47,6 +47,11 @@ EXPLAIN (COSTS OFF)
 SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 7) LIMIT 5;
 SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 7) LIMIT 1;
 SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 599) LIMIT 1;
+-- With nprobe below the routed set the probe re-rank runs: each routed
+-- list's reference is gathered once and reused by the scan pass.
+SET prism.nprobe = 2;
+SELECT id FROM wd ORDER BY v <-> (SELECT v FROM wd WHERE id = 7) LIMIT 1;
+RESET prism.nprobe;
 
 -- Insert: the reference is gathered from the chain and the entry appended
 -- after it.

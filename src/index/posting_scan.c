@@ -52,14 +52,13 @@ prism_posting_scan_init(
 	scan->packed_bytes = VS_RABITQ_BYTES(dim);
 	scan->cur_blkno	   = InvalidBlockNumber;
 
-	/* Pre-allocate batch buffers — pad to multiple of 4 for IP kernel.
-	 * max_entries_cap is the trusted per-page capacity these buffers are
-	 * sized for; a page whose on-disk entry_count exceeds it (corruption)
-	 * would overrun page_distances/page_scratch and is rejected on load. */
+	/* Pre-allocate batch buffers. max_entries_cap is the trusted per-page
+	 * capacity these buffers are sized for; a page whose on-disk
+	 * entry_count exceeds it (corruption) would overrun
+	 * page_distances/page_scratch and is rejected on load. */
 	scan->max_entries_cap = max_entries_per_page;
-	uint32_t padded		  = (max_entries_per_page + 3) & ~3u;
-	scan->page_distances  = vs_alloc(padded * sizeof(Distance));
-	scan->page_scratch	  = vs_alloc(padded * sizeof(float));
+	scan->page_distances  = vs_alloc(max_entries_per_page * sizeof(Distance));
+	scan->page_scratch	  = vs_alloc(max_entries_per_page * sizeof(float));
 
 	scan->spilled = prism_posting_spilled(dim);
 	if (scan->spilled)
