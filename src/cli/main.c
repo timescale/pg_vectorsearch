@@ -18,6 +18,7 @@
 #include "algo/kmeans.h"
 #include "cmd.h"
 #include "core/memory.h"
+#include "kv.h"
 
 /* Forward declarations of command handlers */
 int cmd_bench_distance(CmdContext *ctx);
@@ -89,6 +90,9 @@ print_usage(const char *prog)
 	printf("Options:\n");
 	printf("  -h, --help       Show this help message\n");
 	printf("  -v, --version    Show version information\n");
+	printf("  --json [path]    Write bench results as JSON "
+		   "(omit or '-' = stdout)\n");
+	printf("  --quiet          Suppress human bench output\n");
 	printf("\n");
 	printf("Examples:\n");
 	printf("  %s bench distance --dim 768 --count 10000 --metric l2\n", prog);
@@ -156,8 +160,17 @@ dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 			.subcmd_name = subcmd,
 	};
 
-	/* Dispatch to handler */
-	return cmd->handler(&cmd_ctx);
+	if (json_take_path(&cmd_ctx.argc, cmd_ctx.argv, &cmd_ctx.json_path) != 0)
+		return 1;
+	json_take_quiet(&cmd_ctx.argc, cmd_ctx.argv, &cmd_ctx.quiet);
+	if (json_begin_human(cmd_ctx.json_path, cmd_ctx.quiet) != 0)
+	{
+		json_end_human();
+		return 1;
+	}
+	int ret = cmd->handler(&cmd_ctx);
+	json_end_human();
+	return ret;
 }
 
 #if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)

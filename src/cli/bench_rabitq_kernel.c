@@ -25,6 +25,7 @@
 #include "core/memory.h"
 #include "core/platform.h"
 #include "core/types.h"
+#include "kv.h"
 #include "quant/rabitq.h"
 
 /* Default parameters */
@@ -54,6 +55,7 @@ typedef struct
 	uint32_t  count;
 	uint32_t  runs;
 	bool	  help;
+	Kv		 *metrics;
 } BenchConfig;
 
 /*
@@ -139,6 +141,7 @@ benchmark_hamming_throughput(const BenchConfig *config)
 		   best_vps / 1000.0,
 		   cmd_ratio((double)count, best_vps / 1000.0),
 		   count / 1000);
+	kv_arr_add_metric(config->metrics, "vec/s", best_vps, "hamming");
 
 	vs_free(results);
 	vs_free_aligned(data_bits);
@@ -252,6 +255,8 @@ benchmark_distance_throughput(const BenchConfig *config)
 		   cmd_ratio((double)count, best_sym_vps / 1000.0),
 		   count / 1000);
 	printf("  speedup:     %.1fx\n", cmd_ratio(best_sym_vps, best_asym_vps));
+	kv_arr_add_metric(config->metrics, "vec/s", best_asym_vps, "asymmetric");
+	kv_arr_add_metric(config->metrics, "vec/s", best_sym_vps, "symmetric");
 
 	vs_free(data_buf);
 	vs_free(distances);
@@ -506,6 +511,7 @@ print_usage(CmdContext *ctx)
 	printf("  --runs <int>    Benchmark iterations (default: %d)\n",
 		   DEFAULT_RUNS);
 	printf("  --help          Show this help message\n");
+	CMD_USAGE_JSON();
 	printf("\n");
 	printf("Examples:\n");
 	CMD_USAGE_EXAMPLE(ctx, "bench rabitq-kernel", "--dim 768 --count 10000");
@@ -581,9 +587,25 @@ cmd_bench_rabitq_kernel(CmdContext *ctx)
 
 	vs_rabitq_init_simd();
 
+	KvBuild *kb	  = NULL;
+	Kv		*root = NULL;
+	if (ctx->json_path != NULL)
+	{
+		kb	 = kv_build_open();
+		root = kv_obj();
+		kv_obj_put(root, "bench", kv_str("rabitq-kernel"));
+		kv_obj_put(root, "dim", kv_int(config.dim));
+		kv_obj_put(root, "count", kv_int(config.count));
+		kv_obj_put(root, "runs", kv_int(config.runs));
+		config.metrics = kv_arr();
+		kv_obj_put(root, "metrics", config.metrics);
+	}
+
 	benchmark_hamming_throughput(&config);
 	benchmark_distance_throughput(&config);
 	benchmark_accuracy(&config);
 
-	return 0;
+	int rc = cmd_kv_print(root, ctx->json_path);
+	kv_build_close(kb);
+	return rc;
 }

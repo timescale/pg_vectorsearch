@@ -497,6 +497,9 @@ if build_tools
 # CLI tool
 vs_cli_sources = files(
   'src/cli/main.c',
+  'src/cli/kv.c',
+  'src/cli/kv_json.c',
+  'src/cli/kv_text.c',
   'src/cli/bench_distance.c',
   'src/cli/bench_quantize.c',
   'src/cli/bench_cluster.c',

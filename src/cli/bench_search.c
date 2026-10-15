@@ -29,6 +29,7 @@
 
 #include "cmd.h"
 #include "index/query_scan.h"
+#include "kv.h"
 #include "standalone/api.h"
 #include "standalone/vec32_source.h"
 
@@ -222,6 +223,7 @@ print_usage(CmdContext *ctx)
 	printf("  --hdf5 <path>      HDF5 dataset\n");
 	printf("  --metric <str>     angular, euclidean\n");
 #endif
+	CMD_USAGE_JSON();
 	printf("  --help\n");
 }
 
@@ -378,7 +380,8 @@ cmd_bench_search(CmdContext *ctx)
 	uint32_t gt_k		  = 0;
 
 	PrismBuildInfo info;
-	VsHandle	  *handle = NULL;
+	VsHandle	  *handle	= NULL;
+	double		   build_ms = 0.0;
 
 #ifdef VS_HAVE_HDF5
 	if (config.hdf5_path != NULL)
@@ -452,7 +455,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.fastscan,
 				 config.nworkers,
 				 &info);
-		double build_ms = (double)(get_time_ns() - t0) / 1e6;
+		build_ms = (double)(get_time_ns() - t0) / 1e6;
 
 		vs_hdf5_source_close(&train_src);
 
@@ -505,7 +508,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.fastscan,
 				 config.nworkers,
 				 &info);
-		double build_ms = (double)(get_time_ns() - t0) / 1e6;
+		build_ms = (double)(get_time_ns() - t0) / 1e6;
 		free(train_vecs);
 
 		if (handle == NULL)
@@ -683,6 +686,38 @@ cmd_bench_search(CmdContext *ctx)
 	printf("  Min latency: %.2f us\n", lat_min);
 	printf("  Max latency: %.2f us\n", lat_max);
 	printf("  QPS:         %.0f\n", qps);
+
+	if (ctx->json_path != NULL)
+	{
+		KvBuild *kb	  = kv_build_open();
+		Kv		*root = kv_obj();
+		kv_obj_put(root, "bench", kv_str("search"));
+		kv_obj_put(root, "dim", kv_int(config.dim));
+		kv_obj_put(root, "nlist", kv_int(info.nlist));
+		kv_obj_put(root, "nprobe", kv_int(config.nprobe));
+		kv_obj_put(root, "k", kv_int(config.k));
+		kv_obj_put(root, "queries", kv_int(nqueries));
+		kv_obj_put(root, "runs", kv_int(config.runs));
+		if (config.hdf5_path != NULL)
+			kv_obj_put(root, "dataset", kv_str(config.hdf5_path));
+		Kv *metrics = kv_arr();
+		kv_arr_add_metric(metrics, "1/s", qps, "qps");
+		kv_arr_add_metric(metrics, "us", avg_lat, "avg_lat_us");
+		kv_arr_add_metric(metrics, "s", build_ms / 1000.0, "build_s");
+		if (gt_neighbors != NULL)
+			kv_arr_add_metric(metrics, "ratio", recall, "recall");
+		kv_obj_put(root, "metrics", metrics);
+		int rc = cmd_kv_print(root, ctx->json_path);
+		kv_build_close(kb);
+		if (rc != 0)
+		{
+			free(result_ids);
+			vs_handle_destroy(handle);
+			free(query_vecs);
+			free(gt_neighbors);
+			return 1;
+		}
+	}
 
 	/* Cleanup */
 	free(result_ids);

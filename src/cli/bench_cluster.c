@@ -26,6 +26,7 @@
 #include "core/platform.h"
 #include "core/types.h"
 #include "kmeans_pgvector.h"
+#include "kv.h"
 #include "types/vec16.h"
 
 /* Default parameters */
@@ -57,6 +58,7 @@ typedef struct
 	const char	  *type; /* "f32" or "f16" */
 	bool		   help;
 	bool		   verify;
+	Kv			  *metrics;
 } ClusterBenchConfig;
 
 static DistanceMetric
@@ -449,6 +451,8 @@ run_bench(
 		   empty,
 		   vecs_per_s);
 
+	kv_arr_add_metric(cfg->metrics, "vec/s", vecs_per_s, "%s", name);
+
 	return res;
 }
 
@@ -502,6 +506,8 @@ run_bench_pgvector(const ClusterBenchConfig *cfg, const float *data)
 		   empty,
 		   vecs_per_s);
 
+	kv_arr_add_metric(cfg->metrics, "vec/s", vecs_per_s, "pgvector");
+
 	return res;
 }
 
@@ -529,6 +535,7 @@ print_usage(CmdContext *ctx)
 	printf("  --verify           Compare all algos against lloyd "
 		   "(reference)\n");
 	printf("  --help             Show this help\n");
+	CMD_USAGE_JSON();
 	printf("\n");
 	printf("Examples:\n");
 	CMD_USAGE_EXAMPLE(
@@ -718,6 +725,20 @@ cmd_bench_cluster(CmdContext *ctx)
 		   cfg.nlist,
 		   size_mb);
 
+	KvBuild *kb	  = NULL;
+	Kv		*root = NULL;
+	if (ctx->json_path != NULL)
+	{
+		kb	 = kv_build_open();
+		root = kv_obj();
+		kv_obj_put(root, "bench", kv_str("cluster"));
+		kv_obj_put(root, "dim", kv_int(cfg.dim));
+		kv_obj_put(root, "nvecs", kv_int(cfg.nvecs));
+		kv_obj_put(root, "nlist", kv_int(cfg.nlist));
+		cfg.metrics = kv_arr();
+		kv_obj_put(root, "metrics", cfg.metrics);
+	}
+
 	/* Run benchmarks */
 	bool run_all = cfg.impl == NULL || strcmp(cfg.impl, "all") == 0;
 
@@ -811,5 +832,7 @@ cmd_bench_cluster(CmdContext *ctx)
 
 	vs_free(data_f16);
 	vs_free(data);
-	return 0;
+	int rc = cmd_kv_print(root, ctx->json_path);
+	kv_build_close(kb);
+	return rc;
 }

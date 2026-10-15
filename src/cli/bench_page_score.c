@@ -23,6 +23,7 @@
 #include "core/memory.h"
 #include "core/platform.h"
 #include "core/types.h"
+#include "kv.h"
 #include "quant/rabitq.h"
 #include "types/vec32.h"
 
@@ -58,6 +59,7 @@ typedef struct
 	uint32_t	runs;
 	const char *impl_filter;
 	bool		help;
+	Kv		   *metrics;
 } BenchConfig;
 
 /* Timing helpers */
@@ -380,6 +382,19 @@ run_benchmark(
 
 	printf("\n");
 
+	kv_arr_add_metric(
+			config->metrics, "ns", batch_seq.avg, "%s/batch_seq", impl->name);
+	kv_arr_add_metric(
+			config->metrics,
+			"ns",
+			batch_vert.avg,
+			"%s/batch_vert",
+			impl->name);
+	kv_arr_add_metric(
+			config->metrics, "ns", aos_seq.avg, "%s/aos_seq", impl->name);
+	kv_arr_add_metric(
+			config->metrics, "ns", aos_vert.avg, "%s/aos_vert", impl->name);
+
 	bench_stats_free(&aos_vert);
 	bench_stats_free(&aos_seq);
 	bench_stats_free(&batch_vert);
@@ -410,6 +425,7 @@ print_usage(CmdContext *ctx)
 		   "neon\n");
 	printf("                     (default: all supported)\n");
 	printf("  --help             Show this help message\n");
+	CMD_USAGE_JSON();
 	printf("\n");
 	printf("Examples:\n");
 	CMD_USAGE_EXAMPLE(ctx, "bench page-score", "--dim 768");
@@ -607,6 +623,20 @@ cmd_bench_page_score(CmdContext *ctx)
 	reinit_rabitq_with_simd(0xFFFFFFFF);
 	uint32_t cpu_caps = vs_detect_simd();
 
+	KvBuild *kb	  = NULL;
+	Kv		*root = NULL;
+	if (ctx->json_path != NULL)
+	{
+		kb	 = kv_build_open();
+		root = kv_obj();
+		kv_obj_put(root, "bench", kv_str("page-score"));
+		kv_obj_put(root, "dim", kv_int(config.dim));
+		kv_obj_put(root, "count", kv_int(config.count));
+		kv_obj_put(root, "runs", kv_int(config.runs));
+		config.metrics = kv_arr();
+		kv_obj_put(root, "metrics", config.metrics);
+	}
+
 	/* Benchmark each SIMD implementation */
 	for (const ImplSpec *impl = impls; impl->name; impl++)
 	{
@@ -646,5 +676,7 @@ cmd_bench_page_score(CmdContext *ctx)
 	/* Reset SIMD to auto-detection */
 	reinit_rabitq_with_simd(0xFFFFFFFF);
 
-	return 0;
+	int rc = cmd_kv_print(root, ctx->json_path);
+	kv_build_close(kb);
+	return rc;
 }

@@ -13,8 +13,10 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "core/memory.h"
+#include "kv.h"
 
 /*
  * CmdContext - Shared context for all CLI commands
@@ -66,6 +68,9 @@ typedef struct CmdContext
 	bool verbose;
 	bool quiet;
 
+	/* --json [path] for bench commands; NULL if unset. "-" is stdout. */
+	const char *json_path;
+
 	/* Subcommand name (e.g., "distance" for "vectorsearch bench distance") */
 	const char *subcmd_name;
 } CmdContext;
@@ -79,6 +84,25 @@ typedef struct CmdContext
  */
 typedef int (*CmdHandler)(CmdContext *ctx);
 
+/* Print the tree as text; also JSON if json_path is set. */
+static inline int
+cmd_kv_print(const Kv *root, const char *json_path)
+{
+	int rc = 0;
+
+	if (root == NULL)
+		return 0;
+	char *text = kv_to_text(root);
+	if (text != NULL)
+	{
+		fputs(text, stdout);
+		vs_free(text);
+	}
+	if (json_path != NULL)
+		rc = kv_write_json(root, json_path);
+	return rc;
+}
+
 /*
  * Helper macros for usage messages
  */
@@ -87,5 +111,10 @@ typedef int (*CmdHandler)(CmdContext *ctx);
 
 #define CMD_USAGE_EXAMPLE(ctx, subcmd, args) \
 	printf("  %s %s %s\n", (ctx)->prog_name, subcmd, args)
+
+#define CMD_USAGE_JSON()                                     \
+	printf("  --json [path]     Write JSON results to path " \
+		   "(omit or '-' = stdout)\n");                      \
+	printf("  --quiet           Suppress human bench output\n")
 
 #endif /* VS_CLI_CMD_H */

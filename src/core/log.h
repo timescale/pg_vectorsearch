@@ -15,13 +15,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define vs_log(...)	 fprintf(stderr, __VA_ARGS__)
+/* Set by CLI --quiet; vs_error still always prints. */
+extern int vs_standalone_quiet;
+
+#define vs_log(...)                       \
+	do                                    \
+	{                                     \
+		if (!vs_standalone_quiet)         \
+			fprintf(stderr, __VA_ARGS__); \
+	} while (0)
 #define vs_warn(...) fprintf(stderr, __VA_ARGS__)
 
 /* Verbose diagnostics (e.g. per-phase build timings). Standalone keeps writing
  * to stderr so the CLI still shows them; under PG (below) this is DEBUG1,
  * hidden unless log_min_messages is lowered. */
-#define vs_debug(...) fprintf(stderr, __VA_ARGS__)
+#define vs_debug(...)                     \
+	do                                    \
+	{                                     \
+		if (!vs_standalone_quiet)         \
+			fprintf(stderr, __VA_ARGS__); \
+	} while (0)
 
 /* Unrecoverable error: report and abort (PG's elog(ERROR) longjmps instead).
  */

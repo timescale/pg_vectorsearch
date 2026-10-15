@@ -24,6 +24,7 @@
 #include "core/platform.h"
 #include "core/types.h"
 #include "distance_pgvector.h"
+#include "kv.h"
 #include "types/vec32.h"
 
 /* Default parameters */
@@ -69,6 +70,7 @@ typedef struct
 	uint32_t	metric_filter; /* Bitmask of metrics to run */
 	const char *impl_filter;   /* NULL = all, or "scalar,avx2,..." */
 	bool		help;
+	Kv		   *metrics; /* NULL unless --json */
 } BenchConfig;
 
 /* Timing helpers */
@@ -203,6 +205,37 @@ metric_name(DistanceMetric metric)
 	default:
 		return "Unknown";
 	}
+}
+
+static const char *
+metric_key(DistanceMetric metric)
+{
+	switch (metric)
+	{
+	case DISTANCE_L2:
+		return "l2";
+	case DISTANCE_INNER_PRODUCT:
+		return "ip";
+	case DISTANCE_COSINE:
+		return "cosine";
+	default:
+		return "unknown";
+	}
+}
+
+static void
+add_vecps(
+		Kv			  *metrics,
+		DistanceMetric metric,
+		const char	  *impl,
+		double		   vps,
+		double		   stddev,
+		uint32_t	   runs)
+{
+	Kv *m = kv_arr_add_metric(
+			metrics, "vec/s", vps, "%s/%s", metric_key(metric), impl);
+	if (m != NULL && runs > 1)
+		kv_obj_put(m, "stddev", kv_dbl(stddev));
 }
 
 /*
@@ -370,7 +403,8 @@ benchmark_impl_batch(
 		uint32_t		runs,
 		DistanceMetric	metric,
 		const float	   *query_data,
-		const float	   *db_data)
+		const float	   *db_data,
+		Kv			   *metrics)
 {
 	Vec32Ref query = {.data = query_data, .dim = dim};
 
@@ -590,6 +624,8 @@ benchmark_impl_batch(
 			   runs);
 	}
 
+	add_vecps(metrics, metric, impl->name, stats.avg, stats.stddev, runs);
+
 	bench_stats_free(&stats);
 
 	/* Reset to auto-detection */
@@ -607,7 +643,8 @@ benchmark_pgvector(
 		uint32_t	   runs,
 		DistanceMetric metric,
 		const float	  *query_data,
-		const float	  *db_data)
+		const float	  *db_data,
+		Kv			  *metrics)
 {
 	Vec32Ref query = {.data = query_data, .dim = dim};
 
@@ -713,6 +750,8 @@ benchmark_pgvector(
 			   (stats.stddev / stats.avg) * 100.0,
 			   runs);
 	}
+
+	add_vecps(metrics, metric, "pgvector", stats.avg, stats.stddev, runs);
 
 	bench_stats_free(&stats);
 }
@@ -866,14 +905,27 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 		 * compare well to pgvector since it uses dispatch overhead)
 		 */
 		benchmark_impl_batch(
-				impl, dim, count, config->runs, metric, query_data, db_data);
+				impl,
+				dim,
+				count,
+				config->runs,
+				metric,
+				query_data,
+				db_data,
+				config->metrics);
 	}
 
 	/* Benchmark pgvector-style auto-vectorized implementation */
 	if (should_test_impl("pgvector", config->impl_filter))
 	{
 		benchmark_pgvector(
-				dim, count, config->runs, metric, query_data, db_data);
+				dim,
+				count,
+				config->runs,
+				metric,
+				query_data,
+				db_data,
+				config->metrics);
 	}
 
 	vs_free(query_data);
@@ -907,6 +959,7 @@ print_usage(CmdContext *ctx)
 		   "pgvector\n");
 	printf("                     (default: all supported)\n");
 	printf("  --help             Show this help message\n");
+	CMD_USAGE_JSON();
 	printf("\n");
 	printf("Examples:\n");
 	CMD_USAGE_EXAMPLE(ctx, "bench distance", "--dim 768 --count 10000");
@@ -1003,6 +1056,20 @@ cmd_bench_distance(CmdContext *ctx)
 		return 0;
 	}
 
+	KvBuild *kb	  = NULL;
+	Kv		*root = NULL;
+	if (ctx->json_path != NULL)
+	{
+		kb	 = kv_build_open();
+		root = kv_obj();
+		kv_obj_put(root, "bench", kv_str("distance"));
+		kv_obj_put(root, "dim", kv_int(config.dim));
+		kv_obj_put(root, "count", kv_int(config.count));
+		kv_obj_put(root, "runs", kv_int(config.runs));
+		config.metrics = kv_arr();
+		kv_obj_put(root, "metrics", config.metrics);
+	}
+
 	/* Run benchmarks for each metric in the filter */
 	int ret = 0;
 
@@ -1010,7 +1077,10 @@ cmd_bench_distance(CmdContext *ctx)
 	{
 		ret = run_benchmark(&config, DISTANCE_L2);
 		if (ret != 0)
+		{
+			kv_build_close(kb);
 			return ret;
+		}
 		if (config.metric_filter != METRIC_L2)
 			printf("\n"); /* Blank line between metrics */
 	}
@@ -1019,7 +1089,10 @@ cmd_bench_distance(CmdContext *ctx)
 	{
 		ret = run_benchmark(&config, DISTANCE_INNER_PRODUCT);
 		if (ret != 0)
+		{
+			kv_build_close(kb);
 			return ret;
+		}
 		if (config.metric_filter & METRIC_COSINE)
 			printf("\n"); /* Blank line before next metric */
 	}
@@ -1028,8 +1101,13 @@ cmd_bench_distance(CmdContext *ctx)
 	{
 		ret = run_benchmark(&config, DISTANCE_COSINE);
 		if (ret != 0)
+		{
+			kv_build_close(kb);
 			return ret;
+		}
 	}
 
-	return 0;
+	int rc = cmd_kv_print(root, ctx->json_path);
+	kv_build_close(kb);
+	return rc;
 }

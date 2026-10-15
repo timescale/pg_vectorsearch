@@ -21,6 +21,7 @@
 #include "core/memory.h"
 #include "core/platform.h"
 #include "core/types.h"
+#include "kv.h"
 #include "quant/matrix.h"
 #include "quant/rabitq.h"
 #include "types/vec16.h"
@@ -33,7 +34,18 @@
 /* Default parameters */
 #define DEFAULT_DIM	  768
 #define DEFAULT_COUNT 10000
-#define DEFAULT_RUNS  3
+
+static Kv *g_metrics;
+
+static void
+note_vecps(const char *name, double vps, double stddev, uint32_t runs)
+{
+	Kv *m = kv_arr_add_metric(g_metrics, "vec/s", vps, "%s", name);
+	if (m != NULL && runs > 1)
+		kv_obj_put(m, "stddev", kv_dbl(stddev));
+}
+
+#define DEFAULT_RUNS 3
 
 /* SIMD implementations for distance computation */
 typedef struct
@@ -286,6 +298,8 @@ benchmark_encode_single(
 			   runs);
 	}
 
+	note_vecps("encode/single", stats.avg, stats.stddev, runs);
+
 	bench_stats_free(&stats);
 	vs_free(outputs);
 }
@@ -382,6 +396,8 @@ benchmark_encode_batch(
 			   (stats.stddev / stats.avg) * 100.0,
 			   runs);
 	}
+
+	note_vecps("encode/batch", stats.avg, stats.stddev, runs);
 
 	bench_stats_free(&stats);
 	vs_free(bits);
@@ -491,6 +507,11 @@ benchmark_distance(
 				   (stats.stddev / stats.avg) * 100.0,
 				   runs);
 		}
+
+		Kv *m = kv_arr_add_metric(
+				g_metrics, "vec/s", stats.avg, "distance/%s", impl->name);
+		if (m != NULL && runs > 1)
+			kv_obj_put(m, "stddev", kv_dbl(stats.stddev));
 
 		bench_stats_free(&stats);
 		vs_rabitq_free_query(state);
@@ -989,6 +1010,7 @@ print_usage(CmdContext *ctx)
 	printf("                     compiler, avx2, avx512, neon\n");
 	printf("                     (default: all supported)\n");
 	printf("  --help             Show this help message\n");
+	CMD_USAGE_JSON();
 	printf("\n");
 #ifdef VS_HAVE_FAISS
 	printf("FAISS comparison: enabled (built with -Dfaiss=true)\n\n");
@@ -1181,6 +1203,9 @@ benchmark_encode_comparison(
 
 	printf("  %-12s %.2fx faster\n", "speedup", speedup);
 
+	note_vecps("encode/single", single_stats.avg, single_stats.stddev, runs);
+	note_vecps("encode/batch", batch_stats.avg, batch_stats.stddev, runs);
+
 	bench_stats_free(&single_stats);
 	bench_stats_free(&batch_stats);
 	vs_free(batch_bits);
@@ -1303,6 +1328,21 @@ cmd_bench_quantize(CmdContext *ctx)
 	size_t vectors_size = (size_t)count * dim * elem_size;
 	size_t encoded_size = (size_t)count * VS_RABITQ_DATA_SIZE(dim);
 	size_t total_mb		= (vectors_size + encoded_size) / (1024 * 1024);
+
+	g_metrics	  = NULL;
+	KvBuild *kb	  = NULL;
+	Kv		*root = NULL;
+	if (ctx->json_path != NULL)
+	{
+		kb	 = kv_build_open();
+		root = kv_obj();
+		kv_obj_put(root, "bench", kv_str("quantize"));
+		kv_obj_put(root, "dim", kv_int(dim));
+		kv_obj_put(root, "count", kv_int(count));
+		kv_obj_put(root, "runs", kv_int(config.runs));
+		g_metrics = kv_arr();
+		kv_obj_put(root, "metrics", g_metrics);
+	}
 
 	printf("RaBitQ Quantization Benchmark\n");
 	printf("  Dimension: %u\n", dim);
@@ -1490,5 +1530,10 @@ cmd_bench_quantize(CmdContext *ctx)
 	vs_free(vectors);
 	vs_rabitq_destroy(params);
 
-	return 0;
+	g_metrics = NULL;
+	{
+		int rc = cmd_kv_print(root, ctx->json_path);
+		kv_build_close(kb);
+		return rc;
+	}
 }

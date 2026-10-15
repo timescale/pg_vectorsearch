@@ -9,6 +9,10 @@
 
 #include "platform.h"
 
+#ifdef VS_STANDALONE
+int vs_standalone_quiet = 0;
+#endif
+
 /* Cached SIMD capabilities (computed once) */
 static SimdCapability g_simd_caps	  = SIMD_NONE;
 static bool			  g_simd_detected = false;

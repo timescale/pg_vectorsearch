@@ -25,6 +25,7 @@
 #include "core/memory.h"
 #include "core/platform.h"
 #include "core/types.h"
+#include "kv.h"
 #include "quant/fastscan.h"
 #include "quant/rabitq.h"
 
@@ -52,8 +53,20 @@ typedef struct
 	uint32_t	count;
 	uint32_t	runs;
 	const char *simd;
+	const char *simd_level;
 	bool		help;
+	Kv		   *metrics;
 } BenchConfig;
+
+static void
+add_fs_metric(
+		const BenchConfig *c, const char *what, const char *unit, double v)
+{
+	if (c->simd_level != NULL)
+		kv_arr_add_metric(c->metrics, unit, v, "%s/%s", c->simd_level, what);
+	else
+		kv_arr_add_metric(c->metrics, unit, v, "%s", what);
+}
 
 static void
 fill_random(void *buf, size_t bytes, uint32_t seed)
@@ -113,6 +126,7 @@ benchmark_lut_build(const BenchConfig *config)
 		   best_vps / 1000.0,
 		   VS_FASTSCAN_NSQ(dim),
 		   lut_bytes);
+	add_fs_metric(config, "lut_uint8", "1/s", best_vps);
 
 	/* Benchmark uint16 hacc LUT */
 	best_vps = 0.0;
@@ -135,6 +149,7 @@ benchmark_lut_build(const BenchConfig *config)
 		   best_vps / 1000.0,
 		   VS_FASTSCAN_NSQ(dim),
 		   lut_hacc_bytes);
+	add_fs_metric(config, "lut_uint16", "1/s", best_vps);
 
 	vs_free_aligned(lut_hacc);
 	vs_free_aligned(lut);
@@ -199,6 +214,7 @@ benchmark_accumulate(const BenchConfig *config)
 		   best_vps / 1e6,
 		   cmd_ratio((double)count, best_vps) * 1000.0,
 		   count / 1000);
+	add_fs_metric(config, "accum_uint8", "vec/s", best_vps);
 
 	/* Benchmark uint16 hacc accumulate */
 	uint32_t lut_hacc_bytes = VS_FASTSCAN_LUT_HACC_BYTES(dim);
@@ -222,6 +238,7 @@ benchmark_accumulate(const BenchConfig *config)
 		   best_vps / 1e6,
 		   cmd_ratio((double)count, best_vps) * 1000.0,
 		   count / 1000);
+	add_fs_metric(config, "accum_uint16", "vec/s", best_vps);
 
 	vs_free_aligned(lut_hacc);
 	vs_free_aligned(codes);
@@ -366,6 +383,8 @@ benchmark_distance_throughput(const BenchConfig *config)
 		   cmd_ratio((double)count, fs8_best / 1000.0),
 		   count / 1000);
 	printf("  speedup:    %5.1fx\n", cmd_ratio(fs8_best, rabitq_best));
+	add_fs_metric(config, "asymmetric", "vec/s", rabitq_best);
+	add_fs_metric(config, "fastscan", "vec/s", fs8_best);
 
 	vs_free_aligned(accum_buf);
 	vs_free_aligned(lut_buf);
@@ -400,6 +419,7 @@ print_usage(CmdContext *ctx)
 	printf("  --simd <str>    SIMD level: avx512, avx2, scalar "
 		   "(default: all)\n");
 	printf("  --help          Show this help message\n");
+	CMD_USAGE_JSON();
 	printf("\n");
 	printf("Examples:\n");
 	CMD_USAGE_EXAMPLE(
@@ -464,6 +484,20 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 	printf("Fastscan kernel benchmark\n");
 	printf("=========================\n\n");
 
+	KvBuild *kb	  = NULL;
+	Kv		*root = NULL;
+	if (ctx->json_path != NULL)
+	{
+		kb	 = kv_build_open();
+		root = kv_obj();
+		kv_obj_put(root, "bench", kv_str("fastscan-kernel"));
+		kv_obj_put(root, "dim", kv_int(config.dim));
+		kv_obj_put(root, "count", kv_int(config.count));
+		kv_obj_put(root, "runs", kv_int(config.runs));
+		config.metrics = kv_arr();
+		kv_obj_put(root, "metrics", config.metrics);
+	}
+
 	SimdCapability caps = vs_detect_simd();
 
 #ifdef VS_SIMD_FULL
@@ -505,6 +539,7 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 		vs_fastscan_init_simd();
 
 		printf("--- %s ---\n\n", levels[l].name);
+		config.simd_level = levels[l].name;
 		benchmark_lut_build(&config);
 		benchmark_accumulate(&config);
 		if (levels[l].run_distance)
@@ -524,5 +559,7 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 	printf("\n");
 #endif
 
-	return 0;
+	int rc = cmd_kv_print(root, ctx->json_path);
+	kv_build_close(kb);
+	return rc;
 }

@@ -227,6 +227,12 @@ computation:
 ./bin/vectorsearch bench distance
 
 ./bin/vectorsearch bench distance --dim 1536 --count 50000
+
+# machine-readable results (file, or omit / '-' for stdout).
+# JSON on stdout sends the human text to stderr; --quiet drops it.
+./bin/vectorsearch bench distance --json /tmp/distance.json
+./bin/vectorsearch bench distance --json | jq .
+./bin/vectorsearch bench distance --json --quiet
 ```
 
 Comparing SIMD implementations is covered in [simd.md](simd.md#cli-benchmarks).
