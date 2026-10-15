@@ -80,6 +80,58 @@ SELECT count(*) AS matching_ids
 SELECT bool_and(abs(t.dist - r.dist) < 1e-5) AS distances_match
     FROM truth_cos t JOIN result_cos r USING (id);
 
+-- prism.rerank_pool: the plumbing, not the formula.
+--
+-- At this table size the survivor population is far below any pool the
+-- formula produces, so the automatic cap never binds and this cannot pin it
+-- (test/unit/test_rerank_pool.c does that). What it does cover is that the
+-- GUC reaches the scan at all, that an explicit cap is honoured, and that
+-- neither ever truncates below the query's k.
+
+-- Candidates the index reported reranking, read back from EXPLAIN.
+--
+-- Raises when the counter is absent rather than returning NULL: every
+-- comparison against NULL is NULL rather than false, so a probe that stopped
+-- finding the field would pass while asserting nothing.
+CREATE FUNCTION rerank_candidates(lim int) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE
+    ej    json;
+    cands int;
+BEGIN
+    EXECUTE format(
+        'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, FORMAT JSON)
+         SELECT id FROM rerank_test
+         ORDER BY v <-> (SELECT v FROM rerank_test WHERE id = 42)
+         LIMIT %s', lim)
+    INTO ej;
+    cands := ((ej->0->'Plan'->'Plans'->1->'Prism')->>'Rerank Candidates')::int;
+    IF cands IS NULL THEN
+        RAISE EXCEPTION 'Rerank Candidates not found in EXPLAIN output';
+    END IF;
+    RETURN cands;
+END $$;
+
+SET enable_seqscan = off;
+
+-- The automatic pool never reranks fewer than k, or the result set would be
+-- truncated.
+SET prism.rerank_pool = 0;
+SELECT rerank_candidates(10) >= 10 AS auto_pool_at_least_k;
+
+-- An explicit cap is honoured, and still floored at k.
+SET prism.rerank_pool = 12;
+SELECT rerank_candidates(10) BETWEEN 10 AND 12 AS explicit_cap_honoured;
+
+-- A cap below k must not truncate the result set.
+SET prism.rerank_pool = 2;
+SELECT count(*) AS rows_at_cap_below_k
+    FROM (SELECT id FROM rerank_test
+          ORDER BY v <-> (SELECT v FROM rerank_test WHERE id = 42)
+          LIMIT 10) s;
+RESET prism.rerank_pool;
+RESET enable_seqscan;
+DROP FUNCTION rerank_candidates(int);
+
 -- Cleanup
 DROP TABLE rerank_test;
 
