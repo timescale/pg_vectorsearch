@@ -42,8 +42,6 @@
 #define DEFAULT_NPROBE	0 /* 0 = auto from nlist */
 #define DEFAULT_K		10
 #define DEFAULT_QUERIES 100
-#define DEFAULT_RUNS	5
-#define DEFAULT_WARMUP	100
 
 /* ----------------------------------------------------------------
  * Configuration
@@ -196,16 +194,12 @@ print_usage(CmdContext *ctx)
 	printf("  -k <int>           Top-k (default: %d)\n", DEFAULT_K);
 	printf("  --queries <int>    Query count (default: %d)\n",
 		   DEFAULT_QUERIES);
-	printf("  --runs <int>       Runs per query (default: %d)\n",
-		   DEFAULT_RUNS);
 	printf("  --centroid-fmt <s> float32, float16, rabitq "
 		   "(default: float32)\n");
 	printf("  --posting-fmt <s>  native, rabitq, int8 "
 		   "(default: rabitq)\n");
 	printf("  --posting-layout   pages, flat (default: pages)\n");
 	printf("  --mode <str>       asymmetric, symmetric\n");
-	printf("  --warmup <int>     Warmup queries (default: %d)\n",
-		   DEFAULT_WARMUP);
 	printf("  --nredo <int>      K-means restarts\n");
 	printf("  --km-iter <int>    K-means iterations\n");
 	printf("  --boundary-epsilon <float>  Boundary replication "
@@ -239,8 +233,8 @@ cmd_bench_search(CmdContext *ctx)
 			.nprobe			= DEFAULT_NPROBE,
 			.k				= DEFAULT_K,
 			.queries		= DEFAULT_QUERIES,
-			.runs			= DEFAULT_RUNS,
-			.warmup			= DEFAULT_WARMUP,
+			.runs			= ctx->runs,
+			.warmup			= ctx->warmup,
 			.metric			= "euclidean",
 			.centroid_fmt	= "float32",
 			.posting_fmt	= "rabitq",
@@ -255,11 +249,9 @@ cmd_bench_search(CmdContext *ctx)
 			{"fan-out", required_argument, 0, 'f'},
 			{"nprobe", required_argument, 0, 'p'},
 			{"queries", required_argument, 0, 'q'},
-			{"runs", required_argument, 0, 'r'},
 			{"centroid-fmt", required_argument, 0, 'F'},
 			{"fmt", required_argument, 0, 'F'}, /* backward compat */
 			{"mode", required_argument, 0, 'M'},
-			{"warmup", required_argument, 0, 'W'},
 			{"nredo", required_argument, 0, 'R'},
 			{"km-iter", required_argument, 0, 'I'},
 			{"hdf5", required_argument, 0, 'H'},
@@ -281,7 +273,7 @@ cmd_bench_search(CmdContext *ctx)
 	while ((opt = getopt_long(
 					ctx->argc,
 					ctx->argv,
-					"d:n:f:p:q:r:k:F:M:R:I:H:m:h",
+					"d:n:f:p:q:k:F:M:R:I:H:m:h",
 					long_options,
 					NULL)) != -1)
 	{
@@ -302,9 +294,6 @@ cmd_bench_search(CmdContext *ctx)
 		case 'q':
 			config.queries = (uint32_t)atoi(optarg);
 			break;
-		case 'r':
-			config.runs = (uint32_t)atoi(optarg);
-			break;
 		case 'k':
 			config.k = (uint32_t)atoi(optarg);
 			break;
@@ -319,9 +308,6 @@ cmd_bench_search(CmdContext *ctx)
 			break;
 		case 'P':
 			config.posting_layout = optarg;
-			break;
-		case 'W':
-			config.warmup = (uint32_t)atoi(optarg);
 			break;
 		case 'R':
 			config.nredo = (uint32_t)atoi(optarg);
@@ -698,6 +684,7 @@ cmd_bench_search(CmdContext *ctx)
 		kv_obj_put(root, "k", kv_int(config.k));
 		kv_obj_put(root, "queries", kv_int(nqueries));
 		kv_obj_put(root, "runs", kv_int(config.runs));
+		kv_obj_put(root, "warmup", kv_int(config.warmup));
 		if (config.hdf5_path != NULL)
 			kv_obj_put(root, "dataset", kv_str(config.hdf5_path));
 		Kv *metrics = kv_arr();

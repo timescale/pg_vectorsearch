@@ -30,7 +30,6 @@
 /* Default parameters */
 #define DEFAULT_DIM	  768
 #define DEFAULT_COUNT 200
-#define DEFAULT_RUNS  1000
 
 /* SIMD implementations */
 typedef struct
@@ -57,6 +56,7 @@ typedef struct
 	Dimension	dim;
 	uint32_t	count;
 	uint32_t	runs;
+	uint32_t	warmup;
 	const char *impl_filter;
 	bool		help;
 	Kv		   *metrics;
@@ -416,9 +416,6 @@ print_usage(CmdContext *ctx)
 		   DEFAULT_DIM);
 	printf("  --count <int>      Centroids per page (default: %d)\n",
 		   DEFAULT_COUNT);
-	printf("  --runs <int>       Benchmark iterations "
-		   "(default: %d)\n",
-		   DEFAULT_RUNS);
 	printf("  --impls <list>     Comma-separated implementations "
 		   "to test\n");
 	printf("                     Available: compiler, avx2, avx512, "
@@ -442,7 +439,8 @@ cmd_bench_page_score(CmdContext *ctx)
 	BenchConfig config = {
 			.dim		 = DEFAULT_DIM,
 			.count		 = DEFAULT_COUNT,
-			.runs		 = DEFAULT_RUNS,
+			.runs		 = ctx->runs,
+			.warmup		 = ctx->warmup,
 			.impl_filter = NULL,
 			.help		 = false,
 	};
@@ -450,7 +448,6 @@ cmd_bench_page_score(CmdContext *ctx)
 	static struct option long_options[] =
 			{{"dim", required_argument, 0, 'd'},
 			 {"count", required_argument, 0, 'c'},
-			 {"runs", required_argument, 0, 'r'},
 			 {"impls", required_argument, 0, 'i'},
 			 {"help", no_argument, 0, 'h'},
 			 {0, 0, 0, 0}};
@@ -459,7 +456,7 @@ cmd_bench_page_score(CmdContext *ctx)
 
 	int opt;
 	while ((opt = getopt_long(
-					ctx->argc, ctx->argv, "d:c:r:i:h", long_options, NULL)) !=
+					ctx->argc, ctx->argv, "d:c:i:h", long_options, NULL)) !=
 		   -1)
 	{
 		switch (opt)
@@ -477,14 +474,6 @@ cmd_bench_page_score(CmdContext *ctx)
 			if (config.count == 0)
 			{
 				fprintf(stderr, "Error: Invalid count %s\n", optarg);
-				return 1;
-			}
-			break;
-		case 'r':
-			config.runs = (uint32_t)atoi(optarg);
-			if (config.runs == 0)
-			{
-				fprintf(stderr, "Error: Invalid runs %s\n", optarg);
 				return 1;
 			}
 			break;
@@ -610,7 +599,7 @@ cmd_bench_page_score(CmdContext *ctx)
 		Distance *throwaway = vs_alloc_aligned(count * sizeof(Distance), 64);
 		if (throwaway != NULL)
 		{
-			for (uint32_t w = 0; w < config.runs; w++)
+			for (uint32_t w = 0; w < config.warmup; w++)
 			{
 				vs_rabitq_distance_batch(
 						qstate, f_add, f_rescale, bits, count, dim, throwaway);
@@ -633,6 +622,7 @@ cmd_bench_page_score(CmdContext *ctx)
 		kv_obj_put(root, "dim", kv_int(config.dim));
 		kv_obj_put(root, "count", kv_int(config.count));
 		kv_obj_put(root, "runs", kv_int(config.runs));
+		kv_obj_put(root, "warmup", kv_int(config.warmup));
 		config.metrics = kv_arr();
 		kv_obj_put(root, "metrics", config.metrics);
 	}

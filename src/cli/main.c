@@ -28,6 +28,7 @@ int cmd_bench_search(CmdContext *ctx);
 int cmd_bench_rabitq_kernel(CmdContext *ctx);
 int cmd_bench_page_score(CmdContext *ctx);
 int cmd_bench_fastscan_kernel(CmdContext *ctx);
+int cmd_bench_compare(CmdContext *ctx);
 
 #if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
 int cmd_verify_rabitq(CmdContext *ctx);
@@ -56,6 +57,7 @@ static const Command bench_commands[] = {
 		{"fastscan-kernel",
 		 cmd_bench_fastscan_kernel,
 		 "Benchmark fastscan VPSHUFB kernels"},
+		{"compare", cmd_bench_compare, "Compare two JSON result files"},
 		{NULL, NULL, NULL},
 };
 
@@ -90,6 +92,10 @@ print_usage(const char *prog)
 	printf("Options:\n");
 	printf("  -h, --help       Show this help message\n");
 	printf("  -v, --version    Show version information\n");
+	printf("  --runs <int>     Timed iterations (default: %d)\n",
+		   CMD_DEFAULT_RUNS);
+	printf("  --warmup <int>   Throwaway passes (default: %d)\n",
+		   CMD_DEFAULT_WARMUP);
 	printf("  --json [path]    Write bench results as JSON "
 		   "(omit or '-' = stdout)\n");
 	printf("  --quiet          Suppress human bench output\n");
@@ -119,6 +125,14 @@ print_version(void)
 static int
 dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 {
+	uint32_t runs	= CMD_DEFAULT_RUNS;
+	uint32_t warmup = CMD_DEFAULT_WARMUP;
+
+	if (cmd_take_u32(&argc, argv, "--runs", &runs, 1) != 0)
+		return 1;
+	if (cmd_take_u32(&argc, argv, "--warmup", &warmup, 0) != 0)
+		return 1;
+
 	if (argc < 1)
 	{
 		fprintf(stderr, "Error: 'bench' requires a subcommand\n\n");
@@ -157,6 +171,8 @@ dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 			.memctx		 = parent_ctx->memctx,
 			.verbose	 = parent_ctx->verbose,
 			.quiet		 = parent_ctx->quiet,
+			.runs		 = runs,
+			.warmup		 = warmup,
 			.subcmd_name = subcmd,
 	};
 

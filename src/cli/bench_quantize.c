@@ -35,17 +35,15 @@
 #define DEFAULT_DIM	  768
 #define DEFAULT_COUNT 10000
 
-static Kv *g_metrics;
+static Kv	   *g_metrics;
+static uint32_t g_warmup;
 
 static void
 note_vecps(const char *name, double vps, double stddev, uint32_t runs)
 {
 	Kv *m = kv_arr_add_metric(g_metrics, "vec/s", vps, "%s", name);
-	if (m != NULL && runs > 1)
-		kv_obj_put(m, "stddev", kv_dbl(stddev));
+	kv_metric_stats(m, stddev, runs);
 }
-
-#define DEFAULT_RUNS 3
 
 /* SIMD implementations for distance computation */
 typedef struct
@@ -247,7 +245,7 @@ benchmark_encode_single(
 	}
 
 	/* CPU warmup: throwaway passes to stabilize measurements */
-	for (uint32_t warmup = 0; warmup < runs; warmup++)
+	for (uint32_t warmup = 0; warmup < g_warmup; warmup++)
 	{
 		for (uint32_t i = 0; i < count; i++)
 		{
@@ -342,7 +340,7 @@ benchmark_encode_batch(
 	}
 
 	/* CPU warmup: throwaway passes to stabilize measurements */
-	for (uint32_t warmup = 0; warmup < runs; warmup++)
+	for (uint32_t warmup = 0; warmup < g_warmup; warmup++)
 		vs_rabitq_encode_batch(
 				params,
 				vectors,
@@ -465,7 +463,7 @@ benchmark_distance(
 		}
 
 		/* CPU warmup: throwaway passes to stabilize measurements */
-		for (uint32_t warmup = 0; warmup < runs; warmup++)
+		for (uint32_t warmup = 0; warmup < g_warmup; warmup++)
 		{
 			for (uint32_t i = 0; i < count; i++)
 				distances[i] = vs_rabitq_distance(state, encoded[i], dim);
@@ -510,8 +508,7 @@ benchmark_distance(
 
 		Kv *m = kv_arr_add_metric(
 				g_metrics, "vec/s", stats.avg, "distance/%s", impl->name);
-		if (m != NULL && runs > 1)
-			kv_obj_put(m, "stddev", kv_dbl(stats.stddev));
+		kv_metric_stats(m, stats.stddev, runs);
 
 		bench_stats_free(&stats);
 		vs_rabitq_free_query(state);
@@ -575,7 +572,7 @@ benchmark_faiss_encode(
 	}
 
 	/* CPU warmup - include rotation in timing */
-	for (uint32_t warmup = 0; warmup < runs; warmup++)
+	for (uint32_t warmup = 0; warmup < g_warmup; warmup++)
 	{
 		/* Transform: residual then P^T multiply */
 		for (uint32_t i = 0; i < count; i++)
@@ -727,7 +724,7 @@ benchmark_faiss_distance(
 		}
 
 		/* CPU warmup */
-		for (uint32_t warmup = 0; warmup < runs; warmup++)
+		for (uint32_t warmup = 0; warmup < g_warmup; warmup++)
 		{
 			for (uint32_t i = 0; i < count; i++)
 			{
@@ -999,9 +996,6 @@ print_usage(CmdContext *ctx)
 		   DEFAULT_DIM);
 	printf("  --count <int>      Number of vectors (default: %d)\n",
 		   DEFAULT_COUNT);
-	printf("  --runs <int>       Number of benchmark iterations (default: "
-		   "%d)\n",
-		   DEFAULT_RUNS);
 	printf("  --ops <list>       Comma-separated operations:\n");
 	printf("                     single, batch, distance, encode, all\n");
 	printf("                     (default: all)\n");
@@ -1078,7 +1072,7 @@ benchmark_encode_comparison(
 	 * (µop cache, branch predictor). Running full benchmark iterations as
 	 * throwaway stabilizes the measurements.
 	 */
-	for (uint32_t warmup = 0; warmup < runs; warmup++)
+	for (uint32_t warmup = 0; warmup < g_warmup; warmup++)
 	{
 		/* Throwaway single-vector pass (always f32) */
 		for (uint32_t i = 0; i < count; i++)
@@ -1223,7 +1217,7 @@ cmd_bench_quantize(CmdContext *ctx)
 	BenchConfig config = {
 			.dim		 = DEFAULT_DIM,
 			.count		 = DEFAULT_COUNT,
-			.runs		 = DEFAULT_RUNS,
+			.runs		 = ctx->runs,
 			.op_filter	 = OP_ALL,
 			.impl_filter = NULL,
 			.type		 = "f32",
@@ -1233,7 +1227,6 @@ cmd_bench_quantize(CmdContext *ctx)
 	static struct option long_options[] =
 			{{"dim", required_argument, 0, 'd'},
 			 {"count", required_argument, 0, 'c'},
-			 {"runs", required_argument, 0, 'r'},
 			 {"ops", required_argument, 0, 'o'},
 			 {"impls", required_argument, 0, 'i'},
 			 {"type", required_argument, 0, 't'},
@@ -1246,7 +1239,7 @@ cmd_bench_quantize(CmdContext *ctx)
 	while ((opt = getopt_long(
 					ctx->argc,
 					ctx->argv,
-					"d:c:r:o:i:t:h",
+					"d:c:o:i:t:h",
 					long_options,
 					NULL)) != -1)
 	{
@@ -1265,14 +1258,6 @@ cmd_bench_quantize(CmdContext *ctx)
 			if (config.count == 0)
 			{
 				fprintf(stderr, "Error: Invalid count\n");
-				return 1;
-			}
-			break;
-		case 'r':
-			config.runs = (uint32_t)atoi(optarg);
-			if (config.runs == 0)
-			{
-				fprintf(stderr, "Error: Invalid runs\n");
 				return 1;
 			}
 			break;
@@ -1299,6 +1284,8 @@ cmd_bench_quantize(CmdContext *ctx)
 		print_usage(ctx);
 		return 0;
 	}
+
+	g_warmup = ctx->warmup;
 
 	Dimension dim	= config.dim;
 	uint32_t  count = config.count;
@@ -1340,6 +1327,7 @@ cmd_bench_quantize(CmdContext *ctx)
 		kv_obj_put(root, "dim", kv_int(dim));
 		kv_obj_put(root, "count", kv_int(count));
 		kv_obj_put(root, "runs", kv_int(config.runs));
+		kv_obj_put(root, "warmup", kv_int(ctx->warmup));
 		g_metrics = kv_arr();
 		kv_obj_put(root, "metrics", g_metrics);
 	}

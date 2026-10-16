@@ -31,7 +31,6 @@
 
 #define DEFAULT_DIM	  768
 #define DEFAULT_COUNT 10000
-#define DEFAULT_RUNS  5
 
 static inline uint64_t
 get_time_ns(void)
@@ -52,6 +51,7 @@ typedef struct
 	Dimension	dim;
 	uint32_t	count;
 	uint32_t	runs;
+	uint32_t	warmup;
 	const char *simd;
 	const char *simd_level;
 	bool		help;
@@ -194,7 +194,7 @@ benchmark_accumulate(const BenchConfig *config)
 	uint16_t accum[VS_FASTSCAN_GROUP];
 
 	/* Warmup */
-	for (int w = 0; w < 3; w++)
+	for (uint32_t w = 0; w < config->warmup; w++)
 		for (uint32_t g = 0; g < ngroups; g++)
 			vs_fastscan_accumulate(codes + g * group_bytes, lut, accum, dim);
 
@@ -301,7 +301,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 	uint8_t *data_buf  = vs_alloc(data_size);
 
 	RaBitQData *temp_data = (RaBitQData *)data_buf;
-	for (int w = 0; w < 3; w++)
+	for (uint32_t w = 0; w < config->warmup; w++)
 		for (uint32_t i = 0; i < count; i++)
 		{
 			temp_data->f_add	 = f_add[i];
@@ -340,7 +340,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 	uint16_t *accum_buf =
 			vs_alloc_aligned(VS_FASTSCAN_GROUP * sizeof(uint16_t), 64);
 
-	for (int w = 0; w < 3; w++)
+	for (uint32_t w = 0; w < config->warmup; w++)
 		vs_fastscan_distance_batch(
 				state,
 				f_add,
@@ -414,8 +414,6 @@ print_usage(CmdContext *ctx)
 	printf("  --dim <int>     Vector dimension (default: %d)\n", DEFAULT_DIM);
 	printf("  --count <int>   Number of vectors (default: %d)\n",
 		   DEFAULT_COUNT);
-	printf("  --runs <int>    Benchmark iterations (default: %d)\n",
-		   DEFAULT_RUNS);
 	printf("  --simd <str>    SIMD level: avx512, avx2, scalar "
 		   "(default: all)\n");
 	printf("  --help          Show this help message\n");
@@ -424,23 +422,23 @@ print_usage(CmdContext *ctx)
 	printf("Examples:\n");
 	CMD_USAGE_EXAMPLE(
 			ctx, "bench fastscan-kernel", "--dim 768 --count 100000");
-	CMD_USAGE_EXAMPLE(ctx, "bench fastscan-kernel", "--simd avx2 --runs 10");
+	CMD_USAGE_EXAMPLE(ctx, "bench fastscan-kernel", "--simd avx2");
 }
 
 int
 cmd_bench_fastscan_kernel(CmdContext *ctx)
 {
 	BenchConfig config = {
-			.dim   = DEFAULT_DIM,
-			.count = DEFAULT_COUNT,
-			.runs  = DEFAULT_RUNS,
-			.help  = false,
+			.dim	= DEFAULT_DIM,
+			.count	= DEFAULT_COUNT,
+			.runs	= ctx->runs,
+			.warmup = ctx->warmup,
+			.help	= false,
 	};
 
 	static struct option long_options[] = {
 			{"dim", required_argument, 0, 'd'},
 			{"count", required_argument, 0, 'c'},
-			{"runs", required_argument, 0, 'r'},
 			{"simd", required_argument, 0, 's'},
 			{"help", no_argument, 0, 'h'},
 			{0, 0, 0, 0},
@@ -449,7 +447,7 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 	optind = 1;
 	int opt;
 	while ((opt = getopt_long(
-					ctx->argc, ctx->argv, "d:c:r:s:h", long_options, NULL)) !=
+					ctx->argc, ctx->argv, "d:c:s:h", long_options, NULL)) !=
 		   -1)
 	{
 		switch (opt)
@@ -459,9 +457,6 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 			break;
 		case 'c':
 			config.count = (uint32_t)atoi(optarg);
-			break;
-		case 'r':
-			config.runs = (uint32_t)atoi(optarg);
 			break;
 		case 's':
 			config.simd = optarg;
@@ -494,6 +489,7 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 		kv_obj_put(root, "dim", kv_int(config.dim));
 		kv_obj_put(root, "count", kv_int(config.count));
 		kv_obj_put(root, "runs", kv_int(config.runs));
+		kv_obj_put(root, "warmup", kv_int(config.warmup));
 		config.metrics = kv_arr();
 		kv_obj_put(root, "metrics", config.metrics);
 	}

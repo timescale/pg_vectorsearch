@@ -228,11 +228,19 @@ computation:
 
 ./bin/vectorsearch bench distance --dim 1536 --count 50000
 
+# --runs / --warmup apply to every bench (defaults 9 and 2).
+./bin/vectorsearch bench --runs 15 --warmup 3 distance
+
 # machine-readable results (file, or omit / '-' for stdout).
 # JSON on stdout sends the human text to stderr; --quiet drops it.
 ./bin/vectorsearch bench distance --json /tmp/distance.json
 ./bin/vectorsearch bench distance --json | jq .
 ./bin/vectorsearch bench distance --json --quiet
+
+# Diff two result files. Named metrics pair by name; unit decides
+# whether higher or lower is better. A drop inside 2·SE of the two
+# means (from stddev and n) is noise. Exit 1 if any metric fails.
+./bin/vectorsearch bench compare base.json head.json
 ```
 
 Comparing SIMD implementations is covered in [simd.md](simd.md#cli-benchmarks).

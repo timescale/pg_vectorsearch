@@ -31,7 +31,6 @@
 /* Default parameters */
 #define DEFAULT_DIM	  768
 #define DEFAULT_COUNT 10000
-#define DEFAULT_RUNS  5
 
 /* Timing helpers */
 static inline uint64_t
@@ -54,6 +53,7 @@ typedef struct
 	Dimension dim;
 	uint32_t  count;
 	uint32_t  runs;
+	uint32_t  warmup;
 	bool	  help;
 	Kv		 *metrics;
 } BenchConfig;
@@ -114,7 +114,7 @@ benchmark_hamming_throughput(const BenchConfig *config)
 														0xFF);
 
 	/* Warmup */
-	for (int w = 0; w < 5; w++)
+	for (uint32_t w = 0; w < config->warmup; w++)
 		for (uint32_t i = 0; i < count; i++)
 			results[i] = vs_rabitq_hamming_distance(
 					query_bits, data_bits + i * packed_bytes, packed_bytes);
@@ -508,14 +508,12 @@ print_usage(CmdContext *ctx)
 	printf("  --dim <int>     Vector dimension (default: %d)\n", DEFAULT_DIM);
 	printf("  --count <int>   Number of vectors (default: %d)\n",
 		   DEFAULT_COUNT);
-	printf("  --runs <int>    Benchmark iterations (default: %d)\n",
-		   DEFAULT_RUNS);
 	printf("  --help          Show this help message\n");
 	CMD_USAGE_JSON();
 	printf("\n");
 	printf("Examples:\n");
 	CMD_USAGE_EXAMPLE(ctx, "bench rabitq-kernel", "--dim 768 --count 10000");
-	CMD_USAGE_EXAMPLE(ctx, "bench rabitq-kernel", "--dim 128 --runs 10");
+	CMD_USAGE_EXAMPLE(ctx, "bench rabitq-kernel", "--dim 128 --count 10000");
 }
 
 /*
@@ -525,24 +523,23 @@ int
 cmd_bench_rabitq_kernel(CmdContext *ctx)
 {
 	BenchConfig config = {
-			.dim   = DEFAULT_DIM,
-			.count = DEFAULT_COUNT,
-			.runs  = DEFAULT_RUNS,
-			.help  = false,
+			.dim	= DEFAULT_DIM,
+			.count	= DEFAULT_COUNT,
+			.runs	= ctx->runs,
+			.warmup = ctx->warmup,
+			.help	= false,
 	};
 
 	static struct option long_options[] =
 			{{"dim", required_argument, 0, 'd'},
 			 {"count", required_argument, 0, 'c'},
-			 {"runs", required_argument, 0, 'r'},
 			 {"help", no_argument, 0, 'h'},
 			 {0, 0, 0, 0}};
 
 	optind = 1;
 	int opt;
 	while ((opt = getopt_long(
-					ctx->argc, ctx->argv, "d:c:r:h", long_options, NULL)) !=
-		   -1)
+					ctx->argc, ctx->argv, "d:c:h", long_options, NULL)) != -1)
 	{
 		switch (opt)
 		{
@@ -559,14 +556,6 @@ cmd_bench_rabitq_kernel(CmdContext *ctx)
 			if (config.count == 0)
 			{
 				fprintf(stderr, "Error: Invalid count\n");
-				return 1;
-			}
-			break;
-		case 'r':
-			config.runs = (uint32_t)atoi(optarg);
-			if (config.runs == 0)
-			{
-				fprintf(stderr, "Error: Invalid runs\n");
 				return 1;
 			}
 			break;
@@ -597,6 +586,7 @@ cmd_bench_rabitq_kernel(CmdContext *ctx)
 		kv_obj_put(root, "dim", kv_int(config.dim));
 		kv_obj_put(root, "count", kv_int(config.count));
 		kv_obj_put(root, "runs", kv_int(config.runs));
+		kv_obj_put(root, "warmup", kv_int(config.warmup));
 		config.metrics = kv_arr();
 		kv_obj_put(root, "metrics", config.metrics);
 	}
