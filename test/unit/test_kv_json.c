@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Tiger Data, Inc.
  * Licensed under the PostgreSQL License. See LICENSE for details.
  *
- * test_kv_json.c - JSON encoder
+ * test_kv_json.c - JSON encoder and decoder
  */
 
 #include <math.h>
@@ -208,4 +208,72 @@ TEST(write_path_dash)
 	fclose(f);
 	unlink(tmp);
 	ASSERT_STR_EQ("{\"ok\":true}\n", got, "file contents plus newline");
+}
+
+TEST(from_json_roundtrip)
+{
+	Kv *o = kv_obj();
+	kv_obj_put(o, "bench", kv_str("distance"));
+	kv_obj_put(o, "dim", kv_int(8));
+	Kv *m = kv_arr();
+	kv_arr_add_metric(m, "vec/s", 1e7, "l2/compiler");
+	kv_obj_put(o, "metrics", m);
+	char *s	 = kv_to_json(o);
+	Kv	 *p	 = kv_from_json(s);
+	char *s2 = kv_to_json(p);
+	ASSERT_NOT_NULL(p, "parse");
+	ASSERT_STR_EQ(s, s2, "roundtrip");
+	vs_free(s);
+	vs_free(s2);
+}
+
+TEST(from_json_ws)
+{
+	Kv *p = kv_from_json(" { \"a\" : 1 } ");
+	ASSERT_TRUE(kv_is_obj(p), "obj");
+	ASSERT_TRUE(kv_is_num(kv_get(p, "a")), "num");
+	ASSERT_EQ(1.0, kv_num(kv_get(p, "a")), "a");
+}
+
+TEST(from_json_bad)
+{
+	static const char *const bad[] = {
+			"",			"{",
+			"}",		"[",
+			"]",		"{]",
+			"[}",		"{\"a\"}",
+			"{\"a\":}", "{\"a\":1,}",
+			"[1,]",		"{\"a\":1",
+			"[1",		"\"unterminated",
+			"tru",		"nul",
+			"fals",		"1 2",
+			"{a:1}",	"{\"a\":1} junk",
+			",",		":",
+	};
+
+	ASSERT_NULL(kv_from_json(NULL), "NULL");
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+		ASSERT_NULL(kv_from_json(bad[i]), bad[i]);
+	ASSERT_NULL(kv_from_json_file("/no/such/vs-json"), "missing file");
+}
+
+TEST(from_json_unsupported_escapes)
+{
+	/* jp_string rejects any backslash rather than unescaping. */
+	ASSERT_NULL(kv_from_json("\"a\\\"b\""), "escaped quote");
+	ASSERT_NULL(kv_from_json("\"a\\\\b\""), "escaped backslash");
+	ASSERT_NULL(kv_from_json("\"a\\nb\""), "escaped newline");
+	ASSERT_NULL(kv_from_json("\"a\\tb\""), "escaped tab");
+	ASSERT_NULL(kv_from_json("\"\\u0001\""), "unicode escape");
+}
+
+TEST(from_json_named)
+{
+	Kv *p = kv_from_json(
+			"{\"metrics\":[{\"name\":\"x\",\"unit\":\"vec/s\",\"value\":2}]}");
+	const Kv   *m	 = kv_get(p, "metrics");
+	const Kv   *e	 = kv_at(m, 0);
+	const char *name = kv_as_str(kv_get(e, "name"));
+	ASSERT_STR_EQ("x", name, "name");
+	ASSERT_EQ(2.0, kv_num(kv_get(e, "value")), "value");
 }

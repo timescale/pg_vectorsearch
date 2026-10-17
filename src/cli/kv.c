@@ -196,48 +196,35 @@ to_string_str(Buf *b, const Kv *v, int indent)
 	return kv_buf_puts(b, v->s ? v->s : "") && kv_buf_putc(b, '\n');
 }
 
-const KvClass kv_class_null = {.to_string = to_string_null};
-const KvClass kv_class_bool = {.to_string = to_string_bool};
-const KvClass kv_class_int	= {.to_string = to_string_int};
-const KvClass kv_class_dbl	= {.to_string = to_string_dbl};
-const KvClass kv_class_str	= {.to_string = to_string_str};
+#define KV_CLASS(name) \
+	const KvClass kv_class_##name = {.to_string = to_string_##name}
 
-/* Return a null node. */
-Kv *
-kv_null(void)
-{
-	return kv_new(&kv_class_null);
-}
+KV_CLASS(null);
+KV_CLASS(bool);
+KV_CLASS(int);
+KV_CLASS(dbl);
+KV_CLASS(str);
 
-/* Return a boolean node. */
-Kv *
-kv_bool(bool v)
-{
-	Kv *n = kv_new(&kv_class_bool);
-	if (n != NULL)
-		n->b = v;
-	return n;
-}
+#define KV_CTOR(name)                    \
+	Kv *kv_##name(void)                  \
+	{                                    \
+		return kv_new(&kv_class_##name); \
+	}
 
-/* Return an integer node. */
-Kv *
-kv_int(int64_t v)
-{
-	Kv *n = kv_new(&kv_class_int);
-	if (n != NULL)
-		n->i = v;
-	return n;
-}
+KV_CTOR(null)
 
-/* Return a floating-point node. */
-Kv *
-kv_dbl(double v)
-{
-	Kv *n = kv_new(&kv_class_dbl);
-	if (n != NULL)
-		n->d = v;
-	return n;
-}
+#define KV_SCALAR(name, T, field)         \
+	Kv *kv_##name(T v)                    \
+	{                                     \
+		Kv *n = kv_new(&kv_class_##name); \
+		if (n != NULL)                    \
+			n->field = v;                 \
+		return n;                         \
+	}
+
+KV_SCALAR(bool, bool, b)
+KV_SCALAR(int, int64_t, i)
+KV_SCALAR(dbl, double, d)
 
 /* Return a string node; NULL v becomes empty. */
 Kv *
@@ -295,22 +282,11 @@ to_string_obj(Buf *b, const Kv *v, int indent)
 	return true;
 }
 
-const KvClass kv_class_arr = {.to_string = to_string_arr};
-const KvClass kv_class_obj = {.to_string = to_string_obj};
+KV_CLASS(arr);
+KV_CLASS(obj);
 
-/* Return an empty array. */
-Kv *
-kv_arr(void)
-{
-	return kv_new(&kv_class_arr);
-}
-
-/* Return an empty object. */
-Kv *
-kv_obj(void)
-{
-	return kv_new(&kv_class_obj);
-}
+KV_CTOR(arr)
+KV_CTOR(obj)
 
 /* Append v to arr; NULL v becomes a null node. */
 void
@@ -363,6 +339,117 @@ kv_obj_put(Kv *obj, const char *key, Kv *v)
 	obj->obj.n++;
 }
 
+/* Walkers for compare and tests. */
+#define KV_IS(v, c) ((v) != NULL && (v)->cls == &(c))
+
+#define KV_IS_FN(name, pred)          \
+	bool kv_is_##name(const Kv *v)    \
+	{                                 \
+		return (v) != NULL && (pred); \
+	}
+
+KV_IS_FN(arr, v->cls == &kv_class_arr)
+KV_IS_FN(obj, v->cls == &kv_class_obj)
+KV_IS_FN(num, v->cls == &kv_class_int || v->cls == &kv_class_dbl)
+
+size_t
+kv_count(const Kv *v)
+{
+	if (kv_is_arr(v))
+		return v->arr.n;
+	if (kv_is_obj(v))
+		return v->obj.n;
+	return 0;
+}
+
+const Kv *
+kv_at(const Kv *arr, size_t i)
+{
+	if (!kv_is_arr(arr) || i >= arr->arr.n)
+		return NULL;
+	return arr->arr.v[i];
+}
+
+static bool
+kv_obj_idx(const Kv *obj, size_t i)
+{
+	return kv_is_obj(obj) && i < obj->obj.n;
+}
+
+const char *
+kv_key(const Kv *obj, size_t i)
+{
+	return kv_obj_idx(obj, i) ? obj->obj.k[i] : NULL;
+}
+
+const Kv *
+kv_val(const Kv *obj, size_t i)
+{
+	return kv_obj_idx(obj, i) ? obj->obj.v[i] : NULL;
+}
+
+const Kv *
+kv_get(const Kv *obj, const char *key)
+{
+	if (!kv_is_obj(obj) || key == NULL)
+		return NULL;
+	for (size_t i = 0; i < obj->obj.n; i++)
+	{
+		if (strcmp(obj->obj.k[i], key) == 0)
+			return obj->obj.v[i];
+	}
+	return NULL;
+}
+
+double
+kv_num(const Kv *v)
+{
+	if (v == NULL)
+		return 0.0;
+	if (v->cls == &kv_class_int)
+		return (double)v->i;
+	if (v->cls == &kv_class_dbl)
+		return v->d;
+	return 0.0;
+}
+
+const char *
+kv_as_str(const Kv *v)
+{
+	if (!KV_IS(v, kv_class_str))
+		return NULL;
+	return v->s;
+}
+
+void
+kv_metric_load(const Kv *m, KvMetric *out)
+{
+	size_t i;
+
+	memset(out, 0, sizeof(*out));
+	if (!kv_is_obj(m))
+		return;
+	for (i = 0; i < m->obj.n; i++)
+	{
+		const char *k = m->obj.k[i];
+		const Kv   *v = m->obj.v[i];
+
+		if (strcmp(k, "name") == 0)
+			out->name = kv_as_str(v);
+		else if (strcmp(k, "unit") == 0)
+			out->unit = kv_as_str(v);
+		else if (strcmp(k, "value") == 0 && kv_is_num(v))
+		{
+			out->value	   = kv_num(v);
+			out->has_value = true;
+		}
+		else if (strcmp(k, "stddev") == 0 && kv_is_num(v))
+			out->stddev = kv_num(v);
+		else if (strcmp(k, "n") == 0 && kv_is_num(v))
+			out->n = kv_num(v);
+	}
+}
+
 /* Object with name, unit, and value fields. */
 Kv *
 kv_metric(const char *name, const char *unit, double value)
@@ -391,6 +478,17 @@ kv_arr_add_metric(
 	Kv *m = kv_metric(name, unit, value);
 	kv_arr_add(arr, m);
 	return m;
+}
+
+void
+kv_metric_stats(Kv *m, double stddev, int64_t n)
+{
+	if (m == NULL)
+		return;
+	if (n > 0)
+		kv_obj_put(m, "n", kv_int(n));
+	if (n > 1)
+		kv_obj_put(m, "stddev", kv_dbl(stddev));
 }
 
 /* Strip --quiet from argv. Not -q: bench search uses -q for query count. */

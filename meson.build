@@ -500,6 +500,7 @@ vs_cli_sources = files(
   'src/cli/kv.c',
   'src/cli/kv_json.c',
   'src/cli/kv_text.c',
+  'src/cli/kv_cmp.c',
   'src/cli/bench_distance.c',
   'src/cli/bench_quantize.c',
   'src/cli/bench_cluster.c',
@@ -507,6 +508,7 @@ vs_cli_sources = files(
   'src/cli/bench_rabitq_kernel.c',
   'src/cli/bench_page_score.c',
   'src/cli/bench_fastscan_kernel.c',
+  'src/cli/bench_compare.c',
   'src/cli/distance_pgvector.c',
   'src/cli/kmeans_pgvector.c',
 )

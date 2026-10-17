@@ -73,6 +73,8 @@ typedef struct
 	Kv		   *metrics; /* NULL unless --json */
 } BenchConfig;
 
+static uint32_t g_warmup;
+
 /* Timing helpers */
 static inline uint64_t
 get_time_ns(void)
@@ -234,8 +236,7 @@ add_vecps(
 {
 	Kv *m = kv_arr_add_metric(
 			metrics, "vec/s", vps, "%s/%s", metric_key(metric), impl);
-	if (m != NULL && runs > 1)
-		kv_obj_put(m, "stddev", kv_dbl(stddev));
+	kv_metric_stats(m, stddev, runs);
 }
 
 /*
@@ -305,11 +306,14 @@ benchmark_impl_loop(
 	vs_simd_reset_cache();
 	vs_distance_force_reinit();
 
-	/* Warm up (ensure code is in cache) */
-	for (int i = 0; i < 10; i++)
+	/* Full-count throwaway passes so the timed runs are not the warmup. */
+	for (uint32_t w = 0; w < g_warmup; w++)
 	{
-		Vec32Ref vec = {.data = db_data, .dim = dim};
-		(void)vs_distance(query, vec, metric);
+		for (uint32_t i = 0; i < count; i++)
+		{
+			Vec32Ref vec = {.data = db_data + i * dim, .dim = dim};
+			(void)vs_distance(query, vec, metric);
+		}
 	}
 
 	/* Benchmark: loop over single-pair calls (pgvector approach) */
@@ -413,8 +417,8 @@ benchmark_impl_batch(
 	/* Allocate distances array */
 	Distance *distances = vs_alloc(count * sizeof(Distance));
 
-	/* Warm up with actual batch function (5 iterations) */
-	for (int warmup = 0; warmup < 5; warmup++)
+	/* Full-count throwaway passes so the timed runs are not the warmup. */
+	for (uint32_t warmup = 0; warmup < g_warmup; warmup++)
 	{
 		if (impl->mask == SIMD_NONE)
 		{
@@ -651,8 +655,8 @@ benchmark_pgvector(
 	/* Allocate distances array */
 	Distance *distances = vs_alloc(count * sizeof(Distance));
 
-	/* Warm up with actual batch function (5 iterations) */
-	for (int warmup = 0; warmup < 5; warmup++)
+	/* Full-count throwaway passes so the timed runs are not the warmup. */
+	for (uint32_t warmup = 0; warmup < g_warmup; warmup++)
 	{
 		switch (metric)
 		{
@@ -863,8 +867,7 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 		{
 			Vec32Ref q = {.data = query_data, .dim = dim};
 
-			/* Run full benchmark iterations as throwaway */
-			for (uint32_t run = 0; run < config->runs; run++)
+			for (uint32_t run = 0; run < g_warmup; run++)
 			{
 				switch (metric)
 				{
@@ -949,8 +952,6 @@ print_usage(CmdContext *ctx)
 	printf("  --count <int>      Number of distance computations (default: "
 		   "%d)\n",
 		   DEFAULT_COUNT);
-	printf("  --runs <int>       Number of benchmark iterations (default: "
-		   "3)\n");
 	printf("  --metric <list>    Comma-separated metrics: l2, ip, cosine, "
 		   "all\n");
 	printf("                     (default: all)\n");
@@ -976,7 +977,7 @@ cmd_bench_distance(CmdContext *ctx)
 	BenchConfig config = {
 			.dim		   = DEFAULT_DIM,
 			.count		   = DEFAULT_COUNT,
-			.runs		   = 3, /* Default: 3 runs for stable averages */
+			.runs		   = ctx->runs,
 			.metric_filter = METRIC_ALL, /* Default: run all metrics */
 			.impl_filter   = NULL,
 			.help		   = false,
@@ -986,7 +987,6 @@ cmd_bench_distance(CmdContext *ctx)
 	static struct option long_options[] =
 			{{"dim", required_argument, 0, 'd'},
 			 {"count", required_argument, 0, 'c'},
-			 {"runs", required_argument, 0, 'r'},
 			 {"metric", required_argument, 0, 'm'},
 			 {"impls", required_argument, 0, 'i'},
 			 {"help", no_argument, 0, 'h'},
@@ -997,11 +997,8 @@ cmd_bench_distance(CmdContext *ctx)
 
 	int opt;
 	while ((opt = getopt_long(
-					ctx->argc,
-					ctx->argv,
-					"d:c:r:m:i:h",
-					long_options,
-					NULL)) != -1)
+					ctx->argc, ctx->argv, "d:c:m:i:h", long_options, NULL)) !=
+		   -1)
 	{
 		switch (opt)
 		{
@@ -1021,16 +1018,6 @@ cmd_bench_distance(CmdContext *ctx)
 			{
 				fprintf(stderr,
 						"Error: Invalid count %s (must be > 0)\n",
-						optarg);
-				return 1;
-			}
-			break;
-		case 'r':
-			config.runs = (uint32_t)atoi(optarg);
-			if (config.runs == 0)
-			{
-				fprintf(stderr,
-						"Error: Invalid runs %s (must be > 0)\n",
 						optarg);
 				return 1;
 			}
@@ -1056,6 +1043,8 @@ cmd_bench_distance(CmdContext *ctx)
 		return 0;
 	}
 
+	g_warmup = ctx->warmup;
+
 	KvBuild *kb	  = NULL;
 	Kv		*root = NULL;
 	if (ctx->json_path != NULL)
@@ -1066,6 +1055,7 @@ cmd_bench_distance(CmdContext *ctx)
 		kv_obj_put(root, "dim", kv_int(config.dim));
 		kv_obj_put(root, "count", kv_int(config.count));
 		kv_obj_put(root, "runs", kv_int(config.runs));
+		kv_obj_put(root, "warmup", kv_int(ctx->warmup));
 		config.metrics = kv_arr();
 		kv_obj_put(root, "metrics", config.metrics);
 	}
