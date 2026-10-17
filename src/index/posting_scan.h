@@ -51,6 +51,18 @@ typedef struct PrismPostingScan
 	/* Per-cluster state (set at begin_cluster/begin_flat) */
 	RaBitQQueryState *qstate;
 
+	/*
+	 * Encode reference of the current cluster. Inline layout: a pointer
+	 * into the pinned head page. Spilled layout (prism_posting_spilled):
+	 * either pt_ref, gathered from the head's REFERENCE chain by
+	 * begin_cluster, or a buffer the caller gathered earlier and handed to
+	 * begin_cluster_at. pt_ref is allocated once per scan, only when the
+	 * dimension spills.
+	 */
+	bool		 spilled;
+	float		*pt_ref;
+	const float *cur_ref;
+
 	/* Page iteration — paged mode uses cur_blkno/cur_page,
 	 * flat mode sets cur_page to the flat buffer */
 	BlockNumber cur_blkno;
@@ -118,6 +130,20 @@ void prism_posting_scan_begin_cluster(
 		BlockNumber		  posting_head);
 
 /*
+ * Begin scanning a spilled cluster whose reference the caller already
+ * gathered (prism_posting_reference_read): `ref` is the [dim] vector and
+ * `entries` the block it reported, so no reference page is read again; the
+ * reference pages still count as read for this cluster, as begin_cluster
+ * counts them. Only for a spilled dimension; an inline layout has nothing
+ * to skip.
+ */
+void prism_posting_scan_begin_cluster_at(
+		PrismPostingScan *scan,
+		RaBitQQueryState *qstate,
+		BlockNumber		  entries,
+		const float		 *ref);
+
+/*
  * Begin scanning a flat posting page.
  */
 void prism_posting_scan_begin_flat(
@@ -129,8 +155,9 @@ void prism_posting_scan_begin_flat(
 void prism_posting_scan_end_cluster(PrismPostingScan *scan);
 
 /*
- * Return P^T * centroid from the first posting page.
- * Call after begin_cluster. Returns NULL if no page loaded.
+ * Return P^T * centroid for the current cluster. Call after begin_cluster.
+ * Returns NULL when an inline cluster has no page loaded; a spilled
+ * cluster's reference is known even when it holds no entries.
  */
 const float *prism_posting_scan_pt_centroid(const PrismPostingScan *scan);
 

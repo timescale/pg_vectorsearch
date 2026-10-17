@@ -12,7 +12,6 @@
  * - Inline page access via stored base pointer (no vtable dispatch)
  * - Score + prune + rerank fused into one function (no iterator
  *   overhead, compiler can optimize across all phases)
- * - IP count padded to multiple of 4 (avoids tail kernel)
  */
 
 #include "vs_config.h"
@@ -53,14 +52,17 @@ prism_posting_scan_init(
 	scan->packed_bytes = VS_RABITQ_BYTES(dim);
 	scan->cur_blkno	   = InvalidBlockNumber;
 
-	/* Pre-allocate batch buffers — pad to multiple of 4 for IP kernel.
-	 * max_entries_cap is the trusted per-page capacity these buffers are
-	 * sized for; a page whose on-disk entry_count exceeds it (corruption)
-	 * would overrun page_distances/page_scratch and is rejected on load. */
+	/* Pre-allocate batch buffers. max_entries_cap is the trusted per-page
+	 * capacity these buffers are sized for; a page whose on-disk
+	 * entry_count exceeds it (corruption) would overrun
+	 * page_distances/page_scratch and is rejected on load. */
 	scan->max_entries_cap = max_entries_per_page;
-	uint32_t padded		  = (max_entries_per_page + 3) & ~3u;
-	scan->page_distances  = vs_alloc(padded * sizeof(Distance));
-	scan->page_scratch	  = vs_alloc(padded * sizeof(float));
+	scan->page_distances  = vs_alloc(max_entries_per_page * sizeof(Distance));
+	scan->page_scratch	  = vs_alloc(max_entries_per_page * sizeof(float));
+
+	scan->spilled = prism_posting_spilled(dim);
+	if (scan->spilled)
+		scan->pt_ref = vs_alloc((size_t)dim * sizeof(float));
 }
 
 void
@@ -78,6 +80,11 @@ prism_posting_scan_cleanup(PrismPostingScan *scan)
 	vs_free(scan->page_scratch);
 	scan->page_distances = NULL;
 	scan->page_scratch	 = NULL;
+	if (scan->pt_ref != NULL)
+	{
+		vs_free(scan->pt_ref);
+		scan->pt_ref = NULL;
+	}
 
 	if (scan->fs_lut != NULL)
 	{
@@ -136,20 +143,61 @@ prism_posting_scan_begin_cluster(
 	scan->entries_scanned = 0;
 	scan->entries_pruned  = 0;
 
+	scan->cur_ref = NULL;
+
+	if (posting_head == InvalidBlockNumber)
+		return;
+
+	if (scan->spilled)
+	{
+		/* Gather the reference chain first (one page at a time, released
+		 * before the next), then open the first entry page. */
+		scan->cur_blkno = prism_posting_reference_read(
+				scan->storage, posting_head, scan->dim, scan->pt_ref);
+		scan->cur_ref = scan->pt_ref;
+		scan->pages_read += prism_posting_ref_pages(scan->dim);
+		if (scan->cur_blkno != InvalidBlockNumber)
+			advance_page(scan);
+		return;
+	}
+
 	/* Eagerly read the first page so pt_centroid is accessible
 	 * via prism_posting_pt_centroid(scan->cur_page) before _cluster
 	 * is called. */
-	if (posting_head != InvalidBlockNumber)
+	advance_page(scan);
+}
+
+void
+prism_posting_scan_begin_cluster_at(
+		PrismPostingScan *scan,
+		RaBitQQueryState *qstate,
+		BlockNumber		  entries,
+		const float		 *ref)
+{
+	Assert(scan->spilled);
+
+	scan->qstate		  = qstate;
+	scan->cur_blkno		  = entries;
+	scan->cur_page		  = NULL;
+	scan->cur_content	  = NULL;
+	scan->cur_max_entries = 0;
+	scan->cur_count		  = 0;
+	scan->fs_lut_valid	  = false;
+	scan->pages_read	  = prism_posting_ref_pages(scan->dim);
+	scan->pages_skipped	  = 0;
+	scan->entries_scanned = 0;
+	scan->entries_pruned  = 0;
+	scan->cur_ref		  = ref;
+
+	if (entries != InvalidBlockNumber)
 		advance_page(scan);
 }
 
-/*
- * Return pt_centroid from the first page (must be called after
- * begin_cluster). Returns NULL if no page was loaded.
- */
 const float *
 prism_posting_scan_pt_centroid(const PrismPostingScan *scan)
 {
+	if (scan->spilled)
+		return scan->cur_ref;
 	if (scan->cur_page == NULL)
 		return NULL;
 	return prism_posting_pt_centroid(scan->cur_page);
@@ -192,6 +240,7 @@ prism_posting_scan_end_cluster(PrismPostingScan *scan)
 
 	scan->cur_page	  = NULL;
 	scan->cur_content = NULL;
+	scan->cur_ref	  = NULL;
 	scan->qstate	  = NULL;
 }
 
@@ -250,10 +299,7 @@ advance_page(PrismPostingScan *scan)
 		return false;
 	}
 
-	scan->cur_content =
-			(opaque->flags & PRISM_POSTING_PAGE_FIRST)
-					? prism_posting_content_first(scan->cur_page, scan->dim)
-					: prism_posting_content(scan->cur_page);
+	scan->cur_content = prism_posting_page_content(scan->cur_page, scan->dim);
 	scan->cur_max_entries = opaque->max_entries;
 	/* Reject an entry_count past what a valid page of this format can
 	 * hold. AoS pages drive the page_distances/page_scratch batch (sized
@@ -317,7 +363,9 @@ prism_posting_scan_cluster(PrismPostingScan *scan, VsTopK *topk)
 		/* A page tombstoned by VACUUM (all entries dead) is skipped — no
 		 * scoring kernel; the chain-follow below still advances past it. A
 		 * retired chain also carries TOMBSTONED once reclaimed, but its
-		 * entries moved rather than died, so it is still scored. */
+		 * entries moved rather than died, so it is still scored. (A
+		 * REFERENCE page, should one be met, holds zero entries and scores
+		 * nothing.) */
 		if (!prism_posting_page_all_dead(prism_posting_opaque(scan->cur_page)))
 		{
 			char	*content = scan->cur_content;
@@ -330,13 +378,15 @@ prism_posting_scan_cluster(PrismPostingScan *scan, VsTopK *topk)
 			 * the first entry's bits pointer and a stride of entry_size. */
 			const uint8_t *bits_base = prism_posting_first_bits(content);
 
-			uint32_t padded = (count + 3) & ~3u;
+			/* The exact count: every kernel scores the count % 4 tail
+			 * itself, and padding it would read entries past the last one,
+			 * which at a wide dimension is past the page. */
 			vs_rabitq_inner_product_multi(
 					scan->qstate->transformed,
 					bits_base,
 					entry_size,
 					dim,
-					padded,
+					count,
 					scratch);
 
 			/* Convert raw IPs to distances, reading f_add/f_rescale per

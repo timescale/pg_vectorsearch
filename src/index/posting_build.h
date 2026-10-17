@@ -179,15 +179,6 @@ void prism_build_route_ctx_cleanup(PrismBuildRouteCtx *ctx);
 bool prism_build_route_emit(
 		PrismBuildRouteCtx *ctx, const float *vec, ItemPointerData tid);
 
-/* Map a routed posting-head block back to its leaf index. Head blocks are the
- * formula first_posting + leaf, so this is a subtraction. Shared by the
- * route/encode path and the page-backed refine pass. */
-static inline uint32_t
-prism_route_head_to_leaf(BlockNumber first_posting, BlockNumber head)
-{
-	return (uint32_t)(head - first_posting);
-}
-
 /*
  * Shared refine kernels: the serial and parallel refine passes route,
  * filter, and average identically -- only the accumulator ownership
@@ -220,8 +211,9 @@ typedef void (*PrismLeafWriteFn)(void *ctx, uint32_t leaf, const float *vec);
 
 /*
  * Shared leaf-head writer: writes leaf's posting-list head page (at the
- * formula-derived block first_posting + leaf) carrying pt_centroid =
- * P^T * centroid -- the encode reference the scan reads. Used as the
+ * formula-derived block first_posting + leaf * stride) carrying pt_centroid =
+ * P^T * centroid -- the encode reference the scan reads -- and, for a
+ * spilled layout, the reference pages that follow it. Used as the
  * PrismLeafWriteFn of both the streaming tree write and the refine pass, by
  * the serial build and the parallel leader alike. pt is caller-owned [dim]
  * scratch.
@@ -232,8 +224,10 @@ typedef struct PrismHeadWriteCtx
 	const RaBitQParams *rq_params;
 	Dimension			dim;
 	bool				fastscan;
-	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
-	float			   *pt;			   /* [dim] scratch */
+	BlockNumber			first_posting; /* leaf c's head = first_posting + c *
+										* stride */
+	uint32_t stride;				   /* prism_posting_ref_pages(dim) */
+	float	*pt;					   /* [dim] scratch */
 } PrismHeadWriteCtx;
 
 /* Stack-init/cleanup pair: allocates/frees the [dim] pt scratch. */
@@ -251,6 +245,7 @@ prism_head_write_ctx_init(
 	h->dim			 = dim;
 	h->fastscan		 = fastscan;
 	h->first_posting = first_posting;
+	h->stride		 = prism_posting_ref_pages(dim);
 	h->pt			 = vs_alloc((size_t)dim * sizeof(float));
 }
 
@@ -394,6 +389,17 @@ typedef struct PrismPostingBuilder
 	bool adopted_head;
 
 	BlockNumber fixed_first_blkno;
+
+	/*
+	 * Spilled layout (prism_posting_spilled): the head carries the first
+	 * chunk of the encode reference and no entries, ref_pages - 1 REFERENCE
+	 * pages carry the rest, and the entries start after them. ref_copy is
+	 * the builder's own copy of the reference, since the caller's buffer is
+	 * not required to outlive finish(); NULL for an inline layout.
+	 */
+	bool	 spilled;
+	uint32_t ref_pages;
+	float	*ref_copy;
 
 	RaBitQData	 *enc_buf;
 	RaBitQScratch enc_scratch;

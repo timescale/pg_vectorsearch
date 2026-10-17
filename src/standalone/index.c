@@ -341,11 +341,25 @@ prism_index_build(
 
 	if (src == NULL || src->nvecs == 0 || src->dim == 0 || config == NULL)
 		return NULL;
-	if (src->dim > PRISM_INDEX_MAX_DIM)
+	if (!prism_index_dim_supported(src->dim))
 	{
-		vs_warn("index build: %u dimensions exceeds the layout ceiling %u",
+		vs_warn("index build: %u dimensions is not supported (ceiling %u; "
+				"above %u the dimension must be a power of two times an "
+				"odd factor of at most %u)",
 				(unsigned)src->dim,
-				(unsigned)PRISM_INDEX_MAX_DIM);
+				(unsigned)PRISM_INDEX_MAX_DIM,
+				(unsigned)PRISM_INDEX_NARROW_MAX_DIM,
+				(unsigned)VS_FAST_ROTATE_K_MAX);
+		return NULL;
+	}
+	/* Same refusal the PG build makes: an uncompressed (or fastscan)
+	 * centroid entry that no page can hold. */
+	if (prism_centroid_max_entries_fmt(src->dim, config->centroid_fmt) == 0)
+	{
+		vs_warn("index build: centroid format %d does not fit a page at %u "
+				"dimensions; use RaBitQ centroids",
+				(int)config->centroid_fmt,
+				(unsigned)src->dim);
 		return NULL;
 	}
 
@@ -592,9 +606,11 @@ prism_index_build(
 		 * collapse the beam to width 1 and skip the coverage floors). */
 		idx->base.centroid_error_scale = 0.0f;
 		idx->base.centroid_beam_scale  = 0.5f;
-		/* The streaming build reserves block 0 for the meta page and writes
-		 * the root centroid page in place at block 1, after its subtrees. */
-		idx->base.first_centroid = 1;
+		/* The streaming build reserves block 0 for the meta page (and the
+		 * mean's reference pages after it, left blank here: the standalone
+		 * mean lives in RAM) and writes the root centroid page in place
+		 * right after, following its subtrees. */
+		idx->base.first_centroid = prism_first_centroid_blkno(dim);
 		idx->base.params		 = vs_rabitq_create(dim, VS_RABITQ_BUILD_SEED);
 		/* The paged query needs no per-cluster lists, but the bindings API
 		 * reads idx->clusters[c].count for build stats; give it zeroed entries
@@ -788,6 +804,7 @@ prism_index_build(
 				needs_rq_params ? idx->base.params : NULL,
 				idx->global_mean,
 				0, /* posting_base: leaf child = global leaf (cluster) index */
+				1, /* head_stride: a plain index, whatever the dimension */
 				node_first_blkno,
 				NULL,  /* pt_centroids on posting pages, not here */
 				NULL); /* in-RAM assignment descends the exact float tree */

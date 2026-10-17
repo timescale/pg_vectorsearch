@@ -24,7 +24,9 @@
 #include <utils/resowner.h>
 
 #include "amcache.h"
+#include "bufstorage.h"
 #include "core/log.h"
+#include "index/posting_page.h"
 #include "meta.h"
 #include "support_pg.h"
 #include "typeinfo.h"
@@ -436,17 +438,18 @@ get_cache_data(Relation index)
 	/* Reject an index whose metapage was written by an incompatible format
 	 * (loud in release too, not just a debug Assert) — its layout would
 	 * otherwise be misread. */
-	if (meta->magic != PRISM_META_MAGIC)
+	if (!prism_meta_magic_valid(meta->magic, meta->dim))
 	{
 		uint32_t got = meta->magic;
 		UnlockReleaseBuffer(meta_buf);
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
 				 errmsg("index \"%s\" has an incompatible on-disk format "
-						"(metapage magic 0x%08X, expected 0x%08X)",
+						"(metapage magic 0x%08X, expected 0x%08X or 0x%08X)",
 						RelationGetRelationName(index),
 						got,
-						(uint32_t)PRISM_META_MAGIC),
+						(uint32_t)PRISM_META_MAGIC_INLINE,
+						(uint32_t)PRISM_META_MAGIC_SPILLED),
 				 errhint("REINDEX the index to rebuild it in the current "
 						 "format.")));
 	}
@@ -483,12 +486,24 @@ get_cache_data(Relation index)
 	 */
 
 	/* Copy global mean; P^T * global_mean is computed lazily (see
-	 * prism_index_base_init) so metadata-only callers skip the rotation. */
-	memcpy(cache_global_mean(c),
-		   prism_meta_global_mean_const(meta),
-		   dim * sizeof(float));
+	 * prism_index_base_init) so metadata-only callers skip the rotation. A
+	 * mean too wide for the metapage is gathered from its reference pages
+	 * after the metapage is released (the page layer pins one buffer). */
+	if (prism_meta_mean_inline(dim))
+		memcpy(cache_global_mean(c),
+			   prism_meta_global_mean_const(meta),
+			   dim * sizeof(float));
 
 	UnlockReleaseBuffer(meta_buf);
+
+	if (!prism_meta_mean_inline(dim))
+	{
+		VsPgStorage st;
+
+		vs_pg_storage_init_inspect(&st, index);
+		prism_posting_reference_read(
+				&st.base, PRISM_META_MEAN_BLKNO, dim, cache_global_mean(c));
+	}
 
 	/* Opclass-derived, so no metapage needed -- but resolved here so every
 	 * post-build path reads it as a pointer instead of an fmgr call. */

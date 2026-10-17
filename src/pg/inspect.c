@@ -288,7 +288,7 @@ vs_centroid_pages(PG_FUNCTION_ARGS)
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (meta->magic != PRISM_META_MAGIC)
+	if (!prism_meta_magic_valid(meta->magic, meta->dim))
 	{
 		vs_storage_release_page(st, 0);
 		relation_close(index, AccessShareLock);
@@ -478,6 +478,7 @@ emit_posting_row(PrismPostingChainPos *pos, void *state)
 	bool is_first	 = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0;
 	bool tombstoned	 = (op->flags & PRISM_POSTING_PAGE_TOMBSTONED) != 0;
 	bool is_fastscan = (op->flags & PRISM_POSTING_PAGE_FASTSCAN) != 0;
+	bool is_ref		 = (op->flags & PRISM_POSTING_PAGE_REFERENCE) != 0;
 
 	Datum values[10];
 	bool  nulls[10] = {0};
@@ -536,7 +537,8 @@ emit_posting_row(PrismPostingChainPos *pos, void *state)
 		nulls[7] = true;
 
 	values[8] = Int32GetDatum(ctx->chain_pos++);
-	values[9] = CStringGetTextDatum(is_fastscan ? "fastscan" : "aos");
+	values[9] = CStringGetTextDatum(
+			is_ref ? "reference" : (is_fastscan ? "fastscan" : "aos"));
 
 	tuplestore_putvalues(
 			ctx->rsinfo->setResult, ctx->rsinfo->setDesc, values, nulls);
@@ -588,7 +590,7 @@ vs_posting_pages(PG_FUNCTION_ARGS)
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (meta->magic != PRISM_META_MAGIC)
+	if (!prism_meta_magic_valid(meta->magic, meta->dim))
 	{
 		vs_storage_release_page(st, 0);
 		relation_close(index, AccessShareLock);
@@ -890,7 +892,7 @@ vs_index_settings(PG_FUNCTION_ARGS)
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (meta->magic != PRISM_META_MAGIC)
+	if (!prism_meta_magic_valid(meta->magic, meta->dim))
 	{
 		vs_storage_release_page(st, 0);
 		relation_close(index, AccessShareLock);
@@ -974,6 +976,7 @@ vs_index_settings(PG_FUNCTION_ARGS)
 					"%.0f",
 					prism_index_posting_pages(
 							(double)RelationGetNumberOfBlocks(index),
+							dim,
 							(double)ncentroid_pages)),
 			"derived");
 	settings_row(

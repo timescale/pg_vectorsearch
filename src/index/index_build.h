@@ -261,7 +261,9 @@ BlockNumber prism_compute_centroid_layout(
  * (no O(nlist) posting-head array).
  *
  * posting_base may be InvalidBlockNumber (centroid-only build without
- * posting lists).
+ * posting lists). head_stride is the head region's stride
+ * (prism_posting_ref_pages(dim) for the paged layout, 1 when child_blkno
+ * is a plain leaf index as in the standalone in-RAM build).
  */
 /*
  * pt_centroids: optional P^T * centroid array [nlist * dim] for leaf
@@ -278,6 +280,7 @@ void prism_write_centroid_tree(
 		const RaBitQParams			*rq_params,
 		const float					*global_mean,
 		BlockNumber					 posting_base,
+		uint32_t					 head_stride,
 		const BlockNumber			*node_first_blkno,
 		const float					*pt_centroids,
 		PrismExactCentroidCollector *collector);

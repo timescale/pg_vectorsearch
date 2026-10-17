@@ -21,6 +21,7 @@
 #pragma GCC diagnostic pop
 
 #include "core/types.h"
+#include "index/index_base.h"
 
 /*
  * "PRI" + a format-version byte. Bump the low byte on any incompatible
@@ -31,15 +32,45 @@
  * tombstone_mask word, which moves every group after the first on a page --
  * a posting page format change, not a metapage one, but this is the only
  * version gate the index has.
+ *
+ * The version is per index, chosen by its dimension: v6 is the inline
+ * layout (global mean in the metapage, every posting head carrying its
+ * whole reference), unchanged for every index that could be built before
+ * spilling existed, so those need no REINDEX and still open under an older
+ * binary. v7 is the spilled layout (prism_posting_spilled or
+ * prism_meta_mean_pages > 0), which an older binary rejects at open
+ * instead of reading a reference past its page.
  */
-#define PRISM_META_MAGIC ((uint32_t)0x50524906) /* "PRI\x06" */
+#define PRISM_META_MAGIC_INLINE	 ((uint32_t)0x50524906) /* "PRI\x06" */
+#define PRISM_META_MAGIC_SPILLED ((uint32_t)0x50524907) /* "PRI\x07" */
+
+static inline bool
+prism_meta_layout_spilled(Dimension dim)
+{
+	return prism_posting_spilled(dim) || prism_meta_mean_pages(dim) > 0;
+}
+
+static inline uint32_t
+prism_meta_magic_for(Dimension dim)
+{
+	return prism_meta_layout_spilled(dim) ? PRISM_META_MAGIC_SPILLED
+										  : PRISM_META_MAGIC_INLINE;
+}
+
+/* The magic an index must carry is the one its dimension implies; any other
+ * value is an index written by some other format. */
+static inline bool
+prism_meta_magic_valid(uint32_t magic, Dimension dim)
+{
+	return magic == prism_meta_magic_for(dim);
+}
 
 /* Metadata flags */
 #define PRISM_META_FLAG_FASTSCAN 0x01
 
 typedef struct PrismMetaPage
 {
-	uint32_t	magic;			 /* PRISM_META_MAGIC */
+	uint32_t	magic;			 /* PRISM_META_MAGIC_INLINE or _SPILLED */
 	Dimension	dim;			 /* vector dimension */
 	uint8_t		nlevels;		 /* centroid tree depth */
 	uint8_t		centroid_format; /* PrismCentroidFormat */
@@ -50,7 +81,7 @@ typedef struct PrismMetaPage
 	uint32_t nlist;				 /* number of leaf centroids */
 	/*
 	 * Centroid pages reachable from first_centroid. Maintained rather than
-	 * derived: the region a build reserves is [PRISM_FIRST_CENTROID_BLKNO,
+	 * derived: the region a build reserves is [prism_first_centroid_blkno,
 	 * first_posting), but a split with no room on a level-0 page extends the
 	 * relation and chains the new page past the posting region, so a block
 	 * range stops measuring it. prism_rebalance folds each split's additions
@@ -62,29 +93,56 @@ typedef struct PrismMetaPage
 	uint8_t	 flags;	  /* PRISM_META_FLAG_* */
 	uint8_t	 reserved;
 	uint64_t rabitq_seed; /* seed for RaBitQ params */
-						  /* Global mean vector stored inline after struct */
+						  /* Global mean vector stored inline after struct, up
+						   * to PRISM_META_INLINE_MEAN_MAX_DIM; past it the
+						   * mean lives in the reference pages at
+						   * PRISM_META_MEAN_BLKNO (see index_base.h). */
 } PrismMetaPage;
 
-/* Total special-area size including inline global mean */
-#define PRISM_META_SIZE(dim)                                          \
-	(MAXALIGN(                                                        \
-			offsetof(PrismMetaPage, rabitq_seed) + sizeof(uint64_t) + \
-			(size_t)(dim) * sizeof(float)))
+#define PRISM_META_FIXED_SIZE \
+	(offsetof(PrismMetaPage, rabitq_seed) + sizeof(uint64_t))
 
-/* Access the inline global mean vector after the struct */
+static inline bool
+prism_meta_mean_inline(Dimension dim)
+{
+	return prism_meta_mean_pages(dim) == 0;
+}
+
+/* Special-area size: the struct plus the inline global mean where it fits */
+#define PRISM_META_SIZE(dim)                                                 \
+	(MAXALIGN(                                                               \
+			PRISM_META_FIXED_SIZE + (prism_meta_mean_inline(dim)             \
+											 ? (size_t)(dim) * sizeof(float) \
+											 : 0)))
+
+/*
+ * The inline threshold shared with the standalone layout is exactly the
+ * metapage's capacity: one more dimension would not fit the page.
+ */
+StaticAssertDecl(
+		MAXALIGN(
+				PRISM_META_FIXED_SIZE +
+				(size_t)PRISM_META_INLINE_MEAN_MAX_DIM * sizeof(float)) <=
+				BLCKSZ - MAXALIGN(SizeOfPageHeaderData),
+		"the inline mean must fit the metapage at the threshold");
+StaticAssertDecl(
+		MAXALIGN(
+				PRISM_META_FIXED_SIZE +
+				(size_t)(PRISM_META_INLINE_MEAN_MAX_DIM + 1) * sizeof(float)) >
+				BLCKSZ - MAXALIGN(SizeOfPageHeaderData),
+		"the inline-mean threshold is tight");
+
+/* Access the inline global mean vector after the struct (inline layout) */
 static inline float *
 prism_meta_global_mean(PrismMetaPage *meta)
 {
-	return (float *)((char *)meta + offsetof(PrismMetaPage, rabitq_seed) +
-					 sizeof(uint64_t));
+	return (float *)((char *)meta + PRISM_META_FIXED_SIZE);
 }
 
 static inline const float *
 prism_meta_global_mean_const(const PrismMetaPage *meta)
 {
-	return (const float *)((const char *)meta +
-						   offsetof(PrismMetaPage, rabitq_seed) +
-						   sizeof(uint64_t));
+	return (const float *)((const char *)meta + PRISM_META_FIXED_SIZE);
 }
 
 #endif /* PRISM_META_H */

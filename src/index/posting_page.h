@@ -91,6 +91,16 @@
  * retires the whole old chain, head and all.
  */
 #define PRISM_POSTING_PAGE_DELETED 0x0010
+/*
+ * The page carries a chunk of a full-precision float reference instead of
+ * entries: entry_count and max_entries are 0. A posting list whose encode
+ * reference does not fit beside an entry on its head (prism_posting_spilled)
+ * stores it as a chain of these: the head (FIRST | REFERENCE) holds floats
+ * [0, PRISM_POSTING_REF_CHUNK_FLOATS), each following page (OVERFLOW |
+ * REFERENCE) the next chunk, and the entries start on the page after the
+ * last chunk. The metapage's global mean spills the same way (see meta.h).
+ */
+#define PRISM_POSTING_PAGE_REFERENCE 0x0020
 
 /* ----------------------------------------------------------------
  * Structs
@@ -240,21 +250,20 @@ typedef struct PrismFlatPostingHeader
 	 ~(PRISM_POSTING_ENTRY_ALIGN - 1u))
 
 /*
- * Hard dimension ceiling for the index layout. A posting list's first page
- * carries the list's float encode reference (MAXALIGN(dim * sizeof(float))
- * bytes) and must still hold at least one posting entry; that binds before
- * the float-format centroid page (one dim * sizeof(float) entry, ~2036) and
- * the metadata page's inline mean. Past the ceiling the first-page capacity
- * arithmetic underflows, so index creation must reject the dimension up
- * front.
+ * The widest dimension whose posting-list head holds the float encode
+ * reference (MAXALIGN(dim * sizeof(float)) bytes) and at least one entry on
+ * one page. Up to here the layout is the inline one; past it the reference
+ * spills into a chain of REFERENCE pages (prism_posting_spilled). This is
+ * also the widest dimension the float-format centroid page (~2036) and the
+ * metapage's inline mean (2032) would have allowed, so it pins the
+ * on-disk layout every index built before spilling existed has.
  *
- * The number is derived at 8-byte alignment, the largest MAXALIGN
- * PostgreSQL uses, so it is one constant on every platform. Where MAXALIGN
- * is smaller (32-bit x86) the first page has a few bytes of slack and the
- * ceiling is merely conservative. The static asserts keep the number honest
- * against layout changes, at that same fixed alignment.
+ * Derived at 8-byte alignment, the largest MAXALIGN PostgreSQL uses, so it
+ * is one constant on every platform; where MAXALIGN is smaller the head has
+ * a few bytes of slack and the threshold is merely conservative. The static
+ * asserts keep the number honest against layout changes.
  */
-#define PRISM_INDEX_MAX_DIM 1968
+#define PRISM_INDEX_NARROW_MAX_DIM 1968
 
 #define PRISM_CEILING_ALIGN(len) (((size_t)(len) + 7) & ~(size_t)7)
 
@@ -262,16 +271,57 @@ static_assert(
 		BLCKSZ - PRISM_CEILING_ALIGN(SizeOfPageHeaderData) -
 						sizeof(PrismPostingPageOpaque) -
 						PRISM_CEILING_ALIGN(
-								PRISM_INDEX_MAX_DIM * sizeof(float)) >=
-				PRISM_POSTING_ENTRY_SIZE(PRISM_INDEX_MAX_DIM),
-		"posting first page must fit the encode reference plus one entry");
+								PRISM_INDEX_NARROW_MAX_DIM * sizeof(float)) >=
+				PRISM_POSTING_ENTRY_SIZE(PRISM_INDEX_NARROW_MAX_DIM),
+		"an inline head must fit the encode reference plus one entry");
 static_assert(
 		BLCKSZ - PRISM_CEILING_ALIGN(SizeOfPageHeaderData) -
 						sizeof(PrismPostingPageOpaque) -
 						PRISM_CEILING_ALIGN(
-								(PRISM_INDEX_MAX_DIM + 1) * sizeof(float)) <
-				PRISM_POSTING_ENTRY_SIZE(PRISM_INDEX_MAX_DIM + 1),
-		"the ceiling is tight: one dimension more must not fit");
+								(PRISM_INDEX_NARROW_MAX_DIM + 1) *
+								sizeof(float)) <
+				PRISM_POSTING_ENTRY_SIZE(PRISM_INDEX_NARROW_MAX_DIM + 1),
+		"the inline threshold is tight: one dimension more must not fit");
+
+/*
+ * Hard dimension ceiling for the index layout. Spilling removes the head
+ * page as a bound; what remains is that an overflow page holds at least one
+ * entry and a RaBitQ centroid entry fits a centroid page, both true far
+ * past this. The ceiling is the fast-rotation bound instead: a dimension
+ * above PRISM_INDEX_NARROW_MAX_DIM is admitted only when
+ * vs_fast_rotate_supported() holds (see prism_index_dim_supported), and
+ * the Hadamard transform's inline sign storage stops at
+ * VS_FAST_ROTATE_MAX_DIM. Above the narrow threshold the dense fallback
+ * would cost O(dim^2) memory per backend and an O(dim^3) build on first
+ * use, which is a footgun rather than a feature.
+ */
+#define PRISM_INDEX_MAX_DIM 8192
+
+static_assert(
+		PRISM_INDEX_MAX_DIM <= VS_FAST_ROTATE_MAX_DIM,
+		"every admitted dimension must rotate through the fast path");
+
+/*
+ * The one gate every build applies: an inline layout up to the narrow
+ * threshold, and past it a spilled layout only where the fast rotation
+ * applies (dim = 2^m * k with 2^m >= 4 and odd k <= 8: 2048, 3072, 4096,
+ * 6144, 8192 pass; 3000 does not).
+ */
+static inline bool
+prism_index_dim_supported(Dimension dim)
+{
+	if (dim == 0 || dim > PRISM_INDEX_MAX_DIM)
+		return false;
+	if (dim <= PRISM_INDEX_NARROW_MAX_DIM)
+		return true;
+	return vs_fast_rotate_supported(dim);
+}
+
+static_assert(
+		BLCKSZ - PRISM_CEILING_ALIGN(SizeOfPageHeaderData) -
+						sizeof(PrismPostingPageOpaque) >=
+				PRISM_POSTING_ENTRY_SIZE(PRISM_INDEX_MAX_DIM),
+		"an overflow page must hold one entry at the ceiling");
 
 /* Usable space on a BLCKSZ page (between content start and opaque) */
 static inline uint32_t
@@ -281,11 +331,80 @@ prism_posting_page_usable(void)
 		   sizeof(PrismPostingPageOpaque);
 }
 
-/* Space occupied by P^T * centroid on first pages (MAXALIGN'd) */
+/* Space occupied by P^T * centroid on an inline first page (MAXALIGN'd) */
 static inline uint32_t
 prism_posting_pt_centroid_size(Dimension dim)
 {
 	return (uint32_t)MAXALIGN(dim * sizeof(float));
+}
+
+/*
+ * True when the encode reference no longer fits beside one entry on the
+ * head, so the list stores it as a REFERENCE chain. Equivalent to
+ * dim > PRISM_INDEX_NARROW_MAX_DIM at 8-byte MAXALIGN; computed from the
+ * layout so a different alignment cannot disagree with the pages.
+ */
+static inline bool
+prism_posting_spilled(Dimension dim)
+{
+	return prism_posting_pt_centroid_size(dim) +
+				   PRISM_POSTING_ENTRY_SIZE(dim) >
+		   prism_posting_page_usable();
+}
+
+/* Floats one REFERENCE page carries: the whole usable area. */
+#define PRISM_POSTING_REF_CHUNK_FLOATS                     \
+	((BLCKSZ - PRISM_CEILING_ALIGN(SizeOfPageHeaderData) - \
+	  sizeof(PrismPostingPageOpaque)) /                    \
+	 sizeof(float))
+
+/*
+ * Pages that carry the encode reference: the head alone for an inline
+ * layout, else the head plus its REFERENCE continuations. This is also the
+ * head stride of the bulk-built head region (prism_leaf_head_blkno), so a
+ * leaf's reference pages are contiguous with its head.
+ */
+static inline uint32_t
+prism_posting_ref_pages(Dimension dim)
+{
+	if (!prism_posting_spilled(dim))
+		return 1;
+	return ((uint32_t)dim + PRISM_POSTING_REF_CHUNK_FLOATS - 1) /
+		   PRISM_POSTING_REF_CHUNK_FLOATS;
+}
+
+/* Floats held by reference page `chunk` (0 = head) of a spilled list. */
+static inline uint32_t
+prism_posting_ref_chunk_floats(Dimension dim, uint32_t chunk)
+{
+	uint32_t start = chunk * (uint32_t)PRISM_POSTING_REF_CHUNK_FLOATS;
+
+	if (start >= dim)
+		return 0;
+	return (dim - start) < PRISM_POSTING_REF_CHUNK_FLOATS
+				 ? (dim - start)
+				 : (uint32_t)PRISM_POSTING_REF_CHUNK_FLOATS;
+}
+
+/*
+ * Head block of a leaf, and back. Heads sit in a region at first_posting
+ * with a fixed stride: 1 for an inline layout, prism_posting_ref_pages(dim)
+ * for a spilled one, so the reference pages follow their head. The stride
+ * is passed rather than derived from dim because the standalone in-RAM
+ * build addresses leaves by index (first_posting 0, stride 1).
+ */
+static inline BlockNumber
+prism_leaf_head_blkno(
+		BlockNumber first_posting, uint32_t leaf, uint32_t stride)
+{
+	return first_posting + (BlockNumber)leaf * stride;
+}
+
+static inline uint32_t
+prism_route_head_to_leaf(
+		BlockNumber first_posting, BlockNumber head, uint32_t stride)
+{
+	return (uint32_t)(head - first_posting) / stride;
 }
 
 /* Max entries on an overflow page (no pt_centroid) */
@@ -299,16 +418,16 @@ prism_posting_max_entries(Dimension dim)
 static inline uint32_t
 prism_posting_max_entries_first(Dimension dim)
 {
-	uint32_t usable = prism_posting_page_usable();
-	uint32_t pt		= prism_posting_pt_centroid_size(dim);
-
-	/* Past PRISM_INDEX_MAX_DIM the reference alone overruns the page, and an
-	 * unsigned subtraction would report a capacity of millions -- which the
-	 * count checks use as their bound. */
-	if (pt >= usable)
+	/* A spilled head carries only a reference chunk. Guarded rather than
+	 * subtracted blindly: past the inline threshold the reference alone can
+	 * exceed the page, and an unsigned subtraction would report a capacity
+	 * of millions -- which the count checks use as their bound. */
+	if (prism_posting_spilled(dim))
 		return 0;
 
-	return (usable - pt) / PRISM_POSTING_ENTRY_SIZE(dim);
+	return (prism_posting_page_usable() -
+			prism_posting_pt_centroid_size(dim)) /
+		   PRISM_POSTING_ENTRY_SIZE(dim);
 }
 
 /* Buffer size for a flat page with count entries */
@@ -429,8 +548,9 @@ prism_posting_content(Page page)
 }
 
 /*
- * On first pages, P^T * centroid is stored right after PageHeader,
- * before the SoA content. Content starts after pt_centroid area.
+ * On an inline first page, P^T * centroid is stored right after PageHeader,
+ * before the entries. On a REFERENCE page it is that page's chunk of the
+ * reference; prism_posting_reference_read gathers the whole vector.
  */
 static inline const float *
 prism_posting_pt_centroid(Page page)
@@ -444,11 +564,58 @@ prism_posting_pt_centroid_mut(Page page)
 	return (float *)PageGetContents(page);
 }
 
+/*
+ * Entry content of a first page. A REFERENCE head has no entries, so its
+ * content is the (empty) start of the page rather than a pointer formed
+ * past its end.
+ */
 static inline char *
 prism_posting_content_first(Page page, Dimension dim)
 {
+	if (prism_posting_opaque(page)->flags & PRISM_POSTING_PAGE_REFERENCE)
+		return PageGetContents(page);
 	return PageGetContents(page) + prism_posting_pt_centroid_size(dim);
 }
+
+/*
+ * Gather a posting list's encode reference, inline or spilled, into `out`
+ * (dim floats). Reads the head and any REFERENCE continuations one page at
+ * a time, releasing each before the next (the PG storage pins a single
+ * buffer). Returns the first page that holds entries: the head itself for
+ * an inline layout, the page after the last chunk for a spilled one, or
+ * InvalidBlockNumber when the chain ends with the reference. Errors out on
+ * a chain that is not what the layout says it must be.
+ */
+BlockNumber prism_posting_reference_read(
+		VsStorage *storage, BlockNumber head, Dimension dim, float *out);
+
+/*
+ * The same gather for a caller that already copied the head's chunk (chunk
+ * 0) while it had the head pinned: continues at `next`, the head's
+ * next_blkno, with chunk 1. Inline layouts have nothing left to read and
+ * get `next` back unchanged.
+ */
+BlockNumber prism_posting_reference_read_rest(
+		VsStorage  *storage,
+		BlockNumber head,
+		BlockNumber next,
+		uint32_t	cluster_id,
+		Dimension	dim,
+		float	   *out);
+
+/*
+ * Lay out reference page `chunk` of a spilled list in `page`: init as a
+ * REFERENCE page (FIRST for chunk 0, OVERFLOW otherwise, plus `extra_flags`)
+ * and copy its chunk of `ref`. next_blkno is left Invalid for the caller to
+ * link.
+ */
+void prism_posting_reference_page_fill(
+		Page		 page,
+		uint32_t	 cluster_id,
+		Dimension	 dim,
+		uint32_t	 chunk,
+		const float *ref,
+		uint16_t	 extra_flags);
 
 /* ----------------------------------------------------------------
  * Chain walks
@@ -523,7 +690,11 @@ void prism_posting_chain_mutate(
 static inline char *
 prism_posting_page_content(Page page, Dimension dim)
 {
-	return (prism_posting_opaque(page)->flags & PRISM_POSTING_PAGE_FIRST)
+	uint16_t flags = prism_posting_opaque(page)->flags;
+
+	if (flags & PRISM_POSTING_PAGE_REFERENCE)
+		return prism_posting_content(page);
+	return (flags & PRISM_POSTING_PAGE_FIRST)
 				 ? prism_posting_content_first(page, dim)
 				 : prism_posting_content(page);
 }
@@ -695,29 +866,40 @@ prism_fastscan_group_section_bytes(Dimension dim)
 					  VS_FASTSCAN_GROUP_BYTES(dim) + sizeof(uint32_t));
 }
 
+/*
+ * Groups a fastscan page holds. A spilled head holds none (it carries a
+ * reference chunk); an inline first page gives up the reference's room.
+ * Guarded, not subtracted blindly: past the inline threshold the reference
+ * exceeds the page and an unsigned subtraction would wrap to a capacity of
+ * millions and let fastscan=auto select a layout no page can hold.
+ */
+static inline uint32_t
+prism_fastscan_max_groups(Dimension dim, bool is_first)
+{
+	uint32_t section = prism_fastscan_group_section_bytes(dim);
+	uint32_t usable	 = prism_posting_page_usable();
+
+	if (is_first)
+	{
+		if (prism_posting_spilled(dim))
+			return 0;
+		usable -= prism_posting_pt_centroid_size(dim);
+	}
+	return usable / section;
+}
+
 /* Max entries on a fastscan overflow page */
 static inline uint32_t
 prism_fastscan_max_entries(Dimension dim)
 {
-	uint32_t section = prism_fastscan_group_section_bytes(dim);
-	uint32_t usable	 = prism_posting_page_usable();
-	uint32_t ngroups = usable / section;
-	return ngroups * VS_FASTSCAN_GROUP;
+	return prism_fastscan_max_groups(dim, false) * VS_FASTSCAN_GROUP;
 }
 
 /* Max entries on a fastscan first page (with pt_centroid) */
 static inline uint32_t
 prism_fastscan_max_entries_first(Dimension dim)
 {
-	uint32_t section = prism_fastscan_group_section_bytes(dim);
-	uint32_t usable	 = prism_posting_page_usable();
-	uint32_t pt		 = prism_posting_pt_centroid_size(dim);
-
-	if (pt >= usable)
-		return 0; /* see prism_posting_max_entries_first */
-
-	uint32_t ngroups = (usable - pt) / section;
-	return ngroups * VS_FASTSCAN_GROUP;
+	return prism_fastscan_max_groups(dim, true) * VS_FASTSCAN_GROUP;
 }
 
 /*
@@ -749,6 +931,8 @@ prism_posting_page_cap(const PrismPostingPageOpaque *op, Dimension dim)
 {
 	bool first = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0;
 
+	if (op->flags & PRISM_POSTING_PAGE_REFERENCE)
+		return 0;
 	if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
 		return first ? prism_fastscan_max_entries_first(dim)
 					 : prism_fastscan_max_entries(dim);
@@ -765,17 +949,6 @@ prism_posting_page_cap(const PrismPostingPageOpaque *op, Dimension dim)
  */
 void prism_posting_check_count(
 		BlockNumber blkno, const PrismPostingPageOpaque *op, Dimension dim);
-
-/* Max groups on a page */
-static inline uint32_t
-prism_fastscan_max_groups(Dimension dim, bool is_first)
-{
-	uint32_t section = prism_fastscan_group_section_bytes(dim);
-	uint32_t usable	 = prism_posting_page_usable();
-	if (is_first)
-		usable -= prism_posting_pt_centroid_size(dim);
-	return usable / section;
-}
 
 /* ----------------------------------------------------------------
  * Fastscan group accessors

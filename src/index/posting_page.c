@@ -40,10 +40,15 @@ prism_posting_page_init(
 {
 	PageInit(page, BLCKSZ, sizeof(PrismPostingPageOpaque));
 
-	/* First pages have reduced capacity due to pt_centroid */
-	uint32_t				max	   = (flags & PRISM_POSTING_PAGE_FIRST)
-										   ? prism_posting_max_entries_first(dim)
-										   : prism_posting_max_entries(dim);
+	/* An inline first page gives up room to pt_centroid; a REFERENCE page
+	 * holds a chunk of it and no entries at all. */
+	uint32_t max;
+	if (flags & PRISM_POSTING_PAGE_REFERENCE)
+		max = 0;
+	else if (flags & PRISM_POSTING_PAGE_FIRST)
+		max = prism_posting_max_entries_first(dim);
+	else
+		max = prism_posting_max_entries(dim);
 	PrismPostingPageOpaque *opaque = prism_posting_opaque(page);
 	opaque->next_blkno			   = InvalidBlockNumber;
 	opaque->cluster_id			   = cluster_id;
@@ -94,6 +99,131 @@ prism_posting_page_add(
 		opaque->flags &= (uint16_t)~PRISM_POSTING_PAGE_TOMBSTONED;
 
 	return true;
+}
+
+/* ----------------------------------------------------------------
+ * Encode reference, inline or spilled
+ * ---------------------------------------------------------------- */
+
+void
+prism_posting_reference_page_fill(
+		Page		 page,
+		uint32_t	 cluster_id,
+		Dimension	 dim,
+		uint32_t	 chunk,
+		const float *ref,
+		uint16_t	 extra_flags)
+{
+	uint16_t flags = (chunk == 0 ? PRISM_POSTING_PAGE_FIRST
+								 : PRISM_POSTING_PAGE_OVERFLOW) |
+					 PRISM_POSTING_PAGE_REFERENCE | extra_flags;
+	uint32_t start	 = chunk * (uint32_t)PRISM_POSTING_REF_CHUNK_FLOATS;
+	uint32_t nfloats = prism_posting_ref_chunk_floats(dim, chunk);
+
+	prism_posting_page_init(page, cluster_id, dim, flags);
+	memcpy(prism_posting_pt_centroid_mut(page),
+		   ref + start,
+		   (size_t)nfloats * sizeof(float));
+}
+
+/* Chunks [first_chunk, npages) of a reference chain starting at blk. */
+static BlockNumber
+reference_read_chain(
+		VsStorage  *storage,
+		BlockNumber head,
+		BlockNumber blk,
+		uint32_t	first_chunk,
+		uint32_t	cluster_id,
+		Dimension	dim,
+		float	   *out)
+{
+	uint32_t npages = prism_posting_ref_pages(dim);
+
+	for (uint32_t chunk = first_chunk; chunk < npages; chunk++)
+	{
+		if (blk == InvalidBlockNumber)
+			vs_error(
+					VS_EXTENSION_NAME
+					": posting list %u ends after %u of %u reference "
+					"pages; the index may be corrupted -- REINDEX it",
+					head,
+					chunk,
+					npages);
+
+		Page page = vs_storage_read_page(storage, blk);
+		if (!prism_page_is_posting(page))
+		{
+			vs_storage_release_page(storage, blk);
+			vs_error(
+					VS_EXTENSION_NAME
+					": block %u of posting list %u is not a posting page; "
+					"the index may be corrupted -- REINDEX it",
+					blk,
+					head);
+		}
+
+		const PrismPostingPageOpaque *op = prism_posting_opaque(page);
+		bool spilled = (op->flags & PRISM_POSTING_PAGE_REFERENCE) != 0;
+		bool first	 = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0;
+
+		/* The head says which layout the list has; every later chunk must
+		 * agree with it and belong to the same list. */
+		if (chunk == 0)
+			cluster_id = op->cluster_id;
+		if (first != (chunk == 0) || spilled != prism_posting_spilled(dim) ||
+			op->cluster_id != cluster_id)
+		{
+			vs_storage_release_page(storage, blk);
+			vs_error(
+					VS_EXTENSION_NAME
+					": block %u is not reference page %u of posting list "
+					"%u (flags 0x%04X, cluster %u); the index may be "
+					"corrupted -- REINDEX it",
+					blk,
+					chunk,
+					head,
+					op->flags,
+					op->cluster_id);
+		}
+
+		uint32_t start	 = chunk * (uint32_t)PRISM_POSTING_REF_CHUNK_FLOATS;
+		uint32_t nfloats = spilled ? prism_posting_ref_chunk_floats(dim, chunk)
+								   : dim;
+		memcpy(out + start,
+			   prism_posting_pt_centroid(page),
+			   (size_t)nfloats * sizeof(float));
+
+		BlockNumber next = op->next_blkno;
+		vs_storage_release_page(storage, blk);
+
+		/* An inline head holds its own entries; a spilled chain's entries
+		 * begin past the last chunk. */
+		if (!spilled)
+			return blk;
+		blk = next;
+	}
+	return blk;
+}
+
+BlockNumber
+prism_posting_reference_read(
+		VsStorage *storage, BlockNumber head, Dimension dim, float *out)
+{
+	return reference_read_chain(storage, head, head, 0, 0, dim, out);
+}
+
+BlockNumber
+prism_posting_reference_read_rest(
+		VsStorage  *storage,
+		BlockNumber head,
+		BlockNumber next,
+		uint32_t	cluster_id,
+		Dimension	dim,
+		float	   *out)
+{
+	if (!prism_posting_spilled(dim))
+		return next;
+	return reference_read_chain(storage, head, next, 1, cluster_id, dim, out);
 }
 
 /* ----------------------------------------------------------------

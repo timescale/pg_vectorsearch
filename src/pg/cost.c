@@ -78,6 +78,9 @@ typedef struct CostInputs
 	bool   flat_tree;	   /* one level: the descent reads all of it */
 	double descent_pages;
 	double pages_per_list;
+	/* Pages a routed list's reference occupies: 1 (its head) for an inline
+	 * layout, the head plus its REFERENCE pages once the dimension spills. */
+	double ref_pages;
 	double probed_pages; /* pages of the lists this query will scan */
 	double scanned_pl_entries;
 	/*
@@ -387,9 +390,10 @@ gather_cost_inputs(
 	 * query rather than uniformly.
 	 */
 	double posting_pages = prism_index_posting_pages(
-			(double)info->pages, (double)si.ncentroid_pages);
+			(double)info->pages, in->dim, (double)si.ncentroid_pages);
 
 	in->pages_per_list = posting_pages / (double)in->nlist;
+	in->ref_pages	   = (double)prism_posting_ref_pages(in->dim);
 
 	in->probed_pages = (double)nprobe * in->pages_per_list;
 
@@ -564,7 +568,8 @@ search_page_cost(const CostInputs *in, PlannerInfo *root, IndexOptInfo *info)
 						(in->flat_tree ? in->spc_seq : in->spc_random);
 
 	/*
-	 * The scan prefetches every routed head page before reading any, so
+	 * The scan prefetches every routed head page before reading any (a
+	 * spilled layout reads its reference pages right behind the head), so
 	 * these are a batch of overlapped reads rather than seeks and are
 	 * priced sequentially -- except where effective_io_concurrency is zero
 	 * and the storage layer's prefetch is a no-op, which is the same test
@@ -573,7 +578,7 @@ search_page_cost(const CostInputs *in, PlannerInfo *root, IndexOptInfo *info)
 	 * the closest the planner's currency allows.
 	 */
 	double head_io = pages_fetched_per_scan(
-							 in->n_route,
+							 in->n_route * in->ref_pages,
 							 info->pages,
 							 (double)info->pages,
 							 in->loop_count,
@@ -588,7 +593,8 @@ search_page_cost(const CostInputs *in, PlannerInfo *root, IndexOptInfo *info)
 	 * the build laying a chain out contiguously and the scan walking it
 	 * forward.
 	 */
-	double chain_pages = (double)in->nprobe * (in->pages_per_list - 1.0);
+	double chain_pages = (double)in->nprobe *
+						 (in->pages_per_list - in->ref_pages);
 
 	if (chain_pages < 0.0)
 		chain_pages = 0.0;
@@ -747,6 +753,6 @@ prism_cost_estimate(
 
 	/* The pages search_page_cost prices, so a parallel plan divides the
 	 * same count this estimate was built from. */
-	*index_pages = in.descent_pages + in.n_route +
-				   (double)in.nprobe * (in.pages_per_list - 1.0);
+	*index_pages = in.descent_pages + in.n_route * in.ref_pages +
+				   (double)in.nprobe * (in.pages_per_list - in.ref_pages);
 }

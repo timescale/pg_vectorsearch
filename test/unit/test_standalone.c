@@ -383,10 +383,12 @@ tally_page(PrismPostingChainPos *pos, void *state)
 static void
 verify_head_meta(VsTestResult *result, PrismIndex *idx)
 {
-	VsStorage *st = idx->base.posting_storage;
+	VsStorage *st	  = idx->base.posting_storage;
+	uint32_t   stride = prism_posting_ref_pages(idx->base.dim);
 	for (uint32_t c = 0; c < idx->nlist; c++)
 	{
-		BlockNumber head = idx->first_posting + c;
+		BlockNumber head =
+				prism_leaf_head_blkno(idx->first_posting, c, stride);
 		if (head == InvalidBlockNumber)
 			continue;
 
@@ -529,6 +531,127 @@ TEST(query_exec_recall_pages_parallel_depth3)
 
 	prism_query_ctx_destroy(qctx);
 	prism_index_destroy(idx);
+}
+
+/*
+ * A spilled dimension end to end: the paged build (serial and parallel)
+ * lays out reference chains and strided heads, and the paged query gathers
+ * them. Self-retrieval rather than brute-force recall: uniform random data
+ * at 4096 dimensions has no neighbors to speak of (every pair is nearly
+ * equidistant), while a stored vector queried exactly is at distance zero
+ * and must come back first. The in-RAM build addresses leaves by index
+ * (stride 1) and must keep working too.
+ */
+static void
+check_wide_dim_recall(VsTestResult *result, int nworkers, bool paged)
+{
+	uint32_t dim = 4096, nvecs = 600, k = 5, nlist = 6;
+	float	*vecs = make_vectors(nvecs, dim, 42);
+
+	PrismIndexConfig config = {
+			.nlist		   = nlist,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = paged ? PRISM_POSTING_FMT_PAGES
+								   : PRISM_POSTING_FMT_FLAT,
+			.nworkers	   = nworkers,
+	};
+
+	PrismIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "build at 4096 should succeed");
+	if (paged)
+	{
+		/* Block 0 is the metapage; the mean's three reference pages follow
+		 * it, so the centroid region starts at block 4. */
+		ASSERT_EQ(
+				prism_first_centroid_blkno(dim),
+				idx->base.first_centroid,
+				"the centroid region starts past the mean's pages");
+		ASSERT_EQ(4u, idx->base.first_centroid, "which is block 4 at 4096");
+		verify_head_meta(result, idx);
+	}
+
+	PrismQueryCtx *qctx	 = prism_query_ctx_create(idx, k, nlist);
+	uint32_t	   found = 0, nqueries = 40;
+	for (uint32_t q = 0; q < nqueries; q++)
+	{
+		uint32_t vid = q * 13;
+		uint32_t result_ids[5];
+		uint32_t count = prism_query_exec(
+				qctx,
+				vecs + (size_t)vid * dim,
+				k,
+				nlist,
+				VS_DISTANCE_MODE_ASYMMETRIC,
+				true,
+				result_ids);
+		if (count >= 1 && result_ids[0] == vid)
+			found++;
+	}
+	/* Every list is probed and the rerank is exact, so a stored vector is
+	 * always its own nearest neighbour. */
+	ASSERT_EQ(nqueries, found, "a stored vector retrieves itself at 4096");
+
+	prism_query_ctx_destroy(qctx);
+	prism_index_destroy(idx);
+}
+
+TEST(wide_dim_paged_serial)
+{
+	check_wide_dim_recall(result, 0, true);
+}
+
+TEST(wide_dim_paged_parallel)
+{
+	check_wide_dim_recall(result, 4, true);
+}
+
+TEST(wide_dim_in_ram)
+{
+	check_wide_dim_recall(result, 0, false);
+}
+
+/* The gate: a dimension past the inline threshold that the fast rotation
+ * cannot handle is refused, not built with a dense matrix. */
+/* Uncompressed centroids are whole vectors on a centroid page; where none
+ * fits, the build refuses up front rather than failing mid-write. */
+TEST(wide_dim_rejects_float_centroids)
+{
+	uint32_t dim = 4096, nvecs = 50;
+	float	*vecs = make_vectors(nvecs, dim, 1);
+
+	PrismIndexConfig config = {
+			.nlist		   = 2,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_FLOAT,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+	};
+	ASSERT_NULL(
+			build_from_array(vecs, nvecs, dim, &config),
+			"float32 centroids do not fit a page at 4096");
+	config.centroid_fmt = PRISM_CENTROID_FMT_HALF;
+	ASSERT_NULL(
+			build_from_array(vecs, nvecs, dim, &config),
+			"nor float16 past 4072");
+}
+
+TEST(wide_dim_rejects_non_fast_rotate)
+{
+	uint32_t dim = 3000, nvecs = 50;
+	float	*vecs = make_vectors(nvecs, dim, 1);
+
+	PrismIndexConfig config = {
+			.nlist		   = 2,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+	};
+	ASSERT_NULL(
+			build_from_array(vecs, nvecs, dim, &config),
+			"3000 = 8 * 375 is refused");
 }
 
 TEST(query_exec_null_fails)

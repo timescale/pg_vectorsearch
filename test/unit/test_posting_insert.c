@@ -856,3 +856,52 @@ TEST(tombstoned_fastscan_lane_excluded_despite_perfect_stale_match)
 	vs_free(pt_query_hi);
 	vs_rabitq_destroy(params);
 }
+
+/*
+ * Inserting into a spilled list: the reference comes from the chain, and the
+ * tail of an empty list is its last reference page, which has no room, so the
+ * first insert opens the first entry page.
+ */
+TEST(insert_into_spilled_list)
+{
+	Dimension		dim		 = 4096;
+	TestPageStorage st		 = make_test_storage(32);
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
+	uint32_t		nvecs	 = 40;
+	float		   *vecs	 = make_test_vectors(nvecs, dim);
+	RaBitQScratch	scratch;
+	vs_rabitq_scratch_init(&scratch, dim);
+
+	/* Empty list, three inserts. */
+	BlockNumber head =
+			build_cluster(&st, params, dim, centroid, vecs, 0, false);
+	for (uint32_t i = 0; i < 3; i++)
+		insert_vec(
+				&st, params, dim, head, i, vecs + (size_t)i * dim, &scratch);
+	ASSERT_EQ(
+			3u,
+			scan_count(&st, params, dim, centroid, head, 64, false),
+			"three inserts into an empty spilled list are scanned");
+	{
+		Page hp = vs_storage_read_page(&st.base, head);
+		ASSERT_EQ(3u, prism_posting_head_live_count(hp), "live_count");
+		ASSERT_EQ(
+				head + prism_posting_ref_pages(dim),
+				prism_posting_head_tail(hp),
+				"the tail is the first entry page");
+	}
+
+	/* A built list, inserts crossing a page boundary (15 per page). */
+	head = build_cluster(&st, params, dim, centroid, vecs, 20, false);
+	for (uint32_t i = 20; i < nvecs; i++)
+		insert_vec(
+				&st, params, dim, head, i, vecs + (size_t)i * dim, &scratch);
+	ASSERT_EQ(
+			nvecs,
+			scan_count(&st, params, dim, centroid, head, 64, false),
+			"built and inserted entries are all scanned");
+
+	vs_rabitq_scratch_cleanup(&scratch);
+	vs_rabitq_destroy(params);
+}

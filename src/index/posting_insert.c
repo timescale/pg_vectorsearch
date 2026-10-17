@@ -51,18 +51,36 @@ prism_posting_insert_one(
 		return false;
 	}
 
-	uint32_t	 cluster_id = hop->cluster_id;
-	BlockNumber	 tail_blkno = hop->tail_blkno;
-	uint32_t	 live		= hop->live_count;
-	const float *pt_cent	= prism_posting_pt_centroid(head);
+	uint32_t	cluster_id = hop->cluster_id;
+	BlockNumber tail_blkno = hop->tail_blkno;
+	uint32_t	live	   = hop->live_count;
 
 	/* pt_residual = pt_input - pt_centroid (P^T linear). Reuse scratch
-	 * (encode_from_pt only touches scratch->xu_cb). */
+	 * (encode_from_pt only touches scratch->xu_cb). An inline head carries
+	 * the whole reference; a spilled one is gathered from its chain after
+	 * the head is released, since the storage pins one page at a time. */
 	float *pt_residual = scratch->transformed;
-	for (Dimension i = 0; i < dim; i++)
-		pt_residual[i] = pt_input[i] - pt_cent[i];
+	if (prism_posting_spilled(dim))
+	{
+		/* Chunk 0 off the pinned head, the rest from its chain. */
+		BlockNumber next = hop->next_blkno;
 
-	vs_storage_release_page(storage, head_blkno);
+		memcpy(scratch->residual,
+			   prism_posting_pt_centroid(head),
+			   (size_t)prism_posting_ref_chunk_floats(dim, 0) * sizeof(float));
+		vs_storage_release_page(storage, head_blkno);
+		prism_posting_reference_read_rest(
+				storage, head_blkno, next, cluster_id, dim, scratch->residual);
+		for (Dimension i = 0; i < dim; i++)
+			pt_residual[i] = pt_input[i] - scratch->residual[i];
+	}
+	else
+	{
+		const float *pt_cent = prism_posting_pt_centroid(head);
+		for (Dimension i = 0; i < dim; i++)
+			pt_residual[i] = pt_input[i] - pt_cent[i];
+		vs_storage_release_page(storage, head_blkno);
+	}
 
 	/* Encode relative to the leaf centroid. */
 	RaBitQData *rdata = vs_alloc(VS_RABITQ_DATA_SIZE(dim));
