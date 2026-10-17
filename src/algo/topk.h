@@ -56,8 +56,8 @@ typedef struct VsTopKEntry
 /* ----------------------------------------------------------------
  * Top-K collection
  *
- * Standalone: binary max-heap array for threshold tracking.
- * PG: pairing heap via opaque pointer (defined in src/pg/topk.c).
+ * Binary max-heap array for threshold tracking, in both the standalone
+ * and PG builds.
  * ---------------------------------------------------------------- */
 typedef struct VsTopK
 {
@@ -71,6 +71,14 @@ typedef struct VsTopK
 	uint32_t	 cand_capacity; /* allocated capacity */
 	uint32_t	 cur_src;		/* diagnostic: rank stamped onto inserts */
 	VsMemCtx	 memctx;		/* owning context for all allocations */
+
+	/* Id -> heap position map for vs_topk_insert's dedup lookup, built
+	 * on the first deduping insert. */
+	uint64_t *map_ids;	 /* open-addressing keys */
+	uint32_t *map_pos;	 /* heap position per slot, UINT32_MAX if free */
+	uint32_t *ub_slot;	 /* map slot per heap position */
+	uint32_t  map_mask;	 /* map slots - 1 */
+	uint32_t  map_shift; /* 64 - log2(map slots) */
 } VsTopK;
 
 /* ----------------------------------------------------------------
@@ -113,11 +121,13 @@ void vs_topk_reset(VsTopK *topk);
 void vs_topk_reset_to_k(VsTopK *topk, uint32_t k);
 
 /*
- * Same as vs_topk_insert but skips the O(k) per-insert dedup scan.
+ * Same as vs_topk_insert but skips the per-insert dedup lookup.
  * Use ONLY when the caller guarantees all ids are unique. The cluster
  * scan (where SOAR / boundary replicas can collide) must keep using
  * vs_topk_insert; centroid beam search and similar code that
  * inserts each candidate exactly once should use this fast path.
+ * It keeps a dedup map that vs_topk_insert built up to date, so the
+ * two can be mixed on one top-K.
  */
 void vs_topk_insert_unique(
 		VsTopK *topk, Distance distance, Distance error, uint64_t id);

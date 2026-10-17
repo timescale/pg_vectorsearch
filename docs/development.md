@@ -235,6 +235,15 @@ computation:
 ./bin/vectorsearch bench distance --json --quiet
 ```
 
+`bench topk` times the top-K a posting scan fills per query: the
+deduplicating insert, the extract, and the unique insert that centroid
+search uses, at several k:
+
+```bash
+# default: k=10,100,1000,5000, 50000 candidates per query
+./bin/vectorsearch bench topk
+```
+
 Comparing SIMD implementations is covered in [simd.md](simd.md#cli-benchmarks).
 
 `bench idset` times the id set the candidate extract deduplicates with,

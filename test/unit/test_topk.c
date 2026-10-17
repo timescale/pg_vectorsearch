@@ -507,6 +507,147 @@ TEST(topk_reset)
 }
 
 /* ----------------------------------------------------------------
+ * Dedup map vs a linear-scan reference heap
+ * ---------------------------------------------------------------- */
+
+/* Threshold heap maintained with a linear id scan per insert. The
+ * mapped heap must perform the same moves, so both arrays match
+ * entry for entry. */
+typedef struct RefHeap
+{
+	Distance ub[256];
+	uint64_t id[256];
+	uint32_t count;
+	uint32_t k;
+} RefHeap;
+
+static void
+ref_swap(RefHeap *h, uint32_t a, uint32_t b)
+{
+	Distance d = h->ub[a];
+	h->ub[a]   = h->ub[b];
+	h->ub[b]   = d;
+	uint64_t t = h->id[a];
+	h->id[a]   = h->id[b];
+	h->id[b]   = t;
+}
+
+static void
+ref_sift_down(RefHeap *h, uint32_t i)
+{
+	for (;;)
+	{
+		uint32_t l = 2 * i + 1, r = 2 * i + 2, m = i;
+		if (l < h->count && h->ub[l] > h->ub[m])
+			m = l;
+		if (r < h->count && h->ub[r] > h->ub[m])
+			m = r;
+		if (m == i)
+			return;
+		ref_swap(h, i, m);
+		i = m;
+	}
+}
+
+static void
+ref_insert(RefHeap *h, Distance lb, Distance ub, uint64_t id, bool unique)
+{
+	if (h->count == h->k && !(lb < h->ub[0]))
+		return;
+	for (uint32_t i = 0; !unique && i < h->count; i++)
+	{
+		if (h->id[i] == id)
+		{
+			if (ub < h->ub[i])
+			{
+				h->ub[i] = ub;
+				ref_sift_down(h, i);
+			}
+			return;
+		}
+	}
+	if (h->count < h->k)
+	{
+		uint32_t i = h->count++;
+		h->ub[i]   = ub;
+		h->id[i]   = id;
+		while (i > 0 && h->ub[i] > h->ub[(i - 1) / 2])
+		{
+			ref_swap(h, i, (i - 1) / 2);
+			i = (i - 1) / 2;
+		}
+	}
+	else if (ub < h->ub[0])
+	{
+		h->ub[0] = ub;
+		h->id[0] = id;
+		ref_sift_down(h, 0);
+	}
+}
+
+/* Heavy id reuse forces map hits, evictions and backward-shift
+ * deletes. Resets cover shrinking k, growing it within the allocated
+ * capacity and growing it past. Each round opens with unique inserts,
+ * so the map is built over a non-empty heap after a growing reset and
+ * kept current by unique inserts otherwise. */
+TEST(topk_dedup_map_matches_linear_scan)
+{
+	const uint32_t ks[]			  = {1, 7, 64, 200, 33, 150, 256};
+	uint64_t	   rng			  = 0x2545F4914F6CDD1DULL;
+	uint64_t	   next_unique_id = 1u << 20;
+	VsTopK		  *topk			  = vs_topk_create(ks[0]);
+
+	for (size_t round = 0; round < sizeof(ks) / sizeof(ks[0]); round++)
+	{
+		RefHeap ref = {.count = 0, .k = ks[round]};
+		vs_topk_reset_to_k(topk, ks[round]);
+
+		for (uint32_t step = 0; step < 20000; step++)
+		{
+			rng ^= rng << 13;
+			rng ^= rng >> 7;
+			rng ^= rng << 17;
+
+			Distance d	  = (float)(rng % 10000) / 100.0f;
+			Distance err  = (float)((rng >> 16) % 300) / 100.0f;
+			bool	 uniq = step < 8 || (rng >> 40) % 50 == 0;
+			uint64_t id	  = uniq ? next_unique_id++
+								 : (rng >> 24) % (3 * ks[round] + 1);
+
+			if (uniq)
+				vs_topk_insert_unique(topk, d, err, id);
+			else
+				vs_topk_insert(topk, d, err, id);
+			ref_insert(&ref, d - err, d + err, id, uniq);
+
+			ASSERT_EQ(ref.count, topk->ub_count, "heap size matches");
+			for (uint32_t i = 0; i < ref.count; i++)
+			{
+				ASSERT_TRUE(ref.id[i] == topk->ub_ids[i], "heap ids match");
+				ASSERT_TRUE(ref.ub[i] == topk->ub_heap[i], "heap ubs match");
+			}
+
+			if (topk->map_pos == NULL)
+				continue;
+			uint32_t used = 0;
+			for (uint32_t s = 0; s <= topk->map_mask; s++)
+				used += topk->map_pos[s] != UINT32_MAX;
+			ASSERT_EQ(topk->ub_count, used, "one map slot per heap entry");
+			for (uint32_t i = 0; i < topk->ub_count; i++)
+			{
+				uint32_t s = topk->ub_slot[i];
+				ASSERT_EQ(
+						i, topk->map_pos[s], "slot points back at its entry");
+				ASSERT_TRUE(
+						topk->map_ids[s] == topk->ub_ids[i],
+						"slot holds its id");
+			}
+		}
+	}
+	vs_topk_destroy(topk);
+}
+
+/* ----------------------------------------------------------------
  * Capped extraction (quickselect + dedup) vs brute force
  * ---------------------------------------------------------------- */
 

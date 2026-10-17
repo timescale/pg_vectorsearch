@@ -29,6 +29,7 @@ int cmd_bench_search(CmdContext *ctx);
 int cmd_bench_rabitq_kernel(CmdContext *ctx);
 int cmd_bench_page_score(CmdContext *ctx);
 int cmd_bench_fastscan_kernel(CmdContext *ctx);
+int cmd_bench_topk(CmdContext *ctx);
 
 #if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
 int cmd_verify_rabitq(CmdContext *ctx);
@@ -58,6 +59,7 @@ static const Command bench_commands[] = {
 		{"fastscan-kernel",
 		 cmd_bench_fastscan_kernel,
 		 "Benchmark fastscan VPSHUFB kernels"},
+		{"topk", cmd_bench_topk, "Benchmark top-K insert and dedup"},
 		{NULL, NULL, NULL},
 };
 
