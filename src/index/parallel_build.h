@@ -635,19 +635,18 @@ prism_refine_tile_leaves(uint32_t nleaves, Dimension dim, uint64_t cap_bytes)
 }
 
 /*
- * The per-refined-leaf head writer is the shared PrismLeafWriteFn from
- * posting_build.h: the leader rewrites each leaf's posting-list head with
- * the full-table pt_centroid; workers pass NULL (they never divide/write).
+ * The per-refined-leaf writer is prism_refine_publish_leaf: the leader
+ * rewrites each leaf's posting-list head and centroid-tree entry; workers
+ * pass NULL (they never divide/write).
  */
 
 /*
- * Refine the leaf encode references on the whole table, page-backed (one
- * pass; routing reads only the centroid pages, which refine never rewrites,
- * so the assignment is a fixed point): every row is routed exactly as the
- * query/insert do (prism_query_route k=1 over the centroid pages, head ->
- * leaf), per-leaf means
- * accumulate into the tiled DSM accumulator, and the leader rewrites each
- * leaf's head-page pt_centroid to the full-table mean. Both leader
+ * Refine the leaf encode references on the whole table, page-backed.
+ * Every row is routed exactly as the query and insert do (prism_query_route
+ * k=1 over the centroid pages, head -> leaf) and the per-leaf means
+ * accumulate into the tiled DSM accumulator. The leader then rewrites each
+ * leaf's head-page pt_centroid and the matching centroid-tree entry, after
+ * that tile's scan has finished. Both leader
  * (participant 0) and workers call it; gated by shared->refine so they
  * run the same barriers. The workers route with their own page-backed qs; the
  * leader passes qs == NULL (it does not scan) and a write_head callback.
