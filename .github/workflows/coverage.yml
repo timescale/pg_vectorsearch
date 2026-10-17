@@ -42,6 +42,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write  # For posting coverage comments
+      issues: write         # Sticky comments use the issues API
       pages: write          # For deploying to GitHub Pages
       id-token: write       # For GitHub Pages attestation
 
@@ -111,6 +112,7 @@ jobs:
 
       - name: Post coverage comment on PR
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         uses: marocchino/sticky-pull-request-comment@331f8f5b4215f0445d3c07b4967662a32a2d3e31 # v2
         with:
           header: coverage
