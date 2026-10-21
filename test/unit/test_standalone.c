@@ -384,7 +384,7 @@ static void
 verify_head_meta(VsTestResult *result, PrismIndex *idx)
 {
 	VsStorage *st	  = idx->base.posting_storage;
-	uint32_t   stride = prism_posting_ref_pages(idx->base.dim);
+	uint32_t   stride = prism_posting_reference_pages(idx->base.dim);
 	for (uint32_t c = 0; c < idx->nlist; c++)
 	{
 		BlockNumber head =

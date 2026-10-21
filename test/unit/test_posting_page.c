@@ -344,7 +344,7 @@ check_spilled_chain(
 		uint32_t		 nentries,
 		bool			 fixed)
 {
-	uint32_t	npages = prism_posting_ref_pages(dim);
+	uint32_t	npages = prism_posting_reference_pages(dim);
 	BlockNumber blk	   = head;
 	BlockNumber prev   = InvalidBlockNumber;
 
@@ -630,7 +630,7 @@ TEST(scan_spilled_cluster)
 	ASSERT_EQ(nvecs, scan.entries_scanned, "all entries scanned");
 	ASSERT_EQ(nvecs, topk.cand_count, "all entries in topk");
 	ASSERT_EQ(
-			prism_posting_ref_pages(dim) + 3,
+			prism_posting_reference_pages(dim) + 3,
 			scan.pages_read,
 			"reference pages plus three entry pages");
 
@@ -639,7 +639,10 @@ TEST(scan_spilled_cluster)
 	BlockNumber entries =
 			prism_posting_reference_read(&storage.base, head, dim, mine);
 	ASSERT_MEM_EQ(centroid, mine, dim * sizeof(float), "gather matches");
-	ASSERT_EQ(head + prism_posting_ref_pages(dim), entries, "entries block");
+	ASSERT_EQ(
+			head + prism_posting_reference_pages(dim),
+			entries,
+			"entries block");
 
 	vs_topk_cleanup(&topk);
 	vs_topk_init(&topk, nvecs);
@@ -652,7 +655,7 @@ TEST(scan_spilled_cluster)
 	prism_posting_scan_end_cluster(&scan);
 	ASSERT_EQ(nvecs, topk.cand_count, "all entries in topk again");
 	ASSERT_EQ(
-			prism_posting_ref_pages(dim) + 3,
+			prism_posting_reference_pages(dim) + 3,
 			scan.pages_read,
 			"the same page count as a self-gathering begin");
 
@@ -1018,34 +1021,34 @@ TEST(spill_threshold_pins_the_inline_layout)
 			"an inline head still holds an entry at the threshold");
 	ASSERT_EQ(
 			1u,
-			prism_posting_ref_pages(PRISM_INDEX_NARROW_MAX_DIM),
+			prism_posting_reference_pages(PRISM_INDEX_NARROW_MAX_DIM),
 			"an inline list has its reference on the head alone");
 
 	/* Reference pages: ceil(dim / floats-per-page), 2036 at 8 KB pages. */
-	ASSERT_EQ(2036u, (uint32_t)PRISM_POSTING_REF_CHUNK_FLOATS, "chunk");
-	ASSERT_EQ(1u, prism_posting_ref_pages(2036), "2036 fills one page");
-	ASSERT_EQ(2u, prism_posting_ref_pages(2037), "2037 needs two");
-	ASSERT_EQ(2u, prism_posting_ref_pages(4072), "4072 fills two");
-	ASSERT_EQ(3u, prism_posting_ref_pages(4073), "4073 needs three");
-	ASSERT_EQ(3u, prism_posting_ref_pages(4096), "4096 needs three");
-	ASSERT_EQ(5u, prism_posting_ref_pages(8192), "8192 needs five");
+	ASSERT_EQ(2036u, (uint32_t)PRISM_POSTING_REFERENCE_CHUNK_FLOATS, "chunk");
+	ASSERT_EQ(1u, prism_posting_reference_pages(2036), "2036 fills one page");
+	ASSERT_EQ(2u, prism_posting_reference_pages(2037), "2037 needs two");
+	ASSERT_EQ(2u, prism_posting_reference_pages(4072), "4072 fills two");
+	ASSERT_EQ(3u, prism_posting_reference_pages(4073), "4073 needs three");
+	ASSERT_EQ(3u, prism_posting_reference_pages(4096), "4096 needs three");
+	ASSERT_EQ(5u, prism_posting_reference_pages(8192), "8192 needs five");
 
 	for (Dimension dim = PRISM_INDEX_NARROW_MAX_DIM + 1;
 		 dim <= PRISM_INDEX_MAX_DIM;
 		 dim += 37)
 	{
-		uint32_t npages = prism_posting_ref_pages(dim);
+		uint32_t npages = prism_posting_reference_pages(dim);
 		uint32_t total	= 0;
 		for (uint32_t c = 0; c < npages; c++)
 		{
-			uint32_t n = prism_posting_ref_chunk_floats(dim, c);
+			uint32_t n = prism_posting_reference_chunk_floats(dim, c);
 			ASSERT_TRUE(n >= 1, "every reference page carries a chunk");
 			total += n;
 		}
 		ASSERT_EQ(dim, total, "the chunks cover the vector exactly");
 		ASSERT_EQ(
 				0u,
-				prism_posting_ref_chunk_floats(dim, npages),
+				prism_posting_reference_chunk_floats(dim, npages),
 				"nothing past the last chunk");
 
 		ASSERT_EQ(
@@ -1087,7 +1090,7 @@ TEST(spill_threshold_pins_the_inline_layout)
  */
 TEST(head_stride_round_trips)
 {
-	uint32_t strides[] = {1, prism_posting_ref_pages(4096)};
+	uint32_t strides[] = {1, prism_posting_reference_pages(4096)};
 	for (uint32_t s = 0; s < 2; s++)
 	{
 		for (uint32_t leaf = 0; leaf < 100; leaf += 7)
@@ -1099,7 +1102,7 @@ TEST(head_stride_round_trips)
 					"head -> leaf inverts leaf -> head");
 		}
 	}
-	ASSERT_EQ(3u, prism_posting_ref_pages(4096), "4096 strides by 3");
+	ASSERT_EQ(3u, prism_posting_reference_pages(4096), "4096 strides by 3");
 }
 
 /*
@@ -1110,7 +1113,7 @@ TEST(head_stride_round_trips)
 static void
 check_reference_roundtrip(VsTestResult *result, Dimension dim)
 {
-	uint32_t		npages = prism_posting_ref_pages(dim);
+	uint32_t		npages = prism_posting_reference_pages(dim);
 	TestPageStorage st	   = make_test_storage(npages + 2);
 	float		   *ref	   = vs_alloc((size_t)dim * sizeof(float));
 	float		   *got	   = vs_alloc((size_t)dim * sizeof(float));
@@ -1194,7 +1197,7 @@ TEST(reference_round_trips_inline_and_spilled)
 TEST(reference_read_rejects_a_foreign_chunk)
 {
 	Dimension		dim	   = 4096;
-	uint32_t		npages = prism_posting_ref_pages(dim);
+	uint32_t		npages = prism_posting_reference_pages(dim);
 	TestPageStorage st	   = make_test_storage(npages + 1);
 	float		   *ref	   = vs_alloc0((size_t)dim * sizeof(float));
 	float		   *got	   = vs_alloc((size_t)dim * sizeof(float));

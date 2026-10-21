@@ -117,8 +117,8 @@ prism_posting_reference_page_fill(
 	uint16_t flags = (chunk == 0 ? PRISM_POSTING_PAGE_FIRST
 								 : PRISM_POSTING_PAGE_OVERFLOW) |
 					 PRISM_POSTING_PAGE_REFERENCE | extra_flags;
-	uint32_t start	 = chunk * (uint32_t)PRISM_POSTING_REF_CHUNK_FLOATS;
-	uint32_t nfloats = prism_posting_ref_chunk_floats(dim, chunk);
+	uint32_t start	 = chunk * (uint32_t)PRISM_POSTING_REFERENCE_CHUNK_FLOATS;
+	uint32_t nfloats = prism_posting_reference_chunk_floats(dim, chunk);
 
 	prism_posting_page_init(page, cluster_id, dim, flags);
 	memcpy(prism_posting_pt_centroid_mut(page),
@@ -128,7 +128,7 @@ prism_posting_reference_page_fill(
 
 /* Chunks [first_chunk, npages) of a reference chain starting at blk. */
 static BlockNumber
-reference_read_chain(
+posting_reference_read_chain(
 		VsStorage  *storage,
 		BlockNumber head,
 		BlockNumber blk,
@@ -137,7 +137,7 @@ reference_read_chain(
 		Dimension	dim,
 		float	   *out)
 {
-	uint32_t npages = prism_posting_ref_pages(dim);
+	uint32_t npages = prism_posting_reference_pages(dim);
 
 	for (uint32_t chunk = first_chunk; chunk < npages; chunk++)
 	{
@@ -186,9 +186,11 @@ reference_read_chain(
 					op->cluster_id);
 		}
 
-		uint32_t start	 = chunk * (uint32_t)PRISM_POSTING_REF_CHUNK_FLOATS;
-		uint32_t nfloats = spilled ? prism_posting_ref_chunk_floats(dim, chunk)
-								   : dim;
+		uint32_t start = chunk *
+						 (uint32_t)PRISM_POSTING_REFERENCE_CHUNK_FLOATS;
+		uint32_t nfloats =
+				spilled ? prism_posting_reference_chunk_floats(dim, chunk)
+						: dim;
 		memcpy(out + start,
 			   prism_posting_pt_centroid(page),
 			   (size_t)nfloats * sizeof(float));
@@ -209,7 +211,7 @@ BlockNumber
 prism_posting_reference_read(
 		VsStorage *storage, BlockNumber head, Dimension dim, float *out)
 {
-	return reference_read_chain(storage, head, head, 0, 0, dim, out);
+	return posting_reference_read_chain(storage, head, head, 0, 0, dim, out);
 }
 
 BlockNumber
@@ -223,7 +225,8 @@ prism_posting_reference_read_rest(
 {
 	if (!prism_posting_spilled(dim))
 		return next;
-	return reference_read_chain(storage, head, next, 1, cluster_id, dim, out);
+	return posting_reference_read_chain(
+			storage, head, next, 1, cluster_id, dim, out);
 }
 
 /* ----------------------------------------------------------------

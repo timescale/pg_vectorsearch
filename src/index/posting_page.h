@@ -96,9 +96,9 @@
  * entries: entry_count and max_entries are 0. A posting list whose encode
  * reference does not fit beside an entry on its head (prism_posting_spilled)
  * stores it as a chain of these: the head (FIRST | REFERENCE) holds floats
- * [0, PRISM_POSTING_REF_CHUNK_FLOATS), each following page (OVERFLOW |
+ * [0, PRISM_POSTING_REFERENCE_CHUNK_FLOATS), each following page (OVERFLOW |
  * REFERENCE) the next chunk, and the entries start on the page after the
- * last chunk. The metapage's global mean spills the same way (see meta.h).
+ * last chunk. The global mean spills the same way (see index_base.h).
  */
 #define PRISM_POSTING_PAGE_REFERENCE 0x0020
 
@@ -250,13 +250,11 @@ typedef struct PrismFlatPostingHeader
 	 ~(PRISM_POSTING_ENTRY_ALIGN - 1u))
 
 /*
- * The widest dimension whose posting-list head holds the float encode
- * reference (MAXALIGN(dim * sizeof(float)) bytes) and at least one entry on
- * one page. Up to here the layout is the inline one; past it the reference
- * spills into a chain of REFERENCE pages (prism_posting_spilled). This is
- * also the widest dimension the float-format centroid page (~2036) and the
- * metapage's inline mean (2032) would have allowed, so it pins the
- * on-disk layout every index built before spilling existed has.
+ * A posting list's first page holds a full-precision encode reference (a
+ * vector of 32-bit floats). The reference fits into the first page, together
+ * with at least one entry, up to dimension PRISM_INDEX_NARROW_MAX_DIM.
+ * Vectors of higher dimensions spill over to the following page(s) in a
+ * chain of reference pages (prism_posting_spilled).
  *
  * Derived at 8-byte alignment, the largest MAXALIGN PostgreSQL uses, so it
  * is one constant on every platform; where MAXALIGN is smaller the head has
@@ -284,16 +282,13 @@ static_assert(
 		"the inline threshold is tight: one dimension more must not fit");
 
 /*
- * Hard dimension ceiling for the index layout. Spilling removes the head
- * page as a bound; what remains is that an overflow page holds at least one
- * entry and a RaBitQ centroid entry fits a centroid page, both true far
- * past this. The ceiling is the fast-rotation bound instead: a dimension
- * above PRISM_INDEX_NARROW_MAX_DIM is admitted only when
+ * Hard dimension ceiling for the index layout, which is imposed by the
+ * Hadamard fast-rotation bound.
+ *
+ * A dimension above PRISM_INDEX_NARROW_MAX_DIM is admitted only when
  * vs_fast_rotate_supported() holds (see prism_index_dim_supported), and
  * the Hadamard transform's inline sign storage stops at
- * VS_FAST_ROTATE_MAX_DIM. Above the narrow threshold the dense fallback
- * would cost O(dim^2) memory per backend and an O(dim^3) build on first
- * use, which is a footgun rather than a feature.
+ * VS_FAST_ROTATE_MAX_DIM.
  */
 #define PRISM_INDEX_MAX_DIM 8192
 
@@ -353,7 +348,7 @@ prism_posting_spilled(Dimension dim)
 }
 
 /* Floats one REFERENCE page carries: the whole usable area. */
-#define PRISM_POSTING_REF_CHUNK_FLOATS                     \
+#define PRISM_POSTING_REFERENCE_CHUNK_FLOATS               \
 	((BLCKSZ - PRISM_CEILING_ALIGN(SizeOfPageHeaderData) - \
 	  sizeof(PrismPostingPageOpaque)) /                    \
 	 sizeof(float))
@@ -365,33 +360,34 @@ prism_posting_spilled(Dimension dim)
  * leaf's reference pages are contiguous with its head.
  */
 static inline uint32_t
-prism_posting_ref_pages(Dimension dim)
+prism_posting_reference_pages(Dimension dim)
 {
 	if (!prism_posting_spilled(dim))
 		return 1;
-	return ((uint32_t)dim + PRISM_POSTING_REF_CHUNK_FLOATS - 1) /
-		   PRISM_POSTING_REF_CHUNK_FLOATS;
+	return ((uint32_t)dim + PRISM_POSTING_REFERENCE_CHUNK_FLOATS - 1) /
+		   PRISM_POSTING_REFERENCE_CHUNK_FLOATS;
 }
 
 /* Floats held by reference page `chunk` (0 = head) of a spilled list. */
 static inline uint32_t
-prism_posting_ref_chunk_floats(Dimension dim, uint32_t chunk)
+prism_posting_reference_chunk_floats(Dimension dim, uint32_t chunk)
 {
-	uint32_t start = chunk * (uint32_t)PRISM_POSTING_REF_CHUNK_FLOATS;
+	uint32_t start = chunk * (uint32_t)PRISM_POSTING_REFERENCE_CHUNK_FLOATS;
 
 	if (start >= dim)
 		return 0;
-	return (dim - start) < PRISM_POSTING_REF_CHUNK_FLOATS
+	return (dim - start) < PRISM_POSTING_REFERENCE_CHUNK_FLOATS
 				 ? (dim - start)
-				 : (uint32_t)PRISM_POSTING_REF_CHUNK_FLOATS;
+				 : (uint32_t)PRISM_POSTING_REFERENCE_CHUNK_FLOATS;
 }
 
 /*
  * Head block of a leaf, and back. Heads sit in a region at first_posting
- * with a fixed stride: 1 for an inline layout, prism_posting_ref_pages(dim)
- * for a spilled one, so the reference pages follow their head. The stride
- * is passed rather than derived from dim because the standalone in-RAM
- * build addresses leaves by index (first_posting 0, stride 1).
+ * with a fixed stride: 1 for an inline layout,
+ * prism_posting_reference_pages(dim) for a spilled one, so the reference
+ * pages follow their head. The stride is passed rather than derived from
+ * dim because the standalone in-RAM build addresses leaves by index
+ * (first_posting 0, stride 1).
  */
 static inline BlockNumber
 prism_leaf_head_blkno(

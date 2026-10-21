@@ -142,7 +142,7 @@ typedef struct PrismBuildRouteCtx
 	PrismSorter		   *sorter;		   /* cluster-keyed output (not owned) */
 	const RaBitQParams *rq_params;	   /* not owned */
 	VsStorage		   *storage;	   /* head-page reads (not owned) */
-	BlockNumber			first_posting; /* leaf c's head = first_posting + c */
+	BlockNumber			first_posting; /* see prism_leaf_head_blkno */
 	Dimension			dim;
 	double				soar_lambda;
 	double				boundary_epsilon;
@@ -226,7 +226,7 @@ typedef struct PrismHeadWriteCtx
 	bool				fastscan;
 	BlockNumber			first_posting; /* leaf c's head = first_posting + c *
 										* stride */
-	uint32_t stride;				   /* prism_posting_ref_pages(dim) */
+	uint32_t stride;				   /* prism_posting_reference_pages(dim) */
 	float	*pt;					   /* [dim] scratch */
 } PrismHeadWriteCtx;
 
@@ -245,7 +245,7 @@ prism_head_write_ctx_init(
 	h->dim			 = dim;
 	h->fastscan		 = fastscan;
 	h->first_posting = first_posting;
-	h->stride		 = prism_posting_ref_pages(dim);
+	h->stride		 = prism_posting_reference_pages(dim);
 	h->pt			 = vs_alloc((size_t)dim * sizeof(float));
 }
 

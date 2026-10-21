@@ -125,46 +125,60 @@ static bool advance_page(PrismPostingScan *scan);
  * Per-cluster begin / end
  * ---------------------------------------------------------------- */
 
+/*
+ * Reset the per-cluster state and open the first entry page at `entries`.
+ * `ref_pages` reference pages were already read to gather `ref` (NULL when
+ * the reference is read from the inline head instead).
+ */
+static void
+begin_cluster(
+		PrismPostingScan *scan,
+		RaBitQQueryState *qstate,
+		BlockNumber		  entries,
+		const float		 *ref,
+		uint32_t		  ref_pages)
+{
+	scan->qstate		  = qstate;
+	scan->cur_blkno		  = entries;
+	scan->cur_page		  = NULL;
+	scan->cur_content	  = NULL;
+	scan->cur_max_entries = 0;
+	scan->cur_count		  = 0;
+	scan->fs_lut_valid	  = false;
+	scan->pages_read	  = ref_pages;
+	scan->pages_skipped	  = 0;
+	scan->entries_scanned = 0;
+	scan->entries_pruned  = 0;
+	scan->cur_ref		  = ref;
+
+	/* Eagerly read the first page so an inline pt_centroid is accessible
+	 * via prism_posting_pt_centroid(scan->cur_page) before _cluster is
+	 * called. */
+	if (entries != InvalidBlockNumber)
+		advance_page(scan);
+}
+
 void
 prism_posting_scan_begin_cluster(
 		PrismPostingScan *scan,
 		RaBitQQueryState *qstate,
 		BlockNumber		  posting_head)
 {
-	scan->qstate		  = qstate;
-	scan->cur_blkno		  = posting_head;
-	scan->cur_page		  = NULL;
-	scan->cur_content	  = NULL;
-	scan->cur_max_entries = 0;
-	scan->cur_count		  = 0;
-	scan->fs_lut_valid	  = false;
-	scan->pages_read	  = 0;
-	scan->pages_skipped	  = 0;
-	scan->entries_scanned = 0;
-	scan->entries_pruned  = 0;
+	BlockNumber	 entries   = posting_head;
+	const float *ref	   = NULL;
+	uint32_t	 ref_pages = 0;
 
-	scan->cur_ref = NULL;
-
-	if (posting_head == InvalidBlockNumber)
-		return;
-
-	if (scan->spilled)
+	/* Gather a spilled reference chain first (one page at a time, released
+	 * before the next); its entries start past the last chunk. */
+	if (scan->spilled && posting_head != InvalidBlockNumber)
 	{
-		/* Gather the reference chain first (one page at a time, released
-		 * before the next), then open the first entry page. */
-		scan->cur_blkno = prism_posting_reference_read(
+		entries = prism_posting_reference_read(
 				scan->storage, posting_head, scan->dim, scan->pt_ref);
-		scan->cur_ref = scan->pt_ref;
-		scan->pages_read += prism_posting_ref_pages(scan->dim);
-		if (scan->cur_blkno != InvalidBlockNumber)
-			advance_page(scan);
-		return;
+		ref		  = scan->pt_ref;
+		ref_pages = prism_posting_reference_pages(scan->dim);
 	}
 
-	/* Eagerly read the first page so pt_centroid is accessible
-	 * via prism_posting_pt_centroid(scan->cur_page) before _cluster
-	 * is called. */
-	advance_page(scan);
+	begin_cluster(scan, qstate, entries, ref, ref_pages);
 }
 
 void
@@ -176,21 +190,12 @@ prism_posting_scan_begin_cluster_at(
 {
 	Assert(scan->spilled);
 
-	scan->qstate		  = qstate;
-	scan->cur_blkno		  = entries;
-	scan->cur_page		  = NULL;
-	scan->cur_content	  = NULL;
-	scan->cur_max_entries = 0;
-	scan->cur_count		  = 0;
-	scan->fs_lut_valid	  = false;
-	scan->pages_read	  = prism_posting_ref_pages(scan->dim);
-	scan->pages_skipped	  = 0;
-	scan->entries_scanned = 0;
-	scan->entries_pruned  = 0;
-	scan->cur_ref		  = ref;
-
-	if (entries != InvalidBlockNumber)
-		advance_page(scan);
+	begin_cluster(
+			scan,
+			qstate,
+			entries,
+			ref,
+			prism_posting_reference_pages(scan->dim));
 }
 
 const float *

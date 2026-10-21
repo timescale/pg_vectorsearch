@@ -393,7 +393,7 @@ gather_cost_inputs(
 			(double)info->pages, in->dim, (double)si.ncentroid_pages);
 
 	in->pages_per_list = posting_pages / (double)in->nlist;
-	in->ref_pages	   = (double)prism_posting_ref_pages(in->dim);
+	in->ref_pages	   = (double)prism_posting_reference_pages(in->dim);
 
 	in->probed_pages = (double)nprobe * in->pages_per_list;
 

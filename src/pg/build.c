@@ -314,14 +314,14 @@ write_meta_page(
 	/* A mean too wide for the metapage spills into the reference pages
 	 * right after it, reserved by the layout and chained like a posting
 	 * list's reference; amcache gathers them once per backend. */
-	uint32_t npages = prism_meta_mean_pages(dim);
+	uint32_t npages = prism_global_mean_pages(dim);
 	for (uint32_t chunk = 0; chunk < npages; chunk++)
 	{
-		BlockNumber blk = PRISM_META_MEAN_BLKNO + chunk;
+		BlockNumber blk = PRISM_GLOBAL_MEAN_BLKNO + chunk;
 		Page		p	= vs_storage_write_page(storage, blk);
 
 		prism_posting_reference_page_fill(
-				p, PRISM_META_MEAN_CLUSTER, dim, chunk, global_mean, 0);
+				p, PRISM_GLOBAL_MEAN_CLUSTER, dim, chunk, global_mean, 0);
 		if (chunk + 1 < npages)
 			prism_posting_opaque(p)->next_blkno = blk + 1;
 		vs_storage_commit_page(storage, blk);
@@ -770,7 +770,7 @@ sample_for_build(
 typedef struct RefineHeadState
 {
 	PrismQueryState *qs;
-	BlockNumber		 first_posting; /* leaf c's head = first_posting + c */
+	BlockNumber		 first_posting; /* see prism_leaf_head_blkno */
 	uint32_t		 nlist;
 	Dimension		 dim;
 	bool			 cosine;
@@ -893,7 +893,7 @@ serial_refine_heads(
  *
  * No in-RAM tree is materialized; the streamed tree's shape (leaf count +
  * depth) comes back through out_nlist/out_tree_nlevels. Posting-list heads
- * are formula-derived (first_posting + leaf), so no head array is returned.
+ * are formula-derived (prism_leaf_head_blkno), so no head array is returned.
  * A heap with no indexable rows still builds: the sampler substitutes one
  * synthetic sample and the result is a valid single-cluster index with an
  * empty posting head. The serial path writes its own metadata page; the
@@ -985,9 +985,9 @@ do_serial_build(
 	BlockNumber first_posting  = first_centroid + plan.centroid_pages;
 
 	/*
-	 * Head blocks are formula-derived: leaf c's head is first_posting + c, a
-	 * contiguous head region of nlist pages. Pre-extend the relation to cover
-	 * metadata + centroid + head region so the streaming write can place
+	 * Head blocks are formula-derived (prism_leaf_head_blkno): a contiguous
+	 * head region of nlist heads at a fixed stride. Pre-extend the relation to
+	 * cover metadata + centroid + head region so the streaming write can place
 	 * centroids at reserved blocks and each leaf's head page already exists
 	 * when the write pass emits it; continuation pages are appended past the
 	 * head region during prism_posting_build_lists. No O(nlist) reserve
@@ -996,7 +996,7 @@ do_serial_build(
 	prism_build_reserve_layout(
 			storage,
 			prism_leaf_head_blkno(
-					first_posting, nlist, prism_posting_ref_pages(dim)));
+					first_posting, nlist, prism_posting_reference_pages(dim)));
 
 	/*
 	 * Write pass: stream the centroid pages (reserved blocks, post-order, root

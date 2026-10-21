@@ -52,8 +52,9 @@ typedef struct PrismPostingScan
 	RaBitQQueryState *qstate;
 
 	/*
-	 * Encode reference of the current cluster. Inline layout: a pointer
-	 * into the pinned head page. Spilled layout (prism_posting_spilled):
+	 * Encode reference of the current cluster. Inline layout: NULL, since
+	 * prism_posting_scan_pt_centroid reads it from the pinned head page.
+	 * Spilled layout (prism_posting_spilled):
 	 * either pt_ref, gathered from the head's REFERENCE chain by
 	 * begin_cluster, or a buffer the caller gathered earlier and handed to
 	 * begin_cluster_at. pt_ref is allocated once per scan, only when the

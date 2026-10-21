@@ -262,7 +262,7 @@ BlockNumber prism_compute_centroid_layout(
  *
  * posting_base may be InvalidBlockNumber (centroid-only build without
  * posting lists). head_stride is the head region's stride
- * (prism_posting_ref_pages(dim) for the paged layout, 1 when child_blkno
+ * (prism_posting_reference_pages(dim) for the paged layout, 1 when child_blkno
  * is a plain leaf index as in the standalone in-RAM build).
  */
 /*
@@ -355,7 +355,7 @@ typedef struct PrismStreamTreePlan
  * [0, end_blkno) exist before any is written. vs_storage_extend extends BY
  * npages; the count doubles as the absolute layout end only because the
  * relation holds nothing but the meta-page slot yet -- the reserved layout
- * (heads at first_posting + leaf) silently shifts if a page ever sneaks in
+ * (heads at prism_leaf_head_blkno) silently shifts if a page ever sneaks in
  * before this point, so the invariant is pinned here.
  */
 static inline void
@@ -391,14 +391,14 @@ typedef void (*PrismStreamLeafCb)(
 /*
  * WRITE pass: cluster the sample again (identical tree) and stream the
  * centroid pages to `storage` via on-demand block allocation (post-order, root
- * last). Leaf c's head is first_posting + c, and on_leaf (if set) fires per
- * leaf so the caller can write that leaf's head page from the resident float
- * centroid. Centroid pages occupy reserved blocks [first_centroid,
- * first_centroid + plan.centroid_pages) post-order (root last), and posting
- * heads live in the far posting area — so the caller must pre-extend the
- * relation to cover both before calling. Returns the root block (the value the
- * metadata page's first_centroid must carry), or InvalidBlockNumber on
- * failure.
+ * last). Leaf c's head is prism_leaf_head_blkno(first_posting, c, stride),
+ * and on_leaf (if set) fires per leaf so the caller can write that leaf's
+ * head page from the resident float centroid. Centroid pages occupy reserved
+ * blocks [first_centroid, first_centroid + plan.centroid_pages) post-order
+ * (root last), and posting heads live in the far posting area — so the caller
+ * must pre-extend the relation to cover both before calling. Returns the root
+ * block (the value the metadata page's first_centroid must carry), or
+ * InvalidBlockNumber on failure.
  */
 BlockNumber prism_routing_tree_write(
 		VsStorage					*storage,
@@ -430,11 +430,11 @@ BlockNumber prism_routing_tree_write(
  * The caller supplies the subtree's coordinates in the global layout, both
  * prefix sums over the preceding children (from the PLAN pass's per-child
  * counts): first_block for the block range, and leaf_offset for the leaf
- * index space -- leaf local_leaf's head is first_posting + leaf_offset +
- * local_leaf (formula-derived). level_offset places the subtree's
- * relative node levels at their absolute tree depth (1 under the root).
- * on_leaf fires per leaf with its float centroid so the caller can write
- * the head page. Returns the subtree root block (== first_block).
+ * index space -- leaf local_leaf is leaf leaf_offset + local_leaf of the
+ * head region (formula-derived, prism_leaf_head_blkno). level_offset places
+ * the subtree's relative node levels at their absolute tree depth (1 under the
+ * root). on_leaf fires per leaf with its float centroid so the caller can
+ * write the head page. Returns the subtree root block (== first_block).
  */
 BlockNumber prism_routing_subtree_write(
 		VsStorage					*storage,

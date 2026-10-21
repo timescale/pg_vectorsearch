@@ -405,7 +405,7 @@ prism_build_route_emit(
 	{
 		BlockNumber h	  = ctx->qs->beam_results[i].posting_head;
 		ctx->cand_leaf[i] = prism_route_head_to_leaf(
-				ctx->first_posting, h, prism_posting_ref_pages(dim));
+				ctx->first_posting, h, prism_posting_reference_pages(dim));
 		prism_posting_reference_read(
 				ctx->storage, h, dim, ctx->cand_pt + (size_t)i * dim);
 	}
@@ -676,7 +676,7 @@ builder_init_common(
 	builder->fixed_first_blkno = InvalidBlockNumber;
 
 	builder->spilled   = prism_posting_spilled(dim);
-	builder->ref_pages = prism_posting_ref_pages(dim);
+	builder->ref_pages = prism_posting_reference_pages(dim);
 	if (builder->spilled && (first_page_flags & PRISM_POSTING_PAGE_FIRST))
 	{
 		/* No fastscan page can hold a group at a spilled dimension; the
@@ -993,7 +993,7 @@ prism_posting_builder_adopt_head(
 	builder->fixed_first_blkno = head_blk;
 	builder->adopted_head	   = true;
 	builder->spilled		   = prism_posting_spilled(dim);
-	builder->ref_pages		   = prism_posting_ref_pages(dim);
+	builder->ref_pages		   = prism_posting_reference_pages(dim);
 
 	if (!builder->spilled)
 	{
@@ -1268,7 +1268,7 @@ prism_refine_route_row(
 	uint32_t leaf = prism_route_head_to_leaf(
 			first_posting,
 			qs->beam_results[0].posting_head,
-			prism_posting_ref_pages(dim));
+			prism_posting_reference_pages(dim));
 	if (leaf < tile_lo || leaf >= tile_hi)
 		return NULL;
 	*out_idx = leaf - tile_lo;

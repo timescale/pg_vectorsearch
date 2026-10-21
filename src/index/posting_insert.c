@@ -67,7 +67,8 @@ prism_posting_insert_one(
 
 		memcpy(scratch->residual,
 			   prism_posting_pt_centroid(head),
-			   (size_t)prism_posting_ref_chunk_floats(dim, 0) * sizeof(float));
+			   (size_t)prism_posting_reference_chunk_floats(dim, 0) *
+					   sizeof(float));
 		vs_storage_release_page(storage, head_blkno);
 		prism_posting_reference_read_rest(
 				storage, head_blkno, next, cluster_id, dim, scratch->residual);

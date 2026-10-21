@@ -436,7 +436,7 @@ typedef struct RoutingTreeCtx
 	const float		   *global_mean;
 	BlockNumber			first_posting; /* leaf c's head = first_posting + c *
 										* head_stride */
-	uint32_t		  head_stride;	   /* prism_posting_ref_pages(dim) */
+	uint32_t		  head_stride;	   /* prism_posting_reference_pages(dim) */
 	PrismStreamLeafCb on_leaf;
 	void			 *on_leaf_arg;
 	/* write-phase: optional exact internal-centroid collection */
@@ -927,7 +927,7 @@ routing_tree_ctx_init(
 {
 	memset(c, 0, sizeof(*c));
 	c->dim		   = dim;
-	c->head_stride = prism_posting_ref_pages(dim);
+	c->head_stride = prism_posting_reference_pages(dim);
 	c->nlist	   = nlist;
 	c->fan_out	   = fan_out < 2 ? 2 : fan_out;
 	c->nlevels	   = vs_hkmeans_nlevels(nlist, c->fan_out);
@@ -1124,8 +1124,10 @@ prism_routing_subtree_write(
 			rq_params,
 			global_mean,
 			prism_leaf_head_blkno(
-					first_posting, leaf_offset, prism_posting_ref_pages(dim)),
-			prism_posting_ref_pages(dim),
+					first_posting,
+					leaf_offset,
+					prism_posting_reference_pages(dim)),
+			prism_posting_reference_pages(dim),
 			nfb,
 			NULL,
 			collector);

@@ -7,8 +7,8 @@
  * The leader sets up the DSM, launches workers, participates in the
  * sampling + k-means phases as worker_id 0, streams the centroid tree to
  * pages, then (phase 3) merges the workers' cluster-keyed sorted runs and
- * builds each posting list. Head blocks are formula-derived (cluster c's head
- * is first_posting + c), so no per-partition head array is materialized.
+ * builds each posting list. Head blocks are formula-derived
+ * (prism_leaf_head_blkno), so no per-partition head array is materialized.
  * Returns false if parallelism could not start, so the caller falls back to a
  * serial build.
  */
@@ -71,7 +71,7 @@
  * Build every cluster's posting list from a populated (not yet performsorted)
  * cluster-keyed sorter. Shared by the serial build and the parallel leader:
  * performsort, then read entries grouped by cluster and write each list with a
- * single resident page builder (head at first_posting + c, continuations
+ * single resident page builder (head at prism_leaf_head_blkno, continuations
  * appended at the relation's end and chained). Ends the sorter.
  *
  * Why iterate clusters 0..nlist rather than just draining the sorter until it
@@ -121,15 +121,15 @@ prism_posting_build_lists(
 	bool		have = prism_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
 	for (uint32_t c = 0; c < nlist; c++)
 	{
-		/* Head block of cluster c is the formula first_posting + c; the head
-		 * region [first_posting, first_posting + nlist) was pre-extended and
+		/* Head block of cluster c is formula-derived; the head region
+		 * [first_posting, first_posting + nlist * stride) was pre-extended and
 		 * its pt_centroid written during the centroid streaming. Continuation
 		 * pages are appended at the relation's end and chained (no per-cluster
 		 * reserve), so no O(nlist) reserve arrays are needed. Adopt the
 		 * pre-written head and append in place: no second head construction,
 		 * and a cluster with no entries keeps its on-disk head untouched. */
 		BlockNumber head_blk = prism_leaf_head_blkno(
-				first_posting, c, prism_posting_ref_pages(dim));
+				first_posting, c, prism_posting_reference_pages(dim));
 		PrismPostingBuilder hb;
 		prism_posting_builder_adopt_head(
 				&hb, storage, rq_params, dim, c, head_blk, fastscan);
@@ -216,7 +216,7 @@ plan_batch_cb(
  * facts the leader publishes to the workers before phase 3. */
 typedef struct TreeLayout
 {
-	BlockNumber first_posting; /* leaf c's head = first_posting + c */
+	BlockNumber first_posting; /* see prism_leaf_head_blkno */
 	BlockNumber root_blk;	   /* tree root page */
 	uint8_t		nlevels;	   /* written depth */
 	uint32_t	nlist;		   /* actual leaf count */
@@ -391,8 +391,8 @@ build_routing_tree_batched(
 	vs_free(planarg.leaf_sum);
 	planarg.leaf_sum = NULL;
 
-	/* Head blocks are formula-derived: leaf c's head is first_posting + c,
-	 * a contiguous head region of actual_nlist pages. Pre-extend the
+	/* Head blocks are formula-derived (prism_leaf_head_blkno): a contiguous
+	 * head region of actual_nlist heads at a fixed stride. Pre-extend the
 	 * relation to cover the centroid pages + the head region so the write
 	 * pass can write both at reserved blocks; continuation pages are
 	 * appended past it during prism_posting_build_lists. No O(nlist) reserve
@@ -402,7 +402,7 @@ build_routing_tree_batched(
 			prism_leaf_head_blkno(
 					first_posting,
 					actual_nlist,
-					prism_posting_ref_pages(dim)));
+					prism_posting_reference_pages(dim)));
 
 	/* Streaming pass: read each subtree blob back from the store (child
 	 * order matches the append order) and stream its centroid + head
@@ -536,7 +536,7 @@ build_routing_tree_flat(
 			prism_leaf_head_blkno(
 					first_posting,
 					actual_nlist,
-					prism_posting_ref_pages(dim)));
+					prism_posting_reference_pages(dim)));
 
 	prism_build_report_phase(prog, PRISM_BUILD_PHASE_CENTROID);
 	PrismHeadWriteCtx head;

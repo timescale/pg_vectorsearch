@@ -351,7 +351,7 @@ scan_clusters(
 	 * front so the reads overlap. Best-effort and a no-op where the storage
 	 * has no prefetch (standalone) or the page is already resident.
 	 */
-	uint32_t ref_pages = prism_posting_ref_pages(dim);
+	uint32_t ref_pages = prism_posting_reference_pages(dim);
 	for (uint32_t j = 0; j < n_results; j++)
 	{
 		BlockNumber head = beam_results[j].posting_head;

@@ -443,16 +443,16 @@ get_cache_data(Relation index)
 	 * otherwise be misread. */
 	if (!prism_meta_magic_valid(meta->magic, meta->dim))
 	{
-		uint32_t got = meta->magic;
+		uint32_t got	  = meta->magic;
+		uint32_t expected = prism_meta_magic_for(meta->dim);
 		UnlockReleaseBuffer(meta_buf);
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
 				 errmsg("index \"%s\" has an incompatible on-disk format "
-						"(metapage magic 0x%08X, expected 0x%08X or 0x%08X)",
+						"(metapage magic 0x%08X, expected 0x%08X)",
 						RelationGetRelationName(index),
 						got,
-						(uint32_t)PRISM_META_MAGIC_INLINE,
-						(uint32_t)PRISM_META_MAGIC_SPILLED),
+						expected),
 				 errhint("REINDEX the index to rebuild it in the current "
 						 "format.")));
 	}
@@ -505,7 +505,7 @@ get_cache_data(Relation index)
 
 		vs_pg_storage_init_inspect(&st, index);
 		prism_posting_reference_read(
-				&st.base, PRISM_META_MEAN_BLKNO, dim, cache_global_mean(c));
+				&st.base, PRISM_GLOBAL_MEAN_BLKNO, dim, cache_global_mean(c));
 	}
 
 	/* Opclass-derived, so no metapage needed -- but resolved here so every

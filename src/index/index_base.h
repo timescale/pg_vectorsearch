@@ -19,32 +19,36 @@
 #include "quant/rabitq.h"
 
 /*
- * Block 0 holds the metapage. Up to this dimension the global mean sits
- * inline in its special area; past it the mean spills into reference pages
- * (posting-kind pages flagged REFERENCE, cluster PRISM_META_MEAN_CLUSTER,
- * chained) at the blocks right after it, and the centroid region a build
- * reserves starts after those and runs to first_posting. The threshold is
- * the metapage's inline capacity at 8 KB pages; meta.h asserts the two
- * agree. Shared here so the standalone build reserves the same blocks and
- * the two layouts stay identical.
+ * Block 0 holds the metapage. Up to PRISM_GLOBAL_MEAN_MAX_INLINE_DIM
+ * dimensions the full-precision global mean vector fits in the metapage's
+ * special area. For higher dimensions, the global mean spills into the
+ * pages immediately following the metapage. Similarly, the reference vector
+ * of each posting list spills from its head into the pages chained after it
+ * (all flagged REFERENCE). The centroid region starts after the spilled
+ * mean. Shared here so the standalone build reserves the same blocks.
  */
-#define PRISM_META_INLINE_MEAN_MAX_DIM 2032
-#define PRISM_META_MEAN_CLUSTER		   UINT32_MAX
-#define PRISM_META_MEAN_BLKNO		   1
+#define PRISM_META_PAGE_BLKNO			 0
+#define PRISM_META_PAGE_PAGES			 1
+#define PRISM_GLOBAL_MEAN_MAX_INLINE_DIM 2032
+/* cluster_id stamped on the spilled mean's REFERENCE pages */
+#define PRISM_GLOBAL_MEAN_CLUSTER UINT32_MAX
+
+/* First block of a spilled global mean. */
+#define PRISM_GLOBAL_MEAN_BLKNO (PRISM_META_PAGE_BLKNO + PRISM_META_PAGE_PAGES)
 
 static inline uint32_t
-prism_meta_mean_pages(Dimension dim)
+prism_global_mean_pages(Dimension dim)
 {
-	if (dim <= PRISM_META_INLINE_MEAN_MAX_DIM)
+	if (dim <= PRISM_GLOBAL_MEAN_MAX_INLINE_DIM)
 		return 0;
-	return ((uint32_t)dim + PRISM_POSTING_REF_CHUNK_FLOATS - 1) /
-		   PRISM_POSTING_REF_CHUNK_FLOATS;
+	return ((uint32_t)dim + PRISM_POSTING_REFERENCE_CHUNK_FLOATS - 1) /
+		   PRISM_POSTING_REFERENCE_CHUNK_FLOATS;
 }
 
 static inline BlockNumber
 prism_first_centroid_blkno(Dimension dim)
 {
-	return PRISM_META_MEAN_BLKNO + prism_meta_mean_pages(dim);
+	return PRISM_GLOBAL_MEAN_BLKNO + prism_global_mean_pages(dim);
 }
 
 /*
@@ -114,8 +118,9 @@ typedef struct PrismIndexBase
 	BlockNumber first_centroid;
 	/*
 	 * First block of the posting-head region; leaf c's head is
-	 * first_posting + c. Fixed for the life of the index, since that formula
-	 * is how every head is located, so nothing can be inserted below it.
+	 * prism_leaf_head_blkno(first_posting, c, stride). Fixed for the life of
+	 * the index, since that formula is how every head is located, so
+	 * nothing can be inserted below it.
 	 */
 	BlockNumber first_posting;
 	/*

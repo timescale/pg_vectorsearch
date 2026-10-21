@@ -884,7 +884,7 @@ TEST(insert_into_spilled_list)
 		Page hp = vs_storage_read_page(&st.base, head);
 		ASSERT_EQ(3u, prism_posting_head_live_count(hp), "live_count");
 		ASSERT_EQ(
-				head + prism_posting_ref_pages(dim),
+				head + prism_posting_reference_pages(dim),
 				prism_posting_head_tail(hp),
 				"the tail is the first entry page");
 	}
