@@ -384,13 +384,18 @@ Keep documentation up-to-date with code changes:
 
 ## Development Workflow
 
-Work follows a branch and pull request workflow — never commit directly to
-`main`. The full checklist (branch naming, pre-commit checks, staging,
+Work follows a branch and pull request workflow. Before editing, an
+agent asks whether to use a git worktree under `.agents/worktrees/`
+(gitignored) or the checkout the user has open, including `main`, so
+they can follow the edits in their editor. It says which path and
+branch it is about to change. The full checklist (branch naming,
+pre-commit checks, staging,
 Conventional Commits message format, rebase/push, PR body style, and
 post-merge cleanup) lives in two Claude Code skills rather than here:
 
-- `git-workflow` — starting a branch, working in reviewable increments,
-  addressing review feedback, cleaning up after merge.
+- `git-workflow` — where to work, then a worktree or the current
+  branch, working in reviewable increments, addressing review feedback,
+  cleaning up after merge.
 - `create-pr` — pre-commit checks, committing, rebasing, pushing, and
   opening the PR.
 - `profiling` — perf and flame graphs for a performance change.

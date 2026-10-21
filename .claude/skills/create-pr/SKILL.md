@@ -26,8 +26,10 @@ git status
 git branch --show-current
 ```
 
-If on the default branch, start a feature branch first — see the
-`git-workflow` skill. Never commit directly to the default branch.
+If it is not obvious where the work should land, ask — see the
+`git-workflow` skill. Do not start a branch, or commit on the current
+one, until the user has said whether this is a worktree or the checkout
+they have open.
 
 ## 2. Run pre-commit checks
 

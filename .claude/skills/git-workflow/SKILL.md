@@ -1,10 +1,10 @@
 ---
 name: git-workflow
 description: >
-  This repo's general git conventions — starting a branch, committing as
-  you go, hooks, addressing review feedback, and cleaning up after merge.
-  Trigger when the user wants to start new work, begin a feature/bugfix/
-  refactor, or clean up after a PR merges.
+  This repo's general git conventions — starting a branch or worktree,
+  committing as you go, hooks, addressing review feedback, and cleaning
+  up after merge. Trigger when the user wants to start new work, begin a
+  feature/bugfix/refactor, or clean up after a PR merges.
 ---
 
 # Git workflow
@@ -18,14 +18,48 @@ it, during ongoing work, and after merge.
 
 ## 1. Start a branch
 
-Never commit directly to the default branch. Always make sure it's
-up-to-date first:
+Ask the user where the work should happen before creating a branch or
+editing. Two answers are both legitimate:
+
+- A worktree, when the current checkout should be left alone.
+- The current checkout and its current branch, when the user wants to
+  follow along and see the edits in their editor. That includes `main`.
+
+Do not decide this. Do not switch their checkout to another branch
+while waiting for the answer.
+
+If they want a worktree, pull `main` in a clean checkout of it first
+(or `git fetch` when `origin/main` is already current), then add it
+from the repo root:
 
 ```bash
-git checkout main
-git pull origin main
-git checkout -b <type>/<name>
+git worktree add -b <type>/<name> .agents/worktrees/<short> main
 ```
+
+`.agents/worktrees/` is gitignored, so the main checkout does not list
+the other tree's files. The new directory is a normal checkout of that
+branch. Commit there. Do not put the worktree next to the repo or under
+`.claude/` — those paths are not ignored as worktrees, and a sibling
+directory is easy to lose.
+
+Use the same author as the main checkout. Read it from there
+(`git -C <main> var GIT_AUTHOR_IDENT`) and do not set `user.name`,
+`user.email`, or `GIT_AUTHOR_*` / `GIT_COMMITTER_*` to anything else.
+A worktree shares the repo config, so this already holds unless the
+environment overrides it — check before the first commit, and fix the
+environment rather than writing a second identity into the worktree.
+
+Say which tree the change is in before editing, and again when
+reporting what changed. Give the path and the branch. If it is a
+worktree, the checkout they invoked the agent in is not that tree, and
+a path they have to infer is a path they will look for in the wrong
+place. If it is the current checkout, say that path too.
+
+`git checkout -- <file>` restores `HEAD`, not "the edits from a minute
+ago." In a fresh worktree `HEAD` is `main`, so that command discards
+uncommitted work on a file that was never committed. To undo an
+experiment, copy the file aside first, or commit before trying the
+alternative.
 
 Branch naming:
 
@@ -106,11 +140,14 @@ branch should be organized before a PR is opened from it.
 
 ## 4. After merge
 
+From the main checkout, not from the worktree:
+
 ```bash
-git checkout main
 git pull origin main
+git worktree remove .agents/worktrees/<short>
 git branch -d <branch>
 ```
 
 Only delete the local branch once the PR is actually merged and the default
-branch has pulled that merge in.
+branch has pulled that merge in. `worktree remove` fails if the tree still
+has uncommitted work — that is the point. Do not `--force` it to tidy up.

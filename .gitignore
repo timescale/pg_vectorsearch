@@ -61,6 +61,8 @@ regression.out
 
 # Agent files
 CLAUDE.local.md
+# Agent worktrees (git worktree add). Not part of this checkout.
+.agents/worktrees/
 
 # Written into release tarballs by meson dist; never committed.
 .commit-sha
