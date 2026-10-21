@@ -279,6 +279,9 @@ hdf5_dep = dependency('hdf5', language: 'c', required: hdf5_opt)
 use_hdf5 = hdf5_dep.found()
 
 if use_hdf5
+  # -isystem rather than -I, so clang-tidy does not treat the HDF5
+  # headers as project code and report findings in them.
+  hdf5_dep = hdf5_dep.as_system('system')
   config_data.set('VS_HAVE_HDF5', 1)
   message('HDF5 integration enabled')
 else
