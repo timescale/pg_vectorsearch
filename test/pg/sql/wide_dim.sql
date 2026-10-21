@@ -23,6 +23,22 @@ SELECT name, setting FROM prism_index_settings('wd_idx')
                    'first_posting', 'posting_pages')
     ORDER BY name;
 
+-- The spilled layout is written as format v7. An inline-layout index keeps
+-- v6, the format older binaries open, so it needs no REINDEX across an
+-- upgrade.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set helper_sql :abs_srcdir '/sql/test_helpers.sql'
+\i :helper_sql
+CREATE TABLE wnarrow (v vec32(768));
+INSERT INTO wnarrow
+    SELECT (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
+            FROM generate_series(0, 767) j)::vec32(768)
+    FROM generate_series(1, 20) g;
+CREATE INDEX wnarrow_idx ON wnarrow USING prism (v) WITH (nlist = 1);
+SELECT to_hex(meta_magic('wd_idx'))      AS spilled_magic,
+       to_hex(meta_magic('wnarrow_idx')) AS inline_magic;
+DROP TABLE wnarrow;
+
 -- Block 0 is the metapage, blocks 1..3 the mean's reference pages, so the
 -- centroid region starts at block 4 and runs to first_posting.
 SELECT (SELECT setting::int FROM prism_index_settings('wd_idx')
@@ -135,6 +151,10 @@ DROP TABLE wbad;
 -- The dense params generator keeps its own, narrower cap.
 SELECT rabitq_params_generate(4096, 42);
 
+DROP FUNCTION rabitq_params_cache();
+DROP FUNCTION rabitq_cache_clear();
+DROP FUNCTION append_centroid_page(regclass);
+DROP FUNCTION meta_magic(regclass);
 DROP TABLE wh;
 DROP TABLE wd;
 RESET maintenance_work_mem;
