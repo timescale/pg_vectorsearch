@@ -116,8 +116,15 @@ every commit, not just the one(s) a PR is eventually opened from:
   shows *what* changed.
 - No `Co-Authored-By` lines, no "Generated with Claude Code" or similar
   footer.
-- Keep the body clean and factual: describe what changed and why, not a
+- The body should be short and get to the point immediately. Do not
+  write a story.
+- Keep the body clean, factual: describe what changed and why, not a
   narration of the work session.
+- Write for humans and never use Agent voice. Avoid "load-bearing",
+  "X arrives", "Y is gated on", etc.
+- Do not refer to previous iterations of the commit/PR that no longer
+  exists.
+- Focus on what changed and why.
 - No benchmark numbers tied to this specific machine or environment — they
   won't reproduce elsewhere and go stale. Describe the general performance
   characteristic instead, e.g. "cuts index build time in half" or "no
