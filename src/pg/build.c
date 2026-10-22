@@ -601,7 +601,9 @@ sample_for_build(
 	 * quality. */
 	const uint64_t vec_nbytes = (uint64_t)dim * sizeof(float);
 
-	uint64_t ideal_samples = Max((uint64_t)10000, (uint64_t)nlist * 256);
+	uint64_t ideal_samples =
+			Max((uint64_t)10000,
+				(uint64_t)nlist * PRISM_KMEANS_SAMPLES_PER_LEAF);
 	uint64_t budget	   = (uint64_t)maintenance_work_mem * 1024 / vec_nbytes;
 	uint64_t alloc_cap = MaxAllocSize / vec_nbytes;
 	uint64_t cap	   = Min(budget, alloc_cap);
@@ -704,13 +706,13 @@ sample_for_build(
  * maintenance_work_mem-bounded sample. When that subsampled, refine the
  * per-leaf encode reference on the full table: route every row page-backed to
  * its leaf (the same routing the scan + query use), accumulate per-leaf means,
- * and rewrite each leaf's head-page pt_centroid to the full-table mean. This
- * tightens the RaBitQ residuals (the dominant recall factor) for every vector
- * in the leaf. The accumulator is tiled to a bounded ceiling (like the posting
- * reserve), so memory stays O(maintenance_work_mem) regardless of nlist;
- * nleaves above the tile just means more (re-scanned) tiles. Routing stays on
- * the sample-trained centroid pages, so a single pass reaches the fixed point
- * (assignments do not shift).
+ * and rewrite each leaf's head-page pt_centroid to the full-table mean, and
+ * the matching centroid-tree leaf so the encode scan routes to that list.
+ * The accumulator is tiled to a bounded ceiling (like the posting reserve),
+ * so memory stays O(maintenance_work_mem) regardless of nlist; nleaves above
+ * the tile just means more (re-scanned) tiles. A tile's scan finishes before
+ * its leaves are rewritten, so that scan still routes on the centroids it
+ * started with.
  * ---------------------------------------------------------------- */
 
 typedef struct RefineHeadState
@@ -774,11 +776,11 @@ refine_head_cb(
 
 static void
 serial_refine_heads(
-		PrismBuildState	  *bs,
-		PrismHeadWriteCtx *headctx,
-		PrismQueryState	  *qs,
-		BlockNumber		   first_posting,
-		uint32_t		   nlist)
+		PrismBuildState	   *bs,
+		PrismRefinePublish *publish,
+		PrismQueryState	   *qs,
+		BlockNumber			first_posting,
+		uint32_t			nlist)
 {
 	Dimension dim = bs->params.dim;
 
@@ -822,8 +824,8 @@ serial_refine_heads(
 				hi,
 				dim,
 				rs.scratch,
-				prism_write_leaf_head,
-				headctx);
+				prism_refine_publish_leaf,
+				publish);
 	}
 
 	pfree(rs.sums);
@@ -1050,10 +1052,22 @@ do_serial_build(
 		INSTR_TIME_SET_CURRENT(t_ref_start);
 		prism_build_report_phase(bs->prog, PRISM_BUILD_PHASE_REFINE);
 
-		PrismHeadWriteCtx rhead;
+		PrismHeadWriteCtx  rhead;
+		PrismRefinePublish publish;
+
 		prism_head_write_ctx_init(
 				&rhead, storage, rq_params, dim, p->fastscan, first_posting);
-		serial_refine_heads(bs, &rhead, &bs->qs, first_posting, nlist);
+		prism_refine_publish_init(
+				&publish,
+				&rhead,
+				storage,
+				first_centroid,
+				p->centroid_format,
+				rq_params,
+				global_mean,
+				p->metric);
+		serial_refine_heads(bs, &publish, &bs->qs, first_posting, nlist);
+		prism_refine_publish_cleanup(&publish);
 		prism_head_write_ctx_cleanup(&rhead);
 
 		instr_time t_ref_end;
