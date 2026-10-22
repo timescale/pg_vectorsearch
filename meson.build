@@ -503,6 +503,7 @@ vs_cli_sources = files(
   'src/cli/kv.c',
   'src/cli/kv_json.c',
   'src/cli/kv_text.c',
+  'src/cli/bench.c',
   'src/cli/bench_distance.c',
   'src/cli/bench_idset.c',
   'src/cli/bench_quantize.c',

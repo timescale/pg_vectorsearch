@@ -17,8 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
+#include "bench.h"
 #include "cmd.h"
 #include "core/memory.h"
 #include "core/platform.h"
@@ -31,13 +31,6 @@
 #define DEFAULT_DIM	  768
 #define DEFAULT_COUNT 200
 #define DEFAULT_RUNS  1000
-
-/* SIMD implementations */
-typedef struct
-{
-	const char *name;
-	uint32_t	mask;
-} ImplSpec;
 
 static const ImplSpec impls[] = {
 		{"compiler", SIMD_NONE},
@@ -62,120 +55,8 @@ typedef struct
 	Kv		   *metrics;
 } BenchConfig;
 
-/* Timing helpers */
-static inline uint64_t
-get_time_ns(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-/* Timing statistics */
-typedef struct
-{
-	double	*samples;
-	uint32_t count;
-	double	 avg;
-	double	 min;
-	double	 max;
-	double	 stddev;
-} BenchStats;
-
-static void
-bench_stats_init(BenchStats *stats, uint32_t capacity)
-{
-	stats->samples = vs_alloc(capacity * sizeof(double));
-	stats->count   = 0;
-	stats->avg	   = 0.0;
-	stats->min	   = 0.0;
-	stats->max	   = 0.0;
-	stats->stddev  = 0.0;
-}
-
-static void
-bench_stats_add(BenchStats *stats, double value)
-{
-	stats->samples[stats->count++] = value;
-}
-
-static void
-bench_stats_compute(BenchStats *stats)
-{
-	if (stats->count == 0)
-		return;
-
-	double sum = 0.0;
-	for (uint32_t i = 0; i < stats->count; i++)
-		sum += stats->samples[i];
-	stats->avg = sum / stats->count;
-
-	stats->min = stats->samples[0];
-	stats->max = stats->samples[0];
-	for (uint32_t i = 1; i < stats->count; i++)
-	{
-		if (stats->samples[i] < stats->min)
-			stats->min = stats->samples[i];
-		if (stats->samples[i] > stats->max)
-			stats->max = stats->samples[i];
-	}
-
-	double var_sum = 0.0;
-	for (uint32_t i = 0; i < stats->count; i++)
-	{
-		double diff = stats->samples[i] - stats->avg;
-		var_sum += diff * diff;
-	}
-	stats->stddev = sqrt(var_sum / stats->count);
-}
-
-static void
-bench_stats_free(BenchStats *stats)
-{
-	vs_free(stats->samples);
-}
-
-/*
- * should_test_impl - Check if implementation should be tested
- */
-static bool
-should_test_impl(const char *impl_name, const char *filter)
-{
-	if (filter == NULL)
-		return true;
-
-	const char *start = filter;
-	while (*start)
-	{
-		const char *end = strchr(start, ',');
-		size_t		len = end ? (size_t)(end - start) : strlen(start);
-
-		if (strncmp(start, impl_name, len) == 0 && impl_name[len] == '\0')
-			return true;
-
-		if (end == NULL)
-			break;
-		start = end + 1;
-	}
-
-	return false;
-}
-
-/*
- * generate_random_vector - Fill vector with random floats in [-1, 1]
- */
 /* Seeded once per command, below. */
 static uint32_t g_rng;
-
-static void
-generate_random_vector(float *data, Dimension dim)
-{
-	for (Dimension i = 0; i < dim; i++)
-	{
-		int val = (int)(cmd_rand(&g_rng) % 200) - 100;
-		data[i] = (float)val / 100.0f;
-	}
-}
 
 /*
  * Helper to re-initialize RaBitQ SIMD dispatch with specific override.
@@ -201,9 +82,9 @@ run_one_bench(BenchStats *stats, uint32_t runs, void (*fn)(void *), void *arg)
 
 	for (uint32_t run = 0; run < runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 		fn(arg);
-		uint64_t end = get_time_ns();
+		uint64_t end = bench_now_ns();
 		bench_stats_add(stats, (double)(end - start));
 	}
 	bench_stats_compute(stats);
@@ -525,12 +406,12 @@ cmd_bench_page_score(CmdContext *ctx)
 
 	/* Generate random centroid and vectors */
 	float *centroid = vs_alloc(dim * sizeof(float));
-	generate_random_vector(centroid, dim);
+	bench_fill_random(centroid, dim, &g_rng);
 	Vec32Ref cent_ref = {.data = centroid, .dim = dim};
 
 	float *vectors = vs_alloc((size_t)count * dim * sizeof(float));
 	for (uint32_t i = 0; i < count; i++)
-		generate_random_vector(vectors + i * dim, dim);
+		bench_fill_random(vectors + i * dim, dim, &g_rng);
 
 	/* Encode into separate arrays */
 	float	*f_add	   = vs_alloc_aligned(count * sizeof(float), 64);
@@ -558,7 +439,7 @@ cmd_bench_page_score(CmdContext *ctx)
 
 	/* Generate random query and prepare query state */
 	float *query = vs_alloc(dim * sizeof(float));
-	generate_random_vector(query, dim);
+	bench_fill_random(query, dim, &g_rng);
 	Vec32Ref query_ref = {.data = query, .dim = dim};
 
 	RaBitQQueryState *qstate =
@@ -640,7 +521,7 @@ cmd_bench_page_score(CmdContext *ctx)
 	/* Benchmark each SIMD implementation */
 	for (const ImplSpec *impl = impls; impl->name; impl++)
 	{
-		if (!should_test_impl(impl->name, config.impl_filter))
+		if (!bench_impl_selected(impl->name, config.impl_filter))
 			continue;
 
 		if (impl->mask != SIMD_NONE && (cpu_caps & impl->mask) == 0)

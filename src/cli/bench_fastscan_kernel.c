@@ -19,8 +19,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
+#include "bench.h"
 #include "cmd.h"
 #include "core/memory.h"
 #include "core/platform.h"
@@ -32,20 +32,6 @@
 #define DEFAULT_DIM	  768
 #define DEFAULT_COUNT 10000
 #define DEFAULT_RUNS  5
-
-static inline uint64_t
-get_time_ns(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-static inline double
-ns_to_ms(uint64_t ns)
-{
-	return (double)ns / 1e6;
-}
 
 typedef struct
 {
@@ -110,15 +96,15 @@ benchmark_lut_build(const BenchConfig *config)
 	double best_vps = 0.0;
 	for (uint32_t run = 0; run < config->runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 		for (uint32_t q = 0; q < queries; q++)
 		{
 			fill_random_floats(transformed, dim, 42 + q);
 			vs_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
 		}
-		uint64_t end = get_time_ns();
-		double	 vps =
-				cmd_ratio((double)queries, ns_to_ms(end - start) / 1000.0);
+		uint64_t end = bench_now_ns();
+		double	 vps = cmd_ratio(
+				  (double)queries, bench_ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
 			best_vps = vps;
 	}
@@ -132,16 +118,16 @@ benchmark_lut_build(const BenchConfig *config)
 	best_vps = 0.0;
 	for (uint32_t run = 0; run < config->runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 		for (uint32_t q = 0; q < queries; q++)
 		{
 			fill_random_floats(transformed, dim, 42 + q);
 			vs_fastscan_build_lut_hacc(
 					transformed, dim, lut_hacc, &scale, &bias);
 		}
-		uint64_t end = get_time_ns();
-		double	 vps =
-				cmd_ratio((double)queries, ns_to_ms(end - start) / 1000.0);
+		uint64_t end = bench_now_ns();
+		double	 vps = cmd_ratio(
+				  (double)queries, bench_ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
 			best_vps = vps;
 	}
@@ -202,11 +188,12 @@ benchmark_accumulate(const BenchConfig *config)
 	double best_vps = 0.0;
 	for (uint32_t run = 0; run < config->runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 		for (uint32_t g = 0; g < ngroups; g++)
 			vs_fastscan_accumulate(codes + g * group_bytes, lut, accum, dim);
-		uint64_t end = get_time_ns();
-		double vps = cmd_ratio((double)count, ns_to_ms(end - start) / 1000.0);
+		uint64_t end = bench_now_ns();
+		double	 vps =
+				cmd_ratio((double)count, bench_ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
 			best_vps = vps;
 	}
@@ -225,12 +212,13 @@ benchmark_accumulate(const BenchConfig *config)
 	best_vps = 0.0;
 	for (uint32_t run = 0; run < config->runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 		for (uint32_t g = 0; g < ngroups; g++)
 			vs_fastscan_accumulate_hacc(
 					codes + g * group_bytes, lut_hacc, accum_hacc, dim);
-		uint64_t end = get_time_ns();
-		double vps = cmd_ratio((double)count, ns_to_ms(end - start) / 1000.0);
+		uint64_t end = bench_now_ns();
+		double	 vps =
+				cmd_ratio((double)count, bench_ns_to_ms(end - start) / 1000.0);
 		if (vps > best_vps)
 			best_vps = vps;
 	}
@@ -315,7 +303,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 	double rabitq_best = 0.0;
 	for (uint32_t run = 0; run < config->runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 		for (uint32_t i = 0; i < count; i++)
 		{
 			temp_data->f_add	 = f_add[i];
@@ -325,8 +313,9 @@ benchmark_distance_throughput(const BenchConfig *config)
 				   packed_bytes);
 			distances[i] = vs_rabitq_distance(state, temp_data, dim);
 		}
-		uint64_t end = get_time_ns();
-		double vps = cmd_ratio((double)count, ns_to_ms(end - start) / 1000.0);
+		uint64_t end = bench_now_ns();
+		double	 vps =
+				cmd_ratio((double)count, bench_ns_to_ms(end - start) / 1000.0);
 		if (vps > rabitq_best)
 			rabitq_best = vps;
 	}
@@ -356,7 +345,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 	double fs8_best = 0.0;
 	for (uint32_t run = 0; run < config->runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 		vs_fastscan_distance_batch(
 				state,
 				f_add,
@@ -368,8 +357,9 @@ benchmark_distance_throughput(const BenchConfig *config)
 				distances,
 				lut_buf,
 				accum_buf);
-		uint64_t end = get_time_ns();
-		double vps = cmd_ratio((double)count, ns_to_ms(end - start) / 1000.0);
+		uint64_t end = bench_now_ns();
+		double	 vps =
+				cmd_ratio((double)count, bench_ns_to_ms(end - start) / 1000.0);
 		if (vps > fs8_best)
 			fs8_best = vps;
 	}

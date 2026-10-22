@@ -15,8 +15,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
+#include "bench.h"
 #include "cmd.h"
 #include "core/memory.h"
 #include "core/platform.h"
@@ -46,13 +46,6 @@ note_vecps(const char *name, double vps, double stddev, uint32_t runs)
 }
 
 #define DEFAULT_RUNS 3
-
-/* SIMD implementations for distance computation */
-typedef struct
-{
-	const char *name;
-	uint32_t	mask;
-} ImplSpec;
 
 static const ImplSpec impls[] = {
 		{"compiler", SIMD_NONE},
@@ -84,103 +77,11 @@ typedef struct
 	bool		help;
 } BenchConfig;
 
-/* Timing helpers */
-static inline uint64_t
-get_time_ns(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-static inline double
-ns_to_ms(uint64_t ns)
-{
-	return (double)ns / 1e6;
-}
-
-/* Timing statistics */
-typedef struct
-{
-	double	*samples;
-	uint32_t count;
-	double	 avg;
-	double	 min;
-	double	 max;
-	double	 stddev;
-} BenchStats;
-
-static void
-bench_stats_init(BenchStats *stats, uint32_t capacity)
-{
-	stats->samples = vs_alloc(capacity * sizeof(double));
-	stats->count   = 0;
-	stats->avg	   = 0.0;
-	stats->min	   = 0.0;
-	stats->max	   = 0.0;
-	stats->stddev  = 0.0;
-}
-
-static void
-bench_stats_add(BenchStats *stats, double value)
-{
-	stats->samples[stats->count++] = value;
-}
-
-static void
-bench_stats_compute(BenchStats *stats)
-{
-	if (stats->count == 0)
-		return;
-
-	double sum = 0.0;
-	for (uint32_t i = 0; i < stats->count; i++)
-		sum += stats->samples[i];
-	stats->avg = sum / stats->count;
-
-	stats->min = stats->samples[0];
-	stats->max = stats->samples[0];
-	for (uint32_t i = 1; i < stats->count; i++)
-	{
-		if (stats->samples[i] < stats->min)
-			stats->min = stats->samples[i];
-		if (stats->samples[i] > stats->max)
-			stats->max = stats->samples[i];
-	}
-
-	double var_sum = 0.0;
-	for (uint32_t i = 0; i < stats->count; i++)
-	{
-		double diff = stats->samples[i] - stats->avg;
-		var_sum += diff * diff;
-	}
-	stats->stddev = sqrt(var_sum / stats->count);
-}
-
-static void
-bench_stats_free(BenchStats *stats)
-{
-	vs_free(stats->samples);
-}
-
 /*
  * Generate random test vectors
  */
 /* Seeded once per command, below. */
 static uint32_t g_rng;
-
-static void
-generate_random_vectors(float *data, uint32_t count, Dimension dim)
-{
-	for (uint32_t i = 0; i < count; i++)
-	{
-		for (Dimension j = 0; j < dim; j++)
-		{
-			int val			  = (int)(cmd_rand(&g_rng) % 200) - 100;
-			data[i * dim + j] = (float)val / 100.0f;
-		}
-	}
-}
 
 static void
 generate_random_halfvecs(half *data, uint32_t count, Dimension dim)
@@ -193,32 +94,6 @@ generate_random_halfvecs(half *data, uint32_t count, Dimension dim)
 			data[i * dim + j] = vs_float_to_half((float)val / 100.0f);
 		}
 	}
-}
-
-/*
- * should_test_impl - Check if implementation should be tested
- */
-static bool
-should_test_impl(const char *impl_name, const char *filter)
-{
-	if (filter == NULL)
-		return true;
-
-	const char *start = filter;
-	while (*start)
-	{
-		const char *end = strchr(start, ',');
-		size_t		len = end ? (size_t)(end - start) : strlen(start);
-
-		if (strncmp(start, impl_name, len) == 0 && impl_name[len] == '\0')
-			return true;
-
-		if (end == NULL)
-			break;
-		start = end + 1;
-	}
-
-	return false;
 }
 
 /*
@@ -262,7 +137,7 @@ benchmark_encode_single(
 
 	for (uint32_t run = 0; run < runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 
 		for (uint32_t i = 0; i < count; i++)
 		{
@@ -271,8 +146,8 @@ benchmark_encode_single(
 			vs_rabitq_encode_into(params, vec_ref, cent_ref, out);
 		}
 
-		uint64_t end		 = get_time_ns();
-		double	 elapsed_ms	 = ns_to_ms(end - start);
+		uint64_t end		 = bench_now_ns();
+		double	 elapsed_ms	 = bench_ns_to_ms(end - start);
 		double	 vec_per_sec = (double)count / (elapsed_ms / 1000.0);
 
 		bench_stats_add(&stats, vec_per_sec);
@@ -358,7 +233,7 @@ benchmark_encode_batch(
 
 	for (uint32_t run = 0; run < runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 
 		vs_rabitq_encode_batch(
 				params,
@@ -370,8 +245,8 @@ benchmark_encode_batch(
 				bits,
 				count);
 
-		uint64_t end		 = get_time_ns();
-		double	 elapsed_ms	 = ns_to_ms(end - start);
+		uint64_t end		 = bench_now_ns();
+		double	 elapsed_ms	 = bench_ns_to_ms(end - start);
 		double	 vec_per_sec = (double)count / (elapsed_ms / 1000.0);
 
 		bench_stats_add(&stats, vec_per_sec);
@@ -408,6 +283,114 @@ benchmark_encode_batch(
 /*
  * Benchmark distance computation with different SIMD implementations
  */
+/*
+ * Distance benchmark cases.
+ *
+ * The query state and the encoded vectors are shared; a case differs
+ * only in which SIMD implementation the RaBitQ kernels dispatch to.
+ * That selection is a process-wide override rather than something a
+ * call can carry, so it is re-applied per pass in pre_pass, outside
+ * the timing window.
+ */
+typedef struct
+{
+	RaBitQParams *params;
+	RaBitQData	**encoded;
+	Vec32Ref	  query_ref;
+	Vec32Ref	  cent_ref;
+	uint32_t	  count;
+	Dimension	  dim;
+	Distance	 *distances;
+} QuantDistCtx;
+
+static void
+select_impl(uint32_t mask)
+{
+	vs_simd_set_override(mask);
+	vs_simd_reset_cache();
+	vs_rabitq_force_reinit();
+}
+
+static int
+quant_dist_prepare(void *vctx, BenchCase *bench_case)
+{
+	QuantDistCtx *ctx = vctx;
+
+	select_impl(bench_case->variant);
+
+	RaBitQQueryState *state = vs_rabitq_prepare_query(
+			ctx->params, ctx->query_ref, ctx->cent_ref);
+
+	if (state == NULL)
+	{
+		fprintf(stderr, "Failed to prepare query state\n");
+		return -1;
+	}
+
+	bench_case->state = state;
+	return 0;
+}
+
+static int
+quant_dist_pre_pass(void *vctx, const BenchCase *bench_case)
+{
+	(void)vctx;
+	select_impl(bench_case->variant);
+	return 0;
+}
+
+static int
+quant_dist_pass(void *vctx, const BenchCase *bench_case)
+{
+	QuantDistCtx	 *ctx	= vctx;
+	RaBitQQueryState *state = bench_case->state;
+
+	for (uint32_t i = 0; i < ctx->count; i++)
+		ctx->distances[i] =
+				vs_rabitq_distance(state, ctx->encoded[i], ctx->dim);
+
+	return 0;
+}
+
+static void
+quant_dist_report(void *vctx, const BenchCase *bench_case, uint32_t runs)
+{
+	QuantDistCtx *ctx	  = vctx;
+	double		  seconds = bench_seconds_per_pass(bench_case);
+	double		  vps	  = seconds > 0.0 ? (double)ctx->count / seconds : 0.0;
+
+	if (runs == 1)
+	{
+		printf("  %-12s %8.1f ms  (%7.1fK vec/s)\n",
+			   bench_case->name,
+			   seconds * 1000.0,
+			   vps / 1000.0);
+	}
+	else
+	{
+		printf("  %-12s %8.1f ms  (%7.1fK vec/s) (±%.1f%%, n=%u)\n",
+			   bench_case->name,
+			   seconds * 1000.0,
+			   vps / 1000.0,
+			   bench_rsd_percent(bench_case),
+			   runs);
+	}
+
+	bench_record_rate(g_metrics, "distance", bench_case, "vec/s", vps, runs);
+}
+
+static void
+quant_dist_teardown(void *vctx, BenchCase *bench_case)
+{
+	(void)vctx;
+
+	if (bench_case->state != NULL)
+	{
+		vs_rabitq_free_query(bench_case->state);
+		bench_case->state = NULL;
+	}
+}
+
 static void
 benchmark_distance(
 		RaBitQParams *params,
@@ -437,10 +420,13 @@ benchmark_distance(
 	vs_simd_reset_cache();
 	uint32_t caps = vs_detect_simd();
 
-	/* Test each SIMD implementation */
+	/* Collect the cases to compare; bench_run owns the timing. */
+	BenchCase cases[8];
+	uint32_t  ncases = 0;
+
 	for (const ImplSpec *impl = impls; impl->name; impl++)
 	{
-		if (!should_test_impl(impl->name, impl_filter))
+		if (!bench_impl_selected(impl->name, impl_filter))
 			continue;
 
 		/* Check if supported */
@@ -450,71 +436,36 @@ benchmark_distance(
 			continue;
 		}
 
-		/* Set SIMD override */
-		vs_simd_set_override(impl->mask);
-		vs_simd_reset_cache();
-		vs_rabitq_force_reinit();
+		cases[ncases].name	  = impl->name;
+		cases[ncases].variant = impl->mask;
+		ncases++;
+	}
 
-		/* Prepare query state */
-		RaBitQQueryState *state =
-				vs_rabitq_prepare_query(params, query_ref, cent_ref);
-		if (state == NULL)
-		{
-			fprintf(stderr, "Failed to prepare query state\n");
-			continue;
-		}
+	if (ncases > 0)
+	{
+		QuantDistCtx ctx = {
+				.params	   = params,
+				.encoded   = encoded,
+				.query_ref = query_ref,
+				.cent_ref  = cent_ref,
+				.count	   = count,
+				.dim	   = dim,
+				.distances = distances,
+		};
 
-		/* CPU warmup: throwaway passes to stabilize measurements */
-		for (uint32_t warmup = 0; warmup < runs; warmup++)
-		{
-			for (uint32_t i = 0; i < count; i++)
-				distances[i] = vs_rabitq_distance(state, encoded[i], dim);
-		}
+		BenchSpec spec = {
+				.runs		   = runs,
+				.warmup_passes = runs,
+				.prepare	   = quant_dist_prepare,
+				.pre_pass	   = quant_dist_pre_pass,
+				.pass		   = quant_dist_pass,
+				.report		   = quant_dist_report,
+				.teardown	   = quant_dist_teardown,
+				.ctx		   = &ctx,
+		};
 
-		BenchStats stats;
-		bench_stats_init(&stats, runs);
-
-		for (uint32_t run = 0; run < runs; run++)
-		{
-			uint64_t start = get_time_ns();
-
-			for (uint32_t i = 0; i < count; i++)
-				distances[i] = vs_rabitq_distance(state, encoded[i], dim);
-
-			uint64_t end		 = get_time_ns();
-			double	 elapsed_ms	 = ns_to_ms(end - start);
-			double	 vec_per_sec = (double)count / (elapsed_ms / 1000.0);
-
-			bench_stats_add(&stats, vec_per_sec);
-		}
-
-		bench_stats_compute(&stats);
-		double elapsed_ms = (double)count / (stats.avg / 1000.0);
-
-		if (runs == 1)
-		{
-			printf("  %-12s %8.1f ms  (%7.1fK vec/s)\n",
-				   impl->name,
-				   elapsed_ms,
-				   stats.avg / 1000.0);
-		}
-		else
-		{
-			printf("  %-12s %8.1f ms  (%7.1fK vec/s) (±%.1f%%, n=%u)\n",
-				   impl->name,
-				   elapsed_ms,
-				   stats.avg / 1000.0,
-				   (stats.stddev / stats.avg) * 100.0,
-				   runs);
-		}
-
-		Kv *m = kv_arr_add_metric(
-				g_metrics, "vec/s", stats.avg, "distance/%s", impl->name);
-		if (m != NULL && runs > 1)
-			kv_obj_put(m, "stddev", kv_dbl(stats.stddev));
-
-		bench_stats_free(&stats);
-		vs_rabitq_free_query(state);
+		if (bench_run(&spec, cases, ncases) != 0)
+			fprintf(stderr, "Distance benchmark failed\n");
 	}
 
 	/* Reset to auto-detection */
@@ -598,7 +549,7 @@ benchmark_faiss_encode(
 
 	for (uint32_t run = 0; run < runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 
 		/* Transform: residual then P^T multiply (same as pg_vectorsearch) */
 		for (uint32_t i = 0; i < count; i++)
@@ -615,8 +566,8 @@ benchmark_faiss_encode(
 		faiss_RaBitQuantizer_compute_codes(
 				faiss_rq, transformed, codes, count);
 
-		uint64_t end		 = get_time_ns();
-		double	 elapsed_ms	 = ns_to_ms(end - start);
+		uint64_t end		 = bench_now_ns();
+		double	 elapsed_ms	 = bench_ns_to_ms(end - start);
 		double	 vec_per_sec = (double)count / (elapsed_ms / 1000.0);
 
 		bench_stats_add(&stats, vec_per_sec);
@@ -741,7 +692,7 @@ benchmark_faiss_distance(
 
 		for (uint32_t run = 0; run < runs; run++)
 		{
-			uint64_t start = get_time_ns();
+			uint64_t start = bench_now_ns();
 
 			for (uint32_t i = 0; i < count; i++)
 			{
@@ -749,8 +700,8 @@ benchmark_faiss_distance(
 						faiss_dc, codes + i * code_size, &distances[i]);
 			}
 
-			uint64_t end		 = get_time_ns();
-			double	 elapsed_ms	 = ns_to_ms(end - start);
+			uint64_t end		 = bench_now_ns();
+			double	 elapsed_ms	 = bench_ns_to_ms(end - start);
 			double	 vec_per_sec = (double)count / (elapsed_ms / 1000.0);
 
 			bench_stats_add(&stats, vec_per_sec);
@@ -1105,15 +1056,15 @@ benchmark_encode_comparison(
 
 	for (uint32_t run = 0; run < runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 		for (uint32_t i = 0; i < count; i++)
 		{
 			Vec32Ref	vec_ref = {.data = f32_vectors + i * dim, .dim = dim};
 			RaBitQData *out = (RaBitQData *)(single_outputs + i * data_size);
 			vs_rabitq_encode_into(params, vec_ref, cent_ref, out);
 		}
-		uint64_t end		 = get_time_ns();
-		double	 elapsed_ms	 = ns_to_ms(end - start);
+		uint64_t end		 = bench_now_ns();
+		double	 elapsed_ms	 = bench_ns_to_ms(end - start);
 		double	 vec_per_sec = (double)count / (elapsed_ms / 1000.0);
 		bench_stats_add(&single_stats, vec_per_sec);
 	}
@@ -1125,7 +1076,7 @@ benchmark_encode_comparison(
 
 	for (uint32_t run = 0; run < runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 		vs_rabitq_encode_batch(
 				params,
 				vectors,
@@ -1135,8 +1086,8 @@ benchmark_encode_comparison(
 				batch_f_rescale,
 				batch_bits,
 				count);
-		uint64_t end		 = get_time_ns();
-		double	 elapsed_ms	 = ns_to_ms(end - start);
+		uint64_t end		 = bench_now_ns();
+		double	 elapsed_ms	 = bench_ns_to_ms(end - start);
 		double	 vec_per_sec = (double)count / (elapsed_ms / 1000.0);
 		bench_stats_add(&batch_stats, vec_per_sec);
 	}
@@ -1150,7 +1101,7 @@ benchmark_encode_comparison(
 	vs_matrix_set_use_cblas(false); /* Switch to builtin */
 	for (uint32_t run = 0; run < runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 		vs_rabitq_encode_batch(
 				params,
 				vectors,
@@ -1160,8 +1111,8 @@ benchmark_encode_comparison(
 				batch_f_rescale,
 				batch_bits,
 				count);
-		uint64_t end		 = get_time_ns();
-		double	 elapsed_ms	 = ns_to_ms(end - start);
+		uint64_t end		 = bench_now_ns();
+		double	 elapsed_ms	 = bench_ns_to_ms(end - start);
 		double	 vec_per_sec = (double)count / (elapsed_ms / 1000.0);
 		bench_stats_add(&builtin_stats, vec_per_sec);
 	}
@@ -1372,7 +1323,7 @@ cmd_bench_quantize(CmdContext *ctx)
 	if (use_f16)
 		generate_random_halfvecs((half *)vectors, count, dim);
 	else
-		generate_random_vectors((float *)vectors, count, dim);
+		bench_fill_random((float *)vectors, (size_t)count * dim, &g_rng);
 
 	/* f32 copy for single-encode and distance paths (Vec32Ref is f32) */
 	float *f32_vectors = NULL;
@@ -1404,7 +1355,7 @@ cmd_bench_quantize(CmdContext *ctx)
 		vs_rabitq_destroy(params);
 		return 1;
 	}
-	generate_random_vectors(centroid, 1, dim);
+	bench_fill_random(centroid, dim, &g_rng);
 
 	float *query = vs_alloc(dim * sizeof(float));
 	if (query == NULL)
@@ -1417,7 +1368,7 @@ cmd_bench_quantize(CmdContext *ctx)
 		vs_rabitq_destroy(params);
 		return 1;
 	}
-	generate_random_vectors(query, 1, dim);
+	bench_fill_random(query, dim, &g_rng);
 
 	/* Run encoding benchmarks */
 	bool run_single = (config.op_filter & OP_ENCODE_SINGLE) != 0;

@@ -16,11 +16,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "algo/kmeans.h"
 #include "algo/vecops.h"
+#include "bench.h"
 #include "cmd.h"
 #include "core/memory.h"
 #include "core/platform.h"
@@ -35,14 +35,6 @@
 #define DEFAULT_NLIST 1000
 
 /* Timing helper */
-static inline uint64_t
-get_time_ns(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
 /* Benchmark configuration */
 typedef struct
 {
@@ -71,26 +63,12 @@ parse_metric(const char *s)
 	return DISTANCE_L2;
 }
 
-static const char *
-metric_name(DistanceMetric m)
-{
-	switch (m)
-	{
-	case DISTANCE_L2:
-		return "L2";
-	case DISTANCE_INNER_PRODUCT:
-		return "IP";
-	case DISTANCE_COSINE:
-		return "Cosine";
-	}
-	return "Unknown";
-}
-
 /*
- * Generate random vectors using simple LCG for reproducibility.
+ * Fill with uniform values in [-1, 1) from a seeded LCG, so a run
+ * reproduces from its --seed alone.
  */
 static void
-generate_random_vectors(
+generate_uniform_vectors(
 		float *data, uint32_t nvecs, Dimension dim, uint64_t seed)
 {
 	uint32_t rng = (uint32_t)(seed ^ (seed >> 32));
@@ -405,7 +383,7 @@ run_bench(
 	opts.nredo			= cfg->nredo;
 	opts.algorithm		= algo;
 
-	uint64_t	  start = get_time_ns();
+	uint64_t	  start = bench_now_ns();
 	KMeansResult *res	= vs_kmeans(
 			  data,
 			  NULL,
@@ -415,7 +393,7 @@ run_bench(
 			  cfg->nlist,
 			  cfg->metric,
 			  &opts);
-	uint64_t end = get_time_ns();
+	uint64_t end = bench_now_ns();
 
 	if (res == NULL)
 	{
@@ -467,10 +445,10 @@ run_bench_pgvector(const ClusterBenchConfig *cfg, const float *data)
 	opts.seed			= cfg->seed;
 	opts.nredo			= cfg->nredo;
 
-	uint64_t	  start = get_time_ns();
+	uint64_t	  start = bench_now_ns();
 	KMeansResult *res	= pgvector_kmeans(
 			  data, cfg->nvecs, cfg->dim, cfg->nlist, cfg->metric, &opts);
-	uint64_t end = get_time_ns();
+	uint64_t end = bench_now_ns();
 
 	if (res == NULL)
 	{
@@ -681,7 +659,7 @@ cmd_bench_cluster(CmdContext *ctx)
 			return 1;
 		}
 
-		generate_random_vectors(data, cfg.nvecs, cfg.dim, cfg.seed);
+		generate_uniform_vectors(data, cfg.nvecs, cfg.dim, cfg.seed);
 	}
 
 	if (cfg.metric == DISTANCE_COSINE)
@@ -718,7 +696,7 @@ cmd_bench_cluster(CmdContext *ctx)
 					 (1024.0 * 1024.0);
 	printf("K-means clustering (%s, %s, dim=%u, nvecs=%u, nlist=%u, "
 		   "%.1f MB):\n",
-		   metric_name(cfg.metric),
+		   bench_metric_name(cfg.metric),
 		   vs_vec_type_name(vec_type),
 		   cfg.dim,
 		   cfg.nvecs,

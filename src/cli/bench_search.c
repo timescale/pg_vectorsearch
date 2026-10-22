@@ -18,7 +18,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 #ifdef VS_HAVE_HDF5
@@ -27,6 +26,7 @@
 #include "standalone/hdf5_source.h"
 #endif
 
+#include "bench.h"
 #include "cmd.h"
 #include "index/query_scan.h"
 #include "kv.h"
@@ -79,14 +79,6 @@ typedef struct
 /* ----------------------------------------------------------------
  * Timing
  * ---------------------------------------------------------------- */
-
-static inline uint64_t
-get_time_ns(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
 
 /* ----------------------------------------------------------------
  * HDF5 loading
@@ -167,8 +159,9 @@ rand_normal(void)
 	return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
 }
 
+/* Standard normal components, in a buffer the caller frees. */
 static float *
-generate_random_vectors(uint32_t nvecs, uint32_t dim)
+generate_gaussian_vectors(uint32_t nvecs, uint32_t dim)
 {
 	float *data = malloc((size_t)nvecs * dim * sizeof(float));
 	for (uint32_t i = 0; i < nvecs; i++)
@@ -440,7 +433,7 @@ cmd_bench_search(CmdContext *ctx)
 			   config.posting_layout,
 			   config.nworkers);
 
-		uint64_t t0 = get_time_ns();
+		uint64_t t0 = bench_now_ns();
 		handle		= vs_handle_create(
 				 &train_src.base,
 				 config.nlist,
@@ -455,7 +448,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.fastscan,
 				 config.nworkers,
 				 &info);
-		build_ms = (double)(get_time_ns() - t0) / 1e6;
+		build_ms = (double)(bench_now_ns() - t0) / 1e6;
 
 		vs_hdf5_source_close(&train_src);
 
@@ -480,8 +473,8 @@ cmd_bench_search(CmdContext *ctx)
 		g_rng			  = 42;
 		uint32_t nvecs	  = 10000;
 		nqueries		  = config.queries;
-		float *train_vecs = generate_random_vectors(nvecs, config.dim);
-		query_vecs		  = generate_random_vectors(nqueries, config.dim);
+		float *train_vecs = generate_gaussian_vectors(nvecs, config.dim);
+		query_vecs		  = generate_gaussian_vectors(nqueries, config.dim);
 		printf("Synthetic: %u x %u (L2)\n", nvecs, config.dim);
 
 		printf("Building index (nlist=%u, centroid=%s, "
@@ -491,7 +484,7 @@ cmd_bench_search(CmdContext *ctx)
 			   config.posting_fmt,
 			   config.posting_layout);
 
-		uint64_t t0 = get_time_ns();
+		uint64_t t0 = bench_now_ns();
 		handle		= vs_handle_create_from_array(
 				 train_vecs,
 				 nvecs,
@@ -508,7 +501,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.fastscan,
 				 config.nworkers,
 				 &info);
-		build_ms = (double)(get_time_ns() - t0) / 1e6;
+		build_ms = (double)(bench_now_ns() - t0) / 1e6;
 		free(train_vecs);
 
 		if (handle == NULL)
@@ -620,7 +613,7 @@ cmd_bench_search(CmdContext *ctx)
 		{
 			const float *qvec = query_vecs + (size_t)q * config.dim;
 
-			uint64_t t_start = get_time_ns();
+			uint64_t t_start = bench_now_ns();
 			uint32_t count	 = vs_handle_query(
 					  handle,
 					  qvec,
@@ -629,7 +622,7 @@ cmd_bench_search(CmdContext *ctx)
 					  config.distance_mode,
 					  !config.no_rerank,
 					  result_ids);
-			uint64_t t_end = get_time_ns();
+			uint64_t t_end = bench_now_ns();
 
 			double lat_us = (double)(t_end - t_start) / 1000.0;
 			lat_sum += lat_us;

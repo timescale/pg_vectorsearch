@@ -19,8 +19,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
+#include "bench.h"
 #include "cmd.h"
 #include "core/memory.h"
 #include "core/platform.h"
@@ -32,21 +32,6 @@
 #define DEFAULT_DIM	  768
 #define DEFAULT_COUNT 10000
 #define DEFAULT_RUNS  5
-
-/* Timing helpers */
-static inline uint64_t
-get_time_ns(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-static inline double
-ns_to_ms(uint64_t ns)
-{
-	return (double)ns / 1e6;
-}
 
 /* Benchmark configuration */
 typedef struct
@@ -123,14 +108,14 @@ benchmark_hamming_throughput(const BenchConfig *config)
 	double best_vps = 0.0;
 	for (uint32_t run = 0; run < config->runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 
 		for (uint32_t i = 0; i < count; i++)
 			results[i] = vs_rabitq_hamming_distance(
 					query_bits, data_bits + i * packed_bytes, packed_bytes);
 
-		uint64_t end = get_time_ns();
-		double	 ms	 = ns_to_ms(end - start);
+		uint64_t end = bench_now_ns();
+		double	 ms	 = bench_ns_to_ms(end - start);
 		double	 vps = cmd_ratio((double)count, ms / 1000.0);
 
 		if (vps > best_vps)
@@ -209,7 +194,7 @@ benchmark_distance_throughput(const BenchConfig *config)
 	double best_asym_vps = 0.0;
 	for (uint32_t run = 0; run < config->runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 
 		for (uint32_t i = 0; i < count; i++)
 		{
@@ -221,8 +206,8 @@ benchmark_distance_throughput(const BenchConfig *config)
 			distances[i] = vs_rabitq_distance(state, temp_data, dim);
 		}
 
-		uint64_t end = get_time_ns();
-		double	 ms	 = ns_to_ms(end - start);
+		uint64_t end = bench_now_ns();
+		double	 ms	 = bench_ns_to_ms(end - start);
 		double	 vps = cmd_ratio((double)count, ms / 1000.0);
 
 		if (vps > best_asym_vps)
@@ -233,13 +218,13 @@ benchmark_distance_throughput(const BenchConfig *config)
 	double best_sym_vps = 0.0;
 	for (uint32_t run = 0; run < config->runs; run++)
 	{
-		uint64_t start = get_time_ns();
+		uint64_t start = bench_now_ns();
 
 		vs_rabitq_distance_batch_symmetric(
 				state, f_add, f_rescale, bits, count, dim, distances);
 
-		uint64_t end = get_time_ns();
-		double	 ms	 = ns_to_ms(end - start);
+		uint64_t end = bench_now_ns();
+		double	 ms	 = bench_ns_to_ms(end - start);
 		double	 vps = cmd_ratio((double)count, ms / 1000.0);
 
 		if (vps > best_sym_vps)

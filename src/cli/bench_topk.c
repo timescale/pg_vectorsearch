@@ -23,9 +23,9 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 
 #include "algo/topk.h"
+#include "bench.h"
 #include "cmd.h"
 #include "core/memory.h"
 #include "kv.h"
@@ -59,14 +59,6 @@ typedef struct
 	uint64_t *ids;
 	uint64_t *unique_ids;
 } Stream;
-
-static inline uint64_t
-get_time_ns(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
 
 static inline double
 unit_rand(uint32_t *rng)
@@ -176,23 +168,23 @@ run_k(const BenchConfig *config,
 			uint32_t nout;
 
 			vs_topk_reset_to_k(topk, k);
-			uint64_t t0 = get_time_ns();
+			uint64_t t0 = bench_now_ns();
 			for (uint32_t i = 0; i < count; i++)
 				vs_topk_insert(topk, s->dist[i], s->err[i], s->ids[i]);
-			uint64_t t1 = get_time_ns();
+			uint64_t t1 = bench_now_ns();
 			vs_topk_extract_sorted(topk, out, &nout);
-			uint64_t t2 = get_time_ns();
+			uint64_t t2 = bench_now_ns();
 
 			insert_ns += t1 - t0;
 			extract_ns += t2 - t1;
 			survivors += topk->cand_count;
 
 			vs_topk_reset_to_k(unique_topk, k);
-			t0 = get_time_ns();
+			t0 = bench_now_ns();
 			for (uint32_t i = 0; i < count; i++)
 				vs_topk_insert_unique(
 						unique_topk, s->dist[i], s->err[i], s->unique_ids[i]);
-			unique_ns += get_time_ns() - t0;
+			unique_ns += bench_now_ns() - t0;
 		}
 
 		if (insert_ns < best_insert)

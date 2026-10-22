@@ -16,9 +16,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "algo/distance.h"
+#include "bench.h"
 #include "cmd.h"
 #include "core/memory.h"
 #include "core/platform.h"
@@ -30,13 +30,6 @@
 /* Default parameters */
 #define DEFAULT_DIM	  768
 #define DEFAULT_COUNT 10000
-
-/* SIMD implementations to test */
-typedef struct
-{
-	const char *name;
-	uint32_t	mask;
-} ImplSpec;
 
 /*
  * Available implementations depend on build mode and architecture.
@@ -73,88 +66,6 @@ typedef struct
 	Kv		   *metrics; /* NULL unless --json */
 } BenchConfig;
 
-/* Timing helpers */
-static inline uint64_t
-get_time_ns(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-static inline double
-ns_to_ms(uint64_t ns)
-{
-	return (double)ns / 1e6;
-}
-
-/* Timing statistics */
-typedef struct
-{
-	double	*samples; /* Array of vec/s measurements */
-	uint32_t count;
-	double	 avg;
-	double	 min;
-	double	 max;
-	double	 stddev;
-} BenchStats;
-
-static void
-bench_stats_init(BenchStats *stats, uint32_t capacity)
-{
-	stats->samples = vs_alloc(capacity * sizeof(double));
-	stats->count   = 0;
-	stats->avg	   = 0.0;
-	stats->min	   = 0.0;
-	stats->max	   = 0.0;
-	stats->stddev  = 0.0;
-}
-
-static void
-bench_stats_add(BenchStats *stats, double value)
-{
-	stats->samples[stats->count++] = value;
-}
-
-static void
-bench_stats_compute(BenchStats *stats)
-{
-	if (stats->count == 0)
-		return;
-
-	/* Calculate average */
-	double sum = 0.0;
-	for (uint32_t i = 0; i < stats->count; i++)
-		sum += stats->samples[i];
-	stats->avg = sum / stats->count;
-
-	/* Find min/max */
-	stats->min = stats->samples[0];
-	stats->max = stats->samples[0];
-	for (uint32_t i = 1; i < stats->count; i++)
-	{
-		if (stats->samples[i] < stats->min)
-			stats->min = stats->samples[i];
-		if (stats->samples[i] > stats->max)
-			stats->max = stats->samples[i];
-	}
-
-	/* Calculate standard deviation */
-	double var_sum = 0.0;
-	for (uint32_t i = 0; i < stats->count; i++)
-	{
-		double diff = stats->samples[i] - stats->avg;
-		var_sum += diff * diff;
-	}
-	stats->stddev = sqrt(var_sum / stats->count);
-}
-
-static void
-bench_stats_free(BenchStats *stats)
-{
-	vs_free(stats->samples);
-}
-
 /*
  * parse_metrics - Parse comma-separated list of metric names
  * Returns bitmask of metrics to run, or METRIC_ALL if "all" specified
@@ -188,25 +99,6 @@ parse_metrics(const char *names)
 	return mask ? mask : METRIC_ALL; /* Default to all if empty/invalid */
 }
 
-/*
- * metric_name - Get metric name for display
- */
-static const char *
-metric_name(DistanceMetric metric)
-{
-	switch (metric)
-	{
-	case DISTANCE_L2:
-		return "L2";
-	case DISTANCE_INNER_PRODUCT:
-		return "IP";
-	case DISTANCE_COSINE:
-		return "Cosine";
-	default:
-		return "Unknown";
-	}
-}
-
 static const char *
 metric_key(DistanceMetric metric)
 {
@@ -223,537 +115,210 @@ metric_key(DistanceMetric metric)
 	}
 }
 
-static void
-add_vecps(
-		Kv			  *metrics,
-		DistanceMetric metric,
-		const char	  *impl,
-		double		   vps,
-		double		   stddev,
-		uint32_t	   runs)
-{
-	Kv *m = kv_arr_add_metric(
-			metrics, "vec/s", vps, "%s/%s", metric_key(metric), impl);
-	if (m != NULL && runs > 1)
-		kv_obj_put(m, "stddev", kv_dbl(stddev));
-}
-
-/*
- * should_test_impl - Check if implementation should be tested
- */
-static bool
-should_test_impl(const char *impl_name, const char *filter)
-{
-	if (filter == NULL)
-		return true;
-
-	/* Check if impl_name appears in comma-separated filter */
-	const char *start = filter;
-	while (*start)
-	{
-		const char *end = strchr(start, ',');
-		size_t		len = end ? (size_t)(end - start) : strlen(start);
-
-		if (strncmp(start, impl_name, len) == 0 && impl_name[len] == '\0')
-			return true;
-
-		if (end == NULL)
-			break;
-		start = end + 1;
-	}
-
-	return false;
-}
-
-/*
- * generate_random_vector - Fill vector with random floats in [-1, 1]
- */
-
 /* Seeded once per command, below. */
 static uint32_t g_rng;
 
-static void
-generate_random_vector(float *data, Dimension dim)
-{
-	for (Dimension i = 0; i < dim; i++)
-	{
-		/* Use random integers to ensure consistent floating-point
-		 * representation */
-		int val = (int)(cmd_rand(&g_rng) % 200) - 100; /* -100 to +99 */
-		data[i] = (float)val / 100.0f;
-	}
-}
+/*
+ * Marks the pgvector-style reference among the SIMD masks. Not a
+ * capability bit: SIMD_NONE already means the compiler build, so the
+ * reference needs a value of its own that no capability can take.
+ */
+#define MASK_PGVECTOR 0xFFFFFFFEu
 
 /*
- * benchmark_impl_loop - Benchmark with single-pair loop (pgvector-style)
- * (currently unused - kept for debugging)
+ * batch_call - Run one batch pass for a target
+ *
+ * Called directly rather than through vs_distance dispatch, so what is
+ * timed is the kernel and not the dispatch.
  */
-__attribute__((unused)) static void
-benchmark_impl_loop(
-		const ImplSpec *impl,
-		Dimension		dim,
-		uint32_t		count,
-		uint32_t		runs,
-		DistanceMetric	metric,
-		const float	   *query_data,
-		const float	   *db_data)
+static int
+batch_call(
+		uint32_t	   mask,
+		DistanceMetric metric,
+		Vec32Ref	   query,
+		const float	  *db_data,
+		uint32_t	   count,
+		Dimension	   dim,
+		Distance	  *distances)
 {
-	Vec32Ref query = {.data = query_data, .dim = dim};
-
-	/* Force re-initialization with this SIMD implementation */
-	vs_simd_set_override(impl->mask);
-	vs_simd_reset_cache();
-	vs_distance_force_reinit();
-
-	/* Warm up (ensure code is in cache) */
-	for (int i = 0; i < 10; i++)
+	if (mask == MASK_PGVECTOR)
 	{
-		Vec32Ref vec = {.data = db_data, .dim = dim};
-		(void)vs_distance(query, vec, metric);
-	}
-
-	/* Benchmark: loop over single-pair calls (pgvector approach) */
-	Distance *distances = vs_alloc(count * sizeof(Distance));
-
-	BenchStats stats;
-	bench_stats_init(&stats, runs);
-
-	for (uint32_t run = 0; run < runs; run++)
-	{
-		uint64_t start = get_time_ns();
-
-		for (uint32_t i = 0; i < count; i++)
+		switch (metric)
 		{
-			Vec32Ref vec = {.data = db_data + i * dim, .dim = dim};
-			distances[i] = vs_distance(query, vec, metric);
+		case DISTANCE_L2:
+			return vs_distance_batch_l2_pgvector(
+					query, db_data, count, dim, distances);
+		case DISTANCE_INNER_PRODUCT:
+			return vs_distance_batch_ip_pgvector(
+					query, db_data, count, dim, distances);
+		case DISTANCE_COSINE:
+			return vs_distance_batch_cosine_pgvector(
+					query, db_data, count, dim, distances);
 		}
-
-		uint64_t end		 = get_time_ns();
-		double	 elapsed_ms	 = ns_to_ms(end - start);
-		double	 vec_per_sec = (double)count / (elapsed_ms / 1000.0);
-
-		bench_stats_add(&stats, vec_per_sec);
+		return -1;
 	}
 
-	vs_free(distances);
-
-	/* Compute statistics */
-	bench_stats_compute(&stats);
-
-	double elapsed_ms = (double)count / (stats.avg / 1000.0);
-
-	/* FLOPS calculation: metric-dependent operation count per vector
-	 * L2: 3 ops/elem (1 sub, 1 mul, 1 add)
-	 * IP: 2 ops/elem (1 mul, 1 add)
-	 * Cosine: 6 ops/elem (3 mul, 3 add) + sqrt/div
-	 */
-	uint64_t ops_per_vec;
-	switch (metric)
+	if (mask == SIMD_NONE)
 	{
-	case DISTANCE_L2:
-		ops_per_vec = (uint64_t)dim * 3;
-		break;
-	case DISTANCE_INNER_PRODUCT:
-		ops_per_vec = (uint64_t)dim * 2;
-		break;
-	case DISTANCE_COSINE:
-		ops_per_vec = (uint64_t)dim * 6 + 2; /* +2 for sqrt and div */
-		break;
-	default:
-		ops_per_vec = (uint64_t)dim;
-	}
-	double gflops = (stats.avg * ops_per_vec) / 1e9;
-
-	if (runs == 1)
-	{
-		printf("  %-10s %8.1f ms  (%7.1fK vec/s, %.2f GFLOPS) [loop]\n",
-			   impl->name,
-			   elapsed_ms,
-			   stats.avg / 1000.0,
-			   gflops);
-	}
-	else
-	{
-		printf("  %-10s %8.1f ms  (%7.1fK vec/s, %.2f GFLOPS) [loop] "
-			   "(±%.1f%%, n=%u)\n",
-			   impl->name,
-			   elapsed_ms,
-			   stats.avg / 1000.0,
-			   gflops,
-			   (stats.stddev / stats.avg) * 100.0,
-			   runs);
-	}
-
-	bench_stats_free(&stats);
-
-	/* Reset to auto-detection */
-	vs_simd_set_override(0xFFFFFFFF);
-	vs_simd_reset_cache();
-}
-
-/*
- * benchmark_impl_batch - Benchmark with batch operation (direct call, no
- * dispatch)
- */
-static void
-benchmark_impl_batch(
-		const ImplSpec *impl,
-		Dimension		dim,
-		uint32_t		count,
-		uint32_t		runs,
-		DistanceMetric	metric,
-		const float	   *query_data,
-		const float	   *db_data,
-		Kv			   *metrics)
-{
-	Vec32Ref query = {.data = query_data, .dim = dim};
-
-	/* No reinitialization needed - we call implementations directly */
-
-	/* Allocate distances array */
-	Distance *distances = vs_alloc(count * sizeof(Distance));
-
-	/* Warm up with actual batch function (5 iterations) */
-	for (int warmup = 0; warmup < 5; warmup++)
-	{
-		if (impl->mask == SIMD_NONE)
+		switch (metric)
 		{
-			switch (metric)
-			{
-			case DISTANCE_L2:
-				vs_distance_batch_l2_compiler(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_INNER_PRODUCT:
-				vs_distance_batch_ip_compiler(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_COSINE:
-				vs_distance_batch_cosine_compiler(
-						query, db_data, count, dim, distances);
-				break;
-			}
+		case DISTANCE_L2:
+			return vs_distance_batch_l2_compiler(
+					query, db_data, count, dim, distances);
+		case DISTANCE_INNER_PRODUCT:
+			return vs_distance_batch_ip_compiler(
+					query, db_data, count, dim, distances);
+		case DISTANCE_COSINE:
+			return vs_distance_batch_cosine_compiler(
+					query, db_data, count, dim, distances);
 		}
+		return -1;
+	}
+
 #if defined(VS_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
-		else if (impl->mask == SIMD_AVX2)
-		{
-			switch (metric)
-			{
-			case DISTANCE_L2:
-				vs_distance_batch_l2_avx2(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_INNER_PRODUCT:
-				vs_distance_batch_ip_avx2(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_COSINE:
-				vs_distance_batch_cosine_avx2(
-						query, db_data, count, dim, distances);
-				break;
-			}
-		}
-		else if (impl->mask == VS_SIMD_AVX512_DQ)
-		{
-			switch (metric)
-			{
-			case DISTANCE_L2:
-				vs_distance_batch_l2_avx512(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_INNER_PRODUCT:
-				vs_distance_batch_ip_avx512(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_COSINE:
-				vs_distance_batch_cosine_avx512(
-						query, db_data, count, dim, distances);
-				break;
-			}
-		}
-#endif
-	}
-
-	BenchStats stats;
-	bench_stats_init(&stats, runs);
-
-	for (uint32_t run = 0; run < runs; run++)
+	if (mask == SIMD_AVX2)
 	{
-		uint64_t start = get_time_ns();
-
-		/* Call implementation directly based on impl->mask */
-		int ret = -1;
-		if (impl->mask == SIMD_NONE)
+		switch (metric)
 		{
-			/* Scalar */
-			switch (metric)
-			{
-			case DISTANCE_L2:
-				ret = vs_distance_batch_l2_compiler(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_INNER_PRODUCT:
-				ret = vs_distance_batch_ip_compiler(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_COSINE:
-				ret = vs_distance_batch_cosine_compiler(
-						query, db_data, count, dim, distances);
-				break;
-			}
+		case DISTANCE_L2:
+			return vs_distance_batch_l2_avx2(
+					query, db_data, count, dim, distances);
+		case DISTANCE_INNER_PRODUCT:
+			return vs_distance_batch_ip_avx2(
+					query, db_data, count, dim, distances);
+		case DISTANCE_COSINE:
+			return vs_distance_batch_cosine_avx2(
+					query, db_data, count, dim, distances);
 		}
-#if defined(VS_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
-		else if (impl->mask == SIMD_AVX2)
+		return -1;
+	}
+	if (mask == VS_SIMD_AVX512_DQ)
+	{
+		switch (metric)
 		{
-			switch (metric)
-			{
-			case DISTANCE_L2:
-				ret = vs_distance_batch_l2_avx2(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_INNER_PRODUCT:
-				ret = vs_distance_batch_ip_avx2(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_COSINE:
-				ret = vs_distance_batch_cosine_avx2(
-						query, db_data, count, dim, distances);
-				break;
-			}
+		case DISTANCE_L2:
+			return vs_distance_batch_l2_avx512(
+					query, db_data, count, dim, distances);
+		case DISTANCE_INNER_PRODUCT:
+			return vs_distance_batch_ip_avx512(
+					query, db_data, count, dim, distances);
+		case DISTANCE_COSINE:
+			return vs_distance_batch_cosine_avx512(
+					query, db_data, count, dim, distances);
 		}
-		else if (impl->mask == VS_SIMD_AVX512_DQ)
-		{
-			switch (metric)
-			{
-			case DISTANCE_L2:
-				ret = vs_distance_batch_l2_avx512(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_INNER_PRODUCT:
-				ret = vs_distance_batch_ip_avx512(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_COSINE:
-				ret = vs_distance_batch_cosine_avx512(
-						query, db_data, count, dim, distances);
-				break;
-			}
-		}
+		return -1;
+	}
 #endif
 #if defined(VS_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
-		else if (impl->mask == SIMD_NEON)
+	if (mask == SIMD_NEON)
+	{
+		switch (metric)
 		{
-			switch (metric)
-			{
-			case DISTANCE_L2:
-				ret = vs_distance_batch_l2_neon(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_INNER_PRODUCT:
-				ret = vs_distance_batch_ip_neon(
-						query, db_data, count, dim, distances);
-				break;
-			case DISTANCE_COSINE:
-				ret = vs_distance_batch_cosine_neon(
-						query, db_data, count, dim, distances);
-				break;
-			}
+		case DISTANCE_L2:
+			return vs_distance_batch_l2_neon(
+					query, db_data, count, dim, distances);
+		case DISTANCE_INNER_PRODUCT:
+			return vs_distance_batch_ip_neon(
+					query, db_data, count, dim, distances);
+		case DISTANCE_COSINE:
+			return vs_distance_batch_cosine_neon(
+					query, db_data, count, dim, distances);
 		}
+		return -1;
+	}
 #endif
 
-		if (ret != 0)
-		{
-			fprintf(stderr, "Distance computation failed\n");
-			vs_free(distances);
-			return;
-		}
+	return -1;
+}
 
-		uint64_t end		 = get_time_ns();
-		double	 elapsed_ms	 = ns_to_ms(end - start);
-		double	 vec_per_sec = (double)count / (elapsed_ms / 1000.0);
-
-		bench_stats_add(&stats, vec_per_sec);
-	}
-
-	vs_free(distances);
-
-	/* Compute statistics */
-	bench_stats_compute(&stats);
-
-	double elapsed_ms = (double)count / (stats.avg / 1000.0);
-
-	/* FLOPS calculation: metric-dependent operation count per vector
-	 * L2: 3 ops/elem (1 sub, 1 mul, 1 add)
-	 * IP: 2 ops/elem (1 mul, 1 add)
-	 * Cosine: 6 ops/elem (3 mul, 3 add) + sqrt/div
-	 */
-	uint64_t ops_per_vec;
+/*
+ * ops_per_vector - Operation count per vector, for the GFLOPS column
+ *
+ * L2: 3 ops/elem (sub, mul, add). IP: 2 (mul, add).
+ * Cosine: 6 (3 mul, 3 add) plus a sqrt and a divide.
+ */
+static uint64_t
+ops_per_vector(DistanceMetric metric, Dimension dim)
+{
 	switch (metric)
 	{
 	case DISTANCE_L2:
-		ops_per_vec = (uint64_t)dim * 3;
-		break;
+		return (uint64_t)dim * 3;
 	case DISTANCE_INNER_PRODUCT:
-		ops_per_vec = (uint64_t)dim * 2;
-		break;
+		return (uint64_t)dim * 2;
 	case DISTANCE_COSINE:
-		ops_per_vec = (uint64_t)dim * 6 + 2; /* +2 for sqrt and div */
-		break;
+		return (uint64_t)dim * 6 + 2;
 	default:
-		ops_per_vec = (uint64_t)dim;
+		return (uint64_t)dim;
 	}
-	double gflops = (stats.avg * ops_per_vec) / 1e9;
+}
+
+/*
+ * Everything the pass and report callbacks need. The query, the
+ * vectors and the output buffer are shared by every case: the cases
+ * differ only in which kernel runs over them.
+ */
+typedef struct
+{
+	Vec32Ref	   query;
+	const float	  *db_data;
+	uint32_t	   count;
+	Dimension	   dim;
+	DistanceMetric metric;
+	Distance	  *distances;
+	Kv			  *metrics;
+} DistanceCtx;
+
+static int
+distance_pass(void *vctx, const BenchCase *bench_case)
+{
+	DistanceCtx *ctx = vctx;
+
+	return batch_call(
+			bench_case->variant,
+			ctx->metric,
+			ctx->query,
+			ctx->db_data,
+			ctx->count,
+			ctx->dim,
+			ctx->distances);
+}
+
+static void
+distance_report(void *vctx, const BenchCase *bench_case, uint32_t runs)
+{
+	DistanceCtx *ctx	 = vctx;
+	double		 seconds = bench_seconds_per_pass(bench_case);
+	double		 vps	 = seconds > 0.0 ? (double)ctx->count / seconds : 0.0;
+	double		 gflops	 = (vps * ops_per_vector(ctx->metric, ctx->dim)) / 1e9;
 
 	if (runs == 1)
 	{
 		printf("  %-10s %8.1f ms  (%7.1fK vec/s, %.2f GFLOPS) [batch]\n",
-			   impl->name,
-			   elapsed_ms,
-			   stats.avg / 1000.0,
+			   bench_case->name,
+			   seconds * 1000.0,
+			   vps / 1000.0,
 			   gflops);
 	}
 	else
 	{
 		printf("  %-10s %8.1f ms  (%7.1fK vec/s, %.2f GFLOPS) [batch] "
 			   "(±%.1f%%, n=%u)\n",
-			   impl->name,
-			   elapsed_ms,
-			   stats.avg / 1000.0,
+			   bench_case->name,
+			   seconds * 1000.0,
+			   vps / 1000.0,
 			   gflops,
-			   (stats.stddev / stats.avg) * 100.0,
+			   bench_rsd_percent(bench_case),
 			   runs);
 	}
 
-	add_vecps(metrics, metric, impl->name, stats.avg, stats.stddev, runs);
-
-	bench_stats_free(&stats);
-
-	/* Reset to auto-detection */
-	vs_simd_set_override(0xFFFFFFFF);
-	vs_simd_reset_cache();
-}
-
-/*
- * benchmark_pgvector - Benchmark pgvector-style auto-vectorized implementation
- */
-static void
-benchmark_pgvector(
-		Dimension	   dim,
-		uint32_t	   count,
-		uint32_t	   runs,
-		DistanceMetric metric,
-		const float	  *query_data,
-		const float	  *db_data,
-		Kv			  *metrics)
-{
-	Vec32Ref query = {.data = query_data, .dim = dim};
-
-	/* Allocate distances array */
-	Distance *distances = vs_alloc(count * sizeof(Distance));
-
-	/* Warm up with actual batch function (5 iterations) */
-	for (int warmup = 0; warmup < 5; warmup++)
-	{
-		switch (metric)
-		{
-		case DISTANCE_L2:
-			vs_distance_batch_l2_pgvector(
-					query, db_data, count, dim, distances);
-			break;
-		case DISTANCE_INNER_PRODUCT:
-			vs_distance_batch_ip_pgvector(
-					query, db_data, count, dim, distances);
-			break;
-		case DISTANCE_COSINE:
-			vs_distance_batch_cosine_pgvector(
-					query, db_data, count, dim, distances);
-			break;
-		}
-	}
-
-	BenchStats stats;
-	bench_stats_init(&stats, runs);
-
-	for (uint32_t run = 0; run < runs; run++)
-	{
-		uint64_t start = get_time_ns();
-
-		switch (metric)
-		{
-		case DISTANCE_L2:
-			vs_distance_batch_l2_pgvector(
-					query, db_data, count, dim, distances);
-			break;
-		case DISTANCE_INNER_PRODUCT:
-			vs_distance_batch_ip_pgvector(
-					query, db_data, count, dim, distances);
-			break;
-		case DISTANCE_COSINE:
-			vs_distance_batch_cosine_pgvector(
-					query, db_data, count, dim, distances);
-			break;
-		}
-
-		uint64_t end		 = get_time_ns();
-		double	 elapsed_ms	 = ns_to_ms(end - start);
-		double	 vec_per_sec = (double)count / (elapsed_ms / 1000.0);
-
-		bench_stats_add(&stats, vec_per_sec);
-	}
-
-	vs_free(distances);
-
-	/* Compute statistics */
-	bench_stats_compute(&stats);
-
-	double elapsed_ms = (double)count / (stats.avg / 1000.0);
-
-	/* FLOPS calculation: metric-dependent operation count per vector
-	 * L2: 3 ops/elem (1 sub, 1 mul, 1 add)
-	 * IP: 2 ops/elem (1 mul, 1 add)
-	 * Cosine: 6 ops/elem (3 mul, 3 add) + sqrt/div
-	 */
-	uint64_t ops_per_vec;
-	switch (metric)
-	{
-	case DISTANCE_L2:
-		ops_per_vec = (uint64_t)dim * 3;
-		break;
-	case DISTANCE_INNER_PRODUCT:
-		ops_per_vec = (uint64_t)dim * 2;
-		break;
-	case DISTANCE_COSINE:
-		ops_per_vec = (uint64_t)dim * 6 + 2; /* +2 for sqrt and div */
-		break;
-	default:
-		ops_per_vec = (uint64_t)dim;
-	}
-	double gflops = (stats.avg * ops_per_vec) / 1e9;
-
-	if (runs == 1)
-	{
-		printf("  %-10s %8.1f ms  (%7.1fK vec/s, %.2f GFLOPS) "
-			   "[batch]\n",
-			   "pgvector",
-			   elapsed_ms,
-			   stats.avg / 1000.0,
-			   gflops);
-	}
-	else
-	{
-		printf("  %-10s %8.1f ms  (%7.1fK vec/s, %.2f GFLOPS) "
-			   "[batch] (±%.1f%%, n=%u)\n",
-			   "pgvector",
-			   elapsed_ms,
-			   stats.avg / 1000.0,
-			   gflops,
-			   (stats.stddev / stats.avg) * 100.0,
-			   runs);
-	}
-
-	add_vecps(metrics, metric, "pgvector", stats.avg, stats.stddev, runs);
-
-	bench_stats_free(&stats);
+	bench_record_rate(
+			ctx->metrics,
+			metric_key(ctx->metric),
+			bench_case,
+			"vec/s",
+			vps,
+			runs);
 }
 
 /*
@@ -820,7 +385,7 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 	}
 
 	printf("%s distance (dim=%u, count=%u, %.1f %s):\n",
-		   metric_name(metric),
+		   bench_metric_name(metric),
 		   dim,
 		   count,
 		   size_value,
@@ -845,52 +410,19 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 	}
 
 	g_rng = 42; /* Deterministic */
-	generate_random_vector(query_data, dim);
+	bench_fill_random(query_data, dim, &g_rng);
 	for (uint32_t i = 0; i < count; i++)
 	{
-		generate_random_vector(db_data + i * dim, dim);
+		bench_fill_random(db_data + i * dim, dim, &g_rng);
 	}
 
-	/*
-	 * CPU warmup: run a throwaway benchmark pass first.
-	 * The first implementation measured always appears ~14% slower due to
-	 * CPU warmup effects (µop cache, branch predictor). Running a full
-	 * benchmark pass (not just a few iterations) as throwaway fixes this.
-	 */
-	{
-		Distance *throwaway = vs_alloc(count * sizeof(Distance));
-		if (throwaway != NULL)
-		{
-			Vec32Ref q = {.data = query_data, .dim = dim};
+	/* Collect the cases to compare; bench_run owns the timing. */
+	BenchCase cases[8];
+	uint32_t  ncases = 0;
 
-			/* Run full benchmark iterations as throwaway */
-			for (uint32_t run = 0; run < config->runs; run++)
-			{
-				switch (metric)
-				{
-				case DISTANCE_L2:
-					vs_distance_batch_l2_compiler(
-							q, db_data, count, dim, throwaway);
-					break;
-				case DISTANCE_INNER_PRODUCT:
-					vs_distance_batch_ip_compiler(
-							q, db_data, count, dim, throwaway);
-					break;
-				case DISTANCE_COSINE:
-					vs_distance_batch_cosine_compiler(
-							q, db_data, count, dim, throwaway);
-					break;
-				}
-			}
-			vs_free(throwaway);
-		}
-	}
-
-	/* Benchmark each implementation */
 	for (const ImplSpec *impl = impls; impl->name; impl++)
 	{
-		/* Skip if not in filter */
-		if (!should_test_impl(impl->name, config->impl_filter))
+		if (!bench_impl_selected(impl->name, config->impl_filter))
 			continue;
 
 		/* Skip if not supported by current CPU */
@@ -901,31 +433,63 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 			continue;
 		}
 
-		/* Benchmark batch approach (loop approach hidden by default - doesn't
-		 * compare well to pgvector since it uses dispatch overhead)
-		 */
-		benchmark_impl_batch(
-				impl,
-				dim,
-				count,
-				config->runs,
-				metric,
-				query_data,
-				db_data,
-				config->metrics);
+		cases[ncases].name	  = impl->name;
+		cases[ncases].variant = impl->mask;
+		ncases++;
 	}
 
-	/* Benchmark pgvector-style auto-vectorized implementation */
-	if (should_test_impl("pgvector", config->impl_filter))
+	if (bench_impl_selected("pgvector", config->impl_filter))
 	{
-		benchmark_pgvector(
-				dim,
-				count,
-				config->runs,
-				metric,
-				query_data,
-				db_data,
-				config->metrics);
+		cases[ncases].name	  = "pgvector";
+		cases[ncases].variant = MASK_PGVECTOR;
+		ncases++;
+	}
+
+	if (ncases > 0)
+	{
+		Distance *distances = vs_alloc(count * sizeof(Distance));
+
+		if (distances == NULL)
+		{
+			fprintf(stderr, "Error: Failed to allocate distances\n");
+			vs_free(query_data);
+			vs_free(db_data);
+			return 1;
+		}
+
+		DistanceCtx ctx = {
+				.query	   = {.data = query_data, .dim = dim},
+				.db_data   = db_data,
+				.count	   = count,
+				.dim	   = dim,
+				.metric	   = metric,
+				.distances = distances,
+				.metrics   = config->metrics,
+		};
+
+		BenchSpec spec = {
+				.runs		   = config->runs,
+				.warmup_passes = 5,
+				.pass		   = distance_pass,
+				.report		   = distance_report,
+				.ctx		   = &ctx,
+		};
+
+		int ret = bench_run(&spec, cases, ncases);
+
+		vs_free(distances);
+
+		/* Reset to auto-detection */
+		vs_simd_set_override(0xFFFFFFFF);
+		vs_simd_reset_cache();
+
+		if (ret != 0)
+		{
+			fprintf(stderr, "Distance computation failed\n");
+			vs_free(query_data);
+			vs_free(db_data);
+			return 1;
+		}
 	}
 
 	vs_free(query_data);

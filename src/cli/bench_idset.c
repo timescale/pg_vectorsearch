@@ -17,8 +17,8 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 
+#include "bench.h"
 #include "cmd.h"
 #include "core/idset.h"
 #include "core/memory.h"
@@ -40,14 +40,6 @@ typedef struct
 	double	 replicas;
 	bool	 help;
 } BenchConfig;
-
-static inline uint64_t
-get_time_ns(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
 
 static uint64_t
 random_tid(uint32_t *rng)
@@ -237,7 +229,7 @@ cmd_bench_idset(CmdContext *ctx)
 
 		for (uint32_t run = 0; run < config.runs; run++)
 		{
-			uint64_t t0 = get_time_ns();
+			uint64_t t0 = bench_now_ns();
 
 			for (uint32_t rep = 0; rep < reps; rep++)
 			{
@@ -252,7 +244,7 @@ cmd_bench_idset(CmdContext *ctx)
 				vs_idset_cleanup(&set);
 			}
 
-			uint64_t elapsed = get_time_ns() - t0;
+			uint64_t elapsed = bench_now_ns() - t0;
 			if (elapsed < best)
 				best = elapsed;
 		}
