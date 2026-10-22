@@ -18,7 +18,9 @@
 #include <access/relscan.h>
 #include <fmgr.h>
 #include <miscadmin.h>
+#include <optimizer/optimizer.h>
 #include <pgstat.h>
+#include <storage/bufmgr.h>
 #include <utils/builtins.h>
 #include <utils/memutils.h>
 #include <utils/rel.h>
@@ -493,6 +495,34 @@ ensure_query_state(PrismScanState *ss, uint32_t k)
 	MemoryContextSwitchTo(old_ctx);
 }
 
+/*
+ * Auto-detect the rerank_pool_cost_scale (prism.rerank_pool_cost_scale = 0)
+ * from this scan's table+index size and effective_cache_size; see
+ * prism_query_auto_cost_scale for the rule.
+ *
+ * effective_cache_size is the right cache-size signal here rather than
+ * shared_buffers alone: it is PostgreSQL's own estimate of total
+ * caching capacity across shared_buffers and the OS page cache, which
+ * is exactly what determines whether a rerank's heap fetch is a real
+ * disk read or not.
+ *
+ * A relation's block count is metadata PostgreSQL already tracks (smgr
+ * nblocks), not an I/O -- cheap enough to recompute every scan, which
+ * matters because the right scale is per relation, not per session: a
+ * GUC assign hook fires once per SET, so it cannot track a session that
+ * queries differently-sized tables one after another the way this can.
+ */
+static double
+prism_auto_rerank_cost_scale(Relation heap, Relation index)
+{
+	BlockNumber heap_blocks	 = RelationGetNumberOfBlocks(heap);
+	BlockNumber index_blocks = RelationGetNumberOfBlocks(index);
+
+	return prism_query_auto_cost_scale(
+			(double)(heap_blocks + index_blocks) * BLCKSZ,
+			(double)effective_cache_size * BLCKSZ);
+}
+
 /* ----------------------------------------------------------------
  * Search execution (called on first gettuple)
  * ---------------------------------------------------------------- */
@@ -520,6 +550,18 @@ execute_search(IndexScanDesc scan)
 	 * beginscan time; heapRelation becomes available later) */
 	if (scan->heapRelation != NULL && ss->storage.rel == NULL)
 		vs_pg_storage_set_rel(&ss->storage, scan->heapRelation);
+
+	/* Resolve rerank_pool_cost_scale for this scan: an explicit GUC value
+	 * overrides outright, 0 auto-detects from this scan's own relations. */
+	if (scan->heapRelation != NULL)
+	{
+		double scale = prism_rerank_pool_cost_scale > 0
+							 ? prism_rerank_pool_cost_scale
+							 : prism_auto_rerank_cost_scale(
+									   scan->heapRelation,
+									   scan->indexRelation);
+		prism_query_set_rerank_cost_scale(scale);
+	}
 
 	/*
 	 * Extract query vector. The ORDER BY operator belongs to the opclass, so
