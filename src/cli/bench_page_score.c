@@ -295,7 +295,7 @@ print_usage(CmdContext *ctx)
 	printf("Options:\n");
 	printf("  --dim <int>        Vector dimension (default: %d)\n",
 		   DEFAULT_DIM);
-	printf("  --count <int>      Centroids per page (default: %d)\n",
+	printf("  --count <int>      Vectors per page (default: %d)\n",
 		   DEFAULT_COUNT);
 	printf("  --runs <int>       Benchmark iterations "
 		   "(default: %d)\n",
