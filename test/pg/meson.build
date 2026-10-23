@@ -43,6 +43,7 @@ else
       'row_estimate',
       'index_stats',
       'split',
+      'wide_dim',
     ]
 
     # Test-only SQL entry points (extra introspection the extension
@@ -116,6 +117,7 @@ else
           '--temp-config=' + meson.current_build_dir() / 'pgvs_test.conf',
           '--load-extension=pg_vectorsearch',
           'mutations_concurrent',
+          'mutations_wide',
           'build_serialize',
         ],
         depends: [pgvs_ext_so],

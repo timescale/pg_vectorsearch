@@ -305,7 +305,7 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (meta->magic != PRISM_META_MAGIC)
+	if (!prism_meta_magic_valid(meta->magic, meta->dim))
 	{
 		UnlockReleaseBuffer(meta_buf);
 		relation_close(index, PRISM_MAINT_LOCK);
@@ -319,6 +319,16 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	Dimension	dim			   = meta->dim;
 	uint8_t		nlevels		   = meta->nlevels;
 	UnlockReleaseBuffer(meta_buf);
+
+	/* The same bound CREATE INDEX applies to fastscan=on: a group has to fit
+	 * an overflow page, which stops well before the dimension ceiling. */
+	if (prism_fastscan_max_groups(dim, false) == 0)
+	{
+		relation_close(index, PRISM_MAINT_LOCK);
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("fastscan does not support %d dimensions", dim)));
+	}
 
 	/*
 	 * Find the leaf for this cluster. The argument is the stored cluster_id --

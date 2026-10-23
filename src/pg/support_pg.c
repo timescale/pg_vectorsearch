@@ -453,22 +453,21 @@ vs_pg_check_dim_valid(int dim)
  * Gram-Schmidt -- O(dim^3) in time, O(dim^2) in memory -- and is callable by
  * any role, so an oversized dim is a CPU/memory denial-of-service vector (at
  * the generic vector cap a single call runs for minutes at 100% CPU). Bound
- * it by PRISM_INDEX_MAX_DIM: generating params for a dimension no prism index
- * can hold is pointless, so the largest indexable dimension is the natural
- * ceiling, and it tracks the index limit automatically.
+ * it by VS_RABITQ_PARAMS_GENERATE_MAX_DIM, a cap on the dense generator
+ * itself; prism indexes rotate through the Hadamard path and are not held
+ * to it.
  */
 void
 vs_pg_check_rabitq_params_dim_valid(int dim)
 {
 	vs_pg_check_dim_valid(dim);
-	if (dim > PRISM_INDEX_MAX_DIM)
+	if (dim > VS_RABITQ_PARAMS_GENERATE_MAX_DIM)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("cannot generate rabitq_params for more than %d "
 						"dimensions",
-						PRISM_INDEX_MAX_DIM),
-				 errhint("Building the transform matrix is O(dim^3); no "
-						 "prism index supports more dimensions than this.")));
+						VS_RABITQ_PARAMS_GENERATE_MAX_DIM),
+				 errhint("Building the transform matrix is O(dim^3).")));
 }
 
 void

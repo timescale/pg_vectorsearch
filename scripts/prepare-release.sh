@@ -145,17 +145,20 @@ insert_notes_template() {
 # A format bump makes every existing index unreadable. Written here
 # rather than left to the author because the script can detect it.
 note_format_change() {
-    local prev now was note
+    local prev now was dropped note
     prev="$(previous_release_tag)"
     [[ -n "$prev" ]] || return 0
-    now="$(meta_format_version)"
-    was="$(meta_format_version "$prev")"
-    [[ -n "$now" && -n "$was" && "$now" != "$was" ]] || return 0
+    now="$(meta_format_versions)"
+    was="$(meta_format_versions "$prev")"
+    [[ -n "$now" && -n "$was" ]] || return 0
+    dropped="$(meta_formats_dropped "$prev")"
+    [[ -n "$dropped" ]] || return 0
 
     log "on-disk format changed since $prev: adding a reindex note"
     note="- **Indexes must be rebuilt.** The on-disk index format changed"
-    note="$note (0x$was -> 0x$now), so indexes built by earlier versions"
-    note="$note are rejected at open and have to be recreated."
+    note="$note ($(format_bytes "$dropped") no longer opens), so indexes"
+    note="$note in that format are rejected at open and have to be"
+    note="$note recreated."
     awk -v note="$note" '
         /^FILL-IN: breaking changes/ { print note; print "" }
         { print }

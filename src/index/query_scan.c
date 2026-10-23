@@ -91,6 +91,10 @@ prism_query_state_init(
 	 * probe set; see prism_query_set_probe_expand). */
 	qs->probe_dists = vs_alloc(max_nprobe * sizeof(float));
 	qs->probe_order = vs_alloc(max_nprobe * sizeof(uint32_t));
+	/* probe_refs / probe_entries (spilled layout only) are sized on the
+	 * first expanded probe set, to the clusters it routed: dim floats per
+	 * cluster is the largest buffer a scan state owns, and a query whose
+	 * probe set is never expanded has no use for it. */
 
 	/* Top-K */
 	vs_topk_init(&qs->topk, max_k);
@@ -347,8 +351,20 @@ scan_clusters(
 	 * front so the reads overlap. Best-effort and a no-op where the storage
 	 * has no prefetch (standalone) or the page is already resident.
 	 */
+	uint32_t ref_pages = prism_posting_reference_pages(dim);
 	for (uint32_t j = 0; j < n_results; j++)
-		vs_storage_prefetch(qs->pscan.storage, beam_results[j].posting_head);
+	{
+		BlockNumber head = beam_results[j].posting_head;
+
+		if (head == InvalidBlockNumber)
+			continue;
+		vs_storage_prefetch(qs->pscan.storage, head);
+		/* A spilled list's reference pages follow its head in the bulk-built
+		 * region; a split-created list has them wherever the split appended,
+		 * so for it this warms a page the gather may not read. */
+		for (uint32_t r = 1; r < ref_pages; r++)
+			vs_storage_prefetch(qs->pscan.storage, head + r);
+	}
 
 	/*
 	 * Phase A (only when the probe set was expanded): re-rank the routed
@@ -364,6 +380,21 @@ scan_clusters(
 
 	if (n_results > scan_limit)
 	{
+		if (qs->pscan.spilled && qs->probe_refs_cap < n_results)
+		{
+			VsMemCtx caller_ctx = vs_memctx_switch(qs->memctx);
+
+			if (qs->probe_refs != NULL)
+			{
+				vs_free(qs->probe_refs);
+				vs_free(qs->probe_entries);
+			}
+			qs->probe_refs = vs_alloc((size_t)n_results * dim * sizeof(float));
+			qs->probe_entries  = vs_alloc(n_results * sizeof(BlockNumber));
+			qs->probe_refs_cap = n_results;
+			vs_memctx_switch(caller_ctx);
+		}
+
 		for (uint32_t j = 0; j < n_results; j++)
 		{
 			qs->probe_order[j] = j;
@@ -372,6 +403,17 @@ scan_clusters(
 			BlockNumber ph = beam_results[j].posting_head;
 			if (ph == InvalidBlockNumber)
 				continue;
+
+			if (qs->probe_refs != NULL)
+			{
+				/* Spilled: gather once, keep it for the scan pass. */
+				float *ref			 = qs->probe_refs + (size_t)j * dim;
+				qs->probe_entries[j] = prism_posting_reference_read(
+						qs->pscan.storage, ph, dim, ref);
+				qs->probe_dists[j] =
+						vs_l2_distance_squared(qs->pt_query, ref, dim);
+				continue;
+			}
 
 			prism_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
 			const float *pt_cent = prism_posting_scan_pt_centroid(&qs->pscan);
@@ -406,7 +448,14 @@ scan_clusters(
 		 * measures how many probed clusters the query actually needed. */
 		topk->cur_src = r;
 
-		prism_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
+		if (order != NULL && qs->probe_refs != NULL)
+			prism_posting_scan_begin_cluster_at(
+					&qs->pscan,
+					&qs->cluster_qs,
+					qs->probe_entries[j],
+					qs->probe_refs + (size_t)j * dim);
+		else
+			prism_posting_scan_begin_cluster(&qs->pscan, &qs->cluster_qs, ph);
 
 		const float *pt_cent = prism_posting_scan_pt_centroid(&qs->pscan);
 		if (pt_cent == NULL)

@@ -8,10 +8,12 @@
  * agnostic: page format determines metadata and data sizes.
  */
 
-#include <assert.h>
+#include "vs_config.h"
+
 #include <math.h>
 #include <string.h>
 
+#include "core/log.h"
 #include "core/memory.h"
 #include "index/centroid_build.h"
 #include "quant/fastscan.h"
@@ -87,7 +89,13 @@ prism_centroid_write_pages(
 
 		void *dest = prism_centroid_page_add_entry_begin(
 				cur_page, dim, entry_child, child_count, flags);
-		assert(dest != NULL);
+		if (dest == NULL)
+			vs_error(
+					VS_EXTENSION_NAME
+					": a centroid entry (format %d) does not fit a page at "
+					"%u dimensions",
+					(int)fmt,
+					(unsigned)dim);
 		encoder->ops->encode_into(encoder, i, dest);
 	}
 

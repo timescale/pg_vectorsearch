@@ -329,8 +329,9 @@ prism_bulkdelete(
 	PrismBulkDeleteCtx ctx = {.cb = callback, .cb_state = cb_state};
 
 	/*
-	 * The index is laid out as: block 0 metadata, then the contiguous
-	 * centroid region [1, first_posting), then the posting pages.
+	 * The index is laid out as: block 0 metadata (and past 2032 dimensions
+	 * the mean's reference pages), then the contiguous centroid region up
+	 * to first_posting, then the posting pages.
 	 * first_posting is fixed at build time and the relation only grows from
 	 * there, so nothing below it is ever a posting page or a split-appended
 	 * centroid page -- start there, as before, to skip that region without
