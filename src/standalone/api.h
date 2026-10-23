@@ -42,6 +42,8 @@ typedef struct PrismBuildInfo
  * fan_out:      tree branching factor (0 = auto from nlist).
  * km_nredo:     k-means restarts (0 = default).
  * km_max_iter:  k-means max iterations (0 = default).
+ * max_k:        largest k a query on this handle will ask for.
+ * max_nprobe:   largest nprobe a query will ask for (0 = auto).
  * info:         if non-NULL, filled with build statistics.
  *
  * Returns NULL on failure.
@@ -59,6 +61,8 @@ VsHandle *vs_handle_create(
 		double			boundary_epsilon,
 		int				fastscan,
 		int32_t			nworkers,
+		uint32_t		max_k,
+		uint32_t		max_nprobe,
 		PrismBuildInfo *info);
 
 /*
@@ -81,6 +85,8 @@ VsHandle *vs_handle_create_from_array(
 		double			boundary_epsilon,
 		int				fastscan,
 		int32_t			nworkers,
+		uint32_t		max_k,
+		uint32_t		max_nprobe,
 		PrismBuildInfo *info);
 
 /*
@@ -88,7 +94,8 @@ VsHandle *vs_handle_create_from_array(
  *
  * distance_mode: "asymmetric" or "symmetric".
  * result_ids must have space for k uint32_t entries.
- * Returns actual number of results (may be < k).
+ * Returns actual number of results (may be < k). k and nprobe above
+ * the sizes passed to vs_handle_create are clamped.
  */
 uint32_t vs_handle_query(
 		VsHandle	*handle,

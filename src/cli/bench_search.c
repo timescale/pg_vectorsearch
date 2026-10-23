@@ -447,6 +447,8 @@ cmd_bench_search(CmdContext *ctx)
 				 config.boundary_epsilon,
 				 config.fastscan,
 				 config.nworkers,
+				 config.k,
+				 config.nprobe,
 				 &info);
 		build_ms = (double)(bench_now_ns() - t0) / 1e6;
 
@@ -500,6 +502,8 @@ cmd_bench_search(CmdContext *ctx)
 				 config.boundary_epsilon,
 				 config.fastscan,
 				 config.nworkers,
+				 config.k,
+				 config.nprobe,
 				 &info);
 		build_ms = (double)(bench_now_ns() - t0) / 1e6;
 		free(train_vecs);

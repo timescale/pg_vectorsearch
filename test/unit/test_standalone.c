@@ -599,6 +599,8 @@ TEST(bindings_create_destroy)
 			 0.0,
 			 false,
 			 0,
+			 1,
+			 1,
 			 &info);
 
 	ASSERT_NOT_NULL(handle, "create should succeed");
@@ -630,6 +632,8 @@ TEST(bindings_query)
 			0.0,
 			false,
 			0,
+			10,
+			5,
 			NULL);
 	ASSERT_NOT_NULL(handle, "create should succeed");
 
@@ -638,6 +642,41 @@ TEST(bindings_query)
 			handle, vecs, 10, 5, "asymmetric", true, result_ids);
 
 	ASSERT_EQ(count, 10, "should return 10 results");
+	ASSERT_TRUE(result_ids[0] < nvecs, "result ID in range");
+
+	vs_handle_destroy(handle);
+}
+
+TEST(bindings_query_above_default_limits)
+{
+	uint32_t dim = 16, nvecs = 2000, k = 150;
+	float	*vecs = make_vectors(nvecs, dim, 7);
+
+	VsHandle *handle = vs_handle_create_from_array(
+			vecs,
+			nvecs,
+			dim,
+			8,
+			0,
+			"euclidean",
+			"float32",
+			NULL,
+			0,
+			0,
+			0.0,
+			0.0,
+			0,
+			0,
+			k,
+			8,
+			NULL);
+	ASSERT_NOT_NULL(handle, "create should succeed");
+
+	uint32_t result_ids[150];
+	uint32_t count = vs_handle_query(
+			handle, vecs, k, 8, "asymmetric", true, result_ids);
+
+	ASSERT_EQ(count, k, "k above 100 is not clamped");
 	ASSERT_TRUE(result_ids[0] < nvecs, "result ID in range");
 
 	vs_handle_destroy(handle);
@@ -726,6 +765,8 @@ TEST(bindings_query_fastscan)
 			0.0,
 			16,
 			0,
+			10,
+			5,
 			NULL);
 	ASSERT_NOT_NULL(handle, "fastscan create should succeed");
 
@@ -759,6 +800,8 @@ TEST(bindings_angular_metric)
 			0.0,
 			false,
 			0,
+			5,
+			5,
 			NULL);
 	ASSERT_NOT_NULL(handle, "angular create should succeed");
 
@@ -808,6 +851,8 @@ TEST(bindings_symmetric_mode)
 			0.0,
 			false,
 			0,
+			5,
+			5,
 			NULL);
 
 	uint32_t result_ids[5];
@@ -839,6 +884,8 @@ TEST(bindings_kmeans_params)
 			 0.0,
 			 false,
 			 0,
+			 1,
+			 1,
 			 &info);
 
 	ASSERT_NOT_NULL(handle, "create with kmeans params should succeed");

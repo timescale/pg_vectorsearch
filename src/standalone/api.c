@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "core/memory.h"
+#include "index/query_scan.h"
 #include "standalone/api.h"
 #include "standalone/index.h"
 #include "standalone/query.h"
@@ -88,6 +89,8 @@ vs_handle_create(
 		double			boundary_epsilon,
 		int				fastscan,
 		int32_t			nworkers,
+		uint32_t		max_k,
+		uint32_t		max_nprobe,
 		PrismBuildInfo *info)
 {
 	/* Create context as child of the current context if one exists,
@@ -155,8 +158,14 @@ vs_handle_create(
 		}
 	}
 
-	/* Pre-allocate query context: k up to 100, nprobe up to 400 */
-	PrismQueryCtx *qctx = prism_query_ctx_create(idx, 100, 400);
+	/* 0 nprobe is the same auto rule the bench and the extension use.
+	 * The context is sized once, to the query this handle will run. */
+	if (max_k == 0)
+		max_k = 1;
+	if (max_nprobe == 0)
+		max_nprobe = prism_auto_nprobe(idx->nlist);
+
+	PrismQueryCtx *qctx = prism_query_ctx_create(idx, max_k, max_nprobe);
 	if (qctx == NULL)
 	{
 		prism_index_destroy(idx);
@@ -191,6 +200,8 @@ vs_handle_create_from_array(
 		double			boundary_epsilon,
 		int				fastscan,
 		int32_t			nworkers,
+		uint32_t		max_k,
+		uint32_t		max_nprobe,
 		PrismBuildInfo *info)
 {
 	VsArraySource array_src;
@@ -208,6 +219,8 @@ vs_handle_create_from_array(
 			boundary_epsilon,
 			fastscan,
 			nworkers,
+			max_k,
+			max_nprobe,
 			info);
 }
 
