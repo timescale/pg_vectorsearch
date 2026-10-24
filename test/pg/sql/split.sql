@@ -478,6 +478,20 @@ DROP VIEW overflow_acct;
 DROP TABLE split_overflow;
 RESET maintenance_work_mem;
 
+-- A partitioned index has no storage of its own. The procedures refuse it
+-- rather than reaching for pages that do not exist; the index of each
+-- partition is what they run on.
+CREATE TABLE split_part (id int, v vec32(4)) PARTITION BY RANGE (id);
+CREATE TABLE split_part1 PARTITION OF split_part FOR VALUES FROM (0) TO (100);
+INSERT INTO split_part SELECT i, ARRAY[i::real, 0, 0, 0]::vec32(4)
+    FROM generate_series(1, 60) i;
+CREATE INDEX split_part_idx ON split_part USING prism (v)
+    WITH (nlist = 1, centroid_fastscan = off);
+CALL prism_split_posting_list('split_part_idx', 1);
+CALL prism_rebalance('split_part_idx', 10);
+CALL prism_convert_posting_to_fastscan('split_part_idx', 0);
+DROP TABLE split_part;
+
 -- Cleanup
 DROP TABLE split_test;
 DROP TABLE split_wide;

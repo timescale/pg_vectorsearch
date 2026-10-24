@@ -1,0 +1,50 @@
+Parsed test spec with 3 sessions
+
+starting permutation: h_begin h_lock u_convert u_split u_reb h_commit
+step h_begin: BEGIN;
+step h_lock: LOCK TABLE maint IN SHARE MODE;
+step u_convert: CALL prism_convert_posting_to_fastscan('maint', 0);
+ERROR:  "maint" is not an index
+step u_split: CALL prism_split_posting_list('maint', 1);
+ERROR:  "maint" is not an index
+step u_reb: CALL prism_rebalance('maint');
+ERROR:  "maint" is not an index
+step h_commit: COMMIT;
+
+starting permutation: h_begin h_alter u_iconvert u_isplit u_ireb h_commit
+step h_begin: BEGIN;
+step h_alter: ALTER INDEX maint_idx SET (nlist = 1);
+step u_iconvert: CALL prism_convert_posting_to_fastscan('maint_idx', 0);
+ERROR:  must be owner of table maint
+step u_isplit: CALL prism_split_posting_list('maint_idx', 1);
+ERROR:  must be owner of table maint
+step u_ireb: CALL prism_rebalance('maint_idx');
+ERROR:  must be owner of table maint
+step h_commit: COMMIT;
+
+starting permutation: h_begin h_alter o_reb h_reindex h_commit
+step h_begin: BEGIN;
+step h_alter: ALTER INDEX maint_idx SET (nlist = 1);
+step o_reb: CALL prism_rebalance('maint_idx', 10); <waiting ...>
+step h_reindex: REINDEX INDEX maint_idx;
+step h_commit: COMMIT;
+owner: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
+step o_reb: <... completed>
+
+starting permutation: h_begin h_alter o_reb h_drop h_commit
+step h_begin: BEGIN;
+step h_alter: ALTER INDEX maint_idx SET (nlist = 1);
+step o_reb: CALL prism_rebalance('maint_idx', 10); <waiting ...>
+step h_drop: DROP INDEX maint_idx;
+step h_commit: COMMIT;
+step o_reb: <... completed>
+ERROR:  index "maint_idx" was dropped while waiting for the maintenance lock
+
+starting permutation: h_begin h_alter o_reb h_chown h_commit
+step h_begin: BEGIN;
+step h_alter: ALTER INDEX maint_idx SET (nlist = 1);
+step o_reb: CALL prism_rebalance('maint_idx', 10); <waiting ...>
+step h_chown: ALTER TABLE maint OWNER TO regress_maint_unpriv;
+step h_commit: COMMIT;
+step o_reb: <... completed>
+ERROR:  must be owner of table maint

@@ -117,6 +117,7 @@ else
           '--load-extension=pg_vectorsearch',
           'mutations_concurrent',
           'build_serialize',
+          'maintenance_privilege',
         ],
         depends: [pgvs_ext_so],
         timeout: 120,
