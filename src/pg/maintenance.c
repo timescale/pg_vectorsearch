@@ -31,6 +31,7 @@
 
 #include <postgres.h>
 
+#include <access/genam.h>
 #include <access/generic_xlog.h>
 #include <access/htup_details.h>
 #include <access/relation.h>
@@ -178,6 +179,50 @@ require_index_owner(Relation index, LOCKMODE lockmode)
 }
 
 /*
+ * Open the index for a maintenance pass and take the maintenance lock.
+ *
+ * The caller is checked under AccessShareLock before the maintenance lock is
+ * requested. ShareUpdateExclusiveLock conflicts with VACUUM and DDL, so a
+ * caller that is going to be refused must not queue a request for it on a
+ * relation it has no privileges on.
+ *
+ * The AccessShareLock is released before the wait. A transaction holding
+ * ShareUpdateExclusiveLock on the index that upgrades to AccessExclusiveLock
+ * (REINDEX, DROP INDEX) would otherwise deadlock with a waiter still holding
+ * the weaker lock. The check runs again under the maintenance lock, since
+ * ownership may have changed meanwhile.
+ */
+static Relation
+open_index_for_maintenance(Oid indexoid)
+{
+	Relation index = index_open(indexoid, AccessShareLock);
+
+	/* index_open admits a partitioned index, which has no storage. */
+	if (index->rd_rel->relkind != RELKIND_INDEX)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot run maintenance on partitioned index \"%s\"",
+						RelationGetRelationName(index)),
+				 errhint("Run it on the index of each partition.")));
+	prism_check_index(index);
+	require_index_owner(index, AccessShareLock);
+	NameData name;
+	namestrcpy(&name, RelationGetRelationName(index));
+	index_close(index, AccessShareLock);
+
+	index = try_index_open(indexoid, PRISM_MAINT_LOCK);
+	if (index == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("index \"%s\" was dropped while waiting for the "
+						"maintenance lock",
+						NameStr(name))));
+	prism_check_index(index);
+	require_index_owner(index, PRISM_MAINT_LOCK);
+	return index;
+}
+
+/*
  * Writable pointer to a leaf entry's child block number on a centroid page.
  * The location depends on the page format: an AoS meta array for the
  * meta-based formats, or the packed per-group child array for a fastscan
@@ -284,18 +329,7 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 
 	Oid		 indexoid	= PG_GETARG_OID(0);
 	int32	 cluster_id = PG_GETARG_INT32(1);
-	Relation index		= relation_open(indexoid, PRISM_MAINT_LOCK);
-
-	if (index->rd_rel->relkind != RELKIND_INDEX)
-	{
-		relation_close(index, PRISM_MAINT_LOCK);
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not an index",
-						RelationGetRelationName(index))));
-	}
-
-	require_index_owner(index, PRISM_MAINT_LOCK);
+	Relation index		= open_index_for_maintenance(indexoid);
 
 	/* Read metadata */
 	Buffer meta_buf = ReadBuffer(index, 0);
@@ -308,7 +342,7 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	if (meta->magic != PRISM_META_MAGIC)
 	{
 		UnlockReleaseBuffer(meta_buf);
-		relation_close(index, PRISM_MAINT_LOCK);
+		index_close(index, NoLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a prism index",
@@ -349,7 +383,7 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	if (leaf == NULL)
 	{
 		pfree(leaves);
-		relation_close(index, PRISM_MAINT_LOCK);
+		index_close(index, NoLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("cluster %d not found or has no posting list",
@@ -372,7 +406,7 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 
 		if (already_fastscan)
 		{
-			relation_close(index, PRISM_MAINT_LOCK);
+			index_close(index, NoLock);
 			ereport(NOTICE,
 					(errmsg("cluster %d already fastscan (head block %u)",
 							cluster_id,
@@ -413,7 +447,7 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 				dim,
 				&current_head))
 	{
-		relation_close(index, PRISM_MAINT_LOCK);
+		index_close(index, NoLock);
 		ereport(NOTICE,
 				(errmsg("cluster %d already converted by a concurrent "
 						"call (head block %u)",
@@ -432,7 +466,7 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	 * cached index base with the stale count, and mint cluster ids that
 	 * collide with the ones just written.
 	 */
-	relation_close(index, NoLock);
+	index_close(index, NoLock);
 
 	ereport(NOTICE,
 			(errmsg("converted cluster %d to fastscan (new head block %u)",
@@ -985,22 +1019,12 @@ vs_split_posting_list(PG_FUNCTION_ARGS)
 
 	Oid		 indexoid = PG_GETARG_OID(0);
 	int64	 blk64	  = PG_GETARG_INT64(1);
-	Relation index	  = relation_open(indexoid, PRISM_MAINT_LOCK);
-
-	if (index->rd_rel->relkind != RELKIND_INDEX)
-	{
-		relation_close(index, PRISM_MAINT_LOCK);
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not an index",
-						RelationGetRelationName(index))));
-	}
-	require_index_owner(index, PRISM_MAINT_LOCK);
+	Relation index	  = open_index_for_maintenance(indexoid);
 
 	BlockNumber nblocks = RelationGetNumberOfBlocks(index);
 	if (blk64 < 1 || blk64 >= (int64)nblocks)
 	{
-		relation_close(index, PRISM_MAINT_LOCK);
+		index_close(index, NoLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("block number " INT64_FORMAT " out of range", blk64)));
@@ -1023,7 +1047,7 @@ vs_split_posting_list(PG_FUNCTION_ARGS)
 	 * cached index base with the stale count, and mint cluster ids that
 	 * collide with the ones just written.
 	 */
-	relation_close(index, NoLock);
+	index_close(index, NoLock);
 
 	if (did)
 		ereport(NOTICE,
@@ -1085,20 +1109,10 @@ vs_rebalance(PG_FUNCTION_ARGS)
 	 * meaningful: it asks for the size to be derived from the index. */
 	bool	 target_given = !PG_ARGISNULL(1);
 	int32	 target_arg	  = target_given ? PG_GETARG_INT32(1) : 0;
-	Relation index		  = relation_open(indexoid, PRISM_MAINT_LOCK);
-
-	if (index->rd_rel->relkind != RELKIND_INDEX)
-	{
-		relation_close(index, PRISM_MAINT_LOCK);
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not an index",
-						RelationGetRelationName(index))));
-	}
-	require_index_owner(index, PRISM_MAINT_LOCK);
+	Relation index		  = open_index_for_maintenance(indexoid);
 	if (target_given && target_arg < 1)
 	{
-		relation_close(index, PRISM_MAINT_LOCK);
+		index_close(index, NoLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("target_entries must be positive")));
@@ -1168,7 +1182,7 @@ vs_rebalance(PG_FUNCTION_ARGS)
 	 * cached index base with the stale count, and mint cluster ids that
 	 * collide with the ones just written.
 	 */
-	relation_close(index, NoLock);
+	index_close(index, NoLock);
 
 	/*
 	 * Report the reclaim count as well as the split count. A retired chain is
