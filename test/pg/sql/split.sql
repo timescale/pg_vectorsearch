@@ -93,6 +93,17 @@ CALL prism_rebalance('split_idx', 10);
 -- prism_split_posting_list rejects a non-index argument.
 CALL prism_split_posting_list('split_test', 1);
 
+-- All three procedures reject an index of another access method. The planner
+-- caches that index's metapage in its relcache entry when it plans a query on
+-- the table, so the rejection has to come from the index's access method, not
+-- from reading that cache as prism's own.
+CREATE INDEX split_btree ON split_test (id);
+SELECT count(*) FROM split_test WHERE id = 1;
+CALL prism_split_posting_list('split_btree', 1);
+CALL prism_rebalance('split_btree');
+CALL prism_convert_posting_to_fastscan('split_btree', 0);
+DROP INDEX split_btree;
+
 -- The width is derived from the target, so a list far above it is right-sized
 -- in one pass instead of bisected repeatedly. 60 entries against a target of 10
 -- is round(60/10) = 6 parts, all of which then sit inside the band -- so the

@@ -237,6 +237,18 @@ SELECT * FROM prism_centroid_pages('idx_btree'::regclass);
 ERROR:  "idx_btree" is not a prism index
 SELECT * FROM prism_posting_pages('idx_btree'::regclass);
 ERROR:  "idx_btree" is not a prism index
+-- prism_tids_clusters rejects the btree index and the table itself, even
+-- after the planner has cached the btree metapage in its relcache entry.
+SELECT count(*) FROM embeddings WHERE id = 1;
+ count 
+-------
+     1
+(1 row)
+
+SELECT * FROM prism_tids_clusters('idx_btree'::regclass, ARRAY['(0,1)']::tid[]);
+ERROR:  "idx_btree" is not a prism index
+SELECT * FROM prism_tids_clusters('embeddings'::regclass, ARRAY['(0,1)']::tid[]);
+ERROR:  "embeddings" is not an index
 -- =====================================================================
 -- prism_convert_posting_to_fastscan
 -- =====================================================================

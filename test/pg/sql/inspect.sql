@@ -165,6 +165,11 @@ SELECT bool_and(chain_pos > 0) AS continuation_pages_ok
 CREATE INDEX IF NOT EXISTS idx_btree ON embeddings (id);
 SELECT * FROM prism_centroid_pages('idx_btree'::regclass);
 SELECT * FROM prism_posting_pages('idx_btree'::regclass);
+-- prism_tids_clusters rejects the btree index and the table itself, even
+-- after the planner has cached the btree metapage in its relcache entry.
+SELECT count(*) FROM embeddings WHERE id = 1;
+SELECT * FROM prism_tids_clusters('idx_btree'::regclass, ARRAY['(0,1)']::tid[]);
+SELECT * FROM prism_tids_clusters('embeddings'::regclass, ARRAY['(0,1)']::tid[]);
 
 -- =====================================================================
 -- prism_convert_posting_to_fastscan
