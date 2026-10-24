@@ -621,6 +621,329 @@ write_one_vector(void *state, ItemPointerData tid)
 	w->counts[target]++;
 }
 
+/* ----------------------------------------------------------------
+ * LIRE boundary reassignment
+ * ---------------------------------------------------------------- */
+
+/*
+ * A split moves the boundary between the list it cuts up and the lists around
+ * it: an entry in a neighboring leaf can end up closer to one of the new
+ * centroids than to its own. Leaving it there costs recall, because a scan
+ * that probes the new list -- the one the entry now belongs to -- does not
+ * reach it.
+ *
+ * LIRE's answer (SPFresh SS4.2.2) is to reassign those entries, and the shape
+ * of the fix here is set by what a posting page allows: a fastscan page packs
+ * entries in groups of 32, so a single entry cannot be deleted from one. So an
+ * affected neighbor is not edited -- it is rewritten. A fresh chain under the
+ * neighbor's own centroid takes the entries that stay, the movers go into the
+ * new lists' builders while those are still open, and the neighbor's leaf is
+ * repointed at the new chain. Nothing needs per-entry deletion, and the
+ * rewritten chain comes out in the index's current posting format.
+ *
+ * Everything is decided in rotated (P^T) space against the heads' stored
+ * pt_centroids, which are exact. The rotation is orthonormal, so a squared-L2
+ * comparison there is the same comparison in the original space -- see
+ * reassign_one_vector for what that buys and where it stops holding.
+ */
+
+/* Copy a posting head's stored P^T*centroid into out[dim]. */
+static void
+read_head_pt_centroid(
+		VsStorage *st, BlockNumber head, Dimension dim, float *out)
+{
+	Page page = vs_storage_read_page(st, head);
+	memcpy(out, prism_posting_pt_centroid(page), (size_t)dim * sizeof(float));
+	vs_storage_release_page(st, head);
+}
+
+/* A neighbor leaf selected for reassignment. */
+typedef struct ReassignTarget
+{
+	BlockNumber head;	  /* its posting head, the chain being replaced */
+	BlockNumber new_head; /* the replacement, InvalidBlockNumber until built */
+	float		dist;	  /* centroid distance to the nearest new centroid */
+	uint32_t	moved;	  /* entries this neighbor gave up */
+} ReassignTarget;
+
+/*
+ * Pick the k_neighbors leaves whose centroids sit nearest the new ones, into
+ * a caller-provided array of that size. Returns how many were filled.
+ *
+ * The selection streams the centroid chain and keeps only the k_neighbors
+ * best, so it costs no memory proportional to the leaf count -- the same
+ * reason the split streams its list rather than holding it. It does read one
+ * posting head per leaf, to get that leaf's exact rotated centroid; the leaf
+ * entry's own copy is quantized, and a wrong pick here silently rewrites the
+ * wrong list.
+ */
+static uint32_t
+select_reassign_neighbors(
+		PrismIndexBase *base,
+		BlockNumber		splitting_head,
+		const float	   *pt_new, /* k * dim */
+		uint32_t		k,
+		uint32_t		k_neighbors,
+		ReassignTarget *out)
+{
+	Dimension dim	 = base->dim;
+	uint32_t  nfound = 0;
+	float	 *pt_cL	 = vs_alloc_aligned((size_t)dim * sizeof(float), 64);
+
+	BlockNumber cblk = base->first_centroid;
+	while (cblk != InvalidBlockNumber)
+	{
+		Page page = vs_storage_read_page(base->centroid_storage, cblk);
+		const PrismCentroidPageOpaque *op	= PRISM_CENTROID_OPAQUE(page);
+		uint16_t					   cnt	= op->entry_count;
+		BlockNumber					   next = op->next_blkno;
+
+		for (uint16_t i = 0; i < cnt; i++)
+		{
+			BlockNumber ch = prism_centroid_meta(page, i)->child_blkno;
+
+			/* The list being split is not its own neighbor, and its old chain
+			 * is about to be retired. */
+			if (ch == InvalidBlockNumber || ch == splitting_head)
+				continue;
+
+			read_head_pt_centroid(base->posting_storage, ch, dim, pt_cL);
+
+			float best = 0.0f;
+			for (uint32_t j = 0; j < k; j++)
+			{
+				float d = vs_l2_distance_squared(
+						pt_cL, centroid_at(pt_new, j, dim), dim);
+				if (j == 0 || d < best)
+					best = d;
+			}
+
+			/* Insertion into the sorted prefix: nfound is at most
+			 * PRISM_SPLIT_REASSIGN_MAX, so this stays cheap however many
+			 * leaves the index has. */
+			if (nfound == k_neighbors && best >= out[nfound - 1].dist)
+				continue;
+
+			uint32_t pos = (nfound < k_neighbors) ? nfound : k_neighbors - 1;
+			while (pos > 0 && out[pos - 1].dist > best)
+			{
+				out[pos] = out[pos - 1];
+				pos--;
+			}
+			out[pos] = (ReassignTarget){
+					.head	  = ch,
+					.new_head = InvalidBlockNumber,
+					.dist	  = best,
+					.moved	  = 0,
+			};
+			if (nfound < k_neighbors)
+				nfound++;
+		}
+
+		vs_storage_release_page(base->centroid_storage, cblk);
+		cblk = next;
+	}
+
+	vs_free_aligned(pt_cL);
+	return nfound;
+}
+
+/*
+ * Streaming rewrite of one neighbor: every entry is re-encoded against the
+ * centroid of wherever it lands -- its own list's, unchanged, or a new one's.
+ * Like the split's own writer, this holds one page image per open builder and
+ * nothing per entry.
+ */
+typedef struct ReassignWriter
+{
+	PrismPostingBuilder *stay;	/* the neighbor's replacement chain */
+	PrismPostingBuilder *parts; /* the k new lists, still open */
+	uint32_t			 k;
+	const float			*pt_new; /* k * dim */
+	const float			*pt_own; /* the neighbor's own rotated centroid */
+	Dimension			 dim;
+	DistanceMetric		 metric;
+
+	const PrismSplitEnv *env;
+	const RaBitQParams	*params;
+	RaBitQScratch		*scratch;
+	RaBitQData			*enc_buf;
+	float				*one;	   /* the entry, as fetched */
+	float				*pt_one;   /* rotated */
+	float				*pt_resid; /* rotated, relative to its destination */
+
+	uint32_t moved;
+	uint32_t stayed;
+} ReassignWriter;
+
+static void
+reassign_one_vector(void *state, ItemPointerData tid)
+{
+	ReassignWriter *w	= (ReassignWriter *)state;
+	Dimension		dim = w->dim;
+
+	if (!w->env->fetch_vector(w->env->ctx, tid, w->one, dim))
+		return; /* gone from the heap; the rewrite drops it, as a split does */
+
+	bool degenerate = vector_is_degenerate(w->one, dim, w->metric);
+
+	/* The same unit-vector contract the split's passes keep, and for the same
+	 * reason: the centroids being compared against were elected in that
+	 * space. It is also what makes the squared-L2 comparison below stand in
+	 * for a cosine one -- on unit vectors the two order distances alike. */
+	if (!degenerate && w->metric == DISTANCE_COSINE)
+		vs_l2_normalize(w->one, dim);
+
+	vs_rabitq_rotate(w->params, w->one, w->pt_one);
+
+	const float			*pt_dst = w->pt_own;
+	PrismPostingBuilder *dst	= w->stay;
+
+	/*
+	 * A degenerate entry has no defined distance, so no centroid can claim
+	 * it: it stays where it is, and stays unreachable below.
+	 */
+	if (!degenerate)
+	{
+		float best = vs_l2_distance_squared(w->pt_one, w->pt_own, dim);
+		for (uint32_t j = 0; j < w->k; j++)
+		{
+			const float *pt_c = centroid_at(w->pt_new, j, dim);
+			float		 d	  = vs_l2_distance_squared(w->pt_one, pt_c, dim);
+
+			/* Strictly closer, so an entry already nearest its own centroid
+			 * never moves and the invariant is restored, not churned. */
+			if (d < best)
+			{
+				best   = d;
+				pt_dst = pt_c;
+				dst	   = &w->parts[j];
+			}
+		}
+	}
+
+	/*
+	 * Encode from the rotated residual rather than from a raw centroid: a
+	 * head page stores only pt_centroid, so this is the only form in which
+	 * the neighbor's own centroid is available exactly.
+	 */
+	vec32_sub(w->pt_one, pt_dst, w->pt_resid, dim);
+	vs_rabitq_encode_from_pt(w->params, w->pt_resid, w->enc_buf, w->scratch);
+
+	float f_add = w->enc_buf->f_add;
+	float f_error =
+			vs_rabitq_derive_f_error(f_add, w->enc_buf->f_rescale, dim);
+
+	/* The stamp the build, insert and split paths all apply. */
+	if (degenerate)
+	{
+		f_add	= INFINITY;
+		f_error = 0.0f;
+	}
+
+	prism_posting_builder_add_encoded(
+			dst, tid, f_add, w->enc_buf->f_rescale, f_error, w->enc_buf->bits);
+
+	if (dst == w->stay)
+		w->stayed++;
+	else
+		w->moved++;
+}
+
+/*
+ * Rewrite one neighbor, moving out whatever now belongs to a new list. The
+ * replacement chain is left unreferenced: the caller repoints the leaf at it
+ * after the flip, so a crash before that leaves the neighbor's old chain
+ * authoritative and leaks only pages nothing points at.
+ *
+ * Returns the number of entries moved, and sets t->new_head when there were
+ * any. A neighbor that gives up nothing is left exactly as it was: its
+ * replacement is tombstoned instead of adopted, which trades the pages it
+ * took for not having to fetch every vector twice to find that out.
+ */
+static uint32_t
+rewrite_neighbor(
+		PrismIndexBase		*base,
+		const PrismSplitEnv *env,
+		RaBitQParams		*params,
+		PrismPostingBuilder *parts,
+		const float			*pt_new,
+		uint32_t			 k,
+		ReassignTarget		*t)
+{
+	Dimension dim = base->dim;
+
+	uint32_t cluster_id = 0;
+	float	*pt_own		= vs_alloc_aligned((size_t)dim * sizeof(float), 64);
+	Page	 hp			= vs_storage_read_page(base->posting_storage, t->head);
+	memcpy(pt_own, prism_posting_pt_centroid(hp), (size_t)dim * sizeof(float));
+	cluster_id = prism_posting_opaque(hp)->cluster_id;
+	vs_storage_release_page(base->posting_storage, t->head);
+
+	/*
+	 * The replacement keeps the neighbor's cluster id: it is the same list,
+	 * with the same centroid, in new pages. Its entries arrive pre-encoded,
+	 * so the builder needs no raw centroid (it has none to give).
+	 */
+	PrismPostingBuilder stay;
+	prism_posting_builder_init_fmt(
+			&stay,
+			base->posting_storage,
+			params,
+			dim,
+			cluster_id,
+			NULL,
+			pt_own,
+			base->fastscan != 0);
+
+	RaBitQScratch scratch;
+	vs_rabitq_scratch_init(&scratch, dim);
+
+	ReassignWriter w = {
+			.stay	  = &stay,
+			.parts	  = parts,
+			.k		  = k,
+			.pt_new	  = pt_new,
+			.pt_own	  = pt_own,
+			.dim	  = dim,
+			.metric	  = base->metric,
+			.env	  = env,
+			.params	  = params,
+			.scratch  = &scratch,
+			.enc_buf  = vs_alloc(VS_RABITQ_DATA_SIZE(dim)),
+			.one	  = vs_alloc((size_t)dim * sizeof(float)),
+			.pt_one	  = vs_alloc_aligned((size_t)dim * sizeof(float), 64),
+			.pt_resid = vs_alloc_aligned((size_t)dim * sizeof(float), 64),
+	};
+
+	walk_chain_tids(
+			base->posting_storage,
+			dim,
+			t->head,
+			reassign_one_vector,
+			&w,
+			env,
+			NULL);
+
+	BlockNumber replacement = prism_posting_builder_finish(&stay);
+	prism_posting_builder_cleanup(&stay);
+
+	if (w.moved > 0)
+		t->new_head = replacement;
+	else if (replacement != InvalidBlockNumber)
+		prism_posting_chain_tombstone(base->posting_storage, replacement);
+
+	vs_free_aligned(w.pt_resid);
+	vs_free_aligned(w.pt_one);
+	vs_free(w.one);
+	vs_free(w.enc_buf);
+	vs_rabitq_scratch_cleanup(&scratch);
+	vs_free_aligned(pt_own);
+
+	t->moved = w.moved;
+	return w.moved;
+}
+
 static void
 tombstone_page(PrismPostingPageOpaque *op, void *state)
 {
@@ -933,6 +1256,7 @@ write_phase_cleanup(
 		uint32_t	   k,
 		float		  *pt_res,
 		float		  *pt_c,
+		float		  *pt_new,
 		float		  *centroids)
 {
 	vs_rabitq_scratch_cleanup(scratch);
@@ -940,6 +1264,7 @@ write_phase_cleanup(
 		vs_free(rd[j]);
 	vs_free_aligned(pt_res);
 	vs_free_aligned(pt_c);
+	vs_free_aligned(pt_new);
 	vs_free(centroids);
 }
 
@@ -1055,12 +1380,18 @@ prism_posting_split(
 	if (env->reserve_nlist != NULL)
 		env->reserve_nlist(env->ctx, base->nlist);
 
-	bool		  fastscan = (base->fastscan != 0);
-	BlockNumber	  new_head[PRISM_SPLIT_MAX_PARTS];
-	RaBitQData	 *rd[PRISM_SPLIT_MAX_PARTS];
-	uint32_t	  counts[PRISM_SPLIT_MAX_PARTS] = {0};
-	float		 *pt_c	 = vs_alloc_aligned((size_t)dim * sizeof(float), 64);
-	float		 *pt_res = vs_alloc_aligned((size_t)dim * sizeof(float), 64);
+	bool		fastscan = (base->fastscan != 0);
+	BlockNumber new_head[PRISM_SPLIT_MAX_PARTS];
+	RaBitQData *rd[PRISM_SPLIT_MAX_PARTS];
+	uint32_t	counts[PRISM_SPLIT_MAX_PARTS] = {0};
+	float	   *pt_c   = vs_alloc_aligned((size_t)dim * sizeof(float), 64);
+	float	   *pt_res = vs_alloc_aligned((size_t)dim * sizeof(float), 64);
+	/*
+	 * The new centroids, rotated. pt_c holds one at a time for the builder
+	 * init below; reassignment needs all k at once to decide where a
+	 * neighbor's entry belongs, and k is bounded by PRISM_SPLIT_MAX_PARTS.
+	 */
+	float *pt_new = vs_alloc_aligned((size_t)k * dim * sizeof(float), 64);
 	RaBitQScratch scratch;
 	vs_rabitq_scratch_init(&scratch, dim);
 
@@ -1070,6 +1401,9 @@ prism_posting_split(
 	{
 		const float *centroid = centroid_at(centroids, j, dim);
 		vs_rabitq_rotate(params, centroid, pt_c);
+		memcpy((float *)centroid_at(pt_new, j, dim),
+			   pt_c,
+			   (size_t)dim * sizeof(float));
 
 		/* Not `cid`: that is a command id in PostgreSQL. */
 		uint32_t new_cluster = (j == 0) ? cluster_id : first_new_id + (j - 1);
@@ -1105,6 +1439,45 @@ prism_posting_split(
 			base->posting_storage, dim, head, write_one_vector, &w, env, NULL);
 	vs_free(w.one);
 
+	/*
+	 * 3b. LIRE boundary reassignment, while the builders are still open.
+	 *
+	 * Runs in its own context: the per-neighbor rewrite allocates a page
+	 * image and a handful of dim-sized buffers, and none of it outlives the
+	 * phase. What does outlive it -- which neighbors were rewritten, and
+	 * where their replacements start -- is the caller's fixed-size array.
+	 *
+	 * Inner product is excluded: the reassignment restores "every entry sits
+	 * in the list whose centroid is nearest", which is not what an inner
+	 * product orders by, so there is no invariant here to restore.
+	 */
+	ReassignTarget targets[PRISM_SPLIT_REASSIGN_MAX];
+	uint32_t	   ntargets	   = 0;
+	uint32_t	   reassigned  = 0;
+	uint32_t	   k_neighbors = (cfg != NULL &&
+							  base->metric != DISTANCE_INNER_PRODUCT)
+									   ? cfg->reassign_neighbors
+									   : 0;
+
+	if (k_neighbors > PRISM_SPLIT_REASSIGN_MAX)
+		k_neighbors = PRISM_SPLIT_REASSIGN_MAX;
+
+	if (k_neighbors > 0)
+	{
+		VsMemCtx rctx =
+				vs_memctx_create(vs_memctx_current(), "prism split reassign");
+		VsMemCtx rold = vs_memctx_switch(rctx);
+
+		ntargets = select_reassign_neighbors(
+				base, head, pt_new, k, k_neighbors, targets);
+		for (uint32_t t = 0; t < ntargets; t++)
+			reassigned += rewrite_neighbor(
+					base, env, params, builders, pt_new, k, &targets[t]);
+
+		vs_memctx_switch(rold);
+		vs_memctx_delete(rctx);
+	}
+
 	for (uint32_t j = 0; j < k; j++)
 		new_head[j] = prism_posting_builder_finish(&builders[j]);
 	for (uint32_t j = 0; j < k; j++)
@@ -1125,7 +1498,7 @@ prism_posting_split(
 	if (rc != 0)
 	{
 		/* Should not happen: the head must be reachable from the tree. */
-		write_phase_cleanup(&scratch, rd, k, pt_res, pt_c, centroids);
+		write_phase_cleanup(&scratch, rd, k, pt_res, pt_c, pt_new, centroids);
 		return -1;
 	}
 
@@ -1231,6 +1604,48 @@ prism_posting_split(
 	else
 		prism_posting_chain_tombstone(base->posting_storage, head);
 
+	/*
+	 * 6. Adopt the rewritten neighbors: repoint each leaf at its replacement
+	 * and retire the chain it replaced, through the same seam as the split's
+	 * own. The leaf keeps its routing centroid -- the list did not move, its
+	 * pages did.
+	 *
+	 * Deliberately after the flip. A crash before this leaves every neighbor
+	 * on its old chain, which still holds the entries the new lists also
+	 * received; those duplicates are dropped by the top-k's id dedup, the
+	 * same path the multi-page flip below relies on. A crash midway through
+	 * leaves the same, for the neighbors not yet adopted.
+	 */
+	for (uint32_t t = 0; t < ntargets; t++)
+	{
+		if (targets[t].new_head == InvalidBlockNumber)
+			continue; /* gave up nothing; its replacement was discarded */
+
+		BlockNumber npage, ntail;
+		uint32_t	nidx;
+		uint8_t		nlevel;
+		if (find_leaf_and_tail(
+					base->centroid_storage,
+					base->first_centroid,
+					targets[t].head,
+					&npage,
+					&nidx,
+					&ntail,
+					&nlevel) != 0)
+			continue; /* not reachable from the tree; leave it alone */
+
+		Page cp = vs_storage_write_page(base->centroid_storage, npage);
+		prism_centroid_page_set_child(cp, nidx, targets[t].new_head);
+		vs_storage_commit_page(base->centroid_storage, npage);
+
+		if (env->retire_chain != NULL)
+			env->retire_chain(
+					env->ctx, base->posting_storage, targets[t].head);
+		else
+			prism_posting_chain_tombstone(
+					base->posting_storage, targets[t].head);
+	}
+
 	res.did_split = true;
 	res.nparts	  = k;
 	for (uint32_t j = 0; j < k; j++)
@@ -1241,8 +1656,9 @@ prism_posting_split(
 	res.new_nlist		   = base->nlist;
 	res.new_centroid_pages = appended_centroid_pages;
 	base->ncentroid_pages += appended_centroid_pages;
+	res.reassigned = reassigned;
 
-	write_phase_cleanup(&scratch, rd, k, pt_res, pt_c, centroids);
+	write_phase_cleanup(&scratch, rd, k, pt_res, pt_c, pt_new, centroids);
 
 	if (out != NULL)
 		*out = res;

@@ -138,6 +138,14 @@ typedef struct PrismSplitEnv
  * steady-state split is a bisection, matching the SPFresh/LIRE protocol, and a
  * wider split only happens when a batch pass meets a neglected list.
  */
+/*
+ * Ceiling on PrismSplitConfig.reassign_neighbors. Bounds the selection to a
+ * fixed-size array, so reassignment costs no allocation that scales with the
+ * leaf count, and keeps a caller from turning one split into a rewrite of
+ * half the index.
+ */
+#define PRISM_SPLIT_REASSIGN_MAX 16
+
 #define PRISM_SPLIT_TRIGGER_FACTOR 2
 
 /*
@@ -303,6 +311,23 @@ typedef struct PrismSplitConfig
 	uint64_t sample_budget_bytes;
 	uint32_t km_max_iter; /* k-means iterations (0 -> default) */
 	uint64_t km_seed;	  /* k-means seed (0 -> default) */
+	/*
+	 * LIRE boundary reassignment: after the split, examine this many nearest
+	 * neighbor leaves and pull in any entry now closer to one of the new
+	 * centroids, restoring the nearest-partition invariant across the new
+	 * boundary. 0 disables it; anything higher is clamped to
+	 * PRISM_SPLIT_REASSIGN_MAX.
+	 *
+	 * Each affected neighbor is rewritten under its own centroid, which is
+	 * what lets entries leave a list whose pages cannot be edited in place
+	 * (fastscan packs entries in groups of 32). The caller must hold whatever
+	 * lock keeps those neighbors still -- the PG maintenance paths do not
+	 * enable this yet, which is why it is reachable from standalone only.
+	 *
+	 * Ignored under DISTANCE_INNER_PRODUCT: "closer to another centroid" is
+	 * not a partition invariant there, so there is nothing to restore.
+	 */
+	uint32_t reassign_neighbors;
 } PrismSplitConfig;
 
 typedef struct PrismSplitResult
@@ -324,6 +349,7 @@ typedef struct PrismSplitResult
 	 * being a PostgreSQL detail the shared layer does not reach.
 	 */
 	uint32_t new_centroid_pages;
+	uint32_t reassigned; /* entries pulled in from neighbors (LIRE) */
 } PrismSplitResult;
 
 /*
