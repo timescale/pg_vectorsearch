@@ -423,6 +423,8 @@ cache_pt_global_mean(AmCacheData *c)
 static AmCacheData *
 get_cache_data(Relation index)
 {
+	prism_check_index(index);
+
 	if (index->rd_amcache != NULL)
 		return (AmCacheData *)index->rd_amcache;
 

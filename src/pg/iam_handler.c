@@ -554,6 +554,38 @@ prism_validate(Oid opclassoid)
 }
 
 /* ----------------------------------------------------------------
+ * Access method identity
+ * ---------------------------------------------------------------- */
+
+/*
+ * Whether rel is an index of the prism access method. The relcache fills
+ * rd_indam from prism_handler, so the callback identifies the AM without a
+ * catalog lookup.
+ */
+bool
+prism_is_index(Relation rel)
+{
+	return rel->rd_rel->relkind == RELKIND_INDEX && rel->rd_indam != NULL &&
+		   rel->rd_indam->ambuild == prism_build;
+}
+
+/*
+ * Reject an index that is not a prism index. Every SQL entry point that
+ * takes a regclass runs this after index_open, and so does the per-backend
+ * cache: rd_amcache belongs to whichever access method the relcache built
+ * the entry for, and another AM's cache would be misread as ours.
+ */
+void
+prism_check_index(Relation rel)
+{
+	if (!prism_is_index(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a prism index",
+						RelationGetRelationName(rel))));
+}
+
+/* ----------------------------------------------------------------
  * Handler
  * ---------------------------------------------------------------- */
 

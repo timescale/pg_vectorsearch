@@ -242,6 +242,10 @@ vs_pg_rabitq_alloc(int dim)
  * Validation helpers (implemented in vs_pg.c)
  * ---------------------------------------------------------------- */
 
+/* Access method identity (implemented in iam_handler.c) */
+bool prism_is_index(Relation rel);
+void prism_check_index(Relation rel);
+
 void vs_pg_check_dim_valid(int dim);
 void vs_pg_check_rabitq_params_dim_valid(int dim);
 void vs_pg_check_dims_match(int dim_a, int dim_b);

@@ -18,7 +18,7 @@
 
 #include <postgres.h>
 
-#include <access/relation.h>
+#include <access/genam.h>
 #include <catalog/index.h>
 #include <catalog/pg_class.h>
 #include <catalog/pg_type.h>
@@ -98,7 +98,7 @@ require_index_select(Relation index, LOCKMODE lockmode)
 	{
 		char	  *relname = get_rel_name(heaprelid);
 		ObjectType objtype = get_relkind_objtype(get_rel_relkind(heaprelid));
-		relation_close(index, lockmode);
+		index_close(index, lockmode);
 		aclcheck_error(aclresult, objtype, relname);
 	}
 }
@@ -113,7 +113,7 @@ require_index_owner(Relation index, LOCKMODE lockmode)
 	{
 		char	  *relname = get_rel_name(heaprelid);
 		ObjectType objtype = get_relkind_objtype(get_rel_relkind(heaprelid));
-		relation_close(index, lockmode);
+		index_close(index, lockmode);
 		aclcheck_error(ACLCHECK_NOT_OWNER, objtype, relname);
 	}
 }
@@ -263,18 +263,9 @@ vs_centroid_pages(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	/* Open relation and verify it's an index */
-	Relation index = relation_open(indexoid, AccessShareLock);
+	Relation index = index_open(indexoid, AccessShareLock);
 
-	if (index->rd_rel->relkind != RELKIND_INDEX)
-	{
-		relation_close(index, AccessShareLock);
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not an index",
-						RelationGetRelationName(index))));
-	}
-
+	prism_check_index(index);
 	require_index_select(index, AccessShareLock);
 
 	VsPgStorage store;
@@ -291,7 +282,7 @@ vs_centroid_pages(PG_FUNCTION_ARGS)
 	if (meta->magic != PRISM_META_MAGIC)
 	{
 		vs_storage_release_page(st, 0);
-		relation_close(index, AccessShareLock);
+		index_close(index, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a prism index",
@@ -306,7 +297,7 @@ vs_centroid_pages(PG_FUNCTION_ARGS)
 
 	if (!BlockNumberIsValid(first_centroid))
 	{
-		relation_close(index, AccessShareLock);
+		index_close(index, AccessShareLock);
 		PG_RETURN_NULL();
 	}
 
@@ -449,7 +440,7 @@ vs_centroid_pages(PG_FUNCTION_ARGS)
 	}
 
 	pfree(worklist);
-	relation_close(index, AccessShareLock);
+	index_close(index, AccessShareLock);
 
 	PG_RETURN_NULL();
 }
@@ -565,17 +556,9 @@ vs_posting_pages(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	Relation index = relation_open(indexoid, AccessShareLock);
+	Relation index = index_open(indexoid, AccessShareLock);
 
-	if (index->rd_rel->relkind != RELKIND_INDEX)
-	{
-		relation_close(index, AccessShareLock);
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not an index",
-						RelationGetRelationName(index))));
-	}
-
+	prism_check_index(index);
 	require_index_select(index, AccessShareLock);
 
 	VsPgStorage store;
@@ -591,7 +574,7 @@ vs_posting_pages(PG_FUNCTION_ARGS)
 	if (meta->magic != PRISM_META_MAGIC)
 	{
 		vs_storage_release_page(st, 0);
-		relation_close(index, AccessShareLock);
+		index_close(index, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a prism index",
@@ -605,7 +588,7 @@ vs_posting_pages(PG_FUNCTION_ARGS)
 
 	if (!BlockNumberIsValid(first_centroid))
 	{
-		relation_close(index, AccessShareLock);
+		index_close(index, AccessShareLock);
 		PG_RETURN_NULL();
 	}
 
@@ -623,7 +606,7 @@ vs_posting_pages(PG_FUNCTION_ARGS)
 	}
 
 	pfree(leaves);
-	relation_close(index, AccessShareLock);
+	index_close(index, AccessShareLock);
 
 	PG_RETURN_NULL();
 }
@@ -700,8 +683,9 @@ vs_tids_clusters(PG_FUNCTION_ARGS)
 	}
 	qsort(keys, nk, sizeof(uint64), cmp_u64);
 
-	Relation index = relation_open(indexoid, AccessShareLock);
+	Relation index = index_open(indexoid, AccessShareLock);
 
+	prism_check_index(index);
 	require_index_owner(index, AccessShareLock);
 
 	VsPgStorage store;
@@ -769,7 +753,7 @@ vs_tids_clusters(PG_FUNCTION_ARGS)
 		vs_storage_release_page(st, blkno);
 	}
 
-	relation_close(index, AccessShareLock);
+	index_close(index, AccessShareLock);
 	PG_RETURN_NULL();
 }
 
@@ -863,17 +847,9 @@ vs_index_settings(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	Relation index = relation_open(indexoid, AccessShareLock);
+	Relation index = index_open(indexoid, AccessShareLock);
 
-	if (index->rd_rel->relkind != RELKIND_INDEX)
-	{
-		relation_close(index, AccessShareLock);
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not an index",
-						RelationGetRelationName(index))));
-	}
-
+	prism_check_index(index);
 	require_index_select(index, AccessShareLock);
 
 	VsPgStorage store;
@@ -893,7 +869,7 @@ vs_index_settings(PG_FUNCTION_ARGS)
 	if (meta->magic != PRISM_META_MAGIC)
 	{
 		vs_storage_release_page(st, 0);
-		relation_close(index, AccessShareLock);
+		index_close(index, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a prism index",
@@ -1039,6 +1015,6 @@ vs_index_settings(PG_FUNCTION_ARGS)
 			(prism_nprobe > 0) ? "session" : "auto");
 
 	list_free_deep(set);
-	relation_close(index, AccessShareLock);
+	index_close(index, AccessShareLock);
 	PG_RETURN_NULL();
 }
