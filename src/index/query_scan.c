@@ -516,6 +516,43 @@ prism_query_route(
 #define PRISM_RERANK_POOL_AUTO_COEFF 3.0
 #define PRISM_RERANK_POOL_AUTO_EXP	 0.15
 
+/*
+ * Resolve prism.rerank_pool into an absolute candidate cap. `setting` is the
+ * GUC (-1 unlimited, 0 automatic, >0 absolute), `nprobe` the clusters this
+ * query probes, and `cand_count` the survivor population -- known only
+ * mid-scan, which is why this cannot be resolved once per scan. Returns 0
+ * for unlimited, since that is what "no cap" means downstream.
+ *
+ * Split out from the scan path so the arithmetic can be tested directly.
+ * It cannot be pinned through a regression fixture: the cap only becomes
+ * observable once survivors exceed it, and a small table yields far fewer
+ * survivors than any of these values, which makes every candidate formula
+ * indistinguishable at that size.
+ */
+uint32_t
+vs_auto_rerank_pool(
+		int32_t setting, uint32_t k, uint32_t nprobe, uint32_t cand_count)
+{
+	if (setting < 0)
+		return 0; /* unlimited */
+
+	uint32_t pool;
+
+	if (setting > 0)
+		pool = (uint32_t)setting;
+	else
+	{
+		double auto_floor = PRISM_RERANK_POOL_AUTO_COEFF * (double)k *
+							pow((double)nprobe, PRISM_RERANK_POOL_AUTO_EXP);
+		pool = (uint32_t)(auto_floor + 0.5);
+		if (pool < cand_count / 8)
+			pool = cand_count / 8;
+	}
+
+	/* Never below k, so a cap can never truncate the result set. */
+	return pool < k ? k : pool;
+}
+
 static int32_t g_rerank_pool = 0;
 
 void
