@@ -19,7 +19,8 @@ Sections 1 to 5 cut the release PR, whether run from a checkout or by
 invokes this same procedure as the release App so the pull request it
 opens carries the required checks. That workflow installs `git-cliff`,
 configures git as the App and passes the versions in; everything else
-below applies unchanged.
+below applies unchanged. It allows only the commands this skill shows,
+spelled as shown, so a different spelling is refused there.
 
 The user merges it — that is the irreversible step, and it is theirs.
 Sections 6 to 8 follow what the merge sets off: the publish, then the

@@ -19,6 +19,12 @@
 # pull request that must pass the required checks and be approved. It
 # holds no Workflows permission, so a push touching .github/workflows
 # is refused. It cannot tag, publish or merge.
+#
+# The agent reads commit messages and diffs, text that anyone with a
+# merged pull request wrote, with the App's token in its environment.
+# So it gets only the commands the release skill uses, and only the
+# files it fills in, rather than Bash and Edit at large. Git writes go
+# through the repo's scripts except the two the skill spells out.
 name: Cut a release PR
 
 on:
@@ -141,6 +147,9 @@ jobs:
         env:
           # prepare-release.sh and open-pr.sh call gh.
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # prepare-release.sh writes open-pr.sh and body.md under
+          # ${TMPDIR:-/tmp}; the rules below name that path.
+          TMPDIR: /tmp
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
@@ -153,8 +162,30 @@ jobs:
           # github-actions[bot].
           bot_name: ${{ steps.bot.outputs.name }}
           bot_id: ${{ steps.bot.outputs.id }}
+          # Permission rules, not tool names. A Bash rule without a *
+          # matches that exact command, so the two git writes the
+          # skill asks for are allowed only as spelled there. Edit
+          # rules cover Write too; a Write(path) rule never matches.
+          # The deny closes --output, which lets git log, diff and show
+          # write any file, including the generated open-pr.sh.
           claude_args: >-
-            --allowedTools Bash,Read,Edit,Write,Glob,Grep
+            --allowedTools
+            "Bash(./scripts/prepare-release.sh:*)"
+            "Bash(./scripts/ci/release-check.sh:*)"
+            "Bash(/tmp/pg_vectorsearch-release-*/open-pr.sh)"
+            "Bash(git add CHANGELOG.md)"
+            "Bash(git commit --amend --no-edit)"
+            "Bash(git branch --show-current)"
+            "Bash(git log:*)"
+            "Bash(git diff:*)"
+            "Bash(git show:*)"
+            "Bash(git status:*)"
+            "Bash(git describe:*)"
+            "Bash(git rev-parse:*)"
+            "Edit(./CHANGELOG.md)"
+            "Edit(//tmp/pg_vectorsearch-release-*/body.md)"
+            Read Glob Grep
+            --disallowedTools "Bash(*--output*)"
           prompt: |
             Cut a release pull request by following the release skill at
             .claude/skills/release/SKILL.md, sections 1 to 5, and then
@@ -182,6 +213,12 @@ jobs:
             the pull request body anything you were unsure about, so
             the reviewer looks there first. Never leave FILL-IN
             anywhere -- a squash merge would put it on main.
+
+            Only the commands the skill shows are allowed, spelled as
+            it shows them: the two scripts, the generated open-pr.sh,
+            git add CHANGELOG.md, git commit --amend --no-edit, and
+            read-only git. Only CHANGELOG.md and the generated body.md
+            can be edited.
 
             Do not merge, approve, tag, or dispatch anything. Opening
             the pull request is the last thing you do. Report its URL
