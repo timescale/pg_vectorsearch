@@ -68,7 +68,7 @@ jobs:
           persist-credentials: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@2b983b380ce715a6c836c917154509c332c19b3a # v3
+        uses: github/codeql-action/init@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3.39.1
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -99,6 +99,6 @@ jobs:
           meson compile -C builddir
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@2b983b380ce715a6c836c917154509c332c19b3a # v3
+        uses: github/codeql-action/analyze@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3.39.1
         with:
           category: /language:${{ matrix.language }}

@@ -120,8 +120,14 @@ jobs:
           COVERITY_VERSION: ${{ github.sha }}
           COVERITY_DESCRIPTION: ${{ github.ref_name }} (${{ github.event_name }})
         run: |
+          # The token goes through a file: a form value on the command
+          # line is visible to every process on the runner.
+          token_file="$(mktemp)"
+          trap 'rm -f "$token_file"' EXIT
+          chmod 600 "$token_file"
+          printf '%s' "$COVERITY_TOKEN" >"$token_file"
           reply=$(curl --silent --show-error --fail-with-body \
-            --form "token=$COVERITY_TOKEN" --form "email=$COVERITY_EMAIL" \
+            --form "token=<$token_file" --form "email=$COVERITY_EMAIL" \
             --form "file=@cov-int.tgz" --form "version=$COVERITY_VERSION" \
             --form "description=$COVERITY_DESCRIPTION" \
             "https://scan.coverity.com/builds?project=timescale%2Fpg_vectorsearch")

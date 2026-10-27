@@ -16,10 +16,10 @@
 # checkout is detached and the branch name is not recoverable from it.
 #
 # With APP_SLUG set, the commit is attributed to that App's bot account
-# and the remote is pointed at an authenticated URL built from
+# and gh is installed as git's credential helper, answering from
 # GH_TOKEN. Both are skipped when it is unset, so running this by hand
-# neither rewrites the operator's git identity nor puts a token in
-# their remote.
+# neither rewrites the operator's git identity nor their credential
+# setup.
 #
 # Runs after the release is published, so a failure here leaves a
 # complete release and a main branch still carrying the released
@@ -93,8 +93,8 @@ fi
 
 # Write as the App, when running as one. An unattributed commit can
 # draw the ruleset's extra-approval requirement, which would stall the
-# bump; and the push needs a credential in the remote, because the
-# checkout deliberately keeps none.
+# bump; and the push needs a credential, because the checkout
+# deliberately keeps none.
 if [[ -n "${APP_SLUG:-}" ]]; then
     log "committing as ${APP_SLUG}[bot]"
     bot_id="$(gh api "/users/$APP_SLUG%5Bbot%5D" --jq .id)"
@@ -102,16 +102,15 @@ if [[ -n "${APP_SLUG:-}" ]]; then
     git config user.email \
         "$bot_id+${APP_SLUG}[bot]@users.noreply.github.com"
     : "${GH_TOKEN:?APP_SLUG is set but GH_TOKEN is not}"
-    # Only a GitHub remote, and only to add the credential the checkout
-    # deliberately did not keep. Rewriting any other remote would aim
-    # the push at github.com rather than where it actually points.
+    # gh hands GH_TOKEN to git when it pushes over https, so the token
+    # never lands in the remote URL or .git/config. The helper only
+    # answers for github.com, so any other remote is pushed to as is.
     remote="$(release_remote)"
-    if [[ "$(git remote get-url "$remote")" == *github.com* ]]; then
-        git remote set-url "$remote" \
-            "https://x-access-token:$GH_TOKEN@github.com/$(repo_slug)"
+    if [[ "$(git remote get-url "$remote")" == https://github.com/* ]]; then
+        gh auth setup-git --hostname github.com
     else
-        warn "remote $remote is not on github.com: pushing to it as it" \
-            "stands"
+        warn "remote $remote is not https on github.com: pushing to it" \
+            "as it stands"
     fi
 fi
 

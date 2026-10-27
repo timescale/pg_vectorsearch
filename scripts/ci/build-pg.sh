@@ -91,20 +91,39 @@ if [[ -x "$PREFIX/bin/pg_config" ]] &&
     exit 0
 fi
 
+# Published SHA-256 of each source tarball CI builds, from
+# https://ftp.postgresql.org/pub/source/v<version>/<tarball>.sha256.
+# Kept here rather than fetched next to the tarball so that a tampered
+# or corrupted origin cannot serve a matching pair. A version with no
+# entry fails before anything is downloaded; add its checksum here to
+# build it.
+expected_sha256() {
+    case "$1" in
+        18.4)
+            echo 81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7ab8e64436094 ;;
+        19beta4)
+            echo 83157ee9c599d03b2f7a3d73ef3a56ec24e0e79cc2b3501a64d1364f56398c86 ;;
+        *) return 1 ;;
+    esac
+}
+
+tarball="postgresql-${VERSION}.tar.bz2"
+if ! expected="$(expected_sha256 "$VERSION")"; then
+    echo "==> ERROR: no known checksum for $tarball; add it to" \
+        "expected_sha256() in $0 from" \
+        "https://ftp.postgresql.org/pub/source/v${VERSION}/${tarball}.sha256" >&2
+    exit 1
+fi
+
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
-tarball="postgresql-${VERSION}.tar.bz2"
 url="https://ftp.postgresql.org/pub/source/v${VERSION}/${tarball}"
 echo "==> Downloading $url"
 curl -fsSL "$url" -o "$workdir/$tarball"
-curl -fsSL "${url}.sha256" -o "$workdir/${tarball}.sha256"
 
-# Verify the tarball against PostgreSQL's published checksum before trusting
-# it. TLS protects the download in transit but not the artifact at rest, so
-# this guards against a tampered or corrupted tarball at the origin/mirror.
 echo "==> Verifying checksum"
-if ! (cd "$workdir" && sha256sum -c "${tarball}.sha256"); then
+if ! (cd "$workdir" && echo "$expected  $tarball" | sha256sum -c -); then
     echo "==> ERROR: checksum verification failed for $tarball" >&2
     exit 1
 fi

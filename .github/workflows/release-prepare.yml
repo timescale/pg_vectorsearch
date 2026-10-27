@@ -113,7 +113,6 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-          REPO: ${{ github.repository }}
         run: |
           # The commit is attributed to the App's own account: an
           # unattributed one can draw the ruleset's extra-approval
@@ -132,8 +131,9 @@ jobs:
             echo "id=$bot_id"
           } >>"$GITHUB_OUTPUT"
           # The checkout persists no credentials, and open-pr.sh pushes.
-          git remote set-url origin \
-            "https://x-access-token:$GH_TOKEN@github.com/$REPO"
+          # gh answers git's credential prompt from GH_TOKEN, so the
+          # token stays out of .git/config.
+          gh auth setup-git --hostname github.com
 
       - name: Cut the release PR
         # v1

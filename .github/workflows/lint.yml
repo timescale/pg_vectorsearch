@@ -54,8 +54,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-server-dev-18
           echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
-          pip install pre-commit
-          npm install -g markdownlint-cli2
+          pip install pre-commit==4.7.0
+          npm install -g markdownlint-cli2@0.24.0
 
       # On a pull request, lint only the files it changes. On a push to
       # main the two variables are empty and every file is linted.
