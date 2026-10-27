@@ -1,8 +1,14 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow
 ---
-# Mention @claude in an issue, a pull request review, or a comment on either,
-# and the assistant answers in that thread: it can read the repository and the
-# PR's CI results, and commit to a branch when asked to make a change.
+# Mention @claude in a pull request review, or in a comment on an issue or a
+# pull request, and the assistant answers in that thread: it can read the
+# repository and the PR's CI results, and commit to a branch when asked to
+# make a change.
+#
+# The assistant acts with a token of the Claude GitHub App, minted through
+# OIDC, not with this job's token. What it can do is therefore set by the
+# App's installation permissions on the repository, which an administrator
+# reviews there; the job's own scopes below are read-only.
 name: Claude Code
 
 # zizmor flags these triggers as dangerous because they run on text anyone can
@@ -13,8 +19,6 @@ on: # zizmor: ignore[dangerous-triggers]
     types: [created]
   pull_request_review_comment:
     types: [created]
-  issues:
-    types: [opened, assigned]
   pull_request_review:
     types: [submitted]
 
@@ -27,8 +31,7 @@ jobs:
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude'))
     runs-on: ubuntu-latest
     # Job-level, not workflow-level: a workflow-level group is entered by
     # every triggering event regardless of this job's own `if`, including
@@ -42,17 +45,16 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number }}
       cancel-in-progress: true
-    # The write scopes are what let the assistant answer at all: it posts a
-    # tracking comment and its reply, and commits to a branch when asked. They
-    # grant nothing the caller lacks -- the action requires the invoking actor
-    # to hold write or admin before any model call and rejects non-human
-    # actors -- and main's ruleset still requires a pull request with no bypass
-    # actors, so contents: write reaches branches, not main.
+    # Read-only: replies, tracking comments and commits go through the App
+    # token (see the top of the file), so write scopes here would grant
+    # nothing the assistant uses. The action checks that the mentioning actor
+    # holds write access before any model call, and main's ruleset requires a
+    # pull request, so the App's contents write reaches branches, not main.
     permissions:
-      contents: write       # Commit to a branch when asked to make a change
-      pull-requests: write  # Post the reply and tracking comment
-      issues: write         # Same, on issues
-      id-token: write       # OIDC token for Claude API
+      contents: read        # Check out the repository
+      pull-requests: read   # Read the pull request
+      issues: read          # Read the issue
+      id-token: write       # OIDC exchange for the App token
       actions: read         # Read CI results on PRs
 
     steps:
