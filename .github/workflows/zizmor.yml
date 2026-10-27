@@ -1,12 +1,16 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow
 name: Zizmor
 
-# zizmor runs on every pull request, with no path filtering at either
-# level. Its findings reach the merge gate as a code scanning analysis
-# rather than through this job's exit status, and that analysis exists
-# only for commits where zizmor actually ran. A run that skipped
-# uploads nothing, so the `zizmor` check never reports and a ruleset
-# requiring it waits on it forever.
+# zizmor runs on every pull request, with no path filtering, so the
+# required check always reports.
+#
+# The check gates on zizmor's own exit status: it fails on any finding of
+# medium severity or above. That needs no token, so it works the same on
+# a pull request from a fork. Uploading findings to code scanning is a
+# separate job: the upload needs security-events: write, which a fork's
+# pull request does not get, and zizmor exits zero in SARIF mode so an
+# upload can never fail the check anyway. The upload runs on pushes to
+# main, where the token has the scope, and only feeds the dashboard.
 on:
   push:
     branches: [main]
@@ -26,8 +30,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      security-events: write  # Required to upload SARIF results (if available)
-      contents: read          # Required to checkout repository
+      contents: read
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -41,4 +44,29 @@ jobs:
         with:
           persona: pedantic
           online-audits: false     # Disable online audits (require special API access)
-          advanced-security: ${{ vars.CODE_SCANNING_ENABLED == 'true' }}
+          advanced-security: false
+          annotations: true        # Findings as annotations on the pull request
+          min-severity: medium     # Fail the check from medium up
+
+  upload:
+    name: Upload findings to code scanning
+    if: github.event_name == 'push' && vars.CODE_SCANNING_ENABLED == 'true'
+    runs-on: ubuntu-latest
+
+    permissions:
+      security-events: write  # Upload SARIF results
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor and upload
+        uses: zizmorcore/zizmor-action@135698455da5c3b3e55f73f4419e481ab68cdd95 # v0.4.1
+        # yamllint disable-line rule:comments-indentation
+        # Inputs defined in action.yml, IDE schema may not recognize them
+        with:
+          persona: pedantic
+          online-audits: false
+          advanced-security: true

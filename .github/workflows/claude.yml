@@ -5,7 +5,10 @@
 # PR's CI results, and commit to a branch when asked to make a change.
 name: Claude Code
 
-on:
+# zizmor flags these triggers as dangerous because they run on text anyone can
+# write. The action checks that the mentioning actor has write access before
+# it reads anything, which is the control that makes them acceptable here.
+on: # zizmor: ignore[dangerous-triggers]
   issue_comment:
     types: [created]
   pull_request_review_comment:
