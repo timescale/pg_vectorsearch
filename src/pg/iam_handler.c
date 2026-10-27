@@ -578,6 +578,13 @@ prism_is_index(Relation rel)
 void
 prism_check_index(Relation rel)
 {
+	/* index_open admits a partitioned index, which has no storage. */
+	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_INDEX)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is a partitioned index",
+						RelationGetRelationName(rel)),
+				 errhint("Use the index of each partition.")));
 	if (!prism_is_index(rel))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),

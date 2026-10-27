@@ -197,13 +197,6 @@ open_index_for_maintenance(Oid indexoid)
 {
 	Relation index = index_open(indexoid, AccessShareLock);
 
-	/* index_open admits a partitioned index, which has no storage. */
-	if (index->rd_rel->relkind != RELKIND_INDEX)
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("cannot run maintenance on partitioned index \"%s\"",
-						RelationGetRelationName(index)),
-				 errhint("Run it on the index of each partition.")));
 	prism_check_index(index);
 	require_index_owner(index, AccessShareLock);
 	NameData name;
