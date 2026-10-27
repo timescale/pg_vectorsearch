@@ -588,14 +588,14 @@ INSERT INTO split_part SELECT i, ARRAY[i::real, 0, 0, 0]::vec32(4)
 CREATE INDEX split_part_idx ON split_part USING prism (v)
     WITH (nlist = 1, centroid_fastscan = off);
 CALL prism_split_posting_list('split_part_idx', 1);
-ERROR:  cannot run maintenance on partitioned index "split_part_idx"
-HINT:  Run it on the index of each partition.
+ERROR:  "split_part_idx" is a partitioned index
+HINT:  Use the index of each partition.
 CALL prism_rebalance('split_part_idx', 10);
-ERROR:  cannot run maintenance on partitioned index "split_part_idx"
-HINT:  Run it on the index of each partition.
+ERROR:  "split_part_idx" is a partitioned index
+HINT:  Use the index of each partition.
 CALL prism_convert_posting_to_fastscan('split_part_idx', 0);
-ERROR:  cannot run maintenance on partitioned index "split_part_idx"
-HINT:  Run it on the index of each partition.
+ERROR:  "split_part_idx" is a partitioned index
+HINT:  Use the index of each partition.
 DROP TABLE split_part;
 -- Cleanup
 DROP TABLE split_test;

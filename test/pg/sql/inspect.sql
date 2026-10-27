@@ -170,6 +170,20 @@ SELECT * FROM prism_posting_pages('idx_btree'::regclass);
 SELECT count(*) FROM embeddings WHERE id = 1;
 SELECT * FROM prism_tids_clusters('idx_btree'::regclass, ARRAY['(0,1)']::tid[]);
 SELECT * FROM prism_tids_clusters('embeddings'::regclass, ARRAY['(0,1)']::tid[]);
+-- A partitioned index has no storage of its own. The inspectors refuse it;
+-- the index of each partition is what they read.
+CREATE TABLE embeddings_part (id int, v vec32(3)) PARTITION BY RANGE (id);
+CREATE TABLE embeddings_part1 PARTITION OF embeddings_part
+    FOR VALUES FROM (0) TO (100);
+INSERT INTO embeddings_part SELECT g, format('[%s,0,0]', g)::vec32
+    FROM generate_series(1, 60) g;
+CREATE INDEX idx_part ON embeddings_part USING prism (v)
+    WITH (nlist = 1, centroid_fastscan = off);
+SELECT * FROM prism_centroid_pages('idx_part'::regclass);
+SELECT * FROM prism_posting_pages('idx_part'::regclass);
+SELECT * FROM prism_tids_clusters('idx_part'::regclass, ARRAY['(0,1)']::tid[]);
+SELECT * FROM prism_index_settings('idx_part'::regclass);
+DROP TABLE embeddings_part;
 
 -- =====================================================================
 -- prism_convert_posting_to_fastscan
