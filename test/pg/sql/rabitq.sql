@@ -87,8 +87,8 @@ SELECT rabitq_params_seed(rabitq_params_generate(8, 42));
 SELECT rabitq_params_generate(8, 42);
 
 -- Oversized dimensions are refused: the transform matrix is O(dim^3) and the
--- function is callable by any role, so it is capped at the largest dimension
--- a prism index can hold.
+-- function is callable by any role, so the dense generator has its own cap.
+-- A prism index rotates through the Hadamard path and goes wider.
 SELECT rabitq_params_generate(1969, 42); -- error
 
 -- rabitq_params text input (not supported)

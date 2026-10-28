@@ -44,5 +44,11 @@ RETURNS integer
 AS '$libdir/pgvs_test_helpers', 'vs_test_append_centroid_page'
 LANGUAGE C;
 
+-- The metapage magic, unvalidated. Returns bigint since magic is uint32.
+CREATE OR REPLACE FUNCTION meta_magic(regclass)
+RETURNS bigint
+AS '$libdir/pgvs_test_helpers', 'vs_test_meta_magic'
+LANGUAGE C STRICT PARALLEL SAFE;
+
 -- Restore the caller's echo setting captured above.
 \set ECHO :saved_echo

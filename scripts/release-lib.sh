@@ -394,10 +394,12 @@ resolve_milestone() {
 # On-disk format
 # ----------------------------------------------------------------
 
-# The index format version -- the low byte of PRISM_META_MAGIC -- at git
-# ref $1, or the working tree. Prints nothing when unreadable, which
-# callers must treat as "unknown", never as "changed".
-meta_format_version() {
+# The index format versions -- the low bytes of PRISM_META_MAGIC and of
+# any PRISM_META_MAGIC_COMPAT_* define, i.e. every format a build opens --
+# at git ref $1, or the working tree. One per line, lowercase, sorted.
+# Prints nothing when unreadable, which callers must treat as "unknown",
+# never as "changed".
+meta_format_versions() {
     local ref="${1:-}" src
     if [[ -n "$ref" ]]; then
         src="$(git show "$ref:src/pg/meta.h" 2>/dev/null)" || return 0
@@ -405,8 +407,25 @@ meta_format_version() {
         src="$(cat src/pg/meta.h 2>/dev/null)" || return 0
     fi
     sed -n \
-        's/^#define PRISM_META_MAGIC.*0x[0-9A-Fa-f]\{6\}\([0-9A-Fa-f]\{2\}\).*/\1/p' \
-        <<<"$src" | head -1
+        's/^#define PRISM_META_MAGIC\(_COMPAT_[A-Za-z0-9_]*\)\{0,1\}[[:space:]].*0x[0-9A-Fa-f]\{6\}\([0-9A-Fa-f]\{2\}\).*/\2/p' \
+        <<<"$src" | tr '[:upper:]' '[:lower:]' | LC_ALL=C sort -u
+}
+
+# The formats ref $1 opens that the working tree no longer does: the
+# indexes an upgrade from $1 would have to rebuild. Space separated,
+# empty when every one still opens.
+meta_formats_dropped() {
+    LC_ALL=C comm -23 <(meta_format_versions "$1") <(meta_format_versions) |
+        paste -sd ' ' -
+}
+
+# A list of format bytes as "0x06 0x07".
+format_bytes() {
+    local b out=""
+    for b in $1; do
+        out="${out:+$out }0x$b"
+    done
+    printf '%s\n' "$out"
 }
 
 # Release tags reachable from HEAD, newest first, or nothing.
@@ -642,15 +661,15 @@ check_upgrade_path() {
 # ship in a patch release -- a patch upgrade must not require reindexing.
 # Skipped without a previous release, or when either end is unreadable.
 check_on_disk_format() {
-    local version="$1" prev now was
+    local version="$1" prev now was dropped
     prev="$(previous_release_tag)"
     if [[ -z "$prev" ]]; then
         log "on-disk format: no previous release to compare against"
         return 0
     fi
 
-    now="$(meta_format_version)"
-    was="$(meta_format_version "$prev")"
+    now="$(meta_format_versions)"
+    was="$(meta_format_versions "$prev")"
     if [[ -z "$now" || -z "$was" ]]; then
         local where=""
         [[ -n "$now" ]] || where="HEAD"
@@ -660,16 +679,20 @@ check_on_disk_format() {
         return 0
     fi
 
-    if [[ "$now" == "$was" ]]; then
-        log "on-disk format: unchanged since $prev (0x$now)"
+    dropped="$(meta_formats_dropped "$prev")"
+    if [[ -z "$dropped" ]]; then
+        log "on-disk format: every format $prev opens still opens" \
+            "($(format_bytes "$was"))"
         return 0
     fi
 
-    log "on-disk format: changed since $prev (0x$was -> 0x$now)"
+    log "on-disk format: $prev formats no longer opened:" \
+        "$(format_bytes "$dropped")"
     if is_patch_bump "${prev#v}" "$version"; then
         die "$version is a patch release, but the index format changed" \
-            "since $prev (0x$was -> 0x$now): existing indexes cannot be" \
-            "read, so this needs a minor or major release"
+            "since $prev ($(format_bytes "$dropped") no longer opens):" \
+            "existing indexes cannot be read, so this needs a minor or" \
+            "major release"
     fi
     log "on-disk format: $version is not a patch release, so the" \
         "format change is allowed"

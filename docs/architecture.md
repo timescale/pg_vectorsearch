@@ -415,7 +415,11 @@ Index metadata is stored in multiple locations depending on its nature:
 
 **Metapage** (stored in index file, persists with the index):
 - Root centroid page, first posting page, `nlist`, `nlevels`, `fan_out`
-- Centroid format, distance metric, RaBitQ seed, global mean
+- Centroid format, distance metric, RaBitQ seed, global mean. The mean is
+  inline up to 2032 dimensions; past that it spills into reference pages at
+  the blocks right after the metapage, and the format version recorded in
+  the metapage changes with it so an older binary refuses the index instead
+  of misreading it
 - No per-leaf posting directory. A leaf centroid entry holds its list head.
 - Statistics: per-cluster live counts live on each posting list's head page,
   not here -- inserts already hold that page, so they can maintain them, while
@@ -720,8 +724,10 @@ Pages are organized in three regions:
 │   - Index metadata, parameters, dimension, distance metric      │
 │   - Root centroid page pointer                                  │
 │   - No posting-list directory and no tenant directory           │
+│   - Global mean inline up to 2032 dimensions; wider, it spills  │
+│     into reference pages at blocks 1..M                         │
 ├─────────────────────────────────────────────────────────────────┤
-│ Blocks 1..C: Centroid Pages (hierarchical tree)                 │
+│ Blocks M+1..C: Centroid Pages (hierarchical tree)               │
 │   - Level 0 (root): few hundred centroids                       │
 │   - Level 1..N-1: intermediate levels                           │
 │   - Level N (leaves): pointers to posting lists                 │
@@ -760,6 +766,16 @@ Posting list pages store vector entries with RaBitQ quantization:
 - f_error: per-vector error factor for distance bounds
 
 Pages within a posting list are linked. Each page header contains `next_blkno`.
+
+A list's head page also carries the list's float32 encode reference, the
+rotated centroid every entry was encoded against and every query is scored
+against. Up to 1968 dimensions it sits ahead of the head's entries. Past
+that it no longer fits beside one, so the head holds only its first chunk
+and no entries, further reference pages hold the remaining chunks (three
+pages in all at 4096), and the entries start on the page after the last
+chunk. The bulk build lays a leaf's reference pages out right behind its
+head, so a probe reads them sequentially; a scan gathers the reference once
+per probed list and then scores the entry pages as usual.
 
 ### Initial State: Clustered
 

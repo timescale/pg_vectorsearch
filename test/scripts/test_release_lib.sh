@@ -332,4 +332,63 @@ expect_eq "previous final: candidates above a release are skipped" \
 expect_eq "previous final: nothing when only candidates are tagged" \
     "" "$(lib_call "$rc_only" previous_final_release_tag)"
 
+# ----------------------------------------------------------------
+# meta_format_versions, check_on_disk_format
+# ----------------------------------------------------------------
+
+# Write src/pg/meta.h in fixture $1 defining one magic per format byte
+# in $2.. -- the first as PRISM_META_MAGIC, the rest as compat ones.
+write_magics() {
+    local dir="$1" b
+    shift
+    : >"$dir/src/pg/meta.h"
+    printf '#define PRISM_META_MAGIC ((uint32_t)0x505249%s)\n' "$1" \
+        >>"$dir/src/pg/meta.h"
+    shift
+    for b in "$@"; do
+        printf '#define PRISM_META_MAGIC_COMPAT_V%s ((uint32_t)0x505249%s)\n' \
+            "$b" "$b" >>"$dir/src/pg/meta.h"
+    done
+}
+
+# A compat magic is a format the build still opens; other
+# PRISM_META_MAGIC-prefixed defines are not formats at all.
+fmt="$(new_fixture 0.2.0-dev)"
+write_magics "$fmt" 07 06
+printf '#define PRISM_META_MAGIC_BASE ((uint32_t)0x50524900)\n' \
+    >>"$fmt/src/pg/meta.h"
+expect_eq "format: the current and compat magics are the formats" \
+    "06 07" "$(lib_call "$fmt" meta_format_versions | paste -sd ' ' -)"
+
+write_magics "$fmt" 0B 0a
+expect_eq "format: mixed-case hex bytes compare by value" \
+    "0a 0b" "$(lib_call "$fmt" meta_format_versions | paste -sd ' ' -)"
+
+# A fixture tagged v0.2.0 with the formats $2.., whose working tree has
+# the formats in $1 (space separated). Current magic first in both.
+format_case() {
+    local dir
+    dir="$(new_fixture 0.2.0)"
+    write_magics "$dir" "${@:2}"
+    git -C "$dir" add -A
+    git -C "$dir" commit -qm "formats $*"
+    git -C "$dir" tag v0.2.0
+    # shellcheck disable=SC2086
+    write_magics "$dir" $1
+    printf '%s\n' "$dir"
+}
+
+# Keeping the old format readable is no format change, so a patch may
+# ship it; dropping any format a release opened is, however many stay.
+expect_lib "format: a new format beside a compat one may ship in a patch" \
+    0 "$(format_case "07 06" 06)" check_on_disk_format 0.2.1
+expect_lib "format: adding a third format may ship in a patch" \
+    0 "$(format_case "08 06 07" 07 06)" check_on_disk_format 0.2.1
+expect_lib "format: dropping the compat format is refused in a patch" \
+    1 "$(format_case "07" 07 06)" check_on_disk_format 0.2.1
+expect_lib "format: replacing a newer format is refused in a patch" \
+    1 "$(format_case "08 06" 07 06)" check_on_disk_format 0.2.1
+expect_lib "format: a dropped format is allowed in a minor release" \
+    0 "$(format_case "08 06" 07 06)" check_on_disk_format 0.3.0
+
 tap_finish

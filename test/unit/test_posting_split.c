@@ -1548,3 +1548,69 @@ TEST(split_drops_unfetchable_vectors)
 
 	prism_index_destroy(idx);
 }
+
+/*
+ * A split at a spilled dimension: the old chain's reference pages contribute
+ * no entries, the new lists get spilled heads of their own, and every vector
+ * stays retrievable through the mutated tree.
+ */
+TEST(split_spilled_list)
+{
+	DECLARE_TWO_BLOB_INDEX(300, 4096, 42);
+	ASSERT_NOT_NULL(idx, "paged build at 4096 should succeed");
+	ASSERT_TRUE(prism_posting_spilled(dim), "4096 spills");
+
+	/* The split's fixed k-means scratch alone is ~68 MB at 4096 (a 4096-row
+	 * distance block of dim floats), more than the 32 MB default budget can
+	 * pay; a backend sizes this from maintenance_work_mem. */
+	PrismSplitConfig cfg = {.sample_budget_bytes = 160u * 1024u * 1024u};
+	ASSERT_EQ(
+			0u,
+			prism_split_sample_cap(PRISM_SPLIT_SAMPLE_BUDGET_BYTES, dim),
+			"the default budget cannot pay for a split at 4096");
+
+	FetchCtx		 fc	 = {idx->all_vectors};
+	PrismSplitEnv	 env = {.fetch_vector = fetch_vec, .ctx = &fc};
+	PrismSplitResult res;
+	ASSERT_EQ(
+			prism_posting_split(
+					&idx->base, idx->first_posting, &cfg, &env, &res),
+			0,
+			"split ok");
+	ASSERT_TRUE(res.did_split, "split happened");
+	ASSERT_EQ(res.count[0] + res.count[1], n, "every entry preserved");
+
+	for (uint32_t p = 0; p < 2; p++)
+	{
+		Page hp = vs_storage_read_page(idx->base.posting_storage, res.head[p]);
+		ASSERT_TRUE(
+				prism_posting_opaque(hp)->flags & PRISM_POSTING_PAGE_REFERENCE,
+				"a new head is a reference page");
+		ASSERT_EQ(0u, prism_posting_page_count(hp), "with no entries");
+		vs_storage_release_page(idx->base.posting_storage, res.head[p]);
+	}
+
+	PrismQueryCtx *q	   = prism_query_ctx_create(idx, 1, 2);
+	uint32_t	   checked = 0, found = 0;
+	for (uint32_t vid = 0; vid < n; vid += 5)
+	{
+		uint32_t res_id = UINT32_MAX;
+		uint32_t c		= prism_query_exec(
+				 q,
+				 vecs + (size_t)vid * dim,
+				 1,
+				 2,
+				 VS_DISTANCE_MODE_ASYMMETRIC,
+				 true,
+				 &res_id);
+		checked++;
+		if (c == 1 && res_id == vid)
+			found++;
+	}
+	prism_query_ctx_destroy(q);
+	ASSERT_TRUE(
+			(double)found / (double)checked > 0.98,
+			"nearly all vectors retrievable post-split");
+
+	prism_index_destroy(idx);
+}

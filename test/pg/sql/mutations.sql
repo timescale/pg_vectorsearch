@@ -555,5 +555,6 @@ SELECT id FROM mutcentroid ORDER BY v <-> '[2,0,0]' LIMIT 1;
 DROP FUNCTION rabitq_params_cache();
 DROP FUNCTION rabitq_cache_clear();
 DROP FUNCTION append_centroid_page(regclass);
+DROP FUNCTION meta_magic(regclass);
 DROP TABLE mutcentroid_before;
 DROP TABLE mutcentroid;
