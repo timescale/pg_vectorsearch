@@ -56,33 +56,24 @@ format so the scan path can pre-allocate fastscan scratch buffers.
 
 ### Fastscan page layout
 
-Fastscan pages use SoA layout organized into 32-vector group
-sections. Each group section is self-contained: metadata arrays
-followed by VPSHUFB-packed codes.
+A 32-vector group has VPSHUFB-packed codes (`ceil(dim/8) × 32` bytes,
+3072B at dim=768) and a 580B metadata block:
 
 ```
-┌──────────────────────────────────────────┐
-│ PageHeaderData                      24B  │
-├──────────────────────────────────────────┤
-│ [pt_centroid — FIRST page only]  3072B   │
-├──────────────────────────────────────────┤
-│ Group 0 section:                         │
-│   ItemPointerData tids[32]       192B    │
-│   float f_add[32]                128B    │
-│   float f_rescale[32]            128B    │
-│   float f_error[32]              128B    │
-│   uint8_t codes[96 × 32]       3072B    │
-│   uint32_t tombstone_mask          4B    │
-│                            total 3652B   │
-├──────────────────────────────────────────┤
-│ Group 1 section:                 3652B   │
-│   (same layout as Group 0)               │
-├──────────────────────────────────────────┤
-│ (unused gap)                             │
-├──────────────────────────────────────────┤
-│ PrismPostingPageOpaque               24B   │
-└──────────────────────────────────────────┘
+ItemPointerData tids[32]         192B
+float f_add[32]                  128B
+float f_rescale[32]              128B
+float f_error[32]                128B
+uint32_t tombstone_mask            4B
 ```
+
+The codes of a list's groups form one stream across its fastscan pages,
+breaking at 64-byte chunks. Each page holds the metadata blocks of the
+groups scored on it, then its run of codes; the opaque's `entry_count` and
+`code_bytes` say how much of each. A group can therefore be larger than a
+page. See
+[packed-posting-pages-design.md](packed-posting-pages-design.md) for the
+layout, its rules and diagrams.
 
 `tombstone_mask` is one bit per lane: VACUUM sets a lane's bit to tombstone
 that entry without touching its neighbors' packed codes (`posting_page.h`'s
@@ -90,21 +81,10 @@ that entry without touching its neighbors' packed codes (`posting_page.h`'s
 lane in the group either way -- it has no way to skip one -- but a masked
 lane is excluded from the result regardless of its score.
 
-At dim=768 (nsq=192, nsq_pairs=96):
-- Group section: 32×6 + 32×4×3 + 96×32 + 4 = 192+384+3072+4 = 3652B
-- Overflow page: 2 groups = 64 vectors (usable 8144B, used 7304B)
-- First page: 1 group = 32 vectors (usable 5072B, used 3652B)
-
-The `PRISM_POSTING_PAGE_FASTSCAN` flag (0x0004, already reserved in
-posting_page.h) distinguishes fastscan pages from AoS pages.
-`max_entries` and `entry_count` in the opaque work as before.
-
-### Why per-group sections (not all-meta-then-all-codes)
-
-When the VPSHUFB kernel finishes a 32-vector group, the prune loop
-immediately needs that group's f_add, f_rescale, f_error, and TID
-arrays. Colocating them in one 3648B section keeps the working set
-in L1/L2. Cross-group data is never needed simultaneously.
+The `PRISM_POSTING_PAGE_FASTSCAN` flag distinguishes fastscan pages from AoS
+pages. `entry_count` in the opaque counts the vectors whose metadata is on
+the page, and `code_bytes` (sharing storage with an AoS page's
+`max_entries`) is the length of its code run.
 
 ### LUT construction
 
@@ -137,9 +117,10 @@ for each sq_pair (96 iterations at dim=768):
 
 Output: 32 uint16 accumulated partial distances.
 
-**uint16 overflow check:** Max accumulator value = nsq_pairs × 510
-(two sq each contributing max 255). At dim=768: 96 × 510 = 48,960.
-uint16 max = 65,535. Safe for dim ≤ 1280. Add a static assertion.
+**uint16 overflow:** each kernel call adds into 16-bit lanes, so the scan
+calls it through `vs_fastscan_accumulate_range` and
+`vs_fastscan_accumulate_hacc_range`, which pass at most 128 columns (1024
+dimensions) per call and add the results in 32 bits.
 
 ### AVX2 vs AVX-512
 

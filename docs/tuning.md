@@ -139,7 +139,7 @@ noted per row — most shape query behavior, some only the build.
 
 | Parameter | Default | Affects | What it does | Why you might touch it |
 |---|---|---|---|---|
-| `fastscan` | `auto` (on) | Query speed. | Packed SIMD posting-page layout scanned via VPSHUFB lookup tables. `auto` uses it wherever a 32-vector group fits a page (it always does up to ~1900 dims at 8 KB pages); `on` errors past that, `off` forces the array-of-structs layout. | Only as an experiment control. |
+| `fastscan` | `auto` (on) | Query speed. | Packed SIMD posting-page layout scanned via VPSHUFB lookup tables. Groups continue across pages, so `auto` uses it at every supported dimension; `off` forces the array-of-structs layout. | Only as an experiment control. |
 | `centroid_fastscan` | `auto` (on) | Query speed. | The same packed layout for the centroid routing tree. `auto` additionally requires centroid compression to be in effect. | Only as an experiment control. |
 | `centroid_compression` | `auto` | Query speed and routing memory. | RaBitQ-compress the routing tree's centroids (with exact re-rank of probe order via `prism.probe_expand`). `auto` compresses for L2/cosine and keeps exact centroids for inner product, whose ordering RaBitQ's estimate cannot recover. | Only as an experiment control. |
 | `soar_lambda` | `1.0` | Higher recall at a given nprobe; slower build. | SOAR replication: assigns each vector to a second, spill-orthogonal cluster so near-boundary neighbors are found without extra probes. `0` disables. | Disable to trade recall for a faster build. |

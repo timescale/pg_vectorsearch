@@ -212,7 +212,7 @@ prism_posting_tombstone_chain(
 		uint16_t					  flags = op->flags;
 		uint32_t					  n		= op->entry_count;
 
-		prism_posting_check_count(blk, op, dim);
+		prism_posting_check_count(blk, p, dim);
 
 		/* Already fully tombstoned: nothing to mark, and skip so its entries
 		 * aren't counted into the live_count decrement twice. */

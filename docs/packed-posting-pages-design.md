@@ -1,8 +1,12 @@
 # Packed posting pages
 
-Status: design proposal. Nothing here is implemented. Space figures come
-from a model built on the 0.1.0 layout constants (`posting_page.h`,
-`fastscan.h`), not from built indexes. No speed figures are measured.
+Status: the packed fastscan layout is implemented (`posting_page.h`,
+`posting_build.c`, `posting_scan.c`). The reference vector still sits whole
+on the head page, so AoS lists and the 1968-dimension limit are unchanged;
+[Not yet implemented](#not-yet-implemented) covers letting it cross pages.
+Space figures for the packed layout come from the real builder; figures for
+0.1.0 come from its layout constants. Neither comes from built indexes, and
+no speed figures are measured here.
 
 ## Summary
 
@@ -20,19 +24,15 @@ that in two ways:
    page at 384 dimensions and 47% at 944. At 100M vectors this costs 7.5% of
    posting storage at 768 dimensions and 35% at 944.
 
-The proposal stores each posting list as one byte stream that continues
-across pages. Fastscan groups may break at any 64-byte boundary in their
-codes, which matches the SIMD kernels' step sizes, so the kernels run
-unchanged and read the codes in place. Each page then wastes under 64 bytes,
-and posting pages no longer limit which dimensions can use fastscan. At 100M
-vectors and 768 dimensions this saves **1,195,330,739 bytes (7.5%)** of
-posting storage compared to 0.1.0, and 35% at 944 dimensions.
+The packed layout treats a list's fastscan codes as one stream that
+continues across pages. A group's codes may break at any 64-byte boundary,
+which matches the SIMD kernels' step sizes, so the kernels run unchanged and
+read the codes in place. Each page then wastes under 64 bytes, and fastscan
+works at every dimension the index supports. At 100M vectors and 768
+dimensions this saves **1,195,330,739 bytes (7.5%)** of posting storage
+compared to 0.1.0, and 35% at 944 dimensions.
 
-AoS lists already pack tightly and keep their layout. The stream lets the
-reference vector continue across pages as well, which removes the posting
-pages' 1968-dimension limit for both formats. Two things remain: a kernel
-overflow must be fixed before fastscan runs above 1024 dimensions, and other
-parts of the index set their own dimension limits.
+AoS lists already pack tightly and keep their layout.
 
 ## Terms
 
@@ -203,28 +203,49 @@ last group, which is usually only partly full.
 
 ## The packed layout
 
-### One stream per posting list
+### Page layout
 
-A posting list becomes one byte stream, written into the content area of its
-pages in chain order. Page boundaries cut the stream wherever they fall,
-subject to the rules below.
+The codes of a list's groups form one stream, in group order, that runs
+across the list's fastscan pages. Each page holds a run of that stream, plus
+the metadata blocks of the groups scored on it:
 
 ```
- ┌───────────┬──────────────────────┬──────────────────────┬─── ─ ─
- │ reference │ group 0              │ group 1              │
- │ vector    │ codes      │ metadata│ codes      │ metadata│ …
- └───────────┴──────────────────────┴──────────────────────┴─── ─ ─
-   4×dims B    4×dims B     580 B
+ ┌────────┬────────┬─ ─ ─ ─┬──────────────────────────────┬────┐
+ │ meta   │ meta   │       │ codes: a run of the stream,  │░░░░│
+ │ 580 B  │ 580 B  │  …    │ cut at chunks                │    │
+ └────────┴────────┴─ ─ ─ ─┴──────────────────────────────┴────┘
+  metadata blocks, in group order                          unused
 ```
 
-Each group stores its codes first and its metadata after them. The
-deleted-vector mask moves into the metadata block.
+On the head page all of this follows the reference vector. Nothing is added
+to the page for the stream: the 24-byte opaque already has the two counts a
+reader needs, with one field read differently on fastscan pages.
+
+```
+ opaque (24 B)
+ ┌──────────┬──────────┬────────┬───────┬─────────┬──────────────┬────────┐
+ │next_blkno│cluster_id│entry_  │ flags │ page_id │ max_entries  │ head   │
+ │          │          │count   │       │         │ or code_bytes│metadata│
+ │ 4 B      │ 4 B      │ 2 B    │ 2 B   │ 2 B     │ 2 B          │ 8 B    │
+ └──────────┴──────────┴────────┴───────┴─────────┴──────────────┴────────┘
+```
+
+| Opaque field | On a fastscan page |
+|---|---|
+| `entry_count` | vectors whose metadata is on the page; the page holds `ceil(entry_count / 32)` metadata blocks |
+| `code_bytes` | length of the page's code run, at most 8144. It shares storage with an AoS page's `max_entries`: fastscan pages take no inserts, so they have no capacity to track, and `PRISM_POSTING_PAGE_FASTSCAN` in `flags` says which reading applies. |
+
+Where a page sits in the stream is not stored. A scan reads a list from its
+head, so the position and group it reached on one page are where the next
+page continues: whether the page opens with the rest of a group, a new
+group, or deferred metadata follows from that state. Only the list's last
+group can be partly full, so readers that only need metadata
+(deleted-vector marking, split, inspect) walk the blocks as before.
 
 ### Where the stream may break
 
 | Part | May break at | Why |
 |---|---|---|
-| Reference vector | any float (4 B) | `query − centroid` is computed in pieces, straight from the page |
 | Fastscan codes | any 64-byte chunk | every SIMD kernel steps in 16, 32 or 64 bytes |
 | Fastscan metadata | never | it must be on the page where the group is scored |
 | AoS entry | never | entries are small, so the loss stays under one entry |
@@ -232,123 +253,89 @@ deleted-vector mask moves into the metadata block.
 Where the codes are not a whole number of chunks (dimensions not divisible
 by 16), the last 32 bytes stay together as one piece.
 
-When a group's codes end with less than 580 bytes left on the page, its
-metadata moves to the start of the next page. The **next group's codes** fill
-the gap meanwhile, so it doesn't go to waste. The scan then has two groups in
-flight: one waiting for its metadata, and one adding up its codes.
+A metadata block goes on the page where its group's codes end. When it no
+longer fits there, it waits for the next page, and the **next group's codes**
+use the space meanwhile. At most two blocks wait at once: with two waiting,
+the next group's codes may start on the page but not finish there. So a scan
+has at most three groups in flight, two waiting for their metadata and one
+adding up its codes.
 
 ### Fastscan pages at 768 dimensions
 
 ```
  HEAD PAGE                                                  8144 B
- ┌──────────────────┬──────────────────┬───────┬──────────────┬─┐
- │ reference        │ group 0 codes    │ grp 0 │ group 1 codes│░│
- │ 768 floats       │ 48 chunks        │ meta  │ chunks 0–21  │░│
- │ 3072 B           │ 3072 B           │ 580 B │ 1408 B ─────►│░│ 12 B
- └──────────────────┴──────────────────┴───────┴──────────────┴─┘ unused
- 0               3072               6144    6724           8132
-
+ ┌────────────┬───────┬────────────────┬────────────────┬─┐
+ │ reference  │ grp 0 │ group 0 codes  │ group 1 codes  │░│
+ │ 3072 B     │ meta  │ 48 chunks      │ chunks 0–21   ►│░│ 12 B
+ └────────────┴───────┴────────────────┴────────────────┴─┘ unused
  PAGE 2
- ┌──────────────┬───────┬──────────────────┬───────┬──────────────┬─┐
- │ group 1 codes│ grp 1 │ group 2 codes    │ grp 2 │ group 3 codes│░│
- │ chunks 22–47 │ meta  │ 48 chunks        │ meta  │ chunks 0–34  │░│
- │►1664 B       │ 580 B │ 3072 B           │ 580 B │ 2240 B ─────►│░│ 8 B
- └──────────────┴───────┴──────────────────┴───────┴──────────────┴─┘
- 0           1664    2244               5316    5896           8136
-
+ ┌───────┬───────┬─────────────┬────────────────┬─────────────┬─┐
+ │ grp 1 │ grp 2 │►grp 1 codes │ group 2 codes  │ grp 3 codes │░│
+ │ meta  │ meta  │ ch 22–47    │ 48 chunks      │ ch 0–34    ►│░│ 8 B
+ └───────┴───────┴─────────────┴────────────────┴─────────────┴─┘
  PAGE 3
- ┌──────────┬───────┬──────────────────┬───────┬─ ─ ─
- │ grp 3    │ grp 3 │ group 4 codes    │ grp 4 │ …
- │ ch 35–47 │ meta  │ 48 chunks        │ meta  │
- │►832 B    │ 580 B │ 3072 B           │ 580 B │
- └──────────┴───────┴──────────────────┴───────┴─ ─ ─
- 0        832     1412               4484    5064
+ ┌───────┬───────┬─────────┬────────────────┬────────────────┬─┐
+ │ grp 3 │ grp 4 │►grp 3   │ group 4 codes  │ group 5 codes  │░│
+ │ meta  │ meta  │ ch35–47 │ 48 chunks      │ 48 chunks      │░│ 8 B
+ └───────┴───────┴─────────┴────────────────┴────────────────┴─┘
+ PAGE 4
+ ┌─────┬─────┬─────┬────────────────┬────────────────┬──────┬─┐
+ │ g5  │ g6  │ g7  │ group 6 codes  │ group 7 codes  │grp 8►│░│
+ │meta │meta │meta │ 48 chunks      │ 48 chunks      │ch 0–3│░│ 4 B
+ └─────┴─────┴─────┴────────────────┴────────────────┴──────┴─┘
 ```
 
-In 0.1.0, three pages hold groups 0–4 and 3100 bytes stay empty. With the
-packed layout, the first two pages leave 20 bytes empty, and page 3 still
-has 3080 bytes free after group 4, enough for all of group 5's codes.
+Group 5's metadata doesn't fit after its codes on page 3, so it opens page 4.
+Four pages hold groups 0–7 and start group 8, leaving 32 bytes empty. In
+0.1.0 the same four pages hold groups 0–6 and leave 3940 bytes empty.
 
-### Metadata moving to the next page (96 dimensions)
+### Metadata waiting for the next page (96 dimensions)
 
 At 96 dimensions a group is 384 bytes of codes and 580 bytes of metadata.
-Here are two pages from the middle of a long list. Page n opens with the
-metadata of the last group from page n−1, then holds seven whole groups:
+Two pages from the middle of a long list:
 
 ```
  PAGE n                                                     8144 B
- ┌───────┬─ ─ ─ ─ ─ ─ ─ ─┬────────────┬────────────┬──┐
- │ grp 8 │ groups 9–15   │ group 16   │ group 17   │░░│
- │ meta  │ (whole)       │ codes 384 B│ codes 384 B│░░│ 48 B
- └───────┴─ ─ ─ ─ ─ ─ ─ ─┴────────────┴────────────┴──┘ unused
- 0     580            7328         7712         8096
-
+ ┌────────────────┬─────────────────────┬────────┬────────┬──┐
+ │ meta of        │ codes of groups     │grp 24  │grp 25  │░░│
+ │ groups 16–23   │ 17–23               │codes   │codes   │░░│ 48 B
+ └────────────────┴─────────────────────┴────────┴────────┴──┘
  PAGE n+1
- ┌───────────┬───────────┬────────────────────── ─ ─
- │ group 16  │ group 17  │ group 18 codes …
- │ meta 580 B│ meta 580 B│
- └───────────┴───────────┴────────────────────── ─ ─
- 0           580         1160
+ ┌────────┬────────┬────────────────┬──────────────────┬───┬──┐
+ │grp 24  │grp 25  │ meta of        │ codes of groups  │►33│░░│
+ │meta    │meta    │ groups 26–32   │ 26–32            │   │░░│ 44 B
+ └────────┴────────┴────────────────┴──────────────────┴───┴──┘
 ```
 
-Group 16's metadata doesn't fit after its codes, so group 17's codes take the
-space and both metadata blocks open page n+1. The whole-group rule of 0.1.0
-would end page n after group 15 and leave 432 bytes empty.
+Group 24's metadata doesn't fit after its codes, so group 25's codes take
+the space, and both metadata blocks open page n+1. With whole groups, a page at
+this dimension holds eight of them and leaves 432 bytes empty.
 
-### High dimensions (2048): the reference crosses a page too
+### Groups bigger than a page (1968 dimensions)
+
+At 1968 dimensions a group is 8452 bytes, more than a page, and the
+reference vector fills most of the head page:
 
 ```
  HEAD PAGE
- ┌──────────────────────────────────────────────────────────┐
- │ reference floats 0–2035                          8144 B ►│
- └──────────────────────────────────────────────────────────┘
+ ┌──────────────────────────────────────────────────────────┬───┬┐
+ │ reference 7872 B                                         │g0►││
+ └──────────────────────────────────────────────────────────┴───┴┘
+                                                group 0 chunks 0–3
  PAGE 2
- ┌─┬───────────────────────────────────────────────────────┬┐
- │►│ group 0 codes, chunks 0–125                    8064 B►││ 32 B
- └─┴───────────────────────────────────────────────────────┴┘ unused
-  reference floats 2036–2047 (48 B)
+ ┌───────────────────────────────────────────────────┬───────┬┐
+ │►group 0 codes, chunks 4–122                       │grp 1 ►││
+ │                                           7616 B  │ch 0–7 ││
+ └───────────────────────────────────────────────────┴───────┴┘
  PAGE 3
- ┌──┬───────┬───────────────────────────────────────────────┬┐
- │► │ grp 0 │ group 1 codes, chunks 0–115            7424 B►││ 12 B
- │  │ meta  │                                               ││ unused
- └──┴───────┴───────────────────────────────────────────────┴┘
-  group 0 chunks 126–127 (128 B)
- PAGE 4
- ┌────────┬───────┬───────────────────────────── ─ ─
- │►grp 1  │ grp 1 │ group 2 codes …
- │ chunks │ meta  │
- │ 116–127│       │
- └────────┴───────┴───────────────────────────── ─ ─
+ ┌───────┬─────────────────────────────────────────┬──────┬─┐
+ │ grp 0 │►group 1 codes, chunks 8–122             │grp 2►│░│
+ │ meta  │                                  7360 B │ch 0–2│░│ 12 B
+ └───────┴─────────────────────────────────────────┴──────┴─┘
 ```
 
-At 2048 dimensions a group (8772 B) is bigger than a page, so every group
-crosses at least one page boundary.
-
-### AoS pages
-
-AoS entries keep their size and stay whole. Up to 1968 dimensions the packed
-AoS layout is the same as in 0.1.0: the reference sits on the head page and
-whole entries fill the rest.
-
-Above 1968 dimensions the reference continues onto the next pages, and AoS
-entries fill whatever the reference leaves free on its last page:
-
-```
- 4096 dims, AoS
- HEAD PAGE, PAGE 2
- ┌──────────────────────────────────────────────────────────┐
- │ reference floats (2036 per page)                 8144 B ►│
- └──────────────────────────────────────────────────────────┘
- PAGE 3
- ┌─┬──────────────────────────────────────────────────────┬─┐
- │►│ AoS entries 0–14: 15 × 532 B = 7980 B                │░│ 68 B
- └─┴──────────────────────────────────────────────────────┴─┘ unused
-  reference floats 4072–4095 (96 B)
- FOLLOWING PAGES
- ┌──────────────────────────────────────────────────────────┬┐
- │ AoS entries: 15 × 532 B = 7980 B                         ││ 164 B
- └──────────────────────────────────────────────────────────┴┘ unused
-```
+Every group crosses at least one page boundary, and each metadata block
+opens the page after its codes end.
 
 ### How search reads a list
 
@@ -367,34 +354,33 @@ entries fill whatever the reference leaves free on its last page:
 - Pages are read once, in chain order, one at a time, as the storage layer
   requires.
 - Codes and the reference are read in place. Nothing is copied.
-- Between pages the scan keeps the running sums of at most two groups
-  (32 × 4 bytes each) and the chunk where it stopped.
+- Between pages the scan keeps the running sums of up to three groups and
+  its position in the stream, which is where the next page continues. A
+  page whose metadata arrives before its group's codes are complete, or a
+  list that ends inside a group, is reported as corruption.
 - A group is pruned once its last chunk and its metadata have been read,
   as in 0.1.0.
+- A page whose vectors are all deleted is skipped only when nothing else
+  passes through it: its codes end on a group boundary and every group they
+  touch has its metadata there.
 
 ### Inserts
 
-A new vector takes a free lane in the list's last group. Its codes go into
-that lane in every chunk, and its TID and factors into the metadata.
+Inserts never write into fastscan pages, in 0.1.0 or here. A new vector goes
+onto an AoS page after the list's fastscan pages, and the scan reads those
+with the AoS kernel. Fastscan pages are written only when a list is built,
+converted or split, all of which write the whole list in order.
 
-```
- PAGE n                          PAGE n+1
- ┌───┬─────────────────────┐   ┌────────────────┬───────┐
- │ … │ last group ch 0–k   │──►│ chunks k+1–47  │ meta  │
- └───┴─────────────────────┘   └────────────────┴───────┘
-        ▲ write lane 20             ▲ write lane 20   ▲ TID, factors,
-          in each chunk               in each chunk     clear deleted bit
-```
+### AoS pages
 
-If that group crosses a page, the insert changes both pages. It locks them in
-chain order and WAL-logs them in one record. Inserts into a group on a single
-page touch one page, as in 0.1.0.
+AoS entries keep their size, stay whole, and keep the 0.1.0 layout: the
+reference vector on the head page and whole entries filling the rest.
 
 ## Space with the packed layout
 
 ### Unused bytes per page
 
-Averaged over a long list, so the head page doesn't count:
+Averaged over a long list, so the head page and the list's end don't count.
 
 | Dimensions | Group size | 0.1.0 fastscan | Packed fastscan | 0.1.0 and packed AoS |
 |---:|---:|---:|---:|---:|
@@ -408,23 +394,22 @@ Averaged over a long list, so the head page doesn't count:
 | 944 | 4356 B | 3788 B (46.5%) | 9 B (0.1%) | 24 B (0.3%) |
 | 1024 | 4676 B | no fastscan | 9 B (0.1%) | 4 B (0.0%) |
 | 1536 | 6724 B | no fastscan | 11 B (0.1%) | 88 B (1.1%) |
-| 2048 | 8772 B | no fastscan | 12 B (0.2%) | 140 B (1.7%) |
-| 4096 | 16964 B | no fastscan | 14 B (0.2%) | 164 B (2.0%) |
+| 1968 | 8452 B | no fastscan | 12 B (0.1%) | 104 B (1.3%) |
 
-AoS above 1968 dimensions needs the packed layout.
-
-Moving the metadata ahead of the next group's codes matters at small
-dimensions. With a strict "metadata after its own codes" rule, packed
-fastscan would still leave 432 bytes per page at 96 dimensions and 500 at 128,
-as in 0.1.0.
+Letting the next group's codes use the space a waiting metadata block leaves
+matters at small dimensions. With a strict "metadata after its own codes"
+rule, packed fastscan would still leave about 432 bytes per page at 96
+dimensions and 500 at 128, as in 0.1.0.
 
 ### Savings at 100M vectors
 
-Fastscan posting storage, with the same assumptions as the 0.1.0 table:
+Fastscan posting storage, with the same assumptions as the 0.1.0 table.
+Packed totals come from the builder's page counts.
 
 | Dimensions | 0.1.0 | Packed | Saved | Saved, long lists |
 |---:|---:|---:|---:|---:|
 | 96 | 3.48 GiB | 3.44 GiB | 45,088,081 B (1.2%) | 4.8% |
+| 100 | 3.65 GiB | 3.55 GiB | 101,430,002 B (2.6%) | 1.8% |
 | 128 | 4.12 GiB | 3.91 GiB | 227,772,636 B (5.1%) | 5.6% |
 | 256 | 5.91 GiB | 5.91 GiB | 0 B (0.0%) | 0.8% |
 | 384 | 9.03 GiB | 8.12 GiB | 967,866,768 B (10.0%) | 22.0% |
@@ -439,64 +424,81 @@ gain completely at the default list size.
 
 ### Fastscan above 944 dimensions
 
-These dimensions have no fastscan in 0.1.0. Packed fastscan at 100M vectors,
-with packed AoS for comparison:
+These dimensions use AoS in 0.1.0. Packed fastscan at 100M vectors, with AoS
+for comparison:
 
-| Dimensions | Packed fastscan | Packed AoS | 0.1.0 |
-|---:|---:|---:|---|
-| 1024 | 17.48 GiB | 16.88 GiB | AoS only |
-| 1536 | 24.55 GiB | 23.81 GiB | AoS only |
-| 2048 | 31.24 GiB | 30.72 GiB | not supported |
-| 3072 | 46.11 GiB | 44.19 GiB | not supported |
-| 4096 | 59.87 GiB | 58.21 GiB | not supported |
+| Dimensions | Packed fastscan | AoS (0.1.0 and packed) |
+|---:|---:|---:|
+| 1024 | 17.48 GiB | 16.88 GiB |
+| 1536 | 24.55 GiB | 23.81 GiB |
+| 1968 | 31.24 GiB | 29.76 GiB |
 
-Packed fastscan is 2–4% larger than AoS. A list's last group is usually only
+Packed fastscan is 3–5% larger than AoS. A list's last group is usually only
 partly full, and its empty lanes still take space. That cost is the same in
-0.1.0 and is not affected by this proposal.
+0.1.0 and is not affected by this layout.
 
-## Required kernel fix
+## Kernel overflow
 
-The default 16-bit lookup table (`fastscan_bits = 16`) adds its low bytes in
-16-bit SIMD lanes. With worst-case input these lanes overflow above 1024
-dimensions in the AVX2 kernel and above 2056 dimensions in the AVX-512
-kernel. With typical input, where the low bytes average about half their
-range, the AVX2 kernel is estimated to go wrong from about 2048 dimensions.
-The scalar kernel adds in 32 bits and is correct. NEON has not been checked.
-0.1.0 never runs fastscan above 944 dimensions, so this is not a bug there
-today.
+The fastscan kernels add in 16-bit SIMD lanes. With the default 16-bit
+lookup table (`fastscan_bits = 16`), worst-case input overflows those lanes
+above 1024 dimensions in the AVX2 kernel and above 2056 in the AVX-512
+kernel. The 8-bit table puts up to 255 into every subquantizer, so its
+16-bit result overflows above 1028 dimensions in every kernel. 0.1.0 never
+runs fastscan above 944 dimensions, so it never hit either.
 
-The kernels must widen their sums to 32 bits often enough that no 16-bit
-lane can overflow, for example every 128 columns (1024 dimensions), before
-fastscan is enabled at higher dimensions. Running sums carried from one page
-to the next are then 32-bit in both table modes.
+The scan now calls the kernels through range wrappers
+(`vs_fastscan_accumulate_range` and `vs_fastscan_accumulate_hacc_range`).
+Each scores a range of columns, passing at most 128 columns (1024
+dimensions) to one kernel call, and adds the results in 32 bits. The same
+wrappers score a group a page at a time. The SIMD code is unchanged.
+
+## Not yet implemented
+
+### The reference vector across pages
+
+Above 1968 dimensions the reference vector no longer fits on the head page
+with room for an entry. Letting the reference continue across pages, splitting
+at any float, would lift that limit for both formats: `query − centroid`
+can be computed a piece at a time, straight from each page. AoS entries
+would fill whatever the reference leaves free on its last page:
+
+```
+ 4096 dims, AoS
+ HEAD PAGE, PAGE 2
+ ┌──────────────────────────────────────────────────────────┐
+ │ reference floats (2036 per page)                 8144 B ►│
+ └──────────────────────────────────────────────────────────┘
+ PAGE 3
+ ┌─┬──────────────────────────────────────────────────────┬─┐
+ │►│ AoS entries 0–14: 15 × 532 B = 7980 B                │░│ 68 B
+ └─┴──────────────────────────────────────────────────────┴─┘ unused
+  reference floats 4072–4095 (96 B)
+```
+
+Other parts of the index set their own dimension limits too: centroid pages,
+the fast rotation, and the accuracy of the lookup tables with many
+subquantizers.
 
 ## Costs and open questions
 
-- **Kernel entry point.** Kernels take a range of chunks and starting sums
-  instead of a whole group. This adds one call per page boundary, which
-  should be negligible next to the 48–256 chunks of a group. To be confirmed
-  with a standalone micro-benchmark.
-- **Two groups in flight.** The scan keeps running sums for up to two groups
-  across a page boundary, plus its position in the stream.
-- **Page addressing.** Group `g` no longer sits at `g × group size` in a
-  page. A page needs its stream offset in the opaque area so a reader can
-  find the first group boundary on it, for example when a split or vacuum
-  reads a page out of order.
-- **Inserts across a page boundary** write two pages, as described above.
-- **Fastscan conversion, splits, and vacuum** move from page-local group
-  indexing to the stream layout.
+- **Kernel calls.** A group split across pages takes one extra kernel call
+  per page boundary, plus adding 32 sums into the running total. The
+  micro-benchmark measures what that costs.
+- **Groups in flight.** The scan keeps running sums for up to three groups
+  and its position in the stream.
+- **Deleted pages.** A fully deleted page can no longer always be skipped,
+  since a live group's codes may pass through it.
 - **New on-disk format.** Indexes built by 0.1.0 need `REINDEX`.
-- **Other limits on high dimensions** are separate from this proposal:
-  centroid pages, the fast rotation, and accuracy of the 16-bit lookup table
-  with many subquantizers.
+- **Recall and speed above 944 dimensions** are unmeasured. Fastscan now
+  runs there by default.
 
 ## Validation
 
-- Standalone first: compare contiguous and split groups on the same data for
-  recall (identical) and kernel speed (no measurable difference expected).
-- Rebuild real 100-, 384-, 768- and 1024-dimension datasets with 0.1.0 and
-  with the packed layout. Compare index size, recall, QPS and tail latency in
-  release builds, with warm and cold shared buffers.
-- Add a 4096-dimension dataset once the reference can continue across pages.
-- Check plans as well as results, so a fallback to sequential scan doesn't
-  pass as a working index scan.
+- Unit tests cover the stream at 16–1968 dimensions: metadata never comes
+  before its group's codes are complete, waste stays under a chunk except
+  where metadata waits, and every vector scores as it does in AoS. A page
+  with a shortened code run makes the scan report corruption. Range sums
+  match whole-group sums at 8–4096 dimensions on every SIMD variant.
+- Still to do: rebuild real 100-, 384-, 768- and 1024-dimension datasets with
+  0.1.0 and with the packed layout. Compare index size, recall, QPS and tail
+  latency in release builds, with warm and cold shared buffers.

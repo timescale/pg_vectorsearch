@@ -777,3 +777,120 @@ TEST_PARAMETERIZED(
 
 	reinit_fastscan_with_simd(0xFFFFFFFF);
 }
+
+/* ----------------------------------------------------------------
+ * Column ranges: a group scored in pieces sums to the whole-group result.
+ *
+ * The reference sums table entries directly, in 32 bits. A whole-group
+ * kernel call cannot serve: the 8-bit table puts up to 255 into every
+ * subquantizer, so its 16-bit result wraps past 1028 dimensions in every
+ * kernel, and the SIMD 16-bit-table kernels add in 16-bit lanes that wrap
+ * past 1024 (AVX2). The 2048- and 4096-dimension cases check that the range
+ * wrappers keep each kernel call small enough.
+ * ---------------------------------------------------------------- */
+
+/* Table-lookup sum over a group's codes, mirroring the packed layout. */
+static void
+reference_accumulate(
+		bool		   hacc,
+		const uint8_t *codes,
+		const uint8_t *lut,
+		uint32_t	   ncols,
+		int32_t		  *out)
+{
+	memset(out, 0, VS_FASTSCAN_GROUP * sizeof(int32_t));
+	for (uint32_t sq = 0; sq < ncols * 2; sq++)
+	{
+		const uint8_t *c = codes + (size_t)sq * 16;
+		for (uint32_t j = 0; j < 16; j++)
+		{
+			uint32_t nib[2] = {c[j] & 0x0Fu, c[j] >> 4};
+			for (uint32_t h = 0; h < 2; h++)
+			{
+				int32_t v;
+				if (hacc)
+				{
+					const uint8_t *lo = lut + (sq / 4) * 128 + (sq % 4) * 16;
+					v				  = lo[nib[h]] + 256 * lo[64 + nib[h]];
+				}
+				else
+					v = lut[sq * 16 + nib[h]];
+				out[kPerm0[j] + 16 * h] += v;
+			}
+		}
+	}
+}
+
+/* Score a group through the range wrappers, split at uneven chunk
+ * boundaries that run both below and past one kernel call. */
+static void
+accumulate_in_ranges(
+		bool		   hacc,
+		const uint8_t *codes,
+		const uint8_t *lut,
+		uint32_t	   ncols,
+		int32_t		  *accum)
+{
+	VsFastscanAccumulateHaccFn fn	= vs_fastscan_get_accumulate_hacc();
+	uint32_t				   col	= 0;
+	uint32_t				   step = 2;
+
+	memset(accum, 0, VS_FASTSCAN_GROUP * sizeof(int32_t));
+	while (col < ncols)
+	{
+		uint32_t n = ncols - col < step ? ncols - col : step;
+		if (hacc)
+			vs_fastscan_accumulate_hacc_range(
+					fn, codes + (size_t)col * 32, lut, col, n, accum);
+		else
+			vs_fastscan_accumulate_range(
+					codes + (size_t)col * 32, lut, col, n, accum);
+		col += n;
+		step = step * 3 % 250 + 2; /* stays even */
+	}
+}
+
+TEST_PARAMETERIZED(
+		accumulate_range_matches_whole, "scalar", "avx2", "avx512", "neon")
+{
+	SKIP_IF_FASTSCAN_SIMD_NOT_AVAILABLE(param);
+
+	const uint32_t dims[] = {8, 100, 768, 1024, 1032, 2048, 4096};
+
+	for (uint32_t di = 0; di < sizeof(dims) / sizeof(dims[0]); di++)
+	{
+		uint32_t dim		  = dims[di];
+		uint32_t packed_bytes = (dim + 7) / 8;
+		uint32_t ncols		  = VS_FASTSCAN_GROUP_BYTES(dim) / 32;
+
+		float *transformed = vs_alloc(dim * sizeof(float));
+		fill_random_floats(transformed, dim, 7 + dim);
+		uint8_t *bits = vs_alloc(VS_FASTSCAN_GROUP * packed_bytes);
+		fill_random_bits(bits, VS_FASTSCAN_GROUP * packed_bytes, 11 + dim);
+		uint8_t *codes = vs_alloc(VS_FASTSCAN_GROUP_BYTES(dim));
+		vs_fastscan_pack_codes(bits, VS_FASTSCAN_GROUP, dim, codes);
+
+		for (int hacc = 0; hacc < 2; hacc++)
+		{
+			uint32_t lut_bytes = hacc ? VS_FASTSCAN_LUT_HACC_BYTES(dim)
+									  : VS_FASTSCAN_LUT_BYTES(dim);
+			uint8_t *lut	   = vs_alloc_aligned(lut_bytes, 64);
+			float	 scale, bias;
+			int32_t	 want[VS_FASTSCAN_GROUP];
+			int32_t	 got[VS_FASTSCAN_GROUP];
+
+			if (hacc)
+				vs_fastscan_build_lut_hacc(
+						transformed, dim, lut, &scale, &bias);
+			else
+				vs_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
+			reference_accumulate(hacc != 0, codes, lut, ncols, want);
+			accumulate_in_ranges(hacc != 0, codes, lut, ncols, got);
+
+			for (uint32_t v = 0; v < VS_FASTSCAN_GROUP; v++)
+				ASSERT_EQ(want[v], got[v], "range sums match the whole group");
+		}
+	}
+
+	reinit_fastscan_with_simd(0xFFFFFFFF);
+}

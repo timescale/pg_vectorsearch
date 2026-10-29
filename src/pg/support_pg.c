@@ -412,7 +412,7 @@ _PG_init(void)
 			"VPSHUFB fastscan posting page format",
 			fastscan_mode_relopt_members,
 			PRISM_FASTSCAN_MODE_AUTO,
-			"auto uses it up to the dimension where a group fits a page",
+			"auto uses it at every supported dimension",
 			NoLock);
 	add_enum_reloption(
 			prism_relopt_kind,
