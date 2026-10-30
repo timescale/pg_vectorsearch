@@ -8,7 +8,9 @@
  * - LUT construction (uint8 and uint16 hacc)
  * - Code packing
  * - Accumulate kernel (the hot inner loop)
+ * - Split accumulate (a group scored in one call vs across a page break)
  * - Full distance batch (LUT + accumulate + distance formula)
+ * - Posting scan (built posting lists, fastscan vs AoS)
  */
 
 #include "vs_config.h"
@@ -25,6 +27,9 @@
 #include "core/memory.h"
 #include "core/platform.h"
 #include "core/types.h"
+#include "index/posting_build.h"
+#include "index/posting_page.h"
+#include "index/posting_scan.h"
 #include "kv.h"
 #include "quant/fastscan.h"
 #include "quant/rabitq.h"
@@ -32,12 +37,14 @@
 #define DEFAULT_DIM	  768
 #define DEFAULT_COUNT 10000
 #define DEFAULT_RUNS  5
+#define DEFAULT_LIST  256
 
 typedef struct
 {
 	Dimension	dim;
 	uint32_t	count;
 	uint32_t	runs;
+	uint32_t	list; /* vectors per posting list */
 	const char *simd;
 	const char *simd_level;
 	bool		help;
@@ -236,6 +243,196 @@ benchmark_accumulate(const BenchConfig *config)
 }
 
 /* ----------------------------------------------------------------
+ * Posting scan: posting lists written by the real builder into memory
+ * pages, scanned by the real scan path. Measures the page layout as a
+ * whole: pages per list, bytes per vector, and scan throughput, for
+ * fastscan and AoS lists of the same vectors.
+ * ---------------------------------------------------------------- */
+
+typedef struct BenchPageStorage
+{
+	VsStorage base;
+	char	 *pages;
+	uint32_t  npages;
+	uint32_t  cap;
+} BenchPageStorage;
+
+static Page
+bench_page_at(VsStorage *self, BlockNumber blkno)
+{
+	return ((BenchPageStorage *)self)->pages + (size_t)blkno * BLCKSZ;
+}
+
+static void
+bench_page_noop(VsStorage *self, BlockNumber blkno)
+{
+	(void)self;
+	(void)blkno;
+}
+
+static Page
+bench_page_new(VsStorage *self, BlockNumber *blkno_out)
+{
+	BenchPageStorage *s = (BenchPageStorage *)self;
+	if (s->npages >= s->cap)
+	{
+		fprintf(stderr, "bench: posting page estimate too small\n");
+		exit(1);
+	}
+	*blkno_out = s->npages++;
+	return bench_page_at(self, *blkno_out);
+}
+
+static const VsStorageOps bench_page_ops = {
+		.read_page	  = bench_page_at,
+		.release_page = bench_page_noop,
+		.write_page	  = bench_page_at,
+		.new_page	  = bench_page_new,
+		.commit_page  = bench_page_noop,
+};
+
+/* Write nlists lists of `list` random pre-encoded vectors each. */
+static void
+build_bench_lists(
+		BenchPageStorage *st,
+		Dimension		  dim,
+		uint32_t		  nlists,
+		uint32_t		  list,
+		bool			  fastscan,
+		const float		 *pt_centroid,
+		BlockNumber		 *heads)
+{
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
+	uint8_t *bits		  = vs_alloc(packed_bytes);
+	uint32_t rng		  = 1234;
+
+	for (uint32_t c = 0; c < nlists; c++)
+	{
+		PrismPostingBuilder b;
+		prism_posting_builder_init_fmt(
+				&b, &st->base, NULL, dim, c, NULL, pt_centroid, fastscan);
+		for (uint32_t i = 0; i < list; i++)
+		{
+			ItemPointerData tid;
+			ItemPointerSet(&tid, c * list + i + 1, 1);
+			fill_random(bits, packed_bytes, cmd_rand(&rng));
+			float f_add		= (float)(cmd_rand(&rng) % 1000) / 500.0f;
+			float f_rescale = 0.5f + (float)(cmd_rand(&rng) % 1000) / 1000.0f;
+			prism_posting_builder_add_encoded(
+					&b, tid, f_add, f_rescale, 0.01f, bits);
+		}
+		heads[c] = prism_posting_builder_finish(&b);
+		prism_posting_builder_cleanup(&b);
+	}
+	vs_free(bits);
+}
+
+static void
+benchmark_posting_scan(const BenchConfig *config)
+{
+	Dimension dim	 = config->dim;
+	uint32_t  list	 = config->list;
+	uint32_t  nlists = config->count / list > 0 ? config->count / list : 1;
+	uint32_t  total	 = nlists * list;
+
+	/* Generous for either layout: a page holds at least half its bytes of
+	 * entries, plus the head and one page of slack per list. */
+	uint32_t vec_bytes = PRISM_POSTING_ENTRY_SIZE(dim);
+	uint32_t fs_bytes  = prism_fastscan_group_section_bytes(dim) /
+								VS_FASTSCAN_GROUP +
+						1;
+	if (fs_bytes > vec_bytes)
+		vec_bytes = fs_bytes;
+	uint64_t per_list = 3 + ((uint64_t)list * vec_bytes + 32 * fs_bytes) /
+									(prism_posting_page_usable() / 2);
+
+	printf("\nPosting scan (dim=%u, %u lists of %u vectors, k=10):\n",
+		   dim,
+		   nlists,
+		   list);
+
+	RaBitQParams *params = vs_rabitq_create(dim, 42);
+	float		 *zero	 = vs_alloc0(dim * sizeof(float));
+	float		 *query	 = vs_alloc(dim * sizeof(float));
+	fill_random_floats(query, dim, 7);
+	Vec32Ref		  qref	 = {.data = query, .dim = dim};
+	Vec32Ref		  cref	 = {.data = zero, .dim = dim};
+	RaBitQQueryState *qstate = vs_rabitq_prepare_query(params, qref, cref);
+	BlockNumber		 *heads	 = vs_alloc(nlists * sizeof(BlockNumber));
+
+	for (int fs = 1; fs >= 0; fs--)
+	{
+		BenchPageStorage st = {
+				.base = {.ops = &bench_page_ops},
+				.cap  = (uint32_t)(nlists * per_list),
+		};
+		st.pages = vs_alloc_aligned((size_t)st.cap * BLCKSZ, 4096);
+		build_bench_lists(&st, dim, nlists, list, fs != 0, zero, heads);
+
+		PrismPostingScan scan;
+		prism_posting_scan_init(
+				&scan,
+				&st.base,
+				NULL,
+				params,
+				dim,
+				prism_posting_max_entries(dim));
+		if (fs)
+			prism_posting_scan_enable_fastscan(&scan, 16);
+
+		VsTopK topk;
+		vs_topk_init(&topk, 10);
+		double best = 0.0;
+		for (uint32_t run = 0; run < config->runs + 1; run++)
+		{
+			vs_topk_reset(&topk);
+			uint64_t start = bench_now_ns();
+			for (uint32_t c = 0; c < nlists; c++)
+			{
+				prism_posting_scan_begin_cluster(&scan, qstate, heads[c]);
+				if (fs)
+					prism_posting_scan_cluster_fastscan(&scan, &topk);
+				else
+					prism_posting_scan_cluster(&scan, &topk);
+				prism_posting_scan_end_cluster(&scan);
+			}
+			uint64_t end = bench_now_ns();
+			double	 vps = cmd_ratio(
+					  (double)total, bench_ns_to_ms(end - start) / 1000.0);
+			/* The first round is warmup. */
+			if (run > 0 && vps > best)
+				best = vps;
+		}
+
+		double pages = cmd_ratio((double)st.npages, (double)nlists);
+		printf("  %-9s %6.2f pages/list  %6.1f B/vector  %7.1fM vec/s  "
+			   "(%5.2f us/list)\n",
+			   fs ? "fastscan:" : "aos:",
+			   pages,
+			   cmd_ratio((double)st.npages * BLCKSZ, (double)total),
+			   best / 1e6,
+			   cmd_ratio((double)list, best) * 1e6);
+		add_fs_metric(
+				config, fs ? "scan_fastscan" : "scan_aos", "vec/s", best);
+		add_fs_metric(
+				config,
+				fs ? "pages_per_list_fastscan" : "pages_per_list_aos",
+				"pages",
+				pages);
+
+		vs_topk_cleanup(&topk);
+		prism_posting_scan_cleanup(&scan);
+		vs_free_aligned(st.pages);
+	}
+
+	vs_free(heads);
+	vs_rabitq_free_query(qstate);
+	vs_free(query);
+	vs_free(zero);
+	vs_rabitq_destroy(params);
+}
+
+/* ----------------------------------------------------------------
  * Distance throughput: fastscan vs rabitq asymmetric
  *
  * Uses properly encoded RaBitQ vectors so both kernels operate
@@ -406,6 +603,9 @@ print_usage(CmdContext *ctx)
 		   DEFAULT_COUNT);
 	printf("  --runs <int>    Benchmark iterations (default: %d)\n",
 		   DEFAULT_RUNS);
+	printf("  --list <int>    Vectors per posting list in the posting scan "
+		   "(default: %d)\n",
+		   DEFAULT_LIST);
 	printf("  --simd <str>    SIMD level: avx512, avx2, scalar "
 		   "(default: all)\n");
 	printf("  --help          Show this help message\n");
@@ -415,6 +615,7 @@ print_usage(CmdContext *ctx)
 	CMD_USAGE_EXAMPLE(
 			ctx, "bench fastscan-kernel", "--dim 768 --count 100000");
 	CMD_USAGE_EXAMPLE(ctx, "bench fastscan-kernel", "--simd avx2 --runs 10");
+	CMD_USAGE_EXAMPLE(ctx, "bench fastscan-kernel", "--dim 1536 --list 512");
 }
 
 int
@@ -424,6 +625,7 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 			.dim   = DEFAULT_DIM,
 			.count = DEFAULT_COUNT,
 			.runs  = DEFAULT_RUNS,
+			.list  = DEFAULT_LIST,
 			.help  = false,
 	};
 
@@ -431,6 +633,7 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 			{"dim", required_argument, 0, 'd'},
 			{"count", required_argument, 0, 'c'},
 			{"runs", required_argument, 0, 'r'},
+			{"list", required_argument, 0, 'l'},
 			{"simd", required_argument, 0, 's'},
 			{"help", no_argument, 0, 'h'},
 			{0, 0, 0, 0},
@@ -439,8 +642,11 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 	optind = 1;
 	int opt;
 	while ((opt = getopt_long(
-					ctx->argc, ctx->argv, "d:c:r:s:h", long_options, NULL)) !=
-		   -1)
+					ctx->argc,
+					ctx->argv,
+					"d:c:r:l:s:h",
+					long_options,
+					NULL)) != -1)
 	{
 		switch (opt)
 		{
@@ -452,6 +658,9 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 			break;
 		case 'r':
 			config.runs = (uint32_t)atoi(optarg);
+			break;
+		case 'l':
+			config.list = (uint32_t)atoi(optarg);
 			break;
 		case 's':
 			config.simd = optarg;
@@ -470,6 +679,11 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 		print_usage(ctx);
 		return 0;
 	}
+	if (config.list == 0)
+	{
+		fprintf(stderr, "bench fastscan-kernel: --list must be positive\n");
+		return 1;
+	}
 
 	printf("Fastscan kernel benchmark\n");
 	printf("=========================\n\n");
@@ -484,6 +698,7 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 		kv_obj_put(root, "dim", kv_int(config.dim));
 		kv_obj_put(root, "count", kv_int(config.count));
 		kv_obj_put(root, "runs", kv_int(config.runs));
+		kv_obj_put(root, "list", kv_int(config.list));
 		config.metrics = kv_arr();
 		kv_obj_put(root, "metrics", config.metrics);
 	}
@@ -533,7 +748,10 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 		benchmark_lut_build(&config);
 		benchmark_accumulate(&config);
 		if (levels[l].run_distance)
+		{
 			benchmark_distance_throughput(&config);
+			benchmark_posting_scan(&config);
+		}
 		printf("\n");
 	}
 
@@ -546,6 +764,7 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 	benchmark_lut_build(&config);
 	benchmark_accumulate(&config);
 	benchmark_distance_throughput(&config);
+	benchmark_posting_scan(&config);
 	printf("\n");
 #endif
 
