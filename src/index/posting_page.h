@@ -140,7 +140,17 @@ typedef struct PrismPostingPageOpaque
 	uint16_t	flags;		 /* FIRST | OVERFLOW | FASTSCAN | TOMBSTONED |
 							  * DELETED */
 	uint16_t page_id;		 /* PRISM_POSTING_PAGE_ID */
-	uint16_t max_entries;	 /* capacity of this page */
+
+	/*
+	 * An AoS page's capacity. A fastscan page takes no inserts, so it holds
+	 * the length of its run of the list's code stream instead (see the
+	 * fastscan page format below).
+	 */
+	union
+	{
+		uint16_t max_entries;
+		uint16_t code_bytes;
+	};
 
 	/*
 	 * Overlay (8 bytes). On a live page these are the per-cluster head
@@ -353,11 +363,13 @@ prism_posting_page_count(Page page)
 	return prism_posting_opaque(page)->entry_count;
 }
 
+/* Room for one more AoS entry. A fastscan page never takes one. */
 static inline bool
 prism_posting_page_has_room(Page page)
 {
 	PrismPostingPageOpaque *op = prism_posting_opaque(page);
-	return op->entry_count < op->max_entries;
+	return !(op->flags & PRISM_POSTING_PAGE_FASTSCAN) &&
+		   op->entry_count < op->max_entries;
 }
 
 /*
@@ -661,20 +673,41 @@ bool prism_posting_flat_add(
 /* ----------------------------------------------------------------
  * Fastscan page format
  *
- * SoA layout organized into 32-vector group sections.
- * Each group section:
+ * A fastscan posting list stores 32-vector groups. Each group has codes
+ * (VS_FASTSCAN_GROUP_BYTES(dim) bytes, 1-bit codes of all 32 vectors
+ * interleaved for the VPSHUFB kernel) and metadata:
  *   ItemPointerData tids[32]         192B
  *   float f_add[32]                  128B
  *   float f_rescale[32]              128B
  *   float f_error[32]                128B
- *   uint8_t codes[nsq_pairs × 32]   variable (3072B at dim=768)
  *   uint32_t tombstone_mask            4B   (bit v set => lane v is dead)
+ *
+ * The codes of all groups form one stream that continues across the
+ * list's fastscan pages, breaking only at PRISM_FASTSCAN_CHUNK_BYTES
+ * boundaries within a group. Every kernel steps in sizes that divide the
+ * chunk, so a group split across pages is scored in place, a page at a
+ * time. Metadata never splits. It sits on the page where its group's codes
+ * end, or on the next page when it no longer fits there (at most
+ * PRISM_FASTSCAN_MAX_DEFERRED blocks), so a scan has every metadata block
+ * in hand once it has its codes.
+ *
+ * Page content (after the encode reference on a first page):
+ *   metadata[ngroups]                ngroups × 580B
+ *   codes[code_bytes]                the page's run of the code stream
+ *
+ * The opaque says how much of each there is. entry_count counts the vectors
+ * whose metadata is on the page; only the list's last group can be partial,
+ * so the page holds ceil(entry_count / 32) metadata blocks and every block
+ * but the last is full. code_bytes is the length of the code run.
+ *
+ * Where a page sits in the stream is not stored. A scan reads a list from
+ * its head, and the position and group it reached on one page are where
+ * the next page continues.
  *
  * tombstone_mask is the per-lane analog of an AoS entry's
  * PRISM_POSTING_FLAG_DELETED (see fastscan-design.md for why the codes
- * themselves can't be marked in place). A page starts with every mask word
- * zero (PageInit zeroes the page; a fresh group's tail is never written
- * otherwise), so an unmarked lane reads as live.
+ * themselves can't be marked in place). The builder writes it as zero, so
+ * an unmarked lane reads as live.
  *
  * Pages are identified by PRISM_POSTING_PAGE_FASTSCAN in opaque flags.
  * ---------------------------------------------------------------- */
@@ -685,55 +718,131 @@ static_assert(
 		VS_FASTSCAN_GROUP == 32,
 		"tombstone_mask packs one bit per lane into a uint32_t");
 
-/* Bytes per 32-vector group section (metadata + packed codes + tombstone
- * mask) */
+/* Code bytes per split unit: 16 dimensions of 32 vectors. */
+#define PRISM_FASTSCAN_CHUNK_BYTES 64u
+
+/* Metadata blocks that may wait for the next page. */
+#define PRISM_FASTSCAN_MAX_DEFERRED 2u
+
+/* Groups a scan can have in flight: deferred ones plus the current one. */
+#define PRISM_FASTSCAN_MAX_INFLIGHT (PRISM_FASTSCAN_MAX_DEFERRED + 1u)
+
+/* Bytes of one group's metadata block. */
+#define PRISM_FASTSCAN_META_BYTES                             \
+	((uint32_t)(VS_FASTSCAN_GROUP * sizeof(ItemPointerData) + \
+				VS_FASTSCAN_GROUP * 3 * sizeof(float) + sizeof(uint32_t)))
+
+static_assert(
+		PRISM_FASTSCAN_META_BYTES % sizeof(float) == 0,
+		"metadata blocks keep the floats of the next block aligned");
+
+/* Bytes per 32-vector group, metadata and codes together */
 static inline uint32_t
 prism_fastscan_group_section_bytes(Dimension dim)
 {
-	return (uint32_t)(VS_FASTSCAN_GROUP * sizeof(ItemPointerData) +
-					  VS_FASTSCAN_GROUP * 3 * sizeof(float) +
-					  VS_FASTSCAN_GROUP_BYTES(dim) + sizeof(uint32_t));
+	return PRISM_FASTSCAN_META_BYTES + VS_FASTSCAN_GROUP_BYTES(dim);
+}
+
+/* Bytes for metadata and codes on a fastscan page */
+static inline uint32_t
+prism_fastscan_page_space(Dimension dim, bool is_first)
+{
+	uint32_t usable = prism_posting_page_usable();
+
+	if (is_first)
+	{
+		uint32_t pt = prism_posting_pt_centroid_size(dim);
+		if (pt >= usable)
+			return 0; /* see prism_posting_max_entries_first */
+		usable -= pt;
+	}
+	return usable;
+}
+
+/* Metadata blocks on a fastscan page, from its vector count. */
+static inline uint32_t
+prism_fastscan_page_groups(const PrismPostingPageOpaque *op)
+{
+	return ((uint32_t)op->entry_count + VS_FASTSCAN_GROUP - 1) /
+		   VS_FASTSCAN_GROUP;
+}
+
+/*
+ * Whether a list of this dimension can use fastscan pages. Groups continue
+ * across pages, so their size does not matter; the first page only needs
+ * room past the encode reference.
+ */
+static inline bool
+prism_fastscan_supported(Dimension dim)
+{
+	return prism_fastscan_page_space(dim, true) > 0;
+}
+
+/*
+ * Most metadata blocks a page can hold. Besides the deferred blocks, a page
+ * holds metadata only for groups whose codes end on it, and its code bytes
+ * reach the end of at most space / group-code-size + 1 groups.
+ */
+static inline uint32_t
+prism_fastscan_max_groups(Dimension dim, bool is_first)
+{
+	uint32_t space	 = prism_fastscan_page_space(dim, is_first);
+	uint32_t by_meta = space / PRISM_FASTSCAN_META_BYTES;
+	uint32_t by_code = PRISM_FASTSCAN_MAX_DEFERRED + 1 +
+					   space / VS_FASTSCAN_GROUP_BYTES(dim);
+
+	return by_meta < by_code ? by_meta : by_code;
 }
 
 /* Max entries on a fastscan overflow page */
 static inline uint32_t
 prism_fastscan_max_entries(Dimension dim)
 {
-	uint32_t section = prism_fastscan_group_section_bytes(dim);
-	uint32_t usable	 = prism_posting_page_usable();
-	uint32_t ngroups = usable / section;
-	return ngroups * VS_FASTSCAN_GROUP;
+	return prism_fastscan_max_groups(dim, false) * VS_FASTSCAN_GROUP;
 }
 
 /* Max entries on a fastscan first page (with pt_centroid) */
 static inline uint32_t
 prism_fastscan_max_entries_first(Dimension dim)
 {
-	uint32_t section = prism_fastscan_group_section_bytes(dim);
-	uint32_t usable	 = prism_posting_page_usable();
-	uint32_t pt		 = prism_posting_pt_centroid_size(dim);
+	return prism_fastscan_max_groups(dim, true) * VS_FASTSCAN_GROUP;
+}
 
-	if (pt >= usable)
-		return 0; /* see prism_posting_max_entries_first */
-
-	uint32_t ngroups = (usable - pt) / section;
-	return ngroups * VS_FASTSCAN_GROUP;
+/*
+ * Entries a full page holds on average, for cost estimates. Fastscan pages
+ * waste under a chunk each, so the code and metadata bytes per vector set
+ * the density.
+ */
+static inline double
+prism_fastscan_entries_per_page(Dimension dim)
+{
+	return (double)prism_fastscan_page_space(dim, false) * VS_FASTSCAN_GROUP /
+		   prism_fastscan_group_section_bytes(dim);
 }
 
 /*
  * Upper bound on the entries a single posting page can hold, whatever format
  * it is in. Neither format's figure bounds the other: fastscan packs more
- * than AoS at low dimension (416 vs 339 at dim 4) and fewer at high (64 vs 67
- * at dim 768, and none at all once a group stops fitting). The overflow-page
- * figures bound a first page too, since that gives up room to the encode
- * reference. Callers sizing a buffer for one page's worth of entries want
- * this rather than either half.
+ * than AoS at low dimension and allows for deferred metadata blocks, while
+ * AoS packs more where a page holds under one group's codes. The
+ * overflow-page figures bound a first page too, since that gives up room to
+ * the encode reference. Callers sizing a buffer for one page's worth of
+ * entries want this rather than either half.
  */
 static inline uint32_t
 prism_posting_max_entries_any_format(Dimension dim)
 {
 	uint32_t aos = prism_posting_max_entries(dim);
 	uint32_t fs	 = prism_fastscan_max_entries(dim);
+	return aos > fs ? aos : fs;
+}
+
+/* Entries a full page holds in the denser of the two formats. */
+static inline double
+prism_posting_entries_per_page(Dimension dim)
+{
+	double aos = (double)prism_posting_max_entries(dim);
+	double fs  = prism_fastscan_entries_per_page(dim);
 	return aos > fs ? aos : fs;
 }
 
@@ -759,35 +868,32 @@ prism_posting_page_cap(const PrismPostingPageOpaque *op, Dimension dim)
 
 /*
  * Reject an on-disk entry_count past that ceiling before it drives a loop, so
- * a corrupt or truncated page cannot read past the page end. The bound the
- * scan path already applies (posting_scan.c), in the form the shared read
- * paths need.
+ * a corrupt or truncated page cannot read past the page end. A fastscan page
+ * also has its metadata blocks and code run checked to fit. The bound the scan
+ * path already applies (posting_scan.c), in the form the shared read paths
+ * need.
  */
-void prism_posting_check_count(
-		BlockNumber blkno, const PrismPostingPageOpaque *op, Dimension dim);
-
-/* Max groups on a page */
-static inline uint32_t
-prism_fastscan_max_groups(Dimension dim, bool is_first)
-{
-	uint32_t section = prism_fastscan_group_section_bytes(dim);
-	uint32_t usable	 = prism_posting_page_usable();
-	if (is_first)
-		usable -= prism_posting_pt_centroid_size(dim);
-	return usable / section;
-}
+void prism_posting_check_count(BlockNumber blkno, Page page, Dimension dim);
 
 /* ----------------------------------------------------------------
- * Fastscan group accessors
+ * Fastscan page accessors
  *
- * All take content pointer (past PageHeader, past pt_centroid on
- * first pages) and group index g.
+ * All take the content pointer (past PageHeader, past pt_centroid on first
+ * pages). The group index g counts the metadata blocks on that page.
  * ---------------------------------------------------------------- */
 
 static inline char *
 prism_fastscan_group_base(char *content, uint32_t g, Dimension dim)
 {
-	return content + (size_t)g * prism_fastscan_group_section_bytes(dim);
+	(void)dim;
+	return content + (size_t)g * PRISM_FASTSCAN_META_BYTES;
+}
+
+/* The page's run of the code stream, after its ngroups metadata blocks. */
+static inline uint8_t *
+prism_fastscan_page_codes(char *content, uint32_t ngroups)
+{
+	return (uint8_t *)content + (size_t)ngroups * PRISM_FASTSCAN_META_BYTES;
 }
 
 static inline ItemPointerData *
@@ -815,26 +921,19 @@ prism_fastscan_group_f_error(char *content, uint32_t g, Dimension dim)
 	return prism_fastscan_group_f_rescale(content, g, dim) + VS_FASTSCAN_GROUP;
 }
 
-static inline uint8_t *
-prism_fastscan_group_codes(char *content, uint32_t g, Dimension dim)
-{
-	return (uint8_t *)(prism_fastscan_group_f_error(content, g, dim) +
-					   VS_FASTSCAN_GROUP);
-}
-
 /*
  * Per-group dead-lane bitmap: bit v set means lane v's TID is dead. Read and
  * write through this pointer directly (it aliases the live page); there is no
  * copy to write back. Only valid lanes (v < the group's entry count) are ever
- * set -- PageInit zeroes a fresh page and nothing else touches this word, so
+ * set -- the builder writes the word as zero and nothing else touches it, so
  * an unmarked lane, including every lane past entry_count on a partial final
  * group, reads as live.
  */
 static inline uint32_t *
 prism_fastscan_group_tombstone_mask(char *content, uint32_t g, Dimension dim)
 {
-	return (uint32_t *)(prism_fastscan_group_codes(content, g, dim) +
-						VS_FASTSCAN_GROUP_BYTES(dim));
+	return (uint32_t *)(prism_fastscan_group_f_error(content, g, dim) +
+						VS_FASTSCAN_GROUP);
 }
 
 /*

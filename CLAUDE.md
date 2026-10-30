@@ -32,6 +32,7 @@ a subset of partitions to build the nearest neighbor result set.
 - `docs/architecture.md` - High-level architecture
 - `docs/development.md` - Build instructions, testing, CI scripts
 - `docs/fastscan-design.md`, `docs/incremental-updates-design.md`,
+  `docs/packed-posting-pages-design.md`,
   `docs/parallel-build-design.md` - design notes for work not yet in the
   code. The code is the specification for what is implemented.
 

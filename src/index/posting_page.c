@@ -14,11 +14,33 @@
 #include <miscadmin.h> /* CHECK_FOR_INTERRUPTS */
 #endif
 
-void
-prism_posting_check_count(
+/* A fastscan page's metadata blocks and code run must fit the page. */
+static void
+check_fastscan_page(
 		BlockNumber blkno, const PrismPostingPageOpaque *op, Dimension dim)
 {
-	uint32_t cap = prism_posting_page_cap(op, dim);
+	bool	 first	 = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0;
+	uint32_t space	 = prism_fastscan_page_space(dim, first);
+	uint32_t groups	 = prism_fastscan_page_groups(op);
+	uint32_t col_len = VS_FASTSCAN_GROUP_BYTES(8); /* one 8-dim column */
+
+	if ((size_t)groups * PRISM_FASTSCAN_META_BYTES + op->code_bytes > space ||
+		op->code_bytes % col_len != 0)
+		vs_error(
+				VS_EXTENSION_NAME
+				": fastscan posting page %u does not fit its page "
+				"(%u groups, %u code bytes); "
+				"the index may be corrupted -- REINDEX it",
+				blkno,
+				(unsigned)groups,
+				(unsigned)op->code_bytes);
+}
+
+void
+prism_posting_check_count(BlockNumber blkno, Page page, Dimension dim)
+{
+	const PrismPostingPageOpaque *op  = prism_posting_opaque(page);
+	uint32_t					  cap = prism_posting_page_cap(op, dim);
 
 	if (op->entry_count > cap)
 		vs_error(
@@ -28,6 +50,9 @@ prism_posting_check_count(
 				blkno,
 				(unsigned)op->entry_count,
 				cap);
+
+	if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
+		check_fastscan_page(blkno, op, dim);
 }
 
 /* ----------------------------------------------------------------
@@ -40,10 +65,13 @@ prism_posting_page_init(
 {
 	PageInit(page, BLCKSZ, sizeof(PrismPostingPageOpaque));
 
-	/* First pages have reduced capacity due to pt_centroid */
-	uint32_t				max	   = (flags & PRISM_POSTING_PAGE_FIRST)
-										   ? prism_posting_max_entries_first(dim)
-										   : prism_posting_max_entries(dim);
+	/* First pages have reduced capacity due to pt_centroid. A fastscan page
+	 * keeps its code length in the same field, and starts with none. */
+	uint32_t max = 0;
+	if (!(flags & PRISM_POSTING_PAGE_FASTSCAN))
+		max = (flags & PRISM_POSTING_PAGE_FIRST)
+					? prism_posting_max_entries_first(dim)
+					: prism_posting_max_entries(dim);
 	PrismPostingPageOpaque *opaque = prism_posting_opaque(page);
 	opaque->next_blkno			   = InvalidBlockNumber;
 	opaque->cluster_id			   = cluster_id;
