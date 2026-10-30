@@ -482,8 +482,8 @@ subquantizers.
 ## Costs and open questions
 
 - **Kernel calls.** A group split across pages takes one extra kernel call
-  per page boundary, plus adding 32 sums into the running total. The
-  micro-benchmark measures what that costs.
+  per page boundary, plus adding 32 sums into the running total. See
+  [Measuring](#measuring).
 - **Groups in flight.** The scan keeps running sums for up to three groups
   and its position in the stream.
 - **Deleted pages.** A fully deleted page can no longer always be skipped,
@@ -491,6 +491,31 @@ subquantizers.
 - **New on-disk format.** Indexes built by 0.1.0 need `REINDEX`.
 - **Recall and speed above 944 dimensions** are unmeasured. Fastscan now
   runs there by default.
+
+## Measuring
+
+`vectorsearch bench fastscan-kernel` measures the layout in isolation:
+
+- **Split accumulate** scores each group in one kernel call, then split at
+  a chunk boundary as a page break splits it, and reports the cost per
+  split.
+- **Posting scan** writes posting lists with the real builder into memory
+  pages and scans them with the real scan path, reporting pages per list,
+  bytes per vector and throughput, for fastscan and AoS lists. It uses only
+  APIs that 0.1.0 also has, so the same benchmark can run against both
+  layouts.
+
+```
+vectorsearch bench fastscan-kernel --dim 768 --count 200000 --list 256
+```
+
+On a Zen 4 machine, a page break costs a few nanoseconds per split group.
+Where the layout saves pages, from 768 dimensions up, fastscan scans
+proportionally faster. Where it saves none (96 to 384 dimensions at the
+default list size), scans run within a few percent of 0.1.0; long lists
+at 128 dimensions run up to about 7% slower, since a group's kernel call
+there is short and the stream bookkeeping shows. End-to-end search speed
+and recall are still to be measured with `vectorsearch bench search`.
 
 ## Validation
 

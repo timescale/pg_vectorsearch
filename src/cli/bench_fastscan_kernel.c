@@ -243,6 +243,133 @@ benchmark_accumulate(const BenchConfig *config)
 }
 
 /* ----------------------------------------------------------------
+ * Split accumulate: a group scored in one call, or in two calls split
+ * at a 64-byte chunk boundary, as when a page boundary cuts the group.
+ * The difference is the per-split cost of the packed page layout.
+ * ---------------------------------------------------------------- */
+
+static void
+benchmark_accumulate_split(const BenchConfig *config)
+{
+	Dimension dim		   = config->dim;
+	uint32_t  count		   = config->count;
+	uint32_t  packed_bytes = (dim + 7) / 8;
+	uint32_t  ngroups = (count + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
+	uint32_t  group_bytes = VS_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t  col_bytes	  = VS_FASTSCAN_GROUP_BYTES(8);
+	uint32_t  ncols		  = group_bytes / col_bytes;
+	uint32_t  split		  = (ncols / 2) & ~1u; /* a chunk boundary */
+
+	if (split == 0)
+		return;
+
+	printf("\nSplit accumulate (dim=%u, %u groups, split at column %u of "
+		   "%u):\n",
+		   dim,
+		   ngroups,
+		   split,
+		   ncols);
+
+	float *transformed = vs_alloc(dim * sizeof(float));
+	fill_random_floats(transformed, dim, 42);
+	uint8_t *bits = vs_alloc((size_t)count * packed_bytes);
+	fill_random(bits, (size_t)count * packed_bytes, 99);
+	uint8_t *codes = vs_alloc_aligned(vs_fastscan_codes_size(count, dim), 64);
+	vs_fastscan_pack_codes(bits, count, dim, codes);
+
+	VsFastscanAccumulateHaccFn hacc_fn = vs_fastscan_get_accumulate_hacc();
+	int32_t					   accum[VS_FASTSCAN_GROUP];
+	volatile int32_t		   sink = 0;
+
+	for (int hacc = 0; hacc < 2; hacc++)
+	{
+		uint32_t lut_bytes = hacc ? VS_FASTSCAN_LUT_HACC_BYTES(dim)
+								  : VS_FASTSCAN_LUT_BYTES(dim);
+		uint8_t *lut	   = vs_alloc_aligned(lut_bytes, 64);
+		float	 scale, bias;
+		if (hacc)
+			vs_fastscan_build_lut_hacc(transformed, dim, lut, &scale, &bias);
+		else
+			vs_fastscan_build_lut(transformed, dim, lut, &scale, &bias);
+
+		double best[2] = {0.0, 0.0}; /* whole, split */
+		for (uint32_t run = 0; run < config->runs + 1; run++)
+		{
+			for (int split_run = 0; split_run < 2; split_run++)
+			{
+				uint64_t start = bench_now_ns();
+				for (uint32_t g = 0; g < ngroups; g++)
+				{
+					const uint8_t *gc = codes + (size_t)g * group_bytes;
+					uint32_t	   n1 = split_run ? split : ncols;
+
+					memset(accum, 0, sizeof(accum));
+					if (hacc)
+						vs_fastscan_accumulate_hacc_range(
+								hacc_fn, gc, lut, 0, n1, accum);
+					else
+						vs_fastscan_accumulate_range(gc, lut, 0, n1, accum);
+					if (split_run && hacc)
+						vs_fastscan_accumulate_hacc_range(
+								hacc_fn,
+								gc + (size_t)split * col_bytes,
+								lut,
+								split,
+								ncols - split,
+								accum);
+					else if (split_run)
+						vs_fastscan_accumulate_range(
+								gc + (size_t)split * col_bytes,
+								lut,
+								split,
+								ncols - split,
+								accum);
+					sink += accum[0];
+				}
+				uint64_t end = bench_now_ns();
+				double	 vps = cmd_ratio(
+						  (double)count, bench_ns_to_ms(end - start) / 1000.0);
+				/* The first round is warmup. */
+				if (run > 0 && vps > best[split_run])
+					best[split_run] = vps;
+			}
+		}
+
+		/* What one page break costs a group. */
+		double split_ns = (cmd_ratio((double)count, best[1]) -
+						   cmd_ratio((double)count, best[0])) *
+						  1e9 / ngroups;
+		printf("  %-7s whole: %7.1fM vec/s   split: %7.1fM vec/s   "
+			   "(%+.1f ns per split)\n",
+			   hacc ? "uint16" : "uint8",
+			   best[0] / 1e6,
+			   best[1] / 1e6,
+			   split_ns);
+		add_fs_metric(
+				config,
+				hacc ? "accum_uint16_whole" : "accum_uint8_whole",
+				"vec/s",
+				best[0]);
+		add_fs_metric(
+				config,
+				hacc ? "accum_uint16_split" : "accum_uint8_split",
+				"vec/s",
+				best[1]);
+		add_fs_metric(
+				config,
+				hacc ? "split_cost_uint16" : "split_cost_uint8",
+				"ns",
+				split_ns);
+		vs_free_aligned(lut);
+	}
+
+	(void)sink;
+	vs_free_aligned(codes);
+	vs_free(bits);
+	vs_free(transformed);
+}
+
+/* ----------------------------------------------------------------
  * Posting scan: posting lists written by the real builder into memory
  * pages, scanned by the real scan path. Measures the page layout as a
  * whole: pages per list, bytes per vector, and scan throughput, for
@@ -747,6 +874,7 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 		config.simd_level = levels[l].name;
 		benchmark_lut_build(&config);
 		benchmark_accumulate(&config);
+		benchmark_accumulate_split(&config);
 		if (levels[l].run_distance)
 		{
 			benchmark_distance_throughput(&config);
@@ -763,6 +891,7 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 	vs_fastscan_init_simd();
 	benchmark_lut_build(&config);
 	benchmark_accumulate(&config);
+	benchmark_accumulate_split(&config);
 	benchmark_distance_throughput(&config);
 	benchmark_posting_scan(&config);
 	printf("\n");
