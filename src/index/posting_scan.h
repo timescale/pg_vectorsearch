@@ -67,19 +67,26 @@ typedef struct PrismPostingScan
 
 	/* Fastscan scratch buffers (NULL if fastscan not enabled) */
 	uint8_t *fs_lut;	   /* query LUT */
-	int32_t *fs_accum;	   /* [32] accumulators */
+	int32_t *fs_accum;	   /* running sums, [MAX_INFLIGHT][32] */
 	float	 fs_lut_scale; /* LUT dequantization scale */
 	float	 fs_lut_bias;  /* LUT dequantization bias */
 	bool	 fs_lut_valid; /* LUT built for current cluster */
 	int		 fs_lut_bits;  /* 8 or 16 */
-	/* Dispatch results cached at enable_fastscan: the resolved hacc
-	 * kernel, the AVX-512 capability, and the per-page group capacities
-	 * (first vs overflow page). Avoids an atomic load + double
-	 * indirection per 32-vector group and an integer division per page. */
+	/* Cached at enable_fastscan: the resolved hacc kernel and the AVX-512
+	 * capability, which avoid an atomic load + double indirection per
+	 * 32-vector group, and the page bounds a fastscan page is checked
+	 * against (first vs overflow page). */
 	VsFastscanAccumulateHaccFn fs_accum_hacc;
 	bool					   fs_has_avx512;
-	uint32_t				   fs_max_groups_first;
-	uint32_t				   fs_max_groups_over;
+	uint32_t				   fs_cap_first;
+	uint32_t				   fs_cap_over;
+	uint32_t				   fs_space_first;
+	uint32_t				   fs_space_over;
+	/* Position in the current list's code stream: bytes consumed, and the
+	 * next group to score. Groups in between hold running sums in
+	 * fs_accum, indexed by group % PRISM_FASTSCAN_MAX_INFLIGHT. */
+	uint32_t fs_stream_pos;
+	uint32_t fs_next_group;
 
 	/* Stats */
 	uint32_t pages_read;	/* posting pages fetched (incl. skipped) */

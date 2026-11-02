@@ -50,7 +50,7 @@ stage_page(PrismPostingChainPos *pos, void *state)
 	const PrismPostingPageOpaque *op  = prism_posting_opaque(pos->page);
 	char *content = prism_posting_page_content(pos->page, ctx->dim);
 
-	prism_posting_check_count(pos->blkno, op, ctx->dim);
+	prism_posting_check_count(pos->blkno, pos->page, ctx->dim);
 
 	for (uint32_t i = 0; i < op->entry_count; i++)
 	{

@@ -99,7 +99,8 @@ prism_posting_scan_enable_fastscan(PrismPostingScan *scan, int lut_bits)
 		scan->fs_lut = vs_alloc0(VS_FASTSCAN_LUT_BYTES(scan->dim));
 	else
 		scan->fs_lut = vs_alloc0(VS_FASTSCAN_LUT_HACC_BYTES(scan->dim));
-	scan->fs_accum = vs_alloc(VS_FASTSCAN_GROUP * sizeof(int32_t));
+	scan->fs_accum = vs_alloc(
+			PRISM_FASTSCAN_MAX_INFLIGHT * VS_FASTSCAN_GROUP * sizeof(int32_t));
 
 	/* Resolve dispatch once per scan (see posting_scan.h). */
 	scan->fs_accum_hacc = vs_fastscan_get_accumulate_hacc();
@@ -108,11 +109,46 @@ prism_posting_scan_enable_fastscan(PrismPostingScan *scan, int lut_bits)
 #else
 	scan->fs_has_avx512 = false;
 #endif
-	scan->fs_max_groups_first = prism_fastscan_max_groups(scan->dim, true);
-	scan->fs_max_groups_over  = prism_fastscan_max_groups(scan->dim, false);
+	scan->fs_cap_first	 = prism_fastscan_max_entries_first(scan->dim);
+	scan->fs_cap_over	 = prism_fastscan_max_entries(scan->dim);
+	scan->fs_space_first = prism_fastscan_page_space(scan->dim, true);
+	scan->fs_space_over	 = prism_fastscan_page_space(scan->dim, false);
 }
 
 static bool advance_page(PrismPostingScan *scan);
+
+/*
+ * The checks prism_posting_check_count makes on a fastscan page, against
+ * bounds cached at enable_fastscan: this runs on every page a scan reads.
+ * The page's place in the stream is checked as it is scanned.
+ */
+static void
+fastscan_check_page(
+		const PrismPostingScan *scan, const PrismPostingPageOpaque *opaque)
+{
+	if (scan->fs_lut == NULL)
+	{
+		prism_posting_check_count(scan->cur_blkno, scan->cur_page, scan->dim);
+		return;
+	}
+
+	bool	 first	= (opaque->flags & PRISM_POSTING_PAGE_FIRST) != 0;
+	uint32_t cap	= first ? scan->fs_cap_first : scan->fs_cap_over;
+	uint32_t space	= first ? scan->fs_space_first : scan->fs_space_over;
+	uint32_t groups = prism_fastscan_page_groups(opaque);
+
+	if (opaque->entry_count > cap ||
+		groups * PRISM_FASTSCAN_META_BYTES + opaque->code_bytes > space ||
+		opaque->code_bytes % VS_FASTSCAN_GROUP_BYTES(8) != 0)
+		vs_error(
+				VS_EXTENSION_NAME
+				": fastscan posting page %u does not fit its page (%u "
+				"entries, %u code bytes); the index may be corrupted -- "
+				"REINDEX it",
+				scan->cur_blkno,
+				(unsigned)opaque->entry_count,
+				(unsigned)opaque->code_bytes);
+}
 
 /* ----------------------------------------------------------------
  * Per-cluster begin / end
@@ -131,6 +167,8 @@ prism_posting_scan_begin_cluster(
 	scan->cur_max_entries = 0;
 	scan->cur_count		  = 0;
 	scan->fs_lut_valid	  = false;
+	scan->fs_stream_pos	  = 0;
+	scan->fs_next_group	  = 0;
 	scan->pages_read	  = 0;
 	scan->pages_skipped	  = 0;
 	scan->entries_scanned = 0;
@@ -258,24 +296,18 @@ advance_page(PrismPostingScan *scan)
 	/* Reject an entry_count past what a valid page of this format can
 	 * hold. AoS pages drive the page_distances/page_scratch batch (sized
 	 * to max_entries_cap), so an over-count there is an out-of-bounds
-	 * write; fastscan pages are scored per 32-vector group and hold more
-	 * entries per page, so bound them by the fastscan capacity instead of
-	 * the smaller AoS one. */
-	uint32_t page_cap;
+	 * write. Fastscan pages are scored per 32-vector group, and their
+	 * metadata blocks and code run must fit the page. */
 	if (opaque->flags & PRISM_POSTING_PAGE_FASTSCAN)
-		page_cap = (opaque->flags & PRISM_POSTING_PAGE_FIRST)
-						 ? prism_fastscan_max_entries_first(scan->dim)
-						 : prism_fastscan_max_entries(scan->dim);
-	else
-		page_cap = scan->max_entries_cap;
-	if (opaque->entry_count > page_cap)
+		fastscan_check_page(scan, opaque);
+	else if (opaque->entry_count > scan->max_entries_cap)
 		vs_error(
 				VS_EXTENSION_NAME
 				": posting page %u has an invalid entry count (%u > %u); "
 				"the index may be corrupted -- REINDEX it",
 				scan->cur_blkno,
 				(unsigned)opaque->entry_count,
-				page_cap);
+				scan->max_entries_cap);
 	scan->cur_count = opaque->entry_count;
 	scan->pages_read++;
 	return true;
@@ -477,6 +509,7 @@ VS_TARGET_AVX512 static void
 fastscan_prune_group_avx512(
 		PrismPostingScan *scan,
 		VsTopK			 *topk,
+		const int32_t	 *accum,
 		ItemPointerData	 *tids,
 		const float		 *f_add,
 		const float		 *f_rescale,
@@ -500,7 +533,7 @@ fastscan_prune_group_avx512(
 		uint32_t  off  = h * 16;
 		__mmask16 live = (__mmask16)((live_mask >> off) & 0xFFFFu);
 		__mmask16 surv = fastscan_prune_16(
-				scan->fs_accum + off,
+				accum + off,
 				f_add + off,
 				f_rescale + off,
 				f_error + off,
@@ -543,161 +576,335 @@ fastscan_prune_group_avx512(
 /* ----------------------------------------------------------------
  * Fastscan variant: VPSHUFB kernel for fastscan-format pages
  *
- * Processes 32-vector groups via table-lookup accumulation.
- * Falls back to the AoS kernel for non-fastscan pages (mixed
- * chains).
+ * Walks the list's code stream page by page (see the fastscan page format
+ * in posting_page.h). A group's running sums carry across pages until its
+ * last code byte and its metadata block have both been read, then the
+ * group is scored. Falls back to the AoS kernel for non-fastscan pages
+ * (mixed chains).
  * ---------------------------------------------------------------- */
+
+static void
+fastscan_corrupt(const PrismPostingScan *scan, const char *what)
+{
+	vs_error(
+			VS_EXTENSION_NAME
+			": fastscan posting page %u breaks its list's code stream (%s); "
+			"the index may be corrupted -- REINDEX it",
+			scan->cur_blkno,
+			what);
+}
+
+static inline int32_t *
+fastscan_group_accum(const PrismPostingScan *scan, uint32_t group)
+{
+	return scan->fs_accum +
+		   (size_t)(group % PRISM_FASTSCAN_MAX_INFLIGHT) * VS_FASTSCAN_GROUP;
+}
+
+/* Build the query LUT once per cluster, on its first fastscan page. */
+static void
+fastscan_ensure_lut(PrismPostingScan *scan)
+{
+	if (scan->fs_lut_valid)
+		return;
+	if (scan->fs_lut_bits == 8)
+		vs_fastscan_build_lut(
+				scan->qstate->transformed,
+				scan->dim,
+				scan->fs_lut,
+				&scan->fs_lut_scale,
+				&scan->fs_lut_bias);
+	else
+		vs_fastscan_build_lut_hacc(
+				scan->qstate->transformed,
+				scan->dim,
+				scan->fs_lut,
+				&scan->fs_lut_scale,
+				&scan->fs_lut_bias);
+	scan->fs_lut_valid = true;
+}
+
+/*
+ * Add one run of a group's codes into its running sums. A group's first
+ * run starts them: when it fits one kernel call, the kernel writes the sums
+ * directly, which is the whole job for a group that sits on one page.
+ */
+__attribute__((always_inline)) static inline void
+fastscan_accumulate_run(
+		PrismPostingScan *scan,
+		const uint8_t	 *codes,
+		uint32_t		  offset,
+		uint32_t		  len,
+		int32_t			 *accum)
+{
+	uint32_t col_bytes = VS_FASTSCAN_GROUP_BYTES(8);
+	uint32_t col	   = offset / col_bytes;
+	uint32_t ncols	   = len / col_bytes;
+
+	if (offset == 0 && ncols <= VS_FASTSCAN_MAX_KERNEL_COLS)
+	{
+		Dimension run_dim = (Dimension)(ncols * 8);
+
+		if (scan->fs_lut_bits == 8)
+		{
+			uint16_t acc16[VS_FASTSCAN_GROUP];
+			vs_fastscan_accumulate(codes, scan->fs_lut, acc16, run_dim);
+			for (uint32_t v = 0; v < VS_FASTSCAN_GROUP; v++)
+				accum[v] = acc16[v];
+		}
+		else
+			scan->fs_accum_hacc(codes, scan->fs_lut, accum, run_dim);
+		return;
+	}
+
+	if (offset == 0)
+		memset(accum, 0, VS_FASTSCAN_GROUP * sizeof(int32_t));
+	if (scan->fs_lut_bits == 8)
+		vs_fastscan_accumulate_range(codes, scan->fs_lut, col, ncols, accum);
+	else
+		vs_fastscan_accumulate_hacc_range(
+				scan->fs_accum_hacc, codes, scan->fs_lut, col, ncols, accum);
+}
+
+/* What scoring the groups of one fastscan page needs, gathered once. */
+typedef struct FastscanPageCtx
+{
+	VsTopK	*topk;
+	char	*content;
+	uint32_t first_group; /* list-wide index of the page's first block */
+	uint32_t meta_end;	  /* one past its last */
+	uint32_t count;		  /* vectors in the page's blocks */
+	uint32_t next_group;  /* next group to score */
+	float	 lut_scale;
+	float	 lut_bias;
+	float	 g_add;
+	float	 sum_t;
+	float	 inv_sqrt_d;
+	float	 g_error;
+	Distance threshold;
+} FastscanPageCtx;
+
+/* Prune the next group, whose running sums are complete, and insert
+ * survivors. */
+__attribute__((always_inline)) static inline void
+fastscan_score_group(PrismPostingScan *scan, FastscanPageCtx *ctx)
+{
+	Dimension dim	  = scan->dim;
+	uint32_t  g		  = ctx->next_group - ctx->first_group;
+	uint32_t  g_count = ctx->count - g * VS_FASTSCAN_GROUP;
+	if (g_count > VS_FASTSCAN_GROUP)
+		g_count = VS_FASTSCAN_GROUP;
+
+	const int32_t	*accum = fastscan_group_accum(scan, ctx->next_group);
+	ItemPointerData *tids  = prism_fastscan_group_tids(ctx->content, g, dim);
+	float			*f_add = prism_fastscan_group_f_add(ctx->content, g, dim);
+	float	*f_rescale = prism_fastscan_group_f_rescale(ctx->content, g, dim);
+	float	*f_error   = prism_fastscan_group_f_error(ctx->content, g, dim);
+	uint32_t tombstone_mask =
+			*prism_fastscan_group_tombstone_mask(ctx->content, g, dim);
+
+	/* Vectorized distance + prune: compute 16 distances at a
+	 * time, mask survivors, iterate only the few that pass. */
+	scan->entries_scanned += g_count;
+
+#ifdef VS_SIMD_FULL
+#if defined(__x86_64__) || defined(_M_X64)
+	if (vs_likely(g_count == VS_FASTSCAN_GROUP) && scan->fs_has_avx512)
+	{
+		fastscan_prune_group_avx512(
+				scan,
+				ctx->topk,
+				accum,
+				tids,
+				f_add,
+				f_rescale,
+				f_error,
+				ctx->lut_scale,
+				ctx->lut_bias,
+				ctx->sum_t,
+				ctx->inv_sqrt_d,
+				ctx->g_add,
+				ctx->g_error,
+				tombstone_mask,
+				&ctx->threshold);
+		return;
+	}
+#endif
+#endif
+
+	/* Scalar fallback for partial groups (and non-AVX512 CPUs,
+	 * NEON included): no masked-compare primitive to fold the
+	 * exclusion into, so a dead lane is skipped explicitly, the
+	 * same as a DELETED AoS entry. */
+	Distance threshold = ctx->threshold;
+	for (uint32_t v = 0; v < g_count; v++)
+	{
+		if (prism_fastscan_lane_is_tombstoned(tombstone_mask, v))
+		{
+			scan->entries_pruned++;
+			continue;
+		}
+
+		float	 binary_ip = (float)accum[v] * ctx->lut_scale + ctx->lut_bias;
+		float	 final_dot = (2.0f * binary_ip - ctx->sum_t) * ctx->inv_sqrt_d;
+		Distance est = f_add[v] + ctx->g_add - 2.0f * f_rescale[v] * final_dot;
+		Distance err = f_error[v] * ctx->g_error;
+		Distance lb	 = est - err;
+
+		if (lb >= threshold)
+		{
+			scan->entries_pruned++;
+			continue;
+		}
+
+		uint64_t id = prism_posting_encode_tid(&tids[v]);
+		vs_topk_insert(ctx->topk, est, err, id);
+		threshold = vs_topk_threshold(ctx->topk);
+	}
+	ctx->threshold = threshold;
+}
+
+/*
+ * Score the groups whose metadata is on this page and whose codes are
+ * complete, up to (not including) list-wide group `done`.
+ */
+__attribute__((always_inline)) static inline void
+fastscan_score_ready(
+		PrismPostingScan *scan, FastscanPageCtx *ctx, uint32_t done)
+{
+	while (ctx->next_group < done && ctx->next_group < ctx->meta_end)
+	{
+		fastscan_score_group(scan, ctx);
+		ctx->next_group++;
+	}
+}
 
 static void
 scan_fastscan_page(PrismPostingScan *scan, VsTopK *topk)
 {
-	Dimension dim	  = scan->dim;
-	uint32_t  count	  = scan->cur_count;
-	char	 *content = scan->cur_content;
+	char				   *content	 = scan->cur_content;
+	PrismPostingPageOpaque *opaque	 = prism_posting_opaque(scan->cur_page);
+	uint32_t				code_len = VS_FASTSCAN_GROUP_BYTES(scan->dim);
+	uint32_t				ngroups	 = prism_fastscan_page_groups(opaque);
 
-	PrismPostingPageOpaque *opaque = prism_posting_opaque(scan->cur_page);
+	/* The page continues the stream where the previous one stopped. */
+	uint32_t	   start	   = scan->fs_stream_pos;
+	uint32_t	   end		   = start + opaque->code_bytes;
+	uint32_t	   first_group = scan->fs_next_group;
+	uint32_t	   meta_end	   = first_group + ngroups;
+	uint32_t	   pos		   = start;
+	const uint8_t *codes	   = prism_fastscan_page_codes(content, ngroups);
 
-	/* Fall back to AoS kernel for non-fastscan pages */
-	if (!(opaque->flags & PRISM_POSTING_PAGE_FASTSCAN))
-		return; /* caller handles AoS via the standard path */
-
-	/* Build LUT from transformed query (once per cluster) */
-	if (!scan->fs_lut_valid)
+	/*
+	 * A page with only dead entries is skipped when everything on it belongs
+	 * to its own groups: its codes end on a group boundary and every group
+	 * they touch has its metadata here. Otherwise a live group's codes or
+	 * running sums pass through the page and it must be read.
+	 */
+	if (prism_posting_page_all_dead(opaque) && end % code_len == 0 &&
+		meta_end == end / code_len)
 	{
-		if (scan->fs_lut_bits == 8)
-			vs_fastscan_build_lut(
-					scan->qstate->transformed,
-					dim,
-					scan->fs_lut,
-					&scan->fs_lut_scale,
-					&scan->fs_lut_bias);
-		else
-			vs_fastscan_build_lut_hacc(
-					scan->qstate->transformed,
-					dim,
-					scan->fs_lut,
-					&scan->fs_lut_scale,
-					&scan->fs_lut_bias);
-		scan->fs_lut_valid = true;
+		scan->fs_stream_pos = end;
+		scan->fs_next_group = meta_end;
+		scan->pages_skipped++;
+		return;
 	}
-	float lut_scale = scan->fs_lut_scale;
-	float lut_bias	= scan->fs_lut_bias;
 
-	float	 g_add		= scan->qstate->g_add;
-	float	 sum_t		= scan->qstate->sum_transformed;
-	float	 inv_sqrt_d = scan->qstate->inv_sqrt_d;
-	float	 g_error	= scan->qstate->g_error;
-	uint32_t max_groups = (opaque->flags & PRISM_POSTING_PAGE_FIRST)
-								? scan->fs_max_groups_first
-								: scan->fs_max_groups_over;
-	uint32_t ngroups	= (count + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
-	if (ngroups > max_groups)
-		ngroups = max_groups;
+	fastscan_ensure_lut(scan);
 
-	Distance threshold = vs_topk_threshold(topk);
+	FastscanPageCtx ctx = {
+			.topk		 = topk,
+			.content	 = content,
+			.first_group = first_group,
+			.meta_end	 = meta_end,
+			.count		 = scan->cur_count,
+			.next_group	 = scan->fs_next_group,
+			.lut_scale	 = scan->fs_lut_scale,
+			.lut_bias	 = scan->fs_lut_bias,
+			.g_add		 = scan->qstate->g_add,
+			.sum_t		 = scan->qstate->sum_transformed,
+			.inv_sqrt_d	 = scan->qstate->inv_sqrt_d,
+			.g_error	 = scan->qstate->g_error,
+			.threshold	 = vs_topk_threshold(topk),
+	};
 
-	for (uint32_t g = 0; g < ngroups; g++)
+	/* The group the page's codes start in, and how far into it. */
+	uint32_t g	 = pos / code_len;
+	uint32_t off = pos % code_len;
+
+	/* Groups whose codes ended on an earlier page. */
+	fastscan_score_ready(scan, &ctx, g);
+
+	while (pos < end)
 	{
-		uint32_t g_start = g * VS_FASTSCAN_GROUP;
-		uint32_t g_count = count - g_start;
-		if (g_count > VS_FASTSCAN_GROUP)
-			g_count = VS_FASTSCAN_GROUP;
+		const uint8_t *run_codes = codes + (pos - start);
 
-		/* Access group data — compute base once */
-		char *gbase = prism_fastscan_group_base(content, g, dim);
-
-		ItemPointerData *tids	   = (ItemPointerData *)gbase;
-		float			*f_add	   = (float *)(gbase +
-								   VS_FASTSCAN_GROUP * sizeof(ItemPointerData));
-		float			*f_rescale = f_add + VS_FASTSCAN_GROUP;
-		float			*f_error   = f_rescale + VS_FASTSCAN_GROUP;
-		uint8_t			*codes	   = (uint8_t *)(f_error + VS_FASTSCAN_GROUP);
-		uint32_t		 tombstone_mask = *(uint32_t *)(codes +
-												VS_FASTSCAN_GROUP_BYTES(dim));
-
-		/* Run VPSHUFB accumulate kernel */
-		if (scan->fs_lut_bits == 8)
+		/*
+		 * The common case: a whole group on this page with its metadata
+		 * here and nothing waiting before it, scored straight away.
+		 */
+		if (off == 0 && end - pos >= code_len && ctx.next_group == g &&
+			g < meta_end)
 		{
-			uint16_t acc16[VS_FASTSCAN_GROUP];
-			vs_fastscan_accumulate(codes, scan->fs_lut, acc16, dim);
-			for (uint32_t v2 = 0; v2 < VS_FASTSCAN_GROUP; v2++)
-				scan->fs_accum[v2] = acc16[v2];
-		}
-		else
-		{
-			scan->fs_accum_hacc(codes, scan->fs_lut, scan->fs_accum, dim);
-		}
-
-		/* Prefetch next group's codes during prune phase */
-		if (g + 1 < ngroups)
-		{
-			uint8_t *next_codes =
-					prism_fastscan_group_codes(content, g + 1, dim);
-			uint32_t code_bytes = VS_FASTSCAN_GROUP_BYTES(dim);
-			for (uint32_t p = 0; p < code_bytes; p += 64)
-				__builtin_prefetch(next_codes + p, 0, 1);
-		}
-
-		/* Vectorized distance + prune: compute 16 distances at a
-		 * time, mask survivors, iterate only the few that pass. */
-		scan->entries_scanned += g_count;
-
-#ifdef VS_SIMD_FULL
-#if defined(__x86_64__) || defined(_M_X64)
-		if (vs_likely(g_count == VS_FASTSCAN_GROUP) && scan->fs_has_avx512)
-		{
-			fastscan_prune_group_avx512(
+			fastscan_accumulate_run(
 					scan,
-					topk,
-					tids,
-					f_add,
-					f_rescale,
-					f_error,
-					lut_scale,
-					lut_bias,
-					sum_t,
-					inv_sqrt_d,
-					g_add,
-					g_error,
-					tombstone_mask,
-					&threshold);
+					run_codes,
+					0,
+					code_len,
+					fastscan_group_accum(scan, g));
+			pos += code_len;
+
+			/* Fetch the next group's codes while this one is pruned. */
+			uint32_t ahead = end - pos < code_len ? end - pos : code_len;
+			for (uint32_t p = 0; p < ahead; p += PRISM_FASTSCAN_CHUNK_BYTES)
+				__builtin_prefetch(run_codes + code_len + p, 0, 1);
+			fastscan_score_group(scan, &ctx);
+			ctx.next_group++;
+			g++;
+			continue;
 		}
+
+		uint32_t run = code_len - off;
+		if (run > end - pos)
+			run = end - pos;
+
+		if (g - ctx.next_group >= PRISM_FASTSCAN_MAX_INFLIGHT)
+			fastscan_corrupt(scan, "too many groups in flight");
+
+		fastscan_accumulate_run(
+				scan, run_codes, off, run, fastscan_group_accum(scan, g));
+		pos += run;
+
+		if (off + run < code_len)
+			off += run;
 		else
-#endif
-#endif
 		{
-			/* Scalar fallback for partial groups (and non-AVX512 CPUs,
-			 * NEON included): no masked-compare primitive to fold the
-			 * exclusion into, so a dead lane is skipped explicitly, the
-			 * same as a DELETED AoS entry below. */
-			for (uint32_t v = 0; v < g_count; v++)
-			{
-				if (prism_fastscan_lane_is_tombstoned(tombstone_mask, v))
-				{
-					scan->entries_pruned++;
-					continue;
-				}
-
-				float binary_ip = (float)scan->fs_accum[v] * lut_scale +
-								  lut_bias;
-				float	 final_dot = (2.0f * binary_ip - sum_t) * inv_sqrt_d;
-				Distance est	   = f_add[v] + g_add -
-							   2.0f * f_rescale[v] * final_dot;
-				Distance err = f_error[v] * g_error;
-				Distance lb	 = est - err;
-
-				if (lb >= threshold)
-				{
-					scan->entries_pruned++;
-					continue;
-				}
-
-				uint64_t id = prism_posting_encode_tid(&tids[v]);
-				vs_topk_insert(topk, est, err, id);
-				threshold = vs_topk_threshold(topk);
-			}
+			fastscan_score_ready(scan, &ctx, g + 1);
+			g++;
+			off = 0;
 		}
 	}
+
+	if (ctx.next_group != meta_end)
+		fastscan_corrupt(scan, "metadata ahead of its codes");
+	scan->fs_next_group = ctx.next_group;
+	scan->fs_stream_pos = end;
+}
+
+/* The fastscan pages of a list must leave no group half-read. */
+static void
+fastscan_check_stream_end(const PrismPostingScan *scan)
+{
+	uint32_t code_len = VS_FASTSCAN_GROUP_BYTES(scan->dim);
+
+	if (scan->fs_stream_pos != scan->fs_next_group * code_len)
+		vs_error(
+				VS_EXTENSION_NAME
+				": a fastscan posting list ends inside a group (%u code "
+				"bytes for %u groups); the index may be corrupted -- "
+				"REINDEX it",
+				scan->fs_stream_pos,
+				scan->fs_next_group);
 }
 
 void
@@ -714,23 +921,29 @@ prism_posting_scan_cluster_fastscan(PrismPostingScan *scan, VsTopK *topk)
 
 		PrismPostingPageOpaque *opaque = prism_posting_opaque(scan->cur_page);
 
-		if (prism_posting_page_all_dead(opaque))
-		{
-			/* All entries dead — skip scoring; the chain-follow advances.
-			 * A retired chain is not that: it carries TOMBSTONED too once
-			 * reclaimed, but its entries were rewritten elsewhere, and a
-			 * scan that followed a stale leaf pointer into it must still
-			 * see them. */
-			scan->pages_skipped++;
-		}
-		else if (opaque->flags & PRISM_POSTING_PAGE_FASTSCAN)
+		if (opaque->flags & PRISM_POSTING_PAGE_FASTSCAN)
 			scan_fastscan_page(scan, topk);
 		else
-			prism_posting_scan_cluster(scan, topk);
+		{
+			/* Inserted AoS pages follow the fastscan ones; the AoS scan
+			 * consumes the rest of the chain. */
+			fastscan_check_stream_end(scan);
+			if (prism_posting_page_all_dead(opaque))
+			{
+				/* All entries dead -- skip scoring; the chain-follow
+				 * advances. A retired chain is not that: it carries
+				 * TOMBSTONED too once reclaimed, but its entries were
+				 * rewritten elsewhere, and a scan that followed a stale
+				 * leaf pointer into it must still see them. */
+				scan->pages_skipped++;
+			}
+			else
+				prism_posting_scan_cluster(scan, topk);
+		}
 
 		/* If AoS fallback consumed the entire chain, we're done */
 		if (scan->cur_page == NULL && scan->cur_blkno == InvalidBlockNumber)
-			break;
+			return;
 
 		/* Follow chain: read next_blkno, then release current */
 		if (scan->cur_page != NULL)
@@ -745,4 +958,5 @@ prism_posting_scan_cluster_fastscan(PrismPostingScan *scan, VsTopK *topk)
 			scan->cur_content = NULL;
 		}
 	}
+	fastscan_check_stream_end(scan);
 }

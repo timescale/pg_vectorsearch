@@ -647,7 +647,7 @@ TEST(chain_walk_rejects_corrupt_entry_count)
 	{
 		if (!vs_test_expect_abort())
 			_exit(2);
-		prism_posting_check_count(head, op, dim);
+		prism_posting_check_count(head, p, dim);
 		_exit(0); /* reached only if the check failed to fire */
 	}
 
@@ -664,19 +664,24 @@ TEST(chain_walk_rejects_corrupt_entry_count)
 }
 
 /*
- * Neither format's ceiling bounds the other: fastscan packs more at dim 256
- * and fewer at dim 768. So a single AoS-derived bound is too strict at one
- * dimension and too lax at the other, which is why the count check has to
- * pick the ceiling per format.
+ * The fastscan ceiling allows for metadata blocks deferred from the previous
+ * page, so it sits above the AoS one. An AoS-derived bound would reject a
+ * valid fastscan page, which is why the count check picks the ceiling per
+ * format, and why buffers sized for any page take the larger.
  */
-TEST(neither_format_cap_bounds_the_other)
+TEST(page_caps_differ_by_format)
 {
-	ASSERT_TRUE(
-			prism_fastscan_max_entries(256) > prism_posting_max_entries(256),
-			"fastscan holds more than AoS at dim 256");
-	ASSERT_TRUE(
-			prism_posting_max_entries(768) > prism_fastscan_max_entries(768),
-			"AoS holds more than fastscan at dim 768");
+	for (Dimension dim = 4; dim <= PRISM_INDEX_MAX_DIM; dim += 4)
+	{
+		uint32_t aos = prism_posting_max_entries(dim);
+		uint32_t fs	 = prism_fastscan_max_entries(dim);
+
+		ASSERT_TRUE(fs > aos, "fastscan ceiling exceeds AoS");
+		ASSERT_EQ(
+				fs,
+				prism_posting_max_entries_any_format(dim),
+				"buffers for any page take the larger ceiling");
+	}
 }
 
 /*
@@ -761,5 +766,206 @@ TEST(chain_walk_stops_leaving_posting_pages)
 	vs_free(st.pages);
 	vs_free(vecs);
 	vs_free(centroid);
+	vs_rabitq_destroy(params);
+}
+
+/* ----------------------------------------------------------------
+ * Fastscan code stream
+ * ---------------------------------------------------------------- */
+
+/*
+ * Scan a cluster with k = n and return each TID's estimated distance.
+ * lut_bits is the fastscan table width, or 0 for an AoS scan.
+ */
+static void
+scan_estimates(
+		TestPageStorage *st,
+		RaBitQParams	*params,
+		Dimension		 dim,
+		const float		*centroid,
+		BlockNumber		 head,
+		uint32_t		 n,
+		int				 lut_bits,
+		float			*est_by_vid)
+{
+	RaBitQQueryState qstate;
+	setup_query_state(&qstate, params, centroid, dim);
+
+	PrismPostingScan scan;
+	prism_posting_scan_init(
+			&scan,
+			&st->base,
+			NULL,
+			params,
+			dim,
+			prism_posting_max_entries(dim));
+	if (lut_bits != 0)
+		prism_posting_scan_enable_fastscan(&scan, lut_bits);
+
+	VsTopK topk;
+	vs_topk_init(&topk, n);
+	prism_posting_scan_begin_cluster(&scan, &qstate, head);
+	if (lut_bits != 0)
+		prism_posting_scan_cluster_fastscan(&scan, &topk);
+	else
+		prism_posting_scan_cluster(&scan, &topk);
+	prism_posting_scan_end_cluster(&scan);
+
+	VsTopKEntry *res = vs_alloc((size_t)topk.cand_count * sizeof(*res));
+	uint32_t	 nres;
+	vs_topk_extract_sorted(&topk, res, &nres);
+	for (uint32_t i = 0; i < n; i++)
+		est_by_vid[i] = NAN;
+	for (uint32_t i = 0; i < nres; i++)
+		est_by_vid[prism_posting_decode_vector_id(res[i].id)] =
+				res[i].distance;
+
+	vs_topk_cleanup(&topk);
+	prism_posting_scan_cleanup(&scan);
+}
+
+/*
+ * The fastscan pages of a list carry one code stream: each page picks up
+ * where the previous one stopped, metadata blocks come in group order, and
+ * a page ends only when the next chunk no longer fits, or when metadata
+ * waits for the next page. A scan over that
+ * stream finds every vector at the distance the AoS layout estimates, at
+ * dimensions where a group no longer fits a page as well as where it does.
+ */
+TEST(fastscan_stream_round_trip)
+{
+	const Dimension dims[]	 = {16, 96, 100, 768, 1024, 1536, 1968};
+	const uint32_t	counts[] = {1, 33, 500};
+
+	for (uint32_t di = 0; di < sizeof(dims) / sizeof(dims[0]); di++)
+	{
+		for (uint32_t ci = 0; ci < sizeof(counts) / sizeof(counts[0]); ci++)
+		{
+			Dimension		dim		 = dims[di];
+			uint32_t		n		 = counts[ci];
+			uint32_t		code_len = VS_FASTSCAN_GROUP_BYTES(dim);
+			TestPageStorage st		 = make_test_storage(2048);
+			RaBitQParams   *params	 = vs_rabitq_create(dim, 5);
+			float		   *centroid = vs_alloc0(dim * sizeof(float));
+			float		   *vecs	 = make_test_vectors(n, dim);
+
+			BlockNumber aos =
+					build_cluster(&st, params, dim, centroid, vecs, n, false);
+			BlockNumber fs =
+					build_cluster(&st, params, dim, centroid, vecs, n, true);
+
+			/* Walk the pages, carrying the stream position from page to
+			 * page as the scan does. */
+			uint32_t	pos = 0, next_group = 0, entries = 0;
+			uint32_t	prev_free = 0;
+			BlockNumber blk		  = fs;
+			while (blk != InvalidBlockNumber)
+			{
+				Page					p  = test_read_page(&st.base, blk);
+				PrismPostingPageOpaque *op = prism_posting_opaque(p);
+				bool	 first	 = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0;
+				uint32_t ngroups = prism_fastscan_page_groups(op);
+
+				prism_posting_check_count(blk, p, dim);
+				ASSERT_TRUE(
+						op->flags & PRISM_POSTING_PAGE_FASTSCAN,
+						"every page is fastscan");
+				ASSERT_TRUE(
+						next_group + ngroups <=
+								(pos + op->code_bytes) / code_len,
+						"metadata only for groups whose codes are complete");
+
+				/* A page ends with a chunk or more free only when its last
+				 * metadata block did not fit and opens this page. */
+				bool opens_deferred = ngroups > 0 &&
+									  (next_group + 1) * code_len <= pos;
+				if (blk != fs)
+					ASSERT_TRUE(
+							prev_free < PRISM_FASTSCAN_CHUNK_BYTES ||
+									opens_deferred,
+							"free space left only for deferred metadata");
+
+				uint32_t used = ngroups * PRISM_FASTSCAN_META_BYTES +
+								op->code_bytes;
+				prev_free = prism_fastscan_page_space(dim, first) - used;
+				pos += op->code_bytes;
+				next_group += ngroups;
+				entries += op->entry_count;
+				blk = op->next_blkno;
+			}
+			uint32_t ngroups = (n + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
+			ASSERT_EQ(ngroups * code_len, pos, "all codes in the stream");
+			ASSERT_EQ(ngroups, next_group, "one metadata block per group");
+			ASSERT_EQ(n, entries, "every vector counted once");
+
+			/* Same estimates as AoS, within LUT quantization. The 8-bit
+			 * table is coarse, so it only has to find every vector. */
+			float *want = vs_alloc(n * sizeof(float));
+			float *got	= vs_alloc(n * sizeof(float));
+			scan_estimates(&st, params, dim, centroid, aos, n, 0, want);
+			scan_estimates(&st, params, dim, centroid, fs, n, 16, got);
+			for (uint32_t i = 0; i < n; i++)
+			{
+				ASSERT_FALSE(isnan(got[i]), "fastscan returns every vector");
+				ASSERT_TRUE(
+						fabsf(got[i] - want[i]) <=
+								1e-3f * (fabsf(want[i]) + 1.0f),
+						"fastscan estimate matches AoS");
+			}
+			scan_estimates(&st, params, dim, centroid, fs, n, 8, got);
+			for (uint32_t i = 0; i < n; i++)
+				ASSERT_FALSE(
+						isnan(got[i]), "8-bit fastscan returns every vector");
+
+			vs_free(want);
+			vs_free(got);
+			vs_free(vecs);
+			vs_free(centroid);
+			vs_free(st.pages);
+			vs_rabitq_destroy(params);
+		}
+	}
+}
+
+/*
+ * A page whose code run is shorter than recorded breaks the stream: some
+ * group's metadata arrives before its codes are complete. The scan refuses
+ * it rather than scoring codes against the wrong group.
+ */
+TEST(fastscan_scan_rejects_broken_stream)
+{
+	Dimension		dim		 = 768;
+	uint32_t		n		 = 200;
+	TestPageStorage st		 = make_test_storage(64);
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 5);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(n, dim);
+
+	BlockNumber head =
+			build_cluster(&st, params, dim, centroid, vecs, n, true);
+	Page hp = test_read_page(&st.base, head);
+	Page p2 = test_read_page(&st.base, prism_posting_opaque(hp)->next_blkno);
+	prism_posting_opaque(p2)->code_bytes -= PRISM_FASTSCAN_CHUNK_BYTES;
+
+	fflush(NULL);
+	pid_t pid = fork();
+	ASSERT_TRUE(pid >= 0, "fork succeeded");
+	if (pid == 0)
+	{
+		if (!vs_test_expect_abort())
+			_exit(2);
+		float *est = vs_alloc(n * sizeof(float));
+		scan_estimates(&st, params, dim, centroid, head, n, 16, est);
+		_exit(0); /* reached only if the check failed to fire */
+	}
+	int status = 0;
+	waitpid(pid, &status, 0);
+	ASSERT_TRUE(
+			WIFEXITED(status) && WEXITSTATUS(status) == VS_TEST_ABORTED,
+			"a broken code stream aborts the scan");
+
+	vs_free(vecs);
+	vs_free(centroid);
+	vs_free(st.pages);
 	vs_rabitq_destroy(params);
 }

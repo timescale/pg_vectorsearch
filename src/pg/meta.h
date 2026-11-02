@@ -30,9 +30,10 @@
  * which shifted it again; v4 grew the fastscan group section by one
  * tombstone_mask word, which moves every group after the first on a page --
  * a posting page format change, not a metapage one, but this is the only
- * version gate the index has.
+ * version gate the index has. v7 lets fastscan groups continue across pages,
+ * another posting page format change.
  */
-#define PRISM_META_MAGIC ((uint32_t)0x50524906) /* "PRI\x06" */
+#define PRISM_META_MAGIC ((uint32_t)0x50524907) /* "PRI\x07" */
 
 /* Metadata flags */
 #define PRISM_META_FLAG_FASTSCAN 0x01

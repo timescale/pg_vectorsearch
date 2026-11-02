@@ -405,14 +405,13 @@ gather_cost_inputs(
 	double row_entries = (double)nprobe / (double)in->nlist * N *
 						 PRISM_ENTRY_REPLICA_FACTOR;
 	/*
-	 * Whichever layout packs more entries into a page, since this is an
-	 * upper bound and an index built in one format can hold pages of the
+	 * Whichever layout packs more entries into a full page, since this is
+	 * an upper bound and an index built in one format can hold pages of the
 	 * other. Taking the AoS figure alone under-bounds a fastscan index at
 	 * the dimensions where grouped pages hold more.
 	 */
 	double page_entries = in->probed_pages *
-						  (double)prism_posting_max_entries_any_format(
-								  in->dim);
+						  prism_posting_entries_per_page(in->dim);
 
 	in->scanned_pl_entries = Min(row_entries, page_entries);
 

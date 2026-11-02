@@ -401,14 +401,23 @@ typedef struct PrismPostingBuilder
 	/* Page format dispatch */
 	const PrismPostingPageOps *page_ops;
 
-	/* Format-specific state (only fastscan uses this) */
+	/*
+	 * Format-specific state (only fastscan uses this). Metadata blocks go
+	 * straight into mem_page; the page's run of the code stream is staged in
+	 * page_codes and placed after them when the page is flushed (see the
+	 * fastscan page format in posting_page.h).
+	 */
 	struct
 	{
 		FsGroupStage grp;
-		uint32_t	 groups_on_page;
-		uint32_t	 max_groups;
 		uint8_t		*bits_buf;
-		uint8_t		*codes_buf;
+		uint8_t		*codes_buf;	 /* one packed group */
+		uint8_t		*page_codes; /* current page's code bytes */
+		uint8_t		*deferred;	 /* metadata for the next page */
+		uint32_t	 deferred_lanes[PRISM_FASTSCAN_MAX_DEFERRED];
+		uint32_t	 ndeferred;
+		uint32_t	 page_ngroups;	  /* metadata blocks on the page */
+		uint32_t	 page_code_bytes; /* code bytes staged for the page */
 	} fs;
 } PrismPostingBuilder;
 

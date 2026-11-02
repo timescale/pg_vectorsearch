@@ -301,8 +301,17 @@ INSERT INTO dimcap
                FROM generate_series(1, 1968) j)::vec32(1968)
     FROM generate_series(1, 20) g;
 CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 4);
+-- Fastscan groups continue across pages, so the ceiling uses fastscan too,
+-- and its group codes span more than one page here.
+SELECT setting FROM prism_index_settings('dimcap_i') WHERE name = 'fastscan';
 SET enable_seqscan = off;
 SELECT id FROM dimcap ORDER BY v <-> (SELECT v FROM dimcap WHERE id = 7)
+    LIMIT 1;
+-- An insert lands on an AoS page after the fastscan ones.
+INSERT INTO dimcap
+    SELECT 21, (SELECT ('[' || string_agg((cos(j))::text, ',') || ']')
+                FROM generate_series(1, 1968) j)::vec32(1968);
+SELECT id FROM dimcap ORDER BY v <-> (SELECT v FROM dimcap WHERE id = 21)
     LIMIT 1;
 RESET enable_seqscan;
 DROP TABLE dimcap;
