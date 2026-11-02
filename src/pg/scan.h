@@ -5,7 +5,8 @@
  * scan.h - Index scan for prism
  *
  * Implements ambeginscan, amrescan, amgettuple, amendscan.
- * Reads the centroid tree via beam search and returns medoid TIDs.
+ * Routes the query through the centroid tree, scans the probed posting
+ * lists and returns heap TIDs in estimated-distance order.
  */
 
 #ifndef PRISM_SCAN_H

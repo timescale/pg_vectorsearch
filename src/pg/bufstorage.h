@@ -16,6 +16,7 @@
 
 #include <storage/bufmgr.h>
 #include <utils/rel.h>
+#include <utils/snapshot.h>
 
 #include "index/storage.h"
 
@@ -31,10 +32,11 @@ extern uint64_t vs_bufcache_stale;
 
 typedef struct VsPgStorage
 {
-	VsStorage	   base; /* must be first */
-	Relation	   index;
-	Relation	   rel; /* table relation for rerank (NULL during build) */
-	Buffer		   cur_buf;
+	VsStorage base; /* must be first */
+	Relation  index;
+	Relation  rel;		/* table relation for rerank (NULL during build) */
+	Snapshot  snapshot; /* the scan's; rerank fetches heap rows under it */
+	Buffer	  cur_buf;
 	DistanceMetric metric;	   /* distance metric for reranking */
 	bool		   build_mode; /* skip per-page WAL during build */
 	uint32_t	   read_count; /* debug: total page reads */
@@ -56,10 +58,10 @@ void vs_pg_storage_init(
 		VsPgStorage *s, Relation index, Relation rel, DistanceMetric metric);
 
 /*
- * Lazily set the heap relation after init. Updates the vtable to
- * use the read_stream-optimized rerank path when applicable.
+ * Lazily set the heap relation and the scan's snapshot after init. Updates
+ * the vtable to use the read_stream-optimized rerank path when applicable.
  */
-void vs_pg_storage_set_rel(VsPgStorage *s, Relation rel);
+void vs_pg_storage_set_rel(VsPgStorage *s, Relation rel, Snapshot snapshot);
 
 /*
  * Storage for an inspection sweep: reads go through the shared page layer,

@@ -352,12 +352,11 @@ cmp_tid_order(const void *a, const void *b, void *arg)
  * thrash — sequential block access avoids re-pinning the same
  * buffer multiple times.
  *
- * SnapshotAny: medoid vectors are structural index data that happen
- * to live in the heap. They must be readable regardless of MVCC
- * state — an MVCC snapshot could fail if the row was DELETEd but
- * not yet VACUUMed, breaking centroid reranking. If the tuple is
- * physically reclaimed by VACUUM, the index is stale and needs
- * REINDEX.
+ * Rows are fetched under the scan's snapshot, following HOT chains the way
+ * the executor's own heap fetch does. A candidate whose row is not visible
+ * keeps its estimated distance: the executor discards it anyway, and
+ * detoasting it would read TOAST chunks that an aborted insert or a
+ * vacuumed delete may already have made unreadable.
  */
 static uint32_t
 pg_rerank(
@@ -394,7 +393,9 @@ pg_rerank(
 	VsTopK topk;
 	vs_topk_init(&topk, keep);
 
-	TupleTableSlot *slot = table_slot_create(s->rel, NULL);
+	Assert(s->snapshot != NULL);
+	TupleTableSlot		*slot  = table_slot_create(s->rel, NULL);
+	IndexFetchTableData *fetch = table_index_fetch_begin(s->rel);
 
 	for (uint32_t i = 0; i < count; i++)
 	{
@@ -408,7 +409,15 @@ pg_rerank(
 		else
 		{
 			ItemPointerData tid = prism_posting_decode_tid(candidates[idx].id);
-			if (table_tuple_fetch_row_version(s->rel, &tid, SnapshotAny, slot))
+			bool			call_again = false;
+			bool			all_dead   = false;
+			if (table_index_fetch_tuple(
+						fetch,
+						&tid,
+						s->snapshot,
+						slot,
+						&call_again,
+						&all_dead))
 			{
 				bool  isnull;
 				Datum val = slot_getattr(slot, vec_attnum, &isnull);
@@ -433,6 +442,7 @@ pg_rerank(
 		vs_topk_insert_unique(&topk, d, 0.0f, (uint64_t)idx);
 	}
 
+	table_index_fetch_end(fetch);
 	ExecDropSingleTupleTableSlot(slot);
 
 	VsTopKEntry *entries = palloc(topk.cand_count * sizeof(VsTopKEntry));
@@ -560,19 +570,20 @@ pg_rerank_readstream(
 		uint32_t		idx = *(uint32_t *)per_buffer_data;
 		ItemPointerData tid = prism_posting_decode_tid(candidates[idx].id);
 
-		Page		 page = BufferGetPage(buf);
-		OffsetNumber off  = ItemPointerGetOffsetNumber(&tid);
-		ItemId		 lp	  = PageGetItemId(page, off);
+		/* The executor's heap fetch, on the buffer the stream pinned: follow
+		 * the HOT chain under the scan's snapshot, holding the page lock for
+		 * the walk only. An invisible row keeps its estimated distance (see
+		 * pg_rerank). */
+		HeapTupleData tuple;
+		bool		  all_dead;
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		bool found = heap_hot_search_buffer(
+				&tid, s->rel, buf, s->snapshot, &tuple, &all_dead, true);
+		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 
 		Distance d = candidates[idx].distance;
-		if (ItemIdIsNormal(lp))
+		if (found)
 		{
-			HeapTupleData tuple;
-			tuple.t_tableOid = RelationGetRelid(s->rel);
-			tuple.t_data	 = (HeapTupleHeader)PageGetItem(page, lp);
-			tuple.t_len		 = ItemIdGetLength(lp);
-			ItemPointerCopy(&tid, &tuple.t_self);
-
 			ExecStoreBufferHeapTuple(&tuple, slot, buf);
 
 			bool  isnull;
@@ -694,6 +705,7 @@ vs_pg_storage_init(
 		s->base.ops = &pg_storage_ops;
 	s->index	  = index;
 	s->rel		  = rel;
+	s->snapshot	  = NULL;
 	s->build_mode = false;
 	s->cur_buf	  = InvalidBuffer;
 	s->metric	  = metric;
@@ -708,9 +720,10 @@ vs_pg_storage_init(
 }
 
 void
-vs_pg_storage_set_rel(VsPgStorage *s, Relation rel)
+vs_pg_storage_set_rel(VsPgStorage *s, Relation rel, Snapshot snapshot)
 {
-	s->rel = rel;
+	s->rel		= rel;
+	s->snapshot = snapshot;
 	if (rel != NULL && RelationGetForm(rel)->relam == HEAP_TABLE_AM_OID)
 		s->base.ops = &pg_storage_readstream_ops;
 

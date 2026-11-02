@@ -492,6 +492,32 @@ CALL prism_rebalance('split_part_idx', 10);
 CALL prism_convert_posting_to_fastscan('split_part_idx', 0);
 DROP TABLE split_part;
 
+-- A split re-clusters only rows that may still be live. A wide vector lives
+-- in TOAST, and after a delete and a VACUUM of the toast table the heap tuple
+-- is still there for its posting entry to point at while its chunks are gone,
+-- so the entry has to drop out of the split rather than be detoasted.
+CREATE TABLE split_toast (id serial, v vec32(1024));
+INSERT INTO split_toast (v)
+    SELECT (SELECT array_agg(((i % 2) * 10 + sin(i * 0.1 + j * 0.7))::real)
+            FROM generate_series(0, 1023) j)::vec32(1024)
+    FROM generate_series(1, 40) i;
+CREATE INDEX split_toast_idx ON split_toast USING prism (v)
+    WITH (nlist = 1, centroid_fastscan = off);
+DELETE FROM split_toast WHERE id = 7;
+SELECT reltoastrelid::regclass AS toastrel FROM pg_class
+    WHERE oid = 'split_toast'::regclass \gset
+VACUUM :toastrel;
+CALL prism_rebalance('split_toast_idx', 10);
+SELECT setting::int > 1 AS split_into_several_lists
+    FROM prism_index_settings('split_toast_idx') WHERE name = 'nlist';
+SET prism.nprobe = 10;
+SET enable_seqscan = off;
+SELECT count(*) AS live_rows_found FROM (
+    SELECT id FROM split_toast
+    ORDER BY v <-> (SELECT v FROM split_toast WHERE id = 8) LIMIT 100) t;
+RESET enable_seqscan;
+DROP TABLE split_toast;
+
 -- Cleanup
 DROP TABLE split_test;
 DROP TABLE split_wide;

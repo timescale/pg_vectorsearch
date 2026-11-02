@@ -481,9 +481,14 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 
 typedef struct PgSplitFetchCtx
 {
-	Relation		heap;
-	AttrNumber		attnum;
-	TupleTableSlot *slot;
+	Relation			 heap;
+	AttrNumber			 attnum;
+	TupleTableSlot		*slot;
+	IndexFetchTableData *fetch;
+	/* Dirty: sees committed and in-progress rows, not aborted or deleted
+	 * ones. An entry whose row may still be live is re-clustered, a dead one
+	 * drops out of the split and is left for VACUUM. */
+	SnapshotData snapshot;
 	/* How to read the indexed column as float32 -- the index's own type, not
 	 * an assumed one. Carries the conversion buffer, so it outlives a fetch.
 	 */
@@ -502,10 +507,14 @@ pg_split_fetch_vector(
 	 * after every entry -- so the detoast below, and a TOAST reassembly if
 	 * the vector is stored out of line, need no cleanup of their own.
 	 *
-	 * SnapshotAny: the posting entry exists until VACUUM tombstones it, so we
-	 * re-cluster against whatever it still points at; a fully-pruned tuple
-	 * just drops out of the split (returns false). Same contract as rerank. */
-	if (!table_tuple_fetch_row_version(c->heap, &tid, SnapshotAny, c->slot))
+	 * Fetched the way the executor fetches an index entry, so a HOT-updated
+	 * row is found through its chain. A row the dirty snapshot rejects is
+	 * dead: detoasting it could fail on TOAST chunks already reclaimed, so
+	 * the entry drops out instead. */
+	bool call_again = false;
+	bool all_dead	= false;
+	if (!table_index_fetch_tuple(
+				c->fetch, &tid, &c->snapshot, c->slot, &call_again, &all_dead))
 		return false;
 
 	bool  isnull;
@@ -865,6 +874,8 @@ maint_begin(Relation index, MaintCtx *m)
 	m->fetch.heap	= m->heap;
 	m->fetch.attnum = index->rd_index->indkey.values[0];
 	m->fetch.slot	= table_slot_create(m->heap, NULL);
+	m->fetch.fetch	= table_index_fetch_begin(m->heap);
+	InitDirtySnapshot(m->fetch.snapshot);
 	m->fetch.access = vec32_access(
 			prism_cache_type_info(index), m->base.dim, CurrentMemoryContext);
 	m->fetch.storage = &m->storage.base;
@@ -994,6 +1005,7 @@ maint_end(Relation index, MaintCtx *m, bool changed)
 		CacheInvalidateRelcache(index);
 	}
 	MemoryContextDelete(m->split_ctx);
+	table_index_fetch_end(m->fetch.fetch);
 	ExecDropSingleTupleTableSlot(m->fetch.slot);
 	table_close(m->heap, AccessShareLock);
 	prism_release_params(m->base.dim, m->base.rabitq_seed, m->params_owner);
