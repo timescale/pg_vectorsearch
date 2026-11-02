@@ -260,6 +260,74 @@ the next group's codes may start on the page but not finish there. So a scan
 has at most three groups in flight, two waiting for their metadata and one
 adding up its codes.
 
+### Why it is laid out this way
+
+Each rule has one main reason, and in most cases a workable alternative was
+turned down. The storage layer's contract shapes several of them: a reader
+holds **one page at a time**. PostgreSQL buffer locks have no deadlock
+detection, and holding one page never deadlocks; reranking also reads heap
+pages through the same storage slot, so no index page may be held across
+it.
+
+**Codes break at 64-byte chunks.** *Reason: performance.* Every fastscan
+kernel steps through codes in 16-, 32- or 64-byte units, and the 16-bit
+lookup table comes in 128-byte blocks covering two 32-byte columns. Any
+64-byte boundary is therefore a valid place for a kernel call to start, so a
+group split across pages is scored in place by the unchanged kernels. A
+smaller unit would need tail handling in the middle of a group; a larger one
+would leave more of each page empty.
+
+**A metadata block never splits, and goes on the page where its group's
+codes end.** *Reason: reading in place within the one-page contract.*
+Pruning needs a group's complete sums and its metadata at the same moment,
+which is when the scan reads the group's last chunk. Placed there, the
+metadata is on the page the scan holds. The alternatives each cost
+something:
+
+- Metadata on the page where the codes start would already be released
+  when it is needed, so the scan would copy 580 bytes for every group that
+  crosses a page.
+- Holding two pages would change the storage contract, its lock-ordering
+  rules and the rerank path.
+- Splitting metadata like codes would need the same copy.
+
+**A block that does not fit waits for the next page, while the next group's
+codes use the space.** *Reason: space.* Without this, a page would end with
+up to 579 bytes empty whenever the codes leave less room than a metadata
+block. That gives about 432 and 500 bytes per page at 96 and 128 dimensions,
+as much as 0.1.0 wastes. **At most two blocks wait at once.** *Reason:
+bounded scan state.* The scan then carries running sums for at most three
+groups (384 bytes), and a third waiting block would only help below about 72
+dimensions.
+
+**Metadata blocks come first on a page, codes after, rather than each block
+after its own codes.** *Reasons: simplicity for metadata readers, and reading
+in place.* Deleted-vector marking, split and inspect read only metadata. With
+the blocks first, block `g` is at `content + g × 580` and their number comes
+from `entry_count`, so these readers handle any page on its own without
+knowing where groups start in the code stream. The codes stay one
+continuous run, read in place from start to end and described by a single
+length. The scan also moves forward through both regions instead of back and
+forth group by group, which may be why the packed layout scans faster even
+at dimensions where it saves no pages; that cause is not verified.
+
+**A page does not store its position in the stream.** *Reason: space, and
+nothing needs it.* Only the scan reads codes, and it always reads a list
+from its head, carrying its stream position and next group from page to
+page. The one fact it cannot carry, the length of the page's code run, fits
+in the opaque's `max_entries` field, which fastscan pages do not otherwise
+use because they take no inserts. Storing positions in a page header would
+cost 16 bytes per page (0.2%) and serve only as a cross-check. Corruption is
+still caught: metadata that arrives before its group's codes are complete,
+or a stream that ends inside a group, is reported. A reader that starts in
+the middle of a chain could not decode codes, but none exists.
+
+**Fastscan and AoS pages stay separate, and inserts append AoS pages.**
+*Reason: simplicity.* Fastscan groups are written once, when a list is
+built, converted or split. Letting inserts fill the end of the last fastscan
+page would need pages with two regions in every reader and writer, to save
+at most one page per list.
+
 ### Fastscan pages at 768 dimensions
 
 ```

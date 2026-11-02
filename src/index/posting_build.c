@@ -791,7 +791,10 @@ fs_pack_meta(const FsGroupStage *grp, uint8_t *meta)
 
 /*
  * Pack the staged group and append it to the stream: codes first, as far
- * as each page has room, then its metadata block.
+ * as each page has room, then its metadata block. The block goes where the
+ * codes end, so the scan finds it on the page it holds when the group's
+ * sums are complete; if it does not fit there, it opens the next page and
+ * the next group's codes fill the space instead of leaving it empty.
  */
 static void
 fs_write_group(PrismPostingBuilder *builder)

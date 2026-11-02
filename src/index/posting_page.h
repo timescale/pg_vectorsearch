@@ -683,26 +683,37 @@ bool prism_posting_flat_add(
  *   uint32_t tombstone_mask            4B   (bit v set => lane v is dead)
  *
  * The codes of all groups form one stream that continues across the
- * list's fastscan pages, breaking only at PRISM_FASTSCAN_CHUNK_BYTES
- * boundaries within a group. Every kernel steps in sizes that divide the
- * chunk, so a group split across pages is scored in place, a page at a
- * time. Metadata never splits. It sits on the page where its group's codes
- * end, or on the next page when it no longer fits there (at most
- * PRISM_FASTSCAN_MAX_DEFERRED blocks), so a scan has every metadata block
- * in hand once it has its codes.
+ * list's fastscan pages, so no page is left with a gap a whole group does
+ * not fit. The stream breaks only at PRISM_FASTSCAN_CHUNK_BYTES boundaries
+ * within a group: every kernel steps in sizes that divide the chunk, so a
+ * group split across pages is scored in place, a page at a time.
+ *
+ * Metadata never splits. It sits on the page where its group's codes end,
+ * because pruning needs the complete sums and the metadata together, and a
+ * reader holds one page at a time (the PostgreSQL storage keeps a single
+ * buffer): there it is read in place, where on the page the codes start it
+ * would need copying first.
+ * When it no longer fits, it waits for the next page while the next group's
+ * codes use the space. At most PRISM_FASTSCAN_MAX_DEFERRED blocks wait at
+ * once, which bounds the running sums a scan carries.
  *
  * Page content (after the encode reference on a first page):
  *   metadata[ngroups]                ngroups × 580B
  *   codes[code_bytes]                the page's run of the code stream
+ *
+ * Metadata comes first so readers that need only metadata (deleted-vector
+ * marking, split, inspect) find block g at a fixed offset on any page,
+ * without knowing where groups start in the stream. The codes stay one run,
+ * read in place from start to end.
  *
  * The opaque says how much of each there is. entry_count counts the vectors
  * whose metadata is on the page; only the list's last group can be partial,
  * so the page holds ceil(entry_count / 32) metadata blocks and every block
  * but the last is full. code_bytes is the length of the code run.
  *
- * Where a page sits in the stream is not stored. A scan reads a list from
- * its head, and the position and group it reached on one page are where
- * the next page continues.
+ * Where a page sits in the stream is not stored: only the scan reads codes,
+ * and it reads a list from its head, so the position and group it reached on
+ * one page are where the next page continues.
  *
  * tombstone_mask is the per-lane analog of an AoS entry's
  * PRISM_POSTING_FLAG_DELETED (see fastscan-design.md for why the codes
@@ -718,10 +729,18 @@ static_assert(
 		VS_FASTSCAN_GROUP == 32,
 		"tombstone_mask packs one bit per lane into a uint32_t");
 
-/* Code bytes per split unit: 16 dimensions of 32 vectors. */
+/*
+ * Code bytes per split unit: 16 dimensions of 32 vectors. The widest kernel
+ * step (AVX-512, 64 bytes) and the 16-bit lookup table's 128-byte block of
+ * two columns both line up with it, so a kernel call can start at any chunk.
+ */
 #define PRISM_FASTSCAN_CHUNK_BYTES 64u
 
-/* Metadata blocks that may wait for the next page. */
+/*
+ * Metadata blocks that may wait for the next page. Two keep the gap a block
+ * leaves filled with codes at every dimension above about 72; more would
+ * only grow the running sums a scan carries.
+ */
 #define PRISM_FASTSCAN_MAX_DEFERRED 2u
 
 /* Groups a scan can have in flight: deferred ones plus the current one. */
