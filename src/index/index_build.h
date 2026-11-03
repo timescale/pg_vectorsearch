@@ -479,11 +479,18 @@ prism_auto_fan_out(uint32_t fan_out, uint32_t nlist, uint32_t default_fan_out);
  * points pack into pages. Binds at high dimension, where a page holds few
  * entries.
  *
- * Distinct from the build's k-means training samples per list (build.c,
- * parallel_backend.c), which sizes the sample region; they share a value
- * but must stay independently tunable.
+ * Distinct from the k-means training samples per leaf below, which size
+ * the sample region. They share a value but stay independently tunable.
  */
 #define PRISM_MIN_ENTRIES_PER_LIST 256
+
+/*
+ * K-means training samples per leaf. The sample target is
+ * max(10000, nlist * this). prism.leaf_refine_threshold defaults to the
+ * same value, so a build that reached the target does not refine and one
+ * that maintenance_work_mem cut short of it does.
+ */
+#define PRISM_KMEANS_SAMPLES_PER_LEAF 256
 
 /*
  * Target vectors per posting list at a given dimension:
