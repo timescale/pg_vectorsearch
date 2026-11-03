@@ -874,7 +874,11 @@ maint_begin(Relation index, MaintCtx *m)
 	m->fetch.heap	= m->heap;
 	m->fetch.attnum = index->rd_index->indkey.values[0];
 	m->fetch.slot	= table_slot_create(m->heap, NULL);
-	m->fetch.fetch	= table_index_fetch_begin(m->heap);
+#if PG_VERSION_NUM >= 190000
+	m->fetch.fetch = table_index_fetch_begin(m->heap, SO_NONE);
+#else
+	m->fetch.fetch = table_index_fetch_begin(m->heap);
+#endif
 	InitDirtySnapshot(m->fetch.snapshot);
 	m->fetch.access = vec32_access(
 			prism_cache_type_info(index), m->base.dim, CurrentMemoryContext);

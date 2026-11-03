@@ -394,8 +394,12 @@ pg_rerank(
 	vs_topk_init(&topk, keep);
 
 	Assert(s->snapshot != NULL);
-	TupleTableSlot		*slot  = table_slot_create(s->rel, NULL);
+	TupleTableSlot *slot = table_slot_create(s->rel, NULL);
+#if PG_VERSION_NUM >= 190000
+	IndexFetchTableData *fetch = table_index_fetch_begin(s->rel, SO_NONE);
+#else
 	IndexFetchTableData *fetch = table_index_fetch_begin(s->rel);
+#endif
 
 	for (uint32_t i = 0; i < count; i++)
 	{
