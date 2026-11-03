@@ -1,0 +1,87 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: Hybrid search
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'sql/**'
+      - '*.control'
+      - 'meson.build'
+      - 'meson_options.txt'
+      - 'test/pg/compat/hybridsearch.sql'
+      - 'scripts/ci/textsearch-hybrid.sh'
+      - 'scripts/ci/build-pg-textsearch.sh'
+      - 'scripts/ci/install-pg-textsearch.sh'
+      - '.github/actions/setup-pg-textsearch/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'sql/**'
+      - '*.control'
+      - 'meson.build'
+      - 'meson_options.txt'
+      - 'test/pg/compat/hybridsearch.sql'
+      - 'scripts/ci/textsearch-hybrid.sh'
+      - 'scripts/ci/build-pg-textsearch.sh'
+      - 'scripts/ci/install-pg-textsearch.sh'
+      - '.github/actions/setup-pg-textsearch/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  hybrid-search:
+    name: pg_textsearch + pg_vectorsearch hybrid search
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build gcc libgsl-dev build-essential bc
+
+      - name: Install PostgreSQL 18
+        run: |
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-18 postgresql-server-dev-18
+          echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
+
+      - name: Setup pg_textsearch
+        id: setup-pg-textsearch
+        uses: ./.github/actions/setup-pg-textsearch
+        with:
+          ref: v1.3.0
+          pg-version: '18'
+
+      - name: Run hybrid search tests
+        env:
+          PGTEXTSEARCH_STAGE: ${{ steps.setup-pg-textsearch.outputs.stage-path }}
+        run: ./scripts/ci/textsearch-hybrid.sh
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
+        with:
+          name: test-logs-hybrid-search
+          path: |
+            builddir/meson-logs/
+            builddir/postgres-hybrid.log
+          retention-days: 7
