@@ -233,6 +233,12 @@ computation:
 ./bin/vectorsearch bench distance --json /tmp/distance.json
 ./bin/vectorsearch bench distance --json | jq .
 ./bin/vectorsearch bench distance --json --quiet
+
+# Every bench starts with an adaptive CPU spin-up: a SIMD busy loop
+# that exits once chunk throughput plateaus, so timed runs start at a
+# settled clock. --spinup caps it in ms (0 disables); the JSON root
+# records what it saw under "spinup".
+./bin/vectorsearch bench --spinup 500 distance
 ```
 
 `bench topk` times the top-K a posting scan fills per query: the

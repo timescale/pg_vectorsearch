@@ -192,13 +192,11 @@ cmd_bench_idset(CmdContext *ctx)
 		   config.replicas * 100.0,
 		   config.runs);
 
-	KvBuild *kb		 = NULL;
-	Kv		*root	 = NULL;
-	Kv		*metrics = NULL;
+	Kv *root	= NULL;
+	Kv *metrics = NULL;
 	if (ctx->json_path != NULL)
 	{
-		kb	 = kv_build_open();
-		root = kv_obj();
+		root = ctx->json_root;
 		kv_obj_put(root, "bench", kv_str("idset"));
 		kv_obj_put(root, "runs", kv_int(config.runs));
 		kv_obj_put(root, "replicas", kv_dbl(config.replicas));
@@ -262,7 +260,5 @@ cmd_bench_idset(CmdContext *ctx)
 		vs_free(ids);
 	}
 
-	int rc = cmd_kv_print(root, ctx->json_path);
-	kv_build_close(kb);
-	return rc;
+	return 0;
 }

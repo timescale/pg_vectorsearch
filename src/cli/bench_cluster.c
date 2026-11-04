@@ -703,12 +703,10 @@ cmd_bench_cluster(CmdContext *ctx)
 		   cfg.nlist,
 		   size_mb);
 
-	KvBuild *kb	  = NULL;
-	Kv		*root = NULL;
+	Kv *root = NULL;
 	if (ctx->json_path != NULL)
 	{
-		kb	 = kv_build_open();
-		root = kv_obj();
+		root = ctx->json_root;
 		kv_obj_put(root, "bench", kv_str("cluster"));
 		kv_obj_put(root, "dim", kv_int(cfg.dim));
 		kv_obj_put(root, "nvecs", kv_int(cfg.nvecs));
@@ -810,7 +808,5 @@ cmd_bench_cluster(CmdContext *ctx)
 
 	vs_free(data_f16);
 	vs_free(data);
-	int rc = cmd_kv_print(root, ctx->json_path);
-	kv_build_close(kb);
-	return rc;
+	return 0;
 }

@@ -686,8 +686,7 @@ cmd_bench_search(CmdContext *ctx)
 
 	if (ctx->json_path != NULL)
 	{
-		KvBuild *kb	  = kv_build_open();
-		Kv		*root = kv_obj();
+		Kv *root = ctx->json_root;
 		kv_obj_put(root, "bench", kv_str("search"));
 		kv_obj_put(root, "dim", kv_int(config.dim));
 		kv_obj_put(root, "nlist", kv_int(info.nlist));
@@ -704,16 +703,6 @@ cmd_bench_search(CmdContext *ctx)
 		if (gt_neighbors != NULL)
 			kv_arr_add_metric(metrics, "ratio", recall, "recall");
 		kv_obj_put(root, "metrics", metrics);
-		int rc = cmd_kv_print(root, ctx->json_path);
-		kv_build_close(kb);
-		if (rc != 0)
-		{
-			free(result_ids);
-			vs_handle_destroy(handle);
-			free(query_vecs);
-			free(gt_neighbors);
-			return 1;
-		}
 	}
 
 	/* Cleanup */

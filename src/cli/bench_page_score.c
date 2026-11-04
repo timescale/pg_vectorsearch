@@ -504,12 +504,10 @@ cmd_bench_page_score(CmdContext *ctx)
 	reinit_rabitq_with_simd(0xFFFFFFFF);
 	uint32_t cpu_caps = vs_detect_simd();
 
-	KvBuild *kb	  = NULL;
-	Kv		*root = NULL;
+	Kv *root = NULL;
 	if (ctx->json_path != NULL)
 	{
-		kb	 = kv_build_open();
-		root = kv_obj();
+		root = ctx->json_root;
 		kv_obj_put(root, "bench", kv_str("page-score"));
 		kv_obj_put(root, "dim", kv_int(config.dim));
 		kv_obj_put(root, "count", kv_int(config.count));
@@ -557,7 +555,5 @@ cmd_bench_page_score(CmdContext *ctx)
 	/* Reset SIMD to auto-detection */
 	reinit_rabitq_with_simd(0xFFFFFFFF);
 
-	int rc = cmd_kv_print(root, ctx->json_path);
-	kv_build_close(kb);
-	return rc;
+	return 0;
 }

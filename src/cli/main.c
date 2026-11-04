@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "algo/kmeans.h"
+#include "bench_spinup.h"
 #include "cmd.h"
 #include "core/memory.h"
 #include "kv.h"
@@ -94,6 +95,9 @@ print_usage(const char *prog)
 	printf("Options:\n");
 	printf("  -h, --help       Show this help message\n");
 	printf("  -v, --version    Show version information\n");
+	printf("  --spinup <ms>    CPU spin-up cap before a bench "
+		   "(default: %d, 0 = off)\n",
+		   CMD_DEFAULT_SPINUP_MS);
 	printf("  --json [path]    Write bench results as JSON "
 		   "(omit or '-' = stdout)\n");
 	printf("  --quiet          Suppress human bench output\n");
@@ -117,12 +121,30 @@ print_version(void)
 	printf("PostgreSQL index access method for ANN vector search\n");
 }
 
+/* A help request should not pay for the spin-up. */
+static bool
+args_want_help(int argc, char **argv)
+{
+	for (int i = 0; i < argc; i++)
+	{
+		if (argv[i] != NULL &&
+			(strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0))
+			return true;
+	}
+	return false;
+}
+
 /*
  * dispatch_bench_command - Dispatch to benchmark subcommand
  */
 static int
 dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 {
+	uint32_t spinup = CMD_DEFAULT_SPINUP_MS;
+
+	if (cmd_take_u32(&argc, argv, "--spinup", &spinup, 0) != 0)
+		return 1;
+
 	if (argc < 1)
 	{
 		fprintf(stderr, "Error: 'bench' requires a subcommand\n\n");
@@ -172,7 +194,37 @@ dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 		json_end_human();
 		return 1;
 	}
+	/* Skip the spin-up when the args look like a help request. This
+	 * is a guess at what the handler's own parsing will decide, but
+	 * only the spin-up rides on it; whether anything is written is
+	 * decided below by what the handler put in the tree. */
+	if (!args_want_help(argc, argv))
+		cmd_spinup(spinup, cmd_ctx.quiet);
+
+	/* The dispatcher owns the --json tree: the handler fills the
+	 * root created here, and once it has, the spin-up facts are
+	 * attached and the tree is printed. */
+	KvBuild *kb = NULL;
+	if (cmd_ctx.json_path != NULL)
+	{
+		kb				  = kv_build_open();
+		cmd_ctx.json_root = kv_obj();
+	}
 	int ret = cmd->handler(&cmd_ctx);
+
+	/* A handler that answered a help spelling the precheck missed
+	 * returns success with the tree untouched; writing it would
+	 * clobber a results file with no results. */
+	if (ret == 0 && kv_count(cmd_ctx.json_root) > 0)
+	{
+		Kv *spin = cmd_spinup_kv();
+
+		if (spin != NULL)
+			kv_obj_put(cmd_ctx.json_root, "spinup", spin);
+		ret = cmd_kv_print(cmd_ctx.json_root, cmd_ctx.json_path);
+	}
+	if (kb != NULL)
+		kv_build_close(kb);
 	json_end_human();
 	return ret;
 }
