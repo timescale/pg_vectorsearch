@@ -16,6 +16,9 @@
 #include "cmd.h"
 #include "core/memory.h"
 
+/* A timed batch should cost at least this much between clock reads. */
+#define BENCH_BATCH_TARGET_NS 1000000ull
+
 bool
 bench_impl_selected(const char *impl_name, const char *filter)
 {
@@ -190,6 +193,10 @@ bench_run(const BenchSpec *spec, BenchCase *cases, uint32_t ncases)
 	/*
 	 * Runs outer, cases inner, so the cases alternate.
 	 */
+	uint64_t window_ns		 = (uint64_t)spec->min_runtime_ms * 1000000ull;
+	uint64_t (*now_ns)(void) = spec->now_ns != NULL ? spec->now_ns
+													: bench_now_ns;
+
 	for (uint32_t run = 0; run < spec->runs; run++)
 	{
 		for (uint32_t i = 0; i < ncases; i++)
@@ -198,14 +205,39 @@ bench_run(const BenchSpec *spec, BenchCase *cases, uint32_t ncases)
 				spec->pre_pass(spec->ctx, &cases[i]) != 0)
 				goto cleanup;
 
-			uint64_t start = bench_now_ns();
-			int		 ret   = spec->pass(spec->ctx, &cases[i]);
-			uint64_t end   = bench_now_ns();
+			/*
+			 * Repeat the pass until the window has elapsed. The
+			 * batch doubles while a batch comes back under the
+			 * target, so the clock is read seldom enough that cheap
+			 * passes do not end up measuring the clock.
+			 */
+			uint64_t start	  = now_ns();
+			uint64_t deadline = start + window_ns;
+			uint64_t prev	  = start;
+			uint64_t passes	  = 0;
+			uint64_t batch	  = 1;
+			uint64_t now;
 
-			if (ret != 0)
-				goto cleanup;
+			for (;;)
+			{
+				int ret = 0;
 
-			bench_stats_add(&cases[i].stats, (double)(end - start) / 1e9);
+				for (uint64_t b = 0; ret == 0 && b < batch; b++)
+					ret = spec->pass(spec->ctx, &cases[i]);
+				if (ret != 0)
+					goto cleanup;
+				now = now_ns();
+				passes += batch;
+				if (now >= deadline)
+					break;
+				if (now - prev < BENCH_BATCH_TARGET_NS)
+					batch *= 2;
+				prev = now;
+			}
+
+			bench_stats_add(
+					&cases[i].stats,
+					(double)(now - start) / 1e9 / (double)passes);
 		}
 	}
 

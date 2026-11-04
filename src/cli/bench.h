@@ -90,8 +90,10 @@ typedef int (*BenchPrepareFn)(void *ctx, BenchCase *bench_case);
 
 /*
  * Point global state at this case, for a selection pass() cannot be
- * handed -- a SIMD dispatch override, say. Called before every pass,
- * warmup included, outside the timing window. Returns 0 on success.
+ * handed -- a SIMD dispatch override, say. Called once per warmup
+ * pass and once per timed sample, outside the timing window. The
+ * passes a sample repeats over share one call, so it must set up
+ * state that holds for the whole window. Returns 0 on success.
  */
 typedef int (*BenchPrePassFn)(void *ctx, const BenchCase *bench_case);
 
@@ -107,8 +109,20 @@ typedef void (*BenchTeardownFn)(void *ctx, BenchCase *bench_case);
 
 typedef struct
 {
-	uint32_t runs;			/* timed passes per case */
+	uint32_t runs;			/* timed samples per case */
 	uint32_t warmup_passes; /* untimed passes per case, before any timing */
+
+	/*
+	 * Minimum milliseconds one timed sample spans. The pass repeats
+	 * until this much time has elapsed and the sample averages over
+	 * the repeats, so a sample outlasts transient interference that
+	 * a single pass would soak up whole. 0 times a single pass.
+	 */
+	uint32_t min_runtime_ms;
+
+	/* Clock the timed loop reads. NULL means bench_now_ns. Tests
+	 * script it so window timing is deterministic under load. */
+	uint64_t (*now_ns)(void);
 
 	BenchPrepareFn	prepare;  /* optional */
 	BenchPrePassFn	pre_pass; /* optional */
@@ -137,8 +151,9 @@ void bench_stats_free(BenchStats *stats);
 /*
  * Prepare, warm, and time every case; then report each one.
  *
- * Each sample is passes-per-second as measured, so a benchmark whose
- * pass covers `count` items scales by count in its report callback.
+ * A sample is the seconds one pass took, averaged over a window of
+ * at least min_runtime_ms, so a benchmark whose pass covers `count`
+ * items scales by count in its report callback.
  * Returns 0, or -1 once a callback has failed and said so.
  */
 int bench_run(const BenchSpec *spec, BenchCase *cases, uint32_t ncases);

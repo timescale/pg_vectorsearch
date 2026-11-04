@@ -60,6 +60,7 @@ typedef struct
 	Dimension	dim;
 	uint32_t	count;
 	uint32_t	runs;		   /* Number of iterations to average */
+	uint32_t	min_runtime;   /* Minimum ms one timed sample spans */
 	uint32_t	metric_filter; /* Bitmask of metrics to run */
 	const char *impl_filter;   /* NULL = all, or "scalar,avx2,..." */
 	bool		help;
@@ -468,11 +469,12 @@ run_benchmark(const BenchConfig *config, DistanceMetric metric)
 		};
 
 		BenchSpec spec = {
-				.runs		   = config->runs,
-				.warmup_passes = 5,
-				.pass		   = distance_pass,
-				.report		   = distance_report,
-				.ctx		   = &ctx,
+				.runs			= config->runs,
+				.warmup_passes	= 5,
+				.min_runtime_ms = config->min_runtime,
+				.pass			= distance_pass,
+				.report			= distance_report,
+				.ctx			= &ctx,
 		};
 
 		int ret = bench_run(&spec, cases, ncases);
@@ -541,6 +543,7 @@ cmd_bench_distance(CmdContext *ctx)
 			.dim		   = DEFAULT_DIM,
 			.count		   = DEFAULT_COUNT,
 			.runs		   = 3, /* Default: 3 runs for stable averages */
+			.min_runtime   = ctx->min_runtime,
 			.metric_filter = METRIC_ALL, /* Default: run all metrics */
 			.impl_filter   = NULL,
 			.help		   = false,
@@ -628,6 +631,7 @@ cmd_bench_distance(CmdContext *ctx)
 		kv_obj_put(root, "dim", kv_int(config.dim));
 		kv_obj_put(root, "count", kv_int(config.count));
 		kv_obj_put(root, "runs", kv_int(config.runs));
+		kv_obj_put(root, "min_runtime_ms", kv_int(config.min_runtime));
 		config.metrics = kv_arr();
 		kv_obj_put(root, "metrics", config.metrics);
 	}

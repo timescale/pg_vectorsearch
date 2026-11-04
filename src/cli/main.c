@@ -98,6 +98,9 @@ print_usage(const char *prog)
 	printf("  --spinup <ms>    CPU spin-up cap before a bench "
 		   "(default: %d, 0 = off)\n",
 		   CMD_DEFAULT_SPINUP_MS);
+	printf("  --min-runtime <ms>  Minimum time one timed sample spans "
+		   "(default: %d, 0 = one pass)\n",
+		   CMD_DEFAULT_MIN_RUNTIME_MS);
 	printf("  --json [path]    Write bench results as JSON "
 		   "(omit or '-' = stdout)\n");
 	printf("  --quiet          Suppress human bench output\n");
@@ -140,9 +143,12 @@ args_want_help(int argc, char **argv)
 static int
 dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 {
-	uint32_t spinup = CMD_DEFAULT_SPINUP_MS;
+	uint32_t spinup		 = CMD_DEFAULT_SPINUP_MS;
+	uint32_t min_runtime = CMD_DEFAULT_MIN_RUNTIME_MS;
 
 	if (cmd_take_u32(&argc, argv, "--spinup", &spinup, 0) != 0)
+		return 1;
+	if (cmd_take_u32(&argc, argv, "--min-runtime", &min_runtime, 0) != 0)
 		return 1;
 
 	if (argc < 1)
@@ -184,6 +190,7 @@ dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 			.verbose	 = parent_ctx->verbose,
 			.quiet		 = parent_ctx->quiet,
 			.subcmd_name = subcmd,
+			.min_runtime = min_runtime,
 	};
 
 	if (json_take_path(&cmd_ctx.argc, cmd_ctx.argv, &cmd_ctx.json_path) != 0)
