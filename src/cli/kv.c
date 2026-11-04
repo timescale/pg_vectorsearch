@@ -363,6 +363,19 @@ kv_obj_put(Kv *obj, const char *key, Kv *v)
 	obj->obj.n++;
 }
 
+/* Children in an array or object; 0 for scalars and NULL. */
+size_t
+kv_count(const Kv *v)
+{
+	if (v == NULL)
+		return 0;
+	if (v->cls == &kv_class_arr)
+		return v->arr.n;
+	if (v->cls == &kv_class_obj)
+		return v->obj.n;
+	return 0;
+}
+
 /* Object with name, unit, and value fields. */
 Kv *
 kv_metric(const char *name, const char *unit, double value)

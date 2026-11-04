@@ -620,12 +620,10 @@ cmd_bench_distance(CmdContext *ctx)
 		return 0;
 	}
 
-	KvBuild *kb	  = NULL;
-	Kv		*root = NULL;
+	Kv *root = NULL;
 	if (ctx->json_path != NULL)
 	{
-		kb	 = kv_build_open();
-		root = kv_obj();
+		root = ctx->json_root;
 		kv_obj_put(root, "bench", kv_str("distance"));
 		kv_obj_put(root, "dim", kv_int(config.dim));
 		kv_obj_put(root, "count", kv_int(config.count));
@@ -642,7 +640,6 @@ cmd_bench_distance(CmdContext *ctx)
 		ret = run_benchmark(&config, DISTANCE_L2);
 		if (ret != 0)
 		{
-			kv_build_close(kb);
 			return ret;
 		}
 		if (config.metric_filter != METRIC_L2)
@@ -654,7 +651,6 @@ cmd_bench_distance(CmdContext *ctx)
 		ret = run_benchmark(&config, DISTANCE_INNER_PRODUCT);
 		if (ret != 0)
 		{
-			kv_build_close(kb);
 			return ret;
 		}
 		if (config.metric_filter & METRIC_COSINE)
@@ -666,12 +662,9 @@ cmd_bench_distance(CmdContext *ctx)
 		ret = run_benchmark(&config, DISTANCE_COSINE);
 		if (ret != 0)
 		{
-			kv_build_close(kb);
 			return ret;
 		}
 	}
 
-	int rc = cmd_kv_print(root, ctx->json_path);
-	kv_build_close(kb);
-	return rc;
+	return 0;
 }

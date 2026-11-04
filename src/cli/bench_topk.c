@@ -359,13 +359,11 @@ cmd_bench_topk(CmdContext *ctx)
 		   config.queries,
 		   config.runs);
 
-	KvBuild *kb		 = NULL;
-	Kv		*root	 = NULL;
-	Kv		*metrics = NULL;
+	Kv *root	= NULL;
+	Kv *metrics = NULL;
 	if (ctx->json_path != NULL)
 	{
-		kb	 = kv_build_open();
-		root = kv_obj();
+		root = ctx->json_root;
 		kv_obj_put(root, "bench", kv_str("topk"));
 		kv_obj_put(root, "candidates_per_k", kv_int(config.per_k));
 		kv_obj_put(root, "queries", kv_int(config.queries));
@@ -406,7 +404,5 @@ cmd_bench_topk(CmdContext *ctx)
 	vs_topk_cleanup(&topk);
 	vs_memctx_delete(arena);
 
-	int rc = cmd_kv_print(root, ctx->json_path);
-	kv_build_close(kb);
-	return rc;
+	return 0;
 }

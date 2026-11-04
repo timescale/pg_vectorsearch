@@ -11,6 +11,7 @@
 #define VS_CLI_KV_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct Kv	   Kv;
@@ -33,6 +34,9 @@ Kv *kv_obj(void);
 
 void kv_arr_add(Kv *arr, Kv *v);
 void kv_obj_put(Kv *obj, const char *key, Kv *v);
+
+/* Children in an array or object; 0 for scalars and NULL. */
+size_t kv_count(const Kv *v);
 
 Kv *kv_metric(const char *name, const char *unit, double value);
 

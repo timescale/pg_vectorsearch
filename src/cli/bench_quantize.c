@@ -1280,13 +1280,11 @@ cmd_bench_quantize(CmdContext *ctx)
 	size_t encoded_size = (size_t)count * VS_RABITQ_DATA_SIZE(dim);
 	size_t total_mb		= (vectors_size + encoded_size) / (1024 * 1024);
 
-	g_metrics	  = NULL;
-	KvBuild *kb	  = NULL;
-	Kv		*root = NULL;
+	g_metrics = NULL;
+	Kv *root  = NULL;
 	if (ctx->json_path != NULL)
 	{
-		kb	 = kv_build_open();
-		root = kv_obj();
+		root = ctx->json_root;
 		kv_obj_put(root, "bench", kv_str("quantize"));
 		kv_obj_put(root, "dim", kv_int(dim));
 		kv_obj_put(root, "count", kv_int(count));
@@ -1482,9 +1480,5 @@ cmd_bench_quantize(CmdContext *ctx)
 	vs_rabitq_destroy(params);
 
 	g_metrics = NULL;
-	{
-		int rc = cmd_kv_print(root, ctx->json_path);
-		kv_build_close(kb);
-		return rc;
-	}
+	return 0;
 }

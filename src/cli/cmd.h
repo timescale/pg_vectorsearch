@@ -14,9 +14,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "core/memory.h"
 #include "kv.h"
+
+#define CMD_DEFAULT_SPINUP_MS 2000
 
 /*
  * CmdContext - Shared context for all CLI commands
@@ -71,6 +75,11 @@ typedef struct CmdContext
 	/* --json [path] for bench commands; NULL if unset. "-" is stdout. */
 	const char *json_path;
 
+	/* Root of the --json result tree; NULL unless --json. The bench
+	 * dispatcher owns it: created before the handler runs, printed
+	 * once the handler has filled it and returned success. */
+	Kv *json_root;
+
 	/* Subcommand name (e.g., "distance" for "vectorsearch bench distance") */
 	const char *subcmd_name;
 } CmdContext;
@@ -112,9 +121,80 @@ cmd_kv_print(const Kv *root, const char *json_path)
 #define CMD_USAGE_EXAMPLE(ctx, subcmd, args) \
 	printf("  %s %s %s\n", (ctx)->prog_name, subcmd, args)
 
-#define CMD_USAGE_JSON()                                     \
-	printf("  --json [path]     Write JSON results to path " \
-		   "(omit or '-' = stdout)\n");                      \
+#define CMD_USAGE_JSON()                                           \
+	printf("  --spinup <ms>     CPU spin-up cap before the bench " \
+		   "(default: %d, 0 = off)\n",                             \
+		   CMD_DEFAULT_SPINUP_MS);                                 \
+	printf("  --json [path]     Write JSON results to path "       \
+		   "(omit or '-' = stdout)\n");                            \
 	printf("  --quiet           Suppress human bench output\n")
+
+/* Strip --flag N / --flag=N. argv[0] may be the flag. min is inclusive. */
+static inline int
+cmd_take_u32(
+		int *argc, char **argv, const char *flag, uint32_t *out, uint32_t min)
+{
+	int	   i;
+	size_t flen;
+
+	if (argc == NULL || argv == NULL || flag == NULL || out == NULL)
+		return 1;
+	flen = strlen(flag);
+	i	 = 0;
+	while (i < *argc)
+	{
+		const char *a		= argv[i];
+		const char *val		= NULL;
+		int			consume = 0;
+
+		if (a == NULL)
+		{
+			i++;
+			continue;
+		}
+		if (strcmp(a, flag) == 0)
+		{
+			if (i + 1 >= *argc)
+			{
+				fprintf(stderr, "Error: %s needs a value\n", flag);
+				return 1;
+			}
+			val		= argv[i + 1];
+			consume = 2;
+		}
+		else if (strncmp(a, flag, flen) == 0 && a[flen] == '=')
+		{
+			val		= a + flen + 1;
+			consume = 1;
+		}
+		if (val != NULL)
+		{
+			char		 *end;
+			unsigned long v = strtoul(val, &end, 10);
+			int			  rest;
+
+			if (end == val || *end != '\0' || v < (unsigned long)min ||
+				v > UINT32_MAX)
+			{
+				fprintf(stderr, "Error: invalid %s %s\n", flag, val);
+				return 1;
+			}
+			*out = (uint32_t)v;
+			rest = *argc - i - consume;
+			memmove(&argv[i],
+					&argv[i + consume],
+					(size_t)rest * sizeof(char *));
+			*argc -= consume;
+			/* In bounds: argv from main has argc + 1 entries and
+			 * *argc only shrinks here. The analyzer cannot see the
+			 * caller's extent through the tainted count. */
+			/* NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) */
+			argv[*argc] = NULL;
+			continue;
+		}
+		i++;
+	}
+	return 0;
+}
 
 #endif /* VS_CLI_CMD_H */

@@ -90,6 +90,22 @@ TEST(arr_add_ignored_on_obj)
 	ASSERT_EQ(0, o->obj.n, "obj unchanged");
 }
 
+TEST(count_counts_children_only)
+{
+	Kv *o = kv_obj();
+	Kv *a = kv_arr();
+
+	ASSERT_EQ(0, kv_count(NULL), "NULL");
+	ASSERT_EQ(0, kv_count(o), "empty obj");
+	ASSERT_EQ(0, kv_count(a), "empty arr");
+	ASSERT_EQ(0, kv_count(kv_int(7)), "scalar");
+	kv_obj_put(o, "k", kv_int(1));
+	kv_arr_add(a, kv_int(1));
+	kv_arr_add(a, kv_int(2));
+	ASSERT_EQ(1, kv_count(o), "obj children");
+	ASSERT_EQ(2, kv_count(a), "arr children");
+}
+
 TEST(obj_put)
 {
 	Kv *o = kv_obj();

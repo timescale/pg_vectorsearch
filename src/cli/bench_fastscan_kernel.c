@@ -474,12 +474,10 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 	printf("Fastscan kernel benchmark\n");
 	printf("=========================\n\n");
 
-	KvBuild *kb	  = NULL;
-	Kv		*root = NULL;
+	Kv *root = NULL;
 	if (ctx->json_path != NULL)
 	{
-		kb	 = kv_build_open();
-		root = kv_obj();
+		root = ctx->json_root;
 		kv_obj_put(root, "bench", kv_str("fastscan-kernel"));
 		kv_obj_put(root, "dim", kv_int(config.dim));
 		kv_obj_put(root, "count", kv_int(config.count));
@@ -549,7 +547,5 @@ cmd_bench_fastscan_kernel(CmdContext *ctx)
 	printf("\n");
 #endif
 
-	int rc = cmd_kv_print(root, ctx->json_path);
-	kv_build_close(kb);
-	return rc;
+	return 0;
 }

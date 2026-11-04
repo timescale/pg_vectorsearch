@@ -572,12 +572,10 @@ cmd_bench_rabitq_kernel(CmdContext *ctx)
 
 	vs_rabitq_init_simd();
 
-	KvBuild *kb	  = NULL;
-	Kv		*root = NULL;
+	Kv *root = NULL;
 	if (ctx->json_path != NULL)
 	{
-		kb	 = kv_build_open();
-		root = kv_obj();
+		root = ctx->json_root;
 		kv_obj_put(root, "bench", kv_str("rabitq-kernel"));
 		kv_obj_put(root, "dim", kv_int(config.dim));
 		kv_obj_put(root, "count", kv_int(config.count));
@@ -590,7 +588,5 @@ cmd_bench_rabitq_kernel(CmdContext *ctx)
 	benchmark_distance_throughput(&config);
 	benchmark_accuracy(&config);
 
-	int rc = cmd_kv_print(root, ctx->json_path);
-	kv_build_close(kb);
-	return rc;
+	return 0;
 }
