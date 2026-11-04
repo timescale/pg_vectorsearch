@@ -239,6 +239,12 @@ computation:
 # settled clock. --spinup caps it in ms (0 disables); the JSON root
 # records what it saw under "spinup".
 ./bin/vectorsearch bench --spinup 500 distance
+
+# One timed sample spans at least --min-runtime ms (default 25),
+# repeating the measured pass, so a sample outlasts a transient
+# disturbance that a single pass would soak up whole. 0 times single
+# passes.
+./bin/vectorsearch bench --min-runtime 100 distance
 ```
 
 `bench topk` times the top-K a posting scan fills per query: the

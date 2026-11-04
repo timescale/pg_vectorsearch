@@ -41,6 +41,7 @@ unit_test_sources = files(
   'test_hkmeans.c',
   'test_idset.c',
   'test_kmeans.c',
+  'test_bench.c',
   'test_kv.c',
   'test_kv_json.c',
   'test_spinup.c',

@@ -20,7 +20,8 @@
 #include "core/memory.h"
 #include "kv.h"
 
-#define CMD_DEFAULT_SPINUP_MS 2000
+#define CMD_DEFAULT_SPINUP_MS	   2000
+#define CMD_DEFAULT_MIN_RUNTIME_MS 25
 
 /*
  * CmdContext - Shared context for all CLI commands
@@ -80,6 +81,10 @@ typedef struct CmdContext
 	 * once the handler has filled it and returned success. */
 	Kv *json_root;
 
+	/* Minimum ms one timed sample spans (--min-runtime; 0 = a
+	 * single pass). Benches put it in their BenchSpec. */
+	uint32_t min_runtime;
+
 	/* Subcommand name (e.g., "distance" for "vectorsearch bench distance") */
 	const char *subcmd_name;
 } CmdContext;
@@ -125,6 +130,9 @@ cmd_kv_print(const Kv *root, const char *json_path)
 	printf("  --spinup <ms>     CPU spin-up cap before the bench " \
 		   "(default: %d, 0 = off)\n",                             \
 		   CMD_DEFAULT_SPINUP_MS);                                 \
+	printf("  --min-runtime <ms> Minimum time one timed sample "   \
+		   "spans (default: %d, 0 = one pass)\n",                  \
+		   CMD_DEFAULT_MIN_RUNTIME_MS);                            \
 	printf("  --json [path]     Write JSON results to path "       \
 		   "(omit or '-' = stdout)\n");                            \
 	printf("  --quiet           Suppress human bench output\n")

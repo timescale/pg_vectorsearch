@@ -37,6 +37,9 @@
 
 static Kv *g_metrics;
 
+/* Minimum ms one timed sample spans; set from the command context. */
+static uint32_t g_min_runtime;
+
 static void
 note_vecps(const char *name, double vps, double stddev, uint32_t runs)
 {
@@ -289,8 +292,8 @@ benchmark_encode_batch(
  * The query state and the encoded vectors are shared; a case differs
  * only in which SIMD implementation the RaBitQ kernels dispatch to.
  * That selection is a process-wide override rather than something a
- * call can carry, so it is re-applied per pass in pre_pass, outside
- * the timing window.
+ * call can carry, so pre_pass re-applies it before every timed
+ * sample, outside the timing window.
  */
 typedef struct
 {
@@ -454,14 +457,15 @@ benchmark_distance(
 		};
 
 		BenchSpec spec = {
-				.runs		   = runs,
-				.warmup_passes = runs,
-				.prepare	   = quant_dist_prepare,
-				.pre_pass	   = quant_dist_pre_pass,
-				.pass		   = quant_dist_pass,
-				.report		   = quant_dist_report,
-				.teardown	   = quant_dist_teardown,
-				.ctx		   = &ctx,
+				.runs			= runs,
+				.warmup_passes	= runs,
+				.min_runtime_ms = g_min_runtime,
+				.prepare		= quant_dist_prepare,
+				.pre_pass		= quant_dist_pre_pass,
+				.pass			= quant_dist_pass,
+				.report			= quant_dist_report,
+				.teardown		= quant_dist_teardown,
+				.ctx			= &ctx,
 		};
 
 		if (bench_run(&spec, cases, ncases) != 0)
@@ -1280,8 +1284,9 @@ cmd_bench_quantize(CmdContext *ctx)
 	size_t encoded_size = (size_t)count * VS_RABITQ_DATA_SIZE(dim);
 	size_t total_mb		= (vectors_size + encoded_size) / (1024 * 1024);
 
-	g_metrics = NULL;
-	Kv *root  = NULL;
+	g_metrics	  = NULL;
+	g_min_runtime = ctx->min_runtime;
+	Kv *root	  = NULL;
 	if (ctx->json_path != NULL)
 	{
 		root = ctx->json_root;
@@ -1289,6 +1294,7 @@ cmd_bench_quantize(CmdContext *ctx)
 		kv_obj_put(root, "dim", kv_int(dim));
 		kv_obj_put(root, "count", kv_int(count));
 		kv_obj_put(root, "runs", kv_int(config.runs));
+		kv_obj_put(root, "min_runtime_ms", kv_int(g_min_runtime));
 		g_metrics = kv_arr();
 		kv_obj_put(root, "metrics", g_metrics);
 	}
