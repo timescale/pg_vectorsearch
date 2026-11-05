@@ -169,7 +169,8 @@ double bench_rsd_percent(const BenchCase *bench_case);
 
 /*
  * Record a rate under "<prefix>/<case name>" in a --json result tree.
- * No-op when metrics is NULL. stddev is attached when runs > 1.
+ * No-op when metrics is NULL. n is always attached; stddev when
+ * runs > 1.
  */
 void bench_record_rate(
 		Kv				*metrics,

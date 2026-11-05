@@ -338,6 +338,17 @@ kv_obj_put(Kv *obj, const char *key, Kv *v)
 	if (v == NULL)
 		v = kv_null();
 
+	/* Replace an existing key: a duplicate would encode as JSON the
+	 * decoder rejects as ambiguous. */
+	for (size_t i = 0; i < obj->obj.n; i++)
+	{
+		if (strcmp(obj->obj.k[i], key) == 0)
+		{
+			obj->obj.v[i] = v;
+			return;
+		}
+	}
+
 	size_t need = obj->obj.n + 1;
 	if (need > obj->obj.cap)
 	{
@@ -374,6 +385,92 @@ kv_count(const Kv *v)
 	if (v->cls == &kv_class_obj)
 		return v->obj.n;
 	return 0;
+}
+
+bool
+kv_is_arr(const Kv *v)
+{
+	return v != NULL && v->cls == &kv_class_arr;
+}
+
+bool
+kv_is_obj(const Kv *v)
+{
+	return v != NULL && v->cls == &kv_class_obj;
+}
+
+bool
+kv_is_num(const Kv *v)
+{
+	return v != NULL && (v->cls == &kv_class_int || v->cls == &kv_class_dbl);
+}
+
+const Kv *
+kv_at(const Kv *arr, size_t i)
+{
+	if (!kv_is_arr(arr) || i >= arr->arr.n)
+		return NULL;
+	return arr->arr.v[i];
+}
+
+const Kv *
+kv_get(const Kv *obj, const char *key)
+{
+	if (!kv_is_obj(obj) || key == NULL)
+		return NULL;
+	for (size_t i = 0; i < obj->obj.n; i++)
+	{
+		if (strcmp(obj->obj.k[i], key) == 0)
+			return obj->obj.v[i];
+	}
+	return NULL;
+}
+
+double
+kv_num(const Kv *v)
+{
+	if (v == NULL)
+		return 0.0;
+	if (v->cls == &kv_class_int)
+		return (double)v->i;
+	if (v->cls == &kv_class_dbl)
+		return v->d;
+	return 0.0;
+}
+
+const char *
+kv_as_str(const Kv *v)
+{
+	if (v == NULL || v->cls != &kv_class_str)
+		return NULL;
+	return v->s;
+}
+
+void
+kv_metric_load(const Kv *m, KvMetric *out)
+{
+	memset(out, 0, sizeof(*out));
+	if (!kv_is_obj(m))
+		return;
+	for (size_t i = 0; i < m->obj.n; i++)
+	{
+		const char *k = m->obj.k[i];
+		const Kv   *v = m->obj.v[i];
+
+		if (strcmp(k, "name") == 0)
+			out->name = kv_as_str(v);
+		else if (strcmp(k, "unit") == 0)
+			out->unit = kv_as_str(v);
+		else if (strcmp(k, "value") == 0 && kv_is_num(v))
+		{
+			out->value	   = kv_num(v);
+			out->has_value = true;
+		}
+		else if (strcmp(k, "stddev") == 0 && kv_is_num(v))
+			out->stddev = kv_num(v);
+		else if (strcmp(k, "n") == 0 && kv_is_num(v))
+			out->n = kv_num(v);
+	}
 }
 
 /* Object with name, unit, and value fields. */

@@ -118,6 +118,16 @@ TEST(obj_put)
 	ASSERT_STR_EQ("v", o->obj.v[1]->s, "val1");
 }
 
+TEST(obj_put_replaces_key)
+{
+	Kv *o = kv_obj();
+	kv_obj_put(o, "k", kv_int(1));
+	kv_obj_put(o, "k", kv_int(2));
+	/* A duplicate key would encode as JSON the decoder rejects. */
+	ASSERT_EQ(1, o->obj.n, "no duplicate key");
+	ASSERT_EQ(2, o->obj.v[0]->i, "second value wins");
+}
+
 TEST(obj_put_copies_key)
 {
 	char key[] = "ab";

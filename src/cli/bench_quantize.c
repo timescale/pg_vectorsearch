@@ -44,7 +44,11 @@ static void
 note_vecps(const char *name, double vps, double stddev, uint32_t runs)
 {
 	Kv *m = kv_arr_add_metric(g_metrics, "vec/s", vps, "%s", name);
-	if (m != NULL && runs > 1)
+	if (m == NULL)
+		return;
+	/* n and stddev feed bench compare's noise gate. */
+	kv_obj_put(m, "n", kv_int(runs));
+	if (runs > 1)
 		kv_obj_put(m, "stddev", kv_dbl(stddev));
 }
 

@@ -31,6 +31,7 @@ int cmd_bench_rabitq_kernel(CmdContext *ctx);
 int cmd_bench_page_score(CmdContext *ctx);
 int cmd_bench_fastscan_kernel(CmdContext *ctx);
 int cmd_bench_topk(CmdContext *ctx);
+int cmd_bench_compare(CmdContext *ctx);
 
 #if defined(VS_HAVE_FAISS) && defined(VS_HAVE_HDF5)
 int cmd_verify_rabitq(CmdContext *ctx);
@@ -61,6 +62,7 @@ static const Command bench_commands[] = {
 		 cmd_bench_fastscan_kernel,
 		 "Benchmark fastscan VPSHUFB kernels"},
 		{"topk", cmd_bench_topk, "Benchmark top-K insert and dedup"},
+		{"compare", cmd_bench_compare, "Compare two JSON result files"},
 		{NULL, NULL, NULL},
 };
 
@@ -204,8 +206,10 @@ dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 	/* Skip the spin-up when the args look like a help request. This
 	 * is a guess at what the handler's own parsing will decide, but
 	 * only the spin-up rides on it; whether anything is written is
-	 * decided below by what the handler put in the tree. */
-	if (!args_want_help(argc, argv))
+	 * decided below by what the handler put in the tree. compare
+	 * reads result files rather than timing anything, so it never
+	 * pays for a spin-up. */
+	if (cmd->handler != cmd_bench_compare && !args_want_help(argc, argv))
 		cmd_spinup(spinup, cmd_ctx.quiet);
 
 	/* The dispatcher owns the --json tree: the handler fills the

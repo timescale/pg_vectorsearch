@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "cli/bench.h"
+#include "cli/kv_cmp.h"
 #include "core/memory.h"
 #include "vs_test.h"
 
@@ -131,4 +132,100 @@ TEST(window_spans_slow_passes)
 	 * never grows and the second pass closes the 5 ms window. */
 	ASSERT_EQ(2, h.passes, "window spanned");
 	ASSERT_TRUE(h.avg == sample_of(6000000, 2), "seconds per pass");
+}
+
+TEST(stats_use_sample_variance)
+{
+	BenchStats s;
+
+	bench_stats_init(&s, 2);
+	bench_stats_add(&s, 1.0);
+	bench_stats_add(&s, 3.0);
+	bench_stats_compute(&s);
+	/* Bessel: variance over n - 1 = 2, not over n = 1. */
+	ASSERT_EQ(2.0, s.avg, "avg");
+	ASSERT_TRUE(s.stddev * s.stddev > 1.9, "sample variance");
+	bench_stats_free(&s);
+
+	bench_stats_init(&s, 1);
+	bench_stats_add(&s, 1.0);
+	bench_stats_compute(&s);
+	ASSERT_EQ(0.0, s.stddev, "one sample has no spread");
+	bench_stats_free(&s);
+}
+
+/* A case whose stats carry the given per-pass samples. */
+static void
+case_with_samples(BenchCase *bc, const double *samples, uint32_t n)
+{
+	bench_stats_init(&bc->stats, n);
+	for (uint32_t i = 0; i < n; i++)
+		bench_stats_add(&bc->stats, samples[i]);
+	bench_stats_compute(&bc->stats);
+}
+
+TEST(record_rate_attaches_stats)
+{
+	Kv		 *metrics	 = kv_arr();
+	BenchCase bc		 = {.name = "one"};
+	double	  samples[2] = {1.0, 3.0};
+	const Kv *m;
+
+	case_with_samples(&bc, samples, 2);
+	bench_record_rate(metrics, "enc", &bc, "vec/s", 100.0, 2);
+
+	m = kv_at(metrics, 0);
+	ASSERT_STR_EQ("enc/one", kv_as_str(kv_get(m, "name")), "name");
+	ASSERT_EQ(2.0, kv_num(kv_get(m, "n")), "runs recorded");
+	/* The samples' spread scaled into the rate's own unit. */
+	ASSERT_EQ(
+			100.0 * bc.stats.stddev / bc.stats.avg,
+			kv_num(kv_get(m, "stddev")),
+			"rate-scaled stddev");
+	bench_stats_free(&bc.stats);
+}
+
+TEST(record_rate_single_run_no_stddev)
+{
+	Kv		 *metrics	 = kv_arr();
+	BenchCase bc		 = {.name = "one"};
+	double	  samples[1] = {2.0};
+	const Kv *m;
+
+	case_with_samples(&bc, samples, 1);
+	bench_record_rate(metrics, "enc", &bc, "vec/s", 100.0, 1);
+	bench_stats_free(&bc.stats);
+
+	m = kv_at(metrics, 0);
+	ASSERT_EQ(1.0, kv_num(kv_get(m, "n")), "single run recorded");
+	ASSERT_NULL(kv_get(m, "stddev"), "one run has no spread");
+}
+
+TEST(record_rate_feeds_noise_gate)
+{
+	Kv		 *metrics	 = kv_arr();
+	BenchCase bc		 = {.name = "one"};
+	double	  samples[3] = {1.0, 1.0, 2.0};
+	KvMetric  bm;
+	KvMetric  hm;
+	KvCmp	  r;
+
+	/* The same noisy samples on both sides: rsd ≈ 43%. Record two
+	 * rates with distinct prefixes, as two runs of a bench would. */
+	case_with_samples(&bc, samples, 3);
+	bench_record_rate(metrics, "base", &bc, "vec/s", 1e7, 3);
+	bench_record_rate(metrics, "head", &bc, "vec/s", 8e6, 3);
+	bench_stats_free(&bc.stats);
+
+	/* A 20% drop, inside the SE built from the recorded stats; with
+	 * n or stddev dropped from the record it would WARN instead. */
+	kv_metric_load(kv_at(metrics, 0), &bm);
+	kv_metric_load(kv_at(metrics, 1), &hm);
+	kv_cmp_values(
+			"vec/s",
+			(KvSample){bm.value, bm.stddev, bm.n},
+			(KvSample){hm.value, hm.stddev, hm.n},
+			&r);
+	ASSERT_EQ(KV_CMP_OK, r.kind, "noisy drop inside the gate");
+	ASSERT_TRUE(r.inside_noise, "noise came from the recorded stats");
 }

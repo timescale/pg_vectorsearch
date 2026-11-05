@@ -127,7 +127,11 @@ bench_stats_compute(BenchStats *stats)
 		double diff = stats->samples[i] - stats->avg;
 		var_sum += diff * diff;
 	}
-	stats->stddev = sqrt(var_sum / stats->count);
+	/* Sample variance: the runs are a sample of the distribution, so
+	 * Bessel's n - 1 keeps the estimate from understating the noise
+	 * that bench compare builds its standard error from. */
+	stats->stddev = stats->count > 1 ? sqrt(var_sum / (stats->count - 1))
+									 : 0.0;
 }
 
 void
@@ -283,7 +287,11 @@ bench_record_rate(
 	Kv *m = kv_arr_add_metric(
 			metrics, unit, rate, "%s/%s", prefix, bench_case->name);
 
-	if (m != NULL && runs > 1)
+	if (m == NULL)
+		return;
+	/* n and stddev feed bench compare's noise gate. */
+	kv_obj_put(m, "n", kv_int(runs));
+	if (runs > 1)
 	{
 		/*
 		 * The samples are seconds per pass, so scale the deviation into
