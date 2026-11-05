@@ -245,6 +245,13 @@ computation:
 # disturbance that a single pass would soak up whole. 0 times single
 # passes.
 ./bin/vectorsearch bench --min-runtime 100 distance
+
+# Diff two result files. Named metrics pair by name; unit decides
+# whether higher or lower is better. A drop inside 2·SE of the two
+# means (from stddev and n) is noise: ignored, or softened to a
+# warning when it is fail-grade. A count metric is reported without
+# gating. Exit 1 if any metric fails.
+./bin/vectorsearch bench compare base.json head.json
 ```
 
 `bench topk` times the top-K a posting scan fills per query: the

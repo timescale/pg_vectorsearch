@@ -38,11 +38,34 @@ void kv_obj_put(Kv *obj, const char *key, Kv *v);
 /* Children in an array or object; 0 for scalars and NULL. */
 size_t kv_count(const Kv *v);
 
+/* Readers for a parsed tree. All take NULL and a wrong type in
+ * stride: predicates say no, lookups return NULL, kv_num 0. */
+bool		kv_is_arr(const Kv *v);
+bool		kv_is_obj(const Kv *v);
+bool		kv_is_num(const Kv *v);
+const Kv   *kv_at(const Kv *arr, size_t i);
+const Kv   *kv_get(const Kv *obj, const char *key);
+double		kv_num(const Kv *v);
+const char *kv_as_str(const Kv *v);
+
 Kv *kv_metric(const char *name, const char *unit, double value);
 
 Kv *kv_arr_add_metric(
 		Kv *arr, const char *unit, double value, const char *name_fmt, ...)
 		__attribute__((format(printf, 4, 5)));
+
+/* One pass over a metric object. Missing keys stay 0 / NULL. */
+typedef struct KvMetric
+{
+	const char *name;
+	const char *unit;
+	double		value;
+	double		stddev;
+	double		n;
+	bool		has_value;
+} KvMetric;
+
+void kv_metric_load(const Kv *m, KvMetric *out);
 
 /* Encoders. Caller vs_free's the string. */
 char *kv_to_json(const Kv *v);
@@ -50,6 +73,10 @@ char *kv_to_text(const Kv *v);
 
 /* JSON encoder to a file. path "-" is stdout. */
 int kv_write_json(const Kv *v, const char *path);
+
+/* Decoder for kv_to_json output. NULL on malformed input. */
+Kv *kv_from_json(const char *s);
+Kv *kv_from_json_file(const char *path);
 
 /*
  * --json [path] / --json=path. argv[0] stays (getopt program name).
