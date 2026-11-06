@@ -163,10 +163,12 @@ else
     fi
 fi
 
-# Generate coverage reports
+# High-dimensional k-means tests execute inner loops billions of times.
+# Keep gcovr's counter sanity check above that range.
 gcovr --root . --object-directory "$BUILDDIR" \
     "${GCOV_TOOL[@]}" \
     "${GCOVR_EXCLUDES[@]}" \
+    --gcov-suspicious-hits-threshold 1000000000000 \
     --txt "$LOGDIR/coverage.txt" \
     --xml "$LOGDIR/coverage.xml" \
     --cobertura "$LOGDIR/coverage-cobertura.xml" \

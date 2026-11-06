@@ -60,8 +60,7 @@ prism_posting_scan_init(
 	scan->page_distances  = vs_alloc(max_entries_per_page * sizeof(Distance));
 	scan->page_scratch	  = vs_alloc(max_entries_per_page * sizeof(float));
 
-	scan->spilled = prism_posting_spilled(dim);
-	if (scan->spilled)
+	if (prism_posting_spilled(dim))
 		scan->pt_ref = vs_alloc((size_t)dim * sizeof(float));
 }
 
@@ -170,7 +169,7 @@ prism_posting_scan_begin_cluster(
 
 	/* Gather a spilled reference chain first (one page at a time, released
 	 * before the next); its entries start past the last chunk. */
-	if (scan->spilled && posting_head != InvalidBlockNumber)
+	if (scan->pt_ref != NULL && posting_head != InvalidBlockNumber)
 	{
 		entries = prism_posting_reference_read(
 				scan->storage, posting_head, scan->dim, scan->pt_ref);
@@ -188,7 +187,7 @@ prism_posting_scan_begin_cluster_at(
 		BlockNumber		  entries,
 		const float		 *ref)
 {
-	Assert(scan->spilled);
+	Assert(scan->pt_ref != NULL);
 
 	begin_cluster(
 			scan,
@@ -201,7 +200,7 @@ prism_posting_scan_begin_cluster_at(
 const float *
 prism_posting_scan_pt_centroid(const PrismPostingScan *scan)
 {
-	if (scan->spilled)
+	if (scan->pt_ref != NULL)
 		return scan->cur_ref;
 	if (scan->cur_page == NULL)
 		return NULL;

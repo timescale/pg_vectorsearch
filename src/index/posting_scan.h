@@ -60,7 +60,6 @@ typedef struct PrismPostingScan
 	 * begin_cluster_at. pt_ref is allocated once per scan, only when the
 	 * dimension spills.
 	 */
-	bool		 spilled;
 	float		*pt_ref;
 	const float *cur_ref;
 

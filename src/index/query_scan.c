@@ -380,7 +380,7 @@ scan_clusters(
 
 	if (n_results > scan_limit)
 	{
-		if (qs->pscan.spilled && qs->probe_refs_cap < n_results)
+		if (qs->pscan.pt_ref != NULL && qs->probe_refs_cap < n_results)
 		{
 			VsMemCtx caller_ctx = vs_memctx_switch(qs->memctx);
 

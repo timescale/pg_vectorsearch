@@ -611,7 +611,7 @@ TEST(scan_spilled_cluster)
 			params,
 			dim,
 			prism_posting_max_entries(dim));
-	ASSERT_TRUE(scan.spilled, "the scan knows the layout spills");
+	ASSERT_NOT_NULL(scan.pt_ref, "the scan has a spilled-reference buffer");
 
 	VsTopK topk;
 	vs_topk_init(&topk, nvecs);

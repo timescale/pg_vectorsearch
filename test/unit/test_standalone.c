@@ -612,8 +612,30 @@ TEST(wide_dim_in_ram)
 	check_wide_dim_recall(result, 0, false);
 }
 
-/* The gate: a dimension past the inline threshold that the fast rotation
- * cannot handle is refused, not built with a dense matrix. */
+TEST_PARAMETERIZED(fastscan_rejects_unsupported_dimension, "1024", "4096")
+{
+	const Dimension dims[] = {1024, 4096};
+	Dimension		dim	   = dims[iteration];
+	uint32_t		nvecs  = 50;
+	float		   *vecs   = make_vectors(nvecs, dim, 1);
+
+	PrismIndexConfig config = {
+			.nlist		   = 2,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+			.fastscan	   = 16,
+	};
+	ASSERT_NULL(
+			build_from_array(vecs, nvecs, dim, &config),
+			"serial build rejects an unsupported fastscan dimension");
+	config.nworkers = 4;
+	ASSERT_NULL(
+			build_from_array(vecs, nvecs, dim, &config),
+			"parallel build rejects an unsupported fastscan dimension");
+}
+
 /* Uncompressed centroids are whole vectors on a centroid page; where none
  * fits, the build refuses up front rather than failing mid-write. */
 TEST(wide_dim_rejects_float_centroids)

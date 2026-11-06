@@ -16,14 +16,23 @@
 #
 # pg_isolation_regress runs `setup` before every permutation and `teardown`
 # after every permutation, so each scenario starts from an identical, isolated
-# table+index — no cross-permutation state leaks.
+# table and indexes — no cross-permutation state leaks. Both indexes see the
+# same rows, with zero padding extending the second vector to 4096 dimensions.
 
 setup
 {
-    CREATE TABLE iso (id int, v vec32(3));
+    CREATE TABLE iso (
+        id int,
+        v vec32(3),
+        v_spilled vec32(4096) GENERATED ALWAYS AS (
+            (v::real[] || array_fill(0::real, ARRAY[4093]))::vec32(4096)
+        ) STORED
+    );
     INSERT INTO iso SELECT g, format('[%s,0,0]', g)::vec32
         FROM generate_series(1, 50) g;
     CREATE INDEX iso_idx ON iso USING prism (v)
+        WITH (nlist = 4, centroid_compression = true);
+    CREATE INDEX iso_spilled_idx ON iso USING prism (v_spilled)
         WITH (nlist = 4, centroid_compression = true);
 }
 teardown { DROP TABLE iso; }
@@ -50,7 +59,7 @@ step w2_commit { COMMIT; }
 # lock, so when issued against a table with an open writer they must block
 # until that writer's transaction ends.
 session maint
-step m_reindex { REINDEX INDEX iso_idx; }
+step m_reindex { REINDEX TABLE iso; }
 step m_vacfull { VACUUM FULL iso; }
 
 # The checker forces an index scan (no seqscan) and probes every list
@@ -58,19 +67,55 @@ step m_vacfull { VACUUM FULL iso; }
 # visibility, never on which lists happened to be probed. The query returns 1
 # iff the top-1 nearest neighbor of [100,0,0] is row 1001.
 session checker
-setup { SET enable_seqscan = off; SET prism.nprobe = 4; }
+setup
+{
+    SET enable_seqscan = off;
+    SET prism.nprobe = 4;
+    DO $$
+    DECLARE
+        col text;
+        dim int;
+        plan json;
+    BEGIN
+        FOREACH col IN ARRAY ARRAY['v', 'v_spilled'] LOOP
+            dim := CASE col WHEN 'v' THEN 3 ELSE 4096 END;
+            EXECUTE format(
+                'EXPLAIN (FORMAT JSON) SELECT id FROM iso '
+                'ORDER BY %I <-> %L::real[]::vec32 LIMIT 1', col,
+                (ARRAY[100::real] || array_fill(0::real, ARRAY[dim - 1]))::text
+            ) INTO plan;
+            IF plan->0->'Plan'->'Plans'->0->>'Node Type'
+                    IS DISTINCT FROM 'Index Scan' THEN
+                RAISE EXCEPTION 'expected an index scan for %', col;
+            END IF;
+        END LOOP;
+    END $$;
+}
 step c_chk
 {
-    SELECT count(*) AS found FROM (
-        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+    SELECT
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t
+         WHERE id = 1001) AS found,
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v_spilled <->
+                (ARRAY[100::real] || array_fill(0::real, ARRAY[4095]))::vec32
+                LIMIT 1) t
+         WHERE id = 1001) AS found_spilled;
 }
 # Both far-out rows present: the top-2 nearest neighbors of [100,0,0] must be
 # exactly 1001 and 1002. Returns 2 only if both concurrent inserts landed.
 step c_chk2
 {
-    SELECT count(*) AS found FROM (
-        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 2) t
-        WHERE id IN (1001, 1002);
+    SELECT
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 2) t
+         WHERE id IN (1001, 1002)) AS found,
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v_spilled <->
+                (ARRAY[100::real] || array_fill(0::real, ARRAY[4095]))::vec32
+                LIMIT 2) t
+         WHERE id IN (1001, 1002)) AS found_spilled;
 }
 
 # --- MVCC visibility (the core aminsert contract) ---------------------------

@@ -293,10 +293,32 @@ DROP TABLE hd;
 -- reference spills onto its own pages and the dimension must suit the fast
 -- rotation (a power of two times an odd factor of at most 8), so 1969 is
 -- rejected up front while 1968 builds and answers exactly. The spilled
--- layouts themselves are covered in wide_dim.sql.
+-- layouts themselves run through the shared cases below.
 CREATE TABLE dimcap (id int, v vec32(1969));
 CREATE INDEX dimcap_i ON dimcap USING prism (v);
 DROP TABLE dimcap;
+
+CREATE TABLE dimcap (v vec32(3000));
+CREATE INDEX dimcap_i ON dimcap USING prism (v);
+DROP TABLE dimcap;
+CREATE TABLE dimcap (v vec32(8193));
+CREATE INDEX dimcap_i ON dimcap USING prism (v);
+DROP TABLE dimcap;
+SELECT rabitq_params_generate(4096, 42);
+
+-- Uncompressed centroids and fastscan groups must fit on one page.
+CREATE TABLE dimcap (v vec32(4096));
+CREATE INDEX dimcap_ip ON dimcap USING prism (v vec32_ip_ops);
+CREATE INDEX dimcap_off ON dimcap USING prism (v)
+    WITH (centroid_compression = off);
+CREATE INDEX dimcap_fs ON dimcap USING prism (v) WITH (fastscan = on);
+CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 1);
+CALL prism_convert_posting_to_fastscan('dimcap_i', 0);
+DROP TABLE dimcap;
+CREATE TABLE dimcap (v vec16(4096));
+CREATE INDEX dimcap_ip ON dimcap USING prism (v vec16_ip_ops);
+DROP TABLE dimcap;
+
 CREATE TABLE dimcap (id int, v vec32(1968));
 INSERT INTO dimcap
     SELECT g, (SELECT ('[' || string_agg((sin(g + j))::text, ',') || ']')
@@ -546,3 +568,27 @@ DROP FUNCTION rabitq_cache_clear();
 DROP FUNCTION append_centroid_page(regclass);
 DROP FUNCTION meta_magic(regclass);
 RESET enable_seqscan;
+
+-- The same lifecycle checks cover inline and spilled references.
+SET maintenance_work_mem = '512MB';
+\i :helper_sql
+\set cases_sql :abs_srcdir '/sql/index_cases.sql'
+\set dim 768
+\set reference_pages 0
+\set mean_pages 0
+\set spilled false
+\set expected_magic 50524906
+\i :cases_sql
+
+\set dim 4096
+\set reference_pages 3
+\set mean_pages 3
+\set spilled true
+\set expected_magic 50524907
+\i :cases_sql
+
+DROP FUNCTION rabitq_params_cache();
+DROP FUNCTION rabitq_cache_clear();
+DROP FUNCTION append_centroid_page(regclass);
+DROP FUNCTION meta_magic(regclass);
+RESET maintenance_work_mem;

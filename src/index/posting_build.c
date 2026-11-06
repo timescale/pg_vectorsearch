@@ -679,14 +679,7 @@ builder_init_common(
 	builder->ref_pages = prism_posting_reference_pages(dim);
 	if (builder->spilled && (first_page_flags & PRISM_POSTING_PAGE_FIRST))
 	{
-		/* No fastscan page can hold a group at a spilled dimension; the
-		 * format resolution and the conversion refuse it first, and a
-		 * release build must not write a group past its page buffer. */
-		if (first_page_flags & PRISM_POSTING_PAGE_FASTSCAN)
-			vs_error(
-					VS_EXTENSION_NAME
-					": fastscan does not support %u dimensions",
-					(unsigned)dim);
+		Assert(!(first_page_flags & PRISM_POSTING_PAGE_FASTSCAN));
 		Assert(pt_centroid != NULL);
 		builder->ref_copy = vs_alloc((size_t)dim * sizeof(float));
 		memcpy(builder->ref_copy, pt_centroid, (size_t)dim * sizeof(float));

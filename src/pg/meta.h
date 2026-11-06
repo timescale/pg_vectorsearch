@@ -114,21 +114,20 @@ prism_meta_mean_inline(Dimension dim)
 											 : 0)))
 
 /*
- * The inline threshold shared with the standalone layout is exactly the
- * metapage's capacity: one more dimension would not fit the page.
+ * The shared inline threshold is tight at 8-byte alignment. A smaller
+ * alignment can leave slack in the metapage.
  */
 StaticAssertDecl(
-		MAXALIGN(
-				PRISM_META_FIXED_SIZE +
-				(size_t)PRISM_GLOBAL_MEAN_MAX_INLINE_DIM * sizeof(float)) <=
-				BLCKSZ - MAXALIGN(SizeOfPageHeaderData),
+		PRISM_CEILING_ALIGN(PRISM_META_FIXED_SIZE) +
+						(size_t)PRISM_GLOBAL_MEAN_MAX_INLINE_DIM *
+								sizeof(float) <=
+				BLCKSZ - PRISM_CEILING_ALIGN(SizeOfPageHeaderData),
 		"the inline mean must fit the metapage at the threshold");
 StaticAssertDecl(
-		MAXALIGN(
-				PRISM_META_FIXED_SIZE +
-				(size_t)(PRISM_GLOBAL_MEAN_MAX_INLINE_DIM + 1) *
-						sizeof(float)) >
-				BLCKSZ - MAXALIGN(SizeOfPageHeaderData),
+		PRISM_CEILING_ALIGN(PRISM_META_FIXED_SIZE) +
+						(size_t)(PRISM_GLOBAL_MEAN_MAX_INLINE_DIM + 1) *
+								sizeof(float) >
+				BLCKSZ - PRISM_CEILING_ALIGN(SizeOfPageHeaderData),
 		"the inline-mean threshold is tight");
 
 /* Access the inline global mean vector after the struct (inline layout) */

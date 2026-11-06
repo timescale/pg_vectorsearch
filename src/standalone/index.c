@@ -376,6 +376,14 @@ prism_index_build(
 		return NULL;
 	}
 
+	if (config->posting_fmt == PRISM_POSTING_FMT_PAGES && config->fastscan &&
+		prism_fastscan_max_groups(src->dim, true) == 0)
+	{
+		vs_warn("index build: fastscan does not support %u dimensions",
+				(unsigned)src->dim);
+		return NULL;
+	}
+
 	uint32_t  nvecs = src->nvecs;
 	Dimension dim	= src->dim;
 
