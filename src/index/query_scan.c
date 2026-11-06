@@ -658,6 +658,10 @@ prism_query_execute(
 				k,
 				qs->result_order,
 				qs->result_dists);
+		/* A rerank can keep candidates tied at the k-th distance,
+		 * but result consumers size their buffers to k. */
+		if (qs->nresults > k)
+			qs->nresults = k;
 	}
 	else
 	{

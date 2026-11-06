@@ -180,10 +180,23 @@ aps_rerank(
 		vs_topk_insert(&s->rerank_topk, d, 0.0f, (uint64_t)i);
 	}
 
+	/* Extraction writes every threshold survivor before capping to
+	 * keep, and candidates tied at the keep-th distance can push the
+	 * survivors past the preallocated entries. Grow from the index's
+	 * own context -- the current one belongs to the query, which dies
+	 * before the index -- and double so the superseded buffers an
+	 * arena retains until teardown stay linear in the largest size. */
+	if (s->rerank_topk.cand_count > s->rerank_cap)
+	{
+		while (s->rerank_cap < s->rerank_topk.cand_count)
+			s->rerank_cap *= 2;
+		s->rerank_entries = vs_memctx_alloc(
+				s->memctx, (size_t)s->rerank_cap * sizeof(VsTopKEntry));
+	}
+
 	uint32_t nresults;
-	vs_topk_extract_sorted(&s->rerank_topk, s->rerank_entries, &nresults);
-	if (nresults > s->rerank_cap)
-		nresults = s->rerank_cap;
+	vs_topk_extract_sorted_capped(
+			&s->rerank_topk, s->rerank_entries, &nresults, keep);
 
 	for (uint32_t i = 0; i < nresults; i++)
 	{
