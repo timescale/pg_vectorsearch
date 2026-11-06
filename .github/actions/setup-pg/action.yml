@@ -70,9 +70,20 @@ runs:
         [[ -n "$VARIANT" ]] && prefix="$prefix-$VARIANT"
         echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
 
-    # The build only changes when the version, sanitizer, variant, or
-    # build script changes, so key the cache on all of them. Built once,
-    # then restored across every workflow that uses this action.
+    # ImageOS names the runner image's OS release (e.g. ubuntu26),
+    # which runner.os does not capture. A build restored onto another
+    # release runs against the wrong system libraries and sanitizer
+    # runtime, so the release belongs in the cache key. Env vars are
+    # not reachable from the key expression, so export it as an output.
+    - name: Identify runner image
+      id: image
+      shell: bash
+      run: echo "os=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
+
+    # The build only changes when the version, sanitizer, variant,
+    # image OS, or build script changes, so key the cache on all of
+    # them. Built once, then restored across every workflow that uses
+    # this action.
     #
     # The leading version is a lever for abandoning existing entries
     # when the reason to distrust them lies outside build-pg.sh.
@@ -82,7 +93,7 @@ runs:
       with:
         path: ${{ steps.resolve-prefix.outputs.prefix }}
         key: >-
-          pg-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.variant || 'default' }}-${{ inputs.pg-version }}-${{ inputs.sanitizer || 'debug' }}-${{ hashFiles('scripts/ci/build-pg.sh') }}
+          pg-v2-${{ runner.os }}-${{ steps.image.outputs.os }}-${{ runner.arch }}-${{ inputs.variant || 'default' }}-${{ inputs.pg-version }}-${{ inputs.sanitizer || 'debug' }}-${{ hashFiles('scripts/ci/build-pg.sh') }}
 
     # build-pg.sh configures with --enable-tap-tests, whose configure check
     # requires IPC::Run, and running the TAP tests later needs it too.

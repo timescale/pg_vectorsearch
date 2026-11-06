@@ -25,7 +25,7 @@ jobs:
   # meant to save -- ten of them, counting the Makefile jobs.
   changes:
     name: Does this change affect the build?
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       changed: ${{ steps.changed.outputs.changed }}
     steps:
@@ -82,7 +82,7 @@ jobs:
             arch: arm64
             pg: debug
           # Standalone (no PostgreSQL).
-          - runner: ubuntu-latest
+          - runner: ubuntu-26.04
             os: Linux
             arch: x64
             standalone: true
@@ -94,7 +94,7 @@ jobs:
           # gsl but no OpenBLAS, so this job builds without BLAS. pgdg
           # ships no i386 PostgreSQL, so it is built from source like the
           # arm64 job's, cached under its own variant.
-          - runner: ubuntu-latest
+          - runner: ubuntu-26.04
             os: Linux
             arch: x86-32
             pg: debug
@@ -105,7 +105,7 @@ jobs:
           # debug jobs, so the extension is known to build and pass on it
           # before it releases. Bump the version as betas and release
           # candidates come out.
-          - runner: ubuntu-latest
+          - runner: ubuntu-26.04
             os: Linux
             arch: x64
             pg: debug
@@ -127,7 +127,7 @@ jobs:
           # Extension-only: -Dtools=disabled skips the CLI, standalone
           # library, and unit tests — the default when building from a
           # release tarball. Keeps that build shape working on every PR.
-          - runner: ubuntu-latest
+          - runner: ubuntu-26.04
             os: Linux
             arch: x64
             pg: packaged
@@ -262,7 +262,7 @@ jobs:
     name: Makefile wrapper PG${{ matrix.pg-version }}
     needs: changes
     if: needs.changes.outputs.changed == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -318,7 +318,7 @@ jobs:
     name: Build and test summary
     needs: [changes, build, makefile]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Did the build and its tests pass?

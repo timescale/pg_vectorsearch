@@ -41,7 +41,7 @@ jobs:
     name: CodeQL (${{ matrix.language }})
     # Set repository variable CODE_SCANNING_ENABLED=true to enable
     if: vars.CODE_SCANNING_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     # C is analyzed from a real build so the extension, the generated
     # headers and the PostgreSQL macros are all resolved. Workflows and

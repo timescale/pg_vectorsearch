@@ -90,6 +90,10 @@ if [[ "${MESON_PG_ARGS[0]}" != "-Dpostgresql=disabled" ]]; then
 fi
 
 echo "==> Running tests with $SANITIZER sanitizer"
-TERM=xterm-256color meson test -C "$BUILDDIR" --verbose
+# Instrumentation makes the slowest suites (regress, tap_replication)
+# overrun their stock timeouts while still making progress, so give
+# every test more headroom rather than racing the clock.
+TERM=xterm-256color meson test -C "$BUILDDIR" --verbose \
+    --timeout-multiplier 4
 
 echo "==> Sanitizer tests passed: $SANITIZER"

@@ -42,7 +42,7 @@ permissions:
 jobs:
   asan:
     name: AddressSanitizer
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -83,7 +83,7 @@ jobs:
 
   ubsan:
     name: UndefinedBehaviorSanitizer
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

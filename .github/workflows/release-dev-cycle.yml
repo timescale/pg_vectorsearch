@@ -69,7 +69,7 @@ permissions:
 jobs:
   bump:
     name: Open the development-cycle pull request
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       # Only what checkout needs to fetch: every write below goes
       # through the App token, not this one.
