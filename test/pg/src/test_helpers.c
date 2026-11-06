@@ -18,9 +18,11 @@
 #include <postgres.h>
 
 #include <access/relation.h>
+#include <catalog/pg_am_d.h>
 #include <commands/defrem.h>
 #include <fmgr.h>
 #include <funcapi.h>
+#include <storage/bufmgr.h>
 #include <utils/tuplestore.h>
 
 #include "index/centroid_page.h"
@@ -115,4 +117,32 @@ vs_test_append_centroid_page(PG_FUNCTION_ARGS)
 	relation_close(index, ShareUpdateExclusiveLock);
 
 	PG_RETURN_INT32((int32)blkno);
+}
+
+/* Inspect the original heap TID after HOT pruning. */
+PG_FUNCTION_INFO_V1(vs_test_heap_tid_redirected);
+
+Datum
+vs_test_heap_tid_redirected(PG_FUNCTION_ARGS)
+{
+	Relation heap = relation_open(PG_GETARG_OID(0), AccessShareLock);
+	if (heap->rd_rel->relam != HEAP_TABLE_AM_OID)
+	{
+		relation_close(heap, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("relation is not a heap table")));
+	}
+
+	const ItemPointerData *tid = PG_GETARG_ITEMPOINTER(1);
+	Buffer buf = ReadBuffer(heap, ItemPointerGetBlockNumber(tid));
+	LockBuffer(buf, BUFFER_LOCK_SHARE);
+	Page		 page		= BufferGetPage(buf);
+	OffsetNumber off		= ItemPointerGetOffsetNumber(tid);
+	bool		 redirected = off >= FirstOffsetNumber &&
+					  off <= PageGetMaxOffsetNumber(page) &&
+					  ItemIdIsRedirected(PageGetItemId(page, off));
+	UnlockReleaseBuffer(buf);
+	relation_close(heap, AccessShareLock);
+	PG_RETURN_BOOL(redirected);
 }

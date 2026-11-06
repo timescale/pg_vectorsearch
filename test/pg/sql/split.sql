@@ -492,10 +492,11 @@ CALL prism_rebalance('split_part_idx', 10);
 CALL prism_convert_posting_to_fastscan('split_part_idx', 0);
 DROP TABLE split_part;
 
--- A split re-clusters only rows that may still be live. A wide vector lives
--- in TOAST, and after a delete and a VACUUM of the toast table the heap tuple
--- is still there for its posting entry to point at while its chunks are gone,
--- so the entry has to drop out of the split rather than be detoasted.
+-- A split leaves out only entries whose row is dead to every transaction. A
+-- wide vector lives in TOAST, and after a delete and a VACUUM of the toast
+-- table the heap tuple is still there for its posting entry to point at while
+-- its chunks are gone. Nothing can need that row any more, so the entry drops
+-- out of the split rather than being detoasted.
 CREATE TABLE split_toast (id serial, v vec32(1024));
 INSERT INTO split_toast (v)
     SELECT (SELECT array_agg(((i % 2) * 10 + sin(i * 0.1 + j * 0.7))::real)

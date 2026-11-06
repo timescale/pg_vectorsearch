@@ -78,9 +78,12 @@
  * vectors, which live outside the index (heap in PG, in-RAM store
  * standalone). Fill out[dim] for the given entry TID.
  *
- * Returns true on success; false if the vector is unavailable (e.g. a dead
- * heap tuple), in which case the entry is dropped from the split and left for
- * VACUUM to reclaim.
+ * Returns true on success. False means the entry has no vector any more and
+ * is dropped from the split, so an implementation may only return it once the
+ * entry is dead to every transaction -- not merely invisible to the one
+ * running the split. The split re-clusters; dropping an entry a live snapshot
+ * still has to find would lose the row for that snapshot, since the new lists
+ * are the only place it can look once the centroid leaf is flipped.
  */
 typedef struct PrismSplitEnv
 {

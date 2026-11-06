@@ -1,4 +1,4 @@
-Parsed test spec with 6 sessions
+Parsed test spec with 7 sessions
 
 starting permutation: m_split i_ins o_wake_split o_probe
 injection_points_attach
@@ -111,3 +111,34 @@ id
  3
 (3 rows)
 
+
+starting permutation: old_snapshot v_del1 w_split old_near old_commit
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step old_snapshot: BEGIN ISOLATION LEVEL REPEATABLE READ;
+                    SELECT count(*) AS rows_at_snapshot FROM race;
+rows_at_snapshot
+----------------
+              60
+(1 row)
+
+step v_del1: DELETE FROM race WHERE id = 1;
+w: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
+step w_split: CALL prism_rebalance('race_idx', 10);
+step old_near: SELECT id FROM race ORDER BY v <-> '[1,0,0]' LIMIT 3;
+id
+--
+ 1
+ 2
+ 3
+(3 rows)
+
+step old_commit: COMMIT;
