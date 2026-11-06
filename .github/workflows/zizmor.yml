@@ -27,7 +27,7 @@ permissions:
 jobs:
   zizmor:
     name: Workflow Security Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     permissions:
       contents: read
@@ -51,7 +51,7 @@ jobs:
   upload:
     name: Upload findings to code scanning
     if: github.event_name == 'push' && vars.CODE_SCANNING_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     permissions:
       security-events: write  # Upload SARIF results

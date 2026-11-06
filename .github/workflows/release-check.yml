@@ -40,7 +40,7 @@ permissions:
 jobs:
   check:
     name: Release check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       release: ${{ steps.check.outputs.release }}
       version: ${{ steps.check.outputs.version }}
@@ -77,7 +77,7 @@ jobs:
     if: >-
       needs.check.outputs.release == 'true' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
 

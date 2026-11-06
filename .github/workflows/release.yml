@@ -66,7 +66,7 @@ permissions:
 jobs:
   gate:
     name: Decide whether VERSION should be released
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       release: ${{ steps.gate.outputs.release }}
       version: ${{ steps.gate.outputs.version }}
@@ -112,7 +112,7 @@ jobs:
     name: Build and test the commit that will be tagged
     needs: gate
     if: needs.gate.outputs.release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -171,7 +171,7 @@ jobs:
   release:
     name: Tag the commit and stage its GitHub Releases entry
     needs: [gate, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       # Only what checkout needs. Every write goes through the App
       # token, so the tag this job creates is one GitHub will raise
@@ -264,7 +264,7 @@ jobs:
     # job that skipped instead would be unreachable -- a skipped job is
     # not a failed one, and nothing re-runs it. Running either way also
     # puts the decision, and the reason for it, in the log.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read # only what checkout needs; the App does the write
 

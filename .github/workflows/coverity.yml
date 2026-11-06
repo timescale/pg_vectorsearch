@@ -32,7 +32,7 @@ jobs:
     name: Coverity Scan
     # Forks have neither the token nor a quota to spend.
     if: github.repository == 'timescale/pg_vectorsearch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Check the notification address is configured
