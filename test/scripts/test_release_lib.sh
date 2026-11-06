@@ -53,6 +53,24 @@ list_upgrade_script() {
 }
 
 # ----------------------------------------------------------------
+# check_disabled
+# ----------------------------------------------------------------
+
+# The override counts only where a reader of the pull request sees
+# it. A comment never closed hides the rest of the description.
+disabled_with() {
+    BODY="$1" check_disabled "$2"
+}
+plain="$(new_fixture 0.1.0)"
+expect_lib "disable: a visible line counts" 0 "$plain" \
+    disabled_with $'Next-Version: x\nDisable-check: upgrade-path' upgrade-path
+expect_lib "disable: a line in a comment does not count" 1 "$plain" \
+    disabled_with $'<!--\nDisable-check: upgrade-path\n-->' upgrade-path
+expect_lib "disable: a line after an unclosed comment does not count" 1 \
+    "$plain" disabled_with $'Next-Version: x\n<!--\nDisable-check: upgrade-path' \
+    upgrade-path
+
+# ----------------------------------------------------------------
 # check_upgrade_path
 # ----------------------------------------------------------------
 

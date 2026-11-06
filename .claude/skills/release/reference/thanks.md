@@ -20,10 +20,11 @@ Look in three places, over the commit range git-cliff summarised:
    ```
 
 Then decide who is external, because thanking the team reads as
-filler. The issue or pull request records it:
+filler. The issue or pull request records it, in the repository the
+release is for (the `--repo` one, or the checkout's own):
 
 ```bash
-gh api "repos/$REPO/issues/<number>" --jq .author_association
+gh api repos/<owner>/<repo>/issues/<number> --jq .author_association
 ```
 
 `CONTRIBUTOR` or `NONE` is an outside contributor. `OWNER`, `MEMBER`

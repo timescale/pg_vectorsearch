@@ -3,16 +3,30 @@
 # Cut a release pull request from the Actions tab, with no checkout.
 #
 # The work is the release notes, which is why this runs an agent rather
-# than a script: scripts/prepare-release.sh generates the changelog's
-# commit list and leaves FILL-IN for the parts a person has to write.
-# The agent writes those by following .claude/skills/release/SKILL.md,
-# the same procedure a local cut follows, and stops at the open pull
-# request. Merging it is what publishes, and that stays a human act.
+# than only scripts. The procedure is the one a person follows, with
+# the agent in the person's place for the part that takes judgement:
+# scripts/prepare-release.sh writes the draft, the changelog with its
+# generated commit list and FILL-IN for the notes, plus the pull
+# request body; the agent finishes those two files by following
+# .claude/skills/release/SKILL.md; and scripts/open-release-pr.sh cuts
+# the branch from them, pushes it and opens the pull request. Merging
+# it is what publishes, and that stays a human act.
 #
-# It runs as the release App rather than GITHUB_TOKEN because GitHub
-# starts no workflow runs from events that token creates: the pull
-# request would carry none of main's required checks and could not be
-# merged by anyone.
+# The two jobs are the boundary. The agent reads commit messages, pull
+# requests and issues that anyone can write, and text in them can try
+# to steer it. So the job it runs in holds nothing that can write: its
+# token is read-only, its shell is limited to git and gh reads, and
+# its commands run without the API key in their environment. Its
+# checkout is disposable. The second job starts from a fresh runner
+# and takes only the two draft files from the first, so nothing the
+# agent could have changed in its checkout -- scripts, git
+# configuration, hooks -- reaches the job that holds the release
+# App's token.
+#
+# The push runs as the release App rather than GITHUB_TOKEN because
+# GitHub starts no workflow runs from events that token creates: the
+# pull request would carry none of main's required checks and could
+# not be merged by anyone.
 #
 # What the App can do here is bounded by more than this file. It is not
 # a ruleset bypass actor, so it cannot push to main -- only propose a
@@ -42,28 +56,20 @@ concurrency:
 permissions: {}
 
 jobs:
-  prepare:
-    name: Cut a release PR
+  notes:
+    name: Write the release notes
     runs-on: ubuntu-26.04
     permissions:
-      contents: read   # checkout
-      id-token: write  # the action's API authentication
+      # Read-only, and the only token the agent sees.
+      contents: read       # checkout
+      pull-requests: read  # the thanks section reads merged PRs
+      issues: read         # and the issues those PRs closed
+    env:
+      # Where prepare-release.sh writes the draft, so it can be
+      # collected once the agent is done.
+      RELEASE_TMP: ${{ runner.temp }}/release-pr
 
     steps:
-      - name: Mint a token for the release App
-        id: app-token
-        # v3.2.0
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
-        with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          # Scoped to this repository, and to what cutting a release
-          # needs: a branch, a pull request, and the label and
-          # milestone prepare-release.sh attaches.
-          permission-contents: write
-          permission-pull-requests: write
-          permission-issues: write
-
       - name: Checkout repository
         # v4
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -108,67 +114,120 @@ jobs:
             exit 1
           }
 
-      - name: Identify the release App to git
-        id: bot
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-          REPO: ${{ github.repository }}
-        run: |
-          # The commit is attributed to the App's own account: an
-          # unattributed one can draw the ruleset's extra-approval
-          # requirement, and the CLA check resolves the author email to
-          # an account that has to be one the allow list names.
-          #
-          # Written to the config for anything that commits outside the
-          # next step, and emitted as outputs because that step rewrites
-          # the config from its own inputs -- see the comment there.
-          bot_id="$(gh api "/users/$APP_SLUG%5Bbot%5D" --jq .id)"
-          git config user.name "$APP_SLUG[bot]"
-          git config user.email \
-            "$bot_id+$APP_SLUG[bot]@users.noreply.github.com"
-          {
-            echo "name=$APP_SLUG[bot]"
-            echo "id=$bot_id"
-          } >>"$GITHUB_OUTPUT"
-          # The checkout persists no credentials, and open-pr.sh pushes.
-          git remote set-url origin \
-            "https://x-access-token:$GH_TOKEN@github.com/$REPO"
+      - name: Make a place for the pull request body
+        run: mkdir -p "$RELEASE_TMP"
 
-      - name: Cut the release PR
+      - name: Install bubblewrap for subprocess isolation
+        # The scrub below refuses to start without it.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends bubblewrap
+
+      - name: Authenticate gh with the read-only job token
+        # Through gh's own config rather than GH_TOKEN: the scrub
+        # strips every variable named like a token from the agent's
+        # commands, and the release scripts and the thanks lookups
+        # call gh. gh auth login refuses while GH_TOKEN is set, so
+        # this step does not set it.
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$TOKEN" | gh auth login --with-token
+          gh auth status
+
+      - name: Write the draft
+        id: draft
+        env:
+          VERSION: ${{ inputs.version }}
+          NEXT: ${{ inputs.next_version }}
+          TMPDIR: ${{ env.RELEASE_TMP }}
+        run: |
+          # Before the agent, and not by it: the versions are inputs
+          # and the entry is generated, so nothing here takes
+          # judgement, and the agent then needs no script in its
+          # shell at all. A blank next version takes the default bump.
+          args=(--version "$VERSION" --ignore-untracked-files)
+          [ -z "$NEXT" ] || args+=(--next-version "$NEXT")
+          ./scripts/prepare-release.sh "${args[@]}" </dev/null
+          drafts=("$RELEASE_TMP"/pg_vectorsearch-release-"$VERSION".*)
+          [ "${#drafts[@]}" = 1 ] && [ -d "${drafts[0]}" ] || {
+            echo "::error::expected one draft under $RELEASE_TMP," \
+              "found ${#drafts[@]}"
+            exit 1
+          }
+          echo "dir=${drafts[0]}" >>"$GITHUB_OUTPUT"
+          sed -n 's/^Next-Version: *//p' "${drafts[0]}/body.md" |
+            sed 's/^/next=/' >>"$GITHUB_OUTPUT"
+
+      - name: Write the release notes and the pull request body
         # v1
         uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790
         env:
-          # prepare-release.sh and open-pr.sh call gh.
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Every command the agent runs gets an environment with the
+          # API key, the job token and anything else named like a
+          # secret removed, and runs under bubblewrap in its own PID
+          # namespace, so the CLI process holding the key is not
+          # visible from /proc either.
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: 1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ steps.app-token.outputs.token }}
-          # The release commit is made in here, so these two decide
-          # its author: the action configures user.name and user.email
-          # from them, overwriting what the step above set. They name
-          # the release App -- the account that cut the pull request,
-          # and the one the CLA allow list knows. Left out, the
-          # action's own defaults apply instead, and those resolve to
-          # github-actions[bot].
-          bot_name: ${{ steps.bot.outputs.name }}
-          bot_id: ${{ steps.bot.outputs.id }}
+          # The job's read-only token. The action writes it into the
+          # origin URL, so it is the one credential the agent can read
+          # back, and it can only read with it.
+          github_token: ${{ github.token }}
+          # Off, because it is a step the action runs after the agent,
+          # from the action's own files, with the API key in its
+          # environment. The agent can write files the runner owns,
+          # and this run posts no inline comments anyway.
+          classify_inline_comments: "false"
+          # What the skill needs and nothing else: git reads, gh
+          # reads, and edits under the draft directory. The allow list
+          # is prefix matched, so a git subcommand that is not named
+          # is refused; the gh api rule ends in a bare * because the
+          # :* form wants a space after the prefix, and the path it
+          # has to allow continues from the slash. The deny list wins
+          # over it and closes what
+          # reaches the network or rewrites git's own configuration;
+          # the /proc rule is a backstop for the scrub above. Nothing
+          # here is a boundary on its own -- a git read can still be
+          # told to write a file, which is why the checkout is
+          # discarded and only the two draft files leave this job --
+          # but it keeps a steered agent from getting far. Paths are
+          # ./-relative on purpose: a single leading slash anchors at
+          # the settings source, not the checkout.
           claude_args: >-
-            --allowedTools Bash,Read,Edit,Write,Glob,Grep
+            --allowedTools
+            "Read(./**)"
+            "Read(/${{ env.RELEASE_TMP }}/**)"
+            "Edit(/${{ env.RELEASE_TMP }}/**)"
+            Glob Grep
+            "Bash(git log:*)" "Bash(git diff:*)" "Bash(git show:*)"
+            "Bash(git rev-parse:*)" "Bash(git describe:*)"
+            "Bash(gh pr view:*)" "Bash(gh pr list:*)"
+            "Bash(gh issue view:*)"
+            "Bash(gh api repos/${{ github.repository }}/*)"
+            "Bash(cat:*)" "Bash(head:*)" "Bash(tail:*)"
+            --disallowedTools
+            "Read(//proc/**)"
+            "Bash(git push:*)" "Bash(git fetch:*)" "Bash(git pull:*)"
+            "Bash(git remote:*)" "Bash(git config:*)"
+            "Bash(git -c:*)" "Bash(git -C:*)"
+            "Bash(gh * --hostname*)"
+            "Bash(curl:*)" "Bash(wget:*)"
+            WebFetch WebSearch
           prompt: |
-            Cut a release pull request by following the release skill at
-            .claude/skills/release/SKILL.md, sections 1 to 5, and then
-            stop.
+            Write the notes for a release pull request by following
+            sections 3 and 4 of the release skill at
+            .claude/skills/release/SKILL.md, and then stop.
 
             Release version: ${{ inputs.version }}
-            Next development version: ${{ inputs.next_version }}
+            Next development version: ${{ steps.draft.outputs.next }}
+            The draft: ${{ steps.draft.outputs.dir }}
 
-            If the next development version above is blank, use the
-            skill's default bump and say which pair you cut.
-
-            This is a clean CI checkout, so pass
-            --ignore-untracked-files. git-cliff is on PATH at the
-            version cliff.toml targets.
+            The draft is already written: CHANGELOG.md and body.md in
+            that directory are the two files to finish. The checkout
+            is the base the release is cut from; read it, and change
+            nothing in it.
 
             Writing the notes is the work. The brief is
             .claude/skills/release/reference/release-notes.md, and
@@ -177,12 +236,96 @@ jobs:
             the range git-cliff summarised rather than only its
             bullet list.
 
+            Stop once the two files are finished. Do not run
+            open-release-pr.sh: a later job runs it on those two
+            files, cuts the branch, pushes it and opens the pull
+            request. Your shell is limited to git reads and gh reads;
+            anything else is refused rather than asked about.
+
             There is nobody to ask here, so do not stop for
             confirmation. Write the best version you can and name in
-            the pull request body anything you were unsure about, so
-            the reviewer looks there first. Never leave FILL-IN
-            anywhere -- a squash merge would put it on main.
+            body.md anything you were unsure about, so the reviewer
+            looks there first. Never leave FILL-IN anywhere -- a squash
+            merge would put it on main.
 
-            Do not merge, approve, tag, or dispatch anything. Opening
-            the pull request is the last thing you do. Report its URL
-            and what you left for the reviewer.
+            Do not merge, approve, tag, or dispatch anything. Finish by
+            reporting what you left for the reviewer.
+
+      - name: Collect the draft for the next job
+        env:
+          DRAFT: ${{ steps.draft.outputs.dir }}
+        run: |
+          # Two files, copied as content. The next job cuts the
+          # release from them on its own checkout, so nothing else
+          # from this one is carried over.
+          mkdir -p "$RELEASE_TMP/handoff"
+          cp "$DRAFT/CHANGELOG.md" "$DRAFT/body.md" "$RELEASE_TMP/handoff/"
+
+      - name: Hand the draft to the next job
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
+        with:
+          name: release-notes
+          path: ${{ env.RELEASE_TMP }}/handoff
+          if-no-files-found: error
+          retention-days: 1
+
+  open:
+    name: Open the release PR
+    needs: notes
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read  # checkout; the push goes through the App token
+
+    steps:
+      - name: Checkout the commit the run was dispatched from
+        # v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          # The sha, not the branch: what the notes describe, even if
+          # the branch moved while the agent wrote them.
+          ref: ${{ github.sha }}
+          # Full history and tags: the release check compares against
+          # the previous release and asks whether the tag exists.
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Collect the draft
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/handoff
+
+      - name: Mint a token for the release App
+        id: app-token
+        # v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Scoped to this repository, and to what opening the release
+          # pull request needs: a branch, the pull request, and the
+          # label and milestone it carries.
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Cut the release from the draft and open the PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          # Through the environment, never interpolated into the
+          # shell: a dispatched run takes these from whoever started it.
+          VERSION: ${{ inputs.version }}
+          NEXT: ${{ inputs.next_version }}
+          BASE: ${{ github.ref_name }}
+          NOTES: ${{ runner.temp }}/handoff
+        run: |
+          ./scripts/open-release-pr.sh "$VERSION" "$NEXT" "$BASE" \
+            "$NOTES/CHANGELOG.md" "$NOTES/body.md"
+
+      - name: Say where the pull request is
+        env:
+          URL: ${{ steps.pr.outputs.url }}
+        run: echo "Opened $URL" >>"$GITHUB_STEP_SUMMARY"

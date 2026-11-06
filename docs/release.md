@@ -73,10 +73,14 @@ never *changed*.
 There are two ways in, running the same procedure. From the Actions
 tab, **Cut a release PR** takes the version and optionally the next
 development version, and runs
-[the release skill](../.claude/skills/release/SKILL.md) as the release
-App — no checkout needed, and the pull request it opens carries main's
-required checks precisely because the App is not `GITHUB_TOKEN`.
-Locally, the steps below do the same thing by hand.
+[the release skill](../.claude/skills/release/SKILL.md) — no checkout
+needed. The workflow runs `prepare-release.sh` itself, the agent
+finishes the draft with a read-only token and a shell limited to git
+and gh reads, and a second job runs `open-release-pr.sh` on the two
+files, on a fresh checkout, as the release App, so the pull request
+carries main's required checks precisely because the App is not
+`GITHUB_TOKEN`. Locally, the steps below are the same two scripts run
+by hand, with the notes written in between.
 
 Either way the notes are the work, and either way a human reviews and
 merges the result. The workflow cannot merge, tag or publish.
@@ -84,12 +88,6 @@ merges the result. The workflow cannot merge, tag or publish.
 ```bash
 ./scripts/prepare-release.sh
 ```
-
-An agent cutting a release follows the `release` skill, which drives
-this script. The skill fills the notes before the PR is opened. The
-interactive path below still opens with placeholders and finishes the
-notes in the PR. Either way the release check refuses a merge while
-a `FILL-IN` remains.
 
 It checks the repository first, before asking anything. Uncommitted
 changes to tracked files are refused — they would ride onto the release
@@ -117,118 +115,106 @@ bump on an `X.Y.x` maintenance branch) — and asks you to confirm or edit
 them. With no terminal it takes the defaults, so automation needs no
 flags, and `--version` and `--next-version` override either.
 
-For automation, pass all four flags:
+For automation, pass all three flags:
 
 ```bash
 ./scripts/prepare-release.sh --version 0.2.0 --next-version 0.3.0-dev \
-    --ignore-untracked-files --create-pr
+    --ignore-untracked-files
 ```
 
 That run never consults a terminal, so it cannot stall on a runner that
 happens to allocate one — relying on terminal detection alone would.
 
-It then creates `chore/release-<version>`, sets `VERSION`, writes the
-changelog entry and commits. None of that is asked about, because all of
-it happens *on the branch* — deleting the branch reverses every bit of
-it, and nothing has left the machine. Opening the PR is the step that
-cannot be taken back quietly: it makes the release public. So that is the
-one question:
+It then writes the draft and stops. Nothing in the checkout changes:
+the draft is two files under a temporary directory, and the run ends
+by printing the command that opens the pull request from them:
 
 ```
-==> chore/release-0.2.0 is ready: VERSION is 0.2.0 and CHANGELOG.md has its
-==> entry (notes still unfinished).
-Push chore/release-0.2.0 and open the release PR? [y/N]
+==> Draft written to /tmp/pg_vectorsearch-release-0.2.0.XXXXXX. The checkout is unchanged.
+
+    Finish the notes in CHANGELOG.md there (every FILL-IN) and say what
+    the release is in body.md, keeping Next-Version as its last line.
+    Then cut the branch and open the pull request with:
+
+      ./scripts/open-release-pr.sh 0.2.0 0.3.0-dev main \
+          /tmp/pg_vectorsearch-release-0.2.0.XXXXXX/CHANGELOG.md \
+          /tmp/pg_vectorsearch-release-0.2.0.XXXXXX/body.md
 ```
 
-Answer it up front with `--create-pr`, which is what automation wants.
+`CHANGELOG.md` is the whole changelog with the new entry on top: the
+commit list git-cliff generated under `### Changes`, and the notes
+template above it with a `FILL-IN` placeholder in every section a
+person writes. `body.md` is the pull request description. A squash
+merge turns it into main's commit message, so it ends with the
+`Next-Version` trailer and must keep it last; the highlights go in
+above the trailer once they exist.
 
-Either way the `gh` invocation is written to a temporary script first,
-and *that* is what runs — so declining leaves something runnable rather
-than instructions to retype:
+To preview a release, stop here. The draft is the real changelog
+entry, generated commit list included, and nothing has left the
+machine.
 
-```
-==> PR command written to /tmp/pg_vectorsearch-release-0.2.0.XXXXXX/open-pr.sh
-==> Branch prepared, PR not opened. To open it, run:
+### Opening the pull request
 
-      /tmp/pg_vectorsearch-release-0.2.0.XXXXXX/open-pr.sh
-```
+`open-release-pr.sh` is the step that makes the release public. It
+takes the two files and does everything else from a clean checkout of
+the base: creates `chore/release-<version>`, copies the changelog in,
+sets `VERSION`, commits the two with the trailer, runs the release
+check, pushes the branch and opens the pull request with the title,
+label, milestone and body.
 
-It pushes the branch and opens the PR with the title, label, milestone
-and body that run worked out, and it is safe to re-run. Because it is
-the same file the script executes itself, it cannot drift from what
-would have happened.
+It refuses before pushing when the notes are not done. A `FILL-IN`
+anywhere, in the changelog entry or the body, fails the same release
+check the pull request runs, so a pull request never opens failing
+it. The body must end with exactly one `Next-Version` trailer naming
+the version passed in. The checkout must be clean and on a commit the
+remote's base branch has, and the release commit is built from the
+two files alone, so nothing else in the checkout reaches it.
 
-Re-running it after amending the notes in works: the push uses
-`--force-with-lease` once the branch is on the remote, and the lease is
-git's default — the remote-tracking ref. Your own push updates that, so
-an amend goes through; someone else moving the branch does not, so that
-is refused with `stale info`.
+A refused run leaves the checkout as it found it. Whatever was cut
+before the refusal, the branch and its commit, is dropped, a branch
+that `--force` recreated goes back to its old tip, and the checkout
+returns to where it started, so fixing the draft and re-running the
+printed command is the whole recovery.
 
-To preview a release, run it and answer no. That leaves the real branch,
-the real changelog entry — generated commit list included — and a PR
-script you can read, which is strictly more than a rehearsal could show.
-Then either run the script or drop the branch.
-
-The script refuses to run once its branch is gone, rather than failing
-inside `git push`, so a stale one left in `/tmp` cannot surprise you.
+Changing the notes after the pull request is open is ordinary git:
+edit `CHANGELOG.md` on the release branch, amend the release commit,
+and push with `--force-with-lease`. A release pull request is one
+commit, and the check refuses a second.
 
 ### Re-cutting a version
 
 Cutting the same version twice is supported, because rehearsing the flow
 means doing it repeatedly and a cut that went wrong is easiest to redo
 from scratch. If `chore/release-<version>` already exists — locally, on
-the remote, or both — the run says so and asks:
+the remote, or both — `open-release-pr.sh` refuses, and `--force`
+recreates it from the base:
 
 ```
-WARNING: chore/release-0.1.0 already exists locally and on origin
-WARNING: pushing later would force over the commit these open PRs are reviewing:
+WARNING: recreating chore/release-0.1.0 from main
+WARNING: the push will force over the commit these open pull requests are reviewing:
     #278 into main (https://github.com/timescale/pg_vectorsearch/pull/278)
-Recreate chore/release-0.1.0 from main? [y/N]
 ```
 
-That question is only about the local branch — the push is asked
-separately, further down. `--force` answers it up front, for automation.
-With no terminal and no flag the answer is **no**: unlike untracked
-files, carrying on here would destroy work.
-
-The branch is then recreated with `git checkout -B`, and the push carries
-`--force-with-lease` pinned to the commit the check looked at — so it
-refuses if the branch moved in between, which is exactly when somebody
-else is working on it:
+The push then carries `--force-with-lease` pinned to the commit the
+remote had when the run looked — so it refuses if the branch moved in
+between, which is exactly when somebody else is working on it:
 
 ```
  ! [rejected]  chore/release-0.1.0 -> chore/release-0.1.0 (stale info)
-```
-
-What makes overwriting safe to offer at all is that the tag check runs
-first. A version that has shipped has a `v<version>` tag, so it is
-refused whatever the flags:
-
-```
-ERROR: tag v0.1.0 already exists locally
-```
-
-The push question names what it will actually do when a branch is being
-overwritten:
-
-```
-Force-push chore/release-0.1.0 over 2c04b345 and update the release PR?
 ```
 
 A pull request follows its head branch **by name**, so a force-push
 rewrites the head of every open PR built on that branch — including one
 against a different base, whose diff then becomes meaningless. GitHub
 never repoints a PR's base; that only changes when someone changes it.
-So every open PR on the branch is listed, and if none of them targets
-the base being released from, that is called out, because the run will
-open a *new* PR and leave the others pointing at rewritten history:
+So every open PR on the branch is listed before the push.
+
+What makes overwriting safe to offer at all is that the tag check runs
+first. A version that has shipped has a `v<version>` tag, so it is
+refused whatever the flags:
 
 ```
-WARNING: pushing later would force over the commit these open PRs are reviewing:
-    #278 into feature/release-process (https://github.com/.../pull/278)
-WARNING: none of them targets main, so this run opens a new PR and leaves
-         the ones above pointing at a branch whose history it rewrote --
-         close them first unless you mean that
+ERROR: tag v0.1.0 already exists
 ```
 
 **No duplicate PR is possible.** Before creating one, the run looks for
@@ -241,15 +227,12 @@ base must not stand in for the one being opened. Only open PRs count; a
 closed one is an abandoned attempt, and a fresh PR is the right answer
 there.
 
-Re-running with a PR already open **refreshes its body**, so the PR
-never disagrees with the branch it is reviewing. The body is generated
-content, and the release notes are not at risk: they live in
-`CHANGELOG.md` and are edited by committing to the branch.
+Re-running with a PR already open **refreshes its body** from the body
+file, so the PR never disagrees with the branch it is reviewing.
 
 The one edit that could be lost is a reviewer changing `Next-Version` to
 ask for a different bump. That is not discarded silently — the previous
-body is saved to the run's temporary directory, and a differing trailer
-is named:
+body is saved next to the body file, and a differing trailer is named:
 
 ```
 WARNING: the PR body declares Next-Version: 1.0.0-dev, but this run used
@@ -260,10 +243,9 @@ The PR gets the `release` label and the matching `Release <version>`
 milestone, warning and continuing if none matches.
 
 **The PR body says what the PR does, not how releasing works.** It
-states the version being released and summarises the highlights — taken
-from the changelog entry the run just wrote, so the summary cannot
-contradict the notes. The procedure lives here in this document, where
-it stays current, instead of being copied into every release PR.
+states the version being released and, once written, the highlights.
+The procedure lives here in this document, where it stays current,
+instead of being copied into every release PR.
 
 ### The next development version
 
@@ -290,26 +272,25 @@ with `git log -1`, so the tip commit is the one that counts. A
 the one that lands.
 
 The release PR is one commit. The release check rejects a second.
-Filling the notes amends that commit rather than adding another, and
-a branch that was already pushed is force-pushed with
-`--force-with-lease`. The trailer on that commit and the copy in the
-PR body must be the same value. A rebase merge reads the commit. A
-squash merge reads the body.
+Changing the notes after it is open amends that commit rather than
+adding another, and the push carries `--force-with-lease`. The
+trailer on that commit and the copy in the PR body must be the same
+value. A rebase merge reads the commit. A squash merge reads the body.
 
 Editing it is how a different bump gets requested — a major one, say.
 Change both copies, and keep each one the last paragraph: git only
 parses a trailer block that ends the message.
 
-**On the interactive path, the notes are finished in the PR, not before it.**
-The `release` skill is the exception: it fills them before opening, so
-the PR does not open already failing the check. The entry is
-written with `.release-notes-template.md`'s `FILL-IN` placeholders still
-in it, and the release check fails while any remain — so an unfinished
-release cannot merge. `git-cliff` generates the entry's `### Changes`
-list from the conventional commit history; that list is raw material, so
-trimming it to the notable items is part of editing the PR. This applies
-to the first release too: `--unreleased` means "not reachable from any
-tag", which with no tags yet is the whole history rather than nothing.
+**The notes are finished in the draft, before the PR.** The entry is
+drafted with `.release-notes-template.md`'s `FILL-IN` placeholders in
+it, and `open-release-pr.sh` runs the release check before pushing,
+which fails while any remain — so an unfinished release neither opens
+nor merges. `git-cliff` generates the entry's `### Changes` list from
+the conventional commit history; that list is raw material, so
+trimming it to the notable items is part of writing the notes. This
+applies to the first release too: `--unreleased` means "not reachable
+from any tag", which with no tags yet is the whole history rather than
+nothing.
 
 ## The release check
 
@@ -348,18 +329,29 @@ A candidate may still carry one if its PR adds it — none is required,
 but every file in `sql/` named `<name>--<from>--<to>.sql` has to appear
 in `ext_update_scripts`, or it is built and never installed.
 
-**A release can ship without a path, deliberately.** Put
+**A release can ship without a path, deliberately.** Open it with
+
+```bash
+./scripts/open-release-pr.sh --disable-check upgrade-path ...
+```
+
+which appends
 
 ```text
 Disable-check: upgrade-path
 ```
 
-in the release PR's description and the check reports the override
-instead of failing. It is the same trailer the commit-count check
-takes, so one line can name both. Reach for it when an upgrade is
-genuinely impossible — say the on-disk format changed in a way no
-script can migrate — and say so in the release notes, because users
-will have to drop the extension.
+to the pull request description, and the check reports the override
+instead of failing. The same line in the description of an open pull
+request works too, as long as it is visible: one inside an HTML
+comment is ignored. `open-release-pr.sh` refuses a body file that
+carries the line itself, so the override is always the decision of
+whoever opens the pull request and never part of the notes. It is
+the same trailer the commit-count check takes, so one line can name
+both. Reach for it when an upgrade is genuinely impossible — say the
+on-disk format changed in a way no script can migrate — and say so
+in the release notes, because users will have to drop the
+extension.
 
 Which PRs get checked is decided by what the PR *does*, not by what its
 branch is called: a release PR is one that changes `VERSION` to a value
@@ -424,7 +416,7 @@ merge. `VERSION` cannot degrade that way.
 Five jobs run in order.
 
 **Gate** (`scripts/ci/release-gate.sh`) first checks the commit is one
-`prepare-release.sh` made, by requiring its `Next-Version` trailer.
+`open-release-pr.sh` made, by requiring its `Next-Version` trailer.
 Everything else it asks is a property of the tree — no `-dev` suffix, a
 finished changelog entry, no tag yet — and all of those stay true for
 any commit merged between a release and the dev-cycle bump. The trailer

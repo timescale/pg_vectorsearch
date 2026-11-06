@@ -88,7 +88,7 @@ fi
 # Readiness -- a broken release fails loudly
 # ----------------------------------------------------------------
 
-# The commit must be the one prepare-release.sh made, not merely a
+# The commit must be the one open-release-pr.sh made, not merely a
 # commit sitting where one did. Between a release and the dev-cycle bump,
 # main carries a released VERSION, so any commit merged in that window
 # looks like a release to every other check here. The Next-Version
@@ -98,7 +98,7 @@ next_version="$(read_next_version_trailer HEAD)"
 [[ -n "$next_version" ]] ||
     die "$(git rev-parse --short HEAD) has no Next-Version trailer, so it" \
         "is not a release commit -- VERSION says $VERSION, but only the" \
-        "commit prepare-release.sh writes declares the next cycle"
+        "commit open-release-pr.sh writes declares the next cycle"
 NEXT_VERSION="$next_version"
 log "release commit confirmed; next cycle is $next_version"
 
