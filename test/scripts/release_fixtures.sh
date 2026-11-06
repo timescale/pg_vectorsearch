@@ -21,6 +21,9 @@
 #   STUB_UPLOAD_LOSES  an upload that records nothing, standing in for
 #                    a file that did not reach the release
 #
+# git-cliff is stubbed the same way: it prepends a fixed entry for the
+# tag it is given, so a draft can be written without the real tool.
+#
 # So the git work stays real -- branches, file writes, commits, pushes
 # -- while the GitHub calls become observable. What that cannot cover
 # is GitHub's own behaviour, which needs a repository with a ruleset.
@@ -56,6 +59,8 @@ new_fixture() {
         git config user.name "Release Test"
         printf "project('pg_vectorsearch', 'c')\n" >meson.build
         printf '%s\n' "$version" >VERSION
+        printf '# Changelog\n' >CHANGELOG.md
+        cp "$VS_ROOT/cliff.toml" "$VS_ROOT/.release-notes-template.md" .
         # Where the release checks look for install and upgrade scripts.
         mkdir -p sql src/pg
         printf 'ext_update_scripts = []\n' >src/pg/meson.build
@@ -129,6 +134,38 @@ case "$1 $2" in
 esac
 STUB
     chmod +x "$VS_WORKSPACE/bin/gh"
+    PATH="$VS_WORKSPACE/bin:$PATH"
+    export PATH
+}
+
+# A stub git-cliff earlier on PATH than any real one. It answers
+# --version with the pinned one, so prepare-release.sh does not warn,
+# and prepends one generated entry to the --prepend file.
+install_stub_git_cliff() {
+    local pin
+    pin="$(sed -n \
+        's/^# Pinned version: git-cliff \([0-9][0-9.]*[0-9]\).*$/\1/p' \
+        "$VS_ROOT/cliff.toml" | head -1)"
+    mkdir -p "$VS_WORKSPACE/bin"
+    cat >"$VS_WORKSPACE/bin/git-cliff" <<STUB
+#!/bin/bash
+[[ "\$1" != --version ]] || { echo "git-cliff $pin"; exit 0; }
+[[ -z "\${STUB_CLIFF_FAIL:-}" ]] || exit 1
+tag="" file=""
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        --tag) tag="\$2"; shift 2 ;;
+        --prepend) file="\$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+[[ -n "\$tag" && -f "\$file" ]] || exit 1
+{
+    printf '## [%s] - 2026-01-01\\n\\n### Changes\\n\\n- generated\\n\\n' "\${tag#v}"
+    cat "\$file"
+} >"\$file.new" && mv "\$file.new" "\$file"
+STUB
+    chmod +x "$VS_WORKSPACE/bin/git-cliff"
     PATH="$VS_WORKSPACE/bin:$PATH"
     export PATH
 }

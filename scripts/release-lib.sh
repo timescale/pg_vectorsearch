@@ -16,16 +16,26 @@ require_repo_root() {
         die "run from the repository root"
 }
 
+# Drop HTML comments from stdin, the way a rendered pull request
+# description hides them. One left open hides everything after it, so
+# it is dropped to the end as well.
+strip_html_comments() {
+    perl -0pe 's/<!--.*?(-->|\z)//gs'
+}
+
 # True when the pull request description turns a check off with
 #
 #     Disable-check: <name>
 #
 # in $BODY, the trailer check-commit-count.sh takes. Matched at the
 # start of a line, case-insensitively, and the rest of the line is
-# ignored, so several checks can be named on one.
+# ignored, so several checks can be named on one. HTML comments are
+# dropped first: an override has to be visible to whoever reads the
+# pull request.
 check_disabled() {
-    local line name
+    local body line name
     [[ -n "${BODY:-}" ]] || return 1
+    body="$(strip_html_comments <<<"$BODY")"
     while IFS= read -r line; do
         line="$(printf '%s' "${line//,/ }" | tr '[:upper:]' '[:lower:]')"
         [[ "$line" == disable-check:* ]] || continue
@@ -36,7 +46,7 @@ check_disabled() {
                 return 0
             fi
         done
-    done <<<"$BODY"
+    done <<<"$body"
     return 1
 }
 
@@ -124,18 +134,19 @@ next_dev_version() {
 # Changelog
 # ----------------------------------------------------------------
 
-# A version's CHANGELOG.md entry, heading exclusive.
+# A version's entry in the changelog $2 (default CHANGELOG.md),
+# heading exclusive.
 changelog_section() {
     local version="$1"
     awk -v ver="$version" '
         $0 ~ "^## \\[" ver "\\]" { found = 1; next }
         found && /^## \[/ { exit }
         found { print }
-    ' CHANGELOG.md
+    ' "${2:-CHANGELOG.md}"
 }
 
 changelog_has_section() {
-    grep -q "^## \[$1\]" CHANGELOG.md
+    grep -q "^## \[$1\]" "${2:-CHANGELOG.md}"
 }
 
 # ----------------------------------------------------------------
@@ -330,6 +341,46 @@ release_remote() {
         "repository with --repo"
 }
 
+# The label a release pull request carries.
+# shellcheck disable=SC2034  # read by the scripts that source this
+RELEASE_LABEL="release"
+
+# Act as the release App, when running as one: commits are attributed
+# to its bot account, and the GitHub remote gets a credential built from
+# GH_TOKEN, since a CI checkout deliberately keeps none. A no-op without
+# APP_SLUG, so a run by hand neither rewrites the operator's git
+# identity nor puts a token in their remote.
+#
+# Every step either succeeds or dies, without leaning on errexit: a
+# commit under a half-written identity would reach the remote with an
+# email nothing can resolve.
+configure_app_identity() {
+    [[ -n "${APP_SLUG:-}" ]] || return 0
+    local bot_id remote
+    log "acting as ${APP_SLUG}[bot]"
+    [[ -n "${GH_TOKEN:-}" ]] || die "APP_SLUG is set but GH_TOKEN is not"
+    bot_id="$(gh api "/users/$APP_SLUG%5Bbot%5D" --jq .id)" || bot_id=""
+    [[ "$bot_id" =~ ^[0-9]+$ ]] ||
+        die "cannot resolve ${APP_SLUG}[bot] to an account id"
+    if ! git config user.name "${APP_SLUG}[bot]" ||
+        ! git config user.email \
+            "$bot_id+${APP_SLUG}[bot]@users.noreply.github.com"; then
+        die "cannot set the git identity to ${APP_SLUG}[bot]"
+    fi
+    # Only a GitHub remote, and only to add the credential the checkout
+    # deliberately did not keep. Rewriting any other remote would aim
+    # the push at github.com rather than where it actually points.
+    remote="$(release_remote)"
+    if [[ "$(git remote get-url "$remote")" == *github.com* ]]; then
+        git remote set-url "$remote" \
+            "https://x-access-token:$GH_TOKEN@github.com/$(repo_slug)" ||
+            die "cannot put the App's credential on remote $remote"
+    else
+        warn "remote $remote is not on github.com: pushing to it as it" \
+            "stands"
+    fi
+}
+
 # Refresh an open PR's body. It is generated content, so a stale one just
 # means the PR disagrees with its branch; the release notes live in
 # CHANGELOG.md and are not at risk. The one edit that can be lost is a
@@ -344,7 +395,8 @@ update_pr_body() {
 
     if [[ -n "$prev" ]]; then
         printf '%s\n' "$prev" >"$backup"
-        was="$(printf '%s\n' "$prev" | git interpret-trailers --parse |
+        was="$(printf '%s\n' "$prev" |
+            git interpret-trailers --parse --no-divider |
             sed -n 's/^Next-Version: *//p' | head -1)"
         if [[ -n "$was" && "$was" != "$want" ]]; then
             warn "the PR body declares Next-Version: $was, but this run" \
@@ -488,7 +540,7 @@ check_next_version_order() {
 
 # The Next-Version trailer on the commit $1, whitespace stripped.
 # Prints nothing when there is none, which callers must decide about:
-# only a commit prepare-release.sh wrote carries one, so its absence is
+# only a commit open-release-pr.sh wrote carries one, so its absence is
 # how a release commit is told from any other commit sitting where one
 # did.
 #
@@ -551,7 +603,7 @@ check_next_version_trailer() {
 
     [[ -n "$next" ]] ||
         die "the release commit has no Next-Version trailer --" \
-            "prepare-release.sh writes one, and the gate refuses to" \
+            "open-release-pr.sh writes one, and the gate refuses to" \
             "release a commit without it"
 
     validate_version "$next"

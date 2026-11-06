@@ -149,6 +149,8 @@ if grep -q 'FILL-IN' <<<"$section"; then
     die "CHANGELOG.md entry for $VERSION still has FILL-IN" \
         "placeholders -- the release notes are unfinished"
 fi
+[[ -n "${section//[[:space:]]/}" ]] ||
+    die "CHANGELOG.md entry for $VERSION is empty"
 
 log "check: docs freshness"
 name="$(meson_project_name)"

@@ -8,7 +8,7 @@
 #
 # next-dev defaults to the Next-Version trailer on the checked-out
 # commit, which is where it comes from anyway: the gate reads the same
-# trailer, and prepare-release.sh is what wrote it. Pass it only to
+# trailer, and open-release-pr.sh is what wrote it. Pass it only to
 # override, as a standalone re-run might.
 #
 # base-branch is where the release landed and where the bump goes back.
@@ -16,10 +16,8 @@
 # checkout is detached and the branch name is not recoverable from it.
 #
 # With APP_SLUG set, the commit is attributed to that App's bot account
-# and the remote is pointed at an authenticated URL built from
-# GH_TOKEN. Both are skipped when it is unset, so running this by hand
-# neither rewrites the operator's git identity nor puts a token in
-# their remote.
+# and the remote gets a credential built from GH_TOKEN; see
+# configure_app_identity in release-lib.sh.
 #
 # Runs after the release is published, so a failure here leaves a
 # complete release and a main branch still carrying the released
@@ -95,25 +93,7 @@ fi
 # draw the ruleset's extra-approval requirement, which would stall the
 # bump; and the push needs a credential in the remote, because the
 # checkout deliberately keeps none.
-if [[ -n "${APP_SLUG:-}" ]]; then
-    log "committing as ${APP_SLUG}[bot]"
-    bot_id="$(gh api "/users/$APP_SLUG%5Bbot%5D" --jq .id)"
-    git config user.name "${APP_SLUG}[bot]"
-    git config user.email \
-        "$bot_id+${APP_SLUG}[bot]@users.noreply.github.com"
-    : "${GH_TOKEN:?APP_SLUG is set but GH_TOKEN is not}"
-    # Only a GitHub remote, and only to add the credential the checkout
-    # deliberately did not keep. Rewriting any other remote would aim
-    # the push at github.com rather than where it actually points.
-    remote="$(release_remote)"
-    if [[ "$(git remote get-url "$remote")" == *github.com* ]]; then
-        git remote set-url "$remote" \
-            "https://x-access-token:$GH_TOKEN@github.com/$(repo_slug)"
-    else
-        warn "remote $remote is not on github.com: pushing to it as it" \
-            "stands"
-    fi
-fi
+configure_app_identity
 
 log "opening the $NEXT development cycle on $BRANCH"
 
