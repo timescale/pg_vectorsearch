@@ -682,6 +682,201 @@ TEST(bindings_query_above_default_limits)
 	vs_handle_destroy(handle);
 }
 
+TEST(storage_rerank_clamps_tied_survivors)
+{
+	/* The rerank admits candidates against a threshold that only
+	 * settles as better exact distances arrive, so ties at the
+	 * keep-th distance can all survive extraction. The storage op
+	 * must still return at most the keep results its callers sized
+	 * their buffers for. */
+	uint32_t dim = 8, nvecs = 1000, keep = 2;
+	float	*vecs = make_vectors(nvecs, dim, 23);
+
+	/* Squared L2 from the zero query: 9, 2.25, 2.25 (tie), 1. Only
+	 * these four become candidates; the rest just feeds the build. */
+	memset(vecs, 0, 4 * dim * sizeof(float));
+	vecs[0 * dim] = 3.0f;
+	vecs[1 * dim] = 1.5f;
+	vecs[2 * dim] = 1.5f;
+	vecs[3 * dim] = 1.0f;
+
+	PrismIndexConfig config = {
+			.nlist		   = 10,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+	};
+	PrismIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "build should succeed");
+
+	float query[8] = {0};
+
+	/* Worst exact distance first, so both ties are admitted while
+	 * the threshold still sits above them. The non-zero error makes
+	 * the rerank recompute exact distances from the stored vectors. */
+	uint32_t	ncand = 4;
+	VsTopKEntry candidates[4];
+	for (uint32_t i = 0; i < ncand; i++)
+		candidates[i] = (VsTopKEntry){
+				.distance = 0.0f,
+				.error	  = 1.0f,
+				.id		  = (uint64_t)i << 16,
+		};
+
+	/* Headroom beyond keep, so an overrun fails the assert below
+	 * instead of corrupting the test's stack. */
+	uint32_t order[8];
+	Distance dists[8];
+	uint32_t n = vs_storage_rerank(
+			idx->base.posting_storage,
+			query,
+			dim,
+			candidates,
+			ncand,
+			keep,
+			order,
+			dists);
+
+	ASSERT_EQ(n, keep, "ties at the keep-th distance are clamped");
+	ASSERT_TRUE(dists[0] == 1.0f, "best exact distance first");
+	ASSERT_TRUE(dists[1] == 2.25f, "one of the tied pair second");
+
+	prism_index_destroy(idx);
+}
+
+TEST(storage_rerank_grows_tied_scratch)
+{
+	/* With more threshold survivors than the preallocated extraction
+	 * buffer holds, the rerank must grow its scratch before writing
+	 * the survivors, and still cap the returned count at keep. */
+	uint32_t dim = 8, nvecs = 1000, nties = 257, keep = 257;
+	uint32_t ncand = nties + 2;
+	float	*vecs  = make_vectors(nvecs, dim, 29);
+
+	/* vid 0 is worst, vids 1..nties tie, the last vid is best. */
+	memset(vecs, 0, (size_t)ncand * dim * sizeof(float));
+	vecs[0 * dim] = 3.0f;
+	for (uint32_t i = 1; i <= nties; i++)
+		vecs[i * dim] = 1.5f;
+	vecs[(size_t)(ncand - 1) * dim] = 1.0f;
+
+	PrismIndexConfig config = {
+			.nlist		   = 10,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+	};
+	PrismIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "build should succeed");
+
+	float query[8] = {0};
+
+	/* Worst first, ties, then best, so every tie is admitted. */
+	VsTopKEntry *candidates = vs_alloc((size_t)ncand * sizeof(VsTopKEntry));
+	for (uint32_t i = 0; i < ncand; i++)
+		candidates[i] = (VsTopKEntry){
+				.distance = 0.0f,
+				.error	  = 1.0f,
+				.id		  = (uint64_t)i << 16,
+		};
+
+	uint32_t *order = vs_alloc((size_t)(keep + 8) * sizeof(uint32_t));
+	Distance *dists = vs_alloc((size_t)(keep + 8) * sizeof(Distance));
+	uint32_t  n		= vs_storage_rerank(
+			 idx->base.posting_storage,
+			 query,
+			 dim,
+			 candidates,
+			 ncand,
+			 keep,
+			 order,
+			 dists);
+
+	ASSERT_EQ(n, keep, "grown extraction still caps at keep");
+	ASSERT_TRUE(dists[0] == 1.0f, "best exact distance first");
+	ASSERT_TRUE(dists[1] == 2.25f, "ties follow the best");
+	ASSERT_TRUE(dists[keep - 1] == 2.25f, "ties fill the tail");
+
+	/* The arena gives ASan no redzones, so an overflowing write into
+	 * the old scratch would pass silently: check the growth itself. */
+	ArrayPageStorage *aps = (ArrayPageStorage *)idx->base.posting_storage;
+	ASSERT_TRUE(aps->rerank_cap >= ncand, "scratch grew past its default");
+
+	prism_index_destroy(idx);
+}
+
+/* A rerank that ignores keep and returns extra survivors, standing in
+ * for any storage whose extraction keeps ties past the k-th distance. */
+static uint32_t
+stub_rerank_returns_extra(
+		VsStorage		  *self,
+		const float		  *query,
+		Dimension		   dim,
+		const VsTopKEntry *candidates,
+		uint32_t		   count,
+		uint32_t		   keep,
+		uint32_t		  *out_indices,
+		Distance		  *out_distances)
+{
+	uint32_t n = keep + 3 < count ? keep + 3 : count;
+
+	(void)self;
+	(void)query;
+	(void)dim;
+	(void)candidates;
+	for (uint32_t i = 0; i < n; i++)
+	{
+		out_indices[i]	 = i;
+		out_distances[i] = (Distance)i;
+	}
+	return n;
+}
+
+TEST(query_path_clamps_overlong_rerank)
+{
+	/* Whatever a storage rerank returns, the shared query path must
+	 * cap the result count: its consumers size buffers to k. */
+	uint32_t dim = 8, nvecs = 1000, k = 5, nprobe = 10;
+	float	*vecs = make_vectors(nvecs, dim, 31);
+
+	PrismIndexConfig config = {
+			.nlist		   = 10,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+	};
+	PrismIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "build should succeed");
+
+	VsStorageOps stub_ops = *idx->base.posting_storage->ops;
+
+	stub_ops.rerank				   = stub_rerank_returns_extra;
+	idx->base.posting_storage->ops = &stub_ops;
+
+	PrismQueryCtx *qctx = prism_query_ctx_create(idx, k, nprobe);
+	ASSERT_NOT_NULL(qctx, "query ctx should succeed");
+
+	/* Headroom, so a missing clamp fails the assert below instead of
+	 * corrupting the test's stack. */
+	uint32_t result_ids[16];
+	uint32_t count = prism_query_exec(
+			qctx,
+			vecs,
+			k,
+			nprobe,
+			VS_DISTANCE_MODE_ASYMMETRIC,
+			true,
+			result_ids);
+
+	ASSERT_EQ(count, k, "a rerank surplus is clamped to k");
+
+	prism_query_ctx_destroy(qctx);
+	prism_index_destroy(idx);
+}
+
 TEST(posting_convert_aos_to_fastscan)
 {
 	uint32_t dim   = 32;
