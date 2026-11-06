@@ -519,7 +519,8 @@ execute_search(IndexScanDesc scan)
 	/* Lazily set heap relation for reranking (rel is NULL at
 	 * beginscan time; heapRelation becomes available later) */
 	if (scan->heapRelation != NULL && ss->storage.rel == NULL)
-		vs_pg_storage_set_rel(&ss->storage, scan->heapRelation);
+		vs_pg_storage_set_rel(
+				&ss->storage, scan->heapRelation, scan->xs_snapshot);
 
 	/*
 	 * Extract query vector. The ORDER BY operator belongs to the opclass, so

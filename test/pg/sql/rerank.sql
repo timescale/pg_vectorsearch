@@ -2,7 +2,8 @@
 
 -- Use higher dimensionality to exercise the full rerank path
 -- (low-dim vectors can sometimes bypass rerank entirely)
-CREATE TABLE rerank_test (id serial, v vec32(32));
+CREATE TABLE rerank_test (id serial, v vec32(32), payload int DEFAULT 0)
+    WITH (fillfactor = 40);
 
 INSERT INTO rerank_test (v)
     SELECT (
@@ -79,6 +80,116 @@ SELECT count(*) AS matching_ids
 
 SELECT bool_and(abs(t.dist - r.dist) < 1e-5) AS distances_match
     FROM truth_cos t JOIN result_cos r USING (id);
+
+-- HOT pruning redirects the original TIDs retained by the index. Distinct
+-- vector radii keep the exact ordering unambiguous, while RaBitQ's estimated
+-- ordering must differ so falling back to it cannot pass this check.
+DROP INDEX idx_rerank_l2;
+DROP INDEX idx_rerank_cos;
+TRUNCATE rerank_test;
+WITH components AS (
+    SELECT i, j, sin(i * 0.37 + j * 0.11) AS x
+    FROM generate_series(1, 500) i, generate_series(0, 31) j
+), norms AS (
+    SELECT i, sqrt(sum(x * x)) AS norm FROM components GROUP BY i
+)
+INSERT INTO rerank_test (id, v)
+    SELECT i, array_agg(((10000 + i) * x / norm)::real ORDER BY j)::vec32
+    FROM components JOIN norms USING (i) GROUP BY i ORDER BY i;
+CREATE INDEX idx_rerank_hot ON rerank_test USING prism (v)
+    WITH (nlist = 1, centroid_fastscan = off, fastscan = off);
+CREATE TEMP TABLE hot_roots AS SELECT ctid AS tid FROM rerank_test;
+
+SET enable_indexscan = off;
+CREATE TEMP TABLE hot_truth AS
+    SELECT array_agg(id) AS ids FROM (
+        SELECT id FROM rerank_test
+        ORDER BY v <-> array_fill(0::real, ARRAY[32])::vec32 LIMIT 500
+    ) q;
+RESET enable_indexscan;
+SELECT cardinality(ids) = 500 AS all_rows_in_truth FROM hot_truth;
+
+SET enable_seqscan = off;
+SET prism.nprobe = 1;
+SET prism.rerank_pool = -1;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM rerank_test
+    ORDER BY v <-> array_fill(0::real, ARRAY[32])::vec32 LIMIT 500;
+SELECT ids = (SELECT array_agg(id) FROM (
+    SELECT id FROM rerank_test
+    ORDER BY v <-> array_fill(0::real, ARRAY[32])::vec32 LIMIT 500
+) q) AS exact_before_hot FROM hot_truth;
+SET prism.rerank = off;
+SELECT ids <> (SELECT array_agg(id) FROM (
+    SELECT id FROM rerank_test
+    ORDER BY v <-> array_fill(0::real, ARRAY[32])::vec32 LIMIT 500
+) q) AS estimated_order_differs FROM hot_truth;
+RESET prism.rerank;
+
+UPDATE rerank_test SET payload = payload + 1;
+VACUUM rerank_test;
+CREATE FUNCTION heap_tid_redirected(regclass, tid) RETURNS bool
+    AS '$libdir/pgvs_test_helpers', 'vs_test_heap_tid_redirected'
+    LANGUAGE C STRICT;
+SELECT bool_and(heap_tid_redirected('rerank_test', tid)) AS roots_redirected
+    FROM hot_roots;
+SELECT ids = (SELECT array_agg(id) FROM (
+    SELECT id FROM rerank_test
+    ORDER BY v <-> array_fill(0::real, ARRAY[32])::vec32 LIMIT 500
+) q) AS exact_after_hot FROM hot_truth;
+DROP FUNCTION heap_tid_redirected(regclass, tid);
+DROP TABLE hot_roots;
+DROP TABLE hot_truth;
+RESET enable_seqscan;
+RESET prism.nprobe;
+RESET prism.rerank_pool;
+
+-- A rerank reads only rows the scan can see. A vector too wide for its heap
+-- page lives in TOAST, and a dead row's chunks can be gone before the row
+-- itself is: the delete, or the abort of the insert, frees them, a VACUUM of
+-- the toast table reclaims them, and the heap tuple stays until its page is
+-- pruned. Fetching that tuple's vector would fail on a missing chunk.
+CREATE TABLE rerank_toast (id serial, v vec32(1024));
+INSERT INTO rerank_toast (v)
+    SELECT (
+        SELECT array_agg(sin(i * 0.1 + j * 0.7)::real)
+        FROM generate_series(0, 1023) j
+    )::vec32(1024)
+    FROM generate_series(1, 100) i;
+CREATE INDEX idx_rerank_toast ON rerank_toast USING prism (v)
+    WITH (nlist = 1, centroid_compression = true);
+
+-- Built inside a DO block and in plpgsql, so neither the echo nor the
+-- planner's inlining puts a thousand floats into the output; the scan still
+-- evaluates it once.
+DO $$
+BEGIN
+    EXECUTE format($f$
+        CREATE FUNCTION tqv() RETURNS vec32(1024)
+            LANGUAGE plpgsql STABLE PARALLEL SAFE
+            AS $b$ BEGIN RETURN %L::vec32(1024); END $b$
+    $f$, (SELECT v::text FROM rerank_toast WHERE id = 42));
+END $$;
+
+-- The nearest row is deleted, an identical one is inserted and rolled back,
+-- and only the toast table is vacuumed: both heap tuples are still there for
+-- the index entries to point at, their chunks are not.
+DELETE FROM rerank_toast WHERE id = 42;
+BEGIN;
+INSERT INTO rerank_toast (v) VALUES (tqv());
+ROLLBACK;
+SELECT reltoastrelid::regclass AS toastrel FROM pg_class
+    WHERE oid = 'rerank_toast'::regclass \gset
+VACUUM :toastrel;
+
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+    SELECT id FROM rerank_toast ORDER BY v <-> tqv() LIMIT 3;
+SELECT id FROM rerank_toast ORDER BY v <-> tqv() LIMIT 3;
+RESET enable_seqscan;
+
+DROP TABLE rerank_toast;
+DROP FUNCTION tqv();
 
 -- Cleanup
 DROP TABLE rerank_test;

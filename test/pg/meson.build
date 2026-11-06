@@ -257,6 +257,7 @@ else
         'scan_progress',
         'insert_serialize',
         'split_race',
+        'split_toast_lock',
         'maintenance_lock',
         'split_insert_retry',
       ]

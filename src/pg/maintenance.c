@@ -481,9 +481,26 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 
 typedef struct PgSplitFetchCtx
 {
-	Relation		heap;
-	AttrNumber		attnum;
-	TupleTableSlot *slot;
+	Relation			 heap;
+	AttrNumber			 attnum;
+	TupleTableSlot		*slot;
+	IndexFetchTableData *fetch;
+	/*
+	 * Non-vacuumable: every row version some transaction could still need --
+	 * live, recently deleted, or written by a transaction that has not
+	 * finished. Only a version already dead to everyone is rejected, which is
+	 * the one case where dropping the entry loses nothing, since VACUUM would
+	 * remove it anyway.
+	 *
+	 * Filtering on visibility to *this* transaction instead drops entries
+	 * that are still needed. A row deleted after an older scan took its
+	 * snapshot is invisible here, but that scan has to keep finding it, and
+	 * once the split flips the centroid leaf the new lists are the only place
+	 * left to find it. The split is a re-clustering, not a garbage
+	 * collection: global removability is the only criterion on which it may
+	 * leave an entry out.
+	 */
+	SnapshotData snapshot;
 	/* How to read the indexed column as float32 -- the index's own type, not
 	 * an assumed one. Carries the conversion buffer, so it outlives a fetch.
 	 */
@@ -502,10 +519,14 @@ pg_split_fetch_vector(
 	 * after every entry -- so the detoast below, and a TOAST reassembly if
 	 * the vector is stored out of line, need no cleanup of their own.
 	 *
-	 * SnapshotAny: the posting entry exists until VACUUM tombstones it, so we
-	 * re-cluster against whatever it still points at; a fully-pruned tuple
-	 * just drops out of the split (returns false). Same contract as rerank. */
-	if (!table_tuple_fetch_row_version(c->heap, &tid, SnapshotAny, c->slot))
+	 * Fetched the way the executor fetches an index entry, so a HOT-updated
+	 * row is found through its chain. A row the snapshot rejects is dead to
+	 * every transaction (see PgSplitFetchCtx.snapshot), so the entry drops
+	 * out of the split and is left for VACUUM. */
+	bool call_again = false;
+	bool all_dead	= false;
+	if (!table_index_fetch_tuple(
+				c->fetch, &tid, &c->snapshot, c->slot, &call_again, &all_dead))
 		return false;
 
 	bool  isnull;
@@ -835,9 +856,11 @@ resolve_target_entries(Relation heap, Relation index, Dimension dim)
 /* Common setup: base + storage + heap fetch context. */
 typedef struct MaintCtx
 {
-	PrismIndexBase	base;
-	VsPgStorage		storage;
-	Relation		heap;
+	PrismIndexBase base;
+	VsPgStorage	   storage;
+	Relation	   heap;
+	/* The heap's TOAST relation, locked for the pass. NULL if it has none. */
+	Relation		toast;
 	PgSplitFetchCtx fetch;
 	ResourceOwner	params_owner;
 	/*
@@ -848,6 +871,40 @@ typedef struct MaintCtx
 	 */
 	MemoryContext split_ctx;
 } MaintCtx;
+
+/*
+ * Lock the heap's TOAST relation for the length of the pass. Returns NULL for
+ * a heap that has none.
+ *
+ * A vector wide enough to be stored out of line is reassembled from the TOAST
+ * relation on every fetch, and the versions the split must keep include ones
+ * written by transactions that have not finished yet. If such a transaction
+ * aborts, its TOAST chunks are dead to everyone the instant it does -- no
+ * snapshot holds them back, the way a committed delete's are held back by the
+ * horizon. A VACUUM of the TOAST relation in that window removes chunks this
+ * pass is part way through reading, and the read fails with "missing chunk
+ * number".
+ *
+ * ShareUpdateExclusiveLock is VACUUM's own lock, so holding it here excludes
+ * exactly that and nothing else: the heap stays open to reads, to writes, and
+ * to its own VACUUM. Autovacuum asks for a TOAST relation's lock
+ * conditionally and skips the relation rather than waiting, so a long pass
+ * delays TOAST cleanup instead of stalling a worker on it.
+ *
+ * Taken after the heap's own lock, never before. CLUSTER, REINDEX and VACUUM
+ * all lock the heap first and its TOAST relation second, so acquiring in the
+ * other order here would close a deadlock cycle with them.
+ */
+static Relation
+lock_toast_for_maintenance(Relation heap)
+{
+	Oid toastoid = heap->rd_rel->reltoastrelid;
+
+	if (!OidIsValid(toastoid))
+		return NULL;
+
+	return table_open(toastoid, ShareUpdateExclusiveLock);
+}
 
 static void
 maint_begin(Relation index, MaintCtx *m)
@@ -862,9 +919,16 @@ maint_begin(Relation index, MaintCtx *m)
 	m->base.page_base		 = NULL;
 
 	m->heap			= table_open(index->rd_index->indrelid, AccessShareLock);
+	m->toast		= lock_toast_for_maintenance(m->heap);
 	m->fetch.heap	= m->heap;
 	m->fetch.attnum = index->rd_index->indkey.values[0];
 	m->fetch.slot	= table_slot_create(m->heap, NULL);
+#if PG_VERSION_NUM >= 190000
+	m->fetch.fetch = table_index_fetch_begin(m->heap, SO_NONE);
+#else
+	m->fetch.fetch = table_index_fetch_begin(m->heap);
+#endif
+	InitNonVacuumableSnapshot(m->fetch.snapshot, GlobalVisTestFor(m->heap));
 	m->fetch.access = vec32_access(
 			prism_cache_type_info(index), m->base.dim, CurrentMemoryContext);
 	m->fetch.storage = &m->storage.base;
@@ -994,7 +1058,12 @@ maint_end(Relation index, MaintCtx *m, bool changed)
 		CacheInvalidateRelcache(index);
 	}
 	MemoryContextDelete(m->split_ctx);
+	table_index_fetch_end(m->fetch.fetch);
 	ExecDropSingleTupleTableSlot(m->fetch.slot);
+	/* Both released here rather than at commit: nothing after this reads the
+	 * heap, so there is no reason to keep VACUUM out any longer. */
+	if (m->toast != NULL)
+		table_close(m->toast, ShareUpdateExclusiveLock);
 	table_close(m->heap, AccessShareLock);
 	prism_release_params(m->base.dim, m->base.rabitq_seed, m->params_owner);
 }
