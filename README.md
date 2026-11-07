@@ -175,6 +175,20 @@ the default.
 When replacing an HNSW index, pgvector's `vector_<metric>_ops` maps to
 `vec32_<metric>_ops` and `halfvec_<metric>_ops` to `vec16_<metric>_ops`.
 
+### Dimensions
+
+Any dimension up to 1968 is supported. Above that the dimension must be
+a power of two times an odd factor of at most 8, so 2048, 3072, 4096,
+6144 and 8192 work and 8192 is the ceiling. Past 1968 each posting list
+keeps its full-precision encode reference on a short chain of reference
+pages ahead of its entries (three pages at 4096), and the index reads
+those pages on every probe; the exact rerank also fetches wider heap
+rows, so a `vec16` column halves what it reads. Inner product routes on
+uncompressed centroids, which fit a page up to 2036 dimensions as
+`vec32` and 4072 as `vec16`; use L2 or cosine beyond that. Splitting a
+wide list needs `maintenance_work_mem` of a few hundred megabytes, which
+`prism_rebalance` reports when it is short.
+
 ### Tuning
 
 Defaults are tuned from large-scale benchmarks; most deployments only

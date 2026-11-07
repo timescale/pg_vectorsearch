@@ -75,8 +75,9 @@ typedef struct PrismQueryState
 	 * and cannot miss an allocation. The top-k's and the centroid
 	 * scratch's own contexts are created under it and go with it.
 	 *
-	 * Buffers here are sized to max_k and max_nprobe: resizing means
-	 * building a new state, and the old one has to go somewhere. The
+	 * Buffers here are sized to max_k and max_nprobe (the few that grow,
+	 * grow within those bounds): resizing means building a new state, and
+	 * the old one has to go somewhere. The
 	 * posting scan's pinned page is the one thing a context teardown
 	 * cannot release, which is why prism_query_state_cleanup exists rather
 	 * than callers deleting this directly.
@@ -112,6 +113,15 @@ typedef struct PrismQueryState
 	 * Sized to max_nprobe at init. */
 	float	 *probe_dists;
 	uint32_t *probe_order;
+	/* Spilled layout only: the references the probe re-rank gathered, kept
+	 * for the scan pass so a reference chain is read once per query, and
+	 * the block each list's entries begin on. Sized to the routed set the
+	 * first time it is expanded and grown when a later query routes more
+	 * (bounded by max_nprobe); NULL for an inline layout, which reads the
+	 * reference off the pinned head. */
+	float		*probe_refs;
+	BlockNumber *probe_entries;
+	uint32_t	 probe_refs_cap; /* clusters the two buffers hold */
 
 	/* Result ordering (indices into candidates + final distances) */
 	uint32_t *result_order;

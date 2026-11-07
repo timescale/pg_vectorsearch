@@ -157,6 +157,15 @@ typedef struct PrismOptions
 #define PRISM_MAX_NLIST		2000000
 
 /*
+ * Widest dimension rabitq_params_generate() accepts. The SQL-level params
+ * carry a dense dim x dim matrix built by Gram-Schmidt -- O(dim^3) in time
+ * and O(dim^2) in memory, callable by any role -- so this is a
+ * denial-of-service bound on that generator, not the index ceiling: a prism
+ * index rotates through the O(dim log dim) Hadamard path and goes wider.
+ */
+#define VS_RABITQ_PARAMS_GENERATE_MAX_DIM 1968
+
+/*
  * Range of the target_pages setting -- posting pages each list rests at,
  * the denominator of the automatic nlist. Its default is
  * PRISM_DEFAULT_TARGET_PAGES, over in index_build.h with the code that

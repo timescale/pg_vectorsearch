@@ -87,7 +87,7 @@ typedef void (*PrismBuildScanCb)(
 #define PRISM_DSM_KEY_SORTSHARED   UINT64CONST(0xB000000000000012)
 /* Page-backed phase-3 routing: the global mean, published by the leader before
  * the tree-ready barrier so workers route exactly as the query/insert paths
- * do. The posting-head base (leaf c's head = first_posting + c) is a scalar in
+ * do. The posting-head base (see prism_leaf_head_blkno) is a scalar in
  * PrismBuildShared, not a shared array. */
 #define PRISM_DSM_KEY_GLOBAL_MEAN UINT64CONST(0xB000000000000014)
 
@@ -189,8 +189,9 @@ typedef struct PrismBuildShared
 	uint8_t		nlevels;
 
 	/* Published by the leader before phase 3: the first posting-head block.
-	 * Cluster c's head is first_posting + c (formula), so workers map a routed
-	 * head block back to its leaf by subtraction — no O(nlist) head array. */
+	 * Cluster c's head is formula-derived (prism_leaf_head_blkno), so workers
+	 * map a routed head block back to its leaf arithmetically
+	 * (prism_route_head_to_leaf) — no O(nlist) head array. */
 	BlockNumber first_posting;
 } PrismBuildShared;
 
@@ -1035,7 +1036,8 @@ extern bool do_parallel_build(
 		 * *out_global_mean is the (owned) mean the centroid pages encode
 		 * against, so the caller's metadata write matches. May be NULL. */
 		float **out_global_mean,
-		/* The posting-head base: cluster c's head is *out_first_posting + c.
+		/* The posting-head base: cluster c's head is
+		 * prism_leaf_head_blkno(*out_first_posting, c, stride).
 		 * Callers that need to locate head pages after the build (e.g. the
 		 * standalone driver + its tests) capture it; may be NULL. */
 		BlockNumber *out_first_posting);

@@ -143,6 +143,10 @@ pg_read_page(VsStorage *self, BlockNumber blkno)
 	VsPgStorage *s = PG_STORAGE(self);
 	Buffer		 buf;
 
+	/* One pinned buffer at a time: a read before the previous release
+	 * would overwrite cur_buf and leak its pin. */
+	Assert(s->cur_buf == InvalidBuffer);
+
 	if (g_recent_buffers)
 	{
 		Buffer *slot = bufcache_slot(s->index, blkno);

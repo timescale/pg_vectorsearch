@@ -16,12 +16,11 @@
 #include <utils/builtins.h>
 #include <utils/memutils.h>
 
-#include "index/posting_page.h"
 #include "quant/matrix.h"
 #include "support_pg.h"
 
 /*
- * The generator caps dim at PRISM_INDEX_MAX_DIM (see
+ * The generator caps dim at VS_RABITQ_PARAMS_GENERATE_MAX_DIM (see
  * vs_pg_check_rabitq_params_dim_valid). Prove at compile time that a
  * matrix that large still fits a single allocation, so raising the cap
  * without revisiting VS_RABITQ_PARAMS_PG_SIZE breaks the build here
@@ -29,11 +28,12 @@
  * size computation) at run time.
  */
 StaticAssertDecl(
-		offsetof(RaBitQParamsPG, P) + (uint64_t)PRISM_INDEX_MAX_DIM *
-											  PRISM_INDEX_MAX_DIM *
-											  sizeof(float) <=
+		offsetof(RaBitQParamsPG, P) +
+						(uint64_t)VS_RABITQ_PARAMS_GENERATE_MAX_DIM *
+								VS_RABITQ_PARAMS_GENERATE_MAX_DIM *
+								sizeof(float) <=
 				MaxAllocSize,
-		"rabitq_params matrix at PRISM_INDEX_MAX_DIM exceeds MaxAllocSize; "
+		"rabitq_params matrix at the generator cap exceeds MaxAllocSize; "
 		"revisit VS_RABITQ_PARAMS_PG_SIZE and the dim cap together");
 
 /* ----------------------------------------------------------------

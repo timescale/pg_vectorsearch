@@ -9,8 +9,11 @@
  * handles group packing, page layout, and chain linking.
  */
 
+#include "vs_config.h"
+
 #include <string.h>
 
+#include "core/log.h"
 #include "core/memory.h"
 #include "index/posting_build.h"
 #include "index/posting_convert.h"
@@ -99,19 +102,22 @@ prism_posting_convert_to_fastscan(
 {
 	if (aos_head == InvalidBlockNumber)
 		return InvalidBlockNumber;
+	/* A fastscan group that fits no page would overrun the builder's page
+	 * buffer; the SQL entry point refuses first, this is the backstop. */
+	if (prism_fastscan_max_groups(dim, false) == 0)
+		vs_error(
+				VS_EXTENSION_NAME ": fastscan does not support %u dimensions",
+				(unsigned)dim);
 
 	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
 
-	/* Read pt_centroid from AoS first page */
-	Page   first_page  = vs_storage_read_page(storage, aos_head);
-	float *pt_centroid = vs_alloc(dim * sizeof(float));
-	memcpy(pt_centroid,
-		   prism_posting_pt_centroid(first_page),
-		   dim * sizeof(float));
-
-	PrismPostingPageOpaque *first_op   = prism_posting_opaque(first_page);
-	uint32_t				cluster_id = first_op->cluster_id;
+	/* The cluster id from the AoS head, then its encode reference. */
+	Page	 first_page = vs_storage_read_page(storage, aos_head);
+	uint32_t cluster_id = prism_posting_opaque(first_page)->cluster_id;
 	vs_storage_release_page(storage, aos_head);
+
+	float *pt_centroid = vs_alloc(dim * sizeof(float));
+	prism_posting_reference_read(storage, aos_head, dim, pt_centroid);
 
 	PrismPostingBuilder builder;
 	prism_posting_builder_init_fastscan(

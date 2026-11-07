@@ -21,13 +21,32 @@
 #include <commands/defrem.h>
 #include <fmgr.h>
 #include <funcapi.h>
+#include <storage/bufmgr.h>
 #include <utils/tuplestore.h>
 
 #include "index/centroid_page.h"
 #include "pg/amcache.h"
 #include "pg/bufstorage.h"
+#include "pg/meta.h"
 
 PG_MODULE_MAGIC;
+
+/* Open a relation, erroring unless it is a prism index. */
+static Relation
+open_prism_index(Oid relid, LOCKMODE lockmode)
+{
+	Relation index = relation_open(relid, lockmode);
+
+	if (index->rd_rel->relam != get_am_oid("prism", false))
+	{
+		relation_close(index, lockmode);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a prism index",
+						RelationGetRelationName(index))));
+	}
+	return index;
+}
 
 /*
  * One row per cached RaBitQ rotation matrix in this backend's params
@@ -88,21 +107,12 @@ PG_FUNCTION_INFO_V1(vs_test_append_centroid_page);
 Datum
 vs_test_append_centroid_page(PG_FUNCTION_ARGS)
 {
-	Oid		 indexoid = PG_GETARG_OID(0);
-	Relation index	  = relation_open(indexoid, ShareUpdateExclusiveLock);
-
 	/* This extends whatever relation it's handed -- passing a heap table by
 	 * mistake would silently append a garbage page to it instead of erroring
 	 * out, since neither relation_open nor vs_pg_storage_init care what kind
 	 * of relation they're given. */
-	if (index->rd_rel->relam != get_am_oid("prism", false))
-	{
-		relation_close(index, ShareUpdateExclusiveLock);
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not a prism index",
-						RelationGetRelationName(index))));
-	}
+	Relation index =
+			open_prism_index(PG_GETARG_OID(0), ShareUpdateExclusiveLock);
 
 	VsPgStorage storage;
 	vs_pg_storage_init(&storage, index, NULL, DISTANCE_L2);
@@ -115,4 +125,27 @@ vs_test_append_centroid_page(PG_FUNCTION_ARGS)
 	relation_close(index, ShareUpdateExclusiveLock);
 
 	PG_RETURN_INT32((int32)blkno);
+}
+
+/*
+ * The raw magic on an index's metapage, read without validating it, so a
+ * test can pin the format each dimension is written in.
+ */
+PG_FUNCTION_INFO_V1(vs_test_meta_magic);
+
+Datum
+vs_test_meta_magic(PG_FUNCTION_ARGS)
+{
+	Relation index = open_prism_index(PG_GETARG_OID(0), AccessShareLock);
+	Buffer	 buf   = ReadBuffer(index, PRISM_META_PAGE_BLKNO);
+
+	LockBuffer(buf, BUFFER_LOCK_SHARE);
+	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
+			BufferGetPage(buf));
+	uint32_t magic = meta->magic;
+	UnlockReleaseBuffer(buf);
+
+	relation_close(index, AccessShareLock);
+
+	PG_RETURN_INT64((int64)magic);
 }
