@@ -1,26 +1,19 @@
 Parsed test spec with 2 sessions
 
-starting permutation: b_build w_poll w_wake b_done
+starting permutation: b_build w_read w_wake b_done
 step b_build: 
     CREATE INDEX i_prog ON emb USING prism (v) WITH (nlist = 32);
  <waiting ...>
-s_watch: NOTICE:  tuples_done advanced mid-scan: t
-step w_poll: 
-    DO $$
-    DECLARE
-        observed bool := false;
-    BEGIN
-        FOR i IN 1..50 LOOP
-            PERFORM 1 FROM pg_stat_progress_create_index
-                WHERE tuples_done > 0;
-            IF FOUND THEN
-                observed := true;
-                EXIT;
-            END IF;
-            PERFORM pg_sleep(0.1);
-        END LOOP;
-        RAISE NOTICE 'tuples_done advanced mid-scan: %', observed;
-    END $$;
+step w_read: 
+    -- Every row the scan saw, not just the per-participant remainders it
+    -- flushes at the end: those cannot add up to the row count.
+    SELECT tuples_done >= (SELECT count(*) FROM emb) AS scan_reported_live
+        FROM pg_stat_progress_create_index;
+
+scan_reported_live
+------------------
+t                 
+(1 row)
 
 step w_wake: SELECT injection_points_wakeup('prism-scan-progress');
 injection_points_wakeup

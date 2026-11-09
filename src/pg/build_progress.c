@@ -16,6 +16,7 @@
 
 #include "vs_config.h"
 
+#include <access/parallel.h>
 #include <commands/progress.h>
 #include <miscadmin.h>
 #include <pgstat.h>
@@ -194,23 +195,18 @@ prism_build_report_phase(PrismBuildProgress *p, int phase)
 void
 prism_build_progress_incr_tuples(int64_t n)
 {
+	/* A scan whose row count divides evenly into the batch size has nothing
+	 * left to flush, and one that stole no rows never had anything. Reporting
+	 * it anyway costs a worker a parallel message for the leader to add zero
+	 * to. */
+	if (n == 0)
+		return;
+
 	/* From a worker this piggybacks over the parallel message queue and the
 	 * leader applies it (also while blocked at a barrier -- interrupt
 	 * processing runs inside its condition-variable sleeps); in the leader
 	 * it applies directly. */
 	pgstat_progress_parallel_incr_param(PROGRESS_CREATEIDX_TUPLES_DONE, n);
-
-	/* Test hook: lets an isolation test pause a build at its first
-	 * mid-scan progress flush and observe the advanced counter. Fires once
-	 * per backend so waking the build once suffices. */
-#ifdef USE_INJECTION_POINTS
-	static bool fired = false;
-	if (!fired)
-	{
-		fired = true;
-		INJECTION_POINT("prism-scan-progress", NULL);
-	}
-#endif
 }
 
 void
@@ -222,6 +218,37 @@ prism_build_report_progress(PrismBuildProgress *p, double done)
 				PROGRESS_CREATEIDX_TUPLES_TOTAL, (int64)p->tuples_total);
 		p->total_set = true;
 	}
+	/*
+	 * Test hook: the parallel leader reaches this after its workers have
+	 * finished, and tuples_done still holds only what live reporting
+	 * produced -- this call is what replaces it with the exact count. So a
+	 * watcher that stops the build here sees a nonzero counter if and only
+	 * if progress was reported during the scan.
+	 *
+	 * Here rather than at a flush, because the leader arrives whatever share
+	 * of the scan work-stealing gave it, including none: the counter it
+	 * pauses with is the workers', relayed over the parallel message queue
+	 * and necessarily already applied, since the leader cannot see a worker
+	 * finish without first draining that worker's earlier messages.
+	 *
+	 * The leader is also the backend running the CREATE INDEX, so it is the
+	 * one a test driving the build through a session can see stop.
+	 *
+	 * Tested against the phase rather than p->is_parallel. That flag holds
+	 * the worker count the planner asked for, so it stays set when no worker
+	 * launches and the build falls back to the serial scan -- which reports
+	 * every 10000 rows and would reach a 'wait' here repeatedly, against the
+	 * one wake-up that releases it. The parallel leader's publish is the
+	 * only caller during SCAN_PARALLEL, and it happens once.
+	 *
+	 * Only ever in the leader: a worker has no PrismBuildProgress to report
+	 * through, which the assertion records.
+	 */
+#ifdef USE_INJECTION_POINTS
+	Assert(!IsParallelWorker());
+	if (p->cur_phase == PRISM_BUILD_PHASE_SCAN_PARALLEL)
+		INJECTION_POINT("prism-scan-progress", NULL);
+#endif
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, (int64)done);
 }
 
