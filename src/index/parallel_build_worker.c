@@ -401,8 +401,8 @@ prism_pbuild_exec_sampling(
 	prism_dsm_sample_seen(dsm_samples)[participant_id]	 = sc.seen;
 
 	/* Flush the sub-batch remainder so the participant's contribution to
-	 * the progress view is exact (and so every participant makes at least
-	 * one flush per scan, whatever share the work-stealing gave it). */
+	 * the progress view is exact. Zero when the share divided evenly into
+	 * the batch size, or when work-stealing left this participant none. */
 	prism_build_progress_incr_tuples((int64_t)(sc.seen & 1023));
 
 	/* Barrier: all participants done sampling. */

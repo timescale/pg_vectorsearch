@@ -1,14 +1,22 @@
-# Parallel builds advance pg_stat_progress_create_index.tuples_done while
-# the heap scans run, not only after they finish.
+# A parallel build advances pg_stat_progress_create_index.tuples_done while
+# its heap scans run, not only once they finish, so an operator watching a
+# long build can see it moving.
 #
-# The build session attaches a 'wait' on the progress-flush injection point
-# (session-local, so only the leader pauses -- at its first flush, which is
-# guaranteed no later than its end-of-scan remainder even if work-stealing
-# starved it of rows). The watcher then polls the progress view: with live
-# reporting the leader has already applied its first increment before it
-# pauses, so tuples_done is nonzero mid-scan; the watcher wakes the build
-# afterwards. Without live reporting the injection point never fires, the
-# build runs to completion, and the poll times out at zero.
+# The build stops just before the leader replaces that counter with the exact
+# count its finished workers hand it. So what the watcher reads there is what
+# live reporting alone produced, and it should already account for every row
+# scanned. Reporting only at the end of each participant's scan would leave
+# it at the remainders, far short of the row count.
+#
+# The leader always reaches that point, whatever share of the scan
+# work-stealing gave it -- it does not scan that phase at all, and the counter
+# it stops with is the workers', relayed over the parallel message queue and
+# necessarily already applied. Being the backend running b_build, it is also
+# the one isolationtester can see stop; a paused worker would leave the step
+# looking merely slow, until the cancel.
+#
+# The build is frozen while the watcher looks, so it reads the view once.
+# There is nothing to poll for.
 #
 # Requires a PostgreSQL built with injection points; the meson harness only
 # schedules this spec when -Dpg_srcdir is set and USE_INJECTION_POINTS holds.
@@ -32,6 +40,8 @@ teardown
 session s_build
 setup
 {
+    -- set_local only so a failed permutation cannot leave the point
+    -- attached for the rest of the run. The workers never reach it.
     SELECT injection_points_set_local();
     SELECT injection_points_attach('prism-scan-progress', 'wait');
     SET max_parallel_maintenance_workers = 2;
@@ -46,24 +56,13 @@ step b_done
 }
 
 session s_watch
-step w_poll
+step w_read
 {
-    DO $$
-    DECLARE
-        observed bool := false;
-    BEGIN
-        FOR i IN 1..50 LOOP
-            PERFORM 1 FROM pg_stat_progress_create_index
-                WHERE tuples_done > 0;
-            IF FOUND THEN
-                observed := true;
-                EXIT;
-            END IF;
-            PERFORM pg_sleep(0.1);
-        END LOOP;
-        RAISE NOTICE 'tuples_done advanced mid-scan: %', observed;
-    END $$;
+    -- Every row the scan saw, not just the per-participant remainders it
+    -- flushes at the end: those cannot add up to the row count.
+    SELECT tuples_done >= (SELECT count(*) FROM emb) AS scan_reported_live
+        FROM pg_stat_progress_create_index;
 }
-step w_wake	{ SELECT injection_points_wakeup('prism-scan-progress'); }
+step w_wake { SELECT injection_points_wakeup('prism-scan-progress'); }
 
-permutation b_build w_poll w_wake b_done
+permutation b_build w_read w_wake b_done
