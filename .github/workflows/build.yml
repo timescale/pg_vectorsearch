@@ -238,13 +238,17 @@ jobs:
           done
           # Temp-instance server logs carry the crash signal and, on an
           # assert build, the "TRAP: failed Assert(...) File:Line".
-          for f in builddir/test/pg/tap_log/*; do
+          #
+          # Two places hold them. The regress instance runs with
+          # logging_collector on (see test/pg/meson.build), so its
+          # diagnostics go to the instance's own data/log and the output
+          # directory's postmaster.log keeps only the redirect notice. The
+          # isolation instance has no collector, so its diagnostics are in
+          # that postmaster.log instead. Only a failing run keeps an
+          # instance at all; a passing one removes it.
+          for f in builddir/test/pg/tap_log/* builddir/test/pg/log/* \
+                   builddir/*testdb/data/log/*; do
             [ -f "$f" ] && echo "=== $f ===" && cat "$f"
-          done
-          for d in builddir/testdb builddir/isolation_testdb; do
-            for f in "$d"/log/*; do
-              [ -f "$f" ] && echo "=== $f ===" && cat "$f"
-            done
           done
 
       - name: Upload test logs
@@ -254,8 +258,8 @@ jobs:
           name: test-logs-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.standalone && 'standalone' || matrix.pg }}${{ matrix.label && format('-{0}', matrix.label) || '' }}
           path: |
             builddir/meson-logs/
-            builddir/testdb/log/
-            builddir/isolation_testdb/log/
+            builddir/test/pg/
+            builddir/*testdb/data/log/
           retention-days: 7
 
   makefile:

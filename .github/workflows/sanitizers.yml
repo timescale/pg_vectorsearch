@@ -78,7 +78,16 @@ jobs:
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
         with:
           name: test-logs-asan
-          path: builddir-san-address/meson-logs/
+          # meson-logs/ alone says which test failed but not why. The same
+          # set the build job reads holds that: the output directory for
+          # regression.diffs, the results/ a diff was taken against and the
+          # TAP logs, plus a failing run's retained instance for the server
+          # log. Taken whole rather than file by file, since which of them
+          # exists depends on how the run failed.
+          path: |
+            builddir-san-address/meson-logs/
+            builddir-san-address/test/pg/
+            builddir-san-address/*testdb/data/log/
           retention-days: 7
 
   ubsan:
@@ -116,5 +125,9 @@ jobs:
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
         with:
           name: test-logs-ubsan
-          path: builddir-san-undefined/meson-logs/
+          # Same reasoning as the ASan job above.
+          path: |
+            builddir-san-undefined/meson-logs/
+            builddir-san-undefined/test/pg/
+            builddir-san-undefined/*testdb/data/log/
           retention-days: 7
