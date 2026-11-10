@@ -48,12 +48,33 @@ step r_fetch1 { FETCH 1 FROM c; }
 step r_lock   { SELECT count(*) AS other_rows FROM cinv_other; }
 step r_fetch  { FETCH ALL FROM c; }
 step r_commit { COMMIT; }
+step r_query
+{
+    SELECT id FROM cinv
+    ORDER BY v <-> (SELECT v FROM cinv WHERE id = 42)
+    LIMIT 5;
+}
 
 session maint
 # Invalidates the relcache entry without changing the index's pages.
-step m_alter { ALTER INDEX cinv_idx SET (target_pages = 2); }
+step m_alter    { ALTER INDEX cinv_idx SET (target_pages = 2); }
+step m_begin    { BEGIN; }
+step m_convert  { CALL prism_convert_posting_to_fastscan('cinv_idx', 0); }
+step m_rollback { ROLLBACK; }
 
 # Freed metadata: the invalidation frees the cached metadata while the
 # cursor's scan is still open, and the rescans after it must not read it.
 # The remaining rows are 20, 30, 40 and 50, each its own neighbor.
 permutation r_begin r_declare r_fetch1 m_alter r_lock r_fetch r_commit
+
+# Stale fastscan flag: the reader fills its cache, m_convert rewrites cluster
+# 0 as fastscan, and the reader queries again. A reader still using the
+# cached "no fastscan" flag would score fastscan pages with the AoS kernel:
+# wrong distances, garbage TIDs, and at dim 65-80 an out-of-bounds write into
+# the scan buffers. Both queries must return the same rows.
+permutation r_query m_convert r_query
+
+# Stale flag that is never refreshed: a rollback keeps the converted pages
+# but discards the invalidation, so the reader keeps its cached "no fastscan"
+# flag. It must still score the converted cluster from the pages themselves.
+permutation r_query m_begin m_convert m_rollback r_query

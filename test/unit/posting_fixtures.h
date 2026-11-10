@@ -67,6 +67,36 @@ setup_query_state(
 			qstate, pt_query, centroid, dim, VS_DISTANCE_MODE_ASYMMETRIC);
 }
 
+/*
+ * Build a single-cluster posting list of nbuilt vectors (AoS or fastscan),
+ * numbering them from first_vid.
+ */
+static inline BlockNumber
+build_cluster_from(
+		TestPageStorage *st,
+		RaBitQParams	*params,
+		Dimension		 dim,
+		const float		*centroid,
+		const float		*vecs,
+		uint32_t		 nbuilt,
+		bool			 fastscan,
+		uint32_t		 first_vid)
+{
+	PrismPostingBuilder builder;
+	if (fastscan)
+		prism_posting_builder_init_fastscan(
+				&builder, &st->base, params, dim, 0, centroid, centroid);
+	else
+		prism_posting_builder_init(
+				&builder, &st->base, params, dim, 0, centroid, centroid);
+	for (uint32_t i = 0; i < nbuilt; i++)
+		prism_posting_builder_add(
+				&builder, vid_to_tid(first_vid + i), vecs + (size_t)i * dim);
+	BlockNumber head = prism_posting_builder_finish(&builder);
+	prism_posting_builder_cleanup(&builder);
+	return head;
+}
+
 /* Build a single-cluster posting list of nbuilt vectors (AoS or fastscan). */
 static inline BlockNumber
 build_cluster(
@@ -78,19 +108,8 @@ build_cluster(
 		uint32_t		 nbuilt,
 		bool			 fastscan)
 {
-	PrismPostingBuilder builder;
-	if (fastscan)
-		prism_posting_builder_init_fastscan(
-				&builder, &st->base, params, dim, 0, centroid, centroid);
-	else
-		prism_posting_builder_init(
-				&builder, &st->base, params, dim, 0, centroid, centroid);
-	for (uint32_t i = 0; i < nbuilt; i++)
-		prism_posting_builder_add(
-				&builder, vid_to_tid(i), vecs + (size_t)i * dim);
-	BlockNumber head = prism_posting_builder_finish(&builder);
-	prism_posting_builder_cleanup(&builder);
-	return head;
+	return build_cluster_from(
+			st, params, dim, centroid, vecs, nbuilt, fastscan, 0);
 }
 
 #endif /* VS_TEST_POSTING_FIXTURES_H */

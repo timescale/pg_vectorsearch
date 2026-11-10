@@ -874,8 +874,9 @@ CREATE FUNCTION prism_index_settings(regclass)
 -- no require_own_transaction restriction: it performs one atomic write
 -- with no internal commit boundary, so it is meant to be called in a
 -- loop from inside a DO block or function, e.g. to convert every
--- cluster a query selects. Reports the new posting head block number
--- via NOTICE.
+-- cluster a query selects. A rollback leaves the cluster converted, which
+-- is harmless since the entries are unchanged. Reports the new posting
+-- head block number via NOTICE.
 CREATE PROCEDURE prism_convert_posting_to_fastscan(
         index_oid regclass,
         cluster_id integer

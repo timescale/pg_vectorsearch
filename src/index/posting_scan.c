@@ -289,8 +289,10 @@ advance_page(PrismPostingScan *scan)
  * extracting candidates from topk.
  * ---------------------------------------------------------------- */
 
+static void scan_fastscan_page(PrismPostingScan *scan, VsTopK *topk);
+
 void
-prism_posting_scan_cluster(PrismPostingScan *scan, VsTopK *topk)
+prism_posting_scan_aos_page(PrismPostingScan *scan, VsTopK *topk)
 {
 	Dimension dim		 = scan->dim;
 	uint32_t  entry_size = PRISM_POSTING_ENTRY_SIZE(dim);
@@ -303,95 +305,100 @@ prism_posting_scan_cluster(PrismPostingScan *scan, VsTopK *topk)
 	Distance *distances = scan->page_distances;
 	float	 *scratch	= scan->page_scratch;
 
-	/* Process pages until chain is exhausted.
-	 * For flat mode: single iteration (one page, no chain). */
-	for (;;)
+	char	*content = scan->cur_content;
+	uint32_t count	 = scan->cur_count;
+
+	/* --- Score: batch IP over all entries on this page ---
+	 *
+	 * AoS layout: entry i's bits live at content + i * entry_size
+	 * + PRISM_POSTING_ENTRY_BITS_OFFSET. The SIMD kernel just needs
+	 * the first entry's bits pointer and a stride of entry_size. */
+	const uint8_t *bits_base = prism_posting_first_bits(content);
+
+	uint32_t padded = (count + 3) & ~3u;
+	vs_rabitq_inner_product_multi(
+			scan->qstate->transformed,
+			bits_base,
+			entry_size,
+			dim,
+			padded,
+			scratch);
+
+	/* Convert raw IPs to distances, reading f_add/f_rescale per
+	 * entry via the strided AoS accessor. */
+	for (uint32_t i = 0; i < count; i++)
 	{
-		/* Advance to next page */
-		if (scan->cur_page == NULL)
+		PrismPostingEntryHeader *e = prism_posting_entry_at(content, i, dim);
+		float final_dot			   = (2.0f * scratch[i] - sum_t) * inv_sqrt_d;
+		distances[i] = e->f_add + g_add - 2.0f * e->f_rescale * final_dot;
+	}
+
+	/* --- Prune + insert approximate distances --- */
+	Distance threshold = vs_topk_threshold(topk);
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		PrismPostingEntryHeader *e = prism_posting_entry_at(content, i, dim);
+		scan->entries_scanned++;
+
+		if (e->meta.flags & PRISM_POSTING_FLAG_DELETED)
 		{
-			if (!advance_page(scan))
-				break;
+			scan->entries_pruned++;
+			continue;
 		}
 
-		/* A page tombstoned by VACUUM (all entries dead) is skipped — no
-		 * scoring kernel; the chain-follow below still advances past it. A
+		Distance est = distances[i];
+		Distance err = e->f_error * g_error;
+		Distance lb	 = est - err;
+
+		if (lb >= threshold)
+		{
+			scan->entries_pruned++;
+			continue;
+		}
+
+		uint64_t id = prism_posting_encode_tid(&e->meta.tid);
+		vs_topk_insert(topk, est, err, id);
+		threshold = vs_topk_threshold(topk);
+	}
+}
+
+void
+prism_posting_scan_cluster(PrismPostingScan *scan, VsTopK *topk)
+{
+	/* A flat buffer has no page header to read a format from; standalone
+	 * scans it through prism_posting_scan_cluster_standalone. */
+	Assert(scan->storage != NULL || scan->page_base != NULL);
+
+	for (;;)
+	{
+		if (scan->cur_page == NULL && !advance_page(scan))
+			break;
+
+		const PrismPostingPageOpaque *opaque = prism_posting_opaque(
+				scan->cur_page);
+
+		/* A page tombstoned by VACUUM (all entries dead) is skipped. A
 		 * retired chain also carries TOMBSTONED once reclaimed, but its
 		 * entries moved rather than died, so it is still scored. */
-		if (!prism_posting_page_all_dead(prism_posting_opaque(scan->cur_page)))
-		{
-			char	*content = scan->cur_content;
-			uint32_t count	 = scan->cur_count;
-
-			/* --- Score: batch IP over all entries on this page ---
-			 *
-			 * AoS layout: entry i's bits live at content + i * entry_size
-			 * + PRISM_POSTING_ENTRY_BITS_OFFSET. The SIMD kernel just needs
-			 * the first entry's bits pointer and a stride of entry_size. */
-			const uint8_t *bits_base = prism_posting_first_bits(content);
-
-			uint32_t padded = (count + 3) & ~3u;
-			vs_rabitq_inner_product_multi(
-					scan->qstate->transformed,
-					bits_base,
-					entry_size,
-					dim,
-					padded,
-					scratch);
-
-			/* Convert raw IPs to distances, reading f_add/f_rescale per
-			 * entry via the strided AoS accessor. */
-			for (uint32_t i = 0; i < count; i++)
-			{
-				PrismPostingEntryHeader *e =
-						prism_posting_entry_at(content, i, dim);
-				float final_dot = (2.0f * scratch[i] - sum_t) * inv_sqrt_d;
-				distances[i]	= e->f_add + g_add -
-							   2.0f * e->f_rescale * final_dot;
-			}
-
-			/* --- Prune + insert approximate distances --- */
-			Distance threshold = vs_topk_threshold(topk);
-
-			for (uint32_t i = 0; i < count; i++)
-			{
-				PrismPostingEntryHeader *e =
-						prism_posting_entry_at(content, i, dim);
-				scan->entries_scanned++;
-
-				if (e->meta.flags & PRISM_POSTING_FLAG_DELETED)
-				{
-					scan->entries_pruned++;
-					continue;
-				}
-
-				Distance est = distances[i];
-				Distance err = e->f_error * g_error;
-				Distance lb	 = est - err;
-
-				if (lb >= threshold)
-				{
-					scan->entries_pruned++;
-					continue;
-				}
-
-				uint64_t id = prism_posting_encode_tid(&e->meta.tid);
-				vs_topk_insert(topk, est, err, id);
-				threshold = vs_topk_threshold(topk);
-			}
-		} /* end: page not tombstoned */
-		else
+		if (prism_posting_page_all_dead(opaque))
 			scan->pages_skipped++;
-
-		/* Follow chain: read next_blkno, then release current */
-		BlockNumber prev_blkno = scan->cur_blkno;
-
-		if (scan->storage != NULL)
-			scan->cur_blkno = prism_posting_opaque(scan->cur_page)->next_blkno;
+		else if (opaque->flags & PRISM_POSTING_PAGE_FASTSCAN)
+		{
+			if (scan->fs_lut == NULL)
+				vs_error(
+						VS_EXTENSION_NAME
+						": posting page %u is in fastscan format but the scan "
+						"was not set up for fastscan",
+						scan->cur_blkno);
+			scan_fastscan_page(scan, topk);
+		}
 		else
-			scan->cur_blkno = InvalidBlockNumber;
+			prism_posting_scan_aos_page(scan, topk);
 
-		if (scan->storage != NULL && scan->page_base == NULL)
+		BlockNumber prev_blkno = scan->cur_blkno;
+		scan->cur_blkno		   = opaque->next_blkno;
+		if (scan->page_base == NULL)
 			vs_storage_release_page(scan->storage, prev_blkno);
 
 		scan->cur_page	  = NULL;
@@ -541,11 +548,8 @@ fastscan_prune_group_avx512(
 #endif
 
 /* ----------------------------------------------------------------
- * Fastscan variant: VPSHUFB kernel for fastscan-format pages
- *
- * Processes 32-vector groups via table-lookup accumulation.
- * Falls back to the AoS kernel for non-fastscan pages (mixed
- * chains).
+ * Score one fastscan page: VPSHUFB kernel over 32-vector groups via
+ * table-lookup accumulation.
  * ---------------------------------------------------------------- */
 
 static void
@@ -555,11 +559,8 @@ scan_fastscan_page(PrismPostingScan *scan, VsTopK *topk)
 	uint32_t  count	  = scan->cur_count;
 	char	 *content = scan->cur_content;
 
-	PrismPostingPageOpaque *opaque = prism_posting_opaque(scan->cur_page);
-
-	/* Fall back to AoS kernel for non-fastscan pages */
-	if (!(opaque->flags & PRISM_POSTING_PAGE_FASTSCAN))
-		return; /* caller handles AoS via the standard path */
+	const PrismPostingPageOpaque *opaque = prism_posting_opaque(
+			scan->cur_page);
 
 	/* Build LUT from transformed query (once per cluster) */
 	if (!scan->fs_lut_valid)
@@ -696,53 +697,6 @@ scan_fastscan_page(PrismPostingScan *scan, VsTopK *topk)
 				vs_topk_insert(topk, est, err, id);
 				threshold = vs_topk_threshold(topk);
 			}
-		}
-	}
-}
-
-void
-prism_posting_scan_cluster_fastscan(PrismPostingScan *scan, VsTopK *topk)
-{
-	/* Process pages until chain is exhausted */
-	for (;;)
-	{
-		if (scan->cur_page == NULL)
-		{
-			if (!advance_page(scan))
-				break;
-		}
-
-		PrismPostingPageOpaque *opaque = prism_posting_opaque(scan->cur_page);
-
-		if (prism_posting_page_all_dead(opaque))
-		{
-			/* All entries dead — skip scoring; the chain-follow advances.
-			 * A retired chain is not that: it carries TOMBSTONED too once
-			 * reclaimed, but its entries were rewritten elsewhere, and a
-			 * scan that followed a stale leaf pointer into it must still
-			 * see them. */
-			scan->pages_skipped++;
-		}
-		else if (opaque->flags & PRISM_POSTING_PAGE_FASTSCAN)
-			scan_fastscan_page(scan, topk);
-		else
-			prism_posting_scan_cluster(scan, topk);
-
-		/* If AoS fallback consumed the entire chain, we're done */
-		if (scan->cur_page == NULL && scan->cur_blkno == InvalidBlockNumber)
-			break;
-
-		/* Follow chain: read next_blkno, then release current */
-		if (scan->cur_page != NULL)
-		{
-			BlockNumber prev_blkno = scan->cur_blkno;
-			scan->cur_blkno		   = opaque->next_blkno;
-
-			if (scan->storage != NULL && scan->page_base == NULL)
-				vs_storage_release_page(scan->storage, prev_blkno);
-
-			scan->cur_page	  = NULL;
-			scan->cur_content = NULL;
 		}
 	}
 }

@@ -184,7 +184,6 @@ typedef struct PrismScanState
 	PrismQueryState qstate;
 	bool			qstate_ready;
 	uint32_t		max_nprobe;
-	bool			has_fastscan;
 
 	/* Rows the enclosing LIMIT will pull, 0 when unknown */
 	uint32_t scan_bound;
@@ -272,8 +271,12 @@ prism_beginscan(Relation index, int nkeys, int norderbys)
 		max_nprobe = 4096;
 	if (max_nprobe > info.nlist)
 		max_nprobe = info.nlist;
-	ss->max_nprobe	 = max_nprobe;
-	ss->has_fastscan = ss->index_base.fastscan != 0;
+	ss->max_nprobe = max_nprobe;
+
+	/* Always score through the fastscan path, which falls back to AoS per
+	 * page. Fastscan is the normal format, and the cached metapage flag can
+	 * be stale after a conversion. */
+	ss->index_base.fastscan = prism_fastscan_bits;
 
 	/* Initialize PG storage */
 	vs_pg_storage_init(&ss->storage, index, NULL, ss->index_base.metric);
@@ -486,9 +489,7 @@ ensure_query_state(PrismScanState *ss, uint32_t k)
 
 	prism_query_state_init(
 			&ss->qstate, &ss->index_base, max_k, ss->max_nprobe);
-	if (ss->has_fastscan)
-		prism_posting_scan_enable_fastscan(
-				&ss->qstate.pscan, prism_fastscan_bits);
+	prism_posting_scan_enable_fastscan(&ss->qstate.pscan, prism_fastscan_bits);
 	ss->qstate_ready = true;
 
 	/* The error-bound rerank can return more than max_k results, so this

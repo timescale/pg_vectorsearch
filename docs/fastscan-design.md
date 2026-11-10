@@ -185,17 +185,9 @@ that are later converted during maintenance.
 
 ### Scan integration
 
-The posting scan dispatches on the page flag:
-
-```c
-void prism_posting_scan_cluster(PrismPostingScan *scan, VsTopK *topk)
-{
-    if (scan->fastscan)
-        prism_posting_scan_cluster_fastscan(scan, topk);
-    else
-        prism_posting_scan_cluster_aos(scan, topk);
-}
-```
+The posting scan has one entry point, `prism_posting_scan_cluster`, which
+picks the kernel for each page from its flag: fastscan pages go to the
+VPSHUFB kernel, AoS pages to the 1-bit kernel. A chain may mix both.
 
 The fastscan scan function:
 1. Build LUT once per cluster from `qstate->transformed`

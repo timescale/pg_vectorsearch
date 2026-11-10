@@ -12,7 +12,9 @@
 #ifndef PRISM_STANDALONE_QUERY_H
 #define PRISM_STANDALONE_QUERY_H
 
+#include "algo/topk.h"
 #include "index/centroid_search.h"
+#include "index/posting_scan.h"
 #include "standalone/index.h"
 
 /* Opaque query context */
@@ -54,5 +56,14 @@ uint32_t prism_query_exec(
 		VsDistanceMode mode,
 		bool		   rerank,
 		uint32_t	  *result_ids);
+
+/*
+ * Score a cluster begun with prism_posting_scan_begin_flat or
+ * prism_posting_scan_begin_cluster. A flat buffer has no page header, so it
+ * goes straight to the AoS kernel; a paged chain goes to
+ * prism_posting_scan_cluster.
+ */
+void
+prism_posting_scan_cluster_standalone(PrismPostingScan *scan, VsTopK *topk);
 
 #endif /* PRISM_STANDALONE_QUERY_H */

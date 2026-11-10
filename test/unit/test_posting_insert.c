@@ -83,10 +83,7 @@ scan_count(
 	vs_topk_init(&topk, k);
 
 	prism_posting_scan_begin_cluster(&scan, &qstate, head);
-	if (fastscan)
-		prism_posting_scan_cluster_fastscan(&scan, &topk);
-	else
-		prism_posting_scan_cluster(&scan, &topk);
+	prism_posting_scan_cluster(&scan, &topk);
 	prism_posting_scan_end_cluster(&scan);
 
 	uint32_t n = topk.cand_count;
@@ -133,7 +130,7 @@ scan_contains_vid(
 	vs_topk_init(&topk, k);
 
 	prism_posting_scan_begin_cluster(&scan, qstate, head);
-	prism_posting_scan_cluster_fastscan(&scan, &topk);
+	prism_posting_scan_cluster(&scan, &topk);
 	prism_posting_scan_end_cluster(&scan);
 
 	VsTopKEntry *entries = vs_alloc(topk.cand_count * sizeof(VsTopKEntry));
