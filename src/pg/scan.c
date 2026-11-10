@@ -239,7 +239,18 @@ prism_beginscan(Relation index, int nkeys, int norderbys)
 	/* Immutable index parameters from the per-backend cache (metapage read at
 	 * most once per backend). */
 	prism_index_base_init(index, &ss->index_base);
-	ss->params_owner   = CurrentResourceOwner;
+	ss->params_owner = CurrentResourceOwner;
+
+	/* The cached mean is freed by a relcache invalidation, which an open
+	 * scan can process between rescans, so the scan keeps its own copy. */
+	if (ss->index_base.pt_global_mean != NULL)
+	{
+		size_t bytes = ss->index_base.dim * sizeof(float);
+		float *mean	 = palloc(bytes);
+		memcpy(mean, ss->index_base.pt_global_mean, bytes);
+		ss->index_base.pt_global_mean = mean;
+	}
+
 	PrismScanInfo info = prism_cache_scan_info(index);
 
 	/* From the per-backend cache; the buffer must outlive a rescan. */

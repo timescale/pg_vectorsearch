@@ -1,0 +1,35 @@
+Parsed test spec with 2 sessions
+
+starting permutation: r_begin r_declare r_fetch1 m_alter r_lock r_fetch r_commit
+step r_begin: BEGIN;
+step r_declare: 
+    DECLARE c CURSOR FOR
+        SELECT q.id AS qid, n.id
+        FROM (SELECT id, v FROM cinv WHERE id IN (10, 20, 30, 40, 50)
+              ORDER BY id) q
+        CROSS JOIN LATERAL
+            (SELECT id FROM cinv c ORDER BY c.v <-> q.v LIMIT 1) n;
+
+step r_fetch1: FETCH 1 FROM c;
+qid|id
+---+--
+ 10|10
+(1 row)
+
+step m_alter: ALTER INDEX cinv_idx SET (target_pages = 2);
+step r_lock: SELECT count(*) AS other_rows FROM cinv_other;
+other_rows
+----------
+         0
+(1 row)
+
+step r_fetch: FETCH ALL FROM c;
+qid|id
+---+--
+ 20|20
+ 30|30
+ 40|40
+ 50|50
+(4 rows)
+
+step r_commit: COMMIT;

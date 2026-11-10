@@ -374,8 +374,9 @@ prism_rabitq_cache_clear(void)
  * per-allocation because relcache wrote per-field cleanup for each of them; an
  * access method gets one line of cleanup written for it, so it gets one
  * allocation. Nor can the blob be grown and swapped later: PrismIndexBase
- * .pt_global_mean points into it and a live scan holds that pointer for the
- * duration of the scan.
+ * .pt_global_mean points into it. A scan copies the mean at beginscan, since
+ * it can process an invalidation between rescans; other callers use the
+ * pointer within a single call.
  *
  * LAZY CONTENT, which the single allocation does not prevent. The metapage
  * read is the floor — dim comes from it and dim sizes the blob — but the work
