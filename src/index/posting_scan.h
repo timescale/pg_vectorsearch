@@ -137,7 +137,12 @@ const float *prism_posting_scan_pt_centroid(const PrismPostingScan *scan);
 /*
  * Score and prune a full cluster.
  *
- * Processes all pages (or the flat buffer). Survivors are inserted
+ * Processes every page of the chain, choosing the kernel per page from its
+ * format: fastscan pages use the VPSHUFB kernel, which needs
+ * prism_posting_scan_enable_fastscan, and AoS pages the 1-bit kernel. A
+ * chain may mix both. Paged scans only: a flat buffer has no page header,
+ * so standalone scans it with prism_posting_scan_cluster_standalone.
+ * Survivors are inserted
  * into topk with approximate (estimated) distances and error bounds
  * via prism_posting_encode_tid(). The caller extracts candidates
  * afterward and reranks with exact distances.
@@ -147,20 +152,15 @@ const float *prism_posting_scan_pt_centroid(const PrismPostingScan *scan);
  */
 void prism_posting_scan_cluster(PrismPostingScan *scan, VsTopK *topk);
 
+/* Score the current page, or a flat buffer, with the AoS kernel. */
+void prism_posting_scan_aos_page(PrismPostingScan *scan, VsTopK *topk);
+
 /*
  * Enable fastscan scratch buffers. Call after init if the index
  * may contain fastscan-format pages.
  * lut_bits: 8 for uint8 LUT, 16 for uint16 high-accuracy LUT.
  */
 void prism_posting_scan_enable_fastscan(PrismPostingScan *scan, int lut_bits);
-
-/*
- * Score and prune a cluster using fastscan kernel.
- *
- * Handles mixed chains: fastscan-format pages use the VPSHUFB
- * kernel, AoS pages fall back to the standard 1-bit kernel.
- */
-void prism_posting_scan_cluster_fastscan(PrismPostingScan *scan, VsTopK *topk);
 
 /*
  * Free scratch buffers.

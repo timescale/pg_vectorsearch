@@ -33,3 +33,69 @@ qid|id
 (4 rows)
 
 step r_commit: COMMIT;
+
+starting permutation: r_query m_convert r_query
+step r_query: 
+    SELECT id FROM cinv
+    ORDER BY v <-> (SELECT v FROM cinv WHERE id = 42)
+    LIMIT 5;
+
+id
+--
+42
+25
+59
+ 8
+76
+(5 rows)
+
+maint: NOTICE:  converted cluster 0 to fastscan (new head block 4)
+step m_convert: CALL prism_convert_posting_to_fastscan('cinv_idx', 0);
+step r_query: 
+    SELECT id FROM cinv
+    ORDER BY v <-> (SELECT v FROM cinv WHERE id = 42)
+    LIMIT 5;
+
+id
+--
+42
+25
+59
+ 8
+76
+(5 rows)
+
+
+starting permutation: r_query m_begin m_convert m_rollback r_query
+step r_query: 
+    SELECT id FROM cinv
+    ORDER BY v <-> (SELECT v FROM cinv WHERE id = 42)
+    LIMIT 5;
+
+id
+--
+42
+25
+59
+ 8
+76
+(5 rows)
+
+step m_begin: BEGIN;
+maint: NOTICE:  converted cluster 0 to fastscan (new head block 4)
+step m_convert: CALL prism_convert_posting_to_fastscan('cinv_idx', 0);
+step m_rollback: ROLLBACK;
+step r_query: 
+    SELECT id FROM cinv
+    ORDER BY v <-> (SELECT v FROM cinv WHERE id = 42)
+    LIMIT 5;
+
+id
+--
+42
+25
+59
+ 8
+76
+(5 rows)
+

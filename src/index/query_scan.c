@@ -418,10 +418,7 @@ scan_clusters(
 		vs_rabitq_init_query_state(
 				&qs->cluster_qs, qs->pt_query, pt_cent, dim, mode);
 
-		if (idx->fastscan && qs->pscan.fs_lut != NULL)
-			prism_posting_scan_cluster_fastscan(&qs->pscan, topk);
-		else
-			prism_posting_scan_cluster(&qs->pscan, topk);
+		prism_posting_scan_cluster(&qs->pscan, topk);
 		total_pages += qs->pscan.pages_read;
 		total_skipped += qs->pscan.pages_skipped;
 		total_entries += qs->pscan.entries_scanned;

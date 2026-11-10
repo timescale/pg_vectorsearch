@@ -26,7 +26,9 @@
  * they have already written. convert_posting_to_fastscan performs one
  * atomic write with no such internal boundary, so it carries no such
  * restriction -- it is meant to be called in a loop from a DO block or
- * function, e.g. to convert every cluster a query selects.
+ * function, e.g. to convert every cluster a query selects. A rollback leaves
+ * the cluster converted, which is harmless: the entries are the same, and
+ * scans read each page's format rather than trusting the cached flag.
  */
 
 #include <postgres.h>
@@ -291,8 +293,9 @@ update_centroid_posting_head(
 
 /*
  * Set PRISM_META_FLAG_FASTSCAN on the metadata page if not already set.
+ * Returns true if the flag changed.
  */
-static void
+static bool
 ensure_meta_fastscan_flag(Relation index)
 {
 	Buffer buf = ReadBuffer(index, 0);
@@ -313,6 +316,7 @@ ensure_meta_fastscan_flag(Relation index)
 		GenericXLogFinish(state);
 		UnlockReleaseBuffer(buf);
 	}
+	return needs_update;
 }
 
 /* ----------------------------------------------------------------
@@ -407,6 +411,10 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 
 		if (already_fastscan)
 		{
+			/* Calling again repairs a conversion that failed before setting
+			 * the flag. */
+			if (ensure_meta_fastscan_flag(index))
+				CacheInvalidateRelcache(index);
 			index_close(index, NoLock);
 			ereport(NOTICE,
 					(errmsg("cluster %d already fastscan (head block %u)",
@@ -457,15 +465,17 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 		PG_RETURN_VOID();
 	}
 
-	ensure_meta_fastscan_flag(index);
+	/* Other backends cache the flag for the planner's cost estimate and the
+	 * format a split writes, so drop their cached copy once it is set. Scans
+	 * read each page's format and do not depend on it. */
+	if (ensure_meta_fastscan_flag(index))
+		CacheInvalidateRelcache(index);
 
 	/*
 	 * Keep PRISM_MAINT_LOCK until end of transaction (NoLock here releases the
-	 * reference, not the lock). maint_end queues a relcache invalidation for
-	 * the new leaf count, and that is only delivered at commit -- release the
-	 * lock now and the next maintenance call could take it, still holding a
-	 * cached index base with the stale count, and mint cluster ids that
-	 * collide with the ones just written.
+	 * reference, not the lock). The invalidation is only delivered at commit,
+	 * so releasing the lock now would let the next maintenance call run on a
+	 * stale cached metapage.
 	 */
 	index_close(index, NoLock);
 

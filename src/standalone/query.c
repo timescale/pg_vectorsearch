@@ -317,7 +317,8 @@ exec_fallback(
 
 			prism_posting_scan_begin_flat(
 					&ctx->posting_scan, &ctx->cluster_qs, idx->flat_pages[li]);
-			prism_posting_scan_cluster(&ctx->posting_scan, &ctx->topk);
+			prism_posting_scan_cluster_standalone(
+					&ctx->posting_scan, &ctx->topk);
 			prism_posting_scan_end_cluster(&ctx->posting_scan);
 		}
 	}
@@ -407,4 +408,19 @@ prism_query_exec(
 		return exec_paged(ctx, query, k, nprobe, mode, rerank, result_ids);
 	else
 		return exec_fallback(ctx, query, k, nprobe, mode, rerank, result_ids);
+}
+
+void
+prism_posting_scan_cluster_standalone(PrismPostingScan *scan, VsTopK *topk)
+{
+	if (scan->storage != NULL || scan->page_base != NULL)
+	{
+		prism_posting_scan_cluster(scan, topk);
+		return;
+	}
+
+	if (scan->cur_page != NULL)
+		prism_posting_scan_aos_page(scan, topk);
+	scan->cur_page	  = NULL;
+	scan->cur_content = NULL;
 }

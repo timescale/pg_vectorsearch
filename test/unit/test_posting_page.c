@@ -28,6 +28,7 @@
 #include "posting_fixtures.h"
 #include "quant/rabitq.h"
 #include "standalone/pg_compat.h"
+#include "standalone/query.h"
 #include "vs_test.h"
 
 TEST_GROUP(PostingPage);
@@ -761,5 +762,257 @@ TEST(chain_walk_stops_leaving_posting_pages)
 	vs_free(st.pages);
 	vs_free(vecs);
 	vs_free(centroid);
+	vs_rabitq_destroy(params);
+}
+
+/* ----------------------------------------------------------------
+ * Page format dispatch
+ * ---------------------------------------------------------------- */
+
+static int
+cmp_candidate_id(const void *a, const void *b)
+{
+	uint64_t ia = ((const VsTopKEntry *)a)->id;
+	uint64_t ib = ((const VsTopKEntry *)b)->id;
+	return (ia > ib) - (ia < ib);
+}
+
+/*
+ * Scans one cluster with k large enough that nothing is pruned and copies
+ * every candidate into out (if not NULL), sorted by id. Returns the count.
+ */
+static uint32_t
+scan_candidates(
+		TestPageStorage	 *st,
+		RaBitQParams	 *params,
+		RaBitQQueryState *qstate,
+		Dimension		  dim,
+		BlockNumber		  head,
+		uint32_t		  k,
+		bool			  enable_fastscan,
+		VsTopKEntry		 *out)
+{
+	PrismPostingScan scan;
+	prism_posting_scan_init(
+			&scan,
+			&st->base,
+			NULL,
+			params,
+			dim,
+			prism_posting_max_entries(dim));
+	if (enable_fastscan)
+		prism_posting_scan_enable_fastscan(&scan, 16);
+
+	VsTopK topk;
+	vs_topk_init(&topk, k);
+	prism_posting_scan_begin_cluster(&scan, qstate, head);
+	prism_posting_scan_cluster(&scan, &topk);
+	prism_posting_scan_end_cluster(&scan);
+
+	uint32_t n = topk.cand_count;
+	if (out != NULL)
+	{
+		memcpy(out, topk.candidates, n * sizeof(VsTopKEntry));
+		qsort(out, n, sizeof(VsTopKEntry), cmp_candidate_id);
+	}
+	vs_topk_cleanup(&topk);
+	prism_posting_scan_cleanup(&scan);
+	return n;
+}
+
+/* Encoded id of vector vid, as the scan reports it. */
+static uint64_t
+vid_id(uint32_t vid)
+{
+	ItemPointerData tid = vid_to_tid(vid);
+	return prism_posting_encode_tid(&tid);
+}
+
+/*
+ * A flat buffer has no page header, so the standalone scan must not read page
+ * flags off it. With small vector ids the special-space offset a page header
+ * would hold is zero, which overlays the opaque on the flat header and puts
+ * flags in the top half of cluster_id. Setting FASTSCAN there makes a misread
+ * certain.
+ */
+TEST(flat_scan_ignores_page_flags)
+{
+	Dimension	  dim	   = 128;
+	RaBitQParams *params   = vs_rabitq_create(dim, 42);
+	float		 *centroid = vs_alloc0(dim * sizeof(float));
+	uint32_t	  nvecs	   = 20;
+	float		 *vecs	   = make_test_vectors(nvecs, dim);
+
+	PrismFlatPostingBuilder builder;
+	prism_flat_posting_builder_init(
+			&builder,
+			params,
+			dim,
+			(uint32_t)PRISM_POSTING_PAGE_FASTSCAN << 16,
+			centroid,
+			nvecs);
+	for (uint32_t i = 0; i < nvecs; i++)
+		prism_flat_posting_builder_add(
+				&builder, vid_to_tid(i), vecs + (size_t)i * dim);
+	char *flat = prism_flat_posting_builder_finish(&builder);
+	prism_flat_posting_builder_cleanup(&builder);
+
+	RaBitQQueryState qstate;
+	setup_query_state(&qstate, params, centroid, dim);
+
+	PrismPostingScan scan;
+	prism_posting_scan_init(&scan, NULL, NULL, params, dim, nvecs);
+
+	VsTopK topk;
+	vs_topk_init(&topk, nvecs);
+	prism_posting_scan_begin_flat(&scan, &qstate, flat);
+	prism_posting_scan_cluster_standalone(&scan, &topk);
+	prism_posting_scan_end_cluster(&scan);
+
+	ASSERT_EQ(nvecs, scan.entries_scanned, "flat scan scores every entry");
+	ASSERT_EQ(nvecs, topk.cand_count, "all entries in topk");
+
+	vs_topk_cleanup(&topk);
+	prism_posting_scan_cleanup(&scan);
+	vs_free(flat);
+	vs_rabitq_destroy(params);
+}
+
+/*
+ * A fastscan page is scored with the fastscan kernel. Read as AoS it would
+ * still count every entry but report garbage TIDs, so check the ids.
+ */
+TEST(scan_scores_fastscan_page)
+{
+	Dimension		dim		 = 128;
+	TestPageStorage st		 = make_test_storage(16);
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
+	uint32_t		nvecs	 = 40;
+	float		   *vecs	 = make_test_vectors(nvecs, dim);
+
+	BlockNumber head =
+			build_cluster(&st, params, dim, centroid, vecs, nvecs, true);
+
+	RaBitQQueryState qstate;
+	setup_query_state(&qstate, params, centroid, dim);
+
+	VsTopKEntry *got = vs_alloc(nvecs * sizeof(VsTopKEntry));
+	ASSERT_EQ(
+			nvecs,
+			scan_candidates(&st, params, &qstate, dim, head, nvecs, true, got),
+			"every entry is a candidate");
+	for (uint32_t i = 0; i < nvecs; i++)
+		ASSERT_EQ(vid_id(i), got[i].id, "candidate ids are the built ones");
+
+	vs_free(got);
+	vs_rabitq_destroy(params);
+}
+
+/*
+ * Without fastscan state the scan refuses a fastscan page rather than
+ * reading it as AoS. Runs in a forked child because vs_error aborts.
+ */
+TEST(scan_rejects_fastscan_page_without_state)
+{
+	Dimension		dim		 = 128;
+	TestPageStorage st		 = make_test_storage(16);
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
+	uint32_t		nvecs	 = 40;
+	float		   *vecs	 = make_test_vectors(nvecs, dim);
+
+	BlockNumber head =
+			build_cluster(&st, params, dim, centroid, vecs, nvecs, true);
+
+	RaBitQQueryState qstate;
+	setup_query_state(&qstate, params, centroid, dim);
+
+	fflush(NULL);
+	pid_t pid = fork();
+	ASSERT_TRUE(pid >= 0, "fork succeeded");
+	if (pid == 0)
+	{
+		if (!vs_test_expect_abort())
+			_exit(2);
+		scan_candidates(&st, params, &qstate, dim, head, nvecs, false, NULL);
+		_exit(0); /* reached only if the check failed to fire */
+	}
+
+	int status = 0;
+	waitpid(pid, &status, 0);
+	ASSERT_TRUE(
+			WIFEXITED(status) && WEXITSTATUS(status) == VS_TEST_ABORTED,
+			"a fastscan page without fastscan state aborts");
+
+	vs_rabitq_destroy(params);
+}
+
+/*
+ * A chain that starts AoS and continues fastscan scores each page with its
+ * own kernel: its candidates are exactly those of the two lists scanned on
+ * their own. The AoS list is linked to the fastscan list by hand.
+ */
+TEST(scan_scores_mixed_chain)
+{
+	Dimension		dim		 = 128;
+	TestPageStorage st		 = make_test_storage(32);
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
+	uint32_t		naos	 = 20;
+	uint32_t		nfs		 = 40;
+	uint32_t		n		 = naos + nfs;
+	float		   *vecs	 = make_test_vectors(n, dim);
+
+	BlockNumber aos_head =
+			build_cluster(&st, params, dim, centroid, vecs, naos, false);
+	BlockNumber fs_head = build_cluster_from(
+			&st,
+			params,
+			dim,
+			centroid,
+			vecs + (size_t)naos * dim,
+			nfs,
+			true,
+			naos);
+
+	RaBitQQueryState qstate;
+	setup_query_state(&qstate, params, centroid, dim);
+
+	/* Reference: each list on its own. Ids sort AoS first, then fastscan. */
+	VsTopKEntry *ref = vs_alloc(n * sizeof(VsTopKEntry));
+	ASSERT_EQ(
+			naos,
+			scan_candidates(&st, params, &qstate, dim, aos_head, n, true, ref),
+			"AoS list alone");
+	ASSERT_EQ(
+			nfs,
+			scan_candidates(
+					&st, params, &qstate, dim, fs_head, n, true, ref + naos),
+			"fastscan list alone");
+
+	PrismPostingPageOpaque *aos_op = prism_posting_opaque(
+			test_read_page(&st.base, aos_head));
+	ASSERT_EQ(
+			InvalidBlockNumber,
+			aos_op->next_blkno,
+			"the AoS list is a single page");
+	aos_op->next_blkno = fs_head;
+
+	VsTopKEntry *got = vs_alloc(n * sizeof(VsTopKEntry));
+	ASSERT_EQ(
+			n,
+			scan_candidates(&st, params, &qstate, dim, aos_head, n, true, got),
+			"the mixed chain returns both lists");
+	for (uint32_t i = 0; i < n; i++)
+	{
+		ASSERT_EQ(vid_id(i), ref[i].id, "reference ids are the built ones");
+		ASSERT_EQ(ref[i].id, got[i].id, "same candidate ids");
+		ASSERT_EQ(ref[i].distance, got[i].distance, "same distances");
+		ASSERT_EQ(ref[i].error, got[i].error, "same error bounds");
+	}
+
+	vs_free(got);
+	vs_free(ref);
 	vs_rabitq_destroy(params);
 }
