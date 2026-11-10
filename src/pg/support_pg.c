@@ -326,7 +326,10 @@ _PG_init(void)
 			"the candidate buffer when noisy distance estimates flood "
 			"it; -1 reranks every threshold survivor; positive values "
 			"set an absolute cap. The effective cap is never below the "
-			"query's k, so results are never truncated.",
+			"query's k, so results are never truncated. Every candidate "
+			"in the pool costs one random heap fetch, so this is the "
+			"first setting to lower where the heap does not fit in "
+			"memory.",
 			&prism_rerank_pool,
 			0,
 			-1,
