@@ -1,4 +1,4 @@
-# What a split races against: an insert, a scan, and VACUUM.
+# What a split races against: an insert, a scan, a delete, and VACUUM.
 #
 # All three share one fixture and one shape. Nothing stops any of them
 # overlapping a split: the maintenance lock the split holds on the index
@@ -87,7 +87,24 @@ step i_ins { INSERT INTO race VALUES (1001, '[61,0,0]'); }
 # re-checked under the page lock.
 session v
 step v_del    { DELETE FROM race WHERE id % 10 = 0; }
+step v_del1   { DELETE FROM race WHERE id = 1; }
 step v_vacuum { VACUUM race; }
+
+# A reader whose snapshot predates a delete. The row is gone for everyone
+# newer, but this session still has to find it -- and once the split flips the
+# centroid leaf, the new lists are the only place left to look. So the split
+# may leave an entry out only when its row is dead to every transaction, not
+# when it is merely invisible to the split itself.
+session old
+setup
+{
+    SET enable_seqscan = off;
+    SET prism.nprobe = 16;
+}
+step old_snapshot { BEGIN ISOLATION LEVEL REPEATABLE READ;
+                    SELECT count(*) AS rows_at_snapshot FROM race; }
+step old_near     { SELECT id FROM race ORDER BY v <-> '[1,0,0]' LIMIT 3; }
+step old_commit   { COMMIT; }
 
 session obs
 setup { SET enable_seqscan = off; SET prism.nprobe = 16; }
@@ -123,3 +140,10 @@ permutation w_split w_reclaim
 # page lock, v_vacuum blocks on it, wake releases the split, VACUUM then finds
 # the head retired and skips it, and the index still answers correctly.
 permutation v_del m_split v_vacuum o_wake_split o_near
+
+# Delete against a split, from the point of view of a snapshot older than the
+# delete: id 1 goes away, the split re-partitions the list, and the old
+# snapshot still gets 1, 2, 3 back. Dropping the entry because the row is
+# invisible to the split would return 2, 3, 4 here -- the row would exist and
+# be visible, with nothing in the index pointing at it.
+permutation old_snapshot v_del1 w_split old_near old_commit
