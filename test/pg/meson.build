@@ -257,6 +257,7 @@ else
         'scan_progress',
         'insert_serialize',
         'split_race',
+        'split_toast_lock',
         'maintenance_lock',
         'split_insert_retry',
       ]
@@ -295,6 +296,29 @@ else
                         / 'pg_regress',
           'TESTDATADIR': meson.current_build_dir() / 'tmp_check_crash',
           'TESTLOGDIR': meson.current_build_dir() / 'tap_log_crash',
+        },
+        depends: [pgvs_ext_so],
+        timeout: 300,
+        is_parallel: false,
+        protocol: 'tap',
+      )
+
+      # A known race between a split and a rolled-back insert, reproduced
+      # inside a TODO block, so it reports as an expected failure and turns
+      # into an unexpected pass if the race is ever fixed.
+      test('tap_split_toast_race',
+        find_program(meson.current_source_dir() / 't' / 'run-tap.sh'),
+        args: [
+          meson.current_source_dir() / 't' / '003_split_toast_race.pl',
+        ],
+        env: {
+          'PG_PERL_DIR': pg_perl_dir,
+          'PATH': pg_bindir + ':' + run_command(
+            'sh', '-c', 'echo $PATH', check: true).stdout().strip(),
+          'PG_REGRESS': pg_pkglibdir / 'pgxs' / 'src' / 'test' / 'regress'
+                        / 'pg_regress',
+          'TESTDATADIR': meson.current_build_dir() / 'tmp_check_toast_race',
+          'TESTLOGDIR': meson.current_build_dir() / 'tap_log_toast_race',
         },
         depends: [pgvs_ext_so],
         timeout: 300,

@@ -1,0 +1,29 @@
+Parsed test spec with 3 sessions
+
+starting permutation: m_split v_toast o_wake o_rows
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step m_split: CALL prism_rebalance('toasty_idx', 10); <waiting ...>
+step v_toast: VACUUM (PROCESS_MAIN FALSE) toasty; <waiting ...>
+step o_wake: SELECT injection_points_wakeup('prism-split-locked');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+m: NOTICE:  rebalance: split 1 posting list(s), reclaimed 0 retired chain(s)
+step m_split: <... completed>
+step v_toast: <... completed>
+step o_rows: 
+    SELECT count(*) AS found FROM (
+        SELECT id FROM toasty
+        ORDER BY v <-> (SELECT v FROM toasty WHERE id = 8) LIMIT 100) t;
+
+found
+-----
+   40
+(1 row)
+
