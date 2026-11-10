@@ -291,9 +291,10 @@ DROP TABLE hd;
 -- Up to 1968 dimensions a posting list's first page carries the float encode
 -- reference beside its entries and any dimension builds. Past that the
 -- reference spills onto its own pages and the dimension must suit the fast
--- rotation (a power of two times an odd factor of at most 8), so 1969 is
--- rejected up front while 1968 builds and answers exactly. The spilled
--- layouts themselves run through the shared cases below.
+-- rotation (a power of two times an odd factor of at most 8), so 1969 and
+-- 3000 are rejected up front, as is anything past 8192. 8192 itself builds
+-- and answers exactly. The spilled layouts themselves run through the shared
+-- cases below.
 CREATE TABLE dimcap (id int, v vec32(1969));
 CREATE INDEX dimcap_i ON dimcap USING prism (v);
 DROP TABLE dimcap;
@@ -319,16 +320,23 @@ CREATE TABLE dimcap (v vec16(4096));
 CREATE INDEX dimcap_ip ON dimcap USING prism (v vec16_ip_ops);
 DROP TABLE dimcap;
 
-CREATE TABLE dimcap (id int, v vec32(1968));
+CREATE TABLE dimcap (id int, v vec32(8192));
 INSERT INTO dimcap
-    SELECT g, (SELECT ('[' || string_agg((sin(g + j))::text, ',') || ']')
-               FROM generate_series(1, 1968) j)::vec32(1968)
+    SELECT g, (SELECT array_agg(sin(g + j)::real)
+               FROM generate_series(1, 8192) j)::vec32(8192)
     FROM generate_series(1, 20) g;
 CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 4);
+-- plpgsql, so the planner keeps the call rather than an InitPlan, whose
+-- label differs between PostgreSQL versions.
+CREATE FUNCTION dimcap_q() RETURNS vec32 LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    RETURN (SELECT v FROM dimcap WHERE id = 7);
+END $$;
 SET enable_seqscan = off;
-SELECT id FROM dimcap ORDER BY v <-> (SELECT v FROM dimcap WHERE id = 7)
-    LIMIT 1;
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q() LIMIT 1;
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q() LIMIT 1;
 RESET enable_seqscan;
+DROP FUNCTION dimcap_q();
 DROP TABLE dimcap;
 
 -- ============================================================
