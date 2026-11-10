@@ -55,7 +55,8 @@
  * page_base) are left zeroed for the caller to wire to its own VsPgStorage.
  *
  * Pointers placed into *base stay valid until the next relcache invalidation;
- * do not retain them across yield points.
+ * do not retain them across yield points. An open scan can process one
+ * between rescans, which is why prism_beginscan copies pt_global_mean.
  *
  * base->params is checked out from the process-local rotation-matrix cache
  * and MUST be released with a matching prism_release_params(base->dim,

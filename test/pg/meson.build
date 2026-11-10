@@ -118,6 +118,7 @@ else
           'mutations_concurrent',
           'build_serialize',
           'maintenance_privilege',
+          'cache_invalidation',
         ],
         depends: [pgvs_ext_so],
         timeout: 120,
