@@ -163,12 +163,18 @@ else
     fi
 fi
 
-# High-dimensional k-means tests execute inner loops billions of times.
-# Keep gcovr's counter sanity check above that range.
+# High-dimensional k-means tests execute inner loops billions of times, which
+# gcovr 8 takes for corrupt counters. Raise that threshold where the option
+# exists: gcovr 7 has neither the check nor the option, and rejects it.
+GCOVR_HITS=()
+if gcovr --help 2>/dev/null | grep -q -- '--gcov-suspicious-hits-threshold'; then
+    GCOVR_HITS=(--gcov-suspicious-hits-threshold 1000000000000)
+fi
+
 gcovr --root . --object-directory "$BUILDDIR" \
     "${GCOV_TOOL[@]}" \
     "${GCOVR_EXCLUDES[@]}" \
-    --gcov-suspicious-hits-threshold 1000000000000 \
+    "${GCOVR_HITS[@]}" \
     --txt "$LOGDIR/coverage.txt" \
     --xml "$LOGDIR/coverage.xml" \
     --cobertura "$LOGDIR/coverage-cobertura.xml" \
