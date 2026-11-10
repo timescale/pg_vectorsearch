@@ -612,6 +612,48 @@ TEST(wide_dim_in_ram)
 	check_wide_dim_recall(result, 0, false);
 }
 
+/*
+ * The buffer a query state keeps for spilled references grows geometrically.
+ * The arena frees nothing until the state goes, so growing it to exactly each
+ * larger probe set would keep every smaller buffer from earlier queries alive.
+ * Raising nprobe one step at a time asks for a slightly larger buffer on
+ * every query, which is the case that would pile them up.
+ */
+TEST(spilled_probe_buffer_grows_geometrically)
+{
+	uint32_t dim = 2048, nvecs = 320, nlist = 64, k = 5;
+	float	*vecs = make_vectors(nvecs, dim, 7);
+
+	PrismIndexConfig config = {
+			.nlist		   = nlist,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+	};
+	PrismIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "build at 2048 should succeed");
+
+	PrismQueryState qs;
+	prism_query_state_init(&qs, &idx->base, k, nlist);
+	size_t before = vs_memctx_total_allocated(qs.memctx);
+
+	for (uint32_t nprobe = 1; nprobe <= nlist / 2; nprobe++)
+		prism_query_execute(
+				&qs, vecs, k, nprobe, VS_DISTANCE_MODE_ASYMMETRIC, true, NULL);
+
+	ASSERT_TRUE(qs.probe_refs_cap > 0, "the probe set was expanded");
+	size_t buffer = (size_t)qs.probe_refs_cap *
+					((size_t)dim * sizeof(float) + sizeof(BlockNumber));
+	size_t grown = vs_memctx_total_allocated(qs.memctx) - before;
+	ASSERT_TRUE(
+			grown <= 3 * buffer,
+			"growth stays within a small multiple of the final buffer");
+
+	prism_query_state_cleanup(&qs);
+	prism_index_destroy(idx);
+}
+
 TEST_PARAMETERIZED(fastscan_rejects_unsupported_dimension, "1024", "4096")
 {
 	const Dimension dims[] = {1024, 4096};

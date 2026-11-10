@@ -382,6 +382,17 @@ scan_clusters(
 	{
 		if (qs->pscan.pt_ref != NULL && qs->probe_refs_cap < n_results)
 		{
+			/*
+			 * Grow geometrically, up to max_nprobe. The standalone arena
+			 * frees nothing until its context goes, and this one outlives
+			 * the query -- growing to exactly the size asked for would keep
+			 * every smaller buffer from earlier queries alive.
+			 */
+			uint32_t cap = qs->probe_refs_cap * 2;
+			if (cap > qs->max_nprobe)
+				cap = qs->max_nprobe;
+			if (cap < n_results)
+				cap = n_results;
 			VsMemCtx caller_ctx = vs_memctx_switch(qs->memctx);
 
 			if (qs->probe_refs != NULL)
@@ -389,9 +400,9 @@ scan_clusters(
 				vs_free(qs->probe_refs);
 				vs_free(qs->probe_entries);
 			}
-			qs->probe_refs = vs_alloc((size_t)n_results * dim * sizeof(float));
-			qs->probe_entries  = vs_alloc(n_results * sizeof(BlockNumber));
-			qs->probe_refs_cap = n_results;
+			qs->probe_refs	   = vs_alloc((size_t)cap * dim * sizeof(float));
+			qs->probe_entries  = vs_alloc(cap * sizeof(BlockNumber));
+			qs->probe_refs_cap = cap;
 			vs_memctx_switch(caller_ctx);
 		}
 
