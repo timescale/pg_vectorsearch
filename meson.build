@@ -369,6 +369,9 @@ endif
 # Compiler vectorization flags (for simd=full and simd=compiler, NOT for simd=none)
 # These enable effective auto-vectorization with GCC/Clang for target_clones baseline
 if simd_mode != 'none'
+  # Clang's plain 'fast' fuses even where a pragma turns contraction off,
+  # and src/quant/matrix.c needs that pragma for a reproducible rotation.
+  fp_contract = cc.get_id() == 'clang' ? 'fast-honor-pragmas' : 'fast'
   add_project_arguments(
     '-ftree-vectorize',        # Explicit auto-vectorization (GCC)
     '-fassociative-math',      # Allow reassociation for better vectorization
@@ -381,7 +384,7 @@ if simd_mode != 'none'
     # vfmadd231ps, and nested dot-product loops reduce horizontally
     # per chunk instead of once.
     # See: https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html
-    '-ffp-contract=fast',
+    '-ffp-contract=' + fp_contract,
     language: 'c',
   )
 

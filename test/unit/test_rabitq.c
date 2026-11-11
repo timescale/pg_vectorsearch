@@ -164,6 +164,90 @@ TEST(matrix_different_seeds)
 	vs_free(P2);
 }
 
+/* FNV-1a over each float's bits, little-endian, so the hash does not
+ * depend on the host's byte order. */
+static uint64_t
+hash_floats(const float *data, size_t n)
+{
+	uint64_t h = 1469598103934665603ULL;
+
+	for (size_t i = 0; i < n; i++)
+	{
+		uint32_t bits;
+
+		memcpy(&bits, &data[i], sizeof(bits));
+		for (int byte = 0; byte < 4; byte++)
+		{
+			h ^= (bits >> (8 * byte)) & 0xff;
+			h *= 1099511628211ULL;
+		}
+	}
+	return h;
+}
+
+/*
+ * Indexes regenerate the dense rotation from their seed, so its bits are
+ * pinned, and every SIMD kernel must produce them. The dimensions cover
+ * norms summed sequentially, up to 20, and in pairs from 21, a whole number
+ * of strips, and several strips with a partial one.
+ */
+TEST(matrix_pinned_bits)
+{
+	static const struct
+	{
+		Dimension dim;
+		uint64_t  hash;
+	} pins[] = {
+			{1, 0x2fa203a08531dddaULL},
+			{8, 0xf0cb4876abd216f6ULL},
+			{20, 0xe4094c326fb2b1f2ULL},
+			{21, 0x5bdbc7d2b43889d1ULL},
+			{64, 0xdac5a4e3553c399fULL},
+			{100, 0xe29cb028dee69563ULL},
+			{300, 0xa4dbb1028d778d40ULL},
+			{333, 0x7c9f8d64a2d541efULL},
+	};
+
+	static const uint32_t simd_masks[] = {
+			SIMD_NONE,
+			SIMD_AVX2,
+			SIMD_AVX512F | SIMD_AVX2,
+			SIMD_NEON,
+			0xFFFFFFFF,
+	};
+
+	enum
+	{
+		NPINS  = sizeof(pins) / sizeof(pins[0]),
+		NMASKS = sizeof(simd_masks) / sizeof(simd_masks[0]),
+	};
+
+	uint64_t hashes[NMASKS][NPINS];
+
+	for (int m = 0; m < NMASKS; m++)
+	{
+		vs_simd_set_override(simd_masks[m]);
+		vs_simd_reset_cache();
+		for (int d = 0; d < NPINS; d++)
+		{
+			size_t n = (size_t)pins[d].dim * pins[d].dim;
+			float *P = vs_alloc(n * sizeof(float));
+
+			vs_random_orthogonal_matrix(P, pins[d].dim, 42);
+			hashes[m][d] = hash_floats(P, n);
+			vs_free(P);
+		}
+	}
+	vs_simd_set_override(0xFFFFFFFF);
+	vs_simd_reset_cache();
+
+	for (int m = 0; m < NMASKS; m++)
+		for (int d = 0; d < NPINS; d++)
+			ASSERT_TRUE(
+					hashes[m][d] == pins[d].hash,
+					"dense rotation bits changed");
+}
+
 TEST(matrix_cblas_vs_builtin)
 {
 	/*
