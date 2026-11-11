@@ -274,6 +274,21 @@ walks:
 ./bin/vectorsearch bench idset
 ```
 
+`bench rotation` times generating and applying the two RaBitQ rotations at
+each dimension: the dense random orthogonal matrix, which works at any
+dimension, and the fast Hadamard rotation, which only works where the
+dimension factors suitably. RaBitQ uses the fast one wherever it can.
+Every dimension lists both rotations: a fast case the dimension cannot use
+shows `not supported`, and a dense case above `--dense-max` shows `skipped`:
+
+```bash
+# default: dense-only dimensions up to 1968, plus 768, 4096 and 8192
+./bin/vectorsearch bench rotation
+
+# the dense rotation costs O(dim^3); --dense-max times it past 1968
+./bin/vectorsearch bench rotation --dims 1536 --dense-max 1536
+```
+
 ## Profiling
 
 ### Quick Profiling with perf

@@ -201,6 +201,52 @@ TEST(record_rate_single_run_no_stddev)
 	ASSERT_NULL(kv_get(m, "stddev"), "one run has no spread");
 }
 
+TEST(record_time_converts_unit)
+{
+	Kv		 *metrics	 = kv_arr();
+	BenchCase bc		 = {.name = "one"};
+	double	  samples[2] = {1e-3, 3e-3};
+	const Kv *ms;
+	const Kv *us;
+
+	/* 2 ms per pass, with a sample stddev of sqrt(2) ms. */
+	case_with_samples(&bc, samples, 2);
+	bench_record_time(metrics, "ms", &bc, "ms", 1e3, 2);
+	bench_record_time(metrics, "us", &bc, "us", 1e6, 2);
+	bench_stats_free(&bc.stats);
+
+	ms = kv_at(metrics, 0);
+	ASSERT_STR_EQ("ms/one", kv_as_str(kv_get(ms, "name")), "ms name");
+	ASSERT_STR_EQ("ms", kv_as_str(kv_get(ms, "unit")), "ms unit");
+	ASSERT_EQ(2.0, kv_num(kv_get(ms, "n")), "ms runs recorded");
+	ASSERT_FLOAT_EQ(2.0, kv_num(kv_get(ms, "value")), 1e-12, "ms value");
+	ASSERT_FLOAT_EQ(
+			1.41421356237, kv_num(kv_get(ms, "stddev")), 1e-9, "ms stddev");
+
+	us = kv_at(metrics, 1);
+	ASSERT_STR_EQ("us", kv_as_str(kv_get(us, "unit")), "us unit");
+	ASSERT_FLOAT_EQ(2000.0, kv_num(kv_get(us, "value")), 1e-9, "us value");
+	ASSERT_FLOAT_EQ(
+			1414.21356237, kv_num(kv_get(us, "stddev")), 1e-6, "us stddev");
+}
+
+TEST(record_time_single_run_no_stddev)
+{
+	Kv		 *metrics	 = kv_arr();
+	BenchCase bc		 = {.name = "one"};
+	double	  samples[1] = {2e-3};
+	const Kv *m;
+
+	case_with_samples(&bc, samples, 1);
+	bench_record_time(metrics, "gen", &bc, "ms", 1e3, 1);
+	bench_stats_free(&bc.stats);
+
+	m = kv_at(metrics, 0);
+	ASSERT_FLOAT_EQ(2.0, kv_num(kv_get(m, "value")), 1e-12, "value");
+	ASSERT_EQ(1.0, kv_num(kv_get(m, "n")), "single run recorded");
+	ASSERT_NULL(kv_get(m, "stddev"), "one run has no spread");
+}
+
 TEST(record_rate_feeds_noise_gate)
 {
 	Kv		 *metrics	 = kv_arr();
