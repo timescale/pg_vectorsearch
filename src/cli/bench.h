@@ -180,4 +180,17 @@ void bench_record_rate(
 		double			 rate,
 		uint32_t		 runs);
 
+/*
+ * Record the time one pass took, in the unit named, under
+ * "<prefix>/<case name>". per_second converts seconds into that unit: 1e3
+ * for "ms", 1e6 for "us". Otherwise as bench_record_rate.
+ */
+void bench_record_time(
+		Kv				*metrics,
+		const char		*prefix,
+		const BenchCase *bench_case,
+		const char		*unit,
+		double			 per_second,
+		uint32_t		 runs);
+
 #endif /* VS_CLI_BENCH_H */

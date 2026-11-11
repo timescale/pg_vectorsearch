@@ -514,6 +514,7 @@ vs_cli_sources = files(
   'src/cli/bench_fastscan_kernel.c',
   'src/cli/bench_spinup.c',
   'src/cli/bench_topk.c',
+  'src/cli/bench_rotation.c',
   'src/cli/bench_compare.c',
   'src/cli/kv_cmp.c',
   'src/cli/distance_pgvector.c',

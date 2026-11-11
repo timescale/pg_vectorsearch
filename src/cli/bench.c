@@ -272,6 +272,36 @@ bench_rsd_percent(const BenchCase *bench_case)
 	return (bench_case->stats.stddev / bench_case->stats.avg) * 100.0;
 }
 
+/*
+ * Record value under "<prefix>/<case name>", with the n and stddev bench
+ * compare's noise gate reads. The samples are seconds per pass, so the
+ * deviation is scaled into value's own unit through the relative one.
+ */
+static void
+record_metric(
+		Kv				*metrics,
+		const char		*prefix,
+		const BenchCase *bench_case,
+		const char		*unit,
+		double			 value,
+		uint32_t		 runs)
+{
+	if (metrics == NULL)
+		return;
+
+	Kv *m = kv_arr_add_metric(
+			metrics, unit, value, "%s/%s", prefix, bench_case->name);
+
+	if (m == NULL)
+		return;
+	kv_obj_put(m, "n", kv_int(runs));
+	if (runs > 1)
+		kv_obj_put(
+				m,
+				"stddev",
+				kv_dbl(value * bench_rsd_percent(bench_case) / 100.0));
+}
+
 void
 bench_record_rate(
 		Kv				*metrics,
@@ -281,25 +311,23 @@ bench_record_rate(
 		double			 rate,
 		uint32_t		 runs)
 {
-	if (metrics == NULL)
-		return;
+	record_metric(metrics, prefix, bench_case, unit, rate, runs);
+}
 
-	Kv *m = kv_arr_add_metric(
-			metrics, unit, rate, "%s/%s", prefix, bench_case->name);
-
-	if (m == NULL)
-		return;
-	/* n and stddev feed bench compare's noise gate. */
-	kv_obj_put(m, "n", kv_int(runs));
-	if (runs > 1)
-	{
-		/*
-		 * The samples are seconds per pass, so scale the deviation into
-		 * the reported rate's own unit before publishing it.
-		 */
-		kv_obj_put(
-				m,
-				"stddev",
-				kv_dbl(rate * bench_rsd_percent(bench_case) / 100.0));
-	}
+void
+bench_record_time(
+		Kv				*metrics,
+		const char		*prefix,
+		const BenchCase *bench_case,
+		const char		*unit,
+		double			 per_second,
+		uint32_t		 runs)
+{
+	record_metric(
+			metrics,
+			prefix,
+			bench_case,
+			unit,
+			bench_seconds_per_pass(bench_case) * per_second,
+			runs);
 }
