@@ -5,7 +5,7 @@
  * matrix.c - Random orthogonal matrix generation for RaBitQ
  *
  * Generates random orthogonal matrices via QR decomposition of Gaussian
- * random matrices. Uses the Householder algorithm for numerical stability.
+ * random matrices, using modified Gram-Schmidt.
  *
  * The orthogonal matrix P ensures that residual vectors have isotropic
  * distribution, which is essential for RaBitQ's theoretical error bounds.
@@ -37,8 +37,16 @@
 #endif
 #endif
 
+#if defined(VS_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
+#include <immintrin.h>
+#elif defined(VS_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
+#include <arm_neon.h>
+#endif
+
 #include "algo/simd_utils.h"
 #include "algo/vecops.h"
+#include "core/memory.h"
+#include "core/platform.h"
 #include "core/types.h"
 #include "quant/matrix.h"
 
@@ -154,50 +162,376 @@ fill_gaussian_matrix(float *matrix, Dimension dim, uint64_t seed)
 }
 
 /*
- * QR decomposition using modified Gram-Schmidt.
- *
- * Input: A (dim x dim matrix, row-major)
- * Output: Q (orthogonal matrix, row-major)
- *
- * The input matrix A is overwritten with Q.
+ * The matrix is regenerated from its seed wherever an index is read, so its
+ * bits must not depend on the compiler. The QR code below is evaluated in
+ * source order, without reassociation or fused multiply-adds. The clang
+ * pragma needs -ffp-contract=fast-honor-pragmas, which meson.build sets.
  */
-static void
-gram_schmidt_qr(float *A, Dimension dim)
+#if defined(__clang__)
+#define STRICT_FP_FN
+#define STRICT_FP_BODY _Pragma("clang fp reassociate(off) contract(off)")
+#elif defined(__GNUC__)
+#define STRICT_FP_FN \
+	__attribute__((optimize("no-associative-math", "fp-contract=off")))
+#define STRICT_FP_BODY
+#else
+#define STRICT_FP_FN
+#define STRICT_FP_BODY
+#endif
+
+/* Columns orthogonalized together, packed so a strip stays in cache. */
+#define QR_STRIP 32
+
+/*
+ * Squared norm of a contiguous column. Summed in the order gcc 14 and later
+ * give it at -O2 on x86-64, so the matrix matches indexes built that way.
+ */
+STRICT_FP_FN static float
+column_norm2(const float *x, Dimension n)
 {
-	/* Process columns */
-	for (Dimension j = 0; j < dim; j++)
+	STRICT_FP_BODY
+	float	  norm = 0.0f;
+	Dimension i	   = 0;
+
+	if (n > 20)
 	{
-		/* Get pointer to column j (stored as row j in transposed view) */
-		/* For row-major, column j elements are at A[0*dim+j], A[1*dim+j], ...
-		 */
+		float s0 = 0.0f;
+		float s1 = 0.0f;
 
-		/* Compute norm of column j */
-		float norm = 0.0f;
-		for (Dimension i = 0; i < dim; i++)
-			norm += A[i * dim + j] * A[i * dim + j];
-		norm = sqrtf(norm);
-
-		/* Handle near-zero columns (shouldn't happen with Gaussian init) */
-		if (norm < 1e-10f)
-			norm = 1.0f;
-
-		/* Normalize column j */
-		for (Dimension i = 0; i < dim; i++)
-			A[i * dim + j] /= norm;
-
-		/* Orthogonalize remaining columns against column j */
-		for (Dimension k = j + 1; k < dim; k++)
+		for (; i + 4 <= n; i += 4)
 		{
-			/* Compute dot product of columns j and k */
-			float dot = 0.0f;
-			for (Dimension i = 0; i < dim; i++)
-				dot += A[i * dim + j] * A[i * dim + k];
+			s0 = (x[i + 2] * x[i + 2] + x[i] * x[i]) + s0;
+			s1 = (x[i + 3] * x[i + 3] + x[i + 1] * x[i + 1]) + s1;
+		}
+		norm = s0 + s1;
+	}
+	for (; i < n; i++)
+		norm += x[i] * x[i];
+	return norm;
+}
 
-			/* Subtract projection: col_k = col_k - dot * col_j */
-			for (Dimension i = 0; i < dim; i++)
-				A[i * dim + k] -= dot * A[i * dim + j];
+/*
+ * One pass down a strip of QR_STRIP columns. With p set, subtract
+ * p_dots[c] * p from each column c. With q set, store q . column c in
+ * q_dots[c], after that update. p and q are columns with the given stride,
+ * outside the strip.
+ *
+ * Every kernel gives each column a lane of its own and rounds each multiply
+ * and add separately, so they all produce the same bits. The SIMD kernels
+ * use operators for arithmetic, not intrinsics: clang compiles intrinsics
+ * with the file's flags, which would let them fuse.
+ */
+typedef void (*StripSweepFn)(
+		float		*strip,
+		Dimension	 n,
+		const float *p,
+		const float *p_dots,
+		const float *q,
+		float		*q_dots,
+		size_t		 stride);
+
+STRICT_FP_FN static void
+strip_sweep_scalar(
+		float *restrict strip,
+		Dimension	 n,
+		const float *p,
+		const float *restrict p_dots,
+		const float *q,
+		float *restrict q_dots,
+		size_t stride)
+{
+	STRICT_FP_BODY
+	float acc[QR_STRIP] = {0};
+
+	for (Dimension i = 0; i < n; i++)
+	{
+		float *restrict row = strip + (size_t)i * QR_STRIP;
+
+		if (p != NULL)
+		{
+			float pi = p[i * stride];
+
+			for (int c = 0; c < QR_STRIP; c++)
+				row[c] = row[c] - p_dots[c] * pi;
+		}
+		if (q != NULL)
+		{
+			float qi = q[i * stride];
+
+			for (int c = 0; c < QR_STRIP; c++)
+				acc[c] += qi * row[c];
 		}
 	}
+
+	if (q != NULL)
+		memcpy(q_dots, acc, sizeof(acc));
+}
+
+#if defined(VS_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
+/* Plain AVX2 on purpose: with FMA a lane would round differently. */
+#define AVX2_LANES (QR_STRIP / 8)
+
+__attribute__((target("avx2"))) STRICT_FP_FN static void
+strip_sweep_avx2(
+		float		*strip,
+		Dimension	 n,
+		const float *p,
+		const float *p_dots,
+		const float *q,
+		float		*q_dots,
+		size_t		 stride)
+{
+	STRICT_FP_BODY
+	__m256 acc[AVX2_LANES];
+	__m256 pd[AVX2_LANES];
+
+#pragma GCC unroll 8
+	for (int v = 0; v < AVX2_LANES; v++)
+	{
+		acc[v] = _mm256_setzero_ps();
+		pd[v]  = p != NULL ? _mm256_loadu_ps(p_dots + 8 * v) : acc[v];
+	}
+
+	for (Dimension i = 0; i < n; i++)
+	{
+		float *row = strip + (size_t)i * QR_STRIP;
+		__m256 pi  = _mm256_set1_ps(p != NULL ? p[i * stride] : 0.0f);
+		__m256 qi  = _mm256_set1_ps(q != NULL ? q[i * stride] : 0.0f);
+
+#pragma GCC unroll 8
+		for (int v = 0; v < AVX2_LANES; v++)
+		{
+			__m256 a = _mm256_loadu_ps(row + 8 * v);
+
+			if (p != NULL)
+			{
+				a = a - pd[v] * pi;
+				_mm256_storeu_ps(row + 8 * v, a);
+			}
+			if (q != NULL)
+				acc[v] = acc[v] + qi * a;
+		}
+	}
+
+	if (q != NULL)
+	{
+#pragma GCC unroll 8
+		for (int v = 0; v < AVX2_LANES; v++)
+			_mm256_storeu_ps(q_dots + 8 * v, acc[v]);
+	}
+}
+
+#define AVX512_LANES (QR_STRIP / 16)
+
+__attribute__((target("avx512f"))) STRICT_FP_FN static void
+strip_sweep_avx512(
+		float		*strip,
+		Dimension	 n,
+		const float *p,
+		const float *p_dots,
+		const float *q,
+		float		*q_dots,
+		size_t		 stride)
+{
+	STRICT_FP_BODY
+	__m512 acc[AVX512_LANES];
+	__m512 pd[AVX512_LANES];
+
+#pragma GCC unroll 8
+	for (int v = 0; v < AVX512_LANES; v++)
+	{
+		acc[v] = _mm512_setzero_ps();
+		pd[v]  = p != NULL ? _mm512_loadu_ps(p_dots + 16 * v) : acc[v];
+	}
+
+	for (Dimension i = 0; i < n; i++)
+	{
+		float *row = strip + (size_t)i * QR_STRIP;
+		__m512 pi  = _mm512_set1_ps(p != NULL ? p[i * stride] : 0.0f);
+		__m512 qi  = _mm512_set1_ps(q != NULL ? q[i * stride] : 0.0f);
+
+#pragma GCC unroll 8
+		for (int v = 0; v < AVX512_LANES; v++)
+		{
+			__m512 a = _mm512_loadu_ps(row + 16 * v);
+
+			if (p != NULL)
+			{
+				a = a - pd[v] * pi;
+				_mm512_storeu_ps(row + 16 * v, a);
+			}
+			if (q != NULL)
+				acc[v] = acc[v] + qi * a;
+		}
+	}
+
+	if (q != NULL)
+	{
+#pragma GCC unroll 8
+		for (int v = 0; v < AVX512_LANES; v++)
+			_mm512_storeu_ps(q_dots + 16 * v, acc[v]);
+	}
+}
+#endif /* x86_64 */
+
+#if defined(VS_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
+#define NEON_LANES (QR_STRIP / 4)
+
+STRICT_FP_FN static void
+strip_sweep_neon(
+		float		*strip,
+		Dimension	 n,
+		const float *p,
+		const float *p_dots,
+		const float *q,
+		float		*q_dots,
+		size_t		 stride)
+{
+	STRICT_FP_BODY
+	float32x4_t acc[NEON_LANES];
+	float32x4_t pd[NEON_LANES];
+
+#pragma GCC unroll 8
+	for (int v = 0; v < NEON_LANES; v++)
+	{
+		acc[v] = vdupq_n_f32(0.0f);
+		pd[v]  = p != NULL ? vld1q_f32(p_dots + 4 * v) : acc[v];
+	}
+
+	for (Dimension i = 0; i < n; i++)
+	{
+		float	   *row = strip + (size_t)i * QR_STRIP;
+		float32x4_t pi	= vdupq_n_f32(p != NULL ? p[i * stride] : 0.0f);
+		float32x4_t qi	= vdupq_n_f32(q != NULL ? q[i * stride] : 0.0f);
+
+#pragma GCC unroll 8
+		for (int v = 0; v < NEON_LANES; v++)
+		{
+			float32x4_t a = vld1q_f32(row + 4 * v);
+
+			if (p != NULL)
+			{
+				a = a - pd[v] * pi;
+				vst1q_f32(row + 4 * v, a);
+			}
+			if (q != NULL)
+				acc[v] = acc[v] + qi * a;
+		}
+	}
+
+	if (q != NULL)
+	{
+#pragma GCC unroll 8
+		for (int v = 0; v < NEON_LANES; v++)
+			vst1q_f32(q_dots + 4 * v, acc[v]);
+	}
+}
+#endif /* aarch64 */
+
+/* Resolved per matrix, so a SIMD override set in a test takes effect.
+ * Only simd=full builds have the hand-written kernels. */
+static StripSweepFn
+resolve_strip_sweep(void)
+{
+#if defined(VS_SIMD_FULL) && (defined(__x86_64__) || defined(_M_X64))
+	if (vs_has_simd(SIMD_AVX512F))
+		return strip_sweep_avx512;
+	if (vs_has_simd(SIMD_AVX2))
+		return strip_sweep_avx2;
+#elif defined(VS_SIMD_FULL) && (defined(__aarch64__) || defined(_M_ARM64))
+	if (vs_has_simd(SIMD_NEON))
+		return strip_sweep_neon;
+#endif
+	return strip_sweep_scalar;
+}
+
+/*
+ * QR decomposition using modified Gram-Schmidt, overwriting the row-major
+ * A with Q.
+ *
+ * Columns are processed in strips. A strip first has every finished column
+ * to its left projected out, one at a time and vectorized across the strip,
+ * then is orthogonalized within itself. Each column still sees the
+ * classic column-by-column order of operations.
+ */
+STRICT_FP_FN static int
+gram_schmidt_qr(float *A, Dimension dim)
+{
+	STRICT_FP_BODY
+	StripSweepFn strip_sweep = resolve_strip_sweep();
+	float		 dots[2][QR_STRIP];
+
+	/* A context of its own, since standalone vs_free() keeps the memory. */
+	VS_MEMCTX_SCOPE(qr_ctx);
+	if (qr_ctx == NULL)
+		return -1;
+
+	VsMemCtx old   = vs_memctx_switch(qr_ctx);
+	float	*strip = vs_alloc((size_t)dim * QR_STRIP * sizeof(float));
+	float	*col   = vs_alloc((size_t)dim * sizeof(float));
+
+	vs_memctx_switch(old);
+	if (strip == NULL || col == NULL)
+		return -1;
+
+	for (Dimension s = 0; s < dim; s += QR_STRIP)
+	{
+		Dimension width = dim - s < QR_STRIP ? dim - s : QR_STRIP;
+
+		/* Unused strip columns stay zero and come out of every update so. */
+		memset(strip, 0, (size_t)dim * QR_STRIP * sizeof(float));
+		for (Dimension i = 0; i < dim; i++)
+			memcpy(strip + (size_t)i * QR_STRIP,
+				   A + (size_t)i * dim + s,
+				   width * sizeof(float));
+
+		/* Each update by column j - 1 is fused with the dots for column j. */
+		for (Dimension j = 0; j < s; j++)
+			strip_sweep(
+					strip,
+					dim,
+					j > 0 ? A + j - 1 : NULL,
+					dots[(j + 1) % 2],
+					A + j,
+					dots[j % 2],
+					dim);
+		if (s > 0)
+			strip_sweep(
+					strip, dim, A + s - 1, dots[(s + 1) % 2], NULL, NULL, dim);
+
+		for (Dimension c = 0; c < width; c++)
+		{
+			for (Dimension i = 0; i < dim; i++)
+				col[i] = strip[(size_t)i * QR_STRIP + c];
+
+			float norm = sqrtf(column_norm2(col, dim));
+
+			/* Only a degenerate Gaussian draw has a zero column. */
+			if (norm < 1e-10f)
+				norm = 1.0f;
+
+			for (Dimension i = 0; i < dim; i++)
+			{
+				col[i] /= norm;
+				strip[(size_t)i * QR_STRIP + c] = col[i];
+			}
+
+			if (c + 1 == width)
+				break;
+
+			/* Columns up to c are done, so a zero dot leaves them alone. */
+			strip_sweep(strip, dim, NULL, NULL, col, dots[0], 1);
+			memset(dots[0], 0, (c + 1) * sizeof(float));
+			strip_sweep(strip, dim, col, dots[0], NULL, NULL, 1);
+		}
+
+		for (Dimension i = 0; i < dim; i++)
+			memcpy(A + (size_t)i * dim + s,
+				   strip + (size_t)i * QR_STRIP,
+				   width * sizeof(float));
+	}
+
+	return 0;
 }
 
 /*
@@ -224,9 +558,7 @@ vs_random_orthogonal_matrix(float *matrix, Dimension dim, uint64_t seed)
 	fill_gaussian_matrix(matrix, dim, seed);
 
 	/* QR decomposition to get orthogonal matrix */
-	gram_schmidt_qr(matrix, dim);
-
-	return 0;
+	return gram_schmidt_qr(matrix, dim);
 }
 
 /*
