@@ -728,12 +728,12 @@ TEST(spilled_probe_buffer_cap_keeps_results)
 	prism_index_destroy(idx);
 }
 
-TEST_PARAMETERIZED(fastscan_rejects_unsupported_dimension, "1024", "4096")
+/* A spilled head holds no fastscan group, so a wide list stays AoS. */
+TEST(fastscan_rejects_spilled_dimension)
 {
-	const Dimension dims[] = {1024, 4096};
-	Dimension		dim	   = dims[iteration];
-	uint32_t		nvecs  = 50;
-	float		   *vecs   = make_vectors(nvecs, dim, 1);
+	Dimension dim	= 4096;
+	uint32_t  nvecs = 50;
+	float	 *vecs	= make_vectors(nvecs, dim, 1);
 
 	PrismIndexConfig config = {
 			.nlist		   = 2,
@@ -745,11 +745,11 @@ TEST_PARAMETERIZED(fastscan_rejects_unsupported_dimension, "1024", "4096")
 	};
 	ASSERT_NULL(
 			build_from_array(vecs, nvecs, dim, &config),
-			"serial build rejects an unsupported fastscan dimension");
+			"serial build rejects fastscan at a spilled dimension");
 	config.nworkers = 4;
 	ASSERT_NULL(
 			build_from_array(vecs, nvecs, dim, &config),
-			"parallel build rejects an unsupported fastscan dimension");
+			"parallel build rejects fastscan at a spilled dimension");
 }
 
 /* Uncompressed centroids are whole vectors on a centroid page; where none

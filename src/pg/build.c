@@ -292,7 +292,7 @@ write_meta_page(
 	PageInit(page, BLCKSZ, PRISM_META_SIZE(dim));
 
 	PrismMetaPage *meta	  = (PrismMetaPage *)PageGetSpecialPointer(page);
-	meta->magic			  = prism_meta_magic_for(dim);
+	meta->magic			  = PRISM_META_MAGIC;
 	meta->dim			  = dim;
 	meta->nlevels		  = nlevels;
 	meta->centroid_format = (uint8_t)centroid_format;
@@ -445,18 +445,17 @@ prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 }
 
 /*
- * Resolve the posting-page format. Like the centroid layout, a
- * fastscan posting group has a dimension-dependent fixed size; the
- * binding constraint is a cluster's first page, which also carries
- * the full-precision centroid reference. AUTO uses fastscan exactly
- * where a group fits; ON errors where it does not.
+ * Resolve the posting-page format. Fastscan groups continue across pages,
+ * so the format only needs the first page to have room past the encode
+ * reference. AUTO uses fastscan wherever that holds; ON errors where it
+ * does not.
  */
 static bool
 prism_resolve_fastscan(Relation index, Dimension dim)
 {
 	PrismOptions *opts = (PrismOptions *)index->rd_options;
 	int	 fs	  = (opts != NULL) ? opts->fastscan : PRISM_FASTSCAN_MODE_AUTO;
-	bool fits = prism_fastscan_max_groups(dim, true) > 0;
+	bool fits = prism_fastscan_supported(dim);
 
 	switch (fs)
 	{

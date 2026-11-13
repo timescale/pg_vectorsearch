@@ -344,7 +344,7 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (!prism_meta_magic_valid(meta->magic, meta->dim))
+	if (meta->magic != PRISM_META_MAGIC)
 	{
 		UnlockReleaseBuffer(meta_buf);
 		index_close(index, NoLock);
@@ -359,9 +359,9 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	uint8_t		nlevels		   = meta->nlevels;
 	UnlockReleaseBuffer(meta_buf);
 
-	/* The same bound CREATE INDEX applies to fastscan=on: a group has to fit
-	 * an overflow page, which stops well before the dimension ceiling. */
-	if (prism_fastscan_max_groups(dim, false) == 0)
+	/* The same bound CREATE INDEX applies to fastscan=on: a spilled list's
+	 * head holds a reference chunk, so the list stays AoS. */
+	if (!prism_fastscan_supported(dim))
 	{
 		relation_close(index, PRISM_MAINT_LOCK);
 		ereport(ERROR,

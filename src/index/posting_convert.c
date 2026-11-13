@@ -53,7 +53,7 @@ stage_page(PrismPostingChainPos *pos, void *state)
 	const PrismPostingPageOpaque *op  = prism_posting_opaque(pos->page);
 	char *content = prism_posting_page_content(pos->page, ctx->dim);
 
-	prism_posting_check_count(pos->blkno, op, ctx->dim);
+	prism_posting_check_count(pos->blkno, pos->page, ctx->dim);
 
 	for (uint32_t i = 0; i < op->entry_count; i++)
 	{
@@ -102,9 +102,9 @@ prism_posting_convert_to_fastscan(
 {
 	if (aos_head == InvalidBlockNumber)
 		return InvalidBlockNumber;
-	/* A fastscan group that fits no page would overrun the builder's page
-	 * buffer; the SQL entry point refuses first, this is the backstop. */
-	if (prism_fastscan_max_groups(dim, false) == 0)
+	/* A spilled list has no room for fastscan groups on its head; the SQL
+	 * entry point refuses first, this is the backstop. */
+	if (!prism_fastscan_supported(dim))
 		vs_error(
 				VS_EXTENSION_NAME ": fastscan does not support %u dimensions",
 				(unsigned)dim);
