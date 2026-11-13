@@ -441,10 +441,9 @@ get_cache_data(Relation index)
 	/* Reject an index whose metapage was written by an incompatible format
 	 * (loud in release too, not just a debug Assert) — its layout would
 	 * otherwise be misread. */
-	if (!prism_meta_magic_valid(meta->magic, meta->dim))
+	if (meta->magic != PRISM_META_MAGIC)
 	{
-		uint32_t got	  = meta->magic;
-		uint32_t expected = prism_meta_magic_for(meta->dim);
+		uint32_t got = meta->magic;
 		UnlockReleaseBuffer(meta_buf);
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
@@ -452,7 +451,7 @@ get_cache_data(Relation index)
 						"(metapage magic 0x%08X, expected 0x%08X)",
 						RelationGetRelationName(index),
 						got,
-						expected),
+						(uint32_t)PRISM_META_MAGIC),
 				 errhint("REINDEX the index to rebuild it in the current "
 						 "format.")));
 	}

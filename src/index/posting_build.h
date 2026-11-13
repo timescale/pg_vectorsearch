@@ -228,9 +228,10 @@ typedef struct PrismHeadWriteCtx
 										* stride */
 	uint32_t stride;				   /* prism_posting_reference_pages(dim) */
 	float	*pt;					   /* [dim] scratch */
+	VsMemCtx leaf_ctx;				   /* one head's builder, reset after it */
 } PrismHeadWriteCtx;
 
-/* Stack-init/cleanup pair: allocates/frees the [dim] pt scratch. */
+/* Stack-init/cleanup pair: allocates/frees the scratch. */
 static inline void
 prism_head_write_ctx_init(
 		PrismHeadWriteCtx  *h,
@@ -247,11 +248,13 @@ prism_head_write_ctx_init(
 	h->first_posting = first_posting;
 	h->stride		 = prism_posting_reference_pages(dim);
 	h->pt			 = vs_alloc((size_t)dim * sizeof(float));
+	h->leaf_ctx = vs_memctx_create(vs_memctx_current(), "prism leaf head");
 }
 
 static inline void
 prism_head_write_ctx_cleanup(PrismHeadWriteCtx *h)
 {
+	vs_memctx_delete(h->leaf_ctx);
 	vs_free(h->pt);
 }
 
@@ -371,7 +374,7 @@ typedef struct PrismPostingBuilder
 
 	/*
 	 * Head-metadata bookkeeping. owns_head is set for head builders (those
-	 * that produce the FIRST page) and drives whether finish() stamps the
+	 * that produce the START page) and drives whether finish() stamps the
 	 * head's live_count / tail_blkno. n_entries counts every entry added
 	 * through this builder, so a head builder that holds the whole chain
 	 * (serial build, and the parallel leader's head builder when no
@@ -391,15 +394,20 @@ typedef struct PrismPostingBuilder
 	BlockNumber fixed_first_blkno;
 
 	/*
-	 * Spilled layout (prism_posting_spilled): the head carries the first
-	 * chunk of the encode reference and no entries, ref_pages - 1 REFERENCE
-	 * pages carry the rest, and the entries start after them. ref_copy is
+	 * Spilled layout (prism_posting_spilled): the head's START and MIDDLE
+	 * pages carry a page each of the encode reference and no entries, and
+	 * the END page the rest of it followed by the first entries. ref_copy is
 	 * the builder's own copy of the reference, since the caller's buffer is
 	 * not required to outlive finish(); NULL for an inline layout.
+	 *
+	 * end_pending says mem_page is the END page, which is written even when
+	 * it holds no entries, at end_blkno when that is set.
 	 */
-	bool	 spilled;
-	uint32_t ref_pages;
-	float	*ref_copy;
+	bool		spilled;
+	uint32_t	ref_pages;
+	float	   *ref_copy;
+	bool		end_pending;
+	BlockNumber end_blkno;
 
 	RaBitQData	 *enc_buf;
 	RaBitQScratch enc_scratch;
@@ -407,14 +415,27 @@ typedef struct PrismPostingBuilder
 	/* Page format dispatch */
 	const PrismPostingPageOps *page_ops;
 
-	/* Format-specific state (only fastscan uses this) */
+	/*
+	 * Format-specific state (only fastscan uses this). Group metadata goes
+	 * straight into mem_page. The page's run of the code stream is staged in
+	 * page_codes and copied in after the metadata when the page is flushed
+	 * (see the fastscan page format in posting_page.h).
+	 *
+	 * deferred holds the metadata of groups whose codes ended on the current
+	 * page but which did not fit there, ndeferred of them. They open the next
+	 * page. deferred_lanes is the vector count of each.
+	 */
 	struct
 	{
 		FsGroupStage grp;
-		uint32_t	 groups_on_page;
-		uint32_t	 max_groups;
 		uint8_t		*bits_buf;
-		uint8_t		*codes_buf;
+		uint8_t		*codes_buf;	 /* one packed group */
+		uint8_t		*page_codes; /* current page's code bytes */
+		uint8_t		*deferred;
+		uint32_t	 deferred_lanes[PRISM_FASTSCAN_MAX_INFLIGHT_GROUPS - 1];
+		uint32_t	 ndeferred;
+		uint32_t	 page_ngroups;	  /* groups with metadata on the page */
+		uint32_t	 page_code_bytes; /* code bytes staged for the page */
 	} fs;
 } PrismPostingBuilder;
 

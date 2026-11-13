@@ -157,7 +157,7 @@ walk_one_page_tids(PrismPostingChainPos *pos, void *state)
 	 * clamping to it would still let an AoS page's entry loop run past the
 	 * page. Reject against this page's own ceiling instead.
 	 */
-	prism_posting_check_count(pos->blkno, op, dim);
+	prism_posting_check_count(pos->blkno, pos->page, dim);
 
 	if (!(op->flags & PRISM_POSTING_PAGE_TOMBSTONED))
 	{
@@ -175,10 +175,9 @@ walk_one_page_tids(PrismPostingChainPos *pos, void *state)
 							   VS_FASTSCAN_GROUP;
 			for (uint32_t g = 0; g < ngroups; g++)
 			{
-				ItemPointerData *gt =
-						prism_fastscan_group_tids(content, g, dim);
-				uint32_t mask =
-						*prism_fastscan_group_tombstone_mask(content, g, dim);
+				ItemPointerData *gt = prism_fastscan_group_tids(content, g);
+				uint32_t		 mask =
+						*prism_fastscan_group_tombstone_mask(content, g);
 				uint32_t base_i = g * VS_FASTSCAN_GROUP;
 				uint32_t valid	= (cnt - base_i) < VS_FASTSCAN_GROUP
 										? (cnt - base_i)

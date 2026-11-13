@@ -44,6 +44,9 @@ typedef struct StageCtx
 	uint32_t	 entries_cap;
 	StagedEntry *staged;
 	uint8_t		*all_bits;
+	BlockNumber	 head;
+	bool		 aos_seen;		/* an AoS entry page came first */
+	bool		 fastscan_base; /* the list starts with fastscan pages */
 } StageCtx;
 
 static bool
@@ -53,7 +56,28 @@ stage_page(PrismPostingChainPos *pos, void *state)
 	const PrismPostingPageOpaque *op  = prism_posting_opaque(pos->page);
 	char *content = prism_posting_page_content(pos->page, ctx->dim);
 
-	prism_posting_check_count(pos->blkno, op, ctx->dim);
+	prism_posting_check_count(pos->blkno, pos->page, ctx->dim);
+
+	/*
+	 * A list built, converted or split as fastscan starts with its fastscan
+	 * pages, and inserts only ever append AoS pages after them. So the first
+	 * fastscan page ends the walk: before any AoS page it means the list is
+	 * already converted, and after one the chain is not one we write.
+	 */
+	if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
+	{
+		if (ctx->aos_seen)
+			vs_error(
+					VS_EXTENSION_NAME
+					": posting list %u has a fastscan page (block %u) after "
+					"AoS ones; the index may be corrupted -- REINDEX it",
+					ctx->head,
+					pos->blkno);
+		ctx->fastscan_base = true;
+		return false;
+	}
+	if (!prism_posting_is_reference_only_page(op->flags, ctx->dim))
+		ctx->aos_seen = true;
 
 	for (uint32_t i = 0; i < op->entry_count; i++)
 	{
@@ -98,17 +122,14 @@ stage_page(PrismPostingChainPos *pos, void *state)
 
 BlockNumber
 prism_posting_convert_to_fastscan(
-		VsStorage *storage, BlockNumber aos_head, Dimension dim)
+		VsStorage  *storage,
+		BlockNumber aos_head,
+		Dimension	dim,
+		bool	   *has_fastscan_base)
 {
+	*has_fastscan_base = false;
 	if (aos_head == InvalidBlockNumber)
 		return InvalidBlockNumber;
-	/* A fastscan group that fits no page would overrun the builder's page
-	 * buffer; the SQL entry point refuses first, this is the backstop. */
-	if (prism_fastscan_max_groups(dim, false) == 0)
-		vs_error(
-				VS_EXTENSION_NAME ": fastscan does not support %u dimensions",
-				(unsigned)dim);
-
 	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
 
 	/* The cluster id from the AoS head, then its encode reference. */
@@ -127,11 +148,24 @@ prism_posting_convert_to_fastscan(
 			.dim		  = dim,
 			.packed_bytes = packed_bytes,
 			.entries_cap  = 256,
+			.head		  = aos_head,
 	};
 	ctx.staged	 = vs_alloc(ctx.entries_cap * sizeof(StagedEntry));
 	ctx.all_bits = vs_alloc(ctx.entries_cap * (size_t)packed_bytes);
 
 	prism_posting_chain_walk(storage, aos_head, stage_page, &ctx);
+
+	/* The builder writes nothing until it gets entries, so leaving it
+	 * unfinished leaves the index untouched. */
+	if (ctx.fastscan_base)
+	{
+		*has_fastscan_base = true;
+		vs_free(ctx.staged);
+		vs_free(ctx.all_bits);
+		prism_posting_builder_cleanup(&builder);
+		vs_free(pt_centroid);
+		return InvalidBlockNumber;
+	}
 
 	/* Feed staged entries to the fastscan builder */
 	for (uint32_t i = 0; i < ctx.total_entries; i++)

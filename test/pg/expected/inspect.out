@@ -273,9 +273,9 @@ SELECT bool_and(format = 'aos') AS others_aos
  t
 (1 row)
 
--- Converting again should be a no-op (already fastscan)
+-- Converting again is a no-op: the list already has a fastscan base
 CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
-NOTICE:  cluster 0 already fastscan (head block 33)
+NOTICE:  cluster 0 already has a fastscan base (head block 33)
 -- Query still works after partial conversion (mixed AoS + fastscan).
 --
 -- A small table, so a sequential scan is the plan the cost model correctly

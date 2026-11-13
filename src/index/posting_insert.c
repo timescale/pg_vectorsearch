@@ -62,12 +62,13 @@ prism_posting_insert_one(
 	float *pt_residual = scratch->transformed;
 	if (prism_posting_spilled(dim))
 	{
-		/* Chunk 0 off the pinned head, the rest from its chain. */
+		/* The START page's floats off the pinned head, the rest from its
+		 * chain. */
 		BlockNumber next = hop->next_blkno;
 
 		memcpy(scratch->residual,
 			   prism_posting_pt_centroid(head),
-			   (size_t)prism_posting_reference_chunk_floats(dim, 0) *
+			   (size_t)prism_posting_reference_page_floats(dim, 0) *
 					   sizeof(float));
 		vs_storage_release_page(storage, head_blkno);
 		prism_posting_reference_read_rest(
@@ -156,8 +157,7 @@ prism_posting_insert_one(
 		 * page (it leaves at worst an unreferenced page). */
 		BlockNumber t2;
 		Page		np = vs_storage_new_page(storage, &t2);
-		prism_posting_page_init(
-				np, cluster_id, dim, PRISM_POSTING_PAGE_OVERFLOW);
+		prism_posting_page_init(np, cluster_id, dim, 0);
 		prism_posting_page_add(
 				np,
 				dim,
@@ -231,7 +231,7 @@ prism_posting_tombstone_chain(
 		uint16_t					  flags = op->flags;
 		uint32_t					  n		= op->entry_count;
 
-		prism_posting_check_count(blk, op, dim);
+		prism_posting_check_count(blk, p, dim);
 
 		/* Already fully tombstoned: nothing to mark, and skip so its entries
 		 * aren't counted into the live_count decrement twice. */
@@ -269,9 +269,8 @@ prism_posting_tombstone_chain(
 				if (g_count > VS_FASTSCAN_GROUP)
 					g_count = VS_FASTSCAN_GROUP;
 				uint32_t mask =
-						*prism_fastscan_group_tombstone_mask(content, g, dim);
-				ItemPointerData *tids =
-						prism_fastscan_group_tids(content, g, dim);
+						*prism_fastscan_group_tombstone_mask(content, g);
+				ItemPointerData *tids = prism_fastscan_group_tids(content, g);
 				for (uint32_t v = 0; v < g_count; v++)
 					if (!prism_fastscan_lane_is_tombstoned(mask, v) &&
 						is_dead(tids[v], state))
@@ -332,10 +331,9 @@ prism_posting_tombstone_chain(
 					if (g_count > VS_FASTSCAN_GROUP)
 						g_count = VS_FASTSCAN_GROUP;
 					uint32_t *mask_p =
-							prism_fastscan_group_tombstone_mask(c, g, dim);
+							prism_fastscan_group_tombstone_mask(c, g);
 					uint32_t		 mask = *mask_p;
-					ItemPointerData *tids =
-							prism_fastscan_group_tids(c, g, dim);
+					ItemPointerData *tids = prism_fastscan_group_tids(c, g);
 					for (uint32_t v = 0; v < g_count; v++)
 					{
 						if (prism_fastscan_lane_is_tombstoned(mask, v))

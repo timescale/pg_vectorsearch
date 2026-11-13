@@ -552,16 +552,16 @@ prism_posting_entry_add(
  * Shared helpers
  * ---------------------------------------------------------------- */
 
-/* Write reference page `chunk` (> 0) of a spilled list and link it in. */
+/* Flush MIDDLE page i of a spilled list's head to storage and link it in. */
 static void
-flush_reference_page(PrismPostingBuilder *builder, uint32_t chunk)
+reference_page_flush_middle(PrismPostingBuilder *builder, uint32_t i)
 {
 	BlockNumber blkno;
 	Page		page;
 
 	if (builder->fixed_first_blkno != InvalidBlockNumber)
 	{
-		blkno = builder->fixed_first_blkno + chunk;
+		blkno = builder->fixed_first_blkno + i;
 		page  = vs_storage_write_page(builder->storage, blkno);
 	}
 	else
@@ -569,18 +569,49 @@ flush_reference_page(PrismPostingBuilder *builder, uint32_t chunk)
 		page = vs_storage_new_page(builder->storage, &blkno);
 	}
 	prism_posting_reference_page_fill(
-			page,
-			builder->cluster_id,
-			builder->dim,
-			chunk,
-			builder->ref_copy,
-			0);
+			page, builder->cluster_id, builder->dim, i, builder->ref_copy, 0);
 	vs_storage_commit_page(builder->storage, blkno);
 
 	Page prev = vs_storage_write_page(builder->storage, builder->prev_blkno);
 	prism_posting_opaque(prev)->next_blkno = blkno;
 	vs_storage_commit_page(builder->storage, builder->prev_blkno);
 	builder->prev_blkno = blkno;
+}
+
+static const PrismPostingPageOps fs_page_ops;
+
+/*
+ * Reinit the builder's in-memory page (mem_page, the page it fills before
+ * flush_page writes it out) as a spilled list's head END page: the rest of
+ * the reference, then room for the list's first entries in the builder's
+ * format. It takes the place of the format's reinit_page
+ * (page_reinit_as_aos or page_reinit_as_fastscan) once the START and MIDDLE
+ * pages are flushed.
+ */
+static void
+page_reinit_as_reference_end(PrismPostingBuilder *builder)
+{
+	uint32_t last = builder->ref_pages - 1;
+	uint16_t fmt  = builder->page_ops == &fs_page_ops
+						  ? PRISM_POSTING_PAGE_FASTSCAN
+						  : 0;
+
+	prism_posting_reference_page_fill(
+			builder->mem_page,
+			builder->cluster_id,
+			builder->dim,
+			last,
+			builder->ref_copy,
+			fmt);
+	Assert(prism_posting_head_part(
+				   prism_posting_opaque(builder->mem_page)->flags) ==
+		   PRISM_POSTING_HEAD_END);
+	builder->fs.page_ngroups	= 0;
+	builder->fs.page_code_bytes = 0;
+	builder->end_pending		= true;
+	builder->end_blkno = builder->fixed_first_blkno != InvalidBlockNumber
+							   ? builder->fixed_first_blkno + last
+							   : InvalidBlockNumber;
 }
 
 /*
@@ -599,7 +630,7 @@ flush_page(PrismPostingBuilder *builder)
 	 * fastscan nothing is merged into the head, so it stays empty). Later
 	 * pages are still skipped when they hold no new entries.
 	 */
-	if (!builder->page_dirty && !builder->is_first)
+	if (!builder->page_dirty && !builder->is_first && !builder->end_pending)
 		return;
 
 	BlockNumber blkno;
@@ -609,10 +640,16 @@ flush_page(PrismPostingBuilder *builder)
 		blkno = builder->fixed_first_blkno;
 		spage = vs_storage_write_page(builder->storage, blkno);
 	}
+	else if (builder->end_pending && builder->end_blkno != InvalidBlockNumber)
+	{
+		blkno = builder->end_blkno;
+		spage = vs_storage_write_page(builder->storage, blkno);
+	}
 	else
 	{
 		spage = vs_storage_new_page(builder->storage, &blkno);
 	}
+	builder->end_pending = false;
 
 	memcpy(spage, builder->mem_page, BLCKSZ);
 	vs_storage_commit_page(builder->storage, blkno);
@@ -633,12 +670,18 @@ flush_page(PrismPostingBuilder *builder)
 	}
 	builder->prev_blkno = blkno;
 
-	/* A spilled head is followed by the rest of its reference before any
-	 * entry page: at the reserved blocks after a fixed head (the bulk-built
-	 * head region strides by ref_pages), else at fresh pages. */
+	/* A spilled head is followed by the rest of its reference: at the
+	 * reserved blocks after a fixed head (the bulk-built head region strides
+	 * by ref_pages), else at fresh pages. The END page, where the entries
+	 * start, is written even if it gets none. */
 	if (was_first && builder->spilled)
-		for (uint32_t chunk = 1; chunk < builder->ref_pages; chunk++)
-			flush_reference_page(builder, chunk);
+	{
+		for (uint32_t i = 1; i + 1 < builder->ref_pages; i++)
+			reference_page_flush_middle(builder, i);
+		page_reinit_as_reference_end(builder);
+		builder->page_dirty = false;
+		return;
+	}
 
 	builder->page_ops->reinit_page(builder);
 	builder->page_dirty = false;
@@ -669,17 +712,19 @@ builder_init_common(
 	builder->head_blkno = InvalidBlockNumber;
 	builder->prev_blkno = InvalidBlockNumber;
 	builder->is_first	= true;
-	builder->owns_head	= (first_page_flags & PRISM_POSTING_PAGE_FIRST) != 0;
+	builder->owns_head	= prism_posting_is_head_start(first_page_flags);
 	builder->n_entries	= 0;
 	builder->page_ops	= ops;
 
 	builder->fixed_first_blkno = InvalidBlockNumber;
+	builder->end_blkno		   = InvalidBlockNumber;
 
 	builder->spilled   = prism_posting_spilled(dim);
 	builder->ref_pages = prism_posting_reference_pages(dim);
-	if (builder->spilled && (first_page_flags & PRISM_POSTING_PAGE_FIRST))
+	/* A spilled list's START page holds only reference, in either format.
+	 * The entries start on the head's END page, after the reference. */
+	if (builder->spilled && builder->owns_head)
 	{
-		Assert(!(first_page_flags & PRISM_POSTING_PAGE_FASTSCAN));
 		Assert(pt_centroid != NULL);
 		builder->ref_copy = vs_alloc((size_t)dim * sizeof(float));
 		memcpy(builder->ref_copy, pt_centroid, (size_t)dim * sizeof(float));
@@ -730,13 +775,10 @@ aos_write_entry(
 }
 
 static void
-aos_reinit_page(PrismPostingBuilder *builder)
+page_reinit_as_aos(PrismPostingBuilder *builder)
 {
 	prism_posting_page_init(
-			builder->mem_page,
-			builder->cluster_id,
-			builder->dim,
-			PRISM_POSTING_PAGE_OVERFLOW);
+			builder->mem_page, builder->cluster_id, builder->dim, 0);
 }
 
 static void
@@ -753,18 +795,114 @@ aos_cleanup(PrismPostingBuilder *builder)
 
 static const PrismPostingPageOps aos_page_ops = {
 		.write_entry = aos_write_entry,
-		.reinit_page = aos_reinit_page,
+		.reinit_page = page_reinit_as_aos,
 		.finalize	 = aos_finalize,
 		.cleanup	 = aos_cleanup,
 };
 
 /* ----------------------------------------------------------------
- * Fastscan page ops — buffer 32 entries, pack group
+ * Fastscan page ops — buffer 32 entries, pack group, stream it out
+ *
+ * See the fastscan page format in posting_page.h. A group's codes go onto
+ * the page as far as they fit, breaking at chunk boundaries, and continue
+ * on the next page. Its metadata follows on the page where the codes end,
+ * or is deferred to the next page when it does not fit.
  * ---------------------------------------------------------------- */
 
+/* Bytes left on the in-memory page for group metadata and codes. */
+static uint32_t
+fs_page_bytes_available(const PrismPostingBuilder *builder)
+{
+	uint16_t flags = prism_posting_opaque((Page)builder->mem_page)->flags;
+	uint32_t used  = builder->fs.page_ngroups * PRISM_FASTSCAN_META_BYTES +
+					builder->fs.page_code_bytes;
+
+	/* A spilled list's START page holds only reference. */
+	if (prism_posting_is_reference_only_page(flags, builder->dim))
+		return 0;
+	return prism_fastscan_page_space(
+				   builder->dim,
+				   prism_posting_has_ref_prefix(flags, builder->dim)) -
+		   used;
+}
+
+/* Append one group's metadata to the in-memory page. */
+static void
+fs_page_write_group_meta(
+		PrismPostingBuilder *builder, const uint8_t *meta, uint32_t lanes)
+{
+	char *content =
+			prism_posting_page_content(builder->mem_page, builder->dim);
+	char *dst = prism_fastscan_group_base(content, builder->fs.page_ngroups);
+
+	memcpy(dst, meta, PRISM_FASTSCAN_META_BYTES);
+	builder->fs.page_ngroups++;
+	prism_posting_opaque(builder->mem_page)->entry_count += (uint16_t)lanes;
+	builder->page_dirty = true;
+}
+
+/* Copy the staged codes in after the page's group metadata. */
+static void
+fs_page_write_codes(PrismPostingBuilder *builder)
+{
+	/* A spilled list's START page holds only reference. */
+	if (prism_posting_is_reference_only_page(
+				prism_posting_opaque(builder->mem_page)->flags, builder->dim))
+	{
+		Assert(builder->fs.page_ngroups == 0);
+		Assert(builder->fs.page_code_bytes == 0);
+		return;
+	}
+
+	char *content =
+			prism_posting_page_content(builder->mem_page, builder->dim);
+	uint8_t *dst =
+			prism_fastscan_page_codes(content, builder->fs.page_ngroups);
+
+	memcpy(dst, builder->fs.page_codes, builder->fs.page_code_bytes);
+	prism_posting_opaque(builder->mem_page)->code_bytes =
+			(uint16_t)builder->fs.page_code_bytes;
+}
+
+/* Finish the in-memory page and start the next with the deferred metadata. */
+static void
+fs_page_next(PrismPostingBuilder *builder)
+{
+	fs_page_write_codes(builder);
+	flush_page(builder);
+
+	Assert(builder->fs.ndeferred < PRISM_FASTSCAN_MAX_INFLIGHT_GROUPS);
+	for (uint32_t i = 0; i < builder->fs.ndeferred; i++)
+	{
+		const uint8_t *meta = builder->fs.deferred +
+							  (size_t)i * PRISM_FASTSCAN_META_BYTES;
+
+		fs_page_write_group_meta(builder, meta, builder->fs.deferred_lanes[i]);
+	}
+	builder->fs.ndeferred = 0;
+}
+
+/* Lay out the staged group's metadata. */
+static void
+fs_pack_meta(const FsGroupStage *grp, uint8_t *meta)
+{
+	size_t	 tids_bytes = VS_FASTSCAN_GROUP * sizeof(ItemPointerData);
+	size_t	 f_bytes	= VS_FASTSCAN_GROUP * sizeof(float);
+	uint32_t mask		= 0;
+
+	memcpy(meta, grp->tids, tids_bytes);
+	memcpy(meta + tids_bytes, grp->f_add, f_bytes);
+	memcpy(meta + tids_bytes + f_bytes, grp->f_rescale, f_bytes);
+	memcpy(meta + tids_bytes + 2 * f_bytes, grp->f_error, f_bytes);
+	memcpy(meta + tids_bytes + 3 * f_bytes, &mask, sizeof(mask));
+}
+
 /*
- * Pack the current group into fastscan SoA layout and write it
- * to the in-memory page.
+ * Pack the staged group and append it to the stream: codes first, as far
+ * as each page has room, then its metadata. The metadata goes where the
+ * codes end, so the scan finds it on the page it holds when the group's
+ * sums are complete. If it does not fit there, it is deferred to the start
+ * of the next page and the next group's codes fill the space instead.
  */
 static void
 fs_write_group(PrismPostingBuilder *builder)
@@ -773,35 +911,66 @@ fs_write_group(PrismPostingBuilder *builder)
 	if (grp->count == 0)
 		return;
 
-	Dimension dim = builder->dim;
+	Dimension dim	   = builder->dim;
+	uint32_t  code_len = VS_FASTSCAN_GROUP_BYTES(dim);
+	uint8_t	  meta[PRISM_FASTSCAN_META_BYTES];
 
-	PrismPostingPageOpaque *op = prism_posting_opaque(builder->mem_page);
-	char *content = prism_posting_page_content(builder->mem_page, dim);
-
-	uint32_t g = builder->fs.groups_on_page;
-
-	memcpy(prism_fastscan_group_tids(content, g, dim),
-		   grp->tids,
-		   VS_FASTSCAN_GROUP * sizeof(ItemPointerData));
-	memcpy(prism_fastscan_group_f_add(content, g, dim),
-		   grp->f_add,
-		   VS_FASTSCAN_GROUP * sizeof(float));
-	memcpy(prism_fastscan_group_f_rescale(content, g, dim),
-		   grp->f_rescale,
-		   VS_FASTSCAN_GROUP * sizeof(float));
-	memcpy(prism_fastscan_group_f_error(content, g, dim),
-		   grp->f_error,
-		   VS_FASTSCAN_GROUP * sizeof(float));
-
+	fs_pack_meta(grp, meta);
 	vs_fastscan_pack_codes(
 			builder->fs.bits_buf, grp->count, dim, builder->fs.codes_buf);
-	memcpy(prism_fastscan_group_codes(content, g, dim),
-		   builder->fs.codes_buf,
-		   VS_FASTSCAN_GROUP_BYTES(dim));
 
-	op->entry_count += (uint16_t)grp->count;
-	builder->fs.groups_on_page++;
-	builder->page_dirty = true;
+	uint32_t pos = 0;
+	while (pos < code_len)
+	{
+		uint32_t left  = code_len - pos;
+		uint32_t avail = fs_page_bytes_available(builder);
+		uint32_t take  = left <= avail ? left
+									   : avail / PRISM_FASTSCAN_CHUNK_BYTES *
+												 PRISM_FASTSCAN_CHUNK_BYTES;
+
+		/* With the most metadata already deferred, this group's could not
+		 * be deferred as well, so its codes must not end on this page. That
+		 * bounds the groups a scan has in flight. */
+		if (builder->fs.ndeferred == PRISM_FASTSCAN_MAX_INFLIGHT_GROUPS - 1 &&
+			take == left)
+			take = (left - 1) / PRISM_FASTSCAN_CHUNK_BYTES *
+				   PRISM_FASTSCAN_CHUNK_BYTES;
+
+		if (take == 0)
+		{
+			fs_page_next(builder);
+			continue;
+		}
+
+		uint8_t *dst = builder->fs.page_codes + builder->fs.page_code_bytes;
+
+		memcpy(dst, builder->fs.codes_buf + pos, take);
+		builder->fs.page_code_bytes += take;
+		builder->page_dirty = true;
+		pos += take;
+	}
+
+	if (fs_page_bytes_available(builder) >= PRISM_FASTSCAN_META_BYTES)
+		fs_page_write_group_meta(builder, meta, grp->count);
+	else
+	{
+		/* Free space only shrinks, so a later group's metadata can never
+		 * land on this page ahead of this one's: metadata stays in group
+		 * order. The loop above keeps a group's codes off a page that
+		 * already defers the most metadata, so there is always room here. */
+		if (builder->fs.ndeferred >= PRISM_FASTSCAN_MAX_INFLIGHT_GROUPS - 1)
+			vs_error(
+					VS_EXTENSION_NAME
+					": fastscan posting builder deferred metadata for too "
+					"many groups");
+
+		uint8_t *dst = builder->fs.deferred +
+					   (size_t)builder->fs.ndeferred *
+							   PRISM_FASTSCAN_META_BYTES;
+
+		memcpy(dst, meta, PRISM_FASTSCAN_META_BYTES);
+		builder->fs.deferred_lanes[builder->fs.ndeferred++] = grp->count;
+	}
 
 	memset(grp, 0, sizeof(*grp));
 	memset(builder->fs.bits_buf,
@@ -832,33 +1001,30 @@ fs_write_entry(
 	grp->count++;
 
 	if (grp->count == VS_FASTSCAN_GROUP)
-	{
-		if (builder->fs.groups_on_page >= builder->fs.max_groups)
-			flush_page(builder);
 		fs_write_group(builder);
-	}
 
 	return true;
 }
 
 static void
-fs_reinit_page(PrismPostingBuilder *builder)
+page_reinit_as_fastscan(PrismPostingBuilder *builder)
 {
 	prism_posting_page_init(
 			builder->mem_page,
 			builder->cluster_id,
 			builder->dim,
-			PRISM_POSTING_PAGE_OVERFLOW | PRISM_POSTING_PAGE_FASTSCAN);
-	builder->fs.groups_on_page = 0;
-	builder->fs.max_groups = prism_fastscan_max_groups(builder->dim, false);
+			PRISM_POSTING_PAGE_FASTSCAN);
+	builder->fs.page_ngroups	= 0;
+	builder->fs.page_code_bytes = 0;
 }
 
 static void
 fs_finalize(PrismPostingBuilder *builder)
 {
-	if (builder->fs.groups_on_page >= builder->fs.max_groups)
-		flush_page(builder);
 	fs_write_group(builder);
+	if (builder->fs.ndeferred > 0)
+		fs_page_next(builder);
+	fs_page_write_codes(builder);
 }
 
 static void
@@ -868,11 +1034,28 @@ fs_cleanup(PrismPostingBuilder *builder)
 	builder->fs.bits_buf = NULL;
 	vs_free(builder->fs.codes_buf);
 	builder->fs.codes_buf = NULL;
+	vs_free(builder->fs.page_codes);
+	builder->fs.page_codes = NULL;
+	vs_free(builder->fs.deferred);
+	builder->fs.deferred = NULL;
+}
+
+/* Scratch for a fastscan builder. */
+static void
+fs_alloc_buffers(PrismPostingBuilder *builder, Dimension dim)
+{
+	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
+	builder->fs.bits_buf  = vs_alloc((size_t)VS_FASTSCAN_GROUP * packed_bytes);
+	builder->fs.codes_buf = vs_alloc(VS_FASTSCAN_GROUP_BYTES(dim));
+	builder->fs.page_codes = vs_alloc(prism_posting_page_usable());
+	builder->fs.deferred   = vs_alloc(
+			  (size_t)(PRISM_FASTSCAN_MAX_INFLIGHT_GROUPS - 1) *
+			  PRISM_FASTSCAN_META_BYTES);
 }
 
 static const PrismPostingPageOps fs_page_ops = {
 		.write_entry = fs_write_entry,
-		.reinit_page = fs_reinit_page,
+		.reinit_page = page_reinit_as_fastscan,
 		.finalize	 = fs_finalize,
 		.cleanup	 = fs_cleanup,
 };
@@ -900,7 +1083,7 @@ prism_posting_builder_init(
 			centroid,
 			pt_centroid,
 			&aos_page_ops,
-			PRISM_POSTING_PAGE_FIRST);
+			PRISM_POSTING_HEAD_START);
 }
 
 void
@@ -922,12 +1105,8 @@ prism_posting_builder_init_fastscan(
 			centroid,
 			pt_centroid,
 			&fs_page_ops,
-			PRISM_POSTING_PAGE_FIRST | PRISM_POSTING_PAGE_FASTSCAN);
-
-	uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
-	builder->fs.bits_buf  = vs_alloc((size_t)VS_FASTSCAN_GROUP * packed_bytes);
-	builder->fs.codes_buf = vs_alloc(VS_FASTSCAN_GROUP_BYTES(dim));
-	builder->fs.max_groups = prism_fastscan_max_groups(dim, true);
+			PRISM_POSTING_HEAD_START | PRISM_POSTING_PAGE_FASTSCAN);
+	fs_alloc_buffers(builder, dim);
 }
 
 void
@@ -984,6 +1163,7 @@ prism_posting_builder_adopt_head(
 	builder->page_ops	= fastscan ? &fs_page_ops : &aos_page_ops;
 
 	builder->fixed_first_blkno = head_blk;
+	builder->end_blkno		   = InvalidBlockNumber;
 	builder->adopted_head	   = true;
 	builder->spilled		   = prism_posting_spilled(dim);
 	builder->ref_pages		   = prism_posting_reference_pages(dim);
@@ -1000,31 +1180,36 @@ prism_posting_builder_adopt_head(
 	}
 	else
 	{
-		/* The pre-written head and its reference pages hold no entries and
-		 * stay as they are; entries go on fresh pages chained after the last
-		 * reference page, so the builder starts past it. */
-		Assert(!fastscan);
+		/* The pre-written head and its middle reference pages stay as they
+		 * are. The entries start on the head's END page, which the builder
+		 * loads and rewrites in place, already linked. */
 		BlockNumber blk = head_blk;
-		for (uint32_t chunk = 0; chunk < builder->ref_pages; chunk++)
+
+		for (uint32_t i = 0; i < builder->ref_pages; i++)
 		{
 			Page p = vs_storage_read_page(storage, blk);
 			const PrismPostingPageOpaque *op   = prism_posting_opaque(p);
 			BlockNumber					  next = op->next_blkno;
+			bool						  end  = i + 1 == builder->ref_pages;
 
-			Assert(op->flags & PRISM_POSTING_PAGE_REFERENCE);
-			Assert(chunk > 0 || op->live_count == 0);
+			Assert(prism_posting_head_part(op->flags) ==
+				   (end		 ? PRISM_POSTING_HEAD_END
+					: i == 0 ? PRISM_POSTING_HEAD_START
+							 : PRISM_POSTING_HEAD_MIDDLE));
+			Assert(i > 0 || op->live_count == 0);
+			if (end)
+			{
+				Assert(op->entry_count == 0);
+				memcpy(builder->mem_page, p, BLCKSZ);
+			}
 			vs_storage_release_page(storage, blk);
-			if (chunk + 1 < builder->ref_pages)
+			if (!end)
 				blk = next;
 		}
-		builder->head_blkno = head_blk;
-		builder->prev_blkno = blk;
-		builder->is_first	= false;
-		prism_posting_page_init(
-				builder->mem_page,
-				cluster_id,
-				dim,
-				PRISM_POSTING_PAGE_OVERFLOW);
+		builder->head_blkno	 = head_blk;
+		builder->is_first	 = false;
+		builder->end_pending = true;
+		builder->end_blkno	 = blk;
 	}
 
 	/* No encoder scratch: an adopted head only ever receives pre-encoded
@@ -1034,13 +1219,7 @@ prism_posting_builder_adopt_head(
 	builder->enc_buf = NULL;
 
 	if (fastscan)
-	{
-		uint32_t packed_bytes = VS_RABITQ_BYTES(dim);
-		builder->fs.bits_buf  = vs_alloc(
-				 (size_t)VS_FASTSCAN_GROUP * packed_bytes);
-		builder->fs.codes_buf  = vs_alloc(VS_FASTSCAN_GROUP_BYTES(dim));
-		builder->fs.max_groups = prism_fastscan_max_groups(dim, true);
-	}
+		fs_alloc_buffers(builder, dim);
 }
 
 void
@@ -1059,13 +1238,11 @@ prism_posting_builder_add_encoded(
 		float				 f_error,
 		const uint8_t		*bits)
 {
-	if (!builder->page_ops
-				 ->write_entry(builder, tid, f_add, f_rescale, f_error, bits))
-	{
+	/* More than one flush when a spilled START page and an END page
+	 * without room come first. */
+	while (!builder->page_ops->write_entry(
+			builder, tid, f_add, f_rescale, f_error, bits))
 		flush_page(builder);
-		builder->page_ops
-				->write_entry(builder, tid, f_add, f_rescale, f_error, bits);
-	}
 	builder->page_dirty = true;
 	builder->n_entries++;
 }
@@ -1133,6 +1310,8 @@ prism_posting_builder_finish(PrismPostingBuilder *builder)
 	}
 
 	flush_page(builder);
+	if (builder->end_pending)
+		flush_page(builder);
 
 	/*
 	 * Stamp the head's per-cluster metadata from state the builder already
@@ -1307,6 +1486,9 @@ prism_write_leaf_head(void *arg, uint32_t leaf, const float *centroid)
 	PrismHeadWriteCtx *h = (PrismHeadWriteCtx *)arg;
 	vs_rabitq_rotate(h->rq_params, centroid, h->pt);
 
+	/* The builder's scratch is freed with the context, which the standalone
+	 * arena would otherwise keep for every leaf. */
+	VsMemCtx			outer = vs_memctx_switch(h->leaf_ctx);
 	PrismPostingBuilder hb;
 	prism_posting_builder_init_fmt(
 			&hb,
@@ -1321,4 +1503,6 @@ prism_write_leaf_head(void *arg, uint32_t leaf, const float *centroid)
 			&hb, prism_leaf_head_blkno(h->first_posting, leaf, h->stride));
 	prism_posting_builder_finish(&hb);
 	prism_posting_builder_cleanup(&hb);
+	vs_memctx_switch(outer);
+	vs_memctx_reset(h->leaf_ctx);
 }

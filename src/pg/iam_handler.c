@@ -294,7 +294,7 @@ tid_is_dead(ItemPointerData tid, void *state)
 
 /*
  * VACUUM's dead-tuple removal. Block-scans the index and tombstones each
- * posting chain from its FIRST (head) page via prism_posting_tombstone_chain —
+ * posting chain from its START (head) page via prism_posting_tombstone_chain —
  * the head walk covers the chain's overflow pages, so only heads are acted on.
  * Tombstoned entries are skipped by later scans; physical reclaim happens at a
  * later compaction/rebuild. This is the cleanup path for both explicit DELETEs
@@ -376,7 +376,7 @@ prism_bulkdelete(
 			/* Skip a retired (DELETED) chain: it is superseded by a split,
 			 * its live_count slot now holds delete_xid, and cleanup
 			 * reclaims it once safe. */
-			is_head = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0 &&
+			is_head = prism_posting_is_head_start(op->flags) &&
 					  !(op->flags & PRISM_POSTING_PAGE_DELETED);
 		}
 		/* Centroid pages carry no heap TIDs — there is nothing for
@@ -410,7 +410,7 @@ prism_bulkdelete(
 		/* Re-read under the lock: a live head at this point stays live. */
 		Page hp = vs_storage_read_page(&storage.base, blk);
 		const PrismPostingPageOpaque *hop = prism_posting_opaque(hp);
-		bool still_head = (hop->flags & PRISM_POSTING_PAGE_FIRST) != 0 &&
+		bool still_head = prism_posting_is_head_start(hop->flags) &&
 						  !(hop->flags & PRISM_POSTING_PAGE_DELETED) &&
 						  !(hop->flags & PRISM_POSTING_PAGE_TOMBSTONED);
 		vs_storage_release_page(&storage.base, blk);

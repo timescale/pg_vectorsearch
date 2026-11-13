@@ -19,16 +19,22 @@
  *
  * Reads all entries from the AoS chain starting at aos_head,
  * repacks the 1-bit codes into VPSHUFB nibble layout, and writes
- * new fastscan pages. The pt_centroid from the first AoS page is
- * preserved on the first fastscan page.
+ * new fastscan pages. The chain's encode reference is carried over
+ * to the new chain.
  *
- * Returns the head block of the new fastscan chain.
- * Returns InvalidBlockNumber if the AoS chain is empty.
+ * Returns the head block of the new fastscan chain, or
+ * InvalidBlockNumber when aos_head is invalid or the list already
+ * starts with fastscan pages. In that case *has_fastscan_base is set
+ * and nothing is written: the AoS pages after a fastscan base hold
+ * vectors inserted since, which a split repacks.
  *
  * The original AoS pages are NOT freed — the caller is
  * responsible for any cleanup.
  */
 BlockNumber prism_posting_convert_to_fastscan(
-		VsStorage *storage, BlockNumber aos_head, Dimension dim);
+		VsStorage  *storage,
+		BlockNumber aos_head,
+		Dimension	dim,
+		bool	   *has_fastscan_base);
 
 #endif /* PRISM_POSTING_CONVERT_H */

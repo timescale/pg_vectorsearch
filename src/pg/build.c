@@ -292,7 +292,7 @@ write_meta_page(
 	PageInit(page, BLCKSZ, PRISM_META_SIZE(dim));
 
 	PrismMetaPage *meta	  = (PrismMetaPage *)PageGetSpecialPointer(page);
-	meta->magic			  = prism_meta_magic_for(dim);
+	meta->magic			  = PRISM_META_MAGIC;
 	meta->dim			  = dim;
 	meta->nlevels		  = nlevels;
 	meta->centroid_format = (uint8_t)centroid_format;
@@ -315,14 +315,14 @@ write_meta_page(
 	 * right after it, reserved by the layout and chained like a posting
 	 * list's reference; amcache gathers them once per backend. */
 	uint32_t npages = prism_global_mean_pages(dim);
-	for (uint32_t chunk = 0; chunk < npages; chunk++)
+	for (uint32_t i = 0; i < npages; i++)
 	{
-		BlockNumber blk = PRISM_GLOBAL_MEAN_BLKNO + chunk;
+		BlockNumber blk = PRISM_GLOBAL_MEAN_BLKNO + i;
 		Page		p	= vs_storage_write_page(storage, blk);
 
 		prism_posting_reference_page_fill(
-				p, PRISM_GLOBAL_MEAN_CLUSTER, dim, chunk, global_mean, 0);
-		if (chunk + 1 < npages)
+				p, PRISM_GLOBAL_MEAN_CLUSTER, dim, i, global_mean, 0);
+		if (i + 1 < npages)
 			prism_posting_opaque(p)->next_blkno = blk + 1;
 		vs_storage_commit_page(storage, blk);
 	}
@@ -445,33 +445,16 @@ prism_resolve_format(Relation index, DistanceMetric metric, Dimension dim)
 }
 
 /*
- * Resolve the posting-page format. Like the centroid layout, a
- * fastscan posting group has a dimension-dependent fixed size; the
- * binding constraint is a cluster's first page, which also carries
- * the full-precision centroid reference. AUTO uses fastscan exactly
- * where a group fits; ON errors where it does not.
+ * Resolve the posting-page format. Fastscan works at every dimension the
+ * index supports, so AUTO and ON both mean fastscan.
  */
 static bool
-prism_resolve_fastscan(Relation index, Dimension dim)
+prism_resolve_fastscan(Relation index)
 {
 	PrismOptions *opts = (PrismOptions *)index->rd_options;
-	int	 fs	  = (opts != NULL) ? opts->fastscan : PRISM_FASTSCAN_MODE_AUTO;
-	bool fits = prism_fastscan_max_groups(dim, true) > 0;
+	int fs = (opts != NULL) ? opts->fastscan : PRISM_FASTSCAN_MODE_AUTO;
 
-	switch (fs)
-	{
-	case PRISM_FASTSCAN_MODE_ON:
-		if (!fits)
-			ereport(ERROR,
-					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-					 errmsg("fastscan=on does not support %d dimensions",
-							dim)));
-		return true;
-	case PRISM_FASTSCAN_MODE_OFF:
-		return false;
-	default: /* AUTO */
-		return fits;
-	}
+	return fs != PRISM_FASTSCAN_MODE_OFF;
 }
 
 static uint32_t
@@ -548,7 +531,7 @@ resolve_build_params(
 										 : PRISM_DEFAULT_SOAR_LAMBDA;
 	p->boundary_epsilon = (opts != NULL) ? opts->boundary_epsilon
 										 : PRISM_DEFAULT_BOUNDARY_EPSILON;
-	p->fastscan			= prism_resolve_fastscan(index, dim);
+	p->fastscan			= prism_resolve_fastscan(index);
 
 	/* The exact-centroid collection size is known from the resolved
 	 * shape alone, so an under-budgeted maintenance_work_mem can be

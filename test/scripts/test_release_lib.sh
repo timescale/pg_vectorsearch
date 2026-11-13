@@ -351,62 +351,56 @@ expect_eq "previous final: nothing when only candidates are tagged" \
     "" "$(lib_call "$rc_only" previous_final_release_tag)"
 
 # ----------------------------------------------------------------
-# meta_format_versions, check_on_disk_format
+# meta_format_version, check_on_disk_format
 # ----------------------------------------------------------------
 
-# Write src/pg/meta.h in fixture $1 defining one magic per format byte
-# in $2.. -- the first as PRISM_META_MAGIC, the rest as compat ones.
-write_magics() {
-    local dir="$1" b
-    shift
-    : >"$dir/src/pg/meta.h"
-    printf '#define PRISM_META_MAGIC ((uint32_t)0x505249%s)\n' "$1" \
-        >>"$dir/src/pg/meta.h"
-    shift
-    for b in "$@"; do
-        printf '#define PRISM_META_MAGIC_COMPAT_V%s ((uint32_t)0x505249%s)\n' \
-            "$b" "$b" >>"$dir/src/pg/meta.h"
-    done
+# Write src/pg/meta.h in fixture $1 with format byte $2, behind another
+# define that shares the magic's prefix.
+write_magic() {
+    mkdir -p "$1/src/pg"
+    printf '%s\n%s\n' \
+        '#define PRISM_META_MAGIC_BASE ((uint32_t)0x50524900)' \
+        "#define PRISM_META_MAGIC ((uint32_t)0x505249$2)" \
+        >"$1/src/pg/meta.h"
 }
 
-# A compat magic is a format the build still opens; other
-# PRISM_META_MAGIC-prefixed defines are not formats at all.
 fmt="$(new_fixture 0.2.0-dev)"
-write_magics "$fmt" 07 06
-printf '#define PRISM_META_MAGIC_BASE ((uint32_t)0x50524900)\n' \
-    >>"$fmt/src/pg/meta.h"
-expect_eq "format: the current and compat magics are the formats" \
-    "06 07" "$(lib_call "$fmt" meta_format_versions | paste -sd ' ' -)"
+write_magic "$fmt" 07
+expect_eq "format: the low byte of PRISM_META_MAGIC itself" \
+    "07" "$(lib_call "$fmt" meta_format_version)"
+write_magic "$fmt" 0B
+expect_eq "format: hex digits compare lowercase" \
+    "0b" "$(lib_call "$fmt" meta_format_version)"
+rm "$fmt/src/pg/meta.h"
+expect_eq "format: nothing when meta.h is unreadable" \
+    "" "$(lib_call "$fmt" meta_format_version)"
 
-write_magics "$fmt" 0B 0a
-expect_eq "format: mixed-case hex bytes compare by value" \
-    "0a 0b" "$(lib_call "$fmt" meta_format_versions | paste -sd ' ' -)"
-
-# A fixture tagged v0.2.0 with the formats $2.., whose working tree has
-# the formats in $1 (space separated). Current magic first in both.
+# A fixture tagged v0.2.0 with format byte $2 whose working tree has $1.
 format_case() {
     local dir
     dir="$(new_fixture 0.2.0)"
-    write_magics "$dir" "${@:2}"
+    write_magic "$dir" "$2"
     git -C "$dir" add -A
-    git -C "$dir" commit -qm "formats $*"
+    git -C "$dir" commit -qm "format $2"
     git -C "$dir" tag v0.2.0
-    # shellcheck disable=SC2086
-    write_magics "$dir" $1
+    write_magic "$dir" "$1"
     printf '%s\n' "$dir"
 }
 
-# Keeping the old format readable is no format change, so a patch may
-# ship it; dropping any format a release opened is, however many stay.
-expect_lib "format: a new format beside a compat one may ship in a patch" \
-    0 "$(format_case "07 06" 06)" check_on_disk_format 0.2.1
-expect_lib "format: adding a third format may ship in a patch" \
-    0 "$(format_case "08 06 07" 07 06)" check_on_disk_format 0.2.1
-expect_lib "format: dropping the compat format is refused in a patch" \
-    1 "$(format_case "07" 07 06)" check_on_disk_format 0.2.1
-expect_lib "format: replacing a newer format is refused in a patch" \
-    1 "$(format_case "08 06" 07 06)" check_on_disk_format 0.2.1
-expect_lib "format: a dropped format is allowed in a minor release" \
-    0 "$(format_case "08 06" 07 06)" check_on_disk_format 0.3.0
+# A patch release must not need a REINDEX, so it may not change the
+# format; a minor release may.
+expect_lib "format: an unchanged format may ship in a patch" \
+    0 "$(format_case 07 07)" check_on_disk_format 0.2.1
+expect_lib "format: a byte differing only in case is unchanged" \
+    0 "$(format_case 0b 0B)" check_on_disk_format 0.2.1
+expect_lib "format: a changed format is refused in a patch" \
+    1 "$(format_case 08 07)" check_on_disk_format 0.2.1
+expect_lib "format: a changed format is allowed in a minor release" \
+    0 "$(format_case 08 07)" check_on_disk_format 0.3.0
+
+unreadable="$(format_case 08 07)"
+rm "$unreadable/src/pg/meta.h"
+expect_lib "format: an unreadable format skips the check" \
+    0 "$unreadable" check_on_disk_format 0.2.1
 
 tap_finish

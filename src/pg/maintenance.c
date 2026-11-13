@@ -344,7 +344,7 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (!prism_meta_magic_valid(meta->magic, meta->dim))
+	if (meta->magic != PRISM_META_MAGIC)
 	{
 		UnlockReleaseBuffer(meta_buf);
 		index_close(index, NoLock);
@@ -358,16 +358,6 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	Dimension	dim			   = meta->dim;
 	uint8_t		nlevels		   = meta->nlevels;
 	UnlockReleaseBuffer(meta_buf);
-
-	/* The same bound CREATE INDEX applies to fastscan=on: a group has to fit
-	 * an overflow page, which stops well before the dimension ceiling. */
-	if (prism_fastscan_max_groups(dim, false) == 0)
-	{
-		relation_close(index, PRISM_MAINT_LOCK);
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("fastscan does not support %d dimensions", dim)));
-	}
 
 	/*
 	 * Find the leaf for this cluster. The argument is the stored cluster_id --
@@ -410,30 +400,6 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	uint16_t	entry_idx	  = leaf->entry_idx;
 	pfree(leaves);
 
-	/* Skip if already fastscan */
-	{
-		Buffer buf = ReadBuffer(index, old_head);
-		LockBuffer(buf, BUFFER_LOCK_SHARE);
-		Page					page = BufferGetPage(buf);
-		PrismPostingPageOpaque *op	 = prism_posting_opaque(page);
-		bool already_fastscan = (op->flags & PRISM_POSTING_PAGE_FASTSCAN) != 0;
-		UnlockReleaseBuffer(buf);
-
-		if (already_fastscan)
-		{
-			/* Calling again repairs a conversion that failed before setting
-			 * the flag. */
-			if (ensure_meta_fastscan_flag(index))
-				CacheInvalidateRelcache(index);
-			index_close(index, NoLock);
-			ereport(NOTICE,
-					(errmsg("cluster %d already fastscan (head block %u)",
-							cluster_id,
-							old_head)));
-			PG_RETURN_VOID();
-		}
-	}
-
 	/* Convert the posting chain */
 	VsPgStorage storage;
 	vs_pg_storage_init(&storage, index, NULL, DISTANCE_L2);
@@ -448,8 +414,24 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	 */
 	storage.build_mode = false;
 
-	BlockNumber new_head =
-			prism_posting_convert_to_fastscan(&storage.base, old_head, dim);
+	bool		has_fastscan_base;
+	BlockNumber new_head = prism_posting_convert_to_fastscan(
+			&storage.base, old_head, dim, &has_fastscan_base);
+
+	if (has_fastscan_base)
+	{
+		/* Calling again repairs a conversion that failed before setting the
+		 * flag. */
+		if (ensure_meta_fastscan_flag(index))
+			CacheInvalidateRelcache(index);
+		index_close(index, NoLock);
+		ereport(NOTICE,
+				(errmsg("cluster %d already has a fastscan base (head block "
+						"%u)",
+						cluster_id,
+						old_head)));
+		PG_RETURN_VOID();
+	}
 
 	/*
 	 * Publish the new head, but only if a concurrent converter has not
@@ -767,7 +749,7 @@ require_memory_budget(Relation index, Dimension dim)
 static bool
 posting_head_is_live(const PrismPostingPageOpaque *op)
 {
-	return (op->flags & PRISM_POSTING_PAGE_FIRST) &&
+	return prism_posting_is_head_start(op->flags) &&
 		   !(op->flags & PRISM_POSTING_PAGE_TOMBSTONED) &&
 		   !(op->flags & PRISM_POSTING_PAGE_DELETED);
 }
@@ -1255,7 +1237,7 @@ vs_rebalance(PG_FUNCTION_ARGS)
 		const PrismPostingPageOpaque *op = posting ? prism_posting_opaque(p)
 												   : NULL;
 
-		bool is_head = posting && (op->flags & PRISM_POSTING_PAGE_FIRST) &&
+		bool is_head = posting && prism_posting_is_head_start(op->flags) &&
 					   !(op->flags & PRISM_POSTING_PAGE_TOMBSTONED);
 		bool retired   = is_head && (op->flags & PRISM_POSTING_PAGE_DELETED);
 		bool candidate = is_head && !retired &&

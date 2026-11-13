@@ -1584,8 +1584,9 @@ TEST(split_spilled_list)
 	{
 		Page hp = vs_storage_read_page(idx->base.posting_storage, res.head[p]);
 		ASSERT_TRUE(
-				prism_posting_opaque(hp)->flags & PRISM_POSTING_PAGE_REFERENCE,
-				"a new head is a reference page");
+				prism_posting_is_reference_only_page(
+						prism_posting_opaque(hp)->flags, idx->base.dim),
+				"a new head holds only reference");
 		ASSERT_EQ(0u, prism_posting_page_count(hp), "with no entries");
 		vs_storage_release_page(idx->base.posting_storage, res.head[p]);
 	}

@@ -9,7 +9,7 @@
  *
  *   Paged mode (BLCKSZ pages):
  *     PageHeader (PG-compatible, 24B)
- *     (pt_centroid — on first page only)
+ *     (reference prefix — on a list's first entry page only)
  *     entry[0], entry[1], ...
  *     PrismPostingPageOpaque (16B at page end)
  *
@@ -58,10 +58,37 @@
 #define PRISM_POSTING_FLAG_DELETED	0x01
 #define PRISM_POSTING_FLAG_BOUNDARY 0x02
 
-/* Page flags */
-#define PRISM_POSTING_PAGE_FIRST	0x0001
-#define PRISM_POSTING_PAGE_OVERFLOW 0x0002
-#define PRISM_POSTING_PAGE_FASTSCAN 0x0004 /* reserved for phase 2 */
+/*
+ * Page flags.
+ *
+ * The low two bits are a field, not two flags: the page's part of its
+ * list's head. A list's head is the pages that carry its encode reference
+ * (P^T * centroid, 4 * dim bytes). An inline list's head is its first page,
+ * which holds the whole reference followed by entries. A spilled list
+ * (prism_posting_spilled, past 1968 dimensions) spreads the reference over
+ * prism_posting_reference_pages(dim) pages, which the bulk build lays out
+ * contiguously after the first:
+ *
+ *   head part   inline list                    spilled list
+ *   START       whole reference, then entries  a page of reference only
+ *   MIDDLE      (none)                         a page of reference only
+ *   END         (none)                         rest of reference, entries
+ *   NONE        entries                        entries
+ *
+ * START means the same on every list: the list's first page, which carries
+ * the head metadata in the opaque and is what a leaf centroid points at.
+ * Whether it also holds entries follows from the dimension. The values share
+ * bits (END includes START's), so read the field with
+ * prism_posting_head_part and compare it; never test one of its bits alone.
+ */
+#define PRISM_POSTING_PAGE_HEAD_MASK 0x0003
+#define PRISM_POSTING_HEAD_NONE		 0x0000
+#define PRISM_POSTING_HEAD_START	 0x0001
+#define PRISM_POSTING_HEAD_MIDDLE	 0x0002
+#define PRISM_POSTING_HEAD_END		 0x0003
+
+/* The page's entries are in the fastscan format, not AoS. */
+#define PRISM_POSTING_PAGE_FASTSCAN 0x0004
 /*
  * Every entry on the page is dead (AoS: all entries flagged; FASTSCAN: every
  * lane of every group's tombstone_mask set). Both formats mark entries
@@ -91,16 +118,6 @@
  * retires the whole old chain, head and all.
  */
 #define PRISM_POSTING_PAGE_DELETED 0x0010
-/*
- * The page carries a chunk of a full-precision float reference instead of
- * entries: entry_count and max_entries are 0. A posting list whose encode
- * reference does not fit beside an entry on its head (prism_posting_spilled)
- * stores it as a chain of these: the head (FIRST | REFERENCE) holds floats
- * [0, PRISM_POSTING_REFERENCE_CHUNK_FLOATS), each following page (OVERFLOW |
- * REFERENCE) the next chunk, and the entries start on the page after the
- * last chunk. The global mean spills the same way (see index_base.h).
- */
-#define PRISM_POSTING_PAGE_REFERENCE 0x0020
 
 /* ----------------------------------------------------------------
  * Structs
@@ -147,10 +164,19 @@ typedef struct PrismPostingPageOpaque
 	BlockNumber next_blkno; /* next page in chain */
 	uint32_t	cluster_id;
 	uint16_t	entry_count; /* entries on this page */
-	uint16_t	flags;		 /* FIRST | OVERFLOW | FASTSCAN | TOMBSTONED |
-							  * DELETED */
-	uint16_t page_id;		 /* PRISM_POSTING_PAGE_ID */
-	uint16_t max_entries;	 /* capacity of this page */
+	uint16_t	flags;		 /* PRISM_POSTING_PAGE_* */
+	uint16_t	page_id;	 /* PRISM_POSTING_PAGE_ID */
+
+	/*
+	 * An AoS page's capacity. A fastscan page takes no inserts, so it holds
+	 * the length of its run of the list's code stream instead (see the
+	 * fastscan page format below).
+	 */
+	union
+	{
+		uint16_t max_entries;
+		uint16_t code_bytes;
+	};
 
 	/*
 	 * Overlay (8 bytes). On a live page these are the per-cluster head
@@ -158,7 +184,7 @@ typedef struct PrismPostingPageOpaque
 	 * carry the deletion XID for the reclaim gate. The DELETED flag is the
 	 * sole discriminator — always read live_count/tail_blkno only when it is
 	 * clear and delete_xid only when it is set. A posting-list split retires
-	 * the whole old chain, its FIRST head included, so a DELETED head does
+	 * the whole old chain, its START page included, so a DELETED head does
 	 * carry delete_xid here rather than head metadata; readers of head
 	 * metadata (insert, split) first check the flag and treat a retired head
 	 * as gone, so the two uses never collide. The anonymous struct/union keeps
@@ -336,7 +362,7 @@ prism_posting_pt_centroid_size(Dimension dim)
 
 /*
  * True when the encode reference no longer fits beside one entry on the
- * head, so the list stores it as a REFERENCE chain. Equivalent to
+ * first page, so the list spreads it over several head pages. Equivalent to
  * dim > PRISM_INDEX_NARROW_MAX_DIM at 8-byte MAXALIGN; computed from the
  * layout so a different alignment cannot disagree with the pages.
  */
@@ -348,38 +374,107 @@ prism_posting_spilled(Dimension dim)
 		   prism_posting_page_usable();
 }
 
-/* Floats one REFERENCE page carries: the whole usable area. */
-#define PRISM_POSTING_REFERENCE_CHUNK_FLOATS               \
+/* Floats of the reference on a full head page: its whole usable area. */
+#define PRISM_POSTING_REFERENCE_PAGE_FLOATS                \
 	((BLCKSZ - PRISM_CEILING_ALIGN(SizeOfPageHeaderData) - \
 	  sizeof(PrismPostingPageOpaque)) /                    \
 	 sizeof(float))
 
 /*
- * Pages that carry the encode reference: the head alone for an inline
- * layout, else the head plus its REFERENCE continuations. This is also the
- * head stride of the bulk-built head region (prism_leaf_head_blkno), so a
- * leaf's reference pages are contiguous with its head.
+ * Pages that carry the encode reference, the list's head pages: one for an
+ * inline layout, else START, MIDDLE and END. This is also the head stride of
+ * the bulk-built head region (prism_leaf_head_blkno), so a leaf's head pages
+ * are contiguous.
+ *
+ * A spilled list always has a START and an END page: the smallest spilled
+ * dimension the index accepts (2048) takes more than a page of floats.
  */
 static inline uint32_t
 prism_posting_reference_pages(Dimension dim)
 {
 	if (!prism_posting_spilled(dim))
 		return 1;
-	return ((uint32_t)dim + PRISM_POSTING_REFERENCE_CHUNK_FLOATS - 1) /
-		   PRISM_POSTING_REFERENCE_CHUNK_FLOATS;
+	return ((uint32_t)dim + PRISM_POSTING_REFERENCE_PAGE_FLOATS - 1) /
+		   PRISM_POSTING_REFERENCE_PAGE_FLOATS;
 }
 
-/* Floats held by reference page `chunk` (0 = head) of a spilled list. */
+/* Floats of the reference on head page i of a spilled list (0 = START). */
 static inline uint32_t
-prism_posting_reference_chunk_floats(Dimension dim, uint32_t chunk)
+prism_posting_reference_page_floats(Dimension dim, uint32_t i)
 {
-	uint32_t start = chunk * (uint32_t)PRISM_POSTING_REFERENCE_CHUNK_FLOATS;
+	uint32_t start = i * (uint32_t)PRISM_POSTING_REFERENCE_PAGE_FLOATS;
 
 	if (start >= dim)
 		return 0;
-	return (dim - start) < PRISM_POSTING_REFERENCE_CHUNK_FLOATS
+	return (dim - start) < PRISM_POSTING_REFERENCE_PAGE_FLOATS
 				 ? (dim - start)
-				 : (uint32_t)PRISM_POSTING_REFERENCE_CHUNK_FLOATS;
+				 : (uint32_t)PRISM_POSTING_REFERENCE_PAGE_FLOATS;
+}
+
+/* The page's part of its list's head (see the page flags above). */
+static inline uint16_t
+prism_posting_head_part(uint16_t flags)
+{
+	return flags & PRISM_POSTING_PAGE_HEAD_MASK;
+}
+
+/* Whether the page is its list's first page, the one with head metadata. */
+static inline bool
+prism_posting_is_head_start(uint16_t flags)
+{
+	return prism_posting_head_part(flags) == PRISM_POSTING_HEAD_START;
+}
+
+/*
+ * Whether the page holds part of the reference and no entries: a spilled
+ * list's START page, or a MIDDLE page. Code that looks at a page on its
+ * own uses this to tell it from a page with entries: its capacity is 0, the
+ * builder writes no entries to it, and conversion and inspection count it
+ * as reference. An END page also holds reference, but entries follow it.
+ */
+static inline bool
+prism_posting_is_reference_only_page(uint16_t flags, Dimension dim)
+{
+	uint16_t part = prism_posting_head_part(flags);
+
+	if (part == PRISM_POSTING_HEAD_MIDDLE)
+		return true;
+	return part == PRISM_POSTING_HEAD_START && prism_posting_spilled(dim);
+}
+
+/*
+ * The reference prefix: the part of the reference a list's first entry page
+ * holds ahead of its entries. That is the whole reference on an inline
+ * START page and the rest of it on an END page. Entries, AoS or fastscan,
+ * start this many bytes into the page content, so the prefix sets where a
+ * reader finds them and how many fit. MAXALIGN'd so the entries start
+ * aligned.
+ */
+static inline uint32_t
+prism_posting_ref_prefix_size(Dimension dim)
+{
+	if (!prism_posting_spilled(dim))
+		return prism_posting_pt_centroid_size(dim);
+
+	uint32_t last = prism_posting_reference_pages(dim) - 1;
+
+	return (uint32_t)MAXALIGN(
+			prism_posting_reference_page_floats(dim, last) * sizeof(float));
+}
+
+/*
+ * Whether the page has a reference prefix, so its entries start after it:
+ * an inline START page or an END page. Every other page that holds entries
+ * has them from the start of its content.
+ */
+static inline bool
+prism_posting_has_ref_prefix(uint16_t flags, Dimension dim)
+{
+	uint16_t part = prism_posting_head_part(flags);
+
+	if (part == PRISM_POSTING_HEAD_END)
+		return true;
+	return part == PRISM_POSTING_HEAD_START && !prism_posting_spilled(dim);
 }
 
 /*
@@ -404,26 +499,21 @@ prism_route_head_to_leaf(
 	return (uint32_t)(head - first_posting) / stride;
 }
 
-/* Max entries on an overflow page (no pt_centroid) */
+/* Max entries on a page with no reference ahead of its entries */
 static inline uint32_t
 prism_posting_max_entries(Dimension dim)
 {
 	return prism_posting_page_usable() / PRISM_POSTING_ENTRY_SIZE(dim);
 }
 
-/* Max entries on a first page (with pt_centroid) */
+/*
+ * Max entries on a list's first entry page, after its reference prefix
+ * (prism_posting_ref_prefix_size): an inline START page or an END page.
+ */
 static inline uint32_t
 prism_posting_max_entries_first(Dimension dim)
 {
-	/* A spilled head carries only a reference chunk. Guarded rather than
-	 * subtracted blindly: past the inline threshold the reference alone can
-	 * exceed the page, and an unsigned subtraction would report a capacity
-	 * of millions -- which the count checks use as their bound. */
-	if (prism_posting_spilled(dim))
-		return 0;
-
-	return (prism_posting_page_usable() -
-			prism_posting_pt_centroid_size(dim)) /
+	return (prism_posting_page_usable() - prism_posting_ref_prefix_size(dim)) /
 		   PRISM_POSTING_ENTRY_SIZE(dim);
 }
 
@@ -469,15 +559,17 @@ prism_posting_page_count(Page page)
 	return prism_posting_opaque(page)->entry_count;
 }
 
+/* Room for one more AoS entry. A fastscan page never takes one. */
 static inline bool
 prism_posting_page_has_room(Page page)
 {
 	PrismPostingPageOpaque *op = prism_posting_opaque(page);
-	return op->entry_count < op->max_entries;
+	return !(op->flags & PRISM_POSTING_PAGE_FASTSCAN) &&
+		   op->entry_count < op->max_entries;
 }
 
 /*
- * Per-cluster head metadata (read from the FIRST page). tail_blkno ==
+ * Per-cluster head metadata (read from the START page). tail_blkno ==
  * InvalidBlockNumber means it has not been computed yet — see
  * prism_posting_insert_one, which fills it lazily on the first insert.
  */
@@ -546,8 +638,9 @@ prism_posting_content(Page page)
 
 /*
  * On an inline first page, P^T * centroid is stored right after PageHeader,
- * before the entries. On a REFERENCE page it is that page's chunk of the
- * reference; prism_posting_reference_read gathers the whole vector.
+ * before the entries. On a spilled list's head pages it is that page's
+ * floats of the reference; prism_posting_reference_read gathers the whole
+ * vector.
  */
 static inline const float *
 prism_posting_pt_centroid(Page page)
@@ -562,35 +655,46 @@ prism_posting_pt_centroid_mut(Page page)
 }
 
 /*
- * Entry content of a first page. A REFERENCE head has no entries, so its
- * content is the (empty) start of the page rather than a pointer formed
- * past its end.
- */
-static inline char *
-prism_posting_content_first(Page page, Dimension dim)
-{
-	if (prism_posting_opaque(page)->flags & PRISM_POSTING_PAGE_REFERENCE)
-		return PageGetContents(page);
-	return PageGetContents(page) + prism_posting_pt_centroid_size(dim);
-}
-
-/*
  * Gather a posting list's encode reference, inline or spilled, into `out`
- * (dim floats). Reads the head and any REFERENCE continuations one page at
- * a time, releasing each before the next (the PG storage pins a single
- * buffer). Returns the first page that holds entries: the head itself for
- * an inline layout, the page after the last chunk for a spilled one, or
- * InvalidBlockNumber when the chain ends with the reference. Errors out on
- * a chain that is not what the layout says it must be.
+ * (dim floats). Reads the head pages one at a time, releasing each before
+ * the next (the PG storage pins a single buffer). Returns the first page
+ * that holds entries: the START page for an inline layout, the END page for
+ * a spilled one. Errors out on a chain that is not what the layout says it
+ * must be.
  */
 BlockNumber prism_posting_reference_read(
 		VsStorage *storage, BlockNumber head, Dimension dim, float *out);
 
 /*
- * The same gather for a caller that already copied the head's chunk (chunk
- * 0) while it had the head pinned: continues at `next`, the head's
- * next_blkno, with chunk 1. Inline layouts have nothing left to read and
- * get `next` back unchanged.
+ * prism_posting_reference_read without the floats on the head's END page:
+ * returns that page, for a caller that reads it for its entries anyway and
+ * takes the floats from it with prism_posting_reference_read_end. Sets
+ * *cluster_id to the list's. For an inline layout this is the whole gather.
+ */
+BlockNumber prism_posting_reference_read_to_end(
+		VsStorage  *storage,
+		BlockNumber head,
+		Dimension	dim,
+		float	   *out,
+		uint32_t   *cluster_id);
+
+/*
+ * Check that `page`, at blk, is the head END page of the list at head
+ * with cluster_id, and copy its floats of the reference into out.
+ */
+void prism_posting_reference_read_end(
+		BlockNumber head,
+		BlockNumber blk,
+		Page		page,
+		uint32_t	cluster_id,
+		Dimension	dim,
+		float	   *out);
+
+/*
+ * The same gather for a caller that already copied the START page's floats
+ * while it had the head pinned: continues at `next`, the head's next_blkno,
+ * with head page 1. Inline layouts have nothing left to read and get `next`
+ * back unchanged.
  */
 BlockNumber prism_posting_reference_read_rest(
 		VsStorage  *storage,
@@ -601,16 +705,16 @@ BlockNumber prism_posting_reference_read_rest(
 		float	   *out);
 
 /*
- * Lay out reference page `chunk` of a spilled list in `page`: init as a
- * REFERENCE page (FIRST for chunk 0, OVERFLOW otherwise, plus `extra_flags`)
- * and copy its chunk of `ref`. next_blkno is left Invalid for the caller to
- * link.
+ * Lay out head page i of a spilled list in `page`: init it as the head's
+ * START page for i = 0, its END page for the last, else a MIDDLE page, plus
+ * `extra_flags`, and copy its floats of `ref`. An END page starts with no
+ * entries. next_blkno is left Invalid for the caller to link.
  */
 void prism_posting_reference_page_fill(
 		Page		 page,
 		uint32_t	 cluster_id,
 		Dimension	 dim,
-		uint32_t	 chunk,
+		uint32_t	 i,
 		const float *ref,
 		uint16_t	 extra_flags);
 
@@ -678,27 +782,25 @@ void prism_posting_chain_mutate(
 		void					 *state);
 
 /*
- * Content of any posting page, first or not.
- *
- * A first page carries pt_centroid ahead of its entries, so the offset
- * differs; every caller that walks a chain meets both kinds and was
- * repeating this test. Inline, so the scan pays nothing for it.
+ * Entry content of any posting page: past the reference prefix on an inline
+ * START page or an END page, else the start of the page. A page that holds
+ * only reference has no entries, so its content is the (empty) start of the
+ * page.
  */
 static inline char *
 prism_posting_page_content(Page page, Dimension dim)
 {
 	uint16_t flags = prism_posting_opaque(page)->flags;
+	char	*start = prism_posting_content(page);
 
-	if (flags & PRISM_POSTING_PAGE_REFERENCE)
-		return prism_posting_content(page);
-	return (flags & PRISM_POSTING_PAGE_FIRST)
-				 ? prism_posting_content_first(page, dim)
-				 : prism_posting_content(page);
+	return prism_posting_has_ref_prefix(flags, dim)
+				 ? start + prism_posting_ref_prefix_size(dim)
+				 : start;
 }
 
-/* Paged-mode convenience wrappers — these assume non-first pages
- * (content starts right after PageHeader). For first pages with
- * pt_centroid, go through prism_posting_content_first. */
+/* Paged-mode convenience wrappers — these assume pages with no reference
+ * prefix (content starts right after PageHeader). For the others, go
+ * through prism_posting_page_content. */
 static inline PrismPostingEntryHeader *
 prism_posting_entry(Page page, uint32_t i, Dimension dim)
 {
@@ -829,20 +931,49 @@ bool prism_posting_flat_add(
 /* ----------------------------------------------------------------
  * Fastscan page format
  *
- * SoA layout organized into 32-vector group sections.
- * Each group section:
+ * Fastscan scores 32 vectors at once with in-register table lookups on
+ * their 1-bit codes, which is much faster than scoring AoS entries one at a
+ * time. A fastscan list stores its vectors in 32-vector groups. Each group
+ * has codes, VS_FASTSCAN_GROUP_BYTES(dim) bytes interleaved for the kernel,
+ * and 580 bytes of group metadata:
  *   ItemPointerData tids[32]         192B
  *   float f_add[32]                  128B
  *   float f_rescale[32]              128B
  *   float f_error[32]                128B
- *   uint8_t codes[nsq_pairs × 32]   variable (3072B at dim=768)
  *   uint32_t tombstone_mask            4B   (bit v set => lane v is dead)
+ *
+ * Page content (after the reference prefix on a list's first entry page):
+ *   group metadata[ngroups]          ngroups × 580B
+ *   codes[code_bytes]                the page's run of the code stream
+ *
+ * A spilled list's stream starts on its head's END page, after the rest of
+ * the reference.
+ *
+ * The codes of all groups form one stream that continues from page to page.
+ * A group's codes can break at any PRISM_FASTSCAN_CHUNK_BYTES (64-byte)
+ * boundary, so a page wastes less than 64 bytes instead of the gap a whole
+ * group does not fit. Every kernel steps in sizes that divide 64 bytes, so
+ * the scan scores a split group in place, one page at a time.
+ *
+ * Group metadata never splits. It goes on the page where its group's codes
+ * end, because that is where the scan has the complete sums to prune with,
+ * and the scan holds one page at a time. When it does not fit there, it is
+ * deferred to the start of the next page and the next group's codes use the
+ * space.
+ *
+ * Metadata comes first on the page so readers that need only metadata
+ * (deleted-vector marking, split, inspect) find group g's at a fixed offset,
+ * without knowing where groups start in the code stream.
+ *
+ * In the opaque, entry_count counts the vectors whose metadata is on the
+ * page and code_bytes is the length of its code run. Only the list's last
+ * group can be partial, so a page holds ceil(entry_count / 32) groups'
+ * metadata. A page's position in the stream is not stored: the scan reads a
+ * list from its head and carries the position from page to page.
  *
  * tombstone_mask is the per-lane analog of an AoS entry's
  * PRISM_POSTING_FLAG_DELETED (see fastscan-design.md for why the codes
- * themselves can't be marked in place). A page starts with every mask word
- * zero (PageInit zeroes the page; a fresh group's tail is never written
- * otherwise), so an unmarked lane reads as live.
+ * can't be marked in place). The builder writes it as zero.
  *
  * Pages are identified by PRISM_POSTING_PAGE_FASTSCAN in opaque flags.
  * ---------------------------------------------------------------- */
@@ -853,46 +984,84 @@ static_assert(
 		VS_FASTSCAN_GROUP == 32,
 		"tombstone_mask packs one bit per lane into a uint32_t");
 
-/* Bytes per 32-vector group section (metadata + packed codes + tombstone
- * mask) */
+/*
+ * Code bytes per split unit: 16 dimensions of 32 vectors. The widest kernel
+ * step (AVX-512, 64 bytes) and the 16-bit lookup table's 128-byte block of
+ * two columns both line up with it, so a kernel call can start at any chunk.
+ */
+#define PRISM_FASTSCAN_CHUNK_BYTES 64u
+
+/*
+ * Most groups a scan can have in flight, meaning it has started summing
+ * their codes but not yet reached their metadata. That is the group whose
+ * codes it is reading plus up to two whose metadata was deferred to the next
+ * page. The scan keeps running sums for each, so the bound keeps its state
+ * fixed. Two deferred groups are enough to fill the space deferred metadata
+ * leaves with codes at every dimension above about 72.
+ */
+#define PRISM_FASTSCAN_MAX_INFLIGHT_GROUPS 3u
+
+/* Bytes of one group's metadata. */
+#define PRISM_FASTSCAN_META_BYTES                             \
+	((uint32_t)(VS_FASTSCAN_GROUP * sizeof(ItemPointerData) + \
+				VS_FASTSCAN_GROUP * 3 * sizeof(float) + sizeof(uint32_t)))
+
+static_assert(
+		PRISM_FASTSCAN_META_BYTES % sizeof(float) == 0,
+		"group metadata keeps the floats of the next group's aligned");
+
+/* Bytes per 32-vector group, metadata and codes together */
 static inline uint32_t
 prism_fastscan_group_section_bytes(Dimension dim)
 {
-	return (uint32_t)(VS_FASTSCAN_GROUP * sizeof(ItemPointerData) +
-					  VS_FASTSCAN_GROUP * 3 * sizeof(float) +
-					  VS_FASTSCAN_GROUP_BYTES(dim) + sizeof(uint32_t));
+	return PRISM_FASTSCAN_META_BYTES + VS_FASTSCAN_GROUP_BYTES(dim);
 }
 
 /*
- * Groups a fastscan page holds. A spilled head holds none (it carries a
- * reference chunk); an inline first page gives up the reference's room.
- * Guarded, not subtracted blindly: past the inline threshold the reference
- * exceeds the page and an unsigned subtraction would wrap to a capacity of
- * millions and let fastscan=auto select a layout no page can hold.
+ * Bytes for metadata and codes on a fastscan page, after the reference
+ * prefix when the page is a list's first entry page (ref_prefix).
  */
 static inline uint32_t
-prism_fastscan_max_groups(Dimension dim, bool is_first)
+prism_fastscan_page_space(Dimension dim, bool ref_prefix)
 {
-	uint32_t section = prism_fastscan_group_section_bytes(dim);
-	uint32_t usable	 = prism_posting_page_usable();
+	uint32_t usable = prism_posting_page_usable();
 
-	if (is_first)
-	{
-		if (prism_posting_spilled(dim))
-			return 0;
-		usable -= prism_posting_pt_centroid_size(dim);
-	}
-	return usable / section;
+	return ref_prefix ? usable - prism_posting_ref_prefix_size(dim) : usable;
 }
 
-/* Max entries on a fastscan overflow page */
+/* Groups with metadata on a fastscan page, from its vector count. */
+static inline uint32_t
+prism_fastscan_page_groups(const PrismPostingPageOpaque *op)
+{
+	return ((uint32_t)op->entry_count + VS_FASTSCAN_GROUP - 1) /
+		   VS_FASTSCAN_GROUP;
+}
+
+/*
+ * The max number of groups' metadata a page can hold. Besides the metadata
+ * deferred from the previous page, a page holds metadata only for groups
+ * whose codes end on it, and its code bytes reach the end of at most
+ * space / group-code-size + 1 groups.
+ */
+static inline uint32_t
+prism_fastscan_max_groups(Dimension dim, bool ref_prefix)
+{
+	uint32_t space	  = prism_fastscan_page_space(dim, ref_prefix);
+	uint32_t deferred = PRISM_FASTSCAN_MAX_INFLIGHT_GROUPS - 1;
+	uint32_t by_meta  = space / PRISM_FASTSCAN_META_BYTES;
+	uint32_t by_code  = deferred + 1 + space / VS_FASTSCAN_GROUP_BYTES(dim);
+
+	return by_meta < by_code ? by_meta : by_code;
+}
+
+/* Max entries on a fastscan page with no reference prefix */
 static inline uint32_t
 prism_fastscan_max_entries(Dimension dim)
 {
 	return prism_fastscan_max_groups(dim, false) * VS_FASTSCAN_GROUP;
 }
 
-/* Max entries on a fastscan first page (with pt_centroid) */
+/* Max entries on a list's first fastscan entry page, after the prefix */
 static inline uint32_t
 prism_fastscan_max_entries_first(Dimension dim)
 {
@@ -900,13 +1069,24 @@ prism_fastscan_max_entries_first(Dimension dim)
 }
 
 /*
+ * Entries a full page holds on average, for cost estimates. Fastscan pages
+ * waste under a chunk each, so the code and metadata bytes per vector set
+ * the density.
+ */
+static inline double
+prism_fastscan_entries_per_page(Dimension dim)
+{
+	return (double)prism_fastscan_page_space(dim, false) * VS_FASTSCAN_GROUP /
+		   prism_fastscan_group_section_bytes(dim);
+}
+
+/*
  * Upper bound on the entries a single posting page can hold, whatever format
  * it is in. Neither format's figure bounds the other: fastscan packs more
- * than AoS at low dimension (416 vs 339 at dim 4) and fewer at high (64 vs 67
- * at dim 768, and none at all once a group stops fitting). The overflow-page
- * figures bound a first page too, since that gives up room to the encode
- * reference. Callers sizing a buffer for one page's worth of entries want
- * this rather than either half.
+ * than AoS at low dimension and allows for deferred group metadata, while
+ * AoS packs more where a page holds under one group's codes. The figures
+ * for a page without a reference prefix bound the others too. Callers sizing a
+ * buffer for one page's worth of entries want this rather than either half.
  */
 static inline uint32_t
 prism_posting_max_entries_any_format(Dimension dim)
@@ -916,19 +1096,28 @@ prism_posting_max_entries_any_format(Dimension dim)
 	return aos > fs ? aos : fs;
 }
 
+/* Entries a full page holds in the denser of the two formats. */
+static inline double
+prism_posting_entries_per_page(Dimension dim)
+{
+	double aos = (double)prism_posting_max_entries(dim);
+	double fs  = prism_fastscan_entries_per_page(dim);
+	return aos > fs ? aos : fs;
+}
+
 /*
  * The entry ceiling a page of this format and position really has. All four
  * combinations differ: a fastscan page packs more entries than an AoS one,
- * and a first page gives up room to the encode reference. Bounding an AoS
- * page by the fastscan figure (or by the larger of the two) would still let
- * prism_posting_entry_at walk off the page.
+ * and a list's first entry page gives up room to the reference prefix.
+ * Bounding an AoS page by the fastscan figure (or by the larger of the two)
+ * would still let prism_posting_entry_at walk off the page.
  */
 static inline uint32_t
 prism_posting_page_cap(const PrismPostingPageOpaque *op, Dimension dim)
 {
-	bool first = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0;
+	bool first = prism_posting_has_ref_prefix(op->flags, dim);
 
-	if (op->flags & PRISM_POSTING_PAGE_REFERENCE)
+	if (prism_posting_is_reference_only_page(op->flags, dim))
 		return 0;
 	if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
 		return first ? prism_fastscan_max_entries_first(dim)
@@ -940,71 +1129,80 @@ prism_posting_page_cap(const PrismPostingPageOpaque *op, Dimension dim)
 
 /*
  * Reject an on-disk entry_count past that ceiling before it drives a loop, so
- * a corrupt or truncated page cannot read past the page end. The bound the
- * scan path already applies (posting_scan.c), in the form the shared read
- * paths need.
+ * a corrupt or truncated page cannot read past the page end. A fastscan page
+ * also has its group metadata and code run checked to fit.
  */
-void prism_posting_check_count(
-		BlockNumber blkno, const PrismPostingPageOpaque *op, Dimension dim);
+void prism_posting_check_count(BlockNumber blkno, Page page, Dimension dim);
+
+/*
+ * The fastscan half of prism_posting_check_count, against the entry ceiling
+ * and content space of a page in this one's position. The scan passes bounds
+ * it computed once, since it checks every page it reads.
+ */
+void prism_fastscan_check_page(
+		BlockNumber					  blkno,
+		const PrismPostingPageOpaque *op,
+		uint32_t					  cap,
+		uint32_t					  space);
 
 /* ----------------------------------------------------------------
- * Fastscan group accessors
+ * Fastscan page accessors
  *
- * All take content pointer (past PageHeader, past pt_centroid on
- * first pages) and group index g.
+ * All take the content pointer (past PageHeader, past pt_centroid on first
+ * pages). The group index g counts the groups with metadata on that page.
  * ---------------------------------------------------------------- */
 
 static inline char *
-prism_fastscan_group_base(char *content, uint32_t g, Dimension dim)
+prism_fastscan_group_base(char *content, uint32_t g)
 {
-	return content + (size_t)g * prism_fastscan_group_section_bytes(dim);
+	return content + (size_t)g * PRISM_FASTSCAN_META_BYTES;
+}
+
+/* The page's run of the code stream, after the metadata of ngroups groups. */
+static inline uint8_t *
+prism_fastscan_page_codes(char *content, uint32_t ngroups)
+{
+	return (uint8_t *)content + (size_t)ngroups * PRISM_FASTSCAN_META_BYTES;
 }
 
 static inline ItemPointerData *
-prism_fastscan_group_tids(char *content, uint32_t g, Dimension dim)
+prism_fastscan_group_tids(char *content, uint32_t g)
 {
-	return (ItemPointerData *)prism_fastscan_group_base(content, g, dim);
+	return (ItemPointerData *)prism_fastscan_group_base(content, g);
 }
 
 static inline float *
-prism_fastscan_group_f_add(char *content, uint32_t g, Dimension dim)
+prism_fastscan_group_f_add(char *content, uint32_t g)
 {
-	return (float *)(prism_fastscan_group_base(content, g, dim) +
+	return (float *)(prism_fastscan_group_base(content, g) +
 					 VS_FASTSCAN_GROUP * sizeof(ItemPointerData));
 }
 
 static inline float *
-prism_fastscan_group_f_rescale(char *content, uint32_t g, Dimension dim)
+prism_fastscan_group_f_rescale(char *content, uint32_t g)
 {
-	return prism_fastscan_group_f_add(content, g, dim) + VS_FASTSCAN_GROUP;
+	return prism_fastscan_group_f_add(content, g) + VS_FASTSCAN_GROUP;
 }
 
 static inline float *
-prism_fastscan_group_f_error(char *content, uint32_t g, Dimension dim)
+prism_fastscan_group_f_error(char *content, uint32_t g)
 {
-	return prism_fastscan_group_f_rescale(content, g, dim) + VS_FASTSCAN_GROUP;
-}
-
-static inline uint8_t *
-prism_fastscan_group_codes(char *content, uint32_t g, Dimension dim)
-{
-	return (uint8_t *)(prism_fastscan_group_f_error(content, g, dim) +
-					   VS_FASTSCAN_GROUP);
+	return prism_fastscan_group_f_rescale(content, g) + VS_FASTSCAN_GROUP;
 }
 
 /*
  * Per-group dead-lane bitmap: bit v set means lane v's TID is dead. Read and
  * write through this pointer directly (it aliases the live page); there is no
  * copy to write back. Only valid lanes (v < the group's entry count) are ever
- * set -- PageInit zeroes a fresh page and nothing else touches this word, so
+ * set -- the builder writes the word as zero and nothing else touches it, so
  * an unmarked lane, including every lane past entry_count on a partial final
  * group, reads as live.
  */
 static inline uint32_t *
-prism_fastscan_group_tombstone_mask(char *content, uint32_t g, Dimension dim)
+prism_fastscan_group_tombstone_mask(char *content, uint32_t g)
 {
-	return (uint32_t *)(prism_fastscan_group_codes(content, g, dim) +
-						VS_FASTSCAN_GROUP_BYTES(dim));
+	return (uint32_t *)(prism_fastscan_group_f_error(content, g) +
+						VS_FASTSCAN_GROUP);
 }
 
 /*

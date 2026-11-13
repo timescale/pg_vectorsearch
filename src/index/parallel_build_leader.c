@@ -119,6 +119,12 @@ prism_posting_build_lists(
 	uint32_t	cur_cluster = 0;
 	const void *entry		= NULL;
 	bool		have = prism_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
+
+	/* Each list's builder scratch goes in a context reset after the list,
+	 * since the standalone arena frees nothing on its own. Only the builder
+	 * runs in it: the sorter's next entry must outlive the reset. */
+	VsMemCtx list_ctx =
+			vs_memctx_create(vs_memctx_current(), "prism posting list");
 	for (uint32_t c = 0; c < nlist; c++)
 	{
 		/* Head block of cluster c is formula-derived; the head region
@@ -131,8 +137,10 @@ prism_posting_build_lists(
 		BlockNumber head_blk = prism_leaf_head_blkno(
 				first_posting, c, prism_posting_reference_pages(dim));
 		PrismPostingBuilder hb;
+		VsMemCtx			outer = vs_memctx_switch(list_ctx);
 		prism_posting_builder_adopt_head(
 				&hb, storage, rq_params, dim, c, head_blk, fastscan);
+		vs_memctx_switch(outer);
 
 		/* Ascending, grouped order: a pending entry is never for a cluster we
 		 * already finished. If it were < c we would have skipped its head. */
@@ -144,9 +152,13 @@ prism_posting_build_lists(
 			have = prism_pbuild_sort_getnext(sorter, &cur_cluster, &entry);
 		}
 
+		outer = vs_memctx_switch(list_ctx);
 		(void)prism_posting_builder_finish(&hb);
 		prism_posting_builder_cleanup(&hb);
+		vs_memctx_switch(outer);
+		vs_memctx_reset(list_ctx);
 	}
+	vs_memctx_delete(list_ctx);
 
 	/* Every entry must have landed in some cluster's list. A leftover entry
 	 * means an id >= nlist (out of range) that matched no c and would

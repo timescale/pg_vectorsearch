@@ -279,7 +279,7 @@ vs_centroid_pages(PG_FUNCTION_ARGS)
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (!prism_meta_magic_valid(meta->magic, meta->dim))
+	if (meta->magic != PRISM_META_MAGIC)
 	{
 		vs_storage_release_page(st, 0);
 		index_close(index, AccessShareLock);
@@ -466,10 +466,10 @@ emit_posting_row(PrismPostingChainPos *pos, void *state)
 	PostingRowCtx				 *ctx = state;
 	Dimension					  dim = ctx->dim;
 	const PrismPostingPageOpaque *op  = prism_posting_opaque(pos->page);
-	bool is_first	 = (op->flags & PRISM_POSTING_PAGE_FIRST) != 0;
+	bool is_first					  = prism_posting_is_head_start(op->flags);
 	bool tombstoned	 = (op->flags & PRISM_POSTING_PAGE_TOMBSTONED) != 0;
 	bool is_fastscan = (op->flags & PRISM_POSTING_PAGE_FASTSCAN) != 0;
-	bool is_ref		 = (op->flags & PRISM_POSTING_PAGE_REFERENCE) != 0;
+	bool is_ref		 = prism_posting_is_reference_only_page(op->flags, dim);
 
 	Datum values[10];
 	bool  nulls[10] = {0};
@@ -488,7 +488,7 @@ emit_posting_row(PrismPostingChainPos *pos, void *state)
 		char *content = prism_posting_page_content(pos->page, dim);
 		int32 dead	  = 0;
 
-		prism_posting_check_count(pos->blkno, op, dim);
+		prism_posting_check_count(pos->blkno, pos->page, dim);
 
 		if (!is_fastscan)
 		{
@@ -509,7 +509,7 @@ emit_posting_row(PrismPostingChainPos *pos, void *state)
 			for (uint32_t g = 0; g < ngroups; g++)
 			{
 				uint32_t mask =
-						*prism_fastscan_group_tombstone_mask(content, g, dim);
+						*prism_fastscan_group_tombstone_mask(content, g);
 				/* GCC/Clang builtin, not pg_popcount32: this file already
 				 * relies on compiler builtins elsewhere, and a per-page,
 				 * per-call count is far from hot enough to need a
@@ -520,7 +520,9 @@ emit_posting_row(PrismPostingChainPos *pos, void *state)
 		values[5] = Int32GetDatum(dead);
 	}
 
-	values[6] = Int32GetDatum((int32)op->max_entries);
+	/* Capacity from the layout: a fastscan page keeps its code length where
+	 * an AoS page keeps its capacity. */
+	values[6] = Int32GetDatum((int32)prism_posting_page_cap(op, dim));
 
 	if (BlockNumberIsValid(pos->next))
 		values[7] = Int32GetDatum((int32)pos->next);
@@ -573,7 +575,7 @@ vs_posting_pages(PG_FUNCTION_ARGS)
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (!prism_meta_magic_valid(meta->magic, meta->dim))
+	if (meta->magic != PRISM_META_MAGIC)
 	{
 		vs_storage_release_page(st, 0);
 		index_close(index, AccessShareLock);
@@ -721,7 +723,7 @@ vs_tids_clusters(PG_FUNCTION_ARGS)
 			char	*content = prism_posting_page_content(page, dim);
 			uint32_t count	 = op->entry_count;
 
-			prism_posting_check_count(blkno, op, dim);
+			prism_posting_check_count(blkno, page, dim);
 
 			if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
 			{
@@ -731,7 +733,7 @@ vs_tids_clusters(PG_FUNCTION_ARGS)
 				for (uint32_t g = 0; g < ngroups; g++)
 				{
 					ItemPointerData *tids =
-							prism_fastscan_group_tids(content, g, dim);
+							prism_fastscan_group_tids(content, g);
 					uint32_t gc = count - g * VS_FASTSCAN_GROUP;
 					if (gc > VS_FASTSCAN_GROUP)
 						gc = VS_FASTSCAN_GROUP;
@@ -868,7 +870,7 @@ vs_index_settings(PG_FUNCTION_ARGS)
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
 
-	if (!prism_meta_magic_valid(meta->magic, meta->dim))
+	if (meta->magic != PRISM_META_MAGIC)
 	{
 		vs_storage_release_page(st, 0);
 		index_close(index, AccessShareLock);

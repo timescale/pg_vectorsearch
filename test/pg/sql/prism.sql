@@ -307,14 +307,11 @@ CREATE INDEX dimcap_i ON dimcap USING prism (v);
 DROP TABLE dimcap;
 SELECT rabitq_params_generate(4096, 42);
 
--- Uncompressed centroids and fastscan groups must fit on one page.
+-- Uncompressed centroids must fit on one page.
 CREATE TABLE dimcap (v vec32(4096));
 CREATE INDEX dimcap_ip ON dimcap USING prism (v vec32_ip_ops);
 CREATE INDEX dimcap_off ON dimcap USING prism (v)
     WITH (centroid_compression = off);
-CREATE INDEX dimcap_fs ON dimcap USING prism (v) WITH (fastscan = on);
-CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 1);
-CALL prism_convert_posting_to_fastscan('dimcap_i', 0);
 DROP TABLE dimcap;
 CREATE TABLE dimcap (v vec16(4096));
 CREATE INDEX dimcap_ip ON dimcap USING prism (v vec16_ip_ops);
@@ -326,17 +323,84 @@ INSERT INTO dimcap
                FROM generate_series(1, 8192) j)::vec32(8192)
     FROM generate_series(1, 20) g;
 CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 4);
+-- Fastscan past the inline layout too: each list's code stream starts on the
+-- page after its reference chain.
+SELECT setting FROM prism_index_settings('dimcap_i') WHERE name = 'fastscan';
+SELECT format, count(*) > 0 AS present FROM prism_posting_pages('dimcap_i')
+    GROUP BY format ORDER BY format;
 -- plpgsql, so the planner keeps the call rather than an InitPlan, whose
 -- label differs between PostgreSQL versions.
-CREATE FUNCTION dimcap_q() RETURNS vec32 LANGUAGE plpgsql STABLE AS $$
+CREATE FUNCTION dimcap_q(qid int) RETURNS vec32 LANGUAGE plpgsql STABLE AS $$
 BEGIN
-    RETURN (SELECT v FROM dimcap WHERE id = 7);
+    RETURN (SELECT v FROM dimcap WHERE id = qid);
 END $$;
 SET enable_seqscan = off;
-EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q() LIMIT 1;
-SELECT id FROM dimcap ORDER BY v <-> dimcap_q() LIMIT 1;
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q(7) LIMIT 1;
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q(7) LIMIT 1;
+-- An insert lands on an AoS page after the fastscan ones.
+INSERT INTO dimcap
+    SELECT 21, (SELECT array_agg(cos(j)::real)
+                FROM generate_series(1, 8192) j)::vec32(8192);
+SELECT format, count(*) > 0 AS present FROM prism_posting_pages('dimcap_i')
+    GROUP BY format ORDER BY format;
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q(21) LIMIT 1;
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q(21) LIMIT 1;
 RESET enable_seqscan;
-DROP FUNCTION dimcap_q();
+DROP FUNCTION dimcap_q(int);
+DROP TABLE dimcap;
+
+-- A spilled AoS list converts to fastscan, and converting it again finds it
+-- already done.
+CREATE TABLE dimcap (id int, v vec32(4096));
+INSERT INTO dimcap
+    SELECT g, (SELECT array_agg(sin(g * j)::real)
+               FROM generate_series(1, 4096) j)::vec32(4096)
+    FROM generate_series(1, 20) g;
+CREATE INDEX dimcap_i ON dimcap USING prism (v)
+    WITH (nlist = 1, fastscan = off);
+SELECT format, count(*) > 0 AS present FROM prism_posting_pages('dimcap_i')
+    GROUP BY format ORDER BY format;
+-- The reference's third page also holds the first 15 entries.
+SELECT chain_pos, format, entry_count FROM prism_posting_pages('dimcap_i')
+    ORDER BY chain_pos;
+CALL prism_convert_posting_to_fastscan('dimcap_i', 0);
+SELECT format, count(*) > 0 AS present FROM prism_posting_pages('dimcap_i')
+    GROUP BY format ORDER BY format;
+CALL prism_convert_posting_to_fastscan('dimcap_i', 0);
+CREATE FUNCTION dimcap_q(qid int) RETURNS vec32 LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    RETURN (SELECT v FROM dimcap WHERE id = qid);
+END $$;
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q(7) LIMIT 1;
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q(7) LIMIT 1;
+RESET enable_seqscan;
+DROP FUNCTION dimcap_q(int);
+DROP TABLE dimcap;
+
+-- At the largest inline dimension a group's codes span more than one page.
+CREATE TABLE dimcap (id int, v vec32(1968));
+INSERT INTO dimcap
+    SELECT g, (SELECT ('[' || string_agg((sin(g + j))::text, ',') || ']')
+               FROM generate_series(1, 1968) j)::vec32(1968)
+    FROM generate_series(1, 20) g;
+CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 4);
+SELECT setting FROM prism_index_settings('dimcap_i') WHERE name = 'fastscan';
+CREATE FUNCTION dimcap_q(qid int) RETURNS vec32 LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    RETURN (SELECT v FROM dimcap WHERE id = qid);
+END $$;
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q(7) LIMIT 1;
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q(7) LIMIT 1;
+-- An insert lands on an AoS page after the fastscan ones.
+INSERT INTO dimcap
+    SELECT 21, (SELECT ('[' || string_agg((cos(j))::text, ',') || ']')
+                FROM generate_series(1, 1968) j)::vec32(1968);
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q(21) LIMIT 1;
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q(21) LIMIT 1;
+RESET enable_seqscan;
+DROP FUNCTION dimcap_q(int);
 DROP TABLE dimcap;
 
 -- ============================================================
@@ -585,11 +649,13 @@ SET maintenance_work_mem = '512MB';
 \set reference_pages 0
 \set mean_pages 0
 \set spilled false
-\set expected_magic 50524906
+\set expected_magic 50524907
 \i :cases_sql
 
+-- Of the three pages the reference takes at 4096, the last also holds the
+-- list's first entries, so two hold only reference.
 \set dim 4096
-\set reference_pages 3
+\set reference_pages 2
 \set mean_pages 3
 \set spilled true
 \set expected_magic 50524907

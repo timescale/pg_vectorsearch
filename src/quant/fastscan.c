@@ -593,6 +593,77 @@ vs_fastscan_accumulate_hacc(
 	g_fastscan_accumulate_hacc_fn(codes, lut, accum, dim);
 }
 
+/* A kernel call over n columns sees a group of n * 8 dimensions. */
+static inline Dimension
+fastscan_cols_dim(uint32_t ncols)
+{
+	return (Dimension)(ncols * 8);
+}
+
+void
+vs_fastscan_accumulate_range(
+		const uint8_t *codes,
+		const uint8_t *lut,
+		uint32_t	   col,
+		uint32_t	   ncols,
+		int32_t		  *accum)
+{
+	uint32_t col_bytes = VS_FASTSCAN_GROUP_BYTES(8);
+
+	while (ncols > 0)
+	{
+		uint32_t n = ncols < VS_FASTSCAN_MAX_KERNEL_COLS
+						   ? ncols
+						   : VS_FASTSCAN_MAX_KERNEL_COLS;
+		uint16_t part[VS_FASTSCAN_GROUP];
+
+		/* The 8-bit table has 32 bytes per column, like the codes. */
+		vs_fastscan_accumulate(
+				codes,
+				lut + (size_t)col * col_bytes,
+				part,
+				fastscan_cols_dim(n));
+		for (uint32_t v = 0; v < VS_FASTSCAN_GROUP; v++)
+			accum[v] += part[v];
+
+		codes += (size_t)n * col_bytes;
+		col += n;
+		ncols -= n;
+	}
+}
+
+void
+vs_fastscan_accumulate_hacc_range(
+		VsFastscanAccumulateHaccFn fn,
+		const uint8_t			  *codes,
+		const uint8_t			  *lut,
+		uint32_t				   col,
+		uint32_t				   ncols,
+		int32_t					  *accum)
+{
+	uint32_t col_bytes = VS_FASTSCAN_GROUP_BYTES(8);
+
+	while (ncols > 0)
+	{
+		uint32_t n = ncols < VS_FASTSCAN_MAX_KERNEL_COLS
+						   ? ncols
+						   : VS_FASTSCAN_MAX_KERNEL_COLS;
+		int32_t	 part[VS_FASTSCAN_GROUP];
+
+		/* The 16-bit table has 128 bytes per pair of columns. */
+		fn(codes,
+		   lut + (size_t)col * 2 * col_bytes,
+		   part,
+		   fastscan_cols_dim(n));
+		for (uint32_t v = 0; v < VS_FASTSCAN_GROUP; v++)
+			accum[v] += part[v];
+
+		codes += (size_t)n * col_bytes;
+		col += n;
+		ncols -= n;
+	}
+}
+
 const char *
 vs_fastscan_impl_name(void)
 {
