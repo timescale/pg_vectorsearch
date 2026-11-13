@@ -660,6 +660,74 @@ TEST(spilled_probe_buffer_grows_geometrically)
 	prism_index_destroy(idx);
 }
 
+/*
+ * The spilled-reference buffer has a byte budget. A routed cluster past it
+ * keeps no reference and is gathered again when scanned, which must give
+ * the same candidates as a buffer that holds every reference.
+ */
+TEST(spilled_probe_buffer_cap_keeps_results)
+{
+	uint32_t dim = 2048, nvecs = 320, nlist = 64, k = 5, nprobe = 20;
+	float	*vecs = make_vectors(nvecs, dim, 7);
+
+	PrismIndexConfig config = {
+			.nlist		   = nlist,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+	};
+	PrismIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "build at 2048 should succeed");
+
+	PrismQueryState full, capped;
+	prism_query_state_init(&full, &idx->base, k, nlist);
+	prism_query_state_init(&capped, &idx->base, k, nlist);
+	capped.probe_refs_max = 3;
+
+	for (uint32_t q = 0; q < 20; q++)
+	{
+		const float *query = vecs + (size_t)(q * 13) * dim;
+		uint32_t	 n	   = prism_query_execute(
+				&full,
+				query,
+				k,
+				nprobe,
+				VS_DISTANCE_MODE_ASYMMETRIC,
+				true,
+				NULL);
+		uint32_t m = prism_query_execute(
+				&capped,
+				query,
+				k,
+				nprobe,
+				VS_DISTANCE_MODE_ASYMMETRIC,
+				true,
+				NULL);
+
+		ASSERT_EQ(n, m, "the cap does not change the candidate count");
+		for (uint32_t i = 0; i < n; i++)
+		{
+			ASSERT_EQ(
+					full.candidates[i].id,
+					capped.candidates[i].id,
+					"nor which candidates come back");
+			ASSERT_FLOAT_EQ(
+					full.candidates[i].distance,
+					capped.candidates[i].distance,
+					0.0f,
+					"nor their distances");
+		}
+	}
+
+	ASSERT_TRUE(full.probe_refs_cap > 3, "the probe set outgrew the cap");
+	ASSERT_EQ(3u, capped.probe_refs_cap, "the capped buffer stops at it");
+
+	prism_query_state_cleanup(&capped);
+	prism_query_state_cleanup(&full);
+	prism_index_destroy(idx);
+}
+
 TEST_PARAMETERIZED(fastscan_rejects_unsupported_dimension, "1024", "4096")
 {
 	const Dimension dims[] = {1024, 4096};

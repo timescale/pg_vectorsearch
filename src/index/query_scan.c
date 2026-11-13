@@ -34,6 +34,11 @@
  * Init / cleanup
  * ---------------------------------------------------------------- */
 
+/* Byte budget for the references a spilled probe re-rank keeps for the scan
+ * pass (probe_refs). Without it the buffer is nprobe * dim floats, which a
+ * query can push past 100 MB by raising nprobe. */
+#define PRISM_PROBE_REFS_MAX_BYTES ((size_t)16 * 1024 * 1024)
+
 void
 prism_query_state_init(
 		PrismQueryState *qs,
@@ -95,6 +100,8 @@ prism_query_state_init(
 	 * first expanded probe set, to the clusters it routed: dim floats per
 	 * cluster is the largest buffer a scan state owns, and a query whose
 	 * probe set is never expanded has no use for it. */
+	qs->probe_refs_max = (uint32_t)(PRISM_PROBE_REFS_MAX_BYTES /
+									((size_t)dim * sizeof(float)));
 
 	/* Top-K */
 	vs_topk_init(&qs->topk, max_k);
@@ -380,19 +387,27 @@ scan_clusters(
 
 	if (n_results > scan_limit)
 	{
-		if (qs->pscan.pt_ref != NULL && qs->probe_refs_cap < n_results)
+		/* Clusters past probe_refs_max keep no reference and gather it
+		 * again when scanned. */
+		uint32_t want = n_results < qs->probe_refs_max ? n_results
+													   : qs->probe_refs_max;
+
+		if (qs->pscan.pt_ref != NULL && qs->probe_refs_cap < want)
 		{
 			/*
-			 * Grow geometrically, up to max_nprobe. The standalone arena
-			 * frees nothing until its context goes, and this one outlives
-			 * the query -- growing to exactly the size asked for would keep
-			 * every smaller buffer from earlier queries alive.
+			 * Grow geometrically, up to max_nprobe and the byte budget. The
+			 * standalone arena frees nothing until its context goes, and
+			 * this one outlives the query -- growing to exactly the size
+			 * asked for would keep every smaller buffer from earlier
+			 * queries alive.
 			 */
 			uint32_t cap = qs->probe_refs_cap * 2;
 			if (cap > qs->max_nprobe)
 				cap = qs->max_nprobe;
-			if (cap < n_results)
-				cap = n_results;
+			if (cap > qs->probe_refs_max)
+				cap = qs->probe_refs_max;
+			if (cap < want)
+				cap = want;
 			VsMemCtx caller_ctx = vs_memctx_switch(qs->memctx);
 
 			if (qs->probe_refs != NULL)
@@ -415,12 +430,19 @@ scan_clusters(
 			if (ph == InvalidBlockNumber)
 				continue;
 
-			if (qs->probe_refs != NULL)
+			if (qs->pscan.pt_ref != NULL)
 			{
-				/* Spilled: gather once, keep it for the scan pass. */
-				float *ref			 = qs->probe_refs + (size_t)j * dim;
-				qs->probe_entries[j] = prism_posting_reference_read(
+				/* Spilled: gather once and keep it for the scan pass where
+				 * the buffer has a slot, else gather into the scan's own
+				 * scratch and keep only the distance. */
+				bool		saved	= j < qs->probe_refs_cap;
+				float	   *ref		= saved ? qs->probe_refs + (size_t)j * dim
+											: qs->pscan.pt_ref;
+				BlockNumber entries = prism_posting_reference_read(
 						qs->pscan.storage, ph, dim, ref);
+
+				if (saved)
+					qs->probe_entries[j] = entries;
 				qs->probe_dists[j] =
 						vs_l2_distance_squared(qs->pt_query, ref, dim);
 				continue;
@@ -459,7 +481,7 @@ scan_clusters(
 		 * measures how many probed clusters the query actually needed. */
 		topk->cur_src = r;
 
-		if (order != NULL && qs->probe_refs != NULL)
+		if (order != NULL && j < qs->probe_refs_cap)
 			prism_posting_scan_begin_cluster_at(
 					&qs->pscan,
 					&qs->cluster_qs,

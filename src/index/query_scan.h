@@ -117,11 +117,14 @@ typedef struct PrismQueryState
 	 * for the scan pass so a reference chain is read once per query, and
 	 * the block each list's entries begin on. Sized to the routed set the
 	 * first time it is expanded and grown when a later query routes more
-	 * (bounded by max_nprobe); NULL for an inline layout, which reads the
-	 * reference off the pinned head. */
+	 * (bounded by max_nprobe and probe_refs_max); NULL for an inline
+	 * layout, which reads the reference off the pinned head. A routed
+	 * cluster past probe_refs_cap keeps no reference, so the scan pass
+	 * reads its chain again. */
 	float		*probe_refs;
 	BlockNumber *probe_entries;
 	uint32_t	 probe_refs_cap; /* clusters the two buffers hold */
+	uint32_t	 probe_refs_max; /* most they may hold, a byte budget */
 
 	/* Result ordering (indices into candidates + final distances) */
 	uint32_t *result_order;
