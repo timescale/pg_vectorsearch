@@ -418,6 +418,44 @@ verify_head_meta(VsTestResult *result, PrismIndex *idx)
 	}
 }
 
+typedef struct FormatTally
+{
+	Dimension dim;
+	uint32_t  fastscan;
+	uint32_t  aos;
+} FormatTally;
+
+static bool
+tally_format(PrismPostingChainPos *pos, void *state)
+{
+	FormatTally					 *t	 = state;
+	const PrismPostingPageOpaque *op = prism_posting_opaque(pos->page);
+
+	if (prism_posting_is_reference_only_page(op->flags, t->dim))
+		return true;
+	if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
+		t->fastscan++;
+	else if (op->entry_count > 0)
+		t->aos++;
+	return true;
+}
+
+/* Entry pages of every list, by format. */
+static FormatTally
+tally_entry_formats(PrismIndex *idx)
+{
+	FormatTally t	   = {.dim = idx->base.dim};
+	uint32_t	stride = prism_posting_reference_pages(idx->base.dim);
+
+	for (uint32_t c = 0; c < idx->nlist; c++)
+		prism_posting_chain_walk(
+				idx->base.posting_storage,
+				prism_leaf_head_blkno(idx->first_posting, c, stride),
+				tally_format,
+				&t);
+	return t;
+}
+
 /*
  * Paged + parallel build runs the shared do_parallel_build driver (the same
  * code path as the PG extension). Build, query, and check recall to confirm
@@ -549,7 +587,8 @@ TEST(query_exec_recall_pages_parallel_depth3)
  * (stride 1) and must keep working too.
  */
 static void
-check_wide_dim_recall(VsTestResult *result, int nworkers, bool paged)
+check_wide_dim_recall(
+		VsTestResult *result, int nworkers, bool paged, int fastscan)
 {
 	uint32_t dim = 4096, nvecs = 600, k = 5, nlist = 6;
 	float	*vecs = make_vectors(nvecs, dim, 42);
@@ -561,6 +600,7 @@ check_wide_dim_recall(VsTestResult *result, int nworkers, bool paged)
 			.encode_rabitq = true,
 			.posting_fmt   = paged ? PRISM_POSTING_FMT_PAGES
 								   : PRISM_POSTING_FMT_FLAT,
+			.fastscan	   = fastscan,
 			.nworkers	   = nworkers,
 	};
 
@@ -576,6 +616,15 @@ check_wide_dim_recall(VsTestResult *result, int nworkers, bool paged)
 				"the centroid region starts past the mean's pages");
 		ASSERT_EQ(4u, idx->base.first_centroid, "which is block 4 at 4096");
 		verify_head_meta(result, idx);
+
+		FormatTally formats = tally_entry_formats(idx);
+		if (fastscan)
+		{
+			ASSERT_TRUE(formats.fastscan > 0, "the lists are fastscan");
+			ASSERT_EQ(0u, formats.aos, "with no AoS entry page");
+		}
+		else
+			ASSERT_EQ(0u, formats.fastscan, "the lists are AoS");
 	}
 
 	PrismQueryCtx *qctx	 = prism_query_ctx_create(idx, k, nlist);
@@ -605,17 +654,28 @@ check_wide_dim_recall(VsTestResult *result, int nworkers, bool paged)
 
 TEST(wide_dim_paged_serial)
 {
-	check_wide_dim_recall(result, 0, true);
+	check_wide_dim_recall(result, 0, true, 0);
 }
 
 TEST(wide_dim_paged_parallel)
 {
-	check_wide_dim_recall(result, 4, true);
+	check_wide_dim_recall(result, 4, true, 0);
 }
 
 TEST(wide_dim_in_ram)
 {
-	check_wide_dim_recall(result, 0, false);
+	check_wide_dim_recall(result, 0, false, 0);
+}
+
+/* Fastscan lists start their stream after a spilled reference chain. */
+TEST(wide_dim_fastscan_serial)
+{
+	check_wide_dim_recall(result, 0, true, 16);
+}
+
+TEST(wide_dim_fastscan_parallel)
+{
+	check_wide_dim_recall(result, 4, true, 16);
 }
 
 /*
@@ -726,30 +786,6 @@ TEST(spilled_probe_buffer_cap_keeps_results)
 	prism_query_state_cleanup(&capped);
 	prism_query_state_cleanup(&full);
 	prism_index_destroy(idx);
-}
-
-TEST_PARAMETERIZED(fastscan_rejects_unsupported_dimension, "1024", "4096")
-{
-	const Dimension dims[] = {1024, 4096};
-	Dimension		dim	   = dims[iteration];
-	uint32_t		nvecs  = 50;
-	float		   *vecs   = make_vectors(nvecs, dim, 1);
-
-	PrismIndexConfig config = {
-			.nlist		   = 2,
-			.metric		   = DISTANCE_L2,
-			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
-			.encode_rabitq = true,
-			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
-			.fastscan	   = 16,
-	};
-	ASSERT_NULL(
-			build_from_array(vecs, nvecs, dim, &config),
-			"serial build rejects an unsupported fastscan dimension");
-	config.nworkers = 4;
-	ASSERT_NULL(
-			build_from_array(vecs, nvecs, dim, &config),
-			"parallel build rejects an unsupported fastscan dimension");
 }
 
 /* Uncompressed centroids are whole vectors on a centroid page; where none
@@ -1179,9 +1215,25 @@ TEST(posting_convert_aos_to_fastscan)
 	ASSERT_TRUE(aos_count > 0, "cluster 0 has entries");
 
 	/* Convert cluster 0 to fastscan */
+	bool		has_base;
 	BlockNumber fs_head = prism_posting_convert_to_fastscan(
-			&idx->posting_storage.base, idx->first_posting, dim);
+			&idx->posting_storage.base, idx->first_posting, dim, &has_base);
 	ASSERT_TRUE(fs_head != InvalidBlockNumber, "fastscan chain created");
+	ASSERT_FALSE(has_base, "the AoS list had no fastscan base");
+
+	/* Converting the new chain again finds its fastscan base and writes
+	 * nothing. */
+	uint32_t pages_before = idx->posting_storage.next_blkno;
+	ASSERT_EQ(
+			InvalidBlockNumber,
+			prism_posting_convert_to_fastscan(
+					&idx->posting_storage.base, fs_head, dim, &has_base),
+			"no second chain");
+	ASSERT_TRUE(has_base, "the converted list has a fastscan base");
+	ASSERT_EQ(
+			pages_before,
+			idx->posting_storage.next_blkno,
+			"and no page is written");
 
 	/* Count fastscan entries */
 	uint32_t fs_count = 0;
@@ -1549,10 +1601,7 @@ check_paged_assignment_parity(
 		while (blk != InvalidBlockNumber)
 		{
 			Page	 pg		 = vs_storage_read_page(st, blk);
-			bool	 first	 = (prism_posting_opaque(pg)->flags &
-							PRISM_POSTING_PAGE_FIRST) != 0;
-			char	*content = first ? prism_posting_content_first(pg, dim)
-									 : prism_posting_content(pg);
+			char	*content = prism_posting_page_content(pg, dim);
 			uint32_t count	 = prism_posting_page_count(pg);
 
 			for (uint32_t i = 0; i < count; i++)

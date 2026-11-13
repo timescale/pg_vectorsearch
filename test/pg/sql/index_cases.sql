@@ -1,5 +1,6 @@
 -- Shared build, query, and maintenance cases. The caller sets dim,
--- reference_pages, mean_pages, spilled, and expected_magic.
+-- reference_pages (the pages of a list that hold only reference),
+-- mean_pages, spilled, and expected_magic.
 CREATE TABLE dimtest (id int, v vec32(:dim));
 INSERT INTO dimtest
     SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
@@ -26,7 +27,12 @@ SELECT count(*) = :reference_pages *
            AS lead_the_chain,
        coalesce(bool_and(is_first = (chain_pos = 0)), true) AS head_first
     FROM prism_posting_pages('dimtest_idx') WHERE format = 'reference';
-SELECT bool_and(chain_pos >= :reference_pages) AS entries_follow
+-- Every list's first entry page comes right after them (a fastscan page
+-- there can hold only codes, so its entry_count says nothing).
+SELECT bool_and(chain_pos >= :reference_pages) AS entries_follow,
+       count(*) FILTER (WHERE chain_pos = :reference_pages) =
+           (SELECT setting::int FROM prism_index_settings('dimtest_idx')
+            WHERE name = 'nlist') AS entry_page_right_after
     FROM prism_posting_pages('dimtest_idx') WHERE format <> 'reference';
 
 -- A table-reading SQL function keeps InitPlan numbering out of EXPLAIN.

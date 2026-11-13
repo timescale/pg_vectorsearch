@@ -51,6 +51,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* ANSI color codes */
@@ -572,9 +574,10 @@ vs_test_abort_handler(int sig)
 }
 
 /*
- * Call first thing in the child. False means the child could not be set
- * up, which the caller should report with a distinct exit status rather
- * than go on to run the check.
+ * Set up a child to expect an abort, as vs_test_aborts does first thing in
+ * the child. False means the child could not be set up, which the caller
+ * should report with a distinct exit status rather than go on to run the
+ * check.
  */
 static inline bool
 vs_test_expect_abort(void)
@@ -583,6 +586,103 @@ vs_test_expect_abort(void)
 	if (freopen("/dev/null", "w", stderr) == NULL)
 		return false;
 	return signal(SIGABRT, vs_test_abort_handler) != SIG_ERR;
+}
+
+/* Code to run in a forked child. Returning exits the child with status 0. */
+typedef void (*VsTestChildFn)(void *arg);
+
+static inline int
+vs_test_run_child_(
+		VsTestChildFn fn,
+		void		 *arg,
+		bool		  expect_abort,
+		char		 *msg,
+		size_t		  msg_size)
+{
+	int fds[2] = {-1, -1};
+
+	if (msg != NULL && (msg_size == 0 || pipe(fds) != 0))
+		return -1;
+
+	fflush(NULL);
+	pid_t pid = fork();
+	if (pid < 0)
+	{
+		if (msg != NULL)
+		{
+			close(fds[0]);
+			close(fds[1]);
+		}
+		return -1;
+	}
+	if (pid == 0)
+	{
+		if (expect_abort && !vs_test_expect_abort())
+			_exit(2);
+		if (msg != NULL)
+		{
+			/* After vs_test_expect_abort, which points stderr at /dev/null. */
+			close(fds[0]);
+			dup2(fds[1], STDOUT_FILENO);
+			dup2(fds[1], STDERR_FILENO);
+			setvbuf(stdout, NULL, _IONBF, 0);
+			setvbuf(stderr, NULL, _IONBF, 0);
+		}
+		fn(arg);
+		_exit(0);
+	}
+
+	if (msg != NULL)
+	{
+		size_t	len = 0;
+		ssize_t got;
+		char	discard[256];
+
+		close(fds[1]);
+		/* Keep draining past a full msg so the child never blocks on it. */
+		for (;;)
+		{
+			if (len + 1 < msg_size)
+				got = read(fds[0], msg + len, msg_size - 1 - len);
+			else
+				got = read(fds[0], discard, sizeof(discard));
+			if (got <= 0)
+				break;
+			if (len + 1 < msg_size)
+				len += (size_t)got;
+		}
+		msg[len] = '\0';
+		close(fds[0]);
+	}
+
+	int status = 0;
+	if (waitpid(pid, &status, 0) != pid)
+		return -1;
+	return status;
+}
+
+/*
+ * Run fn(arg) in a forked child and return its wait status, or -1 if the
+ * child could not be started. When msg is not NULL, it receives the child's
+ * stdout and stderr, cut to fit msg_size.
+ */
+static inline int
+vs_test_run_in_child(VsTestChildFn fn, void *arg, char *msg, size_t msg_size)
+{
+	return vs_test_run_child_(fn, arg, false, msg, msg_size);
+}
+
+/*
+ * Whether fn(arg) aborts on a fatal check when run in a forked child. msg
+ * works as for vs_test_run_in_child.
+ */
+static inline bool
+vs_test_aborts(VsTestChildFn fn, void *arg, char *msg, size_t msg_size)
+{
+	int status = vs_test_run_child_(fn, arg, true, msg, msg_size);
+
+	return status != -1 && WIFEXITED(status) &&
+		   WEXITSTATUS(status) == VS_TEST_ABORTED;
 }
 
 #endif /* VS_TEST_H */

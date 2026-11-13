@@ -224,8 +224,7 @@ count_live_page(PrismPostingChainPos *pos, void *state)
 			uint32_t g_count = n - g * VS_FASTSCAN_GROUP;
 			if (g_count > VS_FASTSCAN_GROUP)
 				g_count = VS_FASTSCAN_GROUP;
-			uint32_t mask =
-					*prism_fastscan_group_tombstone_mask(content, g, ctx->dim);
+			uint32_t mask = *prism_fastscan_group_tombstone_mask(content, g);
 			ctx->live += g_count - (uint32_t)__builtin_popcount(mask);
 		}
 		return true;
@@ -856,8 +855,8 @@ TEST(tombstoned_fastscan_lane_excluded_despite_perfect_stale_match)
 
 /*
  * Inserting into a spilled list: the reference comes from the chain, and the
- * tail of an empty list is its last reference page, which has no room, so the
- * first insert opens the first entry page.
+ * tail of an empty list is its head END page, which takes the first
+ * inserts after the rest of the reference.
  */
 TEST(insert_into_spilled_list)
 {
@@ -881,12 +880,21 @@ TEST(insert_into_spilled_list)
 			scan_count(&st, params, dim, centroid, head, 64, false),
 			"three inserts into an empty spilled list are scanned");
 	{
-		Page hp = vs_storage_read_page(&st.base, head);
+		Page		hp	 = vs_storage_read_page(&st.base, head);
+		BlockNumber tail = prism_posting_head_tail(hp);
+
 		ASSERT_EQ(3u, prism_posting_head_live_count(hp), "live_count");
 		ASSERT_EQ(
-				head + prism_posting_reference_pages(dim),
-				prism_posting_head_tail(hp),
-				"the tail is the first entry page");
+				head + prism_posting_reference_pages(dim) - 1,
+				tail,
+				"the tail is the head END page");
+
+		const PrismPostingPageOpaque *op = prism_posting_opaque(
+				vs_storage_read_page(&st.base, tail));
+		ASSERT_TRUE(
+				prism_posting_head_part(op->flags) == PRISM_POSTING_HEAD_END,
+				"which keeps its flag");
+		ASSERT_EQ(3u, (uint32_t)op->entry_count, "and holds the inserts");
 	}
 
 	/* A built list, inserts crossing a page boundary (15 per page). */

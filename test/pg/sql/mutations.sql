@@ -14,9 +14,10 @@ $$;
 SET test.dim = '3';
 \i :cases_sql
 
--- A whole fastscan group does not fit a page at this dimension.
+-- Spilled references, where a fastscan list's stream starts after the
+-- reference chain.
 \set dim 4096
-\set run_fastscan false
+\set run_fastscan true
 SET test.dim = '4096';
 \i :cases_sql
 

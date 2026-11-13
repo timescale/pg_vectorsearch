@@ -335,19 +335,23 @@ DELETE FROM mutfstomb WHERE id % 10 = 0;
 VACUUM mutfstomb;
 -- Exactly the 20 deleted rows are marked dead, spread across fastscan pages
 -- that each keep live entries -- the per-lane mark, not the page-level
--- shortcut, is what accounts for them.
+-- shortcut, is what accounts for them. Where a group's codes span pages,
+-- some pages carry only codes and hold no entries to count.
 SELECT sum(dead_count) FILTER (WHERE format = 'fastscan') AS fastscan_dead,
        bool_and(dead_count < entry_count)
-           FILTER (WHERE format = 'fastscan') AS fastscan_pages_stay_live,
+           FILTER (WHERE format = 'fastscan' AND entry_count > 0)
+           AS fastscan_pages_stay_live,
        count(*) FILTER (WHERE tombstoned) AS tombstoned_after_partial
     FROM prism_posting_pages('idx_mutfstomb'::regclass);
 DELETE FROM mutfstomb;
 VACUUM mutfstomb;
--- Every page — fastscan base included — is now all-dead and flagged.
+-- Every page with entries — fastscan base included — is now all-dead and
+-- flagged. Reference pages and codes-only pages hold none.
 SELECT count(*) > 0 AS have_pages,
        bool_and(tombstoned) AS all_tombstoned,
        bool_and(dead_count = entry_count) AS all_entries_dead
-    FROM prism_posting_pages('idx_mutfstomb'::regclass);
+    FROM prism_posting_pages('idx_mutfstomb'::regclass)
+    WHERE entry_count > 0;
 DROP TABLE mutfstomb;
 \endif
 

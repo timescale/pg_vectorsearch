@@ -188,6 +188,39 @@ void vs_fastscan_accumulate_hacc(
 		int32_t		  *accum,
 		Dimension	   dim);
 
+/* ----------------------------------------------------------------
+ * Column ranges
+ *
+ * Score part of a group: ncols columns (32 bytes each, 8 dimensions of 32
+ * vectors) starting at column col, added into accum. Calls over adjacent
+ * ranges sum to the whole-group result, so a group can be scored a piece
+ * at a time. The SIMD kernels add in 16-bit lanes, so each range is fed to
+ * them in pieces of at most VS_FASTSCAN_MAX_KERNEL_COLS columns, which keeps
+ * every dimension free of overflow.
+ *
+ * codes points at column col of the group. The 16-bit-table variant needs
+ * an even col, since its table is laid out in 128-byte blocks of two
+ * columns.
+ * ---------------------------------------------------------------- */
+
+/* Columns a SIMD kernel can add in 16-bit lanes without overflow. */
+#define VS_FASTSCAN_MAX_KERNEL_COLS 128u
+
+void vs_fastscan_accumulate_range(
+		const uint8_t *codes,
+		const uint8_t *lut,
+		uint32_t	   col,
+		uint32_t	   ncols,
+		int32_t		  *accum);
+
+void vs_fastscan_accumulate_hacc_range(
+		VsFastscanAccumulateHaccFn fn,
+		const uint8_t			  *codes,
+		const uint8_t			  *lut,
+		uint32_t				   col,
+		uint32_t				   ncols,
+		int32_t					  *accum);
+
 /*
  * Batch distance computation using fastscan.
  */

@@ -188,7 +188,7 @@ SELECT bool_and(format = 'aos') AS others_aos
     FROM prism_posting_pages('idx_l2c'::regclass)
     WHERE cluster_id != 0 AND is_first;
 
--- Converting again should be a no-op (already fastscan)
+-- Converting again is a no-op: the list already has a fastscan base
 CALL prism_convert_posting_to_fastscan('idx_l2c'::regclass, 0);
 
 -- Query still works after partial conversion (mixed AoS + fastscan).

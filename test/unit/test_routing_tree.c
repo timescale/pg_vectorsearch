@@ -17,7 +17,6 @@
  */
 
 #include <string.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include "algo/kmeans.h"
@@ -584,6 +583,16 @@ TEST(exact_centroid_collector_overflow)
  * wrapped count describes a smaller tree than the one being built, and
  * every region derived from it is then under-allocated.
  */
+static void
+run_wrapping_max_nlist(void *arg)
+{
+	(void)arg;
+	/* Reached past the call only if the ceiling failed to fire. The result
+	 * is used so the call cannot be optimized away as having no effect. */
+	if (prism_max_nlist(5000000, 100000) == 0)
+		_exit(3);
+}
+
 TEST(max_nlist_never_wraps)
 {
 	/* Shapes the reloptions permit, at their extremes. */
@@ -599,22 +608,7 @@ TEST(max_nlist_never_wraps)
 	 * 100000^2 is 10^10, which a uint32 accumulator truncates to
 	 * 1410065408 -- a plausible-looking count an eighth of the real one.
 	 */
-	fflush(NULL);
-	pid_t pid = fork();
-	ASSERT_TRUE(pid >= 0, "fork succeeded");
-	if (pid == 0)
-	{
-		if (!vs_test_expect_abort())
-			_exit(2);
-		uint32_t wrapped = prism_max_nlist(5000000, 100000);
-		/* Reached only if the ceiling failed to fire. The result is used
-		 * so the call cannot be optimized away as having no effect. */
-		_exit(wrapped == 0 ? 3 : 0);
-	}
-
-	int status = 0;
-	waitpid(pid, &status, 0);
 	ASSERT_TRUE(
-			WIFEXITED(status) && WEXITSTATUS(status) == VS_TEST_ABORTED,
+			vs_test_aborts(run_wrapping_max_nlist, NULL, NULL, 0),
 			"a leaf count past UINT32_MAX aborts");
 }

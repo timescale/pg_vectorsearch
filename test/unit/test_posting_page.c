@@ -21,6 +21,8 @@
 
 #include "core/memory.h"
 #include "index/posting_build.h"
+#include "index/posting_convert.h"
+#include "index/posting_insert.h"
 #include "index/posting_page.h"
 #include "index/posting_scan.h"
 #include "index/posting_split.h"
@@ -152,7 +154,7 @@ TEST(page_init_basic)
 {
 	Page page = vs_alloc0(BLCKSZ);
 
-	prism_posting_page_init(page, 0, 128, PRISM_POSTING_PAGE_FIRST);
+	prism_posting_page_init(page, 0, 128, PRISM_POSTING_HEAD_START);
 
 	PrismPostingPageOpaque *opaque = prism_posting_opaque(page);
 	ASSERT_EQ(
@@ -162,7 +164,9 @@ TEST(page_init_basic)
 	ASSERT_EQ(0, opaque->entry_count, "entry_count should be 0");
 	ASSERT_EQ(0, opaque->cluster_id, "cluster_id should be 0");
 	ASSERT_EQ(
-			PRISM_POSTING_PAGE_FIRST, opaque->flags, "flags should be FIRST");
+			PRISM_POSTING_HEAD_START,
+			opaque->flags,
+			"flags should be the head's START");
 	ASSERT_EQ(
 			PRISM_POSTING_PAGE_ID,
 			opaque->page_id,
@@ -267,7 +271,7 @@ TEST(builder_single_page)
 	ASSERT_EQ(5, prism_posting_page_count(page), "should have 5 entries");
 
 	/* Verify vector IDs — first page content starts after pt_centroid */
-	char *content = prism_posting_content_first(page, dim);
+	char *content = prism_posting_page_content(page, dim);
 	for (uint32_t i = 0; i < 5; i++)
 	{
 		PrismPostingEntryHeader *e = prism_posting_entry_at(content, i, dim);
@@ -347,16 +351,21 @@ check_spilled_chain(
 	uint32_t	npages = prism_posting_reference_pages(dim);
 	BlockNumber blk	   = head;
 	BlockNumber prev   = InvalidBlockNumber;
+	BlockNumber end	   = InvalidBlockNumber;
 
-	for (uint32_t c = 0; c < npages; c++)
+	/* A full page of reference on the START and MIDDLE pages, the rest on
+	 * the END page where the entries start. */
+	for (uint32_t c = 0; c + 1 < npages; c++)
 	{
 		Page						  p = vs_storage_read_page(&st->base, blk);
 		const PrismPostingPageOpaque *op = prism_posting_opaque(p);
-		ASSERT_TRUE(
-				op->flags & PRISM_POSTING_PAGE_REFERENCE,
-				"the chain starts with reference pages");
 		ASSERT_EQ(
-				c == 0, (op->flags & PRISM_POSTING_PAGE_FIRST) != 0, "FIRST");
+				c == 0 ? PRISM_POSTING_HEAD_START : PRISM_POSTING_HEAD_MIDDLE,
+				prism_posting_head_part(op->flags),
+				"the head's START page, then MIDDLE pages");
+		ASSERT_TRUE(
+				prism_posting_is_reference_only_page(op->flags, dim),
+				"which hold only reference");
 		ASSERT_EQ(0u, op->entry_count, "no entries on a reference page");
 		ASSERT_EQ(0u, op->max_entries, "nor capacity");
 		ASSERT_EQ(7u, op->cluster_id, "the list's cluster id");
@@ -367,14 +376,23 @@ check_spilled_chain(
 	}
 
 	uint32_t total = 0;
+	end			   = blk;
 	while (blk != InvalidBlockNumber)
 	{
 		Page						  p = vs_storage_read_page(&st->base, blk);
 		const PrismPostingPageOpaque *op = prism_posting_opaque(p);
 		ASSERT_FALSE(
-				op->flags & PRISM_POSTING_PAGE_REFERENCE,
-				"entry pages carry no reference");
-		ASSERT_TRUE(op->entry_count > 0, "an entry page holds entries");
+				prism_posting_is_reference_only_page(op->flags, dim),
+				"entry pages hold entries");
+		ASSERT_EQ(
+				blk == end ? PRISM_POSTING_HEAD_END : PRISM_POSTING_HEAD_NONE,
+				prism_posting_head_part(op->flags),
+				"the first entry page is the head's END page");
+		ASSERT_EQ(7u, op->cluster_id, "the list's cluster id");
+		if (blk == end && fixed)
+			ASSERT_EQ(prev + 1, blk, "it follows the reference pages");
+		if (blk != end)
+			ASSERT_TRUE(op->entry_count > 0, "a later page holds entries");
 		total += op->entry_count;
 		prev = blk;
 		blk	 = op->next_blkno;
@@ -389,13 +407,9 @@ check_spilled_chain(
 	BlockNumber entries =
 			prism_posting_reference_read(&st->base, head, dim, got);
 	ASSERT_MEM_EQ(ref, got, (size_t)dim * sizeof(float), "reference gathers");
-	if (nentries > 0)
-		ASSERT_EQ(head + npages, entries, "entries start past the reference");
-	else
-		ASSERT_EQ(
-				InvalidBlockNumber,
-				entries,
-				"an empty list ends with its reference");
+	ASSERT_EQ(end, entries, "entries start on the head END page");
+	if (fixed)
+		ASSERT_EQ(head + npages - 1, entries, "the last reference block");
 	vs_free(got);
 }
 
@@ -463,8 +477,9 @@ TEST(builder_spilled_list_layout)
 /*
  * The parallel bulk build pre-writes every head (and, spilled, its reference
  * pages) and later adopts it to append the sorted entries. A spilled adoption
- * leaves the reference chain untouched and starts the entries after it; an
- * adoption that appends nothing leaves the head's stamp alone.
+ * leaves the head and middle reference pages untouched and appends to the
+ * head END page; an adoption that appends nothing leaves the head's
+ * stamp alone.
  */
 TEST(builder_adopts_a_spilled_head)
 {
@@ -499,7 +514,8 @@ TEST(builder_adopts_a_spilled_head)
 			"an empty adoption rewrites nothing");
 	ASSERT_EQ(8u, st.next_blkno, "and appends nothing");
 
-	/* Adopt and append 31 encoded entries: 3 entry pages after the chain. */
+	/* Adopt and append 31 encoded entries: 15 on the head END page,
+	 * which is rewritten in place, then 15 and 1 on two appended pages. */
 	prism_posting_builder_adopt_head(&b, &st.base, params, dim, 7, 5, false);
 	Vec32Ref cref = {.data = ref, .dim = dim};
 	for (uint32_t i = 0; i < 31; i++)
@@ -519,7 +535,7 @@ TEST(builder_adopts_a_spilled_head)
 	ASSERT_EQ(5u, prism_posting_builder_finish(&b), "same head");
 	prism_posting_builder_cleanup(&b);
 	check_spilled_chain(result, &st, 5, dim, ref, 31, true);
-	ASSERT_EQ(11u, st.next_blkno, "31 entries at 15 per page: 3 pages");
+	ASSERT_EQ(10u, st.next_blkno, "two pages appended after the chain");
 
 	vs_free(st.pages);
 	vs_free(rd);
@@ -591,7 +607,7 @@ TEST(scan_spilled_cluster)
 	TestPageStorage storage	 = make_test_storage(16);
 	RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
 	float		   *centroid = vs_alloc(dim * sizeof(float));
-	uint32_t		nvecs	 = 40; /* three entry pages at 15 per page */
+	uint32_t		nvecs	 = 40; /* 15 per page, from the head END page */
 	float		   *vecs	 = make_test_vectors(nvecs, dim);
 
 	for (Dimension d = 0; d < dim; d++)
@@ -630,9 +646,9 @@ TEST(scan_spilled_cluster)
 	ASSERT_EQ(nvecs, scan.entries_scanned, "all entries scanned");
 	ASSERT_EQ(nvecs, topk.cand_count, "all entries in topk");
 	ASSERT_EQ(
-			prism_posting_reference_pages(dim) + 3,
+			prism_posting_reference_pages(dim) + 2,
 			scan.pages_read,
-			"reference pages plus three entry pages");
+			"reference pages, the last with entries, then two more");
 
 	/* Pre-gathered: same entries, the reference pages still counted. */
 	float	   *mine = vs_alloc(dim * sizeof(float));
@@ -640,9 +656,9 @@ TEST(scan_spilled_cluster)
 			prism_posting_reference_read(&storage.base, head, dim, mine);
 	ASSERT_MEM_EQ(centroid, mine, dim * sizeof(float), "gather matches");
 	ASSERT_EQ(
-			head + prism_posting_reference_pages(dim),
+			head + prism_posting_reference_pages(dim) - 1,
 			entries,
-			"entries block");
+			"entries start on the head END page");
 
 	vs_topk_cleanup(&topk);
 	vs_topk_init(&topk, nvecs);
@@ -655,7 +671,7 @@ TEST(scan_spilled_cluster)
 	prism_posting_scan_end_cluster(&scan);
 	ASSERT_EQ(nvecs, topk.cand_count, "all entries in topk again");
 	ASSERT_EQ(
-			prism_posting_reference_pages(dim) + 3,
+			prism_posting_reference_pages(dim) + 2,
 			scan.pages_read,
 			"the same page count as a self-gathering begin");
 
@@ -694,6 +710,15 @@ TEST(dimension_gate)
 	ASSERT_FALSE(prism_index_dim_supported(4097), "4097 is odd");
 	ASSERT_TRUE(prism_index_dim_supported(6144), "6144 = 2048 * 3");
 	ASSERT_TRUE(prism_index_dim_supported(8192), "the ceiling");
+
+	/* Every spilled dimension the gate admits has a START and an END
+	 * page: none fits its reference on one page. */
+	for (uint32_t dim = 1; dim <= PRISM_INDEX_MAX_DIM; dim++)
+		if (prism_index_dim_supported(dim) &&
+			prism_posting_spilled((Dimension)dim))
+			ASSERT_TRUE(
+					prism_posting_reference_pages((Dimension)dim) >= 2,
+					"a spilled head has START and END pages");
 	ASSERT_FALSE(prism_index_dim_supported(8193), "past the ceiling");
 	ASSERT_FALSE(prism_index_dim_supported(0), "zero");
 	ASSERT_FALSE(prism_index_dim_supported(65568), "65568, 32 as a Dimension");
@@ -938,6 +963,21 @@ count_pages_cb(PrismPostingChainPos *pos, void *state)
  * more entries than an AoS one, so bounding an AoS page by the larger figure
  * would not help. Runs in a forked child because vs_error aborts.
  */
+typedef struct CheckCountArgs
+{
+	BlockNumber blkno;
+	Page		page;
+	Dimension	dim;
+} CheckCountArgs;
+
+static void
+run_check_count(void *arg)
+{
+	const CheckCountArgs *a = arg;
+
+	prism_posting_check_count(a->blkno, a->page, a->dim);
+}
+
 TEST(chain_walk_rejects_corrupt_entry_count)
 {
 	Dimension	  dim	 = 64;
@@ -961,21 +1001,9 @@ TEST(chain_walk_rejects_corrupt_entry_count)
 
 	op->entry_count = (uint16_t)(cap + 1);
 
-	fflush(NULL);
-	pid_t pid = fork();
-	ASSERT_TRUE(pid >= 0, "fork succeeded");
-	if (pid == 0)
-	{
-		if (!vs_test_expect_abort())
-			_exit(2);
-		prism_posting_check_count(head, op, dim);
-		_exit(0); /* reached only if the check failed to fire */
-	}
-
-	int status = 0;
-	waitpid(pid, &status, 0);
+	CheckCountArgs args = {.blkno = head, .page = p, .dim = dim};
 	ASSERT_TRUE(
-			WIFEXITED(status) && WEXITSTATUS(status) == VS_TEST_ABORTED,
+			vs_test_aborts(run_check_count, &args, NULL, 0),
 			"a count past the page ceiling aborts");
 
 	vs_free(st.pages);
@@ -985,19 +1013,24 @@ TEST(chain_walk_rejects_corrupt_entry_count)
 }
 
 /*
- * Neither format's ceiling bounds the other: fastscan packs more at dim 256
- * and fewer at dim 768. So a single AoS-derived bound is too strict at one
- * dimension and too lax at the other, which is why the count check has to
- * pick the ceiling per format.
+ * The fastscan ceiling allows for group metadata deferred from the previous
+ * page, so it sits above the AoS one. An AoS-derived bound would reject a
+ * valid fastscan page, which is why the count check picks the ceiling per
+ * format, and why buffers sized for any page take the larger.
  */
-TEST(neither_format_cap_bounds_the_other)
+TEST(page_caps_differ_by_format)
 {
-	ASSERT_TRUE(
-			prism_fastscan_max_entries(256) > prism_posting_max_entries(256),
-			"fastscan holds more than AoS at dim 256");
-	ASSERT_TRUE(
-			prism_posting_max_entries(768) > prism_fastscan_max_entries(768),
-			"AoS holds more than fastscan at dim 768");
+	for (Dimension dim = 4; dim <= PRISM_INDEX_MAX_DIM; dim += 4)
+	{
+		uint32_t aos = prism_posting_max_entries(dim);
+		uint32_t fs	 = prism_fastscan_max_entries(dim);
+
+		ASSERT_TRUE(fs > aos, "fastscan ceiling exceeds AoS");
+		ASSERT_EQ(
+				fs,
+				prism_posting_max_entries_any_format(dim),
+				"buffers for any page take the larger ceiling");
+	}
 }
 
 /*
@@ -1026,68 +1059,86 @@ TEST(spill_threshold_pins_the_inline_layout)
 			"an inline list has its reference on the head alone");
 
 	/* Reference pages: ceil(dim / floats-per-page), 2036 at 8 KB pages. */
-	ASSERT_EQ(2036u, (uint32_t)PRISM_POSTING_REFERENCE_CHUNK_FLOATS, "chunk");
-	ASSERT_EQ(1u, prism_posting_reference_pages(2036), "2036 fills one page");
+	ASSERT_EQ(
+			2036u,
+			(uint32_t)PRISM_POSTING_REFERENCE_PAGE_FLOATS,
+			"floats per page");
 	ASSERT_EQ(2u, prism_posting_reference_pages(2037), "2037 needs two");
 	ASSERT_EQ(2u, prism_posting_reference_pages(4072), "4072 fills two");
 	ASSERT_EQ(3u, prism_posting_reference_pages(4073), "4073 needs three");
 	ASSERT_EQ(3u, prism_posting_reference_pages(4096), "4096 needs three");
 	ASSERT_EQ(5u, prism_posting_reference_pages(8192), "8192 needs five");
 
-	for (Dimension dim = PRISM_INDEX_NARROW_MAX_DIM + 1;
+	for (Dimension dim = PRISM_POSTING_REFERENCE_PAGE_FLOATS + 1;
 		 dim <= PRISM_INDEX_MAX_DIM;
 		 dim += 37)
 	{
 		uint32_t npages = prism_posting_reference_pages(dim);
 		uint32_t total	= 0;
-		for (uint32_t c = 0; c < npages; c++)
+		for (uint32_t i = 0; i < npages; i++)
 		{
-			uint32_t n = prism_posting_reference_chunk_floats(dim, c);
-			ASSERT_TRUE(n >= 1, "every reference page carries a chunk");
+			uint32_t n = prism_posting_reference_page_floats(dim, i);
+			ASSERT_TRUE(n >= 1, "every head page carries reference");
 			total += n;
 		}
-		ASSERT_EQ(dim, total, "the chunks cover the vector exactly");
+		ASSERT_EQ(dim, total, "the head pages cover the vector exactly");
 		ASSERT_EQ(
 				0u,
-				prism_posting_reference_chunk_floats(dim, npages),
-				"nothing past the last chunk");
+				prism_posting_reference_page_floats(dim, npages),
+				"nothing past the END page");
 
+		/* The START and MIDDLE pages hold only reference; the entries
+		 * start after the rest of it, on the END page. */
+		uint32_t prefix = (uint32_t)MAXALIGN(
+				prism_posting_reference_page_floats(dim, npages - 1) *
+				sizeof(float));
+		PrismPostingPageOpaque head_op = {.flags = PRISM_POSTING_HEAD_START};
+		PrismPostingPageOpaque end_op  = {.flags = PRISM_POSTING_HEAD_END};
+
+		ASSERT_EQ(prefix, prism_posting_ref_prefix_size(dim), "prefix");
 		ASSERT_EQ(
-				0u,
-				prism_posting_max_entries_first(dim),
-				"a spilled head holds no entries");
+				0u, prism_posting_page_cap(&head_op, dim), "head holds none");
+		ASSERT_EQ(
+				(prism_posting_page_usable() - prefix) /
+						PRISM_POSTING_ENTRY_SIZE(dim),
+				prism_posting_page_cap(&end_op, dim),
+				"the END page holds what fits after the reference");
+		ASSERT_EQ(
+				prism_posting_page_usable() - prefix,
+				prism_fastscan_page_space(dim, true),
+				"and as much fastscan stream");
 		ASSERT_TRUE(
 				prism_posting_max_entries(dim) >= 1,
-				"an overflow page holds an entry up to the ceiling");
-		ASSERT_EQ(
-				0u,
-				prism_fastscan_max_groups(dim, true),
-				"a spilled head holds no fastscan group");
-		ASSERT_EQ(
-				0u, prism_fastscan_max_entries_first(dim), "same, in entries");
+				"a later page holds an entry up to the ceiling");
 		ASSERT_TRUE(
 				prism_fastscan_max_groups(dim, false) * VS_FASTSCAN_GROUP ==
 						prism_fastscan_max_entries(dim),
-				"overflow fastscan capacity is whole groups");
+				"fastscan capacity is whole groups");
 	}
 
-	/* The guard binds at exactly the dimension the design targets. */
-	ASSERT_EQ(0u, prism_fastscan_max_groups(4096, true), "no group at 4096");
-	ASSERT_EQ(0u, prism_fastscan_max_groups(4096, false), "none anywhere");
-	ASSERT_EQ(15u, prism_posting_max_entries(4096), "15 AoS entries/page");
+	/* At 4096 the END page holds 24 floats of reference, so nearly the
+	 * whole page is left for entries. */
+	ASSERT_EQ(96u, prism_posting_ref_prefix_size(4096), "96-byte prefix");
+	ASSERT_EQ(15u, prism_posting_max_entries_first(4096), "15 AoS entries");
+	ASSERT_EQ(15u, prism_posting_max_entries(4096), "as on a later page");
+	ASSERT_EQ(
+			prism_posting_page_usable() - 96,
+			prism_fastscan_page_space(4096, true),
+			"the stream starts on the END page");
 
-	PrismPostingPageOpaque op = {
-			.flags = PRISM_POSTING_PAGE_FIRST | PRISM_POSTING_PAGE_REFERENCE};
-	ASSERT_EQ(0u, prism_posting_page_cap(&op, 4096), "reference cap is 0");
-	op.flags = PRISM_POSTING_PAGE_OVERFLOW | PRISM_POSTING_PAGE_REFERENCE |
-			   PRISM_POSTING_PAGE_FASTSCAN;
-	ASSERT_EQ(0u, prism_posting_page_cap(&op, 768), "whatever the format");
+	PrismPostingPageOpaque op = {.flags = PRISM_POSTING_HEAD_START};
+	ASSERT_EQ(0u, prism_posting_page_cap(&op, 4096), "a spilled START: 0");
+	ASSERT_TRUE(
+			prism_posting_page_cap(&op, 768) > 0,
+			"an inline START holds entries");
+	op.flags = PRISM_POSTING_HEAD_MIDDLE | PRISM_POSTING_PAGE_FASTSCAN;
+	ASSERT_EQ(0u, prism_posting_page_cap(&op, 4096), "a MIDDLE page: 0");
 }
 
 /*
  * Head addressing: leaf c's head is first_posting + c * stride, and the
  * route back divides. Stride 1 is the inline layout; a spilled layout
- * strides by its reference page count so the chunks follow their head.
+ * strides by its reference page count so the head pages are contiguous.
  */
 TEST(head_stride_round_trips)
 {
@@ -1108,8 +1159,8 @@ TEST(head_stride_round_trips)
 
 /*
  * Write a reference as pages and gather it back. Inline: the head carries
- * it and the entries start on the head. Spilled: the chunks are read in
- * order and the entries start on the page after the last chunk.
+ * it and the entries start on the head. Spilled: the head pages are read in
+ * order and the entries start on the END page.
  */
 static void
 check_reference_roundtrip(VsTestResult *result, Dimension dim)
@@ -1127,7 +1178,7 @@ check_reference_roundtrip(VsTestResult *result, Dimension dim)
 	BlockNumber head = blk;
 	if (!prism_posting_spilled(dim))
 	{
-		prism_posting_page_init(page, 42, dim, PRISM_POSTING_PAGE_FIRST);
+		prism_posting_page_init(page, 42, dim, PRISM_POSTING_HEAD_START);
 		memcpy(prism_posting_pt_centroid_mut(page),
 			   ref,
 			   (size_t)dim * sizeof(float));
@@ -1136,15 +1187,16 @@ check_reference_roundtrip(VsTestResult *result, Dimension dim)
 	else
 	{
 		BlockNumber prev = InvalidBlockNumber;
-		for (uint32_t c = 0; c < npages; c++)
+		for (uint32_t i = 0; i < npages; i++)
 		{
-			if (c > 0)
+			if (i > 0)
 				page = vs_storage_new_page(&st.base, &blk);
-			prism_posting_reference_page_fill(page, 42, dim, c, ref, 0);
+			prism_posting_reference_page_fill(page, 42, dim, i, ref, 0);
+			bool end = i + 1 == npages;
 			ASSERT_EQ(
-					0u,
-					prism_posting_opaque(page)->max_entries,
-					"a reference page has no entry capacity");
+					end ? prism_posting_max_entries_first(dim) : 0u,
+					(uint32_t)prism_posting_opaque(page)->max_entries,
+					"only the head END page has entry capacity");
 			if (prev != InvalidBlockNumber)
 				prism_posting_opaque(vs_storage_write_page(&st.base, prev))
 						->next_blkno = blk;
@@ -1153,7 +1205,7 @@ check_reference_roundtrip(VsTestResult *result, Dimension dim)
 		}
 		/* An entry page after the chain, so the gather can report it. */
 		page = vs_storage_new_page(&st.base, &blk);
-		prism_posting_page_init(page, 42, dim, PRISM_POSTING_PAGE_OVERFLOW);
+		prism_posting_page_init(page, 42, dim, 0);
 		prism_posting_opaque(vs_storage_write_page(&st.base, prev))
 				->next_blkno = blk;
 		vs_storage_commit_page(&st.base, blk);
@@ -1166,9 +1218,9 @@ check_reference_roundtrip(VsTestResult *result, Dimension dim)
 		ASSERT_EQ(head, entries, "inline entries start on the head");
 	else
 		ASSERT_EQ(
-				head + npages,
+				head + npages - 1,
 				entries,
-				"spilled entries start past the last chunk");
+				"spilled entries start on the head END page");
 
 	vs_free(ref);
 	vs_free(got);
@@ -1180,9 +1232,8 @@ TEST(reference_round_trips_inline_and_spilled)
 	Dimension dims[] =
 			{768,
 			 PRISM_INDEX_NARROW_MAX_DIM,
-			 PRISM_INDEX_NARROW_MAX_DIM + 1,
-			 2036,
 			 2037,
+			 2048,
 			 4096,
 			 4097,
 			 PRISM_INDEX_MAX_DIM};
@@ -1191,11 +1242,27 @@ TEST(reference_round_trips_inline_and_spilled)
 }
 
 /*
- * A chunk that belongs to another list, or a chain that ends early, is
+ * A head page that belongs to another list, or a chain that ends early, is
  * corruption: the gather must refuse rather than hand back a vector
  * stitched from foreign pages.
  */
-TEST(reference_read_rejects_a_foreign_chunk)
+typedef struct ReferenceReadArgs
+{
+	VsStorage  *storage;
+	BlockNumber head;
+	Dimension	dim;
+	float	   *out;
+} ReferenceReadArgs;
+
+static void
+run_reference_read(void *arg)
+{
+	const ReferenceReadArgs *a = arg;
+
+	prism_posting_reference_read(a->storage, a->head, a->dim, a->out);
+}
+
+TEST(reference_read_rejects_a_foreign_page)
 {
 	Dimension		dim	   = 4096;
 	uint32_t		npages = prism_posting_reference_pages(dim);
@@ -1205,13 +1272,13 @@ TEST(reference_read_rejects_a_foreign_chunk)
 	BlockNumber		prev   = InvalidBlockNumber;
 	BlockNumber		head   = InvalidBlockNumber;
 
-	for (uint32_t c = 0; c < npages; c++)
+	for (uint32_t i = 0; i < npages; i++)
 	{
 		BlockNumber blk;
 		Page		page = vs_storage_new_page(&st.base, &blk);
-		/* The last chunk carries a different cluster id. */
+		/* The END page carries a different cluster id. */
 		prism_posting_reference_page_fill(
-				page, c + 1 == npages ? 43 : 42, dim, c, ref, 0);
+				page, i + 1 == npages ? 43 : 42, dim, i, ref, 0);
 		if (prev != InvalidBlockNumber)
 			prism_posting_opaque(vs_storage_write_page(&st.base, prev))
 					->next_blkno = blk;
@@ -1220,38 +1287,17 @@ TEST(reference_read_rejects_a_foreign_chunk)
 		prev = blk;
 	}
 
-	fflush(NULL);
-	pid_t pid = fork();
-	ASSERT_TRUE(pid >= 0, "fork succeeded");
-	if (pid == 0)
-	{
-		if (!vs_test_expect_abort())
-			_exit(2);
-		prism_posting_reference_read(&st.base, head, dim, got);
-		_exit(0); /* reached only if the check failed to fire */
-	}
-	int status = 0;
-	waitpid(pid, &status, 0);
+	ReferenceReadArgs args =
+			{.storage = &st.base, .head = head, .dim = dim, .out = got};
 	ASSERT_TRUE(
-			WIFEXITED(status) && WEXITSTATUS(status) == VS_TEST_ABORTED,
-			"a foreign chunk aborts the gather");
+			vs_test_aborts(run_reference_read, &args, NULL, 0),
+			"a foreign page aborts the gather");
 
 	/* And a chain cut short. */
 	prism_posting_opaque(vs_storage_write_page(&st.base, head))->next_blkno =
 			InvalidBlockNumber;
-	fflush(NULL);
-	pid = fork();
-	ASSERT_TRUE(pid >= 0, "fork succeeded");
-	if (pid == 0)
-	{
-		if (!vs_test_expect_abort())
-			_exit(2);
-		prism_posting_reference_read(&st.base, head, dim, got);
-		_exit(0);
-	}
-	waitpid(pid, &status, 0);
 	ASSERT_TRUE(
-			WIFEXITED(status) && WEXITSTATUS(status) == VS_TEST_ABORTED,
+			vs_test_aborts(run_reference_read, &args, NULL, 0),
 			"a short chain aborts the gather");
 
 	vs_free(ref);
@@ -1264,6 +1310,24 @@ TEST(reference_read_rejects_a_foreign_chunk)
  * stop rather than cast a foreign page's bytes as a posting opaque and follow
  * whatever they happen to contain.
  */
+typedef struct ChainWalkArgs
+{
+	VsStorage  *storage;
+	BlockNumber head;
+} ChainWalkArgs;
+
+/* Exits with the number of pages visited, or dies by alarm if it cycles. */
+static void
+run_chain_walk(void *arg)
+{
+	const ChainWalkArgs *a		 = arg;
+	uint32_t			 visited = 0;
+
+	alarm(5);
+	prism_posting_chain_walk(a->storage, a->head, count_pages_cb, &visited);
+	_exit((int)visited);
+}
+
 TEST(chain_walk_stops_leaving_posting_pages)
 {
 	Dimension	  dim	 = 64;
@@ -1289,19 +1353,8 @@ TEST(chain_walk_stops_leaving_posting_pages)
 	 * page's zeroed bytes as next_blkno and cycles forever, so a regression
 	 * has to fail rather than hang the suite.
 	 */
-	fflush(NULL);
-	pid_t pid = fork();
-	ASSERT_TRUE(pid >= 0, "fork succeeded");
-	if (pid == 0)
-	{
-		alarm(5);
-		uint32_t visited = 0;
-		prism_posting_chain_walk(&st.base, head, count_pages_cb, &visited);
-		_exit((int)visited);
-	}
-
-	int status = 0;
-	waitpid(pid, &status, 0);
+	ChainWalkArgs args = {.storage = &st.base, .head = head};
+	int status		   = vs_test_run_in_child(run_chain_walk, &args, NULL, 0);
 	ASSERT_TRUE(
 			WIFEXITED(status),
 			"the walk terminated instead of following the stray page");
@@ -1314,6 +1367,71 @@ TEST(chain_walk_stops_leaving_posting_pages)
 	vs_free(vecs);
 	vs_free(centroid);
 	vs_rabitq_destroy(params);
+}
+
+typedef struct ConvertArgs
+{
+	VsStorage  *storage;
+	BlockNumber head;
+	Dimension	dim;
+} ConvertArgs;
+
+static void
+run_convert(void *arg)
+{
+	const ConvertArgs *a = arg;
+	bool			   has_base;
+
+	prism_posting_convert_to_fastscan(a->storage, a->head, a->dim, &has_base);
+}
+
+/*
+ * Conversion reads its input as AoS. A list that starts with fastscan pages,
+ * after its reference pages if it has any, is reported as already converted
+ * and nothing is written. A fastscan page after AoS ones is a chain no
+ * writer makes, and is refused rather than misread as AoS entries.
+ */
+TEST(convert_refuses_fastscan_pages)
+{
+	const Dimension dims[] = {128, 4096};
+
+	for (uint32_t di = 0; di < sizeof(dims) / sizeof(dims[0]); di++)
+	{
+		Dimension		dim		 = dims[di];
+		TestPageStorage st		 = make_test_storage(64);
+		RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+		float		   *centroid = vs_alloc0(dim * sizeof(float));
+		float		   *vecs	 = make_test_vectors(40, dim);
+		bool			has_base;
+
+		BlockNumber fs =
+				build_cluster(&st, params, dim, centroid, vecs, 40, true);
+		uint32_t pages = st.next_blkno;
+		ASSERT_EQ(
+				InvalidBlockNumber,
+				prism_posting_convert_to_fastscan(
+						&st.base, fs, dim, &has_base),
+				"a fastscan list is not converted again");
+		ASSERT_TRUE(has_base, "it has a fastscan base");
+		ASSERT_EQ(pages, st.next_blkno, "and nothing is written");
+
+		/* An AoS list whose chain runs on into the fastscan one. */
+		BlockNumber aos =
+				build_cluster(&st, params, dim, centroid, vecs, 40, false);
+		BlockNumber tail = prism_posting_head_tail(
+				test_read_page(&st.base, aos));
+		prism_posting_opaque(test_read_page(&st.base, tail))->next_blkno = fs;
+
+		ConvertArgs args = {.storage = &st.base, .head = aos, .dim = dim};
+		ASSERT_TRUE(
+				vs_test_aborts(run_convert, &args, NULL, 0),
+				"a fastscan page after AoS ones aborts the conversion");
+
+		vs_free(vecs);
+		vs_free(centroid);
+		vs_free(st.pages);
+		vs_rabitq_destroy(params);
+	}
 }
 
 /* ----------------------------------------------------------------
@@ -1460,6 +1578,26 @@ TEST(scan_scores_fastscan_page)
 	vs_rabitq_destroy(params);
 }
 
+typedef struct AosScanArgs
+{
+	TestPageStorage	 *st;
+	RaBitQParams	 *params;
+	RaBitQQueryState *qstate;
+	Dimension		  dim;
+	BlockNumber		  head;
+	uint32_t		  k;
+} AosScanArgs;
+
+/* Scans a cluster without fastscan state. */
+static void
+run_aos_scan(void *arg)
+{
+	const AosScanArgs *a = arg;
+
+	scan_candidates(
+			a->st, a->params, a->qstate, a->dim, a->head, a->k, false, NULL);
+}
+
 /*
  * Without fastscan state the scan refuses a fastscan page rather than
  * reading it as AoS. Runs in a forked child because vs_error aborts.
@@ -1479,24 +1617,71 @@ TEST(scan_rejects_fastscan_page_without_state)
 	RaBitQQueryState qstate;
 	setup_query_state(&qstate, params, centroid, dim);
 
-	fflush(NULL);
-	pid_t pid = fork();
-	ASSERT_TRUE(pid >= 0, "fork succeeded");
-	if (pid == 0)
-	{
-		if (!vs_test_expect_abort())
-			_exit(2);
-		scan_candidates(&st, params, &qstate, dim, head, nvecs, false, NULL);
-		_exit(0); /* reached only if the check failed to fire */
-	}
-
-	int status = 0;
-	waitpid(pid, &status, 0);
+	AosScanArgs args =
+			{.st	 = &st,
+			 .params = params,
+			 .qstate = &qstate,
+			 .dim	 = dim,
+			 .head	 = head,
+			 .k		 = nvecs};
 	ASSERT_TRUE(
-			WIFEXITED(status) && WEXITSTATUS(status) == VS_TEST_ABORTED,
+			vs_test_aborts(run_aos_scan, &args, NULL, 0),
 			"a fastscan page without fastscan state aborts");
 
 	vs_rabitq_destroy(params);
+}
+
+/*
+ * A list's first entry page holds fewer AoS entries than a later page, since
+ * the reference comes first. The scan bounds its entry count by that page's
+ * own capacity: a count that would be valid on a later page would read past
+ * the end of this one. Covers an inline head (768) and an END page (3072).
+ */
+TEST(scan_rejects_an_overfull_first_entry_page)
+{
+	const Dimension dims[] = {768, 3072};
+
+	for (uint32_t di = 0; di < sizeof(dims) / sizeof(dims[0]); di++)
+	{
+		Dimension		dim		 = dims[di];
+		TestPageStorage st		 = make_test_storage(16);
+		RaBitQParams   *params	 = vs_rabitq_create(dim, 42);
+		float		   *centroid = vs_alloc0(dim * sizeof(float));
+		float		   *vecs	 = make_test_vectors(4, dim);
+
+		BlockNumber head =
+				build_cluster(&st, params, dim, centroid, vecs, 4, false);
+		float	   *ref = vs_alloc((size_t)dim * sizeof(float));
+		BlockNumber first =
+				prism_posting_reference_read(&st.base, head, dim, ref);
+		vs_free(ref);
+
+		PrismPostingPageOpaque *op = prism_posting_opaque(
+				test_read_page(&st.base, first));
+		ASSERT_TRUE(
+				prism_posting_max_entries_first(dim) <
+						prism_posting_max_entries(dim),
+				"the first entry page holds fewer entries");
+		op->entry_count = (uint16_t)prism_posting_max_entries(dim);
+
+		RaBitQQueryState qstate;
+		setup_query_state(&qstate, params, centroid, dim);
+		AosScanArgs args =
+				{.st	 = &st,
+				 .params = params,
+				 .qstate = &qstate,
+				 .dim	 = dim,
+				 .head	 = head,
+				 .k		 = 4};
+		ASSERT_TRUE(
+				vs_test_aborts(run_aos_scan, &args, NULL, 0),
+				"a later page's count on the first entry page aborts");
+
+		vs_free(vecs);
+		vs_free(centroid);
+		vs_free(st.pages);
+		vs_rabitq_destroy(params);
+	}
 }
 
 /*
@@ -1565,5 +1750,401 @@ TEST(scan_scores_mixed_chain)
 
 	vs_free(got);
 	vs_free(ref);
+	vs_rabitq_destroy(params);
+}
+
+/* ----------------------------------------------------------------
+ * Fastscan code stream
+ * ---------------------------------------------------------------- */
+
+/*
+ * Scan a cluster with k = n and return each TID's estimated distance.
+ * lut_bits is the fastscan table width, or 0 for an AoS scan. The code stream
+ * is read as if first_group groups came before it, which only moves the
+ * positions the scan carries.
+ */
+static void
+scan_estimates_from(
+		TestPageStorage *st,
+		RaBitQParams	*params,
+		Dimension		 dim,
+		const float		*centroid,
+		BlockNumber		 head,
+		uint32_t		 n,
+		int				 lut_bits,
+		uint32_t		 first_group,
+		float			*est_by_vid)
+{
+	RaBitQQueryState qstate;
+	setup_query_state(&qstate, params, centroid, dim);
+
+	PrismPostingScan scan;
+	prism_posting_scan_init(
+			&scan,
+			&st->base,
+			NULL,
+			params,
+			dim,
+			prism_posting_max_entries(dim));
+	if (lut_bits != 0)
+		prism_posting_scan_enable_fastscan(&scan, lut_bits);
+
+	VsTopK topk;
+	vs_topk_init(&topk, n);
+	prism_posting_scan_begin_cluster(&scan, &qstate, head);
+	scan.fs_next_group = first_group;
+	scan.fs_stream_pos = (uint64_t)first_group * VS_FASTSCAN_GROUP_BYTES(dim);
+	prism_posting_scan_cluster(&scan, &topk);
+	prism_posting_scan_end_cluster(&scan);
+
+	VsTopKEntry *res = vs_alloc((size_t)topk.cand_count * sizeof(*res));
+	uint32_t	 nres;
+	vs_topk_extract_sorted(&topk, res, &nres);
+	for (uint32_t i = 0; i < n; i++)
+		est_by_vid[i] = NAN;
+	for (uint32_t i = 0; i < nres; i++)
+		est_by_vid[prism_posting_decode_vector_id(res[i].id)] =
+				res[i].distance;
+
+	vs_topk_cleanup(&topk);
+	prism_posting_scan_cleanup(&scan);
+}
+
+static void
+scan_estimates(
+		TestPageStorage *st,
+		RaBitQParams	*params,
+		Dimension		 dim,
+		const float		*centroid,
+		BlockNumber		 head,
+		uint32_t		 n,
+		int				 lut_bits,
+		float			*est_by_vid)
+{
+	scan_estimates_from(
+			st, params, dim, centroid, head, n, lut_bits, 0, est_by_vid);
+}
+
+/* One dimension and list size of fastscan_stream_round_trip. */
+static void
+check_stream_round_trip(VsTestResult *result, Dimension dim, uint32_t n)
+{
+	uint32_t		code_len = VS_FASTSCAN_GROUP_BYTES(dim);
+	TestPageStorage st		 = make_test_storage(2048);
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 5);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(n, dim);
+
+	BlockNumber aos =
+			build_cluster(&st, params, dim, centroid, vecs, n, false);
+	BlockNumber fs = build_cluster(&st, params, dim, centroid, vecs, n, true);
+
+	/* Walk the pages, carrying the stream position from page to
+	 * page as the scan does. A spilled list's entries start on its
+	 * head END page. */
+	uint32_t	pos = 0, next_group = 0, entries = 0;
+	uint32_t	prev_free = 0;
+	BlockNumber start	  = fs;
+	if (prism_posting_spilled(dim))
+	{
+		float *ref = vs_alloc((size_t)dim * sizeof(float));
+		start	   = prism_posting_reference_read(&st.base, fs, dim, ref);
+		vs_free(ref);
+	}
+	BlockNumber blk = start;
+	while (blk != InvalidBlockNumber)
+	{
+		Page					p  = test_read_page(&st.base, blk);
+		PrismPostingPageOpaque *op = prism_posting_opaque(p);
+		bool	 first	 = prism_posting_has_ref_prefix(op->flags, dim);
+		uint32_t ngroups = prism_fastscan_page_groups(op);
+
+		prism_posting_check_count(blk, p, dim);
+		ASSERT_TRUE(
+				op->flags & PRISM_POSTING_PAGE_FASTSCAN,
+				"every page is fastscan");
+		ASSERT_TRUE(
+				next_group + ngroups <= (pos + op->code_bytes) / code_len,
+				"metadata only for groups whose codes are complete");
+
+		/* A page ends with a chunk or more free only when its last
+		 * group's metadata did not fit and opens this page. */
+		bool opens_deferred = ngroups > 0 &&
+							  (next_group + 1) * code_len <= pos;
+		if (blk != start)
+			ASSERT_TRUE(
+					prev_free < PRISM_FASTSCAN_CHUNK_BYTES || opens_deferred,
+					"free space left only for deferred metadata");
+
+		uint32_t used = ngroups * PRISM_FASTSCAN_META_BYTES + op->code_bytes;
+		prev_free	  = prism_fastscan_page_space(dim, first) - used;
+		pos += op->code_bytes;
+		next_group += ngroups;
+		entries += op->entry_count;
+		blk = op->next_blkno;
+	}
+	uint32_t ngroups = (n + VS_FASTSCAN_GROUP - 1) / VS_FASTSCAN_GROUP;
+	ASSERT_EQ(ngroups * code_len, pos, "all codes in the stream");
+	ASSERT_EQ(ngroups, next_group, "metadata for every group");
+	ASSERT_EQ(n, entries, "every vector counted once");
+
+	/* Same estimates as AoS, within LUT quantization. The 8-bit
+	 * table is coarse, so it only has to find every vector. */
+	float *want = vs_alloc(n * sizeof(float));
+	float *got	= vs_alloc(n * sizeof(float));
+	scan_estimates(&st, params, dim, centroid, aos, n, 0, want);
+	scan_estimates(&st, params, dim, centroid, fs, n, 16, got);
+	for (uint32_t i = 0; i < n; i++)
+	{
+		ASSERT_FALSE(isnan(got[i]), "fastscan returns every vector");
+		ASSERT_TRUE(
+				fabsf(got[i] - want[i]) <= 1e-3f * (fabsf(want[i]) + 1.0f),
+				"fastscan estimate matches AoS");
+	}
+	scan_estimates(&st, params, dim, centroid, fs, n, 8, got);
+	for (uint32_t i = 0; i < n; i++)
+		ASSERT_FALSE(isnan(got[i]), "8-bit fastscan returns every vector");
+
+	vs_free(want);
+	vs_free(got);
+	vs_free(vecs);
+	vs_free(centroid);
+	vs_free(st.pages);
+	vs_rabitq_destroy(params);
+}
+
+/*
+ * The fastscan pages of a list carry one code stream: each page picks up
+ * where the previous one stopped, group metadata comes in group order, and
+ * a page ends only when the next chunk no longer fits, or when metadata is
+ * deferred to the next page. A scan over that stream finds every vector at
+ * the distance the AoS layout estimates, at dimensions where a group no
+ * longer fits a page as well as where it does, and where the stream starts
+ * after a spilled reference chain.
+ */
+TEST(fastscan_stream_round_trip)
+{
+	const Dimension dims[] =
+			{16, 96, 100, 768, 1024, 1536, 1968, 2048, 4096, 8192};
+	const uint32_t counts[] = {1, 33, 500};
+
+	/* Each case in its own context: the arena frees nothing until it is
+	 * deleted, and every case allocates its own page storage. */
+	for (uint32_t di = 0; di < sizeof(dims) / sizeof(dims[0]); di++)
+		for (uint32_t ci = 0; ci < sizeof(counts) / sizeof(counts[0]); ci++)
+		{
+			VsMemCtx ctx = vs_memctx_create(NULL, "stream round trip");
+			VsMemCtx old = vs_memctx_switch(ctx);
+
+			check_stream_round_trip(result, dims[di], counts[ci]);
+			vs_memctx_switch(old);
+			vs_memctx_delete(ctx);
+		}
+}
+
+static bool
+vid_in_first_group(ItemPointerData tid, void *state)
+{
+	(void)state;
+	return prism_posting_get_vector_id(&tid) < VS_FASTSCAN_GROUP;
+}
+
+/*
+ * A page whose entries are all dead still carries the next group's codes
+ * when that group starts on it, so the scan must read it rather than skip
+ * it. Here the head page holds group 0, which dies, and the start of group
+ * 1, which stays live.
+ */
+TEST(fastscan_reads_a_dead_page_a_live_group_crosses)
+{
+	Dimension		dim		 = 768;
+	uint32_t		n		 = 2 * VS_FASTSCAN_GROUP;
+	uint32_t		code_len = VS_FASTSCAN_GROUP_BYTES(dim);
+	TestPageStorage st		 = make_test_storage(16);
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 5);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(n, dim);
+
+	BlockNumber aos =
+			build_cluster(&st, params, dim, centroid, vecs, n, false);
+	BlockNumber fs = build_cluster(&st, params, dim, centroid, vecs, n, true);
+
+	const PrismPostingPageOpaque *head = prism_posting_opaque(
+			test_read_page(&st.base, fs));
+	ASSERT_EQ(1u, prism_fastscan_page_groups(head), "head scores group 0");
+	ASSERT_TRUE(head->code_bytes > code_len, "group 1's codes start on it");
+
+	ASSERT_EQ(
+			VS_FASTSCAN_GROUP,
+			prism_posting_tombstone_chain(
+					&st.base, dim, fs, vid_in_first_group, NULL),
+			"group 0 dies");
+	ASSERT_TRUE(
+			prism_posting_page_all_dead(
+					prism_posting_opaque(test_read_page(&st.base, fs))),
+			"the head page is all dead");
+
+	float *want = vs_alloc(n * sizeof(float));
+	float *got	= vs_alloc(n * sizeof(float));
+	scan_estimates(&st, params, dim, centroid, aos, n, 0, want);
+	scan_estimates(&st, params, dim, centroid, fs, n, 16, got);
+	for (uint32_t i = 0; i < n; i++)
+	{
+		if (i < VS_FASTSCAN_GROUP)
+		{
+			ASSERT_TRUE(isnan(got[i]), "a dead vector is not returned");
+			continue;
+		}
+		ASSERT_FALSE(isnan(got[i]), "a live vector is returned");
+		ASSERT_TRUE(
+				fabsf(got[i] - want[i]) <= 1e-3f * (fabsf(want[i]) + 1.0f),
+				"at the estimate AoS gives it");
+	}
+
+	vs_free(want);
+	vs_free(got);
+	vs_free(vecs);
+	vs_free(centroid);
+	vs_free(st.pages);
+	vs_rabitq_destroy(params);
+}
+
+/*
+ * Stream positions are list-wide byte counts, which pass 4 GiB in a list of
+ * about 17 million vectors at 1968 dimensions. Reading the stream as if that
+ * many groups came first must give the same estimates.
+ */
+TEST(fastscan_stream_positions_past_4gib)
+{
+	Dimension		dim		 = 768;
+	uint32_t		n		 = 200;
+	uint32_t		code_len = VS_FASTSCAN_GROUP_BYTES(dim);
+	uint32_t		offset	 = (uint32_t)((UINT64_C(5) << 32) / code_len);
+	TestPageStorage st		 = make_test_storage(64);
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 5);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(n, dim);
+
+	BlockNumber fs = build_cluster(&st, params, dim, centroid, vecs, n, true);
+
+	float *want = vs_alloc(n * sizeof(float));
+	float *got	= vs_alloc(n * sizeof(float));
+	scan_estimates(&st, params, dim, centroid, fs, n, 16, want);
+	scan_estimates_from(&st, params, dim, centroid, fs, n, 16, offset, got);
+	for (uint32_t i = 0; i < n; i++)
+	{
+		ASSERT_FALSE(isnan(got[i]), "every vector is returned");
+		ASSERT_FLOAT_EQ(want[i], got[i], 0.0f, "at the same estimate");
+	}
+
+	vs_free(want);
+	vs_free(got);
+	vs_free(vecs);
+	vs_free(centroid);
+	vs_free(st.pages);
+	vs_rabitq_destroy(params);
+}
+
+typedef struct FastscanScanArgs
+{
+	TestPageStorage *st;
+	RaBitQParams	*params;
+	Dimension		 dim;
+	const float		*centroid;
+	BlockNumber		 head;
+	uint32_t		 n;
+} FastscanScanArgs;
+
+/* Scans a fastscan cluster with the 16-bit lookup table. */
+static void
+run_fastscan_scan(void *arg)
+{
+	const FastscanScanArgs *a	= arg;
+	float				   *est = vs_alloc(a->n * sizeof(float));
+
+	scan_estimates(
+			a->st, a->params, a->dim, a->centroid, a->head, a->n, 16, est);
+	vs_free(est);
+}
+
+/*
+ * A code run that ends inside a chunk would start the next page's kernel
+ * call at a column the lookup table does not line up with. The scan refuses
+ * the page before any kernel reads it, which the reason it gives shows: the
+ * stream checks would only catch the damage a page later.
+ */
+TEST(fastscan_scan_rejects_a_run_that_splits_a_chunk)
+{
+	Dimension		dim		 = 1024;
+	uint32_t		n		 = 200;
+	TestPageStorage st		 = make_test_storage(64);
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 5);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(n, dim);
+
+	BlockNumber head =
+			build_cluster(&st, params, dim, centroid, vecs, n, true);
+	PrismPostingPageOpaque *op = prism_posting_opaque(
+			test_read_page(&st.base, head));
+	ASSERT_TRUE(
+			op->code_bytes % VS_FASTSCAN_GROUP_BYTES(dim) != 0,
+			"the head's run ends inside a group");
+	op->code_bytes -= PRISM_FASTSCAN_CHUNK_BYTES / 2;
+
+	FastscanScanArgs args =
+			{.st	   = &st,
+			 .params   = params,
+			 .dim	   = dim,
+			 .centroid = centroid,
+			 .head	   = head,
+			 .n		   = n};
+	char msg[4096];
+	ASSERT_TRUE(
+			vs_test_aborts(run_fastscan_scan, &args, msg, sizeof(msg)),
+			"a run that splits a chunk aborts the scan");
+	ASSERT_TRUE(
+			strstr(msg, "a code run ends inside a chunk") != NULL,
+			"before any kernel reads the page");
+
+	vs_free(vecs);
+	vs_free(centroid);
+	vs_free(st.pages);
+	vs_rabitq_destroy(params);
+}
+
+/*
+ * A page whose code run is shorter than recorded breaks the stream: some
+ * group's metadata arrives before its codes are complete. The scan refuses
+ * it rather than scoring codes against the wrong group.
+ */
+TEST(fastscan_scan_rejects_broken_stream)
+{
+	Dimension		dim		 = 768;
+	uint32_t		n		 = 200;
+	TestPageStorage st		 = make_test_storage(64);
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 5);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(n, dim);
+
+	BlockNumber head =
+			build_cluster(&st, params, dim, centroid, vecs, n, true);
+	Page hp = test_read_page(&st.base, head);
+	Page p2 = test_read_page(&st.base, prism_posting_opaque(hp)->next_blkno);
+	prism_posting_opaque(p2)->code_bytes -= PRISM_FASTSCAN_CHUNK_BYTES;
+
+	FastscanScanArgs args =
+			{.st	   = &st,
+			 .params   = params,
+			 .dim	   = dim,
+			 .centroid = centroid,
+			 .head	   = head,
+			 .n		   = n};
+	ASSERT_TRUE(
+			vs_test_aborts(run_fastscan_scan, &args, NULL, 0),
+			"a broken code stream aborts the scan");
+
+	vs_free(vecs);
+	vs_free(centroid);
+	vs_free(st.pages);
 	vs_rabitq_destroy(params);
 }

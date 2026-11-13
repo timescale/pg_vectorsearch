@@ -30,7 +30,7 @@
 #define PRISM_META_PAGE_BLKNO			 0
 #define PRISM_META_PAGE_PAGES			 1
 #define PRISM_GLOBAL_MEAN_MAX_INLINE_DIM 2032
-/* cluster_id stamped on the spilled mean's REFERENCE pages */
+/* cluster_id stamped on the spilled mean's head pages */
 #define PRISM_GLOBAL_MEAN_CLUSTER UINT32_MAX
 
 /* First block of a spilled global mean. */
@@ -41,8 +41,8 @@ prism_global_mean_pages(Dimension dim)
 {
 	if (dim <= PRISM_GLOBAL_MEAN_MAX_INLINE_DIM)
 		return 0;
-	return ((uint32_t)dim + PRISM_POSTING_REFERENCE_CHUNK_FLOATS - 1) /
-		   PRISM_POSTING_REFERENCE_CHUNK_FLOATS;
+	return ((uint32_t)dim + PRISM_POSTING_REFERENCE_PAGE_FLOATS - 1) /
+		   PRISM_POSTING_REFERENCE_PAGE_FLOATS;
 }
 
 static inline BlockNumber

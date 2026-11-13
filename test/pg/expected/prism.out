@@ -410,7 +410,7 @@ DROP TABLE dimcap;
 SELECT rabitq_params_generate(4096, 42);
 ERROR:  cannot generate rabitq_params for more than 1968 dimensions
 HINT:  Building the transform matrix is O(dim^3).
--- Uncompressed centroids and fastscan groups must fit on one page.
+-- Uncompressed centroids must fit on one page.
 CREATE TABLE dimcap (v vec32(4096));
 CREATE INDEX dimcap_ip ON dimcap USING prism (v vec32_ip_ops);
 ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
@@ -419,11 +419,6 @@ CREATE INDEX dimcap_off ON dimcap USING prism (v)
     WITH (centroid_compression = off);
 ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
 HINT:  Leave centroid_compression at its default.
-CREATE INDEX dimcap_fs ON dimcap USING prism (v) WITH (fastscan = on);
-ERROR:  fastscan=on does not support 4096 dimensions
-CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 1);
-CALL prism_convert_posting_to_fastscan('dimcap_i', 0);
-ERROR:  fastscan does not support 4096 dimensions
 DROP TABLE dimcap;
 CREATE TABLE dimcap (v vec16(4096));
 CREATE INDEX dimcap_ip ON dimcap USING prism (v vec16_ip_ops);
@@ -436,29 +431,187 @@ INSERT INTO dimcap
                FROM generate_series(1, 8192) j)::vec32(8192)
     FROM generate_series(1, 20) g;
 CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 4);
+-- Fastscan past the inline layout too: each list's code stream starts on the
+-- page after its reference chain.
+SELECT setting FROM prism_index_settings('dimcap_i') WHERE name = 'fastscan';
+ setting 
+---------
+ on
+(1 row)
+
+SELECT format, count(*) > 0 AS present FROM prism_posting_pages('dimcap_i')
+    GROUP BY format ORDER BY format;
+  format   | present 
+-----------+---------
+ fastscan  | t
+ reference | t
+(2 rows)
+
 -- plpgsql, so the planner keeps the call rather than an InitPlan, whose
 -- label differs between PostgreSQL versions.
-CREATE FUNCTION dimcap_q() RETURNS vec32 LANGUAGE plpgsql STABLE AS $$
+CREATE FUNCTION dimcap_q(qid int) RETURNS vec32 LANGUAGE plpgsql STABLE AS $$
 BEGIN
-    RETURN (SELECT v FROM dimcap WHERE id = 7);
+    RETURN (SELECT v FROM dimcap WHERE id = qid);
 END $$;
 SET enable_seqscan = off;
-EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q() LIMIT 1;
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q(7) LIMIT 1;
                 QUERY PLAN                 
 -------------------------------------------
  Limit
    ->  Index Scan using dimcap_i on dimcap
-         Order By: (v <-> dimcap_q())
+         Order By: (v <-> dimcap_q(7))
 (3 rows)
 
-SELECT id FROM dimcap ORDER BY v <-> dimcap_q() LIMIT 1;
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q(7) LIMIT 1;
+ id 
+----
+  7
+(1 row)
+
+-- An insert lands on an AoS page after the fastscan ones.
+INSERT INTO dimcap
+    SELECT 21, (SELECT array_agg(cos(j)::real)
+                FROM generate_series(1, 8192) j)::vec32(8192);
+SELECT format, count(*) > 0 AS present FROM prism_posting_pages('dimcap_i')
+    GROUP BY format ORDER BY format;
+  format   | present 
+-----------+---------
+ aos       | t
+ fastscan  | t
+ reference | t
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q(21) LIMIT 1;
+                QUERY PLAN                 
+-------------------------------------------
+ Limit
+   ->  Index Scan using dimcap_i on dimcap
+         Order By: (v <-> dimcap_q(21))
+(3 rows)
+
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q(21) LIMIT 1;
+ id 
+----
+ 21
+(1 row)
+
+RESET enable_seqscan;
+DROP FUNCTION dimcap_q(int);
+DROP TABLE dimcap;
+-- A spilled AoS list converts to fastscan, and converting it again finds it
+-- already done.
+CREATE TABLE dimcap (id int, v vec32(4096));
+INSERT INTO dimcap
+    SELECT g, (SELECT array_agg(sin(g * j)::real)
+               FROM generate_series(1, 4096) j)::vec32(4096)
+    FROM generate_series(1, 20) g;
+CREATE INDEX dimcap_i ON dimcap USING prism (v)
+    WITH (nlist = 1, fastscan = off);
+SELECT format, count(*) > 0 AS present FROM prism_posting_pages('dimcap_i')
+    GROUP BY format ORDER BY format;
+  format   | present 
+-----------+---------
+ aos       | t
+ reference | t
+(2 rows)
+
+-- The reference's third page also holds the first 15 entries.
+SELECT chain_pos, format, entry_count FROM prism_posting_pages('dimcap_i')
+    ORDER BY chain_pos;
+ chain_pos |  format   | entry_count 
+-----------+-----------+-------------
+         0 | reference |           0
+         1 | reference |           0
+         2 | aos       |          15
+         3 | aos       |           5
+(4 rows)
+
+CALL prism_convert_posting_to_fastscan('dimcap_i', 0);
+NOTICE:  converted cluster 0 to fastscan (new head block 9)
+SELECT format, count(*) > 0 AS present FROM prism_posting_pages('dimcap_i')
+    GROUP BY format ORDER BY format;
+  format   | present 
+-----------+---------
+ fastscan  | t
+ reference | t
+(2 rows)
+
+CALL prism_convert_posting_to_fastscan('dimcap_i', 0);
+NOTICE:  cluster 0 already has a fastscan base (head block 9)
+CREATE FUNCTION dimcap_q(qid int) RETURNS vec32 LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    RETURN (SELECT v FROM dimcap WHERE id = qid);
+END $$;
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q(7) LIMIT 1;
+                QUERY PLAN                 
+-------------------------------------------
+ Limit
+   ->  Index Scan using dimcap_i on dimcap
+         Order By: (v <-> dimcap_q(7))
+(3 rows)
+
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q(7) LIMIT 1;
  id 
 ----
   7
 (1 row)
 
 RESET enable_seqscan;
-DROP FUNCTION dimcap_q();
+DROP FUNCTION dimcap_q(int);
+DROP TABLE dimcap;
+-- At the largest inline dimension a group's codes span more than one page.
+CREATE TABLE dimcap (id int, v vec32(1968));
+INSERT INTO dimcap
+    SELECT g, (SELECT ('[' || string_agg((sin(g + j))::text, ',') || ']')
+               FROM generate_series(1, 1968) j)::vec32(1968)
+    FROM generate_series(1, 20) g;
+CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 4);
+SELECT setting FROM prism_index_settings('dimcap_i') WHERE name = 'fastscan';
+ setting 
+---------
+ on
+(1 row)
+
+CREATE FUNCTION dimcap_q(qid int) RETURNS vec32 LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    RETURN (SELECT v FROM dimcap WHERE id = qid);
+END $$;
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q(7) LIMIT 1;
+                QUERY PLAN                 
+-------------------------------------------
+ Limit
+   ->  Index Scan using dimcap_i on dimcap
+         Order By: (v <-> dimcap_q(7))
+(3 rows)
+
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q(7) LIMIT 1;
+ id 
+----
+  7
+(1 row)
+
+-- An insert lands on an AoS page after the fastscan ones.
+INSERT INTO dimcap
+    SELECT 21, (SELECT ('[' || string_agg((cos(j))::text, ',') || ']')
+                FROM generate_series(1, 1968) j)::vec32(1968);
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q(21) LIMIT 1;
+                QUERY PLAN                 
+-------------------------------------------
+ Limit
+   ->  Index Scan using dimcap_i on dimcap
+         Order By: (v <-> dimcap_q(21))
+(3 rows)
+
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q(21) LIMIT 1;
+ id 
+----
+ 21
+(1 row)
+
+RESET enable_seqscan;
+DROP FUNCTION dimcap_q(int);
 DROP TABLE dimcap;
 -- ============================================================
 -- RaBitQ rotation-matrix cache liveness across differently-dimensioned scans
@@ -863,10 +1016,11 @@ SET maintenance_work_mem = '512MB';
 \set reference_pages 0
 \set mean_pages 0
 \set spilled false
-\set expected_magic 50524906
+\set expected_magic 50524907
 \i :cases_sql
 -- Shared build, query, and maintenance cases. The caller sets dim,
--- reference_pages, mean_pages, spilled, and expected_magic.
+-- reference_pages (the pages of a list that hold only reference),
+-- mean_pages, spilled, and expected_magic.
 CREATE TABLE dimtest (id int, v vec32(:dim));
 INSERT INTO dimtest
     SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
@@ -914,11 +1068,16 @@ SELECT count(*) = :reference_pages *
  t               | t     | t              | t
 (1 row)
 
-SELECT bool_and(chain_pos >= :reference_pages) AS entries_follow
+-- Every list's first entry page comes right after them (a fastscan page
+-- there can hold only codes, so its entry_count says nothing).
+SELECT bool_and(chain_pos >= :reference_pages) AS entries_follow,
+       count(*) FILTER (WHERE chain_pos = :reference_pages) =
+           (SELECT setting::int FROM prism_index_settings('dimtest_idx')
+            WHERE name = 'nlist') AS entry_page_right_after
     FROM prism_posting_pages('dimtest_idx') WHERE format <> 'reference';
- entries_follow 
-----------------
- t
+ entries_follow | entry_page_right_after 
+----------------+------------------------
+ t              | t
 (1 row)
 
 -- A table-reading SQL function keeps InitPlan numbering out of EXPLAIN.
@@ -1084,14 +1243,17 @@ DROP FUNCTION dimhalf_query(int);
 DROP FUNCTION dimtest_query(int);
 DROP TABLE dimhalf;
 DROP TABLE dimtest;
+-- Of the three pages the reference takes at 4096, the last also holds the
+-- list's first entries, so two hold only reference.
 \set dim 4096
-\set reference_pages 3
+\set reference_pages 2
 \set mean_pages 3
 \set spilled true
 \set expected_magic 50524907
 \i :cases_sql
 -- Shared build, query, and maintenance cases. The caller sets dim,
--- reference_pages, mean_pages, spilled, and expected_magic.
+-- reference_pages (the pages of a list that hold only reference),
+-- mean_pages, spilled, and expected_magic.
 CREATE TABLE dimtest (id int, v vec32(:dim));
 INSERT INTO dimtest
     SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
@@ -1107,7 +1269,7 @@ SELECT name, setting FROM prism_index_settings('dimtest_idx')
 -----------------+---------
  centroid_format | rabitq
  dim             | 4096
- fastscan        | off
+ fastscan        | on
  nlist           | 4
 (4 rows)
 
@@ -1139,11 +1301,16 @@ SELECT count(*) = :reference_pages *
  t               | t     | t              | t
 (1 row)
 
-SELECT bool_and(chain_pos >= :reference_pages) AS entries_follow
+-- Every list's first entry page comes right after them (a fastscan page
+-- there can hold only codes, so its entry_count says nothing).
+SELECT bool_and(chain_pos >= :reference_pages) AS entries_follow,
+       count(*) FILTER (WHERE chain_pos = :reference_pages) =
+           (SELECT setting::int FROM prism_index_settings('dimtest_idx')
+            WHERE name = 'nlist') AS entry_page_right_after
     FROM prism_posting_pages('dimtest_idx') WHERE format <> 'reference';
- entries_follow 
-----------------
- t
+ entries_follow | entry_page_right_after 
+----------------+------------------------
+ t              | t
 (1 row)
 
 -- A table-reading SQL function keeps InitPlan numbering out of EXPLAIN.

@@ -12,8 +12,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 #include "algo/vecops.h"
 #include "core/memory.h"
@@ -257,6 +255,14 @@ TEST(beam_search_two_levels)
 	vs_rabitq_destroy(params);
 }
 
+static void
+run_beam_search(void *arg)
+{
+	PrismCentroidResult results[4];
+
+	prism_centroid_beam_search(arg, 0, 2, results, NULL, NULL);
+}
+
 /* Regression (F3/F9): a page's entry_count is read straight off disk and
  * drives the per-entry loops in score_page, which fill the scratch arrays
  * sized to the format's real per-page capacity. A count past that capacity
@@ -317,24 +323,10 @@ TEST(beam_search_rejects_corrupt_entry_count)
 			.dim		= dim,
 	};
 
-	fflush(NULL);
-	pid_t pid = fork();
-	ASSERT_TRUE(pid >= 0, "fork succeeded");
-	if (pid == 0)
-	{
-		/* Child: the corrupt count must trip vs_error -> abort() before
-		 * any out-of-bounds scratch write. */
-		if (!vs_test_expect_abort())
-			_exit(2);
-		PrismCentroidResult results[4];
-		prism_centroid_beam_search(&st, 0, 2, results, NULL, NULL);
-		_exit(0); /* reached only if the check failed to fire */
-	}
-
-	int status = 0;
-	waitpid(pid, &status, 0);
+	/* The corrupt count must trip vs_error before any out-of-bounds
+	 * scratch write. */
 	ASSERT_TRUE(
-			WIFEXITED(status) && WEXITSTATUS(status) == VS_TEST_ABORTED,
+			vs_test_aborts(run_beam_search, &st, NULL, 0),
 			"corrupt entry_count aborts instead of overflowing the scratch");
 
 	vs_rabitq_free_query(qstate);
