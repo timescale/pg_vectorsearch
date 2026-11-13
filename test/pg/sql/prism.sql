@@ -307,7 +307,7 @@ CREATE INDEX dimcap_i ON dimcap USING prism (v);
 DROP TABLE dimcap;
 SELECT rabitq_params_generate(4096, 42);
 
--- Uncompressed centroids and fastscan groups must fit on one page.
+-- Uncompressed centroids must fit on one page, and a spilled list stays AoS.
 CREATE TABLE dimcap (v vec32(4096));
 CREATE INDEX dimcap_ip ON dimcap USING prism (v vec32_ip_ops);
 CREATE INDEX dimcap_off ON dimcap USING prism (v)
@@ -337,6 +337,27 @@ EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q() LIMIT 1;
 SELECT id FROM dimcap ORDER BY v <-> dimcap_q() LIMIT 1;
 RESET enable_seqscan;
 DROP FUNCTION dimcap_q();
+DROP TABLE dimcap;
+
+-- Fastscan groups continue across pages, so the largest inline dimension
+-- uses fastscan too, and its group codes span more than one page here.
+CREATE TABLE dimcap (id int, v vec32(1968));
+INSERT INTO dimcap
+    SELECT g, (SELECT ('[' || string_agg((sin(g + j))::text, ',') || ']')
+               FROM generate_series(1, 1968) j)::vec32(1968)
+    FROM generate_series(1, 20) g;
+CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 4);
+SELECT setting FROM prism_index_settings('dimcap_i') WHERE name = 'fastscan';
+SET enable_seqscan = off;
+SELECT id FROM dimcap ORDER BY v <-> (SELECT v FROM dimcap WHERE id = 7)
+    LIMIT 1;
+-- An insert lands on an AoS page after the fastscan ones.
+INSERT INTO dimcap
+    SELECT 21, (SELECT ('[' || string_agg((cos(j))::text, ',') || ']')
+                FROM generate_series(1, 1968) j)::vec32(1968);
+SELECT id FROM dimcap ORDER BY v <-> (SELECT v FROM dimcap WHERE id = 21)
+    LIMIT 1;
+RESET enable_seqscan;
 DROP TABLE dimcap;
 
 -- ============================================================
@@ -585,7 +606,7 @@ SET maintenance_work_mem = '512MB';
 \set reference_pages 0
 \set mean_pages 0
 \set spilled false
-\set expected_magic 50524906
+\set expected_magic 50524907
 \i :cases_sql
 
 \set dim 4096
