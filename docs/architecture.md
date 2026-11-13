@@ -767,15 +767,17 @@ Posting list pages store vector entries with RaBitQ quantization:
 
 Pages within a posting list are linked. Each page header contains `next_blkno`.
 
-A list's head page also carries the list's float32 encode reference, the
-rotated centroid every entry was encoded against and every query is scored
-against. Up to 1968 dimensions it sits ahead of the head's entries. Past
-that it no longer fits beside one, so the head holds only its first chunk
-and no entries, further reference pages hold the remaining chunks (three
-pages in all at 4096), and the entries start on the page after the last
-chunk. The bulk build lays a leaf's reference pages out right behind its
-head, so a probe reads them sequentially; a scan gathers the reference once
-per probed list and then scores the entry pages as usual.
+A list's head also carries the list's float32 encode reference, the rotated
+centroid every entry was encoded against and every query is scored against.
+Up to 1968 dimensions the head is the list's first page, and the reference
+sits ahead of its entries. Past that it no longer fits beside one, so the
+head spans several pages (three at 4096): a START page and MIDDLE pages
+filled with reference and no entries, and an END page with the rest of it
+followed by the list's first entries, AoS and fastscan alike. Each page's
+flags say which part of the head it is. The bulk build lays a leaf's head
+pages out contiguously, so a probe reads them sequentially; a scan gathers
+the reference once per probed list and then scores the entry pages as usual,
+starting on the END page.
 
 ### Initial State: Clustered
 

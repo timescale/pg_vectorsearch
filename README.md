@@ -181,8 +181,8 @@ Any dimension up to 1968 is supported. Above that the dimension must be
 a power of two times an odd factor of at most 8, so 2048, 3072, 4096,
 6144 and 8192 work and 8192 is the ceiling. Past 1968 each posting list
 keeps its full-precision encode reference on a short chain of reference
-pages ahead of its entries (three pages at 4096), and the index reads
-those pages on every probe; the exact rerank also fetches wider heap
+pages (three at 4096, the last shared with its first entries), and the
+index reads those pages on every probe; the exact rerank also fetches wider heap
 rows, so a `vec16` column halves what it reads. Inner product routes on
 uncompressed centroids, which fit a page up to 2036 dimensions as
 `vec32` and 4072 as `vec16`; use L2 or cosine beyond that. Splitting a
