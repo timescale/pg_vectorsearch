@@ -385,29 +385,80 @@ DROP TABLE hd;
 -- ============================================================
 -- Index layout dimension ceiling
 -- ============================================================
--- A posting list's first page carries the float encode reference and must
--- still fit one entry, which caps the indexable dimension. One past the
--- ceiling is rejected up front (it would corrupt the first-page capacity
--- arithmetic); the ceiling itself builds and answers exactly.
+-- Up to 1968 dimensions a posting list's first page carries the float encode
+-- reference beside its entries and any dimension builds. Past that the
+-- reference spills onto its own pages and the dimension must suit the fast
+-- rotation (a power of two times an odd factor of at most 8), so 1969 and
+-- 3000 are rejected up front, as is anything past 8192. 8192 itself builds
+-- and answers exactly. The spilled layouts themselves run through the shared
+-- cases below.
 CREATE TABLE dimcap (id int, v vec32(1969));
 CREATE INDEX dimcap_i ON dimcap USING prism (v);
-ERROR:  prism indexes support at most 1968 dimensions
+ERROR:  prism indexes do not support 1969 dimensions
+DETAIL:  Any dimension up to 1968 is supported. Above it the dimension must be a power of two times an odd factor of at most 8, such as 2048, 3072, 4096, 6144 or 8192, and 8192 is the ceiling.
 DROP TABLE dimcap;
-CREATE TABLE dimcap (id int, v vec32(1968));
+CREATE TABLE dimcap (v vec32(3000));
+CREATE INDEX dimcap_i ON dimcap USING prism (v);
+ERROR:  prism indexes do not support 3000 dimensions
+DETAIL:  Any dimension up to 1968 is supported. Above it the dimension must be a power of two times an odd factor of at most 8, such as 2048, 3072, 4096, 6144 or 8192, and 8192 is the ceiling.
+DROP TABLE dimcap;
+CREATE TABLE dimcap (v vec32(8193));
+CREATE INDEX dimcap_i ON dimcap USING prism (v);
+ERROR:  prism indexes do not support 8193 dimensions
+DETAIL:  Any dimension up to 1968 is supported. Above it the dimension must be a power of two times an odd factor of at most 8, such as 2048, 3072, 4096, 6144 or 8192, and 8192 is the ceiling.
+DROP TABLE dimcap;
+SELECT rabitq_params_generate(4096, 42);
+ERROR:  cannot generate rabitq_params for more than 1968 dimensions
+HINT:  Building the transform matrix is O(dim^3).
+-- Uncompressed centroids and fastscan groups must fit on one page.
+CREATE TABLE dimcap (v vec32(4096));
+CREATE INDEX dimcap_ip ON dimcap USING prism (v vec32_ip_ops);
+ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
+HINT:  Inner product routes on uncompressed centroids, which fit up to 2036 dimensions as float32 (vec32) and 4072 as float16 (vec16). Use the L2 or cosine operator class; normalized embeddings rank the same under cosine.
+CREATE INDEX dimcap_off ON dimcap USING prism (v)
+    WITH (centroid_compression = off);
+ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
+HINT:  Leave centroid_compression at its default.
+CREATE INDEX dimcap_fs ON dimcap USING prism (v) WITH (fastscan = on);
+ERROR:  fastscan=on does not support 4096 dimensions
+CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 1);
+CALL prism_convert_posting_to_fastscan('dimcap_i', 0);
+ERROR:  fastscan does not support 4096 dimensions
+DROP TABLE dimcap;
+CREATE TABLE dimcap (v vec16(4096));
+CREATE INDEX dimcap_ip ON dimcap USING prism (v vec16_ip_ops);
+ERROR:  uncompressed centroids do not fit a page at 4096 dimensions
+HINT:  Inner product routes on uncompressed centroids, which fit up to 2036 dimensions as float32 (vec32) and 4072 as float16 (vec16). Use the L2 or cosine operator class; normalized embeddings rank the same under cosine.
+DROP TABLE dimcap;
+CREATE TABLE dimcap (id int, v vec32(8192));
 INSERT INTO dimcap
-    SELECT g, (SELECT ('[' || string_agg((sin(g + j))::text, ',') || ']')
-               FROM generate_series(1, 1968) j)::vec32(1968)
+    SELECT g, (SELECT array_agg(sin(g + j)::real)
+               FROM generate_series(1, 8192) j)::vec32(8192)
     FROM generate_series(1, 20) g;
 CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 4);
+-- plpgsql, so the planner keeps the call rather than an InitPlan, whose
+-- label differs between PostgreSQL versions.
+CREATE FUNCTION dimcap_q() RETURNS vec32 LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    RETURN (SELECT v FROM dimcap WHERE id = 7);
+END $$;
 SET enable_seqscan = off;
-SELECT id FROM dimcap ORDER BY v <-> (SELECT v FROM dimcap WHERE id = 7)
-    LIMIT 1;
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q() LIMIT 1;
+                QUERY PLAN                 
+-------------------------------------------
+ Limit
+   ->  Index Scan using dimcap_i on dimcap
+         Order By: (v <-> dimcap_q())
+(3 rows)
+
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q() LIMIT 1;
  id 
 ----
   7
 (1 row)
 
 RESET enable_seqscan;
+DROP FUNCTION dimcap_q();
 DROP TABLE dimcap;
 -- ============================================================
 -- RaBitQ rotation-matrix cache liveness across differently-dimensioned scans
@@ -794,4 +845,472 @@ END $$;
 DROP FUNCTION rabitq_params_cache();
 DROP FUNCTION rabitq_cache_clear();
 DROP FUNCTION append_centroid_page(regclass);
+DROP FUNCTION meta_magic(regclass);
 RESET enable_seqscan;
+-- The same lifecycle checks cover inline and spilled references.
+SET maintenance_work_mem = '512MB';
+\i :helper_sql
+-- Silence this file's own definitions and documentation so they stay
+-- out of the expected output of any test that includes it. Capture the
+-- caller's current ECHO into a variable and restore it at the end
+-- (below) rather than assuming a value, so whatever the including test
+-- was using keeps working. Everything past \set ECHO none -- these
+-- comments included -- is read with echo off.
+\set saved_echo :ECHO
+\set ECHO none
+\set cases_sql :abs_srcdir '/sql/index_cases.sql'
+\set dim 768
+\set reference_pages 0
+\set mean_pages 0
+\set spilled false
+\set expected_magic 50524906
+\i :cases_sql
+-- Shared build, query, and maintenance cases. The caller sets dim,
+-- reference_pages, mean_pages, spilled, and expected_magic.
+CREATE TABLE dimtest (id int, v vec32(:dim));
+INSERT INTO dimtest
+    SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
+               FROM generate_series(0, :dim - 1) j)::vec32
+    FROM generate_series(1, 600) g;
+SET max_parallel_maintenance_workers = 0;
+CREATE INDEX dimtest_idx ON dimtest USING prism (v)
+    WITH (nlist = 4, centroid_fastscan = off);
+SELECT name, setting FROM prism_index_settings('dimtest_idx')
+    WHERE name IN ('dim', 'nlist', 'fastscan', 'centroid_format')
+    ORDER BY name;
+      name       | setting 
+-----------------+---------
+ centroid_format | rabitq
+ dim             | 768
+ fastscan        | on
+ nlist           | 4
+(4 rows)
+
+SELECT to_hex(meta_magic('dimtest_idx')) = :'expected_magic' AS correct_magic;
+ correct_magic 
+---------------
+ t
+(1 row)
+
+SELECT (SELECT setting::int FROM prism_index_settings('dimtest_idx')
+         WHERE name = 'first_posting') -
+       (SELECT setting::int FROM prism_index_settings('dimtest_idx')
+         WHERE name = 'centroid_pages') = 1 + :mean_pages AS centroid_start;
+ centroid_start 
+----------------
+ t
+(1 row)
+
+SELECT count(*) = :reference_pages *
+           (SELECT setting::int FROM prism_index_settings('dimtest_idx')
+            WHERE name = 'nlist') AS reference_count,
+       coalesce(bool_and(entry_count = 0 AND max_entries = 0), true) AS empty,
+       coalesce(bool_and(chain_pos < :reference_pages), true)
+           AS lead_the_chain,
+       coalesce(bool_and(is_first = (chain_pos = 0)), true) AS head_first
+    FROM prism_posting_pages('dimtest_idx') WHERE format = 'reference';
+ reference_count | empty | lead_the_chain | head_first 
+-----------------+-------+----------------+------------
+ t               | t     | t              | t
+(1 row)
+
+SELECT bool_and(chain_pos >= :reference_pages) AS entries_follow
+    FROM prism_posting_pages('dimtest_idx') WHERE format <> 'reference';
+ entries_follow 
+----------------
+ t
+(1 row)
+
+-- A table-reading SQL function keeps InitPlan numbering out of EXPLAIN.
+CREATE FUNCTION dimtest_query(int) RETURNS vec32 LANGUAGE sql STABLE AS $$
+    SELECT v FROM dimtest WHERE id = $1
+$$;
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(7) LIMIT 5;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Limit
+   ->  Index Scan using dimtest_idx on dimtest
+         Order By: (v <-> dimtest_query(7))
+(3 rows)
+
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(7) LIMIT 1;
+ id 
+----
+  7
+(1 row)
+
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(599) LIMIT 1;
+ id  
+-----
+ 599
+(1 row)
+
+SET prism.nprobe = 2;
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(7) LIMIT 1;
+ id 
+----
+  7
+(1 row)
+
+RESET prism.nprobe;
+INSERT INTO dimtest
+    SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
+               FROM generate_series(0, :dim - 1) j)::vec32
+    FROM generate_series(601, 640) g;
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(640) LIMIT 1;
+ id  
+-----
+ 640
+(1 row)
+
+DELETE FROM dimtest WHERE id <= 500;
+VACUUM dimtest;
+SELECT count(*) AS tombstoned_references
+    FROM prism_posting_pages('dimtest_idx')
+    WHERE format = 'reference' AND tombstoned;
+ tombstoned_references 
+-----------------------
+                     0
+(1 row)
+
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(520) LIMIT 1;
+ id  
+-----
+ 520
+(1 row)
+
+DROP INDEX dimtest_idx;
+TRUNCATE dimtest;
+INSERT INTO dimtest
+    SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
+               FROM generate_series(0, :dim - 1) j)::vec32
+    FROM generate_series(1, 600) g;
+CREATE INDEX dimtest_idx ON dimtest USING prism (v)
+    WITH (nlist = 1, centroid_fastscan = off);
+SET client_min_messages = warning;
+CALL prism_rebalance('dimtest_idx', 100);
+RESET client_min_messages;
+SELECT setting::int > 1 AS split_into_several_lists
+    FROM prism_index_settings('dimtest_idx') WHERE name = 'nlist';
+ split_into_several_lists 
+--------------------------
+ t
+(1 row)
+
+SELECT bool_and((format = 'reference') = :spilled) AS head_format_matches
+    FROM prism_posting_pages('dimtest_idx') WHERE is_first AND NOT tombstoned;
+ head_format_matches 
+---------------------
+ t
+(1 row)
+
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(300) LIMIT 1;
+ id  
+-----
+ 300
+(1 row)
+
+-- squawk-ignore require-concurrent-reindex
+REINDEX INDEX dimtest_idx;
+SELECT to_hex(meta_magic('dimtest_idx')) = :'expected_magic' AS correct_magic;
+ correct_magic 
+---------------
+ t
+(1 row)
+
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(42) LIMIT 1;
+ id 
+----
+ 42
+(1 row)
+
+DROP INDEX dimtest_idx;
+ALTER TABLE dimtest SET (parallel_workers = 2);
+SET max_parallel_maintenance_workers = 2;
+SET min_parallel_table_scan_size = 0;
+CREATE INDEX dimtest_idx ON dimtest USING prism (v) WITH (nlist = 4);
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(42) LIMIT 1;
+ id 
+----
+ 42
+(1 row)
+
+RESET max_parallel_maintenance_workers;
+RESET min_parallel_table_scan_size;
+ALTER TABLE dimtest RESET (parallel_workers);
+CREATE INDEX dimtest_cos ON dimtest USING prism (v vec32_cosine_ops)
+    WITH (nlist = 4);
+EXPLAIN (COSTS OFF)
+SELECT id FROM dimtest ORDER BY v <=> dimtest_query(7) LIMIT 1;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Limit
+   ->  Index Scan using dimtest_cos on dimtest
+         Order By: (v <=> dimtest_query(7))
+(3 rows)
+
+SELECT id FROM dimtest ORDER BY v <=> dimtest_query(7) LIMIT 1;
+ id 
+----
+  7
+(1 row)
+
+DROP INDEX dimtest_cos;
+CREATE TABLE dimhalf (id int, v vec16(:dim));
+INSERT INTO dimhalf SELECT id, v::vec16 FROM dimtest WHERE id <= 200;
+CREATE INDEX dimhalf_idx ON dimhalf USING prism (v) WITH (nlist = 2);
+CREATE FUNCTION dimhalf_query(int) RETURNS vec16 LANGUAGE sql STABLE AS $$
+    SELECT v FROM dimhalf WHERE id = $1
+$$;
+EXPLAIN (COSTS OFF)
+SELECT id FROM dimhalf ORDER BY v <-> dimhalf_query(150) LIMIT 1;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Limit
+   ->  Index Scan using dimhalf_idx on dimhalf
+         Order By: (v <-> dimhalf_query(150))
+(3 rows)
+
+SELECT id FROM dimhalf ORDER BY v <-> dimhalf_query(150) LIMIT 1;
+ id  
+-----
+ 150
+(1 row)
+
+RESET enable_seqscan;
+DROP FUNCTION dimhalf_query(int);
+DROP FUNCTION dimtest_query(int);
+DROP TABLE dimhalf;
+DROP TABLE dimtest;
+\set dim 4096
+\set reference_pages 3
+\set mean_pages 3
+\set spilled true
+\set expected_magic 50524907
+\i :cases_sql
+-- Shared build, query, and maintenance cases. The caller sets dim,
+-- reference_pages, mean_pages, spilled, and expected_magic.
+CREATE TABLE dimtest (id int, v vec32(:dim));
+INSERT INTO dimtest
+    SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
+               FROM generate_series(0, :dim - 1) j)::vec32
+    FROM generate_series(1, 600) g;
+SET max_parallel_maintenance_workers = 0;
+CREATE INDEX dimtest_idx ON dimtest USING prism (v)
+    WITH (nlist = 4, centroid_fastscan = off);
+SELECT name, setting FROM prism_index_settings('dimtest_idx')
+    WHERE name IN ('dim', 'nlist', 'fastscan', 'centroid_format')
+    ORDER BY name;
+      name       | setting 
+-----------------+---------
+ centroid_format | rabitq
+ dim             | 4096
+ fastscan        | off
+ nlist           | 4
+(4 rows)
+
+SELECT to_hex(meta_magic('dimtest_idx')) = :'expected_magic' AS correct_magic;
+ correct_magic 
+---------------
+ t
+(1 row)
+
+SELECT (SELECT setting::int FROM prism_index_settings('dimtest_idx')
+         WHERE name = 'first_posting') -
+       (SELECT setting::int FROM prism_index_settings('dimtest_idx')
+         WHERE name = 'centroid_pages') = 1 + :mean_pages AS centroid_start;
+ centroid_start 
+----------------
+ t
+(1 row)
+
+SELECT count(*) = :reference_pages *
+           (SELECT setting::int FROM prism_index_settings('dimtest_idx')
+            WHERE name = 'nlist') AS reference_count,
+       coalesce(bool_and(entry_count = 0 AND max_entries = 0), true) AS empty,
+       coalesce(bool_and(chain_pos < :reference_pages), true)
+           AS lead_the_chain,
+       coalesce(bool_and(is_first = (chain_pos = 0)), true) AS head_first
+    FROM prism_posting_pages('dimtest_idx') WHERE format = 'reference';
+ reference_count | empty | lead_the_chain | head_first 
+-----------------+-------+----------------+------------
+ t               | t     | t              | t
+(1 row)
+
+SELECT bool_and(chain_pos >= :reference_pages) AS entries_follow
+    FROM prism_posting_pages('dimtest_idx') WHERE format <> 'reference';
+ entries_follow 
+----------------
+ t
+(1 row)
+
+-- A table-reading SQL function keeps InitPlan numbering out of EXPLAIN.
+CREATE FUNCTION dimtest_query(int) RETURNS vec32 LANGUAGE sql STABLE AS $$
+    SELECT v FROM dimtest WHERE id = $1
+$$;
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(7) LIMIT 5;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Limit
+   ->  Index Scan using dimtest_idx on dimtest
+         Order By: (v <-> dimtest_query(7))
+(3 rows)
+
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(7) LIMIT 1;
+ id 
+----
+  7
+(1 row)
+
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(599) LIMIT 1;
+ id  
+-----
+ 599
+(1 row)
+
+SET prism.nprobe = 2;
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(7) LIMIT 1;
+ id 
+----
+  7
+(1 row)
+
+RESET prism.nprobe;
+INSERT INTO dimtest
+    SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
+               FROM generate_series(0, :dim - 1) j)::vec32
+    FROM generate_series(601, 640) g;
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(640) LIMIT 1;
+ id  
+-----
+ 640
+(1 row)
+
+DELETE FROM dimtest WHERE id <= 500;
+VACUUM dimtest;
+SELECT count(*) AS tombstoned_references
+    FROM prism_posting_pages('dimtest_idx')
+    WHERE format = 'reference' AND tombstoned;
+ tombstoned_references 
+-----------------------
+                     0
+(1 row)
+
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(520) LIMIT 1;
+ id  
+-----
+ 520
+(1 row)
+
+DROP INDEX dimtest_idx;
+TRUNCATE dimtest;
+INSERT INTO dimtest
+    SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
+               FROM generate_series(0, :dim - 1) j)::vec32
+    FROM generate_series(1, 600) g;
+CREATE INDEX dimtest_idx ON dimtest USING prism (v)
+    WITH (nlist = 1, centroid_fastscan = off);
+SET client_min_messages = warning;
+CALL prism_rebalance('dimtest_idx', 100);
+RESET client_min_messages;
+SELECT setting::int > 1 AS split_into_several_lists
+    FROM prism_index_settings('dimtest_idx') WHERE name = 'nlist';
+ split_into_several_lists 
+--------------------------
+ t
+(1 row)
+
+SELECT bool_and((format = 'reference') = :spilled) AS head_format_matches
+    FROM prism_posting_pages('dimtest_idx') WHERE is_first AND NOT tombstoned;
+ head_format_matches 
+---------------------
+ t
+(1 row)
+
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(300) LIMIT 1;
+ id  
+-----
+ 300
+(1 row)
+
+-- squawk-ignore require-concurrent-reindex
+REINDEX INDEX dimtest_idx;
+SELECT to_hex(meta_magic('dimtest_idx')) = :'expected_magic' AS correct_magic;
+ correct_magic 
+---------------
+ t
+(1 row)
+
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(42) LIMIT 1;
+ id 
+----
+ 42
+(1 row)
+
+DROP INDEX dimtest_idx;
+ALTER TABLE dimtest SET (parallel_workers = 2);
+SET max_parallel_maintenance_workers = 2;
+SET min_parallel_table_scan_size = 0;
+CREATE INDEX dimtest_idx ON dimtest USING prism (v) WITH (nlist = 4);
+SELECT id FROM dimtest ORDER BY v <-> dimtest_query(42) LIMIT 1;
+ id 
+----
+ 42
+(1 row)
+
+RESET max_parallel_maintenance_workers;
+RESET min_parallel_table_scan_size;
+ALTER TABLE dimtest RESET (parallel_workers);
+CREATE INDEX dimtest_cos ON dimtest USING prism (v vec32_cosine_ops)
+    WITH (nlist = 4);
+EXPLAIN (COSTS OFF)
+SELECT id FROM dimtest ORDER BY v <=> dimtest_query(7) LIMIT 1;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Limit
+   ->  Index Scan using dimtest_cos on dimtest
+         Order By: (v <=> dimtest_query(7))
+(3 rows)
+
+SELECT id FROM dimtest ORDER BY v <=> dimtest_query(7) LIMIT 1;
+ id 
+----
+  7
+(1 row)
+
+DROP INDEX dimtest_cos;
+CREATE TABLE dimhalf (id int, v vec16(:dim));
+INSERT INTO dimhalf SELECT id, v::vec16 FROM dimtest WHERE id <= 200;
+CREATE INDEX dimhalf_idx ON dimhalf USING prism (v) WITH (nlist = 2);
+CREATE FUNCTION dimhalf_query(int) RETURNS vec16 LANGUAGE sql STABLE AS $$
+    SELECT v FROM dimhalf WHERE id = $1
+$$;
+EXPLAIN (COSTS OFF)
+SELECT id FROM dimhalf ORDER BY v <-> dimhalf_query(150) LIMIT 1;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Limit
+   ->  Index Scan using dimhalf_idx on dimhalf
+         Order By: (v <-> dimhalf_query(150))
+(3 rows)
+
+SELECT id FROM dimhalf ORDER BY v <-> dimhalf_query(150) LIMIT 1;
+ id  
+-----
+ 150
+(1 row)
+
+RESET enable_seqscan;
+DROP FUNCTION dimhalf_query(int);
+DROP FUNCTION dimtest_query(int);
+DROP TABLE dimhalf;
+DROP TABLE dimtest;
+DROP FUNCTION rabitq_params_cache();
+DROP FUNCTION rabitq_cache_clear();
+DROP FUNCTION append_centroid_page(regclass);
+DROP FUNCTION meta_magic(regclass);
+RESET maintenance_work_mem;

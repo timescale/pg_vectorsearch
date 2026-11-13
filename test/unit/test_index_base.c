@@ -16,7 +16,7 @@
 TEST_GROUP(IndexBase);
 
 /*
- * A build reserves [PRISM_FIRST_CENTROID_BLKNO, first_posting) for the
+ * A build reserves [prism_first_centroid_blkno(dim), first_posting) for the
  * centroid pages, so ncentroid_pages is exactly first_posting - 1 and the
  * maintained count and the block range have to agree. This is the property
  * that makes the count form safe to adopt: it changes nothing until a split
@@ -29,7 +29,7 @@ TEST(posting_pages_match_the_block_range_on_a_fresh_build)
 
 	ASSERT_FLOAT_EQ(
 			num_pages - first_posting,
-			prism_index_posting_pages(num_pages, first_posting - 1.0),
+			prism_index_posting_pages(num_pages, 768, first_posting - 1.0),
 			0.0,
 			"on a fresh build the count form equals the block range");
 }
@@ -46,7 +46,7 @@ TEST(appended_centroid_pages_are_not_counted_as_posting_pages)
 {
 	ASSERT_FLOAT_EQ(
 			1047.0,
-			prism_index_posting_pages(1058.0, 10.0),
+			prism_index_posting_pages(1058.0, 768, 10.0),
 			0.0,
 			"the nine appended centroid pages are not posting pages");
 }
@@ -62,8 +62,8 @@ TEST(no_page_is_counted_in_both_terms)
 	const double ncentroid = 10.0;
 
 	ASSERT_TRUE(
-			ncentroid + prism_index_posting_pages(num_pages, ncentroid) <=
-					num_pages - (double)PRISM_FIRST_CENTROID_BLKNO,
+			ncentroid + prism_index_posting_pages(num_pages, 768, ncentroid) <=
+					num_pages - (double)prism_first_centroid_blkno(768),
 			"centroid and posting pages together fit in the relation");
 }
 
@@ -72,7 +72,7 @@ TEST(posting_pages_are_floored_at_one)
 {
 	ASSERT_FLOAT_EQ(
 			1.0,
-			prism_index_posting_pages(2.0, 1.0),
+			prism_index_posting_pages(2.0, 768, 1.0),
 			0.0,
 			"an empty posting region reports one page, not zero");
 }

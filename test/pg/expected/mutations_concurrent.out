@@ -3,59 +3,94 @@ Parsed test spec with 4 sessions
 starting permutation: w_ins c_chk w_commit c_chk
 step w_ins: INSERT INTO iso VALUES (1001, '[100,0,0]');
 step c_chk: 
-    SELECT count(*) AS found FROM (
-        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+    SELECT
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t
+         WHERE id = 1001) AS found,
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v_spilled <->
+                (ARRAY[100::real] || array_fill(0::real, ARRAY[4095]))::vec32
+                LIMIT 1) t
+         WHERE id = 1001) AS found_spilled;
 
-found
------
-    0
+found|found_spilled
+-----+-------------
+    0|            0
 (1 row)
 
 step w_commit: COMMIT;
 step c_chk: 
-    SELECT count(*) AS found FROM (
-        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+    SELECT
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t
+         WHERE id = 1001) AS found,
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v_spilled <->
+                (ARRAY[100::real] || array_fill(0::real, ARRAY[4095]))::vec32
+                LIMIT 1) t
+         WHERE id = 1001) AS found_spilled;
 
-found
------
-    1
+found|found_spilled
+-----+-------------
+    1|            1
 (1 row)
 
 
 starting permutation: w_ins c_chk w_abort c_chk
 step w_ins: INSERT INTO iso VALUES (1001, '[100,0,0]');
 step c_chk: 
-    SELECT count(*) AS found FROM (
-        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+    SELECT
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t
+         WHERE id = 1001) AS found,
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v_spilled <->
+                (ARRAY[100::real] || array_fill(0::real, ARRAY[4095]))::vec32
+                LIMIT 1) t
+         WHERE id = 1001) AS found_spilled;
 
-found
------
-    0
+found|found_spilled
+-----+-------------
+    0|            0
 (1 row)
 
 step w_abort: ROLLBACK;
 step c_chk: 
-    SELECT count(*) AS found FROM (
-        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+    SELECT
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t
+         WHERE id = 1001) AS found,
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v_spilled <->
+                (ARRAY[100::real] || array_fill(0::real, ARRAY[4095]))::vec32
+                LIMIT 1) t
+         WHERE id = 1001) AS found_spilled;
 
-found
------
-    0
+found|found_spilled
+-----+-------------
+    0|            0
 (1 row)
 
 
 starting permutation: w_ins m_reindex w_commit c_chk
 step w_ins: INSERT INTO iso VALUES (1001, '[100,0,0]');
-step m_reindex: REINDEX INDEX iso_idx; <waiting ...>
+step m_reindex: REINDEX TABLE iso; <waiting ...>
 step w_commit: COMMIT;
 step m_reindex: <... completed>
 step c_chk: 
-    SELECT count(*) AS found FROM (
-        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+    SELECT
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t
+         WHERE id = 1001) AS found,
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v_spilled <->
+                (ARRAY[100::real] || array_fill(0::real, ARRAY[4095]))::vec32
+                LIMIT 1) t
+         WHERE id = 1001) AS found_spilled;
 
-found
------
-    1
+found|found_spilled
+-----+-------------
+    1|            1
 (1 row)
 
 
@@ -65,12 +100,19 @@ step m_vacfull: VACUUM FULL iso; <waiting ...>
 step w_commit: COMMIT;
 step m_vacfull: <... completed>
 step c_chk: 
-    SELECT count(*) AS found FROM (
-        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t WHERE id = 1001;
+    SELECT
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 1) t
+         WHERE id = 1001) AS found,
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v_spilled <->
+                (ARRAY[100::real] || array_fill(0::real, ARRAY[4095]))::vec32
+                LIMIT 1) t
+         WHERE id = 1001) AS found_spilled;
 
-found
------
-    1
+found|found_spilled
+-----+-------------
+    1|            1
 (1 row)
 
 
@@ -81,12 +123,18 @@ step w2_ins: INSERT INTO iso VALUES (1002, '[99,0,0]');
 step w_commit: COMMIT;
 step w2_commit: COMMIT;
 step c_chk2: 
-    SELECT count(*) AS found FROM (
-        SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 2) t
-        WHERE id IN (1001, 1002);
+    SELECT
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v <-> '[100,0,0]' LIMIT 2) t
+         WHERE id IN (1001, 1002)) AS found,
+        (SELECT count(*) FROM (
+            SELECT id FROM iso ORDER BY v_spilled <->
+                (ARRAY[100::real] || array_fill(0::real, ARRAY[4095]))::vec32
+                LIMIT 2) t
+         WHERE id IN (1001, 1002)) AS found_spilled;
 
-found
------
-    2
+found|found_spilled
+-----+-------------
+    2|            2
 (1 row)
 

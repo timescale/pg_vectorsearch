@@ -193,6 +193,12 @@ TEST(index_build_null_fails)
 	ASSERT_NULL(
 			prism_index_build(&src.base, NULL, NULL),
 			"null config should fail");
+
+	/* Refused before anything is read, so the one float is enough. */
+	vs_array_source_init(&src, &dummy, 100, 65568);
+	ASSERT_NULL(
+			prism_index_build(&src.base, &config, NULL),
+			"a dimension past 16 bits should fail, not wrap");
 }
 
 TEST(index_build_float32_centroids)
@@ -383,10 +389,12 @@ tally_page(PrismPostingChainPos *pos, void *state)
 static void
 verify_head_meta(VsTestResult *result, PrismIndex *idx)
 {
-	VsStorage *st = idx->base.posting_storage;
+	VsStorage *st	  = idx->base.posting_storage;
+	uint32_t   stride = prism_posting_reference_pages(idx->base.dim);
 	for (uint32_t c = 0; c < idx->nlist; c++)
 	{
-		BlockNumber head = idx->first_posting + c;
+		BlockNumber head =
+				prism_leaf_head_blkno(idx->first_posting, c, stride);
 		if (head == InvalidBlockNumber)
 			continue;
 
@@ -529,6 +537,259 @@ TEST(query_exec_recall_pages_parallel_depth3)
 
 	prism_query_ctx_destroy(qctx);
 	prism_index_destroy(idx);
+}
+
+/*
+ * A spilled dimension end to end: the paged build (serial and parallel)
+ * lays out reference chains and strided heads, and the paged query gathers
+ * them. Self-retrieval rather than brute-force recall: uniform random data
+ * at 4096 dimensions has no neighbors to speak of (every pair is nearly
+ * equidistant), while a stored vector queried exactly is at distance zero
+ * and must come back first. The in-RAM build addresses leaves by index
+ * (stride 1) and must keep working too.
+ */
+static void
+check_wide_dim_recall(VsTestResult *result, int nworkers, bool paged)
+{
+	uint32_t dim = 4096, nvecs = 600, k = 5, nlist = 6;
+	float	*vecs = make_vectors(nvecs, dim, 42);
+
+	PrismIndexConfig config = {
+			.nlist		   = nlist,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = paged ? PRISM_POSTING_FMT_PAGES
+								   : PRISM_POSTING_FMT_FLAT,
+			.nworkers	   = nworkers,
+	};
+
+	PrismIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "build at 4096 should succeed");
+	if (paged)
+	{
+		/* Block 0 is the metapage; the mean's three reference pages follow
+		 * it, so the centroid region starts at block 4. */
+		ASSERT_EQ(
+				prism_first_centroid_blkno(dim),
+				idx->base.first_centroid,
+				"the centroid region starts past the mean's pages");
+		ASSERT_EQ(4u, idx->base.first_centroid, "which is block 4 at 4096");
+		verify_head_meta(result, idx);
+	}
+
+	PrismQueryCtx *qctx	 = prism_query_ctx_create(idx, k, nlist);
+	uint32_t	   found = 0, nqueries = 40;
+	for (uint32_t q = 0; q < nqueries; q++)
+	{
+		uint32_t vid = q * 13;
+		uint32_t result_ids[5];
+		uint32_t count = prism_query_exec(
+				qctx,
+				vecs + (size_t)vid * dim,
+				k,
+				nlist,
+				VS_DISTANCE_MODE_ASYMMETRIC,
+				true,
+				result_ids);
+		if (count >= 1 && result_ids[0] == vid)
+			found++;
+	}
+	/* Every list is probed and the rerank is exact, so a stored vector is
+	 * always its own nearest neighbour. */
+	ASSERT_EQ(nqueries, found, "a stored vector retrieves itself at 4096");
+
+	prism_query_ctx_destroy(qctx);
+	prism_index_destroy(idx);
+}
+
+TEST(wide_dim_paged_serial)
+{
+	check_wide_dim_recall(result, 0, true);
+}
+
+TEST(wide_dim_paged_parallel)
+{
+	check_wide_dim_recall(result, 4, true);
+}
+
+TEST(wide_dim_in_ram)
+{
+	check_wide_dim_recall(result, 0, false);
+}
+
+/*
+ * The buffer a query state keeps for spilled references grows geometrically.
+ * The arena frees nothing until the state goes, so growing it to exactly each
+ * larger probe set would keep every smaller buffer from earlier queries alive.
+ * Raising nprobe one step at a time asks for a slightly larger buffer on
+ * every query, which is the case that would pile them up.
+ */
+TEST(spilled_probe_buffer_grows_geometrically)
+{
+	uint32_t dim = 2048, nvecs = 320, nlist = 64, k = 5;
+	float	*vecs = make_vectors(nvecs, dim, 7);
+
+	PrismIndexConfig config = {
+			.nlist		   = nlist,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+	};
+	PrismIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "build at 2048 should succeed");
+
+	PrismQueryState qs;
+	prism_query_state_init(&qs, &idx->base, k, nlist);
+	size_t before = vs_memctx_total_allocated(qs.memctx);
+
+	for (uint32_t nprobe = 1; nprobe <= nlist / 2; nprobe++)
+		prism_query_execute(
+				&qs, vecs, k, nprobe, VS_DISTANCE_MODE_ASYMMETRIC, true, NULL);
+
+	ASSERT_TRUE(qs.probe_refs_cap > 0, "the probe set was expanded");
+	size_t buffer = (size_t)qs.probe_refs_cap *
+					((size_t)dim * sizeof(float) + sizeof(BlockNumber));
+	size_t grown = vs_memctx_total_allocated(qs.memctx) - before;
+	ASSERT_TRUE(
+			grown <= 3 * buffer,
+			"growth stays within a small multiple of the final buffer");
+
+	prism_query_state_cleanup(&qs);
+	prism_index_destroy(idx);
+}
+
+/*
+ * The spilled-reference buffer has a byte budget. A routed cluster past it
+ * keeps no reference and is gathered again when scanned, which must give
+ * the same candidates as a buffer that holds every reference.
+ */
+TEST(spilled_probe_buffer_cap_keeps_results)
+{
+	uint32_t dim = 2048, nvecs = 320, nlist = 64, k = 5, nprobe = 20;
+	float	*vecs = make_vectors(nvecs, dim, 7);
+
+	PrismIndexConfig config = {
+			.nlist		   = nlist,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+	};
+	PrismIndex *idx = build_from_array(vecs, nvecs, dim, &config);
+	ASSERT_NOT_NULL(idx, "build at 2048 should succeed");
+
+	PrismQueryState full, capped;
+	prism_query_state_init(&full, &idx->base, k, nlist);
+	prism_query_state_init(&capped, &idx->base, k, nlist);
+	capped.probe_refs_max = 3;
+
+	for (uint32_t q = 0; q < 20; q++)
+	{
+		const float *query = vecs + (size_t)(q * 13) * dim;
+		uint32_t	 n	   = prism_query_execute(
+				&full,
+				query,
+				k,
+				nprobe,
+				VS_DISTANCE_MODE_ASYMMETRIC,
+				true,
+				NULL);
+		uint32_t m = prism_query_execute(
+				&capped,
+				query,
+				k,
+				nprobe,
+				VS_DISTANCE_MODE_ASYMMETRIC,
+				true,
+				NULL);
+
+		ASSERT_EQ(n, m, "the cap does not change the candidate count");
+		for (uint32_t i = 0; i < n; i++)
+		{
+			ASSERT_EQ(
+					full.candidates[i].id,
+					capped.candidates[i].id,
+					"nor which candidates come back");
+			ASSERT_FLOAT_EQ(
+					full.candidates[i].distance,
+					capped.candidates[i].distance,
+					0.0f,
+					"nor their distances");
+		}
+	}
+
+	ASSERT_TRUE(full.probe_refs_cap > 3, "the probe set outgrew the cap");
+	ASSERT_EQ(3u, capped.probe_refs_cap, "the capped buffer stops at it");
+
+	prism_query_state_cleanup(&capped);
+	prism_query_state_cleanup(&full);
+	prism_index_destroy(idx);
+}
+
+TEST_PARAMETERIZED(fastscan_rejects_unsupported_dimension, "1024", "4096")
+{
+	const Dimension dims[] = {1024, 4096};
+	Dimension		dim	   = dims[iteration];
+	uint32_t		nvecs  = 50;
+	float		   *vecs   = make_vectors(nvecs, dim, 1);
+
+	PrismIndexConfig config = {
+			.nlist		   = 2,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+			.fastscan	   = 16,
+	};
+	ASSERT_NULL(
+			build_from_array(vecs, nvecs, dim, &config),
+			"serial build rejects an unsupported fastscan dimension");
+	config.nworkers = 4;
+	ASSERT_NULL(
+			build_from_array(vecs, nvecs, dim, &config),
+			"parallel build rejects an unsupported fastscan dimension");
+}
+
+/* Uncompressed centroids are whole vectors on a centroid page; where none
+ * fits, the build refuses up front rather than failing mid-write. */
+TEST(wide_dim_rejects_float_centroids)
+{
+	uint32_t dim = 4096, nvecs = 50;
+	float	*vecs = make_vectors(nvecs, dim, 1);
+
+	PrismIndexConfig config = {
+			.nlist		   = 2,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_FLOAT,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+	};
+	ASSERT_NULL(
+			build_from_array(vecs, nvecs, dim, &config),
+			"float32 centroids do not fit a page at 4096");
+	config.centroid_fmt = PRISM_CENTROID_FMT_HALF;
+	ASSERT_NULL(
+			build_from_array(vecs, nvecs, dim, &config),
+			"nor float16 past 4072");
+}
+
+TEST(wide_dim_rejects_non_fast_rotate)
+{
+	uint32_t dim = 3000, nvecs = 50;
+	float	*vecs = make_vectors(nvecs, dim, 1);
+
+	PrismIndexConfig config = {
+			.nlist		   = 2,
+			.metric		   = DISTANCE_L2,
+			.centroid_fmt  = PRISM_CENTROID_FMT_RABITQ,
+			.encode_rabitq = true,
+			.posting_fmt   = PRISM_POSTING_FMT_PAGES,
+	};
+	ASSERT_NULL(
+			build_from_array(vecs, nvecs, dim, &config),
+			"3000 = 8 * 375 is refused");
 }
 
 TEST(query_exec_null_fails)

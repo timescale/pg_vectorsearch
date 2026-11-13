@@ -288,23 +288,55 @@ DROP TABLE hd;
 -- ============================================================
 -- Index layout dimension ceiling
 -- ============================================================
--- A posting list's first page carries the float encode reference and must
--- still fit one entry, which caps the indexable dimension. One past the
--- ceiling is rejected up front (it would corrupt the first-page capacity
--- arithmetic); the ceiling itself builds and answers exactly.
+-- Up to 1968 dimensions a posting list's first page carries the float encode
+-- reference beside its entries and any dimension builds. Past that the
+-- reference spills onto its own pages and the dimension must suit the fast
+-- rotation (a power of two times an odd factor of at most 8), so 1969 and
+-- 3000 are rejected up front, as is anything past 8192. 8192 itself builds
+-- and answers exactly. The spilled layouts themselves run through the shared
+-- cases below.
 CREATE TABLE dimcap (id int, v vec32(1969));
 CREATE INDEX dimcap_i ON dimcap USING prism (v);
 DROP TABLE dimcap;
-CREATE TABLE dimcap (id int, v vec32(1968));
+
+CREATE TABLE dimcap (v vec32(3000));
+CREATE INDEX dimcap_i ON dimcap USING prism (v);
+DROP TABLE dimcap;
+CREATE TABLE dimcap (v vec32(8193));
+CREATE INDEX dimcap_i ON dimcap USING prism (v);
+DROP TABLE dimcap;
+SELECT rabitq_params_generate(4096, 42);
+
+-- Uncompressed centroids and fastscan groups must fit on one page.
+CREATE TABLE dimcap (v vec32(4096));
+CREATE INDEX dimcap_ip ON dimcap USING prism (v vec32_ip_ops);
+CREATE INDEX dimcap_off ON dimcap USING prism (v)
+    WITH (centroid_compression = off);
+CREATE INDEX dimcap_fs ON dimcap USING prism (v) WITH (fastscan = on);
+CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 1);
+CALL prism_convert_posting_to_fastscan('dimcap_i', 0);
+DROP TABLE dimcap;
+CREATE TABLE dimcap (v vec16(4096));
+CREATE INDEX dimcap_ip ON dimcap USING prism (v vec16_ip_ops);
+DROP TABLE dimcap;
+
+CREATE TABLE dimcap (id int, v vec32(8192));
 INSERT INTO dimcap
-    SELECT g, (SELECT ('[' || string_agg((sin(g + j))::text, ',') || ']')
-               FROM generate_series(1, 1968) j)::vec32(1968)
+    SELECT g, (SELECT array_agg(sin(g + j)::real)
+               FROM generate_series(1, 8192) j)::vec32(8192)
     FROM generate_series(1, 20) g;
 CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 4);
+-- plpgsql, so the planner keeps the call rather than an InitPlan, whose
+-- label differs between PostgreSQL versions.
+CREATE FUNCTION dimcap_q() RETURNS vec32 LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    RETURN (SELECT v FROM dimcap WHERE id = 7);
+END $$;
 SET enable_seqscan = off;
-SELECT id FROM dimcap ORDER BY v <-> (SELECT v FROM dimcap WHERE id = 7)
-    LIMIT 1;
+EXPLAIN (COSTS OFF) SELECT id FROM dimcap ORDER BY v <-> dimcap_q() LIMIT 1;
+SELECT id FROM dimcap ORDER BY v <-> dimcap_q() LIMIT 1;
 RESET enable_seqscan;
+DROP FUNCTION dimcap_q();
 DROP TABLE dimcap;
 
 -- ============================================================
@@ -542,4 +574,29 @@ END $$;
 DROP FUNCTION rabitq_params_cache();
 DROP FUNCTION rabitq_cache_clear();
 DROP FUNCTION append_centroid_page(regclass);
+DROP FUNCTION meta_magic(regclass);
 RESET enable_seqscan;
+
+-- The same lifecycle checks cover inline and spilled references.
+SET maintenance_work_mem = '512MB';
+\i :helper_sql
+\set cases_sql :abs_srcdir '/sql/index_cases.sql'
+\set dim 768
+\set reference_pages 0
+\set mean_pages 0
+\set spilled false
+\set expected_magic 50524906
+\i :cases_sql
+
+\set dim 4096
+\set reference_pages 3
+\set mean_pages 3
+\set spilled true
+\set expected_magic 50524907
+\i :cases_sql
+
+DROP FUNCTION rabitq_params_cache();
+DROP FUNCTION rabitq_cache_clear();
+DROP FUNCTION append_centroid_page(regclass);
+DROP FUNCTION meta_magic(regclass);
+RESET maintenance_work_mem;

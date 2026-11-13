@@ -53,19 +53,25 @@ release carries nothing to strip.
 
 The low byte of `PRISM_META_MAGIC` (`src/pg/meta.h`) is the index format
 version. Bumping it makes an index built by an earlier version get
-rejected when opened, so every existing index has to be recreated.
+rejected when opened, so every existing index has to be recreated,
+unless the old format is kept readable through a
+`PRISM_META_MAGIC_COMPAT_*` define. The formats a version opens are
+therefore the low bytes of `PRISM_META_MAGIC` and of every compat
+define, and the format changed when any format the previous release
+opened is missing from that set.
 
 This is checked rather than remembered. Both `prepare-release.sh` and the
-release check compare the byte against the previous release tag, and:
+release check compare the set against the previous release tag, and:
 
 - **a patch release is refused.** Patch upgrades must not require
   reindexing, so a format change needs a minor or major version;
 - **the release notes get the upgrade note automatically** —
   `prepare-release.sh` writes an "Indexes must be rebuilt" bullet into
-  the breaking-changes section, naming the old and new format bytes.
+  the breaking-changes section, naming the format bytes that no longer
+  open.
 
 The comparison is skipped when there is no previous release, or when the
-byte cannot be read at either end — an unreadable end means *unknown*,
+formats cannot be read at either end — an unreadable end means *unknown*,
 never *changed*.
 
 ## Cutting a release PR
