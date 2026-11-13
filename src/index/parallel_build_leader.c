@@ -887,7 +887,7 @@ do_parallel_build(
 	/* ---- Phase 2.5: page-backed full-table refine (only when subsampled)
 	 * ---- The workers route + accumulate; the leader (participant 0) clears
 	 * the tiled accumulator, resets the scan per tile, and rewrites each
-	 * leaf's head-page pt_centroid to the full-table mean. Gated on
+	 * leaf's head and centroid-tree entry to the full-table mean. Gated on
 	 * shared->refine, matching the workers, so the internal barriers stay
 	 * in lockstep. */
 	if (shared->refine)
@@ -895,6 +895,9 @@ do_parallel_build(
 		prism_build_report_phase(prog, PRISM_BUILD_PHASE_REFINE);
 		PrismDsmRefineAccum *accum = refine_accum;
 		PrismHeadWriteCtx	 rhead;
+		PrismRefinePublish	 publish;
+		float				*gmean;
+
 		prism_head_write_ctx_init(
 				&rhead,
 				storage,
@@ -902,6 +905,16 @@ do_parallel_build(
 				dim,
 				shared->fastscan,
 				first_posting);
+		gmean = shm_toc_lookup(pcxt->toc, PRISM_DSM_KEY_GLOBAL_MEAN, false);
+		prism_refine_publish_init(
+				&publish,
+				&rhead,
+				storage,
+				shared->first_centroid,
+				shared->centroid_format,
+				rq_params,
+				gmean,
+				shared->metric);
 		prism_pbuild_exec_refine_paged(
 				0,
 				heap,
@@ -912,8 +925,9 @@ do_parallel_build(
 				first_posting,
 				accum,
 				barrier,
-				prism_write_leaf_head,
-				&rhead);
+				prism_refine_publish_leaf,
+				&publish);
+		prism_refine_publish_cleanup(&publish);
 		prism_head_write_ctx_cleanup(&rhead);
 	}
 
