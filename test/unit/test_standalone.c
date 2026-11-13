@@ -193,6 +193,12 @@ TEST(index_build_null_fails)
 	ASSERT_NULL(
 			prism_index_build(&src.base, NULL, NULL),
 			"null config should fail");
+
+	/* Refused before anything is read, so the one float is enough. */
+	vs_array_source_init(&src, &dummy, 100, 65568);
+	ASSERT_NULL(
+			prism_index_build(&src.base, &config, NULL),
+			"a dimension past 16 bits should fail, not wrap");
 }
 
 TEST(index_build_float32_centroids)

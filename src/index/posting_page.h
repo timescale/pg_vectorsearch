@@ -300,16 +300,17 @@ static_assert(
  * The one gate every build applies: an inline layout up to the narrow
  * threshold, and past it a spilled layout only where the fast rotation
  * applies (dim = 2^m * k with 2^m >= 4 and odd k <= 8: 2048, 3072, 4096,
- * 6144, 8192 pass; 3000 does not).
+ * 6144, 8192 pass; 3000 does not). Takes a uint32_t so a wider dimension
+ * is range-checked before it narrows to a Dimension.
  */
 static inline bool
-prism_index_dim_supported(Dimension dim)
+prism_index_dim_supported(uint32_t dim)
 {
 	if (dim == 0 || dim > PRISM_INDEX_MAX_DIM)
 		return false;
 	if (dim <= PRISM_INDEX_NARROW_MAX_DIM)
 		return true;
-	return vs_fast_rotate_supported(dim);
+	return vs_fast_rotate_supported((Dimension)dim);
 }
 
 static_assert(

@@ -696,6 +696,7 @@ TEST(dimension_gate)
 	ASSERT_TRUE(prism_index_dim_supported(8192), "the ceiling");
 	ASSERT_FALSE(prism_index_dim_supported(8193), "past the ceiling");
 	ASSERT_FALSE(prism_index_dim_supported(0), "zero");
+	ASSERT_FALSE(prism_index_dim_supported(65568), "65568, 32 as a Dimension");
 }
 
 /*
