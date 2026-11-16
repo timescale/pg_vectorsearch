@@ -95,6 +95,7 @@ typedef struct PrismPgScanAdapter
 	PrismBuildScanCb cb;
 	void			*state;
 	Vec32Access		 input;
+	MemoryContext	 tuple_ctx;
 } PrismPgScanAdapter;
 
 static void
@@ -114,8 +115,11 @@ prism_pg_scan_adapter(
 	if (isnull[0])
 		return;
 
-	Vec32Ref vref = vec32_read(&a->input, values[0]);
+	MemoryContext old_ctx = MemoryContextSwitchTo(a->tuple_ctx);
+	Vec32Ref	  vref	  = vec32_read(&a->input, values[0]);
+	MemoryContextSwitchTo(old_ctx);
 	a->cb(a->state, *tid, vref.data);
+	MemoryContextReset(a->tuple_ctx);
 }
 
 /*
@@ -145,6 +149,10 @@ prism_build_scan(
 			.state = state,
 			.input = vec32_access(
 					prism_index_type_info(index), dim, CurrentMemoryContext),
+			.tuple_ctx = AllocSetContextCreate(
+					CurrentMemoryContext,
+					"prism parallel scan tuple",
+					ALLOCSET_DEFAULT_SIZES),
 	};
 
 #if PG_VERSION_NUM >= 190000
@@ -155,7 +163,7 @@ prism_build_scan(
 			heap, ParallelTableScanFromVsShared(shared));
 #endif
 
-	return table_index_build_scan(
+	double reltuples = table_index_build_scan(
 			heap,
 			index,
 			indexInfo,
@@ -164,6 +172,8 @@ prism_build_scan(
 			prism_pg_scan_adapter,
 			&actx,
 			scan);
+	MemoryContextDelete(actx.tuple_ctx);
+	return reltuples;
 }
 
 /*
