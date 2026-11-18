@@ -83,7 +83,9 @@ typedef struct PrismIndexConfig
 	bool   encode_rabitq;			 /* encode posting lists with RaBitQ */
 	PrismPostingFormat posting_fmt;	 /* flat or pages */
 	int				   fastscan;	 /* 0=off, 8=uint8 LUT, 16=uint16 LUT */
-	int32_t			   nworkers;	 /* -1 = auto, 0 = serial */
+	PrismPostingReferenceFormat
+			ref_format; /* posting-list reference element type */
+	int32_t nworkers;	/* -1 = auto, 0 = serial */
 } PrismIndexConfig;
 
 /* ----------------------------------------------------------------

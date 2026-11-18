@@ -271,19 +271,20 @@ build_callback(
 
 static void
 write_meta_page(
-		VsStorage		   *storage,
-		Dimension			dim,
-		uint8_t				nlevels,
-		uint8_t				fan_out,
-		BlockNumber			first_centroid,
-		BlockNumber			first_posting,
-		uint32_t			ncentroid_pages,
-		uint32_t			nlist,
-		PrismCentroidFormat centroid_format,
-		DistanceMetric		metric,
-		uint64_t			rabitq_seed,
-		bool				fastscan,
-		const float		   *global_mean)
+		VsStorage				   *storage,
+		Dimension					dim,
+		uint8_t						nlevels,
+		uint8_t						fan_out,
+		BlockNumber					first_centroid,
+		BlockNumber					first_posting,
+		uint32_t					ncentroid_pages,
+		uint32_t					nlist,
+		PrismCentroidFormat			centroid_format,
+		DistanceMetric				metric,
+		uint64_t					rabitq_seed,
+		bool						fastscan,
+		PrismPostingReferenceFormat ref_format,
+		const float				   *global_mean)
 {
 	/* Block 0 must already exist (extended or new_page'd by caller).
 	 * Use write_page to write in-place. */
@@ -302,9 +303,10 @@ write_meta_page(
 	meta->nlist			  = nlist;
 	meta->metric		  = (uint8_t)metric;
 	meta->fan_out		  = (uint8_t)fan_out;
-	meta->flags			  = fastscan ? PRISM_META_FLAG_FASTSCAN : 0;
-	meta->reserved		  = 0;
-	meta->rabitq_seed	  = rabitq_seed;
+	meta->flags			  = (fastscan ? PRISM_META_FLAG_FASTSCAN : 0) |
+				  prism_meta_ref_format_flag(ref_format);
+	meta->reserved	  = 0;
+	meta->rabitq_seed = rabitq_seed;
 
 	if (prism_meta_mean_inline(dim))
 		memcpy(prism_meta_global_mean(meta), global_mean, dim * sizeof(float));
@@ -532,6 +534,10 @@ resolve_build_params(
 	p->boundary_epsilon = (opts != NULL) ? opts->boundary_epsilon
 										 : PRISM_DEFAULT_BOUNDARY_EPSILON;
 	p->fastscan			= prism_resolve_fastscan(index);
+	/* No reloptions at all (opts == NULL) means the default, float16. */
+	p->ref_format = opts != NULL ? (PrismPostingReferenceFormat)
+										   opts->posting_reference_format
+								 : PRISM_POSTING_REFERENCE_FLOAT16;
 
 	/* The exact-centroid collection size is known from the resolved
 	 * shape alone, so an under-budgeted maintenance_work_mem can be
@@ -930,6 +936,7 @@ do_serial_build(
 				p->fan_out,
 				p->metric,
 				p->centroid_format,
+				p->ref_format,
 				&km_opts,
 				node_store,
 				&plan))
@@ -979,7 +986,9 @@ do_serial_build(
 	prism_build_reserve_layout(
 			storage,
 			prism_leaf_head_blkno(
-					first_posting, nlist, prism_posting_reference_pages(dim)));
+					first_posting,
+					nlist,
+					prism_posting_reference_pages(dim, p->ref_format)));
 
 	/*
 	 * Write pass: stream the centroid pages (reserved blocks, post-order, root
@@ -1008,7 +1017,13 @@ do_serial_build(
 
 	PrismHeadWriteCtx headctx;
 	prism_head_write_ctx_init(
-			&headctx, storage, rq_params, dim, p->fastscan, first_posting);
+			&headctx,
+			storage,
+			rq_params,
+			dim,
+			p->fastscan,
+			p->ref_format,
+			first_posting);
 	BlockNumber root = prism_routing_tree_write(
 			storage,
 			(uint32_t)bs->nsamples,
@@ -1017,6 +1032,7 @@ do_serial_build(
 			target_nlist,
 			p->fan_out,
 			p->centroid_format,
+			p->ref_format,
 			rq_params,
 			global_mean,
 			node_store,
@@ -1062,6 +1078,7 @@ do_serial_build(
 			rabitq_seed,
 			global_mean,
 			palloc(vec_nbytes));
+	idx_base.ref_format = p->ref_format;
 	/* Build-only accuracy hook: score the internal tree levels against the
 	 * exact centroids collected during the streaming write (the query and
 	 * insert paths never set this; see PrismExactInternalCentroids). */
@@ -1092,7 +1109,13 @@ do_serial_build(
 
 		PrismHeadWriteCtx rhead;
 		prism_head_write_ctx_init(
-				&rhead, storage, rq_params, dim, p->fastscan, first_posting);
+				&rhead,
+				storage,
+				rq_params,
+				dim,
+				p->fastscan,
+				p->ref_format,
+				first_posting);
 		serial_refine_heads(bs, &rhead, &bs->qs, first_posting, nlist);
 		prism_head_write_ctx_cleanup(&rhead);
 
@@ -1176,6 +1199,7 @@ do_serial_build(
 			nlist,
 			dim,
 			p->fastscan,
+			p->ref_format,
 			rq_params,
 			first_posting);
 	bs->sorter = NULL; /* ended by prism_posting_build_lists */
@@ -1211,6 +1235,7 @@ do_serial_build(
 			p->metric,
 			rabitq_seed,
 			p->fastscan,
+			p->ref_format,
 			global_mean);
 	*out_nlist		  = nlist;
 	*out_tree_nlevels = (uint8_t)plan.nlevels;
@@ -1347,6 +1372,7 @@ prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 				.soar_lambda	  = bs.params.soar_lambda,
 				.boundary_epsilon = bs.params.boundary_epsilon,
 				.fastscan		  = bs.params.fastscan,
+				.ref_format		  = bs.params.ref_format,
 				.concurrent		  = index_info->ii_Concurrent,
 		};
 
@@ -1479,6 +1505,7 @@ prism_build(Relation heap, Relation index, struct IndexInfo *index_info)
 					p->metric,
 					rabitq_seed,
 					p->fastscan,
+					p->ref_format,
 					global_mean);
 		}
 		prism_build_report_phase(&prog, PRISM_BUILD_PHASE_WAL);

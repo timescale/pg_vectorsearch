@@ -1,0 +1,108 @@
+-- posting_reference_format = float32 keeps each posting list's encode
+-- reference at full precision, in place of the float16 default. Its layout
+-- differs: the reference spills off a list's first page past 1968
+-- dimensions, and takes three pages at 4096 where float16 takes two. The
+-- other tests run with float16; this one checks that a float32 index builds,
+-- answers, takes inserts, rebuilds, splits and converts with that layout.
+SET maintenance_work_mem = '512MB';
+
+-- Builds an index with float32 references at dimension d and reports what
+-- it sees. reference_pages counts a list's pages that hold only reference.
+-- The queries go through the index (uses_index) and find a stored vector,
+-- an inserted one, and, after REINDEX and a parallel build, the stored one
+-- again.
+CREATE FUNCTION ref32_check(d int)
+    RETURNS TABLE (dim int, setting text, reference_pages bigint,
+                   uses_index bool, finds_stored bool, finds_inserted bool,
+                   reindexed text, parallel_finds_stored bool)
+    LANGUAGE plpgsql AS $$
+DECLARE
+    nearest text := 'SELECT id FROM ref32 ORDER BY v <-> '
+                    '(SELECT v FROM ref32 WHERE id = %s) LIMIT 1';
+    line text;
+BEGIN
+    PERFORM set_config('enable_seqscan', 'off', true);
+    EXECUTE format('CREATE TABLE ref32 (id int, v vec32(%s))', d);
+    EXECUTE format(
+        'INSERT INTO ref32 SELECT g, (SELECT array_agg('
+        'sin(g * 0.37 + j * 0.11)::real) FROM generate_series(0, %s - 1) j)'
+        '::vec32 FROM generate_series(1, 300) g', d);
+    SET LOCAL max_parallel_maintenance_workers = 0;
+    CREATE INDEX ref32_idx ON ref32 USING prism (v)
+        WITH (nlist = 2, posting_reference_format = float32);
+
+    dim := d;
+    SELECT s.setting INTO setting FROM prism_index_settings('ref32_idx') s
+        WHERE name = 'posting_reference_format';
+    SELECT count(*) / 2 INTO reference_pages
+        FROM prism_posting_pages('ref32_idx') WHERE format = 'reference';
+    uses_index := false;
+    FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || format(nearest, 7) LOOP
+        uses_index := uses_index OR line LIKE '%Index Scan using ref32_idx%';
+    END LOOP;
+    EXECUTE format(nearest, 7) INTO line;
+    finds_stored := line = '7';
+
+    EXECUTE format(
+        'INSERT INTO ref32 SELECT 1000, (SELECT array_agg('
+        'cos(j * 0.23)::real) FROM generate_series(0, %s - 1) j)::vec32', d);
+    EXECUTE format(nearest, 1000) INTO line;
+    finds_inserted := line = '1000';
+
+    REINDEX INDEX ref32_idx;
+    SELECT s.setting INTO reindexed FROM prism_index_settings('ref32_idx') s
+        WHERE name = 'posting_reference_format';
+
+    DROP INDEX ref32_idx;
+    ALTER TABLE ref32 SET (parallel_workers = 2);
+    SET LOCAL max_parallel_maintenance_workers = 2;
+    SET LOCAL min_parallel_table_scan_size = 0;
+    CREATE INDEX ref32_idx ON ref32 USING prism (v)
+        WITH (nlist = 2, posting_reference_format = float32);
+    EXECUTE format(nearest, 7) INTO line;
+    parallel_finds_stored := line = '7';
+
+    DROP TABLE ref32;
+    RETURN NEXT;
+END $$;
+
+-- Inline at 768. Spilled at 3072, where float16 stays inline, onto two
+-- pages, the second shared with entries. Spilled at 4096 onto three.
+SELECT * FROM ref32_check(768);
+SELECT * FROM ref32_check(3072);
+SELECT * FROM ref32_check(4096);
+DROP FUNCTION ref32_check(int);
+
+-- A split writes its new lists with float32 references too, and a spilled
+-- AoS list converts to fastscan keeping its reference.
+CREATE TABLE ref32_split (id int, v vec32(4096));
+INSERT INTO ref32_split
+    SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
+               FROM generate_series(0, 4095) j)::vec32
+    FROM generate_series(1, 600) g;
+SET max_parallel_maintenance_workers = 0;
+CREATE INDEX ref32_split_idx ON ref32_split USING prism (v)
+    WITH (nlist = 1, centroid_fastscan = off, fastscan = off,
+          posting_reference_format = float32);
+RESET max_parallel_maintenance_workers;
+SET client_min_messages = warning;
+CALL prism_rebalance('ref32_split_idx', 100);
+RESET client_min_messages;
+SELECT setting::int > 1 AS split_into_several_lists
+    FROM prism_index_settings('ref32_split_idx') WHERE name = 'nlist';
+-- Every live list, old or new, has two pages of only reference.
+SELECT count(*) FILTER (WHERE format = 'reference') =
+           2 * count(*) FILTER (WHERE is_first) AS float32_heads
+    FROM prism_posting_pages('ref32_split_idx') WHERE NOT tombstoned;
+SET client_min_messages = warning;
+CALL prism_convert_posting_to_fastscan('ref32_split_idx', 0);
+RESET client_min_messages;
+SELECT bool_or(format = 'fastscan') AS converted
+    FROM prism_posting_pages('ref32_split_idx')
+    WHERE cluster_id = 0 AND NOT tombstoned;
+SET enable_seqscan = off;
+SELECT id FROM ref32_split
+    ORDER BY v <-> (SELECT v FROM ref32_split WHERE id = 300) LIMIT 1;
+RESET enable_seqscan;
+DROP TABLE ref32_split;
+RESET maintenance_work_mem;

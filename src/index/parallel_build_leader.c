@@ -99,13 +99,14 @@
  */
 void
 prism_posting_build_lists(
-		PrismSorter		   *sorter,
-		VsStorage		   *storage,
-		uint32_t			nlist,
-		Dimension			dim,
-		bool				fastscan,
-		const RaBitQParams *rq_params,
-		BlockNumber			first_posting)
+		PrismSorter				   *sorter,
+		VsStorage				   *storage,
+		uint32_t					nlist,
+		Dimension					dim,
+		bool						fastscan,
+		PrismPostingReferenceFormat ref_format,
+		const RaBitQParams		   *rq_params,
+		BlockNumber					first_posting)
 {
 	prism_pbuild_sort_performsort(sorter);
 
@@ -135,7 +136,9 @@ prism_posting_build_lists(
 		 * pre-written head and append in place: no second head construction,
 		 * and a cluster with no entries keeps its on-disk head untouched. */
 		BlockNumber head_blk = prism_leaf_head_blkno(
-				first_posting, c, prism_posting_reference_pages(dim));
+				first_posting,
+				c,
+				prism_posting_reference_pages(dim, ref_format));
 		PrismPostingBuilder hb;
 		VsMemCtx			outer = vs_memctx_switch(list_ctx);
 		prism_posting_builder_adopt_head(
@@ -414,7 +417,7 @@ build_routing_tree_batched(
 			prism_leaf_head_blkno(
 					first_posting,
 					actual_nlist,
-					prism_posting_reference_pages(dim)));
+					prism_posting_reference_pages(dim, shared->ref_format)));
 
 	/* Streaming pass: read each subtree blob back from the store (child
 	 * order matches the append order) and stream its centroid + head
@@ -426,7 +429,13 @@ build_routing_tree_batched(
 			(size_t)km_k * sizeof(BlockNumber));
 	PrismHeadWriteCtx head;
 	prism_head_write_ctx_init(
-			&head, storage, rq_params, dim, shared->fastscan, first_posting);
+			&head,
+			storage,
+			rq_params,
+			dim,
+			shared->fastscan,
+			shared->ref_format,
+			first_posting);
 	HKMeansResult *blob = vs_alloc(slot_size);
 	prism_pbuild_blobstore_rewind(planarg.store);
 	for (uint32_t i = 0; i < km_k; i++)
@@ -444,6 +453,7 @@ build_routing_tree_batched(
 				 fan_out,
 				 1, /* subtrees hang off the level-0 root */
 				 fmt,
+				 shared->ref_format,
 				 rq_params,
 				 global_mean,
 				 first_posting,
@@ -548,12 +558,18 @@ build_routing_tree_flat(
 			prism_leaf_head_blkno(
 					first_posting,
 					actual_nlist,
-					prism_posting_reference_pages(dim)));
+					prism_posting_reference_pages(dim, shared->ref_format)));
 
 	prism_build_report_phase(prog, PRISM_BUILD_PHASE_CENTROID);
 	PrismHeadWriteCtx head;
 	prism_head_write_ctx_init(
-			&head, storage, rq_params, dim, shared->fastscan, first_posting);
+			&head,
+			storage,
+			rq_params,
+			dim,
+			shared->fastscan,
+			shared->ref_format,
+			first_posting);
 	BlockNumber root_blk = prism_routing_subtree_write(
 			storage,
 			flat,
@@ -562,6 +578,7 @@ build_routing_tree_flat(
 			fan_out,
 			0, /* the flat tree IS the root level */
 			fmt,
+			shared->ref_format,
 			rq_params,
 			global_mean,
 			first_posting,
@@ -913,6 +930,7 @@ do_parallel_build(
 				rq_params,
 				dim,
 				shared->fastscan,
+				shared->ref_format,
 				first_posting);
 		prism_pbuild_exec_refine_paged(
 				0,
@@ -1003,6 +1021,7 @@ do_parallel_build(
 			nlist,
 			dim,
 			shared->fastscan,
+			shared->ref_format,
 			rq_params,
 			first_posting);
 

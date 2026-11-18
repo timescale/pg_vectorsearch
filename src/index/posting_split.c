@@ -1072,7 +1072,7 @@ prism_posting_split(
 
 		/* Not `cid`: that is a command id in PostgreSQL. */
 		uint32_t new_cluster = (j == 0) ? cluster_id : first_new_id + (j - 1);
-		prism_posting_builder_init_fmt(
+		prism_posting_builder_init_ref(
 				&builders[j],
 				base->posting_storage,
 				params,
@@ -1080,7 +1080,8 @@ prism_posting_split(
 				new_cluster,
 				centroid,
 				pt_c,
-				fastscan);
+				fastscan,
+				base->ref_format);
 
 		/* Routing centroid for the leaf entry: encode (pt_c - pt_mean), which
 		 * matches encode_into(c, mean) used at build. */

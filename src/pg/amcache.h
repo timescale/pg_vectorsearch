@@ -119,6 +119,8 @@ typedef struct PrismScanInfo
 	uint32_t			ncentroid_pages; /* centroid pages, maintained */
 	PrismCentroidFormat centroid_format;
 	bool				has_fastscan; /* built with FASTSCAN posting pages */
+	PrismPostingReferenceFormat
+			ref_format; /* posting-list reference element type */
 } PrismScanInfo;
 
 PrismScanInfo prism_cache_scan_info(Relation index);

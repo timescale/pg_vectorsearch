@@ -147,6 +147,7 @@ noted per row — most shape query behavior, some only the build.
 | `fan_out` | `32` | Routing-tree shape (depth vs width). | Children per routing-tree node. | Rarely; the auto shape adapts. Pin it only to reproduce a tree. |
 | `target_pages` | `3` | How many vectors each posting list holds, and through that the automatic `nlist` (see above). | Posting pages a list should hold. Raising it gives fewer, fatter lists; lowering it gives more, thinner ones. The 256-entry k-means training floor bounds it from below, and binds above ~608 dimensions at the default — lowering it there has no effect. Changing it takes effect on `REINDEX`; `ALTER INDEX ... SET` plus `prism_rebalance()` re-partitions in place instead. | Raise it for a large index on storage without much read parallelism, where each probe's per-list seek dominates its transfer. Measure first. |
 | `kmeans_nredo` | `1` | Build time vs marginal cluster quality. | K-means restarts during build. | Rarely. Extra restarts cost build time for little cluster quality. |
+| `posting_reference_format` | `float16` | Index size and pages read per probe past 1968 dimensions. | Storage format of each posting list's encode reference, the rotated centroid its entries are encoded against. `float16` halves it, so a list's reference stays on its first page up to 3820 dimensions instead of 1968, and takes two pages instead of three at 4096. Entries are encoded against the rounded reference, so scores stay consistent with it. The global mean stays float32. | `float32` when vectors are so large that a reference element exceeds float16's range (65504), which fails the build or a split, or to rule out the rounding. A reference element is never larger than the largest vector norm, so vectors with L2 norms up to 65504, and every cosine index, are always safe. |
 | `distance_mode` | `asymmetric` | Accuracy vs speed of distance estimates. | RaBitQ distance estimator. `symmetric` is faster with a larger estimation error. | Rarely. Symmetric is faster, but rerank depends on asymmetric accuracy. |
 
 ### Query-time GUCs
@@ -189,20 +190,21 @@ uses. `prism_index_settings(regclass)` reports the resolved values:
 
 ```sql
 SELECT * FROM prism_index_settings('my_index');
-       name       | setting | source
-------------------+---------+---------
- dim              | 768     | column
- metric           | cosine  | opclass
- nlist            | 3906    | auto
- fan_out          | 16      | auto
- nlevels          | 3       | derived
- centroid_format  | fastscan| auto
- fastscan         | on      | auto
- soar_lambda      | 1       | default
- boundary_epsilon | 0.35    | default
- kmeans_nredo     | 1       | default
- distance_mode    | asymmetric | default
- nprobe           | 32      | auto
+           name           | setting | source
+--------------------------+---------+---------
+ dim                      | 768     | column
+ metric                   | cosine  | opclass
+ nlist                    | 3906    | auto
+ fan_out                  | 16      | auto
+ nlevels                  | 3       | derived
+ centroid_format          | fastscan| auto
+ fastscan                 | on      | auto
+ posting_reference_format | float16 | default
+ soar_lambda              | 1       | default
+ boundary_epsilon         | 0.35    | default
+ kmeans_nredo             | 1       | default
+ distance_mode            | asymmetric | default
+ nprobe                   | 32      | auto
 ```
 
 The `source` column tells where each value came from: `option`

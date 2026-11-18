@@ -134,6 +134,7 @@ prism_query_ctx_create(PrismIndex *idx, uint32_t max_k, uint32_t max_nprobe)
 					page_base,
 					idx->base.params,
 					dim,
+					idx->base.ref_format,
 					max_per_page);
 
 			if (idx->base.fastscan)

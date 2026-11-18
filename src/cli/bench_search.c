@@ -71,7 +71,8 @@ typedef struct
 	const char *distance_mode;
 	bool		no_rerank;
 	int			fastscan; /* 0=off, 8=uint8 LUT, 16=uint16 LUT (hacc) */
-	int32_t		nworkers; /* -1=auto, 0=serial */
+	const char *posting_reference_format; /* float32 or float16 */
+	int32_t		nworkers;				  /* -1=auto, 0=serial */
 	bool		wait_profile;
 	bool		help;
 } BenchConfig;
@@ -208,6 +209,8 @@ print_usage(CmdContext *ctx)
 	printf("  --no-rerank        Skip reranking (return approximate)\n");
 	printf("  --fastscan <8|16>  Use VPSHUFB fastscan (8=fast, "
 		   "16=accurate)\n");
+	printf("  --posting-reference-format <float32|float16>  Posting-list "
+		   "reference format (default: float16)\n");
 	printf("  --workers <int>    Build parallelism "
 		   "(-1=auto, 0=serial)\n");
 	printf("  --wait-profile     Pause before queries (print PID for perf "
@@ -228,18 +231,19 @@ int
 cmd_bench_search(CmdContext *ctx)
 {
 	BenchConfig config = {
-			.dim			= DEFAULT_DIM,
-			.nprobe			= DEFAULT_NPROBE,
-			.k				= DEFAULT_K,
-			.queries		= DEFAULT_QUERIES,
-			.runs			= DEFAULT_RUNS,
-			.warmup			= DEFAULT_WARMUP,
-			.metric			= "euclidean",
-			.centroid_fmt	= "float32",
-			.posting_fmt	= "rabitq",
-			.posting_layout = "pages",
-			.distance_mode	= "asymmetric",
-			.nworkers		= -1,
+			.dim					  = DEFAULT_DIM,
+			.nprobe					  = DEFAULT_NPROBE,
+			.k						  = DEFAULT_K,
+			.queries				  = DEFAULT_QUERIES,
+			.runs					  = DEFAULT_RUNS,
+			.warmup					  = DEFAULT_WARMUP,
+			.metric					  = "euclidean",
+			.centroid_fmt			  = "float32",
+			.posting_fmt			  = "rabitq",
+			.posting_layout			  = "pages",
+			.distance_mode			  = "asymmetric",
+			.nworkers				  = -1,
+			.posting_reference_format = "float16",
 	};
 
 	static struct option long_options[] = {
@@ -261,6 +265,7 @@ cmd_bench_search(CmdContext *ctx)
 			{"posting-layout", required_argument, 0, 'P'},
 			{"no-rerank", no_argument, 0, 'N'},
 			{"fastscan", required_argument, 0, 'X'},
+			{"posting-reference-format", required_argument, 0, 'Y'},
 			{"wait-profile", no_argument, 0, 'Z'},
 			{"boundary-epsilon", required_argument, 0, 'B'},
 			{"soar-lambda", required_argument, 0, 'S'},
@@ -330,6 +335,17 @@ cmd_bench_search(CmdContext *ctx)
 			break;
 		case 'N':
 			config.no_rerank = true;
+			break;
+		case 'Y':
+			config.posting_reference_format = optarg;
+			if (strcmp(optarg, "float32") != 0 &&
+				strcmp(optarg, "float16") != 0)
+			{
+				fprintf(stderr,
+						"Error: --posting-reference-format must be float32 or "
+						"float16\n");
+				return 1;
+			}
 			break;
 		case 'X':
 			config.fastscan = atoi(optarg);
@@ -446,6 +462,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.soar_lambda,
 				 config.boundary_epsilon,
 				 config.fastscan,
+				 config.posting_reference_format,
 				 config.nworkers,
 				 config.k,
 				 config.nprobe,
@@ -501,6 +518,7 @@ cmd_bench_search(CmdContext *ctx)
 				 config.soar_lambda,
 				 config.boundary_epsilon,
 				 config.fastscan,
+				 config.posting_reference_format,
 				 config.nworkers,
 				 config.k,
 				 config.nprobe,
@@ -669,12 +687,13 @@ cmd_bench_search(CmdContext *ctx)
 
 	printf("\nResults:\n");
 	printf("  centroid=%-8s posting=%-8s layout=%-6s mode=%-12s "
-		   "fastscan=%-5s nprobe=%u k=%u\n",
+		   "fastscan=%-5s ref=%s nprobe=%u k=%u\n",
 		   config.centroid_fmt,
 		   config.posting_fmt,
 		   config.posting_layout,
 		   config.distance_mode,
 		   config.fastscan ? (config.fastscan == 8 ? "8bit" : "16bit") : "off",
+		   info.posting_reference_format,
 		   config.nprobe,
 		   config.k);
 	if (gt_neighbors != NULL)

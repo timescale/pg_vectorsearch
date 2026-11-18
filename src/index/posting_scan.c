@@ -38,12 +38,13 @@
 
 void
 prism_posting_scan_init(
-		PrismPostingScan   *scan,
-		VsStorage		   *storage,
-		char			   *page_base,
-		const RaBitQParams *params,
-		Dimension			dim,
-		uint32_t			max_entries_per_page)
+		PrismPostingScan		   *scan,
+		VsStorage				   *storage,
+		char					   *page_base,
+		const RaBitQParams		   *params,
+		Dimension					dim,
+		PrismPostingReferenceFormat ref_format,
+		uint32_t					max_entries_per_page)
 {
 	memset(scan, 0, sizeof(*scan));
 	scan->storage	   = storage;
@@ -61,7 +62,9 @@ prism_posting_scan_init(
 	scan->page_distances  = vs_alloc(max_entries_per_page * sizeof(Distance));
 	scan->page_scratch	  = vs_alloc(max_entries_per_page * sizeof(float));
 
-	if (prism_posting_spilled(dim))
+	scan->ref_format = ref_format;
+	scan->spilled	 = prism_posting_spilled(dim, ref_format);
+	if (scan->spilled || ref_format == PRISM_POSTING_REFERENCE_FLOAT16)
 		scan->pt_ref = vs_alloc((size_t)dim * sizeof(float));
 }
 
@@ -120,10 +123,13 @@ prism_posting_scan_enable_fastscan(PrismPostingScan *scan, int lut_bits)
 #else
 	scan->fs_has_avx512 = false;
 #endif
-	scan->fs_cap_first	 = prism_fastscan_max_entries_first(scan->dim);
-	scan->fs_cap_over	 = prism_fastscan_max_entries(scan->dim);
-	scan->fs_space_first = prism_fastscan_page_space(scan->dim, true);
-	scan->fs_space_over	 = prism_fastscan_page_space(scan->dim, false);
+	scan->fs_cap_first =
+			prism_fastscan_max_entries_first(scan->dim, scan->ref_format);
+	scan->fs_cap_over = prism_fastscan_max_entries(scan->dim);
+	scan->fs_space_first =
+			prism_fastscan_page_space(scan->dim, true, scan->ref_format);
+	scan->fs_space_over = prism_fastscan_page_space(
+			scan->dim, false, PRISM_POSTING_REFERENCE_FLOAT32);
 }
 
 static bool advance_page(PrismPostingScan *scan);
@@ -201,9 +207,34 @@ prism_posting_scan_begin_cluster(
 	uint32_t	 ref_pages = 0;
 	uint32_t	 cluster_id;
 
-	if (scan->pt_ref == NULL || posting_head == InvalidBlockNumber)
+	if (!scan->spilled || posting_head == InvalidBlockNumber)
 	{
 		begin_cluster(scan, qstate, entries, ref, ref_pages);
+		if (scan->cur_page == NULL)
+			return;
+
+		/* The index's reference format sets how the head is laid out, and a
+		 * head page that says otherwise is corrupt: read at the width it
+		 * claims, its reference could run past the page. */
+		uint16_t flags = prism_posting_opaque(scan->cur_page)->flags;
+		if (prism_posting_flags_ref_format(flags) != scan->ref_format)
+			vs_error(
+					VS_EXTENSION_NAME
+					": posting list %u stores a %s reference where the "
+					"index uses %s; the index may be corrupted -- REINDEX "
+					"it",
+					posting_head,
+					prism_posting_reference_format_name(
+							prism_posting_flags_ref_format(flags)),
+					prism_posting_reference_format_name(scan->ref_format));
+
+		/* A float16 inline reference is widened once per cluster. */
+		if (scan->ref_format == PRISM_POSTING_REFERENCE_FLOAT16)
+		{
+			prism_posting_reference_load(
+					scan->cur_page, scan->dim, scan->pt_ref);
+			scan->cur_ref = scan->pt_ref;
+		}
 		return;
 	}
 
@@ -211,9 +242,14 @@ prism_posting_scan_begin_cluster(
 	 * of it is on the END page, where the entries start, which begin_cluster
 	 * reads and keeps, so it is taken from there rather than read twice. */
 	entries = prism_posting_reference_read_to_end(
-			scan->storage, posting_head, scan->dim, scan->pt_ref, &cluster_id);
+			scan->storage,
+			posting_head,
+			scan->dim,
+			scan->ref_format,
+			scan->pt_ref,
+			&cluster_id);
 	ref		  = scan->pt_ref;
-	ref_pages = prism_posting_reference_pages(scan->dim) - 1;
+	ref_pages = prism_posting_reference_pages(scan->dim, scan->ref_format) - 1;
 	begin_cluster(scan, qstate, entries, ref, ref_pages);
 	if (scan->cur_page == NULL)
 		vs_error(
@@ -227,6 +263,7 @@ prism_posting_scan_begin_cluster(
 			scan->cur_page,
 			cluster_id,
 			scan->dim,
+			scan->ref_format,
 			scan->pt_ref);
 }
 
@@ -237,7 +274,7 @@ prism_posting_scan_begin_cluster_at(
 		BlockNumber		  entries,
 		const float		 *ref)
 {
-	Assert(scan->pt_ref != NULL);
+	Assert(scan->spilled);
 
 	/* The caller read the reference pages; the head's END page, where the
 	 * entries start, is read again here. */
@@ -246,14 +283,13 @@ prism_posting_scan_begin_cluster_at(
 			qstate,
 			entries,
 			ref,
-			prism_posting_reference_pages(scan->dim) -
-					(prism_posting_spilled(scan->dim) ? 1 : 0));
+			prism_posting_reference_pages(scan->dim, scan->ref_format) - 1);
 }
 
 const float *
 prism_posting_scan_pt_centroid(const PrismPostingScan *scan)
 {
-	if (scan->pt_ref != NULL)
+	if (scan->spilled || scan->cur_ref != NULL)
 		return scan->cur_ref;
 	if (scan->cur_page == NULL)
 		return NULL;

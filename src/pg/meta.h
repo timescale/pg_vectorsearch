@@ -40,7 +40,28 @@
  * a newer one wrote.
  */
 #define PRISM_META_FLAG_FASTSCAN 0x01
-#define PRISM_META_KNOWN_FLAGS	 (PRISM_META_FLAG_FASTSCAN)
+/* Posting-list references are float16 (PRISM_POSTING_PAGE_REF16) */
+#define PRISM_META_FLAG_REF16 0x02
+#define PRISM_META_KNOWN_FLAGS \
+	(PRISM_META_FLAG_FASTSCAN | PRISM_META_FLAG_REF16)
+
+/* The posting-list reference format metapage flags record. */
+static inline PrismPostingReferenceFormat
+prism_meta_ref_format(uint8_t flags)
+{
+	return (flags & PRISM_META_FLAG_REF16) != 0
+				 ? PRISM_POSTING_REFERENCE_FLOAT16
+				 : PRISM_POSTING_REFERENCE_FLOAT32;
+}
+
+/* The metapage flag that records a posting-list reference format. */
+static inline uint8_t
+prism_meta_ref_format_flag(PrismPostingReferenceFormat ref_format)
+{
+	return ref_format == PRISM_POSTING_REFERENCE_FLOAT16
+				 ? PRISM_META_FLAG_REF16
+				 : 0;
+}
 
 typedef struct PrismMetaPage
 {

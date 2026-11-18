@@ -43,6 +43,7 @@ else
       'row_estimate',
       'index_stats',
       'split',
+      'posting_reference_float32',
     ]
 
     # Test-only SQL entry points (extra introspection the extension

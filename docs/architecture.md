@@ -396,6 +396,7 @@ Index metadata is stored in multiple locations depending on its nature:
 - `distance_mode` (`asymmetric` or `symmetric`, default `asymmetric`)
 - `soar_lambda`, `boundary_epsilon`
 - `centroid_compression`, `fastscan`, `centroid_fastscan`
+- `posting_reference_format`
 
 `nprobe` is not a reloption. There is no `fillfactor`, `reserved_pages`,
 `rerank_k`, or `tenant_column`.
@@ -421,7 +422,9 @@ Index metadata is stored in multiple locations depending on its nature:
   the metapage changes with it so an older binary refuses the index instead
   of misreading it
 - A feature that changes how an index must be read takes a metapage flag,
-  and a binary refuses an index with a flag it does not know
+  and a binary refuses an index with a flag it does not know. Float16
+  posting-list references, the default, set one, since their lists have
+  another layout
 - No per-leaf posting directory. A leaf centroid entry holds its list head.
 - Statistics: per-cluster live counts live on each posting list's head page,
   not here -- inserts already hold that page, so they can maintain them, while
@@ -769,17 +772,25 @@ Posting list pages store vector entries with RaBitQ quantization:
 
 Pages within a posting list are linked. Each page header contains `next_blkno`.
 
-A list's head also carries the list's float32 encode reference, the rotated
-centroid every entry was encoded against and every query is scored against.
-Up to 1968 dimensions the head is the list's first page, and the reference
-sits ahead of its entries. Past that it no longer fits beside one, so the
-head spans several pages (three at 4096): a START page and MIDDLE pages
+A list's head also carries the list's encode reference, the rotated centroid
+every entry was encoded against and every query is scored against. As
+float32, up to 1968 dimensions the head is the list's first page, and the
+reference sits ahead of its entries. Past that it no longer fits beside
+one, so the head spans several pages (three at 4096): a START page and MIDDLE pages
 filled with reference and no entries, and an END page with the rest of it
 followed by the list's first entries, AoS and fastscan alike. Each page's
 flags say which part of the head it is. The bulk build lays a leaf's head
 pages out contiguously, so a probe reads them sequentially; a scan gathers
 the reference once per probed list and then scores the entry pages as usual,
 starting on the END page.
+
+By default (`posting_reference_format = float16`) the reference is stored as
+float16, rounded once at build, and entries are encoded against the rounded
+copy. It then fits beside an entry up to 3820 dimensions, and spilled lists
+take half the head pages (two at 4096). `posting_reference_format = float32`
+keeps the float32 layout above. Every head page carries a REF16 flag, so a page
+says how wide its reference is, and the metapage flag sets the layout of
+the whole index.
 
 ### Initial State: Clustered
 

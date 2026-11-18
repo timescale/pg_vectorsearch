@@ -224,29 +224,33 @@ typedef struct PrismHeadWriteCtx
 	const RaBitQParams *rq_params;
 	Dimension			dim;
 	bool				fastscan;
-	BlockNumber			first_posting; /* leaf c's head = first_posting + c *
-										* stride */
-	uint32_t stride;				   /* prism_posting_reference_pages(dim) */
-	float	*pt;					   /* [dim] scratch */
-	VsMemCtx leaf_ctx;				   /* one head's builder, reset after it */
+	PrismPostingReferenceFormat
+				ref_format;	   /* posting-list reference element type */
+	BlockNumber first_posting; /* leaf c's head = first_posting + c *
+								* stride */
+	uint32_t stride;		   /* prism_posting_reference_pages */
+	float	*pt;			   /* [dim] scratch */
+	VsMemCtx leaf_ctx;		   /* one head's builder, reset after it */
 } PrismHeadWriteCtx;
 
 /* Stack-init/cleanup pair: allocates/frees the scratch. */
 static inline void
 prism_head_write_ctx_init(
-		PrismHeadWriteCtx  *h,
-		VsStorage		   *storage,
-		const RaBitQParams *rq_params,
-		Dimension			dim,
-		bool				fastscan,
-		BlockNumber			first_posting)
+		PrismHeadWriteCtx		   *h,
+		VsStorage				   *storage,
+		const RaBitQParams		   *rq_params,
+		Dimension					dim,
+		bool						fastscan,
+		PrismPostingReferenceFormat ref_format,
+		BlockNumber					first_posting)
 {
 	h->storage		 = storage;
 	h->rq_params	 = rq_params;
 	h->dim			 = dim;
 	h->fastscan		 = fastscan;
+	h->ref_format	 = ref_format;
 	h->first_posting = first_posting;
-	h->stride		 = prism_posting_reference_pages(dim);
+	h->stride		 = prism_posting_reference_pages(dim, ref_format);
 	h->pt			 = vs_alloc((size_t)dim * sizeof(float));
 	h->leaf_ctx = vs_memctx_create(vs_memctx_current(), "prism leaf head");
 }
@@ -398,16 +402,22 @@ typedef struct PrismPostingBuilder
 	 * pages carry a page each of the encode reference and no entries, and
 	 * the END page the rest of it followed by the first entries. ref_copy is
 	 * the builder's own copy of the reference, since the caller's buffer is
-	 * not required to outlive finish(); NULL for an inline layout.
+	 * not required to outlive finish(); NULL for an inline float32 layout.
+	 *
+	 * With a float16 ref_format, ref_copy holds the reference rounded to
+	 * float16, which the pages store and raw vectors are encoded against
+	 * (via pt_vec, a rotated-vector scratch), so the two agree.
 	 *
 	 * end_pending says mem_page is the END page, which is written even when
 	 * it holds no entries, at end_blkno when that is set.
 	 */
-	bool		spilled;
-	uint32_t	ref_pages;
-	float	   *ref_copy;
-	bool		end_pending;
-	BlockNumber end_blkno;
+	bool						spilled;
+	PrismPostingReferenceFormat ref_format;
+	uint32_t					ref_pages;
+	float					   *ref_copy;
+	float					   *pt_vec;
+	bool						end_pending;
+	BlockNumber					end_blkno;
 
 	RaBitQData	 *enc_buf;
 	RaBitQScratch enc_scratch;
@@ -478,6 +488,22 @@ void prism_posting_builder_init_fmt(
 		const float			*centroid,
 		const float			*pt_centroid,
 		bool				 fastscan);
+
+/*
+ * prism_posting_builder_init_fmt with the reference stored as ref_format. A
+ * float16 reference (PRISM_POSTING_PAGE_REF16) is rounded once, and raw
+ * vectors are encoded against the rounded one.
+ */
+void prism_posting_builder_init_ref(
+		PrismPostingBuilder		   *builder,
+		VsStorage				   *storage,
+		const RaBitQParams		   *params,
+		Dimension					dim,
+		uint32_t					cluster_id,
+		const float				   *centroid,
+		const float				   *pt_centroid,
+		bool						fastscan,
+		PrismPostingReferenceFormat ref_format);
 
 /*
  * Adopt the pre-written (empty) posting-list head at head_blk and append

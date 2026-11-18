@@ -59,30 +59,36 @@ prism_posting_insert_one(
 	 * (encode_from_pt only touches scratch->xu_cb). An inline head carries
 	 * the whole reference; a spilled one is gathered from its chain after
 	 * the head is released, since the storage pins one page at a time. */
-	float *pt_residual = scratch->transformed;
-	if (prism_posting_spilled(dim))
+	float					   *pt_residual = scratch->transformed;
+	PrismPostingReferenceFormat ref_format	= prism_posting_flags_ref_format(
+			 hop->flags);
+	if (prism_posting_spilled(dim, ref_format))
 	{
-		/* The START page's floats off the pinned head, the rest from its
+		/* The START page's part off the pinned head, the rest from its
 		 * chain. */
 		BlockNumber next = hop->next_blkno;
 
-		memcpy(scratch->residual,
-			   prism_posting_pt_centroid(head),
-			   (size_t)prism_posting_reference_page_floats(dim, 0) *
-					   sizeof(float));
+		prism_posting_reference_load(
+				head,
+				prism_posting_reference_page_elems(dim, 0, ref_format),
+				scratch->residual);
 		vs_storage_release_page(storage, head_blkno);
 		prism_posting_reference_read_rest(
-				storage, head_blkno, next, cluster_id, dim, scratch->residual);
-		for (Dimension i = 0; i < dim; i++)
-			pt_residual[i] = pt_input[i] - scratch->residual[i];
+				storage,
+				head_blkno,
+				next,
+				cluster_id,
+				dim,
+				ref_format,
+				scratch->residual);
 	}
 	else
 	{
-		const float *pt_cent = prism_posting_pt_centroid(head);
-		for (Dimension i = 0; i < dim; i++)
-			pt_residual[i] = pt_input[i] - pt_cent[i];
+		prism_posting_reference_load(head, dim, scratch->residual);
 		vs_storage_release_page(storage, head_blkno);
 	}
+	for (Dimension i = 0; i < dim; i++)
+		pt_residual[i] = pt_input[i] - scratch->residual[i];
 
 	/* Encode relative to the leaf centroid. */
 	RaBitQData *rdata = vs_alloc(VS_RABITQ_DATA_SIZE(dim));

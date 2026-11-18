@@ -21,15 +21,17 @@ pages, the stream starts on the last of them, right after the reference.
 
 - **Posting list**: the vectors assigned to one cluster, stored as a chain of
   8 KB pages with 8144 bytes for data each.
-- **Reference vector**: the cluster's full-precision centroid (`4 × dims`
-  bytes). Search uses it to compute `query − centroid` before scoring any
-  vector in the list.
+- **Reference vector**: the cluster's centroid (`2 × dims` bytes as
+  float16, the default, or `4 × dims` as float32). Search uses it to
+  compute `query − centroid` before scoring any vector in the list.
 - **Head**: the pages of a list that carry its reference vector, each
   marked as the head's **START**, **MIDDLE** or **END** page. Up to 1968
   dimensions the head is the list's first page alone. Past that the
   reference spills: the START and MIDDLE pages are filled with it, 2036
   floats each, and the END page holds the rest followed by the list's first
-  entries.
+  entries. That is the float32 layout (`posting_reference_format =
+  float32`). The default float16 reference spills only past 3820
+  dimensions, 4072 halves a page.
 - **Head page**: a list's first page, its head's START page.
 - **AoS entry**: one vector in the AoS format. A 20-byte header (TID, flags,
   three correction factors) followed by one bit per dimension.

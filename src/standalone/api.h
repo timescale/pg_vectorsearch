@@ -22,12 +22,15 @@ typedef struct VsHandle VsHandle;
 /* Index build statistics */
 typedef struct PrismBuildInfo
 {
-	uint32_t		nlist;		 /* actual number of clusters */
-	uint32_t		nlevels;	 /* tree depth */
-	uint32_t		nvecs;		 /* total vectors in index */
-	uint32_t		max_cluster; /* largest cluster size */
-	uint32_t		min_cluster; /* smallest cluster size */
-	PrismBuildStats stats;		 /* phase timings + posting stats */
+	uint32_t nlist;		  /* actual number of clusters */
+	uint32_t nlevels;	  /* tree depth */
+	uint32_t nvecs;		  /* total vectors in index */
+	uint32_t max_cluster; /* largest cluster size */
+	uint32_t min_cluster; /* smallest cluster size */
+	/* Posting-list reference format the index uses: the requested one for
+	 * the paged layout, float32 for the flat one. */
+	const char	   *posting_reference_format;
+	PrismBuildStats stats; /* phase timings + posting stats */
 } PrismBuildInfo;
 
 /*
@@ -60,6 +63,7 @@ VsHandle *vs_handle_create(
 		double			soar_lambda,
 		double			boundary_epsilon,
 		int				fastscan,
+		const char	   *posting_reference_format,
 		int32_t			nworkers,
 		uint32_t		max_k,
 		uint32_t		max_nprobe,
@@ -84,6 +88,7 @@ VsHandle *vs_handle_create_from_array(
 		double			soar_lambda,
 		double			boundary_epsilon,
 		int				fastscan,
+		const char	   *posting_reference_format,
 		int32_t			nworkers,
 		uint32_t		max_k,
 		uint32_t		max_nprobe,
