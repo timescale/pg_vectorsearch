@@ -60,15 +60,12 @@
  *   CREATE FUNCTION vs_phase_stats() RETURNS text
  *     AS '$libdir/pg_vectorsearch','vs_phase_stats' LANGUAGE C;
  * ---------------------------------------------------------------- */
-static uint64_t g_phase_nqueries	 = 0;
-static uint64_t g_phase_centroid_ns	 = 0;
-static uint64_t g_phase_posting_ns	 = 0;
-static uint64_t g_phase_rerank_ns	 = 0;
-static uint64_t g_phase_entries		 = 0;
-static uint64_t g_phase_rotation_ns	 = 0;
-static uint64_t g_phase_clut_ns		 = 0;
-static uint64_t g_phase_cpageread_ns = 0;
-static uint64_t g_phase_cscore_ns	 = 0;
+static uint64_t g_phase_nqueries	= 0;
+static uint64_t g_phase_centroid_ns = 0;
+static uint64_t g_phase_posting_ns	= 0;
+static uint64_t g_phase_rerank_ns	= 0;
+static uint64_t g_phase_entries		= 0;
+static uint64_t g_phase_rotation_ns = 0;
 /* Routing-depth histogram: deepest probe rank the final top-k came from. */
 static uint64_t g_route_sum	  = 0;
 static uint64_t g_route_le[7] = {0}; /* <=8,16,32,64,128,256,>256 */
@@ -78,19 +75,16 @@ PG_FUNCTION_INFO_V1(vs_phase_stats_reset);
 Datum
 vs_phase_stats_reset(PG_FUNCTION_ARGS)
 {
-	g_phase_nqueries	 = 0;
-	g_phase_centroid_ns	 = 0;
-	g_phase_posting_ns	 = 0;
-	g_phase_rerank_ns	 = 0;
-	g_phase_entries		 = 0;
-	g_phase_rotation_ns	 = 0;
-	g_phase_clut_ns		 = 0;
-	g_phase_cpageread_ns = 0;
-	g_phase_cscore_ns	 = 0;
-	g_route_sum			 = 0;
-	vs_bufcache_hits	 = 0;
-	vs_bufcache_cold	 = 0;
-	vs_bufcache_stale	 = 0;
+	g_phase_nqueries	= 0;
+	g_phase_centroid_ns = 0;
+	g_phase_posting_ns	= 0;
+	g_phase_rerank_ns	= 0;
+	g_phase_entries		= 0;
+	g_phase_rotation_ns = 0;
+	g_route_sum			= 0;
+	vs_bufcache_hits	= 0;
+	vs_bufcache_cold	= 0;
+	vs_bufcache_stale	= 0;
 	for (int i = 0; i < 7; i++)
 		g_route_le[i] = 0;
 	PG_RETURN_VOID();
@@ -137,14 +131,11 @@ vs_phase_stats(PG_FUNCTION_ARGS)
 			buf,
 			sizeof(buf),
 			"queries=" UINT64_FORMAT " | per-query us: centroid=%.1f "
-			"[rot=%.1f lut=%.1f pageread=%.1f score=%.1f] "
+			"[rot=%.1f] "
 			"posting=%.1f rerank=%.1f | entries/q=" UINT64_FORMAT,
 			g_phase_nqueries,
 			(double)g_phase_centroid_ns / n / VS_NS_PER_US,
 			(double)g_phase_rotation_ns / n / VS_NS_PER_US,
-			(double)g_phase_clut_ns / n / VS_NS_PER_US,
-			(double)g_phase_cpageread_ns / n / VS_NS_PER_US,
-			(double)g_phase_cscore_ns / n / VS_NS_PER_US,
 			(double)g_phase_posting_ns / n / VS_NS_PER_US,
 			(double)g_phase_rerank_ns / n / VS_NS_PER_US,
 			g_phase_entries / n);
@@ -588,9 +579,6 @@ execute_search(IndexScanDesc scan)
 	g_phase_rerank_ns += qstats.rerank_ns;
 	g_phase_entries += qstats.posting_entries_scanned;
 	g_phase_rotation_ns += qstats.rotation_ns;
-	g_phase_clut_ns += qstats.centroid_lut_ns;
-	g_phase_cpageread_ns += qstats.centroid_pageread_ns;
-	g_phase_cscore_ns += qstats.centroid_score_ns;
 
 	{
 		uint32_t r = qstats.max_contrib_rank;

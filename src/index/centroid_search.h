@@ -126,13 +126,9 @@ typedef struct PrismCentroidSearchState
  * ---------------------------------------------------------------- */
 typedef struct PrismCentroidSearchStats
 {
-	uint64_t dist_calcs; /* approximate distance computations */
-	uint32_t pages_read; /* centroid pages read */
-	/* Fine-grained wall time in ns (diagnostic; 0 when not measured). */
-	uint64_t rotation_ns; /* query rotation (P^T * query) */
-	uint64_t lut_ns;	  /* per-query fastscan LUT build */
-	uint64_t pageread_ns; /* centroid page read/release */
-	uint64_t score_ns;	  /* score_page total (incl. lut_ns) */
+	uint64_t dist_calcs;  /* approximate distance computations */
+	uint32_t pages_read;  /* centroid pages read */
+	uint64_t rotation_ns; /* query rotation (P^T * query) wall time */
 } PrismCentroidSearchStats;
 
 /* ----------------------------------------------------------------

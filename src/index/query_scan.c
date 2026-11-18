@@ -781,15 +781,12 @@ prism_query_execute(
 	if (stats != NULL)
 	{
 		/* clusters_scanned is set by scan_clusters (actual count). */
-		stats->max_contrib_rank		= max_rank;
-		stats->centroid_pages_read	= beam_stats.pages_read;
-		stats->centroid_ns			= t1 - t0;
-		stats->posting_ns			= t2 - t1;
-		stats->rerank_ns			= t3 - t2;
-		stats->rotation_ns			= beam_stats.rotation_ns;
-		stats->centroid_lut_ns		= beam_stats.lut_ns;
-		stats->centroid_pageread_ns = beam_stats.pageread_ns;
-		stats->centroid_score_ns	= beam_stats.score_ns;
+		stats->max_contrib_rank	   = max_rank;
+		stats->centroid_pages_read = beam_stats.pages_read;
+		stats->centroid_ns		   = t1 - t0;
+		stats->posting_ns		   = t2 - t1;
+		stats->rerank_ns		   = t3 - t2;
+		stats->rotation_ns		   = beam_stats.rotation_ns;
 	}
 
 	return qs->nresults;
