@@ -870,6 +870,8 @@ DROP FUNCTION rabitq_params_cache();
 DROP FUNCTION rabitq_cache_clear();
 DROP FUNCTION append_centroid_page(regclass);
 DROP FUNCTION meta_magic(regclass);
+DROP FUNCTION meta_flags(regclass);
+DROP FUNCTION set_meta_flags(regclass, integer);
 DROP TABLE mutcentroid_before;
 DROP TABLE mutcentroid;
 -- Spilled references, where a fastscan list's stream starts after the
@@ -1737,6 +1739,8 @@ DROP FUNCTION rabitq_params_cache();
 DROP FUNCTION rabitq_cache_clear();
 DROP FUNCTION append_centroid_page(regclass);
 DROP FUNCTION meta_magic(regclass);
+DROP FUNCTION meta_flags(regclass);
+DROP FUNCTION set_meta_flags(regclass, integer);
 DROP TABLE mutcentroid_before;
 DROP TABLE mutcentroid;
 DROP FUNCTION mutvec(real);

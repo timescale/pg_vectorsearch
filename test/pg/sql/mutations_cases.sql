@@ -599,5 +599,7 @@ DROP FUNCTION rabitq_params_cache();
 DROP FUNCTION rabitq_cache_clear();
 DROP FUNCTION append_centroid_page(regclass);
 DROP FUNCTION meta_magic(regclass);
+DROP FUNCTION meta_flags(regclass);
+DROP FUNCTION set_meta_flags(regclass, integer);
 DROP TABLE mutcentroid_before;
 DROP TABLE mutcentroid;

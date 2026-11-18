@@ -292,8 +292,10 @@ vs_centroid_pages(PG_FUNCTION_ARGS)
 	BlockNumber first_centroid = meta->first_centroid;
 	Dimension	dim			   = (Dimension)meta->dim;
 	uint8_t		nlevels		   = meta->nlevels;
+	uint8_t		meta_flags	   = meta->flags;
 
 	vs_storage_release_page(st, 0);
+	prism_meta_check_flags(RelationGetRelationName(index), meta_flags);
 
 	if (!BlockNumberIsValid(first_centroid))
 	{
@@ -588,7 +590,9 @@ vs_posting_pages(PG_FUNCTION_ARGS)
 	BlockNumber first_centroid = meta->first_centroid;
 	Dimension	dim			   = meta->dim;
 	uint8_t		nlevels		   = meta->nlevels;
+	uint8_t		meta_flags	   = meta->flags;
 	vs_storage_release_page(st, 0);
+	prism_meta_check_flags(RelationGetRelationName(index), meta_flags);
 
 	if (!BlockNumberIsValid(first_centroid))
 	{
@@ -705,8 +709,10 @@ vs_tids_clusters(PG_FUNCTION_ARGS)
 	Page				 meta_page = vs_storage_read_page(st, 0);
 	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
 			meta_page);
-	Dimension dim = (Dimension)meta->dim;
+	Dimension dim		 = (Dimension)meta->dim;
+	uint8_t	  meta_flags = meta->flags;
 	vs_storage_release_page(st, 0);
+	prism_meta_check_flags(RelationGetRelationName(index), meta_flags);
 
 	/* Scan every block and pick out posting pages directly (identified by
 	 * page_id), rather than walking the centroid tree to find posting
@@ -890,7 +896,9 @@ vs_index_settings(PG_FUNCTION_ARGS)
 	bool		   fastscan = (meta->flags & PRISM_META_FLAG_FASTSCAN) != 0;
 	uint32_t	   ncentroid_pages = meta->ncentroid_pages;
 	BlockNumber	   first_posting   = meta->first_posting;
+	uint8_t		   meta_flags	   = meta->flags;
 	vs_storage_release_page(st, 0);
+	prism_meta_check_flags(RelationGetRelationName(index), meta_flags);
 
 	const PrismOptions *opts = (const PrismOptions *)index->rd_options;
 	List			   *set	 = explicit_reloptions(indexoid);
