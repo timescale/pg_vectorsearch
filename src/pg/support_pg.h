@@ -146,6 +146,7 @@ typedef struct PrismOptions
 	int	   centroid_compression; /* PrismCentroidCompression */
 	int	   fastscan;			 /* PrismFastscanMode, posting pages */
 	int	   centroid_fastscan;	 /* PrismFastscanMode, centroid pages */
+	int	   posting_reference_format; /* PrismPostingReferenceFormat */
 } PrismOptions;
 
 #define PRISM_DEFAULT_FAN_OUT 32

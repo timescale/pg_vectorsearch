@@ -390,7 +390,8 @@ static void
 verify_head_meta(VsTestResult *result, PrismIndex *idx)
 {
 	VsStorage *st	  = idx->base.posting_storage;
-	uint32_t   stride = prism_posting_reference_pages(idx->base.dim);
+	uint32_t   stride = prism_posting_reference_pages(
+			  idx->base.dim, PRISM_POSTING_REFERENCE_FLOAT32);
 	for (uint32_t c = 0; c < idx->nlist; c++)
 	{
 		BlockNumber head =
@@ -445,7 +446,8 @@ static FormatTally
 tally_entry_formats(PrismIndex *idx)
 {
 	FormatTally t	   = {.dim = idx->base.dim};
-	uint32_t	stride = prism_posting_reference_pages(idx->base.dim);
+	uint32_t	stride = prism_posting_reference_pages(
+			   idx->base.dim, PRISM_POSTING_REFERENCE_FLOAT32);
 
 	for (uint32_t c = 0; c < idx->nlist; c++)
 		prism_posting_chain_walk(
@@ -895,6 +897,7 @@ TEST(bindings_create_destroy)
 			 0.0,
 			 0.0,
 			 false,
+			 NULL,
 			 0,
 			 1,
 			 1,
@@ -907,6 +910,111 @@ TEST(bindings_create_destroy)
 	ASSERT_TRUE(info.max_cluster >= info.min_cluster, "max >= min");
 
 	vs_handle_destroy(handle);
+}
+
+/*
+ * An index with float16 references answers like a float32 one: inline at
+ * 768 dimensions for both, and at 3072, where float32 references spill and
+ * float16 ones stay inline. Each query is a stored vector, which re-ranking
+ * must return first.
+ */
+static void
+check_ref16_matches_ref32(VsTestResult *result, uint32_t dim)
+{
+	uint32_t  nvecs = 600, k = 10, nq = 20;
+	float	 *vecs = make_vectors(nvecs, dim, 5);
+	VsHandle *h[2];
+
+	for (int r = 0; r < 2; r++)
+	{
+		h[r] = vs_handle_create_from_array(
+				vecs,
+				nvecs,
+				dim,
+				4,
+				0,
+				"euclidean",
+				"rabitq",
+				NULL,
+				0,
+				0,
+				0.0,
+				0.0,
+				16,
+				r == 1 ? "float16" : "float32",
+				0,
+				k,
+				4,
+				NULL);
+		ASSERT_NOT_NULL(h[r], "create should succeed");
+	}
+
+	uint32_t same = 0;
+	for (uint32_t q = 0; q < nq; q++)
+	{
+		const float *query = vecs + (size_t)q * 29 * dim;
+		uint32_t	 ids[2][10];
+
+		for (int r = 0; r < 2; r++)
+		{
+			uint32_t n = vs_handle_query(
+					h[r], query, k, 4, "asymmetric", true, ids[r]);
+			ASSERT_EQ(k, n, "k results");
+			ASSERT_EQ(q * 29, ids[r][0], "the query vector comes first");
+		}
+		for (uint32_t i = 0; i < k; i++)
+			for (uint32_t j = 0; j < k; j++)
+				same += ids[0][i] == ids[1][j];
+	}
+	ASSERT_TRUE(same * 10 >= nq * k * 9, "nine in ten results are shared");
+
+	vs_handle_destroy(h[0]);
+	vs_handle_destroy(h[1]);
+}
+
+/* The build reports the reference format the index uses, which the flat
+ * layout does not take from the request. */
+TEST(bindings_report_the_reference_format)
+{
+	float		  *vecs		 = make_vectors(300, 16, 3);
+	const char	  *layouts[] = {NULL, "flat"};
+	const char	  *want[]	 = {"float16", "float32"};
+	PrismBuildInfo info;
+
+	for (int i = 0; i < 2; i++)
+	{
+		VsHandle *h = vs_handle_create_from_array(
+				vecs,
+				300,
+				16,
+				2,
+				0,
+				"euclidean",
+				"rabitq",
+				layouts[i],
+				0,
+				0,
+				0.0,
+				0.0,
+				false,
+				"float16",
+				0,
+				1,
+				1,
+				&info);
+		ASSERT_NOT_NULL(h, "create should succeed");
+		ASSERT_STR_EQ(
+				want[i],
+				info.posting_reference_format,
+				"reported reference format");
+		vs_handle_destroy(h);
+	}
+}
+
+TEST(bindings_ref16_matches_ref32)
+{
+	check_ref16_matches_ref32(result, 768);
+	check_ref16_matches_ref32(result, 3072);
 }
 
 TEST(bindings_query)
@@ -928,6 +1036,7 @@ TEST(bindings_query)
 			0.0,
 			0.0,
 			false,
+			NULL,
 			0,
 			10,
 			5,
@@ -963,6 +1072,7 @@ TEST(bindings_query_above_default_limits)
 			0.0,
 			0.0,
 			0,
+			NULL,
 			0,
 			k,
 			8,
@@ -1272,6 +1382,7 @@ TEST(bindings_query_fastscan)
 			0.0,
 			0.0,
 			16,
+			NULL,
 			0,
 			10,
 			5,
@@ -1307,6 +1418,7 @@ TEST(bindings_angular_metric)
 			0.0,
 			0.0,
 			false,
+			NULL,
 			0,
 			5,
 			5,
@@ -1358,6 +1470,7 @@ TEST(bindings_symmetric_mode)
 			0.0,
 			0.0,
 			false,
+			NULL,
 			0,
 			5,
 			5,
@@ -1391,6 +1504,7 @@ TEST(bindings_kmeans_params)
 			 0.0,
 			 0.0,
 			 false,
+			 NULL,
 			 0,
 			 1,
 			 1,

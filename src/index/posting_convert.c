@@ -135,14 +135,25 @@ prism_posting_convert_to_fastscan(
 	/* The cluster id from the AoS head, then its encode reference. */
 	Page	 first_page = vs_storage_read_page(storage, aos_head);
 	uint32_t cluster_id = prism_posting_opaque(first_page)->cluster_id;
+	PrismPostingReferenceFormat ref_format = prism_posting_flags_ref_format(
+			prism_posting_opaque(first_page)->flags);
 	vs_storage_release_page(storage, aos_head);
 
 	float *pt_centroid = vs_alloc(dim * sizeof(float));
-	prism_posting_reference_read(storage, aos_head, dim, pt_centroid);
+	prism_posting_reference_read(
+			storage, aos_head, dim, ref_format, pt_centroid);
 
 	PrismPostingBuilder builder;
-	prism_posting_builder_init_fastscan(
-			&builder, storage, NULL, dim, cluster_id, NULL, pt_centroid);
+	prism_posting_builder_init_ref(
+			&builder,
+			storage,
+			NULL,
+			dim,
+			cluster_id,
+			NULL,
+			pt_centroid,
+			true,
+			ref_format);
 
 	StageCtx ctx = {
 			.dim		  = dim,

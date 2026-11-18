@@ -919,15 +919,16 @@ replay_node_recurse(RoutingTreeCtx *c, uint32_t count, uint32_t level)
  * tape and replay scratch. */
 static void
 routing_tree_ctx_init(
-		RoutingTreeCtx	   *c,
-		Dimension			dim,
-		uint32_t			nlist,
-		uint32_t			fan_out,
-		PrismCentroidFormat format)
+		RoutingTreeCtx			   *c,
+		Dimension					dim,
+		uint32_t					nlist,
+		uint32_t					fan_out,
+		PrismCentroidFormat			format,
+		PrismPostingReferenceFormat ref_format)
 {
 	memset(c, 0, sizeof(*c));
 	c->dim		   = dim;
-	c->head_stride = prism_posting_reference_pages(dim);
+	c->head_stride = prism_posting_reference_pages(dim, ref_format);
 	c->nlist	   = nlist;
 	c->fan_out	   = fan_out < 2 ? 2 : fan_out;
 	c->nlevels	   = vs_hkmeans_nlevels(nlist, c->fan_out);
@@ -941,19 +942,20 @@ routing_tree_ctx_init(
  * every node, and return the layout totals -- see the header comment. */
 bool
 prism_routing_tree_plan(
-		const float			*vectors,
-		uint32_t			 nvecs,
-		Dimension			 dim,
-		uint32_t			 nlist,
-		uint32_t			 fan_out,
-		DistanceMetric		 metric,
-		PrismCentroidFormat	 format,
-		const KMeansOptions *opts,
-		PrismBlobStore		*store,
-		PrismStreamTreePlan *out)
+		const float				   *vectors,
+		uint32_t					nvecs,
+		Dimension					dim,
+		uint32_t					nlist,
+		uint32_t					fan_out,
+		DistanceMetric				metric,
+		PrismCentroidFormat			format,
+		PrismPostingReferenceFormat ref_format,
+		const KMeansOptions		   *opts,
+		PrismBlobStore			   *store,
+		PrismStreamTreePlan		   *out)
 {
 	RoutingTreeCtx c;
-	routing_tree_ctx_init(&c, dim, nlist, fan_out, format);
+	routing_tree_ctx_init(&c, dim, nlist, fan_out, format, ref_format);
 	/* Only the plan pass clusters, so only it carries the sample, the
 	 * metric and the k-means options. */
 	c.vectors  = vectors;
@@ -1019,6 +1021,7 @@ prism_routing_tree_write(
 		uint32_t					 nlist,
 		uint32_t					 fan_out,
 		PrismCentroidFormat			 format,
+		PrismPostingReferenceFormat	 ref_format,
 		const RaBitQParams			*rq_params,
 		const float					*global_mean,
 		PrismBlobStore				*store,
@@ -1034,7 +1037,7 @@ prism_routing_tree_write(
 		return InvalidBlockNumber;
 
 	RoutingTreeCtx c;
-	routing_tree_ctx_init(&c, dim, nlist, fan_out, format);
+	routing_tree_ctx_init(&c, dim, nlist, fan_out, format, ref_format);
 	c.metric  = metric;
 	c.storage = storage;
 	c.store	  = store;
@@ -1083,6 +1086,7 @@ prism_routing_subtree_write(
 		uint32_t					 fan_out,
 		uint8_t						 level_offset,
 		PrismCentroidFormat			 format,
+		PrismPostingReferenceFormat	 ref_format,
 		const RaBitQParams			*rq_params,
 		const float					*global_mean,
 		BlockNumber					 first_posting,
@@ -1126,8 +1130,8 @@ prism_routing_subtree_write(
 			prism_leaf_head_blkno(
 					first_posting,
 					leaf_offset,
-					prism_posting_reference_pages(dim)),
-			prism_posting_reference_pages(dim),
+					prism_posting_reference_pages(dim, ref_format)),
+			prism_posting_reference_pages(dim, ref_format),
 			nfb,
 			NULL,
 			collector);

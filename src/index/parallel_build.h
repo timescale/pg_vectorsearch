@@ -105,13 +105,15 @@ typedef void (*PrismBuildScanCb)(
 typedef struct PrismBuildShared
 {
 	/* Immutable — set by the leader before launch */
-	Dimension			dim;
-	DistanceMetric		metric;
-	uint32_t			nlist;
-	uint32_t			fan_out;
-	double				soar_lambda;
-	double				boundary_epsilon;
-	bool				fastscan;
+	Dimension	   dim;
+	DistanceMetric metric;
+	uint32_t	   nlist;
+	uint32_t	   fan_out;
+	double		   soar_lambda;
+	double		   boundary_epsilon;
+	bool		   fastscan;
+	PrismPostingReferenceFormat
+						ref_format; /* posting-list reference element type */
 	PrismCentroidFormat centroid_format;
 	uint64_t			rabitq_seed;
 	/* Planned as 1 + planned workers (it sizes the per-participant DSM
@@ -886,6 +888,8 @@ typedef struct PrismBuildConfig
 	bool				fastscan;
 	/* CREATE INDEX CONCURRENTLY: take weak locks + an MVCC scan snapshot. */
 	bool concurrent;
+	/* Store posting-list references as float16 (PRISM_POSTING_PAGE_REF16). */
+	PrismPostingReferenceFormat ref_format;
 } PrismBuildConfig;
 
 /* ----------------------------------------------------------------
@@ -990,13 +994,14 @@ extern void prism_pbuild_sort_end(PrismSorter *sorter);
  * sorter.
  */
 extern void prism_posting_build_lists(
-		PrismSorter		   *sorter,
-		VsStorage		   *storage,
-		uint32_t			nlist,
-		Dimension			dim,
-		bool				fastscan,
-		const RaBitQParams *rq_params,
-		BlockNumber			first_posting);
+		PrismSorter				   *sorter,
+		VsStorage				   *storage,
+		uint32_t					nlist,
+		Dimension					dim,
+		bool						fastscan,
+		PrismPostingReferenceFormat ref_format,
+		const RaBitQParams		   *rq_params,
+		BlockNumber					first_posting);
 
 /* ----------------------------------------------------------------
  * Parallel build entry — shared driver (parallel_build_leader.c)

@@ -63,11 +63,12 @@
  *
  * The low two bits are a field, not two flags: the page's part of its
  * list's head. A list's head is the pages that carry its encode reference
- * (P^T * centroid, 4 * dim bytes). An inline list's head is its first page,
- * which holds the whole reference followed by entries. A spilled list
- * (prism_posting_spilled, past 1968 dimensions) spreads the reference over
- * prism_posting_reference_pages(dim) pages, which the bulk build lays out
- * contiguously after the first:
+ * (P^T * centroid, 4 * dim bytes, or 2 * dim as float16). An inline list's
+ * head is its first page, which holds the whole reference followed by
+ * entries. A spilled list (prism_posting_spilled, past 1968 dimensions, or
+ * 3820 as float16) spreads the reference over
+ * prism_posting_reference_pages(dim, ref_format) pages, which the bulk build
+ * lays out contiguously after the first:
  *
  *   head part   inline list                    spilled list
  *   START       whole reference, then entries  a page of reference only
@@ -118,6 +119,38 @@
  * retires the whole old chain, head and all.
  */
 #define PRISM_POSTING_PAGE_DELETED 0x0010
+
+/*
+ * The list stores its encode reference as float16 instead of float32
+ * (reloption posting_reference_format), half the bytes. Set on every head page
+ * of such a list, so a page alone says how wide its reference prefix is.
+ * Pages past the head hold no reference and do not carry it. The index-wide
+ * layout (whether lists spill, how many head pages they have) follows the
+ * metapage's PRISM_META_FLAG_REF16.
+ */
+#define PRISM_POSTING_PAGE_REF16 0x0020
+
+/*
+ * Element type of a posting list's encode reference (reloption
+ * posting_reference_format). The global mean is always float32.
+ */
+typedef enum PrismPostingReferenceFormat
+{
+	PRISM_POSTING_REFERENCE_FLOAT32 = 0,
+	PRISM_POSTING_REFERENCE_FLOAT16,
+} PrismPostingReferenceFormat;
+
+static const char *const prism_posting_reference_format_names[] = {
+		[PRISM_POSTING_REFERENCE_FLOAT32] = "float32",
+		[PRISM_POSTING_REFERENCE_FLOAT16] = "float16",
+};
+
+/* The reference format's name, as the reloption spells it. */
+static inline const char *
+prism_posting_reference_format_name(PrismPostingReferenceFormat ref_format)
+{
+	return prism_posting_reference_format_names[ref_format];
+}
 
 /* ----------------------------------------------------------------
  * Structs
@@ -278,7 +311,8 @@ typedef struct PrismFlatPostingHeader
 /*
  * A posting list's first page holds a full-precision encode reference (a
  * vector of 32-bit floats). The reference fits into the first page, together
- * with at least one entry, up to dimension PRISM_INDEX_NARROW_MAX_DIM.
+ * with at least one entry, up to dimension PRISM_INDEX_NARROW_MAX_DIM, or
+ * up to 3820 dimensions as float16 (PRISM_POSTING_PAGE_REF16).
  * Vectors of higher dimensions spill over to the following page(s) in a
  * chain of reference pages (prism_posting_spilled).
  *
@@ -353,11 +387,42 @@ prism_posting_page_usable(void)
 		   sizeof(PrismPostingPageOpaque);
 }
 
+/* Bytes of one reference element. */
+static inline uint32_t
+prism_posting_ref_elem_size(PrismPostingReferenceFormat ref_format)
+{
+	static const uint32_t sizes[] = {
+			[PRISM_POSTING_REFERENCE_FLOAT32] = sizeof(float),
+			[PRISM_POSTING_REFERENCE_FLOAT16] = sizeof(uint16_t),
+	};
+
+	return sizes[ref_format];
+}
+
+/* The reference format a head page's flags mark. */
+static inline PrismPostingReferenceFormat
+prism_posting_flags_ref_format(uint16_t flags)
+{
+	return (flags & PRISM_POSTING_PAGE_REF16) != 0
+				 ? PRISM_POSTING_REFERENCE_FLOAT16
+				 : PRISM_POSTING_REFERENCE_FLOAT32;
+}
+
+/* The head-page flag that marks a reference format. */
+static inline uint16_t
+prism_posting_ref_format_flag(PrismPostingReferenceFormat ref_format)
+{
+	return ref_format == PRISM_POSTING_REFERENCE_FLOAT16
+				 ? PRISM_POSTING_PAGE_REF16
+				 : 0;
+}
+
 /* Space occupied by P^T * centroid on an inline first page (MAXALIGN'd) */
 static inline uint32_t
-prism_posting_pt_centroid_size(Dimension dim)
+prism_posting_pt_centroid_size(
+		Dimension dim, PrismPostingReferenceFormat ref_format)
 {
-	return (uint32_t)MAXALIGN(dim * sizeof(float));
+	return (uint32_t)MAXALIGN(dim * prism_posting_ref_elem_size(ref_format));
 }
 
 /*
@@ -367,9 +432,9 @@ prism_posting_pt_centroid_size(Dimension dim)
  * layout so a different alignment cannot disagree with the pages.
  */
 static inline bool
-prism_posting_spilled(Dimension dim)
+prism_posting_spilled(Dimension dim, PrismPostingReferenceFormat ref_format)
 {
-	return prism_posting_pt_centroid_size(dim) +
+	return prism_posting_pt_centroid_size(dim, ref_format) +
 				   PRISM_POSTING_ENTRY_SIZE(dim) >
 		   prism_posting_page_usable();
 }
@@ -380,35 +445,49 @@ prism_posting_spilled(Dimension dim)
 	  sizeof(PrismPostingPageOpaque)) /                    \
 	 sizeof(float))
 
+/* Reference elements on a full head page: its whole usable area. */
+static inline uint32_t
+prism_posting_reference_page_capacity(PrismPostingReferenceFormat ref_format)
+{
+	return (uint32_t)PRISM_POSTING_REFERENCE_PAGE_FLOATS *
+		   (uint32_t)sizeof(float) / prism_posting_ref_elem_size(ref_format);
+}
+
 /*
  * Pages that carry the encode reference, the list's head pages: one for an
  * inline layout, else START, MIDDLE and END. This is also the head stride of
  * the bulk-built head region (prism_leaf_head_blkno), so a leaf's head pages
  * are contiguous.
  *
- * A spilled list always has a START and an END page: the smallest spilled
- * dimension the index accepts (2048) takes more than a page of floats.
+ * A spilled list always has a START and an END page. A float16 reference
+ * spills past 3820 dimensions but fits a page up to 4072, and then the END
+ * page holds none of it, only entries.
  */
 static inline uint32_t
-prism_posting_reference_pages(Dimension dim)
+prism_posting_reference_pages(
+		Dimension dim, PrismPostingReferenceFormat ref_format)
 {
-	if (!prism_posting_spilled(dim))
+	uint32_t cap = prism_posting_reference_page_capacity(ref_format);
+	uint32_t n	 = ((uint32_t)dim + cap - 1) / cap;
+
+	if (!prism_posting_spilled(dim, ref_format))
 		return 1;
-	return ((uint32_t)dim + PRISM_POSTING_REFERENCE_PAGE_FLOATS - 1) /
-		   PRISM_POSTING_REFERENCE_PAGE_FLOATS;
+	return n < 2 ? 2 : n;
 }
 
-/* Floats of the reference on head page i of a spilled list (0 = START). */
+/*
+ * Elements of the reference on head page i of a spilled list (0 = START).
+ */
 static inline uint32_t
-prism_posting_reference_page_floats(Dimension dim, uint32_t i)
+prism_posting_reference_page_elems(
+		Dimension dim, uint32_t i, PrismPostingReferenceFormat ref_format)
 {
-	uint32_t start = i * (uint32_t)PRISM_POSTING_REFERENCE_PAGE_FLOATS;
+	uint32_t cap   = prism_posting_reference_page_capacity(ref_format);
+	uint32_t start = i * cap;
 
 	if (start >= dim)
 		return 0;
-	return (dim - start) < PRISM_POSTING_REFERENCE_PAGE_FLOATS
-				 ? (dim - start)
-				 : (uint32_t)PRISM_POSTING_REFERENCE_PAGE_FLOATS;
+	return (dim - start) < cap ? (dim - start) : cap;
 }
 
 /* The page's part of its list's head (see the page flags above). */
@@ -439,7 +518,8 @@ prism_posting_is_reference_only_page(uint16_t flags, Dimension dim)
 
 	if (part == PRISM_POSTING_HEAD_MIDDLE)
 		return true;
-	return part == PRISM_POSTING_HEAD_START && prism_posting_spilled(dim);
+	return part == PRISM_POSTING_HEAD_START &&
+		   prism_posting_spilled(dim, prism_posting_flags_ref_format(flags));
 }
 
 /*
@@ -451,15 +531,17 @@ prism_posting_is_reference_only_page(uint16_t flags, Dimension dim)
  * aligned.
  */
 static inline uint32_t
-prism_posting_ref_prefix_size(Dimension dim)
+prism_posting_ref_prefix_size(
+		Dimension dim, PrismPostingReferenceFormat ref_format)
 {
-	if (!prism_posting_spilled(dim))
-		return prism_posting_pt_centroid_size(dim);
+	if (!prism_posting_spilled(dim, ref_format))
+		return prism_posting_pt_centroid_size(dim, ref_format);
 
-	uint32_t last = prism_posting_reference_pages(dim) - 1;
+	uint32_t last = prism_posting_reference_pages(dim, ref_format) - 1;
 
 	return (uint32_t)MAXALIGN(
-			prism_posting_reference_page_floats(dim, last) * sizeof(float));
+			prism_posting_reference_page_elems(dim, last, ref_format) *
+			prism_posting_ref_elem_size(ref_format));
 }
 
 /*
@@ -474,15 +556,16 @@ prism_posting_has_ref_prefix(uint16_t flags, Dimension dim)
 
 	if (part == PRISM_POSTING_HEAD_END)
 		return true;
-	return part == PRISM_POSTING_HEAD_START && !prism_posting_spilled(dim);
+	return part == PRISM_POSTING_HEAD_START &&
+		   !prism_posting_spilled(dim, prism_posting_flags_ref_format(flags));
 }
 
 /*
  * Head block of a leaf, and back. Heads sit in a region at first_posting
  * with a fixed stride: 1 for an inline layout,
- * prism_posting_reference_pages(dim) for a spilled one, so the reference
- * pages follow their head. The stride is passed rather than derived from
- * dim because the standalone in-RAM build addresses leaves by index
+ * prism_posting_reference_pages(dim, ref_format) for a spilled one, so the
+ * reference pages follow their head. The stride is passed rather than derived
+ * from dim because the standalone in-RAM build addresses leaves by index
  * (first_posting 0, stride 1).
  */
 static inline BlockNumber
@@ -511,9 +594,11 @@ prism_posting_max_entries(Dimension dim)
  * (prism_posting_ref_prefix_size): an inline START page or an END page.
  */
 static inline uint32_t
-prism_posting_max_entries_first(Dimension dim)
+prism_posting_max_entries_first(
+		Dimension dim, PrismPostingReferenceFormat ref_format)
 {
-	return (prism_posting_page_usable() - prism_posting_ref_prefix_size(dim)) /
+	return (prism_posting_page_usable() -
+			prism_posting_ref_prefix_size(dim, ref_format)) /
 		   PRISM_POSTING_ENTRY_SIZE(dim);
 }
 
@@ -655,6 +740,21 @@ prism_posting_pt_centroid_mut(Page page)
 }
 
 /*
+ * Copy the first n elements of a head page's reference into out as floats,
+ * widening a float16 reference (PRISM_POSTING_PAGE_REF16).
+ */
+void prism_posting_reference_load(Page page, uint32_t n, float *out);
+
+/* Store n floats of ref as the page's reference, as float16 if it is one. */
+void prism_posting_reference_store(Page page, const float *ref, uint32_t n);
+
+/*
+ * Round a reference to the float16 values a REF16 page stores, in place.
+ * Errors out on an element float16 cannot represent (beyond ±65504).
+ */
+void prism_posting_reference_round16(float *ref, Dimension dim);
+
+/*
  * Gather a posting list's encode reference, inline or spilled, into `out`
  * (dim floats). Reads the head pages one at a time, releasing each before
  * the next (the PG storage pins a single buffer). Returns the first page
@@ -663,7 +763,11 @@ prism_posting_pt_centroid_mut(Page page)
  * must be.
  */
 BlockNumber prism_posting_reference_read(
-		VsStorage *storage, BlockNumber head, Dimension dim, float *out);
+		VsStorage				   *storage,
+		BlockNumber					head,
+		Dimension					dim,
+		PrismPostingReferenceFormat ref_format,
+		float					   *out);
 
 /*
  * prism_posting_reference_read without the floats on the head's END page:
@@ -672,23 +776,25 @@ BlockNumber prism_posting_reference_read(
  * *cluster_id to the list's. For an inline layout this is the whole gather.
  */
 BlockNumber prism_posting_reference_read_to_end(
-		VsStorage  *storage,
-		BlockNumber head,
-		Dimension	dim,
-		float	   *out,
-		uint32_t   *cluster_id);
+		VsStorage				   *storage,
+		BlockNumber					head,
+		Dimension					dim,
+		PrismPostingReferenceFormat ref_format,
+		float					   *out,
+		uint32_t				   *cluster_id);
 
 /*
  * Check that `page`, at blk, is the head END page of the list at head
  * with cluster_id, and copy its floats of the reference into out.
  */
 void prism_posting_reference_read_end(
-		BlockNumber head,
-		BlockNumber blk,
-		Page		page,
-		uint32_t	cluster_id,
-		Dimension	dim,
-		float	   *out);
+		BlockNumber					head,
+		BlockNumber					blk,
+		Page						page,
+		uint32_t					cluster_id,
+		Dimension					dim,
+		PrismPostingReferenceFormat ref_format,
+		float					   *out);
 
 /*
  * The same gather for a caller that already copied the START page's floats
@@ -697,12 +803,13 @@ void prism_posting_reference_read_end(
  * back unchanged.
  */
 BlockNumber prism_posting_reference_read_rest(
-		VsStorage  *storage,
-		BlockNumber head,
-		BlockNumber next,
-		uint32_t	cluster_id,
-		Dimension	dim,
-		float	   *out);
+		VsStorage				   *storage,
+		BlockNumber					head,
+		BlockNumber					next,
+		uint32_t					cluster_id,
+		Dimension					dim,
+		PrismPostingReferenceFormat ref_format,
+		float					   *out);
 
 /*
  * Lay out head page i of a spilled list in `page`: init it as the head's
@@ -794,7 +901,8 @@ prism_posting_page_content(Page page, Dimension dim)
 	char	*start = prism_posting_content(page);
 
 	return prism_posting_has_ref_prefix(flags, dim)
-				 ? start + prism_posting_ref_prefix_size(dim)
+				 ? start + prism_posting_ref_prefix_size(
+								   dim, prism_posting_flags_ref_format(flags))
 				 : start;
 }
 
@@ -1019,14 +1127,17 @@ prism_fastscan_group_section_bytes(Dimension dim)
 
 /*
  * Bytes for metadata and codes on a fastscan page, after the reference
- * prefix when the page is a list's first entry page (ref_prefix).
+ * prefix when the page is a list's first entry page (ref_prefix), whose
+ * width ref_format sets.
  */
 static inline uint32_t
-prism_fastscan_page_space(Dimension dim, bool ref_prefix)
+prism_fastscan_page_space(
+		Dimension dim, bool ref_prefix, PrismPostingReferenceFormat ref_format)
 {
 	uint32_t usable = prism_posting_page_usable();
 
-	return ref_prefix ? usable - prism_posting_ref_prefix_size(dim) : usable;
+	return ref_prefix ? usable - prism_posting_ref_prefix_size(dim, ref_format)
+					  : usable;
 }
 
 /* Groups with metadata on a fastscan page, from its vector count. */
@@ -1044,12 +1155,16 @@ prism_fastscan_page_groups(const PrismPostingPageOpaque *op)
  * space / group-code-size + 1 groups.
  */
 static inline uint32_t
-prism_fastscan_max_groups(Dimension dim, bool ref_prefix)
+prism_fastscan_max_groups(
+		Dimension dim, bool ref_prefix, PrismPostingReferenceFormat ref_format)
 {
-	uint32_t space	  = prism_fastscan_page_space(dim, ref_prefix);
+	uint32_t space	  = prism_fastscan_page_space(dim, ref_prefix, ref_format);
 	uint32_t deferred = PRISM_FASTSCAN_MAX_INFLIGHT_GROUPS - 1;
 	uint32_t by_meta  = space / PRISM_FASTSCAN_META_BYTES;
-	uint32_t by_code  = deferred + 1 + space / VS_FASTSCAN_GROUP_BYTES(dim);
+	/* An index's dimension is never 0, so a group has code bytes; the
+	 * analyzer cannot see that from a scan's dim field. */
+	/* NOLINTNEXTLINE(clang-analyzer-core.DivideZero) */
+	uint32_t by_code = deferred + 1 + space / VS_FASTSCAN_GROUP_BYTES(dim);
 
 	return by_meta < by_code ? by_meta : by_code;
 }
@@ -1058,14 +1173,18 @@ prism_fastscan_max_groups(Dimension dim, bool ref_prefix)
 static inline uint32_t
 prism_fastscan_max_entries(Dimension dim)
 {
-	return prism_fastscan_max_groups(dim, false) * VS_FASTSCAN_GROUP;
+	return prism_fastscan_max_groups(
+				   dim, false, PRISM_POSTING_REFERENCE_FLOAT32) *
+		   VS_FASTSCAN_GROUP;
 }
 
 /* Max entries on a list's first fastscan entry page, after the prefix */
 static inline uint32_t
-prism_fastscan_max_entries_first(Dimension dim)
+prism_fastscan_max_entries_first(
+		Dimension dim, PrismPostingReferenceFormat ref_format)
 {
-	return prism_fastscan_max_groups(dim, true) * VS_FASTSCAN_GROUP;
+	return prism_fastscan_max_groups(dim, true, ref_format) *
+		   VS_FASTSCAN_GROUP;
 }
 
 /*
@@ -1076,8 +1195,9 @@ prism_fastscan_max_entries_first(Dimension dim)
 static inline double
 prism_fastscan_entries_per_page(Dimension dim)
 {
-	return (double)prism_fastscan_page_space(dim, false) * VS_FASTSCAN_GROUP /
-		   prism_fastscan_group_section_bytes(dim);
+	return (double)prism_fastscan_page_space(
+				   dim, false, PRISM_POSTING_REFERENCE_FLOAT32) *
+		   VS_FASTSCAN_GROUP / prism_fastscan_group_section_bytes(dim);
 }
 
 /*
@@ -1116,14 +1236,16 @@ static inline uint32_t
 prism_posting_page_cap(const PrismPostingPageOpaque *op, Dimension dim)
 {
 	bool first = prism_posting_has_ref_prefix(op->flags, dim);
+	PrismPostingReferenceFormat ref_format = prism_posting_flags_ref_format(
+			op->flags);
 
 	if (prism_posting_is_reference_only_page(op->flags, dim))
 		return 0;
 	if (op->flags & PRISM_POSTING_PAGE_FASTSCAN)
-		return first ? prism_fastscan_max_entries_first(dim)
+		return first ? prism_fastscan_max_entries_first(dim, ref_format)
 					 : prism_fastscan_max_entries(dim);
 
-	return first ? prism_posting_max_entries_first(dim)
+	return first ? prism_posting_max_entries_first(dim, ref_format)
 				 : prism_posting_max_entries(dim);
 }
 

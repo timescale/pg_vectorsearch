@@ -467,7 +467,8 @@ prism_index_build(
 
 		/* The driver produces fastscan-packed pages when requested; the query
 		 * path must know to read them as fastscan (not AoS). */
-		idx->base.fastscan = config->fastscan != 0;
+		idx->base.fastscan	 = config->fastscan != 0;
+		idx->base.ref_format = config->ref_format;
 
 		/* Upper bound on leaves (fan_out^nlevels, matching the tree the driver
 		 * builds). */
@@ -507,6 +508,7 @@ prism_index_build(
 				.soar_lambda	  = config->soar_lambda,
 				.boundary_epsilon = config->boundary_epsilon,
 				.fastscan		  = config->fastscan != 0,
+				.ref_format		  = config->ref_format,
 		};
 
 		double heap_tuples = 0, indtuples = 0, soar_dupes = 0;

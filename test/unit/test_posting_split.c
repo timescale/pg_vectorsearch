@@ -1558,7 +1558,9 @@ TEST(split_spilled_list)
 {
 	DECLARE_TWO_BLOB_INDEX(300, 4096, 42);
 	ASSERT_NOT_NULL(idx, "paged build at 4096 should succeed");
-	ASSERT_TRUE(prism_posting_spilled(dim), "4096 spills");
+	ASSERT_TRUE(
+			prism_posting_spilled(dim, PRISM_POSTING_REFERENCE_FLOAT32),
+			"4096 spills");
 
 	/* The split's fixed k-means scratch alone is ~68 MB at 4096 (a 4096-row
 	 * distance block of dim floats), more than the 32 MB default budget can

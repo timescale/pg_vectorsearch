@@ -403,11 +403,18 @@ prism_build_route_emit(
 	 * selection or not. */
 	for (uint32_t i = 0; i < n; i++)
 	{
-		BlockNumber h	  = ctx->qs->beam_results[i].posting_head;
-		ctx->cand_leaf[i] = prism_route_head_to_leaf(
-				ctx->first_posting, h, prism_posting_reference_pages(dim));
+		BlockNumber					h = ctx->qs->beam_results[i].posting_head;
+		PrismPostingReferenceFormat ref_format = ctx->qs->index->ref_format;
+		ctx->cand_leaf[i]					   = prism_route_head_to_leaf(
+				 ctx->first_posting,
+				 h,
+				 prism_posting_reference_pages(dim, ref_format));
 		prism_posting_reference_read(
-				ctx->storage, h, dim, ctx->cand_pt + (size_t)i * dim);
+				ctx->storage,
+				h,
+				dim,
+				ref_format,
+				ctx->cand_pt + (size_t)i * dim);
 	}
 
 	/*
@@ -569,7 +576,12 @@ reference_page_flush_middle(PrismPostingBuilder *builder, uint32_t i)
 		page = vs_storage_new_page(builder->storage, &blkno);
 	}
 	prism_posting_reference_page_fill(
-			page, builder->cluster_id, builder->dim, i, builder->ref_copy, 0);
+			page,
+			builder->cluster_id,
+			builder->dim,
+			i,
+			builder->ref_copy,
+			prism_posting_ref_format_flag(builder->ref_format));
 	vs_storage_commit_page(builder->storage, blkno);
 
 	Page prev = vs_storage_write_page(builder->storage, builder->prev_blkno);
@@ -596,6 +608,7 @@ page_reinit_as_reference_end(PrismPostingBuilder *builder)
 						  ? PRISM_POSTING_PAGE_FASTSCAN
 						  : 0;
 
+	fmt |= prism_posting_ref_format_flag(builder->ref_format);
 	prism_posting_reference_page_fill(
 			builder->mem_page,
 			builder->cluster_id,
@@ -693,15 +706,16 @@ flush_page(PrismPostingBuilder *builder)
  */
 static void
 builder_init_common(
-		PrismPostingBuilder		  *builder,
-		VsStorage				  *storage,
-		const RaBitQParams		  *params,
-		Dimension				   dim,
-		uint32_t				   cluster_id,
-		const float				  *centroid,
-		const float				  *pt_centroid,
-		const PrismPostingPageOps *ops,
-		uint16_t				   first_page_flags)
+		PrismPostingBuilder		   *builder,
+		VsStorage				   *storage,
+		const RaBitQParams		   *params,
+		Dimension					dim,
+		uint32_t					cluster_id,
+		const float				   *centroid,
+		const float				   *pt_centroid,
+		const PrismPostingPageOps  *ops,
+		uint16_t					first_page_flags,
+		PrismPostingReferenceFormat ref_format)
 {
 	memset(builder, 0, sizeof(*builder));
 	builder->storage	= storage;
@@ -719,27 +733,57 @@ builder_init_common(
 	builder->fixed_first_blkno = InvalidBlockNumber;
 	builder->end_blkno		   = InvalidBlockNumber;
 
-	builder->spilled   = prism_posting_spilled(dim);
-	builder->ref_pages = prism_posting_reference_pages(dim);
+	builder->ref_format = builder->owns_head ? ref_format
+											 : PRISM_POSTING_REFERENCE_FLOAT32;
+	builder->spilled	= prism_posting_spilled(dim, builder->ref_format);
+	builder->ref_pages =
+			prism_posting_reference_pages(dim, builder->ref_format);
+
+	uint16_t ref_flag = prism_posting_ref_format_flag(builder->ref_format);
+
+	/* A float16 reference is rounded here, once: the pages store it and raw
+	 * vectors are encoded against it, so the two agree. */
+	if (builder->owns_head && pt_centroid != NULL &&
+		(builder->spilled ||
+		 builder->ref_format == PRISM_POSTING_REFERENCE_FLOAT16))
+	{
+		builder->ref_copy = vs_alloc((size_t)dim * sizeof(float));
+		memcpy(builder->ref_copy, pt_centroid, (size_t)dim * sizeof(float));
+		if (builder->ref_format == PRISM_POSTING_REFERENCE_FLOAT16)
+			prism_posting_reference_round16(builder->ref_copy, dim);
+	}
+
 	/* A spilled list's START page holds only reference, in either format.
 	 * The entries start on the head's END page, after the reference. */
 	if (builder->spilled && builder->owns_head)
 	{
 		Assert(pt_centroid != NULL);
-		builder->ref_copy = vs_alloc((size_t)dim * sizeof(float));
-		memcpy(builder->ref_copy, pt_centroid, (size_t)dim * sizeof(float));
 		prism_posting_reference_page_fill(
-				builder->mem_page, cluster_id, dim, 0, builder->ref_copy, 0);
+				builder->mem_page,
+				cluster_id,
+				dim,
+				0,
+				builder->ref_copy,
+				ref_flag);
 	}
 	else
 	{
 		prism_posting_page_init(
-				builder->mem_page, cluster_id, dim, first_page_flags);
+				builder->mem_page,
+				cluster_id,
+				dim,
+				first_page_flags | ref_flag);
 		if (pt_centroid != NULL)
-			memcpy(prism_posting_pt_centroid_mut(builder->mem_page),
-				   pt_centroid,
-				   dim * sizeof(float));
+			prism_posting_reference_store(
+					builder->mem_page,
+					builder->ref_format == PRISM_POSTING_REFERENCE_FLOAT16
+							? builder->ref_copy
+							: pt_centroid,
+					dim);
 	}
+	if (builder->ref_format == PRISM_POSTING_REFERENCE_FLOAT16 &&
+		params != NULL)
+		builder->pt_vec = vs_alloc_aligned((size_t)dim * sizeof(float), 64);
 
 	builder->enc_buf = params ? vs_alloc(VS_RABITQ_DATA_SIZE(dim)) : NULL;
 	if (params)
@@ -822,7 +866,8 @@ fs_page_bytes_available(const PrismPostingBuilder *builder)
 		return 0;
 	return prism_fastscan_page_space(
 				   builder->dim,
-				   prism_posting_has_ref_prefix(flags, builder->dim)) -
+				   prism_posting_has_ref_prefix(flags, builder->dim),
+				   prism_posting_flags_ref_format(flags)) -
 		   used;
 }
 
@@ -1083,7 +1128,8 @@ prism_posting_builder_init(
 			centroid,
 			pt_centroid,
 			&aos_page_ops,
-			PRISM_POSTING_HEAD_START);
+			PRISM_POSTING_HEAD_START,
+			PRISM_POSTING_REFERENCE_FLOAT32);
 }
 
 void
@@ -1105,7 +1151,8 @@ prism_posting_builder_init_fastscan(
 			centroid,
 			pt_centroid,
 			&fs_page_ops,
-			PRISM_POSTING_HEAD_START | PRISM_POSTING_PAGE_FASTSCAN);
+			PRISM_POSTING_HEAD_START | PRISM_POSTING_PAGE_FASTSCAN,
+			PRISM_POSTING_REFERENCE_FLOAT32);
 	fs_alloc_buffers(builder, dim);
 }
 
@@ -1141,6 +1188,34 @@ prism_posting_builder_init_fmt(
 }
 
 void
+prism_posting_builder_init_ref(
+		PrismPostingBuilder		   *builder,
+		VsStorage				   *storage,
+		const RaBitQParams		   *params,
+		Dimension					dim,
+		uint32_t					cluster_id,
+		const float				   *centroid,
+		const float				   *pt_centroid,
+		bool						fastscan,
+		PrismPostingReferenceFormat ref_format)
+{
+	builder_init_common(
+			builder,
+			storage,
+			params,
+			dim,
+			cluster_id,
+			centroid,
+			pt_centroid,
+			fastscan ? &fs_page_ops : &aos_page_ops,
+			PRISM_POSTING_HEAD_START |
+					(fastscan ? PRISM_POSTING_PAGE_FASTSCAN : 0),
+			ref_format);
+	if (fastscan)
+		fs_alloc_buffers(builder, dim);
+}
+
+void
 prism_posting_builder_adopt_head(
 		PrismPostingBuilder *builder,
 		VsStorage			*storage,
@@ -1165,8 +1240,15 @@ prism_posting_builder_adopt_head(
 	builder->fixed_first_blkno = head_blk;
 	builder->end_blkno		   = InvalidBlockNumber;
 	builder->adopted_head	   = true;
-	builder->spilled		   = prism_posting_spilled(dim);
-	builder->ref_pages		   = prism_posting_reference_pages(dim);
+
+	/* The pre-written head says how its reference is stored. */
+	Page head0			= vs_storage_read_page(storage, head_blk);
+	builder->ref_format = prism_posting_flags_ref_format(
+			prism_posting_opaque(head0)->flags);
+	vs_storage_release_page(storage, head_blk);
+	builder->spilled = prism_posting_spilled(dim, builder->ref_format);
+	builder->ref_pages =
+			prism_posting_reference_pages(dim, builder->ref_format);
 
 	if (!builder->spilled)
 	{
@@ -1264,14 +1346,30 @@ prism_posting_builder_add_ex(
 	/* Adopted heads carry no encoder (their entries arrive pre-encoded). */
 	Assert(builder->enc_buf != NULL);
 
-	Vec32Ref vref = {.data = vector, .dim = builder->dim};
-	Vec32Ref cref = {.data = builder->centroid, .dim = builder->dim};
-	vs_rabitq_encode_into_ex(
-			builder->params,
-			vref,
-			cref,
-			builder->enc_buf,
-			&builder->enc_scratch);
+	if (builder->ref_format == PRISM_POSTING_REFERENCE_FLOAT16)
+	{
+		/* Against the rounded reference the pages store, in rotated space
+		 * (P^T is linear: P^T*(v - c) = P^T*v - P^T*c). */
+		vs_rabitq_rotate(builder->params, vector, builder->pt_vec);
+		for (Dimension d = 0; d < builder->dim; d++)
+			builder->pt_vec[d] -= builder->ref_copy[d];
+		vs_rabitq_encode_from_pt(
+				builder->params,
+				builder->pt_vec,
+				builder->enc_buf,
+				&builder->enc_scratch);
+	}
+	else
+	{
+		Vec32Ref vref = {.data = vector, .dim = builder->dim};
+		Vec32Ref cref = {.data = builder->centroid, .dim = builder->dim};
+		vs_rabitq_encode_into_ex(
+				builder->params,
+				vref,
+				cref,
+				builder->enc_buf,
+				&builder->enc_scratch);
+	}
 
 	float f_add	  = builder->enc_buf->f_add;
 	float f_error = vs_rabitq_derive_f_error(
@@ -1346,6 +1444,11 @@ prism_posting_builder_cleanup(PrismPostingBuilder *builder)
 	{
 		vs_free(builder->ref_copy);
 		builder->ref_copy = NULL;
+	}
+	if (builder->pt_vec != NULL)
+	{
+		vs_free_aligned(builder->pt_vec);
+		builder->pt_vec = NULL;
 	}
 }
 
@@ -1440,7 +1543,7 @@ prism_refine_route_row(
 	uint32_t leaf = prism_route_head_to_leaf(
 			first_posting,
 			qs->beam_results[0].posting_head,
-			prism_posting_reference_pages(dim));
+			prism_posting_reference_pages(dim, qs->index->ref_format));
 	if (leaf < tile_lo || leaf >= tile_hi)
 		return NULL;
 	*out_idx = leaf - tile_lo;
@@ -1490,7 +1593,7 @@ prism_write_leaf_head(void *arg, uint32_t leaf, const float *centroid)
 	 * arena would otherwise keep for every leaf. */
 	VsMemCtx			outer = vs_memctx_switch(h->leaf_ctx);
 	PrismPostingBuilder hb;
-	prism_posting_builder_init_fmt(
+	prism_posting_builder_init_ref(
 			&hb,
 			h->storage,
 			h->rq_params,
@@ -1498,7 +1601,8 @@ prism_write_leaf_head(void *arg, uint32_t leaf, const float *centroid)
 			leaf,
 			centroid,
 			h->pt,
-			h->fastscan);
+			h->fastscan,
+			h->ref_format);
 	prism_posting_builder_set_first_blkno(
 			&hb, prism_leaf_head_blkno(h->first_posting, leaf, h->stride));
 	prism_posting_builder_finish(&hb);

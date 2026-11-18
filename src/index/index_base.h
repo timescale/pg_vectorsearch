@@ -88,6 +88,10 @@ typedef struct PrismIndexBase
 	RaBitQParams *params;
 	float		 *pt_global_mean;
 	uint64_t	  rabitq_seed;
+	/* Posting-list references stored as float16 (PRISM_POSTING_PAGE_REF16),
+	 * which sets the lists' layout: whether they spill, how many head pages
+	 * they have. */
+	PrismPostingReferenceFormat ref_format;
 
 	/* PG: both point to the same VsPgStorage (one index relation).
 	 * Standalone: separate ArrayPageStorage for centroids vs postings. */

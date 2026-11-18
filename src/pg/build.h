@@ -37,6 +37,8 @@ typedef struct PrismBuildParams
 	double				soar_lambda;
 	double				boundary_epsilon;
 	bool				fastscan;
+	PrismPostingReferenceFormat
+			ref_format; /* posting-list reference element type */
 } PrismBuildParams;
 
 IndexBuildResult *

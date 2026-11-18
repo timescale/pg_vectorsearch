@@ -492,6 +492,7 @@ get_cache_data(Relation index)
 	c->base.metric			= (DistanceMetric)meta->metric;
 	c->base.centroid_format = (PrismCentroidFormat)meta->centroid_format;
 	c->base.rabitq_seed		= seed;
+	c->base.ref_format		= prism_meta_ref_format(meta->flags);
 	/* base.pt_global_mean stays NULL until prism_index_base_init computes it.
 	 */
 
@@ -512,7 +513,11 @@ get_cache_data(Relation index)
 
 		vs_pg_storage_init_inspect(&st, index);
 		prism_posting_reference_read(
-				&st.base, PRISM_GLOBAL_MEAN_BLKNO, dim, cache_global_mean(c));
+				&st.base,
+				PRISM_GLOBAL_MEAN_BLKNO,
+				dim,
+				PRISM_POSTING_REFERENCE_FLOAT32,
+				cache_global_mean(c));
 	}
 
 	/* Opclass-derived, so no metapage needed -- but resolved here so every
@@ -590,5 +595,6 @@ prism_cache_scan_info(Relation index)
 			.ncentroid_pages = c->base.ncentroid_pages,
 			.centroid_format = c->base.centroid_format,
 			.has_fastscan	 = c->has_fastscan,
+			.ref_format		 = c->base.ref_format,
 	};
 }

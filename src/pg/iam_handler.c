@@ -538,6 +538,9 @@ prism_options(Datum reloptions, bool validate)
 			{"centroid_fastscan",
 			 RELOPT_TYPE_ENUM,
 			 offsetof(PrismOptions, centroid_fastscan)},
+			{"posting_reference_format",
+			 RELOPT_TYPE_ENUM,
+			 offsetof(PrismOptions, posting_reference_format)},
 	};
 	return (bytea *)build_reloptions(
 			reloptions,

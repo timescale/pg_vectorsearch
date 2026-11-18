@@ -122,6 +122,7 @@ prism_query_state_init(
 			index->page_base,
 			index->params,
 			dim,
+			index->ref_format,
 			max_entries);
 
 	vs_memctx_switch(caller_ctx);
@@ -358,7 +359,7 @@ scan_clusters(
 	 * front so the reads overlap. Best-effort and a no-op where the storage
 	 * has no prefetch (standalone) or the page is already resident.
 	 */
-	uint32_t ref_pages = prism_posting_reference_pages(dim);
+	uint32_t ref_pages = prism_posting_reference_pages(dim, idx->ref_format);
 	for (uint32_t j = 0; j < n_results; j++)
 	{
 		BlockNumber head = beam_results[j].posting_head;
@@ -392,7 +393,7 @@ scan_clusters(
 		uint32_t want = n_results < qs->probe_refs_max ? n_results
 													   : qs->probe_refs_max;
 
-		if (qs->pscan.pt_ref != NULL && qs->probe_refs_cap < want)
+		if (qs->pscan.spilled && qs->probe_refs_cap < want)
 		{
 			/*
 			 * Grow geometrically, up to max_nprobe and the byte budget. The
@@ -430,7 +431,7 @@ scan_clusters(
 			if (ph == InvalidBlockNumber)
 				continue;
 
-			if (qs->pscan.pt_ref != NULL)
+			if (qs->pscan.spilled)
 			{
 				/* Spilled: gather once and keep it for the scan pass where
 				 * the buffer has a slot, else gather into the scan's own
@@ -439,7 +440,7 @@ scan_clusters(
 				float	   *ref		= saved ? qs->probe_refs + (size_t)j * dim
 											: qs->pscan.pt_ref;
 				BlockNumber entries = prism_posting_reference_read(
-						qs->pscan.storage, ph, dim, ref);
+						qs->pscan.storage, ph, dim, qs->pscan.ref_format, ref);
 
 				if (saved)
 					qs->probe_entries[j] = entries;

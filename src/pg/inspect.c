@@ -894,9 +894,11 @@ vs_index_settings(PG_FUNCTION_ARGS)
 	DistanceMetric metric	= (DistanceMetric)meta->metric;
 	uint8_t		   fan_out	= meta->fan_out;
 	bool		   fastscan = (meta->flags & PRISM_META_FLAG_FASTSCAN) != 0;
-	uint32_t	   ncentroid_pages = meta->ncentroid_pages;
-	BlockNumber	   first_posting   = meta->first_posting;
-	uint8_t		   meta_flags	   = meta->flags;
+	PrismPostingReferenceFormat ref_format = prism_meta_ref_format(
+			meta->flags);
+	uint32_t	ncentroid_pages = meta->ncentroid_pages;
+	BlockNumber first_posting	= meta->first_posting;
+	uint8_t		meta_flags		= meta->flags;
 	vs_storage_release_page(st, 0);
 	prism_meta_check_flags(RelationGetRelationName(index), meta_flags);
 
@@ -978,6 +980,12 @@ vs_index_settings(PG_FUNCTION_ARGS)
 			"fastscan",
 			fastscan ? "on" : "off",
 			reloption_is_set(set, "fastscan") ? "option" : "auto");
+	settings_row(
+			rsinfo,
+			"posting_reference_format",
+			prism_posting_reference_format_name(ref_format),
+			reloption_is_set(set, "posting_reference_format") ? "option"
+															  : "default");
 
 	/* Build options not persisted in the index: current catalog
 	 * values, with reloption defaults filled in */

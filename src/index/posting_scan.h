@@ -52,16 +52,18 @@ typedef struct PrismPostingScan
 	RaBitQQueryState *qstate;
 
 	/*
-	 * Encode reference of the current cluster. Inline layout: NULL, since
-	 * prism_posting_scan_pt_centroid reads it from the pinned head page.
-	 * Spilled layout (prism_posting_spilled):
-	 * either pt_ref, gathered from the head's REFERENCE chain by
-	 * begin_cluster, or a buffer the caller gathered earlier and handed to
-	 * begin_cluster_at. pt_ref is allocated once per scan, only when the
-	 * dimension spills.
+	 * Encode reference of the current cluster. Inline float32 layout: NULL,
+	 * since prism_posting_scan_pt_centroid reads it from the pinned head
+	 * page. Inline float16: pt_ref, widened from the head page.
+	 * Spilled layout (prism_posting_spilled): either pt_ref, gathered from
+	 * the head's reference chain by begin_cluster, or a buffer the caller
+	 * gathered earlier and handed to begin_cluster_at. pt_ref is allocated
+	 * once per scan, only when the lists spill or store float16.
 	 */
-	float		*pt_ref;
-	const float *cur_ref;
+	bool						spilled;
+	PrismPostingReferenceFormat ref_format;
+	float					   *pt_ref;
+	const float				   *cur_ref;
 
 	/* Page iteration — paged mode uses cur_blkno/cur_page,
 	 * flat mode sets cur_page to the flat buffer */
@@ -121,12 +123,13 @@ typedef struct PrismPostingScan
  *            (bypasses storage vtable). NULL to use storage vtable.
  */
 void prism_posting_scan_init(
-		PrismPostingScan   *scan,
-		VsStorage		   *storage,
-		char			   *page_base,
-		const RaBitQParams *params,
-		Dimension			dim,
-		uint32_t			max_entries_per_page);
+		PrismPostingScan		   *scan,
+		VsStorage				   *storage,
+		char					   *page_base,
+		const RaBitQParams		   *params,
+		Dimension					dim,
+		PrismPostingReferenceFormat ref_format,
+		uint32_t					max_entries_per_page);
 
 /*
  * Begin scanning a cluster's posting list (paged mode).

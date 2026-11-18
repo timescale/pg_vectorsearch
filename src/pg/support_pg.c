@@ -84,6 +84,12 @@ static relopt_enum_elt_def distance_mode_relopt_members[] = {
 };
 
 /* "true"/"false" are accepted aliases for "on"/"off". */
+static relopt_enum_elt_def posting_reference_format_relopt_members[] = {
+		{"float32", PRISM_POSTING_REFERENCE_FLOAT32},
+		{"float16", PRISM_POSTING_REFERENCE_FLOAT16},
+		{NULL, 0},
+};
+
 static relopt_enum_elt_def centroid_compression_relopt_members[] = {
 		{"auto", PRISM_CENTROID_COMPRESSION_AUTO},
 		{"on", PRISM_CENTROID_COMPRESSION_ON},
@@ -425,6 +431,14 @@ _PG_init(void)
 			PRISM_FASTSCAN_MODE_AUTO,
 			"auto follows the resolved centroid compression and the "
 			"dimension limit; on errors where either is unavailable",
+			NoLock);
+	add_enum_reloption(
+			prism_relopt_kind,
+			"posting_reference_format",
+			"Storage format of each posting list's encode reference",
+			posting_reference_format_relopt_members,
+			PRISM_POSTING_REFERENCE_FLOAT16,
+			"valid values are float32 and float16",
 			NoLock);
 
 	vs_distance_init();

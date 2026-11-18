@@ -55,6 +55,15 @@ parse_centroid_fmt(const char *s)
 	return PRISM_CENTROID_FMT_RABITQ;
 }
 
+/* "float32" or "float16"; NULL means the default, float16. */
+static PrismPostingReferenceFormat
+parse_posting_reference_format(const char *s)
+{
+	if (s != NULL && strcmp(s, "float32") == 0)
+		return PRISM_POSTING_REFERENCE_FLOAT32;
+	return PRISM_POSTING_REFERENCE_FLOAT16;
+}
+
 static PrismPostingFormat
 parse_posting_fmt(const char *s)
 {
@@ -88,6 +97,7 @@ vs_handle_create(
 		double			soar_lambda,
 		double			boundary_epsilon,
 		int				fastscan,
+		const char	   *posting_reference_format,
 		int32_t			nworkers,
 		uint32_t		max_k,
 		uint32_t		max_nprobe,
@@ -113,9 +123,11 @@ vs_handle_create(
 			.soar_lambda	  = soar_lambda,
 			.boundary_epsilon = boundary_epsilon,
 			.fastscan		  = fastscan,
-			.nworkers		  = nworkers,
-			.encode_rabitq	  = true,
-			.posting_fmt	  = parse_posting_fmt(posting_fmt),
+			.ref_format		  = parse_posting_reference_format(
+					  posting_reference_format),
+			.nworkers	   = nworkers,
+			.encode_rabitq = true,
+			.posting_fmt   = parse_posting_fmt(posting_fmt),
 	};
 
 	PrismBuildStats build_stats;
@@ -130,10 +142,12 @@ vs_handle_create(
 	/* Fill build stats if requested */
 	if (info != NULL)
 	{
-		info->stats		  = build_stats;
-		info->nlist		  = idx->nlist;
-		info->nlevels	  = idx->base.nlevels;
-		info->nvecs		  = idx->nvecs;
+		info->stats					   = build_stats;
+		info->nlist					   = idx->nlist;
+		info->nlevels				   = idx->base.nlevels;
+		info->nvecs					   = idx->nvecs;
+		info->posting_reference_format = prism_posting_reference_format_name(
+				idx->base.ref_format);
 		info->max_cluster = 0;
 		info->min_cluster = UINT32_MAX;
 		for (uint32_t c = 0; c < idx->nlist; c++)
@@ -199,6 +213,7 @@ vs_handle_create_from_array(
 		double			soar_lambda,
 		double			boundary_epsilon,
 		int				fastscan,
+		const char	   *posting_reference_format,
 		int32_t			nworkers,
 		uint32_t		max_k,
 		uint32_t		max_nprobe,
@@ -218,6 +233,7 @@ vs_handle_create_from_array(
 			soar_lambda,
 			boundary_epsilon,
 			fastscan,
+			posting_reference_format,
 			nworkers,
 			max_k,
 			max_nprobe,

@@ -632,6 +632,7 @@ prism_pbuild_setup_shared(
 	shared->soar_lambda			   = config->soar_lambda;
 	shared->boundary_epsilon	   = config->boundary_epsilon;
 	shared->fastscan			   = config->fastscan;
+	shared->ref_format			   = config->ref_format;
 	shared->centroid_format		   = config->centroid_format;
 	shared->rabitq_seed			   = rabitq_seed;
 	shared->nparticipants		   = nparticipants;

@@ -7,8 +7,11 @@
 
 #include "vs_config.h"
 
+#include <math.h>
+
 #include "core/log.h"
 #include "index/posting_page.h"
+#include "types/vec16.h"
 
 #ifndef VS_STANDALONE
 #include <miscadmin.h> /* CHECK_FOR_INTERRUPTS */
@@ -48,7 +51,13 @@ prism_posting_check_count(BlockNumber blkno, Page page, Dimension dim)
 		bool prefix = prism_posting_has_ref_prefix(op->flags, dim);
 
 		prism_fastscan_check_page(
-				blkno, op, cap, prism_fastscan_page_space(dim, prefix));
+				blkno,
+				op,
+				cap,
+				prism_fastscan_page_space(
+						dim,
+						prefix,
+						prism_posting_flags_ref_format(op->flags)));
 		return;
 	}
 
@@ -79,7 +88,8 @@ prism_posting_page_init(
 	if (!(flags & PRISM_POSTING_PAGE_FASTSCAN) &&
 		!prism_posting_is_reference_only_page(flags, dim))
 		max = prism_posting_has_ref_prefix(flags, dim)
-					? prism_posting_max_entries_first(dim)
+					? prism_posting_max_entries_first(
+							  dim, prism_posting_flags_ref_format(flags))
 					: prism_posting_max_entries(dim);
 	PrismPostingPageOpaque *opaque = prism_posting_opaque(page);
 	opaque->next_blkno			   = InvalidBlockNumber;
@@ -137,15 +147,56 @@ prism_posting_page_add(
  * Encode reference, inline or spilled
  * ---------------------------------------------------------------- */
 
-/* The head part of head page i of a spilled list (0 = START). */
+/*
+ * The flags of head page i of a list (0 = START): its part of the head, and
+ * PRISM_POSTING_PAGE_REF16 for a float16 reference.
+ */
 static uint16_t
-reference_page_kind(Dimension dim, uint32_t i)
+reference_page_kind(
+		Dimension dim, uint32_t i, PrismPostingReferenceFormat ref_format)
 {
+	uint16_t ref = prism_posting_ref_format_flag(ref_format);
+
 	if (i == 0)
-		return PRISM_POSTING_HEAD_START;
-	if (i == prism_posting_reference_pages(dim) - 1)
-		return PRISM_POSTING_HEAD_END;
-	return PRISM_POSTING_HEAD_MIDDLE;
+		return PRISM_POSTING_HEAD_START | ref;
+	if (i == prism_posting_reference_pages(dim, ref_format) - 1)
+		return PRISM_POSTING_HEAD_END | ref;
+	return PRISM_POSTING_HEAD_MIDDLE | ref;
+}
+
+void
+prism_posting_reference_load(Page page, uint32_t n, float *out)
+{
+	if (prism_posting_flags_ref_format(prism_posting_opaque(page)->flags) ==
+		PRISM_POSTING_REFERENCE_FLOAT16)
+		vs_half_to_float_array((const half *)PageGetContents(page), out, n);
+	else
+		memcpy(out, PageGetContents(page), (size_t)n * sizeof(float));
+}
+
+void
+prism_posting_reference_round16(float *ref, Dimension dim)
+{
+	for (Dimension d = 0; d < dim; d++)
+	{
+		if (!(fabsf(ref[d]) <= 65504.0f))
+			vs_error(
+					VS_EXTENSION_NAME
+					": a posting-list reference does not fit in float16, "
+					"whose largest value is 65504; build the index with "
+					"posting_reference_format = float32");
+		ref[d] = vs_half_to_float(vs_float_to_half(ref[d]));
+	}
+}
+
+void
+prism_posting_reference_store(Page page, const float *ref, uint32_t n)
+{
+	if (prism_posting_flags_ref_format(prism_posting_opaque(page)->flags) ==
+		PRISM_POSTING_REFERENCE_FLOAT16)
+		vs_float_to_half_array(ref, (half *)PageGetContents(page), n);
+	else
+		memcpy(PageGetContents(page), ref, (size_t)n * sizeof(float));
 }
 
 void
@@ -157,50 +208,60 @@ prism_posting_reference_page_fill(
 		const float *ref,
 		uint16_t	 extra_flags)
 {
-	uint16_t flags	 = reference_page_kind(dim, i) | extra_flags;
-	uint32_t start	 = i * (uint32_t)PRISM_POSTING_REFERENCE_PAGE_FLOATS;
-	uint32_t nfloats = prism_posting_reference_page_floats(dim, i);
+	PrismPostingReferenceFormat ref_format = prism_posting_flags_ref_format(
+			extra_flags);
+	uint16_t flags = reference_page_kind(dim, i, ref_format) | extra_flags;
+	uint32_t start = i * prism_posting_reference_page_capacity(ref_format);
+	uint32_t n	   = prism_posting_spilled(dim, ref_format)
+						   ? prism_posting_reference_page_elems(dim, i, ref_format)
+						   : dim;
 
 	prism_posting_page_init(page, cluster_id, dim, flags);
-	memcpy(prism_posting_pt_centroid_mut(page),
-		   ref + start,
-		   (size_t)nfloats * sizeof(float));
+	prism_posting_reference_store(page, ref + start, n);
 }
 
 /*
  * Whether a page read while gathering a list's reference is the head page
  * expected at position i: START first, then MIDDLE pages, then END, all of
- * the START page's cluster. `opaque` is the page's opaque. The START page
- * (i = 0) sets *cluster_id for the later pages to match. A page that does
- * not match means the chain is corrupt, and the caller reports it rather
- * than read its contents as reference.
+ * the START page's cluster, and with the reference width the index uses
+ * (ref_format). `opaque` is the page's opaque. The START page (i = 0) sets
+ * *cluster_id for the later pages to match. A page that does not match
+ * means the chain is corrupt, and the caller reports it rather than read
+ * its contents as reference.
  */
 static bool
 reference_page_matches(
 		const PrismPostingPageOpaque *opaque,
 		uint32_t					  i,
 		uint32_t					 *cluster_id,
-		Dimension					  dim)
+		Dimension					  dim,
+		PrismPostingReferenceFormat	  ref_format)
 {
+	uint16_t want = reference_page_kind(dim, i, ref_format);
+
 	if (i == 0)
 		*cluster_id = opaque->cluster_id;
 	return prism_posting_head_part(opaque->flags) ==
-				   reference_page_kind(dim, i) &&
+				   prism_posting_head_part(want) &&
+		   prism_posting_flags_ref_format(opaque->flags) == ref_format &&
 		   opaque->cluster_id == *cluster_id;
 }
 
-/* Copy head page i's floats of the reference into out. */
+/* Copy head page i's part of the reference into out, as floats. */
 static void
-reference_copy_page(Page page, uint32_t i, Dimension dim, float *out)
+reference_copy_page(
+		Page						page,
+		uint32_t					i,
+		Dimension					dim,
+		PrismPostingReferenceFormat ref_format,
+		float					   *out)
 {
-	uint32_t start	 = i * (uint32_t)PRISM_POSTING_REFERENCE_PAGE_FLOATS;
-	uint32_t nfloats = prism_posting_spilled(dim)
-							 ? prism_posting_reference_page_floats(dim, i)
-							 : dim;
+	uint32_t start = i * prism_posting_reference_page_capacity(ref_format);
+	uint32_t n	   = prism_posting_spilled(dim, ref_format)
+						   ? prism_posting_reference_page_elems(dim, i, ref_format)
+						   : dim;
 
-	memcpy(out + start,
-		   prism_posting_pt_centroid(page),
-		   (size_t)nfloats * sizeof(float));
+	prism_posting_reference_load(page, n, out + start);
 }
 
 static void
@@ -241,16 +302,17 @@ not_posting_page_error(BlockNumber head, BlockNumber blk)
  */
 static BlockNumber
 posting_reference_read_chain(
-		VsStorage  *storage,
-		BlockNumber head,
-		BlockNumber blk,
-		uint32_t	first,
-		uint32_t	end,
-		uint32_t   *cluster_id,
-		Dimension	dim,
-		float	   *out)
+		VsStorage				   *storage,
+		BlockNumber					head,
+		BlockNumber					blk,
+		uint32_t					first,
+		uint32_t					end,
+		uint32_t				   *cluster_id,
+		Dimension					dim,
+		PrismPostingReferenceFormat ref_format,
+		float					   *out)
 {
-	uint32_t npages = prism_posting_reference_pages(dim);
+	uint32_t npages = prism_posting_reference_pages(dim, ref_format);
 
 	for (uint32_t i = first; i < end; i++)
 	{
@@ -271,7 +333,7 @@ posting_reference_read_chain(
 		}
 
 		const PrismPostingPageOpaque *op = prism_posting_opaque(page);
-		if (!reference_page_matches(op, i, cluster_id, dim))
+		if (!reference_page_matches(op, i, cluster_id, dim, ref_format))
 		{
 			uint16_t flags = op->flags;
 			uint32_t cid   = op->cluster_id;
@@ -280,12 +342,12 @@ posting_reference_read_chain(
 			reference_page_error(head, blk, i, flags, cid);
 		}
 
-		reference_copy_page(page, i, dim, out);
+		reference_copy_page(page, i, dim, ref_format, out);
 		BlockNumber next = op->next_blkno;
 		vs_storage_release_page(storage, blk);
 
 		if (!prism_posting_is_reference_only_page(
-					reference_page_kind(dim, i), dim))
+					reference_page_kind(dim, i, ref_format), dim))
 			return blk;
 		blk = next;
 	}
@@ -294,7 +356,11 @@ posting_reference_read_chain(
 
 BlockNumber
 prism_posting_reference_read(
-		VsStorage *storage, BlockNumber head, Dimension dim, float *out)
+		VsStorage				   *storage,
+		BlockNumber					head,
+		Dimension					dim,
+		PrismPostingReferenceFormat ref_format,
+		float					   *out)
 {
 	uint32_t cluster_id = 0;
 
@@ -303,67 +369,73 @@ prism_posting_reference_read(
 			head,
 			head,
 			0,
-			prism_posting_reference_pages(dim),
+			prism_posting_reference_pages(dim, ref_format),
 			&cluster_id,
 			dim,
+			ref_format,
 			out);
 }
 
 BlockNumber
 prism_posting_reference_read_to_end(
-		VsStorage  *storage,
-		BlockNumber head,
-		Dimension	dim,
-		float	   *out,
-		uint32_t   *cluster_id)
+		VsStorage				   *storage,
+		BlockNumber					head,
+		Dimension					dim,
+		PrismPostingReferenceFormat ref_format,
+		float					   *out,
+		uint32_t				   *cluster_id)
 {
-	uint32_t npages = prism_posting_reference_pages(dim);
-	uint32_t end	= prism_posting_spilled(dim) ? npages - 1 : npages;
+	uint32_t npages = prism_posting_reference_pages(dim, ref_format);
+	uint32_t end	= prism_posting_spilled(dim, ref_format) ? npages - 1
+															 : npages;
 
 	return posting_reference_read_chain(
-			storage, head, head, 0, end, cluster_id, dim, out);
+			storage, head, head, 0, end, cluster_id, dim, ref_format, out);
 }
 
 void
 prism_posting_reference_read_end(
-		BlockNumber head,
-		BlockNumber blk,
-		Page		page,
-		uint32_t	cluster_id,
-		Dimension	dim,
-		float	   *out)
+		BlockNumber					head,
+		BlockNumber					blk,
+		Page						page,
+		uint32_t					cluster_id,
+		Dimension					dim,
+		PrismPostingReferenceFormat ref_format,
+		float					   *out)
 {
-	uint32_t last = prism_posting_reference_pages(dim) - 1;
+	uint32_t last = prism_posting_reference_pages(dim, ref_format) - 1;
 
-	Assert(prism_posting_spilled(dim));
+	Assert(prism_posting_spilled(dim, ref_format));
 	if (!prism_page_is_posting(page))
 		not_posting_page_error(head, blk);
 
 	const PrismPostingPageOpaque *op = prism_posting_opaque(page);
-	if (!reference_page_matches(op, last, &cluster_id, dim))
+	if (!reference_page_matches(op, last, &cluster_id, dim, ref_format))
 		reference_page_error(head, blk, last, op->flags, op->cluster_id);
-	reference_copy_page(page, last, dim, out);
+	reference_copy_page(page, last, dim, ref_format, out);
 }
 
 BlockNumber
 prism_posting_reference_read_rest(
-		VsStorage  *storage,
-		BlockNumber head,
-		BlockNumber next,
-		uint32_t	cluster_id,
-		Dimension	dim,
-		float	   *out)
+		VsStorage				   *storage,
+		BlockNumber					head,
+		BlockNumber					next,
+		uint32_t					cluster_id,
+		Dimension					dim,
+		PrismPostingReferenceFormat ref_format,
+		float					   *out)
 {
-	if (!prism_posting_spilled(dim))
+	if (!prism_posting_spilled(dim, ref_format))
 		return next;
 	return posting_reference_read_chain(
 			storage,
 			head,
 			next,
 			1,
-			prism_posting_reference_pages(dim),
+			prism_posting_reference_pages(dim, ref_format),
 			&cluster_id,
 			dim,
+			ref_format,
 			out);
 }
 

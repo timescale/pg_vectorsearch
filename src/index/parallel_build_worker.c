@@ -941,6 +941,7 @@ prism_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 			shared->rabitq_seed,
 			global_mean,
 			vs_alloc((size_t)dim * sizeof(float)));
+	base.ref_format = shared->ref_format;
 	/* Build-only accuracy hook: exact scoring of the internal tree levels
 	 * (the query and insert paths never set this). */
 	base.exact_internal = &exact_centroids;

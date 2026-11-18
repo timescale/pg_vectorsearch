@@ -357,7 +357,7 @@ INSERT INTO dimcap
                FROM generate_series(1, 4096) j)::vec32(4096)
     FROM generate_series(1, 20) g;
 CREATE INDEX dimcap_i ON dimcap USING prism (v)
-    WITH (nlist = 1, fastscan = off);
+    WITH (nlist = 1, fastscan = off, posting_reference_format = float32);
 SELECT format, count(*) > 0 AS present FROM prism_posting_pages('dimcap_i')
     GROUP BY format ORDER BY format;
 -- The reference's third page also holds the first 15 entries.
@@ -378,13 +378,15 @@ RESET enable_seqscan;
 DROP FUNCTION dimcap_q(int);
 DROP TABLE dimcap;
 
--- At the largest inline dimension a group's codes span more than one page.
+-- At the largest dimension a float32 reference stays inline, and a group's
+-- codes span more than one page.
 CREATE TABLE dimcap (id int, v vec32(1968));
 INSERT INTO dimcap
     SELECT g, (SELECT ('[' || string_agg((sin(g + j))::text, ',') || ']')
                FROM generate_series(1, 1968) j)::vec32(1968)
     FROM generate_series(1, 20) g;
-CREATE INDEX dimcap_i ON dimcap USING prism (v) WITH (nlist = 4);
+CREATE INDEX dimcap_i ON dimcap USING prism (v)
+    WITH (nlist = 4, posting_reference_format = float32);
 SELECT setting FROM prism_index_settings('dimcap_i') WHERE name = 'fastscan';
 CREATE FUNCTION dimcap_q(qid int) RETURNS vec32 LANGUAGE plpgsql STABLE AS $$
 BEGIN
@@ -669,25 +671,76 @@ DROP FUNCTION meta_flags(regclass);
 DROP FUNCTION set_meta_flags(regclass, integer);
 RESET enable_seqscan;
 
--- The same lifecycle checks cover inline and spilled references.
+-- The same lifecycle checks cover inline and spilled references, with the
+-- default float16 ones. At 768 and 3072 dimensions a list's reference is
+-- inline. At 4096 it spills onto two pages, and the second also holds the
+-- list's first entries, so one holds only reference. The float32 layout has
+-- a test of its own (posting_reference_float32).
 SET maintenance_work_mem = '512MB';
 \i :helper_sql
 \set cases_sql :abs_srcdir '/sql/index_cases.sql'
+\set expected_magic 50524907
 \set dim 768
 \set reference_pages 0
 \set mean_pages 0
 \set spilled false
-\set expected_magic 50524907
 \i :cases_sql
-
--- Of the three pages the reference takes at 4096, the last also holds the
--- list's first entries, so two hold only reference.
+\set dim 3072
+\set mean_pages 2
+\i :cases_sql
 \set dim 4096
-\set reference_pages 2
+\set reference_pages 1
 \set mean_pages 3
 \set spilled true
-\set expected_magic 50524907
 \i :cases_sql
+
+-- An index built with no options at all gets the default.
+CREATE TABLE ref16_plain (v vec32(3));
+CREATE INDEX ref16_plain_idx ON ref16_plain USING prism (v);
+SELECT setting, source FROM prism_index_settings('ref16_plain_idx')
+    WHERE name = 'posting_reference_format';
+DROP TABLE ref16_plain;
+
+-- A reference float16 cannot hold is refused when the index is built,
+-- where float32 holds it. posting_reference_format takes only the two types.
+CREATE TABLE ref16_big (id int, v vec32(3));
+INSERT INTO ref16_big VALUES (1, '[1e6,1e6,1e6]'), (2, '[2e6,2e6,2e6]');
+CREATE INDEX ref16_big_idx ON ref16_big USING prism (v) WITH (nlist = 1);
+CREATE INDEX ref16_big_idx ON ref16_big USING prism (v)
+    WITH (nlist = 1, posting_reference_format = float32);
+SELECT setting, source FROM prism_index_settings('ref16_big_idx')
+    WHERE name = 'posting_reference_format';
+DROP INDEX ref16_big_idx;
+CREATE INDEX ref16_big_idx ON ref16_big USING prism (v)
+    WITH (nlist = 1, posting_reference_format = float64);
+DROP TABLE ref16_big;
+
+-- Converting a list with a float16 reference to fastscan keeps the
+-- reference, so a query finds the same rows before and after.
+CREATE TABLE ref16_conv (id int, v vec32(768));
+INSERT INTO ref16_conv
+    SELECT g, (SELECT array_agg(sin(g * 0.37 + j * 0.11)::real)
+               FROM generate_series(0, 767) j)::vec32
+    FROM generate_series(1, 300) g;
+CREATE INDEX ref16_conv_idx ON ref16_conv USING prism (v)
+    WITH (nlist = 2, fastscan = off, posting_reference_format = float16);
+SET enable_seqscan = off;
+CREATE TEMP TABLE ref16_before AS
+    SELECT id FROM ref16_conv
+    ORDER BY v <-> (SELECT v FROM ref16_conv WHERE id = 7) LIMIT 10;
+SET client_min_messages = warning;
+CALL prism_convert_posting_to_fastscan('ref16_conv_idx', 0);
+CALL prism_convert_posting_to_fastscan('ref16_conv_idx', 1);
+RESET client_min_messages;
+SELECT bool_and(format = 'fastscan') AS all_converted
+    FROM prism_posting_pages('ref16_conv_idx') WHERE is_first;
+SELECT count(*) AS same_rows FROM ref16_before
+    WHERE id IN (SELECT id FROM ref16_conv
+                 ORDER BY v <-> (SELECT v FROM ref16_conv WHERE id = 7)
+                 LIMIT 10);
+RESET enable_seqscan;
+DROP TABLE ref16_before;
+DROP TABLE ref16_conv;
 
 DROP FUNCTION rabitq_params_cache();
 DROP FUNCTION rabitq_cache_clear();

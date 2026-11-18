@@ -76,6 +76,7 @@ scan_count(
 			NULL,
 			params,
 			dim,
+			PRISM_POSTING_REFERENCE_FLOAT32,
 			prism_posting_max_entries(dim));
 	if (fastscan)
 		prism_posting_scan_enable_fastscan(&scan, 16);
@@ -124,6 +125,7 @@ scan_contains_vid(
 			NULL,
 			params,
 			dim,
+			PRISM_POSTING_REFERENCE_FLOAT32,
 			prism_posting_max_entries(dim));
 	prism_posting_scan_enable_fastscan(&scan, 16);
 	VsTopK topk;
@@ -330,13 +332,14 @@ TEST(insert_then_scan_finds_all)
 
 TEST(insert_grows_overflow_page)
 {
-	Dimension		dim		  = 768;
-	uint32_t		first_cap = prism_posting_max_entries_first(dim);
-	uint32_t		ninsert	  = first_cap + 5; /* force a 2nd page */
-	TestPageStorage storage	  = make_test_storage(32);
-	RaBitQParams   *params	  = vs_rabitq_create(dim, 99);
-	float		   *centroid  = vs_alloc0(dim * sizeof(float));
-	float		   *vecs	  = make_test_vectors(ninsert + 1, dim);
+	Dimension dim		= 768;
+	uint32_t  first_cap = prism_posting_max_entries_first(
+			 dim, PRISM_POSTING_REFERENCE_FLOAT32);
+	uint32_t		ninsert	 = first_cap + 5; /* force a 2nd page */
+	TestPageStorage storage	 = make_test_storage(32);
+	RaBitQParams   *params	 = vs_rabitq_create(dim, 99);
+	float		   *centroid = vs_alloc0(dim * sizeof(float));
+	float		   *vecs	 = make_test_vectors(ninsert + 1, dim);
 
 	/* Start from a 1-entry cluster, then insert past the first page's cap. */
 	BlockNumber head =
@@ -885,7 +888,10 @@ TEST(insert_into_spilled_list)
 
 		ASSERT_EQ(3u, prism_posting_head_live_count(hp), "live_count");
 		ASSERT_EQ(
-				head + prism_posting_reference_pages(dim) - 1,
+				head +
+						prism_posting_reference_pages(
+								dim, PRISM_POSTING_REFERENCE_FLOAT32) -
+						1,
 				tail,
 				"the tail is the head END page");
 

@@ -607,21 +607,22 @@ SELECT name, setting, source
     FROM prism_index_settings('idx_settings'::regclass)
     WHERE name NOT IN ('nlist', 'nlevels', 'first_posting',
                        'posting_pages', 'target_entries');
-       name       |  setting  |   source   
-------------------+-----------+------------
- dim              | 3         | column
- metric           | l2        | opclass
- fan_out          | 8         | option
- target_pages     | 3         | default
- centroid_pages   | 9         | maintained
- centroid_format  | rabitq    | option
- fastscan         | off       | option
- soar_lambda      | 0.5       | option
- boundary_epsilon | 0.1       | option
- kmeans_nredo     | 2         | option
- distance_mode    | symmetric | option
- nprobe           | 10        | auto
-(12 rows)
+           name           |  setting  |   source   
+--------------------------+-----------+------------
+ dim                      | 3         | column
+ metric                   | l2        | opclass
+ fan_out                  | 8         | option
+ target_pages             | 3         | default
+ centroid_pages           | 9         | maintained
+ centroid_format          | rabitq    | option
+ fastscan                 | off       | option
+ posting_reference_format | float16   | default
+ soar_lambda              | 0.5       | option
+ boundary_epsilon         | 0.1       | option
+ kmeans_nredo             | 2         | option
+ distance_mode            | symmetric | option
+ nprobe                   | 10        | auto
+(13 rows)
 
 SELECT name, setting::int > 0 AS positive, source
     FROM prism_index_settings('idx_settings'::regclass)
@@ -644,26 +645,27 @@ SELECT name,
        setting <> '0' AND setting <> '' AS resolved,
        source
     FROM prism_index_settings('idx_default'::regclass);
-       name       | resolved |   source   
-------------------+----------+------------
- dim              | t        | column
- metric           | t        | opclass
- nlist            | t        | auto
- fan_out          | t        | auto
- nlevels          | t        | derived
- target_pages     | t        | default
- target_entries   | t        | derived
- centroid_pages   | t        | maintained
- first_posting    | t        | derived
- posting_pages    | t        | derived
- centroid_format  | t        | auto
- fastscan         | t        | auto
- soar_lambda      | t        | default
- boundary_epsilon | t        | default
- kmeans_nredo     | t        | default
- distance_mode    | t        | default
- nprobe           | t        | auto
-(17 rows)
+           name           | resolved |   source   
+--------------------------+----------+------------
+ dim                      | t        | column
+ metric                   | t        | opclass
+ nlist                    | t        | auto
+ fan_out                  | t        | auto
+ nlevels                  | t        | derived
+ target_pages             | t        | default
+ target_entries           | t        | derived
+ centroid_pages           | t        | maintained
+ first_posting            | t        | derived
+ posting_pages            | t        | derived
+ centroid_format          | t        | auto
+ fastscan                 | t        | auto
+ posting_reference_format | t        | default
+ soar_lambda              | t        | default
+ boundary_epsilon         | t        | default
+ kmeans_nredo             | t        | default
+ distance_mode            | t        | default
+ nprobe                   | t        | auto
+(18 rows)
 
 SELECT name, setting, source
     FROM prism_index_settings('idx_default'::regclass)

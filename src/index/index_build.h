@@ -58,6 +58,7 @@ struct PrismBlobStore;
 #include "index/centroid_build.h"
 #include "index/centroid_page.h"
 #include "index/centroid_search.h" /* PrismExactInternalCentroids */
+#include "index/posting_page.h"
 #include "index/storage.h"
 #include "quant/rabitq.h"
 
@@ -367,16 +368,17 @@ prism_build_reserve_layout(VsStorage *storage, BlockNumber end_blkno)
 }
 
 bool prism_routing_tree_plan(
-		const float			  *vectors,
-		uint32_t			   nvecs,
-		Dimension			   dim,
-		uint32_t			   nlist,
-		uint32_t			   fan_out,
-		DistanceMetric		   metric,
-		PrismCentroidFormat	   format,
-		const KMeansOptions	  *opts,
-		struct PrismBlobStore *store,
-		PrismStreamTreePlan	  *out);
+		const float				   *vectors,
+		uint32_t					nvecs,
+		Dimension					dim,
+		uint32_t					nlist,
+		uint32_t					fan_out,
+		DistanceMetric				metric,
+		PrismCentroidFormat			format,
+		PrismPostingReferenceFormat ref_format,
+		const KMeansOptions		   *opts,
+		struct PrismBlobStore	   *store,
+		PrismStreamTreePlan		   *out);
 
 /*
  * Per-leaf callback fired during the write pass, once per leaf, with the
@@ -408,6 +410,7 @@ BlockNumber prism_routing_tree_write(
 		uint32_t					 nlist,
 		uint32_t					 fan_out,
 		PrismCentroidFormat			 format,
+		PrismPostingReferenceFormat	 ref_format,
 		const RaBitQParams			*rq_params,
 		const float					*global_mean,
 		struct PrismBlobStore		*store,
@@ -444,6 +447,7 @@ BlockNumber prism_routing_subtree_write(
 		uint32_t					 fan_out,
 		uint8_t						 level_offset,
 		PrismCentroidFormat			 format,
+		PrismPostingReferenceFormat	 ref_format,
 		const RaBitQParams			*rq_params,
 		const float					*global_mean,
 		BlockNumber					 first_posting,
