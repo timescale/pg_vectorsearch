@@ -33,8 +33,14 @@
  */
 #define PRISM_META_MAGIC ((uint32_t)0x50524907) /* "PRI\x07" */
 
-/* Metadata flags */
+/*
+ * Metadata flags. A feature that changes how an index must be read gets a
+ * flag of its own, and a binary refuses an index with a flag it does not
+ * know (prism_meta_check_flags), so an older binary never misreads an index
+ * a newer one wrote.
+ */
 #define PRISM_META_FLAG_FASTSCAN 0x01
+#define PRISM_META_KNOWN_FLAGS	 (PRISM_META_FLAG_FASTSCAN)
 
 typedef struct PrismMetaPage
 {
@@ -111,6 +117,27 @@ static inline const float *
 prism_meta_global_mean_const(const PrismMetaPage *meta)
 {
 	return (const float *)((const char *)meta + PRISM_META_FIXED_SIZE);
+}
+
+/*
+ * Refuse an index whose metapage flags include one this binary does not
+ * know. Call after releasing the metapage, with the flags read from it.
+ */
+static inline void
+prism_meta_check_flags(const char *relname, uint8_t flags)
+{
+	uint8_t unknown = flags & (uint8_t)~PRISM_META_KNOWN_FLAGS;
+
+	if (unknown != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("index \"%s\" uses features this version of "
+						"pg_vectorsearch does not support (metapage flags "
+						"0x%02X)",
+						relname,
+						(unsigned)unknown),
+				 errhint("Upgrade pg_vectorsearch, or REINDEX the index "
+						 "with this version.")));
 }
 
 #endif /* PRISM_META_H */

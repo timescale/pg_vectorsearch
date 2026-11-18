@@ -626,6 +626,32 @@ INSERT INTO cache_t80
 SELECT refcount, round(usage::numeric, 4) AS usage
 FROM rabitq_params_cache() WHERE dim = 80;
 
+-- A metapage flag this binary does not know means a newer version wrote the
+-- index, possibly in a layout this one would misread. Every entry point
+-- refuses it: scans and maintenance through the relcache entry, and the
+-- inspection functions and fastscan conversion, which read the metapage
+-- themselves. Clearing the flag makes the index usable again. The lists are
+-- AoS, so a conversion that got through would show as a fastscan list.
+CREATE TABLE flagtest (id int, v vec32(3));
+INSERT INTO flagtest
+    SELECT i, ARRAY[i, i + 1, i + 2]::real[]::vec32(3)
+    FROM generate_series(1, 50) i;
+CREATE INDEX flagtest_idx ON flagtest USING prism (v)
+    WITH (nlist = 1, fastscan = off);
+SELECT set_meta_flags('flagtest_idx', meta_flags('flagtest_idx') | 128);
+SELECT id FROM flagtest ORDER BY v <-> '[1,2,3]'::vec32 LIMIT 1;
+SELECT count(*) FROM prism_index_settings('flagtest_idx');
+SELECT count(*) FROM prism_centroid_pages('flagtest_idx');
+SELECT count(*) FROM prism_posting_pages('flagtest_idx');
+SELECT count(*) FROM prism_tids_clusters('flagtest_idx', ARRAY['(0,1)']::tid[]);
+CALL prism_convert_posting_to_fastscan('flagtest_idx', 0);
+CALL prism_rebalance('flagtest_idx');
+SELECT set_meta_flags('flagtest_idx', meta_flags('flagtest_idx') & ~128);
+SELECT bool_and(format = 'aos') AS not_converted
+    FROM prism_posting_pages('flagtest_idx');
+SELECT id FROM flagtest ORDER BY v <-> '[1,2,3]'::vec32 LIMIT 1;
+DROP TABLE flagtest;
+
 -- Cleanup.
 DO $$
 DECLARE d int;
@@ -639,6 +665,8 @@ DROP FUNCTION rabitq_params_cache();
 DROP FUNCTION rabitq_cache_clear();
 DROP FUNCTION append_centroid_page(regclass);
 DROP FUNCTION meta_magic(regclass);
+DROP FUNCTION meta_flags(regclass);
+DROP FUNCTION set_meta_flags(regclass, integer);
 RESET enable_seqscan;
 
 -- The same lifecycle checks cover inline and spilled references.
@@ -665,4 +693,6 @@ DROP FUNCTION rabitq_params_cache();
 DROP FUNCTION rabitq_cache_clear();
 DROP FUNCTION append_centroid_page(regclass);
 DROP FUNCTION meta_magic(regclass);
+DROP FUNCTION meta_flags(regclass);
+DROP FUNCTION set_meta_flags(regclass, integer);
 RESET maintenance_work_mem;

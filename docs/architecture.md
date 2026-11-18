@@ -420,6 +420,8 @@ Index metadata is stored in multiple locations depending on its nature:
   the blocks right after the metapage, and the format version recorded in
   the metapage changes with it so an older binary refuses the index instead
   of misreading it
+- A feature that changes how an index must be read takes a metapage flag,
+  and a binary refuses an index with a flag it does not know
 - No per-leaf posting directory. A leaf centroid entry holds its list head.
 - Statistics: per-cluster live counts live on each posting list's head page,
   not here -- inserts already hold that page, so they can maintain them, while

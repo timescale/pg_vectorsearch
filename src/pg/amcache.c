@@ -456,6 +456,14 @@ get_cache_data(Relation index)
 						 "format.")));
 	}
 
+	if ((meta->flags & (uint8_t)~PRISM_META_KNOWN_FLAGS) != 0)
+	{
+		uint8_t flags = meta->flags;
+
+		UnlockReleaseBuffer(meta_buf);
+		prism_meta_check_flags(RelationGetRelationName(index), flags);
+	}
+
 	Dimension dim  = meta->dim;
 	uint64_t  seed = meta->rabitq_seed;
 

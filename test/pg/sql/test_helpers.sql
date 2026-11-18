@@ -50,5 +50,17 @@ RETURNS bigint
 AS '$libdir/pgvs_test_helpers', 'vs_test_meta_magic'
 LANGUAGE C STRICT PARALLEL SAFE;
 
+-- The metapage flags, unvalidated.
+CREATE OR REPLACE FUNCTION meta_flags(regclass)
+RETURNS integer
+AS '$libdir/pgvs_test_helpers', 'vs_test_meta_flags'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+-- Overwrites the metapage flags. Mutates the index, so PARALLEL UNSAFE.
+CREATE OR REPLACE FUNCTION set_meta_flags(regclass, integer)
+RETURNS void
+AS '$libdir/pgvs_test_helpers', 'vs_test_set_meta_flags'
+LANGUAGE C STRICT;
+
 -- Restore the caller's echo setting captured above.
 \set ECHO :saved_echo

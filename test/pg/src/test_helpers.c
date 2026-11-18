@@ -17,12 +17,14 @@
 
 #include <postgres.h>
 
+#include <access/generic_xlog.h>
 #include <access/relation.h>
 #include <catalog/pg_am_d.h>
 #include <commands/defrem.h>
 #include <fmgr.h>
 #include <funcapi.h>
 #include <storage/bufmgr.h>
+#include <utils/inval.h>
 #include <utils/tuplestore.h>
 
 #include "index/centroid_page.h"
@@ -177,4 +179,52 @@ vs_test_meta_magic(PG_FUNCTION_ARGS)
 	relation_close(index, AccessShareLock);
 
 	PG_RETURN_INT64((int64)magic);
+}
+
+/* The metapage flags, read without validating them. */
+PG_FUNCTION_INFO_V1(vs_test_meta_flags);
+
+Datum
+vs_test_meta_flags(PG_FUNCTION_ARGS)
+{
+	Relation index = open_prism_index(PG_GETARG_OID(0), AccessShareLock);
+	Buffer	 buf   = ReadBuffer(index, PRISM_META_PAGE_BLKNO);
+
+	LockBuffer(buf, BUFFER_LOCK_SHARE);
+	const PrismMetaPage *meta = (const PrismMetaPage *)PageGetSpecialPointer(
+			BufferGetPage(buf));
+	uint8_t flags = meta->flags;
+	UnlockReleaseBuffer(buf);
+
+	relation_close(index, AccessShareLock);
+
+	PG_RETURN_INT32((int32)flags);
+}
+
+/*
+ * Overwrite the metapage flags, so a test can present an index as written by
+ * a newer version. Invalidates the relcache entry so backends re-read it.
+ */
+PG_FUNCTION_INFO_V1(vs_test_set_meta_flags);
+
+Datum
+vs_test_set_meta_flags(PG_FUNCTION_ARGS)
+{
+	Relation index =
+			open_prism_index(PG_GETARG_OID(0), ShareUpdateExclusiveLock);
+	int32 flags = PG_GETARG_INT32(1);
+
+	GenericXLogState *state = GenericXLogStart(index);
+	Buffer			  buf	= ReadBuffer(index, PRISM_META_PAGE_BLKNO);
+
+	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+	Page page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
+	((PrismMetaPage *)PageGetSpecialPointer(page))->flags = (uint8_t)flags;
+	GenericXLogFinish(state);
+	UnlockReleaseBuffer(buf);
+
+	CacheInvalidateRelcache(index);
+	relation_close(index, ShareUpdateExclusiveLock);
+
+	PG_RETURN_VOID();
 }

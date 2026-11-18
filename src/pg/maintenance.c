@@ -357,7 +357,9 @@ vs_convert_posting_to_fastscan(PG_FUNCTION_ARGS)
 	BlockNumber first_centroid = meta->first_centroid;
 	Dimension	dim			   = meta->dim;
 	uint8_t		nlevels		   = meta->nlevels;
+	uint8_t		meta_flags	   = meta->flags;
 	UnlockReleaseBuffer(meta_buf);
+	prism_meta_check_flags(RelationGetRelationName(index), meta_flags);
 
 	/*
 	 * Find the leaf for this cluster. The argument is the stored cluster_id --
