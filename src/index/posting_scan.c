@@ -20,6 +20,7 @@
 
 #include "core/log.h"
 #include "core/memory.h"
+#include "core/platform.h"
 #include "index/posting_scan.h"
 #include "quant/fastscan.h"
 
@@ -781,6 +782,20 @@ typedef struct FastscanPageCtx
 	Distance threshold;
 } FastscanPageCtx;
 
+/* Start fetching list-wide group g's metadata, if it is on this page. */
+__attribute__((always_inline)) static inline void
+fastscan_prefetch_meta(const FastscanPageCtx *ctx, uint32_t g)
+{
+	if (g < ctx->first_group || g >= ctx->meta_end)
+		return;
+
+	const char *meta =
+			prism_fastscan_group_base(ctx->content, g - ctx->first_group);
+	for (uint32_t p = 0; p < PRISM_FASTSCAN_META_BYTES; p += VS_CACHE_LINE)
+		__builtin_prefetch(meta + p, 0, 3);
+	__builtin_prefetch(meta + PRISM_FASTSCAN_META_BYTES - 1, 0, 3);
+}
+
 /* Prune the next group, whose running sums are complete, and insert
  * survivors. */
 __attribute__((always_inline)) static inline void
@@ -790,6 +805,10 @@ fastscan_score_group(PrismPostingScan *scan, FastscanPageCtx *ctx)
 	uint32_t g_count = ctx->count - g * VS_FASTSCAN_GROUP;
 	if (g_count > VS_FASTSCAN_GROUP)
 		g_count = VS_FASTSCAN_GROUP;
+
+	/* The next group's codes are summed after this one is pruned, so its
+	 * metadata has time to arrive. */
+	fastscan_prefetch_meta(ctx, ctx->next_group + 1);
 
 	const int32_t	*accum = fastscan_group_accum(scan, ctx->next_group);
 	ItemPointerData *tids  = prism_fastscan_group_tids(ctx->content, g);
@@ -935,6 +954,9 @@ scan_fastscan_page(PrismPostingScan *scan, VsTopK *topk)
 	/* The group the page's codes start in, and how far into it. */
 	uint32_t g	 = (uint32_t)(pos / code_len);
 	uint32_t off = (uint32_t)(pos % code_len);
+
+	/* The first group scored here needs its metadata soonest. */
+	fastscan_prefetch_meta(&ctx, ctx.next_group);
 
 	/* Groups whose codes ended on an earlier page. */
 	fastscan_score_ready(scan, &ctx, g);
