@@ -41,11 +41,7 @@ typedef struct PrismQueryStats
 	uint64_t centroid_ns; /* query rotation + centroid beam search */
 	uint64_t posting_ns;  /* cluster scan + candidate extraction */
 	uint64_t rerank_ns;	  /* exact-distance rerank (heap fetches) */
-	/* Fine-grained centroid sub-phases (subsets of centroid_ns). */
-	uint64_t rotation_ns;		   /* query rotation P^T*query */
-	uint64_t centroid_lut_ns;	   /* fastscan LUT build (once/query) */
-	uint64_t centroid_pageread_ns; /* centroid page read/release */
-	uint64_t centroid_score_ns;	   /* centroid page scoring (incl. lut) */
+	uint64_t rotation_ns; /* query rotation P^T*query (part of centroid_ns) */
 	/* Routing-quality diagnostic: deepest probe rank (0-based) among the
 	 * final top-k results, i.e. how many probed clusters were needed. */
 	uint32_t max_contrib_rank;
