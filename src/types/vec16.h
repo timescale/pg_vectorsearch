@@ -118,6 +118,60 @@ vs_half_to_float(half h)
 #endif
 }
 
+/*
+ * IEEE 754 float -> float16 bits in software, rounding to nearest with ties
+ * to even. Values too large for float16 become infinity, too small ones zero.
+ * The fallback where no hardware conversion is available, and always built
+ * so it is tested everywhere.
+ */
+static inline uint16_t
+vs_float_to_half_portable(float f)
+{
+	uint32_t bits;
+	memcpy(&bits, &f, sizeof(uint32_t));
+
+	uint32_t sign	 = (bits >> 16) & 0x8000;
+	uint32_t raw_exp = (bits >> 23) & 0xFF;
+	uint32_t frac	 = bits & 0x7FFFFF;
+
+	/* Infinity and NaN, keeping some of a NaN's payload. */
+	if (raw_exp == 0xFF)
+		return (uint16_t)(sign | 0x7C00 |
+						  (frac != 0 ? 0x0200 | (frac >> 13) : 0));
+
+	int32_t exp = (int32_t)raw_exp - 127 + 15;
+
+	if (exp >= 31)
+		return (uint16_t)(sign | 0x7C00);
+
+	if (exp <= 0)
+	{
+		/* Below half a subnormal ULP: zero. */
+		if (exp < -10)
+			return (uint16_t)sign;
+		/* Subnormal: shift in the implicit bit, then round. */
+		frac |= 0x800000;
+		uint32_t shift = (uint32_t)(14 - exp);
+		uint32_t half  = frac >> shift;
+		uint32_t rem   = frac & ((1u << shift) - 1);
+		uint32_t mid   = 1u << (shift - 1);
+
+		if (rem > mid || (rem == mid && (half & 1)))
+			half++;
+		/* Rounding up may reach the smallest normal, which the bits
+		 * encode correctly as they stand. */
+		return (uint16_t)(sign | half);
+	}
+
+	uint32_t half = ((uint32_t)exp << 10) | (frac >> 13);
+	uint32_t rem  = frac & 0x1FFF;
+
+	if (rem > 0x1000 || (rem == 0x1000 && (half & 1)))
+		half++;
+	/* A carry out of the fraction bumps the exponent, up to infinity. */
+	return (uint16_t)(sign | half);
+}
+
 static inline half
 vs_float_to_half(float f)
 {
@@ -126,53 +180,7 @@ vs_float_to_half(float f)
 #elif defined(VS_F16C_SUPPORT)
 	return _cvtss_sh(f, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
 #else
-	/* IEEE 754 bit manipulation fallback */
-	uint32_t bits;
-	memcpy(&bits, &f, sizeof(uint32_t));
-
-	uint32_t sign = (bits >> 16) & 0x8000;
-	int32_t	 exp  = ((bits >> 23) & 0xFF) - 127 + 15;
-	uint32_t frac = bits & 0x7FFFFF;
-
-	if (exp <= 0)
-	{
-		if (exp < -10)
-		{
-			/* Too small, flush to zero */
-			return (half)(sign);
-		}
-		/* Subnormal in half precision */
-		frac |= 0x800000;
-		uint32_t shift = (uint32_t)(1 - exp);
-		/* Round to nearest, ties to even */
-		uint32_t round_bit = 1u << (shift + 12);
-		frac += round_bit >> 1;
-		if ((frac & round_bit) && (frac & (round_bit - 1)) == 0)
-			frac &= ~(round_bit >> 1); /* tie: round to even */
-		return (half)(sign | (frac >> (shift + 13)));
-	}
-	else if (exp >= 31)
-	{
-		if (exp == 31 && frac != 0)
-		{
-			/* NaN: preserve some significand bits */
-			return (half)(sign | 0x7E00 | (frac >> 13));
-		}
-		/* Overflow: Inf */
-		return (half)(sign | 0x7C00);
-	}
-
-	/* Round to nearest, ties to even */
-	frac += 0x1000; /* round bit at position 12 */
-	if (frac & 0x800000)
-	{
-		frac = 0;
-		exp++;
-		if (exp >= 31)
-			return (half)(sign | 0x7C00); /* overflow to Inf */
-	}
-
-	return (half)(sign | ((uint32_t)exp << 10) | (frac >> 13));
+	return vs_float_to_half_portable(f);
 #endif
 }
 
@@ -235,14 +243,25 @@ typedef struct Vec16
 void vs_half_to_float_array(const half *src, float *dst, uint32_t n);
 void vs_float_to_half_array(const float *src, half *dst, uint32_t n);
 
+/*
+ * vs_float_to_half_array that also reports the first element whose float16
+ * is not finite: one beyond float16's range (about ±65504), or not finite to
+ * begin with. Returns its index, or n when every element fits. All n
+ * elements are converted either way.
+ */
+uint32_t
+vs_float_to_half_array_checked(const float *src, half *dst, uint32_t n);
+
 /* ----------------------------------------------------------------
  * Vec16 lifecycle
  * ---------------------------------------------------------------- */
 
 Vec16 *vec16_create(Dimension dim);
+/* NULL also when a value does not fit in float16. */
 Vec16 *vec16_from_floats(const float *values, Dimension dim);
 void   vec16_free(Vec16 *v);
-void   vec16_set(Vec16 *v, const float *values);
+/* False when a value does not fit in float16; v then holds infinities. */
+bool vec16_set(Vec16 *v, const float *values);
 
 /* Convert to Vec32Ref (requires caller-provided float32 buffer) */
 static inline Vec32Ref

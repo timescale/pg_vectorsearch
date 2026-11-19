@@ -27,6 +27,28 @@
  * Fallback: scalar loop via vs_half_to_float / vs_float_to_half
  * ---------------------------------------------------------------- */
 
+/* Whether a float16, as bits, is infinite or NaN: all exponent bits set. */
+static inline bool
+half_bits_nonfinite(uint16_t bits)
+{
+	return (bits & 0x7C00) == 0x7C00;
+}
+
+/* Index of the first non-finite float16 in dst[from, n), or n. */
+static uint32_t
+first_nonfinite_half(const half *dst, uint32_t from, uint32_t n)
+{
+	for (uint32_t i = from; i < n; i++)
+	{
+		uint16_t bits;
+
+		memcpy(&bits, &dst[i], sizeof(bits));
+		if (half_bits_nonfinite(bits))
+			return i;
+	}
+	return n;
+}
+
 #if defined(VS_F16C_SUPPORT) && !defined(VS_SIMD_NONE)
 
 __attribute__((target("avx,f16c"))) void
@@ -56,6 +78,33 @@ vs_float_to_half_array(const float *src, half *dst, uint32_t n)
 	}
 	for (; i < n; i++)
 		dst[i] = vs_float_to_half(src[i]);
+}
+
+/* The conversion loop above, ORing each lane's "exponent all ones" into an
+ * accumulator; the first bad index is found only when something flagged. */
+__attribute__((target("avx,f16c"))) uint32_t
+vs_float_to_half_array_checked(const float *src, half *dst, uint32_t n)
+{
+	const __m128i exp_mask = _mm_set1_epi16(0x7C00);
+	__m128i		  bad	   = _mm_setzero_si128();
+	uint32_t	  i		   = 0;
+
+	for (; i + 8 <= n; i += 8)
+	{
+		__m256	f8 = _mm256_loadu_ps(src + i);
+		__m128i h8 = _mm256_cvtps_ph(
+				f8, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+		_mm_storeu_si128((__m128i *)(dst + i), h8);
+		bad = _mm_or_si128(
+				bad, _mm_cmpeq_epi16(_mm_and_si128(h8, exp_mask), exp_mask));
+	}
+	uint32_t body = i;
+	for (; i < n; i++)
+		dst[i] = vs_float_to_half(src[i]);
+
+	if (_mm_movemask_epi8(bad) != 0)
+		return first_nonfinite_half(dst, 0, body);
+	return first_nonfinite_half(dst, body, n);
 }
 
 #elif defined(__aarch64__) && defined(__ARM_FP16_FORMAT_IEEE) && \
@@ -91,6 +140,31 @@ vs_float_to_half_array(const float *src, half *dst, uint32_t n)
 		dst[i] = vs_float_to_half(src[i]);
 }
 
+/* As the F16C version: flag lanes in the loop, locate them after it. */
+uint32_t
+vs_float_to_half_array_checked(const float *src, half *dst, uint32_t n)
+{
+	const uint16x4_t exp_mask = vdup_n_u16(0x7C00);
+	uint16x4_t		 bad	  = vdup_n_u16(0);
+	uint32_t		 i		  = 0;
+
+	for (; i + 4 <= n; i += 4)
+	{
+		float16x4_t h4 = vcvt_f16_f32(vld1q_f32(src + i));
+		uint16x4_t	b4 = vreinterpret_u16_f16(h4);
+
+		vst1_f16((float16_t *)(dst + i), h4);
+		bad = vorr_u16(bad, vceq_u16(vand_u16(b4, exp_mask), exp_mask));
+	}
+	uint32_t body = i;
+	for (; i < n; i++)
+		dst[i] = vs_float_to_half(src[i]);
+
+	if (vmaxv_u16(bad) != 0)
+		return first_nonfinite_half(dst, 0, body);
+	return first_nonfinite_half(dst, body, n);
+}
+
 #else
 
 /* Scalar fallback */
@@ -106,6 +180,13 @@ vs_float_to_half_array(const float *src, half *dst, uint32_t n)
 {
 	for (uint32_t i = 0; i < n; i++)
 		dst[i] = vs_float_to_half(src[i]);
+}
+
+uint32_t
+vs_float_to_half_array_checked(const float *src, half *dst, uint32_t n)
+{
+	vs_float_to_half_array(src, dst, n);
+	return first_nonfinite_half(dst, 0, n);
 }
 
 #endif
@@ -140,7 +221,11 @@ vec16_from_floats(const float *values, Dimension dim)
 	if (v == NULL)
 		return NULL;
 
-	vs_float_to_half_array(values, v->x, dim);
+	if (vs_float_to_half_array_checked(values, v->x, dim) < dim)
+	{
+		vec16_free(v);
+		return NULL;
+	}
 	return v;
 }
 
@@ -150,10 +235,12 @@ vec16_free(Vec16 *v)
 	vs_free(v);
 }
 
-void
+bool
 vec16_set(Vec16 *v, const float *values)
 {
 	if (v == NULL || values == NULL)
-		return;
-	vs_float_to_half_array(values, v->x, v->dim);
+		return false;
+	uint32_t dim = (uint32_t)v->dim;
+
+	return vs_float_to_half_array_checked(values, v->x, dim) == dim;
 }
