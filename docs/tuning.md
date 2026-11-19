@@ -120,7 +120,10 @@ Index builds cluster a sample of the table and then scan it once.
 Two standard PostgreSQL settings dominate build time:
 
 - `maintenance_work_mem` — bounds the k-means sample and the build's
-  sort memory. Bigger is better until the sample fits.
+  sort memory. Bigger is better until the sample fits. If it cannot
+  hold the target (`nlist` × 256 rows), the build re-centers each leaf
+  from the full table on its own. That is `prism.leaf_refine_threshold`
+  at its default; leave it.
 - `max_parallel_maintenance_workers` (plus the table's
   `parallel_workers` storage parameter) — parallel builds scale to
   tens of workers.
@@ -170,7 +173,7 @@ Take effect during `CREATE INDEX` / `REINDEX`.
 
 | GUC | Default | Affects | What it does | Why you might touch it |
 |---|---|---|---|---|
-| `prism.leaf_refine_threshold` | `0` (off) | Recall of sub-sampled builds; one extra table scan. | Re-center leaf encode references from the full table when the build sample was thin. | Large sub-sampled builds with recall shortfalls. |
+| `prism.leaf_refine_threshold` | `256` | Recall when the sample was cut short; one extra table scan in that case only. | Samples per leaf below which a budget-limited build re-centers each leaf from the full table. The default is the training target, so a build that reached it skips the scan and one that could not refines without being asked. | Leave it. Set `0` to skip the extra scan on a memory-starved build. |
 | `prism.log_build_stats` | `off` | Log volume only. | Per-phase build resource logging (superuser). | Debugging build performance. |
 
 ## Reading query behavior

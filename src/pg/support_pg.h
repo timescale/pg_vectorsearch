@@ -32,16 +32,16 @@
  * GUC variables
  * ---------------------------------------------------------------- */
 
-extern int	prism_distance_mode;   /* VsDistanceMode */
-extern int	prism_nprobe;		   /* clusters to probe per query */
-extern int	prism_query_limit;	   /* min top-k per scan (0=from LIMIT) */
-extern int	prism_fastscan_bits;   /* fastscan LUT bits (8 or 16) */
-extern bool prism_rerank;		   /* enable reranking (default: true) */
-extern bool prism_log_build_stats; /* log per-phase build stats (def: off) */
-extern int	prism_leaf_refine_threshold;  /* refine when samples/leaf < this */
-extern double prism_centroid_error_scale; /* scales centroid pruning error
-									   bound (1=default, 0=drop) */
-extern double prism_probe_expand;		  /* routed clusters / nprobe */
+extern int	  prism_distance_mode;	 /* VsDistanceMode */
+extern int	  prism_nprobe;			 /* clusters to probe per query */
+extern int	  prism_query_limit;	 /* min top-k per scan (0=from LIMIT) */
+extern int	  prism_fastscan_bits;	 /* fastscan LUT bits (8 or 16) */
+extern bool	  prism_rerank;			 /* enable reranking (default: true) */
+extern bool	  prism_log_build_stats; /* log per-phase build stats (def: off) */
+extern int	  prism_leaf_refine_threshold; /* default: samples per leaf */
+extern double prism_centroid_error_scale;  /* scales centroid pruning error
+										bound (1=default, 0=drop) */
+extern double prism_probe_expand;		   /* routed clusters / nprobe */
 extern double prism_centroid_beam_scale; /* intermediate beam width as fraction
 									  of nprobe (0.25=default) */
 extern relopt_kind prism_relopt_kind;	 /* index reloption kind */

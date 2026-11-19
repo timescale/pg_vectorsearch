@@ -303,7 +303,7 @@ prism_pbuild_setup_shared(
 	uint32_t   km_k			 = fan_out < nlist ? fan_out : nlist;
 	const Size vec_nbytes	 = (Size)dim * sizeof(float);
 
-	uint32_t total_samples = nlist * 256;
+	uint32_t total_samples = nlist * PRISM_KMEANS_SAMPLES_PER_LEAF;
 	if (total_samples < 10000)
 		total_samples = 10000;
 	uint32_t max_per_worker = (total_samples + nparticipants - 1) /

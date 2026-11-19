@@ -38,7 +38,7 @@ bool		prism_rerank				= true;
 bool		prism_log_build_stats		= false;
 double		prism_centroid_error_scale	= 0.0;
 double		prism_centroid_beam_scale	= 0.5;
-int			prism_leaf_refine_threshold = 0;
+int			prism_leaf_refine_threshold = PRISM_KMEANS_SAMPLES_PER_LEAF;
 static bool prism_recent_buffers		= true;
 double		prism_probe_expand			= 2.0;
 static int	prism_rerank_pool			= 0;
@@ -164,18 +164,16 @@ _PG_init(void)
 
 	DefineCustomIntVariable(
 			VS_GUC_PREFIX ".leaf_refine_threshold",
-			"Sample-per-leaf count below which a subsampled build refines "
-			"the leaf centroids on the full table.",
-			"The k-means sample trains each leaf's encode reference; the "
-			"reference's error shrinks with the leaf's sample count "
-			"(stderr ~ spread/sqrt(n)), so with enough samples per leaf the "
-			"full-table refine scan buys no recall. Below this many samples "
-			"per leaf the sample mean is noisy and the build re-centers the "
-			"references from the whole table (one extra scan). 0 (the "
-			"default) disables refinement; a large value refines whenever "
-			"the sample was bounded below the table.",
+			"Samples per leaf below which a short sample is re-centered "
+			"on the full table.",
+			"Leave this at the default. It is the sample the build already "
+			"aims for (nlist times this many rows). A build that fits that "
+			"sample does nothing. A build that maintenance_work_mem cut "
+			"short of it scans the table once more and replaces each leaf "
+			"mean with the mean of the rows that route to it. 0 keeps the "
+			"sample means and skips that scan.",
 			&prism_leaf_refine_threshold,
-			0,
+			PRISM_KMEANS_SAMPLES_PER_LEAF,
 			0,
 			INT_MAX,
 			PGC_USERSET,
