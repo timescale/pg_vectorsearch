@@ -12,7 +12,7 @@ inputs:
   pg-version:
     description: PostgreSQL version to build.
     required: false
-    default: '18.4'
+    default: '18.7'
   sanitizer:
     description: >-
       Sanitizer to build PostgreSQL with (passed to -fsanitize=), e.g.

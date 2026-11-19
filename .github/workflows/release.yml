@@ -133,7 +133,7 @@ jobs:
         id: pg
         uses: ./.github/actions/setup-pg
         with:
-          pg-version: '18.4'
+          pg-version: '18.7'
 
       - name: Build and test
         env:
