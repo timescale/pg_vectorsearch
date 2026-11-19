@@ -14,7 +14,7 @@
 # both sides instrumented consistently.
 #
 # Usage: ./scripts/ci/build-pg.sh <version> <prefix> [sanitizer]
-#   <version>    PostgreSQL version, e.g. 18.4
+#   <version>    PostgreSQL version, e.g. 18.7
 #   <prefix>     install prefix, e.g. "$HOME/pg-debug" or "$HOME/pg-sanitized-address"
 #   <sanitizer>  optional; passed straight to -fsanitize= (e.g. address or
 #                undefined). Omit for a plain debug build.
