@@ -47,6 +47,16 @@ SELECT ARRAY[1.0,2.0,3.0]::float8[]::vec16;
 SELECT ARRAY[1.0, NULL, 3.0]::real[]::vec16; -- error: null
 SELECT '{}'::real[]::vec16; -- error: empty
 
+-- A value float16 cannot hold is refused on every way into vec16, not
+-- stored as infinity. 65519 still rounds down to 65504, the largest
+-- float16; 65520 rounds to infinity.
+SELECT '[65504,-65504,65519]'::vec16;
+SELECT '[1,65520]'::vec16; -- error
+SELECT '[1,-70000]'::vec16; -- error
+SELECT '[70000,1]'::vec32::vec16; -- error
+SELECT ARRAY[70000,1]::real[]::vec16; -- error
+SELECT ARRAY[1e6,1]::float8[]::vec16; -- error
+
 -- Comparison operators (all six)
 SELECT '[1,2,3]'::vec16 < '[1,2,4]'::vec16;
 SELECT '[1,2,3]'::vec16 <= '[1,2,3]'::vec16;

@@ -11,6 +11,7 @@
 #include <postgres.h>
 
 #include <catalog/pg_type.h>
+#include <common/shortest_dec.h>
 #include <fmgr.h>
 #include <lib/stringinfo.h>
 #include <libpq/pqformat.h>
@@ -46,6 +47,27 @@
 /* ----------------------------------------------------------------
  * Type I/O
  * ---------------------------------------------------------------- */
+
+/*
+ * Narrow dim floats into a vec16's elements, refusing a value float16 cannot
+ * hold (beyond about ±65504) as pgvector's halfvec does. The inputs are
+ * already checked to be finite.
+ */
+static void
+vec16_narrow(const float *src, half *dst, Dimension dim)
+{
+	uint32_t bad = vs_float_to_half_array_checked(src, dst, dim);
+
+	if (unlikely(bad < dim))
+	{
+		char buf[FLOAT_SHORTEST_DECIMAL_LEN];
+
+		float_to_shortest_decimal_buf(src[bad], buf);
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("\"%s\" is out of range for type vec16", buf)));
+	}
+}
 
 PG_FUNCTION_INFO_V1(vs_vec16_in);
 
@@ -125,7 +147,7 @@ vs_vec16_in(PG_FUNCTION_ARGS)
 	vs_pg_check_expected_dim(dim, typmod);
 
 	Vec16 *result = vs_pg_vec16_alloc(dim);
-	vs_float_to_half_array(values, result->x, dim);
+	vec16_narrow(values, result->x, dim);
 
 	PG_RETURN_VEC16_P(result);
 }
@@ -456,7 +478,7 @@ vs_vec32_to_vec16(PG_FUNCTION_ARGS)
 	vs_pg_check_expected_dim(v->dim, typmod);
 
 	Vec16 *result = vs_pg_vec16_alloc(v->dim);
-	vs_float_to_half_array(v->x, result->x, v->dim);
+	vec16_narrow(v->x, result->x, v->dim);
 
 	PG_RETURN_VEC16_P(result);
 }
@@ -533,7 +555,7 @@ vs_array_to_vec16(PG_FUNCTION_ARGS)
 	}
 
 	Vec16 *result = vs_pg_vec16_alloc(dim);
-	vs_float_to_half_array(floats, result->x, dim);
+	vec16_narrow(floats, result->x, dim);
 
 	pfree(floats);
 
