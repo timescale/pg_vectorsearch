@@ -89,7 +89,7 @@ grow_ptr(void **p, size_t *cap, size_t n, size_t elem)
 bool
 kv_buf_reserve(Buf *b, size_t extra)
 {
-	if (b->n + extra + 1 <= b->cap)
+	if (b->p != NULL && b->n + extra + 1 <= b->cap)
 		return true;
 	size_t ncap = b->cap == 0 ? 64 : b->cap;
 	while (b->n + extra + 1 > ncap)

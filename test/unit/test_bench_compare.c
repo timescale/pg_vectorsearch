@@ -7,7 +7,6 @@
 
 #include <fcntl.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -18,33 +17,6 @@ int cmd_bench_compare(CmdContext *ctx);
 
 TEST_GROUP(BenchCompare);
 TEST_MEMCTX_FIXTURE();
-
-/* Write json to a fresh temp file; path is empty on failure. */
-static void
-write_tmp(char *path, size_t sz, const char *json)
-{
-	const char *dir = getenv("TMPDIR");
-	FILE	   *f;
-	int			fd;
-
-	snprintf(path, sz, "%s/vs-cmp-XXXXXX", dir != NULL ? dir : "/tmp");
-	fd = mkstemp(path);
-	if (fd < 0)
-	{
-		path[0] = '\0';
-		return;
-	}
-	f = fdopen(fd, "w");
-	if (f == NULL)
-	{
-		close(fd);
-		path[0] = '\0';
-		return;
-	}
-	/* A short write must not leave a file that parses differently. */
-	if (fputs(json, f) < 0 || fclose(f) != 0)
-		path[0] = '\0';
-}
 
 /* Run the handler with stdout muted: the command's report would
  * otherwise corrupt the runner's TAP stream. -1 when muting fails. */
@@ -88,15 +60,25 @@ run_compare(const char *base_json, const char *head_json)
 				   .argv	  = argv,
 				   .prog_name = "vectorsearch",
 	   };
-	int ret;
+	int	 ret;
+	bool base_ok = vs_test_write_tmp(
+			base_path,
+			sizeof(base_path),
+			"vs-cmp",
+			base_json,
+			strlen(base_json));
+	bool head_ok = vs_test_write_tmp(
+			head_path,
+			sizeof(head_path),
+			"vs-cmp",
+			head_json,
+			strlen(head_json));
 
-	write_tmp(base_path, sizeof(base_path), base_json);
-	write_tmp(head_path, sizeof(head_path), head_json);
-	if (base_path[0] == '\0' || head_path[0] == '\0')
+	if (!base_ok || !head_ok)
 	{
-		if (base_path[0] != '\0')
+		if (base_ok)
 			unlink(base_path);
-		if (head_path[0] != '\0')
+		if (head_ok)
 			unlink(head_path);
 		return -1;
 	}

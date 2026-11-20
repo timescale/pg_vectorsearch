@@ -84,6 +84,14 @@ spinup_detect_feed(SpinupDetect *d, double chunk_s)
 	return d->stable >= SPINUP_WINDOW;
 }
 
+/* Next LCG draw as a float in [0, 1). */
+static float
+spinup_rand(uint32_t *state)
+{
+	*state = *state * 1664525u + 1013904223u;
+	return (float)(*state >> 8) / (float)(1u << 24);
+}
+
 /* Fill the query and database vectors with fixed pseudo-random data. */
 static void
 spinup_fill(void)
@@ -91,17 +99,11 @@ spinup_fill(void)
 	uint32_t state = 0x9e3779b9;
 
 	for (uint32_t i = 0; i < SPINUP_DIM; i++)
-	{
-		state	   = state * 1664525u + 1013904223u;
-		g_query[i] = (float)(state >> 8) / (float)(1u << 24);
-	}
+		g_query[i] = spinup_rand(&state);
 	for (uint32_t v = 0; v < SPINUP_NDB; v++)
 	{
 		for (uint32_t i = 0; i < SPINUP_DIM; i++)
-		{
-			state	   = state * 1664525u + 1013904223u;
-			g_db[v][i] = (float)(state >> 8) / (float)(1u << 24);
-		}
+			g_db[v][i] = spinup_rand(&state);
 	}
 }
 

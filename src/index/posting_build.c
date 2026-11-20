@@ -989,6 +989,11 @@ fs_write_group(PrismPostingBuilder *builder)
 
 		uint8_t *dst = builder->fs.page_codes + builder->fs.page_code_bytes;
 
+		if (builder->fs.page_code_bytes + take > prism_posting_page_usable())
+			vs_error(
+					VS_EXTENSION_NAME
+					": fastscan posting builder overran the page "
+					"codes buffer");
 		memcpy(dst, builder->fs.codes_buf + pos, take);
 		builder->fs.page_code_bytes += take;
 		builder->page_dirty = true;

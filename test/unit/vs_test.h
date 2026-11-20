@@ -111,6 +111,15 @@ bool vs_test_is_tap_mode(void);
 void vs_test_printf(const char *fmt, ...)
 		__attribute__((format(printf, 1, 2)));
 
+/* Write len bytes to a fresh owner-only temp file in $TMPDIR, else /tmp.
+ * Returns false, with path empty and no file left behind, on failure. */
+bool vs_test_write_tmp(
+		char	   *path,
+		size_t		sz,
+		const char *prefix,
+		const void *data,
+		size_t		len);
+
 /* TEST_GROUP macro - sets the group for subsequent tests in this file */
 #define TEST_GROUP(group_name)                            \
 	static const char *_VS_TEST_GROUP	   = #group_name; \
