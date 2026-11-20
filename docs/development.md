@@ -421,6 +421,12 @@ debugging. These are the same scripts used by GitHub Actions.
 | `upgrade-test.sh` | Update a database from the previous release with `ALTER EXTENSION UPDATE` |
 | `build-release.sh` | Build a released version from its official tarball, for the upgrade test |
 
+One script outside `scripts/ci/` is also part of lint:
+`scripts/upgrade-script-tool.sh check` fails if an install or upgrade
+script names a C symbol the library no longer defines. Its `create`
+and `rename` commands write and rename the pending upgrade script;
+see `sql/README.md`.
+
 ### Usage
 
 ```bash

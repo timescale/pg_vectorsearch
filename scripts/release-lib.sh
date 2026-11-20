@@ -625,6 +625,106 @@ check_next_version_trailer() {
     log "next cycle: $next"
 }
 
+# ----------------------------------------------------------------
+# Upgrade scripts
+# ----------------------------------------------------------------
+
+# Where the build lists the upgrade scripts it installs.
+UPGRADE_SCRIPT_LIST=src/pg/meson.build
+
+# The path of the script that upgrades from $1 to $2.
+upgrade_script_path() {
+    echo "sql/$(meson_project_name)--$1--$2.sql"
+}
+
+# The <from> side of an upgrade script's name.
+upgrade_script_from() {
+    local base
+    base="$(basename "$1" .sql)"
+    base="${base#*--}"
+    echo "${base%%--*}"
+}
+
+# The pending upgrade script, or nothing. It is the one whose <to> side
+# is a development version: the script a cycle collects its catalog
+# changes in, renamed for the version it is released as. A tree holds
+# at most one.
+pending_upgrade_script() {
+    local script found=""
+    for script in sql/*--*--*-dev.sql; do
+        [[ -f "$script" ]] || continue
+        [[ -z "$found" ]] ||
+            die "more than one pending upgrade script: $found and $script"
+        found="$script"
+    done
+    [[ -z "$found" ]] || echo "$found"
+}
+
+# What a new upgrade script from $1 to $2 holds: a header, and the guard
+# against running it with psql. The statements are added by the pull
+# requests that change the catalog.
+upgrade_script_header() {
+    local name
+    name="$(meson_project_name)"
+    cat <<EOF
+/*
+ * $name $1 -> $2
+ */
+
+-- complain if script is sourced in psql, rather than via ALTER EXTENSION
+\\echo Use "ALTER EXTENSION $name UPDATE" to load this file.\\quit
+EOF
+}
+
+# How the script $1 appears in the list.
+upgrade_script_entry() {
+    echo "'../../$1'"
+}
+
+upgrade_script_listed() {
+    grep -qF "$(upgrade_script_entry "$1")" "$UPGRADE_SCRIPT_LIST"
+}
+
+# Rewrite the list through the awk program $1, with any further
+# arguments passed on to awk.
+edit_upgrade_script_list() {
+    local program="$1" tmp
+    shift
+    tmp="$(mktemp)"
+    awk "$@" "$program" "$UPGRADE_SCRIPT_LIST" >"$tmp" &&
+        cat "$tmp" >"$UPGRADE_SCRIPT_LIST"
+    rm -f "$tmp"
+}
+
+# Add the script $1 as the last entry of ext_update_scripts. The list is
+# one entry per line between "ext_update_scripts = files(" and ")".
+upgrade_script_list_add() {
+    upgrade_script_listed "$1" && return 0
+    grep -q '^ext_update_scripts = files($' "$UPGRADE_SCRIPT_LIST" ||
+        die "$UPGRADE_SCRIPT_LIST has no 'ext_update_scripts = files('" \
+            "list to add $1 to"
+    # shellcheck disable=SC2016 # an awk program, not a shell expansion
+    edit_upgrade_script_list '
+        /^ext_update_scripts = files\($/ { inside = 1 }
+        inside && /^\)$/ { print "  " entry ","; inside = 0 }
+        { print }' -v entry="$(upgrade_script_entry "$1")"
+    upgrade_script_listed "$1" ||
+        die "could not add $1 to ext_update_scripts in $UPGRADE_SCRIPT_LIST"
+}
+
+# Replace the list entry of the script $1 with one for $2.
+upgrade_script_list_rename() {
+    # shellcheck disable=SC2016 # an awk program, not a shell expansion
+    edit_upgrade_script_list '
+        {
+            at = index($0, old)
+            if (at)
+                $0 = substr($0, 1, at - 1) new substr($0, at + length(old))
+            print
+        }' -v old="$(upgrade_script_entry "$1")" \
+        -v new="$(upgrade_script_entry "$2")"
+}
+
 # Every upgrade script in sql/ has to be named in ext_update_scripts,
 # or it is never installed and ALTER EXTENSION UPDATE fails exactly as
 # it does for a missing one, only later and less obviously. Checked for

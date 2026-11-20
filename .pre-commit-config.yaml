@@ -47,6 +47,15 @@ repos:
         files: \.(c|h)$
         pass_filenames: true
 
+      # One library serves every installed version, so it has to keep
+      # every C symbol that an install or upgrade script names.
+      - id: upgrade-script-symbols
+        name: upgrade script symbols
+        entry: ./scripts/upgrade-script-tool.sh check
+        language: system
+        files: ^(sql/.*\.sql|src/.*\.c)$
+        pass_filenames: false
+
       - id: commit-message-attribution
         name: commit message AI attribution
         entry: ./scripts/ci/check-commit-messages.sh
