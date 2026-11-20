@@ -17,6 +17,8 @@ adjacent pairs are needed (check the available paths with
 
 - Scripts are added to `ext_update_scripts` in `src/pg/meson.build` as
   they are created (listed explicitly; meson discourages globs).
+  `scripts/upgrade-script-tool.sh create` writes a new script and its list
+  entry, and `rename <version>` renames both at release.
 - Once a version is released its scripts are immutable — never edit a
   released script; fixes go into the next version's script. Only
   `pg_vectorsearch.sql` is a living file; everything else here is a
@@ -28,7 +30,8 @@ adjacent pairs are needed (check the available paths with
   an upgrade script holds only the statements for what changed in the
   SQL. In return the library keeps every C symbol that a script in this
   directory names, and a function whose signature changes gets a new
-  symbol.
+  symbol. `scripts/upgrade-script-tool.sh check` reports a symbol that has
+  gone missing, and runs as part of lint.
 - 0.1.0 bound its functions to `pg_vectorsearch-0.1.0.so`. The script
   that upgrades from 0.1.0 rebinds every C function once, with
   `CREATE OR REPLACE FUNCTION ... AS 'MODULE_PATHNAME', '<symbol>'`.
