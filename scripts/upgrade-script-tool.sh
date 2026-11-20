@@ -107,8 +107,8 @@ cmd_check() {
 
     [[ $# -eq 0 ]] || die "check takes no arguments"
 
-    defined="$(grep -rhoE 'PG_FUNCTION_INFO_V1\([A-Za-z0-9_]+\)' src |
-        sed 's/.*(\(.*\))/\1/' | sort -u)"
+    defined="$({ grep -rhoE 'PG_FUNCTION_INFO_V1\([A-Za-z0-9_]+\)' src ||
+        true; } | sed 's/.*(\(.*\))/\1/' | sort -u)"
 
     for file in sql/*.sql; do
         [[ -f "$file" ]] || continue

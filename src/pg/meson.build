@@ -115,4 +115,15 @@ custom_target('pg_vectorsearch-sql',
 ext_update_scripts = files(
   '../../sql/pg_vectorsearch--0.1.0--0.2.0-dev.sql',
 )
-install_data(ext_update_scripts, install_dir: pg_sharedir / 'extension')
+
+# A script that upgrades to a development version is installed only by
+# a build of that version. A release candidate is cut from the same tree
+# and does not provide the version the script leads to.
+foreach script : ext_update_scripts
+  script_name = fs.name(script)
+  if not script_name.endswith('-dev.sql') or script_name.endswith(
+    '--' + ext_version + '.sql',
+  )
+    install_data(script, install_dir: pg_sharedir / 'extension')
+  endif
+endforeach

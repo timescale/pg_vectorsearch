@@ -241,6 +241,10 @@ dir="$(check_fixture vs_one)"
 expect_status "check: a mention in a comment is not a use" 0 \
     tool "$dir" check
 
+dir="$(fixture 0.2.0-dev)"
+expect_status "check: a tree that defines and names no symbol passes" 0 \
+    tool "$dir" check
+
 expect_status "check: an argument is refused" 1 \
     tool "$dir" check sql/pg_vectorsearch.sql
 

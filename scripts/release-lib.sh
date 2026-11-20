@@ -754,7 +754,7 @@ check_upgrade_scripts_listed() {
 # Skipped for a first release, which has nothing to upgrade from, and
 # for a release whose description says it ships without a path.
 check_upgrade_path() {
-    local version="$1" prev from name script
+    local version="$1" prev from name script pending
 
     if check_disabled upgrade-path; then
         log "upgrade path: the pull request description disables" \
@@ -769,6 +769,15 @@ check_upgrade_path() {
             "is expected to upgrade to"
         return 0
     fi
+
+    # A final release ships its upgrade script under its own version.
+    # One still named for the development version is never reached by
+    # ALTER EXTENSION UPDATE, and the build leaves it out.
+    pending="$(pending_upgrade_script)"
+    [[ -z "$pending" ]] ||
+        die "releasing $version, but $pending is still named for a" \
+            "development version -- rename it with" \
+            "scripts/upgrade-script-tool.sh rename $version"
 
     prev="$(previous_final_release_tag)"
     if [[ -z "$prev" ]]; then

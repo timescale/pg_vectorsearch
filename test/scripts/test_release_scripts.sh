@@ -853,6 +853,83 @@ expect_eq "prepare: the half-written draft is removed" \
     "" "$(ls -A "$halfway.tmp")"
 
 # ----------------------------------------------------------------
+# open-release-pr.sh: the pending upgrade script
+# ----------------------------------------------------------------
+
+# A base at 0.2.0-dev whose last release is 0.1.0, with the pending
+# upgrade script created and listed, and the files for releasing $1.
+upgrade_pr_fixture() {
+    local dir
+    dir="$(new_fixture 0.2.0-dev)"
+    (
+        cd "$dir" || exit 1
+        git tag v0.1.0
+        printf 'ext_update_scripts = files(\n)\n' >src/pg/meson.build
+        ./scripts/upgrade-script-tool.sh create
+        echo "-- a statement" >>sql/pg_vectorsearch--0.1.0--0.2.0-dev.sql
+        git add -A
+        git commit -qm "the pending upgrade script"
+        git push -q origin main
+    ) >/dev/null 2>&1
+    write_changelog "$dir.changelog.md" "$1"
+    write_body "$dir.body.md" "$1" "Next-Version: $2"
+    printf '%s\n' "$dir"
+}
+
+committed_paths() {
+    git -C "$1" diff --no-renames --name-only HEAD~1 HEAD | tr '\n' ' ' |
+        sed 's/ $//'
+}
+
+pending=sql/pg_vectorsearch--0.1.0--0.2.0-dev.sql
+released=sql/pg_vectorsearch--0.1.0--0.2.0.sql
+
+final="$(upgrade_pr_fixture 0.2.0 0.3.0-dev)"
+expect_status "open-pr: a final release with a pending script opens" 0 \
+    open_pr "$final" 0.2.0 0.3.0-dev main \
+    "$final.changelog.md" "$final.body.md"
+expect_eq "open-pr: the commit also renames the script and its entry" \
+    "CHANGELOG.md VERSION $pending $released src/pg/meson.build" \
+    "$(committed_paths "$final")"
+expect_eq "open-pr: the renamed script keeps its statements" \
+    "-- a statement" "$(tail -1 "$final/$released")"
+expect_eq "open-pr: the build lists the released script" 1 \
+    "$(grep -c "'../../$released'," "$final/src/pg/meson.build")"
+expect_eq "open-pr: the build no longer lists the pending one" 0 \
+    "$(grep -c -- '-dev.sql' "$final/src/pg/meson.build")"
+
+candidate="$(upgrade_pr_fixture 0.2.0-rc1 0.2.0-dev)"
+expect_status "open-pr: a candidate with a pending script opens" 0 \
+    open_pr "$candidate" 0.2.0-rc1 0.2.0-dev main \
+    "$candidate.changelog.md" "$candidate.body.md"
+expect_eq "open-pr: a candidate renames nothing" \
+    "CHANGELOG.md VERSION" "$(committed_paths "$candidate")"
+expect_eq "open-pr: a candidate keeps the script pending" \
+    "$pending" "$(cd "$candidate" && echo sql/*--*--*.sql)"
+
+# The release check runs before anything is pushed, and it includes
+# the symbols the scripts name.
+unbound="$(upgrade_pr_fixture 0.2.0 0.3.0-dev)"
+(
+    cd "$unbound" || exit 1
+    printf "CREATE FUNCTION gone() RETURNS int\n" >>"$pending"
+    printf "    AS 'MODULE_PATHNAME', 'vs_gone' LANGUAGE C;\n" >>"$pending"
+    git commit -qam "a function the library does not define"
+    git push -q origin main
+) >/dev/null 2>&1
+expect_status "open-pr: a script naming a missing symbol is refused" 1 \
+    open_pr "$unbound" 0.2.0 0.3.0-dev main \
+    "$unbound.changelog.md" "$unbound.body.md"
+expect_eq "open-pr: the refusal leaves the checkout on the base" \
+    main "$(git -C "$unbound" branch --show-current)"
+expect_eq "open-pr: the refusal leaves the script pending" \
+    "$pending" "$(cd "$unbound" && ls sql/*--*--*.sql)"
+expect_eq "open-pr: the refusal leaves the tree clean" \
+    "" "$(git -C "$unbound" status --porcelain)"
+expect_eq "open-pr: the refusal pushes no release branch" \
+    "" "$(pushed_branches "$unbound")"
+
+# ----------------------------------------------------------------
 # release-check.sh: the verdict it hands the packaging job
 # ----------------------------------------------------------------
 #

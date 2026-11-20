@@ -9,15 +9,17 @@
 # two files as drafts. Once the notes in them are written, this cuts
 # chore/release-<version> from the base, commits CHANGELOG.md and
 # VERSION, runs the release check, pushes the branch and opens the
-# pull request. A person runs it from a checkout; the "Cut a release
-# PR" workflow runs it in a job of its own, on a fresh checkout, after
-# the job that wrote the notes. Both run it the same way.
+# pull request. A final release also renames the pending upgrade
+# script for the version in the same commit. A person runs it from a
+# checkout; the "Cut a release PR" workflow runs it in a job of its
+# own, on a fresh checkout, after the job that wrote the notes. Both
+# run it the same way.
 #
 # The checkout must be clean and sit on a commit the remote's base
 # branch has. Nothing else in it is read: the release commit is built
-# from the two files alone, so whatever wrote them cannot put anything
-# else into the release. A run that is refused leaves the checkout as
-# it found it.
+# from the two files and the rename alone, so whatever wrote the files
+# cannot put anything else into the release. A run that is refused
+# leaves the checkout as it found it.
 #
 # next-dev is the version the development cycle reopens at, blank for
 # the default bump. The body must end with exactly one Next-Version
@@ -248,6 +250,18 @@ fi
 # The release commit
 # ----------------------------------------------------------------
 
+# The pending upgrade script a final release renames, and the name it
+# gets. Both are empty for a candidate, and when nothing is pending.
+pending_script=""
+released_script=""
+if ! is_prerelease "$VERSION"; then
+    pending_script="$(pending_upgrade_script)"
+    if [[ -n "$pending_script" ]]; then
+        released_script="$(upgrade_script_path \
+            "$(upgrade_script_from "$pending_script")" "$VERSION")"
+    fi
+fi
+
 # Where to return to if a step below refuses: the branch, or the
 # commit when detached. The tree was clean, so whatever the cut left
 # in it is the cut's own and is thrown away. A branch the cut
@@ -263,6 +277,7 @@ old_tip="$(git rev-parse -q --verify "refs/heads/$BRANCH" || true)"
 nohooks=(-c core.hooksPath=/dev/null)
 restore_checkout() {
     git reset -q --hard || return 1
+    [[ -z "$released_script" ]] || rm -f "$released_script"
     [[ -n "$had_changelog" ]] || rm -f CHANGELOG.md
     git "${nohooks[@]}" checkout -q "$start" || return 1
     if [[ -n "$old_tip" ]]; then
@@ -288,15 +303,31 @@ git "${nohooks[@]}" switch -q -C "$BRANCH"
 
 cp "$CHANGELOG" CHANGELOG.md
 set_version "$VERSION"
+committed=(CHANGELOG.md VERSION)
 
-git add CHANGELOG.md VERSION
+# A final release ships the pending upgrade script under its own
+# version. A candidate leaves it pending: nothing upgrades to one.
+if [[ -n "$pending_script" ]]; then
+    ./scripts/upgrade-script-tool.sh rename "$VERSION"
+    committed+=("$pending_script" "$released_script" "$UPGRADE_SCRIPT_LIST")
+fi
+
+git add -A -- "${committed[@]}"
 git commit -q -m "chore: release $VERSION" -m "Next-Version: $NEXT"
 
 # The one fact the push relies on, so asserted rather than assumed
-# from the two files staged above.
-changed="$(git diff --name-only HEAD~1 HEAD | sort | tr '\n' ' ')"
-[[ "$changed" == "CHANGELOG.md VERSION " ]] ||
+# from the files staged above. A rename is compared as the two paths
+# it touches, so the answer does not depend on git detecting it.
+changed="$(git diff --no-renames --name-only HEAD~1 HEAD | sort |
+    tr '\n' ' ')"
+expected="$(printf '%s\n' "${committed[@]}" | sort | tr '\n' ' ')"
+[[ "$changed" == "$expected" ]] ||
     die "the release commit changes '${changed% }'"
+if [[ -n "$pending_script" ]]; then
+    [[ "$(git rev-parse "HEAD~1:$pending_script")" == \
+        "$(git rev-parse "HEAD:$released_script")" ]] ||
+        die "the release commit changes the contents of $released_script"
+fi
 
 # The same check the pull request runs, before anything is pushed.
 # The body is the pull request description, so a Disable-check
