@@ -64,10 +64,6 @@ jobs:
       contents: read       # checkout
       pull-requests: read  # the thanks section reads merged PRs
       issues: read         # and the issues those PRs closed
-    env:
-      # Where prepare-release.sh writes the draft, so it can be
-      # collected once the agent is done.
-      RELEASE_TMP: ${{ runner.temp }}/release-pr
 
     steps:
       - name: Checkout repository
@@ -115,7 +111,12 @@ jobs:
           }
 
       - name: Make a place for the pull request body
-        run: mkdir -p "$RELEASE_TMP"
+        # RELEASE_TMP is where prepare-release.sh writes the draft, so it
+        # can be collected once the agent is done. Set here rather than in
+        # the job's env, which has no runner context.
+        run: |
+          echo "RELEASE_TMP=$RUNNER_TEMP/release-pr" >>"$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/release-pr"
 
       - name: Install bubblewrap for subprocess isolation
         # The scrub below refuses to start without it.
