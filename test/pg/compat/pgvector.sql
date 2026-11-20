@@ -347,8 +347,23 @@ SELECT assert_test('vector_dims matches',
     public.vec32_dims('[1,2,3]'::public.vec32)
     = public.vector_dims('[1,2,3]'::public.vector));
 
+-- Both extensions define vector_dims and l2_norm, each for its own
+-- types, so the argument type picks the function.
+SELECT assert_test('vector_dims resolves for both vector types',
+    public.vector_dims('[1,2,3]'::public.vec32) = 3
+    AND public.vector_dims('[1,2,3]'::public.vector) = 3);
+
+SELECT assert_test('vector_dims resolves for both half types',
+    public.vector_dims('[1,2,3]'::public.vec16) = 3
+    AND public.vector_dims('[1,2,3]'::public.halfvec) = 3);
+
+SELECT assert_test('l2_norm resolves for both half types',
+    abs(public.l2_norm('[3,4]'::public.vec16)
+      - public.l2_norm('[3,4]'::public.halfvec))
+    < 1e-6);
+
 SELECT assert_test('vector_norm matches',
-    abs(public.vec32_norm('[3,4]'::public.vec32)
+    abs(public.l2_norm('[3,4]'::public.vec32)
       - public.vector_norm('[3,4]'::public.vector))
     < 1e-6);
 

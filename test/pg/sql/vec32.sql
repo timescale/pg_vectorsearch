@@ -34,7 +34,8 @@ SELECT '[ 1 , 2 , 3 ]'::vec32;
 
 -- Utility functions
 SELECT vec32_dims('[1,2,3]'::vec32);
-SELECT vec32_norm('[3,4]'::vec32);
+SELECT vector_dims('[1,2,3]'::vec32);
+SELECT l2_norm('[3,4]'::vec32);
 
 -- Table storage
 CREATE TABLE t_vec (id serial, v vec32(3));
