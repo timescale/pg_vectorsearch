@@ -113,7 +113,7 @@ custom_target('pg_vectorsearch-sql',
 # Upgrade scripts (sql/pg_vectorsearch--A--B.sql) are listed here
 # explicitly as they are added; see sql/README.md.
 ext_update_scripts = files(
-  '../../sql/pg_vectorsearch--0.1.0--0.2.0-dev.sql',
+  '../../sql/pg_vectorsearch--0.1.0--0.2.0.sql',
 )
 
 # A script that upgrades to a development version is installed only by
