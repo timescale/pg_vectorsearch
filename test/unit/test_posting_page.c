@@ -354,6 +354,8 @@ check_spilled_chain(
 	BlockNumber prev = InvalidBlockNumber;
 	BlockNumber end	 = InvalidBlockNumber;
 
+	ASSERT_TRUE(npages >= 2, "a spilled list has START and END pages");
+
 	/* A full page of reference on the START and MIDDLE pages, the rest on
 	 * the END page where the entries start. */
 	for (uint32_t c = 0; c + 1 < npages; c++)
