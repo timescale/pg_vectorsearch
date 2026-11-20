@@ -115,6 +115,12 @@ Run pgspot on the install script (`pgspot <install-script.sql>`).
 - **Not blocking:** **PS017** (unqualified own-object reference) — the
   standard PostgreSQL idiom, unsilenceable without `@extschema@`. Note the
   count, move on.
+- **Not blocking, for one file:** **PS002** (`CREATE OR REPLACE
+  FUNCTION`) in the script that upgrades from 0.1.0. It replaces functions
+  0.1.0 installed, to rebind them to the unversioned library, and
+  PostgreSQL refuses to replace an object that is not a member of the
+  extension. `scripts/ci/pgspot.sh` ignores it for that script only; PS002
+  anywhere else is blocking.
 - Don't pass the file to `--proc-without-search-path` — that reads empty
   stdin and reports a false "clean".
 

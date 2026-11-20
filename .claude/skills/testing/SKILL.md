@@ -34,6 +34,37 @@ Four kinds of test exist here, each covering something the others can't:
 - **TAP tests** (`test/pg/t/`) — multi-instance scenarios, e.g. streaming
   replication.
 
+One check sits outside those four. `./scripts/ci/upgrade-test.sh`
+installs the previous release next to the current build and runs the
+tests in `test/pg/upgrade/`. `upgrade.sql` runs first: it updates a
+database on the previous release with `ALTER EXTENSION UPDATE` and
+compares it with a fresh install. Every other script in that directory
+then runs against the updated extension, followed by the regression
+tests, whose names the script reads from `test_names` in
+`test/pg/meson.build`. Run it after `meson install` for any change to
+`sql/` or to the upgrade script. It is the only test that loads two
+versions of the library.
+
+A new upgrade test is a script in `test/pg/upgrade/sql/` with its
+expected output in `test/pg/upgrade/expected/`; nothing lists them. A
+check that needs the previous release goes into `upgrade.sql`, which
+reconnects with `\c` wherever it needs a session that has not loaded the
+previous library.
+
+The upgrade tests have to pass for any pair of releases, so keep out of
+the expected output anything that depends on the step being tested:
+
+- Version numbers. `PGVS_UPGRADE_FROM` and `PGVS_UPGRADE_TO` hold them.
+- Whether the previous release has a library of its own, which decides
+  if a session that used it can update. `PGVS_UPGRADE_OWN_LIBRARY` says.
+- Whether the on-disk format changed. `CALL reindex_if_needed(<index>)`,
+  defined in `upgrade.sql`, rebuilds an index only if the current version
+  cannot read it and prints nothing either way.
+
+`scripts/ci/build-release.sh` builds the previous release from its
+official tarball; set `OLD_RELEASE_DIR` to a directory to keep that build
+between runs.
+
 Pick the cheapest kind that actually exercises the change — don't reach for
 a TAP test where a unit test would do.
 

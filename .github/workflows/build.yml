@@ -53,6 +53,8 @@ jobs:
             'scripts/ci/build.sh' \
             'scripts/ci/build-pg.sh' \
             'scripts/ci/makefile-check.sh' \
+            'scripts/ci/upgrade-test.sh' \
+            'scripts/ci/build-release.sh' \
             'scripts/ci/paths-changed.sh' \
             'Makefile' \
             '.github/actions/setup-pg/**' \
@@ -260,8 +262,10 @@ jobs:
             builddir/*testdb/data/log/
           retention-days: 7
 
+  # The PostgreSQL 18 leg also runs the upgrade test and is named for
+  # it, so that test has a line of its own among the checks.
   makefile:
-    name: Makefile wrapper PG${{ matrix.pg-version }}
+    name: ${{ matrix.pg-version == '18' && 'Extension upgrade' || 'Makefile wrapper' }} PG${{ matrix.pg-version }}
     needs: changes
     if: needs.changes.outputs.changed == 'true'
     runs-on: ubuntu-26.04
@@ -308,6 +312,35 @@ jobs:
         env:
           MAKE_CHECK_SMOKE: '1'
         run: ./scripts/ci/makefile-check.sh
+
+      # ALTER EXTENSION UPDATE from the previous release, against the
+      # build the step above installed. The previous release never
+      # changes, so build-release.sh's output is cached and only the
+      # first run downloads and compiles it.
+      #
+      # Limited to PostgreSQL 18 only to avoid a redundant run, not
+      # because the test fails on other versions: what it checks does
+      # not depend on the PostgreSQL version. Any one version would do.
+      - name: Find the previous release
+        id: previous
+        if: matrix.pg-version == '18'
+        run: |
+          echo "version=$(./scripts/ci/upgrade-test.sh --previous-version)" >> "$GITHUB_OUTPUT"
+          echo "image=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the previous release
+        if: matrix.pg-version == '18'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: old-release
+          key: >-
+            old-release-${{ steps.previous.outputs.version }}-pg${{ matrix.pg-version }}-${{ steps.previous.outputs.image }}-${{ runner.arch }}-${{ hashFiles('scripts/ci/build-release.sh') }}
+
+      - name: Update from the previous release
+        if: matrix.pg-version == '18'
+        env:
+          OLD_RELEASE_DIR: old-release
+        run: ./scripts/ci/upgrade-test.sh
 
   # The requirable context. A matrix leg's name is derived from its own
   # parameters, so requiring ten of them directly would mean a ruleset
