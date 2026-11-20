@@ -46,6 +46,8 @@ emit() {
 DOCS_VERSION_ALLOWLIST=(
     'PostgreSQL [0-9]+'
     'pgvector [0-9]+\.[0-9]+'
+    # The library 0.1.0 installed, which the upgrade from it is about.
+    'pg_vectorsearch-0\.1\.0\.so'
 )
 
 # ----------------------------------------------------------------
