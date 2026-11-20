@@ -32,6 +32,17 @@ set -euo pipefail
 # PS016 (unqualified builtin in dynamic SQL), plus anything new.
 IGNORE_CODES=(PS017)
 
+# PS002 warns that CREATE OR REPLACE FUNCTION can take over a function
+# someone else created first. The script that upgrades from 0.1.0 replaces
+# the functions 0.1.0 installed, to rebind them to the unversioned library,
+# and PostgreSQL refuses to replace an object that is not already a member
+# of the extension. So the class is ignored for that one script.
+file_ignore_codes() {
+    case "$(basename "$1")" in
+        pg_vectorsearch--0.1.0--*.sql) echo PS002 ;;
+    esac
+}
+
 if ! command -v pgspot >/dev/null 2>&1; then
     echo "ERROR: pgspot not found on PATH. Install with: pip install pgspot" >&2
     exit 1
@@ -59,7 +70,11 @@ done
 status=0
 for f in "${files[@]}"; do
     echo "==> pgspot $f"
-    if ! pgspot "${ignore_args[@]}" "$f"; then
+    file_args=()
+    for code in $(file_ignore_codes "$f"); do
+        file_args+=(--ignore "$code")
+    done
+    if ! pgspot "${ignore_args[@]}" ${file_args[@]+"${file_args[@]}"} "$f"; then
         status=1
     fi
 done

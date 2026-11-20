@@ -418,6 +418,8 @@ debugging. These are the same scripts used by GitHub Actions.
 | `check-commit-messages.sh` | Reject commit messages that credit an AI agent |
 | `check-commit-count.sh` | Require one commit per pull request unless its description disables the check |
 | `pgspot.sh` | Static security lint of the install-time SQL (pgspot) |
+| `upgrade-test.sh` | Update a database from the previous release with `ALTER EXTENSION UPDATE` |
+| `build-release.sh` | Build a released version from its official tarball, for the upgrade test |
 
 ### Usage
 

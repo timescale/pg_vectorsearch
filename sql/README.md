@@ -31,7 +31,16 @@ adjacent pairs are needed (check the available paths with
   symbol.
 - 0.1.0 bound its functions to `pg_vectorsearch-0.1.0.so`. The script
   that upgrades from 0.1.0 rebinds every C function once, with
-  `CREATE OR REPLACE FUNCTION ... AS 'MODULE_PATHNAME', '<symbol>'`.
+  `CREATE OR REPLACE FUNCTION ... AS 'MODULE_PATHNAME', '<symbol>'`. A
+  change to one of those functions during the cycle edits its statement
+  there.
+- The pending script is named for the development version
+  (`pg_vectorsearch--0.1.0--0.2.0-dev.sql`), which is the version a
+  development build installs. It is renamed when the version is released.
+- `scripts/ci/upgrade-test.sh` runs the pending script against a database
+  on the previous release, compares the result with a fresh install, and
+  runs the regression tests against the updated extension. Its tests
+  are the scripts in `test/pg/upgrade/sql/`.
 - Every catalog-affecting change during a development cycle must land
   in the same PR as its addition to the pending upgrade script (from
   the first non-alpha release on; alphas have no upgrade path).

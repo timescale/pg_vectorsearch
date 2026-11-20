@@ -85,9 +85,10 @@ repos:
         # which build an immutable function around a query vector with
         # \gset and \gexec to keep an InitPlan out of the compared plans,
         # and split.sql, which reads a toast table's name with \gset to
-        # vacuum it.
+        # vacuum it. The upgrade tests read the versions under test with
+        # \getenv and reconnect with \c.
         exclude: >-
-          (?x)^(sql/|test/pg/(compat/|sql/(
+          (?x)^(sql/|test/pg/(compat/|upgrade/|sql/(
           prism|mutations(_cases)?|index_cases|test_helpers|cost|rerank|split
           )\.sql$))
 

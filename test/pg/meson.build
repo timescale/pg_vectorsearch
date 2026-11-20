@@ -23,6 +23,8 @@ else
         'logging_collector = on\\n" > @OUTPUT@'],
     )
 
+    # scripts/ci/upgrade-test.sh reads this list to run the same tests
+    # against an updated extension, so keep it one name per line.
     test_names = [
       'vec32',
       'vec16',
