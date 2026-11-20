@@ -64,14 +64,22 @@ sort_commits = "newest"
 
 # The <!-- N --> prefixes order the groups in the output and are
 # stripped by the body template (invisible in rendered markdown either
-# way). chore/ci/style/test commits are internal housekeeping and are
-# omitted from release notes.
+# way). The first rule that matches a commit decides.
+#
+# Left out of release notes: chore/ci/style/test commits, which are
+# internal housekeeping, and any commit scoped to the release tooling,
+# CI or the agent skills, which change nothing a user runs.
+#
+# Commits scoped to cli are about the benchmark tool, so they get a
+# section of their own rather than mixing with the extension's.
 commit_parsers = [
+  { message = "^(chore|ci|style|test)", skip = true },
+  { message = "^[a-z]+\\((release|ci|skills)\\)", skip = true },
+  { message = "^[a-z]+\\(cli\\)", group = "<!-- 6 -->Benchmark tool" },
   { message = "^feat", group = "<!-- 0 -->Features" },
   { message = "^fix", group = "<!-- 1 -->Bug fixes" },
   { message = "^perf", group = "<!-- 2 -->Performance" },
   { message = "^build", group = "<!-- 3 -->Build" },
   { message = "^docs", group = "<!-- 4 -->Documentation" },
   { message = "^refactor", group = "<!-- 5 -->Refactoring" },
-  { message = "^(chore|ci|style|test)", skip = true },
 ]
