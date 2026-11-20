@@ -22,9 +22,7 @@ these from it:
 | artifact | carries the version as |
 |---|---|
 | `pg_vectorsearch.control` | `default_version` |
-| `pg_vectorsearch--<version>.control` | `module_pathname` |
 | `pg_vectorsearch--<version>.sql` | its filename |
-| `pg_vectorsearch-<version>.so` | its filename |
 | `pg_vectorsearch_version()`, the CLI banner | `VS_VERSION` |
 
 **Between releases, `VERSION` carries a `-dev` suffix.** `main` sits at
@@ -36,13 +34,18 @@ at the following `-dev`.
 like any other — so the release check keys on `-dev` specifically rather
 than on any prerelease suffix.
 
-**Multiple versions can be installed side by side.** The library is
-version-named and each version installs its own secondary control file,
-whose `module_pathname` PostgreSQL uses to resolve `MODULE_PATHNAME` in
-that version's scripts. Several versions can be installed in one cluster
-and databases upgrade independently. C symbols may therefore change
-freely between versions; the obligation is that an upgrade script
-repoints *every* C function at the new version's library.
+**One library serves every version.** `pg_vectorsearch.so` carries no
+version in its name, so installing a release replaces the code for every
+database in the cluster at once, and `ALTER EXTENSION pg_vectorsearch
+UPDATE` only moves a database's catalog. The library therefore has to
+work with the catalog of any version that can still upgrade: a C symbol
+that an install or upgrade script names stays in the library, and a
+function whose signature changes gets a new symbol.
+
+0.1.0 is the exception. It installed `pg_vectorsearch-0.1.0.so`, so the
+script that upgrades from it rebinds every C function to the unversioned
+library, and that update has to run in a session that has not used the
+extension yet.
 
 A prerelease version also turns on an install-time notice: `CREATE
 EXTENSION` warns that upgrading from a prerelease may not be possible.

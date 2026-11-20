@@ -5,11 +5,7 @@
  * script (pg_vectorsearch--<version>.sql); see src/pg/meson.build.
  * PostgreSQL resolves the placeholders when the script runs:
  *
- *   MODULE_PATHNAME  the version-named extension library, from the
- *                    version's own control file
- *                    (pg_vectorsearch--<version>.control) — so every
- *                    version binds its own library, including each
- *                    step of an upgrade chain
+ *   MODULE_PATHNAME  the extension library, from pg_vectorsearch.control
  */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION

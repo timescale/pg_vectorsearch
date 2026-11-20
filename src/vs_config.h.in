@@ -27,9 +27,8 @@
 #mesondefine VS_GUC_PREFIX
 
 /*
- * Name of the version-named extension shared library
- * ("pg_vectorsearch-<version>"). Used where the library is referenced by name,
- * e.g. when launching parallel workers.
+ * Name of the extension shared library. Used where the library is referenced
+ * by name, e.g. when launching parallel workers.
  */
 #mesondefine VS_MODULE_NAME
 

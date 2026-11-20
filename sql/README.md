@@ -22,18 +22,16 @@ adjacent pairs are needed (check the available paths with
   `pg_vectorsearch.sql` is a living file; everything else here is a
   frozen release artifact.
 - Scripts reference the extension library as the literal
-  `'MODULE_PATHNAME'`, which PostgreSQL resolves from the *target
-  version's* control file (`pg_vectorsearch--<version>.control`) when
-  the script runs — upgrade scripts stay version-blind, pgvector-style.
-- The extension shared library is version-named
-  (`pg_vectorsearch-<version>.so`) and every installed version binds
-  its own library, so an upgrade script must repoint **every** C
-  function to the new version's library: a version-agnostic block of
-  `CREATE OR REPLACE FUNCTION ... AS 'MODULE_PATHNAME', '<symbol>'`
-  statements derived from the canonical `sql/pg_vectorsearch.sql` (a
-  small
-  generator to build when the first supported upgrade is owed),
-  followed by the hand-written migration statements.
+  `'MODULE_PATHNAME'`, which PostgreSQL resolves from
+  `pg_vectorsearch.control` when the script runs, pgvector-style.
+- One library, `pg_vectorsearch.so`, serves every installed version, so
+  an upgrade script holds only the statements for what changed in the
+  SQL. In return the library keeps every C symbol that a script in this
+  directory names, and a function whose signature changes gets a new
+  symbol.
+- 0.1.0 bound its functions to `pg_vectorsearch-0.1.0.so`. The script
+  that upgrades from 0.1.0 rebinds every C function once, with
+  `CREATE OR REPLACE FUNCTION ... AS 'MODULE_PATHNAME', '<symbol>'`.
 - Every catalog-affecting change during a development cycle must land
   in the same PR as its addition to the pending upgrade script (from
   the first non-alpha release on; alphas have no upgrade path).

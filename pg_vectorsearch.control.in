@@ -1,4 +1,4 @@
-# module_pathname goes into pg_vectorsearch--<version>.control
 comment = 'ANN vector search with PRISM index'
 default_version = '@VERSION@'
+module_pathname = '$libdir/pg_vectorsearch'
 relocatable = false

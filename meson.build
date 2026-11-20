@@ -1,8 +1,7 @@
 project('pg_vectorsearch', 'c',
   # The version lives in ./VERSION -- one line, the single source of
   # truth. Everything else derives from meson.project_version(): the
-  # control files, the version-named library, the versioned install
-  # SQL, VS_VERSION (pg_vectorsearch_version()) and the dist tarball.
+  # control file, the versioned install SQL, VS_VERSION (pg_vectorsearch_version()) and the dist tarball.
   version: files('VERSION'),
   # Verified floor: 0.61 (Ubuntu 22.04) configures and builds; older
   # meson fails on newer syntax with errors that don't name the real
@@ -70,11 +69,9 @@ config_data.set_quoted('VS_VERSION', meson.project_version())
 config_data.set_quoted('VS_EXTENSION_NAME', extension_name)
 config_data.set_quoted('VS_AM_NAME', am_name)
 config_data.set_quoted('VS_GUC_PREFIX', guc_prefix)
-# The extension shared library is version-named (pg_vectorsearch-<version>.so)
-# so multiple extension versions can be installed side by side; C code
-# that references the library by name (parallel workers) uses this.
-config_data.set_quoted('VS_MODULE_NAME',
-  extension_name + '-' + meson.project_version())
+# C code that references the extension library by name (parallel workers)
+# uses this.
+config_data.set_quoted('VS_MODULE_NAME', extension_name)
 if simd_mode == 'full'
   config_data.set('VS_SIMD_FULL', 1)
 endif

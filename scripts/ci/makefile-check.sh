@@ -19,7 +19,7 @@ make
 ver="$(tr -d '[:space:]' < VERSION)"
 [[ -n "$ver" ]] || { echo "FAIL: cannot read version from VERSION"; exit 1; }
 
-so="$BUILDDIR/src/pg/pg_vectorsearch-$ver.so"
+so="$BUILDDIR/src/pg/pg_vectorsearch.so"
 [[ -f "$so" ]] || { echo "FAIL: extension library not built: $so"; exit 1; }
 
 # The wrapper defaults to an extension-only build: no CLI, no
@@ -41,9 +41,8 @@ pkglibdir="$("$pg_config_bin" --pkglibdir)"
 sharedir="$("$pg_config_bin" --sharedir)"
 
 for f in \
-    "$pkglibdir/pg_vectorsearch-$ver.so" \
+    "$pkglibdir/pg_vectorsearch.so" \
     "$sharedir/extension/pg_vectorsearch.control" \
-    "$sharedir/extension/pg_vectorsearch--$ver.control" \
     "$sharedir/extension/pg_vectorsearch--$ver.sql"; do
     [[ -f "$f" ]] || { echo "FAIL: not installed: $f"; exit 1; }
 done
