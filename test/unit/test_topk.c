@@ -585,6 +585,15 @@ ref_insert(RefHeap *h, Distance lb, Distance ub, uint64_t id, bool unique)
 	}
 }
 
+/* Advance a xorshift64 state. */
+static void
+xorshift64(uint64_t *state)
+{
+	*state ^= *state << 13;
+	*state ^= *state >> 7;
+	*state ^= *state << 17;
+}
+
 /* Heavy id reuse forces map hits, evictions and backward-shift
  * deletes. Resets cover shrinking k, growing it within the allocated
  * capacity and growing it past. Each round opens with unique inserts,
@@ -604,9 +613,7 @@ TEST(topk_dedup_map_matches_linear_scan)
 
 		for (uint32_t step = 0; step < 20000; step++)
 		{
-			rng ^= rng << 13;
-			rng ^= rng >> 7;
-			rng ^= rng << 17;
+			xorshift64(&rng);
 
 			Distance d	  = (float)(rng % 10000) / 100.0f;
 			Distance err  = (float)((rng >> 16) % 300) / 100.0f;

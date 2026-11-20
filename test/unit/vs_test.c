@@ -6,6 +6,7 @@
  */
 
 #include <stdarg.h>
+#include <sys/stat.h>
 
 #include "vs_test.h"
 
@@ -184,6 +185,52 @@ vs_test_printf(const char *fmt, ...)
 	}
 
 	va_end(args);
+}
+
+bool
+vs_test_write_tmp(
+		char	   *path,
+		size_t		sz,
+		const char *prefix,
+		const void *data,
+		size_t		len)
+{
+	const char *dir = getenv("TMPDIR");
+	mode_t		old_mask;
+	int			fd;
+	FILE	   *f;
+
+	snprintf(
+			path,
+			sz,
+			"%s/%s-XXXXXX",
+			dir != NULL && dir[0] != '\0' ? dir : "/tmp",
+			prefix);
+	old_mask = umask(S_IRWXG | S_IRWXO);
+	fd		 = mkstemp(path);
+	umask(old_mask);
+	if (fd < 0)
+	{
+		path[0] = '\0';
+		return false;
+	}
+	f = fdopen(fd, "wb");
+	if (f == NULL)
+	{
+		close(fd);
+		unlink(path);
+		path[0] = '\0';
+		return false;
+	}
+	/* A short write must not leave a file that parses differently. */
+	size_t wrote = fwrite(data, 1, len, f);
+	if (fclose(f) != 0 || wrote != len)
+	{
+		unlink(path);
+		path[0] = '\0';
+		return false;
+	}
+	return true;
 }
 
 int

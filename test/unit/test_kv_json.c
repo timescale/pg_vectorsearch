@@ -7,33 +7,12 @@
 
 #include <math.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "cli/kv.h"
 #include "core/memory.h"
 #include "vs_test.h"
-
-/* Write len bytes to a fresh temp file; path is empty on failure. */
-static void
-write_tmp(char *path, size_t sz, const char *data, size_t len)
-{
-	const char *dir = getenv("TMPDIR");
-	FILE	   *f;
-	int			fd;
-
-	snprintf(path, sz, "%s/vs-json-XXXXXX", dir != NULL ? dir : "/tmp");
-	fd = mkstemp(path);
-	if (fd < 0)
-	{
-		path[0] = '\0';
-		return;
-	}
-	f = fdopen(fd, "wb");
-	fwrite(data, 1, len, f);
-	fclose(f);
-}
 
 TEST_GROUP(KvJson);
 TEST_MEMCTX_FIXTURE();
@@ -219,10 +198,10 @@ TEST(write_path_dash)
 	/* Smoke: stringify path "-" would hit stdout; use a temp file. */
 	Kv *o = kv_obj();
 	kv_obj_put(o, "ok", kv_bool(true));
-	char tmp[] = "/tmp/vs-json-test-XXXXXX";
-	int	 fd	   = mkstemp(tmp);
-	ASSERT_TRUE(fd >= 0, "mkstemp");
-	close(fd);
+	char tmp[256];
+	ASSERT_TRUE(
+			vs_test_write_tmp(tmp, sizeof(tmp), "vs-json-test", "", 0),
+			"temp file");
 	ASSERT_EQ(0, kv_write_json(o, tmp), "write");
 	FILE *f = fopen(tmp, "r");
 	ASSERT_NOT_NULL(f, "reopen");
@@ -422,8 +401,10 @@ TEST(from_json_file_roundtrip)
 	const char *json = "{\"a\":1}";
 	char		path[128];
 
-	write_tmp(path, sizeof(path), json, strlen(json));
-	ASSERT_TRUE(path[0] != '\0', "temp file");
+	ASSERT_TRUE(
+			vs_test_write_tmp(
+					path, sizeof(path), "vs-json", json, strlen(json)),
+			"temp file");
 	Kv *p = kv_from_json_file(path);
 	unlink(path);
 	ASSERT_NOT_NULL(p, "parsed");
@@ -436,8 +417,10 @@ TEST(from_json_file_embedded_nul)
 	const char data[] = "{\"a\":1}\0garbage";
 	char	   path[128];
 
-	write_tmp(path, sizeof(path), data, sizeof(data) - 1);
-	ASSERT_TRUE(path[0] != '\0', "temp file");
+	ASSERT_TRUE(
+			vs_test_write_tmp(
+					path, sizeof(path), "vs-json", data, sizeof(data) - 1),
+			"temp file");
 	Kv *p = kv_from_json_file(path);
 	unlink(path);
 	ASSERT_NULL(p, "NUL rejected");
@@ -455,10 +438,10 @@ TEST(from_json_file_too_large)
 	memset(big, ' ', cap);
 	big[0]		 = '1';
 	big[cap - 1] = 'x';
-	write_tmp(path, sizeof(path), big, cap);
-	ASSERT_TRUE(path[0] != '\0', "temp file");
+	bool wrote	 = vs_test_write_tmp(path, sizeof(path), "vs-json", big, cap);
+	vs_free(big);
+	ASSERT_TRUE(wrote, "temp file");
 	Kv *p = kv_from_json_file(path);
 	unlink(path);
-	vs_free(big);
 	ASSERT_NULL(p, "oversized file rejected");
 }
