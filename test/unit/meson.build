@@ -47,6 +47,7 @@ unit_test_sources = files(
   'test_kv.c',
   'test_kv_json.c',
   'test_kv_cmp.c',
+  'test_library_guard.c',
   'test_spinup.c',
   '../../src/cli/kv.c',
   '../../src/cli/kv_json.c',

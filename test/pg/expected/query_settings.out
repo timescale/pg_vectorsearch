@@ -690,9 +690,8 @@ RESET prism.nprobe;
 -- with nprobe = 8 every reported rank is below 8 -- the histogram's <=8
 -- bucket holds 100% of queries. Ranks above nprobe are impossible unless
 -- the diagnostic leaks pre-re-rank beam indexes.
--- The diagnostic functions live in the version-named extension
--- library (pg_vectorsearch-<version>.so); resolve its path from an
--- existing extension function instead of hardcoding the version.
+-- The diagnostic functions live in the extension library; resolve its
+-- path from an existing extension function instead of hardcoding it.
 DO $$
 DECLARE lib text;
 BEGIN

@@ -22,6 +22,7 @@
 #include "index/index_build.h"
 #include "index/posting_page.h"
 #include "index/query_scan.h"
+#include "library_guard.h"
 #include "pg/bufstorage.h"
 #include "scan.h"
 #include "scan_bound.h"
@@ -109,11 +110,61 @@ static relopt_enum_elt_def fastscan_mode_relopt_members[] = {
 		{NULL, 0},
 };
 
+static void *
+loaded_module_first(void)
+{
+	return get_first_loaded_module();
+}
+
+static void *
+loaded_module_next(void *module)
+{
+	return get_next_loaded_module(module);
+}
+
+static const char *
+loaded_module_path(void *module)
+{
+	const char *path;
+	const char *name;
+	const char *version;
+
+	get_loaded_module_details(module, &path, &name, &version);
+	return path;
+}
+
+static const VsModuleList loaded_modules = {
+		.first = loaded_module_first,
+		.next  = loaded_module_next,
+		.path  = loaded_module_path,
+};
+
+/*
+ * Refuse to load next to another copy of the library. 0.1.0 installed a
+ * version-named library, so a session that used it loads this one as well
+ * when the extension is updated. The library being initialized is not in
+ * PostgreSQL's module list yet, so any match is another copy.
+ */
+static void
+refuse_second_library(void)
+{
+	const char *file = vs_find_extension_library(&loaded_modules);
+
+	if (file != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("library \"%s\" is already loaded in this session",
+						file),
+				 errhint("Reconnect and run the command again.")));
+}
+
 void _PG_init(void);
 
 void
 _PG_init(void)
 {
+	refuse_second_library();
+
 	DefineCustomEnumVariable(
 			VS_GUC_PREFIX ".distance_mode",
 			"RaBitQ distance computation mode.",

@@ -54,13 +54,10 @@ if pg_srcdir_path != ''
   endif
 endif
 
-# The extension shared library is version-named so multiple extension
-# versions can be installed side by side. Every install script pins its
-# own library (see the SQL generation below), letting databases in one
-# cluster run different versions and upgrade independently.
+# One library serves every installed version of the extension, so it has
+# to keep working with the catalog of any version that can still upgrade.
 ext_version = meson.project_version()
-ext_module_name = extension_name + '-' + ext_version
-ext_module_pathname = '$libdir' / ext_module_name
+ext_module_name = extension_name
 
 # Build the extension as a shared library. The vcs_tag-generated
 # git_commit.h is listed as a source so ninja produces it before
@@ -97,22 +94,6 @@ configure_file(
   input: meson.project_source_root() / 'pg_vectorsearch.control.in',
   output: extension_name + '.control',
   configuration: ext_control_data,
-  install: true,
-  install_dir: pg_sharedir / 'extension',
-)
-
-# Per-version (secondary) control file: PostgreSQL substitutes this
-# version's module_pathname for MODULE_PATHNAME in its install and
-# upgrade scripts, so every installed version binds its own
-# version-named library — including each step of an upgrade chain. A
-# single generated line, no template. The primary control deliberately
-# omits module_pathname: a missing secondary control (a packaging bug)
-# then fails loudly at CREATE/ALTER EXTENSION instead of silently
-# binding the newest version's library.
-configure_file(
-  output: extension_name + '--' + ext_version + '.control',
-  command: ['echo', 'module_pathname = \'' + ext_module_pathname + '\''],
-  capture: true,
   install: true,
   install_dir: pg_sharedir / 'extension',
 )
