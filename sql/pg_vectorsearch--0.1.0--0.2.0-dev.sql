@@ -371,3 +371,27 @@ CREATE OR REPLACE PROCEDURE prism_split_posting_list(
 CREATE OR REPLACE PROCEDURE prism_rebalance(index_oid regclass, target_entries integer DEFAULT NULL)
     AS 'MODULE_PATHNAME', 'vs_rebalance'
     LANGUAGE C;
+
+-- =====================================================================
+-- Renamed functions. The norm functions take pgvector's name, and the
+-- vec16 dims function its own type's prefix. A rename keeps the
+-- function's OID, so a view, index or constraint that uses it keeps
+-- working.
+-- =====================================================================
+
+ALTER FUNCTION vec32_norm(vec32) RENAME TO l2_norm;
+ALTER FUNCTION vec32_norm(vec16) RENAME TO l2_norm;
+ALTER FUNCTION vec32_dims(vec16) RENAME TO vec16_dims;
+
+-- =====================================================================
+-- New functions
+-- =====================================================================
+
+-- pgvector's name, so a query written for either type family works
+CREATE FUNCTION vector_dims(vec32) RETURNS integer
+    AS 'MODULE_PATHNAME', 'vs_vec32_dims'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_dims(vec16) RETURNS integer
+    AS 'MODULE_PATHNAME', 'vs_vec16_dims'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;

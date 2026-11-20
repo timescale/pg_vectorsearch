@@ -31,9 +31,9 @@ adjacent pairs are needed (check the available paths with
   symbol.
 - 0.1.0 bound its functions to `pg_vectorsearch-0.1.0.so`. The script
   that upgrades from 0.1.0 rebinds every C function once, with
-  `CREATE OR REPLACE FUNCTION ... AS 'MODULE_PATHNAME', '<symbol>'`. A
-  change to one of those functions during the cycle edits its statement
-  there.
+  `CREATE OR REPLACE FUNCTION ... AS 'MODULE_PATHNAME', '<symbol>'`.
+  That block stays 0.1.0's definitions word for word. A change to one of
+  those functions during the cycle is a statement after the block.
 - The pending script is named for the development version
   (`pg_vectorsearch--0.1.0--0.2.0-dev.sql`), which is the version a
   development build installs. It is renamed when the version is released.

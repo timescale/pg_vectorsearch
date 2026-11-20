@@ -69,7 +69,10 @@ SELECT '[1,2,3]'::vec16 > '[1,2,2]'::vec16;
 SELECT v FROM t_hvec ORDER BY v;
 
 -- Utility
+SELECT vec16_dims('[1,2,3]'::vec16);
+SELECT vector_dims('[1,2,3]'::vec16);
+SELECT l2_norm('[3,4]'::vec16);
+-- vec32_dims takes a vec16 through the implicit cast to vec32
 SELECT vec32_dims('[1,2,3]'::vec16);
-SELECT vec32_norm('[3,4]'::vec16);
 
 DROP TABLE t_hvec;

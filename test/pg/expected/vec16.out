@@ -178,16 +178,29 @@ SELECT v FROM t_hvec ORDER BY v;
 (3 rows)
 
 -- Utility
-SELECT vec32_dims('[1,2,3]'::vec16);
- vec32_dims 
+SELECT vec16_dims('[1,2,3]'::vec16);
+ vec16_dims 
 ------------
           3
 (1 row)
 
-SELECT vec32_norm('[3,4]'::vec16);
- vec32_norm 
+SELECT vector_dims('[1,2,3]'::vec16);
+ vector_dims 
+-------------
+           3
+(1 row)
+
+SELECT l2_norm('[3,4]'::vec16);
+ l2_norm 
+---------
+       5
+(1 row)
+
+-- vec32_dims takes a vec16 through the implicit cast to vec32
+SELECT vec32_dims('[1,2,3]'::vec16);
+ vec32_dims 
 ------------
-          5
+          3
 (1 row)
 
 DROP TABLE t_hvec;

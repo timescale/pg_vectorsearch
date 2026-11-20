@@ -81,10 +81,16 @@ SELECT vec32_dims('[1,2,3]'::vec32);
           3
 (1 row)
 
-SELECT vec32_norm('[3,4]'::vec32);
- vec32_norm 
-------------
-          5
+SELECT vector_dims('[1,2,3]'::vec32);
+ vector_dims 
+-------------
+           3
+(1 row)
+
+SELECT l2_norm('[3,4]'::vec32);
+ l2_norm 
+---------
+       5
 (1 row)
 
 -- Table storage

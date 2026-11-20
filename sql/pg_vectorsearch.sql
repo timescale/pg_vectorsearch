@@ -110,7 +110,12 @@ CREATE FUNCTION vec32_dims(vec32) RETURNS integer
     AS 'MODULE_PATHNAME', 'vs_vec32_dims'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION vec32_norm(vec32) RETURNS float8
+-- pgvector's name, so a query written for either type family works
+CREATE FUNCTION vector_dims(vec32) RETURNS integer
+    AS 'MODULE_PATHNAME', 'vs_vec32_dims'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l2_norm(vec32) RETURNS float8
     AS 'MODULE_PATHNAME', 'vs_pg_vec32_norm'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
@@ -320,11 +325,15 @@ CREATE FUNCTION cosine_distance(vec16, vec16) RETURNS float8
 -- vec16 utility functions
 -- =====================================================================
 
-CREATE FUNCTION vec32_dims(vec16) RETURNS integer
+CREATE FUNCTION vec16_dims(vec16) RETURNS integer
     AS 'MODULE_PATHNAME', 'vs_vec16_dims'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION vec32_norm(vec16) RETURNS float8
+CREATE FUNCTION vector_dims(vec16) RETURNS integer
+    AS 'MODULE_PATHNAME', 'vs_vec16_dims'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l2_norm(vec16) RETURNS float8
     AS 'MODULE_PATHNAME', 'vs_vec16_norm'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
