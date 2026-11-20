@@ -24,6 +24,7 @@
 #include "quant/rabitq.h"
 #include "standalone/api.h"
 #include "standalone/index.h"
+#include "standalone/parallel_scan.h"
 #include "standalone/query.h"
 #include "vs_test.h"
 
@@ -917,11 +918,16 @@ TEST(bindings_create_destroy)
  * 768 dimensions for both, and at 3072, where float32 references spill and
  * float16 ones stay inline. Each query is a stored vector, which re-ranking
  * must return first.
+ *
+ * The two builds have to cluster alike to be comparable. A build seeds its
+ * centroids from the samples in the order the leader and the worker thread
+ * scanned them, which is only the same every time when one scan chunk
+ * holds every vector.
  */
 static void
 check_ref16_matches_ref32(VsTestResult *result, uint32_t dim)
 {
-	uint32_t  nvecs = 600, k = 10, nq = 20;
+	uint32_t  nvecs = PRISM_BUILD_SCAN_CHUNK, k = 10, nq = 20;
 	float	 *vecs = make_vectors(nvecs, dim, 5);
 	VsHandle *h[2];
 
@@ -952,7 +958,7 @@ check_ref16_matches_ref32(VsTestResult *result, uint32_t dim)
 	uint32_t same = 0;
 	for (uint32_t q = 0; q < nq; q++)
 	{
-		const float *query = vecs + (size_t)q * 29 * dim;
+		const float *query = vecs + (size_t)q * 23 * dim;
 		uint32_t	 ids[2][10];
 
 		for (int r = 0; r < 2; r++)
@@ -960,7 +966,7 @@ check_ref16_matches_ref32(VsTestResult *result, uint32_t dim)
 			uint32_t n = vs_handle_query(
 					h[r], query, k, 4, "asymmetric", true, ids[r]);
 			ASSERT_EQ(k, n, "k results");
-			ASSERT_EQ(q * 29, ids[r][0], "the query vector comes first");
+			ASSERT_EQ(q * 23, ids[r][0], "the query vector comes first");
 		}
 		for (uint32_t i = 0; i < k; i++)
 			for (uint32_t j = 0; j < k; j++)
