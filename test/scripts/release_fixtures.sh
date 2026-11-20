@@ -63,7 +63,7 @@ new_fixture() {
         cp "$VS_ROOT/cliff.toml" "$VS_ROOT/.release-notes-template.md" .
         # Where the release checks look for install and upgrade scripts.
         mkdir -p sql src/pg
-        printf 'ext_update_scripts = []\n' >src/pg/meson.build
+        printf 'ext_update_scripts = files(\n)\n' >src/pg/meson.build
         printf -- '-- canonical install script\n' >sql/pg_vectorsearch.sql
         mkdir -p scripts/ci
         cp "$VS_ROOT"/scripts/*.sh scripts/

@@ -340,6 +340,9 @@ jobs:
         if: matrix.pg-version == '18'
         env:
           OLD_RELEASE_DIR: old-release
+          # Reads the previous release, which a private copy of the
+          # repository does not serve anonymously.
+          GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci/upgrade-test.sh
 
   # The requirable context. A matrix leg's name is derived from its own

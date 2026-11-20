@@ -18,7 +18,9 @@ adjacent pairs are needed (check the available paths with
 - Scripts are added to `ext_update_scripts` in `src/pg/meson.build` as
   they are created (listed explicitly; meson discourages globs).
   `scripts/upgrade-script-tool.sh create` writes a new script and its list
-  entry, and `rename <version>` renames both at release.
+  entry, and `rename <version>` renames both at release. The release
+  automation runs both: the pull request that opens a development cycle
+  creates the script, and the release commit renames it.
 - Once a version is released its scripts are immutable — never edit a
   released script; fixes go into the next version's script. Only
   `pg_vectorsearch.sql` is a living file; everything else here is a

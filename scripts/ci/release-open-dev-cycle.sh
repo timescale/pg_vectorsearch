@@ -3,6 +3,11 @@
 # -dev value on chore/dev-<version>, open its pull request, and arm
 # auto-merge so it lands once the checks and review are in.
 #
+# After a final release the same commit creates the pending upgrade
+# script for the new cycle, from the version released to the one
+# opened. After a candidate the cycle reopens at the version it had, so
+# its pending script is still there and nothing is created.
+#
 # Usage: ./scripts/ci/release-open-dev-cycle.sh <released> [next-dev]
 #            [base-branch]
 #
@@ -100,12 +105,16 @@ log "opening the $NEXT development cycle on $BRANCH"
 git switch -c "$BRANCH"
 set_version "$NEXT"
 git add VERSION
-git commit -m "chore: open the $NEXT development cycle" \
-    -m "$RELEASED is tagged, so $BASE carries a version that has
-already been cut. Until this lands, anything merged is built and
-tested as $RELEASED.
 
-Only VERSION changes; the release-cycle check asserts that."
+if ! is_prerelease "$RELEASED"; then
+    ./scripts/upgrade-script-tool.sh create --from "$RELEASED" --to "$NEXT"
+    git add -- "$(upgrade_script_path "$RELEASED" "$NEXT")" \
+        "$UPGRADE_SCRIPT_LIST"
+fi
+
+git commit -m "chore: open the $NEXT development cycle" \
+    -m "Bump the version to the next development cycle after the
+release of $RELEASED."
 
 git push "$(release_remote)" "HEAD:refs/heads/$BRANCH"
 
@@ -114,17 +123,8 @@ url="$(gh pr create \
     --base "$BASE" \
     --head "$BRANCH" \
     --title "chore: open the $NEXT development cycle" \
-    --body "$RELEASED is tagged, so \`$BASE\` currently carries a
-version that has already been cut. This bumps \`VERSION\` to
-\`$NEXT\` so anything merged from here is built and tested as the next
-development version.
-
-Only \`VERSION\` changes. The \`Release cycle\` check asserts that
-and that the new value carries a \`-dev\` suffix.
-
-Opened by the release workflow after tagging \`v$RELEASED\`. The
-Releases entry is published once this and every other step has
-succeeded.")"
+    --body "Bump the version to the next development cycle after the
+release of \`$RELEASED\`.")"
 
 log "opened $url"
 
