@@ -39,7 +39,9 @@ adjacent pairs are needed (check the available paths with
   those functions during the cycle is a statement after the block.
 - The pending script is named for the development version
   (`pg_vectorsearch--0.1.0--0.2.0-dev.sql`), which is the version a
-  development build installs. It is renamed when the version is released.
+  development build installs. The release commit renames it for the
+  version released; a candidate leaves it pending and does not install
+  it.
 - `scripts/ci/upgrade-test.sh` runs the pending script against a database
   on the previous release, compares the result with a fresh install, and
   runs the regression tests against the updated extension. Its tests

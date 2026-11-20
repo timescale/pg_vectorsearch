@@ -165,13 +165,20 @@ sets `VERSION`, commits the two with the trailer, runs the release
 check, pushes the branch and opens the pull request with the title,
 label, milestone and body.
 
+A final release also renames the pending upgrade script in that commit.
+During the cycle it is named for the development version, such as
+`sql/pg_vectorsearch--0.1.0--0.2.0-dev.sql`, and the release gives it
+and its `ext_update_scripts` entry the released version's name. The
+script's contents are not touched. A candidate renames nothing.
+
 It refuses before pushing when the notes are not done. A `FILL-IN`
 anywhere, in the changelog entry or the body, fails the same release
 check the pull request runs, so a pull request never opens failing
 it. The body must end with exactly one `Next-Version` trailer naming
 the version passed in. The checkout must be clean and on a commit the
 remote's base branch has, and the release commit is built from the
-two files alone, so nothing else in the checkout reaches it.
+two files and that rename alone, so nothing else in the checkout
+reaches it.
 
 A refused run leaves the checkout as it found it. Whatever was cut
 before the refusal, the branch and its commit, is dropped, a branch
@@ -309,7 +316,11 @@ on every PR. It asserts:
 - `README.md` and `docs/` carry no stale version references;
 - an incompatible on-disk format change is not shipping as a patch;
 - an upgrade script exists for the step from the previous release, and
-  `src/pg/meson.build` lists it in `ext_update_scripts`.
+  `src/pg/meson.build` lists it in `ext_update_scripts`;
+- a final release has no upgrade script still named for a development
+  version;
+- the library defines every C symbol the scripts in `sql/` name
+  (`scripts/upgrade-script-tool.sh check`, which lint runs too).
 
 The upgrade script is the one thing a release cannot generate for
 itself. The install script is `sql/pg_vectorsearch.sql` copied under the
@@ -328,9 +339,12 @@ candidates are asked for no script and skipped over when the step is
 measured. `0.1.0` → `0.2.0-rc1` → `0.2.0` needs one script, from
 `0.1.0` to `0.2.0`.
 
-A candidate may still carry one if its PR adds it — none is required,
-but every file in `sql/` named `<name>--<from>--<to>.sql` has to appear
-in `ext_update_scripts`, or it is built and never installed.
+A candidate carries the pending script under its development name,
+and its build leaves that script out: a script that upgrades to a
+development version is installed only by a build of that version. So a
+candidate can be installed but not upgraded to, and the upgrade test is
+skipped for one. Every file in `sql/` named `<name>--<from>--<to>.sql`
+still has to appear in `ext_update_scripts`.
 
 **A release can ship without a path, deliberately.** Open it with
 

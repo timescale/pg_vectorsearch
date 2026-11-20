@@ -103,6 +103,20 @@ list_upgrade_script "$wrong" 0.1.0 0.2.0
 expect_lib "upgrade: a script for another version does not count" 1 \
     "$wrong" check_upgrade_path 0.3.0
 
+# A final release ships its script under its own version. One still
+# named for the development version would never be installed.
+unrenamed="$(new_fixture 0.2.0)"
+git -C "$unrenamed" tag v0.1.0
+add_upgrade_script "$unrenamed" 0.1.0 0.2.0
+add_upgrade_script "$unrenamed" 0.1.0 0.2.0-dev
+printf "ext_update_scripts = ['sql/%s', 'sql/%s']\n" \
+    pg_vectorsearch--0.1.0--0.2.0.sql \
+    pg_vectorsearch--0.1.0--0.2.0-dev.sql >"$unrenamed/src/pg/meson.build"
+expect_lib "upgrade: a final release with a pending script is refused" 1 \
+    "$unrenamed" check_upgrade_path 0.2.0
+expect_lib "upgrade: a candidate may keep a pending script" 0 \
+    "$unrenamed" check_upgrade_path 0.2.0-rc1
+
 # A patch release upgrades from the minor it was branched from.
 patch="$(new_fixture 0.1.1)"
 git -C "$patch" tag v0.1.0 "$(git -C "$patch" rev-parse HEAD)"

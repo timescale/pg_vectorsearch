@@ -172,5 +172,8 @@ check_on_disk_format "$VERSION"
 log "check: upgrade path"
 check_upgrade_path "$VERSION"
 
+log "check: upgrade script symbols"
+./scripts/upgrade-script-tool.sh check
+
 emit true "$VERSION"
 log "check: $VERSION looks releasable"

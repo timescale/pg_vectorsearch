@@ -182,13 +182,12 @@ is `open-release-pr.sh` with the two draft files. Not `gh pr create`:
   "$DRAFT/CHANGELOG.md" "$DRAFT/body.md"
 ```
 
-It cuts `chore/release-<version>` from the base, commits
-`CHANGELOG.md` and `VERSION` with the trailer, runs the release check,
-pushes, and opens the PR with the title, label, milestone and the
-body file. A `FILL-IN` left anywhere fails the check and nothing is
-pushed; a refused run puts the checkout back where it started. The
-checkout must be clean and on the base; the commit is built from the
-two files alone.
+It cuts `chore/release-<version>` from the base, makes the release
+commit with the trailer, runs the release check, pushes, and opens the
+PR with the title, label, milestone and the body file. A `FILL-IN`
+left anywhere fails the check and nothing is pushed; a refused run
+puts the checkout back where it started. The checkout must be clean
+and on the base; nothing else in it reaches the commit.
 
 Turning a release check off, such as `--disable-check upgrade-path`
 for a release that ships without an upgrade path, is the user's

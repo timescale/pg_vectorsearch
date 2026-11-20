@@ -10,7 +10,8 @@
 #
 # The previous release is the <from> side of the one upgrade script in sql/
 # whose <to> side is the version in VERSION. --previous-version prints it
-# and exits. Its files are taken from the first place that has them:
+# and exits. A release candidate has no such script, and the test is
+# skipped for one. Its files are taken from the first place that has them:
 #
 #   1. the PostgreSQL directories, if it is already installed there;
 #   2. OLD_RELEASE_DIR, which build-release.sh fills on the first run.
@@ -47,6 +48,19 @@ PKGLIBDIR="$("$PG_CONFIG" --pkglibdir)"
 EXTDIR="$("$PG_CONFIG" --sharedir)/extension"
 
 to="$(tr -d '[:space:]' < VERSION)"
+
+# A release candidate has no upgrade path: the pending script leads to
+# the development version, which a candidate build does not provide.
+if [[ "$to" == *-* && "$to" != *-dev ]]; then
+    if [[ "${1:-}" == --previous-version ]]; then
+        echo none
+    else
+        echo "==> $to is a release candidate, which nothing upgrades to:" \
+            "skipping"
+    fi
+    exit 0
+fi
+
 shopt -s nullglob
 scripts=(sql/"$NAME"--*--"$to".sql)
 shopt -u nullglob
