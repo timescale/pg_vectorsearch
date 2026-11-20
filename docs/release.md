@@ -494,6 +494,9 @@ the publish is re-runnable and leaves nothing public behind.
 **Reopen the development cycle** (`release-dev-cycle.yml`, which runs
 `scripts/ci/release-open-dev-cycle.sh`) bumps `VERSION` to the
 `Next-Version` the release commit declared and opens that pull request.
+After a final release the same commit creates the upgrade script for
+the new cycle, such as `sql/pg_vectorsearch--0.2.0--0.3.0-dev.sql`, with
+no statements in it, and lists it in `src/pg/meson.build`.
 It runs while the release is still a draft: the tag is already pushed,
 so the version is cut whether or not the Releases entry is visible, and
 a bump that cannot be opened should not leave behind a published
@@ -640,8 +643,11 @@ The release workflow opens that pull request itself. Its `dev-cycle`
 job bumps `VERSION` to the `Next-Version` the release commit declared,
 pushes `chore/dev-<version>`, opens the pull request and arms
 auto-merge, so it lands as soon as the checks pass and someone
-approves. `Release cycle` asserts that it changes nothing but
-`VERSION` and that the value carries a `-dev` suffix. The branch name
+approves. `Release cycle` asserts that the value carries a `-dev`
+suffix and that the pull request changes nothing but `VERSION`, plus,
+after a final release, the new cycle's empty upgrade script and its
+entry in `src/pg/meson.build`. A bump made by hand runs
+`scripts/upgrade-script-tool.sh create` for that. The branch name
 is the pipeline's own convention for finding the branch again; nothing
 checks it, and a bump opened by hand under any name is admitted on the
 same terms.

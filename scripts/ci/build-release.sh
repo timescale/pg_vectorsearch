@@ -12,6 +12,10 @@
 # wrapper, the way a user builds it, so nothing here depends on that
 # version's build options.
 #
+# A release that is still a draft has a tag but no downloadable files.
+# The release workflow opens the next cycle in that state, so the source
+# then comes from the tag v<version>.
+#
 # Idempotent: if <dir> already holds a build of this version for this
 # PostgreSQL major version, it does nothing, so it composes with a
 # restore-or-build cache step.
@@ -21,6 +25,9 @@
 #                       (default: pg_config on PATH).
 #   GITHUB_REPOSITORY   owner/name of the repository that published the
 #                       release (default: timescale/pg_vectorsearch).
+#   GH_TOKEN            A token that can read that repository. With it
+#                       the downloads go through gh, which a private
+#                       repository needs. Without it they are anonymous.
 
 set -euo pipefail
 
@@ -40,21 +47,57 @@ if [[ -f "$stamp" ]]; then
 fi
 
 tarball="$NAME-$VERSION.tar.gz"
-url="https://github.com/${GITHUB_REPOSITORY:-timescale/$NAME}"
-url="$url/releases/download/v$VERSION"
+repo="${GITHUB_REPOSITORY:-timescale/$NAME}"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/pgvs-release.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
+fetch() {
+    curl --fail --silent --show-error --location --retry 3 "$@"
+}
+
+authenticated() {
+    [[ -n "${GH_TOKEN:-}" ]] && command -v gh >/dev/null
+}
+
+# The release's tarball and checksum, into $work.
+download_release() {
+    if authenticated; then
+        gh release download "v$VERSION" --repo "$repo" --dir "$work" \
+            --pattern "$tarball" --pattern "$tarball.sha256sum"
+    else
+        local url="https://github.com/$repo/releases/download/v$VERSION"
+        fetch -o "$work/$tarball" "$url/$tarball" \
+            -o "$work/$tarball.sha256sum" "$url/$tarball.sha256sum"
+    fi
+}
+
+# The source at the tag v<version>, unpacked into $work/src.
+unpack_tag() {
+    if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+        git archive "v$VERSION" | tar -x -C "$work/src"
+        return
+    fi
+    if authenticated; then
+        gh api "repos/$repo/tarball/refs/tags/v$VERSION" >"$work/tag.tar.gz"
+    else
+        fetch -o "$work/tag.tar.gz" \
+            "https://github.com/$repo/archive/refs/tags/v$VERSION.tar.gz"
+    fi
+    tar -xzf "$work/tag.tar.gz" -C "$work/src" --strip-components=1
+}
+
+mkdir "$work/src"
 echo "==> Downloading $tarball"
-curl --fail --silent --show-error --location --retry 3 \
-    -o "$work/$tarball" "$url/$tarball" \
-    -o "$work/$tarball.sha256sum" "$url/$tarball.sha256sum"
-(cd "$work" && sha256sum --check --quiet "$tarball.sha256sum")
+if download_release; then
+    (cd "$work" && sha256sum --check --quiet "$tarball.sha256sum")
+    tar -xzf "$work/$tarball" -C "$work/src" --strip-components=1
+else
+    echo "==> $tarball is not published; using the tag v$VERSION"
+    unpack_tag
+fi
 
 echo "==> Building $NAME $VERSION"
-mkdir "$work/src"
-tar -xzf "$work/$tarball" -C "$work/src" --strip-components=1
 if ! make -C "$work/src" BUILDDIR="$work/build" PG_CONFIG="$PG_CONFIG" \
         >"$work/build.log" 2>&1; then
     cat "$work/build.log" >&2

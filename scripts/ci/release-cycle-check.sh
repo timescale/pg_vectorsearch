@@ -10,6 +10,11 @@
 #   0.2.0-dev  ordinary work merges, and a release PR may start 0.2.0
 #   0.2.0      nothing merges except the bump PR back to 0.3.0-dev
 #
+# The bump after a final release also creates the upgrade script the
+# new cycle collects its catalog changes in, with no statements yet.
+# The bump after a candidate reopens the cycle the candidate came from,
+# whose script is still pending, and changes VERSION alone.
+#
 # The second state is the release window. It opens when the release PR
 # merges and closes when the bump PR does, and the bump PR needs an
 # approval, so it lasts as long as that takes. Anything merged in
@@ -94,9 +99,36 @@ if ! in_window; then
         "reopen"
 fi
 
-[[ "$changed" == "VERSION" ]] ||
-    die "the bump PR may only change VERSION, but this one changes:" \
-        $'\n'"$changed"
+allowed=VERSION
+if ! is_prerelease "$base_version"; then
+    script="$(upgrade_script_path "$base_version" "$head_version")"
+    allowed="$(printf '%s\n' VERSION "$script" "$UPGRADE_SCRIPT_LIST" |
+        sort)"
+fi
+
+[[ "$(sort <<<"$changed")" == "$allowed" ]] ||
+    die "the bump PR from $base_version to $head_version changes" \
+        "exactly:"$'\n'"$allowed"$'\n'"but this one changes:" \
+        $'\n'"$changed"$'\n'"scripts/ci/release-open-dev-cycle.sh makes" \
+        "the bump; by hand it is VERSION and, after a final release," \
+        "scripts/upgrade-script-tool.sh create"
+
+# The new script is what the tool writes, and the build gains its
+# entry and nothing else.
+if ! is_prerelease "$base_version"; then
+    [[ "$(git show "$PR_HEAD:$script")" == \
+        "$(upgrade_script_header "$base_version" "$head_version")" ]] ||
+        die "$script is not the empty script" \
+            "scripts/upgrade-script-tool.sh create writes"
+    listed="$(git diff --numstat "$BASE...$PR_HEAD" -- \
+        "$UPGRADE_SCRIPT_LIST" | cut -f1,2 | tr '\t' ' ')"
+    if [[ "$listed" != "1 0" ]] ||
+        ! git show "$PR_HEAD:$UPGRADE_SCRIPT_LIST" |
+            grep -qF "$(upgrade_script_entry "$script")"; then
+        die "the bump may only add the entry for $script to" \
+            "$UPGRADE_SCRIPT_LIST"
+    fi
+fi
 
 expected="$(next_dev_version "$base_version" \
     "${GITHUB_BASE_REF:-$(git branch --show-current)}")"
@@ -105,4 +137,4 @@ expected="$(next_dev_version "$base_version" \
         "bump is $expected -- intended for a major bump, wrong" \
         "otherwise"
 
-log "$base_version -> $head_version, VERSION only"
+log "$base_version -> $head_version: $(tr '\n' ' ' <<<"$allowed")"

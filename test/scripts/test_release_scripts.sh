@@ -50,6 +50,11 @@ cycle_case() {
 
 touch_file() { bash -c 'printf x >>meson.build'; }
 set_version() { bash -c "printf '%s\\n' '$1' >VERSION"; }
+# The bump after a final release: VERSION, and the new cycle's script.
+bump() {
+    printf '%s\n' "$2" >VERSION
+    ./scripts/upgrade-script-tool.sh create --from "$1" --to "$2"
+}
 
 # The development cycle: ordinary work merges, and a release may start.
 cycle_case "ordinary work during the cycle" 0.1.0-dev 0 touch_file
@@ -62,10 +67,22 @@ cycle_case "a bump with no cycle to reopen is refused" 0.1.0-dev 1 \
 cycle_case "ordinary work in the window is refused" 0.1.0 1 touch_file
 cycle_case "a second release in the window is refused" 0.1.0 1 \
     set_version 0.2.0
-cycle_case "the bump reopens the cycle" 0.1.0 0 set_version 0.2.0-dev
+cycle_case "the bump reopens the cycle" 0.1.0 0 bump 0.1.0 0.2.0-dev
+cycle_case "a bump without the cycle's upgrade script is refused" \
+    0.1.0 1 set_version 0.2.0-dev
+cycle_case "a bump whose upgrade script has statements is refused" \
+    0.1.0 1 bash -c "$(declare -f bump); bump 0.1.0 0.2.0-dev &&
+        echo 'DROP TABLE t;' >>sql/pg_vectorsearch--0.1.0--0.2.0-dev.sql"
+cycle_case "a bump with a script for another step is refused" 0.1.0 1 \
+    bump 0.0.9 0.2.0-dev
+cycle_case "a bump changing more of the build file is refused" \
+    0.1.0 1 bash -c "$(declare -f bump); bump 0.1.0 0.2.0-dev &&
+        echo '# more' >>src/pg/meson.build"
 cycle_case "a candidate opens a window too" 0.1.0-rc1 1 touch_file
 cycle_case "a candidate's cycle reopens" 0.1.0-rc1 0 \
     set_version 0.1.0-dev
+cycle_case "a candidate's bump creating a script is refused" \
+    0.1.0-rc1 1 bump 0.0.9 0.1.0-dev
 
 # Nothing here reads a branch name, so a bump cut by hand under any
 # name is admitted, and a bump carrying anything else is not.
@@ -118,8 +135,12 @@ expect_status "open-cycle: opens the cycle" 0 \
     open_cycle "$happy" 0.1.0 0.2.0-dev main
 expect_eq "open-cycle: VERSION carries the next cycle" \
     0.2.0-dev "$(tr -d '[:space:]' <"$happy/VERSION")"
-expect_eq "open-cycle: the commit changes VERSION alone" \
-    VERSION "$(git -C "$happy" diff --name-only HEAD~1 HEAD 2>/dev/null)"
+expect_eq "open-cycle: the commit also creates the cycle's script" \
+    "VERSION sql/pg_vectorsearch--0.1.0--0.2.0-dev.sql src/pg/meson.build" \
+    "$(git -C "$happy" diff --name-only HEAD~1 HEAD 2>/dev/null |
+        tr '\n' ' ' | sed 's/ $//')"
+expect_status "open-cycle: the cycle check accepts the bump" 0 \
+    env -C "$happy" ./scripts/ci/release-cycle-check.sh HEAD~1 HEAD
 expect_eq "open-cycle: the branch reaches the remote" \
     "refs/heads/chore/dev-0.2.0-dev" \
     "$(git -C "$happy.git" show-ref --heads | awk '$2 ~ /chore/ {print $2}')"
@@ -156,6 +177,8 @@ expect_status "open-cycle: a candidate reopens at its own version" 0 \
     open_cycle "$rc" 0.1.0-rc1 0.1.0-dev main
 expect_eq "open-cycle: the candidate's cycle reopens at its version" \
     0.1.0-dev "$(tr -d '[:space:]' <"$rc/VERSION")"
+expect_eq "open-cycle: a candidate's bump changes VERSION alone" \
+    VERSION "$(git -C "$rc" diff --name-only HEAD~1 HEAD 2>/dev/null)"
 
 # An equal base is correct only for a candidate: a final release
 # reopening at its own version would leave the cycle where it was.
