@@ -1,0 +1,77 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+---
+name: Benchmarks
+
+# Filter inside the job so the check reports even on unrelated changes.
+# Editing the PR description can add or remove the benchmark override.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Benchmark regression
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Run the exact PR revision, not GitHub's test merge commit.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check benchmark inputs
+        id: changed
+        run: |
+          ./scripts/ci/paths-changed.sh \
+            'src/**' \
+            'include/**' \
+            ':(glob)**/meson.build' \
+            'meson_options.txt' \
+            'VERSION' \
+            'clang-format-ignore.in' \
+            'scripts/ci/paths-changed.sh' \
+            'scripts/ci/bench-regress.sh' \
+            '.github/workflows/bench.yml'
+
+      - name: Report skipped benchmarks
+        if: steps.changed.outputs.changed == 'false'
+        run: echo 'No benchmark inputs changed.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install standalone build dependencies
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build gcc ccache pkg-config python3 libopenblas-dev
+
+      - name: Compare benchmark results
+        id: compare
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          BENCH_OUTPUT_DIR: ${{ runner.temp }}/bench-results
+          CCACHE_DIR: ${{ runner.temp }}/bench-ccache
+        run: ./scripts/ci/bench-regress.sh
+
+      - name: Upload benchmark results
+        if: >-
+          ${{ !cancelled() && (steps.compare.outcome == 'success' ||
+          steps.compare.outcome == 'failure') }}
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
+        with:
+          name: benchmark-results
+          path: ${{ runner.temp }}/bench-results/
+          retention-days: 7
