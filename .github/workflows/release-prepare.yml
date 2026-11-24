@@ -170,6 +170,8 @@ jobs:
           # namespace, so the CLI process holding the key is not
           # visible from /proc either.
           CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: 1
+          # API gateway, set as a repository variable.
+          ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # The job's read-only token. The action writes it into the
