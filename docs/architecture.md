@@ -24,12 +24,18 @@ pg_vectorsearch is designed as part of a unified search stack alongside
 [pg_textsearch](https://github.com/timescale/pg_textsearch), enabling hybrid
 search that combines semantic (vector) and keyword (BM25) retrieval.
 
-**Filtered semantic search** (keyword filter → vector ranking):
+**Keyword recall, vector rerank** (narrow by keyword match, then rank the
+candidates by vector distance):
 
 ```sql
-SELECT * FROM documents
-WHERE textsearch @@ plainto_tsquery('quarterly revenue')
-ORDER BY embedding <-> query_embedding
+WITH candidates AS (
+    SELECT id FROM documents
+    ORDER BY content <@> 'quarterly revenue'
+    LIMIT 100
+)
+SELECT d.* FROM documents d
+JOIN candidates c ON c.id = d.id
+ORDER BY d.embedding <-> query_embedding
 LIMIT 10;
 ```
 
@@ -38,19 +44,68 @@ LIMIT 10;
 ```sql
 WITH semantic AS (
     SELECT id, row_number() OVER (ORDER BY embedding <-> query_embedding) AS rank
-    FROM documents LIMIT 100
+    FROM documents ORDER BY embedding <-> query_embedding LIMIT 100
 ),
 keyword AS (
-    SELECT id, row_number() OVER (ORDER BY ts_rank(textsearch, query) DESC) AS rank
-    FROM documents WHERE textsearch @@ query LIMIT 100
+    SELECT id, row_number() OVER (ORDER BY content <@> query_text) AS rank
+    FROM documents ORDER BY content <@> query_text LIMIT 100
 )
-SELECT id, 1.0/(60+s.rank) + 1.0/(60+k.rank) AS rrf_score
-FROM semantic s JOIN keyword k USING (id)
+SELECT COALESCE(s.id, k.id) AS id,
+       COALESCE(1.0/(60+s.rank), 0) + COALESCE(1.0/(60+k.rank), 0) AS rrf_score
+FROM semantic s
+FULL JOIN keyword k ON s.id = k.id
 ORDER BY rrf_score DESC LIMIT 10;
 ```
 
+The join shape matters. An inner `JOIN` between the two ranked lists
+silently drops any document found by only one signal, defeating the point
+of fusing independent rankings. A `LEFT JOIN` from the base table with
+`WHERE s.id IS NOT NULL OR k.id IS NOT NULL` keeps them, but the planner
+cannot push that `OR` down into the joins, so it scans the whole base table
+to fuse two lists of 100 — in testing that scan alone cost about as much as
+both index scans combined. A `FULL JOIN` between the two lists (or
+`UNION ALL` followed by `GROUP BY id`) keeps every candidate and touches
+only the candidates. Fetch any further columns from the base table after
+the final `LIMIT`, not before.
+
+Each CTE also needs its own `ORDER BY ... LIMIT` on the outer `SELECT`, not
+only inside the `row_number() OVER (...)` window clause — a window
+function doesn't restrict which rows survive, so a bare `LIMIT` with no
+matching outer `ORDER BY` keeps an arbitrary 100 rows rather than the
+top-100 by rank.
+
 Both extensions share design principles: PostgreSQL-native, billion-scale,
 multi-tenant, and optimized for modern hardware (SIMD, NVMe).
+
+**Gotcha: each index scan has its own cap on how many rows it will emit,
+and the two caps work differently.** Both surfaced while adding CI coverage
+for these patterns (`test/pg/compat/hybridsearch.sql`):
+
+- A PRISM `ORDER BY embedding <-> query` scan computes its whole top-k on
+  the first fetch, so it has to know k up front. It takes it from the
+  query: a `LIMIT` directly above the scan, or above nodes that keep one
+  row per input row (a projection, a `row_number()` window), sizes the
+  scan, including inside a CTE. Without a usable `LIMIT` the scan returns
+  as many rows as `work_mem` affords, reranking every candidate to do so.
+  `prism.query_limit` caps it by hand when the query cannot say. See the
+  [tuning guide](tuning.md) for the full rules.
+- A pg_textsearch `ORDER BY content <@> query` scan also learns the `LIMIT`:
+  the planner records it while costing the index path and the scan reads
+  it back at execution. Without one, the scan scores an initial batch of
+  `pg_textsearch.default_limit` documents (1000 by default) and, if the
+  executor keeps pulling, doubles the batch and re-runs the search, up to
+  a hard cap of 100000 rows. It only ever emits documents with nonzero
+  term overlap — a document with no matching term is not "ranked last",
+  it is absent.
+
+Both patterns above stay safe by giving each signal's own recall step
+("candidates") a direct `LIMIT` no larger than that index's cap. The rerank
+step that follows can use the other operator freely, because it runs over
+that already-small candidate set rather than the full table. Since both
+indexes are ours, a shared candidate-passing primitive between them (e.g.
+restricting a scan to a caller-supplied id set) could remove the need for
+this two-pass shape entirely — noted here as a follow-up opportunity, not
+implemented.
 
 ### Search Flow
 
