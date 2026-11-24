@@ -97,6 +97,11 @@ test('unit_tests', test_runner,
 # Auto-discover test groups from source files using Python
 # Python filters for test_*.c files and extracts TEST_GROUP() declarations
 python = find_program('python3', required: true)
+test('BenchCompareCLI', python,
+  args: [files('test_bench_compare_cli.py'), vs_exe],
+  suite: 'unit',
+)
+
 test_groups_result = run_command(
   python,
   '-c',

@@ -112,7 +112,7 @@ TEST(duplicate_base_metric_rejected)
 			"{\"metrics\":["
 			"{\"name\":\"x\",\"unit\":\"vec/s\",\"value\":100}]}");
 
-	ASSERT_EQ(1, ret, "ambiguous baseline pairing");
+	ASSERT_EQ(2, ret, "ambiguous baseline pairing is an error");
 }
 
 TEST(duplicate_head_metric_rejected)
@@ -124,7 +124,7 @@ TEST(duplicate_head_metric_rejected)
 			"{\"name\":\"x\",\"unit\":\"vec/s\",\"value\":100},"
 			"{\"name\":\"x\",\"unit\":\"vec/s\",\"value\":200}]}");
 
-	ASSERT_EQ(1, ret, "ambiguous head pairing");
+	ASSERT_EQ(2, ret, "ambiguous head pairing is an error");
 }
 
 TEST(identical_results_pass)
@@ -159,7 +159,7 @@ TEST(unit_change_fails)
 			"{\"metrics\":["
 			"{\"name\":\"t\",\"unit\":\"ms\",\"value\":1}]}");
 
-	ASSERT_EQ(1, ret, "incomparable units fail");
+	ASSERT_EQ(2, ret, "incomparable units are an error");
 }
 
 TEST(missing_units_fail)
@@ -170,7 +170,7 @@ TEST(missing_units_fail)
 			"{\"metrics\":[{\"name\":\"t\",\"value\":100}]}",
 			"{\"metrics\":[{\"name\":\"t\",\"value\":200}]}");
 
-	ASSERT_EQ(1, ret, "unitless pair fails");
+	ASSERT_EQ(2, ret, "unitless pair is an error");
 }
 
 TEST(one_sided_unit_tolerated)
@@ -192,7 +192,7 @@ TEST(paired_metric_without_value_fails)
 			"{\"metrics\":["
 			"{\"name\":\"t\",\"unit\":\"us\",\"value\":100}]}");
 
-	ASSERT_EQ(1, ret, "failed baseline measurement fails");
+	ASSERT_EQ(2, ret, "failed baseline measurement is an error");
 }
 
 TEST(missing_metrics_array_fails)
@@ -202,7 +202,7 @@ TEST(missing_metrics_array_fails)
 			"{\"metrics\":["
 			"{\"name\":\"x\",\"unit\":\"vec/s\",\"value\":100}]}");
 
-	ASSERT_EQ(1, ret, "no metrics array errors");
+	ASSERT_EQ(2, ret, "no metrics array errors");
 }
 
 TEST(unnamed_base_metric_rejected)
@@ -214,7 +214,7 @@ TEST(unnamed_base_metric_rejected)
 			"{\"metrics\":["
 			"{\"name\":\"x\",\"unit\":\"vec/s\",\"value\":100}]}");
 
-	ASSERT_EQ(1, ret, "a nameless base entry errors");
+	ASSERT_EQ(2, ret, "a nameless base entry errors");
 }
 
 TEST(unnamed_head_metric_rejected)
@@ -228,7 +228,7 @@ TEST(unnamed_head_metric_rejected)
 			"{\"name\":\"x\",\"unit\":\"vec/s\",\"value\":100},"
 			"{\"unit\":\"vec/s\",\"value\":null}]}");
 
-	ASSERT_EQ(1, ret, "a nameless head entry errors");
+	ASSERT_EQ(2, ret, "a nameless head entry errors");
 }
 
 TEST(empty_base_metrics_fail)
@@ -238,7 +238,7 @@ TEST(empty_base_metrics_fail)
 			"{\"metrics\":["
 			"{\"name\":\"x\",\"unit\":\"vec/s\",\"value\":100}]}");
 
-	ASSERT_EQ(1, ret, "an empty base errors");
+	ASSERT_EQ(2, ret, "an empty base errors");
 }
 
 TEST(json_flag_rejected)
@@ -255,7 +255,7 @@ TEST(json_flag_rejected)
 	   };
 
 	/* Compare writes no result file; a --json request is a mistake. */
-	ASSERT_EQ(1, run_muted(&ctx), "--json rejected");
+	ASSERT_EQ(2, run_muted(&ctx), "--json rejected");
 }
 
 TEST(regression_outside_noise_fails)
@@ -282,7 +282,7 @@ TEST(new_metric_without_value_fails)
 			"{\"name\":\"x\",\"unit\":\"vec/s\",\"value\":100},"
 			"{\"name\":\"y\",\"unit\":\"vec/s\",\"value\":null}]}");
 
-	ASSERT_EQ(1, ret, "new metric with no value fails");
+	ASSERT_EQ(2, ret, "new metric with no value is an error");
 }
 
 TEST(missing_head_metric_fails)
@@ -295,6 +295,42 @@ TEST(missing_head_metric_fails)
 			"{\"name\":\"x\",\"unit\":\"vec/s\",\"value\":100}]}");
 
 	ASSERT_EQ(1, ret, "vanished metric fails");
+}
+
+TEST(vanished_invalid_metric_errors)
+{
+	int ret = run_compare(
+			"{\"metrics\":["
+			"{\"name\":\"x\",\"unit\":\"vec/s\",\"value\":100},"
+			"{\"name\":\"y\",\"unit\":\"vec/s\",\"value\":null}]}",
+			"{\"metrics\":["
+			"{\"name\":\"x\",\"unit\":\"vec/s\",\"value\":100}]}");
+
+	ASSERT_EQ(2, ret, "a vanished measurement must still be valid");
+}
+
+TEST(unit_error_beats_vanished_metric)
+{
+	int ret = run_compare(
+			"{\"metrics\":["
+			"{\"name\":\"old\",\"unit\":\"us\",\"value\":10},"
+			"{\"name\":\"time\",\"unit\":\"us\",\"value\":100}]}",
+			"{\"metrics\":["
+			"{\"name\":\"time\",\"unit\":\"ms\",\"value\":100}]}");
+
+	ASSERT_EQ(2, ret, "bad comparison cannot be waived as a vanished metric");
+}
+
+TEST(invalid_sample_stats_error)
+{
+	int ret = run_compare(
+			"{\"metrics\":["
+			"{\"name\":\"q\",\"unit\":\"vec/s\",\"value\":100}]}",
+			"{\"metrics\":["
+			"{\"name\":\"q\",\"unit\":\"vec/s\",\"value\":65,"
+			"\"stddev\":-1}]}");
+
+	ASSERT_EQ(2, ret, "negative standard deviation is invalid");
 }
 
 TEST(surplus_argument_rejected)
@@ -311,5 +347,5 @@ TEST(surplus_argument_rejected)
 				   .prog_name = "vectorsearch",
 	   };
 
-	ASSERT_EQ(1, run_muted(&ctx), "extra file rejected");
+	ASSERT_EQ(2, run_muted(&ctx), "extra file rejected");
 }

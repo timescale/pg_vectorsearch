@@ -23,6 +23,13 @@
 #define CMD_DEFAULT_SPINUP_MS	   2000
 #define CMD_DEFAULT_MIN_RUNTIME_MS 25
 
+/* Bench dispatch and comparison statuses. */
+enum
+{
+	CMD_BENCH_REGRESSION = 1,
+	CMD_BENCH_ERROR		 = 2,
+};
+
 /*
  * CmdContext - Shared context for all CLI commands
  *

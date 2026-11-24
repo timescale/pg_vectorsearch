@@ -250,7 +250,9 @@ computation:
 # whether higher or lower is better. A drop inside 2·SE of the two
 # means (from stddev and n) is noise: ignored, or softened to a
 # warning when it is fail-grade. A count metric is reported without
-# gating. Exit 1 if any metric fails.
+# gating. Exit 0 for a pass or warnings only, 1 for a regression or
+# vanished metric, and 2 for invalid arguments or results (including
+# mismatched suites or units) or an I/O error.
 ./bin/vectorsearch bench compare base.json head.json
 ```
 
