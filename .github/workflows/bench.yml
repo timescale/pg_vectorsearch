@@ -18,19 +18,29 @@ permissions:
 
 jobs:
   bench:
-    name: Benchmark regression
-    # Keep one CPU generation across runs. Fork PRs use GitHub-hosted
-    # runners; access to RunsOn itself is controlled by its installation.
+    name: Benchmark regression (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            fleet: runs-on/fleet=linux-2cpu-x64-ondemand/env=ue1
+            hosted: ubuntu-26.04
+          - arch: arm64
+            fleet: runs-on/fleet=linux-2cpu-ondemand/env=ue1
+            hosted: ubuntu-24.04-arm
+    # Fleet labels must match exactly. Fork PRs use GitHub-hosted runners.
     runs-on: >-
       ${{ github.event.pull_request.head.repo.full_name == github.repository &&
-          format('runs-on={0}/family=c7i.xlarge/image=ubuntu26-full-x64/spot=false',
-                 github.run_id) ||
-          'ubuntu-26.04' }}
+          matrix.fleet || matrix.hosted }}
     timeout-minutes: 20
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
+      - uses: runs-on/action@13fbb6a39310a0dac9ab4716da2c4e74a3326dfc # v2.7.0
+        if: runner.environment == 'self-hosted'
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           # Run the exact PR revision, not GitHub's test merge commit.
@@ -78,6 +88,6 @@ jobs:
           steps.compare.outcome == 'failure') }}
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
         with:
-          name: benchmark-results
+          name: benchmark-results-${{ matrix.arch }}
           path: ${{ runner.temp }}/bench-results/
           retention-days: 7
