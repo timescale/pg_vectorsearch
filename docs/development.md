@@ -496,10 +496,13 @@ The project uses GitHub Actions for CI with the following workflows:
 | `coverity.yml` | Weekly, push to `trigger/coverity`, manual | Coverity Scan static analysis; Scan caps submissions, so it never runs on PRs |
 
 `Benchmark regression` starts as a non-required check while we measure
-noise on hosted runners. The workflow publishes the comparison in its
-run summary and keeps the raw JSON and logs as an artifact, even on a
-regression. A `Disable-check: bench` line in the PR description waives
-regressions, but not failed builds or invalid benchmark results.
+runner noise. Same-repository PRs use an on-demand RunsOn `c7i.xlarge`
+with Ubuntu 26.04; forks use GitHub-hosted `ubuntu-26.04`. Both builds
+in each comparison still run on the same machine. The workflow publishes
+the comparison in its run summary and keeps the raw JSON and logs as an
+artifact, even on a regression. A `Disable-check: bench` line in the PR
+description waives regressions, but not failed builds or invalid
+benchmark results.
 
 Coverity reads an analysis model from
 [the project's settings][coverity-project] rather than from the uploaded

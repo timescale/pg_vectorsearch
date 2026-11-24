@@ -19,7 +19,13 @@ permissions:
 jobs:
   bench:
     name: Benchmark regression
-    runs-on: ubuntu-26.04
+    # Keep one CPU generation across runs. Fork PRs use GitHub-hosted
+    # runners; access to RunsOn itself is controlled by its installation.
+    runs-on: >-
+      ${{ github.event.pull_request.head.repo.full_name == github.repository &&
+          format('runs-on={0}/family=c7i.xlarge/image=ubuntu26-full-x64/spot=false',
+                 github.run_id) ||
+          'ubuntu-26.04' }}
     timeout-minutes: 20
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
