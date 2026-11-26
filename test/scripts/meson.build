@@ -1,6 +1,6 @@
 # Tests for the scripts in scripts/ and scripts/ci/.
 #
-# Shell rather than C, and outside build_tools: what needs proving is
+# Outside build_tools: what needs proving is
 # the git and gh behaviour of scripts CI runs, which no build artifact
 # is involved in. The framework is vs_test.sh and the fixtures are in
 # release_fixtures.sh, neither named test_* so that the discovery
@@ -14,6 +14,14 @@
 bash_prog = find_program('bash', required: false)
 git_prog = find_program('git', required: false)
 python_prog = find_program('python3', required: false)
+
+if git_prog.found() and python_prog.found()
+  test('test_bench_regress', python_prog,
+    args: [files('test_bench_regress.py')],
+    timeout: 120,
+    suite: 'scripts',
+  )
+endif
 
 if bash_prog.found() and git_prog.found() and python_prog.found()
   script_tests = run_command(

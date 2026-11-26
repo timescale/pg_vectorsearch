@@ -153,9 +153,9 @@ dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 	uint32_t min_runtime = CMD_DEFAULT_MIN_RUNTIME_MS;
 
 	if (cmd_take_u32(&argc, argv, "--spinup", &spinup, 0) != 0)
-		return 1;
+		return CMD_BENCH_ERROR;
 	if (cmd_take_u32(&argc, argv, "--min-runtime", &min_runtime, 0) != 0)
-		return 1;
+		return CMD_BENCH_ERROR;
 
 	if (argc < 1)
 	{
@@ -165,7 +165,7 @@ dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 		{
 			printf("  %-12s %s\n", cmd->name, cmd->description);
 		}
-		return 1;
+		return CMD_BENCH_ERROR;
 	}
 
 	const char *subcmd = argv[0];
@@ -184,7 +184,7 @@ dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 	if (cmd == NULL)
 	{
 		fprintf(stderr, "Error: unknown benchmark subcommand '%s'\n", subcmd);
-		return 1;
+		return CMD_BENCH_ERROR;
 	}
 
 	/* Create command context */
@@ -200,12 +200,12 @@ dispatch_bench_command(CmdContext *parent_ctx, int argc, char **argv)
 	};
 
 	if (json_take_path(&cmd_ctx.argc, cmd_ctx.argv, &cmd_ctx.json_path) != 0)
-		return 1;
+		return CMD_BENCH_ERROR;
 	json_take_quiet(&cmd_ctx.argc, cmd_ctx.argv, &cmd_ctx.quiet);
 	if (json_begin_human(cmd_ctx.json_path, cmd_ctx.quiet) != 0)
 	{
 		json_end_human();
-		return 1;
+		return CMD_BENCH_ERROR;
 	}
 	/* Skip the spin-up when the args look like a help request. This
 	 * is a guess at what the handler's own parsing will decide, but

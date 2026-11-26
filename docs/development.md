@@ -250,7 +250,9 @@ computation:
 # whether higher or lower is better. A drop inside 2·SE of the two
 # means (from stddev and n) is noise: ignored, or softened to a
 # warning when it is fail-grade. A count metric is reported without
-# gating. Exit 1 if any metric fails.
+# gating. Exit 0 for a pass or warnings only, 1 for a regression or
+# vanished metric, and 2 for invalid arguments or results (including
+# mismatched suites or units) or an I/O error.
 ./bin/vectorsearch bench compare base.json head.json
 ```
 
@@ -413,6 +415,7 @@ debugging. These are the same scripts used by GitHub Actions.
 |--------|-------------|
 | `build.sh` | Build and run tests |
 | `coverage.sh` | Build with coverage, generate report |
+| `bench-regress.py` | Compare standalone release benchmarks against the merge base |
 | `sanitizers.sh` | Build and test with sanitizers |
 | `lint.sh` | Check formatting and run clang-tidy |
 | `check-commit-messages.sh` | Reject commit messages that credit an AI agent |
@@ -435,6 +438,9 @@ see `sql/README.md`.
 
 # Build with coverage
 ./scripts/ci/coverage.sh
+
+# Compare committed changes against their merge base with origin/main
+BASE_SHA=origin/main python3 scripts/ci/bench-regress.py
 
 # Run with AddressSanitizer
 ./scripts/ci/sanitizers.sh address
@@ -460,9 +466,14 @@ BASE_SHA=main HEAD_SHA=my-branch ./scripts/ci/check-commit-count.sh
 ./scripts/ci/pgspot.sh
 ```
 
+`bench-regress.py` builds the merge base and `HEAD` from Git snapshots, so
+uncommitted edits do not affect the results. It prints the results directory
+and leaves the JSON, logs, and `summary.md` there. Set `HEAD_SHA` to benchmark
+another commit, or set `BENCH_OUTPUT_DIR` to the path of a new directory.
+
 ### Custom Build Directory
 
-All scripts accept an optional build directory argument:
+Build and coverage scripts accept an optional build directory argument:
 
 ```bash
 ./scripts/ci/build.sh my-builddir
@@ -476,12 +487,27 @@ The project uses GitHub Actions for CI with the following workflows:
 | Workflow | Trigger | Description |
 |----------|---------|-------------|
 | `build.yml` | Push, PR | Build and test |
+| `bench.yml` | PR | Compare standalone release benchmarks against the merge base |
 | `sanitizers.yml` | Push, PR | ASan and UBSan tests |
 | `coverage.yml` | Push, PR | Coverage report, upload to Codecov |
 | `lint.yml` | Push, PR | Format check and clang-tidy |
 | `pgspot.yml` | Push, PR | pgspot security lint of install-time SQL |
 | `codeql.yml` | Push, PR, Weekly, push to `trigger/codeql`, manual | GitHub CodeQL static analysis of C, workflows and Python |
 | `coverity.yml` | Weekly, push to `trigger/coverity`, manual | Coverity Scan static analysis; Scan caps submissions, so it never runs on PRs |
+
+The benchmark checks start non-required while we measure runner noise.
+The x64 job covers x86 SIMD, and the arm64 job covers NEON. Each compares
+the two revisions on the same machine, never across architectures.
+
+| Architecture | RunsOn fleet (`ue1`) | GitHub-hosted (fork PRs) |
+|--------------|---------------------|--------------------------|
+| x64 | `linux-2cpu-x64-ondemand` | `ubuntu-26.04` |
+| arm64 | `linux-2cpu-ondemand` | `ubuntu-24.04-arm` |
+
+Each job publishes its comparison in the run summary and keeps the raw
+JSON and logs in an architecture-specific artifact, even on a regression.
+A `Disable-check: bench` line in the PR description waives regressions,
+but not failed builds or invalid benchmark results.
 
 Coverity reads an analysis model from
 [the project's settings][coverity-project] rather than from the uploaded

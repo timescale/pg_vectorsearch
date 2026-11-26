@@ -8,6 +8,7 @@
  * Unit decides whether higher or lower is better.
  */
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -37,6 +38,60 @@ find_named(const Kv *arr, const char *name)
 	return NULL;
 }
 
+/* Older results may omit sample statistics. */
+static bool
+valid_stat(const Kv *stat)
+{
+	return stat == NULL ||
+		   (kv_is_num(stat) && isfinite(kv_num(stat)) && kv_num(stat) >= 0);
+}
+
+/* Validate even metrics that will not have a partner. */
+static bool
+validate_metrics(const Kv *arr, const char *path)
+{
+	for (size_t i = 0; i < kv_count(arr); i++)
+	{
+		const Kv *entry = kv_at(arr, i);
+		KvMetric  m;
+
+		kv_metric_load(entry, &m);
+		if (m.name == NULL || m.name[0] == '\0')
+		{
+			fprintf(stderr, "Error: unnamed metric in %s\n", path);
+			return false;
+		}
+		if (find_named(arr, m.name) != entry)
+		{
+			fprintf(stderr,
+					"Error: duplicate metric '%s' in %s\n",
+					m.name,
+					path);
+			return false;
+		}
+		if (!m.has_value || !isfinite(m.value) ||
+			!valid_stat(kv_get(entry, "stddev")) ||
+			!valid_stat(kv_get(entry, "n")))
+		{
+			fprintf(stderr,
+					"Error: invalid measurement for '%s' in %s\n",
+					m.name,
+					path);
+			return false;
+		}
+		if (kv_get(entry, "unit") != NULL &&
+			(m.unit == NULL || m.unit[0] == '\0'))
+		{
+			fprintf(stderr,
+					"Error: invalid unit for '%s' in %s\n",
+					m.name,
+					path);
+			return false;
+		}
+	}
+	return true;
+}
+
 static const char *
 tag_of(Cmp *c, const KvCmp *r)
 {
@@ -61,6 +116,7 @@ print_usage(CmdContext *ctx)
 	CMD_USAGE_HEADER(ctx, "bench compare");
 	printf("Compare two JSON result files.\n\n");
 	printf("  %s bench compare BASE.json HEAD.json\n", ctx->prog_name);
+	printf("\nExit status: 0 pass or warn, 1 regression, 2 error.\n");
 }
 
 static int
@@ -78,58 +134,56 @@ compare_files(const char *base_path, const char *head_path)
 	base = kv_from_json_file(base_path);
 	head = kv_from_json_file(head_path);
 	if (base == NULL || head == NULL)
-		return 1;
+		return CMD_BENCH_ERROR;
 
 	ba = kv_get(base, "metrics");
 	ha = kv_get(head, "metrics");
 	if (!kv_is_arr(ba) || !kv_is_arr(ha))
 	{
 		fprintf(stderr, "Error: JSON has no metrics array\n");
-		return 1;
+		return CMD_BENCH_ERROR;
 	}
 
 	bname = kv_as_str(kv_get(base, "bench"));
 	hname = kv_as_str(kv_get(head, "bench"));
-	printf("compare  %s -> %s\n", base_path, head_path);
-	if (bname != NULL)
-		printf("bench    %s\n", bname);
-	if (hname != NULL && bname != NULL && strcmp(bname, hname) != 0)
-		printf("warning: bench names differ (%s vs %s)\n", bname, hname);
-	/* The Δ is two bytes, so give its one glyph an extra column. */
-	printf("  %-24s %12s %12s %10s\n", "metric", "base", "head", "Δ");
-
-	/* Every base metric must still exist in head: a result that
-	 * silently vanished must not let the gate pass. Pairing is by
-	 * name, so a duplicate would pair against the wrong twin, and a
-	 * nameless entry could never be paired or checked at all. */
+	if (kv_get(base, "bench") != NULL || kv_get(head, "bench") != NULL)
+	{
+		if (bname == NULL || hname == NULL || bname[0] == '\0' ||
+			strcmp(bname, hname) != 0)
+		{
+			fprintf(stderr, "Error: bench names must match\n");
+			return CMD_BENCH_ERROR;
+		}
+	}
 	n = kv_count(ba);
 	if (n == 0)
 	{
 		fprintf(stderr, "Error: base has no metrics\n");
-		return 1;
+		return CMD_BENCH_ERROR;
 	}
+	if (!valid_stat(kv_get(base, "runs")) || !valid_stat(kv_get(head, "runs")))
+	{
+		fprintf(stderr, "Error: invalid run count\n");
+		return CMD_BENCH_ERROR;
+	}
+	if (!validate_metrics(ba, base_path) || !validate_metrics(ha, head_path))
+		return CMD_BENCH_ERROR;
+
+	printf("compare  %s -> %s\n", base_path, head_path);
+	if (bname != NULL)
+		printf("bench    %s\n", bname);
+	/* The Δ is two bytes, so give its one glyph an extra column. */
+	printf("  %-24s %12s %12s %10s\n", "metric", "base", "head", "Δ");
+
+	/* Every base metric must still exist in head. */
 	for (size_t i = 0; i < n; i++)
 	{
-		KvMetric bf;
+		const char *name = kv_as_str(kv_get(kv_at(ba, i), "name"));
 
-		kv_metric_load(kv_at(ba, i), &bf);
-		if (bf.name == NULL)
-		{
-			fprintf(stderr, "Error: unnamed metric in %s\n", base_path);
-			return 1;
-		}
-		if (find_named(ba, bf.name) != kv_at(ba, i))
-		{
-			fprintf(stderr,
-					"Error: duplicate metric '%s' in %s\n",
-					bf.name,
-					base_path);
-			return 1;
-		}
-		if (find_named(ha, bf.name) == NULL)
+		if (find_named(ha, name) == NULL)
 		{
 			c.fails++;
-			printf("  %-24s  missing from head FAIL\n", bf.name);
+			printf("  %-24s  missing from head FAIL\n", name);
 		}
 	}
 
@@ -148,28 +202,6 @@ compare_files(const char *base_path, const char *head_path)
 		char	  delta[16];
 
 		kv_metric_load(he, &hf);
-		if (hf.name == NULL)
-		{
-			fprintf(stderr, "Error: unnamed metric in %s\n", head_path);
-			return 1;
-		}
-		if (find_named(ha, hf.name) != he)
-		{
-			fprintf(stderr,
-					"Error: duplicate metric '%s' in %s\n",
-					hf.name,
-					head_path);
-			return 1;
-		}
-		/* A side without a numeric value is a failed measurement
-		 * (non-finite encodes as null), even on a metric with no
-		 * baseline yet. It may never pass as OK. */
-		if (!hf.has_value)
-		{
-			c.fails++;
-			printf("  %-24s  no value FAIL\n", hf.name);
-			continue;
-		}
 		be = find_named(ba, hf.name);
 		if (be == NULL)
 		{
@@ -177,30 +209,23 @@ compare_files(const char *base_path, const char *head_path)
 			continue;
 		}
 		kv_metric_load(be, &bf);
-		if (!bf.has_value)
-		{
-			c.fails++;
-			printf("  %-24s  no value FAIL\n", hf.name);
-			continue;
-		}
 		/* With no unit on either side the better direction is
 		 * unknown, so a regression could pass as an improvement. */
 		if (bf.unit == NULL && hf.unit == NULL)
 		{
-			c.fails++;
-			printf("  %-24s  no unit FAIL\n", hf.name);
-			continue;
+			fprintf(stderr, "Error: no unit for '%s'\n", hf.name);
+			return CMD_BENCH_ERROR;
 		}
 		/* A changed unit makes the values incomparable. */
 		if (bf.unit != NULL && hf.unit != NULL &&
 			strcmp(bf.unit, hf.unit) != 0)
 		{
-			c.fails++;
-			printf("  %-24s  unit changed (%s -> %s) FAIL\n",
-				   hf.name,
-				   bf.unit,
-				   hf.unit);
-			continue;
+			fprintf(stderr,
+					"Error: unit changed for '%s' (%s -> %s)\n",
+					hf.name,
+					bf.unit,
+					hf.unit);
+			return CMD_BENCH_ERROR;
 		}
 		kv_cmp_values(
 				hf.unit != NULL ? hf.unit : bf.unit,
@@ -220,7 +245,7 @@ compare_files(const char *base_path, const char *head_path)
 			   tag_of(&c, &r));
 	}
 	printf("  %d fail, %d warn\n", c.fails, c.warns);
-	return c.fails > 0 ? 1 : 0;
+	return c.fails > 0 ? CMD_BENCH_REGRESSION : 0;
 }
 
 int
@@ -242,20 +267,25 @@ cmd_bench_compare(CmdContext *ctx)
 	if (ctx->argc != 3)
 	{
 		print_usage(ctx);
-		return 1;
+		return CMD_BENCH_ERROR;
 	}
 	/* Compare reads result files and writes none of its own. */
-	if (ctx->json_root != NULL)
+	if (ctx->json_path != NULL || ctx->json_root != NULL)
 	{
 		fprintf(stderr, "Error: compare does not take --json\n");
-		return 1;
+		return CMD_BENCH_ERROR;
 	}
 
 	/* Both parsed trees live in one arena, dropped as a whole. */
 	kb = kv_build_open();
 	if (kb == NULL)
-		return 1;
+		return CMD_BENCH_ERROR;
 	ret = compare_files(ctx->argv[1], ctx->argv[2]);
 	kv_build_close(kb);
+	if (fflush(stdout) == EOF || ferror(stdout))
+	{
+		fprintf(stderr, "Error: cannot write comparison report\n");
+		return CMD_BENCH_ERROR;
+	}
 	return ret;
 }
