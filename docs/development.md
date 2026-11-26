@@ -415,7 +415,7 @@ debugging. These are the same scripts used by GitHub Actions.
 |--------|-------------|
 | `build.sh` | Build and run tests |
 | `coverage.sh` | Build with coverage, generate report |
-| `bench-regress.sh` | Compare standalone release benchmarks against the merge base |
+| `bench-regress.py` | Compare standalone release benchmarks against the merge base |
 | `sanitizers.sh` | Build and test with sanitizers |
 | `lint.sh` | Check formatting and run clang-tidy |
 | `check-commit-messages.sh` | Reject commit messages that credit an AI agent |
@@ -440,7 +440,7 @@ see `sql/README.md`.
 ./scripts/ci/coverage.sh
 
 # Compare committed changes against their merge base with origin/main
-BASE_SHA=origin/main ./scripts/ci/bench-regress.sh
+BASE_SHA=origin/main python3 scripts/ci/bench-regress.py
 
 # Run with AddressSanitizer
 ./scripts/ci/sanitizers.sh address
@@ -466,7 +466,7 @@ BASE_SHA=main HEAD_SHA=my-branch ./scripts/ci/check-commit-count.sh
 ./scripts/ci/pgspot.sh
 ```
 
-`bench-regress.sh` builds the merge base and `HEAD` from Git snapshots, so
+`bench-regress.py` builds the merge base and `HEAD` from Git snapshots, so
 uncommitted edits do not affect the results. It prints the results directory
 and leaves the JSON, logs, and `summary.md` there. Set `HEAD_SHA` to benchmark
 another commit, or set `BENCH_OUTPUT_DIR` to the path of a new directory.

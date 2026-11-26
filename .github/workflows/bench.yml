@@ -59,7 +59,7 @@ jobs:
             'VERSION' \
             'clang-format-ignore.in' \
             'scripts/ci/paths-changed.sh' \
-            'scripts/ci/bench-regress.sh' \
+            'scripts/ci/bench-regress.py' \
             '.github/workflows/bench.yml'
 
       - name: Report skipped benchmarks
@@ -80,7 +80,7 @@ jobs:
           BODY: ${{ github.event.pull_request.body }}
           BENCH_OUTPUT_DIR: ${{ runner.temp }}/bench-results
           CCACHE_DIR: ${{ runner.temp }}/bench-ccache
-        run: ./scripts/ci/bench-regress.sh
+        run: python3 scripts/ci/bench-regress.py
 
       - name: Upload benchmark results
         if: >-
