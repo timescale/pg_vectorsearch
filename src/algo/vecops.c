@@ -111,13 +111,13 @@ typedef float (*DistanceFn)(const float *, const float *, Dimension);
  * a data race whatever they write. Only standalone runs threads; a
  * PostgreSQL backend is a process with its own copy.
  */
-static _Atomic(DotProductFn) g_dot_product_fn		  = NULL;
-static _Atomic(NormFn)		 g_l2_norm_squared_fn	  = NULL;
-static _Atomic(SumFn)		 g_vector_sum_fn		  = NULL;
-static _Atomic(BinaryOpFn)	 g_vector_sub_fn		  = NULL;
-static _Atomic(BinaryOpFn)	 g_vector_add_fn		  = NULL;
-static _Atomic(ScaleFn)		 g_vector_scale_fn		  = NULL;
-static _Atomic(DistanceFn)	 g_l2_distance_squared_fn = NULL;
+static _Atomic(DotProductFn) g_dot_product_fn		  = (DotProductFn)0;
+static _Atomic(NormFn)		 g_l2_norm_squared_fn	  = (NormFn)0;
+static _Atomic(SumFn)		 g_vector_sum_fn		  = (SumFn)0;
+static _Atomic(BinaryOpFn)	 g_vector_sub_fn		  = (BinaryOpFn)0;
+static _Atomic(BinaryOpFn)	 g_vector_add_fn		  = (BinaryOpFn)0;
+static _Atomic(ScaleFn)		 g_vector_scale_fn		  = (ScaleFn)0;
+static _Atomic(DistanceFn)	 g_l2_distance_squared_fn = (DistanceFn)0;
 
 static _Atomic(const char *) g_impl_name   = NULL;
 static _Atomic(bool)		 g_initialized = false;

@@ -230,18 +230,18 @@ vs_horizontal_sum_u64_neon(uint64x2_t v)
  * same implementation, but concurrent non-atomic stores to one object
  * are a data race whatever they write.
  */
-#define DECLARE_DISPATCH(name, ret_type, ...)                   \
-	typedef ret_type (*name##_fn_t)(__VA_ARGS__);               \
-	static _Atomic(name##_fn_t) g_##name##_fn		   = NULL;  \
-	static _Atomic(bool)		g_##name##_initialized = false; \
-	static inline int			name##_init(void);              \
-	static inline ret_type		name##_dispatch(__VA_ARGS__);   \
-                                                                \
-	static inline ret_type name##_dispatch(__VA_ARGS__ args)    \
-	{                                                           \
-		if (vs_unlikely(!g_##name##_initialized))               \
-			name##_init();                                      \
-		return g_##name##_fn(args);                             \
+#define DECLARE_DISPATCH(name, ret_type, ...)                            \
+	typedef ret_type (*name##_fn_t)(__VA_ARGS__);                        \
+	static _Atomic(name##_fn_t) g_##name##_fn		   = (name##_fn_t)0; \
+	static _Atomic(bool)		g_##name##_initialized = false;          \
+	static inline int			name##_init(void);                       \
+	static inline ret_type		name##_dispatch(__VA_ARGS__);            \
+                                                                         \
+	static inline ret_type name##_dispatch(__VA_ARGS__ args)             \
+	{                                                                    \
+		if (vs_unlikely(!g_##name##_initialized))                        \
+			name##_init();                                               \
+		return g_##name##_fn(args);                                      \
 	}
 
 /*

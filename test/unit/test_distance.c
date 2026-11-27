@@ -13,6 +13,8 @@
  * - All SIMD implementations (using override mechanism)
  */
 
+#include "vs_config.h"
+
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -312,6 +314,21 @@ TEST(gsl_reference_random_vectors)
  * test vectors (for exact float representation).
  */
 
+/* Only the full SIMD build selects hand-written kernels from the CPU mask. */
+static const char *
+expected_dispatch_name(const char *full_name)
+{
+#if defined(VS_SIMD_FULL)
+	return full_name;
+#elif defined(VS_SIMD_NONE)
+	(void)full_name;
+	return "none";
+#else
+	(void)full_name;
+	return "compiler";
+#endif
+}
+
 /*
  * Helper to get SIMD mask and expected name from variant string.
  * Returns true if the variant is available, false if it should be skipped.
@@ -322,7 +339,7 @@ get_simd_mask_for_variant(
 {
 	if (strcmp(variant, "compiler") == 0)
 	{
-		*expected_name = "compiler";
+		*expected_name = expected_dispatch_name("compiler");
 		*simd_mask	   = SIMD_NONE;
 		return true; /* Always available */
 	}
@@ -335,7 +352,7 @@ get_simd_mask_for_variant(
 		if (!(caps & SIMD_AVX2))
 			return false; /* Not available */
 
-		*expected_name = "avx2";
+		*expected_name = expected_dispatch_name("avx2");
 		*simd_mask	   = SIMD_AVX2;
 		return true;
 	}
@@ -348,7 +365,7 @@ get_simd_mask_for_variant(
 		if ((caps & VS_SIMD_AVX512_DQ) != VS_SIMD_AVX512_DQ)
 			return false; /* Not available */
 
-		*expected_name = "avx512";
+		*expected_name = expected_dispatch_name("avx512");
 		*simd_mask	   = VS_SIMD_AVX512_DQ;
 		return true;
 	}
@@ -358,7 +375,7 @@ get_simd_mask_for_variant(
 		if (!(caps & SIMD_NEON))
 			return false; /* Not available */
 
-		*expected_name = "neon";
+		*expected_name = expected_dispatch_name("neon");
 		*simd_mask	   = SIMD_NEON;
 		return true;
 	}
@@ -1001,7 +1018,10 @@ TEST(force_compiler_implementation)
 	reinit_distance_with_simd(SIMD_NONE);
 
 	const char *name = vs_distance_impl_name();
-	ASSERT_STR_EQ("compiler", name, "should use compiler implementation");
+	ASSERT_STR_EQ(
+			expected_dispatch_name("compiler"),
+			name,
+			"unexpected dispatch implementation");
 
 	/* Test basic functionality in scalar mode */
 	float	 a_data[] = {1.0f, 2.0f, 3.0f};
@@ -1055,7 +1075,10 @@ TEST(force_avx2_implementation)
 	reinit_distance_with_simd(SIMD_AVX2);
 
 	const char *name = vs_distance_impl_name();
-	ASSERT_STR_EQ("avx2", name, "should use AVX2 implementation");
+	ASSERT_STR_EQ(
+			expected_dispatch_name("avx2"),
+			name,
+			"unexpected dispatch implementation");
 
 	/* Test all metrics with AVX2 - various dimensions to exercise all paths */
 	/* Dimension 8: exact AVX2 width */
@@ -1117,7 +1140,10 @@ TEST(force_avx512_implementation)
 	reinit_distance_with_simd(VS_SIMD_AVX512_DQ);
 
 	const char *name = vs_distance_impl_name();
-	ASSERT_STR_EQ("avx512", name, "should use AVX-512 implementation");
+	ASSERT_STR_EQ(
+			expected_dispatch_name("avx512"),
+			name,
+			"unexpected dispatch implementation");
 
 	/* Test all metrics with AVX-512 */
 	float a_data[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};

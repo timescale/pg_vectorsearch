@@ -441,9 +441,10 @@ vs_distance_init(void)
 
 #if USE_IFUNC
 
-/* IFUNC resolvers - called once at program load */
+/* The ifunc attributes below refer to these resolvers by name. */
 
-static Distance (*resolve_distance_l2(void))(Vec32Ref, Vec32Ref)
+static __attribute__((used))
+Distance (*resolve_distance_l2(void))(Vec32Ref, Vec32Ref)
 {
 	SimdCapability caps = vs_detect_simd();
 
@@ -460,7 +461,8 @@ static Distance (*resolve_distance_l2(void))(Vec32Ref, Vec32Ref)
 	return vs_distance_l2_compiler;
 }
 
-static Distance (*resolve_distance_ip(void))(Vec32Ref, Vec32Ref)
+static __attribute__((used))
+Distance (*resolve_distance_ip(void))(Vec32Ref, Vec32Ref)
 {
 	SimdCapability caps = vs_detect_simd();
 
@@ -477,7 +479,8 @@ static Distance (*resolve_distance_ip(void))(Vec32Ref, Vec32Ref)
 	return vs_distance_ip_compiler;
 }
 
-static Distance (*resolve_distance_cosine(void))(Vec32Ref, Vec32Ref)
+static __attribute__((used))
+Distance (*resolve_distance_cosine(void))(Vec32Ref, Vec32Ref)
 {
 	SimdCapability caps = vs_detect_simd();
 

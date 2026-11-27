@@ -368,7 +368,10 @@ endif
 if simd_mode != 'none'
   # Clang's plain 'fast' fuses even where a pragma turns contraction off,
   # and src/quant/matrix.c needs that pragma for a reproducible rotation.
-  fp_contract = cc.get_id() == 'clang' ? 'fast-honor-pragmas' : 'fast'
+  fp_contract = 'fast'
+  if cc.get_id() == 'clang'
+    fp_contract = cc.has_argument('-ffp-contract=fast-honor-pragmas') ? 'fast-honor-pragmas' : 'on'
+  endif
   add_project_arguments(
     '-ftree-vectorize',        # Explicit auto-vectorization (GCC)
     '-fassociative-math',      # Allow reassociation for better vectorization

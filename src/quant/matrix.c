@@ -164,8 +164,8 @@ fill_gaussian_matrix(float *matrix, Dimension dim, uint64_t seed)
 /*
  * The matrix is regenerated from its seed wherever an index is read, so its
  * bits must not depend on the compiler. The QR code below is evaluated in
- * source order, without reassociation or fused multiply-adds. The clang
- * pragma needs -ffp-contract=fast-honor-pragmas, which meson.build sets.
+ * source order, without reassociation or fused multiply-adds. The Clang
+ * contraction mode selected in meson.build must honor the pragma below.
  */
 #if defined(__clang__)
 #define STRICT_FP_FN
