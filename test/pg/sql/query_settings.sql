@@ -229,6 +229,19 @@ SELECT query_settings_top_k($q$
     ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42)
     FETCH FIRST 5 ROWS WITH TIES$q$) AS top_k_with_ties;
 
+-- A tie-breaker after the distance puts an Incremental Sort between the
+-- Limit and the scan. It only reorders rows that tie on the distance, so
+-- the LIMIT still sizes the scan and the query still gets all its rows.
+-- Reading it as "no bound" would size a 20-row query for all 500 rows.
+SELECT count(*) AS rows_incremental_sort FROM (
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42), id
+    LIMIT 20) t;
+SELECT query_settings_top_k($q$
+    SELECT id FROM query_settings_test
+    ORDER BY v <-> (SELECT v FROM query_settings_test WHERE id = 42), id
+    LIMIT 20$q$) AS top_k_incremental_sort;
+
 -- prism.query_limit only lowers the sizing. Above the LIMIT it is ignored
 -- --  raising it would have the scan rank rows the LIMIT then discards;
 -- below the LIMIT it caps, which is the point of the lever.

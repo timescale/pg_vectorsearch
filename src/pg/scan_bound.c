@@ -143,6 +143,15 @@ find_index_scan_state(PlanState *ps)
 			ps = outerPlanState(ps);
 			break;
 
+		case T_IncrementalSortState:
+			/*
+			 * Presorted on the scan's order, so it reads past the LIMIT only
+			 * to finish a run of rows tying at the boundary. Sizing from the
+			 * LIMIT may cut that run short, as it does for WITH TIES.
+			 */
+			ps = outerPlanState(ps);
+			break;
+
 		case T_WindowAggState:
 			if (((WindowAgg *)ps->plan)->runCondition != NIL)
 				return NULL;
